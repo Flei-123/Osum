@@ -1074,25 +1074,68 @@ fn mark(state: u64, on: bool) {
     dirty(state, y, y + 2)
 }
 
+// EINE GLYPHE. Zweiundvierzig Zeilen weiter unten steht, warum diese
+// Funktion nicht `pixel` ruft.
+//
+// Sie tat es, und die Messung hat es verworfen: `pixel` liest bei JEDEM
+// Bildpunkt Zeichenziel, Zeilenlaenge, Breite und Hoehe erneut aus dem
+// Datenbereich und prueft zwei Grenzen -- sechs Speicherzugriffe fuer
+// einen Schreibzugriff. Eine Glyphe sind 128 Bildpunkte, eine Textzeile
+// achtzig Glyphen. Gemessen: 3200 us fuer eine Zeile, gegenueber 1460 us
+// fuer den GANZEN Bildschirm mit `rep stosq`. Eine Konsole, die eine
+// Zeile langsamer schreibt als ein voller Bildaufbau kostet, ist verkehrt
+// herum gebaut.
+//
+// Hier werden die vier Groessen EINMAL geholt, die Zelle einmal auf ihre
+// Grenzen geprueft und dann Zeile fuer Zeile geschrieben. Die
+// Grenzpruefung je Bildpunkt entfaellt, weil `cols` und `rows` aus
+// Breite und Hoehe abgeleitet sind: eine Zelle innerhalb des Rasters
+// liegt immer ganz im Bild. Liegt sie es doch nicht -- weil jemand die
+// Schreibmarke von aussen verstellt hat --, geht es ueber `pixel`, und
+// dann sind die Grenzen wieder da.
 fn glyph(state: u64, ch: u64) {
     let px: u64 = cell_x(state)
     let py: u64 = cell_y(state)
     let fg: u64 = kstate.get(state, FB_OFF + S_FG)
     let bg: u64 = kstate.get(state, FB_OFF + S_BG)
     let base: u64 = state + FONT_OFF
+    let w: u64 = kstate.get(state, FB_OFF + S_WIDTH)
+    let h: u64 = kstate.get(state, FB_OFF + S_HEIGHT)
+    if px + font.GLYPH_W > w || py + font.GLYPH_H > h {
+        var r2: u64 = 0
+        while r2 < font.GLYPH_H {
+            let b2: u64 = font.row(base, ch, r2)
+            var c2: u64 = 0
+            while c2 < font.GLYPH_W {
+                if ((b2 >> (7 - c2)) & 1) != 0 {
+                    pixel(state, px + c2, py + r2, fg)
+                } else {
+                    pixel(state, px + c2, py + r2, bg)
+                }
+                c2 = c2 + 1
+            }
+            r2 = r2 + 1
+        }
+        dirty(state, py, py + font.GLYPH_H)
+        return
+    }
+    let pt: u64 = kstate.get(state, FB_OFF + S_PITCH)
+    var zeile: u64 = kstate.get(state, FB_OFF + S_DRAW) +% py *% pt +% px *% 4
     var r: u64 = 0
     while r < font.GLYPH_H {
         let bits: u64 = font.row(base, ch, r)
+        var q: u64 = zeile
         var c: u64 = 0
         while c < font.GLYPH_W {
-            // Bit 7 ist die LINKE Spalte.
+            var farbe: u64 = bg
             if ((bits >> (7 - c)) & 1) != 0 {
-                pixel(state, px + c, py + r, fg)
-            } else {
-                pixel(state, px + c, py + r, bg)
+                farbe = fg
             }
+            __mmio_write32(q as *mut u32, farbe as u32)
+            q = q +% 4
             c = c + 1
         }
+        zeile = zeile +% pt
         r = r + 1
     }
     dirty(state, py, py + font.GLYPH_H)

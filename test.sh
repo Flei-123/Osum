@@ -159,6 +159,9 @@ lauf "10. Handles statt Umgebungsautoritaet: die Capability-Schicht aus OrientOS
 lauf "11. der Multiboot-Kopf verlangt einen Bildschirm -- der UEFI-Pfad (tools/boot/run.sh)" \
      tools/boot/run.sh boot '^BOOT: '
 
+lauf "12. der Bildschirm: Rahmenpuffer, Textkonsole, /dev/fb (tools/gfx/run.sh, Runde K7)" \
+     tools/gfx/run.sh gfx '^GFX: |^   fbbench: '
+
 echo
 echo "=================================================================="
 if [ "$FAIL" -eq 0 ]; then
