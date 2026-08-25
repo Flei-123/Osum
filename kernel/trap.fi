@@ -29,6 +29,9 @@ import sched
 import apic
 import nvme
 import cpu
+import rand
+import time
+import signal
 
 export { entry }
 
@@ -63,9 +66,25 @@ fn entry(frame: u64, state: u64) {
     kstate.set(state, kstate.LAST_TRAP, vector)
     if vector < 32 {
         if user_fault(frame, state) {
-            // The process is dead; this never comes back.
-            sched.kill_current(state, vector, word(frame, F_ERROR), cr2(),
-                word(frame, F_RIP))
+            // ROUND K9. BIS HIERHER WAR EINE AUSNAHME IN RING 3 DAS ENDE
+            // DES PROZESSES, und `sched.kill_current` machte auf der
+            // Stelle eine Leiche daraus. Das ist die halbe Wahrheit: ein
+            // Zugriff daneben IST toedlich, solange niemand hinsieht --
+            // aber ein Programm DARF hinsehen. Genau dafuer gibt es
+            // SIGSEGV, SIGFPE und SIGILL, und ein Laufzeitsystem, das
+            // seinen Stapel waechst, wenn er anstoesst, haengt daran.
+            //
+            // Also wird aus der Ausnahme ein SIGNAL, und was danach
+            // geschieht, entscheidet der Prozess: hat er eine Routine,
+            // springt `check_trap` sie an und der Kernel geht hier weiter;
+            // hat er keine, ist das Standardverhalten das, was vorher
+            // fest verdrahtet war -- er stirbt, mit demselben Code
+            // 128 + Nummer, den Runde 62 schon vergeben hat.
+            let cur: u64 = sched.current(state)
+            report_user(frame, state, vector, cur)
+            signal.fault(state, cur, vector)
+            signal.check_trap(state, cur, frame)
+            return
         }
         report(frame, state, vector)
         // does not return
@@ -83,14 +102,33 @@ fn entry(frame: u64, state: u64) {
         if cpu.here(state) == 0 {
             kstate.add(state, kstate.TICKS, 1)
         }
+        // ROUND K9: DER SAMMLER DES ZUFALLSGENERATORS. Der genaue
+        // Zyklenzaehler zum Zeitpunkt eines Zeitgeberschlags haengt an
+        // Cache, Speicherbus und -- unter QEMU -- an der Wirtsmaschine;
+        // seine niedrigen Bits sind das, was zwischen zwei Laeufen
+        // wirklich verschieden ist. Ein Wort je Schlag, mehr kostet es
+        // nicht (`rand.stir`).
+        rand.stir(state, time.tsc())
         // The end-of-interrupt has to go out BEFORE the switch: the
         // controller lets nothing through until it has seen it, and the
         // task that is switched to would run without a timer.
         eoi(state, vector)
         sched.on_tick(state)
+        // ROUND K9. ZWEI DINGE, DIE NUR HIER GEHEN. Die Frist von
+        // `alarm` laeuft in Marken, also wird sie hier faellig. Und ein
+        // Signal an ein Programm, das GAR KEINEN Systemaufruf macht --
+        // eine Endlosschleife -- hat genau einen Augenblick, in dem der
+        // Kernel es in der Hand hat, und das ist dieser. Ohne diese eine
+        // Zeile beendet STRG-C keine Endlosschleife, und das ist der
+        // Test, den ein Mensch bemerkt.
+        signal.alarm_check(state)
+        signal.check_trap(state, sched.current(state), frame)
         return
     }
     if vector == VEC_KEYBOARD {
+        // Wann ein Mensch tippt, weiss vorher niemand -- die klassische
+        // Entropiequelle, und die einzige, die ein Mensch selbst sieht.
+        rand.stir(state, time.tsc())
         kbd.irq(state)
         eoi(state, vector)
         return
@@ -122,6 +160,33 @@ fn user_fault(frame: u64, state: u64) -> bool {
 // ROUND K2: which controller gets told depends on which one is running.
 // The local APIC needs one word and no distinction between master and
 // slave -- the two 8259s needed both.
+// Was `sched.kill_current` gedruckt hat, gedruckt an derselben Stelle --
+// die Ausgabe der Runden 62 bis K6 bleibt Zeile fuer Zeile dieselbe, auch
+// wenn der Prozess jetzt ueber ein Signal stirbt statt unmittelbar.
+fn report_user(frame: u64, state: u64, vector: u64, cur: u64) {
+    var s_kill: [u8; 13] = "user fault: \0"
+    var s_pid: [u8; 6] = "pid=\0\0"
+    var s_vec: [u8; 10] = "  vector=\0"
+    var s_err: [u8; 7] = "  err=\0"
+    var s_cr2: [u8; 7] = "  cr2=\0"
+    var s_rip: [u8; 7] = "  rip=\0"
+    var s_sig: [u8; 9] = "  -> SIG\0"
+    serial.puts((&s_kill[0]) as u64)
+    serial.puts((&s_pid[0]) as u64)
+    serial.dec(sched.tget(state, cur, sched.T_PID))
+    serial.puts((&s_vec[0]) as u64)
+    serial.dec(vector)
+    serial.puts((&s_err[0]) as u64)
+    serial.hex(word(frame, F_ERROR))
+    serial.puts((&s_cr2[0]) as u64)
+    serial.hex(cr2())
+    serial.puts((&s_rip[0]) as u64)
+    serial.hex(word(frame, F_RIP))
+    serial.puts((&s_sig[0]) as u64)
+    signal.say_name(signal.signal_of(vector))
+    serial.nl()
+}
+
 fn eoi(state: u64, vector: u64) {
     if apic.active(state) {
         apic.eoi(state)

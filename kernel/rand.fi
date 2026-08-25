@@ -1,0 +1,385 @@
+// kernel/rand.fi -- Runde K9: Zufall, der einer ist.
+//
+// WARUM DAS EINE VORAUSSETZUNG IST UND KEINE ZIERDE. Runde K8 baut in
+// diesem Repo gerade den Netzwerkstapel. Eine TCP-Verbindung waehlt ihre
+// Anfangsfolgenummer, und waehlt sie ein Kernel vorhersagbar, kann jeder,
+// der die Nummer erraet, Oktette in eine fremde Verbindung schieben (RFC
+// 6528, und der Angriff ist von 1985). Alles, was spaeter TLS heissen
+// soll, faengt an derselben Stelle an. Ein Betriebssystem ohne brauchbaren
+// Zufall kann kein Netz und keine Kryptographie -- deshalb steht dieser
+// Baustein in derselben Runde wie Signale und Terminals.
+//
+// DER AUFBAU IST DER UEBLICHE UND HAT ZWEI HAELFTEN:
+//
+//   DER SAMMLER. Zufall entsteht nicht im Rechenwerk. Er kommt aus
+//   Ereignissen, deren genauer Zeitpunkt niemand vorhersagt: wann der
+//   Zeitgeber schlaegt (gemessen am Zyklenzaehler, dessen niedrige Bits
+//   von Cache, Speicherbus und Wirtsmaschine abhaengen), wann eine Taste
+//   kommt, wann die Platte fertig ist. Jedes solche Ereignis wird in
+//   einen Sammler von 64 Oktetten eingeruehrt (`stir`). Dazu, WO ES SIE
+//   GIBT, `RDSEED` und `RDRAND` -- die Rauschquelle im Prozessor. Sie
+//   werden nicht ALLEIN benutzt: wer ihr allein traut, hat eine
+//   Zufallsquelle, die er nicht nachpruefen kann.
+//
+//   DER GENERATOR. Aus dem Sammler wird ein Schluessel, und aus dem
+//   Schluessel ein Strom: ChaCha20, dieselbe Konstruktion, die Linux seit
+//   4.8 fuer `/dev/urandom` benutzt. Zwanzig Runden aus Addition,
+//   Exklusiv-Oder und Rotation, mehr ist es nicht -- und genau deshalb
+//   laesst es sich in einer Sprache ohne Bibliothek hinschreiben und
+//   nachlesen. Nach `RESEED` Oktetten wird neu geschluesselt, damit ein
+//   einmal ausgelesener Zustand nicht die ganze Laufzeit verraet.
+//
+// DIE ARITHMETIK-FALLE. ChaCha rechnet MODULO 2^32. In Firn panicken `+`
+// und `*` bei Ueberlauf; jede Addition hier ist deshalb `+%` mit
+// anschliessender Maske, jede Multiplikation im Sammler `*%`. Das ist
+// keine Nachlaessigkeit -- die Umdeutung IST die Definition der Chiffre.
+//
+// DIE GEGENPROBE STEHT MIT IM CODE. Mit `fixedrand` auf der
+// Kommandozeile liefert `bytes` fuer immer dasselbe Oktett. Die
+// statistische Pruefung in `tools/unix/run.sh` MUSS daran scheitern --
+// eine Pruefung, die auch einen festverdrahteten Strom durchwinkt, prueft
+// nichts.
+
+import kstate
+import time
+
+export {
+    init, seed, bytes, stir, ready, hardware, seed_hex, fixed_set,
+    RESEED
+}
+
+// Die Plaetze im eigenen Bereich (`kstate.RAND_OFF`).
+const K_KEY: u64 = 0 // acht Woerter zu 32 Bit, je ein Wort je Platz
+const K_CTR: u64 = 64 // der Blockzaehler
+const K_NONCE: u64 = 72 // drei Woerter zu 32 Bit
+const K_POOL: u64 = 96 // der Sammler, acht Woerter zu 64 Bit
+const K_POS: u64 = 160 // verbrauchte Oktette des Blocks
+const K_LEFT: u64 = 168 // Oktette bis zur naechsten Schluesselung
+const K_BLOCK: u64 = 192 // 64 Oktette Schluesselstrom
+const K_SEED0: u64 = 256 // die ersten 16 Oktette ueberhaupt (Bericht)
+const K_WORK: u64 = 320 // sechzehn Arbeitswoerter
+const K_ORIG: u64 = 448 // und ihr Ausgangszustand
+
+const M32: u64 = 0xFFFFFFFF
+const BLOCK: u64 = 64
+const RESEED: u64 = 4096 // Oktette zwischen zwei Schluesselungen
+
+// Der Goldene-Schnitt-Multiplikator aus splitmix64. Ungerade, also
+// umkehrbar modulo 2^64 -- er verliert keine Information, er verteilt sie.
+const GOLD: u64 = 0x9E3779B97F4A7C15
+
+fn base(state: u64) -> u64 {
+    return state + kstate.RAND_OFF
+}
+
+fn wget(p: u64) -> u64 {
+    return __mmio_read64(p as *mut u64)
+}
+
+fn wset(p: u64, v: u64) {
+    __mmio_write64(p as *mut u64, v)
+}
+
+// ------------------------------------------------------------ der Sammler
+
+// Ein Ereignis in den Sammler. Wird aus dem Zeitgeber- und dem
+// Tastaturunterbrecher aufgerufen, also mit abgeschalteten Unterbrechungen
+// und moeglicherweise auf mehreren Kernen gleichzeitig. Ein Wettlauf hier
+// kostet Entropie und zerstoert nichts -- ein Sammler ist kein Zaehler,
+// der stimmen muss, sondern ein Topf, der voll genug sein soll.
+fn stir(state: u64, v: u64) {
+    let n: u64 = kstate.add(state, kstate.RAND_STIRS, 1)
+    let p: u64 = base(state) + K_POOL + (n % 8) * 8
+    var w: u64 = wget(p)
+    w = (w ^ v) *% GOLD
+    w = w ^ (w >> 29)
+    w = w +% (v << 13)
+    wset(p, w)
+}
+
+// ------------------------------------------------------- die Rauschquelle
+
+// Hat dieser Prozessor RDSEED (CPUID Blatt 7, EBX Bit 18) oder RDRAND
+// (Blatt 1, ECX Bit 30)? Gefragt statt angenommen: `rdrand` auf einem
+// Prozessor, der es nicht kennt, ist ein ungueltiger Befehl und damit ein
+// #UD im Kernel. `cpuid` schreibt ebx, und ebx ist das eine Register, das
+// diese Sprache nicht herausgibt -- es traegt den Rahmen. Retten und
+// zurueckholen ist der ehrliche Weg; nach ebx wird ueber rax gefragt.
+fn has_rdseed() -> bool {
+    var b: u64 = 0
+    asm("push rbx\nmov eax, 7\nxor ecx, ecx\ncpuid\nmov rax, rbx\npop rbx",
+        out("rax") & b, clobber("rcx"), clobber("rdx"))
+    return (b & 0x40000) != 0
+}
+
+fn has_rdrand() -> bool {
+    var c: u64 = 0
+    asm("push rbx\nmov eax, 1\ncpuid\nmov rax, rcx\npop rbx",
+        out("rax") & c, clobber("rcx"), clobber("rdx"))
+    return (c & 0x40000000) != 0
+}
+
+// Ein Wort aus der Rauschquelle, oder 0. `rdrand` setzt das Uebertragsbit,
+// wenn der Wert gueltig ist; `setc` holt es heraus, ohne dass ein Sprung
+// im Vorlagentext stehen muss.
+fn rdrand64() -> u64 {
+    var v: u64 = 0
+    var ok: u64 = 0
+    asm("xor edx, edx\nrdrand rax\nsetc dl", out("rax") & v, out("rdx") & ok)
+    if ok == 0 {
+        return 0
+    }
+    return v
+}
+
+fn rdseed64() -> u64 {
+    var v: u64 = 0
+    var ok: u64 = 0
+    asm("xor edx, edx\nrdseed rax\nsetc dl", out("rax") & v, out("rdx") & ok)
+    if ok == 0 {
+        return 0
+    }
+    return v
+}
+
+fn hardware(state: u64) -> u64 {
+    return kstate.get(state, kstate.RAND_HW)
+}
+
+// --------------------------------------------------------------- ChaCha20
+
+fn rot32(x: u64, n: u64) -> u64 {
+    return ((x << n) | (x >> (32 - n))) & M32
+}
+
+// Die Viertelrunde, auf sechzehn Woertern im Datenbereich. Jede Addition
+// ist `+%` mit Maske: die Chiffre rechnet modulo 2^32, und die gepruefte
+// Addition dieser Sprache wuerde bei der ersten Uebertragung stehen
+// bleiben.
+fn qround(p: u64, ai: u64, bi: u64, ci: u64, di: u64) {
+    var a: u64 = wget(p + ai * 8)
+    var b: u64 = wget(p + bi * 8)
+    var c: u64 = wget(p + ci * 8)
+    var d: u64 = wget(p + di * 8)
+    a = (a +% b) & M32
+    d = rot32(d ^ a, 16)
+    c = (c +% d) & M32
+    b = rot32(b ^ c, 12)
+    a = (a +% b) & M32
+    d = rot32(d ^ a, 8)
+    c = (c +% d) & M32
+    b = rot32(b ^ c, 7)
+    wset(p + ai * 8, a)
+    wset(p + bi * 8, b)
+    wset(p + ci * 8, c)
+    wset(p + di * 8, d)
+}
+
+// Ein Block Schluesselstrom aus Schluessel, Zaehler und Nonce.
+fn make_block(state: u64) {
+    let bs: u64 = base(state)
+    let w: u64 = bs + K_WORK
+    let o: u64 = bs + K_ORIG
+    // "expand 32-byte k" -- die vier Konstanten der Chiffre.
+    wset(w, 0x61707865)
+    wset(w + 8, 0x3320646E)
+    wset(w + 16, 0x79622D32)
+    wset(w + 24, 0x6B206574)
+    var i: u64 = 0
+    while i < 8 {
+        wset(w + (4 + i) * 8, wget(bs + K_KEY + i * 8) & M32)
+        i = i + 1
+    }
+    let ctr: u64 = wget(bs + K_CTR)
+    wset(w + 12 * 8, ctr & M32)
+    wset(w + 13 * 8, wget(bs + K_NONCE) & M32)
+    wset(w + 14 * 8, wget(bs + K_NONCE + 8) & M32)
+    wset(w + 15 * 8, wget(bs + K_NONCE + 16) & M32)
+    i = 0
+    while i < 16 {
+        wset(o + i * 8, wget(w + i * 8))
+        i = i + 1
+    }
+    // Zehn Doppelrunden = zwanzig Runden.
+    var r: u64 = 0
+    while r < 10 {
+        qround(w, 0, 4, 8, 12)
+        qround(w, 1, 5, 9, 13)
+        qround(w, 2, 6, 10, 14)
+        qround(w, 3, 7, 11, 15)
+        qround(w, 0, 5, 10, 15)
+        qround(w, 1, 6, 11, 12)
+        qround(w, 2, 7, 8, 13)
+        qround(w, 3, 4, 9, 14)
+        r = r + 1
+    }
+    // Ausgangszustand dazu, dann als Oktette in der kleinen Reihenfolge.
+    i = 0
+    while i < 16 {
+        let v: u64 = (wget(w + i * 8) +% wget(o + i * 8)) & M32
+        kstate.set8(bs + K_BLOCK + i * 4 + 0, (v & 255) as u8)
+        kstate.set8(bs + K_BLOCK + i * 4 + 1, ((v >> 8) & 255) as u8)
+        kstate.set8(bs + K_BLOCK + i * 4 + 2, ((v >> 16) & 255) as u8)
+        kstate.set8(bs + K_BLOCK + i * 4 + 3, ((v >> 24) & 255) as u8)
+        i = i + 1
+    }
+    wset(bs + K_CTR, (ctr +% 1) & 0xFFFFFFFFFFFFFFFF)
+    wset(bs + K_POS, 0)
+}
+
+// ----------------------------------------------------------- schluesseln
+
+// Aus dem Sammler wird ein Schluessel. Was hineingeht: die acht Woerter
+// des Sammlers, der Zyklenzaehler JETZT (seine niedrigen Bits sind das,
+// was zwischen zwei Laeufen wirklich verschieden ist), die Wandzeit des
+// Starts, die Zahl der bisherigen Ereignisse -- und die Rauschquelle des
+// Prozessors, WO ES SIE GIBT.
+fn seed(state: u64) {
+    let bs: u64 = base(state)
+    var hw: u64 = 0
+    var seedok: bool = false
+    var randok: bool = false
+    if has_rdseed() {
+        seedok = true
+        hw = 1
+    }
+    if has_rdrand() {
+        randok = true
+        hw = 1
+    }
+    kstate.set(state, kstate.RAND_HW, hw)
+    var i: u64 = 0
+    while i < 8 {
+        var v: u64 = wget(bs + K_POOL + i * 8)
+        v = v ^ time.tsc()
+        v = (v +% kstate.get(state, kstate.TIME_BOOT)) *% GOLD
+        v = v ^ (v >> 31)
+        v = v ^ (kstate.get(state, kstate.RAND_STIRS) << (i & 31))
+        if seedok {
+            v = v ^ rdseed64()
+        }
+        if randok {
+            v = v ^ rdrand64()
+        }
+        // Beide Haelften des 64-Bit-Wertes in das 32-Bit-Wort falten --
+        // nichts von der gesammelten Entropie wird weggeworfen.
+        wset(bs + K_KEY + i * 8, (v ^ (v >> 32)) & M32)
+        i = i + 1
+    }
+    wset(bs + K_CTR, 0)
+    wset(bs + K_NONCE, time.tsc() & M32)
+    wset(bs + K_NONCE + 8, (time.tsc() >> 17) & M32)
+    wset(bs + K_NONCE + 16, kstate.get(state, kstate.TIME_BOOT) & M32)
+    // Einmal durchlaufen und den Ausgang als neuen Schluessel nehmen. Das
+    // ist die uebliche "fast key erasure": der Schluessel, aus dem der
+    // erste ausgegebene Block kommt, ist nicht mehr derselbe, aus dem der
+    // Sammler ihn gemacht hat -- wer den Sammler kennt, kennt den Strom
+    // trotzdem nicht.
+    make_block(state)
+    i = 0
+    while i < 8 {
+        var v: u64 = 0
+        var k: u64 = 0
+        while k < 4 {
+            v = v | (kstate.get8(bs + K_BLOCK + i * 4 + k) << (k * 8))
+            k = k + 1
+        }
+        wset(bs + K_KEY + i * 8, v & M32)
+        i = i + 1
+    }
+    wset(bs + K_CTR, 0)
+    wset(bs + K_LEFT, RESEED)
+    make_block(state)
+    if kstate.get(state, kstate.RAND_READY) == 0 {
+        // Die ersten sechzehn Oktette werden aufgehoben, damit der Lauf
+        // sie melden kann. Zwei Laeufe, die dieselben sechzehn Oktette
+        // melden, haetten denselben Zufall -- und das ist die Gegenprobe
+        // "keine Wiederholung ueber Neustarts hinweg".
+        var j: u64 = 0
+        while j < 16 {
+            kstate.set8(bs + K_SEED0 + j, kstate.get8(bs + K_BLOCK + j) as u8)
+            j = j + 1
+        }
+    }
+    kstate.set(state, kstate.RAND_READY, 1)
+}
+
+fn init(state: u64) {
+    let bs: u64 = base(state)
+    var i: u64 = 0
+    while i < 8 {
+        wset(bs + K_POOL + i * 8, 0)
+        i = i + 1
+    }
+    kstate.set(state, kstate.RAND_READY, 0)
+    kstate.set(state, kstate.RAND_STIRS, 0)
+    kstate.set(state, kstate.RAND_BYTES, 0)
+    wset(bs + K_POS, BLOCK)
+    wset(bs + K_LEFT, 0)
+}
+
+fn ready(state: u64) -> u64 {
+    return kstate.get(state, kstate.RAND_READY)
+}
+
+// Die Gegenprobe von der Kommandozeile aus einschalten.
+fn fixed_set(state: u64, v: u64) {
+    kstate.set(state, kstate.RAND_FIXED, v)
+}
+
+// Die ersten sechzehn Oktette des ersten Blocks, als Oktett Nummer `i`.
+fn seed_hex(state: u64, i: u64) -> u64 {
+    if i >= 16 {
+        return 0
+    }
+    return kstate.get8(base(state) + K_SEED0 + i)
+}
+
+// ----------------------------------------------------------- die Ausgabe
+
+// `n` Oktette in einen Puffer DES KERNELS. Der Weg nach Ring 3 geht durch
+// `sys.fi` -- diese Datei kennt keine Adressraeume und soll keine kennen.
+fn bytes(state: u64, dst: u64, n: u64) -> u64 {
+    // DIE GEGENPROBE. Mit `fixedrand` ist jedes Oktett 0x5A. Alles andere
+    // an diesem Kernel bleibt, wie es ist -- nur der Strom ist keiner
+    // mehr, und die statistische Pruefung muss das merken.
+    if kstate.get(state, kstate.RAND_FIXED) != 0 {
+        var f: u64 = 0
+        while f < n {
+            kstate.set8(dst + f, 0x5A as u8)
+            f = f + 1
+        }
+        kstate.add(state, kstate.RAND_BYTES, n)
+        return n
+    }
+    if kstate.get(state, kstate.RAND_READY) == 0 {
+        seed(state)
+    }
+    let bs: u64 = base(state)
+    var i: u64 = 0
+    while i < n {
+        var pos: u64 = wget(bs + K_POS)
+        if pos >= BLOCK {
+            let left: u64 = wget(bs + K_LEFT)
+            if left == 0 {
+                // Neu schluesseln, und vorher noch einmal ruehren: der
+                // Zyklenzaehler jetzt ist wieder etwas, das vorher
+                // niemand wusste.
+                stir(state, time.tsc())
+                seed(state)
+            } else {
+                make_block(state)
+            }
+            pos = wget(bs + K_POS)
+        }
+        kstate.set8(dst + i, kstate.get8(bs + K_BLOCK + pos) as u8)
+        wset(bs + K_POS, pos + 1)
+        let left: u64 = wget(bs + K_LEFT)
+        if left > 0 {
+            wset(bs + K_LEFT, left - 1)
+        }
+        i = i + 1
+    }
+    kstate.add(state, kstate.RAND_BYTES, n)
+    return n
+}

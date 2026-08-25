@@ -49,7 +49,11 @@
 //   0x2A000  the capability tables of `cap.fi`, 32 tasks * 16 slots
 //            of 32 octets, up to 0x2E000
 //   0x2E000  their nonces, one per task
-//   0x2F000  free, up to KDATA_SIZE
+//   0x2F000  die Signalbehandlung, 32 Aufgaben * 32 Signale (Runde K9)
+//   0x35000  je Aufgabe ein geretteter Zusammenhang fuer sigreturn (K9)
+//   0x37000  die Terminals, acht Stueck (Runde K9)
+//   0x3B000  Schluessel und Sammler des Zufallsgenerators (Runde K9)
+//   0x3C000  frei, bis KDATA_SIZE (0x40000)
 
 export {
     TICKS, KEYS, TRAPS, HEAP_BASE, HEAP_END, HEAP_HEAD, BITMAP, BITMAP_FRAMES,
@@ -69,6 +73,14 @@ export {
     PIPEBUF_OFF, PIPEBUF_MAX, PIPEHDR_OFF, PIPEHDR_MAX,
     UIO_OFF, UIO_MAX, CAP_OFF, CAP_MAX, CAP_NONCE_OFF, CAP_NONCE_MAX,
     M_NOKBD, M_OSUM, M_NOBSS,
+    // ---- Runde K9: Zeit, Zufall, Signale, Terminals ----
+    TIME_BOOT, TIME_TSC0, TIME_KHZ, TIME_LAST, TIME_BACK, TIME_CALLS,
+    RAND_READY, RAND_FIXED, RAND_BYTES, RAND_STIRS, RAND_HW,
+    SIG_SENT, SIG_DELIVERED, SIG_CAUGHT, SIG_DEFAULT, SIG_STOPS,
+    TTY_READY, TTY_SIGS, TTY_CHARS, K9_MODE,
+    SIG_OFF, SIG_MAX, SIGCTX_OFF, SIGCTX_BYTES,
+    TTY_OFF, TTY_MAX, RAND_OFF, RAND_MAX,
+    M_NOSIG, M_FIXRAND, M_UNIX,
     CPU_OFF, CPU_BYTES, MAX_CPUS, LOCK_OFF, LOCK_BYTES, LOCK_COUNT,
     SMP_OFF, SMP_LAPIC, SMP_COUNT, SMP_NOLOCK, SMP_MODE, SMP_MAX,
     TCPU_OFF, TCPU_BYTES,
@@ -144,6 +156,47 @@ const EXECVES: u64 = 544 // images replaced in place
 const PIPES: u64 = 552 // pipes created
 const MAPS: u64 = 560 // pages handed out by brk and mmap
 const OPENS: u64 = 568 // descriptors opened since the start
+
+// ---------------------------------------------------------- Runde K9
+//
+// Vier Dinge, die jedes Unix-Programm stillschweigend voraussetzt und die
+// dieser Kernel bis zu dieser Runde NICHT hatte: Signale, ein Terminal,
+// eine Uhr und Zufall. Die Skalare dazu liegen ab 576 -- der Bereich
+// darunter gehoert den Runden 59 bis K6 und wird nicht angefasst.
+//
+// DIE UHR (kernel/time.fi). TIME_BOOT ist die Wandzeit in Sekunden seit
+// 1970, EINMAL beim Start aus der CMOS-Uhr gelesen; TIME_TSC0 der
+// Zyklenzaehler zu genau diesem Zeitpunkt. Alles Weitere ist Rechnung:
+// die monotone Uhr ist (tsc - TIME_TSC0) / TIME_KHZ, die Echtzeituhr ist
+// TIME_BOOT plus die monotone. TIME_LAST ist der zuletzt herausgegebene
+// monotone Wert -- die Zusage "laeuft nie rueckwaerts" ist genau diese
+// eine Zahl, und TIME_BACK zaehlt, wie oft sie eingreifen musste.
+const TIME_BOOT: u64 = 576 // Sekunden seit 1970 beim Start
+const TIME_TSC0: u64 = 584 // Zyklenzaehler zum selben Zeitpunkt
+const TIME_KHZ: u64 = 592 // Zyklen je Millisekunde, 0 = ungemessen
+const TIME_LAST: u64 = 600 // zuletzt herausgegebene monotone Nanosekunde
+const TIME_BACK: u64 = 608 // wie oft die Klammer greifen musste
+const TIME_CALLS: u64 = 616 // Aufrufe von clock_gettime
+
+// DER ZUFALL (kernel/rand.fi).
+const RAND_READY: u64 = 624 // 1 = der Generator ist gesaet
+const RAND_FIXED: u64 = 632 // GEGENPROBE: 1 = jedes Oktett ist 0x5A
+const RAND_BYTES: u64 = 640 // Oktette, die getrandom herausgegeben hat
+const RAND_STIRS: u64 = 648 // Ereignisse, die in den Sammler gingen
+const RAND_HW: u64 = 656 // 1 = RDSEED/RDRAND war vorhanden
+
+// DIE SIGNALE (kernel/signal.fi).
+const SIG_SENT: u64 = 664 // abgeschickt
+const SIG_DELIVERED: u64 = 672 // wirklich zugestellt
+const SIG_CAUGHT: u64 = 680 // an eine Behandlungsroutine in Ring 3
+const SIG_DEFAULT: u64 = 688 // im Standardverhalten erledigt
+const SIG_STOPS: u64 = 696 // angehaltene Prozesse
+
+// DIE TERMINALSCHICHT (kernel/tty.fi).
+const TTY_READY: u64 = 704 // 1 = tty.init ist gelaufen
+const TTY_SIGS: u64 = 712 // Signale, die ein Steuerzeichen ausgeloest hat
+const TTY_CHARS: u64 = 720 // Zeichen durch die Zeilendisziplin
+const K9_MODE: u64 = 728 // die Woerter der Kommandozeile dieser Runde
 
 // --------------------------------------------------------- the regions
 
@@ -282,7 +335,36 @@ const CAP_MAX: u64 = 0x4000
 const CAP_NONCE_OFF: u64 = 0x2E000
 const CAP_NONCE_MAX: u64 = 4096
 
-const KDATA_SIZE: u64 = 0x30000
+// ---------------------------------------------------- Runde K9: Bereiche
+//
+// Drei neue Bereiche, und sie liegen HINTER allem bisherigen. Die Karte
+// oben in dieser Datei ist die einzige Stelle, an der steht, wem welche
+// Seite gehoert -- die Runden K4, K5 und K6 haben sich jede einmal
+// dieselbe Seite genommen, weil sie nicht gepflegt wurde.
+//
+//   SIG   die Behandlungsroutinen: 32 Aufgaben * 32 Signale * 24 Oktette
+//         (Routine, Flaggen, Maske) = 24576 Oktette = sechs Seiten.
+//   TTY   die Terminals: acht Stueck zu je 2048 Oktetten. Ein Terminal
+//         sind zwei Ringe (Eingang roh, Zeile fertig) und sein Zustand.
+//   RAND  Schluessel, Zaehler, Sammler und Ausgabepuffer des Generators.
+//
+// Der Datenbereich waechst dafuer von 192 KiB auf 256 KiB -- `boot.s`
+// haelt dieselbe Zahl ein zweites Mal, und die beiden muessen gleich
+// sein.
+const SIG_OFF: u64 = 0x2F000
+const SIG_MAX: u64 = 0x8000
+// Innerhalb von SIG: erst die Behandlungsroutinen, dann die geretteten
+// Zusammenhaenge. Ein Signalrahmen traegt den VOLLSTAENDIGEN Zustand in
+// der Form, die `iretq` zurueckgibt (22 Woerter), und `sigreturn` kopiert
+// ihn hier durch -- ein Zeiger von Ring 3 wird nie unmittelbar gefolgt.
+const SIGCTX_OFF: u64 = 0x35000 // 32 Aufgaben * 192 Oktette
+const SIGCTX_BYTES: u64 = 192
+const TTY_OFF: u64 = 0x37000
+const TTY_MAX: u64 = 0x4000
+const RAND_OFF: u64 = 0x3B000
+const RAND_MAX: u64 = 4096
+
+const KDATA_SIZE: u64 = 0x40000
 
 // ------------------------------------------------------ the command line
 
@@ -293,6 +375,21 @@ const M_NOKBD: u64 = 256 // no keyboard in this run
 const M_OSUM: u64 = 131072 // mount the drive and start /bin/sh from it
 const M_NOBSS: u64 = 262144 // counter-check: do NOT zero what the file
 // does not fill -- the poison pattern stays visible
+
+// ROUND K9. Two of the three are GEGENPROBEN and nothing else: without
+// them the round proves nothing.
+//
+//   `unix`     run the self-test of round K9 (signals, tty, clock,
+//              random) -- as `caps` does it for the capability layer.
+//   `nosig`    do not DELIVER any signal. Everything else stays: `kill`
+//              still says 0, the pending bit is still set. The counter of
+//              the program that counts its SIGINTs has to stay at zero.
+//   `fixedrand` the generator hands out the same octet for ever. The
+//              statistical check has to FAIL -- a check that cannot fail
+//              measures nothing.
+const M_UNIX: u64 = 1048576
+const M_NOSIG: u64 = 2097152
+const M_FIXRAND: u64 = 4194304
 
 // --------------------------------------------------------- the accesses
 

@@ -44,6 +44,10 @@ import elf
 import hw
 import smp
 import cap
+import time
+import rand
+import tty
+import signal
 
 // Indices in the table out of isr.s.
 const V_DF_STACK: u64 = 52
@@ -69,6 +73,10 @@ const M_NOBSS: u64 = 262144 // and do NOT zero what the file leaves open
 // Kommandozeile, damit KEIN bestehender Testlauf sich aendert -- die
 // Runden 59 bis K6 messen weiter genau das, was sie gemessen haben.
 const M_CAPS: u64 = 524288
+// ROUND K9, dieselben Werte wie in `kstate.fi`.
+const M_UNIX: u64 = 1048576
+const M_NOSIG: u64 = 2097152
+const M_FIXRAND: u64 = 4194304
 
 // The programs in uprog.fi.
 const P_HELLO: u64 = 1
@@ -129,6 +137,21 @@ fn kernel_main(mbi: u64, vectors: u64, state: u64, kernel_end: u64,
     // out. The first heap of the run stands on it. See docs/OSUM-K2.md.
     hw.parse(state, cmd)
     smp.parse(state, cmd)
+    // ROUND K9. Die Uhr wird gelesen, BEVOR irgendetwas anderes Zeit
+    // braucht: TIME_BOOT und TIME_TSC0 muessen aus demselben Augenblick
+    // stammen, sonst ist der Fehler fuer immer eingebaut. Der Sammler des
+    // Zufallsgenerators faengt hier an -- von hier bis zum ersten
+    // `getrandom` ruehrt jeder Zeitgeber- und Tastaturschlag ein.
+    time.init(state)
+    rand.init(state)
+    if (kstate.get(state, kstate.MODE) & M_FIXRAND) != 0 {
+        rand.fixed_set(state, 1)
+    }
+    // ROUND K9. DIE TERMINALSCHICHT, und sie steht vor `file.init`:
+    // Deskriptor 0, 1 und 2 sind von hier an Enden eines Terminals, und
+    // ein Terminal, das es beim ersten `write` noch nicht gibt, waere
+    // eine stille Konsole.
+    tty.init(state)
     console_load(state, cmd)
     // ROUND K4: the three console descriptors of the system. They exist
     // before the first task does, they belong to no process, and every
@@ -197,6 +220,11 @@ fn kernel_main(mbi: u64, vectors: u64, state: u64, kernel_end: u64,
     // 5. interrupts on, and the proof that they arrive.
     ticks(state)
 
+    // 5a. ROUND K9. Erst jetzt laesst sich der Zyklenzaehler eichen: es
+    //     gibt einen Zeitgeber, von dem nachgewiesen ist, dass er
+    //     schlaegt. Vorher gaebe es nichts, wogegen zu messen waere.
+    clock(state)
+
     // 6. three tasks at the same time.
     scheduler(state)
 
@@ -237,6 +265,58 @@ fn kernel_main(mbi: u64, vectors: u64, state: u64, kernel_end: u64,
     serial.puts((&s_done[0]) as u64)
     serial.nl()
     power.shutdown(power.EXIT_OK)
+}
+
+// ---------------------------------------------------------- Runde K9
+//
+// Punkt 5a: die Uhr. Der Zyklenzaehler wird gegen den Zeitgeber gehalten,
+// und was dabei herauskommt, steht in der Ausgabe -- eine Uhr, die ihre
+// eigene Frequenz nicht meldet, kann niemand nachrechnen. Danach wird der
+// Zufallsgenerator gesaet und seine ersten sechzehn Oktette gemeldet:
+// zwei Laeufe, die dieselben sechzehn melden, haetten denselben Zufall.
+fn clock(state: u64) {
+    var s_khz: [u8; 12] = "time: tsc=\0\0"
+    var s_khzu: [u8; 6] = " kHz\0\0"
+    var s_wall: [u8; 8] = "  wall=\0"
+    var s_mono: [u8; 9] = "  mono=\0\0"
+    var s_ns: [u8; 4] = " ns\0"
+    var s_tick: [u8; 20] = "time: no tsc, ticks\0"
+    var s_seed: [u8; 13] = "rand: seed=\0\0"
+    var s_hw: [u8; 7] = "  hw=\0\0"
+    var s_stir: [u8; 9] = "  stirs=\0"
+    var s_fix: [u8; 20] = "rand: FIXED (probe)\0"
+
+    let k: u64 = time.calibrate(state)
+    if k == 0 {
+        serial.puts((&s_tick[0]) as u64)
+        serial.nl()
+    } else {
+        serial.puts((&s_khz[0]) as u64)
+        serial.dec(k)
+        serial.puts((&s_khzu[0]) as u64)
+        serial.puts((&s_wall[0]) as u64)
+        serial.dec(time.boot_sec(state))
+        serial.puts((&s_mono[0]) as u64)
+        serial.dec(time.mono_ns(state))
+        serial.puts((&s_ns[0]) as u64)
+        serial.nl()
+    }
+    rand.seed(state)
+    if (kstate.get(state, kstate.MODE) & M_FIXRAND) != 0 {
+        serial.puts((&s_fix[0]) as u64)
+        serial.nl()
+    }
+    serial.puts((&s_seed[0]) as u64)
+    var i: u64 = 0
+    while i < 16 {
+        serial.hex_width(rand.seed_hex(state, i), 2)
+        i = i + 1
+    }
+    serial.puts((&s_hw[0]) as u64)
+    serial.dec(rand.hardware(state))
+    serial.puts((&s_stir[0]) as u64)
+    serial.dec(kstate.get(state, kstate.RAND_STIRS))
+    serial.nl()
 }
 
 fn at(vectors: u64, i: u64) -> u64 {
@@ -913,6 +993,22 @@ fn console_load(state: u64, cmd: u64) -> u64 {
         if c == 59 {
             c = 10 // ';' is a line break
         }
+        // ROUND K9: `^C` IM SKRIPT IST WIRKLICH STRG-C. Ein Dach gefolgt
+        // von einem Grossbuchstaben wird zu dem Steuerzeichen, das die
+        // Taste schickt -- `^C` zu 3, `^D` zu 4, `^Z` zu 26. Das Skript
+        // geht seit dieser Runde durch dieselbe Zeilendisziplin wie die
+        // Tastatur (`sys.script_feed` -> `tty.push`), und deshalb loest
+        // ein `^C` hier genau dasselbe SIGINT aus wie ein Mensch am
+        // Terminal. Ohne diesen Weg liesse sich STRG-C nur mit einem
+        // Menschen davor pruefen -- und was niemand nachmessen kann,
+        // gilt in diesem Projekt als Behauptung.
+        if c == 94 {
+            let nxt: u64 = kstate.get8(p + 1)
+            if nxt >= 64 && nxt < 96 {
+                c = nxt - 64
+                p = p + 1
+            }
+        }
         kstate.set8(state + kstate.CONSOLE_OFF + n, c as u8)
         n = n + 1
         p = p + 1
@@ -1320,6 +1416,21 @@ fn mode_of(cmd: u64) -> u64 {
     var capsw: [u8; 5] = "caps\0"
     if find(cmd, (&capsw[0]) as u64, 4) != 0 {
         mode = mode | M_CAPS
+    }
+    // ROUND K9. `unix` schaltet den Selbsttest dieser Runde ein, `nosig`
+    // und `fixedrand` sind die beiden GEGENPROBEN dazu -- ohne sie
+    // beweist die Runde nichts.
+    var unixw: [u8; 5] = "unix\0"
+    var nosigw: [u8; 6] = "nosig\0"
+    var fixrw: [u8; 10] = "fixedrand\0"
+    if find(cmd, (&unixw[0]) as u64, 4) != 0 {
+        mode = mode | M_UNIX
+    }
+    if find(cmd, (&nosigw[0]) as u64, 5) != 0 {
+        mode = mode | M_NOSIG
+    }
+    if find(cmd, (&fixrw[0]) as u64, 9) != 0 {
+        mode = mode | M_FIXRAND
     }
     return mode
 }

@@ -1,0 +1,360 @@
+// kernel/time.fi -- Runde K9: die Uhr.
+//
+// Bis zu dieser Runde hatte Osum keine. `sleep` zaehlte Zeitgebermarken,
+// `ls -l` zeigte keine Daten, und jede Datei war so alt wie jede andere.
+// Ein Zeitgeberzaehler ist keine Uhr: er faengt bei jedem Start wieder
+// bei null an, er hat keine Aufloesung unter zehn Millisekunden, und er
+// weiss nicht, welcher Tag heute ist.
+//
+// ZWEI UHREN, wie in jedem Unix, und der Unterschied ist der ganze Punkt:
+//
+//   DIE ECHTZEITUHR sagt, welcher Zeitpunkt jetzt ist. Sie kommt aus dem
+//   CMOS-Baustein, den jeder PC seit 1984 hat, wird EINMAL beim Start
+//   gelesen und danach fortgerechnet. Sie darf springen (jemand stellt
+//   sie), und deshalb darf man mit ihr keine Dauer messen.
+//
+//   DIE MONOTONE UHR sagt, wie viel Zeit seit dem Start vergangen ist.
+//   Sie kommt aus dem Zyklenzaehler des Prozessors, geteilt durch seine
+//   gemessene Frequenz. Sie LAEUFT NIE RUECKWAERTS -- das ist die einzige
+//   Zusage, die eine monotone Uhr macht, und sie ist hier nicht behauptet
+//   sondern erzwungen: `mono_ns` klammert jeden Wert gegen den zuletzt
+//   herausgegebenen (`kstate.TIME_LAST`, mit `lock cmpxchg`, weil vier
+//   Kerne gleichzeitig fragen duerfen) und zaehlt in `kstate.TIME_BACK`
+//   mit, wie oft die Klammer greifen musste.
+//
+// WARUM DER ZYKLENZAEHLER UND NICHT DER ZEITGEBER. Der Zeitgeber schlaegt
+// hundertmal in der Sekunde; eine Uhr aus ihm hat zehn Millisekunden
+// Koernung, und `clock_gettime` waere damit fuer alles unbrauchbar, was
+// eine Messung macht. Der Zyklenzaehler laeuft mit dem Prozessortakt --
+// er hat die Aufloesung, die fehlt, und ihm fehlt nur der Massstab. Den
+// gibt ihm `calibrate`: der Zaehler wird gegen den Zeitgeber gehalten,
+// der zu diesem Zeitpunkt bereits nachweislich laeuft (`kmain.ticks`).
+// Solange das nicht geschehen ist -- und auf einer Maschine, deren
+// Zaehler stillsteht -- rechnet `mono_ns` aus den Marken weiter, mit den
+// zehn Millisekunden Koernung, die es dann eben hat. Eine Uhr, die
+// zugibt, grob zu sein, ist besser als eine, die eine Zahl erfindet.
+//
+// DIE ARITHMETIK-FALLE DIESER RUNDE. In Firn panicken `+`, `-` und `*`
+// bei Ueberlauf (SPEC 13). Eine Differenz zweier Zyklenzaehler MEINT
+// Umdeutung -- der Zaehler laeuft ueber, und `b - a` ueber die Grenze
+// hinweg ist genau die gesuchte Differenz und genau das, was `-` fuer
+// einen Fehler haelt. Jede Zeile unten, die mit Zyklen oder Nanosekunden
+// rechnet, benutzt deshalb `+%`, `-%` und `*%`. Das ist keine Nachlaes-
+// sigkeit, es ist die Bedeutung.
+
+import serial
+import kstate
+import atomic
+
+export {
+    init, calibrate, mono_ns, real_ns, boot_sec, rtc_field, tsc, khz,
+    epoch_of, days_from_civil, now_sec, split,
+    CLOCK_REALTIME, CLOCK_MONOTONIC, CLOCK_PROCESS, CLOCK_THREAD,
+    CLOCK_MONOTONIC_RAW, CLOCK_REALTIME_COARSE, CLOCK_MONOTONIC_COARSE,
+    CLOCK_BOOTTIME, CLOCK_MAX,
+    R_YEAR, R_MONTH, R_DAY, R_HOUR, R_MIN, R_SEC,
+    NS_PER_SEC, TICK_NS, TICK_HZ
+}
+
+// Die Nummern von Linux (`include/uapi/linux/time.h`). Die drei, die
+// dieser Kernel nicht unterscheiden kann (Prozess- und Fadenzeit), geben
+// die monotone Uhr zurueck statt einen Fehler: ein Programm, das seine
+// eigene Rechenzeit misst, bekommt hier die verstrichene -- was auf einer
+// Maschine mit einem Prozess pro Kern dasselbe ist, und was `docs/
+// ROUNDK9.md` ausdruecklich als Abweichung nennt.
+const CLOCK_REALTIME: u64 = 0
+const CLOCK_MONOTONIC: u64 = 1
+const CLOCK_PROCESS: u64 = 2
+const CLOCK_THREAD: u64 = 3
+const CLOCK_MONOTONIC_RAW: u64 = 4
+const CLOCK_REALTIME_COARSE: u64 = 5
+const CLOCK_MONOTONIC_COARSE: u64 = 6
+const CLOCK_BOOTTIME: u64 = 7
+const CLOCK_MAX: u64 = 7
+
+const R_YEAR: u64 = 0
+const R_MONTH: u64 = 1
+const R_DAY: u64 = 2
+const R_HOUR: u64 = 3
+const R_MIN: u64 = 4
+const R_SEC: u64 = 5
+
+const NS_PER_SEC: u64 = 1000000000
+const TICK_HZ: u64 = 100
+const TICK_NS: u64 = 10000000 // eine Marke bei 100 Hz
+
+// Wie viele Marken die Eichung mitnimmt. Zwanzig sind 200 ms: lang genug,
+// dass die Koernung des Zeitgebers (eine Marke) unter einem Prozent
+// bleibt, kurz genug, dass kein Testlauf darauf wartet.
+const CAL_TICKS: u64 = 20
+
+// ------------------------------------------------------ der Zyklenzaehler
+
+fn tsc() -> u64 {
+    var lo: u64 = 0
+    var hi: u64 = 0
+    asm("rdtsc", out("rax") & lo, out("rdx") & hi)
+    return (hi << 32) | (lo & 0xFFFFFFFF)
+}
+
+fn khz(state: u64) -> u64 {
+    return kstate.get(state, kstate.TIME_KHZ)
+}
+
+// ------------------------------------------------------------ die CMOS-Uhr
+
+fn cmos(reg: u64) -> u64 {
+    serial.out8(0x70 as u16, reg as u8)
+    return serial.in8(0x71 as u16) as u64
+}
+
+// Ein Feld der Echtzeituhr. Statusregister B sagt, ob die Felder in BCD
+// stehen und ob die Stunde bis zwoelf gezaehlt wird; beides wird GELESEN
+// und nicht angenommen -- QEMU und ein echtes Brett sind sich ueber die
+// Voreinstellungen nicht einig. Bit 7 von Statusregister A steht, waehrend
+// der Baustein Sekunden in Minuten traegt; wer dann liest, bekommt eine
+// Zeit, die es nie gab. Die Warteschleife ist begrenzt: ein Baustein, der
+// nicht da ist, darf den Kernel nicht anhalten.
+fn rtc_field(what: u64) -> u64 {
+    var guard: u64 = 0
+    while guard < 100000 && (cmos(0x0A) & 0x80) != 0 {
+        guard = guard + 1
+    }
+    var reg: u64 = 0
+    if what == R_YEAR {
+        reg = 9
+    }
+    if what == R_MONTH {
+        reg = 8
+    }
+    if what == R_DAY {
+        reg = 7
+    }
+    if what == R_HOUR {
+        reg = 4
+    }
+    if what == R_MIN {
+        reg = 2
+    }
+    if what == R_SEC {
+        reg = 0
+    }
+    let b: u64 = cmos(0x0B)
+    var raw: u64 = cmos(reg)
+    var pm: bool = false
+    if what == R_HOUR && (b & 2) == 0 && (raw & 0x80) != 0 {
+        pm = true
+        raw = raw & 0x7F
+    }
+    var v: u64 = raw
+    if (b & 4) == 0 {
+        v = (raw & 15) + (raw >> 4) * 10
+    }
+    if what == R_HOUR && pm && v < 12 {
+        v = v + 12
+    }
+    if what == R_YEAR {
+        v = v + 2000
+    }
+    return v
+}
+
+// Tage seit dem 1. Januar 1970 aus einem buergerlichen Datum. Der
+// Algorithmus ist Howard Hinnants `days_from_civil` -- keine Schleife
+// ueber Jahre, keine Tabelle von Monatslaengen, und er ist fuer jedes
+// Datum ab 1970 richtig, Schaltjahre und die Hundertjahrregel
+// eingeschlossen. Alles rechnet mit Umdeutung: der Zwischenwert `y -% 1`
+// im Januar und Februar und das abschliessende `-% 719468` (die Tage von
+// Jahr 0 bis 1970) sind genau die Stellen, an denen die gepruefte
+// Arithmetik dieser Sprache sonst stehenbliebe.
+fn days_from_civil(y0: u64, m: u64, d: u64) -> u64 {
+    var y: u64 = y0
+    if m <= 2 {
+        y = y -% 1
+    }
+    let era: u64 = y / 400
+    let yoe: u64 = y -% (era *% 400)
+    var mp: u64 = 0
+    if m > 2 {
+        mp = m -% 3
+    } else {
+        mp = m +% 9
+    }
+    let doy: u64 = (((153 *% mp) +% 2) / 5) +% (d -% 1)
+    let doe: u64 = ((yoe *% 365) +% (yoe / 4) -% (yoe / 100)) +% doy
+    return ((era *% 146097) +% doe) -% 719468
+}
+
+// Sekunden seit 1970 aus sechs Feldern.
+fn epoch_of(y: u64, mo: u64, d: u64, h: u64, mi: u64, s: u64) -> u64 {
+    let days: u64 = days_from_civil(y, mo, d)
+    return (((days *% 86400) +% (h *% 3600)) +% (mi *% 60)) +% s
+}
+
+// Der Weg zurueck: aus Sekunden seit 1970 wieder ein Datum. `date` und
+// `ls -l` brauchen ihn, und der Kernel ist die einzige Stelle, die den
+// Schaltjahrkalender schon kennt. `out` zeigt auf sechs Woerter in der
+// Reihenfolge R_YEAR..R_SEC.
+fn split(secs: u64, out: u64) {
+    let days: u64 = secs / 86400
+    let rest: u64 = secs % 86400
+    // Hinnants civil_from_days, dieselbe Herkunft wie oben.
+    let z: u64 = days +% 719468
+    let era: u64 = z / 146097
+    let doe: u64 = z -% (era *% 146097)
+    let yoe: u64 = (((doe -% (doe / 1460)) +% (doe / 36524)) -% (doe / 146096)) / 365
+    let y: u64 = yoe +% (era *% 400)
+    let doy: u64 = doe -% (((365 *% yoe) +% (yoe / 4)) -% (yoe / 100))
+    let mp: u64 = ((5 *% doy) +% 2) / 153
+    let d: u64 = (doy -% (((153 *% mp) +% 2) / 5)) +% 1
+    var mo: u64 = mp +% 3
+    var yy: u64 = y
+    if mp >= 10 {
+        mo = mp -% 9
+        yy = y +% 1
+    }
+    __mmio_write64((out + R_YEAR * 8) as *mut u64, yy)
+    __mmio_write64((out + R_MONTH * 8) as *mut u64, mo)
+    __mmio_write64((out + R_DAY * 8) as *mut u64, d)
+    __mmio_write64((out + R_HOUR * 8) as *mut u64, rest / 3600)
+    __mmio_write64((out + R_MIN * 8) as *mut u64, (rest % 3600) / 60)
+    __mmio_write64((out + R_SEC * 8) as *mut u64, rest % 60)
+}
+
+// ------------------------------------------------------------- der Start
+
+// Einmal, so frueh wie moeglich: die Wandzeit lesen und den Zyklenzaehler
+// zum selben Zeitpunkt festhalten. Beides gehoert zusammen -- die
+// Echtzeituhr ist von hier an TIME_BOOT plus das, was der Zaehler seit
+// TIME_TSC0 gezaehlt hat, und wenn die beiden Werte aus verschiedenen
+// Augenblicken kaemen, waere der Fehler fuer immer eingebaut.
+fn init(state: u64) -> u64 {
+    let y: u64 = rtc_field(R_YEAR)
+    let mo: u64 = rtc_field(R_MONTH)
+    let d: u64 = rtc_field(R_DAY)
+    let h: u64 = rtc_field(R_HOUR)
+    let mi: u64 = rtc_field(R_MIN)
+    let s: u64 = rtc_field(R_SEC)
+    var secs: u64 = 0
+    // Eine Uhr, die nicht da ist, liefert Nullen oder 0xFF in jedem
+    // Register. Beides ergibt kein Datum, und dann ist die Echtzeituhr
+    // eben der Start der Maschine -- gesagt statt erfunden.
+    if y >= 1970 && y < 2200 && mo >= 1 && mo <= 12 && d >= 1 && d <= 31 {
+        if h < 24 && mi < 60 && s < 60 {
+            secs = epoch_of(y, mo, d, h, mi, s)
+        }
+    }
+    kstate.set(state, kstate.TIME_BOOT, secs)
+    kstate.set(state, kstate.TIME_TSC0, tsc())
+    kstate.set(state, kstate.TIME_KHZ, 0)
+    kstate.set(state, kstate.TIME_LAST, 0)
+    return secs
+}
+
+// Der Massstab fuer den Zyklenzaehler, gegen den Zeitgeber gemessen. Wird
+// von `kmain` aufgerufen, NACHDEM der Zeitgeber nachweislich laeuft --
+// vorher gaebe es nichts, wogegen zu messen waere. Gibt die gemessenen
+// Zyklen je Millisekunde zurueck, oder 0.
+//
+// Die Warteschleifen sind nach oben begrenzt. Mit `notimer` auf der
+// Kommandozeile schlaegt der Zeitgeber nie, und diese Funktion muss dann
+// aufgeben statt die Maschine anzuhalten -- der Kernel rechnet danach
+// weiter mit Marken, deren es keine gibt, und `mono_ns` steht still. Das
+// ist richtig so: eine Maschine ohne Zeitgeber hat keine Zeit.
+fn calibrate(state: u64) -> u64 {
+    let t0: u64 = kstate.get(state, kstate.TICKS)
+    var guard: u64 = 0
+    // Auf die naechste Flanke warten, damit die angebrochene erste Marke
+    // nicht mitzaehlt.
+    while kstate.get(state, kstate.TICKS) == t0 && guard < 200000000 {
+        guard = guard + 1
+    }
+    let s: u64 = kstate.get(state, kstate.TICKS)
+    if s == t0 {
+        return 0
+    }
+    let a: u64 = tsc()
+    guard = 0
+    while kstate.get(state, kstate.TICKS) < s + CAL_TICKS && guard < 2000000000 {
+        guard = guard + 1
+    }
+    let b: u64 = tsc()
+    let e: u64 = kstate.get(state, kstate.TICKS)
+    let elapsed: u64 = e -% s
+    if elapsed == 0 {
+        return 0
+    }
+    let cycles: u64 = b -% a
+    let ms: u64 = elapsed *% (1000 / TICK_HZ)
+    if cycles == 0 || ms == 0 {
+        return 0
+    }
+    let k: u64 = cycles / ms
+    // Ein Zaehler, der weniger als ein Megahertz meldet, ist keiner --
+    // dann bleibt es bei den Marken.
+    if k < 1000 {
+        return 0
+    }
+    kstate.set(state, kstate.TIME_KHZ, k)
+    return k
+}
+
+// ------------------------------------------------------- die beiden Uhren
+
+// Nanosekunden seit dem Start. Der eigentliche Rechenweg ist die eine
+// Stelle, an der ein Kernel gern ueberlaeuft: `cycles * 1000000 / khz`
+// haette bei 3 GHz nach 6 Sekunden 1.8e19 erreicht und waere umgelaufen.
+// Deshalb erst teilen, dann malnehmen, und den Rest getrennt: beide
+// Zwischenwerte bleiben unter 1e13.
+fn raw_ns(state: u64) -> u64 {
+    let k: u64 = kstate.get(state, kstate.TIME_KHZ)
+    if k == 0 {
+        return kstate.get(state, kstate.TICKS) *% TICK_NS
+    }
+    let d: u64 = tsc() -% kstate.get(state, kstate.TIME_TSC0)
+    let whole: u64 = (d / k) *% 1000000
+    let part: u64 = ((d % k) *% 1000000) / k
+    return whole +% part
+}
+
+// Und die Zusage. Vier Kerne duerfen gleichzeitig fragen, und ihre
+// Zyklenzaehler muessen nicht auf dieselbe Zahl geeicht sein -- ein
+// Kern, dessen Zaehler zwei Mikrosekunden hinterherlaeuft, wuerde eine
+// Uhr, die einfach rechnet, rueckwaerts laufen lassen. Also: der zuletzt
+// herausgegebene Wert steht in einem Wort, und ein neuer wird nur
+// herausgegeben, wenn er groesser ist -- mit `lock cmpxchg`, weil sonst
+// zwei Kerne dasselbe Wort ueberschreiben. Wer einen kleineren Wert
+// errechnet, bekommt den alten und wird in TIME_BACK gezaehlt.
+fn mono_ns(state: u64) -> u64 {
+    let want: u64 = raw_ns(state)
+    let cell: u64 = state + kstate.TIME_LAST
+    var last: u64 = atomic.load(cell)
+    var spins: u64 = 0
+    while want > last && spins < 64 {
+        if atomic.cas(cell, last, want) == last {
+            return want
+        }
+        last = atomic.load(cell)
+        spins = spins + 1
+    }
+    if want > last {
+        return want
+    }
+    kstate.add(state, kstate.TIME_BACK, 1)
+    return last
+}
+
+// Die Echtzeituhr: der Startzeitpunkt plus die monotone Uhr. Sie erbt
+// damit deren Aufloesung, und sie erbt NICHT das Springen einer Uhr, die
+// bei jedem Aufruf neu aus dem CMOS gelesen wuerde.
+fn real_ns(state: u64) -> u64 {
+    return (kstate.get(state, kstate.TIME_BOOT) *% NS_PER_SEC) +% mono_ns(state)
+}
+
+fn now_sec(state: u64) -> u64 {
+    return real_ns(state) / NS_PER_SEC
+}
+
+fn boot_sec(state: u64) -> u64 {
+    return kstate.get(state, kstate.TIME_BOOT)
+}

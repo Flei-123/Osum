@@ -1,0 +1,691 @@
+// kernel/tty.fi -- Runde K9: das Terminal.
+//
+// Bis zu dieser Runde redete die Shell UNMITTELBAR mit der Tastatur und
+// der seriellen Leitung. `sys.keyboard_read` holte Oktette aus dem Ring
+// von `kbd.fi`, behandelte den Rueckschritt selbst und gab die Zeile
+// weiter, sobald ein Zeilenvorschub kam. Das ist keine Terminalschicht,
+// das ist eine Zeile Code, die zufaellig so aussieht wie eine -- und
+// alles, was daran haengt, fehlte: kein Echo, das man abschalten kann,
+// kein roher Modus fuer einen Editor, keine Steuerzeichen, keine
+// Fenstergroesse, kein Vordergrund und kein Hintergrund.
+//
+// WAS EINE TERMINALSCHICHT WIRKLICH IST -- die ZEILENDISZIPLIN zwischen
+// Geraet und Prozess, und sie hat genau zwei Betriebsarten:
+//
+//   KANONISCH. Das Terminal sammelt eine ZEILE. Der Rueckschritt nimmt
+//   ein Zeichen zurueck, STRG-U die ganze Zeile, STRG-D beendet die
+//   Eingabe, und erst der Zeilenvorschub gibt alles zusammen an den
+//   lesenden Prozess. Das Echo macht das TERMINAL, nicht das Programm --
+//   deshalb sieht man, was man tippt, auch wenn gar kein Programm liest.
+//
+//   ROH. Jedes Zeichen geht sofort durch, kein Echo, keine Bearbeitung.
+//   Das ist, was ein Editor braucht, und es ist ein Schalter und keine
+//   zweite Schicht.
+//
+// UND DIE STEUERZEICHEN. STRG-C ist kein Zeichen, das ein Programm liest
+// -- es ist ein SIGNAL an die Vordergrund-Prozessgruppe des Terminals.
+// Das ist die Stelle, an der Terminals und Signale dasselbe Thema sind,
+// und der Grund, warum beide in derselben Runde entstehen.
+//
+// DAS ANZEIGEGERAET IST AUSTAUSCHBAR, und das ist Absicht. Runde K7 baut
+// im selben Repo gerade den Rahmenpuffer und die Bildschirmkonsole. Die
+// Zeilendisziplin hier weiss nicht, wohin sie schreibt: sie ruft `emit`,
+// und `emit` sieht in T_SINK nach. Heute steht dort SINK_SERIAL, morgen
+// darf dort SINK_SCREEN stehen, und dieser Datei aendert sich dabei keine
+// Zeile. Der Bildschirmcode von K7 wird hier NICHT angefasst.
+//
+// PSEUDOTERMINALS. Ein Paar aus Steuerseite und Nutzerseite: was auf der
+// einen hineingeht, kommt auf der anderen heraus. Die Nutzerseite ist ein
+// ganz gewoehnliches Terminal mit Zeilendisziplin -- eine Shell, die
+// darauf laeuft, merkt keinen Unterschied. Das ist die Grundlage von
+// allem, was spaeter `screen`, `ssh` oder ein Terminalfenster heissen
+// koennte.
+
+import serial
+import kstate
+import sched
+import signal
+import errno
+
+export {
+    init, console, push, push_text, take, waiting, write_out, out_take,
+    out_waiting, emit, alloc_pair, valid, set_pgrp, pgrp, sink, set_sink,
+    lflag, set_lflag, winsize_rows, winsize_cols, set_winsize,
+    cc_get, cc_set, peer_of, kind_of, info,
+    do_ioctl, stats, count,
+    ISIG, ICANON, ECHO, ECHOE, ECHONL, NOFLSH, TOSTOP,
+    ICRNL, INLCR, IGNCR, OPOST, ONLCR,
+    VINTR, VQUIT, VERASE, VKILL, VEOF, VTIME, VMIN, VSUSP,
+    K_CONSOLE, K_PTY_SLAVE, K_PTY_MASTER,
+    SINK_SERIAL, SINK_SCREEN, SINK_PEER,
+    TCGETS, TCSETS, TIOCGPGRP, TIOCSPGRP, TIOCGWINSZ, TIOCSWINSZ,
+    MAX_TTY, I_COUNT, I_LFLAG, I_PGRP, I_ROWS, I_COLS, I_QUEUED, I_SIGS
+}
+
+const MAX_TTY: u64 = 8
+const BYTES: u64 = 2048
+
+// Die Felder eines Terminals.
+const T_USED: u64 = 0
+const T_KIND: u64 = 8
+const T_PEER: u64 = 16 // die andere Seite eines Paares + 1
+const T_LFLAG: u64 = 24
+const T_IFLAG: u64 = 32
+const T_OFLAG: u64 = 40
+const T_PGRP: u64 = 48 // die Vordergrund-Prozessgruppe
+const T_ROWS: u64 = 56
+const T_COLS: u64 = 64
+const T_SINK: u64 = 72
+const T_LHEAD: u64 = 96 // der Ring der fertigen Zeilen
+const T_LTAIL: u64 = 104
+const T_OHEAD: u64 = 112 // der Ring der Ausgabe (Steuerseite liest ihn)
+const T_OTAIL: u64 = 120
+const T_EDIT: u64 = 128 // Oktette in der Zeile unter Bearbeitung
+const T_CC: u64 = 136 // sechzehn Steuerzeichen zu je acht Oktetten
+const T_STATS: u64 = 264
+const LRING: u64 = 768
+const LRING_MAX: u64 = 512
+const ORING: u64 = 1280
+const ORING_MAX: u64 = 512
+const EDITBUF: u64 = 1792
+const EDIT_MAX: u64 = 254
+
+const K_CONSOLE: u64 = 0
+const K_PTY_SLAVE: u64 = 1
+const K_PTY_MASTER: u64 = 2
+
+const SINK_SERIAL: u64 = 0
+const SINK_SCREEN: u64 = 1 // Runde K7 traegt sich hier ein
+const SINK_PEER: u64 = 2
+
+// Die Bits von `c_lflag`, Linux' Werte (`include/uapi/asm-generic/
+// termbits.h`).
+const ISIG: u64 = 1
+const ICANON: u64 = 2
+const ECHO: u64 = 8
+const ECHOE: u64 = 16
+const ECHONL: u64 = 64
+const NOFLSH: u64 = 128
+const TOSTOP: u64 = 256
+
+const IGNCR: u64 = 0x80
+const ICRNL: u64 = 0x100
+const INLCR: u64 = 0x40
+const OPOST: u64 = 1
+const ONLCR: u64 = 4
+
+// Die Plaetze in `c_cc`.
+const VINTR: u64 = 0
+const VQUIT: u64 = 1
+const VERASE: u64 = 2
+const VKILL: u64 = 3
+const VEOF: u64 = 4
+const VTIME: u64 = 5
+const VMIN: u64 = 6
+const VSUSP: u64 = 10
+
+// Die Nummern von `ioctl`, ebenfalls Linux'.
+const TCGETS: u64 = 0x5401
+const TCSETS: u64 = 0x5402
+const TCSETSW: u64 = 0x5403
+const TCSETSF: u64 = 0x5404
+const TIOCGPGRP: u64 = 0x540F
+const TIOCSPGRP: u64 = 0x5410
+const TIOCGWINSZ: u64 = 0x5413
+const TIOCSWINSZ: u64 = 0x5414
+
+// Was `SYS_OSUM_TTYINFO` beantwortet.
+const I_COUNT: u64 = 0
+const I_LFLAG: u64 = 1
+const I_PGRP: u64 = 2
+const I_ROWS: u64 = 3
+const I_COLS: u64 = 4
+const I_QUEUED: u64 = 5
+const I_SIGS: u64 = 6
+
+fn at(state: u64, t: u64) -> u64 {
+    return state + kstate.TTY_OFF + t * BYTES
+}
+
+fn g(state: u64, t: u64, f: u64) -> u64 {
+    return __mmio_read64((at(state, t) + f) as *mut u64)
+}
+
+fn s(state: u64, t: u64, f: u64, v: u64) {
+    __mmio_write64((at(state, t) + f) as *mut u64, v)
+}
+
+fn valid(state: u64, t: u64) -> bool {
+    if t >= MAX_TTY {
+        return false
+    }
+    return g(state, t, T_USED) != 0
+}
+
+fn console() -> u64 {
+    return 0
+}
+
+fn kind_of(state: u64, t: u64) -> u64 {
+    return g(state, t, T_KIND)
+}
+
+fn peer_of(state: u64, t: u64) -> u64 {
+    let p: u64 = g(state, t, T_PEER)
+    if p == 0 {
+        return MAX_TTY
+    }
+    return p - 1
+}
+
+fn sink(state: u64, t: u64) -> u64 {
+    return g(state, t, T_SINK)
+}
+
+// DIE EINE ZEILE, DIE RUNDE K7 SPAETER AENDERT. Steht hier SINK_SCREEN,
+// geht die Ausgabe auf den Bildschirm statt auf die serielle Leitung --
+// und keine andere Zeile dieser Datei weiss davon.
+fn set_sink(state: u64, t: u64, v: u64) {
+    s(state, t, T_SINK, v)
+}
+
+fn lflag(state: u64, t: u64) -> u64 {
+    return g(state, t, T_LFLAG)
+}
+
+fn set_lflag(state: u64, t: u64, v: u64) {
+    s(state, t, T_LFLAG, v)
+}
+
+fn pgrp(state: u64, t: u64) -> u64 {
+    return g(state, t, T_PGRP)
+}
+
+fn set_pgrp(state: u64, t: u64, v: u64) {
+    s(state, t, T_PGRP, v)
+}
+
+fn winsize_rows(state: u64, t: u64) -> u64 {
+    return g(state, t, T_ROWS)
+}
+
+fn winsize_cols(state: u64, t: u64) -> u64 {
+    return g(state, t, T_COLS)
+}
+
+fn set_winsize(state: u64, t: u64, r: u64, c: u64) {
+    s(state, t, T_ROWS, r)
+    s(state, t, T_COLS, c)
+}
+
+fn cc_get(state: u64, t: u64, i: u64) -> u64 {
+    if i >= 16 {
+        return 0
+    }
+    return g(state, t, T_CC + i * 8)
+}
+
+fn cc_set(state: u64, t: u64, i: u64, v: u64) {
+    if i >= 16 {
+        return
+    }
+    s(state, t, T_CC + i * 8, v)
+}
+
+fn stats(state: u64, t: u64) -> u64 {
+    return g(state, t, T_STATS)
+}
+
+fn count(state: u64) -> u64 {
+    var i: u64 = 0
+    var n: u64 = 0
+    while i < MAX_TTY {
+        if g(state, i, T_USED) != 0 {
+            n = n + 1
+        }
+        i = i + 1
+    }
+    return n
+}
+
+// ------------------------------------------------------------ anlegen
+
+fn reset(state: u64, t: u64, kind: u64) {
+    var i: u64 = 0
+    while i < BYTES / 8 {
+        __mmio_write64((at(state, t) + i * 8) as *mut u64, 0)
+        i = i + 1
+    }
+    s(state, t, T_USED, 1)
+    s(state, t, T_KIND, kind)
+    s(state, t, T_LFLAG, ISIG | ICANON | ECHO | ECHOE)
+    s(state, t, T_IFLAG, ICRNL)
+    s(state, t, T_OFLAG, OPOST | ONLCR)
+    s(state, t, T_ROWS, 24)
+    s(state, t, T_COLS, 80)
+    s(state, t, T_SINK, SINK_SERIAL)
+    cc_set(state, t, VINTR, 3) // STRG-C
+    cc_set(state, t, VQUIT, 28) // STRG-Backslash
+    cc_set(state, t, VERASE, 127)
+    cc_set(state, t, VKILL, 21) // STRG-U
+    cc_set(state, t, VEOF, 4) // STRG-D
+    cc_set(state, t, VMIN, 1)
+    cc_set(state, t, VTIME, 0)
+    cc_set(state, t, VSUSP, 26) // STRG-Z
+}
+
+fn init(state: u64) {
+    var i: u64 = 0
+    while i < MAX_TTY {
+        s(state, i, T_USED, 0)
+        i = i + 1
+    }
+    reset(state, 0, K_CONSOLE)
+    kstate.set(state, kstate.TTY_READY, 1)
+}
+
+// Ein Paar: Steuerseite und Nutzerseite. Gibt die Nutzerseite zurueck,
+// oder MAX_TTY. Die Steuerseite steht danach in `peer_of`.
+fn alloc_pair(state: u64) -> u64 {
+    var m: u64 = MAX_TTY
+    var sl: u64 = MAX_TTY
+    var i: u64 = 1
+    while i < MAX_TTY {
+        if g(state, i, T_USED) == 0 {
+            if m == MAX_TTY {
+                m = i
+            } else {
+                if sl == MAX_TTY {
+                    sl = i
+                }
+            }
+        }
+        i = i + 1
+    }
+    if m == MAX_TTY || sl == MAX_TTY {
+        return MAX_TTY
+    }
+    reset(state, m, K_PTY_MASTER)
+    reset(state, sl, K_PTY_SLAVE)
+    s(state, m, T_PEER, sl + 1)
+    s(state, sl, T_PEER, m + 1)
+    // Die Nutzerseite schreibt nicht auf die serielle Leitung, sie
+    // schreibt der Steuerseite in den Ring. Das ist der ganze
+    // Unterschied zwischen einem Pseudoterminal und einer Konsole.
+    s(state, sl, T_SINK, SINK_PEER)
+    s(state, m, T_SINK, SINK_PEER)
+    // Die Steuerseite hat KEINE Zeilendisziplin: was hineingeschrieben
+    // wird, geht roh an die Nutzerseite.
+    s(state, m, T_LFLAG, 0)
+    s(state, m, T_OFLAG, 0)
+    return sl
+}
+
+// ------------------------------------------------------------ die Ringe
+
+fn lput(state: u64, t: u64, c: u64) {
+    let h: u64 = g(state, t, T_LHEAD)
+    if h - g(state, t, T_LTAIL) >= LRING_MAX {
+        return // voll: was ueberlaeuft, faellt weg, wie bei jedem Terminal
+    }
+    kstate.set8(at(state, t) + LRING + (h % LRING_MAX), c as u8)
+    s(state, t, T_LHEAD, h + 1)
+}
+
+fn oput(state: u64, t: u64, c: u64) {
+    let h: u64 = g(state, t, T_OHEAD)
+    if h - g(state, t, T_OTAIL) >= ORING_MAX {
+        return
+    }
+    kstate.set8(at(state, t) + ORING + (h % ORING_MAX), c as u8)
+    s(state, t, T_OHEAD, h + 1)
+}
+
+// Wie viele fertige Oktette ein Leser bekommen kann.
+fn waiting(state: u64, t: u64) -> u64 {
+    return g(state, t, T_LHEAD) - g(state, t, T_LTAIL)
+}
+
+// Das naechste Oktett, oder 256 wenn keines da ist. 256 und nicht 0, weil
+// 0 ein Oktett ist, das ein Terminal liefern darf.
+fn take(state: u64, t: u64) -> u64 {
+    let tl: u64 = g(state, t, T_LTAIL)
+    if tl >= g(state, t, T_LHEAD) {
+        return 256
+    }
+    s(state, t, T_LTAIL, tl + 1)
+    return kstate.get8(at(state, t) + LRING + (tl % LRING_MAX))
+}
+
+fn out_waiting(state: u64, t: u64) -> u64 {
+    return g(state, t, T_OHEAD) - g(state, t, T_OTAIL)
+}
+
+fn out_take(state: u64, t: u64) -> u64 {
+    let tl: u64 = g(state, t, T_OTAIL)
+    if tl >= g(state, t, T_OHEAD) {
+        return 256
+    }
+    s(state, t, T_OTAIL, tl + 1)
+    return kstate.get8(at(state, t) + ORING + (tl % ORING_MAX))
+}
+
+// ------------------------------------------------------------ die Ausgabe
+
+// DAS AUSTAUSCHBARE ANZEIGEGERAET. Ein Oktett hinaus -- wohin, sagt
+// T_SINK. Das ist die Stelle, an der Runde K7 den Bildschirm einhaengt,
+// ohne dass die Zeilendisziplin darueber davon erfaehrt.
+fn emit(state: u64, t: u64, c: u64) {
+    let k: u64 = g(state, t, T_SINK)
+    if k == SINK_PEER {
+        let p: u64 = peer_of(state, t)
+        if p < MAX_TTY {
+            if g(state, t, T_KIND) == K_PTY_SLAVE {
+                // Nutzerseite -> Steuerseite: in den Ausgabering der
+                // Nutzerseite, dort holt die Steuerseite es ab.
+                oput(state, t, c)
+            } else {
+                // Steuerseite -> Nutzerseite: durch deren
+                // Zeilendisziplin, so wie eine Tastatur.
+                push(state, p, c)
+            }
+        }
+        return
+    }
+    // SINK_SCREEN faellt heute auf die serielle Leitung zurueck. Das ist
+    // ehrlich: solange K7 sich nicht eingetragen hat, gibt es keinen
+    // Bildschirm, und eine Ausgabe ins Leere waere schlimmer als eine auf
+    // die Leitung.
+    serial.put(c as u8)
+}
+
+// Ein Puffer des KERNELS hinaus, durch die Ausgabeverarbeitung. ONLCR
+// macht aus einem Zeilenvorschub einen Wagenruecklauf davor -- die
+// einzige Uebersetzung, die eine serielle Leitung wirklich braucht.
+fn write_out(state: u64, t: u64, buf: u64, n: u64) -> u64 {
+    if !valid(state, t) {
+        return 0
+    }
+    let o: u64 = g(state, t, T_OFLAG)
+    var i: u64 = 0
+    while i < n {
+        let c: u64 = kstate.get8(buf + i)
+        if (o & OPOST) != 0 && (o & ONLCR) != 0 && c == 10 {
+            emit(state, t, 13)
+        }
+        emit(state, t, c)
+        i = i + 1
+    }
+    s(state, t, T_STATS, g(state, t, T_STATS) + n)
+    return n
+}
+
+// ------------------------------------------------------ die Zeilendisziplin
+
+fn echo(state: u64, t: u64, c: u64) {
+    if (g(state, t, T_LFLAG) & ECHO) == 0 {
+        return
+    }
+    if c == 10 {
+        emit(state, t, 13)
+        emit(state, t, 10)
+        return
+    }
+    if c < 32 {
+        // Steuerzeichen sichtbar machen: ^C statt eines unsichtbaren
+        // Oktetts. Das ist, was jedes Terminal tut, und es ist der Grund,
+        // warum man in einer Shell sieht, dass man STRG-C gedrueckt hat.
+        emit(state, t, 94)
+        emit(state, t, c + 64)
+        return
+    }
+    emit(state, t, c)
+}
+
+fn edit_push(state: u64, t: u64, c: u64) {
+    let n: u64 = g(state, t, T_EDIT)
+    if n >= EDIT_MAX {
+        return
+    }
+    kstate.set8(at(state, t) + EDITBUF + n, c as u8)
+    s(state, t, T_EDIT, n + 1)
+}
+
+fn edit_commit(state: u64, t: u64) {
+    let n: u64 = g(state, t, T_EDIT)
+    var i: u64 = 0
+    while i < n {
+        lput(state, t, kstate.get8(at(state, t) + EDITBUF + i))
+        i = i + 1
+    }
+    s(state, t, T_EDIT, 0)
+}
+
+fn edit_drop(state: u64, t: u64) {
+    s(state, t, T_EDIT, 0)
+}
+
+// EIN ZEICHEN VOM GERAET. Der Erzeuger ist der Tastaturunterbrecher oder
+// die Steuerseite eines Pseudoterminals; der Verbraucher ist ein `read`.
+// Alles, was ein Terminal ausmacht, steht in dieser einen Funktion.
+fn push(state: u64, t: u64, c0: u64) -> u64 {
+    if !valid(state, t) {
+        return 0
+    }
+    var c: u64 = c0 & 255
+    kstate.add(state, kstate.TTY_CHARS, 1)
+    let lf: u64 = g(state, t, T_LFLAG)
+    let inf: u64 = g(state, t, T_IFLAG)
+    // Die Eingabeumsetzung. Eine serielle Leitung schickt beim Druck auf
+    // die Eingabetaste einen Wagenruecklauf; ohne ICRNL wartet jedes
+    // Programm dieser Welt darauf ewig.
+    if c == 13 && (inf & IGNCR) != 0 {
+        return 0
+    }
+    if c == 13 && (inf & ICRNL) != 0 {
+        c = 10
+    }
+    if c == 10 && (inf & INLCR) != 0 {
+        c = 13
+    }
+
+    // DIE STEUERZEICHEN -- und hier treffen Terminals und Signale
+    // aufeinander. STRG-C ist kein Zeichen, das jemand liest: es ist ein
+    // SIGINT an die Vordergrund-Prozessgruppe dieses Terminals.
+    if (lf & ISIG) != 0 {
+        var sig: u64 = 0
+        if c == cc_get(state, t, VINTR) && c != 0 {
+            sig = signal.SIGINT
+        }
+        if c == cc_get(state, t, VQUIT) && c != 0 {
+            sig = signal.SIGQUIT
+        }
+        if c == cc_get(state, t, VSUSP) && c != 0 {
+            sig = signal.SIGTSTP
+        }
+        if sig != 0 {
+            echo(state, t, c)
+            if (lf & NOFLSH) == 0 {
+                edit_drop(state, t)
+            }
+            let grp: u64 = g(state, t, T_PGRP)
+            if grp != 0 {
+                let hit: u64 = signal.send_pgid(state, grp, sig)
+                if hit != 0 {
+                    kstate.add(state, kstate.TTY_SIGS, 1)
+                }
+            }
+            return sig
+        }
+    }
+
+    if (lf & ICANON) == 0 {
+        // Roher Modus: sofort durch, kein Echo, keine Bearbeitung.
+        lput(state, t, c)
+        return 0
+    }
+
+    // Kanonischer Modus: die Zeilenbearbeitung.
+    if c == cc_get(state, t, VERASE) || c == 8 {
+        let n: u64 = g(state, t, T_EDIT)
+        if n > 0 {
+            s(state, t, T_EDIT, n - 1)
+            if (lf & ECHO) != 0 && (lf & ECHOE) != 0 {
+                // Rueckschritt, Leerzeichen, Rueckschritt -- das Zeichen
+                // verschwindet auch auf dem Schirm und nicht nur im
+                // Puffer.
+                emit(state, t, 8)
+                emit(state, t, 32)
+                emit(state, t, 8)
+            }
+        }
+        return 0
+    }
+    if c == cc_get(state, t, VKILL) && c != 0 {
+        let n: u64 = g(state, t, T_EDIT)
+        var k: u64 = 0
+        while k < n && (lf & ECHO) != 0 && (lf & ECHOE) != 0 {
+            emit(state, t, 8)
+            emit(state, t, 32)
+            emit(state, t, 8)
+            k = k + 1
+        }
+        s(state, t, T_EDIT, 0)
+        return 0
+    }
+    if c == cc_get(state, t, VEOF) && c != 0 {
+        // STRG-D: was schon getippt ist, geht sofort ab. War nichts
+        // getippt, ist es das ENDE DER EINGABE -- und ein `read`, das
+        // null Oktette bekommt, ist genau das.
+        echo(state, t, c)
+        edit_commit(state, t)
+        return 0
+    }
+    echo(state, t, c)
+    edit_push(state, t, c)
+    if c == 10 {
+        edit_commit(state, t)
+    }
+    return 0
+}
+
+// Ein ganzer Text durch die Zeilendisziplin. `kmain` schiebt damit das
+// Skript der Kommandozeile hinein -- dieselbe Tuer, durch die eine Taste
+// kommt, und deshalb wirkt ein STRG-C aus einem Skript genauso wie eines
+// von der Tastatur.
+fn push_text(state: u64, t: u64, p: u64, n: u64) -> u64 {
+    var i: u64 = 0
+    var sigs: u64 = 0
+    while i < n {
+        if push(state, t, kstate.get8(p + i)) != 0 {
+            sigs = sigs + 1
+        }
+        i = i + 1
+    }
+    return sigs
+}
+
+fn info(state: u64, t: u64, what: u64) -> u64 {
+    if what == I_COUNT {
+        return count(state)
+    }
+    if !valid(state, t) {
+        return errno.neg(errno.E_NOTTY)
+    }
+    if what == I_LFLAG {
+        return g(state, t, T_LFLAG)
+    }
+    if what == I_PGRP {
+        return g(state, t, T_PGRP)
+    }
+    if what == I_ROWS {
+        return g(state, t, T_ROWS)
+    }
+    if what == I_COLS {
+        return g(state, t, T_COLS)
+    }
+    if what == I_QUEUED {
+        return waiting(state, t)
+    }
+    if what == I_SIGS {
+        return kstate.get(state, kstate.TTY_SIGS)
+    }
+    return errno.neg(errno.E_INVAL)
+}
+
+// ------------------------------------------------------------- ioctl
+//
+// Der Kernel schreibt in einen PUFFER SEINER SELBST; `sys.fi` kopiert ihn
+// nach Ring 3 und zurueck. Diese Datei fasst keinen Zeiger eines
+// Prozesses an -- die Regel von Runde K4, und sie gilt weiter.
+//
+// Die Struktur ist Linux' `termios`: vier Flaggenwoerter zu 32 Bit, ein
+// Oktett `c_line`, dann neunzehn Steuerzeichen.
+fn do_ioctl(state: u64, t: u64, req: u64, buf: u64) -> u64 {
+    if !valid(state, t) {
+        return errno.neg(errno.E_NOTTY)
+    }
+    if req == TCGETS {
+        __mmio_write32((buf + 0) as *mut u32, (g(state, t, T_IFLAG) & 0xFFFFFFFF) as u32)
+        __mmio_write32((buf + 4) as *mut u32, (g(state, t, T_OFLAG) & 0xFFFFFFFF) as u32)
+        __mmio_write32((buf + 8) as *mut u32, 0x00000CBD as u32) // c_cflag: 9600 8N1
+        __mmio_write32((buf + 12) as *mut u32, (g(state, t, T_LFLAG) & 0xFFFFFFFF) as u32)
+        kstate.set8(buf + 16, 0 as u8)
+        var i: u64 = 0
+        while i < 19 {
+            var v: u64 = 0
+            if i < 16 {
+                v = cc_get(state, t, i)
+            }
+            kstate.set8(buf + 17 + i, v as u8)
+            i = i + 1
+        }
+        return 0
+    }
+    if req == TCSETS || req == TCSETSW || req == TCSETSF {
+        s(state, t, T_IFLAG, kstate.get32(buf + 0))
+        s(state, t, T_OFLAG, kstate.get32(buf + 4))
+        s(state, t, T_LFLAG, kstate.get32(buf + 12))
+        var i: u64 = 0
+        while i < 16 {
+            cc_set(state, t, i, kstate.get8(buf + 17 + i))
+            i = i + 1
+        }
+        if req == TCSETSF {
+            // "flush": was getippt und noch nicht gelesen wurde, faellt
+            // weg. Ein Programm, das in den rohen Modus geht, will nicht
+            // die Zeilen von vorher.
+            s(state, t, T_LTAIL, g(state, t, T_LHEAD))
+            s(state, t, T_EDIT, 0)
+        }
+        return 0
+    }
+    if req == TIOCGPGRP {
+        __mmio_write32((buf) as *mut u32, (g(state, t, T_PGRP) & 0xFFFFFFFF) as u32)
+        return 0
+    }
+    if req == TIOCSPGRP {
+        s(state, t, T_PGRP, kstate.get32(buf))
+        return 0
+    }
+    if req == TIOCGWINSZ {
+        __mmio_write16((buf + 0) as *mut u16, (g(state, t, T_ROWS) & 0xFFFF) as u16)
+        __mmio_write16((buf + 2) as *mut u16, (g(state, t, T_COLS) & 0xFFFF) as u16)
+        __mmio_write16((buf + 4) as *mut u16, 0 as u16)
+        __mmio_write16((buf + 6) as *mut u16, 0 as u16)
+        return 0
+    }
+    if req == TIOCSWINSZ {
+        s(state, t, T_ROWS, kstate.get16(buf + 0))
+        s(state, t, T_COLS, kstate.get16(buf + 2))
+        // Wer die Groesse aendert, sagt es der Vordergrundgruppe -- das
+        // ist der ganze Zweck von SIGWINCH, und ohne ihn zeichnet jeder
+        // Editor nach dem Vergroessern falsch.
+        let grp: u64 = g(state, t, T_PGRP)
+        if grp != 0 {
+            signal.send_pgid(state, grp, signal.SIGWINCH)
+        }
+        return 0
+    }
+    return errno.neg(errno.E_INVAL)
+}
