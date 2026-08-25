@@ -1,0 +1,1107 @@
+// kernel/fb.fi -- Runde K7: der Bildschirm.
+//
+// Bis zu dieser Runde war Osums Konsole die SERIELLE SCHNITTSTELLE. Auf
+// einer echten Maschine heisst das: der Bildschirm bleibt schwarz. Seit
+// Commit c4427fa VERLANGT der Multiboot-Kopf einen linearen Rahmenpuffer
+// (Flag-Bit 2) -- damit ein Lader unter UEFI nicht auf einem Textmodus
+// besteht, den es dort nicht gibt. Benutzt hat den Rahmenpuffer niemand.
+// Diese Runde benutzt ihn.
+//
+// ZWEI HERKUENFTE, EINE SCHNITTSTELLE. Woher die Angaben ueber den
+// Rahmenpuffer kommen, haengt davon ab, wer den Kern geladen hat:
+//
+//   1. VOM LADER (`SRC_MB`). Multiboot 1, Flag-Bit 12: Adresse, Breite,
+//      Hoehe, Zeilenlaenge, Bit je Bildpunkt und die Lage der drei
+//      Farbfelder stehen in der Informationsstruktur (Spezifikation 3.3,
+//      Oktett 88 aufwaerts). Das ist der Weg unter Limine -- BIOS wie
+//      UEFI -- und der einzige, der auf echter Hardware traegt.
+//   2. VON DER KARTE SELBST (`SRC_VBE`). `qemu-system-x86_64 -kernel`
+//      hat KEINEN Multiboot-Lader mit Videoteil: QEMU meldet
+//      `mb: flags=0x24f`, und Bit 12 (0x1000) ist darin nicht gesetzt --
+//      nachgemessen, bevor diese Zeile entstand. Also stellt der Kern den
+//      Modus selbst ein. Die Karte ist der Bochs-VBE-Aufsatz von QEMU
+//      (PCI 1234:1111, Klasse 03), gesteuert ueber zwei Kurzworttore
+//      (0x1CE Index, 0x1CF Wert); die Adresse des linearen Puffers steht
+//      in BAR0 des Geraets. Das ist ein richtiger Treiber, kein Kniff:
+//      dieselben Register bedienen Bochs, QEMU und VirtualBox.
+//
+// Nach `init` weiss der Rest des Kernels nicht mehr, welcher der beiden
+// Wege gegangen wurde. Er sieht eine Adresse, eine Groesse und eine
+// Zeilenlaenge.
+//
+// WARUM DIESES MODUL NICHTS IMPORTIERT AUSSER kstate UND font. Es haengt
+// UNTER `serial.fi`: `serial.put` spiegelt jedes Oktett auf den
+// Bildschirm, damit beide Ausgaben dasselbe zeigen. Wuerde `fb.fi`
+// seinerseits `serial`, `mem`, `pci` oder `apic` einbinden, waere der
+// Abhaengigkeitsgraph ein Kreis, und Firn nimmt keinen. Also hat dieses
+// Modul seine eigenen vier Torbefehle, seinen eigenen Zugriff auf den
+// PCI-Konfigurationsraum und seine eigene Seitentabellenrechnung. Das ist
+// gewollte, benannte Doppelung -- an drei Stellen zwanzig Zeilen, gegen
+// einen Kreis, den es sonst nicht mehr aufzuloesen gaebe.
+//
+// DIE FENSTERPLAETZE SIND GETEILT. Der Rahmenpuffer liegt bei QEMU auf
+// 0xFD000000, weit oberhalb des Gigabytes, das `boot.s` abbildet.
+// `apic.fi` hat fuer genau dieses Problem acht Plaetze zu 2 MiB am
+// oberen Ende des Kernel-Seitenverzeichnisses (0x3F000000 aufwaerts) und
+// eine Belegungsliste in `pci.K2_SCALARS + 0x80`. Dieses Modul benutzt
+// DIESELBE Liste mit DERSELBEN Kodierung (Block + 1), damit sich die
+// beiden nicht gegenseitig einen Platz wegnehmen. `WIN_*` unten und
+// `apic.fi` muessen uebereinstimmen; `tools/gfx/run.sh` prueft die vier
+// Zahlen in beiden Dateien gegeneinander nach.
+//
+// DIE ARITHMETIK-FALLE. In Firn sind `+`, `-` und `*` geprueft und
+// halten den Kern bei Ueberlauf an (`osum_panic`). Bildpunktrechnungen
+// (y * pitch + x * bpp) werden gross, und Farbwerte sind Umdeutungen von
+// Bitmustern, keine Zahlen. Wo eine Umdeutung gemeint ist, steht deshalb
+// eine Maske oder `+%`/`-%`/`*%`, und wo eine Subtraktion unter null
+// laufen KOENNTE, steht vorher ein `if`. Beides ist hier kein Stilfrage:
+// ein Kernel, der beim Rollen der Konsole anhaelt, ist schlimmer als
+// einer ohne Konsole.
+
+profile kernel
+
+import kstate
+import font
+
+export {
+    init, ready, echo, geometry_ok,
+    width, height, pitch, bpp, bytes, addr, phys, source, back, draw_at,
+    cols, rows, cx, cy, chars, flushes, scrolls, huges, block, offset,
+    rgb, pixel, get_pixel, fill, line, blit, clear, flush, dirty_all,
+    putc, puts, text, nl, set_color, set_cursor, cursor_on, home,
+    set_echo, echo_on, double_buffered, uncached,
+    SRC_NONE, SRC_MB, SRC_VBE, FB_OFF, FB_MAX, FONT_OFF, USER_BASE
+}
+
+// ------------------------------------------------- der Datenbereich
+//
+// Eine Seite am oberen Ende von `kdata` (kstate.fi nennt 0x2F000 als
+// letzte freie Seite). Die Skalare unten, ab 0x100 der Zeichensatz --
+// 1520 Oktette, also endet er bei 0x6F0 und die Seite reicht.
+
+const FB_OFF: u64 = 0x2F000
+const FB_MAX: u64 = 4096
+const FONT_OFF: u64 = 0x2F100
+
+const S_READY: u64 = 0x000 // 1 = es gibt einen Rahmenpuffer
+const S_ADDR: u64 = 0x008 // seine Adresse IM KERNEL (Fensterplatz)
+const S_PHYS: u64 = 0x010 // seine Adresse auf dem Bus
+const S_WIDTH: u64 = 0x018
+const S_HEIGHT: u64 = 0x020
+const S_PITCH: u64 = 0x028 // Oktette je Bildzeile
+const S_BPP: u64 = 0x030 // Bit je Bildpunkt
+const S_COLS: u64 = 0x038 // Zeichen je Textzeile
+const S_ROWS: u64 = 0x040
+const S_CX: u64 = 0x048 // Schreibmarke, Spalte
+const S_CY: u64 = 0x050 // Schreibmarke, Zeile
+const S_FG: u64 = 0x058
+const S_BG: u64 = 0x060
+const S_BACK: u64 = 0x068 // Zweitpuffer im Arbeitsspeicher, 0 = keiner
+const S_DRAW: u64 = 0x070 // wohin gezeichnet wird (Zweitpuffer oder Karte)
+const S_SOURCE: u64 = 0x078 // SRC_MB oder SRC_VBE
+const S_BYTES: u64 = 0x080 // pitch * height
+const S_FLUSHES: u64 = 0x088
+const S_CHARS: u64 = 0x090
+const S_SCROLLS: u64 = 0x098
+const S_CURSOR: u64 = 0x0A0 // 1 = Textmarke sichtbar
+const S_RSHIFT: u64 = 0x0A8
+const S_GSHIFT: u64 = 0x0B0
+const S_BSHIFT: u64 = 0x0B8
+const S_ECHO: u64 = 0x0C0 // 1 = `serial.put` spiegelt hierher
+const S_BLOCK: u64 = 0x0C8 // der 2-MiB-Block, in dem der Puffer beginnt
+const S_OFFSET: u64 = 0x0D0 // Adresse minus Block
+const S_HUGES: u64 = 0x0D8 // wie viele 2-MiB-Seiten der Puffer braucht
+const S_DIRTY_LO: u64 = 0x0E0 // erste geaenderte Bildzeile
+const S_DIRTY_HI: u64 = 0x0E8 // letzte + 1
+const S_UNCACHED: u64 = 0x0F0 // 1 = Fenster ohne Zwischenspeicher
+
+const SRC_NONE: u64 = 0
+const SRC_MB: u64 = 1 // vom Lader (Multiboot, Flag-Bit 12)
+const SRC_VBE: u64 = 2 // von der Karte (Bochs-VBE ueber PCI)
+
+// --------------------------------------------------- Multiboot 1, 3.3
+
+const MB_FLAGS: u64 = 0
+const MB_FB_FLAG: u64 = 0x1000 // Bit 12
+const MB_FB_ADDR: u64 = 88 // 64 Bit
+const MB_FB_PITCH: u64 = 96
+const MB_FB_WIDTH: u64 = 100
+const MB_FB_HEIGHT: u64 = 104
+const MB_FB_BPP: u64 = 108 // ein Oktett
+const MB_FB_TYPE: u64 = 109
+const MB_FB_RPOS: u64 = 110
+const MB_FB_GPOS: u64 = 112
+const MB_FB_BPOS: u64 = 114
+const MB_FB_RGB: u64 = 1 // Typ 1 = direkte Farbe
+
+// ------------------------------------------------------- Bochs-VBE
+
+const VBE_INDEX: u16 = 0x01CE
+const VBE_DATA: u16 = 0x01CF
+
+const VBE_ID: u64 = 0
+const VBE_XRES: u64 = 1
+const VBE_YRES: u64 = 2
+const VBE_BPP: u64 = 3
+const VBE_ENABLE: u64 = 4
+const VBE_BANK: u64 = 5
+const VBE_VWIDTH: u64 = 6
+const VBE_VHEIGHT: u64 = 7
+const VBE_XOFF: u64 = 8
+const VBE_YOFF: u64 = 9
+
+const VBE_DISABLED: u64 = 0
+const VBE_ENABLED: u64 = 0x01
+const VBE_LFB: u64 = 0x40
+
+// Die Kennungen, die Bochs, QEMU und VirtualBox melden: 0xB0C0 bis
+// 0xB0C5. Alles andere ist keine Karte, die diese Register versteht.
+const VBE_ID_LO: u64 = 0xB0C0
+const VBE_ID_HI: u64 = 0xB0C5
+
+// ------------------------------------------------ PCI und Seitentafel
+
+const PCI_ADDR: u16 = 0xCF8
+const PCI_DATA: u16 = 0xCFC
+const CFG_VENDOR: u64 = 0x00
+const CFG_COMMAND: u64 = 0x04
+const CFG_CLASS: u64 = 0x08 // Revision, ProgIF, Unterklasse, Klasse
+const CFG_HEADER: u64 = 0x0C
+const CFG_BAR0: u64 = 0x10
+const CMD_MEM: u64 = 0x2 // Speicherbereiche des Geraets anschalten
+const CLASS_VGA: u64 = 0x03
+
+const PAGE_PRESENT: u64 = 1
+const PAGE_WRITE: u64 = 2
+const PAGE_PWT: u64 = 8
+const PAGE_PCD: u64 = 16
+const PAGE_HUGE: u64 = 0x80
+const ADDR_MASK: u64 = 0x000FFFFFFFFFF000
+
+// MUSS mit `apic.fi` uebereinstimmen. Acht Plaetze zu 2 MiB, aliasiert
+// auf 0x3F000000..0x3FFFFFFF, Belegungsliste bei 0x12000 + 0x80.
+const WIN_SLOTS: u64 = 8
+const WIN_FIRST: u64 = 504
+const WIN_VIRT: u64 = 504 * 0x200000
+const HUGE_SIZE: u64 = 0x200000
+const WIN_LIST: u64 = 0x12000 + 0x080 // pci.K2_SCALARS + apic.S_WIN
+
+// Wo ein Prozess den Rahmenpuffer sieht, wenn er ihn ueber /dev/fb
+// abbildet: die zweite 2-MiB-Kachel seines privaten Verzeichnisses,
+// gleich hinter dem, was `proc.fi` (USER_DATA + USER_SPAN) belegt.
+const USER_BASE: u64 = 0x40200000
+
+// ------------------------------------------------------- Torbefehle
+
+fn out16(port: u16, v: u16) {
+    asm("out dx, ax", in("dx") port, in("ax") v)
+}
+
+fn in16(port: u16) -> u64 {
+    // `in ax, dx` schreibt nur die unteren 16 Bit von rax; der Rest ist,
+    // was vorher darin stand. `movzx` macht das ganze Register aus dem
+    // gelesenen Kurzwort wohldefiniert -- dieselbe Falle, die
+    // `serial.in8` in Runde 72 gestellt hat.
+    return asm("in ax, dx\nmovzx eax, ax", out("rax"), in("dx") port)
+}
+
+fn out32(port: u16, v: u32) {
+    asm("out dx, eax", in("dx") port, in("eax") v)
+}
+
+fn in32(port: u16) -> u64 {
+    // Ein 32-Bit-Schreibzugriff auf eax loescht die oberen 32 Bit von
+    // rax von sich aus; hier braucht es kein movzx.
+    return asm("in eax, dx", out("rax"), in("dx") port)
+}
+
+// ------------------------------------------------------ PCI, das Noetige
+
+fn cfg_addr(bus: u64, dev: u64, fun: u64, off: u64) -> u32 {
+    return (0x80000000 | (bus << 16) | (dev << 11) | (fun << 8)
+        | (off & 0xFC)) as u32
+}
+
+fn cfg32(bus: u64, dev: u64, fun: u64, off: u64) -> u64 {
+    out32(PCI_ADDR, cfg_addr(bus, dev, fun, off))
+    return in32(PCI_DATA)
+}
+
+fn cfg32_write(bus: u64, dev: u64, fun: u64, off: u64, v: u64) {
+    out32(PCI_ADDR, cfg_addr(bus, dev, fun, off))
+    out32(PCI_DATA, v as u32)
+}
+
+// Sucht die Grafikkarte und gibt die Adresse ihres linearen Puffers
+// zurueck (0 = keine gefunden). Nur Bus 0 wird durchgegangen, und das
+// reicht: eine Karte, die der Kern zeichnen soll, haengt nicht hinter
+// einer Bruecke, und diese Runde will keinen zweiten PCI-Durchlauf
+// neben dem von `pci.fi`.
+fn find_lfb() -> u64 {
+    var dev: u64 = 0
+    while dev < 32 {
+        var fun: u64 = 0
+        var last: u64 = 0
+        while fun <= last {
+            let id: u64 = cfg32(0, dev, fun, CFG_VENDOR)
+            if (id & 0xFFFF) != 0xFFFF {
+                if fun == 0 {
+                    if (cfg32(0, dev, 0, CFG_HEADER) & 0x00800000) != 0 {
+                        last = 7 // mehrfunktionales Geraet
+                    }
+                }
+                let cls: u64 = (cfg32(0, dev, fun, CFG_CLASS) >> 24) & 0xFF
+                if cls == CLASS_VGA {
+                    // Speicherbereiche anschalten, falls die Firmware es
+                    // nicht getan hat.
+                    let cmd: u64 = cfg32(0, dev, fun, CFG_COMMAND)
+                    if (cmd & CMD_MEM) == 0 {
+                        cfg32_write(0, dev, fun, CFG_COMMAND, cmd | CMD_MEM)
+                    }
+                    let bar: u64 = cfg32(0, dev, fun, CFG_BAR0)
+                    // Bit 0 = 1 waere ein Torbereich, kein Speicher.
+                    if (bar & 1) == 0 {
+                        let base: u64 = bar & 0xFFFFFFF0
+                        if base != 0 {
+                            return base
+                        }
+                    }
+                }
+            }
+            fun = fun + 1
+        }
+        dev = dev + 1
+    }
+    return 0
+}
+
+// ------------------------------------------------------- der Modus
+
+fn vbe_write(index: u64, value: u64) {
+    out16(VBE_INDEX, index as u16)
+    out16(VBE_DATA, value as u16)
+}
+
+fn vbe_read(index: u64) -> u64 {
+    out16(VBE_INDEX, index as u16)
+    return in16(VBE_DATA)
+}
+
+fn vbe_present() -> bool {
+    let id: u64 = vbe_read(VBE_ID)
+    return id >= VBE_ID_LO && id <= VBE_ID_HI
+}
+
+// Stellt Breite x Hoehe bei 32 Bit ein und gibt die Zeilenlaenge zurueck
+// (0 = ging nicht). Die Reihenfolge ist die der Bochs-Schnittstelle:
+// erst abschalten, dann die Zahlen, dann wieder an -- eine Karte, der man
+// im laufenden Betrieb die Breite aendert, zeigt Streifen.
+fn vbe_set(w: u64, h: u64) -> u64 {
+    vbe_write(VBE_ENABLE, VBE_DISABLED)
+    vbe_write(VBE_XRES, w)
+    vbe_write(VBE_YRES, h)
+    vbe_write(VBE_BPP, 32)
+    vbe_write(VBE_BANK, 0)
+    vbe_write(VBE_XOFF, 0)
+    vbe_write(VBE_YOFF, 0)
+    vbe_write(VBE_ENABLE, VBE_ENABLED | VBE_LFB)
+    // Zurueckgelesen wird, was die Karte WIRKLICH genommen hat. Eine
+    // Karte darf eine Aufloesung ablehnen, und ein Kern, der seinen
+    // Wunsch fuer die Wahrheit haelt, schreibt daneben.
+    if vbe_read(VBE_XRES) != w || vbe_read(VBE_YRES) != h {
+        return 0
+    }
+    if vbe_read(VBE_BPP) != 32 {
+        return 0
+    }
+    var vw: u64 = vbe_read(VBE_VWIDTH)
+    if vw < w {
+        vw = w
+    }
+    return vw * 4
+}
+
+// --------------------------------------------- das Fenster im Kernel
+
+fn slot_used(state: u64, i: u64) -> u64 {
+    return kstate.get(state, WIN_LIST + i * 8)
+}
+
+// `n` aufeinanderfolgende freie Plaetze, damit ein Puffer, der groesser
+// als 2 MiB ist, im Kernel an EINEM Stueck liegt. Gibt die virtuelle
+// Adresse des ersten zurueck, 0 = kein Platz.
+fn map_run(state: u64, block: u64, n: u64, uncached: bool) -> u64 {
+    if n == 0 || n > WIN_SLOTS {
+        return 0
+    }
+    let pd: u64 = kernel_pd(state)
+    if pd == 0 {
+        return 0
+    }
+    var start: u64 = 0
+    while start + n <= WIN_SLOTS {
+        var k: u64 = 0
+        var frei: bool = true
+        while k < n {
+            if slot_used(state, start + k) != 0 {
+                frei = false
+                k = n
+            } else {
+                k = k + 1
+            }
+        }
+        if frei {
+            var bits: u64 = PAGE_PRESENT | PAGE_WRITE | PAGE_HUGE
+            if uncached {
+                // Fuer Geraeteregister richtig, fuer einen Rahmenpuffer
+                // teuer: jeder Bildpunkt geht einzeln auf den Bus.
+                // `tools/gfx/run.sh` misst genau diesen Unterschied.
+                bits = bits | PAGE_PCD | PAGE_PWT
+            }
+            var j: u64 = 0
+            while j < n {
+                __mmio_write64((pd + (WIN_FIRST + start + j) * 8) as *mut u64,
+                    (block + j * HUGE_SIZE) | bits)
+                kstate.set(state, WIN_LIST + (start + j) * 8,
+                    block + j * HUGE_SIZE + 1)
+                j = j + 1
+            }
+            let c: u64 = asm("mov rax, cr3", out("rax"))
+            asm("mov cr3, rax", in("rax") c)
+            return WIN_VIRT + start * HUGE_SIZE
+        }
+        start = start + 1
+    }
+    return 0
+}
+
+// Das Seitenverzeichnis des ersten Gigabytes -- dasselbe, das `apic.fi`
+// benutzt und das jeder Adressraum von `proc.fi` erbt.
+fn kernel_pd(state: u64) -> u64 {
+    var pml4: u64 = kstate.get(state, kstate.KPML4)
+    if pml4 == 0 {
+        pml4 = asm("mov rax, cr3", out("rax")) & ADDR_MASK
+    }
+    let pdpt: u64 = __mmio_read64(pml4 as *mut u64) & ADDR_MASK
+    if pdpt == 0 {
+        return 0
+    }
+    return __mmio_read64(pdpt as *mut u64) & ADDR_MASK
+}
+
+// ------------------------------------------------------------ Start
+
+// Nimmt den Rahmenpuffer entgegen und macht eine Textkonsole daraus.
+//
+//   mbi        die Multiboot-Struktur (Weg 1)
+//   want_w/h   die Wunschaufloesung fuer Weg 2
+//   back       physische Adresse eines Zweitpuffers, 0 = ohne
+//   back_bytes wie gross er ist
+//   uncached   das Fenster ohne Zwischenspeicher abbilden
+//
+// Gibt wahr zurueck, wenn danach ein Bildschirm da ist.
+fn init(state: u64, mbi: u64, want_w: u64, want_h: u64,
+    back: u64, back_bytes: u64, uncached: bool) -> bool {
+    font.load(state + FONT_OFF)
+
+    var quelle: u64 = SRC_NONE
+    var p: u64 = 0
+    var w: u64 = 0
+    var h: u64 = 0
+    var pt: u64 = 0
+    var bp: u64 = 32
+    var rs: u64 = 16
+    var gs: u64 = 8
+    var bs: u64 = 0
+
+    // Weg 1: der Lader hat einen mitgegeben.
+    if mbi != 0 {
+        if (kstate.get32(mbi + MB_FLAGS) & MB_FB_FLAG) != 0 {
+            if kstate.get8(mbi + MB_FB_TYPE) == MB_FB_RGB {
+                p = __mmio_read64((mbi + MB_FB_ADDR) as *mut u64)
+                pt = kstate.get32(mbi + MB_FB_PITCH)
+                w = kstate.get32(mbi + MB_FB_WIDTH)
+                h = kstate.get32(mbi + MB_FB_HEIGHT)
+                bp = kstate.get8(mbi + MB_FB_BPP)
+                rs = kstate.get8(mbi + MB_FB_RPOS)
+                gs = kstate.get8(mbi + MB_FB_GPOS)
+                bs = kstate.get8(mbi + MB_FB_BPOS)
+                if p != 0 && w != 0 && h != 0 && bp == 32 {
+                    quelle = SRC_MB
+                }
+            }
+        }
+    }
+
+    // Weg 2: die Karte selbst.
+    if quelle == SRC_NONE {
+        if vbe_present() {
+            let lfb: u64 = find_lfb()
+            if lfb != 0 {
+                let gemessen: u64 = vbe_set(want_w, want_h)
+                if gemessen != 0 {
+                    p = lfb
+                    w = want_w
+                    h = want_h
+                    pt = gemessen
+                    bp = 32
+                    rs = 16
+                    gs = 8
+                    bs = 0
+                    quelle = SRC_VBE
+                }
+            }
+        }
+    }
+
+    if quelle == SRC_NONE {
+        return false
+    }
+
+    // Ein Rahmenpuffer, dessen Zeile schmaler als seine Breite ist, ist
+    // keiner -- lieber gar keine Konsole als eine, die in fremden
+    // Speicher schreibt.
+    if pt < w * (bp / 8) {
+        return false
+    }
+
+    let n: u64 = pt * h
+    let blk: u64 = p & (~(HUGE_SIZE - 1))
+    let inner: u64 = p - blk
+    // Wie viele 2-MiB-Seiten der Puffer beruehrt, den Versatz im ersten
+    // Block eingerechnet.
+    let kacheln: u64 = (inner + n + HUGE_SIZE - 1) / HUGE_SIZE
+    let fenster: u64 = map_run(state, blk, kacheln, uncached)
+    if fenster == 0 {
+        return false
+    }
+
+    kstate.set(state, FB_OFF + S_PHYS, p)
+    kstate.set(state, FB_OFF + S_ADDR, fenster + inner)
+    kstate.set(state, FB_OFF + S_BLOCK, blk)
+    kstate.set(state, FB_OFF + S_OFFSET, inner)
+    kstate.set(state, FB_OFF + S_HUGES, kacheln)
+    kstate.set(state, FB_OFF + S_WIDTH, w)
+    kstate.set(state, FB_OFF + S_HEIGHT, h)
+    kstate.set(state, FB_OFF + S_PITCH, pt)
+    kstate.set(state, FB_OFF + S_BPP, bp)
+    kstate.set(state, FB_OFF + S_BYTES, n)
+    kstate.set(state, FB_OFF + S_SOURCE, quelle)
+    kstate.set(state, FB_OFF + S_RSHIFT, rs)
+    kstate.set(state, FB_OFF + S_GSHIFT, gs)
+    kstate.set(state, FB_OFF + S_BSHIFT, bs)
+    kstate.set(state, FB_OFF + S_COLS, w / font.GLYPH_W)
+    kstate.set(state, FB_OFF + S_ROWS, h / font.GLYPH_H)
+    kstate.set(state, FB_OFF + S_UNCACHED, bool_num(uncached))
+
+    // Der Zweitpuffer. Er liegt im Arbeitsspeicher, also im ersten
+    // Gigabyte und damit unter seiner eigenen physischen Adresse. Nur
+    // wenn er GROSS GENUG ist -- ein halber Zweitpuffer waere ein
+    // Schreibzugriff daneben.
+    if back != 0 && back_bytes >= n {
+        kstate.set(state, FB_OFF + S_BACK, back)
+        kstate.set(state, FB_OFF + S_DRAW, back)
+    } else {
+        kstate.set(state, FB_OFF + S_BACK, 0)
+        kstate.set(state, FB_OFF + S_DRAW, fenster + inner)
+    }
+
+    kstate.set(state, FB_OFF + S_FG, rgb(state, 0xC8, 0xD0, 0xD8))
+    kstate.set(state, FB_OFF + S_BG, 0)
+    kstate.set(state, FB_OFF + S_CX, 0)
+    kstate.set(state, FB_OFF + S_CY, 0)
+    kstate.set(state, FB_OFF + S_CURSOR, 1)
+    kstate.set(state, FB_OFF + S_READY, 1)
+    clear(state, 0)
+    flush(state)
+    return true
+}
+
+fn bool_num(b: bool) -> u64 {
+    if b {
+        return 1
+    }
+    return 0
+}
+
+// -------------------------------------------------------- die Zahlen
+
+fn ready(state: u64) -> bool {
+    return kstate.get(state, FB_OFF + S_READY) != 0
+}
+
+fn width(state: u64) -> u64 {
+    return kstate.get(state, FB_OFF + S_WIDTH)
+}
+
+fn height(state: u64) -> u64 {
+    return kstate.get(state, FB_OFF + S_HEIGHT)
+}
+
+fn pitch(state: u64) -> u64 {
+    return kstate.get(state, FB_OFF + S_PITCH)
+}
+
+fn bpp(state: u64) -> u64 {
+    return kstate.get(state, FB_OFF + S_BPP)
+}
+
+fn bytes(state: u64) -> u64 {
+    return kstate.get(state, FB_OFF + S_BYTES)
+}
+
+fn addr(state: u64) -> u64 {
+    return kstate.get(state, FB_OFF + S_ADDR)
+}
+
+fn phys(state: u64) -> u64 {
+    return kstate.get(state, FB_OFF + S_PHYS)
+}
+
+fn block(state: u64) -> u64 {
+    return kstate.get(state, FB_OFF + S_BLOCK)
+}
+
+fn offset(state: u64) -> u64 {
+    return kstate.get(state, FB_OFF + S_OFFSET)
+}
+
+fn huges(state: u64) -> u64 {
+    return kstate.get(state, FB_OFF + S_HUGES)
+}
+
+fn source(state: u64) -> u64 {
+    return kstate.get(state, FB_OFF + S_SOURCE)
+}
+
+fn back(state: u64) -> u64 {
+    return kstate.get(state, FB_OFF + S_BACK)
+}
+
+fn draw_at(state: u64) -> u64 {
+    return kstate.get(state, FB_OFF + S_DRAW)
+}
+
+fn cols(state: u64) -> u64 {
+    return kstate.get(state, FB_OFF + S_COLS)
+}
+
+fn rows(state: u64) -> u64 {
+    return kstate.get(state, FB_OFF + S_ROWS)
+}
+
+fn cx(state: u64) -> u64 {
+    return kstate.get(state, FB_OFF + S_CX)
+}
+
+fn cy(state: u64) -> u64 {
+    return kstate.get(state, FB_OFF + S_CY)
+}
+
+fn chars(state: u64) -> u64 {
+    return kstate.get(state, FB_OFF + S_CHARS)
+}
+
+fn flushes(state: u64) -> u64 {
+    return kstate.get(state, FB_OFF + S_FLUSHES)
+}
+
+fn scrolls(state: u64) -> u64 {
+    return kstate.get(state, FB_OFF + S_SCROLLS)
+}
+
+fn double_buffered(state: u64) -> bool {
+    return kstate.get(state, FB_OFF + S_BACK) != 0
+}
+
+fn uncached(state: u64) -> bool {
+    return kstate.get(state, FB_OFF + S_UNCACHED) != 0
+}
+
+fn cursor_on(state: u64) -> bool {
+    return kstate.get(state, FB_OFF + S_CURSOR) != 0
+}
+
+fn echo_on(state: u64) -> bool {
+    return kstate.get(state, FB_OFF + S_ECHO) != 0
+}
+
+// Ist die Geometrie in sich stimmig? Wird als Zusage geprueft.
+fn geometry_ok(state: u64) -> bool {
+    if !ready(state) {
+        return false
+    }
+    let w: u64 = width(state)
+    let h: u64 = height(state)
+    if w == 0 || h == 0 {
+        return false
+    }
+    if pitch(state) < w * (bpp(state) / 8) {
+        return false
+    }
+    if bytes(state) != pitch(state) * h {
+        return false
+    }
+    if cols(state) != w / font.GLYPH_W {
+        return false
+    }
+    return rows(state) == h / font.GLYPH_H
+}
+
+// ------------------------------------------------------ die Farben
+
+// Drei Anteile zu einem Bildpunktwert. Die Anteile werden MASKIERT und
+// nicht addiert: ein Aufrufer, der 0x1FF uebergibt, soll keinen Kern
+// anhalten, sondern eine Farbe bekommen.
+fn rgb(state: u64, r: u64, g: u64, b: u64) -> u64 {
+    return ((r & 0xFF) << kstate.get(state, FB_OFF + S_RSHIFT))
+        | ((g & 0xFF) << kstate.get(state, FB_OFF + S_GSHIFT))
+        | ((b & 0xFF) << kstate.get(state, FB_OFF + S_BSHIFT))
+}
+
+fn set_color(state: u64, fg: u64, bg: u64) {
+    kstate.set(state, FB_OFF + S_FG, fg)
+    kstate.set(state, FB_OFF + S_BG, bg)
+}
+
+fn set_cursor(state: u64, on: bool) {
+    kstate.set(state, FB_OFF + S_CURSOR, bool_num(on))
+}
+
+fn set_echo(state: u64, on: bool) {
+    kstate.set(state, FB_OFF + S_ECHO, bool_num(on))
+}
+
+// ------------------------------------------------- die Zeichengrundlagen
+
+// Der Versatz eines Bildpunktes. `*%` und `+%` stehen hier mit Absicht:
+// die Rechnung ist eine ADRESSRECHNUNG, kein Zaehlen, und sie soll auch
+// dann eine Adresse ergeben, wenn ein Aufrufer Unsinn uebergibt -- die
+// Grenzen prueft der Aufrufer eine Zeile darueber.
+fn spot(state: u64, x: u64, y: u64) -> u64 {
+    return y *% kstate.get(state, FB_OFF + S_PITCH) +% x *% 4
+}
+
+fn pixel(state: u64, x: u64, y: u64, color: u64) {
+    if x >= kstate.get(state, FB_OFF + S_WIDTH) {
+        return
+    }
+    if y >= kstate.get(state, FB_OFF + S_HEIGHT) {
+        return
+    }
+    __mmio_write32((kstate.get(state, FB_OFF + S_DRAW) +% spot(state, x, y))
+        as *mut u32, color as u32)
+}
+
+// Liest zurueck, was da steht -- aus dem ZIEL des Zeichnens. Damit kann
+// eine Zusage im Kernel selbst pruefen, was sie gemalt hat, ohne auf ein
+// Bildschirmfoto zu warten.
+fn get_pixel(state: u64, x: u64, y: u64) -> u64 {
+    if x >= kstate.get(state, FB_OFF + S_WIDTH) {
+        return 0
+    }
+    if y >= kstate.get(state, FB_OFF + S_HEIGHT) {
+        return 0
+    }
+    return __mmio_read32((kstate.get(state, FB_OFF + S_DRAW)
+        +% spot(state, x, y)) as *mut u32) as u64
+}
+
+// Eine Bildzeile in einem Rutsch. Der innere Kern jedes Rechtecks und
+// jedes Loeschvorgangs -- deshalb ohne Aufruf je Bildpunkt.
+fn hline(state: u64, x: u64, y: u64, n: u64, color: u64) {
+    let w: u64 = kstate.get(state, FB_OFF + S_WIDTH)
+    if y >= kstate.get(state, FB_OFF + S_HEIGHT) || x >= w {
+        return
+    }
+    var len: u64 = n
+    if x + len > w {
+        len = w - x
+    }
+    var p: u64 = kstate.get(state, FB_OFF + S_DRAW) +% spot(state, x, y)
+    let ende: u64 = p +% len *% 4
+    while p < ende {
+        __mmio_write32(p as *mut u32, color as u32)
+        p = p +% 4
+    }
+    dirty(state, y, y + 1)
+}
+
+fn fill(state: u64, x: u64, y: u64, w: u64, h: u64, color: u64) {
+    var row: u64 = 0
+    while row < h {
+        hline(state, x, y + row, w, color)
+        row = row + 1
+    }
+}
+
+// Eine Linie, als ganzzahliger Differenzanalysator.
+//
+// KEIN Bresenham mit Vorzeichenfehler, und das ist eine bewusste
+// Entscheidung: `u64` kennt keine negativen Zahlen, und Firn haelt bei
+// jedem `-`, das unter null liefe, den Kern an. Ein Bresenham-Fehlerglied
+// laeuft von -dy bis +dx, es MUESSTE also verschoben werden -- und eine
+// verschobene Vergleichskette ist genau die Sorte Code, die man beim
+// Lesen fuer richtig haelt und die dann bei der senkrechten Linie
+// anhaelt. Hier gibt der laengere der beiden Abstaende die Schrittzahl,
+// und der kuerzere wird durch eine Division darauf verteilt: exakt,
+// vorzeichenfrei, ohne aufsummierten Fehler. Eine Division je Bildpunkt
+// ist der Preis; Linien sind nicht der heisse Pfad, Zeichen sind es.
+fn line(state: u64, x0: u64, y0: u64, x1: u64, y1: u64, color: u64) {
+    var dx: u64 = 0
+    var sx: bool = true
+    if x1 >= x0 {
+        dx = x1 - x0
+    } else {
+        dx = x0 - x1
+        sx = false
+    }
+    var dy: u64 = 0
+    var sy: bool = true
+    if y1 >= y0 {
+        dy = y1 - y0
+    } else {
+        dy = y0 - y1
+        sy = false
+    }
+    var n: u64 = dx
+    if dy > n {
+        n = dy
+    }
+    if n == 0 {
+        pixel(state, x0, y0, color)
+        return
+    }
+    var i: u64 = 0
+    while i <= n {
+        let ox: u64 = (dx * i + n / 2) / n
+        let oy: u64 = (dy * i + n / 2) / n
+        var x: u64 = 0
+        if sx {
+            x = x0 + ox
+        } else {
+            if ox > x0 {
+                return
+            }
+            x = x0 - ox
+        }
+        var y: u64 = 0
+        if sy {
+            y = y0 + oy
+        } else {
+            if oy > y0 {
+                return
+            }
+            y = y0 - oy
+        }
+        pixel(state, x, y, color)
+        i = i + 1
+    }
+    dirty(state, min2(y0, y1), max2(y0, y1) + 1)
+}
+
+fn min2(a: u64, b: u64) -> u64 {
+    if a < b {
+        return a
+    }
+    return b
+}
+
+fn max2(a: u64, b: u64) -> u64 {
+    if a > b {
+        return a
+    }
+    return b
+}
+
+// Ein Bildbereich an eine andere Stelle -- das, was Rollen schnell macht.
+// Kopiert wird ZEILENWEISE zu acht Oktetten; ueberlappt der Bereich, muss
+// das Ziel OBERHALB der Quelle liegen (genau der Fall beim Rollen).
+fn blit(state: u64, sx: u64, sy: u64, dx: u64, dy: u64, w: u64, h: u64) {
+    let base: u64 = kstate.get(state, FB_OFF + S_DRAW)
+    var r: u64 = 0
+    while r < h {
+        var s: u64 = base +% spot(state, sx, sy + r)
+        var d: u64 = base +% spot(state, dx, dy + r)
+        let n: u64 = w *% 4
+        var i: u64 = 0
+        while i + 8 <= n {
+            __mmio_write64((d +% i) as *mut u64,
+                __mmio_read64((s +% i) as *mut u64))
+            i = i + 8
+        }
+        while i < n {
+            __mmio_write32((d +% i) as *mut u32,
+                __mmio_read32((s +% i) as *mut u32))
+            i = i + 4
+        }
+        r = r + 1
+    }
+}
+
+fn clear(state: u64, color: u64) {
+    let h: u64 = kstate.get(state, FB_OFF + S_HEIGHT)
+    var y: u64 = 0
+    while y < h {
+        hline(state, 0, y, kstate.get(state, FB_OFF + S_WIDTH), color)
+        y = y + 1
+    }
+    kstate.set(state, FB_OFF + S_CX, 0)
+    kstate.set(state, FB_OFF + S_CY, 0)
+    dirty_all(state)
+}
+
+// Der ganze Bildschirm gilt als geaendert. Wer eine Teilflaeche malt und
+// das nicht meldet, sieht sie nach dem naechsten `flush` nicht.
+fn dirty_all(state: u64) {
+    kstate.set(state, FB_OFF + S_DIRTY_LO, 0)
+    kstate.set(state, FB_OFF + S_DIRTY_HI, kstate.get(state, FB_OFF + S_HEIGHT))
+}
+
+fn dirty(state: u64, y0: u64, y1: u64) {
+    if kstate.get(state, FB_OFF + S_DIRTY_HI) == 0 {
+        kstate.set(state, FB_OFF + S_DIRTY_LO, y0)
+        kstate.set(state, FB_OFF + S_DIRTY_HI, y1)
+        return
+    }
+    if y0 < kstate.get(state, FB_OFF + S_DIRTY_LO) {
+        kstate.set(state, FB_OFF + S_DIRTY_LO, y0)
+    }
+    if y1 > kstate.get(state, FB_OFF + S_DIRTY_HI) {
+        kstate.set(state, FB_OFF + S_DIRTY_HI, y1)
+    }
+}
+
+// Zweitpuffer auf die Karte. Ohne Zweitpuffer ist das ein Nichts: dann
+// wird ohnehin direkt auf die Karte gezeichnet.
+fn flush(state: u64) {
+    let b: u64 = kstate.get(state, FB_OFF + S_BACK)
+    if b == 0 {
+        return
+    }
+    var lo: u64 = kstate.get(state, FB_OFF + S_DIRTY_LO)
+    var hi: u64 = kstate.get(state, FB_OFF + S_DIRTY_HI)
+    if hi <= lo {
+        return
+    }
+    let h: u64 = kstate.get(state, FB_OFF + S_HEIGHT)
+    if hi > h {
+        hi = h
+    }
+    let pt: u64 = kstate.get(state, FB_OFF + S_PITCH)
+    let von: u64 = lo *% pt
+    let n: u64 = (hi - lo) *% pt
+    let dst: u64 = kstate.get(state, FB_OFF + S_ADDR) +% von
+    let src: u64 = b +% von
+    var i: u64 = 0
+    while i + 32 <= n {
+        __mmio_write64((dst +% i) as *mut u64,
+            __mmio_read64((src +% i) as *mut u64))
+        __mmio_write64((dst +% i +% 8) as *mut u64,
+            __mmio_read64((src +% i +% 8) as *mut u64))
+        __mmio_write64((dst +% i +% 16) as *mut u64,
+            __mmio_read64((src +% i +% 16) as *mut u64))
+        __mmio_write64((dst +% i +% 24) as *mut u64,
+            __mmio_read64((src +% i +% 24) as *mut u64))
+        i = i + 32
+    }
+    while i + 8 <= n {
+        __mmio_write64((dst +% i) as *mut u64,
+            __mmio_read64((src +% i) as *mut u64))
+        i = i + 8
+    }
+    kstate.set(state, FB_OFF + S_DIRTY_LO, 0)
+    kstate.set(state, FB_OFF + S_DIRTY_HI, 0)
+    kstate.add(state, FB_OFF + S_FLUSHES, 1)
+}
+
+// -------------------------------------------------------- die Konsole
+
+fn cell_x(state: u64) -> u64 {
+    return kstate.get(state, FB_OFF + S_CX) *% font.GLYPH_W
+}
+
+fn cell_y(state: u64) -> u64 {
+    return kstate.get(state, FB_OFF + S_CY) *% font.GLYPH_H
+}
+
+// Die Textmarke: zwei Bildpunktzeilen am unteren Rand der Zelle.
+fn mark(state: u64, on: bool) {
+    if kstate.get(state, FB_OFF + S_CURSOR) == 0 {
+        return
+    }
+    var c: u64 = kstate.get(state, FB_OFF + S_BG)
+    if on {
+        c = kstate.get(state, FB_OFF + S_FG)
+    }
+    let y: u64 = cell_y(state) + font.GLYPH_H - 2
+    fill(state, cell_x(state), y, font.GLYPH_W, 2, c)
+    dirty(state, y, y + 2)
+}
+
+fn glyph(state: u64, ch: u64) {
+    let px: u64 = cell_x(state)
+    let py: u64 = cell_y(state)
+    let fg: u64 = kstate.get(state, FB_OFF + S_FG)
+    let bg: u64 = kstate.get(state, FB_OFF + S_BG)
+    let base: u64 = state + FONT_OFF
+    var r: u64 = 0
+    while r < font.GLYPH_H {
+        let bits: u64 = font.row(base, ch, r)
+        var c: u64 = 0
+        while c < font.GLYPH_W {
+            // Bit 7 ist die LINKE Spalte.
+            if ((bits >> (7 - c)) & 1) != 0 {
+                pixel(state, px + c, py + r, fg)
+            } else {
+                pixel(state, px + c, py + r, bg)
+            }
+            c = c + 1
+        }
+        r = r + 1
+    }
+    dirty(state, py, py + font.GLYPH_H)
+}
+
+// Eine Textzeile nach oben. Der obere Teil wird kopiert, die letzte
+// Zeile geloescht -- ein `blit` statt eines Neuaufbaus, und das ist der
+// Unterschied zwischen einer Konsole, die man lesen kann, und einer, die
+// bei jeder Zeile das ganze Bild neu malt.
+fn scroll(state: u64) {
+    let h: u64 = kstate.get(state, FB_OFF + S_HEIGHT)
+    let w: u64 = kstate.get(state, FB_OFF + S_WIDTH)
+    let zh: u64 = font.GLYPH_H
+    if h <= zh {
+        clear(state, kstate.get(state, FB_OFF + S_BG))
+        return
+    }
+    let rest: u64 = kstate.get(state, FB_OFF + S_ROWS) *% zh - zh
+    blit(state, 0, zh, 0, 0, w, rest)
+    fill(state, 0, rest, w, h - rest, kstate.get(state, FB_OFF + S_BG))
+    dirty_all(state)
+    kstate.add(state, FB_OFF + S_SCROLLS, 1)
+}
+
+fn nl(state: u64) {
+    kstate.set(state, FB_OFF + S_CX, 0)
+    let y: u64 = kstate.get(state, FB_OFF + S_CY) + 1
+    if y >= kstate.get(state, FB_OFF + S_ROWS) {
+        scroll(state)
+        // Nach dem Rollen steht die Marke in der LETZTEN Zeile, nicht
+        // dahinter.
+        kstate.set(state, FB_OFF + S_CY, kstate.get(state, FB_OFF + S_ROWS) - 1)
+    } else {
+        kstate.set(state, FB_OFF + S_CY, y)
+    }
+}
+
+fn advance(state: u64) {
+    let x: u64 = kstate.get(state, FB_OFF + S_CX) + 1
+    if x >= kstate.get(state, FB_OFF + S_COLS) {
+        nl(state)
+    } else {
+        kstate.set(state, FB_OFF + S_CX, x)
+    }
+}
+
+// Ein Oktett auf den Bildschirm. Zeilenumbruch, Wagenruecklauf,
+// Tabulator und Ruecktaste werden verstanden; alles ausserhalb von
+// 0x20..0x7E zeichnet der Zeichensatz als Fragezeichen.
+fn putc(state: u64, c: u64) {
+    if kstate.get(state, FB_OFF + S_READY) == 0 {
+        return
+    }
+    mark(state, false)
+    if c == 10 {
+        nl(state)
+        mark(state, true)
+        // Am Zeilenende wird sichtbar gemacht, was da ist. Ohne diesen
+        // Punkt zeigt ein Bildschirm mit Zweitpuffer nichts, bis jemand
+        // von aussen `flush` ruft.
+        flush(state)
+        return
+    }
+    if c == 13 {
+        kstate.set(state, FB_OFF + S_CX, 0)
+        mark(state, true)
+        return
+    }
+    if c == 8 {
+        let x: u64 = kstate.get(state, FB_OFF + S_CX)
+        if x > 0 {
+            kstate.set(state, FB_OFF + S_CX, x - 1)
+            glyph(state, 32)
+        }
+        mark(state, true)
+        return
+    }
+    if c == 9 {
+        // Wie viele Leerzeichen bis zur naechsten Achterstelle. Die Zahl
+        // wird VORHER bestimmt: `advance` kann eine neue Zeile beginnen,
+        // und eine Schleife, die dann noch die Spalte abfragt, faengt auf
+        // der neuen Zeile von vorn an.
+        let x: u64 = kstate.get(state, FB_OFF + S_CX)
+        var n: u64 = 8 - (x & 7)
+        while n > 0 {
+            glyph(state, 32)
+            advance(state)
+            n = n - 1
+        }
+        mark(state, true)
+        return
+    }
+    glyph(state, c)
+    advance(state)
+    kstate.add(state, FB_OFF + S_CHARS, 1)
+    mark(state, true)
+}
+
+fn puts(state: u64, p: u64) {
+    var i: u64 = 0
+    while true {
+        let c: u64 = kstate.get8(p + i)
+        if c == 0 {
+            return
+        }
+        putc(state, c)
+        i = i + 1
+    }
+}
+
+fn text(state: u64, p: u64, n: u64) {
+    var i: u64 = 0
+    while i < n {
+        putc(state, kstate.get8(p + i))
+        i = i + 1
+    }
+}
+
+fn home(state: u64) {
+    kstate.set(state, FB_OFF + S_CX, 0)
+    kstate.set(state, FB_OFF + S_CY, 0)
+}
+
+// ------------------------------------------------------- der Spiegel
+
+// Die Adresse des Kernel-Datenbereichs, ohne sie uebergeben zu bekommen.
+//
+// `serial.put` hat kein `state` -- es wird an rund tausend Stellen
+// gerufen, von `kmain` bis in den Ausnahmebericht hinein, und keine
+// dieser Stellen soll sich fuer eine Konsole aendern. `kdata` ist aber
+// ein Symbol des Binders (`kernel/boot.s`, `.globl kdata`), und genau
+// dieselbe Adresse bekommt `kernel_main` in rdx. Ein `lea` holt sie sich
+// also selbst; der Binder loest den Namen gegen boot.o auf.
+fn kdata() -> u64 {
+    return asm("lea rax, [rip + kdata]", out("rax"))
+}
+
+// Wird von `serial.put` fuer JEDES Oktett gerufen. Solange `S_ECHO` null
+// ist -- und das ist es, solange niemand `gfx` auf die Kommandozeile
+// geschrieben hat -- kostet das ein `lea` und einen Speicherzugriff.
+fn echo(c: u8) {
+    let state: u64 = kdata()
+    if kstate.get(state, FB_OFF + S_ECHO) == 0 {
+        return
+    }
+    putc(state, c as u64)
+}
