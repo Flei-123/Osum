@@ -175,7 +175,28 @@ denselben Gegenproben:
 `/dev/fb` aus Ring 3 unverändert 11 von 11, die vier Farbbänder
 bildpunktgenau ab y=520.
 
-## 6. Was offen bleibt
+## 6. Zwei Dinge, die beim Nachziehen mit auffielen
+
+Beide standen schon auf `main`, bevor diese Runde anfing, und beide sind
+Verschmelzungsreste — kein Bildcode.
+
+**`tools/net/run.sh` meldete zwei Fehler**, und zwar `k0.o: undefined
+symbols: kdata` und dasselbe für `k1.o`. Der Grund ist Runde K7: der
+Bildschirmspiegel hängt unter `serial.put`, und damit `fb.fi` weder
+`serial` noch `mem` einbinden muss (das wäre ein Kreis im
+Abhängigkeitsgraphen), holt sich `fb.kdata()` die Adresse des
+Datenbereichs über das Bindersymbol `kdata` aus `boot.s`. K7 hat dafür
+`tools/kernel/run.sh` und `tools/pci/run.sh` angepasst; der Netzläufer
+entstand **parallel** auf dem K8-Zweig und hat den zweiten erlaubten
+Namen beim Verschmelzen nicht mitbekommen. Jetzt steht er dort, mit
+Begründung.
+
+**In `test.sh` hießen drei Abschnitte „12."** — K7, K9 und K8 haben sich
+beim Anhängen jede dieselbe Nummer genommen, und im Kopfkommentar fehlte
+der Grafikabschnitt ganz. Jetzt 1..14 in der Reihenfolge, in der sie
+laufen.
+
+## 7. Was offen bleibt
 
 * **Die Karte ist eine Liste von Hand.** `tools/kernel/karte.py` kennt
   38 Bereiche, weil sie dort eingetragen sind. Der Vollständigkeitstest
