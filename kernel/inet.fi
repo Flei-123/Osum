@@ -67,12 +67,14 @@ import net.stack
 export {
     init, ready, pump, netd_body, wake, configure, us, set_task,
     ip, mask, gw, mac_at, stat, pumps, frames_in, frames_out,
+    bounce, saddr,
     tcp_stat, task_slot, print_state,
     sock_new, sock_free, sock_kind, sock_handle,
     sock_bind, sock_listen, sock_accept, sock_connect,
     sock_send, sock_recv, sock_sendto, sock_recvfrom,
     sock_close, sock_shutdown, sock_state, sock_peer, sock_local,
     sock_readable, sock_writable, sock_error,
+    sock_nonblock, sock_set_nonblock,
     SK_FREE, SK_TCP, SK_UDP, SK_ICMP, SOCK_MAX,
     SF_LISTEN, SF_NONBLOCK, SF_CONNECTED
 }
@@ -100,6 +102,8 @@ const S_ECHOES: u64 = 0x378
 const S_SEQ: u64 = 0x380
 const S_TSCDIV: u64 = 0x388
 const S_SOCKS: u64 = 0x390
+const S_BOUNCE: u64 = 0x398
+const S_SADDR: u64 = 0x3F0
 
 // The socket table, the shadow address cache and the queue of ICMP
 // answers -- all three in the same page-sized area, all three fixed.
@@ -184,6 +188,14 @@ fn frames_out(state: u64) -> u64 {
     return kstate.get(state, sc(S_OUT))
 }
 
+fn bounce(state: u64) -> u64 {
+    return kstate.get(state, sc(S_BOUNCE))
+}
+
+fn saddr(state: u64) -> u64 {
+    return kstate.get(state, sc(S_SADDR))
+}
+
 fn task_slot(state: u64) -> u64 {
     return kstate.get(state, sc(S_TASK))
 }
@@ -260,16 +272,30 @@ fn init(state: u64, a: u64, b: u64, c: u64, d: u64, prefix: u64,
     }
     let pages: u64 = (stack.net_size() as u64 + mem.FRAME_SIZE - 1)
         / mem.FRAME_SIZE
-    // One page more than the struct: `net_output` writes a whole frame
-    // somewhere, and it may not be a buffer the card is reading.
-    let base: u64 = mem.frame_run(state, pages + 1)
+    // Three pages more than the struct, and each of them has one job:
+    //
+    //   +0  what `net_output` writes a frame into. Touched by the
+    //       network task only, and only while it holds the lock.
+    //   +1  where a system call puts what it copied out of ring 3, and
+    //       what it will copy back into it. The kernel never hands an
+    //       address of a process to the stack.
+    //   +2  the two `sockaddr_in` of a call, in and out.
+    //
+    // The bounce page is ONE page for the whole system, the same way
+    // `kstate.BLOCK_OFF` has been one page for every file operation
+    // since round 62. Two processes in `sendto` at the same instant
+    // would share it; that is the shape this kernel has, and it is
+    // written down here rather than left to be discovered.
+    let base: u64 = mem.frame_run(state, pages + 3)
     if base == 0 {
         return false
     }
     kstate.set(state, sc(S_STACK), base)
     kstate.set(state, sc(S_SCRATCH), base + pages * mem.FRAME_SIZE)
+    kstate.set(state, sc(S_BOUNCE), base + (pages + 1) * mem.FRAME_SIZE)
+    kstate.set(state, sc(S_SADDR), base + (pages + 2) * mem.FRAME_SIZE)
     var z: u64 = 0
-    while z < (pages + 1) * mem.FRAME_SIZE {
+    while z < (pages + 3) * mem.FRAME_SIZE {
         __mmio_write64((base + z) as *mut u64, 0)
         z = z + 8
     }
@@ -637,6 +663,21 @@ fn sock_handle(state: u64, i: u64) -> u64 {
 
 fn sock_flags(state: u64, i: u64) -> u64 {
     return kstate.get(state, so_at(i) + SO_FLAGS)
+}
+
+fn sock_nonblock(state: u64, i: u64) -> bool {
+    if i >= SOCK_MAX {
+        return false
+    }
+    return (kstate.get(state, so_at(i) + SO_FLAGS) & SF_NONBLOCK) != 0
+}
+
+fn sock_set_nonblock(state: u64, i: u64) {
+    if i >= SOCK_MAX {
+        return
+    }
+    kstate.set(state, so_at(i) + SO_FLAGS,
+        kstate.get(state, so_at(i) + SO_FLAGS) | SF_NONBLOCK)
 }
 
 fn sock_new(state: u64, kind: u64) -> u64 {
