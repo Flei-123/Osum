@@ -4,8 +4,9 @@ Ein Betriebssystemkern fuer x86-64, geschrieben in **Firn**. Er bootet
 ueber Multiboot, verwaltet Speicher und Adressraeume, plant Prozesse,
 liest seine eigene Hardware ueber PCI, spricht NVMe ueber DMA, laeuft auf
 mehreren Prozessoren, bietet eine POSIX-Schicht mit den Systemaufruf-
-nummern von Linux x86-64 und startet ein Userland aus eigenstaendigen
-ELF-Dateien von der Platte — eine Shell und dreiundzwanzig Werkzeuge.
+nummern von Linux x86-64, startet ein Userland aus eigenstaendigen
+ELF-Dateien von der Platte — eine Shell und dreiundzwanzig Werkzeuge —
+und **zeigt das alles auf einem Bildschirm**.
 
     osum$ cat /d/nums.txt | grep 1 | wc -l
     4
@@ -18,14 +19,15 @@ Der Umfang, gezaehlt:
 
 | Teil | Zeilen |
 |---|---:|
-| `kernel/*.fi` — der Kern | 14 519 |
+| `kernel/*.fi` — der Kern | 18 032 |
 | `kernel/user/*.fi` — Shell, Werkzeuge, ulib | 3 592 |
-| `kernel/*.s`, `kernel/user/crt.s` — Assembler | 1 181 |
+| `kernel/*.s`, `kernel/user/crt.s` — Assembler | 1 204 |
 | `lib/libc/*.fi` — die libc aus Runde K4 | 1 234 |
-| `tools/` — die Testlaeufer | 4 421 |
+| `tools/` — die Testlaeufer | 5 770 |
 
-Dazu aus der Capability-Runde: `kernel/cap.fi` (die Handle-Tabelle) und
-die Testlaeufer `tools/caps/` und `tools/boot/`.
+Zuletzt dazugekommen: `kernel/cap.fi` (die Handle-Tabelle aus OrientOS'
+nativer ABI) sowie `kernel/fb.fi` und `kernel/font.fi` — der Bildschirm
+der Runde K7.
 
 Osum ist **kein Spielzeug-Bootloader und kein fertiges System.** Was er
 kann, steht unten; was er nicht kann, steht ebenfalls unten, und das ist
@@ -66,6 +68,20 @@ ELF64-Dateien ohne libc-Anbindung an den Kernel.
 
 **Hardware.** PCI-Durchmusterung ueber den Konfigurationsraum, lokaler
 APIC und I/O-APIC, NVMe ueber DMA mit eigener Warteschlange.
+
+**Bildschirm.** Ein linearer Rahmenpuffer, entgegengenommen vom Lader
+(Multiboot, Flag-Bit 12) oder von der Karte selbst eingestellt
+(Bochs-VBE ueber PCI — QEMUs `-kernel` hat keinen Videoteil). Darauf eine
+Textkonsole von 100 x 37 Zeichen mit eigenem 8x16-Zeichensatz, Rollen,
+Farben und Textmarke, dazu Bildpunkt, Linie, Rechteck, Bildbereich und
+ein Zweitpuffer mit bereichsweiser Uebertragung. **Die serielle Konsole
+bleibt parallel bestehen** — `serial.put` spiegelt jedes Oktett, also
+zeigen beide dasselbe, von den Bootmeldungen bis zur Shell. Und
+**/dev/fb**: ein Programm in Ring 3 oeffnet es, schreibt hinein, liest
+zurueck und bildet es sich mit `mmap` als 2-MiB-Kachel in den eigenen
+Adressraum ab — mit den ueblichen Rechtepruefungen. Alles davon haengt an
+dem Wort `gfx` auf der Kommandozeile; ohne es aendert sich am Kernel
+nichts. Gemessen an Bildschirmfotos (`docs/ROUNDK7.md`).
 
 **NVMe-Durchsatz, gemessen.** In QEMU/TCG bei 2,19 GHz, 128 KiB am
 Stueck (`tools/pci/run.sh` reproduziert es):
@@ -127,8 +143,11 @@ Zeileneditor, `cd`, `exit` — und dreiundzwanzig Werkzeuge: `cat`, `cp`,
 
 ## Was ihm fehlt
 
-* **Keine Grafik.** Kein Framebuffer, kein VGA-Textmodus als Konsole, kein
-  Fenstersystem. Die Konsole ist die serielle Schnittstelle.
+* **Kein Fenstersystem.** Es gibt einen Rahmenpuffer, eine Textkonsole
+  und `/dev/fb` (Runde K7) — aber nur EINE Flaeche. Konsole und Programm
+  uebermalen sich, wenn sie dieselben Bildzeilen nehmen. Es gibt auch
+  kein `ioctl`: ein Programm erfaehrt die Groesse des Bildes ueber
+  `lseek(SEEK_END)` und die Breite gar nicht.
 * **Kein Netz.** Kein Treiber fuer eine Netzkarte. Ein TCP/IP-Stack in
   Firn existiert (Runde K3, `docs/OSUM-K3.md`), er liegt aber im
   Firn-Repository unter `lib/net/` und ist nie an diesen Kernel
@@ -158,7 +177,7 @@ cd osum
 # einmalig: den festgenagelten Firn-Uebersetzer bauen
 FIRN_REPO=/pfad/zu/firn ./vendor/firn/hole-firnc.sh
 
-# die ganze Abnahme (neun Abschnitte, QEMU pro Fall)
+# die ganze Abnahme (zwoelf Abschnitte, QEMU pro Fall)
 ./test.sh
 ```
 
@@ -175,6 +194,15 @@ bash tools/pci/run.sh         # PCI, APIC, NVMe (K2)
 bash tools/posix/run.sh       # POSIX-Schicht und libc (K4)
 bash tools/smp/run.sh         # vier Prozessoren (K5)
 bash tools/userland/run.sh    # Shell und Werkzeuge (K6)
+bash tools/gfx/run.sh         # der Bildschirm (K7)
+```
+
+Den Kernel mit Bildschirm starten und selbst hinsehen — `-vga std` ist
+die Karte, die `kernel/fb.fi` bedient:
+
+```sh
+qemu-system-x86_64 -kernel /tmp/k.mb -m 256 -append "osum gfx" \
+   -serial stdio -vga std
 ```
 
 Ein Abbild von Hand bauen und starten (was `tools/userland/run.sh`
@@ -271,6 +299,7 @@ nachtraeglich umgeschrieben.
 | `docs/ROUNDK4.md` | die POSIX-Schicht und die libc |
 | `docs/ROUNDK5.md` | vier Prozessoren und die Sperre |
 | `docs/ROUNDK6.md` | das Userland: Shell und Werkzeuge |
+| `docs/ROUNDK7.md` | der Bildschirm: Rahmenpuffer, Textkonsole, /dev/fb |
 
 `ENTFERNEN-AUS-FIRN.md` beschreibt, was im Firn-Repository geloescht
 werden muss, damit dort nichts doppelt liegt. **Ausgefuehrt ist das
