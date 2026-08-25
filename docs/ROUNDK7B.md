@@ -191,6 +191,18 @@ entstand **parallel** auf dem K8-Zweig und hat den zweiten erlaubten
 Namen beim Verschmelzen nicht mitbekommen. Jetzt steht er dort, mit
 Begründung.
 
+**Der Netzabschnitt ist an einer Stelle wetterfühlig**, und das gehört
+dazugesagt, weil es beim Abnehmen auffällt. `tc netem: one frame in five
+thrown away` verlangt, dass alle 262 144 Oktette ankommen; unter Last der
+Wirtsmaschine läuft der Fall in die Dreißig-Sekunden-Sperre von
+`netsvc.connect_service` und bricht mit ~90 000 bis ~200 000 Oktetten ab.
+Gemessen: auf diesem Zweig einmal grün (47 KiB/s), zweimal rot (1 und
+3 KiB/s), dann wieder grün (29 KiB/s); auf `main` unter denselben
+Bedingungen grün (9 KiB/s). Der Unterschied zwischen den Zweigen sind
+**zwei Adressen in `fb.fi`** und zwei ungenutzte Konstanten — an den
+Netzpfad rührt keine Zeile. `docs/ROUNDK8.md` nennt die Sperre selbst als
+Grenze des Läufers, nicht des Stacks. Das bleibt offen und gehört K8.
+
 **In `test.sh` hießen drei Abschnitte „12."** — K7, K9 und K8 haben sich
 beim Anhängen jede dieselbe Nummer genommen, und im Kopfkommentar fehlte
 der Grafikabschnitt ganz. Jetzt 1..14 in der Reihenfolge, in der sie
