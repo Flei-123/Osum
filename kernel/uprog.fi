@@ -49,6 +49,9 @@ const SYS_EXIT: u64 = 60
 // The two Osum has of its own: a program that travels in the kernel image
 // has no file, so no `execve` can start it.
 const SYS_SPAWN: u64 = 1000
+// ROUNDE K7: die beiden, die /dev/fb braucht.
+const SYS_LSEEK: u64 = 8
+const SYS_MMAP: u64 = 9
 
 // Die native ABI (`kernel/sys.fi`, `kernel/cap.fi`) -- portiert aus
 // OrientOS' `libs/osum-abi-native`. Nummern 2000 + n, Fehler NEGATIV und
@@ -75,8 +78,22 @@ const R_TRANSFER: u64 = 16
 const R_INSPECT: u64 = 32
 const R_ALL: u64 = 1023
 
+const O_RDONLY: u64 = 0
 const O_WRONLY: u64 = 1
+const O_RDWR: u64 = 2
 const O_CREAT: u64 = 64
+// ROUNDE K7
+const PROT_READ: u64 = 1
+const PROT_WRITE: u64 = 2
+const MAP_SHARED: u64 = 1
+const MAP_ANONYMOUS: u64 = 32
+const SEEK_SET: u64 = 0
+const SEEK_END: u64 = 2
+const E_BADF: u64 = 9
+const E_ACCES: u64 = 13
+const E_FAULT: u64 = 14
+const E_NODEV: u64 = 19
+const E_INVAL: u64 = 22
 const O_DIRECTORY: u64 = 65536
 
 const DT_DIR: u64 = 4
@@ -101,6 +118,7 @@ const P_STEAL: u64 = 9
 const P_FORK: u64 = 10
 const P_FORKCHILD: u64 = 11
 const P_CAPS: u64 = 12
+const P_FB: u64 = 13
 
 // ------------------------------------------------------ the system call
 
@@ -111,6 +129,17 @@ fn u_sys(number: u64, a0: u64, a1: u64, a2: u64) -> u64 {
     return asm("syscall", out("rax"), in("rax") number, in("rdi") a0,
         in("rsi") a1, in("rdx") a2, clobber("rcx"), clobber("r11"),
         clobber("memory"))
+}
+
+// ROUNDE K7: derselbe Aufruf mit sechs Argumenten. `mmap` braucht sie,
+// und die Reihenfolge ist die von Linux: rdi, rsi, rdx, r10, r8, r9 --
+// r10 und nicht rcx, weil `syscall` rcx fuer die Ruecksprungadresse
+// braucht.
+fn u_sys6(number: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64,
+    a5: u64) -> u64 {
+    return asm("syscall", out("rax"), in("rax") number, in("rdi") a0,
+        in("rsi") a1, in("rdx") a2, in("r10") a3, in("r8") a4,
+        in("r9") a5, clobber("rcx"), clobber("r11"), clobber("memory"))
 }
 
 // ------------------------------------------------------------- output
@@ -232,6 +261,9 @@ fn u_enter(packed: u64) {
     }
     if prog == P_CAPS {
         u_caps(arg)
+    }
+    if prog == P_FB {
+        u_fb(arg)
     }
     u_sys(SYS_EXIT, 0, 0, 0)
     while true {
@@ -830,4 +862,188 @@ fn u_caps(arg: u64) {
     c_num(h, n)
     c_say(h, (&s_pr[0]) as u64)
     u_sys(SYS_EXIT, n - ok, 0, 0)
+}
+
+// ------------------------------------------- ROUNDE K7: /dev/fb in Ring 3
+//
+// DAS PROGRAMM, DAS DEN BILDSCHIRM BESPIELT, OHNE KERNEL ZU SEIN.
+//
+// Es hat keine Rechte ausser denen, die jeder Prozess hat: kein
+// Torbefehl, kein `cr3`, keine physische Adresse. Was es hat, ist ein
+// Deskriptor auf /dev/fb -- und was es damit darf, entscheidet der
+// Kernel bei jedem einzelnen Aufruf.
+//
+// Es meldet ZEHN Zusagen, und die Haelfte davon ist eine Ablehnung:
+// eine Schnittstelle, die nur den richtigen Fall kann, ist keine.
+//
+//   1. `open("/dev/fb", O_RDWR)` gibt einen Deskriptor.
+//   2. `lseek(fd, 0, SEEK_END)` gibt die Groesse des Bildes, und die ist
+//      Zeilenlaenge mal Hoehe.
+//   3. `write` an einer Stelle schreibt so viele Oktette, wie es sollte.
+//   4. `read` von derselben Stelle gibt zurueck, was geschrieben wurde.
+//   5. `write` HINTER dem Ende gibt 0 -- wie am Ende einer Datei.
+//   6. `write` aus einer Adresse, die dem Programm nicht gehoert, gibt
+//      -EFAULT.
+//   7. `mmap` gibt eine Adresse, und die liegt dort, wo der Kernel sagt.
+//   8. Durch die Abbildung geschrieben ist durch `read` gelesen -- es
+//      ist derselbe Speicher.
+//   9. Ein NUR LESBARER Deskriptor darf nicht schreiben (-EBADF) und
+//      nicht schreibbar abbilden (-EACCES).
+//  10. `mmap` ohne MAP_ANONYMOUS auf einen Deskriptor, der KEIN
+//      Rahmenpuffer ist, gibt -ENODEV.
+//
+// `arg` traegt die Geometrie: Breite in den oberen 16 Bit, Hoehe in den
+// unteren. Ein Programm in Ring 3 kann sie sonst nirgends herbekommen,
+// und ein `ioctl` hat dieser Kernel nicht.
+fn u_fb(arg: u64) {
+    var s_name: [u8; 8] = "/dev/fb\0"
+    var s_open: [u8; 17] = "fbuser: open fd=\0"
+    var s_size: [u8; 15] = "fbuser: bytes=\0"
+    var s_map: [u8; 15] = "fbuser: map=0x\0"
+    var s_ok: [u8; 16] = "fbuser: passed \0"
+    var s_of: [u8; 6] = " / 10\0"
+    var nl: [u8; 2] = "\n\0"
+    var muster: [u8; 32] = [0 as u8; 32]
+
+    let breite: u64 = arg >> 16
+    let hoehe: u64 = arg & 0xFFFF
+    var gut: u64 = 0
+
+    // 1.
+    let fd: u64 = u_sys(SYS_OPEN, (&s_name[0]) as u64, O_RDWR, 0)
+    u_say_line((&s_open[0]) as u64, fd)
+    if (fd >> 63) != 0 {
+        u_say((&s_ok[0]) as u64)
+        u_say_num(0)
+        u_say((&s_of[0]) as u64)
+        u_say((&nl[0]) as u64)
+        return
+    }
+    gut = gut + 1
+
+    // 2.
+    let ganz: u64 = u_sys(SYS_LSEEK, fd, 0, SEEK_END)
+    u_say_line((&s_size[0]) as u64, ganz)
+    if ganz >= breite * hoehe * 4 && (ganz >> 63) == 0 {
+        gut = gut + 1
+    }
+
+    // 3. Zweiunddreissig Oktette -- acht Bildpunkte -- in die
+    //    ZWEITLETZTE Bildzeile. Weit weg von allem, was die Konsole
+    //    beschreibt.
+    var i: u64 = 0
+    while i < 32 {
+        muster[i as usize] = (0x41 + i % 26) as u8
+        i = i + 1
+    }
+    let stelle: u64 = (hoehe - 2) * breite * 4
+    u_sys(SYS_LSEEK, fd, stelle, SEEK_SET)
+    let n: u64 = u_sys(SYS_WRITE, fd, (&muster[0]) as u64, 32)
+    if n == 32 {
+        gut = gut + 1
+    }
+
+    // 4.
+    var zurueck: [u8; 32] = [0 as u8; 32]
+    u_sys(SYS_LSEEK, fd, stelle, SEEK_SET)
+    let m: u64 = u_sys(SYS_READ, fd, (&zurueck[0]) as u64, 32)
+    var gleich: bool = m == 32
+    i = 0
+    while i < 32 {
+        if zurueck[i as usize] != muster[i as usize] {
+            gleich = false
+        }
+        i = i + 1
+    }
+    if gleich {
+        gut = gut + 1
+    }
+
+    // 5. hinter dem Ende
+    u_sys(SYS_LSEEK, fd, ganz, SEEK_SET)
+    if u_sys(SYS_WRITE, fd, (&muster[0]) as u64, 32) == 0 {
+        gut = gut + 1
+    }
+
+    // 6. eine Adresse, die dem Programm nicht gehoert
+    u_sys(SYS_LSEEK, fd, 0, SEEK_SET)
+    if u_sys(SYS_WRITE, fd, 0x1000, 32) == (0 -% E_FAULT) {
+        gut = gut + 1
+    }
+
+    // 7. die Abbildung
+    let bild: u64 = u_sys6(SYS_MMAP, 0, ganz, PROT_READ | PROT_WRITE,
+        MAP_SHARED, fd, 0)
+    u_say((&s_map[0]) as u64)
+    u_say_num(bild)
+    u_say((&nl[0]) as u64)
+    if (bild >> 63) == 0 && bild != 0 {
+        gut = gut + 1
+
+        // 8. Durch die Abbildung malen: ein Band ueber die UNTEREN
+        //    achtzig Bildzeilen, damit die Konsole darueber nicht
+        //    hineinschreibt. Vier Streifen in reinen Farben -- ein
+        //    Bildschirmfoto kann sie nachrechnen.
+        var y: u64 = hoehe - 80
+        while y < hoehe {
+            var x: u64 = 0
+            while x < breite {
+                var farbe: u64 = 0x00FF0000 // rot
+                if x >= breite / 4 {
+                    farbe = 0x0000FF00 // gruen
+                }
+                if x >= breite / 2 {
+                    farbe = 0x000000FF // blau
+                }
+                if x >= breite * 3 / 4 {
+                    farbe = 0x00FFFF00 // gelb
+                }
+                *((bild + y *% breite *% 4 +% x *% 4) as *mut u32) =
+                    farbe as u32
+                x = x + 1
+            }
+            y = y + 1
+        }
+        // Und jetzt der Beweis, dass es DERSELBE Speicher ist: was die
+        // Abbildung geschrieben hat, muss `read` auf dem Deskriptor
+        // wiederfinden.
+        let probe: u64 = (hoehe - 40) * breite * 4
+        u_sys(SYS_LSEEK, fd, probe, SEEK_SET)
+        var vier: [u8; 4] = [0 as u8; 4]
+        if u_sys(SYS_READ, fd, (&vier[0]) as u64, 4) == 4 {
+            // Rot, kleinstwertiges Oktett zuerst: 00 00 FF 00
+            if vier[2 as usize] == 0xFF as u8 && vier[1 as usize] == 0 as u8 {
+                gut = gut + 1
+            }
+        }
+    }
+
+    // 9. ein nur lesbarer Deskriptor
+    let ro: u64 = u_sys(SYS_OPEN, (&s_name[0]) as u64, O_RDONLY, 0)
+    if (ro >> 63) == 0 {
+        var beides: u64 = 0
+        if u_sys(SYS_WRITE, ro, (&muster[0]) as u64, 4) == (0 -% E_BADF) {
+            beides = beides + 1
+        }
+        if u_sys6(SYS_MMAP, 0, ganz, PROT_READ | PROT_WRITE, MAP_SHARED,
+            ro, 0) == (0 -% E_ACCES) {
+            beides = beides + 1
+        }
+        if beides == 2 {
+            gut = gut + 1
+        }
+        u_sys(SYS_CLOSE, ro, 0, 0)
+    }
+
+    // 10. ein Deskriptor, der kein Rahmenpuffer ist
+    if u_sys6(SYS_MMAP, 0, 4096, PROT_READ, MAP_SHARED, OUT, 0)
+        == (0 -% E_NODEV) {
+        gut = gut + 1
+    }
+
+    u_sys(SYS_CLOSE, fd, 0, 0)
+    u_say((&s_ok[0]) as u64)
+    u_say_num(gut)
+    u_say((&s_of[0]) as u64)
+    u_say((&nl[0]) as u64)
 }

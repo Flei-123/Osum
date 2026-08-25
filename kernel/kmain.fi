@@ -83,6 +83,7 @@ const P_SHELL: u64 = 8
 const P_STEAL: u64 = 9
 const P_FORK: u64 = 10
 const P_CAPS: u64 = 12
+const P_FB: u64 = 13
 
 const DISK_FRAMES: u64 = 256 // 1 MiB of RAM disk
 
@@ -480,6 +481,34 @@ fn gfx_bench(state: u64, back: u64) {
     serial.nl()
 }
 
+// DAS PROGRAMM IN RING 3, DAS DEN BILDSCHIRM BESPIELT (`uprog.u_fb`).
+//
+// Der Spiegel wird VORHER abgeschaltet und die Flaeche geleert, und das
+// ist keine Kosmetik: solange die Konsole mitschreibt, rollt jede weitere
+// Zeile das Bild nach oben und uebermalt, was das Programm gezeichnet
+// hat. Danach gehoert die Flaeche dem Programm allein -- und das
+// Bildschirmfoto zeigt, was RING 3 dort hingelegt hat, nicht der Kernel.
+fn gfx_user(state: u64) {
+    var s_run: [u8; 30] = "fb: ring 3 paints, mirror off\0"
+    var s_exit: [u8; 18] = "fb: ring 3 exit=\0\0"
+
+    serial.puts((&s_run[0]) as u64)
+    serial.nl()
+    fb.set_echo(state, false)
+    fb.set_cursor(state, false)
+    fb.clear(state, 0)
+    fb.dirty_all(state)
+    fb.flush(state)
+    // Die Geometrie in einem 32-Bit-Argument: Breite oben, Hoehe unten.
+    // Ein Programm in Ring 3 kann sie sonst nirgends herbekommen.
+    let arg: u64 = (fb.width(state) << 16) | fb.height(state)
+    let t: u64 = proc.create(state, P_FB, arg, 2)
+    let e: u64 = wait_for(state, t)
+    serial.puts((&s_exit[0]) as u64)
+    serial.dec(e)
+    serial.nl()
+}
+
 // Das Pruefbild und das Stillhalten. Beides nur auf ausdrueckliches Wort:
 // `fbtest` malt, `fbhold` wartet, damit der Testlaeufer draussen
 // `screendump` rufen kann, waehrend das Bild noch steht.
@@ -491,6 +520,9 @@ fn gfx_hold(state: u64) {
 
     if !fb.ready(state) {
         return
+    }
+    if fb.want(state, fb.M_USER) {
+        gfx_user(state)
     }
     if fb.want(state, fb.M_PATTERN) {
         fb.set_cursor(state, false)
