@@ -9,6 +9,15 @@ niemand. `KERNELWECHSEL.md` in OrientOS führte das als offenen Punkt 4.3.
 
 Diese Runde benutzt ihn.
 
+> **Nachtrag, `docs/ROUNDK7B.md`.** Nach dem Verschmelzen mit K9 und K8
+> waren sieben Zusagen dieser Runde rot — alle, in denen Text vorkommt.
+> Ursache war **nicht** der Bildcode, sondern eine Adresse: `FB_OFF` und
+> `FONT_OFF` standen auf 0x2F000, und Runde K9 legte die Signaltabelle
+> auf dieselbe Seite. Der Signalblock der Aufgabe 1 löschte die Glyphen
+> `@` bis `o`. Der Bereich liegt jetzt auf **0x3C000**, steht in der
+> Karte in `kstate.fi`, und `tools/kernel/karte.py` rechnet bei jedem
+> Testlauf 38 Bereiche gegeneinander.
+
 Abnahme: `bash tools/gfx/run.sh` (Abschnitt 12 von `./test.sh`),
 **74 Zusagen**. `./test.sh` insgesamt: **12 Abschnitte, 938 Zusagen,
 0 Fehler** — die 175 Zusagen des Kernabschnitts sind unverändert.
