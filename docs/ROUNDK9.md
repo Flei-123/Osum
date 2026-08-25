@@ -17,7 +17,7 @@ spaeter TLS.
 Diese Runde baut die vier. Was gemessen wurde, steht unten mit Zahlen;
 was nicht fertig ist, steht am Ende, mit Namen.
 
-    ./test.sh          zwoelf Abschnitte, 282 Zusagen, 0 Fehler
+    ./test.sh          ALLE 12 ABSCHNITTE BESTANDEN, 971 Zusagen, 0 Fehler
     tools/unix/run.sh  107 Zusagen dieser Runde
 
 ---
@@ -461,17 +461,19 @@ Ehrlich und mit Namen:
 ## 10. Die Zahlen des Abnahmelaufs
 
     1.  der festgenagelte Uebersetzer                     5
-    2.  freistehend uebersetzen                          14
-    3.  std.core im Kernel                               20
+    2.  freistehend uebersetzen                          41
+    3.  std.core im Kernel                               46
     4.  der Kern laeuft                                 175
     5.  ein Programm von der Platte                     130
-    6.  PCI, APIC, NVMe                                  56
+    6.  PCI, APIC, NVMe                                  97
     7.  die POSIX-Schicht und die libc                  134
-    8.  vier Prozessoren                                 43
+    8.  vier Prozessoren                                 58
     9.  ein Userland                                     91
-    10. Handles statt Umgebungsautoritaet                26
-    11. Multiboot-Kopf und UEFI-Pfad                     14
+    10. Handles statt Umgebungsautoritaet                67
+    11. Multiboot-Kopf und UEFI-Pfad                     20
     12. was jedes Unix-Programm voraussetzt (K9)        107
+    ---------------------------------------------------------
+                                                        971
 
 Die Abschnitte 1 bis 11 sind unveraendert gruen. Zwei Erwartungen darin
 mussten mitziehen, und beide sind Zaehlungen und keine Zusagen: die Zahl
