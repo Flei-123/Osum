@@ -35,10 +35,10 @@ export {
     init, init_task, clear_task, close_all, inherit_task, inherit_std,
     fd_of, fd_set, fd_alloc, fd_free,
     open_alloc, open_ref, open_unref, open_kind, open_ino, open_off,
-    open_set_off, open_flags, open_set_flags, open_used,
+    open_set_off, open_flags, open_set_flags, open_used, open_refs,
     pipe_new, pipe_get, pipe_put, pipe_room, pipe_bytes, pipe_writers,
     pipe_readers,
-    K_FREE, K_FILE, K_DIR, K_CONIN, K_CONOUT, K_PIPER, K_PIPEW,
+    K_FREE, K_FILE, K_DIR, K_CONIN, K_CONOUT, K_PIPER, K_PIPEW, K_SOCK,
     MAX_FD, MAX_OPEN, MAX_PIPES, PIPE_CAP, CON_IN, CON_OUT, CON_ERR
 }
 
@@ -60,6 +60,18 @@ const K_CONIN: u64 = 3 // the console, reading
 const K_CONOUT: u64 = 4 // the console, writing
 const K_PIPER: u64 = 5 // the reading end of a pipe
 const K_PIPEW: u64 = 6 // the writing end of a pipe
+// ROUND K8: a socket. `OF_INO` holds the number of the entry in the
+// socket table of `inet.fi`, exactly the way it holds the number of a
+// pipe for the two above. Nothing in THIS file learns what a socket is:
+// `read`, `write`, `close`, `dup2` and `fork` go on doing what they did,
+// and the one place that has to know is `sys.fi`, which is where the
+// kind is looked at.
+//
+// The reference count is what makes that safe. A socket that is `dup`ed
+// or inherited over `fork` must not be torn down when one of the two
+// descriptors is closed, and `open_unref` already answers that question
+// for pipes -- `sys.fi` asks it before it closes the connection.
+const K_SOCK: u64 = 7
 
 // The three that are there before the first process is.
 const CON_IN: u64 = 0
@@ -279,6 +291,16 @@ fn open_unref(state: u64, i: u64) {
     kstate.set(state, of_at(i) + OF_OFF, 0)
     kstate.set(state, of_at(i) + OF_REF, 0)
     kstate.set(state, of_at(i) + OF_FLAGS, 0)
+}
+
+// How many descriptors still point here. ROUND K8 needs it: a socket
+// that was `dup`ed or inherited over `fork` must not have its connection
+// torn down when the FIRST of the two descriptors is closed.
+fn open_refs(state: u64, i: u64) -> u64 {
+    if i >= MAX_OPEN {
+        return 0
+    }
+    return kstate.get(state, of_at(i) + OF_REF)
 }
 
 fn open_kind(state: u64, i: u64) -> u64 {
