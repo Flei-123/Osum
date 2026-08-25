@@ -1,4 +1,4 @@
-/* demos/kernel/isr.s -- round 59: the interrupt entry points.
+/* kernel/isr.s -- round 59: the interrupt entry points.
  *
  * The second and last non-Firn file of the kernel. `#[interrupt]` in Firn
  * (round 52) produces a handler that saves all registers and ends with
@@ -180,7 +180,7 @@ syscall_entry:
      * user stack pointer over r10 before anybody could look at it. It goes
      * into `sys_rsp` instead -- interrupts are off between the store and
      * the push that reads it back, because MSR_SFMASK masks IF for the
-     * whole system call (`demos/kernel/user.fi`, `setup`).
+     * whole system call (`kernel/user.fi`, `setup`).
      *
      * SECOND: what is saved is a COMPLETE user context -- sixteen words on
      * the kernel stack of the calling task -- and its ADDRESS is what the
@@ -195,7 +195,7 @@ syscall_entry:
      *   * a signal handler, when there is one, needs exactly the same.
      *
      * The layout, as offsets from the pointer Firn receives (the F_*
-     * constants at the top of `demos/kernel/sys.fi`):
+     * constants at the top of `kernel/sys.fi`):
      *
      *   +0   r15  +8  r14  +16 r13  +24 r12  +32 rbp  +40 rbx
      *   +48  r9   +56 r8   +64 r10  +72 rdx  +80 rsi  +88 rdi
@@ -362,7 +362,7 @@ vectors:
     .quad KERNEL_USER_START         /* 63: proc.fi, the way into ring 3 */
     /* Round K4: back into ring 3 with a context the kernel wrote itself. */
     .quad user_resume               /* 64: fork and execve */
-    /* Round K5: the other processors (demos/kernel/smp.s, smp.fi). */
+    /* Round K5: the other processors (kernel/smp.s, smp.fi). */
     .quad smp_vectors               /* 65: the table of the trampoline */
     .quad KERNEL_AP_MAIN            /* 66: where a started core lands */
 
@@ -395,7 +395,7 @@ saved_r15:
      * under `profile kernel` a checked site that goes out of range ends in
      * `call osum_panic`, an EXTERNAL symbol the compiler deliberately
      * leaves undefined (SPEC section 2: "calls osum_panic, configurable").
-     * This is that definition, same shape as `demos/kernel/start.s`'s
+     * This is that definition, same shape as `kernel/start.s`'s
      * (the smaller kernel demo): write the message to COM1 -- already
      * initialised by `kmain.fi`'s own `serial.init()`, which runs before
      * anything that could trigger a checked panic -- then halt for good.

@@ -4,7 +4,7 @@
 A loader is only worth as much as its refusals. This tool takes a program
 that WORKS and changes ONE field, so that what the kernel says can be
 traced back to that one field and to nothing else. The reason numbers are
-`elf.R_*` in `demos/kernel/elf.fi`.
+`elf.R_*` in `kernel/elf.fi`.
 
     magic    the four octets 0x7F E L F        -> 4  R_MAGIC
     class    ELFCLASS64 -> ELFCLASS32          -> 5  R_CLASS

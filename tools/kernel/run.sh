@@ -35,11 +35,11 @@ set -uo pipefail
 cd "$(dirname "$0")/../.."
 
 export FIRNLIB="$(pwd)/lib"
-FIRNC=compiler/target/release/firnc
-FC1=${FIRNC1:-./.firnc1}
-SOURCE=demos/kernel/kmain.fi
-USOURCE=demos/kernel/uprog.fi
-LDSCRIPT=demos/kernel/kernel.ld
+FIRNC=${FIRNC:-vendor/firn/bin/firnc}
+FC1=${FIRNC1:-vendor/firn/bin/firnc1}
+SOURCE=kernel/kmain.fi
+USOURCE=kernel/uprog.fi
+LDSCRIPT=kernel/kernel.ld
 TMPD=$(mktemp -d)
 trap 'rm -rf "$TMPD"' EXIT
 
@@ -64,23 +64,17 @@ hasnot() { # file text name
     grep -qF "$2" "$1" && bad "$3 -- '$2' should not be there" || ok "$3"
 }
 
+# Der FESTGENAGELTE Uebersetzer aus vendor/ (vendor/firn/COMMIT). Beide
+# Stufen kommen aus EINEM Firn-Commit; nichts wird gegen ein bewegliches
+# Ziel gebaut. Das Skript baut nur, wenn noetig.
+bash vendor/firn/hole-firnc.sh >/dev/null || { echo "vendor/firn/hole-firnc.sh failed"; exit 1; }
 [ -x "$FIRNC" ] || { echo "firnc0 is missing: $FIRNC"; exit 1; }
+[ -x "$FC1" ]   || { echo "firnc1 is missing: $FC1"; exit 1; }
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
     echo "KERNEL: skipped, qemu-system-x86_64 is not available"
     exit 0
 fi
 
-# Rebuild `.firnc1` when it is missing or a source is younger (the trap
-# from round 35/45/46: an outdated binary measures yesterday's state).
-fresh=0
-[ -x "$FC1" ] || fresh=1
-if [ -x "$FC1" ]; then
-    [ "$FIRNC" -nt "$FC1" ] && fresh=1
-    while IFS= read -r q; do
-        [ "$q" -nt "$FC1" ] && { fresh=1; break; }
-    done < <(find bin lib -name '*.fi' -not -type l)
-fi
-[ "$fresh" -eq 1 ] && { rm -f "$FC1"; "$FIRNC" bin/firnc1.fi -o "$FC1" || exit 1; }
 
 # One run: $1 = image, $2 = command line, $3 = output file, $4 = extra
 # arguments for QEMU (optional). Returns the exit code of QEMU
@@ -112,16 +106,16 @@ value() { # file pattern
 }
 
 echo "== 1. build the kernel and the user programs with both compilers =="
-as --64 -o "$TMPD/boot.o" demos/kernel/boot.s 2>"$TMPD/as1.err" \
+as --64 -o "$TMPD/boot.o" kernel/boot.s 2>"$TMPD/as1.err" \
     && ok "boot.s assembles (multiboot, long mode, GDT, TSS)" \
     || { bad "boot.s"; sed 's/^/        /' "$TMPD/as1.err" | head -5; }
-as --64 -o "$TMPD/isr.o" demos/kernel/isr.s 2>"$TMPD/as2.err" \
+as --64 -o "$TMPD/isr.o" kernel/isr.s 2>"$TMPD/as2.err" \
     && ok "isr.s assembles (48 vectors, syscall, ring 3)" \
     || { bad "isr.s"; sed 's/^/        /' "$TMPD/as2.err" | head -5; }
-as --64 -o "$TMPD/switch.o" demos/kernel/switch.s 2>"$TMPD/as3.err" \
+as --64 -o "$TMPD/switch.o" kernel/switch.s 2>"$TMPD/as3.err" \
     && ok "switch.s assembles (context switch, into ring 3)" \
     || { bad "switch.s"; sed 's/^/        /' "$TMPD/as3.err" | head -5; }
-as --64 -o "$TMPD/smp.o" demos/kernel/smp.s 2>"$TMPD/as4.err" \
+as --64 -o "$TMPD/smp.o" kernel/smp.s 2>"$TMPD/as4.err" \
     && ok "smp.s assembles (the trampoline of the other processors)" \
     || { bad "smp.s"; sed 's/^/        /' "$TMPD/as4.err" | head -5; }
 
@@ -170,7 +164,7 @@ for f in k0 k1 uprog0 uprog1; do
     # ROUND 72: `osum_panic` is the ONE name allowed to stay undefined in an
     # object file. Checked arithmetic (SPEC section 13, item L9) calls it
     # under `profile kernel` when a value goes out of range, on purpose;
-    # `demos/kernel/isr.s` defines it and the link step above resolves it.
+    # `kernel/isr.s` defines it and the link step above resolves it.
     # Anything ELSE undefined is still a hard failure. The same exception is
     # made in tools/freestanding/run.sh; this file was missed there.
     undef=$(nm -u "$o" 2>/dev/null | awk '{print $NF}' | sed '/^$/d' | grep -vxF osum_panic)

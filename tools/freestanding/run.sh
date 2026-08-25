@@ -4,16 +4,16 @@
 # Round 52. What is checked is what can be READ OFF the produced file, not
 # what the compiler claims about itself:
 #
-#   1. `demos/kernel/core.fi` compiles with BOTH compilers to an
+#   1. `kernel/core.fi` compiles with BOTH compilers to an
 #      ELF object file (`ET_REL`), not to an executable.
 #   2. The object file has NO undefined name -- no libc, no
 #      `_start`, no runtime -- EXCEPT `osum_panic` (round 72: `core.fi`
 #      now uses checked arithmetic, and `profile kernel` calls that one
 #      external symbol on an out-of-range value on purpose, SPEC section
-#      13; `demos/kernel/start.s` defines it, resolved at the link step
+#      13; `kernel/start.s` defines it, resolved at the link step
 #      in part 3 below). (`nm -u` yields at most that one name.)
 #   3. It contains not a single `syscall` instruction (`objdump -d`).
-#   4. It can be linked with `ld -T demos/kernel/linker.ld` into an image
+#   4. It can be linked with `ld -T kernel/linker.ld` into an image
 #      and BOOTED in QEMU: the serial output of the kernel appears.
 #   5. The inline assembly is really in there (`in`/`out`, `hlt`, `cli`),
 #      the interrupt entry point ends with `iretq` and saves 14 registers.
@@ -28,10 +28,10 @@ set -uo pipefail
 cd "$(dirname "$0")/../.."
 
 export FIRNLIB="$(pwd)/lib"
-FIRNC=compiler/target/release/firnc
-FC1=${FIRNC1:-./.firnc1}
-SOURCE=demos/kernel/core.fi
-LDSCRIPT=demos/kernel/linker.ld
+FIRNC=${FIRNC:-vendor/firn/bin/firnc}
+FC1=${FIRNC1:-vendor/firn/bin/firnc1}
+SOURCE=kernel/core.fi
+LDSCRIPT=kernel/linker.ld
 # A temp directory of its own per run (several rounds run in parallel).
 TMPD=$(mktemp -d)
 trap 'rm -rf "$TMPD"' EXIT
@@ -41,18 +41,12 @@ fail=0
 ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 
+# Der FESTGENAGELTE Uebersetzer aus vendor/ (vendor/firn/COMMIT). Beide
+# Stufen kommen aus EINEM Firn-Commit; nichts wird gegen ein bewegliches
+# Ziel gebaut. Das Skript baut nur, wenn noetig.
+bash vendor/firn/hole-firnc.sh >/dev/null || { echo "vendor/firn/hole-firnc.sh failed"; exit 1; }
 [ -x "$FIRNC" ] || { echo "firnc0 is missing: $FIRNC"; exit 1; }
-# Rebuild `.firnc1` when it is missing or a source is younger (the trap
-# from round 35/45/46: an outdated binary measures yesterday's state).
-neu=0
-[ -x "$FC1" ] || neu=1
-if [ -x "$FC1" ]; then
-    [ "$FIRNC" -nt "$FC1" ] && neu=1
-    while IFS= read -r q; do
-        [ "$q" -nt "$FC1" ] && { neu=1; break; }
-    done < <(find bin lib -name '*.fi' -not -type l)
-fi
-[ "$neu" -eq 1 ] && { rm -f "$FC1"; "$FIRNC" bin/firnc1.fi -o "$FC1" || exit 1; }
+[ -x "$FC1" ]   || { echo "firnc1 is missing: $FC1"; exit 1; }
 
 echo "== 1. compile (both compilers, the profile comes from the source) =="
 "$FIRNC" -o "$TMPD/k0.o" "$SOURCE" 2>"$TMPD/e0" \
@@ -83,7 +77,7 @@ for s in 0 1; do
     # as u16`), and under `profile kernel` a checked site that goes out of
     # range calls that external symbol on purpose (SPEC section 13, `L9`);
     # this object file is freestanding and has not been linked against
-    # `demos/kernel/start.s`'s own definition of it yet (section 3 below
+    # `kernel/start.s`'s own definition of it yet (section 3 below
     # is where that happens, and where the reference gets resolved for
     # real). Anything ELSE undefined is still a hard failure.
     undef=$(nm -u "$f" 2>/dev/null | awk '{print $NF}' | sed '/^$/d' | grep -vxF osum_panic)
@@ -101,7 +95,7 @@ for s in 0 1; do
 done
 
 echo "== 3. link against the linker script (no libc, no crt files) =="
-as --64 -o "$TMPD/start.o" demos/kernel/start.s 2>"$TMPD/as.err" \
+as --64 -o "$TMPD/start.o" kernel/start.s 2>"$TMPD/as.err" \
     && ok "start.s assembles (multiboot header, long mode)" \
     || { bad "start.s"; sed 's/^/        /' "$TMPD/as.err" | head -5; }
 for s in 0 1; do
@@ -157,7 +151,7 @@ for s in 0 1; do
     # is allocated (`sub ..., %rsp`) -- that instruction is the reliable
     # end-of-prolog marker. ROUND 72: counting `push` over the WHOLE
     # function body (as this used to) broke the moment `timer_ih` itself
-    # contained checked arithmetic (`old + 1` in `demos/kernel/core.fi`)
+    # contained checked arithmetic (`old + 1` in `kernel/core.fi`)
     # -- `emit_checked_bin` rescues its own two operands with a balanced
     # `push`/`push` .. `pop`/`pop` pair around every checked site, which is
     # correct generated code, not a wrong register save count; this test

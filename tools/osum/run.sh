@@ -4,7 +4,7 @@
 # Round 62 proved that the kernel has tasks, address spaces, system calls,
 # a file system and a shell. It also had a hole in the middle of it, and
 # the hole was this: EVERY PROGRAM IT COULD RUN WAS COMPILED INTO IT.
-# `demos/kernel/uprog.fi` travelled in the kernel image, the list of
+# `kernel/uprog.fi` travelled in the kernel image, the list of
 # programs was a list of `if`s, and adding a command meant building a new
 # kernel. A machine like that is a demonstration with a fixed programme.
 #
@@ -47,10 +47,10 @@ set -uo pipefail
 cd "$(dirname "$0")/../.."
 
 export FIRNLIB="$(pwd)/lib"
-FIRNC=compiler/target/release/firnc
-FC1=${FIRNC1:-./.firnc1}
-LDSCRIPT=demos/kernel/kernel.ld
-ULD=demos/kernel/user/user.ld
+FIRNC=${FIRNC:-vendor/firn/bin/firnc}
+FC1=${FIRNC1:-vendor/firn/bin/firnc1}
+LDSCRIPT=kernel/kernel.ld
+ULD=kernel/user/user.ld
 PROGS="sh ls cat echo rm hurt hello"
 BLOCKS=2048
 
@@ -73,23 +73,17 @@ has() { grep -qF "$2" "$1" && ok "$3" || bad "$3 -- '$2' is missing"; }
 hasnot() { grep -qF "$2" "$1" && bad "$3 -- '$2' should not be there" || ok "$3"; }
 value() { grep -oE "$2" "$1" | head -1 | grep -oE '[0-9]+$'; }
 
+# Der FESTGENAGELTE Uebersetzer aus vendor/ (vendor/firn/COMMIT). Beide
+# Stufen kommen aus EINEM Firn-Commit; nichts wird gegen ein bewegliches
+# Ziel gebaut. Das Skript baut nur, wenn noetig.
+bash vendor/firn/hole-firnc.sh >/dev/null || { echo "vendor/firn/hole-firnc.sh failed"; exit 1; }
 [ -x "$FIRNC" ] || { echo "firnc0 is missing: $FIRNC"; exit 1; }
+[ -x "$FC1" ]   || { echo "firnc1 is missing: $FC1"; exit 1; }
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
     echo "OSUM: skipped, qemu-system-x86_64 is not available"
     exit 0
 fi
 
-# The same freshness trap as in tools/kernel/run.sh: an outdated `.firnc1`
-# measures yesterday's compiler.
-fresh=0
-[ -x "$FC1" ] || fresh=1
-if [ -x "$FC1" ]; then
-    [ "$FIRNC" -nt "$FC1" ] && fresh=1
-    while IFS= read -r q; do
-        [ "$q" -nt "$FC1" ] && { fresh=1; break; }
-    done < <(find bin lib -name '*.fi' -not -type l)
-fi
-[ "$fresh" -eq 1 ] && { rm -f "$FC1"; "$FIRNC" bin/firnc1.fi -o "$FC1" || exit 1; }
 
 # ---------------------------------------------------------------- running
 
@@ -116,19 +110,19 @@ QUIET="nokbd nosched noproc nofs noring3"
 
 echo "== 1. build: the kernel, and a userland that is NOT in it =="
 for f in boot isr switch smp; do
-    as --64 -o "$TMPD/$f.o" "demos/kernel/$f.s" 2>"$TMPD/as.err" \
+    as --64 -o "$TMPD/$f.o" "kernel/$f.s" 2>"$TMPD/as.err" \
         || { bad "$f.s does not assemble"; sed 's/^/        /' "$TMPD/as.err" | head -5; }
 done
-as --64 -o "$TMPD/crt.o" demos/kernel/user/crt.s 2>"$TMPD/ascrt.err" \
+as --64 -o "$TMPD/crt.o" kernel/user/crt.s 2>"$TMPD/ascrt.err" \
     && ok "crt.s assembles (_start, osum_panic -- the four instructions of a user program)" \
     || { bad "crt.s"; sed 's/^/        /' "$TMPD/ascrt.err" | head -5; }
 
 build_stage() { # 0 = firnc0, 1 = firnc1
     local s=$1 cc
     if [ "$s" = 0 ]; then cc="$FIRNC"; else cc="$FC1"; fi
-    "$cc" demos/kernel/kmain.fi -o "$TMPD/k$s.o" >"$TMPD/e$s" 2>&1 \
+    "$cc" kernel/kmain.fi -o "$TMPD/k$s.o" >"$TMPD/e$s" 2>&1 \
         || { bad "firnc$s does not compile the kernel"; sed 's/^/        /' "$TMPD/e$s" | head -8; return 1; }
-    "$cc" demos/kernel/uprog.fi -o "$TMPD/u$s.o" >>"$TMPD/e$s" 2>&1 \
+    "$cc" kernel/uprog.fi -o "$TMPD/u$s.o" >>"$TMPD/e$s" 2>&1 \
         || { bad "firnc$s does not compile uprog.fi"; return 1; }
     ld -n -T "$LDSCRIPT" \
         --defsym=KERNEL_MAIN="_F$s.kernel_main" \
@@ -145,7 +139,7 @@ build_stage() { # 0 = firnc0, 1 = firnc1
     ok "firnc$s: kernel linked and turned into a multiboot image"
     local p
     for p in $PROGS; do
-        "$cc" "demos/kernel/user/$p.fi" -o "$TMPD/$p$s.o" >"$TMPD/e$p$s" 2>&1 \
+        "$cc" "kernel/user/$p.fi" -o "$TMPD/$p$s.o" >"$TMPD/e$p$s" 2>&1 \
             || { bad "firnc$s does not compile $p.fi"; sed 's/^/        /' "$TMPD/e$p$s" | head -6; return 1; }
         ld -T "$ULD" --defsym=USER_ENTRY="_F$s.u_start" \
             -o "$TMPD/$p$s.elf" "$TMPD/crt.o" "$TMPD/$p$s.o" 2>"$TMPD/ldu.err" \
@@ -219,7 +213,7 @@ else
 fi
 
 # The file system stops a file at 11 direct + 64 indirect + 64 * 64 double
-# indirect blocks (`demos/kernel/fs.fi`). ROUND K4 RAISED THAT NUMBER, and
+# indirect blocks (`kernel/fs.fi`). ROUND K4 RAISED THAT NUMBER, and
 # it had to: the limit used to be 12 + 64 blocks = 38912 octets, `/bin/sh`
 # built by firnc1 was 35656 of them, and a shell that carries a libc does
 # not fit under that. The margin is still worth a number -- this is the

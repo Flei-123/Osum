@@ -43,11 +43,11 @@ set -uo pipefail
 cd "$(dirname "$0")/../.."
 
 export FIRNLIB="$(pwd)/lib"
-FIRNC=compiler/target/release/firnc
-FC1=${FIRNC1:-./.firnc1}
-SOURCE=demos/kernel/kmain.fi
-USOURCE=demos/kernel/uprog.fi
-LDSCRIPT=demos/kernel/kernel.ld
+FIRNC=${FIRNC:-vendor/firn/bin/firnc}
+FC1=${FIRNC1:-vendor/firn/bin/firnc1}
+SOURCE=kernel/kmain.fi
+USOURCE=kernel/uprog.fi
+LDSCRIPT=kernel/kernel.ld
 TMPD=$(mktemp -d)
 trap 'rm -rf "$TMPD"' EXIT
 
@@ -75,34 +75,28 @@ value() { # file pattern -> the number at the end of the first match
     grep -oE "$2" "$1" 2>/dev/null | head -1 | grep -oE '[0-9]+$'
 }
 
+# Der FESTGENAGELTE Uebersetzer aus vendor/ (vendor/firn/COMMIT). Beide
+# Stufen kommen aus EINEM Firn-Commit; nichts wird gegen ein bewegliches
+# Ziel gebaut. Das Skript baut nur, wenn noetig.
+bash vendor/firn/hole-firnc.sh >/dev/null || { echo "vendor/firn/hole-firnc.sh failed"; exit 1; }
 [ -x "$FIRNC" ] || { echo "firnc0 is missing: $FIRNC"; exit 1; }
+[ -x "$FC1" ]   || { echo "firnc1 is missing: $FC1"; exit 1; }
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
     echo "PCI: skipped, qemu-system-x86_64 is not available"
     exit 0
 fi
 
-# Rebuild `.firnc1` when it is missing or a source is younger (the trap
-# from round 35/45/46: an outdated binary measures yesterday's state).
-fresh=0
-[ -x "$FC1" ] || fresh=1
-if [ -x "$FC1" ]; then
-    [ "$FIRNC" -nt "$FC1" ] && fresh=1
-    while IFS= read -r q; do
-        [ "$q" -nt "$FC1" ] && { fresh=1; break; }
-    done < <(find bin lib -name '*.fi' -not -type l)
-fi
-[ "$fresh" -eq 1 ] && { rm -f "$FC1"; "$FIRNC" bin/firnc1.fi -o "$FC1" || exit 1; }
 
 # ---------------------------------------------------------------- build
 
 echo "== 1. build the kernel with both compilers =="
-as --64 -o "$TMPD/boot.o" demos/kernel/boot.s 2>/dev/null \
+as --64 -o "$TMPD/boot.o" kernel/boot.s 2>/dev/null \
     && ok "boot.s assembles" || bad "boot.s"
-as --64 -o "$TMPD/isr.o" demos/kernel/isr.s 2>/dev/null \
+as --64 -o "$TMPD/isr.o" kernel/isr.s 2>/dev/null \
     && ok "isr.s assembles" || bad "isr.s"
-as --64 -o "$TMPD/switch.o" demos/kernel/switch.s 2>/dev/null \
+as --64 -o "$TMPD/switch.o" kernel/switch.s 2>/dev/null \
     && ok "switch.s assembles" || bad "switch.s"
-as --64 -o "$TMPD/smp.o" demos/kernel/smp.s 2>/dev/null \
+as --64 -o "$TMPD/smp.o" kernel/smp.s 2>/dev/null \
     && ok "smp.s assembles" || bad "smp.s"
 
 for s in 0 1; do

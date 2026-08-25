@@ -1,4 +1,4 @@
-/* demos/kernel/start.s — der einzige Nicht-Firn-Code des Kernels.
+/* kernel/start.s — der einzige Nicht-Firn-Code des Kernels.
  *
  * Aufgabe: den Rechner aus dem 32-Bit-Zustand, in dem ein
  * Multiboot-Lader (QEMU `-kernel`) uebergibt, in den LANGEN MODUS bringen
@@ -100,7 +100,7 @@ lang:
     jmp 2b
 
     /* --------------------------------------------------- osum_panic ---
-     * ROUND 72: `demos/kernel/core.fi` now uses CHECKED arithmetic
+     * ROUND 72: `kernel/core.fi` now uses CHECKED arithmetic
      * (`old + 1 as u16` in `timer_ih`) -- the whole point of round 72 is
      * that the checked build levels catch an out-of-range value instead
      * of wrapping past it silently. Under `profile kernel`
