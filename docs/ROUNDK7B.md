@@ -9,6 +9,13 @@ und alle Gegenproben blieben grün.
 Diese Datei sagt, was es war, wie es gefunden wurde und was daraus
 folgt.
 
+**Abnahme:** `./test.sh` — **alle 14 Abschnitte bestanden, 1126 Zusagen,
+0 Fehler.** FREESTANDING 41 · CORE 46 · KERNEL **175** · OSUM **130** ·
+PCI 97 · POSIX 134 · SMP **58** · USERLAND **91** · CAPS **67** ·
+BOOT **20** · GFX **76** (vorher 67 bestanden bei 7 Fehlern) ·
+UNIX **107** · NET **75** (vorher 73 bei 2 Fehlern). Keine Zahl ist
+gesunken.
+
 ---
 
 ## 1. Der Befund
