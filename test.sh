@@ -52,6 +52,21 @@
 #      Ring 3, das achtzehn Zusagen darueber meldet, was es darf und was
 #      nicht. Gegenprobe: ohne das Wort `caps` gibt es nichts davon, und
 #      der uebrige Kernel verhaelt sich Zeile fuer Zeile wie vorher.
+#  12. Was jedes Unix-Programm voraussetzt (tools/unix/run.sh, Runde
+#      K9): Signale (kill, sigaction, sigprocmask, sigreturn, die
+#      Standardverhalten, SIGCHLD, und SIGSEGV/SIGFPE/SIGILL aus den
+#      echten Prozessorausnahmen statt eines Kernel-Panics), eine
+#      Terminalschicht mit Zeilenpuffer, rohem Modus, Steuerzeichen,
+#      Fenstergroesse, Prozessgruppen und Pseudoterminals, eine Uhr
+#      (Echtzeit aus dem CMOS, monoton aus dem Zyklenzaehler,
+#      clock_gettime, nanosleep) und Zufall (Sammler aus
+#      Zeitgeberflattern und Ereigniszeitpunkten, ChaCha20 darauf,
+#      getrandom). STRG-C beendet den Vordergrundprozess wirklich, und
+#      zwar gemessen: 128 + SIGINT. Gegenproben: `nosig` (nichts wird
+#      zugestellt, der Zaehler bleibt bei null), `fixedrand` (fester
+#      Strom, die statistische Pruefung faellt durch), und drei Neustarts
+#      mit drei verschiedenen Saaten.
+#
 #  11. Der Multiboot-Kopf und der UEFI-Pfad (tools/boot/run.sh): Bit 2
 #      der Flags verlangt einen linearen Rahmenpuffer. Ohne das bricht
 #      jeder Multiboot-Lader unter UEFI mit "Cannot use text mode with
@@ -158,6 +173,9 @@ lauf "10. Handles statt Umgebungsautoritaet: die Capability-Schicht aus OrientOS
 
 lauf "11. der Multiboot-Kopf verlangt einen Bildschirm -- der UEFI-Pfad (tools/boot/run.sh)" \
      tools/boot/run.sh boot '^BOOT: '
+
+lauf "12. was jedes Unix-Programm voraussetzt: Signale, Terminal, Uhr, Zufall (tools/unix/run.sh, Runde K9)" \
+     tools/unix/run.sh unix '^UNIX: |^   -- '
 
 echo
 echo "=================================================================="
