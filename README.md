@@ -149,19 +149,19 @@ darueber **Steckdosen fuer Ring 3** mit den Nummern von Linux x86-64
 funktionieren `read`, `write`, `close`, `dup2` und `fork` darauf, ohne
 dass eines davon weiss, was eine Steckdose ist.
 
-**Gemessen gegen den echten Linux-Kernel** (`tools/net/run.sh`, 74
+**Gemessen gegen den echten Linux-Kernel** (`tools/net/run.sh`, 75
 Zusagen, `veth` + `AF_PACKET` in einem eigenen Netz-Namensraum, QEMU ohne
 KVM):
 
 | was | Ergebnis |
 |---|---|
-| `ping -c 10` vom Linux-Kern | **10 von 10**, 8,6 ms im Mittel |
-| `nc` schiebt 1 MiB hinein | **1 048 576 Oktette**, 733 Rahmen, **5 765 KiB/s**, 0 Neusendungen |
+| `ping -c 10` vom Linux-Kern | **10 von 10**, 3,3 ms im Mittel |
+| `nc` schiebt 1 MiB hinein | **1 048 576 Oktette**, 732 Rahmen, **6 027 KiB/s**, 0 Neusendungen |
 | `nc` durch das Echo | **262 144 Oktette hin und zurueck, md5 gleich** |
 | `curl http://10.9.0.2:8080/` | Statuszeile, Kopf und Rumpf von curl selbst akzeptiert |
 | Osum verbindet sich **aktiv** | 262 144 hin, 262 144 zurueck, **0 falsche Oktette** |
-| `tc netem loss 20 %` hinein | alles in Reihenfolge, 75 Segmente neu zusammengesetzt |
-| `tc netem loss 20 %` hinaus | 0 falsch, **1 Neusendung auf dem Zeitgeber, 6 auf drei doppelte Quittungen** |
+| `tc netem loss 20 %` hinein | alles in Reihenfolge, 132 Segmente neu zusammengesetzt |
+| `tc netem loss 10 %` hinaus | 0 falsch, **4 Verluste erholt: 1 ueber den Zeitgeber, 3 ueber drei doppelte Quittungen** |
 
 Gegenprobe: dasselbe Kernelabbild ohne das Wort `nic` verliert jedes
 Paket, `nicnobm` (kein Busmaster) ebenso, und mit `nicnoirq` kommen alle
