@@ -1,0 +1,605 @@
+// kernel/netsvc.fi -- round K8: the network stage of the kernel, and the
+// four services `tools/net/run.sh` measures against the Linux kernel.
+//
+// This file is to round K8 what `hw.disk` is to round K2: the seam that
+// keeps `kmain.fi` at three lines while several rounds work on it at the
+// same time. It does two things.
+//
+// 1. BRING THE CARD UP, in the order the machine needs: `virtio.init`
+//    (PCI, features, queues, vector), then `inet.init` (the memory for
+//    the stack of round K3, the address, the clock), then the network
+//    task. Every switch has a counter-check in `tools/net/run.sh`, and
+//    every one of them is a run in which the measurement collapses:
+//
+//      (no `nic`)  the card is never touched -- ping gets nothing, the
+//                  connection is refused, and the SAME kernel image is
+//                  what proves it was the driver and not the wire
+//      nicnobm     no bus master bit: the device may answer registers
+//                  but may not fetch a descriptor -- not one frame
+//      nicnoirq    the vector stays masked: the frames still arrive
+//                  because netd polls the ring, the interrupt count
+//                  stays at zero, and the two are told apart in one run
+//      nicintx     the same completion over the interrupt pin and the
+//                  I/O APIC instead of over MSI-X
+//
+// 2. BE SOMETHING TO MEASURE. A number is worth more than a claim, and a
+//    number needs a service that produces one. `nsvc=` picks it:
+//
+//      0  idle     answer ARP and ICMP, nothing else. This is what a
+//                  `ping` from the host measures.
+//      1  sink     take one connection on `nport`, swallow `nbytes`,
+//                  report octets and microseconds -- the throughput of
+//                  host -> Osum.
+//      2  echo     take one connection and send every octet back. The
+//                  host compares the md5 of what it sent with what came
+//                  back; that is the only test that catches a stack
+//                  which loses or reorders one octet in a megabyte.
+//      3  http     one HTTP/1.1 answer, then close. `curl` on the host
+//                  says whether it was well formed.
+//      4  connect  the other direction: Osum opens the connection to
+//                  `ngw:nport` ITSELF, sends `nbytes`, reads the echo
+//                  back and compares it octet for octet.
+//      5  udp      bind `nport`, send every datagram back reversed.
+//
+// EVERY LINE IT PRINTS IS `key value`, so that the shell script reads
+// numbers rather than prose -- the same shape `tools/k3net/run.sh` used
+// in round K3.
+
+import serial
+import kstate
+import mem
+import sched
+import pci
+import apic
+import virtio
+import inet
+import hw
+
+export { stage, netd_start }
+
+// The scratch buffer of this file: one frame for what is read and one
+// for the pattern that is compared against. Both come out of the frame
+// allocator and belong to nobody else.
+const S_BUF: u64 = 0x3E0 // in the K2 scalar page, behind hw.fi's strip
+const S_TASK: u64 = 0x3E8
+const CHUNK: u64 = 4096
+
+// How long any single wait may last, in ticks of 100 Hz. Bounded on
+// purpose: a measurement that ends in the time limit of the shell script
+// measures nothing, and a kernel that hangs cannot say why.
+const WAIT_LIMIT: u64 = 3000 // 30 s
+
+fn sc(off: u64) -> u64 {
+    return pci.K2_SCALARS + off
+}
+
+fn buf(state: u64) -> u64 {
+    return kstate.get(state, sc(S_BUF))
+}
+
+// ------------------------------------------------------------- output
+
+fn say(text: u64) {
+    serial.puts(text)
+}
+
+fn kv(text: u64, v: u64) {
+    serial.puts(text)
+    serial.dec(v)
+    serial.nl()
+}
+
+// -------------------------------------------------------- the stage
+
+fn stage(state: u64) {
+    var s_skip: [u8; 13] = "nic: skipped\0"
+    var s_none: [u8; 15] = "nic: no device\0"
+    var s_fail: [u8; 17] = "nic: init failed\0"
+    var s_nostack: [u8; 18] = "nic: no stack \0\0\0\0"
+    var s_up: [u8; 6] = "nic: \0"
+    var s_q: [u8; 9] = "queue=\0\0\0"
+    var s_f: [u8; 12] = "  features=\0"
+    var s_i: [u8; 8] = "  irq=\0\0"
+    var s_msix: [u8; 5] = "msix\0"
+    var s_intx: [u8; 5] = "intx\0"
+    var s_mask: [u8; 8] = " masked\0"
+    var s_bm: [u8; 11] = "  master=\0\0"
+    var s_task: [u8; 12] = "nic: netd=\0\0"
+
+    if !hw.on(state, hw.M_NIC) {
+        say((&s_skip[0]) as u64)
+        serial.nl()
+        return
+    }
+    let use_msix: bool = !hw.on(state, hw.M_NICINTX)
+    let armed: bool = !hw.on(state, hw.M_NICNOIRQ)
+    let started: bool = virtio.init(state, use_msix, armed)
+    if !virtio.present(state) {
+        // No BAR, no capabilities: there is no virtio-net on this bus.
+        say((&s_none[0]) as u64)
+        serial.nl()
+        return
+    }
+    if !started || !virtio.ready(state) {
+        say((&s_fail[0]) as u64)
+        serial.nl()
+        return
+    }
+    // The counter-check takes the bus master bit away AFTER the card is
+    // up, exactly the way round K2 does it for the disk: `init` needs to
+    // read the device's own configuration once, and a run that cannot do
+    // that would prove nothing about the ring.
+    if hw.on(state, hw.M_NICNOBM) {
+        pci.disable_master(virtio.bdf(state))
+    }
+
+    say((&s_up[0]) as u64)
+    say((&s_q[0]) as u64)
+    serial.dec(virtio.queue_size(state))
+    say((&s_f[0]) as u64)
+    serial.hex(virtio.features(state))
+    say((&s_i[0]) as u64)
+    if virtio.msix(state) {
+        say((&s_msix[0]) as u64)
+    } else {
+        say((&s_intx[0]) as u64)
+    }
+    if !armed {
+        say((&s_mask[0]) as u64)
+    }
+    say((&s_bm[0]) as u64)
+    serial.dec(hw.yes(pci.master_on(virtio.bdf(state))))
+    serial.nl()
+
+    let a: u64 = hw.net_ip(state)
+    if a == 0 {
+        say((&s_nostack[0]) as u64)
+        serial.nl()
+        return
+    }
+    if !inet.init(state, (a >> 24) & 0xFF, (a >> 16) & 0xFF, (a >> 8) & 0xFF,
+        a & 0xFF, hw.net_prefix(state), hw.net_gw(state)) {
+        say((&s_nostack[0]) as u64)
+        serial.nl()
+        return
+    }
+    inet.print_state(state)
+
+    let b: u64 = mem.frame_run(state, 2)
+    if b == 0 {
+        return
+    }
+    kstate.set(state, sc(S_BUF), b)
+
+    let t: u64 = netd_start(state)
+    kv((&s_task[0]) as u64, t)
+
+    service(state)
+}
+
+// The network task. Its priority is 2 -- above the workers of round 62,
+// below nothing: a task that answers frames has to get the processor
+// soon after one arrives, and it gives it back on its own the moment
+// there is nothing to do.
+fn netd_start(state: u64) -> u64 {
+    if kstate.get(state, sc(S_TASK)) != 0 {
+        return kstate.get(state, sc(S_TASK))
+    }
+    let t: u64 = sched.create(state, sched.K_NETD, 2, 0, 0)
+    if t == 0 {
+        return 0
+    }
+    sched.start(state, t)
+    kstate.set(state, sc(S_TASK), t)
+    inet.set_task(state, t)
+    return t
+}
+
+// ------------------------------------------------------- the services
+
+fn service(state: u64) {
+    let mode: u64 = hw.net_svc(state)
+    if mode == 0 {
+        idle_service(state)
+        return
+    }
+    if mode == 1 {
+        stream_service(state, false)
+        return
+    }
+    if mode == 2 {
+        stream_service(state, true)
+        return
+    }
+    if mode == 3 {
+        http_service(state)
+        return
+    }
+    if mode == 4 {
+        connect_service(state)
+        return
+    }
+    if mode == 5 {
+        udp_service(state)
+        return
+    }
+}
+
+// Nothing but the stack. `netd` answers ARP and ICMP by itself, so the
+// only thing this has to do is stay alive long enough for the host to
+// ask -- and then say what it saw.
+fn idle_service(state: u64) {
+    let deadline: u64 = kstate.get(state, kstate.TICKS) + hw.net_wait(state)
+    while kstate.get(state, kstate.TICKS) < deadline {
+        sched.sleep_ticks(state, 1)
+    }
+    report(state)
+}
+
+// One connection, and either it is swallowed or it is sent back. The
+// difference between the two is four lines and a very different number:
+// the echo hands every octet to the send window as well, so every frame
+// is touched twice.
+fn stream_service(state: u64, echo: bool) {
+    var s_wait: [u8; 16] = "nic: listening=\0"
+    var s_acc: [u8; 15] = "nic: accepted=\0"
+    var s_oct: [u8; 13] = "nic: octets=\0"
+    var s_us: [u8; 9] = "nic: us=\0"
+    var s_kb: [u8; 16] = "nic: kib_per_s=\0"
+    var s_back: [u8; 16] = "nic: echoed=\0\0\0\0"
+
+    let port: u64 = hw.net_port(state)
+    let want: u64 = hw.net_bytes(state)
+    let l: u64 = listen_on(state, port)
+    kv((&s_wait[0]) as u64, port)
+    if l >= inet.SOCK_MAX {
+        return
+    }
+    let c: u64 = accept_one(state, l)
+    kv((&s_acc[0]) as u64, hw.yes(c < inet.SOCK_MAX))
+    if c >= inet.SOCK_MAX {
+        return
+    }
+    let b: u64 = buf(state)
+    var total: u64 = 0
+    var sent: u64 = 0
+    var idle: u64 = 0
+    let t0: u64 = inet.us(state)
+    while total < want && idle < WAIT_LIMIT {
+        let n: u64 = inet.sock_recv(state, c, b, CHUNK)
+        if n == 0 {
+            idle = WAIT_LIMIT // the other side is done
+        } else if n > CHUNK {
+            // A negative answer in an unsigned register: nothing yet.
+            idle = idle + 1
+            sched.sleep_ticks(state, 1)
+        } else {
+            total = total + n
+            idle = 0
+            if echo {
+                var off: u64 = 0
+                var guard: u64 = 0
+                while off < n && guard < WAIT_LIMIT {
+                    let w: u64 = inet.sock_send(state, c, b + off, n - off)
+                    if w > CHUNK {
+                        guard = guard + 1
+                        sched.sleep_ticks(state, 1)
+                    } else {
+                        off = off + w
+                        sent = sent + w
+                        guard = 0
+                    }
+                }
+            }
+        }
+    }
+    let t1: u64 = inet.us(state)
+    kv((&s_oct[0]) as u64, total)
+    kv((&s_back[0]) as u64, sent)
+    kv((&s_us[0]) as u64, t1 - t0)
+    var rate: u64 = 0
+    if t1 > t0 {
+        rate = (total * 1000000) / (t1 - t0) / 1024
+    }
+    kv((&s_kb[0]) as u64, rate)
+    // The FIN, and then long enough for it to be acknowledged. A `close`
+    // that is followed by the machine switching itself off is a
+    // connection the other side sees as a reset.
+    inet.sock_close(state, c)
+    settle(state, 200)
+    inet.sock_close(state, l)
+    report(state)
+}
+
+// One HTTP/1.1 answer. Written out octet for octet on purpose: this
+// kernel has no string library in ring 0, and a header that a real
+// `curl` accepts is a header whose every octet was decided here.
+fn http_service(state: u64) {
+    var s_acc: [u8; 15] = "nic: accepted=\0"
+    var s_req: [u8; 14] = "nic: request=\0"
+    var s_ans: [u8; 13] = "nic: answer=\0"
+    let port: u64 = hw.net_port(state)
+    let l: u64 = listen_on(state, port)
+    if l >= inet.SOCK_MAX {
+        return
+    }
+    let c: u64 = accept_one(state, l)
+    kv((&s_acc[0]) as u64, hw.yes(c < inet.SOCK_MAX))
+    if c >= inet.SOCK_MAX {
+        return
+    }
+    let b: u64 = buf(state)
+    // Read the request. One chunk is enough: a GET without a body ends
+    // at the empty line, and nothing after it matters here.
+    var got: u64 = 0
+    var idle: u64 = 0
+    while got == 0 && idle < 500 {
+        let n: u64 = inet.sock_recv(state, c, b, CHUNK)
+        if n > 0 && n <= CHUNK {
+            got = n
+        } else {
+            idle = idle + 1
+            sched.sleep_ticks(state, 1)
+        }
+    }
+    kv((&s_req[0]) as u64, got)
+
+    var head: [u8; 85] = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 40\r\nConnection: close\r\n\r\n\0"
+    var body: [u8; 41] = "osum speaks tcp, and this is the proof.\n\0"
+    let n1: u64 = write_all(state, c, (&head[0]) as u64, 84)
+    let n2: u64 = write_all(state, c, (&body[0]) as u64, 40)
+    kv((&s_ans[0]) as u64, n1 + n2)
+    inet.sock_close(state, c)
+    settle(state, 300)
+    inet.sock_close(state, l)
+    report(state)
+}
+
+// The other direction. Osum opens the connection, sends a pattern and
+// reads it back -- so the handshake, the send window, the receive window
+// and the orderly close are all on THIS side of the wire for once.
+fn connect_service(state: u64) {
+    var s_con: [u8; 15] = "nic: connect=\0\0"
+    var s_sent: [u8; 12] = "nic: sent=\0\0"
+    var s_back: [u8; 12] = "nic: back=\0\0"
+    var s_bad: [u8; 12] = "nic: wrong=\0"
+    var s_us: [u8; 9] = "nic: us=\0"
+    var s_kb: [u8; 16] = "nic: kib_per_s=\0"
+
+    let want: u64 = hw.net_bytes(state)
+    let peer: u64 = hw.net_gw(state)
+    let port: u64 = hw.net_port(state)
+    let c: u64 = inet.sock_new(state, inet.SK_TCP)
+    if c >= inet.SOCK_MAX {
+        return
+    }
+    inet.sock_connect(state, c, peer, port)
+    var spin: u64 = 0
+    while spin < WAIT_LIMIT && inet.sock_state(state, c) != 4 {
+        // 4 is ESTABLISHED in the numbering of `net.tcp`.
+        if inet.sock_state(state, c) == 0 && spin > 20 {
+            spin = WAIT_LIMIT
+        } else {
+            spin = spin + 1
+            sched.sleep_ticks(state, 1)
+        }
+    }
+    let ok: bool = inet.sock_state(state, c) == 4
+    kv((&s_con[0]) as u64, hw.yes(ok))
+    if !ok {
+        report(state)
+        return
+    }
+    let b: u64 = buf(state)
+    var i: u64 = 0
+    while i < CHUNK {
+        kstate.set8(b + i, (i & 0xFF) as u8)
+        i = i + 1
+    }
+    let t0: u64 = inet.us(state)
+    var sent: u64 = 0
+    var back: u64 = 0
+    var wrong: u64 = 0
+    var guard: u64 = 0
+    let rb: u64 = b + CHUNK
+    while back < want && guard < WAIT_LIMIT {
+        var moved: bool = false
+        if sent < want {
+            // The pattern is ONE page long and repeats, so the offset
+            // into it is `sent` modulo the page -- and a send may not
+            // run past the end of it, because what lies behind it is the
+            // buffer the answer is read into. That is the bug the first
+            // run of this service found: 77 880 octets `wrong` out of
+            // 262 144, with a TCP connection that had carried every one
+            // of them correctly.
+            let off: u64 = sent % CHUNK
+            var n: u64 = want - sent
+            if n > CHUNK - off {
+                n = CHUNK - off
+            }
+            let w: u64 = inet.sock_send(state, c, b + off, n)
+            if w <= CHUNK {
+                sent = sent + w
+                if w > 0 {
+                    moved = true
+                }
+            }
+        }
+        let r: u64 = inet.sock_recv(state, c, rb, CHUNK)
+        if r > 0 && r <= CHUNK {
+            var k: u64 = 0
+            while k < r {
+                if kstate.get8(rb + k) != (((back + k) % CHUNK) & 0xFF) {
+                    wrong = wrong + 1
+                }
+                k = k + 1
+            }
+            back = back + r
+            moved = true
+        } else if r == 0 {
+            guard = WAIT_LIMIT
+        }
+        if moved {
+            guard = 0
+        } else {
+            guard = guard + 1
+            sched.sleep_ticks(state, 1)
+        }
+    }
+    let t1: u64 = inet.us(state)
+    kv((&s_sent[0]) as u64, sent)
+    kv((&s_back[0]) as u64, back)
+    kv((&s_bad[0]) as u64, wrong)
+    kv((&s_us[0]) as u64, t1 - t0)
+    var rate: u64 = 0
+    if t1 > t0 {
+        rate = (back * 1000000) / (t1 - t0) / 1024
+    }
+    kv((&s_kb[0]) as u64, rate)
+    inet.sock_close(state, c)
+    settle(state, 200)
+    report(state)
+}
+
+// UDP, both ways, with the octets turned round so that an answer that
+// merely echoed the frame would be visible as one.
+fn udp_service(state: u64) {
+    var s_b: [u8; 14] = "nic: udp_got=\0"
+    var s_s: [u8; 15] = "nic: udp_sent=\0"
+    let port: u64 = hw.net_port(state)
+    let u: u64 = inet.sock_new(state, inet.SK_UDP)
+    if u >= inet.SOCK_MAX {
+        return
+    }
+    if inet.sock_bind(state, u, port) != 0 {
+        return
+    }
+    let b: u64 = buf(state)
+    var got: u64 = 0
+    var sent: u64 = 0
+    var idle: u64 = 0
+    var from: u64 = 0
+    var fport: u64 = 0
+    let deadline: u64 = kstate.get(state, kstate.TICKS) + hw.net_wait(state)
+    while kstate.get(state, kstate.TICKS) < deadline {
+        let n: u64 = inet.sock_recvfrom(state, u, b, CHUNK, &from, &fport)
+        if n > 0 && n <= CHUNK {
+            got = got + 1
+            var i: u64 = 0
+            while i < n / 2 {
+                let x: u64 = kstate.get8(b + i)
+                kstate.set8(b + i, kstate.get8(b + n - 1 - i) as u8)
+                kstate.set8(b + n - 1 - i, x as u8)
+                i = i + 1
+            }
+            if inet.sock_sendto(state, u, b, n, from, fport) <= CHUNK {
+                sent = sent + 1
+            }
+            idle = 0
+        } else {
+            idle = idle + 1
+            sched.sleep_ticks(state, 1)
+        }
+    }
+    kv((&s_b[0]) as u64, got)
+    kv((&s_s[0]) as u64, sent)
+    inet.sock_close(state, u)
+    report(state)
+}
+
+// ---------------------------------------------------------- helpers
+
+fn listen_on(state: u64, port: u64) -> u64 {
+    let l: u64 = inet.sock_new(state, inet.SK_TCP)
+    if l >= inet.SOCK_MAX {
+        return inet.SOCK_MAX
+    }
+    if inet.sock_bind(state, l, port) != 0 {
+        return inet.SOCK_MAX
+    }
+    if inet.sock_listen(state, l, 4) != 0 {
+        return inet.SOCK_MAX
+    }
+    return l
+}
+
+fn accept_one(state: u64, l: u64) -> u64 {
+    var spin: u64 = 0
+    while spin < WAIT_LIMIT {
+        let c: u64 = inet.sock_accept(state, l)
+        if c < inet.SOCK_MAX {
+            return c
+        }
+        spin = spin + 1
+        sched.sleep_ticks(state, 1)
+    }
+    return inet.SOCK_MAX
+}
+
+fn write_all(state: u64, c: u64, src: u64, n: u64) -> u64 {
+    var off: u64 = 0
+    var guard: u64 = 0
+    while off < n && guard < 500 {
+        let w: u64 = inet.sock_send(state, c, src + off, n - off)
+        if w > n {
+            guard = guard + 1
+            sched.sleep_ticks(state, 1)
+        } else {
+            off = off + w
+            guard = 0
+        }
+    }
+    return off
+}
+
+// Long enough for a FIN to be acknowledged and for TIME_WAIT to be
+// entered. Not a `close` that is followed by the machine switching
+// itself off -- that is a reset as far as the other side is concerned,
+// and `curl` reports it as one.
+fn settle(state: u64, ticks: u64) {
+    var i: u64 = 0
+    while i < ticks {
+        sched.sleep_ticks(state, 1)
+        i = i + 1
+    }
+}
+
+// What the run really did, in the counters of the driver and of the
+// stack. This is the part `tools/net/run.sh` compares between a run with
+// the driver and the counter-check without it.
+fn report(state: u64) {
+    var s_rx: [u8; 12] = "nic: rx_f=\0\0"
+    var s_tx: [u8; 12] = "nic: tx_f=\0\0"
+    var s_rxb: [u8; 12] = "nic: rx_o=\0\0"
+    var s_txb: [u8; 12] = "nic: tx_o=\0\0"
+    var s_irq: [u8; 12] = "nic: irqs=\0\0"
+    var s_drop: [u8; 13] = "nic: drops=\0\0"
+    var s_kick: [u8; 13] = "nic: kicks=\0\0"
+    var s_pump: [u8; 13] = "nic: pumps=\0\0"
+    var s_in: [u8; 15] = "nic: to_stack=\0"
+    var s_out: [u8; 17] = "nic: from_stack=\0"
+    var s_arp: [u8; 15] = "nic: arp_seen=\0"
+    var s_icmp: [u8; 12] = "nic: icmp=\0\0"
+    var s_rexmit: [u8; 14] = "nic: rexmit=\0\0"
+    var s_ooo: [u8; 11] = "nic: ooo=\0\0"
+    var s_csum: [u8; 12] = "nic: csum=\0\0"
+    var s_dup: [u8; 15] = "nic: fast_rex=\0"
+    kv((&s_rx[0]) as u64, virtio.rx_frames(state))
+    kv((&s_tx[0]) as u64, virtio.tx_frames(state))
+    kv((&s_rxb[0]) as u64, virtio.rx_octets(state))
+    kv((&s_txb[0]) as u64, virtio.tx_octets(state))
+    kv((&s_irq[0]) as u64, virtio.irqs(state))
+    kv((&s_drop[0]) as u64, virtio.tx_drops(state))
+    kv((&s_kick[0]) as u64, virtio.notified(state))
+    kv((&s_pump[0]) as u64, inet.pumps(state))
+    kv((&s_in[0]) as u64, inet.frames_in(state))
+    kv((&s_out[0]) as u64, inet.frames_out(state))
+    // The counters of the stack itself: `NS_ARP_RX` is 3, `NS_ICMP` 8.
+    kv((&s_arp[0]) as u64, inet.stat(state, 3))
+    kv((&s_icmp[0]) as u64, inet.stat(state, 8))
+    // And of TCP: `ST_REXMIT` 2, `ST_CSUM` 3, `ST_OOO` 5, `ST_FAST` 8.
+    kv((&s_rexmit[0]) as u64, inet.tcp_stat(state, 2))
+    kv((&s_csum[0]) as u64, inet.tcp_stat(state, 3))
+    kv((&s_ooo[0]) as u64, inet.tcp_stat(state, 5))
+    kv((&s_dup[0]) as u64, inet.tcp_stat(state, 8))
+}

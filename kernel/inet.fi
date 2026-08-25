@@ -1,0 +1,1135 @@
+// kernel/inet.fi -- round K8: the seam between the card and the stack.
+//
+// Round K3 wrote a TCP/IP stack with exactly two doors downwards --
+// `net_input(s, frame, n, now)` and `net_output(s, buf, cap, now)` -- and
+// nothing under them. Round K8 wrote `virtio.fi`, which has frames and
+// no idea what they mean. This file is the twenty lines the K3 comment
+// promised, plus everything that turned out not to be twenty lines:
+//
+//   * WHOSE MEMORY. `stack.Stack` is 1 125 520 octets, and Firn has no
+//     global variables (SPEC 14.1 item 5). So it lives in a run of
+//     frames the kernel allocates once and hands over as a pointer --
+//     exactly the way `kstate.fi` solved the same problem in round 59.
+//   * WHOSE CLOCK. The stack asks for microseconds. The kernel's tick is
+//     a hundredth of a second, which would quantise every round-trip
+//     measurement to 10 000 us. The local APIC's TSC is read instead and
+//     divided by the frequency round K2 measured.
+//   * WHOSE THREAD. `net_input` and `net_output` may not run at the same
+//     time as `net_send` out of a system call -- one struct, two
+//     writers. There is one lock (`atomic.L_NET`) and it is held with
+//     interrupts off, the same discipline round K5 gave the run queue
+//     and the file system.
+//   * WHOSE TURN. A pump that only runs inside system calls answers no
+//     `ping` while the shell waits for a key. So there is a kernel task
+//     of its own (`K_NETD`, body in `tasks.fi`), and it is the ONLY
+//     caller of `net_input`/`net_output`.
+//
+// THE ONE THING THE STACK HAS NO DOOR FOR is a datagram that is neither
+// TCP nor UDP. It answers an ICMP echo REQUEST -- that is why a `ping`
+// from the host works with nothing in this file -- but it cannot SEND
+// one, and `ping` on Osum has to. The ARP cache that would give the
+// hardware address for it is private to `stack.fi` as well
+// (`arp_slot_mac` is not exported). Rather than change the vendored
+// library -- which would be the copy this round exists to avoid -- the
+// ICMP path is built HERE, on top of `net.wire`, which is the same
+// module the stack itself uses for every header. It has a hardware
+// address cache of its own with eight entries, fed from every frame that
+// comes in; that is a duplication of forty octets of state and it is
+// written down rather than hidden.
+//
+// THE SOCKETS ARE POSIX SOCKETS, in `kernel/sys.fi` with the numbers of
+// Linux x86-64 (socket 41, connect 42, accept 43, sendto 44, recvfrom
+// 45, shutdown 48, bind 49, listen 50, getsockname 51, getpeername 52).
+// A socket is an entry of the OPEN FILE TABLE of round K4 with kind
+// `file.K_SOCK`, so `read`, `write`, `close`, `dup2` and `fork` work on
+// it without any of them learning what a socket is.
+//
+//   AF_INET + SOCK_STREAM              -> TCP, the stack of round K3
+//   AF_INET + SOCK_DGRAM               -> UDP, ditto
+//   AF_INET + SOCK_DGRAM, IPPROTO_ICMP -> the "ping socket" Linux has
+//                                         had since 3.0, and what
+//                                         /bin/ping uses here
+
+import kstate
+import mem
+import serial
+import atomic
+import cpu
+import sched
+import virtio
+import errno
+import apic
+import pci
+import net.wire
+import net.tcp
+import net.stack
+
+export {
+    init, ready, pump, netd_body, wake, configure, us, set_task,
+    ip, mask, gw, mac_at, stat, pumps, frames_in, frames_out,
+    bounce, saddr,
+    tcp_stat, task_slot, print_state,
+    sock_new, sock_free, sock_kind, sock_handle,
+    sock_bind, sock_listen, sock_accept, sock_connect,
+    sock_send, sock_recv, sock_sendto, sock_recvfrom,
+    sock_close, sock_shutdown, sock_state, sock_peer, sock_local,
+    sock_readable, sock_writable, sock_error,
+    sock_nonblock, sock_set_nonblock,
+    SK_FREE, SK_TCP, SK_UDP, SK_ICMP, SOCK_MAX,
+    SF_LISTEN, SF_NONBLOCK, SF_CONNECTED
+}
+
+// ------------------------------------------- the K8 part of the scalars
+//
+// `pci.K2_SCALARS` reaches to 0x14000; 0x200..0x2F8 is `virtio.fi`.
+// Round K8's seam takes 0x300 upwards.
+const S_STACK: u64 = 0x300
+const S_READY: u64 = 0x308
+const S_IP: u64 = 0x310
+const S_MASK: u64 = 0x318
+const S_GW: u64 = 0x320
+const S_PUMPS: u64 = 0x328
+const S_IN: u64 = 0x330
+const S_OUT: u64 = 0x338
+const S_TASK: u64 = 0x340
+const S_SCRATCH: u64 = 0x348
+const S_KICK: u64 = 0x350
+const S_HOT: u64 = 0x358
+const S_ICMP_HEAD: u64 = 0x360
+const S_ICMP_TAIL: u64 = 0x368
+const S_ARPN: u64 = 0x370
+const S_ECHOES: u64 = 0x378
+const S_SEQ: u64 = 0x380
+const S_TSCDIV: u64 = 0x388
+const S_SOCKS: u64 = 0x390
+const S_BOUNCE: u64 = 0x398
+const S_SADDR: u64 = 0x3F0
+
+// The socket table, the shadow address cache and the queue of ICMP
+// answers -- all three in the same page-sized area, all three fixed.
+// All three are offsets in `pci.K2_SCALARS`, like every scalar above --
+// they go through `sc()` and not through `state` directly. The page
+// reaches to 0x14000 (where the NVMe queues of round K2 begin), so
+// 0x400 + 0x400 + 0x100 + 0x400 of tables fit into it with room to
+// spare.
+const SOCK_OFF: u64 = 0x400
+const SOCK_BYTES: u64 = 32
+const SOCK_MAX: u64 = 16
+
+const ARP_OFF: u64 = 0x600
+const ARP_BYTES: u64 = 16
+const ARP_MAX: u64 = 8
+
+const ICMP_OFF: u64 = 0x700
+const ICMP_BYTES: u64 = 256
+const ICMP_SLOTS: u64 = 4
+const ICMP_MAX: u64 = 192 // what fits in a slot beside the two words
+
+// The fields of a socket.
+const SO_KIND: u64 = 0
+const SO_H: u64 = 8 // the handle in the stack, or NOHANDLE
+const SO_PORT: u64 = 16
+const SO_FLAGS: u64 = 24
+
+const SK_FREE: u64 = 0
+const SK_TCP: u64 = 1
+const SK_UDP: u64 = 2
+const SK_ICMP: u64 = 3
+
+const SF_LISTEN: u64 = 1
+const SF_NONBLOCK: u64 = 2
+const SF_CONNECTED: u64 = 4
+
+const NOHANDLE: u64 = 0xFFFFFFFF
+
+// How many frames one turn of the pump moves before it lets go of the
+// lock. Bounded on purpose: the lock is held with interrupts off, and an
+// unbounded loop there would be a timer that stops while a megabyte
+// arrives.
+const PUMP_BATCH: u64 = 32
+
+// How long netd goes on spinning after the last frame before it lies
+// down. 4000 turns of the run queue is far less than a tick and it keeps
+// the answer time at the length of a context switch while anything at
+// all is going on; when the wire is quiet the task sleeps and the
+// machine reaches `hlt` again.
+const HOT_TURNS: u64 = 4000
+
+const FRAME_CAP: u64 = 1600
+
+fn sc(off: u64) -> u64 {
+    return pci.K2_SCALARS + off
+}
+
+fn ready(state: u64) -> bool {
+    return kstate.get(state, sc(S_READY)) != 0
+}
+
+fn ip(state: u64) -> u64 {
+    return kstate.get(state, sc(S_IP))
+}
+
+fn mask(state: u64) -> u64 {
+    return kstate.get(state, sc(S_MASK))
+}
+
+fn gw(state: u64) -> u64 {
+    return kstate.get(state, sc(S_GW))
+}
+
+fn mac_at(state: u64, i: u64) -> u64 {
+    return virtio.mac_at(state, i)
+}
+
+fn pumps(state: u64) -> u64 {
+    return kstate.get(state, sc(S_PUMPS))
+}
+
+fn frames_in(state: u64) -> u64 {
+    return kstate.get(state, sc(S_IN))
+}
+
+fn frames_out(state: u64) -> u64 {
+    return kstate.get(state, sc(S_OUT))
+}
+
+fn bounce(state: u64) -> u64 {
+    return kstate.get(state, sc(S_BOUNCE))
+}
+
+fn saddr(state: u64) -> u64 {
+    return kstate.get(state, sc(S_SADDR))
+}
+
+fn task_slot(state: u64) -> u64 {
+    return kstate.get(state, sc(S_TASK))
+}
+
+fn set_task(state: u64, t: u64) {
+    kstate.set(state, sc(S_TASK), t)
+}
+
+// The clock the measurements are printed in. Microseconds out of the
+// TSC that round K2 measured, or the 100 Hz tick when there is no APIC.
+fn us(state: u64) -> u64 {
+    return now_us(state)
+}
+
+fn st(state: u64) -> *mut stack.Stack {
+    return kstate.get(state, sc(S_STACK)) as *mut stack.Stack
+}
+
+fn stat(state: u64, which: u64) -> u64 {
+    if !ready(state) {
+        return 0
+    }
+    return stack.net_stat(st(state), (which & 0xFFFFFFFF) as u32)
+}
+
+fn tcp_stat(state: u64, which: u64) -> u64 {
+    if !ready(state) {
+        return 0
+    }
+    return tcp.tcp_stat(stack.net_tcp(st(state)), (which & 0xFFFFFFFF) as u32)
+}
+
+// ------------------------------------------------------------ the clock
+//
+// Microseconds, because that is what the stack asks for. The tick of the
+// kernel is 10 000 of them; the TSC that round K2 measured is finer, and
+// the divisor is computed once so that this is a division and not a
+// multiplication that could run over.
+fn now_us(state: u64) -> u64 {
+    let div: u64 = kstate.get(state, sc(S_TSCDIV))
+    if div == 0 {
+        return kstate.get(state, kstate.TICKS) * 10000
+    }
+    return apic.tsc() / div
+}
+
+// ------------------------------------------------------------- the lock
+
+fn hold(state: u64) -> u64 {
+    let flags: u64 = sched.irq_save()
+    atomic.lock_take(state, atomic.L_NET, cpu.here(state))
+    return flags
+}
+
+fn drop_lock(state: u64, flags: u64) {
+    atomic.lock_give(state, atomic.L_NET)
+    sched.irq_restore(flags)
+}
+
+// ------------------------------------------------------------- the init
+
+// `seed` is what the initial sequence number is derived from. It is the
+// TSC and not a constant: two Osum machines that boot with the same ISN
+// would be two machines a stale segment can be delivered to.
+fn init(state: u64, a: u64, b: u64, c: u64, d: u64, prefix: u64,
+    gateway: u64) -> bool {
+    kstate.set(state, sc(S_READY), 0)
+    if !virtio.ready(state) {
+        return false
+    }
+    let hz: u64 = apic.tsc_hz(state)
+    if hz > 1000000 {
+        kstate.set(state, sc(S_TSCDIV), hz / 1000000)
+    }
+    let pages: u64 = (stack.net_size() as u64 + mem.FRAME_SIZE - 1)
+        / mem.FRAME_SIZE
+    // Three pages more than the struct, and each of them has one job:
+    //
+    //   +0  what `net_output` writes a frame into. Touched by the
+    //       network task only, and only while it holds the lock.
+    //   +1  where a system call puts what it copied out of ring 3, and
+    //       what it will copy back into it. The kernel never hands an
+    //       address of a process to the stack.
+    //   +2  the two `sockaddr_in` of a call, in and out.
+    //
+    // The bounce page is ONE page for the whole system, the same way
+    // `kstate.BLOCK_OFF` has been one page for every file operation
+    // since round 62. Two processes in `sendto` at the same instant
+    // would share it; that is the shape this kernel has, and it is
+    // written down here rather than left to be discovered.
+    let base: u64 = mem.frame_run(state, pages + 3)
+    if base == 0 {
+        return false
+    }
+    kstate.set(state, sc(S_STACK), base)
+    kstate.set(state, sc(S_SCRATCH), base + pages * mem.FRAME_SIZE)
+    kstate.set(state, sc(S_BOUNCE), base + (pages + 1) * mem.FRAME_SIZE)
+    kstate.set(state, sc(S_SADDR), base + (pages + 2) * mem.FRAME_SIZE)
+    var z: u64 = 0
+    while z < (pages + 3) * mem.FRAME_SIZE {
+        __mmio_write64((base + z) as *mut u64, 0)
+        z = z + 8
+    }
+
+    var m: [u8; 6] = [0 as u8; 6]
+    var i: u64 = 0
+    while i < 6 {
+        m[i as usize] = virtio.mac_at(state, i) as u8
+        i = i + 1
+    }
+    let own: u32 = wire.ip4(a as u8, b as u8, c as u8, d as u8)
+    var netmask: u32 = 0
+    if prefix >= 32 {
+        netmask = 0xFFFFFFFF
+    } else if prefix > 0 {
+        netmask = ((0xFFFFFFFF << (32 - prefix)) & 0xFFFFFFFF) as u32
+    }
+    var seed: u64 = apic.tsc()
+    if seed == 0 {
+        seed = 20260825
+    }
+    stack.net_init(st(state), own, netmask, (gateway & 0xFFFFFFFF) as u32,
+        &m[0], seed)
+    kstate.set(state, sc(S_IP), own as u64)
+    kstate.set(state, sc(S_MASK), netmask as u64)
+    kstate.set(state, sc(S_GW), gateway)
+    kstate.set(state, sc(S_SEQ), 1)
+    kstate.set(state, sc(S_READY), 1)
+    return true
+}
+
+// The address, after the fact -- `tools/net/run.sh` hands it in on the
+// command line so that one kernel image can be measured on several
+// wires.
+fn configure(state: u64, a: u64, b: u64, c: u64, d: u64, prefix: u64,
+    gateway: u64) -> bool {
+    return init(state, a, b, c, d, prefix, gateway)
+}
+
+// ---------------------------------------------------------- the pump
+
+// One turn: everything the card has, into the stack; everything the
+// stack has, onto the card. Returns how many frames moved in either
+// direction, which is what netd uses to decide whether to spin or sleep.
+//
+// THIS IS THE ONLY PLACE `net_input` AND `net_output` ARE CALLED.
+fn pump(state: u64) -> u64 {
+    if !ready(state) {
+        return 0
+    }
+    let flags: u64 = hold(state)
+    let s: *mut stack.Stack = st(state)
+    let now: u64 = now_us(state)
+    var work: u64 = 0
+
+    var frame: u64 = 0
+    var slot: u64 = 0
+    var n: u64 = 0
+    while n < PUMP_BATCH {
+        let len: u64 = virtio.rx_take(state, &frame, &slot)
+        if len == 0 {
+            n = PUMP_BATCH
+        } else {
+            learn(state, frame, len)
+            icmp_catch(state, frame, len)
+            stack.net_input(s, frame as *mut u8, len as usize, now)
+            virtio.rx_recycle(state, slot)
+            kstate.add(state, sc(S_IN), 1)
+            work = work + 1
+            n = n + 1
+        }
+    }
+
+    stack.net_poll(s, now)
+
+    let out: u64 = kstate.get(state, sc(S_SCRATCH))
+    n = 0
+    while n < PUMP_BATCH {
+        if virtio.tx_room(state) == 0 {
+            n = PUMP_BATCH
+        } else {
+            let len: usize = stack.net_output(s, out as *mut u8,
+                FRAME_CAP as usize, now)
+            if len == 0 {
+                n = PUMP_BATCH
+            } else {
+                virtio.tx_frame(state, out, len as u64)
+                kstate.add(state, sc(S_OUT), 1)
+                work = work + 1
+                n = n + 1
+            }
+        }
+    }
+    kstate.add(state, sc(S_PUMPS), 1)
+    drop_lock(state, flags)
+    return work
+}
+
+// The body of the K_NETD task, called out of `tasks.main`. It is a task
+// and not a loop in `kmain` for the reason at the top of this file: a
+// `ping` from the host has to be answered while every process in the
+// system is waiting for something else.
+fn netd_body(state: u64, index: u64) {
+    var hot: u64 = HOT_TURNS
+    var seen: u64 = 0
+    while true {
+        let w: u64 = pump(state)
+        let kick: u64 = kstate.get(state, sc(S_KICK))
+        if w > 0 || kick != seen {
+            hot = HOT_TURNS
+            seen = kick
+        }
+        sched.tset(state, index, sched.T_WORK,
+            kstate.get(state, sc(S_PUMPS)))
+        if hot > 0 {
+            hot = hot - 1
+            sched.yield_now(state)
+        } else {
+            sched.sleep_ticks(state, 1)
+        }
+    }
+}
+
+// Called out of the interrupt handler. It does not touch the stack and
+// it does not take the lock -- one store, so that netd notices on its
+// next turn that the wire is alive again.
+fn wake(state: u64) {
+    kstate.add(state, sc(S_KICK), 1)
+}
+
+// ------------------------------------- the shadow cache of hardware
+//
+// Forty octets of duplication, and the reason is at the top: the ARP
+// cache in `stack.fi` is private, and the raw ICMP path needs a
+// destination address. Every frame that comes in is looked at once --
+// an ARP reply for the pairing it announces, an IPv4 frame for the
+// pairing it demonstrates.
+
+fn arp_at(i: u64) -> u64 {
+    return sc(ARP_OFF + i * ARP_BYTES)
+}
+
+fn learn(state: u64, f: u64, n: u64) {
+    if n < 14 {
+        return
+    }
+    var src: u64 = 0
+    let et: u64 = wire.eth_type(f as *mut u8) as u64
+    if et == wire.ETYPE_ARP as u64 {
+        if n < 14 + wire.ARP_LEN as u64 {
+            return
+        }
+        src = wire.arp_spa(((f + 14) as *mut u8)) as u64
+    } else if et == wire.ETYPE_IP4 as u64 {
+        if n < 14 + 20 {
+            return
+        }
+        src = wire.ip_src(((f + 14) as *mut u8)) as u64
+    } else {
+        return
+    }
+    if src == 0 {
+        return
+    }
+    // Six octets of the sender's hardware address sit at offset 6 of
+    // every Ethernet frame there has ever been.
+    var mac: u64 = 0
+    var i: u64 = 0
+    while i < 6 {
+        mac = mac | (__mmio_read8((f + 6 + i) as *mut u8) as u64 << (i * 8))
+        i = i + 1
+    }
+    var slot: u64 = ARP_MAX
+    i = 0
+    while i < ARP_MAX {
+        if kstate.get(state, arp_at(i)) == src {
+            slot = i
+            i = ARP_MAX
+        } else {
+            i = i + 1
+        }
+    }
+    if slot == ARP_MAX {
+        slot = kstate.get(state, sc(S_ARPN)) % ARP_MAX
+        kstate.set(state, sc(S_ARPN), slot + 1)
+    }
+    kstate.set(state, arp_at(slot), src)
+    kstate.set(state, arp_at(slot) + 8, mac)
+}
+
+// The hardware address for an IP, or 0.
+fn arp_look(state: u64, target: u64) -> u64 {
+    var i: u64 = 0
+    while i < ARP_MAX {
+        if kstate.get(state, arp_at(i)) == target {
+            return kstate.get(state, arp_at(i) + 8)
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+// An ARP request, built and put on the wire without the stack: it is a
+// broadcast, so it needs no hardware address to be sent, which is the
+// whole point of ARP.
+fn arp_ask(state: u64, target: u64) {
+    var f: [u8; 64] = [0 as u8; 64]
+    var me: [u8; 6] = [0 as u8; 6]
+    var zero: [u8; 6] = [0 as u8; 6]
+    var bc: [u8; 6] = [0 as u8; 6]
+    var i: u64 = 0
+    while i < 6 {
+        me[i as usize] = virtio.mac_at(state, i) as u8
+        i = i + 1
+    }
+    wire.mac_broadcast(&bc[0])
+    wire.eth_build(&f[0], &bc[0], &me[0], wire.ETYPE_ARP)
+    wire.arp_build(&f[14], wire.ARP_REQUEST, &me[0],
+        (ip(state) & 0xFFFFFFFF) as u32, &zero[0],
+        (target & 0xFFFFFFFF) as u32)
+    virtio.tx_frame(state, (&f[0]) as u64, 14 + wire.ARP_LEN as u64)
+}
+
+// --------------------------------------------------------- ICMP echo
+//
+// The stack answers an echo REQUEST itself; what it does not do is send
+// one or keep an echo REPLY. Both happen here.
+
+fn icmp_at(i: u64) -> u64 {
+    return sc(ICMP_OFF + (i % ICMP_SLOTS) * ICMP_BYTES)
+}
+
+// Every incoming frame is looked at once more: an IPv4 datagram, ICMP,
+// type 0, for us. What is kept is the sender and the ICMP message
+// itself, from its type octet on -- exactly what a `recvfrom` on a ping
+// socket gives back on Linux.
+fn icmp_catch(state: u64, f: u64, n: u64) {
+    if n < 14 + 20 + 8 {
+        return
+    }
+    if wire.eth_type(f as *mut u8) != wire.ETYPE_IP4 {
+        return
+    }
+    let d: u64 = f + 14
+    if wire.ip_proto(d as *mut u8) != wire.IP_ICMP {
+        return
+    }
+    if wire.ip_dst(d as *mut u8) as u64 != ip(state) {
+        return
+    }
+    let ihl: u64 = wire.ip_ihl(d as *mut u8) as u64
+    if ihl < 20 {
+        return
+    }
+    let icmp: u64 = d + ihl
+    if wire.icmp_type(icmp as *mut u8) != wire.ICMP_ECHO_REPLY {
+        return
+    }
+    var len: u64 = wire.ip_total(d as *mut u8) as u64
+    if len <= ihl {
+        return
+    }
+    len = len - ihl
+    if len > ICMP_MAX {
+        len = ICMP_MAX
+    }
+    let tail: u64 = kstate.get(state, sc(S_ICMP_TAIL))
+    let a: u64 = icmp_at(tail)
+    kstate.set(state, a, wire.ip_src(d as *mut u8) as u64)
+    kstate.set(state, a + 8, len)
+    var i: u64 = 0
+    while i < len {
+        kstate.set8(state + a + 16 + i,
+            __mmio_read8((icmp + i) as *mut u8))
+        i = i + 1
+    }
+    kstate.set(state, sc(S_ICMP_TAIL), tail + 1)
+    kstate.add(state, sc(S_ECHOES), 1)
+}
+
+// An ICMP message, built and sent. `body` is what ring 3 handed over --
+// type, code, a checksum field it may have left at zero, and the rest.
+// The checksum is computed HERE and not trusted, the same way Linux's
+// ping socket does it.
+fn icmp_send(state: u64, dst: u64, body: u64, n: u64) -> u64 {
+    if n < 8 || n > ICMP_MAX {
+        return errno.neg(errno.E_INVAL)
+    }
+    let hw: u64 = arp_look(state, dst)
+    if hw == 0 {
+        arp_ask(state, dst)
+        return errno.neg(errno.E_AGAIN)
+    }
+    var f: [u8; 256] = [0 as u8; 256]
+    var me: [u8; 6] = [0 as u8; 6]
+    var peer: [u8; 6] = [0 as u8; 6]
+    var i: u64 = 0
+    while i < 6 {
+        me[i as usize] = virtio.mac_at(state, i) as u8
+        peer[i as usize] = ((hw >> (i * 8)) & 0xFF) as u8
+        i = i + 1
+    }
+    wire.eth_build(&f[0], &peer[0], &me[0], wire.ETYPE_IP4)
+    i = 0
+    while i < n {
+        f[(34 + i) as usize] = kstate.get8(body + i) as u8
+        i = i + 1
+    }
+    // The checksum field of the message itself, zeroed before it is
+    // computed -- RFC 792, and the reason a stack that forgets it gets
+    // silence back.
+    f[36] = 0 as u8
+    f[37] = 0 as u8
+    let sum: u16 = wire.checksum(&f[34], n as usize)
+    wire.put16(&f[0], 36 as usize, sum)
+    let seq: u64 = kstate.add(state, sc(S_SEQ), 1)
+    wire.ip_build(&f[14], (seq & 0xFFFF) as u16, wire.IP_ICMP,
+        (ip(state) & 0xFFFFFFFF) as u32, (dst & 0xFFFFFFFF) as u32,
+        n as usize)
+    if !virtio.tx_frame(state, (&f[0]) as u64, 14 + 20 + n) {
+        return errno.neg(errno.E_AGAIN)
+    }
+    return n
+}
+
+fn icmp_take(state: u64, dst: u64, cap: u64, from: *mut u64) -> u64 {
+    let head: u64 = kstate.get(state, sc(S_ICMP_HEAD))
+    if head == kstate.get(state, sc(S_ICMP_TAIL)) {
+        return errno.neg(errno.E_AGAIN)
+    }
+    let a: u64 = icmp_at(head)
+    *from = kstate.get(state, a)
+    var len: u64 = kstate.get(state, a + 8)
+    if len > cap {
+        len = cap
+    }
+    var i: u64 = 0
+    while i < len {
+        kstate.set8(dst + i, kstate.get8(state + a + 16 + i) as u8)
+        i = i + 1
+    }
+    kstate.set(state, sc(S_ICMP_HEAD), head + 1)
+    return len
+}
+
+// ------------------------------------------------------- the sockets
+
+fn so_at(i: u64) -> u64 {
+    return sc(SOCK_OFF + i * SOCK_BYTES)
+}
+
+fn sock_kind(state: u64, i: u64) -> u64 {
+    if i >= SOCK_MAX {
+        return SK_FREE
+    }
+    return kstate.get(state, so_at(i) + SO_KIND)
+}
+
+fn sock_handle(state: u64, i: u64) -> u64 {
+    if i >= SOCK_MAX {
+        return NOHANDLE
+    }
+    return kstate.get(state, so_at(i) + SO_H)
+}
+
+fn sock_flags(state: u64, i: u64) -> u64 {
+    return kstate.get(state, so_at(i) + SO_FLAGS)
+}
+
+fn sock_nonblock(state: u64, i: u64) -> bool {
+    if i >= SOCK_MAX {
+        return false
+    }
+    return (kstate.get(state, so_at(i) + SO_FLAGS) & SF_NONBLOCK) != 0
+}
+
+fn sock_set_nonblock(state: u64, i: u64) {
+    if i >= SOCK_MAX {
+        return
+    }
+    kstate.set(state, so_at(i) + SO_FLAGS,
+        kstate.get(state, so_at(i) + SO_FLAGS) | SF_NONBLOCK)
+}
+
+fn sock_new(state: u64, kind: u64) -> u64 {
+    var i: u64 = 0
+    while i < SOCK_MAX {
+        if kstate.get(state, so_at(i) + SO_KIND) == SK_FREE {
+            kstate.set(state, so_at(i) + SO_KIND, kind)
+            kstate.set(state, so_at(i) + SO_H, NOHANDLE)
+            kstate.set(state, so_at(i) + SO_PORT, 0)
+            kstate.set(state, so_at(i) + SO_FLAGS, 0)
+            kstate.add(state, sc(S_SOCKS), 1)
+            return i
+        }
+        i = i + 1
+    }
+    return SOCK_MAX
+}
+
+fn sock_free(state: u64, i: u64) {
+    if i >= SOCK_MAX {
+        return
+    }
+    kstate.set(state, so_at(i) + SO_KIND, SK_FREE)
+    kstate.set(state, so_at(i) + SO_H, NOHANDLE)
+    kstate.set(state, so_at(i) + SO_PORT, 0)
+    kstate.set(state, so_at(i) + SO_FLAGS, 0)
+}
+
+fn sock_bind(state: u64, i: u64, port: u64) -> u64 {
+    let k: u64 = sock_kind(state, i)
+    if k == SK_FREE {
+        return errno.neg(errno.E_BADF)
+    }
+    if port > 65535 {
+        return errno.neg(errno.E_INVAL)
+    }
+    if k == SK_UDP {
+        let flags: u64 = hold(state)
+        let h: i32 = stack.udp_bind(st(state), (port & 0xFFFF) as u16)
+        drop_lock(state, flags)
+        if h < 0 {
+            return errno.neg(errno.E_ADDRINUSE)
+        }
+        kstate.set(state, so_at(i) + SO_H, h as u64)
+    }
+    kstate.set(state, so_at(i) + SO_PORT, port)
+    return 0
+}
+
+fn sock_listen(state: u64, i: u64, backlog: u64) -> u64 {
+    if sock_kind(state, i) != SK_TCP {
+        return errno.neg(errno.E_OPNOTSUPP)
+    }
+    let port: u64 = kstate.get(state, so_at(i) + SO_PORT)
+    if port == 0 {
+        return errno.neg(errno.E_INVAL)
+    }
+    let flags: u64 = hold(state)
+    let h: i32 = stack.net_listen(st(state), (port & 0xFFFF) as u16)
+    drop_lock(state, flags)
+    if h < 0 {
+        return errno.neg(errno.E_ADDRINUSE)
+    }
+    kstate.set(state, so_at(i) + SO_H, h as u64)
+    kstate.set(state, so_at(i) + SO_FLAGS, sock_flags(state, i) | SF_LISTEN)
+    return 0
+}
+
+// ONE attempt. The waiting is done by `sys.fi`, which is the layer that
+// knows whether the descriptor was asked for in blocking mode -- and the
+// layer that may sleep. Nothing in this file sleeps while it holds the
+// lock.
+fn sock_accept(state: u64, i: u64) -> u64 {
+    if sock_kind(state, i) != SK_TCP {
+        return errno.neg(errno.E_OPNOTSUPP)
+    }
+    let l: u64 = sock_handle(state, i)
+    if l == NOHANDLE || (sock_flags(state, i) & SF_LISTEN) == 0 {
+        return errno.neg(errno.E_INVAL)
+    }
+    let flags: u64 = hold(state)
+    let h: i32 = stack.net_accept(st(state), l as i32)
+    drop_lock(state, flags)
+    if h < 0 {
+        return errno.neg(errno.E_AGAIN)
+    }
+    let n: u64 = sock_new(state, SK_TCP)
+    if n >= SOCK_MAX {
+        let f2: u64 = hold(state)
+        stack.net_abort(st(state), h)
+        drop_lock(state, f2)
+        return errno.neg(errno.E_NFILE)
+    }
+    kstate.set(state, so_at(n) + SO_H, h as u64)
+    kstate.set(state, so_at(n) + SO_FLAGS, SF_CONNECTED)
+    return n
+}
+
+fn sock_connect(state: u64, i: u64, addr: u64, port: u64) -> u64 {
+    let k: u64 = sock_kind(state, i)
+    if k == SK_FREE {
+        return errno.neg(errno.E_BADF)
+    }
+    if k != SK_TCP {
+        // A connected datagram socket only remembers where it sends to.
+        kstate.set(state, so_at(i) + SO_PORT, port)
+        kstate.set(state, so_at(i) + SO_FLAGS,
+            sock_flags(state, i) | SF_CONNECTED)
+        return 0
+    }
+    if sock_handle(state, i) != NOHANDLE {
+        return errno.neg(errno.E_ISCONN)
+    }
+    let flags: u64 = hold(state)
+    let h: i32 = stack.net_connect(st(state), (addr & 0xFFFFFFFF) as u32,
+        (port & 0xFFFF) as u16, now_us(state))
+    drop_lock(state, flags)
+    if h < 0 {
+        return errno.neg(errno.E_NFILE)
+    }
+    kstate.set(state, so_at(i) + SO_H, h as u64)
+    return 0
+}
+
+// The state of a TCP socket, in the numbers of `net.tcp`.
+fn sock_state(state: u64, i: u64) -> u64 {
+    if sock_kind(state, i) != SK_TCP {
+        return tcp.S_CLOSED as u64
+    }
+    let h: u64 = sock_handle(state, i)
+    if h == NOHANDLE {
+        return tcp.S_CLOSED as u64
+    }
+    let flags: u64 = hold(state)
+    let s: u32 = stack.net_state(st(state), h as i32)
+    drop_lock(state, flags)
+    return s as u64
+}
+
+fn sock_error(state: u64, i: u64) -> u64 {
+    let h: u64 = sock_handle(state, i)
+    if sock_kind(state, i) != SK_TCP || h == NOHANDLE {
+        return 0
+    }
+    let flags: u64 = hold(state)
+    let e: i32 = stack.net_error(st(state), h as i32)
+    drop_lock(state, flags)
+    if e == tcp.E_RESET {
+        return errno.E_CONNRESET
+    }
+    if e == tcp.E_REFUSED {
+        return errno.E_CONNREFUSED
+    }
+    if e == tcp.E_TIMEOUT {
+        return errno.E_TIMEDOUT
+    }
+    return 0
+}
+
+fn sock_readable(state: u64, i: u64) -> u64 {
+    let h: u64 = sock_handle(state, i)
+    let k: u64 = sock_kind(state, i)
+    if h == NOHANDLE {
+        if k == SK_ICMP {
+            return kstate.get(state, sc(S_ICMP_TAIL))
+                - kstate.get(state, sc(S_ICMP_HEAD))
+        }
+        return 0
+    }
+    if k != SK_TCP {
+        return 0
+    }
+    let flags: u64 = hold(state)
+    let n: usize = stack.net_readable(st(state), h as i32)
+    drop_lock(state, flags)
+    return n as u64
+}
+
+fn sock_writable(state: u64, i: u64) -> u64 {
+    let h: u64 = sock_handle(state, i)
+    if sock_kind(state, i) != SK_TCP || h == NOHANDLE {
+        return 0
+    }
+    let flags: u64 = hold(state)
+    let n: usize = stack.net_writable(st(state), h as i32)
+    drop_lock(state, flags)
+    return n as u64
+}
+
+// `src` and `dst` are addresses in the KERNEL's data area -- `sys.fi`
+// has already copied them out of ring 3 and checked every page. Nothing
+// in this file ever sees an address of a process.
+fn sock_send(state: u64, i: u64, src: u64, n: u64) -> u64 {
+    let k: u64 = sock_kind(state, i)
+    if k == SK_FREE {
+        return errno.neg(errno.E_BADF)
+    }
+    if k == SK_TCP {
+        let h: u64 = sock_handle(state, i)
+        if h == NOHANDLE {
+            return errno.neg(errno.E_NOTCONN)
+        }
+        let e: u64 = sock_error(state, i)
+        if e != 0 {
+            return errno.neg(e)
+        }
+        let flags: u64 = hold(state)
+        let got: usize = stack.net_send(st(state), h as i32,
+            src as *mut u8, n as usize)
+        drop_lock(state, flags)
+        if got == 0 && n != 0 {
+            return errno.neg(errno.E_AGAIN)
+        }
+        return got as u64
+    }
+    return errno.neg(errno.E_DESTADDRREQ)
+}
+
+fn sock_recv(state: u64, i: u64, dst: u64, n: u64) -> u64 {
+    let k: u64 = sock_kind(state, i)
+    if k == SK_FREE {
+        return errno.neg(errno.E_BADF)
+    }
+    if k != SK_TCP {
+        return errno.neg(errno.E_OPNOTSUPP)
+    }
+    let h: u64 = sock_handle(state, i)
+    if h == NOHANDLE {
+        return errno.neg(errno.E_NOTCONN)
+    }
+    let flags: u64 = hold(state)
+    let got: usize = stack.net_recv(st(state), h as i32, dst as *mut u8,
+        n as usize)
+    let s: u32 = stack.net_state(st(state), h as i32)
+    drop_lock(state, flags)
+    if got > 0 {
+        return got as u64
+    }
+    // Nothing there. Whether that is "not yet" or "never again" is the
+    // difference between a `read` that blocks and one that returns 0,
+    // and it is exactly the state machine's answer.
+    if s == tcp.S_CLOSE_WAIT || s == tcp.S_LAST_ACK || s == tcp.S_CLOSED
+        || s == tcp.S_TIME_WAIT || s == tcp.S_CLOSING {
+        return 0
+    }
+    let e: u64 = sock_error(state, i)
+    if e != 0 {
+        return errno.neg(e)
+    }
+    return errno.neg(errno.E_AGAIN)
+}
+
+// UDP and the ping socket both carry the peer in the call itself.
+fn sock_sendto(state: u64, i: u64, src: u64, n: u64, addr: u64,
+    port: u64) -> u64 {
+    let k: u64 = sock_kind(state, i)
+    if k == SK_TCP {
+        return sock_send(state, i, src, n)
+    }
+    if k == SK_ICMP {
+        let flags: u64 = hold(state)
+        let r: u64 = icmp_send(state, addr, src, n)
+        drop_lock(state, flags)
+        return r
+    }
+    if k != SK_UDP {
+        return errno.neg(errno.E_BADF)
+    }
+    var sport: u64 = kstate.get(state, so_at(i) + SO_PORT)
+    if sport == 0 {
+        sport = 40000 + (kstate.add(state, sc(S_SEQ), 1) & 4095)
+        kstate.set(state, so_at(i) + SO_PORT, sport)
+    }
+    let flags: u64 = hold(state)
+    let ok: bool = stack.udp_send(st(state), (sport & 0xFFFF) as u16,
+        (addr & 0xFFFFFFFF) as u32, (port & 0xFFFF) as u16,
+        src as *mut u8, n as usize, now_us(state))
+    drop_lock(state, flags)
+    if !ok {
+        return errno.neg(errno.E_AGAIN)
+    }
+    return n
+}
+
+fn sock_recvfrom(state: u64, i: u64, dst: u64, n: u64, addr: *mut u64,
+    port: *mut u64) -> u64 {
+    let k: u64 = sock_kind(state, i)
+    if k == SK_TCP {
+        *addr = 0
+        *port = 0
+        return sock_recv(state, i, dst, n)
+    }
+    if k == SK_ICMP {
+        let flags: u64 = hold(state)
+        let r: u64 = icmp_take(state, dst, n, addr)
+        drop_lock(state, flags)
+        *port = 0
+        return r
+    }
+    if k != SK_UDP {
+        return errno.neg(errno.E_BADF)
+    }
+    let h: u64 = sock_handle(state, i)
+    if h == NOHANDLE {
+        return errno.neg(errno.E_INVAL)
+    }
+    var fip: u32 = 0
+    var fport: u16 = 0
+    let flags: u64 = hold(state)
+    let got: usize = stack.udp_recv(st(state), h as i32, dst as *mut u8,
+        n as usize, &fip, &fport)
+    drop_lock(state, flags)
+    if got == 0 {
+        return errno.neg(errno.E_AGAIN)
+    }
+    *addr = fip as u64
+    *port = fport as u64
+    return got as u64
+}
+
+fn sock_peer(state: u64, i: u64, addr: *mut u64, port: *mut u64) -> u64 {
+    *addr = 0
+    *port = 0
+    if sock_kind(state, i) != SK_TCP {
+        return errno.neg(errno.E_OPNOTSUPP)
+    }
+    let h: u64 = sock_handle(state, i)
+    if h == NOHANDLE {
+        return errno.neg(errno.E_NOTCONN)
+    }
+    let flags: u64 = hold(state)
+    let t: *mut tcp.Tcp = stack.net_tcp(st(state))
+    *addr = tcp.tcp_peer_ip(t, h as i32) as u64
+    *port = tcp.tcp_peer_port(t, h as i32) as u64
+    drop_lock(state, flags)
+    return 0
+}
+
+fn sock_local(state: u64, i: u64, addr: *mut u64, port: *mut u64) -> u64 {
+    *addr = ip(state)
+    *port = kstate.get(state, so_at(i) + SO_PORT)
+    if sock_kind(state, i) == SK_TCP {
+        let h: u64 = sock_handle(state, i)
+        if h != NOHANDLE {
+            let flags: u64 = hold(state)
+            let t: *mut tcp.Tcp = stack.net_tcp(st(state))
+            let p: u16 = tcp.tcp_local_port(t, h as i32)
+            drop_lock(state, flags)
+            if p != 0 as u16 {
+                *port = p as u64
+            }
+        }
+    }
+    return 0
+}
+
+fn sock_shutdown(state: u64, i: u64, how: u64) -> u64 {
+    if sock_kind(state, i) != SK_TCP {
+        return errno.neg(errno.E_OPNOTSUPP)
+    }
+    let h: u64 = sock_handle(state, i)
+    if h == NOHANDLE {
+        return errno.neg(errno.E_NOTCONN)
+    }
+    // SHUT_WR (1) and SHUT_RDWR (2) both mean "no more octets from this
+    // side", which in TCP is a FIN. SHUT_RD is not a segment at all and
+    // is answered without one.
+    if how != 0 {
+        let flags: u64 = hold(state)
+        stack.net_close(st(state), h as i32)
+        drop_lock(state, flags)
+    }
+    return 0
+}
+
+// The end of a socket. An orderly close for TCP -- the FIN travels, the
+// state machine goes through LAST_ACK or TIME_WAIT on its own and frees
+// the slot when it is due. That is the part the first attempt at this
+// round got wrong; `tcp.fi` holds the slot until TIME_WAIT is over and
+// frees it itself, and a `close` that tore the slot out here would be
+// the bug that comment describes.
+fn sock_close(state: u64, i: u64) {
+    let k: u64 = sock_kind(state, i)
+    if k == SK_FREE {
+        return
+    }
+    let h: u64 = sock_handle(state, i)
+    if h != NOHANDLE {
+        let flags: u64 = hold(state)
+        if k == SK_TCP {
+            stack.net_close(st(state), h as i32)
+        } else if k == SK_UDP {
+            stack.udp_close(st(state), h as i32)
+        }
+        drop_lock(state, flags)
+    }
+    sock_free(state, i)
+}
+
+// ------------------------------------------------------------ the report
+
+// Two hex digits, without the `0x` that `serial.hex_width` puts in
+// front -- an Ethernet address is twelve digits and five colons and
+// nothing else.
+fn hex2(v: u64) {
+    var i: u64 = 0
+    while i < 2 {
+        let d: u64 = (v >> ((1 - i) * 4)) & 0xF
+        if d < 10 {
+            serial.put((48 + d) as u8)
+        } else {
+            serial.put((87 + d) as u8)
+        }
+        i = i + 1
+    }
+}
+
+fn print_state(state: u64) {
+    var s_head: [u8; 7] = "net: \0\0"
+    var s_ip: [u8; 5] = " ip=\0"
+    var s_dot: [u8; 2] = ".\0"
+    var s_mac: [u8; 7] = "  mac=\0"
+    var s_colon: [u8; 2] = ":\0"
+    var s_none: [u8; 14] = "net: no card\0\0"
+    if !ready(state) {
+        serial.puts((&s_none[0]) as u64)
+        serial.nl()
+        return
+    }
+    serial.puts((&s_head[0]) as u64)
+    serial.puts((&s_ip[0]) as u64)
+    let a: u64 = ip(state)
+    serial.dec((a >> 24) & 0xFF)
+    serial.puts((&s_dot[0]) as u64)
+    serial.dec((a >> 16) & 0xFF)
+    serial.puts((&s_dot[0]) as u64)
+    serial.dec((a >> 8) & 0xFF)
+    serial.puts((&s_dot[0]) as u64)
+    serial.dec(a & 0xFF)
+    serial.puts((&s_mac[0]) as u64)
+    var i: u64 = 0
+    while i < 6 {
+        if i > 0 {
+            serial.puts((&s_colon[0]) as u64)
+        }
+        hex2(virtio.mac_at(state, i))
+        i = i + 1
+    }
+    serial.nl()
+}

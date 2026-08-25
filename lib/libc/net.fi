@@ -1,0 +1,265 @@
+// lib/libc/net.fi -- round K8: sockets, for a program on the disk.
+//
+// The kernel side of this is `kernel/sys.fi`; this is the half that runs
+// in ring 3. It is deliberately thin -- four lines per call, exactly the
+// way `libc/io.fi` sits on `read` and `write` -- because the SHAPE of
+// the interface is Linux's and there is nothing here to invent.
+//
+// WHAT A PROGRAM SEES:
+//
+//     let fd = net.tcp_socket()
+//     net.connect_to(fd, net.ip4(10, 9, 0, 1), 8000)
+//     net.send_all(fd, text, length)
+//     net.recv_some(fd, buf, capacity)
+//     net.close(fd)
+//
+// and for a listener `bind_port`, `listen`, `accept_from`.
+//
+// THE ONE THING THAT LOOKS ODD is `sockaddr_in`, and it is not this
+// system's fault: sixteen octets, the family in the byte order of the
+// MACHINE and the port and the address in the byte order of the WIRE.
+// That mixture has been the shape of the interface since 4.2BSD; a
+// program that assumed anything else would not work on Linux either, so
+// `sa_build` writes it the way everybody else writes it.
+//
+// THERE IS NO NAME RESOLUTION. Osum has no resolver and no `/etc/hosts`;
+// an address is four numbers. `parse_ip` is what there is, and a program
+// that is handed a name gets a clear refusal rather than a wrong answer.
+
+import libc.kcall
+import libc.errno
+
+export {
+    socket, tcp_socket, udp_socket, icmp_socket,
+    bind_port, listen, accept_from, connect_to,
+    send_all, send_some, recv_some, sendto_ip, recvfrom_ip,
+    close, shutdown, peer_of,
+    sa_build, sa_ip, sa_port, ip4, parse_ip, ip_text,
+    AF_INET, SOCK_STREAM, SOCK_DGRAM, SOCK_NONBLOCK,
+    IPPROTO_ICMP, IPPROTO_TCP, IPPROTO_UDP, SA_BYTES,
+    SHUT_RD, SHUT_WR, SHUT_RDWR, failed
+}
+
+const AF_INET: u64 = 2
+const SOCK_STREAM: u64 = 1
+const SOCK_DGRAM: u64 = 2
+const SOCK_NONBLOCK: u64 = 2048
+const IPPROTO_ICMP: u64 = 1
+const IPPROTO_TCP: u64 = 6
+const IPPROTO_UDP: u64 = 17
+const SA_BYTES: u64 = 16
+const SHUT_RD: u64 = 0
+const SHUT_WR: u64 = 1
+const SHUT_RDWR: u64 = 2
+
+fn failed(v: u64) -> bool {
+    return errno.is_error(v)
+}
+
+fn ld8(p: u64, i: u64) -> u64 {
+    return (*((p + i) as *mut u8)) as u64
+}
+
+fn st8(p: u64, i: u64, v: u64) {
+    __mmio_write8((p + i) as *mut u8, (v & 0xFF) as u8)
+}
+
+// ---------------------------------------------------------- addresses
+
+// The four octets as ONE number, the first one at the top -- the order
+// they are written in and the order they travel in.
+fn ip4(a: u64, b: u64, c: u64, d: u64) -> u64 {
+    return ((a & 0xFF) << 24) | ((b & 0xFF) << 16) | ((c & 0xFF) << 8)
+        | (d & 0xFF)
+}
+
+// `a.b.c.d`, and 0 for anything else. It stops at the first character
+// that is neither a digit nor a dot, so `10.9.0.1:8000` parses and the
+// caller reads the port itself.
+fn parse_ip(p: u64) -> u64 {
+    var v: u64 = 0
+    var part: u64 = 0
+    var seen: u64 = 0
+    var digits: u64 = 0
+    var i: u64 = 0
+    var going: bool = true
+    while going {
+        let c: u64 = ld8(p, i)
+        if c >= 48 && c <= 57 {
+            part = part * 10 + (c - 48)
+            if part > 255 {
+                return 0
+            }
+            digits = digits + 1
+            i = i + 1
+        } else if c == 46 && seen < 3 && digits > 0 {
+            v = (v << 8) | part
+            part = 0
+            digits = 0
+            seen = seen + 1
+            i = i + 1
+        } else {
+            going = false
+        }
+    }
+    if seen != 3 || digits == 0 {
+        return 0
+    }
+    return (v << 8) | part
+}
+
+// The other way, into a buffer of at least sixteen octets. Returns the
+// length; the buffer is not terminated by this function.
+fn ip_text(a: u64, out: u64) -> u64 {
+    var n: u64 = 0
+    var i: u64 = 0
+    while i < 4 {
+        if i > 0 {
+            st8(out, n, 46)
+            n = n + 1
+        }
+        let part: u64 = (a >> ((3 - i) * 8)) & 0xFF
+        if part >= 100 {
+            st8(out, n, 48 + part / 100)
+            n = n + 1
+        }
+        if part >= 10 {
+            st8(out, n, 48 + (part / 10) % 10)
+            n = n + 1
+        }
+        st8(out, n, 48 + part % 10)
+        n = n + 1
+        i = i + 1
+    }
+    return n
+}
+
+// Sixteen octets into a buffer the caller owns.
+fn sa_build(sa: u64, a: u64, port: u64) {
+    var i: u64 = 0
+    while i < SA_BYTES {
+        st8(sa, i, 0)
+        i = i + 1
+    }
+    st8(sa, 0, AF_INET & 0xFF)
+    st8(sa, 1, (AF_INET >> 8) & 0xFF)
+    st8(sa, 2, (port >> 8) & 0xFF)
+    st8(sa, 3, port & 0xFF)
+    st8(sa, 4, (a >> 24) & 0xFF)
+    st8(sa, 5, (a >> 16) & 0xFF)
+    st8(sa, 6, (a >> 8) & 0xFF)
+    st8(sa, 7, a & 0xFF)
+}
+
+fn sa_ip(sa: u64) -> u64 {
+    return (ld8(sa, 4) << 24) | (ld8(sa, 5) << 16) | (ld8(sa, 6) << 8)
+        | ld8(sa, 7)
+}
+
+fn sa_port(sa: u64) -> u64 {
+    return (ld8(sa, 2) << 8) | ld8(sa, 3)
+}
+
+// -------------------------------------------------------- the calls
+
+fn socket(domain: u64, kind: u64, protocol: u64) -> u64 {
+    return kcall.sys3(kcall.SYS_SOCKET, domain, kind, protocol)
+}
+
+fn tcp_socket() -> u64 {
+    return socket(AF_INET, SOCK_STREAM, 0)
+}
+
+fn udp_socket() -> u64 {
+    return socket(AF_INET, SOCK_DGRAM, 0)
+}
+
+// The "ping socket" of Linux 3.0 and later: a datagram socket that
+// carries ICMP messages and needs no privilege. `/bin/ping` uses it.
+fn icmp_socket() -> u64 {
+    return socket(AF_INET, SOCK_DGRAM, IPPROTO_ICMP)
+}
+
+fn bind_port(fd: u64, port: u64) -> u64 {
+    var sa: [u8; 16] = [0 as u8; 16]
+    sa_build((&sa[0]) as u64, 0, port)
+    return kcall.sys3(kcall.SYS_BIND, fd, (&sa[0]) as u64, SA_BYTES)
+}
+
+fn listen(fd: u64, backlog: u64) -> u64 {
+    return kcall.sys2(kcall.SYS_LISTEN, fd, backlog)
+}
+
+// The descriptor of the new connection; `sa` gets the peer, and may be 0.
+fn accept_from(fd: u64, sa: u64) -> u64 {
+    if sa == 0 {
+        return kcall.sys3(kcall.SYS_ACCEPT, fd, 0, 0)
+    }
+    var len: [u8; 8] = [0 as u8; 8]
+    st8((&len[0]) as u64, 0, SA_BYTES)
+    return kcall.sys3(kcall.SYS_ACCEPT, fd, sa, (&len[0]) as u64)
+}
+
+fn connect_to(fd: u64, a: u64, port: u64) -> u64 {
+    var sa: [u8; 16] = [0 as u8; 16]
+    sa_build((&sa[0]) as u64, a, port)
+    return kcall.sys3(kcall.SYS_CONNECT, fd, (&sa[0]) as u64, SA_BYTES)
+}
+
+fn send_some(fd: u64, p: u64, n: u64) -> u64 {
+    return kcall.sock_send(fd, p, n, 0, 0)
+}
+
+// Everything or an error. A short write is not a failure on a socket --
+// it is a send window that was full a moment ago -- so the loop is here
+// and not in every program.
+fn send_all(fd: u64, p: u64, n: u64) -> u64 {
+    var off: u64 = 0
+    while off < n {
+        let w: u64 = kcall.sock_send(fd, p + off, n - off, 0, 0)
+        if failed(w) {
+            return w
+        }
+        if w == 0 {
+            return off
+        }
+        off = off + w
+    }
+    return off
+}
+
+fn recv_some(fd: u64, p: u64, n: u64) -> u64 {
+    return kcall.sock_recv(fd, p, n, 0, 0)
+}
+
+fn sendto_ip(fd: u64, p: u64, n: u64, a: u64, port: u64) -> u64 {
+    var sa: [u8; 16] = [0 as u8; 16]
+    sa_build((&sa[0]) as u64, a, port)
+    return kcall.sock_send(fd, p, n, (&sa[0]) as u64, SA_BYTES)
+}
+
+// What came back, with the sender in `fromp` when that is not 0.
+fn recvfrom_ip(fd: u64, p: u64, n: u64, fromp: *mut u64) -> u64 {
+    var sa: [u8; 16] = [0 as u8; 16]
+    var len: [u8; 8] = [0 as u8; 8]
+    st8((&len[0]) as u64, 0, SA_BYTES)
+    let r: u64 = kcall.sock_recv(fd, p, n, (&sa[0]) as u64, (&len[0]) as u64)
+    if !failed(r) {
+        *fromp = sa_ip((&sa[0]) as u64)
+    }
+    return r
+}
+
+fn peer_of(fd: u64, sa: u64) -> u64 {
+    var len: [u8; 8] = [0 as u8; 8]
+    st8((&len[0]) as u64, 0, SA_BYTES)
+    return kcall.sys3(kcall.SYS_GETPEERNAME, fd, sa, (&len[0]) as u64)
+}
+
+fn shutdown(fd: u64, how: u64) -> u64 {
+    return kcall.sys2(kcall.SYS_SHUTDOWN, fd, how)
+}
+
+fn close(fd: u64) -> u64 {
+    return kcall.sys1(kcall.SYS_CLOSE, fd)
+}
