@@ -67,12 +67,13 @@ export {
     init, ready, echo, geometry_ok,
     width, height, pitch, bpp, bytes, addr, phys, source, back, draw_at,
     cols, rows, cx, cy, chars, flushes, scrolls, huges, block, offset,
-    rgb, pixel, get_pixel, fill, line, blit, clear, flush, dirty_all, scroll,
+    rgb, pixel, get_pixel, fill, line, blit, clear, flush, dirty_all, dirty,
+    scroll, write_bytes, read_bytes,
     putc, puts, text, nl, set_color, set_cursor, cursor_on, home, goto,
     set_echo, echo_on, double_buffered, uncached, set_back,
     parse, mode, want, selftest, selftest_max,
     SRC_NONE, SRC_MB, SRC_VBE, FB_OFF, FB_MAX, FONT_OFF, USER_BASE,
-    M_GFX, M_NODBL, M_UC, M_BIG, M_NOCUR, M_HOLD, M_PATTERN,
+    M_GFX, M_NODBL, M_UC, M_BIG, M_NOCUR, M_HOLD, M_PATTERN, M_USER,
     WIDTH_STD, HEIGHT_STD,
     WIDTH_BIG, HEIGHT_BIG
 }
@@ -134,6 +135,7 @@ const M_BIG: u64 = 8 // "fbbig"    -- 1024x768 statt 800x600
 const M_NOCUR: u64 = 16 // "nocursor" -- ohne Textmarke
 const M_HOLD: u64 = 32 // "fbhold"   -- am Ende stillhalten (fuer das Foto)
 const M_PATTERN: u64 = 64 // "fbtest"   -- das Pruefbild zeichnen
+const M_USER: u64 = 128 // "fbuser"   -- das Programm in Ring 3 laufen lassen
 
 // 800 x 600 x 4 sind 1 920 000 Oktette und passen in EINE 2-MiB-Kachel;
 // 1024 x 768 x 4 sind 3 145 728 und brauchen zwei. Beides steht in der
@@ -980,6 +982,74 @@ fn flush(state: u64) {
     kstate.add(state, FB_OFF + S_FLUSHES, 1)
 }
 
+// ------------------------------------------------- das Geraet /dev/fb
+//
+// Oktette hinein und Oktette heraus, an einer Stelle im Bild. Das ist
+// die Haelfte von /dev/fb, die OHNE Abbildung auskommt: `write` und
+// `read` auf einem Deskriptor, mit den Grenzen des Geraets als Grenzen.
+// Die andere Haelfte -- `mmap` -- liegt in `sys.fi` und `proc.fi`, weil
+// dafuer eine Seitentabelle beschrieben wird und das nicht die Sache
+// eines Treibers ist.
+//
+// GESCHRIEBEN WIRD AUF DIE KARTE, NICHT IN DEN ZWEITPUFFER, und das ist
+// die Entscheidung, an der /dev/fb entweder ein Geraet ist oder nicht.
+// Der Zweitpuffer gehoert der KONSOLE des Kernels; er ist ihre private
+// Angelegenheit. Wer das Geraet oeffnet, meint den Bildschirm -- und
+// bekommt dieselbe Flaeche, die `mmap` ihm abbilden wuerde. Waere es
+// anders, laege dasselbe /dev/fb je nach Zugriffsart an zwei
+// verschiedenen Orten, und ein Programm, das schreibt und danach seine
+// Abbildung liest, saehe seine eigenen Oktette nicht.
+//
+// Der Preis ist benannt: die Konsole uebertraegt ihre geaenderten Zeilen
+// aus dem Zweitpuffer und uebermalt dabei, was ein Programm in dieselben
+// Zeilen gelegt hat. Zwei Zeichner auf einer Flaeche vertragen sich,
+// solange sie verschiedene Zeilen nehmen. Ein Fenstersystem waere die
+// Antwort darauf und ist nicht diese Runde.
+
+fn write_bytes(state: u64, off: u64, src: u64, n: u64) -> u64 {
+    if kstate.get(state, FB_OFF + S_READY) == 0 {
+        return 0
+    }
+    let ganz: u64 = kstate.get(state, FB_OFF + S_BYTES)
+    if off >= ganz {
+        return 0
+    }
+    var len: u64 = n
+    if off + len > ganz {
+        len = ganz - off
+    }
+    let dst: u64 = kstate.get(state, FB_OFF + S_ADDR) +% off
+    let worte: u64 = len / 8
+    copy_words(dst, src, worte)
+    var i: u64 = worte * 8
+    while i < len {
+        kstate.set8(dst +% i, kstate.get8(src + i) as u8)
+        i = i + 1
+    }
+    return len
+}
+
+fn read_bytes(state: u64, off: u64, dst: u64, n: u64) -> u64 {
+    if kstate.get(state, FB_OFF + S_READY) == 0 {
+        return 0
+    }
+    let ganz: u64 = kstate.get(state, FB_OFF + S_BYTES)
+    if off >= ganz {
+        return 0
+    }
+    var len: u64 = n
+    if off + len > ganz {
+        len = ganz - off
+    }
+    let src: u64 = kstate.get(state, FB_OFF + S_ADDR) +% off
+    var i: u64 = 0
+    while i < len {
+        kstate.set8(dst + i, kstate.get8(src +% i) as u8)
+        i = i + 1
+    }
+    return len
+}
+
 // -------------------------------------------------------- die Konsole
 
 fn cell_x(state: u64) -> u64 {
@@ -1229,6 +1299,7 @@ fn parse(state: u64, cmd: u64) {
     var w_nocur: [u8; 9] = "nocursor\0"
     var w_hold: [u8; 7] = "fbhold\0"
     var w_pat: [u8; 7] = "fbtest\0"
+    var w_usr: [u8; 7] = "fbuser\0"
     var m: u64 = 0
     if cmd != 0 {
         if find(cmd, (&w_gfx[0]) as u64, 3) != 0 {
@@ -1251,6 +1322,9 @@ fn parse(state: u64, cmd: u64) {
         }
         if find(cmd, (&w_pat[0]) as u64, 6) != 0 {
             m = m | M_PATTERN
+        }
+        if find(cmd, (&w_usr[0]) as u64, 6) != 0 {
+            m = m | M_USER
         }
     }
     kstate.set(state, FB_OFF + S_MODE, m)
