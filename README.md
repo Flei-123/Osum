@@ -367,6 +367,7 @@ nachtraeglich umgeschrieben.
 | `docs/ROUNDK5.md` | vier Prozessoren und die Sperre |
 | `docs/ROUNDK6.md` | das Userland: Shell und Werkzeuge |
 | `docs/ROUNDK7.md` | der Bildschirm: Rahmenpuffer, Textkonsole, /dev/fb |
+| `docs/ROUNDK7B.md` | warum nach dem Verschmelzen die Buchstaben vom Schirm verschwanden — und die Karte von `kdata` |
 
 `ENTFERNEN-AUS-FIRN.md` beschreibt, was im Firn-Repository geloescht
 werden muss, damit dort nichts doppelt liegt. **Ausgefuehrt ist das
