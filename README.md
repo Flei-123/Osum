@@ -3,9 +3,10 @@
 Ein Betriebssystemkern fuer x86-64, geschrieben in **Firn**. Er bootet
 ueber Multiboot, verwaltet Speicher und Adressraeume, plant Prozesse,
 liest seine eigene Hardware ueber PCI, spricht NVMe ueber DMA, laeuft auf
-mehreren Prozessoren, bietet eine POSIX-Schicht mit den Systemaufruf-
-nummern von Linux x86-64 und startet ein Userland aus eigenstaendigen
-ELF-Dateien von der Platte — eine Shell und dreiundzwanzig Werkzeuge.
+mehreren Prozessoren, **spricht TCP/IP ueber eine virtio-net-Karte**,
+bietet eine POSIX-Schicht mit den Systemaufrufnummern von Linux x86-64
+und startet ein Userland aus eigenstaendigen ELF-Dateien von der Platte —
+eine Shell und fuenfundzwanzig Werkzeuge.
 
     osum$ cat /d/nums.txt | grep 1 | wc -l
     4
@@ -13,6 +14,17 @@ ELF-Dateien von der Platte — eine Shell und dreiundzwanzig Werkzeuge.
     osum$ cd /d ; ls ; wc -l < nums.txt
     ./ ../ three.txt dup.txt nums.txt empty.txt
     12
+    osum$ ping -c 3 10.9.0.1
+    PING 10.9.0.1 56 octets of data.
+    64 octets from 10.9.0.1: icmp_seq=1 time=20 ms
+    64 octets from 10.9.0.1: icmp_seq=2 time=10 ms
+    64 octets from 10.9.0.1: icmp_seq=3 time=10 ms
+    --- ping statistics
+    3 transmitted, 3 received, 0% packet loss
+    osum$ wget http://10.9.0.1:8000/x
+    wget: connected to 10.9.0.1:8000
+    a page from the linux kernel side, 46 octets.
+    wget: status 200
 
 Der Umfang, gezaehlt:
 
@@ -25,7 +37,15 @@ Der Umfang, gezaehlt:
 | `tools/` — die Testlaeufer | 4 421 |
 
 Dazu aus der Capability-Runde: `kernel/cap.fi` (die Handle-Tabelle) und
-die Testlaeufer `tools/caps/` und `tools/boot/`.
+die Testlaeufer `tools/caps/` und `tools/boot/`. Aus der Netzrunde K8:
+`kernel/virtio.fi`, `kernel/inet.fi`, `kernel/netsvc.fi`,
+`lib/libc/net.fi` und `tools/net/`.
+
+Der **TCP/IP-Stack** (2 646 Zeilen) steht in dieser Rechnung nicht — er
+wird nicht hier geschrieben. Er kommt als Abhaengigkeit aus dem
+Firn-Commit, den `vendor/firn/COMMIT` ohnehin schon fuer den Uebersetzer
+festnagelt; `vendor/net/HERKUNFT.md` sagt, wie, und Abschnitt 1 von
+`./test.sh` prueft die drei Blob-Hashes.
 
 Osum ist **kein Spielzeug-Bootloader und kein fertiges System.** Was er
 kann, steht unten; was er nicht kann, steht ebenfalls unten, und das ist
@@ -117,11 +137,42 @@ es noch **nicht** gibt (Kanaele, Ports, Namensraeume, Spawn mit
 Handle-Liste, Speicherobjekte), antwortet `NotSupported` und steht in
 OrientOS' `KERNELWECHSEL.md` als offener Punkt.
 
+**Netz.** Ein **virtio-net-Treiber** in Firn (`kernel/virtio.fi`), modern
+nach virtio 1.0: die vier Bereiche aus der Faehigkeitsliste des Geraets,
+Merkmalsaushandlung mit `FEATURES_OK`, zwei virtqueues zu 64
+Deskriptoren, MSI-X oder der Unterbrechungsstift. Darauf der
+**TCP/IP-Stack aus Runde K3** — als Abhaengigkeit, nicht als Kopie — und
+darueber **Steckdosen fuer Ring 3** mit den Nummern von Linux x86-64
+(`socket` 41, `connect` 42, `accept` 43, `sendto` 44, `recvfrom` 45,
+`shutdown` 48, `bind` 49, `listen` 50, `getsockname` 51, `getpeername`
+52). Eine Steckdose ist ein Eintrag der offenen Dateien aus Runde K4, also
+funktionieren `read`, `write`, `close`, `dup2` und `fork` darauf, ohne
+dass eines davon weiss, was eine Steckdose ist.
+
+**Gemessen gegen den echten Linux-Kernel** (`tools/net/run.sh`, 74
+Zusagen, `veth` + `AF_PACKET` in einem eigenen Netz-Namensraum, QEMU ohne
+KVM):
+
+| was | Ergebnis |
+|---|---|
+| `ping -c 10` vom Linux-Kern | **10 von 10**, 8,6 ms im Mittel |
+| `nc` schiebt 1 MiB hinein | **1 048 576 Oktette**, 733 Rahmen, **5 765 KiB/s**, 0 Neusendungen |
+| `nc` durch das Echo | **262 144 Oktette hin und zurueck, md5 gleich** |
+| `curl http://10.9.0.2:8080/` | Statuszeile, Kopf und Rumpf von curl selbst akzeptiert |
+| Osum verbindet sich **aktiv** | 262 144 hin, 262 144 zurueck, **0 falsche Oktette** |
+| `tc netem loss 20 %` hinein | alles in Reihenfolge, 75 Segmente neu zusammengesetzt |
+| `tc netem loss 20 %` hinaus | 0 falsch, **1 Neusendung auf dem Zeitgeber, 6 auf drei doppelte Quittungen** |
+
+Gegenprobe: dasselbe Kernelabbild ohne das Wort `nic` verliert jedes
+Paket, `nicnobm` (kein Busmaster) ebenso, und mit `nicnoirq` kommen alle
+262 144 Oktette an waehrend der Unterbrechungszaehler auf 0 stehen bleibt.
+Die Zahlen und die offenen Punkte stehen in `docs/ROUNDK8.md`.
+
 **Userland.** `/bin/sh` mit Roehren, Umlenkung (`>`, `<`), `;`,
-Zeileneditor, `cd`, `exit` — und dreiundzwanzig Werkzeuge: `cat`, `cp`,
+Zeileneditor, `cd`, `exit` — und fuenfundzwanzig Werkzeuge: `cat`, `cp`,
 `date`, `df`, `echo`, `false`, `grep`, `head`, `kill`, `ls`, `mkdir`,
-`mv`, `ps`, `rm`, `rmdir`, `sleep`, `sort`, `tail`, `touch`, `true`,
-`uname`, `uniq`, `wc`.
+`mv`, `ping`, `ps`, `rm`, `rmdir`, `sleep`, `sort`, `tail`, `touch`,
+`true`, `uname`, `uniq`, `wc`, `wget`.
 
 ---
 
@@ -129,11 +180,12 @@ Zeileneditor, `cd`, `exit` — und dreiundzwanzig Werkzeuge: `cat`, `cp`,
 
 * **Keine Grafik.** Kein Framebuffer, kein VGA-Textmodus als Konsole, kein
   Fenstersystem. Die Konsole ist die serielle Schnittstelle.
-* **Kein Netz.** Kein Treiber fuer eine Netzkarte. Ein TCP/IP-Stack in
-  Firn existiert (Runde K3, `docs/OSUM-K3.md`), er liegt aber im
-  Firn-Repository unter `lib/net/` und ist nie an diesen Kernel
-  angeschlossen worden — er wurde gegen den Linux-Kernel ueber ein
-  `veth`-Paar gemessen, nicht gegen eine Karte.
+* **Keine Namensaufloesung.** Kein Resolver, kein `/etc/hosts`: eine
+  Adresse sind vier Zahlen. `/bin/wget` weist eine URL mit einem Namen
+  darin ab, statt etwas Falsches zu antworten.
+* **Nur eine Warteschlangenpaarung im Netz**, keine Auslagerung von
+  Pruefsummen an die Karte, kein IPv6, keine Neuzusammensetzung von
+  IP-Fragmenten, kein Fensterskalieren, kein SACK.
 * **Kein USB.** Weder Host-Controller noch Tastatur ueber USB. Die
   Tastatur ist der PS/2-Controller.
 * **Kein SATA/AHCI**, kein Partitionstabellen-Leser, kein Journal im
