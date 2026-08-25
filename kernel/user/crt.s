@@ -53,4 +53,69 @@ osum_panic:
     syscall
 2:  jmp 2b
 
+
+/* ---------------------------------------------------- round K9: signals
+ *
+ * EINE BEHANDLUNGSROUTINE IST EINE ADRESSE, und Stufe 0 von Firn kann die
+ * Adresse einer eigenen Funktion nicht nennen (SPEC 14) -- derselbe
+ * Grund, aus dem `isr.s` eine Tabelle von Wahlnummern hat. Ohne diese
+ * neun Zeilen koennte kein Programm auf dieser Platte `sigaction` auch
+ * nur AUFRUFEN, egal wie vollstaendig der Kernel darunter ist.
+ *
+ * Also liegt die Routine hier, neben `_start`, und sie tut genau das,
+ * was eine Routine tun darf und ein Programm nachpruefen kann: mitzaehlen
+ * und die Nummer aufheben. Kein Systemaufruf, kein Speicher, den ein
+ * zweites Signal mitten darin zerreissen koennte -- zwei Speicherzugriffe
+ * und ein `ret`. Der `ret` geht in den Trampolinsprung, den der Kernel
+ * als Ruecksprungadresse untergelegt hat (`sigreturn_tramp` in isr.s),
+ * und der legt den Zusammenhang zurueck.
+ *
+ * Ein Firn-Programm kommt an die drei Namen mit `lea rax, [rip + name]`
+ * in einem `asm`-Block heran; der Binder loest sie auf, weil crt.o und
+ * das Programm zusammen gebunden werden.
+ */
+    .text
+    .globl osum_sighandler
+osum_sighandler:
+    incq osum_sigcount(%rip)
+    movq %rdi, osum_siglast(%rip)
+    ret
+
+/* Die zweite Routine: sie zaehlt in einen anderen Zaehler, damit ein
+ * Programm zwei Signale unterscheiden kann, ohne die Nummer zu lesen. */
+    .globl osum_sighandler2
+osum_sighandler2:
+    incq osum_sigcount2(%rip)
+    movq %rdi, osum_siglast(%rip)
+    ret
+
+/* Die dritte: sie kehrt NICHT zurueck, sie beendet den Prozess mit
+ * 40 + Signalnummer. Das ist die einzige Art, das Abfangen eines
+ * PROZESSORFEHLERS zu messen: kehrte die Routine zurueck, liefe derselbe
+ * Befehl noch einmal und faellt noch einmal -- jedes Unix macht das so,
+ * und deshalb setzt der Kernel eine Routine fuer ein Fehlersignal beim
+ * Zustellen auf das Standardverhalten zurueck. Ein Beendigungscode von
+ * 51 sagt also zweierlei auf einmal: die Routine LIEF in Ring 3 (sie hat
+ * von dort einen Systemaufruf gemacht), und sie bekam die Nummer 11. */
+    .globl osum_sigexit
+osum_sigexit:
+    incq osum_sigcount(%rip)
+    movq %rdi, osum_siglast(%rip)
+    addq $40, %rdi
+    movq $60, %rax                  /* exit */
+    syscall
+1:  jmp 1b
+
+    .bss
+    .align 8
+    .globl osum_sigcount
+osum_sigcount:
+    .skip 8
+    .globl osum_sigcount2
+osum_sigcount2:
+    .skip 8
+    .globl osum_siglast
+osum_siglast:
+    .skip 8
+
     .section .note.GNU-stack,"",@progbits
