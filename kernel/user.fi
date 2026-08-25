@@ -33,7 +33,7 @@ import serial
 import kstate
 import mem
 
-export { setup, run, handle, map_user }
+export { setup, run, handle, map_user, map_user_pt }
 
 const MSR_EFER: u64 = 0xC0000080
 const MSR_STAR: u64 = 0xC0000081
@@ -123,6 +123,24 @@ fn setup(state: u64) {
 // picks one of the two page tables in the data area -- one for the code
 // page, one for the stack page.
 fn map_user(state: u64, addr: u64, writable: bool, slot: u64) -> bool {
+    return map_user_pt(state, addr, writable,
+        state + kstate.PT_OFF + slot * 4096)
+}
+
+// Dasselbe, aber mit einer AUSDRUECKLICH GENANNTEN Seitentabelle fuer den
+// Fall, dass die 2-MiB-Kachel erst noch geteilt werden muss.
+//
+// WARUM ES DIESE FASSUNG GIBT. Bis hierher lagen die geteilten Tabellen
+// fest in der Datenregion (`kstate.PT_OFF`, zwei Stueck), und das reichte
+// genau so lange, wie alles, was Ring 3 sehen darf, in EINE Kachel passt.
+// Der Abschnitt `.utext` ist mit der Capability-Runde ueber diese Grenze
+// gewachsen -- unter firnc1 auf ueber 2 MiB. Mit nur einer Tabelle haette
+// die Teilung der ZWEITEN Kachel die der ersten ueberschrieben: der
+// Kernel haette sich seine eigene Identitaetsabbildung unter den Fuessen
+// weggezogen und waere unmittelbar nach dem Aufbau stehengeblieben (genau
+// so ist es passiert, bevor diese Funktion entstand). `proc.map_programs`
+// holt sich fuer jede weitere Kachel einen Rahmen vom Allokator.
+fn map_user_pt(state: u64, addr: u64, writable: bool, table: u64) -> bool {
     let cr3: u64 = asm("mov rax, cr3", out("rax")) & ADDR_MASK
     let i4: u64 = (addr >> 39) & 0x1FF
     let i3: u64 = (addr >> 30) & 0x1FF
@@ -143,7 +161,7 @@ fn map_user(state: u64, addr: u64, writable: bool, slot: u64) -> bool {
     if (e2 & PAGE_HUGE) != 0 {
         // Still a 2 MiB page: split it into 512 of 4 KiB, all with the
         // same rights as before -- only the one page gets more.
-        pt = state + kstate.PT_OFF + slot * 4096
+        pt = table
         let base: u64 = e2 & not(0x1FFFFF)
         var i: u64 = 0
         while i < 512 {

@@ -24,6 +24,9 @@ Der Umfang, gezaehlt:
 | `lib/libc/*.fi` — die libc aus Runde K4 | 1 234 |
 | `tools/` — die Testlaeufer | 4 421 |
 
+Dazu aus der Capability-Runde: `kernel/cap.fi` (die Handle-Tabelle) und
+die Testlaeufer `tools/caps/` und `tools/boot/`.
+
 Osum ist **kein Spielzeug-Bootloader und kein fertiges System.** Was er
 kann, steht unten; was er nicht kann, steht ebenfalls unten, und das ist
 die laengere Liste.
@@ -32,7 +35,12 @@ die laengere Liste.
 
 ## Was er kann
 
-**Start und Kern.** Multiboot ueber `boot.s`, eigene GDT/IDT, alle
+**Start und Kern, BIOS und UEFI.** Multiboot ueber `boot.s`. Der Kopf
+verlangt seit der Capability-Runde einen **linearen Rahmenpuffer**
+(Flag-Bit 2): ohne dieses Bit besteht ein Multiboot-Lader auf einem
+Textmodus, den es unter UEFI nicht gibt, und bricht ab — mit ihm bootet
+dasselbe Abbild ueber SeaBIOS **und** ueber OVMF. Das ISO dazu baut
+OrientOS. Weiter: eigene GDT/IDT, alle
 Ausnahmen mit Fehlercode und Registersatz gemeldet (`#DE`, `#PF`, `#GP`,
 `#DF`), PIC und PIT mit hochlaufendem Tickzaehler, serielle Konsole,
 Tastatur ueber IRQ1.
@@ -88,6 +96,27 @@ Linux x86-64** — `read`, `write`, `open`, `close`, `stat`, `fstat`,
 (`lib/libc/`). Die Fehlerfaelle sind mitgemessen: vierzehn Arten, falsch
 zu liegen, vierzehn negative Rueckgaben, ein lebender Kernel danach.
 
+**Handles statt Umgebungsautoritaet.** Neben der POSIX-Schicht steht eine
+zweite ABI, portiert aus OrientOS (`libs/osum-abi-native/`, Rust →
+`kernel/cap.fi`, Firn): eine **Handle-Tabelle je Prozess**, in der ein
+Handle aus Platz, Generation und einem prozesseigenen Wuerfelwert besteht,
+mit zehn Rechtebits und acht Objektarten. Drei Saetze, und jeder ist aus
+Ring 3 gemessen (`tools/caps/run.sh`, achtzehn Zusagen):
+
+* **Eine frische Tabelle ist leer.** Es wird nichts geerbt — auch nicht
+  von einem Vorgaenger auf demselben Platz der Aufgabentabelle.
+* **Ein geschlossenes Handle trifft nie wieder etwas**, auch nicht nach
+  Wiederverwendung des Platzes (Generation).
+* **Rechte koennen nur kleiner werden.** Eine Kopie mit weniger Rechten
+  kann sich das Verlorene nicht zurueckholen.
+
+Der Unterschied zu POSIX in einer Zeile: ein gueltiges Handle ohne das
+noetige Recht ist `RightsDenied`, ein gefaelschtes ist `BadHandle` —
+POSIX hat fuer beides nur `-EBADF`. Die Aufrufnummern liegen ab 2000; was
+es noch **nicht** gibt (Kanaele, Ports, Namensraeume, Spawn mit
+Handle-Liste, Speicherobjekte), antwortet `NotSupported` und steht in
+OrientOS' `KERNELWECHSEL.md` als offener Punkt.
+
 **Userland.** `/bin/sh` mit Roehren, Umlenkung (`>`, `<`), `;`,
 Zeileneditor, `cd`, `exit` — und dreiundzwanzig Werkzeuge: `cat`, `cp`,
 `date`, `df`, `echo`, `false`, `grep`, `head`, `kill`, `ls`, `mkdir`,
@@ -105,8 +134,6 @@ Zeileneditor, `cd`, `exit` — und dreiundzwanzig Werkzeuge: `cat`, `cp`,
   Firn-Repository unter `lib/net/` und ist nie an diesen Kernel
   angeschlossen worden — er wurde gegen den Linux-Kernel ueber ein
   `veth`-Paar gemessen, nicht gegen eine Karte.
-* **Kein UEFI.** Der Start laeuft ueber Multiboot; eine UEFI-Umgebung
-  wird nicht unterstuetzt.
 * **Kein USB.** Weder Host-Controller noch Tastatur ueber USB. Die
   Tastatur ist der PS/2-Controller.
 * **Kein SATA/AHCI**, kein Partitionstabellen-Leser, kein Journal im

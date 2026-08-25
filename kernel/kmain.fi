@@ -43,6 +43,7 @@ import fs
 import elf
 import hw
 import smp
+import cap
 
 // Indices in the table out of isr.s.
 const V_DF_STACK: u64 = 52
@@ -63,6 +64,11 @@ const M_ATA: u64 = 65536
 // reads like the rest of the list.
 const M_OSUM: u64 = 131072 // mount the drive and start /bin/sh off it
 const M_NOBSS: u64 = 262144 // and do NOT zero what the file leaves open
+// Die Capability-Runde: Handles statt Umgebungsautoritaet
+// (`kernel/cap.fi`, portiert aus OrientOS). Ein eigenes Wort auf der
+// Kommandozeile, damit KEIN bestehender Testlauf sich aendert -- die
+// Runden 59 bis K6 messen weiter genau das, was sie gemessen haben.
+const M_CAPS: u64 = 524288
 
 // The programs in uprog.fi.
 const P_HELLO: u64 = 1
@@ -74,6 +80,7 @@ const P_PARENT: u64 = 6
 const P_SHELL: u64 = 8
 const P_STEAL: u64 = 9
 const P_FORK: u64 = 10
+const P_CAPS: u64 = 12
 
 const DISK_FRAMES: u64 = 256 // 1 MiB of RAM disk
 
@@ -198,6 +205,7 @@ fn kernel_main(mbi: u64, vectors: u64, state: u64, kernel_end: u64,
 
     // 7b. processes with an address space of their own.
     processes(state)
+    capabilities(state)
 
     // 7c. the file system.
     filesystem(state)
@@ -573,6 +581,91 @@ fn processes(state: u64) {
     serial.puts((&s_of[0]) as u64)
     serial.dec(before)
     serial.nl()
+    serial.puts((&s_done[0]) as u64)
+    serial.nl()
+}
+
+// ------------------------------------------- Capabilities (aus OrientOS)
+//
+// Die POSIX-Schicht ueber diesem Abschnitt gibt jedem Prozess seine drei
+// Deskriptoren, ohne dass jemand sie ihm gibt. Dieser Abschnitt zeigt das
+// Gegenteil: eine LEERE Handle-Tabelle, EIN ausdruecklich uebergebenes
+// Handle, und ein Programm in Ring 3, das genau so viel darf, wie darin
+// steht.
+//
+// Zwei Dinge misst der Kernel selbst, weil ein Programm sie nicht zeigen
+// kann: dass zwei Prozesse fuer DENSELBEN Platz VERSCHIEDENE Handle-Werte
+// bekommen (der Wuerfelwert), und dass eine frische Tabelle wirklich leer
+// ist. Alles Uebrige misst das Programm jenseits des Schutzwalls.
+fn capabilities(state: u64) {
+    var s_skip: [u8; 13] = "cap: skipped\0"
+    var s_begin: [u8; 32] = "cap: handles instead of ambient\0"
+    var s_slot: [u8; 15] = "cap: slot t1=\0\0"
+    var s_t2: [u8; 7] = "  t2=\0\0"
+    var s_left: [u8; 9] = "  left=\0\0"
+    var s_h1: [u8; 12] = "cap: first \0"
+    var s_h2: [u8; 10] = "  second \0"
+    var s_diff: [u8; 10] = "  differ=\0"
+    var s_exit: [u8; 18] = "cap: ring 3 exit=\0"
+    var s_done: [u8; 10] = "cap: done\0"
+
+    if (kstate.get(state, kstate.MODE) & M_CAPS) == 0 {
+        serial.puts((&s_skip[0]) as u64)
+        serial.nl()
+        return
+    }
+    serial.puts((&s_begin[0]) as u64)
+    serial.nl()
+
+    // Schreiben, vervielfaeltigen, uebertragen, Auskunft -- und
+    // ABSICHTLICH KEIN Leserecht. Genau daran haengt die Zusage, dass ein
+    // gueltiges Handle ohne Recht ein anderer Fehler ist als ein
+    // gefaelschtes.
+    let rechte: u64 = cap.R_WRITE | cap.R_DUPLICATE | cap.R_TRANSFER
+        | cap.R_INSPECT
+
+    let t1: u64 = proc.create_cap(state, P_CAPS, rechte, 2)
+    let g1: u64 = sched.tget(state, t1, sched.T_WORK)
+    let e1: u64 = wait_for(state, t1)
+    // Der erste Lauf hat seine Tabelle absichtlich vollgemacht (die Zusage
+    // "eine volle Tabelle sagt Exhausted"). Was hier steht, ist also
+    // 16 -- und genau darum ist der ZWEITE Lauf der Beweis: er bekommt
+    // denselben Platz in der Aufgabentabelle und zaehlt trotzdem GENAU EIN
+    // Handle. Nichts wird geerbt, auch nicht von einem Vorgaenger.
+    let left: u64 = cap.used(state, t1)
+    serial.puts((&s_exit[0]) as u64)
+    serial.dec(e1)
+    serial.nl()
+
+    // Derselbe Platz, ein anderer Prozess: der Wuerfelwert der Tabelle
+    // macht daraus einen anderen Handle-Wert. Ein abgehoertes Handle aus
+    // einem fremden Prozess trifft damit auch dann nichts, wenn dort
+    // zufaellig derselbe Platz belegt ist.
+    let t2: u64 = proc.create_cap(state, P_CAPS, rechte, 2)
+    let g2: u64 = sched.tget(state, t2, sched.T_WORK)
+    let e2: u64 = wait_for(state, t2)
+    serial.puts((&s_h1[0]) as u64)
+    serial.hex(g1)
+    serial.puts((&s_h2[0]) as u64)
+    serial.hex(g2)
+    serial.puts((&s_diff[0]) as u64)
+    var diff: u64 = 0
+    if g1 != g2 {
+        diff = 1
+    }
+    serial.dec(diff)
+    serial.nl()
+    serial.puts((&s_exit[0]) as u64)
+    serial.dec(e2)
+    serial.nl()
+    serial.puts((&s_slot[0]) as u64)
+    serial.dec(t1)
+    serial.puts((&s_t2[0]) as u64)
+    serial.dec(t2)
+    serial.puts((&s_left[0]) as u64)
+    serial.dec(left)
+    serial.nl()
+
     serial.puts((&s_done[0]) as u64)
     serial.nl()
 }
@@ -1223,6 +1316,10 @@ fn mode_of(cmd: u64) -> u64 {
     }
     if find(cmd, (&ata[0]) as u64, 3) != 0 {
         mode = mode | M_ATA
+    }
+    var capsw: [u8; 5] = "caps\0"
+    if find(cmd, (&capsw[0]) as u64, 4) != 0 {
+        mode = mode | M_CAPS
     }
     return mode
 }

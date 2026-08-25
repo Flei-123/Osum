@@ -48,6 +48,7 @@ import elf
 import errno
 import file
 import uio
+import cap
 
 export {
     entry, neg, STAT_BYTES, DIRENT_HEAD,
@@ -59,7 +60,10 @@ export {
     SYS_DUP, SYS_DUP2, SYS_NANOSLEEP, SYS_GETPID, SYS_FORK, SYS_EXECVE,
     SYS_EXIT, SYS_WAIT4, SYS_GETCWD, SYS_MKDIR, SYS_UNLINK, SYS_GETPPID,
     SYS_GETDENTS64, SYS_EXIT_GROUP, SYS_OSUM_SPAWN, SYS_OSUM_EXEC,
-    SYS_CHDIR, SYS_OSUM_SYSINFO, SYS_OSUM_PSTAT, SYS_OSUM_KILL
+    SYS_CHDIR, SYS_OSUM_SYSINFO, SYS_OSUM_PSTAT, SYS_OSUM_KILL,
+    CAP_BASE, CAP_VERSION, CAP_READ, CAP_WRITE, CAP_CLOSE, CAP_DUP,
+    CAP_INSPECT, CAP_TRANSFER, CAP_COUNT, CAP_MAXNR,
+    grant_console, native
 }
 
 // ---------------------------------------------------------- the numbers
@@ -127,6 +131,37 @@ const SYS_OSUM_EXEC: u64 = 1001
 //        this system, so the second argument is the exit code the
 //        process is made to leave with, not a signal number. The day
 //        signals exist, 62 becomes the real `kill` and this one goes.
+// ---------------------------------------------- die native ABI (cap.fi)
+//
+// Die zweite ABI dieses Kernels, portiert aus OrientOS
+// (`libs/osum-abi-native/src/syscall.rs`). Sie ist NICHT POSIX und will
+// es nicht sein: kein globaler Namensraum, keine geerbten Deskriptoren,
+// kein errno -- jeder Zugriff laeuft ueber ein Handle mit Rechten
+// (`kernel/cap.fi`).
+//
+// WARUM 2000 UND NICHT 0. OrientOS zaehlt seine nativen Aufrufe ab 0, und
+// 0/1/2 sind hier `read`, `write` und `open` von Linux. Beide Zaehlungen
+// koennen nicht in demselben Register stehen, also bekommt die native ABI
+// einen Sockel -- nach derselben Regel, die Runde K4 fuer alles
+// aufgestellt hat, was Linux nicht hat (Nummern >= 1000). Die Nummer
+// innerhalb der ABI bleibt damit die von OrientOS: 2000 + n.
+//
+// WAS ES HIER NOCH NICHT GIBT: Kanaele, Ports, Namensraeume, Spawn mit
+// Handle-Liste, Speicherobjekte. Die stehen in OrientOS' Rust-Kernel und
+// sind in KERNELWECHSEL.md als offener Punkt benannt. Sie geben hier
+// -E_UNSUPPORTED und nicht -ENOSYS: der Aufruf EXISTIERT in dieser ABI,
+// dieser Kernel bietet ihn nur nicht an.
+const CAP_BASE: u64 = 2000
+const CAP_VERSION: u64 = 2000 // () -> Fassung der ABI
+const CAP_READ: u64 = 2001 // (h, buf, len) -> Oktette, braucht R_READ
+const CAP_WRITE: u64 = 2002 // (h, buf, len) -> Oktette, braucht R_WRITE
+const CAP_CLOSE: u64 = 2003 // (h) -> 0
+const CAP_DUP: u64 = 2004 // (h, maske) -> Handle, braucht R_DUPLICATE
+const CAP_INSPECT: u64 = 2005 // (h, aus) -> 0, braucht R_INSPECT
+const CAP_TRANSFER: u64 = 2006 // (h, maske, pid) -> Handle, braucht R_TRANSFER
+const CAP_COUNT: u64 = 2007 // () -> belegte Plaetze der eigenen Tabelle
+const CAP_MAXNR: u64 = 2007
+
 const SYS_OSUM_SYSINFO: u64 = 1002
 const SYS_OSUM_PSTAT: u64 = 1003
 const SYS_OSUM_KILL: u64 = 1004
@@ -240,6 +275,11 @@ fn entry(number: u64, frame: u64, state: u64) -> u64 {
         }
     }
     let me: u64 = sched.current(state)
+    // Die native ABI zuerst: sie hat ihren eigenen Zahlenraum, ihre
+    // eigenen Fehlerwerte und ihre eigene Tabelle.
+    if number >= CAP_BASE {
+        return native(state, me, number, a0, a1, a2)
+    }
     if number == SYS_WRITE {
         return do_write(state, me, a0, a1, a2)
     }
@@ -490,6 +530,16 @@ fn do_write(state: u64, me: u64, fd: u64, buf: u64, want: u64) -> u64 {
     if of >= file.MAX_OPEN {
         return neg(errno.E_BADF)
     }
+    return write_of(state, me, of, buf, len)
+}
+
+// Der Rumpf von `do_write`, aber auf einem EINTRAG DER OFFENEN DATEIEN
+// statt auf einer Deskriptornummer. Aufgespalten fuer die native ABI: ein
+// Handle zeigt auf genau diesen Eintrag, und es waere falsch, es vorher
+// in eine Deskriptornummer zurueckzuuebersetzen -- die Nummer ist ja die
+// Umgebungsautoritaet, die das Handle ersetzt. Laenge und Zeigerpruefung
+// hat der Aufrufer schon gemacht.
+fn write_of(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
     let kind: u64 = file.open_kind(state, of)
     if kind == file.K_CONOUT {
         var k: u64 = 0
@@ -543,6 +593,11 @@ fn do_read(state: u64, me: u64, fd: u64, buf: u64, want: u64) -> u64 {
     if of >= file.MAX_OPEN {
         return neg(errno.E_BADF)
     }
+    return read_of(state, me, of, buf, len)
+}
+
+// Wie `write_of`, fuer die Leseseite.
+fn read_of(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
     let kind: u64 = file.open_kind(state, of)
     if kind == file.K_CONIN {
         return console_read(state, me, buf, len)
@@ -1669,4 +1724,152 @@ fn do_getcwd(state: u64, me: u64, out: u64, size: u64) -> u64 {
         return neg(errno.E_FAULT)
     }
     return n + 1
+}
+
+// ==================================================================
+// die native ABI: Handles statt Umgebungsautoritaet
+// ==================================================================
+//
+// Portiert aus OrientOS' `kernel/src/abi/native.rs`. Der Unterschied zur
+// POSIX-Schicht darueber steht in einer Zeile: dort nennt der Aufrufer
+// eine ZAHL, die der Kernel in seiner Tabelle nachschlaegt und die er
+// geschenkt bekommen hat; hier nennt er ein HANDLE, das er nur besitzt,
+// weil es ihm jemand gegeben hat, und das die Rechte mitfuehrt, mit denen
+// es gegeben wurde.
+//
+// Was ein Handle in diesem Kernel bezeichnet: `cap.K_STREAM` mit der
+// Nummer eines Eintrags der OFFENEN DATEIEN als Objekt. Das ist genau
+// die Ebene, auf der ein Deskriptor in `file.fi` zeigt -- nur ohne die
+// Deskriptornummer davor. Die uebrigen Objektarten (Kanal, Port,
+// Namensraum, Prozess, Speicher) gibt es hier noch nicht; sie geben
+// -E_UNSUPPORTED.
+
+// Ein Handle beschaffen: der Kernel gibt einem Prozess ausdruecklich
+// etwas. Das ist die einzige Stelle, an der Autoritaet ENTSTEHT -- alles
+// andere kann sie nur weitergeben oder verkleinern.
+fn grant_console(state: u64, task: u64, rights: u64) -> u64 {
+    return cap.insert(state, task, cap.K_STREAM, rights, file.CON_OUT)
+}
+
+// Die Weiche. `number` ist >= CAP_BASE; `number - CAP_BASE` ist die
+// Nummer INNERHALB der nativen ABI -- dieselbe wie in OrientOS.
+fn native(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64) -> u64 {
+    if number > CAP_MAXNR {
+        // Ein Aufruf, den es in dieser ABI nicht gibt. OrientOS antwortet
+        // hier InvalidArgs, nicht NotSupported: die Nummer ist falsch,
+        // nicht das Angebot.
+        return cap.err(cap.E_INVALID)
+    }
+    if number == CAP_VERSION {
+        return cap.ABI_VERSION
+    }
+    if number == CAP_COUNT {
+        return cap.used(state, me)
+    }
+    if number == CAP_CLOSE {
+        if !cap.close(state, me, a0) {
+            return cap.err(cap.E_BADHANDLE)
+        }
+        return 0
+    }
+    // Alles Weitere braucht ein gueltiges Handle. GENAU HIER liegt der
+    // Unterschied zu -EBADF von POSIX: ein gefaelschtes Handle und ein
+    // echtes ohne das noetige Recht sind ZWEI Fehler, nicht einer.
+    let i: u64 = cap.find(state, me, a0)
+    if i >= cap.MAX_CAPS {
+        return cap.err(cap.E_BADHANDLE)
+    }
+    let kind: u64 = cap.kind_at(state, me, i)
+    let rights: u64 = cap.rights_at(state, me, i)
+    let object: u64 = cap.object_at(state, me, i)
+
+    if number == CAP_INSPECT {
+        if !cap.rights_contains(rights, cap.R_INSPECT) {
+            return cap.err(cap.E_RIGHTS)
+        }
+        // Art und Rechte, sonst nichts. Keine Objektnummer, kein Zeiger,
+        // keine Kerneladresse -- so steht es in OrientOS' port.rs.
+        if a1 != 0 {
+            if !proc.user_ok(state, me, a1, 16) {
+                return cap.err(cap.E_INVALID)
+            }
+            var k: u64 = 0
+            while k < 8 {
+                if !poke(state, me, a1 + k, (kind >> (k * 8)) & 255) {
+                    return cap.err(cap.E_INVALID)
+                }
+                if !poke(state, me, a1 + 8 + k, (rights >> (k * 8)) & 255) {
+                    return cap.err(cap.E_INVALID)
+                }
+                k = k + 1
+            }
+        }
+        return 0
+    }
+
+    if number == CAP_DUP {
+        if !cap.rights_contains(rights, cap.R_DUPLICATE) {
+            return cap.err(cap.E_RIGHTS)
+        }
+        let h: u64 = cap.insert(state, me, kind,
+            cap.rights_restrict(rights, a1), object)
+        if h == cap.HANDLE_NONE {
+            return cap.err(cap.E_EXHAUSTED)
+        }
+        return h
+    }
+
+    if number == CAP_TRANSFER {
+        if !cap.rights_contains(rights, cap.R_TRANSFER) {
+            return cap.err(cap.E_RIGHTS)
+        }
+        let ziel: u64 = sched.find_pid(state, a2)
+        if ziel >= kstate.MAX_TASKS {
+            return cap.err(cap.E_NOTFOUND)
+        }
+        let h: u64 = cap.insert(state, ziel, kind,
+            cap.rights_restrict(rights, a1), object)
+        if h == cap.HANDLE_NONE {
+            return cap.err(cap.E_EXHAUSTED)
+        }
+        // Das Handle VERLAESST diese Tabelle. Ein uebertragenes Recht ist
+        // kein geteiltes Recht.
+        cap.close(state, me, a0)
+        return h
+    }
+
+    if number == CAP_READ || number == CAP_WRITE {
+        if kind != cap.K_STREAM {
+            return cap.err(cap.E_WRONGTYPE)
+        }
+        var len: u64 = a2
+        if len > MAX_IO {
+            len = MAX_IO
+        }
+        if !proc.user_ok(state, me, a1, len) {
+            return cap.err(cap.E_INVALID)
+        }
+        if object >= file.MAX_OPEN {
+            return cap.err(cap.E_CLOSED)
+        }
+        if number == CAP_WRITE {
+            if !cap.rights_contains(rights, cap.R_WRITE) {
+                return cap.err(cap.E_RIGHTS)
+            }
+            let nw: u64 = write_of(state, me, object, a1, len)
+            if errno.is_error(nw) {
+                return cap.err(cap.E_CLOSED)
+            }
+            return nw
+        }
+        if !cap.rights_contains(rights, cap.R_READ) {
+            return cap.err(cap.E_RIGHTS)
+        }
+        let nr: u64 = read_of(state, me, object, a1, len)
+        if errno.is_error(nr) {
+            return cap.err(cap.E_CLOSED)
+        }
+        return nr
+    }
+    return cap.err(cap.E_UNSUPPORTED)
 }
