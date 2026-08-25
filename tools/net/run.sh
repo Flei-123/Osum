@@ -517,11 +517,11 @@ echo "== 11. ring 3: /bin/ping and /bin/wget, off the disk =="
 # The whole round in one line: a PROCESS, loaded out of a file system,
 # in its own address space, reaches the wire through the socket calls of
 # the POSIX layer.
-cat > "$TMPD/http.py" <<'PY'
+cat > "$TMPD/httpsrv.py" <<'PY'
 import http.server, socketserver, sys
 class H(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
-        b = b"a page from the linux kernel side, 44 octets.\n"
+        b = b"a page from the linux kernel side, 46 octets.\n"
         self.send_response(200)
         self.send_header("Content-Type", "text/plain")
         self.send_header("Content-Length", str(len(b)))
@@ -534,7 +534,7 @@ with socketserver.TCPServer(("0.0.0.0", int(sys.argv[1])), H) as s:
 PY
 wire_up
 bridge_up
-ip netns exec "$NS" python3 "$TMPD/http.py" 8000 > "$TMPD/httpd.log" 2>&1 &
+ip netns exec "$NS" python3 "$TMPD/httpsrv.py" 8000 > "$TMPD/httpd.log" 2>&1 &
 SRVPID=$!
 sleep 1
 cp "$TMPD/disk.img" "$TMPD/live.img"
@@ -552,7 +552,7 @@ num "answers /bin/ping got, in ring 3, over socket(AF_INET, SOCK_DGRAM, IPPROTO_
 has "$R" "0% packet loss" "and it lost none of them"
 has "$R" "wget: connected to 10.9.0.1:8000" "/bin/wget opened a TCP connection out of ring 3"
 has "$R" "wget: status 200" "it parsed the status line of a real python HTTP server"
-has "$R" "a page from the linux kernel side, 44 octets." "and printed the body it fetched"
+has "$R" "a page from the linux kernel side, 46 octets." "and printed the body it fetched"
 has "$R" "wget: octets 46" "the body is the 46 octets the server said it would be"
 hasnot "$R" "*** EXCEPTION" "not one exception in the whole run"
 hasnot "$R" "osum_panic" "and no checked-arithmetic panic -- the sequence numbers wrap with +%"
