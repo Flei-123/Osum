@@ -1,0 +1,839 @@
+// kernel/user/unix.fi -- Runde K9: was ein Unix-Programm voraussetzt,
+// von AUSSEN gemessen.
+//
+// Wie `/bin/posix` aus Runde K4: das Programm laeuft in Ring 3, macht
+// jeden Aufruf wirklich, und schreibt jede Antwort als
+//
+//     unix: <name> = <zahl>
+//
+// auf die Konsole. `tools/unix/run.sh` haelt jede dieser Zahlen gegen
+// das, was POSIX verlangt. Was hier nicht als Zahl herauskommt, ist keine
+// Zusage, sondern eine Behauptung.
+//
+// VIER ABSCHNITTE, in der Reihenfolge des Auftrags dieser Runde:
+//
+//   1. SIGNALE. Abfangen und mitzaehlen, blockieren und nachholen,
+//      ueberhoeren, das Standardverhalten, SIGCHLD, und ein Prozessor-
+//      fehler (Zugriff auf die Null), der als SIGSEGV in einer eigenen
+//      Routine ankommt statt den Kernel anzuhalten. Dazu ANHALTEN und
+//      FORTSETZEN, gemessen am Zustand und an der Rechenzeit des
+//      angehaltenen Prozesses.
+//   2. TERMINAL. Die Zeilendisziplin, die Fenstergroesse, der rohe
+//      Modus -- und ein Pseudoterminalpaar, durch das ein STRG-C
+//      geschickt wird. Das ist der Test, den ein Mensch bemerkt, ohne
+//      dass ein Mensch dabeisitzen muss.
+//   3. UHR. Die monotone Uhr, ueber viele Messungen gegen sich selbst
+//      geprueft: sie darf nie rueckwaerts laufen. Die Echtzeituhr gegen
+//      eine Jahreszahl. Und ein Schlaf, der wirklich so lange dauert.
+//   4. ZUFALL. Achttausend Oktette, die Verteilung ueber 256 Faecher
+//      (Chi-Quadrat), die Verteilung der Bits, und zwei Puffer
+//      hintereinander, die verschieden sein muessen.
+//
+// DIE BEHANDLUNGSROUTINE STEHT IN `crt.s` UND NICHT HIER, und das ist
+// keine Bequemlichkeit: eine Routine ist eine ADRESSE, und Stufe 0 von
+// Firn kann die Adresse einer eigenen Funktion nicht nennen -- derselbe
+// Grund, aus dem `isr.s` eine Tabelle von Wahlnummern hat. Die drei
+// Namen darunter holt dieses Programm mit `lea` aus einem `asm`-Block.
+
+profile kernel
+
+import ulib
+import libc.kcall
+import libc.errno
+
+export { u_start }
+
+// ---------------------------------------------------------- die Nummern
+
+const SYS_READ: u64 = 0
+const SYS_WRITE: u64 = 1
+const SYS_OPEN: u64 = 2
+const SYS_CLOSE: u64 = 3
+const SYS_RT_SIGACTION: u64 = 13
+const SYS_RT_SIGPROCMASK: u64 = 14
+const SYS_IOCTL: u64 = 16
+const SYS_PIPE: u64 = 22
+const SYS_GETPID: u64 = 39
+const SYS_FORK: u64 = 57
+const SYS_EXIT: u64 = 60
+const SYS_WAIT4: u64 = 61
+const SYS_KILL: u64 = 62
+const SYS_GETTIMEOFDAY: u64 = 96
+const SYS_SETPGID: u64 = 109
+const SYS_GETPGRP: u64 = 111
+const SYS_RT_SIGPENDING: u64 = 127
+const SYS_NANOSLEEP: u64 = 35
+const SYS_TIME: u64 = 201
+const SYS_CLOCK_GETTIME: u64 = 228
+const SYS_GETRANDOM: u64 = 318
+const SYS_OSUM_PTY: u64 = 1100
+const SYS_OSUM_TTYINFO: u64 = 1101
+const SYS_OSUM_SIGINFO: u64 = 1102
+
+const SIGINT: u64 = 2
+const SIGFPE: u64 = 8
+const SIGKILL: u64 = 9
+const SIGUSR1: u64 = 10
+const SIGSEGV: u64 = 11
+const SIGUSR2: u64 = 12
+const SIGTERM: u64 = 15
+const SIGCHLD: u64 = 17
+const SIGCONT: u64 = 18
+const SIGSTOP: u64 = 19
+const SIGWINCH: u64 = 28
+
+const SIG_DFL: u64 = 0
+const SIG_IGN: u64 = 1
+const SIG_BLOCK: u64 = 0
+const SIG_UNBLOCK: u64 = 1
+
+const CLOCK_REALTIME: u64 = 0
+const CLOCK_MONOTONIC: u64 = 1
+
+const TCGETS: u64 = 0x5401
+const TCSETS: u64 = 0x5402
+const TIOCGPGRP: u64 = 0x540F
+const TIOCSPGRP: u64 = 0x5410
+const TIOCGWINSZ: u64 = 0x5413
+const TIOCSWINSZ: u64 = 0x5414
+
+const ISIG: u64 = 1
+const ICANON: u64 = 2
+const ECHO: u64 = 8
+
+// Was `siginfo` beantwortet (`kernel/sys.fi`).
+const SI_PENDING: u64 = 0
+const SI_MASK: u64 = 1
+const SI_LAST: u64 = 2
+const SI_CAUGHT: u64 = 5
+const SI_STOPS: u64 = 7
+const SI_MYCOUNT: u64 = 8
+const SI_STOPPED: u64 = 9
+const SI_TTYSIGS: u64 = 10
+const SI_STATE_OF: u64 = 20
+const SI_TICKS_OF: u64 = 21
+
+// Die Zustaende einer Aufgabe (`kernel/sched.fi`).
+const S_STOP: u64 = 7
+
+// ------------------------------------------------------- die Ausgabe
+
+fn line(name: u64, v: u64) {
+    var s_pre: [u8; 7] = "unix: \0"
+    var s_eq: [u8; 4] = " = \0"
+    ulib.say((&s_pre[0 as usize]) as u64)
+    ulib.say(name)
+    ulib.say((&s_eq[0 as usize]) as u64)
+    ulib.sayn(v)
+    ulib.nl()
+}
+
+// ------------------------------------------- die Routine aus crt.s
+
+fn handler_addr() -> u64 {
+    return asm("lea rax, [rip + osum_sighandler]", out("rax"))
+}
+
+fn handler2_addr() -> u64 {
+    return asm("lea rax, [rip + osum_sighandler2]", out("rax"))
+}
+
+// Die Routine, die nicht zurueckkehrt (crt.s). Fuer die Fehlersignale.
+fn exit_handler_addr() -> u64 {
+    return asm("lea rax, [rip + osum_sigexit]", out("rax"))
+}
+
+fn sig_count() -> u64 {
+    return asm("mov rax, [rip + osum_sigcount]", out("rax"))
+}
+
+fn sig_count2() -> u64 {
+    return asm("mov rax, [rip + osum_sigcount2]", out("rax"))
+}
+
+fn sig_last() -> u64 {
+    return asm("mov rax, [rip + osum_siglast]", out("rax"))
+}
+
+// `struct sigaction` von Linux: Routine, Flaggen, Wiederherstellung,
+// Maske -- vier Woerter.
+fn set_handler(sig: u64, h: u64) -> u64 {
+    var sa: [u64; 4] = [0 as u64; 4]
+    sa[0 as usize] = h
+    sa[1 as usize] = 0
+    sa[2 as usize] = 0
+    sa[3 as usize] = 0
+    return kcall.sys4(SYS_RT_SIGACTION, sig, (&sa[0 as usize]) as u64, 0, 8)
+}
+
+fn mask_op(how: u64, set: u64) -> u64 {
+    var m: [u64; 1] = [0 as u64; 1]
+    m[0 as usize] = set
+    return kcall.sys4(SYS_RT_SIGPROCMASK, how, (&m[0 as usize]) as u64, 0, 8)
+}
+
+fn pending_now() -> u64 {
+    var m: [u64; 1] = [0 as u64; 1]
+    kcall.sys3(SYS_RT_SIGPENDING, (&m[0 as usize]) as u64, 8, 0)
+    return m[0 as usize]
+}
+
+fn siginfo(what: u64, arg: u64) -> u64 {
+    return kcall.sys2(SYS_OSUM_SIGINFO, what, arg)
+}
+
+fn my_pid() -> u64 {
+    return kcall.sys0(SYS_GETPID)
+}
+
+fn sleep_ms(ms: u64) -> u64 {
+    var ts: [u64; 2] = [0 as u64; 2]
+    ts[0 as usize] = ms / 1000
+    ts[1 as usize] = (ms % 1000) * 1000000
+    return kcall.sys2(SYS_NANOSLEEP, (&ts[0 as usize]) as u64, 0)
+}
+
+fn mono_ns() -> u64 {
+    var ts: [u64; 2] = [0 as u64; 2]
+    kcall.sys2(SYS_CLOCK_GETTIME, CLOCK_MONOTONIC, (&ts[0 as usize]) as u64)
+    return (ts[0 as usize] *% 1000000000) +% ts[1 as usize]
+}
+
+fn wait_any(status: u64) -> u64 {
+    let big: u64 = 0 -% 1
+    return kcall.sys4(SYS_WAIT4, big, status, 0, 0)
+}
+
+// ====================================================== 1. die Signale
+
+fn part_signals() -> u64 {
+    var n_act: [u8; 8] = "sigact\0\0"
+    var n_one: [u8; 8] = "caught\0\0"
+    var n_many: [u8; 6] = "count\0"
+    var n_last: [u8; 5] = "last\0"
+    var n_blk: [u8; 12] = "blocked ok\0\0"
+    var n_pend: [u8; 8] = "pending\0"
+    var n_after: [u8; 14] = "after unblock\0"
+    var n_ign: [u8; 7] = "ignore\0"
+    var n_kill: [u8; 9] = "act kill\0"
+    var n_zero: [u8; 9] = "act zero\0"
+    var n_big: [u8; 8] = "act big\0"
+    var n_srch: [u8; 10] = "kill srch\0"
+    var n_probe: [u8; 11] = "kill probe\0"
+    var n_term: [u8; 10] = "term code\0"
+    var n_hard: [u8; 10] = "kill code\0"
+    var n_chld: [u8; 6] = "chld\0\0"
+    var n_stop: [u8; 11] = "stop state\0"
+    var n_frozen: [u8; 12] = "stop frozen\0"
+    var n_cont: [u8; 11] = "cont state\0"
+    var n_moves: [u8; 11] = "cont moves\0"
+    var n_stopped: [u8; 13] = "stopped seen\0"
+
+    var lines: u64 = 0
+    let me: u64 = my_pid()
+
+    // -- abfangen
+    line((&n_act[0 as usize]) as u64, set_handler(SIGUSR1, handler_addr()))
+    lines = lines + 1
+    let before: u64 = sig_count()
+    kcall.sys2(SYS_KILL, me, SIGUSR1)
+    line((&n_one[0 as usize]) as u64, sig_count() -% before)
+    lines = lines + 1
+    var k: u64 = 0
+    while k < 5 {
+        kcall.sys2(SYS_KILL, me, SIGUSR1)
+        k = k + 1
+    }
+    line((&n_many[0 as usize]) as u64, sig_count() -% before)
+    lines = lines + 1
+    line((&n_last[0 as usize]) as u64, sig_last())
+    lines = lines + 1
+
+    // -- blockieren: das Signal geht nicht verloren, es wartet
+    set_handler(SIGUSR2, handler2_addr())
+    line((&n_blk[0 as usize]) as u64, mask_op(SIG_BLOCK, 1 << (SIGUSR2 - 1)))
+    lines = lines + 1
+    let b2: u64 = sig_count2()
+    kcall.sys2(SYS_KILL, me, SIGUSR2)
+    var pend: u64 = 0
+    if (pending_now() & (1 << (SIGUSR2 - 1))) != 0 && sig_count2() == b2 {
+        pend = 1
+    }
+    line((&n_pend[0 as usize]) as u64, pend)
+    lines = lines + 1
+    mask_op(SIG_UNBLOCK, 1 << (SIGUSR2 - 1))
+    line((&n_after[0 as usize]) as u64, sig_count2() -% b2)
+    lines = lines + 1
+
+    // -- ueberhoeren
+    set_handler(SIGUSR1, SIG_IGN)
+    let b3: u64 = sig_count()
+    kcall.sys2(SYS_KILL, me, SIGUSR1)
+    kcall.sys2(SYS_KILL, me, SIGUSR1)
+    line((&n_ign[0 as usize]) as u64, sig_count() -% b3)
+    lines = lines + 1
+    set_handler(SIGUSR1, SIG_DFL)
+
+    // -- und die Wege, falsch zu liegen
+    line((&n_kill[0 as usize]) as u64, set_handler(SIGKILL, handler_addr()))
+    lines = lines + 1
+    line((&n_zero[0 as usize]) as u64, set_handler(0, handler_addr()))
+    lines = lines + 1
+    line((&n_big[0 as usize]) as u64, set_handler(64, handler_addr()))
+    lines = lines + 1
+    line((&n_srch[0 as usize]) as u64, kcall.sys2(SYS_KILL, 30000, SIGTERM))
+    lines = lines + 1
+    line((&n_probe[0 as usize]) as u64, kcall.sys2(SYS_KILL, me, 0))
+    lines = lines + 1
+
+    // -- das Standardverhalten: ein Kind, das an SIGTERM stirbt
+    var status: [u64; 1] = [0 as u64; 1]
+    let c1: u64 = kcall.sys0(SYS_FORK)
+    if c1 == 0 {
+        // Das Kind wartet, bis es beendet wird. `pause` kehrt nur mit
+        // -EINTR zurueck; kommt es doch zurueck, ist das Signal nicht
+        // angekommen, und die 77 unten ist der Beweis dafuer.
+        var r: u64 = 0
+        while r < 200 {
+            sleep_ms(10)
+            r = r + 1
+        }
+        kcall.sys1(SYS_EXIT, 77)
+    }
+    sleep_ms(30)
+    kcall.sys2(SYS_KILL, c1, SIGTERM)
+    status[0 as usize] = 0
+    wait_any((&status[0 as usize]) as u64)
+    line((&n_term[0 as usize]) as u64, (status[0 as usize] >> 8) & 255)
+    lines = lines + 1
+
+    // -- SIGKILL laesst sich nicht abfangen
+    let c2: u64 = kcall.sys0(SYS_FORK)
+    if c2 == 0 {
+        set_handler(SIGTERM, handler_addr())
+        var r: u64 = 0
+        while r < 200 {
+            sleep_ms(10)
+            r = r + 1
+        }
+        kcall.sys1(SYS_EXIT, 77)
+    }
+    sleep_ms(30)
+    kcall.sys2(SYS_KILL, c2, SIGKILL)
+    status[0 as usize] = 0
+    wait_any((&status[0 as usize]) as u64)
+    line((&n_hard[0 as usize]) as u64, (status[0 as usize] >> 8) & 255)
+    lines = lines + 1
+
+    // -- SIGCHLD an den Elternprozess
+    set_handler(SIGCHLD, handler2_addr())
+    let b4: u64 = sig_count2()
+    let c3: u64 = kcall.sys0(SYS_FORK)
+    if c3 == 0 {
+        kcall.sys1(SYS_EXIT, 5)
+    }
+    status[0 as usize] = 0
+    wait_any((&status[0 as usize]) as u64)
+    sleep_ms(20)
+    line((&n_chld[0 as usize]) as u64, sig_count2() -% b4)
+    lines = lines + 1
+    set_handler(SIGCHLD, SIG_DFL)
+
+    // -- ANHALTEN UND FORTSETZEN. Gemessen am Zustand der Aufgabe im
+    //    Kern und an ihrer Rechenzeit: ein angehaltener Prozess bekommt
+    //    keine Marke mehr, und das ist der Unterschied zu einem, der nur
+    //    schlaeft.
+    let c4: u64 = kcall.sys0(SYS_FORK)
+    if c4 == 0 {
+        // Rechnen, bis jemand es beendet. Ein Schlaefer taete es nicht:
+        // an ihm liesse sich nicht zeigen, dass ein ANGEHALTENER keine
+        // Rechenzeit mehr bekommt.
+        var spin: u64 = 0
+        while spin < 4000000000 {
+            spin = spin + 1
+        }
+        kcall.sys1(SYS_EXIT, 0)
+    }
+    sleep_ms(40)
+    kcall.sys2(SYS_KILL, c4, SIGSTOP)
+    sleep_ms(40)
+    line((&n_stop[0 as usize]) as u64, siginfo(SI_STATE_OF, c4))
+    lines = lines + 1
+    line((&n_stopped[0 as usize]) as u64, siginfo(SI_STOPPED, 0))
+    lines = lines + 1
+    let t1: u64 = siginfo(SI_TICKS_OF, c4)
+    sleep_ms(60)
+    let t2: u64 = siginfo(SI_TICKS_OF, c4)
+    var frozen: u64 = 0
+    if t2 == t1 {
+        frozen = 1
+    }
+    line((&n_frozen[0 as usize]) as u64, frozen)
+    lines = lines + 1
+    kcall.sys2(SYS_KILL, c4, SIGCONT)
+    sleep_ms(40)
+    let st: u64 = siginfo(SI_STATE_OF, c4)
+    var back: u64 = 0
+    if st != S_STOP {
+        back = 1
+    }
+    line((&n_cont[0 as usize]) as u64, back)
+    lines = lines + 1
+    let t3: u64 = siginfo(SI_TICKS_OF, c4)
+    var moved: u64 = 0
+    if t3 > t2 {
+        moved = 1
+    }
+    line((&n_moves[0 as usize]) as u64, moved)
+    lines = lines + 1
+    kcall.sys2(SYS_KILL, c4, SIGKILL)
+    status[0 as usize] = 0
+    wait_any((&status[0 as usize]) as u64)
+    return lines
+}
+
+// ------------------------------------- ein Prozessorfehler als Signal
+
+fn part_faults() -> u64 {
+    var n_segv: [u8; 12] = "segv caught\0"
+    var n_dead: [u8; 10] = "segv code\0"
+    var n_fpe: [u8; 11] = "fpe caught\0"
+    var lines: u64 = 0
+    var status: [u64; 1] = [0 as u64; 1]
+
+    // MIT ROUTINE: der Zugriff auf die Null wird zu SIGSEGV, die Routine
+    // laeuft, und weil sie ZURUECKKEHRT, laeuft derselbe Befehl noch
+    // einmal -- deshalb setzt der Kernel die Routine beim Fehlersignal
+    // auf das Standardverhalten zurueck, und der zweite Versuch bringt
+    // den Prozess um. Genau so verhaelt sich jedes Unix.
+    let c1: u64 = kcall.sys0(SYS_FORK)
+    if c1 == 0 {
+        set_handler(SIGSEGV, exit_handler_addr())
+        // Der Zugriff daneben. 8 ist keine Seite dieses Prozesses.
+        let bad: u64 = 8
+        __mmio_write64((bad) as *mut u64, 1)
+        // Kommt der Prozess hierher, hat die Routine ihn gerettet.
+        kcall.sys1(SYS_EXIT, 40 + sig_count())
+    }
+    status[0 as usize] = 0
+    wait_any((&status[0 as usize]) as u64)
+    line((&n_segv[0 as usize]) as u64, (status[0 as usize] >> 8) & 255)
+    lines = lines + 1
+
+    // OHNE ROUTINE: der Beendigungscode ist der, den Runde 62 vergeben
+    // hat -- 128 + Vektornummer, und ein Seitenfehler ist Vektor 14.
+    let c2: u64 = kcall.sys0(SYS_FORK)
+    if c2 == 0 {
+        let bad: u64 = 8
+        __mmio_write64((bad) as *mut u64, 1)
+        kcall.sys1(SYS_EXIT, 0)
+    }
+    status[0 as usize] = 0
+    wait_any((&status[0 as usize]) as u64)
+    line((&n_dead[0 as usize]) as u64, (status[0 as usize] >> 8) & 255)
+    lines = lines + 1
+
+    // Und eine Division durch null: SIGFPE, aus Vektor 0.
+    let c3: u64 = kcall.sys0(SYS_FORK)
+    if c3 == 0 {
+        set_handler(SIGFPE, exit_handler_addr())
+        var z: u64 = 0
+        var r: u64 = 0
+        // Der Uebersetzer soll die Division nicht wegrechnen: der Teiler
+        // kommt aus einem Systemaufruf.
+        z = kcall.sys0(SYS_GETPID) -% kcall.sys0(SYS_GETPID)
+        r = asm("xor rdx, rdx\ndiv rcx", out("rax"), in("rax") 100,
+            in("rcx") z, clobber("rdx"))
+        kcall.sys1(SYS_EXIT, 40 + sig_count())
+    }
+    status[0 as usize] = 0
+    wait_any((&status[0 as usize]) as u64)
+    line((&n_fpe[0 as usize]) as u64, (status[0 as usize] >> 8) & 255)
+    lines = lines + 1
+    return lines
+}
+
+// ===================================================== 2. das Terminal
+
+fn part_tty() -> u64 {
+    var n_get: [u8; 7] = "tcgets\0"
+    var n_can: [u8; 7] = "canon\0\0"
+    var n_echo: [u8; 10] = "echo off\0\0"
+    var n_seton: [u8; 9] = "echo on\0\0"
+    var n_rows: [u8; 5] = "rows\0"
+    var n_cols: [u8; 5] = "cols\0"
+    var n_set: [u8; 9] = "winsize\0\0"
+    var n_notty: [u8; 6] = "notty\0"
+    var n_win: [u8; 8] = "winch\0\0\0"
+    var n_pty: [u8; 6] = "pty\0\0\0"
+    var n_m2s: [u8; 13] = "pty to slave\0"
+    var n_s2m: [u8; 14] = "pty to master\0"
+    var n_raw: [u8; 8] = "pty raw\0"
+    var n_ctlc: [u8; 9] = "pty ctlc\0"
+    var n_echo2: [u8; 10] = "pty echo\0\0"
+    var lines: u64 = 0
+
+    var t: [u8; 64] = [0 as u8; 64]
+    var ws: [u8; 8] = [0 as u8; 8]
+    var buf: [u8; 128] = [0 as u8; 128]
+    var fds: [u64; 1] = [0 as u64; 1]
+
+    line((&n_get[0 as usize]) as u64,
+        kcall.sys3(SYS_IOCTL, 0, TCGETS, (&t[0 as usize]) as u64))
+    lines = lines + 1
+    let lf: u64 = (*((&t[12 as usize]) as *mut u32)) as u64
+    var canon: u64 = 0
+    if (lf & ICANON) != 0 && (lf & ISIG) != 0 {
+        canon = 1
+    }
+    line((&n_can[0 as usize]) as u64, canon)
+    lines = lines + 1
+    line((&n_echo[0 as usize]) as u64, lf & ECHO)
+    lines = lines + 1
+
+    // Echo einschalten, nachlesen, wieder aus. Die Konsole faengt ohne
+    // Echo an (`tty.init` sagt warum); dass der Schalter WIRKT, ist eine
+    // eigene Zusage.
+    __mmio_write32(((&t[12 as usize]) as u64) as *mut u32, (lf | ECHO) as u32)
+    kcall.sys3(SYS_IOCTL, 0, TCSETS, (&t[0 as usize]) as u64)
+    kcall.sys3(SYS_IOCTL, 0, TCGETS, (&t[0 as usize]) as u64)
+    let lf2: u64 = (*((&t[12 as usize]) as *mut u32)) as u64
+    var on: u64 = 0
+    if (lf2 & ECHO) != 0 {
+        on = 1
+    }
+    line((&n_seton[0 as usize]) as u64, on)
+    lines = lines + 1
+    __mmio_write32(((&t[12 as usize]) as u64) as *mut u32, lf as u32)
+    kcall.sys3(SYS_IOCTL, 0, TCSETS, (&t[0 as usize]) as u64)
+
+    // Die Fenstergroesse.
+    kcall.sys3(SYS_IOCTL, 0, TIOCGWINSZ, (&ws[0 as usize]) as u64)
+    line((&n_rows[0 as usize]) as u64, (*((&ws[0 as usize]) as *mut u16)) as u64)
+    lines = lines + 1
+    line((&n_cols[0 as usize]) as u64, (*((&ws[2 as usize]) as *mut u16)) as u64)
+    lines = lines + 1
+    // Groesse aendern -- und die Vordergrundgruppe bekommt SIGWINCH.
+    set_handler(SIGWINCH, handler2_addr())
+    // DIE ALTE VORDERGRUNDGRUPPE WIRD GEMERKT UND AM ENDE
+    // ZURUECKGEGEBEN. Der erste Lauf dieses Programms tat das nicht, und
+    // die Folge war lehrreich genug, um sie aufzuschreiben: es liess
+    // seine eigene Gruppe im Terminal stehen, die Shell danach war damit
+    // nicht mehr im Vordergrund, ihr naechstes `read` bekam SIGTTIN, und
+    // das Standardverhalten von SIGTTIN ist ANHALTEN. Die Shell stand.
+    // Der Mechanismus war richtig -- das Programm war unhoeflich.
+    var pgsave: [u8; 8] = [0 as u8; 8]
+    kcall.sys3(SYS_IOCTL, 0, TIOCGPGRP, (&pgsave[0 as usize]) as u64)
+    __mmio_write32(((&ws[0 as usize]) as u64) as *mut u32,
+        (kcall.sys0(SYS_GETPGRP) & 0xFFFFFFFF) as u32)
+    kcall.sys3(SYS_IOCTL, 0, TIOCSPGRP, (&ws[0 as usize]) as u64)
+    let bw: u64 = sig_count2()
+    __mmio_write16(((&ws[0 as usize]) as u64) as *mut u16, 40 as u16)
+    __mmio_write16(((&ws[2 as usize]) as u64) as *mut u16, 120 as u16)
+    kcall.sys3(SYS_IOCTL, 0, TIOCSWINSZ, (&ws[0 as usize]) as u64)
+    sleep_ms(20)
+    line((&n_win[0 as usize]) as u64, sig_count2() -% bw)
+    lines = lines + 1
+    kcall.sys3(SYS_IOCTL, 0, TIOCGWINSZ, (&ws[0 as usize]) as u64)
+    var okw: u64 = 0
+    if (*((&ws[0 as usize]) as *mut u16)) as u64 == 40
+    && (*((&ws[2 as usize]) as *mut u16)) as u64 == 120 {
+        okw = 1
+    }
+    line((&n_set[0 as usize]) as u64, okw)
+    lines = lines + 1
+    __mmio_write16(((&ws[0 as usize]) as u64) as *mut u16, 24 as u16)
+    __mmio_write16(((&ws[2 as usize]) as u64) as *mut u16, 80 as u16)
+    kcall.sys3(SYS_IOCTL, 0, TIOCSWINSZ, (&ws[0 as usize]) as u64)
+    set_handler(SIGWINCH, SIG_DFL)
+
+    // Was kein Terminal ist, hat keine Terminaleigenschaften.
+    var name: [u8; 16] = "/unixtest.txt\0\0\0"
+    let fd: u64 = kcall.sys3(SYS_OPEN, (&name[0 as usize]) as u64, 577, 0)
+    line((&n_notty[0 as usize]) as u64,
+        kcall.sys3(SYS_IOCTL, fd, TCGETS, (&t[0 as usize]) as u64))
+    lines = lines + 1
+    kcall.sys1(SYS_CLOSE, fd)
+
+    // ------------------------------------------------ das Pseudoterminal
+    line((&n_pty[0 as usize]) as u64,
+        kcall.sys1(SYS_OSUM_PTY, (&fds[0 as usize]) as u64))
+    lines = lines + 1
+    let m: u64 = fds[0 as usize] & 0xFFFFFFFF
+    let sl: u64 = (fds[0 as usize] >> 32) & 0xFFFFFFFF
+
+    // Steuerseite schreibt, Nutzerseite liest -- durch die
+    // Zeilendisziplin, also erst mit dem Zeilenvorschub.
+    var text: [u8; 8] = "hallo\n\0\0"
+    kcall.sys3(SYS_WRITE, m, (&text[0 as usize]) as u64, 6)
+    sleep_ms(10)
+    let got: u64 = kcall.sys3(SYS_READ, sl, (&buf[0 as usize]) as u64, 64)
+    var same: u64 = 0
+    if got == 6 && buf[0 as usize] == 104 as u8 && buf[4 as usize] == 111 as u8 {
+        same = got
+    } else {
+        same = 0 -% got
+    }
+    line((&n_m2s[0 as usize]) as u64, same)
+    lines = lines + 1
+
+    // DAS ECHO DER NUTZERSEITE. Ein Pseudoterminal hat ECHO an -- das
+    // ist der Sinn der Sache: wer auf der Steuerseite tippt, soll sehen,
+    // was er tippt. Also liegt auf der Steuerseite jetzt genau das, was
+    // eben hineingeschickt wurde, mit dem Wagenruecklauf, den ONLCR
+    // davorsetzt: sieben Oktette fuer sechs. Der erste Lauf dieses
+    // Programms hat das nicht erwartet und die dreizehn Oktette (Echo
+    // plus Antwort) fuer einen Fehler gehalten.
+    let ec: u64 = kcall.sys3(SYS_READ, m, (&buf[0 as usize]) as u64, 64)
+    line((&n_echo2[0 as usize]) as u64, ec)
+    lines = lines + 1
+
+    // Nutzerseite schreibt, Steuerseite liest.
+    var back: [u8; 6] = "welt\n\0"
+    kcall.sys3(SYS_WRITE, sl, (&back[0 as usize]) as u64, 5)
+    sleep_ms(10)
+    let got2: u64 = kcall.sys3(SYS_READ, m, (&buf[0 as usize]) as u64, 64)
+    var same2: u64 = 0
+    if got2 >= 5 && got2 < 64 && buf[0 as usize] == 119 as u8 {
+        same2 = got2
+    } else {
+        same2 = 0 -% got2
+    }
+    line((&n_s2m[0 as usize]) as u64, same2)
+    lines = lines + 1
+
+    // DER ROHE MODUS. Ein einzelnes Zeichen ohne Zeilenvorschub kommt
+    // durch -- im kanonischen Modus taete es das nicht.
+    kcall.sys3(SYS_IOCTL, sl, TCGETS, (&t[0 as usize]) as u64)
+    let slf: u64 = (*((&t[12 as usize]) as *mut u32)) as u64
+    __mmio_write32(((&t[12 as usize]) as u64) as *mut u32,
+        (slf & 0xFFFFFFFD) as u32) // ICANON aus
+    kcall.sys3(SYS_IOCTL, sl, TCSETS, (&t[0 as usize]) as u64)
+    var one: [u8; 2] = "x\0"
+    kcall.sys3(SYS_WRITE, m, (&one[0 as usize]) as u64, 1)
+    sleep_ms(10)
+    let got3: u64 = kcall.sys3(SYS_READ, sl, (&buf[0 as usize]) as u64, 8)
+    var raw: u64 = 0
+    if got3 == 1 && buf[0 as usize] == 120 as u8 {
+        raw = 1
+    }
+    line((&n_raw[0 as usize]) as u64, raw)
+    lines = lines + 1
+    __mmio_write32(((&t[12 as usize]) as u64) as *mut u32, slf as u32)
+    kcall.sys3(SYS_IOCTL, sl, TCSETS, (&t[0 as usize]) as u64)
+
+    // STRG-C DURCH DAS PSEUDOTERMINAL. Wir setzen unsere eigene
+    // Prozessgruppe als Vordergrund der Nutzerseite und schicken der
+    // Steuerseite ein Oktett 3. Ankommen muss ein SIGINT.
+    var pg: [u8; 8] = [0 as u8; 8]
+    __mmio_write32(((&pg[0 as usize]) as u64) as *mut u32,
+        (kcall.sys0(SYS_GETPGRP) & 0xFFFFFFFF) as u32)
+    kcall.sys3(SYS_IOCTL, sl, TIOCSPGRP, (&pg[0 as usize]) as u64)
+    set_handler(SIGINT, handler_addr())
+    let bi: u64 = sig_count()
+    var ctlc: [u8; 2] = [3 as u8, 0 as u8]
+    kcall.sys3(SYS_WRITE, m, (&ctlc[0 as usize]) as u64, 1)
+    sleep_ms(20)
+    line((&n_ctlc[0 as usize]) as u64, sig_count() -% bi)
+    lines = lines + 1
+    set_handler(SIGINT, SIG_DFL)
+    kcall.sys1(SYS_CLOSE, m)
+    kcall.sys1(SYS_CLOSE, sl)
+    // Und die Konsole so hinterlassen, wie sie war.
+    kcall.sys3(SYS_IOCTL, 0, TIOCSPGRP, (&pgsave[0 as usize]) as u64)
+    return lines
+}
+
+// ========================================================= 3. die Uhr
+
+fn part_clock() -> u64 {
+    var n_mono: [u8; 10] = "mono runs\0"
+    var n_back: [u8; 14] = "mono backward\0"
+    var n_samples: [u8; 13] = "mono samples\0"
+    var n_real: [u8; 10] = "real year\0"
+    var n_sleep: [u8; 11] = "sleep 50ms\0"
+    var n_bad: [u8; 9] = "clock 99\0"
+    var n_tod: [u8; 10] = "tod agree\0"
+    var n_res: [u8; 9] = "res fine\0"
+    var lines: u64 = 0
+
+    let a: u64 = mono_ns()
+    let b: u64 = mono_ns()
+    var runs: u64 = 0
+    if b >= a {
+        runs = 1
+    }
+    line((&n_mono[0 as usize]) as u64, runs)
+    lines = lines + 1
+
+    // DIE ZUSAGE, ueber viele Messungen geprueft und nicht ueber zwei.
+    // Eine Uhr aus dem Zyklenzaehler von vier Kernen ist genau hier
+    // faellig: laeuft der Zaehler eines Kerns hinterher, laeuft die Uhr
+    // rueckwaerts, sobald eine Aufgabe den Kern wechselt.
+    var last: u64 = mono_ns()
+    var backs: u64 = 0
+    var i: u64 = 0
+    while i < 20000 {
+        let now: u64 = mono_ns()
+        if now < last {
+            backs = backs + 1
+        }
+        last = now
+        i = i + 1
+    }
+    line((&n_back[0 as usize]) as u64, backs)
+    lines = lines + 1
+    line((&n_samples[0 as usize]) as u64, i)
+    lines = lines + 1
+
+    var tv: [u64; 2] = [0 as u64; 2]
+    kcall.sys2(SYS_GETTIMEOFDAY, (&tv[0 as usize]) as u64, 0)
+    // Sekunden seit 1970 durch die mittlere Laenge eines Jahres.
+    line((&n_real[0 as usize]) as u64, 1970 + tv[0 as usize] / 31556952)
+    lines = lines + 1
+
+    let s1: u64 = mono_ns()
+    sleep_ms(50)
+    let s2: u64 = mono_ns()
+    line((&n_sleep[0 as usize]) as u64, (s2 -% s1) / 1000000)
+    lines = lines + 1
+
+    var ts: [u64; 2] = [0 as u64; 2]
+    line((&n_bad[0 as usize]) as u64,
+        kcall.sys2(SYS_CLOCK_GETTIME, 99, (&ts[0 as usize]) as u64))
+    lines = lines + 1
+
+    let t0: u64 = kcall.sys1(SYS_TIME, 0)
+    var agree: u64 = 0
+    if t0 >= tv[0 as usize] && t0 -% tv[0 as usize] < 3 {
+        agree = 1
+    }
+    line((&n_tod[0 as usize]) as u64, agree)
+    lines = lines + 1
+
+    // Die Koernung: mit geeichtem Zyklenzaehler sind zwei Messungen
+    // hintereinander VERSCHIEDEN. Mit einer Uhr aus Zeitgebermarken
+    // waeren sie zehn Millisekunden lang gleich.
+    var fine: u64 = 0
+    var tries: u64 = 0
+    while tries < 100 && fine == 0 {
+        let x: u64 = mono_ns()
+        let y: u64 = mono_ns()
+        if y > x && (y -% x) < 1000000 {
+            fine = 1
+        }
+        tries = tries + 1
+    }
+    line((&n_res[0 as usize]) as u64, fine)
+    lines = lines + 1
+    return lines
+}
+
+// ====================================================== 4. der Zufall
+
+fn part_random() -> u64 {
+    var n_got: [u8; 11] = "random got\0"
+    var n_chi: [u8; 11] = "random chi\0"
+    var n_bits: [u8; 12] = "random bits\0"
+    var n_diff: [u8; 12] = "random diff\0"
+    var n_zero: [u8; 12] = "random zero\0"
+    var n_fault: [u8; 13] = "random fault\0"
+    var lines: u64 = 0
+
+    var buf: [u8; 1024] = [0 as u8; 1024]
+    var buf2: [u8; 1024] = [0 as u8; 1024]
+    var bucket: [u64; 256] = [0 as u64; 256]
+
+    let n: u64 = kcall.sys3(SYS_GETRANDOM, (&buf[0 as usize]) as u64, 1024, 0)
+    line((&n_got[0 as usize]) as u64, n)
+    lines = lines + 1
+
+    // ACHT RUNDEN ZU 1024 OKTETTEN = 8192 Ziehungen auf 256 Faecher,
+    // also 32 je Fach im Mittel. Chi-Quadrat mit 255 Freiheitsgraden
+    // liegt fuer einen gleichverteilten Strom bei 255 +- 23; ein Strom
+    // aus EINEM Oktett ergibt (8192-32)^2/32 + 255 * 32 = ueber zwei
+    // Millionen. Zwischen den beiden liegt so viel Platz, dass die
+    // Schranke nicht gedeutet werden muss.
+    var b: u64 = 0
+    while b < 256 {
+        bucket[b as usize] = 0
+        b = b + 1
+    }
+    var round: u64 = 0
+    var total: u64 = 0
+    var ones: u64 = 0
+    while round < 8 {
+        kcall.sys3(SYS_GETRANDOM, (&buf[0 as usize]) as u64, 1024, 0)
+        var i: u64 = 0
+        while i < 1024 {
+            let v: u64 = buf[i as usize] as u64
+            bucket[v as usize] = bucket[v as usize] + 1
+            var m: u64 = 0
+            while m < 8 {
+                if (v & (1 << m)) != 0 {
+                    ones = ones + 1
+                }
+                m = m + 1
+            }
+            i = i + 1
+        }
+        total = total + 1024
+        round = round + 1
+    }
+    let expect: u64 = total / 256
+    var chi: u64 = 0
+    b = 0
+    while b < 256 {
+        let o: u64 = bucket[b as usize]
+        var d: u64 = 0
+        if o > expect {
+            d = o -% expect
+        } else {
+            d = expect -% o
+        }
+        chi = chi +% ((d *% d) / expect)
+        b = b + 1
+    }
+    line((&n_chi[0 as usize]) as u64, chi)
+    lines = lines + 1
+    // Die Bits, in Zehntelprozent. Gleichverteilt sind es 500.
+    line((&n_bits[0 as usize]) as u64, (ones *% 1000) / (total *% 8))
+    lines = lines + 1
+
+    // Zwei Puffer hintereinander duerfen nicht gleich sein.
+    kcall.sys3(SYS_GETRANDOM, (&buf[0 as usize]) as u64, 1024, 0)
+    kcall.sys3(SYS_GETRANDOM, (&buf2[0 as usize]) as u64, 1024, 0)
+    var diff: u64 = 0
+    var i2: u64 = 0
+    while i2 < 1024 {
+        if buf[i2 as usize] != buf2[i2 as usize] {
+            diff = diff + 1
+        }
+        i2 = i2 + 1
+    }
+    line((&n_diff[0 as usize]) as u64, diff)
+    lines = lines + 1
+    line((&n_zero[0 as usize]) as u64,
+        kcall.sys3(SYS_GETRANDOM, (&buf[0 as usize]) as u64, 0, 0))
+    lines = lines + 1
+    line((&n_fault[0 as usize]) as u64, kcall.sys3(SYS_GETRANDOM, 16, 8, 0))
+    lines = lines + 1
+    return lines
+}
+
+// ------------------------------------------------------------- der Lauf
+
+fn u_start(args: u64) -> u64 {
+    var s_head: [u8; 34] = "unix: round K9 -- what Unix wants\0"
+    var n_lines: [u8; 6] = "lines\0"
+    ulib.say((&s_head[0 as usize]) as u64)
+    ulib.nl()
+    var lines: u64 = 0
+    lines = lines + part_signals()
+    lines = lines + part_faults()
+    lines = lines + part_tty()
+    lines = lines + part_clock()
+    lines = lines + part_random()
+    line((&n_lines[0 as usize]) as u64, lines)
+    return 0
+}
