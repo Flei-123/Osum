@@ -49,6 +49,7 @@ import errno
 import file
 import uio
 import cap
+import fb
 
 export {
     entry, neg, STAT_BYTES, DIRENT_HEAD,
@@ -203,6 +204,10 @@ const SEEK_END: u64 = 2
 
 const WNOHANG: u64 = 1
 
+// ROUNDE K7: die beiden anderen Schutzbits. `mmap` auf /dev/fb liest
+// PROT_WRITE, um zu entscheiden, ob die Kachel beschreibbar wird.
+const PROT_READ: u64 = 1
+const PROT_WRITE: u64 = 2
 const PROT_EXEC: u64 = 4
 const MAP_PRIVATE: u64 = 2
 const MAP_ANONYMOUS: u64 = 32
@@ -326,7 +331,10 @@ fn entry(number: u64, frame: u64, state: u64) -> u64 {
         return do_brk(state, me, a0)
     }
     if number == SYS_MMAP {
-        return do_map(state, me, a1, a2, a3, a5)
+        // ROUNDE K7: a4 ist der Deskriptor. Bis hierher wurde er
+        // weggelassen, weil nur MAP_ANONYMOUS ging und Linux ihn dabei
+        // ebenfalls nicht ansieht. Eine Geraeteabbildung braucht ihn.
+        return do_map(state, me, a1, a2, a3, a4, a5)
     }
     if number == SYS_MUNMAP {
         return do_unmap(state, me, a0, a1)
@@ -552,6 +560,9 @@ fn write_of(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
     if kind == file.K_PIPEW {
         return pipe_write(state, me, of, buf, len)
     }
+    if kind == file.K_FB {
+        return fb_write(state, me, of, buf, len)
+    }
     if kind != file.K_FILE {
         return neg(errno.E_BADF)
     }
@@ -604,6 +615,9 @@ fn read_of(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
     }
     if kind == file.K_PIPER {
         return pipe_read(state, me, of, buf, len)
+    }
+    if kind == file.K_FB {
+        return fb_read(state, me, of, buf, len)
     }
     if kind == file.K_DIR {
         return neg(errno.E_ISDIR)
@@ -862,10 +876,107 @@ fn put32(state: u64, me: u64, addr: u64, v: u64) -> bool {
 
 // `open(path, flags, mode)`. The flags are Linux's: O_CREAT is 0o100, not
 // a boolean second argument the way round 62 had it.
-fn do_open(state: u64, me: u64, name: u64, flags: u64) -> u64 {
-    if kstate.get(state, kstate.FS_READY) == 0 {
-        return neg(errno.E_NOSYS)
+// ------------------------------------------------- ROUNDE K7: /dev/fb
+//
+// DIE RECHTE SIND DIE UEBLICHEN, und das ist der Punkt. Ein Programm in
+// Ring 3 bekommt den Bildschirm nicht, weil es der Kernel ist -- es
+// bekommt ihn ueber `open`, und danach entscheidet derselbe Deskriptor
+// mit denselben Flags wie bei jeder Datei, ob es schreiben darf:
+//
+//   * `open("/dev/fb", O_RDONLY)` -> `write` ist -EBADF
+//   * `write` hinter dem Ende des Bildes -> 0 Oktette, kein Fehler
+//   * `mmap` mit PROT_WRITE auf einen nur lesbaren Deskriptor -> -EACCES
+//   * `mmap` ohne MAP_ANONYMOUS auf irgendeinen ANDEREN Deskriptor
+//     -> -ENODEV, wie vorher
+//
+// Der Kernel schreibt dabei kein einziges Oktett fuer das Programm, das
+// er nicht auch fuer eine Datei schreiben wuerde: `copy_in` prueft den
+// Zeiger, die Grenze des Geraets kappt die Laenge, und der Rest ist eine
+// Kopie.
+
+fn is_devfb(state: u64, buf: u64, len: u64) -> bool {
+    var name: [u8; 8] = "/dev/fb\0"
+    if len != 7 {
+        return false
     }
+    var i: u64 = 0
+    while i < 7 {
+        if kstate.get8(buf + i) != (name[i as usize] as u64) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn open_devfb(state: u64, me: u64, flags: u64) -> u64 {
+    if !fb.ready(state) {
+        return neg(errno.E_NODEV)
+    }
+    if (flags & O_DIRECTORY) != 0 {
+        return neg(errno.E_NOTDIR)
+    }
+    let of: u64 = file.open_alloc(state, file.K_FB, 0, flags)
+    if of >= file.MAX_OPEN {
+        return neg(errno.E_NFILE)
+    }
+    let fd: u64 = file.fd_alloc(state, me, 0)
+    if fd >= file.MAX_FD {
+        file.open_unref(state, of)
+        return neg(errno.E_MFILE)
+    }
+    file.fd_set(state, me, fd, of)
+    return fd
+}
+
+fn fb_write(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
+    if !writable(state, of) {
+        return neg(errno.E_BADF)
+    }
+    if !fb.ready(state) {
+        return neg(errno.E_NODEV)
+    }
+    let off: u64 = file.open_off(state, of)
+    if off >= fb.bytes(state) {
+        return 0 // das Ende des Geraets, wie das Ende einer Datei
+    }
+    var n: u64 = len
+    if n > MAX_IO {
+        n = MAX_IO
+    }
+    // Ueber den Datenbereich, wie bei einer Datei: die Karte sieht nie
+    // eine Adresse eines Prozesses.
+    let bounce: u64 = state + kstate.BLOCK_OFF
+    if !copy_in(state, me, bounce, buf, n) {
+        return neg(errno.E_FAULT)
+    }
+    // `fb.write_bytes` legt die Oktette auf die KARTE, nicht in den
+    // Zweitpuffer der Konsole -- siehe den Absatz darueber in `fb.fi`.
+    // Ein Schreibzugriff auf ein Geraet ist damit erledigt, wenn er
+    // zurueckkehrt, und braucht keine Uebertragung hinterher.
+    let k: u64 = fb.write_bytes(state, off, bounce, n)
+    file.open_set_off(state, of, off + k)
+    return k
+}
+
+fn fb_read(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
+    if !readable(state, of) {
+        return neg(errno.E_BADF)
+    }
+    if !fb.ready(state) {
+        return neg(errno.E_NODEV)
+    }
+    let off: u64 = file.open_off(state, of)
+    let bounce: u64 = state + kstate.BLOCK_OFF
+    let k: u64 = fb.read_bytes(state, off, bounce, len)
+    if !copy_out(state, me, buf, bounce, k) {
+        return neg(errno.E_FAULT)
+    }
+    file.open_set_off(state, of, off + k)
+    return k
+}
+
+fn do_open(state: u64, me: u64, name: u64, flags: u64) -> u64 {
     let buf: u64 = state + kstate.NAME_OFF
     let len: u64 = fetch_path(state, me, name, buf, MAX_NAME)
     if errno.is_error(len) {
@@ -873,6 +984,22 @@ fn do_open(state: u64, me: u64, name: u64, flags: u64) -> u64 {
     }
     if len == 0 {
         return neg(errno.E_NOENT)
+    }
+    // ROUNDE K7: /dev/fb. Die Pruefung steht VOR der auf ein
+    // eingehaengtes Dateisystem, und das ist Absicht: der Bildschirm
+    // haengt an der Grafikkarte, nicht an einer Platte. Ein Lauf mit
+    // `nofs` hat kein Dateisystem und soll trotzdem zeichnen koennen.
+    //
+    // Es ist AUCH kein Verzeichnis `/dev` im OFS -- der Name wird
+    // abgefangen, bevor irgendetwas nachgeschlagen wird. Ein Osum mit
+    // einem echten Geraeteverzeichnis waere eine eigene Runde; was hier
+    // steht, ist der eine Name, den diese Runde braucht, und er steht an
+    // genau einer Stelle.
+    if is_devfb(state, buf, len) {
+        return open_devfb(state, me, flags)
+    }
+    if kstate.get(state, kstate.FS_READY) == 0 {
+        return neg(errno.E_NOSYS)
     }
     var ino: u64 = fs.path(state, buf)
     if ino == 0 {
@@ -983,7 +1110,15 @@ fn do_lseek(state: u64, me: u64, fd: u64, off: u64, whence: u64) -> u64 {
         base = file.open_off(state, of)
     } else {
         if whence == SEEK_END {
-            base = fs.inode_size(state, file.open_ino(state, of))
+            // ROUNDE K7: /dev/fb hat keinen Inode, aber eine Groesse --
+            // Zeilenlaenge mal Hoehe. `lseek(fd, 0, SEEK_END)` ist damit
+            // die Art, wie ein Programm erfaehrt, wie gross das Bild ist,
+            // ohne den Kernel danach zu fragen.
+            if kind == file.K_FB {
+                base = fb.bytes(state)
+            } else {
+                base = fs.inode_size(state, file.open_ino(state, of))
+            }
         } else {
             if whence != SEEK_SET {
                 return neg(errno.E_INVAL)
@@ -1130,6 +1265,9 @@ fn do_fstat(state: u64, me: u64, fd: u64, out: u64) -> u64 {
     __mmio_write32((s + ST_MODE) as *mut u32, mode as u32)
     __mmio_write64((s + ST_NLINK) as *mut u64, 1)
     __mmio_write64((s + ST_BLKSIZE) as *mut u64, 512)
+    if kind == file.K_FB {
+        __mmio_write64((s + ST_SIZE) as *mut u64, fb.bytes(state))
+    }
     return stat_out(state, me, out)
 }
 
@@ -1297,15 +1435,15 @@ fn do_brk(state: u64, me: u64, want: u64) -> u64 {
 // symbol table. A kernel function that carried one of those names would
 // make that proof worthless.
 fn do_map(state: u64, me: u64, len: u64, prot: u64, flags: u64,
-    off: u64) -> u64 {
+    fd: u64, off: u64) -> u64 {
     if len == 0 {
         return neg(errno.E_INVAL)
     }
     if (flags & MAP_ANONYMOUS) == 0 {
-        return neg(errno.E_NODEV)
+        // ROUNDE K7: der eine Deskriptor, der sich abbilden laesst.
+        return map_fd(state, me, fd, len, prot, off)
     }
-    // The descriptor in r8 is not read: with MAP_ANONYMOUS Linux ignores
-    // it as well, and without it this call has already been refused.
+    // With MAP_ANONYMOUS Linux ignores the descriptor as well.
     if off != 0 {
         return neg(errno.E_INVAL)
     }
@@ -1328,6 +1466,61 @@ fn do_map(state: u64, me: u64, len: u64, prot: u64, flags: u64,
     }
     sched.tset(state, me, sched.T_MMAP, base)
     return base
+}
+
+// ROUNDE K7: `mmap` auf /dev/fb. Was der Prozess bekommt, ist der
+// RAHMENPUFFER DER KARTE, nicht der Zweitpuffer des Kernels -- er malt
+// also unmittelbar auf den Bildschirm, ohne einen Aufruf dazwischen.
+// Das ist der Sinn der Sache: `write` kostet einen Systemaufruf je
+// Block, eine Abbildung kostet einen einzigen fuer das ganze Bild.
+//
+// WAS DAS FUER DIE KONSOLE HEISST. Laeuft der Kernel mit Zweitpuffer,
+// gehoeren ihm die Bildzeilen, die er als geaendert vermerkt hat; alles
+// andere bleibt so stehen, wie ein Programm es gemalt hat. Zwei Zeichner
+// auf einer Flaeche vertragen sich, solange sie verschiedene Zeilen
+// nehmen -- und vertragen sich nicht, wenn nicht. Ein Fenstersystem
+// waere die Antwort darauf und ist nicht diese Runde.
+//
+// Ein `fork` erbt die Abbildung NICHT: `proc.copy_space` laeuft die
+// Seitentabelle ab, und eine 2-MiB-Seite steht nicht darin. Das Kind
+// muss `mmap` selbst rufen. Gewollt und nachgemessen.
+fn map_fd(state: u64, me: u64, fd: u64, len: u64, prot: u64,
+    off: u64) -> u64 {
+    let of: u64 = of_of(state, me, fd)
+    if of >= file.MAX_OPEN {
+        return neg(errno.E_BADF)
+    }
+    if file.open_kind(state, of) != file.K_FB {
+        return neg(errno.E_NODEV)
+    }
+    if off != 0 {
+        return neg(errno.E_INVAL)
+    }
+    if !fb.ready(state) {
+        return neg(errno.E_NODEV)
+    }
+    if len > fb.bytes(state) {
+        return neg(errno.E_INVAL)
+    }
+    let schreiben: bool = (prot & PROT_WRITE) != 0
+    if schreiben {
+        if !writable(state, of) {
+            return neg(errno.E_ACCES)
+        }
+    }
+    if !readable(state, of) {
+        if !schreiben {
+            return neg(errno.E_ACCES)
+        }
+    }
+    // Die Kachel, in der der Puffer beginnt -- und der Versatz darin,
+    // damit ein Rahmenpuffer, der nicht auf 2 MiB ausgerichtet ist,
+    // trotzdem eine richtige Adresse bekommt.
+    if !proc.map_huge(state, me, fb.USER_BASE, fb.block(state), schreiben) {
+        return neg(errno.E_NOMEM)
+    }
+    kstate.add(state, kstate.MAPS, 1)
+    return fb.USER_BASE + fb.offset(state)
 }
 
 // The pages go back, the bump pointer does not. A hole in the middle of a

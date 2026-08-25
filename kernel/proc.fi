@@ -48,7 +48,7 @@ import cap
 
 export {
     create, user_start, free_space, reap, translate, user_ok, map_programs,
-    inherit, create_bare, discard, page_free, page_exec, map_page, nx,
+    inherit, create_bare, discard, page_free, page_exec, map_page, map_huge, nx,
     create_cap,
     copy_space, swap_space, use_space, page_drop, ARG_RESUME,
     USER_DATA, USER_STACK, USER_SPAN, USER_TOP,
@@ -90,6 +90,14 @@ const MAX_ARGS: u64 = 8
 // every access through such an entry would fault. `nx` is therefore the
 // only place the bit comes from.
 const PAGE_NX: u64 = 0x8000000000000000
+
+// ROUNDE K7. Bit 7 eines Eintrags der dritten Ebene: die 2 MiB dahinter
+// sind EINE Seite, es gibt keine vierte Ebene darunter. So haengt
+// `mmap` auf /dev/fb den Rahmenpuffer in einen Prozess -- eine Kachel,
+// ein Eintrag, keine 512 Seitentabelleneintraege fuer einen Bereich, der
+// ohnehin am Stueck im Speicher liegt.
+const PAGE_HUGE: u64 = 0x80
+const HUGE_SIZE: u64 = 0x200000
 
 // Indices in the table out of isr.s.
 const V_ENTER_TASK: u64 = 56
@@ -357,6 +365,55 @@ fn map_page(state: u64, i: u64, addr: u64, writable: bool,
     return frame
 }
 
+// ROUNDE K7: eine ganze 2-MiB-Kachel auf einen Schlag, an eine feste
+// physische Adresse. Das ist der Weg, auf dem ein Prozess den
+// Rahmenpuffer bekommt: er liegt am Stueck auf dem Bus, er ist 1,9 MiB
+// gross, und 469 Seitentabelleneintraege dafuer waeren 469 Gelegenheiten,
+// sich zu vertun.
+//
+// DREI DINGE, DIE HIER ANDERS SIND ALS BEI `map_page`:
+//
+//   1. Der Rahmen wird NICHT vom Rahmenverwalter geholt. Er gehoert der
+//      Grafikkarte; der Kernel hat ihn nie besessen und gibt ihn nie
+//      zurueck. `free_space` geht deshalb an ihm vorbei -- es laeuft die
+//      SEITENTABELLE ab, und eine 2-MiB-Seite hat keine.
+//   2. Es wird in das private SEITENVERZEICHNIS geschrieben, nicht in die
+//      Seitentabelle. Eintrag 0 davon ist die Tabelle mit den Seiten des
+//      Programms; alles ab Eintrag 1 ist frei, und Eintrag 1 ist
+//      0x40200000 -- genau `fb.USER_BASE`.
+//   3. Die Tabellen sind die des LAUFENDEN Prozesses (der Aufruf kommt
+//      aus seinem eigenen `mmap`), also muss cr3 neu geladen werden. Bei
+//      `map_page` ist das nicht so, und dort steht deshalb, dass es
+//      nicht noetig sei.
+//
+// Kein Ausfuehrungsrecht: ein Bild ist kein Programm.
+fn map_huge(state: u64, i: u64, addr: u64, phys: u64, writable: bool) -> bool {
+    if addr < USER_DATA || addr >= USER_DATA + 512 * HUGE_SIZE {
+        return false
+    }
+    if (addr & (HUGE_SIZE - 1)) != 0 || (phys & (HUGE_SIZE - 1)) != 0 {
+        return false
+    }
+    let pd: u64 = sched.tget(state, i, sched.T_PD)
+    if pd == 0 {
+        return false
+    }
+    let s: u64 = (addr >> 21) & 0x1FF
+    if s == 0 {
+        return false // dort haengt die Seitentabelle des Programms
+    }
+    var bits: u64 = PAGE_PRESENT | PAGE_USER | PAGE_HUGE | nx(state)
+    if writable {
+        bits = bits | PAGE_WRITE
+    }
+    write_entry(pd, s, (phys & (~(HUGE_SIZE - 1))) | bits)
+    // Der Prozess laeuft, seine Tabellen stehen in cr3 -- und der
+    // Prozessor merkt sich Uebersetzungen.
+    let now: u64 = asm("mov rax, cr3", out("rax"))
+    asm("mov cr3, rax", in("rax") now, clobber("memory"))
+    return true
+}
+
 // May ring 3 fetch an instruction from this address? Present, open to the
 // user, and without the no-execute bit. This is the last check of the
 // loader: an `e_entry` that lands anywhere else would be a jump into
@@ -424,7 +481,15 @@ fn user_ok(state: u64, i: u64, addr: u64, len: u64) -> bool {
     if addr + len < addr {
         return false // it wrapped around
     }
-    if addr + len > USER_DATA + USER_SPAN {
+    // ROUNDE K7: die Obergrenze deckt jetzt ZWEI Kacheln statt einer.
+    // Die zweite (0x40200000..0x403FFFFF) ist die, in die `mmap` auf
+    // /dev/fb den Rahmenpuffer haengt (`fb.USER_BASE`). Die Grenze allein
+    // erlaubt dort GAR NICHTS -- entschieden wird eine Zeile tiefer beim
+    // Durchgehen der Tabellen, und ein Prozess, der das Geraet nicht
+    // abgebildet hat, hat dort keine Seite mit Benutzerbit. Was diese
+    // Zeile aendert, ist also nur, welchen Fehler er bekommt: nicht mehr
+    // "ausserhalb", sondern "nicht abgebildet". Beides ist -EFAULT.
+    if addr + len > USER_DATA + USER_SPAN * 2 {
         return false
     }
     var p: u64 = addr
@@ -443,11 +508,22 @@ fn user_ok(state: u64, i: u64, addr: u64, len: u64) -> bool {
         if (e2 & PAGE_USER) == 0 {
             return false
         }
-        let e1: u64 = read_entry(e2 & ADDR_MASK, (p >> 12) & 0x1FF)
-        if (e1 & PAGE_USER) == 0 || (e1 & PAGE_PRESENT) == 0 {
-            return false
+        // Eine 2-MiB-Seite hat keine vierte Ebene. `translate` kennt
+        // diesen Fall seit Runde 62 (Bit 7), diese Pruefung nicht -- und
+        // ohne sie waere der abgebildete Rahmenpuffer fuer `write` und
+        // `read` unerreichbar, obwohl der Prozess ihn beschreiben darf.
+        if (e2 & PAGE_HUGE) != 0 {
+            if (e2 & PAGE_PRESENT) == 0 {
+                return false
+            }
+            p = (p & (~(HUGE_SIZE - 1))) + HUGE_SIZE
+        } else {
+            let e1: u64 = read_entry(e2 & ADDR_MASK, (p >> 12) & 0x1FF)
+            if (e1 & PAGE_USER) == 0 || (e1 & PAGE_PRESENT) == 0 {
+                return false
+            }
+            p = (p & 0xFFFFFFFFFFFFF000) + 4096
         }
-        p = (p & 0xFFFFFFFFFFFFF000) + 4096
     }
     return true
 }
