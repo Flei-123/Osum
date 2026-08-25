@@ -34,7 +34,22 @@
  */
 
     .set MB_MAGIC, 0x1BADB002
-    .set MB_FLAGS, 0x00000003           /* aligned modules + memory map */
+    /* Bit 0 aligned modules, Bit 1 memory map, Bit 2 VIDEO MODE.
+     *
+     * BIT 2 IST DER UEFI-PFAD, und das ist nicht offensichtlich: Osum
+     * bootet ueber Multiboot, und ein Multiboot-Lader, der unter UEFI
+     * laeuft (Limine), muss dem Kern einen Bildschirm uebergeben, bevor er
+     * die Firmware verlaesst. Ohne Bit 2 nimmt er den Textmodus an -- und
+     * unter UEFI gibt es keinen; der Ladevorgang bricht mit "multiboot1:
+     * Cannot use text mode with UEFI" ab. Mit Bit 2 und `mode_type = 0`
+     * verlangt der Kern einen LINEAREN Rahmenpuffer, den die Firmware
+     * setzen kann -- und damit bootet dasselbe Abbild ueber BIOS UND ueber
+     * UEFI. Gemessen in beidem (tools/uefi/run.sh).
+     *
+     * Der Kern BENUTZT den Rahmenpuffer nicht; seine Konsole ist die
+     * serielle Schnittstelle. Was Bit 2 leistet, ist allein, dass der
+     * Lader nicht mehr auf einen Textmodus besteht, den es nicht gibt. */
+    .set MB_FLAGS, 0x00000007
     .set MB_CHECK, -(MB_MAGIC + MB_FLAGS)
 
     .set KDATA_SIZE, 0x30000            /* 192 KiB, see kstate.fi */
@@ -44,6 +59,14 @@
     .long MB_MAGIC
     .long MB_FLAGS
     .long MB_CHECK
+    /* Die Adressfelder der Spezifikation (Abschnitt 3.1.3). Sie gelten
+     * nur mit Flag-Bit 16, das hier aus ist -- stehen muessen sie
+     * trotzdem, weil die Videofelder dahinter liegen. */
+    .long 0, 0, 0, 0, 0
+    .long 0                             /* mode_type: 0 = linear graphics */
+    .long 0                             /* width:  keine Vorgabe */
+    .long 0                             /* height: keine Vorgabe */
+    .long 32                            /* depth:  32 Bit je Bildpunkt */
 
     .section .text.boot, "ax"
     .code32
