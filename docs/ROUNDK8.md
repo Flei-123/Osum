@@ -22,7 +22,7 @@ programs in `/bin` that use them.
 | userland | `lib/libc/net.fi` 265, `kernel/user/ping.fi` 210, `kernel/user/wget.fi` 299 |
 | the wire | `tools/net/bruecke.c` 170, `tools/net/run.sh` 582 |
 | stack | **not written here** — `vendor/firn/lib/net/`, 2,646 lines, pinned by `vendor/firn/COMMIT` |
-| guard | `tools/net/run.sh`, **74 proofs**, section 12 of `test.sh` |
+| guard | `tools/net/run.sh`, **75 proofs**, section 12 of `test.sh` |
 
 ---
 
@@ -235,20 +235,28 @@ them are what mean something.
 
 ### 5.1 The numbers
 
+One acceptance run, `./test.sh` section 12, on this server:
+
 | what | result |
 |---|---|
-| `ping -c 10` from the Linux kernel | **10 of 10 answered**, round trip 8.6 ms average |
+| `ping -c 10` from the Linux kernel | **10 of 10 answered**, round trip **3.27 ms** average |
 | ARP | Linux asked, Osum answered, the entry went into Linux's neighbour table |
-| MSI-X interrupts for those ten | 24 |
-| `nc` pushes 1 MiB in | **1,048,576 octets**, 733 frames, 0 bad checksums, 0 retransmissions, 0 dropped by the driver, **5,765 KiB/s** (177,608 µs) |
-| `nc` through the echo | **262,144 octets there and back, md5 identical**, 2,045 KiB/s |
+| MSI-X interrupts for those ten | 26 |
+| `nc` pushes 1 MiB in | **1,048,576 octets**, 732 frames, 0 bad checksums, 0 retransmissions, 0 dropped by the driver, **6,027 KiB/s** (169,888 µs) |
+| `nc` through the echo | **262,144 octets there and back, md5 identical**, 2,723 KiB/s |
 | `curl http://10.9.0.2:8080/` | status line, headers and `Content-Length: 40` accepted by curl itself |
 | Osum connects **actively** to a python server | 262,144 out, 262,144 back, **0 wrong octets**, ephemeral port, clean close |
 | UDP, 5 datagrams of 1,400 octets | all five came back **reversed**, checksums intact |
-| `tc netem loss 20 %` Linux → Osum | all 262,144 arrive **in order**, 75 segments reassembled out of order, 35 KiB/s against 5,765 on a clean wire |
-| `tc netem loss 20 %` Osum → Linux | 65,536 out and back, **0 wrong**, **1 retransmission on the timer and 6 on three duplicate acknowledgements**, 198 KiB/s |
+| `tc netem loss 20 %` Linux → Osum | all 262,144 arrive **in order**, 132 segments reassembled out of order, 28 KiB/s against 6,027 on a clean wire |
+| `tc netem loss 10 %` Osum → Linux | 65,536 out and back, **0 wrong**, 4 losses recovered — **1 on the timer, 3 on three duplicate acknowledgements** |
 | `/bin/ping` in ring 3 | 3 of 3, 0 % loss |
 | `/bin/wget` in ring 3 | status 200 from a real python HTTP server, 46 octets of body |
+
+The throughput and the round trip move by ten to twenty per cent between
+runs -- this is an emulator on a shared machine, and both numbers are
+reported as what one run said rather than as a constant of the system.
+Four runs gave 5,670 / 5,765 / 6,027 KiB/s for the megaoctet and 3.3 to
+8.6 ms for the round trip.
 
 The echo is half the speed of the sink and that is not a mystery: every
 octet is handled twice, and between the two halves stand a `recv` and a
@@ -273,7 +281,7 @@ to collapse:
 | **no `nic`** | the same kernel image never touches the card | `ping` 100 % loss, `nc` cannot open the connection at all, `nic: skipped` in the log |
 | **`nicnobm`** | no bus master bit: the device may answer registers but may not fetch a descriptor | `master=0`, ping 100 % loss |
 | **`nicnoirq`** | the message vector is masked: the frames still arrive because the task polls the ring, and **not one interrupt** does | 262,144 octets arrived, `irqs=0` — both in the same run |
-| **`nicintx`** | the same card over its interrupt PIN through the I/O APIC instead of MSI-X | 262,144 octets, `irqs=33` |
+| **`nicintx`** | the same card over its interrupt PIN through the I/O APIC instead of MSI-X | 262,144 octets, `irqs=29` |
 | **UDP reversed** | an echo that merely mirrored frames would pass; a reversal will not | 5 of 5 reversed |
 | **`tc netem`** | one frame in five thrown away, and TCP still delivers every octet in order | it did, and the retransmission counters say what it cost |
 
@@ -330,10 +338,17 @@ same run also printed `sent` and `back` and both were right.
   the same instant would share it — the same shape `kstate.BLOCK_OFF`
   has had for every file operation since round 62, and no better for
   being older.
+* **20 % loss on the way OUT is measured at 10 %.** With one frame in
+  five thrown away on Osum's transmissions, the harness -- not the stack
+  -- repeatedly walked into the thirty-second stall guard of
+  `netsvc.connect_service` with about one segment left to go. The
+  direction measured at the full 20 % is the one into Osum, where the
+  stack has to reassemble rather than retransmit.
 * **No IPv6, no fragment reassembly, no window scaling, no SACK.** Those
   are the stack's gaps and they are listed in `docs/OSUM-K3.md`.
-* **The round trip is 8.6 ms** and about 10 of that is the network task
-  waking up on the next tick when the wire has been quiet. A wake from
+* **The round trip is 3.3 ms and was 8.6 ms in another run**, and the
+  spread is the network task waking up on the next tick when the wire
+  has been quiet. A wake from
   the interrupt handler would take it down; it would also mean touching
   the run queue from interrupt context, and that is a change to
   `sched.fi` while another round is working in this repository.
