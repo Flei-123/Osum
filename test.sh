@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ./test.sh -- die Abnahme von Osum.
 #
-# Neun Abschnitte, in der Reihenfolge, in der der Kernel entstanden ist.
+# Elf Abschnitte, in der Reihenfolge, in der der Kernel entstanden ist.
 # Jeder ruft einen eigenen Testlaeufer unter tools/ auf, jeder Laeufer
 # startet QEMU pro Fall mit Zeitlimit, prueft die serielle Ausgabe und den
 # Beendigungscode (21 = der Kernel hat sich selbst beendet, 63 = er ist an
@@ -44,6 +44,20 @@
 #   9. Ein Userland (tools/userland/run.sh, Runde K6): eine Shell,
 #      dreiundzwanzig Werkzeuge, Roehren und Umlenkung -- alles eigene
 #      ELF-Dateien von der Platte.
+#  10. Handles statt Umgebungsautoritaet (tools/caps/run.sh): die
+#      Capability-Schicht, portiert aus OrientOS' nativer ABI
+#      (`libs/osum-abi-native/`, Rust). Eine Handle-Tabelle je Prozess mit
+#      Platz, Generation und Wuerfelwert (`kernel/cap.fi`), eine zweite
+#      Aufrufnummerierung ab 2000 (`kernel/sys.fi`) und ein Programm in
+#      Ring 3, das achtzehn Zusagen darueber meldet, was es darf und was
+#      nicht. Gegenprobe: ohne das Wort `caps` gibt es nichts davon, und
+#      der uebrige Kernel verhaelt sich Zeile fuer Zeile wie vorher.
+#  11. Der Multiboot-Kopf und der UEFI-Pfad (tools/boot/run.sh): Bit 2
+#      der Flags verlangt einen linearen Rahmenpuffer. Ohne das bricht
+#      jeder Multiboot-Lader unter UEFI mit "Cannot use text mode with
+#      UEFI" ab; mit ihm bootet dasselbe Abbild ueber BIOS UND ueber
+#      UEFI. Der Start ueber eine echte UEFI-Firmware wird in OrientOS
+#      gemessen -- dort liegen Lader und ISO.
 #
 # Kein '|| true', kein Verschlucken von Beendigungscodes.
 set -uo pipefail
@@ -138,6 +152,12 @@ lauf "8. vier Prozessoren, und die Sperre, die einen Kernel daraus macht (tools/
 
 lauf "9. ein Userland: eine Shell, 23 Werkzeuge, Roehren und Umlenkung (tools/userland/run.sh, Runde K6)" \
      tools/userland/run.sh userland '^USERLAND:|the whole userland in octets|the biggest program|programs loaded off the disk'
+
+lauf "10. Handles statt Umgebungsautoritaet: die Capability-Schicht aus OrientOS (tools/caps/run.sh)" \
+     tools/caps/run.sh caps '^CAPS: |^        \(\.utext'
+
+lauf "11. der Multiboot-Kopf verlangt einen Bildschirm -- der UEFI-Pfad (tools/boot/run.sh)" \
+     tools/boot/run.sh boot '^BOOT: '
 
 echo
 echo "=================================================================="

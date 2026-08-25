@@ -44,10 +44,12 @@ import sched
 import uio
 import user
 import file
+import cap
 
 export {
     create, user_start, free_space, reap, translate, user_ok, map_programs,
     inherit, create_bare, discard, page_free, page_exec, map_page, nx,
+    create_cap,
     copy_space, swap_space, use_space, page_drop, ARG_RESUME,
     USER_DATA, USER_STACK, USER_SPAN, USER_TOP,
     IMAGE_BASE, IMAGE_END, ARGS_BASE, MAX_ARGS
@@ -138,8 +140,24 @@ fn map_programs(state: u64) -> u64 {
     let end: u64 = vector(state, 60)
     var p: u64 = begin & 0xFFFFFFFFFFFFF000
     var n: u64 = 0
+    // Die 2-MiB-Kachel, in der die erste Seite liegt. Sie bekommt die
+    // feste geteilte Tabelle aus der Datenregion (Platz 0), so wie seit
+    // Runde 59. JEDE WEITERE KACHEL BEKOMMT EINEN EIGENEN RAHMEN -- mit
+    // nur einer Tabelle wuerde die zweite Teilung die erste
+    // ueberschreiben und der Kernel bliebe stehen. Solange `.utext` in
+    // eine Kachel passt (firnc0), aendert diese Schleife nichts an dem,
+    // was die Runden 59 bis K6 gemessen haben.
+    var kachel: u64 = p & 0xFFFFFFFFFFE00000
+    var tabelle: u64 = state + kstate.PT_OFF
     while p < end {
-        if !user.map_user(state, p, false, 0) {
+        if (p & 0xFFFFFFFFFFE00000) != kachel {
+            kachel = p & 0xFFFFFFFFFFE00000
+            tabelle = mem.frame_alloc(state)
+            if tabelle == 0 {
+                return 0
+            }
+        }
+        if !user.map_user_pt(state, p, false, tabelle) {
             return 0
         }
         n = n + 1
@@ -458,6 +476,13 @@ fn create_bare(state: u64, prio: u64) -> u64 {
     // instruction of the process runs. A process without them would have
     // to open the console itself, and there is no name for it.
     file.init_task(state, i)
+    // ...und daneben das GEGENTEIL davon: eine LEERE Handle-Tabelle.
+    // `file.init_task` schenkt dem Prozess seine drei Deskriptoren, weil
+    // POSIX das so will; die native ABI (`kernel/cap.fi`) schenkt nichts.
+    // Wer dort etwas darf, hat es explizit uebergeben bekommen. Der
+    // Wuerfelwert kommt aus der pid, damit derselbe Platz in zwei
+    // Prozessen nicht denselben Handle-Wert ergibt.
+    cap.clear_task(state, i, sched.tget(state, i, sched.T_PID))
     return i
 }
 
@@ -485,6 +510,39 @@ fn create(state: u64, prog: u64, arg: u64, prio: u64) -> u64 {
     sched.tset(state, i, sched.T_USTACK, USER_TOP - 16)
     sched.tset(state, i, sched.T_ARG, prog)
     sched.tset(state, i, sched.T_WORK, arg)
+    inherit(state, sched.tget(state, i, sched.T_PARENT), i)
+    kstate.add(state, kstate.SPAWNS, 1)
+    sched.start(state, i)
+    sched.irq_restore(flags)
+    return i
+}
+
+// EIN PROZESS, DER SEINE AUTORITAET AUSDRUECKLICH BEKOMMT.
+//
+// `create` daneben ist der alte Weg: der Prozess erbt die Deskriptoren 0,
+// 1 und 2, ohne dass jemand sie ihm gibt -- Umgebungsautoritaet. Dieser
+// Weg hier ist der von OrientOS' `ProcessSpawn` (`libs/osum-abi-native`):
+// die Handle-Tabelle ist leer, und was der Prozess darf, steht in genau
+// einer Zeile -- dem `cap.insert` unten.
+//
+// WIE DER PROZESS SEIN HANDLE ERFAEHRT. Er kann es nicht ausrechnen: der
+// Wuerfelwert seiner Tabelle ist ihm unbekannt, und das ist der Sinn der
+// Sache. Also wird es ihm uebergeben, im Argumentregister -- Platz 0 ist
+// vereinbart, uebergeben wird die obere Haelfte (Generation ^ Wuerfel).
+// Ein vollstaendiger Startsatz mehrerer Handles braucht spaeter eine
+// Seite dafuer; fuer EIN Handle ist das Register ehrlicher als eine.
+fn create_cap(state: u64, prog: u64, rights: u64, prio: u64) -> u64 {
+    let flags: u64 = sched.irq_save()
+    let i: u64 = create_bare(state, prio)
+    if i == 0 {
+        sched.irq_restore(flags)
+        return 0
+    }
+    sched.tset(state, i, sched.T_ENTRY, vector(state, V_USER_MAIN))
+    sched.tset(state, i, sched.T_USTACK, USER_TOP - 16)
+    sched.tset(state, i, sched.T_ARG, prog)
+    let h: u64 = cap.insert(state, i, cap.K_STREAM, rights, file.CON_OUT)
+    sched.tset(state, i, sched.T_WORK, cap.handle_gen(h))
     inherit(state, sched.tget(state, i, sched.T_PARENT), i)
     kstate.add(state, kstate.SPAWNS, 1)
     sched.start(state, i)
