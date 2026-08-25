@@ -175,7 +175,7 @@ lauf "7. die POSIX-Schicht und die libc (tools/posix/run.sh, Runde K4)" \
 lauf "8. vier Prozessoren, und die Sperre, die einen Kernel daraus macht (tools/smp/run.sh, Runde K5)" \
      tools/smp/run.sh smp '^SMP: |^        (one core|four cores|speed-up|one host thread|with the lock)'
 
-lauf "9. ein Userland: eine Shell, 23 Werkzeuge, Roehren und Umlenkung (tools/userland/run.sh, Runde K6)" \
+lauf "9. ein Userland: eine Shell, 25 Werkzeuge, Roehren und Umlenkung (tools/userland/run.sh, Runde K6)" \
      tools/userland/run.sh userland '^USERLAND:|the whole userland in octets|the biggest program|programs loaded off the disk'
 
 lauf "10. Handles statt Umgebungsautoritaet: die Capability-Schicht aus OrientOS (tools/caps/run.sh)" \
