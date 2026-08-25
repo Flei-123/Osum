@@ -94,26 +94,25 @@ lauf() { # titel skript logname muster
 
 echo "== 1. der festgenagelte Uebersetzer (vendor/firn/COMMIT) =="
 COMMIT=$(cat vendor/firn/COMMIT)
-bash vendor/firn/hole-firnc.sh > "$WORK/vendor.log" 2>&1 && VRC=0 || VRC=$?
-if [ "$VRC" -ne 0 ]; then
-    bad "vendor/firn/hole-firnc.sh ist fehlgeschlagen (siehe .test-work/vendor.log)"
-    tail -5 "$WORK/vendor.log" | sed 's/^/     /'
+S1=""
+bash vendor/firn/hole-firnc.sh > "$WORK/vendor.log" 2>&1 || \
+    S1="$S1 hole-firnc.sh fehlgeschlagen (siehe .test-work/vendor.log);"
+[ -x vendor/firn/bin/firnc ]  || S1="$S1 vendor/firn/bin/firnc fehlt;"
+[ -x vendor/firn/bin/firnc1 ] || S1="$S1 vendor/firn/bin/firnc1 fehlt;"
+[ -d vendor/firn/lib/std ]    || S1="$S1 vendor/firn/lib/std fehlt;"
+[ -f vendor/firn/.gebaut ] && [ "$(cat vendor/firn/.gebaut)" = "$COMMIT" ] || \
+    S1="$S1 vendor/firn/.gebaut passt nicht zu COMMIT;"
+# Gegenprobe: im Repo selbst liegt kein Uebersetzer. Faende sich hier einer,
+# waere nicht mehr gesagt, welcher Stand gemessen wurde.
+{ [ -e compiler ] || [ -e bin/firnc1.fi ]; } && \
+    S1="$S1 im Repo liegt ein Uebersetzer -- er gehoert nach vendor/;"
+ZUSAGEN=$((ZUSAGEN + 5))
+if [ -z "$S1" ]; then
+    echo "   Firn ${COMMIT:0:8}, firnc0 + firnc1 gebaut, lib/std daneben (5 Zusagen)"
+    ok
 else
-    for b in vendor/firn/bin/firnc vendor/firn/bin/firnc1; do
-        [ -x "$b" ] && ok || bad "$b fehlt"
-    done
-    [ -d vendor/firn/lib/std ] && ok || bad "vendor/firn/lib/std fehlt"
-    [ "$(cat vendor/firn/.gebaut)" = "$COMMIT" ] \
-        && ok || bad "vendor/firn/.gebaut passt nicht zu COMMIT"
-    # Gegenprobe: im Repo selbst liegt kein Uebersetzer. Faende sich hier
-    # einer, waere nicht mehr gesagt, welcher gemessen wurde.
-    if [ -e compiler ] || [ -e bin/firnc1.fi ]; then
-        bad "im Repo liegt ein Uebersetzer -- er gehoert nach vendor/"
-    else
-        ok
-    fi
-    echo "   Firn ${COMMIT:0:8}, firnc0 + firnc1 gebaut, lib/std daneben"
-    ZUSAGEN=$((ZUSAGEN + 6))
+    bad "der festgenagelte Uebersetzer:$S1"
+    tail -5 "$WORK/vendor.log" | sed 's/^/     /'
 fi
 
 lauf "2. freistehend uebersetzen: profile kernel, Inline-Assembler, MMIO, iretq (tools/freestanding/run.sh)" \
@@ -143,7 +142,7 @@ lauf "9. ein Userland: eine Shell, 23 Werkzeuge, Roehren und Umlenkung (tools/us
 echo
 echo "=================================================================="
 if [ "$FAIL" -eq 0 ]; then
-    echo "ALLE $PASS ABSCHNITTE BESTANDEN ($ZUSAGEN Zusagen)"
+    echo "ALLE $PASS ABSCHNITTE BESTANDEN, $ZUSAGEN Zusagen, 0 Fehler"
     exit 0
 else
     echo "$PASS Abschnitte bestanden, $FAIL FEHLGESCHLAGEN ($ZUSAGEN Zusagen)"
