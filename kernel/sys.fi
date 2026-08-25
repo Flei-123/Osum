@@ -49,6 +49,10 @@ import errno
 import file
 import uio
 import cap
+import signal
+import time
+import rand
+import tty
 
 export {
     entry, neg, STAT_BYTES, DIRENT_HEAD,
@@ -61,11 +65,45 @@ export {
     SYS_EXIT, SYS_WAIT4, SYS_GETCWD, SYS_MKDIR, SYS_UNLINK, SYS_GETPPID,
     SYS_GETDENTS64, SYS_EXIT_GROUP, SYS_OSUM_SPAWN, SYS_OSUM_EXEC,
     SYS_CHDIR, SYS_OSUM_SYSINFO, SYS_OSUM_PSTAT, SYS_OSUM_KILL,
+    SYS_RT_SIGACTION, SYS_RT_SIGPROCMASK, SYS_RT_SIGRETURN, SYS_IOCTL,
+    SYS_PAUSE, SYS_ALARM, SYS_CLONE, SYS_KILL, SYS_GETTIMEOFDAY,
+    SYS_SETPGID, SYS_GETPGRP, SYS_SETSID, SYS_GETPGID, SYS_RT_SIGPENDING,
+    SYS_TIME, SYS_FUTEX, SYS_GETTID, SYS_CLOCK_GETTIME, SYS_CLOCK_GETRES,
+    SYS_CLOCK_NANOSLEEP, SYS_TGKILL, SYS_GETRANDOM,
+    SYS_OSUM_PTY, SYS_OSUM_TTYINFO, SYS_OSUM_SIGINFO,
     CAP_BASE, CAP_VERSION, CAP_READ, CAP_WRITE, CAP_CLOSE, CAP_DUP,
     CAP_INSPECT, CAP_TRANSFER, CAP_COUNT, CAP_MAXNR,
     grant_console, native
 }
 
+// ============================================================ DIE KARTE
+//
+// WER WELCHEN ZAHLENBEREICH HAT. Drei Runden haben an diesem Repo
+// gleichzeitig gearbeitet, und dreimal an einem Tag haben zwei von ihnen
+// dieselbe Aufrufnummer genommen. Von hier an steht es aufgeschrieben,
+// und die Regel ist die von Runde K4 geblieben:
+//
+//   * HAT LINUX DEN AUFRUF, DANN HAT ER LINUX' NUMMER. Das ist kein
+//     Respekt, das ist Stufe 2 dieses Plans: ein statisch gebundenes
+//     Linux-Programm legt seine Nummer in rax und fragt niemanden. Jede
+//     abweichende Nummer waere eine Uebersetzungstabelle, die jemand
+//     pflegen muss.
+//   * HAT LINUX IHN NICHT, dann liegt die Nummer ueber 1000 -- weit ueber
+//     allem, was Linux je vergeben wird -- und JEDE RUNDE HAT DORT EINEN
+//     EIGENEN HUNDERTERBLOCK. Das ist die Stelle, an der sich zwei
+//     Runden begegnen koennten, und deshalb ist sie geteilt:
+//
+//         1000..1099   Runden K1 und K6 (spawn, exec, sysinfo, pstat, kill)
+//         1100..1199   RUNDE K9 -- Signale, Terminals, Zeit, Zufall
+//         1200..1299   Runde K7 -- Bildschirm und Rahmenpuffer
+//         1300..1399   Runde K8 -- Netz, soweit es ueber Sockets hinausgeht
+//         2000..2099   die native ABI aus OrientOS (kernel/cap.fi)
+//
+// WELCHE LINUX-NUMMERN RUNDE K9 BELEGT, damit K7 und K8 sie nicht noch
+// einmal nehmen: 13, 14, 15, 16, 34, 37, 56, 62, 96, 109, 111, 112, 121,
+// 127, 201, 202, 228, 229, 230, 234, 318. Keine davon liegt zwischen 41
+// und 55 -- das ist der Block der Sockets, den Runde K8 braucht.
+//
 // ---------------------------------------------------------- the numbers
 
 const SYS_READ: u64 = 0
@@ -98,6 +136,43 @@ const SYS_UNLINK: u64 = 87
 const SYS_GETPPID: u64 = 110
 const SYS_GETDENTS64: u64 = 217
 const SYS_EXIT_GROUP: u64 = 231
+
+// ============================================================= RUNDE K9
+//
+// Die Nummern von Linux x86-64, fuer die Dinge, die jedes Unix-Programm
+// stillschweigend voraussetzt und die dieser Kernel bis zu dieser Runde
+// nicht hatte: Signale, ein Terminal, eine Uhr, Zufall.
+const SYS_RT_SIGACTION: u64 = 13
+const SYS_RT_SIGPROCMASK: u64 = 14
+const SYS_RT_SIGRETURN: u64 = 15
+const SYS_IOCTL: u64 = 16
+const SYS_PAUSE: u64 = 34
+const SYS_ALARM: u64 = 37
+const SYS_CLONE: u64 = 56
+const SYS_KILL: u64 = 62
+const SYS_GETTIMEOFDAY: u64 = 96
+const SYS_SETPGID: u64 = 109
+const SYS_GETPGRP: u64 = 111
+const SYS_SETSID: u64 = 112
+const SYS_GETPGID: u64 = 121
+const SYS_RT_SIGPENDING: u64 = 127
+const SYS_TIME: u64 = 201
+const SYS_FUTEX: u64 = 202
+const SYS_GETTID: u64 = 186
+const SYS_CLOCK_GETTIME: u64 = 228
+const SYS_CLOCK_GETRES: u64 = 229
+const SYS_CLOCK_NANOSLEEP: u64 = 230
+const SYS_TGKILL: u64 = 234
+const SYS_GETRANDOM: u64 = 318
+
+// Und die drei, die Linux nicht hat, im Hunderterblock dieser Runde:
+//   1100 openpty(aus)   -> legt ein Paar aus Steuer- und Nutzerseite an
+//                          und schreibt zwei Deskriptoren nach `aus`
+//   1101 ttyinfo(was)   -> eine Zahl ueber die Terminalschicht
+//   1102 siginfo(was)   -> eine Zahl ueber die Signalschicht
+const SYS_OSUM_PTY: u64 = 1100
+const SYS_OSUM_TTYINFO: u64 = 1101
+const SYS_OSUM_SIGINFO: u64 = 1102
 
 // The two marks of round 59, alive only during the excursion of `user.fi`.
 const SYS_MARK: u64 = 1
@@ -261,7 +336,24 @@ fn fset(frame: u64, off: u64, v: u64) {
 // `KERNEL_SYSCALL` out of isr.s: rdi = the number, rsi = the saved user
 // context, rdx = the kernel data area. What is returned lands in the
 // user's rax -- `isr.s` writes it into the frame and the way out pops it.
+// ROUND K9 SPLIT THIS IN TWO, and the reason is the whole of signal
+// delivery. Ein Signal darf nicht irgendwo zugestellt werden -- es darf
+// nur an EINER Stelle zugestellt werden: unmittelbar bevor der Prozess
+// nach Ring 3 zurueckkehrt. Dort steht sein Zusammenhang vollstaendig und
+// unbenutzt im Rahmen, und nur dort laesst er sich auf den Nutzerstapel
+// retten. Also: `dispatch` beantwortet den Aufruf wie bisher, und diese
+// Huelle darum sieht danach nach, ob etwas wartet.
+//
+// Der Rueckgabewert bleibt unberuehrt. `isr.s` schreibt ihn NACH dem
+// Aufruf in den Rahmen; `check_sys` fasst rax nicht an, sondern nur rip,
+// rsp und die drei Argumentregister der Behandlungsroutine.
 fn entry(number: u64, frame: u64, state: u64) -> u64 {
+    let r: u64 = dispatch(number, frame, state)
+    signal.check_sys(state, sched.current(state), frame)
+    return r
+}
+
+fn dispatch(number: u64, frame: u64, state: u64) -> u64 {
     kstate.add(state, kstate.SYSCALLS, 1)
     let a0: u64 = fget(frame, F_RDI)
     let a1: u64 = fget(frame, F_RSI)
@@ -355,6 +447,10 @@ fn entry(number: u64, frame: u64, state: u64) -> u64 {
     }
     if number == SYS_EXIT || number == SYS_EXIT_GROUP {
         file.close_all(state, me)
+        // ROUND K9: der Elternprozess erfaehrt es. Das ist SIGCHLD, und
+        // es ist der Grund, warum ein Programm ohne `wait` ueberhaupt
+        // merken kann, dass sein Kind fertig ist.
+        signal.exiting(state, me)
         // NOT `a0 & 255`. POSIX masks an exit status to eight bits, and
         // `wait4` below does exactly that -- but the kernel's own task
         // record keeps what the process really said, because the dumps of
@@ -381,6 +477,76 @@ fn entry(number: u64, frame: u64, state: u64) -> u64 {
     }
     if number == SYS_OSUM_KILL {
         return uio.kill_pid(state, a0, a1)
+    }
+    // ------------------------------------------------------- ROUND K9
+    if number == SYS_RT_SIGACTION {
+        return signal.do_sigaction(state, me, a0, a1, a2)
+    }
+    if number == SYS_RT_SIGPROCMASK {
+        return signal.do_sigprocmask(state, me, a0, a1, a2)
+    }
+    if number == SYS_RT_SIGRETURN {
+        return signal.do_sigreturn(state, me, frame)
+    }
+    if number == SYS_RT_SIGPENDING {
+        return signal.do_sigpending(state, me, a0)
+    }
+    if number == SYS_KILL {
+        return signal.do_kill(state, me, a0, a1)
+    }
+    if number == SYS_TGKILL {
+        return signal.do_kill(state, me, a1, a2)
+    }
+    if number == SYS_PAUSE {
+        return signal.do_pause(state, me)
+    }
+    if number == SYS_ALARM {
+        return signal.do_alarm(state, me, a0)
+    }
+    if number == SYS_SETPGID {
+        return signal.do_setpgid(state, me, a0, a1)
+    }
+    if number == SYS_GETPGID {
+        return signal.do_getpgid(state, me, a0)
+    }
+    if number == SYS_GETPGRP {
+        return signal.do_getpgid(state, me, 0)
+    }
+    if number == SYS_SETSID {
+        return signal.do_setsid(state, me)
+    }
+    if number == SYS_GETTID {
+        return sched.tget(state, me, sched.T_PID)
+    }
+    if number == SYS_IOCTL {
+        return do_ioctl(state, me, a0, a1, a2)
+    }
+    if number == SYS_CLOCK_GETTIME {
+        return do_clock_gettime(state, me, a0, a1)
+    }
+    if number == SYS_CLOCK_GETRES {
+        return do_clock_getres(state, me, a0, a1)
+    }
+    if number == SYS_CLOCK_NANOSLEEP {
+        return do_nanosleep(state, me, a2)
+    }
+    if number == SYS_GETTIMEOFDAY {
+        return do_gettimeofday(state, me, a0)
+    }
+    if number == SYS_TIME {
+        return do_time(state, me, a0)
+    }
+    if number == SYS_GETRANDOM {
+        return do_getrandom(state, me, a0, a1)
+    }
+    if number == SYS_OSUM_PTY {
+        return do_openpty(state, me, a0)
+    }
+    if number == SYS_OSUM_TTYINFO {
+        return tty.info(state, tty_of(state, me), a0)
+    }
+    if number == SYS_OSUM_SIGINFO {
+        return do_siginfo(state, me, a0)
     }
     return neg(errno.E_NOSYS)
 }
@@ -542,12 +708,26 @@ fn do_write(state: u64, me: u64, fd: u64, buf: u64, want: u64) -> u64 {
 fn write_of(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
     let kind: u64 = file.open_kind(state, of)
     if kind == file.K_CONOUT {
-        var k: u64 = 0
-        while k < len {
-            serial.put(peek(state, me, buf + k) as u8)
-            k = k + 1
+        // ROUND K9: durch das TERMINAL statt unmittelbar auf die
+        // Leitung. Die Konsole hat `OPOST` aus (siehe `tty.init`), also
+        // geht Oktett fuer Oktett unveraendert hindurch -- jede Messung
+        // der Runden 62 bis K6 sieht genau dieselbe Ausgabe. Was sich
+        // aendert, ist die eine Weiche in `tty.emit`: sagt Runde K7
+        // dort SINK_SCREEN, geht dieselbe Ausgabe auf den Bildschirm,
+        // ohne dass hier eine Zeile anders wird.
+        let bounce: u64 = state + kstate.BLOCK_OFF
+        if !copy_in(state, me, bounce, buf, len) {
+            return neg(errno.E_FAULT)
         }
-        return len
+        return tty.write_out(state, tty_of(state, me), bounce, len)
+    }
+    if kind == file.K_TTY {
+        let t: u64 = file.open_ino(state, of)
+        let bounce: u64 = state + kstate.BLOCK_OFF
+        if !copy_in(state, me, bounce, buf, len) {
+            return neg(errno.E_FAULT)
+        }
+        return tty.write_out(state, t, bounce, len)
     }
     if kind == file.K_PIPEW {
         return pipe_write(state, me, of, buf, len)
@@ -602,6 +782,9 @@ fn read_of(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
     if kind == file.K_CONIN {
         return console_read(state, me, buf, len)
     }
+    if kind == file.K_TTY {
+        return tty_read(state, me, file.open_ino(state, of), buf, len)
+    }
     if kind == file.K_PIPER {
         return pipe_read(state, me, of, buf, len)
     }
@@ -625,73 +808,84 @@ fn read_of(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
     return n
 }
 
-// The console has TWO sources since round K1, and they are tried in this
-// order:
+// ROUND K9 PUT A TERMINAL BETWEEN THE CONSOLE AND THE PROCESS.
 //
-//   1. what the boot loader put there (`script=ls;cat /x` in the tests),
-//   2. the KEYBOARD, when the run has one.
+// Bis hierher las `read` auf Deskriptor 0 unmittelbar aus zwei Quellen:
+// dem Skript der Kommandozeile und dem Ring von `kbd.fi`. Der
+// Rueckschritt wurde hier behandelt, ein Zeilenende hier erkannt, und ein
+// STRG-C war ein Oktett wie jedes andere. Von dieser Runde an geht beides
+// durch die ZEILENDISZIPLIN (`kernel/tty.fi`), und der Unterschied ist
+// nicht kosmetisch:
 //
-// The script comes first so that every measurement of round 62 keeps
-// measuring what it measured; when it is used up and the run was started
-// with `nokbd`, the answer is 0, and 0 is the end of the input, not an
-// error. Only a run with a real keyboard waits.
-fn console_read(state: u64, me: u64, buf: u64, len: u64) -> u64 {
-    let n: u64 = script_read(state, me, buf, len)
-    if n != 0 {
-        return n
+//   * STRG-C ist jetzt ein SIGINT an die Vordergrund-Prozessgruppe und
+//     kein Zeichen mehr, das irgendjemand liest.
+//   * Der rohe Modus ist ein Schalter und keine zweite Leseschleife.
+//   * Ein wartender Leser wird von einem Signal UNTERBROCHEN (-EINTR),
+//     statt bis zum Ende seiner vier Sekunden zu warten. Ohne das taete
+//     STRG-C in einer Shell, die auf eine Zeile wartet, gar nichts.
+//
+// Die beiden Quellen sind geblieben und ihre Reihenfolge auch: erst das
+// Skript, dann die Tastatur. Neu ist nur, durch welche Tuer sie kommen --
+// und weil es dieselbe Tuer ist, wirkt ein `^C` in einem Skript genau wie
+// eines von der Tastatur. Das ist der Weg, auf dem `tools/unix/run.sh`
+// STRG-C ohne einen Menschen davor messen kann.
+
+// Welches Terminal zu dieser Aufgabe gehoert. T_TTY ist Nummer + 1, damit
+// die Null "noch keines" heissen kann; wer keines hat, bekommt die
+// Konsole -- das ist, was ein Prozess erbt, der nie etwas anderes
+// verlangt hat.
+fn tty_of(state: u64, me: u64) -> u64 {
+    let t: u64 = sched.tget(state, me, sched.T_TTY)
+    if t == 0 {
+        return tty.console()
     }
-    if (kstate.get(state, kstate.MODE) & kstate.M_NOKBD) != 0 {
-        return 0
-    }
-    return keyboard_read(state, me, buf, len)
+    return t - 1
 }
 
-// How long the console waits for a key before it calls the input ended.
-// 100 Hz, so four seconds. A shell that waited forever would be right on
-// a machine with a person in front of it and wrong in a test run: the
-// kernel could never shut itself down, and a measurement that ends in a
-// time limit measures nothing. Four seconds is long enough for a person
-// to think and short enough for `tools/osum/run.sh` to finish.
-const KEY_IDLE: u64 = 400
-
-// A LINE OFF THE KEYBOARD. The producer is the interrupt handler in
-// `kbd.fi`, the consumer is this function, and between them lies a ring
-// of 64 octets -- so the ring is read with interrupts off and the waiting
-// happens with them on. `sleep_ticks` is what turns them back on: it
-// hands the processor to the idle task, and IRQ1 arrives there.
-//
-// Backspace (8) takes the last octet back instead of being one. There is
-// no echo here on purpose: `kbd.fi` already reports every key it saw, and
-// the shell prints the line it got. A kernel that echoed as well would be
-// deciding what a terminal looks like.
-fn keyboard_read(state: u64, me: u64, buf: u64, len: u64) -> u64 {
+// Eine Zeile aus dem Skript in die Zeilendisziplin schieben. Zeilenweise
+// und nicht auf einmal: der Ring des Terminals fasst 512 Oktette, die
+// Kommandozeile darf 4096 haben, und ein Skript, dessen Ende still
+// wegfaellt, waere ein Testlauf, der etwas anderes misst als er sagt.
+fn script_feed(state: u64, t: u64) -> u64 {
+    var pos: u64 = kstate.get(state, kstate.CONSOLE_POS)
+    let end: u64 = kstate.get(state, kstate.CONSOLE_LEN)
     var n: u64 = 0
-    var idle: u64 = 0
     var going: bool = true
     while going {
-        let flags: u64 = sched.irq_save()
-        let c: u64 = kbd.take(state)
-        sched.irq_restore(flags)
-        if c == 0 {
-            if idle >= KEY_IDLE {
+        if pos >= end {
+            going = false
+        } else {
+            let c: u64 = kstate.get8(state + kstate.CONSOLE_OFF + pos)
+            pos = pos + 1
+            n = n + 1
+            tty.push(state, t, c)
+            if c == 10 {
+                going = false
+            }
+        }
+    }
+    kstate.set(state, kstate.CONSOLE_POS, pos)
+    return n
+}
+
+// Was fertig im Terminal liegt, in den Puffer des Prozesses. Hoert am
+// Zeilenende auf -- das ist die Zusage des kanonischen Modus, und ein
+// `read`, das zwei Zeilen auf einmal liefert, bricht jede Shell.
+fn tty_drain(state: u64, me: u64, t: u64, buf: u64, len: u64) -> u64 {
+    var n: u64 = 0
+    var going: bool = true
+    while going {
+        if n >= len {
+            going = false
+        } else {
+            let c: u64 = tty.take(state, t)
+            if c == 256 {
                 going = false
             } else {
-                idle = idle + 1
-                sched.sleep_ticks(state, 1)
-            }
-        } else {
-            idle = 0
-            if c == 8 {
-                if n > 0 {
-                    n = n - 1
+                if !poke(state, me, buf + n, c) {
+                    return neg(errno.E_FAULT)
                 }
-            } else {
-                if n < len {
-                    if !poke(state, me, buf + n, c) {
-                        return neg(errno.E_FAULT)
-                    }
-                    n = n + 1
-                }
+                n = n + 1
                 if c == 10 {
                     going = false
                 }
@@ -701,28 +895,100 @@ fn keyboard_read(state: u64, me: u64, buf: u64, len: u64) -> u64 {
     return n
 }
 
-fn script_read(state: u64, me: u64, buf: u64, len: u64) -> u64 {
-    var pos: u64 = kstate.get(state, kstate.CONSOLE_POS)
-    let end: u64 = kstate.get(state, kstate.CONSOLE_LEN)
-    var n: u64 = 0
-    var going: bool = true
-    while going {
-        if n >= len || pos >= end {
-            going = false
-        } else {
-            let c: u64 = kstate.get8(state + kstate.CONSOLE_OFF + pos)
-            pos = pos + 1
-            if !poke(state, me, buf + n, c) {
-                return neg(errno.E_FAULT)
-            }
-            n = n + 1
-            if c == 10 {
-                going = false
-            }
-        }
+// Wie lange die Konsole auf eine Taste wartet, bevor sie die Eingabe fuer
+// beendet erklaert. 100 Hz, also vier Sekunden. Eine Shell, die ewig
+// wartet, haette recht vor einem Menschen und unrecht in einem Testlauf:
+// der Kernel koennte sich nie selbst beenden, und eine Messung, die in
+// einem Zeitlimit endet, misst nichts.
+const KEY_IDLE: u64 = 400
+
+// DIE VORDERGRUNDPRUEFUNG. Wer nicht in der Vordergrundgruppe des
+// Terminals steht und trotzdem lesen will, bekommt SIGTTIN -- so haelt
+// ein Unix zwei Programme davon ab, sich dieselbe Tastatur zu teilen.
+// Steht keine Gruppe im Terminal (bis eine Shell eine setzt), gilt die
+// Pruefung nicht: dann gibt es keinen Vordergrund, gegen den zu pruefen
+// waere, und jede Messung der Runden 62 bis K6 laeuft wie zuvor.
+fn foreground_ok(state: u64, me: u64, t: u64) -> bool {
+    let grp: u64 = tty.pgrp(state, t)
+    if grp == 0 {
+        return true
     }
-    kstate.set(state, kstate.CONSOLE_POS, pos)
-    return n
+    if sched.tget(state, me, sched.T_PGID) == grp {
+        return true
+    }
+    signal.send_task(state, me, signal.SIGTTIN)
+    return false
+}
+
+fn console_read(state: u64, me: u64, buf: u64, len: u64) -> u64 {
+    return tty_read(state, me, tty_of(state, me), buf, len)
+}
+
+fn tty_read(state: u64, me: u64, t: u64, buf: u64, len: u64) -> u64 {
+    if !tty.valid(state, t) {
+        return neg(errno.E_NOTTY)
+    }
+    if !foreground_ok(state, me, t) {
+        return neg(errno.E_INTR)
+    }
+    // Die Steuerseite eines Pseudoterminals liest, was die Nutzerseite
+    // geschrieben hat -- nicht die Zeilendisziplin, sondern den rohen
+    // Ausgabering.
+    if tty.kind_of(state, t) == tty.K_PTY_MASTER {
+        let p: u64 = tty.peer_of(state, t)
+        var n: u64 = 0
+        var rounds: u64 = 0
+        while n == 0 && rounds < BLOCK_ROUNDS {
+            while n < len && tty.out_waiting(state, p) != 0 {
+                let c: u64 = tty.out_take(state, p)
+                if c == 256 {
+                    n = n
+                } else {
+                    if !poke(state, me, buf + n, c) {
+                        return neg(errno.E_FAULT)
+                    }
+                    n = n + 1
+                }
+            }
+            if n != 0 {
+                return n
+            }
+            if signal.interrupted(state, me) {
+                return neg(errno.E_INTR)
+            }
+            sched.sleep_ticks(state, 1)
+            rounds = rounds + 1
+        }
+        return n
+    }
+    if tty.waiting(state, t) == 0 && t == tty.console() {
+        script_feed(state, t)
+    }
+    var n: u64 = tty_drain(state, me, t, buf, len)
+    if n != 0 {
+        return n
+    }
+    if t == tty.console() && (kstate.get(state, kstate.MODE) & kstate.M_NOKBD) != 0 {
+        // Kein Skript mehr und keine Tastatur: das ist das ENDE DER
+        // EINGABE, und null ist genau das -- kein Fehler.
+        return 0
+    }
+    var idle: u64 = 0
+    while idle < KEY_IDLE {
+        // ROUND K9: ein wartender Leser ist unterbrechbar. Das ist die
+        // Zeile, an der STRG-C in einer Shell haengt, die auf eine Zeile
+        // wartet -- ohne sie sitzt sie ihre vier Sekunden ab und stirbt
+        // erst danach.
+        if signal.interrupted(state, me) {
+            return neg(errno.E_INTR)
+        }
+        if tty.waiting(state, t) != 0 {
+            return tty_drain(state, me, t, buf, len)
+        }
+        sched.sleep_ticks(state, 1)
+        idle = idle + 1
+    }
+    return 0
 }
 
 // -------------------------------------------------------------- pipes
@@ -1380,8 +1646,282 @@ fn do_nanosleep(state: u64, me: u64, req: u64) -> u64 {
         return neg(errno.E_INVAL)
     }
     let ticks: u64 = sec * 100 + (nsec + 9999999) / 10000000
-    sched.sleep_ticks(state, ticks)
+    // ROUND K9. GESCHLAFEN WIRD MARKE FUER MARKE, und das ist kein
+    // Umweg: ein Schlaefer muss von einem Signal UNTERBRECHBAR sein.
+    // POSIX sagt dafuer -EINTR, und ein `sleep 30`, das sich von STRG-C
+    // nicht stoeren laesst, ist genau das, was diese Runde beheben soll.
+    // Mit `nosig` kann nichts zugestellt werden, und dann schlaeft dieser
+    // Aufruf seine volle Zeit -- die Gegenprobe dazu.
+    var left: u64 = ticks
+    while left > 0 {
+        if signal.interrupted(state, me) {
+            return neg(errno.E_INTR)
+        }
+        sched.sleep_ticks(state, 1)
+        left = left - 1
+    }
     return 0
+}
+
+// ---------------------------------------------------- ROUND K9: die Uhr
+
+// `clock_gettime(clk, tp)`. `tp` ist ein `struct timespec`: acht Oktette
+// Sekunden, acht Oktette Nanosekunden.
+fn do_clock_gettime(state: u64, me: u64, clk: u64, tp: u64) -> u64 {
+    if clk > time.CLOCK_MAX {
+        return neg(errno.E_INVAL)
+    }
+    if !proc.user_ok(state, me, tp, 16) {
+        return neg(errno.E_FAULT)
+    }
+    kstate.add(state, kstate.TIME_CALLS, 1)
+    var ns: u64 = 0
+    if clk == time.CLOCK_REALTIME || clk == time.CLOCK_REALTIME_COARSE {
+        ns = time.real_ns(state)
+    } else {
+        ns = time.mono_ns(state)
+    }
+    if !put64(state, me, tp, ns / time.NS_PER_SEC) {
+        return neg(errno.E_FAULT)
+    }
+    if !put64(state, me, tp + 8, ns % time.NS_PER_SEC) {
+        return neg(errno.E_FAULT)
+    }
+    return 0
+}
+
+// Die Koernung, und sie wird nicht behauptet, sondern ausgerechnet: mit
+// geeichtem Zyklenzaehler ist es eine Nanosekunde, ohne ihn sind es die
+// zehn Millisekunden des Zeitgebers.
+fn do_clock_getres(state: u64, me: u64, clk: u64, tp: u64) -> u64 {
+    if clk > time.CLOCK_MAX {
+        return neg(errno.E_INVAL)
+    }
+    if tp == 0 {
+        return 0
+    }
+    if !proc.user_ok(state, me, tp, 16) {
+        return neg(errno.E_FAULT)
+    }
+    var res: u64 = time.TICK_NS
+    if time.khz(state) != 0 {
+        res = 1
+    }
+    put64(state, me, tp, 0)
+    put64(state, me, tp + 8, res)
+    return 0
+}
+
+// `gettimeofday(tv, tz)` -- Sekunden und MIKROsekunden. Die Zeitzone wird
+// gelesen und verworfen; sie ist seit 4.4BSD nichts als ein Nullzeiger.
+fn do_gettimeofday(state: u64, me: u64, tv: u64) -> u64 {
+    if tv == 0 {
+        return 0
+    }
+    if !proc.user_ok(state, me, tv, 16) {
+        return neg(errno.E_FAULT)
+    }
+    let ns: u64 = time.real_ns(state)
+    put64(state, me, tv, ns / time.NS_PER_SEC)
+    put64(state, me, tv + 8, (ns % time.NS_PER_SEC) / 1000)
+    return 0
+}
+
+// `time(t)` -- die Sekunden selbst, und dazu in einen Zeiger, wenn einer
+// mitkommt.
+fn do_time(state: u64, me: u64, out: u64) -> u64 {
+    let secs: u64 = time.now_sec(state)
+    if out != 0 {
+        if !proc.user_ok(state, me, out, 8) {
+            return neg(errno.E_FAULT)
+        }
+        put64(state, me, out, secs)
+    }
+    return secs
+}
+
+// ------------------------------------------------- ROUND K9: der Zufall
+
+// `getrandom(buf, len, flags)`. Ueber den Zwischenpuffer des
+// Datenbereichs, so wie jeder andere Weg nach Ring 3 -- der Generator
+// kennt keine Adressraeume und soll keine kennen.
+fn do_getrandom(state: u64, me: u64, buf: u64, want: u64) -> u64 {
+    var len: u64 = want
+    if len > MAX_IO {
+        len = MAX_IO
+    }
+    if !proc.user_ok(state, me, buf, len) {
+        return neg(errno.E_FAULT)
+    }
+    if len == 0 {
+        return 0
+    }
+    let bounce: u64 = state + kstate.BLOCK_OFF
+    rand.bytes(state, bounce, len)
+    if !copy_out(state, me, buf, bounce, len) {
+        return neg(errno.E_FAULT)
+    }
+    return len
+}
+
+// ----------------------------------------------- ROUND K9: die Terminals
+
+// `ioctl(fd, request, arg)`. Der Kernel arbeitet auf seinem eigenen
+// Puffer und kopiert ihn hin und zurueck -- die Regel von Runde K4, dass
+// der Kernel nie einen Zeiger von Ring 3 haelt, gilt auch fuer eine
+// Struktur, die 36 Oktette gross ist.
+fn do_ioctl(state: u64, me: u64, fd: u64, req: u64, arg: u64) -> u64 {
+    let of: u64 = of_of(state, me, fd)
+    if of >= file.MAX_OPEN {
+        return neg(errno.E_BADF)
+    }
+    let kind: u64 = file.open_kind(state, of)
+    var t: u64 = tty.MAX_TTY
+    if kind == file.K_CONIN || kind == file.K_CONOUT {
+        t = tty_of(state, me)
+    }
+    if kind == file.K_TTY {
+        t = file.open_ino(state, of)
+    }
+    if t >= tty.MAX_TTY {
+        // Was kein Terminal ist, hat keine Terminaleigenschaften. -ENOTTY
+        // ist die Antwort, an der jedes Programm merkt, dass seine
+        // Ausgabe in eine Datei geht und nicht auf einen Schirm.
+        return neg(errno.E_NOTTY)
+    }
+    let bounce: u64 = state + kstate.BLOCK_OFF
+    var size: u64 = 36
+    if req == tty.TIOCGWINSZ || req == tty.TIOCSWINSZ {
+        size = 8
+    }
+    if req == tty.TIOCGPGRP || req == tty.TIOCSPGRP {
+        size = 4
+    }
+    if arg == 0 || !proc.user_ok(state, me, arg, size) {
+        return neg(errno.E_FAULT)
+    }
+    if !copy_in(state, me, bounce, arg, size) {
+        return neg(errno.E_FAULT)
+    }
+    let r: u64 = tty.do_ioctl(state, t, req, bounce)
+    if errno.is_error(r) {
+        return r
+    }
+    if !copy_out(state, me, arg, bounce, size) {
+        return neg(errno.E_FAULT)
+    }
+    return 0
+}
+
+// `openpty(out)` -- ein Paar aus Steuer- und Nutzerseite. Zwei
+// Deskriptoren, in `out[0]` und `out[1]`. Linux macht dasselbe in drei
+// Schritten ueber `/dev/ptmx`, `grantpt` und `ptsname`; dieser Kernel hat
+// kein Geraetedateisystem, und ein Aufruf, der beide Enden zurueckgibt,
+// ist die ehrliche Form davon.
+fn do_openpty(state: u64, me: u64, out: u64) -> u64 {
+    if !proc.user_ok(state, me, out, 8) {
+        return neg(errno.E_FAULT)
+    }
+    let sl: u64 = tty.alloc_pair(state)
+    if sl >= tty.MAX_TTY {
+        return neg(errno.E_NFILE)
+    }
+    let m: u64 = tty.peer_of(state, sl)
+    let ofm: u64 = file.open_alloc(state, file.K_TTY, m, O_RDWR)
+    if ofm >= file.MAX_OPEN {
+        return neg(errno.E_NFILE)
+    }
+    let ofs: u64 = file.open_alloc(state, file.K_TTY, sl, O_RDWR)
+    if ofs >= file.MAX_OPEN {
+        file.open_unref(state, ofm)
+        return neg(errno.E_NFILE)
+    }
+    let fdm: u64 = file.fd_alloc(state, me, 0)
+    if fdm >= file.MAX_FD {
+        file.open_unref(state, ofm)
+        file.open_unref(state, ofs)
+        return neg(errno.E_MFILE)
+    }
+    file.fd_set(state, me, fdm, ofm)
+    let fds: u64 = file.fd_alloc(state, me, 0)
+    if fds >= file.MAX_FD {
+        file.fd_free(state, me, fdm)
+        file.open_unref(state, ofm)
+        file.open_unref(state, ofs)
+        return neg(errno.E_MFILE)
+    }
+    file.fd_set(state, me, fds, ofs)
+    kstate.add(state, kstate.OPENS, 2)
+    if !put32(state, me, out, fdm) {
+        return neg(errno.E_FAULT)
+    }
+    if !put32(state, me, out + 4, fds) {
+        return neg(errno.E_FAULT)
+    }
+    return 0
+}
+
+// Eine Zahl ueber die Signalschicht. Wie `sysinfo` aus Runde K6: ein
+// Programm darf die Tabelle LESEN, es bekommt keinen Zeiger hinein.
+const SI_PENDING: u64 = 0
+const SI_MASK: u64 = 1
+const SI_LAST: u64 = 2
+const SI_DELIVERED: u64 = 3
+const SI_SENT: u64 = 4
+const SI_CAUGHT: u64 = 5
+const SI_DEFAULT: u64 = 6
+const SI_STOPS: u64 = 7
+const SI_MYCOUNT: u64 = 8
+const SI_STOPPED: u64 = 9
+const SI_TTYSIGS: u64 = 10
+
+fn do_siginfo(state: u64, me: u64, what: u64) -> u64 {
+    if what == SI_PENDING {
+        return sched.tget(state, me, sched.T_SIGPEND)
+    }
+    if what == SI_MASK {
+        return sched.tget(state, me, sched.T_SIGMASK)
+    }
+    if what == SI_LAST {
+        return sched.tget(state, me, sched.T_SIGLAST)
+    }
+    if what == SI_DELIVERED {
+        return kstate.get(state, kstate.SIG_DELIVERED)
+    }
+    if what == SI_SENT {
+        return kstate.get(state, kstate.SIG_SENT)
+    }
+    if what == SI_CAUGHT {
+        return kstate.get(state, kstate.SIG_CAUGHT)
+    }
+    if what == SI_DEFAULT {
+        return kstate.get(state, kstate.SIG_DEFAULT)
+    }
+    if what == SI_STOPS {
+        return kstate.get(state, kstate.SIG_STOPS)
+    }
+    if what == SI_MYCOUNT {
+        return sched.tget(state, me, sched.T_SIGDEL)
+    }
+    if what == SI_STOPPED {
+        return signal.stopped_count(state)
+    }
+    if what == SI_TTYSIGS {
+        return kstate.get(state, kstate.TTY_SIGS)
+    }
+    return neg(errno.E_INVAL)
+}
+
+// Acht Oktette nach Ring 3, mit Pruefung je Seite.
+fn put64(state: u64, me: u64, addr: u64, v: u64) -> bool {
+    var i: u64 = 0
+    while i < 8 {
+        if !poke(state, me, addr + i, (v >> (i * 8)) & 255) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
 }
 
 // ------------------------------------------------------ processes
@@ -1418,6 +1958,10 @@ fn do_fork(state: u64, me: u64, frame: u64) -> u64 {
         return neg(errno.E_NOMEM)
     }
     file.inherit_task(state, me, child)
+    // ROUND K9: die Routinen und die Maske erbt das Kind, die WARTENDEN
+    // Signale nicht -- ein SIGINT, das dem Elternteil galt, galt nicht
+    // einem Kind, das es damals noch nicht gab (POSIX).
+    signal.inherit(state, me, child)
     sched.tset(state, child, sched.T_CWD, sched.tget(state, me, sched.T_CWD))
     // ROUND K6: and the working directory as TEXT, which is what `getcwd`
     // prints and what a relative path is completed with.
@@ -1453,6 +1997,12 @@ fn do_fork(state: u64, me: u64, frame: u64) -> u64 {
 // same pid, same parent, same descriptors, and that is what `execve`
 // promises.
 fn do_execve(state: u64, me: u64, frame: u64, path: u64, argv: u64) -> u64 {
+    // ROUND K9: die Routinen des alten Abbilds zeigen in Code, den es
+    // nach diesem Aufruf nicht mehr gibt. Was UEBERHOERT wurde, bleibt
+    // ueberhoert (POSIX), alles andere faellt auf das Standardverhalten
+    // zurueck. Frueh, damit auch ein fehlgeschlagener Aufruf nichts
+    // Halbes hinterlaesst -- er kehrt vor jeder Aenderung zurueck.
+    signal.exec_reset(state, me)
     if kstate.get(state, kstate.FS_READY) == 0 {
         return neg(errno.E_NOSYS)
     }
