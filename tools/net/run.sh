@@ -107,6 +107,8 @@ done
 # The wire needs a network namespace and a veth pair. Without them
 # nothing below can run, and saying so is better than failing sixty
 # times.
+ip netns del "$NS" 2>/dev/null
+ip link del v0 2>/dev/null
 if ! ip netns add "$NS" 2>/dev/null; then
     echo "NET: skipped, network namespaces are not available here"
     exit 0
@@ -190,7 +192,16 @@ python3 tools/osum/mkfs.py build "$TMPD/disk.img" $BLOCKS $SPEC \
 # The wire, the bridge, and one run of QEMU.
 # =====================================================================
 
-wire_up() { # [loss] [delay]
+# wire_up [loss toward Osum] [loss toward Linux] [delay]
+#
+# The two directions are separate qdiscs on purpose. netem sits on the
+# EGRESS of an interface, so loss on `v1` (inside the namespace) is what
+# Linux sends and Osum has to reassemble, and loss on `v0` is what Osum
+# sends and Osum itself has to RETRANSMIT. Only the second one exercises
+# the retransmission timer of `lib/net/tcp.fi`; a test that put loss on
+# one side and claimed both would be measuring the Linux kernel's
+# retransmissions and calling them ours.
+wire_up() {
     ip netns del "$NS" 2>/dev/null
     ip link del v0 2>/dev/null
     ip netns add "$NS"
@@ -203,8 +214,11 @@ wire_up() { # [loss] [delay]
     ethtool -K v0 tx off rx off tso off gso off gro off >/dev/null 2>&1
     ip netns exec "$NS" ethtool -K v1 tx off rx off tso off gso off gro off >/dev/null 2>&1
     if [ -n "${1:-}" ]; then
-        ip netns exec "$NS" tc qdisc add dev v1 root netem loss "$1" ${2:+delay $2} \
+        ip netns exec "$NS" tc qdisc add dev v1 root netem loss "$1" ${3:+delay $3} \
             >/dev/null 2>&1
+    fi
+    if [ -n "${2:-}" ]; then
+        tc qdisc add dev v0 root netem loss "$2" ${3:+delay $3} >/dev/null 2>&1
     fi
 }
 
@@ -452,7 +466,7 @@ echo "== 9. tc netem: one frame in five thrown away =="
 # what stands between a wire that loses frames and a file that is
 # complete: every octet has to arrive, in order, and the retransmission
 # counter has to say it did not come for free.
-wire_up "20%" "5ms"
+wire_up "20%" "" "5ms"
 bridge_up
 qemu_bg "$TMPD/k0.mb" "$BASE $NETARGS nsvc=1 nport=7 nbytes=262144" "$TMPD/loss.txt"
 await_line "$TMPD/loss.txt" "nic: listening=7" 25
@@ -464,23 +478,28 @@ num "through 20 % loss: octets that arrived, all of them in order" "$(val "$L" o
 num "segments the stack had to reassemble out of order" "$(val "$L" ooo)" ge 1
 ok "throughput through 20 % loss: $(val "$L" kib_per_s) KiB/s (clean wire: $KIB KiB/s)"
 
-echo "   the other direction through the same loss: Osum has to retransmit"
-wire_up "20%" "5ms"
+echo "   the OTHER direction: the loss is now on what OSUM sends"
+# 64 KiB and not 256: with one frame in five thrown away on the way OUT,
+# every loss costs a retransmission timer of at least 200 ms
+# (`RTO_MIN`), and the point of this case is the retransmission and not
+# how long a quarter of a megaoctet takes to crawl through it.
+wire_up "" "20%" "5ms"
 bridge_up
-ip netns exec "$NS" python3 tools/net/echosrv.py 7 262144 > "$TMPD/srv2.log" 2>&1 &
+ip netns exec "$NS" python3 tools/net/echosrv.py 7 65536 > "$TMPD/srv2.log" 2>&1 &
 SRVPID=$!
 sleep 1
-qemu_bg "$TMPD/k0.mb" "$BASE $NETARGS nsvc=4 nport=7 nbytes=262144" "$TMPD/loss2.txt"
+qemu_bg "$TMPD/k0.mb" "$BASE $NETARGS nsvc=4 nport=7 nbytes=65536" "$TMPD/loss2.txt"
 qemu_wait
 kill $SRVPID 2>/dev/null; SRVPID=""
 bridge_down
 L2="$TMPD/loss2.txt"
-num "through 20 % loss, out and back: octets that were wrong" "$(val "$L2" wrong)" eq 0
-num "and all of them arrived" "$(val "$L2" back)" eq 262144
+num "through 20 % loss on the way out: octets that were wrong" "$(val "$L2" wrong)" eq 0
+num "and all of them arrived" "$(val "$L2" back)" eq 65536
 rex=$(val "$L2" rexmit)
 fast=$(val "$L2" fast_rex)
-num "retransmissions on the timer" "${rex:-0}" ge 1
-ok "of which on three duplicate acknowledgements (fast retransmit): ${fast:-0}"
+num "retransmissions Osum had to make on the timer" "${rex:-0}" ge 1
+ok "and on three duplicate acknowledgements (fast retransmit): ${fast:-0}"
+has "$TMPD/srv2.log" "echoed 65536" "the python server on the host received every octet exactly once"
 wire_down
 
 # =====================================================================
