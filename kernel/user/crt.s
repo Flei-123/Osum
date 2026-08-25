@@ -1,4 +1,4 @@
-/* demos/kernel/user/crt.s -- round K1: the four instructions a user
+/* kernel/user/crt.s -- round K1: the four instructions a user
  * program cannot write in Firn.
  *
  * Everything else down here is Firn. What is left over is exactly what a
@@ -6,7 +6,7 @@
  *
  *   1. THE ENTRY POINT. The kernel jumps to `_start` with `rdi` pointing
  *      at the argument block it built on the top stack page (see
- *      `demos/kernel/elf.fi`), and with a stack pointer that is 16
+ *      `kernel/elf.fi`), and with a stack pointer that is 16
  *      aligned. System V wants `rsp % 16 == 8` INSIDE a function -- the
  *      `call` below is what produces that, and a Firn function cannot
  *      emit a `call` to itself.
@@ -21,7 +21,7 @@
  *      and leave with 70. Without this definition every user program
  *      would carry an undefined symbol, and `ld` would refuse it.
  *
- * The system call numbers are the ones in `demos/kernel/sys.fi`, and since
+ * The system call numbers are the ones in `kernel/sys.fi`, and since
  * ROUND K4 those are Linux's: 60 = exit, 1 = write. Round K1 had 10 and 11
  * here, and the day the table changed underneath them this file was the
  * one that went quiet -- a program that printed everything it had and then

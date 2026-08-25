@@ -1,4 +1,4 @@
-/* demos/kernel/kernel.ld -- round 59: the layout of the small kernel.
+/* kernel/kernel.ld -- round 59: the layout of the small kernel.
  *
  * Binds `boot.s` (multiboot header, long mode), `isr.s` (interrupt entry
  * points) and the freestanding object file out of `kmain.fi` into an image

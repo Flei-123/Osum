@@ -9,7 +9,7 @@
 # file and off a machine that really boots -- not what the compiler claims
 # about itself.
 #
-#   1. `demos/kernel/kcore.fi` compiles with BOTH compilers in the kernel
+#   1. `kernel/kcore.fi` compiles with BOTH compilers in the kernel
 #      profile to an ELF OBJECT FILE, although it says `import std.core`.
 #   2. The object file has NO undefined name and contains NOT ONE `syscall`
 #      instruction. That is the hard form of "this library asks nobody for
@@ -37,10 +37,10 @@ cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
 
 export FIRNLIB="$ROOT/lib"
-FIRNC=compiler/target/release/firnc
-FC1=${FIRNC1:-./.firnc1}
-SOURCE=demos/kernel/kcore.fi
-LDSCRIPT=demos/kernel/linker.ld
+FIRNC=${FIRNC:-vendor/firn/bin/firnc}
+FC1=${FIRNC1:-vendor/firn/bin/firnc1}
+SOURCE=kernel/kcore.fi
+LDSCRIPT=kernel/linker.ld
 ROUNDS=${CORE_ROUNDS:-40000}
 LEAK_ROUNDS=${CORE_LEAK_ROUNDS:-20000}
 SLACK=${CORE_SLACK:-64}
@@ -53,19 +53,13 @@ fail=0
 ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 
+# Der FESTGENAGELTE Uebersetzer aus vendor/ (vendor/firn/COMMIT). Beide
+# Stufen kommen aus EINEM Firn-Commit; nichts wird gegen ein bewegliches
+# Ziel gebaut. Das Skript baut nur, wenn noetig.
+bash vendor/firn/hole-firnc.sh >/dev/null || { echo "vendor/firn/hole-firnc.sh failed"; exit 1; }
 [ -x "$FIRNC" ] || { echo "firnc0 is missing: $FIRNC"; exit 1; }
+[ -x "$FC1" ]   || { echo "firnc1 is missing: $FC1"; exit 1; }
 
-# Rebuild `.firnc1` when it is missing or a source is younger (the trap
-# from round 35/45/46: an outdated binary measures yesterday's state).
-fresh=0
-[ -x "$FC1" ] || fresh=1
-if [ -x "$FC1" ]; then
-    [ "$FIRNC" -nt "$FC1" ] && fresh=1
-    while IFS= read -r q; do
-        [ "$q" -nt "$FC1" ] && { fresh=1; break; }
-    done < <(find bin lib -name '*.fi' -not -type l)
-fi
-[ "$fresh" -eq 1 ] && { rm -f "$FC1"; "$FIRNC" bin/firnc1.fi -o "$FC1" || exit 1; }
 
 echo "== 1. a kernel that says 'import std.core' compiles (both compilers) =="
 "$FIRNC" -o "$TMPD/k0.o" "$SOURCE" 2>"$TMPD/e0" \
@@ -85,7 +79,7 @@ for s in 0 1; do
     # ROUND 72: `osum_panic` is the ONE name allowed to stay undefined here.
     # Checked arithmetic (SPEC section 13, item L9) calls that external
     # symbol under `profile kernel` when a value goes out of range, on
-    # purpose; `demos/kernel/start.s` defines it and the link step resolves
+    # purpose; `kernel/start.s` defines it and the link step resolves
     # it. Anything ELSE undefined is still a hard failure. The same
     # exception is made in tools/freestanding/run.sh and tools/kernel/run.sh.
     undef=$(nm -u "$f" 2>/dev/null | awk '{print $NF}' | sed '/^$/d' | grep -vxF osum_panic)
@@ -116,7 +110,7 @@ for s in 0 1; do
 done
 
 echo "== 3. it boots, and it says what it computed =="
-as --64 -o "$TMPD/start.o" demos/kernel/start.s 2>"$TMPD/as.err" \
+as --64 -o "$TMPD/start.o" kernel/start.s 2>"$TMPD/as.err" \
     && ok "start.s assembles" \
     || { bad "start.s"; sed 's/^/        /' "$TMPD/as.err" | head -5; }
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then

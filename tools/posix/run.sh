@@ -10,7 +10,7 @@
 # Round K4 lays the floor. What is measured here, and every point has a
 # COUNTER-CHECK, because a property without one is a claim:
 #
-#   1. THE NUMBERS ARE LINUX'S NUMBERS. Read out of `demos/kernel/sys.fi`
+#   1. THE NUMBERS ARE LINUX'S NUMBERS. Read out of `kernel/sys.fi`
 #      and compared against the x86-64 table of Linux. That is not
 #      decoration: stage 2 of this plan is to run a statically linked
 #      Linux binary, and such a binary puts its number in rax without
@@ -47,10 +47,10 @@ set -uo pipefail
 cd "$(dirname "$0")/../.."
 
 export FIRNLIB="$(pwd)/lib"
-FIRNC=compiler/target/release/firnc
-FC1=${FIRNC1:-./.firnc1}
-LDSCRIPT=demos/kernel/kernel.ld
-ULD=demos/kernel/user/user.ld
+FIRNC=${FIRNC:-vendor/firn/bin/firnc}
+FC1=${FIRNC1:-vendor/firn/bin/firnc1}
+LDSCRIPT=kernel/kernel.ld
+ULD=kernel/user/user.ld
 PROGS="sh ls cat echo rm hello posix"
 BLOCKS=2048
 
@@ -72,23 +72,17 @@ num() { # name value op expected
 has() { grep -aqF "$2" "$1" && ok "$3" || bad "$3 -- '$2' is missing"; }
 hasnot() { grep -aqF "$2" "$1" && bad "$3 -- '$2' should not be there" || ok "$3"; }
 
+# Der FESTGENAGELTE Uebersetzer aus vendor/ (vendor/firn/COMMIT). Beide
+# Stufen kommen aus EINEM Firn-Commit; nichts wird gegen ein bewegliches
+# Ziel gebaut. Das Skript baut nur, wenn noetig.
+bash vendor/firn/hole-firnc.sh >/dev/null || { echo "vendor/firn/hole-firnc.sh failed"; exit 1; }
 [ -x "$FIRNC" ] || { echo "firnc0 is missing: $FIRNC"; exit 1; }
+[ -x "$FC1" ]   || { echo "firnc1 is missing: $FC1"; exit 1; }
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
     echo "POSIX: skipped, qemu-system-x86_64 is not available"
     exit 0
 fi
 
-# The same freshness trap as in tools/kernel/run.sh: an outdated `.firnc1`
-# measures yesterday's compiler.
-fresh=0
-[ -x "$FC1" ] || fresh=1
-if [ -x "$FC1" ]; then
-    [ "$FIRNC" -nt "$FC1" ] && fresh=1
-    while IFS= read -r q; do
-        [ "$q" -nt "$FC1" ] && { fresh=1; break; }
-    done < <(find bin lib -name '*.fi' -not -type l)
-fi
-[ "$fresh" -eq 1 ] && { rm -f "$FC1"; "$FIRNC" bin/firnc1.fi -o "$FC1" || exit 1; }
 
 # The value of one measurement out of the run: `posix: <name> = <number>`.
 # The value of a `const NAME: u64 = <number>` -- the line may carry a
@@ -117,7 +111,7 @@ say() { # file name expected description
 echo "== 1. the numbers are the numbers of Linux x86-64 =="
 check_number() { # name expected
     local got
-    got=$(number_in demos/kernel/sys.fi "SYS_$1")
+    got=$(number_in kernel/sys.fi "SYS_$1")
     if [ "$got" = "$2" ]; then ok "SYS_$1 = $2"
     else bad "SYS_$1 = ${got:-missing}, Linux says $2"; fi
 }
@@ -149,7 +143,7 @@ check_number GETDENTS64 217
 check_number EXIT_GROUP 231
 # What Osum has of its own lives far above the Linux table on purpose: a
 # number that could one day BE a Linux call would be a trap for stage 2.
-own=$(grep -aoE "^const SYS_OSUM_[A-Z]+: u64 = [0-9]+" demos/kernel/sys.fi \
+own=$(grep -aoE "^const SYS_OSUM_[A-Z]+: u64 = [0-9]+" kernel/sys.fi \
     | sed -E 's/.*= ([0-9]+).*/\1/' | sort -n | head -1)
 num "the lowest number Osum invented for itself" "${own:-0}" ge 1000
 
@@ -157,9 +151,9 @@ num "the lowest number Osum invented for itself" "${own:-0}" ge 1000
 # program that asks for `fstat` and gets `lseek`.
 diffs=0
 while read -r name value; do
-    other=$(number_in lib/osum/libc/kcall.fi "$name")
+    other=$(number_in lib/libc/kcall.fi "$name")
     [ "$other" = "$value" ] || { diffs=$((diffs+1)); echo "        $name: kernel $value, libc ${other:-missing}"; }
-done < <(grep -aoE "^const SYS_[A-Z0-9_]+: u64 = [0-9]+" demos/kernel/sys.fi \
+done < <(grep -aoE "^const SYS_[A-Z0-9_]+: u64 = [0-9]+" kernel/sys.fi \
     | sed -E 's/^const ([A-Z0-9_]+): u64 = ([0-9]+).*/\1 \2/' \
     | grep -vE '^SYS_(MARK|LEAVE) ')
 # SYS_MARK and SYS_LEAVE are not in that comparison: they are the two
@@ -172,16 +166,16 @@ ediffs=0
 ecount=0
 while read -r name value; do
     ecount=$((ecount+1))
-    other=$(number_in lib/osum/libc/errno.fi "$name")
+    other=$(number_in lib/libc/errno.fi "$name")
     [ "$other" = "$value" ] || { ediffs=$((ediffs+1)); echo "        $name: kernel $value, libc ${other:-missing}"; }
-done < <(grep -aoE "^const E_[A-Z0-9_]+: u64 = [0-9]+" demos/kernel/errno.fi \
+done < <(grep -aoE "^const E_[A-Z0-9_]+: u64 = [0-9]+" kernel/errno.fi \
     | sed -E 's/^const ([A-Z0-9_]+): u64 = ([0-9]+).*/\1 \2/')
 num "error numbers the kernel defines" "$ecount" ge 30
 num "error numbers on which kernel and libc disagree" "$ediffs" eq 0
 for pair in "E_NOENT 2" "E_BADF 9" "E_CHILD 10" "E_FAULT 14" "E_INVAL 22" \
             "E_NOSYS 38" "E_ISDIR 21" "E_NOTDIR 20" "E_SPIPE 29" "E_PIPE 32"; do
     set -- $pair
-    got=$(number_in demos/kernel/errno.fi "$1")
+    got=$(number_in kernel/errno.fi "$1")
     [ "$got" = "$2" ] && ok "$1 = $2 (the number Linux uses)" \
                       || bad "$1 = ${got:-missing}, expected $2"
 done
@@ -195,19 +189,19 @@ echo "== 2. build: the kernel, the libc and a program that measures it =="
 # references. `tools/osum/run.sh` already links it; these three lines are
 # the same three.
 for f in boot isr switch smp; do
-    as --64 -o "$TMPD/$f.o" "demos/kernel/$f.s" 2>"$TMPD/as.err" \
+    as --64 -o "$TMPD/$f.o" "kernel/$f.s" 2>"$TMPD/as.err" \
         || { bad "$f.s does not assemble"; sed 's/^/        /' "$TMPD/as.err" | head -5; }
 done
-as --64 -o "$TMPD/crt.o" demos/kernel/user/crt.s 2>"$TMPD/ascrt.err" \
+as --64 -o "$TMPD/crt.o" kernel/user/crt.s 2>"$TMPD/ascrt.err" \
     && ok "crt.s assembles" \
     || { bad "crt.s"; sed 's/^/        /' "$TMPD/ascrt.err" | head -5; }
 
 build_stage() { # 0 = firnc0, 1 = firnc1
     local s=$1 cc
     if [ "$s" = 0 ]; then cc="$FIRNC"; else cc="$FC1"; fi
-    "$cc" demos/kernel/kmain.fi -o "$TMPD/k$s.o" >"$TMPD/e$s" 2>&1 \
+    "$cc" kernel/kmain.fi -o "$TMPD/k$s.o" >"$TMPD/e$s" 2>&1 \
         || { bad "firnc$s does not compile the kernel"; sed 's/^/        /' "$TMPD/e$s" | head -8; return 1; }
-    "$cc" demos/kernel/uprog.fi -o "$TMPD/u$s.o" >>"$TMPD/e$s" 2>&1 \
+    "$cc" kernel/uprog.fi -o "$TMPD/u$s.o" >>"$TMPD/e$s" 2>&1 \
         || { bad "firnc$s does not compile uprog.fi"; return 1; }
     ld -n -T "$LDSCRIPT" \
         --defsym=KERNEL_MAIN="_F$s.kernel_main" \
@@ -224,7 +218,7 @@ build_stage() { # 0 = firnc0, 1 = firnc1
     ok "firnc$s: kernel linked and turned into a multiboot image"
     local p
     for p in $PROGS; do
-        "$cc" "demos/kernel/user/$p.fi" -o "$TMPD/$p$s.o" >"$TMPD/e$p$s" 2>&1 \
+        "$cc" "kernel/user/$p.fi" -o "$TMPD/$p$s.o" >"$TMPD/e$p$s" 2>&1 \
             || { bad "firnc$s does not compile $p.fi"; sed 's/^/        /' "$TMPD/e$p$s" | head -6; return 1; }
         ld -T "$ULD" --defsym=USER_ENTRY="_F$s.u_start" \
             -o "$TMPD/$p$s.elf" "$TMPD/crt.o" "$TMPD/$p$s.o" 2>"$TMPD/ldu.err" \

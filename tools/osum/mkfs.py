@@ -3,7 +3,7 @@
 
 Round K1 needs programs that the kernel has never seen. They therefore
 cannot be produced by the kernel, and this is the second implementation
-of the on-disk format of `demos/kernel/fs.fi` -- written from the
+of the on-disk format of `kernel/fs.fi` -- written from the
 constants in that file and from nothing else.
 
 That it IS a second implementation is the point. Two programs, in two
@@ -13,7 +13,7 @@ file the kernel cannot find or a name it reads as rubbish. A single
 implementation could be wrong in the same way twice and nobody would
 know.
 
-The format, from `demos/kernel/fs.fi`:
+The format, from `kernel/fs.fi`:
 
     block 0        superblock: magic, block size, blocks, inodes,
                    bitmap block, inode table, first data block, root inode
@@ -48,7 +48,7 @@ DIRECT = 11
 T_FREE, T_FILE, T_DIR = 0, 1, 2
 I_TYPE, I_SIZE, I_NLINK, I_DIRECT, I_INDIRECT = 0, 8, 16, 24, 112
 # ROUND K4: the twelfth direct slot became the double indirect pointer --
-# 11 + 64 + 64 * 64 blocks instead of 12 + 64. `demos/kernel/fs.fi` has the
+# 11 + 64 + 64 * 64 blocks instead of 12 + 64. `kernel/fs.fi` has the
 # same three constants and the same two levels; the two must agree octet
 # for octet, and section 3 of tools/posix/run.sh checks that they do.
 I_DINDIRECT = 120
