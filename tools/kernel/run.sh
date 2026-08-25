@@ -165,10 +165,27 @@ for f in k0 k1 uprog0 uprog1; do
     # object file. Checked arithmetic (SPEC section 13, item L9) calls it
     # under `profile kernel` when a value goes out of range, on purpose;
     # `kernel/isr.s` defines it and the link step above resolves it.
-    # Anything ELSE undefined is still a hard failure. The same exception is
-    # made in tools/freestanding/run.sh; this file was missed there.
-    undef=$(nm -u "$o" 2>/dev/null | awk '{print $NF}' | sed '/^$/d' | grep -vxF osum_panic)
-    [ -z "$undef" ] && ok "$f.o: no undefined symbol other than osum_panic (no libc, no runtime)" \
+    #
+    # ROUND K7 ADDS A SECOND ONE, `kdata`, AND ONLY FOR THE KERNEL OBJECT.
+    # `serial.put` mirrors every octet onto the framebuffer console
+    # (`fb.echo`), and that console needs the kernel data area -- the same
+    # address `kernel_main` gets in rdx. `serial.put` has no argument for
+    # it and must not grow one: it is called from roughly a thousand
+    # places, from `kmain` into the exception report, and none of them
+    # should change for a console. So `fb.kdata()` takes the address off
+    # the LINKER SYMBOL that `kernel/boot.s` already exports
+    # (`.globl kdata`), with one `lea`. The name is resolved by the link
+    # step above, out of boot.o, exactly like `osum_panic` out of isr.o.
+    #
+    # What the check is FOR is unchanged: no libc, no runtime, nothing
+    # from outside this kernel. Both names are defined in this kernel's
+    # own assembly. `uprog.o` is held to the stricter rule on purpose --
+    # a program in ring 3 that reached `kdata` would be reaching into the
+    # kernel, and it may not even name it.
+    erlaubt='^(osum_panic)$'
+    case "$f" in k0|k1) erlaubt='^(osum_panic|kdata)$' ;; esac
+    undef=$(nm -u "$o" 2>/dev/null | awk '{print $NF}' | sed '/^$/d' | grep -vE "$erlaubt")
+    [ -z "$undef" ] && ok "$f.o: no undefined symbol other than $(echo "$erlaubt" | tr -d '^$()' | tr '|' '/') (no libc, no runtime)" \
                     || { bad "$f.o: undefined symbols"; echo "$undef" | sed 's/^/        /'; }
     foreign=$(nm --defined-only "$o" | awk '{print $3}' | grep -vE "^_F[01]\." || true)
     [ -z "$foreign" ] && ok "$f.o: every defined symbol is its own" \
