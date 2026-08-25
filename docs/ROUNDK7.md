@@ -10,7 +10,8 @@ niemand. `KERNELWECHSEL.md` in OrientOS führte das als offenen Punkt 4.3.
 Diese Runde benutzt ihn.
 
 Abnahme: `bash tools/gfx/run.sh` (Abschnitt 12 von `./test.sh`),
-**74 Zusagen**.
+**74 Zusagen**. `./test.sh` insgesamt: **12 Abschnitte, 938 Zusagen,
+0 Fehler** — die 175 Zusagen des Kernabschnitts sind unverändert.
 
 ---
 
@@ -371,7 +372,7 @@ einzelnen Aufruf**, mit denselben Prüfungen wie bei einer Datei.
 | `write` | Oktette an die Stelle, an der die Position steht; hinter dem Ende **0**, wie am Ende einer Datei |
 | `read` | liest zurück, was da steht |
 | `lseek(fd, 0, SEEK_END)` | die Größe des Bildes — so erfährt ein Programm die Geometrie |
-| `fstat` | `S_IFCHR`, `st_size` = Zeilenlänge × Höhe |
+| `fstat` | `S_IFCHR`, `st_size` = Fläche, **`st_blksize` = Zeilenlänge** |
 | `mmap(…, MAP_SHARED, fd, 0)` | eine **2-MiB-Kachel** auf `0x40200000`, schreibbar, ohne Ausführungsrecht |
 
 **Die Abbildung ist eine einzige Kachel, kein Feld aus 469 Einträgen.**
@@ -394,14 +395,14 @@ Benutzerbit.
 
 ### 8.1 Was `uprog.u_fb` meldet
 
-Zehn Zusagen, und **die Hälfte davon ist eine Ablehnung** — eine
+Elf Zusagen, und **fast die Hälfte davon ist eine Ablehnung** — eine
 Schnittstelle, die nur den richtigen Fall kann, ist keine:
 
 ```
 fbuser: open fd=3
 fbuser: bytes=1920000
 fbuser: map=1075838976        (= 0x40200000)
-fbuser: passed 10 / 10
+fbuser: passed 11 / 11
 ```
 
 1. `open("/dev/fb", O_RDWR)` gibt einen Deskriptor.
@@ -418,6 +419,11 @@ fbuser: passed 10 / 10
    nicht schreibbar abbilden (`-EACCES`).
 10. `mmap` ohne `MAP_ANONYMOUS` auf einen Deskriptor, der kein
     Rahmenpuffer ist, gibt `-ENODEV`.
+11. **Das Programm rechnet sich seine Geometrie selbst aus.** `fstat`
+    gibt `st_size` (die Fläche) und `st_blksize` (die Zeilenlänge);
+    daraus folgen Breite (`Zeilenlänge / 4`) und Höhe
+    (`Fläche / Zeilenlänge`), und beide stimmen mit dem überein, was der
+    Kernel dem Programm als Argument mitgegeben hatte.
 
 Punkt 10 ist wörtlich die Zusage aus Runde K4 (*„ohne MAP_ANONYMOUS gibt
 es nichts abzubilden"*). Runde K7 nimmt **eine** Ausnahme davon und ändert
@@ -598,8 +604,8 @@ als schwarzes Bild zeigt, ohne zu sagen warum:
 | `kernel/fb.fi` | **neu, 1 513** | Rahmenpuffer entgegennehmen (Multiboot **und** Bochs-VBE), Fensterabbildung, Zeichengrundlagen, Zweitpuffer, Textkonsole, `/dev/fb`-Ein-/Ausgabe, der Spiegel |
 | `kernel/font.fi` | **neu, 130** | der 8 × 16-Zeichensatz, portiert aus OrientOS |
 | `kernel/kmain.fi` | +381 | `graphics`, `gfx_bench`, `gfx_user`, `gfx_hold`, `pattern` |
-| `kernel/sys.fi` | +211 | `/dev/fb`: `open`, `read`, `write`, `lseek`, `fstat`, `mmap` |
-| `kernel/uprog.fi` | +216 | `u_fb` — das Programm in Ring 3, `u_sys6` |
+| `kernel/sys.fi` | +226 | `/dev/fb`: `open`, `read`, `write`, `lseek`, `fstat`, `mmap` |
+| `kernel/uprog.fi` | +240 | `u_fb` — das Programm in Ring 3, `u_sys6` |
 | `kernel/proc.fi` | +88 | `map_huge`, große Seiten in `user_ok` |
 | `kernel/serial.fi` | +14 | eine Zeile in `put`, und der Absatz darüber |
 | `kernel/file.fi` | +7 | `K_FB` |
@@ -620,10 +626,13 @@ in der letzten freien Seite, `kdata + 0x2F000`. `KDATA_SIZE` bleibt
 * **Kein Fenstersystem.** Konsole und `/dev/fb` teilen sich eine Fläche
   und übermalen sich, wenn sie dieselben Zeilen nehmen (Abschnitt 8.3).
   Das ist benannt, nicht behoben.
-* **Kein `ioctl`.** Ein Programm erfährt die Größe des Bildes über
-  `lseek(SEEK_END)` und die **Breite** gar nicht — `u_fb` bekommt sie als
-  Argument vom Kernel. Ohne Breite und Zeilenlänge kann ein Programm
-  keinen Bildpunkt ausrechnen. Das ist die nächstliegende Lücke.
+* **Kein `ioctl`.** Die Geometrie kommt über `fstat` (`st_size` und
+  `st_blksize`, Abschnitt 8) — das reicht für Breite, Höhe und
+  Zeilenlänge und ist geprüft. Was damit **nicht** geht: die Auflösung
+  von Ring 3 aus **ändern**, die Lage der Farbfelder erfragen (der Kernel
+  nimmt 32 Bit mit Rot bei 16 an) und den Zweitpuffer von außen
+  übertragen. Dafür bräuchte es ein `ioctl` oder eine eigene
+  Aufrufnummer.
 * **Der Multiboot-Weg ist ungemessen.** `src=mb` ist geschrieben und
   compiliert, aber QEMUs `-kernel` liefert Bit 12 nicht, und dieses Repo
   baut kein ISO. Der Weg lässt sich nur dort messen, wo Lader und Abbild
