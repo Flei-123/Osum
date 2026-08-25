@@ -307,7 +307,7 @@ num "lseek(fd,0,SEEK_END) gibt die Groesse des Bildes" "$b" eq 1920000
 m=$(grep -aoE 'fbuser: map=[0-9]+' "$TMPD/u.txt" | head -1 | sed 's/.*=//')
 num "mmap legt den Puffer auf 0x40200000" "$m" eq 1075838976
 z=$(zahl "$TMPD/u.txt" 'fbuser: passed [0-9]+')
-num "die Zusagen des Programms in Ring 3" "$z" eq 10
+num "die Zusagen des Programms in Ring 3" "$z" eq 11
 # Und was es gemalt hat, steht im Foto -- vier Streifen ueber die unteren
 # achtzig Bildzeilen, an einer Grenze, die auf den Bildpunkt stimmt.
 schau "der Streifen ist rot" flaeche "$TMPD/u.ppm" 0 520 200 80 255 0 0
