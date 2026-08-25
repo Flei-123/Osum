@@ -27,6 +27,18 @@ PPM in P6), und dieses Programm rechnet sie nach:
              "beide Ausgaben zeigen dasselbe".
   font       der Zeichensatz in kernel/font.fi gegen die Rust-Vorlage, aus
              der er portiert wurde.
+  lesen      das Bild ZURUECK IN TEXT: jede Zelle wird gegen alle 95
+             Glyphen gehalten und der Buchstabe ausgegeben, der dort
+             wirklich steht.  Damit sieht man, was der Bildschirm zeigt,
+             statt nur zu erfahren, wie viele Bildpunkte falsch sind.
+
+RUNDE K7B: `text`, `konsole` und `finde` melden im Fehlerfall nicht mehr
+nur eine Zahl, sondern JEDE abweichende Zelle mit Soll und Ist -- und das
+Ist wird gegen den Zeichensatz erkannt, nicht geraten.  Genau das hat den
+Fehler dieser Runde gefunden: auf dem Schirm standen nur noch '7',
+'01234' und ':', also ausschliesslich Zeichen unter 0x40, waehrend jeder
+Buchstabe leer blieb.  Aus "410 von 3200 Bildpunkten falsch" liest das
+niemand heraus; aus "soll 'O', ist ' '" liest es jeder.
 
 Der Zeichensatz wird IMMER aus `kernel/font.fi` gelesen, nie aus einer
 Kopie: geprueft werden soll der, der im Kernel steht.
@@ -199,6 +211,66 @@ def zeile_pruefen(bild, font, zeile, spalte, text, vg, hg):
     return gesamt, falsch
 
 
+def erkennen(bild, font, zy, zx, vg=None, hg=None):
+    """Welches Zeichen steht WIRKLICH in dieser Zelle?
+
+    Die Zelle wird gegen alle 95 Glyphen des Zeichensatzes gehalten; der
+    mit den wenigsten Abweichungen gewinnt.  Zurueck kommt (Zeichen,
+    Abweichungen) -- ist die zweite Zahl 0, steht dort genau diese Glyphe,
+    sonst ist es das aehnlichste und die Zelle ist etwas anderes.
+    """
+    vg = VG if vg is None else vg
+    hg = HG if hg is None else hg
+    bestes = None
+    bestf = 1 << 30
+    for c in range(ERSTES, LETZTES + 1):
+        _, f = zeile_pruefen(bild, font, zy, zx, bytes([c]), vg, hg)
+        if f < bestf:
+            bestf = f
+            bestes = c
+            if f == 0:
+                break
+    return bestes, bestf
+
+
+def sichtbar(c):
+    if c is None:
+        return "?"
+    if c == 0x20:
+        return "_"  # ein Leerzeichen soll man im Bericht sehen
+    return chr(c)
+
+
+HOECHSTENS = 16  # so viele abweichende Zellen werden einzeln genannt
+
+
+def bericht(bild, font, faelle, vg=None, hg=None):
+    """Die abweichenden Zellen EINZELN nennen, mit Soll und erkanntem Ist.
+
+    `faelle` ist eine Liste (zeile, spalte, sollzeichen).  Ausgegeben wird
+    nur, was wirklich abweicht.
+    """
+    schlecht = []
+    for zy, zx, soll in faelle:
+        _, f = zeile_pruefen(bild, font, zy, zx, bytes([soll]), vg or VG,
+                             hg or HG)
+        if f:
+            ist, iff = erkennen(bild, font, zy, zx, vg, hg)
+            schlecht.append((zy, zx, soll, ist, iff, f))
+    if not schlecht:
+        return
+    print("  %d abweichende Zellen:" % len(schlecht))
+    for zy, zx, soll, ist, iff, f in schlecht[:HOECHSTENS]:
+        wie = "'%s'" % sichtbar(ist) if iff == 0 else \
+              "etwas anderes (am naechsten '%s', %d Bildpunkte daneben)" \
+              % (sichtbar(ist), iff)
+        print("    Zeile %d Spalte %d: soll '%s' (0x%02X), ist %s"
+              " -- %d Bildpunkte falsch"
+              % (zy, zx, sichtbar(soll), soll, wie, f))
+    if len(schlecht) > HOECHSTENS:
+        print("    ... und %d weitere" % (len(schlecht) - HOECHSTENS))
+
+
 def cmd_groesse(a):
     bild = Bild(a[0])
     print("%d %d" % (bild.b, bild.h))
@@ -252,9 +324,12 @@ def cmd_text(a):
     text = a[4].encode("ascii", "replace")
     vg = farbe_von(a, 5) if len(a) >= 8 else VG
     hg = farbe_von(a, 8) if len(a) >= 11 else HG
-    gesamt, falsch = zeile_pruefen(bild, font, int(a[2]), int(a[3]), text,
-                                   vg, hg)
+    zeile, spalte = int(a[2]), int(a[3])
+    gesamt, falsch = zeile_pruefen(bild, font, zeile, spalte, text, vg, hg)
     print("%d Bildpunkte geprueft, %d falsch" % (gesamt, falsch))
+    if falsch:
+        bericht(bild, font,
+                [(zeile, spalte + k, c) for k, c in enumerate(text)], vg, hg)
     return 0 if falsch == 0 else 1
 
 
@@ -282,12 +357,14 @@ def cmd_konsole(a):
     falsch = 0
     gesamt = 0
     zellen = 0
+    faelle = []
     for zy in range(k.ze):
         for zx in range(k.sp):
             c = k.gitter[zy][zx]
             if c is None:
                 continue
             zellen += 1
+            faelle.append((zy, zx, c))
             g, f = zeile_pruefen(bild, font, zy, zx, bytes([c]), VG, HG)
             gesamt += g
             falsch += f
@@ -295,6 +372,8 @@ def cmd_konsole(a):
     if zellen < minzellen:
         print("  zu wenige Zellen -- der Mitschnitt kam nicht auf den Schirm")
         return 1
+    if falsch:
+        bericht(bild, font, faelle)
     return 0 if falsch == 0 else 1
 
 
@@ -333,6 +412,9 @@ def cmd_finde(a):
             g, f = zeile_pruefen(bild, font, zy, p, gesucht, VG, HG)
             print("Zeile %d, Spalte %d: %d Bildpunkte, %d falsch"
                   % (zy, p, g, f))
+            if f:
+                bericht(bild, font,
+                        [(zy, p + i, c) for i, c in enumerate(gesucht)])
             return 0 if f == 0 else 1
     print("'%s' steht nicht auf dem nachgebildeten Bildschirm" % a[5])
     return 1
@@ -358,6 +440,52 @@ def cmd_font(a):
     return 0 if anders == 0 else 1
 
 
+def cmd_lesen(a):
+    """lesen <ppm> <font.fi> [zeile [zeilen]]
+
+    Das Bild zurueck in Text.  Jede Zelle wird gegen alle Glyphen
+    gehalten: passt genau eine, steht sie da; ist die Zelle ganz schwarz,
+    steht ein Leerzeichen; ist etwas anderes darin (Farbfelder, Linien),
+    steht '#'; passt keine Glyphe, steht '~'.
+
+    Das ist das Werkzeug, mit dem man ANSIEHT, was auf dem Schirm steht,
+    statt Bildpunkte zu zaehlen.
+    """
+    bild = Bild(a[0])
+    font = font_aus_firn(a[1])
+    von = int(a[2]) if len(a) >= 3 else 0
+    anzahl = int(a[3]) if len(a) >= 4 else bild.h // HOCH - von
+    muster = {}
+    for c in range(ERSTES, LETZTES + 1):
+        muster.setdefault(bytes(glyphe(font, c)), c)
+    print("%dx%d, %d Spalten, %d Zeilen"
+          % (bild.b, bild.h, bild.b // BREIT, bild.h // HOCH))
+    for zy in range(von, min(von + anzahl, bild.h // HOCH)):
+        zeile = []
+        for zx in range(bild.b // BREIT):
+            bits = []
+            fremd = False
+            for r in range(HOCH):
+                v = 0
+                for c in range(BREIT):
+                    p = bild.punkt(zx * BREIT + c, zy * HOCH + r)
+                    if p == VG:
+                        v |= 1 << (7 - c)
+                    elif p != HG:
+                        fremd = True
+                bits.append(v)
+            if fremd:
+                zeile.append("#")
+            elif bytes(bits) in muster:
+                zeile.append(chr(muster[bytes(bits)]))
+            elif any(bits):
+                zeile.append("~")
+            else:
+                zeile.append(" ")
+        print("%3d |%s|" % (zy, "".join(zeile)))
+    return 0
+
+
 BEFEHLE = {
     "groesse": cmd_groesse,
     "punkt": cmd_punkt,
@@ -367,6 +495,7 @@ BEFEHLE = {
     "konsole": cmd_konsole,
     "finde": cmd_finde,
     "font": cmd_font,
+    "lesen": cmd_lesen,
 }
 
 
