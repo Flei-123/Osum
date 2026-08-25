@@ -333,6 +333,68 @@ user_entry:
     hlt                             /* privileged: #GP in ring 3 */
     jmp 1b
 
+/* ROUND K9: DER RUECKWEG AUS EINER SIGNALBEHANDLUNG, und er liegt hier,
+ * weil er in `.utext` liegen MUSS. Der Kernel baut einen Rahmen auf den
+ * Nutzerstapel und setzt als Ruecksprungadresse der Behandlungsroutine
+ * diese drei Befehle. Auf dem STAPEL koennten sie nicht stehen: seit
+ * Runde K1 traegt jede Stapelseite das No-Execute-Bit, und ein Kernel,
+ * der es fuer den Trampolinsprung wieder abnimmt, hat die aelteste Luecke
+ * wieder aufgemacht, die es gibt. `.utext` ist die eine Seite, die in
+ * JEDEM Adressraum fuer Ring 3 lesbar und ausfuehrbar ist
+ * (`proc.map_programs`), und sie ist nicht beschreibbar -- genau das, was
+ * ein Trampolinsprung braucht.
+ *
+ * Nummer 15 ist `rt_sigreturn`, Linux' Nummer. Kommt der Aufruf zurueck,
+ * ist etwas kaputt; dann `hlt`, was in Ring 3 ein #GP ist und damit
+ * sichtbar statt still. */
+    .section .utext, "ax"
+    .globl sigreturn_tramp
+sigreturn_tramp:
+    movq $15, %rax
+    syscall
+    hlt
+
+/* `user_iret(rdi = 22 Woerter)` -- zurueck nach Ring 3 mit einem
+ * VOLLSTAENDIGEN Zusammenhang, ueber `iretq` statt ueber `sysretq`.
+ *
+ * WARUM ES BEIDE WEGE BRAUCHT. `sysretq` nimmt rip aus rcx und rflags aus
+ * r11 -- und genau diese beiden Register zerstoert `syscall` beim
+ * Eintritt. Fuer einen Rueckweg aus einem SYSTEMAUFRUF ist das richtig:
+ * dort waren sie ohnehin schon verloren. Ein Signal darf aber auch
+ * mitten in ein Programm zugestellt werden, das gar keinen Systemaufruf
+ * gemacht hat -- aus dem Zeitgeber heraus, und das ist der Fall, den
+ * STRG-C in einer Endlosschleife braucht. Dann sind rcx und r11 echte
+ * Registerwerte des Programms, und `sigreturn` muss sie zurueckgeben
+ * koennen. Das kann nur `iretq`.
+ *
+ * Der Block, auf den rdi zeigt, hat GENAU die Form, die `isr_common`
+ * oben aufbaut -- fuenfzehn Register, Vektor, Fehlercode, dann die fuenf
+ * Woerter des Prozessors. Deshalb ist der Rumpf hier Zeile fuer Zeile
+ * das Ende von `isr_common`.
+ */
+    .text
+    .globl user_iret
+user_iret:
+    cli
+    movq %rdi, %rsp
+    popq %r15
+    popq %r14
+    popq %r13
+    popq %r12
+    popq %r11
+    popq %r10
+    popq %r9
+    popq %r8
+    popq %rdi
+    popq %rsi
+    popq %rbp
+    popq %rbx
+    popq %rdx
+    popq %rcx
+    popq %rax
+    addq $16, %rsp                  /* vector number and error code */
+    iretq
+
     .section .rodata
     .align 8
     .globl vectors
@@ -365,6 +427,11 @@ vectors:
     /* Round K5: the other processors (kernel/smp.s, smp.fi). */
     .quad smp_vectors               /* 65: the table of the trampoline */
     .quad KERNEL_AP_MAIN            /* 66: where a started core lands */
+    /* Round K9: signals. 67 is the trampoline in `.utext` that every
+     * signal handler returns through, 68 the way back into ring 3 with a
+     * complete context (iretq instead of sysret). */
+    .quad sigreturn_tramp           /* 67: kernel/signal.fi */
+    .quad user_iret                 /* 68: kernel/signal.fi */
 
     .section .bss, "aw", @nobits
     .align 8
