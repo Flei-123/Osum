@@ -66,7 +66,7 @@ export {
     check_sys, check_trap, pending, deliverable, interrupted,
     do_sigaction, do_sigprocmask, do_sigreturn, do_kill, do_pause,
     do_setpgid, do_getpgid, do_setsid, do_alarm, do_sigpending,
-    exiting, stopped_count, handler_of, say_name, signal_of,
+    exiting, stopped_count, handler_of, say_name, signal_of, lethal,
     SIGHUP, SIGINT, SIGQUIT, SIGILL, SIGTRAP, SIGABRT, SIGBUS, SIGFPE,
     SIGKILL, SIGUSR1, SIGSEGV, SIGUSR2, SIGPIPE, SIGALRM, SIGTERM,
     SIGCHLD, SIGCONT, SIGSTOP, SIGTSTP, SIGTTIN, SIGTTOU, SIGWINCH,
@@ -541,8 +541,27 @@ fn fault(state: u64, task: u64, v: u64) -> u64 {
         aset(act(state, task, sig) + A_FLAGS,
             aget(act(state, task, sig) + A_FLAGS) | SA_RESETHAND)
     }
+    // Der Beendigungscode, den die Runden 62 bis K6 gemessen haben:
+    // 128 + VEKTOR und nicht 128 + Signalnummer. Er gilt nur fuer diesen
+    // einen Tod und nur, wenn ihn niemand abfaengt.
+    sched.tset(state, task, sched.T_KILLCODE, 128 + v)
     send_task(state, task, sig)
     return sig
+}
+
+// Wird dieses Signal den Prozess umbringen? Die Frage, die `trap.fi`
+// stellen muss, bevor es "-- process killed" druckt: was abgefangen wird,
+// bringt niemanden um.
+fn lethal(state: u64, task: u64, sig: u64) -> bool {
+    if uncatchable(sig) {
+        return sig == SIGKILL
+    }
+    let h: u64 = handler_of(state, task, sig)
+    if h != SIG_DFL {
+        return false
+    }
+    let d: u64 = default_of(sig)
+    return d == D_TERM || d == D_CORE
 }
 
 // SIGALRM, wenn die Frist abgelaufen ist. Aus dem Zeitgeber gerufen.
@@ -668,19 +687,31 @@ fn do_default(state: u64, task: u64, sig: u64) -> bool {
         return true
     }
     // Beenden. Der Code ist der, den jede Shell liest: 128 + Nummer.
-    var s_dead: [u8; 15] = "signal: pid=\0\0\0"
-    var s_by: [u8; 8] = " SIG\0\0\0\0"
-    var s_end: [u8; 11] = " -- killed\0"
-    serial.puts((&s_dead[0]) as u64)
-    serial.dec(sched.tget(state, task, sched.T_PID))
-    serial.puts((&s_by[0]) as u64)
-    say_name(sig)
-    serial.puts((&s_end[0]) as u64)
-    serial.nl()
+    // Eine Zeile, wenn ein Signal einen Prozess umbringt -- aber NICHT,
+    // wenn es eine Ausnahme war: die hat `trap.fi` schon in der Form
+    // gemeldet, die seit Runde 62 gemessen wird, und zwei Meldungen
+    // desselben Todes waeren eine zu viel.
+    if sched.tget(state, task, sched.T_KILLCODE) == 0 {
+        var s_dead: [u8; 15] = "signal: pid=\0\0\0"
+        var s_by: [u8; 8] = " SIG\0\0\0\0"
+        var s_end: [u8; 11] = " -- killed\0"
+        serial.puts((&s_dead[0]) as u64)
+        serial.dec(sched.tget(state, task, sched.T_PID))
+        serial.puts((&s_by[0]) as u64)
+        say_name(sig)
+        serial.puts((&s_end[0]) as u64)
+        serial.nl()
+    }
     sched.tset(state, task, sched.T_SIGLAST, sig)
     kstate.add(state, kstate.KILLED, 1)
     exiting(state, task)
-    sched.exit_task(state, 128 + sig)
+    var code: u64 = 128 + sig
+    let forced: u64 = sched.tget(state, task, sched.T_KILLCODE)
+    if forced != 0 {
+        code = forced
+        sched.tset(state, task, sched.T_KILLCODE, 0)
+    }
+    sched.exit_task(state, code)
     return false // nicht erreicht
 }
 
