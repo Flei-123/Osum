@@ -164,8 +164,20 @@ build_stage 1 && ok "firnc1: the same, out of the compiler written in Firn" \
 # is the pinned Firn commit and not a copy in this repository.
 for s in 0 1; do
     [ -f "$TMPD/k$s.o" ] || continue
-    undef=$(nm -u "$TMPD/k$s.o" 2>/dev/null | awk '{print $NF}' | sed '/^$/d' | grep -vxF osum_panic)
-    [ -z "$undef" ] && ok "k$s.o: no undefined name other than osum_panic" \
+    # RUNDE K7B: `kdata` ist der ZWEITE erlaubte offene Name, genau wie in
+    # tools/kernel/run.sh und tools/pci/run.sh.  Runde K7 haengt den
+    # Bildschirmspiegel unter `serial.put`; damit `fb.fi` weder `serial`
+    # noch `mem` einbinden muss (das waere ein Kreis im
+    # Abhaengigkeitsgraphen), holt sich `fb.kdata()` die Adresse des
+    # Datenbereichs ueber das Bindersymbol `kdata` aus `boot.s` -- mit
+    # einem `lea`, aufgeloest im Bindeschritt darueber, wie `osum_panic`
+    # aus isr.o.  DIESER Laeufer entstand auf dem Netzzweig, parallel zu
+    # K7, und hat den zweiten Namen beim Verschmelzen nicht mitbekommen:
+    # er meldete `k0.o: undefined symbols: kdata` und `k1.o` dasselbe.
+    # Das waren die beiden Fehler, die auf `main` schon standen, bevor
+    # diese Runde anfing.
+    undef=$(nm -u "$TMPD/k$s.o" 2>/dev/null | awk '{print $NF}' | sed '/^$/d' | grep -vE '^(osum_panic|kdata)$')
+    [ -z "$undef" ] && ok "k$s.o: no undefined name other than osum_panic and kdata" \
                     || bad "k$s.o: undefined symbols: $undef"
     n=$(objdump -d "$TMPD/k$s.o" | grep -cE '^\s+[0-9a-f]+:.*\bsyscall\b')
     [ "$n" -eq 0 ] && ok "k$s.o: no syscall in the kernel's own code" \
