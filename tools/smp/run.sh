@@ -29,9 +29,9 @@ set -uo pipefail
 cd "$(dirname "$0")/../.."
 
 export FIRNLIB="$(pwd)/lib"
-FIRNC=compiler/target/release/firnc
-FC1=${FIRNC1:-./.firnc1}
-LDSCRIPT=demos/kernel/kernel.ld
+FIRNC=${FIRNC:-vendor/firn/bin/firnc}
+FC1=${FIRNC1:-vendor/firn/bin/firnc1}
+LDSCRIPT=kernel/kernel.ld
 TMPD=$(mktemp -d)
 trap 'rm -rf "$TMPD"' EXIT
 
@@ -51,29 +51,23 @@ value() { # file pattern -> the number at the end of the first match
     grep -oE "$2" "$1" 2>/dev/null | head -1 | grep -oE '[0-9]+$'
 }
 
+# Der FESTGENAGELTE Uebersetzer aus vendor/ (vendor/firn/COMMIT). Beide
+# Stufen kommen aus EINEM Firn-Commit; nichts wird gegen ein bewegliches
+# Ziel gebaut. Das Skript baut nur, wenn noetig.
+bash vendor/firn/hole-firnc.sh >/dev/null || { echo "vendor/firn/hole-firnc.sh failed"; exit 1; }
 [ -x "$FIRNC" ] || { echo "firnc0 is missing: $FIRNC"; exit 1; }
+[ -x "$FC1" ]   || { echo "firnc1 is missing: $FC1"; exit 1; }
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
     echo "SMP: skipped, qemu-system-x86_64 is not available"
     exit 0
 fi
 
-# Rebuild `.firnc1` when it is missing or a source is younger (the trap
-# from round 35/45/46: an outdated binary measures yesterday's state).
-fresh=0
-[ -x "$FC1" ] || fresh=1
-if [ -x "$FC1" ]; then
-    [ "$FIRNC" -nt "$FC1" ] && fresh=1
-    while IFS= read -r q; do
-        [ "$q" -nt "$FC1" ] && { fresh=1; break; }
-    done < <(find bin lib -name '*.fi' -not -type l)
-fi
-[ "$fresh" -eq 1 ] && { rm -f "$FC1"; "$FIRNC" bin/firnc1.fi -o "$FC1" || exit 1; }
 
 # ---------------------------------------------------------------- build
 
 echo "== 1. build the kernel with the trampoline of the other processors =="
 for f in boot isr switch smp; do
-    as --64 -o "$TMPD/$f.o" "demos/kernel/$f.s" 2>"$TMPD/as.err" \
+    as --64 -o "$TMPD/$f.o" "kernel/$f.s" 2>"$TMPD/as.err" \
         && ok "$f.s assembles" \
         || { bad "$f.s"; sed 's/^/        /' "$TMPD/as.err" | head -5; }
 done
@@ -89,9 +83,9 @@ fi
 
 for s in 0 1; do
     if [ "$s" = 0 ]; then C="$FIRNC"; else C="$FC1"; fi
-    "$C" -o "$TMPD/k$s.o" demos/kernel/kmain.fi >"$TMPD/e$s" 2>&1 \
+    "$C" -o "$TMPD/k$s.o" kernel/kmain.fi >"$TMPD/e$s" 2>&1 \
         || { bad "firnc$s does not compile the kernel"; sed 's/^/        /' "$TMPD/e$s" | head -8; continue; }
-    "$C" -o "$TMPD/uprog$s.o" demos/kernel/uprog.fi >>"$TMPD/e$s" 2>&1 \
+    "$C" -o "$TMPD/uprog$s.o" kernel/uprog.fi >>"$TMPD/e$s" 2>&1 \
         || { bad "firnc$s does not compile the user programs"; continue; }
     if ld -n -T "$LDSCRIPT" \
           --defsym=KERNEL_MAIN="_F$s.kernel_main" \

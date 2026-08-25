@@ -1,7 +1,7 @@
-/* demos/kernel/user/user.ld -- round K1: the shape of a program on the
+/* kernel/user/user.ld -- round K1: the shape of a program on the
  * disk.
  *
- * The kernel's ELF loader (`demos/kernel/elf.fi`) does not accept just
+ * The kernel's ELF loader (`kernel/elf.fi`) does not accept just
  * any file. It demands three things of a segment, and this script is what
  * produces them:
  *
@@ -37,7 +37,7 @@ PHDRS
      * the first segment. Without that they get a page of their own and
      * every program on the disk is 4096 octets of nothing bigger -- which
      * matters, because a file in this file system stops at 12 + 64 blocks
-     * (38912 octets, `demos/kernel/fs.fi`) and the shell built by firnc1
+     * (38912 octets, `kernel/fs.fi`) and the shell built by firnc1
      * was over it. It also means a program can read its own ELF header,
      * the way a program on any other system can. */
     text   PT_LOAD FILEHDR PHDRS FLAGS(5);   /* R + X */

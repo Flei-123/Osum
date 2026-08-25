@@ -1,4 +1,4 @@
-/* demos/kernel/smp.s -- round K5: the sixty lines a second processor
+/* kernel/smp.s -- round K5: the sixty lines a second processor
  * cannot be started without.
  *
  * This is the fourth non-Firn file of the kernel and it is here for the

@@ -1,6 +1,6 @@
-/* demos/kernel/boot.s -- round 59: the boot prologue of the small kernel.
+/* kernel/boot.s -- round 59: the boot prologue of the small kernel.
  *
- * This is one of the two non-Firn files of `demos/kernel/kmain.fi` (the
+ * This is one of the two non-Firn files of `kernel/kmain.fi` (the
  * other one is `isr.s`). Everything in here is code that a language
  * cannot express, because it runs BEFORE the machine is in the state a
  * compiled function needs:
@@ -216,7 +216,7 @@ irq_stack_bottom:
 irq_stack_top:
 
     /* The kernel data area: state block, IDT, frame bitmap, heap
-     * metadata. The division is in `demos/kernel/kstate.fi`. */
+     * metadata. The division is in `kernel/kstate.fi`. */
     .align 4096
     .globl kdata
 kdata:

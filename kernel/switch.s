@@ -1,4 +1,4 @@
-/* demos/kernel/switch.s -- round 62: the context switch.
+/* kernel/switch.s -- round 62: the context switch.
  *
  * The third and last non-Firn file of the kernel, and it is here for the
  * same reason as the other two: what happens in it CANNOT be written in a
