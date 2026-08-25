@@ -67,10 +67,14 @@ export {
     init, ready, echo, geometry_ok,
     width, height, pitch, bpp, bytes, addr, phys, source, back, draw_at,
     cols, rows, cx, cy, chars, flushes, scrolls, huges, block, offset,
-    rgb, pixel, get_pixel, fill, line, blit, clear, flush, dirty_all,
-    putc, puts, text, nl, set_color, set_cursor, cursor_on, home,
-    set_echo, echo_on, double_buffered, uncached,
-    SRC_NONE, SRC_MB, SRC_VBE, FB_OFF, FB_MAX, FONT_OFF, USER_BASE
+    rgb, pixel, get_pixel, fill, line, blit, clear, flush, dirty_all, scroll,
+    putc, puts, text, nl, set_color, set_cursor, cursor_on, home, goto,
+    set_echo, echo_on, double_buffered, uncached, set_back,
+    parse, mode, want, selftest, selftest_max,
+    SRC_NONE, SRC_MB, SRC_VBE, FB_OFF, FB_MAX, FONT_OFF, USER_BASE,
+    M_GFX, M_NODBL, M_UC, M_BIG, M_NOCUR, M_HOLD, M_PATTERN,
+    WIDTH_STD, HEIGHT_STD,
+    WIDTH_BIG, HEIGHT_BIG
 }
 
 // ------------------------------------------------- der Datenbereich
@@ -114,6 +118,30 @@ const S_HUGES: u64 = 0x0D8 // wie viele 2-MiB-Seiten der Puffer braucht
 const S_DIRTY_LO: u64 = 0x0E0 // erste geaenderte Bildzeile
 const S_DIRTY_HI: u64 = 0x0E8 // letzte + 1
 const S_UNCACHED: u64 = 0x0F0 // 1 = Fenster ohne Zwischenspeicher
+const S_MODE: u64 = 0x0F8 // die Worte der Kommandozeile, die hierher gehoeren
+
+// Die Worte der Kommandozeile dieser Runde. Sie stehen hier und nicht in
+// `kmain.mode_of` aus demselben Grund, aus dem `hw.fi` seine eigenen hat:
+// wer den Bildschirm anfasst, soll in EINER Datei nachlesen koennen, was
+// ihn anschaltet. OHNE `gfx` aendert sich am Kernel nichts -- kein Modus
+// wird gesetzt, kein Rahmen abgebildet, `serial.put` spiegelt nicht, und
+// die Runden 52 bis K6 messen Zeile fuer Zeile, was sie vorher gemessen
+// haben.
+const M_GFX: u64 = 1 // "gfx"      -- Bildschirm an
+const M_NODBL: u64 = 2 // "nodbl"    -- ohne Zweitpuffer (Gegenprobe)
+const M_UC: u64 = 4 // "fbuc"     -- Fenster ohne Zwischenspeicher
+const M_BIG: u64 = 8 // "fbbig"    -- 1024x768 statt 800x600
+const M_NOCUR: u64 = 16 // "nocursor" -- ohne Textmarke
+const M_HOLD: u64 = 32 // "fbhold"   -- am Ende stillhalten (fuer das Foto)
+const M_PATTERN: u64 = 64 // "fbtest"   -- das Pruefbild zeichnen
+
+// 800 x 600 x 4 sind 1 920 000 Oktette und passen in EINE 2-MiB-Kachel;
+// 1024 x 768 x 4 sind 3 145 728 und brauchen zwei. Beides steht in der
+// Fensterliste zur Verfuegung, und beides wird gemessen.
+const WIDTH_STD: u64 = 800
+const HEIGHT_STD: u64 = 600
+const WIDTH_BIG: u64 = 1024
+const HEIGHT_BIG: u64 = 768
 
 const SRC_NONE: u64 = 0
 const SRC_MB: u64 = 1 // vom Lader (Multiboot, Flag-Bit 12)
@@ -674,6 +702,44 @@ fn set_echo(state: u64, on: bool) {
 
 // ------------------------------------------------- die Zeichengrundlagen
 
+// ---------------------------------------------- die beiden Blockbefehle
+//
+// `rep stosq` und `rep movsq` sind die zwei Anweisungen, die ein
+// Rahmenpuffertreiber braucht und die eine Schleife aus einzelnen
+// Speicherzugriffen nicht ersetzt. Der Unterschied ist gemessen und steht
+// in docs/ROUNDK7.md: dieselbe Flaeche, dieselbe Maschine, ein Faktor.
+//
+// Warum sie hier stehen duerfen, obwohl `profile kernel` sonst wenig
+// erlaubt: Firn gibt den Text unveraendert an den Assembler weiter, und
+// die drei Register, die die Anweisung veraendert, stehen als
+// `clobber` daneben -- sonst haelt der Uebersetzer sie fuer unberuehrt
+// und rechnet mit einem Wert, den `rep` laengst weggezaehlt hat.
+// `clobber("memory")` ist die zweite Haelfte davon: ohne sie darf der
+// Uebersetzer annehmen, der Speicher habe sich nicht geaendert.
+
+fn fill_words(p: u64, value: u64, words: u64) {
+    if words == 0 {
+        return
+    }
+    asm("cld\nrep stosq", in("rdi") p, in("rax") value, in("rcx") words,
+        clobber("rdi"), clobber("rcx"), clobber("memory"))
+}
+
+fn copy_words(dst: u64, src: u64, words: u64) {
+    if words == 0 {
+        return
+    }
+    asm("cld\nrep movsq", in("rdi") dst, in("rsi") src, in("rcx") words,
+        clobber("rdi"), clobber("rsi"), clobber("rcx"), clobber("memory"))
+}
+
+// Eine Farbe zweimal nebeneinander in einem Achtoktettwort -- das, was
+// `rep stosq` je Schritt ablegt.
+fn twice(color: u64) -> u64 {
+    let c: u64 = color & 0xFFFFFFFF
+    return (c << 32) | c
+}
+
 // Der Versatz eines Bildpunktes. `*%` und `+%` stehen hier mit Absicht:
 // die Rechnung ist eine ADRESSRECHNUNG, kein Zaehlen, und sie soll auch
 // dann eine Adresse ergeben, wenn ein Aufrufer Unsinn uebergibt -- die
@@ -719,10 +785,22 @@ fn hline(state: u64, x: u64, y: u64, n: u64, color: u64) {
         len = w - x
     }
     var p: u64 = kstate.get(state, FB_OFF + S_DRAW) +% spot(state, x, y)
-    let ende: u64 = p +% len *% 4
-    while p < ende {
+    // Vorlauf: `rep stosq` legt ACHT Oktette ab, ein Bildpunkt sind
+    // vier. Liegt der Anfang auf einer ungeraden Bildpunktgrenze, geht
+    // der erste einzeln.
+    if (p & 7) != 0 && len > 0 {
         __mmio_write32(p as *mut u32, color as u32)
         p = p +% 4
+        len = len - 1
+    }
+    let paare: u64 = len / 2
+    fill_words(p, twice(color), paare)
+    p = p +% paare *% 8
+    len = len - paare * 2
+    while len > 0 {
+        __mmio_write32(p as *mut u32, color as u32)
+        p = p +% 4
+        len = len - 1
     }
     dirty(state, y, y + 1)
 }
@@ -819,21 +897,17 @@ fn max2(a: u64, b: u64) -> u64 {
 // das Ziel OBERHALB der Quelle liegen (genau der Fall beim Rollen).
 fn blit(state: u64, sx: u64, sy: u64, dx: u64, dy: u64, w: u64, h: u64) {
     let base: u64 = kstate.get(state, FB_OFF + S_DRAW)
+    let n: u64 = w *% 4
+    let worte: u64 = n / 8
+    let rest: u64 = n - worte * 8
     var r: u64 = 0
     while r < h {
-        var s: u64 = base +% spot(state, sx, sy + r)
-        var d: u64 = base +% spot(state, dx, dy + r)
-        let n: u64 = w *% 4
-        var i: u64 = 0
-        while i + 8 <= n {
-            __mmio_write64((d +% i) as *mut u64,
-                __mmio_read64((s +% i) as *mut u64))
-            i = i + 8
-        }
-        while i < n {
-            __mmio_write32((d +% i) as *mut u32,
-                __mmio_read32((s +% i) as *mut u32))
-            i = i + 4
+        let s: u64 = base +% spot(state, sx, sy + r)
+        let d: u64 = base +% spot(state, dx, dy + r)
+        copy_words(d, s, worte)
+        if rest != 0 {
+            __mmio_write32((d +% worte *% 8) as *mut u32,
+                __mmio_read32((s +% worte *% 8) as *mut u32))
         }
         r = r + 1
     }
@@ -893,22 +967,13 @@ fn flush(state: u64) {
     let n: u64 = (hi - lo) *% pt
     let dst: u64 = kstate.get(state, FB_OFF + S_ADDR) +% von
     let src: u64 = b +% von
-    var i: u64 = 0
-    while i + 32 <= n {
-        __mmio_write64((dst +% i) as *mut u64,
-            __mmio_read64((src +% i) as *mut u64))
-        __mmio_write64((dst +% i +% 8) as *mut u64,
-            __mmio_read64((src +% i +% 8) as *mut u64))
-        __mmio_write64((dst +% i +% 16) as *mut u64,
-            __mmio_read64((src +% i +% 16) as *mut u64))
-        __mmio_write64((dst +% i +% 24) as *mut u64,
-            __mmio_read64((src +% i +% 24) as *mut u64))
-        i = i + 32
-    }
-    while i + 8 <= n {
-        __mmio_write64((dst +% i) as *mut u64,
-            __mmio_read64((src +% i) as *mut u64))
-        i = i + 8
+    let worte: u64 = n / 8
+    copy_words(dst, src, worte)
+    var i: u64 = worte * 8
+    while i + 4 <= n {
+        __mmio_write32((dst +% i) as *mut u32,
+            __mmio_read32((src +% i) as *mut u32))
+        i = i + 4
     }
     kstate.set(state, FB_OFF + S_DIRTY_LO, 0)
     kstate.set(state, FB_OFF + S_DIRTY_HI, 0)
@@ -1081,6 +1146,22 @@ fn home(state: u64) {
     kstate.set(state, FB_OFF + S_CY, 0)
 }
 
+// Die Schreibmarke an eine bestimmte Zelle. Damit kann ein Pruefbild
+// seinen Text an eine Stelle legen, die ein Bildschirmfoto NACHRECHNEN
+// kann: Zeile r beginnt bei y = r * 16, Spalte c bei x = c * 8.
+fn goto(state: u64, c: u64, r: u64) {
+    var x: u64 = c
+    var y: u64 = r
+    if x >= kstate.get(state, FB_OFF + S_COLS) {
+        x = kstate.get(state, FB_OFF + S_COLS) - 1
+    }
+    if y >= kstate.get(state, FB_OFF + S_ROWS) {
+        y = kstate.get(state, FB_OFF + S_ROWS) - 1
+    }
+    kstate.set(state, FB_OFF + S_CX, x)
+    kstate.set(state, FB_OFF + S_CY, y)
+}
+
 // ------------------------------------------------------- der Spiegel
 
 // Die Adresse des Kernel-Datenbereichs, ohne sie uebergeben zu bekommen.
@@ -1104,4 +1185,212 @@ fn echo(c: u8) {
         return
     }
     putc(state, c as u64)
+}
+
+// ----------------------------------------------------- die Kommandozeile
+
+// Kommt `n` Oktette von `nadel` irgendwo in `heu` vor? Eigene Fassung,
+// weil dieses Modul `kmain.fi` nicht einbinden darf -- siehe der Absatz
+// ueber den Abhaengigkeitskreis ganz oben.
+fn find(heu: u64, nadel: u64, n: u64) -> u64 {
+    if heu == 0 || n == 0 {
+        return 0
+    }
+    var i: u64 = 0
+    while true {
+        let c: u64 = kstate.get8(heu + i)
+        if c == 0 {
+            return 0
+        }
+        var k: u64 = 0
+        var gleich: bool = true
+        while k < n {
+            let a: u64 = kstate.get8(heu + i + k)
+            if a == 0 || a != kstate.get8(nadel + k) {
+                gleich = false
+                k = n
+            } else {
+                k = k + 1
+            }
+        }
+        if gleich {
+            return heu + i
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+fn parse(state: u64, cmd: u64) {
+    var w_gfx: [u8; 4] = "gfx\0"
+    var w_nodbl: [u8; 6] = "nodbl\0"
+    var w_uc: [u8; 5] = "fbuc\0"
+    var w_big: [u8; 6] = "fbbig\0"
+    var w_nocur: [u8; 9] = "nocursor\0"
+    var w_hold: [u8; 7] = "fbhold\0"
+    var w_pat: [u8; 7] = "fbtest\0"
+    var m: u64 = 0
+    if cmd != 0 {
+        if find(cmd, (&w_gfx[0]) as u64, 3) != 0 {
+            m = m | M_GFX
+        }
+        if find(cmd, (&w_nodbl[0]) as u64, 5) != 0 {
+            m = m | M_NODBL
+        }
+        if find(cmd, (&w_uc[0]) as u64, 4) != 0 {
+            m = m | M_UC
+        }
+        if find(cmd, (&w_big[0]) as u64, 5) != 0 {
+            m = m | M_BIG
+        }
+        if find(cmd, (&w_nocur[0]) as u64, 8) != 0 {
+            m = m | M_NOCUR
+        }
+        if find(cmd, (&w_hold[0]) as u64, 6) != 0 {
+            m = m | M_HOLD
+        }
+        if find(cmd, (&w_pat[0]) as u64, 6) != 0 {
+            m = m | M_PATTERN
+        }
+    }
+    kstate.set(state, FB_OFF + S_MODE, m)
+}
+
+fn mode(state: u64) -> u64 {
+    return kstate.get(state, FB_OFF + S_MODE)
+}
+
+fn want(state: u64, bit: u64) -> bool {
+    return (kstate.get(state, FB_OFF + S_MODE) & bit) != 0
+}
+
+// Schaltet den Zweitpuffer im laufenden Betrieb um. Nur die Messung
+// braucht das: sie will BEIDE Wege auf DERSELBEN Maschine und mit
+// DEMSELBEN Zeitzaehler vergleichen, und zwei QEMU-Laeufe waeren zwei
+// Maschinen.
+fn set_back(state: u64, b: u64) {
+    kstate.set(state, FB_OFF + S_BACK, b)
+    if b != 0 {
+        kstate.set(state, FB_OFF + S_DRAW, b)
+    } else {
+        kstate.set(state, FB_OFF + S_DRAW, kstate.get(state, FB_OFF + S_ADDR))
+    }
+    dirty_all(state)
+}
+
+// ---------------------------------------------------------- die Zusagen
+
+// Was der Kernel ueber seinen eigenen Bildschirm SELBST pruefen kann,
+// ohne auf ein Bildschirmfoto zu warten: geschrieben ist gelesen. Gibt
+// die Zahl der bestandenen Zusagen zurueck; `tools/gfx/run.sh` haelt sie
+// gegen die erwartete Zahl.
+//
+// Das ersetzt das Bildschirmfoto NICHT -- ein Kernel, der in seinen
+// eigenen Zweitpuffer schreibt und daraus liest, hat noch nichts ueber
+// den Bildschirm bewiesen. Es faengt die Fehlerklasse ab, die ein Foto
+// nur als schwarzes Bild zeigt, ohne zu sagen warum.
+fn selftest(state: u64) -> u64 {
+    if !ready(state) {
+        return 0
+    }
+    var n: u64 = 0
+    let rot: u64 = rgb(state, 0xFF, 0, 0)
+    let gruen: u64 = rgb(state, 0, 0xFF, 0)
+    let blau: u64 = rgb(state, 0, 0, 0xFF)
+
+    // 1. Die drei Grundfarben sind wirklich drei verschiedene Werte, und
+    //    die Verschiebungen liegen so, wie die Karte es gesagt hat.
+    if rot != gruen && gruen != blau && rot != blau {
+        n = n + 1
+    }
+    // 2. Geschriebener Bildpunkt = gelesener Bildpunkt.
+    pixel(state, 0, 0, rot)
+    pixel(state, 1, 0, gruen)
+    pixel(state, 0, 1, blau)
+    if get_pixel(state, 0, 0) == rot && get_pixel(state, 1, 0) == gruen {
+        if get_pixel(state, 0, 1) == blau {
+            n = n + 1
+        }
+    }
+    // 3. Der letzte Bildpunkt liegt noch im Puffer -- und der EINE
+    //    dahinter waere schon fremder Speicher.
+    let w: u64 = width(state)
+    let h: u64 = height(state)
+    pixel(state, w - 1, h - 1, gruen)
+    if get_pixel(state, w - 1, h - 1) == gruen {
+        n = n + 1
+    }
+    // 4. Ausserhalb wird nichts geschrieben und nichts gelesen.
+    pixel(state, w, h, rot)
+    if get_pixel(state, w, h) == 0 && get_pixel(state, w, 0) == 0 {
+        n = n + 1
+    }
+    // 5. Ein Rechteck ist an seinen Ecken gefuellt und einen Bildpunkt
+    //    daneben nicht.
+    clear(state, 0)
+    fill(state, 10, 10, 20, 20, blau)
+    if get_pixel(state, 10, 10) == blau && get_pixel(state, 29, 29) == blau {
+        if get_pixel(state, 9, 10) == 0 && get_pixel(state, 30, 29) == 0 {
+            n = n + 1
+        }
+    }
+    // 6. Eine Linie trifft ihre beiden Enden.
+    line(state, 40, 40, 140, 90, rot)
+    if get_pixel(state, 40, 40) == rot && get_pixel(state, 140, 90) == rot {
+        n = n + 1
+    }
+    // 7. Ein Bildbereich, an eine andere Stelle kopiert, steht dort.
+    blit(state, 10, 10, 200, 100, 20, 20)
+    if get_pixel(state, 200, 100) == blau && get_pixel(state, 219, 119) == blau {
+        n = n + 1
+    }
+    // 8. Der Zeichensatz zeichnet: das Grossbuchstaben-A hat in seiner
+    //    vierten Zeile (Index 3) genau die Bitmaske 0x18 -- zwei gesetzte
+    //    Bildpunkte in der Mitte, sechs leere daneben.
+    if font.row(state + FONT_OFF, 0x41, 3) == 0x18 {
+        n = n + 1
+    }
+    // 9. Ein gezeichnetes Zeichen hinterlaesst Vordergrundfarbe DA, wo
+    //    der Zeichensatz ein Bit gesetzt hat, und Hintergrund daneben.
+    clear(state, 0)
+    home(state)
+    set_color(state, rot, 0)
+    set_cursor(state, false)
+    putc(state, 0x41) // 'A'
+    // Zeile 3 der Glyphe, Maske 0x18: Spalten 3 und 4 gesetzt.
+    if get_pixel(state, 3, 3) == rot && get_pixel(state, 4, 3) == rot {
+        if get_pixel(state, 0, 3) == 0 && get_pixel(state, 7, 3) == 0 {
+            n = n + 1
+        }
+    }
+    // 10. Die Schreibmarke ist nach EINEM Zeichen eine Spalte weiter.
+    if cx(state) == 1 && cy(state) == 0 {
+        n = n + 1
+    }
+    // 11. Ein Zeilenumbruch setzt sie zurueck und eine Zeile tiefer.
+    putc(state, 10)
+    if cx(state) == 0 && cy(state) == 1 {
+        n = n + 1
+    }
+    // 12. Rollen: was in Zeile 1 stand, steht danach in Zeile 0.
+    clear(state, 0)
+    home(state)
+    fill(state, 0, font.GLYPH_H, 8, 8, gruen)
+    scroll(state)
+    if get_pixel(state, 0, 0) == gruen && get_pixel(state, 7, 7) == gruen {
+        n = n + 1
+    }
+    // 13. ... und die letzte Zeile ist danach leer.
+    if get_pixel(state, 0, rows(state) * font.GLYPH_H - 1) == 0 {
+        n = n + 1
+    }
+    clear(state, 0)
+    home(state)
+    set_color(state, rgb(state, 0xC8, 0xD0, 0xD8), 0)
+    return n
+}
+
+// Wie viele Zusagen `selftest` hoechstens gibt.
+fn selftest_max() -> u64 {
+    return 13
 }
