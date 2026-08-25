@@ -50,6 +50,31 @@ const SYS_EXIT: u64 = 60
 // has no file, so no `execve` can start it.
 const SYS_SPAWN: u64 = 1000
 
+// Die native ABI (`kernel/sys.fi`, `kernel/cap.fi`) -- portiert aus
+// OrientOS' `libs/osum-abi-native`. Nummern 2000 + n, Fehler NEGATIV und
+// aus einer eigenen Liste (nicht errno).
+const CAP_VERSION: u64 = 2000
+const CAP_READ: u64 = 2001
+const CAP_WRITE: u64 = 2002
+const CAP_CLOSE: u64 = 2003
+const CAP_DUP: u64 = 2004
+const CAP_INSPECT: u64 = 2005
+const CAP_TRANSFER: u64 = 2006
+const CAP_COUNT: u64 = 2007
+
+const E_BADHANDLE: u64 = 1
+const E_RIGHTS: u64 = 2
+const E_NOTFOUND: u64 = 3
+const E_INVALID: u64 = 4
+const E_EXHAUSTED: u64 = 5
+
+const R_READ: u64 = 1
+const R_WRITE: u64 = 2
+const R_DUPLICATE: u64 = 8
+const R_TRANSFER: u64 = 16
+const R_INSPECT: u64 = 32
+const R_ALL: u64 = 1023
+
 const O_WRONLY: u64 = 1
 const O_CREAT: u64 = 64
 const O_DIRECTORY: u64 = 65536
@@ -75,6 +100,7 @@ const P_SHELL: u64 = 8
 const P_STEAL: u64 = 9
 const P_FORK: u64 = 10
 const P_FORKCHILD: u64 = 11
+const P_CAPS: u64 = 12
 
 // ------------------------------------------------------ the system call
 
@@ -203,6 +229,9 @@ fn u_enter(packed: u64) {
     }
     if prog == P_FORKCHILD {
         u_forkchild(arg)
+    }
+    if prog == P_CAPS {
+        u_caps(arg)
     }
     u_sys(SYS_EXIT, 0, 0, 0)
     while true {
@@ -602,4 +631,203 @@ fn u_mkdir(line: u64, at: u64) {
     var s: [u8; 14] = "sh: mkdir \0\0\0\0"
     u_word(line, at, (&path[0]) as u64, 64)
     u_say_line((&s[0]) as u64, u_sys(SYS_MKDIR, (&path[0]) as u64, 0, 0))
+}
+
+// ------------------------------------------- Runde OSUM-CAP: Handles
+//
+// Das Gegenstueck zu `kernel/cap.fi` in RING 3. Es beweist nicht, dass
+// eine Tabelle im Kernel richtig rechnet -- das koennte der Kernel auch
+// selbst behaupten. Es beweist, dass ein UNPRIVILEGIERTES Programm
+// jenseits des Schutzwalls genau so viel darf, wie in seinem Handle
+// steht, und keinen Schritt mehr.
+//
+// Was dieses Programm bekommen hat: EIN Handle auf die Konsole, mit
+// Schreib-, Vervielfaeltigungs-, Uebertragungs- und Auskunftsrecht --
+// und ABSICHTLICH OHNE Leserecht. Seine Tabelle hat sonst nichts drin;
+// eine frische Tabelle ist leer (`proc.create_cap`).
+//
+// Der Bericht selbst geht durch das Handle. Das ist Absicht: waere die
+// Capability-Schicht kaputt, gaebe es keine Ausgabe statt einer
+// falschen.
+
+fn c_write(h: u64, p: u64, n: u64) -> u64 {
+    return u_sys(CAP_WRITE, h, p, n)
+}
+
+fn c_say(h: u64, p: u64) {
+    c_write(h, p, u_length(p))
+}
+
+// Eine Zahl durch das Handle. Negative Werte sind Fehlercodes der
+// nativen ABI; `0 -% v` ist die Umdeutung des Zweierkomplements und
+// nicht etwa eine Subtraktion (Runde 72).
+fn c_num(h: u64, v: u64) {
+    var buf: [u8; 24] = [0 as u8; 24]
+    var digits: [u8; 24] = [0 as u8; 24]
+    var value: u64 = v
+    var at: u64 = 0
+    if (v >> 63) != 0 {
+        buf[0] = 45 as u8
+        at = 1
+        value = 0 -% v
+    }
+    var n: u64 = 0
+    if value == 0 {
+        digits[0] = 48 as u8
+        n = 1
+    }
+    while value > 0 {
+        digits[n as usize] = (48 + value % 10) as u8
+        value = value / 10
+        n = n + 1
+    }
+    var i: u64 = n
+    while i > 0 {
+        i = i - 1
+        buf[at as usize] = digits[i as usize]
+        at = at + 1
+    }
+    buf[at as usize] = 0 as u8
+    c_write(h, (&buf[0]) as u64, at)
+}
+
+// Eine Zusage: Name, gemessener Wert, erwarteter Wert. Sie wird als
+// Zeile gemeldet, damit der Testlaeufer auf dem Wirt jede EINZELN
+// nachlesen kann -- eine Sammelzahl allein waere zu leicht.
+fn c_claim(h: u64, name: u64, got: u64, want: u64) -> u64 {
+    var s_ok: [u8; 10] = "  [ ok ] \0"
+    var s_no: [u8; 10] = "  [FAIL] \0"
+    var s_got: [u8; 8] = "   got=\0"
+    var s_want: [u8; 7] = " want=\0"
+    var s_nl: [u8; 2] = "\n\0"
+    if got == want {
+        c_say(h, (&s_ok[0]) as u64)
+        c_say(h, name)
+        c_say(h, (&s_nl[0]) as u64)
+        return 1
+    }
+    c_say(h, (&s_no[0]) as u64)
+    c_say(h, name)
+    c_say(h, (&s_got[0]) as u64)
+    c_num(h, got)
+    c_say(h, (&s_want[0]) as u64)
+    c_num(h, want)
+    c_say(h, (&s_nl[0]) as u64)
+    return 0
+}
+
+// Der Bericht ist in drei Funktionen geteilt, und das hat einen Grund,
+// den man dem Quelltext sonst nicht ansieht: firnc1 erzeugt fuer EINE
+// grosse Funktion unverhaeltnismaessig viel Code (aus 46 KiB wurden durch
+// diese Teilung 20). Das ist hier keine Kosmetik -- `.utext` muss in EINE
+// 2-MiB-Kachel passen, weil `proc.map_programs` genau eine geteilte
+// Seitentabelle (`kstate.PT_OFF`, Platz 0) dafuer hat. Waechst der
+// Abschnitt darueber hinaus, ueberschreibt die zweite Teilung die erste
+// und der Kernel steht. tools/boot/run.sh misst diese Grenze.
+
+// 1. Was das Handle KANN.
+fn u_caps_kann(h: u64) -> u64 {
+    var n_ver: [u8; 8] = "version\0"
+    var n_one: [u8; 13] = "count-is-one\0"
+    var n_write: [u8; 9] = "write-ok\0"
+    var n_inspect: [u8; 8] = "inspect\0"
+    var s_probe: [u8; 2] = "x\0"
+    var info: [u64; 2] = [0 as u64; 2]
+    var ok: u64 = 0
+    ok = ok + c_claim(h, (&n_ver[0]) as u64, u_sys(CAP_VERSION, 0, 0, 0), 1)
+    ok = ok + c_claim(h, (&n_one[0]) as u64, u_sys(CAP_COUNT, 0, 0, 0), 1)
+    ok = ok + c_claim(h, (&n_write[0]) as u64,
+        c_write(h, (&s_probe[0]) as u64, 0), 0)
+    let insp: u64 = u_sys(CAP_INSPECT, h, (&info[0]) as u64, 0)
+    ok = ok + c_claim(h, (&n_inspect[0]) as u64, insp | info[0], 1)
+    return ok
+}
+
+// 2. Was es NICHT kann -- und dass jedes Nein seinen eigenen Grund nennt.
+fn u_caps_nicht(h: u64) -> u64 {
+    var n_read: [u8; 12] = "read-denied\0"
+    var n_zero: [u8; 12] = "handle-zero\0"
+    var n_forge: [u8; 11] = "forged-gen\0"
+    var n_slot: [u8; 11] = "slot-range\0"
+    var n_unknown: [u8; 11] = "unknown-nr\0"
+    var n_trans: [u8; 15] = "transfer-nopid\0"
+    var s_probe: [u8; 2] = "x\0"
+    let p: u64 = (&s_probe[0]) as u64
+    var ok: u64 = 0
+    // DER KERN DER SACHE: ein GUELTIGES Handle ohne das noetige Recht ist
+    // ein ANDERER Fehler als ein gefaelschtes. POSIX kennt fuer beides
+    // nur -EBADF.
+    ok = ok + c_claim(h, (&n_read[0]) as u64,
+        u_sys(CAP_READ, h, p, 1), 0 -% E_RIGHTS)
+    ok = ok + c_claim(h, (&n_zero[0]) as u64,
+        u_sys(CAP_WRITE, 0, p, 1), 0 -% E_BADHANDLE)
+    ok = ok + c_claim(h, (&n_forge[0]) as u64,
+        u_sys(CAP_WRITE, h ^ 0x100000000, p, 1), 0 -% E_BADHANDLE)
+    ok = ok + c_claim(h, (&n_slot[0]) as u64,
+        u_sys(CAP_WRITE, (h & 0xFFFFFFFF00000000) | 99, p, 1),
+        0 -% E_BADHANDLE)
+    ok = ok + c_claim(h, (&n_unknown[0]) as u64,
+        u_sys(2999, 0, 0, 0), 0 -% E_INVALID)
+    ok = ok + c_claim(h, (&n_trans[0]) as u64,
+        u_sys(CAP_TRANSFER, h, R_WRITE, 4242), 0 -% E_NOTFOUND)
+    return ok
+}
+
+// 3. Weitergeben, schliessen, und die volle Tabelle.
+fn u_caps_weiter(h: u64) -> u64 {
+    var n_dup: [u8; 9] = "dup-less\0"
+    var n_dupw: [u8; 10] = "dup-write\0"
+    var n_dupd: [u8; 10] = "dup-nodup\0"
+    var n_close: [u8; 6] = "close\0"
+    var n_after: [u8; 12] = "after-close\0"
+    var n_twice: [u8; 12] = "close-twice\0"
+    var n_exh: [u8; 10] = "exhausted\0"
+    var n_alive: [u8; 6] = "alive\0"
+    var s_probe: [u8; 2] = "x\0"
+    let p: u64 = (&s_probe[0]) as u64
+    var ok: u64 = 0
+    // Vervielfaeltigen, aber NUR mit Schreibrecht: die Kopie kann danach
+    // weniger als das Original, und aus ihr laesst sich das Verlorene
+    // nicht zurueckholen.
+    let kopie: u64 = u_sys(CAP_DUP, h, R_WRITE, 0)
+    ok = ok + c_claim(h, (&n_dup[0]) as u64, (kopie >> 63) | (kopie & 1), 1)
+    ok = ok + c_claim(h, (&n_dupw[0]) as u64, c_write(kopie, p, 0), 0)
+    ok = ok + c_claim(h, (&n_dupd[0]) as u64,
+        u_sys(CAP_DUP, kopie, R_ALL, 0), 0 -% E_RIGHTS)
+    ok = ok + c_claim(h, (&n_close[0]) as u64, u_sys(CAP_CLOSE, kopie, 0, 0), 0)
+    ok = ok + c_claim(h, (&n_after[0]) as u64,
+        u_sys(CAP_WRITE, kopie, p, 1), 0 -% E_BADHANDLE)
+    ok = ok + c_claim(h, (&n_twice[0]) as u64,
+        u_sys(CAP_CLOSE, kopie, 0, 0), 0 -% E_BADHANDLE)
+    // Die Tabelle vollmachen. Sechzehn Plaetze, einer ist belegt -- die
+    // siebzehnte Kopie muss scheitern, ohne dass sonst etwas passiert.
+    var k: u64 = 0
+    var letzte: u64 = 0
+    while k < 20 {
+        letzte = u_sys(CAP_DUP, h, R_ALL, 0)
+        k = k + 1
+    }
+    ok = ok + c_claim(h, (&n_exh[0]) as u64, letzte, 0 -% E_EXHAUSTED)
+    ok = ok + c_claim(h, (&n_alive[0]) as u64, u_sys(CAP_VERSION, 0, 0, 0), 1)
+    return ok
+}
+
+fn u_caps(arg: u64) {
+    var s_head: [u8; 20] = "caps: ring 3 begin\n\0"
+    var s_tail: [u8; 7] = "caps: \0"
+    var s_of: [u8; 2] = "/\0"
+    var s_pr: [u8; 9] = " proofs\n\0"
+    // Platz 0 ist vereinbart; die obere Haelfte kam im Argument.
+    let h: u64 = (arg << 32) | 1
+    let n: u64 = 18
+    c_say(h, (&s_head[0]) as u64)
+    var ok: u64 = u_caps_kann(h)
+    ok = ok + u_caps_nicht(h)
+    ok = ok + u_caps_weiter(h)
+    c_say(h, (&s_tail[0]) as u64)
+    c_num(h, ok)
+    c_say(h, (&s_of[0]) as u64)
+    c_num(h, n)
+    c_say(h, (&s_pr[0]) as u64)
+    u_sys(SYS_EXIT, n - ok, 0, 0)
 }
