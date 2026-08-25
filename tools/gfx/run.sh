@@ -23,12 +23,18 @@
 #   2. DER ZEICHENSATZ. `kernel/font.fi` gegen die Rust-Vorlage, aus der
 #      er portiert wurde -- 1520 Oktette, Oktett fuer Oktett.  "Portiert"
 #      soll nicht "ungefaehr abgeschrieben" heissen.
-#   3. DIE FENSTERPLAETZE. `fb.fi` und `apic.fi` teilen sich acht
-#      2-MiB-Plaetze am oberen Ende des Kernel-Seitenverzeichnisses.  Die
-#      vier Zahlen dafuer stehen in beiden Dateien; sie werden hier
-#      gegeneinander gehalten, weil ein Auseinanderlaufen erst dann
-#      auffiele, wenn sich zwei Treiber gegenseitig die Abbildung
-#      ueberschreiben.
+#   3. DIE FENSTERPLAETZE UND DIE SPEICHERKARTE. `fb.fi` und `apic.fi`
+#      teilen sich acht 2-MiB-Plaetze am oberen Ende des
+#      Kernel-Seitenverzeichnisses.  Die vier Zahlen dafuer stehen in
+#      beiden Dateien; sie werden hier gegeneinander gehalten, weil ein
+#      Auseinanderlaufen erst dann auffiele, wenn sich zwei Treiber
+#      gegenseitig die Abbildung ueberschreiben.
+#      DAZU SEIT RUNDE K7B: die ganze Karte von `kdata`, 38 Bereiche aus
+#      vier Dateien, paarweise gegeneinander gerechnet
+#      (`tools/kernel/karte.py`).  Runde K7 legte den Zeichensatz auf
+#      0x2F000 und Runde K9 die Signaltabelle -- beide Zweige waren fuer
+#      sich gruen, und der Textverschmelzer konnte das nicht sehen, weil
+#      sich keine gemeinsame ZEILE ueberschnitt, nur zwei ADRESSEN.
 #   4. DER RAHMENPUFFER KOMMT AN. Geometrie, Herkunft, Fensteradresse,
 #      und die dreizehn Zusagen, die der Kernel ueber seinen eigenen
 #      Bildschirm selbst pruefen kann (`fb.selftest`).
@@ -175,7 +181,7 @@ else
     echo "        (OrientOS liegt nicht unter $ORIENTOS -- Vorlage nicht geprueft)"
 fi
 
-echo "== 3. die Fensterplaetze: fb.fi und apic.fi muessen sich einig sein =="
+echo "== 3. die Fensterplaetze und die Speicherkarte von kdata =="
 # Beide Dateien bilden Geraetespeicher in dieselben acht 2-MiB-Plaetze am
 # oberen Ende des Kernel-Seitenverzeichnisses ab und fuehren dieselbe
 # Belegungsliste.  Laufen die Zahlen auseinander, nehmen sich zwei Treiber
@@ -198,6 +204,39 @@ if [ "$fbl" = "$k2 + $sw" ]; then
     ok "fb.WIN_LIST ist pci.K2_SCALARS + apic.S_WIN ($k2 + $sw)"
 else
     bad "fb.WIN_LIST ist '$fbl', erwartet '$k2 + $sw'"
+fi
+
+# DIE SPEICHERKARTE VON `kdata`, UND WARUM SIE HIER STEHT.
+#
+# Der Fehler, der diese Runde ausgeloest hat, war keiner im Bildcode: er
+# war eine ADRESSE.  Runde K7 legte den Zustand des Rahmenpuffers samt
+# Zeichensatz auf 0x2F000 -- und schrieb die Konstante in `fb.fi` statt
+# in die Karte in `kstate.fi`.  Runde K9 las die Karte, fand 0x2F000
+# unbelegt und legte die Signaltabelle dorthin.  Beide Zweige waren fuer
+# sich gruen; nach dem Verschmelzen loeschte der Signalblock der Aufgabe 1
+# die Glyphen '@' bis 'o'.  Auf dem Schirm blieben Ziffern stehen und
+# jeder Buchstabe verschwand.
+#
+# Dasselbe ist in diesem Baum viermal passiert (K4/K2, K5/K2, K6/K5,
+# K7/K9), und dreimal endete es als Kommentar statt als Zusage.  Ab hier
+# ist es eine Zusage.
+kart=$(python3 tools/kernel/karte.py kernel 2>&1)
+if [ $? -eq 0 ]; then ok "die Speicherkarte von kdata: $kart"
+else bad "die Speicherkarte von kdata kollidiert"; echo "$kart" | sed 's/^/        /'; fi
+
+# UND DIE GEGENPROBE ZUM PRUEFER SELBST.  Ein Kollisionspruefer, der nie
+# etwas findet, ist von einem, der nichts prueft, nicht zu unterscheiden.
+# Also wird die alte Adresse in einer KOPIE zurueckgesetzt -- der Baum
+# bleibt unangetastet -- und der Pruefer MUSS anschlagen.
+GG="$TMPD/kernel-gg"
+mkdir -p "$GG"
+cp kernel/*.fi "$GG/"
+sed -i 's/^const FB_OFF: u64 = 0x3C000/const FB_OFF: u64 = 0x2F000/; s/^const FONT_OFF: u64 = 0x3C100/const FONT_OFF: u64 = 0x2F100/' "$GG/fb.fi" "$GG/kstate.fi"
+gg=$(python3 tools/kernel/karte.py "$GG" 2>&1)
+if [ $? -ne 0 ] && printf '%s' "$gg" | grep -q 'KOLLISION: FB'; then
+    ok "mit FB_OFF zurueck auf 0x2F000 findet der Pruefer die Kollision mit SIG"
+else
+    bad "der Kollisionspruefer findet den Fehler dieser Runde NICHT: $gg"
 fi
 
 echo "== 4. der Rahmenpuffer kommt an =="
@@ -394,6 +433,13 @@ if [ "$gebaut" = 1 ]; then
         "fb: console mirrored to screen" "fb: hold" 500
     # Und die Zeile der Shell einzeln, damit im Fehlerfall dasteht, WELCHE
     # Zeile nicht stimmt.
+    #
+    # DIESE ZEILE IST SEIT DEM VERSCHMELZEN MIT K9 MEHR ALS EIN TEXT: das
+    # `write(1, ...)` der Shell laeuft durch `tty.write_out` (sys.fi:823),
+    # also durch K9s ZEILENDISZIPLIN, und von dort ueber `tty.emit` auf
+    # `serial.put` und den Spiegel. Steht sie bildpunktgenau da, ist
+    # bewiesen, dass Terminalschicht und Bildschirm zusammenpassen -- und
+    # zwar ohne dass eine Zeile von `tty.fi` das Wort `fb` kennt.
     schau "die Zeile der Shell steht bildpunktgenau auf dem Schirm" \
         finde "$TMPD/sh.ppm" kernel/font.fi "$TMPD/sh.txt" \
         "fb: console mirrored to screen" "fb: hold" "OSUM SHELL ON SCREEN"
