@@ -44,6 +44,8 @@ import elf
 import hw
 import smp
 import cap
+import fb
+import apic
 
 // Indices in the table out of isr.s.
 const V_DF_STACK: u64 = 52
@@ -129,6 +131,7 @@ fn kernel_main(mbi: u64, vectors: u64, state: u64, kernel_end: u64,
     // out. The first heap of the run stands on it. See docs/OSUM-K2.md.
     hw.parse(state, cmd)
     smp.parse(state, cmd)
+    fb.parse(state, cmd)
     console_load(state, cmd)
     // ROUND K4: the three console descriptors of the system. They exist
     // before the first task does, they belong to no process, and every
@@ -174,6 +177,14 @@ fn kernel_main(mbi: u64, vectors: u64, state: u64, kernel_end: u64,
     //     controller must not be swapped while it is delivering. See
     //     `hw.fi`, `pci.fi`, `apic.fi`.
     hw.stage(state)
+
+    // 3c. ROUNDE K7: DER BILDSCHIRM. Hier und nicht frueher, weil der
+    //     Rahmenpuffer oberhalb des abgebildeten Gigabytes liegt und die
+    //     Fensterplaetze dafuer aus derselben Liste kommen wie die des
+    //     APIC (`apic.map_device`) -- und weil der Zweitpuffer aus dem
+    //     Rahmenverwalter kommt, den Abschnitt 3 gerade erst aufgebaut
+    //     hat. Ohne das Wort `gfx` kehrt das hier sofort zurueck.
+    graphics(state, mbi)
 
     // 3b. the task table. From here on there is a scheduler -- it does
     //     not switch anything yet, because there is only one task, but
@@ -234,9 +245,294 @@ fn kernel_main(mbi: u64, vectors: u64, state: u64, kernel_end: u64,
     // 8. ring 3, the excursion of round 59.
     ring3(state)
 
+    // 9. ROUNDE K7: stillhalten, damit ein Bildschirmfoto entstehen
+    //    kann. Ohne `fbhold` ist das ein Nichts.
+    gfx_hold(state)
+
     serial.puts((&s_done[0]) as u64)
     serial.nl()
     power.shutdown(power.EXIT_OK)
+}
+
+// ------------------------------------------------------ ROUNDE K7: Grafik
+//
+// Was hier passiert und warum es an dieser Stelle steht, steht in
+// `kernel/fb.fi`. Hier steht nur die REIHENFOLGE: Zweitpuffer holen,
+// Rahmenpuffer entgegennehmen, melden was gefunden wurde, die Zusagen
+// des Kernels ueber seinen eigenen Bildschirm zaehlen, die beiden Wege
+// (mit und ohne Zweitpuffer) gegeneinander messen -- und ERST DANN den
+// Spiegel anschalten. Die Reihenfolge ist nicht beliebig: ein Spiegel,
+// der waehrend der Messung mitzeichnet, misst sich selbst.
+
+const GFX_RUNDEN: u64 = 5 // Wiederholungen je Messwert
+
+fn graphics(state: u64, mbi: u64) {
+    var s_none: [u8; 24] = "fb: kein Rahmenpuffer\0\0\0"
+    var s_geo: [u8; 5] = "fb: \0"
+    var s_x: [u8; 2] = "x\0"
+    var s_bpp: [u8; 4] = "x32\0"
+    var s_pitch: [u8; 9] = "  pitch=\0"
+    var s_src: [u8; 7] = "  src=\0"
+    var s_mb: [u8; 3] = "mb\0"
+    var s_vbe: [u8; 4] = "vbe\0"
+    var s_phys: [u8; 8] = "  phys=\0"
+    var s_win: [u8; 7] = "  win=\0"
+    var s_huge: [u8; 8] = "  huge=\0"
+    var s_cols: [u8; 8] = "  cols=\0"
+    var s_rows: [u8; 8] = "  rows=\0"
+    var s_back: [u8; 8] = "  back=\0"
+    var s_none2: [u8; 5] = "none\0"
+    var s_uc: [u8; 6] = "  uc=\0"
+    var s_st: [u8; 14] = "fb: selftest \0"
+    var s_of: [u8; 4] = " / \0"
+    var s_on: [u8; 31] = "fb: console mirrored to screen\0"
+
+    if !fb.want(state, fb.M_GFX) {
+        return
+    }
+    var w: u64 = fb.WIDTH_STD
+    var h: u64 = fb.HEIGHT_STD
+    if fb.want(state, fb.M_BIG) {
+        w = fb.WIDTH_BIG
+        h = fb.HEIGHT_BIG
+    }
+    // Der Zweitpuffer, aus zusammenhaengenden Rahmen. Acht Rahmen mehr
+    // als gerechnet: eine Karte darf eine laengere Zeile liefern als
+    // Breite mal vier, und ein zu kleiner Zweitpuffer waere ein
+    // Schreibzugriff daneben. `fb.init` prueft die Groesse noch einmal
+    // und laesst ihn im Zweifel liegen.
+    var back: u64 = 0
+    var back_bytes: u64 = 0
+    if !fb.want(state, fb.M_NODBL) {
+        let rahmen: u64 = (w * h * 4 + mem.FRAME_SIZE - 1) / mem.FRAME_SIZE + 8
+        back = mem.frame_run(state, rahmen)
+        if back != 0 {
+            back_bytes = rahmen * mem.FRAME_SIZE
+        }
+    }
+    if !fb.init(state, mbi, w, h, back, back_bytes, fb.want(state, fb.M_UC)) {
+        serial.puts((&s_none[0]) as u64)
+        serial.nl()
+        return
+    }
+    if fb.want(state, fb.M_NOCUR) {
+        fb.set_cursor(state, false)
+    }
+
+    serial.puts((&s_geo[0]) as u64)
+    serial.dec(fb.width(state))
+    serial.puts((&s_x[0]) as u64)
+    serial.dec(fb.height(state))
+    serial.puts((&s_bpp[0]) as u64)
+    serial.puts((&s_pitch[0]) as u64)
+    serial.dec(fb.pitch(state))
+    serial.puts((&s_src[0]) as u64)
+    if fb.source(state) == fb.SRC_MB {
+        serial.puts((&s_mb[0]) as u64)
+    } else {
+        serial.puts((&s_vbe[0]) as u64)
+    }
+    serial.puts((&s_phys[0]) as u64)
+    serial.hex(fb.phys(state))
+    serial.puts((&s_win[0]) as u64)
+    serial.hex(fb.addr(state))
+    serial.puts((&s_huge[0]) as u64)
+    serial.dec(fb.huges(state))
+    serial.puts((&s_cols[0]) as u64)
+    serial.dec(fb.cols(state))
+    serial.puts((&s_rows[0]) as u64)
+    serial.dec(fb.rows(state))
+    serial.puts((&s_back[0]) as u64)
+    if fb.back(state) == 0 {
+        serial.puts((&s_none2[0]) as u64)
+    } else {
+        serial.hex(fb.back(state))
+    }
+    serial.puts((&s_uc[0]) as u64)
+    serial.dec(bnum(fb.uncached(state)))
+    serial.nl()
+
+    let n: u64 = fb.selftest(state)
+    serial.puts((&s_st[0]) as u64)
+    serial.dec(n)
+    serial.puts((&s_of[0]) as u64)
+    serial.dec(fb.selftest_max())
+    serial.nl()
+
+    gfx_bench(state, back)
+
+    // Und JETZT der Spiegel: ab hier geht jedes Oktett, das ueber
+    // `serial.put` laeuft, auch auf den Bildschirm.
+    fb.clear(state, 0)
+    fb.home(state)
+    fb.set_echo(state, true)
+    serial.puts((&s_on[0]) as u64)
+    serial.nl()
+}
+
+fn bnum(b: bool) -> u64 {
+    if b {
+        return 1
+    }
+    return 0
+}
+
+// Mikrosekunden aus Prozessortakten. `apic.tsc_hz` steht seit
+// `hw.stage`; ohne APIC gibt es keine Zeitbasis und damit keine Messung.
+fn us_of(state: u64, takte: u64) -> u64 {
+    let hz: u64 = apic.tsc_hz(state)
+    if hz == 0 {
+        return 0
+    }
+    return takte * 1000000 / hz
+}
+
+// DIE MESSUNG. Beide Wege auf DERSELBEN Maschine, mit DEMSELBEN
+// Zeitzaehler und in EINEM Lauf -- zwei QEMU-Starts waeren zwei
+// Maschinen und die Zahlen nicht vergleichbar.
+//
+//   1. voller Bildaufbau, direkt auf die Karte
+//   2. eine Rollbewegung,  direkt auf die Karte
+//   3. voller Bildaufbau in den Zweitpuffer + Uebertragung
+//   4. eine Rollbewegung  im Zweitpuffer + Uebertragung
+fn gfx_bench(state: u64, back: u64) {
+    var s_b1: [u8; 26] = "        fbbench: direct  \0"
+    var s_b2: [u8; 26] = "        fbbench: buffered\0"
+    var s_fill: [u8; 8] = "  fill=\0"
+    var s_scr: [u8; 10] = "  scroll=\0"
+    var s_fl: [u8; 9] = "  flush=\0"
+    var s_us: [u8; 4] = " us\0"
+    var s_nb: [u8; 30] = "        fbbench: no time base\0"
+
+    if apic.tsc_hz(state) == 0 {
+        serial.puts((&s_nb[0]) as u64)
+        serial.nl()
+        return
+    }
+    let farbe: u64 = fb.rgb(state, 0x20, 0x30, 0x40)
+
+    // --- 1 und 2: ohne Zweitpuffer, jeder Bildpunkt geht auf die Karte.
+    fb.set_back(state, 0)
+    var t: u64 = apic.tsc()
+    var i: u64 = 0
+    while i < GFX_RUNDEN {
+        fb.clear(state, farbe)
+        i = i + 1
+    }
+    let d_fill: u64 = us_of(state, apic.tsc() - t) / GFX_RUNDEN
+    t = apic.tsc()
+    i = 0
+    while i < GFX_RUNDEN {
+        fb.scroll(state)
+        i = i + 1
+    }
+    let d_scroll: u64 = us_of(state, apic.tsc() - t) / GFX_RUNDEN
+    serial.puts((&s_b1[0]) as u64)
+    serial.puts((&s_fill[0]) as u64)
+    serial.dec(d_fill)
+    serial.puts((&s_us[0]) as u64)
+    serial.puts((&s_scr[0]) as u64)
+    serial.dec(d_scroll)
+    serial.puts((&s_us[0]) as u64)
+    serial.nl()
+
+    if back == 0 {
+        fb.set_back(state, 0)
+        return
+    }
+
+    // --- 3 und 4: derselbe Bildaufbau im Arbeitsspeicher, danach EINE
+    //     Uebertragung. Die Uebertragung wird getrennt ausgewiesen, weil
+    //     genau sie der Preis der Doppelpufferung ist.
+    fb.set_back(state, back)
+    t = apic.tsc()
+    i = 0
+    while i < GFX_RUNDEN {
+        fb.clear(state, farbe)
+        i = i + 1
+    }
+    let b_fill: u64 = us_of(state, apic.tsc() - t) / GFX_RUNDEN
+    t = apic.tsc()
+    i = 0
+    while i < GFX_RUNDEN {
+        fb.scroll(state)
+        i = i + 1
+    }
+    let b_scroll: u64 = us_of(state, apic.tsc() - t) / GFX_RUNDEN
+    t = apic.tsc()
+    i = 0
+    while i < GFX_RUNDEN {
+        fb.dirty_all(state)
+        fb.flush(state)
+        i = i + 1
+    }
+    let b_flush: u64 = us_of(state, apic.tsc() - t) / GFX_RUNDEN
+    serial.puts((&s_b2[0]) as u64)
+    serial.puts((&s_fill[0]) as u64)
+    serial.dec(b_fill)
+    serial.puts((&s_us[0]) as u64)
+    serial.puts((&s_scr[0]) as u64)
+    serial.dec(b_scroll)
+    serial.puts((&s_us[0]) as u64)
+    serial.puts((&s_fl[0]) as u64)
+    serial.dec(b_flush)
+    serial.puts((&s_us[0]) as u64)
+    serial.nl()
+}
+
+// Das Pruefbild und das Stillhalten. Beides nur auf ausdrueckliches Wort:
+// `fbtest` malt, `fbhold` wartet, damit der Testlaeufer draussen
+// `screendump` rufen kann, waehrend das Bild noch steht.
+fn gfx_hold(state: u64) {
+    var s_pat: [u8; 26] = "OSUM K7 FRAMEBUFFER 01234\0"
+    var s_pat2: [u8; 26] = "abcdefghijklm ABCDEFGHIJK\0"
+    var s_hold: [u8; 10] = "fb: hold\0\0"
+    var s_go: [u8; 10] = "fb: go\0\0\0\0"
+
+    if !fb.ready(state) {
+        return
+    }
+    if fb.want(state, fb.M_PATTERN) {
+        fb.set_cursor(state, false)
+        fb.clear(state, 0)
+        // Vier Felder zu 100 x 100 in reinen Farben. Reine Farben, weil
+        // ein Bildschirmfoto sie ohne Rundungsfrage nachrechnen kann.
+        fb.fill(state, 0, 0, 100, 100, fb.rgb(state, 0xFF, 0, 0))
+        fb.fill(state, 100, 0, 100, 100, fb.rgb(state, 0, 0xFF, 0))
+        fb.fill(state, 200, 0, 100, 100, fb.rgb(state, 0, 0, 0xFF))
+        fb.fill(state, 300, 0, 100, 100, fb.rgb(state, 0xFF, 0xFF, 0xFF))
+        // Eine Linie von Ecke zu Ecke des oberen Bandes.
+        fb.line(state, 0, 110, 399, 210, fb.rgb(state, 0xFF, 0xFF, 0))
+        // Und zwei Textzeilen an einer Stelle, die sich AUSRECHNEN
+        // laesst: Zeile 14 beginnt bei y = 224, Spalte 0 bei x = 0.
+        // Geschrieben wird ueber `serial` -- damit steht dasselbe im
+        // seriellen Protokoll wie auf dem Bildschirm, und der Testlaeufer
+        // kann beides gegeneinander halten.
+        fb.goto(state, 0, 14)
+        serial.puts((&s_pat[0]) as u64)
+        serial.nl()
+        serial.puts((&s_pat2[0]) as u64)
+        serial.nl()
+        fb.dirty_all(state)
+        fb.flush(state)
+    }
+    if !fb.want(state, fb.M_HOLD) {
+        return
+    }
+    fb.flush(state)
+    serial.puts((&s_hold[0]) as u64)
+    serial.nl()
+    // Rund vier Sekunden stillhalten. Der Testlaeufer draussen sieht die
+    // Zeile oben, ruft `screendump` und prueft das Bild, waehrend es noch
+    // steht.
+    let hz: u64 = apic.tsc_hz(state)
+    if hz != 0 {
+        let bis: u64 = apic.tsc() + hz * 4
+        while apic.tsc() < bis {
+        }
+    }
+    serial.puts((&s_go[0]) as u64)
+    serial.nl()
 }
 
 fn at(vectors: u64, i: u64) -> u64 {
