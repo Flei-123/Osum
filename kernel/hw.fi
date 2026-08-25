@@ -39,7 +39,13 @@ import blk
 import fs
 import idt
 
-export { parse, stage, disk, timer_off, mode_of, M_NOPCI, M_NOAPIC, M_NVME, M_BENCH }
+export {
+    parse, stage, disk, timer_off, mode_of,
+    M_NOPCI, M_NOAPIC, M_NVME, M_BENCH,
+    M_NIC, M_NICINTX, M_NICNOIRQ, M_NICNOBM,
+    net_ip, net_prefix, net_gw, net_svc, net_port, net_bytes, net_wait,
+    on, yes
+}
 
 // The words of the command line this round understands. They are read
 // here and not in `kmain.mode_of` for the same reason the stage exists.
@@ -52,8 +58,29 @@ const M_NOMSIX: u64 = 32
 const M_NOIRQ: u64 = 64
 const M_BENCH: u64 = 128
 const M_NVPOLL: u64 = 256
+// ROUND K8. The word that brings the network card up is `nic` and not
+// `net`, and that is not taste: the counter-check runs the SAME command
+// line without it, and every parameter of this round (`nip=`, `ngw=`,
+// `nsvc=`) carries the three letters `net` inside it. A switch that its
+// own arguments turn on again is no switch.
+const M_NIC: u64 = 512 // bring the card up at all
+const M_NICINTX: u64 = 1024 // the pin through the I/O APIC, not MSI-X
+const M_NICNOIRQ: u64 = 2048 // the vector stays masked -- counter-check
+const M_NICNOBM: u64 = 4096 // no bus master -- counter-check
 
 const S_MODE: u64 = 0x0F0 // in the K2 scalar page, between apic and nvme
+
+// ROUND K8. Read out of the command line in `parse`, which happens
+// BEFORE the frame allocator hands the command line itself out as heap
+// (see the comment there). 0x200 is `virtio.fi`, 0x300 `inet.fi`; this
+// is the strip between the seam and its socket table.
+const S_NIP: u64 = 0x3A0
+const S_NPREFIX: u64 = 0x3A8
+const S_NGW: u64 = 0x3B0
+const S_NSVC: u64 = 0x3B8
+const S_NPORT: u64 = 0x3C0
+const S_NBYTES: u64 = 0x3C8
+const S_NWAIT: u64 = 0x3D0
 
 const TIMER_HZ: u64 = 100
 const GSI_KEYBOARD: u64 = 1
@@ -88,6 +115,141 @@ fn on(state: u64, bit: u64) -> bool {
 // turned into a number.
 fn parse(state: u64, cmd: u64) {
     kstate.set(state, pci.K2_SCALARS + S_MODE, mode_of(cmd))
+    net_parse(state, cmd)
+}
+
+// ---------------------------------------------- the K8 command line
+//
+// `nip=10.9.0.2/24 ngw=10.9.0.1 nsvc=1 nport=7 nbytes=1048576 nwait=900`
+//
+// All of it here and not in `netsvc.fi` for the reason at `parse`: the
+// command line is a string that stops existing the moment the heap
+// stands on it, and this function runs before that.
+fn net_parse(state: u64, cmd: u64) {
+    var w_ip: [u8; 5] = "nip=\0"
+    var w_gw: [u8; 5] = "ngw=\0"
+    var w_svc: [u8; 6] = "nsvc=\0"
+    var w_port: [u8; 7] = "nport=\0"
+    var w_bytes: [u8; 8] = "nbytes=\0"
+    var w_wait: [u8; 7] = "nwait=\0"
+    kstate.set(state, pci.K2_SCALARS + S_NIP, 0)
+    kstate.set(state, pci.K2_SCALARS + S_NPREFIX, 24)
+    kstate.set(state, pci.K2_SCALARS + S_NGW, 0)
+    kstate.set(state, pci.K2_SCALARS + S_NSVC, 0)
+    kstate.set(state, pci.K2_SCALARS + S_NPORT, 7)
+    kstate.set(state, pci.K2_SCALARS + S_NBYTES, 262144)
+    kstate.set(state, pci.K2_SCALARS + S_NWAIT, 0)
+    if cmd == 0 {
+        return
+    }
+    let a: u64 = find(cmd, (&w_ip[0]) as u64, 4)
+    if a != 0 {
+        var after: u64 = 0
+        kstate.set(state, pci.K2_SCALARS + S_NIP, ip_of(a + 4, &after))
+        if kstate.get8(after) == 47 { // '/'
+            var e: u64 = 0
+            let p: u64 = dec_of(after + 1, &e)
+            if p > 0 && p <= 32 {
+                kstate.set(state, pci.K2_SCALARS + S_NPREFIX, p)
+            }
+        }
+    }
+    let g: u64 = find(cmd, (&w_gw[0]) as u64, 4)
+    if g != 0 {
+        var after2: u64 = 0
+        kstate.set(state, pci.K2_SCALARS + S_NGW, ip_of(g + 4, &after2))
+    }
+    num_arg(state, cmd, (&w_svc[0]) as u64, 5, S_NSVC)
+    num_arg(state, cmd, (&w_port[0]) as u64, 6, S_NPORT)
+    num_arg(state, cmd, (&w_bytes[0]) as u64, 7, S_NBYTES)
+    num_arg(state, cmd, (&w_wait[0]) as u64, 6, S_NWAIT)
+}
+
+fn num_arg(state: u64, cmd: u64, word: u64, n: u64, slot: u64) {
+    let a: u64 = find(cmd, word, n)
+    if a == 0 {
+        return
+    }
+    var e: u64 = 0
+    kstate.set(state, pci.K2_SCALARS + slot, dec_of(a + n, &e))
+}
+
+// A decimal number, and where it ended.
+fn dec_of(p: u64, endp: *mut u64) -> u64 {
+    var v: u64 = 0
+    var i: u64 = 0
+    while i < 20 {
+        let c: u64 = kstate.get8(p + i)
+        if c < 48 || c > 57 {
+            i = 20
+        } else {
+            v = v * 10 + (c - 48)
+            i = i + 1
+        }
+    }
+    var k: u64 = 0
+    while k < 20 {
+        let c: u64 = kstate.get8(p + k)
+        if c < 48 || c > 57 {
+            *endp = p + k
+            return v
+        }
+        k = k + 1
+    }
+    *endp = p + 20
+    return v
+}
+
+// Four decimal numbers with three dots between them, packed the way the
+// stack wants them: the first octet at the top.
+fn ip_of(p: u64, endp: *mut u64) -> u64 {
+    var v: u64 = 0
+    var at: u64 = p
+    var i: u64 = 0
+    while i < 4 {
+        var e: u64 = 0
+        let part: u64 = dec_of(at, &e)
+        v = (v << 8) | (part & 0xFF)
+        at = e
+        if i < 3 {
+            if kstate.get8(at) != 46 { // '.'
+                *endp = at
+                return 0
+            }
+            at = at + 1
+        }
+        i = i + 1
+    }
+    *endp = at
+    return v
+}
+
+fn net_ip(state: u64) -> u64 {
+    return kstate.get(state, pci.K2_SCALARS + S_NIP)
+}
+
+fn net_prefix(state: u64) -> u64 {
+    return kstate.get(state, pci.K2_SCALARS + S_NPREFIX)
+}
+
+fn net_gw(state: u64) -> u64 {
+    return kstate.get(state, pci.K2_SCALARS + S_NGW)
+}
+
+fn net_svc(state: u64) -> u64 {
+    return kstate.get(state, pci.K2_SCALARS + S_NSVC)
+}
+
+fn net_port(state: u64) -> u64 {
+    return kstate.get(state, pci.K2_SCALARS + S_NPORT)
+}
+
+fn net_bytes(state: u64) -> u64 {
+    return kstate.get(state, pci.K2_SCALARS + S_NBYTES)
+}
+
+fn net_wait(state: u64) -> u64 {
+    return kstate.get(state, pci.K2_SCALARS + S_NWAIT)
 }
 
 // ---------------------------------------------------------- stage one
@@ -494,6 +656,10 @@ fn mode_of(cmd: u64) -> u64 {
     var w_noirq: [u8; 6] = "noirq\0"
     var w_bench: [u8; 6] = "bench\0"
     var w_poll: [u8; 7] = "nvpoll\0"
+    var w_nic: [u8; 4] = "nic\0"
+    var w_nintx: [u8; 8] = "nicintx\0"
+    var w_nnoirq: [u8; 9] = "nicnoirq\0"
+    var w_nnobm: [u8; 8] = "nicnobm\0"
     if cmd == 0 {
         return 0
     }
@@ -524,6 +690,18 @@ fn mode_of(cmd: u64) -> u64 {
     }
     if find(cmd, (&w_poll[0]) as u64, 6) != 0 {
         m = m | M_NVPOLL
+    }
+    if find(cmd, (&w_nic[0]) as u64, 3) != 0 {
+        m = m | M_NIC
+    }
+    if find(cmd, (&w_nintx[0]) as u64, 7) != 0 {
+        m = m | M_NICINTX
+    }
+    if find(cmd, (&w_nnoirq[0]) as u64, 8) != 0 {
+        m = m | M_NICNOIRQ
+    }
+    if find(cmd, (&w_nnobm[0]) as u64, 7) != 0 {
+        m = m | M_NICNOBM
     }
     return m
 }
