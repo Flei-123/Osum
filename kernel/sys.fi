@@ -56,6 +56,8 @@ import time
 import rand
 import tty
 
+import inet
+
 export {
     entry, neg, STAT_BYTES, DIRENT_HEAD,
     O_WRONLY, O_RDWR, O_CREAT, O_EXCL, O_TRUNC, O_APPEND, O_DIRECTORY,
@@ -75,6 +77,11 @@ export {
     SYS_OSUM_PTY, SYS_OSUM_TTYINFO, SYS_OSUM_SIGINFO,
     CAP_BASE, CAP_VERSION, CAP_READ, CAP_WRITE, CAP_CLOSE, CAP_DUP,
     CAP_INSPECT, CAP_TRANSFER, CAP_COUNT, CAP_MAXNR,
+    SYS_SOCKET, SYS_CONNECT, SYS_ACCEPT, SYS_SENDTO, SYS_RECVFROM,
+    SYS_SHUTDOWN, SYS_BIND, SYS_LISTEN, SYS_GETSOCKNAME, SYS_GETPEERNAME,
+    SYS_SETSOCKOPT, SYS_GETSOCKOPT, SYS_ACCEPT4,
+    AF_INET, SOCK_STREAM, SOCK_DGRAM, SOCK_NONBLOCK, SA_BYTES,
+    IPPROTO_ICMP, IPPROTO_TCP, IPPROTO_UDP,
     grant_console, native
 }
 
@@ -175,6 +182,50 @@ const SYS_GETRANDOM: u64 = 318
 const SYS_OSUM_PTY: u64 = 1100
 const SYS_OSUM_TTYINFO: u64 = 1101
 const SYS_OSUM_SIGINFO: u64 = 1102
+
+// ROUND K8. THE SOCKET CALLS, and again Linux's numbers and Linux's
+// shapes -- there is no `send` and no `recv` in the x86-64 table,
+// because glibc turns both into `sendto`/`recvfrom` with a null address.
+// Copying that means a Linux binary of stage 2 needs no translation, and
+// it means `ping` and `wget` in `kernel/user/` are written the way they
+// would be written anywhere else.
+const SYS_SOCKET: u64 = 41
+const SYS_CONNECT: u64 = 42
+const SYS_ACCEPT: u64 = 43
+const SYS_SENDTO: u64 = 44
+const SYS_RECVFROM: u64 = 45
+const SYS_SHUTDOWN: u64 = 48
+const SYS_BIND: u64 = 49
+const SYS_LISTEN: u64 = 50
+const SYS_GETSOCKNAME: u64 = 51
+const SYS_GETPEERNAME: u64 = 52
+const SYS_SETSOCKOPT: u64 = 54
+const SYS_GETSOCKOPT: u64 = 55
+const SYS_ACCEPT4: u64 = 288
+
+// `struct sockaddr_in`: sixteen octets, the family in the byte order of
+// the machine, the port and the address in the byte order of the WIRE.
+// That mixture is not a mistake of this kernel, it is what the interface
+// has looked like since 4.2BSD, and a program that assumes anything else
+// would not work on Linux either.
+const AF_INET: u64 = 2
+const SA_BYTES: u64 = 16
+const SOCK_STREAM: u64 = 1
+const SOCK_DGRAM: u64 = 2
+// The two flags Linux packs into the TYPE argument (and into `accept4`).
+const SOCK_NONBLOCK: u64 = 2048 // 0o4000
+const SOCK_CLOEXEC: u64 = 524288 // 0o2000000
+const IPPROTO_ICMP: u64 = 1
+const IPPROTO_TCP: u64 = 6
+const IPPROTO_UDP: u64 = 17
+const SHUT_RD: u64 = 0
+
+// How long a blocking socket call waits before it gives up with
+// -EAGAIN. Bounded for the same reason `BLOCK_ROUNDS` is: a measurement
+// that ends in the time limit of the shell script measures nothing, and
+// a kernel that cannot say why it stopped is worse than one that stops.
+// 100 Hz, so this is thirty seconds.
+const NET_ROUNDS: u64 = 3000
 
 // The two marks of round 59, alive only during the excursion of `user.fi`.
 const SYS_MARK: u64 = 1
@@ -411,6 +462,46 @@ fn dispatch(number: u64, frame: u64, state: u64) -> u64 {
     if number == SYS_GETCWD {
         return do_getcwd(state, me, a0, a1)
     }
+    // ROUND K8: the sockets. They stand here, in the same table as
+    // `read` and `write`, and not beside it -- a socket IS a descriptor
+    // of this system, and `dup2`, `fork` and `close` reach it without
+    // knowing that.
+    if number == SYS_SOCKET {
+        return do_socket(state, me, a0, a1, a2)
+    }
+    if number == SYS_BIND {
+        return do_bind(state, me, a0, a1, a2)
+    }
+    if number == SYS_LISTEN {
+        return do_listen(state, me, a0, a1)
+    }
+    if number == SYS_ACCEPT {
+        return do_accept(state, me, a0, a1, a2, 0)
+    }
+    if number == SYS_ACCEPT4 {
+        return do_accept(state, me, a0, a1, a2, a3)
+    }
+    if number == SYS_CONNECT {
+        return do_connect(state, me, a0, a1, a2)
+    }
+    if number == SYS_SENDTO {
+        return do_sendto(state, me, a0, a1, a2, a4, a5)
+    }
+    if number == SYS_RECVFROM {
+        return do_recvfrom(state, me, a0, a1, a2, a4, a5)
+    }
+    if number == SYS_SHUTDOWN {
+        return do_shutdown(state, me, a0, a1)
+    }
+    if number == SYS_GETSOCKNAME {
+        return do_sockname(state, me, a0, a1, a2, false)
+    }
+    if number == SYS_GETPEERNAME {
+        return do_sockname(state, me, a0, a1, a2, true)
+    }
+    if number == SYS_SETSOCKOPT {
+        return do_setsockopt(state, me, a0, a1, a2)
+    }
     if number == SYS_DUP {
         return do_dup(state, me, a0)
     }
@@ -455,6 +546,7 @@ fn dispatch(number: u64, frame: u64, state: u64) -> u64 {
         return do_wait4(state, me, a0, a1, a2)
     }
     if number == SYS_EXIT || number == SYS_EXIT_GROUP {
+        sock_close_all(state, me)
         file.close_all(state, me)
         // ROUND K9: der Elternprozess erfaehrt es. Das ist SIGCHLD, und
         // es ist der Grund, warum ein Programm ohne `wait` ueberhaupt
@@ -744,6 +836,9 @@ fn write_of(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
     if kind == file.K_FB {
         return fb_write(state, me, of, buf, len)
     }
+    if kind == file.K_SOCK {
+        return sock_write(state, me, of, buf, len)
+    }
     if kind != file.K_FILE {
         return neg(errno.E_BADF)
     }
@@ -802,6 +897,9 @@ fn read_of(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
     }
     if kind == file.K_FB {
         return fb_read(state, me, of, buf, len)
+    }
+    if kind == file.K_SOCK {
+        return sock_read(state, me, of, buf, len)
     }
     if kind == file.K_DIR {
         return neg(errno.E_ISDIR)
@@ -1100,21 +1198,21 @@ fn do_pipe(state: u64, me: u64, out: u64) -> u64 {
     }
     let wr: u64 = file.open_alloc(state, file.K_PIPEW, p, O_WRONLY)
     if wr >= file.MAX_OPEN {
-        file.open_unref(state, rd)
+        unref_of(state, rd)
         return neg(errno.E_NFILE)
     }
     let fd0: u64 = file.fd_alloc(state, me, 0)
     if fd0 >= file.MAX_FD {
-        file.open_unref(state, rd)
-        file.open_unref(state, wr)
+        unref_of(state, rd)
+        unref_of(state, wr)
         return neg(errno.E_MFILE)
     }
     file.fd_set(state, me, fd0, rd)
     let fd1: u64 = file.fd_alloc(state, me, 0)
     if fd1 >= file.MAX_FD {
         file.fd_free(state, me, fd0)
-        file.open_unref(state, rd)
-        file.open_unref(state, wr)
+        unref_of(state, rd)
+        unref_of(state, wr)
         return neg(errno.E_MFILE)
     }
     file.fd_set(state, me, fd1, wr)
@@ -1304,7 +1402,7 @@ fn do_open(state: u64, me: u64, name: u64, flags: u64) -> u64 {
     }
     let fd: u64 = file.fd_alloc(state, me, 0)
     if fd >= file.MAX_FD {
-        file.open_unref(state, of)
+        unref_of(state, of)
         return neg(errno.E_MFILE)
     }
     file.fd_set(state, me, fd, of)
@@ -1317,7 +1415,7 @@ fn do_close(state: u64, me: u64, fd: u64) -> u64 {
         return neg(errno.E_BADF)
     }
     file.fd_free(state, me, fd)
-    file.open_unref(state, of)
+    unref_of(state, of)
     return 0
 }
 
@@ -1353,7 +1451,7 @@ fn do_dup2(state: u64, me: u64, from: u64, to: u64) -> u64 {
     let old: u64 = of_of(state, me, to)
     if old < file.MAX_OPEN {
         file.fd_free(state, me, to)
-        file.open_unref(state, old)
+        unref_of(state, old)
     }
     file.open_ref(state, of)
     file.fd_set(state, me, to, of)
@@ -2663,4 +2761,492 @@ fn native(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64) -> u64 {
         return nr
     }
     return cap.err(cap.E_UNSUPPORTED)
+}
+
+// =====================================================================
+// ROUND K8 -- THE SOCKETS
+// =====================================================================
+//
+// Everything below keeps the three rules at the top of this file. The
+// numbers are Linux's; nothing is answered silently (a domain that is
+// not AF_INET gives -EAFNOSUPPORT, a descriptor that is not a socket
+// gives -ENOTSOCK's nearest relative -EBADF, a pointer that is not the
+// caller's gives -EFAULT, checked BEFORE it is followed); and the
+// kernel never holds a pointer of ring 3 -- every buffer travels
+// through the data area.
+//
+// A socket lives in TWO tables at once and that is on purpose:
+//
+//   the OPEN FILE TABLE of round K4  -- kind `file.K_SOCK`, and the
+//       number of the socket in `OF_INO`. This is what makes `read`,
+//       `write`, `close`, `dup2` and `fork` work on it without any of
+//       them learning what a socket is.
+//   the SOCKET TABLE of `inet.fi`    -- the kind (TCP/UDP/ICMP), the
+//       handle in the stack of round K3, the bound port.
+//
+// The reference count of the first decides when the second is torn
+// down: `unref_of` closes the connection only when the LAST descriptor
+// pointing at it goes away. A `fork`ed child that closes its copy must
+// not take the parent's connection with it.
+
+// The socket behind a descriptor, or `inet.SOCK_MAX`.
+fn sock_of(state: u64, me: u64, fd: u64) -> u64 {
+    let of: u64 = of_of(state, me, fd)
+    if of >= file.MAX_OPEN {
+        return inet.SOCK_MAX
+    }
+    if file.open_kind(state, of) != file.K_SOCK {
+        return inet.SOCK_MAX
+    }
+    return file.open_ino(state, of)
+}
+
+// One reference less on an open file, and the connection behind it torn
+// down when that was the last one. Everything in this file that drops a
+// descriptor goes through here.
+fn unref_of(state: u64, of: u64) {
+    if of < file.MAX_OPEN && file.open_kind(state, of) == file.K_SOCK {
+        if file.open_refs(state, of) <= 1 {
+            inet.sock_close(state, file.open_ino(state, of))
+        }
+    }
+    file.open_unref(state, of)
+}
+
+// The end of a process. Every socket it still holds and nobody else
+// does is closed in an orderly way -- the FIN travels, and the state
+// machine of round K3 walks through TIME_WAIT on its own afterwards.
+fn sock_close_all(state: u64, me: u64) {
+    var fd: u64 = 0
+    while fd < file.MAX_FD {
+        let of: u64 = of_of(state, me, fd)
+        if of < file.MAX_OPEN && file.open_kind(state, of) == file.K_SOCK {
+            if file.open_refs(state, of) <= 1 {
+                inet.sock_close(state, file.open_ino(state, of))
+            }
+        }
+        fd = fd + 1
+    }
+}
+
+// ------------------------------------------------------ sockaddr_in
+
+// Reads sixteen octets out of ring 3 and takes the address and the port
+// out of them. The port and the address are BIG ENDIAN on the wire and
+// in this structure; the family is not.
+fn sa_in(state: u64, me: u64, addr: u64, len: u64, ipp: *mut u64,
+    portp: *mut u64) -> u64 {
+    *ipp = 0
+    *portp = 0
+    if addr == 0 || len < SA_BYTES {
+        return neg(errno.E_INVAL)
+    }
+    let sa: u64 = inet.saddr(state)
+    if !copy_in(state, me, sa, addr, SA_BYTES) {
+        return neg(errno.E_FAULT)
+    }
+    let family: u64 = kstate.get8(sa) | (kstate.get8(sa + 1) << 8)
+    if family != AF_INET {
+        return neg(errno.E_AFNOSUPPORT)
+    }
+    *portp = (kstate.get8(sa + 2) << 8) | kstate.get8(sa + 3)
+    *ipp = (kstate.get8(sa + 4) << 24) | (kstate.get8(sa + 5) << 16)
+        | (kstate.get8(sa + 6) << 8) | kstate.get8(sa + 7)
+    return 0
+}
+
+// And the other direction, with the `socklen_t*` the caller handed in:
+// it is read AND written, exactly as `accept(2)` describes it.
+fn sa_out(state: u64, me: u64, addr: u64, lenp: u64, a: u64,
+    port: u64) -> u64 {
+    if addr == 0 {
+        return 0
+    }
+    var room: u64 = SA_BYTES
+    if lenp != 0 {
+        if !proc.user_ok(state, me, lenp, 4) {
+            return neg(errno.E_FAULT)
+        }
+        room = 0
+        var k: u64 = 0
+        while k < 4 {
+            room = room | (peek(state, me, lenp + k) << (k * 8))
+            k = k + 1
+        }
+    }
+    let sa: u64 = inet.saddr(state) + 64
+    var i: u64 = 0
+    while i < SA_BYTES {
+        kstate.set8(sa + i, 0 as u8)
+        i = i + 1
+    }
+    kstate.set8(sa, (AF_INET & 0xFF) as u8)
+    kstate.set8(sa + 1, ((AF_INET >> 8) & 0xFF) as u8)
+    kstate.set8(sa + 2, ((port >> 8) & 0xFF) as u8)
+    kstate.set8(sa + 3, (port & 0xFF) as u8)
+    kstate.set8(sa + 4, ((a >> 24) & 0xFF) as u8)
+    kstate.set8(sa + 5, ((a >> 16) & 0xFF) as u8)
+    kstate.set8(sa + 6, ((a >> 8) & 0xFF) as u8)
+    kstate.set8(sa + 7, (a & 0xFF) as u8)
+    var n: u64 = SA_BYTES
+    if room < n {
+        n = room
+    }
+    if n > 0 {
+        if !copy_out(state, me, addr, sa, n) {
+            return neg(errno.E_FAULT)
+        }
+    }
+    if lenp != 0 {
+        var k: u64 = 0
+        while k < 4 {
+            if !poke(state, me, lenp + k, (SA_BYTES >> (k * 8)) & 0xFF) {
+                return neg(errno.E_FAULT)
+            }
+            k = k + 1
+        }
+    }
+    return 0
+}
+
+// -------------------------------------------------------- the calls
+
+fn do_socket(state: u64, me: u64, domain: u64, kind: u64,
+    protocol: u64) -> u64 {
+    if !inet.ready(state) {
+        return neg(errno.E_NODEV)
+    }
+    if domain != AF_INET {
+        return neg(errno.E_AFNOSUPPORT)
+    }
+    let flags: u64 = kind & (SOCK_NONBLOCK | SOCK_CLOEXEC)
+    let base: u64 = kind & 0xFF
+    var k: u64 = inet.SK_FREE
+    if base == SOCK_STREAM {
+        if protocol != 0 && protocol != IPPROTO_TCP {
+            return neg(errno.E_PROTONOSUPPORT)
+        }
+        k = inet.SK_TCP
+    } else if base == SOCK_DGRAM {
+        // The ping socket Linux has had since 3.0. A `ping` that needs
+        // no raw socket and no privilege is the reason it exists there,
+        // and the reason it exists here.
+        if protocol == IPPROTO_ICMP {
+            k = inet.SK_ICMP
+        } else if protocol == 0 || protocol == IPPROTO_UDP {
+            k = inet.SK_UDP
+        } else {
+            return neg(errno.E_PROTONOSUPPORT)
+        }
+    } else {
+        return neg(errno.E_PROTONOSUPPORT)
+    }
+    let fd: u64 = file.fd_alloc(state, me, 0)
+    if fd >= file.MAX_FD {
+        return neg(errno.E_MFILE)
+    }
+    let si: u64 = inet.sock_new(state, k)
+    if si >= inet.SOCK_MAX {
+        return neg(errno.E_NFILE)
+    }
+    if (flags & SOCK_NONBLOCK) != 0 {
+        inet.sock_set_nonblock(state, si)
+    }
+    let of: u64 = file.open_alloc(state, file.K_SOCK, si, O_RDWR)
+    if of >= file.MAX_OPEN {
+        inet.sock_close(state, si)
+        return neg(errno.E_NFILE)
+    }
+    file.fd_set(state, me, fd, of)
+    return fd
+}
+
+fn do_bind(state: u64, me: u64, fd: u64, addr: u64, len: u64) -> u64 {
+    let si: u64 = sock_of(state, me, fd)
+    if si >= inet.SOCK_MAX {
+        return neg(errno.E_BADF)
+    }
+    var a: u64 = 0
+    var port: u64 = 0
+    let r: u64 = sa_in(state, me, addr, len, &a, &port)
+    if errno.is_error(r) {
+        return r
+    }
+    // An address that is neither 0.0.0.0 nor the one this machine has is
+    // one nobody would ever answer for.
+    if a != 0 && a != inet.ip(state) {
+        return neg(errno.E_ADDRNOTAVAIL)
+    }
+    return inet.sock_bind(state, si, port)
+}
+
+fn do_listen(state: u64, me: u64, fd: u64, backlog: u64) -> u64 {
+    let si: u64 = sock_of(state, me, fd)
+    if si >= inet.SOCK_MAX {
+        return neg(errno.E_BADF)
+    }
+    return inet.sock_listen(state, si, backlog)
+}
+
+// Waits, unless the descriptor was asked for in non-blocking mode. The
+// waiting is `sleep_ticks`, so the network task goes on moving frames
+// the whole time -- that is the whole reason it is a task.
+fn do_accept(state: u64, me: u64, fd: u64, addr: u64, lenp: u64,
+    flags: u64) -> u64 {
+    let si: u64 = sock_of(state, me, fd)
+    if si >= inet.SOCK_MAX {
+        return neg(errno.E_BADF)
+    }
+    let nb: bool = inet.sock_nonblock(state, si) || (flags & SOCK_NONBLOCK) != 0
+    var waited: u64 = 0
+    var got: u64 = inet.SOCK_MAX
+    while got >= inet.SOCK_MAX {
+        let c: u64 = inet.sock_accept(state, si)
+        if !errno.is_error(c) && c < inet.SOCK_MAX {
+            got = c
+        } else if nb {
+            return neg(errno.E_AGAIN)
+        } else if waited >= NET_ROUNDS {
+            return neg(errno.E_AGAIN)
+        } else {
+            waited = waited + 1
+            sched.sleep_ticks(state, 1)
+        }
+    }
+    let nfd: u64 = file.fd_alloc(state, me, 0)
+    if nfd >= file.MAX_FD {
+        inet.sock_close(state, got)
+        return neg(errno.E_MFILE)
+    }
+    let of: u64 = file.open_alloc(state, file.K_SOCK, got, O_RDWR)
+    if of >= file.MAX_OPEN {
+        inet.sock_close(state, got)
+        return neg(errno.E_NFILE)
+    }
+    file.fd_set(state, me, nfd, of)
+    var pip: u64 = 0
+    var pport: u64 = 0
+    inet.sock_peer(state, got, &pip, &pport)
+    let w: u64 = sa_out(state, me, addr, lenp, pip, pport)
+    if errno.is_error(w) {
+        return w
+    }
+    return nfd
+}
+
+// A blocking `connect` comes back when the handshake is done, an error
+// when it was refused, and -ETIMEDOUT when nobody ever answered. State 4
+// is ESTABLISHED and 0 is CLOSED in the numbering of `net.tcp`.
+fn do_connect(state: u64, me: u64, fd: u64, addr: u64, len: u64) -> u64 {
+    let si: u64 = sock_of(state, me, fd)
+    if si >= inet.SOCK_MAX {
+        return neg(errno.E_BADF)
+    }
+    var a: u64 = 0
+    var port: u64 = 0
+    let r: u64 = sa_in(state, me, addr, len, &a, &port)
+    if errno.is_error(r) {
+        return r
+    }
+    let c: u64 = inet.sock_connect(state, si, a, port)
+    if errno.is_error(c) {
+        return c
+    }
+    if inet.sock_kind(state, si) != inet.SK_TCP {
+        return 0
+    }
+    if inet.sock_nonblock(state, si) {
+        return neg(errno.E_INPROGRESS)
+    }
+    var waited: u64 = 0
+    while waited < NET_ROUNDS {
+        let st: u64 = inet.sock_state(state, si)
+        if st == 4 {
+            return 0
+        }
+        let e: u64 = inet.sock_error(state, si)
+        if e != 0 {
+            return neg(e)
+        }
+        if st == 0 && waited > 20 {
+            return neg(errno.E_CONNREFUSED)
+        }
+        waited = waited + 1
+        sched.sleep_ticks(state, 1)
+    }
+    return neg(errno.E_TIMEDOUT)
+}
+
+// `send` and `recv` are these two with a null address -- that is what
+// glibc does on x86-64, and copying it is what makes a Linux program
+// work here without a translation table.
+fn do_sendto(state: u64, me: u64, fd: u64, buf: u64, want: u64,
+    addr: u64, alen: u64) -> u64 {
+    let si: u64 = sock_of(state, me, fd)
+    if si >= inet.SOCK_MAX {
+        return neg(errno.E_BADF)
+    }
+    var len: u64 = want
+    if len > MAX_IO {
+        len = MAX_IO
+    }
+    let bounce: u64 = inet.bounce(state)
+    if !copy_in(state, me, bounce, buf, len) {
+        return neg(errno.E_FAULT)
+    }
+    var a: u64 = 0
+    var port: u64 = 0
+    if addr != 0 {
+        let r: u64 = sa_in(state, me, addr, alen, &a, &port)
+        if errno.is_error(r) {
+            return r
+        }
+    }
+    return sock_io(state, si, bounce, len, a, port, true)
+}
+
+fn do_recvfrom(state: u64, me: u64, fd: u64, buf: u64, want: u64,
+    addr: u64, lenp: u64) -> u64 {
+    let si: u64 = sock_of(state, me, fd)
+    if si >= inet.SOCK_MAX {
+        return neg(errno.E_BADF)
+    }
+    var len: u64 = want
+    if len > MAX_IO {
+        len = MAX_IO
+    }
+    if !proc.user_ok(state, me, buf, len) {
+        return neg(errno.E_FAULT)
+    }
+    let bounce: u64 = inet.bounce(state)
+    var a: u64 = 0
+    var port: u64 = 0
+    var waited: u64 = 0
+    let nb: bool = inet.sock_nonblock(state, si)
+    var n: u64 = 0
+    var going: bool = true
+    while going {
+        n = inet.sock_recvfrom(state, si, bounce, len, &a, &port)
+        if !errno.is_error(n) {
+            going = false
+        } else if n != neg(errno.E_AGAIN) {
+            return n
+        } else if nb || waited >= NET_ROUNDS {
+            return neg(errno.E_AGAIN)
+        } else {
+            waited = waited + 1
+            sched.sleep_ticks(state, 1)
+        }
+    }
+    if n > 0 {
+        if !copy_out(state, me, buf, bounce, n) {
+            return neg(errno.E_FAULT)
+        }
+    }
+    if addr != 0 {
+        let w: u64 = sa_out(state, me, addr, lenp, a, port)
+        if errno.is_error(w) {
+            return w
+        }
+    }
+    return n
+}
+
+// The waiting half of `send`, shared with `write` on a socket. A socket
+// whose send window is full is not an error; it is a reason to come back
+// in a moment -- and a `write` that returns a SHORT count is what the
+// interface has always allowed.
+fn sock_io(state: u64, si: u64, bounce: u64, len: u64, a: u64, port: u64,
+    to: bool) -> u64 {
+    var waited: u64 = 0
+    let nb: bool = inet.sock_nonblock(state, si)
+    while waited <= NET_ROUNDS {
+        var n: u64 = 0
+        if to {
+            n = inet.sock_sendto(state, si, bounce, len, a, port)
+        } else {
+            n = inet.sock_send(state, si, bounce, len)
+        }
+        if !errno.is_error(n) {
+            return n
+        }
+        if n != neg(errno.E_AGAIN) {
+            return n
+        }
+        if nb {
+            return neg(errno.E_AGAIN)
+        }
+        waited = waited + 1
+        sched.sleep_ticks(state, 1)
+    }
+    return neg(errno.E_AGAIN)
+}
+
+// `read` and `write` on a socket descriptor. The same two functions the
+// calls above use, minus the address -- so a program can point `stdout`
+// at a connection with `dup2` and never call a socket function again.
+fn sock_read(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
+    return do_recvfrom(state, me, fd_back(state, me, of), buf, len, 0, 0)
+}
+
+fn sock_write(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
+    return do_sendto(state, me, fd_back(state, me, of), buf, len, 0, 0)
+}
+
+// `read_of`/`write_of` were split off a descriptor for the native ABI of
+// the capability round, so they carry an OPEN FILE and not a number. The
+// socket calls want the number back; the table is sixteen entries and
+// the search is a loop over them.
+fn fd_back(state: u64, me: u64, of: u64) -> u64 {
+    var fd: u64 = 0
+    while fd < file.MAX_FD {
+        if of_of(state, me, fd) == of {
+            return fd
+        }
+        fd = fd + 1
+    }
+    return file.MAX_FD
+}
+
+fn do_shutdown(state: u64, me: u64, fd: u64, how: u64) -> u64 {
+    let si: u64 = sock_of(state, me, fd)
+    if si >= inet.SOCK_MAX {
+        return neg(errno.E_BADF)
+    }
+    return inet.sock_shutdown(state, si, how)
+}
+
+fn do_sockname(state: u64, me: u64, fd: u64, addr: u64, lenp: u64,
+    peer: bool) -> u64 {
+    let si: u64 = sock_of(state, me, fd)
+    if si >= inet.SOCK_MAX {
+        return neg(errno.E_BADF)
+    }
+    var a: u64 = 0
+    var port: u64 = 0
+    var r: u64 = 0
+    if peer {
+        r = inet.sock_peer(state, si, &a, &port)
+    } else {
+        r = inet.sock_local(state, si, &a, &port)
+    }
+    if errno.is_error(r) {
+        return r
+    }
+    return sa_out(state, me, addr, lenp, a, port)
+}
+
+// There is exactly one option this kernel could act on and it is the
+// default: a listening socket may be bound again after the connection
+// before it went through TIME_WAIT, because the slot is held by
+// `tcp.fi` and freed by it. So every option is taken and none is acted
+// on -- and that is said here rather than answered with -ENOPROTOOPT,
+// which would make `curl` and `nc` give up for no reason.
+fn do_setsockopt(state: u64, me: u64, fd: u64, level: u64,
+    name: u64) -> u64 {
+    let si: u64 = sock_of(state, me, fd)
+    if si >= inet.SOCK_MAX {
+        return neg(errno.E_BADF)
+    }
+    return 0
 }
