@@ -1,0 +1,925 @@
+// kernel/virtio.fi -- round K8: a network card the processor does not
+// carry either.
+//
+// Round K2 taught this kernel to find a device on the bus and to let it
+// fetch its own commands out of memory (`nvme.fi`). Round K3 wrote a
+// TCP/IP stack that has two doors and nothing under them. THIS file is
+// what goes under them: virtio-net, the paravirtual network card, in the
+// MODERN shape of the virtio 1.0 specification.
+//
+// WHY VIRTIO AND NOT e1000. Both are in QEMU and both were on the bus
+// before the choice was made (`tools/net/run.sh` prints the list):
+//
+//   00:03.0 1af4:1000 class=02:00:00  bar0=io0xc060/0x20
+//                                     bar4=0xfe000000/0x4000  msix
+//   00:03.0 8086:100e class=02:00:00  bar0=0xfebc0000/0x20000  msi
+//
+// e1000 is a real chip and its driver is a transcript of a data sheet:
+// EEPROM reads for the address, a PHY that has to be talked to, sixteen
+// registers whose names only mean something with the manual open. Every
+// line of that would be about an Intel chip from 2000 and nothing about
+// how a driver works. virtio is the opposite: ONE ring structure that
+// every virtio device shares, a feature negotiation that is a protocol
+// rather than a table of quirks, and a specification that fits in a
+// pocket. The kernel learns the shape here that its next four devices
+// will also have.
+//
+// THE MODERN SHAPE, and why not the legacy one. A transitional
+// virtio-net-pci offers both: BAR0 as a PORT range with the 0.9.5
+// register layout, and BAR4 as MEMORY with the 1.0 layout described by
+// CAPABILITIES in the configuration space. The legacy path is fewer
+// lines -- and it is a step back into exactly what round K2 left: `in
+// ax, dx` for every register, a queue address that is a 32-bit PAGE
+// NUMBER (so no queue above 4 GiB), and no way to say which of several
+// regions is which. The modern path is read out of the device the same
+// way the BARs were: the device says where its four regions are, and the
+// driver believes the device rather than a constant.
+//
+// FIVE THINGS A VIRTIO DRIVER IS, in the order they happen:
+//
+//   1. FIND IT. Vendor 0x1AF4, class 02:00 (ethernet). Modern devices
+//      answer 0x1041, transitional ones 0x1000; both are taken.
+//   2. THE FOUR REGIONS. The capability list carries vendor capabilities
+//      (id 0x09), each one saying `cfg_type`, `bar`, `offset`, `length`.
+//      Type 1 is the common configuration, 2 the notification area, 3
+//      the interrupt status, 4 the device's own configuration -- for a
+//      network card the six octets of its Ethernet address.
+//   3. NEGOTIATE. The device offers 64 feature bits in two 32-bit
+//      windows; the driver writes back the subset it understands and
+//      then asks the device whether that subset is acceptable
+//      (FEATURES_OK). This driver takes exactly two: VIRTIO_F_VERSION_1
+//      (bit 32, without which none of the above layout holds) and
+//      VIRTIO_NET_F_MAC (bit 5, the address). Everything else --
+//      checksum offload, merged receive buffers, control queue, multiple
+//      queues -- is REFUSED, and refusing is a decision the device is
+//      told about rather than one the driver keeps to itself.
+//   4. TWO VIRTQUEUES. Queue 0 receives, queue 1 sends. A split
+//      virtqueue is three arrays in ordinary memory: DESCRIPTORS (where
+//      a buffer is and how long), the AVAILABLE ring (what the driver
+//      handed over) and the USED ring (what the device gave back). The
+//      device reads and writes all three ITSELF -- which is why the bus
+//      master bit is as necessary here as it was for the disk.
+//   5. NOTIFY AND BE NOTIFIED. One 16-bit write into the notification
+//      area says "the ring has grown"; an MSI-X message or the interrupt
+//      pin says "something came back".
+//
+// WHAT THIS DRIVER DOES NOT DO, said plainly: no merged receive buffers
+// (so every frame has to fit in one 2 KiB buffer, which every Ethernet
+// frame does), no checksum or segmentation offload (the stack computes
+// every checksum itself, and `tools/net/run.sh` switches the offloads off
+// on the Linux side for the same reason round K3 did), no control queue,
+// one queue pair, no packed rings, no indirect descriptors.
+//
+// THE ORDER OF WRITES IS PART OF THE PROTOCOL. A descriptor has to be
+// complete in memory before the available ring points at it, and the
+// available ring has to be complete before its index moves -- otherwise
+// the device reads a descriptor that is half written. On x86 stores are
+// not reordered against stores, so no fence is needed for that direction;
+// what IS needed is that the compiler does not move them, and every
+// access below goes through the volatile intrinsics for exactly that
+// reason. Where the device's writes have to be seen in order --
+// `used.idx` before `used.ring[i]` -- there is an `lfence`.
+
+import kstate
+import mem
+import pci
+import apic
+
+export {
+    init, present, ready, up, mac_at, bdf, idx,
+    rx_take, rx_recycle, tx_frame, tx_room, poll,
+    irq, irqs, rx_frames, tx_frames, tx_drops, rx_octets, tx_octets,
+    features, queue_size, msix, notified, link_up,
+    shut_down, VEC_NET, QSIZE, BUFSZ
+}
+
+// ------------------------------------------ the K8 part of the scalars
+
+// `pci.K2_SCALARS` is one page. 0x000 is pci.fi, 0x008..0x0F8 apic.fi,
+// 0x0F0 hw.fi, 0x100..0x198 nvme.fi. Round K8 takes 0x200 upwards for
+// the driver and leaves 0x300 upwards to `inet.fi`.
+const S_COMMON: u64 = 0x200 // the four regions, as the KERNEL sees them
+const S_NOTIFY: u64 = 0x208
+const S_NMULT: u64 = 0x210 // notify_off_multiplier
+const S_ISR: u64 = 0x218
+const S_DEVCFG: u64 = 0x220
+const S_BDF: u64 = 0x228
+const S_IDX: u64 = 0x230 // its place in the device table of pci.fi
+const S_READY: u64 = 0x238
+const S_MAC: u64 = 0x240 // six octets in one word, low first
+const S_RING: u64 = 0x248 // the memory the two queues live in
+const S_RX_AVAIL: u64 = 0x250 // the driver's own copy of avail.idx
+const S_RX_USED: u64 = 0x258 // the last used.idx that was worked off
+const S_TX_AVAIL: u64 = 0x260
+const S_TX_USED: u64 = 0x268
+const S_RX_DOOR: u64 = 0x270 // where queue 0 is notified
+const S_TX_DOOR: u64 = 0x278
+const S_IRQS: u64 = 0x280
+const S_RXP: u64 = 0x288
+const S_TXP: u64 = 0x290
+const S_TXDROP: u64 = 0x298
+const S_MSIX: u64 = 0x2A0
+const S_QSIZE: u64 = 0x2A8
+const S_FEAT: u64 = 0x2B0 // what was negotiated, low window
+const S_FEATHI: u64 = 0x2B8
+const S_RXB: u64 = 0x2C0
+const S_TXB: u64 = 0x2C8
+const S_NOTIFIED: u64 = 0x2D0 // how often the doorbell was rung
+const S_LINK: u64 = 0x2D8
+
+// ------------------------------------------------ the ring memory
+
+// Sixty-four descriptors per queue. Not 256 (what QEMU offers): the
+// receive side keeps a 2 KiB buffer per descriptor pinned, and 2 * 64 *
+// 2 KiB = 256 KiB is already a quarter of what the whole stack costs.
+// Modern virtio lets the driver WRITE a smaller queue size, and the
+// value has to be a power of two -- so this number is one.
+const QSIZE: u64 = 64
+const BUFSZ: u64 = 2048 // 1514 octets of frame + 12 of virtio header
+
+// One contiguous run of frames. Each of the six ring parts gets a page
+// of its own -- the alignment virtio asks for is 16/2/4 octets, and a
+// page is cheaper to reason about than a packing that has to be
+// recomputed when QSIZE changes.
+const RXD_OFF: u64 = 0x00000 // 64 * 16 = 1024
+const RXA_OFF: u64 = 0x01000 // 4 + 64 * 2 + 2 = 134
+const RXU_OFF: u64 = 0x02000 // 4 + 64 * 8 + 2 = 518
+const TXD_OFF: u64 = 0x03000
+const TXA_OFF: u64 = 0x04000
+const TXU_OFF: u64 = 0x05000
+const RXB_OFF: u64 = 0x06000 // 64 * 2048 = 0x20000
+const TXB_OFF: u64 = 0x26000
+const RING_BYTES: u64 = 0x46000 // 286 720 octets = 70 frames
+
+// ----------------------------------------------------- the constants
+
+const VENDOR_VIRTIO: u64 = 0x1AF4
+const CLASS_NET: u64 = 0x02
+const SUB_ETHERNET: u64 = 0x00
+
+const CAP_VENDOR: u64 = 0x09
+
+// Offsets inside a virtio PCI capability.
+const VC_TYPE: u64 = 3
+const VC_BAR: u64 = 4
+const VC_OFFSET: u64 = 8
+const VC_LENGTH: u64 = 12
+const VC_NOTIFY_MULT: u64 = 16
+
+const CFG_COMMON: u64 = 1
+const CFG_NOTIFY: u64 = 2
+const CFG_ISR: u64 = 3
+const CFG_DEVICE: u64 = 4
+
+// The common configuration structure, virtio 1.0 section 4.1.4.3.
+const C_DFSELECT: u64 = 0x00
+const C_DFEATURE: u64 = 0x04
+const C_GFSELECT: u64 = 0x08
+const C_GFEATURE: u64 = 0x0C
+const C_MSIX_CFG: u64 = 0x10
+const C_NUMQ: u64 = 0x12
+const C_STATUS: u64 = 0x14
+const C_GENERATION: u64 = 0x15
+const C_QSELECT: u64 = 0x16
+const C_QSIZE: u64 = 0x18
+const C_QMSIX: u64 = 0x1A
+const C_QENABLE: u64 = 0x1C
+const C_QNOTIFY_OFF: u64 = 0x1E
+const C_QDESC: u64 = 0x20
+const C_QDRIVER: u64 = 0x28
+const C_QDEVICE: u64 = 0x30
+
+const ST_ACK: u64 = 1
+const ST_DRIVER: u64 = 2
+const ST_DRIVER_OK: u64 = 4
+const ST_FEATURES_OK: u64 = 8
+const ST_NEEDS_RESET: u64 = 64
+const ST_FAILED: u64 = 128
+
+// The feature bits this driver knows about.
+const F_NET_MAC: u64 = 5 // the device carries an address
+const F_NET_STATUS: u64 = 16 // and a link status
+const F_VERSION_1: u64 = 0 // in the HIGH window: bit 32 of the whole
+
+const NO_VECTOR: u64 = 0xFFFF
+
+// Descriptor flags.
+const D_NEXT: u64 = 1
+const D_WRITE: u64 = 2 // the DEVICE writes into this buffer
+
+// The device configuration of a network card: six octets of address,
+// then a 16-bit link status.
+const N_MAC: u64 = 0
+const N_STATUS: u64 = 6
+const NS_LINK_UP: u64 = 1
+
+// The vector the card reports on. 44 belongs to the disk since round K2,
+// 45 was the next free stub in the table of `isr.s` -- no assembly had to
+// change for this round either.
+const VEC_NET: u64 = 45
+
+// How long a wait for the device may last before it is called dead. The
+// same rule as in `nvme.fi`: a card that never answers must not be able
+// to stop the kernel, because then the counter-check would hang instead
+// of collapsing.
+const SPIN_LIMIT: u64 = 2000000
+
+// -------------------------------------------------------- small helpers
+
+fn sc(off: u64) -> u64 {
+    return pci.K2_SCALARS + off
+}
+
+fn common(state: u64) -> u64 {
+    return kstate.get(state, sc(S_COMMON))
+}
+
+fn present(state: u64) -> bool {
+    return common(state) != 0
+}
+
+fn ready(state: u64) -> bool {
+    return kstate.get(state, sc(S_READY)) != 0
+}
+
+fn up(state: u64) -> bool {
+    return ready(state)
+}
+
+fn bdf(state: u64) -> u64 {
+    return kstate.get(state, sc(S_BDF))
+}
+
+fn idx(state: u64) -> u64 {
+    return kstate.get(state, sc(S_IDX))
+}
+
+fn irqs(state: u64) -> u64 {
+    return kstate.get(state, sc(S_IRQS))
+}
+
+fn rx_frames(state: u64) -> u64 {
+    return kstate.get(state, sc(S_RXP))
+}
+
+fn tx_frames(state: u64) -> u64 {
+    return kstate.get(state, sc(S_TXP))
+}
+
+fn tx_drops(state: u64) -> u64 {
+    return kstate.get(state, sc(S_TXDROP))
+}
+
+fn rx_octets(state: u64) -> u64 {
+    return kstate.get(state, sc(S_RXB))
+}
+
+fn tx_octets(state: u64) -> u64 {
+    return kstate.get(state, sc(S_TXB))
+}
+
+fn features(state: u64) -> u64 {
+    return kstate.get(state, sc(S_FEAT))
+        | (kstate.get(state, sc(S_FEATHI)) << 32)
+}
+
+fn queue_size(state: u64) -> u64 {
+    return kstate.get(state, sc(S_QSIZE))
+}
+
+fn msix(state: u64) -> bool {
+    return kstate.get(state, sc(S_MSIX)) != 0
+}
+
+fn notified(state: u64) -> u64 {
+    return kstate.get(state, sc(S_NOTIFIED))
+}
+
+fn link_up(state: u64) -> bool {
+    return kstate.get(state, sc(S_LINK)) != 0
+}
+
+// The six octets of the Ethernet address, one at a time. They travel in
+// ONE word because a kernel without global variables has nowhere else to
+// put six octets that several modules read.
+fn mac_at(state: u64, i: u64) -> u64 {
+    if i >= 6 {
+        return 0
+    }
+    return (kstate.get(state, sc(S_MAC)) >> (i * 8)) & 0xFF
+}
+
+fn rd8(b: u64, off: u64) -> u64 {
+    return __mmio_read8((b + off) as *mut u8) as u64
+}
+
+fn wr8(b: u64, off: u64, v: u64) {
+    __mmio_write8((b + off) as *mut u8, (v & 0xFF) as u8)
+}
+
+fn rd16(b: u64, off: u64) -> u64 {
+    return __mmio_read16((b + off) as *mut u16) as u64
+}
+
+fn wr16(b: u64, off: u64, v: u64) {
+    __mmio_write16((b + off) as *mut u16, (v & 0xFFFF) as u16)
+}
+
+fn rd32(b: u64, off: u64) -> u64 {
+    return __mmio_read32((b + off) as *mut u32) as u64
+}
+
+fn wr32(b: u64, off: u64, v: u64) {
+    __mmio_write32((b + off) as *mut u32, (v & 0xFFFFFFFF) as u32)
+}
+
+fn wr64(b: u64, off: u64, v: u64) {
+    __mmio_write64((b + off) as *mut u64, v)
+}
+
+fn ring(state: u64) -> u64 {
+    return kstate.get(state, sc(S_RING))
+}
+
+// --------------------------------------------------- the split ring
+//
+// A descriptor is sixteen octets: address, length, flags, next. The
+// device reads them; every store goes through the volatile intrinsic so
+// that nothing is merged or moved out from under it.
+
+fn desc_set(table: u64, i: u64, addr: u64, len: u64, flags: u64, next: u64) {
+    let d: u64 = table + i * 16
+    wr64(d, 0, addr)
+    wr32(d, 8, len)
+    wr16(d, 12, flags)
+    wr16(d, 14, next)
+}
+
+// The available ring: flags, index, then QSIZE entries of sixteen bits.
+fn avail_put(a: u64, slot: u64, desc: u64) {
+    wr16(a, 4 + slot * 2, desc)
+}
+
+fn avail_idx(a: u64) -> u64 {
+    return rd16(a, 2)
+}
+
+fn avail_publish(a: u64, v: u64) {
+    wr16(a, 2, v)
+}
+
+// The used ring: flags, index, then QSIZE entries of eight octets --
+// four for the descriptor number, four for how much the device wrote.
+fn used_idx(u: u64) -> u64 {
+    return rd16(u, 2)
+}
+
+fn used_id(u: u64, slot: u64) -> u64 {
+    return rd32(u, 4 + slot * 8)
+}
+
+fn used_len(u: u64, slot: u64) -> u64 {
+    return rd32(u, 4 + slot * 8 + 4)
+}
+
+// The doorbell. One 16-bit write of the queue number into the address
+// the notification capability named for THIS queue.
+fn kick(state: u64, door: u64, queue: u64) {
+    if door == 0 {
+        return
+    }
+    wr16(door, 0, queue)
+    kstate.add(state, sc(S_NOTIFIED), 1)
+}
+
+// ---------------------------------------------------- the capabilities
+
+// Walks the capability list and returns the offset of the vendor
+// capability whose `cfg_type` is `want`, or 0. This is not
+// `pci.cap_find`: there are FIVE capabilities with the same id 0x09 on
+// this device and they are told apart by a field inside them.
+fn find_vcap(d: u64, want: u64) -> u64 {
+    if (pci.cfg_read16(d, 0x06) & 0x10) == 0 {
+        return 0
+    }
+    var off: u64 = pci.cfg_read8(d, 0x34) & 0xFC
+    var guard: u64 = 0
+    while off >= 0x40 && guard < 48 {
+        if pci.cfg_read8(d, off) == CAP_VENDOR {
+            if pci.cfg_read8(d, off + VC_TYPE) == want {
+                return off
+            }
+        }
+        off = pci.cfg_read8(d, off + 1) & 0xFC
+        guard = guard + 1
+    }
+    return 0
+}
+
+// The address the KERNEL uses to reach one of the four regions. The
+// capability says which BAR and which offset in it; the BAR says where
+// the device answers ON THE BUS, and `apic.map_device` makes that
+// reachable in the first gigabyte. Confusing the two is the classic way
+// to read zeroes forever.
+fn region(state: u64, i: u64, d: u64, cap: u64) -> u64 {
+    if cap == 0 {
+        return 0
+    }
+    let which: u64 = pci.cfg_read8(d, cap + VC_BAR)
+    if which >= 6 {
+        return 0
+    }
+    let phys: u64 = pci.bar(state, i, which)
+    if phys == 0 || pci.bar_is_io(state, i, which) {
+        return 0
+    }
+    let off: u64 = pci.cfg_read32(d, cap + VC_OFFSET)
+    return apic.map_device(state, phys + off)
+}
+
+// ------------------------------------------------------------- status
+
+fn status(state: u64) -> u64 {
+    return rd8(common(state), C_STATUS)
+}
+
+fn status_add(state: u64, bits: u64) {
+    wr8(common(state), C_STATUS, status(state) | bits)
+}
+
+// A reset is a write of zero AND a read that says the device has seen
+// it. The specification is explicit that the driver has to wait for the
+// zero to come back; a device that is reset while it still owns
+// descriptors would otherwise write into memory that has been handed
+// out again.
+fn reset(state: u64) -> bool {
+    wr8(common(state), C_STATUS, 0)
+    var spin: u64 = 0
+    while spin < SPIN_LIMIT {
+        if rd8(common(state), C_STATUS) == 0 {
+            return true
+        }
+        asm("pause")
+        spin = spin + 1
+    }
+    return false
+}
+
+// ------------------------------------------------------------ the init
+
+fn find(state: u64) -> u64 {
+    let n: u64 = pci.count(state)
+    var i: u64 = 0
+    while i < n {
+        if pci.get(state, i, pci.E_VENDOR) == VENDOR_VIRTIO {
+            if pci.get(state, i, pci.E_CLASS) == CLASS_NET {
+                if pci.get(state, i, pci.E_SUBCLASS) == SUB_ETHERNET {
+                    return i
+                }
+            }
+        }
+        i = i + 1
+    }
+    return pci.MAX_DEV
+}
+
+// `armed` decides whether the interrupt is unmasked; `use_msix` which of
+// the two paths it takes. Both are switches of `tools/net/run.sh`, and
+// both have a run in which the measurement has to collapse.
+fn init(state: u64, use_msix: bool, armed: bool) -> bool {
+    kstate.set(state, sc(S_READY), 0)
+    let i: u64 = find(state)
+    if i >= pci.MAX_DEV {
+        return false
+    }
+    let d: u64 = pci.get(state, i, pci.E_BDF)
+    kstate.set(state, sc(S_IDX), i)
+    kstate.set(state, sc(S_BDF), d)
+
+    // The four regions, read out of the device.
+    let c_cap: u64 = find_vcap(d, CFG_COMMON)
+    let n_cap: u64 = find_vcap(d, CFG_NOTIFY)
+    let i_cap: u64 = find_vcap(d, CFG_ISR)
+    let v_cap: u64 = find_vcap(d, CFG_DEVICE)
+    if c_cap == 0 || n_cap == 0 {
+        return false // not a modern device: nothing here would hold
+    }
+    let cbase: u64 = region(state, i, d, c_cap)
+    if cbase == 0 {
+        return false
+    }
+    kstate.set(state, sc(S_COMMON), cbase)
+    kstate.set(state, sc(S_NOTIFY), region(state, i, d, n_cap))
+    kstate.set(state, sc(S_NMULT), pci.cfg_read32(d, n_cap + VC_NOTIFY_MULT))
+    kstate.set(state, sc(S_ISR), region(state, i, d, i_cap))
+    kstate.set(state, sc(S_DEVCFG), region(state, i, d, v_cap))
+
+    // Without this bit the card may answer registers but may not fetch a
+    // descriptor. `tools/net/run.sh` runs this whole function once
+    // without it, and nothing may arrive then.
+    pci.enable_master(d)
+
+    if !reset(state) {
+        return false
+    }
+    status_add(state, ST_ACK)
+    status_add(state, ST_DRIVER)
+
+    if !negotiate(state) {
+        wr8(cbase, C_STATUS, ST_FAILED)
+        return false
+    }
+
+    // The memory for both queues and all their buffers, in ONE run of
+    // frames: a descriptor carries a PHYSICAL address, and the kernel's
+    // heap gives no promise about contiguity.
+    let r: u64 = mem.frame_run(state, RING_BYTES / mem.FRAME_SIZE)
+    if r == 0 {
+        wr8(cbase, C_STATUS, ST_FAILED)
+        return false
+    }
+    var z: u64 = 0
+    while z < RING_BYTES {
+        __mmio_write64((r + z) as *mut u64, 0)
+        z = z + 8
+    }
+    kstate.set(state, sc(S_RING), r)
+    kstate.set(state, sc(S_QSIZE), QSIZE)
+
+    // THE INTERRUPT IS ARMED BEFORE THE QUEUES ARE ENABLED, for the same
+    // reason it was on the disk: a queue remembers which vector it
+    // reports on at the moment it is enabled. Armed afterwards, the
+    // vector is one no queue knows about, and every completion lands in
+    // memory in silence.
+    if use_msix {
+        if !msix_arm(state, i, VEC_NET, armed) {
+            wr8(cbase, C_STATUS, ST_FAILED)
+            return false
+        }
+        kstate.set(state, sc(S_MSIX), 1)
+    } else {
+        intx_arm(state, i, VEC_NET, armed)
+        kstate.set(state, sc(S_MSIX), 0)
+    }
+
+    if !queue_setup(state, 0, r + RXD_OFF, r + RXA_OFF, r + RXU_OFF,
+        S_RX_DOOR, use_msix) {
+        wr8(cbase, C_STATUS, ST_FAILED)
+        return false
+    }
+    if !queue_setup(state, 1, r + TXD_OFF, r + TXA_OFF, r + TXU_OFF,
+        S_TX_DOOR, use_msix) {
+        wr8(cbase, C_STATUS, ST_FAILED)
+        return false
+    }
+
+    read_mac(state)
+    rx_fill(state)
+
+    status_add(state, ST_DRIVER_OK)
+    if (status(state) & ST_DRIVER_OK) == 0 {
+        return false
+    }
+    kstate.set(state, sc(S_READY), 1)
+    // The card only starts writing into the receive buffers once it has
+    // been told the ring is full of them.
+    kick(state, kstate.get(state, sc(S_RX_DOOR)), 0)
+    read_link(state)
+    return true
+}
+
+// Sixty-four bits of features in two windows of thirty-two. The driver
+// writes back what it understands, then ASKS whether that is acceptable
+// -- FEATURES_OK reads back as zero if the device refuses, and a driver
+// that does not check goes on to build queues the device will not serve.
+fn negotiate(state: u64) -> bool {
+    let b: u64 = common(state)
+    wr32(b, C_DFSELECT, 0)
+    let dev_lo: u64 = rd32(b, C_DFEATURE)
+    wr32(b, C_DFSELECT, 1)
+    let dev_hi: u64 = rd32(b, C_DFEATURE)
+
+    // Bit 32 of the whole set -- bit 0 of the high window. Without it
+    // the device is speaking the 0.9.5 layout and everything this file
+    // computes would be at the wrong offset.
+    if (dev_hi & (1 << F_VERSION_1)) == 0 {
+        return false
+    }
+    var lo: u64 = 0
+    if (dev_lo & (1 << F_NET_MAC)) != 0 {
+        lo = lo | (1 << F_NET_MAC)
+    }
+    if (dev_lo & (1 << F_NET_STATUS)) != 0 {
+        lo = lo | (1 << F_NET_STATUS)
+    }
+    let hi: u64 = 1 << F_VERSION_1
+
+    wr32(b, C_GFSELECT, 0)
+    wr32(b, C_GFEATURE, lo)
+    wr32(b, C_GFSELECT, 1)
+    wr32(b, C_GFEATURE, hi)
+    kstate.set(state, sc(S_FEAT), lo)
+    kstate.set(state, sc(S_FEATHI), hi)
+
+    status_add(state, ST_FEATURES_OK)
+    if (status(state) & ST_FEATURES_OK) == 0 {
+        return false
+    }
+    return true
+}
+
+fn queue_setup(state: u64, q: u64, desc: u64, avail: u64, used: u64,
+    door_slot: u64, use_msix: bool) -> bool {
+    let b: u64 = common(state)
+    wr16(b, C_QSELECT, q)
+    let offered: u64 = rd16(b, C_QSIZE)
+    if offered == 0 {
+        return false // the device has no such queue
+    }
+    if offered > QSIZE {
+        // Modern virtio lets the driver shrink a queue. The value has to
+        // be a power of two, and QSIZE is one.
+        wr16(b, C_QSIZE, QSIZE)
+    }
+    if rd16(b, C_QSIZE) != QSIZE {
+        return false
+    }
+    wr64(b, C_QDESC, desc)
+    wr64(b, C_QDRIVER, avail)
+    wr64(b, C_QDEVICE, used)
+    if use_msix {
+        wr16(b, C_QMSIX, 0)
+        if rd16(b, C_QMSIX) != 0 {
+            return false // the device refused the vector
+        }
+    } else {
+        wr16(b, C_QMSIX, NO_VECTOR)
+    }
+    // WHERE this queue is notified. Not a fixed address: the capability
+    // gives a base and a multiplier, and the queue says its own offset.
+    let door: u64 = kstate.get(state, sc(S_NOTIFY))
+        + rd16(b, C_QNOTIFY_OFF) * kstate.get(state, sc(S_NMULT))
+    kstate.set(state, sc(door_slot), door)
+    wr16(b, C_QENABLE, 1)
+    return rd16(b, C_QENABLE) == 1
+}
+
+// The address. With VIRTIO_NET_F_MAC the device has one and it stands in
+// its own configuration region; without it a card would have to invent
+// one, and this driver refuses instead -- an invented address on a wire
+// that a real Linux kernel is listening on is a bug that looks like
+// packet loss.
+fn read_mac(state: u64) {
+    let cfg: u64 = kstate.get(state, sc(S_DEVCFG))
+    if cfg == 0 || (kstate.get(state, sc(S_FEAT)) & (1 << F_NET_MAC)) == 0 {
+        return
+    }
+    var v: u64 = 0
+    var i: u64 = 0
+    while i < 6 {
+        v = v | (rd8(cfg, N_MAC + i) << (i * 8))
+        i = i + 1
+    }
+    kstate.set(state, sc(S_MAC), v)
+}
+
+fn read_link(state: u64) {
+    let cfg: u64 = kstate.get(state, sc(S_DEVCFG))
+    if cfg == 0 || (kstate.get(state, sc(S_FEAT)) & (1 << F_NET_STATUS)) == 0 {
+        kstate.set(state, sc(S_LINK), 1) // no status bit: assume a wire
+        return
+    }
+    var v: u64 = 0
+    if (rd16(cfg, N_STATUS) & NS_LINK_UP) != 0 {
+        v = 1
+    }
+    kstate.set(state, sc(S_LINK), v)
+}
+
+// ------------------------------------------------------- the receive side
+
+// Every descriptor of queue 0 gets a buffer and the WRITE flag -- the
+// device is the one that fills them. All sixty-four go into the
+// available ring at once; from here on the ring is kept full by
+// `rx_recycle`.
+fn rx_fill(state: u64) {
+    let r: u64 = ring(state)
+    let d: u64 = r + RXD_OFF
+    let a: u64 = r + RXA_OFF
+    var i: u64 = 0
+    while i < QSIZE {
+        desc_set(d, i, r + RXB_OFF + i * BUFSZ, BUFSZ, D_WRITE, 0)
+        avail_put(a, i, i)
+        i = i + 1
+    }
+    avail_publish(a, QSIZE)
+    kstate.set(state, sc(S_RX_AVAIL), QSIZE)
+    kstate.set(state, sc(S_RX_USED), 0)
+    kstate.set(state, sc(S_TX_AVAIL), 0)
+    kstate.set(state, sc(S_TX_USED), 0)
+}
+
+// One frame, or 0. What comes back is the address of the frame in
+// `frame` and its length as the result; `slot` gets the descriptor
+// number, which the caller has to hand back with `rx_recycle` once it
+// has copied the octets out.
+//
+// The virtio header of twelve octets sits in front of every frame and is
+// skipped here: without merged buffers and without any offload
+// negotiated it carries nothing this kernel acts on.
+fn rx_take(state: u64, frame: *mut u64, slot: *mut u64) -> u64 {
+    if !ready(state) {
+        return 0
+    }
+    let r: u64 = ring(state)
+    let u: u64 = r + RXU_OFF
+    let last: u64 = kstate.get(state, sc(S_RX_USED))
+    let now: u64 = used_idx(u)
+    if last == now {
+        return 0
+    }
+    // The device wrote `used.ring[i]` before it moved `used.idx`; this
+    // side has to READ them in that order, and on x86 that needs a load
+    // fence and nothing more.
+    asm("lfence")
+    let i: u64 = last % QSIZE
+    let id: u64 = used_id(u, i) % QSIZE
+    let len: u64 = used_len(u, i)
+    kstate.set(state, sc(S_RX_USED), (last +% 1) & 0xFFFF)
+    if len <= 12 || len > BUFSZ {
+        // Nothing usable -- but the descriptor still has to go back,
+        // otherwise the ring runs dry one buffer at a time.
+        rx_recycle(state, id)
+        return 0
+    }
+    *frame = r + RXB_OFF + id * BUFSZ + 12
+    *slot = id
+    kstate.add(state, sc(S_RXP), 1)
+    kstate.add(state, sc(S_RXB), len - 12)
+    return len - 12
+}
+
+// The buffer is free again. Descriptor and length are unchanged, so only
+// the available ring has to point at it once more.
+fn rx_recycle(state: u64, id: u64) {
+    let r: u64 = ring(state)
+    let a: u64 = r + RXA_OFF
+    let idx: u64 = kstate.get(state, sc(S_RX_AVAIL))
+    avail_put(a, idx % QSIZE, id)
+    avail_publish(a, (idx +% 1) & 0xFFFF)
+    kstate.set(state, sc(S_RX_AVAIL), (idx +% 1) & 0xFFFF)
+    kick(state, kstate.get(state, sc(S_RX_DOOR)), 0)
+}
+
+// ------------------------------------------------------- the send side
+
+// How many descriptors of queue 1 are free right now. In flight is the
+// difference of the two indices, and it is computed modulo 2^16 because
+// both of them wrap there -- `-%`, not `-`: since round 72 the plain
+// operator is checked and would rightly panic the kernel at the first
+// wraparound, which happens after 65 536 frames and would therefore be
+// found in a measurement rather than in a test.
+fn tx_room(state: u64) -> u64 {
+    if !ready(state) {
+        return 0
+    }
+    let inflight: u64 = (kstate.get(state, sc(S_TX_AVAIL))
+        -% used_idx(ring(state) + TXU_OFF)) & 0xFFFF
+    if inflight >= QSIZE {
+        return 0
+    }
+    return QSIZE - inflight
+}
+
+// One frame out. `false` means the ring was full -- the caller decides
+// whether to drop it or try again; TCP is built for both.
+fn tx_frame(state: u64, src: u64, n: u64) -> bool {
+    if !ready(state) || n == 0 || n + 12 > BUFSZ {
+        return false
+    }
+    if tx_room(state) == 0 {
+        kstate.add(state, sc(S_TXDROP), 1)
+        return false
+    }
+    let r: u64 = ring(state)
+    let idx: u64 = kstate.get(state, sc(S_TX_AVAIL))
+    let id: u64 = idx % QSIZE
+    let buf: u64 = r + TXB_OFF + id * BUFSZ
+    // The twelve octets of header, zeroed: no offload was negotiated, so
+    // every field of it means "nothing to do".
+    var z: u64 = 0
+    while z < 12 {
+        __mmio_write32((buf + z) as *mut u32, 0)
+        z = z + 4
+    }
+    var k: u64 = 0
+    while k < n {
+        __mmio_write8((buf + 12 + k) as *mut u8,
+            __mmio_read8((src + k) as *mut u8))
+        k = k + 1
+    }
+    desc_set(r + TXD_OFF, id, buf, n + 12, 0, 0)
+    // The descriptor is complete BEFORE the ring points at it, and the
+    // ring is complete before its index moves. On x86 stores keep their
+    // order; what the volatile intrinsics buy is that the compiler keeps
+    // it too.
+    avail_put(r + TXA_OFF, idx % QSIZE, id)
+    avail_publish(r + TXA_OFF, (idx +% 1) & 0xFFFF)
+    kstate.set(state, sc(S_TX_AVAIL), (idx +% 1) & 0xFFFF)
+    kstate.add(state, sc(S_TXP), 1)
+    kstate.add(state, sc(S_TXB), n)
+    kick(state, kstate.get(state, sc(S_TX_DOOR)), 1)
+    return true
+}
+
+// ------------------------------------------------------- the interrupt
+
+// Called out of `trap.fi`. Reading the interrupt status register is what
+// ACKNOWLEDGES a pin interrupt -- the register clears on read. With MSI-X
+// the device does not set it at all and the read is harmless.
+//
+// Nothing else happens here on purpose. The frames are taken out of the
+// ring by `inet.pump`, in a task of its own: a TCP state machine in
+// interrupt context would run on whichever kernel stack happened to be
+// current, with interrupts off, for as long as a retransmission takes.
+fn irq(state: u64) {
+    kstate.add(state, sc(S_IRQS), 1)
+    let isr: u64 = kstate.get(state, sc(S_ISR))
+    if isr != 0 {
+        let v: u64 = rd8(isr, 0)
+        if (v & 2) != 0 {
+            read_link(state)
+        }
+    }
+}
+
+// Is there anything to take? Cheap enough to ask on every turn of the
+// idle loop: two reads of ordinary memory.
+fn poll(state: u64) -> bool {
+    if !ready(state) {
+        return false
+    }
+    return kstate.get(state, sc(S_RX_USED)) != used_idx(ring(state) + RXU_OFF)
+}
+
+// ---------------------------------------------------- arming the vector
+
+// MSI-X entry 0, exactly as `nvme.fi` does it: the PHYSICAL address of
+// the local APIC as the target, the vector as the data. The device puts
+// that word on the bus itself and never sees a page table.
+fn msix_arm(state: u64, i: u64, vector: u64, armed: bool) -> bool {
+    let d: u64 = pci.get(state, i, pci.E_BDF)
+    let cap: u64 = pci.get(state, i, pci.E_MSIX)
+    if cap == 0 {
+        return false
+    }
+    let table: u64 = pci.cfg_read32(d, cap + 4)
+    let bir: u64 = table & 7
+    let toff: u64 = table & 0xFFFFFFF8
+    if pci.bar(state, i, bir) == 0 {
+        return false
+    }
+    let tbase: u64 = apic.map_device(state, pci.bar(state, i, bir) + toff)
+    if tbase == 0 {
+        return false
+    }
+    wr32(tbase, 0, apic.lapic_phys(state) | ((apic.id(state) & 0xFF) << 12))
+    wr32(tbase, 4, 0)
+    wr32(tbase, 8, vector & 0xFF)
+    var ctrl: u64 = 1 // masked
+    if armed {
+        ctrl = 0
+    }
+    wr32(tbase, 12, ctrl)
+    let msg: u64 = pci.cfg_read16(d, cap + 2)
+    pci.cfg_write16(d, cap + 2, (msg | 0x8000) & 0xBFFF)
+    pci.cfg_write16(d, 0x04, pci.cfg_read16(d, 0x04) | 0x400)
+    return true
+}
+
+// The other path: the interrupt PIN through the I/O APIC. PCI lines are
+// level triggered and active low.
+fn intx_arm(state: u64, i: u64, vector: u64, armed: bool) {
+    let d: u64 = pci.get(state, i, pci.E_BDF)
+    pci.cfg_write16(d, 0x04, pci.cfg_read16(d, 0x04) & 0xFBFF)
+    let gsi: u64 = pci.get(state, i, pci.E_IRQLINE)
+    if gsi == 0 || gsi > 23 {
+        return
+    }
+    apic.route(state, gsi, vector, apic.id(state), true, true)
+    if !armed {
+        apic.mask_gsi(state, gsi)
+    }
+}
+
+// The counter-check needs a way to take the card away from a kernel that
+// is otherwise identical. `nonet` never calls `init`; this is for the
+// case where it came up and has to go down again.
+fn shut_down(state: u64) {
+    if common(state) == 0 {
+        return
+    }
+    wr8(common(state), C_STATUS, 0)
+    kstate.set(state, sc(S_READY), 0)
+    pci.disable_master(bdf(state))
+}

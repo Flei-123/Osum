@@ -73,6 +73,17 @@
 #      UEFI" ab; mit ihm bootet dasselbe Abbild ueber BIOS UND ueber
 #      UEFI. Der Start ueber eine echte UEFI-Firmware wird in OrientOS
 #      gemessen -- dort liegen Lader und ISO.
+#  12. Das Netz (tools/net/run.sh, Runde K8): ein virtio-net-Treiber in
+#      Firn (`kernel/virtio.fi`), der TCP/IP-Stack aus Runde K3 als
+#      ABHAENGIGKEIT ueber vendor/firn/COMMIT (`vendor/net/HERKUNFT.md`),
+#      die Naht dazwischen (`kernel/inet.fi`) und Steckdosen-Aufrufe fuer
+#      Ring 3 mit den Nummern von Linux. Gemessen gegen den ECHTEN
+#      Linux-Kernel ueber veth + AF_PACKET: ping, nc, curl, ein
+#      Python-Server und `tc netem`. Gegenproben: ohne das Wort `nic`
+#      bricht jede Messung zusammen, `nicnobm` nimmt das Busmaster-Bit,
+#      `nicnoirq` maskiert den Vektor, `nicintx` nimmt den Stift statt
+#      MSI-X.
+#
 #
 # Kein '|| true', kein Verschlucken von Beendigungscodes.
 set -uo pipefail
@@ -131,13 +142,27 @@ bash vendor/firn/hole-firnc.sh > "$WORK/vendor.log" 2>&1 || \
 [ -d vendor/firn/lib/std ]    || S1="$S1 vendor/firn/lib/std fehlt;"
 [ -f vendor/firn/.gebaut ] && [ "$(cat vendor/firn/.gebaut)" = "$COMMIT" ] || \
     S1="$S1 vendor/firn/.gebaut passt nicht zu COMMIT;"
+# RUNDE K8: der TCP/IP-Stack kommt MIT dem festgenagelten Uebersetzer
+# herein und nicht als Kopie. Die drei Blob-Hashes in vendor/net/BLOBS
+# sind die, die Firn im Baum dieses Commits stehen hat -- zieht jemand
+# COMMIT nach und der Stack hat sich dabei geaendert, faellt es hier auf
+# und nicht erst in einer Messung. Siehe vendor/net/HERKUNFT.md.
+while read -r want name; do
+    case "$want" in \#*|"") continue;; esac
+    got=$(git hash-object "vendor/firn/lib/$name" 2>/dev/null)
+    [ "$got" = "$want" ] || S1="$S1 vendor/firn/lib/$name: $got statt $want;"
+done < vendor/net/BLOBS
+# Gegenprobe zur Gegenprobe: eine Kopie des Stacks im Repo waere genau
+# das Auseinanderdriften, das diese Runde vermeidet.
+[ -d lib/net ] && S1="$S1 im Repo liegt eine Kopie des Stacks unter lib/net;"
 # Gegenprobe: im Repo selbst liegt kein Uebersetzer. Faende sich hier einer,
 # waere nicht mehr gesagt, welcher Stand gemessen wurde.
 { [ -e compiler ] || [ -e bin/firnc1.fi ]; } && \
     S1="$S1 im Repo liegt ein Uebersetzer -- er gehoert nach vendor/;"
-ZUSAGEN=$((ZUSAGEN + 5))
+ZUSAGEN=$((ZUSAGEN + 9))
 if [ -z "$S1" ]; then
-    echo "   Firn ${COMMIT:0:8}, firnc0 + firnc1 gebaut, lib/std daneben (5 Zusagen)"
+    echo "   Firn ${COMMIT:0:8}, firnc0 + firnc1 gebaut, lib/std daneben,"
+    echo "   lib/net/ mit den drei Blob-Hashes aus vendor/net/BLOBS (9 Zusagen)"
     ok
 else
     bad "der festgenagelte Uebersetzer:$S1"
@@ -165,7 +190,7 @@ lauf "7. die POSIX-Schicht und die libc (tools/posix/run.sh, Runde K4)" \
 lauf "8. vier Prozessoren, und die Sperre, die einen Kernel daraus macht (tools/smp/run.sh, Runde K5)" \
      tools/smp/run.sh smp '^SMP: |^        (one core|four cores|speed-up|one host thread|with the lock)'
 
-lauf "9. ein Userland: eine Shell, 23 Werkzeuge, Roehren und Umlenkung (tools/userland/run.sh, Runde K6)" \
+lauf "9. ein Userland: eine Shell, 25 Werkzeuge, Roehren und Umlenkung (tools/userland/run.sh, Runde K6)" \
      tools/userland/run.sh userland '^USERLAND:|the whole userland in octets|the biggest program|programs loaded off the disk'
 
 lauf "10. Handles statt Umgebungsautoritaet: die Capability-Schicht aus OrientOS (tools/caps/run.sh)" \
@@ -179,6 +204,9 @@ lauf "12. der Bildschirm: Rahmenpuffer, Textkonsole, /dev/fb (tools/gfx/run.sh, 
 
 lauf "12. was jedes Unix-Programm voraussetzt: Signale, Terminal, Uhr, Zufall (tools/unix/run.sh, Runde K9)" \
      tools/unix/run.sh unix '^UNIX: |^   -- '
+
+lauf "12. das Netz: virtio-net, der Stack aus K3, Steckdosen -- gegen den Linux-Kern (tools/net/run.sh)" \
+     tools/net/run.sh net '^NET:|^  OK    (throughput|round trip|what came back|and on three)'
 
 echo
 echo "=================================================================="

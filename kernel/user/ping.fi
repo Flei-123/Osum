@@ -1,0 +1,210 @@
+// kernel/user/ping.fi -- round K8: the twenty-fourth program on the disk.
+//
+// It is an ordinary ELF file in /bin, started by the shell like every
+// other one, and everything it does is a system call. That is the point
+// of it: round K3 wrote a TCP/IP stack, round K8 put a card under it,
+// and this is the first proof that a PROCESS IN RING 3 can reach the
+// wire -- not the kernel, not a test harness inside the kernel, a
+// program that was loaded off a file system.
+//
+//     ping [-c count] [-s size] <a.b.c.d>
+//
+// HOW IT SENDS AN ICMP MESSAGE WITHOUT A RAW SOCKET. Linux has had the
+// "ping socket" since 3.0: `socket(AF_INET, SOCK_DGRAM, IPPROTO_ICMP)`
+// carries ICMP echo and needs no privilege, and modern `ping` binaries
+// use it rather than a raw socket. Osum copies that, so this program is
+// written the way it would be written anywhere else -- and the kernel
+// fills the checksum in, exactly as Linux does for that socket type.
+//
+// WHY IT MAY HAVE TO ASK TWICE. The first message to an address whose
+// hardware address is not known yet cannot be sent: the kernel puts an
+// ARP request on the wire and answers -EAGAIN. That is not an error to
+// report, it is a reason to try again in a moment, and the loop below
+// does exactly that. A `ping` that gave up there would report a dead
+// host on every first attempt.
+//
+// THE CLOCK is the tick counter of the system, a hundredth of a second
+// (`sysinfo`, `I_TICKS`). So a round trip is printed in whole
+// milliseconds and the resolution is ten of them -- which is honest
+// about what this kernel can measure and better than a number with three
+// decimal places that were invented.
+
+profile kernel
+
+import ulib
+import libc.net
+
+export { u_start }
+
+const ICMP_ECHO: u64 = 8
+const ICMP_ECHO_REPLY: u64 = 0
+const HDR: u64 = 8
+const DEFAULT_SIZE: u64 = 56
+const MAX_SIZE: u64 = 180
+const TRIES: u64 = 60 // 60 turns of 10 ms per message, then it is lost
+
+fn u_start(args: u64) -> u64 {
+    var s_use: [u8; 34] = "usage: ping [-c n] [-s n] a.b.c.d\0"
+    var s_bad: [u8; 26] = "ping: not an address: \0\0\0\0"
+    var s_nosock: [u8; 27] = "ping: no socket, errno \0\0\0\0"
+    var s_head: [u8; 8] = "PING \0\0\0"
+    var s_data: [u8; 3] = " \0\0"
+    var s_bytes: [u8; 21] = " octets of data.\0\0\0\0\0"
+    var s_from: [u8; 14] = " octets from \0"
+    var s_seq: [u8; 12] = ": icmp_seq=\0"
+    var s_time: [u8; 8] = " time=\0\0"
+    var s_ms: [u8; 4] = " ms\0"
+    var s_lost: [u8; 21] = "ping: no answer for \0"
+    var s_stat: [u8; 22] = "--- ping statistics \0\0"
+    var s_sent: [u8; 21] = " transmitted, \0\0\0\0\0\0\0"
+    var s_recv: [u8; 12] = " received, \0"
+    var s_loss: [u8; 15] = "% packet loss\n\0"
+    var s_c: [u8; 3] = "-c\0"
+    var s_s: [u8; 3] = "-s\0"
+    var addr: [u8; 24] = [0 as u8; 24]
+    var msg: [u8; 200] = [0 as u8; 200]
+    var back: [u8; 256] = [0 as u8; 256]
+
+    var count: u64 = 4
+    var size: u64 = DEFAULT_SIZE
+    var target: u64 = 0
+    var i: u64 = 1
+    let argc: u64 = ulib.arg_count(args)
+    while i < argc {
+        let a: u64 = ulib.arg_at(args, i)
+        if ulib.streq(a, (&s_c[0]) as u64) && i + 1 < argc {
+            count = ulib.to_num(ulib.arg_at(args, i + 1))
+            i = i + 2
+        } else if ulib.streq(a, (&s_s[0]) as u64) && i + 1 < argc {
+            size = ulib.to_num(ulib.arg_at(args, i + 1))
+            i = i + 2
+        } else {
+            target = a
+            i = i + 1
+        }
+    }
+    if target == 0 {
+        ulib.esay_line((&s_use[0]) as u64, 0)
+        return 1
+    }
+    if size < 0 || size > MAX_SIZE {
+        size = DEFAULT_SIZE
+    }
+    let peer: u64 = net.parse_ip(target)
+    if peer == 0 {
+        ulib.esay_line((&s_bad[0]) as u64, target)
+        return 1
+    }
+    let fd: u64 = net.icmp_socket()
+    if ulib.bad(fd) {
+        ulib.say((&s_nosock[0]) as u64)
+        ulib.sayn(fd)
+        ulib.nl()
+        return 1
+    }
+
+    ulib.say((&s_head[0]) as u64)
+    ulib.put((&addr[0]) as u64, net.ip_text(peer, (&addr[0]) as u64))
+    ulib.say((&s_data[0]) as u64)
+    ulib.sayu(size)
+    ulib.say((&s_bytes[0]) as u64)
+    ulib.nl()
+
+    let ident: u64 = ulib.sys(ulib.SYS_GETPID, 0, 0, 0) & 0xFFFF
+    var sent: u64 = 0
+    var got: u64 = 0
+    var seq: u64 = 1
+    while seq <= count {
+        // The message: type, code, the checksum field (the kernel fills
+        // it), the identifier, the sequence number, then the payload.
+        var k: u64 = 0
+        while k < HDR + size {
+            msg[k as usize] = 0 as u8
+            k = k + 1
+        }
+        msg[0] = ICMP_ECHO as u8
+        msg[1] = 0 as u8
+        msg[4] = ((ident >> 8) & 0xFF) as u8
+        msg[5] = (ident & 0xFF) as u8
+        msg[6] = ((seq >> 8) & 0xFF) as u8
+        msg[7] = (seq & 0xFF) as u8
+        k = 0
+        while k < size {
+            msg[(HDR + k) as usize] = ((k + 16) & 0xFF) as u8
+            k = k + 1
+        }
+        let t0: u64 = ulib.sys(ulib.SYS_SYSINFO, ulib.I_TICKS, 0, 0)
+        var out: u64 = 0
+        var tries: u64 = 0
+        // The ARP loop described at the top: -EAGAIN means "the address
+        // is being looked up", not "the host is down".
+        while tries < TRIES {
+            out = net.sendto_ip(fd, (&msg[0]) as u64, HDR + size, peer, 0)
+            if !net.failed(out) {
+                tries = TRIES
+            } else {
+                tries = tries + 1
+                ulib.sleep_ms(10)
+            }
+        }
+        if !net.failed(out) {
+            sent = sent + 1
+            var waited: u64 = 0
+            var answered: bool = false
+            while waited < TRIES && !answered {
+                var from: u64 = 0
+                let n: u64 = net.recvfrom_ip(fd, (&back[0]) as u64, 256,
+                    &from)
+                if !net.failed(n) && n >= HDR {
+                    if (back[0] as u64) == ICMP_ECHO_REPLY {
+                        let rseq: u64 = ((back[6] as u64) << 8)
+                            | (back[7] as u64)
+                        let t1: u64 = ulib.sys(ulib.SYS_SYSINFO,
+                            ulib.I_TICKS, 0, 0)
+                        got = got + 1
+                        answered = true
+                        ulib.sayu(n)
+                        ulib.say((&s_from[0]) as u64)
+                        ulib.put((&addr[0]) as u64,
+                            net.ip_text(from, (&addr[0]) as u64))
+                        ulib.say((&s_seq[0]) as u64)
+                        ulib.sayu(rseq)
+                        ulib.say((&s_time[0]) as u64)
+                        ulib.sayu((t1 - t0) * 10)
+                        ulib.say((&s_ms[0]) as u64)
+                        ulib.nl()
+                    }
+                } else {
+                    waited = waited + 1
+                    ulib.sleep_ms(10)
+                }
+            }
+            if !answered {
+                ulib.say((&s_lost[0]) as u64)
+                ulib.sayu(seq)
+                ulib.nl()
+            }
+        }
+        seq = seq + 1
+        if seq <= count {
+            ulib.sleep_ms(200)
+        }
+    }
+    ulib.say((&s_stat[0]) as u64)
+    ulib.nl()
+    ulib.sayu(sent)
+    ulib.say((&s_sent[0]) as u64)
+    ulib.sayu(got)
+    ulib.say((&s_recv[0]) as u64)
+    var loss: u64 = 100
+    if sent > 0 {
+        loss = ((sent - got) * 100) / sent
+    }
+    ulib.sayu(loss)
+    ulib.say((&s_loss[0]) as u64)
+    net.close(fd)
+    if got == 0 {
+        return 1
+    }
+    return 0
+}

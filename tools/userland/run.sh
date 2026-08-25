@@ -43,8 +43,12 @@ LDSCRIPT=kernel/kernel.ld
 ULD=kernel/user/user.ld
 # The whole userland. `hello` and `hurt` belong to round K1 and travel
 # with it, because tools/osum/run.sh measures them on the same image.
+# ROUND K8 added `ping` and `wget`. They are ordinary programs of this
+# userland -- nothing about them is special except that they call
+# `socket`, and that is why they are built and measured HERE together
+# with the other twenty-three rather than only in tools/net/run.sh.
 PROGS="sh ls cat echo cp mv rm mkdir rmdir touch head tail wc grep sort
-       uniq true false sleep ps kill uname date df hello hurt"
+       uniq true false sleep ps kill uname date df hello hurt ping wget"
 BLOCKS=4096
 
 TMPD=$(mktemp -d)
