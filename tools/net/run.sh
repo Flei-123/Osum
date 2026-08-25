@@ -313,7 +313,7 @@ bridge_down
 P="$TMPD/pingout.txt"
 got=$(grep -oE '[0-9]+ received' "$P" | grep -oE '^[0-9]+')
 num "ping -c 10 from the Linux kernel: answers" "${got:-0}" ge 9
-rtt=$(grep -oE 'rtt min/avg/max/mdev = [0-9.]+/[0-9.]+' "$P" | cut -d/ -f2)
+rtt=$(grep -oE 'min/avg/max/mdev = [0-9.]+/[0-9.]+' "$P" | awk -F'= ' '{print $2}' | cut -d/ -f2)
 [ -n "$rtt" ] && ok "round trip, average: $rtt ms (QEMU without KVM, netd at 100 Hz)" \
               || bad "no round trip time in the ping output"
 ip netns exec "$NS" ip neigh show 2>/dev/null | grep -q "$OSUM_IP.*52:54:00:aa:bb:cc" \
