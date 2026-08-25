@@ -217,8 +217,15 @@ for s in 0 1; do
     utx=$(objdump -d -j .utext "$TMPD/k$s.elf" | grep -cE '^\s+[0-9a-f]+:.*\bsyscall\b')
     ktx=$(objdump -d -j .text "$TMPD/k$s.elf" | grep -cE '^\s+[0-9a-f]+:.*\bsyscall\b')
     uob=$(objdump -d "$TMPD/uprog$s.o" | grep -cE '^\s+[0-9a-f]+:.*\bsyscall\b')
-    # Two of them come out of isr.s: the user program of round 59.
-    if [ "$ktx" -eq 0 ] && [ "$tot" -eq "$utx" ] && [ "$utx" -eq $((uob + 2)) ]; then
+    # Three of them come out of isr.s: the two of the user program of
+    # round 59, and since ROUND K9 the `sigreturn` trampoline that every
+    # signal handler returns through (`kernel/signal.fi`). It has to lie
+    # here and nowhere else -- a trampoline on the stack would need the
+    # no-execute bit taken off a stack page, which is the hole round K1
+    # closed. The PROMISE of this check is unchanged: every `syscall`
+    # instruction of the kernel image lies on the pages of ring 3 and none
+    # in the kernel's own text. Only the count moved, by one.
+    if [ "$ktx" -eq 0 ] && [ "$tot" -eq "$utx" ] && [ "$utx" -eq $((uob + 3)) ]; then
         ok "firnc$s: all $tot syscall instructions lie in .utext, none in the kernel text"
     else
         bad "firnc$s: $tot syscalls, $utx of them in .utext, $ktx in .text, $uob in uprog$s.o"

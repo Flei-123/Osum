@@ -39,12 +39,16 @@ export {
     trace_push, trace_dump, dump_tasks, ready_count, alive_count,
     irq_save, irq_restore, set_kernel_stack,
     adopt, enter_task, set_idle, zombies, reap_all, cpu_of, cpu_mask,
+    clear_signals,
     set_affinity, affinity, ANY_CPU,
     T_STATE, T_PID, T_RSP, T_KSTACK, T_KTOP, T_PRIO, T_BUDGET, T_WORK,
     T_WAKE, T_CR3, T_PARENT, T_EXIT, T_RUNS, T_ENTRY, T_USTACK, T_KIND,
     T_WAITPID, T_TICKS, T_PDPT, T_PD, T_PT, T_DATA, T_CWD, T_ARG,
     T_END, T_FD, T_FDOFF, T_FAULTS, FD_SLOTS, T_BRK, T_MMAP,
-    S_FREE, S_READY, S_RUN, S_SLEEP, S_WAIT, S_ZOMBIE, S_NEW,
+    S_FREE, S_READY, S_RUN, S_SLEEP, S_WAIT, S_ZOMBIE, S_NEW, S_STOP,
+    T_SIGPEND, T_SIGMASK, T_SIGLAST, T_PGID, T_SID, T_TTY, T_SIGDEL,
+    T_STOPSIG, T_SIGRET, T_ALARM, T_TGID, T_SHARED, T_FUTEX, T_FUTEXVAL,
+    T_KILLCODE,
     K_BOOT, K_IDLE, K_WORKER, K_USER, K_GRIND, KSTACK_FRAMES
 }
 
@@ -89,6 +93,36 @@ const T_FAULTS: u64 = 248 // faults it caused
 const T_BRK: u64 = 256 // `brk`, 0 = the process has never asked
 const T_MMAP: u64 = 264 // the lower end of the mmap area, 0 = none yet
 
+// ROUND K9. WAS EIN UNIX-PROZESS AUSSER SEINEM SPEICHER UND SEINEN
+// DATEIEN NOCH IST. Der Satz passt in den zweiten Teil des Datensatzes,
+// den Runde K4 aufgemacht und nicht ausgefuellt hat -- 272 bis 511 lagen
+// leer. Nichts davon muss der Kern der Auswahl kennen; `sched.create`
+// nullt den ganzen Datensatz, also faengt jede Aufgabe mit leerer
+// Warteschlange, leerer Maske und ohne Prozessgruppe an.
+const T_SIGPEND: u64 = 272 // wartende Signale, ein Bit je Nummer
+const T_SIGMASK: u64 = 280 // blockierte Signale
+const T_SIGLAST: u64 = 288 // das zuletzt zugestellte
+const T_PGID: u64 = 296 // Prozessgruppe (0 = die eigene pid)
+const T_SID: u64 = 304 // Sitzung
+const T_TTY: u64 = 312 // beherrschendes Terminal + 1, 0 = keines
+const T_SIGDEL: u64 = 320 // wie viele Signale zugestellt wurden
+const T_STOPSIG: u64 = 328 // welches Signal es angehalten hat
+const T_SIGRET: u64 = 336 // Adresse des Rahmens auf dem Nutzerstapel
+const T_ALARM: u64 = 344 // Marke, zu der SIGALRM faellig ist, 0 = nie
+const T_TGID: u64 = 352 // Fadengruppe (clone), 0 = die eigene pid
+const T_SHARED: u64 = 360 // 1 = teilt den Adressraum, nicht freigeben
+const T_FUTEX: u64 = 368 // Adresse, auf die dieser Faden wartet
+const T_FUTEXVAL: u64 = 376 // und der Wert, auf den er sich berufen hat
+// ROUND K9, UND ES IST EINE ZUSAGE AN DIE RUNDEN VORHER. Stirbt ein
+// Prozess an einem Signal, ist sein Beendigungscode 128 + Signalnummer --
+// so rechnet jede Shell. Stirbt er an einer AUSNAHME, war er in diesem
+// Kernel seit Runde 62 128 + VEKTORNUMMER, und `tools/osum/run.sh` misst
+// seit damals, dass ein Seitenfehler 142 ergibt (128 + 14). Beide Zahlen
+// haben ihr Recht, und beide bleiben: `signal.fault` traegt hier die
+// vektorbasierte ein, und wo sie steht, gilt sie. 0 = es gilt die
+// Signalnummer.
+const T_KILLCODE: u64 = 384
+
 // The three descriptor slots of round 62. Nothing writes them any more;
 // they stay named so that a reader of a task dump knows what the hole in
 // the middle of the record was.
@@ -107,6 +141,14 @@ const S_ZOMBIE: u64 = 5
 // rip was still zero. A task becomes runnable when its creator says so,
 // and not a moment earlier.
 const S_NEW: u64 = 6
+// ROUND K9. ANGEHALTEN -- was `SIGSTOP` aus einem Prozess macht und was
+// `SIGCONT` rueckgaengig macht. Es ist ein eigener Zustand und nicht
+// S_SLEEP: ein Schlaefer wird vom Zeitgeber geweckt, ein Angehaltener
+// nicht, und ohne den Unterschied waere STRG-Z ein Schlaf von zehn
+// Millisekunden. `pick` waehlt nur S_READY -- eine angehaltene Aufgabe
+// faellt damit von selbst aus der Laufliste, ohne dass der Kern der
+// Auswahl eine Zeile mehr braucht.
+const S_STOP: u64 = 7
 
 const K_BOOT: u64 = 0
 const K_IDLE: u64 = 1
@@ -306,6 +348,16 @@ fn init(state: u64) {
     tset(state, 0, T_PRIO, 2)
     tset(state, 0, T_BUDGET, 2)
     tset(state, 0, T_KIND, K_BOOT)
+    // ROUND K9. AUCH AUFGABE 0 HAT EINE PROZESSGRUPPE, und dass sie
+    // nicht null ist, entscheidet mehr als es aussieht: jeder Prozess
+    // dieses Systems erbt seine Gruppe von seinem Elternteil, und die
+    // Kette endet hier. Blieb hier die Null stehen, hatte die ganze
+    // Maschine die Gruppe null -- und `tty.push` haelt genau die Null
+    // fuer "dieses Terminal hat keinen Vordergrund" und schickt kein
+    // SIGINT. STRG-C tat dann nichts, und zwar still.
+    tset(state, 0, T_PGID, 1)
+    tset(state, 0, T_SID, 1)
+    tset(state, 0, T_TGID, 1)
     tset(state, 0, T_KTOP, vector(state, 61))
     tset(state, 0, T_CR3, kstate.get(state, kstate.KPML4))
     var t: u64 = 0
@@ -364,6 +416,7 @@ fn adopt(state: u64, kind: u64, prio: u64, ktop: u64) -> u64 {
     tc_set(state, slot, TC_CPU, cpu.here(state))
     tc_set(state, slot, TC_MASK, 1 << cpu.here(state))
     tc_set(state, slot, TC_AFF, cpu.here(state))
+    clear_signals(state, slot)
     if slot + 1 > kstate.get(state, kstate.TASKS) {
         kstate.set(state, kstate.TASKS, slot + 1)
     }
@@ -473,9 +526,52 @@ fn create(state: u64, kind: u64, prio: u64, arg: u64, entry: u64) -> u64 {
     tc_set(state, slot, TC_CPU, kstate.MAX_CPUS)
     tc_set(state, slot, TC_MASK, 0)
     tc_set(state, slot, TC_AFF, ANY_CPU)
+    clear_signals(state, slot)
     atomic.lock_give(state, atomic.L_SCHED)
     irq_restore(flags)
     return slot
+}
+
+// ROUND K9. DIE SIGNALTABELLE EINER AUFGABE, GELOESCHT.
+//
+// Warum das hier steht und nicht in `signal.fi`, wo es hingehoerte: die
+// Tabelle muss beim ANLEGEN einer Aufgabe geloescht werden, und das
+// geschieht in diesem File. `signal.fi` braucht `proc.fi` (es schreibt
+// auf den Nutzerstapel), `proc.fi` braucht dieses hier -- ein `import
+// signal` in `sched.fi` oder `proc.fi` waere ein Ring im Modulgraphen,
+// und der Uebersetzer nimmt ihn nicht. Was hier bleibt, ist reines
+// Nullen von Speicher, das keine Bedeutung kennt; die Bedeutung steht
+// vollstaendig in `signal.fi`.
+//
+// UND ES IST KEIN SCHOENHEITSFEHLER, SONDERN DER FEHLER, DEN RUNDE K6
+// SCHON EINMAL HATTE: ein Platz, den eine tote Aufgabe hinterlaesst, darf
+// seiner Nachfolgerin nichts vererben. Ohne diese Zeilen erbte ein neuer
+// Prozess die Behandlungsroutinen seines Vorgaengers -- Adressen in einem
+// Abbild, das es nicht mehr gibt.
+const SIG_SLOTS: u64 = 32
+const SIG_ENTRY: u64 = 24
+
+fn clear_signals(state: u64, i: u64) {
+    if i >= kstate.MAX_TASKS {
+        return
+    }
+    let base: u64 = state + kstate.SIG_OFF + i * (SIG_SLOTS * SIG_ENTRY)
+    var k: u64 = 0
+    while k < (SIG_SLOTS * SIG_ENTRY) / 8 {
+        __mmio_write64((base + k * 8) as *mut u64, 0)
+        k = k + 1
+    }
+    tset(state, i, T_SIGPEND, 0)
+    tset(state, i, T_SIGMASK, 0)
+    tset(state, i, T_SIGRET, 0)
+    tset(state, i, T_ALARM, 0)
+    tset(state, i, T_STOPSIG, 0)
+    // Prozessgruppe und Sitzung sind die eigene pid, solange niemand
+    // etwas anderes sagt.
+    let pid: u64 = tget(state, i, T_PID)
+    tset(state, i, T_PGID, pid)
+    tset(state, i, T_SID, pid)
+    tset(state, i, T_TGID, pid)
 }
 
 fn free_stack(state: u64, stack: u64) {
