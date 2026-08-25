@@ -60,6 +60,7 @@ const SYS_WAIT4: u64 = 61
 const SYS_KILL: u64 = 62
 const SYS_GETTIMEOFDAY: u64 = 96
 const SYS_SETPGID: u64 = 109
+const SYS_GETPGID: u64 = 121
 const SYS_GETPGRP: u64 = 111
 const SYS_RT_SIGPENDING: u64 = 127
 const SYS_NANOSLEEP: u64 = 35
@@ -473,6 +474,16 @@ fn part_tty() -> u64 {
     var n_echo2: [u8; 10] = "pty echo\0\0"
     var lines: u64 = 0
 
+    // ZUERST EINE EIGENE PROZESSGRUPPE, und der Grund ist ein Fehler, der
+    // in dieser Runde wirklich passiert ist: dieses Programm schickt
+    // gleich ein STRG-C durch ein Pseudoterminal, dessen Vordergrundgruppe
+    // die eigene ist. Erbte es die Gruppe der Shell (und das tut ein Kind
+    // hier), traefe dasselbe SIGINT die Shell mit -- sie starb mit 130,
+    // waehrend der Test weiterlief und alles gruen meldete. GENAU DAFUER
+    // GIBT ES PROZESSGRUPPEN, und der Fehler war das beste Beispiel
+    // dafuer, dass sie wirken.
+    kcall.sys2(SYS_SETPGID, 0, 0)
+
     var t: [u8; 64] = [0 as u8; 64]
     var ws: [u8; 8] = [0 as u8; 8]
     var buf: [u8; 128] = [0 as u8; 128]
@@ -821,18 +832,181 @@ fn part_random() -> u64 {
     return lines
 }
 
+// ============================== 5. Auftragssteuerung, ohne einen Menschen
+//
+// DER TEST, DEN EIN MENSCH BEMERKT -- nur ohne den Menschen. Ein
+// Vordergrundprozess in einer eigenen Prozessgruppe, ein Oktett 3 auf der
+// Steuerseite des Terminals, und der Prozess ist tot. Das ist Zeile fuer
+// Zeile derselbe Weg, den eine gedrueckte Taste nimmt: `tty.push` sieht
+// VINTR, `ISIG` steht, und `signal.send_pgid` trifft die
+// Vordergrundgruppe. Was hier gemessen wird, ist damit genau das, was
+// STRG-C auf der Konsole tut.
+//
+// Dazu die beiden anderen Haelften der Auftragssteuerung: STRG-Z haelt
+// an statt zu beenden, und ein HINTERGRUNDPROZESS, der lesen will,
+// bekommt SIGTTIN und wird angehalten -- die Regel, die zwei Programme
+// davon abhaelt, sich dieselbe Tastatur zu teilen.
+
+fn part_jobs() -> u64 {
+    var n_ctl: [u8; 10] = "job ctlc\0\0"
+    var n_grp: [u8; 9] = "job grp\0\0"
+    var n_tstp: [u8; 10] = "job tstp\0\0"
+    var n_cont: [u8; 10] = "job cont\0\0"
+    var n_ttin: [u8; 10] = "job ttin\0\0"
+    var lines: u64 = 0
+    var fds: [u64; 1] = [0 as u64; 1]
+    var pg: [u8; 8] = [0 as u8; 8]
+    var status: [u64; 1] = [0 as u64; 1]
+
+    kcall.sys1(SYS_OSUM_PTY, (&fds[0 as usize]) as u64)
+    let m: u64 = fds[0 as usize] & 0xFFFFFFFF
+    let sl: u64 = (fds[0 as usize] >> 32) & 0xFFFFFFFF
+
+    // -- STRG-C beendet den Vordergrundprozess wirklich
+    let c1: u64 = kcall.sys0(SYS_FORK)
+    if c1 == 0 {
+        kcall.sys2(SYS_SETPGID, 0, 0) // eine eigene Gruppe
+        var spin: u64 = 0
+        while spin < 4000000000 {
+            spin = spin + 1
+        }
+        kcall.sys1(SYS_EXIT, 77)
+    }
+    sleep_ms(40)
+    line((&n_grp[0 as usize]) as u64, kcall.sys1(SYS_GETPGID, c1) -% c1)
+    lines = lines + 1
+    __mmio_write32(((&pg[0 as usize]) as u64) as *mut u32, (c1 & 0xFFFFFFFF) as u32)
+    kcall.sys3(SYS_IOCTL, sl, TIOCSPGRP, (&pg[0 as usize]) as u64)
+    var ctlc: [u8; 2] = [3 as u8, 0 as u8]
+    kcall.sys3(SYS_WRITE, m, (&ctlc[0 as usize]) as u64, 1)
+    status[0 as usize] = 0
+    wait_any((&status[0 as usize]) as u64)
+    line((&n_ctl[0 as usize]) as u64, (status[0 as usize] >> 8) & 255)
+    lines = lines + 1
+
+    // -- STRG-Z haelt an, SIGCONT setzt fort
+    let c2: u64 = kcall.sys0(SYS_FORK)
+    if c2 == 0 {
+        kcall.sys2(SYS_SETPGID, 0, 0)
+        var spin: u64 = 0
+        while spin < 4000000000 {
+            spin = spin + 1
+        }
+        kcall.sys1(SYS_EXIT, 77)
+    }
+    sleep_ms(40)
+    __mmio_write32(((&pg[0 as usize]) as u64) as *mut u32, (c2 & 0xFFFFFFFF) as u32)
+    kcall.sys3(SYS_IOCTL, sl, TIOCSPGRP, (&pg[0 as usize]) as u64)
+    var ctlz: [u8; 2] = [26 as u8, 0 as u8]
+    kcall.sys3(SYS_WRITE, m, (&ctlz[0 as usize]) as u64, 1)
+    sleep_ms(40)
+    line((&n_tstp[0 as usize]) as u64, siginfo(SI_STATE_OF, c2))
+    lines = lines + 1
+    kcall.sys2(SYS_KILL, c2, SIGCONT)
+    sleep_ms(40)
+    var running: u64 = 0
+    if siginfo(SI_STATE_OF, c2) != S_STOP {
+        running = 1
+    }
+    line((&n_cont[0 as usize]) as u64, running)
+    lines = lines + 1
+    kcall.sys2(SYS_KILL, c2, SIGKILL)
+    status[0 as usize] = 0
+    wait_any((&status[0 as usize]) as u64)
+
+    // -- ein HINTERGRUNDPROZESS, der lesen will: SIGTTIN, und das
+    //    Standardverhalten von SIGTTIN ist ANHALTEN.
+    var buf: [u8; 16] = [0 as u8; 16]
+    let c3: u64 = kcall.sys0(SYS_FORK)
+    if c3 == 0 {
+        kcall.sys2(SYS_SETPGID, 0, 0)
+        kcall.sys3(SYS_READ, sl, (&buf[0 as usize]) as u64, 8)
+        kcall.sys1(SYS_EXIT, 88)
+    }
+    sleep_ms(40)
+    // Der Vordergrund bleibt bei UNS -- das Kind liest aus dem
+    // Hintergrund.
+    __mmio_write32(((&pg[0 as usize]) as u64) as *mut u32,
+        (kcall.sys0(SYS_GETPGRP) & 0xFFFFFFFF) as u32)
+    kcall.sys3(SYS_IOCTL, sl, TIOCSPGRP, (&pg[0 as usize]) as u64)
+    sleep_ms(60)
+    line((&n_ttin[0 as usize]) as u64, siginfo(SI_STATE_OF, c3))
+    lines = lines + 1
+    kcall.sys2(SYS_KILL, c3, SIGKILL)
+    status[0 as usize] = 0
+    wait_any((&status[0 as usize]) as u64)
+    kcall.sys1(SYS_CLOSE, m)
+    kcall.sys1(SYS_CLOSE, sl)
+    return lines
+}
+
 // ------------------------------------------------------------- der Lauf
+
+// DER KURZE LAUF FUER DIE GEGENPROBEN. `unix probe` macht nur, was ohne
+// Kindprozesse auskommt -- und das ist kein Sparen, es ist noetig: mit
+// `nosig` kommt kein Signal an, also stirbt kein Kind, also kehrt kein
+// `wait4` zurueck, und der volle Lauf bliebe stehen. Was hier gemessen
+// wird, ist genau das, was die beiden Gegenproben umlegen muessen:
+//
+//   ohne `nosig`      caught=1  count=6  after unblock=1
+//   mit  `nosig`      caught=0  count=0  after unblock=0
+//   ohne `fixedrand`  chi um 255, diff nahe 1024
+//   mit  `fixedrand`  chi ueber einer Million, diff genau 0
+fn part_probe() -> u64 {
+    var n_one: [u8; 8] = "caught\0\0"
+    var n_many: [u8; 6] = "count\0"
+    var n_pend: [u8; 8] = "pending\0"
+    var n_after: [u8; 14] = "after unblock\0"
+    var lines: u64 = 0
+    let me: u64 = my_pid()
+    set_handler(SIGUSR1, handler_addr())
+    let before: u64 = sig_count()
+    kcall.sys2(SYS_KILL, me, SIGUSR1)
+    line((&n_one[0 as usize]) as u64, sig_count() -% before)
+    lines = lines + 1
+    var k: u64 = 0
+    while k < 5 {
+        kcall.sys2(SYS_KILL, me, SIGUSR1)
+        k = k + 1
+    }
+    line((&n_many[0 as usize]) as u64, sig_count() -% before)
+    lines = lines + 1
+    set_handler(SIGUSR2, handler2_addr())
+    mask_op(SIG_BLOCK, 1 << (SIGUSR2 - 1))
+    let b2: u64 = sig_count2()
+    kcall.sys2(SYS_KILL, me, SIGUSR2)
+    var pend: u64 = 0
+    if (pending_now() & (1 << (SIGUSR2 - 1))) != 0 && sig_count2() == b2 {
+        pend = 1
+    }
+    line((&n_pend[0 as usize]) as u64, pend)
+    lines = lines + 1
+    mask_op(SIG_UNBLOCK, 1 << (SIGUSR2 - 1))
+    line((&n_after[0 as usize]) as u64, sig_count2() -% b2)
+    lines = lines + 1
+    return lines
+}
 
 fn u_start(args: u64) -> u64 {
     var s_head: [u8; 34] = "unix: round K9 -- what Unix wants\0"
     var n_lines: [u8; 6] = "lines\0"
+    var s_probe: [u8; 6] = "probe\0"
     ulib.say((&s_head[0 as usize]) as u64)
     ulib.nl()
     var lines: u64 = 0
+    if ulib.arg_count(args) > 1 {
+        if ulib.streq(ulib.arg_at(args, 1), (&s_probe[0 as usize]) as u64) {
+            lines = part_probe()
+            lines = lines + part_random()
+            line((&n_lines[0 as usize]) as u64, lines)
+            return 0
+        }
+    }
     lines = lines + part_signals()
     lines = lines + part_faults()
     lines = lines + part_tty()
     lines = lines + part_clock()
+    lines = lines + part_jobs()
     lines = lines + part_random()
     line((&n_lines[0 as usize]) as u64, lines)
     return 0
