@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ./test.sh -- die Abnahme von Osum.
 #
-# Elf Abschnitte, in der Reihenfolge, in der der Kernel entstanden ist.
+# Vierzehn Abschnitte, in der Reihenfolge, in der der Kernel entstanden ist.
 # Jeder ruft einen eigenen Testlaeufer unter tools/ auf, jeder Laeufer
 # startet QEMU pro Fall mit Zeitlimit, prueft die serielle Ausgabe und den
 # Beendigungscode (21 = der Kernel hat sich selbst beendet, 63 = er ist an
@@ -52,7 +52,22 @@
 #      Ring 3, das achtzehn Zusagen darueber meldet, was es darf und was
 #      nicht. Gegenprobe: ohne das Wort `caps` gibt es nichts davon, und
 #      der uebrige Kernel verhaelt sich Zeile fuer Zeile wie vorher.
-#  12. Was jedes Unix-Programm voraussetzt (tools/unix/run.sh, Runde
+#  11. Der Multiboot-Kopf und der UEFI-Pfad (tools/boot/run.sh): Bit 2
+#      der Flags verlangt einen linearen Rahmenpuffer. Ohne das bricht
+#      jeder Multiboot-Lader unter UEFI mit "Cannot use text mode with
+#      UEFI" ab; mit ihm bootet dasselbe Abbild ueber BIOS UND ueber
+#      UEFI. Der Start ueber eine echte UEFI-Firmware wird in OrientOS
+#      gemessen -- dort liegen Lader und ISO.
+#  12. Der Bildschirm (tools/gfx/run.sh, Runde K7, nachgezogen in K7B):
+#      der lineare Rahmenpuffer, eine Textkonsole mit eigenem
+#      8x16-Zeichensatz, Zeichengrundlagen mit Zweitpuffer und /dev/fb
+#      fuer Ring 3. Gemessen an echten BILDSCHIRMFOTOS ueber den
+#      QEMU-Monitor, bildpunktgenau gegen den Zeichensatz gerechnet --
+#      und dazu die Speicherkarte von `kdata`, 38 Bereiche aus vier
+#      Dateien paarweise gegeneinander (`tools/kernel/karte.py`).
+#      Gegenproben: ohne das Wort `gfx` bricht jede Messung zusammen, und
+#      mit der alten Adresse 0x2F000 MUSS der Kartenpruefer anschlagen.
+#  13. Was jedes Unix-Programm voraussetzt (tools/unix/run.sh, Runde
 #      K9): Signale (kill, sigaction, sigprocmask, sigreturn, die
 #      Standardverhalten, SIGCHLD, und SIGSEGV/SIGFPE/SIGILL aus den
 #      echten Prozessorausnahmen statt eines Kernel-Panics), eine
@@ -67,13 +82,7 @@
 #      Strom, die statistische Pruefung faellt durch), und drei Neustarts
 #      mit drei verschiedenen Saaten.
 #
-#  11. Der Multiboot-Kopf und der UEFI-Pfad (tools/boot/run.sh): Bit 2
-#      der Flags verlangt einen linearen Rahmenpuffer. Ohne das bricht
-#      jeder Multiboot-Lader unter UEFI mit "Cannot use text mode with
-#      UEFI" ab; mit ihm bootet dasselbe Abbild ueber BIOS UND ueber
-#      UEFI. Der Start ueber eine echte UEFI-Firmware wird in OrientOS
-#      gemessen -- dort liegen Lader und ISO.
-#  12. Das Netz (tools/net/run.sh, Runde K8): ein virtio-net-Treiber in
+#  14. Das Netz (tools/net/run.sh, Runde K8): ein virtio-net-Treiber in
 #      Firn (`kernel/virtio.fi`), der TCP/IP-Stack aus Runde K3 als
 #      ABHAENGIGKEIT ueber vendor/firn/COMMIT (`vendor/net/HERKUNFT.md`),
 #      die Naht dazwischen (`kernel/inet.fi`) und Steckdosen-Aufrufe fuer
@@ -202,10 +211,10 @@ lauf "11. der Multiboot-Kopf verlangt einen Bildschirm -- der UEFI-Pfad (tools/b
 lauf "12. der Bildschirm: Rahmenpuffer, Textkonsole, /dev/fb (tools/gfx/run.sh, Runde K7)" \
      tools/gfx/run.sh gfx '^GFX: |^   fbbench: '
 
-lauf "12. was jedes Unix-Programm voraussetzt: Signale, Terminal, Uhr, Zufall (tools/unix/run.sh, Runde K9)" \
+lauf "13. was jedes Unix-Programm voraussetzt: Signale, Terminal, Uhr, Zufall (tools/unix/run.sh, Runde K9)" \
      tools/unix/run.sh unix '^UNIX: |^   -- '
 
-lauf "12. das Netz: virtio-net, der Stack aus K3, Steckdosen -- gegen den Linux-Kern (tools/net/run.sh)" \
+lauf "14. das Netz: virtio-net, der Stack aus K3, Steckdosen -- gegen den Linux-Kern (tools/net/run.sh)" \
      tools/net/run.sh net '^NET:|^  OK    (throughput|round trip|what came back|and on three)'
 
 echo
