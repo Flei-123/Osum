@@ -40,7 +40,40 @@ SECTIONS
      * is compiled into an object file of its own for exactly this reason.
      * The kernel sets the user bit for these pages and for no others
      * (`proc.map_programs`). */
-    .utext : ALIGN(4K)
+    /* RUNDE K18: ALIGN(2M) UND NICHT MEHR ALIGN(4K).
+     *
+     * `proc.map_programs` macht diesen Abschnitt fuer Ring 3 sichtbar
+     * und teilt dafuer jede 2-MiB-Kachel, die er beruehrt, in 512 Seiten
+     * zu 4 KiB. Fuer die ERSTE Kachel nimmt es die feste Tabelle aus
+     * `kdata` (PT_OFF); fuer jede WEITERE einen Rahmen aus dem
+     * Rahmenverwalter -- und dieser Pfad ist kaputt. Gemessen, nicht
+     * vermutet: mit einem `.utext`, das ueber die Grenze reicht, faellt
+     * derselbe Kernel unter `osum gfx` mit einem #PF im Rahmenpuffer
+     * (`fb.copy_words`, Lesen auf eine Adresse in der zweiten Kachel,
+     * die nicht mehr abgebildet ist) und danach mit einem
+     * DREIFACHFEHLER. Und zwar AUCH DER KERNEL OHNE RUNDE K18: es
+     * genuegt, seinem `uprog.fi` genug Fuellcode zu geben, dass
+     * `.utext` von 0x1f4000 bis 0x205000 reicht. Der Fehler ist also
+     * aelter als diese Runde -- sie hat ihn nur als erste ausgeloest,
+     * weil sie drei Programme in Ring 3 dazugelegt hat (12 Seiten -> 14).
+     *
+     * Diese Zeile nimmt dem Fehler den Anlass, statt ihn zu verstecken:
+     * mit einer 2-MiB-Ausrichtung faengt `.utext` immer AM ANFANG einer
+     * Kachel an und passt in EINE, solange es unter zwei Megabyte
+     * bleibt -- das ist das Hundertfache dessen, was heute darin steht.
+     * `map_programs` nimmt damit wieder nur die feste Tabelle und
+     * keinen Rahmen aus dem Verwalter.
+     *
+     * Der Preis ist Fuellung im Abbild (bis zu 2 MiB Nullen). Das ist
+     * ein Abbild auf einer Platte, kein Speicher zur Laufzeit; die
+     * Alternative waere ein Kernel, der bei genuegend Ring-3-Code ohne
+     * Vorwarnung dreifach faellt.
+     *
+     * WAS DAMIT NICHT BEHOBEN IST: der Pfad in `map_programs` fuer die
+     * ZWEITE Kachel bleibt kaputt. Er wird jetzt nur nicht mehr
+     * betreten. Wer `.utext` ueber zwei Megabyte wachsen laesst, faellt
+     * wieder hinein -- das steht in docs/ROUNDK18.md als offene Kante. */
+    .utext : ALIGN(2M)
     {
         __user_begin = .;
         *(.utext)

@@ -168,7 +168,7 @@ import fb
 
 export {
     probe, ready, cur_profile, set_profile, apply, caps, value,
-    idle_wait, note_activity, tick,
+    idle_wait, note_activity, tick, temp_work,
     set_bright, blank, unblank, screen_tick, screen_work, scale_rgb, bright,
     PW_BRIGHT, PW_BLANKED, PW_BLANKS, PW_LASTACT, PW_BLANKAFTER,
     temp_c, temp_ok, throttle_check,
@@ -726,6 +726,7 @@ fn idle_wait(state: u64, allow: bool) {
     // geschlafen. Anders herum laege der Bildschirm eine Aufweckung lang
     // falsch.
     screen_work(state)
+    temp_work(state)
     let me: u64 = cpu.here(state)
     if allow && (g(state, PW_CAPS) & C_MONITOR) != 0 {
         // Jeder Kern bekommt eine eigene Zeile. Zwei Kerne auf derselben
@@ -779,15 +780,40 @@ fn note_activity(state: u64) {
 // Lesen eines MSR ist teuer genug, dass es im Unterbrechungspfad
 // auffaellt, und eine Temperatur aendert sich nicht in zehn
 // Millisekunden.
+// DER ZEITGEBER MELDET AN. GEMESSEN WIRD AUSSERHALB.
+//
+// Auch das ist gemessen und nicht ueberlegt, und es hat diese Runde
+// einen DREIFACHEN FEHLER gekostet. Die erste Fassung rief hier
+// `throttle_check`, und das ruft `read_temp`, und das ruft `msr_temp`
+// mit zwei `rdmsr` -- vier Rahmen tief, IM UNTERBRECHUNGSPFAD.
+//
+// Der Kernstapel dieses Systems ist 16384 Oktette gross, und der Kernel
+// misst selbst, wie tief er wirklich wird: "osum: kstack deepest=16192
+// of 16384". Das sind 192 Oktette Luft. Vier Rahmen mehr passen da
+// nicht hinein. Schlaegt der Zeitgeber an der tiefsten Stelle zu -- und
+// beim Laden eines ELF unter `osum gfx` tut er das --, laeuft der
+// Stapel ueber: #PF, dann #DF, dann Dreifachfehler, und QEMU setzt die
+// Maschine zurueck. Im Mitschnitt sieht das aus wie ein Kernel, der
+// mitten im `exec` aufhoert; `-d cpu_reset` sagt, was es wirklich war.
+//
+// Hier steht deshalb nur noch, WAS zu tun ist. `pwr.idle_wait` tut es --
+// in Aufgabenkontext, auf einem Stapel, der nicht schon fast voll ist.
 fn tick(state: u64) {
     if g(state, PW_READY) == 0 {
         return
     }
-    let t: u64 = kstate.get(state, kstate.TICKS)
     screen_tick(state)
-    if (t % 64) != 0 {
+    if (kstate.get(state, kstate.TICKS) % 64) == 0 {
+        s(state, PW_TEMPWANT, 1)
+    }
+}
+
+// Was der Zeitgeber angemeldet hat. Aufgabenkontext.
+fn temp_work(state: u64) {
+    if g(state, PW_TEMPWANT) == 0 {
         return
     }
+    s(state, PW_TEMPWANT, 0)
     throttle_check(state)
 }
 
@@ -894,6 +920,9 @@ const PW_BEFORE: u64 = 264 + 512 // hinter den monitor-Zeilen
 // 0 = nichts, 1 = abschalten, 2 = wieder anschalten. Warum das ein
 // Merkzeichen ist und keine Tat, steht bei `screen_tick`.
 const PW_BLANKWANT: u64 = 784
+// Dasselbe fuer die Waerme: der Zeitgeber meldet an, gemessen wird
+// ausserhalb. Warum, steht bei `tick`.
+const PW_TEMPWANT: u64 = 792
 
 fn blank(state: u64) {
     if g(state, PW_BLANKED) != 0 {
