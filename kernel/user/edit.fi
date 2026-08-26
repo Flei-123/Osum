@@ -1,0 +1,1390 @@
+// kernel/user/edit.fi -- Runde K11: ein Editor, mit dem man arbeitet.
+//
+// Bis zu dieser Runde konnte auf Osum niemand eine Datei aendern. Es lief
+// nur, was vorher hineinkompiliert worden war -- und das macht aus einem
+// Vorfuehrsystem kein benutzbares.
+//
+// AN WELCHER BEDIENUNG DAS HIER SICH ORIENTIERT UND WARUM: an `nano`
+// (und damit an `pico`), nicht an `vi`. Drei Gruende, und der dritte ist
+// der eigentliche:
+//
+//   1. Modenlos. Es gibt keinen Zustand, in dem `dd` etwas anderes tut
+//      als `dd`. Wer den Editor zum ersten Mal sieht, kann tippen.
+//   2. Jeder Befehl ist ein Steuerzeichen und damit EIN Oktett. Das ist
+//      genau das, was `sendkey ctrl-o` ueber den QEMU-Monitor schickt --
+//      der Testlauf bedient also dieselben Tasten wie ein Mensch.
+//   3. `vi` braeuchte die Fluchttaste als Befehl. Die Fluchttaste ist
+//      aber auch das erste Oktett JEDER Pfeiltaste (`ESC [ A`). Ein
+//      modaler Editor muss deshalb auf ein ZEITLIMIT warten, um beides
+//      zu unterscheiden -- und ein Zeitlimit ist genau die Sorte Sache,
+//      die eine Messung wetterfuehlig macht. Modenlos gibt es das
+//      Problem nicht.
+//
+// ABWEICHUNGEN VON NANO, aufgeschrieben statt verschwiegen:
+//   STRG-B / STRG-F   Wort zurueck / Wort vor (nano: Zeichen)
+//   STRG-T / STRG-G   Anfang / Ende der Datei (nano: Rechtschreibung/Hilfe)
+//   STRG-R            Suchen und Ersetzen (nano: STRG-Backslash; der
+//                     Backslash ist ueber `sendkey` nicht erreichbar)
+//   STRG-O            sichert SOFORT unter dem bekannten Namen und fragt
+//                     nur, wenn es keinen gibt (nano fragt immer)
+//
+// DIE TASTATUR HAT ZWEI WEGE HEREIN, und der Editor versteht beide:
+//   * Von einer seriellen Leitung kommen die Fluchtfolgen von VT100:
+//     `ESC [ A/B/C/D`, `ESC [ H`, `ESC [ F`, `ESC [ 5~`, `ESC [ 6~`,
+//     `ESC [ 3~`.
+//   * Von der PS/2-Tastatur dieses Rechners kommt die Pfeiltaste NACH
+//     OBEN seit Runde K6 als das einzelne Oktett 14, weil die Shell sie
+//     dort als "die Zeile von vorhin" liest. Das bleibt so -- an dieser
+//     Zahl haengt Abschnitt 11 von tools/userland/run.sh. Runde K11 hat
+//     `kernel/kbd.fi` um Umschalt, Steuerung und die UEBRIGEN
+//     Pfeiltasten erweitert; die schicken echte Fluchtfolgen.
+//
+// LANGE ZEILEN werden nicht umgebrochen, sondern GESCHOBEN: `coloff`
+// sagt, ab welcher Spalte das Fenster steht, und ein `$` am Rand sagt,
+// dass es weitergeht. Ein Umbruch waere eine zweite Zuordnung zwischen
+// Text- und Bildschirmzeilen, und die ist die haeufigste Fehlerquelle
+// eines Editors.
+
+profile kernel
+
+import ulib
+import tools
+
+export { u_start }
+
+const MAXL: u64 = 1024
+const POOL: u64 = 65536
+const LINEMAX: u64 = 1024
+const UNDO: u64 = 256
+const UPOOL: u64 = 8192
+const CUTMAX: u64 = 4096
+const IDLE_GIVEUP: u64 = 8
+
+// Was ein Rueckgaengig-Schritt war.
+const U_INS: u64 = 1 // ein Zeichen eingefuegt
+const U_DEL: u64 = 2 // ein Zeichen geloescht
+const U_SPLIT: u64 = 3 // eine Zeile getrennt
+const U_JOIN: u64 = 4 // zwei Zeilen verbunden
+const U_CUTL: u64 = 5 // eine Zeile herausgeschnitten
+const U_INSL: u64 = 6 // eine Zeile eingesetzt
+
+static mut pool: [u8; 65536] = [0 as u8; 65536]
+static mut lat: [u64; 1024] = [0 as u64; 1024]
+static mut llen: [u64; 1024] = [0 as u64; 1024]
+static mut nline: u64 = 0
+static mut used: u64 = 0
+
+static mut cy: u64 = 0 // Zeile im Text
+static mut cx: u64 = 0 // Spalte in der Zeile
+static mut rowoff: u64 = 0
+static mut coloff: u64 = 0
+static mut rows: u64 = 24
+static mut cols: u64 = 80
+static mut dirty: u64 = 0
+// 0 = nichts, 1 = nur die Zeile unter der Marke, 2 = alles.
+const W_NONE: u64 = 0
+const W_LINE: u64 = 1
+const W_ALL: u64 = 2
+static mut want_draw: u64 = 2
+static mut running: u64 = 1
+static mut code: u64 = 0
+
+static mut fname: [u8; 256] = [0 as u8; 256]
+static mut msg: [u8; 128] = [0 as u8; 128]
+static mut prompt_buf: [u8; 256] = [0 as u8; 256]
+static mut findbuf: [u8; 128] = [0 as u8; 128]
+static mut replbuf: [u8; 128] = [0 as u8; 128]
+static mut cut: [u8; 4096] = [0 as u8; 4096]
+static mut cutlen: u64 = 0
+static mut cutlines: u64 = 0
+
+static mut u_kind: [u64; 256] = [0 as u64; 256]
+static mut u_row: [u64; 256] = [0 as u64; 256]
+static mut u_col: [u64; 256] = [0 as u64; 256]
+static mut u_ch: [u64; 256] = [0 as u64; 256]
+static mut u_at: [u64; 256] = [0 as u64; 256]
+static mut u_len: [u64; 256] = [0 as u64; 256]
+static mut u_grp: [u64; 256] = [0 as u64; 256]
+static mut u_n: u64 = 0
+static mut upool: [u8; 8192] = [0 as u8; 8192]
+static mut u_used: u64 = 0
+static mut u_group: u64 = 0
+static mut replaying: u64 = 0
+
+static mut inbuf: [u8; 128] = [0 as u8; 128]
+static mut inlen: u64 = 0
+static mut inpos: u64 = 0
+static mut idle: u64 = 0
+
+static mut saved_t: [u8; 40] = [0 as u8; 40]
+
+// =============================================================== Termios
+
+const SYS_IOCTL: u64 = 16
+const TCGETS: u64 = 0x5401
+const TCSETSF: u64 = 0x5404
+const TIOCGWINSZ: u64 = 0x5413
+
+fn raw_on() {
+    var t: [u8; 40] = [0 as u8; 40]
+    if ulib.bad(ulib.sys(SYS_IOCTL, ulib.IN, TCGETS,
+        (&t[0 as usize]) as u64)) {
+        return
+    }
+    var i: u64 = 0
+    while i < 36 {
+        saved_t[(i) as usize] = t[(i) as usize]
+        i = i + 1
+    }
+    // c_lflag steht bei +12. ICANON, ECHO und ISIG fallen weg -- damit
+    // kommt jedes Oktett einzeln, ohne Echo, und STRG-C ist ein Zeichen
+    // und kein Signal.
+    let lf: u64 = __mmio_read32((((&t[12 as usize]) as u64)) as *mut u32) as u64
+    __mmio_write32((((&t[12 as usize]) as u64)) as *mut u32,
+        (lf & 0xFFFFFFF4) as u32)
+    // ICRNL raus: die Eingabetaste soll als 13 ankommen und nicht schon
+    // hier zu 10 werden -- der Editor entscheidet das selbst.
+    let inf: u64 = __mmio_read32((((&t[0 as usize]) as u64)) as *mut u32) as u64
+    __mmio_write32((((&t[0 as usize]) as u64)) as *mut u32,
+        (inf & 0xFFFFFEFF) as u32)
+    ulib.sys(SYS_IOCTL, ulib.IN, TCSETSF, (&t[0 as usize]) as u64)
+}
+
+fn raw_off() {
+    ulib.sys(SYS_IOCTL, ulib.IN, TCSETSF, (&saved_t[0 as usize]) as u64)
+}
+
+fn window() {
+    var w: [u8; 8] = [0 as u8; 8]
+    if !ulib.bad(ulib.sys(SYS_IOCTL, ulib.OUT, TIOCGWINSZ,
+        (&w[0 as usize]) as u64)) {
+        let r: u64 = __mmio_read16((((&w[0 as usize]) as u64)) as *mut u16) as u64
+        let c: u64 = __mmio_read16((((&w[2 as usize]) as u64)) as *mut u16) as u64
+        if r >= 8 && r <= 200 {
+            rows = r
+        }
+        if c >= 20 && c <= 400 {
+            cols = c
+        }
+    }
+}
+
+// Wie viele Zeilen Text auf den Schirm passen: Titel oben, Meldung und
+// Tastenzeile unten.
+fn textrows() -> u64 {
+    return rows - 3
+}
+
+// ============================================================ die Ausgabe
+
+fn esc_num(a: u64, b: u64, last: u64) {
+    tools.ob_byte(27)
+    tools.ob_byte(91)
+    tools.ob_num(a)
+    if b != ulib.EOF {
+        tools.ob_byte(59)
+        tools.ob_num(b)
+    }
+    tools.ob_byte(last)
+}
+
+fn goto(r: u64, c: u64) {
+    esc_num(r + 1, c + 1, 72)
+}
+
+fn clear_eol() {
+    tools.ob_byte(27)
+    tools.ob_byte(91)
+    tools.ob_byte(75)
+}
+
+fn reverse_on() {
+    tools.ob_byte(27)
+    tools.ob_byte(91)
+    tools.ob_byte(55)
+    tools.ob_byte(109)
+}
+
+fn attr_off() {
+    tools.ob_byte(27)
+    tools.ob_byte(91)
+    tools.ob_byte(109)
+}
+
+fn cursor(on: bool) {
+    tools.ob_byte(27)
+    tools.ob_byte(91)
+    tools.ob_byte(63)
+    tools.ob_byte(50)
+    tools.ob_byte(53)
+    if on {
+        tools.ob_byte(104)
+    } else {
+        tools.ob_byte(108)
+    }
+}
+
+// Eine Zeile bis zur Breite fuellen, damit die Umkehrung wirklich ueber
+// den ganzen Balken geht.
+// DIE LETZTE SPALTE BLEIBT FREI. `fb.advance` (Runde K7) bricht die
+// Zeile um, SOBALD die Marke die Breite erreicht -- ein Balken ueber die
+// volle Breite wuerde also in der untersten Zeile den ganzen Schirm
+// rollen lassen. Auf einer seriellen Leitung faellt das nicht auf, auf
+// dem Schirm sofort.
+fn bar(p: u64, n: u64) {
+    var i: u64 = 0
+    while i < n && i + 1 < cols {
+        tools.ob_byte((*((p + i) as *mut u8)) as u64)
+        i = i + 1
+    }
+    while i + 1 < cols {
+        tools.ob_byte(32)
+        i = i + 1
+    }
+}
+
+fn line_ptr(i: u64) -> u64 {
+    return (&pool[(lat[(i) as usize]) as usize]) as u64
+}
+
+// EINE einzelne Textzeile neu. Der Grund dafuer ist eine Zahl: ein
+// ganzer Schirm sind rund zweitausend Oktette, und die gehen bei jedem
+// Tastendruck ueber dieselbe serielle Leitung, auf die `serial.put` Bit
+// fuer Bit wartet. Wer einen Absatz tippt, schickt so ein Vielfaches
+// dessen, was er geschrieben hat. Solange sich weder der Ausschnitt noch
+// die Zahl der Zeilen aendert, genuegt die eine Zeile.
+fn draw_line() {
+    cursor(false)
+    goto(cy - rowoff + 1, 0)
+    clear_eol()
+    let n: u64 = llen[(cy) as usize]
+    if coloff < n {
+        var k: u64 = coloff
+        var w: u64 = 0
+        while k < n && w + 1 < cols {
+            var c: u64 = (*((line_ptr(cy) + k) as *mut u8)) as u64
+            if c < 32 || c > 126 {
+                c = 63
+            }
+            tools.ob_byte(c)
+            w = w + 1
+            k = k + 1
+        }
+        if k < n {
+            tools.ob_byte(36)
+        }
+    }
+    place()
+    cursor(true)
+    tools.ob_flush()
+}
+
+fn draw() {
+    var t_edit: [u8; 8] = "  edit \0"
+    var t_mod: [u8; 12] = "  Modified\0\0"
+    var t_new: [u8; 12] = "  New file\0\0"
+    var t_help1: [u8; 41] = "^O Write  ^X Exit   ^K Cut   ^U Paste\0\0\0\0"
+    var t_help2: [u8; 41] = "^W Where  ^R Replace ^Z Undo  ^G Bottom\0\0"
+    var t_dash: [u8; 2] = "$\0"
+    var t_more: [u8; 2] = "~\0"
+    cursor(false)
+    goto(0, 0)
+    reverse_on()
+    var head: [u8; 256] = [0 as u8; 256]
+    ulib.strcpy((&head[0 as usize]) as u64, (&t_edit[0 as usize]) as u64)
+    ulib.strcat((&head[0 as usize]) as u64, (&fname[0 as usize]) as u64)
+    if dirty != 0 {
+        ulib.strcat((&head[0 as usize]) as u64, (&t_mod[0 as usize]) as u64)
+    } else if nline == 1 && llen[0 as usize] == 0 {
+        ulib.strcat((&head[0 as usize]) as u64, (&t_new[0 as usize]) as u64)
+    }
+    bar((&head[0 as usize]) as u64,
+        ulib.length((&head[0 as usize]) as u64))
+    attr_off()
+    var r: u64 = 0
+    while r < textrows() {
+        goto(r + 1, 0)
+        clear_eol()
+        let i: u64 = rowoff + r
+        if i < nline {
+            let n: u64 = llen[(i) as usize]
+            if coloff < n {
+                var k: u64 = coloff
+                var w: u64 = 0
+                while k < n && w + 1 < cols {
+                    var c: u64 = (*((line_ptr(i) + k) as *mut u8)) as u64
+                    if c < 32 || c > 126 {
+                        c = 63
+                    }
+                    tools.ob_byte(c)
+                    w = w + 1
+                    k = k + 1
+                }
+                if k < n {
+                    tools.ob_str((&t_dash[0 as usize]) as u64)
+                }
+            }
+        } else {
+            tools.ob_str((&t_more[0 as usize]) as u64)
+        }
+        r = r + 1
+    }
+    goto(rows - 2, 0)
+    clear_eol()
+    reverse_on()
+    var st: [u8; 256] = [0 as u8; 256]
+    ulib.strcpy((&st[0 as usize]) as u64, (&msg[0 as usize]) as u64)
+    bar((&st[0 as usize]) as u64, ulib.length((&st[0 as usize]) as u64))
+    attr_off()
+    goto(rows - 1, 0)
+    clear_eol()
+    tools.ob_str((&t_help1[0 as usize]) as u64)
+    if cols >= 78 {
+        tools.ob_byte(32)
+    }
+    if cols >= 78 {
+        tools.ob_str((&t_help2[0 as usize]) as u64)
+    }
+    place()
+    cursor(true)
+    tools.ob_flush()
+}
+
+// Die Schreibmarke dorthin, wo sie im Text steht.
+fn place() {
+    goto(cy - rowoff + 1, cx - coloff)
+    tools.ob_flush()
+}
+
+// ======================================================== die Textablage
+
+fn shift_pool(from: u64, delta: u64, grow: bool) -> bool {
+    if grow {
+        if used + delta >= POOL {
+            return false
+        }
+        var i: u64 = used
+        while i > from {
+            i = i - 1
+            pool[(i + delta) as usize] = pool[(i) as usize]
+        }
+        used = used + delta
+    } else {
+        var i: u64 = from
+        while i < used {
+            pool[(i - delta) as usize] = pool[(i) as usize]
+            i = i + 1
+        }
+        used = used - delta
+    }
+    return true
+}
+
+fn move_starts(after: u64, delta: u64, grow: bool) {
+    var i: u64 = after
+    while i < nline {
+        if grow {
+            lat[(i) as usize] = lat[(i) as usize] + delta
+        } else {
+            lat[(i) as usize] = lat[(i) as usize] - delta
+        }
+        i = i + 1
+    }
+}
+
+fn insert_char(row: u64, col: u64, c: u64) -> bool {
+    if llen[(row) as usize] + 1 >= LINEMAX {
+        return false
+    }
+    let at: u64 = lat[(row) as usize] + col
+    if !shift_pool(at, 1, true) {
+        return false
+    }
+    pool[(at) as usize] = c as u8
+    llen[(row) as usize] = llen[(row) as usize] + 1
+    move_starts(row + 1, 1, true)
+    return true
+}
+
+fn delete_char(row: u64, col: u64) -> u64 {
+    if col >= llen[(row) as usize] {
+        return ulib.EOF
+    }
+    let at: u64 = lat[(row) as usize] + col
+    let c: u64 = (pool[(at) as usize]) as u64
+    shift_pool(at + 1, 1, false)
+    llen[(row) as usize] = llen[(row) as usize] - 1
+    move_starts(row + 1, 1, false)
+    return c
+}
+
+fn split_line(row: u64, col: u64) -> bool {
+    if nline + 1 >= MAXL {
+        return false
+    }
+    var i: u64 = nline
+    while i > row + 1 {
+        i = i - 1
+        lat[(i + 1) as usize] = lat[(i) as usize]
+        llen[(i + 1) as usize] = llen[(i) as usize]
+    }
+    let rest: u64 = llen[(row) as usize] - col
+    lat[(row + 1) as usize] = lat[(row) as usize] + col
+    llen[(row + 1) as usize] = rest
+    llen[(row) as usize] = col
+    nline = nline + 1
+    return true
+}
+
+fn join_line(row: u64) -> bool {
+    if row + 1 >= nline {
+        return false
+    }
+    if llen[(row) as usize] + llen[(row + 1) as usize] >= LINEMAX {
+        return false
+    }
+    llen[(row) as usize] = llen[(row) as usize] + llen[(row + 1) as usize]
+    var i: u64 = row + 1
+    while i + 1 < nline {
+        lat[(i) as usize] = lat[(i + 1) as usize]
+        llen[(i) as usize] = llen[(i + 1) as usize]
+        i = i + 1
+    }
+    nline = nline - 1
+    return true
+}
+
+// Eine ganze Zeile herausnehmen; ihr Text kommt nach `out`.
+fn take_line(row: u64, out: u64) -> u64 {
+    let n: u64 = llen[(row) as usize]
+    var i: u64 = 0
+    while i < n {
+        __mmio_write8((out + i) as *mut u8, pool[(lat[(row) as usize] + i) as usize])
+        i = i + 1
+    }
+    shift_pool(lat[(row) as usize] + n, n, false)
+    move_starts(row + 1, n, false)
+    i = row
+    while i + 1 < nline {
+        lat[(i) as usize] = lat[(i + 1) as usize]
+        llen[(i) as usize] = llen[(i + 1) as usize]
+        i = i + 1
+    }
+    if nline > 1 {
+        nline = nline - 1
+    } else {
+        llen[0 as usize] = 0
+    }
+    return n
+}
+
+fn put_line(row: u64, p: u64, n: u64) -> bool {
+    if nline + 1 >= MAXL || used + n >= POOL {
+        return false
+    }
+    var at: u64 = used
+    if row < nline {
+        at = lat[(row) as usize]
+    }
+    if !shift_pool(at, n, true) {
+        return false
+    }
+    var i: u64 = 0
+    while i < n {
+        pool[(at + i) as usize] = *((p + i) as *mut u8)
+        i = i + 1
+    }
+    var k: u64 = nline
+    while k > row {
+        k = k - 1
+        lat[(k + 1) as usize] = lat[(k) as usize] + n
+        llen[(k + 1) as usize] = llen[(k) as usize]
+    }
+    lat[(row) as usize] = at
+    llen[(row) as usize] = n
+    nline = nline + 1
+    return true
+}
+
+// ======================================================== Rueckgaengig
+
+fn push_undo(kind: u64, row: u64, col: u64, c: u64, p: u64, n: u64) {
+    if replaying == 1 {
+        return
+    }
+    if u_n >= UNDO {
+        // Der aelteste Schritt faellt weg. Ein Editor mit begrenztem
+        // Gedaechtnis ist ehrlicher als einer, der bei voller Liste
+        // gar nichts mehr merkt.
+        var i: u64 = 0
+        while i + 1 < UNDO {
+            u_kind[(i) as usize] = u_kind[(i + 1) as usize]
+            u_row[(i) as usize] = u_row[(i + 1) as usize]
+            u_col[(i) as usize] = u_col[(i + 1) as usize]
+            u_ch[(i) as usize] = u_ch[(i + 1) as usize]
+            u_at[(i) as usize] = u_at[(i + 1) as usize]
+            u_len[(i) as usize] = u_len[(i + 1) as usize]
+            u_grp[(i) as usize] = u_grp[(i + 1) as usize]
+            i = i + 1
+        }
+        u_n = UNDO - 1
+    }
+    u_kind[(u_n) as usize] = kind
+    u_row[(u_n) as usize] = row
+    u_col[(u_n) as usize] = col
+    u_ch[(u_n) as usize] = c
+    u_grp[(u_n) as usize] = u_group
+    u_at[(u_n) as usize] = 0
+    u_len[(u_n) as usize] = 0
+    if n > 0 {
+        if u_used + n >= UPOOL {
+            u_used = 0
+        }
+        var i: u64 = 0
+        while i < n {
+            upool[(u_used + i) as usize] = *((p + i) as *mut u8)
+            i = i + 1
+        }
+        u_at[(u_n) as usize] = u_used
+        u_len[(u_n) as usize] = n
+        u_used = u_used + n
+    }
+    u_n = u_n + 1
+}
+
+fn undo_one() -> bool {
+    if u_n == 0 {
+        return false
+    }
+    let g: u64 = u_grp[(u_n - 1) as usize]
+    replaying = 1
+    var going: bool = true
+    while going {
+        if u_n == 0 {
+            going = false
+        } else if u_grp[(u_n - 1) as usize] != g {
+            going = false
+        } else {
+            u_n = u_n - 1
+            let k: u64 = u_kind[(u_n) as usize]
+            let r: u64 = u_row[(u_n) as usize]
+            let c: u64 = u_col[(u_n) as usize]
+            if k == U_INS {
+                delete_char(r, c)
+            } else if k == U_DEL {
+                insert_char(r, c, u_ch[(u_n) as usize])
+            } else if k == U_SPLIT {
+                join_line(r)
+            } else if k == U_JOIN {
+                split_line(r, c)
+            } else if k == U_CUTL {
+                put_line(r, (&upool[(u_at[(u_n) as usize]) as usize]) as u64,
+                    u_len[(u_n) as usize])
+            } else if k == U_INSL {
+                var tmp: [u8; 1024] = [0 as u8; 1024]
+                take_line(r, (&tmp[0 as usize]) as u64)
+            }
+            cy = r
+            cx = c
+        }
+    }
+    replaying = 0
+    if cy >= nline {
+        cy = nline - 1
+    }
+    if cx > llen[(cy) as usize] {
+        cx = llen[(cy) as usize]
+    }
+    return true
+}
+
+// ========================================================== Datei lesen
+
+fn load(path: u64) -> bool {
+    nline = 0
+    used = 0
+    let fd: u64 = tools.openr(path)
+    if ulib.bad(fd) {
+        lat[0 as usize] = 0
+        llen[0 as usize] = 0
+        nline = 1
+        return false
+    }
+    var total: u64 = 0
+    var going: bool = true
+    while going {
+        let n: u64 = ulib.sys(ulib.SYS_READ, fd,
+            (&pool[(total) as usize]) as u64, 4096)
+        if n == 0 || ulib.bad(n) {
+            going = false
+        } else {
+            total = total + n
+            if total + 4096 >= POOL {
+                going = false
+            }
+        }
+    }
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    used = total
+    var start: u64 = 0
+    var i: u64 = 0
+    while i < total {
+        if pool[(i) as usize] == 10 as u8 {
+            if nline < MAXL {
+                lat[(nline) as usize] = start
+                llen[(nline) as usize] = i - start
+                nline = nline + 1
+            }
+            start = i + 1
+        }
+        i = i + 1
+    }
+    if start < total && nline < MAXL {
+        lat[(nline) as usize] = start
+        llen[(nline) as usize] = total - start
+        nline = nline + 1
+    }
+    // DIE ZEILENUMBRUECHE STEHEN NICHT MEHR IM SPEICHER: `used` zaehlt
+    // sie noch mit, und jede Einfuegung wuerde sie mitschieben. Also
+    // werden sie herausgenommen und die Anfaenge nachgezogen.
+    compact()
+    if nline == 0 {
+        lat[0 as usize] = 0
+        llen[0 as usize] = 0
+        nline = 1
+    }
+    return true
+}
+
+// Die Zeilen dicht hintereinander, ohne Trennzeichen dazwischen.
+fn compact() {
+    var out: u64 = 0
+    var i: u64 = 0
+    while i < nline {
+        let from: u64 = lat[(i) as usize]
+        let n: u64 = llen[(i) as usize]
+        var k: u64 = 0
+        while k < n {
+            pool[(out + k) as usize] = pool[(from + k) as usize]
+            k = k + 1
+        }
+        lat[(i) as usize] = out
+        out = out + n
+        i = i + 1
+    }
+    used = out
+}
+
+fn save(path: u64) -> bool {
+    let fd: u64 = tools.openw(path)
+    if ulib.bad(fd) {
+        return false
+    }
+    tools.ob_flush()
+    let old: u64 = tools.ob_fd()
+    tools.ob_to(fd)
+    var i: u64 = 0
+    while i < nline {
+        tools.ob_put(line_ptr(i), llen[(i) as usize])
+        // JEDE Zeile bekommt ihren Umbruch, auch die letzte. Eine Datei
+        // ohne abschliessenden Umbruch ist auf einem Unix die Ausnahme;
+        // wer sie braucht, sagt es -- und dieser Editor sagt hier, dass
+        // er sie nicht macht (docs/ROUNDK11.md).
+        tools.ob_byte(10)
+        i = i + 1
+    }
+    tools.ob_flush()
+    tools.ob_to(old)
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    return true
+}
+
+// ========================================================== die Eingabe
+
+fn next_byte() -> u64 {
+    if inpos < inlen {
+        let c: u64 = (inbuf[(inpos) as usize]) as u64
+        inpos = inpos + 1
+        return c
+    }
+    tools.ob_flush()
+    let n: u64 = ulib.sys(ulib.SYS_READ, ulib.IN,
+        (&inbuf[0 as usize]) as u64, 128)
+    if ulib.bad(n) || n == 0 {
+        idle = idle + 1
+        if idle >= IDLE_GIVEUP {
+            return 256
+        }
+        return 257
+    }
+    idle = 0
+    inlen = n
+    inpos = 1
+    return (inbuf[0 as usize]) as u64
+}
+
+// Ein Tastendruck. Steuerzeichen kommen als sie selbst, besondere Tasten
+// als Zahlen ab 300.
+const K_UP: u64 = 300
+const K_DOWN: u64 = 301
+const K_RIGHT: u64 = 302
+const K_LEFT: u64 = 303
+const K_HOME: u64 = 304
+const K_END: u64 = 305
+const K_PGUP: u64 = 306
+const K_PGDN: u64 = 307
+const K_DEL: u64 = 308
+const K_NONE: u64 = 309
+
+fn key() -> u64 {
+    let c: u64 = next_byte()
+    if c == 257 {
+        return K_NONE
+    }
+    if c == 14 {
+        // Die Pfeiltaste nach oben der PS/2-Tastatur (Runde K6).
+        return K_UP
+    }
+    if c != 27 {
+        return c
+    }
+    let a: u64 = next_byte()
+    if a != 91 && a != 79 {
+        return 27
+    }
+    let b: u64 = next_byte()
+    if b == 65 {
+        return K_UP
+    }
+    if b == 66 {
+        return K_DOWN
+    }
+    if b == 67 {
+        return K_RIGHT
+    }
+    if b == 68 {
+        return K_LEFT
+    }
+    if b == 72 {
+        return K_HOME
+    }
+    if b == 70 {
+        return K_END
+    }
+    if b >= 48 && b <= 57 {
+        let d: u64 = next_byte()
+        if b == 49 {
+            return K_HOME
+        }
+        if b == 52 {
+            return K_END
+        }
+        if b == 51 {
+            return K_DEL
+        }
+        if b == 53 {
+            return K_PGUP
+        }
+        if b == 54 {
+            return K_PGDN
+        }
+        return K_NONE
+    }
+    return K_NONE
+}
+
+// ========================================================== die Meldung
+
+fn set_msg(p: u64) {
+    ulib.strncpy((&msg[0 as usize]) as u64, p, 128)
+    want_draw = W_ALL
+}
+
+fn set_msg2(p: u64, q: u64) {
+    ulib.strncpy((&msg[0 as usize]) as u64, p, 128)
+    ulib.strcat((&msg[0 as usize]) as u64, q)
+    want_draw = W_ALL
+}
+
+// Eine Frage in der Meldungszeile, mit einem winzigen Zeileneditor.
+// Gibt false, wenn abgebrochen wurde (STRG-C oder die Fluchttaste).
+fn ask(question: u64, out: u64, max: u64) -> bool {
+    var n: u64 = ulib.length(out)
+    var going: bool = true
+    var ok: bool = false
+    while going {
+        goto(rows - 2, 0)
+        clear_eol()
+        reverse_on()
+        var buf: [u8; 256] = [0 as u8; 256]
+        ulib.strncpy((&buf[0 as usize]) as u64, question, 200)
+        ulib.strcat((&buf[0 as usize]) as u64, out)
+        bar((&buf[0 as usize]) as u64,
+            ulib.length((&buf[0 as usize]) as u64))
+        attr_off()
+        goto(rows - 2, ulib.length(question) + n)
+        tools.ob_flush()
+        let k: u64 = key()
+        if k == 13 || k == 10 {
+            going = false
+            ok = true
+        } else if k == 3 || k == 27 || k == 24 {
+            going = false
+        } else if k == 127 || k == 8 {
+            if n > 0 {
+                n = n - 1
+                __mmio_write8((out + n) as *mut u8, 0 as u8)
+            }
+        } else if k == 256 {
+            going = false
+        } else if k < 256 && k >= 32 && n + 1 < max {
+            __mmio_write8((out + n) as *mut u8, k as u8)
+            n = n + 1
+            __mmio_write8((out + n) as *mut u8, 0 as u8)
+        }
+    }
+    want_draw = W_ALL
+    return ok
+}
+
+// Eine Frage, die mit EINER Taste beantwortet wird -- `y`, `n`, `a`.
+// Ohne Eingabetaste, so wie bei nano: wer schon getippt hat, dass er
+// nicht sichern will, soll das nicht noch bestaetigen muessen.
+fn ask_char(question: u64) -> u64 {
+    goto(rows - 2, 0)
+    clear_eol()
+    reverse_on()
+    bar(question, ulib.length(question))
+    attr_off()
+    goto(rows - 2, ulib.length(question))
+    tools.ob_flush()
+    let k: u64 = key()
+    want_draw = W_ALL
+    if k == K_NONE {
+        return ask_char(question)
+    }
+    return k
+}
+
+// ============================================================ Bewegung
+
+fn clamp() {
+    if nline == 0 {
+        nline = 1
+        lat[0 as usize] = 0
+        llen[0 as usize] = 0
+    }
+    if cy >= nline {
+        cy = nline - 1
+    }
+    if cx > llen[(cy) as usize] {
+        cx = llen[(cy) as usize]
+    }
+    if cy < rowoff {
+        rowoff = cy
+        want_draw = W_ALL
+    }
+    if cy >= rowoff + textrows() {
+        rowoff = cy - textrows() + 1
+        want_draw = W_ALL
+    }
+    if cx < coloff {
+        coloff = cx
+        want_draw = W_ALL
+    }
+    if cx + 2 >= coloff + cols {
+        coloff = cx + 2 - cols
+        want_draw = W_ALL
+    }
+}
+
+fn is_word(c: u64) -> bool {
+    if c >= 48 && c <= 57 {
+        return true
+    }
+    if c >= 65 && c <= 90 {
+        return true
+    }
+    if c >= 97 && c <= 122 {
+        return true
+    }
+    return c == 95
+}
+
+fn word_right() {
+    var n: u64 = llen[(cy) as usize]
+    while cx < n && is_word((*((line_ptr(cy) + cx) as *mut u8)) as u64) {
+        cx = cx + 1
+    }
+    while cx < n && !is_word((*((line_ptr(cy) + cx) as *mut u8)) as u64) {
+        cx = cx + 1
+    }
+    if cx >= n && cy + 1 < nline {
+        cy = cy + 1
+        cx = 0
+    }
+}
+
+fn word_left() {
+    if cx == 0 {
+        if cy > 0 {
+            cy = cy - 1
+            cx = llen[(cy) as usize]
+        }
+        return
+    }
+    while cx > 0 && !is_word((*((line_ptr(cy) + cx - 1) as *mut u8)) as u64) {
+        cx = cx - 1
+    }
+    while cx > 0 && is_word((*((line_ptr(cy) + cx - 1) as *mut u8)) as u64) {
+        cx = cx - 1
+    }
+}
+
+// ============================================================== Suchen
+
+// `wrap` sagt, ob am Dateiende von vorn begonnen wird. SUCHEN tut das
+// (so wie nano), ERSETZEN nicht: ein Ersetzen, das umlaeuft, fragt
+// dieselbe Stelle ein zweites Mal, und wer dann `n` sagt, sitzt in einer
+// Schleife, die nie endet. Genau das ist beim ersten Versuch passiert.
+fn find_from(row: u64, col: u64, pat: u64, wrap: bool) -> bool {
+    let m: u64 = ulib.length(pat)
+    if m == 0 {
+        return false
+    }
+    var r: u64 = row
+    var c: u64 = col
+    var seen: u64 = 0
+    while seen <= nline && r < nline {
+        let n: u64 = llen[(r) as usize]
+        if n >= m {
+            var i: u64 = c
+            while i + m <= n {
+                if tools.same_bytes(line_ptr(r) + i, pat, m) {
+                    cy = r
+                    cx = i
+                    return true
+                }
+                i = i + 1
+            }
+        }
+        r = r + 1
+        c = 0
+        if r >= nline && wrap {
+            r = 0
+        }
+        seen = seen + 1
+    }
+    return false
+}
+
+fn do_replace() {
+    var q1: [u8; 20] = "Search (replace): \0\0"
+    var q2: [u8; 14] = "Replace with: "
+    var q3: [u8; 26] = "Replace this one? (y/n/a) "
+    var m_done: [u8; 12] = "replaced \0\0\0"
+    if !ask((&q1[0 as usize]) as u64, (&findbuf[0 as usize]) as u64, 128) {
+        return
+    }
+    if !ask((&q2[0 as usize]) as u64, (&replbuf[0 as usize]) as u64, 128) {
+        return
+    }
+    let m: u64 = ulib.length((&findbuf[0 as usize]) as u64)
+    if m == 0 {
+        return
+    }
+    u_group = u_group + 1
+    var all: bool = false
+    var done: u64 = 0
+    var going: bool = true
+    var from_row: u64 = cy
+    var from_col: u64 = cx
+    while going {
+        if from_row >= nline || !find_from(from_row, from_col,
+            (&findbuf[0 as usize]) as u64, false) {
+            going = false
+        } else {
+            var yes: bool = all
+            if !all {
+                draw()
+                let a: u64 = ask_char((&q3[0 as usize]) as u64)
+                if a == 3 || a == 27 || a == 24 || a == 256 {
+                    going = false
+                }
+                if a == 97 {
+                    all = true
+                    yes = true
+                } else if a == 121 {
+                    yes = true
+                }
+            }
+            if going {
+                if yes {
+                    var k: u64 = 0
+                    while k < m {
+                        let c: u64 = delete_char(cy, cx)
+                        push_undo(U_DEL, cy, cx, c, 0, 0)
+                        k = k + 1
+                    }
+                    let rn: u64 = ulib.length((&replbuf[0 as usize]) as u64)
+                    k = 0
+                    while k < rn {
+                        if insert_char(cy, cx + k,
+                            (replbuf[(k) as usize]) as u64) {
+                            push_undo(U_INS, cy, cx + k, 0, 0, 0)
+                        }
+                        k = k + 1
+                    }
+                    cx = cx + rn
+                    done = done + 1
+                    dirty = 1
+                } else {
+                    cx = cx + 1
+                }
+                from_row = cy
+                from_col = cx
+                if cx > llen[(cy) as usize] {
+                    from_col = 0
+                    from_row = cy + 1
+                    if from_row >= nline {
+                        going = false
+                    }
+                }
+            }
+        }
+    }
+    var line: [u8; 64] = [0 as u8; 64]
+    var num: [u8; 26] = [0 as u8; 26]
+    ulib.digits(done, (&num[0 as usize]) as u64)
+    ulib.strcpy((&line[0 as usize]) as u64, (&m_done[0 as usize]) as u64)
+    ulib.strcat((&line[0 as usize]) as u64, (&num[0 as usize]) as u64)
+    set_msg((&line[0 as usize]) as u64)
+    clamp()
+}
+
+// ============================================================ die Befehle
+
+fn do_save() -> bool {
+    var q: [u8; 16] = "File name to: \0\0"
+    var m_ok: [u8; 10] = "wrote \0\0\0\0"
+    var m_no: [u8; 20] = "cannot write \0\0\0\0\0\0\0"
+    if fname[0 as usize] == 0 as u8 {
+        if !ask((&q[0 as usize]) as u64, (&fname[0 as usize]) as u64, 256) {
+            return false
+        }
+    }
+    if fname[0 as usize] == 0 as u8 {
+        return false
+    }
+    if !save((&fname[0 as usize]) as u64) {
+        set_msg2((&m_no[0 as usize]) as u64, (&fname[0 as usize]) as u64)
+        return false
+    }
+    dirty = 0
+    set_msg2((&m_ok[0 as usize]) as u64, (&fname[0 as usize]) as u64)
+    return true
+}
+
+fn do_exit() {
+    var q: [u8; 32] = "Save modified buffer? (y/n) \0\0\0\0"
+    if dirty == 0 {
+        running = 0
+        return
+    }
+    let a: u64 = ask_char((&q[0 as usize]) as u64)
+    if a == 121 {
+        if do_save() {
+            running = 0
+        }
+    } else if a == 110 || a == 256 {
+        running = 0
+    }
+}
+
+fn do_cut() {
+    if cutlines == 0 {
+        cutlen = 0
+    }
+    let n: u64 = llen[(cy) as usize]
+    if cutlen + n + 1 >= CUTMAX {
+        cutlen = 0
+        cutlines = 0
+    }
+    var tmp: [u8; 1024] = [0 as u8; 1024]
+    let got: u64 = take_line(cy, (&tmp[0 as usize]) as u64)
+    push_undo(U_CUTL, cy, 0, 0, (&tmp[0 as usize]) as u64, got)
+    var i: u64 = 0
+    while i < got {
+        cut[(cutlen + i) as usize] = tmp[(i) as usize]
+        i = i + 1
+    }
+    cutlen = cutlen + got
+    cut[(cutlen) as usize] = 10 as u8
+    cutlen = cutlen + 1
+    cutlines = cutlines + 1
+    dirty = 1
+    clamp()
+    want_draw = W_ALL
+}
+
+fn do_paste() {
+    if cutlines == 0 {
+        return
+    }
+    u_group = u_group + 1
+    var at: u64 = 0
+    var row: u64 = cy
+    while at < cutlen {
+        var end: u64 = at
+        while end < cutlen && cut[(end) as usize] != 10 as u8 {
+            end = end + 1
+        }
+        if put_line(row, (&cut[(at) as usize]) as u64, end - at) {
+            push_undo(U_INSL, row, 0, 0, 0, 0)
+            row = row + 1
+        }
+        at = end + 1
+    }
+    cy = row
+    cx = 0
+    dirty = 1
+    clamp()
+    want_draw = W_ALL
+}
+
+fn do_search() {
+    var q: [u8; 10] = "Search: \0\0"
+    var m_no: [u8; 12] = "not found\0\0\0"
+    if !ask((&q[0 as usize]) as u64, (&findbuf[0 as usize]) as u64, 128) {
+        return
+    }
+    var from: u64 = cx + 1
+    if from > llen[(cy) as usize] {
+        from = llen[(cy) as usize]
+    }
+    if !find_from(cy, from, (&findbuf[0 as usize]) as u64, true) {
+        set_msg((&m_no[0 as usize]) as u64)
+    }
+    clamp()
+    want_draw = W_ALL
+}
+
+fn do_where() {
+    var s_line: [u8; 8] = "line \0\0\0"
+    var s_of: [u8; 4] = "/\0\0\0"
+    var s_col: [u8; 8] = "  col \0\0"
+    var s_ch: [u8; 12] = "  chars \0\0\0\0"
+    var buf: [u8; 96] = [0 as u8; 96]
+    var num: [u8; 26] = [0 as u8; 26]
+    ulib.strcpy((&buf[0 as usize]) as u64, (&s_line[0 as usize]) as u64)
+    ulib.digits(cy + 1, (&num[0 as usize]) as u64)
+    ulib.strcat((&buf[0 as usize]) as u64, (&num[0 as usize]) as u64)
+    ulib.strcat((&buf[0 as usize]) as u64, (&s_of[0 as usize]) as u64)
+    ulib.digits(nline, (&num[0 as usize]) as u64)
+    ulib.strcat((&buf[0 as usize]) as u64, (&num[0 as usize]) as u64)
+    ulib.strcat((&buf[0 as usize]) as u64, (&s_col[0 as usize]) as u64)
+    ulib.digits(cx + 1, (&num[0 as usize]) as u64)
+    ulib.strcat((&buf[0 as usize]) as u64, (&num[0 as usize]) as u64)
+    ulib.strcat((&buf[0 as usize]) as u64, (&s_ch[0 as usize]) as u64)
+    ulib.digits(used, (&num[0 as usize]) as u64)
+    ulib.strcat((&buf[0 as usize]) as u64, (&num[0 as usize]) as u64)
+    set_msg((&buf[0 as usize]) as u64)
+}
+
+fn handle(k: u64) {
+    var m_undo: [u8; 16] = "nothing to undo\0"
+    want_draw = W_NONE
+    if k == K_NONE {
+        return
+    }
+    if k == 256 {
+        running = 0
+        return
+    }
+    if k == K_UP {
+        if cy > 0 {
+            cy = cy - 1
+        }
+    } else if k == K_DOWN {
+        if cy + 1 < nline {
+            cy = cy + 1
+        }
+    } else if k == K_LEFT {
+        if cx > 0 {
+            cx = cx - 1
+        } else if cy > 0 {
+            cy = cy - 1
+            cx = llen[(cy) as usize]
+        }
+    } else if k == K_RIGHT {
+        if cx < llen[(cy) as usize] {
+            cx = cx + 1
+        } else if cy + 1 < nline {
+            cy = cy + 1
+            cx = 0
+        }
+    } else if k == K_HOME || k == 1 {
+        cx = 0
+    } else if k == K_END || k == 5 {
+        cx = llen[(cy) as usize]
+    } else if k == K_PGUP || k == 25 {
+        if cy > textrows() {
+            cy = cy - textrows()
+        } else {
+            cy = 0
+        }
+    } else if k == K_PGDN || k == 22 {
+        cy = cy + textrows()
+        if cy >= nline {
+            cy = nline - 1
+        }
+    } else if k == 20 {
+        cy = 0
+        cx = 0
+    } else if k == 7 {
+        cy = nline - 1
+        cx = llen[(cy) as usize]
+    } else if k == 2 {
+        word_left()
+    } else if k == 6 {
+        word_right()
+    } else if k == 15 {
+        do_save()
+    } else if k == 24 {
+        do_exit()
+    } else if k == 11 {
+        do_cut()
+    } else if k == 21 {
+        do_paste()
+    } else if k == 23 {
+        do_search()
+    } else if k == 18 {
+        do_replace()
+    } else if k == 26 {
+        if !undo_one() {
+            set_msg((&m_undo[0 as usize]) as u64)
+        }
+        dirty = 1
+        want_draw = W_ALL
+    } else if k == 12 {
+        want_draw = W_ALL
+    } else if k == 3 {
+        do_where()
+    } else if k == 13 || k == 10 {
+        u_group = u_group + 1
+        if split_line(cy, cx) {
+            push_undo(U_SPLIT, cy, cx, 0, 0, 0)
+            cy = cy + 1
+            cx = 0
+            dirty = 1
+        }
+        want_draw = W_ALL
+    } else if k == 127 || k == 8 {
+        u_group = u_group + 1
+        if cx > 0 {
+            let c: u64 = delete_char(cy, cx - 1)
+            if c != ulib.EOF {
+                push_undo(U_DEL, cy, cx - 1, c, 0, 0)
+                cx = cx - 1
+                dirty = 1
+                if want_draw == W_NONE {
+                    want_draw = W_LINE
+                }
+            }
+        } else if cy > 0 {
+            let at: u64 = llen[(cy - 1) as usize]
+            if join_line(cy - 1) {
+                push_undo(U_JOIN, cy - 1, at, 0, 0, 0)
+                cy = cy - 1
+                cx = at
+                dirty = 1
+                want_draw = W_ALL
+            }
+        }
+    } else if k == K_DEL || k == 4 {
+        u_group = u_group + 1
+        if cx < llen[(cy) as usize] {
+            let c: u64 = delete_char(cy, cx)
+            if c != ulib.EOF {
+                push_undo(U_DEL, cy, cx, c, 0, 0)
+                dirty = 1
+                if want_draw == W_NONE {
+                    want_draw = W_LINE
+                }
+            }
+        } else if cy + 1 < nline {
+            let at: u64 = llen[(cy) as usize]
+            if join_line(cy) {
+                push_undo(U_JOIN, cy, at, 0, 0, 0)
+                dirty = 1
+                want_draw = W_ALL
+            }
+        }
+    } else if k == 9 || (k >= 32 && k < 127) {
+        if insert_char(cy, cx, k) {
+            push_undo(U_INS, cy, cx, 0, 0, 0)
+            cx = cx + 1
+            dirty = 1
+            if want_draw == W_NONE {
+                want_draw = W_LINE
+            }
+        }
+    }
+    clamp()
+}
+
+fn u_start(args: u64) -> u64 {
+    var s_ready: [u8; 19] = "edit: ready\0\0\0\0\0\0\0\0"
+    var s_new: [u8; 12] = "new file\0\0\0\0"
+    var s_read: [u8; 12] = "read \0\0\0\0\0\0\0"
+    let argc: u64 = ulib.arg_count(args)
+    fname[0 as usize] = 0 as u8
+    if argc > 1 {
+        ulib.strncpy((&fname[0 as usize]) as u64, ulib.arg_at(args, 1), 256)
+    }
+    if fname[0 as usize] != 0 as u8 {
+        if load((&fname[0 as usize]) as u64) {
+            set_msg2((&s_read[0 as usize]) as u64, (&fname[0 as usize]) as u64)
+        } else {
+            set_msg((&s_new[0 as usize]) as u64)
+        }
+    } else {
+        nline = 1
+        lat[0 as usize] = 0
+        llen[0 as usize] = 0
+        set_msg((&s_new[0 as usize]) as u64)
+    }
+    window()
+    raw_on()
+    // DIESE ZEILE GEHT AUF DIE SERIELLE LEITUNG UND AUF DEN SCHIRM, und
+    // sie steht hier, damit ein Testlaeufer weiss, WANN er die Tasten
+    // schicken darf. Ohne so ein Zeichen faengt er zu frueh an und die
+    // ersten Tasten fallen in die Shell.
+    tools.ob_str((&s_ready[0 as usize]) as u64)
+    tools.ob_byte(10)
+    tools.ob_flush()
+    draw()
+    while running == 1 {
+        let k: u64 = key()
+        handle(k)
+        if want_draw == W_ALL {
+            want_draw = W_NONE
+            draw()
+        } else if want_draw == W_LINE {
+            want_draw = W_NONE
+            draw_line()
+        } else {
+            place()
+        }
+    }
+    // Aufraeumen: Schirm loeschen, Marke zurueck, Terminal wie vorher.
+    tools.ob_byte(27)
+    tools.ob_byte(91)
+    tools.ob_byte(50)
+    tools.ob_byte(74)
+    goto(0, 0)
+    cursor(true)
+    tools.ob_flush()
+    raw_off()
+    return code
+}
