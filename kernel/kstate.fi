@@ -109,6 +109,12 @@ export {
     CPU_OFF, CPU_BYTES, MAX_CPUS, LOCK_OFF, LOCK_BYTES, LOCK_COUNT,
     SMP_OFF, SMP_LAPIC, SMP_COUNT, SMP_NOLOCK, SMP_MODE, SMP_MAX,
     TCPU_OFF, TCPU_BYTES,
+    // ---- Runde K14: die VFS-Schicht und die fremden Dateisysteme ----
+    K14_OFF, K14_MAX, FAT_OFF, FAT_MAX, PROCFS_OFF, PROCFS_MAX,
+    K14_MODE, VFS_READY, VFS_MOUNTS, VFS_LOOKUPS, VFS_CROSSINGS,
+    VFS_OPS, VFS_INDIRECT, DISK2_BLOCKS, DISK2_DEV,
+    M_VFS, M_NOVFS, M_NOPROCFS, M_NODEVFS, M_NOFAT, M_NOPART, M_FATRO,
+    M_VFSALL,
     get, set, add, get32, get16, get8, set8
 }
 
@@ -246,6 +252,41 @@ const MOD_WANT: u64 = 800 // die verlangte (modcrc=), 0 = keine Vorgabe
 const MOD_OK: u64 = 808 // 1 = vorhanden und Summe stimmt
 const MOD_MODE: u64 = 816 // die Woerter dieser Runde (modfs)
 const GUARD_APS: u64 = 824 // weitere Prozessoren mit gesetzten Schutzbits
+
+// --------------------------------------------------------- Runde K14
+//
+// DIE VFS-SCHICHT. Bis zu dieser Runde kannte Osum genau EIN
+// Dateisystem, und `FS_READY` oben war die ganze Buchfuehrung darueber:
+// eine Null hiess "nichts eingehaengt", eine Eins "die eine Platte ist
+// da". Ein zweites Dateisystem hat in dieser Zahl keinen Platz.
+//
+// Die Skalare hier zaehlen, was die Schicht tut, und sie sind der
+// Grund, warum die Zusagen dieser Runde messbar sind statt behauptet:
+// ein Lauf, in dem `VFS_CROSSINGS` null bleibt, hat KEINE
+// Einhaengegrenze ueberquert, egal was er sonst meldet.
+//
+//   VFS_READY      1 = `vfs.init` ist gelaufen
+//   VFS_MOUNTS     wie viele Einhaengepunkte gerade stehen
+//   VFS_LOOKUPS    aufgeloeste Pfade
+//   VFS_CROSSINGS  Pfade, die dabei eine Einhaengegrenze ueberquert
+//                  haben (also NICHT auf der Wurzel landeten)
+//   VFS_OPS        Verrichtungen, die ueber eine Ops-Tafel gingen
+//   VFS_INDIRECT   davon die, die ein ECHTER indirekter Aufruf waren
+//                  (`call *rax`) -- die beiden muessen gleich sein
+//   DISK2_BLOCKS   die ZWEITE Platte (ATA-Sklave am ersten Bus): ihre
+//   DISK2_DEV      Groesse in Bloecken und ihre Geraetenummer. Die
+//                  erste Platte steht in DISK/DISK_BLOCKS/DISK_DEV und
+//                  bleibt, was sie war -- ein Dateisystem mehr darf der
+//                  bestehenden Platte nichts wegnehmen.
+const K14_MODE: u64 = 832 // die Woerter der Kommandozeile dieser Runde
+const VFS_READY: u64 = 840
+const VFS_MOUNTS: u64 = 848
+const VFS_LOOKUPS: u64 = 856
+const VFS_CROSSINGS: u64 = 864
+const VFS_OPS: u64 = 872
+const VFS_INDIRECT: u64 = 880
+const DISK2_BLOCKS: u64 = 888
+const DISK2_DEV: u64 = 896
 
 // --------------------------------------------------------- the regions
 
@@ -508,6 +549,67 @@ const WM_OFF: u64 = 0x1E000
 const WM_MAX: u64 = 0x2000
 const TTF_OFF: u64 = 0x3F000
 const TTF_MAX: u64 = 4096
+
+// ------------------------------------------- Runde K14: die VFS-Schicht
+//
+// DREI SEITEN, UND SIE STEHEN HIER, WEIL GENAU DAS DIE STELLE IST, AN
+// DER DIESES PROJEKT VIERMAL DENSELBEN FEHLER GEMACHT HAT (siehe den
+// Kopf von `tools/kernel/karte.py`). Der Auftrag dieser Runde hat den
+// Bereich 0x43000..0x46000 zugeteilt, weil weitere Runden GLEICHZEITIG
+// an diesem Baum arbeiten; nichts ausserhalb davon wird genommen.
+//
+//   K14      0x43000  die Einhaengetafel (8 Eintraege zu 128 Oktetten),
+//                     die Partitionstafel, die Skalare von devfs und
+//                     procfs und zwei Pfadpuffer fuer die Aufloesung
+//                     ueber Einhaengegrenzen hinweg.
+//   FAT      0x44000  die Arbeitsbloecke von FAT32: ein Sektor der
+//                     Zuordnungstafel, ein Verzeichnissektor, ein
+//                     Datensektor und der Zusammenbau eines langen
+//                     Namens. Ein Kernelstapel ist 8 KiB -- vier
+//                     Sektoren darauf waeren ein Viertel davon.
+//   PROCFS   0x45000  eine Seite, auf der eine Datei des /proc-
+//                     Dateisystems ENTSTEHT. `/proc/meminfo` liegt
+//                     nirgends; es wird bei jedem Lesen geschrieben,
+//                     und das ist der Unterschied zwischen einem
+//                     Dateisystem im Speicher und einer Datei.
+const K14_OFF: u64 = 0x43000
+const K14_MAX: u64 = 0x1000
+const FAT_OFF: u64 = 0x44000
+const FAT_MAX: u64 = 0x1000
+const PROCFS_OFF: u64 = 0x45000
+const PROCFS_MAX: u64 = 0x1000
+
+// DIE WOERTER DER KOMMANDOZEILE, und die meisten davon sind GEGENPROBEN.
+// Eine Eigenschaft, die sich nicht abschalten laesst, kann nicht
+// gemessen werden -- ohne das Gegenstueck bleibt jede Zahl eine
+// Behauptung ueber sich selbst.
+//
+//   `vfs`       die Schicht dieser Runde anschalten.
+//   `novfs`     GEGENPROBE: nur die Wurzel, kein weiteres Einhaengen.
+//               /proc, /dev und FAT32 gibt es dann nicht, und JEDE
+//               Zusage dieser Runde ausser der ueber OFS MUSS fallen.
+//   `noprocfs`  GEGENPROBE: /proc wird nicht eingehaengt.
+//   `nodevfs`   GEGENPROBE: /dev wird nicht eingehaengt.
+//   `nofat`     GEGENPROBE: die zweite Platte wird nicht angefasst.
+//   `nopart`    GEGENPROBE: die Partitionstafel wird NICHT gelesen, das
+//               Dateisystem also bei Block 0 der Platte gesucht. Auf
+//               einer partitionierten Platte steht dort kein FAT32 --
+//               die Messung MUSS zusammenbrechen.
+//   `fatro`     FAT32 nur lesend einhaengen. Jeder Schreibversuch gibt
+//               -EROFS, und das ist die Gegenprobe zur Schreibseite.
+//   `vfsall`    AUCH die Wurzel geht durch die Ops-Tafel statt durch
+//               den geraden Weg von Runde 62. Der Vergleich der beiden
+//               Laeufe, Oktett fuer Oktett, ist der Beweis, dass OFS
+//               ein NUTZER dieser Schicht ist und kein Sonderfall
+//               daneben.
+const M_VFS: u64 = 2147483648 // 1 << 31
+const M_NOVFS: u64 = 4294967296 // 1 << 32
+const M_NOPROCFS: u64 = 8589934592 // 1 << 33
+const M_NODEVFS: u64 = 17179869184 // 1 << 34
+const M_NOFAT: u64 = 34359738368 // 1 << 35
+const M_NOPART: u64 = 68719476736 // 1 << 36
+const M_FATRO: u64 = 137438953472 // 1 << 37
+const M_VFSALL: u64 = 274877906944 // 1 << 38
 
 // Runde K12 hat kdata von 0x40000 auf 0x50000 wachsen lassen; dieselbe
 // Zahl steht in kernel/boot.s und tools/hv/run.sh vergleicht beide.
