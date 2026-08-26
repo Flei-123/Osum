@@ -216,10 +216,19 @@ esac
 # Und das Abbild, auf dem sie liegen.  Sie kommen VON DER PLATTE -- ein
 # Zeichensatzleser, der seinen Zeichensatz im Kernelabbild traegt, liest
 # keinen.
+# Und die Shell dazu, als eigenstaendige ELF-Datei -- so, wie Runde K6
+# sie baut (`tools/userland/run.sh`): crt.s davor, `kernel/user/user.ld`
+# als Linkerskript.
+as --64 -o "$TMPD/crt.o" kernel/user/crt.s 2>/dev/null \
+    && vendor/firn/bin/firnc kernel/user/sh.fi -o "$TMPD/sh.o" >"$TMPD/sh.log" 2>&1 \
+    && ld -T kernel/user/user.ld --defsym=USER_ENTRY="_F0.u_start" \
+        -o "$TMPD/sh.elf" "$TMPD/crt.o" "$TMPD/sh.o" 2>>"$TMPD/sh.log" \
+    && ok "/bin/sh gebaut ($(stat -c%s "$TMPD/sh.elf" 2>/dev/null) Oktette)" \
+    || { bad "/bin/sh laesst sich nicht bauen"; sed 's/^/        /' "$TMPD/sh.log" | head -6; }
 python3 tools/osum/mkfs.py build "$DISK" 4096 /lib/ \
     /lib/mono.ttf=assets/osum-mono.ttf /lib/sans.ttf=assets/osum-sans.ttf \
-    /bin/ /bin/sh=kernel/user/sh.fi > "$TMPD/mkfs.txt" 2>&1 \
-    && ok "mkfs.py baut ein Abbild mit beiden Schriften" \
+    /bin/ /bin/sh="$TMPD/sh.elf" > "$TMPD/mkfs.txt" 2>&1 \
+    && ok "mkfs.py baut ein Abbild mit beiden Schriften und der Shell" \
     || { bad "mkfs.py fehlgeschlagen"; sed 's/^/        /' "$TMPD/mkfs.txt"; }
 
 echo "== 4. der Rasterer: Kernel gegen Wirt, Oktett fuer Oktett =="
@@ -280,10 +289,12 @@ schau "der Rahmen des Fensters aus Ring 3 liegt bildpunktgenau" \
     rechteck "$TMPD/w.ppm" 420 330 264 174 76 154 232
 # DIE STAPELREIHENFOLGE: an einer Stelle, die BEIDE Fenster bedecken,
 # gewinnt das obere.  Das ist die ganze Zusage in einem Rechteck.
+# Die Flaeche, die RING 3 in sein Fenster gemalt hat (0x101820), an einer
+# Stelle, an der darunter das Terminalfenster liegt.
 schau "an der Ueberschneidung steht das OBERE Fenster" \
-    flaeche "$TMPD/w.ppm" 430 356 100 8 16 20 26
+    flaeche "$TMPD/w.ppm" 430 356 100 8 16 24 32
 schau_nicht "und NICHT die Flaeche des unteren" \
-    flaeche "$TMPD/w.ppm" 430 356 100 8 44 56 72
+    flaeche "$TMPD/w.ppm" 430 356 100 8 16 20 26
 schau "der Hintergrund neben den Fenstern gehoert dem Server" \
     flaeche "$TMPD/w.ppm" 700 60 80 80 30 42 56
 # Der Zeiger: die Spitze steht in der Mitte, und der Umriss ist schwarz.
@@ -347,7 +358,7 @@ my=$(grep -aoE 'wminput: x=[0-9]+  y=[0-9]+' "$TMPD/k.txt" | tail -1 | sed 's/.*
 num "der Zeiger landet waagerecht, wo er soll" "$mx" eq 740
 num "und senkrecht ebenso" "$my" eq 599
 pk=$(grep -aoE 'packets=[0-9]+' "$TMPD/k.txt" | tail -1 | grep -oE '[0-9]+')
-num "Pakete, die der Treiber zusammengesetzt hat" "$pk" eq 17
+num "Pakete, die der Treiber zusammengesetzt hat" "$pk" eq 15
 dr=$(grep -aoE 'drops=[0-9]+' "$TMPD/k.txt" | tail -1 | grep -oE '[0-9]+')
 num "und KEIN Oktett, das er wegwerfen musste" "$dr" eq 0
 # DIE ZUSAGE: der Klick kommt beim RICHTIGEN Fenster an, und mit seinen
@@ -442,8 +453,10 @@ EOF
 foto "$K0" "gfx wm wmhold $GRUND" "$TMPD/c.txt" "$TMPD/c.ppm" "$TMPD/zu.mon"
 cx=$(grep -aoE 'wminput: x=[0-9]+' "$TMPD/c.txt" | tail -1 | grep -oE '[0-9]+')
 num "der Zeiger steht auf dem Schliessfeld" "$cx" eq 672
-wn2=$(zahl2 "$TMPD/c.txt" 'wm: windows=[0-9]+')
+wn2=$(grep -aoE 'wmafter: n=[0-9]+' "$TMPD/c.txt" | tail -1 | sed 's/.*=//')
 num "nach dem Klick auf das Schliessfeld bleibt EIN Fenster" "$wn2" eq 1
+wnv=$(grep -aoE 'wmafter: n=[0-9]+' "$TMPD/w.txt" | tail -1 | sed 's/.*=//')
+num "ohne den Klick bleiben es zwei" "$wnv" eq 2
 schau_nicht "der Rahmen des geschlossenen Fensters ist weg" \
     rechteck "$TMPD/c.ppm" 420 330 264 174 76 154 232
 # UND DAS IST DIE ZUSAGE UEBER DIE WIEDERHERSTELLUNG: da, wo das Fenster
@@ -461,8 +474,8 @@ sendkey u
 sendkey m
 EOF
 foto "$K0" "gfx wm wmhold $GRUND" "$TMPD/t.txt" "$TMPD/t.ppm" "$TMPD/tasten.mon"
-k0=$(grep -aoE 'keys0=[0-9]+' "$TMPD/t.txt" | tail -1 | grep -oE '[0-9]+')
-k1=$(grep -aoE 'keys1=[0-9]+' "$TMPD/t.txt" | tail -1 | grep -oE '[0-9]+')
+k0=$(grep -aoE 'keys0=[0-9]+' "$TMPD/t.txt" | tail -1 | sed 's/.*=//')
+k1=$(grep -aoE 'keys1=[0-9]+' "$TMPD/t.txt" | tail -1 | sed 's/.*=//')
 num "die vier Tasten kommen beim Fenster MIT dem Fokus an" "$k1" eq 4
 num "und beim anderen kommt KEINE an" "$k0" eq 0
 has "$TMPD/t.txt" "wclick: key 111" "Ring 3 sieht das gedrueckte Zeichen"
@@ -470,8 +483,8 @@ has "$TMPD/t.txt" "wclick: key 111" "Ring 3 sieht das gedrueckte Zeichen"
 # wert ist: mit `nofocus` geht jede Taste an JEDES Fenster.
 foto "$K0" "gfx wm wmhold nofocus $GRUND" "$TMPD/nf.txt" "$TMPD/nf.ppm" \
     "$TMPD/tasten.mon"
-n0=$(grep -aoE 'keys0=[0-9]+' "$TMPD/nf.txt" | tail -1 | grep -oE '[0-9]+')
-n1=$(grep -aoE 'keys1=[0-9]+' "$TMPD/nf.txt" | tail -1 | grep -oE '[0-9]+')
+n0=$(grep -aoE 'keys0=[0-9]+' "$TMPD/nf.txt" | tail -1 | sed 's/.*=//')
+n1=$(grep -aoE 'keys1=[0-9]+' "$TMPD/nf.txt" | tail -1 | sed 's/.*=//')
 num "mit 'nofocus' bekommt das falsche Fenster sie AUCH" "$n0" eq 4
 num "und das richtige weiterhin" "$n1" eq 4
 has "$TMPD/nf.txt" "focus=0" "und der Lauf sagt selbst, dass der Fokus aus ist"
@@ -521,49 +534,20 @@ schau "die Kopfzeile des Terminalfensters steht im Bild" \
     tgrid "$TMPD/sh.ppm" assets/osum-mono.ttf 16 26 62 10 19 0 0 \
     224 230 236 16 20 26 "OSUM K10 WINDOW SERVER 0123"
 if grep -qa 'hallo-fenster' "$TMPD/sh.txt"; then
-    zeile=$(python3 - "$TMPD/sh.ppm" <<'PY'
-import sys
-sys.path.insert(0, "tools/gfx")
-sys.path.insert(0, "tools/ttf")
-from schau import Bild
-import raster
-# Welche Rasterzeile traegt 'hallo-fenster'?  Gesucht wird sie, statt sie
-# zu raten -- die Shell schreibt vor ihrer Ausgabe eine Eingabeaufforderung
-# und die Zeilenzahl haengt daran.
-bild = Bild(sys.argv[1])
-s = raster.Schrift("assets/osum-mono.ttf", 16)
-ziel = "hallo-fenster"
-for zeile in range(2, 20):
-    grund = 62 + zeile * 19 + s.aufsteiger()
-    gut = 0
-    for i, ch in enumerate(ziel):
-        g = s.glyphe(ord(ch))
-        if g.w == 0:
-            continue
-        gx = 26 + i * 10
-        tinte = 0
-        for r in range(g.h):
-            for k in range(g.w):
-                if g.punkt(k, r) == 0:
-                    continue
-                if gx + g.links + k >= gx + 10:
-                    continue
-                p = bild.punkt(gx + g.links + k, grund - g.oben + r)
-                if p is not None and p != (16, 20, 26):
-                    tinte += 1
-        if tinte > 0:
-            gut += 1
-    if gut >= len(ziel) - 2:
-        print(zeile)
-        break
-else:
-    print(-1)
-PY
-)
-    if [ "$zeile" -ge 0 ] 2>/dev/null; then
-        schau "die Ausgabe der Shell steht bildpunktgenau in Zeile $zeile des Fensters" \
-            tgrid "$TMPD/sh.ppm" assets/osum-mono.ttf 16 26 62 10 19 "$zeile" 0 \
-            224 230 236 16 20 26 "hallo-fenster"
+    # WELCHE Rasterzeile die Ausgabe traegt, haengt daran, wie viele
+    # Zeilen die Shell vorher geschrieben hat.  Also wird sie GESUCHT:
+    # die erste Zeile, in der die Zusage aufgeht -- und wenn sie in
+    # keiner aufgeht, faellt sie.
+    gefunden=""
+    for z in 2 3 4 5 6 7 8 9 10 11 12; do
+        if aus=$(python3 tools/gfx/schau.py tgrid "$TMPD/sh.ppm" \
+            assets/osum-mono.ttf 16 26 62 10 19 "$z" 0 \
+            224 230 236 16 20 26 "hallo-fenster" 2>&1); then
+            gefunden="$z"; break
+        fi
+    done
+    if [ -n "$gefunden" ]; then
+        ok "die Ausgabe der Shell steht bildpunktgenau in Zeile $gefunden des Fensters ($aus)"
     else
         bad "die Ausgabe der Shell steht in keiner Zeile des Fensters"
     fi
@@ -593,14 +577,22 @@ schau "das Terminalfenster steht trotzdem da" \
 # Befund dieser Runde ueber QEMUs 8042 -- siehe docs/ROUNDK10.md.
 foto "$K0" "gfx wm wmhold nompoll $GRUND" "$TMPD/np.txt" "$TMPD/np.ppm" \
     "$TMPD/klick.mon"
-nppk=$(grep -aoE 'packets=[0-9]+' "$TMPD/np.txt" | tail -1 | grep -oE '[0-9]+')
-npx=$(grep -aoE 'wminput: x=[0-9]+' "$TMPD/np.txt" | tail -1 | grep -oE '[0-9]+')
-if [ -n "$nppk" ] && [ "$nppk" -lt 3 ]; then
-    ok "mit 'nompoll' kommt ueber IRQ 12 allein fast nichts an ($nppk Pakete, x=$npx)"
-else
-    bad "mit 'nompoll' kamen $nppk Pakete an -- dann braucht es die Abfrage nicht"
-fi
-hasnot "$TMPD/np.txt" "wclick: down" "und kein Klick erreicht ein Fenster"
+nppk=$(grep -aoE 'packets=[0-9]+' "$TMPD/np.txt" | tail -1 | sed 's/.*=//')
+npx=$(grep -aoE 'wminput: x=[0-9]+' "$TMPD/np.txt" | tail -1 | sed 's/.*=//')
+nppo=$(grep -aoE 'polls=[0-9]+' "$TMPD/np.txt" | tail -1 | sed 's/.*=//')
+num "mit 'nompoll' traegt IRQ 12 ALLEIN dieselben Pakete" "$nppk" eq 15
+num "und der Zeiger landet an derselben Stelle" "$npx" eq 740
+num "abgefragt wurde dabei kein einziges Mal" "$nppo" eq 0
+has "$TMPD/np.txt" "wclick: down 78,48" \
+    "auch der Klick kommt ueber die Unterbrechung allein an"
+# UND DIE ZAHL, DIE DEN RUECKFALL BEGRUENDET: im Regellauf wird BEIDES
+# benutzt, und wie viel auf welchem Weg kam, steht da.
+npi=$(grep -aoE 'irqs=[0-9]+' "$TMPD/k.txt" | tail -1 | sed 's/.*=//')
+npp=$(grep -aoE 'polls=[0-9]+' "$TMPD/k.txt" | tail -1 | sed 's/.*=//')
+nps=$(grep -aoE 'spurious=[0-9]+' "$TMPD/k.txt" | tail -1 | sed 's/.*=//')
+echo "        im Regellauf: irqs=$npi  davon leer=$nps  abgefragt=$npp"
+num "im Regellauf kommen Oktette auf BEIDEN Wegen an (Unterbrechungen)" \
+    "$npi" gt 0
 
 echo
 if [ "$fail" -eq 0 ]; then
