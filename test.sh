@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ./test.sh -- die Abnahme von Osum.
 #
-# Vierzehn Abschnitte, in der Reihenfolge, in der der Kernel entstanden ist.
+# Fuenfzehn Abschnitte, in der Reihenfolge, in der der Kernel entstanden ist.
 # Jeder ruft einen eigenen Testlaeufer unter tools/ auf, jeder Laeufer
 # startet QEMU pro Fall mit Zeitlimit, prueft die serielle Ausgabe und den
 # Beendigungscode (21 = der Kernel hat sich selbst beendet, 63 = er ist an
@@ -82,6 +82,19 @@
 #      Strom, die statistische Pruefung faellt durch), und drei Neustarts
 #      mit drei verschiedenen Saaten.
 #
+#  15. Die Oberflaeche (tools/wm/run.sh, Runde K10): ein Zeigegeraet am
+#      zweiten Anschluss des Tastaturbausteins (`kernel/ps2m.fi`), ein
+#      Fensterserver mit Stapelreihenfolge, Eingabefokus und
+#      Bereichsverfolgung (`kernel/wm.fi`) und ein TrueType-Leser samt
+#      Rasterer mit Kantenglaettung, ganz in Firn (`kernel/ttf.fi`).
+#      Gemessen an echten Bildschirmfotos, in die ueber den QEMU-Monitor
+#      echte Mausbewegungen, Klicks und Tastendruecke eingespeist wurden
+#      -- und der Text darin nicht gegen eine Flaeche, sondern JE
+#      ZEICHEN gegen eine zweite, unabhaengige Rasterung desselben
+#      Umrisses (`tools/ttf/raster.py`). Gegenproben: `nodirty`
+#      (Bereichsverfolgung aus -- die Messung MUSS einbrechen),
+#      `nofocus` (die Taste kommt beim falschen Fenster an), `nomouse`,
+#      `nompoll` und der Lauf ganz ohne das Wort `wm`.
 #  14. Das Netz (tools/net/run.sh, Runde K8): ein virtio-net-Treiber in
 #      Firn (`kernel/virtio.fi`), der TCP/IP-Stack aus Runde K3 als
 #      ABHAENGIGKEIT ueber vendor/firn/COMMIT (`vendor/net/HERKUNFT.md`),
@@ -216,6 +229,9 @@ lauf "13. was jedes Unix-Programm voraussetzt: Signale, Terminal, Uhr, Zufall (t
 
 lauf "14. das Netz: virtio-net, der Stack aus K3, Steckdosen -- gegen den Linux-Kern (tools/net/run.sh)" \
      tools/net/run.sh net '^NET:|^  OK    (throughput|round trip|what came back|and on three)'
+
+lauf "15. die Oberflaeche: Maus, Fensterserver, TrueType (tools/wm/run.sh, Runde K10)" \
+     tools/wm/run.sh wm '^WM: |^   wmbench: |^        im Regellauf|^        ohne Bereichsverfolgung'
 
 echo
 echo "=================================================================="
