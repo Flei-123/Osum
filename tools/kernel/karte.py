@@ -90,6 +90,12 @@ BEREICHE = [
     # zu dieser Runde als einziger Bereich NICHT in `kstate.fi`, sondern
     # nur in `fb.fi` -- und genau deshalb ging er bei K9 unter.
     ("FB",         "kstate.fi", "FB_OFF",         "FB_MAX"),
+    # RUNDE K10: die Oberflaeche.  Sie liegt in den beiden Luecken, die
+    # Runde K7B als frei ausgewiesen hat -- und sie steht HIER, weil
+    # genau das der Fehler war, an dem Runde K7 gescheitert ist.
+    ("MOUSE",      "kstate.fi", "MOUSE_OFF",      "MOUSE_MAX"),
+    ("WM",         "kstate.fi", "WM_OFF",         "WM_MAX"),
+    ("TTF",        "kstate.fi", "TTF_OFF",        "TTF_MAX"),
 ]
 
 # `_OFF`-Konstanten, die KEINE Bereiche in `kdata` sind -- Offsets
@@ -111,6 +117,8 @@ KEINE_KDATA = {
     ("virtio.fi", "RXB_OFF"),
     ("virtio.fi", "TXB_OFF"),
     ("pci.fi", "K2_OFF"),       # derselbe Wert wie TABLE_OFF
+    ("ttf.fi", "A_HEAP"),       # Versatz IM Glyphenspeicher, nicht kdata
+    ("wm.fi", "W_OFF"),         # Versatz IN der Fenstertafel
     ("virtio.fi", "C_QNOTIFY_OFF"),  # ein Register im Konfigurationsraum
 }
 
