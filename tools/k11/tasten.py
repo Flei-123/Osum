@@ -13,6 +13,13 @@ Zeilendisziplin -- kein eingeschleustes Oktett irgendwo weiter oben.
 Eine Taste ist entweder ein QEMU-Name (`ret`, `spc`, `ctrl-o`, `up`,
 `shift-a`, `pgdn`, ...) oder `text:HALLO WELT`, das in einzelne Tasten
 zerlegt wird -- samt Umschalttaste fuer Grossbuchstaben und Sonderzeichen.
+
+`foto:/pfad.ppm` MITTEN in der Folge macht ein Bildschirmfoto -- der
+einzige Weg, den Schirm zu sehen, WAEHREND das Programm noch laeuft und
+nicht erst, wenn es sich schon verabschiedet hat.
+
+`warte:0.8` haelt an dieser Stelle an; `ruhe` wartet, bis der Rechner
+nichts mehr auf die Leitung schreibt.
 """
 import os
 import socket
@@ -102,6 +109,50 @@ def main():
     except OSError:
         pass
     for k in folge:
+        if k.startswith('foto:'):
+            ziel = k[5:]
+            if os.path.exists(ziel):
+                os.unlink(ziel)
+            # Erst zur Ruhe kommen lassen: ein Foto mitten im Neuzeichnen
+            # zeigt einen halben Schirm, und der verliert jeden Vergleich.
+            time.sleep(1.2)
+            s.sendall(("screendump %s\n" % ziel).encode())
+            letzte = -1
+            ruhig = 0
+            bis2 = time.time() + 20
+            while time.time() < bis2:
+                time.sleep(0.15)
+                try:
+                    jetzt = os.path.getsize(ziel)
+                except OSError:
+                    continue
+                if jetzt == letzte and jetzt > 0:
+                    ruhig += 1
+                    if ruhig >= 3:
+                        break
+                else:
+                    ruhig = 0
+                    letzte = jetzt
+            try:
+                s.recv(65536)
+            except OSError:
+                pass
+            continue
+        if k.startswith('warte:'):
+            time.sleep(float(k[6:]))
+            continue
+        if k == 'ruhe':
+            letzte = -1
+            while True:
+                time.sleep(0.4)
+                try:
+                    jetzt = os.path.getsize(warte)
+                except OSError:
+                    break
+                if jetzt == letzte:
+                    break
+                letzte = jetzt
+            continue
         s.sendall(("sendkey %s\n" % k).encode())
         time.sleep(0.12)
         try:
