@@ -262,6 +262,7 @@ bash tools/posix/run.sh       # POSIX-Schicht und libc (K4)
 bash tools/smp/run.sh         # vier Prozessoren (K5)
 bash tools/userland/run.sh    # Shell und Werkzeuge (K6)
 bash tools/gfx/run.sh         # der Bildschirm (K7)
+bash tools/hv/run.sh          # der Hypervisor: AMD-V, NPT, Gaeste (K12)
 ```
 
 Den Kernel mit Bildschirm starten und selbst hinsehen — `-vga std` ist
@@ -368,6 +369,7 @@ nachtraeglich umgeschrieben.
 | `docs/ROUNDK6.md` | das Userland: Shell und Werkzeuge |
 | `docs/ROUNDK7.md` | der Bildschirm: Rahmenpuffer, Textkonsole, /dev/fb |
 | `docs/ROUNDK7B.md` | warum nach dem Verschmelzen die Buchstaben vom Schirm verschwanden — und die Karte von `kdata` |
+| `docs/ROUNDK12.md` | ein Wirt fuer fremde Prozessoren: AMD-V, verschachtelte Seitentabellen, Gaeste, Gastmaschinen aus Ring 3 |
 
 `ENTFERNEN-AUS-FIRN.md` beschreibt, was im Firn-Repository geloescht
 werden muss, damit dort nichts doppelt liegt. **Ausgefuehrt ist das
