@@ -102,6 +102,14 @@ BEREICHE = [
     # Runde ist VOR dem Bauen verteilt worden, weil am 26.08.2026 vier
     # Runden gleichzeitig liefen und drei dieselbe Seite genommen haben.
     ("K16",        "kstate.fi", "K16_OFF",        "K16_MAX"),
+    # RUNDE K17: DER USB-BAUM (0x50000..0x58000).  Diese Runde hat kdata
+    # von 0x50000 auf 0x58000 wachsen lassen -- der zweite Zuwachs nach
+    # Runde K12, und aus demselben Grund: ein xHCI liest seine Ringe,
+    # seine Zusammenhangstafel und seine Puffer SELBST aus dem Speicher,
+    # und die muessen ausgerichtet und ortsfest liegen.  EIN Bereich fuer
+    # die ganze Runde; wie er innen aufgeteilt ist, steht in `xhci.fi`
+    # und `usb.fi` und wird unten (Punkt 5) nachgerechnet.
+    ("K17",        "kstate.fi", "K17_OFF",        "K17_MAX"),
     # RUNDE K12: die Gastmaschinen des Hypervisors.  Der Bereich steht
     # in `hv.fi` und nicht in `kstate.fi` -- absichtlich, denn er ist die
     # EINZIGE Seite, die diese Runde in `kdata` braucht; alles andere
@@ -145,6 +153,29 @@ BEREICHE = [
 # innerhalb eines anderen Puffers oder innerhalb von Geraetespeicher.
 # Wer hier etwas eintraegt, sagt damit ausdruecklich: das ist kein Stueck
 # `kdata`.  Alles andere MUSS in BEREICHE stehen.
+# RUNDE K17: die Untergliederung des USB-Bereichs.  Jeder dieser Versaetze
+# liegt INNERHALB von kstate.K17_OFF; Punkt 5 unten rechnet das nach und
+# prueft ausserdem, dass sich die Stuecke nicht gegenseitig ueberschneiden.
+K17_STUECKE = [
+    ("xhci.fi", "SCAL_OFF",   0x400),
+    ("xhci.fi", "EPTAB_OFF",  0x400),
+    ("xhci.fi", "DCBAA_OFF",  0x400),
+    ("xhci.fi", "ERST_OFF",   0x40),
+    ("xhci.fi", "CMD_OFF",    0x800),
+    ("xhci.fi", "EVT_OFF",    0x1000),
+    ("xhci.fi", "INCTX_OFF",  0x1000),
+    ("xhci.fi", "DEVCTX_OFF", 0x1000),
+    ("xhci.fi", "RING_OFF",   0x1000),
+    ("xhci.fi", "SPARE_OFF",  0x1000),
+    ("usb.fi",  "USCAL_OFF",  0x100),
+    ("usb.fi",  "UDEV_OFF",   0x300),
+    ("usb.fi",  "DESC_OFF",   0x200),
+    ("usb.fi",  "REPORT_OFF", 0x100),
+    ("usb.fi",  "CBW_OFF",    0x40),
+    ("usb.fi",  "CSW_OFF",    0x40),
+    ("usb.fi",  "BLK_OFF",    0x200),
+]
+
 KEINE_KDATA = {
     ("fb.fi", "FB_OFF"),        # Spiegel von kstate.FB_OFF, s. u.
     ("fb.fi", "FONT_OFF"),      # liegt IN FB_OFF
@@ -181,6 +212,11 @@ KEINE_KDATA = {
     ("fat.fi", "SB_OFF"),       # in FAT_OFF
     ("fat.fi", "NODE_OFF"),     # in FAT_OFF
 }
+# Die K17-Stuecke sind ebenfalls kein eigenes kdata -- sie liegen alle in
+# K17_OFF.  Eingetragen wird das mechanisch, damit die beiden Listen
+# nicht auseinanderlaufen koennen.
+for _d, _k, _n in K17_STUECKE:
+    KEINE_KDATA.add((_d, _k))
 
 
 def konstanten(pfad):
@@ -219,6 +255,9 @@ def main():
     dateien = {}
     for d in ("kstate.fi", "pci.fi", "nvme.fi", "fb.fi", "inet.fi",
               "virtio.fi", "hv.fi",
+              # RUNDE K17 -- sonst pruefte die Karte den USB-Bereich gar
+              # nicht, und ein vergessener Versatz fiele nie auf.
+              "xhci.fi", "usb.fi",
               # RUNDE K14 -- sonst pruefte die Karte diese Dateien gar
               # nicht, und ein vergessener Bereich fiele nie auf.
               "vfs.fi", "mnt.fi", "fat.fi", "procfs.fi", "devfs.fi",
@@ -286,6 +325,46 @@ def main():
             fehler.append("FONT_OFF 0x%X liegt nicht in FB_OFF 0x%X + 0x%X"
                           % (f, b, n))
 
+    # 5. RUNDE K17: die Untergliederung des USB-Bereichs.  Sie ist kein
+    #    eigener kdata-Bereich, aber sie kann sich SELBST ueberschneiden
+    #    und aus ihrem Bereich herauslaufen -- und beides faende sonst
+    #    niemand, weil die Karte oben nur EINEN Block sieht.
+    if "xhci.fi" in dateien and "usb.fi" in dateien:
+        a0 = wert(dateien["kstate.fi"], "K17_OFF")
+        e0 = a0 + wert(dateien["kstate.fi"], "K17_MAX")
+        k17 = []
+        for datei, k, n in K17_STUECKE:
+            if datei not in dateien or k not in dateien[datei]:
+                fehler.append("%s:%s fehlt -- die K17-Karte ist veraltet"
+                              % (datei, k))
+                continue
+            a = wert(dateien[datei], k)
+            if a < a0 or a + n > e0:
+                fehler.append(
+                    "%s:%s 0x%X..0x%X liegt AUSSERHALB von K17 0x%X..0x%X"
+                    % (datei, k, a, a + n, a0, e0))
+            k17.append((a, a + n, datei, k))
+        k17.sort()
+        for i in range(len(k17)):
+            a1, e1, d1, k1 = k17[i]
+            for j in range(i + 1, len(k17)):
+                a2, e2, d2, k2 = k17[j]
+                if a2 >= e1:
+                    break
+                fehler.append(
+                    "KOLLISION IN K17: %s:%s 0x%X..0x%X ueberschneidet "
+                    "%s:%s 0x%X..0x%X" % (d1, k1, a1, e1, d2, k2, a2, e2))
+        if laut:
+            print("  ---- die Untergliederung von K17 ----")
+            vor17 = a0
+            for a, e, dd, kk in k17:
+                if a > vor17:
+                    print("       ---- frei 0x%05X..0x%05X" % (vor17, a))
+                print("  0x%05X..0x%05X  %s:%s" % (a, e, dd, kk))
+                vor17 = max(vor17, e)
+            if vor17 < e0:
+                print("       ---- frei 0x%05X..0x%05X" % (vor17, e0))
+
     if laut:
         vor = 0
         for a, e, n, d, k in stuecke:
@@ -313,6 +392,51 @@ def main():
     # Firn keine Konstante eines anderen Moduls in einen `const`
     # einsetzt), ZWEI VERSCHIEDENE Namen duerfen nicht auf derselben
     # Zahl liegen.
+    # ------------------------------------------------ die Modusbits
+    #
+    # RUNDE K17 HAT DENSELBEN FEHLER EINE DRITTE EBENE HOEHER GEFUNDEN.
+    # `kstate.MODE` ist EIN Wort, in dem jede Runde ihre Schalter als Bit
+    # ablegt -- und die Runden K13, K14 und K16 haben alle drei bei
+    # 1 << 31 angefangen.  Folge: `novfs` schaltete auch die Rechtepruefung
+    # ab (M_NOPERM) und das Stapelwachstum (M_NOSTACK), `noperm` schaltete
+    # das VFS ab, und die Gegenprobe `novfs` von Runde K14 starb daran,
+    # dass der Uebersetzer in Ring 3 keine Stapelseite mehr bekam.  Beide
+    # Zweige waren FUER SICH gruen; die Kollision stand in keiner
+    # gemeinsamen Zeile.  Genau wie bei `kdata` und bei der Vektortafel.
+    #
+    # Dieselbe Regel wie dort: DERSELBE Name darf mehrfach dastehen
+    # (`kmain.fi` und `kstate.fi` fuehren M_NOKBD beide), ZWEI
+    # VERSCHIEDENE Namen duerfen nicht auf demselben Wert liegen.
+    #
+    # NUR `kstate.fi` UND `kmain.fi`.  Andere Module (`hw.fi`, `fb.fi`,
+    # `hv.fi`, `guard.fi`, `smp.fi`, `bootmod.fi`) fuehren ein EIGENES
+    # Wort mit eigenen Bits -- dort faengt jede Runde zu Recht wieder bei
+    # 1 an.  Das gemeinsame Wort ist `kstate.MODE`, und wer ein Bit
+    # darin nimmt, schreibt es in eine dieser beiden Dateien.
+    modi = {}
+    for datei in ("kstate.fi", "kmain.fi"):
+        pfad = os.path.join(kdir, datei)
+        if not os.path.exists(pfad):
+            continue
+        for k, roh in konstanten(pfad).items():
+            if not k.startswith("M_"):
+                continue
+            try:
+                v = int(roh, 0)
+            except ValueError:
+                continue
+            modi.setdefault(v, {}).setdefault(k, []).append(datei)
+    for v in sorted(modi):
+        if len(modi[v]) > 1:
+            wer = ", ".join("%s (%s)" % (k, "+".join(dd))
+                            for k, dd in sorted(modi[v].items()))
+            fehler.append("KOLLISION: das Modusbit %d haben zwei Namen: %s"
+                          % (v, wer))
+    if laut:
+        print("  ---- die Modusbits von kstate.MODE ----")
+        for v in sorted(modi):
+            print("  %20d  %s" % (v, ", ".join(sorted(modi[v]))))
+
     vektoren = {}
     for pfad in sorted(glob.glob(os.path.join(kdir, "*.fi"))):
         datei = os.path.basename(pfad)
@@ -339,8 +463,9 @@ def main():
 
     for f in fehler:
         print("  " + f)
-    print("%d Bereiche in 0x%X Oktetten kdata, %d Vektoren, %d Kollisionen"
-          % (len(stuecke), kdata, len(vektoren), len(fehler)))
+    print("%d Bereiche in 0x%X Oktetten kdata, %d Vektoren, %d Modusbits, "
+          "%d Kollisionen"
+          % (len(stuecke), kdata, len(vektoren), len(modi), len(fehler)))
     return 1 if fehler else 0
 
 
