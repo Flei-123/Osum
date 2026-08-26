@@ -1,0 +1,186 @@
+// kernel/user/gunzip.fi -- Runde K11: auspacken nach RFC 1952.
+//
+//     gunzip [-c] [DATEI.gz]    DATEI.gz -> DATEI (die .gz faellt weg)
+//     gunzip                    Standardeingabe -> Standardausgabe
+//
+// Der Kopf wird GEPRUEFT und nicht ueberlesen: die Kennung, das
+// Verfahren, und die Zusatzfelder (Name, Kommentar, Zusatz,
+// Kopfpruefsumme), die `gzip` auf dem Wirt anlegt, wenn man ihm eine
+// Datei nennt. Am Ende wird die CRC-32 nachgerechnet UND die Laenge --
+// ein Entpacker, der die Pruefsumme nicht prueft, sagt bei kaputten
+// Daten nichts, und das ist die schlimmste Art zu versagen.
+
+profile kernel
+
+import ulib
+import tools
+import flate
+
+export { u_start }
+
+const MAX_IN: u64 = 65536
+const MAX_OUT: u64 = 262144
+
+static mut inb: [u8; 65536] = [0 as u8; 65536]
+static mut outb: [u8; 262144] = [0 as u8; 262144]
+static mut name: [u8; 264] = [0 as u8; 264]
+
+fn slurp(fd: u64) -> u64 {
+    var total: u64 = 0
+    var going: bool = true
+    while going {
+        let n: u64 = ulib.sys(ulib.SYS_READ, fd,
+            (&inb[(total) as usize]) as u64, MAX_IN - total)
+        if n == 0 || ulib.bad(n) {
+            going = false
+        } else {
+            total = total + n
+            if total >= MAX_IN {
+                return ulib.EOF
+            }
+        }
+    }
+    return total
+}
+
+fn spill(fd: u64, p: u64, n: u64) -> bool {
+    var w: u64 = 0
+    while w < n {
+        var chunk: u64 = n - w
+        if chunk > 4096 {
+            chunk = 4096
+        }
+        let r: u64 = ulib.sys(ulib.SYS_WRITE, fd, p + w, chunk)
+        if ulib.bad(r) || r == 0 {
+            return false
+        }
+        w = w + r
+    }
+    return true
+}
+
+fn u_start(args: u64) -> u64 {
+    var s_big: [u8; 32] = "gunzip: input above 64 KiB\0\0\0\0\0\0"
+    var s_open: [u8; 22] = "gunzip: cannot open \0\0"
+    var s_write: [u8; 23] = "gunzip: cannot write \0\0"
+    var s_hdr: [u8; 30] = "gunzip: not a gzip file\0\0\0\0\0\0\0"
+    var s_bad: [u8; 28] = "gunzip: the stream is bad\0\0\0"
+    var s_room: [u8; 32] = "gunzip: result above 256 KiB\0\0\0\0"
+    var s_crc: [u8; 30] = "gunzip: checksum mismatch\0\0\0\0\0"
+    var s_len: [u8; 27] = "gunzip: length mismatch\0\0\0\0"
+    var o_c: [u8; 3] = "-c\0"
+    let argc: u64 = ulib.arg_count(args)
+    var to_stdout: bool = false
+    var at: u64 = 1
+    while at < argc && ulib.streq(ulib.arg_at(args, at),
+        (&o_c[0 as usize]) as u64) {
+        to_stdout = true
+        at = at + 1
+    }
+    var infd: u64 = ulib.IN
+    var src: u64 = 0
+    if at < argc {
+        src = ulib.arg_at(args, at)
+        infd = tools.openr(src)
+        if ulib.bad(infd) {
+            ulib.esay_line((&s_open[0 as usize]) as u64, src)
+            return 1
+        }
+    } else {
+        to_stdout = true
+    }
+    let n: u64 = slurp(infd)
+    if infd != ulib.IN {
+        ulib.sys(ulib.SYS_CLOSE, infd, 0, 0)
+    }
+    if n == ulib.EOF {
+        ulib.esay_line((&s_big[0 as usize]) as u64, 0)
+        return 1
+    }
+    if n < 18 || inb[0 as usize] != 31 as u8 || inb[1 as usize] != 139 as u8
+    || inb[2 as usize] != 8 as u8 {
+        ulib.esay_line((&s_hdr[0 as usize]) as u64, 0)
+        return 1
+    }
+    let flags: u64 = (inb[3 as usize]) as u64
+    var off: u64 = 10
+    if (flags & 4) != 0 {
+        let xl: u64 = ((inb[(off) as usize]) as u64)
+            | (((inb[(off + 1) as usize]) as u64) << 8)
+        off = off + 2 + xl
+    }
+    if (flags & 8) != 0 {
+        while off < n && inb[(off) as usize] != 0 as u8 {
+            off = off + 1
+        }
+        off = off + 1
+    }
+    if (flags & 16) != 0 {
+        while off < n && inb[(off) as usize] != 0 as u8 {
+            off = off + 1
+        }
+        off = off + 1
+    }
+    if (flags & 2) != 0 {
+        off = off + 2
+    }
+    if off + 8 > n {
+        ulib.esay_line((&s_hdr[0 as usize]) as u64, 0)
+        return 1
+    }
+    var used: [u64; 1] = [0 as u64; 1]
+    let r: u64 = flate.inflate((&inb[(off) as usize]) as u64, n - off - 8,
+        (&outb[0 as usize]) as u64, MAX_OUT, (&used[0 as usize]) as u64)
+    if r == flate.E_ROOM {
+        ulib.esay_line((&s_room[0 as usize]) as u64, 0)
+        return 1
+    }
+    if r != flate.E_OK {
+        ulib.esay_line((&s_bad[0 as usize]) as u64, 0)
+        return 1
+    }
+    let got: u64 = used[0 as usize]
+    var crc: u64 = 0
+    var len: u64 = 0
+    var i: u64 = 0
+    while i < 4 {
+        crc = crc | (((inb[(n - 8 + i) as usize]) as u64) << (i * 8))
+        len = len | (((inb[(n - 4 + i) as usize]) as u64) << (i * 8))
+        i = i + 1
+    }
+    if flate.crc32((&outb[0 as usize]) as u64, got) != crc {
+        ulib.esay_line((&s_crc[0 as usize]) as u64, 0)
+        return 1
+    }
+    if (got & 0xFFFFFFFF) != len {
+        ulib.esay_line((&s_len[0 as usize]) as u64, 0)
+        return 1
+    }
+    var out: u64 = ulib.OUT
+    if !to_stdout {
+        let ln: u64 = ulib.strcpy((&name[0 as usize]) as u64, src)
+        // `.gz` faellt weg, wenn es dasteht; sonst bleibt der Name, wie
+        // er ist -- ein Ziel, das die Vorlage ueberschreibt, waere die
+        // Art von Werkzeug, die Daten frisst.
+        if ln > 3 && name[(ln - 3) as usize] == 46 as u8
+        && name[(ln - 2) as usize] == 103 as u8
+        && name[(ln - 1) as usize] == 122 as u8 {
+            name[(ln - 3) as usize] = 0 as u8
+        }
+        out = tools.openw((&name[0 as usize]) as u64)
+        if ulib.bad(out) {
+            ulib.esay_line((&s_write[0 as usize]) as u64,
+                (&name[0 as usize]) as u64)
+            return 1
+        }
+    }
+    if !spill(out, (&outb[0 as usize]) as u64, got) {
+        ulib.esay_line((&s_write[0 as usize]) as u64, 0)
+        return 1
+    }
+    if !to_stdout {
+        ulib.sys(ulib.SYS_CLOSE, out, 0, 0)
+        ulib.sys(ulib.SYS_UNLINK, src, 0, 0)
+    }
+    return 0
+}

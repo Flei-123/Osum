@@ -1,0 +1,121 @@
+// kernel/user/top.fi -- Runde K11: die Prozessliste, fortlaufend.
+//
+// Dieselbe Quelle wie `ps` -- SYS_PSTAT, ein Feld je Aufruf -- nur immer
+// wieder, mit dem Kopf aus SYS_SYSINFO darueber und der Verweildauer
+// jeder Aufgabe seit dem letzten Durchgang. Diese Differenz ist der
+// einzige Grund, warum `top` mehr ist als ein `ps` in einer Schleife:
+// sie sagt, wer JETZT rechnet, und nicht, wer seit dem Start am meisten
+// gerechnet hat.
+//
+// WIE ES AUFHOERT: mit STRG-C, so wie jedes `top`. Das ist seit Runde K9
+// ein echtes SIGINT aus der Zeilendisziplin an die Vordergrundgruppe;
+// der Beendigungscode ist 130. `-n ZAHL` laeuft stattdessen genau so oft
+// durch und kehrt von selbst zurueck -- das ist die Form, die ein
+// Testlauf messen kann.
+//
+// Kein Bildschirmaufbau, keine Steuerzeichen: `top` schreibt Zeilen. Der
+// Editor dieser Runde ist das Programm, das den Schirm anfasst; ein
+// zweites davon waere eine zweite Stelle, an der die Terminalkenntnis
+// steht.
+
+profile kernel
+
+import ulib
+import tools
+
+export { u_start }
+
+const SLOTS: u64 = 32
+
+static mut prev: [u64; 32] = [0 as u64; 32]
+
+fn u_start(args: u64) -> u64 {
+    var head: [u8; 41] = "  PID PPID STATE   PRIO  TICKS  DELTA\0\0\0\0"
+    var s_up: [u8; 10] = "up      \0\0"
+    var s_tasks: [u8; 10] = "  tasks \0\0"
+    var s_calls: [u8; 10] = "  calls \0\0"
+    var s_free: [u8; 12] = "  frames \0\0\0"
+    var s_slash: [u8; 2] = "/\0"
+    var st_ready: [u8; 8] = "ready  \0"
+    var st_run: [u8; 8] = "run    \0"
+    var st_sleep: [u8; 8] = "sleep  \0"
+    var st_wait: [u8; 8] = "wait   \0"
+    var st_zomb: [u8; 8] = "zombie \0"
+    var st_new: [u8; 8] = "new    \0"
+    var o_n: [u8; 3] = "-n\0"
+    var o_d: [u8; 3] = "-d\0"
+    let argc: u64 = ulib.arg_count(args)
+    var rounds: u64 = 0
+    var delay: u64 = 1000
+    var at: u64 = 1
+    while at + 1 < argc {
+        let a: u64 = ulib.arg_at(args, at)
+        if ulib.streq(a, (&o_n[0 as usize]) as u64) {
+            rounds = ulib.to_num(ulib.arg_at(args, at + 1))
+            at = at + 2
+        } else if ulib.streq(a, (&o_d[0 as usize]) as u64) {
+            delay = ulib.to_num(ulib.arg_at(args, at + 1))
+            at = at + 2
+        } else {
+            at = at + 1
+        }
+    }
+    var done: u64 = 0
+    var going: bool = true
+    while going {
+        tools.ob_str((&s_up[0 as usize]) as u64)
+        tools.ob_num(ulib.sys(ulib.SYS_SYSINFO, ulib.I_UPTIME, 0, 0))
+        tools.ob_str((&s_tasks[0 as usize]) as u64)
+        tools.ob_num(ulib.sys(ulib.SYS_SYSINFO, ulib.I_TASKS, 0, 0))
+        tools.ob_str((&s_calls[0 as usize]) as u64)
+        tools.ob_num(ulib.sys(ulib.SYS_SYSINFO, ulib.I_SYSCALLS, 0, 0))
+        tools.ob_str((&s_free[0 as usize]) as u64)
+        tools.ob_num(ulib.sys(ulib.SYS_SYSINFO, ulib.I_FRAMES_FREE, 0, 0))
+        tools.ob_str((&s_slash[0 as usize]) as u64)
+        tools.ob_num(ulib.sys(ulib.SYS_SYSINFO, ulib.I_FRAMES_ALL, 0, 0))
+        tools.ob_nl()
+        tools.ob_str((&head[0 as usize]) as u64)
+        tools.ob_nl()
+        var i: u64 = 0
+        while i < SLOTS {
+            let st: u64 = ulib.sys(ulib.SYS_PSTAT, i, ulib.P_STATE, 0)
+            if !ulib.bad(st) && st != 0 {
+                tools.ob_pad(ulib.sys(ulib.SYS_PSTAT, i, ulib.P_PID, 0), 5)
+                tools.ob_pad(ulib.sys(ulib.SYS_PSTAT, i, ulib.P_PPID, 0), 5)
+                tools.ob_byte(32)
+                if st == 1 {
+                    tools.ob_str((&st_ready[0 as usize]) as u64)
+                } else if st == 2 {
+                    tools.ob_str((&st_run[0 as usize]) as u64)
+                } else if st == 3 {
+                    tools.ob_str((&st_sleep[0 as usize]) as u64)
+                } else if st == 4 {
+                    tools.ob_str((&st_wait[0 as usize]) as u64)
+                } else if st == 5 {
+                    tools.ob_str((&st_zomb[0 as usize]) as u64)
+                } else {
+                    tools.ob_str((&st_new[0 as usize]) as u64)
+                }
+                tools.ob_pad(ulib.sys(ulib.SYS_PSTAT, i, ulib.P_PRIO, 0), 4)
+                let t: u64 = ulib.sys(ulib.SYS_PSTAT, i, ulib.P_TICKS, 0)
+                tools.ob_pad(t, 7)
+                var d: u64 = 0
+                if t > prev[(i) as usize] {
+                    d = t - prev[(i) as usize]
+                }
+                prev[(i) as usize] = t
+                tools.ob_pad(d, 7)
+                tools.ob_nl()
+            }
+            i = i + 1
+        }
+        tools.ob_flush()
+        done = done + 1
+        if rounds != 0 && done >= rounds {
+            going = false
+        } else {
+            ulib.sleep_ms(delay)
+        }
+    }
+    return 0
+}

@@ -27,6 +27,13 @@ The format, from `kernel/fs.fi`:
 Usage:
     mkfs.py build <image> <blocks> [<path>=<hostfile> | <path>/ ] ...
     mkfs.py list  <image>
+    mkfs.py cat   <image> <path>
+
+`cat` stand seit Runde K4 im Rumpf, aber nicht hier oben. Es schreibt die
+Oktette einer Datei AUS DEM ABBILD auf die Standardausgabe -- und das ist
+die einzige ehrliche Art, "das Programm hat die richtigen Oktette
+gesichert" zu pruefen: nicht ein Mitschnitt ueber eine serielle Leitung,
+sondern der Inhalt der Platte. Runde K11 misst den Editor damit.
 """
 
 import struct

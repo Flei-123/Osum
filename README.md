@@ -11,7 +11,19 @@ und **zeigt das alles auf einem Bildschirm**.
 mehreren Prozessoren, **spricht TCP/IP ueber eine virtio-net-Karte**,
 bietet eine POSIX-Schicht mit den Systemaufrufnummern von Linux x86-64
 und startet ein Userland aus eigenstaendigen ELF-Dateien von der Platte —
-eine Shell und fuenfundzwanzig Werkzeuge.
+eine Shell und fuenfundzwanzig Werkzeuge. Seit Runde K11 kann man darauf
+**arbeiten**: es gibt einen bildschirmorientierten Editor, zwanzig
+weitere Werkzeuge (`find`, `sed`, `diff`, `patch`, `tar`, `gzip`, …) und
+eine Shell mit `if`, `for`, `while`, `case` und Funktionen.
+
+    osum$ edit /notizen.txt          # ^O sichert, ^X geht, ^W sucht
+    osum$ find / -name *.txt -type f
+    /d/three.txt
+    /notizen.txt
+    osum$ tar -cf /w/alles.tar /d ; gzip /w/alles.tar
+    osum$ for f in a b c ; do echo $f > /w/$f ; done
+    osum$ if [ -s /w/a ] ; then echo da ; fi
+    da
 
     osum$ cat /d/nums.txt | grep 1 | wc -l
     4
@@ -398,6 +410,7 @@ nachtraeglich umgeschrieben.
 | `docs/ROUNDK8.md` | das Netz: virtio-net, der Stack aus K3, Steckdosen |
 | `docs/ROUNDK9.md` | Signale, Terminals, Uhr und Zufall |
 | `docs/ROUNDK10.md` | SMEP/SMAP und das Boot-Modul — die letzten zwei Punkte des Kernelwechsels |
+| `docs/ROUNDK11.md` | **man kann darauf arbeiten**: der Editor, zwanzig Werkzeuge, die Shell als Sprache |
 
 `ENTFERNEN-AUS-FIRN.md` beschreibt, was im Firn-Repository geloescht
 werden muss, damit dort nichts doppelt liegt. **Ausgefuehrt ist das
