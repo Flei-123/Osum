@@ -102,11 +102,19 @@ FAS="$TMPD/fas"
 # ersten beiden sind Bibliotheksmodule ohne `u_start`, `ulib` hat ein
 # `fn main` und damit ein eigenes `_start`. Sie stehen hier als
 # Ausnahme, damit die Zahl darunter eine Zahl ueber PROGRAMME ist.
+#
+# NACHTRAG ZUM MERGE VON K15: dieselbe Ausnahme fuer die fuenf Module,
+# die diese Runde mitgebracht hat -- `wlib`/`wlibc` (die Widget-
+# Bibliothek), `appdir` (das Anwendungsverzeichnis), `nidx` (der
+# Namensindex) und `pw` (die Passwortdatei von K13). Auch sie haben kein
+# `u_start`; sie werden EINGEBUNDEN. Wer sie mitzaehlt, misst nicht den
+# Assembler, sondern seine eigene Liste.
 mkdir -p "$TMPD/s"
 PROGS=""
 for f in kernel/user/*.fi; do
     n=$(basename "$f" .fi)
     case "$n" in flate|tools|ulib) continue;; esac
+    grep -q "fn u_start" "$f" || continue
     PROGS="$PROGS $n"
 done
 gebaut=0; nichtgebaut=""

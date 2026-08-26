@@ -983,10 +983,31 @@ fn dispatch(number: u64, frame: u64, state: u64) -> u64 {
     // dasselbe nichts, weil ihr Rahmen erst entsteht, wenn wirklich
     // eine dieser Nummern kommt. Dieselbe Ueberlegung steht seit Runde
     // K12 hinter `vm_call` und seit Runde K6 hinter `native`.
-    if is_k13(number) {
-        return k13_call(state, me, number, a0, a1, a2, a3)
+    // NACHTRAG ZUM MERGE VON K15: ZWEI RUNDEN, EINE WEICHE, UND DAS AUS
+    // GEMESSENEM GRUND. Der Rahmen von `dispatch` ist der teuerste im
+    // Kernel -- der Kommentar darueber steht seit K13 hier. Ein ZWEITER
+    // Aufruf mit acht Argumenten (`wig_call`) hat ihn so weit wachsen
+    // lassen, dass der tiefste Kernstapel eines Laufes 16384 von 16384
+    // Oktetten erreichte: `cp` starb an einem #PF, der wie ein Fehler im
+    // Dateisystem aussah und keiner war. Deshalb geht beides durch EINEN
+    // Aufruf mit VIER Argumenten; die Argumente holt sich `late_call`
+    // selbst aus dem Rahmen, und ihr Platz entsteht erst dort.
+    if is_k13(number) || (number >= WIG_BASE && number <= WIG_MAXNR) {
+        return late_call(state, me, number, frame)
     }
     return neg(errno.E_NOSYS)
+}
+
+fn late_call(state: u64, me: u64, number: u64, frame: u64) -> u64 {
+    let a0: u64 = fget(frame, F_RDI)
+    let a1: u64 = fget(frame, F_RSI)
+    let a2: u64 = fget(frame, F_RDX)
+    let a3: u64 = fget(frame, F_R10)
+    if number >= WIG_BASE && number <= WIG_MAXNR {
+        return wig_call(state, me, number, a0, a1, a2, a3,
+            fget(frame, F_R8))
+    }
+    return k13_call(state, me, number, a0, a1, a2, a3)
 }
 
 // Gehoert diese Nummer der Benutzerschicht? Absichtlich eine einzige
@@ -1092,11 +1113,6 @@ fn k13_call(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64,
     }
     if number == SYS_OSUM_USERINFO {
         return do_userinfo(state, me, a0)
-    }
-
-    // RUNDE K15: die Naht zur Widget-Bibliothek.
-    if number >= WIG_BASE && number <= WIG_MAXNR {
-        return wig_call(state, me, number, a0, a1, a2, a3, a4)
     }
     return neg(errno.E_NOSYS)
 }
@@ -1954,6 +1970,16 @@ fn open_vfs(state: u64, me: u64, m: u64, path: u64, flags: u64) -> u64 {
         if node == 0 {
             return neg(errno.E_NOSPC)
         }
+        // NACHTRAG ZUM MERGE VON K15: DIESELBE DATEI UEBER BEIDE WEGE.
+        // Der gerade Weg (unten) gibt der frischen Datei Rechte und
+        // Eigentuemer (`perm.on_create`, 0o666 abzueglich der Maske); der
+        // Weg ueber die Ops-Tafel tat es nicht. Auf OFS waren die beiden
+        // Platten danach an drei Inodes verschieden -- genau an I_MODE.
+        // Ein Dateisystem, das je nach Weg andere Oktette schreibt, ist
+        // kein Nutzer der Schicht, sondern zwei Dateisysteme.
+        if vfs.type_of(state, m) == vfsops.FS_OFS {
+            perm.on_create(state, me, node, 438)
+        }
     } else {
         if (flags & O_CREAT) != 0 && (flags & O_EXCL) != 0 {
             return neg(errno.E_EXIST)
@@ -2025,6 +2051,14 @@ fn open_devtty(state: u64, me: u64, flags: u64) -> u64 {
     return fd
 }
 
+// WARUM `open` HIER KEINEN MODUS BEKOMMT, obwohl POSIX einen dritten
+// Parameter hat: dieser Weg ist der TIEFSTE im ganzen Kernel --
+// Systemaufruf, VFS, FAT32, Platte -- und der Kernstapel hat 16 KiB.
+// Jeder weitere Parameter an dieser Stelle hat ihn beim Merge von K15
+// ueber die Kante gehoben (16384 von 16384, `mkdir` auf FAT32 starb an
+// einem Seitenfehler). Die frische Datei bekommt deshalb weiter 0o666
+// abzueglich der Maske, und wer ein PROGRAMM schreibt, setzt das x-Bit
+// danach selbst mit `chmod` -- so macht es `kernel/user/fas.fi`.
 fn do_open(state: u64, me: u64, name: u64, flags: u64) -> u64 {
     let buf: u64 = state + kstate.NAME_OFF
     let len: u64 = fetch_path(state, me, name, buf, MAX_NAME)
@@ -2327,8 +2361,16 @@ fn do_mkdir(state: u64, me: u64, name: u64) -> u64 {
                     }
                     return neg(errno.E_PERM)
                 }
-                if vfs.v_create(state, m, buf, vfsops.N_DIR) == 0 {
+                let vmade: u64 = vfs.v_create(state, m, buf,
+                    vfsops.N_DIR)
+                if vmade == 0 {
                     return neg(errno.E_NOSPC)
+                }
+                // Wie bei `open`: 0o777 abzueglich der Maske, und nur
+                // auf OFS -- FAT32 und die beiden Dateisysteme im
+                // Speicher haben keine Rechtebits.
+                if vfs.type_of(state, m) == vfsops.FS_OFS {
+                    perm.on_create(state, me, vmade, 511)
                 }
                 return 0
             }
