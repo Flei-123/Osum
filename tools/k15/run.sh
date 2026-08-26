@@ -452,7 +452,14 @@ mouse_move 60 60
 EOF
 foto tast "gfx wm wig wmhold wiglong $GRUND" "$M"
 num "der Kern beendet sich sauber" "$RC" eq 21
-e2=$(grep -a 'wigdemo: state' "$TMPD/tast.txt" | tail -1 | sed 's/.*e2=\[//; s/\]$//')
+# DEN INHALT AUS EINER ZEILE HOLEN, DIE WIRKLICH VOLLSTAENDIG IST. Die
+# serielle Leitung teilen sich der Kernel und die Anwendung; gelegentlich
+# schiebt sich eine Kernelzeile mitten in eine Anwendungszeile
+# ("... sel=wm: go"). Ein `sed 's/.*e2=\[//'` darauf liefert Unsinn, und
+# die Zusage faellt aus einem Grund, der mit der Sache nichts zu tun hat.
+# `tools/k15/felder.py` sucht das VOLLSTAENDIGE Muster mit beiden
+# schliessenden Klammern und nimmt die letzte Zeile, die es enthaelt.
+e2=$(python3 tools/k15/felder.py "$TMPD/tast.txt" e2)
 gleich "was im zweiten Textfeld steht" "Kopiermich-ab" "$e2"
 cs=$(feld "$TMPD/tast.txt" "wig: blits" clipset)
 cg=$(feld "$TMPD/tast.txt" "wig: blits" clipget)
@@ -472,7 +479,7 @@ schau_nicht "im Lauf OHNE Tastendruecke steht dort NICHTS" \
 # DIE GEGENPROBE, DIE DIE ZUSAGE ERST WERTVOLL MACHT: dieselben
 # Tastendruecke mit abgeschalteter Zwischenablage.
 foto noclip "gfx wm wig wignoclip wmhold wiglong $GRUND" "$M"
-e2n=$(grep -a 'wigdemo: state' "$TMPD/noclip.txt" | tail -1 | sed 's/.*e2=\[//; s/\]$//')
+e2n=$(python3 tools/k15/felder.py "$TMPD/noclip.txt" e2)
 gleich "mit 'noclip' kommt NUR das Getippte an" "-ab" "$e2n"
 schau_nicht "und im Bild steht der eingefuegte Text dann nicht" \
     ttext "$TMPD/noclip.ppm" "$SANS" 15 $((CX + E1TX)) $((CY + EBASE + E2Y - E1Y)) \
@@ -493,9 +500,9 @@ mouse_move 120 120
 mouse_move 60 60
 EOF
 foto tabkey "gfx wm wig wmhold wiglong $GRUND" "$M"
-e2t=$(grep -a 'wigdemo: state' "$TMPD/tabkey.txt" | tail -1 | sed 's/.*e2=\[//; s/\]$//')
+e2t=$(python3 tools/k15/felder.py "$TMPD/tabkey.txt" e2)
 gleich "nach der Tabulatortaste tippt man in das NAECHSTE Feld" "xy" "$e2t"
-e1t=$(grep -a 'wigdemo: state' "$TMPD/tabkey.txt" | tail -1 | sed 's/.*e1=\[//; s/\] e2.*//')
+e1t=$(python3 tools/k15/felder.py "$TMPD/tabkey.txt" e1)
 gleich "und im vorigen steht unveraendert, was darin stand" "Kopiermich" "$e1t"
 schau "der Fokusring ist mitgewandert -- er liegt jetzt um das zweite Feld" \
     rechteck "$TMPD/tabkey.ppm" $((CX + $(rect "$TMPD/ruhe.txt" wigdemo 4 x))) \

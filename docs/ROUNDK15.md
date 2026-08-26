@@ -371,7 +371,7 @@ sie ist die *benannte Grenze*: ein Zeichen darf bis 48 × 48 groß sein,
 also bis etwa 48 Bildpunkte Schriftgröße. Darüber gibt `glyph_into` eine
 Null zurück, statt in die nächste Seite zu schreiben.
 
-### 7.6 Zwei Fehler im Testläufer selbst
+### 7.6 Drei Fehler im Testläufer selbst
 
 * `grep -oE '.*fg=[0-9]+'` holt `selfg` statt `fg` — `.*` ist gierig, und
   `selfg` endet auf `fg`. Vier Zusagen fielen um, mit einer Meldung, die
@@ -381,6 +381,15 @@ Null zurück, statt in die nächste Seite zu schreiben.
 * `monitor.py "$sock" "$MON" > "$OUT/$NAME.mon"` — Eingabe- und
   Ausgabedatei waren dieselbe. Die Umlenkung schnitt die Befehlsdatei ab,
   bevor sie gelesen wurde: `0 Befehle`, keine Maus, keine Fehlermeldung.
+* **Die serielle Leitung gehört zwei Schreibern.** Der Kernel und die
+  Anwendung in Ring 3 schreiben beide darauf, und gelegentlich schiebt
+  sich eine Kernelzeile mitten in eine Anwendungszeile:
+  `wigdemo: state ... sel=wm: go`. Ein `sed 's/.*e2=\[//'` darauf liefert
+  Unsinn, und zwei Zusagen fielen aus einem Grund, der mit der Sache
+  nichts zu tun hat. `tools/k15/felder.py` sucht seither das
+  **vollständige** Muster — `e1=[…] e2=[…]` mit beiden schließenden
+  Klammern — und nimmt die letzte Zeile, die es enthält. Fehlt eine
+  solche Zeile ganz, ist *das* der Befund und nicht ein leerer Text.
 
 ---
 
@@ -433,13 +442,89 @@ das Farbschema aus einer Datei · das Zeigerbild.
 
 **152 Zusagen, 0 Fehler.**
 
+### Die ganze Abnahme, Abschnitt für Abschnitt
+
+| # | Abschnitt | Zusagen | Fehler |
+|---:|---|---:|---:|
+| 1 | der festgenagelte Übersetzer | 9 | 0 |
+| 2 | freistehend übersetzen | 41 | 0 |
+| 3 | std.core im Kernel | 46 | 0 |
+| 4 | der Kern läuft | 176 | 0 |
+| 5 | ein Programm von der Platte | 130 | 0 |
+| 6 | PCI, APIC, NVMe | **98** | 0 |
+| 7 | die POSIX-Schicht und die libc | 134 | 0 |
+| 8 | vier Prozessoren | 59 | 0 |
+| 9 | ein Userland | 91 | 0 |
+| 10 | Handles statt Umgebungsautorität | 67 | 0 |
+| 11 | der Multiboot-Kopf und UEFI | 20 | 0 |
+| 12 | der Bildschirm | 76 | 0 |
+| 13 | Signale, Terminal, Uhr, Zufall | 107 | 0 |
+| 14 | das Netz | 75 | 0 |
+| 15 | SMEP, SMAP, Boot-Modul | 55 | 0 |
+| 16 | der Editor und der Werkzeugkasten | 85 | 0 |
+| 17 | die Oberfläche (Runde K10) | **103** | 0 |
+| 18 | ein Wirt für fremde Prozessoren | 114 | 0 |
+| **21** | **Widgets und der Dateimanager** | **152** | **0** |
+| | **Summe** | **1638** | **0** |
+
+Die achtzehn Abschnitte vor dieser Runde ergeben **1486** — genau die
+Zahl, die vorher dastand, keine einzige weniger. Abschnitt 17
+(`tools/wm/run.sh`) meldet weiter **103**, obwohl diese Runde
+`kernel/wm.fi` angefasst hat; Abschnitt 4 und 13 messen die Tastatur
+weiter, obwohl `kernel/kbd.fi` eine Taste dazubekommen hat.
+
+**Wie gemessen wurde, und was daran unschön ist.** Ein Durchlauf von
+`./test.sh` in einem Stück ist auf diesem Rechner nicht zu Ende
+gekommen: der Prozess wurde während Abschnitt 16 beendet, während drei
+weitere Runden gleichzeitig ihre eigenen Abnahmen fuhren (bis zu elf
+QEMU-Prozesse auf zwölf Kernen). Die Abschnitte 16 bis 21 wurden deshalb
+einzeln nachgezogen — dieselben Skripte, dieselben Aufrufe, nur
+nacheinander. Das steht hier, weil eine Summe, die aus zwei Läufen
+zusammengesetzt ist, etwas anderes ist als eine aus einem.
+
 Zwölf QEMU-Läufe, jeder mit eigenem Plattenabbild, jeder mit
 Bildschirmfoto: `ruhe` · `klick` · `haken` · `reiter` · `tast` · `noclip`
 · `tabkey` · `pop` · `popw` · `dlg` · `dlgok` · `files` · `fdbl` ·
 `fsort` · `fneu` · `haken_nd` · `nohit` · `nomaus` · `nofok` · `ohne` ·
 `theme2` · `beam`.
 
-Die 1486 Zusagen der Runden 52 bis K12 sind unverändert da — diese Runde
-fasst von ihnen nur `kernel/kbd.fi` (eine Taste, die vorher nicht ankam)
-und `kernel/wm.fi` (die rechte Maustaste, ein zweites Zeigerbild) an, und
+Die Zusagen der Runden 52 bis K12 sind unverändert da — diese Runde fasst
+von ihnen nur `kernel/kbd.fi` (eine Taste, die vorher nicht ankam) und
+`kernel/wm.fi` (die rechte Maustaste, ein zweites Zeigerbild) an, und
 `tools/wm/run.sh` misst beides weiter Zeile für Zeile.
+
+### Die eine rote Zeile, und warum sie nicht dieser Runde gehört
+
+Im Gesamtlauf schlug **Abschnitt 6 (PCI/NVMe)** mit fünf Zusagen fehl:
+
+```
+FAIL  the same file system formats and mounts on the NVMe disk
+FAIL  written over DMA, read back over DMA, identical
+FAIL  nvme.txt is missing in the listing
+FAIL  the file name is not in the image
+FAIL  the two kernels behave differently
+PCI: 93 passed, 5 failed
+```
+
+**Nachgemessen statt behauptet.** Derselbe Läufer allein auf derselben
+Maschine, unmittelbar danach:
+
+```
+PCI: 98 passed, 0 failed
+```
+
+Der Unterschied ist die Last. Auf diesem Rechner liefen während der
+Abnahme **drei weitere Runden gleichzeitig** mit eigenen QEMU-Prozessen
+(bis zu elf auf zwölf Kernen), und `tools/pci/run.sh` gibt jedem Lauf ein
+Zeitlimit. Was dabei ausfiel, war das Formatieren des Dateisystems *auf
+der NVMe-Platte* — der Teil des Abschnitts, der am längsten rechnet;
+Identify, MSI-X, das Busmaster-Bit und beide Durchsatzmessungen liefen
+durch. Dass die Ursache nicht in dieser Runde liegt, ist außerdem an der
+Sache zu sehen: der Abschnitt läuft **ohne** das Wort `wm` und damit ohne
+eine einzige Zeile dieser Runde, und die Speicherkarte von `kdata` ist
+kollisionsfrei (44 Bereiche, `WIG` bei 0x46000 zwischen zwei freien
+Lücken).
+
+Das gehört hier hin und nicht in eine Fußnote: eine grüne Abnahme, die
+man nur bekommt, wenn die Maschine sonst nichts tut, ist eine Abnahme mit
+einer Bedingung — und die Bedingung ist genannt.
