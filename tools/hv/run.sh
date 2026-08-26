@@ -328,6 +328,51 @@ has "$Q64" "np=no" "-cpu qemu64: der Wirt MELDET, dass CPUID keine NPT anbietet"
 has "$Q64" "hv: BAD it can do nested page tables" \
     "-cpu qemu64: und die Zusage darueber wird ROT, statt stillzuschweigen"
 
+# F. DAS WORT MUSS EIN WORT SEIN -- und das ist keine Feinheit, sondern
+#    ein Fehler, den Gegenprobe A dieser Runde WIRKLICH GEFUNDEN hat.
+#
+#    QEMU stellt der Multiboot-Kommandozeile den PFAD DES ABBILDS voran:
+#
+#      mb: flags=0x24f  cmd=/tmp/tmp.aBhvXk12/osum0.mb osum nokbd nofs
+#
+#    Die Laeufer bauen in ein Verzeichnis aus `mktemp -d`, und dessen
+#    Name ist zufaellig. Enthielt er die zwei Buchstaben `hv`, fand die
+#    urspruengliche Teilzeichenkettensuche das Wort dieser Runde IM PFAD
+#    -- und der Kernel schaltete den Hypervisor ein, obwohl auf der
+#    Kommandozeile nichts davon stand. Gegenprobe A wurde rot, weil der
+#    Kernel 20 Zusagen meldete, wo er haette schweigen sollen.
+#
+#    Von hier an wird genau das gemessen, statt sich auf den Zufall zu
+#    verlassen: das Abbild wird in ein Verzeichnis gelegt, dessen Name
+#    die zwei Buchstaben ENTHAELT, und der Kernel muss trotzdem schweigen.
+WORTDIR="$TMPD/ein-pfad-mit-hv-darin"
+mkdir -p "$WORTDIR"
+cp "$TMPD/osum0.mb" "$WORTDIR/k.mb"
+WORT="$TMPD/wort.txt"
+rc=0
+timeout 150 qemu-system-x86_64 -kernel "$WORTDIR/k.mb" -cpu "$CPU" -m 256 \
+    -append "$BASIS" -serial "file:$WORT" -display none -no-reboot \
+    -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1 || rc=$?
+[ "$rc" -eq 21 ] && ok "das Wort ist ein WORT: der Kernel lebt (21)" \
+    || bad "das Wort ist ein WORT: Beendigungscode $rc statt 21"
+grep -qa "cmd=$WORTDIR" "$WORT" \
+    && ok "der Pfad mit 'hv' darin steht wirklich in der Kommandozeile" \
+    || bad "der Pfad steht nicht in der Kommandozeile -- die Probe misst nichts"
+has    "$WORT" "hv: skipped" "und der Kernel schweigt trotzdem"
+hasnot "$WORT" "hv: OK" "kein Wort im Pfad hat die Runde eingeschaltet"
+
+# Und die Gegenprobe zur Gegenprobe: MIT dem Wort auf der Kommandozeile
+# laeuft aus DEMSELBEN Pfad alles.
+WORT2="$TMPD/wort2.txt"
+rc=0
+timeout 200 qemu-system-x86_64 -kernel "$WORTDIR/k.mb" -cpu "$CPU" -m 256 \
+    -append "$BASIS hv" -serial "file:$WORT2" -display none -no-reboot \
+    -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1 || rc=$?
+[ "$rc" -eq 21 ] && ok "mit dem Wort laeuft aus demselben Pfad alles (21)" \
+    || bad "mit dem Wort: Beendigungscode $rc statt 21"
+has "$WORT2" "hv: OK  every frame of every guest came back" \
+    "und zwar vollstaendig"
+
 echo
 echo "HV: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

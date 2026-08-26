@@ -325,7 +325,37 @@ fn rdmsr(index: u64) -> u64 {
 
 // ------------------------------------------------------------- die Woerter
 
-fn find(hay: u64, needle: u64, n: u64) -> u64 {
+// EIN WORT, UND ZWAR ALS GANZES WORT. Das ist keine Feinheit, sondern
+// ein Fehler, den die Gegenprobe dieser Runde gefunden hat -- und er
+// haette sonst still im Baum gelegen.
+//
+// QEMU stellt der Multiboot-Kommandozeile DEN PFAD DES ABBILDS VORAN:
+//
+//   mb: flags=0x24f  cmd=/tmp/tmp.aBhvXk12/osum0.mb osum nokbd nofs
+//
+// Die Testlaeufer bauen ihr Abbild in ein Verzeichnis aus `mktemp -d`,
+// und dessen Name ist zufaellig. Enthaelt er die zwei Buchstaben `hv`
+// -- und das passiert -- dann fand die alte Teilzeichenkettensuche das
+// Wort dieser Runde IM PFAD, und der Kernel schaltete den Hypervisor
+// ein, obwohl auf der Kommandozeile nichts davon stand. Genau das ist
+// passiert: die Gegenprobe "ohne `hv` genau eine Zeile" wurde rot, weil
+// der Kernel 20 Zusagen meldete, wo er hätte schweigen sollen.
+//
+// Nachgestellt, damit es kein Verdacht bleibt:
+//
+//   $ qemu-system-x86_64 -kernel /tmp/pfad-mit-hv-drin/k.mb \
+//         -append 'osum nokbd nofs'
+//   hv: proofs 20 / 20        <- ohne das Wort auf der Kommandozeile
+//
+// Deshalb sucht diese Runde WORTGENAU: vor dem Treffer muss der Anfang
+// der Zeile oder ein Leerzeichen stehen, dahinter das Ende oder ein
+// Leerzeichen. Ein Wort aus zwei Buchstaben ist sonst kein Schalter,
+// sondern ein Zufall.
+fn is_sep(c: u64) -> bool {
+    return c == 32 || c == 9 || c == 0
+}
+
+fn find_word(hay: u64, needle: u64, n: u64) -> u64 {
     if hay == 0 {
         return 0
     }
@@ -342,7 +372,14 @@ fn find(hay: u64, needle: u64, n: u64) -> u64 {
             }
         }
         if hit {
-            return hay +% i
+            var links: bool = i == 0
+            if !links {
+                links = is_sep(kstate.get8(hay +% i -% 1))
+            }
+            let rechts: bool = is_sep(kstate.get8(hay +% i +% n))
+            if links && rechts {
+                return hay +% i
+            }
         }
         i = i + 1
     }
@@ -358,25 +395,25 @@ fn mode_of(cmd: u64) -> u64 {
     var w_mess: [u8; 9] = "gastmess\0"
     var w_frei: [u8; 9] = "gastfrei\0"
     var m: u64 = 0
-    if find(cmd, (&w_hv[0]) as u64, 2) != 0 {
+    if find_word(cmd, (&w_hv[0]) as u64, 2) != 0 {
         m = m | M_HV
     }
-    if find(cmd, (&w_loop[0]) as u64, 8) != 0 {
+    if find_word(cmd, (&w_loop[0]) as u64, 8) != 0 {
         m = m | M_LOOP
     }
-    if find(cmd, (&w_nosvm[0]) as u64, 5) != 0 {
+    if find_word(cmd, (&w_nosvm[0]) as u64, 5) != 0 {
         m = m | M_NOSVM
     }
-    if find(cmd, (&w_nonpt[0]) as u64, 5) != 0 {
+    if find_word(cmd, (&w_nonpt[0]) as u64, 5) != 0 {
         m = m | M_NONPT
     }
-    if find(cmd, (&w_cr[0]) as u64, 6) != 0 {
+    if find_word(cmd, (&w_cr[0]) as u64, 6) != 0 {
         m = m | M_CR
     }
-    if find(cmd, (&w_mess[0]) as u64, 8) != 0 {
+    if find_word(cmd, (&w_mess[0]) as u64, 8) != 0 {
         m = m | M_MESS
     }
-    if find(cmd, (&w_frei[0]) as u64, 8) != 0 {
+    if find_word(cmd, (&w_frei[0]) as u64, 8) != 0 {
         m = m | M_FREI
     }
     return m

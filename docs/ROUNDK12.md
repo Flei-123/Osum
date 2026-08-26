@@ -462,7 +462,65 @@ führen, ohne dafür Sonderrechte zu bekommen.
 
 ---
 
-## 12. Ein Befund nebenbei: zwei Runden koennen `./test.sh` nicht gleichzeitig laufen lassen
+## 12. Der Fehler, den die Gegenprobe gefunden hat
+
+Das ist der lehrreichste Teil dieser Runde, und er stand fast im Baum.
+
+Alles war grün — Gäste, NPT, Ring 3, alle fünf Gegenproben. Dann lief
+`./test.sh` ein weiteres Mal, und Gegenprobe A wurde **rot**:
+
+```
+FAIL  ohne 'hv': genau die eine Zeile -- 'hv: skipped' fehlt
+FAIL  ohne 'hv': keine einzige Zusage -- 'hv: OK' sollte nicht da sein
+FAIL  ohne 'hv': kein Gast hat geredet -- 'gast|' sollte nicht da sein
+FAIL  ohne 'hv': kein Programm in Ring 3 -- 'hvuser:' sollte nicht da sein
+```
+
+Der Kernel hatte den Hypervisor eingeschaltet, **obwohl das Wort nicht
+auf der Kommandozeile stand**. Der Grund:
+
+**QEMU stellt der Multiboot-Kommandozeile den Pfad des Abbilds voran.**
+
+```
+mb: flags=0x24f  cmd=/tmp/tmp.aBhvXk12/osum0.mb osum nokbd nofs
+                          ^^
+```
+
+Die Testläufer bauen in ein Verzeichnis aus `mktemp -d`, und dessen Name
+ist zufällig. Enthält er die zwei Buchstaben `hv`, findet eine
+**Teilzeichenketten**-Suche das Wort dieser Runde im Pfad. Genau das war
+passiert.
+
+Nachgestellt, damit es kein Verdacht bleibt:
+
+```
+$ mkdir /tmp/pfad-mit-hv-drin
+$ qemu-system-x86_64 -kernel /tmp/pfad-mit-hv-drin/k.mb \
+      -append 'osum nokbd nofs'
+hv: proofs 20 / 20        <- ohne das Wort auf der Kommandozeile
+```
+
+Die Abhilfe ist klein und steht jetzt in `hv.fi` (`find_word`): vor dem
+Treffer muss der Anfang der Zeile oder ein Trennzeichen stehen, dahinter
+das Ende oder ein Trennzeichen. **Ein Wort aus zwei Buchstaben ist sonst
+kein Schalter, sondern ein Zufall.**
+
+Und aus dem Fehler ist eine **dauerhafte Wache** geworden. Gegenprobe F
+in `tools/hv/run.sh` verlässt sich nicht mehr auf den Zufall: sie legt
+das Abbild ausdrücklich in ein Verzeichnis, dessen Name die zwei
+Buchstaben *enthält*, prüft nach, dass der Pfad wirklich in der
+Kommandozeile steht — und verlangt, dass der Kernel trotzdem schweigt.
+Danach dasselbe *mit* dem Wort, aus demselben Pfad, und alles muss laufen.
+
+> **Für die anderen Runden.** Dieselbe Falle liegt unter jedem Wort, das
+> mit `mem.cmdline` gesucht wird: `nic` (`hw.fi`), `unix`, `caps`, `gfx`,
+> `osum`, `ata`, `nofs`. Je kürzer das Wort, desto wahrscheinlicher der
+> Zufallstreffer. Diese Runde fasst die fremden Dateien **nicht** an —
+> aber `hv.find_word` ist die Vorlage, wenn jemand es aufräumen will.
+
+---
+
+## 13. Ein Befund nebenbei: zwei Runden koennen `./test.sh` nicht gleichzeitig laufen lassen
 
 Das gehoert nicht zu dieser Runde, ist aber beim Messen zweimal
 passiert und kostet jeden, dem es passiert, eine halbe Stunde Suche.
@@ -492,7 +550,7 @@ damit es nicht ein drittes Mal gesucht werden muss.
 
 ---
 
-## 13. Die Dateien
+## 14. Die Dateien
 
 | Datei | Zeilen | was drin steht |
 |---|---|---|
