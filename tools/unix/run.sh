@@ -164,7 +164,7 @@ num "Nummern von K9, die im Socket-Block 41..55 von K8 liegen" "$clash" eq 0
 # ------------------------------------------------------------- Abschnitt 2
 
 echo "== 2. bauen: der Kernel, das Userland und das messende Programm =="
-for f in boot isr switch smp; do
+for f in boot isr switch smp hv; do
     as --64 -o "$TMPD/$f.o" "kernel/$f.s" 2>"$TMPD/as.err" \
         || { bad "$f.s laesst sich nicht assemblieren"; sed 's/^/        /' "$TMPD/as.err" | head -5; }
 done
@@ -196,7 +196,7 @@ build_stage() { # 0 = firnc0, 1 = firnc1
         --defsym=KERNEL_AP_MAIN="_F$s.smp__ap_main" \
         --defsym=USER_MAIN="_F$s.u_enter" \
         -o "$TMPD/k$s.elf" "$TMPD/boot.o" "$TMPD/isr.o" "$TMPD/switch.o" \
-        "$TMPD/smp.o" "$TMPD/k$s.o" "$TMPD/u$s.o" 2>"$TMPD/ld$s.err" \
+        "$TMPD/smp.o" "$TMPD/hv.o" "$TMPD/k$s.o" "$TMPD/u$s.o" 2>"$TMPD/ld$s.err" \
         || { bad "firnc$s: ld am Kernel gescheitert"; grep -v 'GNU-stack\|RWX\|deprecated' "$TMPD/ld$s.err" | sed 's/^/        /' | head -5; return 1; }
     objcopy -O elf32-i386 "$TMPD/k$s.elf" "$TMPD/k$s.mb" 2>/dev/null
     ok "firnc$s: der Kernel ist gebunden und ein Multiboot-Abbild"
