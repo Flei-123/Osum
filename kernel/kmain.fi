@@ -60,6 +60,16 @@ import guard
 import bootmod
 import perm
 
+// RUNDE K14: die VFS-Schicht und die fremden Dateisysteme. `vfs` zieht
+// `mnt`, `vfsops`, `ofs`, `procfs`, `devfs` und `fat` mit herein --
+// alles, was diese Runde an den Kernel haengt, haengt an dieser einen
+// Zeile.
+import vfs
+import mnt
+import vfsops
+import part
+import devfs
+
 // Indices in the table out of isr.s.
 const V_DF_STACK: u64 = 52
 const V_IRQ_STACK: u64 = 53
@@ -116,6 +126,11 @@ const DISK_FRAMES: u64 = 256 // 1 MiB of RAM disk
 // system and this is the number that names it.
 const OSUM_BLOCKS: u64 = 4096
 const DISK_BLOCKS: u64 = 2048
+// ROUNDE K14: die zweite Platte. Die Zahl gibt der Wirt vor -- ATA PIO
+// sagt von sich aus nicht, wie gross ein Laufwerk ist, und ein
+// IDENTIFY dafuer waere ein zweites Protokoll fuer eine Zahl, die
+// `tools/k14/run.sh` ohnehin kennt (es baut das Abbild). 80 MiB.
+const DISK2_BLOCKS: u64 = 163840
 
 const ADDR_MASK: u64 = 0x000FFFFFFFFFF000
 
@@ -1631,6 +1646,151 @@ fn shell(state: u64) {
 // The kernel therefore has no list of programs any more. `tools/osum/
 // run.sh` proves that by putting a DIFFERENT file at `/bin/ls` and
 // watching the output change without a line of the kernel changing.
+// ==================================================================
+// RUNDE K14 -- DIE VFS-SCHICHT UND DIE FREMDEN DATEISYSTEME
+//
+// Hier steht die REIHENFOLGE, und sie ist wieder nicht beliebig:
+//
+//   1. Die Schicht selbst und die WURZEL. Ohne einen Eintrag fuer die
+//      Wurzel hat kein weiterer Einhaengepunkt einen Ort, an dem er
+//      haengen koennte -- `mount_at` verlangt ein Verzeichnis, das es
+//      gibt, und ein Verzeichnis gibt es nur auf einem eingehaengten
+//      Dateisystem.
+//   2. /proc und /dev. Beide brauchen keine Platte.
+//   3. Die ZWEITE Platte, ihre Partitionstafel und das FAT32 darauf.
+//      Zuletzt, weil sie als einzige fehlschlagen kann, ohne dass
+//      etwas kaputt ist: eine Maschine ohne zweites Laufwerk ist keine
+//      kaputte Maschine.
+//
+// JEDER EINHAENGEPUNKT MUSS ALS VERZEICHNIS AUF DER WURZEL LIEGEN. Das
+// ist der Grund, warum diese Runde an einem bestehenden Plattenabbild
+// nichts aendert: wo kein /proc liegt, wird auch keines eingehaengt,
+// und die 1486 Zusagen der Runden 59 bis K12 messen weiter genau das,
+// was sie gemessen haben.
+fn k14_setup(state: u64) {
+    var s_off: [u8; 20] = "k14: novfs          "
+    var s_root: [u8; 14] = "k14: root=    "
+    var s_proc: [u8; 14] = "  proc=       "
+    var s_dev: [u8; 10] = "  dev=    "
+    var s_fat: [u8; 10] = "  fat=    "
+    var s_k14: [u8; 6] = "k14:  "
+    var s_disk2: [u8; 16] = "k14: disk2=     "
+    var s_parts: [u8; 12] = "  parts=    "
+    var s_mnts: [u8; 12] = "  mounts=   "
+    var p_proc: [u8; 6] = "/proc "
+    var p_dev: [u8; 5] = "/dev "
+    var p_mnt: [u8; 5] = "/mnt "
+    let mode: u64 = kstate.get(state, kstate.MODE)
+    kstate.set(state, kstate.K14_MODE, mode)
+    if (mode & kstate.M_VFS) == 0 {
+        return
+    }
+    vfs.init(state)
+    let root_ok: bool = vfs.mount_root(state)
+    serial.puts((&s_root[0]) as u64)
+    serial.dec(yes(root_ok))
+    if (mode & kstate.M_NOVFS) != 0 {
+        // DIE GEGENPROBE. Die Wurzel steht, alles andere nicht --
+        // /proc, /dev und FAT32 gibt es in diesem Lauf nicht, und
+        // jede Zusage dieser Runde ausser der ueber OFS MUSS fallen.
+        serial.nl()
+        serial.puts((&s_off[0]) as u64)
+        serial.nl()
+        return
+    }
+    var proc_m: u64 = vfs.MAX_MNT
+    var dev_m: u64 = vfs.MAX_MNT
+    if (mode & kstate.M_NOPROCFS) == 0 {
+        proc_m = vfs.mount_at(state, vfsops.FS_PROC, 0, 0, 0,
+            (&p_proc[0]) as u64, 0)
+    }
+    if (mode & kstate.M_NODEVFS) == 0 {
+        dev_m = vfs.mount_at(state, vfsops.FS_DEV, 0, 0, 0,
+            (&p_dev[0]) as u64, 0)
+    }
+    serial.puts((&s_proc[0]) as u64)
+    serial.dec(yes(proc_m < vfs.MAX_MNT))
+    serial.puts((&s_dev[0]) as u64)
+    serial.dec(yes(dev_m < vfs.MAX_MNT))
+    serial.nl()
+    if (mode & kstate.M_NOFAT) != 0 {
+        return
+    }
+    // Die zweite Platte. `probe_ata1` liest ihren ersten Block; ein
+    // Statusregister allein ist noch keine Platte.
+    let have2: bool = blk.probe_ata1(state, DISK2_BLOCKS)
+    serial.puts((&s_disk2[0]) as u64)
+    serial.dec(yes(have2))
+    serial.nl()
+    if !have2 {
+        return
+    }
+    var first: u64 = 0
+    var count: u64 = blk.blocks_on(state, blk.DEV_ATA1)
+    var nparts: u64 = 0
+    if (mode & kstate.M_NOPART) == 0 {
+        nparts = part.scan(state, blk.DEV_ATA1)
+        if nparts != 0 {
+            // Die erste Partition, die ein FAT32 sein koennte. Auf
+            // einer GPT-Platte ist das die mit der Kennung "Microsoft
+            // basic data", auf einer MBR-Platte der Typ 0x0B/0x0C.
+            var pick: u64 = part.find_kind(state, blk.DEV_ATA1,
+                part.T_FAT32)
+            if pick >= part.MAX_PARTS {
+                pick = part.find_kind(state, blk.DEV_ATA1, part.T_BASIC)
+            }
+            if pick >= part.MAX_PARTS {
+                pick = part.find_kind(state, blk.DEV_ATA1, part.T_EFI)
+            }
+            if pick < part.MAX_PARTS {
+                first = part.start(state, pick)
+                count = part.blocks(state, pick)
+            }
+        }
+    }
+    serial.puts((&s_parts[0]) as u64)
+    serial.dec(nparts)
+    serial.nl()
+    var fflags: u64 = 0
+    if (mode & kstate.M_FATRO) != 0 {
+        fflags = mnt.F_RDONLY
+    }
+    let fat_m: u64 = vfs.mount_at(state, vfsops.FS_FAT, blk.DEV_ATA1,
+        first, count, (&p_mnt[0]) as u64, fflags)
+    serial.puts((&s_k14[0]) as u64)
+    serial.puts((&s_fat[0]) as u64)
+    serial.dec(yes(fat_m < vfs.MAX_MNT))
+    serial.puts((&s_mnts[0]) as u64)
+    serial.dec(kstate.get(state, kstate.VFS_MOUNTS))
+    serial.nl()
+}
+
+// Was die Schicht in diesem Lauf getan hat. Vier Zahlen, und jede
+// einzelne ist eine, die `tools/k14/run.sh` zurueckliest -- eine
+// Runde, die eine Einhaengegrenze baut und nicht sagen kann, wie oft
+// sie ueberquert wurde, hat nichts vorzuweisen.
+fn say_k14(state: u64) {
+    var s: [u8; 18] = "k14: mounts=      "
+    var s_l: [u8; 12] = " lookups=   "
+    var s_c: [u8; 14] = " crossings=   "
+    var s_o: [u8; 8] = " ops=   "
+    var s_i: [u8; 12] = " indirect=  "
+    if (kstate.get(state, kstate.MODE) & kstate.M_VFS) == 0 {
+        return
+    }
+    serial.puts((&s[0]) as u64)
+    serial.dec(kstate.get(state, kstate.VFS_MOUNTS))
+    serial.puts((&s_l[0]) as u64)
+    serial.dec(kstate.get(state, kstate.VFS_LOOKUPS))
+    serial.puts((&s_c[0]) as u64)
+    serial.dec(kstate.get(state, kstate.VFS_CROSSINGS))
+    serial.puts((&s_o[0]) as u64)
+    serial.dec(kstate.get(state, kstate.VFS_OPS))
+    serial.puts((&s_i[0]) as u64)
+    serial.dec(kstate.get(state, kstate.VFS_INDIRECT))
+    serial.nl()
+}
+
 fn osum(state: u64) {
     if wm_owns_shell(state) {
         return
@@ -1689,6 +1849,10 @@ fn osum(state: u64) {
     if !mounted {
         return
     }
+    // ROUNDE K14: die Schicht, BEVOR das erste Programm laeuft. Eine
+    // Shell, die /proc erst nach ihrem Start bekaeme, haette es zum
+    // Zeitpunkt ihres eigenen `open` noch nicht.
+    k14_setup(state)
     list_dir(state, (&p_bin[0]) as u64, (&s_bin[0]) as u64)
 
     // ================================================== RUNDE K13
@@ -1809,6 +1973,7 @@ fn osum(state: u64) {
     serial.puts((&s_of[0]) as u64)
     serial.dec(before)
     serial.nl()
+    say_k14(state)
     say_posix(state)
     perm.report(state)
 }
@@ -2186,6 +2351,40 @@ fn mode_of(cmd: u64) -> u64 {
     }
     if find(cmd, (&fixrw[0]) as u64, 9) != 0 {
         mode = mode | M_FIXRAND
+    }
+    // ROUNDE K14. `vfs` schaltet die Schicht an; alles andere sind
+    // GEGENPROBEN, und ohne sie beweist die Runde nichts.
+    var w_vfs: [u8; 4] = "vfs "
+    var w_novfs: [u8; 6] = "novfs "
+    var w_nopfs: [u8; 9] = "noprocfs "
+    var w_nodfs: [u8; 8] = "nodevfs "
+    var w_nofat: [u8; 6] = "nofat "
+    var w_nopart: [u8; 7] = "nopart "
+    var w_fatro: [u8; 6] = "fatro "
+    var w_vfsall: [u8; 7] = "vfsall "
+    if find(cmd, (&w_vfs[0]) as u64, 3) != 0 {
+        mode = mode | kstate.M_VFS
+    }
+    if find(cmd, (&w_novfs[0]) as u64, 5) != 0 {
+        mode = mode | kstate.M_NOVFS
+    }
+    if find(cmd, (&w_nopfs[0]) as u64, 8) != 0 {
+        mode = mode | kstate.M_NOPROCFS
+    }
+    if find(cmd, (&w_nodfs[0]) as u64, 7) != 0 {
+        mode = mode | kstate.M_NODEVFS
+    }
+    if find(cmd, (&w_nofat[0]) as u64, 5) != 0 {
+        mode = mode | kstate.M_NOFAT
+    }
+    if find(cmd, (&w_nopart[0]) as u64, 6) != 0 {
+        mode = mode | kstate.M_NOPART
+    }
+    if find(cmd, (&w_fatro[0]) as u64, 5) != 0 {
+        mode = mode | kstate.M_FATRO
+    }
+    if find(cmd, (&w_vfsall[0]) as u64, 6) != 0 {
+        mode = mode | kstate.M_VFSALL
     }
     return mode
 }

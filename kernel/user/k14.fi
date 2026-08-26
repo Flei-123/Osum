@@ -1,0 +1,721 @@
+// kernel/user/k14.fi -- Runde K14: die VFS-Schicht, von AUSSEN gemessen.
+//
+// Wie `/bin/posix` (K4) und `/bin/unix` (K9): das Programm laeuft in
+// Ring 3, macht jeden Aufruf wirklich, und schreibt jede Antwort als
+//
+//     k14: <name> = <zahl>
+//
+// auf die Konsole. `tools/k14/run.sh` haelt jede dieser Zahlen gegen
+// das, was sie sein MUSS. Was hier nicht als Zahl herauskommt, ist
+// keine Zusage, sondern eine Behauptung.
+//
+// SECHS ABSCHNITTE, in der Reihenfolge des Auftrags dieser Runde:
+//
+//   1. DIE EINHAENGETAFEL. Wie viele Einhaengungen es gibt, welche Art
+//      sie haben, wo sie liegen -- gelesen ueber SYS_OSUM_MNTSTAT, also
+//      aus der Tafel des Kernels und nicht aus einer Vermutung.
+//   2. DIE PFADAUFLOESUNG UEBER GRENZEN HINWEG. Derselbe Aufruf
+//      (`stat`) auf zwei Pfaden, die auf zwei verschiedenen
+//      Dateisystemen liegen, muss zwei verschiedene `st_dev` geben --
+//      und "/mnttest" darf NICHT auf "/mnt" landen, obwohl die vier
+//      Oktette stimmen. Das ist die eine Zeile, an der eine
+//      Einhaengeschicht falsch wird.
+//   3. AUSHAENGEN MIT OFFENEN DESKRIPTOREN. Eine Datei wird geoeffnet,
+//      der Zaehler der Einhaengung geht auf eins, `umount` MUSS -EBUSY
+//      geben, nach `close` MUSS es gehen -- und danach ist das
+//      Verzeichnis wirklich leer.
+//   4. /proc. Der eigene Prozess, in Zahlen: die Pid in
+//      /proc/<pid>/status, die eigenen Deskriptoren in
+//      /proc/<pid>/fd, und /proc/<pid>/maps, das sich AENDERT, wenn
+//      der Prozess eine Seite mehr bekommt.
+//   5. /dev. null, zero, urandom und das BLOCKGERAET -- und das
+//      Blockgeraet ist die eine Datei hier, deren Oktette wirklich auf
+//      einem Traeger liegen. Der Bootsektor der zweiten Platte wird
+//      gelesen und gegen 0x55 0xAA geprueft.
+//   6. WAS NICHT GEHEN DARF. Schreiben in /proc, Anlegen in /dev,
+//      Umbenennen ueber eine Einhaengegrenze (-EXDEV) -- eine Schicht,
+//      die alles erlaubt, trennt nichts.
+
+profile kernel
+
+import ulib
+import libc.kcall
+import libc.errno
+
+export { u_start }
+
+// ---------------------------------------------------------- die Nummern
+
+const SYS_READ: u64 = 0
+const SYS_WRITE: u64 = 1
+const SYS_OPEN: u64 = 2
+const SYS_CLOSE: u64 = 3
+const SYS_DUP: u64 = 32
+const SYS_STAT: u64 = 4
+const SYS_FSTAT: u64 = 5
+const SYS_LSEEK: u64 = 8
+const SYS_MMAP: u64 = 9
+const SYS_GETPID: u64 = 39
+const SYS_RENAME: u64 = 82
+const SYS_MKDIR: u64 = 83
+const SYS_UNLINK: u64 = 87
+const SYS_MOUNT: u64 = 165
+const SYS_UMOUNT2: u64 = 166
+const SYS_GETDENTS64: u64 = 217
+const SYS_MNTSTAT: u64 = 1700
+
+const O_RDONLY: u64 = 0
+const O_WRONLY: u64 = 1
+const O_RDWR: u64 = 2
+const O_CREAT: u64 = 64
+const O_TRUNC: u64 = 512
+const SEEK_SET: u64 = 0
+const SEEK_END: u64 = 2
+
+// Die Felder von `struct stat`, x86-64 (kernel/sys.fi).
+const ST_DEV: u64 = 0
+const ST_INO: u64 = 8
+const ST_MODE: u64 = 24
+const ST_SIZE: u64 = 48
+const ST_BLKSIZE: u64 = 56
+const S_IFMT: u64 = 61440
+const S_IFDIR: u64 = 16384
+const S_IFREG: u64 = 32768
+const S_IFCHR: u64 = 8192
+const S_IFBLK: u64 = 24576
+
+// Die Felder von SYS_MNTSTAT.
+const MS_USED: u64 = 0
+const MS_TYPE: u64 = 1
+const MS_DEV: u64 = 2
+const MS_FLAGS: u64 = 5
+const MS_OPENS: u64 = 6
+const MS_COUNT: u64 = 7
+const MS_PATHLEN: u64 = 8
+const MS_PATHCH: u64 = 100
+
+const FS_OFS: u64 = 1
+const FS_PROC: u64 = 2
+const FS_DEV: u64 = 3
+const FS_FAT: u64 = 4
+
+const E_BUSY: u64 = 16
+const E_XDEV: u64 = 18
+const E_PERM: u64 = 1
+const E_ROFS: u64 = 30
+const E_NOENT: u64 = 2
+
+// ------------------------------------------------------- die Ausgabe
+
+fn line(name: u64, v: u64) {
+    var s_pre: [u8; 6] = "k14: \0"
+    var s_eq: [u8; 4] = " = \0"
+    ulib.say((&s_pre[0 as usize]) as u64)
+    ulib.say(name)
+    ulib.say((&s_eq[0 as usize]) as u64)
+    ulib.sayn(v)
+    ulib.nl()
+}
+
+// Ein Fehler als POSITIVE Zahl, damit die Zeilen lesbar bleiben: 0
+// heisst "hat geklappt", 16 heisst -EBUSY.
+fn code(v: u64) -> u64 {
+    if errno.is_error(v) {
+        return 0 -% v
+    }
+    return 0
+}
+
+// ------------------------------------------------------- kleine Hilfen
+
+fn zero(p: u64, n: u64) {
+    var i: u64 = 0
+    while i < n {
+        __mmio_write8((p + i) as *mut u8, 0 as u8)
+        i = i + 1
+    }
+}
+
+fn byte_at(p: u64, i: u64) -> u64 {
+    return __mmio_read8((p + i) as *mut u8) as u64
+}
+
+fn word_at(p: u64, i: u64) -> u64 {
+    return __mmio_read64((p + i) as *mut u64)
+}
+
+fn dword_at(p: u64, i: u64) -> u64 {
+    return __mmio_read32((p + i) as *mut u32) as u64
+}
+
+// ============================================ 1. die Einhaengetafel
+
+fn mnt_by_path(p: u64) -> u64 {
+    var i: u64 = 0
+    while i < 8 {
+        if ulib.sys(SYS_MNTSTAT, i, MS_USED, 0) == 1 {
+            let n: u64 = ulib.sys(SYS_MNTSTAT, i, MS_PATHLEN, 0)
+            var same: bool = true
+            var k: u64 = 0
+            while k < n {
+                if ulib.sys(SYS_MNTSTAT, i, MS_PATHCH + k, 0)
+                    != byte_at(p, k) {
+                    same = false
+                    k = n
+                } else {
+                    k = k + 1
+                }
+            }
+            if same && byte_at(p, n) == 0 {
+                return i
+            }
+        }
+        i = i + 1
+    }
+    return 8
+}
+
+// Die Art der Einhaengung an diesem Ort -- 0, wenn es sie nicht gibt.
+// NICHT der Fehler von SYS_MNTSTAT: eine Gegenprobe soll "gibt es
+// nicht" sagen koennen, und -EINVAL ("die Nummer 8 ist keine
+// Einhaengung") ist eine Aussage ueber die FRAGE und nicht ueber die
+// Antwort.
+fn type_at(p: u64) -> u64 {
+    let m: u64 = mnt_by_path(p)
+    if m >= 8 {
+        return 0
+    }
+    return ulib.sys(SYS_MNTSTAT, m, MS_TYPE, 0)
+}
+
+fn section_table() {
+    var n_count: [u8; 12] = "mount_count\0"
+    var n_root: [u8; 10] = "root_type\0"
+    var n_proc: [u8; 10] = "proc_type\0"
+    var n_dev: [u8; 9] = "dev_type\0"
+    var n_fat: [u8; 9] = "fat_type\0"
+    var n_fatdev: [u8; 8] = "fat_dev\0"
+    var p_root: [u8; 2] = "/\0"
+    var p_proc: [u8; 6] = "/proc\0"
+    var p_dev: [u8; 5] = "/dev\0"
+    var p_mnt: [u8; 5] = "/mnt\0"
+    line((&n_count[0 as usize]) as u64,
+        ulib.sys(SYS_MNTSTAT, 0, MS_COUNT, 0))
+    let d: u64 = mnt_by_path((&p_mnt[0 as usize]) as u64)
+    line((&n_root[0 as usize]) as u64, type_at((&p_root[0 as usize]) as u64))
+    line((&n_proc[0 as usize]) as u64, type_at((&p_proc[0 as usize]) as u64))
+    line((&n_dev[0 as usize]) as u64, type_at((&p_dev[0 as usize]) as u64))
+    line((&n_fat[0 as usize]) as u64, type_at((&p_mnt[0 as usize]) as u64))
+    var fdev: u64 = 0
+    if d < 8 {
+        fdev = ulib.sys(SYS_MNTSTAT, d, MS_DEV, 0)
+    }
+    line((&n_fatdev[0 as usize]) as u64, fdev)
+}
+
+// ================================= 2. Aufloesung ueber Grenzen hinweg
+
+fn section_cross() {
+    var st: [u8; 160] = [0 as u8; 160]
+    var st2: [u8; 160] = [0 as u8; 160]
+    var n_rootdev: [u8; 12] = "st_dev_root\0"
+    var n_fatdev: [u8; 11] = "st_dev_fat\0"
+    var n_procdev: [u8; 12] = "st_dev_proc\0"
+    var n_devdev: [u8; 11] = "st_dev_dev\0"
+    var n_same: [u8; 17] = "st_dev_different\0"
+    var n_trap: [u8; 15] = "mnttest_is_err\0"
+    var n_deep: [u8; 15] = "deep_fat_size\0\0"
+    var n_dir: [u8; 13] = "fat_dir_mode\0"
+    var p_bin: [u8; 8] = "/bin/sh\0"
+    var p_hello: [u8; 15] = "/mnt/hello.txt\0"
+    var p_proc: [u8; 14] = "/proc/meminfo\0"
+    var p_dev: [u8; 10] = "/dev/null\0"
+    var p_trap: [u8; 19] = "/mnttest/hello.txt\0"
+    var p_deep: [u8; 20] = "/mnt/unter/tief.txt\0"
+    var p_unter: [u8; 12] = "/mnt/unter\0\0"
+    // BEIDE Puffer werden geleert, BEVOR gefragt wird. Ein `stat`, das
+    // fehlschlaegt, schreibt nichts -- und was dann im Puffer stuende,
+    // waere der Rest vom letzten Mal. Genau daran ist die erste
+    // Fassung dieser Gegenprobe gescheitert.
+    zero((&st[0 as usize]) as u64, 160)
+    zero((&st2[0 as usize]) as u64, 160)
+    var have_root: bool = !ulib.bad(ulib.sys(SYS_STAT,
+        (&p_bin[0 as usize]) as u64, (&st[0 as usize]) as u64, 0))
+    let dev_root: u64 = word_at((&st[0 as usize]) as u64, ST_DEV)
+    line((&n_rootdev[0 as usize]) as u64, dev_root)
+    var have_fat: bool = !ulib.bad(ulib.sys(SYS_STAT,
+        (&p_hello[0 as usize]) as u64, (&st2[0 as usize]) as u64, 0))
+    let dev_fat: u64 = word_at((&st2[0 as usize]) as u64, ST_DEV)
+    line((&n_fatdev[0 as usize]) as u64, dev_fat)
+    ulib.sys(SYS_STAT, (&p_proc[0 as usize]) as u64,
+        (&st[0 as usize]) as u64, 0)
+    line((&n_procdev[0 as usize]) as u64,
+        word_at((&st[0 as usize]) as u64, ST_DEV))
+    ulib.sys(SYS_STAT, (&p_dev[0 as usize]) as u64,
+        (&st[0 as usize]) as u64, 0)
+    line((&n_devdev[0 as usize]) as u64,
+        word_at((&st[0 as usize]) as u64, ST_DEV))
+    var diff: u64 = 0
+    if have_root && have_fat && dev_root != dev_fat {
+        diff = 1
+    }
+    line((&n_same[0 as usize]) as u64, diff)
+    // DIE NAMENSGRENZE. "/mnttest" faengt mit "/mnt" an -- Oktett fuer
+    // Oktett. Ein Praefixvergleich ohne Grenze wuerde die Datei auf dem
+    // FAT32 suchen und finden. Sie MUSS unauffindbar sein.
+    line((&n_trap[0 as usize]) as u64,
+        code(ulib.sys(SYS_STAT, (&p_trap[0 as usize]) as u64,
+            (&st[0 as usize]) as u64, 0)))
+    ulib.sys(SYS_STAT, (&p_deep[0 as usize]) as u64,
+        (&st[0 as usize]) as u64, 0)
+    line((&n_deep[0 as usize]) as u64,
+        word_at((&st[0 as usize]) as u64, ST_SIZE))
+    ulib.sys(SYS_STAT, (&p_unter[0 as usize]) as u64,
+        (&st[0 as usize]) as u64, 0)
+    var isdir: u64 = 0
+    if (dword_at((&st[0 as usize]) as u64, ST_MODE) & S_IFMT) == S_IFDIR {
+        isdir = 1
+    }
+    line((&n_dir[0 as usize]) as u64, isdir)
+}
+
+// ======================= 3. aushaengen mit offenen Deskriptoren
+
+fn section_busy() {
+    var n_before: [u8; 13] = "opens_before\0"
+    var n_open: [u8; 11] = "opens_open\0"
+    var n_busy: [u8; 12] = "umount_busy\0"
+    var n_after: [u8; 12] = "opens_after\0"
+    var n_dup: [u8; 10] = "opens_dup\0"
+    var n_dup1: [u8; 11] = "opens_dup1\0"
+    var n_dup0: [u8; 11] = "opens_dup0\0"
+    var n_ok: [u8; 10] = "umount_ok\0"
+    var n_gone: [u8; 12] = "gone_is_err\0"
+    var n_back: [u8; 9] = "mount_ok\0"
+    var n_again: [u8; 12] = "back_is_err\0"
+    var p_mnt: [u8; 5] = "/mnt\0"
+    var p_hello: [u8; 15] = "/mnt/hello.txt\0"
+    var s_dev: [u8; 11] = "/dev/hdb1\0\0"
+    var s_type: [u8; 5] = "vfat\0"
+    var st: [u8; 160] = [0 as u8; 160]
+    let m: u64 = mnt_by_path((&p_mnt[0 as usize]) as u64)
+    line((&n_before[0 as usize]) as u64,
+        ulib.sys(SYS_MNTSTAT, m, MS_OPENS, 0))
+    let fd: u64 = ulib.sys(SYS_OPEN, (&p_hello[0 as usize]) as u64,
+        O_RDONLY, 0)
+    line((&n_open[0 as usize]) as u64,
+        ulib.sys(SYS_MNTSTAT, m, MS_OPENS, 0))
+    line((&n_busy[0 as usize]) as u64,
+        code(ulib.sys(SYS_UMOUNT2, (&p_mnt[0 as usize]) as u64, 0, 0)))
+    ulib.sys(SYS_CLOSE, fd, 0, 0)
+    line((&n_after[0 as usize]) as u64,
+        ulib.sys(SYS_MNTSTAT, m, MS_OPENS, 0))
+    // ZWEI DESKRIPTOREN, EINE OFFENE DATEI. `dup` macht aus einem
+    // Deskriptor zwei -- die EINHAENGUNG ist danach trotzdem einmal
+    // offen und nicht zweimal, denn die Zahl haengt am Eintrag der
+    // Tafel der offenen Dateien und nicht an der Deskriptornummer.
+    // Erst wenn der LETZTE Deskriptor faellt, geht sie herunter.
+    let d1: u64 = ulib.sys(SYS_OPEN, (&p_hello[0 as usize]) as u64,
+        O_RDONLY, 0)
+    let d2: u64 = ulib.sys(SYS_DUP, d1, 0, 0)
+    line((&n_dup[0 as usize]) as u64,
+        ulib.sys(SYS_MNTSTAT, m, MS_OPENS, 0))
+    ulib.sys(SYS_CLOSE, d1, 0, 0)
+    line((&n_dup1[0 as usize]) as u64,
+        ulib.sys(SYS_MNTSTAT, m, MS_OPENS, 0))
+    ulib.sys(SYS_CLOSE, d2, 0, 0)
+    line((&n_dup0[0 as usize]) as u64,
+        ulib.sys(SYS_MNTSTAT, m, MS_OPENS, 0))
+    line((&n_ok[0 as usize]) as u64,
+        code(ulib.sys(SYS_UMOUNT2, (&p_mnt[0 as usize]) as u64, 0, 0)))
+    // AUSGEHAENGT HEISST WIRKLICH WEG.
+    line((&n_gone[0 as usize]) as u64,
+        code(ulib.sys(SYS_STAT, (&p_hello[0 as usize]) as u64,
+            (&st[0 as usize]) as u64, 0)))
+    line((&n_back[0 as usize]) as u64,
+        code(ulib.sys4(SYS_MOUNT, (&s_dev[0 as usize]) as u64,
+            (&p_mnt[0 as usize]) as u64, (&s_type[0 as usize]) as u64, 0)))
+    line((&n_again[0 as usize]) as u64,
+        code(ulib.sys(SYS_STAT, (&p_hello[0 as usize]) as u64,
+            (&st[0 as usize]) as u64, 0)))
+}
+
+// ================================================== 4. /proc
+
+fn read_all(path: u64, dst: u64, max: u64) -> u64 {
+    let fd: u64 = ulib.sys(SYS_OPEN, path, O_RDONLY, 0)
+    if ulib.bad(fd) {
+        return 0
+    }
+    var got: u64 = 0
+    var going: bool = true
+    while going {
+        let n: u64 = ulib.sys(SYS_READ, fd, dst + got, max - got - 1)
+        if ulib.bad(n) || n == 0 {
+            going = false
+        } else {
+            got = got + n
+            if got + 1 >= max {
+                going = false
+            }
+        }
+    }
+    ulib.sys(SYS_CLOSE, fd, 0, 0)
+    __mmio_write8((dst + got) as *mut u8, 0 as u8)
+    return got
+}
+
+// Die Zahl hinter dem n-ten Doppelpunkt-Feld mit diesem Namen.
+fn field_num(text: u64, name: u64) -> u64 {
+    var i: u64 = 0
+    while byte_at(text, i) != 0 {
+        var k: u64 = 0
+        var hit: bool = true
+        while byte_at(name, k) != 0 && hit {
+            if byte_at(text, i + k) != byte_at(name, k) {
+                hit = false
+            } else {
+                k = k + 1
+            }
+        }
+        if hit {
+            var at: u64 = i + k
+            while byte_at(text, at) == 32 {
+                at = at + 1
+            }
+            var v: u64 = 0
+            var any: bool = false
+            while byte_at(text, at) >= 48 && byte_at(text, at) <= 57 {
+                v = v * 10 + (byte_at(text, at) - 48)
+                at = at + 1
+                any = true
+            }
+            if any {
+                return v
+            }
+        }
+        i = i + 1
+    }
+    return 0xFFFFFFFF
+}
+
+fn count_lines(text: u64) -> u64 {
+    var n: u64 = 0
+    var i: u64 = 0
+    while byte_at(text, i) != 0 {
+        if byte_at(text, i) == 10 {
+            n = n + 1
+        }
+        i = i + 1
+    }
+    return n
+}
+
+fn num_to_path(pid: u64, prefix: u64, suffix: u64, out: u64) {
+    var i: u64 = 0
+    while byte_at(prefix, i) != 0 {
+        __mmio_write8((out + i) as *mut u8, byte_at(prefix, i) as u8)
+        i = i + 1
+    }
+    var digits: [u8; 24] = [0 as u8; 24]
+    var n: u64 = 0
+    var x: u64 = pid
+    if x == 0 {
+        digits[0 as usize] = 48 as u8
+        n = 1
+    }
+    while x > 0 {
+        digits[n as usize] = ((x % 10) + 48) as u8
+        x = x / 10
+        n = n + 1
+    }
+    while n > 0 {
+        n = n - 1
+        __mmio_write8((out + i) as *mut u8, digits[n as usize])
+        i = i + 1
+    }
+    var k: u64 = 0
+    while byte_at(suffix, k) != 0 {
+        __mmio_write8((out + i) as *mut u8, byte_at(suffix, k) as u8)
+        i = i + 1
+        k = k + 1
+    }
+    __mmio_write8((out + i) as *mut u8, 0 as u8)
+}
+
+fn section_proc() {
+    var n_pid: [u8; 12] = "status_pid\0\0"
+    var n_lines: [u8; 14] = "status_lines\0\0"
+    var n_mem: [u8; 14] = "meminfo_total\0"
+    var n_mount: [u8; 13] = "mounts_lines\0"
+    var n_up: [u8; 13] = "uptime_bytes\0"
+    var n_maps1: [u8; 11] = "maps_lines\0"
+    var n_maps2: [u8; 15] = "maps_after_map\0"
+    var n_grew: [u8; 10] = "maps_grew\0"
+    var n_cmd: [u8; 13] = "cmdline_len\0\0"
+    var n_fdn: [u8; 9] = "fd_count\0"
+    var pre: [u8; 7] = "/proc/\0"
+    var s_status: [u8; 8] = "/status\0"
+    var s_maps: [u8; 6] = "/maps\0"
+    var s_cmd: [u8; 9] = "/cmdline\0"
+    var f_pid: [u8; 5] = "Pid:\0"
+    var f_mem: [u8; 10] = "MemTotal:\0"
+    var p_mem: [u8; 14] = "/proc/meminfo\0"
+    var p_mounts: [u8; 13] = "/proc/mounts\0"
+    var p_up: [u8; 13] = "/proc/uptime\0"
+    var path: [u8; 48] = [0 as u8; 48]
+    var text: [u8; 2200] = [0 as u8; 2200]
+    let pid: u64 = ulib.sys(SYS_GETPID, 0, 0, 0)
+    num_to_path(pid, (&pre[0 as usize]) as u64,
+        (&s_status[0 as usize]) as u64, (&path[0 as usize]) as u64)
+    read_all((&path[0 as usize]) as u64, (&text[0 as usize]) as u64, 2200)
+    line((&n_pid[0 as usize]) as u64,
+        field_num((&text[0 as usize]) as u64, (&f_pid[0 as usize]) as u64))
+    line((&n_lines[0 as usize]) as u64,
+        count_lines((&text[0 as usize]) as u64))
+    read_all((&p_mem[0 as usize]) as u64, (&text[0 as usize]) as u64, 2200)
+    line((&n_mem[0 as usize]) as u64,
+        field_num((&text[0 as usize]) as u64, (&f_mem[0 as usize]) as u64))
+    read_all((&p_mounts[0 as usize]) as u64, (&text[0 as usize]) as u64, 2200)
+    line((&n_mount[0 as usize]) as u64,
+        count_lines((&text[0 as usize]) as u64))
+    line((&n_up[0 as usize]) as u64,
+        read_all((&p_up[0 as usize]) as u64, (&text[0 as usize]) as u64, 2200))
+    // /proc/<pid>/maps AENDERT SICH, wenn der Prozess eine Seite mehr
+    // bekommt. Das ist die Zusage "hier steht die Seitentabelle und
+    // keine Liste von Konstanten" -- und sie ist genau dann etwas wert,
+    // wenn die Zahl VORHER kleiner ist als NACHHER.
+    num_to_path(pid, (&pre[0 as usize]) as u64,
+        (&s_maps[0 as usize]) as u64, (&path[0 as usize]) as u64)
+    read_all((&path[0 as usize]) as u64, (&text[0 as usize]) as u64, 2200)
+    let before: u64 = count_lines((&text[0 as usize]) as u64)
+    line((&n_maps1[0 as usize]) as u64, before)
+    kcall.map_anon(4096 * 4, kcall.PROT_READ | kcall.PROT_WRITE,
+        kcall.MAP_PRIVATE | kcall.MAP_ANONYMOUS)
+    read_all((&path[0 as usize]) as u64, (&text[0 as usize]) as u64, 2200)
+    let after: u64 = count_lines((&text[0 as usize]) as u64)
+    line((&n_maps2[0 as usize]) as u64, after)
+    var grew: u64 = 0
+    if after > before {
+        grew = 1
+    }
+    line((&n_grew[0 as usize]) as u64, grew)
+    num_to_path(pid, (&pre[0 as usize]) as u64,
+        (&s_cmd[0 as usize]) as u64, (&path[0 as usize]) as u64)
+    line((&n_cmd[0 as usize]) as u64,
+        read_all((&path[0 as usize]) as u64, (&text[0 as usize]) as u64, 2200))
+    // Die eigenen Deskriptoren, gezaehlt ueber `getdents64` auf
+    // /proc/<pid>/fd. Drei sind es mindestens: 0, 1 und 2.
+    var s_fd: [u8; 4] = "/fd\0"
+    num_to_path(pid, (&pre[0 as usize]) as u64,
+        (&s_fd[0 as usize]) as u64, (&path[0 as usize]) as u64)
+    line((&n_fdn[0 as usize]) as u64,
+        dir_count((&path[0 as usize]) as u64))
+}
+
+// Wie viele Eintraege hat dieses Verzeichnis (ohne `.` und `..`)?
+fn dir_count(path: u64) -> u64 {
+    var buf: [u8; 1024] = [0 as u8; 1024]
+    let fd: u64 = ulib.sys(SYS_OPEN, path, O_RDONLY, 0)
+    if ulib.bad(fd) {
+        return 0xFFFFFFFF
+    }
+    var n: u64 = 0
+    var going: bool = true
+    while going {
+        let got: u64 = ulib.sys(SYS_GETDENTS64, fd,
+            (&buf[0 as usize]) as u64, 1024)
+        if ulib.bad(got) || got == 0 {
+            going = false
+        } else {
+            var at: u64 = 0
+            while at < got {
+                let reclen: u64 = __mmio_read16(
+                    (((&buf[0 as usize]) as u64) + at + 16) as *mut u16) as u64
+                if reclen == 0 {
+                    at = got
+                } else {
+                    let name: u64 = ((&buf[0 as usize]) as u64) + at + 19
+                    var dot: bool = false
+                    if byte_at(name, 0) == 46 {
+                        if byte_at(name, 1) == 0 {
+                            dot = true
+                        }
+                        if byte_at(name, 1) == 46 && byte_at(name, 2) == 0 {
+                            dot = true
+                        }
+                    }
+                    if !dot {
+                        n = n + 1
+                    }
+                    at = at + reclen
+                }
+            }
+        }
+    }
+    ulib.sys(SYS_CLOSE, fd, 0, 0)
+    return n
+}
+
+// ================================================== 5. /dev
+
+fn section_dev() {
+    var n_null: [u8; 10] = "null_read\0"
+    var n_nullw: [u8; 11] = "null_write\0"
+    var n_zero: [u8; 15] = "zero_all_zero\0\0"
+    var n_rand: [u8; 12] = "rand_varies\0"
+    var n_hdb: [u8; 12] = "hdb_boot_ok\0"
+    var n_size: [u8; 9] = "hdb_size\0"
+    var n_mode: [u8; 9] = "hdb_mode\0"
+    var n_nmode: [u8; 10] = "null_mode\0"
+    var p_null: [u8; 10] = "/dev/null\0"
+    var p_zero: [u8; 10] = "/dev/zero\0"
+    var p_rand: [u8; 13] = "/dev/urandom\0"
+    var p_hdb: [u8; 9] = "/dev/hdb\0"
+    var buf: [u8; 600] = [0 as u8; 600]
+    var st: [u8; 160] = [0 as u8; 160]
+    let a: u64 = ulib.sys(SYS_OPEN, (&p_null[0 as usize]) as u64, O_RDWR, 0)
+    line((&n_null[0 as usize]) as u64,
+        ulib.sys(SYS_READ, a, (&buf[0 as usize]) as u64, 64))
+    line((&n_nullw[0 as usize]) as u64,
+        ulib.sys(SYS_WRITE, a, (&buf[0 as usize]) as u64, 64))
+    ulib.sys(SYS_CLOSE, a, 0, 0)
+    var i: u64 = 0
+    while i < 128 {
+        __mmio_write8((((&buf[0 as usize]) as u64) + i) as *mut u8, 0x5A as u8)
+        i = i + 1
+    }
+    let b: u64 = ulib.sys(SYS_OPEN, (&p_zero[0 as usize]) as u64, O_RDONLY, 0)
+    ulib.sys(SYS_READ, b, (&buf[0 as usize]) as u64, 128)
+    ulib.sys(SYS_CLOSE, b, 0, 0)
+    var allzero: u64 = 1
+    i = 0
+    while i < 128 {
+        if byte_at((&buf[0 as usize]) as u64, i) != 0 {
+            allzero = 0
+        }
+        i = i + 1
+    }
+    line((&n_zero[0 as usize]) as u64, allzero)
+    // /dev/urandom: zwei Puffer hintereinander, die verschieden sein
+    // muessen. Ein Geraet, das immer dasselbe liefert, besteht jede
+    // Pruefung, die nur "es kamen Oktette" misst.
+    var r1: [u8; 64] = [0 as u8; 64]
+    var r2: [u8; 64] = [0 as u8; 64]
+    let c: u64 = ulib.sys(SYS_OPEN, (&p_rand[0 as usize]) as u64, O_RDONLY, 0)
+    ulib.sys(SYS_READ, c, (&r1[0 as usize]) as u64, 64)
+    ulib.sys(SYS_READ, c, (&r2[0 as usize]) as u64, 64)
+    ulib.sys(SYS_CLOSE, c, 0, 0)
+    var differ: u64 = 0
+    i = 0
+    while i < 64 {
+        if byte_at((&r1[0 as usize]) as u64, i)
+            != byte_at((&r2[0 as usize]) as u64, i) {
+            differ = differ + 1
+        }
+        i = i + 1
+    }
+    line((&n_rand[0 as usize]) as u64, differ)
+    // DAS BLOCKGERAET. Der erste Sektor der zweiten Platte ist ihr
+    // Bootsatz, und dessen letzte zwei Oktette sind 0x55 0xAA -- das
+    // steht dort, weil `sfdisk` auf dem WIRT es hineingeschrieben hat.
+    let d: u64 = ulib.sys(SYS_OPEN, (&p_hdb[0 as usize]) as u64, O_RDONLY, 0)
+    var got: u64 = 0
+    if !ulib.bad(d) {
+        got = ulib.sys(SYS_READ, d, (&buf[0 as usize]) as u64, 512)
+    }
+    var sig: u64 = 0
+    if got == 512 {
+        if byte_at((&buf[0 as usize]) as u64, 510) == 0x55 {
+            if byte_at((&buf[0 as usize]) as u64, 511) == 0xAA {
+                sig = 1
+            }
+        }
+    }
+    line((&n_hdb[0 as usize]) as u64, sig)
+    line((&n_size[0 as usize]) as u64, ulib.sys(SYS_LSEEK, d, 0, SEEK_END))
+    ulib.sys(SYS_CLOSE, d, 0, 0)
+    ulib.sys(SYS_STAT, (&p_hdb[0 as usize]) as u64,
+        (&st[0 as usize]) as u64, 0)
+    var isblk: u64 = 0
+    if (dword_at((&st[0 as usize]) as u64, ST_MODE) & S_IFMT) == S_IFBLK {
+        isblk = 1
+    }
+    line((&n_mode[0 as usize]) as u64, isblk)
+    ulib.sys(SYS_STAT, (&p_null[0 as usize]) as u64,
+        (&st[0 as usize]) as u64, 0)
+    var ischr: u64 = 0
+    if (dword_at((&st[0 as usize]) as u64, ST_MODE) & S_IFMT) == S_IFCHR {
+        ischr = 1
+    }
+    line((&n_nmode[0 as usize]) as u64, ischr)
+}
+
+// ========================================= 6. was nicht gehen darf
+
+fn section_refuse() {
+    var n_pw: [u8; 15] = "proc_write_err\0"
+    var n_pm: [u8; 15] = "proc_mkdir_err\0"
+    var n_pu: [u8; 16] = "proc_unlink_err\0"
+    var n_dc: [u8; 16] = "dev_create_err\0\0"
+    var n_xd: [u8; 12] = "xdev_rename\0"
+    var n_rn: [u8; 10] = "fat_renam\0"
+    var n_rn2: [u8; 14] = "fat_renam_ok\0\0"
+    var n_ro: [u8; 15] = "fat_write_back\0"
+    var p_up: [u8; 13] = "/proc/uptime\0"
+    var p_pd: [u8; 11] = "/proc/neu\0\0"
+    var p_dev: [u8; 13] = "/dev/neu.txt\0"
+    var p_a: [u8; 15] = "/mnt/hello.txt\0"
+    var p_b: [u8; 14] = "/tmpname.txt\0\0"
+    var p_c: [u8; 16] = "/mnt/umben.txt\0\0"
+    var buf: [u8; 64] = [0 as u8; 64]
+    var st: [u8; 160] = [0 as u8; 160]
+    let fd: u64 = ulib.sys(SYS_OPEN, (&p_up[0 as usize]) as u64, O_WRONLY, 0)
+    if ulib.bad(fd) {
+        line((&n_pw[0 as usize]) as u64, code(fd))
+    } else {
+        line((&n_pw[0 as usize]) as u64,
+            code(ulib.sys(SYS_WRITE, fd, (&buf[0 as usize]) as u64, 4)))
+        ulib.sys(SYS_CLOSE, fd, 0, 0)
+    }
+    line((&n_pm[0 as usize]) as u64,
+        code(ulib.sys(SYS_MKDIR, (&p_pd[0 as usize]) as u64, 0, 0)))
+    line((&n_pu[0 as usize]) as u64,
+        code(ulib.sys(SYS_UNLINK, (&p_up[0 as usize]) as u64, 0, 0)))
+    line((&n_dc[0 as usize]) as u64,
+        code(ulib.sys(SYS_OPEN, (&p_dev[0 as usize]) as u64,
+            O_WRONLY | O_CREAT, 0)))
+    // UMBENENNEN UEBER EINE EINHAENGEGRENZE GEHT NICHT. -EXDEV, und
+    // `mv` weiss, was das heisst.
+    line((&n_xd[0 as usize]) as u64,
+        code(ulib.sys(SYS_RENAME, (&p_a[0 as usize]) as u64,
+            (&p_b[0 as usize]) as u64, 0)))
+    // Innerhalb DESSELBEN Dateisystems geht es.
+    line((&n_rn[0 as usize]) as u64,
+        code(ulib.sys(SYS_RENAME, (&p_a[0 as usize]) as u64,
+            (&p_c[0 as usize]) as u64, 0)))
+    line((&n_rn2[0 as usize]) as u64,
+        code(ulib.sys(SYS_STAT, (&p_c[0 as usize]) as u64,
+            (&st[0 as usize]) as u64, 0)))
+    // ...und zurueck, damit der naechste Lauf dieselbe Platte sieht.
+    line((&n_ro[0 as usize]) as u64,
+        code(ulib.sys(SYS_RENAME, (&p_c[0 as usize]) as u64,
+            (&p_a[0 as usize]) as u64, 0)))
+}
+
+// ===================================================== der Einstieg
+
+fn u_start(args: u64) -> u64 {
+    var head: [u8; 44] = "k14: Runde K14 -- VFS und fremde Systeme\0\0\0\0"
+    ulib.say((&head[0 as usize]) as u64)
+    ulib.nl()
+    section_table()
+    section_cross()
+    section_busy()
+    section_proc()
+    section_dev()
+    section_refuse()
+    var done: [u8; 5] = "done\0"
+    line((&done[0 as usize]) as u64, 1)
+    return 0
+}

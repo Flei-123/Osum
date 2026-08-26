@@ -1,0 +1,498 @@
+// kernel/part.fi -- Runde K14: die Partitionstafel, MBR und GPT.
+//
+// EIN DATEISYSTEM LIEGT AUF EINER PLATTE NICHT AM ANFANG. Auf jeder
+// Platte, die Linux oder Windows beschrieben hat, steht in Block 0
+// keine Superblockkennung, sondern eine TAFEL, und das Dateisystem
+// faengt irgendwo dahinter an. Osum hat bis zu dieser Runde immer bei
+// Block 0 nachgesehen -- und deshalb war jede fremde Platte fuer diesen
+// Kernel leer, auch wenn drei Dateisysteme darauf lagen.
+//
+// Zwei Formate, und das zweite steckt IM ersten:
+//
+//   MBR   Der Blocksatz von 1983. Block 0, Oktett 510/511 traegt
+//         0x55 0xAA, und ab Oktett 446 stehen vier Eintraege zu 16
+//         Oktetten: Zustand, drei Oktette Zylinder/Kopf/Sektor (tot
+//         seit 1996), ein TYP-Oktett, noch einmal drei tote Oktette,
+//         der erste Block als 32-Bit-Zahl und die Zahl der Bloecke.
+//         Alles kleinendig. Mehr ist es nicht.
+//   GPT   Die Tafel von 1998, und sie meldet sich IM MBR an: ein
+//         einziger Eintrag mit dem Typ 0xEE, der die ganze Platte
+//         belegt, damit ein Werkzeug von 1983 die Platte fuer voll
+//         haelt und nicht daraufschreibt ("protective MBR"). Der
+//         eigentliche Kopf steht in Block 1 und faengt mit den acht
+//         Oktetten "EFI PART" an. Er nennt den Block, ab dem die
+//         Eintraege liegen, ihre Zahl und ihre Groesse -- und er traegt
+//         ZWEI Pruefsummen: eine ueber sich selbst und eine ueber die
+//         ganze Eintragstafel.
+//
+// DIE ZWEI PRUEFSUMMEN WERDEN GERECHNET UND NICHT UEBERSPRUNGEN. Das
+// ist der Unterschied zwischen "die Oktette sehen aus wie eine Tafel"
+// und "es IST die Tafel, die ein anderes System geschrieben hat": wer
+// ein Oktett darin aendert, faellt hier durch. `tools/k14/run.sh`
+// dreht genau dafuer ein Bit im Kopf um und verlangt, dass Osum die
+// Platte danach nicht mehr liest.
+//
+// CRC32 kommt aus `bootmod.fi` -- dieselbe Rechnung, die Runde K10 an
+// das Boot-Modul haengt (IEEE 802.3, reflektiert, 0xEDB88320). Sie wird
+// hier fortgeschrieben statt gesammelt: die Eintragstafel ist bis zu
+// 16 KiB gross, die Platte gibt sie in Sektoren her, und der ganze
+// Datenbereich dieser Runde sind drei Seiten.
+//
+// WO DER ZUSTAND LIEGT. Wie ueberall in diesem Kernel in der
+// uebergebenen Datenregion: `kstate.K14_OFF + PART_OFF`, sechzehn
+// Eintraege zu 48 Oktetten. Firn Stufe 0 hat keine globalen
+// veraenderlichen Variablen.
+
+import kstate
+import serial
+import blk
+import bootmod
+
+export {
+    scan, count, start, blocks, kind, scheme, dev_of, index_of, find_kind,
+    SCH_NONE, SCH_MBR, SCH_GPT,
+    T_OTHER, T_FAT32, T_EFI, T_LINUX, T_BASIC,
+    MAX_PARTS
+}
+
+// ------------------------------------------------------------ die Tafel
+
+const MAX_PARTS: u64 = 16
+const PART_OFF: u64 = 0x440 // in kstate.K14_OFF
+const PART_BYTES: u64 = 48
+
+const P_USED: u64 = 0
+const P_START: u64 = 8
+const P_COUNT: u64 = 16
+const P_KIND: u64 = 24
+const P_SCHEME: u64 = 32
+const P_DEV: u64 = 40
+
+// Der Sektorpuffer dieses Moduls. Ein Kernelstapel ist 8 KiB; ein
+// Block von 512 Oktetten darauf waere zu verschmerzen, zwei
+// gleichzeitig (Kopf und Eintragstafel) nicht mehr.
+const SECT_OFF: u64 = 0xE00 // in kstate.K14_OFF, 512 Oktette
+
+const SCH_NONE: u64 = 0
+const SCH_MBR: u64 = 1
+const SCH_GPT: u64 = 2
+
+// Was in der Tafel als TYP steht. Die Zahlen sind Osums eigene -- MBR
+// nennt ein Oktett, GPT eine 16 Oktette lange Kennung, und beide
+// bedeuten dasselbe Dutzend Dinge.
+const T_OTHER: u64 = 0
+const T_FAT32: u64 = 1
+const T_EFI: u64 = 2
+const T_LINUX: u64 = 3
+const T_BASIC: u64 = 4 // GPT: "Microsoft basic data" -- meist FAT/NTFS
+
+const BS: u64 = 512
+
+fn at(state: u64, i: u64) -> u64 {
+    return state + kstate.K14_OFF + PART_OFF + i * PART_BYTES
+}
+
+fn sect(state: u64) -> u64 {
+    return state + kstate.K14_OFF + SECT_OFF
+}
+
+fn get(state: u64, i: u64, field: u64) -> u64 {
+    if i >= MAX_PARTS {
+        return 0
+    }
+    return __mmio_read64((at(state, i) + field) as *mut u64)
+}
+
+fn put(state: u64, i: u64, field: u64, v: u64) {
+    if i >= MAX_PARTS {
+        return
+    }
+    __mmio_write64((at(state, i) + field) as *mut u64, v)
+}
+
+fn count(state: u64) -> u64 {
+    var n: u64 = 0
+    var i: u64 = 0
+    while i < MAX_PARTS {
+        if get(state, i, P_USED) != 0 {
+            n = n + 1
+        }
+        i = i + 1
+    }
+    return n
+}
+
+fn start(state: u64, i: u64) -> u64 {
+    return get(state, i, P_START)
+}
+
+fn blocks(state: u64, i: u64) -> u64 {
+    return get(state, i, P_COUNT)
+}
+
+fn kind(state: u64, i: u64) -> u64 {
+    return get(state, i, P_KIND)
+}
+
+fn scheme(state: u64, i: u64) -> u64 {
+    return get(state, i, P_SCHEME)
+}
+
+fn dev_of(state: u64, i: u64) -> u64 {
+    return get(state, i, P_DEV)
+}
+
+fn index_of(state: u64, i: u64) -> u64 {
+    if get(state, i, P_USED) == 0 {
+        return 0
+    }
+    return i + 1
+}
+
+// Die erste Partition dieser Art auf diesem Geraet, oder MAX_PARTS.
+fn find_kind(state: u64, dev: u64, want: u64) -> u64 {
+    var i: u64 = 0
+    while i < MAX_PARTS {
+        if get(state, i, P_USED) != 0 {
+            if get(state, i, P_DEV) == dev && get(state, i, P_KIND) == want {
+                return i
+            }
+        }
+        i = i + 1
+    }
+    return MAX_PARTS
+}
+
+// ---------------------------------------------------- kleine Handgriffe
+
+fn le16(p: u64) -> u64 {
+    return kstate.get8(p) | (kstate.get8(p + 1) << 8)
+}
+
+fn le32(p: u64) -> u64 {
+    return le16(p) | (le16(p + 2) << 16)
+}
+
+fn le64(p: u64) -> u64 {
+    return le32(p) | (le32(p + 4) << 32)
+}
+
+fn clear(state: u64) {
+    var i: u64 = 0
+    while i < MAX_PARTS {
+        var k: u64 = 0
+        while k < PART_BYTES {
+            kstate.set8(at(state, i) + k, 0 as u8)
+            k = k + 1
+        }
+        i = i + 1
+    }
+}
+
+fn add(state: u64, dev: u64, s: u64, n: u64, k: u64, sch: u64) -> bool {
+    var i: u64 = 0
+    while i < MAX_PARTS {
+        if get(state, i, P_USED) == 0 {
+            put(state, i, P_USED, 1)
+            put(state, i, P_START, s)
+            put(state, i, P_COUNT, n)
+            put(state, i, P_KIND, k)
+            put(state, i, P_SCHEME, sch)
+            put(state, i, P_DEV, dev)
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+// Das Typoktett des MBR, uebersetzt. Die Liste ist die kurze: was
+// dieser Kernel unterscheiden koennen muss und keine Zeile mehr.
+fn mbr_kind(t: u64) -> u64 {
+    if t == 0x0B || t == 0x0C {
+        return T_FAT32 // FAT32 (CHS) und FAT32 (LBA)
+    }
+    if t == 0xEF {
+        return T_EFI
+    }
+    if t == 0x83 {
+        return T_LINUX
+    }
+    return T_OTHER
+}
+
+// ------------------------------------------------------------ der MBR
+
+// Rueckgabe: 0 = keine Tafel, 1 = MBR gelesen, 2 = das ist eine GPT
+// (Schutz-MBR mit dem einen Eintrag 0xEE).
+fn read_mbr(state: u64, dev: u64) -> u64 {
+    let b: u64 = sect(state)
+    if !blk.read_on(state, dev, 0, b) {
+        return 0
+    }
+    if kstate.get8(b + 510) != 0x55 || kstate.get8(b + 511) != 0xAA {
+        return 0
+    }
+    var protective: bool = false
+    var i: u64 = 0
+    while i < 4 {
+        let e: u64 = b + 446 + i * 16
+        let t: u64 = kstate.get8(e + 4)
+        if t == 0xEE {
+            protective = true
+        }
+        i = i + 1
+    }
+    if protective {
+        return 2
+    }
+    i = 0
+    var found: u64 = 0
+    while i < 4 {
+        let e: u64 = b + 446 + i * 16
+        let t: u64 = kstate.get8(e + 4)
+        let s: u64 = le32(e + 8)
+        let n: u64 = le32(e + 12)
+        if t != 0 && n != 0 {
+            if add(state, dev, s, n, mbr_kind(t), SCH_MBR) {
+                found = found + 1
+            }
+        }
+        i = i + 1
+    }
+    return 1
+}
+
+// ------------------------------------------------------------ die GPT
+
+fn sig_ok(p: u64) -> bool {
+    var want: [u8; 9] = "EFI PART\0"
+    var i: u64 = 0
+    while i < 8 {
+        if kstate.get8(p + i) != (want[i as usize] as u64) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+// Die Pruefsumme des Kopfes. Sie steht IM Kopf, also wird sie ueber
+// einen Kopf gerechnet, in dem an ihrer Stelle vier Nullen stehen --
+// das ist die Vorschrift, und wer sie ueberspringt, prueft nichts.
+fn header_crc(state: u64, p: u64, size: u64) -> u64 {
+    let save: u64 = le32(p + 16)
+    var i: u64 = 0
+    while i < 4 {
+        kstate.set8(p + 16 + i, 0 as u8)
+        i = i + 1
+    }
+    let got: u64 = bootmod.crc32(p, size)
+    i = 0
+    while i < 4 {
+        kstate.set8(p + 16 + i, ((save >> (i * 8)) & 0xFF) as u8)
+        i = i + 1
+    }
+    return got
+}
+
+// Ist diese 16 Oktette lange Kennung die von "Microsoft basic data"?
+// 0xEBD0A0A2 0xB9E5 0x4433 87C0-68B6B72699C7, die ersten drei Felder
+// kleinendig, die letzten beiden grossendig -- so steht ein GUID auf
+// einer Platte, und deshalb wird er hier Oktett fuer Oktett verglichen
+// und nicht als Zahl.
+fn guid_is(p: u64, tafel: u64) -> bool {
+    var i: u64 = 0
+    while i < 16 {
+        if kstate.get8(p + i) != kstate.get8(tafel + i) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn gpt_kind(p: u64) -> u64 {
+    var basic: [u8; 16] = [0 as u8; 16]
+    basic[0 as usize] = 0xA2 as u8
+    basic[1 as usize] = 0xA0 as u8
+    basic[2 as usize] = 0xD0 as u8
+    basic[3 as usize] = 0xEB as u8
+    basic[4 as usize] = 0xE5 as u8
+    basic[5 as usize] = 0xB9 as u8
+    basic[6 as usize] = 0x33 as u8
+    basic[7 as usize] = 0x44 as u8
+    basic[8 as usize] = 0x87 as u8
+    basic[9 as usize] = 0xC0 as u8
+    basic[10 as usize] = 0x68 as u8
+    basic[11 as usize] = 0xB6 as u8
+    basic[12 as usize] = 0xB7 as u8
+    basic[13 as usize] = 0x26 as u8
+    basic[14 as usize] = 0x99 as u8
+    basic[15 as usize] = 0xC7 as u8
+    var esp: [u8; 16] = [0 as u8; 16]
+    esp[0 as usize] = 0x28 as u8
+    esp[1 as usize] = 0x73 as u8
+    esp[2 as usize] = 0x2A as u8
+    esp[3 as usize] = 0xC1 as u8
+    esp[4 as usize] = 0x1F as u8
+    esp[5 as usize] = 0xF8 as u8
+    esp[6 as usize] = 0xD2 as u8
+    esp[7 as usize] = 0x11 as u8
+    esp[8 as usize] = 0xBA as u8
+    esp[9 as usize] = 0x4B as u8
+    esp[10 as usize] = 0x00 as u8
+    esp[11 as usize] = 0xA0 as u8
+    esp[12 as usize] = 0xC9 as u8
+    esp[13 as usize] = 0x3E as u8
+    esp[14 as usize] = 0xC9 as u8
+    esp[15 as usize] = 0x3B as u8
+    var linux: [u8; 16] = [0 as u8; 16]
+    linux[0 as usize] = 0xAF as u8
+    linux[1 as usize] = 0x3D as u8
+    linux[2 as usize] = 0xC6 as u8
+    linux[3 as usize] = 0x0F as u8
+    linux[4 as usize] = 0x83 as u8
+    linux[5 as usize] = 0x84 as u8
+    linux[6 as usize] = 0x72 as u8
+    linux[7 as usize] = 0x47 as u8
+    linux[8 as usize] = 0x8E as u8
+    linux[9 as usize] = 0x79 as u8
+    linux[10 as usize] = 0x3D as u8
+    linux[11 as usize] = 0x69 as u8
+    linux[12 as usize] = 0xD8 as u8
+    linux[13 as usize] = 0x47 as u8
+    linux[14 as usize] = 0x7D as u8
+    linux[15 as usize] = 0xE4 as u8
+    if guid_is(p, (&basic[0]) as u64) {
+        return T_BASIC
+    }
+    if guid_is(p, (&esp[0]) as u64) {
+        return T_EFI
+    }
+    if guid_is(p, (&linux[0]) as u64) {
+        return T_LINUX
+    }
+    return T_OTHER
+}
+
+fn all_zero(p: u64, n: u64) -> bool {
+    var i: u64 = 0
+    while i < n {
+        if kstate.get8(p + i) != 0 {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn read_gpt(state: u64, dev: u64) -> u64 {
+    var s_bad: [u8; 24] = "part: gpt crc mismatch\0\0"
+    let b: u64 = sect(state)
+    if !blk.read_on(state, dev, 1, b) {
+        return 0
+    }
+    if !sig_ok(b) {
+        return 0
+    }
+    var hsize: u64 = le32(b + 12)
+    if hsize < 92 || hsize > BS {
+        return 0
+    }
+    let want: u64 = le32(b + 16)
+    if header_crc(state, b, hsize) != want {
+        serial.puts((&s_bad[0]) as u64)
+        serial.nl()
+        return 0
+    }
+    let entry_lba: u64 = le64(b + 72)
+    var n_entries: u64 = le32(b + 80)
+    let esize: u64 = le32(b + 84)
+    let want_arr: u64 = le32(b + 88)
+    if esize < 128 || esize > BS {
+        return 0
+    }
+    if n_entries == 0 || n_entries > 128 {
+        n_entries = 128
+    }
+    // 1. Die Pruefsumme der ganzen Eintragstafel, Sektor fuer Sektor.
+    let per: u64 = BS / esize
+    var total: u64 = n_entries * esize
+    var crc: u64 = bootmod.crc32_start()
+    var done: u64 = 0
+    var lba: u64 = entry_lba
+    var okay: bool = true
+    while done < total && okay {
+        if !blk.read_on(state, dev, lba, b) {
+            okay = false
+        } else {
+            var chunk: u64 = BS
+            if total - done < BS {
+                chunk = total - done
+            }
+            crc = bootmod.crc32_feed(crc, b, chunk)
+            done = done + chunk
+            lba = lba + 1
+        }
+    }
+    if !okay {
+        return 0
+    }
+    if bootmod.crc32_end(crc) != want_arr {
+        serial.puts((&s_bad[0]) as u64)
+        serial.nl()
+        return 0
+    }
+    // 2. Erst jetzt werden die Eintraege geglaubt.
+    done = 0
+    lba = entry_lba
+    var idx: u64 = 0
+    while idx < n_entries {
+        let in_sector: u64 = idx % per
+        if in_sector == 0 {
+            if !blk.read_on(state, dev, lba + idx / per, b) {
+                return count(state)
+            }
+        }
+        let e: u64 = b + in_sector * esize
+        if !all_zero(e, 16) {
+            let first: u64 = le64(e + 32)
+            let last: u64 = le64(e + 40)
+            if last >= first {
+                add(state, dev, first, last - first + 1, gpt_kind(e), SCH_GPT)
+            }
+        }
+        idx = idx + 1
+    }
+    return count(state)
+}
+
+// ------------------------------------------------------------ der Einstieg
+
+// Die Tafel eines Geraets lesen. Rueckgabe: die Zahl der gefundenen
+// Partitionen. Die Tafel wird VORHER geleert -- zweimal `scan` auf
+// derselben Platte darf nicht zwei Saetze Eintraege ergeben.
+fn scan(state: u64, dev: u64) -> u64 {
+    var s_m: [u8; 12] = "part: mbr=\0\0"
+    var s_g: [u8; 12] = "  gpt=\0\0\0\0\0\0"
+    var s_n: [u8; 10] = "  parts=\0\0"
+    clear(state)
+    let what: u64 = read_mbr(state, dev)
+    var n: u64 = 0
+    var gpt: u64 = 0
+    if what == 2 {
+        gpt = 1
+        n = read_gpt(state, dev)
+    } else {
+        n = count(state)
+    }
+    serial.puts((&s_m[0]) as u64)
+    serial.dec(what)
+    serial.puts((&s_g[0]) as u64)
+    serial.dec(gpt)
+    serial.puts((&s_n[0]) as u64)
+    serial.dec(n)
+    serial.nl()
+    return n
+}

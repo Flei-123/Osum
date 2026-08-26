@@ -63,6 +63,18 @@ import inet
 import perm
 import power
 
+// RUNDE K14: die VFS-Schicht. `vfs` zieht die Treiber mit herein;
+// `mnt` ist die Einhaengetafel, `devfs` wird an genau einer Stelle
+// unmittelbar gebraucht (ein Geraet, das ein TERMINAL oder der
+// RAHMENPUFFER ist, bekommt den Deskriptor, den es seit Runde K7/K9
+// bekommt -- und nicht einen neuen, der dasselbe noch einmal koennte).
+import vfs
+import mnt
+import vfsops
+import devfs
+import part
+import blk
+
 export {
     entry, neg, STAT_BYTES, DIRENT_HEAD,
     O_WRONLY, O_RDWR, O_CREAT, O_EXCL, O_TRUNC, O_APPEND, O_DIRECTORY,
@@ -82,6 +94,7 @@ export {
     SYS_OSUM_PTY, SYS_OSUM_TTYINFO, SYS_OSUM_SIGINFO,
     SYS_VM_CREATE, SYS_VM_RUN, SYS_VM_STAT, SYS_VM_KILL, SYS_VM_VALUE,
     SYS_OSUM_SETENV, SYS_OSUM_MOUNT,
+    SYS_MOUNT, SYS_UMOUNT2, SYS_RENAME, SYS_OSUM_MNTSTAT,
     CAP_BASE, CAP_VERSION, CAP_READ, CAP_WRITE, CAP_CLOSE, CAP_DUP,
     CAP_INSPECT, CAP_TRANSFER, CAP_COUNT, CAP_MAXNR,
     SYS_SOCKET, SYS_CONNECT, SYS_ACCEPT, SYS_SENDTO, SYS_RECVFROM,
@@ -437,6 +450,51 @@ const UI_UMASK: u64 = 15
 const UI_NOPERM: u64 = 16
 const UI_TASKS: u64 = 17
 const UI_COUNT: u64 = 18
+// ============================================================ RUNDE K14
+//
+// DREI LINUX-NUMMERN UND EINE EIGENE, und die Aufteilung folgt Regel 1
+// der Karte oben: was Linux hat, hat Linux' Nummer.
+//
+//   165  mount(quelle, ziel, art, flaggen, daten)
+//   166  umount2(ziel, flaggen)
+//    82  rename(von, nach)
+//
+// Die drei GIBT es bei Linux, also waere jede andere Zahl eine
+// Uebersetzungstabelle. `SYS_OSUM_MOUNT` (1401) aus Runde K11 bleibt
+// daneben stehen und tut genau, was es tat -- der Auftrag dieser Runde
+// sagt ausdruecklich, dass nichts entfernt wird, bevor der Ersatz
+// gemessen ist.
+//
+// Und eine eigene, aus dem Hunderterblock, den diese Runde zugeteilt
+// bekommen hat (1700..1799):
+//
+//   1700  osum_mntstat(index, feld) -- ein Feld eines Eintrags der
+//         Einhaengetafel. Dieselbe Bauart wie SYS_OSUM_PSTAT von Runde
+//         K6: eine Zahl je Aufruf, kein Puffer, kein Zeiger in den
+//         Kernel. Damit kann ein Programm in Ring 3 die Tafel lesen,
+//         ohne dass /proc dafuer stehen muss -- und der Testlauf kann
+//         beide Wege gegeneinander halten.
+const SYS_MOUNT: u64 = 165
+const SYS_UMOUNT2: u64 = 166
+const SYS_RENAME: u64 = 82
+const SYS_OSUM_MNTSTAT: u64 = 1700
+
+// Die Felder von `osum_mntstat`.
+const MS_USED: u64 = 0
+const MS_TYPE: u64 = 1
+const MS_DEV: u64 = 2
+const MS_FIRST: u64 = 3
+const MS_BLOCKS: u64 = 4
+const MS_FLAGS: u64 = 5
+const MS_OPENS: u64 = 6
+const MS_COUNT: u64 = 7
+const MS_PATHLEN: u64 = 8
+const MS_PATHCH: u64 = 100 // 100 + i = das i-te Oktett des Pfades
+
+// Die Schalter von `mount`. MS_RDONLY ist Linux' Bit 0; alles andere
+// kennt dieser Kernel nicht und weist es ab, statt es zu ueberlesen.
+const MNT_RDONLY: u64 = 1
+const MNT_KNOWN: u64 = 1
 
 // ------------------------------------------------------------ the frame
 
@@ -487,6 +545,10 @@ const MAP_ANONYMOUS: u64 = 32
 const S_IFDIR: u64 = 16384 // 0o40000
 const S_IFREG: u64 = 32768 // 0o100000
 const S_IFCHR: u64 = 8192 // 0o20000
+// ROUNDE K14: ein BLOCKGERAET. /dev/hda ist keines von den drei
+// Dingen, die dieser Kernel bisher kannte, und `ls -l` unterscheidet
+// sie an genau diesem Feld.
+const S_IFBLK: u64 = 24576 // 0o60000
 const S_IFIFO: u64 = 4096 // 0o10000
 
 const DT_DIR: u64 = 4
@@ -715,6 +777,19 @@ fn dispatch(number: u64, frame: u64, state: u64) -> u64 {
     }
     if number == SYS_OSUM_MOUNT {
         return do_mount(state, a0)
+    }
+    // ---------------------------------------------------- RUNDE K14
+    if number == SYS_MOUNT {
+        return do_vfs_mount(state, me, a0, a1, a2, a3)
+    }
+    if number == SYS_UMOUNT2 {
+        return do_vfs_umount(state, me, a0)
+    }
+    if number == SYS_RENAME {
+        return do_rename(state, me, a0, a1)
+    }
+    if number == SYS_OSUM_MNTSTAT {
+        return do_mntstat(state, a0, a1)
     }
     // ROUND K6.
     if number == SYS_CHDIR {
@@ -1146,6 +1221,13 @@ fn write_of(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
     if kind == file.K_SOCK {
         return sock_write(state, me, of, buf, len)
     }
+    // ROUNDE K14: eine Datei auf einem eingehaengten Dateisystem.
+    if kind == file.K_VFILE {
+        return vfs_write(state, me, of, buf, len)
+    }
+    if kind == file.K_VDIR {
+        return neg(errno.E_ISDIR)
+    }
     if kind != file.K_FILE {
         return neg(errno.E_BADF)
     }
@@ -1208,8 +1290,12 @@ fn read_of(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
     if kind == file.K_SOCK {
         return sock_read(state, me, of, buf, len)
     }
-    if kind == file.K_DIR {
+    if kind == file.K_DIR || kind == file.K_VDIR {
         return neg(errno.E_ISDIR)
+    }
+    // ROUNDE K14.
+    if kind == file.K_VFILE {
+        return vfs_read(state, me, of, buf, len)
     }
     if kind != file.K_FILE {
         return neg(errno.E_BADF)
@@ -1691,6 +1777,169 @@ fn dir_allowed(state: u64, me: u64, path: u64, ino: u64) -> bool {
     return perm.may(state, me, dir, dwant)
 }
 
+// =========================================== RUNDE K14: lesen, schreiben
+//
+// Derselbe Weg, den `read_of` und `write_of` fuer eine OFS-Datei gehen
+// -- ueber den Zwischenpuffer im Kerneldatenbereich, damit KEIN
+// Dateisystem je eine Adresse eines Prozesses zu sehen bekommt. Das
+// ist Regel 3 aus dem Kopf dieser Datei, und sie gilt fuer einen
+// fremden Treiber erst recht: FAT32 rechnet mit Zahlen aus einem
+// Bootsektor, den irgendjemand geschrieben hat.
+fn vfs_read(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
+    if !readable(state, of) {
+        return neg(errno.E_BADF)
+    }
+    let m: u64 = file.open_mnt(state, of)
+    let node: u64 = file.open_ino(state, of)
+    let off: u64 = file.open_off(state, of)
+    let bounce: u64 = state + kstate.BLOCK_OFF
+    var want: u64 = len
+    if want > kstate.BLOCK_MAX {
+        want = kstate.BLOCK_MAX
+    }
+    let n: u64 = vfs.v_read(state, m, node, off, bounce, want)
+    if !copy_out(state, me, buf, bounce, n) {
+        return neg(errno.E_FAULT)
+    }
+    file.open_set_off(state, of, off + n)
+    return n
+}
+
+fn vfs_write(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
+    if !writable(state, of) {
+        return neg(errno.E_BADF)
+    }
+    let m: u64 = file.open_mnt(state, of)
+    let node: u64 = file.open_ino(state, of)
+    var off: u64 = file.open_off(state, of)
+    if (file.open_flags(state, of) & O_APPEND) != 0 {
+        off = vfs.v_attr(state, m, node, vfsops.A_SIZE)
+    }
+    let bounce: u64 = state + kstate.BLOCK_OFF
+    var want: u64 = len
+    if want > kstate.BLOCK_MAX {
+        want = kstate.BLOCK_MAX
+    }
+    if !copy_in(state, me, bounce, buf, want) {
+        return neg(errno.E_FAULT)
+    }
+    let n: u64 = vfs.v_write(state, m, node, off, bounce, want)
+    if errno.is_error(n) {
+        return n
+    }
+    if n == 0 && want != 0 {
+        return neg(errno.E_NOSPC)
+    }
+    file.open_set_off(state, of, off + n)
+    return n
+}
+
+// ================================================== RUNDE K14: oeffnen
+//
+// Ein Name auf einem eingehaengten Dateisystem. Alles, was hier
+// passiert, geht ueber `vfs.*` -- der Name `fs.` kommt nicht vor, und
+// das ist die Zusage: OFS ist hier kein Sonderfall, sondern der Fall
+// mit der Nummer 0.
+//
+// ZWEI GERAETE SIND ANDERS, und zwar mit Absicht: ein Knoten von
+// /dev, der ein TERMINAL oder der RAHMENPUFFER ist, wird zu genau dem
+// Deskriptor, den Runde K9 und Runde K7 dafuer gebaut haben (K_TTY,
+// K_FB). Ein zweiter Weg auf dasselbe Geraet waere eine zweite Stelle,
+// an der die Zeilendisziplin steht -- und die zweite waere irgendwann
+// die falsche.
+fn open_vfs(state: u64, me: u64, m: u64, path: u64, flags: u64) -> u64 {
+    var node: u64 = vfs.node_for(state, m, path)
+    if node == 0 {
+        if (flags & O_CREAT) == 0 {
+            return neg(errno.E_NOENT)
+        }
+        // ZWEI GRUENDE, EINE ANTWORT WAERE ZU WENIG. Ein Treiber
+        // OHNE Anlegen (procfs, devfs) sagt -EPERM: da wird nie etwas
+        // angelegt werden. Ein Treiber MIT Anlegen auf einer nur
+        // lesend eingehaengten Platte sagt -EROFS: da koennte man,
+        // wenn man anders eingehaengt haette. `mount -o remount,rw`
+        // hilft im zweiten Fall und im ersten nie.
+        if !vfs.can(state, m, vfsops.OP_CREATE) {
+            if vfs.rdonly(state, m) {
+                return neg(errno.E_ROFS)
+            }
+            return neg(errno.E_PERM)
+        }
+        node = vfs.v_create(state, m, path, vfsops.N_FILE)
+        if node == 0 {
+            return neg(errno.E_NOSPC)
+        }
+    } else {
+        if (flags & O_CREAT) != 0 && (flags & O_EXCL) != 0 {
+            return neg(errno.E_EXIST)
+        }
+    }
+    let art: u64 = vfs.v_attr(state, m, node, vfsops.A_TYPE)
+    // Die zwei Geraete, die schon einen Deskriptor haben.
+    if vfs.type_of(state, m) == vfsops.FS_DEV {
+        if devfs.is_fb(node) {
+            return open_devfb(state, me, flags)
+        }
+        if devfs.is_tty(node) {
+            return open_devtty(state, me, flags)
+        }
+    }
+    var kind: u64 = file.K_VFILE
+    if art == vfsops.N_DIR {
+        if (flags & 3) != 0 {
+            return neg(errno.E_ISDIR)
+        }
+        kind = file.K_VDIR
+    } else {
+        if (flags & O_DIRECTORY) != 0 {
+            return neg(errno.E_NOTDIR)
+        }
+        if (flags & O_TRUNC) != 0 {
+            let r: u64 = vfs.v_trunc(state, m, node)
+            if r != 0 {
+                return neg(r)
+            }
+        }
+    }
+    let of: u64 = file.open_alloc(state, kind, node, flags)
+    if of >= file.MAX_OPEN {
+        return neg(errno.E_NFILE)
+    }
+    file.open_set_mnt(state, of, m)
+    let fd: u64 = file.fd_alloc(state, me, 0)
+    if fd >= file.MAX_FD {
+        file.open_unref(state, of)
+        return neg(errno.E_MFILE)
+    }
+    file.fd_set(state, me, fd, of)
+    // DIE ZAHL, WEGEN DER `umount` NEIN SAGEN KANN. Sie geht hier
+    // hoch und in `unref_of` wieder herunter, und zwar an genau diesen
+    // zwei Stellen.
+    mnt.open_inc(state, m)
+    return fd
+}
+
+// /dev/tty: das beherrschende Terminal DIESES Prozesses. Der Knoten
+// weiss davon nichts -- er ist eine Nummer in einem Verzeichnis; wer
+// gerade fragt, weiss nur diese Ebene.
+fn open_devtty(state: u64, me: u64, flags: u64) -> u64 {
+    let t: u64 = tty_of(state, me)
+    if !tty.valid(state, t) {
+        return neg(errno.E_NODEV)
+    }
+    let of: u64 = file.open_alloc(state, file.K_TTY, t, flags)
+    if of >= file.MAX_OPEN {
+        return neg(errno.E_NFILE)
+    }
+    let fd: u64 = file.fd_alloc(state, me, 0)
+    if fd >= file.MAX_FD {
+        file.open_unref(state, of)
+        return neg(errno.E_MFILE)
+    }
+    file.fd_set(state, me, fd, of)
+    return fd
+}
+
 fn do_open(state: u64, me: u64, name: u64, flags: u64) -> u64 {
     let buf: u64 = state + kstate.NAME_OFF
     let len: u64 = fetch_path(state, me, name, buf, MAX_NAME)
@@ -1712,6 +1961,28 @@ fn do_open(state: u64, me: u64, name: u64, flags: u64) -> u64 {
     // genau einer Stelle.
     if is_devfb(state, buf, len) {
         return open_devfb(state, me, flags)
+    }
+    // ============================================= RUNDE K14: die Weiche
+    //
+    // HIER, UND NUR HIER, ENTSCHEIDET SICH, AUF WELCHEM DATEISYSTEM EIN
+    // NAME LIEGT. `vfs.mount_for` sucht den LAENGSTEN passenden
+    // Einhaengepfad; kommt etwas anderes als die Wurzel heraus, geht
+    // der ganze Rest dieses Aufrufs ueber die Ops-Tafel.
+    //
+    // Fuer die WURZEL bleibt der gerade Weg von Runde 62 stehen,
+    // solange `vfsall` nicht auf der Kommandozeile steht. Das ist die
+    // Vorsicht, die der Auftrag verlangt: 1486 Zusagen haengen an
+    // diesen Zeilen. Mit `vfsall` geht auch sie durch die Tafel, und
+    // `tools/k14/run.sh` haelt beide Laeufe Oktett fuer Oktett
+    // gegeneinander -- das ist der Beweis, dass der eine Weg den
+    // anderen ersetzen kann.
+    if vfs.ready(state) {
+        let m: u64 = vfs.mount_for(state, buf)
+        if m < vfs.MAX_MNT {
+            if m != 0 || vfs.all_mode(state) {
+                return open_vfs(state, me, m, buf, flags)
+            }
+        }
     }
     if kstate.get(state, kstate.FS_READY) == 0 {
         return neg(errno.E_NOSYS)
@@ -1864,6 +2135,13 @@ fn do_lseek(state: u64, me: u64, fd: u64, off: u64, whence: u64) -> u64 {
             // ohne den Kernel danach zu fragen.
             if kind == file.K_FB {
                 base = fb.bytes(state)
+            } else if kind == file.K_VFILE || kind == file.K_VDIR {
+                // ROUNDE K14: die Groesse kommt aus der Ops-Tafel. Bei
+                // /dev/hdb ist das die Zahl der Bloecke mal 512 -- und
+                // damit sagt `lseek(fd, 0, SEEK_END)` wirklich, wie
+                // gross die Platte ist.
+                base = vfs.v_attr(state, file.open_mnt(state, of),
+                    file.open_ino(state, of), vfsops.A_SIZE)
             } else {
                 base = fs.inode_size(state, file.open_ino(state, of))
             }
@@ -1890,13 +2168,34 @@ fn do_lseek(state: u64, me: u64, fd: u64, off: u64, whence: u64) -> u64 {
 }
 
 fn do_unlink(state: u64, me: u64, name: u64) -> u64 {
-    if kstate.get(state, kstate.FS_READY) == 0 {
-        return neg(errno.E_NOSYS)
-    }
     let buf: u64 = state + kstate.NAME_OFF
     let len: u64 = fetch_path(state, me, name, buf, MAX_NAME)
     if errno.is_error(len) {
         return len
+    }
+    // ROUNDE K14.
+    if vfs.ready(state) {
+        let m: u64 = vfs.mount_for(state, buf)
+        if m < vfs.MAX_MNT {
+            if m != 0 || vfs.all_mode(state) {
+                let node: u64 = vfs.node_for(state, m, buf)
+                if node == 0 {
+                    return neg(errno.E_NOENT)
+                }
+                if vfs.v_attr(state, m, node, vfsops.A_TYPE)
+                    == vfsops.N_DIR {
+                    return neg(errno.E_ISDIR)
+                }
+                let r: u64 = vfs.v_unlink(state, m, buf)
+                if r != 0 {
+                    return neg(r)
+                }
+                return 0
+            }
+        }
+    }
+    if kstate.get(state, kstate.FS_READY) == 0 {
+        return neg(errno.E_NOSYS)
     }
     let ino: u64 = fs.path(state, buf)
     if ino == 0 {
@@ -1924,13 +2223,34 @@ fn do_unlink(state: u64, me: u64, name: u64) -> u64 {
 }
 
 fn do_mkdir(state: u64, me: u64, name: u64) -> u64 {
-    if kstate.get(state, kstate.FS_READY) == 0 {
-        return neg(errno.E_NOSYS)
-    }
     let buf: u64 = state + kstate.NAME_OFF
     let len: u64 = fetch_path(state, me, name, buf, MAX_NAME)
     if errno.is_error(len) {
         return len
+    }
+    // ROUNDE K14.
+    if vfs.ready(state) {
+        let m: u64 = vfs.mount_for(state, buf)
+        if m < vfs.MAX_MNT {
+            if m != 0 || vfs.all_mode(state) {
+                if vfs.node_for(state, m, buf) != 0 {
+                    return neg(errno.E_EXIST)
+                }
+                if !vfs.can(state, m, vfsops.OP_CREATE) {
+                    if vfs.rdonly(state, m) {
+                        return neg(errno.E_ROFS)
+                    }
+                    return neg(errno.E_PERM)
+                }
+                if vfs.v_create(state, m, buf, vfsops.N_DIR) == 0 {
+                    return neg(errno.E_NOSPC)
+                }
+                return 0
+            }
+        }
+    }
+    if kstate.get(state, kstate.FS_READY) == 0 {
+        return neg(errno.E_NOSYS)
     }
     if fs.path(state, buf) != 0 {
         return neg(errno.E_EXIST)
@@ -1996,10 +2316,48 @@ fn stat_out(state: u64, me: u64, out: u64) -> u64 {
     return 0
 }
 
-fn do_stat(state: u64, me: u64, name: u64, out: u64) -> u64 {
-    if kstate.get(state, kstate.FS_READY) == 0 {
-        return neg(errno.E_NOSYS)
+// ROUNDE K14: `stat` fuer einen Knoten eines eingehaengten
+// Dateisystems. Dieselben Felder wie `fill_stat`, nur aus der
+// Ops-Tafel statt aus einer Inode -- und `st_dev` ist die Nummer der
+// EINHAENGUNG plus eins, damit zwei Dateien auf zwei Dateisystemen
+// nicht dasselbe Paar (dev, ino) tragen. Genau das ist die Zusage, auf
+// die sich `find -xdev` und jedes `du` verlassen.
+fn fill_vstat(state: u64, m: u64, node: u64) -> bool {
+    let s: u64 = state + kstate.BLOCK_OFF + 2048
+    var i: u64 = 0
+    while i < STAT_BYTES {
+        kstate.set8(s + i, 0 as u8)
+        i = i + 1
     }
+    let art: u64 = vfs.v_attr(state, m, node, vfsops.A_TYPE)
+    let size: u64 = vfs.v_attr(state, m, node, vfsops.A_SIZE)
+    var mode: u64 = vfs.v_attr(state, m, node, vfsops.A_MODE)
+    if art == vfsops.N_DIR {
+        mode = mode | S_IFDIR
+    } else if art == vfsops.N_CHR {
+        mode = mode | S_IFCHR
+    } else if art == vfsops.N_BLK {
+        mode = mode | S_IFBLK
+    } else {
+        mode = mode | S_IFREG
+    }
+    let bs: u64 = vfs.v_attr(state, m, node, vfsops.A_BLKSIZE)
+    __mmio_write64((s + ST_DEV) as *mut u64, m + 1)
+    __mmio_write64((s + ST_INO) as *mut u64, node)
+    __mmio_write64((s + ST_NLINK) as *mut u64,
+        vfs.v_attr(state, m, node, vfsops.A_NLINK))
+    __mmio_write32((s + ST_MODE) as *mut u32, mode as u32)
+    __mmio_write64((s + ST_RDEV) as *mut u64,
+        vfs.v_attr(state, m, node, vfsops.A_RDEV))
+    __mmio_write64((s + ST_SIZE) as *mut u64, size)
+    __mmio_write64((s + ST_BLKSIZE) as *mut u64, bs)
+    if bs != 0 {
+        __mmio_write64((s + ST_BLOCKS) as *mut u64, (size + 511) / 512)
+    }
+    return true
+}
+
+fn do_stat(state: u64, me: u64, name: u64, out: u64) -> u64 {
     if !proc.user_ok(state, me, out, STAT_BYTES) {
         return neg(errno.E_FAULT)
     }
@@ -2007,6 +2365,22 @@ fn do_stat(state: u64, me: u64, name: u64, out: u64) -> u64 {
     let len: u64 = fetch_path(state, me, name, buf, MAX_NAME)
     if errno.is_error(len) {
         return len
+    }
+    if vfs.ready(state) {
+        let m: u64 = vfs.mount_for(state, buf)
+        if m < vfs.MAX_MNT {
+            if m != 0 || vfs.all_mode(state) {
+                let node: u64 = vfs.node_for(state, m, buf)
+                if node == 0 {
+                    return neg(errno.E_NOENT)
+                }
+                fill_vstat(state, m, node)
+                return stat_out(state, me, out)
+            }
+        }
+    }
+    if kstate.get(state, kstate.FS_READY) == 0 {
+        return neg(errno.E_NOSYS)
     }
     let ino: u64 = fs.path(state, buf)
     if ino == 0 {
@@ -2027,6 +2401,12 @@ fn do_fstat(state: u64, me: u64, fd: u64, out: u64) -> u64 {
     let kind: u64 = file.open_kind(state, of)
     if kind == file.K_FILE || kind == file.K_DIR {
         fill_stat(state, file.open_ino(state, of))
+        return stat_out(state, me, out)
+    }
+    // ROUNDE K14.
+    if kind == file.K_VFILE || kind == file.K_VDIR {
+        fill_vstat(state, file.open_mnt(state, of),
+            file.open_ino(state, of))
         return stat_out(state, me, out)
     }
     // A pipe and the console have no inode. They still have a KIND, and a
@@ -2076,10 +2456,76 @@ fn do_fstat(state: u64, me: u64, fd: u64, out: u64) -> u64 {
 // that is what the interface promises. A buffer too short for even the
 // first entry is -EINVAL -- the one case in which a short answer would be
 // a lie.
+// ROUNDE K14: dasselbe fuer ein Verzeichnis eines eingehaengten
+// Dateisystems. Die Form der Eintraege ist Wort fuer Wort dieselbe --
+// ein `ls` merkt nicht, aus welchem Dateisystem es liest, und genau
+// das ist der Sinn der Schicht.
+fn do_getdents_vfs(state: u64, me: u64, of: u64, out: u64,
+    size: u64) -> u64 {
+    let m: u64 = file.open_mnt(state, of)
+    let dir: u64 = file.open_ino(state, of)
+    let named: u64 = state + kstate.NAME_OFF + 512
+    let build: u64 = state + kstate.BLOCK_OFF + 2048
+    var written: u64 = 0
+    var pos: u64 = file.open_off(state, of)
+    var going: bool = true
+    while going {
+        let node: u64 = vfs.v_readdir(state, m, dir, pos, named)
+        if node == 0 {
+            going = false
+        } else {
+            var n: u64 = 0
+            while kstate.get8(named + n) != 0 {
+                n = n + 1
+            }
+            let reclen: u64 = (DIRENT_HEAD + n + 1 + 7) & 0xFFFFFFFFFFFFFFF8
+            if written + reclen > size {
+                if written == 0 {
+                    return neg(errno.E_INVAL)
+                }
+                going = false
+            } else {
+                var z: u64 = 0
+                while z < reclen {
+                    kstate.set8(build + z, 0 as u8)
+                    z = z + 1
+                }
+                __mmio_write64(build as *mut u64, node)
+                __mmio_write64((build + 8) as *mut u64, pos + 1)
+                __mmio_write16((build + 16) as *mut u16, reclen as u16)
+                var kind: u64 = DT_REG
+                if vfs.v_attr(state, m, node, vfsops.A_TYPE) == vfsops.N_DIR {
+                    kind = DT_DIR
+                }
+                kstate.set8(build + 18, kind as u8)
+                var k: u64 = 0
+                while k < n {
+                    kstate.set8(build + DIRENT_HEAD + k,
+                        kstate.get8(named + k) as u8)
+                    k = k + 1
+                }
+                if !copy_out(state, me, out + written, build, reclen) {
+                    return neg(errno.E_FAULT)
+                }
+                written = written + reclen
+                pos = pos + 1
+                file.open_set_off(state, of, pos)
+            }
+        }
+    }
+    return written
+}
+
 fn do_getdents(state: u64, me: u64, fd: u64, out: u64, size: u64) -> u64 {
     let of: u64 = of_of(state, me, fd)
     if of >= file.MAX_OPEN {
         return neg(errno.E_BADF)
+    }
+    if file.open_kind(state, of) == file.K_VDIR {
+        if !proc.user_ok(state, me, out, size) {
+            return neg(errno.E_FAULT)
+        }
+        return do_getdents_vfs(state, me, of, out, size)
     }
     if file.open_kind(state, of) != file.K_DIR {
         return neg(errno.E_NOTDIR)
@@ -2995,6 +3441,262 @@ fn do_setenv(state: u64, me: u64, buf: u64, len: u64) -> u64 {
     return n
 }
 
+// ==================================================== RUNDE K14
+//
+// EINHAENGEN MIT EINEM ZIEL. `mount(quelle, ziel, art, flaggen, daten)`
+// ist Linux' Aufruf 165 und traegt hier Linux' Bedeutung: die QUELLE
+// ist ein Geraetename, das ZIEL ein Verzeichnis, das es gibt, und die
+// ART der Name eines Treibers.
+//
+// Was `SYS_OSUM_MOUNT` (1401, Runde K11) davon unterscheidet: jener
+// hatte kein Ziel. Er konnte nur sagen "die eine Platte ist jetzt da".
+// Er bleibt daneben stehen und tut genau das weiter.
+
+fn name_is(state: u64, p: u64, lit: u64) -> bool {
+    var i: u64 = 0
+    while kstate.get8(p + i) != 0 && kstate.get8(lit + i) != 0 {
+        if kstate.get8(p + i) != kstate.get8(lit + i) {
+            return false
+        }
+        i = i + 1
+    }
+    return kstate.get8(p + i) == kstate.get8(lit + i)
+}
+
+fn fstype_of(state: u64, p: u64) -> u64 {
+    var a: [u8; 4] = "ofs "
+    var b: [u8; 5] = "proc "
+    var c: [u8; 6] = "devfs "
+    var d: [u8; 5] = "vfat "
+    var e: [u8; 6] = "fat32 "
+    if name_is(state, p, (&a[0]) as u64) {
+        return vfsops.FS_OFS
+    }
+    if name_is(state, p, (&b[0]) as u64) {
+        return vfsops.FS_PROC
+    }
+    if name_is(state, p, (&c[0]) as u64) {
+        return vfsops.FS_DEV
+    }
+    if name_is(state, p, (&d[0]) as u64) || name_is(state, p, (&e[0]) as u64) {
+        return vfsops.FS_FAT
+    }
+    return vfsops.FS_NONE
+}
+
+// "/dev/hdb1" -> Geraet DEV_ATA1, Partition 1. Der Name wird von
+// hinten gelesen: eine Ziffer am Ende ist eine Partitionsnummer, und
+// was davor steht, ist das Geraet. Genau so liest jedes Unix diesen
+// Namen, und deshalb ist "/dev/ram0" auch keine Partition 0 -- die
+// Null gehoert zum Geraetenamen, und die Nummerierung faengt bei eins an.
+fn source_dev(state: u64, p: u64, out_part: u64) -> u64 {
+    var n_hda: [u8; 9] = "/dev/hda "
+    var n_hdb: [u8; 9] = "/dev/hdb "
+    var n_ram: [u8; 10] = "/dev/ram0 "
+    var n_nvme: [u8; 11] = "/dev/nvme0 "
+    var base: [u8; 32] = [0 as u8; 32]
+    var n: u64 = 0
+    while kstate.get8(p + n) != 0 && n < 31 {
+        base[n as usize] = kstate.get8(p + n) as u8
+        n = n + 1
+    }
+    base[n as usize] = 0 as u8
+    __mmio_write64(out_part as *mut u64, 0)
+    if name_is(state, (&base[0]) as u64, (&n_ram[0]) as u64) {
+        return blk.DEV_RAM
+    }
+    if name_is(state, (&base[0]) as u64, (&n_nvme[0]) as u64) {
+        return blk.DEV_NVME
+    }
+    // Eine Ziffer am Ende: Partitionsnummer.
+    if n > 1 {
+        let last: u64 = base[(n - 1) as usize] as u64
+        if last >= 49 && last <= 57 {
+            __mmio_write64(out_part as *mut u64, last - 48)
+            base[(n - 1) as usize] = 0 as u8
+        }
+    }
+    if name_is(state, (&base[0]) as u64, (&n_hda[0]) as u64) {
+        return blk.DEV_ATA
+    }
+    if name_is(state, (&base[0]) as u64, (&n_hdb[0]) as u64) {
+        return blk.DEV_ATA1
+    }
+    return 99
+}
+
+fn do_vfs_mount(state: u64, me: u64, src: u64, target: u64, kind: u64,
+    flags: u64) -> u64 {
+    if !vfs.ready(state) {
+        return neg(errno.E_NOSYS)
+    }
+    if (flags & 0xFFFFFFFFFFFFFFFE) != 0 {
+        return neg(errno.E_INVAL)
+    }
+    let sbuf: u64 = state + kstate.NAME_OFF + 1024
+    let tbuf: u64 = state + kstate.NAME_OFF
+    let kbuf: u64 = state + kstate.NAME_OFF + 1536
+    if errno.is_error(fetch_name(state, me, src, sbuf, 64)) {
+        return neg(errno.E_FAULT)
+    }
+    let tl: u64 = fetch_path(state, me, target, tbuf, MAX_NAME)
+    if errno.is_error(tl) {
+        return tl
+    }
+    if errno.is_error(fetch_name(state, me, kind, kbuf, 32)) {
+        return neg(errno.E_FAULT)
+    }
+    let ft: u64 = fstype_of(state, kbuf)
+    if ft == vfsops.FS_NONE {
+        return neg(errno.E_NODEV)
+    }
+    var mflags: u64 = 0
+    if (flags & MNT_RDONLY) != 0 {
+        mflags = mnt.F_RDONLY
+    }
+    var dev: u64 = 0
+    var first: u64 = 0
+    var count: u64 = 0
+    if ft == vfsops.FS_FAT || ft == vfsops.FS_OFS {
+        var pnum: u64 = 0
+        dev = source_dev(state, sbuf, (&pnum) as u64)
+        if dev == 99 {
+            return neg(errno.E_NODEV)
+        }
+        if pnum == 0 {
+            first = 0
+            count = blk.blocks_on(state, dev)
+        } else {
+            // DIE PARTITIONSTAFEL. Ohne sie faengt ein Dateisystem bei
+            // Block 0 an -- und dort steht auf einer partitionierten
+            // Platte die Tafel selbst.
+            if part.scan(state, dev) == 0 {
+                return neg(errno.E_NODEV)
+            }
+            var found: u64 = part.MAX_PARTS
+            var i: u64 = 0
+            var seen: u64 = 0
+            while i < part.MAX_PARTS {
+                if part.index_of(state, i) != 0 {
+                    if part.dev_of(state, i) == dev {
+                        seen = seen + 1
+                        if seen == pnum {
+                            found = i
+                            i = part.MAX_PARTS
+                        }
+                    }
+                }
+                if i < part.MAX_PARTS {
+                    i = i + 1
+                }
+            }
+            if found >= part.MAX_PARTS {
+                return neg(errno.E_NODEV)
+            }
+            first = part.start(state, found)
+            count = part.blocks(state, found)
+        }
+    }
+    let m: u64 = vfs.mount_at(state, ft, dev, first, count, tbuf, mflags)
+    if m >= vfs.MAX_MNT {
+        return neg(errno.E_INVAL)
+    }
+    return 0
+}
+
+fn do_vfs_umount(state: u64, me: u64, target: u64) -> u64 {
+    if !vfs.ready(state) {
+        return neg(errno.E_NOSYS)
+    }
+    let tbuf: u64 = state + kstate.NAME_OFF
+    let tl: u64 = fetch_path(state, me, target, tbuf, MAX_NAME)
+    if errno.is_error(tl) {
+        return tl
+    }
+    let r: u64 = vfs.umount_path(state, tbuf)
+    if r != 0 {
+        return neg(r)
+    }
+    return 0
+}
+
+// `rename` -- Linux' 82. Die beiden Namen muessen auf DERSELBEN
+// Einhaengung liegen; sonst -EXDEV, und `mv` weiss, was das heisst.
+fn do_rename(state: u64, me: u64, from: u64, to: u64) -> u64 {
+    let a: u64 = state + kstate.NAME_OFF
+    let b: u64 = state + kstate.NAME_OFF + 1024
+    let la: u64 = fetch_path(state, me, from, a, MAX_NAME)
+    if errno.is_error(la) {
+        return la
+    }
+    let lb: u64 = fetch_path(state, me, to, b, MAX_NAME)
+    if errno.is_error(lb) {
+        return lb
+    }
+    if !vfs.ready(state) {
+        return neg(errno.E_NOSYS)
+    }
+    let ma: u64 = vfs.mount_for(state, a)
+    let mb: u64 = vfs.mount_for(state, b)
+    if ma >= vfs.MAX_MNT || mb >= vfs.MAX_MNT {
+        return neg(errno.E_NOENT)
+    }
+    let r: u64 = vfs.v_rename(state, ma, a, mb, b)
+    if r != 0 {
+        return neg(r)
+    }
+    return 0
+}
+
+// Ein Feld eines Eintrags der Einhaengetafel. Dieselbe Bauart wie
+// SYS_OSUM_PSTAT: eine Zahl je Aufruf, kein Puffer, kein Zeiger.
+fn do_mntstat(state: u64, index: u64, field: u64) -> u64 {
+    if field == MS_COUNT {
+        return mnt.count(state)
+    }
+    if index >= vfs.MAX_MNT {
+        return neg(errno.E_INVAL)
+    }
+    if field == MS_USED {
+        if mnt.used(state, index) {
+            return 1
+        }
+        return 0
+    }
+    if !mnt.used(state, index) {
+        return 0
+    }
+    if field == MS_TYPE {
+        return mnt.fstype(state, index)
+    }
+    if field == MS_DEV {
+        return mnt.dev(state, index)
+    }
+    if field == MS_FIRST {
+        return mnt.first(state, index)
+    }
+    if field == MS_BLOCKS {
+        return mnt.blocks(state, index)
+    }
+    if field == MS_FLAGS {
+        return mnt.flags(state, index)
+    }
+    if field == MS_OPENS {
+        return mnt.opens(state, index)
+    }
+    if field == MS_PATHLEN {
+        return mnt.path_len(state, index)
+    }
+    if field >= MS_PATHCH {
+        let i: u64 = field - MS_PATHCH
+        if i >= mnt.path_len(state, index) {
+            return 0
+        }
+        return kstate.get8(mnt.path_at(state, index) + i)
+    }
+    return neg(errno.E_INVAL)
+}
+
 // Ein- und Aushaengen. Ausgehaengt heisst: FS_READY ist null, und jeder
 // Weg ins Dateisystem antwortet mit dem Fehler, den er dafuer schon
 // hatte. Das ist keine Attrappe -- danach findet `ls /` wirklich nichts
@@ -3300,6 +4002,11 @@ fn unref_of(state: u64, of: u64) {
             inet.sock_close(state, file.open_ino(state, of))
         }
     }
+    // ROUNDE K14: der Zaehler der offenen Deskriptoren je Einhaengung
+    // geht in `file.open_unref` herunter und nicht hier. Der Grund
+    // steht dort: ein Prozess, der stirbt, kommt an dieser Funktion
+    // vorbei (`file.close_all`), und ein `dup2`, das einen Deskriptor
+    // ueberschreibt, ebenfalls.
     file.open_unref(state, of)
 }
 

@@ -158,6 +158,29 @@
 #      zusammen), `nosuid`, `ofsv2raw` (altes Abbild, neue Regeln),
 #      `noacpi` (Beendigungscode 21 statt 0), `initsh` (der Notweg),
 #      und ein Lauf ohne init, in dem die Waise als Leiche stehenbleibt.
+#  20. DIE VFS-SCHICHT UND DIE FREMDEN DATEISYSTEME (tools/k14/run.sh,
+#      Runde K14): bis dahin kannte dieser Kernel genau EIN
+#      Dateisystem, und `mount` hatte kein Ziel -- es hiess "die eine
+#      Platte ist da". Jetzt melden sich Dateisysteme mit einer TAFEL
+#      VON NEUN VERRICHTUNGEN an (`kernel/vfsops.fi`), die Pfade werden
+#      ueber Einhaengegrenzen hinweg aufgeloest (`kernel/vfs.fi`,
+#      `kernel/mnt.fi`), und OFS ist der erste NUTZER dieser Schicht
+#      (`kernel/ofs.fi`) und kein Sonderfall daneben. Darauf: /proc als
+#      Dateisystem, das seine Dateien beim Lesen ERZEUGT
+#      (`kernel/procfs.fi`), /dev mit null, zero, random, tty, fb und
+#      den Blockgeraeten (`kernel/devfs.fi`), ein Leser fuer MBR und
+#      GPT samt BEIDEN CRC32-Pruefsummen (`kernel/part.fi`) und FAT32
+#      lesend UND schreibend, mit langen Namen (`kernel/fat.fi`).
+#      Gemessen gegen die ECHTEN Werkzeuge: das Abbild kommt von
+#      `mkfs.vfat`, die Dateien von `mcopy`, die Tafeln von `sfdisk`
+#      und `sgdisk`, und `fsck.fat` faellt das Urteil ueber das, was
+#      Osum geschrieben hat. Gegenproben: `novfs` (nur die Wurzel),
+#      `noprocfs`, `nodevfs`, `nofat`, `nopart` (das Dateisystem wird
+#      bei Block 0 gesucht, wo die TAFEL steht), `fatro`, ein
+#      umgedrehtes Bit im GPT-Kopf, und ein Lauf ganz ohne zweite
+#      Platte. Dazu `vfsall`: dieselbe Arbeit auf OFS, einmal auf dem
+#      geraden Weg von Runde 62 und einmal durch die Ops-Tafel,
+#      Oktett fuer Oktett verglichen.
 #
 #  17. Die Oberflaeche (tools/wm/run.sh, Runde K10): ein Zeigegeraet am
 #      zweiten Anschluss des Tastaturbausteins (`kernel/ps2m.fi`), ein
@@ -313,6 +336,8 @@ lauf "18. ein Wirt fuer fremde Prozessoren: AMD-V, verschachtelte Seitentabellen
 
 lauf "19. Benutzer, Rechte und der erste Prozess: uid/gid, chmod/chown, login, init (tools/k13/run.sh, Runde K13)" \
      tools/k13/run.sh k13 '^K13: |^  OK    (DIE (KENNUNG|WAISE)|GEGENPROBE|PYTHON|das Passwort steht NICHT|die Maschine (schaltet|faehrt)|DER NOTWEG)'
+lauf "20. die VFS-Schicht und die fremden Dateisysteme: /proc, /dev, FAT32, MBR und GPT (tools/k14/run.sh, Runde K14)" \
+     tools/k14/run.sh k14 '^K14: |^  OK    (vier Dateisysteme|blob.bin|kopie.bin|fsck.fat|dieselbe Arbeit|GEGENPROBE novfs: nur|GEGENPROBE nopart)'
 
 echo
 echo "=================================================================="
