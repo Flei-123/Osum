@@ -1,0 +1,531 @@
+// kernel/user/nidx.fi -- Runde K15, zweiter Nachtrag: DER NAMENSINDEX.
+// Ring 3, eine Bibliothek ohne `u_start`, wie `ulib.fi` und `wlib.fi`.
+//
+// WAS "EVERYTHING" WIRKLICH MACHT, und warum das hier nachbaubar ist.
+// Das Programm von voidtools durchsucht die Platte NICHT. Es liest
+// EINMAL die Master File Table von NTFS am Stueck -- die Tabelle, die
+// das Dateisystem ohnehin fuer jede Datei fuehrt -- und baut daraus im
+// Arbeitsspeicher eine Liste NUR AUS NAMEN. Ein frisches Windows mit
+// rund 120 000 Dateien ist dadurch in etwa einer Sekunde erfasst. Danach
+// sieht es die Tabelle nie wieder an, sondern verfolgt das
+// Aenderungsjournal (USN) und traegt nach. Es ist deshalb sofort da:
+// gesucht wird in einer Namensliste im Speicher, nicht auf der Platte,
+// und indiziert werden Namen, keine Inhalte.
+//
+// BEIDE HAELFTEN GIBT ES IN OSUM SEIT DEM ZWEITEN NACHTRAG:
+//   * `WIG_SCAN` (1807) laeuft EINMAL durch die Inode-Tabelle und gibt
+//     die Verzeichniseintraege heraus, ohne einen einzigen Pfad
+//     aufzuloesen (`kernel/fs.fi`, `scan`).
+//   * `WIG_JRNL` (1808) holt die Aenderungen ab, die `fs.dir_add` und
+//     `fs.dir_remove` seither eingetragen haben (`kernel/nidx.fi`).
+//
+// WAS HIER STEHT, IST DIE HAELFTE IN RING 3: die Namensliste, das
+// Nachziehen und die Suche. Und daneben -- absichtlich in derselben
+// Datei -- DER BAUMDURCHLAUF, gegen den sich der Index beweisen muss.
+// Beide beantworten dieselbe Frage; sie muessen dieselben Treffer
+// liefern, sonst luegt der Index. Sie in getrennten Programmen zu haben
+// waere bequemer und waere schwaecher: so laufen sie im selben Prozess,
+// auf demselben Dateisystem, im selben Augenblick.
+//
+// WAS DER INDEX NICHT KANN, und es gehoert nach vorn:
+//   * Er ueberlebt keinen Neustart. Das Journal liegt im Speicher des
+//     Kernels, nicht auf der Platte -- die Begruendung fuer diesen
+//     Handel steht in `kernel/nidx.fi`.
+//   * Er haelt 4200 Namen. Darueber sagt `build` "abgeschnitten" statt
+//     stillschweigend die Haelfte zu vergessen.
+//   * Er sucht in NAMEN. Nicht in Inhalten. Genau wie das Vorbild.
+
+profile kernel
+
+import ulib
+import libc.io
+import libc.kcall
+
+export {
+    build, poll, find, count, name_at, ino_at, kind_at, parent_at,
+    path_of, walk_find, walk_seen, contains, lower,
+    calls, records, truncated, lost_seen, seq_now, mono_us,
+    MAXN, NAMEN
+}
+
+const MAXN: u64 = 4200
+const NAMEN: u64 = 24 // wie ein Verzeichniseintrag in OFS
+
+// Der Satz, den Kernel und Ring 3 teilen -- 64 Oktette, dieselben
+// Felder beim Tabellenlauf wie im Journal (`kernel/nidx.fi`).
+const REC: u64 = 64
+const R_INO: u64 = 0
+const R_PARENT: u64 = 8
+const R_SIZE: u64 = 16
+const R_KIND: u64 = 24
+const R_NAME: u64 = 32
+const R_OP: u64 = 56
+
+const OP_ADD: u64 = 1
+const OP_DEL: u64 = 2
+
+const K_DIR: u64 = 2
+
+const WIG_SCAN: u64 = 1807
+const WIG_JRNL: u64 = 1808
+const WIG_IDXINFO: u64 = 1809
+const WX_JSEQ: u64 = 2
+const WX_JLOST: u64 = 3
+
+const SYS_CLOCK_GETTIME: u64 = 228
+const CLOCK_MONOTONIC: u64 = 1
+
+// STAPEL VON SATZ-PUFFERN: 63 Saetze je Aufruf, so viel wie der Kernel
+// in eine Seite legt.
+const STAPEL: u64 = 63
+
+static mut nm: [u8; 100800] = [0 as u8; 100800] // MAXN * NAMEN
+static mut pino: [u32; 4200] = [0 as u32; 4200]
+static mut ino_: [u32; 4200] = [0 as u32; 4200]
+static mut art: [u8; 4200] = [0 as u8; 4200]
+static mut nn: u64 = 0
+static mut jseq: u64 = 0
+static mut jlost: u64 = 0
+static mut abgeschnitten: u64 = 0
+static mut aufrufe: u64 = 0
+static mut saetze: u64 = 0
+static mut puffer: [u8; 4032] = [0 as u8; 4032] // STAPEL * REC
+static mut lauf: [u64; 2] = [0 as u64; 2]
+static mut gesehen: u64 = 0
+
+fn sys3(number: u64, a0: u64, a1: u64, a2: u64) -> u64 {
+    return asm("syscall", out("rax"), in("rax") number, in("rdi") a0,
+        in("rsi") a1, in("rdx") a2, clobber("rcx"), clobber("r11"),
+        clobber("memory"))
+}
+
+// Mikrosekunden von der monotonen Uhr. Sie ist mit geeichtem
+// Zyklenzaehler auf die Nanosekunde genau (`kernel/time.fi`), und ohne
+// ihn auf zehn Millisekunden -- das steht bei jeder Messung dabei, weil
+// eine Zahl ohne ihre Koernung eine Behauptung ist.
+fn mono_us() -> u64 {
+    var ts: [u64; 2] = [0 as u64; 2]
+    kcall.sys2(SYS_CLOCK_GETTIME, CLOCK_MONOTONIC, (&ts[0 as usize]) as u64)
+    return ts[0 as usize] *% 1000000 +% ts[1 as usize] / 1000
+}
+
+fn count() -> u64 {
+    return nn
+}
+
+fn calls() -> u64 {
+    return aufrufe
+}
+
+fn records() -> u64 {
+    return saetze
+}
+
+fn truncated() -> u64 {
+    return abgeschnitten
+}
+
+fn lost_seen() -> u64 {
+    return jlost
+}
+
+fn seq_now() -> u64 {
+    return jseq
+}
+
+fn name_at(i: u64) -> u64 {
+    return (&nm[0 as usize]) as u64 + i * NAMEN
+}
+
+fn ino_at(i: u64) -> u64 {
+    return ino_[(i) as usize] as u64
+}
+
+fn parent_at(i: u64) -> u64 {
+    return pino[(i) as usize] as u64
+}
+
+fn kind_at(i: u64) -> u64 {
+    return art[(i) as usize] as u64
+}
+
+// ------------------------------------------------------- der Aufbau
+
+fn eintragen(rec: u64) -> bool {
+    if nn >= MAXN {
+        abgeschnitten = abgeschnitten + 1
+        return false
+    }
+    let ziel: u64 = (&nm[0 as usize]) as u64 + nn * NAMEN
+    var k: u64 = 0
+    while k < NAMEN {
+        __mmio_write8((ziel + k) as *mut u8,
+            __mmio_read8((rec + R_NAME + k) as *mut u8))
+        k = k + 1
+    }
+    ino_[(nn) as usize] = (__mmio_read64((rec + R_INO) as *mut u64)) as u32
+    pino[(nn) as usize] = (__mmio_read64((rec + R_PARENT) as *mut u64)) as u32
+    art[(nn) as usize] = (__mmio_read64((rec + R_KIND) as *mut u64)) as u8
+    nn = nn + 1
+    return true
+}
+
+fn loeschen(dir: u64, name: u64) -> bool {
+    var i: u64 = 0
+    while i < nn {
+        if pino[(i) as usize] as u64 == dir && gleich(name_at(i), name) {
+            // Der letzte rueckt nach: eine Namensliste hat keine
+            // Reihenfolge, die etwas bedeutet, und ein Loch haette eine.
+            nn = nn - 1
+            if i != nn {
+                var k: u64 = 0
+                while k < NAMEN {
+                    __mmio_write8((name_at(i) + k) as *mut u8,
+                        __mmio_read8((name_at(nn) + k) as *mut u8))
+                    k = k + 1
+                }
+                ino_[(i) as usize] = ino_[(nn) as usize]
+                pino[(i) as usize] = pino[(nn) as usize]
+                art[(i) as usize] = art[(nn) as usize]
+            }
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn gleich(a: u64, b: u64) -> bool {
+    var k: u64 = 0
+    while k < NAMEN {
+        let x: u64 = __mmio_read8((a + k) as *mut u8) as u64
+        let y: u64 = __mmio_read8((b + k) as *mut u8) as u64
+        if x != y {
+            return false
+        }
+        if x == 0 {
+            return true
+        }
+        k = k + 1
+    }
+    return true
+}
+
+// DER AUFBAU. Ein Durchgang durch die Inode-Tabelle, so oft aufgerufen,
+// wie 63 Saetze in eine Seite passen. Gibt die Zahl der Namen zurueck.
+//
+// DIE LAUFENDE NUMMER DES JOURNALS WIRD VORHER GEHOLT, nicht nachher.
+// Wer sie nachher holte, verloere jede Aenderung, die WAEHREND des Laufs
+// passiert: der Lauf haette sie vielleicht noch nicht gesehen, und das
+// Journal gaelte danach als abgearbeitet. Vorher zu fragen heisst
+// hoechstens, eine Aenderung zweimal zu sehen -- und ein zweites
+// "dazugekommen" ist harmlos, ein verlorenes nicht.
+fn build() -> u64 {
+    nn = 0
+    aufrufe = 0
+    saetze = 0
+    abgeschnitten = 0
+    jseq = sys3(WIG_IDXINFO, WX_JSEQ, 0, 0)
+    jlost = sys3(WIG_IDXINFO, WX_JLOST, 0, 0)
+    lauf[(0) as usize] = 0
+    var weiter: bool = true
+    while weiter {
+        let got: u64 = sys3(WIG_SCAN, (&lauf[0 as usize]) as u64,
+            (&puffer[0 as usize]) as u64, STAPEL)
+        aufrufe = aufrufe + 1
+        if ulib.bad(got) || got == 0 {
+            weiter = false
+        } else {
+            saetze = saetze + got
+            var i: u64 = 0
+            while i < got {
+                eintragen((&puffer[0 as usize]) as u64 + i * REC)
+                i = i + 1
+            }
+        }
+    }
+    return nn
+}
+
+// NACHZIEHEN OHNE NEUAUFBAU. Gibt die Zahl der verarbeiteten Saetze
+// zurueck; hat der Ring etwas verworfen, gibt es 0 zurueck und `poll`
+// meldet ueber `lost_seen`, dass neu gebaut werden muss.
+fn poll() -> u64 {
+    let verloren: u64 = sys3(WIG_IDXINFO, WX_JLOST, 0, 0)
+    var n: u64 = 0
+    var weiter: bool = true
+    while weiter {
+        let got: u64 = sys3(WIG_JRNL, jseq, (&puffer[0 as usize]) as u64,
+            STAPEL)
+        if ulib.bad(got) || got == 0 {
+            weiter = false
+        } else {
+            var i: u64 = 0
+            while i < got {
+                let rec: u64 = (&puffer[0 as usize]) as u64 + i * REC
+                let op: u64 = __mmio_read64((rec + R_OP) as *mut u64)
+                let dir: u64 = __mmio_read64((rec + R_PARENT) as *mut u64)
+                if op == OP_ADD {
+                    // Erst weg, dann hin: ein Name, den es schon gab
+                    // (der Lauf hat ihn gesehen, das Journal meldet ihn
+                    // noch einmal), darf nicht zweimal im Index stehen.
+                    loeschen(dir, rec + R_NAME)
+                    eintragen(rec)
+                } else if op == OP_DEL {
+                    loeschen(dir, rec + R_NAME)
+                }
+                n = n + 1
+                i = i + 1
+            }
+            jseq = jseq + got
+        }
+    }
+    jlost = verloren
+    return n
+}
+
+// ------------------------------------------------------- die Suche
+
+fn lower(c: u64) -> u64 {
+    if c >= 65 && c <= 90 {
+        return c + 32
+    }
+    return c
+}
+
+fn contains(heu: u64, nadel: u64) -> bool {
+    let n: u64 = ulib.length(nadel)
+    if n == 0 {
+        return true
+    }
+    let h: u64 = ulib.length(heu)
+    if n > h {
+        return false
+    }
+    var i: u64 = 0
+    while i + n <= h {
+        var k: u64 = 0
+        var g: bool = true
+        while k < n {
+            if lower(__mmio_read8((heu + i + k) as *mut u8) as u64)
+                != lower(__mmio_read8((nadel + k) as *mut u8) as u64) {
+                g = false
+                k = n
+            } else {
+                k = k + 1
+            }
+        }
+        if g {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+// IM SPEICHER, UND NUR DORT. Kein Systemaufruf, kein Block, keine
+// Pfadaufloesung -- der Unterschied zum Baumdurchlauf darunter ist genau
+// dieser, und er wird in Mikrosekunden gemessen.
+fn find(term: u64, out: u64, max: u64) -> u64 {
+    var n: u64 = 0
+    var i: u64 = 0
+    while i < nn && n < max {
+        if contains(name_at(i), term) {
+            __mmio_write64((out + n * 8) as *mut u64, i)
+            n = n + 1
+        }
+        i = i + 1
+    }
+    return n
+}
+
+// Der ganze Pfad eines Treffers. Die Eltern werden rueckwaerts gesucht;
+// das ist ein Durchgang je Ebene und passiert nur fuer die paar Treffer,
+// die jemand ansieht -- nicht fuer 4000 Namen beim Aufbau. Genau das ist
+// der Grund, warum der Index NUR Namen haelt und keine Pfade.
+fn path_of(i: u64, out: u64, max: u64) -> u64 {
+    var teile: [u64; 24] = [0 as u64; 24]
+    var tiefe: u64 = 0
+    var wo: u64 = i
+    var weiter: bool = true
+    while weiter && tiefe < 24 {
+        teile[(tiefe) as usize] = wo
+        tiefe = tiefe + 1
+        let eltern: u64 = pino[(wo) as usize] as u64
+        if eltern <= 1 {
+            weiter = false
+        } else {
+            var k: u64 = 0
+            var gefunden: bool = false
+            while k < nn && !gefunden {
+                if ino_[(k) as usize] as u64 == eltern
+                    && art[(k) as usize] as u64 == K_DIR {
+                    wo = k
+                    gefunden = true
+                }
+                k = k + 1
+            }
+            if !gefunden {
+                weiter = false
+            }
+        }
+    }
+    var at: u64 = 0
+    while tiefe > 0 {
+        tiefe = tiefe - 1
+        if at + 1 < max {
+            __mmio_write8((out + at) as *mut u8, 47 as u8)
+            at = at + 1
+        }
+        let p: u64 = name_at(teile[(tiefe) as usize])
+        var k: u64 = 0
+        while k < NAMEN && at + 1 < max {
+            let c: u64 = __mmio_read8((p + k) as *mut u8) as u64
+            if c == 0 {
+                k = NAMEN
+            } else {
+                __mmio_write8((out + at) as *mut u8, c as u8)
+                at = at + 1
+                k = k + 1
+            }
+        }
+    }
+    __mmio_write8((out + at) as *mut u8, 0 as u8)
+    return at
+}
+
+// ------------------------------------------------- DIE GEGENPROBE
+//
+// DIESELBE FRAGE, DER ANDERE WEG: von der Wurzel aus jedes Verzeichnis
+// oeffnen, seine Eintraege lesen, in die Unterverzeichnisse absteigen.
+// Das ist, was ein `find /` tut, und es ist das, was der Index ersetzt.
+//
+// Was ihn teuer macht, ist nicht das Lesen -- es ist der PFAD. Jedes
+// `open` loest die ganze Kette von der Wurzel an noch einmal auf,
+// Bestandteil fuer Bestandteil, und je Bestandteil laeuft der Kernel
+// durch ein Verzeichnis. Der Tabellenlauf tut das kein einziges Mal.
+//
+// `walk_seen` sagt hinterher, wie viele Namen er gesehen hat. Wenn diese
+// Zahl nicht zu der des Index passt, ist die Gleichheit der Treffer ein
+// Zufall und keine Zusage.
+//
+// ER LIEFERT DIE NAMEN und nicht nur eine Anzahl -- je Treffer NAMEN
+// Oktette in `out`. Zwei Suchen, die beide "sieben" sagen, koennen sieben
+// VERSCHIEDENE Dateien meinen; nur der Vergleich der Namen schliesst das
+// aus, und genau den rechnet der Messlauf nach.
+static mut wpfad: [u8; 512] = [0 as u8; 512]
+static mut wbuf: [u8; 1024] = [0 as u8; 1024]
+
+fn walk_seen() -> u64 {
+    return gesehen
+}
+
+fn walk_find(term: u64, out: u64, max: u64) -> u64 {
+    var wurzel: [u8; 2] = "/\0"
+    gesehen = 0
+    ulib.strcpy((&wpfad[0 as usize]) as u64, (&wurzel[0 as usize]) as u64)
+    return absteigen((&wpfad[0 as usize]) as u64, term, out, max, 0, 0)
+}
+
+fn absteigen(pfad: u64, term: u64, out: u64, max: u64, hab: u64,
+    tiefe: u64) -> u64 {
+    var n: u64 = hab
+    if tiefe > 8 {
+        return n
+    }
+    let fd: u64 = io.dir_open(pfad)
+    if ulib.bad(fd) {
+        return n
+    }
+    // ERST DIESES VERZEICHNIS GANZ LESEN, DANN ABSTEIGEN. Wer mitten im
+    // Lesen ein zweites oeffnet, braucht einen zweiten Puffer je Ebene --
+    // acht Ebenen auf dem Stapel einer Anwendung, die 32 KiB davon hat.
+    //
+    // GEMERKT WERDEN NUR DIE UNTERVERZEICHNISSE. Der erste Entwurf legte
+    // JEDEN Namen in diesen Puffer, und in einem Ordner mit 4000 Dateien
+    // war er nach sechzig voll -- der Durchlauf stieg dann in kein
+    // Unterverzeichnis mehr ab und meldete zu wenige Treffer. Eine
+    // Gegenprobe, die weniger findet als der Index, wuerde den Index
+    // faelschlich gut aussehen lassen.
+    var namen: [u8; 1024] = [0 as u8; 1024]
+    var anzahl: u64 = 0
+    var at: u64 = 0
+    var weiter: bool = true
+    while weiter {
+        let got: u64 = io.dir_read(fd, (&wbuf[0 as usize]) as u64, 1024)
+        if ulib.bad(got) || got == 0 {
+            weiter = false
+        } else {
+            var p: u64 = 0
+            while p < got {
+                let rec: u64 = (&wbuf[0 as usize]) as u64 + p
+                let rl: u64 = io.dir_reclen(rec)
+                if rl == 0 {
+                    p = got
+                } else {
+                    let name: u64 = io.dir_name(rec)
+                    if !punkt(name) {
+                        gesehen = gesehen + 1
+                        if contains(name, term) && n < max {
+                            var k: u64 = 0
+                            while k < NAMEN {
+                                var c: u64 = 0
+                                if k < ulib.length(name) {
+                                    c = __mmio_read8((name + k) as *mut u8)
+                                        as u64
+                                }
+                                __mmio_write8((out + n * NAMEN + k) as *mut u8,
+                                    c as u8)
+                                k = k + 1
+                            }
+                            n = n + 1
+                        }
+                        if io.dir_kind(rec) == io.DT_DIR {
+                            let ln: u64 = ulib.length(name)
+                            if at + ln + 1 < 1024 {
+                                ulib.strcpy((&namen[0 as usize]) as u64 + at,
+                                    name)
+                                anzahl = anzahl + 1
+                                at = at + ln + 1
+                            }
+                        }
+                    }
+                    p = p + rl
+                }
+            }
+        }
+    }
+    io.close(fd)
+    var unten: [u8; 256] = [0 as u8; 256]
+    var i: u64 = 0
+    var wo: u64 = 0
+    while i < anzahl {
+        let name: u64 = (&namen[0 as usize]) as u64 + wo
+        let ln: u64 = ulib.length(name)
+        ulib.strcpy((&unten[0 as usize]) as u64, pfad)
+        if ulib.length((&unten[0 as usize]) as u64) > 1 {
+            var schraeg: [u8; 2] = "/\0"
+            ulib.strcat((&unten[0 as usize]) as u64,
+                (&schraeg[0 as usize]) as u64)
+        }
+        ulib.strcat((&unten[0 as usize]) as u64, name)
+        n = absteigen((&unten[0 as usize]) as u64, term, out, max, n,
+            tiefe + 1)
+        wo = wo + ln + 1
+        i = i + 1
+    }
+    return n
+}
+
+fn punkt(p: u64) -> bool {
+    if __mmio_read8(p as *mut u8) != 46 as u8 {
+        return false
+    }
+    if __mmio_read8((p + 1) as *mut u8) == 0 as u8 {
+        return true
+    }
+    if __mmio_read8((p + 1) as *mut u8) != 46 as u8 {
+        return false
+    }
+    return __mmio_read8((p + 2) as *mut u8) == 0 as u8
+}

@@ -18,8 +18,8 @@ verlangt, und nicht im Kernel:
 
 | Datei | Zeilen | wo |
 |---|---:|---|
-| `kernel/user/wig.fi` — die Widgets, die Anordnung, die Ereignisschleife | 2688 | **Ring 3** |
-| `kernel/user/wigc.fi` — Zeichenfläche, Grundformen, Glyphen, Farbschema | 862 | **Ring 3** |
+| `kernel/user/wlib.fi` — die Widgets, die Anordnung, die Ereignisschleife | 2688 | **Ring 3** |
+| `kernel/user/wlibc.fi` — Zeichenfläche, Grundformen, Glyphen, Farbschema | 862 | **Ring 3** |
 | `kernel/user/files.fi` — `/bin/files`, der Dateimanager | 939 | **Ring 3** |
 | `kernel/user/wigdemo.fi` — die Anwendung, an der gemessen wird | 448 | **Ring 3** |
 | `kernel/wig.fi` — die Naht: sieben Aufrufe, die kein Widget kennen | 484 | Ring 0 |
@@ -450,6 +450,371 @@ in Zeile 1 nichts mehr; mit `wignokeys` steht auch in Zeile 0 nichts.
 
 ---
 
+## 6c. Der zweite Nachtrag: das Paket, das Symbol und der Namensindex
+
+*(Zweiter Nachtrag zum Auftrag, 26.08.2026.)*
+
+Drei Festlegungen, und die dritte ist die eigentliche Arbeit.
+
+### 6c.1 Die Dateinamen im Quellbaum
+
+Programme in Ring 3 liegen als `kernel/user/<name>.fi` und werden über
+die Liste `PROGS` nach `/bin/<name>` gebaut. Der Dateimanager hieß schon
+`explorer.fi`; die **Bibliothek** hieß `wig.fi` und `wigc.fi` — genauso
+wie die Kernel-Naht `kernel/wig.fi`, also zwei Dateien mit demselben
+Namen in zwei Verzeichnissen. Das ist jetzt aufgeräumt:
+
+| vorher | jetzt | was es ist |
+|---|---|---|
+| `kernel/user/wig.fi` | **`kernel/user/wlib.fi`** | die Widget-Schicht |
+| `kernel/user/wigc.fi` | **`kernel/user/wlibc.fi`** | der Zeichenkern |
+| `kernel/wig.fi` | `kernel/wig.fi` | die Naht im Kernel, unverändert |
+
+Beide Bibliotheken haben **kein `u_start`** und stehen **nicht in
+`PROGS`** — wie `ulib.fi` und `flate.fi`. Der Läufer prüft weiter, dass
+der Kernel die Symbole `wlib__button`, `wlib__step` und `wlibc__text_at`
+**nicht** trägt.
+
+### 6c.2 Ein Programm ist ein Verzeichnis
+
+Der erste Nachtrag legte je Programm eine Datei `/usr/share/apps/*.app`
+an. Justins Festlegung für den zweiten: **wie bei Apple, ein Bündel** —
+alles, was zu einem Programm gehört, an einer Stelle. Installieren heißt
+kopieren, entfernen heißt löschen. Die Endung ist **`.prog`** und nicht
+`.app`; wer die Form übernimmt, muss nicht auch den Namen nehmen.
+
+```
+/apps/explorer.prog/
+    INFO            name, info, keys, fassung
+    start           die ausfuehrbare Datei
+    symbol          das Bild (Format OSYM)
+    daten/          alles Weitere
+```
+
+`INFO` ist `schlüssel=wert`, eine Zeile je Feld — der Gedanke von
+`.desktop`, ohne Gruppenkopf, Sprachvarianten, `%f`, Escapes und die
+Felder für Dinge, die es hier nicht gibt. Die Begründung steht ganz in
+`kernel/user/appdir.fi`.
+
+**Was gegenüber dem ersten Nachtrag WEGGEFALLEN ist: `exec=`.** Dort
+stand ein absoluter Pfad, und ein Bündel mit einem Pfad nach draußen ist
+kein Bündel — man könnte es kopieren, und es zeigte weiter auf das alte
+Programm. Was läuft, ist **immer** `<bündel>/start`. Das kostet nichts:
+`start` ist ein **zweiter Name** auf dieselbe Inode wie die Datei unter
+`/bin` (`mkfs.py`, `<neu>@<vorhanden>`), kein zweites Exemplar. Fünf
+Bündel für fünf Programme von zusammen 896 KiB kosten dadurch **5 × 1036
+Oktette Symbol + 5 INFO-Dateien** und keinen einzigen Block für Code.
+
+Die alten `/bin`-Namen bleiben: `/apps` steht **daneben**, nicht an ihrer
+Stelle. Der Läufer prüft, dass `/usr/share/apps` nicht mehr im Abbild
+steht — eine Beschreibung an zwei Orten wäre einer zu viel.
+
+### 6c.3 Das Symbol ist jetzt wirklich ein Bild
+
+Im ersten Nachtrag war `icon=` **eine Farbe in sechs Hexziffern**, und
+der Starter malte daraus ein Plättchen mit einem Buchstaben darauf. Das
+war ehrlich, solange dieses System keine Bilddatei lesen konnte — aber es
+war kein Symbol.
+
+Jetzt liegt in jedem Bündel eine Datei `symbol` im Format **OSYM**: vier
+Oktette Kennung, Breite, Höhe, dann Breite × Höhe Bildpunkte zu vier
+Oktetten (B, G, R, A). Zwölf Oktette Kopf, ein Leser von zwanzig Zeilen
+in `wlib.fi`.
+
+**Warum nicht PNG.** PNG braucht einen Deflate-Leser (den gibt es,
+`flate.fi`), einen Filterschritt je Zeile, eine Farbtabelle, Interlacing
+und CRC32 — mehrere hundert Zeilen für 16 × 16 Bildpunkte, die aus einem
+Bündel kommen, das der Bauer dieses Systems selbst schreibt. Die Kennung
+steht am Anfang, also steht dieses Format einem PNG-Leser später nicht im
+Weg.
+
+**Die Quelle ist Text** (`assets/apps/*.prog/symbol.txt`: eine Palette,
+dann sechzehn Zeilen zu sechzehn Zeichen) — ein Oktettklumpen im Baum
+wäre in keinem Unterschied lesbar. `tools/k15/symbol.py` macht daraus die
+Datei und liest sie unabhängig zurück.
+
+**Gemessen wird Bildpunkt gegen Bildpunkt**, nicht als Fläche: das ist
+die Lehre aus Runde K7B, angewandt auf ein Bild. `tools/k15/symbolbild.py`
+vergleicht die gezeichneten 14 × 14 mit der zurückgelesenen Datei und
+zählt **nur die deckenden** Bildpunkte — über die durchsichtigen sagt ein
+Symbol nichts aus.
+
+| Prüfung | Ergebnis |
+|---|---|
+| Symbol des Dateimanagers, Zeile 0 | **169 von 169 deckenden gleich** |
+| dasselbe gegen das Symbol des Editors (Gegenprobe) | **161 von 169 falsch** |
+| Symbol des Editors, Zeile 1 | **169 von 169 gleich** |
+
+### 6c.4 Der Namensindex — das ganze Dateisystem, sofort
+
+Justin sagt: die Windows-Suche ist schlecht. Wer die Suche öffnet und
+etwas eintippt, soll **das ganze Dateisystem** durchsucht bekommen und
+die Antwort **sofort**. Das Vorbild ist **„Everything" von voidtools**,
+und sein Trick ist nachlesbar: es durchsucht die Platte nicht, sondern
+liest **einmal** die Master File Table von NTFS am Stück und hält daraus
+im Speicher eine Liste **nur aus Namen**; danach verfolgt es das
+**Änderungsjournal** (USN) und trägt nach.
+
+**Beide Hälften gibt es jetzt in Osum.**
+
+#### Die erste Hälfte: die Tabelle am Stück
+
+`WIG_SCAN` (1807) läuft **einmal** durch die Inode-Tabelle und gibt die
+Verzeichniseinträge heraus (`kernel/fs.fi`, `scan`). Kein Pfad wird dabei
+aufgelöst — genau das ist der Unterschied zum Baumdurchlauf, der für
+jeden Namen die ganze Kette von der Wurzel an noch einmal auflöst,
+Bestandteil für Bestandteil, mit einem Verzeichnisdurchlauf je
+Bestandteil.
+
+**Ein Unterschied zu NTFS, und er gehört benannt:** dort steht der Name
+im Tabelleneintrag (`$FILE_NAME`), hier nicht. In OFS trägt der Inode
+keinen Namen — Namen stehen in Verzeichnissen, und genau deshalb kann
+eine Datei zwei haben (`/bin/explorer` und `/bin/files`). Der Lauf geht
+deshalb über die **Verzeichnisse** der Tabelle und liest ihre Einträge;
+das bleibt **ein** Durchgang und bleibt ohne Pfadauflösung, aber es ist
+nicht dasselbe wie ein MFT-Lauf, und es soll nicht so aussehen.
+
+#### Die zweite Hälfte: das Journal — und warum dieser Weg
+
+Der Auftrag ließ die Wahl: (A) den Index an den Stellen im Kernel
+nachziehen, die Dateien anlegen/löschen/umbenennen, oder (B) ein Journal
+in OFS ergänzen. **Gewählt ist A**, und zwar als Ring im Kernelspeicher
+(`kernel/nidx.fi`, `WIG_JRNL` 1808), beschrieben an **genau zwei
+Stellen**: `fs.dir_add` (ein Name entsteht) und `fs.dir_remove` (ein Name
+vergeht). Mehr gibt es nicht — `create_path`, `mkdir`, `unlink_path`,
+`link` und das Umbenennen des Dateimanagers gehen alle da durch. Ein Name
+ist genau dann neu, wenn ein **Verzeichniseintrag** neu ist, nicht wenn
+ein Inode neu ist.
+
+**Was B gekostet hätte:** ein neues Feld im Superblock, also ein
+geändertes Format auf der Platte, also `tools/osum/mkfs.py`, also **jedes
+bestehende Abbild** und jeden Abschnitt von `test.sh`, der eines baut —
+und dazu die Frage, was passiert, wenn das Journal voll ist und der
+Schreiber gerade keinen Block mehr frei hat. Für eine Runde, die 1486
+bestehende Zusagen nicht senken darf, ist das der falsche Handel.
+
+**Was A kostet, und es steht hier und nicht im Kleingedruckten:** der
+Index **überlebt keinen Neustart** — das Journal liegt im Speicher. Und
+der Ring fasst **56 Sätze**; läuft er über, zählt `lost` mit, und ein
+Leser, der das sieht, **muss neu bauen**. Das ist keine Notlösung, das
+ist genau das, was Everything tut, wenn das USN-Journal umläuft.
+
+#### Wofür `fs.fi` angefasst werden musste
+
+Zwei Dinge, beide unvermeidbar, beide mit einer Gegenprobe:
+
+**1. Die Zahl der Inodes kommt aus dem Superblock.** Sie stand seit Runde
+62 als Konstante `128` in beiden Umsetzungen — und 128 Inodes sind 128
+Dateien. An zwanzig Dateien beweist sich gegen einen Baumdurchlauf
+nichts. Die Zahl **stand immer schon im Superblock** (`SB_INODES`), sie
+wurde nur nie gelesen; `mount` liest sie jetzt und prüft dabei, dass die
+Tabelle dort liegt, wo `inode_block_of` sie sucht, dass sie in den Platz
+vor dem ersten Datenblock passt und dass beides auf die Platte passt. Ein
+Superblock, der 40 000 Inodes behauptet, wird **nicht** eingehängt.
+
+*Die Bedingung, unter der das gemacht werden durfte:* ein Abbild ohne
+`--inodes=` muss **Oktett für Oktett** dasselbe sein wie vorher.
+Abschnitt 15d misst das — `data=34`, `inodes=…/128`, zweimal gebaut,
+zweimal dieselben Oktette. Was **nicht** beweglich wurde: die Blockkarte
+bleibt **ein** Block, also höchstens 4096 Blöcke je Abbild.
+
+**2. `getdents64` war quadratisch.** Es rief je Eintrag
+`fs.entry_at(dir, index)`, und das zählt für **jeden** Aufruf von vorn,
+wie viele belegte Einträge davor lagen. Bei acht Dateien fällt das nicht
+auf; bei 250 Dateien in einem Ordner sind es 31 000 Leseoperationen für
+einmal Durchgehen, und der erste Messlauf über 4000 Dateien **lief zehn
+Minuten und war nicht fertig**.
+
+Das musste auffallen, denn **die Gegenprobe dieser Runde IST der
+Baumdurchlauf**: ein Durchlauf, den ein quadratischer Kernelaufruf
+ausbremst, ließe den Namensindex besser aussehen, als er ist. Eine
+Gegenprobe, die man gewinnt, weil man dem Gegner ein Bein stellt, ist
+keine. `fs.entry_slot` gibt jetzt den Eintrag **am Platz** zurück, und
+`d_off` heißt in jedem Unix „wo im Verzeichnis" und nicht „der
+wievielte" — was jetzt drinsteht, ist also auch das richtige.
+
+#### Die Zahlen
+
+Ein Abbild mit **4000 leeren Dateien** in einem Baum aus siebzehn Ordnern
+(`tools/k15/gross.py`, `--inodes=4096`, Datenbereich ab Block 1026), im
+selben Prozess gemessen: erst der Index, dann derselbe Suchbegriff als
+rekursiver Baumdurchlauf.
+
+**1. Der Aufbau.**
+
+| | |
+|---|---:|
+| Namen aus der Inode-Tabelle | **4021** |
+| Sätze, die der Kernel geliefert hat | 4021 (keiner verloren) |
+| Systemaufrufe dafür | **65** (63 Sätze je Aufruf) |
+| Zeit | **820 123 µs** ≈ 0,82 s |
+| je Name | 203 µs |
+| abgeschnitten | 0 |
+
+Dass es 4021 sein müssen, wird nicht geglaubt: der Läufer zählt die Namen
+im fertigen Abbild auf dem Wirt (`mkfs.py list`) und hält die Zahl
+dagegen.
+
+**2. Die Suche danach.** Zehn Suchen am Stück gemessen, weil eine
+einzelne unter der Körnung der Uhr liegen kann:
+
+| Wort | Treffer | zehn Suchen | eine Suche |
+|---|---:|---:|---:|
+| `kupfer` | 1 | 69 663 µs | **6966 µs** |
+| `07` | 179 | 92 287 µs | 9228 µs |
+| `quaste` | 0 | 68 923 µs | 6892 µs |
+
+Der Aufbau ist **117-mal** so teuer wie eine Suche. Er passiert einmal;
+die Suche passiert bei jedem Tastendruck.
+
+**3. Die Gegenprobe — dieselbe Frage, der andere Weg.**
+
+| Wort | Index: Treffer / Zeit | Baumdurchlauf: Treffer / Zeit | Namen ungleich | Index schneller um |
+|---|---|---|---:|---:|
+| `kupfer` | 1 / **6966 µs** | 1 / **1 966 404 µs** | **0** | **282×** |
+| `07` | 179 / 9228 µs | 179 / 1 766 744 µs | **0** | 191× |
+| `quaste` | 0 / 6892 µs | 0 / 1 804 693 µs | **0** | 261× |
+
+*Die Zeiten für `kupfer` sind die der Abnahme; die für `07` und `quaste`
+stammen aus einem Lauf mit denselben Aufrufen kurz davor. Der Läufer
+nagelt bei allen drei die **Trefferzahlen** und die **Namensgleichheit**
+fest, nicht die Mikrosekunden — die schwanken mit der Last der Maschine
+um etwa ein Fünftel, die Größenordnung nicht.*
+
+Der Durchlauf hat dabei jedes Mal **4021 Namen** gesehen — genau so viele,
+wie im Index stehen. **Beide Wege liefern nicht nur dieselbe Zahl,
+sondern dieselben Namen**: `suchen` holt sich die Namen beider Listen,
+sortiert sie und vergleicht sie Oktett für Oktett (`ungleich=0`). Zwei
+Suchen, die beide „179" sagen, könnten 179 verschiedene Dateien meinen.
+
+Und `07` trifft genau **179**, weil die Liste, aus der das Abbild gebaut
+wurde, 179 Namen mit `07` enthält — nachgerechnet auf dem Wirt, nicht in
+der Maschine.
+
+**4. Nachziehen ohne Neuaufbau.** `suchen -j` legt eine Datei an, benennt
+sie um (kopieren und löschen — dieser Kernel hat kein `rename`) und
+löscht sie, und holt nach jedem Schritt das Journal ab. Was danach im
+Index steht, wird nicht behauptet, sondern **gesucht**:
+
+| Schritt | Journal geholt | Namen im Index | `zwiebel` | `apfel` |
+|---|---:|---:|---:|---:|
+| angelegt | 1 | 4022 | **1** | 0 |
+| umbenannt | 3 | 4022 | 0 | **1** |
+| gelöscht | 4 | 4021 | 0 | 0 |
+
+**Genau ein Aufbau im ganzen Lauf.** Ein Index, der nach jeder Änderung
+neu baut, ist kein Index, sondern ein Zwischenspeicher mit einer Sekunde
+Wartezeit.
+
+**5. Und die Gegenprobe dazu** (`suchen -n`): dieselben drei Schritte,
+aber das Journal wird **nicht** abgeholt.
+
+| Schritt | Journal geholt | Namen im Index | `zwiebel` | `apfel` |
+|---|---:|---:|---:|---:|
+| angelegt | **0** | 4021 | 0 | 0 |
+| umbenannt | **0** | 4021 | 0 | 0 |
+| gelöscht | **0** | 4021 | 0 | 0 |
+
+Der Index merkt **nichts**. Das ist der Beweis, dass oben wirklich das
+Journal gewirkt hat und nicht ein Zufall. `lost` blieb in beiden Läufen
+**0** — der Ring hat keinen Satz verworfen.
+
+**6. Und ein Wort, das nirgends steht.** `quaste` kommt in keinem der
+4021 Namen vor — nachgerechnet auf dem Wirt —, und **beide** Wege finden
+**null**, obwohl der Durchlauf dafür alle 4021 Namen angesehen hat. Eine
+Suche, die immer etwas findet, ist keine Suche.
+
+#### Die Suche im Fenster: Programme UND Dateien
+
+Der Starter sucht seit diesem Nachtrag in beidem: **erst** die Treffer
+aus `/apps` (Anzeigename, Beschreibung, Schlüsselwörter), **darunter** die
+Dateitreffer aus dem Namensindex, jeder mit seinem ganzen Pfad — aus den
+Elternnummern gebaut, denn der Index hält Namen und keine Pfade.
+
+Getippt wird über den QEMU-Monitor, gemessen wird der Schirm:
+
+| Lauf | getippt | Programme | Dateien |
+|---|---|---:|---:|
+| Regellauf | `blau` | **0** | **1** — `/daten/bilder/blau.ppm` |
+| **`wignoidx`** (ohne Namensindex) | `blau` | 0 | **0** |
+| Regellauf | `folder` | **1** — Datei-Explorer | 0 |
+| Regellauf | `quaste` | 0 | 0 |
+
+`blau` steht in **keiner** `INFO` — der Läufer rechnet das vorher nach.
+Was gefunden wird, kann also nur eine Datei sein. Und der Pfad steht im
+Bild, je Zeichen gegen die zweite Rasterung geprüft; mit `wignoidx` steht
+er dort nicht.
+
+### 6c.5 Die Fehler des zweiten Nachtrags
+
+**Der Rahmen über dem Bild.** Das Listen-Widget malte um jedes Symbol
+denselben Rahmen wie um ein Farbplättchen — und überschrieb damit die
+untere und die rechte Kante des Bildes. Im Bild sah man nichts; der
+Prüfer sah **25 von 169 deckenden Bildpunkten falsch**, und die Zahl 25
+ist genau 13 + 12, also eine Reihe und eine Spalte. Ein Symbol bringt
+seinen Rand selbst mit oder hat keinen.
+
+**`wig.init` löschte die Geometrie des Dateisystems.** Der zweite
+Nachtrag legt in die erste Seite des K15-Vorrats zwei Wörter für die
+Inode-Zahl (0x46080) und das Journal (0x46100). `wig.init` nullte bis
+dahin **die ganzen drei Seiten** — und es läuft, wenn die Oberfläche
+hochkommt, also lange nach dem ersten `mkdir`. Das Ergebnis wäre ein
+`mount`, das geht, und ein `block_alloc`, das ab Block 34 vergibt, wo die
+Inode-Tabelle liegt. Jetzt löscht es nur, was ihm gehört.
+
+**Ein Leseaufruf je Verzeichniseintrag.** Der erste Entwurf von
+`fs.scan` las je Eintrag 32 Oktette; jetzt liest er 512 und nimmt
+sechzehn Einträge daraus. Das darf nur, wer weiß, **welcher Puffer wem
+gehört**: der Eintragsblock steht in `buf_zz`, `read_at` arbeitet in
+`buf_dt`, `inode_get` in `buf_in`, `file_block` in `buf_ib`. Stünde er in
+`buf_dt`, zöge ihn der nächste Leseaufruf unter der Schleife weg — und
+der Lauf lieferte Müll, der wie ein Dateiname aussieht.
+
+**Der Baumdurchlauf merkte sich alle Namen.** `absteigen` legte **jeden**
+gelesenen Namen in einen Puffer, um danach in die Unterverzeichnisse zu
+gehen. In einem Ordner mit 4000 Dateien war der nach sechzig voll — der
+Durchlauf stieg dann in kein Unterverzeichnis mehr ab und meldete zu
+wenige Treffer. Eine Gegenprobe, die **weniger** findet als der Index,
+ließe den Index fälschlich gut aussehen. Gemerkt werden jetzt nur
+Unterverzeichnisse.
+
+**`mkfs.py` brauchte 59 Sekunden für das große Abbild.** `dir_find` und
+die Suche nach einem freien Platz gingen beide von vorn durch das
+Verzeichnis: acht Millionen Eintragsleseoperationen. Mit einem Gedächtnis
+je Verzeichnis sind es **0,1 Sekunden**. Der Kernel darf so arbeiten — er
+legt selten viertausend Dateien an —, ein Werkzeug auf dem Wirt nicht.
+
+### 6c.6 Was der zweite Nachtrag NICHT hat
+
+* **Der Index überlebt keinen Neustart.** Das Journal liegt im Speicher
+  des Kernels. Nach jedem Start baut das suchende Programm neu — 0,94 s
+  für 4021 Namen.
+* **56 Sätze im Ring, 4200 Namen im Index.** Läuft der Ring über, sagt
+  `lost` das und der Leser muss neu bauen. Über 4200 Namen sagt `build`
+  „abgeschnitten" statt stillschweigend zu vergessen.
+* **Eine Suche über 4021 Namen kostet 6,8 ms.** Das ist ein Zeichen für
+  Zeichen laufender Teilzeichenkettenvergleich ohne jeden Index über den
+  Anfangsbuchstaben. Für ein Suchfeld reicht es; für 120 000 Namen wie
+  beim Vorbild reichte es nicht.
+* **Der Index hält Namen, keine Pfade.** Der ganze Pfad wird für die
+  angezeigten Treffer aus den Elternnummern gebaut — ein Durchgang je
+  Ebene. Das ist billig für zwölf Treffer und wäre teuer für 4000.
+* **`unlink` zählt `I_NLINK` weiter nicht herunter.** Ein `rm
+  /apps/explorer.prog/start` macht `/bin/explorer` unbrauchbar. Auf `/bin`
+  und `/apps`, die nur gelesen werden, fällt das nicht an; falsch ist es
+  trotzdem.
+* **Die Blockkarte bleibt ein Block** — höchstens 4096 Blöcke, also zwei
+  Megaoktett je Abbild. Mehr Inodes gehen; mehr Platz nicht.
+* **Der Starter startet keine Datei.** Ein Doppelklick auf einen
+  Dateitreffer sagt, welche Datei es ist. Was damit geschehen soll,
+  entscheidet nicht der Starter.
+* **Ein Bündel kann keinen Argumentsatz mitgeben.** Was läuft, ist
+  `<bündel>/start` ohne Argumente.
+* **Sechzehn Bündel, 6 KiB Zeichenketten, 16 KiB Symbole.** Was darüber
+  hinausgeht, wird übergangen.
+
+---
+
 ## 7. Die Fehler dieser Runde
 
 Sie stehen hier, weil sie mehr über den Baum sagen als die grünen Zeilen.
@@ -533,14 +898,9 @@ Null zurück, statt in die nächste Seite zu schreiben.
 
 ## 8. Was diese Runde NICHT hat
 
-* **Ein `.app`-Eintrag kann keinen Argumentsatz mitgeben.** `exec=` ist
-  ein Pfad, kein Kommando mit Argumenten — der Starter ruft `spawn` mit
-  genau diesem Pfad. Wer `edit /etc/theme` als Eintrag will, braucht ein
-  Feld mehr und einen Zerleger dafür.
-* **Sechzehn Programme, 4 KiB Zeichenketten.** Das Anwendungsverzeichnis
-  liest höchstens sechzehn `.app`-Dateien und legt ihre Werte in einen
-  Bereich von vier Kilooktett. Was darüber hinausgeht, wird übergangen —
-  nicht abgeschnitten.
+*(Die Punkte zum Anwendungsverzeichnis und zum Symbol stehen seit dem
+zweiten Nachtrag in 6c.6 — dort in ihrer heutigen Fassung.)*
+
 * **Kein Hintergrundbild.** Der Schreibtisch ist eine Farbe, und der
   Fensterserver malt ihn (`wm.compose`, `S_DESK`). Ein Bild dahinter
   hieße entweder ein Bild im Kernel oder ein Fenster, das *unter* alle
@@ -579,16 +939,17 @@ Null zurück, statt in die nächste Seite zu schreiben.
 
 `bash tools/k15/run.sh` ist Abschnitt 21 von `./test.sh`.
 
-Die siebzehn Abschnitte des Läufers: bauen aus beiden Übersetzern · die
+Die Abschnitte des Läufers: bauen aus beiden Übersetzern · die
 Speicherkarte · die Anwendung steht da (Anordnung) · der Text je Zeichen
 · die Widgets an ihrer Stelle · bedienen mit echten Klicks · die Tastatur
 samt Zwischenablage · Menüs und Dialoge · der Dateimanager gegen die
 Platte · hineingehen, sortieren, anlegen · die Zeiten · die Gegenproben ·
 das Farbschema aus einer Datei · das Zeigerbild · **der Name und der
-zweite Name** · **das Anwendungsverzeichnis und der Starter** · **die
-Suche und ihre drei Gegenproben**.
-
-**189 Zusagen, 0 Fehler.**
+zweite Name** · **die Bündel unter `/apps` und der Starter** · **die
+Suche über die Schlüsselwörter und ihre drei Gegenproben** ·
+**der Namensindex gegen den Baumdurchlauf** · **das Journal und die
+Gegenprobe ohne Journal** · **der Starter findet Dateien** · **und die
+alten Abbilder sind Oktett für Oktett die alten**.
 
 ### Die ganze Abnahme, Abschnitt für Abschnitt
 
@@ -612,8 +973,8 @@ Suche und ihre drei Gegenproben**.
 | 16 | der Editor und der Werkzeugkasten | 85 | 0 |
 | 17 | die Oberfläche (Runde K10) | **103** | 0 |
 | 18 | ein Wirt für fremde Prozessoren | 114 | 0 |
-| **21** | **Widgets, der Dateimanager, der Starter** | **189** | **0** |
-| | **Summe** | **1675** | **0** |
+| **21** | **Widgets, der Dateimanager, der Starter, der Namensindex** | **251** | **0** |
+| | **Summe** | **1737** | **0** |
 
 Die achtzehn Abschnitte vor dieser Runde ergeben **1486** — genau die
 Zahl, die vorher dastand, keine einzige weniger. Abschnitt 17
@@ -621,31 +982,46 @@ Zahl, die vorher dastand, keine einzige weniger. Abschnitt 17
 `kernel/wm.fi` angefasst hat; Abschnitt 4 und 13 messen die Tastatur
 weiter, obwohl `kernel/kbd.fi` eine Taste dazubekommen hat.
 
-**Nach dem Nachtrag noch einmal nachgemessen.** Der Nachtrag hat
-`tools/osum/mkfs.py` angefasst (der zweite Name) — und `mkfs.py` baut das
-Plattenabbild für sieben andere Abschnitte. Die wurden deshalb einzeln
-wiederholt, nach dem Umbau:
+**Nach dem ZWEITEN Nachtrag alle achtzehn noch einmal.** Dieser Nachtrag
+hat `kernel/fs.fi` angefasst (die Inode-Zahl aus dem Superblock, der
+Tabellenlauf, die zwei Journalhaken), `kernel/sys.fi` (`getdents64` geht
+über Plätze statt über laufende Nummern) und `tools/osum/mkfs.py` — also
+den Boden, auf dem **jeder** andere Abschnitt steht. Es wäre unredlich,
+nur den eigenen zu messen. Alle achtzehn, einzeln, nach dem Umbau:
 
 ```
-OSUM 130 · POSIX 134 · USERLAND 91 · GFX 76 · UNIX 107 · K11 85 · WM 103
+FREESTANDING 41 · CORE 46 · KERNEL 176 · OSUM 130 · PCI 98 · POSIX 134
+SMP 59 · USERLAND 91 · CAPS 67 · BOOT 20 · GFX 76 · UNIX 107 · NET 75
+GUARD 55 · K11 85 · WM 103 · HV 114     (+ Abschnitt 1: 9)
 ```
 
-Alle sieben Zeile für Zeile dieselben Zahlen wie vorher, 0 Fehler.
+Zusammen **1486** — Zahl für Zahl dieselben wie vorher, 0 Fehler. Mit den
+**251** dieser Runde sind es **1737**.
 
-**Wie gemessen wurde, und was daran unschön ist.** Ein Durchlauf von
-`./test.sh` in einem Stück ist auf diesem Rechner nicht zu Ende
-gekommen: der Prozess wurde während Abschnitt 16 beendet, während drei
-weitere Runden gleichzeitig ihre eigenen Abnahmen fuhren (bis zu elf
-QEMU-Prozesse auf zwölf Kernen). Die Abschnitte 16 bis 21 wurden deshalb
-einzeln nachgezogen — dieselben Skripte, dieselben Aufrufe, nur
-nacheinander. Das steht hier, weil eine Summe, die aus zwei Läufen
-zusammengesetzt ist, etwas anderes ist als eine aus einem.
+*Eine Zahl, die zwischendurch anders aussah:* NET meldete in einem Lauf
+**74 + 1 Fehler** („64240 statt 65536 angekommen") — allein und ohne Last
+danach **75 + 0**. Das ist ein TCP-Fenster unter Last und keine Zeile
+dieser Runde; es steht hier, weil eine Zahl, die man zweimal messen
+musste, dazugehört.
 
-Sechsundzwanzig QEMU-Läufe, jeder mit eigenem Plattenabbild, jeder mit
-Bildschirmfoto: `ruhe` · `klick` · `haken` · `reiter` · `tast` · `noclip`
-· `tabkey` · `pop` · `popw` · `dlg` · `dlgok` · `files` · `fdbl` ·
-`fsort` · `fneu` · `haken_nd` · `nohit` · `nomaus` · `nofok` · `ohne` ·
-`theme2` · `beam` · `start` · `suche` · `nokeys` · `unsinn`.
+**Wie gemessen wurde, und was daran unschön ist.** Die Summe stammt
+nicht aus **einem** Aufruf von `./test.sh`, sondern aus dem Läufer dieser
+Runde am Stück (251 Zusagen, 0 Fehler, ein Lauf) plus den achtzehn
+anderen Abschnitten, einzeln aufgerufen. Der Grund ist die Maschine:
+Abschnitt 21 allein braucht auf ihr etwa eine Stunde und einunddreißig
+QEMU-Läufe, und `./test.sh` in einem Stück ist hier schon in der Runde
+davor nicht durchgekommen. Das steht hier, weil eine Summe, die aus
+mehreren Läufen zusammengesetzt ist, etwas anderes ist als eine aus
+einem.
+
+**Einunddreißig QEMU-Läufe**, jeder mit eigenem Plattenabbild.
+Sechsundzwanzig davon mit Bildschirmfoto: `ruhe` · `klick` · `haken` ·
+`reiter` · `tast` · `noclip` · `tabkey` · `pop` · `popw` · `dlg` ·
+`dlgok` · `files` · `fdbl` · `fsort` · `fneu` · `haken_nd` · `nohit` ·
+`nomaus` · `nofok` · `ohne` · `theme2` · `beam` · `start` · `suche` ·
+`nokeys` · `unsinn` · **`dsuche`** · **`noidx`**. Und fünf ohne Bild, auf
+dem großen Abbild mit 4000 Dateien: **`gkupfer`** · **`gviele`** ·
+**`gquaste`** · **`gjrnl`** · **`gnojrnl`**.
 
 Die Zusagen der Runden 52 bis K12 sind unverändert da — diese Runde fasst
 von ihnen nur `kernel/kbd.fi` (eine Taste, die vorher nicht ankam) und
@@ -687,3 +1063,8 @@ Lücken).
 Das gehört hier hin und nicht in eine Fußnote: eine grüne Abnahme, die
 man nur bekommt, wenn die Maschine sonst nichts tut, ist eine Abnahme mit
 einer Bedingung — und die Bedingung ist genannt.
+
+*(Nachtrag beim zweiten Nachtrag: bei der Wiederholung aller achtzehn
+Abschnitte lief PCI **98 von 98** durch — auf einer Maschine, auf der
+diesmal nichts anderes rechnete. Der Absatz darüber bleibt trotzdem
+stehen; er beschreibt, was passiert, wenn sie voll ist.)*

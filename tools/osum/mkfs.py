@@ -25,12 +25,25 @@ The format, from `kernel/fs.fi`:
     a dirent       32 octets: inode number, then 24 for the name
 
 Usage:
-    mkfs.py build <image> <blocks>
-            [ <path>=<hostfile> | <path>/ | <neu>@<vorhanden> ] ...
+    mkfs.py build <image> <blocks> [--inodes=<n>]
+            [ <path>=<hostfile> | <path>= | <path>/ | <neu>@<vorhanden> ] ...
 
 `<neu>@<vorhanden>` ist ein ZWEITER NAME fuer dieselbe Datei (Runde K15):
 zwei Verzeichniseintraege mit derselben Inode-Nummer, ein Exemplar der
 Oktette.
+
+`<path>=` mit nichts dahinter legt eine LEERE Datei an -- ein Name, ein
+Inode, kein Datenblock. Der Namensindex des zweiten K15-Nachtrags wird an
+mehreren Tausend davon gemessen, und mehrere Tausend Dateien mit Inhalt
+passten nicht auf ein Abbild von zwei Megaoktett.
+
+`--inodes=<n>` setzt die GROESSE DER INODE-TABELLE. Sie stand seit Runde
+62 als 128 in beiden Umsetzungen; sie steht aber auch im Superblock, und
+seit dem zweiten K15-Nachtrag liest `kernel/fs.fi` sie von dort. Ohne die
+Angabe bleiben es 128 -- Abbild fuer Abbild dieselben Oktette wie vorher.
+Die Tabelle waechst um einen Block je vier Inodes, und der erste
+Datenblock rueckt entsprechend nach hinten. Die Blockkarte bleibt EIN
+Block, also hoechstens 4096 Bloecke je Abbild.
     mkfs.py list  <image>
     mkfs.py cat   <image> <path>
 
@@ -69,9 +82,17 @@ SB = dict(MAGIC=0, BSIZE=8, BLOCKS=16, INODES=24, BITMAP=32, ITABLE=40,
 
 
 class Fs:
-    def __init__(self, blocks):
-        if blocks < DATA_START + 8:
-            raise SystemExit("mkfs: a disk of %d blocks is too small" % blocks)
+    def __init__(self, blocks, inodes=INODE_COUNT):
+        self.inodes = inodes
+        self.itab_blocks = (inodes + INODES_PER_BLOCK - 1) // INODES_PER_BLOCK
+        self.data_start = INODE_START + self.itab_blocks
+        if blocks < self.data_start + 8:
+            raise SystemExit("mkfs: a disk of %d blocks is too small for %d "
+                             "inodes (the table alone takes %d)"
+                             % (blocks, inodes, self.itab_blocks))
+        if blocks > BS * 8:
+            raise SystemExit("mkfs: the bitmap is one block, so at most %d "
+                             "blocks fit; %d asked" % (BS * 8, blocks))
         self.blocks = blocks
         self.d = bytearray(blocks * BS)
         self.root = 1
@@ -91,7 +112,7 @@ class Fs:
         return (self.d[BITMAP_BLOCK * BS + b // 8] >> (b % 8)) & 1
 
     def block_alloc(self):
-        b = DATA_START
+        b = self.data_start
         while b < self.blocks and b < BS * 8:
             if not self.bit_get(b):
                 self.bit_set(b)
@@ -105,6 +126,9 @@ class Fs:
 
     # ------------------------------------------------------------ inodes
     def inode_at(self, ino):
+        if ino < 1 or ino > self.inodes:
+            raise SystemExit("mkfs: inode %d is outside the table (%d)"
+                             % (ino, self.inodes))
         return ((INODE_START + (ino - 1) // INODES_PER_BLOCK) * BS
                 + ((ino - 1) % INODES_PER_BLOCK) * INODE_SIZE)
 
@@ -115,17 +139,22 @@ class Fs:
         self.p64(self.inode_at(ino) + field, v)
 
     def inode_alloc(self, kind):
-        for ino in range(1, INODE_COUNT + 1):
+        # Der naechste freie und nicht immer wieder von vorn: bei 4000
+        # Dateien waere das linear von eins ein quadratischer Bau, und der
+        # dauert auf dem Wirt Minuten statt Sekunden.
+        start = getattr(self, "_next_ino", 1)
+        for ino in range(start, self.inodes + 1):
             if self.iget(ino, I_TYPE) == T_FREE:
                 at = self.inode_at(ino)
                 self.d[at:at + INODE_SIZE] = bytes(INODE_SIZE)
                 self.iset(ino, I_TYPE, kind)
                 self.iset(ino, I_NLINK, 1)
+                self._next_ino = ino + 1
                 return ino
-        raise SystemExit("mkfs: no inode left")
+        raise SystemExit("mkfs: no inode left (%d in the table)" % self.inodes)
 
     def used_inodes(self):
-        return sum(1 for i in range(1, INODE_COUNT + 1)
+        return sum(1 for i in range(1, self.inodes + 1)
                    if self.iget(i, I_TYPE) != T_FREE)
 
     # ------------------------------------------------------------- files
@@ -228,21 +257,41 @@ class Fs:
         name = raw[8:].split(b"\0")[0].decode("ascii", "replace")
         return ino, name
 
+    # EIN GEDAECHTNIS JE VERZEICHNIS, und es ist nicht Bequemlichkeit.
+    # `dir_find` und die Suche nach einem freien Platz gingen beide von
+    # vorn durch das Verzeichnis; bei 4000 Dateien in einem Ordner sind
+    # das acht Millionen Eintragsleseoperationen, und der Bau des
+    # Messabbilds dauerte damit 59 Sekunden. Der Kernel darf so
+    # arbeiten -- er legt selten viertausend Dateien an --, ein Werkzeug
+    # auf dem Wirt nicht.
+    def _cache(self, dirino):
+        c = getattr(self, "_dc", None)
+        if c is None:
+            c = self._dc = {}
+        got = c.get(dirino)
+        if got is None:
+            namen = {}
+            frei = None
+            n = self.dir_entries(dirino)
+            for i in range(n):
+                ino, name = self.entry(dirino, i)
+                if ino:
+                    namen[name] = ino
+                elif frei is None:
+                    frei = i
+            got = c[dirino] = [namen, n if frei is None else frei]
+        return got
+
     def dir_find(self, dirino, name):
-        for i in range(self.dir_entries(dirino)):
-            ino, got = self.entry(dirino, i)
-            if ino and got == name:
-                return ino
-        return 0
+        return self._cache(dirino)[0].get(name, 0)
 
     def dir_add(self, dirino, name, ino):
         if len(name.encode()) > NAME_LEN - 1:
             raise SystemExit("mkfs: the name '%s' is too long" % name)
-        slot = self.dir_entries(dirino)
-        for i in range(slot):
-            if self.entry(dirino, i)[0] == 0:
-                slot = i
-                break
+        c = self._cache(dirino)
+        slot = c[1]
+        c[0][name] = ino
+        c[1] = slot + 1
         rec = bytearray(DIRENT)
         struct.pack_into("<Q", rec, 0, ino)
         rec[8:8 + len(name)] = name.encode()
@@ -329,12 +378,12 @@ class Fs:
         self.p64(SB["MAGIC"], MAGIC)
         self.p64(SB["BSIZE"], BS)
         self.p64(SB["BLOCKS"], self.blocks)
-        self.p64(SB["INODES"], INODE_COUNT)
+        self.p64(SB["INODES"], self.inodes)
         self.p64(SB["BITMAP"], BITMAP_BLOCK)
         self.p64(SB["ITABLE"], INODE_START)
-        self.p64(SB["DATA"], DATA_START)
+        self.p64(SB["DATA"], self.data_start)
         self.p64(SB["ROOT"], 1)
-        for b in range(DATA_START):
+        for b in range(self.data_start):
             self.bit_set(b)
         self.root = 1
         ino = self.inode_alloc(T_DIR)
@@ -360,21 +409,38 @@ class Fs:
         return out
 
 
+# Ein Abbild vom Wirt lesen -- und die Geometrie AUS DEM SUPERBLOCK
+# nehmen, nicht aus den Konstanten. Genau das tut `fs.mount` seit dem
+# zweiten K15-Nachtrag auch; eine der beiden Umsetzungen, die es nicht
+# taete, waere der Fehler, gegen den es die zweite ueberhaupt gibt.
+def load(path):
+    raw = open(path, "rb").read()
+    if len(raw) < BS:
+        return None
+    inodes = struct.unpack_from("<Q", raw, SB["INODES"])[0] or INODE_COUNT
+    fs = Fs(max(len(raw) // BS, INODE_START
+                + (inodes + INODES_PER_BLOCK - 1) // INODES_PER_BLOCK + 8),
+            inodes)
+    fs.d[:len(raw)] = raw
+    if fs.g64(SB["MAGIC"]) != MAGIC:
+        return None
+    fs.root = fs.g64(SB["ROOT"])
+    return fs
+
+
 def main(argv):
     if len(argv) < 3:
         print(__doc__)
         return 2
     cmd = argv[1]
     if cmd == "list":
-        raw = open(argv[2], "rb").read()
-        fs = Fs(max(len(raw) // BS, DATA_START + 8))
-        fs.d[:len(raw)] = raw
-        if fs.g64(SB["MAGIC"]) != MAGIC:
+        fs = load(argv[2])
+        if fs is None:
             print("no OSUM-OFS magic")
             return 1
-        fs.root = fs.g64(SB["ROOT"])
-        print("blocks=%d free=%d inodes=%d"
-              % (fs.g64(SB["BLOCKS"]), fs.free_blocks(), fs.used_inodes()))
+        print("blocks=%d free=%d inodes=%d/%d"
+              % (fs.g64(SB["BLOCKS"]), fs.free_blocks(), fs.used_inodes(),
+                 fs.inodes))
         for line in fs.tree():
             print(line)
         return 0
@@ -385,13 +451,10 @@ def main(argv):
         # written and has to come back octet for octet -- the old format
         # stopped at 38912, and a reader that still walked only one level
         # would give back the first 38912 and call it a file.
-        raw = open(argv[2], "rb").read()
-        fs = Fs(max(len(raw) // BS, DATA_START + 8))
-        fs.d[:len(raw)] = raw
-        if fs.g64(SB["MAGIC"]) != MAGIC:
+        fs = load(argv[2])
+        if fs is None:
             print("no OSUM-OFS magic")
             return 1
-        fs.root = fs.g64(SB["ROOT"])
         ino = fs.resolve(argv[3])
         if not ino:
             print("mkfs: no such path '%s'" % argv[3])
@@ -404,9 +467,17 @@ def main(argv):
         return 2
 
     image, blocks = argv[2], int(argv[3])
-    fs = Fs(blocks)
+    specs = list(argv[4:])
+    inodes = INODE_COUNT
+    rest = []
+    for spec in specs:
+        if spec.startswith("--inodes="):
+            inodes = int(spec.split("=", 1)[1])
+        else:
+            rest.append(spec)
+    fs = Fs(blocks, inodes)
     fs.format()
-    for spec in argv[4:]:
+    for spec in rest:
         if spec.endswith("/"):
             fs.mkdir(spec[:-1])
             continue
@@ -416,15 +487,19 @@ def main(argv):
             path, _, alt = spec.partition("@")
             fs.link(path, alt)
             continue
-        path, _, host = spec.partition("=")
-        if not host:
+        path, sep, host = spec.partition("=")
+        if not sep:
             raise SystemExit("mkfs: '%s' needs <path>=<hostfile>" % spec)
+        if not host:
+            fs.addfile(path, b"")  # eine leere Datei: ein Name, kein Block
+            continue
         with open(host, "rb") as f:
             fs.addfile(path, f.read())
     with open(image, "wb") as f:
         f.write(fs.d)
-    print("mkfs: %s  blocks=%d free=%d inodes=%d"
-          % (image, blocks, fs.free_blocks(), fs.used_inodes()))
+    print("mkfs: %s  blocks=%d free=%d inodes=%d/%d data=%d"
+          % (image, blocks, fs.free_blocks(), fs.used_inodes(), fs.inodes,
+             fs.data_start))
     return 0
 
 
