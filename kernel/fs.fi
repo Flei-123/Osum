@@ -41,12 +41,14 @@ import sched
 import blk
 import atomic
 import cpu
+import nidx
 
 export {
     format, mount, path, create_path, unlink_path, entry_at, dir_entries,
     inode_type, inode_size, read_at, write_at, file_truncate, root,
     free_blocks,
-    used_inodes, MAGIC, T_FILE, T_DIR, DIRENT, NAME_LEN, INODE_COUNT
+    used_inodes, MAGIC, T_FILE, T_DIR, DIRENT, NAME_LEN, INODE_COUNT,
+    inode_count, data_start, scan, geom, entry_slot, slot_count
 }
 
 const BS: u64 = 512 // one block
@@ -73,6 +75,49 @@ const PER_BLOCK: u64 = BS / 8 // pointers in one block: 64
 const T_FREE: u64 = 0
 const T_FILE: u64 = 1
 const T_DIR: u64 = 2
+
+// ------------------------------------- ROUND K15, ZWEITER NACHTRAG
+//
+// DIE ZAHL DER INODES STAND IMMER SCHON IM SUPERBLOCK -- sie wurde nur
+// nie gelesen. `INODE_COUNT` und `DATA_START` oben sind seit Runde 62
+// Konstanten, und 128 Inodes sind 128 Dateien: fuer einen Namensindex,
+// der sich gegen einen Baumdurchlauf beweisen soll, ist das keine
+// Messung, das ist eine Anekdote.
+//
+// Also werden die beiden Zahlen beim Einhaengen AUS DEM SUPERBLOCK
+// gelesen und in zwei Woertern gehalten (`kstate.FSG_OFF`). Die
+// Konstanten bleiben als VORGABE stehen -- ein Abbild, das 128 im
+// Superblock hat, verhaelt sich Oktett fuer Oktett wie vorher, und das
+// ist die Bedingung, unter der diese Aenderung ueberhaupt gemacht werden
+// durfte: 1486 bestehende Zusagen haengen daran.
+//
+// Was NICHT beweglich wurde: die Blockkarte bleibt EIN Block, also
+// 4096 Bloecke, also zwei Megaoktett je Abbild. Wer mehr will, braucht
+// eine mehrblockige Karte -- das ist eine andere Runde, und es steht
+// hier, damit niemand es fuer erledigt haelt.
+const G_INODES: u64 = 0
+const G_DATA: u64 = 8
+
+fn inode_count(state: u64) -> u64 {
+    let n: u64 = kstate.get(state, kstate.FSG_OFF + G_INODES)
+    if n == 0 {
+        return INODE_COUNT
+    }
+    return n
+}
+
+fn data_start(state: u64) -> u64 {
+    let d: u64 = kstate.get(state, kstate.FSG_OFF + G_DATA)
+    if d == 0 {
+        return DATA_START
+    }
+    return d
+}
+
+fn geom(state: u64, inodes: u64, data: u64) {
+    kstate.set(state, kstate.FSG_OFF + G_INODES, inodes)
+    kstate.set(state, kstate.FSG_OFF + G_DATA, data)
+}
 
 // The fields of an inode.
 const I_TYPE: u64 = 0
@@ -217,7 +262,7 @@ fn inode_off(ino: u64) -> u64 {
 }
 
 fn inode_get(state: u64, ino: u64, field: u64) -> u64 {
-    if ino == 0 || ino > INODE_COUNT {
+    if ino == 0 || ino > inode_count(state) {
         return 0
     }
     if !blk.read(state, inode_block_of(ino), buf_in(state)) {
@@ -227,7 +272,7 @@ fn inode_get(state: u64, ino: u64, field: u64) -> u64 {
 }
 
 fn inode_set(state: u64, ino: u64, field: u64, v: u64) -> bool {
-    if ino == 0 || ino > INODE_COUNT {
+    if ino == 0 || ino > inode_count(state) {
         return false
     }
     if !blk.read(state, inode_block_of(ino), buf_in(state)) {
@@ -260,7 +305,8 @@ fn inode_init(state: u64, ino: u64, kind: u64) -> bool {
 
 fn inode_alloc(state: u64, kind: u64) -> u64 {
     var ino: u64 = 1
-    while ino <= INODE_COUNT {
+    let letzte: u64 = inode_count(state)
+    while ino <= letzte {
         if inode_get(state, ino, I_TYPE) == T_FREE {
             if inode_init(state, ino, kind) {
                 return ino
@@ -272,14 +318,24 @@ fn inode_alloc(state: u64, kind: u64) -> u64 {
     return 0
 }
 
+// EIN BLOCK JE VIER INODES UND NICHT EIN BLOCK JE INODE. Mit 128 Inodes
+// war der Unterschied nicht zu merken; mit 4096 sind es 4096 Leseaufrufe
+// gegen 1024 fuer dieselbe Antwort, und `df` ruft das.
 fn used_inodes(state: u64) -> u64 {
-    var ino: u64 = 1
+    let letzte: u64 = inode_count(state)
     var n: u64 = 0
-    while ino <= INODE_COUNT {
-        if inode_get(state, ino, I_TYPE) != T_FREE {
-            n = n + 1
+    var b: u64 = 0
+    while b * INODES_PER_BLOCK < letzte {
+        if blk.read(state, INODE_START + b, buf_in(state)) {
+            var k: u64 = 0
+            while k < INODES_PER_BLOCK && b * INODES_PER_BLOCK + k < letzte {
+                if get64(buf_in(state) + k * INODE_SIZE + I_TYPE) != T_FREE {
+                    n = n + 1
+                }
+                k = k + 1
+            }
         }
-        ino = ino + 1
+        b = b + 1
     }
     return n
 }
@@ -290,7 +346,7 @@ fn block_alloc(state: u64) -> u64 {
     if !blk.read(state, BITMAP_BLOCK, buf_bm(state)) {
         return 0
     }
-    var b: u64 = DATA_START
+    var b: u64 = data_start(state)
     let last: u64 = blk.blocks(state)
     while b < last && b < BS * 8 {
         let p: u64 = buf_bm(state) + b / 8
@@ -309,7 +365,7 @@ fn block_alloc(state: u64) -> u64 {
 }
 
 fn block_free(state: u64, b: u64) {
-    if b < DATA_START || b >= blk.blocks(state) {
+    if b < data_start(state) || b >= blk.blocks(state) {
         return
     }
     if !blk.read(state, BITMAP_BLOCK, buf_bm(state)) {
@@ -632,6 +688,32 @@ fn dir_find(state: u64, dir: u64, name: u64) -> u64 {
 
 // The `index`-th LIVE entry. `out` gets the 32 octets of the entry:
 // inode number and name. 0 = there is no such entry.
+// ------------------------------------------- ROUND K15, ZWEITER NACHTRAG
+//
+// DER EINTRAG AM PLATZ `slot`, und nicht "der `index`-te, der belegt
+// ist". `entry_at` darunter zaehlt fuer JEDEN Aufruf von vorn; wer damit
+// ein Verzeichnis durchgeht, arbeitet quadratisch. Der Grund, warum das
+// diese Runde angeht, steht bei `sys.do_getdents`.
+//
+// Ein leerer Platz gibt 0 zurueck, der Aufrufer geht weiter.
+fn entry_slot(state: u64, dir: u64, slot: u64, out: u64) -> u64 {
+    let flags: u64 = enter(state)
+    if slot >= dir_entries(state, dir) {
+        leave(state, flags)
+        return 0
+    }
+    let ino: u64 = entry_read(state, dir, slot, out)
+    leave(state, flags)
+    return ino
+}
+
+fn slot_count(state: u64, dir: u64) -> u64 {
+    let flags: u64 = enter(state)
+    let n: u64 = dir_entries(state, dir)
+    leave(state, flags)
+    return n
+}
+
 fn entry_at(state: u64, dir: u64, index: u64, out: u64) -> u64 {
     let n: u64 = dir_entries(state, dir)
     var i: u64 = 0
@@ -668,7 +750,33 @@ fn dir_add(state: u64, dir: u64, name: u64, ino: u64) -> bool {
         kstate.set8(buf_nm(state) + 8 + k, kstate.get8(name + k) as u8)
         k = k + 1
     }
-    return write_at(state, dir, slot * DIRENT, buf_nm(state), DIRENT) == DIRENT
+    if write_at(state, dir, slot * DIRENT, buf_nm(state), DIRENT) != DIRENT {
+        return false
+    }
+    // RUNDE K15: EIN NAME IST ENTSTANDEN. Das ist die eine der zwei
+    // Stellen im ganzen Kernel, an der das passiert -- `create_path`,
+    // `mkdir`, `link` und das Umbenennen des Dateimanagers gehen alle
+    // hier durch. `.` und `..` bleiben draussen: sie sind keine Namen,
+    // nach denen jemand sucht, und sie kaemen bei jedem `mkdir` zu zweit.
+    if !punktname(name) {
+        nidx.note(state, nidx.OP_ADD, dir, ino,
+            inode_get(state, ino, I_TYPE), name)
+    }
+    return true
+}
+
+// `.` oder `..` -- und nichts sonst.
+fn punktname(p: u64) -> bool {
+    if kstate.get8(p) != 46 {
+        return false
+    }
+    if kstate.get8(p + 1) == 0 {
+        return true
+    }
+    if kstate.get8(p + 1) != 46 {
+        return false
+    }
+    return kstate.get8(p + 2) == 0
 }
 
 fn dir_remove(state: u64, dir: u64, name: u64) -> u64 {
@@ -679,6 +787,13 @@ fn dir_remove(state: u64, dir: u64, name: u64) -> u64 {
         if ino != 0 && name_eq(buf_nm(state) + 8, name) {
             zero(buf_nm(state), DIRENT)
             write_at(state, dir, i * DIRENT, buf_nm(state), DIRENT)
+            // RUNDE K15: UND DAS IST DIE ZWEITE STELLE -- ein Name
+            // vergeht. Die Art wird VORHER geholt; danach kann der Inode
+            // schon frei sein.
+            if !punktname(name) {
+                nidx.note(state, nidx.OP_DEL, dir, ino,
+                    inode_get(state, ino, I_TYPE), name)
+            }
             return ino
         }
         i = i + 1
@@ -889,6 +1004,7 @@ fn format(state: u64) -> bool {
         blk.write(state, INODE_START + k, buf_in(state))
         k = k + 1
     }
+    geom(state, INODE_COUNT, DATA_START)
     kstate.set(state, kstate.FS_ROOT, 1)
     kstate.set(state, kstate.FS_READY, 1)
     // The root directory.
@@ -923,8 +1039,32 @@ fn mount(state: u64) -> bool {
         leave(state, flags)
         return false
     }
+    // RUNDE K15: DIE GEOMETRIE KOMMT AUS DEM SUPERBLOCK und nicht mehr
+    // aus zwei Konstanten. Was nicht zusammenpasst, wird NICHT
+    // eingehaengt: die Inode-Tabelle muss dort liegen, wo
+    // `inode_block_of` sie sucht, sie muss in den Platz vor dem ersten
+    // Datenblock passen, und beides muss auf die Platte passen. Ein
+    // Superblock, der 40000 Inodes behauptet, ist kein Dateisystem,
+    // sondern ein Weg, in fremde Bloecke zu schreiben.
+    var ni: u64 = get64(buf_sb(state) + SB_INODES)
+    var ds: u64 = get64(buf_sb(state) + SB_DATA)
+    if ni == 0 {
+        ni = INODE_COUNT
+    }
+    if ds == 0 {
+        ds = DATA_START
+    }
+    let itab: u64 = get64(buf_sb(state) + SB_ITABLE)
+    let noetig: u64 = (ni + INODES_PER_BLOCK - 1) / INODES_PER_BLOCK
+    if itab != INODE_START || ds < INODE_START + noetig
+        || ds >= blk.blocks(state) {
+        leave(state, flags)
+        return false
+    }
+    geom(state, ni, ds)
     let r: u64 = get64(buf_sb(state) + SB_ROOT)
     if inode_get(state, r, I_TYPE) != T_DIR {
+        geom(state, INODE_COUNT, DATA_START)
         leave(state, flags)
         return false
     }
@@ -932,4 +1072,119 @@ fn mount(state: u64) -> bool {
     kstate.set(state, kstate.FS_READY, 1)
     leave(state, flags)
     return true
+}
+
+// ------------------------------------------- ROUND K15: DER TABELLENLAUF
+//
+// EIN DURCHGANG DURCH DIE INODE-TABELLE, und kein Pfad wird dabei
+// aufgeloest. Das ist der Trick von "Everything" auf NTFS, uebersetzt in
+// dieses Dateisystem: die Tabelle liegt ohnehin da, sie ist eine Reihe
+// von Nummern, und jede Nummer, die ein Verzeichnis ist, traegt ihre
+// Eintraege am Stueck. Wer stattdessen den Baum absteigt, loest fuer
+// JEDEN Namen den ganzen Pfad noch einmal auf -- Bestandteil fuer
+// Bestandteil, jedes Mal von der Wurzel, jedes Mal mit einem
+// Verzeichnisdurchlauf je Bestandteil.
+//
+// EIN UNTERSCHIED ZU NTFS, und er ist wichtig genug, um ihn zu benennen:
+// dort steht der NAME im Tabelleneintrag ($FILE_NAME), hier nicht. In
+// OFS traegt der Inode keinen Namen -- Namen stehen in Verzeichnissen,
+// und genau deshalb kann eine Datei zwei haben (`/bin/explorer` und
+// `/bin/files`). Der Lauf geht deshalb ueber die VERZEICHNISSE der
+// Tabelle und liest ihre Eintraege; das bleibt EIN Durchgang und bleibt
+// ohne Pfadaufloesung, aber es ist nicht dasselbe wie ein MFT-Lauf, und
+// es soll nicht so aussehen.
+//
+// EIN LESEAUFRUF JE SECHZEHN EINTRAEGEN und nicht je Eintrag: ein
+// Verzeichniseintrag ist 32 Oktette, ein Block 512. Der erste Entwurf
+// las je Eintrag.
+//
+// Das darf nur, wer weiss, WELCHER Puffer wem gehoert. Der Block mit den
+// sechzehn Eintraegen steht in `buf_zz`; `read_at` arbeitet in `buf_dt`,
+// `inode_get` in `buf_in`, `file_block` in `buf_ib`. Deshalb ueberlebt
+// der Eintragsblock die Groessenabfrage mitten in der Schleife. Stuende
+// er in `buf_dt`, wuerde ihn der naechste Leseaufruf unter der Schleife
+// wegziehen -- und der Lauf lieferte Muell, der wie ein Dateiname
+// aussieht.
+//
+// `cur` zeigt auf ein Wort im KERNEL: (Inode << 20) | Eintragsnummer.
+// Null heisst "von vorn". Kommen null Saetze zurueck, ist die Tabelle zu
+// Ende.
+const SCAN_SHIFT: u64 = 20
+const SCAN_MASK: u64 = 1048575
+const EPB: u64 = 16 // BS / DIRENT
+
+fn scan(state: u64, cur: u64, out: u64, max: u64) -> u64 {
+    let flags: u64 = enter(state)
+    let c: u64 = get64(cur)
+    var ino: u64 = c >> SCAN_SHIFT
+    var idx: u64 = c & SCAN_MASK
+    if ino < 1 {
+        ino = 1
+    }
+    let letzte: u64 = inode_count(state)
+    var n: u64 = 0
+    var voll: bool = false
+    while ino <= letzte && !voll {
+        if inode_get(state, ino, I_TYPE) == T_DIR {
+            let cnt: u64 = dir_entries(state, ino)
+            while idx < cnt && !voll {
+                let chunk: u64 = idx / EPB
+                let got: u64 = read_at(state, ino, chunk * BS,
+                    buf_zz(state), BS)
+                if got == 0 {
+                    idx = cnt
+                } else {
+                    var bis: u64 = (chunk + 1) * EPB
+                    if bis > cnt {
+                        bis = cnt
+                    }
+                    if bis > chunk * EPB + got / DIRENT {
+                        bis = chunk * EPB + got / DIRENT
+                    }
+                    while idx < bis && !voll {
+                        let p: u64 = buf_zz(state) + (idx % EPB) * DIRENT
+                        let child: u64 = get64(p)
+                        if child != 0 && !punktname(p + 8) {
+                            if n >= max {
+                                voll = true
+                            } else {
+                                let rec: u64 = out + n * nidx.REC
+                                put64(rec + nidx.R_INO, child)
+                                put64(rec + nidx.R_PARENT, ino)
+                                // EIN Blockleseaufruf fuer beide
+                                // Felder: `inode_get` liest je Aufruf
+                                // einen Block, und Groesse und Art
+                                // stehen im selben.
+                                if blk.read(state, inode_block_of(child),
+                                    buf_in(state)) {
+                                    let at2: u64 = buf_in(state)
+                                        + inode_off(child)
+                                    put64(rec + nidx.R_SIZE,
+                                        get64(at2 + I_SIZE))
+                                    put64(rec + nidx.R_KIND,
+                                        get64(at2 + I_TYPE))
+                                } else {
+                                    put64(rec + nidx.R_SIZE, 0)
+                                    put64(rec + nidx.R_KIND, 0)
+                                }
+                                put64(rec + nidx.R_OP, idx)
+                                copy(p + 8, rec + nidx.R_NAME, NAME_LEN)
+                                n = n + 1
+                            }
+                        }
+                        if !voll {
+                            idx = idx + 1
+                        }
+                    }
+                }
+            }
+        }
+        if !voll {
+            ino = ino + 1
+            idx = 0
+        }
+    }
+    put64(cur, (ino << SCAN_SHIFT) | idx)
+    leave(state, flags)
+    return n
 }

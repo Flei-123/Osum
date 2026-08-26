@@ -7,7 +7,7 @@
 # eine Anwendung dort bekommt, und einer Anwendung fehlte alles --
 # Knoepfe, Textfelder, Listen, Menues, Dialoge, eine Ereignisschleife,
 # eine Anordnung. Runde K15 baut das, und zwar IN RING 3
-# (`kernel/user/wig.fi` und `kernel/user/wigc.fi`); im Kernel stehen
+# (`kernel/user/wlib.fi` und `kernel/user/wlibc.fi`); im Kernel stehen
 # sieben Aufrufe, die kein Widget kennen (`kernel/wig.fi`).
 #
 # WAS HIER GEMESSEN WIRD, UND WARUM SO:
@@ -163,7 +163,7 @@ for s in 0 1; do
 done
 [ -f "$TMPD/k0.mb" ] || { echo "K15: $pass passed, $((fail + 1)) failed"; exit 1; }
 
-PROGS="wigdemo explorer starter sh echo ls cat edit"
+PROGS="wigdemo explorer starter suchen sh echo ls cat edit"
 as --64 -o "$TMPD/crt.o" kernel/user/crt.s 2>/dev/null \
     || bad "crt.s laesst sich nicht assemblieren"
 baue() { # stufe
@@ -191,14 +191,14 @@ baue 1 && ok "firnc1: dieselben aus dem Uebersetzer, der in Firn geschrieben ist
 # EINGEBUNDEN. Das ist die Zusage "in Ring 3, nicht im Kernel" in ihrer
 # pruefbaren Form -- und dazu, dass der Kernel sie NICHT enthaelt.
 if nm "$TMPD/explorer0.elf" 2>/dev/null | grep -q . ; then :; fi
-for sym in wig__button wig__step wigc__text_at; do
+for sym in wlib__button wlib__step wlibc__text_at; do
     if nm -a "$TMPD/k0.mb.elf" 2>/dev/null | grep -q "$sym"; then
         bad "der Kernel traegt $sym -- die Bibliothek gehoert nach Ring 3"
     else
         ok "der Kernel traegt $sym NICHT (die Bibliothek liegt in Ring 3)"
     fi
 done
-wigzeilen=$(cat kernel/user/wig.fi kernel/user/wigc.fi | wc -l)
+wigzeilen=$(cat kernel/user/wlib.fi kernel/user/wlibc.fi | wc -l)
 kernzeilen=$(wc -l < kernel/wig.fi)
 num "Zeilen der Bibliothek in Ring 3" "$wigzeilen" gt 1500
 num "Zeilen der Naht im Kernel -- so wenig Kernel wie moeglich" "$kernzeilen" lt 600
@@ -212,8 +212,8 @@ ARGS=(build "$TMPD/disk.img" 4096 /lib/
 for p in $PROGS; do ARGS+=("/bin/$p=$TMPD/${p}0.elf"); done
 ARGS+=("/bin/files@/bin/explorer")
 ARGS+=(/etc/ "/etc/theme=$TMPD/baum/theme")
-ARGS+=(/usr/ /usr/share/ /usr/share/apps/)
-for a in assets/apps/*.app; do ARGS+=("/usr/share/apps/$(basename "$a")=$a"); done
+# DIE BUENDEL: /apps/<name>.prog/{INFO,start,symbol,daten/}
+while read -r zeile; do ARGS+=("$zeile"); done < <(python3 tools/k15/buendel.py assets/apps "$TMPD/buendel")
 while read -r z; do ARGS+=("$z"); done < "$TMPD/baum/liste"
 python3 tools/osum/mkfs.py "${ARGS[@]}" > "$TMPD/mkfs.txt" 2>&1 \
     && ok "mkfs.py baut ein Abbild mit den Schriften, den Programmen und /etc/theme" \
@@ -233,10 +233,15 @@ fi
 # nachgerechnet, dass diese Runde in ihrem Vorrat geblieben ist.
 wo=$(python3 tools/kernel/karte.py kernel -v 2>/dev/null | grep ' WIG ' | grep -oE '0x[0-9A-Fa-f]+' | head -2 | tr '\n' ' ')
 gleich "der Bereich liegt im zugeteilten Vorrat" "0x46000 0x49000 " "$wo"
-for n in 1800 1806; do
-    grep -q "= $n$" kernel/sys.fi && ok "die Aufrufnummer $n steht in kernel/sys.fi" \
+# ZEHN AUFRUFE: sieben aus der Runde, drei aus dem zweiten Nachtrag
+# (1807 Tabellenlauf, 1808 Journal, 1809 Auskunft).
+for n in 1800 1806 1807 1808 1809; do
+    grep -qE "= $n( |$)" kernel/sys.fi && ok "die Aufrufnummer $n steht in kernel/sys.fi" \
         || bad "die Aufrufnummer $n fehlt"
 done
+grep -q 'const WIG_MAXNR: u64 = 1809' kernel/sys.fi \
+    && ok "und 1809 ist die hoechste" \
+    || bad "WIG_MAXNR passt nicht zu den Aufrufen"
 if grep -qE 'WIG_(BASE|MAXNR)' kernel/sys.fi && \
    ! grep -qE 'const WIG_[A-Z]+: u64 = (19[0-9][0-9]|17[0-9][0-9])' kernel/sys.fi; then
     ok "alle Aufrufe dieser Runde liegen zwischen 1800 und 1899"
@@ -896,8 +901,7 @@ ARGS2=(build "$TMPD/disk2.img" 4096 /lib/
 for p in $PROGS; do ARGS2+=("/bin/$p=$TMPD/${p}0.elf"); done
 ARGS2+=("/bin/files@/bin/explorer")
 ARGS2+=(/etc/ "/etc/theme=$TMPD/theme2")
-ARGS2+=(/usr/ /usr/share/ /usr/share/apps/)
-for a in assets/apps/*.app; do ARGS2+=("/usr/share/apps/$(basename "$a")=$a"); done
+while read -r zeile; do ARGS2+=("$zeile"); done < <(python3 tools/k15/buendel.py assets/apps "$TMPD/buendel")
 while read -r z; do ARGS2+=("$z"); done < "$TMPD/baum/liste"
 python3 tools/osum/mkfs.py "${ARGS2[@]}" > "$TMPD/mkfs2.txt" 2>&1
 cp -f "$TMPD/disk.img" "$TMPD/disk1.img"
@@ -938,7 +942,7 @@ echo "== 14. der Name, der zweite Name und die Auffindbarkeit =="
 # DER NAME IST DIE BESCHREIBUNG. Kein Nautilus, kein Finder, kein
 # Kunstwort: das Programm heisst `/bin/explorer` und traegt fuer den
 # Nutzer den Namen "Datei-Explorer" -- und dieser Name steht NICHT im
-# Quelltext, sondern in `/usr/share/apps/explorer.app`.
+# Quelltext, sondern in `/apps/explorer.prog/INFO`.
 # EIN `grep` PRUEFT DAS NICHT: der Kopfkommentar von explorer.fi
 # ERKLAERT, warum das Programm "Datei-Explorer" heisst, und ein
 # `grep -q` schlaegt darauf an. `tools/k15/keinname.py` entfernt die
@@ -946,7 +950,7 @@ echo "== 14. der Name, der zweite Name und die Auffindbarkeit =="
 aus=$(python3 tools/k15/keinname.py kernel/user/explorer.fi "Datei-Explorer" 2>&1)
 if [ $? -eq 0 ]; then ok "der Anzeigename steht NICHT im Code ($aus)"
 else bad "der Anzeigename steht im Code: $aus"; fi
-aus=$(python3 tools/k15/keinname.py kernel/user/starter.fi "Starten" 2>&1)
+aus=$(python3 tools/k15/keinname.py kernel/user/starter.fi "Suchen" 2>&1)
 if [ $? -eq 0 ]; then ok "und der des Starters auch nicht"
 else bad "der Name des Starters steht im Code: $aus"; fi
 # Und die Gegenprobe zum Pruefer selbst: eine Zeichenkette, die WIRKLICH
@@ -956,11 +960,11 @@ if python3 tools/k15/keinname.py kernel/user/starter.fi "Ausfuehren" >/dev/null 
 else
     ok "eine Zeichenkette, die wirklich im Code steht, findet er (die Gegenprobe)"
 fi
-grep -q '^name=Datei-Explorer' assets/apps/explorer.app \
-    && ok "sondern in assets/apps/explorer.app" \
-    || bad "assets/apps/explorer.app fuehrt keinen Anzeigenamen"
-has "$TMPD/files.txt" "explorer: name [Datei-Explorer] aus [explorer.app]" \
-    "und das Programm holt ihn von dort"
+grep -q '^name=Datei-Explorer' assets/apps/explorer.prog/INFO \
+    && ok "sondern in assets/apps/explorer.prog/INFO" \
+    || bad "assets/apps/explorer.prog/INFO fuehrt keinen Anzeigenamen"
+has "$TMPD/files.txt" "explorer: name [Datei-Explorer] aus [explorer.prog]" \
+    "und das Programm holt ihn aus dem Buendel"
 # UND ER STEHT IN DER TITELLEISTE. Die malt der FENSTERSERVER -- damit
 # ist der ganze Weg gemessen: Datei auf der Platte, Ring 3, WM_CREATE,
 # Titelleiste, Bildpunkte.
@@ -1007,10 +1011,23 @@ foto start "gfx wm wigstart wmhold wiglong $GRUND"
 num "der Kern beendet sich sauber" "$RC" eq 21
 has "$TMPD/start.txt" "k15: start /bin/starter" "der Starter kommt von der Platte"
 na=$(feld "$TMPD/start.txt" "starter: apps" apps)
-soll=$(ls assets/apps/*.app | wc -l)
-num "er findet so viele Programme, wie .app-Dateien im Baum liegen" "$na" eq "$soll"
-has "$TMPD/start.txt" "starter: treffer i=0 name=[Datei-Explorer] exec=[/bin/explorer]" \
-    "und das Verzeichnis fuehrt den Dateimanager mit Name UND Befehl"
+soll=$(ls -d assets/apps/*.prog | wc -l)
+num "er findet so viele Programme, wie .prog-Buendel im Baum liegen" "$na" eq "$soll"
+has "$TMPD/start.txt" "starter: treffer i=0 name=[Datei-Explorer] exec=[/apps/explorer.prog/start]" \
+    "und das Buendel fuehrt den Dateimanager mit Name UND Befehl"
+# EIN PROGRAMM IST EIN VERZEICHNIS, und das steht nicht im Quelltext,
+# sondern auf der Platte. Was ausgefuehrt wird, ist `start` IM Buendel --
+# und `start` ist derselbe Inode wie die Datei unter `/bin`, kein zweites
+# Exemplar (das misst 14a).
+for teil in INFO symbol start daten/LIESMICH; do
+    grep -q "^/apps/explorer.prog/$teil " "$TMPD/disk.ls" \
+        && ok "das Buendel traegt $teil" \
+        || bad "/apps/explorer.prog/$teil fehlt auf der Platte"
+done
+gb=$(grep -c '^/apps/[a-z]*\.prog/$' "$TMPD/disk.ls")
+num "so viele Buendel liegen unter /apps" "$gb" eq "$soll"
+hasnot "$TMPD/disk.ls" "/usr/share/apps" \
+    "und der alte Ort ist weg -- eine Beschreibung, zwei Orte, waeren einer zu viel"
 SBX=190; SBY=110
 SCX=$((SBX + BORDER)); SCY=$((SBY + TITLE))
 SRX=$(feld "$TMPD/start.txt" "starter: rows" x)
@@ -1030,19 +1047,37 @@ schau "die erste Zeile des Starters, je Zeichen" \
 schau "und die zweite" \
     ttext "$TMPD/start.ppm" "$SANS" 15 $((SCX + SRX)) $((SCY + SRB + SZH)) \
     $SFG $SBG "Editor  --  Text schreiben und aendern" 96
-# DAS SYMBOL. Es gibt in diesem System keine Bilddateien; `icon=` ist
-# eine Farbe, und der Starter malt daraus ein Plaettchen mit dem ersten
-# Buchstaben darauf. Beides ist messbar -- die Farbe als Zahl von
-# Bildpunkten, der Buchstabe je Zeichen.
-n1=$(python3 tools/k15/zaehl.py "$TMPD/start.ppm" $((SCX + SIX + 1)) $((SCY + SIY + 1)) 12 12 74 144 208)
-n2=$(python3 tools/k15/zaehl.py "$TMPD/start.ppm" $((SCX + SIX + 1)) $((SCY + SIY + 1)) 12 12 192 128 64)
-num "das Plaettchen des Dateimanagers hat die Farbe aus icon=4a90d0" "$n1" gt 50
-num "und KEINEN Bildpunkt der Farbe des Editors (die Gegenprobe)" "$n2" eq 0
-n3=$(python3 tools/k15/zaehl.py "$TMPD/start.ppm" $((SCX + SIX + 1)) $((SCY + SIY + 1 + SZH)) 12 12 192 128 64)
-num "und das Plaettchen des Editors umgekehrt" "$n3" gt 50
-schau "der Anfangsbuchstabe steht auf dem Plaettchen, je Zeichen" \
-    ttext "$TMPD/start.ppm" "$SANS" 15 $((SCX + SLX)) $((SCY + SLB)) \
-    255 255 255 74 144 208 "D"
+# DAS SYMBOL IST EINE DATEI. Im ersten Nachtrag war es sechs Hexziffern
+# in einer Textdatei -- ehrlich, solange dieses System kein Bild lesen
+# konnte, aber eben kein Bild. Seit dem zweiten liegt in jedem Buendel
+# `symbol` im Format OSYM (`tools/k15/symbol.py`), und deshalb wird hier
+# nicht eine Farbflaeche gezaehlt, sondern BILDPUNKT GEGEN BILDPUNKT
+# gegen eine zweite Umsetzung, die dieselbe Datei unabhaengig von Firn
+# zurueckliest. Das ist die Lehre aus Runde K7B, angewandt auf ein Bild:
+# eine Flaechenzahl kann zu 87 Prozent stimmen, waehrend das Bild fehlt.
+#
+# GEZAEHLT WERDEN NUR DIE DECKENDEN BILDPUNKTE. Ueber die durchsichtigen
+# sagt ein Symbol nichts aus -- dort steht die Zeilenfarbe, und die
+# gehoert der Liste.
+sym() { echo "$TMPD/buendel/$1.prog.symbol"; }
+pruef() { local name=$1; shift
+    local aus rc; aus=$(python3 tools/k15/symbolbild.py "$@" 2>&1); rc=$?
+    if [ "$rc" -eq 0 ]; then ok "$name ($aus)"; else bad "$name -- $aus"; fi; }
+pruef_nicht() { local name=$1; shift
+    local aus rc; aus=$(python3 tools/k15/symbolbild.py "$@" 2>&1); rc=$?
+    if [ "$rc" -ne 0 ]; then ok "$name ($aus)"; else bad "$name -- ging durch"; fi; }
+for a in explorer editor; do
+    python3 tools/k15/symbol.py --pruefe "$(sym $a)" "assets/apps/$a.prog/symbol.txt" \
+        > "$TMPD/sym-$a.txt" 2>&1 \
+        && ok "das Symbol von $a im Abbild ist die Zeichnung aus dem Quellbaum ($(cat "$TMPD/sym-$a.txt"))" \
+        || bad "das Symbol von $a stimmt nicht mit seiner Zeichnung ueberein"
+done
+pruef "das Symbol des Dateimanagers steht Punkt fuer Punkt im Bild" \
+    "$TMPD/start.ppm" $((SCX + SIX)) $((SCY + SIY)) 14 14 "$(sym explorer)"
+pruef_nicht "und es ist NICHT das des Editors (die Gegenprobe)" \
+    "$TMPD/start.ppm" $((SCX + SIX)) $((SCY + SIY)) 14 14 "$(sym editor)"
+pruef "in Zeile 1 steht dafuer das des Editors" \
+    "$TMPD/start.ppm" $((SCX + SIX)) $((SCY + SIY + SZH)) 14 14 "$(sym editor)"
 
 echo "== 14c. die Suche -- und dass wirklich die Schluesselwoerter greifen =="
 # DIE ZUSAGE, UM DIE ES GEHT: man tippt "folder" und findet den
@@ -1051,7 +1086,7 @@ echo "== 14c. die Suche -- und dass wirklich die Schluesselwoerter greifen =="
 # nur in `keys=`. Zuerst wird das ueberhaupt nachgerechnet -- sonst
 # waere die Zusage eine ueber einen Zufall.
 for w in folder files manager verzeichnis; do
-    if grep -iE '^(name|info)=' assets/apps/*.app | grep -qi "$w"; then
+    if grep -ihE '^(name|info)=' assets/apps/*.prog/INFO | grep -qi "$w"; then
         bad "'$w' steht in einem Anzeigenamen oder einer Beschreibung -- die Zusage waere wertlos"
     else
         ok "'$w' steht in KEINEM Anzeigenamen und in KEINER Beschreibung"
@@ -1076,9 +1111,9 @@ mouse_move 120 120
 mouse_move 60 60
 EOF
 foto suche "gfx wm wigstart wmhold wiglong $GRUND" "$M"
-has "$TMPD/suche.txt" "starter: suche [folder] treffer=1" \
-    "getippt 'folder': GENAU EIN Treffer"
-has "$TMPD/start.txt" "starter: name [Starten]" \
+has "$TMPD/suche.txt" "starter: suche [folder] treffer=1 apps=1" \
+    "getippt 'folder': GENAU EIN Treffer, und es ist ein Programm"
+has "$TMPD/start.txt" "starter: name [Suchen]" \
     "auch der Starter holt seinen eigenen Namen aus den Daten"
 tf=$(grep -aA1 'starter: suche \[folder\]' "$TMPD/suche.txt" | grep -a 'name=' | tail -1)
 case "$tf" in
@@ -1095,7 +1130,7 @@ schau_nicht "und in Zeile 1 steht nichts mehr" \
 # DIE GEGENPROBE, DIE DIE ZUSAGE ERST WERTVOLL MACHT: dieselben
 # Tastendruecke, dieselben Dateien, nur OHNE das Feld `keys`.
 foto nokeys "gfx wm wigstart wignokeys wmhold wiglong $GRUND" "$M"
-has "$TMPD/nokeys.txt" "starter: suche [folder] treffer=0" \
+has "$TMPD/nokeys.txt" "starter: suche [folder] treffer=0 apps=0" \
     "OHNE die Schluesselwoerter findet 'folder' NICHTS"
 has "$TMPD/nokeys.txt" "starter: apps=$soll" \
     "obwohl dasselbe Verzeichnis mit denselben $soll Programmen gelesen wurde"
@@ -1107,15 +1142,253 @@ schau_nicht "und im Bild steht dann auch keine Zeile" \
 sed 's/^sendkey f$/sendkey q/; s/^sendkey o$/sendkey u/; s/^sendkey l$/sendkey a/; s/^sendkey d$/sendkey s/; s/^sendkey e$/sendkey t/; s/^sendkey r$/sendkey e/' \
     "$M" > "$TMPD/unsinn.mon"
 foto unsinn "gfx wm wigstart wmhold wiglong $GRUND" "$TMPD/unsinn.mon"
-has "$TMPD/unsinn.txt" "starter: suche [quaste] treffer=0" \
-    "ein Wort, das nirgends steht, findet NICHTS"
-grep -qi 'quaste' assets/apps/*.app \
-    && bad "'quaste' steht doch in einer .app-Datei" \
-    || ok "und 'quaste' steht wirklich in keiner .app-Datei"
+has "$TMPD/unsinn.txt" "starter: suche [quaste] treffer=0 apps=0   dateien=0" \
+    "ein Wort, das nirgends steht, findet NICHTS -- kein Programm und keine Datei"
+grep -qi 'quaste' assets/apps/*.prog/INFO \
+    && bad "'quaste' steht doch in einer INFO" \
+    || ok "und 'quaste' steht wirklich in keiner INFO"
 # Und dass die Suche ueberhaupt etwas findet, wenn sie soll: der leere
 # Begriff zeigt alle.
 has "$TMPD/start.txt" "starter: suche [] treffer=$soll" \
     "ohne Suchbegriff stehen alle $soll Programme in der Liste"
+
+echo "== 15. der Namensindex: das GANZE Dateisystem, und sofort =="
+# WAS HIER GEMESSEN WIRD UND WARUM SO.
+#
+# Das Vorbild ist "Everything" von voidtools, und sein Trick ist genau
+# nachlesbar: es durchsucht die Platte nicht, sondern liest EINMAL die
+# Master File Table von NTFS am Stueck und haelt daraus eine Liste NUR
+# AUS NAMEN im Speicher; danach verfolgt es das Aenderungsjournal.
+# Osum hat beide Haelften seit dem zweiten K15-Nachtrag: `WIG_SCAN`
+# (1807) laeuft durch die Inode-Tabelle, `WIG_JRNL` (1808) holt die
+# Aenderungen ab, die `fs.dir_add` und `fs.dir_remove` eingetragen haben.
+#
+# ES REICHT NICHT, DASS DER INDEX SCHNELL IST. Ein Index, der nichts
+# findet, ist unendlich schnell. Gemessen wird deshalb IMMER PAARWEISE:
+# derselbe Suchbegriff einmal ueber den Index und einmal als rekursiver
+# Baumdurchlauf, im selben Prozess, auf demselben Dateisystem, im selben
+# Augenblick -- und beide muessen DIESELBEN NAMEN liefern, sortiert und
+# Oktett fuer Oktett verglichen (`kernel/user/suchen.fi`, `vergleiche`).
+#
+# UND ES BRAUCHT EIN ERNSTHAFTES DATEISYSTEM. An zwanzig Dateien beweist
+# sich nichts. `tools/k15/gross.py` legt viertausend an, in einem Baum
+# aus siebzehn Ordnern, und schreibt daneben auf, wie viele Namen jedes
+# gesuchte Wort treffen MUSS -- der Laeufer glaubt weder dem Index noch
+# dem Durchlauf, sondern der Liste, aus der das Abbild gebaut wurde.
+#
+# DASS DIE INODE-TABELLE UEBERHAUPT VIERTAUSEND FASST, ist die eine
+# Aenderung an OFS, die dieser Nachtrag gebraucht hat: die Zahl stand
+# immer schon im Superblock und wurde nie gelesen (`kernel/fs.fi`,
+# `mount`). Abbilder mit 128 bleiben Oktett fuer Oktett, was sie waren --
+# Abschnitt 15d rechnet das nach.
+
+python3 tools/k15/gross.py "$TMPD/gross" 4000 > "$TMPD/gross.log" 2>&1 \
+    && ok "tools/k15/gross.py: $(cat "$TMPD/gross.log")" \
+    || bad "gross.py fehlgeschlagen"
+GARGS=(build "$TMPD/gross.img" 4096 /bin/
+       "/bin/sh=$TMPD/sh0.elf" "/bin/suchen=$TMPD/suchen0.elf"
+       "/bin/ls=$TMPD/ls0.elf")
+while read -r z; do GARGS+=("$z"); done < "$TMPD/gross/angaben"
+python3 tools/osum/mkfs.py "${GARGS[@]}" > "$TMPD/gmkfs.txt" 2>&1 \
+    && ok "das grosse Abbild: $(cat "$TMPD/gmkfs.txt")" \
+    || { bad "mkfs.py fehlgeschlagen"; head -3 "$TMPD/gmkfs.txt"; }
+# JEDER NAME IM GANZEN BAUM, aus dem Abbild gezaehlt: eine Zeile je Name
+# (die erste Zeile ist der Kopf mit den Bloecken). Das ist die Zahl, die
+# der Index treffen muss -- nicht die der Dateien, denn ein Ordner hat
+# auch einen Namen und wird auch gefunden.
+GN=$(python3 tools/osum/mkfs.py list "$TMPD/gross.img" | tail -n +2 | wc -l)
+num "so viele Namen traegt das Abbild insgesamt" "$GN" ge 4000
+
+gross() { # name skript
+    local name=$1 zeile=$2
+    cp -f "$TMPD/gross.img" "$TMPD/g-$name.img"
+    timeout 600 qemu-system-x86_64 -kernel "$TMPD/k0.mb" -m 256 \
+        -append "osum nokbd nosched noproc nofs noring3 script=$zeile;exit" \
+        -serial "file:$TMPD/$name.txt" -display none -no-reboot \
+        -drive "file=$TMPD/g-$name.img,format=raw,if=ide,index=0" \
+        -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1
+    RC=$?
+    return 0
+}
+# DAS LEERZEICHEN VOR DEM NAMEN GEHOERT DAZU. Ohne es fand `n=` auch das
+# `n=` in `abgeschn=0`, nahm mit `tail -1` das letzte und lieferte 0 --
+# und die halbe Messung haengt an dieser Zahl.
+gfeld() { grep -a "$2" "$1" | tail -1 | grep -oE "(^| )$3=[0-9]+" | tail -1 | sed 's/.*=//'; }
+
+gross gkupfer "suchen -m kupfer"
+num "der Kern beendet sich sauber" "$RC" eq 21
+GB_N=$(gfeld "$TMPD/gkupfer.txt" 'suchen: bauen' 'n')
+GB_S=$(gfeld "$TMPD/gkupfer.txt" 'suchen: bauen' 'saetze')
+GB_C=$(gfeld "$TMPD/gkupfer.txt" 'suchen: bauen' 'aufrufe')
+GB_U=$(gfeld "$TMPD/gkupfer.txt" 'suchen: bauen' 'us')
+GB_T=$(gfeld "$TMPD/gkupfer.txt" 'suchen: bauen' 'abgeschn')
+num "1. DER AUFBAU: so viele Namen aus der Inode-Tabelle" "$GB_N" eq "$GN"
+gleich "und kein Satz ist unterwegs verlorengegangen" "$GB_N" "$GB_S"
+num "abgeschnitten wurde nichts" "$GB_T" eq 0
+num "und das in so wenigen Systemaufrufen (63 Saetze je Aufruf)" "$GB_C" lt 100
+num "Mikrosekunden fuer den ganzen Aufbau" "$GB_U" gt 0
+echo "        -> $GB_N Namen in $GB_U us, $GB_C Aufrufe; das ist $((GB_U / GB_N)) us je Name"
+
+GI_U=$(gfeld "$TMPD/gkupfer.txt" 'suchen: index' 'us10')
+GI_T=$(grep -a 'suchen: index' "$TMPD/gkupfer.txt" | tail -1 | grep -oE 'treffer=[0-9]+' | sed 's/.*=//')
+GW_U=$(gfeld "$TMPD/gkupfer.txt" 'suchen: baum' 'us')
+GW_T=$(grep -a 'suchen: baum' "$TMPD/gkupfer.txt" | tail -1 | grep -oE 'treffer=[0-9]+' | sed 's/.*=//')
+GW_G=$(gfeld "$TMPD/gkupfer.txt" 'suchen: baum' 'gesehen')
+GI_1=$((GI_U / 10))
+num "2. DIE SUCHE: sie ist um Groessenordnungen billiger als der Aufbau" \
+    $((GB_U / (GI_1 + 1))) ge 20
+echo "        -> Aufbau $GB_U us, eine Suche $GI_1 us (zehn gemessen: $GI_U us)"
+num "3. DIE GEGENPROBE: der Baumdurchlauf sieht dieselben Namen" "$GW_G" eq "$GB_N"
+gleich "und er findet GENAU DIESELBE ZAHL Treffer" "$GI_T" "$GW_T"
+has "$TMPD/gkupfer.txt" "ungleich=0" \
+    "und DIESELBEN NAMEN -- sortiert, Oktett fuer Oktett verglichen"
+num "und der Index ist dabei um ein Vielfaches schneller" \
+    $((GW_U / (GI_1 + 1))) ge 20
+echo "        -> Baumdurchlauf $GW_U us, Suche im Index $GI_1 us"
+SOLLK=$(grep '^kupfer ' "$TMPD/gross/erwartet" | awk '{print $2}')
+num "und beide finden so viele, wie die Liste des Abbilds hergibt" "$GI_T" eq "$SOLLK"
+has "$TMPD/gkupfer.txt" "suchen: pfad /daten/kupfer" \
+    "und der Treffer traegt seinen ganzen Pfad, aus den Elternnummern gebaut"
+
+gross gviele "suchen -m 07"
+SOLL7=$(grep '^07 ' "$TMPD/gross/erwartet" | awk '{print $2}')
+V_I=$(grep -a 'suchen: index' "$TMPD/gviele.txt" | tail -1 | grep -oE 'treffer=[0-9]+' | sed 's/.*=//')
+V_B=$(grep -a 'suchen: baum' "$TMPD/gviele.txt" | tail -1 | grep -oE 'treffer=[0-9]+' | sed 's/.*=//')
+num "ein Wort, das VIELE trifft: der Index findet so viele" "$V_I" eq "$SOLL7"
+gleich "und der Baumdurchlauf genauso viele" "$V_I" "$V_B"
+has "$TMPD/gviele.txt" "ungleich=0" "und wieder Name fuer Name dieselben"
+
+# 5. UND EIN WORT, DAS NIRGENDS STEHT. Eine Suche, die immer etwas
+# findet, ist keine Suche -- und das gilt fuer den Index genauso wie fuer
+# den Durchlauf.
+gross gquaste "suchen -m quaste"
+SOLLQ=$(grep '^quaste ' "$TMPD/gross/erwartet" | awk '{print $2}')
+num "die Liste des Abbilds kennt 'quaste' so oft" "$SOLLQ" eq 0
+has "$TMPD/gquaste.txt" "suchen: index [quaste] treffer=0" \
+    "5. der Index findet 'quaste' NICHT"
+has "$TMPD/gquaste.txt" "suchen: baum [quaste] treffer=0" \
+    "und der Baumdurchlauf auch nicht"
+Q_G=$(gfeld "$TMPD/gquaste.txt" 'suchen: baum' 'gesehen')
+num "obwohl er dabei alle $Q_G Namen angesehen hat" "$Q_G" eq "$GB_N"
+
+echo "== 15b. das Journal: anlegen, umbenennen, loeschen -- ohne Neuaufbau =="
+# 4. DER INDEX MUSS ES WISSEN, OHNE NEU ZU BAUEN. `suchen -j` legt eine
+# Datei an, benennt sie um (kopieren und loeschen -- dieser Kernel hat
+# kein `rename`) und loescht sie, und holt nach jedem Schritt das Journal
+# ab. Was danach im Index steht, wird nicht behauptet, sondern GESUCHT.
+gross gjrnl "suchen -j kupfer"
+num "der Kern beendet sich sauber" "$RC" eq 21
+has "$TMPD/gjrnl.txt" "schritt=1  zwiebel=1  apfel=0" \
+    "nach dem Anlegen findet der Index die neue Datei"
+has "$TMPD/gjrnl.txt" "schritt=3  zwiebel=0  apfel=1" \
+    "nach dem Umbenennen den NEUEN Namen und den alten nicht mehr"
+has "$TMPD/gjrnl.txt" "schritt=4  zwiebel=0  apfel=0" \
+    "und nach dem Loeschen keinen von beiden"
+J_N1=$(grep -a 'schritt=1 ' "$TMPD/gjrnl.txt" | grep -oE 'namen=[0-9]+' | sed 's/.*=//')
+J_N4=$(grep -a 'schritt=4 ' "$TMPD/gjrnl.txt" | grep -oE 'namen=[0-9]+' | sed 's/.*=//')
+num "der Index hat dabei einen Namen mehr bekommen" $((J_N1 - GB_N)) eq 1
+num "und am Ende wieder so viele wie am Anfang" "$J_N4" eq "$GB_N"
+has "$TMPD/gjrnl.txt" "lost=0" "und der Ring hat keinen Satz verworfen"
+# UND DAS ALLES OHNE EINEN ZWEITEN AUFBAU. Das ist die eigentliche
+# Zusage: ein Index, der nach jeder Aenderung neu baut, ist kein Index,
+# sondern ein Cache mit einer Sekunde Wartezeit.
+nb=$(grep -ac 'suchen: bauen' "$TMPD/gjrnl.txt")
+num "genau EIN Aufbau im ganzen Lauf, und danach nur noch Journal" "$nb" eq 1
+
+# DIE GEGENPROBE ZUM JOURNAL: dieselben drei Schritte, aber es wird nicht
+# abgeholt. Der Index weiss dann von nichts -- und das ist der Beweis,
+# dass oben wirklich das Journal gewirkt hat und nicht ein Zufall.
+gross gnojrnl "suchen -n kupfer"
+has "$TMPD/gnojrnl.txt" "schritt=1  zwiebel=0  apfel=0" \
+    "OHNE das Journal weiss der Index von der neuen Datei nichts"
+has "$TMPD/gnojrnl.txt" "schritt=4  zwiebel=0  apfel=0" \
+    "und von den anderen beiden Schritten auch nicht"
+N_N4=$(grep -a 'schritt=4 ' "$TMPD/gnojrnl.txt" | grep -oE 'namen=[0-9]+' | sed 's/.*=//')
+num "seine Namensliste hat sich kein einziges Mal geaendert" "$N_N4" eq "$GB_N"
+N_S=$(grep -a 'schritt=4 ' "$TMPD/gnojrnl.txt" | grep -oE 'gezogen=[0-9]+' | sed 's/.*=//')
+num "er hat null Saetze abgeholt" "$N_S" eq 0
+J_S=$(grep -a 'schritt=4 ' "$TMPD/gjrnl.txt" | grep -oE 'gezogen=[0-9]+' | sed 's/.*=//')
+num "der Lauf MIT Journal dagegen vier" "$J_S" eq 4
+
+echo "== 15c. der Starter sucht Dateien, nicht nur Programme =="
+# DIE ZUSAGE AUS DEM AUFTRAG: wer die Suche oeffnet und etwas eintippt,
+# soll das GANZE Dateisystem durchsucht bekommen -- nicht nur eine
+# Anwendungsliste. "blau" ist kein Programm und steht in keiner INFO; es
+# ist eine Datei auf der Platte. Getippt wird ueber den QEMU-Monitor,
+# gemessen wird der Schirm.
+grep -qi 'blau' assets/apps/*.prog/INFO \
+    && bad "'blau' steht in einer INFO -- die Zusage waere wertlos" \
+    || ok "'blau' steht in KEINER INFO: was gefunden wird, kann nur eine Datei sein"
+M="$TMPD/dsuche.mon"; : > "$M"
+zeiger "$M" "$FX2" "$FY2"
+cat >> "$M" <<EOF
+mouse_button 1
+mouse_button 0
+warte 0.4
+sendkey b
+sendkey l
+sendkey a
+sendkey u
+warte 1.2
+mouse_move 120 120
+mouse_move 60 60
+EOF
+foto dsuche "gfx wm wigstart wmhold wiglong $GRUND" "$M"
+has "$TMPD/dsuche.txt" "starter: suche [blau] treffer=1 apps=0   dateien=1" \
+    "getippt 'blau': ein Treffer, und er ist KEIN Programm, sondern eine Datei"
+has "$TMPD/dsuche.txt" "starter: datei i=0 name=[/daten/bilder/blau.ppm]" \
+    "und es ist die Datei, die wirklich dort liegt"
+grep -q '^/daten/bilder/blau.ppm ' "$TMPD/disk.ls" \
+    && ok "was das Abbild an dieser Stelle auch wirklich fuehrt" \
+    || bad "/daten/bilder/blau.ppm steht gar nicht im Abbild"
+schau "und im Bild steht der Pfad in Zeile 0 der Trefferliste, je Zeichen" \
+    ttext "$TMPD/dsuche.ppm" "$SANS" 15 $((SCX + SRX)) $((SCY + SRB)) \
+    $SSFG $SSEL "/daten/bilder/blau.ppm" 96
+DIX=$(feld "$TMPD/dsuche.txt" "starter: index" n)
+num "der Starter hat dafuer einen Index ueber so viele Namen gebaut" "$DIX" ge 40
+# DIE GEGENPROBE: derselbe Starter, dieselben Tastendruecke, nur OHNE den
+# Namensindex. Dann findet "blau" nichts -- und das zeigt, dass der
+# Treffer oben WIRKLICH aus dem Index kam und nicht aus der Programmliste.
+foto noidx "gfx wm wigstart wignoidx wmhold wiglong $GRUND" "$M"
+has "$TMPD/noidx.txt" "starter: suche [blau] treffer=0 apps=0   dateien=0" \
+    "OHNE den Namensindex findet 'blau' NICHTS"
+has "$TMPD/noidx.txt" "starter: index n=0" \
+    "weil gar keiner gebaut wurde"
+has "$TMPD/noidx.txt" "starter: apps=$soll" \
+    "obwohl dasselbe Anwendungsverzeichnis mit denselben $soll Buendeln gelesen wurde"
+schau_nicht "und im Bild steht dann auch kein Pfad" \
+    ttext "$TMPD/noidx.ppm" "$SANS" 15 $((SCX + SRX)) $((SCY + SRB)) \
+    $SSFG $SSEL "/daten/bilder/blau.ppm" 96
+
+echo "== 15d. und die alten Abbilder sind Oktett fuer Oktett die alten =="
+# DIE BEDINGUNG, UNTER DER `fs.fi` UEBERHAUPT ANGEFASST WERDEN DURFTE.
+# Die Zahl der Inodes kommt seit diesem Nachtrag aus dem Superblock. Ein
+# Abbild ohne `--inodes=` muss deshalb dasselbe sein wie vorher -- sonst
+# haengen 1486 bestehende Zusagen an einer geaenderten Platte.
+head -c 20000 /dev/urandom > "$TMPD/probe.bin"
+python3 tools/osum/mkfs.py build "$TMPD/alt1.img" 4096 /a/ /b/ \
+    "/a/eins=$TMPD/probe.bin" "/b/zwei=$TMPD/probe.bin" "/b/drei@/a/eins" \
+    > "$TMPD/alt1.txt" 2>&1
+python3 tools/osum/mkfs.py build "$TMPD/alt2.img" 4096 /a/ /b/ \
+    "/a/eins=$TMPD/probe.bin" "/b/zwei=$TMPD/probe.bin" "/b/drei@/a/eins" \
+    > "$TMPD/alt2.txt" 2>&1
+cmp -s "$TMPD/alt1.img" "$TMPD/alt2.img" \
+    && ok "zweimal gebaut, zweimal dieselben Oktette" \
+    || bad "mkfs.py baut nicht zweimal dasselbe"
+grep -q 'data=34' "$TMPD/alt1.txt" \
+    && ok "ohne --inodes faengt der Datenbereich weiter bei Block 34 an" \
+    || bad "der Datenbereich ist verrutscht: $(cat "$TMPD/alt1.txt")"
+grep -q 'inodes=[0-9]*/128' "$TMPD/alt1.txt" \
+    && ok "und die Tabelle hat weiter 128 Inodes" \
+    || bad "die Inode-Zahl der Vorgabe hat sich geaendert: $(cat "$TMPD/alt1.txt")"
+grep -q 'data=1026' "$TMPD/gmkfs.txt" \
+    && ok "mit --inodes=4096 rueckt er dagegen auf Block 1026" \
+    || bad "der grosse Datenbereich liegt falsch: $(cat "$TMPD/gmkfs.txt")"
+# Und der Kernel liest beides -- das kleine Abbild hat jeder Lauf oben
+# eingehaengt, das grosse jeder Lauf dieses Abschnitts.
+has "$TMPD/gkupfer.txt" "osum: mount=1" \
+    "und derselbe Kernel haengt beide ein, ohne eine Zeile Unterschied"
+
 
 echo
 echo "K15: $pass passed, $fail failed"
