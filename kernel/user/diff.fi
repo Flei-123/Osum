@@ -1,0 +1,389 @@
+// kernel/user/diff.fi -- Runde K11: was zwischen zwei Dateien steht.
+//
+// Zeilenweise, mit der laengsten gemeinsamen Teilfolge (dynamische
+// Programmierung, O(n*m) an Zeit UND an Speicher). Das ist nicht der
+// Myers-Algorithmus, den GNU nimmt, aber es liefert bei kleinen Dateien
+// dieselbe MINIMALE Loesung, und die Reihenfolge im Zweifelsfall ist
+// dieselbe: erst die geloeschte Zeile, dann die eingefuegte.
+//
+// AUSGABEFORM IST DIE VEREINHEITLICHTE (`diff -u`), und zwar aus einem
+// Grund: `patch` dieser Runde muss sie wieder einspielen koennen, und
+// eine Form mit Zeilennummern auf beiden Seiten und drei Zeilen Umfeld
+// laesst sich auch dann noch anlegen, wenn die Datei sich seither um ein
+// paar Zeilen verschoben hat. Die klassische Form (`3c3`) kann das nicht.
+//
+// Die Kopfzeilen tragen KEINEN Zeitstempel: dieses Dateisystem hat
+// keinen (siehe `find`). Auf dem Wirt entspricht dem
+// `diff -u --label ALT --label NEU`, und genau so vergleicht
+// tools/k11/run.sh die Ausgabe Oktett fuer Oktett.
+//
+// Beendigungscodes wie ueberall: 0 gleich, 1 verschieden, 2 kaputt.
+
+profile kernel
+
+import ulib
+import tools
+
+export { u_start }
+
+const MAXL: u64 = 256
+const POOL: u64 = 24576
+const CONTEXT: u64 = 3
+
+static mut abuf: [u8; 24576] = [0 as u8; 24576]
+static mut bbuf: [u8; 24576] = [0 as u8; 24576]
+static mut aat: [u64; 257] = [0 as u64; 257]
+static mut alen: [u64; 257] = [0 as u64; 257]
+static mut bat: [u64; 257] = [0 as u64; 257]
+static mut blen: [u64; 257] = [0 as u64; 257]
+static mut an: u64 = 0
+static mut bn: u64 = 0
+static mut anonl: bool = false
+static mut bnonl: bool = false
+static mut table: [u16; 66049] = [0 as u16; 66049]
+static mut op: [u8; 512] = [0 as u8; 512]
+static mut oi: [u64; 512] = [0 as u64; 512]
+static mut nop: u64 = 0
+
+// Eine Datei einlesen und in Zeilen zerlegen. Gibt false, wenn sie nicht
+// hineinpasst oder nicht da ist.
+fn load(path: u64, buf: u64, at: u64, len: u64, nonl: u64) -> u64 {
+    let fd: u64 = tools.openr(path)
+    if ulib.bad(fd) {
+        return ulib.EOF
+    }
+    var total: u64 = 0
+    var going: bool = true
+    while going {
+        let n: u64 = ulib.sys(ulib.SYS_READ, fd, buf + total,
+            POOL - total)
+        if n == 0 || ulib.bad(n) {
+            going = false
+        } else {
+            total = total + n
+            if total >= POOL {
+                going = false
+            }
+        }
+    }
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    if total >= POOL {
+        return ulib.EOF
+    }
+    var lines: u64 = 0
+    var start: u64 = 0
+    var i: u64 = 0
+    while i < total {
+        if *((buf + i) as *mut u8) == 10 as u8 {
+            if lines >= MAXL {
+                return ulib.EOF
+            }
+            __mmio_write64((at + lines * 8) as *mut u64, start)
+            __mmio_write64((len + lines * 8) as *mut u64, i - start)
+            lines = lines + 1
+            start = i + 1
+        }
+        i = i + 1
+    }
+    __mmio_write8((nonl) as *mut u8, 0 as u8)
+    if start < total {
+        if lines >= MAXL {
+            return ulib.EOF
+        }
+        __mmio_write64((at + lines * 8) as *mut u64, start)
+        __mmio_write64((len + lines * 8) as *mut u64, total - start)
+        lines = lines + 1
+        __mmio_write8((nonl) as *mut u8, 1 as u8)
+    }
+    return lines
+}
+
+fn same_line(i: u64, j: u64) -> bool {
+    if alen[(i) as usize] != blen[(j) as usize] {
+        return false
+    }
+    return tools.same_bytes((&abuf[(aat[(i) as usize]) as usize]) as u64,
+        (&bbuf[(bat[(j) as usize]) as usize]) as u64, alen[(i) as usize])
+}
+
+fn tget(i: u64, j: u64) -> u64 {
+    return (table[(i * (bn + 1) + j) as usize]) as u64
+}
+
+// Die Tabelle von hinten nach vorn. `table[i][j]` ist die Laenge der
+// laengsten gemeinsamen Teilfolge von a[i..] und b[j..].
+fn build() {
+    var i: u64 = an + 1
+    while i > 0 {
+        i = i - 1
+        var j: u64 = bn + 1
+        while j > 0 {
+            j = j - 1
+            var v: u64 = 0
+            if i < an && j < bn {
+                if same_line(i, j) {
+                    v = tget(i + 1, j + 1) + 1
+                } else {
+                    v = tget(i + 1, j)
+                    if tget(i, j + 1) > v {
+                        v = tget(i, j + 1)
+                    }
+                }
+            }
+            table[(i * (bn + 1) + j) as usize] = v as u16
+        }
+    }
+}
+
+fn push(kind: u64, idx: u64) {
+    if nop < 512 {
+        op[(nop) as usize] = kind as u8
+        oi[(nop) as usize] = idx
+        nop = nop + 1
+    }
+}
+
+fn script() {
+    var i: u64 = 0
+    var j: u64 = 0
+    nop = 0
+    while i < an || j < bn {
+        if i < an && j < bn && same_line(i, j) {
+            push(0, i)
+            i = i + 1
+            j = j + 1
+        } else if j >= bn || (i < an && tget(i + 1, j) >= tget(i, j + 1)) {
+            push(1, i)
+            i = i + 1
+        } else {
+            push(2, j)
+            j = j + 1
+        }
+    }
+}
+
+fn put_line(which: u64, idx: u64) {
+    if which == 0 {
+        tools.ob_put((&abuf[(aat[(idx) as usize]) as usize]) as u64,
+            alen[(idx) as usize])
+    } else {
+        tools.ob_put((&bbuf[(bat[(idx) as usize]) as usize]) as u64,
+            blen[(idx) as usize])
+    }
+    tools.ob_nl()
+    var s_nonl: [u8; 31] = "\\ No newline at end of file\0\0\0\0"
+    if which == 0 && anonl && idx + 1 == an {
+        tools.ob_str((&s_nonl[0 as usize]) as u64)
+        tools.ob_nl()
+    }
+    if which == 1 && bnonl && idx + 1 == bn {
+        tools.ob_str((&s_nonl[0 as usize]) as u64)
+        tools.ob_nl()
+    }
+}
+
+// Die Kopfzahl eines Bereichs: eine einzelne Zeile bekommt kein Komma,
+// ein leerer Bereich beginnt VOR der Stelle -- so schreibt GNU es.
+fn range(start: u64, count: u64) {
+    if count == 0 {
+        tools.ob_num(start)
+        tools.ob_byte(44)
+        tools.ob_byte(48)
+        return
+    }
+    tools.ob_num(start + 1)
+    if count != 1 {
+        tools.ob_byte(44)
+        tools.ob_num(count)
+    }
+}
+
+fn u_start(args: u64) -> u64 {
+    var s_use: [u8; 26] = "diff: needs two files\0\0\0\0\0"
+    var s_open: [u8; 20] = "diff: cannot read \0\0"
+    var s_big: [u8; 22] = "diff: file too big \0\0\0"
+    var s_minus: [u8; 5] = "--- \0"
+    var s_plus: [u8; 5] = "+++ \0"
+    var s_at: [u8; 4] = "@@ \0"
+    var s_at2: [u8; 4] = " @@\0"
+    var o_u: [u8; 3] = "-u\0"
+    var o_q: [u8; 3] = "-q\0"
+    var s_differ: [u8; 8] = "Files \0\0"
+    var s_and: [u8; 6] = " and \0"
+    var s_dif: [u8; 8] = " differ\0"
+    let argc: u64 = ulib.arg_count(args)
+    var at: u64 = 1
+    var brief: bool = false
+    while at < argc && *((ulib.arg_at(args, at)) as *mut u8) == 45 as u8 {
+        let a: u64 = ulib.arg_at(args, at)
+        if ulib.streq(a, (&o_q[0 as usize]) as u64) {
+            brief = true
+        } else if !ulib.streq(a, (&o_u[0 as usize]) as u64) {
+            ulib.esay_line((&s_use[0 as usize]) as u64, 0)
+            return 2
+        }
+        at = at + 1
+    }
+    if at + 1 >= argc {
+        ulib.esay_line((&s_use[0 as usize]) as u64, 0)
+        return 2
+    }
+    let pa: u64 = ulib.arg_at(args, at)
+    let pb: u64 = ulib.arg_at(args, at + 1)
+    var na: [u8; 1] = [0 as u8; 1]
+    var nb: [u8; 1] = [0 as u8; 1]
+    let ra: u64 = load(pa, (&abuf[0 as usize]) as u64,
+        (&aat[0 as usize]) as u64, (&alen[0 as usize]) as u64,
+        (&na[0 as usize]) as u64)
+    if ra == ulib.EOF {
+        if ulib.bad(ulib.size_of(pa)) {
+            ulib.esay_line((&s_open[0 as usize]) as u64, pa)
+        } else {
+            ulib.esay_line((&s_big[0 as usize]) as u64, pa)
+        }
+        return 2
+    }
+    let rb: u64 = load(pb, (&bbuf[0 as usize]) as u64,
+        (&bat[0 as usize]) as u64, (&blen[0 as usize]) as u64,
+        (&nb[0 as usize]) as u64)
+    if rb == ulib.EOF {
+        if ulib.bad(ulib.size_of(pb)) {
+            ulib.esay_line((&s_open[0 as usize]) as u64, pb)
+        } else {
+            ulib.esay_line((&s_big[0 as usize]) as u64, pb)
+        }
+        return 2
+    }
+    an = ra
+    bn = rb
+    anonl = na[0 as usize] == 1 as u8
+    bnonl = nb[0 as usize] == 1 as u8
+    build()
+    script()
+    var changed: bool = false
+    var k: u64 = 0
+    while k < nop {
+        if op[(k) as usize] != 0 as u8 {
+            changed = true
+        }
+        k = k + 1
+    }
+    if !changed && anonl == bnonl {
+        return 0
+    }
+    if brief {
+        tools.ob_str((&s_differ[0 as usize]) as u64)
+        tools.ob_str(pa)
+        tools.ob_str((&s_and[0 as usize]) as u64)
+        tools.ob_str(pb)
+        tools.ob_str((&s_dif[0 as usize]) as u64)
+        tools.ob_nl()
+        tools.ob_flush()
+        return 1
+    }
+    tools.ob_str((&s_minus[0 as usize]) as u64)
+    tools.ob_str(pa)
+    tools.ob_nl()
+    tools.ob_str((&s_plus[0 as usize]) as u64)
+    tools.ob_str(pb)
+    tools.ob_nl()
+    // Die Bloecke: jede Aenderung mit drei Zeilen Umfeld, und was
+    // naeher als sechs Zeilen beieinander liegt, kommt in EINEN Block.
+    var k0: u64 = 0
+    while k0 < nop {
+        if op[(k0) as usize] == 0 as u8 {
+            k0 = k0 + 1
+        } else {
+            var first: u64 = k0
+            var run: u64 = 0
+            var ctx_start: u64 = 0
+            var k1: u64 = k0
+            var going: bool = true
+            while going {
+                if k1 >= nop {
+                    going = false
+                } else if op[(k1) as usize] != 0 as u8 {
+                    run = 0
+                    k1 = k1 + 1
+                } else {
+                    if run == 0 {
+                        ctx_start = k1
+                    }
+                    run = run + 1
+                    if run > CONTEXT * 2 {
+                        going = false
+                    } else {
+                        k1 = k1 + 1
+                    }
+                }
+            }
+            // Mehr Umfeld als drei Zeilen gehoert nicht mehr zu diesem
+            // Block -- entweder folgt ein zweiter, oder die Datei endet.
+            var last: u64 = k1
+            if run > CONTEXT {
+                last = ctx_start + CONTEXT
+            }
+            var start: u64 = 0
+            if first > CONTEXT {
+                start = first - CONTEXT
+            }
+            let sa: u64 = count_side(start, 0)
+            let sb: u64 = count_side(start, 1)
+            var ca: u64 = 0
+            var cb: u64 = 0
+            var i: u64 = start
+            while i < last {
+                let o: u64 = (op[(i) as usize]) as u64
+                if o == 0 {
+                    ca = ca + 1
+                    cb = cb + 1
+                } else if o == 1 {
+                    ca = ca + 1
+                } else {
+                    cb = cb + 1
+                }
+                i = i + 1
+            }
+            tools.ob_str((&s_at[0 as usize]) as u64)
+            tools.ob_byte(45)
+            range(sa, ca)
+            tools.ob_byte(32)
+            tools.ob_byte(43)
+            range(sb, cb)
+            tools.ob_str((&s_at2[0 as usize]) as u64)
+            tools.ob_nl()
+            i = start
+            while i < last {
+                let o: u64 = (op[(i) as usize]) as u64
+                if o == 0 {
+                    tools.ob_byte(32)
+                    put_line(0, oi[(i) as usize])
+                } else if o == 1 {
+                    tools.ob_byte(45)
+                    put_line(0, oi[(i) as usize])
+                } else {
+                    tools.ob_byte(43)
+                    put_line(1, oi[(i) as usize])
+                }
+                i = i + 1
+            }
+            k0 = last
+        }
+    }
+    tools.ob_flush()
+    return 1
+}
+
+// Wie viele Zeilen der einen Seite vor Schritt `upto` liegen.
+fn count_side(upto: u64, which: u64) -> u64 {
+    var n: u64 = 0
+    var i: u64 = 0
+    while i < upto {
+        let o: u64 = (op[(i) as usize]) as u64
+        if o == 0 || o == which + 1 {
+            n = n + 1
+        }
+        i = i + 1
+    }
+    return n
+}

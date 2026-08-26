@@ -1,0 +1,268 @@
+// kernel/user/find.fi -- Runde K11: den Baum durchgehen.
+//
+// Tiefe zuerst, das Verzeichnis VOR seinem Inhalt -- die Reihenfolge von
+// GNU. `.` und `..` werden uebersprungen; ohne das laeuft jedes `find`
+// auf diesem Dateisystem im Kreis, denn OFS legt beide als echte
+// Eintraege an (`kernel/fs.fi`, `dir_init`).
+//
+// Was es kann: `-name MUSTER` (mit `*` und `?`), `-type f|d`,
+// `-size [+-]N[c|k]`, `-maxdepth N`, `-empty`. Alle Bedingungen gelten
+// UND -- `-o` gibt es nicht, und ein halbes `-o` waere eine Falle.
+//
+// WAS ES NICHT KANN UND WARUM: `-newer` und `-mtime`. Ein OFS-Inode ist
+// 128 Oktette gross und die sind voll (Typ, Groesse, Verweiszahl, elf
+// direkte Bloecke, ein einfach und ein doppelt indirekter). Es gibt auf
+// dieser Platte keinen Zeitstempel, also kann `find` keinen vergleichen.
+// Siehe docs/ROUNDK11.md.
+//
+// Die Tiefe ist auf acht begrenzt, und je Ebene steht EIN Puffer im
+// .bss statt auf dem Stapel: acht Rahmen zu 512 Oktetten waeren ein
+// Viertel des ganzen Stapels eines Prozesses.
+
+profile kernel
+
+import ulib
+import tools
+import libc.io
+import libc.errno
+
+export { u_start }
+
+const MAXD: u64 = 8
+const PATH: u64 = 256
+
+static mut ents: [u8; 4096] = [0 as u8; 4096]
+static mut path: [u8; 256] = [0 as u8; 256]
+static mut pat: u64 = 0
+static mut want_type: u64 = 0 // 0 = alles, 102 = f, 100 = d
+static mut size_op: u64 = 0 // 0 = keine, 43 = +, 45 = -, 61 = genau
+static mut size_val: u64 = 0
+static mut size_unit: u64 = 0 // 0 = Bloecke zu 512, 99 = Oktette, 107 = KiB
+static mut maxdepth: u64 = 64
+static mut want_empty: bool = false
+static mut found: u64 = 0
+
+// Wie viele Einheiten diese Groesse belegt -- aufgerundet, so wie GNU
+// zaehlt (`-size 1` trifft alles von 1 bis 512 Oktetten).
+fn units(sz: u64) -> u64 {
+    if size_unit == 99 {
+        return sz
+    }
+    var per: u64 = 512
+    if size_unit == 107 {
+        per = 1024
+    }
+    return (sz + per - 1) / per
+}
+
+fn size_ok(sz: u64) -> bool {
+    if size_op == 0 {
+        return true
+    }
+    let u: u64 = units(sz)
+    if size_op == 43 {
+        return u > size_val
+    }
+    if size_op == 45 {
+        return u < size_val
+    }
+    return u == size_val
+}
+
+fn matches(full: u64, name: u64, isdir: bool) -> bool {
+    if want_type == 102 && isdir {
+        return false
+    }
+    if want_type == 100 && !isdir {
+        return false
+    }
+    if pat != 0 && !tools.wild(pat, name) {
+        return false
+    }
+    if size_op != 0 {
+        if isdir {
+            return false
+        }
+        let sz: u64 = ulib.size_of(full)
+        if ulib.bad(sz) {
+            return false
+        }
+        if !size_ok(sz) {
+            return false
+        }
+    }
+    if want_empty {
+        if isdir {
+            if entries(full) != 0 {
+                return false
+            }
+        } else {
+            let sz: u64 = ulib.size_of(full)
+            if ulib.bad(sz) || sz != 0 {
+                return false
+            }
+        }
+    }
+    return true
+}
+
+// Wie viele echte Eintraege ein Verzeichnis hat (ohne `.` und `..`).
+fn entries(p: u64) -> u64 {
+    let fd: u64 = io.dir_open(p)
+    if errno.failed(fd) {
+        return 0
+    }
+    var buf: [u8; 512] = [0 as u8; 512]
+    var n: u64 = 0
+    var going: bool = true
+    while going {
+        let got: u64 = io.dir_read(fd, (&buf[0 as usize]) as u64, 512)
+        if got == 0 || ulib.bad(got) {
+            going = false
+        } else {
+            var at: u64 = 0
+            while at < got {
+                let rec: u64 = (&buf[0 as usize]) as u64 + at
+                if !dot(io.dir_name(rec)) {
+                    n = n + 1
+                }
+                at = at + io.dir_reclen(rec)
+            }
+        }
+    }
+    io.close(fd)
+    return n
+}
+
+fn dot(name: u64) -> bool {
+    let a: u64 = (*((name) as *mut u8)) as u64
+    if a != 46 {
+        return false
+    }
+    let b: u64 = (*((name + 1) as *mut u8)) as u64
+    if b == 0 {
+        return true
+    }
+    return b == 46 && *((name + 2) as *mut u8) == 0 as u8
+}
+
+fn report(full: u64, name: u64, isdir: bool) {
+    if matches(full, name, isdir) {
+        tools.ob_str(full)
+        tools.ob_nl()
+        found = found + 1
+    }
+}
+
+// Ein Verzeichnis und alles darunter. `at` ist die Laenge des Pfades in
+// `path`, so dass kein Nachkomme den Pfad neu zusammensetzen muss.
+//
+// `depth` ist die Ebene DIESES Verzeichnisses; was es aufzaehlt, liegt
+// eine Ebene tiefer. `-maxdepth 0` heisst also: gar nicht hineinsehen.
+fn walk(at: u64, depth: u64) {
+    if depth >= maxdepth || depth >= MAXD {
+        return
+    }
+    let base: u64 = (&path[0 as usize]) as u64
+    let fd: u64 = io.dir_open(base)
+    if errno.failed(fd) {
+        return
+    }
+    let buf: u64 = (&ents[(depth * 512) as usize]) as u64
+    var going: bool = true
+    while going {
+        let got: u64 = io.dir_read(fd, buf, 512)
+        if got == 0 || ulib.bad(got) {
+            going = false
+        } else {
+            var off: u64 = 0
+            while off < got {
+                let rec: u64 = buf + off
+                let name: u64 = io.dir_name(rec)
+                let isdir: bool = io.dir_kind(rec) == io.DT_DIR
+                if !dot(name) {
+                    var end: u64 = at
+                    if end > 0 && path[(end - 1) as usize] != 47 as u8 {
+                        path[(end) as usize] = 47 as u8
+                        end = end + 1
+                    }
+                    let ln: u64 = ulib.strncpy(base + end, name, PATH - end)
+                    report(base, name, isdir)
+                    if isdir {
+                        walk(end + ln, depth + 1)
+                    }
+                    path[(at) as usize] = 0 as u8
+                }
+                off = off + io.dir_reclen(rec)
+            }
+        }
+    }
+    io.close(fd)
+}
+
+fn u_start(args: u64) -> u64 {
+    var s_use: [u8; 25] = "find: unknown option \0\0\0\0"
+    var s_no: [u8; 25] = "find: cannot look at \0\0\0\0"
+    var o_name: [u8; 6] = "-name\0"
+    var o_type: [u8; 6] = "-type\0"
+    var o_size: [u8; 6] = "-size\0"
+    var o_max: [u8; 10] = "-maxdepth\0"
+    var o_empty: [u8; 7] = "-empty\0"
+    var o_print: [u8; 7] = "-print\0"
+    var here: [u8; 2] = ".\0"
+    let argc: u64 = ulib.arg_count(args)
+    var start: u64 = (&here[0 as usize]) as u64
+    var at: u64 = 1
+    if at < argc && *((ulib.arg_at(args, at)) as *mut u8) != 45 as u8 {
+        start = ulib.arg_at(args, at)
+        at = at + 1
+    }
+    while at < argc {
+        let a: u64 = ulib.arg_at(args, at)
+        if ulib.streq(a, (&o_name[0 as usize]) as u64) && at + 1 < argc {
+            pat = ulib.arg_at(args, at + 1)
+            at = at + 2
+        } else if ulib.streq(a, (&o_type[0 as usize]) as u64) && at + 1 < argc {
+            want_type = (*((ulib.arg_at(args, at + 1)) as *mut u8)) as u64
+            at = at + 2
+        } else if ulib.streq(a, (&o_size[0 as usize]) as u64) && at + 1 < argc {
+            let v: u64 = ulib.arg_at(args, at + 1)
+            var i: u64 = 0
+            size_op = 61
+            if *((v) as *mut u8) == 43 as u8 || *((v) as *mut u8) == 45 as u8 {
+                size_op = (*((v) as *mut u8)) as u64
+                i = 1
+            }
+            var end: [u64; 1] = [0 as u64; 1]
+            size_val = tools.dec_at(v, i, (&end[0 as usize]) as u64)
+            let suf: u64 = (*((v + end[0 as usize]) as *mut u8)) as u64
+            if suf == 99 || suf == 107 {
+                size_unit = suf
+            }
+            at = at + 2
+        } else if ulib.streq(a, (&o_max[0 as usize]) as u64) && at + 1 < argc {
+            maxdepth = ulib.to_num(ulib.arg_at(args, at + 1))
+            at = at + 2
+        } else if ulib.streq(a, (&o_empty[0 as usize]) as u64) {
+            want_empty = true
+            at = at + 1
+        } else if ulib.streq(a, (&o_print[0 as usize]) as u64) {
+            at = at + 1
+        } else {
+            ulib.esay_line((&s_use[0 as usize]) as u64, a)
+            return 1
+        }
+    }
+    let n: u64 = ulib.strncpy((&path[0 as usize]) as u64, start, PATH)
+    let isdir: bool = ulib.is_dir((&path[0 as usize]) as u64)
+    if !isdir && ulib.bad(ulib.size_of((&path[0 as usize]) as u64)) {
+        ulib.esay_line((&s_no[0 as usize]) as u64, start)
+        return 1
+    }
+    report((&path[0 as usize]) as u64, ulib.base_name(start), isdir)
+    if isdir {
+        walk(n, 0)
+    }
+    tools.ob_flush()
+    return 0
+}

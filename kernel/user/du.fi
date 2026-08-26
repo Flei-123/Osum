@@ -1,0 +1,161 @@
+// kernel/user/du.fi -- Runde K11: wie viel wo liegt.
+//
+// Ein Verzeichnis nach dem anderen, das Verzeichnis NACH seinem Inhalt
+// (das ist die Reihenfolge von `du`, und sie ist die umgekehrte von
+// `find`). `-s` sagt nur die Summe, `-a` auch jede einzelne Datei.
+//
+// DIE EINHEIT UND DIE ABWEICHUNG VON LINUX: gezaehlt werden Bloecke zu
+// 1024 Oktetten, aufgerundet, und zwar ueber die GROESSE der Dateien --
+// nicht ueber den belegten Platz. Ein Verzeichnis selbst zaehlt NULL.
+// Auf Linux zaehlt `du` den wirklich belegten Platz mit, und ein
+// Verzeichnis hat dort 4096 Oktette; beides ist eine Eigenschaft des
+// Wirtsdateisystems und nicht dieses Werkzeugs. `du --apparent-size -k`
+// waere auf einem Baum ohne Verzeichnisse dasselbe -- und genau so
+// prueft tools/k11/run.sh es nach.
+
+profile kernel
+
+import ulib
+import tools
+import libc.io
+import libc.errno
+
+export { u_start }
+
+const MAXD: u64 = 8
+const PATH: u64 = 256
+
+static mut ents: [u8; 4096] = [0 as u8; 4096]
+static mut path: [u8; 256] = [0 as u8; 256]
+static mut all: bool = false
+static mut only_sum: bool = false
+
+fn blocks(sz: u64) -> u64 {
+    return (sz + 1023) / 1024
+}
+
+fn line(n: u64, p: u64) {
+    tools.ob_num(n)
+    tools.ob_byte(9)
+    tools.ob_str(p)
+    tools.ob_nl()
+}
+
+fn dot(name: u64) -> bool {
+    let a: u64 = (*((name) as *mut u8)) as u64
+    if a != 46 {
+        return false
+    }
+    let b: u64 = (*((name + 1) as *mut u8)) as u64
+    if b == 0 {
+        return true
+    }
+    return b == 46 && *((name + 2) as *mut u8) == 0 as u8
+}
+
+// Die Summe unter `path` (Laenge `at`), und unterwegs die Zeilen.
+fn walk(at: u64, depth: u64, top: bool) -> u64 {
+    let base: u64 = (&path[0 as usize]) as u64
+    var sum: u64 = 0
+    if depth >= MAXD {
+        return 0
+    }
+    let fd: u64 = io.dir_open(base)
+    if errno.failed(fd) {
+        return 0
+    }
+    let buf: u64 = (&ents[(depth * 512) as usize]) as u64
+    var going: bool = true
+    while going {
+        let got: u64 = io.dir_read(fd, buf, 512)
+        if got == 0 || ulib.bad(got) {
+            going = false
+        } else {
+            var off: u64 = 0
+            while off < got {
+                let rec: u64 = buf + off
+                let name: u64 = io.dir_name(rec)
+                let isdir: bool = io.dir_kind(rec) == io.DT_DIR
+                if !dot(name) {
+                    var end: u64 = at
+                    if end > 0 && path[(end - 1) as usize] != 47 as u8 {
+                        path[(end) as usize] = 47 as u8
+                        end = end + 1
+                    }
+                    let ln: u64 = ulib.strncpy(base + end, name, PATH - end)
+                    if isdir {
+                        sum = sum + walk(end + ln, depth + 1, false)
+                    } else {
+                        let sz: u64 = ulib.size_of(base)
+                        var b: u64 = 0
+                        if !ulib.bad(sz) {
+                            b = blocks(sz)
+                        }
+                        sum = sum + b
+                        if all && !only_sum {
+                            line(b, base)
+                        }
+                    }
+                    path[(at) as usize] = 0 as u8
+                }
+                off = off + io.dir_reclen(rec)
+            }
+        }
+    }
+    io.close(fd)
+    if !only_sum || top {
+        line(sum, base)
+    }
+    return sum
+}
+
+// Ein Name auf der Kommandozeile.
+fn one(p: u64, s_no: u64) -> u64 {
+    let n: u64 = ulib.strncpy((&path[0 as usize]) as u64, p, PATH)
+    if ulib.is_dir((&path[0 as usize]) as u64) {
+        walk(n, 0, true)
+        return 0
+    }
+    let sz: u64 = ulib.size_of((&path[0 as usize]) as u64)
+    if ulib.bad(sz) {
+        ulib.esay_line(s_no, p)
+        return 1
+    }
+    line(blocks(sz), (&path[0 as usize]) as u64)
+    return 0
+}
+
+fn u_start(args: u64) -> u64 {
+    var s_no: [u8; 23] = "du: cannot look at \0\0\0\0"
+    var o_a: [u8; 3] = "-a\0"
+    var o_s: [u8; 3] = "-s\0"
+    var here: [u8; 2] = ".\0"
+    let argc: u64 = ulib.arg_count(args)
+    var at: u64 = 1
+    var reading: bool = true
+    while reading && at < argc {
+        let a: u64 = ulib.arg_at(args, at)
+        if ulib.streq(a, (&o_a[0 as usize]) as u64) {
+            all = true
+            at = at + 1
+        } else if ulib.streq(a, (&o_s[0 as usize]) as u64) {
+            only_sum = true
+            at = at + 1
+        } else {
+            reading = false
+        }
+    }
+    var code: u64 = 0
+    if at >= argc {
+        code = one((&here[0 as usize]) as u64, (&s_no[0 as usize]) as u64)
+    } else {
+        while at < argc {
+            if one(ulib.arg_at(args, at), (&s_no[0 as usize]) as u64) != 0 {
+                code = 1
+            }
+            at = at + 1
+        }
+    }
+    tools.ob_flush()
+    return code
+}
