@@ -1,0 +1,1548 @@
+// kernel/usb.fi -- Runde K17: der Kern ueber dem Regler, und die drei
+// Klassen, die ein Rechner wirklich braucht.
+//
+// `xhci.fi` weiss, was ein Steckplatz und ein Endpunkt ist. Diese Datei
+// weiss, was ein GERAET ist -- und das ist etwas anderes: ein Geraet
+// beschreibt sich selbst, und zwar in einer festen Reihenfolge, die man
+// nicht abkuerzen kann.
+//
+//   1. ANSCHLUSS EINSCHALTEN UND ZURUECKSETZEN. Ein USB-2-Geraet meldet
+//      sich erst nach einer Ruecksetzung; ein USB-3-Geraet richtet die
+//      Verbindung selbst ein und ist danach schon freigeschaltet. Beide
+//      Faelle stehen hier, weil `qemu-xhci` beide anbietet -- die
+//      vorderen Anschluesse sind USB 2, die hinteren USB 3.
+//   2. STECKPLATZ ANFORDERN und einen Geraetezusammenhang dafuer
+//      hinterlegen.
+//   3. ADRESSE VERGEBEN. Bis hierher hoert das Geraet auf Adresse 0; der
+//      Befehl `Address Device` gibt ihm eine eigene.
+//   4. DESKRIPTOREN LESEN, und zwar in ZWEI Schritten: erst acht Oktett
+//      des Geraetedeskriptors, weil in Oktett 7 steht, wie gross ein
+//      Paket auf dem Steuerungsendpunkt sein darf -- und ein
+//      langsameres Geraet sagt dort acht, wo der Treiber vierundsechzig
+//      angenommen hat. Dann der ganze.
+//   5. KONFIGURATIONSDESKRIPTOR, auch in zwei Schritten: die ersten neun
+//      Oktett sagen, wie lang das Ganze ist. Darin stehen die
+//      SCHNITTSTELLEN und ihre ENDPUNKTE -- eine Kette von Bloecken
+//      hintereinander, jeder mit seiner Laenge im ersten Oktett.
+//   6. ENDPUNKTE EINRICHTEN (`Configure Endpoint`) und dann
+//      `SET_CONFIGURATION`. In dieser Reihenfolge: der Regler muss die
+//      Bandbreite kennen, bevor das Geraet zu senden anfaengt.
+//   7. TREIBER ZUORDNEN, an der KLASSE der Schnittstelle und an nichts
+//      sonst. Ein Treiber, der an Hersteller- und Geraetenummer haengt,
+//      kennt genau die Geraete, die sein Schreiber besass.
+//
+// DIE TASTATUR UND DIE MAUS MUENDEN IN DEN BESTEHENDEN EINGABEWEG, und
+// das ist woertlich gemeint: der Tastaturtreiber uebersetzt den
+// HID-Gebrauchscode in einen PS/2-ABTASTCODE (Satz 1) und ruft damit
+// `kbd.on_code` -- dieselbe Funktion, die die Unterbrechung von IRQ 1
+// ruft. Es gibt keinen zweiten Weg in die Zeilendisziplin, keinen
+// zweiten Fokus im Fensterserver und keine zweite Tabelle fuer
+// Umschalt und Steuerung. Die Maus baut aus dem HID-Bericht ein
+// PS/2-PAKET und gibt es an `ps2m.usb_packet`. Damit gilt fuer Shell,
+// Fensterserver und Widgets: sie merken nicht, woher die Taste kam --
+// und genau das misst `tools/k17/run.sh`, indem es DENSELBEN Testlauf
+// einmal mit `-device usb-kbd` und einmal mit PS/2 faehrt und die
+// Ausgaben Oktett fuer Oktett vergleicht.
+//
+// DER STICK IST EIN BLOCKGERAET, und auch das ist woertlich gemeint: er
+// haengt als `blk.DEV_USB` an derselben Schnittstelle wie RAM-Platte,
+// ATA und NVMe (`kernel/blk.fi`, Runde 62). `fs.fi`, `vfs.fi` und
+// `fat.fi` aendern dafuer keine Zeile -- dieselbe Zusage wie bei NVMe in
+// Runde K2, und dieselbe Art, sie zu pruefen: das Abbild wird nach dem
+// Lauf VON AUSSEN gelesen.
+//
+// WAS DIESE DATEI NICHT TUT: sie kennt keine HID-Berichtsbeschreibung.
+// Tastatur und Maus laufen im BOOT-PROTOKOLL (`SET_PROTOCOL 0`), in dem
+// das Berichtsformat festgelegt ist -- acht Oktett bei der Tastatur,
+// drei oder vier bei der Maus. Das ist kein Kniff: es ist der Grund,
+// warum jedes BIOS eine USB-Tastatur bedienen kann, ohne einen Zerleger
+// fuer Berichtsbeschreibungen zu haben. Ein Geraet ohne Boot-Protokoll
+// (Schnittstellenunterklasse != 1) wird deshalb ausdruecklich ABGELEHNT
+// und nicht stillschweigend falsch gelesen.
+
+profile kernel
+
+import serial
+import kstate
+import xhci
+import kbd
+import ps2m
+
+export {
+    stage, irq, service, say, ready, count,
+    msc_ready, msc_blocks, msc_bsize, msc_read, msc_write,
+    unplug_check, unplug_now, keys, reports, enums, hotplugs, unplugs,
+    have_kbd, have_mouse, msc_errors, msc_ios, selftest,
+    DRV_NONE, DRV_KBD, DRV_MOUSE, DRV_MSC
+}
+
+// ---------------------------------------------- der Platz dieser Runde
+//
+// Die zwei Kilooktett hinter dem Kommandoring von `xhci.fi` -- derselbe
+// Vorrat 0x50000..0x58000, kein Byte darueber hinaus.
+
+const U_SCAL: u64 = 0x51800
+const U_DEV: u64 = 0x51900
+const DEV_BYTES: u64 = 192
+const MAX_DEV: u64 = 4
+
+// Die Puffer, die ein GERAET beschreibt. Sie liegen in `kdata`, weil der
+// Regler sie ueber den Bus erreicht und der Haldenallokator nichts
+// darueber verspricht, wo etwas liegt.
+const B_DESC: u64 = 0x56000 // Deskriptoren, 512
+const B_REPORT: u64 = 0x56200 // vier Berichte zu 64
+const B_CBW: u64 = 0x56300 // der Befehlsblock, 64
+const B_CSW: u64 = 0x56340 // die Quittung, 64
+const B_BLOCK: u64 = 0x56400 // ein Datenblock, 512
+
+const S_READY: u64 = 0x00
+const S_NDEV: u64 = 0x08
+const S_ENUMS: u64 = 0x10
+const S_KBD: u64 = 0x18 // Platz + 1, 0 = keine
+const S_MOUSE: u64 = 0x20
+const S_MSC: u64 = 0x28
+const S_BLOCKS: u64 = 0x30
+const S_BSIZE: u64 = 0x38
+const S_TAG: u64 = 0x40
+const S_REPORTS: u64 = 0x48
+const S_KEYS: u64 = 0x50
+const S_MOVES: u64 = 0x58
+const S_UNPLUGS: u64 = 0x60
+const S_HOTPLUGS: u64 = 0x68
+const S_MSCERR: u64 = 0x70
+const S_MSCIO: u64 = 0x78
+const S_FAILS: u64 = 0x80
+const S_ATTACHED: u64 = 0x88 // Bitkarte der Anschluesse mit Geraet
+const S_NOHID: u64 = 0x90
+const S_NOMSC: u64 = 0x98
+const S_LASTDATA: u64 = 0xA0 // Oktette im Datenteil der letzten BOT-Runde
+
+const D_USED: u64 = 0
+const D_SLOT: u64 = 8
+const D_PORT: u64 = 16
+const D_SPEED: u64 = 24
+const D_VID: u64 = 32
+const D_PID: u64 = 40
+const D_CLASS: u64 = 48
+const D_SUB: u64 = 56
+const D_PROTO: u64 = 64
+const D_DRIVER: u64 = 72
+const D_INTDCI: u64 = 80
+const D_INDCI: u64 = 88
+const D_OUTDCI: u64 = 96
+const D_INTLEN: u64 = 104
+const D_SEQ: u64 = 112
+const D_PREV: u64 = 120
+const D_IFACE: u64 = 128
+const D_CONFIG: u64 = 136
+const D_MPS0: u64 = 144
+const D_INTMPS: u64 = 152
+const D_INTIVL: u64 = 160
+const D_BULKMPS: u64 = 168
+
+const DRV_NONE: u64 = 0
+const DRV_KBD: u64 = 1
+const DRV_MOUSE: u64 = 2
+const DRV_MSC: u64 = 3
+
+// Die Standardanforderungen. Sie stehen im Kapitel 9 der Spezifikation
+// und in jedem Geraet der Welt gleich.
+const REQ_GET_DESCRIPTOR: u64 = 6
+const REQ_SET_CONFIGURATION: u64 = 9
+const REQ_CLEAR_FEATURE: u64 = 1
+const D_DEVICE: u64 = 1
+const D_CONFIGURATION: u64 = 2
+
+const CLS_HID: u64 = 3
+const CLS_MSC: u64 = 8
+
+fn g(state: u64, off: u64) -> u64 {
+    return kstate.get(state + U_SCAL, off)
+}
+
+fn s(state: u64, off: u64, v: u64) {
+    kstate.set(state + U_SCAL, off, v)
+}
+
+fn dev_at(state: u64, i: u64) -> u64 {
+    return state + U_DEV + i * DEV_BYTES
+}
+
+fn dg(state: u64, i: u64, f: u64) -> u64 {
+    return __mmio_read64((dev_at(state, i) + f) as *mut u64)
+}
+
+fn ds(state: u64, i: u64, f: u64, v: u64) {
+    __mmio_write64((dev_at(state, i) + f) as *mut u64, v)
+}
+
+fn ready(state: u64) -> bool {
+    return g(state, S_READY) != 0
+}
+
+fn count(state: u64) -> u64 {
+    return g(state, S_NDEV)
+}
+
+fn keys(state: u64) -> u64 {
+    return g(state, S_KEYS)
+}
+
+fn reports(state: u64) -> u64 {
+    return g(state, S_REPORTS)
+}
+
+fn enums(state: u64) -> u64 {
+    return g(state, S_ENUMS)
+}
+
+fn hotplugs(state: u64) -> u64 {
+    return g(state, S_HOTPLUGS)
+}
+
+fn unplugs(state: u64) -> u64 {
+    return g(state, S_UNPLUGS)
+}
+
+fn have_kbd(state: u64) -> bool {
+    return g(state, S_KBD) != 0
+}
+
+fn have_mouse(state: u64) -> bool {
+    return g(state, S_MOUSE) != 0
+}
+
+fn msc_errors(state: u64) -> u64 {
+    return g(state, S_MSCERR)
+}
+
+fn msc_ios(state: u64) -> u64 {
+    return g(state, S_MSCIO)
+}
+
+fn b8(p: u64, i: u64) -> u64 {
+    return kstate.get8(p + i)
+}
+
+fn b16(p: u64, i: u64) -> u64 {
+    return b8(p, i) | (b8(p, i + 1) << 8)
+}
+
+fn wr32(at: u64, v: u64) {
+    __mmio_write32(at as *mut u32, (v & 0xFFFFFFFF) as u32)
+}
+
+fn zero(p: u64, n: u64) {
+    var i: u64 = 0
+    while i < n / 8 {
+        __mmio_write64((p + i * 8) as *mut u64, 0)
+        i = i + 1
+    }
+}
+
+fn yes(b: bool) -> u64 {
+    if b {
+        return 1
+    }
+    return 0
+}
+
+// -------------------------------------------------------- der Aufbau
+
+fn stage(state: u64) {
+    var s_skip: [u8; 13] = "usb: skipped\0"
+    var s_no: [u8; 19] = "usb: no controller\0"
+    var s_fail: [u8; 18] = "usb: init failed\0\0"
+    var s_hc: [u8; 12] = "usb: xhci \0\0"
+    var s_slots: [u8; 7] = "slots=\0"
+    var s_ports: [u8; 9] = "  ports=\0"
+    var s_ctx: [u8; 7] = "  ctx=\0"
+    var s_msix: [u8; 7] = "  irq=\0"
+    var s_off: [u8; 12] = "usb: nousb\0\0"
+
+    let mode: u64 = kstate.get(state, kstate.MODE)
+    if (mode & kstate.M_USB) == 0 {
+        serial.puts((&s_skip[0]) as u64)
+        serial.nl()
+        return
+    }
+    zero(state + U_SCAL, 256)
+    zero(state + U_DEV, MAX_DEV * DEV_BYTES)
+    if (mode & kstate.M_NOHID) != 0 {
+        s(state, S_NOHID, 1)
+    }
+    if (mode & kstate.M_NOMSC) != 0 {
+        s(state, S_NOMSC, 1)
+    }
+    // DIE GEGENPROBE, die alles fallen laesst: kein Regler, kein Kern,
+    // keine Klasse. Jede Zusage dieser Runde MUSS damit zusammenbrechen.
+    if (mode & kstate.M_NOUSB) != 0 {
+        serial.puts((&s_off[0]) as u64)
+        serial.nl()
+        return
+    }
+    if !xhci.present(state) {
+        serial.puts((&s_no[0]) as u64)
+        serial.nl()
+        return
+    }
+    let armed: bool = (mode & kstate.M_NOUSBIRQ) == 0
+    if !xhci.init(state, armed) {
+        serial.puts((&s_fail[0]) as u64)
+        serial.nl()
+        return
+    }
+    serial.puts((&s_hc[0]) as u64)
+    serial.puts((&s_slots[0]) as u64)
+    serial.dec(xhci.slots(state))
+    serial.puts((&s_ports[0]) as u64)
+    serial.dec(xhci.ports(state))
+    serial.puts((&s_ctx[0]) as u64)
+    serial.dec(xhci.ctx_size(state))
+    serial.puts((&s_msix[0]) as u64)
+    serial.dec(yes(armed))
+    serial.nl()
+    s(state, S_READY, 1)
+    scan(state)
+    say(state)
+}
+
+// Alle Anschluesse einschalten und dann durchsehen. In zwei Durchgaengen,
+// weil ein Anschluss nach dem Einschalten der Versorgung einen
+// Augenblick braucht, bevor er eine Verbindung meldet -- und ein
+// Treiber, der beides in einer Schleife tut, findet das erste Geraet
+// und das zweite nicht.
+fn scan(state: u64) {
+    let n: u64 = xhci.ports(state)
+    var p: u64 = 1
+    while p <= n {
+        xhci.port_power(state, p)
+        p = p + 1
+    }
+    settle(state)
+    p = 1
+    while p <= n {
+        if xhci.port_connected(state, p) {
+            mark(state, p)
+            attach(state, p)
+        }
+        p = p + 1
+    }
+}
+
+fn settle(state: u64) {
+    var i: u64 = 0
+    while i < 200000 {
+        i = i + 1
+    }
+    xhci.drain(state)
+}
+
+fn mark(state: u64, p: u64) {
+    s(state, S_ATTACHED, g(state, S_ATTACHED) | (1 << (p & 63)))
+}
+
+fn unmark(state: u64, p: u64) {
+    s(state, S_ATTACHED, g(state, S_ATTACHED) & (~(1 << (p & 63))))
+}
+
+fn was_there(state: u64, p: u64) -> bool {
+    return (g(state, S_ATTACHED) & (1 << (p & 63))) != 0
+}
+
+fn alloc_dev(state: u64) -> u64 {
+    var i: u64 = 0
+    while i < MAX_DEV {
+        if dg(state, i, D_USED) == 0 {
+            zero(dev_at(state, i), DEV_BYTES)
+            ds(state, i, D_USED, 1)
+            return i
+        }
+        i = i + 1
+    }
+    return MAX_DEV
+}
+
+fn mps0_of(speed: u64) -> u64 {
+    if speed == 3 {
+        return 64 // hohe Geschwindigkeit
+    }
+    if speed >= 4 {
+        return 512 // Super und darueber
+    }
+    return 8 // voll und langsam
+}
+
+// ------------------------------------------------- ein Geraet aufnehmen
+
+fn attach(state: u64, port: u64) -> bool {
+    var s_dev: [u8; 11] = "usb: port=\0"
+    var s_sp: [u8; 8] = " speed=\0"
+    var s_id: [u8; 5] = " id=\0"
+    var s_cls: [u8; 8] = " class=\0"
+    var s_drv: [u8; 9] = " driver=\0"
+    var s_slot: [u8; 7] = " slot=\0"
+
+    if !xhci.port_reset(state, port) {
+        s(state, S_FAILS, g(state, S_FAILS) + 1)
+        return false
+    }
+    let speed: u64 = xhci.port_speed(state, port)
+    let slot: u64 = xhci.slot_enable(state)
+    if slot == 0 {
+        s(state, S_FAILS, g(state, S_FAILS) + 1)
+        return false
+    }
+    let d: u64 = alloc_dev(state)
+    if d >= MAX_DEV {
+        xhci.slot_disable(state, slot)
+        return false
+    }
+    ds(state, d, D_SLOT, slot)
+    ds(state, d, D_PORT, port)
+    ds(state, d, D_SPEED, speed)
+    ds(state, d, D_MPS0, mps0_of(speed))
+
+    if !address(state, d) {
+        drop_dev(state, d)
+        return false
+    }
+    if !describe(state, d) {
+        drop_dev(state, d)
+        return false
+    }
+    if !configure(state, d) {
+        drop_dev(state, d)
+        return false
+    }
+    s(state, S_ENUMS, g(state, S_ENUMS) + 1)
+    s(state, S_NDEV, g(state, S_NDEV) + 1)
+
+    serial.puts((&s_dev[0]) as u64)
+    serial.dec(port)
+    serial.puts((&s_sp[0]) as u64)
+    serial.dec(speed)
+    serial.puts((&s_slot[0]) as u64)
+    serial.dec(slot)
+    serial.puts((&s_id[0]) as u64)
+    hex4(dg(state, d, D_VID))
+    serial.put(58 as u8)
+    hex4(dg(state, d, D_PID))
+    serial.puts((&s_cls[0]) as u64)
+    hex2(dg(state, d, D_CLASS))
+    serial.put(58 as u8)
+    hex2(dg(state, d, D_SUB))
+    serial.put(58 as u8)
+    hex2(dg(state, d, D_PROTO))
+    serial.puts((&s_drv[0]) as u64)
+    drv_name(dg(state, d, D_DRIVER))
+    serial.nl()
+    bind(state, d)
+    return true
+}
+
+fn hex2(v: u64) {
+    var i: u64 = 2
+    while i > 0 {
+        i = i - 1
+        let x: u64 = (v >> (i * 4)) & 15
+        if x < 10 {
+            serial.put((48 + x) as u8)
+        } else {
+            serial.put((87 + x) as u8)
+        }
+    }
+}
+
+fn hex4(v: u64) {
+    hex2(v >> 8)
+    hex2(v & 0xFF)
+}
+
+fn drv_name(k: u64) {
+    var s_k: [u8; 4] = "kbd\0"
+    var s_m: [u8; 6] = "mouse\0"
+    var s_s: [u8; 4] = "msc\0"
+    var s_n: [u8; 5] = "none\0"
+    if k == DRV_KBD {
+        serial.puts((&s_k[0]) as u64)
+    } else if k == DRV_MOUSE {
+        serial.puts((&s_m[0]) as u64)
+    } else if k == DRV_MSC {
+        serial.puts((&s_s[0]) as u64)
+    } else {
+        serial.puts((&s_n[0]) as u64)
+    }
+}
+
+// Den Steckplatz mit einem Zusammenhang versehen und die Adresse
+// vergeben. Der Eingabezusammenhang traegt zwei Bloecke: den des
+// Steckplatzes und den des Steuerungsendpunkts.
+fn address(state: u64, d: u64) -> bool {
+    let slot: u64 = dg(state, d, D_SLOT)
+    let dc: u64 = xhci.devctx(state, slot)
+    zero(dc, 1024)
+    xhci.dcbaa_set(state, slot, dc)
+    let ep0: u64 = xhci.ep_open(state, slot, 1)
+    if ep0 >= xhci.MAX_EP {
+        return false
+    }
+    build_slot(state, d, 1)
+    build_ep0(state, d, ep0)
+    let ic: u64 = xhci.in_control(state)
+    wr32(ic, 0) // nichts fallen lassen
+    wr32(ic + 4, 3) // Steckplatz und Endpunkt 0 aufnehmen
+    if xhci.address_device(state, slot, false) != xhci.CC_SUCCESS {
+        return false
+    }
+    return true
+}
+
+fn build_slot(state: u64, d: u64, entries: u64) {
+    let sc: u64 = xhci.in_slot(state)
+    zero(sc, xhci.ctx_size(state))
+    wr32(sc, (dg(state, d, D_SPEED) << 20) | (entries << 27))
+    wr32(sc + 4, dg(state, d, D_PORT) << 16)
+    wr32(sc + 8, 0)
+    wr32(sc + 12, 0)
+}
+
+fn build_ep0(state: u64, d: u64, i: u64) {
+    let ec: u64 = xhci.in_ep(state, 1)
+    zero(ec, xhci.ctx_size(state))
+    wr32(ec, 0)
+    // CErr = 3, Art 4 (Steuerung), Paketgroesse oben.
+    wr32(ec + 4, (3 << 1) | (4 << 3) | (dg(state, d, D_MPS0) << 16))
+    __mmio_write64((ec + 8) as *mut u64, xhci.ep_ring(state, i) | 1)
+    wr32(ec + 16, 8)
+}
+
+// Die Deskriptoren. Erst acht Oktett -- nur so erfaehrt der Treiber die
+// wirkliche Paketgroesse des Steuerungsendpunkts, und nur mit ihr
+// stimmen alle weiteren Uebertragungen.
+fn describe(state: u64, d: u64) -> bool {
+    let slot: u64 = dg(state, d, D_SLOT)
+    let buf: u64 = state + B_DESC
+    zero(buf, 64)
+    if xhci.control(state, slot, 0x80, REQ_GET_DESCRIPTOR,
+        (D_DEVICE << 8), 0, 8, buf, true) < 8 {
+        return false
+    }
+    let mps: u64 = b8(buf, 7)
+    if mps >= 8 && mps != dg(state, d, D_MPS0) {
+        ds(state, d, D_MPS0, mps)
+        let ep0: u64 = xhci.ep_find(state, slot, 1)
+        if ep0 < xhci.MAX_EP {
+            build_ep0(state, d, ep0)
+            let ic: u64 = xhci.in_control(state)
+            wr32(ic, 0)
+            wr32(ic + 4, 2)
+            xhci.evaluate_context(state, slot)
+        }
+    }
+    zero(buf, 64)
+    if xhci.control(state, slot, 0x80, REQ_GET_DESCRIPTOR,
+        (D_DEVICE << 8), 0, 18, buf, true) < 18 {
+        return false
+    }
+    ds(state, d, D_VID, b16(buf, 8))
+    ds(state, d, D_PID, b16(buf, 10))
+    return true
+}
+
+// Den Konfigurationsdeskriptor holen und die Schnittstelle waehlen, die
+// dieser Kernel bedienen kann. Die Kette wird EINMAL durchgegangen; die
+// erste Schnittstelle mit einer bekannten Klasse gewinnt, und alles, was
+// danach an Endpunkten kommt, gehoert ihr -- bis die naechste
+// Schnittstelle anfaengt.
+fn configure(state: u64, d: u64) -> bool {
+    let slot: u64 = dg(state, d, D_SLOT)
+    let buf: u64 = state + B_DESC
+    zero(buf, 512)
+    if xhci.control(state, slot, 0x80, REQ_GET_DESCRIPTOR,
+        (D_CONFIGURATION << 8), 0, 9, buf, true) < 9 {
+        return false
+    }
+    var total: u64 = b16(buf, 2)
+    if total < 9 {
+        return false
+    }
+    if total > 512 {
+        total = 512
+    }
+    ds(state, d, D_CONFIG, b8(buf, 5))
+    zero(buf, 512)
+    if xhci.control(state, slot, 0x80, REQ_GET_DESCRIPTOR,
+        (D_CONFIGURATION << 8), 0, total, buf, true) < (total as i64) {
+        return false
+    }
+    parse(state, d, buf, total)
+    if dg(state, d, D_DRIVER) == DRV_NONE {
+        return false
+    }
+    if !endpoints(state, d) {
+        return false
+    }
+    if xhci.control(state, slot, 0, REQ_SET_CONFIGURATION,
+        dg(state, d, D_CONFIG), 0, 0, 0, false) < 0 {
+        return false
+    }
+    return true
+}
+
+fn parse(state: u64, d: u64, buf: u64, total: u64) {
+    var at: u64 = 0
+    var mine: bool = false
+    var picked: bool = false
+    while at + 2 <= total {
+        let len: u64 = b8(buf, at)
+        let kind: u64 = b8(buf, at + 1)
+        if len < 2 {
+            at = total
+        } else {
+            if kind == 4 && len >= 9 {
+                // Eine Schnittstelle. Alternative Einstellungen ausser 0
+                // werden uebergangen -- die Vorgabe ist das, was ohne
+                // `SET_INTERFACE` gilt.
+                mine = false
+                if !picked && b8(buf, at + 3) == 0 {
+                    let cls: u64 = b8(buf, at + 5)
+                    let sub: u64 = b8(buf, at + 6)
+                    let pro: u64 = b8(buf, at + 7)
+                    if wanted(state, cls, sub, pro) {
+                        ds(state, d, D_CLASS, cls)
+                        ds(state, d, D_SUB, sub)
+                        ds(state, d, D_PROTO, pro)
+                        ds(state, d, D_IFACE, b8(buf, at + 2))
+                        ds(state, d, D_DRIVER, driver_for(cls, sub, pro))
+                        mine = true
+                        picked = true
+                    }
+                }
+            } else if kind == 5 && len >= 7 && mine {
+                take_ep(state, d, buf, at)
+            }
+            at = at + len
+        }
+    }
+}
+
+// Welche Schnittstellen dieser Kernel annimmt. Eine HID-Schnittstelle
+// OHNE Boot-Protokoll (Unterklasse 1) wird ABGELEHNT und nicht falsch
+// gelesen: ihr Berichtsformat steht in einer Berichtsbeschreibung, und
+// die zerlegt diese Runde nicht.
+fn wanted(state: u64, cls: u64, sub: u64, pro: u64) -> bool {
+    if cls == CLS_HID {
+        if g(state, S_NOHID) != 0 {
+            return false
+        }
+        return sub == 1 && (pro == 1 || pro == 2)
+    }
+    if cls == CLS_MSC {
+        if g(state, S_NOMSC) != 0 {
+            return false
+        }
+        return sub == 6 && pro == 0x50
+    }
+    return false
+}
+
+fn driver_for(cls: u64, sub: u64, pro: u64) -> u64 {
+    if cls == CLS_HID && pro == 1 {
+        return DRV_KBD
+    }
+    if cls == CLS_HID && pro == 2 {
+        return DRV_MOUSE
+    }
+    if cls == CLS_MSC {
+        return DRV_MSC
+    }
+    return DRV_NONE
+}
+
+fn take_ep(state: u64, d: u64, buf: u64, at: u64) {
+    let addr: u64 = b8(buf, at + 2)
+    let attrs: u64 = b8(buf, at + 3) & 3
+    let mps: u64 = b16(buf, at + 4) & 0x7FF
+    let ivl: u64 = b8(buf, at + 6)
+    let num: u64 = addr & 0xF
+    var dci: u64 = num * 2
+    if (addr & 0x80) != 0 {
+        dci = dci + 1
+    }
+    if attrs == 3 && (addr & 0x80) != 0 && dg(state, d, D_INTDCI) == 0 {
+        ds(state, d, D_INTDCI, dci)
+        ds(state, d, D_INTMPS, mps)
+        ds(state, d, D_INTIVL, ivl)
+        var want: u64 = mps
+        if want > 8 {
+            want = 8
+        }
+        ds(state, d, D_INTLEN, want)
+        return
+    }
+    if attrs == 2 {
+        // DIE PAKETGROSSE KOMMT AUS DEM DESKRIPTOR UND NICHT AUS DEM
+        // KOPF DES TREIBERS. Ein Massenendpunkt hat bei voller
+        // Geschwindigkeit 64, bei hoher 512 und bei Super 1024 Oktett --
+        // und `qemu-xhci` haengt einen Stick an einen USB-3-Anschluss,
+        // wenn einer frei ist. Eine geratene 512 waere dort schlicht
+        // falsch.
+        ds(state, d, D_BULKMPS, mps)
+        if (addr & 0x80) != 0 {
+            if dg(state, d, D_INDCI) == 0 {
+                ds(state, d, D_INDCI, dci)
+            }
+        } else {
+            if dg(state, d, D_OUTDCI) == 0 {
+                ds(state, d, D_OUTDCI, dci)
+            }
+        }
+    }
+}
+
+// Ein Endpunktzusammenhang. `art` ist die xHCI-Nummer: 2 Masse aus,
+// 6 Masse ein, 7 Unterbrechung ein.
+fn build_ep(state: u64, dci: u64, art: u64, mps: u64, ivl: u64, ring: u64,
+    avg: u64) {
+    let ec: u64 = xhci.in_ep(state, dci)
+    zero(ec, xhci.ctx_size(state))
+    wr32(ec, ivl << 16)
+    wr32(ec + 4, (3 << 1) | (art << 3) | (mps << 16))
+    __mmio_write64((ec + 8) as *mut u64, ring | 1)
+    wr32(ec + 16, avg | (mps << 16))
+}
+
+// Das Zeitraster einer Unterbrechungsmeldung. Bei hoher Geschwindigkeit
+// steht in `bInterval` schon ein Logarithmus, bei voller und langsamer
+// stehen dort MILLISEKUNDEN -- und xHCI will in beiden Faellen einen
+// Exponenten zur Basis 125 Mikrosekunden. Wer das verwechselt, bekommt
+// eine Tastatur, die achtmal zu selten oder achtmal zu oft meldet.
+fn interval_of(speed: u64, binterval: u64) -> u64 {
+    if speed >= 3 {
+        if binterval == 0 {
+            return 0
+        }
+        var v: u64 = binterval - 1
+        if v > 15 {
+            v = 15
+        }
+        return v
+    }
+    var ms: u64 = binterval
+    if ms == 0 {
+        ms = 1
+    }
+    var n: u64 = 3
+    while n < 10 && (1 << (n - 3)) < ms {
+        n = n + 1
+    }
+    return n
+}
+
+fn endpoints(state: u64, d: u64) -> bool {
+    let slot: u64 = dg(state, d, D_SLOT)
+    var top: u64 = 1
+    var add: u64 = 1 // der Steckplatz selbst
+    let ic: u64 = xhci.in_control(state)
+    // Alle Endpunktbloecke des Eingabezusammenhangs leeren: was von
+    // einem frueheren Geraet stehenbliebe, waere ein Endpunkt, den
+    // niemand bestellt hat.
+    zero(xhci.in_ep(state, 1), 31 * xhci.ctx_size(state))
+
+    let idci: u64 = dg(state, d, D_INTDCI)
+    if idci != 0 {
+        let i: u64 = xhci.ep_open(state, slot, idci)
+        if i >= xhci.MAX_EP {
+            return false
+        }
+        build_ep(state, idci, 7, dg(state, d, D_INTMPS),
+            interval_of(dg(state, d, D_SPEED), dg(state, d, D_INTIVL)),
+            xhci.ep_ring(state, i), dg(state, d, D_INTMPS))
+        add = add | (1 << idci)
+        if idci > top {
+            top = idci
+        }
+    }
+    let indci: u64 = dg(state, d, D_INDCI)
+    if indci != 0 {
+        let i: u64 = xhci.ep_open(state, slot, indci)
+        if i >= xhci.MAX_EP {
+            return false
+        }
+        build_ep(state, indci, 6, dg(state, d, D_BULKMPS), 0,
+            xhci.ep_ring(state, i), 512)
+        add = add | (1 << indci)
+        if indci > top {
+            top = indci
+        }
+    }
+    let outdci: u64 = dg(state, d, D_OUTDCI)
+    if outdci != 0 {
+        let i: u64 = xhci.ep_open(state, slot, outdci)
+        if i >= xhci.MAX_EP {
+            return false
+        }
+        build_ep(state, outdci, 2, dg(state, d, D_BULKMPS), 0,
+            xhci.ep_ring(state, i), 512)
+        add = add | (1 << outdci)
+        if outdci > top {
+            top = outdci
+        }
+    }
+    build_slot(state, d, top)
+    wr32(ic, 0)
+    wr32(ic + 4, add)
+    return xhci.configure_endpoint(state, slot) == xhci.CC_SUCCESS
+}
+
+fn drop_dev(state: u64, d: u64) {
+    let slot: u64 = dg(state, d, D_SLOT)
+    if slot != 0 {
+        xhci.forget_slot(state, slot)
+        xhci.slot_disable(state, slot)
+        xhci.dcbaa_set(state, slot, 0)
+    }
+    zero(dev_at(state, d), DEV_BYTES)
+}
+
+// ------------------------------------------------------- die Zuordnung
+
+fn bind(state: u64, d: u64) {
+    let k: u64 = dg(state, d, D_DRIVER)
+    if k == DRV_KBD {
+        hid_start(state, d)
+        s(state, S_KBD, d + 1)
+        return
+    }
+    if k == DRV_MOUSE {
+        hid_start(state, d)
+        s(state, S_MOUSE, d + 1)
+        return
+    }
+    if k == DRV_MSC {
+        if msc_start(state, d) {
+            s(state, S_MSC, d + 1)
+        }
+        return
+    }
+}
+
+// ------------------------------------------------------------ HID
+//
+// Boot-Protokoll einschalten, Wiederholung abschalten, und dann liegt
+// dauerhaft GENAU EIN Block auf dem Unterbrechungsring. Wird er fertig,
+// kommt eine Meldung; der Behandler wertet den Bericht aus und legt
+// sofort den naechsten hin. Ein Ring ohne offenen Block ist eine
+// Tastatur, die einmal getippt hat.
+
+fn hid_start(state: u64, d: u64) {
+    let slot: u64 = dg(state, d, D_SLOT)
+    let iface: u64 = dg(state, d, D_IFACE)
+    // SET_PROTOCOL 0 = Boot. Klasse, Schnittstelle, Wirt an Geraet.
+    xhci.control(state, slot, 0x21, 0x0B, 0, iface, 0, 0, false)
+    // SET_IDLE 0 = nur melden, wenn sich etwas aendert.
+    xhci.control(state, slot, 0x21, 0x0A, 0, iface, 0, 0, false)
+    ds(state, d, D_PREV, 0)
+    let i: u64 = xhci.ep_find(state, slot, dg(state, d, D_INTDCI))
+    if i < xhci.MAX_EP {
+        ds(state, d, D_SEQ, xhci.ep_seq(state, i))
+    }
+    arm(state, d)
+}
+
+fn arm(state: u64, d: u64) {
+    xhci.int_queue(state, dg(state, d, D_SLOT), dg(state, d, D_INTDCI),
+        report_buf(state, d), dg(state, d, D_INTLEN))
+}
+
+fn report_buf(state: u64, d: u64) -> u64 {
+    return state + B_REPORT + d * 64
+}
+
+// Der Unterbrechungsweg. `trap.fi` ruft das; alles darunter ist die
+// Kette, die ein Tastendruck bis in die Zeilendisziplin nimmt.
+fn irq(state: u64) {
+    xhci.irq(state)
+    service(state)
+}
+
+// Was seit dem letzten Blick fertig wurde. Wird aus der Unterbrechung
+// gerufen UND aus dem Abfragebetrieb der Gegenprobe -- beide Wege enden
+// hier, und deshalb misst die Gegenprobe wirklich dieselbe Auswertung.
+fn service(state: u64) {
+    if g(state, S_READY) == 0 {
+        return
+    }
+    var d: u64 = 0
+    while d < MAX_DEV {
+        if dg(state, d, D_USED) != 0 && dg(state, d, D_INTDCI) != 0 {
+            let i: u64 = xhci.ep_find(state, dg(state, d, D_SLOT),
+                dg(state, d, D_INTDCI))
+            if i < xhci.MAX_EP {
+                let seq: u64 = xhci.ep_seq(state, i)
+                if seq != dg(state, d, D_SEQ) {
+                    ds(state, d, D_SEQ, seq)
+                    if xhci.ep_code(state, i) == xhci.CC_SUCCESS
+                        || xhci.ep_code(state, i) == xhci.CC_SHORT {
+                        s(state, S_REPORTS, g(state, S_REPORTS) + 1)
+                        deliver(state, d)
+                    }
+                    arm(state, d)
+                }
+            }
+        }
+        d = d + 1
+    }
+}
+
+fn deliver(state: u64, d: u64) {
+    if dg(state, d, D_DRIVER) == DRV_KBD {
+        kbd_report(state, d)
+        return
+    }
+    if dg(state, d, D_DRIVER) == DRV_MOUSE {
+        mouse_report(state, d)
+    }
+}
+
+// Acht Oktett: ein Zusatztastenfeld, ein leeres, sechs Gebrauchscodes.
+// Was NEU dabei ist, ist gedrueckt worden. Was fehlt, ist losgelassen --
+// und das interessiert nur bei Umschalt und Steuerung, weil der
+// PS/2-Weg fuer alles andere ohnehin nur die Druecken-Codes ansieht.
+fn kbd_report(state: u64, d: u64) {
+    let p: u64 = report_buf(state, d)
+    let mods: u64 = b8(p, 0)
+    let prev: u64 = dg(state, d, D_PREV)
+    let pmods: u64 = prev & 0xFF
+    // Umschalt: links Bit 1, rechts Bit 5.
+    if (mods & 0x22) != 0 && (pmods & 0x22) == 0 {
+        kbd.on_code(state, 0x2A)
+    }
+    if (mods & 0x22) == 0 && (pmods & 0x22) != 0 {
+        kbd.on_code(state, 0xAA)
+    }
+    // Steuerung: links Bit 0, rechts Bit 4.
+    if (mods & 0x11) != 0 && (pmods & 0x11) == 0 {
+        kbd.on_code(state, 0x1D)
+    }
+    if (mods & 0x11) == 0 && (pmods & 0x11) != 0 {
+        kbd.on_code(state, 0x9D)
+    }
+    var i: u64 = 2
+    while i < 8 {
+        let u: u64 = b8(p, i)
+        if u > 3 && !in_prev(prev, u) {
+            press(state, u)
+        }
+        i = i + 1
+    }
+    var neu: u64 = mods & 0xFF
+    i = 2
+    while i < 8 {
+        neu = neu | ((b8(p, i) & 0xFF) << (i * 8))
+        i = i + 1
+    }
+    ds(state, d, D_PREV, neu)
+}
+
+fn in_prev(prev: u64, u: u64) -> bool {
+    var i: u64 = 2
+    while i < 8 {
+        if ((prev >> (i * 8)) & 0xFF) == u {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+// DIE STELLE, AN DER USB IN DEN WEG VON RUNDE 59 MUENDET. Der
+// Gebrauchscode wird in einen Abtastcode des Satzes 1 uebersetzt -- also
+// in genau das, was der 8042 an Tor 0x60 liefern wuerde -- und dann geht
+// er durch `kbd.on_code`. Dieselbe Tabelle fuer Umschalt, dieselbe
+// Behandlung von Steuerung, dieselbe Zeilendisziplin, derselbe
+// Eingabefokus des Fensterservers. Es gibt keinen zweiten Weg.
+fn press(state: u64, u: u64) {
+    let ext: bool = is_ext(u)
+    let code: u64 = scancode(u)
+    if code == 0 {
+        return
+    }
+    if ext {
+        kbd.on_code(state, 0xE0)
+    }
+    kbd.on_code(state, code)
+    s(state, S_KEYS, g(state, S_KEYS) + 1)
+}
+
+fn is_ext(u: u64) -> bool {
+    if u >= 0x49 && u <= 0x52 {
+        return true
+    }
+    return u == 0x54 || u == 0x58
+}
+
+// HID-Gebrauchscode -> Abtastcode, Satz 1. Zwei Tabellen und keine
+// Rechnung: die Reihenfolge der Buchstaben im HID-Feld ist alphabetisch,
+// die auf einer Tastatur ist es nicht.
+fn scancode(u: u64) -> u64 {
+    var t: [u8; 100] = [0 as u8; 100]
+    if u >= 100 {
+        return 0
+    }
+    t[4] = 0x1E as u8
+    t[5] = 0x30 as u8
+    t[6] = 0x2E as u8
+    t[7] = 0x20 as u8
+    t[8] = 0x12 as u8
+    t[9] = 0x21 as u8
+    t[10] = 0x22 as u8
+    t[11] = 0x23 as u8
+    t[12] = 0x17 as u8
+    t[13] = 0x24 as u8
+    t[14] = 0x25 as u8
+    t[15] = 0x26 as u8
+    t[16] = 0x32 as u8
+    t[17] = 0x31 as u8
+    t[18] = 0x18 as u8
+    t[19] = 0x19 as u8
+    t[20] = 0x10 as u8
+    t[21] = 0x13 as u8
+    t[22] = 0x1F as u8
+    t[23] = 0x14 as u8
+    t[24] = 0x16 as u8
+    t[25] = 0x2F as u8
+    t[26] = 0x11 as u8
+    t[27] = 0x2D as u8
+    t[28] = 0x15 as u8
+    t[29] = 0x2C as u8
+    t[30] = 0x02 as u8
+    t[31] = 0x03 as u8
+    t[32] = 0x04 as u8
+    t[33] = 0x05 as u8
+    t[34] = 0x06 as u8
+    t[35] = 0x07 as u8
+    t[36] = 0x08 as u8
+    t[37] = 0x09 as u8
+    t[38] = 0x0A as u8
+    t[39] = 0x0B as u8
+    t[40] = 0x1C as u8 // Eingabe
+    t[41] = 0x01 as u8 // Flucht
+    t[42] = 0x0E as u8 // Rueckschritt
+    t[43] = 0x0F as u8 // Tabulator
+    t[44] = 0x39 as u8 // Leerzeichen
+    t[45] = 0x0C as u8
+    t[46] = 0x0D as u8
+    t[47] = 0x1A as u8
+    t[48] = 0x1B as u8
+    t[49] = 0x2B as u8
+    t[50] = 0x2B as u8
+    t[51] = 0x27 as u8
+    t[52] = 0x28 as u8
+    t[53] = 0x29 as u8
+    t[54] = 0x33 as u8
+    t[55] = 0x34 as u8
+    t[56] = 0x35 as u8
+    t[57] = 0x3A as u8 // Feststell
+    t[58] = 0x3B as u8
+    t[59] = 0x3C as u8
+    t[60] = 0x3D as u8
+    t[61] = 0x3E as u8
+    t[62] = 0x3F as u8
+    t[63] = 0x40 as u8
+    t[64] = 0x41 as u8
+    t[65] = 0x42 as u8
+    t[66] = 0x43 as u8
+    t[67] = 0x44 as u8
+    t[68] = 0x57 as u8
+    t[69] = 0x58 as u8
+    t[71] = 0x46 as u8 // Rollen
+    t[73] = 0x52 as u8 // Einfuegen (erweitert)
+    t[74] = 0x47 as u8 // Anfang
+    t[75] = 0x49 as u8 // Seite hoch
+    t[76] = 0x53 as u8 // Entfernen
+    t[77] = 0x4F as u8 // Ende
+    t[78] = 0x51 as u8 // Seite runter
+    t[79] = 0x4D as u8 // rechts
+    t[80] = 0x4B as u8 // links
+    t[81] = 0x50 as u8 // runter
+    t[82] = 0x48 as u8 // hoch
+    t[83] = 0x45 as u8 // Nummernfeststell
+    t[84] = 0x35 as u8 // Ziffernblock geteilt (erweitert)
+    t[85] = 0x37 as u8
+    t[86] = 0x4A as u8
+    t[87] = 0x4E as u8
+    t[88] = 0x1C as u8 // Ziffernblock Eingabe (erweitert)
+    t[89] = 0x4F as u8
+    t[90] = 0x50 as u8
+    t[91] = 0x51 as u8
+    t[92] = 0x4B as u8
+    t[93] = 0x4C as u8
+    t[94] = 0x4D as u8
+    t[95] = 0x47 as u8
+    t[96] = 0x48 as u8
+    t[97] = 0x49 as u8
+    t[98] = 0x52 as u8
+    t[99] = 0x53 as u8
+    return t[u as usize] as u64
+}
+
+// Der Bericht einer Boot-Maus: Tasten, dx, dy und -- wenn der Endpunkt
+// vier Oktett gross ist -- das Rad. Daraus wird ein PS/2-PAKET gebaut
+// und in `ps2m` gegeben; von dort an ist es dieselbe Rechnung wie bei
+// einer Maus am 8042.
+//
+// ZWEI VORZEICHEN DREHEN SICH UM, und beide sind eine eigene Art zu
+// scheitern:
+//   * y. USB zaehlt nach UNTEN (wie der Bildschirm), PS/2 nach OBEN --
+//     `ps2m.apply` zieht die Bewegung deshalb ab. Wer das nicht dreht,
+//     hat einen Zeiger, der nach oben faehrt, wenn man nach unten zieht.
+//   * das Rad. USB zaehlt eine Umdrehung nach vorn als +1, PS/2 als 0x0F.
+fn mouse_report(state: u64, d: u64) {
+    let p: u64 = report_buf(state, d)
+    let btn: u64 = b8(p, 0) & 7
+    let dx: u64 = b8(p, 1) & 0xFF
+    let uy: u64 = b8(p, 2) & 0xFF
+    var dy: u64 = 0
+    if uy != 0 {
+        dy = (256 - uy) & 0xFF
+    }
+    var b0: u64 = 8 | btn
+    if (dx & 0x80) != 0 {
+        b0 = b0 | 0x10
+    }
+    if (dy & 0x80) != 0 {
+        b0 = b0 | 0x20
+    }
+    var rad: u64 = 0
+    var vier: bool = false
+    if dg(state, d, D_INTLEN) >= 4 {
+        let z: u64 = b8(p, 3) & 0xFF
+        vier = true
+        if z != 0 {
+            if (z & 0x80) != 0 {
+                rad = 1 // USB rueckwaerts -> PS/2 vorwaerts
+            } else {
+                rad = 15
+            }
+        }
+    }
+    ps2m.usb_packet(state, b0, dx, dy, rad, vier)
+    s(state, S_MOVES, g(state, S_MOVES) + 1)
+}
+
+// ------------------------------------------------------ Massenspeicher
+//
+// Bulk-Only-Transport: ein Befehlsblock hin, Daten hin oder her, eine
+// Quittung zurueck. Darin steckt ein SCSI-Befehl -- derselbe, den eine
+// SATA-Platte auch verstuende. Das ist der Grund, warum ein Stick
+// ueberhaupt an `blk.fi` passt: er spricht Bloecke.
+
+const CBW_SIG: u64 = 0x43425355
+const CSW_SIG: u64 = 0x53425355
+
+fn msc_ready(state: u64) -> bool {
+    return g(state, S_MSC) != 0
+}
+
+fn msc_blocks(state: u64) -> u64 {
+    return g(state, S_BLOCKS)
+}
+
+fn msc_bsize(state: u64) -> u64 {
+    return g(state, S_BSIZE)
+}
+
+fn msc_dev(state: u64) -> u64 {
+    return g(state, S_MSC) - 1
+}
+
+fn set8(p: u64, i: u64, v: u64) {
+    __mmio_write8((p + i) as *mut u8, (v & 0xFF) as u8)
+}
+
+fn set32le(p: u64, i: u64, v: u64) {
+    set8(p, i, v)
+    set8(p, i + 1, v >> 8)
+    set8(p, i + 2, v >> 16)
+    set8(p, i + 3, v >> 24)
+}
+
+fn be32(p: u64, i: u64) -> u64 {
+    return (b8(p, i) << 24) | (b8(p, i + 1) << 16) | (b8(p, i + 2) << 8)
+        | b8(p, i + 3)
+}
+
+fn set_be32(p: u64, i: u64, v: u64) {
+    set8(p, i, v >> 24)
+    set8(p, i + 1, v >> 16)
+    set8(p, i + 2, v >> 8)
+    set8(p, i + 3, v)
+}
+
+// Ein Befehl. `cdb` steht schon im Befehlsblock ab Oktett 15; hier wird
+// nur der Kopf gefuellt, gesendet, Daten bewegt und die Quittung
+// geprueft. Rueckgabe: true, wenn das Geraet 0 gemeldet hat.
+fn bot(state: u64, d: u64, cdb_len: u64, data: u64, dlen: u64,
+    dir_in: bool) -> bool {
+    let slot: u64 = dg(state, d, D_SLOT)
+    let cbw: u64 = state + B_CBW
+    let csw: u64 = state + B_CSW
+    s(state, S_LASTDATA, 0)
+    let tag: u64 = g(state, S_TAG) + 1
+    s(state, S_TAG, tag)
+    set32le(cbw, 0, CBW_SIG)
+    set32le(cbw, 4, tag)
+    set32le(cbw, 8, dlen)
+    var flags: u64 = 0
+    if dir_in {
+        flags = 0x80
+    }
+    set8(cbw, 12, flags)
+    set8(cbw, 13, 0) // Einheit 0
+    set8(cbw, 14, cdb_len)
+    s(state, S_MSCIO, g(state, S_MSCIO) + 1)
+    if xhci.bulk(state, slot, dg(state, d, D_OUTDCI), cbw, 31) != 31 {
+        s(state, S_MSCERR, g(state, S_MSCERR) + 1)
+        return false
+    }
+    if dlen > 0 {
+        var dci: u64 = dg(state, d, D_OUTDCI)
+        if dir_in {
+            dci = dg(state, d, D_INDCI)
+        }
+        let n: i64 = xhci.bulk(state, slot, dci, data, dlen)
+        if n > 0 {
+            s(state, S_LASTDATA, n as u64)
+        } else {
+            s(state, S_LASTDATA, 0)
+        }
+        if n < 0 {
+            // Ein STALL im Datenteil ist kein Weltuntergang -- das
+            // Protokoll sieht ihn vor. Der Endpunkt wird
+            // zurueckgesetzt, und die Quittung wird trotzdem geholt;
+            // sie sagt, was wirklich war.
+            unstall(state, d, dci)
+        }
+    }
+    zero(csw, 16)
+    if xhci.bulk(state, slot, dg(state, d, D_INDCI), csw, 13) != 13 {
+        unstall(state, d, dg(state, d, D_INDCI))
+        if xhci.bulk(state, slot, dg(state, d, D_INDCI), csw, 13) != 13 {
+            s(state, S_MSCERR, g(state, S_MSCERR) + 1)
+            return false
+        }
+    }
+    if b8(csw, 0) != (CSW_SIG & 0xFF) || b8(csw, 1) != ((CSW_SIG >> 8) & 0xFF) {
+        s(state, S_MSCERR, g(state, S_MSCERR) + 1)
+        return false
+    }
+    if b8(csw, 12) != 0 {
+        s(state, S_MSCERR, g(state, S_MSCERR) + 1)
+        return false
+    }
+    return true
+}
+
+fn unstall(state: u64, d: u64, dci: u64) {
+    let slot: u64 = dg(state, d, D_SLOT)
+    let i: u64 = xhci.ep_find(state, slot, dci)
+    if i >= xhci.MAX_EP {
+        return
+    }
+    // CLEAR_FEATURE(ENDPOINT_HALT) an das GERAET und `Reset Endpoint` an
+    // den REGLER: beide Seiten haben den Anschlag gemerkt, und beide
+    // muessen ihn vergessen.
+    var epaddr: u64 = dci / 2
+    if (dci & 1) != 0 {
+        epaddr = epaddr | 0x80
+    }
+    xhci.reset_endpoint(state, slot, dci)
+    xhci.control(state, slot, 0x02, REQ_CLEAR_FEATURE, 0, epaddr, 0, 0, false)
+    xhci.set_dequeue(state, slot, dci, i)
+}
+
+fn cdb(state: u64) -> u64 {
+    return state + B_CBW + 15
+}
+
+fn msc_start(state: u64, d: u64) -> bool {
+    var s_msc: [u8; 11] = "usb: msc \0\0"
+    var s_blk: [u8; 8] = "blocks=\0"
+    var s_bs: [u8; 9] = "  bsize=\0"
+    var s_inq: [u8; 7] = "  inq=\0"
+    var s_bad: [u8; 26] = "usb: msc unusable bsize=\0\0"
+
+    if dg(state, d, D_INDCI) == 0 || dg(state, d, D_OUTDCI) == 0 {
+        return false
+    }
+    let buf: u64 = state + B_DESC
+    // INQUIRY: 36 Oktett, und die Oktette 8..15 sind der Hersteller --
+    // die einzige Stelle, an der ein Stick sagt, wer er ist.
+    zero(cdb(state), 16)
+    zero(buf, 64)
+    set8(cdb(state), 0, 0x12)
+    set8(cdb(state), 4, 36)
+    if !bot(state, d, 6, buf, 36, true) {
+        return false
+    }
+    let inq_len: u64 = g(state, S_LASTDATA)
+    // TEST UNIT READY, bis zu fuenfmal. Ein Stick, der gerade erst
+    // angesteckt wurde, meldet beim ersten Mal oft "nicht bereit"; das
+    // ist kein Fehler, sondern der Grund, warum es diesen Befehl gibt.
+    var tries: u64 = 0
+    var up: bool = false
+    while tries < 5 && !up {
+        zero(cdb(state), 16)
+        set8(cdb(state), 0, 0x00)
+        if bot(state, d, 6, 0, 0, false) {
+            up = true
+        } else {
+            sense(state, d)
+        }
+        tries = tries + 1
+    }
+    if !up {
+        return false
+    }
+    // Die Antwort auf READ CAPACITY kommt in einen EIGENEN Puffer.
+    // Der erste Entwurf schrieb sie ueber die INQUIRY-Antwort, und
+    // danach war der Herstellername in der Meldung leer -- ein Fehler,
+    // der nur in der AUSGABE stand und nicht im Treiber, und der genau
+    // deshalb eine Stunde gekostet haette, wenn ihn niemand gemeldet
+    // haette.
+    let cap: u64 = buf + 128
+    zero(cdb(state), 16)
+    zero(cap, 32)
+    set8(cdb(state), 0, 0x25) // READ CAPACITY (10)
+    if !bot(state, d, 10, cap, 8, true) {
+        return false
+    }
+    let last: u64 = be32(cap, 0)
+    let bs: u64 = be32(cap, 4)
+    if bs != 512 {
+        // Ehrlich statt still: `blk.fi` spricht 512 Oktett je Block,
+        // und ein Stick mit 4096 waere ein anderer Treiber. Er wird
+        // gemeldet und NICHT eingehaengt.
+        serial.puts((&s_bad[0]) as u64)
+        serial.dec(bs)
+        serial.nl()
+        return false
+    }
+    s(state, S_BLOCKS, last + 1)
+    s(state, S_BSIZE, bs)
+    serial.puts((&s_msc[0]) as u64)
+    serial.puts((&s_blk[0]) as u64)
+    serial.dec(last + 1)
+    serial.puts((&s_bs[0]) as u64)
+    serial.dec(bs)
+    serial.puts((&s_inq[0]) as u64)
+    serial.dec(inq_len)
+    serial.put(32 as u8)
+    var i: u64 = 8
+    while i < 16 {
+        let c: u64 = b8(buf, i)
+        if c >= 32 && c < 127 {
+            serial.put(c as u8)
+        }
+        i = i + 1
+    }
+    serial.nl()
+    return true
+}
+
+fn sense(state: u64, d: u64) {
+    let buf: u64 = state + B_DESC + 256
+    zero(cdb(state), 16)
+    zero(buf, 32)
+    set8(cdb(state), 0, 0x03)
+    set8(cdb(state), 4, 18)
+    bot(state, d, 6, buf, 18, true)
+}
+
+// Die zwei Zeilen, an denen `blk.fi` haengt. Ein Block, 512 Oktett, und
+// die Schicht darueber erfaehrt nicht, dass er ueber vier Endpunkte und
+// drei Uebertragungen gekommen ist.
+fn msc_read(state: u64, lba: u64, dst: u64) -> bool {
+    if g(state, S_MSC) == 0 {
+        return false
+    }
+    let d: u64 = msc_dev(state)
+    let tmp: u64 = state + B_BLOCK
+    zero(cdb(state), 16)
+    set8(cdb(state), 0, 0x28) // READ (10)
+    set_be32(cdb(state), 2, lba)
+    set8(cdb(state), 7, 0)
+    set8(cdb(state), 8, 1)
+    if !bot(state, d, 10, tmp, 512, true) {
+        return false
+    }
+    copy(tmp, dst, 512)
+    return true
+}
+
+fn msc_write(state: u64, lba: u64, src: u64) -> bool {
+    if g(state, S_MSC) == 0 {
+        return false
+    }
+    let d: u64 = msc_dev(state)
+    let tmp: u64 = state + B_BLOCK
+    copy(src, tmp, 512)
+    zero(cdb(state), 16)
+    set8(cdb(state), 0, 0x2A) // WRITE (10)
+    set_be32(cdb(state), 2, lba)
+    set8(cdb(state), 7, 0)
+    set8(cdb(state), 8, 1)
+    return bot(state, d, 10, tmp, 512, false)
+}
+
+fn copy(from: u64, to: u64, n: u64) {
+    var i: u64 = 0
+    while i < n / 8 {
+        __mmio_write64((to + i * 8) as *mut u64,
+            __mmio_read64((from + i * 8) as *mut u64))
+        i = i + 1
+    }
+}
+
+// ------------------------------------------------------ abziehen
+
+// Nachsehen, ob ein Geraet verschwunden ist. Wird aus dem Zeitgeber
+// gerufen und aus der Gegenprobe -- und der Unterschied zwischen
+// "abgezogen" und "war nie da" steht in der Bitkarte S_ATTACHED.
+fn unplug_check(state: u64) {
+    if g(state, S_READY) == 0 {
+        return
+    }
+    let n: u64 = xhci.ports(state)
+    var p: u64 = 1
+    while p <= n {
+        if xhci.port_has_change(state, p) {
+            xhci.port_clear_changes(state, p)
+            let now: bool = xhci.port_connected(state, p)
+            if was_there(state, p) && !now {
+                gone(state, p)
+            } else if !was_there(state, p) && now {
+                s(state, S_HOTPLUGS, g(state, S_HOTPLUGS) + 1)
+                mark(state, p)
+                attach(state, p)
+            }
+        }
+        p = p + 1
+    }
+}
+
+fn gone(state: u64, p: u64) {
+    var s_gone: [u8; 18] = "usb: unplug port=\0"
+    var s_drv: [u8; 9] = " driver=\0"
+    unmark(state, p)
+    var d: u64 = 0
+    while d < MAX_DEV {
+        if dg(state, d, D_USED) != 0 && dg(state, d, D_PORT) == p {
+            serial.puts((&s_gone[0]) as u64)
+            serial.dec(p)
+            serial.puts((&s_drv[0]) as u64)
+            drv_name(dg(state, d, D_DRIVER))
+            serial.nl()
+            if g(state, S_KBD) == d + 1 {
+                s(state, S_KBD, 0)
+            }
+            if g(state, S_MOUSE) == d + 1 {
+                s(state, S_MOUSE, 0)
+            }
+            if g(state, S_MSC) == d + 1 {
+                s(state, S_MSC, 0)
+                s(state, S_BLOCKS, 0)
+            }
+            drop_dev(state, d)
+            s(state, S_NDEV, g(state, S_NDEV) - 1)
+            s(state, S_UNPLUGS, g(state, S_UNPLUGS) + 1)
+        }
+        d = d + 1
+    }
+}
+
+// DIE GEGENPROBE ZUM ABZIEHEN, ohne dass jemand am Stecker zieht: der
+// Anschluss wird fuer weg erklaert. Genau das, was passiert, wenn eine
+// Hand den Stick herauszieht -- der Regler meldet einen Anschlusswechsel
+// und CCS faellt auf null. Hier wird nur der zweite Teil nachgestellt,
+// und was danach geschieht (kein Panik, ENODEV auf offenen Deskriptoren)
+// ist dasselbe.
+fn unplug_now(state: u64) {
+    if g(state, S_READY) == 0 {
+        return
+    }
+    var d: u64 = 0
+    while d < MAX_DEV {
+        if dg(state, d, D_USED) != 0 {
+            gone(state, dg(state, d, D_PORT))
+        }
+        d = d + 1
+    }
+}
+
+// ------------------------------------------------------- die Auskunft
+
+fn say(state: u64) {
+    var s_h: [u8; 14] = "usb: devices=\0"
+    var s_k: [u8; 6] = " kbd=\0"
+    var s_m: [u8; 8] = " mouse=\0"
+    var s_s: [u8; 6] = " msc=\0"
+    var s_e: [u8; 8] = " enums=\0"
+    var s_f: [u8; 8] = " fails=\0"
+    var s_ev: [u8; 9] = " events=\0"
+    var s_i: [u8; 7] = " irqs=\0"
+    var s_c: [u8; 7] = " cmds=\0"
+    serial.puts((&s_h[0]) as u64)
+    serial.dec(g(state, S_NDEV))
+    serial.puts((&s_k[0]) as u64)
+    serial.dec(yes(have_kbd(state)))
+    serial.puts((&s_m[0]) as u64)
+    serial.dec(yes(have_mouse(state)))
+    serial.puts((&s_s[0]) as u64)
+    serial.dec(yes(msc_ready(state)))
+    serial.puts((&s_e[0]) as u64)
+    serial.dec(g(state, S_ENUMS))
+    serial.puts((&s_f[0]) as u64)
+    serial.dec(g(state, S_FAILS))
+    serial.puts((&s_ev[0]) as u64)
+    serial.dec(xhci.events(state))
+    serial.puts((&s_i[0]) as u64)
+    serial.dec(xhci.irqs(state))
+    serial.puts((&s_c[0]) as u64)
+    serial.dec(xhci.cmds(state))
+    serial.nl()
+}
+
+// Der Selbsttest dieser Schicht: Zusagen, die sie ueber sich selbst
+// machen kann, ohne dass ein Testlaeufer sie ihr vorsagt. Rueckgabe: wie
+// viele davon halten.
+fn selftest(state: u64) -> u64 {
+    var n: u64 = 0
+    if xhci.ready(state) {
+        n = n + 1
+    }
+    if xhci.ports(state) > 0 && xhci.ports(state) < 256 {
+        n = n + 1
+    }
+    if xhci.slots(state) > 0 {
+        n = n + 1
+    }
+    if xhci.ctx_size(state) == 32 || xhci.ctx_size(state) == 64 {
+        n = n + 1
+    }
+    if xhci.cmds(state) > 0 {
+        n = n + 1
+    }
+    if xhci.events(state) >= xhci.cmds(state) {
+        n = n + 1
+    }
+    if g(state, S_NDEV) <= MAX_DEV {
+        n = n + 1
+    }
+    if xhci.errors(state) == 0 {
+        n = n + 1
+    }
+    return n
+}

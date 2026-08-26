@@ -1,0 +1,1134 @@
+// kernel/xhci.fi -- Runde K17: der Regler, an dem an einem echten Rechner
+// alles haengt.
+//
+// Osum hatte bis zu dieser Runde genau zwei Eingabegeraete, und beide
+// haengen am 8042: die Tastatur an IRQ 1 (Runde 59) und die Maus an
+// IRQ 12 (Runde K10). Im Kommentarkopf von `ps2m.fi` steht der Satz, der
+// diese Runde ausgeloest hat: "Ein USB-HID-Weg braucht davor einen
+// xHCI-Treiber, Endpunkte, Deskriptoren und eine Warteschlange; das ist
+// eine Runde fuer sich." Das hier ist diese Runde.
+//
+// WAS EIN xHCI IST, in der Reihenfolge, in der der Treiber es braucht:
+//
+//   1. VIER REGISTERSAETZE, und wo sie liegen, sagt der erste. Bei BAR 0
+//      stehen die FAEHIGKEITSREGISTER; ihr erstes Oktett (CAPLENGTH) ist
+//      der Abstand zu den BETRIEBSREGISTERN, `DBOFF` der Abstand zur
+//      TUERKLINGELTAFEL, `RTSOFF` der zu den LAUFZEITREGISTERN. Ein
+//      Treiber, der eine dieser Zahlen raet, spricht mit dem Nichts.
+//   2. ZWEI RINGE, die dem WIRT gehoeren, und einer, der dem REGLER
+//      gehoert. Der Kommandoring nimmt Befehle an den Regler auf
+//      (Steckplatz einschalten, Adresse vergeben, Endpunkte einrichten),
+//      je Endpunkt nimmt ein Uebertragungsring die Datenpakete auf, und
+//      auf dem EREIGNISRING antwortet der Regler auf beides. Jeder Ring
+//      ist ein Feld von 16-Oktett-Bloecken (TRB) mit einem UMLAUFBIT:
+//      wer schreibt, setzt es, wer liest, vergleicht es. Ohne dieses Bit
+//      liesse sich nicht sagen, wo der eine aufgehoert und der andere
+//      angefangen hat.
+//   3. EINE TAFEL VON ZUSAMMENHAENGEN (DCBAA). Je Steckplatz ein
+//      Geraetezusammenhang, darin ein Steckplatzzusammenhang und bis zu
+//      31 Endpunktzusammenhaenge. Der Regler LIEST diese Bloecke; der
+//      Wirt beschreibt sie nur ueber einen EINGABEZUSAMMENHANG, den ein
+//      Befehl uebernimmt. Ein Treiber, der den Ausgabezusammenhang
+//      selbst beschreibt, arbeitet gegen den Regler.
+//   4. TUERKLINGELN. Ein Ring, der gewachsen ist, wird nicht abgefragt,
+//      sondern GEMELDET: ein 32-Bit-Schreibzugriff je Steckplatz.
+//      Klingel 0 gehoert dem Kommandoring, Klingel n dem Steckplatz n --
+//      und der Wert sagt, WELCHER Endpunkt gemeint ist.
+//
+// WAS DIESE DATEI NICHT WEISS, und das ist Absicht: sie kennt weder
+// Tastaturen noch Sticks noch Deskriptoren. Sie kennt Steckplaetze,
+// Endpunkte und Uebertragungen. Die Aufzaehlung, die Klassen und die
+// Zuordnung stehen in `usb.fi` -- so wie `blk.fi` nicht weiss, was ein
+// Dateisystem ist.
+//
+// WAS DIE SPRACHE HIER NICHT KANN, gleiche Lage wie in `nvme.fi`: ein
+// TRB ist ein Block mit Feldern an festen Stellen, aber Firn hat weder
+// fluechtigen Feldzugriff noch `#[align(n)]`. Also werden die Versaetze
+// von Hand gerechnet, und jeder Zugriff auf Geraetespeicher geht durch
+// `__mmio_read32`/`__mmio_write32`. Die Ausrichtung kommt aus dem
+// Bereich, den `boot.s` uebergibt -- er ist seitenausgerichtet, und
+// jeder Versatz hier ist ein Vielfaches von 64.
+//
+// DIE ADRESSEN. Der Regler liest den BUS, nicht die Seitentabelle. In
+// diesem Kernel sind physische und virtuelle Adresse im ersten Gigabyte
+// dieselbe Zahl (`boot.s` bildet es auf sich selbst ab), und `kdata`
+// liegt darin. Deshalb steht `state + VERSATZ` in einem Registerwert,
+// den der Regler liest. Auf einem Kernel mit hoher Haelfte waere genau
+// das die Zeile, an der ein Treiber bricht -- sie steht deshalb hier und
+// nicht verstreut.
+
+profile kernel
+
+import serial
+import kstate
+import pci
+import apic
+import mem
+
+export {
+    present, init, ready, base_of, bdf, ctx_size, slots, ports,
+    irq, drain, irqs, events, cmds, port_events, errors,
+    portsc, port_connected, port_enabled, port_power, port_speed,
+    port_reset, port_clear_changes, port_has_change,
+    slot_enable, slot_disable, address_device, configure_endpoint,
+    evaluate_context, reset_endpoint, stop_endpoint, set_dequeue,
+    devctx, inctx, in_control, in_slot, in_ep, dev_slot_ctx, dev_ep_ctx,
+    ep_open, ep_find, ep_ring, ep_seq, ep_code, ep_resid, ep_reset_ring,
+    control, bulk, int_queue, doorbell, dcbaa_set,
+    buf, BUF_SIZE, MAX_SLOT, MAX_EP,
+    CC_SUCCESS, CC_SHORT, VEC_XHCI, teardown, forget_slot
+}
+
+// ------------------------------------------------- der Vorrat dieser Runde
+//
+// Acht Seiten, 0x50000..0x58000, und keine davon gehoert jemand anderem.
+// Der Vorrat ist VOR dem Bauen zugeteilt worden, weil mehrere Runden
+// gleichzeitig an diesem Baum arbeiten; `tools/kernel/karte.py` rechnet
+// nach, dass sich nichts ueberschneidet. Die Untergliederung steht hier
+// und ist in der Karte als "kein eigener kdata-Bereich" eingetragen --
+// sie liegt vollstaendig INNERHALB von K17_OFF.
+
+const SCAL_OFF: u64 = 0x50000 // 1 KiB Skalare
+const EPTAB_OFF: u64 = 0x50400 // 16 Endpunkte * 64 Oktette
+const DCBAA_OFF: u64 = 0x50800 // 128 Steckplaetze * 8, 64-ausgerichtet
+const ERST_OFF: u64 = 0x50C00 // ein Eintrag, 16 Oktette, 64-ausgerichtet
+const CMD_OFF: u64 = 0x51000 // Kommandoring, 128 TRBs
+const EVT_OFF: u64 = 0x52000 // Ereignisring, 256 TRBs
+const INCTX_OFF: u64 = 0x53000 // ein Eingabezusammenhang
+const DEVCTX_OFF: u64 = 0x54000 // vier Geraetezusammenhaenge zu 1 KiB
+const RING_OFF: u64 = 0x55000 // 16 Uebertragungsringe zu 256 Oktetten
+const BUF_OFF: u64 = 0x56000 // die Puffer, die ein Geraet beschreibt
+const SPARE_OFF: u64 = 0x57000 // Kratzblockfeld und Reserve
+
+const CMD_TRBS: u64 = 128
+const EVT_TRBS: u64 = 256
+const RING_TRBS: u64 = 16 // 15 nutzbar, der letzte ist der Sprung
+const RING_BYTES: u64 = 256
+const MAX_EP: u64 = 16
+const MAX_SLOT: u64 = 4 // so viele Geraete traegt DEVCTX_OFF
+const EPTAB_BYTES: u64 = 64
+const BUF_SIZE: u64 = 4096
+
+// ------------------------------------------------------------- Skalare
+
+const S_BASE: u64 = 0x000 // Faehigkeitsregister, virtuell
+const S_OP: u64 = 0x008 // Betriebsregister
+const S_RT: u64 = 0x010 // Laufzeitregister
+const S_DB: u64 = 0x018 // Tuerklingeltafel
+const S_BDF: u64 = 0x020
+const S_READY: u64 = 0x028
+const S_SLOTS: u64 = 0x030 // MaxSlots des Reglers
+const S_PORTS: u64 = 0x038 // MaxPorts
+const S_CTXSZ: u64 = 0x040 // 32 oder 64
+const S_CMD_ENQ: u64 = 0x048
+const S_CMD_CYC: u64 = 0x050
+const S_EVT_DEQ: u64 = 0x058
+const S_EVT_CYC: u64 = 0x060
+const S_CC_SEQ: u64 = 0x068 // wie viele Kommandoantworten kamen
+const S_CC_CODE: u64 = 0x070
+const S_CC_SLOT: u64 = 0x078
+const S_IRQS: u64 = 0x080
+const S_EVENTS: u64 = 0x088
+const S_CMDS: u64 = 0x090
+const S_PORTEV: u64 = 0x098
+const S_ERRORS: u64 = 0x0A0
+const S_NEP: u64 = 0x0A8 // belegte Plaetze der Endpunkttafel
+const S_MSIX: u64 = 0x0B0
+const S_SCRATCH: u64 = 0x0B8 // Feld der Kratzbloecke, 0 = keine
+const S_NSCRATCH: u64 = 0x0C0
+const S_XFERS: u64 = 0x0C8
+const S_STALLS: u64 = 0x0D0
+
+// -------------------------------------- die Felder eines Endpunktplatzes
+
+const E_SLOT: u64 = 0
+const E_DCI: u64 = 8
+const E_RING: u64 = 16
+const E_ENQ: u64 = 24
+const E_CYC: u64 = 32
+const E_SEQ: u64 = 40
+const E_CODE: u64 = 48
+const E_RESID: u64 = 56
+
+// --------------------------------------------------------- die Register
+
+const C_CAPLENGTH: u64 = 0x00
+const C_HCSPARAMS1: u64 = 0x04
+const C_HCSPARAMS2: u64 = 0x08
+const C_HCCPARAMS1: u64 = 0x10
+const C_DBOFF: u64 = 0x14
+const C_RTSOFF: u64 = 0x18
+
+const O_USBCMD: u64 = 0x00
+const O_USBSTS: u64 = 0x04
+const O_PAGESIZE: u64 = 0x08
+const O_DNCTRL: u64 = 0x14
+const O_CRCR: u64 = 0x18
+const O_DCBAAP: u64 = 0x30
+const O_CONFIG: u64 = 0x38
+const O_PORTSC: u64 = 0x400
+
+const CMD_RS: u64 = 0x1
+const CMD_HCRST: u64 = 0x2
+const CMD_INTE: u64 = 0x4
+const CMD_HSEE: u64 = 0x8
+
+const STS_HCH: u64 = 0x1
+const STS_HSE: u64 = 0x4
+const STS_EINT: u64 = 0x8
+const STS_PCD: u64 = 0x10
+const STS_CNR: u64 = 0x800
+
+const R_IMAN: u64 = 0x20
+const R_IMOD: u64 = 0x24
+const R_ERSTSZ: u64 = 0x28
+const R_ERSTBA: u64 = 0x30
+const R_ERDP: u64 = 0x38
+
+// PORTSC. Die Bits, die beim Schreiben ERHALTEN bleiben duerfen: PP,
+// Anzeige, Aufweckbits. Alles andere ist entweder nur lesbar oder
+// wird durch eine Eins GELOESCHT -- ein Treiber, der den gelesenen Wert
+// unveraendert zurueckschreibt, loescht damit jede Aenderungsmeldung
+// und schaltet nebenbei den Anschluss ab (Bit 1 ist RW1CS).
+const PSC_KEEP: u64 = 0x0E00C200
+const PSC_CCS: u64 = 0x1
+const PSC_PED: u64 = 0x2
+const PSC_PR: u64 = 0x10
+const PSC_PP: u64 = 0x200
+const PSC_CSC: u64 = 0x20000
+const PSC_PEC: u64 = 0x40000
+const PSC_WRC: u64 = 0x80000
+const PSC_OCC: u64 = 0x100000
+const PSC_PRC: u64 = 0x200000
+const PSC_PLC: u64 = 0x400000
+const PSC_CEC: u64 = 0x800000
+const PSC_CHANGES: u64 = 0xFE0000
+
+// TRB-Arten.
+const T_NORMAL: u64 = 1
+const T_SETUP: u64 = 2
+const T_DATA: u64 = 3
+const T_STATUS: u64 = 4
+const T_LINK: u64 = 6
+const T_ENABLE_SLOT: u64 = 9
+const T_DISABLE_SLOT: u64 = 10
+const T_ADDRESS_DEV: u64 = 11
+const T_CONFIG_EP: u64 = 12
+const T_EVAL_CTX: u64 = 13
+const T_RESET_EP: u64 = 14
+const T_STOP_EP: u64 = 15
+const T_SET_DEQ: u64 = 16
+const T_NOOP_CMD: u64 = 23
+const T_XFER_EVENT: u64 = 32
+const T_CMD_EVENT: u64 = 33
+const T_PORT_EVENT: u64 = 34
+
+const CC_SUCCESS: u64 = 1
+const CC_SHORT: u64 = 13
+
+// 43 ist frei: 32 Zeitgeber, 33 Tastatur, 44 NVMe, 45 Netz, 46 Maus,
+// 47 verirrt. `tools/kernel/karte.py` rechnet die Vektortafel seit
+// Runde K10 nach -- zwei Namen auf einer Zahl waeren genau der Fehler,
+// der dort dokumentiert ist.
+const VEC_XHCI: u64 = 43
+
+const SPIN_LIMIT: u64 = 2000000
+const RESET_SPIN: u64 = 400000
+
+// ---------------------------------------------------------- Kleinkram
+
+fn g(state: u64, off: u64) -> u64 {
+    return kstate.get(state + SCAL_OFF, off)
+}
+
+fn s(state: u64, off: u64, v: u64) {
+    kstate.set(state + SCAL_OFF, off, v)
+}
+
+fn rd32(b: u64, off: u64) -> u64 {
+    return __mmio_read32((b + off) as *mut u32) as u64
+}
+
+fn wr32(b: u64, off: u64, v: u64) {
+    __mmio_write32((b + off) as *mut u32, (v & 0xFFFFFFFF) as u32)
+}
+
+fn rd64(b: u64, off: u64) -> u64 {
+    return __mmio_read64((b + off) as *mut u64)
+}
+
+fn wr64(b: u64, off: u64, v: u64) {
+    __mmio_write64((b + off) as *mut u64, v)
+}
+
+fn base_of(state: u64) -> u64 {
+    return g(state, S_BASE)
+}
+
+fn op(state: u64) -> u64 {
+    return g(state, S_OP)
+}
+
+fn rt(state: u64) -> u64 {
+    return g(state, S_RT)
+}
+
+fn db(state: u64) -> u64 {
+    return g(state, S_DB)
+}
+
+fn bdf(state: u64) -> u64 {
+    return g(state, S_BDF)
+}
+
+fn ready(state: u64) -> bool {
+    return g(state, S_READY) != 0
+}
+
+fn ctx_size(state: u64) -> u64 {
+    return g(state, S_CTXSZ)
+}
+
+fn slots(state: u64) -> u64 {
+    return g(state, S_SLOTS)
+}
+
+fn ports(state: u64) -> u64 {
+    return g(state, S_PORTS)
+}
+
+fn irqs(state: u64) -> u64 {
+    return g(state, S_IRQS)
+}
+
+fn events(state: u64) -> u64 {
+    return g(state, S_EVENTS)
+}
+
+fn cmds(state: u64) -> u64 {
+    return g(state, S_CMDS)
+}
+
+fn port_events(state: u64) -> u64 {
+    return g(state, S_PORTEV)
+}
+
+fn errors(state: u64) -> u64 {
+    return g(state, S_ERRORS)
+}
+
+fn buf(state: u64, which: u64) -> u64 {
+    return state + BUF_OFF + which * 512
+}
+
+fn zero(p: u64, n: u64) {
+    var i: u64 = 0
+    while i < n / 8 {
+        __mmio_write64((p + i * 8) as *mut u64, 0)
+        i = i + 1
+    }
+}
+
+// Ein TRB besteht aus vier Doppelworten. Alle vier gehen durch die
+// fluechtigen Zugriffe: der Regler ist der zweite Leser dieses Speichers,
+// und der Uebersetzer darf hier nichts zusammenlegen oder verschieben.
+// Das Steuerwort ZULETZT, weil in ihm das Umlaufbit steht -- der Regler
+// darf den Block erst dann fuer gueltig halten, wenn der Rest schon
+// darin steht.
+fn trb(at: u64, param: u64, status: u64, control: u64) {
+    __mmio_write32((at) as *mut u32, (param & 0xFFFFFFFF) as u32)
+    __mmio_write32((at + 4) as *mut u32, ((param >> 32) & 0xFFFFFFFF) as u32)
+    __mmio_write32((at + 8) as *mut u32, (status & 0xFFFFFFFF) as u32)
+    __mmio_write32((at + 12) as *mut u32, (control & 0xFFFFFFFF) as u32)
+}
+
+// ----------------------------------------------------- die Endpunkttafel
+
+fn ep_at(state: u64, i: u64) -> u64 {
+    return state + EPTAB_OFF + i * EPTAB_BYTES
+}
+
+fn eg(state: u64, i: u64, f: u64) -> u64 {
+    return __mmio_read64((ep_at(state, i) + f) as *mut u64)
+}
+
+fn es(state: u64, i: u64, f: u64, v: u64) {
+    __mmio_write64((ep_at(state, i) + f) as *mut u64, v)
+}
+
+fn ep_find(state: u64, slot: u64, dci: u64) -> u64 {
+    let n: u64 = g(state, S_NEP)
+    var i: u64 = 0
+    while i < n {
+        if eg(state, i, E_SLOT) == slot && eg(state, i, E_DCI) == dci {
+            return i
+        }
+        i = i + 1
+    }
+    return MAX_EP
+}
+
+// Einen Uebertragungsring anlegen. Der Ring ist SEIN Platz in der Tafel:
+// Platz i bekommt die 256 Oktette bei RING_OFF + i * 256. Damit haengt
+// die Zahl der gleichzeitig offenen Endpunkte an einer Zahl (MAX_EP) und
+// nicht an einem Allokator, den ein Unterbrechungsweg anfassen muesste.
+fn ep_open(state: u64, slot: u64, dci: u64) -> u64 {
+    let found: u64 = ep_find(state, slot, dci)
+    if found < MAX_EP {
+        ep_reset_ring(state, found)
+        return found
+    }
+    let n: u64 = g(state, S_NEP)
+    if n >= MAX_EP {
+        return MAX_EP
+    }
+    es(state, n, E_SLOT, slot)
+    es(state, n, E_DCI, dci)
+    es(state, n, E_RING, state + RING_OFF + n * RING_BYTES)
+    es(state, n, E_SEQ, 0)
+    es(state, n, E_CODE, 0)
+    es(state, n, E_RESID, 0)
+    s(state, S_NEP, n + 1)
+    ep_reset_ring(state, n)
+    return n
+}
+
+fn ep_reset_ring(state: u64, i: u64) {
+    zero(eg(state, i, E_RING), RING_BYTES)
+    es(state, i, E_ENQ, 0)
+    es(state, i, E_CYC, 1)
+}
+
+fn ep_ring(state: u64, i: u64) -> u64 {
+    return eg(state, i, E_RING)
+}
+
+fn ep_seq(state: u64, i: u64) -> u64 {
+    return eg(state, i, E_SEQ)
+}
+
+fn ep_code(state: u64, i: u64) -> u64 {
+    return eg(state, i, E_CODE)
+}
+
+fn ep_resid(state: u64, i: u64) -> u64 {
+    return eg(state, i, E_RESID)
+}
+
+// Alle Plaetze eines Steckplatzes vergessen. Wird beim Abziehen gerufen:
+// ein Endpunkt eines Geraets, das nicht mehr da ist, darf keine
+// Uebertragung mehr annehmen -- und sein Platz soll wieder frei werden.
+fn forget_slot(state: u64, slot: u64) {
+    let n: u64 = g(state, S_NEP)
+    var i: u64 = 0
+    while i < n {
+        if eg(state, i, E_SLOT) == slot {
+            es(state, i, E_SLOT, 0)
+            es(state, i, E_DCI, 0)
+            es(state, i, E_SEQ, 0)
+        }
+        i = i + 1
+    }
+}
+
+// Einen Block in den Ring legen. Der letzte Platz ist immer ein SPRUNG
+// zurueck an den Anfang, und mit ihm kippt das Umlaufbit -- das ist die
+// ganze Ringmechanik von xHCI. Gibt die Adresse des gelegten Blocks
+// zurueck: die steht spaeter im Ereignis, und nur so laesst sich sagen,
+// WELCHER Block fertig wurde.
+fn ring_push(state: u64, i: u64, param: u64, status: u64, control: u64) -> u64 {
+    let base: u64 = eg(state, i, E_RING)
+    var at: u64 = eg(state, i, E_ENQ)
+    var cyc: u64 = eg(state, i, E_CYC)
+    let here: u64 = base + at * 16
+    trb(here, param, status, control | cyc)
+    at = at + 1
+    if at == RING_TRBS - 1 {
+        // Der Sprung. TC (Bit 1) sagt: hier kippt das Umlaufbit.
+        trb(base + at * 16, base, 0, (T_LINK << 10) | 2 | cyc)
+        at = 0
+        cyc = 1 - cyc
+    }
+    es(state, i, E_ENQ, at)
+    es(state, i, E_CYC, cyc)
+    return here
+}
+
+// ------------------------------------------------------- die Tuerklingel
+
+fn doorbell(state: u64, slot: u64, target: u64) {
+    wr32(db(state), slot * 4, target & 0xFF)
+}
+
+// -------------------------------------------------------- der Ereignisring
+
+fn irq(state: u64) {
+    s(state, S_IRQS, g(state, S_IRQS) + 1)
+    // Beide Meldebits loeschen -- eine Eins loescht, eine Null laesst
+    // stehen. Ein Regler mit stehendem IP schickt keine zweite Meldung.
+    wr32(op(state), O_USBSTS, STS_EINT)
+    wr32(rt(state), R_IMAN, rd32(rt(state), R_IMAN) | 1)
+    drain(state)
+}
+
+// Alles nehmen, was da liegt. Eine Meldung kann fuer mehrere fertige
+// Uebertragungen stehen; ein Behandler, der immer nur eine nimmt, laesst
+// den Rest liegen -- derselbe Satz steht in `nvme.drain`, und er gilt
+// hier genauso.
+// UNTERBRECHUNGSSICHER, und das ist keine Vorsicht auf Vorrat. Der
+// Ereignisring hat GENAU EINEN Abholzeiger, und an ihm arbeiten in
+// diesem Kernel zwei Seiten: die Abfrageschleife einer laufenden
+// Steuerungsuebertragung und der Behandler von Vektor 43. Wird die
+// Schleife zwischen "Block gelesen" und "Zeiger weitergesetzt"
+// unterbrochen, liest der Behandler denselben Block noch einmal -- und
+// zaehlt dieselbe Uebertragung zweimal fertig. Deshalb wird hier
+// abgeschaltet und danach genau dann wieder ein, wenn es vorher an war;
+// aus dem Behandler heraus gerufen bleibt es aus. Denselben Griff macht
+// `ps2m.init` seit Runde K10, und aus demselben Grund.
+fn drain(state: u64) -> u64 {
+    let flags: u64 = asm("pushfq\npop rax\ncli", out("rax"))
+    let n: u64 = drain_inner(state)
+    if (flags & 0x200) != 0 {
+        asm("sti")
+    }
+    return n
+}
+
+fn drain_inner(state: u64) -> u64 {
+    if g(state, S_READY) == 0 {
+        return 0
+    }
+    var at: u64 = g(state, S_EVT_DEQ)
+    var cyc: u64 = g(state, S_EVT_CYC)
+    var got: u64 = 0
+    while got < EVT_TRBS {
+        let here: u64 = state + EVT_OFF + at * 16
+        let c3: u64 = rd32(here, 12)
+        if (c3 & 1) != cyc {
+            got = got + EVT_TRBS + 1
+        } else {
+            handle(state, here, c3)
+            at = at + 1
+            if at >= EVT_TRBS {
+                at = 0
+                cyc = 1 - cyc
+            }
+            got = got + 1
+        }
+    }
+    let n: u64 = got
+    s(state, S_EVT_DEQ, at)
+    s(state, S_EVT_CYC, cyc)
+    // Bit 3 des Abholzeigers (EHB) sagt dem Regler: der Behandler ist
+    // fertig. Ohne ihn bleibt der Regler der Meinung, es laufe noch
+    // einer, und schickt keine weitere Meldung.
+    wr64(rt(state), R_ERDP, (state + EVT_OFF + at * 16) | 8)
+    if n > EVT_TRBS {
+        return n - EVT_TRBS - 1
+    }
+    return n
+}
+
+fn handle(state: u64, here: u64, c3: u64) {
+    let kind: u64 = (c3 >> 10) & 0x3F
+    let st: u64 = rd32(here, 8)
+    s(state, S_EVENTS, g(state, S_EVENTS) + 1)
+    if kind == T_CMD_EVENT {
+        s(state, S_CC_CODE, (st >> 24) & 0xFF)
+        s(state, S_CC_SLOT, (c3 >> 24) & 0xFF)
+        s(state, S_CC_SEQ, g(state, S_CC_SEQ) + 1)
+        return
+    }
+    if kind == T_XFER_EVENT {
+        let slot: u64 = (c3 >> 24) & 0xFF
+        let dci: u64 = (c3 >> 16) & 0x1F
+        let code: u64 = (st >> 24) & 0xFF
+        s(state, S_XFERS, g(state, S_XFERS) + 1)
+        if code != CC_SUCCESS && code != CC_SHORT {
+            s(state, S_ERRORS, g(state, S_ERRORS) + 1)
+            if code == 6 {
+                s(state, S_STALLS, g(state, S_STALLS) + 1)
+            }
+        }
+        let i: u64 = ep_find(state, slot, dci)
+        if i < MAX_EP {
+            es(state, i, E_CODE, code)
+            es(state, i, E_RESID, st & 0xFFFFFF)
+            es(state, i, E_SEQ, eg(state, i, E_SEQ) + 1)
+        }
+        return
+    }
+    if kind == T_PORT_EVENT {
+        s(state, S_PORTEV, g(state, S_PORTEV) + 1)
+        return
+    }
+}
+
+// ------------------------------------------------------ die Kommandos
+
+// Einen Befehl in den Kommandoring legen, klingeln und auf die Antwort
+// warten. Gibt den Abschlusscode zurueck; 0xFF heisst: der Regler hat
+// nicht geantwortet. Begrenzt, weil ein Regler, der nie antwortet, den
+// Kernel nicht anhalten darf.
+fn command(state: u64, param: u64, status: u64, control: u64) -> u64 {
+    let want: u64 = g(state, S_CC_SEQ) + 1
+    var at: u64 = g(state, S_CMD_ENQ)
+    var cyc: u64 = g(state, S_CMD_CYC)
+    trb(state + CMD_OFF + at * 16, param, status, control | cyc)
+    at = at + 1
+    if at == CMD_TRBS - 1 {
+        trb(state + CMD_OFF + at * 16, state + CMD_OFF, 0,
+            (T_LINK << 10) | 2 | cyc)
+        at = 0
+        cyc = 1 - cyc
+    }
+    s(state, S_CMD_ENQ, at)
+    s(state, S_CMD_CYC, cyc)
+    s(state, S_CMDS, g(state, S_CMDS) + 1)
+    doorbell(state, 0, 0)
+    var spin: u64 = 0
+    while spin < SPIN_LIMIT {
+        drain(state)
+        if g(state, S_CC_SEQ) >= want {
+            return g(state, S_CC_CODE)
+        }
+        spin = spin + 1
+    }
+    s(state, S_ERRORS, g(state, S_ERRORS) + 1)
+    return 0xFF
+}
+
+fn slot_enable(state: u64) -> u64 {
+    if command(state, 0, 0, T_ENABLE_SLOT << 10) != CC_SUCCESS {
+        return 0
+    }
+    let slot: u64 = g(state, S_CC_SLOT)
+    if slot == 0 || slot > MAX_SLOT {
+        return 0
+    }
+    return slot
+}
+
+fn slot_disable(state: u64, slot: u64) -> u64 {
+    return command(state, 0, 0, (T_DISABLE_SLOT << 10) | ((slot & 0xFF) << 24))
+}
+
+fn address_device(state: u64, slot: u64, bsr: bool) -> u64 {
+    var c: u64 = (T_ADDRESS_DEV << 10) | ((slot & 0xFF) << 24)
+    if bsr {
+        c = c | (1 << 9)
+    }
+    return command(state, state + INCTX_OFF, 0, c)
+}
+
+fn configure_endpoint(state: u64, slot: u64) -> u64 {
+    return command(state, state + INCTX_OFF, 0,
+        (T_CONFIG_EP << 10) | ((slot & 0xFF) << 24))
+}
+
+fn evaluate_context(state: u64, slot: u64) -> u64 {
+    return command(state, state + INCTX_OFF, 0,
+        (T_EVAL_CTX << 10) | ((slot & 0xFF) << 24))
+}
+
+fn reset_endpoint(state: u64, slot: u64, dci: u64) -> u64 {
+    return command(state, 0, 0, (T_RESET_EP << 10) | ((slot & 0xFF) << 24)
+        | ((dci & 0x1F) << 16))
+}
+
+fn stop_endpoint(state: u64, slot: u64, dci: u64) -> u64 {
+    return command(state, 0, 0, (T_STOP_EP << 10) | ((slot & 0xFF) << 24)
+        | ((dci & 0x1F) << 16))
+}
+
+// Nach einem Abbruch weiss der Regler nicht mehr, wo im Ring er stand.
+// Diese Zeile sagt es ihm -- und das Umlaufbit gehoert dazu, sonst liest
+// er den halben Ring als leer.
+fn set_dequeue(state: u64, slot: u64, dci: u64, i: u64) -> u64 {
+    ep_reset_ring(state, i)
+    return command(state, eg(state, i, E_RING) | 1, 0,
+        (T_SET_DEQ << 10) | ((slot & 0xFF) << 24) | ((dci & 0x1F) << 16))
+}
+
+// ---------------------------------------------------- die Zusammenhaenge
+
+// Wo der Regler den Zusammenhang eines Steckplatzes SUCHT. Die Tafel
+// gehoert dieser Datei; `usb.fi` traegt nur ein, was es angelegt hat --
+// und beim Abziehen wieder aus.
+fn dcbaa_set(state: u64, slot: u64, addr: u64) {
+    if slot == 0 || slot > 127 {
+        return
+    }
+    __mmio_write64((state + DCBAA_OFF + slot * 8) as *mut u64, addr)
+}
+
+fn devctx(state: u64, slot: u64) -> u64 {
+    return state + DEVCTX_OFF + (slot - 1) * 1024
+}
+
+fn inctx(state: u64) -> u64 {
+    return state + INCTX_OFF
+}
+
+// Der Eingabesteuerzusammenhang steht ganz vorn, danach der
+// Steckplatzzusammenhang, danach die 31 Endpunkte -- jeder so gross, wie
+// HCCPARAMS1 es sagt.
+fn in_control(state: u64) -> u64 {
+    return state + INCTX_OFF
+}
+
+fn in_slot(state: u64) -> u64 {
+    return state + INCTX_OFF + ctx_size(state)
+}
+
+fn in_ep(state: u64, dci: u64) -> u64 {
+    return state + INCTX_OFF + (dci + 1) * ctx_size(state)
+}
+
+fn dev_slot_ctx(state: u64, slot: u64) -> u64 {
+    return devctx(state, slot)
+}
+
+fn dev_ep_ctx(state: u64, slot: u64, dci: u64) -> u64 {
+    return devctx(state, slot) + dci * ctx_size(state)
+}
+
+// ---------------------------------------------------------- die Anschluesse
+
+fn portsc(state: u64, p: u64) -> u64 {
+    return rd32(op(state), O_PORTSC + (p - 1) * 0x10)
+}
+
+fn portsc_write(state: u64, p: u64, v: u64) {
+    wr32(op(state), O_PORTSC + (p - 1) * 0x10, v)
+}
+
+fn port_connected(state: u64, p: u64) -> bool {
+    return (portsc(state, p) & PSC_CCS) != 0
+}
+
+fn port_enabled(state: u64, p: u64) -> bool {
+    return (portsc(state, p) & PSC_PED) != 0
+}
+
+fn port_speed(state: u64, p: u64) -> u64 {
+    return (portsc(state, p) >> 10) & 0xF
+}
+
+fn port_has_change(state: u64, p: u64) -> bool {
+    return (portsc(state, p) & PSC_CHANGES) != 0
+}
+
+fn port_power(state: u64, p: u64) {
+    let cur: u64 = portsc(state, p)
+    if (cur & PSC_PP) != 0 {
+        return
+    }
+    portsc_write(state, p, (cur & PSC_KEEP) | PSC_PP)
+}
+
+fn port_clear_changes(state: u64, p: u64) {
+    let cur: u64 = portsc(state, p)
+    portsc_write(state, p, (cur & PSC_KEEP) | (cur & PSC_CHANGES))
+}
+
+// Ein USB-2-Anschluss braucht eine Ruecksetzung, bevor das Geraet
+// antwortet; ein USB-3-Anschluss richtet sich selbst ein und ist nach
+// dem Anstecken schon freigeschaltet. Beide Faelle stehen hier, weil
+// QEMU beide anbietet: die ersten Anschluesse von `qemu-xhci` sind
+// USB 2, die hinteren USB 3.
+fn port_reset(state: u64, p: u64) -> bool {
+    if port_enabled(state, p) {
+        port_clear_changes(state, p)
+        return true
+    }
+    let cur: u64 = portsc(state, p)
+    portsc_write(state, p, (cur & PSC_KEEP) | PSC_PR)
+    var spin: u64 = 0
+    while spin < RESET_SPIN {
+        let v: u64 = portsc(state, p)
+        if (v & PSC_PRC) != 0 {
+            port_clear_changes(state, p)
+            return (portsc(state, p) & PSC_PED) != 0
+        }
+        spin = spin + 1
+    }
+    return false
+}
+
+// ------------------------------------------------------ die Uebertragungen
+
+fn wait_ep(state: u64, i: u64, want: u64) -> bool {
+    var spin: u64 = 0
+    while spin < SPIN_LIMIT {
+        drain(state)
+        if eg(state, i, E_SEQ) >= want {
+            return true
+        }
+        spin = spin + 1
+    }
+    s(state, S_ERRORS, g(state, S_ERRORS) + 1)
+    return false
+}
+
+// Eine Steuerungsuebertragung: Anforderungsblock, Datenblock, Quittung.
+// `len` Oktette in oder aus `dst`. Rueckgabe: uebertragene Oktette, oder
+// eine negative Zahl, wenn etwas schiefging.
+//
+// DREI BLOECKE UND ZWEI MELDUNGEN. Auf dem Datenblock steht IOC und ISP
+// (Meldung auch bei einem kurzen Paket), auf der Quittung IOC. Das erste
+// Ereignis sagt, wie viel WIRKLICH kam -- der Rest steht als `resid`
+// darin; das zweite sagt, dass das Geraet die Uebertragung abgeschlossen
+// hat. Wer nur auf die Quittung wartet, bekommt eine Laenge, die er sich
+// ausgedacht hat.
+fn control(state: u64, slot: u64, bmreq: u64, brequest: u64, wvalue: u64,
+    windex: u64, wlength: u64, dst: u64, in_dir: bool) -> i64 {
+    let i: u64 = ep_find(state, slot, 1)
+    if i >= MAX_EP {
+        return 0 - 1
+    }
+    let setup: u64 = (bmreq & 0xFF) | ((brequest & 0xFF) << 8)
+        | ((wvalue & 0xFFFF) << 16) | ((windex & 0xFFFF) << 32)
+        | ((wlength & 0xFFFF) << 48)
+    var trt: u64 = 0
+    if wlength > 0 {
+        if in_dir {
+            trt = 3
+        } else {
+            trt = 2
+        }
+    }
+    let seq0: u64 = eg(state, i, E_SEQ)
+    ring_push(state, i, setup, 8, (T_SETUP << 10) | (1 << 6) | (trt << 16))
+    var events_wanted: u64 = 1
+    if wlength > 0 {
+        var dir: u64 = 0
+        if in_dir {
+            dir = 1
+        }
+        ring_push(state, i, dst, wlength & 0x1FFFF,
+            (T_DATA << 10) | (dir << 16) | (1 << 5) | (1 << 2))
+        events_wanted = 2
+    }
+    var sdir: u64 = 1
+    if wlength > 0 && in_dir {
+        sdir = 0
+    }
+    ring_push(state, i, 0, 0, (T_STATUS << 10) | (sdir << 16) | (1 << 5))
+    doorbell(state, slot, 1)
+
+    var moved: u64 = wlength
+    if events_wanted == 2 {
+        if !wait_ep(state, i, seq0 + 1) {
+            return 0 - 2
+        }
+        let code: u64 = eg(state, i, E_CODE)
+        if code != CC_SUCCESS && code != CC_SHORT {
+            return 0 - 3
+        }
+        let resid: u64 = eg(state, i, E_RESID)
+        if resid <= wlength {
+            moved = wlength - resid
+        } else {
+            moved = 0
+        }
+    }
+    if !wait_ep(state, i, seq0 + events_wanted) {
+        return 0 - 4
+    }
+    let last: u64 = eg(state, i, E_CODE)
+    if last != CC_SUCCESS && last != CC_SHORT {
+        return 0 - 5
+    }
+    return moved as i64
+}
+
+// Ein einzelner Datenblock auf einem Massen- oder Unterbrechungsendpunkt,
+// und darauf gewartet. Rueckgabe wie oben.
+fn bulk(state: u64, slot: u64, dci: u64, dst: u64, len: u64) -> i64 {
+    let i: u64 = ep_find(state, slot, dci)
+    if i >= MAX_EP {
+        return 0 - 1
+    }
+    let seq0: u64 = eg(state, i, E_SEQ)
+    ring_push(state, i, dst, len & 0x1FFFF,
+        (T_NORMAL << 10) | (1 << 5) | (1 << 2))
+    doorbell(state, slot, dci)
+    if !wait_ep(state, i, seq0 + 1) {
+        return 0 - 2
+    }
+    let code: u64 = eg(state, i, E_CODE)
+    if code != CC_SUCCESS && code != CC_SHORT {
+        return 0 - (code as i64) - 16
+    }
+    let resid: u64 = eg(state, i, E_RESID)
+    if resid > len {
+        return 0
+    }
+    return (len - resid) as i64
+}
+
+// Einen Block auf einem Unterbrechungsendpunkt einreihen, OHNE zu warten.
+// Das ist der Weg, auf dem eine Tastatur meldet: der Ring traegt immer
+// genau einen offenen Block, und wenn er fertig ist, kommt eine
+// Unterbrechung -- nicht eine Abfrage.
+fn int_queue(state: u64, slot: u64, dci: u64, dst: u64, len: u64) -> bool {
+    let i: u64 = ep_find(state, slot, dci)
+    if i >= MAX_EP {
+        return false
+    }
+    ring_push(state, i, dst, len & 0x1FFFF,
+        (T_NORMAL << 10) | (1 << 5) | (1 << 2))
+    doorbell(state, slot, dci)
+    return true
+}
+
+// ------------------------------------------------------------ das Aufsetzen
+
+fn present(state: u64) -> bool {
+    return pci.find_class(state, 0x0C, 0x03, 0x30) < pci.MAX_DEV
+}
+
+fn init(state: u64, armed: bool) -> bool {
+    s(state, S_READY, 0)
+    let idx: u64 = pci.find_class(state, 0x0C, 0x03, 0x30)
+    if idx >= pci.MAX_DEV {
+        return false
+    }
+    let phys: u64 = pci.bar(state, idx, 0)
+    if phys == 0 || pci.bar_is_io(state, idx, 0) {
+        return false
+    }
+    let b: u64 = apic.map_device(state, phys)
+    if b == 0 {
+        return false
+    }
+    s(state, S_BASE, b)
+    s(state, S_BDF, pci.get(state, idx, pci.E_BDF))
+
+    let caplen: u64 = rd32(b, C_CAPLENGTH) & 0xFF
+    if caplen == 0 || caplen == 0xFF {
+        return false
+    }
+    let hcs1: u64 = rd32(b, C_HCSPARAMS1)
+    let hcc1: u64 = rd32(b, C_HCCPARAMS1)
+    s(state, S_OP, b + caplen)
+    s(state, S_RT, b + (rd32(b, C_RTSOFF) & 0xFFFFFFE0))
+    s(state, S_DB, b + (rd32(b, C_DBOFF) & 0xFFFFFFFC))
+    s(state, S_SLOTS, hcs1 & 0xFF)
+    s(state, S_PORTS, (hcs1 >> 24) & 0xFF)
+    var csz: u64 = 32
+    if (hcc1 & 4) != 0 {
+        csz = 64
+    }
+    s(state, S_CTXSZ, csz)
+    if (hcs1 & 0xFF) == 0 || ((hcs1 >> 24) & 0xFF) == 0 {
+        return false
+    }
+
+    // Ohne dieses Bit darf der Regler antworten, aber nicht selbst in den
+    // Speicher greifen -- und ein xHCI tut nichts anderes als das.
+    pci.enable_master(bdf(state))
+
+    if !halt(state) {
+        return false
+    }
+    if !reset(state) {
+        return false
+    }
+
+    // Steckplaetze anmelden. Genau so viele, wie diese Runde
+    // Geraetezusammenhaenge hat: die Steckplatznummern, die der Regler
+    // dann vergibt, liegen zwischen 1 und MAX_SLOT und sind damit
+    // unmittelbar der Platz in DEVCTX_OFF.
+    var want: u64 = MAX_SLOT
+    if want > slots(state) {
+        want = slots(state)
+    }
+    wr32(op(state), O_CONFIG, want)
+
+    zero(state + DCBAA_OFF, 1024)
+    zero(state + CMD_OFF, CMD_TRBS * 16)
+    zero(state + EVT_OFF, EVT_TRBS * 16)
+    zero(state + INCTX_OFF, 4096)
+    zero(state + DEVCTX_OFF, 4096)
+    zero(state + RING_OFF, MAX_EP * RING_BYTES)
+    s(state, S_NEP, 0)
+    s(state, S_CMD_ENQ, 0)
+    s(state, S_CMD_CYC, 1)
+    s(state, S_EVT_DEQ, 0)
+    s(state, S_EVT_CYC, 1)
+    s(state, S_CC_SEQ, 0)
+    s(state, S_EVENTS, 0)
+    s(state, S_IRQS, 0)
+    s(state, S_CMDS, 0)
+    s(state, S_PORTEV, 0)
+    s(state, S_ERRORS, 0)
+    s(state, S_XFERS, 0)
+    s(state, S_STALLS, 0)
+
+    if !scratchpad(state) {
+        return false
+    }
+    wr64(op(state), O_DCBAAP, state + DCBAA_OFF)
+    // Bit 0 ist das Umlaufbit des Kommandorings, nicht ein Teil der
+    // Adresse -- der Ring ist 64-ausgerichtet, die unteren sechs Bit
+    // sind frei.
+    wr64(op(state), O_CRCR, (state + CMD_OFF) | 1)
+
+    // Der Ereignisring wird nicht angemeldet, sondern seine
+    // SEGMENTTAFEL. Ein Eintrag: Adresse und Zahl der Bloecke.
+    trb(state + ERST_OFF, state + EVT_OFF, EVT_TRBS, 0)
+    wr32(rt(state), R_ERSTSZ, 1)
+    wr64(rt(state), R_ERDP, (state + EVT_OFF) | 8)
+    wr64(rt(state), R_ERSTBA, state + ERST_OFF)
+    // Der Zwischenzaehler: 4000 * 250 ns = 1 ms zwischen zwei Meldungen.
+    wr32(rt(state), R_IMOD, 4000)
+
+    // DIE MELDUNG WIRD SCHARFGEMACHT, BEVOR DER REGLER LAEUFT. Dieselbe
+    // Regel wie bei NVMe in Runde K2, und aus demselben Grund: was
+    // hinterher eingerichtet wird, kennt keine Warteschlange.
+    if pci.get(state, idx, pci.E_MSIX) != 0 {
+        if msix_arm(state, idx, VEC_XHCI, armed) {
+            s(state, S_MSIX, 1)
+        } else {
+            return false
+        }
+    } else {
+        intx_arm(state, idx, VEC_XHCI, armed)
+        s(state, S_MSIX, 0)
+    }
+    var iman: u64 = 0
+    if armed {
+        iman = 2
+    }
+    wr32(rt(state), R_IMAN, iman | 1)
+
+    wr32(op(state), O_USBCMD, CMD_RS | CMD_INTE | CMD_HSEE)
+    var spin: u64 = 0
+    while spin < SPIN_LIMIT {
+        if (rd32(op(state), O_USBSTS) & STS_HCH) == 0 {
+            s(state, S_READY, 1)
+            return true
+        }
+        spin = spin + 1
+    }
+    return false
+}
+
+fn halt(state: u64) -> bool {
+    let o: u64 = op(state)
+    wr32(o, O_USBCMD, rd32(o, O_USBCMD) & (~CMD_RS) & 0xFFFFFFFF)
+    var spin: u64 = 0
+    while spin < SPIN_LIMIT {
+        if (rd32(o, O_USBSTS) & STS_HCH) != 0 {
+            return true
+        }
+        spin = spin + 1
+    }
+    return false
+}
+
+fn reset(state: u64) -> bool {
+    let o: u64 = op(state)
+    wr32(o, O_USBCMD, CMD_HCRST)
+    var spin: u64 = 0
+    while spin < SPIN_LIMIT {
+        let c: u64 = rd32(o, O_USBCMD)
+        let st: u64 = rd32(o, O_USBSTS)
+        if (c & CMD_HCRST) == 0 && (st & STS_CNR) == 0 {
+            return true
+        }
+        spin = spin + 1
+    }
+    return false
+}
+
+// Manche Regler verlangen Arbeitsspeicher fuer sich selbst, und wie viel,
+// sagen sie in HCSPARAMS2. QEMU verlangt keinen -- die Zeilen stehen
+// trotzdem hier, weil ein Treiber, der die Zahl nicht liest, auf der
+// ersten echten Maschine mit einem Regler spricht, der auf Speicher
+// wartet, den es nicht gibt.
+fn scratchpad(state: u64) -> bool {
+    let hcs2: u64 = rd32(base_of(state), C_HCSPARAMS2)
+    let n: u64 = ((hcs2 >> 27) & 0x1F) | (((hcs2 >> 21) & 0x1F) << 5)
+    s(state, S_NSCRATCH, n)
+    if n == 0 {
+        s(state, S_SCRATCH, 0)
+        __mmio_write64((state + DCBAA_OFF) as *mut u64, 0)
+        return true
+    }
+    if n > 512 {
+        return false
+    }
+    let arr: u64 = state + SPARE_OFF
+    zero(arr, 4096)
+    var i: u64 = 0
+    while i < n {
+        let f: u64 = mem.frame_alloc(state)
+        if f == 0 {
+            return false
+        }
+        zero(f, 4096)
+        __mmio_write64((arr + i * 8) as *mut u64, f)
+        i = i + 1
+    }
+    s(state, S_SCRATCH, arr)
+    __mmio_write64((state + DCBAA_OFF) as *mut u64, arr)
+    return true
+}
+
+// Denselben Weg wie `nvme.fi`: entweder eine Nachricht, die das Geraet
+// selbst auf den Bus schreibt, oder der Stift durch den I/O-APIC.
+fn msix_arm(state: u64, idx: u64, vector: u64, armed: bool) -> bool {
+    let d: u64 = pci.get(state, idx, pci.E_BDF)
+    let cap: u64 = pci.get(state, idx, pci.E_MSIX)
+    if cap == 0 {
+        return false
+    }
+    let table: u64 = pci.cfg_read32(d, cap + 4)
+    let bir: u64 = table & 7
+    let toff: u64 = table & 0xFFFFFFF8
+    if pci.bar(state, idx, bir) == 0 {
+        return false
+    }
+    let tbase: u64 = apic.map_device(state, pci.bar(state, idx, bir) + toff)
+    if tbase == 0 {
+        return false
+    }
+    wr32(tbase, 0, apic.lapic_phys(state) | ((apic.id(state) & 0xFF) << 12))
+    wr32(tbase, 4, 0)
+    wr32(tbase, 8, vector & 0xFF)
+    var ctrl: u64 = 1
+    if armed {
+        ctrl = 0
+    }
+    wr32(tbase, 12, ctrl)
+    let msg: u64 = pci.cfg_read16(d, cap + 2)
+    pci.cfg_write16(d, cap + 2, (msg | 0x8000) & 0xBFFF)
+    pci.cfg_write16(d, 0x04, pci.cfg_read16(d, 0x04) | 0x400)
+    return true
+}
+
+fn intx_arm(state: u64, idx: u64, vector: u64, armed: bool) {
+    let d: u64 = pci.get(state, idx, pci.E_BDF)
+    pci.cfg_write16(d, 0x04, pci.cfg_read16(d, 0x04) & 0xFBFF)
+    let gsi: u64 = pci.get(state, idx, pci.E_IRQLINE)
+    if gsi == 0 || gsi > 23 {
+        return
+    }
+    apic.route(state, gsi, vector, apic.id(state), true, true)
+    if !armed {
+        apic.mask_gsi(state, gsi)
+    }
+}
+
+// Den Regler wieder anhalten. Wird von der Gegenprobe gerufen, die das
+// Abziehen im Betrieb misst -- und von nichts sonst.
+fn teardown(state: u64) {
+    if g(state, S_READY) == 0 {
+        return
+    }
+    s(state, S_READY, 0)
+    halt(state)
+}

@@ -72,6 +72,9 @@ import vfsops
 import part
 import devfs
 import ftype
+// RUNDE K17: der USB-Baum -- Regler, Kern, Klassen.
+import xhci
+import usb
 
 // Indices in the table out of isr.s.
 const V_DF_STACK: u64 = 52
@@ -338,6 +341,16 @@ fn kernel_main(mbi: u64, vectors: u64, state: u64, kernel_end: u64,
     //     nothing else -- every measurement of rounds 59 to K6 sees the
     //     kernel it saw before.
     netsvc.stage(state)
+
+    // 7e-ter. RUNDE K17: DER USB-BAUM. Hier und nicht spaeter, aus drei
+    //     Gruenden: der Bus muss gelesen sein (`hw.stage`, Runde K2),
+    //     die Meldungen muessen ankommen koennen (der APIC steht seit
+    //     derselben Runde), und alles darunter braucht ihn -- die Shell,
+    //     die gleich in `osum` startet, liest von einer Tastatur, und
+    //     der Stick, den sie einhaengen soll, muss vorher ein
+    //     Blockgeraet sein. Ohne das Wort `usb` ist das hier EINE
+    //     gedruckte Zeile und sonst nichts.
+    usb_stage(state)
 
     // 7f. round K1: a system on that disk. Mount what the host built,
     //     load /bin/sh out of it, and let it run until it is done.
@@ -1803,6 +1816,54 @@ fn say_k14(state: u64) {
     serial.nl()
 }
 
+// RUNDE K17. Die Naht ist absichtlich duenn: was USB ist, steht in
+// `usb.fi` und `xhci.fi`, und `kmain.fi` bekommt vier Zeilen statt
+// vierzig. Dieselbe Ueberlegung wie bei `hw.stage` in Runde K2 -- an
+// dieser Datei arbeiten mehrere Runden gleichzeitig, und eine Naht laesst
+// sich verschmelzen, ein ueber tausend Zeilen verteilter Unterschied
+// nicht.
+fn usb_stage(state: u64) {
+    usb.stage(state)
+    if !usb.ready(state) {
+        return
+    }
+    // Ein Zeigegeraet braucht einen Anschlag, auch wenn es nicht am 8042
+    // haengt. Steht schon ein PS/2-Zeiger, bleibt dessen Einstellung.
+    if usb.have_mouse(state) {
+        ps2m.adopt(state, 1024, 768)
+    }
+    // DIE GEGENPROBE ZUM ABZIEHEN. Sie steht hier und nicht in der
+    // Bibliothek, weil sie eine Anforderung der Kommandozeile ist und
+    // kein Zustand des Geraets.
+    if (kstate.get(state, kstate.MODE) & kstate.M_UNPLUG) != 0 {
+        usb_unplug(state)
+    }
+}
+
+// Was nach dem Abziehen noch geht. Drei Zeilen, und jede einzelne ist
+// eine Zusage: der Kern laeuft weiter, das Blockgeraet meldet sich als
+// nicht da, und ein offener Deskriptor darauf gibt ENODEV (das prueft
+// `/bin/k17` aus Ring 3, nicht der Kern).
+fn usb_unplug(state: u64) {
+    var s_a: [u8; 22] = "k17: before unplug=\0\0\0"
+    var s_b: [u8; 21] = "k17: after unplug=\0\0\0"
+    var s_p: [u8; 11] = "  present=\0"
+    var s_d: [u8; 11] = "  devices=\0"
+    serial.puts((&s_a[0]) as u64)
+    serial.dec(yes(blk.present_on(state, blk.DEV_USB)))
+    serial.puts((&s_d[0]) as u64)
+    serial.dec(usb.count(state))
+    serial.nl()
+    usb.unplug_now(state)
+    serial.puts((&s_b[0]) as u64)
+    serial.dec(yes(blk.present_on(state, blk.DEV_USB)))
+    serial.puts((&s_d[0]) as u64)
+    serial.dec(usb.count(state))
+    serial.puts((&s_p[0]) as u64)
+    serial.dec(usb.unplugs(state))
+    serial.nl()
+}
+
 fn osum(state: u64) {
     if wm_owns_shell(state) {
         return
@@ -2478,6 +2539,46 @@ fn mode_of(cmd: u64) -> u64 {
     }
     if find(cmd, (&w_vfsall[0]) as u64, 6) != 0 {
         mode = mode | kstate.M_VFSALL
+    }
+    // ROUNDE K17. `usb` schaltet den Baum an; die sechs anderen sind
+    // GEGENPROBEN. `nousb` und nicht `noxhci`: die Gegenprobe soll die
+    // GANZE Runde ausschalten und nicht nur den Regler -- und sie darf
+    // sich nicht selbst wieder einschalten, weshalb `usb` erst gesucht
+    // wird und `nousb` danach das Bit wieder loeschen koennte. Es wird
+    // stattdessen ein zweites Bit gesetzt und `usb.stage` sieht beide
+    // an; ein Schalter, den sein eigenes Argument aufhebt, ist keiner
+    // (die Lehre aus `nic`/`net` in Runde K8).
+    var w_usb: [u8; 4] = "usb\0"
+    var w_nousb: [u8; 6] = "nousb\0"
+    var w_upoll: [u8; 8] = "usbpoll\0"
+    var w_nohid: [u8; 6] = "nohid\0"
+    var w_nomsc: [u8; 6] = "nomsc\0"
+    var w_unplug: [u8; 7] = "unplug\0"
+    var w_noirq2: [u8; 9] = "usbnoirq\0"
+    var w_stick: [u8; 9] = "usbstick\0"
+    if find(cmd, (&w_usb[0]) as u64, 3) != 0 {
+        mode = mode | kstate.M_USB
+    }
+    if find(cmd, (&w_nousb[0]) as u64, 5) != 0 {
+        mode = mode | kstate.M_NOUSB
+    }
+    if find(cmd, (&w_upoll[0]) as u64, 7) != 0 {
+        mode = mode | kstate.M_USBPOLL
+    }
+    if find(cmd, (&w_nohid[0]) as u64, 5) != 0 {
+        mode = mode | kstate.M_NOHID
+    }
+    if find(cmd, (&w_nomsc[0]) as u64, 5) != 0 {
+        mode = mode | kstate.M_NOMSC
+    }
+    if find(cmd, (&w_unplug[0]) as u64, 6) != 0 {
+        mode = mode | kstate.M_UNPLUG
+    }
+    if find(cmd, (&w_noirq2[0]) as u64, 8) != 0 {
+        mode = mode | kstate.M_NOUSBIRQ
+    }
+    if find(cmd, (&w_stick[0]) as u64, 8) != 0 {
+        mode = mode | kstate.M_USBSTICK
     }
     return mode
 }
