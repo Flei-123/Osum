@@ -1,0 +1,80 @@
+// kernel/user/tee.fi -- Runde K11: dasselbe zweimal.
+//
+// Die Eingabe geht unveraendert auf die Ausgabe UND in jede genannte
+// Datei. `-a` haengt an, statt zu ueberschreiben. Eine Datei, die sich
+// nicht oeffnen laesst, ist eine Meldung und ein Beendigungscode -- die
+// uebrigen werden trotzdem geschrieben, so wie es POSIX verlangt.
+//
+// Oktette und keine Zeilen: `tee` steht auch mitten in einer Roehre, in
+// der Binaerdaten laufen.
+
+profile kernel
+
+import ulib
+import tools
+
+export { u_start }
+
+const MAX_OUT: u64 = 4
+
+static mut fds: [u64; 4] = [0 as u64; 4]
+static mut nfd: u64 = 0
+static mut buf: [u8; 1024] = [0 as u8; 1024]
+
+fn u_start(args: u64) -> u64 {
+    var s_open: [u8; 19] = "tee: cannot write \0"
+    var s_many: [u8; 22] = "tee: too many files\0\0\0"
+    var opt_a: [u8; 3] = "-a\0"
+    let argc: u64 = ulib.arg_count(args)
+    var append: bool = false
+    var at: u64 = 1
+    if argc > 1 && ulib.streq(ulib.arg_at(args, 1), (&opt_a[0 as usize]) as u64) {
+        append = true
+        at = 2
+    }
+    var code: u64 = 0
+    while at < argc {
+        let p: u64 = ulib.arg_at(args, at)
+        if nfd >= MAX_OUT {
+            ulib.esay_line((&s_many[0 as usize]) as u64, 0)
+            code = 1
+        } else {
+            var fd: u64 = 0
+            if append {
+                fd = tools.opena(p)
+            } else {
+                fd = tools.openw(p)
+            }
+            if ulib.bad(fd) {
+                ulib.esay_line((&s_open[0 as usize]) as u64, p)
+                code = 1
+            } else {
+                fds[(nfd) as usize] = fd
+                nfd = nfd + 1
+            }
+        }
+        at = at + 1
+    }
+    var going: bool = true
+    while going {
+        let n: u64 = ulib.sys(ulib.SYS_READ, ulib.IN,
+            (&buf[0 as usize]) as u64, 1024)
+        if n == 0 || ulib.bad(n) {
+            going = false
+        } else {
+            ulib.sys(ulib.SYS_WRITE, ulib.OUT, (&buf[0 as usize]) as u64, n)
+            var i: u64 = 0
+            while i < nfd {
+                ulib.sys(ulib.SYS_WRITE, fds[(i) as usize],
+                    (&buf[0 as usize]) as u64, n)
+                i = i + 1
+            }
+        }
+    }
+    var i: u64 = 0
+    while i < nfd {
+        ulib.sys(ulib.SYS_CLOSE, fds[(i) as usize], 0, 0)
+        i = i + 1
+    }
+    return code
+}
