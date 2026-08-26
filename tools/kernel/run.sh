@@ -118,6 +118,10 @@ as --64 -o "$TMPD/switch.o" kernel/switch.s 2>"$TMPD/as3.err" \
 as --64 -o "$TMPD/smp.o" kernel/smp.s 2>"$TMPD/as4.err" \
     && ok "smp.s assembles (the trampoline of the other processors)" \
     || { bad "smp.s"; sed 's/^/        /' "$TMPD/as4.err" | head -5; }
+# RUNDE K12: die fuenfte Assemblerdatei -- der Weltwechsel und die Gaeste.
+as --64 -o "$TMPD/hv.o" kernel/hv.s 2>"$TMPD/as5.err" \
+    && ok "hv.s assembles (the world switch and the guests)" \
+    || { bad "hv.s"; sed 's/^/        /' "$TMPD/as5.err" | head -5; }
 
 "$FIRNC" -o "$TMPD/k0.o" "$SOURCE" 2>"$TMPD/e0" \
     && ok "firnc0: $SOURCE -> k0.o" \
@@ -144,7 +148,7 @@ for s in 0 1; do
           --defsym=KERNEL_AP_MAIN="_F$s.smp__ap_main" \
           --defsym=USER_MAIN="_F$s.u_enter" \
           -o "$TMPD/k$s.elf" "$TMPD/boot.o" "$TMPD/isr.o" "$TMPD/switch.o" \
-          "$TMPD/smp.o" \
+          "$TMPD/smp.o" "$TMPD/hv.o" \
           "$TMPD/k$s.o" "$TMPD/uprog$s.o" 2>"$TMPD/ld$s.err"; then
         objcopy -O elf32-i386 "$TMPD/k$s.elf" "$TMPD/k$s.mb" 2>/dev/null
         ok "firnc$s: linked and turned into a multiboot image"
