@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ./test.sh -- die Abnahme von Osum.
 #
-# Vierzehn Abschnitte, in der Reihenfolge, in der der Kernel entstanden ist.
+# Fuenfzehn Abschnitte, in der Reihenfolge, in der der Kernel entstanden ist.
 # Jeder ruft einen eigenen Testlaeufer unter tools/ auf, jeder Laeufer
 # startet QEMU pro Fall mit Zeitlimit, prueft die serielle Ausgabe und den
 # Beendigungscode (21 = der Kernel hat sich selbst beendet, 63 = er ist an
@@ -93,6 +93,22 @@
 #      `nicnoirq` maskiert den Vektor, `nicintx` nimmt den Stift statt
 #      MSI-X.
 #
+#
+#  15. Die zwei Schutzbits und das Boot-Modul (tools/guard/run.sh, Runde
+#      K10): die letzten zwei Faehigkeiten aus OrientOS' Rust-Kernel, die
+#      dieser hier noch nicht hatte. SMEP und SMAP in CR4
+#      (`kernel/guard.fi`, aus `arch/x86_64/user.rs`) -- Ring 0 fuehrt
+#      keinen Nutzercode mehr aus und fasst Nutzerdaten nur noch im
+#      `stac`-Fenster an, das an genau vier Stellen steht (`sys.peek`,
+#      `sys.poke`, `sys.copy_in`, `sys.copy_out`) und beim Signalrahmen.
+#      Und ein BOOT-MODUL als Wurzelplatte (`kernel/bootmod.fi`, aus
+#      `kcore/initramfs.rs`) mit CRC32 davor -- damit traegt ein ISO
+#      nicht nur einen Kern, sondern ein Userland. Gegenproben: `smapraw`
+#      und `smepraw` muessen mit den Bits einen #PF geben (0x1 und 0x11)
+#      und ohne sie durchlaufen, ein falsches `modcrc=` laesst das Modul
+#      liegen, und die Summe wird am Ende des Laufs NOCH EINMAL gerechnet
+#      -- haette `mem.scan` den Bereich nicht reserviert, waere sie eine
+#      andere.
 #
 # Kein '|| true', kein Verschlucken von Beendigungscodes.
 set -uo pipefail
@@ -216,6 +232,9 @@ lauf "13. was jedes Unix-Programm voraussetzt: Signale, Terminal, Uhr, Zufall (t
 
 lauf "14. das Netz: virtio-net, der Stack aus K3, Steckdosen -- gegen den Linux-Kern (tools/net/run.sh)" \
      tools/net/run.sh net '^NET:|^  OK    (throughput|round trip|what came back|and on three)'
+
+lauf "15. die Schutzbits und das Boot-Modul: SMEP, SMAP, CRC32 (tools/guard/run.sh, Runde K10)" \
+     tools/guard/run.sh guard '^GUARD: |^  OK    (das SMAP-Fenster|und alle drei weiteren|nach einem Lauf)'
 
 echo
 echo "=================================================================="

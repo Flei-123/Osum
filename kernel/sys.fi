@@ -49,6 +49,7 @@ import errno
 import file
 import uio
 import cap
+import guard
 import fb
 
 import signal
@@ -662,7 +663,15 @@ fn peek(state: u64, me: u64, addr: u64) -> u64 {
     if phys == 0 {
         return 0
     }
-    return kstate.get8(phys)
+    // ROUND K10: the SMAP window. The frame is reached through the
+    // identity mapping, and for the pages of `.utext` that mapping
+    // carries the user bit -- with CR4.SMAP a read of it out of ring 0
+    // is a #PF unless AC is set. `guard.stac` is a no-op when the bit is
+    // off, so this costs a compare on a machine without SMAP.
+    guard.stac(state)
+    let v: u64 = kstate.get8(phys)
+    guard.clac(state)
+    return v
 }
 
 fn poke(state: u64, me: u64, addr: u64, v: u64) -> bool {
@@ -670,7 +679,9 @@ fn poke(state: u64, me: u64, addr: u64, v: u64) -> bool {
     if phys == 0 {
         return false
     }
+    guard.stac(state)
     kstate.set8(phys, v as u8)
+    guard.clac(state)
     return true
 }
 
@@ -692,10 +703,16 @@ fn copy_out(state: u64, me: u64, dst: u64, src: u64, len: u64) -> bool {
             room = len - n
         }
         var k: u64 = 0
+        // Das Fenster steht um die SEITE, nicht um das einzelne Oktett:
+        // `stac`/`clac` je Oktett waeren zwei Befehle auf jeden
+        // kopierten Wert, und ein Fenster, das eine Seite lang offen
+        // ist, ist immer noch ein Fenster.
+        guard.stac(state)
         while k < room {
             kstate.set8(phys + k, kstate.get8(src + n + k) as u8)
             k = k + 1
         }
+        guard.clac(state)
         n = n + room
     }
     return true
@@ -716,10 +733,12 @@ fn copy_in(state: u64, me: u64, dst: u64, src: u64, len: u64) -> bool {
             room = len - n
         }
         var k: u64 = 0
+        guard.stac(state)
         while k < room {
             kstate.set8(dst + n + k, kstate.get8(phys + k) as u8)
             k = k + 1
         }
+        guard.clac(state)
         n = n + room
     }
     return true

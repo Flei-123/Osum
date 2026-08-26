@@ -1,0 +1,290 @@
+// kernel/bootmod.fi -- was der Lader dem Kern mitgibt, und die Summe, die
+// beweist, dass es heil angekommen ist.
+//
+// HERKUNFT. Dieses Modul ist die Portierung von OrientOS'
+// `kernel/src/kcore/initramfs.rs` (Rust, 428 Zeilen) nach Firn -- nicht
+// des Archivformats, sondern der Sache, um die es dort ging.
+// KERNELWECHSEL.md § 4.4 hielt fest: *"Osum liest sein Dateisystem von
+// einer Platte und kennt kein Boot-Modul. Fuer ein ISO ohne Platte ist
+// das der Unterschied zwischen 'hat ein Userland' und 'hat keins'."*
+// Genau das ist hier behoben.
+//
+// WARUM DAS UEBERHAUPT FEHLTE. Osum hat drei Blockgeraete (`blk.fi`):
+// eine RAM-Platte, ATA und NVMe. Sein Userland liegt in einem
+// OFS-Dateisystem auf einer Platte, die QEMU mit `-drive` hereinreicht.
+// Ein ISO hat keine solche Platte -- ein bootfaehiges Abbild besteht aus
+// dem Lader, dem Kern und dem, was der Lader als MODUL danebenlegt. Ohne
+// Modulunterstuetzung kann ein ISO nur einen Kern tragen, keinen
+// Userland-Baum.
+//
+// WAS EIN MODUL IST. Multiboot 1 (Spezifikation 3.3): Flag-Bit 3 der
+// Informationsstruktur sagt, dass `mods_count` (Offset 20) und
+// `mods_addr` (Offset 24) gelten. Dahinter liegt eine Tabelle von je 16
+// Oktetten: Anfang, Ende, Zeichenkette, reserviert. Das ist alles. Der
+// Lader legt die Datei irgendwo in nutzbaren Speicher und nennt die
+// beiden Adressen -- er sagt nicht, was drin ist, und er prueft nichts.
+//
+// DIE PRUEFSUMME, und warum sie hier ueberhaupt vorkommt. Der Weg vom
+// Bauplatz zum Kern geht ueber ein Abbildformat, ein Bootmedium, eine
+// Firmware und einen Lader. Ein einzelnes gekipptes Oktett im
+// Programmtext faellt sonst erst als unerklaerlicher Absturz im
+// unprivilegierten Programm auf -- der Fehler ist dann vier Schichten
+// von seiner Ursache entfernt. `crc32` (IEEE, reflektiert, dasselbe
+// Polynom wie in OrientOS' `initramfs.rs`) wird ueber das GANZE Modul
+// gerechnet, BEVOR der erste Block davon gelesen wird, und gegen das
+// gehalten, was auf der Kommandozeile steht (`modcrc=<8 Hexziffern>`).
+// Passt es nicht, wird das Modul NICHT benutzt -- und das steht im
+// Protokoll, statt still zu passieren.
+//
+// TABELLENLOS. Die Summe wird Bit fuer Bit gerechnet, ohne
+// vorberechnete Tabelle: acht Runden je Oktett. Das ist der langsamere
+// von zwei Wegen und der kuerzere von beiden; bei einem Abbild von zwei
+// Megaoktetten sind es sechzehn Millionen Runden, was in QEMU unter
+// einer Sekunde bleibt. Eine Tabelle waere schneller und braeuchte
+// globalen Zustand, den Stufe 0 von Firn nicht hat.
+//
+// ARITHMETIK. `+`, `-`, `*` sind seit Runde 72 geprueft und panicken
+// beim Ueberlauf. Die eine Stelle, an der hier eine Zweierkomplement-
+// Umdeutung gemeint ist, ist die Maske aus dem untersten Bit der Summe
+// (`0 -% (crc & 1)` ergibt 0 oder 0xFFFFFFFFFFFFFFFF); dort steht `-%`.
+
+import kstate
+import serial
+import mem
+
+export {
+    parse, stage, recheck, ready, base, bytes, blocks, sum, expected, want,
+    crc32, M_MODFS
+}
+
+const BLOCK_SIZE: u64 = 512
+
+// ------------------------------------------- Woerter der Kommandozeile
+
+const M_MODFS: u64 = 1 // "modfs"   -- das Modul ist die Wurzelplatte
+
+fn parse(state: u64, cmd: u64) {
+    var w_modfs: [u8; 6] = "modfs\0"
+    var w_crc: [u8; 8] = "modcrc=\0"
+    var m: u64 = 0
+    var soll: u64 = 0
+    if cmd != 0 {
+        if find(cmd, (&w_modfs[0]) as u64, 5) != 0 {
+            m = m | M_MODFS
+        }
+        let at: u64 = find(cmd, (&w_crc[0]) as u64, 7)
+        if at != 0 {
+            soll = hex_at(at + 7, 8)
+        }
+    }
+    kstate.set(state, kstate.MOD_MODE, m)
+    kstate.set(state, kstate.MOD_WANT, soll)
+    kstate.set(state, kstate.MOD_BASE, 0)
+    kstate.set(state, kstate.MOD_BYTES, 0)
+    kstate.set(state, kstate.MOD_CRC, 0)
+    kstate.set(state, kstate.MOD_OK, 0)
+}
+
+fn want(state: u64, bit: u64) -> bool {
+    return (kstate.get(state, kstate.MOD_MODE) & bit) != 0
+}
+
+// ---------------------------------------------------------- die Summe
+
+// CRC32, IEEE 802.3, reflektiert -- dieselbe Rechnung wie in OrientOS'
+// `initramfs.rs`. Startwert und Endwert sind invertiert, das Polynom ist
+// 0xEDB88320 in reflektierter Schreibweise.
+fn crc32(p: u64, len: u64) -> u64 {
+    var crc: u64 = 0xFFFFFFFF
+    var i: u64 = 0
+    while i < len {
+        crc = crc ^ kstate.get8(p + i)
+        var k: u64 = 0
+        while k < 8 {
+            // 0 oder lauter Einsen -- eine Verzweigung weniger im
+            // innersten Rumpf. Hier ist die Umdeutung gemeint, also `-%`.
+            let maske: u64 = 0 -% (crc & 1)
+            crc = (crc >> 1) ^ (0xEDB88320 & maske)
+            k = k + 1
+        }
+        i = i + 1
+    }
+    return (crc ^ 0xFFFFFFFF) & 0xFFFFFFFF
+}
+
+// ------------------------------------------------------------ die Stufe
+
+// Sucht das erste Modul, rechnet seine Summe und haelt fest, ob es
+// benutzbar ist. Laeuft NACH `mem.scan` -- der Rahmenverwalter muss den
+// Bereich des Moduls schon reserviert haben, sonst gibt er die Rahmen
+// aus, auf denen das Abbild liegt.
+fn stage(state: u64, mbi: u64) {
+    var s_none: [u8; 11] = "mod: none\0\0"
+    var s_a: [u8; 11] = "mod: base=\0"
+    var s_b: [u8; 9] = "  bytes=\0"
+    var s_c: [u8; 7] = "  crc=\0"
+    var s_d: [u8; 8] = "  want=\0"
+    var s_e: [u8; 6] = "  ok=\0"
+    var s_f: [u8; 10] = "  blocks=\0"
+    var s_short: [u8; 27] = "mod: shorter than a block\0\0"
+
+    let n: u64 = mem.mods(mbi)
+    if n == 0 {
+        serial.puts((&s_none[0]) as u64)
+        serial.nl()
+        return
+    }
+    let von: u64 = mem.mod_start(mbi, 0)
+    let bis: u64 = mem.mod_end(mbi, 0)
+    if bis <= von || bis - von < BLOCK_SIZE {
+        serial.puts((&s_short[0]) as u64)
+        serial.nl()
+        return
+    }
+    let len: u64 = bis - von
+    let sum: u64 = crc32(von, len)
+    let soll: u64 = kstate.get(state, kstate.MOD_WANT)
+    // Ohne Vorgabe gilt das Modul als heil: dann ist die Summe eine
+    // Angabe, keine Bedingung. MIT Vorgabe muss sie stimmen.
+    var ok: u64 = 1
+    if soll != 0 {
+        if soll != sum {
+            ok = 0
+        }
+    }
+    kstate.set(state, kstate.MOD_BASE, von)
+    kstate.set(state, kstate.MOD_BYTES, len)
+    kstate.set(state, kstate.MOD_CRC, sum)
+    kstate.set(state, kstate.MOD_OK, ok)
+
+    serial.puts((&s_a[0]) as u64)
+    serial.hex(von)
+    serial.puts((&s_b[0]) as u64)
+    serial.dec(len)
+    serial.puts((&s_f[0]) as u64)
+    serial.dec(len / BLOCK_SIZE)
+    serial.puts((&s_c[0]) as u64)
+    serial.hex(sum)
+    serial.puts((&s_d[0]) as u64)
+    serial.hex(soll)
+    serial.puts((&s_e[0]) as u64)
+    serial.dec(ok)
+    serial.nl()
+}
+
+// DIE SUMME NOCH EINMAL, am Ende des Laufs.
+//
+// Das ist die Gegenprobe zu einer Zeile in `mem.scan`, und sie ist der
+// Grund, warum es sie gibt: der Lader legt das Modul in Speicher, den die
+// Speicherkarte als NUTZBAR fuehrt, und `release` gibt genau diese Rahmen
+// an den Rahmenverwalter. Ohne das `reserve` in `mem.scan` bekommt der
+// naechste Anforderer das Userland-Abbild und schreibt darueber -- und
+// der Fehler zeigt sich erst viel spaeter, in einem Programm, das nicht
+// mehr laedt. Stimmt die Summe am Ende eines Laufs, der Prozesse
+// gestartet, Seiten abgebildet und die Halde benutzt hat, immer noch,
+// dann hat den Bereich niemand angefasst.
+fn recheck(state: u64) {
+    var s_a: [u8; 18] = "mod: recheck crc=\0"
+    var s_b: [u8; 8] = "  same=\0"
+    if kstate.get(state, kstate.MOD_BYTES) == 0 {
+        return
+    }
+    let jetzt: u64 = crc32(base(state), bytes(state))
+    var gleich: u64 = 0
+    if jetzt == kstate.get(state, kstate.MOD_CRC) {
+        gleich = 1
+    }
+    serial.puts((&s_a[0]) as u64)
+    serial.hex(jetzt)
+    serial.puts((&s_b[0]) as u64)
+    serial.dec(gleich)
+    serial.nl()
+}
+
+// Benutzbar heisst: es gibt ein Modul, seine Summe stimmt, und die
+// Kommandozeile will es als Platte haben. Alle drei -- ein Modul, das
+// niemand angefordert hat, wird nicht heimlich zur Wurzel.
+fn ready(state: u64) -> bool {
+    if !want(state, M_MODFS) {
+        return false
+    }
+    if kstate.get(state, kstate.MOD_OK) == 0 {
+        return false
+    }
+    return kstate.get(state, kstate.MOD_BYTES) >= BLOCK_SIZE
+}
+
+fn base(state: u64) -> u64 {
+    return kstate.get(state, kstate.MOD_BASE)
+}
+
+fn bytes(state: u64) -> u64 {
+    return kstate.get(state, kstate.MOD_BYTES)
+}
+
+fn blocks(state: u64) -> u64 {
+    return kstate.get(state, kstate.MOD_BYTES) / BLOCK_SIZE
+}
+
+fn sum(state: u64) -> u64 {
+    return kstate.get(state, kstate.MOD_CRC)
+}
+
+fn expected(state: u64) -> u64 {
+    return kstate.get(state, kstate.MOD_WANT)
+}
+
+// ---------------------------------------------------------- Kleinkram
+
+fn hex_at(p: u64, n: u64) -> u64 {
+    var v: u64 = 0
+    var i: u64 = 0
+    while i < n {
+        let c: u64 = kstate.get8(p + i)
+        var d: u64 = 16
+        if c >= 48 && c <= 57 {
+            d = c - 48
+        }
+        if c >= 97 && c <= 102 {
+            d = c - 87
+        }
+        if c >= 65 && c <= 70 {
+            d = c - 55
+        }
+        if d == 16 {
+            return v
+        }
+        v = (v << 4) | d
+        i = i + 1
+    }
+    return v
+}
+
+fn find(heu: u64, nadel: u64, n: u64) -> u64 {
+    if heu == 0 || n == 0 {
+        return 0
+    }
+    var i: u64 = 0
+    while true {
+        let c: u64 = kstate.get8(heu + i)
+        if c == 0 {
+            return 0
+        }
+        var k: u64 = 0
+        var gleich: bool = true
+        while k < n {
+            let a: u64 = kstate.get8(heu + i + k)
+            if a == 0 || a != kstate.get8(nadel + k) {
+                gleich = false
+                k = n
+            } else {
+                k = k + 1
+            }
+        }
+        if gleich {
+            return heu + i
+        }
+        i = i + 1
+    }
+    return 0
+}
