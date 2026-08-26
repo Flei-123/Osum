@@ -45,7 +45,7 @@ import cpu
 export {
     format, mount, path, create_path, unlink_path, entry_at, dir_entries,
     inode_type, inode_size, read_at, write_at, file_truncate, root,
-    free_blocks,
+    free_blocks, rename_path,
     used_inodes, MAGIC, T_FILE, T_DIR, DIRENT, NAME_LEN, INODE_COUNT
 }
 
@@ -848,6 +848,70 @@ fn unlink_path(state: u64, p: u64) -> bool {
     dir_remove(state, dir, (&name[0]) as u64)
     leave(state, flags)
     return true
+}
+
+// ------------------------------------------------- Runde K14: umbenennen
+//
+// EIN NAME IST NICHT DIE DATEI. Das steht seit 1974 im Kopf dieser
+// Datei ("The NAME is not in it -- names live in directories"), und
+// genau deshalb ist Umbenennen kein Kopieren: der Eintrag verschwindet
+// im einen Verzeichnis und erscheint im anderen, die Inode bleibt, wo
+// sie ist, und kein einziges Datenoktett wird angefasst. Ein `rename`,
+// das kopiert, waere bei einer Datei von zwei Megabyte messbar
+// langsamer -- und bei einer offenen Datei falsch.
+//
+// Rueckgabe: 0 = gut, sonst die POSITIVE Fehlernummer aus `errno.fi`.
+//
+// DIE GRENZE, UND SIE STEHT AUCH IN docs/ROUNDK14.md: ein VERZEICHNIS,
+// das in ein ANDERES Verzeichnis umgehaengt wird, bekommt sein `..`
+// mitgezogen. Was NICHT geprueft wird, ist der Ringschluss -- ein
+// Verzeichnis in einen seiner eigenen Nachfahren zu haengen, wuerde
+// einen Teilbaum abschneiden, der dann nur noch sich selbst kennt.
+// POSIX verlangt dafuer -EINVAL; dieser Kernel prueft es nicht, weil
+// die Pruefung den ganzen Pfad nach oben laufen muesste und es hier
+// keinen Weg von einer Inode zu ihrem Elternteil gibt ausser ihrem
+// eigenen `..`.
+fn rename_path(state: u64, from: u64, to: u64) -> u64 {
+    var oldname: [u8; 32] = [0 as u8; 32]
+    var newname: [u8; 32] = [0 as u8; 32]
+    var dotdot: [u8; 3] = "..\0"
+    let flags: u64 = enter(state)
+    let odir: u64 = parent_of(state, from, (&oldname[0]) as u64)
+    if odir == 0 {
+        leave(state, flags)
+        return 2 // ENOENT
+    }
+    let ino: u64 = dir_find(state, odir, (&oldname[0]) as u64)
+    if ino == 0 {
+        leave(state, flags)
+        return 2
+    }
+    let ndir: u64 = parent_of(state, to, (&newname[0]) as u64)
+    if ndir == 0 {
+        leave(state, flags)
+        return 2
+    }
+    if dir_find(state, ndir, (&newname[0]) as u64) != 0 {
+        leave(state, flags)
+        return 17 // EEXIST -- dieser Kernel ueberschreibt nicht still
+    }
+    if !dir_add(state, ndir, (&newname[0]) as u64, ino) {
+        leave(state, flags)
+        return 28 // ENOSPC
+    }
+    if dir_remove(state, odir, (&oldname[0]) as u64) == 0 {
+        // Der neue Eintrag steht schon; ihn stehenzulassen waere eine
+        // zweite Verbindung auf dieselbe Inode, die niemand bestellt hat.
+        dir_remove(state, ndir, (&newname[0]) as u64)
+        leave(state, flags)
+        return 2
+    }
+    if inode_type(state, ino) == T_DIR && odir != ndir {
+        dir_remove(state, ino, (&dotdot[0]) as u64)
+        dir_add(state, ino, (&dotdot[0]) as u64, ndir)
+    }
+    leave(state, flags)
+    return 0
 }
 
 // ------------------------------------------------------ format and mount

@@ -1,0 +1,1226 @@
+// kernel/procfs.fi -- Runde K14: /proc, ein Dateisystem aus nichts.
+//
+// EINE DATEI, DIE NIRGENDS LIEGT. Jede Datei bis zu dieser Runde hatte
+// Bloecke auf einer Platte. Die Dateien hier haben keine: sie ENTSTEHEN
+// in dem Augenblick, in dem jemand sie liest, aus dem Zustand des
+// laufenden Kernels, und sie sind wieder weg, sobald das `read` zurueck
+// ist. Das ist der ganze Trick von /proc, und es ist der Grund, warum
+// dieses Verzeichnis in jedem Unix seit 1984 existiert: ein Programm in
+// Ring 3 darf keine Kernelvariable lesen, aber es darf eine Datei lesen.
+//
+// WAS DAS ERSETZT. Runde K6 hat dafuer zwei SYSTEMAUFRUFE gebaut --
+// SYS_OSUM_PSTAT (Nummer 1003) und SYS_OSUM_SYSINFO (1002), je ein Feld
+// je Aufruf, und `ps`, `top`, `df`, `uname` und `date` fragen darueber.
+// Das ist eine eigene ABI fuer eine Frage, die jedes Unix ueber das
+// Dateisystem beantwortet. Von dieser Runde an geht es auch ueber
+// Dateien.
+//
+// DIE BEIDEN AUFRUFE BLEIBEN. Der Auftrag dieser Runde sagt es
+// ausdruecklich, und es ist auch die einzige ehrliche Reihenfolge: erst
+// wird gemessen, dass beide Wege DIESELBEN ZAHLEN liefern, dann darf
+// man ueber das Entfernen des einen reden. `tools/k14/run.sh` haelt
+// `ps` (ueber PSTAT) und `cat /proc/<pid>/status` (ueber dieses
+// Dateisystem) Zeile fuer Zeile gegeneinander -- und ein Unterschied
+// ist ein Fehler, egal in welchem der beiden.
+//
+// WAS DRIN STEHT:
+//
+//   /proc/meminfo    Rahmen, freie Rahmen, nutzbarer Speicher
+//   /proc/cpuinfo    je Prozessor eine Gruppe: Nummer, APIC-Kennung,
+//                    ob er laeuft, wie viele Wechsel er hatte
+//   /proc/uptime     Sekunden seit dem Start, mit Hundertsteln
+//   /proc/mounts     die Einhaengetafel aus `mnt.fi`, in der Form, die
+//                    Linux' /proc/mounts hat
+//   /proc/stat       Ticks, Kontextwechsel, Systemaufrufe, Prozesse
+//   /proc/version    was `uname` sagt
+//   /proc/<pid>/     ein Verzeichnis je lebendem Prozess, darin:
+//     status         Name, Pid, PPid, Zustand, Vorrang, Ticks, Fehler
+//     stat           dieselben Zahlen in einer Zeile
+//     cmdline        die Argumente, wie `execve` sie hingelegt hat --
+//                    GELESEN AUS DEM ADRESSRAUM DES PROZESSES ueber
+//                    `proc.translate`, nicht aus einer Kopie
+//     maps           WELCHE SEITEN WIRKLICH ABGEBILDET SIND. Das ist
+//                    keine Liste von Konstanten: die Seitentabelle des
+//                    Prozesses wird Seite fuer Seite abgelaufen
+//                    (`proc.translate`, `proc.page_exec`), und was
+//                    zusammenhaengt, wird zu einer Zeile. Ein Prozess,
+//                    der eine Seite mehr per `mmap` nimmt, hat danach
+//                    eine andere Datei -- und genau das misst
+//                    `tools/k14/run.sh`.
+//     fd/            ein Verzeichnis mit den offenen Deskriptoren
+//
+// KEINE SYMBOLISCHEN VERWEISE. Linux macht aus /proc/<pid>/fd/1 einen
+// Verweis; dieser Kernel hat keine. Die Eintraege sind hier gewoehnliche
+// Dateien, deren INHALT sagt, was der Deskriptor ist ("file 12",
+// "pipe", "tty 0"). Das steht so in docs/ROUNDK14.md, damit niemand
+// spaeter glaubt, hier fehle etwas.
+//
+// WO DER TEXT ENTSTEHT: auf `kstate.PROCFS_OFF`, EINER Seite, mit
+// `atomic.L_PROC` darum. Zwei Kerne, die gleichzeitig `/proc/meminfo`
+// lesen, wuerden sich sonst ihre Texte ineinanderschreiben.
+
+profile kernel
+
+import kstate
+import mnt
+import vfsops
+import sched
+import proc
+import file
+import cpu
+import atomic
+import uio
+import blk
+
+export { ops, node_root }
+
+// ------------------------------------------------------------ die Knoten
+//
+// Ein Knoten ist EINE ZAHL, und sie traegt drei Dinge:
+//
+//     Art * 0x1000000  +  Aufgabenplatz * 0x100  +  Unterart
+//
+// Die Art sagt, was es ist; der Aufgabenplatz, zu welchem Prozess es
+// gehoert; die Unterart, welche der Dateien. Damit braucht dieses
+// Dateisystem KEINE Tafel im Speicher -- ein Knoten ist selbsterklaerend
+// und ueberlebt jedes `fork`, weil er nichts festhaelt.
+const K_ROOT: u64 = 1
+const K_GLOBAL: u64 = 2
+const K_PIDDIR: u64 = 3
+const K_PIDFILE: u64 = 4
+const K_FDDIR: u64 = 5
+const K_FDFILE: u64 = 6
+
+const ART: u64 = 0x1000000
+const SLOT: u64 = 0x100
+
+// Die globalen Dateien.
+const G_MEMINFO: u64 = 1
+const G_CPUINFO: u64 = 2
+const G_UPTIME: u64 = 3
+const G_MOUNTS: u64 = 4
+const G_STAT: u64 = 5
+const G_VERSION: u64 = 6
+const G_LAST: u64 = 6
+
+// Die Dateien je Prozess.
+const F_STATUS: u64 = 1
+const F_STAT: u64 = 2
+const F_CMDLINE: u64 = 3
+const F_MAPS: u64 = 4
+const F_FD: u64 = 5 // das VERZEICHNIS fd/
+const F_LAST: u64 = 5
+
+const BUF_MAX: u64 = 4000 // von 4096; der Rest ist Luft fuer die letzte Zeile
+
+fn node(art: u64, slot: u64, sub: u64) -> u64 {
+    return art * ART + slot * SLOT + sub
+}
+
+fn n_art(n: u64) -> u64 {
+    return n / ART
+}
+
+fn n_slot(n: u64) -> u64 {
+    return (n / SLOT) % SLOT
+}
+
+fn n_sub(n: u64) -> u64 {
+    return n % SLOT
+}
+
+fn node_root(state: u64) -> u64 {
+    return node(K_ROOT, 0, 0)
+}
+
+fn tick(state: u64) {
+    kstate.add(state, kstate.VFS_INDIRECT, 1)
+}
+
+// ------------------------------------------------------- der Textaufbau
+
+fn buf(state: u64) -> u64 {
+    return state + kstate.PROCFS_OFF
+}
+
+fn w_ch(state: u64, at: u64, c: u64) -> u64 {
+    if at >= BUF_MAX {
+        return at
+    }
+    kstate.set8(buf(state) + at, c as u8)
+    return at + 1
+}
+
+fn w_str(state: u64, at: u64, s: u64) -> u64 {
+    var p: u64 = at
+    var i: u64 = 0
+    while kstate.get8(s + i) != 0 {
+        p = w_ch(state, p, kstate.get8(s + i))
+        i = i + 1
+    }
+    return p
+}
+
+fn w_num(state: u64, at: u64, v: u64) -> u64 {
+    var digits: [u8; 24] = [0 as u8; 24]
+    var n: u64 = 0
+    var x: u64 = v
+    if x == 0 {
+        return w_ch(state, at, 48)
+    }
+    while x > 0 {
+        digits[n as usize] = ((x % 10) + 48) as u8
+        x = x / 10
+        n = n + 1
+    }
+    var p: u64 = at
+    while n > 0 {
+        n = n - 1
+        p = w_ch(state, p, digits[n as usize] as u64)
+    }
+    return p
+}
+
+// Sechzehn Hexziffern, feste Breite -- so wie Linux' /proc/<pid>/maps
+// seine Adressen schreibt. Feste Breite, damit sich die Spalten decken.
+fn w_hex16(state: u64, at: u64, v: u64) -> u64 {
+    var p: u64 = at
+    var i: u64 = 16
+    while i > 0 {
+        i = i - 1
+        let d: u64 = (v >> (i * 4)) & 15
+        if d < 10 {
+            p = w_ch(state, p, d + 48)
+        } else {
+            p = w_ch(state, p, d + 87)
+        }
+    }
+    return p
+}
+
+fn w_nl(state: u64, at: u64) -> u64 {
+    return w_ch(state, at, 10)
+}
+
+// ------------------------------------------------------- die Aufgaben
+
+// Der Aufgabenplatz zu einer PID. MAX_TASKS heisst: gibt es nicht.
+fn slot_of_pid(state: u64, pid: u64) -> u64 {
+    var i: u64 = 0
+    while i < kstate.get(state, kstate.TASKS) {
+        if sched.tget(state, i, sched.T_STATE) != sched.S_FREE {
+            if sched.tget(state, i, sched.T_PID) == pid {
+                return i
+            }
+        }
+        i = i + 1
+    }
+    return kstate.MAX_TASKS
+}
+
+fn alive(state: u64, i: u64) -> bool {
+    if i >= kstate.get(state, kstate.TASKS) {
+        return false
+    }
+    return sched.tget(state, i, sched.T_STATE) != sched.S_FREE
+}
+
+// Der Buchstabe, den Linux' /proc/<pid>/stat an dritter Stelle traegt.
+fn state_letter(s: u64) -> u64 {
+    if s == sched.S_RUN {
+        return 82 // R
+    }
+    if s == sched.S_READY {
+        return 82 // R -- lauffaehig ist bei Linux dasselbe R
+    }
+    if s == sched.S_SLEEP {
+        return 83 // S
+    }
+    if s == sched.S_WAIT {
+        return 83 // S
+    }
+    if s == sched.S_ZOMBIE {
+        return 90 // Z
+    }
+    if s == sched.S_STOP {
+        return 84 // T
+    }
+    return 78 // N -- neu, noch nie gelaufen
+}
+
+fn kind_name(k: u64, out: u64) {
+    var boot: [u8; 5] = "boot\0"
+    var idle: [u8; 5] = "idle\0"
+    var work: [u8; 7] = "worker\0"
+    var user: [u8; 5] = "user\0"
+    var netd: [u8; 5] = "netd\0"
+    var grind: [u8; 6] = "grind\0"
+    var src: u64 = (&user[0]) as u64
+    if k == sched.K_BOOT {
+        src = (&boot[0]) as u64
+    } else if k == sched.K_IDLE {
+        src = (&idle[0]) as u64
+    } else if k == sched.K_WORKER {
+        src = (&work[0]) as u64
+    } else if k == sched.K_GRIND {
+        src = (&grind[0]) as u64
+    } else if k == sched.K_NETD {
+        src = (&netd[0]) as u64
+    }
+    var i: u64 = 0
+    while kstate.get8(src + i) != 0 {
+        kstate.set8(out + i, kstate.get8(src + i) as u8)
+        i = i + 1
+    }
+    kstate.set8(out + i, 0 as u8)
+}
+
+// ------------------------------------------------------- die Erzeuger
+//
+// Jeder von ihnen schreibt seinen Text nach `buf` und gibt zurueck, wie
+// lang er geworden ist. Keiner von ihnen weiss, wer ihn liest.
+
+fn make_meminfo(state: u64) -> u64 {
+    var t1: [u8; 17] = "MemTotal:      \0\0"
+    var t2: [u8; 17] = "MemFree:       \0\0"
+    var t3: [u8; 17] = "Frames:        \0\0"
+    var t4: [u8; 17] = "FramesFree:    \0\0"
+    var t5: [u8; 17] = "FrameSize:     \0\0"
+    var kb: [u8; 4] = " kB\0"
+    var p: u64 = 0
+    p = w_str(state, p, (&t1[0]) as u64)
+    p = w_num(state, p, kstate.get(state, kstate.MEM_USABLE) / 1024)
+    p = w_str(state, p, (&kb[0]) as u64)
+    p = w_nl(state, p)
+    p = w_str(state, p, (&t2[0]) as u64)
+    p = w_num(state, p, kstate.get(state, kstate.FRAMES_FREE) * 4)
+    p = w_str(state, p, (&kb[0]) as u64)
+    p = w_nl(state, p)
+    p = w_str(state, p, (&t3[0]) as u64)
+    p = w_num(state, p, kstate.get(state, kstate.BITMAP_FRAMES))
+    p = w_nl(state, p)
+    p = w_str(state, p, (&t4[0]) as u64)
+    p = w_num(state, p, kstate.get(state, kstate.FRAMES_FREE))
+    p = w_nl(state, p)
+    p = w_str(state, p, (&t5[0]) as u64)
+    p = w_num(state, p, 4096)
+    p = w_nl(state, p)
+    return p
+}
+
+fn make_cpuinfo(state: u64) -> u64 {
+    var c1: [u8; 14] = "processor : \0\0"
+    var c2: [u8; 14] = "apicid    : \0\0"
+    var c3: [u8; 14] = "online    : \0\0"
+    var c4: [u8; 14] = "switches  : \0\0"
+    var c5: [u8; 14] = "ticks     : \0\0"
+    var p: u64 = 0
+    // `cpu.count` ist die Zahl, die die FIRMWARE gemeldet hat -- und
+    // sie ist null, solange `smp.fi` nicht gelaufen ist. Ein Lauf ohne
+    // ACPI hat trotzdem einen Prozessor: den, auf dem er laeuft.
+    var n: u64 = cpu.count(state)
+    if n == 0 {
+        n = 1
+    }
+    var i: u64 = 0
+    while i < n {
+        p = w_str(state, p, (&c1[0]) as u64)
+        p = w_num(state, p, i)
+        p = w_nl(state, p)
+        p = w_str(state, p, (&c2[0]) as u64)
+        p = w_num(state, p, cpu.get(state, i, cpu.C_APICID))
+        p = w_nl(state, p)
+        p = w_str(state, p, (&c3[0]) as u64)
+        p = w_num(state, p, cpu.get(state, i, cpu.C_ONLINE))
+        p = w_nl(state, p)
+        p = w_str(state, p, (&c4[0]) as u64)
+        p = w_num(state, p, cpu.get(state, i, cpu.C_SWITCHES))
+        p = w_nl(state, p)
+        p = w_str(state, p, (&c5[0]) as u64)
+        p = w_num(state, p, cpu.get(state, i, cpu.C_TICKS))
+        p = w_nl(state, p)
+        p = w_nl(state, p)
+        i = i + 1
+    }
+    return p
+}
+
+fn make_uptime(state: u64) -> u64 {
+    // Der Zeitgeber laeuft mit 100 Hz (`idt.fi`), ein Tick ist also eine
+    // Hundertstelsekunde. Linux schreibt hier zwei Zahlen mit zwei
+    // Nachkommastellen: Laufzeit und Leerlaufzeit.
+    let ticks: u64 = kstate.get(state, kstate.TICKS)
+    var p: u64 = 0
+    p = w_num(state, p, ticks / 100)
+    p = w_ch(state, p, 46)
+    if (ticks % 100) < 10 {
+        p = w_ch(state, p, 48)
+    }
+    p = w_num(state, p, ticks % 100)
+    p = w_ch(state, p, 32)
+    let idle: u64 = kstate.get(state, kstate.IDLE)
+    var iticks: u64 = 0
+    if idle < kstate.MAX_TASKS {
+        iticks = sched.tget(state, idle, sched.T_TICKS)
+    }
+    p = w_num(state, p, iticks / 100)
+    p = w_ch(state, p, 46)
+    if (iticks % 100) < 10 {
+        p = w_ch(state, p, 48)
+    }
+    p = w_num(state, p, iticks % 100)
+    p = w_nl(state, p)
+    return p
+}
+
+// DIE QUELLE EINER EINHAENGUNG. Ein Dateisystem ohne Platte hat keine
+// Geraetedatei -- Linux schreibt dort den Namen des Treibers ("proc
+// /proc proc rw"), und dieser Kernel schreibt ihn auch. Ein
+// "/dev/ram0" davorzusetzen waere eine Erfindung: /proc liegt auf gar
+// keinem Geraet.
+fn source_text(state: u64, at: u64, m: u64) -> u64 {
+    var t_proc: [u8; 5] = "proc "
+    var t_dev: [u8; 6] = "devfs "
+    let t: u64 = mnt.fstype(state, m)
+    if t == vfsops.FS_PROC {
+        return w_str(state, at, (&t_proc[0]) as u64)
+    }
+    if t == vfsops.FS_DEV {
+        return w_str(state, at, (&t_dev[0]) as u64)
+    }
+    return dev_text(state, at, mnt.dev(state, m))
+}
+
+fn dev_text(state: u64, at: u64, dev: u64) -> u64 {
+    var d_ram: [u8; 10] = "/dev/ram0\0"
+    var d_ata: [u8; 9] = "/dev/hda\0"
+    var d_atb: [u8; 9] = "/dev/hdb\0"
+    var d_nvme: [u8; 11] = "/dev/nvme0\0"
+    var d_none: [u8; 5] = "none\0"
+    if dev == blk.DEV_RAM {
+        return w_str(state, at, (&d_ram[0]) as u64)
+    }
+    if dev == blk.DEV_ATA {
+        return w_str(state, at, (&d_ata[0]) as u64)
+    }
+    if dev == blk.DEV_ATA1 {
+        return w_str(state, at, (&d_atb[0]) as u64)
+    }
+    if dev == blk.DEV_NVME {
+        return w_str(state, at, (&d_nvme[0]) as u64)
+    }
+    return w_str(state, at, (&d_none[0]) as u64)
+}
+
+fn type_text(state: u64, at: u64, t: u64) -> u64 {
+    var t_ofs: [u8; 4] = "ofs\0"
+    var t_proc: [u8; 5] = "proc\0"
+    var t_dev: [u8; 6] = "devfs\0"
+    var t_fat: [u8; 6] = "vfat\0\0"
+    var t_none: [u8; 5] = "none\0"
+    if t == vfsops.FS_OFS {
+        return w_str(state, at, (&t_ofs[0]) as u64)
+    }
+    if t == vfsops.FS_PROC {
+        return w_str(state, at, (&t_proc[0]) as u64)
+    }
+    if t == vfsops.FS_DEV {
+        return w_str(state, at, (&t_dev[0]) as u64)
+    }
+    if t == vfsops.FS_FAT {
+        return w_str(state, at, (&t_fat[0]) as u64)
+    }
+    return w_str(state, at, (&t_none[0]) as u64)
+}
+
+// Die Form von Linux' /proc/mounts, Feld fuer Feld:
+//     <Quelle> <Ort> <Art> <Schalter> 0 0
+fn make_mounts(state: u64) -> u64 {
+    var rw: [u8; 3] = "rw\0"
+    var ro: [u8; 3] = "ro\0"
+    var tail: [u8; 5] = " 0 0\0"
+    var p: u64 = 0
+    var m: u64 = 0
+    while m < mnt.MAX_MNT {
+        if mnt.used(state, m) {
+            p = source_text(state, p, m)
+            p = w_ch(state, p, 32)
+            p = w_str(state, p, mnt.path_at(state, m))
+            p = w_ch(state, p, 32)
+            p = type_text(state, p, mnt.fstype(state, m))
+            p = w_ch(state, p, 32)
+            if (mnt.flags(state, m) & mnt.F_RDONLY) != 0 {
+                p = w_str(state, p, (&ro[0]) as u64)
+            } else {
+                p = w_str(state, p, (&rw[0]) as u64)
+            }
+            p = w_str(state, p, (&tail[0]) as u64)
+            p = w_nl(state, p)
+        }
+        m = m + 1
+    }
+    return p
+}
+
+fn make_stat(state: u64) -> u64 {
+    var s1: [u8; 12] = "ticks     \0\0"
+    var s2: [u8; 12] = "ctxt      \0\0"
+    var s3: [u8; 12] = "syscalls  \0\0"
+    var s4: [u8; 12] = "processes \0\0"
+    var s5: [u8; 12] = "forks     \0\0"
+    var s6: [u8; 12] = "execs     \0\0"
+    var s7: [u8; 12] = "traps     \0\0"
+    var s8: [u8; 12] = "opens     \0\0"
+    var p: u64 = 0
+    p = w_str(state, p, (&s1[0]) as u64)
+    p = w_num(state, p, kstate.get(state, kstate.TICKS))
+    p = w_nl(state, p)
+    p = w_str(state, p, (&s2[0]) as u64)
+    p = w_num(state, p, kstate.get(state, kstate.SWITCHES))
+    p = w_nl(state, p)
+    p = w_str(state, p, (&s3[0]) as u64)
+    p = w_num(state, p, kstate.get(state, kstate.SYSCALLS))
+    p = w_nl(state, p)
+    p = w_str(state, p, (&s4[0]) as u64)
+    p = w_num(state, p, sched.alive_count(state))
+    p = w_nl(state, p)
+    p = w_str(state, p, (&s5[0]) as u64)
+    p = w_num(state, p, kstate.get(state, kstate.FORKS))
+    p = w_nl(state, p)
+    p = w_str(state, p, (&s6[0]) as u64)
+    p = w_num(state, p, kstate.get(state, kstate.EXECS))
+    p = w_nl(state, p)
+    p = w_str(state, p, (&s7[0]) as u64)
+    p = w_num(state, p, kstate.get(state, kstate.TRAPS))
+    p = w_nl(state, p)
+    p = w_str(state, p, (&s8[0]) as u64)
+    p = w_num(state, p, kstate.get(state, kstate.OPENS))
+    p = w_nl(state, p)
+    return p
+}
+
+fn make_version(state: u64) -> u64 {
+    var v: [u8; 30] = "Osum (Firn) version \0\0\0\0\0\0\0\0\0\0"
+    var p: u64 = 0
+    p = w_str(state, p, (&v[0]) as u64)
+    p = w_num(state, p, uio.sysinfo(state, uio.I_VERSION))
+    p = w_nl(state, p)
+    return p
+}
+
+// ------------------------------------------------- die Dateien je Prozess
+
+fn make_status(state: u64, t: u64) -> u64 {
+    var l1: [u8; 10] = "Name:   \0\0"
+    var l2: [u8; 10] = "Pid:    \0\0"
+    var l3: [u8; 10] = "PPid:   \0\0"
+    var l4: [u8; 10] = "State:  \0\0"
+    var l5: [u8; 10] = "Prio:   \0\0"
+    var l6: [u8; 10] = "Ticks:  \0\0"
+    var l7: [u8; 10] = "Runs:   \0\0"
+    var l8: [u8; 10] = "Faults: \0\0"
+    var l9: [u8; 10] = "Brk:    \0\0"
+    var l10: [u8; 10] = "Cwd:    \0\0"
+    var name: [u8; 12] = [0 as u8; 12]
+    var p: u64 = 0
+    kind_name(sched.tget(state, t, sched.T_KIND), (&name[0]) as u64)
+    p = w_str(state, p, (&l1[0]) as u64)
+    p = w_str(state, p, (&name[0]) as u64)
+    p = w_nl(state, p)
+    p = w_str(state, p, (&l2[0]) as u64)
+    p = w_num(state, p, sched.tget(state, t, sched.T_PID))
+    p = w_nl(state, p)
+    p = w_str(state, p, (&l3[0]) as u64)
+    let par: u64 = sched.tget(state, t, sched.T_PARENT)
+    var ppid: u64 = 0
+    if par < kstate.MAX_TASKS {
+        ppid = sched.tget(state, par, sched.T_PID)
+    }
+    p = w_num(state, p, ppid)
+    p = w_nl(state, p)
+    p = w_str(state, p, (&l4[0]) as u64)
+    p = w_ch(state, p, state_letter(sched.tget(state, t, sched.T_STATE)))
+    p = w_nl(state, p)
+    p = w_str(state, p, (&l5[0]) as u64)
+    p = w_num(state, p, sched.tget(state, t, sched.T_PRIO))
+    p = w_nl(state, p)
+    p = w_str(state, p, (&l6[0]) as u64)
+    p = w_num(state, p, sched.tget(state, t, sched.T_TICKS))
+    p = w_nl(state, p)
+    p = w_str(state, p, (&l7[0]) as u64)
+    p = w_num(state, p, sched.tget(state, t, sched.T_RUNS))
+    p = w_nl(state, p)
+    p = w_str(state, p, (&l8[0]) as u64)
+    p = w_num(state, p, sched.tget(state, t, sched.T_FAULTS))
+    p = w_nl(state, p)
+    p = w_str(state, p, (&l9[0]) as u64)
+    p = w_hex16(state, p, sched.tget(state, t, sched.T_BRK))
+    p = w_nl(state, p)
+    p = w_str(state, p, (&l10[0]) as u64)
+    var k: u64 = 0
+    let n: u64 = uio.cwd_len(state, t)
+    while k < n {
+        p = w_ch(state, p, uio.cwd_at(state, t, k))
+        k = k + 1
+    }
+    p = w_nl(state, p)
+    return p
+}
+
+fn make_pstat(state: u64, t: u64) -> u64 {
+    var name: [u8; 12] = [0 as u8; 12]
+    var p: u64 = 0
+    kind_name(sched.tget(state, t, sched.T_KIND), (&name[0]) as u64)
+    p = w_num(state, p, sched.tget(state, t, sched.T_PID))
+    p = w_ch(state, p, 32)
+    p = w_ch(state, p, 40) // '('
+    p = w_str(state, p, (&name[0]) as u64)
+    p = w_ch(state, p, 41) // ')'
+    p = w_ch(state, p, 32)
+    p = w_ch(state, p, state_letter(sched.tget(state, t, sched.T_STATE)))
+    p = w_ch(state, p, 32)
+    let par: u64 = sched.tget(state, t, sched.T_PARENT)
+    var ppid: u64 = 0
+    if par < kstate.MAX_TASKS {
+        ppid = sched.tget(state, par, sched.T_PID)
+    }
+    p = w_num(state, p, ppid)
+    p = w_ch(state, p, 32)
+    p = w_num(state, p, sched.tget(state, t, sched.T_PGID))
+    p = w_ch(state, p, 32)
+    p = w_num(state, p, sched.tget(state, t, sched.T_SID))
+    p = w_ch(state, p, 32)
+    p = w_num(state, p, sched.tget(state, t, sched.T_PRIO))
+    p = w_ch(state, p, 32)
+    p = w_num(state, p, sched.tget(state, t, sched.T_TICKS))
+    p = w_ch(state, p, 32)
+    p = w_num(state, p, sched.tget(state, t, sched.T_RUNS))
+    p = w_ch(state, p, 32)
+    p = w_num(state, p, sched.tget(state, t, sched.T_FAULTS))
+    p = w_nl(state, p)
+    return p
+}
+
+// DIE ARGUMENTE, AUS DEM ADRESSRAUM DES PROZESSES. `elf.write_args`
+// legt sie auf die oberste Stapelseite (`proc.ARGS_BASE`): erst `argc`,
+// dann `argc` Zeiger, dann die Zeichenketten. Hier wird genau dort
+// gelesen -- ueber `proc.translate`, also durch die Seitentabelle des
+// FREMDEN Prozesses hindurch, und nicht aus einer Kopie, die der Kernel
+// sich gemerkt haette. Eine Kopie waere veraltet, sobald `execve` lief.
+fn make_cmdline(state: u64, t: u64) -> u64 {
+    var p: u64 = 0
+    let frame: u64 = proc.translate(state, t, proc.ARGS_BASE)
+    if frame == 0 {
+        return 0
+    }
+    let argc: u64 = __mmio_read64(frame as *mut u64)
+    if argc == 0 || argc > proc.MAX_ARGS {
+        return 0
+    }
+    var k: u64 = 0
+    while k < argc {
+        let ptr: u64 = __mmio_read64((frame + 8 + k * 8) as *mut u64)
+        if ptr < proc.ARGS_BASE || ptr >= proc.ARGS_BASE + 4096 {
+            k = argc
+        } else {
+            var at: u64 = frame + (ptr - proc.ARGS_BASE)
+            var going: bool = true
+            while going {
+                let c: u64 = kstate.get8(at)
+                if c == 0 {
+                    going = false
+                } else {
+                    p = w_ch(state, p, c)
+                    at = at + 1
+                }
+            }
+            // Wie bei Linux: die Argumente sind durch NULLEN getrennt
+            // und nicht durch Leerzeichen. Wer das anders schreibt,
+            // kann ein Argument mit Leerzeichen nicht mehr wiedergeben.
+            p = w_ch(state, p, 0)
+            k = k + 1
+        }
+    }
+    return p
+}
+
+// DIE SEITENTABELLE, ABGELAUFEN. Keine Konstantenliste: was hier steht,
+// steht da, weil `proc.translate` fuer diese Adresse einen Rahmen
+// gefunden hat.
+fn make_maps(state: u64, t: u64) -> u64 {
+    var rw: [u8; 5] = " rw-\0"
+    var rx: [u8; 5] = " r-x\0"
+    var p: u64 = 0
+    let low: u64 = proc.USER_DATA
+    // DER GANZE PRIVATE BEREICH, und nicht nur der Stapel. `USER_TOP`
+    // ist die OBERKANTE DES STAPELS (0x40009000) und nicht das Ende
+    // des Adressraums -- die erste Fassung dieser Funktion hoerte dort
+    // auf und meldete fuer jeden Prozess genau eine Zeile, obwohl das
+    // ABBILD bei 0x40100000 liegt und der Haufen bei 0x40020000. Was
+    // eine private Seitentabelle ueberhaupt abdecken kann, steht in
+    // `proc.USER_SPAN`, und bis dahin wird gesucht.
+    let high: u64 = proc.USER_DATA + proc.USER_SPAN
+    var addr: u64 = low
+    var run_start: u64 = 0
+    var run_exec: bool = false
+    var in_run: bool = false
+    while addr < high {
+        let phys: u64 = proc.translate(state, t, addr)
+        var here: bool = false
+        var ex: bool = false
+        if phys != 0 {
+            here = true
+            ex = proc.page_exec(state, t, addr)
+        }
+        if here && !in_run {
+            in_run = true
+            run_start = addr
+            run_exec = ex
+        } else if in_run {
+            if !here || ex != run_exec {
+                p = w_hex16(state, p, run_start)
+                p = w_ch(state, p, 45)
+                p = w_hex16(state, p, addr)
+                if run_exec {
+                    p = w_str(state, p, (&rx[0]) as u64)
+                } else {
+                    p = w_str(state, p, (&rw[0]) as u64)
+                }
+                p = w_nl(state, p)
+                in_run = here
+                run_start = addr
+                run_exec = ex
+            }
+        }
+        addr = addr + 4096
+    }
+    if in_run {
+        p = w_hex16(state, p, run_start)
+        p = w_ch(state, p, 45)
+        p = w_hex16(state, p, high)
+        if run_exec {
+            p = w_str(state, p, (&rx[0]) as u64)
+        } else {
+            p = w_str(state, p, (&rw[0]) as u64)
+        }
+        p = w_nl(state, p)
+    }
+    return p
+}
+
+fn make_fdfile(state: u64, t: u64, fd: u64) -> u64 {
+    var k_file: [u8; 6] = "file \0"
+    var k_dir: [u8; 5] = "dir \0"
+    var k_pipe: [u8; 6] = "pipe\0\0"
+    var k_tty: [u8; 5] = "tty \0"
+    var k_con: [u8; 8] = "console\0"
+    var k_sock: [u8; 8] = "socket\0\0"
+    var k_fb: [u8; 4] = "fb\0\0"
+    var k_vfs: [u8; 5] = "vfs \0"
+    var p: u64 = 0
+    // `file.fd_of` gibt den PLATZ IN DER TAFEL DER OFFENEN DATEIEN
+    // zurueck -- und `MAX_OPEN`, wenn der Deskriptor geschlossen ist.
+    // NICHT null: null ist ein gueltiger Platz, naemlich die Konsole
+    // auf Deskriptor 0. Die erste Fassung dieser Datei hat `!= 0`
+    // geprueft und damit genau das Gegenteil aufgezaehlt: Deskriptor 0
+    // fehlte in der Liste, und jeder GESCHLOSSENE stand darin.
+    let e: u64 = file.fd_of(state, t, fd)
+    if e >= file.MAX_OPEN {
+        return 0
+    }
+    let kind: u64 = file.open_kind(state, e)
+    if kind == file.K_FILE {
+        p = w_str(state, p, (&k_file[0]) as u64)
+        p = w_num(state, p, file.open_ino(state, e))
+    } else if kind == file.K_DIR {
+        p = w_str(state, p, (&k_dir[0]) as u64)
+        p = w_num(state, p, file.open_ino(state, e))
+    } else if kind == file.K_PIPER || kind == file.K_PIPEW {
+        p = w_str(state, p, (&k_pipe[0]) as u64)
+    } else if kind == file.K_TTY {
+        p = w_str(state, p, (&k_tty[0]) as u64)
+        p = w_num(state, p, file.open_ino(state, e))
+    } else if kind == file.K_CONIN || kind == file.K_CONOUT {
+        p = w_str(state, p, (&k_con[0]) as u64)
+    } else if kind == file.K_SOCK {
+        p = w_str(state, p, (&k_sock[0]) as u64)
+    } else if kind == file.K_FB {
+        p = w_str(state, p, (&k_fb[0]) as u64)
+    } else {
+        p = w_str(state, p, (&k_vfs[0]) as u64)
+        p = w_num(state, p, file.open_ino(state, e))
+    }
+    p = w_nl(state, p)
+    return p
+}
+
+// EINE Weiche fuer alle Dateien dieses Dateisystems. Sie ist die
+// einzige Stelle, an der ein Knoten zu Text wird.
+fn build(state: u64, n: u64) -> u64 {
+    let art: u64 = n_art(n)
+    let slot: u64 = n_slot(n)
+    let sub: u64 = n_sub(n)
+    if art == K_GLOBAL {
+        if sub == G_MEMINFO {
+            return make_meminfo(state)
+        }
+        if sub == G_CPUINFO {
+            return make_cpuinfo(state)
+        }
+        if sub == G_UPTIME {
+            return make_uptime(state)
+        }
+        if sub == G_MOUNTS {
+            return make_mounts(state)
+        }
+        if sub == G_STAT {
+            return make_stat(state)
+        }
+        if sub == G_VERSION {
+            return make_version(state)
+        }
+        return 0
+    }
+    if art == K_PIDFILE {
+        if !alive(state, slot) {
+            return 0
+        }
+        if sub == F_STATUS {
+            return make_status(state, slot)
+        }
+        if sub == F_STAT {
+            return make_pstat(state, slot)
+        }
+        if sub == F_CMDLINE {
+            return make_cmdline(state, slot)
+        }
+        if sub == F_MAPS {
+            return make_maps(state, slot)
+        }
+        return 0
+    }
+    if art == K_FDFILE {
+        if !alive(state, slot) {
+            return 0
+        }
+        return make_fdfile(state, slot, sub)
+    }
+    return 0
+}
+
+// ------------------------------------------------------ die Verrichtungen
+
+fn streq(a: u64, b: u64) -> bool {
+    var i: u64 = 0
+    while kstate.get8(a + i) != 0 && kstate.get8(b + i) != 0 {
+        if kstate.get8(a + i) != kstate.get8(b + i) {
+            return false
+        }
+        i = i + 1
+    }
+    return kstate.get8(a + i) == kstate.get8(b + i)
+}
+
+// Ein Namensteil aus dem Pfad, ab `at`. Rueckgabe: die Stelle hinter
+// ihm. `out` bekommt den Teil ohne Schraegstriche.
+fn segment(path: u64, at: u64, out: u64, max: u64) -> u64 {
+    var i: u64 = at
+    while kstate.get8(path + i) == 47 {
+        i = i + 1
+    }
+    var n: u64 = 0
+    while kstate.get8(path + i) != 0 && kstate.get8(path + i) != 47 {
+        if n + 1 < max {
+            kstate.set8(out + n, kstate.get8(path + i) as u8)
+            n = n + 1
+        }
+        i = i + 1
+    }
+    kstate.set8(out + n, 0 as u8)
+    return i
+}
+
+fn to_num(p: u64) -> u64 {
+    var v: u64 = 0
+    var i: u64 = 0
+    if kstate.get8(p) == 0 {
+        return 0xFFFFFFFF
+    }
+    while kstate.get8(p + i) != 0 {
+        let c: u64 = kstate.get8(p + i)
+        if c < 48 || c > 57 {
+            return 0xFFFFFFFF
+        }
+        v = v * 10 + (c - 48)
+        i = i + 1
+    }
+    return v
+}
+
+fn global_of(name: u64) -> u64 {
+    var a: [u8; 8] = "meminfo\0"
+    var b: [u8; 8] = "cpuinfo\0"
+    var c: [u8; 7] = "uptime\0"
+    var d: [u8; 7] = "mounts\0"
+    var e: [u8; 5] = "stat\0"
+    var f: [u8; 8] = "version\0"
+    if streq(name, (&a[0]) as u64) {
+        return G_MEMINFO
+    }
+    if streq(name, (&b[0]) as u64) {
+        return G_CPUINFO
+    }
+    if streq(name, (&c[0]) as u64) {
+        return G_UPTIME
+    }
+    if streq(name, (&d[0]) as u64) {
+        return G_MOUNTS
+    }
+    if streq(name, (&e[0]) as u64) {
+        return G_STAT
+    }
+    if streq(name, (&f[0]) as u64) {
+        return G_VERSION
+    }
+    return 0
+}
+
+fn pidfile_of(name: u64) -> u64 {
+    var a: [u8; 7] = "status\0"
+    var b: [u8; 5] = "stat\0"
+    var c: [u8; 8] = "cmdline\0"
+    var d: [u8; 5] = "maps\0"
+    var e: [u8; 3] = "fd\0"
+    if streq(name, (&a[0]) as u64) {
+        return F_STATUS
+    }
+    if streq(name, (&b[0]) as u64) {
+        return F_STAT
+    }
+    if streq(name, (&c[0]) as u64) {
+        return F_CMDLINE
+    }
+    if streq(name, (&d[0]) as u64) {
+        return F_MAPS
+    }
+    if streq(name, (&e[0]) as u64) {
+        return F_FD
+    }
+    return 0
+}
+
+fn p_lookup(state: u64, m: u64, path: u64) -> u64 {
+    tick(state)
+    var seg: [u8; 24] = [0 as u8; 24]
+    var at: u64 = segment(path, 0, (&seg[0]) as u64, 24)
+    if kstate.get8((&seg[0]) as u64) == 0 {
+        return node(K_ROOT, 0, 0)
+    }
+    let g: u64 = global_of((&seg[0]) as u64)
+    if g != 0 {
+        // Ein globaler Name darf nichts hinter sich haben.
+        var rest: [u8; 24] = [0 as u8; 24]
+        segment(path, at, (&rest[0]) as u64, 24)
+        if kstate.get8((&rest[0]) as u64) != 0 {
+            return 0
+        }
+        return node(K_GLOBAL, 0, g)
+    }
+    let pid: u64 = to_num((&seg[0]) as u64)
+    if pid == 0xFFFFFFFF {
+        return 0
+    }
+    let slot: u64 = slot_of_pid(state, pid)
+    if slot >= kstate.MAX_TASKS {
+        return 0
+    }
+    var seg2: [u8; 24] = [0 as u8; 24]
+    at = segment(path, at, (&seg2[0]) as u64, 24)
+    if kstate.get8((&seg2[0]) as u64) == 0 {
+        return node(K_PIDDIR, slot, 0)
+    }
+    let f: u64 = pidfile_of((&seg2[0]) as u64)
+    if f == 0 {
+        return 0
+    }
+    var seg3: [u8; 24] = [0 as u8; 24]
+    at = segment(path, at, (&seg3[0]) as u64, 24)
+    if kstate.get8((&seg3[0]) as u64) == 0 {
+        if f == F_FD {
+            return node(K_FDDIR, slot, 0)
+        }
+        return node(K_PIDFILE, slot, f)
+    }
+    if f != F_FD {
+        return 0
+    }
+    let fd: u64 = to_num((&seg3[0]) as u64)
+    if fd >= file.MAX_FD {
+        return 0
+    }
+    if file.fd_of(state, slot, fd) >= file.MAX_OPEN {
+        return 0
+    }
+    return node(K_FDFILE, slot, fd)
+}
+
+fn dot_entry(state: u64, index: u64, out: u64) -> bool {
+    if index == 0 {
+        kstate.set8(out, 46 as u8)
+        kstate.set8(out + 1, 0 as u8)
+        return true
+    }
+    kstate.set8(out, 46 as u8)
+    kstate.set8(out + 1, 46 as u8)
+    kstate.set8(out + 2, 0 as u8)
+    return true
+}
+
+fn global_name(state: u64, sub: u64, out: u64) {
+    var a: [u8; 8] = "meminfo\0"
+    var b: [u8; 8] = "cpuinfo\0"
+    var c: [u8; 7] = "uptime\0"
+    var d: [u8; 7] = "mounts\0"
+    var e: [u8; 5] = "stat\0"
+    var f: [u8; 8] = "version\0"
+    var src: u64 = (&a[0]) as u64
+    if sub == G_CPUINFO {
+        src = (&b[0]) as u64
+    } else if sub == G_UPTIME {
+        src = (&c[0]) as u64
+    } else if sub == G_MOUNTS {
+        src = (&d[0]) as u64
+    } else if sub == G_STAT {
+        src = (&e[0]) as u64
+    } else if sub == G_VERSION {
+        src = (&f[0]) as u64
+    }
+    var i: u64 = 0
+    while kstate.get8(src + i) != 0 {
+        kstate.set8(out + i, kstate.get8(src + i) as u8)
+        i = i + 1
+    }
+    kstate.set8(out + i, 0 as u8)
+}
+
+fn pidfile_name(state: u64, sub: u64, out: u64) {
+    var a: [u8; 7] = "status\0"
+    var b: [u8; 5] = "stat\0"
+    var c: [u8; 8] = "cmdline\0"
+    var d: [u8; 5] = "maps\0"
+    var e: [u8; 3] = "fd\0"
+    var src: u64 = (&a[0]) as u64
+    if sub == F_STAT {
+        src = (&b[0]) as u64
+    } else if sub == F_CMDLINE {
+        src = (&c[0]) as u64
+    } else if sub == F_MAPS {
+        src = (&d[0]) as u64
+    } else if sub == F_FD {
+        src = (&e[0]) as u64
+    }
+    var i: u64 = 0
+    while kstate.get8(src + i) != 0 {
+        kstate.set8(out + i, kstate.get8(src + i) as u8)
+        i = i + 1
+    }
+    kstate.set8(out + i, 0 as u8)
+}
+
+fn num_name(state: u64, v: u64, out: u64) {
+    var digits: [u8; 24] = [0 as u8; 24]
+    var n: u64 = 0
+    var x: u64 = v
+    if x == 0 {
+        kstate.set8(out, 48 as u8)
+        kstate.set8(out + 1, 0 as u8)
+        return
+    }
+    while x > 0 {
+        digits[n as usize] = ((x % 10) + 48) as u8
+        x = x / 10
+        n = n + 1
+    }
+    var k: u64 = 0
+    while n > 0 {
+        n = n - 1
+        kstate.set8(out + k, digits[n as usize])
+        k = k + 1
+    }
+    kstate.set8(out + k, 0 as u8)
+}
+
+fn p_readdir(state: u64, m: u64, dir: u64, index: u64, out: u64) -> u64 {
+    tick(state)
+    let art: u64 = n_art(dir)
+    let slot: u64 = n_slot(dir)
+    if index < 2 {
+        dot_entry(state, index, out)
+        return dir
+    }
+    let i: u64 = index - 2
+    if art == K_ROOT {
+        if i < G_LAST {
+            global_name(state, i + 1, out)
+            return node(K_GLOBAL, 0, i + 1)
+        }
+        // Dahinter die Prozesse, in der Reihenfolge der Aufgabentafel.
+        var seen: u64 = 0
+        var t: u64 = 0
+        let n: u64 = kstate.get(state, kstate.TASKS)
+        while t < n {
+            if alive(state, t) {
+                if seen == i - G_LAST {
+                    num_name(state, sched.tget(state, t, sched.T_PID), out)
+                    return node(K_PIDDIR, t, 0)
+                }
+                seen = seen + 1
+            }
+            t = t + 1
+        }
+        return 0
+    }
+    if art == K_PIDDIR {
+        if i < F_LAST {
+            pidfile_name(state, i + 1, out)
+            if i + 1 == F_FD {
+                return node(K_FDDIR, slot, 0)
+            }
+            return node(K_PIDFILE, slot, i + 1)
+        }
+        return 0
+    }
+    if art == K_FDDIR {
+        var seen: u64 = 0
+        var fd: u64 = 0
+        while fd < file.MAX_FD {
+            if file.fd_of(state, slot, fd) < file.MAX_OPEN {
+                if seen == i {
+                    num_name(state, fd, out)
+                    return node(K_FDFILE, slot, fd)
+                }
+                seen = seen + 1
+            }
+            fd = fd + 1
+        }
+        return 0
+    }
+    return 0
+}
+
+fn p_attr(state: u64, m: u64, n: u64, what: u64) -> u64 {
+    tick(state)
+    let art: u64 = n_art(n)
+    if what == vfsops.A_TYPE {
+        if art == K_ROOT || art == K_PIDDIR || art == K_FDDIR {
+            return vfsops.N_DIR
+        }
+        if art == K_GLOBAL || art == K_PIDFILE || art == K_FDFILE {
+            return vfsops.N_FILE
+        }
+        return vfsops.N_NONE
+    }
+    if what == vfsops.A_SIZE {
+        // EINE DATEI, DIE NIRGENDS LIEGT, HAT KEINE LAENGE, BIS MAN SIE
+        // SCHREIBT. Also wird sie hier geschrieben und dann weggeworfen
+        // -- das ist genau, was Linux tut, und der Grund, warum
+        // `ls -l /proc` dort ueberall Nullen zeigt. Dieser Kernel sagt
+        // die Wahrheit statt Null, und das kostet einen Aufbau.
+        if art == K_ROOT || art == K_PIDDIR || art == K_FDDIR {
+            return 0
+        }
+        let flags: u64 = lock(state)
+        let len: u64 = build(state, n)
+        unlock(state, flags)
+        return len
+    }
+    if what == vfsops.A_MODE {
+        if art == K_ROOT || art == K_PIDDIR || art == K_FDDIR {
+            return 365 // 0o555 -- lesen und betreten, nicht schreiben
+        }
+        return 292 // 0o444
+    }
+    if what == vfsops.A_NLINK {
+        return 1
+    }
+    if what == vfsops.A_BLKSIZE {
+        return 4096
+    }
+    return 0
+}
+
+fn lock(state: u64) -> u64 {
+    let flags: u64 = sched.irq_save()
+    atomic.lock_take(state, atomic.L_PROC, cpu.here(state))
+    return flags
+}
+
+fn unlock(state: u64, flags: u64) {
+    atomic.lock_give(state, atomic.L_PROC)
+    sched.irq_restore(flags)
+}
+
+fn p_read(state: u64, m: u64, n: u64, off: u64, dst: u64, len: u64) -> u64 {
+    tick(state)
+    let flags: u64 = lock(state)
+    let have: u64 = build(state, n)
+    if off >= have {
+        unlock(state, flags)
+        return 0
+    }
+    var want: u64 = len
+    if off + want > have {
+        want = have - off
+    }
+    var i: u64 = 0
+    while i < want {
+        kstate.set8(dst + i, kstate.get8(buf(state) + off + i) as u8)
+        i = i + 1
+    }
+    unlock(state, flags)
+    return want
+}
+
+fn p_write(state: u64, m: u64, n: u64, off: u64, src: u64,
+    len: u64) -> u64 {
+    tick(state)
+    return 0
+}
+
+fn p_create(state: u64, m: u64, path: u64, art: u64) -> u64 {
+    tick(state)
+    return 0
+}
+
+fn p_unlink(state: u64, m: u64, path: u64) -> u64 {
+    tick(state)
+    return 1 // EPERM
+}
+
+fn p_rename(state: u64, m: u64, from: u64, to: u64) -> u64 {
+    tick(state)
+    return 1
+}
+
+fn p_trunc(state: u64, m: u64, n: u64) -> u64 {
+    tick(state)
+    return 30 // EROFS
+}
+
+// Die Tafel. VIER Bits, und kein einziges davon schreibt: /proc ist ein
+// Fenster in den Kernel und keine Tuer.
+fn ops() -> vfsops.Ops {
+    return vfsops.Ops {
+        lookup: p_lookup,
+        readdir: p_readdir,
+        attr: p_attr,
+        read: p_read,
+        write: p_write,
+        create: p_create,
+        unlink: p_unlink,
+        rename: p_rename,
+        trunc: p_trunc,
+        mask: vfsops.OP_READONLY,
+        tag: 1668248176 // "proc"
+    }
+}

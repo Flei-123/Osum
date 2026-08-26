@@ -1,0 +1,530 @@
+// kernel/vfs.fi -- Runde K14: DIE SCHICHT, DIE MEHRERE DATEISYSTEME
+// NEBENEINANDER TRAEGT.
+//
+// WAS VORHER WAR. Dieser Kernel kannte genau ein Dateisystem. `mount`
+// gab es als Kernelfunktion (`fs.mount`) und als Befehl, aber es hatte
+// kein ZIEL: es hiess "die eine Platte ist jetzt da" und setzte eine
+// Eins in `kstate.FS_READY`. Ein zweites Dateisystem hatte in dieser
+// Zahl keinen Platz, also gab es kein /proc, kein /dev als
+// Verzeichnis, und jede Platte, die ein anderes System beschrieben
+// hatte, war unlesbar.
+//
+// WAS DIESE DATEI IST. Der Namensraum. Sie kennt kein einziges
+// Dateisystem -- der Name `fs.` kommt hier nicht vor, `fat.` und
+// `procfs.` nur an EINER Stelle, naemlich in `ops_of`, wo sich die
+// Treiber anmelden. Alles andere arbeitet auf `vfsops.Ops`, also auf
+// neun Funktionszeigern.
+//
+// DIE DREI DINGE, DIE EINE VFS-SCHICHT AUSMACHEN, und wo sie hier
+// stehen:
+//
+//   1. PFADAUFLOESUNG, DIE BEIM UEBERQUEREN EINES EINHAENGEPUNKTS DAS
+//      DATEISYSTEM WECHSELT (`mount_for`, `node_for`). Der Weg ist der
+//      LAENGSTE passende Einhaengepfad, und "passend" heisst an einer
+//      NAMENSGRENZE: "/mnt" ist kein Anfang von "/mnttest". Genau
+//      diese eine Zeile ist die, an der eine Einhaengeschicht falsch
+//      wird, und `mnt.path_eq_prefix` prueft sie.
+//   2. EINHAENGEN MIT EINEM ZIEL (`mount_at`). Der Einhaengepunkt MUSS
+//      ein Verzeichnis sein, das es GIBT -- so wie auf jedem Unix. Das
+//      ist keine Strenge um ihrer selbst willen: dadurch aendert sich
+//      an einem bestehenden Abbild nichts, in dem /proc und /dev nicht
+//      vorkommen, und die 1486 Zusagen der Runden 59 bis K12 messen
+//      weiter genau das, was sie gemessen haben.
+//   3. AUSHAENGEN MIT PRUEFUNG (`umount_path`). Eine Einhaengung mit
+//      offenen Deskriptoren wird NICHT ausgehaengt: -EBUSY. Die Zahl
+//      dafuer fuehrt `mnt.fi` (`opens`), `sys.fi` zaehlt sie beim
+//      Oeffnen hoch und beim Schliessen herunter, und
+//      `tools/k14/run.sh` misst beide Richtungen.
+//
+// WARUM DIE WURZEL PLATZ 0 IST UND OFS DARAUF LIEGT. Der Auftrag sagt:
+// "OFS wird zum ERSTEN Nutzer dieser Schicht, nicht zum Sonderfall
+// daneben." Also ist OFS ein Eintrag der Einhaengetafel wie jeder
+// andere, mit einer Ops-Tafel wie jeder andere, und `vfs.read` auf
+// einer OFS-Datei geht durch denselben Zeiger wie `vfs.read` auf einer
+// FAT32-Datei. Was die Wurzel voraus hat, ist genau eine Sache: sie
+// darf nicht ausgehaengt werden, solange etwas darauf offen ist.
+//
+// UND WAS SIE NICHT VORAUS HAT: `sys.fi` benutzt fuer die WURZEL
+// weiterhin den geraden Weg von Runde 62 (`fs.read_at` auf einer
+// Inode), solange nicht `vfsall` auf der Kommandozeile steht. Das ist
+// keine zweite Wahrheit, sondern die Vorsicht, die der Auftrag
+// verlangt ("Nichts loeschen, bevor der Ersatz laeuft"): mit `vfsall`
+// geht AUCH die Wurzel durch die Ops-Tafel, `tools/k14/run.sh` laesst
+// dieselbe Arbeit zweimal laufen und haelt die Ausgaben OKTETT FUER
+// OKTETT gegeneinander. Erst wenn die beiden gleich sind, ist bewiesen,
+// dass der eine Weg den anderen ersetzen kann.
+
+profile kernel
+
+import kstate
+import serial
+import mnt
+import vfsops
+import ofs
+import procfs
+import devfs
+import fat
+import errno
+
+export {
+    init, ready, mount_root, mount_at, umount_path, umount_index,
+    mount_for, node_for, resolve, ops_of,
+    v_readdir, v_attr, v_read, v_write, v_create, v_unlink, v_rename,
+    v_trunc, can, rdonly, root_node, type_of, all_mode,
+    MAX_MNT
+}
+
+const MAX_MNT: u64 = 8
+
+// -------------------------------------------------------- die Anmeldung
+//
+// DIE EINZIGE STELLE IM KERNEL, an der ein Dateisystem beim Namen
+// genannt wird. Vier Zeilen; ein fuenftes Dateisystem waere eine
+// fuenfte. Alles andere in dieser Datei arbeitet auf dem, was hier
+// herauskommt.
+//
+// Dass das WIRKLICH Zeiger sind und keine verkleidete Weiche, laesst
+// sich nachrechnen: `tools/k14/run.sh` zerlegt die uebersetzte
+// Objektdatei und zaehlt die `call *`-Befehle in diesem Modul. Firn
+// Stufe 0 kann einen Funktionszeiger weder in eine Zahl wandeln noch
+// aus einer Tafel heraus aufrufen -- ein Feld einer Struktur aufrufen
+// kann es, und das ist der Weg hier.
+fn ops_of(t: u64) -> vfsops.Ops {
+    if t == vfsops.FS_PROC {
+        return procfs.ops()
+    }
+    if t == vfsops.FS_DEV {
+        return devfs.ops()
+    }
+    if t == vfsops.FS_FAT {
+        return fat.ops()
+    }
+    return ofs.ops()
+}
+
+fn ready(state: u64) -> bool {
+    return kstate.get(state, kstate.VFS_READY) != 0
+}
+
+fn all_mode(state: u64) -> bool {
+    return (kstate.get(state, kstate.MODE) & kstate.M_VFSALL) != 0
+}
+
+fn init(state: u64) {
+    mnt.init(state)
+    kstate.set(state, kstate.VFS_READY, 1)
+    kstate.set(state, kstate.VFS_LOOKUPS, 0)
+    kstate.set(state, kstate.VFS_CROSSINGS, 0)
+    kstate.set(state, kstate.VFS_OPS, 0)
+    kstate.set(state, kstate.VFS_INDIRECT, 0)
+}
+
+fn type_of(state: u64, m: u64) -> u64 {
+    return mnt.fstype(state, m)
+}
+
+fn root_node(state: u64, m: u64) -> u64 {
+    return mnt.root(state, m)
+}
+
+// Darf dieser Einhaengepunkt diese Verrichtung? Das Bit wird geprueft,
+// BEVOR der Zeiger benutzt wird -- und das Nur-Lese-Bit der
+// Einhaengung kommt oben drauf. Ein FAT32, das mit `fatro`
+// eingehaengt wurde, hat dieselbe Ops-Tafel wie eines mit `rw`; was
+// sich unterscheidet, ist diese eine Zeile.
+// Ist diese Einhaengung nur lesend? Der Unterschied zwischen "geht
+// hier nie" und "geht so, wie es eingehaengt ist, nicht" ist der
+// Unterschied zwischen -EPERM und -EROFS -- und ein Programm, das
+// beides gleich behandelt, schlaegt dem Benutzer das Falsche vor.
+fn rdonly(state: u64, m: u64) -> bool {
+    if m >= MAX_MNT || !mnt.used(state, m) {
+        return false
+    }
+    return (mnt.flags(state, m) & mnt.F_RDONLY) != 0
+}
+
+fn can(state: u64, m: u64, bit: u64) -> bool {
+    if m >= MAX_MNT || !mnt.used(state, m) {
+        return false
+    }
+    let o: vfsops.Ops = ops_of(mnt.fstype(state, m))
+    if (o.mask & bit) == 0 {
+        return false
+    }
+    if (mnt.flags(state, m) & mnt.F_RDONLY) != 0 {
+        let schreibend: u64 = vfsops.OP_WRITE | vfsops.OP_CREATE
+            | vfsops.OP_UNLINK | vfsops.OP_RENAME | vfsops.OP_TRUNC
+        if (bit & schreibend) != 0 {
+            return false
+        }
+    }
+    return true
+}
+
+// ------------------------------------------------------- die Aufloesung
+
+// DER LAENGSTE passende Einhaengepfad. Nicht der erste -- mit "/" und
+// "/mnt" in der Tafel wuerde der erste jeden Pfad auf der Wurzel enden
+// lassen, und /mnt waere unerreichbar.
+fn mount_for(state: u64, path: u64) -> u64 {
+    var best: u64 = MAX_MNT
+    var best_len: u64 = 0
+    var m: u64 = 0
+    while m < MAX_MNT {
+        if mnt.used(state, m) {
+            let used: u64 = mnt.path_eq_prefix(state, m, path)
+            if used != 0 {
+                if best == MAX_MNT || used > best_len {
+                    best = m
+                    best_len = used
+                }
+            }
+        }
+        m = m + 1
+    }
+    kstate.add(state, kstate.VFS_LOOKUPS, 1)
+    if best != MAX_MNT && best != 0 {
+        // Die Zahl, an der ein Lauf ohne echte Einhaengegrenze
+        // auffliegt. Sie steht hier und nicht in `node_for`, weil sie
+        // die AUFLOESUNG zaehlen soll und nicht die Treffer.
+        kstate.add(state, kstate.VFS_CROSSINGS, 1)
+    }
+    return best
+}
+
+// Der Rest des Pfades, wie ihn der Treiber sieht: absolut, aber
+// gerechnet ab seinem eigenen Wurzelverzeichnis.
+//
+// KEIN ZWISCHENPUFFER. Der Rest ist ein Stueck DESSELBEN Textes --
+// `path + used` --, weil der Einhaengepfad ein Anfang davon ist. Nur
+// wenn der Pfad GENAU der Einhaengepunkt ist, bleibt nichts uebrig,
+// und dann wird ein "/" gebraucht. Ein Puffer dafuer waere auf einer
+// Maschine mit acht Kernen eine Stelle, an der sich zwei Aufloesungen
+// ins Gehege kommen; der Zeiger in den Text des Aufrufers ist keine.
+fn rest_of(state: u64, m: u64, path: u64, slash: u64) -> u64 {
+    let used: u64 = mnt.path_eq_prefix(state, m, path)
+    if used == 0 {
+        return 0
+    }
+    if mnt.path_len(state, m) == 1 {
+        return path // die Wurzel: der ganze Pfad gehoert ihr
+    }
+    let rest: u64 = path + used
+    if kstate.get8(rest) == 0 {
+        return slash
+    }
+    return rest
+}
+
+fn node_for(state: u64, m: u64, path: u64) -> u64 {
+    var slash: [u8; 2] = "/\0"
+    if m >= MAX_MNT || !mnt.used(state, m) {
+        return 0
+    }
+    let rest: u64 = rest_of(state, m, path, (&slash[0]) as u64)
+    if rest == 0 {
+        return 0
+    }
+    if !can(state, m, vfsops.OP_LOOKUP) {
+        return 0
+    }
+    kstate.add(state, kstate.VFS_OPS, 1)
+    let o: vfsops.Ops = ops_of(mnt.fstype(state, m))
+    return o.lookup(state, m, rest)
+}
+
+// Der bequeme Weg fuer alles, was nur wissen will, ob es einen Knoten
+// gibt: die Einhaengung wird gesucht und der Knoten geholt. Wer BEIDE
+// Zahlen braucht, ruft die zwei einzeln -- Firn gibt einen Wert
+// zurueck, und ein Ausgabezeiger waere hier eine zweite Stelle, an der
+// SMP wehtut.
+fn resolve(state: u64, path: u64) -> u64 {
+    let m: u64 = mount_for(state, path)
+    if m >= MAX_MNT {
+        return 0
+    }
+    return node_for(state, m, path)
+}
+
+// ------------------------------------------------- die Verrichtungen
+
+fn v_readdir(state: u64, m: u64, dir: u64, index: u64, out: u64) -> u64 {
+    if !can(state, m, vfsops.OP_READDIR) {
+        return 0
+    }
+    kstate.add(state, kstate.VFS_OPS, 1)
+    let o: vfsops.Ops = ops_of(mnt.fstype(state, m))
+    return o.readdir(state, m, dir, index, out)
+}
+
+fn v_attr(state: u64, m: u64, node: u64, what: u64) -> u64 {
+    if !can(state, m, vfsops.OP_ATTR) {
+        return 0
+    }
+    kstate.add(state, kstate.VFS_OPS, 1)
+    let o: vfsops.Ops = ops_of(mnt.fstype(state, m))
+    return o.attr(state, m, node, what)
+}
+
+fn v_read(state: u64, m: u64, node: u64, off: u64, dst: u64,
+    len: u64) -> u64 {
+    if !can(state, m, vfsops.OP_READ) {
+        return 0
+    }
+    kstate.add(state, kstate.VFS_OPS, 1)
+    let o: vfsops.Ops = ops_of(mnt.fstype(state, m))
+    return o.read(state, m, node, off, dst, len)
+}
+
+// Rueckgabe: die Zahl der Oktette, oder ein NEGATIVER errno. Das ist
+// die einzige der neun, die einen Fehler unterscheiden muss -- "null
+// Oktette geschrieben" und "darf nicht schreiben" sind zwei Dinge,
+// und ein Programm, das den Unterschied nicht sieht, verliert Daten.
+fn v_write(state: u64, m: u64, node: u64, off: u64, src: u64,
+    len: u64) -> u64 {
+    if m >= MAX_MNT || !mnt.used(state, m) {
+        return errno.neg(errno.E_BADF)
+    }
+    let o: vfsops.Ops = ops_of(mnt.fstype(state, m))
+    if (o.mask & vfsops.OP_WRITE) == 0 {
+        return errno.neg(errno.E_PERM)
+    }
+    if (mnt.flags(state, m) & mnt.F_RDONLY) != 0 {
+        return errno.neg(errno.E_ROFS)
+    }
+    kstate.add(state, kstate.VFS_OPS, 1)
+    return o.write(state, m, node, off, src, len)
+}
+
+fn v_create(state: u64, m: u64, path: u64, art: u64) -> u64 {
+    var slash: [u8; 2] = "/\0"
+    if m >= MAX_MNT || !mnt.used(state, m) {
+        return 0
+    }
+    let o: vfsops.Ops = ops_of(mnt.fstype(state, m))
+    if (o.mask & vfsops.OP_CREATE) == 0 {
+        return 0
+    }
+    if (mnt.flags(state, m) & mnt.F_RDONLY) != 0 {
+        return 0
+    }
+    let rest: u64 = rest_of(state, m, path, (&slash[0]) as u64)
+    if rest == 0 {
+        return 0
+    }
+    kstate.add(state, kstate.VFS_OPS, 1)
+    return o.create(state, m, rest, art)
+}
+
+fn v_unlink(state: u64, m: u64, path: u64) -> u64 {
+    var slash: [u8; 2] = "/\0"
+    if m >= MAX_MNT || !mnt.used(state, m) {
+        return errno.E_BADF
+    }
+    let o: vfsops.Ops = ops_of(mnt.fstype(state, m))
+    if (o.mask & vfsops.OP_UNLINK) == 0 {
+        return errno.E_PERM
+    }
+    if (mnt.flags(state, m) & mnt.F_RDONLY) != 0 {
+        return errno.E_ROFS
+    }
+    let rest: u64 = rest_of(state, m, path, (&slash[0]) as u64)
+    if rest == 0 {
+        return errno.E_NOENT
+    }
+    kstate.add(state, kstate.VFS_OPS, 1)
+    return o.unlink(state, m, rest)
+}
+
+// UMBENENNEN GEHT NICHT UEBER EINE EINHAENGEGRENZE. Das ist keine
+// Bequemlichkeit: die beiden Seiten waeren zwei verschiedene
+// Dateisysteme, und die Inode, um die es geht, kann nicht in beiden
+// liegen. POSIX sagt dazu -EXDEV, und wer eine Datei wirklich
+// verschieben will, kopiert und loescht -- das ist das, was `mv` tut,
+// wenn `rename` mit EXDEV antwortet.
+fn v_rename(state: u64, from_m: u64, from: u64, to_m: u64,
+    to: u64) -> u64 {
+    var slash: [u8; 2] = "/\0"
+    if from_m != to_m {
+        return errno.E_XDEV
+    }
+    let m: u64 = from_m
+    if m >= MAX_MNT || !mnt.used(state, m) {
+        return errno.E_BADF
+    }
+    let o: vfsops.Ops = ops_of(mnt.fstype(state, m))
+    if (o.mask & vfsops.OP_RENAME) == 0 {
+        return errno.E_PERM
+    }
+    if (mnt.flags(state, m) & mnt.F_RDONLY) != 0 {
+        return errno.E_ROFS
+    }
+    let a: u64 = rest_of(state, m, from, (&slash[0]) as u64)
+    let b: u64 = rest_of(state, m, to, (&slash[0]) as u64)
+    if a == 0 || b == 0 {
+        return errno.E_NOENT
+    }
+    kstate.add(state, kstate.VFS_OPS, 1)
+    return o.rename(state, m, a, b)
+}
+
+fn v_trunc(state: u64, m: u64, node: u64) -> u64 {
+    if m >= MAX_MNT || !mnt.used(state, m) {
+        return errno.E_BADF
+    }
+    let o: vfsops.Ops = ops_of(mnt.fstype(state, m))
+    if (o.mask & vfsops.OP_TRUNC) == 0 {
+        return errno.E_PERM
+    }
+    if (mnt.flags(state, m) & mnt.F_RDONLY) != 0 {
+        return errno.E_ROFS
+    }
+    kstate.add(state, kstate.VFS_OPS, 1)
+    return o.trunc(state, m, node)
+}
+
+// ---------------------------------------------------------- einhaengen
+
+// Die WURZEL. Sie bekommt Platz 0, sie ist OFS, und sie liegt auf der
+// Platte, die `kstate.DISK_DEV` nennt -- also auf genau derselben, auf
+// der sie seit Runde 62 liegt.
+fn mount_root(state: u64) -> bool {
+    var slash: [u8; 2] = "/\0"
+    if !ready(state) {
+        init(state)
+    }
+    if mnt.used(state, 0) {
+        return true
+    }
+    let m: u64 = mnt.alloc(state, true)
+    if m >= MAX_MNT {
+        return false
+    }
+    mnt.set(state, m, mnt.M_TYPE, vfsops.FS_OFS)
+    mnt.set(state, m, mnt.M_DEV, kstate.get(state, kstate.DISK_DEV))
+    mnt.set(state, m, mnt.M_FIRST, 0)
+    mnt.set(state, m, mnt.M_BLOCKS, kstate.get(state, kstate.DISK_BLOCKS))
+    mnt.set(state, m, mnt.M_FLAGS, 0)
+    mnt.set_path(state, m, (&slash[0]) as u64)
+    mnt.set_root(state, m, ofs.node_root(state))
+    return true
+}
+
+// EIN EINHAENGEPUNKT MUSS EIN VERZEICHNIS SEIN, DAS ES GIBT. Genau wie
+// auf jedem Unix -- und genau deshalb aendert sich an einem
+// bestehenden Plattenabbild nichts: wo kein /proc liegt, wird auch
+// keines eingehaengt.
+//
+// Rueckgabe: der Platz, oder MAX_MNT.
+fn mount_at(state: u64, fstype: u64, dev: u64, first: u64, blocks: u64,
+    path: u64, flags: u64) -> u64 {
+    if !ready(state) {
+        return MAX_MNT
+    }
+    // 1. Der Ort muss ein Verzeichnis auf einem BEREITS eingehaengten
+    //    Dateisystem sein.
+    let over: u64 = mount_for(state, path)
+    if over >= MAX_MNT {
+        return MAX_MNT
+    }
+    let node: u64 = node_for(state, over, path)
+    if node == 0 {
+        return MAX_MNT
+    }
+    if v_attr(state, over, node, vfsops.A_TYPE) != vfsops.N_DIR {
+        return MAX_MNT
+    }
+    // 2. Und er darf nicht schon belegt sein. Zwei Dateisysteme auf
+    //    demselben Ort waeren ein Stapel, den dieser Kernel nicht
+    //    fuehrt -- und der Rest dieser Datei wuerde dann raten.
+    var k: u64 = 0
+    while k < MAX_MNT {
+        if mnt.used(state, k) && mnt.path_is(state, k, path) {
+            return MAX_MNT
+        }
+        k = k + 1
+    }
+    let m: u64 = mnt.alloc(state, false)
+    if m >= MAX_MNT {
+        return MAX_MNT
+    }
+    mnt.set(state, m, mnt.M_TYPE, fstype)
+    mnt.set(state, m, mnt.M_DEV, dev)
+    mnt.set(state, m, mnt.M_FIRST, first)
+    mnt.set(state, m, mnt.M_BLOCKS, blocks)
+    mnt.set(state, m, mnt.M_FLAGS, flags)
+    if !mnt.set_path(state, m, path) {
+        mnt.free(state, m)
+        return MAX_MNT
+    }
+    // 3. Der Wurzelknoten des neuen Dateisystems. Meldet der Treiber
+    //    keinen, war die Platte nicht das, was behauptet wurde -- und
+    //    die Einhaengung wird zurueckgenommen statt halb stehenzulassen.
+    var r: u64 = 0
+    if fstype == vfsops.FS_PROC {
+        r = procfs.node_root(state)
+    } else if fstype == vfsops.FS_DEV {
+        r = devfs.node_root(state)
+    } else if fstype == vfsops.FS_FAT {
+        r = fat.mount_probe(state, m)
+    } else {
+        r = ofs.node_root(state)
+    }
+    if r == 0 {
+        mnt.free(state, m)
+        return MAX_MNT
+    }
+    mnt.set_root(state, m, r)
+    return m
+}
+
+// AUSHAENGEN. Die Pruefung auf offene Deskriptoren ist der Punkt: ein
+// Dateisystem, das man unter einem lesenden Prozess wegziehen kann,
+// verliert Daten, und der Fehler faellt drei Bloecke spaeter auf.
+//
+// Rueckgabe: 0 = gut, sonst der POSITIVE errno.
+fn umount_index(state: u64, m: u64) -> u64 {
+    if m >= MAX_MNT || !mnt.used(state, m) {
+        return errno.E_INVAL
+    }
+    if mnt.opens(state, m) != 0 {
+        return errno.E_BUSY
+    }
+    // Etwas, das AUF diesem Punkt liegt, muss zuerst weg -- sonst
+    // haengt es an nichts mehr.
+    var k: u64 = 0
+    while k < MAX_MNT {
+        if k != m && mnt.used(state, k) {
+            if mnt.path_eq_prefix(state, m, mnt.path_at(state, k)) != 0 {
+                return errno.E_BUSY
+            }
+        }
+        k = k + 1
+    }
+    if m == 0 {
+        // Die Wurzel bleibt in der Tafel stehen; was sie aushaengt,
+        // ist `fs.fi`s eigene Buchfuehrung, und die macht `sys.fi`
+        // genau wie in Runde K11.
+        return 0
+    }
+    if mnt.fstype(state, m) == vfsops.FS_FAT {
+        // Erst die Buchfuehrung des Dateisystems in Ordnung bringen,
+        // dann den Platz freigeben. Nach `release` gibt es keinen
+        // Eintrag mehr, ueber den `sync` das Geraet finden koennte.
+        fat.sync(state, m)
+        fat.release(state, m)
+    }
+    mnt.free(state, m)
+    return 0
+}
+
+fn umount_path(state: u64, path: u64) -> u64 {
+    var k: u64 = 0
+    while k < MAX_MNT {
+        if mnt.path_is(state, k, path) {
+            return umount_index(state, k)
+        }
+        k = k + 1
+    }
+    return errno.E_INVAL
+}

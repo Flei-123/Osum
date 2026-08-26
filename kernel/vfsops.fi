@@ -1,0 +1,138 @@
+// kernel/vfsops.fi -- Runde K14: DIE FORM, IN DER SICH EIN DATEISYSTEM
+// ANMELDET.
+//
+// Bis zu dieser Runde stand in `sys.fi` an jeder Stelle, an der eine
+// Datei angefasst wird, der Name `fs.` -- `fs.path`, `fs.read_at`,
+// `fs.entry_at`. Das ist kein Dateisystem, das ist DAS Dateisystem: ein
+// zweites haette an jeder dieser Stellen ein zweites `if` gebraucht,
+// und beim dritten waere die Weiche groesser als die Treiber.
+//
+// Hier steht stattdessen die TAFEL DER VERRICHTUNGEN. Ein Dateisystem
+// ist von dieser Runde an ein Satz von neun Funktionen, und die Schicht
+// darueber kennt nur diesen Satz. `vfs.fi` nennt den Namen `fs.` nicht
+// ein einziges Mal.
+//
+// DASS DAS WIRKLICH ZEIGER SIND UND KEINE VERKLEIDETE WEICHE, ist
+// nachgemessen und nicht behauptet: `tools/k14/run.sh` zerlegt die
+// uebersetzte Kernelobjektdatei und zaehlt die `call *`-Befehle. Firn
+// Stufe 0 kann einen Funktionszeiger weder in eine Zahl wandeln noch
+// aus einer Tafel heraus aufrufen ("only direct function names can be
+// called"); ein Feld einer Struktur aufzurufen kann es, und genau das
+// ist der Weg, den diese Datei geht -- in BEIDEN Uebersetzern, firnc0
+// und firnc1.
+//
+// DIE NEUN VERRICHTUNGEN, und warum es genau diese sind:
+//
+//   lookup    Ein Pfad INNERHALB dieses Dateisystems wird zu einem
+//             KNOTEN. Was ein Knoten ist, weiss nur der Treiber: bei
+//             OFS ist es die Inodenummer, bei /proc eine Zahl aus Art
+//             und Prozess, bei FAT32 ein Platz in einer kleinen Tafel.
+//             Die Schicht darueber reicht ihn durch und sieht ihn nie an.
+//   readdir   Der n-te Eintrag eines Verzeichnisses: sein Knoten und
+//             sein Name. Kein Zeiger auf ein Verzeichnisformat -- die
+//             Formate von OFS, /proc und FAT32 haben nichts gemeinsam.
+//   attr      Eine Zahl ueber einen Knoten: Art, Groesse, Rechte.
+//   read      Oktette aus einem Knoten, ab einer Stelle.
+//   write     Oktette in einen Knoten, ab einer Stelle.
+//   create    Einen Namen anlegen (Datei oder Verzeichnis).
+//   unlink    Einen Namen entfernen.
+//   rename    Einen Namen umhaengen -- innerhalb DESSELBEN
+//             Dateisystems. Ueber eine Einhaengegrenze hinweg gibt es
+//             kein Umbenennen, sondern Kopieren und Loeschen; POSIX
+//             sagt dazu -EXDEV, und `vfs.fi` sagt es auch.
+//   trunc     Einen Knoten auf null Oktette bringen (O_TRUNC).
+//
+// WAS EIN TREIBER NICHT KANN, SAGT ER VORHER. `mask` ist eine Bitkarte
+// ueber genau diese neun; /proc traegt keine Schreibbits, ein nur
+// lesend eingehaengtes FAT32 auch nicht. `vfs.fi` prueft das Bit,
+// BEVOR es den Zeiger benutzt, und antwortet sonst mit -EROFS oder
+// -EPERM. Ein Treiber, der eine Verrichtung nicht anbietet, traegt
+// trotzdem eine Funktion ein (Firn hat keinen Nullzeiger fuer `fn`) --
+// eine, die den Fehler zurueckgibt. Beide Wege enden also gleich, und
+// das eine ist die Zusage, das andere der Fangnetz darunter.
+
+profile kernel
+
+export {
+    Ops,
+    A_TYPE, A_SIZE, A_MODE, A_NLINK, A_RDEV, A_BLKSIZE,
+    N_NONE, N_FILE, N_DIR, N_CHR, N_BLK,
+    OP_LOOKUP, OP_READDIR, OP_ATTR, OP_READ, OP_WRITE,
+    OP_CREATE, OP_UNLINK, OP_RENAME, OP_TRUNC, OP_ALL, OP_READONLY,
+    FS_NONE, FS_OFS, FS_PROC, FS_DEV, FS_FAT,
+    NODE_NONE, NAME_MAX
+}
+
+// Was `attr` beantwortet.
+const A_TYPE: u64 = 0
+const A_SIZE: u64 = 1
+const A_MODE: u64 = 2
+const A_NLINK: u64 = 3
+const A_RDEV: u64 = 4
+const A_BLKSIZE: u64 = 5
+
+// Was ein Knoten ist.
+const N_NONE: u64 = 0
+const N_FILE: u64 = 1
+const N_DIR: u64 = 2
+const N_CHR: u64 = 3 // ein zeichenweises Geraet (/dev/null, /dev/tty)
+const N_BLK: u64 = 4 // ein blockweises Geraet (/dev/hda)
+
+// Die Bits von `mask`.
+const OP_LOOKUP: u64 = 1
+const OP_READDIR: u64 = 2
+const OP_ATTR: u64 = 4
+const OP_READ: u64 = 8
+const OP_WRITE: u64 = 16
+const OP_CREATE: u64 = 32
+const OP_UNLINK: u64 = 64
+const OP_RENAME: u64 = 128
+const OP_TRUNC: u64 = 256
+const OP_ALL: u64 = 511
+// Was ein nur lesbares Dateisystem anbietet: alles ausser den vier,
+// die die Platte anfassen.
+const OP_READONLY: u64 = 15 // LOOKUP | READDIR | ATTR | READ
+
+// Die Kennzahlen der Treiber. Sie stehen in der Einhaengetafel und sind
+// das einzige, woran `vfs.ops_of` den Treiber erkennt.
+const FS_NONE: u64 = 0
+const FS_OFS: u64 = 1
+const FS_PROC: u64 = 2
+const FS_DEV: u64 = 3
+const FS_FAT: u64 = 4
+
+const NODE_NONE: u64 = 0
+const NAME_MAX: u64 = 64 // was ein Name hier hoechstens lang ist
+
+// DIE TAFEL SELBST.
+//
+// Alle Verrichtungen bekommen `state` (die Datenregion) und `m` (die
+// Nummer der Einhaengung) als erste zwei Argumente. Damit braucht ein
+// Treiber KEINEN eigenen Zustand ausserhalb der Datenregion -- er
+// schlaegt in `mnt.fi` nach, auf welchem Geraet und ab welchem Block
+// seine Einhaengung liegt. Ein zweites FAT32 auf einer zweiten Platte
+// ist deshalb kein Sonderfall, sondern ein zweiter Eintrag.
+struct Ops {
+    // (state, m, pfad) -> Knoten, 0 = gibt es nicht
+    lookup: fn(u64, u64, u64) -> u64,
+    // (state, m, dir, index, out_name) -> Knoten des Eintrags, 0 = Ende
+    readdir: fn(u64, u64, u64, u64, u64) -> u64,
+    // (state, m, node, was) -> Zahl
+    attr: fn(u64, u64, u64, u64) -> u64,
+    // (state, m, node, off, dst, len) -> Oktette
+    read: fn(u64, u64, u64, u64, u64, u64) -> u64,
+    // (state, m, node, off, src, len) -> Oktette
+    write: fn(u64, u64, u64, u64, u64, u64) -> u64,
+    // (state, m, pfad, art) -> Knoten, 0 = ging nicht
+    create: fn(u64, u64, u64, u64) -> u64,
+    // (state, m, pfad) -> 0 = gut, sonst der positive Fehler
+    unlink: fn(u64, u64, u64) -> u64,
+    // (state, m, von, nach) -> 0 = gut, sonst der positive Fehler
+    rename: fn(u64, u64, u64, u64) -> u64,
+    // (state, m, node) -> 0 = gut
+    trunc: fn(u64, u64, u64) -> u64,
+    // welche der neun wirklich da sind
+    mask: u64,
+    // vier Oktette Kurzname, kleinendig gepackt ("ofs\0")
+    tag: u64
+}
