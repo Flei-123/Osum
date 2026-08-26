@@ -369,7 +369,7 @@ rc=$(run_case init "$TMPD/k0.img" "$TMPD/d0.img" \
     "osum nokbd nosched noproc nofs noring3 script=sh /t/dienste.sh")
 F="$TMPD/init.txt"
 is "die Maschine faehrt ueber ACPI herunter (QEMU beendet sich mit 0)" "$rc" "0"
-has "$F" "osum: first = /sbin/init" "der Kern startet /sbin/init und nicht die Shell"
+has "$F" "osum: pid1 init" "der Kern startet /sbin/init und nicht die Shell"
 has "$F" "init: dienste=2" "init liest /etc/inittab und findet zwei Dienste"
 hasnot "$F" "init: ich bin nicht der Prozess 1" "init IST der Prozess 1"
 is "und der Kern sagt es auch" "$(val "$F" 'init=[0-9]+')" "1"
@@ -397,7 +397,8 @@ rc=$(run_case initsh "$TMPD/k0.img" "$TMPD/d0.img" \
     "osum initsh nokbd nosched noproc nofs noring3 script=id")
 F="$TMPD/initsh.txt"
 is "DER NOTWEG: mit initsh endet der Lauf wie vor dieser Runde" "$rc" "21"
-has "$F" "osum: first = /bin/sh" "und zwar mit /bin/sh statt /sbin/init"
+hasnot "$F" "osum: pid1 init" "und zwar mit /bin/sh statt /sbin/init"
+has "$F" "sh: ready, osum" "die Shell startet unmittelbar aus dem Kern"
 has "$F" "uid=0(root)" "das System ist damit vollstaendig benutzbar"
 
 echo "== 7. die Anmeldung: Name und Passwort ueber die Konsole =="
