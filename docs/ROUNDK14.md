@@ -1,9 +1,10 @@
 # Runde K14 — VFS und fremde Dateisysteme
 
 **Stand:** 26.08.2026 · Branch `k14-vfs`, abgezweigt von `main` (`7a53ac3`)
-· Abnahme: `bash tools/k14/run.sh` → **146 Zusagen, 0 Fehler**
-· Vollabnahme: `./test.sh` → Abschnitt 20 dazu, keine bestehende Zusage
-verloren.
+· Abnahme: `bash tools/k14/run.sh` → **152 Zusagen, 0 Fehler**
+· Vollabnahme: `./test.sh` → **ALLE 19 ABSCHNITTE BESTANDEN, 1638
+Zusagen, 0 Fehler** (vorher 18 Abschnitte, 1486 Zusagen — 1486 + 152 =
+1638, also keine einzige bestehende Zusage verloren).
 
 ---
 
@@ -169,7 +170,17 @@ zwei Deskriptoren aus einer offenen Datei). Gemessen:
 opens_before = 0 · opens_open = 1 · umount_busy = 16 (-EBUSY)
 opens_after  = 0 · umount_ok   = 0 · gone_is_err = 2 (wirklich weg)
 mount_ok     = 0 · back_is_err = 0 (und wieder da)
+opens_dup    = 1 · opens_dup1  = 1 · opens_dup0  = 0
 ```
+
+Die letzte Zeile ist die, die eine Einhängeschicht sonst falsch macht:
+`dup` macht aus einem Deskriptor zwei, aber **eine** offene Datei. Die
+Einhängung ist danach einmal offen und nicht zweimal, und erst der
+**letzte** Deskriptor gibt sie frei.
+
+Dazu ein eigener Lauf: ein Prozess liest `/mnt/hello.txt` und **endet**
+— danach lässt sich `/mnt` aushängen. Warum das eine eigene Messung
+braucht, steht in Abschnitt 14.
 
 ---
 
@@ -487,7 +498,7 @@ Nichts davon ist geschönt.
 
 ---
 
-## 14. Vier Fehler, die diese Runde selbst gemacht und gemessen hat
+## 14. Fünf Fehler, die diese Runde selbst gemacht und gemessen hat
 
 * **`/proc/<pid>/maps` lief bis `proc.USER_TOP`.** Das ist die Oberkante
   des Stapels (0x40009000), nicht das Ende des Adressraums. Die Datei
@@ -529,7 +540,18 @@ Nichts davon ist geschönt.
   Fenster mit abgeschalteten Unterbrechungen gibt es damit gar nicht
   mehr.
 
-Alle vier stehen als Kommentar an der jeweiligen Stelle im Quelltext — so
+* **Der Zähler der offenen Deskriptoren stand an der falschen Stelle.**
+  Er wurde in `sys.unref_of` heruntergezählt — aber ein Prozess, der
+  *stirbt*, geht durch `file.close_all`, und ein `dup2`, das einen
+  Deskriptor überschreibt, geht durch keinen von beiden. Nach jedem
+  Programm, das eine Datei auf `/mnt` geöffnet hatte und ohne `close`
+  endete, blieb `mnt.opens` um eins zu hoch stehen — und `umount /mnt`
+  hätte danach **für immer** `-EBUSY` gesagt. Der Zähler gehört in
+  `file.open_unref`: das ist die einzige Stelle, an der die letzte
+  Bezugnahme auf einen Eintrag fällt. Vier neue Zusagen halten das jetzt
+  fest.
+
+Alle fünf stehen als Kommentar an der jeweiligen Stelle im Quelltext — so
 wie die vier kdata-Kollisionen in `kstate.fi` stehen.
 
 ---
@@ -549,7 +571,14 @@ bash tools/k14/run.sh
   9. OFS ist ein NUTZER der Schicht, kein Sonderfall daneben
  10. /proc gegen SYS_OSUM_PSTAT: zwei Wege, dieselben Zahlen
 
-K14: 146 passed, 0 failed
+K14: 152 passed, 0 failed
+```
+
+Und in der Vollabnahme:
+
+```
+./test.sh
+ALLE 19 ABSCHNITTE BESTANDEN, 1638 Zusagen, 0 Fehler
 ```
 
 Der Läufer überspringt sich selbst (Rückgabe 0), wenn `qemu-system-x86_64`,
