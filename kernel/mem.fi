@@ -30,7 +30,7 @@ export {
     scan, frame_alloc, frame_free, frame_run, frames_free,
     heap_init, kalloc, kfree, heap_blocks,
     frame_selftest, heap_selftest,
-    FRAME_SIZE, cmdline
+    FRAME_SIZE, cmdline, mods, mod_start, mod_end
 }
 
 const FRAME_SIZE: u64 = 4096
@@ -43,6 +43,12 @@ const MB_FLAGS: u64 = 0
 const MB_CMDLINE: u64 = 16
 const MB_MMAP_LEN: u64 = 44
 const MB_MMAP_ADDR: u64 = 48
+// ROUND K10: the boot modules. Flag bit 3 says the two below hold.
+// Behind `mods_addr` lies a table of sixteen octets per module:
+// start, end, string, reserved (specification 3.3).
+const MB_MODS_COUNT: u64 = 20
+const MB_MODS_ADDR: u64 = 24
+const MOD_ENTRY: u64 = 16
 
 // Address of the command line, or 0. `-append` of QEMU lands here; the
 // kernel reads out of it which fault it is supposed to provoke.
@@ -51,6 +57,31 @@ fn cmdline(mbi: u64) -> u64 {
         return 0
     }
     return kstate.get32(mbi + MB_CMDLINE)
+}
+
+// How many modules the loader handed over, or 0. A loader that sets no
+// flag bit 3 may have anything in those two words -- reading them
+// without the bit is how a kernel ends up with a random RAM disk.
+fn mods(mbi: u64) -> u64 {
+    if (kstate.get32(mbi + MB_FLAGS) & 8) == 0 {
+        return 0
+    }
+    return kstate.get32(mbi + MB_MODS_COUNT)
+}
+
+fn mod_start(mbi: u64, i: u64) -> u64 {
+    if i >= mods(mbi) {
+        return 0
+    }
+    return kstate.get32(kstate.get32(mbi + MB_MODS_ADDR) + i * MOD_ENTRY)
+}
+
+fn mod_end(mbi: u64, i: u64) -> u64 {
+    if i >= mods(mbi) {
+        return 0
+    }
+    return kstate.get32(kstate.get32(mbi + MB_MODS_ADDR)
+        + i * MOD_ENTRY + 4)
 }
 
 // ------------------------------------------------------ the frame bitmap
@@ -121,6 +152,27 @@ fn scan(state: u64, mbi: u64, kernel_end: u64) -> u64 {
             kstate.get32(mbi + MB_MMAP_LEN))
     }
     reserve(bitmap, frames, mbi, 4096)
+
+    // ROUND K10: THE BOOT MODULES. The loader put them in memory the
+    // map calls usable, and `release` above has just handed exactly
+    // those frames to the allocator. Whoever asks for a frame next
+    // gets the userland image and writes over it -- and the fault
+    // shows up much later, in a program that will not load. So they
+    // are taken back here, together with the table that names them.
+    let mc: u64 = mods(mbi)
+    if mc != 0 {
+        reserve(bitmap, frames, kstate.get32(mbi + MB_MODS_ADDR),
+            mc * MOD_ENTRY)
+        var m: u64 = 0
+        while m < mc {
+            let von: u64 = mod_start(mbi, m)
+            let bis: u64 = mod_end(mbi, m)
+            if bis > von {
+                reserve(bitmap, frames, von, bis - von)
+            }
+            m = m + 1
+        }
+    }
 
     var free: u64 = 0
     var f: u64 = 0

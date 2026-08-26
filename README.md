@@ -35,15 +35,19 @@ Der Umfang, gezaehlt:
 
 | Teil | Zeilen |
 |---|---:|
-| `kernel/*.fi` — der Kern | 18 032 |
-| `kernel/user/*.fi` — Shell, Werkzeuge, ulib | 3 592 |
-| `kernel/*.s`, `kernel/user/crt.s` — Assembler | 1 204 |
-| `lib/libc/*.fi` — die libc aus Runde K4 | 1 234 |
-| `tools/` — die Testlaeufer | 5 770 |
+| `kernel/*.fi` — der Kern | 26 088 |
+| `kernel/user/*.fi` — Shell, Werkzeuge, ulib | 5 114 |
+| `kernel/*.s`, `kernel/user/crt.s` — Assembler | 1 336 |
+| `lib/libc/*.fi` — die libc aus Runde K4 | 1 598 |
+| `tools/` — die Testlaeufer | 7 584 |
 
-Zuletzt dazugekommen: `kernel/cap.fi` (die Handle-Tabelle aus OrientOS'
-nativer ABI) sowie `kernel/fb.fi` und `kernel/font.fi` — der Bildschirm
-der Runde K7.
+Zuletzt dazugekommen (Runde K10): `kernel/guard.fi` — SMEP und SMAP in
+CR4 samt dem `stac`-Fenster — und `kernel/bootmod.fi` — ein Boot-Modul
+als Wurzelplatte, mit CRC32 davor. Beides ist aus OrientOS' Rust-Kernel
+portiert und waren dort die letzten zwei offenen Punkte des
+Kernelwechsels (`docs/ROUNDK10.md`). Davor: `kernel/cap.fi` (die
+Handle-Tabelle aus OrientOS' nativer ABI) sowie `kernel/fb.fi` und
+`kernel/font.fi` — der Bildschirm der Runde K7.
 
 Dazu aus der Capability-Runde: `kernel/cap.fi` (die Handle-Tabelle) und
 die Testlaeufer `tools/caps/` und `tools/boot/`. Aus der Netzrunde K8:
@@ -191,6 +195,24 @@ Paket, `nicnobm` (kein Busmaster) ebenso, und mit `nicnoirq` kommen alle
 262 144 Oktette an waehrend der Unterbrechungszaehler auf 0 stehen bleibt.
 Die Zahlen und die offenen Punkte stehen in `docs/ROUNDK8.md`.
 
+**Der Kernel schuetzt sich vor dem Userland (Runde K10).** SMEP und SMAP
+stehen in CR4, sobald CPUID sie meldet — auf JEDEM Kern, denn CR4 ist pro
+Prozessor. Ring 0 fuehrt damit keinen Nutzercode mehr aus, und
+Nutzerdaten fasst er nur noch im `stac`-Fenster an, das an genau vier
+Stellen steht (`sys.peek`, `sys.poke`, `sys.copy_in`, `sys.copy_out`)
+plus am Signalrahmen. Gemessen wird nicht die Behauptung, sondern das
+Register: `guard: cr4=0x300020  smep=1  smap=1`. Gegenproben: `smapraw`
+und `smepraw` muessen mit den Bits einen #PF geben (Fehlercode 0x1 und
+0x11) und ohne sie durchlaufen.
+
+**Ein Boot-Modul kann die Wurzelplatte sein (Runde K10).** Was ein Lader
+neben den Kern legt (Multiboot, Flag-Bit 3), wird mit CRC32 geprueft und
+dann als Blockgeraet gemountet — `fs.fi` merkt davon nichts, es sind
+dieselben 512 Oktette je Block. Damit traegt ein ISO nicht nur einen
+Kern, sondern ein Userland. Ein falsches `modcrc=` laesst das Modul
+liegen, und `mem.scan` nimmt seinen Bereich aus dem Rahmenverwalter --
+nachgewiesen dadurch, dass die Summe am ENDE des Laufs dieselbe ist.
+
 **Userland.** `/bin/sh` mit Roehren, Umlenkung (`>`, `<`), `;`,
 Zeileneditor, `cd`, `exit` — und fuenfundzwanzig Werkzeuge: `cat`, `cp`,
 `date`, `df`, `echo`, `false`, `grep`, `head`, `kill`, `ls`, `mkdir`,
@@ -206,14 +228,6 @@ Zeileneditor, `cd`, `exit` — und fuenfundzwanzig Werkzeuge: `cat`, `cp`,
   uebermalen sich, wenn sie dieselben Bildzeilen nehmen. Es gibt auch
   kein `ioctl`: ein Programm erfaehrt die Groesse des Bildes ueber
   `lseek(SEEK_END)` und die Breite gar nicht.
-* **Kein Netz.** Kein Treiber fuer eine Netzkarte. Ein TCP/IP-Stack in
-  Firn existiert (Runde K3, `docs/OSUM-K3.md`), er liegt aber im
-  Firn-Repository unter `lib/net/` und ist nie an diesen Kernel
-  angeschlossen worden — er wurde gegen den Linux-Kernel ueber ein
-  `veth`-Paar gemessen, nicht gegen eine Karte.
-
-* **Keine Grafik.** Kein Framebuffer, kein VGA-Textmodus als Konsole, kein
-  Fenstersystem. Die Konsole ist die serielle Schnittstelle.
 * **Keine Namensaufloesung.** Kein Resolver, kein `/etc/hosts`: eine
   Adresse sind vier Zahlen. `/bin/wget` weist eine URL mit einem Namen
   darin ab, statt etwas Falsches zu antworten.
@@ -226,7 +240,17 @@ Zeileneditor, `cd`, `exit` — und fuenfundzwanzig Werkzeuge: `cat`, `cp`,
   Dateisystem, keine Rechte/Benutzer, keine Signale ausser dem
   Noetigsten, keine dynamische Bindung, keine gemeinsam genutzten
   Bibliotheken.
-* **Nur x86-64.** Firn kann auch aarch64, der Kernel nicht.
+* **Nur x86-64, und ohne Architekturgrenze.** Firn kann auch aarch64, der
+  Kernel nicht — und es gibt in diesem Baum keine Schicht, hinter der die
+  x86-Einzelheiten steckten. OrientOS hatte dafuer `kcore/arch_iface.rs`
+  (Traits plus ein Testschritt, der x86-Begriffe ausserhalb von `arch/`
+  verbietet); das ist NICHT portiert, weil es eine Umbauarbeit an jedem
+  Modul waere und keine Portierung. Die Vorlage steht in OrientOS unter
+  `vorlage/arch_iface.rs`.
+* **Kanaele, Ports, Namensraeume.** Die nativen Aufrufe dafuer gibt es in
+  `sys.fi`, und sie antworten `NotSupported` (−9): der Aufruf EXISTIERT in
+  dieser ABI, dieser Kernel bietet ihn nur nicht an. Portiert ist das
+  Handle-Modell darunter (`cap.fi`), nicht die Objekte, die daran haengen.
 * **Getestet wird in QEMU**, nicht auf echter Hardware.
 
 ---
@@ -368,6 +392,9 @@ nachtraeglich umgeschrieben.
 | `docs/ROUNDK6.md` | das Userland: Shell und Werkzeuge |
 | `docs/ROUNDK7.md` | der Bildschirm: Rahmenpuffer, Textkonsole, /dev/fb |
 | `docs/ROUNDK7B.md` | warum nach dem Verschmelzen die Buchstaben vom Schirm verschwanden — und die Karte von `kdata` |
+| `docs/ROUNDK8.md` | das Netz: virtio-net, der Stack aus K3, Steckdosen |
+| `docs/ROUNDK9.md` | Signale, Terminals, Uhr und Zufall |
+| `docs/ROUNDK10.md` | SMEP/SMAP und das Boot-Modul — die letzten zwei Punkte des Kernelwechsels |
 
 `ENTFERNEN-AUS-FIRN.md` beschreibt, was im Firn-Repository geloescht
 werden muss, damit dort nichts doppelt liegt. **Ausgefuehrt ist das
