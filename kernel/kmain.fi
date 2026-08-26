@@ -46,6 +46,9 @@ import netsvc
 import smp
 import cap
 import fb
+import ttf
+import ps2m
+import wm
 import apic
 
 import time
@@ -94,6 +97,7 @@ const P_STEAL: u64 = 9
 const P_FORK: u64 = 10
 const P_CAPS: u64 = 12
 const P_FB: u64 = 13
+const P_WCLICK: u64 = 14
 
 const DISK_FRAMES: u64 = 256 // 1 MiB of RAM disk
 
@@ -285,6 +289,14 @@ fn kernel_main(mbi: u64, vectors: u64, state: u64, kernel_end: u64,
 
     // 8. ring 3, the excursion of round 59.
     ring3(state)
+
+    // 8b. ROUNDE K10: DIE OBERFLAECHE. Zeigegeraet, Schriftleser und
+    //     Fensterserver -- und darauf zwei Anwendungen. Hier und nicht
+    //     frueher, weil alles davon steht: der Bildschirm aus K7, das
+    //     Terminal aus K9, die Handles aus K6 und das Dateisystem, aus
+    //     dem die Schriften kommen. Ohne das Wort `wm` kehrt das sofort
+    //     zurueck und keine Messung der Runden 52 bis K9 aendert sich.
+    surface(state)
 
     // 9. ROUNDE K7: stillhalten, damit ein Bildschirmfoto entstehen
     //    kann. Ohne `fbhold` ist das ein Nichts.
@@ -1830,6 +1842,34 @@ fn mode_of(cmd: u64) -> u64 {
     var unixw: [u8; 5] = "unix\0"
     var nosigw: [u8; 6] = "nosig\0"
     var fixrw: [u8; 10] = "fixedrand\0"
+    // ROUNDE K10. `wm` schaltet Maus, Fensterserver und Schriften an;
+    // `nodirty`, `nofocus` und `nomouse` sind die drei GEGENPROBEN
+    // dazu, `wmhold` haelt fuer das Bildschirmfoto still und `wmshell`
+    // startet die Shell im Terminalfenster.
+    var wmw: [u8; 3] = "wm\0"
+    var ndw: [u8; 8] = "nodirty\0"
+    var nfw: [u8; 8] = "nofocus\0"
+    var nmw: [u8; 8] = "nomouse\0"
+    var whw: [u8; 7] = "wmhold\0"
+    var wsw: [u8; 8] = "wmshell\0"
+    if find(cmd, (&wmw[0]) as u64, 2) != 0 {
+        mode = mode | kstate.M_WM
+    }
+    if find(cmd, (&ndw[0]) as u64, 7) != 0 {
+        mode = mode | kstate.M_NODIRTY
+    }
+    if find(cmd, (&nfw[0]) as u64, 7) != 0 {
+        mode = mode | kstate.M_NOFOCUS
+    }
+    if find(cmd, (&nmw[0]) as u64, 7) != 0 {
+        mode = mode | kstate.M_NOMOUSE
+    }
+    if find(cmd, (&whw[0]) as u64, 6) != 0 {
+        mode = mode | kstate.M_WMHOLD
+    }
+    if find(cmd, (&wsw[0]) as u64, 7) != 0 {
+        mode = mode | kstate.M_WMSHELL
+    }
     if find(cmd, (&unixw[0]) as u64, 4) != 0 {
         mode = mode | M_UNIX
     }
@@ -1869,4 +1909,511 @@ fn find(hay: u64, needle: u64, n: u64) -> u64 {
         i = i + 1
     }
     return 0
+}
+
+
+// ==================================================================
+// ROUNDE K10 -- DIE OBERFLAECHE
+//
+// Was hier passiert, steht in `kernel/ps2m.fi` (das Zeigegeraet),
+// `kernel/ttf.fi` (die Schriften) und `kernel/wm.fi` (der
+// Fensterserver). Hier steht die REIHENFOLGE, und die ist wieder nicht
+// beliebig:
+//
+//   1. Der Arbeitsbereich des Schriftlesers -- ein halbes Megabyte aus
+//      dem Rahmenverwalter, NICHT aus dem Kernelhaufen. Der ist 256 KiB
+//      gross und gehoert allen.
+//   2. Das Dateisystem, falls es noch nicht steht. Die Schriften liegen
+//      auf der Platte, so wie sie auf jedem System auf der Platte
+//      liegen -- ein Zeichensatzleser, der seinen Zeichensatz im
+//      Kernelabbild traegt, liest keinen.
+//   3. Die beiden Schriften.
+//   4. Das Zeigegeraet. Nach dem Bildschirm, weil es seinen Anschlag an
+//      der Bildgroesse hat.
+//   5. Der Fensterserver.
+//   6. Die Fenster und die Anwendungen.
+// ==================================================================
+
+const WM_ARENA_FRAMES: u64 = 128 // 512 KiB, ttf.ARENA_BYTES
+const K10_RUNDEN: u64 = 20
+
+fn surface(state: u64) {
+    var s_off: [u8; 12] = "wm: skipped\0"
+    var s_nofb: [u8; 22] = "wm: kein Bildschirm\0\0\0"
+    var s_noar: [u8; 24] = "wm: kein Arbeitsbereich\0"
+    var s_fs: [u8; 12] = "wm: mount=\0\0"
+    var s_font: [u8; 6] = "ttf: \0"
+    var s_g: [u8; 10] = "  glyphs=\0"
+    var s_upm: [u8; 7] = "  upm=\0"
+    var s_asc: [u8; 7] = "  asc=\0"
+    var s_desc: [u8; 8] = "  desc=\0"
+    var s_lh: [u8; 6] = "  lh=\0"
+    var s_kp: [u8; 8] = "  kern=\0"
+    var s_st: [u8; 12] = "  selftest \0"
+    var s_of: [u8; 4] = " / \0"
+    var s_nofont: [u8; 28] = "ttf: keine Schrift gefunden\0"
+    var s_mono: [u8; 5] = "mono\0"
+    var s_sans: [u8; 5] = "sans\0"
+    var s_ms: [u8; 8] = "mouse: \0"
+    var s_id: [u8; 5] = "id=\0\0"
+    var s_pk: [u8; 11] = "  packets=\0"
+    var s_none: [u8; 19] = "mouse: kein Zeiger\0"
+    var s_wm: [u8; 5] = "wm: \0"
+    var s_x: [u8; 2] = "x\0"
+    var s_win: [u8; 11] = "  windows=\0"
+    var s_cur: [u8; 10] = "  cursor=\0"
+    var s_dirty: [u8; 9] = "  dirty=\0"
+    var s_focus: [u8; 9] = "  focus=\0"
+    var s_arena: [u8; 10] = "  arena=\0\0"
+    var s_term: [u8; 15] = "wm: term win=\0\0"
+    var s_cols: [u8; 8] = "  cols=\0"
+    var s_rows: [u8; 8] = "  rows=\0"
+    var s_cell: [u8; 8] = "  cell=\0"
+    var s_hold: [u8; 10] = "wm: hold\0\0"
+    var s_go: [u8; 8] = "wm: go\0\0"
+    var s_exit: [u8; 16] = "wm: sh exit=\0\0\0\0"
+    var s_stat: [u8; 6] = "wm: \0\0"
+    var s_comp: [u8; 13] = "composites=\0\0"
+    var s_blit: [u8; 9] = "  blits=\0"
+    var s_pix: [u8; 10] = "  pixels=\0"
+    var s_cache: [u8; 12] = "  cached=\0\0\0"
+    var s_hit: [u8; 8] = "  hits=\0"
+    var s_miss: [u8; 9] = "  miss=\0\0"
+
+    if (kstate.get(state, kstate.MODE) & kstate.M_WM) == 0 {
+        serial.puts((&s_off[0]) as u64)
+        serial.nl()
+        return
+    }
+    if !fb.ready(state) {
+        serial.puts((&s_nofb[0]) as u64)
+        serial.nl()
+        return
+    }
+    // 1. der Arbeitsbereich
+    let arena: u64 = mem.frame_run(state, WM_ARENA_FRAMES)
+    if arena == 0 || !ttf.init(state, arena, WM_ARENA_FRAMES * mem.FRAME_SIZE) {
+        serial.puts((&s_noar[0]) as u64)
+        serial.nl()
+        return
+    }
+    // 2. das Dateisystem, falls noetig
+    if kstate.get(state, kstate.FS_READY) == 0 && blk.present(state) {
+        blk.use_ata(state, OSUM_BLOCKS)
+        let m: bool = fs.mount(state)
+        serial.puts((&s_fs[0]) as u64)
+        serial.dec(yes(m))
+        serial.nl()
+    }
+    // 3. die Schriften
+    var p_mono: [u8; 15] = "/lib/mono.ttf\0\0"
+    var p_sans: [u8; 15] = "/lib/sans.ttf\0\0"
+    let f_mono: u64 = load_font(state, (&p_mono[0]) as u64)
+    let f_sans: u64 = load_font(state, (&p_sans[0]) as u64)
+    if f_mono >= ttf.MAX_FONTS && f_sans >= ttf.MAX_FONTS {
+        serial.puts((&s_nofont[0]) as u64)
+        serial.nl()
+        return
+    }
+    var f_ui: u64 = f_sans
+    if f_ui >= ttf.MAX_FONTS {
+        f_ui = f_mono
+    }
+    var f_tx: u64 = f_mono
+    if f_tx >= ttf.MAX_FONTS {
+        f_tx = f_sans
+    }
+    let PX_UI: u64 = 15
+    let PX_MONO: u64 = 16
+    say_font(state, f_tx, PX_MONO, (&s_mono[0]) as u64, (&s_font[0]) as u64,
+        (&s_g[0]) as u64, (&s_upm[0]) as u64, (&s_asc[0]) as u64,
+        (&s_desc[0]) as u64, (&s_lh[0]) as u64, (&s_kp[0]) as u64,
+        (&s_st[0]) as u64, (&s_of[0]) as u64)
+    if f_sans < ttf.MAX_FONTS && f_sans != f_tx {
+        say_font(state, f_sans, PX_UI, (&s_sans[0]) as u64,
+            (&s_font[0]) as u64, (&s_g[0]) as u64, (&s_upm[0]) as u64,
+            (&s_asc[0]) as u64, (&s_desc[0]) as u64, (&s_lh[0]) as u64,
+            (&s_kp[0]) as u64, (&s_st[0]) as u64, (&s_of[0]) as u64)
+    }
+    // 4. das Zeigegeraet
+    let w: u64 = fb.width(state)
+    let h: u64 = fb.height(state)
+    if (kstate.get(state, kstate.MODE) & kstate.M_NOMOUSE) != 0 {
+        serial.puts((&s_none[0]) as u64)
+        serial.nl()
+    } else {
+        ps2m.init(state, w, h)
+        serial.puts((&s_ms[0]) as u64)
+        serial.puts((&s_id[0]) as u64)
+        serial.dec(ps2m.id(state))
+        serial.puts((&s_pk[0]) as u64)
+        serial.dec(ps2m.packets(state))
+        serial.puts((&s_st[0]) as u64)
+        serial.dec(ps2m.selftest(state))
+        serial.puts((&s_of[0]) as u64)
+        serial.dec(ps2m.selftest_max())
+        serial.nl()
+    }
+    // 5. der Fensterserver
+    let nodirty: bool = (kstate.get(state, kstate.MODE) & kstate.M_NODIRTY) != 0
+    let nofocus: bool = (kstate.get(state, kstate.MODE) & kstate.M_NOFOCUS) != 0
+    if !wm.init(state, w, h, nodirty, nofocus) {
+        return
+    }
+    wm.set_fonts(state, f_ui, PX_UI, f_tx, PX_MONO)
+    if (kstate.get(state, kstate.MODE) & kstate.M_NOMOUSE) != 0 {
+        wm.set_cursor(state, false)
+    }
+    serial.puts((&s_wm[0]) as u64)
+    serial.dec(w)
+    serial.puts((&s_x[0]) as u64)
+    serial.dec(h)
+    serial.puts((&s_cur[0]) as u64)
+    serial.dec(bnum(wm.cursor_on(state)))
+    serial.puts((&s_dirty[0]) as u64)
+    serial.dec(1 - bnum(nodirty))
+    serial.puts((&s_focus[0]) as u64)
+    serial.dec(1 - bnum(nofocus))
+    serial.puts((&s_arena[0]) as u64)
+    serial.dec(WM_ARENA_FRAMES * mem.FRAME_SIZE)
+    serial.nl()
+    serial.puts((&s_wm[0]) as u64)
+    serial.puts((&s_st[0]) as u64 + 2)
+    serial.dec(wm.selftest(state))
+    serial.puts((&s_of[0]) as u64)
+    serial.dec(wm.selftest_max())
+    serial.nl()
+
+    // 6. der Bildschirm gehoert ab hier dem Server. Der Spiegel der
+    //    Textkonsole geht AUS -- zwei Zeichner auf einer Flaeche war
+    //    genau das Problem, das Runde K7 offen gelassen hat.
+    fb.set_echo(state, false)
+    fb.set_cursor(state, false)
+    fb.clear(state, 0)
+    wm.damage_all(state)
+
+    // Das Terminalfenster. Es bekommt das Terminal der Konsole -- von
+    // hier an geht jedes Oktett, das ein Prozess auf fd 1 schreibt,
+    // durch `tty.emit` mit SINK_WINDOW in dieses Fenster UND weiter auf
+    // die serielle Leitung.
+    var t_titel: [u8; 16] = "Terminal -- sh\0\0"
+    let tw: u64 = wm.create(state, 0, 24, 40, 560, 380, wm.K_TERM,
+        (&t_titel[0]) as u64)
+    if tw < wm.MAX_WIN {
+        wm.bind_tty(state, tw, tty.console())
+        tty.set_window(state, tty.console(), tw)
+        tty.set_sink(state, tty.console(), tty.SINK_WINDOW)
+        serial.puts((&s_term[0]) as u64)
+        serial.dec(tw)
+        serial.puts((&s_cols[0]) as u64)
+        serial.dec(wm.term_cols(state, tw))
+        serial.puts((&s_rows[0]) as u64)
+        serial.dec(wm.term_rows(state, tw))
+        serial.puts((&s_cell[0]) as u64)
+        serial.dec(560 / wm.term_cols(state, tw))
+        serial.puts((&s_x[0]) as u64)
+        serial.dec(380 / wm.term_rows(state, tw))
+        serial.nl()
+        // Zwei Zeilen, die IM FENSTER stehen und deren Stelle sich
+        // ausrechnen laesst -- Zeile 0 und 1, Spalte 0. Genau das
+        // rechnet `tools/wm/run.sh` bildpunktgenau gegen den
+        // Referenzrasterer nach.
+        var b1: [u8; 32] = "OSUM K10 WINDOW SERVER 0123\n\0\0\0\0"
+        var b2: [u8; 32] = "abcdefghijklm ABCDEFGHIJK +-*/\n\0"
+        wm.term_write(state, tw, (&b1[0]) as u64, 28)
+        wm.term_write(state, tw, (&b2[0]) as u64, 31)
+    }
+
+    // Die Anwendung in Ring 3. Sie legt ihr Fenster SELBST an, ueber ein
+    // Handle -- der Kernel gibt ihr keine Flaeche, sie holt sich eine.
+    let t: u64 = proc.create(state, P_WCLICK, (w << 16) | h, 2)
+    // Ein paar Marken, damit sie ihr Fenster wirklich anlegt, bevor
+    // gemessen wird.
+    sched.sleep_ticks(state, 12)
+    wm.compose(state)
+
+    // Die Shell im Terminalfenster -- auf ausdrueckliches Wort, weil sie
+    // eine Platte braucht.
+    if (kstate.get(state, kstate.MODE) & kstate.M_WMSHELL) != 0 {
+        var p_sh: [u8; 8] = "/bin/sh\0"
+        var a_sh: [u8; 3] = "sh\0"
+        let abuf: u64 = state + kstate.EARG_OFF
+        var k: u64 = 0
+        while k < 3 {
+            kstate.set8(abuf + k, a_sh[k as usize])
+            k = k + 1
+        }
+        let sh: u64 = elf.spawn(state, (&p_sh[0]) as u64, abuf, 1, 2)
+        if sh != 0 {
+            let code: u64 = wait_wm(state, sh)
+            serial.puts((&s_exit[0]) as u64)
+            serial.dec(code)
+            serial.nl()
+        }
+    }
+
+    wm_bench(state, f_tx, PX_MONO)
+    wm.damage_all(state)
+    wm.compose(state)
+
+    serial.puts((&s_stat[0]) as u64)
+    serial.puts((&s_comp[0]) as u64)
+    serial.dec(wm.composites(state))
+    serial.puts((&s_blit[0]) as u64)
+    serial.dec(wm.blits(state))
+    serial.puts((&s_pix[0]) as u64)
+    serial.dec(wm.pixels(state))
+    serial.puts((&s_cache[0]) as u64)
+    serial.dec(ttf.cache_used(state))
+    serial.puts((&s_hit[0]) as u64)
+    serial.dec(ttf.hits(state))
+    serial.puts((&s_miss[0]) as u64)
+    serial.dec(ttf.misses(state))
+    serial.nl()
+    serial.puts((&s_wm[0]) as u64)
+    serial.puts((&s_win[0]) as u64 + 2)
+    serial.dec(wm.count(state))
+    serial.puts((&s_focus[0]) as u64)
+    serial.dec(wm.focus(state))
+    serial.nl()
+
+    // Stillhalten, damit ein Bildschirmfoto entsteht -- und dabei WEITER
+    // den Zeiger verfolgen und zusammensetzen. Genau darin werden von
+    // aussen ueber den QEMU-Monitor Mausereignisse eingespeist.
+    if (kstate.get(state, kstate.MODE) & kstate.M_WMHOLD) == 0 {
+        return
+    }
+    serial.puts((&s_hold[0]) as u64)
+    serial.nl()
+    let hz: u64 = apic.tsc_hz(state)
+    if hz != 0 {
+        let bis: u64 = apic.tsc() + hz * 5
+        while apic.tsc() < bis {
+            wm.poll(state)
+            wm.compose(state)
+        }
+    }
+    wm.damage_all(state)
+    wm.compose(state)
+    serial.puts((&s_go[0]) as u64)
+    serial.nl()
+    say_wm_input(state)
+    let _unused: u64 = t
+}
+
+// Warten auf die Shell im Fenster -- wie `wait_long`, aber es setzt
+// zwischendurch zusammen, damit man beim Zusehen etwas sieht und damit
+// der Zeiger sich bewegen laesst, waehrend sie laeuft.
+fn wait_wm(state: u64, i: u64) -> u64 {
+    if i == 0 {
+        return 0xFFFFFFFFFFFFFFFF
+    }
+    var rounds: u64 = 0
+    while rounds < 20000 {
+        if sched.tget(state, i, sched.T_STATE) == sched.S_ZOMBIE {
+            let code: u64 = sched.tget(state, i, sched.T_EXIT)
+            proc.reap(state, i)
+            return code
+        }
+        wm.poll(state)
+        wm.compose(state)
+        sched.sleep_ticks(state, 1)
+        rounds = rounds + 1
+    }
+    return 0xFFFFFFFFFFFFFFFE
+}
+
+// Was das Zeigegeraet in diesem Lauf WIRKLICH gemeldet hat. Die Zahlen
+// sind der einzige Weg, von aussen nachzuweisen, dass die ueber den
+// QEMU-Monitor eingespeisten Bewegungen angekommen sind.
+fn say_wm_input(state: u64) {
+    var s: [u8; 12] = "wminput: x=\0"
+    var s_y: [u8; 5] = "  y=\0"
+    var s_b: [u8; 7] = "  btn=\0"
+    var s_p: [u8; 11] = "  packets=\0"
+    var s_m: [u8; 9] = "  moves=\0"
+    var s_d: [u8; 9] = "  drops=\0"
+    var s_w: [u8; 9] = "  wheel=\0"
+    serial.puts((&s[0]) as u64)
+    serial.dec(ps2m.x(state))
+    serial.puts((&s_y[0]) as u64)
+    serial.dec(ps2m.y(state))
+    serial.puts((&s_b[0]) as u64)
+    serial.dec(ps2m.buttons(state))
+    serial.puts((&s_p[0]) as u64)
+    serial.dec(ps2m.packets(state))
+    serial.puts((&s_m[0]) as u64)
+    serial.dec(ps2m.moves(state))
+    serial.puts((&s_d[0]) as u64)
+    serial.dec(ps2m.drops(state))
+    serial.puts((&s_w[0]) as u64)
+    serial.dec(ps2m.wheel(state))
+    serial.nl()
+}
+
+fn say_font(state: u64, f: u64, px: u64, name: u64, s_font: u64, s_g: u64,
+    s_upm: u64, s_asc: u64, s_desc: u64, s_lh: u64, s_kp: u64, s_st: u64,
+    s_of: u64) {
+    if f >= ttf.MAX_FONTS {
+        return
+    }
+    serial.puts(s_font)
+    serial.puts(name)
+    serial.puts(s_g)
+    serial.dec(ttf.glyphs(state, f))
+    serial.puts(s_upm)
+    serial.dec(ttf.upm(state, f))
+    serial.puts(s_asc)
+    serial.dec(ttf.ascent(state, f, px) as u64)
+    serial.puts(s_desc)
+    serial.dec(ttf.descent(state, f, px) as u64)
+    serial.puts(s_lh)
+    serial.dec(ttf.line_height(state, f, px))
+    serial.puts(s_kp)
+    serial.dec(kern_pairs(state, f, px))
+    serial.puts(s_st)
+    serial.dec(ttf.selftest(state, f))
+    serial.puts(s_of)
+    serial.dec(ttf.selftest_max())
+    serial.nl()
+}
+
+// Wie viele der 95 Zeichenpaare dieser Schrift wirklich unterschnitten
+// werden -- eine Zahl statt der Behauptung "kann Unterschneidung".
+fn kern_pairs(state: u64, f: u64, px: u64) -> u64 {
+    var n: u64 = 0
+    var a: u64 = 0x20
+    while a <= 0x7E {
+        var b: u64 = 0x20
+        while b <= 0x7E {
+            if ttf.kern26(state, f, ttf.glyph_of(state, f, a),
+                ttf.glyph_of(state, f, b), px) != 0 {
+                n = n + 1
+            }
+            b = b + 1
+        }
+        a = a + 1
+    }
+    return n
+}
+
+// Eine Schriftdatei von der Platte in den Speicher und in den Leser.
+fn load_font(state: u64, pfad: u64) -> u64 {
+    if kstate.get(state, kstate.FS_READY) == 0 {
+        return ttf.MAX_FONTS
+    }
+    let ino: u64 = fs.path(state, pfad)
+    if ino == 0 {
+        return ttf.MAX_FONTS
+    }
+    let n: u64 = fs.inode_size(state, ino)
+    if n < 12 || n > 1048576 {
+        return ttf.MAX_FONTS
+    }
+    let rahmen: u64 = (n + mem.FRAME_SIZE - 1) / mem.FRAME_SIZE
+    let buf: u64 = mem.frame_run(state, rahmen)
+    if buf == 0 {
+        return ttf.MAX_FONTS
+    }
+    var off: u64 = 0
+    while off < n {
+        var c: u64 = n - off
+        if c > 4096 {
+            c = 4096
+        }
+        let got: u64 = fs.read_at(state, ino, off, buf + off, c)
+        if got == 0 {
+            off = n
+        } else {
+            off = off + got
+        }
+    }
+    return ttf.load_font(state, buf, n)
+}
+
+// DIE MESSUNG DIESER RUNDE, und sie hat zwei Teile:
+//
+//   1. ZUSAMMENSETZEN MIT UND OHNE BEREICHSVERFOLGUNG. Derselbe
+//      Bildschirm, dieselben Fenster, derselbe Zeitzaehler -- einmal
+//      ueber den ganzen Schirm und einmal ueber das Rechteck, das ein
+//      bewegter Zeiger schmutzig macht. Das ist die Zahl, die eine
+//      bedienbare Oberflaeche von einer unbedienbaren trennt.
+//   2. SCHRIFTRASTERUNG MIT UND OHNE ZWISCHENSPEICHER. Fuenfundneunzig
+//      Zeichen frisch gerastert gegen fuenfundneunzig aus dem Speicher.
+fn wm_bench(state: u64, f: u64, px: u64) {
+    var s_c: [u8; 23] = "wmbench: compose full=\0"
+    var s_us: [u8; 4] = " us\0"
+    var s_sm: [u8; 10] = "  small=\0\0"
+    var s_fa: [u8; 11] = "  factor=\0\0"
+    var s_g: [u8; 21] = "wmbench: glyph cold=\0"
+    var s_wa: [u8; 9] = "  warm=\0\0"
+    var s_pc: [u8; 12] = " (je 95 Zn)\0"
+
+    let hz: u64 = apic.tsc_hz(state)
+    if hz == 0 {
+        return
+    }
+    // 1a. der ganze Schirm
+    var t: u64 = apic.tsc()
+    var i: u64 = 0
+    while i < K10_RUNDEN {
+        wm.damage_all(state)
+        wm.compose(state)
+        i = i + 1
+    }
+    let voll: u64 = us_of(state, apic.tsc() - t) / K10_RUNDEN
+    // 1b. nur das Rechteck eines Zeigers (12x18) -- das, was eine
+    //     Zeigerbewegung wirklich schmutzig macht.
+    t = apic.tsc()
+    i = 0
+    while i < K10_RUNDEN {
+        wm.damage(state, 300, 300, 312, 318)
+        wm.compose(state)
+        i = i + 1
+    }
+    var klein: u64 = us_of(state, apic.tsc() - t) / K10_RUNDEN
+    serial.puts((&s_c[0]) as u64)
+    serial.dec(voll)
+    serial.puts((&s_us[0]) as u64)
+    serial.puts((&s_sm[0]) as u64)
+    serial.dec(klein)
+    serial.puts((&s_us[0]) as u64)
+    serial.puts((&s_fa[0]) as u64)
+    if klein == 0 {
+        klein = 1
+    }
+    serial.dec(voll * 100 / klein)
+    serial.nl()
+
+    // 2. die Schriftrasterung
+    if f < ttf.MAX_FONTS {
+        let kalt_px: u64 = px + 7 // eine Groesse, die noch niemand hat
+        t = apic.tsc()
+        var c: u64 = 0x20
+        while c <= 0x7E {
+            ttf.glyph(state, f, c, kalt_px)
+            c = c + 1
+        }
+        let kalt: u64 = us_of(state, apic.tsc() - t)
+        t = apic.tsc()
+        c = 0x20
+        while c <= 0x7E {
+            ttf.glyph(state, f, c, kalt_px)
+            c = c + 1
+        }
+        var warm: u64 = us_of(state, apic.tsc() - t)
+        serial.puts((&s_g[0]) as u64)
+        serial.dec(kalt)
+        serial.puts((&s_us[0]) as u64)
+        serial.puts((&s_wa[0]) as u64)
+        serial.dec(warm)
+        serial.puts((&s_us[0]) as u64)
+        serial.puts((&s_fa[0]) as u64)
+        if warm == 0 {
+            warm = 1
+        }
+        serial.dec(kalt * 100 / warm)
+        serial.puts((&s_pc[0]) as u64)
+        serial.nl()
+    }
 }
