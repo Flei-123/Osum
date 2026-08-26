@@ -168,7 +168,7 @@ import fb
 
 export {
     probe, ready, cur_profile, set_profile, apply, caps, value,
-    idle_wait, note_activity, tick, temp_work,
+    idle_wait, note_activity, tick,
     set_bright, blank, unblank, screen_tick, screen_work, scale_rgb, bright,
     PW_BRIGHT, PW_BLANKED, PW_BLANKS, PW_LASTACT, PW_BLANKAFTER,
     temp_c, temp_ok, throttle_check,
@@ -722,11 +722,8 @@ fn throttle_check(state: u64) {
 // herum ist es richtig, und so herum macht es jedes Unix.
 fn idle_wait(state: u64, allow: bool) {
     bump(state, PW_IDLERUNS)
-    // Erst die Arbeit, die der Zeitgeber angemeldet hat -- danach wird
-    // geschlafen. Anders herum laege der Bildschirm eine Aufweckung lang
-    // falsch.
-    screen_work(state)
-    temp_work(state)
+    // Erst nachsehen, ob etwas zu tun ist -- danach wird geschlafen.
+    tick(state)
     let me: u64 = cpu.here(state)
     if allow && (g(state, PW_CAPS) & C_MONITOR) != 0 {
         // Jeder Kern bekommt eine eigene Zeile. Zwei Kerne auf derselben
@@ -780,42 +777,69 @@ fn note_activity(state: u64) {
 // Lesen eines MSR ist teuer genug, dass es im Unterbrechungspfad
 // auffaellt, und eine Temperatur aendert sich nicht in zehn
 // Millisekunden.
-// DER ZEITGEBER MELDET AN. GEMESSEN WIRD AUSSERHALB.
+// DIESE RUNDE HAENGT NICHTS IN DEN UNTERBRECHUNGSPFAD. NICHTS.
 //
-// Auch das ist gemessen und nicht ueberlegt, und es hat diese Runde
-// einen DREIFACHEN FEHLER gekostet. Die erste Fassung rief hier
-// `throttle_check`, und das ruft `read_temp`, und das ruft `msr_temp`
-// mit zwei `rdmsr` -- vier Rahmen tief, IM UNTERBRECHUNGSPFAD.
+// Das ist die dritte und letzte Fassung dieser Stelle, und die beiden
+// davor sind teuer gewesen -- beide stehen in docs/ROUNDK18.md:
 //
-// Der Kernstapel dieses Systems ist 16384 Oktette gross, und der Kernel
-// misst selbst, wie tief er wirklich wird: "osum: kstack deepest=16192
-// of 16384". Das sind 192 Oktette Luft. Vier Rahmen mehr passen da
-// nicht hinein. Schlaegt der Zeitgeber an der tiefsten Stelle zu -- und
-// beim Laden eines ELF unter `osum gfx` tut er das --, laeuft der
-// Stapel ueber: #PF, dann #DF, dann Dreifachfehler, und QEMU setzt die
-// Maschine zurueck. Im Mitschnitt sieht das aus wie ein Kernel, der
-// mitten im `exec` aufhoert; `-d cpu_reset` sagt, was es wirklich war.
+//   1. Die erste rief `blank()` aus dem Zeitgeber. `blank()` rechnet
+//      480.000 Bildpunkte um; der Lauf mit der Shell auf dem
+//      Rahmenpuffer endete im Zeitlimit.
+//   2. Die zweite setzte im Zeitgeber nur noch Merkzeichen -- und fiel
+//      in EINEM von FUENF Laeufen mit einem #UD bei rip=0x9fc42 aus,
+//      also mit einem Sprung in den Speicher unterhalb des Kernels.
 //
-// Hier steht deshalb nur noch, WAS zu tun ist. `pwr.idle_wait` tut es --
-// in Aufgabenkontext, auf einem Stapel, der nicht schon fast voll ist.
+// Der Grund fuer (2) steht im Kernel selbst, und er ist aelter als diese
+// Runde: `osum: kstack deepest=16384 of 16384`. Der Kernstapel ist
+// RANDVOLL, auch ohne K18. Eine Firn-Funktion nimmt sich rund 96 Oktette
+// Rahmen; drei davon im Unterbrechungspfad sind rund 300 Oktette, die es
+// nicht gibt. Schlaegt der Zeitgeber an der tiefsten Stelle zu, laeuft
+// der Stapel in das, was darunter liegt, und der naechste Ruecksprung
+// geht irgendwohin. Derselbe Lauf auf `main` ist achtmal von acht sauber
+// durchgegangen.
+//
+// Also gar nichts. Kein Haken im Zeitgeber, keiner in der Tastatur,
+// keiner in der Maus. Alles, was diese Runde regelmaessig tun muss,
+// passiert in `idle_wait` -- in Aufgabenkontext, auf dem Stapel der
+// Leerlaufaufgabe, wo Platz ist.
+//
+// WAS DAS KOSTET, und es wird nicht verschwiegen: eine Maschine, die
+// NIE in den Leerlauf kommt, schaltet ihren Bildschirm nicht ab und
+// misst ihre Temperatur nicht nach. Das ist eine echte Einschraenkung.
+// Sie ist der Preis dafuer, dass diese Runde den Kernel nicht
+// unzuverlaessig macht, und sie waere mit einem groesseren Kernstapel
+// oder einer Arbeitsschlange aufzuheben -- beides gehoert einer Runde,
+// die sich das vornimmt, und steht in docs/ROUNDK18.md als offene Kante.
+//
+// `tick` bleibt als Name stehen, wird aber von `idle_wait` gerufen und
+// nicht mehr vom Zeitgeber.
 fn tick(state: u64) {
     if g(state, PW_READY) == 0 {
         return
     }
+    // DIE TASTATUR, OHNE HAKEN IM UNTERBRECHUNGSPFAD. `kstate.KEYS`
+    // zaehlt jeden Tastendruck ohnehin schon -- Runde 59. Aendert sich
+    // die Zahl, war jemand da; das kostet ein Lesen und keinen einzigen
+    // Rahmen im Unterbrechungspfad.
+    let keys: u64 = kstate.get(state, kstate.KEYS)
+    if keys != g(state, PW_LASTKEYS) {
+        s(state, PW_LASTKEYS, keys)
+        s(state, PW_LASTACT, kstate.get(state, kstate.TICKS))
+        if g(state, PW_BLANKED) != 0 {
+            unblank(state)
+        }
+        return
+    }
     screen_tick(state)
-    if (kstate.get(state, kstate.TICKS) % 64) == 0 {
-        s(state, PW_TEMPWANT, 1)
+    screen_work(state)
+    let now: u64 = kstate.get(state, kstate.TICKS)
+    if now -% g(state, PW_LASTTEMP) >= 64 {
+        s(state, PW_LASTTEMP, now)
+        throttle_check(state)
     }
 }
 
-// Was der Zeitgeber angemeldet hat. Aufgabenkontext.
-fn temp_work(state: u64) {
-    if g(state, PW_TEMPWANT) == 0 {
-        return
-    }
-    s(state, PW_TEMPWANT, 0)
-    throttle_check(state)
-}
+
 
 // ====================================================== 4.6 DER BILDSCHIRM
 //
@@ -923,6 +947,12 @@ const PW_BLANKWANT: u64 = 784
 // Dasselbe fuer die Waerme: der Zeitgeber meldet an, gemessen wird
 // ausserhalb. Warum, steht bei `tick`.
 const PW_TEMPWANT: u64 = 792
+// Der Stand von `kstate.KEYS`, als zuletzt nachgesehen wurde. Warum die
+// Tastatur so und nicht ueber einen Haken im Unterbrechungspfad
+// abgefragt wird, steht bei `idle_wait`.
+const PW_LASTKEYS: u64 = 800
+// Die Marke, bei der zuletzt nach der Waerme gesehen wurde.
+const PW_LASTTEMP: u64 = 808
 
 fn blank(state: u64) {
     if g(state, PW_BLANKED) != 0 {
