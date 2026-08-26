@@ -56,8 +56,10 @@ Waisen an und fährt die Maschine über **echtes ACPI** herunter.
 
 ## 2. Die Zahlen
 
-`bash tools/k13/run.sh` → **98 Zusagen, 0 Fehler** (Abschnitt 19 von
-`./test.sh`). Der Gesamtlauf: siehe Abschnitt 8.
+`bash tools/k13/run.sh` → **99 Zusagen, 0 Fehler** (Abschnitt 19 von
+`./test.sh`). Der Gesamtlauf: **19 Abschnitte, 1585 Zusagen, 0 Fehler**
+— die 1486 Zusagen von `main` plus die 99 dieser Runde, und keine
+einzige verloren.
 
 | Was | Gemessen |
 |---|---|
