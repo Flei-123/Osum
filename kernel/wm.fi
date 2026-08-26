@@ -74,6 +74,7 @@ export {
     on_mouse, on_key, term_write, term_out, term_cols, term_rows, term_cx, term_cy,
     bind_tty, key_tty, tty_of, NO_TTY,
     poll, composites, blits, pixels, last_us, cursor_on, set_cursor,
+    downs, moves_seen, hits_seen,
     set_fonts, font_ui, font_mono, px_ui, px_mono,
     selftest, selftest_max,
     MAX_WIN, K_RAW, K_TERM, TITLE_H, BORDER, GRIP,
@@ -138,7 +139,10 @@ const S_LASTUS: u64 = 0x0D8
 const S_KEYS: u64 = 0x0E0
 const S_EVDROP: u64 = 0x0E8
 const S_CURSAVE: u64 = 0x0F0 // Rahmen fuer den Zeigergrund
-const S_DESK: u64 = 0x0F8 // die Farbe des Hintergrunds
+const S_DESK: u64 = 0x0F8
+const S_DOWNS: u64 = 0x100
+const S_MOVES: u64 = 0x108
+const S_HITS: u64 = 0x110 // die Farbe des Hintergrunds
 
 // ein Fenster
 const W_USED: u64 = 0x00
@@ -915,6 +919,18 @@ fn compose(state: u64) -> u64 {
     return (x1 - x0) * (y1 - y0)
 }
 
+fn downs(state: u64) -> u64 {
+    return gs(state, S_DOWNS)
+}
+
+fn moves_seen(state: u64) -> u64 {
+    return gs(state, S_MOVES)
+}
+
+fn hits_seen(state: u64) -> u64 {
+    return gs(state, S_HITS)
+}
+
 fn imax(a: i64, b: i64) -> i64 {
     if a > b {
         return a
@@ -1238,15 +1254,14 @@ fn on_mouse(state: u64) {
             return
         }
     }
+    ss(state, S_MOVES, gs(state, S_MOVES) + 1)
     let i: u64 = hit(state, x, y)
-    let vorher: u64 = gs(state, S_KEYS) // wird nur als Speicher missbraucht
     if i >= MAX_WIN {
         return
     }
+    ss(state, S_HITS, gs(state, S_HITS) + 1)
     let lokal_x: i64 = x - win_x(state, i) - BORDER as i64
     let lokal_y: i64 = y - win_y(state, i) - TITLE_H as i64
-    if btn != 0 && ps2m.take_change(state) {
-    }
     // Tastenwechsel erkennen: `ps2m` fuehrt den Zustand, hier steht der
     // zuletzt GESEHENE.
     let alt: u64 = gs(state, S_KEYS) & 7
@@ -1280,6 +1295,7 @@ fn on_mouse(state: u64) {
                 ss(state, S_SIZING, i + 1)
                 return
             }
+            ss(state, S_DOWNS, gs(state, S_DOWNS) + 1)
             ev_push(state, i, E_DOWN, lokal_x as u64, lokal_y as u64, btn)
             return
         }
@@ -1319,6 +1335,33 @@ fn on_key(state: u64, c: u64) {
 fn poll(state: u64) -> bool {
     if !ready(state) {
         return false
+    }
+    // DER RUECKFALL AUF ABFRAGE, und er steht hier mit Begruendung.
+    //
+    // Der Baustein meldet ueber IRQ 12, und das ist der Weg, den dieser
+    // Treiber geht. Es gibt aber einen Zustand, in dem die Unterbrechung
+    // AUSBLEIBT und trotzdem ein Oktett bereitliegt: das Zustandstor
+    // sagt dann "Ausgabepuffer voll" (Bit 0) und "vom zweiten Anschluss"
+    // (Bit 5). Wer nur auf die Unterbrechung wartet, hat dann einen
+    // Zeiger, der stehenbleibt, und keinen Hinweis darauf, warum.
+    //
+    // Also wird hier NACHGESEHEN. Wie viele Oktette auf welchem der
+    // beiden Wege kamen, steht in `irqs` und `polls` und wird gemeldet
+    // -- eine Abfrage, die als Unterbrechung ausgegeben wird, waere eine
+    // Luege ueber den Treiber.
+    if ps2m.present(state) && ps2m.polling(state) {
+        var n: u64 = 0
+        while n < 64 && ps2m.poll_one(state) {
+            // NACH JEDEM VOLLSTAENDIGEN PAKET, nicht am Ende des
+            // Stapels: ein Druck und das Loslassen danach sind zwei
+            // Pakete, und wer beide zusammen abholt und DANN nachsieht,
+            // findet die Taste wieder oben und hat den Klick verloren.
+            if ps2m.changed(state) {
+                ps2m.take_change(state)
+                on_mouse(state)
+            }
+            n = n + 1
+        }
     }
     if !ps2m.changed(state) {
         return false
