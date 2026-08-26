@@ -33,6 +33,8 @@ import trap
 import kbd
 import user
 import power
+import pwr
+import batt
 import sched
 import tasks
 import proc
@@ -114,6 +116,9 @@ const P_STEAL: u64 = 9
 const P_FORK: u64 = 10
 const P_CAPS: u64 = 12
 // RUNDE K13: die beiden Programmnummern dieser Runde (kernel/uprog.fi).
+const P_PWR: u64 = 45
+const P_PWRIDLE: u64 = 46
+const P_PWRLOAD: u64 = 47
 const P_USER: u64 = 16
 const P_ZOMBIE: u64 = 17
 const P_FB: u64 = 13
@@ -321,6 +326,23 @@ fn kernel_main(mbi: u64, vectors: u64, state: u64, kernel_end: u64,
     //     Ohne das Wort `k13` eine Zeile und sonst nichts.
     users(state)
 
+    // 7b-ter. RUNDE K18: DIE ENERGIESCHICHT UND IHRE MESSUNG.
+    //     Hier und nicht weiter unten, und der Grund ist derselbe wie
+    //     eine Zeile darueber bei K13: das hier braucht KEIN
+    //     Dateisystem, keine Platte und keinen zweiten Prozessor. Die
+    //     ACPI-Tabellen findet `acpi.table_count` selbst, wenn `find`
+    //     noch nicht gelaufen ist -- genau dafuer hat Runde K13 den
+    //     nachtraeglichen RSDP-Suchlauf in `acpi.table` eingebaut.
+    //
+    //     IN DER ERSTEN FASSUNG STAND ES HINTER `smp.stage`, und dort
+    //     kam das Messprogramm aus seinem `nanosleep` nicht zurueck:
+    //     `smp.stage` laesst die Rechenaufgaben seiner eigenen Messung
+    //     laufen, und der Schlaefer wartete hinter ihnen, bis die Frist
+    //     von `wait_for` abgelaufen war. Zwanzig Sekunden, Ausgang -2,
+    //     und keine einzige Zahl. Weiter oben ist das Bild ruhig.
+    power_stage(state)
+    power_test(state)
+
     // 7c. the file system.
     filesystem(state)
 
@@ -353,6 +375,7 @@ fn kernel_main(mbi: u64, vectors: u64, state: u64, kernel_end: u64,
     //     kernel behaves as it did; under `-smp 4` it starts the other
     //     three and hands them work.
     smp.stage(state)
+
 
     // 7i. RUNDE K12: ein Wirt fuer fremde Betriebssysteme. Hier und
     //     nicht frueher, aus drei Gruenden: der Rahmenverwalter muss
@@ -2175,6 +2198,180 @@ fn keyboard(state: u64) {
 
 // ------------------------------------------------------------- ring 3
 
+// ==================================================== RUNDE K18
+//
+// DIE ENERGIESCHICHT WIRD ANGESCHALTET UND MELDET, WAS SIE VORFINDET.
+//
+// Die Reihenfolge ist nicht beliebig:
+//
+//   1. `pwr.probe` fragt den PROZESSOR (CPUID und ein paar MSR): gibt es
+//      SpeedStep, HWP, Turbo, MONITOR/MWAIT, eine Temperaturanzeige, und
+//      welche Taktstufen nennt die Maschine?
+//   2. `batt.scan` fragt die FIRMWARE (die ACPI-Tabellen): gibt es einen
+//      Akku, ein Netzteil, eine Thermalzone?
+//   3. Was dabei an Temperatur herauskam, wird in die Energieschicht
+//      gereicht. Die beiden Dateien importieren einander NICHT -- ein
+//      Modulgraph mit einem Kreis darin uebersetzt nicht, und ein Wort
+//      hier ist billiger als eine dritte Datei dazwischen.
+//   4. Erst dann wird ein Profil gesetzt. "Ausgeglichen" ist der
+//      Anfangswert, wie bei jedem System, das diese drei Schalter hat.
+//
+// Alles, was gemeldet wird, ist eine Zahl in der Form `pwr: NAME=WERT`
+// -- der Testlauf liest sie zeilenweise, und was der Kernel nicht
+// wirklich gelesen hat, meldet er als `ok=0` statt als Null in Grad
+// Celsius.
+fn power_stage(state: u64) {
+    var s_off: [u8; 14] = "pwr: skipped\0\0"
+    if (kstate.get(state, kstate.MODE) & kstate.M_NOPWR) != 0 {
+        serial.puts((&s_off[0]) as u64)
+        serial.nl()
+        return
+    }
+    pwr.probe(state)
+    batt.scan(state)
+    // Die Thermalzone aus den Tabellen in die Energieschicht reichen.
+    if batt.value(state, batt.BT_TZOK) != 0 {
+        kstate.set(state, kstate.K18_OFF + pwr.PW_TZRAW,
+            batt.value(state, batt.BT_TZ))
+        kstate.set(state, kstate.K18_OFF + pwr.PW_CAPS,
+            pwr.caps(state) | pwr.C_ACPITZ)
+    }
+    // `pwrhot` taeuscht eine Temperatur ueber der Schwelle vor. NUR zum
+    // Fehlersuchen -- die Abnahme benutzt dafuer eine echte SSDT.
+    if (kstate.get(state, kstate.MODE) & kstate.M_PWRHOT) != 0 {
+        kstate.set(state, kstate.K18_OFF + pwr.PW_TZRAW, 3632) // 90 Grad
+    }
+    pwr.set_profile(state, pwr.PROF_BALANCED)
+    pwr.throttle_check(state)
+    power_report(state)
+}
+
+fn pnum(name: u64, v: u64) {
+    var s_p: [u8; 6] = "pwr: \0"
+    var s_e: [u8; 2] = "=\0"
+    serial.puts((&s_p[0]) as u64)
+    serial.puts(name)
+    serial.puts((&s_e[0]) as u64)
+    serial.dec(v)
+    serial.nl()
+}
+
+fn phex(name: u64, v: u64) {
+    var s_p: [u8; 6] = "pwr: \0"
+    var s_e: [u8; 2] = "=\0"
+    serial.puts((&s_p[0]) as u64)
+    serial.puts(name)
+    serial.puts((&s_e[0]) as u64)
+    serial.hex(v)
+    serial.nl()
+}
+
+fn power_report(state: u64) {
+    var n_caps: [u8; 5] = "caps\0"
+    var n_prof: [u8; 8] = "profile\0"
+    var n_rat: [u8; 7] = "ratios\0"
+    var n_rsrc: [u8; 10] = "ratiosrc\0\0"
+    var n_pc: [u8; 8] = "perfctl\0"
+    var n_pb: [u8; 9] = "perfback\0"
+    var n_hw: [u8; 7] = "hwpreq\0"
+    var n_hb: [u8; 8] = "hwpback\0"
+    var n_mi: [u8; 5] = "misc\0"
+    var n_mb: [u8; 9] = "miscback\0"
+    var n_mo: [u8; 9] = "miscorig\0"
+    var n_cst: [u8; 7] = "cstate\0"
+    var n_tmp: [u8; 5] = "temp\0"
+    var n_tok: [u8; 8] = "tempok\0\0"
+    var n_tjm: [u8; 6] = "tjmax\0"
+    var n_thr: [u8; 10] = "throttles\0"
+    var n_ap: [u8; 8] = "applies\0"
+    var n_tz: [u8; 6] = "tzraw\0"
+    phex((&n_caps[0]) as u64, pwr.caps(state))
+    pnum((&n_prof[0]) as u64, pwr.cur_profile(state))
+    phex((&n_rat[0]) as u64, pwr.value(state, pwr.PW_RATIOS))
+    pnum((&n_rsrc[0]) as u64, pwr.value(state, pwr.PW_RATIOSRC))
+    phex((&n_pc[0]) as u64, pwr.value(state, pwr.PW_PERFCTL))
+    phex((&n_pb[0]) as u64, pwr.value(state, pwr.PW_PERFBACK))
+    phex((&n_hw[0]) as u64, pwr.value(state, pwr.PW_HWPREQ))
+    phex((&n_hb[0]) as u64, pwr.value(state, pwr.PW_HWPBACK))
+    phex((&n_mi[0]) as u64, pwr.value(state, pwr.PW_MISC))
+    phex((&n_mb[0]) as u64, pwr.value(state, pwr.PW_MISCBACK))
+    phex((&n_mo[0]) as u64, pwr.value(state, pwr.PW_MISCORIG))
+    pnum((&n_cst[0]) as u64, pwr.value(state, pwr.PW_CSTATE))
+    pnum((&n_tmp[0]) as u64, pwr.temp_c(state))
+    pnum((&n_tok[0]) as u64, pwr.value(state, pwr.PW_TEMPOK))
+    pnum((&n_tjm[0]) as u64, pwr.value(state, pwr.PW_TJMAX))
+    pnum((&n_thr[0]) as u64, pwr.value(state, pwr.PW_THROTTLES))
+    pnum((&n_ap[0]) as u64, pwr.value(state, pwr.PW_APPLIES))
+    pnum((&n_tz[0]) as u64, pwr.value(state, pwr.PW_TZRAW))
+}
+
+// RUNDE K18: DIE ENERGIESCHICHT, GEMESSEN AUS RING 3.
+//
+// Warum aus Ring 3 und nicht aus dem Kernel: eine Zahl, die den Weg
+// durch `syscall` gegangen ist, ist wirklich durch die Schnittstelle
+// gekommen -- und die Schnittstelle ist das, was `/bin/power` benutzt.
+// Der Kernel meldet dieselben Werte oben in `power_report`; dass beide
+// Wege dasselbe sagen, ist eine der Zusagen dieser Runde.
+//
+// Danach zweimal dasselbe mit verschiedener Beschaeftigung: ein
+// Programm, das SCHLAEFT (dann laeuft der Leerlaufpfad), und eines, das
+// RECHNET (dann laeuft er nicht). Der Unterschied zwischen den beiden
+// Zaehlerstaenden ist die Messung von 4.2 -- und er kommt aus der
+// Beschaeftigung der Maschine, nicht aus einem Schalter.
+fn power_test(state: u64) {
+    var s_skip: [u8; 19] = "k18: skipped\0\0\0\0\0\0\0"
+    var s_beg: [u8; 12] = "k18: begin\0\0"
+    var s_exit: [u8; 18] = "k18: ring3 exit=\0\0"
+    var n_mA: [u8; 12] = "mwaits_load\0"
+    var n_hA: [u8; 10] = "hlts_load\0"
+    var n_iA: [u8; 14] = "idleruns_load\0"
+    var n_mB: [u8; 12] = "mwaits_idle\0"
+    var n_hB: [u8; 10] = "hlts_idle\0"
+    var n_iB: [u8; 14] = "idleruns_idle\0"
+    if (kstate.get(state, kstate.MODE) & kstate.M_PWR) == 0 {
+        serial.puts((&s_skip[0]) as u64)
+        serial.nl()
+        return
+    }
+    serial.puts((&s_beg[0]) as u64)
+    serial.nl()
+    let t: u64 = proc.create(state, P_PWR, 0, 2)
+    let e: u64 = wait_for(state, t)
+    serial.puts((&s_exit[0]) as u64)
+    serial.dec(e)
+    serial.nl()
+
+    // 1. RECHNEN. Solange das laeuft, ist der Kern beschaeftigt.
+    let m0: u64 = pwr.value(state, pwr.PW_MWAITS)
+    let h0: u64 = pwr.value(state, pwr.PW_HLTS)
+    let i0: u64 = pwr.value(state, pwr.PW_IDLERUNS)
+    let l: u64 = proc.create(state, P_PWRLOAD, 4000000, 2)
+    wait_for(state, l)
+    kpair((&n_mA[0]) as u64, pwr.value(state, pwr.PW_MWAITS) -% m0)
+    kpair((&n_hA[0]) as u64, pwr.value(state, pwr.PW_HLTS) -% h0)
+    kpair((&n_iA[0]) as u64, pwr.value(state, pwr.PW_IDLERUNS) -% i0)
+
+    // 2. SCHLAFEN. Jetzt hat der Kern nichts zu tun.
+    let m1: u64 = pwr.value(state, pwr.PW_MWAITS)
+    let h1: u64 = pwr.value(state, pwr.PW_HLTS)
+    let i1: u64 = pwr.value(state, pwr.PW_IDLERUNS)
+    let d: u64 = proc.create(state, P_PWRIDLE, 800, 2)
+    wait_for(state, d)
+    kpair((&n_mB[0]) as u64, pwr.value(state, pwr.PW_MWAITS) -% m1)
+    kpair((&n_hB[0]) as u64, pwr.value(state, pwr.PW_HLTS) -% h1)
+    kpair((&n_iB[0]) as u64, pwr.value(state, pwr.PW_IDLERUNS) -% i1)
+}
+
+fn kpair(name: u64, v: u64) {
+    var s_h: [u8; 6] = "k18: \0"
+    var s_m: [u8; 4] = " = \0"
+    serial.puts((&s_h[0]) as u64)
+    serial.puts(name)
+    serial.puts((&s_m[0]) as u64)
+    serial.dec(v)
+    serial.nl()
+}
+
 fn ring3(state: u64) {
     var s_off: [u8; 20] = "ring3: skipped\0\0\0\0\0\0"
     var s_bad: [u8; 15] = "ring3: FAILED\0\0"
@@ -2435,6 +2632,27 @@ fn mode_of(cmd: u64) -> u64 {
     }
     if find(cmd, (&wni[0]) as u64, 8) != 0 {
         mode = mode | kstate.M_WIGNOIDX
+    }
+    // RUNDE K18: die Energieschicht und ihre Gegenproben.
+    var pww: [u8; 4] = "pwr\0"
+    var pwnc: [u8; 10] = "nocstates\0"
+    var pwno: [u8; 6] = "nopwr\0"
+    var pwho: [u8; 7] = "pwrhot\0"
+    var pwnb: [u8; 8] = "noblank\0"
+    if find(cmd, (&pww[0]) as u64, 3) != 0 {
+        mode = mode | kstate.M_PWR
+    }
+    if find(cmd, (&pwnc[0]) as u64, 9) != 0 {
+        mode = mode | kstate.M_NOCSTATES
+    }
+    if find(cmd, (&pwno[0]) as u64, 5) != 0 {
+        mode = mode | kstate.M_NOPWR
+    }
+    if find(cmd, (&pwho[0]) as u64, 6) != 0 {
+        mode = mode | kstate.M_PWRHOT
+    }
+    if find(cmd, (&pwnb[0]) as u64, 7) != 0 {
+        mode = mode | kstate.M_NOBLANK
     }
     if find(cmd, (&unixw[0]) as u64, 4) != 0 {
         mode = mode | M_UNIX
