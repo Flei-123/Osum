@@ -74,6 +74,10 @@ einzige verloren.
 | Dateigröße höchstens, jetzt | 2.134.016 Oktette (−1536, −0,07 %) |
 | Bereiche in `kdata` | 44, 0 Kollisionen (`tools/kernel/karte.py`) |
 
+Der Gesamtlauf, Abschnitt für Abschnitt (`./test.sh`, alle 19 grün):
+9 · 41 · 46 · 176 · 130 · 98 · 134 · 59 · 91 · 67 · 20 · 76 · 107 · 75 ·
+55 · 85 · 103 · 114 · **99** = **1585**.
+
 ---
 
 ## 3. Das Dateisystem: woher der Platz kam
