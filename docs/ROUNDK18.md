@@ -619,7 +619,61 @@ Der Pfad für die zweite Kachel **bleibt kaputt** — er wird nur nicht
 mehr betreten. Das gehört einer Runde, die sich den Rahmenverwalter
 vornimmt; siehe Abschnitt 15.
 
-**11. Der Bildschirm wurde aus dem Unterbrechungspfad heraus neu
+**11. Der Kernstapel lief schon auf `main` über — und diese Runde ist
+hineingefallen.** Der zweite große Fund, und der wichtigste für alle
+folgenden Runden.
+
+`kmain.osum` meldet den Höchststand des Kernstapels. Im Lauf mit der
+Shell auf dem Rahmenpuffer (`osum gfx`) stand dort **seit jeher**:
+
+```
+osum: kstack deepest=16384 of 16384
+```
+
+Das liest sich wie „gerade noch", ist aber **voll**: `stack_high` färbt
+den Stapel und liest den Höchststand zurück — meldet er die *ganze*
+Größe, ist keine gefärbte Stelle mehr übrig. Genau diesen Fall verbietet
+`tools/osum/run.sh` („der tiefste Kernstapel des Laufs muss **unter** der
+Größe bleiben"); in *diesem* Lauf wurde es nur nie geprüft.
+
+Mit acht Rahmen statt vier sagt derselbe Lauf, wie tief er wirklich geht:
+
+```
+osum: kstack deepest=16888 of 32768
+```
+
+**16888 > 16384.** Der Stapel ist um rund 500 Oktette übergelaufen, und
+zwar auch ohne diese Runde. `main` überlebt es, weil hinter dem letzten
+Oktett zufällig nichts liegt, was gebraucht wird.
+
+Mit K18 tut es das nicht mehr: derselbe Lauf endete in **drei von acht**
+Fällen mit
+
+```
+*** EXCEPTION 6 #UD  rip=0x9fc42  rsp=0x506ff8
+```
+
+— ein Sprung an eine Adresse *unterhalb* des Kernels, also eine
+Rücksprungadresse, die nicht mehr da war, wo sie hingehörte. Nach der
+Änderung: **zehn von zehn Läufen sauber**.
+
+Die Herkunft ist durch Ausschluss bewiesen, jeweils acht Läufe im Zweig
+`eed1edd`:
+
+| Aufbau | Ergebnis |
+|---|---|
+| Basis allein | 8 × sauber |
+| Basis + `ALIGN(2M)` | 8 × sauber |
+| Basis + `ALIGN(2M)` + kdata `0x60000` | 8 × sauber |
+| Basis + all das + 15 Seiten `.utext` | 8 × sauber |
+| K18 (auch mit **allen** K18-Haken abgeschaltet) | 3–4 × Ausnahme |
+
+Es lag an keiner dieser Größen. Es lag daran, dass der Stapel keine Luft
+mehr hatte und K18s andere Codeanordnung die letzten Oktette verbraucht.
+`sched.KSTACK_FRAMES` steht jetzt auf 8 — dieselbe Begründung, aus der
+Runde K1 aus der 2 eine 4 gemacht hat, nur eine Stufe später.
+
+**12. Der Bildschirm wurde aus dem Unterbrechungspfad heraus neu
 gerechnet.** Die erste Fassung ließ `screen_tick` im Zeitgeber direkt
 `blank()` rufen — und damit eine Umrechnung über 480.000 Bildpunkte
 **im Interrupt-Handler**. Das fiel bei der Fehlersuche zu Punkt 2 auf und
@@ -681,6 +735,14 @@ bei K13 und K14 sogar deutlicher als hier. Beispiel aus K13: `mkfs.py`
 liest ein Abbild der Fassung 1 mit den Feldversätzen der Fassung 2 und
 gibt `/bin/passwd 1265 694 695` statt `755 0 0` aus. Das ist reines
 Python auf dem Wirt und hat mit dem Kernel nichts zu tun.
+
+**Zur Platte der Messmaschine:** ein Teil der Sprunghaftigkeit, die zu
+Fund 11 geführt hat, kam gar nicht aus dem Kernel — die Platte war zu
+100 Prozent voll. Das äußerte sich als fehlende `.ppm`-Dateien (das
+Bildschirmfoto ließ sich nicht schreiben), als abgebrochene
+Übersetzungsläufe und einmal als halb geschriebene `kernel/sched.fi`.
+Erst nach dem Aufräumen waren die Zahlen stabil reproduzierbar. Wer
+diese Runde nachmisst, sollte vorher `df -h` ansehen.
 
 **Zur Belastung der Messmaschine:** an dem Tag liefen drei Abnahmen
 gleichzeitig auf demselben Rechner (zwölf Kerne, Lastmittel bis 14,6).
