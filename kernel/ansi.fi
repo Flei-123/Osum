@@ -1,0 +1,320 @@
+// kernel/ansi.fi -- Runde K11: die Bildschirmkonsole versteht VT100.
+//
+// WARUM DIESE DATEI UEBERHAUPT DA IST. Der Editor dieser Runde schreibt
+// wie jedes bildschirmorientierte Programm Fluchtfolgen: `ESC [ 5;1 H`
+// setzt die Schreibmarke, `ESC [ 2 J` loescht den Schirm, `ESC [ 7 m`
+// dreht die Darstellung um. Eine serielle Leitung traegt das
+// unveraendert -- am anderen Ende sitzt ein Terminal, das es versteht.
+// Der Bildschirm dieser Maschine hat keines: `fb.putc` (Runde K7) kennt
+// Zeilenumbruch, Wagenruecklauf, Tabulator und Ruecktaste, und alles
+// andere malt es als Fragezeichen. Ohne diese Datei stuenden auf dem
+// Schirm die Steuerzeichen selbst.
+//
+// WO SIE HAENGT, und warum genau dort: `serial.put` schickt jedes Oktett,
+// das der Kernel hinausgibt, ausserdem an den Schirm (Runde K7 haengte
+// `fb.echo` dort ein). Diese Datei setzt sich DAZWISCHEN -- eine Zeile in
+// `serial.fi`. Damit bleibt alles erhalten, was K7 wollte: die
+// Bootmeldungen vor `tty.init`, der Registerauszug einer Ausnahme, jedes
+// `serial.puts` gehen weiter auf den Schirm. Neu ist nur, dass eine
+// Fluchtfolge jetzt etwas TUT statt gemalt zu werden.
+//
+// `kernel/fb.fi` wird NICHT angefasst. Runde K10 arbeitet daran (Maus,
+// Fensterdienst, TrueType); diese Datei benutzt nur, was fb ohnehin
+// nach aussen gibt: `goto`, `putc`, `fill`, `clear`, `set_color`,
+// `set_cursor`, `cols`, `rows`, `cx`, `cy`, `rgb`, `dirty_all`, `flush`.
+//
+// WAS SIE KANN: CUP (`H`/`f`), CUU/CUD/CUF/CUB (`A`/`B`/`C`/`D`), ED
+// (`J` mit 0/1/2), EL (`K` mit 0/1/2), SGR (`m` mit 0 und 7) und
+// DECTCEM (`?25h`/`?25l`). Das ist genau die Menge, die der Editor
+// benutzt -- und keine Folge mehr, denn eine, die niemand schickt, ist
+// eine, die niemand prueft.
+//
+// WAS SIE NICHT KANN: Farben (SGR 30..47), Rollbereiche, alternative
+// Schirme. Die Textkonsole hat eine Vorder- und eine Hintergrundfarbe,
+// und mehr braucht ein Editor nicht.
+
+profile kernel
+
+import kstate
+import fb
+import font
+
+export { echo, feed, active, seqs }
+
+const S_TEXT: u64 = 0
+const S_ESC: u64 = 1
+const S_CSI: u64 = 2
+
+// Die Adresse des Kernel-Datenbereichs, ohne sie uebergeben zu bekommen
+// -- derselbe Griff wie in `fb.echo`, und aus demselben Grund:
+// `serial.put` hat kein `state` und soll keines bekommen.
+fn kdata() -> u64 {
+    return asm("lea rax, [rip + kdata]", out("rax"))
+}
+
+fn g(state: u64, off: u64) -> u64 {
+    return kstate.get(state, kstate.K11_OFF + off)
+}
+
+fn s(state: u64, off: u64, v: u64) {
+    kstate.set(state, kstate.K11_OFF + off, v)
+}
+
+fn par(state: u64, i: u64) -> u64 {
+    return kstate.get(state, kstate.K11_OFF + kstate.AN_PAR + i * 8)
+}
+
+fn set_par(state: u64, i: u64, v: u64) {
+    kstate.set(state, kstate.K11_OFF + kstate.AN_PAR + i * 8, v)
+}
+
+// Eine Zahl aus der Folge, mit Vorgabe 1 -- `ESC [ H` und `ESC [ 1;1 H`
+// bedeuten dasselbe.
+fn par_or(state: u64, i: u64, dflt: u64) -> u64 {
+    if i >= g(state, kstate.AN_NPAR) {
+        return dflt
+    }
+    let v: u64 = par(state, i)
+    if v == 0 {
+        return dflt
+    }
+    return v
+}
+
+fn active(state: u64) -> bool {
+    return g(state, kstate.AN_STATE) != S_TEXT
+}
+
+fn seqs(state: u64) -> u64 {
+    return g(state, kstate.AN_SEQS)
+}
+
+// Die zwei Farben. `fb.fi` setzt dieselben in `init`; eine Konstante
+// eines anderen Moduls laesst sich in dieser Stufe von Firn nicht in
+// einen `const` einsetzen, also stehen sie hier ein zweites Mal -- und
+// dieser Satz sagt, dass sie zusammengehoeren.
+fn fg(state: u64) -> u64 {
+    return fb.rgb(state, 0xC8, 0xD0, 0xD8)
+}
+
+fn bg(state: u64) -> u64 {
+    return 0
+}
+
+fn apply_color(state: u64) {
+    if g(state, kstate.AN_REV) == 1 {
+        fb.set_color(state, bg(state), fg(state))
+    } else {
+        fb.set_color(state, fg(state), bg(state))
+    }
+}
+
+// Ein Rechteck aus Textzellen mit der Hintergrundfarbe fuellen.
+fn wipe(state: u64, c0: u64, r0: u64, c1: u64, r1: u64) {
+    if c1 <= c0 || r1 <= r0 {
+        return
+    }
+    var back: u64 = bg(state)
+    if g(state, kstate.AN_REV) == 1 {
+        back = fg(state)
+    }
+    fb.fill(state, c0 * font.GLYPH_W, r0 * font.GLYPH_H,
+        (c1 - c0) * font.GLYPH_W, (r1 - r0) * font.GLYPH_H, back)
+    fb.dirty_all(state)
+}
+
+// Die Folge ist zu Ende: `final` ist ihr Schlussbuchstabe.
+fn run(state: u64, final: u64) {
+    let cols: u64 = fb.cols(state)
+    let rows: u64 = fb.rows(state)
+    let x: u64 = fb.cx(state)
+    let y: u64 = fb.cy(state)
+    kstate.add(state, kstate.K11_OFF + kstate.AN_SEQS, 1)
+    if final == 72 || final == 102 {
+        // CUP: Zeile und Spalte, beide ab EINS gezaehlt.
+        var r: u64 = par_or(state, 0, 1) - 1
+        var c: u64 = par_or(state, 1, 1) - 1
+        if r >= rows {
+            r = rows - 1
+        }
+        if c >= cols {
+            c = cols - 1
+        }
+        fb.goto(state, c, r)
+        return
+    }
+    if final == 65 {
+        let n: u64 = par_or(state, 0, 1)
+        var r: u64 = 0
+        if y > n {
+            r = y - n
+        }
+        fb.goto(state, x, r)
+        return
+    }
+    if final == 66 {
+        var r: u64 = y + par_or(state, 0, 1)
+        if r >= rows {
+            r = rows - 1
+        }
+        fb.goto(state, x, r)
+        return
+    }
+    if final == 67 {
+        var c: u64 = x + par_or(state, 0, 1)
+        if c >= cols {
+            c = cols - 1
+        }
+        fb.goto(state, c, y)
+        return
+    }
+    if final == 68 {
+        let n: u64 = par_or(state, 0, 1)
+        var c: u64 = 0
+        if x > n {
+            c = x - n
+        }
+        fb.goto(state, c, y)
+        return
+    }
+    if final == 74 {
+        // ED. Die Schreibmarke bleibt, wo sie ist -- das ist der
+        // Unterschied zwischen `ESC[2J` und `ESC[2J ESC[H`, und ein
+        // Editor, der sich darauf verlaesst, zeichnet sonst um eine
+        // Zeile verschoben.
+        let what: u64 = par_or(state, 0, 0)
+        if what == 2 {
+            wipe(state, 0, 0, cols, rows)
+        } else if what == 1 {
+            wipe(state, 0, 0, cols, y)
+            wipe(state, 0, y, x + 1, y + 1)
+        } else {
+            wipe(state, x, y, cols, y + 1)
+            wipe(state, 0, y + 1, cols, rows)
+        }
+        fb.goto(state, x, y)
+        fb.flush(state)
+        return
+    }
+    if final == 75 {
+        let what: u64 = par_or(state, 0, 0)
+        if what == 1 {
+            wipe(state, 0, y, x + 1, y + 1)
+        } else if what == 2 {
+            wipe(state, 0, y, cols, y + 1)
+        } else {
+            wipe(state, x, y, cols, y + 1)
+        }
+        fb.goto(state, x, y)
+        fb.flush(state)
+        return
+    }
+    if final == 109 {
+        // SGR: 0 zurueck auf normal, 7 umgekehrt. Alles andere wird
+        // uebergangen statt falsch gedeutet.
+        var i: u64 = 0
+        let n: u64 = g(state, kstate.AN_NPAR)
+        if n == 0 {
+            s(state, kstate.AN_REV, 0)
+        }
+        while i < n {
+            let v: u64 = par(state, i)
+            if v == 0 {
+                s(state, kstate.AN_REV, 0)
+            } else if v == 7 {
+                s(state, kstate.AN_REV, 1)
+            } else if v == 27 {
+                s(state, kstate.AN_REV, 0)
+            }
+            i = i + 1
+        }
+        apply_color(state)
+        return
+    }
+    if final == 104 || final == 108 {
+        if g(state, kstate.AN_PRIV) == 1 && par_or(state, 0, 0) == 25 {
+            fb.set_cursor(state, final == 104)
+        }
+        return
+    }
+}
+
+// EIN OKTETT. Das ist der ganze Automat.
+fn feed(state: u64, c: u64) {
+    let st: u64 = g(state, kstate.AN_STATE)
+    if st == S_TEXT {
+        if c == 27 {
+            s(state, kstate.AN_STATE, S_ESC)
+            return
+        }
+        fb.putc(state, c)
+        return
+    }
+    if st == S_ESC {
+        if c == 91 {
+            s(state, kstate.AN_STATE, S_CSI)
+            s(state, kstate.AN_NPAR, 0)
+            s(state, kstate.AN_PRIV, 0)
+            set_par(state, 0, 0)
+            return
+        }
+        // Alles andere nach ESC ist eine Folge, die dieses Terminal
+        // nicht hat. Sie wird VERWORFEN und nicht gemalt -- ein `?` auf
+        // dem Schirm waere schlimmer als nichts.
+        s(state, kstate.AN_STATE, S_TEXT)
+        return
+    }
+    // In der Folge.
+    if c == 63 {
+        s(state, kstate.AN_PRIV, 1)
+        return
+    }
+    if c >= 48 && c <= 57 {
+        var n: u64 = g(state, kstate.AN_NPAR)
+        if n == 0 {
+            n = 1
+            s(state, kstate.AN_NPAR, 1)
+            set_par(state, 0, 0)
+        }
+        if n <= kstate.AN_MAXPAR {
+            set_par(state, n - 1, par(state, n - 1) * 10 + (c - 48))
+        }
+        return
+    }
+    if c == 59 {
+        var n: u64 = g(state, kstate.AN_NPAR)
+        if n == 0 {
+            n = 1
+            set_par(state, 0, 0)
+        }
+        if n < kstate.AN_MAXPAR {
+            set_par(state, n, 0)
+            n = n + 1
+        }
+        s(state, kstate.AN_NPAR, n)
+        return
+    }
+    if c >= 64 && c <= 126 {
+        run(state, c)
+        s(state, kstate.AN_STATE, S_TEXT)
+        return
+    }
+    // Ein Zwischenzeichen (0x20..0x2F) gehoert zur Folge und wird
+    // uebergangen; alles andere bricht sie ab.
+    if c < 32 {
+        s(state, kstate.AN_STATE, S_TEXT)
+        fb.putc(state, c)
+    }
+}
+
+// Wird von `serial.put` fuer JEDES Oktett gerufen -- die Stelle, an der
+// bis zu dieser Runde `fb.echo` stand. Solange niemand `gfx` auf die
+// Kommandozeile geschrieben hat, kostet das genau so viel wie vorher:
+// ein `lea`, ein Speicherzugriff, ein Ruecksprung.
+fn echo(c: u8) {
+    let state: u64 = kdata()
+    if !fb.echo_on(state) {
+        return
+    }
+    feed(state, c as u64)
+}
