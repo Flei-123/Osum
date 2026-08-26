@@ -54,6 +54,9 @@ import mnt
 import vfsops
 import rand
 import blk
+import sched
+import atomic
+import cpu
 
 export { ops, node_root, D_TTY, D_FB, D_CONSOLE, is_tty, is_fb, rdev_of }
 
@@ -330,7 +333,45 @@ fn d_write(state: u64, m: u64, node: u64, off: u64, src: u64,
 // `read` von 100 Oktetten ab Stelle 700 liest also Block 1 und gibt
 // die Oktette 188..287 daraus heraus. Genau das macht jedes Unix, und
 // genau das macht `dd` moeglich.
+// DIE SPERRE DER PLATTE. `atomic.L_FS` schuetzt in `fs.fi` die
+// Arbeitsbloecke des Dateisystems -- und darunter die ATA-Register, die
+// `blk.fi` benutzt und die keine eigene haben. Ein `dd if=/dev/hda`
+// auf einem zweiten Kern wuerde einem OFS mitten im Sektor die Tore
+// umschreiben. Der Zwischenpuffer hier ist der zweite Grund: er ist
+// EINER fuer alle Kerne.
+fn enter(state: u64) -> u64 {
+    let flags: u64 = sched.irq_save()
+    let me: u64 = cpu.here(state)
+    if atomic.lock_owner(state, atomic.L_FS) == me + 1 {
+        return flags | 0x8000000000000000
+    }
+    atomic.lock_take(state, atomic.L_FS, me)
+    return flags
+}
+
+fn leave(state: u64, flags: u64) {
+    if (flags & 0x8000000000000000) == 0 {
+        atomic.lock_give(state, atomic.L_FS)
+    }
+    sched.irq_restore(flags & 0x7FFFFFFFFFFFFFFF)
+}
+
 fn block_read(state: u64, dev: u64, off: u64, dst: u64, len: u64) -> u64 {
+    let f: u64 = enter(state)
+    let r: u64 = block_read_inner(state, dev, off, dst, len)
+    leave(state, f)
+    return r
+}
+
+fn block_write(state: u64, dev: u64, off: u64, src: u64, len: u64) -> u64 {
+    let f: u64 = enter(state)
+    let r: u64 = block_write_inner(state, dev, off, src, len)
+    leave(state, f)
+    return r
+}
+
+fn block_read_inner(state: u64, dev: u64, off: u64, dst: u64,
+    len: u64) -> u64 {
     let scratch: u64 = state + kstate.K14_OFF + 0x740 + 0x40
     let total: u64 = blk.blocks_on(state, dev) * BS
     if off >= total {
@@ -362,7 +403,8 @@ fn block_read(state: u64, dev: u64, off: u64, dst: u64, len: u64) -> u64 {
     return done
 }
 
-fn block_write(state: u64, dev: u64, off: u64, src: u64, len: u64) -> u64 {
+fn block_write_inner(state: u64, dev: u64, off: u64, src: u64,
+    len: u64) -> u64 {
     let scratch: u64 = state + kstate.K14_OFF + 0x740 + 0x40
     let total: u64 = blk.blocks_on(state, dev) * BS
     if off >= total {
