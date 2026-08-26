@@ -6,7 +6,8 @@ liest seine eigene Hardware ueber PCI, spricht NVMe ueber DMA, laeuft auf
 mehreren Prozessoren, bietet eine POSIX-Schicht mit den Systemaufruf-
 nummern von Linux x86-64, startet ein Userland aus eigenstaendigen
 ELF-Dateien von der Platte — eine Shell und dreiundzwanzig Werkzeuge —
-und **zeigt das alles auf einem Bildschirm**.
+und **zeigt das alles in Fenstern**: mit Maus, Fensterserver und
+TrueType-Schriften mit Kantenglaettung.
 
 mehreren Prozessoren, **spricht TCP/IP ueber eine virtio-net-Karte**,
 bietet eine POSIX-Schicht mit den Systemaufrufnummern von Linux x86-64
@@ -201,11 +202,19 @@ Zeileneditor, `cd`, `exit` — und fuenfundzwanzig Werkzeuge: `cat`, `cp`,
 
 ## Was ihm fehlt
 
-* **Kein Fenstersystem.** Es gibt einen Rahmenpuffer, eine Textkonsole
-  und `/dev/fb` (Runde K7) — aber nur EINE Flaeche. Konsole und Programm
-  uebermalen sich, wenn sie dieselben Bildzeilen nehmen. Es gibt auch
-  kein `ioctl`: ein Programm erfaehrt die Groesse des Bildes ueber
-  `lseek(SEEK_END)` und die Breite gar nicht.
+* **Der Fensterserver laeuft IM KERN.** Runde K10 hat Fenster, Maus,
+  Stapelreihenfolge, Eingabefokus und echte Schriften — aber der Server
+  sitzt in Ring 0, weil dieser Kernel keinen Speicher zwischen zwei
+  Prozessen teilen kann (`mmap` kennt anonyme Seiten und den
+  Rahmenpuffer, sonst nichts). Der Schutz zwischen den ANWENDUNGEN
+  steht; der zwischen Server und Anwendung nicht.
+* **Kein `ioctl` fuer die Flaeche.** Ein Programm erfaehrt die Groesse
+  seines Fensters ueber `wm_info`, die des Bildschirms ueber
+  `lseek(SEEK_END)` auf `/dev/fb` — aendern kann es die Aufloesung
+  nicht.
+* **Kein Hinting, keine Unterpixel-Positionierung, keine Drehung.** Der
+  Rasterer setzt Glyphen auf ganze Bildpunkte und setzt zusammengesetzte
+  Glyphen mit ihrer Verschiebung ein, nicht mit ihrer Matrix.
 * **Kein Netz.** Kein Treiber fuer eine Netzkarte. Ein TCP/IP-Stack in
   Firn existiert (Runde K3, `docs/OSUM-K3.md`), er liegt aber im
   Firn-Repository unter `lib/net/` und ist nie an diesen Kernel
@@ -262,6 +271,8 @@ bash tools/posix/run.sh       # POSIX-Schicht und libc (K4)
 bash tools/smp/run.sh         # vier Prozessoren (K5)
 bash tools/userland/run.sh    # Shell und Werkzeuge (K6)
 bash tools/gfx/run.sh         # der Bildschirm (K7)
+bash tools/unix/run.sh        # Signale, Terminal, Uhr, Zufall (K9)
+bash tools/wm/run.sh          # Maus, Fenster, TrueType (K10)
 ```
 
 Den Kernel mit Bildschirm starten und selbst hinsehen — `-vga std` ist
@@ -270,6 +281,17 @@ die Karte, die `kernel/fb.fi` bedient:
 ```sh
 qemu-system-x86_64 -kernel /tmp/k.mb -m 256 -append "osum gfx" \
    -serial stdio -vga std
+```
+
+Und mit **Fenstern**, Maus und echten Schriften (Runde K10). Die
+Schriften liegen auf der Platte, also braucht es ein Abbild mit
+`/lib/mono.ttf` und `/lib/sans.ttf` darauf:
+
+```sh
+python3 tools/osum/mkfs.py build /tmp/d.img 4096 /lib/ \
+   /lib/mono.ttf=assets/osum-mono.ttf /lib/sans.ttf=assets/osum-sans.ttf
+qemu-system-x86_64 -kernel /tmp/k.mb -m 256 -append "gfx wm wmhold" \
+   -serial stdio -vga std -drive file=/tmp/d.img,format=raw,if=ide,index=0
 ```
 
 Ein Abbild von Hand bauen und starten (was `tools/userland/run.sh`
@@ -368,6 +390,9 @@ nachtraeglich umgeschrieben.
 | `docs/ROUNDK6.md` | das Userland: Shell und Werkzeuge |
 | `docs/ROUNDK7.md` | der Bildschirm: Rahmenpuffer, Textkonsole, /dev/fb |
 | `docs/ROUNDK7B.md` | warum nach dem Verschmelzen die Buchstaben vom Schirm verschwanden — und die Karte von `kdata` |
+| `docs/ROUNDK8.md` | virtio-net und der Stack aus K3 am Kernel |
+| `docs/ROUNDK9.md` | Signale, Terminals, Uhr und Zufall |
+| `docs/ROUNDK10.md` | die Oberflaeche: Maus, Fensterserver, TrueType mit Kantenglaettung |
 
 `ENTFERNEN-AUS-FIRN.md` beschreibt, was im Firn-Repository geloescht
 werden muss, damit dort nichts doppelt liegt. **Ausgefuehrt ist das
