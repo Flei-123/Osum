@@ -293,10 +293,10 @@ if [ ! -f /nirgends ]; then echo F; fi
 if [ -d /bin ]; then echo G; fi
 if [ -s /d/drei.txt ]; then echo H; fi
 if [ -z "" ]; then echo I; fi
-i=1
-while [ $i -lt 4 ]; do
-  echo w$i
-  i=$i$i
+s=x
+while [ $s != xxxx ]; do
+  echo w$s
+  s=${s}x
 done
 for x in eins zwei drei; do echo f=$x; done
 L="a b"
@@ -478,7 +478,7 @@ du_soll() { # verzeichnis anzeigename
     echo "tee-test"
     echo "/dev/hda on / type ofs (rw)"
 } > "$TMPD/werk.soll"
-head -n 9 "$TMPD/werk.ist" > "$TMPD/werk.ist9"
+head -n 10 "$TMPD/werk.ist" > "$TMPD/werk.ist9"
 dateien_gleich "du, xargs, tee und mount sagen, was sie sollen" \
     "$TMPD/werk.soll" "$TMPD/werk.ist9"
 grep -qaE '^  blocks [0-9]+  free [0-9]+  inodes [0-9]+$' "$TMPD/werk.txt" \
@@ -522,8 +522,9 @@ F
 G
 H
 I
-w1
-w11
+wx
+wxx
+wxxx
 f=eins
 f=zwei
 f=drei
