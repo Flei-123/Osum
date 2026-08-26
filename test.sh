@@ -137,7 +137,10 @@ bad() { FAIL=$((FAIL + 1)); FAILED="$FAILED\n  $1"; echo "  FEHLER  $1"; }
 zusagen() {
     local log=$1
     local n
-    n=$(grep -aoE '^[A-Z]+: [0-9]+ (passed|proofs)' "$log" | tail -1 | grep -oE '[0-9]+' | head -1)
+    # `[A-Z][A-Z0-9]*` und nicht `[A-Z]+`: der Laeufer von Runde K11
+    # meldet sich als "K11:", und mit dem alten Muster waeren seine
+    # Zusagen still unter den Tisch gefallen.
+    n=$(grep -aoE '^[A-Z][A-Z0-9]*: [0-9]+ (passed|proofs)' "$log" | tail -1 | grep -oE '[0-9]+' | tail -1)
     [ -n "${n:-}" ] && ZUSAGEN=$((ZUSAGEN + n))
 }
 
