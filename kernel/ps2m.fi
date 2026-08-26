@@ -56,6 +56,8 @@ import serial
 
 export {
     init, present, irq, id, x, y, buttons, wheel, packets, drops, moves,
+    irqs, polls, spurious, clicks, status, reset_counters, poll_one,
+    set_poll, polling,
     set_bounds, set_pos, changed, take_change,
     B_LEFT, B_RIGHT, B_MIDDLE, selftest, selftest_max
 }
@@ -82,6 +84,10 @@ const S_MOVES: u64 = 0x078
 const S_CHANGED: u64 = 0x080 // 1 = seit dem letzten Blick etwas passiert
 const S_LASTBTN: u64 = 0x088
 const S_CLICKS: u64 = 0x090
+const S_IRQS: u64 = 0x098 // wie oft Vektor 44 wirklich gelaufen ist
+const S_POLLS: u64 = 0x0A0
+const S_NOPOLL: u64 = 0x0A8 // GEGENPROBE: nur Unterbrechungen
+const S_SPURIOUS: u64 = 0x0B0 // wie oft Vektor 44 wirklich gelaufen ist
 
 const B_LEFT: u64 = 1
 const B_RIGHT: u64 = 2
@@ -156,7 +162,23 @@ fn set_rate(r: u64) {
 
 // ------------------------------------------------------------- Start
 
+// Der ganze Aufsetzweg laeuft mit ABGESCHALTETEN UNTERBRECHUNGEN, und
+// das ist keine Vorsicht, sondern notwendig: die Antworten des Geraets
+// (0xFA, 0xAA, die Kennung) kommen ueber DASSELBE Tor wie spaeter die
+// Pakete. Waere IRQ 12 dabei offen, laese die Behandlungsroutine die
+// Antwort weg, `take` bekaeme das naechste Oktett und der Aufsetzweg
+// waere um eines verschoben -- ein Fehler, der sich als "das Geraet hat
+// kein Rad" tarnt.
 fn init(state: u64, w: u64, h: u64) -> bool {
+    let flags: u64 = asm("pushfq\npop rax\ncli", out("rax"))
+    let r: bool = init_inner(state, w, h)
+    if (flags & 0x200) != 0 {
+        asm("sti")
+    }
+    return r
+}
+
+fn init_inner(state: u64, w: u64, h: u64) -> bool {
     s(state, S_READY, 0)
     s(state, S_ID, 0)
     s(state, S_PHASE, 0)
@@ -204,6 +226,15 @@ fn init(state: u64, w: u64, h: u64) -> bool {
     if mouse_cmd(0xF4) != 0xFA {
         return false
     }
+    // Was noch im Ausgabepuffer liegt, gehoert zum Aufsetzen und nicht
+    // zum ersten Paket. Ohne dieses Leeren faengt der Paketzaehler mit
+    // einem Oktett an, das keines ist -- und der Zeiger springt einmal.
+    var rest: u64 = 0
+    while rest < 32 && (serial.in8(CMD) as u64 & 1) != 0 {
+        serial.in8(DATA)
+        rest = rest + 1
+    }
+    s(state, S_PHASE, 0)
     s(state, S_READY, 1)
     return true
 }
@@ -301,8 +332,26 @@ fn delta(v: u64, negativ: bool) -> i64 {
 
 // Vektor 44. Ein Oktett je Unterbrechung; das Paket ist erst nach drei
 // oder vier davon vollstaendig.
+// Vektor 44. EIN OKTETT, WENN AUCH EINES DA IST -- und das ist der
+// Unterschied zwischen einem Treiber und einer Vermutung.
+//
+// Der Fensterserver sieht ausserdem selbst im Baustein nach (siehe
+// `poll_one`). Holt die Abfrage ein Oktett, waehrend die Unterbrechung
+// dafuer schon unterwegs ist, laeuft die Behandlungsroutine auf einen
+// LEEREN Ausgabepuffer -- und `in al, 0x60` gibt dann das zuletzt
+// gelesene Oktett noch einmal. Ohne die Pruefung unten wandert dieses
+// Gespenst als Paketanfang in die Zustandsmaschine. Gemessen: 18
+// verworfene Oktette bei siebzehn Paketen, und nach der Pruefung keines.
 fn irq(state: u64) {
-    let c: u64 = serial.in8(DATA) as u64
+    s(state, S_IRQS, g(state, S_IRQS) + 1)
+    if (serial.in8(CMD) as u64 & 0x21) != 0x21 {
+        s(state, S_SPURIOUS, g(state, S_SPURIOUS) + 1)
+        return
+    }
+    consume(state, serial.in8(DATA) as u64)
+}
+
+fn consume(state: u64, c: u64) {
     let phase: u64 = g(state, S_PHASE)
     if phase == 0 {
         // DER ANKER: Bit 3 des ersten Oktetts ist immer gesetzt. Passt
@@ -394,6 +443,80 @@ fn apply(state: u64, rad: u64) {
             s(state, S_CHANGED, 1)
         }
     }
+}
+
+fn irqs(state: u64) -> u64 {
+    return g(state, S_IRQS)
+}
+
+fn polls(state: u64) -> u64 {
+    return g(state, S_POLLS)
+}
+
+fn spurious(state: u64) -> u64 {
+    return g(state, S_SPURIOUS)
+}
+
+// GEGENPROBE ZUM RUECKFALL. Mit `nompoll` wird NUR die Unterbrechung
+// genommen -- dann steht im Mitschnitt, wie weit der Zeiger damit
+// wirklich kommt. Ohne diese Zahl waere die Abfrage im Fensterserver
+// eine Bequemlichkeit statt einer gemessenen Notwendigkeit.
+fn set_poll(state: u64, on: bool) {
+    if on {
+        s(state, S_NOPOLL, 0)
+    } else {
+        s(state, S_NOPOLL, 1)
+    }
+}
+
+fn polling(state: u64) -> bool {
+    return g(state, S_NOPOLL) == 0
+}
+
+// Ein Oktett, das der Baustein bereithaelt, OHNE Unterbrechung.
+//
+// NACHSEHEN UND LESEN GEHOEREN ZUSAMMEN, und zwar mit ABGESCHALTETER
+// UNTERBRECHUNG. Sonst gibt es ein Zeitfenster zwischen "das Tor sagt,
+// es liegt eines bereit" und "ich hole es": faellt IRQ 12 hinein, holt
+// die Behandlungsroutine dasselbe Oktett, und der Abfragende bekommt das
+// naechste -- die Paketgrenze ist verschoben. Gemessen: ohne diese
+// Klammer 18 verworfene Oktette in einem Lauf mit siebzehn Paketen, mit
+// ihr keines.
+fn poll_one(state: u64) -> bool {
+    let flags: u64 = asm("pushfq\npop rax\ncli", out("rax"))
+    var gab: bool = false
+    if (serial.in8(CMD) as u64 & 0x21) == 0x21 {
+        s(state, S_POLLS, g(state, S_POLLS) + 1)
+        consume(state, serial.in8(DATA) as u64)
+        gab = true
+    }
+    if (flags & 0x200) != 0 {
+        asm("sti")
+    }
+    return gab
+}
+
+// Das Zustandstor des Bausteins, unveraendert. Bit 0: es liegt ein
+// Oktett bereit. Bit 5: es kommt vom ZWEITEN Anschluss. Damit laesst
+// sich von aussen unterscheiden, ob das Geraet nichts schickt oder ob
+// die Unterbrechung nicht ankommt -- zwei voellig verschiedene Fehler,
+// die im Bild gleich aussehen (der Zeiger bewegt sich nicht).
+fn status() -> u64 {
+    return serial.in8(CMD) as u64
+}
+
+// Nach dem Selbsttest: die Zaehler auf null. Der Selbsttest fuettert
+// `apply` mit erfundenen Paketen, und die duerfen nicht als Messwerte
+// eines echten Geraets durchgehen.
+fn reset_counters(state: u64) {
+    s(state, S_PACKETS, 0)
+    s(state, S_DROPS, 0)
+    s(state, S_MOVES, 0)
+    s(state, S_CLICKS, 0)
+    s(state, S_IRQS, 0)
+    s(state, S_POLLS, 0)
+    s(state, S_SPURIOUS, 0)
+    s(state, S_WHEEL, 0)
 }
 
 fn clicks(state: u64) -> u64 {
