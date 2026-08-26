@@ -109,6 +109,38 @@ indirekten Bloecken, Verzeichnissen, `getdents64`. Es liegt auf einer
 RAM-Platte, auf einer ATA-Platte oder auf NVMe. `tools/osum/mkfs.py`
 baut Abbilder davon ausserhalb des Kernels.
 
+**Mehrere Dateisysteme nebeneinander (Runde K14).** Ein Dateisystem
+meldet sich mit einer **Tafel von neun Verrichtungen** an
+(`kernel/vfsops.fi`) — echte Funktionszeiger, nachgezaehlt in der
+uebersetzten Objektdatei. `kernel/vfs.fi` loest Pfade ueber
+Einhaengegrenzen hinweg auf (laengster passender Einhaengepfad, an einer
+NAMENSGRENZE: `/mnttest` ist nicht `/mnt`), haengt mit einem Ziel ein
+(`mount`, Linux' Nummer 165) und haengt wieder aus (`umount2`, 166) —
+mit Pruefung auf offene Deskriptoren, also `-EBUSY` statt Datenverlust.
+OFS ist der **erste Nutzer** dieser Schicht (`kernel/ofs.fi`), kein
+Sonderfall daneben: mit dem Wort `vfsall` geht auch die Wurzel durch
+dieselbe Tafel, und dieselbe Arbeit ergibt Oktett fuer Oktett dieselbe
+Ausgabe. Darauf:
+
+* **`/proc`** (`kernel/procfs.fi`) — ein Dateisystem, dessen Dateien beim
+  LESEN entstehen: `meminfo`, `cpuinfo`, `uptime`, `mounts`, `stat`,
+  `version`, und je Prozess `status`, `stat`, `cmdline`, `maps`, `fd/`.
+  `cmdline` liest den Adressraum des fremden Prozesses ueber
+  `proc.translate`; `maps` laeuft seine SEITENTABELLE ab — ein Prozess,
+  der sich eine Seite per `mmap` nimmt, hat danach eine andere Datei.
+* **`/dev`** (`kernel/devfs.fi`) — `null`, `zero`, `random`, `urandom`,
+  `tty`, `console`, `fb` und die Blockgeraete `hda`, `hdb`, `ram0`,
+  `nvme0`. `lseek(SEEK_END)` auf `/dev/hdb` sagt, wie gross die Platte
+  ist; `ls -l` unterscheidet Zeichen- und Blockgeraet.
+* **FAT32, lesend und schreibend** (`kernel/fat.fi`) — mit langen Namen
+  (VFAT), Unterverzeichnissen und Ketten ueber beliebig viele Verbaende.
+  Gemessen gegen die ECHTEN Werkzeuge: das Abbild kommt von
+  `mkfs.vfat`, die Dateien von `mcopy`, und `fsck.fat` faellt das Urteil
+  ueber das, was Osum geschrieben hat (Rueckgabe 0, keine Anmerkung).
+* **MBR und GPT** (`kernel/part.fi`) — beide Tafeln, bei GPT werden
+  BEIDE CRC32-Pruefsummen gerechnet. Ein umgedrehtes Bit im Kopf, und
+  die Platte wird nicht mehr gelesen.
+
 **ELF-Lader.** `/bin/sh` ist eine Datei. Der Kernel liest sie von der
 Platte, legt ihre Segmente mit den Rechten, die sie verlangt, in einen
 frischen Adressraum und startet sie. Alle Werkzeuge sind eigenstaendige
@@ -357,7 +389,7 @@ cd osum
 # einmalig: den festgenagelten Firn-Uebersetzer bauen
 FIRN_REPO=/pfad/zu/firn ./vendor/firn/hole-firnc.sh
 
-# die ganze Abnahme (fuenfzehn Abschnitte, 1181 Zusagen, QEMU pro Fall)
+# die ganze Abnahme (neunzehn Abschnitte, 1638 Zusagen, QEMU pro Fall)
 ./test.sh
 ```
 
@@ -380,6 +412,7 @@ bash tools/net/run.sh         # virtio-net und der TCP/IP-Stack (K8)
 bash tools/guard/run.sh       # SMEP/SMAP und das Boot-Modul (K10)
 bash tools/wm/run.sh          # Maus, Fenster, TrueType (K10)
 bash tools/hv/run.sh          # der Hypervisor: AMD-V, NPT, Gaeste (K12)
+bash tools/k14/run.sh         # VFS, /proc, /dev, FAT32, MBR/GPT (K14)
 ```
 
 Den Kernel mit Bildschirm starten und selbst hinsehen — `-vga std` ist
@@ -504,6 +537,7 @@ nachtraeglich umgeschrieben.
 | `docs/ROUNDK10W.md` | die Oberflaeche: Maus, Fensterserver, TrueType mit Kantenglaettung |
 | `docs/ROUNDK12.md` | ein Wirt fuer fremde Prozessoren: AMD-V, verschachtelte Seitentabellen, Gaeste, Gastmaschinen aus Ring 3 |
 | `docs/ROUNDK13.md` | **Benutzer, Rechte und `init`**: uid/gid, chmod/chown, /etc/passwd und /etc/shadow, Anmeldung, der erste Prozess |
+| `docs/ROUNDK14.md` | **VFS und fremde Dateisysteme**: die Tafel der neun Verrichtungen, /proc, /dev, FAT32 gegen `mkfs.vfat`/`mcopy`/`fsck.fat`, MBR und GPT |
 
 `ENTFERNEN-AUS-FIRN.md` beschreibt, was im Firn-Repository geloescht
 werden muss, damit dort nichts doppelt liegt. **Ausgefuehrt ist das
