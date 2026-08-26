@@ -69,9 +69,10 @@ import kbd
 import ps2m
 
 export {
-    stage, irq, service, say, report, ready, count,
+    stage, irq, service, poll, say, report, ready, count,
     msc_ready, msc_blocks, msc_bsize, msc_read, msc_write,
     unplug_check, unplug_now, keys, reports, enums, hotplugs, unplugs,
+    stat,
     have_kbd, have_mouse, msc_errors, msc_ios, selftest,
     DRV_NONE, DRV_KBD, DRV_MOUSE, DRV_MSC
 }
@@ -896,6 +897,22 @@ fn service(state: u64) {
     }
 }
 
+// DER ZWEITE WEG ZU DENSELBEN BERICHTEN, und er ist eine GEGENPROBE und
+// kein Ersatz. Mit `usbnoirq` bleibt der Meldevektor maskiert: der
+// Regler bewegt die Daten weiterhin, aber niemand sagt es dem Kernel --
+// und dann kommt keine Taste an. Mit `usbpoll` sieht der Kernel selbst
+// nach, und dieselben Tasten kommen an. Der Unterschied zwischen den
+// beiden Laeufen ist der Beweis, dass die Meldung wirklich das ist, was
+// die Eingabe traegt, und nicht eine Verzierung neben einer
+// Abfrageschleife.
+fn poll(state: u64) {
+    if g(state, S_READY) == 0 {
+        return
+    }
+    xhci.drain(state)
+    service(state)
+}
+
 fn deliver(state: u64, d: u64) {
     if dg(state, d, D_DRIVER) == DRV_KBD {
         kbd_report(state, d)
@@ -1542,6 +1559,7 @@ fn report(state: u64) {
     var s_my: [u8; 5] = " my=\0"
     var s_mb: [u8; 7] = " mbtn=\0"
     var s_mp: [u8; 7] = " mpkt=\0"
+    var s_mc: [u8; 7] = " mclk=\0"
     if g(state, S_READY) == 0 {
         return
     }
@@ -1582,7 +1600,89 @@ fn report(state: u64) {
     serial.dec(ps2m.buttons(state))
     serial.puts((&s_mp[0]) as u64)
     serial.dec(ps2m.packets(state))
+    serial.puts((&s_mc[0]) as u64)
+    serial.dec(ps2m.clicks(state))
     serial.nl()
+}
+
+// WAS RING 3 UEBER DIESEN BAUM ERFAHREN DARF. Eine Zahl je Frage, ueber
+// SYS_OSUM_USBSTAT (1701) -- damit `/bin/k17` jede Zusage dieser Runde
+// von AUSSEN messen kann und nicht aus der seriellen Leitung des Kerns
+// abschreiben muss. Dieselbe Bauart wie SYS_OSUM_MNTSTAT aus Runde K14.
+fn stat(state: u64, what: u64) -> u64 {
+    if what == 0 {
+        return yes(ready(state))
+    }
+    if what == 1 {
+        return g(state, S_NDEV)
+    }
+    if what == 2 {
+        return yes(have_kbd(state))
+    }
+    if what == 3 {
+        return yes(have_mouse(state))
+    }
+    if what == 4 {
+        return yes(msc_ready(state))
+    }
+    if what == 5 {
+        return g(state, S_BLOCKS)
+    }
+    if what == 6 {
+        return g(state, S_BSIZE)
+    }
+    if what == 7 {
+        return g(state, S_KEYS)
+    }
+    if what == 8 {
+        return g(state, S_REPORTS)
+    }
+    if what == 9 {
+        return g(state, S_MOVES)
+    }
+    if what == 10 {
+        return xhci.events(state)
+    }
+    if what == 11 {
+        return xhci.irqs(state)
+    }
+    if what == 12 {
+        return g(state, S_ENUMS)
+    }
+    if what == 13 {
+        return g(state, S_UNPLUGS)
+    }
+    if what == 14 {
+        return g(state, S_HOTPLUGS)
+    }
+    if what == 15 {
+        return g(state, S_MSCIO)
+    }
+    if what == 16 {
+        return g(state, S_MSCERR)
+    }
+    if what == 17 {
+        return xhci.errors(state)
+    }
+    if what == 18 {
+        return xhci.ports(state)
+    }
+    if what == 19 {
+        return xhci.slots(state)
+    }
+    if what == 20 {
+        return xhci.ctx_size(state)
+    }
+    if what == 21 {
+        return xhci.cmds(state)
+    }
+    if what == 22 {
+        return selftest(state)
+    }
+    if what == 23 {
+        return g(state, S_FAILS)
+    }
+    return 0
 }
 
 // Der Selbsttest dieser Schicht: Zusagen, die sie ueber sich selbst

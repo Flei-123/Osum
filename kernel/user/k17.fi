@@ -1,0 +1,299 @@
+// kernel/user/k17.fi -- Runde K17: der USB-Baum, von AUSSEN gemessen.
+//
+// Wie `/bin/posix` (K4), `/bin/unix` (K9) und `/bin/k14` (K14): das
+// Programm laeuft in Ring 3, macht jeden Aufruf wirklich, und schreibt
+// jede Antwort als
+//
+//     k17: <name> = <zahl>
+//
+// auf die Konsole. `tools/k17/run.sh` haelt jede dieser Zahlen gegen
+// das, was sie sein MUSS. Was hier nicht als Zahl herauskommt, ist keine
+// Zusage, sondern eine Behauptung.
+//
+// VIER ABSCHNITTE:
+//
+//   1. WAS DER BAUM SAGT. Zahl der Geraete, Klassen, Anschluesse,
+//      Steckplaetze, Meldungen -- gelesen ueber SYS_OSUM_USBSTAT, also
+//      aus dem Kernel und nicht aus dem Mitschnitt.
+//   2. DER STICK IST EIN DATEISYSTEM. Eine Datei, die der WIRT
+//      hineingelegt hat, wird gelesen und Oktett fuer Oktett verglichen;
+//      eine neue wird geschrieben, und der Wirt liest sie nach dem Lauf
+//      mit `mtools` wieder heraus. `stat` sagt, auf welchem Geraet sie
+//      liegt -- und das muss ein anderes sein als die Wurzel.
+//   3. ABZIEHEN IM BETRIEB. Ein Deskriptor bleibt OFFEN, dann wird das
+//      Geraet abgezogen (SYS_OSUM_USBPULL), und danach MUSS jeder
+//      Zugriff darauf -ENODEV geben -- nicht null Oktette, nicht -EIO,
+//      und vor allem keine Panik. Der Prozess lebt weiter, und das
+//      beweist die letzte Zeile.
+//   4. DASS ES DANACH WEITERGEHT. Nach dem Abziehen wird auf der
+//      WURZEL gelesen und geschrieben. Ein Kern, den ein abgezogener
+//      Stick mitnimmt, kommt hier nicht an.
+
+profile kernel
+
+import ulib
+
+export { u_start }
+
+const SYS_READ: u64 = 0
+const SYS_WRITE: u64 = 1
+const SYS_OPEN: u64 = 2
+const SYS_CLOSE: u64 = 3
+const SYS_STAT: u64 = 4
+const SYS_LSEEK: u64 = 8
+const SYS_GETDENTS64: u64 = 217
+const SYS_USBSTAT: u64 = 1701
+const SYS_USBPULL: u64 = 1702
+
+const O_RDONLY: u64 = 0
+const O_WRONLY: u64 = 1
+const O_RDWR: u64 = 2
+const O_CREAT: u64 = 64
+const O_TRUNC: u64 = 512
+
+const ST_DEV: u64 = 0
+const ST_SIZE: u64 = 48
+
+const E_NODEV: u64 = 19
+
+// Die Fragen an SYS_USBSTAT. Dieselbe Reihenfolge wie in `usb.stat`.
+const Q_READY: u64 = 0
+const Q_DEVS: u64 = 1
+const Q_KBD: u64 = 2
+const Q_MOUSE: u64 = 3
+const Q_MSC: u64 = 4
+const Q_BLOCKS: u64 = 5
+const Q_BSIZE: u64 = 6
+const Q_KEYS: u64 = 7
+const Q_REPORTS: u64 = 8
+const Q_MOVES: u64 = 9
+const Q_EVENTS: u64 = 10
+const Q_IRQS: u64 = 11
+const Q_ENUMS: u64 = 12
+const Q_UNPLUGS: u64 = 13
+const Q_MSCIO: u64 = 15
+const Q_MSCERR: u64 = 16
+const Q_XERR: u64 = 17
+const Q_PORTS: u64 = 18
+const Q_SLOTS: u64 = 19
+const Q_CTX: u64 = 20
+const Q_CMDS: u64 = 21
+const Q_SELF: u64 = 22
+const Q_FAILS: u64 = 23
+
+fn line(name: u64, v: u64) {
+    var s_pre: [u8; 6] = "k17: \0"
+    var s_eq: [u8; 4] = " = \0"
+    ulib.say((&s_pre[0 as usize]) as u64)
+    ulib.say(name)
+    ulib.say((&s_eq[0 as usize]) as u64)
+    ulib.sayn(v)
+    ulib.nl()
+}
+
+// Ein Fehler als POSITIVE Zahl. 0 heisst "ging durch", sonst der errno.
+fn err_of(r: u64) -> u64 {
+    if (r as i64) < 0 {
+        return (0 - (r as i64)) as u64
+    }
+    return 0
+}
+
+fn stat_of(what: u64) -> u64 {
+    return ulib.sys(SYS_USBSTAT, what, 0, 0)
+}
+
+fn u_start() {
+    var n_ready: [u8; 6] = "ready\0"
+    var n_devs: [u8; 8] = "devices\0"
+    var n_kbd: [u8; 4] = "kbd\0"
+    var n_mouse: [u8; 6] = "mouse\0"
+    var n_msc: [u8; 4] = "msc\0"
+    var n_blocks: [u8; 7] = "blocks\0"
+    var n_bsize: [u8; 6] = "bsize\0"
+    var n_ports: [u8; 6] = "ports\0"
+    var n_slots: [u8; 6] = "slots\0"
+    var n_ctx: [u8; 8] = "ctxsize\0"
+    var n_ev: [u8; 7] = "events\0"
+    var n_irq: [u8; 5] = "irqs\0"
+    var n_cmds: [u8; 5] = "cmds\0"
+    var n_enum: [u8; 6] = "enums\0"
+    var n_self: [u8; 9] = "selftest\0"
+    var n_fails: [u8; 6] = "fails\0"
+    var n_xerr: [u8; 8] = "xhcierr\0"
+    var n_mscio: [u8; 6] = "mscio\0"
+    var n_mscer: [u8; 7] = "mscerr\0"
+    var n_keys: [u8; 5] = "keys\0"
+    var n_rep: [u8; 8] = "reports\0"
+
+    var n_hostlen: [u8; 9] = "hostlen\0\0"
+    var n_hostok: [u8; 7] = "hostok\0"
+    var n_wrote: [u8; 6] = "wrote\0"
+    var n_reread: [u8; 7] = "reread\0"
+    var n_devdiff: [u8; 8] = "devdiff\0"
+    var n_openfd: [u8; 7] = "openfd\0"
+    var n_pull: [u8; 5] = "pull\0"
+    var n_after: [u8; 10] = "afterread\0"
+    var n_awrite: [u8; 11] = "afterwrite\0"
+    var n_aopen: [u8; 10] = "afteropen\0"
+    var n_gone: [u8; 8] = "mscgone\0"
+    var n_root: [u8; 9] = "rootread\0"
+    var n_rootw: [u8; 10] = "rootwrite\0"
+    var n_done: [u8; 5] = "done\0"
+    var n_unpl_name: [u8; 8] = "unplugs\0"
+
+    var p_host: [u8; 15] = "/usb/host.txt\0\0"
+    var p_neu: [u8; 14] = "/usb/neu.txt\0\0"
+    var p_root: [u8; 9] = "/k17.txt\0"
+    var soll: [u8; 25] = "von linux auf den stick\n\0"
+    var text: [u8; 15] = "osum-war-hier\n\0"
+    var buf: [u8; 128] = [0 as u8; 128]
+    var st: [u8; 144] = [0 as u8; 144]
+    var st2: [u8; 144] = [0 as u8; 144]
+
+    // ---------------------------------------------- 1. was der Baum sagt
+    line((&n_ready[0 as usize]) as u64, stat_of(Q_READY))
+    line((&n_devs[0 as usize]) as u64, stat_of(Q_DEVS))
+    line((&n_kbd[0 as usize]) as u64, stat_of(Q_KBD))
+    line((&n_mouse[0 as usize]) as u64, stat_of(Q_MOUSE))
+    line((&n_msc[0 as usize]) as u64, stat_of(Q_MSC))
+    line((&n_blocks[0 as usize]) as u64, stat_of(Q_BLOCKS))
+    line((&n_bsize[0 as usize]) as u64, stat_of(Q_BSIZE))
+    line((&n_ports[0 as usize]) as u64, stat_of(Q_PORTS))
+    line((&n_slots[0 as usize]) as u64, stat_of(Q_SLOTS))
+    line((&n_ctx[0 as usize]) as u64, stat_of(Q_CTX))
+    line((&n_ev[0 as usize]) as u64, stat_of(Q_EVENTS))
+    line((&n_irq[0 as usize]) as u64, stat_of(Q_IRQS))
+    line((&n_cmds[0 as usize]) as u64, stat_of(Q_CMDS))
+    line((&n_enum[0 as usize]) as u64, stat_of(Q_ENUMS))
+    line((&n_self[0 as usize]) as u64, stat_of(Q_SELF))
+    line((&n_fails[0 as usize]) as u64, stat_of(Q_FAILS))
+    line((&n_xerr[0 as usize]) as u64, stat_of(Q_XERR))
+    line((&n_keys[0 as usize]) as u64, stat_of(Q_KEYS))
+    line((&n_rep[0 as usize]) as u64, stat_of(Q_REPORTS))
+
+    // ------------------------------------- 2. der Stick als Dateisystem
+    var i: u64 = 0
+    while i < 128 {
+        buf[i as usize] = 0 as u8
+        i = i + 1
+    }
+    let fd: u64 = ulib.sys(SYS_OPEN, (&p_host[0 as usize]) as u64,
+        O_RDONLY, 0)
+    var got: u64 = 0
+    if (fd as i64) >= 0 {
+        got = ulib.sys(SYS_READ, fd, (&buf[0 as usize]) as u64, 128)
+        ulib.sys(SYS_CLOSE, fd, 0, 0)
+    }
+    line((&n_hostlen[0 as usize]) as u64, got)
+    line((&n_hostok[0 as usize]) as u64,
+        gleich((&buf[0 as usize]) as u64, (&soll[0 as usize]) as u64, 24))
+
+    let wfd: u64 = ulib.sys(SYS_OPEN, (&p_neu[0 as usize]) as u64,
+        O_WRONLY | O_CREAT | O_TRUNC, 420)
+    var wrote: u64 = 0
+    if (wfd as i64) >= 0 {
+        wrote = ulib.sys(SYS_WRITE, wfd, (&text[0 as usize]) as u64, 14)
+        ulib.sys(SYS_CLOSE, wfd, 0, 0)
+    }
+    line((&n_wrote[0 as usize]) as u64, wrote)
+
+    i = 0
+    while i < 128 {
+        buf[i as usize] = 0 as u8
+        i = i + 1
+    }
+    let rfd: u64 = ulib.sys(SYS_OPEN, (&p_neu[0 as usize]) as u64,
+        O_RDONLY, 0)
+    var back: u64 = 0
+    if (rfd as i64) >= 0 {
+        back = ulib.sys(SYS_READ, rfd, (&buf[0 as usize]) as u64, 128)
+        ulib.sys(SYS_CLOSE, rfd, 0, 0)
+    }
+    line((&n_reread[0 as usize]) as u64,
+        gleich((&buf[0 as usize]) as u64, (&text[0 as usize]) as u64, 14) * back)
+
+    // Zwei Dateisysteme, zwei st_dev. Ohne das waere "eingehaengt" ein
+    // Wort und keine Grenze.
+    ulib.sys(SYS_STAT, (&p_host[0 as usize]) as u64,
+        (&st[0 as usize]) as u64, 0)
+    ulib.sys(SYS_STAT, (&p_root[0 as usize]) as u64,
+        (&st2[0 as usize]) as u64, 0)
+    var diff: u64 = 0
+    if wort((&st[0 as usize]) as u64, ST_DEV)
+        != wort((&st2[0 as usize]) as u64, ST_DEV) {
+        diff = 1
+    }
+    line((&n_devdiff[0 as usize]) as u64, diff)
+    line((&n_mscio[0 as usize]) as u64, stat_of(Q_MSCIO))
+    line((&n_mscer[0 as usize]) as u64, stat_of(Q_MSCERR))
+
+    // ------------------------------------------ 3. abziehen im Betrieb
+    //
+    // DER DESKRIPTOR BLEIBT OFFEN. Das ist der ganze Punkt: ein Programm,
+    // das vor dem Abziehen alles zumacht, misst nichts.
+    let ofd: u64 = ulib.sys(SYS_OPEN, (&p_host[0 as usize]) as u64,
+        O_RDWR, 0)
+    var ok: u64 = 0
+    if (ofd as i64) >= 0 {
+        ok = 1
+    }
+    line((&n_openfd[0 as usize]) as u64, ok)
+    line((&n_pull[0 as usize]) as u64, ulib.sys(SYS_USBPULL, 0, 0, 0))
+    // Lesen auf dem offenen Deskriptor: MUSS -ENODEV geben.
+    let r2: u64 = ulib.sys(SYS_READ, ofd, (&buf[0 as usize]) as u64, 64)
+    line((&n_after[0 as usize]) as u64, err_of(r2))
+    let w2: u64 = ulib.sys(SYS_WRITE, ofd, (&text[0 as usize]) as u64, 4)
+    line((&n_awrite[0 as usize]) as u64, err_of(w2))
+    ulib.sys(SYS_CLOSE, ofd, 0, 0)
+    // Und ein NEUES Oeffnen auf demselben Pfad geht auch nicht mehr.
+    let nfd: u64 = ulib.sys(SYS_OPEN, (&p_host[0 as usize]) as u64,
+        O_RDONLY, 0)
+    var nerr: u64 = err_of(nfd)
+    if nerr == 0 {
+        ulib.sys(SYS_CLOSE, nfd, 0, 0)
+    }
+    line((&n_aopen[0 as usize]) as u64, nerr)
+    line((&n_gone[0 as usize]) as u64, stat_of(Q_MSC))
+    line((&n_unpl_name[0 as usize]) as u64, stat_of(Q_UNPLUGS))
+
+    // ------------------------------------------- 4. es geht weiter
+    let kfd: u64 = ulib.sys(SYS_OPEN, (&p_root[0 as usize]) as u64,
+        O_WRONLY | O_CREAT | O_TRUNC, 420)
+    var kw: u64 = 0
+    if (kfd as i64) >= 0 {
+        kw = ulib.sys(SYS_WRITE, kfd, (&text[0 as usize]) as u64, 14)
+        ulib.sys(SYS_CLOSE, kfd, 0, 0)
+    }
+    line((&n_rootw[0 as usize]) as u64, kw)
+    i = 0
+    while i < 128 {
+        buf[i as usize] = 0 as u8
+        i = i + 1
+    }
+    let k2: u64 = ulib.sys(SYS_OPEN, (&p_root[0 as usize]) as u64,
+        O_RDONLY, 0)
+    var kr: u64 = 0
+    if (k2 as i64) >= 0 {
+        kr = ulib.sys(SYS_READ, k2, (&buf[0 as usize]) as u64, 128)
+        ulib.sys(SYS_CLOSE, k2, 0, 0)
+    }
+    line((&n_root[0 as usize]) as u64,
+        gleich((&buf[0 as usize]) as u64, (&text[0 as usize]) as u64, 14) * kr)
+    line((&n_done[0 as usize]) as u64, 1)
+}
+
+fn wort(p: u64, off: u64) -> u64 {
+    return __mmio_read64((p + off) as *mut u64)
+}
+
+fn gleich(a: u64, b: u64, n: u64) -> u64 {
+    var i: u64 = 0
+    while i < n {
+        if __mmio_read8((a + i) as *mut u8) != __mmio_read8((b + i) as *mut u8) {
+            return 0
+        }
+        i = i + 1
+    }
+    return 1
+}

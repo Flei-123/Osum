@@ -78,6 +78,7 @@ import vfsops
 import devfs
 import part
 import blk
+import usb
 
 export {
     entry, neg, STAT_BYTES, DIRENT_HEAD,
@@ -529,6 +530,17 @@ const SYS_MOUNT: u64 = 165
 const SYS_UMOUNT2: u64 = 166
 const SYS_RENAME: u64 = 82
 const SYS_OSUM_MNTSTAT: u64 = 1700
+
+// RUNDE K17: der USB-Baum, von Ring 3 aus. Der Vorrat dieser Runde ist
+// 1700..1749; 1700 gehoert seit Runde K14 der Einhaengetafel, also faengt
+// diese Runde bei 1701 an. ZWEI Nummern und keine dreissig: was Ring 3
+// ueber USB wissen muss, ist eine Zahl je Frage, und was es TUN darf,
+// ist genau eines -- das Abziehen nachstellen, damit die Zusage
+// "abgezogen, und der Kern laeuft weiter" von aussen messbar wird.
+const SYS_OSUM_USBSTAT: u64 = 1701 // (was) -> Zahl
+const SYS_OSUM_USBPULL: u64 = 1702 // () -> wie oft abgezogen wurde
+const USB_MINNR: u64 = 1701
+const USB_MAXNR: u64 = 1702
 
 // Die Felder von `osum_mntstat`.
 const MS_USED: u64 = 0
@@ -989,6 +1001,24 @@ fn dispatch(number: u64, frame: u64, state: u64) -> u64 {
     }
     if is_k13(number) {
         return k13_call(state, me, number, a0, a1, a2, a3)
+    }
+    // RUNDE K17. Zwei Nummern, in einer eigenen Funktion -- aus genau
+    // demselben Grund, aus dem `k13_call` eine ist: der Rahmen von
+    // `dispatch` ist ohnehin der groesste dieses Kernels, und diese
+    // Runde hat den tiefsten Aufruf um vier Schichten verlaengert.
+    if number >= USB_MINNR && number <= USB_MAXNR {
+        return usb_call(state, number, a0)
+    }
+    return neg(errno.E_NOSYS)
+}
+
+fn usb_call(state: u64, number: u64, a0: u64) -> u64 {
+    if number == SYS_OSUM_USBSTAT {
+        return usb.stat(state, a0)
+    }
+    if number == SYS_OSUM_USBPULL {
+        usb.unplug_now(state)
+        return usb.unplugs(state)
     }
     return neg(errno.E_NOSYS)
 }
@@ -1957,6 +1987,15 @@ fn vfs_write(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
 // an der die Zeilendisziplin steht -- und die zweite waere irgendwann
 // die falsche.
 fn open_vfs(state: u64, me: u64, m: u64, path: u64, flags: u64) -> u64 {
+    // RUNDE K17: dieselbe Frage wie beim Lesen und Schreiben, nur
+    // frueher. Ohne diese drei Zeilen antwortet ein abgezogener Stick
+    // mit -ENOENT ("die Datei gibt es nicht"), und das ist die falsche
+    // Auskunft: die Datei gibt es sehr wohl, sie ist nur nicht mehr
+    // erreichbar. Der Unterschied ist der zwischen "loesch sie aus
+    // deiner Liste" und "steck ihn wieder ein".
+    if mnt_gone(state, m) {
+        return neg(errno.E_NODEV)
+    }
     var node: u64 = vfs.node_for(state, m, path)
     if node == 0 {
         if (flags & O_CREAT) == 0 {
