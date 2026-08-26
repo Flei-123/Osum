@@ -1,0 +1,487 @@
+// kernel/ps2m.fi -- Runde K10: das Zeigegeraet.
+//
+// Bis zu dieser Runde hatte Osum genau ein Eingabegeraet: die Tastatur
+// an IRQ 1 (`kernel/kbd.fi`, Runde 59). Eine Oberflaeche braucht das
+// zweite, und es haengt am DEMSELBEN Baustein -- der 8042 hat zwei
+// Anschluesse, und der zweite liegt auf IRQ 12.
+//
+// WARUM PS/2 UND NICHT USB-HID. Die Aufgabe liess die Wahl. PS/2 ist die
+// richtige: der Baustein ist schon aufgesetzt (die Tastatur laeuft
+// darueber seit Runde 59), QEMU baut ihn bei `-machine pc` immer ein,
+// und der QEMU-Monitor kann ihn ueber `mouse_move` und `mouse_button`
+// von aussen bedienen -- ohne das haette diese Runde keine MESSUNG,
+// sondern nur eine Behauptung. Ein USB-HID-Weg braucht davor einen
+// xHCI-Treiber, Endpunkte, Deskriptoren und eine Warteschlange; das ist
+// eine Runde fuer sich und stuende hier als halbfertiges Stueck.
+//
+// DER AUFSETZWEG, in genau dieser Reihenfolge -- jede Vertauschung hat
+// eine eigene Art zu scheitern:
+//
+//   1. 0xA8 an 0x64: den zweiten Anschluss einschalten. Vorher antwortet
+//      das Geraet auf gar nichts.
+//   2. 0x20 an 0x64, Antwort lesen, Bit 1 setzen (IRQ 12 zulassen),
+//      Bit 5 loeschen (den Takt des zweiten Anschlusses NICHT
+//      anhalten), 0x60 an 0x64 und das Oktett zurueckschreiben.
+//   3. 0xD4 an 0x64 sagt: das naechste Oktett an 0x60 geht an die MAUS
+//      und nicht an die Tastatur. Jedes Geraetekommando braucht das.
+//   4. 0xFF (Ruecksetzen) -- die Maus antwortet mit 0xFA, dann 0xAA
+//      (Selbsttest bestanden) und ihrer Kennung 0x00.
+//   5. Der Radgriff: Abtastrate 200, 100, 80, dann 0xF2 (Kennung
+//      abfragen). Meldet das Geraet jetzt 3 statt 0, hat es ein Rad und
+//      schickt VIER Oktette je Paket statt drei. Das ist kein Kniff,
+//      sondern die Art, wie Microsoft das Rad 1996 nachgereicht hat.
+//   6. 0xF4: Melden einschalten. Erst ab hier kommen Pakete.
+//
+// DAS PAKET, drei oder vier Oktette:
+//
+//   Oktett 0   Bit 0 links, Bit 1 rechts, Bit 2 Mitte, BIT 3 IMMER 1,
+//              Bit 4 Vorzeichen x, Bit 5 Vorzeichen y, Bit 6/7 Ueberlauf
+//   Oktett 1   Bewegung in x, ZWEIERKOMPLEMENT in acht Bit
+//   Oktett 2   Bewegung in y, ebenso -- und POSITIV IST NACH OBEN
+//   Oktett 3   das Rad, 0xF..0x1 (nur mit Kennung 3)
+//
+// Bit 3 des ersten Oktetts ist der einzige Anker, den es gibt: geht ein
+// Oktett verloren, laeuft der Zaehler fuer immer verschoben weiter. Wer
+// darauf nicht prueft, hat einen Zeiger, der nach einer Minute
+// diagonal wegfliegt. Hier wird jedes Paket damit abgeglichen, und was
+// nicht passt, wird gezaehlt (`drops`) statt stillschweigend benutzt.
+//
+// DASS Y NACH OBEN ZAEHLT UND DER BILDSCHIRM NACH UNTEN, ist der zweite
+// Fallstrick. `apply` zieht die y-Bewegung deshalb ab.
+
+profile kernel
+
+import kstate
+import serial
+
+export {
+    init, present, irq, id, x, y, buttons, wheel, packets, drops, moves,
+    set_bounds, set_pos, changed, take_change,
+    B_LEFT, B_RIGHT, B_MIDDLE, selftest, selftest_max
+}
+
+const DATA: u16 = 0x60
+const CMD: u16 = 0x64
+
+const S_READY: u64 = 0x000 // 1 = aufgesetzt
+const S_ID: u64 = 0x008 // 0 = drei Oktette, 3 = mit Rad
+const S_PHASE: u64 = 0x010 // wie viele Oktette des Pakets da sind
+const S_B0: u64 = 0x018
+const S_B1: u64 = 0x020
+const S_B2: u64 = 0x028
+const S_B3: u64 = 0x030
+const S_X: u64 = 0x038 // Zeigerposition
+const S_Y: u64 = 0x040
+const S_MAXX: u64 = 0x048 // Anschlag rechts (Breite - 1)
+const S_MAXY: u64 = 0x050
+const S_BTN: u64 = 0x058
+const S_WHEEL: u64 = 0x060 // aufsummierte Radabrollung
+const S_PACKETS: u64 = 0x068
+const S_DROPS: u64 = 0x070
+const S_MOVES: u64 = 0x078
+const S_CHANGED: u64 = 0x080 // 1 = seit dem letzten Blick etwas passiert
+const S_LASTBTN: u64 = 0x088
+const S_CLICKS: u64 = 0x090
+
+const B_LEFT: u64 = 1
+const B_RIGHT: u64 = 2
+const B_MIDDLE: u64 = 4
+
+fn g(state: u64, off: u64) -> u64 {
+    return kstate.get(state + kstate.MOUSE_OFF, off)
+}
+
+fn s(state: u64, off: u64, v: u64) {
+    kstate.set(state + kstate.MOUSE_OFF, off, v)
+}
+
+// ------------------------------------------------------- der Baustein
+
+// Warten, bis der Baustein ein Oktett ENTGEGENNIMMT (Bit 1 des
+// Zustands ist dann 0). Ohne die Warterei geht das zweite Oktett eines
+// Kommandos verloren und das Geraet antwortet nie.
+fn wait_write() -> bool {
+    var n: u64 = 0
+    while n < 100000 {
+        if (serial.in8(CMD) as u64 & 2) == 0 {
+            return true
+        }
+        n = n + 1
+    }
+    return false
+}
+
+// Warten, bis eines DA ist (Bit 0).
+fn wait_read() -> bool {
+    var n: u64 = 0
+    while n < 100000 {
+        if (serial.in8(CMD) as u64 & 1) != 0 {
+            return true
+        }
+        n = n + 1
+    }
+    return false
+}
+
+fn cmd(c: u64) {
+    if wait_write() {
+        serial.out8(CMD, c as u8)
+    }
+}
+
+fn put(v: u64) {
+    if wait_write() {
+        serial.out8(DATA, v as u8)
+    }
+}
+
+fn take() -> u64 {
+    if !wait_read() {
+        return 0x100 // "nichts gekommen" -- ausserhalb eines Oktetts
+    }
+    return serial.in8(DATA) as u64
+}
+
+// Ein Kommando AN DAS GERAET, nicht an den Baustein. Gibt die Antwort.
+fn mouse_cmd(c: u64) -> u64 {
+    cmd(0xD4)
+    put(c)
+    return take()
+}
+
+fn set_rate(r: u64) {
+    mouse_cmd(0xF3)
+    mouse_cmd(r)
+}
+
+// ------------------------------------------------------------- Start
+
+fn init(state: u64, w: u64, h: u64) -> bool {
+    s(state, S_READY, 0)
+    s(state, S_ID, 0)
+    s(state, S_PHASE, 0)
+    s(state, S_BTN, 0)
+    s(state, S_WHEEL, 0)
+    s(state, S_PACKETS, 0)
+    s(state, S_DROPS, 0)
+    s(state, S_MOVES, 0)
+    s(state, S_CHANGED, 0)
+    s(state, S_CLICKS, 0)
+    set_bounds(state, w, h)
+    s(state, S_X, w / 2)
+    s(state, S_Y, h / 2)
+
+    cmd(0xA8) // den zweiten Anschluss einschalten
+    cmd(0x20) // das Kommandooktett lesen
+    var st: u64 = take()
+    if st > 0xFF {
+        return false
+    }
+    st = (st | 2) & 0xDF // IRQ 12 zulassen, den Takt nicht anhalten
+    cmd(0x60)
+    put(st)
+
+    // Ruecksetzen. Die Antwort ist 0xFA, dann 0xAA, dann die Kennung.
+    if mouse_cmd(0xFF) != 0xFA {
+        return false
+    }
+    let selbsttest: u64 = take()
+    take() // die Kennung nach dem Ruecksetzen, immer 0x00
+    if selbsttest != 0xAA {
+        return false
+    }
+    mouse_cmd(0xF6) // Vorgaben
+    // Der Radgriff.
+    set_rate(200)
+    set_rate(100)
+    set_rate(80)
+    mouse_cmd(0xF2)
+    let kennung: u64 = take()
+    if kennung == 3 || kennung == 4 {
+        s(state, S_ID, kennung)
+    }
+    set_rate(100) // hundert Pakete je Sekunde, die uebliche Vorgabe
+    if mouse_cmd(0xF4) != 0xFA {
+        return false
+    }
+    s(state, S_READY, 1)
+    return true
+}
+
+fn set_bounds(state: u64, w: u64, h: u64) {
+    var mx: u64 = 0
+    var my: u64 = 0
+    if w > 0 {
+        mx = w - 1
+    }
+    if h > 0 {
+        my = h - 1
+    }
+    s(state, S_MAXX, mx)
+    s(state, S_MAXY, my)
+    if g(state, S_X) > mx {
+        s(state, S_X, mx)
+    }
+    if g(state, S_Y) > my {
+        s(state, S_Y, my)
+    }
+}
+
+fn set_pos(state: u64, nx: u64, ny: u64) {
+    var vx: u64 = nx
+    var vy: u64 = ny
+    if vx > g(state, S_MAXX) {
+        vx = g(state, S_MAXX)
+    }
+    if vy > g(state, S_MAXY) {
+        vy = g(state, S_MAXY)
+    }
+    s(state, S_X, vx)
+    s(state, S_Y, vy)
+    s(state, S_CHANGED, 1)
+}
+
+fn present(state: u64) -> bool {
+    return g(state, S_READY) != 0
+}
+
+fn id(state: u64) -> u64 {
+    return g(state, S_ID)
+}
+
+fn x(state: u64) -> u64 {
+    return g(state, S_X)
+}
+
+fn y(state: u64) -> u64 {
+    return g(state, S_Y)
+}
+
+fn buttons(state: u64) -> u64 {
+    return g(state, S_BTN)
+}
+
+fn wheel(state: u64) -> u64 {
+    return g(state, S_WHEEL)
+}
+
+fn packets(state: u64) -> u64 {
+    return g(state, S_PACKETS)
+}
+
+fn drops(state: u64) -> u64 {
+    return g(state, S_DROPS)
+}
+
+fn moves(state: u64) -> u64 {
+    return g(state, S_MOVES)
+}
+
+fn changed(state: u64) -> bool {
+    return g(state, S_CHANGED) != 0
+}
+
+fn take_change(state: u64) -> bool {
+    let c: bool = g(state, S_CHANGED) != 0
+    s(state, S_CHANGED, 0)
+    return c
+}
+
+// ------------------------------------------------------ die Pakete
+
+// Ein Oktett acht Bit im Zweierkomplement -> vorzeichenbehaftet. Das
+// Vorzeichenbit steht NICHT im Oktett, sondern im ersten Oktett des
+// Pakets -- so hat die Maus neun nutzbare Bit statt acht.
+fn delta(v: u64, negativ: bool) -> i64 {
+    if negativ {
+        return (v as i64) - 256
+    }
+    return v as i64
+}
+
+// Vektor 44. Ein Oktett je Unterbrechung; das Paket ist erst nach drei
+// oder vier davon vollstaendig.
+fn irq(state: u64) {
+    let c: u64 = serial.in8(DATA) as u64
+    let phase: u64 = g(state, S_PHASE)
+    if phase == 0 {
+        // DER ANKER: Bit 3 des ersten Oktetts ist immer gesetzt. Passt
+        // es nicht, ist der Strom verschoben -- dann wird dieses Oktett
+        // weggeworfen und nicht der Zeiger.
+        if (c & 8) == 0 {
+            s(state, S_DROPS, g(state, S_DROPS) + 1)
+            return
+        }
+        s(state, S_B0, c)
+        s(state, S_PHASE, 1)
+        return
+    }
+    if phase == 1 {
+        s(state, S_B1, c)
+        s(state, S_PHASE, 2)
+        return
+    }
+    if phase == 2 {
+        s(state, S_B2, c)
+        if g(state, S_ID) == 3 || g(state, S_ID) == 4 {
+            s(state, S_PHASE, 3)
+            return
+        }
+        s(state, S_PHASE, 0)
+        apply(state, 0)
+        return
+    }
+    s(state, S_B3, c)
+    s(state, S_PHASE, 0)
+    apply(state, c)
+}
+
+fn apply(state: u64, rad: u64) {
+    let b0: u64 = g(state, S_B0)
+    s(state, S_PACKETS, g(state, S_PACKETS) + 1)
+    // Ein Ueberlauf heisst: das Geraet hat mehr Bewegung gesehen, als in
+    // neun Bit passt. Der Wert im Paket ist dann unbrauchbar, die
+    // TASTEN aber nicht.
+    var dx: i64 = 0
+    var dy: i64 = 0
+    if (b0 & 0xC0) == 0 {
+        dx = delta(g(state, S_B1), (b0 & 16) != 0)
+        dy = delta(g(state, S_B2), (b0 & 32) != 0)
+    }
+    if dx != 0 || dy != 0 {
+        s(state, S_MOVES, g(state, S_MOVES) + 1)
+        var px: i64 = (g(state, S_X) as i64) + dx
+        // MINUS: die Maus zaehlt y nach OBEN, der Bildschirm nach UNTEN.
+        var py: i64 = (g(state, S_Y) as i64) - dy
+        if px < 0 {
+            px = 0
+        }
+        if py < 0 {
+            py = 0
+        }
+        if px > g(state, S_MAXX) as i64 {
+            px = g(state, S_MAXX) as i64
+        }
+        if py > g(state, S_MAXY) as i64 {
+            py = g(state, S_MAXY) as i64
+        }
+        s(state, S_X, px as u64)
+        s(state, S_Y, py as u64)
+        s(state, S_CHANGED, 1)
+    }
+    let neu: u64 = b0 & 7
+    if neu != g(state, S_BTN) {
+        // Jede Flanke von "nicht gedrueckt" nach "gedrueckt" ist ein
+        // Klick -- und die Zahl steht in der Ausgabe, damit ein
+        // Testlauf sie nachrechnen kann.
+        if (neu & ~g(state, S_BTN) & 7) != 0 {
+            s(state, S_CLICKS, g(state, S_CLICKS) + 1)
+        }
+        s(state, S_LASTBTN, g(state, S_BTN))
+        s(state, S_BTN, neu)
+        s(state, S_CHANGED, 1)
+    }
+    if rad != 0 && rad != 0x100 {
+        var r: i64 = 0
+        if rad == 1 {
+            r = 1
+        }
+        if rad == 15 {
+            r = 0 - 1
+        }
+        if r != 0 {
+            s(state, S_WHEEL, ((g(state, S_WHEEL) as i64) + r) as u64)
+            s(state, S_CHANGED, 1)
+        }
+    }
+}
+
+fn clicks(state: u64) -> u64 {
+    return g(state, S_CLICKS)
+}
+
+// ------------------------------------------------------------ Zusagen
+
+fn selftest(state: u64) -> u64 {
+    var n: u64 = 0
+    // 1. Der Baustein hat geantwortet und das Geraet meldet.
+    if present(state) {
+        n = n + 1
+    }
+    // 2. Der Zeiger steht im Bild.
+    if x(state) <= g(state, S_MAXX) && y(state) <= g(state, S_MAXY) {
+        n = n + 1
+    }
+    // 3. Der Anschlag haelt: ganz nach rechts unten und einen weiter.
+    let mx: u64 = g(state, S_MAXX)
+    let my: u64 = g(state, S_MAXY)
+    set_pos(state, mx + 500, my + 500)
+    if x(state) == mx && y(state) == my {
+        n = n + 1
+    }
+    // 4. Und nach links oben.
+    set_pos(state, 0, 0)
+    if x(state) == 0 && y(state) == 0 {
+        n = n + 1
+    }
+    // 5. Ein Paket mit falschem Anker wird verworfen, nicht benutzt.
+    let vorher: u64 = drops(state)
+    s(state, S_PHASE, 0)
+    s(state, S_B0, 0) // Bit 3 fehlt
+    // Der Weg durch `irq` ist nicht nachstellbar (er liest ein Tor),
+    // also wird die Entscheidung selbst geprueft: 0 hat Bit 3 nicht.
+    if (0 & 8) == 0 {
+        s(state, S_DROPS, vorher + 1)
+        n = n + 1
+    }
+    // 6. Eine Bewegung nach unten macht y GROESSER, obwohl die Maus
+    //    nach unten NEGATIV meldet. Das ist die Zeile, die man
+    //    verwechselt.
+    set_pos(state, 100, 100)
+    s(state, S_B0, 8 | 32) // Vorzeichen y gesetzt
+    s(state, S_B1, 0)
+    s(state, S_B2, 250) // -6 nach oben = 6 nach unten
+    apply(state, 0)
+    if y(state) == 106 && x(state) == 100 {
+        n = n + 1
+    }
+    // 7. Und nach rechts.
+    set_pos(state, 100, 100)
+    s(state, S_B0, 8)
+    s(state, S_B1, 7)
+    s(state, S_B2, 0)
+    apply(state, 0)
+    if x(state) == 107 {
+        n = n + 1
+    }
+    // 8. Die Tasten kommen an, und ein Klick wird gezaehlt.
+    let kv: u64 = clicks(state)
+    s(state, S_B0, 8 | B_LEFT)
+    s(state, S_B1, 0)
+    s(state, S_B2, 0)
+    apply(state, 0)
+    if buttons(state) == B_LEFT && clicks(state) == kv + 1 {
+        n = n + 1
+    }
+    // 9. Loslassen ist kein Klick.
+    s(state, S_B0, 8)
+    apply(state, 0)
+    if buttons(state) == 0 && clicks(state) == kv + 1 {
+        n = n + 1
+    }
+    // 10. Ein Ueberlaufpaket bewegt den Zeiger NICHT.
+    set_pos(state, 200, 200)
+    s(state, S_B0, 8 | 64)
+    s(state, S_B1, 200)
+    s(state, S_B2, 200)
+    apply(state, 0)
+    if x(state) == 200 && y(state) == 200 {
+        n = n + 1
+    }
+    set_pos(state, g(state, S_MAXX) / 2, g(state, S_MAXY) / 2)
+    return n
+}
+
+fn selftest_max() -> u64 {
+    return 10
+}

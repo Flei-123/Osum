@@ -67,6 +67,27 @@ const CAP_DUP: u64 = 2004
 const CAP_INSPECT: u64 = 2005
 const CAP_TRANSFER: u64 = 2006
 const CAP_COUNT: u64 = 2007
+// ROUNDE K10: der Fensterserver, derselbe Zahlenraum.
+const WM_CREATE: u64 = 2100
+const WM_FILL: u64 = 2101
+const WM_TEXT: u64 = 2102
+const WM_EVENT: u64 = 2103
+const WM_INFO: u64 = 2104
+const WM_FLUSH: u64 = 2105
+const WM_MOVE: u64 = 2106
+const WM_CLOSE: u64 = 2107
+const WM_WRITE: u64 = 2108
+const WI_W: u64 = 0
+const WI_H: u64 = 1
+const WI_X: u64 = 2
+const WI_Y: u64 = 3
+const WI_FOCUS: u64 = 8
+const EV_KEY: u64 = 1
+const EV_DOWN: u64 = 2
+const EV_UP: u64 = 3
+const EV_MOVE: u64 = 4
+const EV_CLOSE: u64 = 5
+const E_CLOSED: u64 = 8
 
 const E_BADHANDLE: u64 = 1
 const E_RIGHTS: u64 = 2
@@ -122,6 +143,8 @@ const P_FORK: u64 = 10
 const P_FORKCHILD: u64 = 11
 const P_CAPS: u64 = 12
 const P_FB: u64 = 13
+// ROUNDE K10: die Anwendung mit Fenster.
+const P_WCLICK: u64 = 14
 
 // ------------------------------------------------------ the system call
 
@@ -267,6 +290,9 @@ fn u_enter(packed: u64) {
     }
     if prog == P_FB {
         u_fb(arg)
+    }
+    if prog == P_WCLICK {
+        u_wclick(arg)
     }
     u_sys(SYS_EXIT, 0, 0, 0)
     while true {
@@ -1069,4 +1095,164 @@ fn u_fb(arg: u64) {
     u_say_num(gut)
     u_say((&s_of[0]) as u64)
     u_say((&nl[0]) as u64)
+}
+
+
+// ----------------------------------------------- ROUNDE K10: ein Fenster
+//
+// Die zweite Anwendung dieser Runde, und die, an der man SIEHT, dass es
+// eine Oberflaeche ist: ein Fenster, das man anklicken, verschieben und
+// schliessen kann. Sie hat keine Kernelrechte, sie kennt den
+// Rahmenpuffer nicht und sie weiss nicht, wo sie auf dem Schirm liegt --
+// sie hat ein HANDLE, und alles, was sie tut, geht durch dieses Handle.
+//
+// WIE BEI `u_caps` UND `u_fb` IST DIE HAELFTE DER ZUSAGEN EINE
+// ABLEHNUNG. Eine Schnittstelle, die nur den richtigen Fall kann, ist
+// keine: ein Handle, das es nicht gibt, ein Fenster, das geschlossen
+// wurde, ein Handle ohne das noetige Recht und eine Groesse, die kein
+// Fenster ergibt, muessen VIER verschiedene Fehler geben.
+fn u_wclick(arg: u64) {
+    var s_titel: [u8; 16] = "Klick mich\0\0\0\0\0\0"
+    var s_kurz: [u8; 4] = "xx\0\0"
+    var s_ok: [u8; 15] = "wclick: passed\0"
+    var s_of: [u8; 6] = " / 10\0"
+    var s_h: [u8; 15] = "wclick: win h=\0"
+    var s_ev: [u8; 17] = "wclick: events=\0\0"
+    var s_kl: [u8; 16] = "wclick: click \0\0"
+    var s_ky: [u8; 16] = "wclick: keys \0\0\0"
+    var s_zeile: [u8; 24] = "Tasten:\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"
+    var s_kopf: [u8; 24] = "Fenster aus Ring 3\0\0\0\0\0\0"
+    var nl: [u8; 2] = "\n\0"
+    var ev: [u8; 16] = [0 as u8; 16]
+    var eingabe: [u8; 24] = [0 as u8; 24]
+
+    let breite: u64 = 260
+    let hoehe: u64 = 150
+    var gut: u64 = 0
+
+    // 1. Ein Fenster.
+    let h: u64 = u_sys6(WM_CREATE, (420 << 16) | 330,
+        (breite << 16) | hoehe, (&s_titel[0]) as u64, 0, 0, 0)
+    u_say_line((&s_h[0]) as u64, h)
+    if (h >> 63) != 0 || h == 0 {
+        u_say((&s_ok[0]) as u64)
+        u_say_num(0)
+        u_say((&s_of[0]) as u64)
+        u_say((&nl[0]) as u64)
+        return
+    }
+    gut = gut + 1
+
+    // 2. und 3. Es ist so gross, wie es bestellt wurde.
+    if u_sys(WM_INFO, h, WI_W, 0) == breite {
+        gut = gut + 1
+    }
+    if u_sys(WM_INFO, h, WI_H, 0) == hoehe {
+        gut = gut + 1
+    }
+    // 4. Es liegt, wo es liegen soll.
+    if u_sys(WM_INFO, h, WI_X, 0) == 420 && u_sys(WM_INFO, h, WI_Y, 0) == 330 {
+        gut = gut + 1
+    }
+    // 5. Eine Groesse, die kein Fenster ergibt, wird abgelehnt.
+    let winzig: u64 = u_sys6(WM_CREATE, 0, (4 << 16) | 4,
+        (&s_kurz[0]) as u64, 0, 0, 0)
+    if (winzig >> 63) != 0 {
+        gut = gut + 1
+    }
+    // 6. Ein Handle, das es nicht gibt.
+    if (u_sys(WM_INFO, 0x1234567, WI_W, 0) >> 63) != 0 {
+        gut = gut + 1
+    }
+    // 7. Ein GESCHLOSSENES Fenster: das Handle bleibt, das Fenster nicht.
+    //    Der Fehler muss E_CLOSED sein und nicht E_BADHANDLE -- die
+    //    beiden zu verwechseln hiesse, dass eine Anwendung nicht
+    //    unterscheiden kann, ob sie sich vertan hat oder ob ihr jemand
+    //    das Fenster zugemacht hat.
+    let kurz: u64 = u_sys6(WM_CREATE, (10 << 16) | 10, (64 << 16) | 32,
+        (&s_kurz[0]) as u64, 0, 0, 0)
+    if (kurz >> 63) == 0 {
+        u_sys(WM_CLOSE, kurz, 0, 0)
+        if u_sys(WM_INFO, kurz, WI_W, 0) == (0 -% E_BADHANDLE) {
+            gut = gut + 1
+        }
+    }
+    // 8. Ohne Ereignis gibt WM_EVENT eine Null und schreibt nichts.
+    if u_sys(WM_EVENT, h, (&ev[0]) as u64, 0) == 0 {
+        gut = gut + 1
+    }
+    // 9. Malen geht.
+    let dunkel: u64 = 0x00101820
+    let hell: u64 = 0x00E8EEF4
+    if u_sys6(WM_FILL, h, 0, (breite << 16) | hoehe, dunkel, 0, 0) == 0 {
+        gut = gut + 1
+    }
+    // 10. Text gibt die Stelle HINTER dem Text zurueck, und die liegt
+    //     weiter rechts als der Anfang.
+    let ende: u64 = u_sys6(WM_TEXT, h, (10 << 16) | 22,
+        (&s_kopf[0]) as u64, 18, hell, 0)
+    if (ende >> 63) == 0 && ende > 10 {
+        gut = gut + 1
+    }
+
+    u_say((&s_ok[0]) as u64)
+    u_say_num(gut)
+    u_say((&s_of[0]) as u64)
+    u_say((&nl[0]) as u64)
+
+    // Und jetzt die eigentliche Anwendung: ein Feld, das auf Klicks
+    // reagiert, und eine Zeile, die zeigt, was getippt wurde.
+    u_sys6(WM_FILL, h, (20 << 16) | 40, (100 << 16) | 40, 0x00305070, 0, 0)
+    u_sys6(WM_TEXT, h, (30 << 16) | 66, (&s_titel[0]) as u64, 10,
+        hell, 0)
+    u_sys6(WM_TEXT, h, (10 << 16) | 110, (&s_zeile[0]) as u64, 7, hell, 0)
+    u_sys(WM_FLUSH, h, 0, 0)
+
+    var klicks: u64 = 0
+    var tasten: u64 = 0
+    var len: u64 = 0
+    var runden: u64 = 0
+    while runden < 200000 {
+        var etwas: bool = false
+        while u_sys(WM_EVENT, h, (&ev[0]) as u64, 0) == 1 {
+            etwas = true
+            let typ: u64 = *((&ev[0]) as *mut u64)
+            let d: u64 = *(((&ev[0]) as u64 + 8) as *mut u64)
+            let ex: u64 = (d >> 32) & 0xFFFF
+            let ey: u64 = (d >> 16) & 0xFFFF
+            if typ == EV_CLOSE {
+                runden = 200000
+            }
+            if typ == EV_DOWN {
+                klicks = klicks + 1
+                // Ein Fleck da, wo der Zeiger war -- der Beweis, dass
+                // der Klick MIT SEINER STELLE ankommt und nicht nur als
+                // Tatsache.
+                u_sys6(WM_FILL, h, (ex << 16) | ey, (8 << 16) | 8,
+                    0x00FFC020, 0, 0)
+                u_sys(WM_FLUSH, h, 0, 0)
+            }
+            if typ == EV_KEY {
+                tasten = tasten + 1
+                let c: u64 = ex
+                if c >= 32 && c < 127 && len < 16 {
+                    eingabe[len as usize] = c as u8
+                    len = len + 1
+                    u_sys6(WM_FILL, h, (70 << 16) | 96, (180 << 16) | 20,
+                        dunkel, 0, 0)
+                    u_sys6(WM_TEXT, h, (70 << 16) | 110,
+                        (&eingabe[0]) as u64, len, 0x0060FF80, 0)
+                    u_sys(WM_FLUSH, h, 0, 0)
+                }
+            }
+        }
+        if !etwas {
+            u_sys(SYS_YIELD, 0, 0, 0)
+        }
+        runden = runden + 1
+    }
+    u_say_line((&s_kl[0]) as u64, klicks)
+    u_say_line((&s_ky[0]) as u64, tasten)
+    u_say_line((&s_ev[0]) as u64, klicks + tasten)
+    u_sys(SYS_EXIT, 0, 0, 0)
 }

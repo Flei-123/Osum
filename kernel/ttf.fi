@@ -1,0 +1,1350 @@
+// kernel/ttf.fi -- Runde K10: echte Schriften.
+//
+// Der 8x16-Zeichensatz aus Runde K7 (`kernel/font.fi`) ist eine
+// BITMASKE: 95 Zeichen zu je sechzehn Oktetten, eine Groesse, keine
+// Laufweite, keine Kantenglaettung. Fuer eine Konsole reicht das. Fuer
+// eine Oberflaeche reicht es nicht -- dort steht Text in verschiedenen
+// Groessen nebeneinander, Buchstaben sind verschieden breit, und eine
+// Schraege, die aus ganzen Bildpunkten besteht, sieht man.
+//
+// Diese Datei liest deshalb ECHTE TRUETYPE-DATEIEN und rastert die
+// Umrisse selbst. Kein FreeType, kein stb_truetype -- Firn.
+//
+// WAS GELESEN WIRD, und das ist genau das, was ein Rasterer braucht:
+//
+//   head  Einheiten je Geviert (`unitsPerEm`) und das Format von `loca`
+//   hhea  Aufsteiger, Absteiger, Zeilenzwischenraum, Zahl der Laufweiten
+//   maxp  wie viele Glyphen die Datei traegt
+//   hmtx  Laufweite je Glyphe
+//   cmap  Zeichen -> Glyphennummer, Format 4 (das der Windows-Tabelle)
+//   loca  Glyphennummer -> Versatz in `glyf`
+//   glyf  die Umrisse: Punkte, gerade Stuecke und QUADRATISCHE Bezier
+//   kern  Unterschneidung, Format 0 -- die Paare, bei denen zwei
+//         Buchstaben naeher zusammenruecken duerfen ("AV", "To")
+//
+// ALLES IN FESTKOMMA. Es gibt keine Gleitkommazahlen in diesem Kernel
+// und es soll keine geben: `profile kernel` hat keine SSE-Rettung im
+// Kontextwechsel, und eine Schriftrasterung, die je nach Rundungsmodus
+// des Prozessors anders aussieht, ist nicht nachpruefbar. Die Rechnung
+// laeuft in 26.6 -- eine Einheit ist ein Vierundsechzigstel Bildpunkt:
+//
+//     scale = (px << 16) / upm            16.16
+//     f26(v) = (v * scale) >> 10          Font-Einheit -> 26.6
+//
+// DIE ARITHMETIK-FALLE DIESES PROJEKTS, und sie ist hier besonders
+// scharf: Umrisskoordinaten sind VORZEICHENBEHAFTET (ein Absteiger liegt
+// unter der Grundlinie, ein linker Seitenabstand kann negativ sein).
+// Deshalb rechnet dieses Modul in `i64`, nicht in `u64`. `+`, `-` und `*`
+// bleiben geprueft und panicken bei Ueberlauf -- das ist erwuenscht, die
+// Zahlen sind klein. Wo ein Bitmuster gemeint ist (das Lesen aus der
+// Datei, der Schluessel des Glyphenspeichers), steht `u64` und `+%`.
+//
+// NACHGEMESSEN AN firnc, BEVOR EINE ZEILE DAVON ENTSTAND:
+//   (0-7) / 2   ist -3    -- `/` schneidet zur Null hin ab
+//   (0-7) >> 1  ist -4    -- `>>` ist ARITHMETISCH, es rundet nach unten
+// Beides steht so auch in `tools/ttf/raster.py`, der zweiten Fassung
+// dieses Rasterers auf dem Wirt. Die beiden muessen Bildpunkt fuer
+// Bildpunkt dasselbe liefern; genau das misst `tools/wm/run.sh`.
+//
+// DIE FUELLREGEL. Nichtnull-Windung mit 4x4-Unterabtastung: vier
+// Abtastzeilen je Bildzeile, vier Abtastspalten je Bildpunkt. Das gibt
+// siebzehn Deckungsstufen (0..16) und daraus die Deckkraft
+// (cov * 255 + 8) / 16. Warum nicht die exakte Flaechendeckung: sie
+// braucht eine Division je Kante und Bildzeile und ist an den
+// Selbstueberschneidungen, die TrueType erlaubt, nicht eindeutig. Vier
+// mal vier ist grob genug zum Nachrechnen und fein genug, dass man den
+// Unterschied zum 8x16-Raster sofort sieht.
+
+profile kernel
+
+import kstate
+
+export {
+    init, ready, load_font, fonts, arena, arena_bytes, used_bytes,
+    upm, ascent, descent, line_height, glyph_of, advance26, kern26,
+    glyph, g_w, g_h, g_left, g_top, g_adv, g_pixel, g_data,
+    text_width26, hits, misses, rastered, cache_slots, cache_used,
+    selftest, selftest_max,
+    MAX_FONTS, SLOTS, A_HEAP, ARENA_BYTES
+}
+
+// ------------------------------------------------------- der Zustand
+//
+// Eine Seite von `kdata` (kstate.TTF_OFF) fuer die Skalare und die
+// beiden Zeichensatzplaetze. Alles, was gross ist -- der Glyphenspeicher
+// und die Arbeitsfelder des Rasterers -- liegt in einem Lauf aus Rahmen,
+// den `init` uebergeben bekommt. Der Kernelhaufen hat 256 KiB insgesamt;
+// ein Rasterer, der sich dort bedient, nimmt sie allen anderen weg.
+
+const MAX_FONTS: u64 = 2
+const FONT_BYTES: u64 = 256
+
+const S_READY: u64 = 0x000
+const S_ARENA: u64 = 0x008 // Adresse des Arbeitsbereichs
+const S_ABYTES: u64 = 0x010
+const S_FONTS: u64 = 0x018 // wie viele Zeichensaetze geladen sind
+const S_HEAD: u64 = 0x020 // Stossallokator im Glyphenspeicher
+const S_HITS: u64 = 0x028
+const S_MISSES: u64 = 0x030
+const S_RASTERED: u64 = 0x038
+const S_USED: u64 = 0x040 // belegte Plaetze des Speichers
+const S_FIRST: u64 = 0x080 // ab hier die Zeichensatzplaetze
+
+// Ein Zeichensatzplatz.
+const F_BASE: u64 = 0x00 // Adresse der Datei im Speicher
+const F_LEN: u64 = 0x08
+const F_UPM: u64 = 0x10
+const F_LOCFMT: u64 = 0x18
+const F_ASC: u64 = 0x20 // vorzeichenbehaftet, als Bitmuster abgelegt
+const F_DESC: u64 = 0x28
+const F_GAP: u64 = 0x30
+const F_NHM: u64 = 0x38 // Zahl der vollen Laufweiten in hmtx
+const F_NGLYPH: u64 = 0x40
+const F_CMAP: u64 = 0x48 // Adresse der Format-4-Untertabelle
+const F_GLYF: u64 = 0x50
+const F_LOCA: u64 = 0x58
+const F_HMTX: u64 = 0x60
+const F_KERN: u64 = 0x68 // Adresse des ersten Paares, 0 = keine
+const F_KPAIRS: u64 = 0x70
+
+// ------------------------------------------------- der Arbeitsbereich
+//
+// Feste Groessen, damit es keinen zweiten Allokator im Kernel gibt.
+
+const SLOTS: u64 = 512 // Plaetze des Glyphenspeichers
+const SLOT_BYTES: u64 = 64
+const MAX_EDGES: u64 = 1536
+const EDGE_BYTES: u64 = 32
+const MAX_PTS: u64 = 512
+const MAX_CONT: u64 = 32
+const MAX_CROSS: u64 = 128
+const MAX_W: u64 = 256 // breiteste Glyphe, die gerastert wird
+const MAX_H: u64 = 256
+
+const A_IDX: u64 = 0x00000 // SLOTS * 64 = 32 KiB
+const A_EDGE: u64 = 0x08000 // MAX_EDGES * 32 = 48 KiB
+const A_FLAGS: u64 = 0x14000 // MAX_PTS Oktette
+const A_XS: u64 = 0x14400 // MAX_PTS * 8
+const A_YS: u64 = 0x15400
+const A_ENDS: u64 = 0x16400 // MAX_CONT * 8
+const A_COV: u64 = 0x16800 // MAX_W * 8
+const A_CROSS: u64 = 0x17800 // MAX_CROSS * 16
+const A_HEAP: u64 = 0x18000 // ab hier die Bitmasken, Stossallokator
+const ARENA_BYTES: u64 = 0x80000 // 512 KiB
+
+// Ein Platz im Glyphenspeicher.
+const C_KEY: u64 = 0x00 // 0 = frei
+const C_OFF: u64 = 0x08 // Versatz der Bitmaske im Arbeitsbereich
+const C_W: u64 = 0x10
+const C_H: u64 = 0x18
+const C_LEFT: u64 = 0x20
+const C_TOP: u64 = 0x28
+const C_ADV: u64 = 0x30 // Laufweite in 26.6
+const C_HITS: u64 = 0x38
+
+// -------------------------------------------------------- die Oktette
+//
+// TrueType ist GROSS-ENDIG, x86 ist klein-endig. Jedes Kurzwort und
+// jedes Wort wird deshalb von Hand zusammengesetzt; ein `__mmio_read16`
+// auf dieselbe Adresse gaebe die Oktette verkehrt herum.
+
+fn rd8(p: u64) -> u64 {
+    return kstate.get8(p)
+}
+
+fn rd16(p: u64) -> u64 {
+    return (kstate.get8(p) << 8) | kstate.get8(p + 1)
+}
+
+fn rs16(p: u64) -> i64 {
+    let v: u64 = rd16(p)
+    if v >= 32768 {
+        return (v as i64) - 65536
+    }
+    return v as i64
+}
+
+fn rs8(p: u64) -> i64 {
+    let v: u64 = kstate.get8(p)
+    if v >= 128 {
+        return (v as i64) - 256
+    }
+    return v as i64
+}
+
+fn rd32(p: u64) -> u64 {
+    return (kstate.get8(p) << 24) | (kstate.get8(p + 1) << 16)
+        | (kstate.get8(p + 2) << 8) | kstate.get8(p + 3)
+}
+
+// --------------------------------------------------- Zustandszugriffe
+
+fn base(state: u64) -> u64 {
+    return state + kstate.TTF_OFF
+}
+
+fn gs(state: u64, off: u64) -> u64 {
+    return kstate.get(base(state), off)
+}
+
+fn ss(state: u64, off: u64, v: u64) {
+    kstate.set(base(state), off, v)
+}
+
+fn fat(state: u64, i: u64) -> u64 {
+    return S_FIRST + i * FONT_BYTES
+}
+
+fn fg(state: u64, i: u64, off: u64) -> u64 {
+    return kstate.get(base(state), fat(state, i) + off)
+}
+
+fn fs(state: u64, i: u64, off: u64, v: u64) {
+    kstate.set(base(state), fat(state, i) + off, v)
+}
+
+fn ready(state: u64) -> bool {
+    return gs(state, S_READY) != 0
+}
+
+fn arena(state: u64) -> u64 {
+    return gs(state, S_ARENA)
+}
+
+fn arena_bytes(state: u64) -> u64 {
+    return gs(state, S_ABYTES)
+}
+
+fn used_bytes(state: u64) -> u64 {
+    return gs(state, S_HEAD) - A_HEAP
+}
+
+fn fonts(state: u64) -> u64 {
+    return gs(state, S_FONTS)
+}
+
+fn hits(state: u64) -> u64 {
+    return gs(state, S_HITS)
+}
+
+fn misses(state: u64) -> u64 {
+    return gs(state, S_MISSES)
+}
+
+fn rastered(state: u64) -> u64 {
+    return gs(state, S_RASTERED)
+}
+
+fn cache_slots(state: u64) -> u64 {
+    return SLOTS
+}
+
+fn cache_used(state: u64) -> u64 {
+    return gs(state, S_USED)
+}
+
+// ------------------------------------------------------------- Start
+
+fn init(state: u64, ar: u64, bytes: u64) -> bool {
+    if ar == 0 || bytes < ARENA_BYTES {
+        return false
+    }
+    // Der Index muss leer sein, sonst faende der erste Zugriff Muell aus
+    // dem letzten Leben dieser Rahmen (`nobss` ist eine Gegenprobe dieses
+    // Kernels und faerbt sie ausdruecklich ein).
+    var i: u64 = 0
+    while i < SLOTS {
+        kstate.set(ar, A_IDX + i * SLOT_BYTES + C_KEY, 0)
+        i = i + 1
+    }
+    ss(state, S_ARENA, ar)
+    ss(state, S_ABYTES, bytes)
+    ss(state, S_HEAD, A_HEAP)
+    ss(state, S_FONTS, 0)
+    ss(state, S_HITS, 0)
+    ss(state, S_MISSES, 0)
+    ss(state, S_RASTERED, 0)
+    ss(state, S_USED, 0)
+    ss(state, S_READY, 1)
+    return true
+}
+
+// Einen Zeichensatz aus einem Speicherbereich uebernehmen. Die Datei
+// liegt schon da -- geladen hat sie, wer sie hat: `kmain` liest sie aus
+// dem Dateisystem. Dieses Modul liest nur ihre Tabellen.
+//
+// Gibt die Platznummer oder MAX_FONTS bei einem Fehler.
+fn load_font(state: u64, p: u64, len: u64) -> u64 {
+    if !ready(state) {
+        return MAX_FONTS
+    }
+    let n: u64 = gs(state, S_FONTS)
+    if n >= MAX_FONTS || p == 0 || len < 12 {
+        return MAX_FONTS
+    }
+    // sfnt-Kennung: 0x00010000 oder "true". Alles andere wird abgelehnt,
+    // statt in einer Tabellenliste aus Zufallszahlen zu landen.
+    let kennung: u64 = rd32(p)
+    if kennung != 0x00010000 && kennung != 0x74727565 {
+        return MAX_FONTS
+    }
+    let ntab: u64 = rd16(p + 4)
+    if ntab == 0 || ntab > 64 || 12 + ntab * 16 > len {
+        return MAX_FONTS
+    }
+    var head: u64 = 0
+    var hhea: u64 = 0
+    var maxp: u64 = 0
+    var hmtx: u64 = 0
+    var cmap: u64 = 0
+    var loca: u64 = 0
+    var glyf: u64 = 0
+    var kern: u64 = 0
+    var i: u64 = 0
+    while i < ntab {
+        let e: u64 = p + 12 + i * 16
+        let marke: u64 = rd32(e)
+        let off: u64 = rd32(e + 8)
+        if off < len {
+            if marke == 0x68656164 {
+                head = p + off
+            }
+            if marke == 0x68686561 {
+                hhea = p + off
+            }
+            if marke == 0x6D617870 {
+                maxp = p + off
+            }
+            if marke == 0x686D7478 {
+                hmtx = p + off
+            }
+            if marke == 0x636D6170 {
+                cmap = p + off
+            }
+            if marke == 0x6C6F6361 {
+                loca = p + off
+            }
+            if marke == 0x676C7966 {
+                glyf = p + off
+            }
+            if marke == 0x6B65726E 
+            {
+                kern = p + off
+            }
+        }
+        i = i + 1
+    }
+    if head == 0 || hhea == 0 || maxp == 0 || hmtx == 0 {
+        return MAX_FONTS
+    }
+    if cmap == 0 || loca == 0 || glyf == 0 {
+        return MAX_FONTS
+    }
+    let upm_v: u64 = rd16(head + 18)
+    if upm_v == 0 {
+        return MAX_FONTS
+    }
+    fs(state, n, F_BASE, p)
+    fs(state, n, F_LEN, len)
+    fs(state, n, F_UPM, upm_v)
+    fs(state, n, F_LOCFMT, rd16(head + 50))
+    fs(state, n, F_ASC, rs16(hhea + 4) as u64)
+    fs(state, n, F_DESC, rs16(hhea + 6) as u64)
+    fs(state, n, F_GAP, rs16(hhea + 8) as u64)
+    fs(state, n, F_NHM, rd16(hhea + 34))
+    fs(state, n, F_NGLYPH, rd16(maxp + 4))
+    fs(state, n, F_GLYF, glyf)
+    fs(state, n, F_LOCA, loca)
+    fs(state, n, F_HMTX, hmtx)
+    fs(state, n, F_CMAP, cmap4_of(cmap))
+    if fg(state, n, F_CMAP) == 0 {
+        return MAX_FONTS
+    }
+    kern0_of(state, n, kern)
+    ss(state, S_FONTS, n + 1)
+    return n
+}
+
+// Die Untertabelle im Format 4. Bevorzugt (3,1) -- Windows,
+// Unicode-BMP -- und nimmt sonst die erste, die Format 4 hat.
+fn cmap4_of(c: u64) -> u64 {
+    if c == 0 {
+        return 0
+    }
+    let n: u64 = rd16(c + 2)
+    var beste: u64 = 0
+    var i: u64 = 0
+    while i < n {
+        let pid: u64 = rd16(c + 4 + i * 8)
+        let eid: u64 = rd16(c + 6 + i * 8)
+        let sub: u64 = c + rd32(c + 8 + i * 8)
+        if rd16(sub) == 4 {
+            if beste == 0 {
+                beste = sub
+            }
+            if pid == 3 && eid == 1 {
+                beste = sub
+            }
+            if pid == 0 {
+                beste = sub
+            }
+        }
+        i = i + 1
+    }
+    return beste
+}
+
+// Die erste WAAGERECHTE Untertabelle im Format 0. Alles andere -- GPOS,
+// Format 2, senkrechte Unterschneidung -- wird nicht gelesen und auch
+// nicht behauptet.
+fn kern0_of(state: u64, n: u64, k: u64) {
+    fs(state, n, F_KERN, 0)
+    fs(state, n, F_KPAIRS, 0)
+    if k == 0 {
+        return
+    }
+    if rd16(k) != 0 || rd16(k + 2) < 1 {
+        return
+    }
+    let deckung: u64 = rd16(k + 8)
+    if (deckung >> 8) != 0 || (deckung & 1) != 1 {
+        return
+    }
+    fs(state, n, F_KPAIRS, rd16(k + 10))
+    fs(state, n, F_KERN, k + 14)
+}
+
+// ------------------------------------------------------- die Metriken
+
+fn upm(state: u64, f: u64) -> u64 {
+    if f >= gs(state, S_FONTS) {
+        return 0
+    }
+    return fg(state, f, F_UPM)
+}
+
+fn scale_of(state: u64, f: u64, px: u64) -> i64 {
+    let u: u64 = fg(state, f, F_UPM)
+    if u == 0 {
+        return 0
+    }
+    return ((px << 16) / u) as i64
+}
+
+// Font-Einheit -> 26.6. Das ist die eine Rechnung, an der alles haengt.
+fn f26(v: i64, scale: i64) -> i64 {
+    return (v * scale) >> 10
+}
+
+fn ascent(state: u64, f: u64, px: u64) -> i64 {
+    return f26(fg(state, f, F_ASC) as i64, scale_of(state, f, px)) >> 6
+}
+
+fn descent(state: u64, f: u64, px: u64) -> i64 {
+    return (0 - f26(fg(state, f, F_DESC) as i64,
+        scale_of(state, f, px))) >> 6
+}
+
+fn line_height(state: u64, f: u64, px: u64) -> u64 {
+    let a: i64 = fg(state, f, F_ASC) as i64
+    let d: i64 = fg(state, f, F_DESC) as i64
+    let g: i64 = fg(state, f, F_GAP) as i64
+    let h: i64 = (f26(a - d + g, scale_of(state, f, px)) + 63) >> 6
+    if h < 1 {
+        return 1
+    }
+    return h as u64
+}
+
+// Zeichen -> Glyphennummer, aus der Format-4-Tabelle. Die Suche laeuft
+// linear ueber die Segmente: ein Zeichensatz mit fuenfundneunzig Zeichen
+// hat drei davon, und eine binaere Suche waere hier mehr Code als
+// Ersparnis.
+fn glyph_of(state: u64, f: u64, c: u64) -> u64 {
+    if f >= gs(state, S_FONTS) {
+        return 0
+    }
+    let t: u64 = fg(state, f, F_CMAP)
+    let segx2: u64 = rd16(t + 6)
+    let enden: u64 = t + 14
+    let anfaenge: u64 = enden + segx2 + 2
+    let deltas: u64 = anfaenge + segx2
+    let bereiche: u64 = deltas + segx2
+    var i: u64 = 0
+    while i < segx2 / 2 {
+        if rd16(enden + i * 2) >= c {
+            let a: u64 = rd16(anfaenge + i * 2)
+            if a > c {
+                return 0
+            }
+            let ro: u64 = rd16(bereiche + i * 2)
+            let dl: u64 = rd16(deltas + i * 2)
+            if ro == 0 {
+                return (c +% dl) & 0xFFFF
+            }
+            let g: u64 = rd16(bereiche + i * 2 + ro + (c - a) * 2)
+            if g == 0 {
+                return 0
+            }
+            return (g +% dl) & 0xFFFF
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+fn advance_units(state: u64, f: u64, gid: u64) -> u64 {
+    let nhm: u64 = fg(state, f, F_NHM)
+    var g: u64 = gid
+    if nhm == 0 {
+        return 0
+    }
+    if g >= nhm {
+        g = nhm - 1
+    }
+    return rd16(fg(state, f, F_HMTX) + g * 4)
+}
+
+fn advance26(state: u64, f: u64, gid: u64, px: u64) -> i64 {
+    return f26(advance_units(state, f, gid) as i64, scale_of(state, f, px))
+}
+
+// Unterschneidung: die Paartabelle ist nach (links << 16) | rechts
+// SORTIERT, also binaere Suche. Zweihundertzwanzig Paare linear zu
+// durchsuchen kostet je Zeichen mehr als das Rastern der Glyphe.
+fn kern26(state: u64, f: u64, g1: u64, g2: u64, px: u64) -> i64 {
+    if f >= gs(state, S_FONTS) {
+        return 0
+    }
+    let k: u64 = fg(state, f, F_KERN)
+    if k == 0 || g1 == 0 || g2 == 0 {
+        return 0
+    }
+    let schluessel: u64 = (g1 << 16) | g2
+    var lo: u64 = 0
+    var hi: u64 = fg(state, f, F_KPAIRS)
+    while lo < hi {
+        let m: u64 = (lo + hi) / 2
+        let p: u64 = k + m * 6
+        let v: u64 = (rd16(p) << 16) | rd16(p + 2)
+        if v == schluessel {
+            return f26(rs16(p + 4), scale_of(state, f, px))
+        }
+        if v < schluessel {
+            lo = m + 1
+        } else {
+            hi = m
+        }
+    }
+    return 0
+}
+
+// Die Breite einer Zeile in 26.6, mit Unterschneidung. `p` zeigt auf
+// `n` Oktette.
+fn text_width26(state: u64, f: u64, p: u64, n: u64, px: u64) -> i64 {
+    var x: i64 = 0
+    var vorher: u64 = 0
+    var i: u64 = 0
+    while i < n {
+        let gid: u64 = glyph_of(state, f, kstate.get8(p + i))
+        if vorher != 0 {
+            x = x + kern26(state, f, vorher, gid, px)
+        }
+        x = x + advance26(state, f, gid, px)
+        vorher = gid
+        i = i + 1
+    }
+    return x
+}
+
+// ------------------------------------------------------ die Umrisse
+
+fn loca(state: u64, f: u64, gid: u64) -> u64 {
+    let l: u64 = fg(state, f, F_LOCA)
+    if fg(state, f, F_LOCFMT) == 0 {
+        return rd16(l + gid * 2) * 2
+    }
+    return rd32(l + gid * 4)
+}
+
+// Die Punkte einer EINFACHEN Glyphe in die Arbeitsfelder. Gibt die Zahl
+// der Umrisse zurueck, oder 0.
+//
+// Der Umriss steht in der Datei in einer Sparform: die Flaggen sind
+// lauflaengenkodiert, und die Koordinaten sind DIFFERENZEN zum vorigen
+// Punkt, wahlweise als Oktett mit getrenntem Vorzeichenbit oder als
+// Kurzwort mit Vorzeichen. Wer das falsch liest, bekommt keinen Fehler,
+// sondern einen Buchstaben, der aussieht wie ein Blitz.
+fn load_simple(state: u64, ar: u64, g: u64, nc: u64) -> u64 {
+    if nc == 0 || nc > MAX_CONT {
+        return 0
+    }
+    var i: u64 = 0
+    while i < nc {
+        kstate.set(ar, A_ENDS + i * 8, rd16(g + 10 + i * 2))
+        i = i + 1
+    }
+    let npunkte: u64 = kstate.get(ar, A_ENDS + (nc - 1) * 8) + 1
+    if npunkte > MAX_PTS {
+        return 0
+    }
+    var p: u64 = g + 10 + nc * 2
+    p = p + 2 + rd16(p) // die Hinting-Anweisungen werden uebersprungen
+    // die Flaggen
+    var k: u64 = 0
+    while k < npunkte {
+        let fl: u64 = rd8(p)
+        p = p + 1
+        kstate.set8(ar + A_FLAGS + k, fl as u8)
+        k = k + 1
+        if (fl & 8) != 0 {
+            var w: u64 = rd8(p)
+            p = p + 1
+            while w > 0 && k < npunkte {
+                kstate.set8(ar + A_FLAGS + k, fl as u8)
+                k = k + 1
+                w = w - 1
+            }
+        }
+    }
+    // die x-Differenzen
+    var x: i64 = 0
+    k = 0
+    while k < npunkte {
+        let fl: u64 = kstate.get8(ar + A_FLAGS + k)
+        if (fl & 2) != 0 {
+            let d: i64 = rd8(p) as i64
+            p = p + 1
+            if (fl & 16) != 0 {
+                x = x + d
+            } else {
+                x = x - d
+            }
+        } else {
+            if (fl & 16) == 0 {
+                x = x + rs16(p)
+                p = p + 2
+            }
+        }
+        kstate.set(ar, A_XS + k * 8, x as u64)
+        k = k + 1
+    }
+    // die y-Differenzen
+    var y: i64 = 0
+    k = 0
+    while k < npunkte {
+        let fl: u64 = kstate.get8(ar + A_FLAGS + k)
+        if (fl & 4) != 0 {
+            let d: i64 = rd8(p) as i64
+            p = p + 1
+            if (fl & 32) != 0 {
+                y = y + d
+            } else {
+                y = y - d
+            }
+        } else {
+            if (fl & 32) == 0 {
+                y = y + rs16(p)
+                p = p + 2
+            }
+        }
+        kstate.set(ar, A_YS + k * 8, y as u64)
+        k = k + 1
+    }
+    return nc
+}
+
+// --------------------------------------------------------- die Kanten
+
+fn edge_count(ar: u64) -> u64 {
+    return kstate.get(ar, A_EDGE + MAX_EDGES * EDGE_BYTES)
+}
+
+fn edge_reset(ar: u64) {
+    kstate.set(ar, A_EDGE + MAX_EDGES * EDGE_BYTES, 0)
+}
+
+fn edge_add(ar: u64, x0: i64, y0: i64, x1: i64, y1: i64) {
+    if y0 == y1 {
+        return // waagerechte Kanten schneiden keine Abtastzeile
+    }
+    let n: u64 = edge_count(ar)
+    if n >= MAX_EDGES {
+        return
+    }
+    let e: u64 = A_EDGE + n * EDGE_BYTES
+    kstate.set(ar, e + 0, x0 as u64)
+    kstate.set(ar, e + 8, y0 as u64)
+    kstate.set(ar, e + 16, x1 as u64)
+    kstate.set(ar, e + 24, y1 as u64)
+    kstate.set(ar, A_EDGE + MAX_EDGES * EDGE_BYTES, n + 1)
+}
+
+fn ex0(ar: u64, i: u64) -> i64 {
+    return kstate.get(ar, A_EDGE + i * EDGE_BYTES + 0) as i64
+}
+
+fn ey0(ar: u64, i: u64) -> i64 {
+    return kstate.get(ar, A_EDGE + i * EDGE_BYTES + 8) as i64
+}
+
+fn ex1(ar: u64, i: u64) -> i64 {
+    return kstate.get(ar, A_EDGE + i * EDGE_BYTES + 16) as i64
+}
+
+fn ey1(ar: u64, i: u64) -> i64 {
+    return kstate.get(ar, A_EDGE + i * EDGE_BYTES + 24) as i64
+}
+
+// Division, die zur NULL hin abschneidet -- Firns `/` tut das schon,
+// diese Funktion steht hier, damit die Zeile in `tools/ttf/raster.py`
+// danebengehalten werden kann (Python rundet nach unten).
+fn tdiv(n: i64, d: i64) -> i64 {
+    return n / d
+}
+
+// Wie viele gerade Stuecke eine quadratische Bezier bekommt. Die Zahl
+// haengt an der Laenge des Kontrollzugs in Bildpunkten und ist
+// GANZZAHLIG -- beide Fassungen des Rasterers muessen dieselbe waehlen,
+// sonst liegen ihre Punkte verschieden und der Vergleich ist wertlos.
+fn quad_steps(x0: i64, y0: i64, cx: i64, cy: i64, x1: i64, y1: i64) -> i64 {
+    let d: i64 = iabs(cx - x0) + iabs(cy - y0) + iabs(x1 - cx) + iabs(y1 - cy)
+    var n: i64 = (d >> 6) / 3 + 2
+    if n > 32 {
+        n = 32
+    }
+    return n
+}
+
+fn iabs(v: i64) -> i64 {
+    if v < 0 {
+        return 0 - v
+    }
+    return v
+}
+
+// Eine quadratische Bezier als Kantenzug. TrueType kennt nur diese eine
+// Kurvenart -- kubische gibt es erst in OpenType/CFF, und die liest
+// dieser Kernel nicht.
+fn quad_edges(ar: u64, x0: i64, y0: i64, cx: i64, cy: i64,
+    x1: i64, y1: i64) -> u64 {
+    let n: i64 = quad_steps(x0, y0, cx, cy, x1, y1)
+    var ax: i64 = x0
+    var ay: i64 = y0
+    var i: i64 = 1
+    while i <= n {
+        let j: i64 = n - i
+        let bx: i64 = tdiv(j * j * x0 + 2 * j * i * cx + i * i * x1, n * n)
+        let by: i64 = tdiv(j * j * y0 + 2 * j * i * cy + i * i * y1, n * n)
+        edge_add(ar, ax, ay, bx, by)
+        ax = bx
+        ay = by
+        i = i + 1
+    }
+    return 0
+}
+
+fn ptx(ar: u64, i: u64, scale: i64) -> i64 {
+    return f26(kstate.get(ar, A_XS + i * 8) as i64, scale)
+}
+
+fn pty(ar: u64, i: u64, scale: i64) -> i64 {
+    return f26(kstate.get(ar, A_YS + i * 8) as i64, scale)
+}
+
+fn onkurve(ar: u64, i: u64) -> bool {
+    return (kstate.get8(ar + A_FLAGS + i) & 1) != 0
+}
+
+// EIN Umriss zu Kanten. `a` und `b` sind der erste und der letzte Punkt
+// (einschliesslich).
+//
+// Die Kurzschreibweise des Formats: zwei Kontrollpunkte hintereinander
+// bedeuten einen Punkt auf der Kurve genau zwischen ihnen. Und ein
+// Umriss, der GAR KEINEN Punkt auf der Kurve hat -- ein Kreis aus vier
+// Kontrollpunkten --, faengt bei dem gedachten Mittelpunkt an. Beides
+// steht in der Spezifikation und beides kommt in DejaVu vor.
+fn contour_edges(ar: u64, a: u64, b: u64, scale: i64) {
+    let n: u64 = b - a + 1
+    if n < 2 {
+        return
+    }
+    // Anfangspunkt suchen.
+    var start: u64 = n
+    var i: u64 = 0
+    while i < n {
+        if onkurve(ar, a + i) {
+            start = i
+            i = n
+        } else {
+            i = i + 1
+        }
+    }
+    var sx: i64 = 0
+    var sy: i64 = 0
+    if start >= n {
+        start = 0
+        sx = (ptx(ar, a, scale) + ptx(ar, b, scale)) >> 1
+        sy = (pty(ar, a, scale) + pty(ar, b, scale)) >> 1
+    } else {
+        sx = ptx(ar, a + start, scale)
+        sy = pty(ar, a + start, scale)
+    }
+    var cx: i64 = sx
+    var cy: i64 = sy
+    var k: u64 = 1
+    while k <= n {
+        let idx: u64 = a + (start + k) % n
+        let px: i64 = ptx(ar, idx, scale)
+        let py: i64 = pty(ar, idx, scale)
+        if onkurve(ar, idx) {
+            edge_add(ar, cx, cy, px, py)
+            cx = px
+            cy = py
+            k = k + 1
+        } else {
+            let jdx: u64 = a + (start + k + 1) % n
+            var nx: i64 = ptx(ar, jdx, scale)
+            var ny: i64 = pty(ar, jdx, scale)
+            var schritt: u64 = 2
+            if !onkurve(ar, jdx) {
+                nx = (px + nx) >> 1
+                ny = (py + ny) >> 1
+                schritt = 1
+            }
+            quad_edges(ar, cx, cy, px, py, nx, ny)
+            cx = nx
+            cy = ny
+            k = k + schritt
+        }
+    }
+    // Der Umriss ist geschlossen -- immer, auch wenn die Datei den
+    // letzten Punkt weglaesst.
+    edge_add(ar, cx, cy, sx, sy)
+}
+
+// Alle Umrisse einer Glyphe zu Kanten. Zusammengesetzte Glyphen werden
+// mit ihrer Verschiebung eingesetzt; Drehung und Streckung nicht -- das
+// steht in der Doku und wird nicht behauptet.
+fn glyph_edges(state: u64, f: u64, gid: u64, px: u64, dx: i64, dy: i64,
+    tiefe: u64) {
+    if tiefe > 4 || gid >= fg(state, f, F_NGLYPH) {
+        return
+    }
+    let ar: u64 = arena(state)
+    let scale: i64 = scale_of(state, f, px)
+    let a: u64 = loca(state, f, gid)
+    let b: u64 = loca(state, f, gid + 1)
+    if b <= a {
+        return
+    }
+    let g: u64 = fg(state, f, F_GLYF) + a
+    let nc: i64 = rs16(g)
+    if nc < 0 {
+        // zusammengesetzt
+        var p: u64 = g + 10
+        var weiter: bool = true
+        while weiter {
+            let flags: u64 = rd16(p)
+            let sub: u64 = rd16(p + 2)
+            p = p + 4
+            var ox: i64 = 0
+            var oy: i64 = 0
+            if (flags & 1) != 0 {
+                ox = rs16(p)
+                oy = rs16(p + 2)
+                p = p + 4
+            } else {
+                ox = rs8(p)
+                oy = rs8(p + 1)
+                p = p + 2
+            }
+            if (flags & 8) != 0 {
+                p = p + 2
+            } else {
+                if (flags & 64) != 0 {
+                    p = p + 4
+                } else {
+                    if (flags & 128) != 0 {
+                        p = p + 8
+                    }
+                }
+            }
+            if (flags & 2) == 0 {
+                ox = 0
+                oy = 0
+            }
+            glyph_edges(state, f, sub, px, dx + f26(ox, scale),
+                dy + f26(oy, scale), tiefe + 1)
+            if (flags & 32) == 0 {
+                weiter = false
+            }
+        }
+        return
+    }
+    if load_simple(state, ar, g, nc as u64) == 0 {
+        return
+    }
+    // Die Verschiebung einer zusammengesetzten Glyphe wird HIER
+    // eingerechnet, nicht in `contour_edges` -- dort steht sonst in
+    // jeder Zeile ein Summand, den es fast nie gibt.
+    if dx != 0 || dy != 0 {
+        var k: u64 = 0
+        let npunkte: u64 = kstate.get(ar, A_ENDS + (nc as u64 - 1) * 8) + 1
+        // Die Verschiebung ist in 26.6, die Punkte sind in Font-
+        // Einheiten. Also zurueckrechnen, damit `contour_edges` weiter
+        // mit einer einzigen Skalierung auskommt.
+        let scale2: i64 = scale
+        while k < npunkte {
+            if scale2 != 0 {
+                kstate.set(ar, A_XS + k * 8,
+                    ((kstate.get(ar, A_XS + k * 8) as i64)
+                        + ((dx << 10) / scale2)) as u64)
+                kstate.set(ar, A_YS + k * 8,
+                    ((kstate.get(ar, A_YS + k * 8) as i64)
+                        + ((dy << 10) / scale2)) as u64)
+            }
+            k = k + 1
+        }
+    }
+    var c: u64 = 0
+    var anfang: u64 = 0
+    while c < nc as u64 {
+        let ende: u64 = kstate.get(ar, A_ENDS + c * 8)
+        contour_edges(ar, anfang, ende, scale)
+        anfang = ende + 1
+        c = c + 1
+    }
+}
+
+// ------------------------------------------------------- die Fuellung
+
+fn cross_add(ar: u64, n: u64, x: i64, dir: i64) -> u64 {
+    if n >= MAX_CROSS {
+        return n
+    }
+    // Einfuegesortierung: die Schnittpunkte muessen nach x geordnet
+    // sein, damit die Windungszahl stimmt. Ein Umriss hat selten mehr
+    // als sechs Schnittpunkte je Abtastzeile.
+    var i: u64 = n
+    while i > 0 {
+        let vx: i64 = kstate.get(ar, A_CROSS + (i - 1) * 16) as i64
+        if vx > x {
+            kstate.set(ar, A_CROSS + i * 16,
+                kstate.get(ar, A_CROSS + (i - 1) * 16))
+            kstate.set(ar, A_CROSS + i * 16 + 8,
+                kstate.get(ar, A_CROSS + (i - 1) * 16 + 8))
+            i = i - 1
+        } else {
+            i = 0
+            // Abbruch: ab hier ist die Ordnung wieder hergestellt.
+            kstate.set(ar, A_CROSS + n * 16, x as u64)
+            kstate.set(ar, A_CROSS + n * 16 + 8, dir as u64)
+            return n + 1
+        }
+    }
+    kstate.set(ar, A_CROSS + 0, x as u64)
+    kstate.set(ar, A_CROSS + 8, dir as u64)
+    return n + 1
+}
+
+// Die eigentliche Rasterung. Legt die Bitmaske im Glyphenspeicher ab und
+// traegt den Platz ein; gibt die Platznummer oder SLOTS.
+fn rasterize(state: u64, f: u64, gid: u64, px: u64, slot: u64) -> u64 {
+    let ar: u64 = arena(state)
+    edge_reset(ar)
+    glyph_edges(state, f, gid, px, 0, 0, 0)
+    let ne: u64 = edge_count(ar)
+    let adv: i64 = advance26(state, f, gid, px)
+    if ne == 0 {
+        return finish(state, slot, 0, 0, 0, 0, 0, adv)
+    }
+    var minx: i64 = ex0(ar, 0)
+    var maxx: i64 = minx
+    var miny: i64 = ey0(ar, 0)
+    var maxy: i64 = miny
+    var i: u64 = 0
+    while i < ne {
+        minx = imin(imin(minx, ex0(ar, i)), ex1(ar, i))
+        maxx = imax(imax(maxx, ex0(ar, i)), ex1(ar, i))
+        miny = imin(imin(miny, ey0(ar, i)), ey1(ar, i))
+        maxy = imax(imax(maxy, ey0(ar, i)), ey1(ar, i))
+        i = i + 1
+    }
+    let bx0: i64 = minx >> 6
+    let bx1: i64 = (maxx + 63) >> 6
+    let by0: i64 = miny >> 6
+    let by1: i64 = (maxy + 63) >> 6
+    let w: i64 = bx1 - bx0
+    let h: i64 = by1 - by0
+    if w <= 0 || h <= 0 || w > MAX_W as i64 || h > MAX_H as i64 {
+        return finish(state, slot, 0, 0, 0, 0, 0, adv)
+    }
+    let daten: u64 = alloc(state, (w * h) as u64)
+    if daten == 0 {
+        return SLOTS
+    }
+    var py: i64 = by0
+    while py < by1 {
+        // Deckungszaehler dieser Bildzeile zuruecksetzen.
+        var c: i64 = 0
+        while c < w {
+            kstate.set(ar, A_COV + (c as u64) * 8, 0)
+            c = c + 1
+        }
+        var sub: i64 = 0
+        while sub < 4 {
+            let ys: i64 = py * 64 + 8 + sub * 16
+            var n: u64 = 0
+            i = 0
+            while i < ne {
+                let ay: i64 = ey0(ar, i)
+                let by: i64 = ey1(ar, i)
+                var lo: i64 = ay
+                var hi: i64 = by
+                var dir: i64 = 1
+                if ay > by {
+                    lo = by
+                    hi = ay
+                    dir = 0 - 1
+                }
+                if ys >= lo && ys < hi {
+                    let ax: i64 = ex0(ar, i)
+                    let bx: i64 = ex1(ar, i)
+                    n = cross_add(ar, n, ax + tdiv((bx - ax) * (ys - ay),
+                        by - ay), dir)
+                }
+                i = i + 1
+            }
+            if n > 0 {
+                var wind: i64 = 0
+                var anfang: i64 = 0
+                var j: u64 = 0
+                while j < n {
+                    let xs: i64 = kstate.get(ar, A_CROSS + j * 16) as i64
+                    let dz: i64 = kstate.get(ar, A_CROSS + j * 16 + 8) as i64
+                    let vorher: i64 = wind
+                    wind = wind + dz
+                    if vorher == 0 && wind != 0 {
+                        anfang = xs
+                    }
+                    if vorher != 0 && wind == 0 {
+                        span(ar, anfang, xs, bx0, bx1)
+                    }
+                    j = j + 1
+                }
+            }
+            sub = sub + 1
+        }
+        let zeile: u64 = ((by1 - 1 - py) * w) as u64
+        c = 0
+        while c < w {
+            var cov: i64 = kstate.get(ar, A_COV + (c as u64) * 8) as i64
+            if cov > 16 {
+                cov = 16
+            }
+            kstate.set8(daten + zeile + c as u64,
+                (((cov * 255 + 8) / 16) & 0xFF) as u8)
+            c = c + 1
+        }
+        py = py + 1
+    }
+    kstate.add(base(state), S_RASTERED, 1)
+    return finish(state, slot, daten - ar, w as u64, h as u64,
+        bx0 as u64, by1 as u64, adv)
+}
+
+// Ein waagerechter Abschnitt zwischen zwei Schnittpunkten: welche
+// Abtastspalten liegen darin? Abtastspalte j sitzt bei j * 16 + 8, also
+// ist die erste bei ceil((a - 8) / 16) und die erste dahinter bei
+// ceil((b - 8) / 16). `>> 4` rundet nach unten, auch bei negativen
+// Zahlen -- deshalb ist (z + 15) >> 4 wirklich das Aufrunden.
+fn span(ar: u64, a: i64, b: i64, bx0: i64, bx1: i64) {
+    var j0: i64 = (a - 8 + 15) >> 4
+    var j1: i64 = (b - 8 + 15) >> 4
+    if j0 < bx0 * 4 {
+        j0 = bx0 * 4
+    }
+    if j1 > bx1 * 4 {
+        j1 = bx1 * 4
+    }
+    var j: i64 = j0
+    while j < j1 {
+        let c: u64 = ((j >> 2) - bx0) as u64
+        kstate.set(ar, A_COV + c * 8, kstate.get(ar, A_COV + c * 8) + 1)
+        j = j + 1
+    }
+}
+
+fn imin(a: i64, b: i64) -> i64 {
+    if a < b {
+        return a
+    }
+    return b
+}
+
+fn imax(a: i64, b: i64) -> i64 {
+    if a > b {
+        return a
+    }
+    return b
+}
+
+// Der Stossallokator des Glyphenspeichers. Freigegeben wird nichts: eine
+// Oberflaeche benutzt immer wieder dieselben Zeichen in denselben
+// Groessen, und ein Speicher, der nach ein paar hundert Glyphen voll
+// ist, wird EINMAL geleert statt in Stuecke zerlegt.
+fn alloc(state: u64, n: u64) -> u64 {
+    let ar: u64 = arena(state)
+    var h: u64 = gs(state, S_HEAD)
+    let ende: u64 = gs(state, S_ABYTES)
+    if h + n + 8 > ende {
+        return 0
+    }
+    ss(state, S_HEAD, h + (n + 7) / 8 * 8)
+    return ar + h
+}
+
+fn finish(state: u64, slot: u64, off: u64, w: u64, h: u64,
+    left: u64, top: u64, adv: i64) -> u64 {
+    let ar: u64 = arena(state)
+    let s: u64 = A_IDX + slot * SLOT_BYTES
+    kstate.set(ar, s + C_OFF, off)
+    kstate.set(ar, s + C_W, w)
+    kstate.set(ar, s + C_H, h)
+    kstate.set(ar, s + C_LEFT, left)
+    kstate.set(ar, s + C_TOP, top)
+    kstate.set(ar, s + C_ADV, adv as u64)
+    kstate.set(ar, s + C_HITS, 0)
+    return slot
+}
+
+// ---------------------------------------------------- der Speicher
+//
+// Offene Adressierung mit linearem Sondieren. Der Schluessel traegt
+// Zeichensatz, Groesse und Zeichen; die 0 ist frei, deshalb steht im
+// Schluessel eine 1 an oberster Stelle.
+
+fn key_of(f: u64, px: u64, c: u64) -> u64 {
+    return (1 << 40) | (f << 32) | ((px & 0xFF) << 24) | (c & 0xFFFFFF)
+}
+
+fn hash(k: u64) -> u64 {
+    var a: u64 = k +% 0x9E3779B97F4A7C15
+    a = (a ^ (a >> 30)) *% 0xBF58476D1CE4E5B9
+    a = a ^ (a >> 27)
+    return a
+}
+
+// Die Glyphe fuer ein Zeichen -- aus dem Speicher oder frisch gerastert.
+// Gibt die Platznummer oder SLOTS.
+fn glyph(state: u64, f: u64, c: u64, px: u64) -> u64 {
+    if !ready(state) || f >= gs(state, S_FONTS) || px == 0 || px > 200 {
+        return SLOTS
+    }
+    let ar: u64 = arena(state)
+    let k: u64 = key_of(f, px, c)
+    var i: u64 = hash(k) % SLOTS
+    var schritte: u64 = 0
+    while schritte < SLOTS {
+        let s: u64 = A_IDX + i * SLOT_BYTES
+        let vorhanden: u64 = kstate.get(ar, s + C_KEY)
+        if vorhanden == k {
+            kstate.set(ar, s + C_HITS, kstate.get(ar, s + C_HITS) + 1)
+            kstate.add(base(state), S_HITS, 1)
+            return i
+        }
+        if vorhanden == 0 {
+            kstate.add(base(state), S_MISSES, 1)
+            kstate.set(ar, s + C_KEY, k)
+            ss(state, S_USED, gs(state, S_USED) + 1)
+            let r: u64 = rasterize(state, f, glyph_of(state, f, c), px, i)
+            if r >= SLOTS {
+                kstate.set(ar, s + C_KEY, 0)
+                ss(state, S_USED, gs(state, S_USED) - 1)
+                return SLOTS
+            }
+            return i
+        }
+        i = (i + 1) % SLOTS
+        schritte = schritte + 1
+    }
+    return SLOTS
+}
+
+fn g_w(state: u64, slot: u64) -> u64 {
+    if slot >= SLOTS {
+        return 0
+    }
+    return kstate.get(arena(state), A_IDX + slot * SLOT_BYTES + C_W)
+}
+
+fn g_h(state: u64, slot: u64) -> u64 {
+    if slot >= SLOTS {
+        return 0
+    }
+    return kstate.get(arena(state), A_IDX + slot * SLOT_BYTES + C_H)
+}
+
+fn g_left(state: u64, slot: u64) -> i64 {
+    if slot >= SLOTS {
+        return 0
+    }
+    return kstate.get(arena(state), A_IDX + slot * SLOT_BYTES + C_LEFT) as i64
+}
+
+fn g_top(state: u64, slot: u64) -> i64 {
+    if slot >= SLOTS {
+        return 0
+    }
+    return kstate.get(arena(state), A_IDX + slot * SLOT_BYTES + C_TOP) as i64
+}
+
+fn g_adv(state: u64, slot: u64) -> i64 {
+    if slot >= SLOTS {
+        return 0
+    }
+    return kstate.get(arena(state), A_IDX + slot * SLOT_BYTES + C_ADV) as i64
+}
+
+fn g_data(state: u64, slot: u64) -> u64 {
+    if slot >= SLOTS {
+        return 0
+    }
+    let o: u64 = kstate.get(arena(state), A_IDX + slot * SLOT_BYTES + C_OFF)
+    if o == 0 {
+        return 0
+    }
+    return arena(state) + o
+}
+
+// Die Deckkraft eines Bildpunktes der Glyphe, 0..255.
+fn g_pixel(state: u64, slot: u64, x: u64, y: u64) -> u64 {
+    let w: u64 = g_w(state, slot)
+    if x >= w || y >= g_h(state, slot) {
+        return 0
+    }
+    let d: u64 = g_data(state, slot)
+    if d == 0 {
+        return 0
+    }
+    return kstate.get8(d + y * w + x)
+}
+
+// ------------------------------------------------------------ Zusagen
+//
+// Was der Kernel ueber seinen eigenen Schriftleser SELBST pruefen kann.
+// Es ersetzt das Bildschirmfoto nicht -- es faengt die Fehlerklasse ab,
+// die auf dem Schirm nur als leeres Rechteck erscheint.
+
+fn selftest(state: u64, f: u64) -> u64 {
+    if !ready(state) || f >= gs(state, S_FONTS) {
+        return 0
+    }
+    var n: u64 = 0
+    // 1. Die Kopfangaben sind gelesen und plausibel.
+    if fg(state, f, F_UPM) >= 16 && fg(state, f, F_NGLYPH) > 1 {
+        n = n + 1
+    }
+    // 2. Der Aufsteiger liegt ueber der Grundlinie, der Absteiger
+    //    darunter -- das faellt auf, wenn die beiden vorzeichenlos
+    //    gelesen werden.
+    if (fg(state, f, F_ASC) as i64) > 0 && (fg(state, f, F_DESC) as i64) < 0 {
+        n = n + 1
+    }
+    // 3. Die cmap findet 'A', 'a' und '0', und drei verschiedene.
+    let ga: u64 = glyph_of(state, f, 0x41)
+    let gk: u64 = glyph_of(state, f, 0x61)
+    let g0: u64 = glyph_of(state, f, 0x30)
+    if ga != 0 && gk != 0 && g0 != 0 && ga != gk && gk != g0 {
+        n = n + 1
+    }
+    // 4. Das Leerzeichen hat eine Laufweite, aber keinen Umriss.
+    let sp: u64 = glyph(state, f, 0x20, 16)
+    if sp < SLOTS && g_w(state, sp) == 0 && g_adv(state, sp) > 0 {
+        n = n + 1
+    }
+    // 5. 'A' bei 16 Bildpunkten hat eine Bitmaske und passt in die
+    //    Zeile: hoechstens so hoch wie der Aufsteiger.
+    let a16: u64 = glyph(state, f, 0x41, 16)
+    if a16 < SLOTS && g_w(state, a16) > 2 && g_h(state, a16) > 6 {
+        if g_h(state, a16) <= 20 {
+            n = n + 1
+        }
+    }
+    // 6. GEGEN DIE FALLE AUS RUNDE K7B: es wird nicht gezaehlt, wie viel
+    //    Flaeche dunkel ist, sondern wie viele Bildpunkte der Glyphe
+    //    WIRKLICH GESETZT sind. Ein 'A' mit 16 Bildpunkten Hoehe hat
+    //    Dutzende davon; ein leeres Rechteck hat keinen.
+    var gesetzt: u64 = 0
+    var y: u64 = 0
+    while y < g_h(state, a16) {
+        var x: u64 = 0
+        while x < g_w(state, a16) {
+            if g_pixel(state, a16, x, y) > 0 {
+                gesetzt = gesetzt + 1
+            }
+            x = x + 1
+        }
+        y = y + 1
+    }
+    if gesetzt >= 20 {
+        n = n + 1
+    }
+    // 7. Und es ist wirklich eine KANTENGLAETTUNG: mindestens ein
+    //    Bildpunkt ist weder ganz an noch ganz aus. Eine Rasterung ohne
+    //    Zwischenstufen ginge durch Zusage 6 hindurch.
+    var halb: u64 = 0
+    y = 0
+    while y < g_h(state, a16) {
+        var x: u64 = 0
+        while x < g_w(state, a16) {
+            let v: u64 = g_pixel(state, a16, x, y)
+            if v > 16 && v < 239 {
+                halb = halb + 1
+            }
+            x = x + 1
+        }
+        y = y + 1
+    }
+    if halb > 0 {
+        n = n + 1
+    }
+    // 8. Zwei Groessen sind zwei Bitmasken -- und die groessere ist
+    //    groesser. Ein Rasterer, der die Groesse ignoriert, faellt hier.
+    let a32: u64 = glyph(state, f, 0x41, 32)
+    if a32 < SLOTS && a32 != a16 && g_h(state, a32) > g_h(state, a16) {
+        n = n + 1
+    }
+    // 9. Der Speicher antwortet beim zweiten Mal aus sich selbst.
+    let vorher: u64 = gs(state, S_HITS)
+    let noch: u64 = glyph(state, f, 0x41, 16)
+    if noch == a16 && gs(state, S_HITS) == vorher + 1 {
+        n = n + 1
+    }
+    // 10. Ein Zeichen, das die Datei nicht hat, gibt Glyphe 0 -- und die
+    //     ist gueltig, nicht ein Absturz.
+    if glyph_of(state, f, 0x4E00) == 0 {
+        n = n + 1
+    }
+    // 11. Die Laufweite einer Zeile ist die Summe ihrer Zeichen (ohne
+    //     Unterschneidung sind es zwei gleiche Zahlen).
+    var wort: [u8; 4] = "AAA\0"
+    let dreimal: i64 = text_width26(state, f, (&wort[0]) as u64, 3, 16)
+    let einmal: i64 = advance26(state, f, ga, 16)
+    let k: i64 = kern26(state, f, ga, ga, 16)
+    if dreimal == einmal * 3 + k * 2 {
+        n = n + 1
+    }
+    // 12. Und die Grundlinie: Aufsteiger plus Absteiger passen in die
+    //     Zeilenhoehe.
+    let lh: u64 = line_height(state, f, 16)
+    if lh >= (ascent(state, f, 16) + descent(state, f, 16)) as u64 && lh < 40 {
+        n = n + 1
+    }
+    return n
+}
+
+fn selftest_max() -> u64 {
+    return 12
+}
