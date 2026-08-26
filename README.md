@@ -356,6 +356,7 @@ bash tools/net/run.sh         # virtio-net und der TCP/IP-Stack (K8)
 bash tools/guard/run.sh       # SMEP/SMAP und das Boot-Modul (K10)
 bash tools/wm/run.sh          # Maus, Fenster, TrueType (K10)
 bash tools/hv/run.sh          # der Hypervisor: AMD-V, NPT, Gaeste (K12)
+bash tools/k16/run.sh         # der Uebersetzer auf Osum selbst (K16)
 ```
 
 Den Kernel mit Bildschirm starten und selbst hinsehen — `-vga std` ist
@@ -479,6 +480,7 @@ nachtraeglich umgeschrieben.
 | `docs/ROUNDK11.md` | **man kann darauf arbeiten**: der Editor, zwanzig Werkzeuge, die Shell als Sprache |
 | `docs/ROUNDK10W.md` | die Oberflaeche: Maus, Fensterserver, TrueType mit Kantenglaettung |
 | `docs/ROUNDK12.md` | ein Wirt fuer fremde Prozessoren: AMD-V, verschachtelte Seitentabellen, Gaeste, Gastmaschinen aus Ring 3 |
+| `docs/ROUNDK16.md` | **der Uebersetzer laeuft auf dem System selbst**: `firnc` und ein Assembler in Firn auf Osum, das Ergebnis zeichengleich mit dem vom Wirt — dazu die Tabelle "Dateiart → womit oeffnen" im Kern und `#!` in `execve` |
 
 `ENTFERNEN-AUS-FIRN.md` beschreibt, was im Firn-Repository geloescht
 werden muss, damit dort nichts doppelt liegt. **Ausgefuehrt ist das

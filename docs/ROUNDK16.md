@@ -368,6 +368,61 @@ Abschnitte 1 bis 18 der Abnahme messen unverändert dasselbe. Nichts
 wurde gelöscht, bevor der Ersatz lief — und der Ersatz *ersetzt* auch
 nichts, er kommt daneben.
 
+## Vier Fehler, die diese Runde selbst gemacht hat
+
+Sie stehen hier, weil der nächste, der an dieser Stelle arbeitet, sie
+sonst noch einmal macht.
+
+1. **Der Kernelstapel lief über, und zwar unsichtbar.** Der Ausleger
+   hatte seine Ortsvariablen zuerst in `elf.build`. Der Stufe-0-Kernel
+   lief damit durch (16.336 von 16.384 Oktetten), der Stufe-1-Kernel
+   nicht (16.384 von 16.384) — und was man sah, war „QEMU exit code 63"
+   in Abschnitt 9, ohne jeden Hinweis auf den Stapel. `firnc0` und
+   `firnc1` rechnen Rahmengrößen leicht verschieden aus; wer nur mit
+   Stufe 0 misst, sieht so etwas nicht.
+2. **Die neue Stapelregel hat eine Gegenprobe von Runde 62
+   kaputtgemacht.** `uprog.u_steal` fasst absichtlich `0x40010000` an
+   und muss dafür einen `#PF` bekommen. Diese Adresse liegt seit dieser
+   Runde *im* Stapelbereich — ohne die Bedingung „nur unterhalb des
+   eigenen `T_USTACK`" wäre aus der Gegenprobe eine stille
+   Speicherzuteilung geworden, und die Runde hätte eine Zusage von
+   damals zerstört, ohne es zu merken. Eine neue Eigenschaft im Kern
+   kann eine alte Gegenprobe entwerten; danach muss man suchen.
+3. **Der Zeichenvergleich schlug fehl, und schuld war ein Pfadname.**
+   `firnc` legt `panic: … at <pfad>:<zeile>:<spalte>` nach `.rodata`.
+   Osum hatte `t.fi`, der Wirt `/tmp/k16t.fi` — 8 Oktette Unterschied im
+   Text, 8 in `p_filesz`, und ein „NEIN" im Vergleich. Mit demselben
+   Argument auf beiden Seiten: zeichengleich. Genau einer der
+   „üblichen Verdächtigen", und er ist wirklich der erste, der auftritt.
+4. **Ein Programm für Osum hat das gleichnamige für den Wirt
+   überschrieben.** `bau_osum fas` schrieb nach `$TMPD/fas` — derselbe
+   Name wie der Assembler für den Wirt, den Teil 4 danach noch braucht.
+   Auf dem Wirt gestartet gab dieser dann seine Gebrauchsanweisung aus,
+   und der Vergleich hatte nichts zu vergleichen. Die Osum-Programme
+   liegen jetzt in `$TMPD/o/`.
+
+## Die Zahlen der Abnahme
+
+| | |
+|---|---:|
+| Zusagen in Abschnitt 22 | **64**, 0 Fehler |
+| Programme, die `fas` bindet | 54 von 54 |
+| davon gegen `as`+`ld` gehalten | 16 von 16 gleich |
+| Kernelstapel, Stufe 0 / Stufe 1 | 15.328 / 15.240 von 16.384 |
+| Stapelseiten im Übersetzerlauf | 38 |
+| `firnc` für Osum | 1.618.392 Oktette, 396 Seiten |
+| Übersetzter Assemblertext | 14.909 Oktette, zeichengleich |
+| Erzeugtes Programm | 8.192 Oktette, zeichengleich |
+
+Und die ganze Abnahme, `./test.sh` im Osum-Repo:
+
+```
+ALLE 19 ABSCHNITTE BESTANDEN, 1550 Zusagen, 0 Fehler
+```
+
+1486 Zusagen standen vorher, 64 kommen hinzu — es ist keine
+verschwunden.
+
 ## Die Dateien
 
 | Datei | was |
