@@ -92,6 +92,24 @@
 #      bricht jede Messung zusammen, `nicnobm` nimmt das Busmaster-Bit,
 #      `nicnoirq` maskiert den Vektor, `nicintx` nimmt den Stift statt
 #      MSI-X.
+#  21. WIDGETS UND EIN DATEIMANAGER (tools/k15/run.sh, Runde K15):
+#      zwischen dem Rechteck, das Runde K10 einer Anwendung gab, und
+#      einer Anwendung fehlte alles. Diese Runde baut es -- als
+#      BIBLIOTHEK IN RING 3 (`kernel/user/wig.fi`, `wigc.fi`), nicht im
+#      Kernel: Knoepfe, Beschriftungen, Textfelder mit Einfuegemarke,
+#      Auswahl und Zwischenablage, Listen und Tabellen mit
+#      Bildlaufleisten, Menues und Kontextmenues, Kontrollkaestchen,
+#      Auswahlfelder, Reiter, Dialoge, eine Ereignisschleife, drei
+#      Anordnungen und die Tastaturweiterschaltung. Im Kernel stehen
+#      sieben Aufrufe (1800..1899, `kernel/wig.fi`), die kein Widget
+#      kennen. Darauf sitzt `/bin/files`, die grafische Fassung von
+#      `ls`. Gemessen an echten Bildschirmfotos, in die ueber den
+#      QEMU-Monitor echte Klicks und Tastendruecke gespeist wurden --
+#      und der Text darin JE ZEICHEN gegen `tools/ttf/raster.py`.
+#      Gegenproben: `wignohit` (keine Trefferpruefung -- kein Widget
+#      erfaehrt vom Klick), `wignoclip` (keine Zwischenablage),
+#      `nodirty`, `nofocus`, `nomouse` und der Lauf ganz ohne `wig`.
+#
 #  15. EIN WIRT FUER FREMDE PROZESSOREN (tools/hv/run.sh, Runde K12):
 #      AMD-V, verschachtelte Seitentabellen, sechs Gaeste. Der Kernel
 #      legt eine Gastmaschine an, tritt ein, wertet den Austrittsgrund
@@ -294,6 +312,9 @@ lauf "17. die Oberflaeche: Maus, Fensterserver, TrueType (tools/wm/run.sh, Runde
 
 lauf "18. ein Wirt fuer fremde Prozessoren: AMD-V, verschachtelte Seitentabellen, Gaeste (tools/hv/run.sh, Runde K12)" \
      tools/hv/run.sh hv '^HV:|^        (bench|exits|cpu):'
+
+lauf "21. Widgets und der Dateimanager: eine Bibliothek in Ring 3 (tools/k15/run.sh, Runde K15)" \
+     tools/k15/run.sh k15 '^K15: |^  OK    (die Anordnung|ein Klick auf das Kaestchen|mit Bereichsverfolgung|und /daten/neu)'
 
 echo
 echo "=================================================================="

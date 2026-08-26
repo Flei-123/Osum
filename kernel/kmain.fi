@@ -49,6 +49,7 @@ import fb
 import ttf
 import ps2m
 import wm
+import wig
 import apic
 import hv
 
@@ -1995,6 +1996,33 @@ fn mode_of(cmd: u64) -> u64 {
     if find(cmd, (&tdw[0]) as u64, 7) != 0 {
         mode = mode | kstate.M_TTFDUMP
     }
+    // RUNDE K15. `wig` startet die Anwendung, die auf der
+    // Widget-Bibliothek sitzt, `wigfiles` den Dateimanager; die beiden
+    // Gegenproben `wignohit` und `wignoclip` werden der Anwendung als
+    // ARGUMENT durchgereicht, weil die Eigenschaft, die sie abschalten,
+    // in Ring 3 liegt und nicht im Kernel. `wiglong` haelt laenger
+    // still -- eine Oberflaeche, die von aussen wirklich BEDIENT wird,
+    // braucht mehr als fuenf Sekunden fuer zwanzig Monitorbefehle.
+    var wgw: [u8; 4] = "wig\0"
+    var wfw: [u8; 9] = "wigfiles\0"
+    var wnh: [u8; 9] = "wignohit\0"
+    var wnc: [u8; 10] = "wignoclip\0"
+    var wlw: [u8; 8] = "wiglong\0"
+    if find(cmd, (&wgw[0]) as u64, 3) != 0 {
+        mode = mode | kstate.M_WIG
+    }
+    if find(cmd, (&wfw[0]) as u64, 8) != 0 {
+        mode = mode | kstate.M_WIGFILES
+    }
+    if find(cmd, (&wnh[0]) as u64, 8) != 0 {
+        mode = mode | kstate.M_WIGNOHIT
+    }
+    if find(cmd, (&wnc[0]) as u64, 9) != 0 {
+        mode = mode | kstate.M_WIGNOCLIP
+    }
+    if find(cmd, (&wlw[0]) as u64, 7) != 0 {
+        mode = mode | kstate.M_WIGLONG
+    }
     if find(cmd, (&unixw[0]) as u64, 4) != 0 {
         mode = mode | M_UNIX
     }
@@ -2211,6 +2239,19 @@ fn surface(state: u64) {
     serial.puts((&s_of[0]) as u64)
     serial.dec(wm.selftest_max())
     serial.nl()
+    // RUNDE K15: die Naht zur Widget-Bibliothek. Sie kommt NACH dem
+    // Fensterserver, weil sie in seine Fenster schreibt, und sie kommt
+    // IMMER -- auch ohne das Wort `wig`. Ein Aufruf, den es nur
+    // manchmal gibt, ist kein Aufruf, sondern eine Falle.
+    wig.init(state)
+    var s_wig: [u8; 6] = "wig: \0"
+    var s_wsel: [u8; 11] = "selftest \0\0"
+    serial.puts((&s_wig[0]) as u64)
+    serial.puts((&s_wsel[0]) as u64)
+    serial.dec(wig.selftest(state))
+    serial.puts((&s_of[0]) as u64)
+    serial.dec(wig.selftest_max())
+    serial.nl()
 
     // 6. der Bildschirm gehoert ab hier dem Server. Der Spiegel der
     //    Textkonsole geht AUS -- zwei Zeichner auf einer Flaeche war
@@ -2254,11 +2295,22 @@ fn surface(state: u64) {
 
     // Die Anwendung in Ring 3. Sie legt ihr Fenster SELBST an, ueber ein
     // Handle -- der Kernel gibt ihr keine Flaeche, sie holt sich eine.
-    let t: u64 = proc.create(state, P_WCLICK, (w << 16) | h, 2)
-    // Ein paar Marken, damit sie ihr Fenster wirklich anlegt, bevor
-    // gemessen wird.
-    sched.sleep_ticks(state, 12)
-    wm.compose(state)
+    //
+    // RUNDE K15: mit `wig` oder `wigfiles` bleibt sie WEG. Nicht aus
+    // Schoenheit: `u_wclick` wartet in einer Schleife auf Ereignisse und
+    // teilt sich einen Prozessor mit der Anwendung dieser Runde, und ihr
+    // Fenster liegt genau dort, wo der Dateimanager steht.
+    var t: u64 = 0
+    if (kstate.get(state, kstate.MODE)
+        & (kstate.M_WIG | kstate.M_WIGFILES)) == 0 {
+        t = proc.create(state, P_WCLICK, (w << 16) | h, 2)
+        // Ein paar Marken, damit sie ihr Fenster wirklich anlegt, bevor
+        // gemessen wird.
+        sched.sleep_ticks(state, 12)
+        wm.compose(state)
+    } else {
+        t = k15_start(state)
+    }
 
     // Die Shell im Terminalfenster -- auf ausdrueckliches Wort, weil sie
     // eine Platte braucht.
@@ -2332,8 +2384,16 @@ fn surface(state: u64) {
     // sie die Klickereignisse nicht mehr abholte. Im Bild sah man das
     // als fehlenden Klickfleck, und im Mitschnitt an nichts.
     let hz: u64 = apic.tsc_hz(state)
+    // RUNDE K15: mit `wiglong` zwanzig statt fuenf Sekunden. Eine
+    // Oberflaeche, in die von aussen dreissig Monitorbefehle gespeist
+    // werden -- Bewegungen, Klicks, Tasten --, ist in fuenf Sekunden
+    // nicht bedient, und ein Foto davon zeigt einen halben Vorgang.
+    var sek: u64 = 5
+    if (kstate.get(state, kstate.MODE) & kstate.M_WIGLONG) != 0 {
+        sek = 20
+    }
     if hz != 0 {
-        let bis: u64 = apic.tsc() + hz * 5
+        let bis: u64 = apic.tsc() + hz * sek
         while apic.tsc() < bis {
             wm.poll(state)
             wm.compose(state)
@@ -2345,7 +2405,112 @@ fn surface(state: u64) {
     serial.puts((&s_go[0]) as u64)
     serial.nl()
     say_wm_input(state)
+    say_wig(state)
     let _unused: u64 = t
+}
+
+// RUNDE K15: DIE ANWENDUNG DIESER RUNDE STARTEN. Sie kommt von der
+// PLATTE und ist keine eingebaute Aufgabe -- die Widget-Bibliothek ist
+// eine Bibliothek in Ring 3, und ein Programm, das sie benutzt, ist ein
+// gewoehnliches Programm. `/bin/files` ist der Dateimanager,
+// `/bin/wigdemo` die Anwendung, die jedes Widget einmal hinstellt und
+// ueber die serielle Leitung meldet, was sie sieht.
+//
+// Die beiden Gegenproben gehen als ARGUMENT mit. Das ist die ehrliche
+// Stelle dafuer: `nohit` schaltet die Trefferpruefung der Bibliothek ab
+// (ein Klick landet dann bei keinem Widget), `noclip` die
+// Zwischenablage. Beides liegt in Ring 3, also wird es in Ring 3
+// abgeschaltet.
+fn k15_start(state: u64) -> u64 {
+    var p_files: [u8; 11] = "/bin/files\0"
+    var p_demo: [u8; 13] = "/bin/wigdemo\0"
+    var a_files: [u8; 6] = "files\0"
+    var a_demo: [u8; 8] = "wigdemo\0"
+    var a_nohit: [u8; 6] = "nohit\0"
+    var a_noclip: [u8; 7] = "noclip\0"
+    let abuf: u64 = state + kstate.EARG_OFF
+    var pfad: u64 = (&p_demo[0]) as u64
+    var arg0: u64 = (&a_demo[0]) as u64
+    var n0: u64 = 8
+    if (kstate.get(state, kstate.MODE) & kstate.M_WIGFILES) != 0 {
+        pfad = (&p_files[0]) as u64
+        arg0 = (&a_files[0]) as u64
+        n0 = 6
+    }
+    var at: u64 = 0
+    var k: u64 = 0
+    while k < n0 {
+        kstate.set8(abuf + at, kstate.get8(arg0 + k) as u8)
+        at = at + 1
+        k = k + 1
+    }
+    var argc: u64 = 1
+    if (kstate.get(state, kstate.MODE) & kstate.M_WIGNOHIT) != 0 {
+        k = 0
+        while k < 6 {
+            kstate.set8(abuf + at, a_nohit[k as usize])
+            at = at + 1
+            k = k + 1
+        }
+        argc = argc + 1
+    }
+    if (kstate.get(state, kstate.MODE) & kstate.M_WIGNOCLIP) != 0 {
+        k = 0
+        while k < 7 {
+            kstate.set8(abuf + at, a_noclip[k as usize])
+            at = at + 1
+            k = k + 1
+        }
+        argc = argc + 1
+    }
+    let pid: u64 = elf.spawn(state, pfad, abuf, argc, 2)
+    var s_k15: [u8; 12] = "k15: start \0"
+    var s_pid: [u8; 7] = "  pid=\0"
+    serial.puts((&s_k15[0]) as u64)
+    serial.puts(pfad)
+    serial.puts((&s_pid[0]) as u64)
+    serial.dec(pid)
+    serial.nl()
+    // Der Anwendung Zeit geben, ihr Fenster anzulegen und einmal zu
+    // malen, BEVOR gemessen wird -- sie liest dazu die Platte.
+    var runden: u64 = 0
+    while runden < 400 {
+        wm.poll(state)
+        wm.compose(state)
+        sched.sleep_ticks(state, 1)
+        runden = runden + 1
+    }
+    return pid
+}
+
+// Was die Naht in diesem Lauf wirklich getan hat. Die Zahlen sind die
+// Gegenprobe zu jeder Aussage ueber die Bereichsverfolgung: `blits` ist,
+// wie oft Ring 3 ein Rechteck herueber geschoben hat, `pixels` wie viele
+// Bildpunkte das waren -- und das ist NICHT dasselbe wie die Bildpunkte,
+// die der Server danach zusammengesetzt hat.
+fn say_wig(state: u64) {
+    var s_a: [u8; 12] = "wig: blits=\0"
+    var s_b: [u8; 10] = "  rows=\0\0\0"
+    var s_c: [u8; 10] = "  pixels=\0"
+    var s_d: [u8; 10] = "  glyphs=\0"
+    var s_e: [u8; 12] = "  clipset=\0\0"
+    var s_f: [u8; 12] = "  clipget=\0\0"
+    var s_g: [u8; 10] = "  shape=\0\0"
+    serial.puts((&s_a[0]) as u64)
+    serial.dec(wig.blits(state))
+    serial.puts((&s_b[0]) as u64)
+    serial.dec(wig.rows_copied(state))
+    serial.puts((&s_c[0]) as u64)
+    serial.dec(wig.pixels(state))
+    serial.puts((&s_d[0]) as u64)
+    serial.dec(wig.glyph_calls(state))
+    serial.puts((&s_e[0]) as u64)
+    serial.dec(wig.clip_writes(state))
+    serial.puts((&s_f[0]) as u64)
+    serial.dec(wig.clip_reads(state))
+    serial.puts((&s_g[0]) as u64)
+    serial.dec(wm.shape(state))
+    serial.nl()
 }
 
 // Warten auf die Shell im Fenster -- wie `wait_long`, aber es setzt

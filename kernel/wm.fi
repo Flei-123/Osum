@@ -74,6 +74,7 @@ export {
     on_mouse, on_key, term_write, term_out, term_cols, term_rows, term_cx, term_cy,
     bind_tty, key_tty, tty_of, NO_TTY,
     poll, composites, blits, pixels, last_us, cursor_on, set_cursor,
+    shape, set_shape,
     downs, moves_seen, hits_seen, win_keys,
     set_fonts, font_ui, font_mono, px_ui, px_mono,
     selftest, selftest_max,
@@ -143,6 +144,12 @@ const S_DESK: u64 = 0x0F8
 const S_DOWNS: u64 = 0x100
 const S_MOVES: u64 = 0x108
 const S_HITS: u64 = 0x110 // die Farbe des Hintergrunds
+// RUNDE K15: WELCHES ZEIGERBILD. 0 = Pfeil, 1 = Textbalken. Es steht
+// hier und nicht in der Anwendung, weil der Zeiger UEBER allen Fenstern
+// liegt und vom Server gemalt wird -- eine Anwendung, die ihn selbst
+// zeichnete, zeichnete ihn in ihr eigenes Rechteck und damit unter alle
+// anderen. `kernel/wig.fi` setzt ihn auf Verlangen aus Ring 3.
+const S_SHAPE: u64 = 0x118
 
 // ein Fenster
 const W_USED: u64 = 0x00
@@ -896,18 +903,58 @@ const CUR_W: u64 = 12
 const CUR_H: u64 = 18
 
 fn cursor_row(r: u64, fuell: bool) -> u64 {
+    return cursor_row_of(0, r, fuell)
+}
+
+// RUNDE K15: ZWEI ZEIGERBILDER STATT EINEM. Der Balken ist mechanisch
+// aus dem Pfeil-Verfahren entstanden und nicht von Hand gemalt: die
+// Fuellung ist der Balken, der Umriss ist die Fuellung um einen
+// Bildpunkt geweitet. Damit ist er ueber JEDEM Untergrund zu sehen --
+// derselbe Grund, aus dem der Pfeil einen schwarzen Rand hat.
+fn cursor_row_of(form: u64, r: u64, fuell: bool) -> u64 {
     // Bit 11 ist links.
     var umriss: [u8; 37] = b"\x08\x00\x0c\x00\x0a\x00\x09\x00\x08\x80\x08\x40\x08\x20\x08\x10\x08\x08\x08\x04\x08\x02\x0b\xff\x0c\x88\x0a\x48\x02\x48\x01\x24\x01\x24\x00\xfc\x00"
     var innen: [u8; 37] = b"\x00\x00\x00\x00\x04\x00\x06\x00\x07\x00\x07\x80\x07\xc0\x07\xe0\x07\xf0\x07\xf8\x07\xfc\x04\x00\x03\x70\x01\xb0\x01\xb0\x00\xd8\x00\xd8\x00\x00\x00"
+    var bumriss: [u8; 37] = b"\x03\xfc\x03\xfc\x03\xfc\x00\xf0\x00\xf0\x00\xf0\x00\xf0\x00\xf0\x00\xf0\x00\xf0\x00\xf0\x00\xf0\x00\xf0\x00\xf0\x00\xf0\x03\xfc\x03\xfc\x03\xfc\x00"
+    var binnen: [u8; 37] = b"\x00\x00\x01\xf8\x00\x60\x00\x60\x00\x60\x00\x60\x00\x60\x00\x60\x00\x60\x00\x60\x00\x60\x00\x60\x00\x60\x00\x60\x00\x60\x00\x60\x01\xf8\x00\x00\x00"
     if r >= CUR_H {
         return 0
     }
-    if fuell {
-        let pi: u64 = (&innen[0]) as u64 + r * 2
-        return (kstate.get8(pi) << 8) | kstate.get8(pi + 1)
+    var p: u64 = 0
+    if form == 1 {
+        if fuell {
+            p = (&binnen[0]) as u64 + r * 2
+        } else {
+            p = (&bumriss[0]) as u64 + r * 2
+        }
+    } else {
+        if fuell {
+            p = (&innen[0]) as u64 + r * 2
+        } else {
+            p = (&umriss[0]) as u64 + r * 2
+        }
     }
-    let pu: u64 = (&umriss[0]) as u64 + r * 2
-    return (kstate.get8(pu) << 8) | kstate.get8(pu + 1)
+    return (kstate.get8(p) << 8) | kstate.get8(p + 1)
+}
+
+fn shape(state: u64) -> u64 {
+    return gs(state, S_SHAPE)
+}
+
+// Das Bild wechseln und die STELLE schmutzig machen, an der der Zeiger
+// gerade steht -- sonst steht das alte Bild dort, bis sich die Maus
+// bewegt.
+fn set_shape(state: u64, s: u64) {
+    if s > 1 || !ready(state) {
+        return
+    }
+    if gs(state, S_SHAPE) == s {
+        return
+    }
+    ss(state, S_SHAPE, s)
+    let mx: i64 = gs(state, S_CURX) as i64
+    let my: i64 = gs(state, S_CURY) as i64
+    damage(state, mx, my, mx + CUR_W as i64, my + CUR_H as i64)
 }
 
 // Eine Bildzeile des zusammengesetzten Bildes. Der Hintergrund, dann
@@ -1154,8 +1201,8 @@ fn paint_cursor(state: u64, cx0: u64, cy0: u64, cx1: u64, cy1: u64) {
     while r < CUR_H {
         let py: i64 = my + r as i64
         if py >= cy0 as i64 && py < cy1 as i64 {
-            let u: u64 = cursor_row(r, false)
-            let f: u64 = cursor_row(r, true)
+            let u: u64 = cursor_row_of(gs(state, S_SHAPE), r, false)
+            let f: u64 = cursor_row_of(gs(state, S_SHAPE), r, true)
             var c: u64 = 0
             while c < CUR_W {
                 let pxx: i64 = mx + c as i64
@@ -1346,6 +1393,29 @@ fn on_mouse(state: u64) {
         }
         if (btn & ps2m.B_LEFT) == 0 && (alt & ps2m.B_LEFT) != 0 {
             ev_push(state, i, E_UP, lokal_x as u64, lokal_y as u64, alt)
+            return
+        }
+        // RUNDE K15: DIE RECHTE TASTE. Runde K10 sah nur die linke an --
+        // sie brauchte nicht mehr, und der Rest lief still ueber die
+        // Zustandsmaske. Ein Kontextmenue gibt es ohne rechte Taste
+        // nicht, also kommt sie hier dazu: dieselben zwei Ereignisse,
+        // dieselben Ortskoordinaten, und die Tastenmaske steht wie bei
+        // der linken im dritten Wort. KEIN Heben und KEIN Fokuswechsel
+        // dabei -- ein Rechtsklick soll das Fenster nicht umsortieren,
+        // sondern nur fragen.
+        if (btn & ps2m.B_RIGHT) != 0 && (alt & ps2m.B_RIGHT) == 0 {
+            if lokal_x >= 0 && lokal_y >= 0 {
+                ss(state, S_DOWNS, gs(state, S_DOWNS) + 1)
+                ev_push(state, i, E_DOWN, lokal_x as u64, lokal_y as u64,
+                    btn)
+            }
+            return
+        }
+        if (btn & ps2m.B_RIGHT) == 0 && (alt & ps2m.B_RIGHT) != 0 {
+            if lokal_x >= 0 && lokal_y >= 0 {
+                ev_push(state, i, E_UP, lokal_x as u64, lokal_y as u64,
+                    alt)
+            }
             return
         }
     }

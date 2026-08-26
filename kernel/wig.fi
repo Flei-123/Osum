@@ -1,0 +1,484 @@
+// kernel/wig.fi -- Runde K15: DIE NAHT ZWISCHEN FENSTERSERVER UND
+// ANWENDUNG. Und sie ist absichtlich duenn.
+//
+// Runde K10 hat den Fensterserver gebaut: eine Anwendung bekommt ein
+// Rechteck, malt hinein und holt Ereignisse ab. Was zwischen diesem
+// Rechteck und einer Anwendung fehlt, ist alles, was eine Anwendung
+// wirklich braucht -- Knoepfe, Beschriftungen, Textfelder, Listen,
+// Menues, Reiter, Dialoge, eine Ereignisschleife, eine Anordnung.
+//
+// DAS GEHOERT NICHT IN DEN KERNEL. Es steht in `kernel/user/wig.fi`,
+// in Ring 3, und wird von jedem Programm mitgebunden, das eine
+// Oberflaeche hat. Ein Kernel, der weiss, wie ein Knopf aussieht, ist
+// kein Kernel mehr.
+//
+// WAS DANN HIER STEHT, und warum es hier stehen MUSS -- fuenf Dinge,
+// jedes mit einem Grund, den man nicht in Ring 3 aufloesen kann:
+//
+//   1. EIN RECHTECK AUS DEM SPEICHER DER ANWENDUNG IN DAS FENSTER.
+//      Runde K10 gab Ring 3 `WM_FILL` (ein Rechteck einer Farbe) und
+//      `WM_TEXT` (eine Zeile). Eine Widget-Bibliothek malt Verlaeufe,
+//      Fokusringe, Bildlaufleisten, halbdurchsichtige Auswahlfarben und
+//      kantengeglaetteten Text in beliebiger Farbe. Das als Folge von
+//      Systemaufrufen zu malen waere je Bildpunktzeile ein Aufruf.
+//      Also malt die Bibliothek in IHREN EIGENEN Speicher und schiebt
+//      das fertige Rechteck mit EINEM Aufruf hinueber. Der Kernel
+//      kopiert und beschmutzt genau dieses Rechteck -- nicht das ganze
+//      Fenster; das ist der Unterschied, den `nodirty` sichtbar macht.
+//   2. EINE GLYPHE ALS DECKUNGSFELD. Der TrueType-Rasterer liegt im
+//      Kernel (`kernel/ttf.fi`), sein Arbeitsbereich ist ein halbes
+//      Megabyte aus dem Rahmenverwalter, und sein Zwischenspeicher ist
+//      der Grund, warum eine Textzeile 78 Mikrosekunden kostet statt
+//      47 Millisekunden. Ring 3 fragt hier nach den DECKUNGSWERTEN
+//      einer Glyphe und mischt sie SELBST -- damit gehoert die Farbe,
+//      der Beschnitt und der Auswahlhintergrund der Bibliothek, und der
+//      Kernel bleibt bei dem, was nur er hat.
+//   3. DIE UNTERSCHNEIDUNG. Sie steht in der `kern`-Tabelle der
+//      Schrift, die der Kernel gelesen hat. Ohne sie setzt Ring 3 den
+//      Text anders als der Server die Titelleiste -- und ein Pruefer,
+//      der beides gegen dieselbe zweite Rasterung haelt, faellt.
+//   4. DIE ZWISCHENABLAGE. Sie ist per Definition das, was ZWEI
+//      Prozesse teilen. In Ring 3 waere sie ein Prozess, den es nicht
+//      gibt, oder eine Datei, die kein Prozess dem anderen ankuendigen
+//      kann. Vier Kilooktett im Kernel, und der Fall ist erledigt.
+//   5. DAS ZEIGERBILD. Der Zeiger wird vom Server gemalt, nicht von der
+//      Anwendung -- er liegt UEBER allen Fenstern. Wer ihn ueber einem
+//      Textfeld zu einem Balken machen will, muss es dem Server sagen.
+//
+// WAS HIER NICHT STEHT UND WARUM. Keine Fensterhierarchie, keine
+// Unterfenster, kein Beschnittstapel, keine Ereignisverteilung an
+// Widgets. Das sind alles Begriffe der Bibliothek; der Kernel kennt
+// Fenster und Rechtecke und sonst nichts.
+//
+// SPEICHER: eine einzige Seitengruppe von `kdata` (kstate.WIG_OFF,
+// 0x46000..0x49000, drei Seiten):
+//
+//   +0x0000  die Skalare
+//   +0x1000  die Zwischenablage, 4096 Oktette
+//   +0x2000  der Umschlagpuffer -- EINE Bildpunktzeile oder EINE Glyphe
+//
+// Der Umschlagpuffer ist der Grund, warum diese Runde nichts aus dem
+// Kernelhaufen nimmt: er ist 256 KiB gross und gehoert allen.
+
+profile kernel
+
+import kstate
+import proc
+import guard
+import wm
+import ttf
+
+export {
+    init, ready,
+    blit, glyph_into, kern_of, clip_set, clip_get, clip_len,
+    shape, set_shape,
+    blits, rows_copied, pixels, glyph_calls, clip_writes, clip_reads,
+    fetch,
+    selftest, selftest_max,
+    CLIP_MAX, G_HDR, MAX_ROW
+}
+
+// ------------------------------------------------------- die Zahlen
+
+const CLIP_OFF: u64 = 0x1000
+const CLIP_MAX: u64 = 4096
+const STAGE_OFF: u64 = 0x2000
+const STAGE_MAX: u64 = 4096
+
+// Die breiteste Bildpunktzeile, die durch den Umschlagpuffer passt.
+// 4096 / 4 = 1024, und der Bildschirm dieser Runde ist 800 breit. Steht
+// hier als Rechnung und nicht als Zahl, damit ein groesserer Puffer
+// nicht vergessen wird.
+const MAX_ROW: u64 = 1024 // STAGE_MAX / 4
+
+// Der Kopf eines Deckungsfeldes, sechs Woerter, danach w*h Oktette:
+//   +0 Breite  +8 Hoehe  +16 links  +24 oben  +32 Laufweite in 26.6
+//   +40 Oktette der Deckung
+const G_HDR: u64 = 48
+
+// Die Skalare
+const S_READY: u64 = 0x000
+const S_CLIPLEN: u64 = 0x008
+const S_BLITS: u64 = 0x010
+const S_ROWS: u64 = 0x018
+const S_PIXELS: u64 = 0x020
+const S_GLYPHS: u64 = 0x028
+const S_CLIPW: u64 = 0x030
+const S_CLIPR: u64 = 0x038
+const S_SHAPE: u64 = 0x040
+
+fn base(state: u64) -> u64 {
+    return state + kstate.WIG_OFF
+}
+
+fn gs(state: u64, off: u64) -> u64 {
+    return kstate.get(state, kstate.WIG_OFF + off)
+}
+
+fn ss(state: u64, off: u64, v: u64) {
+    kstate.set(state, kstate.WIG_OFF + off, v)
+}
+
+fn ready(state: u64) -> bool {
+    return gs(state, S_READY) != 0
+}
+
+fn blits(state: u64) -> u64 {
+    return gs(state, S_BLITS)
+}
+
+fn rows_copied(state: u64) -> u64 {
+    return gs(state, S_ROWS)
+}
+
+fn pixels(state: u64) -> u64 {
+    return gs(state, S_PIXELS)
+}
+
+fn glyph_calls(state: u64) -> u64 {
+    return gs(state, S_GLYPHS)
+}
+
+fn clip_writes(state: u64) -> u64 {
+    return gs(state, S_CLIPW)
+}
+
+fn clip_reads(state: u64) -> u64 {
+    return gs(state, S_CLIPR)
+}
+
+fn clip_len(state: u64) -> u64 {
+    return gs(state, S_CLIPLEN)
+}
+
+fn shape(state: u64) -> u64 {
+    return gs(state, S_SHAPE)
+}
+
+fn set_shape(state: u64, s: u64) {
+    if s > 2 {
+        return
+    }
+    if gs(state, S_SHAPE) == s {
+        return
+    }
+    ss(state, S_SHAPE, s)
+    wm.set_shape(state, s)
+}
+
+// Die drei Seiten leer, die Zaehler auf null. Wird aus `kmain` gerufen,
+// nachdem der Fensterserver steht -- vorher gaebe es kein Fenster, in
+// das etwas geschoben werden koennte.
+fn init(state: u64) -> bool {
+    var i: u64 = 0
+    while i < 0x3000 {
+        kstate.set8(base(state) + i, 0 as u8)
+        i = i + 1
+    }
+    ss(state, S_READY, 1)
+    return true
+}
+
+// ------------------------------------------------ aus Ring 3 herein
+//
+// DASSELBE WIE `sys.copy_in`, NUR NICHT OKTETTWEISE. Der Kopierer der
+// Runde K4 laeuft eine Schleife je Oktett; fuer einen Namen ist das
+// richtig, fuer 3200 Oktette Bildpunktzeile ist es der Unterschied
+// zwischen einer Oberflaeche und einer Diashow. Gemessen in
+// docs/ROUNDK15.md.
+//
+// Die drei Regeln bleiben genau dieselben:
+//   1. `proc.user_ok` -- die Anwendung muss den Bereich besitzen.
+//   2. `proc.translate` je Seite -- der Kernel folgt keinem fremden
+//      Zeiger, er rechnet ihn um.
+//   3. `guard.stac` / `guard.clac` um jeden Zugriff -- SMAP.
+fn fetch(state: u64, me: u64, dst: u64, src: u64, len: u64) -> bool {
+    if len == 0 {
+        return true
+    }
+    if !proc.user_ok(state, me, src, len) {
+        return false
+    }
+    var n: u64 = 0
+    while n < len {
+        let phys: u64 = proc.translate(state, me, src + n)
+        if phys == 0 {
+            return false
+        }
+        var room: u64 = 4096 - ((src + n) & 4095)
+        if room > len - n {
+            room = len - n
+        }
+        guard.stac(state)
+        asm("cld\nrep movsb", in("rdi") dst +% n, in("rsi") phys,
+            in("rcx") room, clobber("rdi"), clobber("rsi"),
+            clobber("rcx"), clobber("memory"))
+        guard.clac(state)
+        n = n + room
+    }
+    return true
+}
+
+fn store(state: u64, me: u64, dst: u64, src: u64, len: u64) -> bool {
+    if len == 0 {
+        return true
+    }
+    if !proc.user_ok(state, me, dst, len) {
+        return false
+    }
+    var n: u64 = 0
+    while n < len {
+        let phys: u64 = proc.translate(state, me, dst + n)
+        if phys == 0 {
+            return false
+        }
+        var room: u64 = 4096 - ((dst + n) & 4095)
+        if room > len - n {
+            room = len - n
+        }
+        guard.stac(state)
+        asm("cld\nrep movsb", in("rdi") phys, in("rsi") src +% n,
+            in("rcx") room, clobber("rdi"), clobber("rsi"),
+            clobber("rcx"), clobber("memory"))
+        guard.clac(state)
+        n = n + room
+    }
+    return true
+}
+
+// ------------------------------------------------------- 1. das Blit
+//
+// Ein Rechteck aus dem Speicher der Anwendung in ihr Fenster, Zeile fuer
+// Zeile durch den Umschlagpuffer. Danach ist GENAU DIESES RECHTECK
+// schmutzig und nicht das Fenster -- `wm.damage` bekommt die Stelle auf
+// dem BILDSCHIRM, also Fensterecke plus Rahmen plus Versatz.
+//
+// Warum zeilenweise und nicht am Stueck: der Umschlagpuffer ist eine
+// Seite. Ein Puffer fuer ein ganzes Fenster waere 851 200 Oktette in
+// `kdata`, und `kdata` sind 320 KiB.
+//
+// `stride` ist die Zeilenlaenge der QUELLE in Bildpunkten. Sie ist nicht
+// immer `w`: die Bibliothek malt in einen Streifen, der so breit ist wie
+// das Fenster, und schiebt daraus ein schmales Rechteck.
+fn blit(state: u64, me: u64, i: u64, x: u64, y: u64, w: u64, h: u64,
+    src: u64, stride: u64) -> u64 {
+    if !wm.valid(state, i) {
+        return 0
+    }
+    if w == 0 || h == 0 || w > MAX_ROW {
+        return 0
+    }
+    let ww: u64 = wm.win_w(state, i)
+    let wh: u64 = wm.win_h(state, i)
+    if x >= ww || y >= wh {
+        return 0
+    }
+    var bw: u64 = w
+    var bh: u64 = h
+    if x + bw > ww {
+        bw = ww - x
+    }
+    if y + bh > wh {
+        bh = wh - y
+    }
+    let stage: u64 = base(state) + STAGE_OFF
+    var r: u64 = 0
+    while r < bh {
+        if !fetch(state, me, stage, src +% r *% stride *% 4, bw *% 4) {
+            // Was schon drin steht, bleibt drin -- aber die Zusage
+            // "so viele Bildpunkte" wird nicht gegeben.
+            ss(state, S_ROWS, gs(state, S_ROWS) + r)
+            return 0
+        }
+        wm.blit_in(state, i, stage, x, y + r, bw, 1)
+        r = r + 1
+    }
+    ss(state, S_BLITS, gs(state, S_BLITS) + 1)
+    ss(state, S_ROWS, gs(state, S_ROWS) + bh)
+    ss(state, S_PIXELS, gs(state, S_PIXELS) + bw * bh)
+    // NUR DAS RECHTECK. Der Unterschied zu `wm.flush_win` ist die ganze
+    // Bereichsverfolgung: eine Einfuegemarke, die blinkt, ist 2 x 16
+    // Bildpunkte und nicht 560 x 380.
+    let sx: i64 = wm.win_x(state, i) + wm.BORDER as i64 + x as i64
+    let sy: i64 = wm.win_y(state, i) + wm.TITLE_H as i64 + y as i64
+    wm.damage(state, sx, sy, sx + bw as i64, sy + bh as i64)
+    return bw * bh
+}
+
+// ---------------------------------------------------- 2. eine Glyphe
+//
+// Kopf und Deckungsfeld in den Speicher der Anwendung. Der Kernel
+// rastert (und speichert zwischen), Ring 3 mischt.
+//
+// `f` ist 0 fuer die Proportionalschrift der Oberflaeche und 1 fuer die
+// Festbreitenschrift -- die beiden, die der Server geladen hat. Eine
+// dritte gibt es nicht, und eine Nummer, die auf einen Platz zeigt, der
+// nie gefuellt wurde, waere ein Leseversuch in fremdem Speicher.
+fn font_of(state: u64, f: u64) -> u64 {
+    if f == 0 {
+        return wm.font_ui(state)
+    }
+    return wm.font_mono(state)
+}
+
+fn glyph_into(state: u64, me: u64, f: u64, px: u64, c: u64, out: u64,
+    max: u64) -> u64 {
+    if f > 1 || px == 0 || px > 128 {
+        return 0
+    }
+    let font: u64 = font_of(state, f)
+    if font >= ttf.MAX_FONTS {
+        return 0
+    }
+    let stage: u64 = base(state) + STAGE_OFF
+    let slot: u64 = ttf.glyph(state, font, c, px)
+    var gw: u64 = 0
+    var gh: u64 = 0
+    var gl: i64 = 0
+    var gt: i64 = 0
+    var ga: i64 = 0
+    if slot < ttf.SLOTS {
+        gw = ttf.g_w(state, slot)
+        gh = ttf.g_h(state, slot)
+        gl = ttf.g_left(state, slot)
+        gt = ttf.g_top(state, slot)
+        ga = ttf.g_adv(state, slot)
+    } else {
+        // Kein Umriss (Leerzeichen) oder kein Platz mehr im
+        // Zwischenspeicher: die LAUFWEITE gilt trotzdem, sonst rutscht
+        // die ganze Zeile.
+        let gid: u64 = ttf.glyph_of(state, font, c)
+        ga = ttf.advance26(state, font, gid, px)
+    }
+    if gw * gh + G_HDR > STAGE_MAX {
+        return 0
+    }
+    if gw * gh + G_HDR > max {
+        return 0
+    }
+    __mmio_write64((stage + 0) as *mut u64, gw)
+    __mmio_write64((stage + 8) as *mut u64, gh)
+    __mmio_write64((stage + 16) as *mut u64, gl as u64)
+    __mmio_write64((stage + 24) as *mut u64, gt as u64)
+    __mmio_write64((stage + 32) as *mut u64, ga as u64)
+    __mmio_write64((stage + 40) as *mut u64, gw * gh)
+    var r: u64 = 0
+    while r < gh {
+        var k: u64 = 0
+        while k < gw {
+            kstate.set8(stage + G_HDR + r * gw + k,
+                ttf.g_pixel(state, slot, k, r) as u8)
+            k = k + 1
+        }
+        r = r + 1
+    }
+    if !store(state, me, out, stage, G_HDR + gw * gh) {
+        return 0
+    }
+    ss(state, S_GLYPHS, gs(state, S_GLYPHS) + 1)
+    return G_HDR + gw * gh
+}
+
+// --------------------------------------------- 3. die Unterschneidung
+
+fn kern_of(state: u64, f: u64, px: u64, c1: u64, c2: u64) -> i64 {
+    if f > 1 {
+        return 0
+    }
+    let font: u64 = font_of(state, f)
+    if font >= ttf.MAX_FONTS {
+        return 0
+    }
+    let g1: u64 = ttf.glyph_of(state, font, c1)
+    let g2: u64 = ttf.glyph_of(state, font, c2)
+    return ttf.kern26(state, font, g1, g2, px)
+}
+
+// ------------------------------------------- 4. die Zwischenablage
+
+fn clip_set(state: u64, me: u64, src: u64, n: u64) -> u64 {
+    var len: u64 = n
+    if len > CLIP_MAX {
+        len = CLIP_MAX
+    }
+    if len == 0 {
+        ss(state, S_CLIPLEN, 0)
+        ss(state, S_CLIPW, gs(state, S_CLIPW) + 1)
+        return 0
+    }
+    if !fetch(state, me, base(state) + CLIP_OFF, src, len) {
+        return 0
+    }
+    ss(state, S_CLIPLEN, len)
+    ss(state, S_CLIPW, gs(state, S_CLIPW) + 1)
+    return len
+}
+
+fn clip_get(state: u64, me: u64, dst: u64, max: u64) -> u64 {
+    var len: u64 = gs(state, S_CLIPLEN)
+    if len > max {
+        len = max
+    }
+    if len == 0 {
+        return 0
+    }
+    if !store(state, me, dst, base(state) + CLIP_OFF, len) {
+        return 0
+    }
+    ss(state, S_CLIPR, gs(state, S_CLIPR) + 1)
+    return len
+}
+
+// ------------------------------------------------- was es selbst weiss
+//
+// Sieben Zusagen, und sie pruefen die Rechnungen, die sonst niemand
+// sieht -- die Grenzen des Umschlagpuffers und der Zwischenablage.
+fn selftest(state: u64) -> u64 {
+    var gut: u64 = 0
+    // 1. Der Umschlagpuffer traegt genau eine Bildpunktzeile von
+    //    MAX_ROW, und keine breitere.
+    if MAX_ROW * 4 == STAGE_MAX {
+        gut = gut + 1
+    }
+    // 2. Ein Blit, das breiter ist als der Umschlagpuffer, wird
+    //    abgelehnt -- und nicht halb ausgefuehrt.
+    if blit(state, 0, 0, 0, 0, MAX_ROW + 1, 1, 0, MAX_ROW + 1) == 0 {
+        gut = gut + 1
+    }
+    // 3. Ein Fenster, das es nicht gibt.
+    if blit(state, 0, wm.MAX_WIN, 0, 0, 4, 4, 0, 4) == 0 {
+        gut = gut + 1
+    }
+    // 4. Der Glyphenkopf passt mit dem groessten Deckungsfeld in den
+    //    Umschlagpuffer. DIE ERSTE FASSUNG DIESER ZEILE RECHNETE MIT
+    //    64 x 64 UND FIEL DURCH -- 48 + 4096 sind mehr als 4096, und
+    //    zwar genau um den Kopf. Das ist die Grenze, die hier steht:
+    //    ein Zeichen darf bis 48 x 48 gross sein, also bis etwa 48
+    //    Bildpunkte Schriftgroesse. Darueber gibt `glyph_into` eine
+    //    Null zurueck statt in die naechste Seite zu schreiben.
+    if STAGE_MAX >= G_HDR + 48 * 48 {
+        gut = gut + 1
+    }
+    // 5. Die Zwischenablage faengt leer an und der Zaehler stimmt.
+    let vorher: u64 = gs(state, S_CLIPLEN)
+    ss(state, S_CLIPLEN, 0)
+    if clip_len(state) == 0 {
+        gut = gut + 1
+    }
+    ss(state, S_CLIPLEN, vorher)
+    // 6. Eine Schriftnummer, die es nicht gibt, gibt keine
+    //    Unterschneidung -- statt in einen Platz zu lesen, der nie
+    //    gefuellt wurde.
+    if kern_of(state, 2, 15, 65, 86) == 0 {
+        gut = gut + 1
+    }
+    // 7. Und die drei Seiten liegen dort, wo die Karte sie fuehrt.
+    if kstate.WIG_MAX == 0x3000 {
+        gut = gut + 1
+    }
+    return gut
+}
+
+fn selftest_max() -> u64 {
+    return 7
+}
