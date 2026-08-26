@@ -45,6 +45,9 @@ const S_TEXT: u64 = 0
 const S_ESC: u64 = 1
 const S_CSI: u64 = 2
 
+// Ob seit dem letzten Sichtbarmachen etwas gezeichnet wurde.
+const AN_PEND: u64 = 0x48
+
 // Die Adresse des Kernel-Datenbereichs, ohne sie uebergeben zu bekommen
 // -- derselbe Griff wie in `fb.echo`, und aus demselben Grund:
 // `serial.put` hat kein `state` und soll keines bekommen.
@@ -123,8 +126,28 @@ fn wipe(state: u64, c0: u64, r0: u64, c1: u64, r1: u64) {
     fb.dirty_all(state)
 }
 
+// WAS GEZEICHNET WURDE, SICHTBAR MACHEN.
+//
+// `fb.putc` schiebt den Zweitpuffer nur beim Zeilenvorschub auf den
+// Schirm -- ein Programm, das mit `ESC [ r;c H` von Zeile zu Zeile
+// springt, schickt aber nie einen. Beim ersten Messlauf sah man genau
+// das: jede Zeile des Editors stand da, nur die LETZTE nicht, denn sie
+// wurde von keinem nachfolgenden Loeschbefehl mehr mitgeschoben.
+//
+// Also wird hier gezaehlt, ob seit dem letzten Mal etwas gemalt wurde,
+// und vor jedem Sprung, jedem Loeschen und jedem Ein- und Ausschalten
+// der Schreibmarke nachgeholt. Das ist EIN Schub je gezeichneter Zeile --
+// genau so viele wie vorher, plus dem einen, der gefehlt hat.
+fn settle(state: u64) {
+    if g(state, AN_PEND) != 0 {
+        s(state, AN_PEND, 0)
+        fb.flush(state)
+    }
+}
+
 // Die Folge ist zu Ende: `final` ist ihr Schlussbuchstabe.
 fn run(state: u64, final: u64) {
+    settle(state)
     let cols: u64 = fb.cols(state)
     let rows: u64 = fb.rows(state)
     let x: u64 = fb.cx(state)
@@ -234,6 +257,7 @@ fn run(state: u64, final: u64) {
     if final == 104 || final == 108 {
         if g(state, kstate.AN_PRIV) == 1 && par_or(state, 0, 0) == 25 {
             fb.set_cursor(state, final == 104)
+            fb.flush(state)
         }
         return
     }
@@ -248,6 +272,7 @@ fn feed(state: u64, c: u64) {
             return
         }
         fb.putc(state, c)
+        s(state, AN_PEND, 1)
         return
     }
     if st == S_ESC {

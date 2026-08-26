@@ -278,8 +278,7 @@ gunzip -c /d/drei.txt
 echo gunzip=$?
 sed s/a/b/ /d
 echo sedverz=$?
-cat /d/nonl.txt
-echo .
+cat /d/nonl.txt > /w/nonl2.txt
 wc -c /d/nonl.txt
 cut -c 1-4 /d/lang.txt
 echo ==END==
@@ -502,9 +501,14 @@ hat "$E" "cut: cannot open /nirgends" "cut sagt, welche Datei fehlt"
 hat "$E" "gunzip: not a gzip file" "gunzip erkennt, dass das kein gzip ist"
 # Eine Datei OHNE abschliessenden Zeilenumbruch: `cat` gibt genau die
 # Oktette, `wc -c` zaehlt sie, und die naechste Zeile klebt nicht daran.
-grep -qa '^ohne umbruch\.$' "$E" \
-    && ok "Text ohne abschliessenden Zeilenumbruch: das naechste Zeichen klebt daran" \
-    || { bad "der Text ohne Zeilenumbruch fehlt"; grep -a 'umbruch' "$E" | head -3 | sed 's/^/        /'; }
+# Ein Text OHNE abschliessenden Zeilenumbruch, durch `cat` in eine neue
+# Datei -- und dann die Oktette AUF DER PLATTE dagegen gehalten. Auf der
+# seriellen Leitung liesse sich das gar nicht messen: dort klebt die
+# naechste Zeile des Kerns daran, und genau daran erkennt man ja, dass
+# kein Umbruch da war.
+python3 tools/osum/mkfs.py cat "$TMPD/nach-fehler.img" /w/nonl2.txt > "$TMPD/nonl2.ist" 2>/dev/null
+dateien_gleich "Text ohne abschliessenden Zeilenumbruch: 12 Oktette, unveraendert durch cat" \
+    "$F/nonl.txt" "$TMPD/nonl2.ist"
 hat "$E" "12 /d/nonl.txt" "wc -c zaehlt die 12 Oktette ohne Zeilenumbruch"
 hat "$E" "xxxx" "cut -c auf einer Zeile von 900 Zeichen"
 
@@ -622,7 +626,7 @@ tar -xf /d/gnu.tar
 find /w/aus -type f | sort
 cat /w/aus/baum/a.txt
 gunzip -c /d/gnu.gz | wc -c
-gunzip -c /d/gnu.gz | sort | head -n 1
+gunzip -c /d/gnu.gz | head -n 1
 echo ==END==
 SCRIPT
 python3 tools/osum/mkfs.py build "$TMPD/d1.img" $BLOCKS $DIRS $SPEC $DATA \
@@ -638,7 +642,7 @@ block "$TMPD/ein.txt" > "$TMPD/ein.ist"
     ( cd "$TMPD" && find baum -type f | sed 's|^baum|/w/aus/baum|' | sort )
     cat "$F/drei.txt"
     stat -c%s "$F/gross.txt"
-    sort "$F/gross.txt" | head -n 1
+    head -n 1 "$F/gross.txt"
 } > "$TMPD/ein.soll"
 dateien_gleich "Osums tar und gunzip lesen, was GNU geschrieben hat" \
     "$TMPD/ein.soll" "$TMPD/ein.ist"

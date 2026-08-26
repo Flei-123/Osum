@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ./test.sh -- die Abnahme von Osum.
 #
-# Vierzehn Abschnitte, in der Reihenfolge, in der der Kernel entstanden ist.
+# Fuenfzehn Abschnitte, in der Reihenfolge, in der der Kernel entstanden ist.
 # Jeder ruft einen eigenen Testlaeufer unter tools/ auf, jeder Laeufer
 # startet QEMU pro Fall mit Zeitlimit, prueft die serielle Ausgabe und den
 # Beendigungscode (21 = der Kernel hat sich selbst beendet, 63 = er ist an
@@ -81,6 +81,23 @@
 #      zugestellt, der Zaehler bleibt bei null), `fixedrand` (fester
 #      Strom, die statistische Pruefung faellt durch), und drei Neustarts
 #      mit drei verschiedenen Saaten.
+#
+#  15. Man kann auf diesem System ARBEITEN (tools/k11/run.sh, Runde
+#      K11): ein bildschirmorientierter Editor in Ring 3 ueber den rohen
+#      Terminalmodus aus Runde K9, zwanzig Werkzeuge (find, sed, diff,
+#      patch, tar, gzip/gunzip, xargs, du, top, mount/umount, basename,
+#      dirname, tee, cut, tr, seq, env, which) und eine Shell, die eine
+#      Sprache ist (if/elif/else, while, until, for, case, Funktionen,
+#      return/break/continue/shift, test und `[`). Der Editor wird
+#      WIRKLICH BEDIENT: die Tasten kommen ueber den QEMU-Monitor am Tor
+#      0x60 an, und danach liest der WIRT die gesicherte Datei aus dem
+#      Plattenabbild und haelt sie Oktett fuer Oktett gegen die
+#      Erwartung. Jedes Werkzeug steht gegen sein GNU-Gegenstueck;
+#      `tar` und `gzip` arbeiten in BEIDE Richtungen mit dem echten
+#      `tar` und `gzip` des Wirts zusammen. Gegenproben: ohne Sichern
+#      aendert sich die Platte nicht, ohne Umschalttaste gibt es keine
+#      Grossbuchstaben, ohne `gfx` kein Bild, und nach `umount` startet
+#      kein Programm mehr von der Platte.
 #
 #  14. Das Netz (tools/net/run.sh, Runde K8): ein virtio-net-Treiber in
 #      Firn (`kernel/virtio.fi`), der TCP/IP-Stack aus Runde K3 als
@@ -216,6 +233,9 @@ lauf "13. was jedes Unix-Programm voraussetzt: Signale, Terminal, Uhr, Zufall (t
 
 lauf "14. das Netz: virtio-net, der Stack aus K3, Steckdosen -- gegen den Linux-Kern (tools/net/run.sh)" \
      tools/net/run.sh net '^NET:|^  OK    (throughput|round trip|what came back|and on three)'
+
+lauf "15. man kann darauf arbeiten: ein Editor, zwanzig Werkzeuge, eine Shell mit Sprache (tools/k11/run.sh, Runde K11)" \
+     tools/k11/run.sh k11 '^K11: |^  OK    (DIE GESICHERTE|EINE DATEI|AUF DEM BILDSCHIRM|GNU )'
 
 echo
 echo "=================================================================="
