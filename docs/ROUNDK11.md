@@ -336,6 +336,11 @@ warum es keine Behauptung ist:
 
 `bash tools/k11/run.sh` — **85 Zusagen, 0 Fehler.**
 
+`./test.sh` im Ganzen — **alle 15 Abschnitte bestanden, 1211 Zusagen,
+0 Fehler** (vorher: 14 Abschnitte, 1126 Zusagen). Die 85 dieser Runde
+kommen dazu; der Abschnitt der POSIX-Schicht zaehlt eine mehr, weil die
+zwei neuen Aufrufnummern jetzt in beiden Listen stehen.
+
 | | |
 |---|---|
 | neue Programme | 21 (20 Werkzeuge + `edit`), dazu die Module `tools.fi` und `flate.fi` |
@@ -361,10 +366,21 @@ mit 90000 bis 200000 Oktetten ab.
 
 Auf diesem Zweig gemessen: zweimal rot, **während gleichzeitig andere
 Läufe auf derselben Maschine liefen** (2 und 1 KiB/s), und grün, sobald
-die Maschine nichts anderes zu tun hatte (**83 KiB/s, 262144 Oktette,
-NET: 75 passed, 0 failed**). Der Durchsatz auf der sauberen Leitung ist
-auf beiden Zweigen derselbe (6300 bis 6400 KiB/s) — diese Runde hat den
+die Maschine nichts anderes zu tun hatte (83 und 91 KiB/s, 262144
+Oktette, **NET: 75 passed, 0 failed** — sowohl einzeln als auch im
+vollständigen `./test.sh`). Der Durchsatz auf der sauberen Leitung ist
+auf beiden Zweigen derselbe (5700 bis 6400 KiB/s) — diese Runde hat den
 Netzweg nicht verlangsamt, sie hat nur beim Messen daneben gestanden.
+
+Und noch eine Falle derselben Art, für die nächste Runde aufgeschrieben:
+**wer einen laufenden `tools/net/run.sh` abbricht, lässt das Hilfsprogramm
+`bruecke` am Leben**, und das hält die UDP-Tore 5555/5556. Der nächste
+Netzlauf scheitert dann an allem auf einmal (34 Fehler statt einem). Vor
+einem Netzlauf gehört also:
+
+```sh
+pkill -f bruecke ; ip netns del k8net ; ip link del v0
+```
 
 ---
 
