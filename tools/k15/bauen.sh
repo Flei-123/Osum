@@ -11,7 +11,7 @@ CC=${FIRNC:-vendor/firn/bin/firnc}
 OUT=${1:-/tmp/k15}
 mkdir -p "$OUT"
 
-PROGS="wigdemo explorer starter sh echo ls cat edit"
+PROGS="wigdemo explorer starter suchen sh echo ls cat edit"
 
 bash tools/build-kernel.sh "$OUT/k.mb" > "$OUT/k.log" 2>&1 || {
     echo "== der Kern laesst sich nicht bauen"; tail -20 "$OUT/k.log"; exit 1; }
@@ -49,8 +49,8 @@ for p in $PROGS; do ARGS+=("/bin/$p=$OUT/$p.elf"); done
 # Der ZWEITE NAME: ein Verzeichniseintrag mehr auf dieselbe Inode.
 ARGS+=("/bin/files@/bin/explorer")
 ARGS+=(/etc/ "/etc/theme=$OUT/baum/theme")
-ARGS+=(/usr/ /usr/share/ /usr/share/apps/)
-for a in assets/apps/*.app; do ARGS+=("/usr/share/apps/$(basename "$a")=$a"); done
+# DIE BUENDEL: /apps/<name>.prog/{INFO,start,symbol,daten/}
+while read -r zeile; do ARGS+=("$zeile"); done < <(python3 tools/k15/buendel.py assets/apps "$OUT/buendel")
 while read -r pfad; do ARGS+=("$pfad"); done < "$OUT/baum/liste"
 python3 tools/osum/mkfs.py "${ARGS[@]}" > "$OUT/mkfs.log" 2>&1 || {
     echo "== mkfs.py fehlgeschlagen"; tail -20 "$OUT/mkfs.log"; exit 1; }
