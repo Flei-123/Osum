@@ -42,7 +42,7 @@ ttf: mono  glyphs=96  upm=2048  asc=14  desc=3  lh=19  kern=0   selftest 12 / 12
 ttf: sans  glyphs=96  upm=2048  asc=13  desc=3  lh=18  kern=220 selftest 12 / 12
 mouse: id=3  packets=0  selftest 10 / 10
 wm: 800x600  cursor=1  dirty=1  focus=1  arena=524288
-wm:   selftest 15 / 15
+wm:   selftest 17 / 17
 wm: term win=0  cols=56  rows=20  cell=10x19
 wclick: passed 10 / 10
 wmbench: compose full=6801 us  small=198 us  factor=3434
@@ -222,7 +222,7 @@ geschlossen wurde, eine Größe, die kein Fenster ergibt.
 
 ### 3.3 Was der Server selbst prüft
 
-`wm: selftest 15 / 15`. Die Kernaussagen:
+`wm: selftest 17 / 17`. Die Kernaussagen:
 
 * Ein zweites Fenster liegt **über** dem ersten, und der Treffer an einer
   Stelle, die beide bedecken, ist das obere. **Heben** ändert das.
@@ -235,6 +235,10 @@ geschlossen wurde, eine Größe, die kein Fenster ergibt.
   Bereich deckt **beide** Stellen, die alte und die neue. Ohne das bliebe
   ein Fenstergespenst stehen.
 * Schließen schließt die **Lücke** in der Stapelreihenfolge.
+* **Die Größe ändern** geht bis zur Größe, für die der Puffer geholt
+  wurde, und darüber hinaus nicht — ein Fenster, das über seinen eigenen
+  Puffer hinauswächst, wäre ein Schreibzugriff daneben. Ein
+  Terminalfenster rechnet sein Raster dabei neu.
 
 ### 3.4 Die Wiederherstellung des Hintergrunds
 

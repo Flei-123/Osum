@@ -276,7 +276,7 @@ foto "$K0" "gfx wm wmhold $GRUND" "$TMPD/w.txt" "$TMPD/w.ppm"
 num "der Kern beendet sich sauber" "$RC" eq 21
 has "$TMPD/w.txt" "wm: hold" "der Kern haelt fuer das Foto still"
 ws=$(zahl "$TMPD/w.txt" 'wm: .*selftest [0-9]+')
-num "die Zusagen des Fensterservers ueber sich selbst" "$ws" eq 15
+num "die Zusagen des Fensterservers ueber sich selbst" "$ws" eq 17
 has "$TMPD/w.txt" "wm: 800x600" "der Server kennt die Flaeche"
 has "$TMPD/w.txt" "wm: term win=0  cols=56  rows=20  cell=10x19" \
     "das Terminalfenster hat ein Raster von 56x20 Zellen zu 10x19"
