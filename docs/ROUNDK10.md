@@ -558,7 +558,7 @@ Eingabezeile.
 
 ---
 
-## 8. Die drei Fehler dieser Runde
+## 8. Die vier Fehler dieser Runde
 
 Sie stehen hier, weil sie mehr über den Baum sagen als die grünen Zeilen.
 
@@ -594,7 +594,39 @@ Umriss war gelesen, nur die Füllung war falsch. Gefunden hat es nicht das
 Foto, sondern `ttfdump`: die Glyphe als Text auf der seriellen Leitung,
 neben die Ausgabe von `tools/ttf/raster.py` gehalten.
 
-### 8.3 `W_KEYS` lag auf `W_CELLH`
+### 8.3 `VEC_MOUSE` war `VEC_NVME`
+
+Der Maustreiber bekam **Vektor 44** — und 44 ist seit Runde K2 der Vektor
+des NVMe-Reglers. Die Weiche in `trap.fi` ist eine Kette von `if`s; die
+Mausbedingung stand vor der NVMe-Bedingung, und damit gingen **alle
+Abschlussmeldungen des Reglers an den Maustreiber**: `nvme: irqs=0` statt
+`irqs=5`, in jedem Lauf — **auch ohne das Wort `wm`**.
+
+Das ist der schlimmste der vier Fehler dieser Runde, weil er eine Zusage
+brach, die mit der Oberfläche nichts zu tun hat, und weil `tools/wm/run.sh`
+ihn *nicht* sehen konnte. Gefunden hat ihn **Abschnitt 6 von `./test.sh`**
+— genau dafür läuft die ganze Abnahme und nicht nur der Läufer der Runde.
+
+`tools/kernel/karte.py` rechnet seither auch die **Vektortabelle** nach.
+Die Regel ist dieselbe wie bei `kdata`: derselbe Name darf mehrfach
+dastehen (`trap.fi` und `nvme.fi` führen `VEC_NVME` beide, weil Firn keine
+Konstante eines anderen Moduls in einen `const` einsetzt), **zwei
+verschiedene Namen dürfen nicht auf derselben Zahl liegen**:
+
+```
+  ---- die Vektortabelle ----
+   32  VEC_TIMER
+   33  VEC_KEYBOARD
+   44  VEC_NVME
+   45  VEC_NET
+   46  VEC_MOUSE
+   47  VEC_SPURIOUS
+```
+
+Und die Gegenprobe zum Prüfer: setzt man `VEC_MOUSE` in einer Kopie auf
+44 zurück, **muss** er anschlagen.
+
+### 8.4 `W_KEYS` lag auf `W_CELLH`
 
 Der Zähler „wie viele Tasten hat dieses Fenster bekommen" bekam den
 Versatz `0xA8` im Fensterdatensatz — und dort liegt die Zellenhöhe. Die
@@ -605,7 +637,7 @@ Dieselbe Sorte Fehler wie Runde K7B, eine Ebene tiefer, und derselbe
 Grund: eine Belegung, die nirgends nachgerechnet wird. Für `kdata` gibt es
 den Prüfer; für die Felder eines Datensatzes nicht.
 
-Ein vierter Befund gehört daneben, auch wenn er kein Fehler im Code war:
+Ein fünfter Befund gehört daneben, auch wenn er kein Fehler im Code war:
 die Wartschleife am Ende gab die Maschine nicht her, und die Anwendung in
 Ring 3 holte ihre Klickereignisse nicht mehr ab. Im Bild fehlte der
 Klickfleck, im Mitschnitt stand nichts. Das Gegenmittel war eine Zeile
@@ -625,7 +657,8 @@ K7 ihren nicht hingeschrieben hat:
 ```
 
 `tools/kernel/karte.py` rechnet jetzt **41 Bereiche** paarweise
-gegeneinander, und der Läufer prüft zusätzlich, dass jeder der drei neuen
+gegeneinander — und seit dieser Runde zusätzlich die **Vektortabelle**
+(siehe 8.3), und der Läufer prüft zusätzlich, dass jeder der drei neuen
 Namen wirklich in der Karte steht. Dazu die Gegenprobe zum Prüfer selbst:
 legt man `WM_OFF` auf die Seite des Rahmenpuffers, **muss** er anschlagen.
 
