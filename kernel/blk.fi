@@ -32,10 +32,11 @@
 import serial
 import kstate
 import nvme
+import usb
 
 export {
     ram_init, use_ata, use_nvme, read, write, blocks, present,
-    BLOCK_SIZE, DEV_RAM, DEV_ATA, DEV_NVME, DEV_ATA1,
+    BLOCK_SIZE, DEV_RAM, DEV_ATA, DEV_NVME, DEV_ATA1, DEV_USB,
     // ---- Runde K14 ----
     read_on, write_on, blocks_on, present_on, probe_ata1, dev_name
 }
@@ -51,6 +52,16 @@ const DEV_NVME: u64 = 2
 // und liest daneben, was Linux geschrieben hat. Ohne ein zweites
 // Geraet waere jede Messung dieser Runde ein Selbstgespraech.
 const DEV_ATA1: u64 = 3
+
+// RUNDE K17: DER VIERTE. Ein USB-Stick, ueber Bulk-Only-Transport und
+// SCSI (`kernel/usb.fi`). Und wieder aendert sich an dieser
+// Schnittstelle nichts -- kein Argument mehr, keine zweite Leseroutine,
+// keine Zeile in `fs.fi` oder `fat.fi`. Das ist zum dritten Mal
+// dieselbe Zusage wie bei DEV_NVME in Runde K2 und DEV_ATA1 in Runde
+// K14, und `tools/k17/run.sh` misst sie zum dritten Mal auf dieselbe
+// Art: der Stick wird eingehaengt, beschrieben, und danach liest der
+// WIRT das Abbild mit `mtools` und vergleicht Oktett fuer Oktett.
+const DEV_USB: u64 = 4
 
 // ------------------------------------------------------------- the RAM
 
@@ -313,6 +324,12 @@ fn present_on(state: u64, dev: u64) -> bool {
     if dev == DEV_ATA {
         return present(state)
     }
+    // RUNDE K17: ein Stick kann WEG sein, und zwar mitten im Betrieb.
+    // Das ist der Unterschied zu jeder Platte, die dieser Kernel bisher
+    // kannte -- und deshalb ist diese Zeile die, an der ENODEV entsteht.
+    if dev == DEV_USB {
+        return usb.msc_ready(state)
+    }
     return true
 }
 
@@ -321,6 +338,9 @@ fn present_on(state: u64, dev: u64) -> bool {
 fn blocks_on(state: u64, dev: u64) -> u64 {
     if dev == DEV_ATA1 {
         return kstate.get(state, kstate.DISK2_BLOCKS)
+    }
+    if dev == DEV_USB {
+        return usb.msc_blocks(state)
     }
     return kstate.get(state, kstate.DISK_BLOCKS)
 }
@@ -375,6 +395,9 @@ fn read_on(state: u64, dev: u64, lba: u64, dst: u64) -> bool {
     if dev == DEV_NVME {
         return nvme.read_block(state, lba, dst)
     }
+    if dev == DEV_USB {
+        return usb.msc_read(state, lba, dst)
+    }
     let base: u64 = kstate.get(state, kstate.DISK)
     if base == 0 {
         return false
@@ -395,6 +418,9 @@ fn write_on(state: u64, dev: u64, lba: u64, src: u64) -> bool {
     }
     if dev == DEV_NVME {
         return nvme.write_block(state, lba, src)
+    }
+    if dev == DEV_USB {
+        return usb.msc_write(state, lba, src)
     }
     let base: u64 = kstate.get(state, kstate.DISK)
     if base == 0 {
