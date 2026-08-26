@@ -1,0 +1,178 @@
+// kernel/ofs.fi -- Runde K14: OFS als TREIBER, nicht als Sonderfall.
+//
+// Der Auftrag dieser Runde sagt: "OFS wird zum ERSTEN Nutzer dieser
+// Schicht, nicht zum Sonderfall daneben." Diese Datei ist die
+// Einloesung. Sie ist duenn, und das ist der Beweis, dass die Tafel in
+// `vfsops.fi` die richtige Form hat: neun Funktionen, jede ein bis
+// fuenf Zeilen, alle nichts als eine Uebersetzung zwischen der Sprache
+// der Schicht (Pfad, Knoten, Attribut) und der Sprache von `fs.fi`
+// (Pfad, Inode, Inodenfeld). Waere die Form falsch gewaehlt, stuende
+// hier ein Dateisystem.
+//
+// DER KNOTEN VON OFS IST DIE INODENUMMER. Das ist keine Abbildung und
+// keine Tabelle -- OFS hat schon eine Zahl, die eine Datei benennt und
+// nicht ihr Name ist, und genau dafuer ist der Knoten der Schicht da.
+// Die Null bedeutet in beiden Welten dasselbe: gibt es nicht.
+//
+// WAS DIESER TREIBER NICHT TUT, und es steht auch in docs/ROUNDK14.md:
+// er sieht `mnt.dev` und `mnt.first` NICHT an. `fs.fi` liest ueber
+// `blk.read`, also ueber die EINE Platte, die `kstate.DISK_DEV` nennt,
+// und diese Runde hat daran keine Zeile geaendert -- 1486 bestehende
+// Zusagen haengen daran. OFS laesst sich deshalb genau einmal
+// einhaengen, als Wurzel. Die Felder stehen trotzdem in der
+// Einhaengetafel, FAT32 benutzt sie, und der Tag, an dem OFS auf einer
+// Partition liegen soll, aendert genau die drei Zeilen unten, in denen
+// jetzt `fs.` steht.
+
+profile kernel
+
+import kstate
+import fs
+import mnt
+import vfsops
+
+export { ops, node_root }
+
+// ---------------------------------------------------------- die Zaehler
+//
+// JEDE der neun Verrichtungen zaehlt hier hoch, und zwar IM TREIBER und
+// nicht in der Schicht darueber. Das ist Absicht: `vfs.fi` zaehlt
+// `VFS_OPS`, wenn es eine Verrichtung ANSTOESST, und der Treiber zaehlt
+// `VFS_INDIRECT`, wenn sie bei ihm ANKOMMT. Waeren beide Zaehler an
+// derselben Stelle, waere ihre Gleichheit eine Tautologie -- so ist sie
+// die Aussage "der Zeiger hat wirklich hierher gefuehrt". Runde K7B hat
+// dieses Projekt gelehrt, was eine Metrik wert ist, die auch durch
+// Nichtstun besteht.
+fn tick(state: u64) {
+    kstate.add(state, kstate.VFS_INDIRECT, 1)
+}
+
+fn node_root(state: u64) -> u64 {
+    return fs.root(state)
+}
+
+// ------------------------------------------------------ die Verrichtungen
+
+fn o_lookup(state: u64, m: u64, path: u64) -> u64 {
+    tick(state)
+    if kstate.get(state, kstate.FS_READY) == 0 {
+        return 0
+    }
+    return fs.path(state, path)
+}
+
+fn o_readdir(state: u64, m: u64, dir: u64, index: u64, out: u64) -> u64 {
+    tick(state)
+    let scratch: u64 = state + kstate.K14_OFF + 0xD00
+    let ino: u64 = fs.entry_at(state, dir, index, scratch)
+    if ino == 0 {
+        return 0
+    }
+    // Was `fs.entry_at` schreibt, ist der Verzeichniseintrag von OFS:
+    // acht Oktette Inodenummer, dahinter der Name. Die Schicht will nur
+    // den Namen -- die Zahl bekommt sie als Rueckgabewert.
+    var i: u64 = 0
+    while i < fs.NAME_LEN {
+        let c: u64 = kstate.get8(scratch + 8 + i)
+        kstate.set8(out + i, c as u8)
+        if c == 0 {
+            i = fs.NAME_LEN
+        } else {
+            i = i + 1
+        }
+    }
+    kstate.set8(out + fs.NAME_LEN, 0 as u8)
+    return ino
+}
+
+fn o_attr(state: u64, m: u64, node: u64, what: u64) -> u64 {
+    tick(state)
+    if what == vfsops.A_TYPE {
+        if fs.inode_type(state, node) == fs.T_DIR {
+            return vfsops.N_DIR
+        }
+        if fs.inode_type(state, node) == fs.T_FILE {
+            return vfsops.N_FILE
+        }
+        return vfsops.N_NONE
+    }
+    if what == vfsops.A_SIZE {
+        return fs.inode_size(state, node)
+    }
+    if what == vfsops.A_MODE {
+        if fs.inode_type(state, node) == fs.T_DIR {
+            return 493 // 0o755
+        }
+        return 420 // 0o644
+    }
+    if what == vfsops.A_NLINK {
+        return 1
+    }
+    if what == vfsops.A_BLKSIZE {
+        return 512
+    }
+    return 0
+}
+
+fn o_read(state: u64, m: u64, node: u64, off: u64, dst: u64,
+    len: u64) -> u64 {
+    tick(state)
+    return fs.read_at(state, node, off, dst, len)
+}
+
+fn o_write(state: u64, m: u64, node: u64, off: u64, src: u64,
+    len: u64) -> u64 {
+    tick(state)
+    return fs.write_at(state, node, off, src, len)
+}
+
+fn o_create(state: u64, m: u64, path: u64, art: u64) -> u64 {
+    tick(state)
+    var kind: u64 = fs.T_FILE
+    if art == vfsops.N_DIR {
+        kind = fs.T_DIR
+    }
+    return fs.create_path(state, path, kind)
+}
+
+fn o_unlink(state: u64, m: u64, path: u64) -> u64 {
+    tick(state)
+    if !fs.unlink_path(state, path) {
+        return 2 // ENOENT -- oder ein volles Verzeichnis; `fs.fi`
+                 // unterscheidet das an dieser Stelle nicht
+    }
+    return 0
+}
+
+fn o_rename(state: u64, m: u64, from: u64, to: u64) -> u64 {
+    tick(state)
+    return fs.rename_path(state, from, to)
+}
+
+fn o_trunc(state: u64, m: u64, node: u64) -> u64 {
+    tick(state)
+    fs.file_truncate(state, node)
+    return 0
+}
+
+// DIE TAFEL. Das ist der einzige Ort in diesem Modul, an dem etwas
+// nach aussen sichtbar wird -- neun Zeiger und zwei Zahlen.
+//
+// `tag` sind vier Oktette Text, kleinendig gepackt: 'o','f','s',0. Ein
+// Name als Zahl und nicht als Zeiger, damit die Tafel selbst nirgends
+// hinzeigt, wo etwas liegen koennte, das sich bewegt.
+fn ops() -> vfsops.Ops {
+    return vfsops.Ops {
+        lookup: o_lookup,
+        readdir: o_readdir,
+        attr: o_attr,
+        read: o_read,
+        write: o_write,
+        create: o_create,
+        unlink: o_unlink,
+        rename: o_rename,
+        trunc: o_trunc,
+        mask: vfsops.OP_ALL,
+        tag: 7562863 // "ofs\0"
+    }
+}

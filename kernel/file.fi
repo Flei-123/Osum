@@ -30,6 +30,7 @@
 // offset is what a global variable is here.
 
 import kstate
+import mnt
 
 export {
     init, init_task, clear_task, close_all, inherit_task, inherit_std,
@@ -39,7 +40,8 @@ export {
     pipe_new, pipe_get, pipe_put, pipe_room, pipe_bytes, pipe_writers,
     pipe_readers,
     K_FREE, K_FILE, K_DIR, K_CONIN, K_CONOUT, K_PIPER, K_PIPEW, K_FB,
-    K_TTY, K_SOCK,
+    K_TTY, K_SOCK, K_VFILE, K_VDIR,
+    open_mnt, open_set_mnt,
     MAX_FD, MAX_OPEN, MAX_PIPES, PIPE_CAP, CON_IN, CON_OUT, CON_ERR
 }
 
@@ -53,6 +55,11 @@ const OF_INO: u64 = 8 // inode, or the number of the pipe
 const OF_OFF: u64 = 16 // read/write position, or the entry of a directory
 const OF_REF: u64 = 24 // how many descriptors point here
 const OF_FLAGS: u64 = 32 // what `open` was asked for
+// ROUNDE K14: welche EINHAENGUNG. Ein Eintrag ist 64 Oktette gross und
+// war bis 40 belegt; hier stand also Platz. Fuer alles ausser K_VFILE
+// und K_VDIR ist das Feld null, und null ist die Wurzel -- ein alter
+// Eintrag bedeutet damit weiter genau, was er bedeutet hat.
+const OF_MNT: u64 = 40
 
 const K_FREE: u64 = 0
 const K_FILE: u64 = 1
@@ -86,6 +93,21 @@ const K_TTY: u64 = 8
 // descriptors is closed, and `open_unref` already answers that question
 // for pipes -- `sys.fi` asks it before it closes the connection.
 const K_SOCK: u64 = 9
+
+// ROUNDE K14: EIN DESKRIPTOR AUF EINEM FREMDEN DATEISYSTEM. Die
+// Nummern 12 und 13 sind die, die der Auftrag dieser Runde zugeteilt
+// hat -- 10 und 11 gehoeren einer Runde, die gleichzeitig laeuft, und
+// zwei Runden, die dieselbe Zahl nehmen, sind der Fehler, den dieses
+// Projekt in `kdata` viermal gemacht hat.
+//
+// Was sie von K_FILE und K_DIR unterscheidet, ist EINE Zahl: der
+// Eintrag traegt zusaetzlich die EINHAENGUNG (`OF_MNT`). `OF_INO`
+// heisst dann nicht "Inode", sondern "Knoten", und was ein Knoten ist,
+// weiss nur der Treiber. Die Referenzzaehlung, `dup2`, `fork` und
+// `close` aendern dafuer keine Zeile -- genau das ist der Sinn der
+// Tafel der offenen Dateien aus Runde K4.
+const K_VFILE: u64 = 12
+const K_VDIR: u64 = 13
 
 // The three that are there before the first process is.
 const CON_IN: u64 = 0
@@ -266,6 +288,11 @@ fn open_alloc(state: u64, kind: u64, ino: u64, flags: u64) -> u64 {
             kstate.set(state, of_at(i) + OF_OFF, 0)
             kstate.set(state, of_at(i) + OF_REF, 1)
             kstate.set(state, of_at(i) + OF_FLAGS, flags)
+            // ROUNDE K14: ein frischer Eintrag gehoert der WURZEL,
+            // bis jemand etwas anderes sagt. Ein stehengebliebener
+            // Wert aus einem vorherigen Leben waere ein Deskriptor,
+            // der auf einer laengst ausgehaengten Platte liest.
+            kstate.set(state, of_at(i) + OF_MNT, 0)
             kstate.add(state, kstate.OPENS, 1)
             return i
         }
@@ -300,11 +327,27 @@ fn open_unref(state: u64, i: u64) {
     if kind == K_PIPEW {
         pipe_drop(state, p, false)
     }
+    // ROUNDE K14: DIE EINHAENGUNG GIBT DEN DESKRIPTOR FREI, UND ZWAR
+    // HIER. Nicht in `sys.do_close`: ein Prozess, der stirbt, geht
+    // durch `close_all`, und ein `dup2`, das einen Deskriptor
+    // ueberschreibt, geht durch keinen von beiden. DIESE Funktion ist
+    // die EINZIGE Stelle, an der die letzte Bezugnahme auf einen
+    // Eintrag faellt -- also gehoert der Zaehler hierher.
+    //
+    // Die erste Fassung dieser Runde hat ihn in `sys.unref_of`
+    // gesetzt, und damit blieb `mnt.opens` nach jedem Prozess, der
+    // eine Datei auf /mnt geoeffnet hatte und ohne `close` endete, um
+    // eins zu hoch stehen. `umount /mnt` haette danach fuer immer
+    // -EBUSY gesagt.
+    if kind == K_VFILE || kind == K_VDIR {
+        mnt.open_dec(state, kstate.get(state, of_at(i) + OF_MNT))
+    }
     kstate.set(state, of_at(i) + OF_KIND, K_FREE)
     kstate.set(state, of_at(i) + OF_INO, 0)
     kstate.set(state, of_at(i) + OF_OFF, 0)
     kstate.set(state, of_at(i) + OF_REF, 0)
     kstate.set(state, of_at(i) + OF_FLAGS, 0)
+    kstate.set(state, of_at(i) + OF_MNT, 0)
 }
 
 // How many descriptors still point here. ROUND K8 needs it: a socket
@@ -334,6 +377,14 @@ fn open_off(state: u64, i: u64) -> u64 {
 
 fn open_set_off(state: u64, i: u64, off: u64) {
     kstate.set(state, of_at(i) + OF_OFF, off)
+}
+
+fn open_mnt(state: u64, i: u64) -> u64 {
+    return kstate.get(state, of_at(i) + OF_MNT)
+}
+
+fn open_set_mnt(state: u64, i: u64, v: u64) {
+    kstate.set(state, of_at(i) + OF_MNT, v)
 }
 
 fn open_flags(state: u64, i: u64) -> u64 {

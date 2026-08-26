@@ -1,0 +1,486 @@
+// kernel/devfs.fi -- Runde K14: /dev als ECHTES Dateisystem.
+//
+// WAS ES VORHER GAB, und warum es zu wenig war. Runde K7 brauchte einen
+// Rahmenpuffer in Ring 3 und schrieb dafuer in `sys.do_open` drei
+// Zeilen, die den Namen `/dev/fb` ABFANGEN, bevor irgendetwas
+// nachgeschlagen wird. Der Kommentar dort ist ehrlich: "Es ist AUCH
+// kein Verzeichnis `/dev` im OFS -- der Name wird abgefangen [...] Ein
+// Osum mit einem echten Geraeteverzeichnis waere eine eigene Runde."
+// Das ist diese Runde.
+//
+// Der Unterschied ist nicht kosmetisch. Ein abgefangener Name kann
+// nicht aufgelistet werden, hat keine Groesse, keine Rechte, keinen
+// `stat`, und jeder weitere Geraetename waere ein weiteres `if` in der
+// heissesten Weiche des Kernels. Ein Dateisystem hat ein Verzeichnis:
+// `ls -l /dev` zaehlt auf, was diese Maschine hat, und jedes Stueck
+// davon hat eine Art, eine Kennzahl und ein `stat`, das sie sagt.
+//
+// WAS HIER DRIN LIEGT und wo die Oktette wirklich herkommen:
+//
+//   /dev/null      liest nichts (sofort Dateiende), schluckt alles
+//   /dev/zero      liest Nullen, so viele wie verlangt
+//   /dev/random    aus `kernel/rand.fi`, dem Sammler von Runde K9
+//   /dev/urandom   dasselbe -- dieser Kernel hat KEINEN zweiten Topf,
+//                  und zwei Namen fuer zwei Toepfe zu behaupten waere
+//                  eine Luege ueber die Qualitaet des einen
+//   /dev/tty       das beherrschende Terminal des LESENDEN Prozesses.
+//                  Der Knoten selbst weiss nichts davon; `sys.fi` macht
+//                  daraus einen K_TTY-Deskriptor, und ab da ist es
+//                  wortgleich der Weg von Runde K9.
+//   /dev/console   dasselbe fuer die Konsole
+//   /dev/fb        der Rahmenpuffer, ebenso: `sys.fi` macht einen
+//                  K_FB-Deskriptor daraus, und alle Messungen der Runde
+//                  K7 laufen unveraendert weiter
+//   /dev/hda       DIE PLATTE, blockweise. Das ist die einzige Datei
+//                  hier, deren Oktette wirklich auf einem Traeger
+//                  liegen -- und die, mit der `tools/k14/run.sh` misst,
+//                  dass hier keine Attrappe steht: es liest den
+//                  Bootsektor der zweiten Platte durch /dev/hdb und
+//                  haelt ihn gegen das, was der WIRT in der Abbilddatei
+//                  stehen hat.
+//   /dev/hdb       die zweite Platte (der ATA-Sklave)
+//   /dev/ram0      die RAM-Platte
+//   /dev/nvme0     der NVMe-Regler von Runde K2
+//
+// KEIN ZUSTAND. Dieses Dateisystem hat keine Tafel im Speicher: der
+// Knoten IST die Geraetenummer, die Liste steht als Kette von `if` in
+// `name_to_node`, und ein Geraet mehr ist eine Zeile. Das ist die
+// kleinste Bauart, die "echtes Dateisystem" noch ehrlich traegt.
+
+profile kernel
+
+import kstate
+import mnt
+import vfsops
+import rand
+import blk
+import sched
+import atomic
+import cpu
+
+export { ops, node_root, D_TTY, D_FB, D_CONSOLE, is_tty, is_fb, rdev_of }
+
+// Die Knoten. Die 0 bleibt frei ("gibt es nicht"), die Wurzel ist 100 --
+// damit ein Knoten nie mit einer Geraetenummer verwechselt wird.
+const D_NULL: u64 = 1
+const D_ZERO: u64 = 2
+const D_RANDOM: u64 = 3
+const D_URANDOM: u64 = 4
+const D_TTY: u64 = 5
+const D_CONSOLE: u64 = 6
+const D_FB: u64 = 7
+const D_HDA: u64 = 8
+const D_HDB: u64 = 9
+const D_RAM0: u64 = 10
+const D_NVME0: u64 = 11
+const D_LAST: u64 = 11
+const D_ROOT: u64 = 100
+
+const BS: u64 = 512
+
+fn node_root(state: u64) -> u64 {
+    return D_ROOT
+}
+
+fn tick(state: u64) {
+    kstate.add(state, kstate.VFS_INDIRECT, 1)
+}
+
+fn is_tty(node: u64) -> bool {
+    return node == D_TTY || node == D_CONSOLE
+}
+
+fn is_fb(node: u64) -> bool {
+    return node == D_FB
+}
+
+// Die Kennzahl, die `stat` in `st_rdev` traegt. Sie ist der Knoten
+// selbst -- eine zweite Nummerierung waere eine zweite Stelle, an der
+// dasselbe steht.
+fn rdev_of(node: u64) -> u64 {
+    return node
+}
+
+fn streq(a: u64, b: u64) -> bool {
+    var i: u64 = 0
+    while kstate.get8(a + i) != 0 && kstate.get8(b + i) != 0 {
+        if kstate.get8(a + i) != kstate.get8(b + i) {
+            return false
+        }
+        i = i + 1
+    }
+    return kstate.get8(a + i) == kstate.get8(b + i)
+}
+
+// Den Namen des n-ten Geraets in `out` schreiben. EINE Liste, von der
+// `lookup` und `readdir` beide leben -- zwei Listen waeren zwei
+// Wahrheiten, und die zweite waere irgendwann die falsche.
+fn name_at(node: u64, out: u64) -> bool {
+    var n_null: [u8; 5] = "null\0"
+    var n_zero: [u8; 5] = "zero\0"
+    var n_rand: [u8; 7] = "random\0"
+    var n_urand: [u8; 8] = "urandom\0"
+    var n_tty: [u8; 4] = "tty\0"
+    var n_con: [u8; 8] = "console\0"
+    var n_fb: [u8; 3] = "fb\0"
+    var n_hda: [u8; 4] = "hda\0"
+    var n_hdb: [u8; 4] = "hdb\0"
+    var n_ram: [u8; 5] = "ram0\0"
+    var n_nvme: [u8; 6] = "nvme0\0"
+    var src: u64 = 0
+    if node == D_NULL {
+        src = (&n_null[0]) as u64
+    } else if node == D_ZERO {
+        src = (&n_zero[0]) as u64
+    } else if node == D_RANDOM {
+        src = (&n_rand[0]) as u64
+    } else if node == D_URANDOM {
+        src = (&n_urand[0]) as u64
+    } else if node == D_TTY {
+        src = (&n_tty[0]) as u64
+    } else if node == D_CONSOLE {
+        src = (&n_con[0]) as u64
+    } else if node == D_FB {
+        src = (&n_fb[0]) as u64
+    } else if node == D_HDA {
+        src = (&n_hda[0]) as u64
+    } else if node == D_HDB {
+        src = (&n_hdb[0]) as u64
+    } else if node == D_RAM0 {
+        src = (&n_ram[0]) as u64
+    } else if node == D_NVME0 {
+        src = (&n_nvme[0]) as u64
+    } else {
+        return false
+    }
+    var i: u64 = 0
+    while kstate.get8(src + i) != 0 {
+        kstate.set8(out + i, kstate.get8(src + i) as u8)
+        i = i + 1
+    }
+    kstate.set8(out + i, 0 as u8)
+    return true
+}
+
+// Welches Blockgeraet steht hinter diesem Knoten? MAX heisst: keines.
+fn block_of(node: u64) -> u64 {
+    if node == D_HDA {
+        return blk.DEV_ATA
+    }
+    if node == D_HDB {
+        return blk.DEV_ATA1
+    }
+    if node == D_RAM0 {
+        return blk.DEV_RAM
+    }
+    if node == D_NVME0 {
+        return blk.DEV_NVME
+    }
+    return 99
+}
+
+fn is_block(node: u64) -> bool {
+    return block_of(node) != 99
+}
+
+// ------------------------------------------------------ die Verrichtungen
+
+fn d_lookup(state: u64, m: u64, path: u64) -> u64 {
+    tick(state)
+    var name: [u8; 16] = [0 as u8; 16]
+    var p: u64 = path
+    while kstate.get8(p) == 47 {
+        p = p + 1
+    }
+    if kstate.get8(p) == 0 {
+        return D_ROOT
+    }
+    // Ein Geraeteverzeichnis hat keine Unterverzeichnisse; ein
+    // Schraegstrich im Rest ist deshalb ein Fehler und keine Suche.
+    var i: u64 = 0
+    while kstate.get8(p + i) != 0 {
+        if kstate.get8(p + i) == 47 {
+            return 0
+        }
+        i = i + 1
+    }
+    var node: u64 = 1
+    while node <= D_LAST {
+        if name_at(node, (&name[0]) as u64) {
+            if streq(p, (&name[0]) as u64) {
+                return node
+            }
+        }
+        node = node + 1
+    }
+    return 0
+}
+
+fn d_readdir(state: u64, m: u64, dir: u64, index: u64, out: u64) -> u64 {
+    tick(state)
+    if dir != D_ROOT {
+        return 0
+    }
+    var dot: [u8; 2] = ".\0"
+    var dotdot: [u8; 3] = "..\0"
+    if index == 0 {
+        kstate.set8(out, 46 as u8)
+        kstate.set8(out + 1, 0 as u8)
+        return D_ROOT
+    }
+    if index == 1 {
+        kstate.set8(out, 46 as u8)
+        kstate.set8(out + 1, 46 as u8)
+        kstate.set8(out + 2, 0 as u8)
+        return D_ROOT
+    }
+    let node: u64 = index - 1
+    if node > D_LAST {
+        return 0
+    }
+    if !name_at(node, out) {
+        return 0
+    }
+    return node
+}
+
+fn d_attr(state: u64, m: u64, node: u64, what: u64) -> u64 {
+    tick(state)
+    if what == vfsops.A_TYPE {
+        if node == D_ROOT {
+            return vfsops.N_DIR
+        }
+        if is_block(node) {
+            return vfsops.N_BLK
+        }
+        if node >= 1 && node <= D_LAST {
+            return vfsops.N_CHR
+        }
+        return vfsops.N_NONE
+    }
+    if what == vfsops.A_SIZE {
+        // EIN BLOCKGERAET HAT EINE GROESSE, und sie ist keine
+        // Erfindung: sie ist die Zahl der Bloecke mal 512. Ein
+        // `lseek(fd, 0, SEEK_END)` auf /dev/hdb sagt damit, wie gross
+        // die Platte ist -- und `tools/k14/run.sh` haelt die Zahl gegen
+        // die Groesse der Abbilddatei auf dem Wirt.
+        if is_block(node) {
+            return blk.blocks_on(state, block_of(node)) * BS
+        }
+        return 0
+    }
+    if what == vfsops.A_MODE {
+        if node == D_ROOT {
+            return 493 // 0o755
+        }
+        if node == D_NULL || node == D_ZERO || node == D_TTY
+            || node == D_CONSOLE {
+            return 438 // 0o666
+        }
+        return 420 // 0o644
+    }
+    if what == vfsops.A_NLINK {
+        return 1
+    }
+    if what == vfsops.A_RDEV {
+        if node == D_ROOT {
+            return 0
+        }
+        return rdev_of(node)
+    }
+    if what == vfsops.A_BLKSIZE {
+        return BS
+    }
+    return 0
+}
+
+fn d_read(state: u64, m: u64, node: u64, off: u64, dst: u64,
+    len: u64) -> u64 {
+    tick(state)
+    if node == D_NULL {
+        return 0
+    }
+    if node == D_ZERO {
+        var i: u64 = 0
+        while i < len {
+            kstate.set8(dst + i, 0 as u8)
+            i = i + 1
+        }
+        return len
+    }
+    if node == D_RANDOM || node == D_URANDOM {
+        return rand.bytes(state, dst, len)
+    }
+    if is_block(node) {
+        return block_read(state, block_of(node), off, dst, len)
+    }
+    return 0
+}
+
+fn d_write(state: u64, m: u64, node: u64, off: u64, src: u64,
+    len: u64) -> u64 {
+    tick(state)
+    if node == D_NULL || node == D_ZERO {
+        return len // geschluckt, und das ist die Zusage
+    }
+    if is_block(node) {
+        return block_write(state, block_of(node), off, src, len)
+    }
+    return 0
+}
+
+// EIN BLOCKGERAET OKTETTWEISE. Die Platte kann nur ganze Bloecke; ein
+// `read` von 100 Oktetten ab Stelle 700 liest also Block 1 und gibt
+// die Oktette 188..287 daraus heraus. Genau das macht jedes Unix, und
+// genau das macht `dd` moeglich.
+// DIE SPERRE DER PLATTE. `atomic.L_FS` schuetzt in `fs.fi` die
+// Arbeitsbloecke des Dateisystems -- und darunter die ATA-Register, die
+// `blk.fi` benutzt und die keine eigene haben. Ein `dd if=/dev/hda`
+// auf einem zweiten Kern wuerde einem OFS mitten im Sektor die Tore
+// umschreiben. Der Zwischenpuffer hier ist der zweite Grund: er ist
+// EINER fuer alle Kerne.
+fn enter(state: u64) -> u64 {
+    let flags: u64 = sched.irq_save()
+    let me: u64 = cpu.here(state)
+    if atomic.lock_owner(state, atomic.L_FS) == me + 1 {
+        return flags | 0x8000000000000000
+    }
+    atomic.lock_take(state, atomic.L_FS, me)
+    return flags
+}
+
+fn leave(state: u64, flags: u64) {
+    if (flags & 0x8000000000000000) == 0 {
+        atomic.lock_give(state, atomic.L_FS)
+    }
+    sched.irq_restore(flags & 0x7FFFFFFFFFFFFFFF)
+}
+
+fn block_read(state: u64, dev: u64, off: u64, dst: u64, len: u64) -> u64 {
+    let f: u64 = enter(state)
+    let r: u64 = block_read_inner(state, dev, off, dst, len)
+    leave(state, f)
+    return r
+}
+
+fn block_write(state: u64, dev: u64, off: u64, src: u64, len: u64) -> u64 {
+    let f: u64 = enter(state)
+    let r: u64 = block_write_inner(state, dev, off, src, len)
+    leave(state, f)
+    return r
+}
+
+fn block_read_inner(state: u64, dev: u64, off: u64, dst: u64,
+    len: u64) -> u64 {
+    let scratch: u64 = state + kstate.K14_OFF + 0x740 + 0x40
+    let total: u64 = blk.blocks_on(state, dev) * BS
+    if off >= total {
+        return 0
+    }
+    var want: u64 = len
+    if off + want > total {
+        want = total - off
+    }
+    var done: u64 = 0
+    while done < want {
+        let pos: u64 = off + done
+        let lba: u64 = pos / BS
+        let inb: u64 = pos % BS
+        var chunk: u64 = BS - inb
+        if chunk > want - done {
+            chunk = want - done
+        }
+        if !blk.read_on(state, dev, lba, scratch) {
+            return done
+        }
+        var i: u64 = 0
+        while i < chunk {
+            kstate.set8(dst + done + i, kstate.get8(scratch + inb + i) as u8)
+            i = i + 1
+        }
+        done = done + chunk
+    }
+    return done
+}
+
+fn block_write_inner(state: u64, dev: u64, off: u64, src: u64,
+    len: u64) -> u64 {
+    let scratch: u64 = state + kstate.K14_OFF + 0x740 + 0x40
+    let total: u64 = blk.blocks_on(state, dev) * BS
+    if off >= total {
+        return 0
+    }
+    var want: u64 = len
+    if off + want > total {
+        want = total - off
+    }
+    var done: u64 = 0
+    while done < want {
+        let pos: u64 = off + done
+        let lba: u64 = pos / BS
+        let inb: u64 = pos % BS
+        var chunk: u64 = BS - inb
+        if chunk > want - done {
+            chunk = want - done
+        }
+        // Ein Teilblock muss GELESEN werden, bevor er geschrieben wird
+        // -- sonst nimmt ein `write` von einem Oktett die anderen 511
+        // mit. Das ist der Fehler, den jeder Blocktreiber einmal macht.
+        if chunk != BS {
+            if !blk.read_on(state, dev, lba, scratch) {
+                return done
+            }
+        }
+        var i: u64 = 0
+        while i < chunk {
+            kstate.set8(scratch + inb + i, kstate.get8(src + done + i) as u8)
+            i = i + 1
+        }
+        if !blk.write_on(state, dev, lba, scratch) {
+            return done
+        }
+        done = done + chunk
+    }
+    return done
+}
+
+fn d_create(state: u64, m: u64, path: u64, art: u64) -> u64 {
+    tick(state)
+    return 0
+}
+
+fn d_unlink(state: u64, m: u64, path: u64) -> u64 {
+    tick(state)
+    return 1 // EPERM
+}
+
+fn d_rename(state: u64, m: u64, from: u64, to: u64) -> u64 {
+    tick(state)
+    return 1 // EPERM
+}
+
+fn d_trunc(state: u64, m: u64, node: u64) -> u64 {
+    tick(state)
+    return 0 // ein Geraet hat keine Laenge, die man kuerzen koennte
+}
+
+// Die Tafel. `mask` sagt, was es WIRKLICH kann: nachschlagen,
+// auflisten, Attribute, lesen, schreiben, kuerzen. Anlegen, loeschen
+// und umbenennen stehen NICHT darin -- `vfs.fi` faengt sie ab, bevor
+// der Zeiger benutzt wird, und die drei Funktionen oben sind das
+// Fangnetz darunter.
+fn ops() -> vfsops.Ops {
+    return vfsops.Ops {
+        lookup: d_lookup,
+        readdir: d_readdir,
+        attr: d_attr,
+        read: d_read,
+        write: d_write,
+        create: d_create,
+        unlink: d_unlink,
+        rename: d_rename,
+        trunc: d_trunc,
+        mask: 287, // LOOKUP|READDIR|ATTR|READ|WRITE|TRUNC
+        tag: 7759204 // "dev\0"
+    }
+}
