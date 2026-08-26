@@ -462,7 +462,37 @@ führen, ohne dafür Sonderrechte zu bekommen.
 
 ---
 
-## 12. Die Dateien
+## 12. Ein Befund nebenbei: zwei Runden koennen `./test.sh` nicht gleichzeitig laufen lassen
+
+Das gehoert nicht zu dieser Runde, ist aber beim Messen zweimal
+passiert und kostet jeden, dem es passiert, eine halbe Stunde Suche.
+
+`tools/net/run.sh` (Runde K8) arbeitet mit einem **globalen** Netz-
+Namensraum `k8net`, einem globalen Verbindungspaar `v0` und zwei
+**festen** UDP-Anschluessen (5555 und 5556):
+
+```sh
+NS=k8net ; QPORT=5555 ; BPORT=5556
+cleanup() { ... ip netns del "$NS" ; ip link del v0 ; }
+trap cleanup EXIT
+```
+
+Laufen zwei Arbeitsbaeume gleichzeitig durch `./test.sh`, reisst der
+zweite dem ersten mitten in Abschnitt 14 den Namensraum unter den
+Fuessen weg. Der erste Lauf stirbt dabei **ohne Fehlermeldung** — er
+bricht einfach ab, und das Protokoll hoert mitten in einem Abschnitt auf.
+Genau das ist hier zweimal passiert.
+
+Die Abhilfe waere klein: Namensraum, Verbindungspaar und Anschluesse aus
+der Prozessnummer oder aus `$TMPD` ableiten (`k8net-$$`, `v0-$$`,
+`QPORT=$((5000 + $$ % 1000))`). Diese Runde fasst `tools/net/run.sh`
+NICHT an — sie hat dort nichts verloren, und eine Aenderung daran
+gehoert der Runde, der die Datei gehoert. Aufgeschrieben ist es hier,
+damit es nicht ein drittes Mal gesucht werden muss.
+
+---
+
+## 13. Die Dateien
 
 | Datei | Zeilen | was drin steht |
 |---|---|---|
