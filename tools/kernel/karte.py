@@ -105,6 +105,13 @@ BEREICHE = [
     # Speicher der Gaeste) kommt aus dem Rahmenverwalter.  Eingetragen
     # ist er hier, damit der Kollisionspruefer ihn trotzdem sieht.
     ("HV",         "hv.fi",     "HV_OFF",         "HV_MAX"),
+    # RUNDE K13: die Zaehler der Benutzer- und Rechteschicht. Zwei
+    # Seiten, 0x41000 und 0x42000 -- die ersten hinter dem Bereich des
+    # Hypervisors, so wie kstate.fi es fuer die naechste Runde
+    # ausgewiesen hat. Die zweite Seite ist der Ausgabepuffer von
+    # SYS_OSUM_USERINFO; sie steht hier mit, damit die Runde danach bei
+    # 0x43000 anfaengt und nicht mitten drin.
+    ("K13",        "kstate.fi", "K13_OFF",        "K13_MAX"),
 ]
 
 # `_OFF`-Konstanten, die KEINE Bereiche in `kdata` sind -- Offsets

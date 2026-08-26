@@ -1,0 +1,137 @@
+// kernel/user/svc.fi -- Runde K13: Dienste starten, stoppen, ansehen.
+//
+//     svc                 dasselbe wie `svc status`
+//     svc status          eine Zeile je Dienst: name zustand pid neustarts
+//     svc start NAME
+//     svc stop NAME
+//     svc restart NAME
+//     svc shutdown        das System herunterfahren
+//
+// `status` liest nur `/run/svc.state` -- die Datei, die `init` schreibt.
+// Alles andere schreibt eine Zeile nach `/run/svc.cmd` und wartet, bis
+// `init` sie geleert hat; danach wird der neue Zustand ausgegeben. Das
+// Warten ist begrenzt (eine Sekunde): laeuft kein init, soll `svc` das
+// sagen und nicht haengen.
+//
+// ES DARF NUR root. Nicht, weil das Programm es so entscheidet, sondern
+// weil `/run/svc.cmd` root gehoert und 0o600 traegt -- die Ablehnung
+// kommt aus dem Kern, aus `perm.may`, wie bei jeder anderen Datei auch.
+// Dieses Programm sagt es nur verstaendlicher.
+
+profile kernel
+
+import ulib
+import tools
+
+export { u_start }
+
+fn show_state() -> u64 {
+    var path: [u8; 15] = "/run/svc.state\0"
+    var buf: [u8; 1024] = [0 as u8; 1024]
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&path[0]) as u64, 0, 0)
+    if ulib.bad(fd) {
+        return 1
+    }
+    var going: bool = true
+    while going {
+        let n: u64 = ulib.sys(ulib.SYS_READ, fd, (&buf[0]) as u64, 1024)
+        if ulib.bad(n) || n == 0 {
+            going = false
+        } else {
+            ulib.put((&buf[0]) as u64, n)
+        }
+    }
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    return 0
+}
+
+fn send(verb: u64, who: u64) -> u64 {
+    var path: [u8; 13] = "/run/svc.cmd\0"
+    var line: [u8; 128] = [0 as u8; 128]
+    var sp: [u8; 2] = " \0"
+    var nlc: [u8; 2] = "\n\0"
+    var e_no: [u8; 35] = "svc: /run/svc.cmd nicht schreibbar\0"
+    var at: u64 = ulib.strcpy((&line[0]) as u64, verb)
+    if who != 0 {
+        at = at + ulib.strcpy((&line[at as usize]) as u64, (&sp[0]) as u64)
+        at = at + ulib.strcpy((&line[at as usize]) as u64, who)
+    }
+    at = at + ulib.strcpy((&line[at as usize]) as u64, (&nlc[0]) as u64)
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&path[0]) as u64, 577, 0)
+    if ulib.bad(fd) {
+        ulib.esay_line((&e_no[0]) as u64, 0)
+        return 1
+    }
+    ulib.sys(ulib.SYS_WRITE, fd, (&line[0]) as u64, at)
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    return 0
+}
+
+// Wartet, bis init die Datei geleert hat. Ein `svc start`, das
+// zurueckkehrt, bevor der Dienst laeuft, waere eine Luege.
+fn wait_done() -> bool {
+    var path: [u8; 13] = "/run/svc.cmd\0"
+    var round: u64 = 0
+    while round < 40 {
+        if ulib.size_of((&path[0]) as u64) == 0 {
+            // Noch einen Durchgang, damit init den neuen Zustand
+            // geschrieben hat.
+            ulib.sleep_ms(60)
+            return true
+        }
+        ulib.sleep_ms(25)
+        round = round + 1
+    }
+    return false
+}
+
+fn u_start(args: u64) -> u64 {
+    var w_status: [u8; 7] = "status\0"
+    var w_start: [u8; 6] = "start\0"
+    var w_stop: [u8; 5] = "stop\0"
+    var w_rest: [u8; 8] = "restart\0"
+    var w_down: [u8; 9] = "shutdown\0"
+    var e_use: [u8; 49] = "svc: svc status|start|stop|restart NAME|shutdown\0"
+    var e_noinit: [u8; 28] = "svc: init antwortet nicht\0\0\0"
+    var e_nostate: [u8; 32] = "svc: /run/svc.state fehlt\0\0\0\0\0\0\0"
+
+    let n: u64 = ulib.arg_count(args)
+    if n < 2 {
+        if show_state() != 0 {
+            ulib.esay_line((&e_nostate[0]) as u64, 0)
+            return 1
+        }
+        ulib.nl()
+        return 0
+    }
+    let verb: u64 = ulib.arg_at(args, 1)
+    if ulib.streq(verb, (&w_status[0]) as u64) {
+        if show_state() != 0 {
+            ulib.esay_line((&e_nostate[0]) as u64, 0)
+            return 1
+        }
+        return 0
+    }
+    if ulib.streq(verb, (&w_down[0]) as u64) {
+        return send(verb, 0)
+    }
+    if !ulib.streq(verb, (&w_start[0]) as u64)
+        && !ulib.streq(verb, (&w_stop[0]) as u64)
+        && !ulib.streq(verb, (&w_rest[0]) as u64) {
+        ulib.esay_line((&e_use[0]) as u64, 0)
+        return 2
+    }
+    if n < 3 {
+        ulib.esay_line((&e_use[0]) as u64, 0)
+        return 2
+    }
+    let rc: u64 = send(verb, ulib.arg_at(args, 2))
+    if rc != 0 {
+        return rc
+    }
+    if !wait_done() {
+        ulib.esay_line((&e_noinit[0]) as u64, 0)
+        return 1
+    }
+    return show_state()
+}

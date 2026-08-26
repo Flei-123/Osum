@@ -1,0 +1,474 @@
+// kernel/user/init.fi -- Runde K13: DER ERSTE PROZESS.
+//
+// Bis zu dieser Runde startete der Kern die Shell und wartete auf sie.
+// Das ist kein System, das ist ein Programmstarter: es gibt keinen Ort,
+// an dem `login` laufen koennte, niemanden, der Waisen einsammelt, und
+// niemanden, der beim Abschalten aufraeumt. Von hier an startet der Kern
+// `/sbin/init`, und alles andere ist ein Kind davon.
+//
+// VIER AUFGABEN, UND NUR DIESE VIER:
+//
+//   1. DIENSTE STARTEN. `/etc/inittab`, eine Zeile je Dienst:
+//
+//          name:art:befehl arg arg
+//
+//      art ist `once` (einmal starten), `respawn` (nach dem Ende wieder
+//      starten), `ctrl` (wie once, aber sein Ende beendet das System)
+//      oder `off` (steht da, laeuft nicht).
+//
+//      `ctrl` gibt es in keinem echten Unix, und der Grund steht hier:
+//      dieses System wird GEMESSEN. Ein Lauf, der nie endet, ist ein
+//      Lauf ohne Ergebnis. `ctrl` ist die eine Zeile, die sagt "wenn
+//      DIESES Programm fertig ist, ist der Lauf fertig" -- bei einem
+//      Menschen davor waere es die Shell, im Pruefstand ist es das
+//      Skript.
+//
+//   2. WAISEN EINSAMMELN. Stirbt ein Prozess, der noch Kinder hat, so
+//      fallen die Kinder an den Prozess 1 (`sched.reparent` im Kern).
+//      Wer sie nicht abholt, hat Leichen in der Aufgabentafel, bis der
+//      Rechner neu startet -- und die Tafel hat 32 Plaetze. Das ist die
+//      GEGENPROBE dieser Runde: derselbe Lauf ohne init laesst die Zahl
+//      messbar steigen.
+//
+//   3. ABGESTUERZTE DIENSTE NEU STARTEN, aber nicht schneller als
+//      fuenfmal je Sekunde -- ein Dienst, der beim Start sofort stirbt,
+//      wuerde die Maschine sonst mit Neustarts fuellen und nichts
+//      anderes mehr laufen lassen.
+//
+//   4. HERUNTERFAHREN. SIGTERM an alle bekannten Dienste, warten,
+//      SIGKILL an die, die noch stehen, und dann ACPI (`reboot`). Nicht
+//      einfach abschalten: ein Dienst, der Daten in einem Puffer haelt,
+//      soll die Gelegenheit haben, sie wegzuschreiben.
+//
+// DIE VERSTAENDIGUNG MIT `svc` LAEUFT UEBER ZWEI DATEIEN und nicht ueber
+// Signale, und das ist eine bewusste Entscheidung: ein Signal traegt
+// keine Nutzlast, und dieses System hat keine Sockets im Dateisystem und
+// kein `mkfifo`. Also:
+//
+//     /run/svc.cmd     was getan werden soll ("start name", "stop name",
+//                      "restart name", "shutdown"). `init` liest die
+//                      Datei, fuehrt sie aus und leert sie.
+//     /run/svc.state   was ist: eine Zeile je Dienst, "name zustand pid
+//                      neustarts". `svc status` liest nur diese Datei.
+//
+// Das ist langsamer als ein Signal (init sieht es beim naechsten
+// Durchgang, also binnen 50 ms) und dafuer nachvollziehbar: was `svc`
+// wollte und was `init` daraus gemacht hat, steht beides auf der Platte.
+
+profile kernel
+
+import ulib
+import tools
+import pw
+
+export { u_start }
+
+const SYS_FORK: u64 = 57
+const SYS_EXECVE: u64 = 59
+const SYS_WAIT4: u64 = 61
+const SYS_KILL: u64 = 62
+const SYS_GETPID: u64 = 39
+const SYS_REBOOT: u64 = 169
+const SYS_USERINFO: u64 = 1600
+const WNOHANG: u64 = 1
+const SIGTERM: u64 = 15
+const SIGKILL: u64 = 9
+const RB_POWEROFF: u64 = 0x4321FEDC
+
+const MAX_SVC: u64 = 8
+const A_OFF: u64 = 0
+const A_ONCE: u64 = 1
+const A_RESPAWN: u64 = 2
+const A_CTRL: u64 = 3
+
+// Zustand: 0 = gestoppt, 1 = laeuft, 2 = fertig
+const S_STOP: u64 = 0
+const S_RUN: u64 = 1
+const S_DONE: u64 = 2
+
+static mut s_name: [u8; 256] = [0 as u8; 256] // 8 * 32
+static mut s_cmd: [u8; 1024] = [0 as u8; 1024] // 8 * 128
+static mut s_act: [u64; 8] = [0 as u64; 8]
+static mut s_pid: [u64; 8] = [0 as u64; 8]
+static mut s_starts: [u64; 8] = [0 as u64; 8]
+static mut s_state: [u64; 8] = [0 as u64; 8]
+static mut s_want: [u64; 8] = [0 as u64; 8] // 1 = soll laufen
+static mut nsvc: u64 = 0
+static mut orphans: u64 = 0
+static mut reaped: u64 = 0
+static mut going: u64 = 1
+static mut tab: [u8; 2048] = [0 as u8; 2048]
+static mut argbuf: [u8; 256] = [0 as u8; 256]
+
+fn nm(i: u64) -> u64 {
+    return (&s_name[(i * 32) as usize]) as u64
+}
+
+fn cm(i: u64) -> u64 {
+    return (&s_cmd[(i * 128) as usize]) as u64
+}
+
+// ------------------------------------------------------- /etc/inittab
+
+fn action_of(p: u64) -> u64 {
+    var w_once: [u8; 5] = "once\0"
+    var w_re: [u8; 8] = "respawn\0"
+    var w_ctrl: [u8; 5] = "ctrl\0"
+    if ulib.streq(p, (&w_once[0]) as u64) {
+        return A_ONCE
+    }
+    if ulib.streq(p, (&w_re[0]) as u64) {
+        return A_RESPAWN
+    }
+    if ulib.streq(p, (&w_ctrl[0]) as u64) {
+        return A_CTRL
+    }
+    return A_OFF
+}
+
+fn read_tab() -> u64 {
+    var path: [u8; 13] = "/etc/inittab\0"
+    var line: [u8; 256] = [0 as u8; 256]
+    var f: [u8; 128] = [0 as u8; 128]
+    let n: u64 = pw.read_all((&path[0]) as u64, (&tab[0]) as u64, 2048)
+    if n == ulib.EOF {
+        return 0
+    }
+    let cnt: u64 = pw.lines_of((&tab[0]) as u64)
+    var i: u64 = 0
+    nsvc = 0
+    while i < cnt && nsvc < MAX_SVC {
+        if pw.line_at((&tab[0]) as u64, i, (&line[0]) as u64, 256)
+            != ulib.EOF {
+            // Kommentare und leere Zeilen.
+            if line[0 as usize] != 0 as u8 && line[0 as usize] != 35 as u8 {
+                pw.field((&line[0]) as u64, 0, nm(nsvc), 32)
+                pw.field((&line[0]) as u64, 1, (&f[0]) as u64, 128)
+                let act: u64 = action_of((&f[0]) as u64)
+                pw.field((&line[0]) as u64, 2, cm(nsvc), 128)
+                if *((nm(nsvc)) as *mut u8) != 0 as u8
+                    && *((cm(nsvc)) as *mut u8) != 0 as u8 {
+                    s_act[nsvc as usize] = act
+                    s_pid[nsvc as usize] = 0
+                    s_starts[nsvc as usize] = 0
+                    s_state[nsvc as usize] = S_STOP
+                    s_want[nsvc as usize] = 0
+                    if act != A_OFF {
+                        s_want[nsvc as usize] = 1
+                    }
+                    nsvc = nsvc + 1
+                }
+            }
+        }
+        i = i + 1
+    }
+    return nsvc
+}
+
+// ---------------------------------------------------------- starten
+
+// Einen Dienst starten: `fork`, dann `execve` im Kind. Der Befehl wird an
+// Leerzeichen zerlegt -- hoechstens vier Woerter, mehr braucht kein
+// Eintrag dieser Tafel.
+fn start(i: u64) {
+    var e_fail: [u8; 22] = "init: kann nicht: \0\0\0\0"
+    var argv: [u64; 5] = [0 as u64; 5]
+    let kid: u64 = ulib.sys(SYS_FORK, 0, 0, 0)
+    if kid == 0 {
+        var at: u64 = 0
+        var k: u64 = 0
+        var pos: u64 = 0
+        while k < 4 {
+            let was: u64 = pos
+            pos = ulib.word(cm(i), pos, (&argbuf[at as usize]) as u64, 64)
+            if *((&argbuf[at as usize]) as u64 as *mut u8) == 0 as u8 {
+                k = 4
+            } else {
+                argv[k as usize] = (&argbuf[at as usize]) as u64
+                at = at + 64
+                k = k + 1
+            }
+            if pos == was {
+                k = 4
+            }
+        }
+        argv[4] = 0
+        ulib.sys(SYS_EXECVE, argv[0], (&argv[0]) as u64, 0)
+        ulib.esay_line((&e_fail[0]) as u64, cm(i))
+        ulib.sys(60, 127, 0, 0)
+    }
+    if ulib.bad(kid) {
+        return
+    }
+    s_pid[i as usize] = kid
+    s_state[i as usize] = S_RUN
+    s_starts[i as usize] = s_starts[i as usize] + 1
+}
+
+// ------------------------------------------------------- /run/svc.state
+
+fn write_state() {
+    var path: [u8; 15] = "/run/svc.state\0"
+    var out: [u8; 1024] = [0 as u8; 1024]
+    var sp: [u8; 2] = " \0"
+    var nlc: [u8; 2] = "\n\0"
+    var w_run: [u8; 8] = "running\0"
+    var w_stop: [u8; 8] = "stopped\0"
+    var w_done: [u8; 5] = "done\0"
+    var num: [u8; 24] = [0 as u8; 24]
+    var at: u64 = 0
+    var i: u64 = 0
+    while i < nsvc {
+        at = at + ulib.strcpy((&out[at as usize]) as u64, nm(i))
+        at = at + ulib.strcpy((&out[at as usize]) as u64, (&sp[0]) as u64)
+        var w: u64 = (&w_stop[0]) as u64
+        if s_state[i as usize] == S_RUN {
+            w = (&w_run[0]) as u64
+        }
+        if s_state[i as usize] == S_DONE {
+            w = (&w_done[0]) as u64
+        }
+        at = at + ulib.strcpy((&out[at as usize]) as u64, w)
+        at = at + ulib.strcpy((&out[at as usize]) as u64, (&sp[0]) as u64)
+        ulib.digits(s_pid[i as usize], (&num[0]) as u64)
+        at = at + ulib.strcpy((&out[at as usize]) as u64, (&num[0]) as u64)
+        at = at + ulib.strcpy((&out[at as usize]) as u64, (&sp[0]) as u64)
+        ulib.digits(s_starts[i as usize], (&num[0]) as u64)
+        at = at + ulib.strcpy((&out[at as usize]) as u64, (&num[0]) as u64)
+        at = at + ulib.strcpy((&out[at as usize]) as u64, (&nlc[0]) as u64)
+        i = i + 1
+    }
+    pw.write_all((&path[0]) as u64, (&out[0]) as u64, at)
+}
+
+// --------------------------------------------------------- /run/svc.cmd
+
+fn find_svc(name: u64) -> u64 {
+    var i: u64 = 0
+    while i < nsvc {
+        if ulib.streq(nm(i), name) {
+            return i
+        }
+        i = i + 1
+    }
+    return MAX_SVC
+}
+
+fn stop_one(i: u64, sig: u64) {
+    if s_state[i as usize] == S_RUN && s_pid[i as usize] != 0 {
+        ulib.sys(SYS_KILL, s_pid[i as usize], sig, 0)
+    }
+}
+
+fn read_cmd() {
+    var path: [u8; 13] = "/run/svc.cmd\0"
+    var buf: [u8; 256] = [0 as u8; 256]
+    var verb: [u8; 32] = [0 as u8; 32]
+    var who: [u8; 32] = [0 as u8; 32]
+    var w_start: [u8; 6] = "start\0"
+    var w_stop: [u8; 5] = "stop\0"
+    var w_rest: [u8; 8] = "restart\0"
+    var w_down: [u8; 9] = "shutdown\0"
+    let n: u64 = pw.read_all((&path[0]) as u64, (&buf[0]) as u64, 256)
+    if n == ulib.EOF || n == 0 {
+        return
+    }
+    // Sofort leeren: was gelesen ist, ist getan, und ein zweiter
+    // Durchgang soll es nicht noch einmal tun.
+    pw.write_all((&path[0]) as u64, (&buf[0]) as u64, 0)
+    let after: u64 = ulib.word((&buf[0]) as u64, 0, (&verb[0]) as u64, 32)
+    ulib.word((&buf[0]) as u64, after, (&who[0]) as u64, 32)
+    // Ein Zeilenende am Wortende abschneiden.
+    var k: u64 = 0
+    while k < 32 {
+        if who[k as usize] == 10 as u8 || who[k as usize] == 13 as u8 {
+            who[k as usize] = 0 as u8
+        }
+        if verb[k as usize] == 10 as u8 || verb[k as usize] == 13 as u8 {
+            verb[k as usize] = 0 as u8
+        }
+        k = k + 1
+    }
+    if ulib.streq((&verb[0]) as u64, (&w_down[0]) as u64) {
+        going = 0
+        return
+    }
+    let i: u64 = find_svc((&who[0]) as u64)
+    if i >= MAX_SVC {
+        return
+    }
+    if ulib.streq((&verb[0]) as u64, (&w_start[0]) as u64) {
+        s_want[i as usize] = 1
+        if s_state[i as usize] != S_RUN {
+            start(i)
+        }
+    }
+    if ulib.streq((&verb[0]) as u64, (&w_stop[0]) as u64) {
+        s_want[i as usize] = 0
+        stop_one(i, SIGTERM)
+    }
+    if ulib.streq((&verb[0]) as u64, (&w_rest[0]) as u64) {
+        s_want[i as usize] = 1
+        stop_one(i, SIGTERM)
+    }
+    write_state()
+}
+
+// ------------------------------------------------------- das Aufraeumen
+
+fn shutdown() {
+    var s_down: [u8; 21] = "init: herunterfahren\0"
+    var s_orph: [u8; 16] = "init: orphans=\0\0"
+    var s_reap: [u8; 16] = "init: reaped=\0\0\0"
+    var num: [u8; 24] = [0 as u8; 24]
+    ulib.eput((&s_down[0]) as u64)
+    var nlc: [u8; 2] = "\n\0"
+    ulib.eput((&nlc[0]) as u64)
+    var i: u64 = 0
+    while i < nsvc {
+        s_want[i as usize] = 0
+        stop_one(i, SIGTERM)
+        i = i + 1
+    }
+    // Zeit zum Aufraeumen -- und dabei weiter einsammeln, was faellt.
+    // ZWEI SEKUNDEN, nicht eine halbe. Gemessen: eine Waise, die
+    // 700 ms lebt, war nach 500 ms noch nicht tot -- die Zahl
+    // `init: orphans=` blieb bei null, und der Testlaeufer hatte recht,
+    // sich zu beschweren. Wer beim Herunterfahren zu frueh aufhoert,
+    // laesst genau die Leichen liegen, wegen derer es ihn gibt.
+    var round: u64 = 0
+    while round < 40 {
+        harvest()
+        ulib.sleep_ms(50)
+        round = round + 1
+    }
+    i = 0
+    while i < nsvc {
+        stop_one(i, SIGKILL)
+        i = i + 1
+    }
+    harvest()
+    write_state()
+    ulib.eput((&s_orph[0]) as u64)
+    ulib.digits(orphans, (&num[0]) as u64)
+    ulib.eput((&num[0]) as u64)
+    ulib.eput((&nlc[0]) as u64)
+    ulib.eput((&s_reap[0]) as u64)
+    ulib.digits(reaped, (&num[0]) as u64)
+    ulib.eput((&num[0]) as u64)
+    ulib.eput((&nlc[0]) as u64)
+    // Und jetzt wirklich aus. Kommt der Aufruf zurueck, hat er nicht
+    // gegriffen -- dann bleibt nur, stehenzubleiben.
+    ulib.sys(SYS_REBOOT, RB_POWEROFF, 0, 0)
+    var e_off: [u8; 26] = "init: ACPI hat nicht aus\n\0"
+    ulib.eput((&e_off[0]) as u64)
+}
+
+// Jedes Kind abholen, das fertig ist -- eigene Dienste UND Waisen. Genau
+// das ist die Aufgabe, wegen der es einen Prozess 1 gibt.
+fn harvest() -> u64 {
+    var st: [u64; 1] = [0 as u64; 1]
+    var got: u64 = 0
+    var going2: bool = true
+    while going2 {
+        let who: u64 = ulib.sys(SYS_WAIT4, 0xFFFFFFFFFFFFFFFF,
+            (&st[0]) as u64, WNOHANG)
+        if ulib.bad(who) || who == 0 {
+            going2 = false
+        } else {
+            got = got + 1
+            reaped = reaped + 1
+            var mine: bool = false
+            var i: u64 = 0
+            while i < nsvc {
+                if s_pid[i as usize] == who {
+                    mine = true
+                    s_pid[i as usize] = 0
+                    if s_act[i as usize] == A_CTRL {
+                        going = 0
+                    }
+                    if s_act[i as usize] == A_RESPAWN
+                        && s_want[i as usize] == 1 && going == 1 {
+                        s_state[i as usize] = S_STOP
+                    } else {
+                        s_state[i as usize] = S_DONE
+                        if s_want[i as usize] == 1
+                            && s_act[i as usize] == A_RESPAWN {
+                            s_state[i as usize] = S_STOP
+                        }
+                    }
+                }
+                i = i + 1
+            }
+            if !mine {
+                // Ein Kind, das nie von init gestartet wurde: es ist eine
+                // WAISE, deren Elternteil gestorben ist und die der Kern
+                // hierher gehaengt hat.
+                orphans = orphans + 1
+            }
+        }
+    }
+    return got
+}
+
+// ----------------------------------------------------------- der Lauf
+
+fn u_start(args: u64) -> u64 {
+    var e_pid: [u8; 34] = "init: ich bin nicht der Prozess 1\0"
+    var e_tab: [u8; 31] = "init: /etc/inittab fehlt\0\0\0\0\0\0\0"
+    var s_up: [u8; 20] = "init: dienste=\0\0\0\0\0\0"
+    var num: [u8; 24] = [0 as u8; 24]
+    var nlc: [u8; 2] = "\n\0"
+
+    // DER ERSTE SATZ: bin ich wirklich der Erste? Ein `init`, das als
+    // gewoehnlicher Prozess laeuft, wuerde fremde Kinder toeten und
+    // seine eigenen nicht finden.
+    if ulib.sys(SYS_GETPID, 0, 0, 0) != 1 {
+        ulib.esay_line((&e_pid[0]) as u64, 0)
+        return 1
+    }
+    if read_tab() == 0 {
+        ulib.esay_line((&e_tab[0]) as u64, 0)
+        return 1
+    }
+    ulib.eput((&s_up[0]) as u64)
+    ulib.digits(nsvc, (&num[0]) as u64)
+    ulib.eput((&num[0]) as u64)
+    ulib.eput((&nlc[0]) as u64)
+
+    var i: u64 = 0
+    while i < nsvc {
+        if s_want[i as usize] == 1 {
+            start(i)
+        }
+        i = i + 1
+    }
+    write_state()
+
+    var idle: u64 = 0
+    while going == 1 && idle < 4000 {
+        if harvest() == 0 {
+            idle = idle + 1
+            ulib.sleep_ms(25)
+        } else {
+            idle = 0
+            write_state()
+        }
+        read_cmd()
+        // Was wieder laufen soll und nicht laeuft, wird neu gestartet --
+        // hoechstens fuenfmal je Sekunde, damit ein Dienst, der sofort
+        // stirbt, die Maschine nicht auffrisst.
+        i = 0
+        while i < nsvc {
+            if s_want[i as usize] == 1 && s_state[i as usize] != S_RUN
+                && s_act[i as usize] == A_RESPAWN && going == 1 {
+                ulib.sleep_ms(200)
+                start(i)
+                write_state()
+            }
+            i = i + 1
+        }
+    }
+    shutdown()
+    return 0
+}
