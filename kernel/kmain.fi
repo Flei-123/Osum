@@ -402,6 +402,7 @@ fn kernel_main(mbi: u64, vectors: u64, state: u64, kernel_end: u64,
     // hat. Haette `mem.scan` seinen Bereich nicht reserviert, stuende
     // hier jetzt eine andere Summe.
     bootmod.recheck(state)
+    usb.report(state)
 
     serial.puts((&s_done[0]) as u64)
     serial.nl()
@@ -1864,6 +1865,58 @@ fn usb_unplug(state: u64) {
     serial.nl()
 }
 
+// RUNDE K17: EIN STICK, EINGEHAENGT WIE JEDE ANDERE PLATTE.
+//
+// Hier steht keine einzige Zeile ueber USB. `part.scan` bekommt eine
+// Geraetenummer, `vfs.mount_at` bekommt eine Geraetenummer, und `fat.fi`
+// liest Bloecke ueber `blk.read_on`. Dass diese Bloecke ueber vier
+// Endpunkte, einen Befehlsblock und eine Quittung gekommen sind, weiss
+// keiner davon -- und genau das IST die Zusage der Schnittstelle aus
+// Runde 62. Sie wird hier zum dritten Mal eingeloest (nach NVMe in K2
+// und dem ATA-Sklaven in K14).
+fn usb_mount(state: u64) {
+    var s_h: [u8; 12] = "k17: stick \0"
+    var s_p: [u8; 8] = "parts=\0\0"
+    var s_f: [u8; 9] = "  first=\0"
+    var s_n: [u8; 10] = "  blocks=\0"
+    var s_m: [u8; 9] = "  mount=\0"
+    var p_usb: [u8; 5] = "/usb\0"
+    if (kstate.get(state, kstate.MODE) & kstate.M_USBSTICK) == 0 {
+        return
+    }
+    if !usb.msc_ready(state) {
+        return
+    }
+    if !vfs.ready(state) {
+        return
+    }
+    var first: u64 = 0
+    var anzahl: u64 = blk.blocks_on(state, blk.DEV_USB)
+    let nparts: u64 = part.scan(state, blk.DEV_USB)
+    if nparts != 0 {
+        var pick: u64 = part.find_kind(state, blk.DEV_USB, part.T_FAT32)
+        if pick >= part.MAX_PARTS {
+            pick = part.find_kind(state, blk.DEV_USB, part.T_BASIC)
+        }
+        if pick < part.MAX_PARTS {
+            first = part.start(state, pick)
+            anzahl = part.blocks(state, pick)
+        }
+    }
+    let m: u64 = vfs.mount_at(state, vfsops.FS_FAT, blk.DEV_USB, first,
+        anzahl, (&p_usb[0]) as u64, 0)
+    serial.puts((&s_h[0]) as u64)
+    serial.puts((&s_p[0]) as u64)
+    serial.dec(nparts)
+    serial.puts((&s_f[0]) as u64)
+    serial.dec(first)
+    serial.puts((&s_n[0]) as u64)
+    serial.dec(anzahl)
+    serial.puts((&s_m[0]) as u64)
+    serial.dec(yes(m < vfs.MAX_MNT))
+    serial.nl()
+}
+
 fn osum(state: u64) {
     if wm_owns_shell(state) {
         return
@@ -1926,6 +1979,7 @@ fn osum(state: u64) {
     // Shell, die /proc erst nach ihrem Start bekaeme, haette es zum
     // Zeitpunkt ihres eigenen `open` noch nicht.
     k14_setup(state)
+    usb_mount(state)
     list_dir(state, (&p_bin[0]) as u64, (&s_bin[0]) as u64)
 
     // ================================================== RUNDE K13
@@ -2049,6 +2103,7 @@ fn osum(state: u64) {
     say_k14(state)
     say_posix(state)
     perm.report(state)
+    usb.report(state)
 }
 
 // ROUND K4: what the system call layer did in this run. Six counters, one
