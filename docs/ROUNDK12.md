@@ -8,8 +8,13 @@ vollständig in den Handbüchern von Intel und AMD — und wenn sie stimmt,
 stimmt sie für jedes Gastsystem, weil ein Gastsystem nichts anderes sieht
 als einen Prozessor.
 
-    ./test.sh                      15 Abschnitte, 1234 Zusagen, 0 Fehler
-    bash tools/hv/run.sh           108 Zusagen dieser Runde, 0 Fehler
+    ./test.sh          ALLE 15 ABSCHNITTE BESTANDEN, 1243 Zusagen, 0 Fehler
+    bash tools/hv/run.sh                HV: 114 passed, 0 failed
+
+Vorher: 14 Abschnitte, 1126 Zusagen. Dazugekommen sind 117 -- 114 aus
+`tools/hv/run.sh`, dazu je eine in `tools/kernel/run.sh` und
+`tools/pci/run.sh` (die fuenfte Assemblerdatei uebersetzt) und eine im
+Netz-Abschnitt. Keine bestehende Zusage ist weggefallen.
 
 ---
 
