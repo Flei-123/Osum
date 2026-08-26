@@ -1,0 +1,505 @@
+// kernel/ftype.fi -- RUNDE K16: WOMIT MAN EINE DATEI OEFFNET.
+//
+// Bis zu dieser Runde wusste dieses System von einer Datei genau zwei
+// Dinge: wie lang sie ist und ob sie ein Verzeichnis ist. Was sie IST --
+// ein Programm, ein Quelltext, ein Bild, ein Skript -- wusste allenfalls
+// das Programm, das sie gerade in der Hand hatte, und es wusste es, weil
+// jemand die Endung dort hineingeschrieben hatte. Ein Dateiverwalter, der
+// so gebaut ist, hat eine `if`-Kette; die zweite Anwendung bekommt eine
+// zweite, und die beiden driften auseinander.
+//
+// Deshalb steht die Zuordnung HIER, im Kern, als EINE Tabelle:
+//
+//     Dateiart -> womit oeffnen
+//
+// und alles darueber -- der Dateiverwalter von Runde K15, die Shell, ein
+// Doppelklick -- ruft sie ab, statt sie noch einmal zu kennen.
+//
+// ZWEI WEGE ZUR ART, UND DER INHALT GEHT VOR.
+//
+//   1. DIE MAGISCHE ZAHL. Die ersten Oktette der Datei. 0x7F 'E' 'L' 'F'
+//      ist ein Programm dieses Systems, '#' '!' ist ein Skript mit
+//      Ausleger. Das ist die verlaessliche Auskunft: sie steht in der
+//      Datei und nicht in ihrem Namen.
+//   2. DIE ENDUNG. `.fi` ist Firn-Quelltext, `.s` ist Assembler, `.sh`
+//      ist ein Shell-Skript. Das ist die Auskunft fuer alles, was keine
+//      magische Zahl hat -- und Text hat keine.
+//
+// Der Inhalt geht vor, und das ist eine ENTSCHEIDUNG, die man messen
+// kann: eine Datei namens `bild.fi`, in der ein ELF-Kopf steht, ist ein
+// Programm und kein Quelltext. Abschnitt 22 der Abnahme misst genau
+// diesen Fall, weil er der einzige ist, an dem sich die beiden Wege
+// UNTERSCHEIDEN -- eine Regel, die nie zu einem Widerspruch fuehrt, ist
+// keine Regel.
+//
+// WAS DIESE DATEI NICHT TUT. Sie uebersetzt nichts und startet nichts
+// selbst. Sie sagt, WELCHES Programm zustaendig ist; gestartet wird es in
+// `sys.do_fopen` mit demselben Lader, den `exec` benutzt. Das Uebersetzen
+// einer `.fi` ist Sache von `/bin/firun` in Ring 3 -- ein Uebersetzer
+// gehoert nicht in einen Kernel, und ein Kernel, der Fehlermeldungen
+// eines Uebersetzers durchreichen muesste, waere ein schlechter Ort dafuer.
+//
+// DIE SCHNITTSTELLE FUER RUNDE K15 (der Doppelklick gehoert dort hin):
+//
+//     SYS_OSUM_FTYPE(pfad, aus, len)   -> Art einordnen, Satz nach `aus`
+//     SYS_OSUM_FOPEN(pfad, argv, argc) -> das zustaendige Programm starten
+//     SYS_OSUM_FLIST(nr, aus, len)     -> die Tabelle durchgehen
+//     SYS_OSUM_FREG(satz, len)         -> einen Eintrag setzen
+//
+// K15 braucht fuer einen Doppelklick genau EINEN Aufruf: `fopen`. Was
+// zurueckkommt, ist eine Prozessnummer -- oder ein negativer Fehler, und
+// dann hat NICHTS gestartet. Ein Doppelklick, der nichts tut und Erfolg
+// meldet, ist der Fehler, den diese Runde nicht machen will.
+
+import kstate
+import fs
+import errno
+import serial
+
+export {
+    init, classify, record_for, table_at, register_from,
+    action_of, prog_of, label_of, slot_off,
+    A_NONE, A_EXEC, A_OPEN,
+    T_NONE,
+    R_USED, R_ACTION, R_MAGOFF, R_MAGLEN, R_MAGIC, R_EXT, R_PROG, R_LABEL,
+    EXT_MAX, PROG_MAX, LABEL_MAX, MAGIC_MAX,
+    head_of, count, refuse, opened, say
+}
+
+// ------------------------------------------------------------ der Satz
+//
+// 128 Oktette, und die Aufteilung steht hier und in `kernel/user/ftype.fi`
+// (Ring 3) zweimal -- so wie `mkfs.py` das Plattenformat ein zweites Mal
+// fuehrt. Zwei Fassungen, die auseinanderlaufen, fallen sofort auf; eine
+// Fassung, die falsch ist, faellt nie auf.
+const R_USED: u64 = 0 // 0 = frei
+const R_ACTION: u64 = 8
+const R_MAGOFF: u64 = 16 // wo die magische Zahl steht
+const R_MAGLEN: u64 = 24 // wie lang sie ist, 0 = keine
+const R_MAGIC: u64 = 32 // MAGIC_MAX Oktette
+const R_EXT: u64 = 48 // EXT_MAX, mit Null
+const R_PROG: u64 = 64 // PROG_MAX, mit Null
+const R_LABEL: u64 = 112 // LABEL_MAX, mit Null
+
+const MAGIC_MAX: u64 = 16
+const EXT_MAX: u64 = 16
+const PROG_MAX: u64 = 48
+const LABEL_MAX: u64 = 16
+
+// Was mit der Datei geschehen soll.
+const A_NONE: u64 = 0 // nichts -- die Art ist bekannt, ein Programm nicht
+const A_EXEC: u64 = 1 // die Datei SELBST starten
+const A_OPEN: u64 = 2 // `prog` starten, die Datei als Argument
+
+const T_NONE: u64 = 0xFFFFFFFFFFFFFFFF // keine Art gefunden
+
+fn base(state: u64) -> u64 {
+    return state + kstate.K16_OFF
+}
+
+fn slot_off(i: u64) -> u64 {
+    return kstate.K16_OFF + kstate.FT_TAB + i * kstate.FT_SLOT
+}
+
+fn zaehler(state: u64, off: u64, um: u64) {
+    let a: u64 = kstate.K16_OFF + kstate.FT_SCALARS + off
+    kstate.set(state, a, kstate.get(state, a) + um)
+}
+
+fn count(state: u64, off: u64) -> u64 {
+    return kstate.get(state, kstate.K16_OFF + kstate.FT_SCALARS + off)
+}
+
+fn refuse(state: u64) {
+    zaehler(state, kstate.FT_REFUSED, 1)
+}
+
+fn opened(state: u64) {
+    zaehler(state, kstate.FT_OPENED, 1)
+}
+
+fn head_of(state: u64) -> u64 {
+    return base(state) + kstate.FT_HEAD
+}
+
+// ------------------------------------------------------- kleine Helfer
+
+fn text_len(p: u64, max: u64) -> u64 {
+    var i: u64 = 0
+    while i < max {
+        if kstate.get8(p + i) == 0 {
+            return i
+        }
+        i = i + 1
+    }
+    return max
+}
+
+// Text nach kdata, mit Null, hoechstens `max` Oktette einschliesslich.
+fn put_text(dst: u64, src: u64, max: u64) {
+    var i: u64 = 0
+    while i < max {
+        kstate.set8(dst + i, 0 as u8)
+        i = i + 1
+    }
+    i = 0
+    while i + 1 < max {
+        let c: u64 = kstate.get8(src + i)
+        if c == 0 {
+            return
+        }
+        kstate.set8(dst + i, c as u8)
+        i = i + 1
+    }
+}
+
+fn bytes_eq(a: u64, b: u64, n: u64) -> bool {
+    var i: u64 = 0
+    while i < n {
+        if kstate.get8(a + i) != kstate.get8(b + i) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+// Endet `pfad` auf `ext`? Grosskleinschreibung zaehlt -- dieses System
+// hat ein Dateisystem, in dem sie auch sonst zaehlt.
+fn ends_with(pfad: u64, plen: u64, ext: u64) -> bool {
+    let elen: u64 = text_len(ext, EXT_MAX)
+    if elen == 0 {
+        return false
+    }
+    if elen > plen {
+        return false
+    }
+    return bytes_eq(pfad + (plen - elen), ext, elen)
+}
+
+// ------------------------------------------------------- die Tabelle
+
+fn clear_all(state: u64) {
+    var i: u64 = 0
+    while i < kstate.FT_SLOTS {
+        var k: u64 = 0
+        while k < kstate.FT_SLOT {
+            kstate.set8(state + slot_off(i) + k, 0 as u8)
+            k = k + 1
+        }
+        i = i + 1
+    }
+    var s: u64 = 0
+    while s < 0x100 {
+        kstate.set8(base(state) + kstate.FT_SCALARS + s, 0 as u8)
+        s = s + 8
+    }
+}
+
+fn free_slot(state: u64) -> u64 {
+    var i: u64 = 0
+    while i < kstate.FT_SLOTS {
+        if kstate.get(state, slot_off(i) + R_USED) == 0 {
+            return i
+        }
+        i = i + 1
+    }
+    return kstate.FT_SLOTS
+}
+
+// Ein Eintrag mit ENDUNG. `magic` = 0 heisst: keine magische Zahl.
+fn add(state: u64, label: u64, ext: u64, magic: u64, maglen: u64,
+    magoff: u64, action: u64, prog: u64) -> u64 {
+    let i: u64 = free_slot(state)
+    if i >= kstate.FT_SLOTS {
+        return kstate.FT_SLOTS
+    }
+    let r: u64 = state + slot_off(i)
+    kstate.set(state, slot_off(i) + R_USED, 1)
+    kstate.set(state, slot_off(i) + R_ACTION, action)
+    kstate.set(state, slot_off(i) + R_MAGOFF, magoff)
+    kstate.set(state, slot_off(i) + R_MAGLEN, maglen)
+    var k: u64 = 0
+    while k < MAGIC_MAX {
+        kstate.set8(r + R_MAGIC + k, 0 as u8)
+        k = k + 1
+    }
+    k = 0
+    while k < maglen {
+        if k < MAGIC_MAX {
+            kstate.set8(r + R_MAGIC + k, kstate.get8(magic + k) as u8)
+        }
+        k = k + 1
+    }
+    if ext != 0 {
+        put_text(r + R_EXT, ext, EXT_MAX)
+    } else {
+        kstate.set8(r + R_EXT, 0 as u8)
+    }
+    if prog != 0 {
+        put_text(r + R_PROG, prog, PROG_MAX)
+    } else {
+        kstate.set8(r + R_PROG, 0 as u8)
+    }
+    put_text(r + R_LABEL, label, LABEL_MAX)
+    zaehler(state, kstate.FT_REGISTERED, 1)
+    return i
+}
+
+// DIE EINGEBAUTEN ARTEN. Sie stehen in dieser Reihenfolge in der Tabelle,
+// und die Reihenfolge ist die Suchreihenfolge -- was mit einer MAGISCHEN
+// ZAHL erkannt wird, steht vorne.
+//
+// Warum `#!` als eigene Art und nicht als Sonderfall: die Datei ist damit
+// AUSFUEHRBAR, und `execve` im Kern weiss seit dieser Runde, was `#!`
+// bedeutet (kernel/elf.fi, `shebang`). Ein Doppelklick auf ein Skript
+// startet es also, ohne dass irgendjemand ueber dem Kern eine Shell
+// dazwischenschieben muesste.
+fn init(state: u64) {
+    clear_all(state)
+
+    var l_elf: [u8; 4] = "elf\0"
+    var m_elf: [u8; 5] = b"\x7FELF\x00"
+    add(state, (&l_elf[0]) as u64, 0, (&m_elf[0]) as u64, 4, 0, A_EXEC, 0)
+
+    var l_shb: [u8; 7] = "script\0"
+    var m_shb: [u8; 3] = "#!\0"
+    add(state, (&l_shb[0]) as u64, 0, (&m_shb[0]) as u64, 2, 0, A_EXEC, 0)
+
+    // Firn-Quelltext: uebersetzen und danach starten. Das tut `/bin/firun`
+    // -- und es MELDET, was der Uebersetzer gesagt hat. Ein Doppelklick
+    // auf eine Datei, die nicht uebersetzt, endet mit einem Fehlercode
+    // ungleich null und einer Meldung, die man lesen kann.
+    var l_fi: [u8; 5] = "firn\0"
+    var e_fi: [u8; 4] = ".fi\0"
+    var p_fi: [u8; 11] = "/bin/firun\0"
+    add(state, (&l_fi[0]) as u64, (&e_fi[0]) as u64, 0, 0, 0, A_OPEN,
+        (&p_fi[0]) as u64)
+
+    // Assembler in der Sprache, die firnc ausgibt -> `/bin/fas` bindet
+    // daraus unmittelbar ein Programm.
+    var l_s: [u8; 4] = "asm\0"
+    var e_s: [u8; 3] = ".s\0"
+    var p_s: [u8; 9] = "/bin/fas\0"
+    add(state, (&l_s[0]) as u64, (&e_s[0]) as u64, 0, 0, 0, A_OPEN,
+        (&p_s[0]) as u64)
+
+    var l_sh: [u8; 6] = "shell\0"
+    var e_sh: [u8; 4] = ".sh\0"
+    var p_sh: [u8; 8] = "/bin/sh\0"
+    add(state, (&l_sh[0]) as u64, (&e_sh[0]) as u64, 0, 0, 0, A_OPEN,
+        (&p_sh[0]) as u64)
+
+    var l_txt: [u8; 5] = "text\0"
+    var e_txt: [u8; 5] = ".txt\0"
+    var p_ed: [u8; 10] = "/bin/edit\0"
+    add(state, (&l_txt[0]) as u64, (&e_txt[0]) as u64, 0, 0, 0, A_OPEN,
+        (&p_ed[0]) as u64)
+
+    var l_md: [u8; 5] = "text\0"
+    var e_md: [u8; 4] = ".md\0"
+    add(state, (&l_md[0]) as u64, (&e_md[0]) as u64, 0, 0, 0, A_OPEN,
+        (&p_ed[0]) as u64)
+
+    var l_log: [u8; 5] = "text\0"
+    var e_log: [u8; 5] = ".log\0"
+    add(state, (&l_log[0]) as u64, (&e_log[0]) as u64, 0, 0, 0, A_OPEN,
+        (&p_ed[0]) as u64)
+}
+
+// --------------------------------------------------------- einordnen
+
+// Die ersten Oktette der Datei nach FT_HEAD. Gibt zurueck, wie viele
+// wirklich gelesen wurden.
+fn read_head(state: u64, ino: u64) -> u64 {
+    let dst: u64 = head_of(state)
+    var i: u64 = 0
+    while i < kstate.FT_HEAD_MAX {
+        kstate.set8(dst + i, 0 as u8)
+        i = i + 1
+    }
+    return fs.read_at(state, ino, 0, dst, kstate.FT_HEAD_MAX)
+}
+
+// Welche Art passt zu diesem Kopf? T_NONE, wenn keine.
+fn by_magic(state: u64, n: u64) -> u64 {
+    let h: u64 = head_of(state)
+    var i: u64 = 0
+    while i < kstate.FT_SLOTS {
+        let off: u64 = slot_off(i)
+        if kstate.get(state, off + R_USED) != 0 {
+            let ml: u64 = kstate.get(state, off + R_MAGLEN)
+            if ml != 0 {
+                let mo: u64 = kstate.get(state, off + R_MAGOFF)
+                if mo + ml <= n {
+                    if bytes_eq(h + mo, state + off + R_MAGIC, ml) {
+                        return i
+                    }
+                }
+            }
+        }
+        i = i + 1
+    }
+    return T_NONE
+}
+
+fn by_ext(state: u64, pfad: u64, plen: u64) -> u64 {
+    var i: u64 = 0
+    while i < kstate.FT_SLOTS {
+        let off: u64 = slot_off(i)
+        if kstate.get(state, off + R_USED) != 0 {
+            if kstate.get8(state + off + R_EXT) != 0 {
+                if ends_with(pfad, plen, state + off + R_EXT) {
+                    return i
+                }
+            }
+        }
+        i = i + 1
+    }
+    return T_NONE
+}
+
+// DER EINE EINSTIEG. `pfad` ist eine KERNEL-Adresse (Regel 3 von
+// `sys.fi`: der Kern haelt nie einen Zeiger von Ring 3). Zurueck kommt
+// der Platz in der Tabelle oder T_NONE.
+//
+// Reihenfolge: Inhalt, dann Name. Eine Datei ohne Inhalt (Laenge 0) kann
+// keine magische Zahl haben und wird deshalb am Namen erkannt -- das ist
+// der Fall, den ein Editor erzeugt, wenn er eine neue Datei anlegt.
+fn classify(state: u64, pfad: u64) -> u64 {
+    zaehler(state, kstate.FT_CLASSIFIED, 1)
+    let plen: u64 = text_len(pfad, 256)
+    if kstate.get(state, kstate.FS_READY) != 0 {
+        let ino: u64 = fs.path(state, pfad)
+        if ino != 0 {
+            if fs.inode_type(state, ino) == fs.T_FILE {
+                let n: u64 = read_head(state, ino)
+                let m: u64 = by_magic(state, n)
+                if m != T_NONE {
+                    zaehler(state, kstate.FT_BY_MAGIC, 1)
+                    return m
+                }
+            }
+        }
+    }
+    let e: u64 = by_ext(state, pfad, plen)
+    if e != T_NONE {
+        zaehler(state, kstate.FT_BY_EXT, 1)
+    }
+    return e
+}
+
+fn action_of(state: u64, i: u64) -> u64 {
+    if i >= kstate.FT_SLOTS {
+        return A_NONE
+    }
+    return kstate.get(state, slot_off(i) + R_ACTION)
+}
+
+// KERNEL-Adresse des Programmpfads, oder 0.
+fn prog_of(state: u64, i: u64) -> u64 {
+    if i >= kstate.FT_SLOTS {
+        return 0
+    }
+    let p: u64 = state + slot_off(i) + R_PROG
+    if kstate.get8(p) == 0 {
+        return 0
+    }
+    return p
+}
+
+fn label_of(state: u64, i: u64) -> u64 {
+    if i >= kstate.FT_SLOTS {
+        return 0
+    }
+    return state + slot_off(i) + R_LABEL
+}
+
+// Den Satz einer Art nach FT_REC legen, damit `sys.fi` ihn in einem Stueck
+// nach Ring 3 kopieren kann. Ein nicht belegter Platz gibt einen Satz aus
+// Nullen -- das ist die Antwort "diese Art gibt es nicht", und sie ist
+// eindeutig, weil R_USED dann 0 ist.
+fn record_for(state: u64, i: u64) -> u64 {
+    let dst: u64 = base(state) + kstate.FT_REC
+    var k: u64 = 0
+    while k < kstate.FT_SLOT {
+        kstate.set8(dst + k, 0 as u8)
+        k = k + 1
+    }
+    if i >= kstate.FT_SLOTS {
+        return dst
+    }
+    let src: u64 = state + slot_off(i)
+    k = 0
+    while k < kstate.FT_SLOT {
+        kstate.set8(dst + k, kstate.get8(src + k) as u8)
+        k = k + 1
+    }
+    return dst
+}
+
+fn table_at(state: u64, i: u64) -> u64 {
+    return record_for(state, i)
+}
+
+// Einen Eintrag AUS RING 3 setzen. `satz` ist eine KERNEL-Adresse, in die
+// `sys.fi` schon kopiert hat. Passt die Endung zu einem vorhandenen
+// Eintrag, wird dieser ueberschrieben -- sonst gaebe es zwei Regeln fuer
+// dieselbe Endung, und welche gilt, haenge an der Reihenfolge.
+fn register_from(state: u64, satz: u64) -> u64 {
+    let ext: u64 = satz + R_EXT
+    var ziel: u64 = kstate.FT_SLOTS
+    if kstate.get8(ext) != 0 {
+        var i: u64 = 0
+        while i < kstate.FT_SLOTS {
+            let off: u64 = slot_off(i)
+            if kstate.get(state, off + R_USED) != 0 {
+                if kstate.get8(state + off + R_EXT) != 0 {
+                    let a: u64 = text_len(ext, EXT_MAX)
+                    let b: u64 = text_len(state + off + R_EXT, EXT_MAX)
+                    if a == b {
+                        if bytes_eq(ext, state + off + R_EXT, a) {
+                            ziel = i
+                            i = kstate.FT_SLOTS
+                        }
+                    }
+                }
+            }
+            if i < kstate.FT_SLOTS {
+                i = i + 1
+            }
+        }
+    }
+    if ziel >= kstate.FT_SLOTS {
+        ziel = free_slot(state)
+    }
+    if ziel >= kstate.FT_SLOTS {
+        return kstate.FT_SLOTS
+    }
+    let dst: u64 = state + slot_off(ziel)
+    var k: u64 = 0
+    while k < kstate.FT_SLOT {
+        kstate.set8(dst + k, kstate.get8(satz + k) as u8)
+        k = k + 1
+    }
+    kstate.set(state, slot_off(ziel) + R_USED, 1)
+    // Die Texte enden auf jeden Fall mit einer Null -- was Ring 3 schickt,
+    // muss der Kern nicht glauben.
+    kstate.set8(dst + R_EXT + EXT_MAX - 1, 0 as u8)
+    kstate.set8(dst + R_PROG + PROG_MAX - 1, 0 as u8)
+    kstate.set8(dst + R_LABEL + LABEL_MAX - 1, 0 as u8)
+    if kstate.get(state, slot_off(ziel) + R_MAGLEN) > MAGIC_MAX {
+        kstate.set(state, slot_off(ziel) + R_MAGLEN, MAGIC_MAX)
+    }
+    zaehler(state, kstate.FT_REGISTERED, 1)
+    return ziel
+}
+
+// Eine Zeile auf die serielle Leitung, damit die Abnahme etwas zu lesen
+// hat. Sie steht hier und nicht in `sys.fi`, weil die Tabelle hier liegt.
+fn say(state: u64) {
+    var s_h: [u8; 12] = "ftype: n=\0\0\0"
+    serial.puts((&s_h[0]) as u64)
+    serial.dec(count(state, kstate.FT_REGISTERED))
+    serial.nl()
+}

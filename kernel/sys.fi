@@ -53,6 +53,7 @@ import hv
 import guard
 import wm
 import fb
+import ftype
 
 import signal
 import time
@@ -80,6 +81,7 @@ export {
     SYS_OSUM_PTY, SYS_OSUM_TTYINFO, SYS_OSUM_SIGINFO,
     SYS_VM_CREATE, SYS_VM_RUN, SYS_VM_STAT, SYS_VM_KILL, SYS_VM_VALUE,
     SYS_OSUM_SETENV, SYS_OSUM_MOUNT,
+    SYS_OSUM_FTYPE, SYS_OSUM_FOPEN, SYS_OSUM_FLIST, SYS_OSUM_FREG,
     CAP_BASE, CAP_VERSION, CAP_READ, CAP_WRITE, CAP_CLOSE, CAP_DUP,
     CAP_INSPECT, CAP_TRANSFER, CAP_COUNT, CAP_MAXNR,
     SYS_SOCKET, SYS_CONNECT, SYS_ACCEPT, SYS_SENDTO, SYS_RECVFROM,
@@ -372,6 +374,23 @@ const SYS_OSUM_KILL: u64 = 1004
 const SYS_OSUM_SETENV: u64 = 1400
 const SYS_OSUM_MOUNT: u64 = 1401
 
+// ================================================= RUNDE K16: 1900..1999
+//
+// Der Zahlenraum dieser Runde. Vier Runden liefen an dem Tag gleichzeitig
+// und hatten sich in den 1000ern schon zweimal getroffen; deshalb ist er
+// vorher verteilt worden: K13 hat 1600..1699, K14 1700..1799, K15
+// 1800..1899, K16 1900..1999.
+//
+// Was die vier tun, steht in `kernel/ftype.fi`. Sie sind die SCHICHT
+// UNTER dem Doppelklick von Runde K15: die Tabelle "Dateiart -> womit
+// oeffnen" und das Starten. K15 ruft `fopen` und bekommt eine
+// Prozessnummer -- oder einen negativen Fehler, und dann hat nichts
+// gestartet.
+const SYS_OSUM_FTYPE: u64 = 1900 // (pfad, aus, len) -> Art oder -ENOEXEC
+const SYS_OSUM_FOPEN: u64 = 1901 // (pfad, argv, argc) -> pid
+const SYS_OSUM_FLIST: u64 = 1902 // (nr, aus, len) -> Art oder -ENOENT
+const SYS_OSUM_FREG: u64 = 1903 // (satz, len) -> Platz in der Tabelle
+
 // ------------------------------------------------------------ the frame
 
 // The sixteen words `isr.s` saved. Offsets from the pointer it hands over.
@@ -649,6 +668,19 @@ fn dispatch(number: u64, frame: u64, state: u64) -> u64 {
     }
     if number == SYS_OSUM_MOUNT {
         return do_mount(state, a0)
+    }
+    // RUNDE K16.
+    if number == SYS_OSUM_FTYPE {
+        return do_ftype(state, me, a0, a1, a2)
+    }
+    if number == SYS_OSUM_FOPEN {
+        return do_fopen(state, me, a0, a1, a2)
+    }
+    if number == SYS_OSUM_FLIST {
+        return do_flist(state, me, a0, a1, a2)
+    }
+    if number == SYS_OSUM_FREG {
+        return do_freg(state, me, a0, a1)
     }
     // ROUND K6.
     if number == SYS_CHDIR {
@@ -1850,7 +1882,13 @@ fn do_getdents(state: u64, me: u64, fd: u64, out: u64, size: u64) -> u64 {
 // That is the whole allocator: no free list, no coalescing -- `brk` is a
 // line and `mmap` is a bump. What sits on top of it is `malloc` in the
 // libc, and that is where a free list belongs.
-const BRK_BASE: u64 = 0x40020000
+// RUNDE K16: `brk` faengt hinter dem gewachsenen Stapel an
+// (`proc.ARGS_BASE` liegt jetzt bei 0x4007F000). Der Bereich dazwischen
+// ist von 851.968 auf 458.752 Oktette geschrumpft; was ihn nicht mehr
+// braucht, ist die grosse Arena weiter oben -- und was `brk` misst,
+// misst `tools/posix/run.sh` relativ zur eigenen Linie und nicht als
+// Adresse.
+const BRK_BASE: u64 = 0x40080000
 const MMAP_TOP: u64 = 0x400F0000
 const PAGE: u64 = 4096
 
@@ -1910,6 +1948,55 @@ fn do_brk(state: u64, me: u64, want: u64) -> u64 {
     return want
 }
 
+// ============================================ RUNDE K16: DIE GROSSE ARENA
+//
+// Sechs MiB zwischen `proc.BIG_FLOOR` und `proc.BIG_TOP`, in drei
+// 2-MiB-Kacheln des privaten Seitenverzeichnisses, die es vor dieser
+// Runde nicht gab. Sie werden angelegt, wenn jemand sie braucht
+// (`proc.pt_for`), und mit dem Prozess wieder freigegeben
+// (`proc.free_space`).
+//
+// WARUM NEBEN DER ALTEN HALDE UND NICHT STATT IHRER: die alte gibt
+// Adressen zurueck, die seit Runde K4 gemessen werden. Eine Runde, die
+// den Uebersetzer zum Laufen bringt und dabei drei Abschnitte der Abnahme
+// umschreibt, hat zwei Dinge getan und keines davon nachweisbar.
+//
+// DIE GEGENPROBE: `nobigmem` auf der Kernel-Befehlszeile schaltet sie ab.
+// Danach MUSS der Uebersetzer an genau dieser Stelle stehenbleiben -- und
+// wenn er es nicht tut, hat er sie nie gebraucht und diese Zeilen messen
+// nichts.
+fn big_bottom(state: u64, me: u64) -> u64 {
+    let b: u64 = sched.tget(state, me, sched.T_BIG)
+    if b == 0 {
+        return proc.BIG_TOP
+    }
+    return b
+}
+
+fn big_map(state: u64, me: u64, pages: u64, prot: u64) -> u64 {
+    if (kstate.get(state, kstate.MODE) & kstate.M_NOBIG) != 0 {
+        return neg(errno.E_NOMEM)
+    }
+    let top: u64 = big_bottom(state, me)
+    if pages * PAGE > top - proc.BIG_FLOOR {
+        return neg(errno.E_NOMEM)
+    }
+    let base: u64 = top - pages * PAGE
+    if base < proc.BIG_FLOOR {
+        return neg(errno.E_NOMEM)
+    }
+    var p: u64 = base
+    while p < top {
+        if proc.map_page(state, me, p, true, (prot & PROT_EXEC) != 0) == 0 {
+            return neg(errno.E_NOMEM)
+        }
+        kstate.add(state, kstate.MAPS, 1)
+        p = p + PAGE
+    }
+    sched.tset(state, me, sched.T_BIG, base)
+    return base
+}
+
 // Anonymous memory only: a mapping backed by a FILE needs the page cache
 // this system does not have, and pretending otherwise would be the kind of
 // half-truth that costs a day later. MAP_ANONYMOUS missing is -ENODEV, and
@@ -1935,11 +2022,19 @@ fn do_map(state: u64, me: u64, len: u64, prot: u64, flags: u64,
     let pages: u64 = page_up(len) / PAGE
     let top: u64 = map_bottom(state, me)
     if pages * PAGE > top {
-        return neg(errno.E_NOMEM)
+        return big_map(state, me, pages, prot)
     }
     let base: u64 = top - pages * PAGE
+    // RUNDE K16: WENN DIE ALTE HALDE NICHT MEHR REICHT, KOMMT DIE GROSSE.
+    //
+    // Die alte ist 851.968 Oktette zwischen `brk` und MMAP_TOP, und sie
+    // bleibt Oktett fuer Oktett, wo sie seit Runde K4 liegt -- was
+    // `tools/posix/run.sh` an Adressen misst, misst es weiter. Erst wenn
+    // sie voll ist, geht es in `proc.BIG_TOP` abwaerts weiter. Das ist
+    // additiv, und es ist der einzige Grund, warum ein Uebersetzer auf
+    // diesem System laufen kann.
     if base < page_up(brk_of(state, me)) + PAGE {
-        return neg(errno.E_NOMEM)
+        return big_map(state, me, pages, prot)
     }
     var p: u64 = base
     while p < top {
@@ -2027,16 +2122,16 @@ fn do_unmap(state: u64, me: u64, addr: u64, len: u64) -> u64 {
     if len == 0 {
         return neg(errno.E_INVAL)
     }
-    if addr < map_bottom(state, me) {
-        return neg(errno.E_INVAL)
-    }
-    if addr >= MMAP_TOP {
+    // RUNDE K16: zwei Fenster statt einem.
+    let in_alt: bool = addr >= map_bottom(state, me) && addr < MMAP_TOP
+    let in_gross: bool = addr >= big_bottom(state, me) && addr < proc.BIG_TOP
+    if !in_alt && !in_gross {
         return neg(errno.E_INVAL)
     }
     var p: u64 = addr
     let end: u64 = addr + page_up(len)
     while p < end {
-        if p < MMAP_TOP {
+        if p < MMAP_TOP || p < proc.BIG_TOP {
             proc.page_drop(state, me, p)
         }
         p = p + PAGE
@@ -2413,6 +2508,12 @@ fn do_fork(state: u64, me: u64, frame: u64) -> u64 {
     uio.adopt(state, me, child)
     sched.tset(state, child, sched.T_BRK, brk_of(state, me))
     sched.tset(state, child, sched.T_MMAP, map_bottom(state, me))
+    sched.tset(state, child, sched.T_BIG, sched.tget(state, me, sched.T_BIG))
+    // RUNDE K16: das Kind erbt den Boden seines Stapels. Ohne diese
+    // Zeile stuende dort null, und `proc.grow_stack` liesse den Stapel
+    // eines `fork`-Kindes nicht wachsen -- ein Fehler, der erst beim
+    // ersten tiefen Aufruf im Kind sichtbar wuerde.
+    sched.tset(state, child, sched.T_USTACK, sched.tget(state, me, sched.T_USTACK))
     // The context the child comes back on. `proc.resume_start` hands this
     // copy to `user_resume` in isr.s.
     let ctx: u64 = state + kstate.CTX_OFF + child * F_BYTES
@@ -2507,6 +2608,7 @@ fn do_execve(state: u64, me: u64, frame: u64, path: u64, argv: u64) -> u64 {
     sched.tset(state, me, sched.T_USTACK, ustack)
     sched.tset(state, me, sched.T_BRK, 0)
     sched.tset(state, me, sched.T_MMAP, 0)
+    sched.tset(state, me, sched.T_BIG, 0)
     // What ring 3 finds on the way out: a program at its entry point with
     // the argument block in rdi and nothing else left over from the
     // caller. Everything a process could have hidden in a register is gone
@@ -2693,6 +2795,197 @@ fn do_mount(state: u64, op: u64) -> u64 {
         return 0
     }
     return neg(errno.E_INVAL)
+}
+
+// ============================================================ Runde K16
+//
+// WOMIT MAN EINE DATEI OEFFNET -- die vier Aufrufe zu `kernel/ftype.fi`.
+//
+// Der Doppelklick selbst gehoert Runde K15. Was hier steht, ist die
+// Schicht darunter, und sie ist so geschnitten, dass K15 sie nur RUFEN
+// muss: eine Zeile fuer "was ist das", eine fuer "mach es auf".
+
+// Ein nullbeendeter Text im Kern, kopiert. Zurueck kommt, wie viele
+// Oktette einschliesslich der Null geschrieben wurden.
+fn kcopy_word(dst: u64, src: u64, max: u64) -> u64 {
+    var i: u64 = 0
+    while i < max {
+        let c: u64 = kstate.get8(src + i)
+        kstate.set8(dst + i, c as u8)
+        if c == 0 {
+            return i + 1
+        }
+        i = i + 1
+    }
+    kstate.set8(dst + max - 1, 0 as u8)
+    return max
+}
+
+// `ftype(pfad, aus, len)` -- was IST diese Datei? Zurueck kommt der Platz
+// in der Tabelle, und nach `aus` (hoechstens `len` Oktette) der ganze
+// Satz: Wirkung, magische Zahl, Endung, Programm, Bezeichnung. Wer nur
+// die Art wissen will, gibt `aus` als 0 an.
+fn do_ftype(state: u64, me: u64, path: u64, out: u64, len: u64) -> u64 {
+    let name: u64 = state + kstate.NAME_OFF
+    let n: u64 = fetch_path(state, me, path, name, MAX_NAME)
+    if errno.is_error(n) {
+        return n
+    }
+    if n == 0 {
+        return neg(errno.E_NOENT)
+    }
+    // Erst nachsehen, OB es sie gibt. Eine Datei, die nicht da ist, ist
+    // -ENOENT -- nicht "eine Art, die ich nicht kenne". Der Unterschied
+    // ist der zwischen "gibt es nicht" und "weiss nicht, womit".
+    if kstate.get(state, kstate.FS_READY) != 0 {
+        if fs.path(state, name) == 0 {
+            return neg(errno.E_NOENT)
+        }
+    }
+    let art: u64 = ftype.classify(state, name)
+    if art == ftype.T_NONE {
+        return neg(errno.E_NOEXEC)
+    }
+    if out != 0 {
+        var k: u64 = len
+        if k > kstate.FT_SLOT {
+            k = kstate.FT_SLOT
+        }
+        if !copy_out(state, me, out, ftype.record_for(state, art), k) {
+            return neg(errno.E_FAULT)
+        }
+    }
+    return art
+}
+
+// `flist(nr, aus, len)` -- die Tabelle durchgehen. Damit baut ein
+// Dateiverwalter ein Menue "Oeffnen mit", ohne eine einzige Endung selbst
+// zu kennen. Hinter dem letzten Eintrag: -ENOENT.
+fn do_flist(state: u64, me: u64, nr: u64, out: u64, len: u64) -> u64 {
+    if nr >= kstate.FT_SLOTS {
+        return neg(errno.E_NOENT)
+    }
+    if kstate.get(state, ftype.slot_off(nr) + ftype.R_USED) == 0 {
+        return neg(errno.E_NOENT)
+    }
+    if out != 0 {
+        var k: u64 = len
+        if k > kstate.FT_SLOT {
+            k = kstate.FT_SLOT
+        }
+        if !copy_out(state, me, out, ftype.table_at(state, nr), k) {
+            return neg(errno.E_FAULT)
+        }
+    }
+    return nr
+}
+
+// `freg(satz, len)` -- einen Eintrag setzen oder ersetzen. Ring 3 darf
+// das: die Tabelle ist eine Einstellung des Systems und kein Geheimnis.
+// Was der Kern NICHT glaubt, sind die Laengen -- `ftype.register_from`
+// setzt hinter jeden Text eine Null, egal was ankam.
+fn do_freg(state: u64, me: u64, satz: u64, len: u64) -> u64 {
+    if len != kstate.FT_SLOT {
+        return neg(errno.E_INVAL)
+    }
+    let buf: u64 = state + kstate.BLOCK_OFF
+    if !copy_in(state, me, buf, satz, len) {
+        return neg(errno.E_FAULT)
+    }
+    let i: u64 = ftype.register_from(state, buf)
+    if i >= kstate.FT_SLOTS {
+        return neg(errno.E_NOSPC)
+    }
+    return i
+}
+
+// `fopen(pfad, argv, argc)` -- MACH DIESE DATEI AUF.
+//
+// Genau das, was ein Doppelklick heisst, und der ganze Unterschied zu
+// `exec` ist die Zeile darueber: WAS gestartet wird, entscheidet die
+// Tabelle und nicht der Aufrufer.
+//
+//   * ein Programm  -> es selbst, mit den Argumenten des Aufrufers
+//   * eine `.fi`    -> `/bin/firun`, mit der Datei als erstem Argument
+//   * ein `#!`      -> es selbst; den Ausleger findet `elf.build`
+//   * sonst         -> -ENOEXEC, UND NICHTS IST GESTARTET
+//
+// Der letzte Punkt ist der wichtige: dieser Aufruf meldet keinen Erfolg,
+// wenn keiner da ist. Ein Doppelklick, der nichts tut und trotzdem 0
+// sagt, waere schlimmer als einer, der gar nichts tut.
+fn do_fopen(state: u64, me: u64, path: u64, argv: u64, argc: u64) -> u64 {
+    if kstate.get(state, kstate.FS_READY) == 0 {
+        return neg(errno.E_NOSYS)
+    }
+    if argc > proc.MAX_ARGS {
+        return neg(errno.E_2BIG)
+    }
+    let name: u64 = state + kstate.NAME_OFF
+    let n: u64 = fetch_path(state, me, path, name, MAX_NAME)
+    if errno.is_error(n) {
+        return n
+    }
+    if n == 0 {
+        return neg(errno.E_NOENT)
+    }
+    if fs.path(state, name) == 0 {
+        ftype.refuse(state)
+        return neg(errno.E_NOENT)
+    }
+    let art: u64 = ftype.classify(state, name)
+    if art == ftype.T_NONE {
+        ftype.refuse(state)
+        return neg(errno.E_NOEXEC)
+    }
+    let wirkung: u64 = ftype.action_of(state, art)
+    let abuf: u64 = state + kstate.EARG_OFF
+    var at: u64 = 0
+    var anz: u64 = 0
+    var start: u64 = name
+    if wirkung == ftype.A_EXEC {
+        at = at + kcopy_word(abuf + at, name, MAX_NAME + 1)
+        anz = 1
+    } else {
+        if wirkung != ftype.A_OPEN {
+            ftype.refuse(state)
+            return neg(errno.E_NOEXEC)
+        }
+        let prog: u64 = ftype.prog_of(state, art)
+        if prog == 0 {
+            ftype.refuse(state)
+            return neg(errno.E_NOEXEC)
+        }
+        start = prog
+        at = at + kcopy_word(abuf + at, prog, ftype.PROG_MAX)
+        at = at + kcopy_word(abuf + at, name, MAX_NAME + 1)
+        anz = 2
+    }
+    var k: u64 = 0
+    while k < argc {
+        if !proc.user_ok(state, me, argv + k * 8, 8) {
+            return neg(errno.E_FAULT)
+        }
+        let m: u64 = fetch_name(state, me,
+            user_word(state, me, argv + k * 8), abuf + at, MAX_NAME)
+        if errno.is_error(m) {
+            return m
+        }
+        at = at + m + 1
+        anz = anz + 1
+        k = k + 1
+    }
+    if anz > proc.MAX_ARGS {
+        return neg(errno.E_2BIG)
+    }
+    let t: u64 = elf.spawn(state, start, abuf, anz, 2)
+    if t == 0 {
+        let why: u64 = kstate.get(state, kstate.ELF_ERR)
+        elf.say_reason(why)
+        ftype.refuse(state)
+        return neg(elf.errno_of(why))
+    }
+    ftype.opened(state)
+    return sched.tget(state, t, sched.T_PID)
 }
 
 // ============================================================ round K6

@@ -106,10 +106,15 @@ export {
     // ---- Runde K10: Maus, Fensterserver, Schriften ----
     MOUSE_OFF, MOUSE_MAX, WM_OFF, WM_MAX, TTF_OFF, TTF_MAX,
     M_WM, M_NODIRTY, M_NOFOCUS, M_NOMOUSE, M_WMHOLD, M_WMSHELL, M_NOMPOLL, M_TTFDUMP,
+    M_NOBIG, M_NOSTACK,
     CPU_OFF, CPU_BYTES, MAX_CPUS, LOCK_OFF, LOCK_BYTES, LOCK_COUNT,
     SMP_OFF, SMP_LAPIC, SMP_COUNT, SMP_NOLOCK, SMP_MODE, SMP_MAX,
     TCPU_OFF, TCPU_BYTES,
-    get, set, add, get32, get16, get8, set8
+    get, set, add, get32, get16, get8, set8,
+    K16_OFF, K16_MAX, FT_TAB, FT_SCALARS, FT_HEAD, FT_SB, FT_LINE,
+    FT_REC, FT_ARGS, FT_IPATH, FT_SLOTS, FT_SLOT, FT_HEAD_MAX,
+    FT_CLASSIFIED, FT_BY_MAGIC, FT_BY_EXT, FT_OPENED, FT_SHEBANGS,
+    FT_REGISTERED, FT_REFUSED, STACKGROW
 }
 
 // ------------------------------------------------------------- scalars
@@ -509,6 +514,61 @@ const WM_MAX: u64 = 0x2000
 const TTF_OFF: u64 = 0x3F000
 const TTF_MAX: u64 = 4096
 
+// --------------------------------------- Runde K16: die Dateiarten
+//
+// DREI SEITEN, 0x49000..0x4C000, UND SIE GEHOEREN DIESER RUNDE ALLEIN.
+// Am Morgen des 26.08.2026 liefen vier Runden gleichzeitig, und drei
+// davon hatten dieselbe Seite genommen -- derselbe Fehler wie in K7, nur
+// dreifach. Der Vorrat ist deshalb vorher verteilt worden:
+//
+//     K13  0x41000..0x43000     K14  0x43000..0x46000
+//     K15  0x46000..0x49000     K16  0x49000..0x4C000   <- hier
+//
+// Was darin liegt:
+//
+//   FT_TAB     die Tabelle "Dateiart -> womit oeffnen", 32 Saetze zu 128
+//              Oktetten. EINE Tabelle, kein Sonderfall in irgendeinem
+//              Programm -- der Dateiverwalter von Runde K15 ruft sie ab,
+//              statt Endungen selbst zu kennen.
+//   FT_SCALARS die Zaehler, an denen die Abnahme misst.
+//   FT_HEAD    die ersten Oktette einer Datei, um die MAGISCHE ZAHL zu
+//              lesen. Der Kernel haelt nie einen Zeiger von Ring 3, also
+//              wird auch hier erst kopiert und dann gelesen.
+//   FT_LINE    die zerlegte `#!`-Zeile: Ausleger und ein Argument.
+//   FT_REC     ein Satz, wie ihn Ring 3 zu sehen bekommt.
+//   FT_ARGS    die Argumentliste, die beim Starten neu gebaut wird --
+//              beim Ausleger eines Skripts stehen vorne zwei Woerter mehr.
+const K16_OFF: u64 = 0x49000
+const K16_MAX: u64 = 0x3000
+
+const FT_TAB: u64 = 0x0000 // FT_SLOTS * FT_SLOT = 4096
+const FT_SCALARS: u64 = 0x1000
+const FT_HEAD: u64 = 0x1200 // FT_HEAD_MAX
+const FT_LINE: u64 = 0x1400 // 2 * 128
+const FT_SB: u64 = 0x1300 // die erste Zeile, wenn sie `#!` ist
+const FT_REC: u64 = 0x1600 // FT_SLOT
+const FT_ARGS: u64 = 0x2000 // 2 * IARGS_MAX, siehe kernel/elf.fi
+const FT_IPATH: u64 = 0x1700 // 2 * 128: der Pfad des Auslegers
+
+const FT_SLOTS: u64 = 32
+const FT_SLOT: u64 = 128
+const FT_HEAD_MAX: u64 = 256
+
+// Die Zaehler (Versatz ab K16_OFF + FT_SCALARS).
+const FT_CLASSIFIED: u64 = 0x00 // wie oft eine Datei eingeordnet wurde
+const FT_BY_MAGIC: u64 = 0x08 // davon am INHALT erkannt
+const FT_BY_EXT: u64 = 0x10 // davon an der ENDUNG erkannt
+const FT_OPENED: u64 = 0x18 // wie oft `fopen` etwas gestartet hat
+const FT_SHEBANGS: u64 = 0x20 // wie oft `execve` einen Ausleger fand
+const FT_REGISTERED: u64 = 0x28 // Eintraege in der Tabelle
+const FT_REFUSED: u64 = 0x30 // wie oft `fopen` abgelehnt hat
+
+// RUNDE K16: wie viele Stapelseiten bei Bedarf entstanden sind. Der
+// Zaehler liegt bei den uebrigen Skalaren des Kernels und nicht im
+// K16-Bereich, weil `proc.fi` ihn schreibt und `proc.fi` den K16-Bereich
+// sonst nicht kennt.
+const STACKGROW: u64 = 1024 // RUNDE K16: naechster freier Skalar
+
 // Runde K12 hat kdata von 0x40000 auf 0x50000 wachsen lassen; dieselbe
 // Zahl steht in kernel/boot.s und tools/hv/run.sh vergleicht beide.
 const KDATA_SIZE: u64 = 0x50000
@@ -565,6 +625,20 @@ const M_WMSHELL: u64 = 268435456
 const M_NOMPOLL: u64 = 536870912
 // `ttfdump` -- einige Glyphen als Text auf die serielle Leitung.
 const M_TTFDUMP: u64 = 1073741824
+
+// RUNDE K16. `nobigmem` -- die GROSSE Arena abschalten (`sys.big_map`).
+// Das ist die Gegenprobe zu ihr: mit dem Wort MUSS der Uebersetzer an
+// dem Punkt stehenbleiben, an dem er mehr Speicher haben will als die
+// alte Halde hergibt. Bleibt er es nicht, hat er die Arena nie gebraucht
+// und sie beweist nichts.
+const M_NOBIG: u64 = 2147483648
+
+// RUNDE K16. `nostackgrow` -- der Stapel waechst NICHT. Die Gegenprobe zu
+// `proc.grow_stack`: damit muss der Uebersetzer an derselben Stelle
+// sterben wie vor dieser Runde, und der Zaehler STACKGROW bleibt bei
+// null. Ein Stapel, der auch ohne die Eigenschaft reicht, beweist
+// nichts.
+const M_NOSTACK: u64 = 4294967296
 
 // --------------------------------------------------------- the accesses
 
