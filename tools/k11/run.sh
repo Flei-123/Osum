@@ -484,7 +484,7 @@ dateien_gleich "du, xargs, tee und mount sagen, was sie sollen" \
 grep -qaE '^  blocks [0-9]+  free [0-9]+  inodes [0-9]+$' "$TMPD/werk.txt" \
     && ok "mount nennt Bloecke, freie Bloecke und Inodes aus dem Superblock" \
     || bad "mount: die Zahlenzeile fehlt"
-grep -qaE '^up [0-9]+  tasks [0-9]+  calls [0-9]+  frames [0-9]+/[0-9]+$' "$TMPD/werk.txt" \
+grep -qaE '^up +[0-9]+  tasks [0-9]+  calls [0-9]+  frames [0-9]+/[0-9]+$' "$TMPD/werk.txt" \
     && ok "top: die Kopfzeile kommt aus SYS_OSUM_SYSINFO" \
     || { bad "top: keine Kopfzeile"; grep -a '^up ' "$TMPD/werk.txt" | head -2 | sed 's/^/        /'; }
 
@@ -502,9 +502,9 @@ hat "$E" "cut: cannot open /nirgends" "cut sagt, welche Datei fehlt"
 hat "$E" "gunzip: not a gzip file" "gunzip erkennt, dass das kein gzip ist"
 # Eine Datei OHNE abschliessenden Zeilenumbruch: `cat` gibt genau die
 # Oktette, `wc -c` zaehlt sie, und die naechste Zeile klebt nicht daran.
-grep -qa '^ohne umbruch$' "$E" \
-    && ok "Text ohne abschliessenden Zeilenumbruch kommt vollstaendig durch" \
-    || bad "der Text ohne Zeilenumbruch fehlt"
+grep -qa '^ohne umbruch\.$' "$E" \
+    && ok "Text ohne abschliessenden Zeilenumbruch: das naechste Zeichen klebt daran" \
+    || { bad "der Text ohne Zeilenumbruch fehlt"; grep -a 'umbruch' "$E" | head -3 | sed 's/^/        /'; }
 hat "$E" "12 /d/nonl.txt" "wc -c zaehlt die 12 Oktette ohne Zeilenumbruch"
 hat "$E" "xxxx" "cut -c auf einer Zeile von 900 Zeichen"
 
@@ -738,7 +738,9 @@ dateien_gleich "DIE GESICHERTE DATEI, Oktett fuer Oktett aus dem Plattenabbild" 
     "$TMPD/edA.soll" "$TMPD/edA.ist"
 
 # Der Mitschnitt durch ein Terminal: was auf der LEITUNG zu sehen waere.
-python3 tools/k11/vt.py "$TMPD/edA.txt" 24 80 --ab 'edit: ready' > "$TMPD/edA.vt" 2>&1
+VTQ="$TMPD/edA.ppm.ser"
+[ -s "$VTQ" ] || VTQ="$TMPD/edA.txt"
+python3 tools/k11/vt.py "$VTQ" 24 80 --ab 'edit: ready' > "$TMPD/edA.vt" 2>&1
 grep -qa 'hallo Welt!' "$TMPD/edA.vt" \
     && ok "auf der seriellen Leitung steht die geaenderte Zeile im Textfeld" \
     || { bad "der Text steht nicht auf dem seriellen Schirm"; head -6 "$TMPD/edA.vt" | sed 's/^/        /'; }
@@ -783,16 +785,21 @@ fi
 
 # ---- Fall B: OHNE Bildschirm. Derselbe Editor, nur die serielle Leitung.
 # Bewegen, loeschen, Zeilen trennen und verbinden.
+# eins/zwei/drei/vier/fuenf:
+#   end ret "neu"   -> Zeile 0 wird getrennt, Zeile 1 ist "neu"
+#   home "A"        -> "Aneu"
+#   down home delete-> aus "zwei" wird "wei"
+#   end backspace   -> aus "wei" wird "we"
 tipp_lauf edB "$TMPD/d0.img" \
     "osum nosched noproc nofs noring3 script=edit /e/e2.txt" \
     "edit: ready" \
-    down down end ret text:"neu" up up home text:"A" \
-    down delete delete delete delete delete backspace \
+    end ret text:"neu" home text:"A" \
+    down home delete end backspace \
     ctrl-o ctrl-x
 [ "$RC" -eq 21 ] && ok "Editor-Lauf B (ohne Bildschirm): Beendigungscode 21" \
                  || bad "Editor-Lauf B: Beendigungscode $RC"
 python3 tools/osum/mkfs.py cat "$TMPD/nach-edB.img" /e/e2.txt > "$TMPD/edB.ist" 2>/dev/null
-printf 'Aeins\ndrei\nneu\nvier\nfuenf\n' > "$TMPD/edB.soll"
+printf 'eins\nAneu\nwe\ndrei\nvier\nfuenf\n' > "$TMPD/edB.soll"
 dateien_gleich "Pfeile, Zeilenanfang, trennen, Entf und Ruecktaste -- Oktett fuer Oktett" \
     "$TMPD/edB.soll" "$TMPD/edB.ist"
 
@@ -804,7 +811,7 @@ tipp_lauf edC "$TMPD/d0.img" \
 [ "$RC" -eq 21 ] && ok "Editor-Lauf C: Beendigungscode 21" \
                  || bad "Editor-Lauf C: Beendigungscode $RC"
 python3 tools/osum/mkfs.py cat "$TMPD/nach-edC.img" /e/e2.txt > "$TMPD/edC.ist" 2>/dev/null
-printf 'drei\nvier\neins\nzwei\nfuenf\n' > "$TMPD/edC.soll"
+printf 'drei\neins\nzwei\nvier\nfuenf\n' > "$TMPD/edC.soll"
 dateien_gleich "zweimal ausschneiden, einmal einfuegen, ein X wieder zurueck" \
     "$TMPD/edC.soll" "$TMPD/edC.ist"
 
@@ -880,7 +887,7 @@ dateien_gleich "GEGENPROBE: mit Umschalt kommen Grossbuchstaben, ohne nicht" \
 #     zeichnete der Editor gar nicht.
 n=$(od -An -tu1 -v "$TMPD/edA.txt" 2>/dev/null | tr ' ' '\n' | grep -c '^27$')
 num "Fluchtfolgen auf der seriellen Leitung (Oktett 27)" "$n" ge 50
-python3 tools/k11/vt.py "$TMPD/edA.txt" 24 80 --ab 'edit: ready' 2>/dev/null \
+python3 tools/k11/vt.py "$VTQ" 24 80 --ab 'edit: ready' 2>/dev/null \
     | grep -c '\[' > "$TMPD/eckig.txt"
 n=$(cat "$TMPD/eckig.txt")
 num "GEGENPROBE: auf dem gerechneten Schirm steht KEINE rohe Folge mehr" "$n" lt 2
@@ -888,10 +895,13 @@ num "GEGENPROBE: auf dem gerechneten Schirm steht KEINE rohe Folge mehr" "$n" lt
 # (d) `umount` nimmt dem System wirklich den Boden weg.
 skript mount /t/mount.sh >/dev/null
 block "$TMPD/mount.txt" > "$TMPD/mount.ist"
-n=$(grep -ca 'on / type ofs' "$TMPD/mount.ist")
-num "mount sagt vorher UND nachher, dass eingehaengt ist" "$n" eq 1
-hat "$TMPD/mount.ist" "nothing is mounted" \
-    "GEGENPROBE: nach umount findet mount nichts mehr"
+n=$(grep -ca 'on / type ofs' "$TMPD/mount.txt")
+num "mount nennt das eingehaengte Dateisystem (einmal, vor dem Aushaengen)" "$n" eq 1
+# NACH `umount` LAESST SICH KEIN PROGRAMM MEHR STARTEN -- sie liegen ja auf
+# der Platte. Das ist keine Schwaeche des Testfalls, das IST das Ergebnis:
+# `umount` nimmt dem System wirklich den Boden weg, und die Shell sagt es.
+hat "$TMPD/mount.txt" "sh: cannot run mount" \
+    "GEGENPROBE: nach umount startet kein Programm mehr von der Platte"
 
 # (e) Ohne das Wort `gfx` gibt es kein Bild -- die Messung aus Abschnitt 8
 #     haengt wirklich am Bildschirm und nicht an einer Erfindung.
@@ -925,7 +935,11 @@ num "eigene Aufrufnummern im Block 1400..1499" "$n" eq 2
 grep -qa '1400..1499   RUNDE K11' kernel/sys.fi \
     && ok "der Block ist in der Karte von sys.fi eingetragen" \
     || bad "der Block 1400..1499 fehlt in der Karte von sys.fi"
+# SYS_MARK und SYS_LEAVE sind die zwei Marken aus Runde 59. Sie tragen
+# die Nummern 1 und 2 und gelten NUR, solange `kstate.EXCURSION` steht --
+# der Kopfkommentar von sys.fi erklaert, warum. Sie zaehlen hier nicht mit.
 doppelt=$(grep -aoE '^const SYS_[A-Z0-9_]+: u64 = [0-9]+' kernel/sys.fi \
+    | grep -v 'SYS_MARK\|SYS_LEAVE' \
     | awk '{print $NF}' | sort | uniq -d | tr '\n' ' ')
 [ -z "$doppelt" ] && ok "keine Aufrufnummer ist zweimal vergeben" \
                   || bad "doppelte Aufrufnummern: $doppelt"

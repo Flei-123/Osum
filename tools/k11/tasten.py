@@ -116,6 +116,16 @@ def main():
             # Erst zur Ruhe kommen lassen: ein Foto mitten im Neuzeichnen
             # zeigt einen halben Schirm, und der verliert jeden Vergleich.
             time.sleep(1.2)
+            # DER MITSCHNITT WIRD IM SELBEN AUGENBLICK FESTGEHALTEN.
+            # Ohne das misst man spaeter den Schirm, den der Editor beim
+            # VERLASSEN hinterlassen hat, und nicht den, der auf dem Foto
+            # steht -- und dann vergleicht man zwei verschiedene
+            # Zeitpunkte miteinander.
+            try:
+                with open(warte, 'rb') as f:
+                    open(ziel + '.ser', 'wb').write(f.read())
+            except OSError:
+                pass
             s.sendall(("screendump %s\n" % ziel).encode())
             letzte = -1
             ruhig = 0
