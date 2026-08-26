@@ -75,6 +75,7 @@ export {
     SYS_TIME, SYS_FUTEX, SYS_GETTID, SYS_CLOCK_GETTIME, SYS_CLOCK_GETRES,
     SYS_CLOCK_NANOSLEEP, SYS_TGKILL, SYS_GETRANDOM,
     SYS_OSUM_PTY, SYS_OSUM_TTYINFO, SYS_OSUM_SIGINFO,
+    SYS_OSUM_SETENV, SYS_OSUM_MOUNT,
     CAP_BASE, CAP_VERSION, CAP_READ, CAP_WRITE, CAP_CLOSE, CAP_DUP,
     CAP_INSPECT, CAP_TRANSFER, CAP_COUNT, CAP_MAXNR,
     SYS_SOCKET, SYS_CONNECT, SYS_ACCEPT, SYS_SENDTO, SYS_RECVFROM,
@@ -106,6 +107,14 @@ export {
 //         1100..1199   RUNDE K9 -- Signale, Terminals, Zeit, Zufall
 //         1200..1299   Runde K7 -- Bildschirm und Rahmenpuffer
 //         1300..1399   Runde K8 -- Netz, soweit es ueber Sockets hinausgeht
+//         1400..1499   RUNDE K11 -- Umgebung und Einhaengen
+//
+// ZUR VORGABE "ab Nummer 120 aufwaerts" fuer Runde K11: auf DIESER Karte
+// gelesen ist das der naechste freie EIGENE Hunderterblock, also 1400.
+// Die 120 selbst ist Linux' `setresgid` und 121 `getpgid` -- letztere hat
+// Runde K9 belegt. Eine eigene Bedeutung fuer eine Nummer, die Linux
+// vergeben hat, waere genau die Uebersetzungstabelle, die Regel 1 oben
+// vermeidet.
 //         2000..2099   die native ABI aus OrientOS (kernel/cap.fi)
 //
 // WELCHE LINUX-NUMMERN RUNDE K9 BELEGT, damit K7 und K8 sie nicht noch
@@ -293,6 +302,20 @@ const CAP_MAXNR: u64 = 2007
 const SYS_OSUM_SYSINFO: u64 = 1002
 const SYS_OSUM_PSTAT: u64 = 1003
 const SYS_OSUM_KILL: u64 = 1004
+
+// ---------------------------------------------------------- Runde K11
+//
+// `setenv(buf, len)` legt den Umgebungsblock fest: `len` Oktette, darin
+// `len` Zeichenketten der Form NAME=wert, jede mit einer Null dahinter.
+// Jedes Programm, das danach gestartet wird, findet ihn auf seiner
+// Argumentseite (`kernel/elf.fi`, `write_env`).
+//
+// `mount(op, 0, 0)`: 0 fragt nach (1 = eingehaengt), 1 haengt ein,
+// 2 haengt aus. Mehr gibt es nicht zu sagen -- dieses System hat EIN
+// Dateisystem auf EINER Platte, und ein `mount` mit Geraetenamen und
+// Typen waere eine Behauptung ueber etwas, das es nicht gibt.
+const SYS_OSUM_SETENV: u64 = 1400
+const SYS_OSUM_MOUNT: u64 = 1401
 
 // ------------------------------------------------------------ the frame
 
@@ -565,6 +588,12 @@ fn dispatch(number: u64, frame: u64, state: u64) -> u64 {
     }
     if number == SYS_OSUM_EXEC {
         return do_exec(state, me, a0, a1, a2)
+    }
+    if number == SYS_OSUM_SETENV {
+        return do_setenv(state, me, a0, a1)
+    }
+    if number == SYS_OSUM_MOUNT {
+        return do_mount(state, a0)
     }
     // ROUND K6.
     if number == SYS_CHDIR {
@@ -2539,6 +2568,54 @@ fn do_exec(state: u64, me: u64, path: u64, argv: u64, argc: u64) -> u64 {
         return neg(elf.errno_of(why))
     }
     return sched.tget(state, t, sched.T_PID)
+}
+
+// ============================================================ Runde K11
+
+// Der Umgebungsblock. Er wird in den Kernel KOPIERT, wie alles andere
+// auch -- ein Zeiger von Ring 3 wird nie gehalten (Regel 3 ganz oben).
+fn do_setenv(state: u64, me: u64, buf: u64, len: u64) -> u64 {
+    if len > kstate.ENV_MAX {
+        return neg(errno.E_2BIG)
+    }
+    if len != 0 && !proc.user_ok(state, me, buf, len) {
+        return neg(errno.E_FAULT)
+    }
+    let dst: u64 = state + kstate.K11_OFF + kstate.ENV_BUF
+    var i: u64 = 0
+    var n: u64 = 0
+    while i < len {
+        let c: u64 = peek(state, me, buf + i)
+        kstate.set8(dst + i, c as u8)
+        if c == 0 {
+            n = n + 1
+        }
+        i = i + 1
+    }
+    kstate.set(state, kstate.K11_OFF + kstate.ENV_N, n)
+    kstate.set(state, kstate.K11_OFF + kstate.ENV_LEN, len)
+    return n
+}
+
+// Ein- und Aushaengen. Ausgehaengt heisst: FS_READY ist null, und jeder
+// Weg ins Dateisystem antwortet mit dem Fehler, den er dafuer schon
+// hatte. Das ist keine Attrappe -- danach findet `ls /` wirklich nichts
+// mehr, und `mount` bringt es wirklich zurueck.
+fn do_mount(state: u64, op: u64) -> u64 {
+    if op == 0 {
+        return kstate.get(state, kstate.FS_READY)
+    }
+    if op == 1 {
+        if fs.mount(state) {
+            return 1
+        }
+        return neg(errno.E_NODEV)
+    }
+    if op == 2 {
+        kstate.set(state, kstate.FS_READY, 0)
+        return 0
+    }
+    return neg(errno.E_INVAL)
 }
 
 // ============================================================ round K6
