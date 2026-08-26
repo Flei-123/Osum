@@ -1,0 +1,392 @@
+// kernel/guard.fi -- die zwei Bits, mit denen der Prozessor den Kernel
+// vor dem Userland schuetzt.
+//
+// HERKUNFT. Dieses Modul ist die Portierung von OrientOS'
+// `kernel/src/arch/x86_64/user.rs` (Rust) nach Firn -- der letzte
+// Abschnitt daraus, den Osum noch nicht hatte. Bis zu dieser Runde stand
+// in KERNELWECHSEL.md § 4.1: *"Osum setzt SMEP/SMAP nicht"*, und das war
+// richtig: `grep SMEP kernel/` war leer. Osum hatte W^X und NX, aber
+// nicht diese beiden.
+//
+// WAS DIE BEIDEN BITS TUN, und warum NX sie nicht ersetzt:
+//
+//   SMEP (CR4 Bit 20, "Supervisor Mode Execution Prevention"). Ring 0
+//     darf keinen Befehl mehr aus einer Seite holen, deren Benutzerbit
+//     gesetzt ist. Das ist die Abwehr gegen die aelteste
+//     Rechteausweitung ueberhaupt: ein Kernelzeiger wird verbogen, zeigt
+//     auf Code, den das unprivilegierte Programm selbst geschrieben hat,
+//     und dieser Code laeuft dann in Ring 0. NX hilft dagegen nicht --
+//     die Seite des Programms ist ja ABSICHTLICH ausfuehrbar, nur eben
+//     fuer Ring 3.
+//
+//   SMAP (CR4 Bit 21, "Supervisor Mode Access Prevention"). Ring 0 darf
+//     unprivilegierte Daten nur noch in einem ausdruecklich geoeffneten
+//     FENSTER lesen und schreiben (`stac` auf, `clac` zu; das Fenster ist
+//     das AC-Bit in den Flags). Damit wird aus "der Kernel hat aus
+//     Versehen einen Nutzerzeiger dereferenziert" ein sofortiger,
+//     lokalisierbarer #PF statt eines stillen Datenlecks.
+//
+// WO DAS FENSTER STEHT. Genau vier Stellen in diesem Kernel greifen auf
+// Speicher zu, den Ring 3 sehen darf: `sys.peek`, `sys.poke`,
+// `sys.copy_in`, `sys.copy_out`. Sie gehen alle ueber `proc.translate`
+// und die Identitaetsabbildung, und sie sind die einzigen. Alles andere
+// -- der Kernelstapel, die Datenregion, die Rahmenverwaltung -- liegt
+// hinter Seiten ohne Benutzerbit und braucht kein Fenster.
+//
+// WARUM DAS FENSTER GEZAEHLT WIRD (`kstate.SMAP_WINDOWS`): eine Zusage
+// "SMAP ist an" waere wertlos, solange niemand nachweist, dass der
+// Kernel das Fenster ueberhaupt benutzt. Ein Kernel, der Ring-3-Speicher
+// nie anfasst, haette dieselbe Zusage und koennte nichts.
+//
+// DIE GEGENPROBEN, und ohne sie waere das hier eine Behauptung:
+//
+//   `smapraw`  Der Kernel liest EINE Zelle Ring-3-Speicher OHNE das
+//              Fenster. Mit SMAP muss das ein #PF sein (Beendigungscode
+//              63); ohne SMAP darf es keiner sein.
+//   `smepraw`  Der Kernel RUFT eine Seite mit Benutzerbit auf. Mit SMEP
+//              muss das ein #PF sein; ohne SMEP laeuft es durch.
+//   `nosmep` / `nosmap`  schalten das jeweilige Bit ab. Dieselbe
+//              Gegenprobe muss dann NICHT mehr anschlagen -- damit ist
+//              belegt, dass der Fehler wirklich von diesem Bit kommt und
+//              nicht von irgendetwas anderem an derselben Adresse.
+//
+// CPUID. Beide Bits stehen in Blatt 7, Unterblatt 0, im EBX -- SMEP in
+// Bit 7, SMAP in Bit 20. EBX ist das eine Register, das `asm` in dieser
+// Sprache nicht herausgibt (es traegt den Rahmen); retten und
+// zurueckholen ist der Weg, den `rand.has_rdseed` schon geht.
+//
+// MEHRERE PROZESSOREN. CR4 ist PRO KERN. Ein zweiter Prozessor, der
+// hochkommt, hat die Bits nicht -- er faengt bei dem CR4 an, das sein
+// Trampolin gesetzt hat. `apply_here` zieht sie deshalb in `smp.ap_main`
+// nach; ein Kernel, der nur auf dem Startprozessor geschuetzt ist, ist
+// nicht geschuetzt.
+//
+// ARITHMETIK. Hier wird nur mit Bits gearbeitet (`|`, `&`, `<<`) und mit
+// einem Zaehler, der nicht ueberlaufen kann; die gepruefte Arithmetik der
+// Runde 72 kommt nicht ins Spiel.
+
+import kstate
+import serial
+import mem
+import user
+
+export {
+    parse, apply, apply_here, stac, clac,
+    smep_on, smap_on, windows, report, report_aps, aps, want, cr4,
+    M_NOSMEP, M_NOSMAP, M_RAWREAD, M_RAWEXEC,
+    raw_read, raw_exec
+}
+
+// ------------------------------------------------------------ die Bits
+
+const CR4_SMEP: u64 = 0x100000 // Bit 20
+const CR4_SMAP: u64 = 0x200000 // Bit 21
+
+// CPUID Blatt 7, EBX
+const F7_SMEP: u64 = 0x80 // Bit 7
+const F7_SMAP: u64 = 0x100000 // Bit 20
+
+// ------------------------------------------- Woerter der Kommandozeile
+
+const M_NOSMEP: u64 = 1
+const M_NOSMAP: u64 = 2
+const M_RAWREAD: u64 = 4
+const M_RAWEXEC: u64 = 8
+
+fn parse(state: u64, cmd: u64) {
+    var w_nosmep: [u8; 7] = "nosmep\0"
+    var w_nosmap: [u8; 7] = "nosmap\0"
+    var w_rawr: [u8; 8] = "smapraw\0"
+    var w_rawx: [u8; 8] = "smepraw\0"
+    var m: u64 = 0
+    if cmd != 0 {
+        if find(cmd, (&w_nosmep[0]) as u64, 6) != 0 {
+            m = m | M_NOSMEP
+        }
+        if find(cmd, (&w_nosmap[0]) as u64, 6) != 0 {
+            m = m | M_NOSMAP
+        }
+        if find(cmd, (&w_rawr[0]) as u64, 7) != 0 {
+            m = m | M_RAWREAD
+        }
+        if find(cmd, (&w_rawx[0]) as u64, 7) != 0 {
+            m = m | M_RAWEXEC
+        }
+    }
+    kstate.set(state, kstate.GUARD_MODE, m)
+    kstate.set(state, kstate.SMEP_OK, 0)
+    kstate.set(state, kstate.SMAP_OK, 0)
+    kstate.set(state, kstate.SMAP_WINDOWS, 0)
+}
+
+fn want(state: u64, bit: u64) -> bool {
+    return (kstate.get(state, kstate.GUARD_MODE) & bit) != 0
+}
+
+// ------------------------------------------------------- der Prozessor
+
+// Blatt 7, Unterblatt 0, EBX. `cpuid` schreibt alle vier Register; rbx
+// wird ueber rax herausgereicht, weil `asm` es nicht als Ausgabe annimmt.
+fn leaf7_ebx() -> u64 {
+    var b: u64 = 0
+    asm("push rbx\nmov eax, 7\nxor ecx, ecx\ncpuid\nmov rax, rbx\npop rbx",
+        out("rax") & b, clobber("rcx"), clobber("rdx"))
+    return b
+}
+
+fn cpu_has_smep() -> bool {
+    return (leaf7_ebx() & F7_SMEP) != 0
+}
+
+fn cpu_has_smap() -> bool {
+    return (leaf7_ebx() & F7_SMAP) != 0
+}
+
+fn cr4() -> u64 {
+    return asm("mov rax, cr4", out("rax"))
+}
+
+fn cr4_set(v: u64) {
+    asm("mov cr4, rax", in("rax") v)
+}
+
+// --------------------------------------------------------- einschalten
+
+// Auf DEM Prozessor, der gerade laeuft, und zwar nur, wenn CPUID das Bit
+// meldet UND die Kommandozeile es nicht abbestellt hat. Ein Bit blind zu
+// setzen waere auf einer aelteren Maschine ein #GP beim `mov cr4`.
+fn apply(state: u64) {
+    var v: u64 = cr4()
+    var smep: u64 = 0
+    var smap: u64 = 0
+    if !want(state, M_NOSMEP) {
+        if cpu_has_smep() {
+            v = v | CR4_SMEP
+            smep = 1
+        }
+    }
+    if !want(state, M_NOSMAP) {
+        if cpu_has_smap() {
+            v = v | CR4_SMAP
+            smap = 1
+        }
+    }
+    cr4_set(v)
+    kstate.set(state, kstate.SMEP_OK, smep)
+    kstate.set(state, kstate.SMAP_OK, smap)
+}
+
+// Jeder weitere Prozessor. Er fragt CPUID nicht noch einmal -- was der
+// Startprozessor entschieden hat, gilt fuer die Maschine.
+fn apply_here(state: u64) {
+    var v: u64 = cr4()
+    var soll: u64 = 0
+    if kstate.get(state, kstate.SMEP_OK) != 0 {
+        v = v | CR4_SMEP
+        soll = soll | CR4_SMEP
+    }
+    if kstate.get(state, kstate.SMAP_OK) != 0 {
+        v = v | CR4_SMAP
+        soll = soll | CR4_SMAP
+    }
+    cr4_set(v)
+    // ZURUECKGELESEN, nicht angenommen: gezaehlt wird nur der Kern, der
+    // die Bits danach WIRKLICH in seinem CR4 stehen hat. Ein `mov cr4`,
+    // das nichts bewirkt haette, faellt hier auf. Der Zaehler ist
+    // atomar -- vier Kerne zaehlen gleichzeitig.
+    if (cr4() & soll) == soll {
+        kstate.add(state, kstate.GUARD_APS, 1)
+    }
+}
+
+fn smep_on(state: u64) -> bool {
+    return kstate.get(state, kstate.SMEP_OK) != 0
+}
+
+fn smap_on(state: u64) -> bool {
+    return kstate.get(state, kstate.SMAP_OK) != 0
+}
+
+fn windows(state: u64) -> u64 {
+    return kstate.get(state, kstate.SMAP_WINDOWS)
+}
+
+// ---------------------------------------------------------- das Fenster
+
+// `stac` und `clac` sind ohne CR4.SMAP ein ungueltiger Befehl (#UD im
+// Kernel), deshalb steht die Abfrage davor und nicht daneben.
+fn stac(state: u64) {
+    if kstate.get(state, kstate.SMAP_OK) != 0 {
+        asm("stac")
+        kstate.set(state, kstate.SMAP_WINDOWS,
+            kstate.get(state, kstate.SMAP_WINDOWS) + 1)
+    }
+}
+
+fn clac(state: u64) {
+    if kstate.get(state, kstate.SMAP_OK) != 0 {
+        asm("clac")
+    }
+}
+
+// -------------------------------------------------------- die Gegenproben
+//
+// Beide bauen sich ihren Gegenstand SELBST: ein Rahmen aus dem
+// Rahmenverwalter, beschrieben, solange er noch dem Kernel allein
+// gehoert, und erst danach mit dem Benutzerbit versehen. Damit haengt der
+// Nachweis an nichts, was eine andere Runde gerade auch benutzt -- und
+// die Reihenfolge (erst schreiben, dann oeffnen) ist kein Zufall: mit
+// eingeschaltetem SMAP koennte der Kernel die Zelle hinterher gar nicht
+// mehr beschreiben.
+
+// Eine Seite, die Ring 3 sehen darf, mit `fuellung` im ersten Oktett.
+// Gibt ihre Adresse zurueck, oder 0.
+fn open_page(state: u64, fuellung: u64) -> u64 {
+    let f: u64 = mem.frame_alloc(state)
+    if f == 0 {
+        return 0
+    }
+    kstate.set8(f, fuellung as u8)
+    let t: u64 = mem.frame_alloc(state)
+    if t == 0 {
+        return 0
+    }
+    if !user.map_user_pt(state, f, true, t) {
+        return 0
+    }
+    return f
+}
+
+// EIN Oktett aus einer Seite mit Benutzerbit, OHNE Fenster. Mit SMAP ist
+// das ein #PF und der Lauf endet im Trap-Melder (Beendigungscode 63);
+// ohne SMAP kommt die Funktion zurueck und meldet das Oktett, das sie
+// gelesen hat. Genau dieser Unterschied ist der Nachweis -- und deshalb
+// steht die Fuellung 0x5A hier: eine 0 koennte auch ein Leseloch sein.
+fn raw_read(state: u64) {
+    var s_try: [u8; 18] = "smap: raw read @ \0"
+    var s_got: [u8; 7] = "  got=\0"
+    var s_no: [u8; 24] = "smap: raw read no page\0\0"
+    if !want(state, M_RAWREAD) {
+        return
+    }
+    let a: u64 = open_page(state, 0x5A)
+    if a == 0 {
+        serial.puts((&s_no[0]) as u64)
+        serial.nl()
+        return
+    }
+    serial.puts((&s_try[0]) as u64)
+    serial.hex(a)
+    serial.nl()
+    // Ab hier darf der naechste Zugriff nicht mehr zurueckkommen, wenn
+    // SMAP an ist.
+    let v: u64 = kstate.get8(a)
+    serial.puts((&s_got[0]) as u64)
+    serial.hex(v)
+    serial.nl()
+}
+
+// Ein AUFRUF in eine Seite mit Benutzerbit, aus Ring 0. Mit SMEP ist das
+// ein #PF mit gesetztem Instruktionsabruf-Bit; ohne SMEP wird wirklich
+// ausgefuehrt, was dort steht. Was dort steht, ist ein einziges `ret`
+// (0xC3), das dieser Kernel selbst hingeschrieben hat -- damit ist der
+// Rueckweg definiert und die Gegenprobe ohne SMEP harmlos.
+fn raw_exec(state: u64) {
+    var s_try: [u8; 18] = "smep: raw call @ \0"
+    var s_back: [u8; 21] = "smep: came back (!)\0\0"
+    var s_no: [u8; 24] = "smep: raw call no page\0\0"
+    if !want(state, M_RAWEXEC) {
+        return
+    }
+    let a: u64 = open_page(state, 0xC3)
+    if a == 0 {
+        serial.puts((&s_no[0]) as u64)
+        serial.nl()
+        return
+    }
+    serial.puts((&s_try[0]) as u64)
+    serial.hex(a)
+    serial.nl()
+    asm("call rax", in("rax") a, clobber("memory"))
+    serial.puts((&s_back[0]) as u64)
+    serial.nl()
+}
+
+// ------------------------------------------------------------- melden
+
+fn report(state: u64) {
+    var s_a: [u8; 12] = "guard: cr4=\0"
+    var s_b: [u8; 8] = "  smep=\0"
+    var s_c: [u8; 8] = "  smap=\0"
+    var s_d: [u8; 8] = "  cpu=\0\0"
+    var s_e: [u8; 2] = "/\0"
+    serial.puts((&s_a[0]) as u64)
+    serial.hex(cr4())
+    serial.puts((&s_b[0]) as u64)
+    serial.dec(kstate.get(state, kstate.SMEP_OK))
+    serial.puts((&s_c[0]) as u64)
+    serial.dec(kstate.get(state, kstate.SMAP_OK))
+    serial.puts((&s_d[0]) as u64)
+    serial.dec(yesno(cpu_has_smep()))
+    serial.puts((&s_e[0]) as u64)
+    serial.dec(yesno(cpu_has_smap()))
+    serial.nl()
+}
+
+// Nach `smp.stage`: wie viele weitere Prozessoren die Bits wirklich
+// tragen. CR4 ist pro Kern, und ein Kernel, der nur auf einem von vier
+// geschuetzt ist, ist nicht geschuetzt.
+fn report_aps(state: u64) {
+    var s_a: [u8; 12] = "guard: aps=\0"
+    var s_b: [u8; 12] = "  windows=\0\0"
+    serial.puts((&s_a[0]) as u64)
+    serial.dec(kstate.get(state, kstate.GUARD_APS))
+    serial.puts((&s_b[0]) as u64)
+    serial.dec(kstate.get(state, kstate.SMAP_WINDOWS))
+    serial.nl()
+}
+
+fn aps(state: u64) -> u64 {
+    return kstate.get(state, kstate.GUARD_APS)
+}
+
+fn yesno(b: bool) -> u64 {
+    if b {
+        return 1
+    }
+    return 0
+}
+
+// -------------------------------------------------------------- Suche
+
+// Dieselbe Suche wie in `fb.parse`: die Kommandozeile ist eine
+// nullterminierte Zeichenkette, und jedes Modul liest sich sein eigenes
+// Wort heraus, statt dass eine Stelle alle kennt.
+fn find(heu: u64, nadel: u64, n: u64) -> u64 {
+    if heu == 0 || n == 0 {
+        return 0
+    }
+    var i: u64 = 0
+    while true {
+        let c: u64 = kstate.get8(heu + i)
+        if c == 0 {
+            return 0
+        }
+        var k: u64 = 0
+        var gleich: bool = true
+        while k < n {
+            let a: u64 = kstate.get8(heu + i + k)
+            if a == 0 || a != kstate.get8(nadel + k) {
+                gleich = false
+                k = n
+            } else {
+                k = k + 1
+            }
+        }
+        if gleich {
+            return heu + i
+        }
+        i = i + 1
+    }
+    return 0
+}

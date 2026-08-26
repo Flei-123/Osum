@@ -52,6 +52,8 @@ import time
 import rand
 import tty
 import signal
+import guard
+import bootmod
 
 // Indices in the table out of isr.s.
 const V_DF_STACK: u64 = 52
@@ -143,6 +145,13 @@ fn kernel_main(mbi: u64, vectors: u64, state: u64, kernel_end: u64,
     hw.parse(state, cmd)
     smp.parse(state, cmd)
     fb.parse(state, cmd)
+    // ROUNDE K10: die Schutzbits und das Boot-Modul lesen ihr eigenes
+    // Wort, so wie `fb` es seit K7 tut. Die Informationsstruktur wird
+    // hier aufgehoben, weil sie spaeter noch gebraucht wird und
+    // `kernel_main` sie nur als Argument hat.
+    kstate.set(state, kstate.MBI, mbi)
+    guard.parse(state, cmd)
+    bootmod.parse(state, cmd)
 
     // ROUND K9. Die Uhr wird gelesen, BEVOR irgendetwas anderes Zeit
     // braucht: TIME_BOOT und TIME_TSC0 muessen aus demselben Augenblick
@@ -199,6 +208,12 @@ fn kernel_main(mbi: u64, vectors: u64, state: u64, kernel_end: u64,
     // 3. memory.
     memory(state, mbi, kernel_end)
 
+    // 3a0. ROUNDE K10: was der Lader danebengelegt hat, und ob es heil
+    //      angekommen ist. Muss NACH `memory` stehen -- vorher gibt es
+    //      keinen Rahmenverwalter, der den Bereich haette reservieren
+    //      koennen -- und VOR allem, was Rahmen anfordert.
+    bootmod.stage(state, mbi)
+
     // 3a. ROUND K2: the bus is read and the interrupts move from the two
     //     8259s to the APIC -- before the first `sti`, because a
     //     controller must not be swapped while it is delivering. See
@@ -226,7 +241,19 @@ fn kernel_main(mbi: u64, vectors: u64, state: u64, kernel_end: u64,
     // not only before the excursion of round 59. Without EFER.SCE the
     // `sysretq` of `enter_user_task` is an invalid opcode.
     user.setup(state)
+    // ROUNDE K10: SMEP und SMAP, und zwar hier -- direkt hinter den
+    // vier Modellregistern und VOR der ersten Seite mit Benutzerbit.
+    // Ein Schutzbit, das erst nach dem ersten unprivilegierten
+    // Programm gesetzt wird, hat genau dieses eine nicht geschuetzt.
+    guard.apply(state)
+    guard.report(state)
     proc.map_programs(state)
+    // Die beiden Gegenproben. Sie tun nichts, solange die
+    // Kommandozeile sie nicht ausdruecklich verlangt -- und wenn sie
+    // etwas tun, endet der Lauf hier im Trap-Melder. Genau das ist
+    // der Nachweis.
+    guard.raw_read(state)
+    guard.raw_exec(state)
 
     // 4. a deliberate fault, when the command line asks for one. Comes
     //    back only if the IDT is broken -- `trap.report` stops.
@@ -289,6 +316,17 @@ fn kernel_main(mbi: u64, vectors: u64, state: u64, kernel_end: u64,
     // 9. ROUNDE K7: stillhalten, damit ein Bildschirmfoto entstehen
     //    kann. Ohne `fbhold` ist das ein Nichts.
     gfx_hold(state)
+
+    // ROUNDE K10: was die Schutzbits am Ende des Laufs zu berichten
+    // haben -- wie viele weitere Prozessoren sie tragen und wie oft das
+    // SMAP-Fenster wirklich geoeffnet wurde. Eine Zusage "SMAP ist an"
+    // ohne eine einzige Fensteroeffnung waere ein Kernel, der
+    // Ring-3-Speicher nie anfasst.
+    guard.report_aps(state)
+    // ...und ob das Boot-Modul den ganzen Lauf unversehrt ueberstanden
+    // hat. Haette `mem.scan` seinen Bereich nicht reserviert, stuende
+    // hier jetzt eine andere Summe.
+    bootmod.recheck(state)
 
     serial.puts((&s_done[0]) as u64)
     serial.nl()
@@ -1480,18 +1518,40 @@ fn osum(state: u64) {
     var p_sh: [u8; 8] = "/bin/sh\0"
     var p_bin: [u8; 5] = "/bin\0"
     var a_sh: [u8; 3] = "sh\0"
+    var s_mod: [u8; 20] = "osum: from module \0\0"
+    var s_blk: [u8; 10] = "  blocks=\0"
 
     if (kstate.get(state, kstate.MODE) & M_OSUM) == 0 {
         serial.puts((&s_off[0]) as u64)
         serial.nl()
         return
     }
-    if !blk.present(state) {
-        serial.puts((&s_no[0]) as u64)
+    // ROUNDE K10: DIE WURZELPLATTE DARF EIN BOOT-MODUL SEIN.
+    //
+    // Bis hierher lag das Userland auf einer Platte, die QEMU mit
+    // `-drive` hereinreicht. Ein ISO hat keine solche Platte; was ein
+    // Lader dort weiterreichen kann, ist ein MODUL. `bootmod.ready`
+    // sagt nur dann ja, wenn es eines gibt, seine Pruefsumme stimmt und
+    // die Kommandozeile es angefordert hat -- ein Modul, das niemand
+    // verlangt hat, wird nicht heimlich zur Wurzel. Fuer `fs.fi`
+    // aendert sich dabei nichts: es sind dieselben 512 Oktette je
+    // Block, nur aus einem anderen Geraet. Genau dafuer gibt es die
+    // Schnittstelle in `blk.fi`.
+    if bootmod.ready(state) {
+        blk.ram_init(state, bootmod.base(state), bootmod.blocks(state))
+        serial.puts((&s_mod[0]) as u64)
+        serial.hex(bootmod.base(state))
+        serial.puts((&s_blk[0]) as u64)
+        serial.dec(bootmod.blocks(state))
         serial.nl()
-        return
+    } else {
+        if !blk.present(state) {
+            serial.puts((&s_no[0]) as u64)
+            serial.nl()
+            return
+        }
+        blk.use_ata(state, OSUM_BLOCKS)
     }
-    blk.use_ata(state, OSUM_BLOCKS)
     let mounted: bool = fs.mount(state)
     serial.puts((&s_mount[0]) as u64)
     serial.dec(yes(mounted))
