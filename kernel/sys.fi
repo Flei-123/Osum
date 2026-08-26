@@ -50,6 +50,7 @@ import file
 import uio
 import cap
 import guard
+import wm
 import fb
 
 import signal
@@ -300,6 +301,35 @@ const CAP_TRANSFER: u64 = 2006 // (h, maske, pid) -> Handle, braucht R_TRANSFER
 const CAP_COUNT: u64 = 2007 // () -> belegte Plaetze der eigenen Tabelle
 const CAP_MAXNR: u64 = 2007
 
+// ---------------------------------------------------- Runde K10: Fenster
+//
+// Neun Aufrufe, und sie reichen fuer eine Anwendung mit Oberflaeche:
+// eine Flaeche bekommen, darauf malen, Text setzen, Ereignisse abholen,
+// sich verschieben, zumachen.  Jeder braucht ein HANDLE, und jeder
+// prueft das RECHT, das zu ihm gehoert -- malen ist R_WRITE, Ereignisse
+// abholen ist R_READ, verschieben und schliessen ist R_MANAGE.
+const WM_BASE: u64 = 2100
+const WM_CREATE: u64 = 2100 // (xy, wh, titel, art) -> Handle
+const WM_FILL: u64 = 2101 // (h, xy, wh, farbe) -> 0
+const WM_TEXT: u64 = 2102 // (h, xy, p, n, farbe) -> x hinter dem Text
+const WM_EVENT: u64 = 2103 // (h, aus) -> 1 = eines geholt, 0 = keines
+const WM_INFO: u64 = 2104 // (h, was) -> Zahl
+const WM_FLUSH: u64 = 2105 // (h) -> 0
+const WM_MOVE: u64 = 2106 // (h, xy) -> 0
+const WM_CLOSE: u64 = 2107 // (h) -> 0
+const WM_WRITE: u64 = 2108 // (h, p, n) -> Oktette (nur Terminalfenster)
+const WM_MAXNR: u64 = 2108
+
+const WI_W: u64 = 0
+const WI_H: u64 = 1
+const WI_X: u64 = 2
+const WI_Y: u64 = 3
+const WI_ID: u64 = 4
+const WI_EVENTS: u64 = 5
+const WI_COLS: u64 = 6
+const WI_ROWS: u64 = 7
+const WI_FOCUS: u64 = 8
+
 const SYS_OSUM_SYSINFO: u64 = 1002
 const SYS_OSUM_PSTAT: u64 = 1003
 const SYS_OSUM_KILL: u64 = 1004
@@ -451,7 +481,7 @@ fn dispatch(number: u64, frame: u64, state: u64) -> u64 {
     // Die native ABI zuerst: sie hat ihren eigenen Zahlenraum, ihre
     // eigenen Fehlerwerte und ihre eigene Tabelle.
     if number >= CAP_BASE {
-        return native(state, me, number, a0, a1, a2)
+        return native(state, me, number, a0, a1, a2, a3, a4)
     }
     if number == SYS_WRITE {
         return do_write(state, me, a0, a1, a2)
@@ -2738,7 +2768,15 @@ fn grant_console(state: u64, task: u64, rights: u64) -> u64 {
 
 // Die Weiche. `number` ist >= CAP_BASE; `number - CAP_BASE` ist die
 // Nummer INNERHALB der nativen ABI -- dieselbe wie in OrientOS.
-fn native(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64) -> u64 {
+fn native(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64,
+    a3: u64, a4: u64) -> u64 {
+    // RUNDE K10: der Fensterserver hat seinen eigenen Block ab 2100. Er
+    // liegt in DIESER ABI und nicht bei den POSIX-Nummern, weil ein
+    // Fenster ein HANDLE ist und kein Deskriptor: es wird nicht geerbt,
+    // es hat Rechte, und wer es nicht bekommen hat, hat kein Fenster.
+    if number >= WM_BASE {
+        return wm_call(state, me, number, a0, a1, a2, a3, a4)
+    }
     if number > CAP_MAXNR {
         // Ein Aufruf, den es in dieser ABI nicht gibt. OrientOS antwortet
         // hier InvalidArgs, nicht NotSupported: die Nummer ist falsch,
@@ -3345,4 +3383,211 @@ fn do_setsockopt(state: u64, me: u64, fd: u64, level: u64,
         return neg(errno.E_BADF)
     }
     return 0
+}
+
+
+// ------------------------------------------------- Runde K10: Fenster
+//
+// EIN FENSTER IST EIN HANDLE. Das Objekt hinter dem Handle traegt zwei
+// Zahlen: unten den Platz in der Fenstertafel, oben die laufende Nummer
+// des Fensters. Wird ein Platz nach dem Schliessen neu vergeben, passt
+// die laufende Nummer nicht mehr -- und das alte Handle trifft das neue
+// Fenster NICHT. Das ist dieselbe Regel wie bei den Generationen der
+// Handle-Tabelle, eine Stufe tiefer, und sie ist der Grund, warum hier
+// kein Zeiger im Objekt steht.
+fn win_of(state: u64, object: u64) -> u64 {
+    let i: u64 = object & 0xFF
+    if !wm.valid(state, i) {
+        return wm.MAX_WIN
+    }
+    if wm.win_id(state, i) != (object >> 8) {
+        return wm.MAX_WIN
+    }
+    return i
+}
+
+fn wm_call(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64,
+    a3: u64, a4: u64) -> u64 {
+    if number > WM_MAXNR {
+        return cap.err(cap.E_INVALID)
+    }
+    if !wm.ready(state) {
+        return cap.err(cap.E_UNSUPPORTED)
+    }
+    if number == WM_CREATE {
+        // Ein Fenster anlegen. Der Titel kommt aus Ring 3 und wird
+        // KOPIERT -- der Server folgt keinem fremden Zeiger, er holt
+        // sich zweiunddreissig Oktette in seinen eigenen Puffer.
+        let x: u64 = (a0 >> 16) & 0xFFFF
+        let y: u64 = a0 & 0xFFFF
+        let w: u64 = (a1 >> 16) & 0xFFFF
+        let h: u64 = a1 & 0xFFFF
+        let titel: u64 = state + kstate.BLOCK_OFF + 3072
+        var k: u64 = 0
+        while k < 31 {
+            var c: u64 = 0
+            if a2 != 0 {
+                if !proc.user_ok(state, me, a2 + k, 1) {
+                    return cap.err(cap.E_INVALID)
+                }
+                c = kstate.get8(proc.translate(state, me, a2 + k))
+            }
+            kstate.set8(titel + k, c as u8)
+            if c == 0 {
+                k = 31
+            } else {
+                k = k + 1
+            }
+        }
+        kstate.set8(titel + 31, 0 as u8)
+        let i: u64 = wm.create(state, me, x as i64, y as i64, w, h,
+            a3 & 1, titel)
+        if i >= wm.MAX_WIN {
+            return cap.err(cap.E_EXHAUSTED)
+        }
+        let rechte: u64 = cap.R_READ | cap.R_WRITE | cap.R_MANAGE
+            | cap.R_INSPECT | cap.R_DUPLICATE
+        let hh: u64 = cap.insert(state, me, cap.K_CHANNEL, rechte,
+            i | (wm.win_id(state, i) << 8))
+        if hh == cap.HANDLE_NONE {
+            wm.destroy(state, i)
+            return cap.err(cap.E_EXHAUSTED)
+        }
+        return hh
+    }
+    // Alles Weitere braucht ein gueltiges Handle DIESES Prozesses.
+    let slot: u64 = cap.find(state, me, a0)
+    if slot >= cap.MAX_CAPS {
+        return cap.err(cap.E_BADHANDLE)
+    }
+    if cap.kind_at(state, me, slot) != cap.K_CHANNEL {
+        return cap.err(cap.E_WRONGTYPE)
+    }
+    let rights: u64 = cap.rights_at(state, me, slot)
+    let i: u64 = win_of(state, cap.object_at(state, me, slot))
+    if i >= wm.MAX_WIN {
+        return cap.err(cap.E_CLOSED)
+    }
+    if number == WM_FILL {
+        if !cap.rights_contains(rights, cap.R_WRITE) {
+            return cap.err(cap.E_RIGHTS)
+        }
+        wm.fill(state, i, (a1 >> 16) & 0xFFFF, a1 & 0xFFFF,
+            (a2 >> 16) & 0xFFFF, a2 & 0xFFFF, a3)
+        return 0
+    }
+    if number == WM_TEXT {
+        if !cap.rights_contains(rights, cap.R_WRITE) {
+            return cap.err(cap.E_RIGHTS)
+        }
+        var n: u64 = a3
+        if n > 256 {
+            n = 256
+        }
+        if !proc.user_ok(state, me, a2, n) {
+            return cap.err(cap.E_INVALID)
+        }
+        let puffer: u64 = state + kstate.BLOCK_OFF + 3200
+        if !copy_in(state, me, puffer, a2, n) {
+            return cap.err(cap.E_INVALID)
+        }
+        let f: u64 = wm.font_ui(state)
+        return wm.text(state, i, f, wm.px_ui(state),
+            ((a1 >> 16) & 0xFFFF) as i64, (a1 & 0xFFFF) as i64,
+            puffer, n, a4) as u64
+    }
+    if number == WM_EVENT {
+        if !cap.rights_contains(rights, cap.R_READ) {
+            return cap.err(cap.E_RIGHTS)
+        }
+        if wm.ev_waiting(state, i) == 0 {
+            return 0
+        }
+        let puffer: u64 = state + kstate.BLOCK_OFF + 3520
+        if !wm.ev_pop(state, i, puffer) {
+            return 0
+        }
+        if !proc.user_ok(state, me, a1, 16) {
+            return cap.err(cap.E_INVALID)
+        }
+        if !copy_out(state, me, a1, puffer, 16) {
+            return cap.err(cap.E_INVALID)
+        }
+        return 1
+    }
+    if number == WM_INFO {
+        if a1 == WI_W {
+            return wm.win_w(state, i)
+        }
+        if a1 == WI_H {
+            return wm.win_h(state, i)
+        }
+        if a1 == WI_X {
+            return wm.win_x(state, i) as u64
+        }
+        if a1 == WI_Y {
+            return wm.win_y(state, i) as u64
+        }
+        if a1 == WI_ID {
+            return wm.win_id(state, i)
+        }
+        if a1 == WI_EVENTS {
+            return wm.ev_waiting(state, i)
+        }
+        if a1 == WI_COLS {
+            return wm.term_cols(state, i)
+        }
+        if a1 == WI_ROWS {
+            return wm.term_rows(state, i)
+        }
+        if a1 == WI_FOCUS {
+            if wm.focus(state) == i {
+                return 1
+            }
+            return 0
+        }
+        return cap.err(cap.E_INVALID)
+    }
+    if number == WM_FLUSH {
+        if !cap.rights_contains(rights, cap.R_WRITE) {
+            return cap.err(cap.E_RIGHTS)
+        }
+        wm.flush_win(state, i)
+        wm.compose(state)
+        return 0
+    }
+    if number == WM_MOVE {
+        if !cap.rights_contains(rights, cap.R_MANAGE) {
+            return cap.err(cap.E_RIGHTS)
+        }
+        wm.move_win(state, i, ((a1 >> 16) & 0xFFFF) as i64,
+            (a1 & 0xFFFF) as i64)
+        return 0
+    }
+    if number == WM_CLOSE {
+        if !cap.rights_contains(rights, cap.R_MANAGE) {
+            return cap.err(cap.E_RIGHTS)
+        }
+        wm.destroy(state, i)
+        cap.close(state, me, a0)
+        return 0
+    }
+    if number == WM_WRITE {
+        if !cap.rights_contains(rights, cap.R_WRITE) {
+            return cap.err(cap.E_RIGHTS)
+        }
+        var n: u64 = a2
+        if n > 256 {
+            n = 256
+        }
+        if !proc.user_ok(state, me, a1, n) {
+            return cap.err(cap.E_INVALID)
+        }
+        let puffer: u64 = state + kstate.BLOCK_OFF + 3200
+        if !copy_in(state, me, puffer, a1, n) {
+            return cap.err(cap.E_INVALID)
+        }
+        return wm.term_write(state, i, puffer, n)
+    }
+    return cap.err(cap.E_UNSUPPORTED)
 }

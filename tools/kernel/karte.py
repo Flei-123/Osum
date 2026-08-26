@@ -37,6 +37,7 @@ Ausgabe: eine Zeile je Bereich (nur mit -v), am Ende die Zahl der Bereiche
 und der Kollisionen.  Rueckgabe 0, wenn sich nichts ueberschneidet und
 alles in KDATA_SIZE passt.
 """
+import glob
 import os
 import re
 import sys
@@ -91,6 +92,12 @@ BEREICHE = [
     # nur in `fb.fi` -- und genau deshalb ging er bei K9 unter.
     ("FB",         "kstate.fi", "FB_OFF",         "FB_MAX"),
     ("K11",        "kstate.fi", "K11_OFF",        "K11_MAX"),
+    # RUNDE K10: die Oberflaeche.  Sie liegt in den beiden Luecken, die
+    # Runde K7B als frei ausgewiesen hat -- und sie steht HIER, weil
+    # genau das der Fehler war, an dem Runde K7 gescheitert ist.
+    ("MOUSE",      "kstate.fi", "MOUSE_OFF",      "MOUSE_MAX"),
+    ("WM",         "kstate.fi", "WM_OFF",         "WM_MAX"),
+    ("TTF",        "kstate.fi", "TTF_OFF",        "TTF_MAX"),
 ]
 
 # `_OFF`-Konstanten, die KEINE Bereiche in `kdata` sind -- Offsets
@@ -112,6 +119,8 @@ KEINE_KDATA = {
     ("virtio.fi", "RXB_OFF"),
     ("virtio.fi", "TXB_OFF"),
     ("pci.fi", "K2_OFF"),       # derselbe Wert wie TABLE_OFF
+    ("ttf.fi", "A_HEAP"),       # Versatz IM Glyphenspeicher, nicht kdata
+    ("wm.fi", "W_OFF"),         # Versatz IN der Fenstertafel
     ("virtio.fi", "C_QNOTIFY_OFF"),  # ein Register im Konfigurationsraum
 }
 
@@ -227,10 +236,49 @@ def main():
             print("       ---- frei 0x%05X..0x%05X (%d KiB)"
                   % (vor, kdata, (kdata - vor) // 1024))
 
+    # ------------------------------------------------ die Vektortabelle
+    #
+    # RUNDE K10 HAT DENSELBEN FEHLER EINE EBENE HOEHER GEMACHT.  Der
+    # Maustreiber bekam `VEC_MOUSE = 44` -- und 44 ist seit Runde K2 der
+    # Vektor des NVMe-Reglers.  Die Weiche in `trap.fi` ist eine Kette
+    # von `if`s; die Mausbedingung stand vor der NVMe-Bedingung, und
+    # damit gingen alle Abschlussmeldungen des Reglers an den
+    # Maustreiber.  `nvme: irqs=0` statt `irqs=5`, in jedem Lauf, auch
+    # OHNE das Wort `wm`.
+    #
+    # Die Regel ist dieselbe wie oben: DERSELBE Name darf mehrfach
+    # dastehen (`trap.fi` und `nvme.fi` fuehren VEC_NVME beide, weil
+    # Firn keine Konstante eines anderen Moduls in einen `const`
+    # einsetzt), ZWEI VERSCHIEDENE Namen duerfen nicht auf derselben
+    # Zahl liegen.
+    vektoren = {}
+    for pfad in sorted(glob.glob(os.path.join(kdir, "*.fi"))):
+        datei = os.path.basename(pfad)
+        for k, roh in konstanten(pfad).items():
+            if not k.startswith("VEC_"):
+                continue
+            try:
+                v = int(roh, 0)
+            except ValueError:
+                continue
+            vektoren.setdefault(v, {}).setdefault(k, []).append(datei)
+    vfehler = []
+    for v in sorted(vektoren):
+        if len(vektoren[v]) > 1:
+            wer = ", ".join("%s (%s)" % (k, "+".join(d))
+                            for k, d in sorted(vektoren[v].items()))
+            vfehler.append("KOLLISION: Vektor %d haben zwei Namen: %s"
+                           % (v, wer))
+    fehler += vfehler
+    if laut:
+        print("  ---- die Vektortabelle ----")
+        for v in sorted(vektoren):
+            print("  %3d  %s" % (v, ", ".join(sorted(vektoren[v]))))
+
     for f in fehler:
         print("  " + f)
-    print("%d Bereiche in 0x%X Oktetten kdata, %d Kollisionen"
-          % (len(stuecke), kdata, len(fehler)))
+    print("%d Bereiche in 0x%X Oktetten kdata, %d Vektoren, %d Kollisionen"
+          % (len(stuecke), kdata, len(vektoren), len(fehler)))
     return 1 if fehler else 0
 
 

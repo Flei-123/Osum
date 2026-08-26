@@ -1,0 +1,1812 @@
+// kernel/wm.fi -- Runde K10: der Fensterserver.
+//
+// Runde K7 gab Osum einen Bildschirm: 800x600 Bildpunkte, eine
+// Textkonsole darauf, und `/dev/fb` fuer Ring 3. Sie endete mit einem
+// zugegebenen Mangel, und der steht woertlich in `kernel/fb.fi`:
+//
+//     "Der Preis ist benannt: die Konsole uebertraegt ihre geaenderten
+//      Zeilen aus dem Zweitpuffer und uebermalt dabei, was ein Programm
+//      in dieselben Zeilen gelegt hat. Zwei Zeichner auf einer Flaeche
+//      vertragen sich, solange sie verschiedene Zeilen nehmen. Ein
+//      Fenstersystem waere die Antwort darauf und ist nicht diese Runde."
+//
+// Diese Runde ist es.
+//
+// WAS EIN FENSTERSERVER WIRKLICH IST, und es sind vier Dinge:
+//
+//   1. EINE FLAECHE JE ANWENDUNG. Ein Fenster ist ein Speicherbereich,
+//      den die Anwendung bemalt und den der Server auf den Schirm
+//      zusammensetzt. Die Anwendung sieht den Bildschirm NICHT; sie
+//      sieht ihr Rechteck, und sie kann nicht danebenschreiben.
+//   2. EINE STAPELREIHENFOLGE. Fenster verdecken einander, und wer oben
+//      liegt, gewinnt. Das entscheidet der Server, nicht der Zeichner.
+//   3. EIN EINGABEFOKUS. Genau EIN Fenster bekommt die Tastatur. Ohne
+//      das tippt man in alle Fenster gleichzeitig -- die Gegenprobe
+//      `nofocus` schaltet es ab und muss den Test zum Einsturz bringen.
+//   4. NUR DAS NEUE MALEN. Ein Zeiger, der ueber den Schirm faehrt,
+//      aendert zwei kleine Rechtecke. Wer dafuer 1,9 MB neu
+//      zusammensetzt, hat eine Oberflaeche, die man nicht bedienen kann.
+//      Die Bereichsverfolgung ist deshalb keine Feinheit, sondern das,
+//      was den Unterschied ausmacht -- gemessen in docs/ROUNDK10.md,
+//      und `nodirty` schaltet sie ab, damit die Zahl etwas bedeutet.
+//
+// WO DER SERVER LAEUFT. Im Kernel. Das ist eine Entscheidung und keine
+// Bequemlichkeit, und sie gehoert benannt: ein Fensterserver in Ring 3
+// braucht eine Nachrichtenschicht, die Speicher zwischen Prozessen
+// TEILT (der Fensterpuffer muss in zwei Adressraeumen liegen), und die
+// hat dieser Kernel nicht -- `mmap` kennt anonyme Seiten und den
+// Rahmenpuffer, sonst nichts. Ihn hierhin zu legen kostet den Schutz
+// zwischen Server und Anwendung; er kostet NICHT den Schutz zwischen den
+// Anwendungen, und das ist der, um den es beim Fenstern geht. Der Weg
+// nach Ring 3 fuehrt ueber ein Speicherobjekt, das zwei Prozesse
+// abbilden koennen; das ist die naechste Runde und steht so in der Doku.
+//
+// WIE ANWENDUNGEN MIT IHM REDEN: ueber HANDLES aus `kernel/cap.fi`, wie
+// die Aufgabe es verlangt, und nicht ueber einen zweiten Weg. Ein
+// Fenster ist ein `K_CHANNEL` mit Rechten; wer es nicht hat, hat kein
+// Fenster. `R_WRITE` malt, `R_READ` holt Ereignisse, `R_MANAGE`
+// verschiebt und schliesst. Ein Handle aus einem anderen Prozess faellt
+// am Wuerfelwert der Tabelle, und ein geschlossenes faellt an der
+// Generation -- beides hat Runde K6 gebaut und wird hier nur benutzt.
+//
+// DIE ARITHMETIK-FALLE. Fensterkoordinaten werden negativ, sobald ein
+// Fenster ueber den linken Rand geschoben wird, und Ueberschneidungen
+// sind Differenzen von Differenzen. Dieses Modul rechnet Rechtecke
+// deshalb in `i64` und schneidet ERST beim Zeichnen auf den Bildschirm
+// zurecht. Wo ein Bitmuster gemeint ist (Farben), steht `u64`.
+
+profile kernel
+
+import kstate
+import mem
+import fb
+import ttf
+import ps2m
+
+export {
+    init, ready, compose, damage, damage_all, dirty_x0, dirty_y0,
+    dirty_x1, dirty_y1,
+    create, destroy, valid, count, focus, set_focus, raise_win,
+    move_win, resize_win, win_x, win_y, win_w, win_h, win_z, win_buf,
+    win_owner, win_kind, win_id, outer_w, outer_h,
+    fill, text, blit_in, flush_win, hit,
+    ev_push, ev_pop, ev_waiting,
+    on_mouse, on_key, term_write, term_out, term_cols, term_rows, term_cx, term_cy,
+    bind_tty, key_tty, tty_of, NO_TTY,
+    poll, composites, blits, pixels, last_us, cursor_on, set_cursor,
+    downs, moves_seen, hits_seen, win_keys,
+    set_fonts, font_ui, font_mono, px_ui, px_mono,
+    selftest, selftest_max,
+    MAX_WIN, K_RAW, K_TERM, TITLE_H, BORDER, GRIP,
+    E_KEY, E_DOWN, E_UP, E_MOVE, E_CLOSE, E_FOCUS, E_RESIZE
+}
+
+// ------------------------------------------------------- die Zahlen
+
+const MAX_WIN: u64 = 8
+const WIN_BYTES: u64 = 256
+const W_OFF: u64 = 0x400 // die Fenstertafel in WM_OFF
+const EV_OFF: u64 = 0x1000 // die Ereignisringe
+const EV_SLOTS: u64 = 32
+const EV_BYTES: u64 = 16
+const EV_RING: u64 = 512 // EV_SLOTS * EV_BYTES
+
+const TITLE_H: u64 = 22 // die Titelleiste
+const BORDER: u64 = 2 // der Rand links, rechts und unten
+const GRIP: u64 = 12 // das Feld unten rechts zum Groessenaendern
+const CLOSE_W: u64 = 14
+
+const K_RAW: u64 = 0 // die Anwendung malt selbst
+const K_TERM: u64 = 1 // ein Zeichenraster, der Server malt
+
+const E_KEY: u64 = 1
+const E_DOWN: u64 = 2
+const E_UP: u64 = 3
+const E_MOVE: u64 = 4
+const E_CLOSE: u64 = 5
+const E_FOCUS: u64 = 6
+const E_RESIZE: u64 = 7
+
+// die Skalare
+const S_READY: u64 = 0x000
+const S_COUNT: u64 = 0x008
+const S_FOCUS: u64 = 0x010 // Fenster + 1, 0 = keines
+const S_NEXTID: u64 = 0x018
+const S_DX0: u64 = 0x020 // der schmutzige Bereich
+const S_DY0: u64 = 0x028
+const S_DX1: u64 = 0x030
+const S_DY1: u64 = 0x038
+const S_DON: u64 = 0x040
+const S_SW: u64 = 0x048 // Bildschirmgroesse
+const S_SH: u64 = 0x050
+const S_DRAG: u64 = 0x058 // Fenster + 1, das am Zeiger haengt
+const S_DRAGX: u64 = 0x060
+const S_DRAGY: u64 = 0x068
+const S_SIZING: u64 = 0x070 // Fenster + 1, dessen Groesse gezogen wird
+const S_CURON: u64 = 0x078
+const S_CURX: u64 = 0x080 // wo der Zeiger zuletzt gemalt wurde
+const S_CURY: u64 = 0x088
+const S_COMPOSITES: u64 = 0x090
+const S_BLITS: u64 = 0x098
+const S_PIXELS: u64 = 0x0A0
+const S_NODIRTY: u64 = 0x0A8 // GEGENPROBE: immer das ganze Bild
+const S_NOFOCUS: u64 = 0x0B0 // GEGENPROBE: Tasten an alle
+const S_FONT_UI: u64 = 0x0B8
+const S_FONT_MONO: u64 = 0x0C0
+const S_PX_UI: u64 = 0x0C8
+const S_PX_MONO: u64 = 0x0D0
+const S_LASTUS: u64 = 0x0D8
+const S_KEYS: u64 = 0x0E0
+const S_EVDROP: u64 = 0x0E8
+const S_CURSAVE: u64 = 0x0F0 // Rahmen fuer den Zeigergrund
+const S_DESK: u64 = 0x0F8
+const S_DOWNS: u64 = 0x100
+const S_MOVES: u64 = 0x108
+const S_HITS: u64 = 0x110 // die Farbe des Hintergrunds
+
+// ein Fenster
+const W_USED: u64 = 0x00
+const W_ID: u64 = 0x08
+const W_OWNER: u64 = 0x10
+const W_X: u64 = 0x18 // AUSSEN, oben links
+const W_Y: u64 = 0x20
+const W_W: u64 = 0x28 // die Malflaeche, ohne Rahmen
+const W_H: u64 = 0x30
+const W_BUF: u64 = 0x38
+const W_BUFBYTES: u64 = 0x40
+const W_Z: u64 = 0x48
+const W_KIND: u64 = 0x50
+const W_COLS: u64 = 0x58
+const W_ROWS: u64 = 0x60
+const W_CX: u64 = 0x68
+const W_CY: u64 = 0x70
+const W_GRID: u64 = 0x78
+const W_EHEAD: u64 = 0x80
+const W_ETAIL: u64 = 0x88
+const W_FG: u64 = 0x90
+const W_BG: u64 = 0x98
+const W_CELLW: u64 = 0xA0
+const W_CELLH: u64 = 0xA8
+// 0xB8 und NICHT 0xA8: dort liegt W_CELLH. Die erste Fassung nahm 0xA8,
+// und die Zahl der Tastenereignisse des Terminalfensters war danach
+// genau seine Zellenhoehe -- neunzehn, ohne dass eine Taste gedrueckt
+// worden waere. Dieselbe Sorte Fehler wie Runde K7B, eine Ebene tiefer.
+const W_KEYS: u64 = 0xB8
+const W_TTY: u64 = 0xB0 // Runde K10: das Terminal + 1, 0 = keines
+const W_TITLE: u64 = 0xC0 // 32 Oktette
+
+// "kein Terminal". Absichtlich eine Zahl und kein Ruf nach `tty.fi`:
+// dieses Modul darf `tty` NICHT einbinden, weil `tty` es einbindet
+// (SINK_WINDOW). Der Abhaengigkeitsgraph bleibt ein Baum, und die
+// Richtung ist die richtige -- der Fensterserver weiss nichts von
+// Zeilendisziplinen, das Terminal weiss, wohin es schreibt.
+const NO_TTY: u64 = 255
+
+fn gs(state: u64, off: u64) -> u64 {
+    return kstate.get(state + kstate.WM_OFF, off)
+}
+
+fn ss(state: u64, off: u64, v: u64) {
+    kstate.set(state + kstate.WM_OFF, off, v)
+}
+
+fn wat(i: u64) -> u64 {
+    return W_OFF + i * WIN_BYTES
+}
+
+fn wg(state: u64, i: u64, off: u64) -> u64 {
+    return kstate.get(state + kstate.WM_OFF, wat(i) + off)
+}
+
+fn wsv(state: u64, i: u64, off: u64, v: u64) {
+    kstate.set(state + kstate.WM_OFF, wat(i) + off, v)
+}
+
+fn ready(state: u64) -> bool {
+    return gs(state, S_READY) != 0
+}
+
+fn valid(state: u64, i: u64) -> bool {
+    if i >= MAX_WIN {
+        return false
+    }
+    return wg(state, i, W_USED) != 0
+}
+
+fn count(state: u64) -> u64 {
+    return gs(state, S_COUNT)
+}
+
+fn focus(state: u64) -> u64 {
+    let f: u64 = gs(state, S_FOCUS)
+    if f == 0 {
+        return MAX_WIN
+    }
+    return f - 1
+}
+
+fn composites(state: u64) -> u64 {
+    return gs(state, S_COMPOSITES)
+}
+
+fn blits(state: u64) -> u64 {
+    return gs(state, S_BLITS)
+}
+
+fn pixels(state: u64) -> u64 {
+    return gs(state, S_PIXELS)
+}
+
+fn last_us(state: u64) -> u64 {
+    return gs(state, S_LASTUS)
+}
+
+fn cursor_on(state: u64) -> bool {
+    return gs(state, S_CURON) != 0
+}
+
+fn set_cursor(state: u64, on: bool) {
+    if on {
+        ss(state, S_CURON, 1)
+    } else {
+        ss(state, S_CURON, 0)
+    }
+}
+
+fn font_ui(state: u64) -> u64 {
+    return gs(state, S_FONT_UI)
+}
+
+fn font_mono(state: u64) -> u64 {
+    return gs(state, S_FONT_MONO)
+}
+
+fn px_ui(state: u64) -> u64 {
+    return gs(state, S_PX_UI)
+}
+
+fn px_mono(state: u64) -> u64 {
+    return gs(state, S_PX_MONO)
+}
+
+fn set_fonts(state: u64, ui: u64, pui: u64, mono: u64, pmono: u64) {
+    ss(state, S_FONT_UI, ui)
+    ss(state, S_PX_UI, pui)
+    ss(state, S_FONT_MONO, mono)
+    ss(state, S_PX_MONO, pmono)
+}
+
+fn win_x(state: u64, i: u64) -> i64 {
+    return wg(state, i, W_X) as i64
+}
+
+fn win_y(state: u64, i: u64) -> i64 {
+    return wg(state, i, W_Y) as i64
+}
+
+fn win_w(state: u64, i: u64) -> u64 {
+    return wg(state, i, W_W)
+}
+
+fn win_h(state: u64, i: u64) -> u64 {
+    return wg(state, i, W_H)
+}
+
+fn win_z(state: u64, i: u64) -> u64 {
+    return wg(state, i, W_Z)
+}
+
+fn win_buf(state: u64, i: u64) -> u64 {
+    return wg(state, i, W_BUF)
+}
+
+fn win_owner(state: u64, i: u64) -> u64 {
+    return wg(state, i, W_OWNER)
+}
+
+fn win_kind(state: u64, i: u64) -> u64 {
+    return wg(state, i, W_KIND)
+}
+
+fn win_id(state: u64, i: u64) -> u64 {
+    return wg(state, i, W_ID)
+}
+
+fn outer_w(state: u64, i: u64) -> u64 {
+    return wg(state, i, W_W) + BORDER * 2
+}
+
+fn outer_h(state: u64, i: u64) -> u64 {
+    return wg(state, i, W_H) + TITLE_H + BORDER
+}
+
+fn term_cols(state: u64, i: u64) -> u64 {
+    return wg(state, i, W_COLS)
+}
+
+fn term_rows(state: u64, i: u64) -> u64 {
+    return wg(state, i, W_ROWS)
+}
+
+fn term_cx(state: u64, i: u64) -> u64 {
+    return wg(state, i, W_CX)
+}
+
+fn term_cy(state: u64, i: u64) -> u64 {
+    return wg(state, i, W_CY)
+}
+
+// ------------------------------------------------------------- Start
+
+fn init(state: u64, w: u64, h: u64, nodirty: bool, nofocus: bool) -> bool {
+    if w == 0 || h == 0 {
+        return false
+    }
+    var i: u64 = 0
+    while i < MAX_WIN {
+        wsv(state, i, W_USED, 0)
+        wsv(state, i, W_EHEAD, 0)
+        wsv(state, i, W_ETAIL, 0)
+        i = i + 1
+    }
+    ss(state, S_COUNT, 0)
+    ss(state, S_FOCUS, 0)
+    ss(state, S_NEXTID, 1)
+    ss(state, S_SW, w)
+    ss(state, S_SH, h)
+    ss(state, S_DRAG, 0)
+    ss(state, S_SIZING, 0)
+    ss(state, S_CURON, 1)
+    ss(state, S_CURX, w / 2)
+    ss(state, S_CURY, h / 2)
+    ss(state, S_COMPOSITES, 0)
+    ss(state, S_BLITS, 0)
+    ss(state, S_PIXELS, 0)
+    ss(state, S_KEYS, 0)
+    ss(state, S_EVDROP, 0)
+    ss(state, S_LASTUS, 0)
+    ss(state, S_DON, 0)
+    ss(state, S_NODIRTY, 0)
+    if nodirty {
+        ss(state, S_NODIRTY, 1)
+    }
+    ss(state, S_NOFOCUS, 0)
+    if nofocus {
+        ss(state, S_NOFOCUS, 1)
+    }
+    ss(state, S_DESK, fb.rgb(state, 0x1E, 0x2A, 0x38))
+    ss(state, S_FONT_UI, ttf.MAX_FONTS)
+    ss(state, S_FONT_MONO, ttf.MAX_FONTS)
+    ss(state, S_READY, 1)
+    damage_all(state)
+    return true
+}
+
+// ---------------------------------------------------- die Rechtecke
+
+fn damage(state: u64, x0: i64, y0: i64, x1: i64, y1: i64) {
+    if !ready(state) {
+        return
+    }
+    if gs(state, S_NODIRTY) != 0 {
+        damage_all(state)
+        return
+    }
+    var a: i64 = x0
+    var b: i64 = y0
+    var c: i64 = x1
+    var d: i64 = y1
+    if a < 0 {
+        a = 0
+    }
+    if b < 0 {
+        b = 0
+    }
+    if c > gs(state, S_SW) as i64 {
+        c = gs(state, S_SW) as i64
+    }
+    if d > gs(state, S_SH) as i64 {
+        d = gs(state, S_SH) as i64
+    }
+    if c <= a || d <= b {
+        return
+    }
+    if gs(state, S_DON) == 0 {
+        ss(state, S_DX0, a as u64)
+        ss(state, S_DY0, b as u64)
+        ss(state, S_DX1, c as u64)
+        ss(state, S_DY1, d as u64)
+        ss(state, S_DON, 1)
+        return
+    }
+    if (a as u64) < gs(state, S_DX0) {
+        ss(state, S_DX0, a as u64)
+    }
+    if (b as u64) < gs(state, S_DY0) {
+        ss(state, S_DY0, b as u64)
+    }
+    if (c as u64) > gs(state, S_DX1) {
+        ss(state, S_DX1, c as u64)
+    }
+    if (d as u64) > gs(state, S_DY1) {
+        ss(state, S_DY1, d as u64)
+    }
+}
+
+fn damage_all(state: u64) {
+    ss(state, S_DX0, 0)
+    ss(state, S_DY0, 0)
+    ss(state, S_DX1, gs(state, S_SW))
+    ss(state, S_DY1, gs(state, S_SH))
+    ss(state, S_DON, 1)
+}
+
+fn damage_win(state: u64, i: u64) {
+    damage(state, win_x(state, i), win_y(state, i),
+        win_x(state, i) + outer_w(state, i) as i64,
+        win_y(state, i) + outer_h(state, i) as i64)
+}
+
+fn dirty_x0(state: u64) -> u64 {
+    return gs(state, S_DX0)
+}
+
+fn dirty_y0(state: u64) -> u64 {
+    return gs(state, S_DY0)
+}
+
+fn dirty_x1(state: u64) -> u64 {
+    return gs(state, S_DX1)
+}
+
+fn dirty_y1(state: u64) -> u64 {
+    return gs(state, S_DY1)
+}
+
+// ------------------------------------------------------ die Fenster
+
+fn create(state: u64, owner: u64, x: i64, y: i64, w: u64, h: u64,
+    kind: u64, title: u64) -> u64 {
+    if !ready(state) || w < 32 || h < 16 || w > 2048 || h > 2048 {
+        return MAX_WIN
+    }
+    var i: u64 = 0
+    while i < MAX_WIN {
+        if wg(state, i, W_USED) == 0 {
+            let bytes: u64 = w * h * 4
+            let rahmen: u64 = (bytes + mem.FRAME_SIZE - 1) / mem.FRAME_SIZE
+            let buf: u64 = mem.frame_run(state, rahmen)
+            if buf == 0 {
+                return MAX_WIN
+            }
+            wsv(state, i, W_USED, 1)
+            wsv(state, i, W_ID, gs(state, S_NEXTID))
+            ss(state, S_NEXTID, gs(state, S_NEXTID) + 1)
+            wsv(state, i, W_OWNER, owner)
+            wsv(state, i, W_X, x as u64)
+            wsv(state, i, W_Y, y as u64)
+            wsv(state, i, W_W, w)
+            wsv(state, i, W_H, h)
+            wsv(state, i, W_BUF, buf)
+            wsv(state, i, W_BUFBYTES, rahmen * mem.FRAME_SIZE)
+            wsv(state, i, W_KIND, kind)
+            wsv(state, i, W_EHEAD, 0)
+            wsv(state, i, W_ETAIL, 0)
+            wsv(state, i, W_FG, fb.rgb(state, 0xE0, 0xE6, 0xEC))
+            wsv(state, i, W_BG, fb.rgb(state, 0x10, 0x14, 0x1A))
+            wsv(state, i, W_GRID, 0)
+            wsv(state, i, W_KEYS, 0)
+            wsv(state, i, W_Z, gs(state, S_COUNT))
+            ss(state, S_COUNT, gs(state, S_COUNT) + 1)
+            set_title(state, i, title)
+            fill(state, i, 0, 0, w, h, wg(state, i, W_BG))
+            if kind == K_TERM {
+                term_setup(state, i)
+            }
+            set_focus(state, i)
+            damage_win(state, i)
+            return i
+        }
+        i = i + 1
+    }
+    return MAX_WIN
+}
+
+fn set_title(state: u64, i: u64, p: u64) {
+    var k: u64 = 0
+    while k < 31 {
+        var c: u64 = 0
+        if p != 0 {
+            c = kstate.get8(p + k)
+        }
+        kstate.set8(state + kstate.WM_OFF + wat(i) + W_TITLE + k, c as u8)
+        if c == 0 {
+            k = 31
+        } else {
+            k = k + 1
+        }
+    }
+    kstate.set8(state + kstate.WM_OFF + wat(i) + W_TITLE + 31, 0 as u8)
+}
+
+fn destroy(state: u64, i: u64) -> bool {
+    if !valid(state, i) {
+        return false
+    }
+    damage_win(state, i)
+    let z: u64 = wg(state, i, W_Z)
+    wsv(state, i, W_USED, 0)
+    if wg(state, i, W_BUF) != 0 {
+        mem.frame_free_run(state, wg(state, i, W_BUF),
+            wg(state, i, W_BUFBYTES) / mem.FRAME_SIZE)
+        wsv(state, i, W_BUF, 0)
+    }
+    if wg(state, i, W_GRID) != 0 {
+        mem.frame_free_run(state, wg(state, i, W_GRID), 1)
+        wsv(state, i, W_GRID, 0)
+    }
+    // Die Stapelreihenfolge schliesst sich: wer ueber dem geschlossenen
+    // Fenster lag, rutscht eine Stufe herunter. Ohne das entstehen
+    // Luecken, und `compose` findet auf einer Stufe kein Fenster mehr.
+    var k: u64 = 0
+    while k < MAX_WIN {
+        if wg(state, k, W_USED) != 0 && wg(state, k, W_Z) > z {
+            wsv(state, k, W_Z, wg(state, k, W_Z) - 1)
+        }
+        k = k + 1
+    }
+    ss(state, S_COUNT, gs(state, S_COUNT) - 1)
+    if focus(state) == i {
+        ss(state, S_FOCUS, 0)
+        // Der Fokus geht an das oberste verbliebene Fenster.
+        let o: u64 = topmost(state)
+        if o < MAX_WIN {
+            set_focus(state, o)
+        }
+    }
+    if gs(state, S_DRAG) == i + 1 {
+        ss(state, S_DRAG, 0)
+    }
+    if gs(state, S_SIZING) == i + 1 {
+        ss(state, S_SIZING, 0)
+    }
+    return true
+}
+
+fn topmost(state: u64) -> u64 {
+    var beste: u64 = MAX_WIN
+    var bz: u64 = 0
+    var i: u64 = 0
+    while i < MAX_WIN {
+        if wg(state, i, W_USED) != 0 {
+            if beste == MAX_WIN || wg(state, i, W_Z) >= bz {
+                beste = i
+                bz = wg(state, i, W_Z)
+            }
+        }
+        i = i + 1
+    }
+    return beste
+}
+
+// Das Fenster auf einer Stufe der Stapelreihenfolge.
+fn at_z(state: u64, z: u64) -> u64 {
+    var i: u64 = 0
+    while i < MAX_WIN {
+        if wg(state, i, W_USED) != 0 && wg(state, i, W_Z) == z {
+            return i
+        }
+        i = i + 1
+    }
+    return MAX_WIN
+}
+
+fn raise_win(state: u64, i: u64) {
+    if !valid(state, i) {
+        return
+    }
+    let z: u64 = wg(state, i, W_Z)
+    let oben: u64 = gs(state, S_COUNT) - 1
+    if z == oben {
+        return
+    }
+    var k: u64 = 0
+    while k < MAX_WIN {
+        if wg(state, k, W_USED) != 0 && wg(state, k, W_Z) > z {
+            wsv(state, k, W_Z, wg(state, k, W_Z) - 1)
+        }
+        k = k + 1
+    }
+    wsv(state, i, W_Z, oben)
+    damage_win(state, i)
+}
+
+fn set_focus(state: u64, i: u64) {
+    if !valid(state, i) {
+        return
+    }
+    let alt: u64 = focus(state)
+    if alt == i {
+        return
+    }
+    if alt < MAX_WIN {
+        damage_win(state, alt)
+        ev_push(state, alt, E_FOCUS, 0, 0, 0)
+    }
+    ss(state, S_FOCUS, i + 1)
+    ev_push(state, i, E_FOCUS, 0, 0, 1)
+    damage_win(state, i)
+}
+
+fn move_win(state: u64, i: u64, x: i64, y: i64) {
+    if !valid(state, i) {
+        return
+    }
+    damage_win(state, i) // die alte Stelle wird wiederhergestellt
+    wsv(state, i, W_X, x as u64)
+    wsv(state, i, W_Y, y as u64)
+    damage_win(state, i) // und die neue gemalt
+}
+
+fn resize_win(state: u64, i: u64, w: u64, h: u64) -> bool {
+    if !valid(state, i) {
+        return false
+    }
+    if w < 32 || h < 16 || w > 2048 || h > 2048 {
+        return false
+    }
+    if w * h * 4 > wg(state, i, W_BUFBYTES) {
+        return false // ohne neuen Puffer nicht groesser als angelegt
+    }
+    damage_win(state, i)
+    wsv(state, i, W_W, w)
+    wsv(state, i, W_H, h)
+    if wg(state, i, W_KIND) == K_TERM {
+        term_setup(state, i)
+    } else {
+        fill(state, i, 0, 0, w, h, wg(state, i, W_BG))
+    }
+    ev_push(state, i, E_RESIZE, w, h, 0)
+    damage_win(state, i)
+    return true
+}
+
+// ---------------------------------------------------- in ein Fenster
+
+fn wpixel(state: u64, i: u64, x: u64, y: u64, color: u64) {
+    let w: u64 = wg(state, i, W_W)
+    if x >= w || y >= wg(state, i, W_H) {
+        return
+    }
+    __mmio_write32((wg(state, i, W_BUF) +% y *% w *% 4 +% x *% 4)
+        as *mut u32, color as u32)
+}
+
+fn wget(state: u64, i: u64, x: u64, y: u64) -> u64 {
+    let w: u64 = wg(state, i, W_W)
+    if x >= w || y >= wg(state, i, W_H) {
+        return 0
+    }
+    return __mmio_read32((wg(state, i, W_BUF) +% y *% w *% 4 +% x *% 4)
+        as *mut u32) as u64
+}
+
+fn fill(state: u64, i: u64, x: u64, y: u64, w: u64, h: u64, color: u64) {
+    if !valid(state, i) {
+        return
+    }
+    let ww: u64 = wg(state, i, W_W)
+    let wh: u64 = wg(state, i, W_H)
+    if x >= ww || y >= wh {
+        return
+    }
+    var bw: u64 = w
+    var bh: u64 = h
+    if x + bw > ww {
+        bw = ww - x
+    }
+    if y + bh > wh {
+        bh = wh - y
+    }
+    var r: u64 = 0
+    while r < bh {
+        let p: u64 = wg(state, i, W_BUF) +% (y + r) *% ww *% 4 +% x *% 4
+        fill_words(p, (color & 0xFFFFFFFF) | ((color & 0xFFFFFFFF) << 32),
+            bw / 2)
+        if (bw & 1) != 0 {
+            __mmio_write32((p +% (bw - 1) *% 4) as *mut u32, color as u32)
+        }
+        r = r + 1
+    }
+}
+
+fn fill_words(p: u64, value: u64, words: u64) {
+    if words == 0 {
+        return
+    }
+    asm("cld\nrep stosq", in("rdi") p, in("rax") value, in("rcx") words,
+        clobber("rdi"), clobber("rcx"), clobber("memory"))
+}
+
+fn copy_words(dst: u64, src: u64, words: u64) {
+    if words == 0 {
+        return
+    }
+    asm("cld\nrep movsq", in("rdi") dst, in("rsi") src, in("rcx") words,
+        clobber("rdi"), clobber("rsi"), clobber("rcx"), clobber("memory"))
+}
+
+// Eine Farbe mit Deckkraft ueber eine andere. Ganzzahlig und ohne
+// Rundungsbeiwerk -- `tools/ttf/raster.py` und `tools/gfx/schau.py`
+// rechnen dieselbe Zeile, sonst waere ein bildpunktgenauer Vergleich
+// eines kantengeglaetteten Zeichens nicht moeglich.
+fn blend(alt: u64, neu: u64, a: u64) -> u64 {
+    if a == 0 {
+        return alt
+    }
+    if a >= 255 {
+        return neu
+    }
+    let ia: u64 = 255 - a
+    let r: u64 = (((alt >> 16) & 0xFF) * ia + ((neu >> 16) & 0xFF) * a) / 255
+    let g: u64 = (((alt >> 8) & 0xFF) * ia + ((neu >> 8) & 0xFF) * a) / 255
+    let b: u64 = ((alt & 0xFF) * ia + (neu & 0xFF) * a) / 255
+    return (r << 16) | (g << 8) | b
+}
+
+// Eine Zeile Text in ein Fenster, mit Kantenglaettung und
+// Unterschneidung. `y` ist die GRUNDLINIE, nicht die Oberkante -- das
+// ist die Groesse, mit der Schriften rechnen, und die einzige, an der
+// zwei Schriftgroessen nebeneinander stehen koennen.
+fn text(state: u64, i: u64, f: u64, px: u64, x: i64, y: i64, p: u64,
+    n: u64, color: u64) -> i64 {
+    if !valid(state, i) || f >= ttf.MAX_FONTS {
+        return x
+    }
+    var cx: i64 = x * 64
+    var vorher: u64 = 0
+    var k: u64 = 0
+    while k < n {
+        let c: u64 = kstate.get8(p + k)
+        if c == 0 {
+            k = n
+        } else {
+            let gid: u64 = ttf.glyph_of(state, f, c)
+            if vorher != 0 {
+                cx = cx + ttf.kern26(state, f, vorher, gid, px)
+            }
+            let slot: u64 = ttf.glyph(state, f, c, px)
+            if slot < ttf.SLOTS {
+                draw_glyph(state, i, slot, cx >> 6, y, color)
+                cx = cx + ttf.g_adv(state, slot)
+            } else {
+                cx = cx + ttf.advance26(state, f, gid, px)
+            }
+            vorher = gid
+            k = k + 1
+        }
+    }
+    return cx >> 6
+}
+
+fn draw_glyph(state: u64, i: u64, slot: u64, x: i64, y: i64, color: u64) {
+    draw_glyph_clip(state, i, slot, x, y, color, 0,
+        wg(state, i, W_W) as i64)
+}
+
+// EINE GLYPHE, AUF EINEN SENKRECHTEN STREIFEN BESCHNITTEN.
+//
+// Im Terminal ist der Streifen die ZELLE, und das ist keine Feinheit:
+// DejaVu Sans Mono hat bei sechzehn Bildpunkten eine Laufweite von
+// 9,625, die Zelle ist also zehn breit -- und 'W', 'V' und 'M' sind
+// BREITER als zehn. Ohne Beschnitt ragen sie in die naechste Zelle,
+// und sobald dort ein Zeichen geschrieben wird, loescht dessen
+// Hintergrund die Haelfte des vorigen wieder weg. Gemessen: von 1413
+// Tintenpunkten einer Zeile waren 146 falsch, und alle davon standen am
+// rechten Rand eines breiten Buchstabens. Mit Beschnitt sind es null,
+// und das Bild zeigt, was ein Terminal zeigt.
+fn draw_glyph_clip(state: u64, i: u64, slot: u64, x: i64, y: i64,
+    color: u64, cx0: i64, cx1: i64) {
+    let gw: u64 = ttf.g_w(state, slot)
+    let gh: u64 = ttf.g_h(state, slot)
+    if gw == 0 || gh == 0 {
+        return
+    }
+    let x0: i64 = x + ttf.g_left(state, slot)
+    let y0: i64 = y - ttf.g_top(state, slot)
+    var ww: i64 = wg(state, i, W_W) as i64
+    let wh: i64 = wg(state, i, W_H) as i64
+    var lo: i64 = cx0
+    if lo < 0 {
+        lo = 0
+    }
+    if cx1 < ww {
+        ww = cx1
+    }
+    var r: u64 = 0
+    while r < gh {
+        let py: i64 = y0 + r as i64
+        if py >= 0 && py < wh {
+            var c: u64 = 0
+            while c < gw {
+                let pxx: i64 = x0 + c as i64
+                if pxx >= lo && pxx < ww {
+                    let a: u64 = ttf.g_pixel(state, slot, c, r)
+                    if a != 0 {
+                        wpixel(state, i, pxx as u64, py as u64,
+                            blend(wget(state, i, pxx as u64, py as u64),
+                                color, a))
+                    }
+                }
+                c = c + 1
+            }
+        }
+        r = r + 1
+    }
+}
+
+// Ein Rechteck aus fremdem Speicher in ein Fenster -- das, was eine
+// Anwendung braucht, die selbst malt.
+fn blit_in(state: u64, i: u64, src: u64, x: u64, y: u64, w: u64,
+    h: u64) -> u64 {
+    if !valid(state, i) {
+        return 0
+    }
+    let ww: u64 = wg(state, i, W_W)
+    if x >= ww || y >= wg(state, i, W_H) {
+        return 0
+    }
+    var bw: u64 = w
+    var bh: u64 = h
+    if x + bw > ww {
+        bw = ww - x
+    }
+    if y + bh > wg(state, i, W_H) {
+        bh = wg(state, i, W_H) - y
+    }
+    var r: u64 = 0
+    while r < bh {
+        copy_words(wg(state, i, W_BUF) +% (y + r) *% ww *% 4 +% x *% 4,
+            src +% r *% w *% 4, bw *% 4 / 8)
+        if (bw & 1) != 0 {
+            __mmio_write32((wg(state, i, W_BUF) +% (y + r) *% ww *% 4
+                +% (x + bw - 1) *% 4) as *mut u32,
+                __mmio_read32((src +% r *% w *% 4 +% (bw - 1) *% 4)
+                    as *mut u32))
+        }
+        r = r + 1
+    }
+    return bw * bh
+}
+
+fn flush_win(state: u64, i: u64) {
+    if !valid(state, i) {
+        return
+    }
+    damage_win(state, i)
+}
+
+// ------------------------------------------------- das Zusammensetzen
+
+// Der Zeiger. Achtzehn Zeilen zu zwoelf Bildpunkten, als zwei
+// Bitmasken je Zeile: Umriss und Fuellung. Warum von Hand und nicht als
+// Bilddatei: es sind 72 Oktette, und ein Zeiger, der aus einer Datei
+// kommt, fehlt genau dann, wenn man ihn zum Suchen des Fehlers braucht.
+const CUR_W: u64 = 12
+const CUR_H: u64 = 18
+
+fn cursor_row(r: u64, fuell: bool) -> u64 {
+    // Bit 11 ist links.
+    var umriss: [u8; 37] = b"\x08\x00\x0c\x00\x0a\x00\x09\x00\x08\x80\x08\x40\x08\x20\x08\x10\x08\x08\x08\x04\x08\x02\x0b\xff\x0c\x88\x0a\x48\x02\x48\x01\x24\x01\x24\x00\xfc\x00"
+    var innen: [u8; 37] = b"\x00\x00\x00\x00\x04\x00\x06\x00\x07\x00\x07\x80\x07\xc0\x07\xe0\x07\xf0\x07\xf8\x07\xfc\x04\x00\x03\x70\x01\xb0\x01\xb0\x00\xd8\x00\xd8\x00\x00\x00"
+    if r >= CUR_H {
+        return 0
+    }
+    if fuell {
+        let pi: u64 = (&innen[0]) as u64 + r * 2
+        return (kstate.get8(pi) << 8) | kstate.get8(pi + 1)
+    }
+    let pu: u64 = (&umriss[0]) as u64 + r * 2
+    return (kstate.get8(pu) << 8) | kstate.get8(pu + 1)
+}
+
+// Eine Bildzeile des zusammengesetzten Bildes. Der Hintergrund, dann
+// von unten nach oben jedes Fenster, das diese Stelle beruehrt.
+fn compose(state: u64) -> u64 {
+    if !ready(state) || !fb.ready(state) {
+        return 0
+    }
+    if gs(state, S_DON) == 0 {
+        return 0
+    }
+    let x0: u64 = gs(state, S_DX0)
+    let y0: u64 = gs(state, S_DY0)
+    let x1: u64 = gs(state, S_DX1)
+    let y1: u64 = gs(state, S_DY1)
+    ss(state, S_DON, 0)
+    if x1 <= x0 || y1 <= y0 {
+        return 0
+    }
+    // 1. der Hintergrund
+    fb.fill(state, x0, y0, x1 - x0, y1 - y0, gs(state, S_DESK))
+    // 2. die Fenster, von unten nach oben
+    var z: u64 = 0
+    while z < gs(state, S_COUNT) {
+        let i: u64 = at_z(state, z)
+        if i < MAX_WIN {
+            paint_win(state, i, x0, y0, x1, y1)
+        }
+        z = z + 1
+    }
+    // 3. der Zeiger, ganz oben
+    if gs(state, S_CURON) != 0 {
+        paint_cursor(state, x0, y0, x1, y1)
+    }
+    fb.dirty(state, y0, y1)
+    fb.flush(state)
+    ss(state, S_COMPOSITES, gs(state, S_COMPOSITES) + 1)
+    ss(state, S_PIXELS, gs(state, S_PIXELS) + (x1 - x0) * (y1 - y0))
+    return (x1 - x0) * (y1 - y0)
+}
+
+// WIE VIELE TASTEN BEI DIESEM FENSTER ANGEKOMMEN SIND. Die Zahl ist die
+// Gegenprobe zum Eingabefokus: mit Fokus MUSS sie beim unbeteiligten
+// Fenster null sein, mit `nofocus` MUSS sie es nicht sein. Ohne diese
+// zwei Zahlen waere "die Taste geht an das richtige Fenster" eine
+// Behauptung ueber etwas, das man im Bild nicht sieht.
+fn win_keys(state: u64, i: u64) -> u64 {
+    if i >= MAX_WIN {
+        return 0
+    }
+    return wg(state, i, W_KEYS)
+}
+
+fn downs(state: u64) -> u64 {
+    return gs(state, S_DOWNS)
+}
+
+fn moves_seen(state: u64) -> u64 {
+    return gs(state, S_MOVES)
+}
+
+fn hits_seen(state: u64) -> u64 {
+    return gs(state, S_HITS)
+}
+
+fn imax(a: i64, b: i64) -> i64 {
+    if a > b {
+        return a
+    }
+    return b
+}
+
+fn imin(a: i64, b: i64) -> i64 {
+    if a < b {
+        return a
+    }
+    return b
+}
+
+// Ein Fenster in den schmutzigen Bereich. Rahmen, Titelleiste,
+// Schliessfeld, Groessengriff -- und dann die Flaeche der Anwendung.
+fn paint_win(state: u64, i: u64, cx0: u64, cy0: u64, cx1: u64, cy1: u64) {
+    let wx: i64 = win_x(state, i)
+    let wy: i64 = win_y(state, i)
+    let ow: i64 = outer_w(state, i) as i64
+    let oh: i64 = outer_h(state, i) as i64
+    let ax0: i64 = imax(wx, cx0 as i64)
+    let ay0: i64 = imax(wy, cy0 as i64)
+    let ax1: i64 = imin(wx + ow, cx1 as i64)
+    let ay1: i64 = imin(wy + oh, cy1 as i64)
+    if ax1 <= ax0 || ay1 <= ay0 {
+        return
+    }
+    let aktiv: bool = focus(state) == i
+    var rahmen: u64 = fb.rgb(state, 0x3A, 0x46, 0x54)
+    var leiste: u64 = fb.rgb(state, 0x2C, 0x38, 0x48)
+    var schrift: u64 = fb.rgb(state, 0x90, 0x9C, 0xA8)
+    if aktiv {
+        rahmen = fb.rgb(state, 0x4C, 0x9A, 0xE8)
+        leiste = fb.rgb(state, 0x1C, 0x4E, 0x7E)
+        schrift = fb.rgb(state, 0xFF, 0xFF, 0xFF)
+    }
+    // Der ganze Aussenbereich in Rahmenfarbe, danach die Leiste und die
+    // Flaeche darueber. Das ist ein Rechteck mehr als noetig und spart
+    // vier Sonderfaelle an den Ecken.
+    fb.fill(state, ax0 as u64, ay0 as u64, (ax1 - ax0) as u64,
+        (ay1 - ay0) as u64, rahmen)
+    // die Titelleiste
+    let tx0: i64 = imax(wx + BORDER as i64, ax0)
+    let tx1: i64 = imin(wx + ow - BORDER as i64, ax1)
+    let ty0: i64 = imax(wy + BORDER as i64, ay0)
+    let ty1: i64 = imin(wy + TITLE_H as i64 - 1, ay1)
+    if tx1 > tx0 && ty1 > ty0 {
+        fb.fill(state, tx0 as u64, ty0 as u64, (tx1 - tx0) as u64,
+            (ty1 - ty0) as u64, leiste)
+    }
+    // das Schliessfeld: ein Kreuz aus zwei Linien in einem Feld
+    let bx: i64 = wx + ow - BORDER as i64 - CLOSE_W as i64 - 3
+    let by: i64 = wy + 4
+    if bx + CLOSE_W as i64 > ax0 && bx < ax1 && by + CLOSE_W as i64 > ay0 {
+        let rot: u64 = fb.rgb(state, 0xD0, 0x40, 0x40)
+        fb.fill(state, bx as u64, by as u64, CLOSE_W, CLOSE_W, rot)
+        let weiss: u64 = fb.rgb(state, 0xFF, 0xFF, 0xFF)
+        var k: u64 = 3
+        while k < CLOSE_W - 3 {
+            fb.pixel(state, (bx + k as i64) as u64, (by + k as i64) as u64,
+                weiss)
+            fb.pixel(state, (bx + k as i64) as u64,
+                (by + (CLOSE_W - 1 - k) as i64) as u64, weiss)
+            k = k + 1
+        }
+    }
+    // der Titel
+    let f: u64 = gs(state, S_FONT_UI)
+    if f < ttf.MAX_FONTS {
+        title_text(state, i, f, wx + BORDER as i64 + 5,
+            wy + BORDER as i64 + ttf.ascent(state, f, gs(state, S_PX_UI)),
+            schrift, ax0, ay0, ax1, ay1, bx)
+    }
+    // die Flaeche der Anwendung
+    let px0: i64 = wx + BORDER as i64
+    let py0: i64 = wy + TITLE_H as i64
+    let sx0: i64 = imax(px0, ax0)
+    let sy0: i64 = imax(py0, ay0)
+    let sx1: i64 = imin(px0 + wg(state, i, W_W) as i64, ax1)
+    let sy1: i64 = imin(py0 + wg(state, i, W_H) as i64, ay1)
+    if sx1 <= sx0 || sy1 <= sy0 {
+        return
+    }
+    let ww: u64 = wg(state, i, W_W)
+    let quelle: u64 = wg(state, i, W_BUF)
+    let n: u64 = (sx1 - sx0) as u64
+    var r: i64 = sy0
+    while r < sy1 {
+        let zeile: u64 = (r - py0) as u64
+        let spalte: u64 = (sx0 - px0) as u64
+        fb_row(state, sx0 as u64, r as u64,
+            quelle +% zeile *% ww *% 4 +% spalte *% 4, n)
+        r = r + 1
+    }
+    ss(state, S_BLITS, gs(state, S_BLITS) + 1)
+}
+
+// Eine Bildzeile aus einem Fensterpuffer in den Zweitpuffer des
+// Bildschirms. Ueber `rep movsq`, wie alles andere in `fb.fi` -- eine
+// Schleife aus Einzelzugriffen kostete dort gemessen den Faktor acht.
+fn fb_row(state: u64, x: u64, y: u64, src: u64, n: u64) {
+    let ziel: u64 = fb.draw_at(state) +% y *% fb.pitch(state) +% x *% 4
+    copy_words(ziel, src, n *% 4 / 8)
+    if (n & 1) != 0 {
+        __mmio_write32((ziel +% (n - 1) *% 4) as *mut u32,
+            __mmio_read32((src +% (n - 1) *% 4) as *mut u32))
+    }
+}
+
+// Der Titel, auf die Breite bis zum Schliessfeld beschnitten.
+fn title_text(state: u64, i: u64, f: u64, x: i64, y: i64, color: u64,
+    ax0: i64, ay0: i64, ax1: i64, ay1: i64, grenze: i64) {
+    let px: u64 = gs(state, S_PX_UI)
+    var cx: i64 = x * 64
+    var vorher: u64 = 0
+    var k: u64 = 0
+    while k < 31 {
+        let c: u64 = kstate.get8(state + kstate.WM_OFF + wat(i) + W_TITLE + k)
+        if c == 0 {
+            k = 31
+        } else {
+            let gid: u64 = ttf.glyph_of(state, f, c)
+            if vorher != 0 {
+                cx = cx + ttf.kern26(state, f, vorher, gid, px)
+            }
+            let slot: u64 = ttf.glyph(state, f, c, px)
+            if slot < ttf.SLOTS {
+                if (cx >> 6) + ttf.g_w(state, slot) as i64 > grenze - 4 {
+                    return
+                }
+                fb_glyph(state, slot, cx >> 6, y, color, ax0, ay0, ax1, ay1)
+                cx = cx + ttf.g_adv(state, slot)
+            } else {
+                cx = cx + ttf.advance26(state, f, gid, px)
+            }
+            vorher = gid
+            k = k + 1
+        }
+    }
+}
+
+// Eine Glyphe unmittelbar in den Zweitpuffer -- fuer alles, was der
+// SERVER malt (Titel), nicht die Anwendung.
+fn fb_glyph(state: u64, slot: u64, x: i64, y: i64, color: u64,
+    ax0: i64, ay0: i64, ax1: i64, ay1: i64) {
+    let gw: u64 = ttf.g_w(state, slot)
+    let gh: u64 = ttf.g_h(state, slot)
+    let x0: i64 = x + ttf.g_left(state, slot)
+    let y0: i64 = y - ttf.g_top(state, slot)
+    var r: u64 = 0
+    while r < gh {
+        let py: i64 = y0 + r as i64
+        if py >= ay0 && py < ay1 {
+            var c: u64 = 0
+            while c < gw {
+                let pxx: i64 = x0 + c as i64
+                if pxx >= ax0 && pxx < ax1 {
+                    let a: u64 = ttf.g_pixel(state, slot, c, r)
+                    if a != 0 {
+                        fb.pixel(state, pxx as u64, py as u64,
+                            blend(fb.get_pixel(state, pxx as u64,
+                                py as u64), color, a))
+                    }
+                }
+                c = c + 1
+            }
+        }
+        r = r + 1
+    }
+}
+
+fn paint_cursor(state: u64, cx0: u64, cy0: u64, cx1: u64, cy1: u64) {
+    let mx: i64 = gs(state, S_CURX) as i64
+    let my: i64 = gs(state, S_CURY) as i64
+    let schwarz: u64 = fb.rgb(state, 0, 0, 0)
+    let weiss: u64 = fb.rgb(state, 0xFF, 0xFF, 0xFF)
+    var r: u64 = 0
+    while r < CUR_H {
+        let py: i64 = my + r as i64
+        if py >= cy0 as i64 && py < cy1 as i64 {
+            let u: u64 = cursor_row(r, false)
+            let f: u64 = cursor_row(r, true)
+            var c: u64 = 0
+            while c < CUR_W {
+                let pxx: i64 = mx + c as i64
+                if pxx >= cx0 as i64 && pxx < cx1 as i64 {
+                    let bit: u64 = 1 << (11 - c)
+                    if (f & bit) != 0 {
+                        fb.pixel(state, pxx as u64, py as u64, weiss)
+                    } else {
+                        if (u & bit) != 0 {
+                            fb.pixel(state, pxx as u64, py as u64, schwarz)
+                        }
+                    }
+                }
+                c = c + 1
+            }
+        }
+        r = r + 1
+    }
+}
+
+// ------------------------------------------------------- die Ereignisse
+
+fn ev_at(state: u64, i: u64, k: u64) -> u64 {
+    return state + kstate.WM_OFF + EV_OFF + i * EV_RING + (k % EV_SLOTS) * EV_BYTES
+}
+
+fn ev_push(state: u64, i: u64, typ: u64, a: u64, b: u64, c: u64) {
+    if !valid(state, i) {
+        return
+    }
+    let kopf: u64 = wg(state, i, W_EHEAD)
+    if kopf - wg(state, i, W_ETAIL) >= EV_SLOTS {
+        // Ein Ring, der ueberlaeuft, verliert das AELTESTE. Eine
+        // Anwendung, die nicht abholt, soll nicht den Server anhalten.
+        wsv(state, i, W_ETAIL, wg(state, i, W_ETAIL) + 1)
+        ss(state, S_EVDROP, gs(state, S_EVDROP) + 1)
+    }
+    if typ == E_KEY {
+        wsv(state, i, W_KEYS, wg(state, i, W_KEYS) + 1)
+    }
+    let p: u64 = ev_at(state, i, kopf)
+    kstate.set(p, 0, typ)
+    kstate.set(p, 8, ((a & 0xFFFF) << 32) | ((b & 0xFFFF) << 16) | (c & 0xFFFF))
+    wsv(state, i, W_EHEAD, kopf + 1)
+}
+
+fn ev_waiting(state: u64, i: u64) -> u64 {
+    if !valid(state, i) {
+        return 0
+    }
+    return wg(state, i, W_EHEAD) - wg(state, i, W_ETAIL)
+}
+
+// Holt ein Ereignis. `out` bekommt zwei Achtoktettworte: Art und Daten.
+fn ev_pop(state: u64, i: u64, out: u64) -> bool {
+    if ev_waiting(state, i) == 0 {
+        return false
+    }
+    let schwanz: u64 = wg(state, i, W_ETAIL)
+    let p: u64 = ev_at(state, i, schwanz)
+    kstate.set(out, 0, kstate.get(p, 0))
+    kstate.set(out, 8, kstate.get(p, 8))
+    wsv(state, i, W_ETAIL, schwanz + 1)
+    return true
+}
+
+// ------------------------------------------------------- die Eingabe
+
+// Welches Fenster liegt an dieser Stelle -- das OBERSTE. Gibt MAX_WIN,
+// wenn dort der Hintergrund ist.
+fn hit(state: u64, x: i64, y: i64) -> u64 {
+    var z: u64 = gs(state, S_COUNT)
+    while z > 0 {
+        z = z - 1
+        let i: u64 = at_z(state, z)
+        if i < MAX_WIN {
+            let rx: i64 = win_x(state, i) + outer_w(state, i) as i64
+            let ry: i64 = win_y(state, i) + outer_h(state, i) as i64
+            if x >= win_x(state, i) && y >= win_y(state, i) {
+                if x < rx && y < ry {
+                    return i
+                }
+            }
+        }
+    }
+    return MAX_WIN
+}
+
+// Der Zeiger hat sich bewegt oder eine Taste gewechselt. Wird aus der
+// Unterbrechungsbehandlung heraus gerufen; alles, was hier passiert,
+// muss ohne Warten auskommen.
+fn on_mouse(state: u64) {
+    if !ready(state) {
+        return
+    }
+    let nx: u64 = ps2m.x(state)
+    let ny: u64 = ps2m.y(state)
+    let ox: u64 = gs(state, S_CURX)
+    let oy: u64 = gs(state, S_CURY)
+    let btn: u64 = ps2m.buttons(state)
+    if nx != ox || ny != oy {
+        // DIE WIEDERHERSTELLUNG DES HINTERGRUNDS. Beide Rechtecke --
+        // das alte und das neue -- werden schmutzig; `compose` malt
+        // dort den Hintergrund und die Fenster neu und danach den
+        // Zeiger. Ein gerettetes Rechteck waere der zweite Weg dahin
+        // und muesste bei jedem Fensterwechsel nachgezogen werden.
+        damage(state, ox as i64, oy as i64, (ox + CUR_W) as i64,
+            (oy + CUR_H) as i64)
+        ss(state, S_CURX, nx)
+        ss(state, S_CURY, ny)
+        damage(state, nx as i64, ny as i64, (nx + CUR_W) as i64,
+            (ny + CUR_H) as i64)
+    }
+    let x: i64 = nx as i64
+    let y: i64 = ny as i64
+    // Ziehen
+    if gs(state, S_DRAG) != 0 {
+        let i: u64 = gs(state, S_DRAG) - 1
+        if (btn & ps2m.B_LEFT) == 0 {
+            ss(state, S_DRAG, 0)
+        } else {
+            move_win(state, i, x - gs(state, S_DRAGX) as i64,
+                y - gs(state, S_DRAGY) as i64)
+            return
+        }
+    }
+    if gs(state, S_SIZING) != 0 {
+        let i: u64 = gs(state, S_SIZING) - 1
+        if (btn & ps2m.B_LEFT) == 0 {
+            ss(state, S_SIZING, 0)
+        } else {
+            var nw: i64 = x - win_x(state, i) - BORDER as i64
+            var nh: i64 = y - win_y(state, i) - TITLE_H as i64
+            if nw < 32 {
+                nw = 32
+            }
+            if nh < 16 {
+                nh = 16
+            }
+            resize_win(state, i, nw as u64, nh as u64)
+            return
+        }
+    }
+    ss(state, S_MOVES, gs(state, S_MOVES) + 1)
+    let i: u64 = hit(state, x, y)
+    if i >= MAX_WIN {
+        return
+    }
+    ss(state, S_HITS, gs(state, S_HITS) + 1)
+    let lokal_x: i64 = x - win_x(state, i) - BORDER as i64
+    let lokal_y: i64 = y - win_y(state, i) - TITLE_H as i64
+    // Tastenwechsel erkennen: `ps2m` fuehrt den Zustand, hier steht der
+    // zuletzt GESEHENE.
+    let alt: u64 = gs(state, S_KEYS) & 7
+    if btn != alt {
+        ss(state, S_KEYS, (gs(state, S_KEYS) & ~7) | btn)
+        if (btn & ps2m.B_LEFT) != 0 && (alt & ps2m.B_LEFT) == 0 {
+            raise_win(state, i)
+            set_focus(state, i)
+            // Schliessfeld?
+            let bx: i64 = win_x(state, i) + outer_w(state, i) as i64
+                - BORDER as i64 - CLOSE_W as i64 - 3
+            let by: i64 = win_y(state, i) + 4
+            let im_feld: bool = x >= bx && x < bx + CLOSE_W as i64
+            let im_feld2: bool = y >= by && y < by + CLOSE_W as i64
+            if im_feld && im_feld2 {
+                ev_push(state, i, E_CLOSE, 0, 0, 0)
+                destroy(state, i)
+                return
+            }
+            if lokal_y < 0 {
+                // die Titelleiste: ziehen
+                ss(state, S_DRAG, i + 1)
+                ss(state, S_DRAGX, (x - win_x(state, i)) as u64)
+                ss(state, S_DRAGY, (y - win_y(state, i)) as u64)
+                return
+            }
+            // der Griff unten rechts
+            let gx: bool = lokal_x >= wg(state, i, W_W) as i64 - GRIP as i64
+            let gy: bool = lokal_y >= wg(state, i, W_H) as i64 - GRIP as i64
+            if gx && gy {
+                ss(state, S_SIZING, i + 1)
+                return
+            }
+            ss(state, S_DOWNS, gs(state, S_DOWNS) + 1)
+            ev_push(state, i, E_DOWN, lokal_x as u64, lokal_y as u64, btn)
+            return
+        }
+        if (btn & ps2m.B_LEFT) == 0 && (alt & ps2m.B_LEFT) != 0 {
+            ev_push(state, i, E_UP, lokal_x as u64, lokal_y as u64, alt)
+            return
+        }
+    }
+    if lokal_x >= 0 && lokal_y >= 0 {
+        ev_push(state, i, E_MOVE, lokal_x as u64, lokal_y as u64, btn)
+    }
+}
+
+// Eine Taste. Sie geht an das Fenster mit dem EINGABEFOKUS -- und mit
+// `nofocus` an alle, damit die Zusage darueber etwas wert ist.
+fn on_key(state: u64, c: u64) {
+    if !ready(state) || c == 0 {
+        return
+    }
+    if gs(state, S_NOFOCUS) != 0 {
+        var i: u64 = 0
+        while i < MAX_WIN {
+            if wg(state, i, W_USED) != 0 {
+                ev_push(state, i, E_KEY, c, 0, 0)
+            }
+            i = i + 1
+        }
+        return
+    }
+    let f: u64 = focus(state)
+    if f < MAX_WIN {
+        ev_push(state, f, E_KEY, c, 0, 0)
+    }
+}
+
+// Wird aus der Hauptschleife gerufen: hat sich am Zeiger etwas getan?
+fn poll(state: u64) -> bool {
+    if !ready(state) {
+        return false
+    }
+    // DER RUECKFALL AUF ABFRAGE, und er steht hier mit Begruendung.
+    //
+    // Der Baustein meldet ueber IRQ 12, und das ist der Weg, den dieser
+    // Treiber geht. Es gibt aber einen Zustand, in dem die Unterbrechung
+    // AUSBLEIBT und trotzdem ein Oktett bereitliegt: das Zustandstor
+    // sagt dann "Ausgabepuffer voll" (Bit 0) und "vom zweiten Anschluss"
+    // (Bit 5). Wer nur auf die Unterbrechung wartet, hat dann einen
+    // Zeiger, der stehenbleibt, und keinen Hinweis darauf, warum.
+    //
+    // Also wird hier NACHGESEHEN. Wie viele Oktette auf welchem der
+    // beiden Wege kamen, steht in `irqs` und `polls` und wird gemeldet
+    // -- eine Abfrage, die als Unterbrechung ausgegeben wird, waere eine
+    // Luege ueber den Treiber.
+    if ps2m.present(state) && ps2m.polling(state) {
+        var n: u64 = 0
+        while n < 64 && ps2m.poll_one(state) {
+            // NACH JEDEM VOLLSTAENDIGEN PAKET, nicht am Ende des
+            // Stapels: ein Druck und das Loslassen danach sind zwei
+            // Pakete, und wer beide zusammen abholt und DANN nachsieht,
+            // findet die Taste wieder oben und hat den Klick verloren.
+            if ps2m.changed(state) {
+                ps2m.take_change(state)
+                on_mouse(state)
+            }
+            n = n + 1
+        }
+    }
+    if !ps2m.changed(state) {
+        return false
+    }
+    ps2m.take_change(state)
+    on_mouse(state)
+    return true
+}
+
+// ------------------------------------------------------ das Terminal
+//
+// Ein Fenster mit einem ZEICHENRASTER. Die Anwendung schickt Oktette,
+// der Server fuehrt dieselbe Zustandsmaschine wie `fb.putc` (Umbruch,
+// Rollen, Tabulator, Ruecktaste) und malt die Zellen mit der
+// Festbreitenschrift. Damit kann eine Shell in einem Fenster laufen,
+// ohne von Schriften etwas zu wissen.
+
+fn term_setup(state: u64, i: u64) {
+    let f: u64 = gs(state, S_FONT_MONO)
+    var cw: u64 = 8
+    var ch: u64 = 16
+    if f < ttf.MAX_FONTS {
+        let px: u64 = gs(state, S_PX_MONO)
+        let gid: u64 = ttf.glyph_of(state, f, 0x4D) // 'M'
+        cw = ((ttf.advance26(state, f, gid, px) + 63) >> 6) as u64
+        ch = ttf.line_height(state, f, px)
+    }
+    if cw == 0 {
+        cw = 8
+    }
+    if ch == 0 {
+        ch = 16
+    }
+    wsv(state, i, W_CELLW, cw)
+    wsv(state, i, W_CELLH, ch)
+    let cols: u64 = wg(state, i, W_W) / cw
+    let rows: u64 = wg(state, i, W_H) / ch
+    wsv(state, i, W_COLS, cols)
+    wsv(state, i, W_ROWS, rows)
+    wsv(state, i, W_CX, 0)
+    wsv(state, i, W_CY, 0)
+    if wg(state, i, W_GRID) == 0 {
+        let g: u64 = mem.frame_run(state, 1)
+        wsv(state, i, W_GRID, g)
+    }
+    let g: u64 = wg(state, i, W_GRID)
+    if g != 0 {
+        var k: u64 = 0
+        while k < cols * rows && k < 4096 {
+            kstate.set8(g + k, 32 as u8)
+            k = k + 1
+        }
+    }
+    fill(state, i, 0, 0, wg(state, i, W_W), wg(state, i, W_H),
+        wg(state, i, W_BG))
+}
+
+fn cell_set(state: u64, i: u64, c: u64, r: u64, ch: u64) {
+    let g: u64 = wg(state, i, W_GRID)
+    if g == 0 {
+        return
+    }
+    let k: u64 = r * wg(state, i, W_COLS) + c
+    if k >= 4096 {
+        return
+    }
+    kstate.set8(g + k, ch as u8)
+}
+
+fn cell_get(state: u64, i: u64, c: u64, r: u64) -> u64 {
+    let g: u64 = wg(state, i, W_GRID)
+    if g == 0 {
+        return 32
+    }
+    let k: u64 = r * wg(state, i, W_COLS) + c
+    if k >= 4096 {
+        return 32
+    }
+    return kstate.get8(g + k)
+}
+
+fn cell_paint(state: u64, i: u64, c: u64, r: u64) {
+    let cw: u64 = wg(state, i, W_CELLW)
+    let ch: u64 = wg(state, i, W_CELLH)
+    let f: u64 = gs(state, S_FONT_MONO)
+    fill(state, i, c * cw, r * ch, cw, ch, wg(state, i, W_BG))
+    let z: u64 = cell_get(state, i, c, r)
+    if z <= 32 || f >= ttf.MAX_FONTS {
+        return
+    }
+    let px: u64 = gs(state, S_PX_MONO)
+    let slot: u64 = ttf.glyph(state, f, z, px)
+    if slot < ttf.SLOTS {
+        draw_glyph_clip(state, i, slot, (c * cw) as i64,
+            (r * ch) as i64 + ttf.ascent(state, f, px), wg(state, i, W_FG),
+            (c * cw) as i64, ((c + 1) * cw) as i64)
+    }
+}
+
+fn term_scroll(state: u64, i: u64) {
+    let cols: u64 = wg(state, i, W_COLS)
+    let rows: u64 = wg(state, i, W_ROWS)
+    var r: u64 = 1
+    while r < rows {
+        var c: u64 = 0
+        while c < cols {
+            cell_set(state, i, c, r - 1, cell_get(state, i, c, r))
+            c = c + 1
+        }
+        r = r + 1
+    }
+    var c2: u64 = 0
+    while c2 < cols {
+        cell_set(state, i, c2, rows - 1, 32)
+        c2 = c2 + 1
+    }
+    // Der Bildinhalt wandert mit -- eine Zeile nach oben, statt alle
+    // Zellen neu zu malen. Das ist derselbe Griff wie in `fb.scroll`.
+    let cw: u64 = wg(state, i, W_CELLW)
+    let ch: u64 = wg(state, i, W_CELLH)
+    let ww: u64 = wg(state, i, W_W)
+    let buf: u64 = wg(state, i, W_BUF)
+    var y: u64 = 0
+    while y + ch < rows * ch {
+        copy_words(buf +% y *% ww *% 4, buf +% (y + ch) *% ww *% 4,
+            ww *% 4 / 8)
+        y = y + 1
+    }
+    fill(state, i, 0, (rows - 1) * ch, ww, ch, wg(state, i, W_BG))
+}
+
+fn term_putc(state: u64, i: u64, ch: u64) {
+    let cols: u64 = wg(state, i, W_COLS)
+    let rows: u64 = wg(state, i, W_ROWS)
+    if cols == 0 || rows == 0 {
+        return
+    }
+    var cx: u64 = wg(state, i, W_CX)
+    var cy: u64 = wg(state, i, W_CY)
+    if ch == 13 {
+        wsv(state, i, W_CX, 0)
+        return
+    }
+    if ch == 10 {
+        cx = 0
+        cy = cy + 1
+        if cy >= rows {
+            term_scroll(state, i)
+            cy = rows - 1
+        }
+        wsv(state, i, W_CX, cx)
+        wsv(state, i, W_CY, cy)
+        return
+    }
+    if ch == 8 {
+        if cx > 0 {
+            cx = cx - 1
+            wsv(state, i, W_CX, cx)
+            cell_set(state, i, cx, cy, 32)
+            cell_paint(state, i, cx, cy)
+        }
+        return
+    }
+    if ch == 9 {
+        var n: u64 = 8 - (cx & 7)
+        while n > 0 {
+            term_putc(state, i, 32)
+            n = n - 1
+        }
+        return
+    }
+    if ch < 32 || ch > 126 {
+        return
+    }
+    cell_set(state, i, cx, cy, ch)
+    cell_paint(state, i, cx, cy)
+    cx = cx + 1
+    if cx >= cols {
+        cx = 0
+        cy = cy + 1
+        if cy >= rows {
+            term_scroll(state, i)
+            cy = rows - 1
+        }
+        wsv(state, i, W_CY, cy)
+    }
+    wsv(state, i, W_CX, cx)
+}
+
+fn term_write(state: u64, i: u64, p: u64, n: u64) -> u64 {
+    if !valid(state, i) || wg(state, i, W_KIND) != K_TERM {
+        return 0
+    }
+    var k: u64 = 0
+    while k < n {
+        term_putc(state, i, kstate.get8(p + k))
+        k = k + 1
+    }
+    damage_win(state, i)
+    return n
+}
+
+// ------------------------------------------------------------ Zusagen
+
+// Ein Terminalfenster an ein Terminal binden. Von da an geht `tty.emit`
+// mit SINK_WINDOW hierher.
+fn bind_tty(state: u64, i: u64, t: u64) {
+    if !valid(state, i) {
+        return
+    }
+    wsv(state, i, W_TTY, t + 1)
+}
+
+fn tty_of(state: u64, i: u64) -> u64 {
+    if !valid(state, i) {
+        return NO_TTY
+    }
+    let t: u64 = wg(state, i, W_TTY)
+    if t == 0 {
+        return NO_TTY
+    }
+    return t - 1
+}
+
+// An WELCHES Terminal eine Taste geht: an das des Fensters mit dem
+// Eingabefokus, wenn das ein Terminalfenster ist -- sonst an gar keines.
+// Das ist die eine Zeile, die aus einem Bildschirm eine BEDIENBARE
+// Oberflaeche macht.
+fn key_tty(state: u64) -> u64 {
+    if !ready(state) {
+        return NO_TTY
+    }
+    let f: u64 = focus(state)
+    if f >= MAX_WIN || wg(state, f, W_KIND) != K_TERM {
+        return NO_TTY
+    }
+    return tty_of(state, f)
+}
+
+// EIN Oktett in ein Terminalfenster. Der Weg von `tty.emit`.
+fn term_out(state: u64, i: u64, c: u64) {
+    if !valid(state, i) || wg(state, i, W_KIND) != K_TERM {
+        return
+    }
+    term_putc(state, i, c)
+    damage_win(state, i)
+}
+
+fn selftest(state: u64) -> u64 {
+    if !ready(state) {
+        return 0
+    }
+    var n: u64 = 0
+    var t1: [u8; 5] = "eins\0"
+    var t2: [u8; 5] = "zwei\0"
+    // 1. Ein Fenster entsteht und hat eine Flaeche.
+    let a: u64 = create(state, 0, 40, 40, 200, 100, K_RAW, (&t1[0]) as u64)
+    if a < MAX_WIN && win_buf(state, a) != 0 {
+        n = n + 1
+    }
+    // 2. Ein zweites liegt DARUEBER -- die Stapelreihenfolge waechst.
+    let b: u64 = create(state, 0, 100, 70, 200, 100, K_RAW, (&t2[0]) as u64)
+    if b < MAX_WIN && win_z(state, b) > win_z(state, a) {
+        n = n + 1
+    }
+    // 3. Der Treffer an einer Stelle, an der sich beide ueberschneiden,
+    //    ist das OBERE. Das ist die ganze Stapelreihenfolge in einer
+    //    Zeile.
+    if hit(state, 150, 100) == b {
+        n = n + 1
+    }
+    // 4. ... und daneben das untere.
+    if hit(state, 50, 60) == a {
+        n = n + 1
+    }
+    // 5. Der Hintergrund ist kein Fenster.
+    if hit(state, 700, 500) == MAX_WIN {
+        n = n + 1
+    }
+    // 6. Heben aendert die Reihenfolge wirklich.
+    raise_win(state, a)
+    if hit(state, 150, 100) == a && win_z(state, a) > win_z(state, b) {
+        n = n + 1
+    }
+    // 7. Der Fokus liegt bei genau EINEM Fenster.
+    set_focus(state, b)
+    if focus(state) == b {
+        n = n + 1
+    }
+    // 8. Eine Taste kommt beim Fenster mit dem Fokus an -- und NUR
+    //    dort. Das ist die Zusage, die `nofocus` zum Einsturz bringt.
+    let va: u64 = ev_waiting(state, a)
+    let vb: u64 = ev_waiting(state, b)
+    on_key(state, 0x41)
+    if gs(state, S_NOFOCUS) == 0 {
+        if ev_waiting(state, b) == vb + 1 && ev_waiting(state, a) == va {
+            n = n + 1
+        }
+    } else {
+        if ev_waiting(state, b) == vb + 1 && ev_waiting(state, a) == va + 1 {
+            n = n + 1
+        }
+    }
+    // 9. Und das Ereignis traegt das Zeichen, das gedrueckt wurde.
+    var aus: [u8; 16] = [0 as u8; 16]
+    var gefunden: bool = false
+    while ev_pop(state, b, (&aus[0]) as u64) {
+        if kstate.get(((&aus[0]) as u64), 0) == E_KEY {
+            if (kstate.get(((&aus[0]) as u64), 8) >> 32) == 0x41 {
+                gefunden = true
+            }
+        }
+    }
+    if gefunden {
+        n = n + 1
+    }
+    // 10. Das Malen bleibt IM Fenster: ein Bildpunkt jenseits der Kante
+    //     wird nicht geschrieben, und der letzte darin schon.
+    fill(state, a, 0, 0, 200, 100, 0)
+    wpixel(state, a, 199, 99, 0x00FF00)
+    wpixel(state, a, 200, 99, 0xFF0000)
+    if wget(state, a, 199, 99) == 0x00FF00 && wget(state, a, 0, 0) == 0 {
+        n = n + 1
+    }
+    // 11. Verschieben aendert die Stelle, nicht den Inhalt.
+    move_win(state, a, 300, 200)
+    if win_x(state, a) == 300 && wget(state, a, 199, 99) == 0x00FF00 {
+        n = n + 1
+    }
+    // 12. Der schmutzige Bereich deckt beide Stellen -- die alte und
+    //     die neue. Ohne das bliebe ein Fenstergespenst stehen.
+    if gs(state, S_NODIRTY) == 0 {
+        if dirty_x0(state) <= 40 && dirty_x1(state) >= 300 {
+            n = n + 1
+        }
+    } else {
+        if dirty_x0(state) == 0 && dirty_x1(state) == gs(state, S_SW) {
+            n = n + 1
+        }
+    }
+    // 13. Ein Terminalfenster hat ein Raster, und ein Zeichen landet in
+    //     der Zelle, in der es landen soll.
+    var t3: [u8; 5] = "term\0"
+    let t: u64 = create(state, 0, 10, 300, 200, 100, K_TERM,
+        (&t3[0]) as u64)
+    if t < MAX_WIN && term_cols(state, t) > 4 && term_rows(state, t) > 2 {
+        n = n + 1
+    }
+    // 14. Zeilenvorschub und Umbruch bewegen die Schreibmarke.
+    if t < MAX_WIN {
+        var txt: [u8; 5] = "ab\nc\0"
+        term_write(state, t, (&txt[0]) as u64, 4)
+        if term_cx(state, t) == 1 && term_cy(state, t) == 1 {
+            n = n + 1
+        }
+    }
+    // 15. Schliessen gibt den Platz frei und schliesst die Luecke in der
+    //     Stapelreihenfolge.
+    let vorher: u64 = count(state)
+    destroy(state, b)
+    if count(state) == vorher - 1 && !valid(state, b) {
+        var luecke: bool = false
+        var z: u64 = 0
+        while z < count(state) {
+            if at_z(state, z) >= MAX_WIN {
+                luecke = true
+            }
+            z = z + 1
+        }
+        if !luecke {
+            n = n + 1
+        }
+    }
+    // 16. GROESSE AENDERN. Der Puffer wurde beim Anlegen fuer die
+    //     angefragte Flaeche geholt; kleiner geht immer, groesser nur
+    //     bis dorthin. Ein Fenster, das ueber seinen eigenen Puffer
+    //     hinauswaechst, waere ein Schreibzugriff daneben -- und der
+    //     faellt erst auf, wenn er etwas Wichtiges trifft.
+    if resize_win(state, a, 120, 60) && win_w(state, a) == 120 {
+        if !resize_win(state, a, 4096, 4096) && win_w(state, a) == 120 {
+            n = n + 1
+        }
+    }
+    // 17. Und ein Terminalfenster rechnet sein Raster dabei NEU.
+    if t < MAX_WIN {
+        let vorher_cols: u64 = term_cols(state, t)
+        if resize_win(state, t, 100, 60) {
+            if term_cols(state, t) < vorher_cols && term_cols(state, t) > 0 {
+                n = n + 1
+            }
+        }
+    }
+    if t < MAX_WIN {
+        destroy(state, t)
+    }
+    destroy(state, a)
+    damage_all(state)
+    return n
+}
+
+fn selftest_max() -> u64 {
+    return 17
+}
