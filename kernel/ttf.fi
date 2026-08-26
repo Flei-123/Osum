@@ -60,7 +60,7 @@ profile kernel
 import kstate
 
 export {
-    init, ready, load_font, fonts, arena, arena_bytes, used_bytes,
+    init, ready, load_font, fonts, glyphs, arena, arena_bytes, used_bytes,
     upm, ascent, descent, line_height, glyph_of, advance26, kern26,
     glyph, g_w, g_h, g_left, g_top, g_adv, g_pixel, g_data,
     text_width26, hits, misses, rastered, cache_slots, cache_used,
@@ -121,12 +121,23 @@ const MAX_CROSS: u64 = 128
 const MAX_W: u64 = 256 // breiteste Glyphe, die gerastert wird
 const MAX_H: u64 = 256
 
-const A_IDX: u64 = 0x00000 // SLOTS * 64 = 32 KiB
-const A_EDGE: u64 = 0x08000 // MAX_EDGES * 32 = 48 KiB
-const A_FLAGS: u64 = 0x14000 // MAX_PTS Oktette
+// DIE ADRESSEN HIER SIND NACHGERECHNET UND NICHT GERATEN, und der Grund
+// steht in der Geschichte dieses Projekts: SLOTS * 64 ist genau 0x8000,
+// MAX_EDGES * 32 ist genau 0xC000. Der ZAEHLER der Kanten lag in der
+// ersten Fassung HINTER dem Kantenfeld -- also auf 0x14000, und dort
+// liegen die Flaggen der Punkte. Die erste Glyphe ueberschrieb ihren
+// eigenen Kantenzaehler, `edge_count` gab eine Zufallszahl, und der Kern
+// las bei 0x40000000 weiter, der ersten Adresse jenseits des
+// abgebildeten Gigabytes: #PF, cr2=0x40000000. Genau die Sorte Fehler,
+// die `tools/kernel/karte.py` fuer `kdata` abfaengt -- hier gibt es
+// keinen Pruefer, also stehen die Rechnungen daneben.
+const A_IDX: u64 = 0x00000 // SLOTS * 64 = 0x8000
+const A_EDGE: u64 = 0x08000 // MAX_EDGES * 32 = 0xC000, bis 0x14000
+const A_FLAGS: u64 = 0x14000 // MAX_PTS Oktette, bis 0x14200
 const A_XS: u64 = 0x14400 // MAX_PTS * 8
 const A_YS: u64 = 0x15400
-const A_ENDS: u64 = 0x16400 // MAX_CONT * 8
+const A_ENDS: u64 = 0x16400 // MAX_CONT * 8, bis 0x16500
+const A_ECOUNT: u64 = 0x16600 // wie viele Kanten es sind
 const A_COV: u64 = 0x16800 // MAX_W * 8
 const A_CROSS: u64 = 0x17800 // MAX_CROSS * 16
 const A_HEAP: u64 = 0x18000 // ab hier die Bitmasken, Stossallokator
@@ -416,6 +427,13 @@ fn kern0_of(state: u64, n: u64, k: u64) {
 
 // ------------------------------------------------------- die Metriken
 
+fn glyphs(state: u64, f: u64) -> u64 {
+    if f >= gs(state, S_FONTS) {
+        return 0
+    }
+    return fg(state, f, F_NGLYPH)
+}
+
 fn upm(state: u64, f: u64) -> u64 {
     if f >= gs(state, S_FONTS) {
         return 0
@@ -657,11 +675,11 @@ fn load_simple(state: u64, ar: u64, g: u64, nc: u64) -> u64 {
 // --------------------------------------------------------- die Kanten
 
 fn edge_count(ar: u64) -> u64 {
-    return kstate.get(ar, A_EDGE + MAX_EDGES * EDGE_BYTES)
+    return kstate.get(ar, A_ECOUNT)
 }
 
 fn edge_reset(ar: u64) {
-    kstate.set(ar, A_EDGE + MAX_EDGES * EDGE_BYTES, 0)
+    kstate.set(ar, A_ECOUNT, 0)
 }
 
 fn edge_add(ar: u64, x0: i64, y0: i64, x1: i64, y1: i64) {
@@ -677,7 +695,7 @@ fn edge_add(ar: u64, x0: i64, y0: i64, x1: i64, y1: i64) {
     kstate.set(ar, e + 8, y0 as u64)
     kstate.set(ar, e + 16, x1 as u64)
     kstate.set(ar, e + 24, y1 as u64)
-    kstate.set(ar, A_EDGE + MAX_EDGES * EDGE_BYTES, n + 1)
+    kstate.set(ar, A_ECOUNT, n + 1)
 }
 
 fn ex0(ar: u64, i: u64) -> i64 {
