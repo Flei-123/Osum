@@ -6,7 +6,8 @@ liest seine eigene Hardware ueber PCI, spricht NVMe ueber DMA, laeuft auf
 mehreren Prozessoren, bietet eine POSIX-Schicht mit den Systemaufruf-
 nummern von Linux x86-64, startet ein Userland aus eigenstaendigen
 ELF-Dateien von der Platte — eine Shell und dreiundzwanzig Werkzeuge —
-und **zeigt das alles auf einem Bildschirm**.
+und **zeigt das alles in Fenstern**: mit Maus, Fensterserver und
+TrueType-Schriften mit Kantenglaettung.
 
 mehreren Prozessoren, **spricht TCP/IP ueber eine virtio-net-Karte**,
 bietet eine POSIX-Schicht mit den Systemaufrufnummern von Linux x86-64
@@ -47,19 +48,23 @@ Der Umfang, gezaehlt:
 
 | Teil | Zeilen |
 |---|---:|
-| `kernel/*.fi` — der Kern | 26 088 |
+| `kernel/*.fi` — der Kern | 30 383 |
 | `kernel/user/*.fi` — Shell, Werkzeuge, ulib | 5 114 |
 | `kernel/*.s`, `kernel/user/crt.s` — Assembler | 1 336 |
 | `lib/libc/*.fi` — die libc aus Runde K4 | 1 598 |
-| `tools/` — die Testlaeufer | 7 584 |
+| `tools/` — die Testlaeufer | 9 650 |
 
-Zuletzt dazugekommen (Runde K10): `kernel/guard.fi` — SMEP und SMAP in
-CR4 samt dem `stac`-Fenster — und `kernel/bootmod.fi` — ein Boot-Modul
-als Wurzelplatte, mit CRC32 davor. Beides ist aus OrientOS' Rust-Kernel
-portiert und waren dort die letzten zwei offenen Punkte des
-Kernelwechsels (`docs/ROUNDK10.md`). Davor: `kernel/cap.fi` (die
-Handle-Tabelle aus OrientOS' nativer ABI) sowie `kernel/fb.fi` und
-`kernel/font.fi` — der Bildschirm der Runde K7.
+Zuletzt dazugekommen: Runde K10 hat ZWEI Teile, die parallel liefen.
+Die Oberflaeche -- `kernel/wm.fi` (der Fensterserver), `kernel/ttf.fi`
+(TrueType-Leser und Rasterer) und `kernel/ps2m.fi` (das Zeigegeraet),
+dazu auf dem Wirt `tools/ttf/schnitt.py`, `tools/ttf/raster.py` (die
+ZWEITE Fassung des Rasterers, gegen die die erste gemessen wird) und
+`tools/wm/` (`docs/ROUNDK10W.md`). Und die Schutzbits --
+`kernel/guard.fi` (SMEP und SMAP in CR4 samt dem `stac`-Fenster) und
+`kernel/bootmod.fi` (ein Boot-Modul als Wurzelplatte, mit CRC32 davor);
+beides aus OrientOS' Rust-Kernel portiert und dort die letzten zwei
+offenen Punkte des Kernelwechsels (`docs/ROUNDK10.md`). Runde K11 hat
+den Editor und die zwanzig Werkzeuge dazugelegt (`docs/ROUNDK11.md`).
 
 Dazu aus der Capability-Runde: `kernel/cap.fi` (die Handle-Tabelle) und
 die Testlaeufer `tools/caps/` und `tools/boot/`. Aus der Netzrunde K8:
@@ -125,6 +130,33 @@ zurueck und bildet es sich mit `mmap` als 2-MiB-Kachel in den eigenen
 Adressraum ab — mit den ueblichen Rechtepruefungen. Alles davon haengt an
 dem Wort `gfx` auf der Kommandozeile; ohne es aendert sich am Kernel
 nichts. Gemessen an Bildschirmfotos (`docs/ROUNDK7.md`).
+
+**Oberflaeche (Runde K10).** Ein **Zeigegeraet** am zweiten Anschluss
+des Tastaturbausteins (IRQ 12, `kernel/ps2m.fi`): Drei- und
+Vier-Oktett-Pakete, Rad, Anschlag an den Bildraendern, ein gezeichneter
+Zeiger. Ein **Fensterserver** (`kernel/wm.fi`): Fenster anlegen,
+verschieben, Groesse aendern, schliessen; Stapelreihenfolge;
+Eingabefokus; Ereignisse an das richtige Fenster; und
+**Bereichsverfolgung**, damit nur das Neue gemalt wird — gemessen 6801 us
+fuer den ganzen Schirm gegen 198 us fuer eine Zeigerbewegung, also
+Faktor 34. Anwendungen reden ueber **Handles** aus `kernel/cap.fi` mit
+ihm (neun Aufrufe ab 2100), nicht ueber einen zweiten Weg.
+
+Und **echte Schriften** (`kernel/ttf.fi`): ein TrueType-Leser (`head`,
+`hhea`, `maxp`, `hmtx`, `cmap` Format 4, `loca`, `glyf`, `kern`) und ein
+Rasterer mit **Kantenglaettung**, ganz in Firn und ganz in Festkomma —
+kein FreeType, keine Gleitkommazahl. Die Schriften liegen als
+zusammengeschnittene TrueType-Dateien auf der Platte (`assets/`,
+`tools/ttf/schnitt.py`). Darauf ein **Terminalfenster**, in dem
+`/bin/sh` von der Platte laeuft, und ein zweites Fenster, das ein
+Programm in **Ring 3** anlegt, bemalt und auf Klicks und Tasten
+antwortet.
+
+Gemessen an Bildschirmfotos, in die ueber den QEMU-Monitor **echte
+Mausbewegungen, Klicks und Tastendruecke** eingespeist wurden — und der
+Text darin nicht gegen eine Flaeche, sondern **je Zeichen** gegen eine
+zweite, unabhaengige Rasterung desselben Umrisses
+(`tools/ttf/raster.py`). `docs/ROUNDK10.md`.
 
 **NVMe-Durchsatz, gemessen.** In QEMU/TCG bei 2,19 GHz, 128 KiB am
 Stueck (`tools/pci/run.sh` reproduziert es):
@@ -240,6 +272,27 @@ Zeileneditor, `cd`, `exit` — und fuenfundzwanzig Werkzeuge: `cat`, `cp`,
   uebermalen sich, wenn sie dieselben Bildzeilen nehmen. Es gibt auch
   kein `ioctl`: ein Programm erfaehrt die Groesse des Bildes ueber
   `lseek(SEEK_END)` und die Breite gar nicht.
+* **Der Fensterserver laeuft IM KERN.** Runde K10 hat Fenster, Maus,
+  Stapelreihenfolge, Eingabefokus und echte Schriften — aber der Server
+  sitzt in Ring 0, weil dieser Kernel keinen Speicher zwischen zwei
+  Prozessen teilen kann (`mmap` kennt anonyme Seiten und den
+  Rahmenpuffer, sonst nichts). Der Schutz zwischen den ANWENDUNGEN
+  steht; der zwischen Server und Anwendung nicht.
+* **Kein `ioctl` fuer die Flaeche.** Ein Programm erfaehrt die Groesse
+  seines Fensters ueber `wm_info`, die des Bildschirms ueber
+  `lseek(SEEK_END)` auf `/dev/fb` — aendern kann es die Aufloesung
+  nicht.
+* **Kein Hinting, keine Unterpixel-Positionierung, keine Drehung.** Der
+  Rasterer setzt Glyphen auf ganze Bildpunkte und setzt zusammengesetzte
+  Glyphen mit ihrer Verschiebung ein, nicht mit ihrer Matrix.
+* **Kein Netz.** Kein Treiber fuer eine Netzkarte. Ein TCP/IP-Stack in
+  Firn existiert (Runde K3, `docs/OSUM-K3.md`), er liegt aber im
+  Firn-Repository unter `lib/net/` und ist nie an diesen Kernel
+  angeschlossen worden — er wurde gegen den Linux-Kernel ueber ein
+  `veth`-Paar gemessen, nicht gegen eine Karte.
+
+* **Keine Grafik.** Kein Framebuffer, kein VGA-Textmodus als Konsole, kein
+  Fenstersystem. Die Konsole ist die serielle Schnittstelle.
 * **Keine Namensaufloesung.** Kein Resolver, kein `/etc/hosts`: eine
   Adresse sind vier Zahlen. `/bin/wget` weist eine URL mit einem Namen
   darin ab, statt etwas Falsches zu antworten.
@@ -301,6 +354,7 @@ bash tools/gfx/run.sh         # der Bildschirm (K7)
 bash tools/unix/run.sh        # Signale, Terminal, Uhr, Zufall (K9)
 bash tools/net/run.sh         # virtio-net und der TCP/IP-Stack (K8)
 bash tools/guard/run.sh       # SMEP/SMAP und das Boot-Modul (K10)
+bash tools/wm/run.sh          # Maus, Fenster, TrueType (K10)
 ```
 
 Den Kernel mit Bildschirm starten und selbst hinsehen — `-vga std` ist
@@ -309,6 +363,17 @@ die Karte, die `kernel/fb.fi` bedient:
 ```sh
 qemu-system-x86_64 -kernel /tmp/k.mb -m 256 -append "osum gfx" \
    -serial stdio -vga std
+```
+
+Und mit **Fenstern**, Maus und echten Schriften (Runde K10). Die
+Schriften liegen auf der Platte, also braucht es ein Abbild mit
+`/lib/mono.ttf` und `/lib/sans.ttf` darauf:
+
+```sh
+python3 tools/osum/mkfs.py build /tmp/d.img 4096 /lib/ \
+   /lib/mono.ttf=assets/osum-mono.ttf /lib/sans.ttf=assets/osum-sans.ttf
+qemu-system-x86_64 -kernel /tmp/k.mb -m 256 -append "gfx wm wmhold" \
+   -serial stdio -vga std -drive file=/tmp/d.img,format=raw,if=ide,index=0
 ```
 
 Ein Abbild von Hand bauen und starten (was `tools/userland/run.sh`
@@ -411,6 +476,9 @@ nachtraeglich umgeschrieben.
 | `docs/ROUNDK9.md` | Signale, Terminals, Uhr und Zufall |
 | `docs/ROUNDK10.md` | SMEP/SMAP und das Boot-Modul — die letzten zwei Punkte des Kernelwechsels |
 | `docs/ROUNDK11.md` | **man kann darauf arbeiten**: der Editor, zwanzig Werkzeuge, die Shell als Sprache |
+| `docs/ROUNDK8.md` | virtio-net und der Stack aus K3 am Kernel |
+| `docs/ROUNDK9.md` | Signale, Terminals, Uhr und Zufall |
+| `docs/ROUNDK10.md` | die Oberflaeche: Maus, Fensterserver, TrueType mit Kantenglaettung |
 
 `ENTFERNEN-AUS-FIRN.md` beschreibt, was im Firn-Repository geloescht
 werden muss, damit dort nichts doppelt liegt. **Ausgefuehrt ist das
