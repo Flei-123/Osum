@@ -35,13 +35,22 @@ import nvme
 
 export {
     ram_init, use_ata, use_nvme, read, write, blocks, present,
-    BLOCK_SIZE, DEV_RAM, DEV_ATA, DEV_NVME
+    BLOCK_SIZE, DEV_RAM, DEV_ATA, DEV_NVME, DEV_ATA1,
+    // ---- Runde K14 ----
+    read_on, write_on, blocks_on, present_on, probe_ata1, dev_name
 }
 
 const BLOCK_SIZE: u64 = 512
 const DEV_RAM: u64 = 0
 const DEV_ATA: u64 = 1
 const DEV_NVME: u64 = 2
+// ROUNDE K14: DIE ZWEITE PLATTE. Derselbe Bus, dasselbe Registerpaar,
+// ein einziges Bit anders -- Bit 4 des Laufwerksregisters waehlt den
+// Sklaven statt des Meisters. Sie ist die Platte, auf der ein FREMDES
+// Dateisystem liegt: Osum haengt seine eigene weiter unter DEV_ATA ein
+// und liest daneben, was Linux geschrieben hat. Ohne ein zweites
+// Geraet waere jede Messung dieser Runde ein Selbstgespraech.
+const DEV_ATA1: u64 = 3
 
 // ------------------------------------------------------------- the RAM
 
@@ -132,6 +141,21 @@ fn ata_wait(want_drq: bool) -> bool {
     return false
 }
 
+// ROUNDE K14: `slave` waehlt Bit 4. Die Zeile hiess bis dahin fest
+// 0xE0 -- Meister, LBA-Modus. 0xF0 ist derselbe Modus auf dem zweiten
+// Geraet desselben Busses.
+fn ata_select_on(lba: u64, slave: bool) {
+    var top: u64 = 0xE0
+    if slave {
+        top = 0xF0
+    }
+    serial.out8(ATA_DRIVE, (top | ((lba >> 24) & 0x0F)) as u8)
+    serial.out8(ATA_COUNT, 1 as u8)
+    serial.out8(ATA_LBA0, (lba & 0xFF) as u8)
+    serial.out8(ATA_LBA1, ((lba >> 8) & 0xFF) as u8)
+    serial.out8(ATA_LBA2, ((lba >> 16) & 0xFF) as u8)
+}
+
 fn ata_select(lba: u64) {
     serial.out8(ATA_DRIVE, (0xE0 | ((lba >> 24) & 0x0F)) as u8)
     serial.out8(ATA_COUNT, 1 as u8)
@@ -149,6 +173,35 @@ fn present(state: u64) -> bool {
         return false
     }
     return true
+}
+
+fn ata_read_on(lba: u64, dst: u64, slave: bool) -> bool {
+    ata_select_on(lba, slave)
+    serial.out8(ATA_CMD, ATA_READ)
+    if !ata_wait(true) {
+        return false
+    }
+    var i: u64 = 0
+    while i < BLOCK_SIZE / 2 {
+        __mmio_write16((dst + i * 2) as *mut u16, in16(ATA_DATA) as u16)
+        i = i + 1
+    }
+    return true
+}
+
+fn ata_write_on(lba: u64, src: u64, slave: bool) -> bool {
+    ata_select_on(lba, slave)
+    serial.out8(ATA_CMD, ATA_WRITE)
+    if !ata_wait(true) {
+        return false
+    }
+    var i: u64 = 0
+    while i < BLOCK_SIZE / 2 {
+        out16(ATA_DATA, __mmio_read16((src + i * 2) as *mut u16) as u64)
+        i = i + 1
+    }
+    serial.out8(ATA_CMD, ATA_FLUSH)
+    return ata_wait(false)
 }
 
 fn ata_read(lba: u64, dst: u64) -> bool {
@@ -178,6 +231,124 @@ fn ata_write(lba: u64, src: u64) -> bool {
     }
     serial.out8(ATA_CMD, ATA_FLUSH)
     return ata_wait(false)
+}
+
+// ------------------------------------------------- Runde K14: das Geraet
+//
+// Bis zu dieser Runde war die Geraetenummer eine GLOBALE Zahl
+// (`kstate.DISK_DEV`): es gab genau eine Platte, und `read` sah nach,
+// welche es gerade war. Sobald zwei Dateisysteme gleichzeitig
+// eingehaengt sind, ist das falsch -- OFS liegt auf der einen, FAT32
+// auf der anderen, und ein Lesevorgang darf nicht davon abhaengen, wer
+// zuletzt `use_ata` gerufen hat.
+//
+// Also bekommt die Schnittstelle das Geraet als ARGUMENT. `read` und
+// `write` oben bleiben genau, was sie waren -- sie reichen die globale
+// Zahl durch -- und `fs.fi` aendert dafuer keine Zeile. Das ist
+// dieselbe Regel wie bei DEV_NVME in Runde K2: eine Platte mehr, und
+// die Schicht darueber merkt nichts davon.
+
+fn ata1_present(state: u64) -> bool {
+    serial.out8(ATA_DRIVE, 0xF0 as u8)
+    serial.io_wait()
+    serial.io_wait()
+    let st: u64 = serial.in8(ATA_CMD) as u64
+    // Das Laufwerksregister zurueck auf den Meister: alles andere in
+    // diesem Kernel geht von ihm aus, und ein stehengelassenes Bit 4
+    // waere ein Fehler, der erst drei Bloecke spaeter auffaellt.
+    serial.out8(ATA_DRIVE, 0xE0 as u8)
+    serial.io_wait()
+    if st == 0xFF || st == 0 {
+        return false
+    }
+    return true
+}
+
+fn present_on(state: u64, dev: u64) -> bool {
+    if dev == DEV_ATA1 {
+        return ata1_present(state)
+    }
+    if dev == DEV_ATA {
+        return present(state)
+    }
+    return true
+}
+
+// Wie viele Bloecke das Geraet hat. Fuer die zweite Platte steht die
+// Zahl in einem eigenen Skalar; sie darf die der ersten nicht anfassen.
+fn blocks_on(state: u64, dev: u64) -> u64 {
+    if dev == DEV_ATA1 {
+        return kstate.get(state, kstate.DISK2_BLOCKS)
+    }
+    return kstate.get(state, kstate.DISK_BLOCKS)
+}
+
+// Die zweite Platte anmelden. `n` ist ihre Groesse in Bloecken, wie sie
+// der Aufrufer kennt -- ATA PIO sagt sie nicht von selbst, und ein
+// IDENTIFY dafuer waere ein zweites Protokoll fuer eine Zahl, die der
+// Wirt ohnehin vorgibt.
+fn probe_ata1(state: u64, n: u64) -> bool {
+    kstate.set(state, kstate.DISK2_DEV, DEV_ATA1)
+    kstate.set(state, kstate.DISK2_BLOCKS, 0)
+    if !ata1_present(state) {
+        return false
+    }
+    // Ein Geraet, das antwortet, muss auch seinen ersten Block
+    // hergeben. Ein Statusregister, das nicht 0xFF liest, ist noch
+    // keine Platte -- QEMU laesst den Sklaven auch dann antworten, wenn
+    // gar kein -drive daran haengt.
+    var probe: [u8; 512] = [0 as u8; 512]
+    if !ata_read_on(0, (&probe[0]) as u64, true) {
+        return false
+    }
+    kstate.set(state, kstate.DISK2_BLOCKS, n)
+    return true
+}
+
+fn dev_name(dev: u64) -> u64 {
+    return dev
+}
+
+fn read_on(state: u64, dev: u64, lba: u64, dst: u64) -> bool {
+    if lba >= blocks_on(state, dev) {
+        return false
+    }
+    if dev == DEV_ATA {
+        return ata_read_on(lba, dst, false)
+    }
+    if dev == DEV_ATA1 {
+        return ata_read_on(lba, dst, true)
+    }
+    if dev == DEV_NVME {
+        return nvme.read_block(state, lba, dst)
+    }
+    let base: u64 = kstate.get(state, kstate.DISK)
+    if base == 0 {
+        return false
+    }
+    copy(base + lba * BLOCK_SIZE, dst)
+    return true
+}
+
+fn write_on(state: u64, dev: u64, lba: u64, src: u64) -> bool {
+    if lba >= blocks_on(state, dev) {
+        return false
+    }
+    if dev == DEV_ATA {
+        return ata_write_on(lba, src, false)
+    }
+    if dev == DEV_ATA1 {
+        return ata_write_on(lba, src, true)
+    }
+    if dev == DEV_NVME {
+        return nvme.write_block(state, lba, src)
+    }
+    let base: u64 = kstate.get(state, kstate.DISK)
+    if base == 0 {
+        return false
+    }
+    copy(src, base + lba * BLOCK_SIZE)
+    return true
 }
 
 // ------------------------------------------------------- the interface

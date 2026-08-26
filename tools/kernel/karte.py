@@ -105,6 +105,14 @@ BEREICHE = [
     # Speicher der Gaeste) kommt aus dem Rahmenverwalter.  Eingetragen
     # ist er hier, damit der Kollisionspruefer ihn trotzdem sieht.
     ("HV",         "hv.fi",     "HV_OFF",         "HV_MAX"),
+    # RUNDE K14: die VFS-Schicht und die fremden Dateisysteme. Der
+    # Auftrag dieser Runde hat 0x43000..0x46000 zugeteilt, weil weitere
+    # Runden GLEICHZEITIG an diesem Baum arbeiten -- genau die Lage, aus
+    # der die vier Kollisionen oben entstanden sind. Drei Seiten, drei
+    # Eintraege, und der Pruefer rechnet nach.
+    ("K14",        "kstate.fi", "K14_OFF",        "K14_MAX"),
+    ("K14FAT",     "kstate.fi", "FAT_OFF",        "FAT_MAX"),
+    ("K14PROC",    "kstate.fi", "PROCFS_OFF",     "PROCFS_MAX"),
 ]
 
 # `_OFF`-Konstanten, die KEINE Bereiche in `kdata` sind -- Offsets
@@ -133,6 +141,14 @@ KEINE_KDATA = {
     ("hv.fi", "VM_OFF"),
     ("hv.fi", "GPR_OFF"),
     ("virtio.fi", "C_QNOTIFY_OFF"),  # ein Register im Konfigurationsraum
+    # RUNDE K14: Versaetze INNERHALB der drei Seiten oben, kein eigenes
+    # kdata. Sie stehen hier, damit Punkt 3 unten sie sieht und nicht
+    # als vergessenen Bereich meldet.
+    ("mnt.fi", "MNT_OFF"),      # in K14_OFF
+    ("part.fi", "PART_OFF"),    # in K14_OFF
+    ("part.fi", "SECT_OFF"),    # in K14_OFF
+    ("fat.fi", "SB_OFF"),       # in FAT_OFF
+    ("fat.fi", "NODE_OFF"),     # in FAT_OFF
 }
 
 
@@ -171,7 +187,11 @@ def main():
 
     dateien = {}
     for d in ("kstate.fi", "pci.fi", "nvme.fi", "fb.fi", "inet.fi",
-              "virtio.fi", "hv.fi"):
+              "virtio.fi", "hv.fi",
+              # RUNDE K14 -- sonst pruefte die Karte diese Dateien gar
+              # nicht, und ein vergessener Bereich fiele nie auf.
+              "vfs.fi", "mnt.fi", "fat.fi", "procfs.fi", "devfs.fi",
+              "part.fi", "ofs.fi"):
         p = os.path.join(kdir, d)
         if os.path.exists(p):
             dateien[d] = konstanten(p)

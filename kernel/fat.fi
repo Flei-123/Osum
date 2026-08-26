@@ -1,0 +1,1802 @@
+// kernel/fat.fi -- Runde K14: FAT32, lesend UND schreibend.
+//
+// DAS IST DAS ERSTE DATEISYSTEM DIESES KERNELS, DAS ER NICHT SELBST
+// ERFUNDEN HAT. OFS (`kernel/fs.fi`) ist Osums eigenes: der Kernel
+// schreibt es, der Kernel liest es, und wenn beide Seiten denselben
+// Fehler machen, faellt es nie auf. FAT32 ist das Gegenteil davon --
+// das Format steht seit 1996 fest, `mkfs.vfat` legt es an, `mcopy`
+// schreibt hinein, und wenn Osum ein Oktett anders versteht, ist Osum
+// im Unrecht. Genau deshalb ist es die ehrlichste Pruefung, die dieses
+// Projekt bisher hatte: `tools/k14/run.sh` laesst die echten
+// Linux-Werkzeuge das Abbild bauen und haelt Osums Lesung Oktett fuer
+// Oktett dagegen -- und umgekehrt liest `mdir`/`mcopy` das, was Osum
+// geschrieben hat.
+//
+// DAS FORMAT, so weit dieser Treiber es braucht:
+//
+//   Sektor 0     DER BPB. Oktettzahl je Sektor (11), Sektoren je
+//                Verband (13), reservierte Sektoren (14), Zahl der
+//                Zuordnungstafeln (16), Sektoren je Tafel (36),
+//                Wurzelverband (44), und 0x55 0xAA am Ende.
+//   dahinter     DIE ZUORDNUNGSTAFEL, ein- oder zweimal. Je Verband
+//                vier Oktette: die Nummer des naechsten Verbands, oder
+//                >= 0x0FFFFFF8 fuer "hier hoert die Kette auf", oder 0
+//                fuer "frei". Die obersten vier Bits gehoeren nicht
+//                dazu und werden weder gelesen noch geschrieben -- das
+//                ist die Stelle, an der ein Treiber ein fremdes
+//                Dateisystem still kaputtmacht.
+//   dahinter     DIE DATEN, in Verbaenden. Verband 2 ist der erste.
+//
+//   Ein VERZEICHNIS ist eine Datei aus Eintraegen zu 32 Oktetten:
+//   Name 8+3, Merkmale (11), Verband hoch (20) und niedrig (26),
+//   Groesse (28). Ein Eintrag mit dem Merkmal 0x0F ist KEIN Eintrag,
+//   sondern ein Stueck eines LANGEN NAMENS -- dreizehn Zeichen in
+//   UTF-16, rueckwaerts vor dem eigentlichen Eintrag stehend, mit
+//   einer Pruefsumme des kurzen Namens darin. Wer die nicht liest,
+//   sieht auf jeder heutigen Platte nur "HELLO~1.TXT".
+//
+// WAS DIESER TREIBER KANN UND WAS NICHT -- die Liste steht auch in
+// docs/ROUNDK14.md, und keine Zeile davon ist geschoent:
+//
+//   KANN:  Lesen (kurze und lange Namen, Unterverzeichnisse, Ketten
+//          ueber beliebig viele Verbaende), Schreiben in eine
+//          bestehende Datei, Verlaengern mit neuen Verbaenden, Anlegen
+//          einer Datei, Anlegen eines Verzeichnisses, Loeschen,
+//          Umbenennen im selben Verzeichnis, Kuerzen.
+//   KANN NICHT: Sektoren, die nicht 512 Oktette gross sind (der
+//          Treiber lehnt sie beim Einhaengen ab, statt zu raten);
+//          FAT12 und FAT16; Namen laenger als 63 Zeichen; Zeichen
+//          ausserhalb von US-ASCII in einem NEUEN Namen (gelesen
+//          werden sie, geschrieben nicht -- eine halbe UTF-16-Wandlung
+//          waere schlimmer als keine).
+//
+// WO DER ZUSTAND LIEGT: `kstate.FAT_OFF`, eine Seite. Darin die
+// Kennzahlen je Einhaengung, eine kleine Knotentafel und vier
+// Arbeitssektoren. Ein Kernelstapel ist 8 KiB; vier Sektoren darauf
+// waeren die Haelfte davon.
+
+profile kernel
+
+import kstate
+import serial
+import blk
+import mnt
+import vfsops
+import time
+
+export { ops, mount_probe, release, sync, MAX_NODES }
+
+const BS: u64 = 512
+
+// ------------------------------------------------- die Seite, aufgeteilt
+
+const SB_OFF: u64 = 0x000 // 8 Einhaengungen zu 64 Oktetten
+const SB_BYTES: u64 = 64
+const NODE_OFF: u64 = 0x200 // 24 Knoten zu 48 Oktetten
+const NODE_BYTES: u64 = 48
+const MAX_NODES: u64 = 24
+const FATBUF: u64 = 0x700 // ein Sektor der Zuordnungstafel
+const DIRBUF: u64 = 0x900 // ein Verzeichnissektor
+const DATBUF: u64 = 0xB00 // ein Datensektor
+const LFNBUF: u64 = 0xD00 // der Zusammenbau eines langen Namens
+const CMPBUF: u64 = 0xE00 // der Name, gegen den verglichen wird
+
+// die Felder je Einhaengung
+const S_VALID: u64 = 0
+const S_SPC: u64 = 8 // Sektoren je Verband
+const S_FATLBA: u64 = 16 // erster Sektor der Zuordnungstafel (absolut)
+const S_DATALBA: u64 = 24 // erster Datensektor (absolut)
+const S_ROOT: u64 = 32 // Wurzelverband
+const S_CLUSTERS: u64 = 40 // wie viele Verbaende es gibt
+const S_FATSEC: u64 = 48 // Sektoren je Tafel
+const S_NFATS: u64 = 56 // wie viele Tafeln
+
+// die Felder je Knoten
+const N_MNT: u64 = 0 // Einhaengung + 1, 0 = frei
+const N_CLUS: u64 = 8
+const N_SIZE: u64 = 16
+const N_ATTR: u64 = 24
+const N_DLBA: u64 = 32 // wo der 32-Oktett-Eintrag liegt (absolut)
+const N_DOFF: u64 = 40 // und an welcher Stelle darin
+
+const A_RDONLY: u64 = 0x01
+const A_HIDDEN: u64 = 0x02
+const A_SYSTEM: u64 = 0x04
+const A_VOLUME: u64 = 0x08
+const A_DIR: u64 = 0x10
+const A_LFN: u64 = 0x0F
+
+const EOC: u64 = 0x0FFFFFF8
+const BAD: u64 = 0x0FFFFFF7
+const MASK28: u64 = 0x0FFFFFFF
+
+fn sb(state: u64, m: u64) -> u64 {
+    return state + kstate.FAT_OFF + SB_OFF + m * SB_BYTES
+}
+
+fn sget(state: u64, m: u64, f: u64) -> u64 {
+    return __mmio_read64((sb(state, m) + f) as *mut u64)
+}
+
+fn sset(state: u64, m: u64, f: u64, v: u64) {
+    __mmio_write64((sb(state, m) + f) as *mut u64, v)
+}
+
+fn nd(state: u64, i: u64) -> u64 {
+    return state + kstate.FAT_OFF + NODE_OFF + (i - 1) * NODE_BYTES
+}
+
+fn nget(state: u64, i: u64, f: u64) -> u64 {
+    if i == 0 || i > MAX_NODES {
+        return 0
+    }
+    return __mmio_read64((nd(state, i) + f) as *mut u64)
+}
+
+fn nset(state: u64, i: u64, f: u64, v: u64) {
+    if i == 0 || i > MAX_NODES {
+        return
+    }
+    __mmio_write64((nd(state, i) + f) as *mut u64, v)
+}
+
+fn buf(state: u64, which: u64) -> u64 {
+    return state + kstate.FAT_OFF + which
+}
+
+fn tick(state: u64) {
+    kstate.add(state, kstate.VFS_INDIRECT, 1)
+}
+
+// ------------------------------------------------------ kleine Handgriffe
+
+fn le16(p: u64) -> u64 {
+    return kstate.get8(p) | (kstate.get8(p + 1) << 8)
+}
+
+fn le32(p: u64) -> u64 {
+    return le16(p) | (le16(p + 2) << 16)
+}
+
+fn put16(p: u64, v: u64) {
+    kstate.set8(p, (v & 0xFF) as u8)
+    kstate.set8(p + 1, ((v >> 8) & 0xFF) as u8)
+}
+
+fn put32(p: u64, v: u64) {
+    put16(p, v & 0xFFFF)
+    put16(p + 2, (v >> 16) & 0xFFFF)
+}
+
+fn upper(c: u64) -> u64 {
+    if c >= 97 && c <= 122 {
+        return c - 32
+    }
+    return c
+}
+
+fn lower(c: u64) -> u64 {
+    if c >= 65 && c <= 90 {
+        return c + 32
+    }
+    return c
+}
+
+fn zero(p: u64, n: u64) {
+    var i: u64 = 0
+    while i < n {
+        kstate.set8(p + i, 0 as u8)
+        i = i + 1
+    }
+}
+
+// ----------------------------------------------------- Sektor und Verband
+
+fn rd(state: u64, m: u64, lba: u64, dst: u64) -> bool {
+    return blk.read_on(state, mnt.dev(state, m), lba, dst)
+}
+
+fn wr(state: u64, m: u64, lba: u64, src: u64) -> bool {
+    return blk.write_on(state, mnt.dev(state, m), lba, src)
+}
+
+fn clus_lba(state: u64, m: u64, c: u64) -> u64 {
+    return sget(state, m, S_DATALBA) + (c - 2) * sget(state, m, S_SPC)
+}
+
+// Der Eintrag eines Verbands in der Zuordnungstafel. Vier Oktette,
+// kleinendig, und die obersten vier Bit gehoeren nicht dazu.
+fn fat_get(state: u64, m: u64, c: u64) -> u64 {
+    let off: u64 = c * 4
+    let lba: u64 = sget(state, m, S_FATLBA) + off / BS
+    if !rd(state, m, lba, buf(state, FATBUF)) {
+        return 0
+    }
+    return le32(buf(state, FATBUF) + (off % BS)) & MASK28
+}
+
+// Schreiben heisst: in JEDE Tafel schreiben. Ein Dateisystem, dessen
+// zweite Tafel nicht mitgeht, faellt bei `fsck.fat` durch -- und der
+// naechste Treiber, der die zweite nimmt, sieht eine andere Platte.
+fn fat_set(state: u64, m: u64, c: u64, v: u64) -> bool {
+    let off: u64 = c * 4
+    let secs: u64 = sget(state, m, S_FATSEC)
+    let n: u64 = sget(state, m, S_NFATS)
+    var k: u64 = 0
+    while k < n {
+        let lba: u64 = sget(state, m, S_FATLBA) + k * secs + off / BS
+        if !rd(state, m, lba, buf(state, FATBUF)) {
+            return false
+        }
+        let at: u64 = buf(state, FATBUF) + (off % BS)
+        let keep: u64 = le32(at) & 0xF0000000
+        put32(at, keep | (v & MASK28))
+        if !wr(state, m, lba, buf(state, FATBUF)) {
+            return false
+        }
+        k = k + 1
+    }
+    return true
+}
+
+fn is_eoc(v: u64) -> bool {
+    return v >= EOC
+}
+
+// Einen freien Verband suchen und ihn als Kettenende eintragen.
+// Rueckgabe: seine Nummer, oder 0.
+fn clus_alloc(state: u64, m: u64) -> u64 {
+    let total: u64 = sget(state, m, S_CLUSTERS)
+    var c: u64 = 2
+    while c < total + 2 {
+        if fat_get(state, m, c) == 0 {
+            if !fat_set(state, m, c, MASK28) {
+                return 0
+            }
+            return c
+        }
+        c = c + 1
+    }
+    return 0
+}
+
+fn clus_zero(state: u64, m: u64, c: u64) -> bool {
+    zero(buf(state, DATBUF), BS)
+    let spc: u64 = sget(state, m, S_SPC)
+    var i: u64 = 0
+    while i < spc {
+        if !wr(state, m, clus_lba(state, m, c) + i, buf(state, DATBUF)) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+// Die ganze Kette ab `c` freigeben.
+fn chain_free(state: u64, m: u64, c: u64) {
+    var cur: u64 = c
+    var guard: u64 = 0
+    while cur >= 2 && cur < MASK28 && !is_eoc(cur) && guard < 1000000 {
+        let next: u64 = fat_get(state, m, cur)
+        fat_set(state, m, cur, 0)
+        cur = next
+        guard = guard + 1
+    }
+}
+
+// Der `n`-te Verband einer Kette. `grow` haengt fehlende an.
+fn chain_at(state: u64, m: u64, first: u64, n: u64, grow: bool) -> u64 {
+    if first < 2 {
+        return 0
+    }
+    var cur: u64 = first
+    var k: u64 = 0
+    while k < n {
+        let next: u64 = fat_get(state, m, cur)
+        if next < 2 || is_eoc(next) {
+            if !grow {
+                return 0
+            }
+            let fresh: u64 = clus_alloc(state, m)
+            if fresh == 0 {
+                return 0
+            }
+            if !fat_set(state, m, cur, fresh) {
+                return 0
+            }
+            if !clus_zero(state, m, fresh) {
+                return 0
+            }
+            cur = fresh
+        } else {
+            cur = next
+        }
+        k = k + 1
+    }
+    return cur
+}
+
+// -------------------------------------------------------- die Knotentafel
+
+fn node_find(state: u64, m: u64, dlba: u64, doff: u64, clus: u64) -> u64 {
+    var i: u64 = 1
+    while i <= MAX_NODES {
+        if nget(state, i, N_MNT) == m + 1 {
+            if nget(state, i, N_DLBA) == dlba && nget(state, i, N_DOFF) == doff
+                && nget(state, i, N_CLUS) == clus {
+                return i
+            }
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+// EIN KNOTEN JE DATEI, NICHT JE NACHSCHLAGEN. Wer denselben Namen
+// zweimal oeffnet, bekommt denselben Knoten -- sonst waere die kleine
+// Tafel nach vierundzwanzig `open` voll, und `st_ino` waere jedes Mal
+// eine andere Zahl fuer dieselbe Datei.
+fn node_get(state: u64, m: u64, clus: u64, size: u64, attr: u64,
+    dlba: u64, doff: u64) -> u64 {
+    let have: u64 = node_find(state, m, dlba, doff, clus)
+    if have != 0 {
+        nset(state, have, N_SIZE, size)
+        nset(state, have, N_ATTR, attr)
+        return have
+    }
+    var i: u64 = 1
+    while i <= MAX_NODES {
+        if nget(state, i, N_MNT) == 0 {
+            nset(state, i, N_MNT, m + 1)
+            nset(state, i, N_CLUS, clus)
+            nset(state, i, N_SIZE, size)
+            nset(state, i, N_ATTR, attr)
+            nset(state, i, N_DLBA, dlba)
+            nset(state, i, N_DOFF, doff)
+            return i
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+// AUSHAENGEN HEISST AUFRAEUMEN. Beim Einhaengen wurde die Zahl der
+// freien Verbaende in der FSInfo-Seite auf "unbekannt" gesetzt, weil
+// sie bei jeder Zuteilung mitzufuehren hiesse, die ganze Tafel zu
+// durchsuchen. Beim AUSHAENGEN wird sie einmal wirklich gerechnet --
+// 129022 Eintraege, gut tausend Sektoren, ein Mal. Danach ist das
+// Dateisystem fuer `fsck.fat` ohne Anmerkung, und genau das misst
+// `tools/k14/run.sh`: OHNE `umount` sagt fsck "Free cluster summary
+// uninitialized", MIT `umount` sagt es gar nichts.
+fn sync(state: u64, m: u64) -> u64 {
+    if sget(state, m, S_VALID) == 0 {
+        return 0
+    }
+    let total: u64 = sget(state, m, S_CLUSTERS)
+    let secs: u64 = sget(state, m, S_FATSEC)
+    var free: u64 = 0
+    var idx: u64 = 2
+    var sec: u64 = 0xFFFFFFFF
+    while idx < total + 2 {
+        let want: u64 = (idx * 4) / BS
+        if want >= secs {
+            idx = total + 2
+        } else {
+            if want != sec {
+                if !rd(state, m, sget(state, m, S_FATLBA) + want,
+                    buf(state, FATBUF)) {
+                    return free
+                }
+                sec = want
+            }
+            if (le32(buf(state, FATBUF) + ((idx * 4) % BS)) & MASK28) == 0 {
+                free = free + 1
+            }
+            idx = idx + 1
+        }
+    }
+    let base: u64 = mnt.first(state, m)
+    if !rd(state, m, base, buf(state, DIRBUF)) {
+        return free
+    }
+    let fs_sec: u64 = le16(buf(state, DIRBUF) + 48)
+    if fs_sec == 0 || fs_sec == 0xFFFF {
+        return free
+    }
+    if !rd(state, m, base + fs_sec, buf(state, DIRBUF)) {
+        return free
+    }
+    let b: u64 = buf(state, DIRBUF)
+    if le32(b) != 0x41615252 || le32(b + 484) != 0x61417272 {
+        return free
+    }
+    put32(b + 488, free)
+    put32(b + 492, 2)
+    wr(state, m, base + fs_sec, b)
+    return free
+}
+
+fn release(state: u64, m: u64) {
+    var i: u64 = 1
+    while i <= MAX_NODES {
+        if nget(state, i, N_MNT) == m + 1 {
+            zero(nd(state, i), NODE_BYTES)
+        }
+        i = i + 1
+    }
+}
+
+// ------------------------------------------------------------ einhaengen
+
+// Rueckgabe: der Wurzelknoten, oder 0. Das ist die Stelle, an der ein
+// FAT32 erkannt wird -- und sie ist streng: was hier nicht durchkommt,
+// wird nicht eingehaengt, statt als etwas anderes gelesen zu werden.
+fn mount_probe(state: u64, m: u64) -> u64 {
+    var s_no: [u8; 20] = "fat: not fat32 (\0\0\0\0"
+    var s_ok: [u8; 12] = "fat: spc=\0\0\0"
+    var s_c: [u8; 12] = " clusters=\0\0"
+    var s_r: [u8; 8] = " root=\0\0"
+    let base: u64 = mnt.first(state, m)
+    sset(state, m, S_VALID, 0)
+    if !rd(state, m, base, buf(state, DIRBUF)) {
+        return 0
+    }
+    let b: u64 = buf(state, DIRBUF)
+    if kstate.get8(b + 510) != 0x55 || kstate.get8(b + 511) != 0xAA {
+        serial.puts((&s_no[0]) as u64)
+        serial.dec(1)
+        serial.nl()
+        return 0
+    }
+    let bps: u64 = le16(b + 11)
+    let spc: u64 = kstate.get8(b + 13)
+    let reserved: u64 = le16(b + 14)
+    let nfats: u64 = kstate.get8(b + 16)
+    let rootent: u64 = le16(b + 17)
+    let fatsz16: u64 = le16(b + 22)
+    let fatsz32: u64 = le32(b + 36)
+    let root: u64 = le32(b + 44)
+    var total: u64 = le16(b + 19)
+    if total == 0 {
+        total = le32(b + 32)
+    }
+    if bps != BS {
+        serial.puts((&s_no[0]) as u64)
+        serial.dec(2)
+        serial.nl()
+        return 0
+    }
+    if spc == 0 || reserved == 0 || nfats == 0 {
+        serial.puts((&s_no[0]) as u64)
+        serial.dec(3)
+        serial.nl()
+        return 0
+    }
+    // FAT32 und nichts anderes: die 16-Bit-Felder MUESSEN null sein.
+    // Ein FAT16 hier durchzulassen hiesse, seine Wurzel als Verband 2
+    // zu lesen -- dort steht bei FAT16 die erste Datei.
+    if rootent != 0 || fatsz16 != 0 || fatsz32 == 0 {
+        serial.puts((&s_no[0]) as u64)
+        serial.dec(4)
+        serial.nl()
+        return 0
+    }
+    if root < 2 {
+        serial.puts((&s_no[0]) as u64)
+        serial.dec(5)
+        serial.nl()
+        return 0
+    }
+    let data: u64 = reserved + nfats * fatsz32
+    if total <= data {
+        serial.puts((&s_no[0]) as u64)
+        serial.dec(6)
+        serial.nl()
+        return 0
+    }
+    let clusters: u64 = (total - data) / spc
+    // Die Zahl, die FAT32 von FAT16 unterscheidet, steht in keinem
+    // Feld: es sind die Verbaende. Unter 65525 ist es kein FAT32,
+    // egal was der Kopf behauptet -- so steht es in Microsofts eigener
+    // Beschreibung, und `mkfs.vfat` haelt sich daran.
+    sset(state, m, S_SPC, spc)
+    sset(state, m, S_FATLBA, base + reserved)
+    sset(state, m, S_DATALBA, base + data)
+    sset(state, m, S_ROOT, root)
+    sset(state, m, S_CLUSTERS, clusters)
+    sset(state, m, S_FATSEC, fatsz32)
+    sset(state, m, S_NFATS, nfats)
+    sset(state, m, S_VALID, 1)
+    serial.puts((&s_ok[0]) as u64)
+    serial.dec(spc)
+    serial.puts((&s_c[0]) as u64)
+    serial.dec(clusters)
+    serial.puts((&s_r[0]) as u64)
+    serial.dec(root)
+    serial.nl()
+    return node_get(state, m, root, 0, A_DIR, 0, 0)
+}
+
+// ------------------------------------------------------- Namen im Eintrag
+
+// Der kurze Name eines Eintrags als Text. Die beiden Bits im Oktett 12
+// ("NT reserved") sagen, ob Grundname und Erweiterung klein zu
+// schreiben sind -- so legt `mcopy` eine Datei "hello.txt" an, OHNE
+// einen langen Namen dafuer zu brauchen, und ein Treiber, der die Bits
+// uebersieht, zeigt "HELLO.TXT".
+fn short_name(state: u64, e: u64, out: u64) -> u64 {
+    let nt: u64 = kstate.get8(e + 12)
+    var n: u64 = 0
+    var i: u64 = 0
+    while i < 8 {
+        let c: u64 = kstate.get8(e + i)
+        if c != 32 {
+            var x: u64 = c
+            if (nt & 0x08) != 0 {
+                x = lower(x)
+            }
+            kstate.set8(out + n, x as u8)
+            n = n + 1
+        }
+        i = i + 1
+    }
+    var ext: u64 = 0
+    i = 8
+    while i < 11 {
+        if kstate.get8(e + i) != 32 {
+            ext = ext + 1
+        }
+        i = i + 1
+    }
+    if ext != 0 {
+        kstate.set8(out + n, 46 as u8)
+        n = n + 1
+        i = 8
+        while i < 11 {
+            let c: u64 = kstate.get8(e + i)
+            if c != 32 {
+                var x: u64 = c
+                if (nt & 0x10) != 0 {
+                    x = lower(x)
+                }
+                kstate.set8(out + n, x as u8)
+                n = n + 1
+            }
+            i = i + 1
+        }
+    }
+    kstate.set8(out + n, 0 as u8)
+    return n
+}
+
+// Die Pruefsumme des kurzen Namens, die in jedem Stueck eines langen
+// Namens steht. Ohne sie waere ein langer Name nicht an seinen Eintrag
+// gebunden -- und ein Werkzeug, das nur kurze Namen kennt, koennte den
+// Eintrag verschieben, ohne dass es auffiele.
+fn lfn_sum(e: u64) -> u64 {
+    var sum: u64 = 0
+    var i: u64 = 0
+    while i < 11 {
+        // rechts rotieren um eins, dann addieren -- alles in acht Bit
+        sum = (((sum & 1) << 7) + (sum >> 1) + kstate.get8(e + i)) & 0xFF
+        i = i + 1
+    }
+    return sum
+}
+
+// Ein Stueck eines langen Namens auswerten. Die dreizehn Zeichen
+// liegen an drei Stellen im Eintrag; das ist keine Schoenheit, das ist
+// der Preis dafuer, dass Microsoft 1996 die Felder eines normalen
+// Eintrags nicht anfassen wollte.
+fn lfn_chars(state: u64, e: u64, out: u64) -> u64 {
+    var n: u64 = 0
+    var i: u64 = 0
+    while i < 5 {
+        let c: u64 = le16(e + 1 + i * 2)
+        kstate.set8(out + n, byte_of(c) as u8)
+        n = n + 1
+        i = i + 1
+    }
+    i = 0
+    while i < 6 {
+        let c: u64 = le16(e + 14 + i * 2)
+        kstate.set8(out + n, byte_of(c) as u8)
+        n = n + 1
+        i = i + 1
+    }
+    i = 0
+    while i < 2 {
+        let c: u64 = le16(e + 28 + i * 2)
+        kstate.set8(out + n, byte_of(c) as u8)
+        n = n + 1
+        i = i + 1
+    }
+    return n
+}
+
+// UTF-16 zu einem Oktett. Alles ueber 127 wird zu '?' -- und das steht
+// so in docs/ROUNDK14.md. Ein halbes UTF-8 zu bauen waere schlimmer
+// als eine ehrliche Ersatzmarke: der Name waere lesbar falsch statt
+// sichtbar unbekannt.
+fn byte_of(c: u64) -> u64 {
+    if c == 0 || c == 0xFFFF {
+        return 0
+    }
+    if c > 127 {
+        return 63 // '?'
+    }
+    return c
+}
+
+// ------------------------------------------------------- Verzeichnisse
+
+// Die Zahl der 32-Oktett-Eintraege in einem Verzeichnis, das an
+// `first` haengt. Bei einer Kette ohne Ende waere das eine
+// Endlosschleife, also gibt es eine Schranke.
+fn dir_sectors(state: u64, m: u64, first: u64) -> u64 {
+    let spc: u64 = sget(state, m, S_SPC)
+    var count: u64 = 0
+    var cur: u64 = first
+    var guard: u64 = 0
+    while cur >= 2 && !is_eoc(cur) && guard < 65536 {
+        count = count + spc
+        cur = fat_get(state, m, cur)
+        guard = guard + 1
+    }
+    return count
+}
+
+// Der `i`-te Sektor eines Verzeichnisses, absolut.
+fn dir_sector(state: u64, m: u64, first: u64, i: u64) -> u64 {
+    let spc: u64 = sget(state, m, S_SPC)
+    let c: u64 = chain_at(state, m, first, i / spc, false)
+    if c == 0 {
+        return 0
+    }
+    return clus_lba(state, m, c) + (i % spc)
+}
+
+// EIN DURCHGANG DURCH EIN VERZEICHNIS.
+//
+// `want` = 0: den Eintrag mit dem Namen in CMPBUF suchen.
+// `want` > 0: den `want`-ten sichtbaren Eintrag liefern (1-basiert).
+//
+// Rueckgabe: der KNOTEN, oder 0. `out_name` bekommt den Namen (lang,
+// wenn es einen gibt), `out_seq` die Zahl der Namensstuecke davor --
+// die braucht `dir_remove`, um sie mit zu loeschen.
+//
+// Beide Faelle in EINER Schleife, und das ist Absicht: ein zweiter
+// Durchlauf waere eine zweite Stelle, an der die Regeln fuer lange
+// Namen stehen, und die zweite waere irgendwann die falsche.
+fn dir_walk(state: u64, m: u64, first: u64, want: u64, out_name: u64,
+    out_lba: u64, out_off: u64) -> u64 {
+    let secs: u64 = dir_sectors(state, m, first)
+    let lfn: u64 = buf(state, LFNBUF)
+    var seen: u64 = 0
+    var have_lfn: bool = false
+    var lfn_len: u64 = 0
+    var s: u64 = 0
+    while s < secs {
+        let lba: u64 = dir_sector(state, m, first, s)
+        if lba == 0 {
+            return 0
+        }
+        if !rd(state, m, lba, buf(state, DIRBUF)) {
+            return 0
+        }
+        var k: u64 = 0
+        while k < BS / 32 {
+            let e: u64 = buf(state, DIRBUF) + k * 32
+            let c0: u64 = kstate.get8(e)
+            let attr: u64 = kstate.get8(e + 11)
+            if c0 == 0 {
+                return 0 // hier hoert das Verzeichnis wirklich auf
+            }
+            if c0 == 0xE5 {
+                have_lfn = false
+                lfn_len = 0
+            } else if attr == A_LFN {
+                let seq: u64 = c0 & 0x3F
+                if seq >= 1 && seq <= 20 {
+                    var part: [u8; 16] = [0 as u8; 16]
+                    let got: u64 = lfn_chars(state, e, (&part[0]) as u64)
+                    let at: u64 = (seq - 1) * 13
+                    var i: u64 = 0
+                    while i < got {
+                        if at + i < 63 {
+                            kstate.set8(lfn + at + i, part[i as usize])
+                        }
+                        i = i + 1
+                    }
+                    if (c0 & 0x40) != 0 {
+                        // Das LETZTE Stueck kommt ZUERST; es sagt, wie
+                        // lang der Name hoechstens wird.
+                        var n: u64 = at
+                        var going: bool = true
+                        while going {
+                            if n >= at + got || n >= 63 {
+                                going = false
+                            } else if kstate.get8(lfn + n) == 0 {
+                                going = false
+                            } else {
+                                n = n + 1
+                            }
+                        }
+                        lfn_len = n
+                        kstate.set8(lfn + lfn_len, 0 as u8)
+                    }
+                    have_lfn = true
+                }
+            } else if (attr & A_VOLUME) != 0 {
+                have_lfn = false
+                lfn_len = 0
+            } else {
+                var name: [u8; 72] = [0 as u8; 72]
+                if have_lfn && lfn_len != 0 {
+                    var i: u64 = 0
+                    while i < lfn_len && i < 71 {
+                        name[i as usize] = kstate.get8(lfn + i) as u8
+                        i = i + 1
+                    }
+                    name[i as usize] = 0 as u8
+                } else {
+                    short_name(state, e, (&name[0]) as u64)
+                }
+                have_lfn = false
+                lfn_len = 0
+                seen = seen + 1
+                var hit: bool = false
+                if want == 0 {
+                    hit = name_eq((&name[0]) as u64, buf(state, CMPBUF))
+                } else {
+                    hit = seen == want
+                }
+                if hit {
+                    var i: u64 = 0
+                    while name[i as usize] != 0 as u8 && i < 71 {
+                        kstate.set8(out_name + i, name[i as usize])
+                        i = i + 1
+                    }
+                    kstate.set8(out_name + i, 0 as u8)
+                    let clus: u64 = (le16(e + 20) << 16) | le16(e + 26)
+                    let size: u64 = le32(e + 28)
+                    __mmio_write64(out_lba as *mut u64, lba)
+                    __mmio_write64(out_off as *mut u64, k * 32)
+                    return node_get(state, m, clus, size, attr, lba, k * 32)
+                }
+            }
+            k = k + 1
+        }
+        s = s + 1
+    }
+    return 0
+}
+
+// FAT UNTERSCHEIDET KEINE GROSS- UND KLEINSCHREIBUNG. Das ist keine
+// Nachlaessigkeit dieses Treibers, sondern die Eigenschaft des
+// Formats: "Hello.TXT" und "hello.txt" sind auf einer FAT-Platte
+// derselbe Name, und ein Treiber, der sie unterscheidet, legt eine
+// zweite Datei an, die Windows nie wieder findet.
+fn name_eq(a: u64, b: u64) -> bool {
+    var i: u64 = 0
+    while kstate.get8(a + i) != 0 && kstate.get8(b + i) != 0 {
+        if upper(kstate.get8(a + i)) != upper(kstate.get8(b + i)) {
+            return false
+        }
+        i = i + 1
+    }
+    return kstate.get8(a + i) == kstate.get8(b + i)
+}
+
+fn copy_name(dst: u64, src: u64, max: u64) -> u64 {
+    var i: u64 = 0
+    while kstate.get8(src + i) != 0 && i + 1 < max {
+        kstate.set8(dst + i, kstate.get8(src + i) as u8)
+        i = i + 1
+    }
+    kstate.set8(dst + i, 0 as u8)
+    return i
+}
+
+// Einen Namen in einem Verzeichnis suchen.
+fn dir_find(state: u64, m: u64, dir_clus: u64, name: u64) -> u64 {
+    var junk: [u8; 72] = [0 as u8; 72]
+    var lba: u64 = 0
+    var off: u64 = 0
+    copy_name(buf(state, CMPBUF), name, 72)
+    return dir_walk(state, m, dir_clus, 0, (&junk[0]) as u64,
+        (&lba) as u64, (&off) as u64)
+}
+
+// ------------------------------------------------------ Pfade aufloesen
+
+fn segment(path: u64, at: u64, out: u64, max: u64) -> u64 {
+    var i: u64 = at
+    while kstate.get8(path + i) == 47 {
+        i = i + 1
+    }
+    var n: u64 = 0
+    while kstate.get8(path + i) != 0 && kstate.get8(path + i) != 47 {
+        if n + 1 < max {
+            kstate.set8(out + n, kstate.get8(path + i) as u8)
+            n = n + 1
+        }
+        i = i + 1
+    }
+    kstate.set8(out + n, 0 as u8)
+    return i
+}
+
+fn f_lookup(state: u64, m: u64, path: u64) -> u64 {
+    tick(state)
+    if sget(state, m, S_VALID) == 0 {
+        return 0
+    }
+    var seg: [u8; 72] = [0 as u8; 72]
+    var at: u64 = 0
+    var node: u64 = node_get(state, m, sget(state, m, S_ROOT), 0, A_DIR, 0, 0)
+    var going: bool = true
+    while going {
+        at = segment(path, at, (&seg[0]) as u64, 72)
+        if kstate.get8((&seg[0]) as u64) == 0 {
+            going = false
+        } else {
+            if (nget(state, node, N_ATTR) & A_DIR) == 0 {
+                return 0
+            }
+            let next: u64 = dir_find(state, m, nget(state, node, N_CLUS),
+                (&seg[0]) as u64)
+            if next == 0 {
+                return 0
+            }
+            node = next
+        }
+    }
+    return node
+}
+
+// Das Verzeichnis, in dem ein Pfad liegt, und der letzte Namensteil.
+fn parent_of(state: u64, m: u64, path: u64, out_name: u64) -> u64 {
+    var buffer: [u8; 128] = [0 as u8; 128]
+    var n: u64 = 0
+    while kstate.get8(path + n) != 0 && n < 127 {
+        buffer[n as usize] = kstate.get8(path + n) as u8
+        n = n + 1
+    }
+    buffer[n as usize] = 0 as u8
+    if n == 0 {
+        return 0
+    }
+    var cut: u64 = n
+    var found: bool = false
+    while cut > 0 && !found {
+        cut = cut - 1
+        if buffer[cut as usize] == 47 as u8 {
+            found = true
+        }
+    }
+    var start: u64 = 0
+    var dir: u64 = node_get(state, m, sget(state, m, S_ROOT), 0, A_DIR, 0, 0)
+    if found {
+        buffer[cut as usize] = 0 as u8
+        start = cut + 1
+        if cut > 0 {
+            dir = f_lookup(state, m, (&buffer[0]) as u64)
+            if dir == 0 {
+                return 0
+            }
+        }
+    }
+    var k: u64 = 0
+    while buffer[(start + k) as usize] != 0 as u8 && k < 71 {
+        kstate.set8(out_name + k, buffer[(start + k) as usize])
+        k = k + 1
+    }
+    kstate.set8(out_name + k, 0 as u8)
+    if k == 0 {
+        return 0
+    }
+    if (nget(state, dir, N_ATTR) & A_DIR) == 0 {
+        return 0
+    }
+    return dir
+}
+
+// ---------------------------------------------------------- lesen
+
+fn f_read(state: u64, m: u64, node: u64, off: u64, dst: u64,
+    len: u64) -> u64 {
+    tick(state)
+    if node == 0 || sget(state, m, S_VALID) == 0 {
+        return 0
+    }
+    let size: u64 = nget(state, node, N_SIZE)
+    let first: u64 = nget(state, node, N_CLUS)
+    if (nget(state, node, N_ATTR) & A_DIR) != 0 {
+        return 0
+    }
+    if off >= size {
+        return 0
+    }
+    var want: u64 = len
+    if off + want > size {
+        want = size - off
+    }
+    let spc: u64 = sget(state, m, S_SPC)
+    let csize: u64 = spc * BS
+    var done: u64 = 0
+    while done < want {
+        let pos: u64 = off + done
+        let c: u64 = chain_at(state, m, first, pos / csize, false)
+        if c == 0 {
+            return done
+        }
+        let inc: u64 = pos % csize
+        let lba: u64 = clus_lba(state, m, c) + inc / BS
+        let inb: u64 = inc % BS
+        var chunk: u64 = BS - inb
+        if chunk > want - done {
+            chunk = want - done
+        }
+        if !rd(state, m, lba, buf(state, DATBUF)) {
+            return done
+        }
+        var i: u64 = 0
+        while i < chunk {
+            kstate.set8(dst + done + i,
+                kstate.get8(buf(state, DATBUF) + inb + i) as u8)
+            i = i + 1
+        }
+        done = done + chunk
+    }
+    return done
+}
+
+// -------------------------------------------------------- schreiben
+
+// Den Eintrag einer Datei nachfuehren: Groesse und erster Verband. Ohne
+// diese zwei Zeilen waere jedes `write` fuer jedes andere System
+// unsichtbar -- die Oktette laegen da, und das Verzeichnis wuesste
+// nichts davon.
+fn entry_update(state: u64, m: u64, node: u64) -> bool {
+    let lba: u64 = nget(state, node, N_DLBA)
+    if lba == 0 {
+        return true // die Wurzel hat keinen Eintrag
+    }
+    if !rd(state, m, lba, buf(state, DIRBUF)) {
+        return false
+    }
+    let e: u64 = buf(state, DIRBUF) + nget(state, node, N_DOFF)
+    let c: u64 = nget(state, node, N_CLUS)
+    put16(e + 22, fat_time(state))
+    put16(e + 24, fat_date(state))
+    put16(e + 20, (c >> 16) & 0xFFFF)
+    put16(e + 26, c & 0xFFFF)
+    put32(e + 28, nget(state, node, N_SIZE))
+    return wr(state, m, lba, buf(state, DIRBUF))
+}
+
+fn f_write(state: u64, m: u64, node: u64, off: u64, src: u64,
+    len: u64) -> u64 {
+    tick(state)
+    if node == 0 || sget(state, m, S_VALID) == 0 {
+        return 0
+    }
+    if (nget(state, node, N_ATTR) & A_DIR) != 0 {
+        return 0
+    }
+    var first: u64 = nget(state, node, N_CLUS)
+    if first < 2 {
+        first = clus_alloc(state, m)
+        if first == 0 {
+            return 0
+        }
+        if !clus_zero(state, m, first) {
+            return 0
+        }
+        nset(state, node, N_CLUS, first)
+    }
+    let spc: u64 = sget(state, m, S_SPC)
+    let csize: u64 = spc * BS
+    var done: u64 = 0
+    while done < len {
+        let pos: u64 = off + done
+        let c: u64 = chain_at(state, m, first, pos / csize, true)
+        if c == 0 {
+            done = len // kein Platz mehr -- was geschrieben ist, zaehlt
+        } else {
+            let inc: u64 = pos % csize
+            let lba: u64 = clus_lba(state, m, c) + inc / BS
+            let inb: u64 = inc % BS
+            var chunk: u64 = BS - inb
+            if chunk > len - done {
+                chunk = len - done
+            }
+            // Ein Teilsektor wird erst GELESEN. Sonst nimmt ein
+            // `write` von einem Oktett die anderen 511 mit.
+            if chunk != BS {
+                if !rd(state, m, lba, buf(state, DATBUF)) {
+                    return done
+                }
+            }
+            var i: u64 = 0
+            while i < chunk {
+                kstate.set8(buf(state, DATBUF) + inb + i,
+                    kstate.get8(src + done + i) as u8)
+                i = i + 1
+            }
+            if !wr(state, m, lba, buf(state, DATBUF)) {
+                return done
+            }
+            done = done + chunk
+        }
+    }
+    var wrote: u64 = done
+    if off + wrote > nget(state, node, N_SIZE) {
+        nset(state, node, N_SIZE, off + wrote)
+    }
+    entry_update(state, m, node)
+    fsinfo_unknown(state, m)
+    return wrote
+}
+
+// ------------------------------------------------- Zeit und FSInfo
+
+// DIE ZEIT IM EINTRAG. FAT speichert sie in zwei 16-Bit-Woertern, und
+// die Aufteilung ist die von 1980: das Datum als ((Jahr-1980) << 9) |
+// (Monat << 5) | Tag, die Uhrzeit als (Stunde << 11) | (Minute << 5) |
+// (Sekunde / 2). Die eine Sekunde Aufloesung, die dabei verlorengeht,
+// ist der Grund fuer das Feld "crt_time_tenth" -- das schreibt dieser
+// Treiber nicht.
+//
+// WARUM DAS NICHT NULL BLEIBEN DARF: eine Null bedeutet Monat 0 und
+// Tag 0, und die gibt es nicht. `fsck.fat` meldet das, und jedes
+// Werkzeug, das Dateien nach Datum ordnet, bekommt Muell. Die erste
+// Fassung dieser Datei liess die Felder null, und `mdir` zeigte
+// "1980-00-00" -- sichtbar falsch.
+fn fat_date(state: u64) -> u64 {
+    var y: u64 = time.rtc_field(time.R_YEAR)
+    let mo: u64 = time.rtc_field(time.R_MONTH)
+    let d: u64 = time.rtc_field(time.R_DAY)
+    if y < 1980 || mo < 1 || mo > 12 || d < 1 || d > 31 {
+        // Eine Uhr, die Unsinn sagt, darf keinen Unsinn auf die Platte
+        // schreiben: dann lieber der erste Tag, den FAT kennt.
+        return (0 << 9) | (1 << 5) | 1
+    }
+    return ((y - 1980) << 9) | (mo << 5) | d
+}
+
+fn fat_time(state: u64) -> u64 {
+    let h: u64 = time.rtc_field(time.R_HOUR)
+    let mi: u64 = time.rtc_field(time.R_MIN)
+    let se: u64 = time.rtc_field(time.R_SEC)
+    if h > 23 || mi > 59 || se > 59 {
+        return 0
+    }
+    return (h << 11) | (mi << 5) | (se / 2)
+}
+
+fn stamp(state: u64, e: u64) {
+    let d: u64 = fat_date(state)
+    let t: u64 = fat_time(state)
+    put16(e + 14, t) // erstellt
+    put16(e + 16, d)
+    put16(e + 18, d) // zuletzt gelesen
+    put16(e + 22, t) // zuletzt geschrieben
+    put16(e + 24, d)
+}
+
+// DIE FSINFO-SEITE. FAT32 fuehrt darin die Zahl der freien Verbaende
+// mit -- als BEQUEMLICHKEIT, nicht als Wahrheit: die Wahrheit steht in
+// der Zuordnungstafel. Wer Verbaende nimmt und die Zahl stehen laesst,
+// hinterlaesst ein Dateisystem, ueber das `fsck.fat` sagt "Free
+// cluster summary wrong".
+//
+// Dieser Treiber schreibt 0xFFFFFFFF hinein, und das heisst in der
+// Beschreibung von Microsoft ausdruecklich "unbekannt, bitte
+// nachrechnen". Das ist die ehrliche Antwort: die Zahl wirklich zu
+// fuehren hiesse, bei jedem Verband die ganze Tafel zu durchsuchen
+// (129022 Eintraege, 504 KiB), und eine GERATENE Zahl waere schlimmer
+// als keine.
+fn fsinfo_unknown(state: u64, m: u64) {
+    let base: u64 = mnt.first(state, m)
+    if !rd(state, m, base, buf(state, DIRBUF)) {
+        return
+    }
+    let sec: u64 = le16(buf(state, DIRBUF) + 48)
+    if sec == 0 || sec == 0xFFFF {
+        return
+    }
+    if !rd(state, m, base + sec, buf(state, DIRBUF)) {
+        return
+    }
+    let b: u64 = buf(state, DIRBUF)
+    if le32(b) != 0x41615252 {
+        return
+    }
+    if le32(b + 484) != 0x61417272 {
+        return
+    }
+    put32(b + 488, 0xFFFFFFFF)
+    put32(b + 492, 0xFFFFFFFF)
+    wr(state, m, base + sec, b)
+}
+
+// ------------------------------------------------- Eintraege anlegen
+
+// Aus "hello.txt" wird "HELLO   TXT". Passt der Name nicht in 8+3, wird
+// die Tilde-Form gebaut, die jedes FAT seit 1996 benutzt: die ersten
+// sechs Zeichen, '~' und eine Zahl.
+fn make_short(state: u64, name: u64, out: u64, nr: u64) -> bool {
+    var i: u64 = 0
+    while i < 11 {
+        kstate.set8(out + i, 32 as u8)
+        i = i + 1
+    }
+    var dot: u64 = 0xFFFF
+    var n: u64 = 0
+    while kstate.get8(name + n) != 0 {
+        if kstate.get8(name + n) == 46 {
+            dot = n
+        }
+        n = n + 1
+    }
+    if n == 0 {
+        return false
+    }
+    var base_len: u64 = n
+    if dot != 0xFFFF {
+        base_len = dot
+    }
+    var simple: bool = base_len <= 8 && base_len > 0
+    if dot != 0xFFFF && n - dot - 1 > 3 {
+        simple = false
+    }
+    var k: u64 = 0
+    if simple && nr == 0 {
+        while k < base_len {
+            kstate.set8(out + k, upper(kstate.get8(name + k)) as u8)
+            k = k + 1
+        }
+    } else {
+        var take: u64 = base_len
+        if take > 6 {
+            take = 6
+        }
+        while k < take {
+            kstate.set8(out + k, upper(kstate.get8(name + k)) as u8)
+            k = k + 1
+        }
+        kstate.set8(out + k, 126 as u8) // '~'
+        k = k + 1
+        var num: u64 = nr
+        if num == 0 {
+            num = 1
+        }
+        kstate.set8(out + k, (48 + (num % 10)) as u8)
+    }
+    if dot != 0xFFFF {
+        var e: u64 = 0
+        while e < 3 && dot + 1 + e < n {
+            kstate.set8(out + 8 + e, upper(kstate.get8(name + dot + 1 + e)) as u8)
+            e = e + 1
+        }
+    }
+    return true
+}
+
+// Braucht dieser Name ein langes Namensstueck? Genau dann, wenn er sich
+// nicht Zeichen fuer Zeichen aus seinem kurzen Namen zurueckgewinnen
+// laesst.
+fn needs_lfn(state: u64, name: u64, short: u64) -> bool {
+    var back: [u8; 16] = [0 as u8; 16]
+    // Der kurze Name, zurueckgelesen -- ohne die Kleinschreibbits, denn
+    // die werden hier nicht gesetzt.
+    var n: u64 = 0
+    var i: u64 = 0
+    while i < 8 {
+        if kstate.get8(short + i) != 32 {
+            back[n as usize] = kstate.get8(short + i) as u8
+            n = n + 1
+        }
+        i = i + 1
+    }
+    var ext: u64 = 0
+    i = 8
+    while i < 11 {
+        if kstate.get8(short + i) != 32 {
+            ext = ext + 1
+        }
+        i = i + 1
+    }
+    if ext != 0 {
+        back[n as usize] = 46 as u8
+        n = n + 1
+        i = 8
+        while i < 11 {
+            if kstate.get8(short + i) != 32 {
+                back[n as usize] = kstate.get8(short + i) as u8
+                n = n + 1
+            }
+            i = i + 1
+        }
+    }
+    back[n as usize] = 0 as u8
+    var k: u64 = 0
+    while kstate.get8(name + k) != 0 {
+        if k >= n {
+            return true
+        }
+        if kstate.get8(name + k) != (back[k as usize] as u64) {
+            return true
+        }
+        k = k + 1
+    }
+    return k != n
+}
+
+// `count` freie Eintraege hintereinander suchen; das Verzeichnis waechst,
+// wenn keine da sind. Rueckgabe: der Sektor, `out_off` die Stelle.
+fn dir_space(state: u64, m: u64, dir_clus: u64, count: u64,
+    out_lba: u64, out_off: u64) -> bool {
+    let secs: u64 = dir_sectors(state, m, dir_clus)
+    var run: u64 = 0
+    var run_lba: u64 = 0
+    var run_off: u64 = 0
+    var s: u64 = 0
+    while s < secs {
+        let lba: u64 = dir_sector(state, m, dir_clus, s)
+        if lba == 0 {
+            s = secs
+        } else {
+            if !rd(state, m, lba, buf(state, DIRBUF)) {
+                return false
+            }
+            var k: u64 = 0
+            while k < BS / 32 {
+                let c0: u64 = kstate.get8(buf(state, DIRBUF) + k * 32)
+                if c0 == 0 || c0 == 0xE5 {
+                    if run == 0 {
+                        run_lba = lba
+                        run_off = k * 32
+                    }
+                    run = run + 1
+                    if run == count {
+                        __mmio_write64(out_lba as *mut u64, run_lba)
+                        __mmio_write64(out_off as *mut u64, run_off)
+                        return true
+                    }
+                } else {
+                    run = 0
+                }
+                k = k + 1
+            }
+            s = s + 1
+        }
+    }
+    // Nichts frei: einen Verband anhaengen. Der neue ist genullt, also
+    // sind alle seine Eintraege frei -- und `count` ist hoechstens 20,
+    // passt also in einen Sektor von sechzehn... nein: in zwei. Der
+    // neue Verband hat mindestens einen Sektor, meist mehr; bei genau
+    // einem Sektor je Verband und mehr als 16 noetigen Eintraegen
+    // wuerde die Suche oben beim naechsten Anlauf ueber die
+    // Verbandsgrenze hinweg fuendig, weil `dir_sector` die Kette
+    // abgeht. Deshalb: anhaengen und noch einmal suchen.
+    let last: u64 = chain_at(state, m, dir_clus,
+        dir_sectors(state, m, dir_clus) / sget(state, m, S_SPC), true)
+    if last == 0 {
+        return false
+    }
+    let secs2: u64 = dir_sectors(state, m, dir_clus)
+    if secs2 <= secs {
+        return false
+    }
+    var s2: u64 = secs
+    while s2 < secs2 {
+        let lba: u64 = dir_sector(state, m, dir_clus, s2)
+        if lba == 0 {
+            return false
+        }
+        if !rd(state, m, lba, buf(state, DIRBUF)) {
+            return false
+        }
+        var k: u64 = 0
+        while k < BS / 32 {
+            let c0: u64 = kstate.get8(buf(state, DIRBUF) + k * 32)
+            if c0 == 0 || c0 == 0xE5 {
+                if run == 0 {
+                    run_lba = lba
+                    run_off = k * 32
+                }
+                run = run + 1
+                if run == count {
+                    __mmio_write64(out_lba as *mut u64, run_lba)
+                    __mmio_write64(out_off as *mut u64, run_off)
+                    return true
+                }
+            } else {
+                run = 0
+            }
+            k = k + 1
+        }
+        s2 = s2 + 1
+    }
+    return false
+}
+
+// Ein Stueck eines langen Namens schreiben.
+fn lfn_put(state: u64, e: u64, name: u64, len: u64, seq: u64, last: bool,
+    sum: u64) {
+    zero(e, 32)
+    var first: u64 = seq
+    if last {
+        first = seq | 0x40
+    }
+    kstate.set8(e, first as u8)
+    kstate.set8(e + 11, A_LFN as u8)
+    kstate.set8(e + 12, 0 as u8)
+    kstate.set8(e + 13, sum as u8)
+    put16(e + 26, 0)
+    let base: u64 = (seq - 1) * 13
+    var i: u64 = 0
+    while i < 13 {
+        var v: u64 = 0xFFFF
+        if base + i < len {
+            v = kstate.get8(name + base + i)
+        } else if base + i == len {
+            v = 0
+        }
+        if i < 5 {
+            put16(e + 1 + i * 2, v)
+        } else if i < 11 {
+            put16(e + 14 + (i - 5) * 2, v)
+        } else {
+            put16(e + 28 + (i - 11) * 2, v)
+        }
+        i = i + 1
+    }
+}
+
+// Einen Eintrag anlegen. Rueckgabe: der Knoten, oder 0.
+fn dir_add(state: u64, m: u64, dir_clus: u64, name: u64, clus: u64,
+    attr: u64, size: u64) -> u64 {
+    var short: [u8; 12] = [0 as u8; 12]
+    var out_lba: u64 = 0
+    var out_off: u64 = 0
+    var nr: u64 = 0
+    var okay: bool = false
+    // Einen kurzen Namen finden, den es noch nicht gibt.
+    while nr < 10 && !okay {
+        if !make_short(state, name, (&short[0]) as u64, nr) {
+            return 0
+        }
+        var probe: [u8; 16] = [0 as u8; 16]
+        short_name(state, (&short[0]) as u64, (&probe[0]) as u64)
+        if dir_find(state, m, dir_clus, (&probe[0]) as u64) == 0 {
+            okay = true
+        } else {
+            nr = nr + 1
+        }
+    }
+    if !okay {
+        return 0
+    }
+    var len: u64 = 0
+    while kstate.get8(name + len) != 0 {
+        len = len + 1
+    }
+    if len > 63 {
+        return 0
+    }
+    var pieces: u64 = 0
+    if needs_lfn(state, name, (&short[0]) as u64) {
+        pieces = (len + 12) / 13
+    }
+    if !dir_space(state, m, dir_clus, pieces + 1, (&out_lba) as u64,
+        (&out_off) as u64) {
+        return 0
+    }
+    let sum: u64 = lfn_sum((&short[0]) as u64)
+    // Die Stuecke stehen RUECKWAERTS vor dem Eintrag: das letzte
+    // Stueck zuerst. Wer sie vorwaerts schreibt, baut einen Namen, den
+    // Windows als Muell liest.
+    var idx: u64 = 0
+    while idx < pieces {
+        let seq: u64 = pieces - idx
+        let lba: u64 = step_lba(state, m, dir_clus, out_lba, out_off, idx)
+        let off: u64 = step_off(out_off, idx)
+        if lba == 0 {
+            return 0
+        }
+        if !rd(state, m, lba, buf(state, DIRBUF)) {
+            return 0
+        }
+        lfn_put(state, buf(state, DIRBUF) + off, name, len, seq,
+            idx == 0, sum)
+        if !wr(state, m, lba, buf(state, DIRBUF)) {
+            return 0
+        }
+        idx = idx + 1
+    }
+    let lba: u64 = step_lba(state, m, dir_clus, out_lba, out_off, pieces)
+    let off: u64 = step_off(out_off, pieces)
+    if lba == 0 {
+        return 0
+    }
+    if !rd(state, m, lba, buf(state, DIRBUF)) {
+        return 0
+    }
+    let e: u64 = buf(state, DIRBUF) + off
+    zero(e, 32)
+    var i: u64 = 0
+    while i < 11 {
+        kstate.set8(e + i, kstate.get8((&short[0]) as u64 + i) as u8)
+        i = i + 1
+    }
+    kstate.set8(e + 11, attr as u8)
+    stamp(state, e)
+    put16(e + 20, (clus >> 16) & 0xFFFF)
+    put16(e + 26, clus & 0xFFFF)
+    put32(e + 28, size)
+    if !wr(state, m, lba, buf(state, DIRBUF)) {
+        return 0
+    }
+    return node_get(state, m, clus, size, attr, lba, off)
+}
+
+// Der `n`-te Eintragsplatz ab (lba, off). Die Plaetze aus `dir_space`
+// liegen hintereinander -- aber ueber eine Sektorgrenze hinweg ist der
+// naechste Sektor nicht lba+1, sondern der naechste Sektor DER KETTE.
+fn step_lba(state: u64, m: u64, dir_clus: u64, lba: u64, off: u64,
+    n: u64) -> u64 {
+    let per: u64 = BS / 32
+    let total: u64 = off / 32 + n
+    if total < per {
+        return lba
+    }
+    // Den Sektorindex des Anfangs suchen und `total / per` weiter gehen.
+    let secs: u64 = dir_sectors(state, m, dir_clus)
+    var s: u64 = 0
+    while s < secs {
+        if dir_sector(state, m, dir_clus, s) == lba {
+            let want: u64 = s + total / per
+            if want >= secs {
+                return 0
+            }
+            return dir_sector(state, m, dir_clus, want)
+        }
+        s = s + 1
+    }
+    return 0
+}
+
+fn step_off(off: u64, n: u64) -> u64 {
+    let per: u64 = BS / 32
+    return ((off / 32 + n) % per) * 32
+}
+
+// -------------------------------------------------- die Verrichtungen
+
+fn f_readdir(state: u64, m: u64, dir: u64, index: u64, out: u64) -> u64 {
+    tick(state)
+    if dir == 0 || sget(state, m, S_VALID) == 0 {
+        return 0
+    }
+    if (nget(state, dir, N_ATTR) & A_DIR) == 0 {
+        return 0
+    }
+    var lba: u64 = 0
+    var off: u64 = 0
+    let clus: u64 = nget(state, dir, N_CLUS)
+    // DIE WURZEL VON FAT32 HAT KEIN `.` UND KEIN `..`. Jedes andere
+    // Verzeichnis hat sie als echte Eintraege; die Wurzel nicht, weil
+    // sie kein Elternteil hat. Damit `ls /mnt` trotzdem aussieht wie
+    // `ls` auf jedem anderen Verzeichnis, werden die beiden hier
+    // erzeugt -- und das steht so in docs/ROUNDK14.md.
+    if clus == sget(state, m, S_ROOT) {
+        if index == 0 {
+            kstate.set8(out, 46 as u8)
+            kstate.set8(out + 1, 0 as u8)
+            return dir
+        }
+        if index == 1 {
+            kstate.set8(out, 46 as u8)
+            kstate.set8(out + 1, 46 as u8)
+            kstate.set8(out + 2, 0 as u8)
+            return dir
+        }
+        return dir_walk(state, m, clus, index - 1, out, (&lba) as u64,
+            (&off) as u64)
+    }
+    return dir_walk(state, m, clus, index + 1, out, (&lba) as u64,
+        (&off) as u64)
+}
+
+fn f_attr(state: u64, m: u64, node: u64, what: u64) -> u64 {
+    tick(state)
+    if node == 0 {
+        return 0
+    }
+    let attr: u64 = nget(state, node, N_ATTR)
+    if what == vfsops.A_TYPE {
+        if (attr & A_DIR) != 0 {
+            return vfsops.N_DIR
+        }
+        return vfsops.N_FILE
+    }
+    if what == vfsops.A_SIZE {
+        return nget(state, node, N_SIZE)
+    }
+    if what == vfsops.A_MODE {
+        if (attr & A_DIR) != 0 {
+            return 493 // 0o755
+        }
+        if (attr & A_RDONLY) != 0 {
+            return 292 // 0o444
+        }
+        return 420 // 0o644
+    }
+    if what == vfsops.A_NLINK {
+        return 1
+    }
+    if what == vfsops.A_BLKSIZE {
+        return sget(state, m, S_SPC) * BS
+    }
+    return 0
+}
+
+fn f_create(state: u64, m: u64, path: u64, art: u64) -> u64 {
+    tick(state)
+    if sget(state, m, S_VALID) == 0 {
+        return 0
+    }
+    var name: [u8; 72] = [0 as u8; 72]
+    let dir: u64 = parent_of(state, m, path, (&name[0]) as u64)
+    if dir == 0 {
+        return 0
+    }
+    let dir_clus: u64 = nget(state, dir, N_CLUS)
+    if dir_find(state, m, dir_clus, (&name[0]) as u64) != 0 {
+        return 0
+    }
+    if art == vfsops.N_DIR {
+        let fresh: u64 = clus_alloc(state, m)
+        if fresh == 0 {
+            return 0
+        }
+        if !clus_zero(state, m, fresh) {
+            return 0
+        }
+        // `.` und `..` -- ohne sie ist es kein Verzeichnis. `..` zeigt
+        // bei einem Kind der Wurzel auf NULL und nicht auf die Nummer
+        // des Wurzelverbands; so steht es in der Beschreibung, und
+        // Windows verlaesst sich darauf.
+        if !rd(state, m, clus_lba(state, m, fresh), buf(state, DIRBUF)) {
+            return 0
+        }
+        let e0: u64 = buf(state, DIRBUF)
+        zero(e0, 64)
+        var i: u64 = 0
+        while i < 11 {
+            kstate.set8(e0 + i, 32 as u8)
+            kstate.set8(e0 + 32 + i, 32 as u8)
+            i = i + 1
+        }
+        kstate.set8(e0, 46 as u8)
+        kstate.set8(e0 + 11, A_DIR as u8)
+        put16(e0 + 20, (fresh >> 16) & 0xFFFF)
+        put16(e0 + 26, fresh & 0xFFFF)
+        stamp(state, e0)
+        kstate.set8(e0 + 32, 46 as u8)
+        kstate.set8(e0 + 33, 46 as u8)
+        kstate.set8(e0 + 43, A_DIR as u8)
+        stamp(state, e0 + 32)
+        var up: u64 = dir_clus
+        if up == sget(state, m, S_ROOT) {
+            up = 0
+        }
+        put16(e0 + 52, (up >> 16) & 0xFFFF)
+        put16(e0 + 58, up & 0xFFFF)
+        if !wr(state, m, clus_lba(state, m, fresh), buf(state, DIRBUF)) {
+            return 0
+        }
+        let made: u64 = dir_add(state, m, dir_clus, (&name[0]) as u64,
+            fresh, A_DIR, 0)
+        fsinfo_unknown(state, m)
+        return made
+    }
+    return dir_add(state, m, dir_clus, (&name[0]) as u64, 0, 0x20, 0)
+}
+
+// Einen Eintrag loeschen: das erste Oktett wird 0xE5, und die
+// Namensstuecke davor gehen mit. Wer sie stehen laesst, hinterlaesst
+// einen Namen ohne Datei -- `fsck.fat` nennt das "orphaned long
+// filename".
+fn dir_remove(state: u64, m: u64, dir_clus: u64, name: u64) -> bool {
+    var found: [u8; 72] = [0 as u8; 72]
+    var lba: u64 = 0
+    var off: u64 = 0
+    copy_name(buf(state, CMPBUF), name, 72)
+    let node: u64 = dir_walk(state, m, dir_clus, 0, (&found[0]) as u64,
+        (&lba) as u64, (&off) as u64)
+    if node == 0 {
+        return false
+    }
+    if !rd(state, m, lba, buf(state, DIRBUF)) {
+        return false
+    }
+    kstate.set8(buf(state, DIRBUF) + off, 0xE5 as u8)
+    if !wr(state, m, lba, buf(state, DIRBUF)) {
+        return false
+    }
+    // Rueckwaerts durch die Namensstuecke davor.
+    var back: u64 = 1
+    var going: bool = true
+    while going && back <= 20 {
+        let plba: u64 = back_lba(state, m, dir_clus, lba, off, back)
+        let poff: u64 = back_off(off, back)
+        if plba == 0 {
+            going = false
+        } else {
+            if !rd(state, m, plba, buf(state, DIRBUF)) {
+                going = false
+            } else {
+                let e: u64 = buf(state, DIRBUF) + poff
+                if kstate.get8(e + 11) == A_LFN
+                    && kstate.get8(e) != 0xE5 {
+                    kstate.set8(e, 0xE5 as u8)
+                    if !wr(state, m, plba, buf(state, DIRBUF)) {
+                        going = false
+                    }
+                    back = back + 1
+                } else {
+                    going = false
+                }
+            }
+        }
+    }
+    zero(nd(state, node), NODE_BYTES)
+    return true
+}
+
+fn back_lba(state: u64, m: u64, dir_clus: u64, lba: u64, off: u64,
+    n: u64) -> u64 {
+    let per: u64 = BS / 32
+    let idx: u64 = off / 32
+    if idx >= n {
+        return lba
+    }
+    let secs: u64 = dir_sectors(state, m, dir_clus)
+    var s: u64 = 0
+    while s < secs {
+        if dir_sector(state, m, dir_clus, s) == lba {
+            let back_secs: u64 = (n - idx + per - 1) / per
+            if back_secs > s {
+                return 0
+            }
+            return dir_sector(state, m, dir_clus, s - back_secs)
+        }
+        s = s + 1
+    }
+    return 0
+}
+
+fn back_off(off: u64, n: u64) -> u64 {
+    let per: u64 = BS / 32
+    let idx: u64 = off / 32
+    if idx >= n {
+        return (idx - n) * 32
+    }
+    let d: u64 = n - idx
+    let r: u64 = d % per
+    if r == 0 {
+        return 0
+    }
+    return (per - r) * 32
+}
+
+fn f_unlink(state: u64, m: u64, path: u64) -> u64 {
+    tick(state)
+    if sget(state, m, S_VALID) == 0 {
+        return 5 // EIO
+    }
+    var name: [u8; 72] = [0 as u8; 72]
+    let dir: u64 = parent_of(state, m, path, (&name[0]) as u64)
+    if dir == 0 {
+        return 2
+    }
+    let dir_clus: u64 = nget(state, dir, N_CLUS)
+    let node: u64 = dir_find(state, m, dir_clus, (&name[0]) as u64)
+    if node == 0 {
+        return 2
+    }
+    let attr: u64 = nget(state, node, N_ATTR)
+    let clus: u64 = nget(state, node, N_CLUS)
+    if (attr & A_DIR) != 0 {
+        // Ein Verzeichnis geht nur leer. `.` und `..` zaehlen nicht.
+        var junk: [u8; 72] = [0 as u8; 72]
+        var l: u64 = 0
+        var o: u64 = 0
+        if dir_walk(state, m, clus, 3, (&junk[0]) as u64, (&l) as u64,
+            (&o) as u64) != 0 {
+            return 39 // ENOTEMPTY
+        }
+    }
+    if !dir_remove(state, m, dir_clus, (&name[0]) as u64) {
+        return 2
+    }
+    if clus >= 2 {
+        chain_free(state, m, clus)
+    }
+    fsinfo_unknown(state, m)
+    return 0
+}
+
+fn f_rename(state: u64, m: u64, from: u64, to: u64) -> u64 {
+    tick(state)
+    if sget(state, m, S_VALID) == 0 {
+        return 5
+    }
+    var a: [u8; 72] = [0 as u8; 72]
+    var b: [u8; 72] = [0 as u8; 72]
+    let dira: u64 = parent_of(state, m, from, (&a[0]) as u64)
+    if dira == 0 {
+        return 2
+    }
+    let dirb: u64 = parent_of(state, m, to, (&b[0]) as u64)
+    if dirb == 0 {
+        return 2
+    }
+    let ca: u64 = nget(state, dira, N_CLUS)
+    let cb: u64 = nget(state, dirb, N_CLUS)
+    let node: u64 = dir_find(state, m, ca, (&a[0]) as u64)
+    if node == 0 {
+        return 2
+    }
+    if dir_find(state, m, cb, (&b[0]) as u64) != 0 {
+        return 17 // EEXIST
+    }
+    let clus: u64 = nget(state, node, N_CLUS)
+    let size: u64 = nget(state, node, N_SIZE)
+    let attr: u64 = nget(state, node, N_ATTR)
+    if dir_add(state, m, cb, (&b[0]) as u64, clus, attr, size) == 0 {
+        return 28
+    }
+    if !dir_remove(state, m, ca, (&a[0]) as u64) {
+        return 5
+    }
+    return 0
+}
+
+fn f_trunc(state: u64, m: u64, node: u64) -> u64 {
+    tick(state)
+    if node == 0 {
+        return 9
+    }
+    let clus: u64 = nget(state, node, N_CLUS)
+    if clus >= 2 {
+        chain_free(state, m, clus)
+    }
+    nset(state, node, N_CLUS, 0)
+    nset(state, node, N_SIZE, 0)
+    entry_update(state, m, node)
+    fsinfo_unknown(state, m)
+    return 0
+}
+
+fn ops() -> vfsops.Ops {
+    return vfsops.Ops {
+        lookup: f_lookup,
+        readdir: f_readdir,
+        attr: f_attr,
+        read: f_read,
+        write: f_write,
+        create: f_create,
+        unlink: f_unlink,
+        rename: f_rename,
+        trunc: f_trunc,
+        mask: vfsops.OP_ALL,
+        tag: 7627110 // "fat\0"
+    }
+}
