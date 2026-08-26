@@ -90,6 +90,7 @@ BEREICHE = [
     # zu dieser Runde als einziger Bereich NICHT in `kstate.fi`, sondern
     # nur in `fb.fi` -- und genau deshalb ging er bei K9 unter.
     ("FB",         "kstate.fi", "FB_OFF",         "FB_MAX"),
+    ("K11",        "kstate.fi", "K11_OFF",        "K11_MAX"),
 ]
 
 # `_OFF`-Konstanten, die KEINE Bereiche in `kdata` sind -- Offsets
