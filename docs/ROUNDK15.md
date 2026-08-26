@@ -579,14 +579,16 @@ Null zurück, statt in die nächste Seite zu schreiben.
 
 `bash tools/k15/run.sh` ist Abschnitt 21 von `./test.sh`.
 
-Die vierzehn Abschnitte des Läufers: bauen aus beiden Übersetzern · die
+Die siebzehn Abschnitte des Läufers: bauen aus beiden Übersetzern · die
 Speicherkarte · die Anwendung steht da (Anordnung) · der Text je Zeichen
 · die Widgets an ihrer Stelle · bedienen mit echten Klicks · die Tastatur
 samt Zwischenablage · Menüs und Dialoge · der Dateimanager gegen die
 Platte · hineingehen, sortieren, anlegen · die Zeiten · die Gegenproben ·
-das Farbschema aus einer Datei · das Zeigerbild.
+das Farbschema aus einer Datei · das Zeigerbild · **der Name und der
+zweite Name** · **das Anwendungsverzeichnis und der Starter** · **die
+Suche und ihre drei Gegenproben**.
 
-**152 Zusagen, 0 Fehler.**
+**189 Zusagen, 0 Fehler.**
 
 ### Die ganze Abnahme, Abschnitt für Abschnitt
 
@@ -610,14 +612,25 @@ das Farbschema aus einer Datei · das Zeigerbild.
 | 16 | der Editor und der Werkzeugkasten | 85 | 0 |
 | 17 | die Oberfläche (Runde K10) | **103** | 0 |
 | 18 | ein Wirt für fremde Prozessoren | 114 | 0 |
-| **21** | **Widgets und der Dateimanager** | **152** | **0** |
-| | **Summe** | **1638** | **0** |
+| **21** | **Widgets, der Dateimanager, der Starter** | **189** | **0** |
+| | **Summe** | **1675** | **0** |
 
 Die achtzehn Abschnitte vor dieser Runde ergeben **1486** — genau die
 Zahl, die vorher dastand, keine einzige weniger. Abschnitt 17
 (`tools/wm/run.sh`) meldet weiter **103**, obwohl diese Runde
 `kernel/wm.fi` angefasst hat; Abschnitt 4 und 13 messen die Tastatur
 weiter, obwohl `kernel/kbd.fi` eine Taste dazubekommen hat.
+
+**Nach dem Nachtrag noch einmal nachgemessen.** Der Nachtrag hat
+`tools/osum/mkfs.py` angefasst (der zweite Name) — und `mkfs.py` baut das
+Plattenabbild für sieben andere Abschnitte. Die wurden deshalb einzeln
+wiederholt, nach dem Umbau:
+
+```
+OSUM 130 · POSIX 134 · USERLAND 91 · GFX 76 · UNIX 107 · K11 85 · WM 103
+```
+
+Alle sieben Zeile für Zeile dieselben Zahlen wie vorher, 0 Fehler.
 
 **Wie gemessen wurde, und was daran unschön ist.** Ein Durchlauf von
 `./test.sh` in einem Stück ist auf diesem Rechner nicht zu Ende
@@ -628,11 +641,11 @@ einzeln nachgezogen — dieselben Skripte, dieselben Aufrufe, nur
 nacheinander. Das steht hier, weil eine Summe, die aus zwei Läufen
 zusammengesetzt ist, etwas anderes ist als eine aus einem.
 
-Zwölf QEMU-Läufe, jeder mit eigenem Plattenabbild, jeder mit
+Sechsundzwanzig QEMU-Läufe, jeder mit eigenem Plattenabbild, jeder mit
 Bildschirmfoto: `ruhe` · `klick` · `haken` · `reiter` · `tast` · `noclip`
 · `tabkey` · `pop` · `popw` · `dlg` · `dlgok` · `files` · `fdbl` ·
 `fsort` · `fneu` · `haken_nd` · `nohit` · `nomaus` · `nofok` · `ohne` ·
-`theme2` · `beam`.
+`theme2` · `beam` · `start` · `suche` · `nokeys` · `unsinn`.
 
 Die Zusagen der Runden 52 bis K12 sind unverändert da — diese Runde fasst
 von ihnen nur `kernel/kbd.fi` (eine Taste, die vorher nicht ankam) und
