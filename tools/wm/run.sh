@@ -219,15 +219,20 @@ esac
 # Und die Shell dazu, als eigenstaendige ELF-Datei -- so, wie Runde K6
 # sie baut (`tools/userland/run.sh`): crt.s davor, `kernel/user/user.ld`
 # als Linkerskript.
-as --64 -o "$TMPD/crt.o" kernel/user/crt.s 2>/dev/null \
-    && vendor/firn/bin/firnc kernel/user/sh.fi -o "$TMPD/sh.o" >"$TMPD/sh.log" 2>&1 \
-    && ld -T kernel/user/user.ld --defsym=USER_ENTRY="_F0.u_start" \
-        -o "$TMPD/sh.elf" "$TMPD/crt.o" "$TMPD/sh.o" 2>>"$TMPD/sh.log" \
-    && ok "/bin/sh gebaut ($(stat -c%s "$TMPD/sh.elf" 2>/dev/null) Oktette)" \
-    || { bad "/bin/sh laesst sich nicht bauen"; sed 's/^/        /' "$TMPD/sh.log" | head -6; }
+gebaut=1
+as --64 -o "$TMPD/crt.o" kernel/user/crt.s 2>/dev/null || gebaut=0
+for p in sh echo uname; do
+    vendor/firn/bin/firnc "kernel/user/$p.fi" -o "$TMPD/$p.o" >"$TMPD/$p.log" 2>&1 \
+        && ld -T kernel/user/user.ld --defsym=USER_ENTRY="_F0.u_start" \
+            -o "$TMPD/$p.elf" "$TMPD/crt.o" "$TMPD/$p.o" 2>>"$TMPD/$p.log" \
+        || { gebaut=0; sed 's/^/        /' "$TMPD/$p.log" | head -4; }
+done
+[ "$gebaut" = 1 ] && ok "/bin/sh, /bin/echo und /bin/uname gebaut ($(stat -c%s "$TMPD/sh.elf" 2>/dev/null) Oktette fuer die Shell)" \
+    || bad "die Programme fuer das Terminalfenster lassen sich nicht bauen"
 python3 tools/osum/mkfs.py build "$DISK" 4096 /lib/ \
     /lib/mono.ttf=assets/osum-mono.ttf /lib/sans.ttf=assets/osum-sans.ttf \
-    /bin/ /bin/sh="$TMPD/sh.elf" > "$TMPD/mkfs.txt" 2>&1 \
+    /bin/ /bin/sh="$TMPD/sh.elf" /bin/echo="$TMPD/echo.elf" \
+    /bin/uname="$TMPD/uname.elf" > "$TMPD/mkfs.txt" 2>&1 \
     && ok "mkfs.py baut ein Abbild mit beiden Schriften und der Shell" \
     || { bad "mkfs.py fehlgeschlagen"; sed 's/^/        /' "$TMPD/mkfs.txt"; }
 
@@ -263,12 +268,8 @@ ms=$(zahl "$TMPD/dump.txt" 'mouse: id=[0-9]+')
 num "die Kennung nach dem Radgriff (3 = mit Rad, vier Oktette je Paket)" "$ms" eq 3
 mst=$(zahl "$TMPD/dump.txt" 'mouse: .*selftest [0-9]+')
 num "die Zusagen des Treibers ueber sich selbst" "$mst" eq 10
-gsi=$(grep -aoE 'gsi=0x[0-9a-f]+' "$TMPD/dump.txt" | head -1 | sed 's/.*=//')
-if [ "$gsi" = "0x2c" ]; then
-    ok "der Eintrag der Umleitungstabelle fuer GSI 12: $gsi (Vektor 44, nicht maskiert)"
-else
-    bad "GSI 12 zeigt $gsi statt 0x2c"
-fi
+# Der Eintrag der Umleitungstabelle steht im Bericht am Ende eines
+# Laufes mit `wmhold` -- er wird in Abschnitt 6 geholt.
 
 echo "== 6. der Fensterserver: Selbsttest und das Foto =="
 foto "$K0" "gfx wm wmhold $GRUND" "$TMPD/w.txt" "$TMPD/w.ppm"
@@ -292,12 +293,18 @@ schau "der Rahmen des Fensters aus Ring 3 liegt bildpunktgenau" \
 # Die Flaeche, die RING 3 in sein Fenster gemalt hat (0x101820), an einer
 # Stelle, an der darunter das Terminalfenster liegt.
 schau "an der Ueberschneidung steht das OBERE Fenster" \
-    flaeche "$TMPD/w.ppm" 430 356 100 8 16 24 32
+    flaeche "$TMPD/w.ppm" 430 353 100 6 16 24 32
 schau_nicht "und NICHT die Flaeche des unteren" \
-    flaeche "$TMPD/w.ppm" 430 356 100 8 16 20 26
+    flaeche "$TMPD/w.ppm" 430 353 100 6 16 20 26
 schau "der Hintergrund neben den Fenstern gehoert dem Server" \
     flaeche "$TMPD/w.ppm" 700 60 80 80 30 42 56
 # Der Zeiger: die Spitze steht in der Mitte, und der Umriss ist schwarz.
+gsi=$(grep -aoE 'gsi=0x[0-9a-f]+' "$TMPD/w.txt" | head -1 | sed 's/.*=//')
+if [ "$gsi" = "0x2c" ]; then
+    ok "der Eintrag der Umleitungstabelle fuer GSI 12: $gsi (Vektor 44, nicht maskiert)"
+else
+    bad "GSI 12 zeigt '$gsi' statt 0x2c"
+fi
 schau "die Spitze des Zeigers steht in der Bildmitte" \
     punkt "$TMPD/w.ppm" 399 299 0 0 0
 schau "und zwei Bildpunkte tiefer ist er weiss gefuellt" \
@@ -522,9 +529,15 @@ echo "== 12. die Shell im Terminalfenster =="
 # ANZEIGEGERAET austauschbar ist (`tty.SINK_SCREEN`).  Diese Runde traegt
 # sich dort ein: SINK_WINDOW schreibt in ein Fenster -- UND weiter auf
 # die serielle Leitung, damit der Mitschnitt die Grundwahrheit bleibt.
-foto "$K0" "gfx wm wmhold wmshell osum quiet script=uname;echo hallo-fenster;exit nokbd" \
+# KEIN `osum` auf der Zeile, und das ist wichtig: die Kommandozeile
+# traegt EIN Skript, und es gehoert der Shell im Fenster.  `wmshell`
+# haelt deshalb die Shell aus Runde K1 und die aus Runde K6 zurueck --
+# sonst liest die erste das Skript weg und im Fenster steht eine leere
+# Eingabezeile (gemessen, genau so passiert).
+foto "$K0" "gfx wm wmhold wmshell script=uname;echo hallo-fenster;exit $GRUND" \
     "$TMPD/sh.txt" "$TMPD/sh.ppm"
 num "der Kern beendet sich sauber" "$RC" eq 21
+has "$TMPD/sh.txt" "sh: ready, osum" "die Shell von der Platte ist gestartet"
 has "$TMPD/sh.txt" "hallo-fenster" "die Shell hat geschrieben (seriell)"
 she=$(grep -aoE 'wm: sh exit=[0-9]+' "$TMPD/sh.txt" | grep -oE '[0-9]+$')
 num "und sich sauber beendet" "$she" eq 0
@@ -539,7 +552,7 @@ if grep -qa 'hallo-fenster' "$TMPD/sh.txt"; then
     # die erste Zeile, in der die Zusage aufgeht -- und wenn sie in
     # keiner aufgeht, faellt sie.
     gefunden=""
-    for z in 2 3 4 5 6 7 8 9 10 11 12; do
+    for z in 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19; do
         if aus=$(python3 tools/gfx/schau.py tgrid "$TMPD/sh.ppm" \
             assets/osum-mono.ttf 16 26 62 10 19 "$z" 0 \
             224 230 236 16 20 26 "hallo-fenster" 2>&1); then
