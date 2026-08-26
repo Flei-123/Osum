@@ -111,6 +111,33 @@ Adressraum ab — mit den ueblichen Rechtepruefungen. Alles davon haengt an
 dem Wort `gfx` auf der Kommandozeile; ohne es aendert sich am Kernel
 nichts. Gemessen an Bildschirmfotos (`docs/ROUNDK7.md`).
 
+**Oberflaeche (Runde K10).** Ein **Zeigegeraet** am zweiten Anschluss
+des Tastaturbausteins (IRQ 12, `kernel/ps2m.fi`): Drei- und
+Vier-Oktett-Pakete, Rad, Anschlag an den Bildraendern, ein gezeichneter
+Zeiger. Ein **Fensterserver** (`kernel/wm.fi`): Fenster anlegen,
+verschieben, Groesse aendern, schliessen; Stapelreihenfolge;
+Eingabefokus; Ereignisse an das richtige Fenster; und
+**Bereichsverfolgung**, damit nur das Neue gemalt wird — gemessen 6801 us
+fuer den ganzen Schirm gegen 198 us fuer eine Zeigerbewegung, also
+Faktor 34. Anwendungen reden ueber **Handles** aus `kernel/cap.fi` mit
+ihm (neun Aufrufe ab 2100), nicht ueber einen zweiten Weg.
+
+Und **echte Schriften** (`kernel/ttf.fi`): ein TrueType-Leser (`head`,
+`hhea`, `maxp`, `hmtx`, `cmap` Format 4, `loca`, `glyf`, `kern`) und ein
+Rasterer mit **Kantenglaettung**, ganz in Firn und ganz in Festkomma —
+kein FreeType, keine Gleitkommazahl. Die Schriften liegen als
+zusammengeschnittene TrueType-Dateien auf der Platte (`assets/`,
+`tools/ttf/schnitt.py`). Darauf ein **Terminalfenster**, in dem
+`/bin/sh` von der Platte laeuft, und ein zweites Fenster, das ein
+Programm in **Ring 3** anlegt, bemalt und auf Klicks und Tasten
+antwortet.
+
+Gemessen an Bildschirmfotos, in die ueber den QEMU-Monitor **echte
+Mausbewegungen, Klicks und Tastendruecke** eingespeist wurden — und der
+Text darin nicht gegen eine Flaeche, sondern **je Zeichen** gegen eine
+zweite, unabhaengige Rasterung desselben Umrisses
+(`tools/ttf/raster.py`). `docs/ROUNDK10.md`.
+
 **NVMe-Durchsatz, gemessen.** In QEMU/TCG bei 2,19 GHz, 128 KiB am
 Stueck (`tools/pci/run.sh` reproduziert es):
 
