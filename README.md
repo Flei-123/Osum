@@ -36,15 +36,18 @@ Der Umfang, gezaehlt:
 
 | Teil | Zeilen |
 |---|---:|
-| `kernel/*.fi` — der Kern | 18 032 |
-| `kernel/user/*.fi` — Shell, Werkzeuge, ulib | 3 592 |
-| `kernel/*.s`, `kernel/user/crt.s` — Assembler | 1 204 |
-| `lib/libc/*.fi` — die libc aus Runde K4 | 1 234 |
-| `tools/` — die Testlaeufer | 5 770 |
+| `kernel/*.fi` — der Kern | 30 383 |
+| `kernel/user/*.fi` — Shell, Werkzeuge, ulib | 5 114 |
+| `kernel/*.s`, `kernel/user/crt.s` — Assembler | 1 336 |
+| `lib/libc/*.fi` — die libc aus Runde K4 | 1 598 |
+| `tools/` — die Testlaeufer | 9 650 |
 
-Zuletzt dazugekommen: `kernel/cap.fi` (die Handle-Tabelle aus OrientOS'
-nativer ABI) sowie `kernel/fb.fi` und `kernel/font.fi` — der Bildschirm
-der Runde K7.
+Zuletzt dazugekommen (Runde K10, die Oberflaeche): `kernel/wm.fi` (der
+Fensterserver, 1 812 Zeilen), `kernel/ttf.fi` (TrueType-Leser und
+Rasterer, 1 386) und `kernel/ps2m.fi` (das Zeigegeraet, 610); dazu auf
+dem Wirt `tools/ttf/schnitt.py` (der Schriftschnitt),
+`tools/ttf/raster.py` (die ZWEITE Fassung des Rasterers, gegen die die
+erste gemessen wird) und `tools/wm/`.
 
 Dazu aus der Capability-Runde: `kernel/cap.fi` (die Handle-Tabelle) und
 die Testlaeufer `tools/caps/` und `tools/boot/`. Aus der Netzrunde K8:
