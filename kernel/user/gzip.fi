@@ -1,0 +1,162 @@
+// kernel/user/gzip.fi -- Runde K11: einpacken nach RFC 1952.
+//
+//     gzip [-c] [DATEI]      DATEI -> DATEI.gz (die Vorlage faellt weg)
+//     gzip -c [DATEI]        auf die Standardausgabe, Vorlage bleibt
+//     gzip                   Standardeingabe -> Standardausgabe
+//
+// Der Kopf sind zehn Oktette: 0x1F 0x8B, Verfahren 8 (deflate), keine
+// Zusatzfelder, Zeitstempel NULL (dieses Dateisystem hat keinen),
+// XFL 0, Betriebssystem 3 (Unix). Danach der deflate-Strom, dahinter
+// CRC-32 und die Laenge der Vorlage, beide vier Oktette, niedrigstes
+// Oktett zuerst.
+//
+// DIE OBERGRENZE: 64 KiB Eingabe. Ein Prozess hat auf dieser Maschine
+// 1 MiB zwischen `proc.IMAGE_BASE` und `proc.IMAGE_END`, und darin liegen
+// auch die Kette des Packers und der Ausgabepuffer. Was groesser ist,
+// wird ABGELEHNT statt still gekuerzt.
+
+profile kernel
+
+import ulib
+import tools
+import flate
+
+export { u_start }
+
+const MAX_IN: u64 = 65536
+const MAX_OUT: u64 = 98304
+
+static mut inb: [u8; 65536] = [0 as u8; 65536]
+static mut outb: [u8; 98304] = [0 as u8; 98304]
+static mut name: [u8; 264] = [0 as u8; 264]
+
+fn slurp(fd: u64) -> u64 {
+    var total: u64 = 0
+    var going: bool = true
+    while going {
+        let n: u64 = ulib.sys(ulib.SYS_READ, fd,
+            (&inb[(total) as usize]) as u64, MAX_IN - total)
+        if n == 0 || ulib.bad(n) {
+            going = false
+        } else {
+            total = total + n
+            if total >= MAX_IN {
+                return ulib.EOF
+            }
+        }
+    }
+    return total
+}
+
+fn spill(fd: u64, p: u64, n: u64) -> bool {
+    var w: u64 = 0
+    while w < n {
+        var chunk: u64 = n - w
+        if chunk > 4096 {
+            chunk = 4096
+        }
+        let r: u64 = ulib.sys(ulib.SYS_WRITE, fd, p + w, chunk)
+        if ulib.bad(r) || r == 0 {
+            return false
+        }
+        w = w + r
+    }
+    return true
+}
+
+fn u_start(args: u64) -> u64 {
+    var s_big: [u8; 32] = "gzip: input above 64 KiB\0\0\0\0\0\0\0\0"
+    var s_open: [u8; 20] = "gzip: cannot open \0\0"
+    var s_write: [u8; 21] = "gzip: cannot write \0\0"
+    var s_room: [u8; 30] = "gzip: it did not get smaller\0\0"
+    var s_suffix: [u8; 4] = ".gz\0"
+    var o_c: [u8; 3] = "-c\0"
+    let argc: u64 = ulib.arg_count(args)
+    var to_stdout: bool = false
+    var at: u64 = 1
+    while at < argc && ulib.streq(ulib.arg_at(args, at),
+        (&o_c[0 as usize]) as u64) {
+        to_stdout = true
+        at = at + 1
+    }
+    var infd: u64 = ulib.IN
+    var src: u64 = 0
+    if at < argc {
+        src = ulib.arg_at(args, at)
+        infd = tools.openr(src)
+        if ulib.bad(infd) {
+            ulib.esay_line((&s_open[0 as usize]) as u64, src)
+            return 1
+        }
+    } else {
+        to_stdout = true
+    }
+    let n: u64 = slurp(infd)
+    if infd != ulib.IN {
+        ulib.sys(ulib.SYS_CLOSE, infd, 0, 0)
+    }
+    if n == ulib.EOF {
+        ulib.esay_line((&s_big[0 as usize]) as u64, 0)
+        return 1
+    }
+    // Der Kopf.
+    outb[0 as usize] = 31 as u8
+    outb[1 as usize] = 139 as u8
+    outb[2 as usize] = 8 as u8
+    outb[3 as usize] = 0 as u8
+    outb[4 as usize] = 0 as u8
+    outb[5 as usize] = 0 as u8
+    outb[6 as usize] = 0 as u8
+    outb[7 as usize] = 0 as u8
+    outb[8 as usize] = 0 as u8
+    outb[9 as usize] = 3 as u8
+    var used: [u64; 1] = [0 as u64; 1]
+    let r: u64 = flate.deflate((&inb[0 as usize]) as u64, n,
+        (&outb[10 as usize]) as u64, MAX_OUT - 18,
+        (&used[0 as usize]) as u64)
+    if r != flate.E_OK {
+        ulib.esay_line((&s_room[0 as usize]) as u64, 0)
+        return 1
+    }
+    // Ist nichts gewonnen, geht der Strom als GESPEICHERTE Bloecke
+    // hinaus: Zufallszahlen wuerden durch die Huffman-Baeume um ein
+    // Achtel groesser, und ein Packer, der vergroessert, ist kaputt.
+    if used[0 as usize] >= n {
+        let r2: u64 = flate.store((&inb[0 as usize]) as u64, n,
+            (&outb[10 as usize]) as u64, MAX_OUT - 18,
+            (&used[0 as usize]) as u64)
+        if r2 != flate.E_OK {
+            ulib.esay_line((&s_room[0 as usize]) as u64, 0)
+            return 1
+        }
+    }
+    var at_out: u64 = 10 + used[0 as usize]
+    let crc: u64 = flate.crc32((&inb[0 as usize]) as u64, n)
+    var i: u64 = 0
+    while i < 4 {
+        outb[(at_out + i) as usize] = ((crc >> (i * 8)) & 255) as u8
+        outb[(at_out + 4 + i) as usize] = ((n >> (i * 8)) & 255) as u8
+        i = i + 1
+    }
+    at_out = at_out + 8
+    var out: u64 = ulib.OUT
+    if !to_stdout {
+        ulib.strcpy((&name[0 as usize]) as u64, src)
+        ulib.strcat((&name[0 as usize]) as u64, (&s_suffix[0 as usize]) as u64)
+        out = tools.openw((&name[0 as usize]) as u64)
+        if ulib.bad(out) {
+            ulib.esay_line((&s_write[0 as usize]) as u64,
+                (&name[0 as usize]) as u64)
+            return 1
+        }
+    }
+    if !spill(out, (&outb[0 as usize]) as u64, at_out) {
+        ulib.esay_line((&s_write[0 as usize]) as u64, 0)
+        return 1
+    }
+    if !to_stdout {
+        ulib.sys(ulib.SYS_CLOSE, out, 0, 0)
+        ulib.sys(ulib.SYS_UNLINK, src, 0, 0)
+    }
+    return 0
+}

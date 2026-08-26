@@ -1,0 +1,216 @@
+// kernel/user/tools.fi -- Runde K11: was die neuen Werkzeuge gemeinsam
+// brauchen.
+//
+// Runde K6 hat `ulib.fi` geschrieben, weil ein Userland, in dem `head`
+// und `tail` je eine eigene Vorstellung von einer Zeile haben, kein
+// Userland ist, sondern dreiundzwanzig. Dieselbe Ueberlegung ein
+// Stockwerk hoeher: `find`, `sed`, `diff`, `tar` und `gzip` schreiben
+// alle viel und in kleinen Stuecken, und ein `write` je Oktett ist auf
+// dieser Maschine ein Systemaufruf je Oktett.
+//
+// Also steht hier EIN Ausgabepuffer -- und nicht `libc.stdio`, denn das
+// zieht den Allokator herein (siehe den Absatz dazu am Ende von
+// `ulib.fi`); dieser hier ist ein Feld im .bss und kostet kein Byte
+// Halde. Wer ihn benutzt, MUSS am Ende `ob_flush` rufen; `u_start` gibt
+// sonst zurueck, waehrend die letzte Zeile noch im Puffer steht.
+
+profile kernel
+
+import ulib
+
+export {
+    ob_to, ob_fd, ob_byte, ob_put, ob_str, ob_num, ob_pad, ob_flush, ob_nl,
+    wild, openr, openw, opena, is_digit, is_space, dec_at,
+    same_bytes, join, last_slash,
+    OUT_CAP
+}
+
+const OUT_CAP: u64 = 1024
+
+static mut obuf: [u8; 1024] = [0 as u8; 1024]
+static mut olen: u64 = 0
+static mut ofd: u64 = 1
+
+// ------------------------------------------------------- die Ausgabe
+
+fn ob_flush() {
+    if olen > 0 {
+        let n: u64 = olen
+        olen = 0
+        ulib.sys(ulib.SYS_WRITE, ofd, (&obuf[0 as usize]) as u64, n)
+    }
+}
+
+// Der Puffer haengt an EINEM Deskriptor. Ein Wechsel leert ihn zuerst --
+// sonst landet die Zeile von vorhin in der Datei von jetzt.
+fn ob_to(fd: u64) {
+    ob_flush()
+    ofd = fd
+}
+
+fn ob_fd() -> u64 {
+    return ofd
+}
+
+fn ob_byte(c: u64) {
+    if olen >= OUT_CAP {
+        ob_flush()
+    }
+    obuf[(olen) as usize] = c as u8
+    olen = olen + 1
+}
+
+fn ob_put(p: u64, n: u64) {
+    var i: u64 = 0
+    while i < n {
+        ob_byte((*((p + i) as *mut u8)) as u64)
+        i = i + 1
+    }
+}
+
+fn ob_str(p: u64) {
+    var i: u64 = 0
+    while *((p + i) as *mut u8) != 0 as u8 {
+        ob_byte((*((p + i) as *mut u8)) as u64)
+        i = i + 1
+    }
+}
+
+fn ob_num(v: u64) {
+    var buf: [u8; 26] = [0 as u8; 26]
+    let n: u64 = ulib.digits(v, (&buf[0 as usize]) as u64)
+    ob_put((&buf[0 as usize]) as u64, n)
+}
+
+// Eine Zahl rechtsbuendig in `w` Stellen -- `top` und `du` sind Tabellen.
+fn ob_pad(v: u64, w: u64) {
+    var buf: [u8; 26] = [0 as u8; 26]
+    let n: u64 = ulib.digits(v, (&buf[0 as usize]) as u64)
+    var i: u64 = n
+    while i < w {
+        ob_byte(32)
+        i = i + 1
+    }
+    ob_put((&buf[0 as usize]) as u64, n)
+}
+
+fn ob_nl() {
+    ob_byte(10)
+}
+
+// ------------------------------------------------------- die Muster
+//
+// `*` und `?` wie in einer Shell, mit EINEM Rueckschritt statt Rekursion:
+// `star` merkt sich die Stelle im Muster, `back` die im Text, und ein
+// Fehlschlag setzt beide um eins weiter. Zeichenklassen (`[a-z]`) hat
+// dieses Muster nicht -- `find -name` braucht sie nicht, und ein halbes
+// `[...]` waere schlimmer als keines.
+fn wild(pat: u64, s: u64) -> bool {
+    var p: u64 = 0
+    var t: u64 = 0
+    var star: u64 = ulib.EOF
+    var back: u64 = 0
+    var done: bool = false
+    var result: bool = false
+    while !done {
+        let sc: u64 = (*((s + t) as *mut u8)) as u64
+        let pc: u64 = (*((pat + p) as *mut u8)) as u64
+        if pc == 0 && sc == 0 {
+            result = true
+            done = true
+        } else if pc == 42 {
+            star = p
+            p = p + 1
+            back = t
+        } else if sc != 0 && (pc == 63 || pc == sc) {
+            p = p + 1
+            t = t + 1
+        } else if star != ulib.EOF && sc != 0 {
+            p = star + 1
+            back = back + 1
+            t = back
+        } else {
+            result = false
+            done = true
+        }
+    }
+    return result
+}
+
+// ------------------------------------------------------- die Dateien
+
+fn openr(path: u64) -> u64 {
+    return ulib.sys(ulib.SYS_OPEN, path, 0, 0)
+}
+
+// Wie `>` in der Shell: der alte Inhalt faellt weg. O_TRUNC allein
+// genuegt dem Dateisystem, das Wegnehmen des Namens davor ist die
+// Vorsichtsmassnahme, die `cp` seit Runde K6 trifft.
+fn openw(path: u64) -> u64 {
+    return ulib.sys(ulib.SYS_OPEN, path, ulib.O_MAKE, 0)
+}
+
+// Wie `>>`: O_WRONLY | O_CREAT | O_APPEND.
+fn opena(path: u64) -> u64 {
+    return ulib.sys(ulib.SYS_OPEN, path, 1089, 0)
+}
+
+// ------------------------------------------------------- die Zeichen
+
+fn is_digit(c: u64) -> bool {
+    return c >= 48 && c <= 57
+}
+
+fn is_space(c: u64) -> bool {
+    return c == 32 || c == 9 || c == 10 || c == 13
+}
+
+// Eine Dezimalzahl ab `at`; `end` bekommt die Stelle dahinter.
+fn dec_at(p: u64, at: u64, end: u64) -> u64 {
+    var i: u64 = at
+    var v: u64 = 0
+    while is_digit((*((p + i) as *mut u8)) as u64) {
+        if v < 1000000000000000000 {
+            v = v * 10 + ((*((p + i) as *mut u8)) as u64 - 48)
+        }
+        i = i + 1
+    }
+    __mmio_write64((end) as *mut u64, i)
+    return v
+}
+
+fn same_bytes(a: u64, b: u64, n: u64) -> bool {
+    var i: u64 = 0
+    while i < n {
+        if *((a + i) as *mut u8) != *((b + i) as *mut u8) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+// `dir` + `/` + `name` in `out`, ohne doppelten Schraegstrich. Gibt die
+// Laenge zurueck.
+fn join(out: u64, dir: u64, name: u64) -> u64 {
+    var n: u64 = ulib.strcpy(out, dir)
+    if n > 0 && *((out + n - 1) as *mut u8) != 47 as u8 {
+        __mmio_write8((out + n) as *mut u8, 47 as u8)
+        n = n + 1
+    }
+    let m: u64 = ulib.strcpy(out + n, name)
+    return n + m
+}
+
+// Die Stelle des letzten `/`, oder EOF.
+fn last_slash(p: u64) -> u64 {
+    let n: u64 = ulib.length(p)
+    var i: u64 = n
+    while i > 0 {
+        i = i - 1
+        if *((p + i) as *mut u8) == 47 as u8 {
+            return i
+        }
+    }
+    return ulib.EOF
+}

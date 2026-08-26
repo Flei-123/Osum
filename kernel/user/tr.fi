@@ -1,0 +1,156 @@
+// kernel/user/tr.fi -- Runde K11: Oktette gegen Oktette.
+//
+// `tr MENGE1 MENGE2` ersetzt, `tr -d MENGE1` loescht, `tr -s MENGE1`
+// zieht Wiederholungen zusammen. Eine Menge ist eine Folge von Zeichen
+// mit Bereichen (`a-z`) und den Fluchtzeichen `\n`, `\t`, `\\`; keine
+// Klassen wie `[:alpha:]` -- die waeren ein halbes `tr`, und ein halbes
+// ist schlimmer als ein ganzes kleines.
+//
+// Ist MENGE2 kuerzer als MENGE1, wird ihr letztes Zeichen wiederholt --
+// das ist, was POSIX verlangt und was GNU tut.
+//
+// Oktette und keine Zeilen: `tr` laeuft in Roehren mit Binaerdaten.
+
+profile kernel
+
+import ulib
+import tools
+
+export { u_start }
+
+static mut set1: [u8; 256] = [0 as u8; 256]
+static mut set2: [u8; 256] = [0 as u8; 256]
+static mut n1: u64 = 0
+static mut n2: u64 = 0
+static mut map: [u8; 256] = [0 as u8; 256]
+static mut hit: [u8; 256] = [0 as u8; 256]
+static mut buf: [u8; 1024] = [0 as u8; 1024]
+
+// Eine Menge auspacken. Gibt die Zahl der Oktette zurueck.
+fn expand(p: u64, out: u64) -> u64 {
+    var i: u64 = 0
+    var n: u64 = 0
+    while *((p + i) as *mut u8) != 0 as u8 && n < 250 {
+        var c: u64 = (*((p + i) as *mut u8)) as u64
+        if c == 92 && *((p + i + 1) as *mut u8) != 0 as u8 {
+            let d: u64 = (*((p + i + 1) as *mut u8)) as u64
+            i = i + 2
+            if d == 110 {
+                c = 10
+            } else if d == 116 {
+                c = 9
+            } else if d == 114 {
+                c = 13
+            } else if d == 92 {
+                c = 92
+            } else {
+                c = d
+            }
+        } else {
+            i = i + 1
+        }
+        // Ein Bereich `a-z`: der Bindestrich am Anfang oder am Ende ist
+        // ein gewoehnliches Zeichen.
+        if *((p + i) as *mut u8) == 45 as u8
+        && *((p + i + 1) as *mut u8) != 0 as u8 {
+            let e: u64 = (*((p + i + 1) as *mut u8)) as u64
+            i = i + 2
+            var v: u64 = c
+            while v <= e && n < 250 {
+                __mmio_write8((out + n) as *mut u8, v as u8)
+                n = n + 1
+                v = v + 1
+            }
+        } else {
+            __mmio_write8((out + n) as *mut u8, c as u8)
+            n = n + 1
+        }
+    }
+    return n
+}
+
+fn u_start(args: u64) -> u64 {
+    var s_use: [u8; 22] = "tr: needs one or two \0"
+    var o_d: [u8; 3] = "-d\0"
+    var o_s: [u8; 3] = "-s\0"
+    let argc: u64 = ulib.arg_count(args)
+    var del: bool = false
+    var squeeze: bool = false
+    var at: u64 = 1
+    var reading: bool = true
+    while reading && at < argc {
+        let a: u64 = ulib.arg_at(args, at)
+        if ulib.streq(a, (&o_d[0 as usize]) as u64) {
+            del = true
+            at = at + 1
+        } else if ulib.streq(a, (&o_s[0 as usize]) as u64) {
+            squeeze = true
+            at = at + 1
+        } else {
+            reading = false
+        }
+    }
+    if at >= argc {
+        ulib.esay_line((&s_use[0 as usize]) as u64, 0)
+        return 1
+    }
+    n1 = expand(ulib.arg_at(args, at), (&set1[0 as usize]) as u64)
+    at = at + 1
+    if at < argc {
+        n2 = expand(ulib.arg_at(args, at), (&set2[0 as usize]) as u64)
+    }
+    // Die Tabelle: `map[c]` ist, was aus `c` wird, `hit[c]` sagt, ob `c`
+    // in MENGE1 steht. 256 Eintraege statt einer Suche je Oktett.
+    var i: u64 = 0
+    while i < 256 {
+        map[(i) as usize] = i as u8
+        hit[(i) as usize] = 0 as u8
+        i = i + 1
+    }
+    i = 0
+    while i < n1 {
+        let c: u64 = (set1[(i) as usize]) as u64
+        hit[(c) as usize] = 1 as u8
+        if n2 > 0 {
+            var k: u64 = i
+            if k >= n2 {
+                k = n2 - 1
+            }
+            map[(c) as usize] = set2[(k) as usize]
+        }
+        i = i + 1
+    }
+    var last: u64 = 256
+    var going: bool = true
+    while going {
+        let n: u64 = ulib.sys(ulib.SYS_READ, ulib.IN,
+            (&buf[0 as usize]) as u64, 1024)
+        if n == 0 || ulib.bad(n) {
+            going = false
+        } else {
+            var k: u64 = 0
+            while k < n {
+                let c: u64 = (buf[(k) as usize]) as u64
+                if del && hit[(c) as usize] == 1 as u8 {
+                    last = 256
+                } else {
+                    var o: u64 = c
+                    if !del {
+                        o = (map[(c) as usize]) as u64
+                    }
+                    // Zusammenziehen prueft die AUSGABE, nicht die
+                    // Eingabe -- `tr -s ab x` macht aus `ab` ein `x`.
+                    if squeeze && o == last && hit[(c) as usize] == 1 as u8 {
+                        last = o
+                    } else {
+                        tools.ob_byte(o)
+                        last = o
+                    }
+                }
+                k = k + 1
+            }
+        }
+    }
+    tools.ob_flush()
+    return 0
+}

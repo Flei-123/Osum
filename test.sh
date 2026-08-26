@@ -82,6 +82,23 @@
 #      Strom, die statistische Pruefung faellt durch), und drei Neustarts
 #      mit drei verschiedenen Saaten.
 #
+#  15. Man kann auf diesem System ARBEITEN (tools/k11/run.sh, Runde
+#      K11): ein bildschirmorientierter Editor in Ring 3 ueber den rohen
+#      Terminalmodus aus Runde K9, zwanzig Werkzeuge (find, sed, diff,
+#      patch, tar, gzip/gunzip, xargs, du, top, mount/umount, basename,
+#      dirname, tee, cut, tr, seq, env, which) und eine Shell, die eine
+#      Sprache ist (if/elif/else, while, until, for, case, Funktionen,
+#      return/break/continue/shift, test und `[`). Der Editor wird
+#      WIRKLICH BEDIENT: die Tasten kommen ueber den QEMU-Monitor am Tor
+#      0x60 an, und danach liest der WIRT die gesicherte Datei aus dem
+#      Plattenabbild und haelt sie Oktett fuer Oktett gegen die
+#      Erwartung. Jedes Werkzeug steht gegen sein GNU-Gegenstueck;
+#      `tar` und `gzip` arbeiten in BEIDE Richtungen mit dem echten
+#      `tar` und `gzip` des Wirts zusammen. Gegenproben: ohne Sichern
+#      aendert sich die Platte nicht, ohne Umschalttaste gibt es keine
+#      Grossbuchstaben, ohne `gfx` kein Bild, und nach `umount` startet
+#      kein Programm mehr von der Platte.
+#
 #  14. Das Netz (tools/net/run.sh, Runde K8): ein virtio-net-Treiber in
 #      Firn (`kernel/virtio.fi`), der TCP/IP-Stack aus Runde K3 als
 #      ABHAENGIGKEIT ueber vendor/firn/COMMIT (`vendor/net/HERKUNFT.md`),
@@ -136,7 +153,10 @@ bad() { FAIL=$((FAIL + 1)); FAILED="$FAILED\n  $1"; echo "  FEHLER  $1"; }
 zusagen() {
     local log=$1
     local n
-    n=$(grep -aoE '^[A-Z]+: [0-9]+ (passed|proofs)' "$log" | tail -1 | grep -oE '[0-9]+' | head -1)
+    # `[A-Z][A-Z0-9]*` und nicht `[A-Z]+`: der Laeufer von Runde K11
+    # meldet sich als "K11:", und mit dem alten Muster waeren seine
+    # Zusagen still unter den Tisch gefallen.
+    n=$(grep -aoE '^[A-Z][A-Z0-9]*: [0-9]+ (passed|proofs)' "$log" | tail -1 | grep -oE '[0-9]+' | tail -1)
     [ -n "${n:-}" ] && ZUSAGEN=$((ZUSAGEN + n))
 }
 
@@ -235,6 +255,9 @@ lauf "14. das Netz: virtio-net, der Stack aus K3, Steckdosen -- gegen den Linux-
 
 lauf "15. die Schutzbits und das Boot-Modul: SMEP, SMAP, CRC32 (tools/guard/run.sh, Runde K10)" \
      tools/guard/run.sh guard '^GUARD: |^  OK    (das SMAP-Fenster|und alle drei weiteren|nach einem Lauf)'
+
+lauf "16. man kann darauf arbeiten: ein Editor, zwanzig Werkzeuge, eine Shell mit Sprache (tools/k11/run.sh, Runde K11)" \
+     tools/k11/run.sh k11 '^K11: |^  OK    (DIE GESICHERTE|EINE DATEI|AUF DEM BILDSCHIRM|GNU )'
 
 echo
 echo "=================================================================="

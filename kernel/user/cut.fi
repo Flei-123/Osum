@@ -1,0 +1,208 @@
+// kernel/user/cut.fi -- Runde K11: Spalten aus Zeilen.
+//
+// `cut -c LISTE` schneidet nach Zeichen, `cut -f LISTE [-d Z]` nach
+// Feldern. Die Liste ist die von POSIX: `1,3-5`, `-3`, `4-`, und die
+// Reihenfolge darin ist gleichgueltig -- ausgegeben wird immer in der
+// Reihenfolge der Eingabe, GENAU wie bei GNU. Der Trenner ist der
+// Tabulator, solange `-d` nichts anderes sagt.
+//
+// Eine Zeile OHNE Trenner geht bei `-f` unveraendert durch (das ist GNUs
+// Verhalten ohne `-s`); mit `-s` faellt sie weg.
+
+profile kernel
+
+import ulib
+import tools
+
+export { u_start }
+
+const MAX_RANGE: u64 = 16
+const LINE: u64 = 1024
+
+static mut lo: [u64; 16] = [0 as u64; 16]
+static mut hi: [u64; 16] = [0 as u64; 16]
+static mut nr: u64 = 0
+static mut line: [u8; 1024] = [0 as u8; 1024]
+static mut ctx: [u8; 528] = [0 as u8; 528]
+
+fn wanted(i: u64) -> bool {
+    var k: u64 = 0
+    while k < nr {
+        if i >= lo[(k) as usize] && i <= hi[(k) as usize] {
+            return true
+        }
+        k = k + 1
+    }
+    return false
+}
+
+// `1,3-5` in Paare. Eine offene Seite wird zu 1 beziehungsweise zu einer
+// Zahl, die keine Zeile erreicht.
+fn parse_list(p: u64) -> bool {
+    var i: u64 = 0
+    nr = 0
+    var going: bool = true
+    while going {
+        if nr >= MAX_RANGE {
+            return false
+        }
+        var end: [u64; 1] = [0 as u64; 1]
+        var a: u64 = 1
+        var b: u64 = 0xFFFFFFFF
+        if tools.is_digit((*((p + i) as *mut u8)) as u64) {
+            a = tools.dec_at(p, i, (&end[0 as usize]) as u64)
+            i = end[0 as usize]
+            b = a
+        }
+        if (*((p + i) as *mut u8)) == 45 as u8 {
+            i = i + 1
+            b = 0xFFFFFFFF
+            if tools.is_digit((*((p + i) as *mut u8)) as u64) {
+                b = tools.dec_at(p, i, (&end[0 as usize]) as u64)
+                i = end[0 as usize]
+            }
+        }
+        if a == 0 {
+            return false
+        }
+        lo[(nr) as usize] = a
+        hi[(nr) as usize] = b
+        nr = nr + 1
+        if (*((p + i) as *mut u8)) == 44 as u8 {
+            i = i + 1
+        } else {
+            going = false
+        }
+    }
+    return *((p + i) as *mut u8) == 0 as u8 && nr > 0
+}
+
+fn u_start(args: u64) -> u64 {
+    var s_use: [u8; 34] = "cut: needs -c LIST or -f LIST\0\0\0\0\0"
+    var s_open: [u8; 19] = "cut: cannot open \0\0"
+    var o_c: [u8; 3] = "-c\0"
+    var o_f: [u8; 3] = "-f\0"
+    var o_d: [u8; 3] = "-d\0"
+    var o_s: [u8; 3] = "-s\0"
+    let argc: u64 = ulib.arg_count(args)
+    var by_char: bool = false
+    var by_field: bool = false
+    var only_sep: bool = false
+    var delim: u64 = 9
+    var at: u64 = 1
+    var reading: bool = true
+    while reading && at < argc {
+        let a: u64 = ulib.arg_at(args, at)
+        if ulib.streq(a, (&o_c[0 as usize]) as u64) && at + 1 < argc {
+            by_char = parse_list(ulib.arg_at(args, at + 1))
+            if !by_char {
+                ulib.esay_line((&s_use[0 as usize]) as u64, 0)
+                return 1
+            }
+            at = at + 2
+        } else if ulib.streq(a, (&o_f[0 as usize]) as u64) && at + 1 < argc {
+            by_field = parse_list(ulib.arg_at(args, at + 1))
+            if !by_field {
+                ulib.esay_line((&s_use[0 as usize]) as u64, 0)
+                return 1
+            }
+            at = at + 2
+        } else if ulib.streq(a, (&o_d[0 as usize]) as u64) && at + 1 < argc {
+            delim = (*((ulib.arg_at(args, at + 1)) as *mut u8)) as u64
+            at = at + 2
+        } else if ulib.streq(a, (&o_s[0 as usize]) as u64) {
+            only_sep = true
+            at = at + 1
+        } else {
+            reading = false
+        }
+    }
+    if !by_char && !by_field {
+        ulib.esay_line((&s_use[0 as usize]) as u64, 0)
+        return 1
+    }
+    var code: u64 = 0
+    if at >= argc {
+        work(ulib.IN, by_char, delim, only_sep)
+    } else {
+        while at < argc {
+            let p: u64 = ulib.arg_at(args, at)
+            let fd: u64 = tools.openr(p)
+            if ulib.bad(fd) || ulib.is_dir(p) {
+                ulib.esay_line((&s_open[0 as usize]) as u64, p)
+                code = 1
+                if !ulib.bad(fd) {
+                    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+                }
+            } else {
+                work(fd, by_char, delim, only_sep)
+                ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+            }
+            at = at + 1
+        }
+    }
+    tools.ob_flush()
+    return code
+}
+
+fn work(fd: u64, by_char: bool, delim: u64, only_sep: bool) {
+    ulib.rd_init((&ctx[0 as usize]) as u64)
+    var going: bool = true
+    while going {
+        let n: u64 = ulib.rd_line(fd, (&ctx[0 as usize]) as u64,
+            (&line[0 as usize]) as u64, LINE)
+        if ulib.bad(n) {
+            going = false
+        } else if by_char {
+            var i: u64 = 0
+            while i < n {
+                if wanted(i + 1) {
+                    tools.ob_byte((line[(i) as usize]) as u64)
+                }
+                i = i + 1
+            }
+            tools.ob_nl()
+        } else {
+            var seen: bool = false
+            var i: u64 = 0
+            while i < n {
+                if (line[(i) as usize]) as u64 == delim {
+                    seen = true
+                }
+                i = i + 1
+            }
+            if !seen {
+                if !only_sep {
+                    tools.ob_put((&line[0 as usize]) as u64, n)
+                    tools.ob_nl()
+                }
+            } else {
+                var field: u64 = 1
+                var start: u64 = 0
+                var out: u64 = 0
+                i = 0
+                var scanning: bool = true
+                while scanning {
+                    let at_end: bool = i >= n
+                    if at_end || (line[(i) as usize]) as u64 == delim {
+                        if wanted(field) {
+                            if out > 0 {
+                                tools.ob_byte(delim)
+                            }
+                            tools.ob_put((&line[(start) as usize]) as u64,
+                                i - start)
+                            out = out + 1
+                        }
+                        field = field + 1
+                        start = i + 1
+                    }
+                    if at_end {
+                        scanning = false
+                    }
+                    i = i + 1
+                }
+                tools.ob_nl()
+            }
+        }
+    }
+}

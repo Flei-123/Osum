@@ -1,0 +1,457 @@
+// kernel/user/tar.fi -- Runde K11: packen und auspacken.
+//
+// USTAR, das Format aus POSIX.1-1988, und zwar deshalb, weil es das
+// einzige ist, das man nachpruefen kann: was dieses Programm packt, muss
+// das `tar` auf dem Wirt auspacken koennen, und umgekehrt. Ein eigenes
+// Format waere ein Format, das nur sich selbst beweist.
+//
+//     tar -cf ARCHIV PFAD...    packen (Verzeichnisse mit allem darunter)
+//     tar -xf ARCHIV            auspacken
+//     tar -tf ARCHIV            nur die Namen nennen
+//     -v                        dabei sagen, was passiert
+//
+// Der Kopf sind 512 Oktette: Name, Rechte, Groesse und Zeit als
+// OKTALZAHLEN in Text, dann die Pruefsumme, die Art, die Kennung
+// "ustar\0" und "00". Der Inhalt folgt, aufgefuellt auf ein Vielfaches
+// von 512; am Ende stehen zwei leere Bloecke.
+//
+// ZEITSTEMPEL SIND NULL. Dieses Dateisystem hat keine (siehe `find`),
+// und eine erfundene Zahl waere schlimmer als eine ehrliche Null --
+// `tar tvf` auf dem Wirt zeigt dann 1970, und das ist die Wahrheit.
+//
+// Rechte: 0644 fuer Dateien, 0755 fuer Verzeichnisse. OFS kennt keine.
+
+profile kernel
+
+import ulib
+import tools
+import libc.io
+import libc.errno
+
+export { u_start }
+
+const BLK: u64 = 512
+const MAXD: u64 = 8
+const PATH: u64 = 256
+
+static mut head: [u8; 512] = [0 as u8; 512]
+static mut data: [u8; 512] = [0 as u8; 512]
+static mut ents: [u8; 4096] = [0 as u8; 4096]
+static mut path: [u8; 256] = [0 as u8; 256]
+static mut full: [u8; 256] = [0 as u8; 256]
+static mut afd: u64 = 0
+static mut verbose: bool = false
+static mut code: u64 = 0
+
+// ------------------------------------------------------------- Oktal
+
+fn put_octal(off: u64, width: u64, v: u64) {
+    var x: u64 = v
+    var i: u64 = width - 1
+    head[(off + i) as usize] = 0 as u8
+    while i > 0 {
+        i = i - 1
+        head[(off + i) as usize] = (48 + (x & 7)) as u8
+        x = x >> 3
+    }
+}
+
+fn get_octal(p: u64, width: u64) -> u64 {
+    var v: u64 = 0
+    var i: u64 = 0
+    while i < width {
+        let c: u64 = (*((p + i) as *mut u8)) as u64
+        if c >= 48 && c <= 55 {
+            v = v * 8 + (c - 48)
+        } else if c != 32 {
+            i = width
+        }
+        i = i + 1
+    }
+    return v
+}
+
+// Die Pruefsumme: die Summe aller Oktette des Kopfes, wobei das Feld
+// selbst als acht Leerzeichen gilt. Sechs Oktalstellen, dann eine Null
+// und ein Leerzeichen -- so schreibt es jedes tar seit 1988.
+fn checksum() -> u64 {
+    var s: u64 = 0
+    var i: u64 = 0
+    while i < BLK {
+        if i >= 148 && i < 156 {
+            s = s + 32
+        } else {
+            s = s + (head[(i) as usize]) as u64
+        }
+        i = i + 1
+    }
+    return s
+}
+
+fn zero_head() {
+    var i: u64 = 0
+    while i < BLK {
+        head[(i) as usize] = 0 as u8
+        i = i + 1
+    }
+}
+
+fn write_block(p: u64) -> bool {
+    let n: u64 = ulib.sys(ulib.SYS_WRITE, afd, p, BLK)
+    return !ulib.bad(n) && n == BLK
+}
+
+// ------------------------------------------------------------- packen
+
+fn header(name: u64, size: u64, isdir: bool) -> bool {
+    var magic: [u8; 6] = "ustar\0"
+    var vers: [u8; 3] = "00\0"
+    var user: [u8; 5] = "root\0"
+    zero_head()
+    let n: u64 = ulib.length(name)
+    if n >= 100 {
+        return false
+    }
+    var i: u64 = 0
+    while i < n {
+        head[(i) as usize] = *((name + i) as *mut u8)
+        i = i + 1
+    }
+    if isdir {
+        head[(n) as usize] = 47 as u8
+        put_octal(100, 8, 493) // 0755
+        head[156 as usize] = 53 as u8 // '5'
+    } else {
+        put_octal(100, 8, 420) // 0644
+        head[156 as usize] = 48 as u8 // '0'
+    }
+    put_octal(108, 8, 0)
+    put_octal(116, 8, 0)
+    put_octal(124, 12, size)
+    put_octal(136, 12, 0)
+    i = 0
+    while i < 5 {
+        head[(257 + i) as usize] = magic[(i) as usize]
+        i = i + 1
+    }
+    head[(262) as usize] = 0 as u8
+    head[(263) as usize] = vers[0 as usize]
+    head[(264) as usize] = vers[1 as usize]
+    i = 0
+    while i < 5 {
+        head[(265 + i) as usize] = user[(i) as usize]
+        head[(297 + i) as usize] = user[(i) as usize]
+        i = i + 1
+    }
+    let s: u64 = checksum()
+    put_octal(148, 7, s)
+    head[(154) as usize] = 32 as u8
+    return write_block((&head[0 as usize]) as u64)
+}
+
+fn say(name: u64) {
+    if verbose {
+        tools.ob_str(name)
+        tools.ob_nl()
+    }
+}
+
+fn pack_file(fs_path: u64, name: u64) {
+    var s_open: [u8; 18] = "tar: cannot open \0"
+    var s_long: [u8; 21] = "tar: name too long \0\0"
+    let sz: u64 = ulib.size_of(fs_path)
+    if ulib.bad(sz) {
+        ulib.esay_line((&s_open[0 as usize]) as u64, fs_path)
+        code = 2
+        return
+    }
+    if !header(name, sz, false) {
+        ulib.esay_line((&s_long[0 as usize]) as u64, name)
+        code = 2
+        return
+    }
+    say(name)
+    let fd: u64 = tools.openr(fs_path)
+    if ulib.bad(fd) {
+        ulib.esay_line((&s_open[0 as usize]) as u64, fs_path)
+        code = 2
+        return
+    }
+    var left: u64 = sz
+    while left > 0 {
+        var i: u64 = 0
+        while i < BLK {
+            data[(i) as usize] = 0 as u8
+            i = i + 1
+        }
+        var want: u64 = BLK
+        if left < BLK {
+            want = left
+        }
+        let n: u64 = ulib.sys(ulib.SYS_READ, fd, (&data[0 as usize]) as u64,
+            want)
+        if ulib.bad(n) || n == 0 {
+            left = 0
+        } else {
+            write_block((&data[0 as usize]) as u64)
+            left = left - n
+        }
+    }
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+}
+
+fn dot(name: u64) -> bool {
+    let a: u64 = (*((name) as *mut u8)) as u64
+    if a != 46 {
+        return false
+    }
+    let b: u64 = (*((name + 1) as *mut u8)) as u64
+    if b == 0 {
+        return true
+    }
+    return b == 46 && *((name + 2) as *mut u8) == 0 as u8
+}
+
+fn pack_dir(at: u64, depth: u64) {
+    if depth >= MAXD {
+        return
+    }
+    let base: u64 = (&path[0 as usize]) as u64
+    let fd: u64 = io.dir_open(base)
+    if errno.failed(fd) {
+        return
+    }
+    let buf: u64 = (&ents[(depth * 512) as usize]) as u64
+    var going: bool = true
+    while going {
+        let got: u64 = io.dir_read(fd, buf, 512)
+        if got == 0 || ulib.bad(got) {
+            going = false
+        } else {
+            var off: u64 = 0
+            while off < got {
+                let rec: u64 = buf + off
+                let nm: u64 = io.dir_name(rec)
+                let isdir: bool = io.dir_kind(rec) == io.DT_DIR
+                if !dot(nm) {
+                    var end: u64 = at
+                    if end > 0 && path[(end - 1) as usize] != 47 as u8 {
+                        path[(end) as usize] = 47 as u8
+                        end = end + 1
+                    }
+                    let ln: u64 = ulib.strncpy(base + end, nm, PATH - end)
+                    if isdir {
+                        header(base, 0, true)
+                        say(base)
+                        pack_dir(end + ln, depth + 1)
+                    } else {
+                        pack_file(base, base)
+                    }
+                    path[(at) as usize] = 0 as u8
+                }
+                off = off + io.dir_reclen(rec)
+            }
+        }
+    }
+    io.close(fd)
+}
+
+// ---------------------------------------------------------- auspacken
+
+// Jedes Verzeichnis auf dem Weg anlegen. Ein `mkdir`, das schon da ist,
+// ist kein Fehler -- der Kernel sagt -EEXIST und das ist die Antwort.
+fn make_dirs(p: u64, upto: u64) {
+    var i: u64 = 0
+    while i < upto {
+        if *((p + i) as *mut u8) == 47 as u8 && i > 0 {
+            var k: u64 = 0
+            while k < i {
+                full[(k) as usize] = *((p + k) as *mut u8)
+                k = k + 1
+            }
+            full[(i) as usize] = 0 as u8
+            ulib.sys(ulib.SYS_MKDIR, (&full[0 as usize]) as u64, 0, 0)
+        }
+        i = i + 1
+    }
+}
+
+fn u_start(args: u64) -> u64 {
+    var s_use: [u8; 33] = "tar: needs -cf, -xf or -tf\0\0\0\0\0\0\0"
+    var s_open: [u8; 21] = "tar: cannot open \0\0\0\0"
+    var s_bad: [u8; 26] = "tar: not a ustar archive\0\0"
+    var s_sum: [u8; 25] = "tar: bad header checksum\0"
+    var s_write: [u8; 20] = "tar: cannot write \0\0"
+    let argc: u64 = ulib.arg_count(args)
+    var mode: u64 = 0 // 'c', 'x', 't'
+    var at: u64 = 1
+    // Die Buchstabenform (`tar cf`) und die Strichform (`tar -cf`) sind
+    // dasselbe; beide werden Buchstabe fuer Buchstabe gelesen.
+    if at < argc {
+        let a: u64 = ulib.arg_at(args, at)
+        var i: u64 = 0
+        if *((a) as *mut u8) == 45 as u8 {
+            i = 1
+        }
+        while *((a + i) as *mut u8) != 0 as u8 {
+            let c: u64 = (*((a + i) as *mut u8)) as u64
+            if c == 99 || c == 120 || c == 116 {
+                mode = c
+            } else if c == 118 {
+                verbose = true
+            }
+            i = i + 1
+        }
+        at = at + 1
+    }
+    if mode == 0 || at >= argc {
+        ulib.esay_line((&s_use[0 as usize]) as u64, 0)
+        return 2
+    }
+    let archive: u64 = ulib.arg_at(args, at)
+    at = at + 1
+    if mode == 99 {
+        afd = tools.openw(archive)
+        if ulib.bad(afd) {
+            ulib.esay_line((&s_open[0 as usize]) as u64, archive)
+            return 2
+        }
+        while at < argc {
+            let p: u64 = ulib.arg_at(args, at)
+            let n: u64 = ulib.strncpy((&path[0 as usize]) as u64, p, PATH)
+            if ulib.is_dir((&path[0 as usize]) as u64) {
+                header((&path[0 as usize]) as u64, 0, true)
+                say((&path[0 as usize]) as u64)
+                pack_dir(n, 0)
+            } else {
+                pack_file((&path[0 as usize]) as u64,
+                    (&path[0 as usize]) as u64)
+            }
+            at = at + 1
+        }
+        // Zwei leere Bloecke sind das Ende eines tar-Archivs.
+        zero_head()
+        write_block((&head[0 as usize]) as u64)
+        write_block((&head[0 as usize]) as u64)
+        ulib.sys(ulib.SYS_CLOSE, afd, 0, 0)
+        tools.ob_flush()
+        return code
+    }
+    afd = tools.openr(archive)
+    if ulib.bad(afd) {
+        ulib.esay_line((&s_open[0 as usize]) as u64, archive)
+        return 2
+    }
+    var going: bool = true
+    while going {
+        let n: u64 = read_full((&head[0 as usize]) as u64, BLK)
+        if n != BLK {
+            going = false
+        } else if head[0 as usize] == 0 as u8 {
+            going = false
+        } else {
+            let want: u64 = get_octal((&head[148 as usize]) as u64, 8)
+            let got: u64 = checksum()
+            if want != got {
+                ulib.esay_line((&s_sum[0 as usize]) as u64, 0)
+                code = 2
+                going = false
+            } else {
+                var magic: [u8; 6] = "ustar\0"
+                if !tools.same_bytes((&head[257 as usize]) as u64,
+                    (&magic[0 as usize]) as u64, 5) {
+                    ulib.esay_line((&s_bad[0 as usize]) as u64, 0)
+                    code = 2
+                    going = false
+                } else {
+                    let size: u64 = get_octal((&head[124 as usize]) as u64, 12)
+                    let kind: u64 = (head[156 as usize]) as u64
+                    ulib.strncpy((&path[0 as usize]) as u64,
+                        (&head[0 as usize]) as u64, 101)
+                    var ln: u64 = ulib.length((&path[0 as usize]) as u64)
+                    let isdir: bool = kind == 53
+                    || (ln > 0 && path[(ln - 1) as usize] == 47 as u8)
+                    if isdir && ln > 1 && path[(ln - 1) as usize] == 47 as u8 {
+                        ln = ln - 1
+                        path[(ln) as usize] = 0 as u8
+                    }
+                    if mode == 116 {
+                        tools.ob_str((&path[0 as usize]) as u64)
+                        if isdir {
+                            tools.ob_byte(47)
+                        }
+                        tools.ob_nl()
+                        skip(size)
+                    } else {
+                        say((&path[0 as usize]) as u64)
+                        make_dirs((&path[0 as usize]) as u64, ln)
+                        if isdir {
+                            ulib.sys(ulib.SYS_MKDIR,
+                                (&path[0 as usize]) as u64, 0, 0)
+                            skip(size)
+                        } else {
+                            let out: u64 = tools.openw(
+                                (&path[0 as usize]) as u64)
+                            if ulib.bad(out) {
+                                ulib.esay_line((&s_write[0 as usize]) as u64,
+                                    (&path[0 as usize]) as u64)
+                                code = 2
+                                skip(size)
+                            } else {
+                                var left: u64 = size
+                                while left > 0 {
+                                    let r: u64 = read_full(
+                                        (&data[0 as usize]) as u64, BLK)
+                                    if r != BLK {
+                                        left = 0
+                                    } else {
+                                        var w: u64 = BLK
+                                        if left < BLK {
+                                            w = left
+                                        }
+                                        ulib.sys(ulib.SYS_WRITE, out,
+                                            (&data[0 as usize]) as u64, w)
+                                        left = left - w
+                                    }
+                                }
+                                ulib.sys(ulib.SYS_CLOSE, out, 0, 0)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    ulib.sys(ulib.SYS_CLOSE, afd, 0, 0)
+    tools.ob_flush()
+    return code
+}
+
+// Ein `read`, das erst zurueckkehrt, wenn `n` Oktette da sind oder die
+// Datei zu Ende ist -- ein tar-Kopf ueber zwei Leseaufrufe hinweg waere
+// sonst zerrissen.
+fn read_full(p: u64, n: u64) -> u64 {
+    var got: u64 = 0
+    while got < n {
+        let r: u64 = ulib.sys(ulib.SYS_READ, afd, p + got, n - got)
+        if ulib.bad(r) || r == 0 {
+            return got
+        }
+        got = got + r
+    }
+    return got
+}
+
+fn skip(size: u64) {
+    var left: u64 = size
+    while left > 0 {
+        let r: u64 = read_full((&data[0 as usize]) as u64, BLK)
+        if r != BLK {
+            left = 0
+        } else if left < BLK {
+            left = 0
+        } else {
+            left = left - BLK
+        }
+    }
+}

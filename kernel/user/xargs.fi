@@ -1,0 +1,158 @@
+// kernel/user/xargs.fi -- Runde K11: aus Zeilen werden Argumente.
+//
+// Die Eingabe wird an Leerraum zerlegt, und aus den Worten werden
+// Kommandozeilen gebaut. `-n N` sagt, wie viele Worte je Aufruf; ohne
+// `-n` kommen so viele hinein, wie das Argumentfeld dieses Kernels
+// fasst.
+//
+// DIE OBERGRENZE IST HART UND STEHT IM KERNEL: `proc.MAX_ARGS` ist ACHT,
+// samt Programmname. `xargs` kann also hoechstens sieben Worte je Aufruf
+// anhaengen, minus dem, was auf der Kommandozeile schon steht. Ein `-n`
+// darueber wird abgelehnt statt still gekuerzt -- ein `xargs`, das
+// Argumente verschluckt, ist schlimmer als eines, das nein sagt.
+//
+// Ohne Befehl ist der Befehl `echo`, wie bei POSIX.
+
+profile kernel
+
+import ulib
+import tools
+
+export { u_start }
+
+const MAX_ARGS: u64 = 8
+const WORDS: u64 = 2048
+
+static mut argv: [u64; 8] = [0 as u64; 8]
+static mut fixed: u64 = 0
+static mut words: [u8; 2048] = [0 as u8; 2048]
+static mut wat: u64 = 0
+static mut count: u64 = 0
+static mut path: [u8; 160] = [0 as u8; 160]
+static mut code: u64 = 0
+static mut ran: u64 = 0
+// Der Vorgabebefehl liegt im .bss und nicht auf dem Stapel: `argv` ist
+// statisch, und ein Zeiger aus dem Rahmen von `u_start` hinein waere
+// genau das, was die Fluchtanalyse von Firn (Runde 79) verbietet.
+static mut d_name: [u8; 8] = [0 as u8; 8]
+
+fn make_path(cmd: u64) {
+    var b_bin: [u8; 6] = "/bin/\0"
+    if tools.last_slash(cmd) != ulib.EOF {
+        ulib.strncpy((&path[0 as usize]) as u64, cmd, 160)
+        return
+    }
+    ulib.strcpy((&path[0 as usize]) as u64, (&b_bin[0 as usize]) as u64)
+    ulib.strncpy((&path[0 as usize]) as u64 + 5, cmd, 155)
+}
+
+// Was gesammelt wurde, einmal ausfuehren.
+fn flush_args() {
+    var s_no: [u8; 20] = "xargs: cannot run \0\0"
+    if count == fixed {
+        return
+    }
+    tools.ob_flush()
+    make_path(argv[0 as usize])
+    let pid: u64 = ulib.sys(ulib.SYS_EXEC, (&path[0 as usize]) as u64,
+        (&argv[0 as usize]) as u64, count)
+    if ulib.bad(pid) {
+        ulib.esay_line((&s_no[0 as usize]) as u64, argv[0 as usize])
+        code = 127
+    } else {
+        let r: u64 = ulib.wait_code(pid)
+        if r != 0 {
+            code = r
+        }
+        ran = ran + 1
+    }
+    count = fixed
+    wat = 0
+}
+
+fn u_start(args: u64) -> u64 {
+    var s_big: [u8; 34] = "xargs: at most seven per command\0\0"
+    var s_full: [u8; 22] = "xargs: input too big\0\0"
+    var d_echo: [u8; 5] = "echo\0"
+    var o_n: [u8; 3] = "-n\0"
+    let argc: u64 = ulib.arg_count(args)
+    var per: u64 = 0
+    var at: u64 = 1
+    if at + 1 < argc && ulib.streq(ulib.arg_at(args, at),
+        (&o_n[0 as usize]) as u64) {
+        per = ulib.to_num(ulib.arg_at(args, at + 1))
+        at = at + 2
+    }
+    fixed = 0
+    if at >= argc {
+        ulib.strcpy((&d_name[0 as usize]) as u64, (&d_echo[0 as usize]) as u64)
+        argv[0 as usize] = (&d_name[0 as usize]) as u64
+        fixed = 1
+    } else {
+        while at < argc && fixed < MAX_ARGS {
+            argv[(fixed) as usize] = ulib.arg_at(args, at)
+            fixed = fixed + 1
+            at = at + 1
+        }
+    }
+    let room: u64 = MAX_ARGS - fixed
+    if per == 0 {
+        per = room
+    }
+    if per > room {
+        ulib.esay_line((&s_big[0 as usize]) as u64, 0)
+        return 1
+    }
+    count = fixed
+    // Ein Wort nach dem anderen aus der Eingabe. Leerraum trennt;
+    // Anfuehrungszeichen kennt dieses `xargs` nicht.
+    var ctx: [u8; 528] = [0 as u8; 528]
+    ulib.rd_init((&ctx[0 as usize]) as u64)
+    var start: u64 = 0
+    var len: u64 = 0
+    var going: bool = true
+    while going {
+        let c: u64 = ulib.rd_byte(ulib.IN, (&ctx[0 as usize]) as u64)
+        let end: bool = c == 256
+        if end || tools.is_space(c) {
+            if len > 0 {
+                words[(wat) as usize] = 0 as u8
+                wat = wat + 1
+                argv[(count) as usize] = (&words[(start) as usize]) as u64
+                count = count + 1
+                len = 0
+                if count - fixed >= per {
+                    flush_args()
+                }
+                start = wat
+            }
+            if end {
+                going = false
+            }
+        } else {
+            if wat + 2 >= WORDS {
+                // Der Puffer ist voll: was da ist, geht ab, und danach
+                // beginnt die Sammlung von vorn.
+                if len > 0 {
+                    words[(wat) as usize] = 0 as u8
+                    wat = wat + 1
+                    argv[(count) as usize] = (&words[(start) as usize]) as u64
+                    count = count + 1
+                    len = 0
+                }
+                if count == fixed {
+                    ulib.esay_line((&s_full[0 as usize]) as u64, 0)
+                    return 1
+                }
+                flush_args()
+                start = 0
+            }
+            words[(wat) as usize] = c as u8
+            wat = wat + 1
+            len = len + 1
+        }
+    }
+    flush_args()
+    tools.ob_flush()
+    return code
+}
