@@ -46,7 +46,11 @@ export {
     format, mount, path, create_path, unlink_path, entry_at, dir_entries,
     inode_type, inode_size, read_at, write_at, file_truncate, root,
     free_blocks,
-    used_inodes, MAGIC, T_FILE, T_DIR, DIRENT, NAME_LEN, INODE_COUNT
+    used_inodes, MAGIC, T_FILE, T_DIR, DIRENT, NAME_LEN, INODE_COUNT,
+    // ---- Runde K13 ----
+    version, directs, inode_mode, inode_uid, inode_gid, set_mode, set_owner,
+    set_meta, parent_ino, OFS_V1, OFS_V2, S_ISUID, S_ISGID, S_ISVTX,
+    DIRECT_V1, DIRECT_V2
 }
 
 const BS: u64 = 512 // one block
@@ -67,7 +71,32 @@ const NAME_LEN: u64 = 24
 // this round started, and a program that carries a libc does not fit under
 // it. Now it is 11 + 64 + 64 * 64 blocks -- 2135552 octets, more than the
 // 1 MiB image itself. The inode did not grow: 128 octets, as before.
-const DIRECT: u64 = 11
+// RUNDE K13 HAT AUS DIESER ZAHL ZWEI GEMACHT, und das ist der einzige
+// Eingriff dieser Runde in das Format auf der Platte. Der Inode hat 128
+// Oktette und war VOLL: 0 Art, 8 Groesse, 16 Verweise, 24..111 elf
+// Blockzeiger, 112 der einfach indirekte, 120 der doppelt indirekte. Es
+// gab kein freies Oktett fuer Rechte, Eigentuemer und Gruppe.
+//
+// Wo also Platz hernehmen? Die einzige Reihe mit Luft ist die der
+// direkten Zeiger. Drei davon geben drei Woerter frei (88, 96, 104), und
+// was es kostet, ist genau ausrechenbar: eine Datei fasst danach
+// (8 + 64 + 4096) * 512 = 2.134.016 Oktette statt (11 + 64 + 4096) * 512
+// = 2.135.552. Das sind 1536 Oktette weniger, 0,07 % -- und das groesste
+// Programm dieses Userlands ist rund 40 KiB gross. Alles ueber vier
+// Kilooktetten ging schon vorher durch den indirekten Block; die Grenze,
+// ab der es das tut, sinkt von 5632 auf 4096.
+//
+// DASS DIE ZAHL SICH AENDERT, IST GEFAEHRLICH, und deshalb steht sie
+// nicht einfach auf 8. Ein Abbild der alten Fassung, mit den Regeln der
+// neuen gelesen, wuerde den NEUNTEN Blockzeiger als Rechtebits lesen und
+// die Rechtebits eines Verzeichnisses als Blocknummer schreiben. Also
+// traegt der Superblock seit dieser Runde eine FASSUNGSNUMMER, `mount`
+// liest sie, und diese Datei rechnet mit der Zahl, die zum eingehaengten
+// Abbild gehoert -- alte Abbilder bleiben lesbar, sie haben nur keine
+// Rechte (jede Datei gehoert dann root, jede Datei traegt die
+// Standardrechte ihrer Art). Die Gegenprobe dazu ist `ofsv2raw`.
+const DIRECT_V1: u64 = 11
+const DIRECT_V2: u64 = 8
 const PER_BLOCK: u64 = BS / 8 // pointers in one block: 64
 
 const T_FREE: u64 = 0
@@ -78,9 +107,21 @@ const T_DIR: u64 = 2
 const I_TYPE: u64 = 0
 const I_SIZE: u64 = 8
 const I_NLINK: u64 = 16
-const I_DIRECT: u64 = 24 // eleven of them
+const I_DIRECT: u64 = 24 // eight of them from OFS 2 on, eleven before
 const I_INDIRECT: u64 = 112
 const I_DINDIRECT: u64 = 120 // round K4: 64 blocks of 64 pointers
+// RUNDE K13: die drei Woerter, die aus den Blockzeigern 8, 9 und 10
+// wurden. Sie haben in einem Abbild der Fassung 1 KEINE Bedeutung -- die
+// Zugriffe unten geben dort Standardwerte zurueck, statt Blocknummern als
+// Rechte auszugeben.
+const I_MODE: u64 = 88 // Rechtebits, wie bei Unix: 0o7777
+const I_UID: u64 = 96
+const I_GID: u64 = 104
+
+// Die drei Bits ueber den neun Rechtebits.
+const S_ISUID: u64 = 2048 // 0o4000 -- laeuft mit der Kennung des Besitzers
+const S_ISGID: u64 = 1024 // 0o2000
+const S_ISVTX: u64 = 512 // 0o1000
 
 // The fields of the superblock.
 const SB_MAGIC: u64 = 0
@@ -91,6 +132,14 @@ const SB_BITMAP: u64 = 32
 const SB_ITABLE: u64 = 40
 const SB_DATA: u64 = 48
 const SB_ROOT: u64 = 56
+// RUNDE K13. Der Superblock ist 512 Oktette gross und war bis 63 belegt;
+// alles dahinter war Null. Eine Null heisst deshalb "Fassung 1" -- jedes
+// Abbild, das vor dieser Runde gebaut wurde, sagt damit von selbst das
+// Richtige, ohne dass jemand es anfassen muesste. Das ist die ganze
+// Rueckwaertsvertraeglichkeit, und sie kostet ein Wort.
+const SB_VERSION: u64 = 64
+const OFS_V1: u64 = 1
+const OFS_V2: u64 = 2
 
 // ------------------------------------------------------ the scratch area
 
@@ -204,6 +253,119 @@ fn put64(p: u64, v: u64) {
 
 fn root(state: u64) -> u64 {
     return kstate.get(state, kstate.FS_ROOT)
+}
+
+// ---------------------------------------------------------- Runde K13
+
+// Welche Fassung des Formats gerade eingehaengt ist. `mount` und `format`
+// schreiben sie; vor beiden ist sie 0, und 0 wird wie 1 behandelt --
+// dieselbe Regel wie im Superblock.
+//
+// `ofsv2raw` auf der Kommandozeile UEBERSCHREIBT sie mit 2. Das ist die
+// Gegenprobe zur Fassungsnummer und nichts sonst: dasselbe Abbild, mit
+// den falschen Regeln gelesen.
+fn version(state: u64) -> u64 {
+    if (kstate.get(state, kstate.MODE) & kstate.M_FORCEV2) != 0 {
+        return OFS_V2
+    }
+    let v: u64 = kstate.get(state, kstate.K13_OFF + kstate.U_FSVER)
+    if v == 0 {
+        return OFS_V1
+    }
+    return v
+}
+
+// Wie viele direkte Blockzeiger dieses Abbild hat. JEDE Stelle, die
+// Blocknummern aus einem Inode holt, geht durch diese eine Zahl.
+fn directs(state: u64) -> u64 {
+    if version(state) >= OFS_V2 {
+        return DIRECT_V2
+    }
+    return DIRECT_V1
+}
+
+// Die Rechtebits einer Datei. In einem Abbild der Fassung 1 gibt es sie
+// nicht: dort waere I_MODE der neunte Blockzeiger, und eine Blocknummer
+// als Rechtebits zu lesen waere schlimmer als kein Recht zu kennen. Also
+// die Standardwerte -- 0o755 fuer ein Verzeichnis, 0o644 fuer eine Datei.
+// Sie stehen ABSICHTLICH so: ein altes Abbild verhaelt sich damit genau
+// wie vor dieser Runde (jeder darf lesen, nur root darf schreiben), und
+// niemand bekommt durch das Alter eines Abbildes mehr Rechte.
+fn inode_mode(state: u64, ino: u64) -> u64 {
+    if version(state) < OFS_V2 {
+        // 0o755 FUER ALLES, auch fuer gewoehnliche Dateien -- und das
+        // ist keine Bequemlichkeit, sondern die einzige richtige
+        // Antwort. Vor dieser Runde hatte dieses Dateisystem keine
+        // Rechte: JEDE Datei war lesbar, schreibbar und ausfuehrbar. Ein
+        // altes Abbild mit 0o644 zu beantworten haette bedeutet, dass
+        // /bin/sh darin kein Programm mehr ist -- der Kern haette sein
+        // eigenes Userland nicht mehr starten koennen. Was hier steht,
+        // ist also: ein Dateisystem ohne Rechte gibt die Rechte, die es
+        // vorher gab, und der Schreibschutz gegen fremde Benutzer kommt
+        // daher, dass alles root gehoert.
+        return 493 // 0o755
+    }
+    return inode_get(state, ino, I_MODE) & 4095
+}
+
+fn inode_uid(state: u64, ino: u64) -> u64 {
+    if version(state) < OFS_V2 {
+        return 0
+    }
+    return inode_get(state, ino, I_UID)
+}
+
+fn inode_gid(state: u64, ino: u64) -> u64 {
+    if version(state) < OFS_V2 {
+        return 0
+    }
+    return inode_get(state, ino, I_GID)
+}
+
+// Ein Abbild der Fassung 1 hat keinen Platz dafuer -- dort ist das Wort
+// ein Blockzeiger, und es zu beschreiben wuerde die Datei zerstoeren.
+// `chmod` bekommt dann -EROFS zu sehen, und das ist die Wahrheit: dieses
+// Dateisystem kann keine Rechte tragen.
+fn set_mode(state: u64, ino: u64, mode: u64) -> bool {
+    if version(state) < OFS_V2 {
+        return false
+    }
+    let flags: u64 = enter(state)
+    let r: bool = inode_set(state, ino, I_MODE, mode & 4095)
+    leave(state, flags)
+    return r
+}
+
+fn set_owner(state: u64, ino: u64, uid: u64, gid: u64) -> bool {
+    if version(state) < OFS_V2 {
+        return false
+    }
+    let flags: u64 = enter(state)
+    var r: bool = true
+    if uid != (0 -% 1) {
+        r = inode_set(state, ino, I_UID, uid)
+    }
+    if r && gid != (0 -% 1) {
+        r = inode_set(state, ino, I_GID, gid)
+    }
+    leave(state, flags)
+    return r
+}
+
+fn set_meta(state: u64, ino: u64, mode: u64, uid: u64, gid: u64) -> bool {
+    if version(state) < OFS_V2 {
+        return false
+    }
+    let flags: u64 = enter(state)
+    var r: bool = inode_set(state, ino, I_MODE, mode & 4095)
+    if r {
+        r = inode_set(state, ino, I_UID, uid)
+    }
+    if r {
+        r = inode_set(state, ino, I_GID, gid)
+    }
+    leave(state, flags)
+    return r
 }
 
 // ---------------------------------------------------------- the inodes
@@ -339,7 +501,8 @@ fn free_blocks(state: u64) -> u64 {
 // The `index`-th block of a file. With `grow` a missing one is created --
 // that is what makes a file grow.
 fn file_block(state: u64, ino: u64, index: u64, grow: bool) -> u64 {
-    if index < DIRECT {
+    let dn: u64 = directs(state)
+    if index < dn {
         let b: u64 = inode_get(state, ino, I_DIRECT + index * 8)
         if b != 0 || !grow {
             return b
@@ -351,7 +514,7 @@ fn file_block(state: u64, ino: u64, index: u64, grow: bool) -> u64 {
         inode_set(state, ino, I_DIRECT + index * 8, fresh)
         return fresh
     }
-    let k: u64 = index - DIRECT
+    let k: u64 = index - dn
     if k < PER_BLOCK {
         return single_block(state, ino, k, grow)
     }
@@ -454,7 +617,8 @@ fn double_block(state: u64, ino: u64, d: u64, grow: bool) -> u64 {
 // Every block of a file back to the bitmap.
 fn file_truncate(state: u64, ino: u64) {
     var i: u64 = 0
-    while i < DIRECT {
+    let dn: u64 = directs(state)
+    while i < dn {
         let b: u64 = inode_get(state, ino, I_DIRECT + i * 8)
         if b != 0 {
             block_free(state, b)
@@ -769,6 +933,25 @@ fn parent_of(state: u64, p: u64, out_name: u64) -> u64 {
     return dir
 }
 
+// RUNDE K13: DAS VERZEICHNIS, IN DEM DIESER NAME LIEGT. `parent_of`
+// darueber gibt es seit Runde 62, aber nur nach innen -- und die
+// Rechtepruefung braucht es: wer eine Datei ANLEGEN oder LOESCHEN will,
+// braucht Schreibrecht am VERZEICHNIS und nicht an der Datei. (Genau
+// deshalb kann man unter Unix eine schreibgeschuetzte Datei loeschen,
+// wenn einem das Verzeichnis gehoert -- das ist kein Fehler, das ist die
+// Regel, und sie steht hier, damit `sys.fi` sie einhalten kann.)
+fn parent_ino(state: u64, p: u64) -> u64 {
+    // Der Namenspuffer liegt in `kdata` und nicht auf dem Stapel. Diese
+    // Funktion wird aus dem OEFFNEN-PFAD gerufen, und der ist der
+    // tiefste Weg, den dieser Kernel hat -- jedes Oktett hier zaehlt
+    // doppelt. Sicher ist es, weil der Aufruf unter der Sperre des
+    // Dateisystems steht: es kann keine zweite Benutzung geben.
+    let flags: u64 = enter(state)
+    let dir: u64 = parent_of(state, p, state + kstate.K13_OFF + 0x100)
+    leave(state, flags)
+    return dir
+}
+
 fn create_path(state: u64, p: u64, kind: u64) -> u64 {
     let flags: u64 = enter(state)
     var name: [u8; 32] = [0 as u8; 32]
@@ -854,6 +1037,13 @@ fn unlink_path(state: u64, p: u64) -> bool {
 
 fn format(state: u64) -> bool {
     let flags: u64 = enter(state)
+    // RUNDE K13: DIE FASSUNG STEHT VOR DEM ERSTEN BLOCK, den dieses
+    // Format schreibt. `dir_init` weiter unten geht durch `write_at` und
+    // damit durch `file_block`, und das fragt `directs(state)` -- also
+    // muss die Fassung schon gelten, wenn die Wurzel entsteht. Wer sie
+    // erst am Ende setzt, hat ein Wurzelverzeichnis mit elf direkten
+    // Zeigern in einem Abbild, das acht liest.
+    kstate.set(state, kstate.K13_OFF + kstate.U_FSVER, OFS_V2)
     let total: u64 = blk.blocks(state)
     if total < DATA_START + 8 {
         leave(state, flags)
@@ -869,6 +1059,7 @@ fn format(state: u64) -> bool {
     put64(buf_sb(state) + SB_ITABLE, INODE_START)
     put64(buf_sb(state) + SB_DATA, DATA_START)
     put64(buf_sb(state) + SB_ROOT, 1)
+    put64(buf_sb(state) + SB_VERSION, OFS_V2)
     if !blk.write(state, 0, buf_sb(state)) {
         leave(state, flags)
         return false
@@ -902,6 +1093,11 @@ fn format(state: u64) -> bool {
         leave(state, flags)
         return false
     }
+    // Die Wurzel gehoert root und traegt 0o755. Ohne diese Zeile waeren
+    // ihre Rechtebits 0 (der Inode wird genullt), und dann duerfte NUR
+    // root ueberhaupt etwas -- ein System, in dem sich niemand anmelden
+    // kann, weil /etc nicht zu betreten ist.
+    set_meta(state, 1, 493, 0, 0)
     leave(state, flags)
     return true
 }
@@ -923,6 +1119,19 @@ fn mount(state: u64) -> bool {
         leave(state, flags)
         return false
     }
+    // RUNDE K13. Die Fassung entscheidet, wie viele direkte Blockzeiger
+    // ein Inode hat und ob er Rechte traegt -- sie muss also stehen,
+    // bevor der erste Inode gelesen wird. Eine 0 im Feld heisst 1: so
+    // sagt jedes Abbild von vor dieser Runde von selbst das Richtige.
+    var ver: u64 = get64(buf_sb(state) + SB_VERSION)
+    if ver == 0 {
+        ver = OFS_V1
+    }
+    if ver > OFS_V2 {
+        leave(state, flags) // aus der Zukunft: lieber nein sagen
+        return false
+    }
+    kstate.set(state, kstate.K13_OFF + kstate.U_FSVER, ver)
     let r: u64 = get64(buf_sb(state) + SB_ROOT)
     if inode_get(state, r, I_TYPE) != T_DIR {
         leave(state, flags)

@@ -25,9 +25,24 @@ The format, from `kernel/fs.fi`:
     a dirent       32 octets: inode number, then 24 for the name
 
 Usage:
-    mkfs.py build <image> <blocks> [<path>=<hostfile> | <path>/ ] ...
+    mkfs.py build <image> <blocks> [--v1] [<spec> ...]
     mkfs.py list  <image>
     mkfs.py cat   <image> <path>
+    mkfs.py meta  <image> [<path>]
+
+Ein <spec> ist eines von
+
+    <pfad>/                        ein Verzeichnis
+    <pfad>=<wirtsdatei>            eine Datei
+    <pfad>=<wirtsdatei>@<rechte>[:<uid>[:<gid>]]
+    <pfad>/@<rechte>[:<uid>[:<gid>]]
+
+RUNDE K13 hat die letzten beiden Formen und `meta` dazugelegt. <rechte>
+ist oktal wie ueberall (`755`, `4755`, `600`); ohne Angabe bekommt alles
+0755 und gehoert root. `--v1` baut ein Abbild der ALTEN Fassung -- ohne
+Rechte, mit elf direkten Blockzeigern. Das ist die Gegenprobe zur
+Fassungsnummer im Superblock, und ohne sie waere "rueckwaertsvertraeglich"
+eine Behauptung.
 
 `cat` stand seit Runde K4 im Rumpf, aber nicht hier oben. Es schreibt die
 Oktette einer Datei AUS DEM ABBILD auf die Standardausgabe -- und das ist
@@ -50,26 +65,42 @@ INODE_BLOCKS = 32
 DATA_START = 34
 DIRENT = 32
 NAME_LEN = 24
-DIRECT = 11
+DIRECT = 8      # Fassung 2
+DIRECT_V1 = 11  # Fassung 1, vor Runde K13
 
 T_FREE, T_FILE, T_DIR = 0, 1, 2
 I_TYPE, I_SIZE, I_NLINK, I_DIRECT, I_INDIRECT = 0, 8, 16, 24, 112
+# RUNDE K13. Die drei Woerter, die aus den Blockzeigern 8, 9 und 10
+# wurden (`kernel/fs.fi`, dieselben Offsets). In einem Abbild der Fassung
+# 1 gibt es sie nicht.
+I_MODE, I_UID, I_GID = 88, 96, 104
+OFS_V1, OFS_V2 = 1, 2
 # ROUND K4: the twelfth direct slot became the double indirect pointer --
 # 11 + 64 + 64 * 64 blocks instead of 12 + 64. `kernel/fs.fi` has the
 # same three constants and the same two levels; the two must agree octet
 # for octet, and section 3 of tools/posix/run.sh checks that they do.
 I_DINDIRECT = 120
 SB = dict(MAGIC=0, BSIZE=8, BLOCKS=16, INODES=24, BITMAP=32, ITABLE=40,
-          DATA=48, ROOT=56)
+          DATA=48, ROOT=56, VERSION=64)
 
 
 class Fs:
-    def __init__(self, blocks):
+    def __init__(self, blocks, version=OFS_V2):
         if blocks < DATA_START + 8:
             raise SystemExit("mkfs: a disk of %d blocks is too small" % blocks)
         self.blocks = blocks
         self.d = bytearray(blocks * BS)
         self.root = 1
+        self.version = version
+
+    # RUNDE K13: wie viele direkte Blockzeiger dieses Abbild hat. Die
+    # ZWEITE Umsetzung derselben Regel, die in `kernel/fs.fi::directs`
+    # steht -- und genau deshalb faellt es auf, wenn eine der beiden
+    # sich irrt: der Kern faende dann die Bloecke nicht, die dieses
+    # Programm geschrieben hat.
+    @property
+    def directs(self):
+        return DIRECT if self.version >= OFS_V2 else DIRECT_V1
 
     # ------------------------------------------------------------ octets
     def g64(self, at):
@@ -116,6 +147,8 @@ class Fs:
                 self.d[at:at + INODE_SIZE] = bytes(INODE_SIZE)
                 self.iset(ino, I_TYPE, kind)
                 self.iset(ino, I_NLINK, 1)
+                if self.version >= OFS_V2:
+                    self.iset(ino, I_MODE, 0o755)
                 return ino
         raise SystemExit("mkfs: no inode left")
 
@@ -125,14 +158,14 @@ class Fs:
 
     # ------------------------------------------------------------- files
     def file_block(self, ino, index, grow):
-        if index < DIRECT:
+        if index < self.directs:
             b = self.iget(ino, I_DIRECT + index * 8)
             if b or not grow:
                 return b
             b = self.block_alloc()
             self.iset(ino, I_DIRECT + index * 8, b)
             return b
-        k = index - DIRECT
+        k = index - self.directs
         if k < BS // 8:
             return self.single_block(ino, k, grow)
         d = k - BS // 8
@@ -141,7 +174,8 @@ class Fs:
                 "mkfs: a file may hold %d octets in this format (%d direct "
                 "blocks, %d through the indirect one and %d through the "
                 "double indirect one, see fs.fi); this one is bigger"
-                % ((DIRECT + BS // 8 + (BS // 8) ** 2) * BS, DIRECT,
+                % ((self.directs + BS // 8 + (BS // 8) ** 2) * BS,
+                   self.directs,
                    BS // 8, (BS // 8) ** 2))
         return self.double_block(ino, d, grow)
 
@@ -267,17 +301,35 @@ class Fs:
             raise SystemExit("mkfs: '%s' has no directory" % path)
         return dirino, parts[-1]
 
-    def mkdir(self, path):
+    def set_meta(self, ino, mode, uid, gid):
+        if self.version < OFS_V2:
+            return
+        self.iset(ino, I_MODE, mode & 0o7777)
+        self.iset(ino, I_UID, uid)
+        self.iset(ino, I_GID, gid)
+
+    def get_meta(self, ino):
+        if self.version < OFS_V2:
+            # Dieselbe Antwort wie `kernel/fs.fi::inode_mode`: ein
+            # Abbild der Fassung 1 traegt keine Rechte, und vor dieser
+            # Runde war dort alles erlaubt.
+            return 0o755, 0, 0
+        return (self.iget(ino, I_MODE) & 0o7777, self.iget(ino, I_UID),
+                self.iget(ino, I_GID))
+
+    def mkdir(self, path, mode=0o755, uid=0, gid=0):
         dirino, name = self.parent_of(path)
         there = self.dir_find(dirino, name)
         if there:
+            self.set_meta(there, mode, uid, gid)
             return there
         ino = self.inode_alloc(T_DIR)
         self.dir_init(ino, dirino)
         self.dir_add(dirino, name, ino)
+        self.set_meta(ino, mode, uid, gid)
         return ino
 
-    def addfile(self, path, data):
+    def addfile(self, path, data, mode=0o755, uid=0, gid=0):
         dirino, name = self.parent_of(path)
         if self.dir_find(dirino, name):
             raise SystemExit("mkfs: '%s' is already there" % path)
@@ -285,6 +337,7 @@ class Fs:
         if data:
             self.write_at(ino, 0, data)
         self.dir_add(dirino, name, ino)
+        self.set_meta(ino, mode, uid, gid)
         return ino
 
     # ------------------------------------------------------------- format
@@ -297,6 +350,7 @@ class Fs:
         self.p64(SB["ITABLE"], INODE_START)
         self.p64(SB["DATA"], DATA_START)
         self.p64(SB["ROOT"], 1)
+        self.p64(SB["VERSION"], self.version)
         for b in range(DATA_START):
             self.bit_set(b)
         self.root = 1
@@ -304,6 +358,7 @@ class Fs:
         if ino != 1:
             raise SystemExit("mkfs: the root did not become inode 1")
         self.dir_init(1, 1)
+        self.set_meta(1, 0o755, 0, 0)
 
     def tree(self, ino=None, prefix="/", out=None):
         if out is None:
@@ -328,7 +383,7 @@ def main(argv):
         print(__doc__)
         return 2
     cmd = argv[1]
-    if cmd == "list":
+    if cmd in ("list", "meta"):
         raw = open(argv[2], "rb").read()
         fs = Fs(max(len(raw) // BS, DATA_START + 8))
         fs.d[:len(raw)] = raw
@@ -336,6 +391,28 @@ def main(argv):
             print("no OSUM-OFS magic")
             return 1
         fs.root = fs.g64(SB["ROOT"])
+        fs.version = fs.g64(SB["VERSION"]) or OFS_V1
+        if cmd == "meta":
+            # RUNDE K13: Rechte und Eigentuemer AUS DEM ABBILD, auf dem
+            # Wirt gelesen. Das ist die ehrliche Art zu pruefen, dass
+            # `chmod` im Gastsystem etwas getan hat -- nicht ein
+            # Mitschnitt einer seriellen Leitung, sondern der Inode.
+            if len(argv) > 3:
+                ino = fs.resolve(argv[3])
+                if not ino:
+                    print("mkfs: no such path '%s'" % argv[3])
+                    return 1
+                m, u, g = fs.get_meta(ino)
+                print("%s %o %d %d" % (argv[3], m, u, g))
+                return 0
+            print("version=%d" % fs.version)
+            for line in fs.tree():
+                path = line.split(" ")[0].rstrip("/")
+                ino = fs.resolve(path)
+                if ino:
+                    m, u, g = fs.get_meta(ino)
+                    print("%s %o %d %d" % (path, m, u, g))
+            return 0
         print("blocks=%d free=%d inodes=%d"
               % (fs.g64(SB["BLOCKS"]), fs.free_blocks(), fs.used_inodes()))
         for line in fs.tree():
@@ -355,6 +432,7 @@ def main(argv):
             print("no OSUM-OFS magic")
             return 1
         fs.root = fs.g64(SB["ROOT"])
+        fs.version = fs.g64(SB["VERSION"]) or OFS_V1
         ino = fs.resolve(argv[3])
         if not ino:
             print("mkfs: no such path '%s'" % argv[3])
@@ -367,17 +445,31 @@ def main(argv):
         return 2
 
     image, blocks = argv[2], int(argv[3])
-    fs = Fs(blocks)
+    rest = [a for a in argv[4:] if a != "--v1"]
+    fs = Fs(blocks, OFS_V1 if "--v1" in argv[4:] else OFS_V2)
     fs.format()
-    for spec in argv[4:]:
+    for spec in rest:
+        # RUNDE K13: das Anhaengsel `@rechte[:uid[:gid]]`. Es steht
+        # HINTER dem Dateinamen und nicht davor, damit jeder Aufruf aus
+        # den Runden K1 bis K12 Zeichen fuer Zeichen weiter gilt.
+        mode, uid, gid = None, 0, 0
+        if "@" in spec:
+            spec, _, meta = spec.partition("@")
+            parts = meta.split(":")
+            mode = int(parts[0], 8)
+            if len(parts) > 1 and parts[1] != "":
+                uid = int(parts[1])
+            if len(parts) > 2 and parts[2] != "":
+                gid = int(parts[2])
         if spec.endswith("/"):
-            fs.mkdir(spec[:-1])
+            fs.mkdir(spec[:-1], 0o755 if mode is None else mode, uid, gid)
             continue
         path, _, host = spec.partition("=")
         if not host:
             raise SystemExit("mkfs: '%s' needs <path>=<hostfile>" % spec)
         with open(host, "rb") as f:
-            fs.addfile(path, f.read())
+            fs.addfile(path, f.read(),
+                       0o755 if mode is None else mode, uid, gid)
     with open(image, "wb") as f:
         f.write(fs.d)
     print("mkfs: %s  blocks=%d free=%d inodes=%d"

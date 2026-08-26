@@ -51,6 +51,17 @@ const SYS_EXIT: u64 = 60
 const SYS_SPAWN: u64 = 1000
 // ROUNDE K7: die beiden, die /dev/fb braucht.
 const SYS_LSEEK: u64 = 8
+// RUNDE K13. Die Nummern sind die von Linux (kernel/sys.fi).
+const SYS_FORK: u64 = 57
+const SYS_UMASK: u64 = 95
+const SYS_GETUID: u64 = 102
+const SYS_GETGID: u64 = 104
+const SYS_SETUID: u64 = 105
+const SYS_SETGID: u64 = 106
+const SYS_GETEUID: u64 = 107
+const SYS_GETEGID: u64 = 108
+const SYS_SETRESUID: u64 = 117
+const SYS_GETRESUID: u64 = 118
 const SYS_MMAP: u64 = 9
 const SYS_FSTAT: u64 = 5
 const ST_SIZE: u64 = 48 // Versatz in `struct stat`, siehe sys.fi
@@ -155,6 +166,9 @@ const P_FB: u64 = 13
 const P_HV: u64 = 15 // RUNDE K12: eine Gastmaschine aus Ring 3 (14 nahm K10s Fenster)
 // ROUNDE K10: die Anwendung mit Fenster.
 const P_WCLICK: u64 = 14
+// RUNDE K13: die beiden Nummern, die dieser Runde zugeteilt sind.
+const P_USER: u64 = 16 // Kennungen und Kennungswechsel, aus Ring 3
+const P_ZOMBIE: u64 = 17 // ein Kind ohne `wait` -- die Waise
 
 // ------------------------------------------------------ the system call
 
@@ -306,6 +320,12 @@ fn u_enter(packed: u64) {
     }
     if prog == P_WCLICK {
         u_wclick(arg)
+    }
+    if prog == P_USER {
+        u_user(arg)
+    }
+    if prog == P_ZOMBIE {
+        u_zombie(arg)
     }
     u_sys(SYS_EXIT, 0, 0, 0)
     while true {
@@ -1473,4 +1493,112 @@ fn u_hv(arg: u64) {
     u_say((&s_of[0]) as u64)
     u_say((&nl[0]) as u64)
     u_sys(SYS_EXIT, 14 - gut, 0, 0)
+}
+
+// ==================================================== RUNDE K13, RING 3
+//
+// WER BIN ICH, UND WER DARF ICH WERDEN. Dieses Programm laeuft in Ring 3
+// und braucht dafuer KEINE Platte -- es fragt nur nach Kennungen, und
+// genau deshalb steht es hier und nicht im Userland: die Zusagen ueber
+// uid/gid sind damit auch in einem Lauf `nofs` messbar, in dem es kein
+// Dateisystem gibt, an dem man sich vertun koennte.
+//
+// Jede Zeile ist eine Zusage, und der Testlaeufer liest sie zurueck. Das
+// Muster ist "k13u: NAME=WERT", damit ein `grep` genuegt.
+fn k13_line(p: u64, v: u64) {
+    u_say_line(p, v)
+}
+
+fn u_user(arg: u64) {
+    var s_uid: [u8; 12] = "k13u: uid=\0\0"
+    var s_euid: [u8; 13] = "k13u: euid=\0\0"
+    var s_gid: [u8; 12] = "k13u: gid=\0\0"
+    var s_egid: [u8; 13] = "k13u: egid=\0\0"
+    var s_um0: [u8; 15] = "k13u: umask0=\0\0"
+    var s_um1: [u8; 15] = "k13u: umask1=\0\0"
+    var s_dr: [u8; 15] = "k13u: dropeu=\0\0"
+    var s_bk: [u8; 15] = "k13u: backeu=\0\0"
+    var s_su: [u8; 15] = "k13u: setuid=\0\0"
+    var s_ru: [u8; 15] = "k13u: reroot=\0\0"
+    var s_ch: [u8; 15] = "k13u: childu=\0\0"
+    var s_r: [u8; 11] = "k13u: r=\0\0\0"
+    var s_e: [u8; 11] = "k13u: e=\0\0\0"
+    var s_s: [u8; 11] = "k13u: s=\0\0\0"
+    var s_done: [u8; 11] = "k13u: done\0"
+
+    // 1. Wer startet: der Kern hat diesen Prozess aus der Bootaufgabe
+    //    erzeugt, und die ist root. Ohne Vererbung stuende hier Unsinn.
+    k13_line((&s_uid[0]) as u64, u_sys(SYS_GETUID, 0, 0, 0))
+    k13_line((&s_euid[0]) as u64, u_sys(SYS_GETEUID, 0, 0, 0))
+    k13_line((&s_gid[0]) as u64, u_sys(SYS_GETGID, 0, 0, 0))
+    k13_line((&s_egid[0]) as u64, u_sys(SYS_GETEGID, 0, 0, 0))
+
+    // 2. Die Maske gibt die ALTE zurueck -- der Weg, auf dem ein
+    //    Programm sie erfaehrt, ohne dass es ein `getumask` gibt.
+    k13_line((&s_um0[0]) as u64, u_sys(SYS_UMASK, 18, 0, 0))
+    k13_line((&s_um1[0]) as u64, u_sys(SYS_UMASK, 18, 0, 0))
+
+    // 3. root legt die WIRKSAME Kennung ab und holt sie zurueck. Das
+    //    geht, weil die echte 0 geblieben ist -- die Regel aus
+    //    `sys.ids_ok`, an einem Fall, an dem sie greift.
+    u_sys6(SYS_SETRESUID, 0 -% 1, 7, 0 -% 1, 0, 0, 0)
+    k13_line((&s_dr[0]) as u64, u_sys(SYS_GETEUID, 0, 0, 0))
+    u_sys6(SYS_SETRESUID, 0 -% 1, 0, 0 -% 1, 0, 0, 0)
+    k13_line((&s_bk[0]) as u64, u_sys(SYS_GETEUID, 0, 0, 0))
+
+    // 4. Jetzt endgueltig: `setuid` als root setzt ALLE DREI. Danach
+    //    fuehrt kein Weg zurueck, und das ist die Zusage, auf der
+    //    `login` steht.
+    u_sys(SYS_SETGID, 5, 0, 0)
+    k13_line((&s_su[0]) as u64, u_sys(SYS_SETUID, 7, 0, 0))
+    k13_line((&s_uid[0]) as u64, u_sys(SYS_GETUID, 0, 0, 0))
+    k13_line((&s_gid[0]) as u64, u_sys(SYS_GETGID, 0, 0, 0))
+    // -1 ist -EPERM. Eine 0 hier waere ein Kernel, in dem sich jeder zu
+    // root machen kann.
+    k13_line((&s_ru[0]) as u64, u_sys(SYS_SETUID, 0, 0, 0))
+
+    // 5. Alle drei auf einmal.
+    var three: [u64; 3] = [0 as u64; 3]
+    u_sys(SYS_GETRESUID, (&three[0]) as u64, (&three[1]) as u64,
+        (&three[2]) as u64)
+    k13_line((&s_r[0]) as u64, three[0 as usize] & 0xFFFFFFFF)
+    k13_line((&s_e[0]) as u64, three[1 as usize] & 0xFFFFFFFF)
+    k13_line((&s_s[0]) as u64, three[2 as usize] & 0xFFFFFFFF)
+
+    // 6. UND UEBER `fork`. Das Kind sagt seine Kennung ueber seinen
+    //    Beendigungscode -- sieben, wenn geerbt wurde, null wenn nicht.
+    let kid: u64 = u_sys(SYS_FORK, 0, 0, 0)
+    if kid == 0 {
+        u_sys(SYS_EXIT, u_sys(SYS_GETUID, 0, 0, 0), 0, 0)
+    }
+    var st: [u64; 1] = [0 as u64; 1]
+    u_sys(SYS_WAIT4, kid, (&st[0]) as u64, 0)
+    k13_line((&s_ch[0]) as u64, (st[0 as usize] >> 8) & 255)
+
+    u_say((&s_done[0]) as u64)
+    var nl: [u8; 2] = "\n\0"
+    u_say((&nl[0]) as u64)
+    u_sys(SYS_EXIT, 0, 0, 0)
+}
+
+// DIE WAISE. Dieses Programm laesst ein Kind zurueck, ohne auf es zu
+// warten, und endet vorher. Ohne einen Prozess 1 nimmt sich niemand der
+// Leiche an: sie bleibt in der Aufgabentafel stehen, und der Kern zaehlt
+// sie am Ende des Laufs (`k13: ... zombies=`). Genau das ist die
+// Gegenprobe zu init -- eine Zahl, die OHNE die Eigenschaft steigt.
+fn u_zombie(arg: u64) {
+    var s_kid: [u8; 12] = "k13z: kid=\0\0"
+    var s_bye: [u8; 11] = "k13z: bye\0\0"
+    let kid: u64 = u_sys(SYS_FORK, 0, 0, 0)
+    if kid == 0 {
+        // Das Kind lebt laenger als sein Elternteil und stirbt dann.
+        u_sleep(0, 200)
+        u_sys(SYS_EXIT, 3, 0, 0)
+    }
+    u_say_line((&s_kid[0]) as u64, kid)
+    u_say((&s_bye[0]) as u64)
+    var nl: [u8; 2] = "\n\0"
+    u_say((&nl[0]) as u64)
+    // KEIN `wait`. Genau das ist der Punkt.
+    u_sys(SYS_EXIT, 0, 0, 0)
 }

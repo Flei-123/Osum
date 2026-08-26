@@ -59,7 +59,8 @@
 //   0x3F000  die Zeichensatzplaetze des Schriftlesers (Runde K10)
 //   0x3C000  der Rahmenpuffer-Zustand samt Zeichensatz (Runde K7B)
 //   0x40000  die Gastmaschinen des Hypervisors (Runde K12, `hv.fi`)
-//   0x41000  frei, bis KDATA_SIZE (0x50000)
+//   0x41000  die Zaehler der Benutzer/Rechte-Schicht (Runde K13)
+//   0x43000  frei, bis KDATA_SIZE (0x50000)
 //
 // RUNDE K12 HAT DIESEN BEREICH WACHSEN LASSEN, von 0x40000 auf 0x50000.
 // Der Grund steht hier, damit ihn niemand suchen muss: mit dem
@@ -106,6 +107,11 @@ export {
     // ---- Runde K10: Maus, Fensterserver, Schriften ----
     MOUSE_OFF, MOUSE_MAX, WM_OFF, WM_MAX, TTF_OFF, TTF_MAX,
     M_WM, M_NODIRTY, M_NOFOCUS, M_NOMOUSE, M_WMHOLD, M_WMSHELL, M_NOMPOLL, M_TTFDUMP,
+    // ---- Runde K13: Benutzer, Rechte, init ----
+    K13_OFF, K13_MAX,
+    U_CHECKS, U_DENIED, U_SETIDS, U_CHMODS, U_CHOWNS, U_SUIDEXEC,
+    U_FSVER, U_INITSLOT, U_ORPHANS, U_INITOK, U_ACPI, U_LASTDENY,
+    M_NOPERM, M_INITSH, M_K13, M_NOSUID, M_NOACPI, M_FORCEV2, M_ZOMBIE,
     CPU_OFF, CPU_BYTES, MAX_CPUS, LOCK_OFF, LOCK_BYTES, LOCK_COUNT,
     SMP_OFF, SMP_LAPIC, SMP_COUNT, SMP_NOLOCK, SMP_MODE, SMP_MAX,
     TCPU_OFF, TCPU_BYTES,
@@ -508,6 +514,75 @@ const WM_OFF: u64 = 0x1E000
 const WM_MAX: u64 = 0x2000
 const TTF_OFF: u64 = 0x3F000
 const TTF_MAX: u64 = 4096
+
+// ------------------------------------------- Runde K13: die Benutzer
+//
+// ZWEI SEITEN, 0x41000 und 0x42000, und sie sind die ersten hinter dem
+// Bereich des Hypervisors (0x40000). Runde K12 hat `kdata` auf 0x50000
+// wachsen lassen und ausdruecklich geschrieben, dass die naechste Runde
+// bei 0x41000 anfaengt -- das ist diese. Der Bereich steht in
+// `tools/kernel/karte.py`, und der Kartenpruefer rechnet nach, dass er
+// sich mit keinem der 43 anderen ueberschneidet.
+//
+// WAS DRIN LIEGT: nur ZAEHLER und drei Merker. Die uid/gid eines
+// Prozesses liegen NICHT hier, sondern im Aufgabensatz (`sched.fi`,
+// T_UID..T_UMASK) -- ein Prozessattribut gehoert zum Prozess, und der
+// Satz hat seit Runde K4 512 Oktette, von denen 384 belegt waren. Die
+// Rechte einer DATEI liegen im Inode auf der Platte (`fs.fi`), nicht im
+// Speicher. Was bleibt, ist das, was eine MESSUNG braucht: wie oft
+// gefragt wurde, wie oft nein herauskam, wie oft eine Kennung gewechselt
+// hat. Ohne diese Zahlen ist die Zusage "es wird geprueft" eine
+// Behauptung.
+//
+// Die zweite Seite ist noch leer und ausdruecklich reserviert: sie steht
+// in der Karte, damit die naechste Runde bei 0x43000 anfaengt und nicht
+// hier.
+const K13_OFF: u64 = 0x41000
+const K13_MAX: u64 = 0x2000
+
+// Die Zaehler, Offsets INNERHALB von K13_OFF.
+const U_CHECKS: u64 = 0x00 // Rechtefragen, die durch perm.may gingen
+const U_DENIED: u64 = 0x08 // davon abgelehnt
+const U_SETIDS: u64 = 0x10 // erfolgreiche setuid/setgid/setres*
+const U_CHMODS: u64 = 0x18 // chmod/fchmod/fchmodat
+const U_CHOWNS: u64 = 0x20 // chown/fchown/fchownat
+const U_SUIDEXEC: u64 = 0x28 // exec ueber eine Datei mit setuid-Bit
+const U_FSVER: u64 = 0x30 // Fassung des eingehaengten OFS (1 oder 2)
+const U_INITSLOT: u64 = 0x38 // Platz + 1 des Prozesses 1, 0 = keiner
+const U_ORPHANS: u64 = 0x40 // Kinder, die an den Prozess 1 fielen
+const U_INITOK: u64 = 0x48 // 1 = /sbin/init wurde gestartet
+const U_ACPI: u64 = 0x50 // was die ACPI-Abschaltung gefunden hat
+const U_LASTDENY: u64 = 0x58 // (ino << 8) | gewuenschte Rechte
+
+// RUNDE K13. Fuenf der sechs sind GEGENPROBEN -- ohne sie beweist die
+// Runde nichts:
+//
+//   `k13`      den Selbsttest dieser Runde in Ring 3 laufen lassen.
+//   `noperm`   die Rechtepruefung sagt IMMER ja. Der Zugriff, der
+//              scheitern MUSS, gelingt dann -- und genau daran haengt,
+//              dass die Pruefung ueberhaupt etwas tut.
+//   `initsh`   der Notweg: der Kernel startet /bin/sh statt /sbin/init,
+//              so wie vor dieser Runde. Er ist geprueft, weil ein
+//              System, das nur noch ueber init startet, bei einem
+//              kaputten init gar nicht mehr startet.
+//   `nosuid`   das setuid-Bit wird nicht beachtet.
+//   `noacpi`   nicht ueber ACPI abschalten, sondern ueber den Ausgang
+//              des Pruefstands. Die beiden sind am Beendigungscode von
+//              QEMU zu unterscheiden (0 gegen 21), und das ist der
+//              Beweis, dass die Abschaltung wirklich ACPI war.
+//   `ofsv2raw` ein Abbild der alten Fassung mit den Regeln der neuen
+//              lesen. Die Rechte werden dann aus Blockzeigern gelesen
+//              und sind Unsinn -- die Gegenprobe zur Fassungsnummer im
+//              Superblock.
+//   `zombie`   ein Prozess, der ein Kind hinterlaesst und ohne `wait`
+//              endet. Damit ist zu messen, was init einsammelt.
+const M_K13: u64 = 2147483648 // 1 << 31
+const M_NOPERM: u64 = 4294967296 // 1 << 32
+const M_INITSH: u64 = 8589934592 // 1 << 33
+const M_NOSUID: u64 = 17179869184 // 1 << 34
+const M_NOACPI: u64 = 34359738368 // 1 << 35
+const M_FORCEV2: u64 = 68719476736 // 1 << 36
+const M_ZOMBIE: u64 = 137438953472 // 1 << 37
 
 // Runde K12 hat kdata von 0x40000 auf 0x50000 wachsen lassen; dieselbe
 // Zahl steht in kernel/boot.s und tools/hv/run.sh vergleicht beide.

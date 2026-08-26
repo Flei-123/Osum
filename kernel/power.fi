@@ -10,8 +10,20 @@
 // that is killed after ten seconds tells you nothing about whether it got
 // to the end. On real hardware the port is unused; a write there does
 // nothing at all.
+//
+// RUNDE K13 HAT DAS DRITTE DAZUGELEGT: die ECHTE Abschaltung ueber ACPI.
+// `init` beendet ein System nicht, indem es dem Pruefstand sagt, er moege
+// jetzt aufhoeren -- es schaltet die Maschine ab. Wie das geht, steht bei
+// `acpi_off` weiter unten; dass es WIRKLICH ACPI war und nicht der
+// Ausgang des Pruefstands, ist am Beendigungscode von QEMU zu sehen: eine
+// ACPI-Abschaltung ergibt 0, `isa-debug-exit` ergibt 21. Die Gegenprobe
+// `noacpi` nimmt genau den einen Weg weg, und dann steht dort wieder 21.
 
-export { shutdown, halt_forever, EXIT_OK, EXIT_TRAP }
+import kstate
+import acpi
+import serial
+
+export { shutdown, halt_forever, acpi_off, off_reason, EXIT_OK, EXIT_TRAP }
 
 // QEMU makes 21 out of this: (10 << 1) | 1.
 const EXIT_OK: u8 = 10
@@ -30,4 +42,147 @@ fn halt_forever() {
     while true {
         asm("hlt")
     }
+}
+
+// ------------------------------------------------- RUNDE K13: ACPI aus
+
+// Was `acpi_off` gefunden hat, fuer den Bericht:
+//   0 nichts versucht · 1 FADT+DSDT gelesen, PM1a beschrieben
+//   2 keine FADT · 3 kein \_S5 in der DSDT · 4 kein PM1a-Anschluss
+fn off_reason(state: u64) -> u64 {
+    return kstate.get(state, kstate.K13_OFF + kstate.U_ACPI)
+}
+
+const F_PM1A_CNT: u64 = 64 // Offsets in der FADT (ACPI 1.0, 32 Bit)
+const F_PM1B_CNT: u64 = 68
+const F_DSDT: u64 = 40
+
+const SLP_EN: u64 = 8192 // Bit 13 von PM1x_CNT
+
+fn out16(port: u64, v: u64) {
+    asm("out dx, ax", in("dx") port as u16, in("ax") v as u16)
+}
+
+// DAS SCHLAFOBJEKT \_S5_ AUS DER DSDT.
+//
+// ACPI sagt nicht, welchen Wert man in das Steuerregister schreiben muss,
+// um eine Maschine abzuschalten -- es sagt, dass die Firmware ihn in
+// einem AML-Objekt namens `_S5_` hinterlegt. Vollstaendig richtig waere
+// ein AML-Interpreter; das ist eine eigene Runde und mehr Code als der
+// ganze Rest dieser Datei.
+//
+// Was hier steht, ist der Weg, den jeder kleine Kernel geht und der seit
+// zwanzig Jahren auf jeder Maschine funktioniert, auf der er ueberhaupt
+// gebraucht wird: die DSDT nach den vier Oktetten `_S5_` absuchen und das
+// Paket dahinter von Hand lesen. Die Form ist immer dieselbe --
+//
+//     5F 53 35 5F   '_S5_'
+//     12            PackageOp
+//     <PkgLength>   ein oder zwei Oktette
+//     04            vier Elemente
+//     <SLP_TYPa>    entweder 0A xx (ein Byte-Wert) oder 00/01 (0 oder 1)
+//     <SLP_TYPb>
+//
+// -- und alles, was davon gebraucht wird, sind die ersten beiden Werte.
+// Was diese Abkuerzung NICHT kann, steht ehrlich in docs/ROUNDK13.md:
+// eine Firmware, die `_S5_` in einem `If` versteckt oder es ueber eine
+// Methode berechnet, wird hier nicht gefunden. Dann bleibt die Maschine
+// an, `off_reason` sagt 3, und der Aufrufer nimmt seinen Notweg.
+fn s5_values(dsdt: u64, out: u64) -> bool {
+    if dsdt == 0 {
+        return false
+    }
+    let len: u64 = kstate.get32(dsdt + 4)
+    if len < 36 || len > 0x100000 {
+        return false
+    }
+    var p: u64 = dsdt + 36
+    let end: u64 = dsdt + len - 8
+    while p < end {
+        if kstate.get8(p) == 0x5F && kstate.get8(p + 1) == 0x53 &&
+            kstate.get8(p + 2) == 0x35 && kstate.get8(p + 3) == 0x5F {
+            var q: u64 = p + 4
+            if kstate.get8(q) != 0x12 {
+                return false
+            }
+            q = q + 1
+            // PkgLength: die oberen zwei Bits sagen, wie viele
+            // Folgeoktette es hat.
+            let lead: u64 = kstate.get8(q)
+            q = q + 1 + ((lead >> 6) & 3)
+            q = q + 1 // die Zahl der Elemente
+            var a: u64 = 0
+            var b: u64 = 0
+            if kstate.get8(q) == 0x0A {
+                a = kstate.get8(q + 1)
+                q = q + 2
+            } else {
+                a = kstate.get8(q) & 7 // ZeroOp = 0x00, OneOp = 0x01
+                q = q + 1
+            }
+            if kstate.get8(q) == 0x0A {
+                b = kstate.get8(q + 1)
+            } else {
+                b = kstate.get8(q) & 7
+            }
+            __mmio_write64(out as *mut u64, a)
+            __mmio_write64((out + 8) as *mut u64, b)
+            return true
+        }
+        p = p + 1
+    }
+    return false
+}
+
+// DIE ABSCHALTUNG. Kehrt NUR zurueck, wenn sie nicht gegriffen hat.
+fn acpi_off(state: u64) -> bool {
+    var w_facp: [u8; 5] = "FACP\0"
+    var s_try: [u8; 22] = "power: acpi pm1a=0x\0\0\0"
+    var s_typ: [u8; 8] = " s5typ=\0"
+    var s_no: [u8; 20] = "power: acpi off no \0"
+    kstate.set(state, kstate.K13_OFF + kstate.U_ACPI, 0)
+    let fadt: u64 = acpi.table(state, (&w_facp[0]) as u64)
+    if fadt == 0 {
+        kstate.set(state, kstate.K13_OFF + kstate.U_ACPI, 2)
+        serial.puts((&s_no[0]) as u64)
+        serial.dec(2)
+        serial.nl()
+        return false
+    }
+    let pm1a: u64 = kstate.get32(fadt + F_PM1A_CNT)
+    let pm1b: u64 = kstate.get32(fadt + F_PM1B_CNT)
+    if pm1a == 0 {
+        kstate.set(state, kstate.K13_OFF + kstate.U_ACPI, 4)
+        serial.puts((&s_no[0]) as u64)
+        serial.dec(4)
+        serial.nl()
+        return false
+    }
+    var vals: [u64; 2] = [0 as u64; 2]
+    let dsdt: u64 = kstate.get32(fadt + F_DSDT)
+    if !s5_values(dsdt, (&vals[0]) as u64) {
+        kstate.set(state, kstate.K13_OFF + kstate.U_ACPI, 3)
+        serial.puts((&s_no[0]) as u64)
+        serial.dec(3)
+        serial.nl()
+        return false
+    }
+    kstate.set(state, kstate.K13_OFF + kstate.U_ACPI, 1)
+    serial.puts((&s_try[0]) as u64)
+    serial.hex(pm1a)
+    serial.puts((&s_typ[0]) as u64)
+    serial.dec(vals[0 as usize])
+    serial.nl()
+    out16(pm1a, ((vals[0 as usize] & 7) << 10) | SLP_EN)
+    if pm1b != 0 {
+        out16(pm1b, ((vals[1 as usize] & 7) << 10) | SLP_EN)
+    }
+    // Die Maschine ist an dieser Stelle normalerweise weg. Kommt sie doch
+    // zurueck, hat es nicht gegriffen und der Aufrufer erfaehrt es.
+    var spin: u64 = 0
+    while spin < 100000 {
+        asm("pause")
+        spin = spin + 1
+    }
+    return false
 }

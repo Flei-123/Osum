@@ -1,0 +1,123 @@
+// kernel/user/login.fi -- Runde K13: die Anmeldung.
+//
+// Das Programm, das es ohne `init` nicht geben koennte -- es braucht
+// einen Ort, an dem es laeuft, und dieser Ort ist der Prozess 1. `init`
+// startet es, es fragt nach Namen und Passwort, legt die Rechte des
+// Systems ab und WIRD die Shell des Menschen.
+//
+//     login              fragt nach Namen und Passwort
+//     login NAME         fragt nur nach dem Passwort
+//
+// DREI VERSUCHE, DANN ENDET ES mit dem Code 1. `init` startet es dann
+// neu (`respawn` in /etc/inittab) -- das ist die Art, wie ein Unix eine
+// Anmeldemaske hinstellt, ohne dass irgendwo eine Schleife steht, die
+// niemand beenden kann.
+//
+// WAS ES NICHT TUT: es zaehlt Fehlversuche nicht ueber seine eigene
+// Lebensdauer hinaus und wartet nach einem Fehlversuch nicht. Beides
+// gehoert zu einer ernsthaften Anmeldung dazu und steht als Grenze in
+// docs/ROUNDK13.md.
+
+profile kernel
+
+import ulib
+import tools
+import pw
+
+export { u_start }
+
+const SYS_SETUID: u64 = 105
+const SYS_SETGID: u64 = 106
+const SYS_EXECVE: u64 = 59
+
+fn read_name(out: u64, max: u64) -> u64 {
+    var c: [u8; 1] = [0 as u8; 1]
+    var n: u64 = 0
+    var going: bool = true
+    while going {
+        let r: u64 = ulib.sys(ulib.SYS_READ, 0, (&c[0]) as u64, 1)
+        if ulib.bad(r) || r == 0 {
+            going = false
+        } else {
+            if c[0 as usize] == 10 as u8 || c[0 as usize] == 13 as u8 {
+                going = false
+            } else {
+                if n + 1 < max {
+                    __mmio_write8((out + n) as *mut u8, c[0 as usize])
+                    n = n + 1
+                }
+            }
+        }
+    }
+    __mmio_write8((out + n) as *mut u8, 0 as u8)
+    return n
+}
+
+fn u_start(args: u64) -> u64 {
+    var s_hi: [u8; 15] = "\nosum login: \0\0"
+    var q_pw: [u8; 12] = "Passwort: \0\0"
+    var e_bad: [u8; 20] = "Anmeldung falsch\n\0\0\0"
+    var s_ok: [u8; 12] = "willkommen \0"
+    var d_sh: [u8; 8] = "/bin/sh\0"
+    var nlc: [u8; 2] = "\n\0"
+
+    var tries: u64 = 0
+    while tries < 3 {
+        var name: [u8; 64] = [0 as u8; 64]
+        if ulib.arg_count(args) > 1 && tries == 0 {
+            ulib.strncpy((&name[0]) as u64, ulib.arg_at(args, 1), 64)
+        } else {
+            ulib.eput((&s_hi[0]) as u64)
+            if read_name((&name[0]) as u64, 64) == 0 {
+                return 1
+            }
+        }
+        var given: [u8; 128] = [0 as u8; 128]
+        pw.read_pass((&q_pw[0]) as u64, (&given[0]) as u64, 128)
+
+        let uid: u64 = pw.uid_of_name((&name[0]) as u64)
+        var have: [u8; 160] = [0 as u8; 160]
+        var okay: bool = false
+        if uid != ulib.EOF {
+            if pw.shadow_of((&name[0]) as u64, (&have[0]) as u64, 160) {
+                okay = pw.check_hash((&have[0]) as u64, (&given[0]) as u64)
+            }
+        } else {
+            // DER UNBEKANNTE NAME WIRD TROTZDEM GEPRUEFT -- gegen einen
+            // Eintrag, der nie stimmt. Sonst waere an der Antwortzeit zu
+            // sehen, welche Namen es gibt: ein unbekannter Name kaeme
+            // sofort zurueck, ein bekannter erst nach 2048 Runden.
+            var dummy: [u8; 94] = "$osum1$2048$0000000000000000$0000000000000000000000000000000000000000000000000000000000000000\0"
+            pw.check_hash((&dummy[0]) as u64, (&given[0]) as u64)
+        }
+        if okay {
+            let gid: u64 = pw.gid_of_name((&name[0]) as u64)
+            // Erst die Gruppe, dann der Benutzer -- danach ist dieser
+            // Prozess kein root mehr und kann es nicht rueckgaengig
+            // machen. Genau das ist der Sinn: was von hier an laeuft,
+            // gehoert dem Menschen und nicht dem System.
+            ulib.sys(SYS_SETGID, gid, 0, 0)
+            if ulib.bad(ulib.sys(SYS_SETUID, uid, 0, 0)) {
+                return 1
+            }
+            ulib.eput((&s_ok[0]) as u64)
+            ulib.eput((&name[0]) as u64)
+            ulib.eput((&nlc[0]) as u64)
+            var path: [u8; 96] = [0 as u8; 96]
+            if !pw.shell_of_name((&name[0]) as u64, (&path[0]) as u64, 96) {
+                ulib.strcpy((&path[0]) as u64, (&d_sh[0]) as u64)
+            }
+            if *((&path[0]) as u64 as *mut u8) == 0 as u8 {
+                ulib.strcpy((&path[0]) as u64, (&d_sh[0]) as u64)
+            }
+            var argv: [u64; 2] = [0 as u64; 2]
+            argv[0] = (&path[0]) as u64
+            argv[1] = 0
+            ulib.sys(SYS_EXECVE, (&path[0]) as u64, (&argv[0]) as u64, 0)
+            return 127
+        }
+        ulib.eput((&e_bad[0]) as u64)
+        tries = tries + 1
+    }
+    return 1
+}

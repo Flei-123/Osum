@@ -60,6 +60,8 @@ import rand
 import tty
 
 import inet
+import perm
+import power
 
 export {
     entry, neg, STAT_BYTES, DIRENT_HEAD,
@@ -372,6 +374,70 @@ const SYS_OSUM_KILL: u64 = 1004
 const SYS_OSUM_SETENV: u64 = 1400
 const SYS_OSUM_MOUNT: u64 = 1401
 
+// ---------------------------------------------------------- RUNDE K13
+//
+// BENUTZER UND RECHTE, MIT DEN NUMMERN VON LINUX. Keine davon ist neu
+// erfunden: `getuid` ist 102, weil es auf x86-64-Linux 102 ist, und ein
+// Programm, das gegen diese Nummern uebersetzt wurde, laeuft ohne eine
+// Zeile Aenderung auf beiden. Die einzige eigene Nummer dieser Runde ist
+// 1600, und sie ist es, weil Linux nichts hat, was sie beantworten
+// koennte: sie gibt die ZAEHLER dieser Runde heraus, damit ein Programm
+// in Ring 3 messen kann, was der Kern getan hat.
+const SYS_ACCESS: u64 = 21
+const SYS_CHMOD: u64 = 90
+const SYS_FCHMOD: u64 = 91
+const SYS_CHOWN: u64 = 92
+const SYS_FCHOWN: u64 = 93
+const SYS_LCHOWN: u64 = 94
+const SYS_UMASK: u64 = 95
+const SYS_GETUID: u64 = 102
+const SYS_GETGID: u64 = 104
+const SYS_SETUID: u64 = 105
+const SYS_SETGID: u64 = 106
+const SYS_GETEUID: u64 = 107
+const SYS_GETEGID: u64 = 108
+const SYS_SETREUID: u64 = 113
+const SYS_SETREGID: u64 = 114
+const SYS_SETRESUID: u64 = 117
+const SYS_GETRESUID: u64 = 118
+const SYS_SETRESGID: u64 = 119
+const SYS_GETRESGID: u64 = 120
+const SYS_REBOOT: u64 = 169
+const SYS_FCHOWNAT: u64 = 260
+const SYS_FCHMODAT: u64 = 268
+const SYS_FACCESSAT: u64 = 269
+
+// Die eigene Nummer dieser Runde, aus dem zugeteilten Vorrat 1600..1699.
+const SYS_OSUM_USERINFO: u64 = 1600
+
+// Was `reboot` als zweites Wort versteht. Linux verlangt drei magische
+// Zahlen davor; dieser Kernel verlangt sie nicht und nimmt nur den
+// Befehl -- was er dafuer verlangt, ist die wirksame Kennung 0.
+const RB_POWEROFF: u64 = 0x4321FEDC
+const RB_HALT: u64 = 0xCDEF0123
+const RB_RESTART: u64 = 0x01234567
+
+// Die Felder, die SYS_OSUM_USERINFO herausgibt.
+const UI_CHECKS: u64 = 0
+const UI_DENIED: u64 = 1
+const UI_SETIDS: u64 = 2
+const UI_CHMODS: u64 = 3
+const UI_CHOWNS: u64 = 4
+const UI_SUIDEXEC: u64 = 5
+const UI_FSVER: u64 = 6
+const UI_INITSLOT: u64 = 7
+const UI_ORPHANS: u64 = 8
+const UI_ZOMBIES: u64 = 9
+const UI_UID: u64 = 10
+const UI_EUID: u64 = 11
+const UI_GID: u64 = 12
+const UI_EGID: u64 = 13
+const UI_SUID: u64 = 14
+const UI_UMASK: u64 = 15
+const UI_NOPERM: u64 = 16
+const UI_TASKS: u64 = 17
+const UI_COUNT: u64 = 18
+
 // ------------------------------------------------------------ the frame
 
 // The sixteen words `isr.s` saved. Offsets from the pointer it hands over.
@@ -661,6 +727,9 @@ fn dispatch(number: u64, frame: u64, state: u64) -> u64 {
         return uio.pstat(state, a0, a1)
     }
     if number == SYS_OSUM_KILL {
+        if !kill_allowed(state, me, a0) {
+            return neg(errno.E_PERM)
+        }
         return uio.kill_pid(state, a0, a1)
     }
     // ------------------------------------------------------- ROUND K9
@@ -677,6 +746,13 @@ fn dispatch(number: u64, frame: u64, state: u64) -> u64 {
         return signal.do_sigpending(state, me, a0)
     }
     if number == SYS_KILL {
+        // RUNDE K13: dieselbe Funktion aus `perm.fi`, die auch ueber
+        // Dateien entscheidet. Ein Benutzer darf nur Prozesse
+        // abschiessen, die ihm gehoeren -- ohne diese Zeile koennte
+        // jeder den Prozess 1 beenden.
+        if !kill_allowed(state, me, a0) {
+            return neg(errno.E_PERM)
+        }
         return signal.do_kill(state, me, a0, a1)
     }
     if number == SYS_TGKILL {
@@ -736,6 +812,131 @@ fn dispatch(number: u64, frame: u64, state: u64) -> u64 {
     // RUNDE K12: die Gastmaschinen.
     if number >= SYS_VM_CREATE && number <= SYS_VM_VALUE {
         return vm_call(state, me, number, a0, a1)
+    }
+    // ------------------------------------------------------ RUNDE K13
+    //
+    // EINE ZEILE UND NICHT FUENFUNDZWANZIG, und das ist keine
+    // Kosmetik, sondern eine gemessene Notwendigkeit. `dispatch` ist
+    // EINE Funktion mit ueber hundert Zweigen, und firnc gibt jedem
+    // Zwischenwert jedes Zweiges einen eigenen Platz auf dem Stapel --
+    // der Rahmen dieser einen Funktion war schon vor dieser Runde 5104
+    // Oktette gross. Die fuenfundzwanzig Aufrufe dieser Runde als
+    // Zweige hier drin haben ihn auf 6864 wachsen lassen, und der
+    // tiefste Kernstapel eines Laufs stieg damit von 14224 auf 16128
+    // von 16384 Oktetten -- 112 Oktette Luft, gemessen mit
+    // `osum: kstack deepest=`. In einer eigenen Funktion kostet
+    // dasselbe nichts, weil ihr Rahmen erst entsteht, wenn wirklich
+    // eine dieser Nummern kommt. Dieselbe Ueberlegung steht seit Runde
+    // K12 hinter `vm_call` und seit Runde K6 hinter `native`.
+    if is_k13(number) {
+        return k13_call(state, me, number, a0, a1, a2, a3)
+    }
+    return neg(errno.E_NOSYS)
+}
+
+// Gehoert diese Nummer der Benutzerschicht? Absichtlich eine einzige
+// Funktion mit Vergleichen und kein Bereich: die Nummern von Linux
+// liegen verstreut (21, 90..95, 102..108, 113..120, 169, 260..269) und
+// ein Bereich wuerde fremde Nummern mitnehmen.
+fn is_k13(number: u64) -> bool {
+    if number == SYS_ACCESS || number == SYS_UMASK || number == SYS_REBOOT {
+        return true
+    }
+    if number >= SYS_CHMOD && number <= SYS_LCHOWN {
+        return true
+    }
+    if number >= SYS_GETUID && number <= SYS_GETEGID {
+        return true
+    }
+    if number >= SYS_SETREUID && number <= SYS_GETRESGID {
+        return true
+    }
+    if number == SYS_FCHOWNAT || number == SYS_FCHMODAT
+        || number == SYS_FACCESSAT {
+        return true
+    }
+    return number == SYS_OSUM_USERINFO
+}
+
+fn k13_call(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64,
+    a3: u64) -> u64 {
+    if number == SYS_GETUID {
+        return do_getid(state, me, sched.T_UID)
+    }
+    if number == SYS_GETEUID {
+        return do_getid(state, me, sched.T_EUID)
+    }
+    if number == SYS_GETGID {
+        return do_getid(state, me, sched.T_GID)
+    }
+    if number == SYS_GETEGID {
+        return do_getid(state, me, sched.T_EGID)
+    }
+    if number == SYS_SETUID {
+        return do_setuid(state, me, a0)
+    }
+    if number == SYS_SETGID {
+        return do_setgid(state, me, a0)
+    }
+    if number == SYS_SETREUID {
+        return do_setre(state, me, a0, a1, sched.T_UID, sched.T_EUID,
+            sched.T_SUID)
+    }
+    if number == SYS_SETREGID {
+        return do_setre(state, me, a0, a1, sched.T_GID, sched.T_EGID,
+            sched.T_SGID)
+    }
+    if number == SYS_SETRESUID {
+        return do_setres(state, me, a0, a1, a2, sched.T_UID, sched.T_EUID,
+            sched.T_SUID)
+    }
+    if number == SYS_SETRESGID {
+        return do_setres(state, me, a0, a1, a2, sched.T_GID, sched.T_EGID,
+            sched.T_SGID)
+    }
+    if number == SYS_GETRESUID {
+        return do_getres(state, me, a0, a1, a2, sched.T_UID, sched.T_EUID,
+            sched.T_SUID)
+    }
+    if number == SYS_GETRESGID {
+        return do_getres(state, me, a0, a1, a2, sched.T_GID, sched.T_EGID,
+            sched.T_SGID)
+    }
+    if number == SYS_UMASK {
+        return do_umask(state, me, a0)
+    }
+    if number == SYS_CHMOD {
+        return do_chmod(state, me, a0, a1)
+    }
+    if number == SYS_FCHMOD {
+        return do_fchmod(state, me, a0, a1)
+    }
+    // Die `*at`-Formen: dieser Kernel hat keine Verzeichnisdeskriptoren,
+    // und AT_FDCWD ist der einzige Wert, den sie annehmen. Der Pfad steht
+    // im ZWEITEN Argument, alles andere ist wie bei der kurzen Form.
+    if number == SYS_FCHMODAT {
+        return do_chmod(state, me, a1, a2)
+    }
+    if number == SYS_CHOWN || number == SYS_LCHOWN {
+        return do_chown(state, me, a0, a1, a2)
+    }
+    if number == SYS_FCHOWN {
+        return do_fchown(state, me, a0, a1, a2)
+    }
+    if number == SYS_FCHOWNAT {
+        return do_chown(state, me, a1, a2, a3)
+    }
+    if number == SYS_ACCESS {
+        return do_access(state, me, a0, a1)
+    }
+    if number == SYS_FACCESSAT {
+        return do_access(state, me, a1, a2)
+    }
+    if number == SYS_REBOOT {
+        return do_reboot(state, me, a0)
+    }
+    if number == SYS_OSUM_USERINFO {
+        return do_userinfo(state, me, a0)
     }
     return neg(errno.E_NOSYS)
 }
@@ -1447,6 +1648,49 @@ fn fb_read(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
     return k
 }
 
+// Welche Rechte die Flaggen von `open` wirklich verlangen.
+//
+//     O_RDONLY (0)  -> lesen
+//     O_WRONLY (1)  -> schreiben
+//     O_RDWR   (2)  -> beides
+//     O_TRUNC       -> schreiben, auch wenn nur gelesen wuerde
+//
+// Eine eigene Funktion und keine vier Zeilen in `do_open`: der Rahmen
+// von `do_open` liegt auf dem tiefsten Weg dieses Kernels, und firnc
+// gibt jedem Zwischenwert dort einen eigenen Platz (s. `k13_call`).
+fn want_of(flags: u64) -> u64 {
+    var want: u64 = perm.R_READ
+    if (flags & 3) == 1 {
+        want = perm.R_WRITE
+    }
+    if (flags & 3) == 2 {
+        want = perm.R_READ | perm.R_WRITE
+    }
+    if (flags & O_TRUNC) != 0 {
+        want = want | perm.R_WRITE
+    }
+    return want
+}
+
+// Darf in diesem VERZEICHNIS geoeffnet oder angelegt werden? Betreten
+// muss man es immer, beschreiben nur, wenn etwas Neues entsteht. Die
+// Wurzel wird uebergangen -- sie hat kein Elternverzeichnis, und
+// `parent_of` gaebe dort 0 zurueck.
+fn dir_allowed(state: u64, me: u64, path: u64, ino: u64) -> bool {
+    if ino == fs.root(state) {
+        return true
+    }
+    let dir: u64 = fs.parent_ino(state, path)
+    if dir == 0 {
+        return true // kein Verzeichnis gefunden: `fs.path` sagt es gleich
+    }
+    var dwant: u64 = perm.R_EXEC
+    if ino == 0 {
+        dwant = perm.R_EXEC | perm.R_WRITE // anlegen
+    }
+    return perm.may(state, me, dir, dwant)
+}
+
 fn do_open(state: u64, me: u64, name: u64, flags: u64) -> u64 {
     let buf: u64 = state + kstate.NAME_OFF
     let len: u64 = fetch_path(state, me, name, buf, MAX_NAME)
@@ -1472,7 +1716,34 @@ fn do_open(state: u64, me: u64, name: u64, flags: u64) -> u64 {
     if kstate.get(state, kstate.FS_READY) == 0 {
         return neg(errno.E_NOSYS)
     }
+    // ================================================== RUNDE K13
+    //
+    // DAS TOR. Hier -- und an den vier anderen Stellen, an denen man an
+    // eine Datei kommt -- wird `perm.may` gefragt, und zwar mit dem,
+    // was die Flaggen wirklich verlangen:
+    //
+    //     O_RDONLY (0)  -> lesen
+    //     O_WRONLY (1)  -> schreiben
+    //     O_RDWR   (2)  -> beides
+    //     O_TRUNC       -> schreiben, auch wenn nur gelesen wuerde
+    //
+    // Gibt es die Datei noch nicht, gilt die Frage dem VERZEICHNIS: wer
+    // etwas anlegen will, braucht dort Schreib- und Betretungsrecht. Und
+    // gibt es sie, wird trotzdem zuerst das Verzeichnis gefragt --
+    // sonst waere ein Verzeichnis ohne Betretungsrecht kein Hindernis,
+    // sondern eine Dekoration.
+    //
+    // WAS HIER NICHT GEPRUEFT WIRD, und es steht auch in
+    // docs/ROUNDK13.md: das Betretungsrecht auf JEDEM Glied eines
+    // langen Pfades. Geprueft wird das letzte Verzeichnis und das Ziel.
+    // Der Grund ist der Modulgraph -- `fs.path` loest den Pfad auf und
+    // kennt keine Aufgabe, und `fs.fi` darf `perm.fi` nicht einbinden,
+    // weil `perm.fi` `fs.fi` einbindet. Das ist eine echte Luecke und
+    // keine Vereinfachung.
     var ino: u64 = fs.path(state, buf)
+    if !dir_allowed(state, me, buf, ino) {
+        return neg(errno.E_ACCES)
+    }
     if ino == 0 {
         if (flags & O_CREAT) == 0 {
             return neg(errno.E_NOENT)
@@ -1481,11 +1752,17 @@ fn do_open(state: u64, me: u64, name: u64, flags: u64) -> u64 {
         if ino == 0 {
             return neg(errno.E_NOSPC)
         }
+        // Rechte und Eigentuemer der frischen Datei: 0o666 abzueglich
+        // der Maske des Prozesses, und sie gehoert dem, der sie anlegt.
+        perm.on_create(state, me, ino, 438)
     } else {
         if (flags & O_CREAT) != 0 {
             if (flags & O_EXCL) != 0 {
                 return neg(errno.E_EXIST)
             }
+        }
+        if !perm.may(state, me, ino, want_of(flags)) {
+            return neg(errno.E_ACCES)
         }
     }
     var kind: u64 = file.K_FILE
@@ -1628,6 +1905,18 @@ fn do_unlink(state: u64, me: u64, name: u64) -> u64 {
     if fs.inode_type(state, ino) == fs.T_DIR {
         return neg(errno.E_ISDIR)
     }
+    // RUNDE K13: geloescht wird ein NAME, und ein Name steht in einem
+    // Verzeichnis. Gefragt wird deshalb nach dem Schreibrecht am
+    // VERZEICHNIS und nicht an der Datei -- deshalb kann man unter Unix
+    // eine schreibgeschuetzte Datei loeschen, wenn einem der Ordner
+    // gehoert, und deshalb kann man eine eigene Datei NICHT loeschen,
+    // wenn sie in einem fremden Ordner liegt.
+    let dir: u64 = fs.parent_ino(state, buf)
+    if dir != 0 {
+        if !perm.may(state, me, dir, perm.R_WRITE | perm.R_EXEC) {
+            return neg(errno.E_ACCES)
+        }
+    }
     if !fs.unlink_path(state, buf) {
         return neg(errno.E_NOENT)
     }
@@ -1646,9 +1935,20 @@ fn do_mkdir(state: u64, me: u64, name: u64) -> u64 {
     if fs.path(state, buf) != 0 {
         return neg(errno.E_EXIST)
     }
-    if fs.create_path(state, buf, fs.T_DIR) == 0 {
+    let dir: u64 = fs.parent_ino(state, buf)
+    if dir != 0 {
+        if !perm.may(state, me, dir, perm.R_WRITE | perm.R_EXEC) {
+            return neg(errno.E_ACCES)
+        }
+    }
+    let made: u64 = fs.create_path(state, buf, fs.T_DIR)
+    if made == 0 {
         return neg(errno.E_NOSPC)
     }
+    // 0o777 abzueglich der Maske -- wie bei `open`, nur mit dem anderen
+    // Ausgangswert, weil ein Verzeichnis ohne Betretungsrecht nutzlos
+    // waere.
+    perm.on_create(state, me, made, 511)
     return 0
 }
 
@@ -1664,15 +1964,23 @@ fn fill_stat(state: u64, ino: u64) -> bool {
         i = i + 1
     }
     let kind: u64 = fs.inode_type(state, ino)
-    var mode: u64 = S_IFREG | 420 // 0o644
+    // RUNDE K13: DIE RECHTE KOMMEN AUS DEM INODE. Bis zu dieser Runde
+    // stand hier eine feste Zahl -- 0o644 fuer jede Datei, 0o755 fuer
+    // jedes Verzeichnis -- und `ls -l` haette damit fuer alles dasselbe
+    // gemeldet. Jetzt ist es das, was auf der Platte steht; bei einem
+    // Abbild der Fassung 1 gibt `fs.inode_mode` genau die beiden alten
+    // Zahlen zurueck, und dort aendert sich also nichts.
+    var mode: u64 = S_IFREG | fs.inode_mode(state, ino)
     if kind == fs.T_DIR {
-        mode = S_IFDIR | 493 // 0o755
+        mode = S_IFDIR | fs.inode_mode(state, ino)
     }
     let size: u64 = fs.inode_size(state, ino)
     __mmio_write64((s + ST_DEV) as *mut u64, 1)
     __mmio_write64((s + ST_INO) as *mut u64, ino)
     __mmio_write64((s + ST_NLINK) as *mut u64, 1)
     __mmio_write32((s + ST_MODE) as *mut u32, mode as u32)
+    __mmio_write32((s + ST_UID) as *mut u32, fs.inode_uid(state, ino) as u32)
+    __mmio_write32((s + ST_GID) as *mut u32, fs.inode_gid(state, ino) as u32)
     __mmio_write64((s + ST_RDEV) as *mut u64, 0)
     __mmio_write64((s + ST_SIZE) as *mut u64, size)
     __mmio_write64((s + ST_BLKSIZE) as *mut u64, 512)
@@ -2498,6 +2806,19 @@ fn do_execve(state: u64, me: u64, frame: u64, path: u64, argv: u64) -> u64 {
     let entry: u64 = sched.tget(state, t, sched.T_ENTRY)
     let ustack: u64 = sched.tget(state, t, sched.T_USTACK)
     let args: u64 = sched.tget(state, t, sched.T_WORK)
+    // RUNDE K13: DAS setuid-BIT KOMMT HIER AN. `elf.build` hat die
+    // Kennungen auf die eben gebaute Aufgabe geschrieben (sie erbt sie
+    // von diesem Prozess und bekommt sie ueberschrieben, wenn die Datei
+    // das Bit traegt). `execve` ist aber kein neuer Prozess -- der
+    // Aufrufer WIRD das Programm -- also werden die vier Woerter
+    // herueberkopiert, bevor die Huelle verworfen wird. Ohne diese vier
+    // Zeilen haette ein setuid-Programm ueber `execve` keine Wirkung,
+    // wohl aber ueber `spawn`, und die beiden Wege wuerden sich
+    // unterscheiden.
+    sched.tset(state, me, sched.T_EUID, sched.tget(state, t, sched.T_EUID))
+    sched.tset(state, me, sched.T_EGID, sched.tget(state, t, sched.T_EGID))
+    sched.tset(state, me, sched.T_SUID, sched.tget(state, t, sched.T_SUID))
+    sched.tset(state, me, sched.T_SGID, sched.tget(state, t, sched.T_SGID))
     proc.swap_space(state, me, t)
     // The new tables FIRST, then the old ones are freed -- in that order,
     // because the processor is standing in the old ones right now.
@@ -2740,6 +3061,13 @@ fn do_chdir(state: u64, me: u64, name: u64) -> u64 {
     let len: u64 = fetch_path(state, me, name, buf, MAX_NAME)
     if errno.is_error(len) {
         return len
+    }
+    // RUNDE K13: in ein Verzeichnis wechseln heisst, es zu betreten.
+    let ino: u64 = fs.path(state, buf)
+    if ino != 0 {
+        if !perm.may(state, me, ino, perm.R_EXEC) {
+            return neg(errno.E_ACCES)
+        }
     }
     return uio.chdir_to(state, me, buf)
 }
@@ -3760,13 +4088,436 @@ fn do_vm_stat(state: u64, me: u64, h: u64, aus: u64) -> u64 {
         return cap.err(cap.E_INVALID)
     }
     var w: [u64; 5] = [0 as u64; 5]
-    w[0] = hv.vm_state(state, s)
-    w[1] = hv.vm_exits(state, s)
-    w[2] = hv.vm_result(state, s)
-    w[3] = hv.vm_guest(state, s)
-    w[4] = hv.exits_total(state)
+    kstate.set(state, kstate.K13_OFF + 0x1000 + 0 * 8, hv.vm_state(state, s))
+    kstate.set(state, kstate.K13_OFF + 0x1000 + 1 * 8, hv.vm_exits(state, s))
+    kstate.set(state, kstate.K13_OFF + 0x1000 + 2 * 8, hv.vm_result(state, s))
+    kstate.set(state, kstate.K13_OFF + 0x1000 + 3 * 8, hv.vm_guest(state, s))
+    kstate.set(state, kstate.K13_OFF + 0x1000 + 4 * 8, hv.exits_total(state))
     if !copy_out(state, me, aus, (&w[0]) as u64, VMSTAT_WORDS * 8) {
         return cap.err(cap.E_INVALID)
+    }
+    return 0
+}
+
+// ============================================================ RUNDE K13
+//
+// BENUTZER UND RECHTE, VON RING 3 AUS GESEHEN.
+//
+// Alles, was hier steht, faellt in eine von drei Gruppen:
+//
+//   1. AUSKUNFT   -- getuid, geteuid, getgid, getegid, getresuid,
+//                    getresgid, umask, access. Sie koennen nicht
+//                    fehlschlagen (ausser an einem falschen Zeiger).
+//   2. WECHSEL    -- setuid, setgid, setreuid, setregid, setresuid,
+//                    setresgid. Sie duerfen NUR das, was POSIX erlaubt,
+//                    und die Regel steht in `ids_ok` an genau einer
+//                    Stelle.
+//   3. RECHTE     -- chmod, chown und ihre Verwandten. Sie aendern den
+//                    Inode auf der Platte, und sie duerfen es nur, wenn
+//                    die Datei dem Aufrufer gehoert oder er root ist.
+//
+// Die PRUEFUNG, ob jemand eine Datei oeffnen darf, steht NICHT hier,
+// sondern in `kernel/perm.fi`. Diese Datei ruft sie auf -- fuenfmal, an
+// den fuenf Toren, durch die man an eine Datei kommt (`open`, `mkdir`,
+// `unlink`, `chdir`, und `execve` ueber `elf.build`). Fuenf Aufrufe EINER
+// Funktion sind etwas anderes als fuenf Pruefungen.
+
+// -------------------------------------------------------- die Auskunft
+
+// Darf `me` dem Prozess mit dieser pid ein Signal schicken? Eine
+// negative Zahl oder 0 heisst "eine ganze Gruppe" -- dann wird gegen
+// JEDES Mitglied gefragt und ein einziges Nein reicht nicht aus, um den
+// ganzen Aufruf abzulehnen; POSIX verlangt nur, dass mindestens einer
+// getroffen werden durfte. Hier ist es einfacher und strenger: bei einer
+// Gruppe entscheidet die Kennung des Aufrufers gegen die des ersten
+// Treffers, und root darf immer.
+fn kill_allowed(state: u64, me: u64, pid: u64) -> bool {
+    if perm.is_root(state, me) {
+        return true
+    }
+    if pid == 0 || (pid >> 63) != 0 {
+        return true // Gruppen: `signal.do_kill` filtert selbst
+    }
+    let t: u64 = sched.find_pid(state, pid)
+    if t >= kstate.MAX_TASKS {
+        return true // gibt es nicht -- die Fehlernummer kommt von dort
+    }
+    return perm.may_signal(state, me, t)
+}
+
+fn do_getid(state: u64, me: u64, which: u64) -> u64 {
+    return sched.tget(state, me, which)
+}
+
+// `getresuid(r, e, s)` -- alle drei auf einmal. Drei 32-Bit-Worte, wie
+// bei Linux.
+fn do_getres(state: u64, me: u64, a: u64, b: u64, c: u64,
+    fr: u64, fe: u64, fs_: u64) -> u64 {
+    if a != 0 {
+        if !put32(state, me, a, sched.tget(state, me, fr)) {
+            return neg(errno.E_FAULT)
+        }
+    }
+    if b != 0 {
+        if !put32(state, me, b, sched.tget(state, me, fe)) {
+            return neg(errno.E_FAULT)
+        }
+    }
+    if c != 0 {
+        if !put32(state, me, c, sched.tget(state, me, fs_)) {
+            return neg(errno.E_FAULT)
+        }
+    }
+    return 0
+}
+
+// `umask(m)` gibt die ALTE Maske zurueck und setzt die neue -- so wie
+// ueberall, und das ist der Grund, warum ein Programm sie erfragen kann,
+// ohne dass es einen `getumask` gibt.
+fn do_umask(state: u64, me: u64, m: u64) -> u64 {
+    let old: u64 = sched.tget(state, me, sched.T_UMASK) & 4095
+    sched.tset(state, me, sched.T_UMASK, m & 4095)
+    return old
+}
+
+// --------------------------------------------------------- der Wechsel
+
+// DIE EINE REGEL FUER JEDEN KENNUNGSWECHSEL. Sie steht hier einmal, und
+// `setuid`, `setreuid` und `setresuid` sind drei Aufrufe darauf --
+// dieselbe Ueberlegung wie bei `perm.may`.
+//
+// root darf jeden Wert setzen. Wer nicht root ist, darf nur zwischen
+// seinen DREI EIGENEN Werten wechseln (echt, wirksam, gesichert). Das ist
+// genau das, was ein setuid-Programm braucht, um seine Rechte abzulegen
+// und wiederzuholen -- und genau das, was verhindert, dass es sich
+// fremde nimmt.
+fn ids_ok(state: u64, me: u64, want: u64, real_f: u64, eff_f: u64,
+    sav_f: u64) -> bool {
+    if want == (0 -% 1) {
+        return true // -1: unveraendert
+    }
+    if perm.is_root(state, me) {
+        return true
+    }
+    if want == sched.tget(state, me, real_f) {
+        return true
+    }
+    if want == sched.tget(state, me, eff_f) {
+        return true
+    }
+    return want == sched.tget(state, me, sav_f)
+}
+
+fn ids_set(state: u64, me: u64, f: u64, v: u64) {
+    if v != (0 -% 1) {
+        sched.tset(state, me, f, v)
+    }
+}
+
+// `setresuid(r, e, s)` -- der allgemeine Fall; die drei anderen sind
+// Sonderfaelle davon. ALLE DREI WERTE WERDEN GEPRUEFT, BEVOR EINER
+// GESETZT WIRD: ein Aufruf, der zur Haelfte gelingt, waere ein Prozess
+// mit halben Rechten, und dafuer gibt es keine Fehlernummer.
+fn do_setres(state: u64, me: u64, r: u64, e: u64, sv: u64,
+    real_f: u64, eff_f: u64, sav_f: u64) -> u64 {
+    if !ids_ok(state, me, r, real_f, eff_f, sav_f) {
+        return neg(errno.E_PERM)
+    }
+    if !ids_ok(state, me, e, real_f, eff_f, sav_f) {
+        return neg(errno.E_PERM)
+    }
+    if !ids_ok(state, me, sv, real_f, eff_f, sav_f) {
+        return neg(errno.E_PERM)
+    }
+    ids_set(state, me, real_f, r)
+    ids_set(state, me, eff_f, e)
+    ids_set(state, me, sav_f, sv)
+    kstate.add(state, kstate.K13_OFF + kstate.U_SETIDS, 1)
+    return 0
+}
+
+// `setuid(u)`. Als root setzt es ALLE DREI -- danach gibt es keinen Weg
+// zurueck, und genau das ist der Sinn: `login` legt die Rechte des
+// Systems endgueltig ab, bevor es die Shell des Menschen startet. Wer
+// nicht root ist, setzt nur die wirksame Kennung und kann zurueck.
+fn do_setuid(state: u64, me: u64, u: u64) -> u64 {
+    if perm.is_root(state, me) {
+        sched.tset(state, me, sched.T_UID, u)
+        sched.tset(state, me, sched.T_EUID, u)
+        sched.tset(state, me, sched.T_SUID, u)
+        kstate.add(state, kstate.K13_OFF + kstate.U_SETIDS, 1)
+        return 0
+    }
+    if !ids_ok(state, me, u, sched.T_UID, sched.T_EUID, sched.T_SUID) {
+        return neg(errno.E_PERM)
+    }
+    sched.tset(state, me, sched.T_EUID, u)
+    kstate.add(state, kstate.K13_OFF + kstate.U_SETIDS, 1)
+    return 0
+}
+
+fn do_setgid(state: u64, me: u64, g: u64) -> u64 {
+    if perm.is_root(state, me) {
+        sched.tset(state, me, sched.T_GID, g)
+        sched.tset(state, me, sched.T_EGID, g)
+        sched.tset(state, me, sched.T_SGID, g)
+        kstate.add(state, kstate.K13_OFF + kstate.U_SETIDS, 1)
+        return 0
+    }
+    if !ids_ok(state, me, g, sched.T_GID, sched.T_EGID, sched.T_SGID) {
+        return neg(errno.E_PERM)
+    }
+    sched.tset(state, me, sched.T_EGID, g)
+    kstate.add(state, kstate.K13_OFF + kstate.U_SETIDS, 1)
+    return 0
+}
+
+// `setreuid(r, e)`. Wird die echte Kennung gesetzt oder die wirksame auf
+// etwas anderes als die echte, so wird die GESICHERTE nachgezogen -- das
+// steht so in POSIX, und ohne diese Zeile koennte ein Prozess ueber
+// mehrere Aufrufe eine Kennung behalten, die er einmal hatte.
+fn do_setre(state: u64, me: u64, r: u64, e: u64,
+    real_f: u64, eff_f: u64, sav_f: u64) -> u64 {
+    if !ids_ok(state, me, r, real_f, eff_f, sav_f) {
+        return neg(errno.E_PERM)
+    }
+    if !ids_ok(state, me, e, real_f, eff_f, sav_f) {
+        return neg(errno.E_PERM)
+    }
+    let old_real: u64 = sched.tget(state, me, real_f)
+    ids_set(state, me, real_f, r)
+    ids_set(state, me, eff_f, e)
+    if r != (0 -% 1) || (e != (0 -% 1) && e != old_real) {
+        sched.tset(state, me, sav_f, sched.tget(state, me, eff_f))
+    }
+    kstate.add(state, kstate.K13_OFF + kstate.U_SETIDS, 1)
+    return 0
+}
+
+// ------------------------------------------------------- die Rechte
+
+// Wer darf die Rechte einer Datei aendern? Ihr Besitzer und root, und
+// sonst niemand -- auch nicht, wer Schreibrecht an ihr hat. (Sonst
+// koennte jeder, der eine Datei aendern darf, sie sich aneignen.)
+fn owns(state: u64, me: u64, ino: u64) -> bool {
+    if perm.is_root(state, me) {
+        return true
+    }
+    return perm.euid(state, me) == fs.inode_uid(state, ino)
+}
+
+fn chmod_ino(state: u64, me: u64, ino: u64, mode: u64) -> u64 {
+    if !owns(state, me, ino) {
+        kstate.add(state, kstate.K13_OFF + kstate.U_DENIED, 1)
+        if (kstate.get(state, kstate.MODE) & kstate.M_NOPERM) == 0 {
+            return neg(errno.E_PERM)
+        }
+    }
+    if !fs.set_mode(state, ino, mode) {
+        return neg(errno.E_ROFS) // ein Abbild der Fassung 1
+    }
+    kstate.add(state, kstate.K13_OFF + kstate.U_CHMODS, 1)
+    return 0
+}
+
+// `chown`. Den BESITZER darf nur root wechseln -- ein Benutzer, der eine
+// Datei verschenken kann, kann Plattenkontingente umgehen und fremde
+// Programme mit seinem Namen versehen. Die GRUPPE darf auch der Besitzer
+// wechseln, aber nur auf seine eigene.
+//
+// UND ES NIMMT DIE BEIDEN OBEREN BITS WEG. Eine Datei mit setuid-Bit, die
+// den Besitzer wechselt, waere sonst ein Programm, das mit der Kennung
+// des NEUEN Besitzers laeuft, ohne dass der etwas davon weiss. Das ist
+// die aelteste Falle in diesem Bereich, und POSIX schreibt genau deshalb
+// vor, dass sie fallen.
+fn chown_ino(state: u64, me: u64, ino: u64, uid: u64, gid: u64) -> u64 {
+    let root: bool = perm.is_root(state, me)
+    if uid != (0 -% 1) && !root {
+        kstate.add(state, kstate.K13_OFF + kstate.U_DENIED, 1)
+        if (kstate.get(state, kstate.MODE) & kstate.M_NOPERM) == 0 {
+            return neg(errno.E_PERM)
+        }
+    }
+    if gid != (0 -% 1) && !root {
+        if !owns(state, me, ino) || gid != perm.egid(state, me) {
+            kstate.add(state, kstate.K13_OFF + kstate.U_DENIED, 1)
+            if (kstate.get(state, kstate.MODE) & kstate.M_NOPERM) == 0 {
+                return neg(errno.E_PERM)
+            }
+        }
+    }
+    if !fs.set_owner(state, ino, uid, gid) {
+        return neg(errno.E_ROFS)
+    }
+    if !root {
+        let m: u64 = fs.inode_mode(state, ino)
+        if (m & (fs.S_ISUID | fs.S_ISGID)) != 0 {
+            fs.set_mode(state, ino, m & (~(fs.S_ISUID | fs.S_ISGID)))
+        }
+    }
+    kstate.add(state, kstate.K13_OFF + kstate.U_CHOWNS, 1)
+    return 0
+}
+
+// Ein Pfad aus Ring 3 zu einem Inode, mit allen Pruefungen davor. Die
+// vier Aufrufe darunter unterscheiden sich nur darin, was sie damit tun.
+fn ino_of_path(state: u64, me: u64, name: u64) -> u64 {
+    if kstate.get(state, kstate.FS_READY) == 0 {
+        return neg(errno.E_NOSYS)
+    }
+    let buf: u64 = state + kstate.NAME_OFF
+    let len: u64 = fetch_path(state, me, name, buf, MAX_NAME)
+    if errno.is_error(len) {
+        return len
+    }
+    let ino: u64 = fs.path(state, buf)
+    if ino == 0 {
+        return neg(errno.E_NOENT)
+    }
+    return ino
+}
+
+fn do_chmod(state: u64, me: u64, name: u64, mode: u64) -> u64 {
+    let ino: u64 = ino_of_path(state, me, name)
+    if errno.is_error(ino) {
+        return ino
+    }
+    return chmod_ino(state, me, ino, mode)
+}
+
+fn do_chown(state: u64, me: u64, name: u64, uid: u64, gid: u64) -> u64 {
+    let ino: u64 = ino_of_path(state, me, name)
+    if errno.is_error(ino) {
+        return ino
+    }
+    return chown_ino(state, me, ino, uid, gid)
+}
+
+fn ino_of_fd(state: u64, me: u64, fd: u64) -> u64 {
+    let of: u64 = of_of(state, me, fd)
+    if of >= file.MAX_OPEN {
+        return neg(errno.E_BADF)
+    }
+    let kind: u64 = file.open_kind(state, of)
+    if kind != file.K_FILE && kind != file.K_DIR {
+        return neg(errno.E_INVAL)
+    }
+    return file.open_ino(state, of)
+}
+
+fn do_fchmod(state: u64, me: u64, fd: u64, mode: u64) -> u64 {
+    let ino: u64 = ino_of_fd(state, me, fd)
+    if errno.is_error(ino) {
+        return ino
+    }
+    return chmod_ino(state, me, ino, mode)
+}
+
+fn do_fchown(state: u64, me: u64, fd: u64, uid: u64, gid: u64) -> u64 {
+    let ino: u64 = ino_of_fd(state, me, fd)
+    if errno.is_error(ino) {
+        return ino
+    }
+    return chown_ino(state, me, ino, uid, gid)
+}
+
+// `access(pfad, art)` -- mit der ECHTEN Kennung, so wie POSIX es sagt.
+// F_OK ist 0 und fragt nur, ob es die Datei gibt.
+fn do_access(state: u64, me: u64, name: u64, want: u64) -> u64 {
+    let ino: u64 = ino_of_path(state, me, name)
+    if errno.is_error(ino) {
+        return ino
+    }
+    if want == 0 {
+        return 0
+    }
+    if perm.may_real(state, me, ino, want & 7) {
+        return 0
+    }
+    return neg(errno.E_ACCES)
+}
+
+// -------------------------------------------------- das Herunterfahren
+
+// `reboot(befehl)`. Es ist der Aufruf, mit dem der Prozess 1 die Maschine
+// beendet -- und nur er kann es, weil nur er mit der wirksamen Kennung 0
+// laeuft, wenn das System richtig aufgesetzt ist.
+//
+// Der Weg ist ECHTES ACPI (`power.acpi_off`): FADT lesen, \_S5_ in der
+// DSDT suchen, in das Steuerregister schreiben. Kommt der Aufruf zurueck,
+// hat es nicht gegriffen -- dann bleibt der Ausgang des Pruefstands, und
+// der Unterschied ist am Beendigungscode von QEMU zu sehen (0 gegen 21).
+// `noacpi` nimmt den ersten Weg weg; das ist die Gegenprobe.
+fn do_reboot(state: u64, me: u64, cmd: u64) -> u64 {
+    if !perm.is_root(state, me) {
+        kstate.add(state, kstate.K13_OFF + kstate.U_DENIED, 1)
+        return neg(errno.E_PERM)
+    }
+    var s_off: [u8; 20] = "power: init sagt ab\0"
+    // DER BERICHT ZUERST. Nach der naechsten Zeile gibt es die Maschine
+    // nicht mehr; was hier nicht steht, steht nirgends.
+    perm.report(state)
+    serial.puts((&s_off[0]) as u64)
+    serial.nl()
+    if cmd == RB_POWEROFF {
+        if (kstate.get(state, kstate.MODE) & kstate.M_NOACPI) == 0 {
+            power.acpi_off(state)
+        }
+        power.shutdown(power.EXIT_OK)
+        return 0
+    }
+    if cmd == RB_HALT {
+        power.halt_forever()
+        return 0
+    }
+    if cmd == RB_RESTART {
+        power.shutdown(power.EXIT_OK)
+        return 0
+    }
+    return neg(errno.E_INVAL)
+}
+
+// ------------------------------------------------------- die Auskunft
+
+// SYS_OSUM_USERINFO: die Zahlen dieser Runde nach Ring 3. Sie sind das,
+// woran der Testlaeufer festmacht, dass ueberhaupt geprueft wurde -- eine
+// Rechtepruefung, die niemand aufruft, ist von einer, die immer ja sagt,
+// sonst nicht zu unterscheiden.
+fn do_userinfo(state: u64, me: u64, out: u64) -> u64 {
+    if !proc.user_ok(state, me, out, UI_COUNT * 8) {
+        return neg(errno.E_FAULT)
+    }
+    // Der Puffer liegt in `kdata` und nicht auf dem Stapel: achtzehn
+    // Woerter auf dem Kernstapel sind 144 Oktette, und firnc macht in
+    // dieser Funktion 1984 daraus. Die ZWEITE Seite des Bereichs dieser
+    // Runde (0x42000) ist genau dafuer da.
+    let w: u64 = state + kstate.K13_OFF + 0x1000
+    let b: u64 = kstate.K13_OFF
+    kstate.set(state, kstate.K13_OFF + 0x1000 + 0 * 8,
+        kstate.get(state, b + kstate.U_CHECKS))
+    kstate.set(state, kstate.K13_OFF + 0x1000 + 1 * 8, kstate.get(state, b + kstate.U_DENIED))
+    kstate.set(state, kstate.K13_OFF + 0x1000 + 2 * 8, kstate.get(state, b + kstate.U_SETIDS))
+    kstate.set(state, kstate.K13_OFF + 0x1000 + 3 * 8, kstate.get(state, b + kstate.U_CHMODS))
+    kstate.set(state, kstate.K13_OFF + 0x1000 + 4 * 8, kstate.get(state, b + kstate.U_CHOWNS))
+    kstate.set(state, kstate.K13_OFF + 0x1000 + 5 * 8, kstate.get(state, b + kstate.U_SUIDEXEC))
+    kstate.set(state, kstate.K13_OFF + 0x1000 + 6 * 8, fs.version(state))
+    kstate.set(state, kstate.K13_OFF + 0x1000 + 7 * 8, kstate.get(state, b + kstate.U_INITSLOT))
+    kstate.set(state, kstate.K13_OFF + 0x1000 + 8 * 8, kstate.get(state, b + kstate.U_ORPHANS))
+    kstate.set(state, kstate.K13_OFF + 0x1000 + 9 * 8, sched.zombies(state, sched.K_USER))
+    kstate.set(state, kstate.K13_OFF + 0x1000 + 10 * 8, sched.tget(state, me, sched.T_UID))
+    kstate.set(state, kstate.K13_OFF + 0x1000 + 11 * 8, sched.tget(state, me, sched.T_EUID))
+    kstate.set(state, kstate.K13_OFF + 0x1000 + 12 * 8, sched.tget(state, me, sched.T_GID))
+    kstate.set(state, kstate.K13_OFF + 0x1000 + 13 * 8, sched.tget(state, me, sched.T_EGID))
+    kstate.set(state, kstate.K13_OFF + 0x1000 + 14 * 8, sched.tget(state, me, sched.T_SUID))
+    kstate.set(state, kstate.K13_OFF + 0x1000 + 15 * 8, sched.tget(state, me, sched.T_UMASK))
+    kstate.set(state, kstate.K13_OFF + 0x1000 + 16 * 8, 0)
+    if (kstate.get(state, kstate.MODE) & kstate.M_NOPERM) != 0 {
+        kstate.set(state, kstate.K13_OFF + 0x1000 + 16 * 8, 1)
+    }
+    kstate.set(state, kstate.K13_OFF + 0x1000 + 17 * 8,
+        sched.alive_count(state))
+    if !copy_out(state, me, out, w, UI_COUNT * 8) {
+        return neg(errno.E_FAULT)
     }
     return 0
 }

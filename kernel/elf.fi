@@ -58,6 +58,7 @@ import proc
 import fs
 import file
 import uio
+import perm
 
 export {
     spawn, build, load, say_reason, errno_of,
@@ -92,6 +93,13 @@ const R_ENTRY: u64 = 19 // the entry point is on no executable page
 const R_READ: u64 = 20 // the disk gave less than was asked for
 const R_NOLOAD: u64 = 21 // not a single PT_LOAD
 const R_ARGS: u64 = 22 // the arguments do not fit on the page
+// RUNDE K13: die Datei ist da, sie ist ein Programm -- aber dieser
+// Prozess darf sie nicht starten. Das ist kein Formatfehler, und sie
+// bekommt deshalb einen eigenen Grund und ihre eigene Fehlernummer
+// (-EACCES statt -ENOEXEC): "du darfst nicht" und "das ist kein
+// Programm" sind zwei verschiedene Auskuenfte, und ein Programm, das
+// beide gleich beantwortet bekommt, kann sie nicht auseinanderhalten.
+const R_PERM: u64 = 23
 
 // ---------------------------------------------------------- the format
 
@@ -599,6 +607,15 @@ fn build(state: u64, path: u64, args: u64, argc: u64, prio: u64) -> u64 {
         fail(state, R_ISDIR)
         return 0
     }
+    // RUNDE K13, UND SIE STEHT HIER UND NUR HIER. Jeder Weg, auf dem in
+    // diesem Kernel ein Programm von der Platte startet -- `execve`,
+    // `SYS_OSUM_EXEC`, `elf.spawn` aus dem Kern heraus -- geht durch
+    // diese Funktion. Eine Datei ohne Ausfuehrungsrecht ist damit an
+    // JEDEM dieser Wege kein Programm, und es gibt keinen vierten.
+    if !perm.may(state, sched.current(state), ino, perm.R_EXEC) {
+        fail(state, R_PERM)
+        return 0
+    }
     // Interrupts stay down until the process is COMPLETE -- the same rule
     // as in `proc.create`, and for the same reason: a task the scheduler
     // takes while its page table is half full has an rip that points into
@@ -617,6 +634,10 @@ fn build(state: u64, path: u64, args: u64, argc: u64, prio: u64) -> u64 {
         fail(state, r)
         return 0
     }
+    // Das setuid-Bit, auf die eben gebaute Aufgabe. `execve` traegt die
+    // Kennungen von dort in den Aufrufer ein, `spawn` startet diese
+    // Aufgabe unmittelbar -- beide Wege kommen hier vorbei.
+    perm.apply_exec(state, t, ino)
     if !write_args(state, t, args, argc) {
         proc.discard(state, t)
         sched.irq_restore(flags)
@@ -673,6 +694,9 @@ fn errno_of(r: u64) -> u64 {
     }
     if r == R_ARGS {
         return errno.E_2BIG
+    }
+    if r == R_PERM {
+        return errno.E_ACCES
     }
     return errno.E_NOEXEC
 }

@@ -143,6 +143,22 @@
 #      kein Programm mehr von der Platte.
 #
 #
+#  19. BENUTZER, RECHTE UND DER ERSTE PROZESS (tools/k13/run.sh, Runde
+#      K13): uid/gid je Prozess mit den Nummern von Linux, vererbt ueber
+#      fork und execve, mit echter/wirksamer/gesicherter Kennung nach
+#      POSIX. Rechtebits und Eigentuemer IM INODE -- das Format wurde
+#      dafuer erweitert (drei direkte Blockzeiger weniger, dafuer mode,
+#      uid, gid) und traegt jetzt eine Fassungsnummer im Superblock;
+#      alte Abbilder bleiben lesbar. Die Pruefung steht an EINER Stelle
+#      (kernel/perm.fi) und wird aus fuenf Toren gerufen. Passwoerter
+#      mit PBKDF2-HMAC-SHA256 und Salz, gegen Pythons hashlib gemessen.
+#      Und /sbin/init als PROZESS 1: Dienstetafel, respawn, Waisen
+#      einsammeln, `svc`, Herunterfahren ueber echtes ACPI. Gegenproben:
+#      `noperm` (die Pruefung sagt immer ja -- die Messung bricht
+#      zusammen), `nosuid`, `ofsv2raw` (altes Abbild, neue Regeln),
+#      `noacpi` (Beendigungscode 21 statt 0), `initsh` (der Notweg),
+#      und ein Lauf ohne init, in dem die Waise als Leiche stehenbleibt.
+#
 #  17. Die Oberflaeche (tools/wm/run.sh, Runde K10): ein Zeigegeraet am
 #      zweiten Anschluss des Tastaturbausteins (`kernel/ps2m.fi`), ein
 #      Fensterserver mit Stapelreihenfolge, Eingabefokus und
@@ -294,6 +310,9 @@ lauf "17. die Oberflaeche: Maus, Fensterserver, TrueType (tools/wm/run.sh, Runde
 
 lauf "18. ein Wirt fuer fremde Prozessoren: AMD-V, verschachtelte Seitentabellen, Gaeste (tools/hv/run.sh, Runde K12)" \
      tools/hv/run.sh hv '^HV:|^        (bench|exits|cpu):'
+
+lauf "19. Benutzer, Rechte und der erste Prozess: uid/gid, chmod/chown, login, init (tools/k13/run.sh, Runde K13)" \
+     tools/k13/run.sh k13 '^K13: |^  OK    (DIE (KENNUNG|WAISE)|GEGENPROBE|PYTHON|das Passwort steht NICHT|die Maschine (schaltet|faehrt)|DER NOTWEG)'
 
 echo
 echo "=================================================================="

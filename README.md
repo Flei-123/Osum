@@ -257,6 +257,23 @@ Kern, sondern ein Userland. Ein falsches `modcrc=` laesst das Modul
 liegen, und `mem.scan` nimmt seinen Bereich aus dem Rahmenverwalter --
 nachgewiesen dadurch, dass die Summe am ENDE des Laufs dieselbe ist.
 
+**Benutzer, Rechte und ein erster Prozess (Runde K13).** Jeder Prozess
+traegt eine echte, eine wirksame und eine gesicherte Benutzer- und
+Gruppenkennung; sie werden ueber `fork` und `execve` vererbt und ueber
+`setuid`/`setgid`/`setresuid` mit den Regeln von POSIX gewechselt --
+Aufrufnummern wie bei Linux. Dateien tragen Rechtebits und einen
+Eigentuemer IM INODE; das Format hat dafuer eine Fassungsnummer im
+Superblock bekommen und alte Abbilder bleiben lesbar. Die Pruefung steht
+an EINER Stelle (`kernel/perm.fi`) und wird aus fuenf Toren gerufen:
+`open`, `mkdir`, `unlink`, `chdir`, `execve`. Dazu `chmod`, `chown`,
+`id`, `whoami`, `su`, `passwd` und `login` -- Passwoerter als
+PBKDF2-HMAC-SHA256 mit Salz, gegen Pythons `hashlib` gemessen. Und
+`/sbin/init` als **Prozess 1**: eine Dienstetafel (`/etc/inittab`),
+Neustart abgestuerzter Dienste, Einsammeln von Waisen, `svc` zum
+Starten/Stoppen/Abfragen und ein Herunterfahren ueber echtes ACPI -- an
+QEMUs Beendigungscode zu erkennen (0 statt 21). Ein Notweg ueber die
+Kommandozeile (`initsh`) startet die Shell wie vorher.
+
 **Userland.** `/bin/sh` mit Roehren, Umlenkung (`>`, `<`), `;`,
 Zeileneditor, `cd`, `exit` — und fuenfundzwanzig Werkzeuge: `cat`, `cp`,
 `date`, `df`, `echo`, `false`, `grep`, `head`, `kill`, `ls`, `mkdir`,
@@ -302,9 +319,16 @@ Zeileneditor, `cd`, `exit` — und fuenfundzwanzig Werkzeuge: `cat`, `cp`,
 * **Kein USB.** Weder Host-Controller noch Tastatur ueber USB. Die
   Tastatur ist der PS/2-Controller.
 * **Kein SATA/AHCI**, kein Partitionstabellen-Leser, kein Journal im
-  Dateisystem, keine Rechte/Benutzer, keine Signale ausser dem
-  Noetigsten, keine dynamische Bindung, keine gemeinsam genutzten
+  Dateisystem, keine dynamische Bindung, keine gemeinsam genutzten
   Bibliotheken.
+* **Rechte, aber keine vollstaendigen.** Seit Runde K13 gibt es
+  Benutzer, Rechtebits und Eigentuemer -- aber das Betretungsrecht wird
+  nur am LETZTEN Verzeichnis eines Pfades geprueft, nicht an jedem
+  Glied; es gibt keine Nebengruppen und kein `/etc/group`; das
+  Sticky-Bit wird gespeichert und nicht beachtet; und die 2048 Runden
+  PBKDF2 sind fuer heutige Verhaeltnisse zu wenig (die Rundenzahl steht
+  im Eintrag und laesst sich erhoehen). `docs/ROUNDK13.md`, Abschnitt 7,
+  zaehlt die Luecken einzeln auf.
 * **Nur x86-64, und ohne Architekturgrenze.** Firn kann auch aarch64, der
   Kernel nicht — und es gibt in diesem Baum keine Schicht, hinter der die
   x86-Einzelheiten steckten. OrientOS hatte dafuer `kcore/arch_iface.rs`
@@ -479,6 +503,7 @@ nachtraeglich umgeschrieben.
 | `docs/ROUNDK11.md` | **man kann darauf arbeiten**: der Editor, zwanzig Werkzeuge, die Shell als Sprache |
 | `docs/ROUNDK10W.md` | die Oberflaeche: Maus, Fensterserver, TrueType mit Kantenglaettung |
 | `docs/ROUNDK12.md` | ein Wirt fuer fremde Prozessoren: AMD-V, verschachtelte Seitentabellen, Gaeste, Gastmaschinen aus Ring 3 |
+| `docs/ROUNDK13.md` | **Benutzer, Rechte und `init`**: uid/gid, chmod/chown, /etc/passwd und /etc/shadow, Anmeldung, der erste Prozess |
 
 `ENTFERNEN-AUS-FIRN.md` beschreibt, was im Firn-Repository geloescht
 werden muss, damit dort nichts doppelt liegt. **Ausgefuehrt ist das

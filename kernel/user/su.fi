@@ -1,0 +1,114 @@
+// kernel/user/su.fi -- Runde K13: die Kennung wechseln.
+//
+//     su                     zu root, mit Passwort
+//     su NAME                zu NAME
+//     su NAME BEFEHL ARG...  BEFEHL unter NAME laufen lassen
+//     su NAME BEFEHL < d     das Passwort kommt aus einer Datei
+//
+// DIE FORM `su -c "..."` GIBT ES HIER NICHT, und der Grund steht in
+// docs/ROUNDK13.md: die Shell dieses Systems kennt kein `-c`. Statt
+// eines Zeichenkettenarguments, das noch einmal zerlegt werden muesste,
+// nimmt `su` den Befehl und seine Argumente unmittelbar. Das ist
+// weniger, aber es ist nicht falsch.
+//
+// DIE REIHENFOLGE BEIM ABLEGEN DER RECHTE IST NICHT BELIEBIG: erst die
+// GRUPPE, dann der BENUTZER. Wer zuerst `setuid` sagt, ist danach kein
+// root mehr und darf `setgid` nicht mehr -- der Prozess behielte die
+// Gruppe von root. Das ist eine der aeltesten Fallen in diesem Bereich,
+// und sie faellt nicht auf, weil alles andere funktioniert.
+
+profile kernel
+
+import ulib
+import tools
+import pw
+
+export { u_start }
+
+const SYS_GETUID: u64 = 102
+const SYS_SETUID: u64 = 105
+const SYS_SETGID: u64 = 106
+const SYS_EXECVE: u64 = 59
+
+fn u_start(args: u64) -> u64 {
+    var q_pw: [u8; 12] = "Passwort: \0\0"
+    var e_no: [u8; 22] = "su: unbekannt: \0\0\0\0\0\0\0"
+    var e_wrong: [u8; 22] = "su: falsches Passwort\0"
+    var e_noshadow: [u8; 30] = "su: kein Eintrag in shadow\0\0\0\0"
+    var e_setid: [u8; 30] = "su: Kennungswechsel abgelehnt\0"
+    var e_exec: [u8; 23] = "su: kann nicht starten\0"
+    var d_root: [u8; 5] = "root\0"
+    var d_sh: [u8; 8] = "/bin/sh\0"
+
+    var name: [u8; 64] = [0 as u8; 64]
+    var first: u64 = 1
+    let ac: u64 = ulib.arg_count(args)
+    if ac > 1 {
+        ulib.strncpy((&name[0]) as u64, ulib.arg_at(args, 1), 64)
+        first = 2
+    } else {
+        ulib.strcpy((&name[0]) as u64, (&d_root[0]) as u64)
+    }
+
+    let uid: u64 = pw.uid_of_name((&name[0]) as u64)
+    if uid == ulib.EOF {
+        ulib.esay_line((&e_no[0]) as u64, (&name[0]) as u64)
+        return 1
+    }
+    let gid: u64 = pw.gid_of_name((&name[0]) as u64)
+
+    // WER SCHON root IST, WIRD NICHT GEFRAGT. Das ist keine Bequemlichkeit:
+    // root kann die Datei ohnehin lesen und aendern, ein Passwort waere
+    // eine Hoeflichkeitsform ohne Wirkung.
+    let real: u64 = ulib.sys(SYS_GETUID, 0, 0, 0)
+    if real != 0 {
+        var have: [u8; 160] = [0 as u8; 160]
+        if !pw.shadow_of((&name[0]) as u64, (&have[0]) as u64, 160) {
+            ulib.esay_line((&e_noshadow[0]) as u64, (&name[0]) as u64)
+            return 1
+        }
+        var given: [u8; 128] = [0 as u8; 128]
+        pw.read_pass((&q_pw[0]) as u64, (&given[0]) as u64, 128)
+        if !pw.check_hash((&have[0]) as u64, (&given[0]) as u64) {
+            ulib.esay_line((&e_wrong[0]) as u64, 0)
+            return 1
+        }
+    }
+
+    // Erst die Gruppe, dann der Benutzer. Siehe oben.
+    if ulib.bad(ulib.sys(SYS_SETGID, gid, 0, 0)) {
+        ulib.esay_line((&e_setid[0]) as u64, 0)
+        return 1
+    }
+    if ulib.bad(ulib.sys(SYS_SETUID, uid, 0, 0)) {
+        ulib.esay_line((&e_setid[0]) as u64, 0)
+        return 1
+    }
+
+    // Was jetzt laeuft: der Befehl aus der Kommandozeile, sonst die Shell
+    // aus /etc/passwd.
+    var path: [u8; 96] = [0 as u8; 96]
+    var argv: [u64; 8] = [0 as u64; 8]
+    var k: u64 = 0
+    if first < ac {
+        ulib.strncpy((&path[0]) as u64, ulib.arg_at(args, first), 96)
+        while first + k < ac && k < 7 {
+            argv[k as usize] = ulib.arg_at(args, first + k)
+            k = k + 1
+        }
+    } else {
+        if !pw.shell_of_name((&name[0]) as u64, (&path[0]) as u64, 96) {
+            ulib.strcpy((&path[0]) as u64, (&d_sh[0]) as u64)
+        }
+        if *((&path[0]) as u64 as *mut u8) == 0 as u8 {
+            ulib.strcpy((&path[0]) as u64, (&d_sh[0]) as u64)
+        }
+        argv[0] = (&path[0]) as u64
+        k = 1
+    }
+    argv[k as usize] = 0
+    tools.ob_flush()
+    ulib.sys(SYS_EXECVE, (&path[0]) as u64, (&argv[0]) as u64, 0)
+    ulib.esay_line((&e_exec[0]) as u64, (&path[0]) as u64)
+    return 127
+}
