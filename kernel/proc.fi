@@ -52,7 +52,8 @@ export {
     create_cap,
     copy_space, swap_space, use_space, page_drop, ARG_RESUME,
     USER_DATA, USER_STACK, USER_SPAN, USER_TOP,
-    IMAGE_BASE, IMAGE_END, ARGS_BASE, MAX_ARGS
+    IMAGE_BASE, IMAGE_END, ARGS_BASE, MAX_ARGS, STACK_FLOOR, grow_stack,
+    PRIV_SLOTS, BIG_TOP, BIG_FLOOR, pd_slot, pt_for
 }
 
 const PAGE_PRESENT: u64 = 1
@@ -80,8 +81,64 @@ const USER_SPAN: u64 = 0x00200000 // what the private PD covers
 // grew into the image would be a bug that only shows up under load, and
 // 0xF7000 of unmapped pages between them turn it into an immediate #PF.
 const IMAGE_BASE: u64 = 0x40100000
-const IMAGE_END: u64 = 0x40200000 // = USER_DATA + USER_SPAN
-const ARGS_BASE: u64 = 0x40008000 // the top stack page holds argc/argv
+// RUNDE K16: DAS ABBILDFENSTER IST DREI KACHELN GROSS STATT EINER HALBEN.
+//
+// Bis zu dieser Runde reichte ein Programm von 0x40100000 bis 0x401FFFFF
+// -- eine Million Oktette, und darunter passte alles, was auf dieser
+// Platte lag. Der Uebersetzer passt nicht darunter: `firnc1`, fuer Osum
+// gebunden, sind 1.462.583 Oktette Text und 151.737 Oktette Konstanten.
+// Also endet das Fenster jetzt bei 0x40400000.
+//
+// WAS DAS FUER DEN RAHMENPUFFER HEISST, und es ist eine echte Grenze und
+// keine Formsache: `fb.USER_BASE` ist 0x40200000, also genau die zweite
+// Kachel. Ein Prozess kann von hier an ein Abbild ueber 1 MiB haben ODER
+// den Rahmenpuffer abbilden, nicht beides -- die zweite Kachel traegt
+// dann eine Seitentabelle statt einer 2-MiB-Seite. `map_huge` sagt das
+// klar (es gibt 0 zurueck, `mmap` daraus -ENOMEM); es verwechselt die
+// beiden nicht stillschweigend. Kein Programm dieses Systems will beides,
+// und der Uebersetzer will den Bildschirm am allerwenigsten.
+const IMAGE_END: u64 = 0x40400000 // RUNDE K16: war 0x40200000
+
+// Wie viele 2-MiB-Kacheln dem privaten Seitenverzeichnis gehoeren.
+//
+//   0  0x40000000  Datenseite, Stapel, Argumente, `brk`, das alte `mmap`
+//   1  0x40200000  Abbild, zweite Haelfte -- ODER der Rahmenpuffer
+//   2  0x40400000  Abbild, dritte Haelfte
+//   3  0x40600000  \
+//   4  0x40800000   > RUNDE K16: die GROSSE Arena, 6 MiB, waechst von
+//   5  0x40A00000  /  0x40C00000 nach unten
+//
+// Die Kacheln 3 bis 5 sind der Grund, warum ein Uebersetzer hier laufen
+// kann. Gemessen: `firnc1` braucht auf Linux 3 MiB Adressraum insgesamt
+// (`tools/k16/run.sh`, Abschnitt "Speicherbedarf"), davon rund 1 MiB
+// Halde -- und die alte Halde dieses Systems war 851.968 Oktette
+// zwischen `brk` und `MMAP_TOP`. Es fehlte also nicht viel, aber es
+// fehlte.
+const PRIV_SLOTS: u64 = 6
+const BIG_TOP: u64 = 0x40C00000
+const BIG_FLOOR: u64 = 0x40600000
+// RUNDE K16: DER ARGUMENTBLOCK IST HOCHGEZOGEN, DAMIT DER STAPEL WACHSEN
+// KANN.
+//
+// Bis zu dieser Runde lag er auf der obersten der acht Stapelseiten
+// (0x40008000), und darunter blieben genau 28 KiB Stapel. Das reicht fuer
+// jedes der 52 Programme dieses Userlands und fuer keines, das einen
+// Uebersetzer enthaelt: `firnc` auf Osum ist an dieser Grenze gestorben,
+// gemessen als #PF bei cr2=0x3fff9348, also 31.928 Oktette UNTER dem
+// Stapelboden -- ein einziger Rahmen von `firnc1` ist so gross.
+//
+// Gemessen auf Linux (`ulimit -s`, tools/k16/run.sh): `firnc1` braucht
+// 128 KiB Stapel fuer eine Quelle ohne Einbindungen und 256 KiB fuer
+// eine mit. Also liegt der Block jetzt bei 0x4007F000, und zwischen
+// 0x40001000 und ihm sind 504 KiB Platz.
+//
+// DIE SEITEN DAZWISCHEN WERDEN NICHT IM VORAUS GENOMMEN. Wuerde
+// `space_build` 126 Rahmen je Prozess reservieren, waere jede
+// Rahmenzaehlung dieses Projekts eine andere. Sie kommen bei Bedarf --
+// `trap.grow_stack`, ausgeloest vom Seitenfehler, so wie es jedes Unix
+// macht. Die acht Seiten von frueher bleiben, wo sie waren.
+const ARGS_BASE: u64 = 0x4007F000 // RUNDE K16: war 0x40008000
+const STACK_FLOOR: u64 = 0x40001000 // so weit darf der Stapel wachsen
 const MAX_ARGS: u64 = 8
 
 // Bit 63 of a page table entry: this page may not be executed. It only
@@ -233,6 +290,23 @@ fn space_build(state: u64, i: u64) -> u64 {
     return pml4
 }
 
+// Eine Seitentabelle samt ihren Seiten zurueck. Zurueck kommt, wie viele
+// Rahmen freigegeben wurden -- die Tabelle selbst mitgezaehlt.
+fn free_pt(state: u64, pt: u64) -> u64 {
+    var freed: u64 = 0
+    var k: u64 = 0
+    while k < 512 {
+        let e: u64 = read_entry(pt, k)
+        if (e & PAGE_PRESENT) != 0 {
+            mem.frame_free(state, e & ADDR_MASK)
+            freed = freed + 1
+        }
+        k = k + 1
+    }
+    mem.frame_free(state, pt)
+    return freed + 1
+}
+
 // Gives back everything `space_build` took -- and nothing else. The
 // kernel PDPT hangs in entry 0 and is SHARED; freeing it would pull the
 // ground out from under every other process.
@@ -244,20 +318,28 @@ fn free_space(state: u64, i: u64) -> u64 {
     var freed: u64 = 0
     let pt: u64 = sched.tget(state, i, sched.T_PT)
     if pt != 0 {
-        var k: u64 = 0
-        while k < 512 {
-            let e: u64 = read_entry(pt, k)
-            if (e & PAGE_PRESENT) != 0 {
-                mem.frame_free(state, e & ADDR_MASK)
-                freed = freed + 1
-            }
-            k = k + 1
-        }
-        mem.frame_free(state, pt)
-        freed = freed + 1
+        freed = freed + free_pt(state, pt)
     }
     let pd: u64 = sched.tget(state, i, sched.T_PD)
     if pd != 0 {
+        // RUNDE K16: die Kacheln 1 bis PRIV_SLOTS-1. Sie sind erst
+        // angelegt worden, als jemand sie brauchte, also sind die meisten
+        // nicht da -- und eine 2-MiB-Seite (der Rahmenpuffer) wird NICHT
+        // freigegeben, denn sie gehoert der Grafikkarte und nicht dem
+        // Rahmenverwalter. Genau das stand seit Runde K7 in `map_huge`
+        // und musste hier nachgezogen werden, sonst haette der erste
+        // Prozess mit Bildschirm den Rahmenverwalter vergiftet.
+        var k: u64 = 1
+        while k < PRIV_SLOTS {
+            let e: u64 = read_entry(pd, k)
+            if (e & PAGE_PRESENT) != 0 {
+                if (e & PAGE_HUGE) == 0 {
+                    freed = freed + free_pt(state, e & ADDR_MASK)
+                }
+                write_entry(pd, k, 0)
+            }
+            k = k + 1
+        }
         mem.frame_free(state, pd)
         freed = freed + 1
     }
@@ -315,20 +397,85 @@ fn pt_slot(addr: u64) -> u64 {
     if addr < USER_DATA {
         return 512
     }
-    if addr >= USER_DATA + USER_SPAN {
+    // RUNDE K16: die Grenze ist nicht mehr EINE Kachel, sondern
+    // PRIV_SLOTS davon -- und der Platz ist der INNERHALB der Kachel.
+    // Fuer alles, was vor dieser Runde da war (0x40000000..0x401FFFFF),
+    // rechnet das genau dasselbe aus wie vorher.
+    if addr >= USER_DATA + USER_SPAN * PRIV_SLOTS {
         return 512
     }
-    return (addr - USER_DATA) >> 12
+    return ((addr - USER_DATA) >> 12) & 511
+}
+
+// Welche 2-MiB-Kachel des privaten Seitenverzeichnisses. PRIV_SLOTS =
+// gehoert nicht diesem Prozess.
+fn pd_slot(addr: u64) -> u64 {
+    if addr < USER_DATA {
+        return PRIV_SLOTS
+    }
+    if addr >= USER_DATA + USER_SPAN * PRIV_SLOTS {
+        return PRIV_SLOTS
+    }
+    return (addr - USER_DATA) >> 21
+}
+
+// DIE SEITENTABELLE ZU EINER ADRESSE, und wenn `anlegen` gesetzt ist,
+// wird sie dabei angelegt.
+//
+// Kachel 0 ist die alte: sie haengt seit Runde 59 in `T_PT` und wird beim
+// Bau des Adressraums angelegt. Jede weitere kommt erst, wenn jemand sie
+// braucht -- ein Programm von 900 Oktetten soll keine drei Rahmen fuer
+// leere Tabellen bezahlen.
+//
+// 0 = es gibt keine und es soll auch keine geben. Das ist AUCH die
+// Antwort, wenn in der Kachel eine 2-MiB-Seite haengt (der Rahmenpuffer):
+// eine solche Kachel hat keine vierte Ebene, und wer dort eine
+// 4-KiB-Seite eintragen wollte, wuerde den Rahmenpuffer ueberschreiben.
+fn pt_for(state: u64, i: u64, addr: u64, anlegen: bool) -> u64 {
+    let k: u64 = pd_slot(addr)
+    if k >= PRIV_SLOTS {
+        return 0
+    }
+    if k == 0 {
+        return sched.tget(state, i, sched.T_PT)
+    }
+    let pd: u64 = sched.tget(state, i, sched.T_PD)
+    if pd == 0 {
+        return 0
+    }
+    let e: u64 = read_entry(pd, k)
+    if (e & PAGE_PRESENT) != 0 {
+        if (e & PAGE_HUGE) != 0 {
+            return 0
+        }
+        return e & ADDR_MASK
+    }
+    if !anlegen {
+        return 0
+    }
+    let f: u64 = mem.frame_alloc(state)
+    if f == 0 {
+        return 0
+    }
+    zero_frame(f)
+    write_entry(pd, k, f | PAGE_PRESENT | PAGE_WRITE | PAGE_USER)
+    return f
 }
 
 // May this page still be taken? Outside the region: no. Already there:
 // no -- and that is what makes two segments of one file that want the
 // same page a refusal instead of a silent merge of their rights.
 fn page_free(state: u64, i: u64, addr: u64) -> bool {
-    let pt: u64 = sched.tget(state, i, sched.T_PT)
     let s: u64 = pt_slot(addr)
-    if pt == 0 || s >= 512 {
+    if s >= 512 {
         return false
+    }
+    // OHNE ANLEGEN: die Frage ist "ist da schon etwas", und eine Kachel,
+    // die es noch nicht gibt, ist leer. Anlegen wuerde hier einen Rahmen
+    // kosten fuer eine Frage.
+    let pt: u64 = pt_for(state, i, addr, false)
+    if pt == 0 {
+        return pd_slot(addr) < PRIV_SLOTS
     }
     return (read_entry(pt, s) & PAGE_PRESENT) == 0
 }
@@ -339,9 +486,12 @@ fn page_free(state: u64, i: u64, addr: u64) -> bool {
 // belongs to is not running and its tables are not the ones in cr3.
 fn map_page(state: u64, i: u64, addr: u64, writable: bool,
     runnable: bool) -> u64 {
-    let pt: u64 = sched.tget(state, i, sched.T_PT)
     let s: u64 = pt_slot(addr)
-    if pt == 0 || s >= 512 {
+    if s >= 512 {
+        return 0
+    }
+    let pt: u64 = pt_for(state, i, addr, true)
+    if pt == 0 {
         return 0
     }
     if (read_entry(pt, s) & PAGE_PRESENT) != 0 {
@@ -363,6 +513,83 @@ fn map_page(state: u64, i: u64, addr: u64, writable: bool,
     // process gets them at its first context switch, and THAT writes cr3
     // and flushes everything.
     return frame
+}
+
+// ================================ RUNDE K16: DER STAPEL WAECHST BEI BEDARF
+//
+// Was jedes Unix seit den Siebzigern tut und dieses System bis hierher
+// nicht: faellt ein Prozess unterhalb seines Stapels auf eine Seite, die
+// es nicht gibt, wird sie angelegt und der Befehl noch einmal versucht.
+//
+// DIE BEDINGUNGEN, und sie sind eng, weil eine zu weite Regel jeden
+// Programmierfehler in eine stille Speicherzuteilung verwandeln wuerde:
+//
+//   1. Die Adresse liegt zwischen STACK_FLOOR und ARGS_BASE. Das ist der
+//      Bereich, der fuer den Stapel vorgesehen ist, und sonst nichts --
+//      ein Griff nach 0x40500000 waechst nicht.
+//   2. Die Seite ist NICHT vorhanden. Ein Schreibversuch auf eine
+//      vorhandene, nur lesbare Seite bleibt ein Fehler.
+//   3. Der Prozess ist ein Nutzerprozess.
+//
+//   4. UND DIE ADRESSE LIEGT IN DER NAEHE DES STAPELZEIGERS -- hoechstens
+//      GROW_SLACK darunter. Das ist Linux' Regel (`expand_downwards`),
+//      und sie ist nicht Kosmetik: Runde 62 hat ein Programm, das
+//      absichtlich 0x40010000 anfasst und dafuer einen #PF bekommen MUSS
+//      (`uprog.u_steal`, Abschnitt 13 von tools/kernel/run.sh). Diese
+//      Adresse liegt seit dieser Runde IM Stapelbereich. Ohne die
+//      vierte Bedingung waere aus der Gegenprobe von Runde 62 eine
+//      stille Speicherzuteilung geworden -- und die Runde haette eine
+//      Zusage von damals kaputtgemacht, ohne es zu merken.
+//
+//      64 KiB, und die Zahl ist gemessen: der groesste Stapelrahmen von
+//      `firnc1` ist 31.928 Oktette (der Seitenfehler, an dem der
+//      Uebersetzer vor dieser Runde gestorben ist). Ein Zugriff in
+//      seinem eigenen Rahmen liegt immer UEBER rsp; nur ein `push`
+//      oder ein `sub rsp, N` mit anschliessendem Schreiben landet
+//      darunter, und dafuer sind 64 KiB reichlich.
+//
+// Zurueck kommt true, wenn wirklich eine Seite entstanden ist -- dann
+// darf der Befehl wiederholt werden. false heisst: das war ein echter
+// Fehler und wird auch einer bleiben.
+const GROW_SLACK: u64 = 65536
+
+fn grow_stack(state: u64, i: u64, addr: u64, rsp: u64) -> bool {
+    // DIE OBERGRENZE IST DER STAPEL DIESES PROZESSES UND NICHT DER
+    // BEREICH ALS GANZES. `T_USTACK` ist der Stapelzeiger, mit dem der
+    // Prozess gestartet ist, also der Boden seines Stapels von oben
+    // gesehen: 0x4007F000 fuer ein Programm von der Platte,
+    // USER_TOP - 16 fuer eines aus `uprog.fi`. Ein Programm der zweiten
+    // Art, das nach 0x40010000 greift, greift damit UEBER seinen
+    // eigenen Stapel hinaus -- und bekommt weiterhin den #PF, den Runde
+    // 62 dafuer misst.
+    let boden: u64 = sched.tget(state, i, sched.T_USTACK)
+    if boden == 0 {
+        return false
+    }
+    if addr < STACK_FLOOR || addr >= boden {
+        return false
+    }
+    if rsp > addr + GROW_SLACK {
+        return false
+    }
+    if sched.tget(state, i, sched.T_KIND) != sched.K_USER {
+        return false
+    }
+    let seite: u64 = addr & 0xFFFFFFFFFFFFF000
+    if !page_free(state, i, seite) {
+        return false
+    }
+    if map_page(state, i, seite, true, false) == 0 {
+        return false
+    }
+    kstate.add(state, kstate.STACKGROW, 1)
+    // Die Tabellen des LAUFENDEN Prozesses stehen in cr3, und der
+    // Prozessor merkt sich, dass dort nichts war.
+    let now: u64 = asm("mov rax, cr3", out("rax"))
+    if sched.tget(state, i, sched.T_CR3) == now {
+        asm("mov rax, cr3\nmov cr3, rax", out("rax"))
+    }
+    return true
 }
 
 // ROUNDE K7: eine ganze 2-MiB-Kachel auf einen Schlag, an eine feste
@@ -402,6 +629,17 @@ fn map_huge(state: u64, i: u64, addr: u64, phys: u64, writable: bool) -> bool {
     if s == 0 {
         return false // dort haengt die Seitentabelle des Programms
     }
+    // RUNDE K16: und seit dieser Runde kann AUCH die zweite Kachel eine
+    // Seitentabelle tragen -- naemlich dann, wenn das Abbild groesser als
+    // 1 MiB ist. Dann gibt es hier den Rahmenpuffer NICHT, und das wird
+    // gesagt statt verwechselt: die 2-MiB-Seite wuerde die Tabelle
+    // ueberschreiben, und das Programm liefe auf einem Bildschirm.
+    let vorher: u64 = read_entry(pd, s)
+    if (vorher & PAGE_PRESENT) != 0 {
+        if (vorher & PAGE_HUGE) == 0 {
+            return false
+        }
+    }
     var bits: u64 = PAGE_PRESENT | PAGE_USER | PAGE_HUGE | nx(state)
     if writable {
         bits = bits | PAGE_WRITE
@@ -419,9 +657,12 @@ fn map_huge(state: u64, i: u64, addr: u64, phys: u64, writable: bool) -> bool {
 // loader: an `e_entry` that lands anywhere else would be a jump into
 // nothing, reported as a fault at an address nobody can explain.
 fn page_exec(state: u64, i: u64, addr: u64) -> bool {
-    let pt: u64 = sched.tget(state, i, sched.T_PT)
     let s: u64 = pt_slot(addr)
-    if pt == 0 || s >= 512 {
+    if s >= 512 {
+        return false
+    }
+    let pt: u64 = pt_for(state, i, addr, false)
+    if pt == 0 {
         return false
     }
     let e: u64 = read_entry(pt, s)
@@ -489,7 +730,11 @@ fn user_ok(state: u64, i: u64, addr: u64, len: u64) -> bool {
     // abgebildet hat, hat dort keine Seite mit Benutzerbit. Was diese
     // Zeile aendert, ist also nur, welchen Fehler er bekommt: nicht mehr
     // "ausserhalb", sondern "nicht abgebildet". Beides ist -EFAULT.
-    if addr + len > USER_DATA + USER_SPAN * 2 {
+    // RUNDE K16: PRIV_SLOTS statt 2. Was diese Zeile aendert, ist
+    // weiterhin nur, WELCHEN Fehler ein Prozess bekommt -- entschieden
+    // wird beim Durchgehen der Tabellen darunter, und wer die Kachel
+    // nicht abgebildet hat, hat dort keine Seite mit Benutzerbit.
+    if addr + len > USER_DATA + USER_SPAN * PRIV_SLOTS {
         return false
     }
     var p: u64 = addr
@@ -649,9 +894,12 @@ fn create_cap(state: u64, prog: u64, rights: u64, prio: u64) -> u64 {
 // `map_page`, and the reason `brk` can shrink and `munmap` can give
 // something back at all.
 fn page_drop(state: u64, i: u64, addr: u64) -> bool {
-    let pt: u64 = sched.tget(state, i, sched.T_PT)
     let s: u64 = pt_slot(addr)
-    if pt == 0 || s >= 512 {
+    if s >= 512 {
+        return false
+    }
+    let pt: u64 = pt_for(state, i, addr, false)
+    if pt == 0 {
         return false
     }
     let e: u64 = read_entry(pt, s)
@@ -678,11 +926,44 @@ fn page_drop(state: u64, i: u64, addr: u64) -> bool {
 // mapped with the SAME rights the parent had, down to the no-execute bit.
 // Returns how many pages it copied, or 0.
 fn copy_space(state: u64, from: u64, to: u64) -> u64 {
-    let src: u64 = sched.tget(state, from, sched.T_PT)
-    let dst: u64 = sched.tget(state, to, sched.T_PT)
-    if src == 0 || dst == 0 {
-        return 0
+    var n: u64 = 0
+    // RUNDE K16: Kachel fuer Kachel. Vor dieser Runde gab es nur eine,
+    // und dann ist diese Schleife genau die von damals.
+    var kachel: u64 = 0
+    while kachel < PRIV_SLOTS {
+        let a: u64 = USER_DATA + kachel * USER_SPAN
+        let s2: u64 = pt_for(state, from, a, false)
+        if s2 != 0 {
+            let d2: u64 = pt_for(state, to, a, true)
+            if d2 == 0 {
+                return 0
+            }
+            let m: u64 = copy_pt(state, s2, d2)
+            if m == 0 {
+                if pt_used(s2) != 0 {
+                    return 0
+                }
+            }
+            n = n + m
+        }
+        kachel = kachel + 1
     }
+    return n
+}
+
+fn pt_used(pt: u64) -> u64 {
+    var n: u64 = 0
+    var k: u64 = 0
+    while k < 512 {
+        if (read_entry(pt, k) & PAGE_PRESENT) != 0 {
+            n = n + 1
+        }
+        k = k + 1
+    }
+    return n
+}
+
+fn copy_pt(state: u64, src: u64, dst: u64) -> u64 {
     var n: u64 = 0
     var k: u64 = 0
     while k < 512 {
