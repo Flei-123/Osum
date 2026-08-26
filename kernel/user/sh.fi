@@ -121,7 +121,8 @@ fn u_start(args: u64) -> u64 {
     ulib.rd_init((&rctx[0 as usize]) as u64)
     in_fd = ulib.IN
     interactive = 1
-    if ulib.arg_count(args) > 1 {
+    let ac: u64 = ulib.arg_count(args)
+    if ac > 1 {
         let p: u64 = ulib.arg_at(args, 1)
         let fd: u64 = ulib.sys(ulib.SYS_OPEN, p, 0, 0)
         if ulib.bad(fd) {
@@ -130,6 +131,22 @@ fn u_start(args: u64) -> u64 {
         }
         in_fd = fd
         interactive = 0
+        // `$0` ist das Skript, `$1` das erste Argument dahinter -- so wie
+        // ueberall.
+        var k: u64 = 1
+        npos = 0
+        while k < ac && k - 1 < NPOS {
+            pos_set(k - 1, ulib.arg_at(args, k))
+            npos = k
+            k = k + 1
+        }
+        // RUNDE K11: ein Skript wird als GANZES gelesen und in
+        // Anweisungen zerlegt. Nur so kann ein `if` ueber mehrere Zeilen
+        // gehen. Der interaktive Weg darunter bleibt der von Runde K1.
+        let rc: u64 = run_script(in_fd)
+        ulib.sys(ulib.SYS_CLOSE, in_fd, 0, 0)
+        reap_all()
+        return rc
     }
     if interactive == 1 {
         ulib.say((&s_hi[0 as usize]) as u64)
@@ -316,6 +333,58 @@ fn expand(i: u64) -> u64 {
             k = k + 1
         }
         return i + 2
+    }
+    // RUNDE K11: `$#` ist die Zahl der Stellungsparameter, `$0`..`$9`
+    // sind sie selbst, und `${NAME}` ist `$NAME` mit Klammern -- das
+    // braucht man, sobald hinter dem Namen ein Buchstabe steht
+    // (`${X}abc`).
+    if ch(i + 1) == 35 {
+        var buf: [u8; 26] = [0 as u8; 26]
+        var many: u64 = 0
+        if npos > 0 {
+            many = npos - 1
+        }
+        let n: u64 = ulib.digits(many, (&buf[0 as usize]) as u64)
+        var k: u64 = 0
+        while k < n {
+            put_word((buf[k as usize]) as u64)
+            k = k + 1
+        }
+        return i + 2
+    }
+    if ch(i + 1) >= 48 && ch(i + 1) <= 57 {
+        let v0: u64 = pos_get(ch(i + 1) - 48)
+        if v0 != 0 {
+            var k: u64 = 0
+            while *((v0 + k) as *mut u8) != 0 as u8 {
+                put_word((*((v0 + k) as *mut u8)) as u64)
+                k = k + 1
+            }
+        }
+        return i + 2
+    }
+    if ch(i + 1) == 123 {
+        var name2: [u8; 20] = [0 as u8; 20]
+        var at2: u64 = i + 2
+        var n2: u64 = 0
+        while is_name(ch(at2)) && n2 + 1 < 20 {
+            name2[n2 as usize] = ch(at2) as u8
+            n2 = n2 + 1
+            at2 = at2 + 1
+        }
+        name2[n2 as usize] = 0 as u8
+        if ch(at2) == 125 {
+            at2 = at2 + 1
+        }
+        let v2: u64 = var_get((&name2[0 as usize]) as u64)
+        if v2 != 0 {
+            var k: u64 = 0
+            while *((v2 + k) as *mut u8) != 0 as u8 {
+                put_word((*((v2 + k) as *mut u8)) as u64)
+                k = k + 1
+            }
+        }
+        return at2
     }
     if !is_name(ch(i + 1)) {
         put_word(36)
@@ -810,7 +879,22 @@ fn builtin() -> bool {
     var c_exit: [u8; 5] = "exit\0"
     var c_export: [u8; 7] = "export\0"
     var c_wait: [u8; 5] = "wait\0"
+    var c_test: [u8; 5] = "test\0"
+    var c_brk: [u8; 2] = "[\0"
+    var c_shift: [u8; 6] = "shift\0"
     let w: u64 = argv[0 as usize]
+    if ulib.streq(w, (&c_test[0 as usize]) as u64) {
+        status = do_test(false)
+        return true
+    }
+    if ulib.streq(w, (&c_brk[0 as usize]) as u64) {
+        status = do_test(true)
+        return true
+    }
+    if ulib.streq(w, (&c_shift[0 as usize]) as u64) {
+        do_shift()
+        return true
+    }
     if ulib.streq(w, (&c_cd[0 as usize]) as u64) {
         do_cd()
         return true
@@ -917,4 +1001,1046 @@ fn reap_all() {
         i = i + 1
     }
     nbg = 0
+}
+
+// ================================================ RUNDE K11: das Skript
+//
+// WAS DIE SHELL AUS RUNDE K6 VORGEFUNDEN HAT -- nachgesehen und nicht
+// geraten (`kernel/user/sh.fi`, Stand f4c58d1): Roehren mit bis zu vier
+// Stufen ueber Zwischendateien, `<`, `>`, `>>`, `2>`, `;`, `&` und
+// `wait`, einfache und doppelte Anfuehrungszeichen, `$NAME`, `$?`, `$!`,
+// Zuweisungen `NAME=wert` vor einem Befehl, die eingebauten Befehle `cd`,
+// `pwd`, `exit`, `export` und `wait`, einen Zeileneditor mit Ruecktaste
+// und "die Zeile von vorhin", und `/bin/` als einzigen Suchpfad.
+//
+// WAS FEHLTE: alles, was ein Skript zu einem Programm macht. Kein `if`,
+// kein `for`, kein `while`, kein `case`, keine Funktionen, kein `test`,
+// keine Stellungsparameter. Ein Skript war eine Liste von Befehlen.
+//
+// DER ZUSCHNITT DIESER RUNDE, und er ist mit Absicht so: die Maschinerie
+// von K6 bleibt Zeile fuer Zeile stehen. Darueber liegt eine Schicht, die
+// den Text in ANWEISUNGEN zerlegt (getrennt an Zeilenende und `;`,
+// Anfuehrungszeichen zaehlen mit) und die Schluesselwoerter erkennt.
+// Alles, was kein Schluesselwort ist, geht durch `run_line` -- dieselbe
+// Funktion, dieselbe Ausgabe, dieselben Beendigungscodes wie in Runde K6.
+// Deshalb misst tools/userland/run.sh weiterhin genau das, was es gemessen
+// hat.
+//
+// EINE ANWEISUNG DARF 255 OKTETTE HABEN (`LINE`); ein Skript im Ganzen
+// 16384 und 512 Anweisungen. Was darueber liegt, wird ABGELEHNT.
+
+const SRCMAX: u64 = 16384
+const STMTS: u64 = 512
+const NFUNC: u64 = 16
+const FNLEN: u64 = 24
+const NPOS: u64 = 10
+const POSLEN: u64 = 64
+const FORBUF: u64 = 1024
+const FORMAX: u64 = 32
+
+static mut src: [u8; 16384] = [0 as u8; 16384]
+static mut nsrc: u64 = 0
+static mut sat: [u64; 512] = [0 as u64; 512]
+static mut slen: [u64; 512] = [0 as u64; 512]
+static mut nstmt: u64 = 0
+static mut fn_name: [u8; 384] = [0 as u8; 384]
+static mut fn_beg: [u64; 16] = [0 as u64; 16]
+static mut fn_end: [u64; 16] = [0 as u64; 16]
+static mut nfunc: u64 = 0
+static mut pos: [u8; 640] = [0 as u8; 640]
+static mut npos: u64 = 0
+static mut ret_flag: u64 = 0
+static mut brk_flag: u64 = 0
+static mut cont_flag: u64 = 0
+static mut calls: u64 = 0
+static mut kwbuf: [u8; 32] = [0 as u8; 32]
+
+// ------------------------------------------------- Anweisungen schneiden
+
+fn add_stmt(from: u64, to: u64) {
+    var a: u64 = from
+    var b: u64 = to
+    while a < b && (src[(a) as usize] == 32 as u8 || src[(a) as usize] == 9 as u8) {
+        a = a + 1
+    }
+    while b > a && (src[(b - 1) as usize] == 32 as u8
+        || src[(b - 1) as usize] == 9 as u8) {
+        b = b - 1
+    }
+    if b <= a || nstmt >= STMTS {
+        return
+    }
+    // `then`, `else` und `do` sind Schluesselwoerter, hinter denen auf
+    // derselben Zeile ein Befehl stehen darf (`if x; then echo a; fi`).
+    // Sie werden hier abgetrennt, damit der Ausfuehrer nur noch ganze
+    // Schluesselwoerter sieht.
+    let w: u64 = word_end(a, b)
+    if lead(a, w) {
+        sat[(nstmt) as usize] = a
+        slen[(nstmt) as usize] = w - a
+        nstmt = nstmt + 1
+        add_stmt(w, b)
+        return
+    }
+    sat[(nstmt) as usize] = a
+    slen[(nstmt) as usize] = b - a
+    nstmt = nstmt + 1
+}
+
+fn word_end(a: u64, b: u64) -> u64 {
+    var i: u64 = a
+    while i < b && src[(i) as usize] != 32 as u8 && src[(i) as usize] != 9 as u8 {
+        i = i + 1
+    }
+    return i
+}
+
+fn lit_eq(a: u64, n: u64, p: u64) -> bool {
+    var i: u64 = 0
+    while i < n {
+        if src[(a + i) as usize] != *((p + i) as *mut u8) {
+            return false
+        }
+        i = i + 1
+    }
+    return *((p + n) as *mut u8) == 0 as u8
+}
+
+fn lead(a: u64, w: u64) -> bool {
+    var k_then: [u8; 5] = "then\0"
+    var k_else: [u8; 5] = "else\0"
+    var k_do: [u8; 3] = "do\0"
+    let n: u64 = w - a
+    if lit_eq(a, n, (&k_then[0 as usize]) as u64) {
+        return true
+    }
+    if lit_eq(a, n, (&k_else[0 as usize]) as u64) {
+        return true
+    }
+    return lit_eq(a, n, (&k_do[0 as usize]) as u64)
+}
+
+// Der ganze Text in Anweisungen. Getrennt wird an Zeilenende und an `;`,
+// aber nicht innerhalb von Anfuehrungszeichen -- `echo "a;b"` ist EINE.
+// `;;` bleibt als eigene Anweisung stehen: `case` braucht es.
+fn split_all() {
+    nstmt = 0
+    var i: u64 = 0
+    while i < nsrc {
+        while i < nsrc && (src[(i) as usize] == 32 as u8
+            || src[(i) as usize] == 9 as u8 || src[(i) as usize] == 10 as u8) {
+            i = i + 1
+        }
+        if i < nsrc && src[(i) as usize] == 59 as u8 {
+            if i + 1 < nsrc && src[(i + 1) as usize] == 59 as u8 {
+                if nstmt < STMTS {
+                    sat[(nstmt) as usize] = i
+                    slen[(nstmt) as usize] = 2
+                    nstmt = nstmt + 1
+                }
+                i = i + 2
+            } else {
+                i = i + 1
+            }
+        } else if i < nsrc && src[(i) as usize] == 35 as u8 {
+            while i < nsrc && src[(i) as usize] != 10 as u8 {
+                i = i + 1
+            }
+        } else if i < nsrc {
+            let start: u64 = i
+            var q: u64 = 0
+            var going: bool = true
+            while going && i < nsrc {
+                let c: u64 = (src[(i) as usize]) as u64
+                if q != 0 {
+                    if c == q {
+                        q = 0
+                    }
+                    i = i + 1
+                } else if c == 39 || c == 34 {
+                    q = c
+                    i = i + 1
+                } else if c == 10 || c == 59 {
+                    going = false
+                } else if c == 35 && i > start
+                && (src[(i - 1) as usize] == 32 as u8
+                    || src[(i - 1) as usize] == 9 as u8) {
+                    going = false
+                } else {
+                    i = i + 1
+                }
+            }
+            add_stmt(start, i)
+            if i < nsrc && src[(i) as usize] == 35 as u8 {
+                while i < nsrc && src[(i) as usize] != 10 as u8 {
+                    i = i + 1
+                }
+            }
+        }
+    }
+}
+
+// ------------------------------------------------- das erste Wort
+
+fn kw_of(i: u64) -> u64 {
+    let a: u64 = sat[(i) as usize]
+    let b: u64 = a + slen[(i) as usize]
+    let w: u64 = word_end(a, b)
+    var n: u64 = w - a
+    if n > 30 {
+        n = 30
+    }
+    var k: u64 = 0
+    while k < n {
+        kwbuf[(k) as usize] = src[(a + k) as usize]
+        k = k + 1
+    }
+    kwbuf[(n) as usize] = 0 as u8
+    return (&kwbuf[0 as usize]) as u64
+}
+
+fn kw_is(i: u64, p: u64) -> bool {
+    return ulib.streq(kw_of(i), p)
+}
+
+// Alles nach dem ersten Wort dieser Anweisung.
+fn tail_of(i: u64) -> u64 {
+    let a: u64 = sat[(i) as usize]
+    let b: u64 = a + slen[(i) as usize]
+    var w: u64 = word_end(a, b)
+    while w < b && (src[(w) as usize] == 32 as u8
+        || src[(w) as usize] == 9 as u8) {
+        w = w + 1
+    }
+    return w
+}
+
+fn tail_len(i: u64) -> u64 {
+    let a: u64 = sat[(i) as usize]
+    let b: u64 = a + slen[(i) as usize]
+    let w: u64 = tail_of(i)
+    if w >= b {
+        return 0
+    }
+    return b - w
+}
+
+// ------------------------------------------------- Bloecke finden
+
+fn opener(i: u64) -> bool {
+    var k_if: [u8; 3] = "if\0"
+    var k_while: [u8; 6] = "while\0"
+    var k_for: [u8; 4] = "for\0"
+    var k_case: [u8; 5] = "case\0"
+    if kw_is(i, (&k_if[0 as usize]) as u64) {
+        return true
+    }
+    if kw_is(i, (&k_while[0 as usize]) as u64) {
+        return true
+    }
+    if kw_is(i, (&k_for[0 as usize]) as u64) {
+        return true
+    }
+    return kw_is(i, (&k_case[0 as usize]) as u64)
+}
+
+fn closer(i: u64) -> bool {
+    var k_fi: [u8; 3] = "fi\0"
+    var k_done: [u8; 5] = "done\0"
+    var k_esac: [u8; 5] = "esac\0"
+    if kw_is(i, (&k_fi[0 as usize]) as u64) {
+        return true
+    }
+    if kw_is(i, (&k_done[0 as usize]) as u64) {
+        return true
+    }
+    return kw_is(i, (&k_esac[0 as usize]) as u64)
+}
+
+// Die naechste Anweisung zwischen `from` und `to`, deren erstes Wort
+// eines der drei ist -- auf DERSELBEN Verschachtelungsebene.
+fn scan_to(from: u64, to: u64, a: u64, b: u64, c: u64) -> u64 {
+    var depth: u64 = 0
+    var i: u64 = from
+    while i < to {
+        if depth == 0 {
+            let w: u64 = kw_of(i)
+            if a != 0 && ulib.streq(w, a) {
+                return i
+            }
+            if b != 0 && ulib.streq(w, b) {
+                return i
+            }
+            if c != 0 && ulib.streq(w, c) {
+                return i
+            }
+        }
+        if opener(i) {
+            depth = depth + 1
+        } else if closer(i) {
+            if depth > 0 {
+                depth = depth - 1
+            }
+        }
+        i = i + 1
+    }
+    return to
+}
+
+// ------------------------------------------------- Anweisungen ausfuehren
+
+// Ein Stueck Rohtext als Befehlszeile. Genau der Weg von Runde K6.
+fn run_text(p: u64, n: u64) -> bool {
+    var k: u64 = 0
+    while k < n && k + 1 < LINE {
+        line[(k) as usize] = *((p + k) as *mut u8)
+        k = k + 1
+    }
+    line[(k) as usize] = 0 as u8
+    if k == 0 {
+        return true
+    }
+    return run_line()
+}
+
+fn run_stmt(i: u64) -> bool {
+    return run_text((&src[(sat[(i) as usize]) as usize]) as u64,
+        slen[(i) as usize])
+}
+
+// Nur zerlegen, nicht ausfuehren -- fuer `for` und `case`, die die Worte
+// selbst brauchen.
+fn tokenize_stmt(i: u64) -> bool {
+    var k: u64 = 0
+    let n: u64 = slen[(i) as usize]
+    let p: u64 = (&src[(sat[(i) as usize]) as usize]) as u64
+    while k < n && k + 1 < LINE {
+        line[(k) as usize] = *((p + k) as *mut u8)
+        k = k + 1
+    }
+    line[(k) as usize] = 0 as u8
+    return tokenize()
+}
+
+// ------------------------------------------------------------- Muster
+
+fn wild(pat: u64, s: u64) -> bool {
+    var p: u64 = 0
+    var t: u64 = 0
+    var star: u64 = ulib.EOF
+    var back: u64 = 0
+    var done: bool = false
+    var result: bool = false
+    while !done {
+        let sc: u64 = (*((s + t) as *mut u8)) as u64
+        let pc: u64 = (*((pat + p) as *mut u8)) as u64
+        if pc == 0 && sc == 0 {
+            result = true
+            done = true
+        } else if pc == 42 {
+            star = p
+            p = p + 1
+            back = t
+        } else if sc != 0 && (pc == 63 || pc == sc) {
+            p = p + 1
+            t = t + 1
+        } else if star != ulib.EOF && sc != 0 {
+            p = star + 1
+            back = back + 1
+            t = back
+        } else {
+            result = false
+            done = true
+        }
+    }
+    return result
+}
+
+// ------------------------------------------------------------- test / [
+
+fn num_cmp(a: u64, op: u64, b: u64) -> bool {
+    let x: u64 = ulib.to_num(a)
+    let y: u64 = ulib.to_num(b)
+    if op == 1 {
+        return x == y
+    }
+    if op == 2 {
+        return x != y
+    }
+    if op == 3 {
+        return x < y
+    }
+    if op == 4 {
+        return x <= y
+    }
+    if op == 5 {
+        return x > y
+    }
+    return x >= y
+}
+
+fn num_op(p: u64) -> u64 {
+    var o_eq: [u8; 4] = "-eq\0"
+    var o_ne: [u8; 4] = "-ne\0"
+    var o_lt: [u8; 4] = "-lt\0"
+    var o_le: [u8; 4] = "-le\0"
+    var o_gt: [u8; 4] = "-gt\0"
+    var o_ge: [u8; 4] = "-ge\0"
+    if ulib.streq(p, (&o_eq[0 as usize]) as u64) {
+        return 1
+    }
+    if ulib.streq(p, (&o_ne[0 as usize]) as u64) {
+        return 2
+    }
+    if ulib.streq(p, (&o_lt[0 as usize]) as u64) {
+        return 3
+    }
+    if ulib.streq(p, (&o_le[0 as usize]) as u64) {
+        return 4
+    }
+    if ulib.streq(p, (&o_gt[0 as usize]) as u64) {
+        return 5
+    }
+    if ulib.streq(p, (&o_ge[0 as usize]) as u64) {
+        return 6
+    }
+    return 0
+}
+
+// `test` und `[` sind hier eingebaut und keine Programme. Zwei Gruende:
+// ein Prozess je Bedingung waere in einer `while`-Schleife der ganze
+// Aufwand, und `[` muesste als Dateiname `/bin/[` auf der Platte liegen,
+// wo ihn niemand vermutet. Jede Shell macht es so.
+//
+// Was es kennt: -e -f -d -r -s (Dateien), -n -z (Zeichenketten),
+// = != (Vergleich), -eq -ne -lt -le -gt -ge (Zahlen), ! davor, und ein
+// einzelnes Wort ist wahr, wenn es nicht leer ist.
+fn do_test(as_bracket: bool) -> u64 {
+    var o_e: [u8; 3] = "-e\0"
+    var o_f: [u8; 3] = "-f\0"
+    var o_d: [u8; 3] = "-d\0"
+    var o_r: [u8; 3] = "-r\0"
+    var o_s: [u8; 3] = "-s\0"
+    var o_n: [u8; 3] = "-n\0"
+    var o_z: [u8; 3] = "-z\0"
+    var o_bang: [u8; 2] = "!\0"
+    var o_eqs: [u8; 2] = "=\0"
+    var o_nes: [u8; 3] = "!=\0"
+    var n: u64 = argc
+    if as_bracket {
+        // Die schliessende Klammer gehoert nicht zur Bedingung.
+        if n > 1 {
+            n = n - 1
+        }
+    }
+    var at: u64 = 1
+    var invert: bool = false
+    while at < n && ulib.streq(argv[(at) as usize], (&o_bang[0 as usize]) as u64) {
+        invert = !invert
+        at = at + 1
+    }
+    var yes: bool = false
+    let left: u64 = n - at
+    if left == 0 {
+        yes = false
+    } else if left == 1 {
+        yes = *((argv[(at) as usize]) as *mut u8) != 0 as u8
+    } else if left == 2 {
+        let o: u64 = argv[(at) as usize]
+        let v: u64 = argv[(at + 1) as usize]
+        if ulib.streq(o, (&o_e[0 as usize]) as u64) {
+            yes = !ulib.bad(ulib.size_of(v)) || ulib.is_dir(v)
+        } else if ulib.streq(o, (&o_f[0 as usize]) as u64) {
+            yes = !ulib.bad(ulib.size_of(v)) && !ulib.is_dir(v)
+        } else if ulib.streq(o, (&o_d[0 as usize]) as u64) {
+            yes = ulib.is_dir(v)
+        } else if ulib.streq(o, (&o_r[0 as usize]) as u64) {
+            yes = !ulib.bad(ulib.size_of(v)) || ulib.is_dir(v)
+        } else if ulib.streq(o, (&o_s[0 as usize]) as u64) {
+            let sz: u64 = ulib.size_of(v)
+            yes = !ulib.bad(sz) && sz > 0
+        } else if ulib.streq(o, (&o_n[0 as usize]) as u64) {
+            yes = *((v) as *mut u8) != 0 as u8
+        } else if ulib.streq(o, (&o_z[0 as usize]) as u64) {
+            yes = *((v) as *mut u8) == 0 as u8
+        }
+    } else {
+        let a: u64 = argv[(at) as usize]
+        let o: u64 = argv[(at + 1) as usize]
+        let b: u64 = argv[(at + 2) as usize]
+        let nop: u64 = num_op(o)
+        if nop != 0 {
+            yes = num_cmp(a, nop, b)
+        } else if ulib.streq(o, (&o_eqs[0 as usize]) as u64) {
+            yes = ulib.streq(a, b)
+        } else if ulib.streq(o, (&o_nes[0 as usize]) as u64) {
+            yes = !ulib.streq(a, b)
+        }
+    }
+    if invert {
+        yes = !yes
+    }
+    if yes {
+        return 0
+    }
+    return 1
+}
+
+// ------------------------------------------------------- Funktionen
+
+fn func_find(name: u64) -> u64 {
+    var i: u64 = 0
+    while i < nfunc {
+        if ulib.streq((&fn_name[(i * FNLEN) as usize]) as u64, name) {
+            return i
+        }
+        i = i + 1
+    }
+    return NFUNC
+}
+
+fn pos_set(k: u64, p: u64) {
+    if k >= NPOS {
+        return
+    }
+    ulib.strncpy((&pos[(k * POSLEN) as usize]) as u64, p, POSLEN)
+}
+
+fn pos_get(k: u64) -> u64 {
+    if k >= NPOS || k >= npos {
+        return 0
+    }
+    return (&pos[(k * POSLEN) as usize]) as u64
+}
+
+// ------------------------------------------------- der Ausfuehrer
+
+// Anweisungen `from`..`to`. Gibt false, wenn `exit` dabei war.
+fn exec_range(from: u64, to: u64) -> bool {
+    var k_if: [u8; 3] = "if\0"
+    var k_elif: [u8; 5] = "elif\0"
+    var k_else: [u8; 5] = "else\0"
+    var k_then: [u8; 5] = "then\0"
+    var k_fi: [u8; 3] = "fi\0"
+    var k_while: [u8; 6] = "while\0"
+    var k_until: [u8; 6] = "until\0"
+    var k_for: [u8; 4] = "for\0"
+    var k_do: [u8; 3] = "do\0"
+    var k_done: [u8; 5] = "done\0"
+    var k_case: [u8; 5] = "case\0"
+    var k_esac: [u8; 5] = "esac\0"
+    var k_ret: [u8; 7] = "return\0"
+    var k_brk: [u8; 6] = "break\0"
+    var k_cont: [u8; 9] = "continue\0"
+    var k_colon: [u8; 2] = ":\0"
+    var k_close: [u8; 2] = "}\0"
+    var i: u64 = from
+    var alive: bool = true
+    while i < to && alive && ret_flag == 0 && brk_flag == 0 && cont_flag == 0 {
+        let w: u64 = kw_of(i)
+        if ulib.streq(w, (&k_if[0 as usize]) as u64) {
+            i = do_if(i, to)
+            if i == ulib.EOF {
+                return false
+            }
+        } else if ulib.streq(w, (&k_while[0 as usize]) as u64)
+        || ulib.streq(w, (&k_until[0 as usize]) as u64) {
+            let r: u64 = do_while(i, to,
+                ulib.streq(w, (&k_until[0 as usize]) as u64))
+            if r == ulib.EOF {
+                return false
+            }
+            i = r
+        } else if ulib.streq(w, (&k_for[0 as usize]) as u64) {
+            let r: u64 = do_for(i, to)
+            if r == ulib.EOF {
+                return false
+            }
+            i = r
+        } else if ulib.streq(w, (&k_case[0 as usize]) as u64) {
+            let r: u64 = do_case(i, to)
+            if r == ulib.EOF {
+                return false
+            }
+            i = r
+        } else if ulib.streq(w, (&k_ret[0 as usize]) as u64) {
+            if tail_len(i) > 0 {
+                status = ulib.to_num((&src[(tail_of(i)) as usize]) as u64)
+            }
+            ret_flag = 1
+            i = i + 1
+        } else if ulib.streq(w, (&k_brk[0 as usize]) as u64) {
+            brk_flag = 1
+            i = i + 1
+        } else if ulib.streq(w, (&k_cont[0 as usize]) as u64) {
+            cont_flag = 1
+            i = i + 1
+        } else if ulib.streq(w, (&k_colon[0 as usize]) as u64) {
+            status = 0
+            i = i + 1
+        } else if ulib.streq(w, (&k_close[0 as usize]) as u64)
+        || ulib.streq(w, (&k_fi[0 as usize]) as u64)
+        || ulib.streq(w, (&k_done[0 as usize]) as u64)
+        || ulib.streq(w, (&k_esac[0 as usize]) as u64)
+        || ulib.streq(w, (&k_then[0 as usize]) as u64)
+        || ulib.streq(w, (&k_do[0 as usize]) as u64)
+        || ulib.streq(w, (&k_else[0 as usize]) as u64) {
+            // Ein Schluesselwort ohne seinen Kopf -- uebergehen statt
+            // als Befehl zu suchen. So bleibt ein halb geschriebenes
+            // Skript eine Meldung und kein `sh: cannot run fi`.
+            i = i + 1
+        } else if is_funcdef(i) {
+            i = def_func(i, to)
+        } else {
+            if !run_one(i) {
+                return false
+            }
+            i = i + 1
+        }
+    }
+    return alive
+}
+
+// Ein gewoehnlicher Befehl -- oder der Aufruf einer Funktion.
+fn run_one(i: u64) -> bool {
+    if !tokenize_stmt(i) {
+        status = 2
+        return true
+    }
+    if ntok == 0 {
+        return true
+    }
+    let first: u64 = word_at(0)
+    let f: u64 = func_find(first)
+    if f < NFUNC && tok_kind[0 as usize] == K_WORD {
+        return call_func(f)
+    }
+    return run_stmt(i)
+}
+
+fn call_func(f: u64) -> bool {
+    var save: [u8; 640] = [0 as u8; 640]
+    var s_deep: [u8; 24] = "sh: functions too deep\0\0"
+    if calls >= 8 {
+        ulib.esay_line((&s_deep[0 as usize]) as u64, 0)
+        status = 2
+        return true
+    }
+    // Die Stellungsparameter des Aufrufers retten -- eine Funktion, die
+    // die $1 ihres Aufrufers zerstoert, ist keine.
+    var k: u64 = 0
+    while k < NPOS * POSLEN {
+        save[(k) as usize] = pos[(k) as usize]
+        k = k + 1
+    }
+    let saved_n: u64 = npos
+    npos = 0
+    k = 0
+    while k < ntok && k < NPOS {
+        if tok_kind[(k) as usize] == K_WORD {
+            pos_set(k, word_at(k))
+            npos = k + 1
+        }
+        k = k + 1
+    }
+    calls = calls + 1
+    let alive: bool = exec_range(fn_beg[(f) as usize], fn_end[(f) as usize])
+    calls = calls - 1
+    ret_flag = 0
+    k = 0
+    while k < NPOS * POSLEN {
+        pos[(k) as usize] = save[(k) as usize]
+        k = k + 1
+    }
+    npos = saved_n
+    return alive
+}
+
+// `name()` oder `name() {`
+fn is_funcdef(i: u64) -> bool {
+    let a: u64 = sat[(i) as usize]
+    let b: u64 = a + slen[(i) as usize]
+    let w: u64 = word_end(a, b)
+    if w - a < 3 {
+        return false
+    }
+    return src[(w - 2) as usize] == 40 as u8 && src[(w - 1) as usize] == 41 as u8
+}
+
+fn def_func(i: u64, to: u64) -> u64 {
+    var k_close: [u8; 2] = "}\0"
+    let a: u64 = sat[(i) as usize]
+    let b: u64 = a + slen[(i) as usize]
+    let w: u64 = word_end(a, b)
+    var n: u64 = w - a - 2
+    if n + 1 >= FNLEN {
+        n = FNLEN - 1
+    }
+    if nfunc >= NFUNC {
+        return i + 1
+    }
+    var k: u64 = 0
+    while k < n {
+        fn_name[(nfunc * FNLEN + k) as usize] = src[(a + k) as usize]
+        k = k + 1
+    }
+    fn_name[(nfunc * FNLEN + n) as usize] = 0 as u8
+    // Der Rumpf beginnt hinter der oeffnenden Klammer. Steht sie allein
+    // in der naechsten Anweisung, faengt er eine spaeter an.
+    var body: u64 = i + 1
+    let end: u64 = scan_to(body, to, (&k_close[0 as usize]) as u64, 0, 0)
+    if body < to && kw_of(body) != 0 {
+        var only: [u8; 2] = "{\0"
+        if kw_is(body, (&only[0 as usize]) as u64) && slen[(body) as usize] == 1 {
+            body = body + 1
+        }
+    }
+    fn_beg[(nfunc) as usize] = body
+    fn_end[(nfunc) as usize] = end
+    nfunc = nfunc + 1
+    if end < to {
+        return end + 1
+    }
+    return to
+}
+
+// `if` .. `then` .. [`elif` .. `then` ..] [`else` ..] `fi`
+fn do_if(i: u64, to: u64) -> u64 {
+    var k_then: [u8; 5] = "then\0"
+    var k_elif: [u8; 5] = "elif\0"
+    var k_else: [u8; 5] = "else\0"
+    var k_fi: [u8; 3] = "fi\0"
+    let fi: u64 = scan_to(i + 1, to, (&k_fi[0 as usize]) as u64, 0, 0)
+    var head: u64 = i
+    var done: bool = false
+    var alive: bool = true
+    while !done {
+        let then_at: u64 = scan_to(head + 1, fi, (&k_then[0 as usize]) as u64,
+            0, 0)
+        if then_at >= fi {
+            done = true
+        } else {
+            // Die Bedingung: alles zwischen dem Kopf und `then`.
+            if tail_len(head) > 0 {
+                if !run_text((&src[(tail_of(head)) as usize]) as u64,
+                    tail_len(head)) {
+                    return ulib.EOF
+                }
+            }
+            var c: u64 = head + 1
+            while c < then_at {
+                if !run_stmt(c) {
+                    return ulib.EOF
+                }
+                c = c + 1
+            }
+            let ok: bool = status == 0
+            let next: u64 = scan_to(then_at + 1, fi,
+                (&k_elif[0 as usize]) as u64, (&k_else[0 as usize]) as u64, 0)
+            if ok {
+                if !exec_range(then_at + 1, next) {
+                    return ulib.EOF
+                }
+                done = true
+            } else if next < fi
+            && kw_is(next, (&k_else[0 as usize]) as u64) {
+                if !exec_range(next + 1, fi) {
+                    return ulib.EOF
+                }
+                done = true
+            } else if next < fi {
+                head = next
+            } else {
+                status = 0
+                done = true
+            }
+        }
+    }
+    if fi < to {
+        return fi + 1
+    }
+    return to
+}
+
+// `while COND` `do` .. `done` -- und `until`, das dieselbe Schleife mit
+// umgedrehter Bedingung ist.
+fn do_while(i: u64, to: u64, invert: bool) -> u64 {
+    var k_do: [u8; 3] = "do\0"
+    var k_done: [u8; 5] = "done\0"
+    let done_at: u64 = scan_to(i + 1, to, (&k_done[0 as usize]) as u64, 0, 0)
+    let do_at: u64 = scan_to(i + 1, done_at, (&k_do[0 as usize]) as u64, 0, 0)
+    if do_at >= done_at {
+        return done_at
+    }
+    var rounds: u64 = 0
+    var going: bool = true
+    while going {
+        if tail_len(i) > 0 {
+            if !run_text((&src[(tail_of(i)) as usize]) as u64, tail_len(i)) {
+                return ulib.EOF
+            }
+        }
+        var c: u64 = i + 1
+        while c < do_at {
+            if !run_stmt(c) {
+                return ulib.EOF
+            }
+            c = c + 1
+        }
+        var ok: bool = status == 0
+        if invert {
+            ok = !ok
+        }
+        if !ok {
+            going = false
+        } else {
+            if !exec_range(do_at + 1, done_at) {
+                return ulib.EOF
+            }
+            cont_flag = 0
+            if brk_flag == 1 {
+                brk_flag = 0
+                going = false
+            }
+            if ret_flag == 1 {
+                going = false
+            }
+            rounds = rounds + 1
+            // EINE OBERGRENZE, und sie steht hier mit Absicht: eine
+            // Schleife, die nicht endet, macht aus einem Testlauf ein
+            // Zeitlimit, und ein Zeitlimit misst nichts.
+            if rounds > 100000 {
+                going = false
+            }
+        }
+    }
+    if done_at < to {
+        return done_at + 1
+    }
+    return to
+}
+
+// `for V in W...` `do` .. `done`
+fn do_for(i: u64, to: u64) -> u64 {
+    var k_do: [u8; 3] = "do\0"
+    var k_done: [u8; 5] = "done\0"
+    var k_in: [u8; 3] = "in\0"
+    var buf: [u8; 1024] = [0 as u8; 1024]
+    var at: [u64; 32] = [0 as u64; 32]
+    var name: [u8; 24] = [0 as u8; 24]
+    let done_at: u64 = scan_to(i + 1, to, (&k_done[0 as usize]) as u64, 0, 0)
+    let do_at: u64 = scan_to(i + 1, done_at, (&k_do[0 as usize]) as u64, 0, 0)
+    if do_at >= done_at {
+        return done_at
+    }
+    if !tokenize_stmt(i) {
+        status = 2
+        return done_at + 1
+    }
+    if ntok < 2 {
+        return done_at + 1
+    }
+    ulib.strncpy((&name[0 as usize]) as u64, word_at(1), 24)
+    var k: u64 = 2
+    if k < ntok && ulib.streq(word_at(k), (&k_in[0 as usize]) as u64) {
+        k = k + 1
+    }
+    // DIE WORTE WERDEN AN LEERZEICHEN NOCH EINMAL ZERLEGT. `$LIST` wird
+    // in Runde K6 zu EINEM Wort, auch ohne Anfuehrungszeichen; damit
+    // `for i in $LIST` das tut, was jeder erwartet, teilt genau diese
+    // Schleife sie hier. Das ist eine ABWEICHUNG von POSIX (dort trennt
+    // die Zerlegung schon frueher) und steht in docs/ROUNDK11.md.
+    var n: u64 = 0
+    var used: u64 = 0
+    while k < ntok && n < FORMAX {
+        let p: u64 = word_at(k)
+        var j: u64 = 0
+        var start: u64 = used
+        var any: bool = false
+        var going: bool = true
+        while going {
+            let c: u64 = (*((p + j) as *mut u8)) as u64
+            if c == 0 || c == 32 || c == 9 {
+                if any && n < FORMAX && used + 1 < FORBUF {
+                    buf[(used) as usize] = 0 as u8
+                    used = used + 1
+                    at[(n) as usize] = start
+                    n = n + 1
+                }
+                any = false
+                start = used
+                if c == 0 {
+                    going = false
+                }
+            } else if used + 2 < FORBUF {
+                buf[(used) as usize] = c as u8
+                used = used + 1
+                any = true
+            }
+            j = j + 1
+        }
+        k = k + 1
+    }
+    var idx: u64 = 0
+    while idx < n {
+        var_set((&name[0 as usize]) as u64, (&buf[(at[(idx) as usize]) as usize]) as u64)
+        if !exec_range(do_at + 1, done_at) {
+            return ulib.EOF
+        }
+        cont_flag = 0
+        if brk_flag == 1 {
+            brk_flag = 0
+            idx = n
+        }
+        if ret_flag == 1 {
+            idx = n
+        }
+        idx = idx + 1
+    }
+    if done_at < to {
+        return done_at + 1
+    }
+    return to
+}
+
+// `case W in` `MUSTER)` .. `;;` .. `esac`
+fn do_case(i: u64, to: u64) -> u64 {
+    var k_esac: [u8; 5] = "esac\0"
+    var k_semi: [u8; 3] = ";;\0"
+    var subject: [u8; 128] = [0 as u8; 128]
+    var pat: [u8; 128] = [0 as u8; 128]
+    let esac: u64 = scan_to(i + 1, to, (&k_esac[0 as usize]) as u64, 0, 0)
+    if !tokenize_stmt(i) {
+        status = 2
+        return esac + 1
+    }
+    if ntok < 2 {
+        return esac + 1
+    }
+    ulib.strncpy((&subject[0 as usize]) as u64, word_at(1), 128)
+    var j: u64 = i + 1
+    var hit: bool = false
+    while j < esac && !hit {
+        // Eine Zweigzeile: `MUSTER)` oder `A|B)` -- und dahinter darf
+        // schon der erste Befehl stehen.
+        let a: u64 = sat[(j) as usize]
+        let b: u64 = a + slen[(j) as usize]
+        var close: u64 = a
+        var q: u64 = 0
+        while close < b && (q != 0 || src[(close) as usize] != 41 as u8) {
+            let c: u64 = (src[(close) as usize]) as u64
+            if q != 0 {
+                if c == q {
+                    q = 0
+                }
+            } else if c == 39 || c == 34 {
+                q = c
+            }
+            close = close + 1
+        }
+        if close >= b {
+            j = j + 1
+        } else {
+            // Passt eines der Muster?
+            var start: u64 = a
+            var m: u64 = a
+            var matched: bool = false
+            while m <= close {
+                if m == close || src[(m) as usize] == 124 as u8 {
+                    var n: u64 = m - start
+                    if n + 1 >= 128 {
+                        n = 127
+                    }
+                    var q2: u64 = 0
+                    while q2 < n {
+                        pat[(q2) as usize] = src[(start + q2) as usize]
+                        q2 = q2 + 1
+                    }
+                    pat[(n) as usize] = 0 as u8
+                    if wild((&pat[0 as usize]) as u64,
+                        (&subject[0 as usize]) as u64) {
+                        matched = true
+                    }
+                    start = m + 1
+                }
+                m = m + 1
+            }
+            let stop: u64 = scan_to(j + 1, esac, (&k_semi[0 as usize]) as u64,
+                0, 0)
+            if matched {
+                hit = true
+                status = 0
+                // Was hinter der Klammer noch auf der Zeile steht.
+                var rest: u64 = close + 1
+                while rest < b && (src[(rest) as usize] == 32 as u8
+                    || src[(rest) as usize] == 9 as u8) {
+                    rest = rest + 1
+                }
+                if rest < b {
+                    if !run_text((&src[(rest) as usize]) as u64, b - rest) {
+                        return ulib.EOF
+                    }
+                }
+                if !exec_range(j + 1, stop) {
+                    return ulib.EOF
+                }
+            }
+            j = stop + 1
+        }
+    }
+    if !hit {
+        status = 0
+    }
+    if esac < to {
+        return esac + 1
+    }
+    return to
+}
+
+// ---------------------------------------------------- ein ganzes Skript
+
+fn read_all(fd: u64) -> bool {
+    nsrc = 0
+    var going: bool = true
+    while going {
+        let n: u64 = ulib.sys(ulib.SYS_READ, fd,
+            (&src[(nsrc) as usize]) as u64, 4096)
+        if n == 0 || ulib.bad(n) {
+            going = false
+        } else {
+            nsrc = nsrc + n
+            if nsrc + 4096 > SRCMAX {
+                return false
+            }
+        }
+    }
+    return true
+}
+
+fn run_script(fd: u64) -> u64 {
+    var s_big: [u8; 22] = "sh: script too big\0\0\0\0"
+    if !read_all(fd) {
+        ulib.esay_line((&s_big[0 as usize]) as u64, 0)
+        return 2
+    }
+    split_all()
+    exec_range(0, nstmt)
+    return status
+}
+
+// `shift` -- die Stellungsparameter um eins nach vorn.
+fn do_shift() {
+    var k: u64 = 1
+    while k + 1 < npos {
+        var i: u64 = 0
+        while i < POSLEN {
+            pos[(k * POSLEN + i) as usize] = pos[((k + 1) * POSLEN + i) as usize]
+            i = i + 1
+        }
+        k = k + 1
+    }
+    if npos > 1 {
+        npos = npos - 1
+    }
+    status = 0
 }
