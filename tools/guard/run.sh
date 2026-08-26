@@ -135,7 +135,11 @@ python3 tools/osum/mkfs.py build "$TMPD/disk.img" 4096 $SPEC \
     || { bad "mkfs.py fehlgeschlagen"; sed 's/^/        /' "$TMPD/mkfs.log" | head -5; }
 CRC=$(python3 -c "import zlib,sys;print('%08x'%zlib.crc32(open(sys.argv[1],'rb').read()))" \
         "$TMPD/disk.img")
-ok "die CRC32 des Abbilds auf dem Wirt: 0x$CRC"
+# So, wie der KERNEL sie schreibt: `serial.hex` gibt die Ziffern aus, die
+# die Zahl hat, und nicht acht Stueck. Bei einer Summe, die mit einer Null
+# anfaengt, fiele ein Vergleich gegen die aufgefuellte Form.
+CRCK=$(printf '%x' "0x$CRC")
+ok "die CRC32 des Abbilds auf dem Wirt: 0x$CRC (der Kernel schreibt 0x$CRCK)"
 
 # ------------------------------------------------- 2. die Bits in CR4
 
@@ -226,7 +230,7 @@ rc=0
 lauf "$TMPD/k0.mb" "$MOD script=ls /bin;uname;cat /d/d.txt;exit" \
      "$TMPD/mod.log" -cpu max -initrd "$TMPD/disk.img" || rc=$?
 gleich "der Kernel startet ein Userland aus einem Modul" "$rc" 21
-has "$TMPD/mod.log" "blocks=4096  crc=0x$CRC  want=0x$CRC  ok=1" \
+has "$TMPD/mod.log" "blocks=4096  crc=0x$CRCK  want=0x$CRCK  ok=1" \
     "die gerechnete Summe ist die des Wirts, und sie war verlangt"
 has "$TMPD/mod.log" "osum: from module" "die Wurzelplatte ist das Modul"
 has "$TMPD/mod.log" "osum: mount=1" "das Dateisystem darin ist gemountet"
@@ -250,14 +254,14 @@ hasnot "$TMPD/modbad.log" "sh: ready" "es laeuft keine Shell daraus"
 rc=0
 lauf "$TMPD/k0.mb" "osum nokbd nosched noproc nofs noring3 script=exit" \
      "$TMPD/modoff.log" -cpu max -initrd "$TMPD/disk.img" || rc=$?
-has "$TMPD/modoff.log" "crc=0x$CRC" "ohne 'modfs' wird das Modul gesehen und gerechnet"
+has "$TMPD/modoff.log" "crc=0x$CRCK" "ohne 'modfs' wird das Modul gesehen und gerechnet"
 hasnot "$TMPD/modoff.log" "osum: from module" "aber nicht benutzt"
 
 rc=0; lauf "$TMPD/k0.mb" "$BASIS" "$TMPD/modnone.log" -cpu max || rc=$?
 has "$TMPD/modnone.log" "mod: none" "ohne Modul sagt der Kernel das, statt zu raten"
 
 echo "== 8. der Bereich des Moduls gehoert dem Modul =="
-has "$TMPD/mod.log" "mod: recheck crc=0x$CRC  same=1" \
+has "$TMPD/mod.log" "mod: recheck crc=0x$CRCK  same=1" \
     "nach einem Lauf mit Prozessen, Seiten und Halde ist das Abbild unveraendert"
 f=$(grep -aoE 'frames_free=[0-9]+ of [0-9]+' "$TMPD/mod.log" | tail -1)
 a=$(echo "$f" | grep -oE '[0-9]+' | head -1)
@@ -278,7 +282,7 @@ if [ -f "$TMPD/k1.mb" ]; then
     lauf "$TMPD/k1.mb" "$MOD script=ls /bin;exit" "$TMPD/mod1.log" \
          -cpu max -initrd "$TMPD/disk.img" || rc=$?
     gleich "firnc1: dasselbe Userland aus demselben Modul" "$rc" 21
-    has "$TMPD/mod1.log" "crc=0x$CRC  want=0x$CRC  ok=1" "firnc1: dieselbe Pruefsumme"
+    has "$TMPD/mod1.log" "crc=0x$CRCK  want=0x$CRCK  ok=1" "firnc1: dieselbe Pruefsumme"
     has "$TMPD/mod1.log" "sh: ready, osum" "firnc1: /bin/sh laeuft aus dem Modul"
 else
     bad "firnc1 hat keinen Kern gebaut"
