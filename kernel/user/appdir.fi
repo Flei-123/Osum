@@ -1,0 +1,399 @@
+// kernel/user/appdir.fi -- Runde K15, Nachtrag: DAS
+// ANWENDUNGSVERZEICHNIS. Ring 3.
+//
+// Osum hatte bis hierher keinen Ort, an dem steht, WELCHE Programme es
+// gibt. `/bin` listet Dateinamen -- `sh`, `edit`, `wc`, `explorer` --,
+// und ein Dateiname ist kein Name: er sagt nicht, was das Programm tut,
+// er ist nicht uebersetzbar, und man kann nicht danach suchen, wenn man
+// ihn nicht schon kennt. Genau das ist der Grund, warum jedes System mit
+// einer Oberflaeche ein zweites Verzeichnis hat.
+//
+// EINE DATEI JE PROGRAMM, unter `/usr/share/apps/*.app`:
+//
+//     # Anmerkungen fangen mit einem Gatter an
+//     name=Datei-Explorer
+//     info=Dateien und Ordner ansehen
+//     exec=/bin/explorer
+//     icon=4a90d0
+//     keys=datei,dateien,explorer,ordner,verzeichnis,manager,file,files,folder
+//
+// WARUM DIESES FORMAT UND NICHT `.desktop`. Der GEDANKE ist der von
+// Freedesktop und er ist der richtige: eine Textdatei je Programm, mit
+// Anzeigename, Beschreibung, auszufuehrendem Befehl, Symbol und einer
+// Liste von Schluesselwoertern, und ein Verzeichnis voll davon. Was
+// `.desktop` darueber hinaus mitbringt, hat dieses System nicht und
+// braucht es nicht:
+//
+//   * `[Desktop Entry]` -- ein Gruppenkopf. Es gibt genau eine Gruppe.
+//   * `Name[de]=` -- Sprachvarianten. Es gibt eine Sprache.
+//   * `%f %U` -- Platzhalter in `Exec`. Der Starter uebergibt nichts.
+//   * Escapes (`\s`, `\n`, `\\`) und in Anfuehrungszeichen gesetzte
+//     Argumente. Ein Wert ist hier alles bis zum Zeilenende, roh.
+//   * `Type=`, `Version=`, `Categories=`, `MimeType=`, `StartupNotify=`
+//     -- Felder fuer Dinge, die es hier nicht gibt.
+//
+// Ein Leser fuer `.desktop` waere also zu neun Zehnteln Leser fuer
+// Sachen, die nie vorkommen -- und jedes dieser Zehntel eine Stelle, an
+// der er sich anders verhaelt als der echte. Diese Datei liest
+// `schluessel=wert`, eine Zeile je Feld, und das ist ehrlicher.
+//
+// DAS SYMBOL. Es gibt in diesem System keine Bilddateien und keinen
+// Leser dafuer. `icon=` ist deshalb eine FARBE in sechs Hexziffern; der
+// Starter malt daraus ein Plaettchen und setzt den ersten Buchstaben des
+// Anzeigenamens darauf. Das ist ein Symbol, das man messen kann -- die
+// Farbe als Flaeche, der Buchstabe je Zeichen gegen den Rasterer --, und
+// es ist nicht die Behauptung, es gaebe Symbole.
+
+profile kernel
+
+import ulib
+import libc.io
+
+export {
+    load, count, name_of, info_of, exec_of, icon_of, keys_of, datei_of,
+    search, matches, lower, contains,
+    MAXAPP
+}
+
+const MAXAPP: u64 = 16
+const A_NAME: u64 = 0
+const A_INFO: u64 = 1
+const A_EXEC: u64 = 2
+const A_ICON: u64 = 3
+const A_KEYS: u64 = 4
+const A_FILE: u64 = 5
+const A_FIELDS: u64 = 6
+
+static mut ap: [u64; 96] = [0 as u64; 96] // MAXAPP * A_FIELDS
+static mut folge: [u64; 16] = [0 as u64; 16]
+static mut nap: u64 = 0
+static mut arena: [u8; 4096] = [0 as u8; 4096]
+static mut apos: u64 = 0
+static mut nokeys: u64 = 0
+static mut leer: [u8; 2] = "\0\0"
+
+fn g(i: u64, f: u64) -> u64 {
+    if i >= nap {
+        return 0
+    }
+    return ap[(folge[(i) as usize] * A_FIELDS + f) as usize]
+}
+
+fn count() -> u64 {
+    return nap
+}
+
+fn name_of(i: u64) -> u64 {
+    return oder_leer(g(i, A_NAME))
+}
+
+fn info_of(i: u64) -> u64 {
+    return oder_leer(g(i, A_INFO))
+}
+
+fn exec_of(i: u64) -> u64 {
+    return oder_leer(g(i, A_EXEC))
+}
+
+fn icon_of(i: u64) -> u64 {
+    return g(i, A_ICON)
+}
+
+// DIE SCHLUESSELWOERTER, und mit `nokeys` gibt es sie NICHT. Das ist die
+// Gegenprobe zur Suche: dieselben Dateien, dieselbe Suche, nur ohne das
+// Feld, das den Unterschied macht -- und "folder" findet dann nichts.
+fn keys_of(i: u64) -> u64 {
+    if nokeys != 0 {
+        return (&leer[0 as usize]) as u64
+    }
+    return oder_leer(g(i, A_KEYS))
+}
+
+fn datei_of(i: u64) -> u64 {
+    return oder_leer(g(i, A_FILE))
+}
+
+fn oder_leer(p: u64) -> u64 {
+    if p == 0 {
+        return (&leer[0 as usize]) as u64
+    }
+    return p
+}
+
+// ------------------------------------------------------------- lesen
+
+fn put(p: u64, n: u64) -> u64 {
+    if apos + n + 1 >= 4096 {
+        return 0
+    }
+    let anfang: u64 = (&arena[0 as usize]) as u64 + apos
+    var k: u64 = 0
+    while k < n {
+        arena[((apos + k)) as usize] = *((p + k) as *mut u8)
+        k = k + 1
+    }
+    arena[((apos + n)) as usize] = 0 as u8
+    apos = apos + n + 1
+    return anfang
+}
+
+fn hex4(c: u64) -> u64 {
+    if c >= 48 && c <= 57 {
+        return c - 48
+    }
+    if c >= 97 && c <= 102 {
+        return c - 87
+    }
+    if c >= 65 && c <= 70 {
+        return c - 55
+    }
+    return 16
+}
+
+fn feld_gleich(p: u64, n: u64, w: u64) -> bool {
+    var k: u64 = 0
+    while k < n {
+        if (*((w + k) as *mut u8)) == 0 as u8 {
+            return false
+        }
+        if (*((p + k) as *mut u8)) != (*((w + k) as *mut u8)) {
+            return false
+        }
+        k = k + 1
+    }
+    return (*((w + n) as *mut u8)) == 0 as u8
+}
+
+fn eine_datei(pfad: u64, i: u64) -> bool {
+    var buf: [u8; 1024] = [0 as u8; 1024]
+    var f_name: [u8; 5] = "name\0"
+    var f_info: [u8; 5] = "info\0"
+    var f_exec: [u8; 5] = "exec\0"
+    var f_icon: [u8; 5] = "icon\0"
+    var f_keys: [u8; 5] = "keys\0"
+    let fd: u64 = io.open(pfad, 0)
+    if ulib.bad(fd) {
+        return false
+    }
+    let n: u64 = io.read(fd, (&buf[0 as usize]) as u64, 1023)
+    io.close(fd)
+    if ulib.bad(n) || n == 0 {
+        return false
+    }
+    let b: u64 = (&buf[0 as usize]) as u64
+    var gefunden: bool = false
+    var at: u64 = 0
+    while at < n {
+        var e: u64 = at
+        while e < n && (*((b + e) as *mut u8)) != 10 as u8 {
+            e = e + 1
+        }
+        if e > at && (*((b + at) as *mut u8)) != 35 as u8 {
+            var g2: u64 = at
+            while g2 < e && (*((b + g2) as *mut u8)) != 61 as u8 {
+                g2 = g2 + 1
+            }
+            if g2 < e {
+                let wert: u64 = b + g2 + 1
+                let wlen: u64 = e - g2 - 1
+                if feld_gleich(b + at, g2 - at, (&f_name[0 as usize]) as u64) {
+                    ap[((i * A_FIELDS + A_NAME)) as usize] = put(wert, wlen)
+                    gefunden = true
+                } else if feld_gleich(b + at, g2 - at,
+                    (&f_info[0 as usize]) as u64) {
+                    ap[((i * A_FIELDS + A_INFO)) as usize] = put(wert, wlen)
+                } else if feld_gleich(b + at, g2 - at,
+                    (&f_exec[0 as usize]) as u64) {
+                    ap[((i * A_FIELDS + A_EXEC)) as usize] = put(wert, wlen)
+                } else if feld_gleich(b + at, g2 - at,
+                    (&f_keys[0 as usize]) as u64) {
+                    ap[((i * A_FIELDS + A_KEYS)) as usize] = put(wert, wlen)
+                } else if feld_gleich(b + at, g2 - at,
+                    (&f_icon[0 as usize]) as u64) {
+                    var v: u64 = 0
+                    var stellen: u64 = 0
+                    var k: u64 = 0
+                    while k < wlen {
+                        let d: u64 = hex4((*((wert + k) as *mut u8)) as u64)
+                        if d < 16 {
+                            v = (v << 4) | d
+                            stellen = stellen + 1
+                        }
+                        k = k + 1
+                    }
+                    if stellen == 6 {
+                        ap[((i * A_FIELDS + A_ICON)) as usize] = v
+                    }
+                }
+            }
+        }
+        at = e + 1
+    }
+    return gefunden
+}
+
+fn endet_auf_app(p: u64) -> bool {
+    let n: u64 = ulib.length(p)
+    if n < 5 {
+        return false
+    }
+    if (*((p + n - 4) as *mut u8)) != 46 as u8 {
+        return false
+    }
+    if (*((p + n - 3) as *mut u8)) != 97 as u8 {
+        return false
+    }
+    if (*((p + n - 2) as *mut u8)) != 112 as u8 {
+        return false
+    }
+    return (*((p + n - 1) as *mut u8)) == 112 as u8
+}
+
+// Das Verzeichnis lesen. Gibt die Zahl der gefundenen Programme zurueck.
+// Nach Anzeigenamen sortiert -- die Reihenfolge auf der Platte ist die
+// Reihenfolge, in der `mkfs.py` sie hingeschrieben hat, und das ist
+// keine, an der sich ein Testlauf festhalten kann.
+fn load(dir: u64, ohne_keys: bool) -> u64 {
+    var eintraege: [u8; 1024] = [0 as u8; 1024]
+    var voll: [u8; 160] = [0 as u8; 160]
+    nap = 0
+    apos = 0
+    if ohne_keys {
+        nokeys = 1
+    } else {
+        nokeys = 0
+    }
+    let fd: u64 = io.dir_open(dir)
+    if ulib.bad(fd) {
+        return 0
+    }
+    var weiter: bool = true
+    while weiter {
+        let n: u64 = io.dir_read(fd, (&eintraege[0 as usize]) as u64, 1024)
+        if ulib.bad(n) || n == 0 {
+            weiter = false
+        } else {
+            var at: u64 = 0
+            while at < n {
+                let rec: u64 = (&eintraege[0 as usize]) as u64 + at
+                let rl: u64 = io.dir_reclen(rec)
+                if rl == 0 {
+                    at = n
+                } else {
+                    let nm: u64 = io.dir_name(rec)
+                    if endet_auf_app(nm) && nap < MAXAPP {
+                        ulib.strncpy((&voll[0 as usize]) as u64, dir, 100)
+                        var slash: [u8; 2] = "/\0"
+                        ulib.strcat((&voll[0 as usize]) as u64,
+                            (&slash[0 as usize]) as u64)
+                        ulib.strcat((&voll[0 as usize]) as u64, nm)
+                        ap[((nap * A_FIELDS + A_NAME)) as usize] = 0
+                        ap[((nap * A_FIELDS + A_INFO)) as usize] = 0
+                        ap[((nap * A_FIELDS + A_EXEC)) as usize] = 0
+                        ap[((nap * A_FIELDS + A_ICON)) as usize] = 0
+                        ap[((nap * A_FIELDS + A_KEYS)) as usize] = 0
+                        ap[((nap * A_FIELDS + A_FILE)) as usize] =
+                            put(nm, ulib.length(nm))
+                        if eine_datei((&voll[0 as usize]) as u64, nap) {
+                            nap = nap + 1
+                        }
+                    }
+                    at = at + rl
+                }
+            }
+        }
+    }
+    io.close(fd)
+    // nach Anzeigenamen sortieren
+    var i: u64 = 0
+    while i < nap {
+        folge[(i) as usize] = i
+        i = i + 1
+    }
+    i = 1
+    while i < nap {
+        let v: u64 = folge[(i) as usize]
+        var k: u64 = i
+        while k > 0 && ulib.cmp(ap[((v * A_FIELDS + A_NAME)) as usize],
+            ap[((folge[((k - 1)) as usize] * A_FIELDS + A_NAME)) as usize])
+            == 1 {
+            folge[(k) as usize] = folge[((k - 1)) as usize]
+            k = k - 1
+        }
+        folge[(k) as usize] = v
+        i = i + 1
+    }
+    return nap
+}
+
+// ------------------------------------------------------------- suchen
+
+fn lower(c: u64) -> u64 {
+    if c >= 65 && c <= 90 {
+        return c + 32
+    }
+    return c
+}
+
+// Steht `nadel` irgendwo in `heu`? Gross und klein gelten als gleich --
+// wer "Explorer" tippt, meint "explorer".
+fn contains(heu: u64, nadel: u64) -> bool {
+    let n: u64 = ulib.length(nadel)
+    if n == 0 {
+        return true
+    }
+    let h: u64 = ulib.length(heu)
+    if n > h {
+        return false
+    }
+    var i: u64 = 0
+    while i + n <= h {
+        var k: u64 = 0
+        var gleich: bool = true
+        while k < n {
+            if lower((*((heu + i + k) as *mut u8)) as u64)
+                != lower((*((nadel + k) as *mut u8)) as u64) {
+                gleich = false
+                k = n
+            } else {
+                k = k + 1
+            }
+        }
+        if gleich {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+// DREI FELDER, UND DAS DRITTE IST DER GRUND FUER DIE GANZE SACHE.
+// Anzeigename und Beschreibung findet man auch mit einem Namensvergleich;
+// die Schluesselwoerter sind das, was "folder" auf "Datei-Explorer"
+// zeigen laesst, obwohl das Wort dort nicht steht.
+fn matches(i: u64, term: u64) -> bool {
+    if ulib.length(term) == 0 {
+        return true
+    }
+    if contains(name_of(i), term) {
+        return true
+    }
+    if contains(info_of(i), term) {
+        return true
+    }
+    return contains(keys_of(i), term)
+}
+
+// Die Treffer in `out` (je acht Oktette ein Index). Gibt die Zahl.
+fn search(term: u64, out: u64, max: u64) -> u64 {
+    var n: u64 = 0
+    var i: u64 = 0
+    while i < nap && n < max {
+        if matches(i, term) {
+            __mmio_write64((out + n * 8) as *mut u64, i)
+            n = n + 1
+        }
+        i = i + 1
+    }
+    return n
+}
