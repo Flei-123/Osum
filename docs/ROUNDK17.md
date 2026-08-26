@@ -446,7 +446,47 @@ Und zwei Dinge, die diese Runde **gefunden**, aber nicht behoben hat:
 
 ---
 
-## 11. Die Zahlen
+## 11. Was die uebrigen Abschnitte der Vollabnahme sagen
+
+Gemessen auf diesem Branch und, zum Vergleich, auf dem Stand `93ad914`
+(nur die beiden Uebersetzungsschaeden behoben, sonst nichts von dieser
+Runde):
+
+| Abschnitt | dieser Branch | `93ad914` |
+|---|---|---|
+| `tools/kernel/run.sh` | 176 / 0 | — |
+| `tools/osum/run.sh` | 130 / 0 | — |
+| `tools/posix/run.sh` | 134 / 0 | — |
+| `tools/wm/run.sh` | 103 / 0 | — |
+| `tools/gfx/run.sh` | 76 / 0 | — |
+| `tools/k14/run.sh` | 151 / 1 | 138 / 14 |
+| `tools/k13/run.sh` | 88 / 11 | 82 / 17 |
+| `tools/k16/run.sh` | 58 / 6 | 58 / 6 |
+| `tools/k17/run.sh` | **146 / 0** | — |
+
+**K13 und K16 sind auf `main` rot, und zwar unabhaengig von dieser
+Runde.** Die Reparatur der Modusbits (Abschnitt 9.3) hat K13 von 17
+Fehlern auf 11 gebracht und K14 von 14 auf 1; die uebrigen Fehler
+betreffen `su`/`passwd`/PBKDF2 (K13) und den Assembler `fas` mit den
+Ring-3-Programmen von Runde K15 (K16). Beides gehoert denen, die diese
+Runden gebaut haben — hier steht es, damit es nicht in einer Fussnote
+verschwindet.
+
+**Eine Warnung zur Messmaschine.** Waehrend dieser Runde lief die
+Systemplatte des Messrechners auf 97 Prozent voll, und mehrere Runden
+massen gleichzeitig. Unter dieser Last faellt `tools/k14/run.sh`
+sprunghaft aus (einmal 141 / 11 statt 151 / 1), und zwar an genau den
+Stellen, an denen ein FAT-Schreibvorgang halb durchkommt — `fsck.fat`
+meldet dann "Free cluster summary wrong" und eine neue Datei ist leer.
+Das ist keine Eigenschaft des Kernels, sondern eine des Wirts: eine
+ATA-Uebertragung, die auf ein volles Dateisystem schreibt, reisst die
+Zeitgrenze in `blk.ata_wait`. Der Kommentar dort beschreibt genau diesen
+Fall seit Runde K14. Die Zahlen oben stammen aus Laeufen mit freiem
+Platz.
+
+---
+
+## 12. Die Zahlen
 
 ```
 bash tools/k17/run.sh   ->  146 Zusagen, 0 Fehler
