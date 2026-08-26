@@ -109,7 +109,7 @@ run_disk() { # image append out diskimage
 QUIET="nokbd nosched noproc nofs noring3"
 
 echo "== 1. build: the kernel, and a userland that is NOT in it =="
-for f in boot isr switch smp; do
+for f in boot isr switch smp hv; do
     as --64 -o "$TMPD/$f.o" "kernel/$f.s" 2>"$TMPD/as.err" \
         || { bad "$f.s does not assemble"; sed 's/^/        /' "$TMPD/as.err" | head -5; }
 done
@@ -132,7 +132,7 @@ build_stage() { # 0 = firnc0, 1 = firnc1
         --defsym=KERNEL_USER_START="_F$s.proc__user_start" \
         --defsym=KERNEL_AP_MAIN="_F$s.smp__ap_main" \
         --defsym=USER_MAIN="_F$s.u_enter" \
-        -o "$TMPD/k$s.elf" "$TMPD/boot.o" "$TMPD/isr.o" "$TMPD/switch.o" "$TMPD/smp.o" \
+        -o "$TMPD/k$s.elf" "$TMPD/boot.o" "$TMPD/isr.o" "$TMPD/switch.o" "$TMPD/smp.o" "$TMPD/hv.o" \
         "$TMPD/k$s.o" "$TMPD/u$s.o" 2>"$TMPD/ld$s.err" \
         || { bad "firnc$s: ld failed on the kernel"; grep -v 'GNU-stack\|RWX\|deprecated' "$TMPD/ld$s.err" | sed 's/^/        /' | head -5; return 1; }
     objcopy -O elf32-i386 "$TMPD/k$s.elf" "$TMPD/k$s.mb" 2>/dev/null

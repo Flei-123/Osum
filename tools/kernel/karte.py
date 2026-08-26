@@ -98,6 +98,13 @@ BEREICHE = [
     ("MOUSE",      "kstate.fi", "MOUSE_OFF",      "MOUSE_MAX"),
     ("WM",         "kstate.fi", "WM_OFF",         "WM_MAX"),
     ("TTF",        "kstate.fi", "TTF_OFF",        "TTF_MAX"),
+    # RUNDE K12: die Gastmaschinen des Hypervisors.  Der Bereich steht
+    # in `hv.fi` und nicht in `kstate.fi` -- absichtlich, denn er ist die
+    # EINZIGE Seite, die diese Runde in `kdata` braucht; alles andere
+    # (Steuerbloecke, verschachtelte Seitentabellen, Bitkarten, der
+    # Speicher der Gaeste) kommt aus dem Rahmenverwalter.  Eingetragen
+    # ist er hier, damit der Kollisionspruefer ihn trotzdem sieht.
+    ("HV",         "hv.fi",     "HV_OFF",         "HV_MAX"),
 ]
 
 # `_OFF`-Konstanten, die KEINE Bereiche in `kdata` sind -- Offsets
@@ -121,6 +128,10 @@ KEINE_KDATA = {
     ("pci.fi", "K2_OFF"),       # derselbe Wert wie TABLE_OFF
     ("ttf.fi", "A_HEAP"),       # Versatz IM Glyphenspeicher, nicht kdata
     ("wm.fi", "W_OFF"),         # Versatz IN der Fenstertafel
+    ("hv.fi", "CNT_OFF"),       # Versaetze INNERHALB von HV_OFF (Runde K12)
+    ("hv.fi", "VAL_OFF"),
+    ("hv.fi", "VM_OFF"),
+    ("hv.fi", "GPR_OFF"),
     ("virtio.fi", "C_QNOTIFY_OFF"),  # ein Register im Konfigurationsraum
 }
 
@@ -160,7 +171,7 @@ def main():
 
     dateien = {}
     for d in ("kstate.fi", "pci.fi", "nvme.fi", "fb.fi", "inet.fi",
-              "virtio.fi"):
+              "virtio.fi", "hv.fi"):
         p = os.path.join(kdir, d)
         if os.path.exists(p):
             dateien[d] = konstanten(p)

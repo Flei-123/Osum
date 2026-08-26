@@ -51,6 +51,7 @@ import uio
 import cap
 import guard
 import wm
+import hv
 import fb
 
 import signal
@@ -78,6 +79,7 @@ export {
     SYS_CLOCK_NANOSLEEP, SYS_TGKILL, SYS_GETRANDOM,
     SYS_OSUM_PTY, SYS_OSUM_TTYINFO, SYS_OSUM_SIGINFO,
     SYS_OSUM_SETENV, SYS_OSUM_MOUNT,
+    SYS_VM_CREATE, SYS_VM_RUN, SYS_VM_STAT, SYS_VM_KILL, SYS_VM_VALUE,
     CAP_BASE, CAP_VERSION, CAP_READ, CAP_WRITE, CAP_CLOSE, CAP_DUP,
     CAP_INSPECT, CAP_TRANSFER, CAP_COUNT, CAP_MAXNR,
     SYS_SOCKET, SYS_CONNECT, SYS_ACCEPT, SYS_SENDTO, SYS_RECVFROM,
@@ -117,7 +119,17 @@ export {
 // Runde K9 belegt. Eine eigene Bedeutung fuer eine Nummer, die Linux
 // vergeben hat, waere genau die Uebersetzungstabelle, die Regel 1 oben
 // vermeidet.
+//         1500..1599   RUNDE K12 -- Gastmaschinen (kernel/hv.fi); 1400 war
+//                      beim Bau frei, K11 hat sie parallel genommen
 //         2000..2099   die native ABI aus OrientOS (kernel/cap.fi)
+//
+// ZU 1400, UND WARUM NICHT 140. Der Auftrag der Runde K12 sagte "neue
+// Aufrufe fest ab Nummer 140 aufwaerts". 140 ist bei Linux
+// `setpriority`, 141 `getpriority`, 158 `arch_prctl`, 186 `gettid` --
+// und 186 hat Runde K9 bereits als `gettid`. Die erste Regel dieser
+// Karte ist aelter als der Auftrag: was Linux hat, hat Linux' Nummer.
+// Runde K12 nimmt deshalb den HUNDERTERBLOCK 1400 -- dieselbe 140, an
+// der Stelle, an der dieser Kernel seine eigenen Aufrufe fuehrt.
 //
 // WELCHE LINUX-NUMMERN RUNDE K9 BELEGT, damit K7 und K8 sie nicht noch
 // einmal nehmen: 13, 14, 15, 16, 34, 37, 56, 62, 96, 109, 111, 112, 121,
@@ -190,6 +202,17 @@ const SYS_GETRANDOM: u64 = 318
 //                          und schreibt zwei Deskriptoren nach `aus`
 //   1101 ttyinfo(was)   -> eine Zahl ueber die Terminalschicht
 //   1102 siginfo(was)   -> eine Zahl ueber die Signalschicht
+// RUNDE K12. Fuenf Aufrufe fuer Gastmaschinen. Sie arbeiten auf HANDLES
+// aus `cap.fi` (Art `K_VM`) und nicht auf einer Zahl, die man raten
+// koennte -- und sie antworten deshalb in der Fehlersprache DER HANDLES
+// (`cap.err`, negativ) und nicht in der von POSIX. Zwei ABIs, zwei
+// Listen; eine gemeinsame waere eine Luege ueber beide.
+const SYS_VM_CREATE: u64 = 1500 // (gast, rechte) -> Handle
+const SYS_VM_RUN: u64 = 1501 // (h) -> Grund des Anhaltens, braucht R_WRITE
+const SYS_VM_STAT: u64 = 1502 // (h, aus) -> 0, braucht R_INSPECT
+const SYS_VM_KILL: u64 = 1503 // (h) -> 0, braucht R_MANAGE
+const SYS_VM_VALUE: u64 = 1504 // (h, nr) -> gemeldeter Wert, braucht R_READ
+
 const SYS_OSUM_PTY: u64 = 1100
 const SYS_OSUM_TTYINFO: u64 = 1101
 const SYS_OSUM_SIGINFO: u64 = 1102
@@ -708,6 +731,10 @@ fn dispatch(number: u64, frame: u64, state: u64) -> u64 {
     }
     if number == SYS_OSUM_SIGINFO {
         return do_siginfo(state, me, a0, a1)
+    }
+    // RUNDE K12: die Gastmaschinen.
+    if number >= SYS_VM_CREATE && number <= SYS_VM_VALUE {
+        return vm_call(state, me, number, a0, a1)
     }
     return neg(errno.E_NOSYS)
 }
@@ -3590,4 +3617,152 @@ fn wm_call(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64,
         return wm.term_write(state, i, puffer, n)
     }
     return cap.err(cap.E_UNSUPPORTED)
+// ==================================================================
+//        RUNDE K12: GASTMASCHINEN AUS RING 3, UEBER HANDLES
+// ==================================================================
+//
+// Ein Programm in Ring 3 legt eine Gastmaschine an, laesst sie laufen,
+// fragt nach ihrem Zustand und raeumt sie ab. Es hat dafuer KEINE
+// Sonderrechte und keinen zweiten Weg: es hat ein HANDLE, und was es
+// damit darf, steht in den Rechtebits dieses Handles.
+//
+// DAS IST DER GANZE PUNKT. Eine Gastmaschine ist ein maechtiges Ding --
+// sie hat eigenen physischen Speicher und einen eigenen Prozessor. Waere
+// sie ueber eine kleine Zahl erreichbar, koennte jeder Prozess durch
+// Raten an eine fremde geraten. Ueber ein Handle kann er es nicht: der
+// Wuerfelwert der Tabelle geht in die Generation ein (`cap.fi`), und ein
+// Handle aus einem anderen Prozess trifft hier nichts.
+//
+// UND DIE RECHTE SIND ECHT GETRENNT:
+//   R_WRITE    darf sie LAUFEN LASSEN
+//   R_INSPECT  darf ihren Zustand ERFRAGEN
+//   R_READ     darf lesen, was der Gast gemeldet hat
+//   R_MANAGE   darf sie ABRAEUMEN
+// Wer eine Kopie ohne R_MANAGE weitergibt, gibt das Recht zu laufen
+// weiter und das Recht zu toeten nicht. Genau das misst `u_hv` in
+// `uprog.fi`.
+
+const VM_E_BAD: u64 = 100 // Handle gibt es nicht
+const VM_E_TYPE: u64 = 101 // Handle ja, aber keine Gastmaschine
+const VM_E_RIGHTS: u64 = 102 // Handle ja, Art ja, Recht nein
+
+// Loest ein Handle in einen Platz in `hv.fi` auf und prueft das
+// verlangte Recht. Die drei Fehler bleiben UNTERSCHEIDBAR -- POSIX hat
+// fuer alle drei nur -EBADF, und dass das zu wenig ist, ist die These
+// der Runde mit den Handles.
+fn vm_of(state: u64, me: u64, h: u64, need: u64) -> u64 {
+    let i: u64 = cap.find(state, me, h)
+    if i >= cap.MAX_CAPS {
+        return VM_E_BAD
+    }
+    if cap.kind_at(state, me, i) != cap.K_VM {
+        return VM_E_TYPE
+    }
+    if !cap.rights_contains(cap.rights_at(state, me, i), need) {
+        return VM_E_RIGHTS
+    }
+    let slot: u64 = cap.object_at(state, me, i)
+    if !hv.vm_valid(state, slot) {
+        return VM_E_BAD
+    }
+    return slot
+}
+
+fn vm_fehler(r: u64) -> u64 {
+    if r == VM_E_TYPE {
+        return cap.err(cap.E_WRONGTYPE)
+    }
+    if r == VM_E_RIGHTS {
+        return cap.err(cap.E_RIGHTS)
+    }
+    return cap.err(cap.E_BADHANDLE)
+}
+
+fn vm_call(state: u64, me: u64, number: u64, a0: u64, a1: u64) -> u64 {
+    if number == SYS_VM_CREATE {
+        return do_vm_create(state, me, a0, a1)
+    }
+    if number == SYS_VM_RUN {
+        let s: u64 = vm_of(state, me, a0, cap.R_WRITE)
+        if s >= hv.MAX_VMS {
+            return vm_fehler(s)
+        }
+        return hv.vm_run(state, s)
+    }
+    if number == SYS_VM_STAT {
+        return do_vm_stat(state, me, a0, a1)
+    }
+    if number == SYS_VM_KILL {
+        let s: u64 = vm_of(state, me, a0, cap.R_MANAGE)
+        if s >= hv.MAX_VMS {
+            return vm_fehler(s)
+        }
+        hv.vm_destroy(state, s)
+        cap.close(state, me, a0)
+        return 0
+    }
+    if number == SYS_VM_VALUE {
+        let s: u64 = vm_of(state, me, a0, cap.R_READ)
+        if s >= hv.MAX_VMS {
+            return vm_fehler(s)
+        }
+        return hv.value_of(state, a1)
+    }
+    return cap.err(cap.E_INVALID)
+}
+
+// Eine Gastmaschine anlegen. Die Rechte, die der Aufrufer verlangt,
+// werden auf das eingeschraenkt, was es fuer diese Art ueberhaupt gibt
+// -- ein Bit, das keine Bedeutung hat, ist kein Recht, sondern Muell,
+// und wird beim Anlegen weggefiltert (`cap.rights_restrict`).
+fn do_vm_create(state: u64, me: u64, guest: u64, want: u64) -> u64 {
+    if !hv.ready(state) {
+        return cap.err(cap.E_UNSUPPORTED)
+    }
+    if guest >= hv.G_MAX {
+        return cap.err(cap.E_INVALID)
+    }
+    let moeglich: u64 = cap.R_READ | cap.R_WRITE | cap.R_INSPECT
+        | cap.R_MANAGE | cap.R_DUPLICATE | cap.R_TRANSFER
+    let slot: u64 = hv.vm_create(state, guest, me)
+    if slot >= hv.MAX_VMS {
+        return cap.err(cap.E_EXHAUSTED)
+    }
+    let h: u64 = cap.insert(state, me, cap.K_VM,
+        cap.rights_restrict(moeglich, want), slot)
+    if h == cap.HANDLE_NONE {
+        // Kein Platz in der Handle-Tabelle: die Maschine darf dann auch
+        // nicht stehenbleiben, sonst waere sie ein Rahmenleck, das
+        // niemand mehr erreichen kann.
+        hv.vm_destroy(state, slot)
+        return cap.err(cap.E_EXHAUSTED)
+    }
+    return h
+}
+
+// Der Zustand einer Gastmaschine, in fuenf Woertern nach Ring 3. Wie bei
+// `CAP_INSPECT`: Zahlen, und keine einzige Adresse des Kernels.
+const VMSTAT_WORDS: u64 = 5
+
+fn do_vm_stat(state: u64, me: u64, h: u64, aus: u64) -> u64 {
+    let s: u64 = vm_of(state, me, h, cap.R_INSPECT)
+    if s >= hv.MAX_VMS {
+        return vm_fehler(s)
+    }
+    if aus == 0 {
+        return 0
+    }
+    if !proc.user_ok(state, me, aus, VMSTAT_WORDS * 8) {
+        return cap.err(cap.E_INVALID)
+    }
+    var w: [u64; 5] = [0 as u64; 5]
+    w[0] = hv.vm_state(state, s)
+    w[1] = hv.vm_exits(state, s)
+    w[2] = hv.vm_result(state, s)
+    w[3] = hv.vm_guest(state, s)
+    w[4] = hv.exits_total(state)
+    if !copy_out(state, me, aus, (&w[0]) as u64, VMSTAT_WORDS * 8) {
+        return cap.err(cap.E_INVALID)
+    }
+    return 0
 }

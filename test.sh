@@ -92,6 +92,21 @@
 #      bricht jede Messung zusammen, `nicnobm` nimmt das Busmaster-Bit,
 #      `nicnoirq` maskiert den Vektor, `nicintx` nimmt den Stift statt
 #      MSI-X.
+#  15. EIN WIRT FUER FREMDE PROZESSOREN (tools/hv/run.sh, Runde K12):
+#      AMD-V, verschachtelte Seitentabellen, sechs Gaeste. Der Kernel
+#      legt eine Gastmaschine an, tritt ein, wertet den Austrittsgrund
+#      aus und tritt wieder ein -- CPUID, Anschluesse, MSR, HLT,
+#      Steuerregister, Seitenfehler des Gasts, Dreifachfehler,
+#      Unterbrechungen. Ein Gast geht SELBST in den geschuetzten Modus
+#      und baut sich seine EIGENE Seitentabelle; dass er durch sie
+#      hindurchliest, beweist ZWEI Uebersetzungen hintereinander. Ring 3
+#      fuehrt eine Gastmaschine ueber ein Handle mit Rechten.
+#      Nicht Intel VT-x, sondern AMD-V, und das ist gemessen: QEMUs
+#      Softwareemulation meldet vmx als nicht unterstuetzt, und einen
+#      /dev/kvm gibt es auf dem Messrechner nicht. Gegenproben: ohne
+#      `hv` genau eine Zeile, `nonpt` laesst den Gast in den Speicher
+#      des Wirts laufen, `gastfrei` gibt dem Gast die Maschine,
+#      `nosvm` schaltet alles ab, `-cpu qemu64` bietet keine NPT an.
 #
 #
 #  15. Die zwei Schutzbits und das Boot-Modul (tools/guard/run.sh, Runde
@@ -276,6 +291,9 @@ lauf "16. man kann darauf arbeiten: ein Editor, zwanzig Werkzeuge, eine Shell mi
 
 lauf "17. die Oberflaeche: Maus, Fensterserver, TrueType (tools/wm/run.sh, Runde K10)" \
      tools/wm/run.sh wm '^WM: |^   wmbench: |^        im Regellauf|^        ohne Bereichsverfolgung'
+
+lauf "18. ein Wirt fuer fremde Prozessoren: AMD-V, verschachtelte Seitentabellen, Gaeste (tools/hv/run.sh, Runde K12)" \
+     tools/hv/run.sh hv '^HV:|^        (bench|exits|cpu):'
 
 echo
 echo "=================================================================="
