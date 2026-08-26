@@ -43,9 +43,9 @@ Drei Folgen, und alle drei waren im Baum sichtbar:
 | `kernel/vfs.fi` | 530 | Der **Namensraum**: Auflösung über Grenzen, Ein- und Aushängen, die neun Verrichtungen |
 | `kernel/ofs.fi` | 178 | OFS als **Treiber** dieser Schicht |
 | `kernel/procfs.fi` | 1226 | `/proc`, im Speicher erzeugt |
-| `kernel/devfs.fi` | 444 | `/dev` als echtes Dateisystem |
+| `kernel/devfs.fi` | 486 | `/dev` als echtes Dateisystem |
 | `kernel/part.fi` | 498 | MBR und GPT, mit **beiden** CRC32-Prüfsummen |
-| `kernel/fat.fi` | 1802 | FAT32, lesend **und** schreibend, mit langen Namen |
+| `kernel/fat.fi` | 2007 | FAT32, lesend **und** schreibend, mit langen Namen |
 | `kernel/user/k14.fi` | 701 | Das Messprogramm in Ring 3 |
 | `tools/k14/run.sh` | 612 | Der Testläufer |
 
@@ -339,15 +339,22 @@ Felder null, und `mdir` zeigte `1980-00-00` — Monat 0 und Tag 0 gibt es
 nicht. Jetzt kommt die Zeit aus der CMOS-Uhr (`time.rtc_field`); sagt die
 Uhr Unsinn, wird der erste Tag geschrieben, den FAT kennt, statt Unsinn.
 
-Die FSInfo-Seite (die Zahl der freien Verbände) wird bei jeder Zuteilung
-auf **0xFFFFFFFF = unbekannt** gesetzt — das ist der von Microsoft
-vorgesehene Wert. Beim **Aushängen** wird sie einmal wirklich gerechnet
-(`fat.sync`, 129022 Einträge). Das ist gemessen, in beide Richtungen:
+Die Zahl der **freien Verbände** kommt beim Einhängen aus der
+FSInfo-Seite (`mkfs.vfat` schreibt sie hinein) und wird danach bei jeder
+Zuteilung und jeder Freigabe um eins verändert — O(1), und genau das, was
+Linux' `vfat` tut. Beim ersten Schreiben wird die Seite auf
+**0xFFFFFFFF = unbekannt** gesetzt (einmal, nicht bei jedem `write`);
+beim **Aushängen** wird der richtige Wert hineingeschrieben. Nur eine
+Platte, die schon als „unbekannt" eingehängt wurde, wird beim Aushängen
+wirklich durchgerechnet. Das ist gemessen, in beide Richtungen:
 
 ```
 mit `umount /mnt`:   fsck.fat -n → Rueckgabe 0, keine Anmerkung
 ohne `umount`:       fsck.fat sagt "Free cluster summary uninitialized"
 ```
+
+**Der erste Anlauf war anders, und die Vollabnahme hat ihn zerlegt** —
+siehe Abschnitt 14.
 
 ---
 
@@ -453,9 +460,9 @@ Nichts davon ist geschönt.
    Gelesen werden auch andere Zeichen — aber jedes Oktett über 127 wird
    zu `?`. Eine halbe UTF-16-Wandlung wäre schlimmer als eine ehrliche
    Ersatzmarke: der Name wäre lesbar falsch statt sichtbar unbekannt.
-7. **FAT32: höchstens 24 gleichzeitig geöffnete Knoten je Kernel**
+7. **FAT32: höchstens 16 gleichzeitig geöffnete Knoten je Kernel**
    (`fat.MAX_NODES`). Ein Knoten wird wiederverwendet, wenn dieselbe
-   Datei noch einmal geöffnet wird — sonst wäre die Tafel nach 24 `open`
+   Datei noch einmal geöffnet wird — sonst wäre die Tafel nach 16 `open`
    voll und `st_ino` wäre jedes Mal eine andere Zahl für dieselbe Datei.
 8. **FAT32: kein `fsync`.** Geschrieben wird sofort und ohne Zwischenlage;
    die FSInfo-Seite wird beim Aushängen nachgeführt. Wer die Maschine vor
@@ -480,7 +487,7 @@ Nichts davon ist geschönt.
 
 ---
 
-## 14. Zwei Fehler, die diese Runde selbst gemacht und gemessen hat
+## 14. Vier Fehler, die diese Runde selbst gemacht und gemessen hat
 
 * **`/proc/<pid>/maps` lief bis `proc.USER_TOP`.** Das ist die Oberkante
   des Stapels (0x40009000), nicht das Ende des Adressraums. Die Datei
@@ -492,8 +499,38 @@ Nichts davon ist geschönt.
   auf: Deskriptor 0 (die Konsole, Platz 0) fehlte, jeder geschlossene
   stand darin. Sichtbar wurde es als `0 1 2 4 5 … 15` statt `0 1 2`.
 
-Beides steht als Kommentar an der jeweiligen Stelle im Quelltext — so wie
-die vier kdata-Kollisionen in `kstate.fi` stehen.
+* **`kernel/user/mount.fi` verlor eine bestehende Zusage.** Das Programm
+  wurde neu geschrieben, damit es die Einhängetafel zeigt — und sagte
+  damit *ohne* die VFS-Schicht etwas anderes als vorher. Abschnitt 16
+  der Vollabnahme (`tools/k11/run.sh`) hält genau diese zwei Zeilen
+  Oktett für Oktett gegen eine Erwartung und fiel mit drei Zusagen
+  durch. Jetzt sagt es ohne die Schicht wortgleich das, was es in Runde
+  K11 gesagt hat, und mit ihr die Tafel dazu. **Eine Runde, die etwas
+  hinzufügt, darf nichts kosten.**
+
+* **Die freien Verbände beim Aushängen zu ZÄHLEN hat die Platte
+  zerstört — unter Last.** Der erste Anlauf las dafür die ganze
+  Zuordnungstafel: 1008 Sektoren, und zwar mit **abgeschalteten
+  Unterbrechungen**, weil die Sperre der Platte gehalten wird. In der
+  Vollabnahme (parallele QEMU-Läufe, geladene Maschine) riss darin ein
+  einzelner Lesevorgang die Zeitgrenze von `blk.ata_wait` — und
+  `ata_read_on` liess das Laufwerk daraufhin **mitten im Befehl**
+  stehen. Der nächste Befehl traf auf ein Laufwerk, das noch den
+  vorigen zu Ende bringen wollte, und schlug auch fehl: `part.scan`
+  fand keine Partitionstafel mehr, und `mount /dev/hdb1 /mnt vfat`
+  sagte `-ENODEV` auf einer Platte, die eine Sekunde vorher gelesen
+  worden war. **Sieben Zusagen fielen an dieser einen Ursache**, und
+  auf einer ruhigen Maschine war keine davon zu sehen.
+
+  Zwei Änderungen, beide für sich richtig: `blk.fi` setzt das Laufwerk
+  nach einer Zeitüberschreitung mit SRST zurück und wiederholt einen
+  Lesevorgang **einmal** (ein dritter Versuch wäre Aberglaube), und
+  `fat.fi` führt die Zahl laufend mit, statt sie zu zählen — das lange
+  Fenster mit abgeschalteten Unterbrechungen gibt es damit gar nicht
+  mehr.
+
+Alle vier stehen als Kommentar an der jeweiligen Stelle im Quelltext — so
+wie die vier kdata-Kollisionen in `kstate.fi` stehen.
 
 ---
 

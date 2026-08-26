@@ -336,6 +336,9 @@ sagt "$H" opens_before 0 "vor dem Oeffnen: null Deskriptoren auf /mnt"
 sagt "$H" opens_open 1 "nach dem Oeffnen: einer"
 sagt "$H" umount_busy 16 "umount mit offenem Deskriptor: -EBUSY"
 sagt "$H" opens_after 0 "nach dem Schliessen: wieder null"
+sagt "$H" opens_dup 1 "zwei Deskriptoren, eine offene Datei: die Einhaengung ist EINMAL offen"
+sagt "$H" opens_dup1 1 "der erste von beiden geschlossen: immer noch einmal"
+sagt "$H" opens_dup0 0 "der zweite auch: jetzt null"
 sagt "$H" umount_ok 0 "dann geht umount"
 sagt "$H" gone_is_err 2 "und danach ist die Datei wirklich weg"
 sagt "$H" mount_ok 0 "mount /dev/hdb1 /mnt vfat bringt sie zurueck"
@@ -485,6 +488,18 @@ rc=$(lauf nopart "$TMPD/k0.mb" "$TMPD/root.img" "$MBR" \
 hat "$TMPD/nopart.txt" "k14: mounts=3" "GEGENPROBE nopart: nur drei Einhaengungen"
 hat_nicht "$TMPD/nopart.txt" "on /mnt type vfat" \
     "GEGENPROBE nopart: ohne Partitionstafel wird kein FAT32 gefunden"
+
+# EIN PROZESS, DER EINE DATEI AUF /mnt OEFFNET UND ENDET, MUSS DIE
+# EINHAENGUNG WIEDER FREIGEBEN. Der Zaehler haengt an `open_unref`, und
+# ein sterbender Prozess geht durch `file.close_all` -- also an
+# `sys.unref_of` VORBEI. Die erste Fassung dieser Runde zaehlte dort,
+# und `umount /mnt` sagte danach fuer immer -EBUSY.
+rc=$(lauf freigabe "$TMPD/k0.mb" "$TMPD/root.img" "$MBR" \
+    "osum nokbd vfs script=cat /mnt/hello.txt;mount;umount /mnt;mount")
+num "der Freigabelauf beendet sich selbst" "$rc" eq 21
+n=$(grep -ac 'on /mnt type vfat' "$TMPD/freigabe.txt")
+num "/mnt steht vor dem Aushaengen genau einmal in der Tafel" "$n" eq 1
+hat "$TMPD/freigabe.txt" "hallo aus linux" "und der Prozess hat davon wirklich gelesen"
 
 # GEGENPROBE: KEINE ZWEITE PLATTE. Der Kernel muss das sagen und
 # weiterlaufen -- eine Maschine ohne zweites Laufwerk ist keine kaputte.
