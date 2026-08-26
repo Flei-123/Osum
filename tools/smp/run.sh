@@ -66,7 +66,7 @@ fi
 # ---------------------------------------------------------------- build
 
 echo "== 1. build the kernel with the trampoline of the other processors =="
-for f in boot isr switch smp; do
+for f in boot isr switch smp hv; do
     as --64 -o "$TMPD/$f.o" "kernel/$f.s" 2>"$TMPD/as.err" \
         && ok "$f.s assembles" \
         || { bad "$f.s"; sed 's/^/        /' "$TMPD/as.err" | head -5; }
@@ -96,7 +96,7 @@ for s in 0 1; do
           --defsym=KERNEL_AP_MAIN="_F$s.smp__ap_main" \
           --defsym=USER_MAIN="_F$s.u_enter" \
           -o "$TMPD/k$s.elf" "$TMPD/boot.o" "$TMPD/isr.o" "$TMPD/switch.o" \
-          "$TMPD/smp.o" "$TMPD/k$s.o" "$TMPD/uprog$s.o" 2>"$TMPD/ld$s.err"; then
+          "$TMPD/smp.o" "$TMPD/hv.o" "$TMPD/k$s.o" "$TMPD/uprog$s.o" 2>"$TMPD/ld$s.err"; then
         objcopy -O elf32-i386 "$TMPD/k$s.elf" "$TMPD/k$s.mb" 2>/dev/null
         ok "firnc$s: kernel with acpi.fi, cpu.fi, atomic.fi, smp.fi linked"
     else

@@ -1,0 +1,271 @@
+// kernel/vmcb.fi -- Runde K12: der Steuerblock der virtuellen Maschine.
+//
+// Diese Datei enthaelt KEINE Entscheidung. Sie ist die Uebersetzung von
+// AMD APM Band 2, Anhang B ("Layout of VMCB") nach Firn: wo welches Feld
+// liegt, wie breit es ist, und wie man ein Segment hineinschreibt. Alles,
+// was daraus folgt, steht in `hv.fi`.
+//
+// WARUM EINE EIGENE DATEI. Der Steuerblock ist 4096 Oktette mit etwa
+// sechzig benannten Feldern, und jede falsche Zahl darin ist ein Fehler,
+// den man nicht sieht: der Prozessor nimmt sie schweigend und der Gast
+// tut etwas anderes als gedacht. Sie hier zu buendeln heisst, dass es
+// EINE Stelle gibt, die man gegen das Handbuch haelt.
+//
+// ZWEI TEILE, und die Grenze liegt bei 0x400:
+//
+//   0x000..0x3FF  DER STEUERBEREICH. Was der Wirt dem Prozessor sagt:
+//                 welche Befehle des Gasts abgefangen werden, wo die
+//                 Bitkarten fuer Anschluesse und MSRs liegen, welche
+//                 Adressraumkennung der Gast hat, ob verschachtelte
+//                 Seitentabellen benutzt werden -- und, nach dem
+//                 Austritt, WARUM er ausgetreten ist.
+//   0x400..0xFFF  DER ZUSTANDSBEREICH. Der Gast selbst: seine Segmente,
+//                 seine Steuerregister, RIP, RSP, RAX, RFLAGS.
+//
+// WAS NICHT IM VMCB STEHT: rbx, rcx, rdx, rbp, rsi, rdi und r8 bis r15.
+// Die traegt `hv.s` von Hand hin und zurueck. Nur RAX, RSP und RIP sind
+// Felder -- alles andere waere Verschwendung, weil der Wirt sie ohnehin
+// anfassen muss.
+//
+// ARITHMETIK. Jede Zahl hier ist ein BITMUSTER oder ein Versatz in einer
+// Seite, kein Zaehler. Wo gerechnet wird, steht deshalb `+%` und `*%`:
+// die gepruefte Arithmetik dieser Sprache (Runde 72) gehoert an die
+// Stellen, an denen ein Ueberlauf ein Fehler waere, und nicht an eine
+// Feldadresse.
+
+import kstate
+
+export {
+    // Steuerbereich
+    C_ICPT_CR, C_ICPT_DR, C_ICPT_EXC, C_ICPT_1, C_ICPT_2, C_ICPT_3,
+    C_PAUSE, C_IOPM, C_MSRPM, C_TSCOFF, C_ASID, C_TLBCTL,
+    C_INTCTL, C_INTVEC, C_INTSTATE, C_EXITCODE, C_EXITINFO1,
+    C_EXITINFO2, C_EXITINTINFO, C_NPENABLE, C_AVIC, C_EVENTINJ,
+    C_NCR3, C_LBR, C_CLEAN, C_NRIP, C_FETCHLEN, C_FETCHBYTES,
+    // Zustandsbereich
+    S_ES, S_CS, S_SS, S_DS, S_FS, S_GS, S_GDTR, S_LDTR, S_IDTR, S_TR,
+    S_CPL, S_EFER, S_CR4, S_CR3, S_CR0, S_DR7, S_DR6, S_RFLAGS, S_RIP,
+    S_RSP, S_RAX, S_STAR, S_LSTAR, S_CSTAR, S_SFMASK, S_KGSBASE,
+    S_SYSENTER_CS, S_SYSENTER_ESP, S_SYSENTER_EIP, S_CR2, S_GPAT,
+    // Abfangbits
+    I3_INTR, I3_NMI, I3_SMI, I3_INIT, I3_VINTR, I3_CR0_SEL,
+    I3_RDTSC, I3_RDPMC, I3_CPUID, I3_INVD, I3_HLT, I3_INVLPG,
+    I3_IOIO, I3_MSR, I3_TASKSW, I3_SHUTDOWN,
+    I4_VMRUN, I4_VMMCALL, I4_VMLOAD, I4_VMSAVE, I4_STGI, I4_CLGI,
+    I4_SKINIT, I4_RDTSCP, I4_ICEBP, I4_WBINVD, I4_MONITOR, I4_MWAIT,
+    // Austrittsgruende
+    X_CR0_READ, X_CR0_WRITE, X_EXC_BASE, X_EXC_UD, X_EXC_GP, X_EXC_PF,
+    X_INTR, X_NMI, X_VINTR, X_CR0_SEL_WRITE, X_CPUID, X_HLT, X_IOIO,
+    X_MSR, X_SHUTDOWN, X_VMRUN, X_VMMCALL, X_NPF, X_ERR,
+    // Sonstiges
+    INT_MASKING, NP_ENABLE, TLB_FLUSH_ALL, EFER_SVME,
+    ATTR_CODE16, ATTR_DATA16, ATTR_LDTR, ATTR_TR,
+    // Zugriffe
+    rd, wr, rd32, wr32, wr16, wr8, seg, seg_base, seg_sel, zero_page
+}
+
+// ------------------------------------------------------ Steuerbereich
+
+const C_ICPT_CR: u64 = 0x000 // 16 Bit Lesen, 16 Bit Schreiben von CR0..15
+const C_ICPT_DR: u64 = 0x004 // dasselbe fuer die Fehlersuchregister
+const C_ICPT_EXC: u64 = 0x008 // ein Bit je Ausnahme 0..31
+const C_ICPT_1: u64 = 0x00C // INTR, CPUID, HLT, IOIO, MSR, SHUTDOWN ...
+const C_ICPT_2: u64 = 0x010 // VMRUN, VMMCALL, VMLOAD, STGI, MONITOR ...
+const C_ICPT_3: u64 = 0x014 // INVLPGB und was danach kam
+const C_PAUSE: u64 = 0x03C
+const C_IOPM: u64 = 0x040 // Bitkarte der Anschluesse, DREI Seiten
+const C_MSRPM: u64 = 0x048 // Bitkarte der MSRs, ZWEI Seiten
+const C_TSCOFF: u64 = 0x050
+const C_ASID: u64 = 0x058 // Adressraumkennung, 0 ist VERBOTEN
+const C_TLBCTL: u64 = 0x05C // 1 = beim Eintritt alles verwerfen
+const C_INTCTL: u64 = 0x060 // V_TPR, V_IRQ, V_INTR_MASKING
+const C_INTVEC: u64 = 0x064
+const C_INTSTATE: u64 = 0x068 // Bit 0 Schatten, Bit 1 Maske des Gasts
+const C_EXITCODE: u64 = 0x070 // WARUM der Gast ausgetreten ist
+const C_EXITINFO1: u64 = 0x078
+const C_EXITINFO2: u64 = 0x080
+const C_EXITINTINFO: u64 = 0x088
+const C_NPENABLE: u64 = 0x090 // Bit 0 = verschachtelte Seitentabellen
+const C_AVIC: u64 = 0x098
+const C_EVENTINJ: u64 = 0x0A8 // was der Wirt dem Gast einwirft
+const C_NCR3: u64 = 0x0B0 // die Wurzel der verschachtelten Tabelle
+const C_LBR: u64 = 0x0B8
+const C_CLEAN: u64 = 0x0C0
+const C_NRIP: u64 = 0x0C8 // NUR gueltig, wenn CPUID 0x8000000A EDX Bit 3
+const C_FETCHLEN: u64 = 0x0D0 // NUR mit Decode Assists
+const C_FETCHBYTES: u64 = 0x0D1
+
+// ---------------------------------------------------- Zustandsbereich
+//
+// Ein Segment sind sechzehn Oktette: Selektor (16), Attribute (16),
+// Grenze (32), Basis (64). Die Attribute sind die ZUSAMMENGESCHOBENE
+// Form: die unteren acht Bits sind die Oktette 47:40 des Deskriptors,
+// die oberen vier die Bits 55:52. Wer den Deskriptor eines Segments hat,
+// rechnet also ((d >> 40) & 0xFF) | ((d >> 44) & 0xF00).
+
+const S_ES: u64 = 0x400
+const S_CS: u64 = 0x410
+const S_SS: u64 = 0x420
+const S_DS: u64 = 0x430
+const S_FS: u64 = 0x440
+const S_GS: u64 = 0x450
+const S_GDTR: u64 = 0x460
+const S_LDTR: u64 = 0x470
+const S_IDTR: u64 = 0x480
+const S_TR: u64 = 0x490
+const S_CPL: u64 = 0x4CB // EIN Oktett
+const S_EFER: u64 = 0x4D0
+const S_CR4: u64 = 0x548
+const S_CR3: u64 = 0x550
+const S_CR0: u64 = 0x558
+const S_DR7: u64 = 0x560
+const S_DR6: u64 = 0x568
+const S_RFLAGS: u64 = 0x570
+const S_RIP: u64 = 0x578
+const S_RSP: u64 = 0x5D8
+const S_RAX: u64 = 0x5F8
+const S_STAR: u64 = 0x600
+const S_LSTAR: u64 = 0x608
+const S_CSTAR: u64 = 0x610
+const S_SFMASK: u64 = 0x618
+const S_KGSBASE: u64 = 0x620
+const S_SYSENTER_CS: u64 = 0x628
+const S_SYSENTER_ESP: u64 = 0x630
+const S_SYSENTER_EIP: u64 = 0x638
+const S_CR2: u64 = 0x640
+const S_GPAT: u64 = 0x668
+
+// -------------------------------------------------------- die Abfangbits
+//
+// C_ICPT_1, Bit fuer Bit. Was hier nicht steht, faengt diese Runde nicht
+// ab -- und was nicht abgefangen wird, tut der Gast unbemerkt.
+
+const I3_INTR: u64 = 1 // physische Unterbrechung: DER NOTAUSGANG
+const I3_NMI: u64 = 2
+const I3_SMI: u64 = 4
+const I3_INIT: u64 = 8
+const I3_VINTR: u64 = 16
+const I3_CR0_SEL: u64 = 32 // Schreiben auf CR0 ausser TS und MP
+const I3_RDTSC: u64 = 16384
+const I3_RDPMC: u64 = 32768
+const I3_CPUID: u64 = 262144 // Bit 18
+const I3_INVD: u64 = 4194304
+const I3_HLT: u64 = 16777216 // Bit 24
+const I3_INVLPG: u64 = 33554432
+const I3_IOIO: u64 = 134217728 // Bit 27
+const I3_MSR: u64 = 268435456 // Bit 28
+const I3_TASKSW: u64 = 536870912
+const I3_SHUTDOWN: u64 = 2147483648 // Bit 31
+
+// C_ICPT_2. VMRUN MUSS abgefangen werden -- ohne dieses Bit weist der
+// Prozessor den Eintritt zurueck (AMD APM 15.5.1, und QEMU tut es
+// genauso: svm_helper.c, `if (!cpu_svm_has_intercept(env, SVM_EXIT_VMRUN))`).
+const I4_VMRUN: u64 = 1
+const I4_VMMCALL: u64 = 2
+const I4_VMLOAD: u64 = 4
+const I4_VMSAVE: u64 = 8
+const I4_STGI: u64 = 16
+const I4_CLGI: u64 = 32
+const I4_SKINIT: u64 = 64
+const I4_RDTSCP: u64 = 128
+const I4_ICEBP: u64 = 256
+const I4_WBINVD: u64 = 512
+const I4_MONITOR: u64 = 1024
+const I4_MWAIT: u64 = 2048
+
+// ---------------------------------------------------- die Austrittsgruende
+
+const X_CR0_READ: u64 = 0x000 // bis 0x00F
+const X_CR0_WRITE: u64 = 0x010 // bis 0x01F
+const X_EXC_BASE: u64 = 0x040 // bis 0x05F, + Nummer der Ausnahme
+const X_EXC_UD: u64 = 0x046
+const X_EXC_GP: u64 = 0x04D
+const X_EXC_PF: u64 = 0x04E
+const X_INTR: u64 = 0x060
+const X_NMI: u64 = 0x061
+const X_VINTR: u64 = 0x064
+const X_CR0_SEL_WRITE: u64 = 0x065
+const X_CPUID: u64 = 0x072
+const X_HLT: u64 = 0x078
+const X_IOIO: u64 = 0x07B
+const X_MSR: u64 = 0x07C
+const X_SHUTDOWN: u64 = 0x07F
+const X_VMRUN: u64 = 0x080
+const X_VMMCALL: u64 = 0x081
+const X_NPF: u64 = 0x400
+// Der Prozessor schreibt -1, wenn er den Eintritt selbst zurueckweist:
+// eine Adressraumkennung von 0, ein verbotenes Bit in CR0, eine Bitkarte
+// jenseits des physischen Speichers.
+const X_ERR: u64 = 0xFFFFFFFFFFFFFFFF
+
+const INT_MASKING: u64 = 16777216 // C_INTCTL Bit 24
+const NP_ENABLE: u64 = 1
+const TLB_FLUSH_ALL: u64 = 1
+const EFER_SVME: u64 = 4096 // Bit 12
+
+// Zusammengeschobene Segmentattribute, wie oben beschrieben.
+const ATTR_CODE16: u64 = 0x009B // vorhanden, Code, lesbar, benutzt
+const ATTR_DATA16: u64 = 0x0093 // vorhanden, Daten, schreibbar, benutzt
+const ATTR_LDTR: u64 = 0x0082
+const ATTR_TR: u64 = 0x008B
+
+// -------------------------------------------------------------- Zugriffe
+//
+// Alles geht ueber `__mmio_*`. Nicht aus Vorsicht, sondern weil es muss:
+// der Prozessor selbst schreibt in diese Seite, waehrend der Wirt sie
+// liest (der Austrittsgrund entsteht zwischen zwei Firn-Anweisungen).
+// Ein gewoehnlicher Zugriff duerfte vom Optimierer aus einer Schleife
+// gezogen werden -- genau der Fehler, den `kstate.fi` in Runde 52 schon
+// einmal beschrieben hat.
+
+fn rd(vmcb: u64, off: u64) -> u64 {
+    return __mmio_read64((vmcb +% off) as *mut u64)
+}
+
+fn wr(vmcb: u64, off: u64, v: u64) {
+    __mmio_write64((vmcb +% off) as *mut u64, v)
+}
+
+fn rd32(vmcb: u64, off: u64) -> u64 {
+    return __mmio_read32((vmcb +% off) as *mut u32) as u64
+}
+
+fn wr32(vmcb: u64, off: u64, v: u64) {
+    __mmio_write32((vmcb +% off) as *mut u32, (v & 0xFFFFFFFF) as u32)
+}
+
+fn wr16(vmcb: u64, off: u64, v: u64) {
+    __mmio_write16((vmcb +% off) as *mut u16, (v & 0xFFFF) as u16)
+}
+
+fn wr8(vmcb: u64, off: u64, v: u64) {
+    __mmio_write8((vmcb +% off) as *mut u8, (v & 0xFF) as u8)
+}
+
+// Ein Segment vollstaendig: Selektor, Attribute, Grenze, Basis.
+fn seg(vmcb: u64, off: u64, sel: u64, attr: u64, limit: u64, base: u64) {
+    wr16(vmcb, off, sel)
+    wr16(vmcb, off +% 2, attr)
+    wr32(vmcb, off +% 4, limit)
+    wr(vmcb, off +% 8, base)
+}
+
+fn seg_base(vmcb: u64, off: u64) -> u64 {
+    return rd(vmcb, off +% 8)
+}
+
+fn seg_sel(vmcb: u64, off: u64) -> u64 {
+    return __mmio_read16((vmcb +% off) as *mut u16) as u64
+}
+
+// Eine Seite auf Null. Der Steuerblock MUSS genullt sein, bevor etwas
+// hineingeschrieben wird: jedes Feld, das nicht gesetzt wird, ist sonst,
+// was der Rahmenverwalter zufaellig darin liegen hatte -- und ein
+// zufaelliges Abfangbit ist ein Gast, der ohne Grund austritt.
+fn zero_page(p: u64) {
+    var i: u64 = 0
+    while i < 4096 {
+        __mmio_write64((p +% i) as *mut u64, 0)
+        i = i +% 8
+    }
+}
