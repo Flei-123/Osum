@@ -350,6 +350,22 @@ warum es keine Behauptung ist:
 | die Shell aus firnc1 | 279096 Oktette (Runde K6: 147288) |
 | das Userland aus firnc1, gesamt | 1987632 von erlaubten 1997152 |
 
+### Der eine Fall, der von der Last der Wirtsmaschine abhängt
+
+`tc netem: one frame in five thrown away` (Abschnitt 9 von
+`tools/net/run.sh`, Runde K8) verlangt, dass alle 262144 Oktette durch
+eine Leitung kommen, die jeden fünften Rahmen wegwirft. Runde K7B hat
+schon aufgeschrieben, dass dieser Fall wetterfühlig ist: unter Last läuft
+er in die Dreißig-Sekunden-Sperre von `netsvc.connect_service` und bricht
+mit 90000 bis 200000 Oktetten ab.
+
+Auf diesem Zweig gemessen: zweimal rot, **während gleichzeitig andere
+Läufe auf derselben Maschine liefen** (2 und 1 KiB/s), und grün, sobald
+die Maschine nichts anderes zu tun hatte (**83 KiB/s, 262144 Oktette,
+NET: 75 passed, 0 failed**). Der Durchsatz auf der sauberen Leitung ist
+auf beiden Zweigen derselbe (6300 bis 6400 KiB/s) — diese Runde hat den
+Netzweg nicht verlangsamt, sie hat nur beim Messen daneben gestanden.
+
 ---
 
 ## 6. Was am Übersetzer aufgefallen ist
