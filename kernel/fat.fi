@@ -63,6 +63,9 @@ import blk
 import mnt
 import vfsops
 import time
+import sched
+import atomic
+import cpu
 
 export { ops, mount_probe, release, sync, MAX_NODES }
 
@@ -146,6 +149,41 @@ fn buf(state: u64, which: u64) -> u64 {
 
 fn tick(state: u64) {
     kstate.add(state, kstate.VFS_INDIRECT, 1)
+}
+
+// ------------------------------------------------------------ die Sperre
+//
+// DIESELBE SPERRE WIE OFS, UND ZWAR MIT ABSICHT. `atomic.L_FS` schuetzt
+// in `fs.fi` die Arbeitsbloecke des Dateisystems -- und darunter die
+// ATA-REGISTER, die `blk.fi` benutzt und die keine eigene Sperre haben.
+// Ein FAT32, das an dieser Sperre vorbei auf die Platte griffe, wuerde
+// einem OFS auf einem anderen Kern mitten im Sektor die Tore
+// umschreiben. Zwei Dateisysteme, EINE Platte, EINE Sperre.
+//
+// Sie ist RE-ENTRANT auf demselben Kern, aus demselben Grund wie in
+// `fs.fi`: `f_create` ruft `parent_of`, das `f_lookup` ruft, und das
+// ist wieder ein Einstiegspunkt. Ohne die Wiedereintrittsfaehigkeit
+// saesse der Kern auf einer Sperre, die er selbst haelt, mit
+// abgeschalteten Unterbrechungen -- und die Maschine waere still.
+// Bit 63 der geretteten Flaggen traegt die Notiz; der Prozessor setzt
+// es nie, und `sched.irq_restore` sieht nur auf Bit 9.
+const NESTED: u64 = 0x8000000000000000
+
+fn enter(state: u64) -> u64 {
+    let flags: u64 = sched.irq_save()
+    let me: u64 = cpu.here(state)
+    if atomic.lock_owner(state, atomic.L_FS) == me + 1 {
+        return flags | NESTED
+    }
+    atomic.lock_take(state, atomic.L_FS, me)
+    return flags
+}
+
+fn leave(state: u64, flags: u64) {
+    if (flags & NESTED) == 0 {
+        atomic.lock_give(state, atomic.L_FS)
+    }
+    sched.irq_restore(flags & 0x7FFFFFFFFFFFFFFF)
 }
 
 // ------------------------------------------------------ kleine Handgriffe
@@ -370,6 +408,13 @@ fn node_get(state: u64, m: u64, clus: u64, size: u64, attr: u64,
 // `tools/k14/run.sh`: OHNE `umount` sagt fsck "Free cluster summary
 // uninitialized", MIT `umount` sagt es gar nichts.
 fn sync(state: u64, m: u64) -> u64 {
+    let __f: u64 = enter(state)
+    let __r: u64 = sync__inner(state, m)
+    leave(state, __f)
+    return __r
+}
+
+fn sync__inner(state: u64, m: u64) -> u64 {
     if sget(state, m, S_VALID) == 0 {
         return 0
     }
@@ -433,6 +478,13 @@ fn release(state: u64, m: u64) {
 // FAT32 erkannt wird -- und sie ist streng: was hier nicht durchkommt,
 // wird nicht eingehaengt, statt als etwas anderes gelesen zu werden.
 fn mount_probe(state: u64, m: u64) -> u64 {
+    let __f: u64 = enter(state)
+    let __r: u64 = mount_probe__inner(state, m)
+    leave(state, __f)
+    return __r
+}
+
+fn mount_probe__inner(state: u64, m: u64) -> u64 {
     var s_no: [u8; 20] = "fat: not fat32 (\0\0\0\0"
     var s_ok: [u8; 12] = "fat: spc=\0\0\0"
     var s_c: [u8; 12] = " clusters=\0\0"
@@ -829,6 +881,13 @@ fn segment(path: u64, at: u64, out: u64, max: u64) -> u64 {
 }
 
 fn f_lookup(state: u64, m: u64, path: u64) -> u64 {
+    let __f: u64 = enter(state)
+    let __r: u64 = f_lookup__inner(state, m, path)
+    leave(state, __f)
+    return __r
+}
+
+fn f_lookup__inner(state: u64, m: u64, path: u64) -> u64 {
     tick(state)
     if sget(state, m, S_VALID) == 0 {
         return 0
@@ -907,6 +966,14 @@ fn parent_of(state: u64, m: u64, path: u64, out_name: u64) -> u64 {
 
 fn f_read(state: u64, m: u64, node: u64, off: u64, dst: u64,
     len: u64) -> u64 {
+    let __f: u64 = enter(state)
+    let __r: u64 = f_read__inner(state, m, node, off, dst, len)
+    leave(state, __f)
+    return __r
+}
+
+fn f_read__inner(state: u64, m: u64, node: u64, off: u64, dst: u64,
+    len: u64) -> u64 {
     tick(state)
     if node == 0 || sget(state, m, S_VALID) == 0 {
         return 0
@@ -978,6 +1045,14 @@ fn entry_update(state: u64, m: u64, node: u64) -> bool {
 }
 
 fn f_write(state: u64, m: u64, node: u64, off: u64, src: u64,
+    len: u64) -> u64 {
+    let __f: u64 = enter(state)
+    let __r: u64 = f_write__inner(state, m, node, off, src, len)
+    leave(state, __f)
+    return __r
+}
+
+fn f_write__inner(state: u64, m: u64, node: u64, off: u64, src: u64,
     len: u64) -> u64 {
     tick(state)
     if node == 0 || sget(state, m, S_VALID) == 0 {
@@ -1479,6 +1554,13 @@ fn step_off(off: u64, n: u64) -> u64 {
 // -------------------------------------------------- die Verrichtungen
 
 fn f_readdir(state: u64, m: u64, dir: u64, index: u64, out: u64) -> u64 {
+    let __f: u64 = enter(state)
+    let __r: u64 = f_readdir__inner(state, m, dir, index, out)
+    leave(state, __f)
+    return __r
+}
+
+fn f_readdir__inner(state: u64, m: u64, dir: u64, index: u64, out: u64) -> u64 {
     tick(state)
     if dir == 0 || sget(state, m, S_VALID) == 0 {
         return 0
@@ -1514,6 +1596,13 @@ fn f_readdir(state: u64, m: u64, dir: u64, index: u64, out: u64) -> u64 {
 }
 
 fn f_attr(state: u64, m: u64, node: u64, what: u64) -> u64 {
+    let __f: u64 = enter(state)
+    let __r: u64 = f_attr__inner(state, m, node, what)
+    leave(state, __f)
+    return __r
+}
+
+fn f_attr__inner(state: u64, m: u64, node: u64, what: u64) -> u64 {
     tick(state)
     if node == 0 {
         return 0
@@ -1547,6 +1636,13 @@ fn f_attr(state: u64, m: u64, node: u64, what: u64) -> u64 {
 }
 
 fn f_create(state: u64, m: u64, path: u64, art: u64) -> u64 {
+    let __f: u64 = enter(state)
+    let __r: u64 = f_create__inner(state, m, path, art)
+    leave(state, __f)
+    return __r
+}
+
+fn f_create__inner(state: u64, m: u64, path: u64, art: u64) -> u64 {
     tick(state)
     if sget(state, m, S_VALID) == 0 {
         return 0
@@ -1697,6 +1793,13 @@ fn back_off(off: u64, n: u64) -> u64 {
 }
 
 fn f_unlink(state: u64, m: u64, path: u64) -> u64 {
+    let __f: u64 = enter(state)
+    let __r: u64 = f_unlink__inner(state, m, path)
+    leave(state, __f)
+    return __r
+}
+
+fn f_unlink__inner(state: u64, m: u64, path: u64) -> u64 {
     tick(state)
     if sget(state, m, S_VALID) == 0 {
         return 5 // EIO
@@ -1734,6 +1837,13 @@ fn f_unlink(state: u64, m: u64, path: u64) -> u64 {
 }
 
 fn f_rename(state: u64, m: u64, from: u64, to: u64) -> u64 {
+    let __f: u64 = enter(state)
+    let __r: u64 = f_rename__inner(state, m, from, to)
+    leave(state, __f)
+    return __r
+}
+
+fn f_rename__inner(state: u64, m: u64, from: u64, to: u64) -> u64 {
     tick(state)
     if sget(state, m, S_VALID) == 0 {
         return 5
@@ -1770,6 +1880,13 @@ fn f_rename(state: u64, m: u64, from: u64, to: u64) -> u64 {
 }
 
 fn f_trunc(state: u64, m: u64, node: u64) -> u64 {
+    let __f: u64 = enter(state)
+    let __r: u64 = f_trunc__inner(state, m, node)
+    leave(state, __f)
+    return __r
+}
+
+fn f_trunc__inner(state: u64, m: u64, node: u64) -> u64 {
     tick(state)
     if node == 0 {
         return 9
