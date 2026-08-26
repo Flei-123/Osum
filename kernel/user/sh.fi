@@ -829,6 +829,7 @@ fn execute(bg: bool) -> bool {
         return leaving == 0
     }
     make_path(argv[0 as usize])
+    push_env()
     let pid: u64 = ulib.sys(ulib.SYS_EXEC, (&path[0 as usize]) as u64,
         (&argv[0 as usize]) as u64, argc)
     if ulib.bad(pid) {
@@ -1039,6 +1040,8 @@ const FORBUF: u64 = 1024
 const FORMAX: u64 = 32
 
 static mut src: [u8; 16384] = [0 as u8; 16384]
+static mut raw: [u8; 16384] = [0 as u8; 16384]
+static mut nraw: u64 = 0
 static mut nsrc: u64 = 0
 static mut sat: [u64; 512] = [0 as u64; 512]
 static mut slen: [u64; 512] = [0 as u64; 512]
@@ -1054,6 +1057,68 @@ static mut brk_flag: u64 = 0
 static mut cont_flag: u64 = 0
 static mut calls: u64 = 0
 static mut kwbuf: [u8; 32] = [0 as u8; 32]
+
+// EIN WOERTERBUCH STATT VIERZIG ZEICHENKETTEN AUF DEM STAPEL.
+//
+// Ein `var s: [u8; n] = "then\0"` INNERHALB einer Funktion legt Firn Stufe
+// 0 auf den Stapel und fuellt es bei jedem Aufruf Oktett fuer Oktett. Der
+// Ausfuehrer haette so vierzig davon, und der Vergleich waere vierzig
+// Aufrufe von `streq`. Hier steht die Liste EINMAL in `.rodata`, und
+// verglichen wird eine ZAHL. Es steht als `static mut` da und nicht als
+// `static`, obwohl niemand hineinschreibt: firnc1 (der Uebersetzer in
+// Firn) bricht bei einem unveraenderlichen `static` mit einer
+// Zeichenkette in einer Datei dieser Groesse OHNE MELDUNG mit 1 ab.
+// Siehe docs/ROUNDK11.md, Abschnitt "was am Uebersetzer aufgefallen ist".
+//
+// Das ist nicht Kosmetik: die Shell muss samt
+// dem uebrigen Userland auf eine Platte von 2 MiB passen, und
+// tools/userland/run.sh rechnet das nach.
+const W_IF: u64 = 1
+const W_THEN: u64 = 2
+const W_ELIF: u64 = 3
+const W_ELSE: u64 = 4
+const W_FI: u64 = 5
+const W_WHILE: u64 = 6
+const W_UNTIL: u64 = 7
+const W_FOR: u64 = 8
+const W_DO: u64 = 9
+const W_DONE: u64 = 10
+const W_CASE: u64 = 11
+const W_ESAC: u64 = 12
+const W_IN: u64 = 13
+const W_RETURN: u64 = 14
+const W_BREAK: u64 = 15
+const W_CONTINUE: u64 = 16
+const W_COLON: u64 = 17
+const W_SEMI2: u64 = 18
+const W_OPEN: u64 = 19
+const W_CLOSE: u64 = 20
+
+static mut KWTAB: [u8; 89] = "if\0then\0elif\0else\0fi\0while\0until\0for\0do\0done\0case\0esac\0in\0return\0break\0continue\0:\0;;\0{\0}\0"
+
+// Welche Nummer dieses Wort hat, oder 0.
+fn kw_id_of(p: u64) -> u64 {
+    var at: u64 = 0
+    var id: u64 = 1
+    while at < 89 {
+        if KWTAB[(at) as usize] == 0 as u8 {
+            return 0
+        }
+        if ulib.streq((&KWTAB[(at) as usize]) as u64, p) {
+            return id
+        }
+        while KWTAB[(at) as usize] != 0 as u8 {
+            at = at + 1
+        }
+        at = at + 1
+        id = id + 1
+    }
+    return 0
+}
+
+fn kw_id(i: u64) -> u64 {
+    return kw_id_of(kw_of(i))
+}
 
 // ------------------------------------------------- Anweisungen schneiden
 
@@ -1106,18 +1171,22 @@ fn lit_eq(a: u64, n: u64, p: u64) -> bool {
     return *((p + n) as *mut u8) == 0 as u8
 }
 
+// Ein Schluesselwort, hinter dem auf derselben Zeile noch ein Befehl
+// stehen darf.
 fn lead(a: u64, w: u64) -> bool {
-    var k_then: [u8; 5] = "then\0"
-    var k_else: [u8; 5] = "else\0"
-    var k_do: [u8; 3] = "do\0"
-    let n: u64 = w - a
-    if lit_eq(a, n, (&k_then[0 as usize]) as u64) {
-        return true
+    var buf: [u8; 32] = [0 as u8; 32]
+    var n: u64 = w - a
+    if n > 30 {
+        return false
     }
-    if lit_eq(a, n, (&k_else[0 as usize]) as u64) {
-        return true
+    var k: u64 = 0
+    while k < n {
+        buf[(k) as usize] = src[(a + k) as usize]
+        k = k + 1
     }
-    return lit_eq(a, n, (&k_do[0 as usize]) as u64)
+    buf[(n) as usize] = 0 as u8
+    let id: u64 = kw_id_of((&buf[0 as usize]) as u64)
+    return id == W_THEN || id == W_ELSE || id == W_DO
 }
 
 // Der ganze Text in Anweisungen. Getrennt wird an Zeilenende und an `;`,
@@ -1228,33 +1297,14 @@ fn tail_len(i: u64) -> u64 {
 // ------------------------------------------------- Bloecke finden
 
 fn opener(i: u64) -> bool {
-    var k_if: [u8; 3] = "if\0"
-    var k_while: [u8; 6] = "while\0"
-    var k_for: [u8; 4] = "for\0"
-    var k_case: [u8; 5] = "case\0"
-    if kw_is(i, (&k_if[0 as usize]) as u64) {
-        return true
-    }
-    if kw_is(i, (&k_while[0 as usize]) as u64) {
-        return true
-    }
-    if kw_is(i, (&k_for[0 as usize]) as u64) {
-        return true
-    }
-    return kw_is(i, (&k_case[0 as usize]) as u64)
+    let id: u64 = kw_id(i)
+    return id == W_IF || id == W_WHILE || id == W_UNTIL || id == W_FOR
+        || id == W_CASE
 }
 
 fn closer(i: u64) -> bool {
-    var k_fi: [u8; 3] = "fi\0"
-    var k_done: [u8; 5] = "done\0"
-    var k_esac: [u8; 5] = "esac\0"
-    if kw_is(i, (&k_fi[0 as usize]) as u64) {
-        return true
-    }
-    if kw_is(i, (&k_done[0 as usize]) as u64) {
-        return true
-    }
-    return kw_is(i, (&k_esac[0 as usize]) as u64)
+    let id: u64 = kw_id(i)
+    return id == W_FI || id == W_DONE || id == W_ESAC
 }
 
 // Die naechste Anweisung zwischen `from` und `to`, deren erstes Wort
@@ -1264,14 +1314,8 @@ fn scan_to(from: u64, to: u64, a: u64, b: u64, c: u64) -> u64 {
     var i: u64 = from
     while i < to {
         if depth == 0 {
-            let w: u64 = kw_of(i)
-            if a != 0 && ulib.streq(w, a) {
-                return i
-            }
-            if b != 0 && ulib.streq(w, b) {
-                return i
-            }
-            if c != 0 && ulib.streq(w, c) {
+            let w: u64 = kw_id(i)
+            if w != 0 && (w == a || w == b || w == c) {
                 return i
             }
         }
@@ -1379,30 +1423,36 @@ fn num_cmp(a: u64, op: u64, b: u64) -> bool {
     return x >= y
 }
 
+// Dieselbe Ueberlegung wie beim Woerterbuch der Schluesselwoerter: EINE
+// Liste in `.rodata`, verglichen wird eine Zahl.
+//   1 -eq  2 -ne  3 -lt  4 -le  5 -gt  6 -ge
+//   7 -e   8 -f   9 -d  10 -r  11 -s  12 -n  13 -z
+//  14 =   15 !=  16 !
+static mut OPTAB: [u8; 52] = "-eq\0-ne\0-lt\0-le\0-gt\0-ge\0-e\0-f\0-d\0-r\0-s\0-n\0-z\0=\0!=\0!\0"
+
+fn op_id(p: u64) -> u64 {
+    var at: u64 = 0
+    var id: u64 = 1
+    while at < 52 {
+        if OPTAB[(at) as usize] == 0 as u8 {
+            return 0
+        }
+        if ulib.streq((&OPTAB[(at) as usize]) as u64, p) {
+            return id
+        }
+        while OPTAB[(at) as usize] != 0 as u8 {
+            at = at + 1
+        }
+        at = at + 1
+        id = id + 1
+    }
+    return 0
+}
+
 fn num_op(p: u64) -> u64 {
-    var o_eq: [u8; 4] = "-eq\0"
-    var o_ne: [u8; 4] = "-ne\0"
-    var o_lt: [u8; 4] = "-lt\0"
-    var o_le: [u8; 4] = "-le\0"
-    var o_gt: [u8; 4] = "-gt\0"
-    var o_ge: [u8; 4] = "-ge\0"
-    if ulib.streq(p, (&o_eq[0 as usize]) as u64) {
-        return 1
-    }
-    if ulib.streq(p, (&o_ne[0 as usize]) as u64) {
-        return 2
-    }
-    if ulib.streq(p, (&o_lt[0 as usize]) as u64) {
-        return 3
-    }
-    if ulib.streq(p, (&o_le[0 as usize]) as u64) {
-        return 4
-    }
-    if ulib.streq(p, (&o_gt[0 as usize]) as u64) {
-        return 5
-    }
-    if ulib.streq(p, (&o_ge[0 as usize]) as u64) {
-        return 6
+    let id: u64 = op_id(p)
+    if id >= 1 && id <= 6 {
+        return id
     }
     return 0
 }
@@ -1416,16 +1466,6 @@ fn num_op(p: u64) -> u64 {
 // = != (Vergleich), -eq -ne -lt -le -gt -ge (Zahlen), ! davor, und ein
 // einzelnes Wort ist wahr, wenn es nicht leer ist.
 fn do_test(as_bracket: bool) -> u64 {
-    var o_e: [u8; 3] = "-e\0"
-    var o_f: [u8; 3] = "-f\0"
-    var o_d: [u8; 3] = "-d\0"
-    var o_r: [u8; 3] = "-r\0"
-    var o_s: [u8; 3] = "-s\0"
-    var o_n: [u8; 3] = "-n\0"
-    var o_z: [u8; 3] = "-z\0"
-    var o_bang: [u8; 2] = "!\0"
-    var o_eqs: [u8; 2] = "=\0"
-    var o_nes: [u8; 3] = "!=\0"
     var n: u64 = argc
     if as_bracket {
         // Die schliessende Klammer gehoert nicht zur Bedingung.
@@ -1435,45 +1475,40 @@ fn do_test(as_bracket: bool) -> u64 {
     }
     var at: u64 = 1
     var invert: bool = false
-    while at < n && ulib.streq(argv[(at) as usize], (&o_bang[0 as usize]) as u64) {
+    while at < n && op_id(argv[(at) as usize]) == 16 {
         invert = !invert
         at = at + 1
     }
     var yes: bool = false
     let left: u64 = n - at
-    if left == 0 {
-        yes = false
-    } else if left == 1 {
+    if left == 1 {
         yes = *((argv[(at) as usize]) as *mut u8) != 0 as u8
     } else if left == 2 {
-        let o: u64 = argv[(at) as usize]
+        let o: u64 = op_id(argv[(at) as usize])
         let v: u64 = argv[(at + 1) as usize]
-        if ulib.streq(o, (&o_e[0 as usize]) as u64) {
+        if o == 7 || o == 10 {
             yes = !ulib.bad(ulib.size_of(v)) || ulib.is_dir(v)
-        } else if ulib.streq(o, (&o_f[0 as usize]) as u64) {
+        } else if o == 8 {
             yes = !ulib.bad(ulib.size_of(v)) && !ulib.is_dir(v)
-        } else if ulib.streq(o, (&o_d[0 as usize]) as u64) {
+        } else if o == 9 {
             yes = ulib.is_dir(v)
-        } else if ulib.streq(o, (&o_r[0 as usize]) as u64) {
-            yes = !ulib.bad(ulib.size_of(v)) || ulib.is_dir(v)
-        } else if ulib.streq(o, (&o_s[0 as usize]) as u64) {
+        } else if o == 11 {
             let sz: u64 = ulib.size_of(v)
             yes = !ulib.bad(sz) && sz > 0
-        } else if ulib.streq(o, (&o_n[0 as usize]) as u64) {
+        } else if o == 12 {
             yes = *((v) as *mut u8) != 0 as u8
-        } else if ulib.streq(o, (&o_z[0 as usize]) as u64) {
+        } else if o == 13 {
             yes = *((v) as *mut u8) == 0 as u8
         }
-    } else {
+    } else if left >= 3 {
         let a: u64 = argv[(at) as usize]
-        let o: u64 = argv[(at + 1) as usize]
+        let o: u64 = op_id(argv[(at + 1) as usize])
         let b: u64 = argv[(at + 2) as usize]
-        let nop: u64 = num_op(o)
-        if nop != 0 {
-            yes = num_cmp(a, nop, b)
-        } else if ulib.streq(o, (&o_eqs[0 as usize]) as u64) {
+        if o >= 1 && o <= 6 {
+            yes = num_cmp(a, o, b)
+        } else if o == 14 {
             yes = ulib.streq(a, b)
-        } else if ulib.streq(o, (&o_nes[0 as usize]) as u64) {
+        } else if o == 15 {
             yes = !ulib.streq(a, b)
         }
     }
@@ -1517,77 +1552,51 @@ fn pos_get(k: u64) -> u64 {
 
 // Anweisungen `from`..`to`. Gibt false, wenn `exit` dabei war.
 fn exec_range(from: u64, to: u64) -> bool {
-    var k_if: [u8; 3] = "if\0"
-    var k_elif: [u8; 5] = "elif\0"
-    var k_else: [u8; 5] = "else\0"
-    var k_then: [u8; 5] = "then\0"
-    var k_fi: [u8; 3] = "fi\0"
-    var k_while: [u8; 6] = "while\0"
-    var k_until: [u8; 6] = "until\0"
-    var k_for: [u8; 4] = "for\0"
-    var k_do: [u8; 3] = "do\0"
-    var k_done: [u8; 5] = "done\0"
-    var k_case: [u8; 5] = "case\0"
-    var k_esac: [u8; 5] = "esac\0"
-    var k_ret: [u8; 7] = "return\0"
-    var k_brk: [u8; 6] = "break\0"
-    var k_cont: [u8; 9] = "continue\0"
-    var k_colon: [u8; 2] = ":\0"
-    var k_close: [u8; 2] = "}\0"
     var i: u64 = from
-    var alive: bool = true
-    while i < to && alive && ret_flag == 0 && brk_flag == 0 && cont_flag == 0 {
-        let w: u64 = kw_of(i)
-        if ulib.streq(w, (&k_if[0 as usize]) as u64) {
+    while i < to && ret_flag == 0 && brk_flag == 0 && cont_flag == 0 {
+        let w: u64 = kw_id(i)
+        if w == W_IF {
             i = do_if(i, to)
             if i == ulib.EOF {
                 return false
             }
-        } else if ulib.streq(w, (&k_while[0 as usize]) as u64)
-        || ulib.streq(w, (&k_until[0 as usize]) as u64) {
-            let r: u64 = do_while(i, to,
-                ulib.streq(w, (&k_until[0 as usize]) as u64))
+        } else if w == W_WHILE || w == W_UNTIL {
+            let r: u64 = do_while(i, to, w == W_UNTIL)
             if r == ulib.EOF {
                 return false
             }
             i = r
-        } else if ulib.streq(w, (&k_for[0 as usize]) as u64) {
+        } else if w == W_FOR {
             let r: u64 = do_for(i, to)
             if r == ulib.EOF {
                 return false
             }
             i = r
-        } else if ulib.streq(w, (&k_case[0 as usize]) as u64) {
+        } else if w == W_CASE {
             let r: u64 = do_case(i, to)
             if r == ulib.EOF {
                 return false
             }
             i = r
-        } else if ulib.streq(w, (&k_ret[0 as usize]) as u64) {
+        } else if w == W_RETURN {
             if tail_len(i) > 0 {
                 status = ulib.to_num((&src[(tail_of(i)) as usize]) as u64)
             }
             ret_flag = 1
             i = i + 1
-        } else if ulib.streq(w, (&k_brk[0 as usize]) as u64) {
+        } else if w == W_BREAK {
             brk_flag = 1
             i = i + 1
-        } else if ulib.streq(w, (&k_cont[0 as usize]) as u64) {
+        } else if w == W_CONTINUE {
             cont_flag = 1
             i = i + 1
-        } else if ulib.streq(w, (&k_colon[0 as usize]) as u64) {
+        } else if w == W_COLON {
             status = 0
             i = i + 1
-        } else if ulib.streq(w, (&k_close[0 as usize]) as u64)
-        || ulib.streq(w, (&k_fi[0 as usize]) as u64)
-        || ulib.streq(w, (&k_done[0 as usize]) as u64)
-        || ulib.streq(w, (&k_esac[0 as usize]) as u64)
-        || ulib.streq(w, (&k_then[0 as usize]) as u64)
-        || ulib.streq(w, (&k_do[0 as usize]) as u64)
-        || ulib.streq(w, (&k_else[0 as usize]) as u64) {
-            // Ein Schluesselwort ohne seinen Kopf -- uebergehen statt
-            // als Befehl zu suchen. So bleibt ein halb geschriebenes
-            // Skript eine Meldung und kein `sh: cannot run fi`.
+        } else if w != 0 {
+            // Ein Schluesselwort ohne seinen Kopf -- uebergehen statt als
+            // Befehl zu suchen. So bleibt ein halb geschriebenes Skript
+            // eine Meldung und kein `sh: cannot run fi`.
             i = i + 1
         } else if is_funcdef(i) {
             i = def_func(i, to)
@@ -1598,7 +1607,7 @@ fn exec_range(from: u64, to: u64) -> bool {
             i = i + 1
         }
     }
-    return alive
+    return true
 }
 
 // Ein gewoehnlicher Befehl -- oder der Aufruf einer Funktion.
@@ -1668,7 +1677,6 @@ fn is_funcdef(i: u64) -> bool {
 }
 
 fn def_func(i: u64, to: u64) -> u64 {
-    var k_close: [u8; 2] = "}\0"
     let a: u64 = sat[(i) as usize]
     let b: u64 = a + slen[(i) as usize]
     let w: u64 = word_end(a, b)
@@ -1688,12 +1696,9 @@ fn def_func(i: u64, to: u64) -> u64 {
     // Der Rumpf beginnt hinter der oeffnenden Klammer. Steht sie allein
     // in der naechsten Anweisung, faengt er eine spaeter an.
     var body: u64 = i + 1
-    let end: u64 = scan_to(body, to, (&k_close[0 as usize]) as u64, 0, 0)
-    if body < to && kw_of(body) != 0 {
-        var only: [u8; 2] = "{\0"
-        if kw_is(body, (&only[0 as usize]) as u64) && slen[(body) as usize] == 1 {
-            body = body + 1
-        }
+    let end: u64 = scan_to(body, to, W_CLOSE, 0, 0)
+    if body < to && kw_id(body) == W_OPEN && slen[(body) as usize] == 1 {
+        body = body + 1
     }
     fn_beg[(nfunc) as usize] = body
     fn_end[(nfunc) as usize] = end
@@ -1706,17 +1711,12 @@ fn def_func(i: u64, to: u64) -> u64 {
 
 // `if` .. `then` .. [`elif` .. `then` ..] [`else` ..] `fi`
 fn do_if(i: u64, to: u64) -> u64 {
-    var k_then: [u8; 5] = "then\0"
-    var k_elif: [u8; 5] = "elif\0"
-    var k_else: [u8; 5] = "else\0"
-    var k_fi: [u8; 3] = "fi\0"
-    let fi: u64 = scan_to(i + 1, to, (&k_fi[0 as usize]) as u64, 0, 0)
+    let fi: u64 = scan_to(i + 1, to, W_FI, 0, 0)
     var head: u64 = i
     var done: bool = false
     var alive: bool = true
     while !done {
-        let then_at: u64 = scan_to(head + 1, fi, (&k_then[0 as usize]) as u64,
-            0, 0)
+        let then_at: u64 = scan_to(head + 1, fi, W_THEN, 0, 0)
         if then_at >= fi {
             done = true
         } else {
@@ -1735,15 +1735,13 @@ fn do_if(i: u64, to: u64) -> u64 {
                 c = c + 1
             }
             let ok: bool = status == 0
-            let next: u64 = scan_to(then_at + 1, fi,
-                (&k_elif[0 as usize]) as u64, (&k_else[0 as usize]) as u64, 0)
+            let next: u64 = scan_to(then_at + 1, fi, W_ELIF, W_ELSE, 0)
             if ok {
                 if !exec_range(then_at + 1, next) {
                     return ulib.EOF
                 }
                 done = true
-            } else if next < fi
-            && kw_is(next, (&k_else[0 as usize]) as u64) {
+            } else if next < fi && kw_id(next) == W_ELSE {
                 if !exec_range(next + 1, fi) {
                     return ulib.EOF
                 }
@@ -1765,10 +1763,8 @@ fn do_if(i: u64, to: u64) -> u64 {
 // `while COND` `do` .. `done` -- und `until`, das dieselbe Schleife mit
 // umgedrehter Bedingung ist.
 fn do_while(i: u64, to: u64, invert: bool) -> u64 {
-    var k_do: [u8; 3] = "do\0"
-    var k_done: [u8; 5] = "done\0"
-    let done_at: u64 = scan_to(i + 1, to, (&k_done[0 as usize]) as u64, 0, 0)
-    let do_at: u64 = scan_to(i + 1, done_at, (&k_do[0 as usize]) as u64, 0, 0)
+    let done_at: u64 = scan_to(i + 1, to, W_DONE, 0, 0)
+    let do_at: u64 = scan_to(i + 1, done_at, W_DO, 0, 0)
     if do_at >= done_at {
         return done_at
     }
@@ -1822,14 +1818,11 @@ fn do_while(i: u64, to: u64, invert: bool) -> u64 {
 
 // `for V in W...` `do` .. `done`
 fn do_for(i: u64, to: u64) -> u64 {
-    var k_do: [u8; 3] = "do\0"
-    var k_done: [u8; 5] = "done\0"
-    var k_in: [u8; 3] = "in\0"
     var buf: [u8; 1024] = [0 as u8; 1024]
     var at: [u64; 32] = [0 as u64; 32]
     var name: [u8; 24] = [0 as u8; 24]
-    let done_at: u64 = scan_to(i + 1, to, (&k_done[0 as usize]) as u64, 0, 0)
-    let do_at: u64 = scan_to(i + 1, done_at, (&k_do[0 as usize]) as u64, 0, 0)
+    let done_at: u64 = scan_to(i + 1, to, W_DONE, 0, 0)
+    let do_at: u64 = scan_to(i + 1, done_at, W_DO, 0, 0)
     if do_at >= done_at {
         return done_at
     }
@@ -1842,7 +1835,7 @@ fn do_for(i: u64, to: u64) -> u64 {
     }
     ulib.strncpy((&name[0 as usize]) as u64, word_at(1), 24)
     var k: u64 = 2
-    if k < ntok && ulib.streq(word_at(k), (&k_in[0 as usize]) as u64) {
+    if k < ntok && kw_id_of(word_at(k)) == W_IN {
         k = k + 1
     }
     // DIE WORTE WERDEN AN LEERZEICHEN NOCH EINMAL ZERLEGT. `$LIST` wird
@@ -1905,11 +1898,9 @@ fn do_for(i: u64, to: u64) -> u64 {
 
 // `case W in` `MUSTER)` .. `;;` .. `esac`
 fn do_case(i: u64, to: u64) -> u64 {
-    var k_esac: [u8; 5] = "esac\0"
-    var k_semi: [u8; 3] = ";;\0"
     var subject: [u8; 128] = [0 as u8; 128]
     var pat: [u8; 128] = [0 as u8; 128]
-    let esac: u64 = scan_to(i + 1, to, (&k_esac[0 as usize]) as u64, 0, 0)
+    let esac: u64 = scan_to(i + 1, to, W_ESAC, 0, 0)
     if !tokenize_stmt(i) {
         status = 2
         return esac + 1
@@ -1965,8 +1956,7 @@ fn do_case(i: u64, to: u64) -> u64 {
                 }
                 m = m + 1
             }
-            let stop: u64 = scan_to(j + 1, esac, (&k_semi[0 as usize]) as u64,
-                0, 0)
+            let stop: u64 = scan_to(j + 1, esac, W_SEMI2, 0, 0)
             if matched {
                 hit = true
                 status = 0
@@ -2000,19 +1990,86 @@ fn do_case(i: u64, to: u64) -> u64 {
 // ---------------------------------------------------- ein ganzes Skript
 
 fn read_all(fd: u64) -> bool {
-    nsrc = 0
+    nraw = 0
     var going: bool = true
     while going {
         let n: u64 = ulib.sys(ulib.SYS_READ, fd,
-            (&src[(nsrc) as usize]) as u64, 4096)
+            (&raw[(nraw) as usize]) as u64, 4096)
         if n == 0 || ulib.bad(n) {
             going = false
         } else {
-            nsrc = nsrc + n
-            if nsrc + 4096 > SRCMAX {
+            nraw = nraw + n
+            if nraw + 4096 > SRCMAX {
                 return false
             }
         }
+    }
+    return edit_pass()
+}
+
+// DER ZEILENEDITOR AUS RUNDE K1, UNVERAENDERT -- und er steht hier, weil
+// er sonst mit dem Lesen als Ganzes verschwunden waere.
+//
+// Auf dieser Maschine sind das Oktett 8 (Ruecktaste) und das Oktett 14
+// ("die Zeile von vorhin") Tasten, und weil sie Oktette sind, kann eine
+// DATEI sie genauso enthalten. Genau daran misst Abschnitt 5 von
+// tools/userland/run.sh den Zeileneditor -- ohne einen Menschen davor.
+// Also bekommt der Text vor dem Zerlegen denselben Durchgang, den
+// `get_line` Zeichen fuer Zeichen macht: 8 nimmt das letzte Zeichen
+// zurueck, 14 setzt die vorige Zeile ein, und eine nicht leere Zeile
+// wird die neue "vorige".
+fn edit_pass() -> bool {
+    var last: [u8; 256] = [0 as u8; 256]
+    var cur: [u8; 256] = [0 as u8; 256]
+    nsrc = 0
+    var i: u64 = 0
+    var n: u64 = 0
+    var going: bool = true
+    while going {
+        let at_end: bool = i >= nraw
+        var c: u64 = 10
+        if !at_end {
+            c = (raw[(i) as usize]) as u64
+        }
+        if c == 10 {
+            if nsrc + n + 2 >= SRCMAX {
+                return false
+            }
+            var k: u64 = 0
+            while k < n {
+                src[(nsrc + k) as usize] = cur[(k) as usize]
+                k = k + 1
+            }
+            nsrc = nsrc + n
+            src[(nsrc) as usize] = 10 as u8
+            nsrc = nsrc + 1
+            if n > 0 {
+                k = 0
+                while k <= n {
+                    last[(k) as usize] = cur[(k) as usize]
+                    k = k + 1
+                }
+            }
+            n = 0
+            if at_end {
+                going = false
+            }
+        } else if c == 8 {
+            if n > 0 {
+                n = n - 1
+            }
+        } else if c == 14 {
+            n = 0
+            while last[(n) as usize] != 0 as u8 && n + 1 < LINE {
+                cur[(n) as usize] = last[(n) as usize]
+                n = n + 1
+            }
+        } else if n + 1 < LINE {
+            cur[(n) as usize] = c as u8
+            n = n + 1
+        }
+        cur[(n) as usize] = 0 as u8
+        i = i + 1
     }
     return true
 }
@@ -2043,4 +2100,46 @@ fn do_shift() {
         npos = npos - 1
     }
     status = 0
+}
+
+// RUNDE K11: `export` erreicht das Kind. Runde K6 hat die Markierung
+// gesetzt und in die Doku geschrieben, dass sie nirgends ankommt; jetzt
+// wird sie vor jedem Start in den Kernel geschoben (SYS_OSUM_SETENV), und
+// `kernel/elf.fi` legt sie dem Kind auf die Argumentseite.
+//
+// Vor JEDEM Start und nicht nur beim `export`: eine Variable, die schon
+// markiert ist und danach einen neuen Wert bekommt, soll den neuen Wert
+// weitergeben.
+fn push_env() {
+    var buf: [u8; 512] = [0 as u8; 512]
+    var at: u64 = 0
+    var i: u64 = 0
+    while i < nvar {
+        if vexp[(i) as usize] == 1 {
+            let name: u64 = (&vname[(i * VNAME) as usize]) as u64
+            let val: u64 = (&vval[(i * VVAL) as usize]) as u64
+            let n1: u64 = ulib.length(name)
+            let n2: u64 = ulib.length(val)
+            if at + n1 + n2 + 2 < 512 {
+                var k: u64 = 0
+                while k < n1 {
+                    buf[(at + k) as usize] = *((name + k) as *mut u8)
+                    k = k + 1
+                }
+                at = at + n1
+                buf[(at) as usize] = 61 as u8
+                at = at + 1
+                k = 0
+                while k < n2 {
+                    buf[(at + k) as usize] = *((val + k) as *mut u8)
+                    k = k + 1
+                }
+                at = at + n2
+                buf[(at) as usize] = 0 as u8
+                at = at + 1
+            }
+        }
+        i = i + 1
+    }
+    ulib.set_env((&buf[0 as usize]) as u64, at)
 }

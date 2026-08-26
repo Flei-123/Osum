@@ -433,9 +433,57 @@ fn yes(b: bool) -> u64 {
 // the process, and the stack pointer is set below it -- so it costs no
 // frame of its own and it is gone with the process.
 //
-//     +0   argc
-//     +8   argv[0..argc-1], then a zero
-//     +80  the strings, each one ended by a zero
+//     +0     argc
+//     +8     argv[0..argc-1], then a zero
+//     +80    the strings, each one ended by a zero
+//
+// ROUND K11 PUT THE ENVIRONMENT ON THE SAME PAGE, at a fixed offset, so
+// that nothing about the first half moves:
+//
+//     +2048  envc
+//     +2056  envp[0..envc-1], then a zero
+//     +2192  those strings, each one ended by a zero
+//
+// Where it comes from: the kernel holds ONE environment block
+// (`kstate.K11_OFF + ENV_BUF`), and a process fills it with
+// SYS_OSUM_SETENV. Every program started afterwards finds it here. That
+// is not a per-process `environ` -- it is the half of it that a shell
+// needs, and `docs/ROUNDK11.md` says so.
+const ENV_OFF: u64 = 2048
+const ENV_MAXN: u64 = 16
+const ENV_STR: u64 = 2192 // ENV_OFF + 8 + (ENV_MAXN + 1) * 8
+
+fn write_env(state: u64, frame: u64) {
+    let n0: u64 = kstate.get(state, kstate.K11_OFF + kstate.ENV_N)
+    var n: u64 = n0
+    if n > ENV_MAXN {
+        n = ENV_MAXN
+    }
+    put64(frame + ENV_OFF, n)
+    var src: u64 = state + kstate.K11_OFF + kstate.ENV_BUF
+    var at: u64 = ENV_STR
+    var k: u64 = 0
+    while k < n {
+        put64(frame + ENV_OFF + 8 + k * 8, proc.ARGS_BASE + at)
+        var going: bool = true
+        while going {
+            if at >= PAGE - 1 {
+                put64(frame + ENV_OFF, k)
+                return
+            }
+            let c: u64 = kstate.get8(src)
+            kstate.set8(frame + at, c as u8)
+            at = at + 1
+            src = src + 1
+            if c == 0 {
+                going = false
+            }
+        }
+        k = k + 1
+    }
+    put64(frame + ENV_OFF + 8 + n * 8, 0)
+}
+
 fn write_args(state: u64, t: u64, args: u64, argc: u64) -> bool {
     if argc > proc.MAX_ARGS {
         return false
@@ -453,7 +501,9 @@ fn write_args(state: u64, t: u64, args: u64, argc: u64) -> bool {
         put64(frame + 8 + k * 8, proc.ARGS_BASE + at)
         var going: bool = true
         while going {
-            if at >= PAGE - 1 {
+            // ROUND K11: die Argumente enden bei ENV_OFF, denn dahinter
+            // liegt die Umgebung. Vorher war die Grenze die Seite.
+            if at >= ENV_OFF - 1 {
                 return false
             }
             let c: u64 = kstate.get8(src)
@@ -467,6 +517,7 @@ fn write_args(state: u64, t: u64, args: u64, argc: u64) -> bool {
         k = k + 1
     }
     put64(frame + 8 + argc * 8, 0)
+    write_env(state, frame)
     return true
 }
 
