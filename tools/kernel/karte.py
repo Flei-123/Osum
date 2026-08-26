@@ -105,6 +105,14 @@ BEREICHE = [
     # Speicher der Gaeste) kommt aus dem Rahmenverwalter.  Eingetragen
     # ist er hier, damit der Kollisionspruefer ihn trotzdem sieht.
     ("HV",         "hv.fi",     "HV_OFF",         "HV_MAX"),
+    # RUNDE K15: die Naht zwischen Fensterserver und Widget-Bibliothek.
+    # Drei Seiten -- Skalare, Zwischenablage, Umschlagpuffer.  Sie liegen
+    # in dem Vorrat, den diese Runde zugeteilt bekommen hat
+    # (0x46000..0x49000), und in keinem anderen: drei Runden liefen
+    # gleichzeitig, und genau daran waeren die Merges beinahe
+    # gescheitert.  Der Rest der Bibliothek liegt in Ring 3 und kommt in
+    # `kdata` gar nicht vor.
+    ("WIG",        "kstate.fi", "WIG_OFF",        "WIG_MAX"),
 ]
 
 # `_OFF`-Konstanten, die KEINE Bereiche in `kdata` sind -- Offsets
@@ -128,6 +136,8 @@ KEINE_KDATA = {
     ("pci.fi", "K2_OFF"),       # derselbe Wert wie TABLE_OFF
     ("ttf.fi", "A_HEAP"),       # Versatz IM Glyphenspeicher, nicht kdata
     ("wm.fi", "W_OFF"),         # Versatz IN der Fenstertafel
+    ("wig.fi", "CLIP_OFF"),     # Versatz IN WIG_OFF (Runde K15)
+    ("wig.fi", "STAGE_OFF"),    # dito
     ("hv.fi", "CNT_OFF"),       # Versaetze INNERHALB von HV_OFF (Runde K12)
     ("hv.fi", "VAL_OFF"),
     ("hv.fi", "VM_OFF"),
