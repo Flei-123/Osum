@@ -124,6 +124,21 @@ BEREICHE = [
     ("K14",        "kstate.fi", "K14_OFF",        "K14_MAX"),
     ("K14FAT",     "kstate.fi", "FAT_OFF",        "FAT_MAX"),
     ("K14PROC",    "kstate.fi", "PROCFS_OFF",     "PROCFS_MAX"),
+    # RUNDE K15: die Naht zwischen Fensterserver und Widget-Bibliothek.
+    # Drei Seiten -- Skalare, Zwischenablage, Umschlagpuffer.  Sie liegen
+    # in dem Vorrat, den diese Runde zugeteilt bekommen hat
+    # (0x46000..0x49000), und in keinem anderen: drei Runden liefen
+    # gleichzeitig, und genau daran waeren die Merges beinahe
+    # gescheitert.  Der Rest der Bibliothek liegt in Ring 3 und kommt in
+    # `kdata` gar nicht vor.
+    ("WIG",        "kstate.fi", "WIG_OFF",        "WIG_MAX"),
+    # RUNDE K15, ZWEITER NACHTRAG.  Die erste Seite dieses Vorrats wird
+    # geteilt: `wig.fi` braucht davon 0x40 Oktette, der Rest gehoert der
+    # Geometrie des Dateisystems (FSG, zwei Woerter aus dem Superblock)
+    # und dem Aenderungsjournal (JRNL).  Beide liegen INNERHALB von
+    # WIG_OFF und sind deshalb hier keine eigenen Bereiche -- sie stehen
+    # unten bei den Unterversaetzen.  Was hier zaehlt, ist: derselbe
+    # Vorrat, keine neue Seite.
 ]
 
 # `_OFF`-Konstanten, die KEINE Bereiche in `kdata` sind -- Offsets
@@ -147,6 +162,11 @@ KEINE_KDATA = {
     ("pci.fi", "K2_OFF"),       # derselbe Wert wie TABLE_OFF
     ("ttf.fi", "A_HEAP"),       # Versatz IM Glyphenspeicher, nicht kdata
     ("wm.fi", "W_OFF"),         # Versatz IN der Fenstertafel
+    ("wig.fi", "CLIP_OFF"),     # Versatz IN WIG_OFF (Runde K15)
+    ("wig.fi", "STAGE_OFF"),    # dito
+    ("kstate.fi", "FSG_OFF"),   # Versatz IN WIG_OFF (K15, zweiter Nachtrag)
+    ("kstate.fi", "JRNL_OFF"),  # dito -- das Aenderungsjournal
+    ("nidx.fi", "H_BASE"),      # Versatz IM Journal, nicht kdata
     ("hv.fi", "CNT_OFF"),       # Versaetze INNERHALB von HV_OFF (Runde K12)
     ("hv.fi", "VAL_OFF"),
     ("hv.fi", "VM_OFF"),

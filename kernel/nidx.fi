@@ -1,0 +1,191 @@
+// kernel/nidx.fi -- Runde K15, zweiter Nachtrag: DAS AENDERUNGSJOURNAL
+// DES DATEISYSTEMS. Sechzig Zeilen Zustand, und kein Index.
+//
+// DAS VORBILD, UND ES IST NACHLESBAR. "Everything" von voidtools sucht
+// auf einer NTFS-Platte nicht. Es liest EINMAL die Master File Table --
+// die Tabelle, die das Dateisystem ohnehin fuer jede Datei fuehrt -- und
+// baut daraus im Arbeitsspeicher eine Liste NUR AUS NAMEN. Danach sieht
+// es die Tabelle nie wieder an: es verfolgt das AENDERUNGSJOURNAL (USN
+// Journal) und traegt nach, was sich geaendert hat. Deshalb ist es
+// sofort da -- gesucht wird in einer Namensliste im Speicher, nicht auf
+// der Platte, und indiziert werden Namen, keine Inhalte.
+//
+// OSUM HAT DIE ERSTE HAELFTE SCHON: OFS hat eine Inode-Tabelle, und die
+// laesst sich am Stueck lesen (`fs.scan`, Systemaufruf 1807). Was fehlte,
+// ist die zweite Haelfte -- ein Journal.
+//
+// ZWEI WEGE STANDEN ZUR WAHL, und dies ist der gewaehlte:
+//
+//   A) DER KERNEL MERKT SICH DIE AENDERUNG. Ein Ring im Kernelspeicher,
+//      beschrieben an genau ZWEI Stellen -- `fs.dir_add` (ein Name
+//      entsteht) und `fs.dir_remove` (ein Name vergeht). Mehr Stellen
+//      gibt es nicht: `create_path`, `unlink_path`, `mkdir` und das
+//      Umbenennen des Dateimanagers gehen alle durch diese beiden
+//      hindurch. Ein Name ist genau dann neu, wenn ein VERZEICHNISEINTRAG
+//      neu ist -- nicht, wenn ein Inode neu ist. Kostet: diese Datei,
+//      zwei Aufrufe in `fs.fi`, eine Seite kdata.
+//
+//   B) EIN JOURNAL AUF DER PLATTE, in OFS. Das waere das treuere
+//      Gegenstueck zu NTFS und haette einen echten Vorteil: es
+//      ueberlebt einen Neustart, der Index muesste nach dem Hochfahren
+//      nicht neu gebaut werden. Es haette gekostet: ein neues Feld im
+//      Superblock, also ein geaendertes Format auf der Platte, also
+//      `tools/osum/mkfs.py`, also JEDES bestehende Abbild und jeden
+//      Abschnitt von `test.sh`, der eines baut -- und dazu die Frage,
+//      was passiert, wenn das Journal voll ist und der Schreiber gerade
+//      keinen Block mehr frei hat. Fuer eine Runde, die 1486 bestehende
+//      Zusagen nicht senken darf, ist das der falsche Handel.
+//
+// WEG A. Der Index ueberlebt den Neustart nicht -- er wird beim Start
+// des Suchprogramms aus der Tabelle gebaut, und genau dafuer wird
+// gemessen, wie lange das dauert.
+//
+// WENN DER RING UEBERLAEUFT, SAGT ER DAS. `lost` zaehlt die Saetze, die
+// ueberschrieben wurden, bevor sie jemand geholt hat. Ein Leser, der
+// `lost` groesser sieht als beim letzten Mal, MUSS neu bauen. Das ist
+// nicht die Notloesung, das ist genau das, was Everything tut, wenn das
+// USN-Journal umlaeuft -- ein Ring hat eine Groesse, und ein Leser, der
+// zu lange nicht hinsieht, hat Pech. Ehrlich gesagt zu haben, dass man
+// etwas verpasst hat, ist der ganze Unterschied zu einem Index, der
+// luegt.
+//
+// DER SATZ IST DERSELBE WIE BEIM TABELLENLAUF -- 64 Oktette, dieselben
+// Felder an denselben Stellen. Ring 3 hat damit EINEN Satzleser und
+// nicht zwei, und ein Fehler in einem der beiden waere in beiden
+// derselbe und daher sichtbar.
+
+profile kernel
+
+import kstate
+
+export {
+    init, ready, note, take, seq, lost, count,
+    REC, R_INO, R_PARENT, R_SIZE, R_KIND, R_NAME, R_OP,
+    OP_ADD, OP_DEL, MAXJ, NAMEJ
+}
+
+const REC: u64 = 64
+const R_INO: u64 = 0
+const R_PARENT: u64 = 8
+const R_SIZE: u64 = 16
+const R_KIND: u64 = 24
+const R_NAME: u64 = 32 // 24 Oktette, wie ein Verzeichniseintrag
+const R_OP: u64 = 56 // im Journal: was geschah. Im Tabellenlauf: die Nummer
+const NAMEJ: u64 = 24
+
+const OP_ADD: u64 = 1
+const OP_DEL: u64 = 2
+
+// Der Kopf, dann die Saetze. 0x40 + 56 * 64 = 3648 <= JRNL_MAX (3840).
+const H_SEQ: u64 = 0x00 // wie viele Saetze es je gab
+const H_HEAD: u64 = 0x08 // naechster Platz im Ring
+const H_LOST: u64 = 0x10 // ueberschrieben, ehe sie jemand holte
+const H_READY: u64 = 0x18
+const H_BASE: u64 = 0x40
+const MAXJ: u64 = 56
+
+fn g(state: u64, off: u64) -> u64 {
+    return kstate.get(state, kstate.JRNL_OFF + off)
+}
+
+fn s(state: u64, off: u64, v: u64) {
+    kstate.set(state, kstate.JRNL_OFF + off, v)
+}
+
+fn slot_off(k: u64) -> u64 {
+    return kstate.JRNL_OFF + H_BASE + (k % MAXJ) * REC
+}
+
+fn ready(state: u64) -> bool {
+    return g(state, H_READY) != 0
+}
+
+fn seq(state: u64) -> u64 {
+    return g(state, H_SEQ)
+}
+
+fn lost(state: u64) -> u64 {
+    return g(state, H_LOST)
+}
+
+fn count(state: u64) -> u64 {
+    let n: u64 = g(state, H_SEQ)
+    if n > MAXJ {
+        return MAXJ
+    }
+    return n
+}
+
+// NUR DER EIGENE BEREICH WIRD GELOESCHT, und das ist kein Detail: diese
+// Seite teilen sich drei Nutzer dieser Runde (`kstate.fi`), und `wig.init`
+// laeuft SPAETER als das erste `mkdir`. Wer hier die ganze Seite nullt,
+// loescht die Geometrie des Dateisystems unter dem laufenden Kernel weg
+// -- und genau das hat diese Runde einmal getan.
+fn init(state: u64) -> bool {
+    var i: u64 = 0
+    while i < kstate.JRNL_MAX {
+        kstate.set8(state + kstate.JRNL_OFF + i, 0 as u8)
+        i = i + 1
+    }
+    s(state, H_READY, 1)
+    return true
+}
+
+// EIN NAME IST ENTSTANDEN ODER VERGANGEN. Gerufen aus `fs.fi`, unter dem
+// Dateisystem-Schloss, ohne einen Block anzufassen.
+fn note(state: u64, op: u64, dir: u64, ino: u64, kind: u64, name: u64) {
+    if !ready(state) {
+        return
+    }
+    let n: u64 = g(state, H_SEQ)
+    let off: u64 = slot_off(n)
+    kstate.set(state, off + R_INO, ino)
+    kstate.set(state, off + R_PARENT, dir)
+    kstate.set(state, off + R_SIZE, 0)
+    kstate.set(state, off + R_KIND, kind)
+    kstate.set(state, off + R_OP, op)
+    var k: u64 = 0
+    while k < NAMEJ {
+        var c: u64 = 0
+        if name != 0 {
+            c = kstate.get8(name + k)
+        }
+        kstate.set8(state + off + R_NAME + k, c as u8)
+        k = k + 1
+    }
+    s(state, H_SEQ, n + 1)
+    s(state, H_HEAD, (n + 1) % MAXJ)
+}
+
+// Die Saetze ab `from` in `out` (eine Kerneladresse), hoechstens `max`.
+// Gibt die Zahl zurueck; der Satz Nummer `i` traegt die laufende Nummer
+// `from + i`, deshalb steht sie nicht noch einmal im Satz.
+//
+// Wer `from` kleiner setzt als das aelteste, das noch im Ring liegt,
+// bekommt das aelteste -- und `lost` waechst um die Zahl der Saetze, die
+// er verpasst hat. Ein Leser, der das sieht, baut neu. Ein Index, der
+// stattdessen weitermachen wuerde, waere ab da eine Behauptung.
+fn take(state: u64, from: u64, out: u64, max: u64) -> u64 {
+    let ende: u64 = g(state, H_SEQ)
+    var erste: u64 = 0
+    if ende > MAXJ {
+        erste = ende - MAXJ
+    }
+    var f: u64 = from
+    if f < erste {
+        s(state, H_LOST, g(state, H_LOST) + (erste - f))
+        f = erste
+    }
+    var n: u64 = 0
+    while f + n < ende && n < max {
+        let von: u64 = state + slot_off(f + n)
+        let nach: u64 = out + n * REC
+        var k: u64 = 0
+        while k < REC {
+            kstate.set8(nach + k, kstate.get8(von + k) as u8)
+            k = k + 1
+        }
+        n = n + 1
+    }
+    return n
+}

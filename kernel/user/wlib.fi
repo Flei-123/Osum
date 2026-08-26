@@ -1,0 +1,2843 @@
+// kernel/user/wlib.fi -- Runde K15: DIE WIDGET-BIBLIOTHEK. Ring 3.
+//
+// Runde K10 gab einer Anwendung ein Rechteck, ein Handle und einen Ring
+// mit Ereignissen. Was zwischen diesem Rechteck und einem Programm
+// fehlt, ist alles: ein Knopf weiss, dass er gedrueckt aussieht,
+// solange die Taste unten ist; ein Textfeld weiss, wo die Einfuegemarke
+// steht; eine Liste weiss, welche Zeile ausgewaehlt ist und wie weit
+// sie gerollt wurde; die Tabulatortaste weiss, was als naechstes den
+// Fokus bekommt. Das steht hier.
+//
+// UND ES STEHT IN RING 3, NICHT IM KERNEL. Der Auftrag dieser Runde
+// sagt es, und es ist auch richtig so: ein Kernel, der weiss, wie ein
+// Knopf aussieht, kann nicht mehr sagen, was er ist. Was diese
+// Bibliothek vom Kernel braucht, sind sieben Aufrufe
+// (`kernel/wlib.fi`), und keiner davon kennt ein Widget.
+//
+// DER AUFBAU, in der Reihenfolge, in der ein Programm ihn benutzt:
+//
+//   1. `wlib.begin(nohit, noclip)` -- die Zeichenflaeche holen, das
+//      Farbschema lesen.
+//   2. `wlib.window(x, y, w, h, titel)` -- ein Fenster beim Server.
+//   3. Kaesten aufmachen (`box_v`, `box_h`, `box_grid`) und Widgets
+//      hineinstellen. Jedes gibt eine Nummer zurueck.
+//   4. `wlib.step()` in einer Schleife: holt die Ereignisse ALLER
+//      Fenster ab, verteilt sie, malt neu, was schmutzig ist, und gibt
+//      die Nummer des Widgets zurueck, bei dem etwas passiert ist.
+//
+// WAS EIN "EREIGNIS" HIER IST: ein Knopf, der losgelassen wurde, eine
+// Zeile, auf die doppelt geklickt wurde, ein Menuepunkt, der gewaehlt
+// wurde, ein Reiter, der gewechselt hat, ein Dialog, der geschlossen
+// wurde. Nicht: jede Mausbewegung. Die verarbeitet die Bibliothek
+// selbst, und sie ist der Grund, warum ueberhaupt etwas neu gemalt
+// wird.
+//
+// DIE ZWEI GEGENPROBEN, die diese Bibliothek selbst mitbringt:
+//
+//   `nohit`   Die Trefferpruefung ist aus. Widgets werden gemalt, die
+//             Maus laeuft, die Ereignisse kommen an -- und landen bei
+//             KEINEM Widget. Kein Knopf geht herunter, keine Zeile
+//             wird ausgewaehlt, kein Menue klappt auf. Jede Messung,
+//             die "der Klick ist angekommen" behauptet, MUSS damit
+//             einbrechen.
+//   `noclip`  Die Zwischenablage ist aus. Kopieren und Einfuegen tun
+//             nichts, der Rest bleibt.
+//
+// WAS ES NICHT GIBT, und es steht hier und nicht in einer Fussnote:
+// keine Unterfenster im Fenster (jedes Menue und jeder Dialog ist ein
+// eigenes Fenster beim Server), keine Umbrueche im Textfeld (es ist
+// EINE Zeile), keine Auswahl mit Umschalt-Pfeil (die Umschalttaste
+// kommt in diesem System nicht als eigenes Ereignis an -- die
+// Zeilendisziplin liefert das fertige Zeichen), und kein Ziehen
+// zwischen Fenstern.
+
+profile kernel
+
+import ulib
+import wlibc
+
+export {
+    begin, window, window_kind, close, closed, handle, win_w, win_h,
+    win_x, win_y,
+    box_v, box_h, box_grid, box_end, size, gap_after,
+    label, button, check, entry, list, table, tabs, menubar, choice,
+    sep, scrollarea,
+    value, set_value, text_of, set_text, set_rows, set_cols, enable,
+    list_icons,
+    focus_id, set_focus, fired_kind, fired_index, fired_win,
+    step, draw_all, dirty, dirty_all, alive, quit,
+    menu_open, menu_at, menu_win, dlg_text, dlg_open, dlg_ask, dlg_state,
+    dlg_close, dlg_button, dlg_win, dlg_label,
+    counts, blits_done, key_last,
+    rect_x, rect_y, rect_w, rect_h, kind_of,
+    text_x, text_base, text_fg, text_bg, row_base, row_x, row_h,
+    head_base, cell_base, cell_x, head_h, icon_x, icon_y,
+    icon_letter_x, icon_letter_base,
+    K_LABEL, K_BUTTON, K_CHECK, K_ENTRY, K_LIST, K_TABLE, K_TABS,
+    K_MENUBAR, K_CHOICE, K_SEP, K_SCROLL,
+    NK_MAIN, NK_MENU, NK_DLG,
+    KEY_TAB, KEY_ENTER, KEY_BS, KEY_ESC, KEY_UP, KEY_DOWN, KEY_LEFT,
+    KEY_RIGHT, KEY_HOME, KEY_END, KEY_PGUP, KEY_PGDN, KEY_DEL,
+    MAXWD, MAXWN
+}
+
+// ------------------------------------------------------- die Zahlen
+
+const MAXWD: u64 = 96 // Widgets insgesamt
+const MAXWN: u64 = 4 // Fenster: das Hauptfenster, ein Menue, ein Dialog
+const MAXCT: u64 = 24 // Kaesten
+
+const K_LABEL: u64 = 1
+const K_BUTTON: u64 = 2
+const K_CHECK: u64 = 3
+const K_ENTRY: u64 = 4
+const K_LIST: u64 = 5
+const K_TABLE: u64 = 6
+const K_TABS: u64 = 7
+const K_MENUBAR: u64 = 8
+const K_CHOICE: u64 = 9
+const K_SEP: u64 = 10
+const K_SCROLL: u64 = 11
+
+const NK_MAIN: u64 = 0
+const NK_MENU: u64 = 1
+const NK_DLG: u64 = 2
+
+// Die Felder eines Widgets. Sechzehn Woerter, ein Feld je Wort -- Firn
+// hat keine Verbunde, und eine Tabelle aus Woertern ist ehrlicher als
+// sechzehn Felder mit sechzehn Namen.
+const D_KIND: u64 = 0
+const D_X: u64 = 1
+const D_Y: u64 = 2
+const D_W: u64 = 3
+const D_H: u64 = 4
+const D_FLAGS: u64 = 5
+const D_TEXT: u64 = 6
+const D_VAL: u64 = 7
+const D_WIN: u64 = 8
+const D_A: u64 = 9 // Rollversatz / Zeilenzahl
+const D_B: u64 = 10 // Einfuegemarke / sichtbare Zeilen
+const D_C: u64 = 11 // Auswahlanker / Spaltenzahl
+const D_D: u64 = 12 // Hoechstlaenge / Spaltenbreiten
+const D_PW: u64 = 13 // Wunschbreite
+const D_PH: u64 = 14 // Wunschhoehe
+const D_CT: u64 = 15 // der Kasten
+const D_FIELDS: u64 = 16
+
+const F_FOCUSABLE: u64 = 1
+const F_PRESSED: u64 = 2
+const F_HOVER: u64 = 4
+const F_OFF: u64 = 8
+const F_HIDE: u64 = 16
+
+// Ein Fenster
+const N_H: u64 = 0
+const N_W: u64 = 1
+const N_HH: u64 = 2
+const N_KIND: u64 = 3
+const N_VAL: u64 = 4
+const N_DATA: u64 = 5
+const N_CNT: u64 = 6
+const N_NDIRT: u64 = 7 // wie viele Rechtecke gerade schmutzig sind
+const N_OWNER: u64 = 11
+const N_X: u64 = 12
+const N_Y: u64 = 13
+const N_FIELDS: u64 = 14
+
+// Ein Kasten
+const C_KIND: u64 = 0 // 1 senkrecht, 2 waagerecht, 3 Raster
+const C_X: u64 = 1
+const C_Y: u64 = 2
+const C_W: u64 = 3
+const C_H: u64 = 4
+const C_PAD: u64 = 5
+const C_GAP: u64 = 6
+const C_COLS: u64 = 7
+const C_CX: u64 = 8 // der Setzpunkt
+const C_CY: u64 = 9
+const C_COL: u64 = 10
+const C_ROWH: u64 = 11
+const C_WIN: u64 = 12
+const C_FIELDS: u64 = 13
+
+const KEY_TAB: u64 = 9
+const KEY_ENTER: u64 = 13
+const KEY_BS: u64 = 8
+const KEY_ESC: u64 = 27
+const KEY_UP: u64 = 0x101
+const KEY_DOWN: u64 = 0x102
+const KEY_LEFT: u64 = 0x103
+const KEY_RIGHT: u64 = 0x104
+const KEY_HOME: u64 = 0x105
+const KEY_END: u64 = 0x106
+const KEY_PGUP: u64 = 0x107
+const KEY_PGDN: u64 = 0x108
+const KEY_DEL: u64 = 0x109
+
+// ------------------------------------------------------- der Zustand
+
+static mut wd: [u64; 1536] = [0 as u64; 1536] // MAXWD * D_FIELDS
+static mut wn: [u64; 56] = [0 as u64; 56] // MAXWN * N_FIELDS
+static mut ct: [u64; 312] = [0 as u64; 312] // MAXCT * C_FIELDS
+static mut nwd: u64 = 0
+static mut nwn: u64 = 0
+static mut nct: u64 = 0
+static mut ctcur: u64 = 0xFFFFFFFFFFFFFFFF
+static mut wncur: u64 = 0
+static mut want_w: u64 = 0
+static mut want_h: u64 = 0
+static mut want_gap: u64 = 0
+
+static mut s_focus: u64 = 0 // Widgetnummer + 1
+static mut s_nohit: u64 = 0
+static mut s_alive: u64 = 1
+static mut s_fired: u64 = 0
+static mut s_fkind: u64 = 0
+static mut s_findex: u64 = 0
+static mut s_fwin: u64 = 0
+static mut s_blits: u64 = 0
+static mut s_keylast: u64 = 0
+static mut s_down: u64 = 0 // gedruecktes Widget + 1
+static mut s_esc: u64 = 0 // Zustand der Fluchtfolge
+static mut s_lastclick: u64 = 0
+static mut s_lastwd: u64 = 0
+static mut s_ticks: u64 = 0
+static mut dlgbuf: [u8; 160] = [0 as u8; 160]
+static mut ev: [u8; 16] = [0 as u8; 16]
+
+// ------------------------------------------------------- der Zugriff
+
+fn g(i: u64, f: u64) -> u64 {
+    if i >= MAXWD {
+        return 0
+    }
+    return wd[(i * D_FIELDS + f) as usize]
+}
+
+fn s(i: u64, f: u64, v: u64) {
+    if i >= MAXWD {
+        return
+    }
+    wd[(i * D_FIELDS + f) as usize] = v
+}
+
+fn ng(w: u64, f: u64) -> u64 {
+    if w >= MAXWN {
+        return 0
+    }
+    return wn[(w * N_FIELDS + f) as usize]
+}
+
+fn ns(w: u64, f: u64, v: u64) {
+    if w >= MAXWN {
+        return
+    }
+    wn[(w * N_FIELDS + f) as usize] = v
+}
+
+fn cg(c: u64, f: u64) -> u64 {
+    if c >= MAXCT {
+        return 0
+    }
+    return ct[(c * C_FIELDS + f) as usize]
+}
+
+fn cs(c: u64, f: u64, v: u64) {
+    if c >= MAXCT {
+        return
+    }
+    ct[(c * C_FIELDS + f) as usize] = v
+}
+
+fn tlen(p: u64) -> u64 {
+    if p == 0 {
+        return 0
+    }
+    return ulib.length(p)
+}
+
+fn imin(a: u64, b: u64) -> u64 {
+    if a < b {
+        return a
+    }
+    return b
+}
+
+fn sub(a: u64, b: u64) -> u64 {
+    if b >= a {
+        return 0
+    }
+    return a - b
+}
+
+// ------------------------------------------------------- das Aufsetzen
+
+fn begin(nohit: bool, noclip: bool) -> bool {
+    if !wlibc.start(noclip) {
+        return false
+    }
+    var pfad: [u8; 11] = "/etc/theme\0"
+    wlibc.theme_load((&pfad[0 as usize]) as u64)
+    if nohit {
+        s_nohit = 1
+    }
+    return true
+}
+
+fn counts() -> u64 {
+    return nwd
+}
+
+fn blits_done() -> u64 {
+    return s_blits
+}
+
+fn key_last() -> u64 {
+    return s_keylast
+}
+
+fn alive() -> bool {
+    return s_alive != 0
+}
+
+fn quit() {
+    s_alive = 0
+}
+
+// ------------------------------------------------------- die Fenster
+
+fn window(x: u64, y: u64, w: u64, h: u64, titel: u64) -> u64 {
+    return new_win(x, y, w, h, titel, NK_MAIN)
+}
+
+fn new_win(x: u64, y: u64, w: u64, h: u64, titel: u64, kind: u64) -> u64 {
+    if nwn >= MAXWN {
+        return MAXWN
+    }
+    let hh: u64 = wlibc.sys5(wlibc.WM_CREATE, (x << 16) | y, (w << 16) | h,
+        titel, 0, 0)
+    if ulib.bad(hh) || hh == 0 {
+        return MAXWN
+    }
+    let i: u64 = nwn
+    nwn = nwn + 1
+    ns(i, N_H, hh)
+    ns(i, N_W, w)
+    ns(i, N_HH, h)
+    ns(i, N_KIND, kind)
+    ns(i, N_VAL, 0)
+    ns(i, N_DATA, 0)
+    ns(i, N_CNT, 0)
+    ns(i, N_OWNER, 0)
+    ns(i, N_X, x)
+    ns(i, N_Y, y)
+    wncur = i
+    dirty_all(i)
+    return i
+}
+
+fn window_kind(w: u64) -> u64 {
+    return ng(w, N_KIND)
+}
+
+fn handle(w: u64) -> u64 {
+    return ng(w, N_H)
+}
+
+// Wo das Fenster auf dem BILDSCHIRM steht. Ein Menue liegt am Zeiger
+// und nicht an einer Stelle, die ein Testlaeufer erraten kann -- also
+// sagt die Bibliothek sie.
+fn win_x(w: u64) -> u64 {
+    return ng(w, N_X)
+}
+
+fn win_y(w: u64) -> u64 {
+    return ng(w, N_Y)
+}
+
+fn win_w(w: u64) -> u64 {
+    return ng(w, N_W)
+}
+
+fn win_h(w: u64) -> u64 {
+    return ng(w, N_HH)
+}
+
+fn closed(w: u64) -> bool {
+    return ng(w, N_H) == 0
+}
+
+fn close(w: u64) {
+    if w >= MAXWN || ng(w, N_H) == 0 {
+        return
+    }
+    wlibc.sys3w(wlibc.WM_CLOSE, ng(w, N_H), 0, 0)
+    ns(w, N_H, 0)
+    // Die Widgets dieses Fensters verschwinden mit ihm.
+    var i: u64 = 0
+    while i < nwd {
+        if g(i, D_WIN) == w {
+            s(i, D_FLAGS, g(i, D_FLAGS) | F_HIDE)
+        }
+        i = i + 1
+    }
+}
+
+// ------------------------------------------------- der schmutzige Teil
+//
+// BIS ZU VIER RECHTECKE JE FENSTER, UND NICHT EINES. Die erste Fassung
+// fuehrte EIN Rechteck und legte jede Meldung hinein -- die Vereinigung
+// von allem. Das ist bequem und es ist gemessen falsch: bewegt sich der
+// Zeiger von einem Knopf oben zu einer Liste unten, sind beide
+// schmutzig, die Vereinigung ist das halbe Fenster, und dazwischen wird
+// alles neu gemalt, was sich nicht geaendert hat. Gemessen: EIN Klick
+// auf ein Kaestchen kostete so 82 992 von 192 000 Bildpunkten -- Faktor
+// 2,3 statt Faktor 30.
+//
+// Also vier Rechtecke, und die Regel zum Zusammenlegen ist eine
+// Flaechenregel: zwei werden nur dann eines, wenn die Vereinigung nicht
+// mehr als ein Drittel groesser ist als beide zusammen. Sind alle vier
+// belegt, wird das Paar zusammengelegt, das dabei am wenigsten
+// hinzufuegt -- so bleibt die Zahl beschraenkt und die Flaeche klein.
+const DIRT_MAX: u64 = 4
+
+static mut dr: [u64; 64] = [0 as u64; 64] // MAXWN * DIRT_MAX * 4
+
+fn dg(w: u64, k: u64, f: u64) -> u64 {
+    return dr[((w * DIRT_MAX + k) * 4 + f) as usize]
+}
+
+fn ds(w: u64, k: u64, f: u64, v: u64) {
+    dr[((w * DIRT_MAX + k) * 4 + f) as usize] = v
+}
+
+fn flaeche(x0: u64, y0: u64, x1: u64, y1: u64) -> u64 {
+    if x1 <= x0 || y1 <= y0 {
+        return 0
+    }
+    return (x1 - x0) * (y1 - y0)
+}
+
+fn setz(w: u64, k: u64, x0: u64, y0: u64, x1: u64, y1: u64) {
+    ds(w, k, 0, x0)
+    ds(w, k, 1, y0)
+    ds(w, k, 2, x1)
+    ds(w, k, 3, y1)
+}
+
+fn vereinen(w: u64, k: u64, x0: u64, y0: u64, x1: u64, y1: u64) {
+    var a: u64 = dg(w, k, 0)
+    var b: u64 = dg(w, k, 1)
+    var c: u64 = dg(w, k, 2)
+    var d: u64 = dg(w, k, 3)
+    if x0 < a {
+        a = x0
+    }
+    if y0 < b {
+        b = y0
+    }
+    if x1 > c {
+        c = x1
+    }
+    if y1 > d {
+        d = y1
+    }
+    setz(w, k, a, b, c, d)
+}
+
+fn union_flaeche(w: u64, k: u64, x0: u64, y0: u64, x1: u64, y1: u64) -> u64 {
+    var a: u64 = dg(w, k, 0)
+    var b: u64 = dg(w, k, 1)
+    var c: u64 = dg(w, k, 2)
+    var d: u64 = dg(w, k, 3)
+    if x0 < a {
+        a = x0
+    }
+    if y0 < b {
+        b = y0
+    }
+    if x1 > c {
+        c = x1
+    }
+    if y1 > d {
+        d = y1
+    }
+    return flaeche(a, b, c, d)
+}
+
+fn dirty(w: u64, x0: u64, y0: u64, x1: u64, y1: u64) {
+    if w >= MAXWN || ng(w, N_H) == 0 {
+        return
+    }
+    if x1 <= x0 || y1 <= y0 {
+        return
+    }
+    var ax0: u64 = x0
+    var ay0: u64 = y0
+    var ax1: u64 = x1
+    var ay1: u64 = y1
+    if ax1 > ng(w, N_W) {
+        ax1 = ng(w, N_W)
+    }
+    if ay1 > ng(w, N_HH) {
+        ay1 = ng(w, N_HH)
+    }
+    if ax1 <= ax0 || ay1 <= ay0 {
+        return
+    }
+    let neu_f: u64 = flaeche(ax0, ay0, ax1, ay1)
+    var n: u64 = ng(w, N_NDIRT)
+    // 1. Passt es guenstig zu einem der vorhandenen?
+    var beste: u64 = DIRT_MAX
+    var bester_zuwachs: u64 = 0xFFFFFFFFFFFFFFFF
+    var k: u64 = 0
+    while k < n {
+        let alt_f: u64 = flaeche(dg(w, k, 0), dg(w, k, 1), dg(w, k, 2),
+            dg(w, k, 3))
+        let uf: u64 = union_flaeche(w, k, ax0, ay0, ax1, ay1)
+        if uf * 3 <= (alt_f + neu_f) * 4 {
+            let zuwachs: u64 = uf - alt_f
+            if zuwachs < bester_zuwachs {
+                bester_zuwachs = zuwachs
+                beste = k
+            }
+        }
+        k = k + 1
+    }
+    if beste < DIRT_MAX {
+        vereinen(w, beste, ax0, ay0, ax1, ay1)
+        return
+    }
+    // 2. Ist noch ein Platz frei?
+    if n < DIRT_MAX {
+        setz(w, n, ax0, ay0, ax1, ay1)
+        ns(w, N_NDIRT, n + 1)
+        return
+    }
+    // 3. Alle belegt: das Paar zusammenlegen, das am wenigsten kostet.
+    var pa: u64 = 0
+    var pb: u64 = 1
+    var billigst: u64 = 0xFFFFFFFFFFFFFFFF
+    var i: u64 = 0
+    while i < n {
+        var j: u64 = i + 1
+        while j < n {
+            let fi: u64 = flaeche(dg(w, i, 0), dg(w, i, 1), dg(w, i, 2),
+                dg(w, i, 3))
+            let fj: u64 = flaeche(dg(w, j, 0), dg(w, j, 1), dg(w, j, 2),
+                dg(w, j, 3))
+            let u: u64 = union_flaeche(w, i, dg(w, j, 0), dg(w, j, 1),
+                dg(w, j, 2), dg(w, j, 3))
+            if u - fi - fj < billigst {
+                billigst = u - fi - fj
+                pa = i
+                pb = j
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    vereinen(w, pa, dg(w, pb, 0), dg(w, pb, 1), dg(w, pb, 2), dg(w, pb, 3))
+    setz(w, pb, ax0, ay0, ax1, ay1)
+}
+
+fn dirty_all(w: u64) {
+    ns(w, N_NDIRT, 1)
+    setz(w, 0, 0, 0, ng(w, N_W), ng(w, N_HH))
+}
+
+fn dirty_wd(i: u64) {
+    dirty(g(i, D_WIN), g(i, D_X), g(i, D_Y), g(i, D_X) + g(i, D_W),
+        g(i, D_Y) + g(i, D_H))
+}
+
+// ------------------------------------------------------- die Anordnung
+//
+// DREI KAESTEN, UND SIE SETZEN, WAS MAN IHNEN GIBT.
+//
+//   senkrecht  jedes Widget bekommt die volle Breite des Kastens und
+//              seine Wunschhoehe; der Setzpunkt wandert nach unten.
+//   waagerecht jedes bekommt seine Wunschbreite und die volle Hoehe;
+//              der Setzpunkt wandert nach rechts. Eine Wunschbreite
+//              von 0 heisst "nimm, was uebrig ist" -- so bekommt eine
+//              Pfadleiste ihren Platz zwischen zwei Knoepfen.
+//   Raster     `cols` Spalten gleicher Breite, Zeilenhoehe ist die
+//              hoechste Wunschhoehe der Zeile.
+//
+// Das ist eine Anordnung und kein Loeser. Was sie kann, steht hier;
+// was sie nicht kann -- Gewichte, Mindestgroessen, Ausdehnen in beide
+// Richtungen zugleich -- steht in docs/ROUNDK15.md unter den Grenzen.
+//
+// SIE LAEUFT BEI JEDER GROESSENAENDERUNG NEU (`relayout`), und das ist
+// der Grund, warum die Kaesten ueberhaupt gespeichert werden statt die
+// Rechtecke nur einmal auszurechnen.
+
+fn box_v(w: u64, x: u64, y: u64, bw: u64, bh: u64, pad: u64,
+    gp: u64) -> u64 {
+    return new_box(w, 1, x, y, bw, bh, pad, gp, 1)
+}
+
+fn box_h(w: u64, x: u64, y: u64, bw: u64, bh: u64, pad: u64,
+    gp: u64) -> u64 {
+    return new_box(w, 2, x, y, bw, bh, pad, gp, 1)
+}
+
+fn box_grid(w: u64, x: u64, y: u64, bw: u64, bh: u64, pad: u64, gp: u64,
+    cols: u64) -> u64 {
+    return new_box(w, 3, x, y, bw, bh, pad, gp, cols)
+}
+
+fn new_box(w: u64, kind: u64, x: u64, y: u64, bw: u64, bh: u64, pad: u64,
+    gp: u64, cols: u64) -> u64 {
+    if nct >= MAXCT {
+        return MAXCT
+    }
+    let c: u64 = nct
+    nct = nct + 1
+    cs(c, C_KIND, kind)
+    cs(c, C_X, x)
+    cs(c, C_Y, y)
+    cs(c, C_W, bw)
+    cs(c, C_H, bh)
+    cs(c, C_PAD, pad)
+    cs(c, C_GAP, gp)
+    cs(c, C_COLS, cols)
+    cs(c, C_WIN, w)
+    reset_box(c)
+    ctcur = c
+    wncur = w
+    return c
+}
+
+fn reset_box(c: u64) {
+    cs(c, C_CX, cg(c, C_X) + cg(c, C_PAD))
+    cs(c, C_CY, cg(c, C_Y) + cg(c, C_PAD))
+    cs(c, C_COL, 0)
+    cs(c, C_ROWH, 0)
+}
+
+fn box_end() {
+    ctcur = 0xFFFFFFFFFFFFFFFF
+}
+
+// Die Wunschgroesse des NAECHSTEN Widgets. Danach ist sie wieder
+// vergessen -- eine Wunschgroesse, die haengenbleibt, ist die Sorte
+// Zustand, die man erst bemerkt, wenn drei Knoepfe zu hoch sind.
+fn size(w: u64, h: u64) {
+    want_w = w
+    want_h = h
+}
+
+fn gap_after(n: u64) {
+    want_gap = n
+}
+
+fn place(i: u64) {
+    let c: u64 = g(i, D_CT)
+    if c >= MAXCT {
+        return
+    }
+    let innen: u64 = sub(cg(c, C_W), 2 * cg(c, C_PAD))
+    let kind: u64 = cg(c, C_KIND)
+    var pw: u64 = g(i, D_PW)
+    var ph: u64 = g(i, D_PH)
+    if ph == 0 {
+        ph = 24
+    }
+    if kind == 1 {
+        s(i, D_X, cg(c, C_CX))
+        s(i, D_Y, cg(c, C_CY))
+        var bw: u64 = innen
+        if pw != 0 && pw < innen {
+            bw = pw
+        }
+        s(i, D_W, bw)
+        s(i, D_H, ph)
+        cs(c, C_CY, cg(c, C_CY) + ph + cg(c, C_GAP))
+    } else if kind == 2 {
+        let rest: u64 = sub(cg(c, C_X) + cg(c, C_W) - cg(c, C_PAD),
+            cg(c, C_CX))
+        var bw2: u64 = pw
+        if bw2 == 0 || bw2 > rest {
+            bw2 = rest
+        }
+        s(i, D_X, cg(c, C_CX))
+        s(i, D_Y, cg(c, C_CY))
+        s(i, D_W, bw2)
+        var bh2: u64 = ph
+        let hoch: u64 = sub(cg(c, C_H), 2 * cg(c, C_PAD))
+        if g(i, D_PH) == 0 && hoch > 0 {
+            bh2 = hoch
+        }
+        s(i, D_H, bh2)
+        cs(c, C_CX, cg(c, C_CX) + bw2 + cg(c, C_GAP))
+    } else {
+        let cols: u64 = cg(c, C_COLS)
+        var zw: u64 = 40
+        if cols > 0 {
+            zw = sub(innen + cg(c, C_GAP), 0) / cols
+            if zw > cg(c, C_GAP) {
+                zw = zw - cg(c, C_GAP)
+            }
+        }
+        s(i, D_X, cg(c, C_CX))
+        s(i, D_Y, cg(c, C_CY))
+        s(i, D_W, zw)
+        s(i, D_H, ph)
+        if ph > cg(c, C_ROWH) {
+            cs(c, C_ROWH, ph)
+        }
+        cs(c, C_COL, cg(c, C_COL) + 1)
+        if cg(c, C_COL) >= cols {
+            cs(c, C_COL, 0)
+            cs(c, C_CX, cg(c, C_X) + cg(c, C_PAD))
+            cs(c, C_CY, cg(c, C_CY) + cg(c, C_ROWH) + cg(c, C_GAP))
+            cs(c, C_ROWH, 0)
+        } else {
+            cs(c, C_CX, cg(c, C_CX) + zw + cg(c, C_GAP))
+        }
+    }
+    if want_gap != 0 {
+        if kind == 2 {
+            cs(c, C_CX, cg(c, C_CX) + want_gap)
+        } else {
+            cs(c, C_CY, cg(c, C_CY) + want_gap)
+        }
+        want_gap = 0
+    }
+}
+
+// Alle Kaesten von vorn setzen. Wird nach einer Groessenaenderung
+// gerufen und nach jeder Aenderung, die Platz kostet.
+fn relayout() {
+    var c: u64 = 0
+    while c < nct {
+        // Kaesten, die die volle Fensterbreite wollten, wachsen mit.
+        let w: u64 = cg(c, C_WIN)
+        if cg(c, C_W) == 0 {
+            cs(c, C_W, ng(w, N_W))
+        }
+        reset_box(c)
+        c = c + 1
+    }
+    var i: u64 = 0
+    while i < nwd {
+        if (g(i, D_FLAGS) & F_HIDE) == 0 {
+            place(i)
+        }
+        i = i + 1
+    }
+}
+
+// ------------------------------------------------------- die Widgets
+
+fn add(kind: u64, txt: u64, pw: u64, ph: u64, fokus: bool) -> u64 {
+    if nwd >= MAXWD {
+        return 0
+    }
+    let i: u64 = nwd
+    nwd = nwd + 1
+    s(i, D_KIND, kind)
+    s(i, D_TEXT, txt)
+    s(i, D_WIN, wncur)
+    s(i, D_CT, ctcur)
+    s(i, D_PW, want_w)
+    s(i, D_PH, want_h)
+    if want_w == 0 {
+        s(i, D_PW, pw)
+    }
+    if want_h == 0 {
+        s(i, D_PH, ph)
+    }
+    want_w = 0
+    want_h = 0
+    var fl: u64 = 0
+    if fokus {
+        fl = F_FOCUSABLE
+    }
+    s(i, D_FLAGS, fl)
+    place(i)
+    if s_focus == 0 && fokus {
+        s_focus = i + 1
+    }
+    return i
+}
+
+fn label(txt: u64) -> u64 {
+    return add(K_LABEL, txt, 0, wlibc.text_h(wlibc.PX_UI), false)
+}
+
+fn button(txt: u64) -> u64 {
+    let w: u64 = wlibc.text_w(wlibc.F_UI, wlibc.PX_UI, txt, tlen(txt)) + 24
+    return add(K_BUTTON, txt, w, 26, true)
+}
+
+fn check(txt: u64, on: bool) -> u64 {
+    let i: u64 = add(K_CHECK, txt, 0, 22, true)
+    if on {
+        s(i, D_VAL, 1)
+    }
+    return i
+}
+
+// Ein Textfeld arbeitet auf dem Puffer DES AUFRUFERS. Die Bibliothek
+// legt keinen an: wer den Text hinterher braucht, hat ihn dann schon.
+fn entry(buf: u64, max: u64) -> u64 {
+    let i: u64 = add(K_ENTRY, buf, 0, 24, true)
+    s(i, D_D, max)
+    s(i, D_B, tlen(buf))
+    s(i, D_C, tlen(buf))
+    return i
+}
+
+fn list(blob: u64, rows: u64) -> u64 {
+    let i: u64 = add(K_LIST, blob, 0, rows * (wlibc.PX_UI + 5) + 4, true)
+    s(i, D_VAL, 0)
+    s(i, D_A, 0)
+    count_rows(i)
+    return i
+}
+
+// Eine Tabelle bekommt die Zeilen als EINEN Text: Spalten durch
+// Tabulator getrennt, Zeilen durch Zeilenumbruch. Kein Modell, keine
+// Rueckrufe -- die Sprache hat keine Funktionszeiger, und ein
+// Zeilenpuffer ist das, was ein Dateimanager ohnehin baut.
+fn table(blob: u64, rows: u64, cols: u64, breiten: u64) -> u64 {
+    let i: u64 = add(K_TABLE, blob, 0, rows * (wlibc.PX_UI + 5) + 24, true)
+    s(i, D_C, cols)
+    s(i, D_D, breiten)
+    s(i, D_VAL, 0)
+    s(i, D_A, 0)
+    count_rows(i)
+    return i
+}
+
+fn tabs(txt: u64) -> u64 {
+    return add(K_TABS, txt, 0, 26, true)
+}
+
+fn menubar(txt: u64) -> u64 {
+    return add(K_MENUBAR, txt, 0, 22, false)
+}
+
+fn choice(txt: u64, sel: u64) -> u64 {
+    let i: u64 = add(K_CHOICE, txt, 0, 24, true)
+    s(i, D_VAL, sel)
+    return i
+}
+
+fn sep() -> u64 {
+    return add(K_SEP, 0, 0, 5, false)
+}
+
+fn scrollarea(rows: u64, sicht: u64) -> u64 {
+    let i: u64 = add(K_SCROLL, 0, 14, 0, false)
+    s(i, D_A, rows)
+    s(i, D_B, sicht)
+    return i
+}
+
+// ------------------------------------------------------- der Zustand
+
+fn value(i: u64) -> u64 {
+    return g(i, D_VAL)
+}
+
+fn set_value(i: u64, v: u64) {
+    if g(i, D_VAL) == v {
+        return
+    }
+    s(i, D_VAL, v)
+    dirty_wd(i)
+}
+
+fn text_of(i: u64) -> u64 {
+    return g(i, D_TEXT)
+}
+
+fn set_text(i: u64, p: u64) {
+    s(i, D_TEXT, p)
+    if g(i, D_KIND) == K_LIST || g(i, D_KIND) == K_TABLE {
+        count_rows(i)
+        if g(i, D_VAL) >= g(i, D_A) {
+            s(i, D_VAL, 0)
+        }
+        s(i, D_B, 0)
+    }
+    if g(i, D_KIND) == K_ENTRY {
+        s(i, D_B, tlen(p))
+        s(i, D_C, g(i, D_B))
+    }
+    dirty_wd(i)
+}
+
+fn set_rows(i: u64, n: u64) {
+    s(i, D_A, n)
+}
+
+fn set_cols(i: u64, n: u64, breiten: u64) {
+    s(i, D_C, n)
+    s(i, D_D, breiten)
+}
+
+fn enable(i: u64, on: bool) {
+    if on {
+        s(i, D_FLAGS, g(i, D_FLAGS) & ~F_OFF)
+    } else {
+        s(i, D_FLAGS, g(i, D_FLAGS) | F_OFF)
+    }
+    dirty_wd(i)
+}
+
+fn focus_id() -> u64 {
+    if s_focus == 0 {
+        return MAXWD
+    }
+    return s_focus - 1
+}
+
+fn set_focus(i: u64) {
+    if s_focus != 0 {
+        dirty_wd(s_focus - 1)
+    }
+    s_focus = i + 1
+    dirty_wd(i)
+}
+
+fn fired_kind() -> u64 {
+    return s_fkind
+}
+
+fn fired_index() -> u64 {
+    return s_findex
+}
+
+fn fired_win() -> u64 {
+    return s_fwin
+}
+
+// --------------------------------------------------- Zeilen und Spalten
+
+// Wie viele Zeilen der Textblock hat. Eine Zeile ist alles bis zum
+// naechsten Umbruch; der letzte Umbruch zaehlt nicht als leere Zeile
+// dahinter.
+fn count_rows(i: u64) {
+    let p: u64 = g(i, D_TEXT)
+    if p == 0 {
+        s(i, D_A, 0)
+        return
+    }
+    var n: u64 = 0
+    var k: u64 = 0
+    var zeichen: u64 = 0
+    while (*((p + k) as *mut u8)) != 0 as u8 {
+        if (*((p + k) as *mut u8)) == 10 as u8 {
+            n = n + 1
+            zeichen = 0
+        } else {
+            zeichen = zeichen + 1
+        }
+        k = k + 1
+    }
+    if zeichen > 0 {
+        n = n + 1
+    }
+    s(i, D_A, n)
+}
+
+fn row_at(p: u64, r: u64) -> u64 {
+    if p == 0 {
+        return 0
+    }
+    var k: u64 = 0
+    var n: u64 = 0
+    while n < r {
+        if (*((p + k) as *mut u8)) == 0 as u8 {
+            return 0
+        }
+        if (*((p + k) as *mut u8)) == 10 as u8 {
+            n = n + 1
+        }
+        k = k + 1
+    }
+    if (*((p + k) as *mut u8)) == 0 as u8 {
+        return 0
+    }
+    return p + k
+}
+
+fn row_len(q: u64) -> u64 {
+    var n: u64 = 0
+    while (*((q + n) as *mut u8)) != 0 as u8 {
+        if (*((q + n) as *mut u8)) == 10 as u8 {
+            return n
+        }
+        n = n + 1
+    }
+    return n
+}
+
+// Spalte `c` einer Zeile: Zeiger und Laenge (Laenge oben in `col_len`).
+fn col_at(q: u64, ende: u64, c: u64) -> u64 {
+    var k: u64 = 0
+    var n: u64 = 0
+    while n < c {
+        if k >= ende {
+            return 0
+        }
+        if (*((q + k) as *mut u8)) == 9 as u8 {
+            n = n + 1
+        }
+        k = k + 1
+    }
+    if k > ende {
+        return 0
+    }
+    return q + k
+}
+
+fn col_len(q: u64, rest: u64) -> u64 {
+    var n: u64 = 0
+    while n < rest {
+        if (*((q + n) as *mut u8)) == 9 as u8 {
+            return n
+        }
+        n = n + 1
+    }
+    return rest
+}
+
+fn zeilen_hoehe() -> u64 {
+    return wlibc.PX_UI + 5
+}
+
+// ==================================================================
+// DAS MALEN
+//
+// Alles laeuft ueber `wlibc.px` und damit ueber den Streifen. Kein
+// Widget kennt den Fensterpuffer, kein Widget kennt einen
+// Systemaufruf: es malt in Fensterkoordinaten, und die Bibliothek
+// entscheidet, welcher Streifen gerade darunter liegt.
+
+fn paint_bg(w: u64, x: u64, y: u64, bw: u64, bh: u64) {
+    var c: u64 = wlibc.theme(wlibc.T_BG)
+    if ng(w, N_KIND) == NK_DLG {
+        c = wlibc.theme(wlibc.T_DLG)
+    }
+    if ng(w, N_KIND) == NK_MENU {
+        c = wlibc.theme(wlibc.T_MENU)
+    }
+    wlibc.rect(x, y, bw, bh, c)
+}
+
+// Text, waagerecht ausgerichtet: 0 links, 1 mittig, 2 rechts.
+fn put_text(f: u64, pxs: u64, x: u64, y: u64, bw: u64, p: u64, n: u64,
+    farbe: u64, aus: u64) -> u64 {
+    if p == 0 || n == 0 {
+        return x
+    }
+    var tx: u64 = x
+    if aus != 0 {
+        let tw: u64 = wlibc.text_w(f, pxs, p, n)
+        if aus == 1 {
+            tx = x + sub(bw, tw) / 2
+        } else {
+            tx = x + sub(bw, tw)
+        }
+    }
+    return wlibc.text_at(f, pxs, tx, y, p, n, farbe)
+}
+
+fn focus_ring(i: u64) {
+    if s_focus != i + 1 {
+        return
+    }
+    wlibc.frame(g(i, D_X), g(i, D_Y), g(i, D_W), g(i, D_H),
+        wlibc.theme(wlibc.T_FOCUS))
+}
+
+fn paint_scroll(x: u64, y: u64, h: u64, oben: u64, sicht: u64,
+    ganz: u64) {
+    wlibc.rect(x, y, 14, h, wlibc.theme(wlibc.T_SCROLL))
+    if ganz == 0 || sicht >= ganz {
+        return
+    }
+    var th: u64 = h * sicht / ganz
+    if th < 12 {
+        th = 12
+    }
+    if th > h {
+        th = h
+    }
+    var ty: u64 = 0
+    if ganz > sicht {
+        ty = (h - th) * oben / (ganz - sicht)
+    }
+    wlibc.rect(x + 2, y + ty, 10, th, wlibc.theme(wlibc.T_THUMB))
+}
+
+fn paint_button(i: u64) {
+    let x: u64 = g(i, D_X)
+    let y: u64 = g(i, D_Y)
+    let bw: u64 = g(i, D_W)
+    let bh: u64 = g(i, D_H)
+    var flaeche: u64 = wlibc.theme(wlibc.T_BTN)
+    if (g(i, D_FLAGS) & F_PRESSED) != 0 {
+        flaeche = wlibc.theme(wlibc.T_BTNDN)
+    } else if (g(i, D_FLAGS) & F_HOVER) != 0 {
+        flaeche = wlibc.theme(wlibc.T_BTNHI)
+    }
+    wlibc.rect(x, y, bw, bh, flaeche)
+    wlibc.frame3(x, y, bw, bh, wlibc.theme(wlibc.T_BTNHI),
+        wlibc.theme(wlibc.T_LINE), (g(i, D_FLAGS) & F_PRESSED) != 0)
+    var farbe: u64 = wlibc.theme(wlibc.T_FG)
+    if (g(i, D_FLAGS) & F_OFF) != 0 {
+        farbe = wlibc.theme(wlibc.T_DIM)
+    }
+    let grund: u64 = y + (bh + wlibc.ascent_of(wlibc.F_UI, wlibc.PX_UI)) / 2
+    put_text(wlibc.F_UI, wlibc.PX_UI, x, grund, bw, g(i, D_TEXT),
+        tlen(g(i, D_TEXT)), farbe, 1)
+    focus_ring(i)
+}
+
+fn paint_label(i: u64) {
+    let grund: u64 = g(i, D_Y) + wlibc.ascent_of(wlibc.F_UI, wlibc.PX_UI)
+    put_text(wlibc.F_UI, wlibc.PX_UI, g(i, D_X), grund, g(i, D_W),
+        g(i, D_TEXT), tlen(g(i, D_TEXT)), wlibc.theme(wlibc.T_FG), 0)
+}
+
+fn paint_check(i: u64) {
+    let x: u64 = g(i, D_X)
+    let y: u64 = g(i, D_Y)
+    let k: u64 = 14
+    let oy: u64 = y + sub(g(i, D_H), k) / 2
+    wlibc.rect(x, oy, k, k, wlibc.theme(wlibc.T_ENTRY))
+    wlibc.frame(x, oy, k, k, wlibc.theme(wlibc.T_LINE))
+    if g(i, D_VAL) != 0 {
+        // Ein Haken aus zwei Strichen, und nicht ein gefuelltes
+        // Kaestchen: ein Bildschirmfoto kann einen Haken von einer
+        // Auswahlfarbe unterscheiden, eine Fuellung nicht.
+        var n: u64 = 0
+        while n < 4 {
+            wlibc.px(x + 3 + n, oy + 6 + n, wlibc.theme(wlibc.T_ACCENT))
+            wlibc.px(x + 3 + n, oy + 7 + n, wlibc.theme(wlibc.T_ACCENT))
+            n = n + 1
+        }
+        n = 0
+        while n < 6 {
+            wlibc.px(x + 7 + n, oy + 9 - n, wlibc.theme(wlibc.T_ACCENT))
+            wlibc.px(x + 7 + n, oy + 10 - n, wlibc.theme(wlibc.T_ACCENT))
+            n = n + 1
+        }
+    }
+    let grund: u64 = y + (g(i, D_H)
+        + wlibc.ascent_of(wlibc.F_UI, wlibc.PX_UI)) / 2
+    put_text(wlibc.F_UI, wlibc.PX_UI, x + k + 6, grund, g(i, D_W),
+        g(i, D_TEXT), tlen(g(i, D_TEXT)), wlibc.theme(wlibc.T_FG), 0)
+    focus_ring(i)
+}
+
+// DAS TEXTFELD, und hier steckt die meiste Arbeit dieser Datei.
+//
+// Es zeigt eine Zeile, es hat eine EINFUEGEMARKE (`D_B`) und einen
+// AUSWAHLANKER (`D_C`). Sind beide gleich, ist nichts ausgewaehlt.
+// Sonst liegt die Auswahl zwischen ihnen, und sie wird mit der
+// Auswahlfarbe hinterlegt und in der Auswahlvordergrundfarbe gesetzt --
+// zwei Textlaeufe statt einem, damit die Farbe wirklich wechselt und
+// nicht nur der Hintergrund.
+fn entry_x(i: u64, at: u64) -> u64 {
+    return g(i, D_X) + 5 + wlibc.text_w(wlibc.F_UI, wlibc.PX_UI,
+        g(i, D_TEXT), at)
+}
+
+fn paint_entry(i: u64) {
+    let x: u64 = g(i, D_X)
+    let y: u64 = g(i, D_Y)
+    let bw: u64 = g(i, D_W)
+    let bh: u64 = g(i, D_H)
+    wlibc.rect(x, y, bw, bh, wlibc.theme(wlibc.T_ENTRY))
+    wlibc.frame(x, y, bw, bh, wlibc.theme(wlibc.T_LINE))
+    let p: u64 = g(i, D_TEXT)
+    let n: u64 = tlen(p)
+    let grund: u64 = y + (bh + wlibc.ascent_of(wlibc.F_UI, wlibc.PX_UI)) / 2
+    var a: u64 = g(i, D_B)
+    var b: u64 = g(i, D_C)
+    if a > b {
+        let t: u64 = a
+        a = b
+        b = t
+    }
+    if b > n {
+        b = n
+    }
+    if a > n {
+        a = n
+    }
+    if b > a {
+        let x0: u64 = entry_x(i, a)
+        let x1: u64 = entry_x(i, b)
+        wlibc.rect(x0, y + 3, sub(x1, x0), sub(bh, 6),
+            wlibc.theme(wlibc.T_SEL))
+    }
+    // vor der Auswahl, die Auswahl, danach -- drei Laeufe, damit die
+    // ausgewaehlten Zeichen ihre eigene Farbe bekommen.
+    var cx: u64 = wlibc.text_at(wlibc.F_UI, wlibc.PX_UI, x + 5, grund, p, a,
+        wlibc.theme(wlibc.T_FG))
+    if b > a {
+        cx = wlibc.text_at(wlibc.F_UI, wlibc.PX_UI, entry_x(i, a), grund,
+            p + a, b - a, wlibc.theme(wlibc.T_SELFG))
+    }
+    if n > b {
+        wlibc.text_at(wlibc.F_UI, wlibc.PX_UI, entry_x(i, b), grund, p + b,
+            n - b, wlibc.theme(wlibc.T_FG))
+    }
+    // Die Einfuegemarke -- nur, wenn das Feld den Fokus hat. Ein Feld,
+    // das immer eine Marke zeigt, sagt nicht mehr, wohin getippt wird.
+    if s_focus == i + 1 {
+        let mx: u64 = entry_x(i, g(i, D_B))
+        wlibc.rect(mx, y + 3, 2, sub(bh, 6), wlibc.theme(wlibc.T_ACCENT))
+    }
+    focus_ring(i)
+}
+
+// EIN SYMBOL JE ZEILE. `p` zeigt auf ein Feld aus WOERTERN, eines je
+// Zeile, und jedes ist entweder
+//
+//   * ein ZEIGER auf ein Bild im Format OSYM (`tools/k15/symbol.py`:
+//     vier Oktette "OSYM", Breite, Hoehe, dann Breite mal Hoehe
+//     Bildpunkte zu vier Oktetten) -- so liegt es in jedem Buendel unter
+//     `/apps/<name>.prog/symbol`, oder
+//   * eine FARBE, wenn kein Bild da ist. Dann wird ein Plaettchen in
+//     dieser Farbe gemalt und der erste Buchstabe des Namens darauf.
+//
+// Unterschieden werden die beiden am Kopf: was mit "OSYM" anfaengt, ist
+// ein Bild. Ein Zeiger in Ring 3 liegt bei 0x40100000 und eine Farbe
+// unter 0x01000000, also waere auch das eine Unterscheidung -- aber eine,
+// die von der Speicherkarte abhaengt statt vom Inhalt, und die faellt
+// still um, wenn sich die Karte aendert.
+//
+// WARUM UEBERHAUPT EIN BILD. Der erste Nachtrag hatte nur die Farbe, und
+// das war ehrlich, solange dieses System keine Bilddatei lesen konnte.
+// Der zweite Nachtrag verlangt ein Buendel, in dem ALLES steckt, was zu
+// einem Programm gehoert -- ein Symbol, das in Wahrheit sechs Hexziffern
+// in einer Textdatei ist, gehoert nicht dazu. Das Format ist so klein,
+// dass der Leser dieser Datei zwanzig Zeilen hat, und es ist trotzdem
+// eine Datei mit Bildpunkten darin, die man Punkt fuer Punkt gegen den
+// Schirm rechnen kann.
+fn list_icons(i: u64, p: u64) {
+    s(i, D_D, p)
+    dirty_wd(i)
+}
+
+// "OSYM" -- vier Oktette, gelesen als eine Zahl waere es von der
+// Ausrichtung abhaengig, also Oktett fuer Oktett.
+//
+// ZUERST DER BEREICH, DANN DIE KENNUNG, und das ist kein Uebereifer: die
+// erste Fassung fragte nur `p < 4096` und las danach vier Oktette. Eine
+// FARBE wie 0x707880 ist groesser als 4096 -- der Starter setzte genau
+// die fuer seine Dateitreffer, und der Prozess starb mit
+// `user fault: cr2=0x707880`. Ein Wort ist nur dann ein Zeiger, wenn es
+// in den privaten Bereich dieses Prozesses zeigt (`proc.IMAGE_BASE` bis
+// zum Ende der privaten Seiten); alles andere ist eine Farbe.
+const U_LO: u64 = 0x40100000
+const U_HI: u64 = 0x40200000
+
+fn ist_bild(p: u64) -> bool {
+    if p < U_LO || p >= U_HI {
+        return false
+    }
+    if __mmio_read8((p) as *mut u8) != 79 as u8 {
+        return false
+    }
+    if __mmio_read8((p + 1) as *mut u8) != 83 as u8 {
+        return false
+    }
+    if __mmio_read8((p + 2) as *mut u8) != 89 as u8 {
+        return false
+    }
+    return __mmio_read8((p + 3) as *mut u8) == 77 as u8
+}
+
+fn bild_w(p: u64) -> u64 {
+    return __mmio_read32((p + 4) as *mut u32) as u64
+}
+
+fn bild_h(p: u64) -> u64 {
+    return __mmio_read32((p + 8) as *mut u32) as u64
+}
+
+// Das Bild in ein Feld von `kw` mal `kh`. Groesser wird nicht skaliert,
+// sondern beschnitten -- ein Symbol, das nicht passt, ist ein Fehler im
+// Buendel und soll auffallen, nicht weichgezeichnet werden.
+fn bild_malen(p: u64, x: u64, y: u64, kw: u64, kh: u64) {
+    let w: u64 = bild_w(p)
+    let h: u64 = bild_h(p)
+    if w == 0 || h == 0 || w > 64 || h > 64 {
+        return
+    }
+    var r: u64 = 0
+    while r < h && r < kh {
+        var c: u64 = 0
+        while c < w && c < kw {
+            let f: u64 = __mmio_read32((p + 12 + (r * w + c) * 4)
+                as *mut u32) as u64
+            // DECKUNG NULL HEISST DURCHSICHTIG, und dann bleibt stehen,
+            // was schon da ist -- die Auswahlfarbe der Zeile zum
+            // Beispiel. Ohne das haette jedes Symbol einen schwarzen
+            // Kasten um sich, und ein Pruefer, der die Zeilenfarbe misst,
+            // faende sie an den Ecken nicht.
+            if (f >> 24) != 0 {
+                wlibc.px(x + c, y + r, f & 0x00FFFFFF)
+            }
+            c = c + 1
+        }
+        r = r + 1
+    }
+}
+
+fn list_ein(i: u64) -> u64 {
+    if g(i, D_KIND) == K_LIST && g(i, D_D) != 0 {
+        return 22
+    }
+    return 0
+}
+
+fn paint_list(i: u64) {
+    let x: u64 = g(i, D_X)
+    let y: u64 = g(i, D_Y)
+    let bw: u64 = g(i, D_W)
+    let bh: u64 = g(i, D_H)
+    let zh: u64 = zeilen_hoehe()
+    let sicht: u64 = sub(bh, 4) / zh
+    wlibc.rect(x, y, bw, bh, wlibc.theme(wlibc.T_ENTRY))
+    wlibc.frame(x, y, bw, bh, wlibc.theme(wlibc.T_LINE))
+    let ganz: u64 = g(i, D_A)
+    var r: u64 = 0
+    while r < sicht {
+        let z: u64 = g(i, D_B) + r
+        if z < ganz {
+            let q: u64 = row_at(g(i, D_TEXT), z)
+            let ln: u64 = row_len(q)
+            let ry: u64 = y + 2 + r * zh
+            var farbe: u64 = wlibc.theme(wlibc.T_FG)
+            if z == g(i, D_VAL) {
+                wlibc.rect(x + 1, ry, sub(bw, 16), zh,
+                    wlibc.theme(wlibc.T_SEL))
+                farbe = wlibc.theme(wlibc.T_SELFG)
+            }
+            let ein: u64 = list_ein(i)
+            if ein != 0 {
+                let f: u64 = __mmio_read64((g(i, D_D) + z * 8) as *mut u64)
+                if ist_bild(f) {
+                    // KEIN RAHMEN UEBER EIN BILD. Der erste Entwurf malte
+                    // erst das Symbol und dann denselben Rahmen wie um
+                    // ein Farbplaettchen -- und ueberschrieb damit die
+                    // untere und die rechte Kante des Bildes. Der
+                    // Pruefer sah 25 von 169 deckenden Bildpunkten
+                    // falsch; im Bild sah man nichts. Ein Symbol bringt
+                    // seinen Rand selbst mit oder hat keinen.
+                    bild_malen(f, x + 5, ry + 3, 14, 14)
+                } else {
+                wlibc.rect(x + 5, ry + 3, 14, 14, f)
+                wlibc.frame(x + 5, ry + 3, 14, 14, wlibc.theme(wlibc.T_LINE))
+                if ln > 0 {
+                    // MITTIG AUF DAS PLAETTCHEN, und das ist keine
+                    // Feinheit: die erste Fassung setzte den Buchstaben
+                    // auf eine feste Stelle, und bei einem breiten
+                    // ragte er ueber den Rand -- im Bild sah man einen
+                    // Buchstaben, im Pruefer 49 von 67 Tintenpunkten
+                    // falsch, weil dort nicht mehr die Farbe des
+                    // Plaettchens hinter ihm stand.
+                    let bw2: u64 = wlibc.text_w(wlibc.F_UI, wlibc.PX_UI,
+                        q, 1)
+                    wlibc.text_at(wlibc.F_UI, wlibc.PX_UI,
+                        x + 5 + sub(14, bw2) / 2, ry + 3 + 12, q, 1,
+                        0x00FFFFFF)
+                }
+                }
+            }
+            wlibc.text_at(wlibc.F_UI, wlibc.PX_UI, x + 6 + ein,
+                ry + wlibc.ascent_of(wlibc.F_UI, wlibc.PX_UI) + 1, q, ln,
+                farbe)
+        }
+        r = r + 1
+    }
+    paint_scroll(x + bw - 15, y + 1, sub(bh, 2), g(i, D_B), sicht, ganz)
+    focus_ring(i)
+}
+
+fn spalte_breit(i: u64, c: u64) -> u64 {
+    let p: u64 = g(i, D_D)
+    if p == 0 {
+        return 100
+    }
+    return __mmio_read64((p + c * 8) as *mut u64)
+}
+
+fn paint_table(i: u64) {
+    let x: u64 = g(i, D_X)
+    let y: u64 = g(i, D_Y)
+    let bw: u64 = g(i, D_W)
+    let bh: u64 = g(i, D_H)
+    let zh: u64 = zeilen_hoehe()
+    let kopf: u64 = zh + 4
+    let sicht: u64 = sub(sub(bh, 4), kopf) / zh
+    let cols: u64 = g(i, D_C)
+    wlibc.rect(x, y, bw, bh, wlibc.theme(wlibc.T_ENTRY))
+    // DIE KOPFZEILE. Sie ist Zeile 0 des Textblocks -- so steht die
+    // Beschriftung in derselben Quelle wie die Daten, und eine Spalte,
+    // die dazukommt, kann nicht vergessen werden.
+    wlibc.rect(x + 1, y + 1, sub(bw, 2), kopf, wlibc.theme(wlibc.T_HEAD))
+    let kq: u64 = row_at(g(i, D_TEXT), 0)
+    let kl: u64 = row_len(kq)
+    var cx: u64 = x + 6
+    var c: u64 = 0
+    while c < cols {
+        let q: u64 = col_at(kq, kl, c)
+        if q != 0 {
+            let ln: u64 = col_len(q, sub(kl, sub(q, kq)))
+            wlibc.text_at(wlibc.F_UI, wlibc.PX_UI, cx,
+                y + 3 + wlibc.ascent_of(wlibc.F_UI, wlibc.PX_UI), q, ln,
+                wlibc.theme(wlibc.T_FG))
+        }
+        cx = cx + spalte_breit(i, c)
+        if c + 1 < cols {
+            wlibc.vline(cx - 4, y + 1, kopf, wlibc.theme(wlibc.T_LINE))
+        }
+        c = c + 1
+    }
+    wlibc.hline(x + 1, y + kopf, sub(bw, 2), wlibc.theme(wlibc.T_LINE))
+    let ganz: u64 = sub(g(i, D_A), 1)
+    var r: u64 = 0
+    while r < sicht {
+        let z: u64 = g(i, D_B) + r
+        if z < ganz {
+            let q: u64 = row_at(g(i, D_TEXT), z + 1)
+            let ln: u64 = row_len(q)
+            let ry: u64 = y + kopf + 1 + r * zh
+            var farbe: u64 = wlibc.theme(wlibc.T_FG)
+            if z == g(i, D_VAL) {
+                wlibc.rect(x + 1, ry, sub(bw, 16), zh,
+                    wlibc.theme(wlibc.T_SEL))
+                farbe = wlibc.theme(wlibc.T_SELFG)
+            }
+            var tx: u64 = x + 6
+            c = 0
+            while c < cols {
+                let cq: u64 = col_at(q, ln, c)
+                if cq != 0 {
+                    var cl: u64 = col_len(cq, sub(ln, sub(cq, q)))
+                    // was nicht in die Spalte passt, wird abgeschnitten
+                    // und nicht in die naechste geschrieben
+                    let platz: u64 = sub(spalte_breit(i, c), 6)
+                    while cl > 0 && wlibc.text_w(wlibc.F_UI, wlibc.PX_UI,
+                        cq, cl) > platz {
+                        cl = cl - 1
+                    }
+                    var f2: u64 = farbe
+                    if c > 0 && z != g(i, D_VAL) {
+                        f2 = wlibc.theme(wlibc.T_DIM)
+                    }
+                    wlibc.text_at(wlibc.F_UI, wlibc.PX_UI, tx,
+                        ry + wlibc.ascent_of(wlibc.F_UI, wlibc.PX_UI) + 1,
+                        cq, cl, f2)
+                }
+                tx = tx + spalte_breit(i, c)
+                c = c + 1
+            }
+        }
+        r = r + 1
+    }
+    wlibc.frame(x, y, bw, bh, wlibc.theme(wlibc.T_LINE))
+    paint_scroll(x + bw - 15, y + kopf + 1, sub(sub(bh, kopf), 2),
+        g(i, D_B), sicht, ganz)
+    focus_ring(i)
+}
+
+fn tab_breite(i: u64, k: u64) -> u64 {
+    let q: u64 = row_at(g(i, D_TEXT), k)
+    if q == 0 {
+        return 0
+    }
+    return wlibc.text_w(wlibc.F_UI, wlibc.PX_UI, q, row_len(q)) + 20
+}
+
+fn paint_tabs(i: u64) {
+    let x: u64 = g(i, D_X)
+    let y: u64 = g(i, D_Y)
+    let bh: u64 = g(i, D_H)
+    wlibc.rect(x, y, g(i, D_W), bh, wlibc.theme(wlibc.T_PANEL))
+    var tx: u64 = x
+    var k: u64 = 0
+    while k < 8 {
+        let q: u64 = row_at(g(i, D_TEXT), k)
+        if q == 0 {
+            k = 8
+        } else {
+            let tw: u64 = tab_breite(i, k)
+            var flaeche: u64 = wlibc.theme(wlibc.T_PANEL)
+            var farbe: u64 = wlibc.theme(wlibc.T_DIM)
+            if k == g(i, D_VAL) {
+                flaeche = wlibc.theme(wlibc.T_BG)
+                farbe = wlibc.theme(wlibc.T_FG)
+            }
+            wlibc.rect(tx, y, tw, bh, flaeche)
+            wlibc.vline(tx, y, bh, wlibc.theme(wlibc.T_LINE))
+            if k == g(i, D_VAL) {
+                wlibc.hline(tx, y, tw, wlibc.theme(wlibc.T_ACCENT))
+                wlibc.hline(tx, y + 1, tw, wlibc.theme(wlibc.T_ACCENT))
+            } else {
+                wlibc.hline(tx, y + bh - 1, tw, wlibc.theme(wlibc.T_LINE))
+            }
+            put_text(wlibc.F_UI, wlibc.PX_UI, tx,
+                y + (bh + wlibc.ascent_of(wlibc.F_UI, wlibc.PX_UI)) / 2, tw,
+                q, row_len(q), farbe, 1)
+            tx = tx + tw
+            k = k + 1
+        }
+    }
+    wlibc.hline(tx, y + bh - 1, sub(x + g(i, D_W), tx),
+        wlibc.theme(wlibc.T_LINE))
+    focus_ring(i)
+}
+
+fn paint_menubar(i: u64) {
+    let x: u64 = g(i, D_X)
+    let y: u64 = g(i, D_Y)
+    wlibc.rect(x, y, g(i, D_W), g(i, D_H), wlibc.theme(wlibc.T_PANEL))
+    var tx: u64 = x + 4
+    var k: u64 = 0
+    while k < 8 {
+        let q: u64 = row_at(g(i, D_TEXT), k)
+        if q == 0 {
+            k = 8
+        } else {
+            let tw: u64 = wlibc.text_w(wlibc.F_UI, wlibc.PX_UI, q,
+                row_len(q)) + 16
+            if k + 1 == g(i, D_VAL) {
+                wlibc.rect(tx, y, tw, g(i, D_H), wlibc.theme(wlibc.T_SEL))
+            }
+            put_text(wlibc.F_UI, wlibc.PX_UI, tx,
+                y + (g(i, D_H) + wlibc.ascent_of(wlibc.F_UI, wlibc.PX_UI))
+                / 2, tw, q, row_len(q), wlibc.theme(wlibc.T_FG), 1)
+            tx = tx + tw
+            k = k + 1
+        }
+    }
+}
+
+fn paint_choice(i: u64) {
+    let x: u64 = g(i, D_X)
+    let y: u64 = g(i, D_Y)
+    let bw: u64 = g(i, D_W)
+    let bh: u64 = g(i, D_H)
+    wlibc.rect(x, y, bw, bh, wlibc.theme(wlibc.T_BTN))
+    wlibc.frame3(x, y, bw, bh, wlibc.theme(wlibc.T_BTNHI),
+        wlibc.theme(wlibc.T_LINE), false)
+    let q: u64 = row_at(g(i, D_TEXT), g(i, D_VAL))
+    if q != 0 {
+        put_text(wlibc.F_UI, wlibc.PX_UI, x + 6,
+            y + (bh + wlibc.ascent_of(wlibc.F_UI, wlibc.PX_UI)) / 2, bw, q,
+            row_len(q), wlibc.theme(wlibc.T_FG), 0)
+    }
+    // Das Dreieck rechts -- sechs Zeilen, von aussen nach innen.
+    var n: u64 = 0
+    while n < 5 {
+        wlibc.hline(x + bw - 16 + n, y + bh / 2 - 2 + n, 10 - 2 * n,
+            wlibc.theme(wlibc.T_FG))
+        n = n + 1
+    }
+    focus_ring(i)
+}
+
+fn paint_sep(i: u64) {
+    wlibc.hline(g(i, D_X), g(i, D_Y) + g(i, D_H) / 2, g(i, D_W),
+        wlibc.theme(wlibc.T_LINE))
+}
+
+fn paint_one(i: u64) {
+    let k: u64 = g(i, D_KIND)
+    if (g(i, D_FLAGS) & F_HIDE) != 0 {
+        return
+    }
+    if k == K_LABEL {
+        paint_label(i)
+    } else if k == K_BUTTON {
+        paint_button(i)
+    } else if k == K_CHECK {
+        paint_check(i)
+    } else if k == K_ENTRY {
+        paint_entry(i)
+    } else if k == K_LIST {
+        paint_list(i)
+    } else if k == K_TABLE {
+        paint_table(i)
+    } else if k == K_TABS {
+        paint_tabs(i)
+    } else if k == K_MENUBAR {
+        paint_menubar(i)
+    } else if k == K_CHOICE {
+        paint_choice(i)
+    } else if k == K_SEP {
+        paint_sep(i)
+    } else if k == K_SCROLL {
+        paint_scroll(g(i, D_X), g(i, D_Y), g(i, D_H), g(i, D_VAL),
+            g(i, D_B), g(i, D_A))
+    }
+}
+
+// EIN MENUEFENSTER. Es hat keine Widgets -- es ist eine Liste von
+// Zeilen und ein Rahmen. Der Grund: ein Menue ist der einzige Fall, in
+// dem ein FENSTER genau ein Widget ist, und eine Widgetliste dafuer
+// waere eine Verwaltung ohne Nutzen.
+fn paint_menu(w: u64) {
+    let zh: u64 = zeilen_hoehe() + 2
+    wlibc.rect(0, 0, ng(w, N_W), ng(w, N_HH), wlibc.theme(wlibc.T_MENU))
+    var k: u64 = 0
+    while k < ng(w, N_CNT) {
+        let q: u64 = row_at(ng(w, N_DATA), k)
+        if q != 0 {
+            let ry: u64 = 2 + k * zh
+            var farbe: u64 = wlibc.theme(wlibc.T_FG)
+            if k + 1 == ng(w, N_VAL) {
+                wlibc.rect(1, ry, sub(ng(w, N_W), 2), zh,
+                    wlibc.theme(wlibc.T_SEL))
+                farbe = wlibc.theme(wlibc.T_SELFG)
+            }
+            wlibc.text_at(wlibc.F_UI, wlibc.PX_UI, 8,
+                ry + wlibc.ascent_of(wlibc.F_UI, wlibc.PX_UI) + 1, q,
+                row_len(q), farbe)
+        }
+        k = k + 1
+    }
+    wlibc.frame(0, 0, ng(w, N_W), ng(w, N_HH), wlibc.theme(wlibc.T_ACCENT))
+}
+
+// DAS NEUZEICHNEN -- STREIFEN FUER STREIFEN.
+//
+// Der schmutzige Bereich wird in so viele Streifen zerlegt, wie die
+// Flaeche hoch ist. Je Streifen: Hintergrund, alle Widgets, die ihn
+// beruehren, und EIN Aufruf hinueber. Ein Widget, das drei Streifen
+// beruehrt, wird dreimal gezeichnet -- was es kostet, ist der Anteil,
+// der ohnehin gezeichnet wird, und was es spart, ist der ganze Puffer.
+fn flush_win(w: u64) -> u64 {
+    if w >= MAXWN || ng(w, N_H) == 0 {
+        return 0
+    }
+    let n: u64 = ng(w, N_NDIRT)
+    ns(w, N_NDIRT, 0)
+    var gemalt: u64 = 0
+    var k: u64 = 0
+    while k < n {
+        gemalt = gemalt + flush_rect(w, dg(w, k, 0), dg(w, k, 1),
+            dg(w, k, 2), dg(w, k, 3))
+        k = k + 1
+    }
+    return gemalt
+}
+
+fn flush_rect(w: u64, x0: u64, y0: u64, x1: u64, y1: u64) -> u64 {
+    if x1 <= x0 || y1 <= y0 {
+        return 0
+    }
+    var gemalt: u64 = 0
+    var yb: u64 = y0
+    while yb < y1 {
+        var ye: u64 = yb + wlibc.surf_rows()
+        if ye > y1 {
+            ye = y1
+        }
+        wlibc.set_band(yb)
+        wlibc.clip_set(x0, yb, x1, ye)
+        paint_bg(w, x0, yb, x1 - x0, ye - yb)
+        if ng(w, N_KIND) == NK_MENU {
+            paint_menu(w)
+        } else {
+            var i: u64 = 0
+            while i < nwd {
+                if g(i, D_WIN) == w {
+                    if g(i, D_Y) < ye && g(i, D_Y) + g(i, D_H) > yb {
+                        paint_one(i)
+                    }
+                }
+                i = i + 1
+            }
+        }
+        wlibc.push(ng(w, N_H), x0, yb, x1 - x0, ye - yb)
+        s_blits = s_blits + 1
+        gemalt = gemalt + (x1 - x0) * (ye - yb)
+        yb = ye
+    }
+    return gemalt
+}
+
+fn draw_all() {
+    var w: u64 = 0
+    while w < nwn {
+        if ng(w, N_H) != 0 {
+            dirty_all(w)
+            flush_win(w)
+        }
+        w = w + 1
+    }
+}
+
+// ==================================================================
+// DIE EINGABE
+//
+// DIE TREFFERPRUEFUNG IST DIE STELLE, AN DER `nohit` ANSETZT. Ohne sie
+// kommen dieselben Ereignisse an, dieselben Zaehler laufen hoch -- und
+// kein Widget erfaehrt davon. Das ist die Gegenprobe zu jeder Zusage
+// ueber einen Klick: sie MUSS damit einbrechen.
+fn hit_at(w: u64, x: u64, y: u64) -> u64 {
+    if s_nohit != 0 {
+        return MAXWD
+    }
+    var i: u64 = 0
+    while i < nwd {
+        if g(i, D_WIN) == w && (g(i, D_FLAGS) & (F_HIDE | F_OFF)) == 0 {
+            if x >= g(i, D_X) && x < g(i, D_X) + g(i, D_W) {
+                if y >= g(i, D_Y) && y < g(i, D_Y) + g(i, D_H) {
+                    return i
+                }
+            }
+        }
+        i = i + 1
+    }
+    return MAXWD
+}
+
+fn ticks() -> u64 {
+    return ulib.sys(ulib.SYS_SYSINFO, ulib.I_TICKS, 0, 0)
+}
+
+fn fire(i: u64, kind: u64, index: u64, w: u64) {
+    s_fired = i + 1
+    s_fkind = kind
+    s_findex = index
+    s_fwin = w
+}
+
+// Welche Zeile einer Liste/Tabelle liegt unter dieser Stelle? MAXWD,
+// wenn keine.
+fn row_under(i: u64, y: u64) -> u64 {
+    let zh: u64 = zeilen_hoehe()
+    var oben: u64 = g(i, D_Y) + 2
+    if g(i, D_KIND) == K_TABLE {
+        oben = g(i, D_Y) + zh + 5
+    }
+    if y < oben {
+        return MAXWD
+    }
+    let r: u64 = (y - oben) / zh + g(i, D_B)
+    var ganz: u64 = g(i, D_A)
+    if g(i, D_KIND) == K_TABLE {
+        ganz = sub(ganz, 1)
+    }
+    if r >= ganz {
+        return MAXWD
+    }
+    return r
+}
+
+fn scroll_to(i: u64, z: u64) {
+    let zh: u64 = zeilen_hoehe()
+    var sicht: u64 = sub(g(i, D_H), 4) / zh
+    if g(i, D_KIND) == K_TABLE {
+        sicht = sub(sub(g(i, D_H), 4), zh + 4) / zh
+    }
+    if sicht == 0 {
+        return
+    }
+    if z < g(i, D_B) {
+        s(i, D_B, z)
+    } else if z >= g(i, D_B) + sicht {
+        s(i, D_B, z - sicht + 1)
+    }
+}
+
+fn on_down(w: u64, x: u64, y: u64, btn: u64) {
+    // Ein Menuefenster: die Zeile unter dem Zeiger waehlen.
+    if ng(w, N_KIND) == NK_MENU {
+        if s_nohit != 0 {
+            return
+        }
+        let zh: u64 = zeilen_hoehe() + 2
+        if y >= 2 {
+            let k: u64 = (y - 2) / zh
+            if k < ng(w, N_CNT) {
+                ns(w, N_VAL, k + 1)
+                fire(ng(w, N_OWNER), K_MENUBAR, k, w)
+            }
+        }
+        return
+    }
+    let i: u64 = hit_at(w, x, y)
+    if i >= MAXWD {
+        return
+    }
+    let k: u64 = g(i, D_KIND)
+    if (g(i, D_FLAGS) & F_FOCUSABLE) != 0 {
+        set_focus(i)
+    }
+    if k == K_BUTTON {
+        s(i, D_FLAGS, g(i, D_FLAGS) | F_PRESSED)
+        s_down = i + 1
+        dirty_wd(i)
+        return
+    }
+    if k == K_CHECK {
+        s(i, D_VAL, 1 - g(i, D_VAL))
+        dirty_wd(i)
+        fire(i, K_CHECK, g(i, D_VAL), w)
+        return
+    }
+    if k == K_ENTRY {
+        // Die Einfuegemarke dorthin, wo geklickt wurde -- Zeichen fuer
+        // Zeichen nachgerechnet und nicht durch die mittlere Breite
+        // geteilt: bei einer Proportionalschrift waere das um bis zu
+        // ein halbes Zeichen daneben.
+        let p: u64 = g(i, D_TEXT)
+        let n: u64 = tlen(p)
+        var at: u64 = 0
+        while at < n && entry_x(i, at + 1) <= x {
+            at = at + 1
+        }
+        s(i, D_B, at)
+        s(i, D_C, at)
+        s_down = i + 1
+        dirty_wd(i)
+        return
+    }
+    if k == K_LIST || k == K_TABLE {
+        // die Bildlaufleiste?
+        if x >= g(i, D_X) + g(i, D_W) - 16 {
+            let zh: u64 = zeilen_hoehe()
+            var sicht: u64 = sub(g(i, D_H), 4) / zh
+            if k == K_TABLE {
+                sicht = sub(sub(g(i, D_H), 4), zh + 4) / zh
+            }
+            var ganz: u64 = g(i, D_A)
+            if k == K_TABLE {
+                ganz = sub(ganz, 1)
+            }
+            if ganz > sicht {
+                let rel: u64 = sub(y, g(i, D_Y))
+                let z: u64 = rel * ganz / g(i, D_H)
+                var oben: u64 = z
+                if oben + sicht > ganz {
+                    oben = ganz - sicht
+                }
+                s(i, D_B, oben)
+                dirty_wd(i)
+            }
+            return
+        }
+        // die Kopfzeile einer Tabelle: nach dieser Spalte sortieren
+        if k == K_TABLE && y < g(i, D_Y) + zeilen_hoehe() + 5 {
+            var cx: u64 = g(i, D_X) + 2
+            var c: u64 = 0
+            while c < g(i, D_C) {
+                if x >= cx && x < cx + spalte_breit(i, c) {
+                    fire(i, K_TABLE, c, w)
+                    s(i, D_C, g(i, D_C))
+                    c = g(i, D_C)
+                } else {
+                    cx = cx + spalte_breit(i, c)
+                    c = c + 1
+                }
+            }
+            return
+        }
+        let r: u64 = row_under(i, y)
+        if r < MAXWD {
+            let jetzt: u64 = ticks()
+            var doppelt: bool = false
+            if s_lastwd == i + 1 && s_lastclick != 0 {
+                if jetzt - s_lastclick < 100 && g(i, D_VAL) == r {
+                    doppelt = true
+                }
+            }
+            s(i, D_VAL, r)
+            s_lastclick = jetzt
+            s_lastwd = i + 1
+            dirty_wd(i)
+            if doppelt {
+                fire(i, K_LIST, r, w)
+                s_lastclick = 0
+            } else if (btn & 2) != 0 {
+                // DIE RECHTE TASTE IST BIT 1 UND NICHT BIT 2. Der
+                // PS/2-Baustein legt links auf Bit 0, RECHTS auf Bit 1
+                // und die Mitte auf Bit 2 (`kernel/ps2m.fi`); der
+                // QEMU-Monitor nimmt fuer `mouse_button` dieselbe
+                // Reihenfolge (1 links, 2 rechts, 4 Mitte). Die erste
+                // Fassung dieser Zeile pruefte auf 4 -- das ist die
+                // MITTLERE Taste, und das Kontextmenue klappte nie auf,
+                // ohne dass irgendwo ein Fehler stand.
+                fire(i, K_SCROLL, r, w)
+            }
+        }
+        return
+    }
+    if k == K_TABS {
+        var tx: u64 = g(i, D_X)
+        var t: u64 = 0
+        while t < 8 {
+            let tw: u64 = tab_breite(i, t)
+            if tw == 0 {
+                t = 8
+            } else if x >= tx && x < tx + tw {
+                if g(i, D_VAL) != t {
+                    s(i, D_VAL, t)
+                    dirty_wd(i)
+                    fire(i, K_TABS, t, w)
+                }
+                t = 8
+            } else {
+                tx = tx + tw
+                t = t + 1
+            }
+        }
+        return
+    }
+    if k == K_MENUBAR {
+        var tx: u64 = g(i, D_X) + 4
+        var t: u64 = 0
+        while t < 8 {
+            let q: u64 = row_at(g(i, D_TEXT), t)
+            if q == 0 {
+                t = 8
+            } else {
+                let tw: u64 = wlibc.text_w(wlibc.F_UI, wlibc.PX_UI, q,
+                    row_len(q)) + 16
+                if x >= tx && x < tx + tw {
+                    s(i, D_VAL, t + 1)
+                    dirty_wd(i)
+                    fire(i, K_MENUBAR, 0x1000 + t, w)
+                    t = 8
+                } else {
+                    tx = tx + tw
+                    t = t + 1
+                }
+            }
+        }
+        return
+    }
+    if k == K_CHOICE {
+        fire(i, K_CHOICE, 0x1000, w)
+        return
+    }
+}
+
+fn on_up(w: u64, x: u64, y: u64) {
+    if s_down != 0 {
+        let i: u64 = s_down - 1
+        s_down = 0
+        if g(i, D_KIND) == K_BUTTON {
+            s(i, D_FLAGS, g(i, D_FLAGS) & ~F_PRESSED)
+            dirty_wd(i)
+            // Nur, wenn losgelassen wurde, WO gedrueckt wurde -- so wie
+            // jeder Knopf seit vierzig Jahren.
+            if hit_at(w, x, y) == i {
+                fire(i, K_BUTTON, 0, w)
+            }
+        }
+    }
+}
+
+fn on_move(w: u64, x: u64, y: u64, btn: u64) {
+    if ng(w, N_KIND) == NK_MENU {
+        let zh: u64 = zeilen_hoehe() + 2
+        var k: u64 = ng(w, N_CNT)
+        if y >= 2 {
+            k = (y - 2) / zh
+        }
+        if k < ng(w, N_CNT) && ng(w, N_VAL) != k + 1 {
+            ns(w, N_VAL, k + 1)
+            dirty_all(w)
+        }
+        return
+    }
+    let i: u64 = hit_at(w, x, y)
+    // Das Zeigerbild: ueber einem Textfeld ein Balken, sonst ein Pfeil.
+    // Es ist der einzige Weg, auf dem eine Anwendung dem SERVER etwas
+    // ueber den Zeiger sagt, und deshalb steht er im Logbuch.
+    if i < MAXWD && g(i, D_KIND) == K_ENTRY {
+        wlibc.cursor_shape(1)
+    } else {
+        wlibc.cursor_shape(0)
+    }
+    // Ziehen im Textfeld waehlt aus. Umschalt-Pfeil gibt es hier nicht:
+    // die Zeilendisziplin liefert das FERTIGE Zeichen, die Umschalttaste
+    // kommt nie als eigenes Ereignis an. Also waehlt die Maus.
+    if s_down != 0 && (btn & 1) != 0 {
+        let d: u64 = s_down - 1
+        if g(d, D_KIND) == K_ENTRY {
+            let p: u64 = g(d, D_TEXT)
+            let n: u64 = tlen(p)
+            var at: u64 = 0
+            while at < n && entry_x(d, at + 1) <= x {
+                at = at + 1
+            }
+            if at != g(d, D_B) {
+                s(d, D_B, at)
+                dirty_wd(d)
+            }
+            return
+        }
+    }
+    var k2: u64 = 0
+    while k2 < nwd {
+        if g(k2, D_WIN) == w {
+            let alt: bool = (g(k2, D_FLAGS) & F_HOVER) != 0
+            let neu: bool = k2 == i
+            if alt != neu {
+                if neu {
+                    s(k2, D_FLAGS, g(k2, D_FLAGS) | F_HOVER)
+                } else {
+                    s(k2, D_FLAGS, g(k2, D_FLAGS) & ~F_HOVER)
+                }
+                if g(k2, D_KIND) == K_BUTTON {
+                    dirty_wd(k2)
+                }
+            }
+        }
+        k2 = k2 + 1
+    }
+}
+
+// ------------------------------------------------- die Tastatur
+
+// DIE FLUCHTFOLGEN. Die Zeilendisziplin dieses Systems schickt
+// Pfeiltasten als `ESC [ D` und Seitentasten als `ESC [ 5 ~` -- so, wie
+// ein VT100 es tut und wie `kernel/kbd.fi` es aufsetzt. Ein Ereignis
+// traegt EIN Oktett, also steht die Zustandsmaschine hier.
+//
+// EINE AUSNAHME, und sie ist aelter als diese Runde: die Pfeiltaste
+// nach oben kommt als EIN Oktett 14. `kernel/kbd.fi` sagt warum.
+fn decode(c: u64) -> u64 {
+    if s_esc == 0 {
+        if c == 27 {
+            s_esc = 1
+            return 0
+        }
+        if c == 14 {
+            return KEY_UP
+        }
+        return c
+    }
+    if s_esc == 1 {
+        if c == 91 {
+            s_esc = 2
+            return 0
+        }
+        s_esc = 0
+        return KEY_ESC
+    }
+    if s_esc == 2 {
+        if c >= 48 && c <= 57 {
+            s_esc = 3 + (c - 48)
+            return 0
+        }
+        s_esc = 0
+        if c == 65 {
+            return KEY_UP
+        }
+        if c == 66 {
+            return KEY_DOWN
+        }
+        if c == 67 {
+            return KEY_RIGHT
+        }
+        if c == 68 {
+            return KEY_LEFT
+        }
+        if c == 72 {
+            return KEY_HOME
+        }
+        if c == 70 {
+            return KEY_END
+        }
+        return 0
+    }
+    // `ESC [ n ~`
+    let n: u64 = s_esc - 3
+    s_esc = 0
+    if c != 126 {
+        return 0
+    }
+    if n == 5 {
+        return KEY_PGUP
+    }
+    if n == 6 {
+        return KEY_PGDN
+    }
+    if n == 3 {
+        return KEY_DEL
+    }
+    if n == 1 {
+        return KEY_HOME
+    }
+    if n == 4 {
+        return KEY_END
+    }
+    return 0
+}
+
+fn next_focus(w: u64, rueckwaerts: bool) {
+    var n: u64 = 0
+    var erste: u64 = MAXWD
+    var letzte: u64 = MAXWD
+    var vor: u64 = MAXWD
+    var nach: u64 = MAXWD
+    let jetzt: u64 = focus_id()
+    var i: u64 = 0
+    while i < nwd {
+        if g(i, D_WIN) == w
+            && (g(i, D_FLAGS) & (F_HIDE | F_OFF)) == 0
+            && (g(i, D_FLAGS) & F_FOCUSABLE) != 0 {
+            if erste == MAXWD {
+                erste = i
+            }
+            letzte = i
+            if i < jetzt {
+                vor = i
+            }
+            if i > jetzt && nach == MAXWD {
+                nach = i
+            }
+            n = n + 1
+        }
+        i = i + 1
+    }
+    if n == 0 {
+        return
+    }
+    var ziel: u64 = nach
+    if rueckwaerts {
+        ziel = vor
+        if ziel == MAXWD {
+            ziel = letzte
+        }
+    } else if ziel == MAXWD {
+        ziel = erste
+    }
+    set_focus(ziel)
+}
+
+fn entry_erase(i: u64) -> bool {
+    var a: u64 = g(i, D_B)
+    var b: u64 = g(i, D_C)
+    if a == b {
+        return false
+    }
+    if a > b {
+        let t: u64 = a
+        a = b
+        b = t
+    }
+    let p: u64 = g(i, D_TEXT)
+    let n: u64 = tlen(p)
+    var k: u64 = b
+    while k <= n {
+        __mmio_write8((p + a + (k - b)) as *mut u8,
+            *((p + k) as *mut u8))
+        k = k + 1
+    }
+    s(i, D_B, a)
+    s(i, D_C, a)
+    return true
+}
+
+fn entry_insert(i: u64, c: u64) {
+    let p: u64 = g(i, D_TEXT)
+    entry_erase(i)
+    var n: u64 = tlen(p)
+    if n + 1 >= g(i, D_D) {
+        return
+    }
+    let at: u64 = g(i, D_B)
+    var k: u64 = n + 1
+    while k > at {
+        __mmio_write8((p + k) as *mut u8, *((p + k - 1) as *mut u8))
+        k = k - 1
+    }
+    __mmio_write8((p + at) as *mut u8, c as u8)
+    s(i, D_B, at + 1)
+    s(i, D_C, at + 1)
+}
+
+fn entry_key(i: u64, k: u64) {
+    let p: u64 = g(i, D_TEXT)
+    let n: u64 = tlen(p)
+    if k == KEY_LEFT {
+        if g(i, D_B) > 0 {
+            s(i, D_B, g(i, D_B) - 1)
+        }
+        s(i, D_C, g(i, D_B))
+    } else if k == KEY_RIGHT {
+        if g(i, D_B) < n {
+            s(i, D_B, g(i, D_B) + 1)
+        }
+        s(i, D_C, g(i, D_B))
+    } else if k == KEY_HOME {
+        s(i, D_B, 0)
+        s(i, D_C, 0)
+    } else if k == KEY_END {
+        s(i, D_B, n)
+        s(i, D_C, n)
+    } else if k == KEY_BS || k == 127 {
+        if !entry_erase(i) {
+            if g(i, D_B) > 0 {
+                let at: u64 = g(i, D_B) - 1
+                var q: u64 = at
+                while q < n {
+                    __mmio_write8((p + q) as *mut u8,
+                        *((p + q + 1) as *mut u8))
+                    q = q + 1
+                }
+                s(i, D_B, at)
+                s(i, D_C, at)
+            }
+        }
+    } else if k == KEY_DEL {
+        if !entry_erase(i) {
+            if g(i, D_B) < n {
+                var q2: u64 = g(i, D_B)
+                while q2 < n {
+                    __mmio_write8((p + q2) as *mut u8,
+                        *((p + q2 + 1) as *mut u8))
+                    q2 = q2 + 1
+                }
+            }
+        }
+    } else if k == 1 {
+        // STRG-A: alles auswaehlen
+        s(i, D_C, 0)
+        s(i, D_B, n)
+    } else if k == 3 || k == 24 {
+        // STRG-C / STRG-X
+        var a: u64 = g(i, D_B)
+        var b: u64 = g(i, D_C)
+        if a > b {
+            let t: u64 = a
+            a = b
+            b = t
+        }
+        if b > a {
+            wlibc.clip_put(p + a, b - a)
+            if k == 24 {
+                entry_erase(i)
+            }
+        }
+    } else if k == 22 {
+        // STRG-V
+        var ein: [u8; 128] = [0 as u8; 128]
+        let m: u64 = wlibc.clip_take((&ein[0 as usize]) as u64, 127)
+        var q3: u64 = 0
+        while q3 < m {
+            let c: u64 = (ein[(q3) as usize]) as u64
+            if c >= 32 && c < 127 {
+                entry_insert(i, c)
+            }
+            q3 = q3 + 1
+        }
+    } else if k >= 32 && k < 127 {
+        entry_insert(i, k)
+    }
+    dirty_wd(i)
+}
+
+fn on_key(w: u64, c: u64) {
+    let k: u64 = decode(c)
+    if k == 0 {
+        return
+    }
+    s_keylast = k
+    if ng(w, N_KIND) == NK_MENU {
+        let zh: u64 = ng(w, N_CNT)
+        if k == KEY_DOWN && ng(w, N_VAL) < zh {
+            ns(w, N_VAL, ng(w, N_VAL) + 1)
+            dirty_all(w)
+        } else if k == KEY_UP && ng(w, N_VAL) > 1 {
+            ns(w, N_VAL, ng(w, N_VAL) - 1)
+            dirty_all(w)
+        } else if k == KEY_ENTER && ng(w, N_VAL) > 0 {
+            fire(ng(w, N_OWNER), K_MENUBAR, ng(w, N_VAL) - 1, w)
+        } else if k == KEY_ESC {
+            ns(w, N_VAL, 0)
+            fire(ng(w, N_OWNER), K_MENUBAR, 0xFFFF, w)
+        }
+        return
+    }
+    if k == KEY_TAB {
+        next_focus(w, false)
+        return
+    }
+    let i: u64 = focus_id()
+    if i >= MAXWD || g(i, D_WIN) != w {
+        return
+    }
+    let kind: u64 = g(i, D_KIND)
+    if kind == K_ENTRY {
+        if k == KEY_ENTER {
+            fire(i, K_ENTRY, 0, w)
+            return
+        }
+        entry_key(i, k)
+        return
+    }
+    if kind == K_BUTTON {
+        if k == KEY_ENTER || k == 32 {
+            fire(i, K_BUTTON, 0, w)
+        }
+        return
+    }
+    if kind == K_CHECK {
+        if k == KEY_ENTER || k == 32 {
+            s(i, D_VAL, 1 - g(i, D_VAL))
+            dirty_wd(i)
+            fire(i, K_CHECK, g(i, D_VAL), w)
+        }
+        return
+    }
+    if kind == K_LIST || kind == K_TABLE {
+        var ganz: u64 = g(i, D_A)
+        if kind == K_TABLE {
+            ganz = sub(ganz, 1)
+        }
+        if ganz == 0 {
+            return
+        }
+        var v: u64 = g(i, D_VAL)
+        if k == KEY_DOWN && v + 1 < ganz {
+            v = v + 1
+        } else if k == KEY_UP && v > 0 {
+            v = v - 1
+        } else if k == KEY_HOME {
+            v = 0
+        } else if k == KEY_END {
+            v = ganz - 1
+        } else if k == KEY_PGDN {
+            v = imin(v + 10, ganz - 1)
+        } else if k == KEY_PGUP {
+            v = sub(v, 10)
+        } else if k == KEY_ENTER {
+            fire(i, K_LIST, v, w)
+            return
+        } else {
+            return
+        }
+        s(i, D_VAL, v)
+        scroll_to(i, v)
+        dirty_wd(i)
+        return
+    }
+    if kind == K_TABS {
+        if k == KEY_RIGHT && tab_breite(i, g(i, D_VAL) + 1) != 0 {
+            s(i, D_VAL, g(i, D_VAL) + 1)
+            dirty_wd(i)
+            fire(i, K_TABS, g(i, D_VAL), w)
+        } else if k == KEY_LEFT && g(i, D_VAL) > 0 {
+            s(i, D_VAL, g(i, D_VAL) - 1)
+            dirty_wd(i)
+            fire(i, K_TABS, g(i, D_VAL), w)
+        }
+        return
+    }
+    if kind == K_CHOICE {
+        if k == KEY_ENTER || k == 32 {
+            fire(i, K_CHOICE, 0x1000, w)
+        }
+        return
+    }
+}
+
+// ==================================================================
+// MENUES UND DIALOGE
+//
+// BEIDE SIND EIGENE FENSTER BEIM SERVER, und das ist keine Notloesung,
+// sondern die einzige richtige Antwort in diesem System: ein
+// Kontextmenue, das in das Fenster gemalt wird, endet an dessen Rand.
+// Ein Menue am unteren Rand einer Liste waere abgeschnitten. Der
+// Fensterserver hat Fenster, also bekommt ein Menue eines.
+//
+// WAS DAS KOSTET: ein Menue hat eine Titelleiste und einen Rahmen wie
+// jedes Fenster (`kernel/wm.fi` malt sie). Ein Server mit einem
+// Fenstertyp OHNE Zierrat waere die Antwort darauf; er steht in
+// docs/ROUNDK15.md unter dem, was offen bleibt.
+
+static mut mn_win: u64 = 0xFFFFFFFFFFFFFFFF
+static mut mn_res: u64 = 0xFFFFFFFFFFFFFFFF
+
+fn menu_open(owner: u64, sx: u64, sy: u64, items: u64, n: u64) -> u64 {
+    if mn_win != 0xFFFFFFFFFFFFFFFF {
+        return MAXWN
+    }
+    var titel: [u8; 6] = "Menue\0"
+    let zh: u64 = zeilen_hoehe() + 2
+    var bw: u64 = 60
+    var k: u64 = 0
+    while k < n {
+        let q: u64 = row_at(items, k)
+        if q != 0 {
+            let tw: u64 = wlibc.text_w(wlibc.F_UI, wlibc.PX_UI, q,
+                row_len(q)) + 24
+            if tw > bw {
+                bw = tw
+            }
+        }
+        k = k + 1
+    }
+    let bh: u64 = n * zh + 4
+    // Ein Menue, das unten aus dem Bild laeuft, klappt nach oben auf --
+    // deshalb kennt diese Bibliothek die Bildschirmgroesse.
+    var y: u64 = sy
+    if y + bh + 24 > wlibc.screen_h() {
+        y = sub(sy, bh + 24)
+    }
+    var x: u64 = sx
+    if x + bw + 4 > wlibc.screen_w() {
+        x = sub(wlibc.screen_w(), bw + 4)
+    }
+    let w: u64 = new_win(x, y, bw, bh, (&titel[0 as usize]) as u64,
+        NK_MENU)
+    if w >= MAXWN {
+        return MAXWN
+    }
+    ns(w, N_DATA, items)
+    ns(w, N_CNT, n)
+    ns(w, N_VAL, 0)
+    ns(w, N_OWNER, owner)
+    mn_win = w
+    mn_res = 0xFFFFFFFFFFFFFFFF
+    dirty_all(w)
+    return w
+}
+
+// Was gewaehlt wurde. 0xFFFF heisst abgebrochen, 0xFFFFFFFF... heisst
+// "noch offen".
+fn menu_at() -> u64 {
+    return mn_res
+}
+
+fn menu_close() {
+    if mn_win == 0xFFFFFFFFFFFFFFFF {
+        return
+    }
+    close(mn_win)
+    // Der Platz wird wieder frei: ein Programm, das zwanzig Menues
+    // aufklappt, soll nicht nach vier stehenbleiben.
+    if mn_win + 1 == nwn {
+        nwn = nwn - 1
+    }
+    mn_win = 0xFFFFFFFFFFFFFFFF
+}
+
+static mut dl_win: u64 = 0xFFFFFFFFFFFFFFFF
+static mut dl_state: u64 = 0
+static mut dl_ok: u64 = 0
+static mut dl_no: u64 = 0
+static mut dl_ent: u64 = MAXWD
+static mut dl_lbl: u64 = 0
+
+fn dlg_text() -> u64 {
+    return (&dlgbuf[0 as usize]) as u64
+}
+
+// 0 = keiner offen, 1 = offen, 2 = bestaetigt, 3 = abgebrochen
+fn dlg_state() -> u64 {
+    return dl_state
+}
+
+fn dlg_open(titel: u64, frage: u64, anfang: u64) -> u64 {
+    return dlg_new(titel, frage, anfang, true)
+}
+
+fn dlg_ask(titel: u64, frage: u64) -> u64 {
+    return dlg_new(titel, frage, 0, false)
+}
+
+// Die Beschriftungen der beiden Knoepfe liegen STATISCH, und der
+// Uebersetzer besteht darauf: `button` behaelt den Zeiger ueber das
+// Ende von `dlg_new` hinaus, und ein Zeiger in einen abgeraeumten
+// Rahmen waere genau die Sorte Fehler, die man erst im Bild sieht.
+static mut d_ok: [u8; 3] = "OK\0"
+static mut d_ja: [u8; 3] = "Ja\0"
+static mut d_ab: [u8; 10] = "Abbrechen\0"
+static mut d_nein: [u8; 5] = "Nein\0"
+
+fn dlg_new(titel: u64, frage: u64, anfang: u64, mit_feld: bool) -> u64 {
+    if dl_win != 0xFFFFFFFFFFFFFFFF {
+        return MAXWN
+    }
+    let bw: u64 = 340
+    var bh: u64 = 108
+    if !mit_feld {
+        bh = 84
+    }
+    let x: u64 = sub(wlibc.screen_w(), bw) / 2
+    let y: u64 = sub(wlibc.screen_h(), bh) / 2
+    let w: u64 = new_win(x, y, bw, bh, titel, NK_DLG)
+    if w >= MAXWN {
+        return MAXWN
+    }
+    dl_win = w
+    dl_state = 1
+    var i: u64 = 0
+    while i < 160 {
+        dlgbuf[(i) as usize] = 0 as u8
+        i = i + 1
+    }
+    if anfang != 0 {
+        ulib.strncpy((&dlgbuf[0 as usize]) as u64, anfang, 158)
+    }
+    box_v(w, 0, 0, bw, bh, 12, 10)
+    size(0, wlibc.text_h(wlibc.PX_UI))
+    dl_lbl = label(frage)
+    dl_ent = MAXWD
+    if mit_feld {
+        size(0, 26)
+        dl_ent = entry((&dlgbuf[0 as usize]) as u64, 158)
+        set_focus(dl_ent)
+    }
+    let unten: u64 = cg(ctcur, C_CY)
+    box_end()
+    box_h(w, sub(bw, 220), unten, 208, 30, 0, 10)
+    size(94, 28)
+    if mit_feld {
+        dl_ok = button((&d_ok[0 as usize]) as u64)
+    } else {
+        dl_ok = button((&d_ja[0 as usize]) as u64)
+    }
+    size(94, 28)
+    if mit_feld {
+        dl_no = button((&d_ab[0 as usize]) as u64)
+    } else {
+        dl_no = button((&d_nein[0 as usize]) as u64)
+    }
+    box_end()
+    dirty_all(w)
+    return w
+}
+
+fn dlg_close() {
+    if dl_win == 0xFFFFFFFFFFFFFFFF {
+        return
+    }
+    close(dl_win)
+    if dl_win + 1 == nwn {
+        nwn = nwn - 1
+    }
+    dl_win = 0xFFFFFFFFFFFFFFFF
+    dl_state = 0
+    // Die Widgets des Dialogs sind verborgen; ihre Plaetze werden
+    // wieder frei, wenn sie am Ende der Tafel liegen.
+    while nwd > 0 && (g(nwd - 1, D_FLAGS) & F_HIDE) != 0 {
+        nwd = nwd - 1
+    }
+    if s_focus != 0 && s_focus - 1 >= nwd {
+        s_focus = 0
+        var i: u64 = 0
+        while i < nwd {
+            if (g(i, D_FLAGS) & F_FOCUSABLE) != 0 && s_focus == 0 {
+                s_focus = i + 1
+            }
+            i = i + 1
+        }
+    }
+}
+
+// ==================================================================
+// DIE EREIGNISSCHLEIFE
+//
+// EIN Aufruf holt die Ereignisse ALLER Fenster ab, verteilt sie, malt
+// nach, was schmutzig geworden ist, und gibt die Nummer des Widgets
+// zurueck, bei dem etwas passiert ist -- oder MAXWD.
+//
+// SIE GIBT DIE MASCHINE HER, wenn nichts anliegt. Das steht hier, weil
+// Runde K10 genau daran gescheitert ist: eine Warteschleife, die nicht
+// abgibt, laesst die andere Aufgabe nicht laufen, und im
+// Bildschirmfoto fehlt dann etwas, ohne dass irgendwo ein Fehler steht.
+
+fn step() -> u64 {
+    s_fired = 0
+    s_fkind = 0
+    s_findex = 0
+    s_ticks = s_ticks + 1
+    var etwas: bool = false
+    var w: u64 = 0
+    while w < nwn {
+        if ng(w, N_H) != 0 {
+            var n: u64 = 0
+            while n < 64 && wlibc.sys3w(wlibc.WM_EVENT, ng(w, N_H),
+                (&ev[0 as usize]) as u64, 0) == 1 {
+                etwas = true
+                n = n + 1
+                let b: u64 = (&ev[0 as usize]) as u64
+                let typ: u64 = __mmio_read64((b) as *mut u64)
+                let d: u64 = __mmio_read64((b + 8) as *mut u64)
+                let ex: u64 = (d >> 32) & 0xFFFF
+                let ey: u64 = (d >> 16) & 0xFFFF
+                let btn: u64 = d & 0xFFFF
+                if typ == wlibc.EV_DOWN {
+                    on_down(w, ex, ey, btn)
+                } else if typ == wlibc.EV_UP {
+                    on_up(w, ex, ey)
+                } else if typ == wlibc.EV_MOVE {
+                    on_move(w, ex, ey, btn)
+                } else if typ == wlibc.EV_KEY {
+                    on_key(w, ex)
+                } else if typ == wlibc.EV_CLOSE {
+                    ns(w, N_H, 0)
+                    if w == mn_win {
+                        mn_res = 0xFFFF
+                    } else if w == dl_win {
+                        dl_state = 3
+                    } else if ng(w, N_KIND) == NK_MAIN {
+                        s_alive = 0
+                    }
+                } else if typ == wlibc.EV_RESIZE {
+                    ns(w, N_W, ex)
+                    ns(w, N_HH, ey)
+                    relayout()
+                    dirty_all(w)
+                }
+            }
+        }
+        w = w + 1
+    }
+    // Ein Menue, bei dem etwas gewaehlt wurde, schliesst sich selbst --
+    // ein Menue, das nach der Wahl stehenbleibt, ist keines.
+    if mn_win != 0xFFFFFFFFFFFFFFFF && s_fired != 0 {
+        if s_fwin == mn_win {
+            mn_res = s_findex
+            let besitzer: u64 = s_fired - 1
+            menu_close()
+            if mn_res == 0xFFFF {
+                s_fired = 0
+            } else {
+                s_fired = besitzer + 1
+                s_fkind = K_MENUBAR
+                s_findex = mn_res
+            }
+        }
+    }
+    // Der Dialog: die beiden Knoepfe sind seine Antwort.
+    if dl_win != 0xFFFFFFFFFFFFFFFF && s_fired != 0 {
+        let i: u64 = s_fired - 1
+        if i == dl_ok {
+            dl_state = 2
+            s_fired = 0
+        } else if i == dl_no {
+            dl_state = 3
+            s_fired = 0
+        } else if i == dl_ent && s_fkind == K_ENTRY {
+            dl_state = 2
+            s_fired = 0
+        }
+    }
+    var gemalt: u64 = 0
+    w = 0
+    while w < nwn {
+        if ng(w, N_H) != 0 {
+            gemalt = gemalt + flush_win(w)
+        }
+        w = w + 1
+    }
+    if !etwas && gemalt == 0 {
+        ulib.sys(ulib.SYS_YIELD, 0, 0, 0)
+    }
+    if s_fired == 0 {
+        return MAXWD
+    }
+    return s_fired - 1
+}
+
+// ==================================================================
+// WAS DIE ANORDNUNG AUSGERECHNET HAT -- UND WOHIN DER TEXT KOMMT
+//
+// Diese acht Funktionen sind fuer die MESSUNG da und fuer nichts
+// sonst. Sie geben dieselben Zahlen zurueck, mit denen `paint_*` malt
+// -- nicht aehnliche, dieselben: jede steht als Ausdruck genau einmal,
+// hier und dort, und wer eine der beiden aendert, macht den Testlauf
+// rot statt ihn zu belegen.
+//
+// Ohne sie muesste ein Testlaeufer die Grundlinie eines Knopftextes
+// selbst ausrechnen -- also die Anordnung nachbauen --, und dann pruefte
+// er seinen eigenen Nachbau. So sagt die Anwendung, wo sie es
+// hinschreibt, und der Laeufer rechnet im BILD nach, ob es dort steht.
+
+fn rect_x(i: u64) -> u64 {
+    return g(i, D_X)
+}
+
+fn rect_y(i: u64) -> u64 {
+    return g(i, D_Y)
+}
+
+fn rect_w(i: u64) -> u64 {
+    return g(i, D_W)
+}
+
+fn rect_h(i: u64) -> u64 {
+    return g(i, D_H)
+}
+
+fn kind_of(i: u64) -> u64 {
+    return g(i, D_KIND)
+}
+
+fn row_h() -> u64 {
+    return zeilen_hoehe()
+}
+
+fn text_x(i: u64) -> u64 {
+    let k: u64 = g(i, D_KIND)
+    if k == K_BUTTON {
+        let tw: u64 = wlibc.text_w(wlibc.F_UI, wlibc.PX_UI, g(i, D_TEXT),
+            tlen(g(i, D_TEXT)))
+        return g(i, D_X) + sub(g(i, D_W), tw) / 2
+    }
+    if k == K_ENTRY {
+        return g(i, D_X) + 5
+    }
+    if k == K_CHECK {
+        return g(i, D_X) + 20
+    }
+    return g(i, D_X)
+}
+
+fn text_base(i: u64) -> u64 {
+    let k: u64 = g(i, D_KIND)
+    let asc: u64 = wlibc.ascent_of(wlibc.F_UI, wlibc.PX_UI)
+    if k == K_LABEL {
+        return g(i, D_Y) + asc
+    }
+    return g(i, D_Y) + (g(i, D_H) + asc) / 2
+}
+
+fn text_fg(i: u64) -> u64 {
+    if (g(i, D_FLAGS) & F_OFF) != 0 {
+        return wlibc.theme(wlibc.T_DIM)
+    }
+    return wlibc.theme(wlibc.T_FG)
+}
+
+// Die Farbe UNTER dem Text. Sie gehoert zur Messung, weil ein
+// kantengeglaettetes Zeichen aus Mischungen zwischen beiden besteht --
+// ohne den Hintergrund ist keine einzige Zwischenstufe nachzurechnen.
+fn text_bg(i: u64) -> u64 {
+    let k: u64 = g(i, D_KIND)
+    if k == K_BUTTON {
+        if (g(i, D_FLAGS) & F_PRESSED) != 0 {
+            return wlibc.theme(wlibc.T_BTNDN)
+        }
+        if (g(i, D_FLAGS) & F_HOVER) != 0 {
+            return wlibc.theme(wlibc.T_BTNHI)
+        }
+        return wlibc.theme(wlibc.T_BTN)
+    }
+    if k == K_ENTRY {
+        return wlibc.theme(wlibc.T_ENTRY)
+    }
+    if k == K_CHOICE {
+        return wlibc.theme(wlibc.T_BTN)
+    }
+    if g(i, D_WIN) < MAXWN && ng(g(i, D_WIN), N_KIND) == NK_DLG {
+        return wlibc.theme(wlibc.T_DLG)
+    }
+    return wlibc.theme(wlibc.T_BG)
+}
+
+// Die Grundlinie der SICHTBAREN Zeile `r` einer Liste, und die Stelle,
+// an der ihr Text anfaengt. Genau die Rechnung aus `paint_list`.
+fn row_base(i: u64, r: u64) -> u64 {
+    let zh: u64 = zeilen_hoehe()
+    return g(i, D_Y) + 2 + r * zh
+        + wlibc.ascent_of(wlibc.F_UI, wlibc.PX_UI) + 1
+}
+
+fn row_x(i: u64) -> u64 {
+    return g(i, D_X) + 6 + list_ein(i)
+}
+
+// Wo das Symbolplaettchen einer sichtbaren Zeile liegt.
+fn icon_x(i: u64) -> u64 {
+    return g(i, D_X) + 5
+}
+
+fn icon_y(i: u64, r: u64) -> u64 {
+    return g(i, D_Y) + 2 + r * zeilen_hoehe() + 3
+}
+
+// Wo der Buchstabe auf dem Plaettchen anfaengt und auf welcher
+// Grundlinie er sitzt -- fuer die Messung, genau die Ausdruecke von oben.
+fn icon_letter_x(i: u64, p: u64) -> u64 {
+    return g(i, D_X) + 5 + sub(14, wlibc.text_w(wlibc.F_UI, wlibc.PX_UI,
+        p, 1)) / 2
+}
+
+fn icon_letter_base(i: u64, r: u64) -> u64 {
+    return g(i, D_Y) + 2 + r * zeilen_hoehe() + 15
+}
+
+// DIE TABELLE HAT IHRE EIGENE RECHNUNG, und diese drei Funktionen sind
+// der Grund, warum sie hier steht: die erste Fassung des Dateimanagers
+// meldete die Grundlinie einer Tabellenzeile als "die einer Liste plus
+// Kopfhoehe" -- und lag um EINEN Bildpunkt daneben. Im Bild sah man
+// nichts (der Text stand ja da), im Pruefer standen 219 von 304
+// Tintenpunkten falsch, und die Ursache war keine Farbe, sondern eine
+// Zeile: `paint_list` setzt bei `y + 2`, `paint_table` bei
+// `y + kopf + 1`. Jetzt steht jede der beiden Rechnungen genau einmal.
+fn head_h(i: u64) -> u64 {
+    return zeilen_hoehe() + 4
+}
+
+fn head_base(i: u64) -> u64 {
+    return g(i, D_Y) + 3 + wlibc.ascent_of(wlibc.F_UI, wlibc.PX_UI)
+}
+
+fn cell_base(i: u64, r: u64) -> u64 {
+    return g(i, D_Y) + head_h(i) + 1 + r * zeilen_hoehe()
+        + wlibc.ascent_of(wlibc.F_UI, wlibc.PX_UI) + 1
+}
+
+fn cell_x(i: u64, c: u64) -> u64 {
+    var x: u64 = g(i, D_X) + 6
+    var k: u64 = 0
+    while k < c && k < g(i, D_C) {
+        x = x + spalte_breit(i, k)
+        k = k + 1
+    }
+    return x
+}
+
+// Welche Widgetnummer die beiden Knoepfe eines Dialogs haben, und in
+// welchem Fenster er liegt. Fuer die MESSUNG: ein Testlaeufer, der die
+// Stelle des Knopfes selbst ausrechnet, rechnet die Anordnung nach --
+// und prueft dann seinen eigenen Nachbau.
+fn dlg_button(welcher: u64) -> u64 {
+    if welcher == 0 {
+        return dl_ok
+    }
+    return dl_no
+}
+
+fn dlg_label() -> u64 {
+    return dl_lbl
+}
+
+fn dlg_win() -> u64 {
+    if dl_win == 0xFFFFFFFFFFFFFFFF {
+        return MAXWN
+    }
+    return dl_win
+}
+
+fn menu_win() -> u64 {
+    if mn_win == 0xFFFFFFFFFFFFFFFF {
+        return MAXWN
+    }
+    return mn_win
+}

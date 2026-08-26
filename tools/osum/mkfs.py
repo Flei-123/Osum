@@ -25,7 +25,24 @@ The format, from `kernel/fs.fi`:
     a dirent       32 octets: inode number, then 24 for the name
 
 Usage:
-    mkfs.py build <image> <blocks> [--v1] [<spec> ...]
+    mkfs.py build <image> <blocks> [--v1] [--inodes=<n>] [<spec> ...]
+
+`<neu>@<vorhanden>` ist ein ZWEITER NAME fuer dieselbe Datei (Runde K15):
+zwei Verzeichniseintraege mit derselben Inode-Nummer, ein Exemplar der
+Oktette.
+
+`<path>=` mit nichts dahinter legt eine LEERE Datei an -- ein Name, ein
+Inode, kein Datenblock. Der Namensindex des zweiten K15-Nachtrags wird an
+mehreren Tausend davon gemessen, und mehrere Tausend Dateien mit Inhalt
+passten nicht auf ein Abbild von zwei Megaoktett.
+
+`--inodes=<n>` setzt die GROESSE DER INODE-TABELLE. Sie stand seit Runde
+62 als 128 in beiden Umsetzungen; sie steht aber auch im Superblock, und
+seit dem zweiten K15-Nachtrag liest `kernel/fs.fi` sie von dort. Ohne die
+Angabe bleiben es 128 -- Abbild fuer Abbild dieselben Oktette wie vorher.
+Die Tabelle waechst um einen Block je vier Inodes, und der erste
+Datenblock rueckt entsprechend nach hinten. Die Blockkarte bleibt EIN
+Block, also hoechstens 4096 Bloecke je Abbild.
     mkfs.py list  <image>
     mkfs.py cat   <image> <path>
     mkfs.py meta  <image> [<path>]
@@ -85,9 +102,17 @@ SB = dict(MAGIC=0, BSIZE=8, BLOCKS=16, INODES=24, BITMAP=32, ITABLE=40,
 
 
 class Fs:
-    def __init__(self, blocks, version=OFS_V2):
-        if blocks < DATA_START + 8:
-            raise SystemExit("mkfs: a disk of %d blocks is too small" % blocks)
+    def __init__(self, blocks, version=OFS_V2, inodes=INODE_COUNT):
+        self.inodes = inodes
+        self.itab_blocks = (inodes + INODES_PER_BLOCK - 1) // INODES_PER_BLOCK
+        self.data_start = INODE_START + self.itab_blocks
+        if blocks < self.data_start + 8:
+            raise SystemExit("mkfs: a disk of %d blocks is too small for %d "
+                             "inodes (the table alone takes %d)"
+                             % (blocks, inodes, self.itab_blocks))
+        if blocks > BS * 8:
+            raise SystemExit("mkfs: the bitmap is one block, so at most %d "
+                             "blocks fit; %d asked" % (BS * 8, blocks))
         self.blocks = blocks
         self.d = bytearray(blocks * BS)
         self.root = 1
@@ -117,7 +142,7 @@ class Fs:
         return (self.d[BITMAP_BLOCK * BS + b // 8] >> (b % 8)) & 1
 
     def block_alloc(self):
-        b = DATA_START
+        b = self.data_start
         while b < self.blocks and b < BS * 8:
             if not self.bit_get(b):
                 self.bit_set(b)
@@ -131,6 +156,9 @@ class Fs:
 
     # ------------------------------------------------------------ inodes
     def inode_at(self, ino):
+        if ino < 1 or ino > self.inodes:
+            raise SystemExit("mkfs: inode %d is outside the table (%d)"
+                             % (ino, self.inodes))
         return ((INODE_START + (ino - 1) // INODES_PER_BLOCK) * BS
                 + ((ino - 1) % INODES_PER_BLOCK) * INODE_SIZE)
 
@@ -141,7 +169,11 @@ class Fs:
         self.p64(self.inode_at(ino) + field, v)
 
     def inode_alloc(self, kind):
-        for ino in range(1, INODE_COUNT + 1):
+        # Der naechste freie und nicht immer wieder von vorn: bei 4000
+        # Dateien waere das linear von eins ein quadratischer Bau, und der
+        # dauert auf dem Wirt Minuten statt Sekunden.
+        start = getattr(self, "_next_ino", 1)
+        for ino in range(start, self.inodes + 1):
             if self.iget(ino, I_TYPE) == T_FREE:
                 at = self.inode_at(ino)
                 self.d[at:at + INODE_SIZE] = bytes(INODE_SIZE)
@@ -149,11 +181,12 @@ class Fs:
                 self.iset(ino, I_NLINK, 1)
                 if self.version >= OFS_V2:
                     self.iset(ino, I_MODE, 0o755)
+                self._next_ino = ino + 1
                 return ino
-        raise SystemExit("mkfs: no inode left")
+        raise SystemExit("mkfs: no inode left (%d in the table)" % self.inodes)
 
     def used_inodes(self):
-        return sum(1 for i in range(1, INODE_COUNT + 1)
+        return sum(1 for i in range(1, self.inodes + 1)
                    if self.iget(i, I_TYPE) != T_FREE)
 
     # ------------------------------------------------------------- files
@@ -257,21 +290,41 @@ class Fs:
         name = raw[8:].split(b"\0")[0].decode("ascii", "replace")
         return ino, name
 
+    # EIN GEDAECHTNIS JE VERZEICHNIS, und es ist nicht Bequemlichkeit.
+    # `dir_find` und die Suche nach einem freien Platz gingen beide von
+    # vorn durch das Verzeichnis; bei 4000 Dateien in einem Ordner sind
+    # das acht Millionen Eintragsleseoperationen, und der Bau des
+    # Messabbilds dauerte damit 59 Sekunden. Der Kernel darf so
+    # arbeiten -- er legt selten viertausend Dateien an --, ein Werkzeug
+    # auf dem Wirt nicht.
+    def _cache(self, dirino):
+        c = getattr(self, "_dc", None)
+        if c is None:
+            c = self._dc = {}
+        got = c.get(dirino)
+        if got is None:
+            namen = {}
+            frei = None
+            n = self.dir_entries(dirino)
+            for i in range(n):
+                ino, name = self.entry(dirino, i)
+                if ino:
+                    namen[name] = ino
+                elif frei is None:
+                    frei = i
+            got = c[dirino] = [namen, n if frei is None else frei]
+        return got
+
     def dir_find(self, dirino, name):
-        for i in range(self.dir_entries(dirino)):
-            ino, got = self.entry(dirino, i)
-            if ino and got == name:
-                return ino
-        return 0
+        return self._cache(dirino)[0].get(name, 0)
 
     def dir_add(self, dirino, name, ino):
         if len(name.encode()) > NAME_LEN - 1:
             raise SystemExit("mkfs: the name '%s' is too long" % name)
-        slot = self.dir_entries(dirino)
-        for i in range(slot):
-            if self.entry(dirino, i)[0] == 0:
-                slot = i
-                break
+        c = self._cache(dirino)
+        slot = c[1]
+        c[0][name] = ino
+        c[1] = slot + 1
         rec = bytearray(DIRENT)
         struct.pack_into("<Q", rec, 0, ino)
         rec[8:8 + len(name)] = name.encode()
@@ -329,6 +382,38 @@ class Fs:
         self.set_meta(ino, mode, uid, gid)
         return ino
 
+    # RUNDE K15: EIN ZWEITER NAME FUER DIESELBE DATEI.
+    #
+    # Ein Verzeichniseintrag ist eine Inode-Nummer und ein Name (32
+    # Oktette, `kernel/fs.fi`). Zwei Eintraege mit DERSELBEN Nummer sind
+    # deshalb zwei Namen fuer eine Datei -- ein harter Verweis, wie ihn
+    # jedes Unix hat, und er braucht in diesem Format keine einzige neue
+    # Zeile. Die Verweiszahl im Inode gibt es auch schon (`I_NLINK`); sie
+    # wird hier hochgezaehlt, damit sie die Wahrheit sagt.
+    #
+    # WARUM DAS UND NICHT ZWEIMAL DIESELBE DATEI: `/bin/explorer` ist
+    # 205 KiB. Zweimal waeren 410 KiB auf einem Abbild von 2 MiB, und die
+    # beiden koennten auseinanderlaufen. Der Testlaeufer misst genau das:
+    # er baut dasselbe Abbild einmal mit Verweis und einmal mit Kopie und
+    # vergleicht die freien Bloecke.
+    #
+    # WAS DIESER KERNEL DABEI NOCH NICHT KANN, und es gehoert gesagt:
+    # `unlink` zaehlt die Verweiszahl nicht herunter, es gibt den Inode
+    # frei. Wer einen der beiden Namen loescht, macht den anderen
+    # unbrauchbar. Auf einem Abbild, das nur gelesen wird -- und `/bin`
+    # wird nur gelesen --, faellt das nicht an; ein `rm /bin/files` waere
+    # trotzdem falsch, und das steht in docs/ROUNDK15.md.
+    def link(self, newpath, oldpath):
+        ino = self.resolve(oldpath)
+        if not ino:
+            raise SystemExit("mkfs: '%s' gibt es nicht" % oldpath)
+        dirino, name = self.parent_of(newpath)
+        if self.dir_find(dirino, name):
+            raise SystemExit("mkfs: '%s' ist schon da" % newpath)
+        self.dir_add(dirino, name, ino)
+        self.iset(ino, I_NLINK, self.iget(ino, I_NLINK) + 1)
+        return ino
+
     def addfile(self, path, data, mode=0o755, uid=0, gid=0):
         dirino, name = self.parent_of(path)
         if self.dir_find(dirino, name):
@@ -345,13 +430,13 @@ class Fs:
         self.p64(SB["MAGIC"], MAGIC)
         self.p64(SB["BSIZE"], BS)
         self.p64(SB["BLOCKS"], self.blocks)
-        self.p64(SB["INODES"], INODE_COUNT)
+        self.p64(SB["INODES"], self.inodes)
         self.p64(SB["BITMAP"], BITMAP_BLOCK)
         self.p64(SB["ITABLE"], INODE_START)
-        self.p64(SB["DATA"], DATA_START)
+        self.p64(SB["DATA"], self.data_start)
         self.p64(SB["ROOT"], 1)
         self.p64(SB["VERSION"], self.version)
-        for b in range(DATA_START):
+        for b in range(self.data_start):
             self.bit_set(b)
         self.root = 1
         ino = self.inode_alloc(T_DIR)
@@ -378,20 +463,35 @@ class Fs:
         return out
 
 
+# Ein Abbild vom Wirt lesen -- und die Geometrie AUS DEM SUPERBLOCK
+# nehmen, nicht aus den Konstanten. Genau das tut `fs.mount` seit dem
+# zweiten K15-Nachtrag auch; eine der beiden Umsetzungen, die es nicht
+# taete, waere der Fehler, gegen den es die zweite ueberhaupt gibt.
+def load(path):
+    raw = open(path, "rb").read()
+    if len(raw) < BS:
+        return None
+    inodes = struct.unpack_from("<Q", raw, SB["INODES"])[0] or INODE_COUNT
+    fs = Fs(max(len(raw) // BS, INODE_START
+                + (inodes + INODES_PER_BLOCK - 1) // INODES_PER_BLOCK + 8),
+            inodes)
+    fs.d[:len(raw)] = raw
+    if fs.g64(SB["MAGIC"]) != MAGIC:
+        return None
+    fs.root = fs.g64(SB["ROOT"])
+    return fs
+
+
 def main(argv):
     if len(argv) < 3:
         print(__doc__)
         return 2
     cmd = argv[1]
     if cmd in ("list", "meta"):
-        raw = open(argv[2], "rb").read()
-        fs = Fs(max(len(raw) // BS, DATA_START + 8))
-        fs.d[:len(raw)] = raw
-        if fs.g64(SB["MAGIC"]) != MAGIC:
+        fs = load(argv[2])
+        if fs is None:
             print("no OSUM-OFS magic")
             return 1
-        fs.root = fs.g64(SB["ROOT"])
-        fs.version = fs.g64(SB["VERSION"]) or OFS_V1
         if cmd == "meta":
             # RUNDE K13: Rechte und Eigentuemer AUS DEM ABBILD, auf dem
             # Wirt gelesen. Das ist die ehrliche Art zu pruefen, dass
@@ -413,8 +513,9 @@ def main(argv):
                     m, u, g = fs.get_meta(ino)
                     print("%s %o %d %d" % (path, m, u, g))
             return 0
-        print("blocks=%d free=%d inodes=%d"
-              % (fs.g64(SB["BLOCKS"]), fs.free_blocks(), fs.used_inodes()))
+        print("blocks=%d free=%d inodes=%d/%d"
+              % (fs.g64(SB["BLOCKS"]), fs.free_blocks(), fs.used_inodes(),
+                 fs.inodes))
         for line in fs.tree():
             print(line)
         return 0
@@ -425,14 +526,10 @@ def main(argv):
         # written and has to come back octet for octet -- the old format
         # stopped at 38912, and a reader that still walked only one level
         # would give back the first 38912 and call it a file.
-        raw = open(argv[2], "rb").read()
-        fs = Fs(max(len(raw) // BS, DATA_START + 8))
-        fs.d[:len(raw)] = raw
-        if fs.g64(SB["MAGIC"]) != MAGIC:
+        fs = load(argv[2])
+        if fs is None:
             print("no OSUM-OFS magic")
             return 1
-        fs.root = fs.g64(SB["ROOT"])
-        fs.version = fs.g64(SB["VERSION"]) or OFS_V1
         ino = fs.resolve(argv[3])
         if not ino:
             print("mkfs: no such path '%s'" % argv[3])
@@ -445,16 +542,34 @@ def main(argv):
         return 2
 
     image, blocks = argv[2], int(argv[3])
-    rest = [a for a in argv[4:] if a != "--v1"]
-    fs = Fs(blocks, OFS_V1 if "--v1" in argv[4:] else OFS_V2)
+    inodes = INODE_COUNT
+    rest = []
+    for spec in argv[4:]:
+        if spec == "--v1":
+            continue
+        if spec.startswith("--inodes="):
+            inodes = int(spec.split("=", 1)[1])
+            continue
+        rest.append(spec)
+    fs = Fs(blocks, OFS_V1 if "--v1" in argv[4:] else OFS_V2, inodes)
     fs.format()
     for spec in rest:
-        # RUNDE K13: das Anhaengsel `@rechte[:uid[:gid]]`. Es steht
-        # HINTER dem Dateinamen und nicht davor, damit jeder Aufruf aus
-        # den Runden K1 bis K12 Zeichen fuer Zeichen weiter gilt.
+        # ZWEI BEDEUTUNGEN FUER EIN ZEICHEN, und sie sind zu
+        # unterscheiden: K13 haengt `@rechte[:uid[:gid]]` an einen
+        # Dateinamen, K15 schreibt `<neu>@<vorhanden>` fuer einen
+        # ZWEITEN NAMEN derselben Datei. Was hinter dem `@` steht,
+        # entscheidet -- ein Pfad hat einen Schraegstrich, eine Rechte-
+        # angabe hat nur Ziffern und Doppelpunkte. Beide Formen aus den
+        # Runden davor gelten Zeichen fuer Zeichen weiter.
         mode, uid, gid = None, 0, 0
         if "@" in spec:
-            spec, _, meta = spec.partition("@")
+            head, _, meta = spec.partition("@")
+            if "/" in meta:
+                # <neuer pfad>@<vorhandener pfad> -- ein zweiter NAME fuer
+                # dieselbe Datei, kein zweites Exemplar.
+                fs.link(head, meta)
+                continue
+            spec = head
             parts = meta.split(":")
             mode = int(parts[0], 8)
             if len(parts) > 1 and parts[1] != "":
@@ -464,16 +579,20 @@ def main(argv):
         if spec.endswith("/"):
             fs.mkdir(spec[:-1], 0o755 if mode is None else mode, uid, gid)
             continue
-        path, _, host = spec.partition("=")
-        if not host:
+        path, sep, host = spec.partition("=")
+        if not sep:
             raise SystemExit("mkfs: '%s' needs <path>=<hostfile>" % spec)
+        if not host:
+            fs.addfile(path, b"")  # eine leere Datei: ein Name, kein Block
+            continue
         with open(host, "rb") as f:
             fs.addfile(path, f.read(),
                        0o755 if mode is None else mode, uid, gid)
     with open(image, "wb") as f:
         f.write(fs.d)
-    print("mkfs: %s  blocks=%d free=%d inodes=%d"
-          % (image, blocks, fs.free_blocks(), fs.used_inodes()))
+    print("mkfs: %s  blocks=%d free=%d inodes=%d/%d data=%d"
+          % (image, blocks, fs.free_blocks(), fs.used_inodes(), fs.inodes,
+             fs.data_start))
     return 0
 
 

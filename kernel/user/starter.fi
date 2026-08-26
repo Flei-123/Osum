@@ -1,0 +1,443 @@
+// kernel/user/starter.fi -- Runde K15, Nachtrag: DER STARTER.
+//
+// Ein Fenster mit einem Suchfeld. Man tippt, und waehrend man tippt
+// wird die Liste kuerzer; man drueckt die Eingabetaste oder klickt
+// doppelt, und das Programm laeuft.
+//
+// GESUCHT WIRD IN DREI FELDERN: Anzeigename, Beschreibung UND
+// SCHLUESSELWOERTER (`kernel/user/appdir.fi`). Das dritte ist der Grund
+// fuer die ganze Sache. "Datei-Explorer" findet man mit "datei" und mit
+// "explorer" -- das kann jeder Namensvergleich. Mit "folder", "files",
+// "manager" oder "verzeichnis" findet man ihn NUR ueber die
+// Schluesselwoerter, denn keines dieser Woerter steht im Namen oder in
+// der Beschreibung. Genau das misst `tools/k15/run.sh`, und genau
+// deshalb gibt es das Argument `nokeys`: dieselbe Suche ohne das Feld,
+// und dann findet "folder" nichts. Eine Suche, die immer etwas findet,
+// ist keine Suche.
+//
+// WAS ER MELDET, damit man ihn von aussen nachrechnen kann: wie viele
+// Programme das Verzeichnis hat, welchen Suchbegriff er gerade hat, wie
+// viele Treffer, und je Treffer Name und Befehl.
+
+profile kernel
+
+import ulib
+import libc.io
+import wlibc
+import wlib
+import appdir
+import nidx
+
+export { u_start }
+
+static mut suchfeld: [u8; 64] = [0 as u8; 64]
+static mut liste: [u8; 1024] = [0 as u8; 1024]
+// EIN PLATZ JE ZEILE DER LISTE, und die Liste traegt Programme UND
+// Dateien: bis zu MAXAPP Programme und bis zu DMAX Dateien. Das Feld war
+// erst 16 lang und damit zu kurz -- das haette bei 16 Programmen und
+// einem Dateitreffer neben das Feld geschrieben.
+static mut farben: [u64; 32] = [0 as u64; 32]
+static mut treffer: [u64; 16] = [0 as u64; 16]
+static mut ntreffer: u64 = 0
+// AUCH SEIN EIGENER NAME STEHT IN DEN DATEN. Er nimmt sich nicht aus:
+// der Titel kommt aus dem Eintrag, dessen `exec` auf dieses Programm
+// zeigt -- genauso wie beim Datei-Explorer. Ohne Eintrag steht der
+// Aufrufname da und nichts Schoeneres.
+static mut t_titel: [u8; 64] = [0 as u8; 64]
+static mut t_selbst: [u8; 24] = "/apps/suchen.prog/start\0"
+static mut t_frage: [u8; 24] = "Programm suchen:\0\0\0\0\0\0\0\0"
+// Die Aufschrift des Knopfes, nicht der Name des Programms: der
+// steht in den Daten. "Ausfuehren" und nicht noch einmal
+// "Starten" -- das Fenster heisst schon so.
+static mut t_los: [u8; 12] = "Ausfuehren\0\0"
+static mut t_dir: [u8; 8] = "/apps\0\0\0"
+// WIE VIELE DATEITREFFER UNTER DIE PROGRAMME PASSEN. Der Index kann
+// Tausende liefern; ein Fenster kann sieben Zeilen zeigen, und wer nach
+// "e" sucht, will nicht 3000 Zeilen sehen, sondern die ersten paar und
+// die Zahl daneben.
+const DMAX: u64 = 12
+static mut dtreffer: [u64; 12] = [0 as u64; 12]
+static mut ndatei: u64 = 0
+static mut dgesamt: u64 = 0
+static mut napp: u64 = 0
+static mut idxn: u64 = 0
+static mut idxus: u64 = 0
+static mut ohne_index: bool = false
+static mut pfad: [u8; 256] = [0 as u8; 256]
+
+fn say(p: u64) {
+    ulib.say(p)
+}
+
+fn kv(name: u64, v: u64) {
+    var sp: [u8; 2] = " \0"
+    say(name)
+    ulib.sayn(v)
+    say((&sp[0 as usize]) as u64)
+}
+
+// Die Trefferliste neu bauen: ein Textblock fuer das Listen-Widget, ein
+// Feld aus Farben fuer die Symbole. Und dieselbe Auskunft auf die
+// serielle Leitung, damit der Laeufer draussen nachrechnen kann, was
+// drinnen ausgewaehlt wurde.
+fn neu_suchen(ls: u64) {
+    var s_s: [u8; 24] = "starter: suche [\0\0\0\0\0\0\0\0"
+    var s_t: [u8; 16] = "] treffer=\0\0\0\0\0\0"
+    var s_e: [u8; 20] = "starter: treffer \0\0\0"
+    var si: [u8; 4] = "i=\0\0"
+    var sn: [u8; 8] = "name=[\0\0"
+    var sx: [u8; 10] = "] exec=[\0\0"
+    var sz: [u8; 4] = "]\0\0\0"
+    napp = appdir.search((&suchfeld[0 as usize]) as u64,
+        (&treffer[0 as usize]) as u64, 16)
+    ntreffer = napp
+    var lp: u64 = 0
+    var k: u64 = 0
+    while k < ntreffer {
+        let a: u64 = treffer[(k) as usize]
+        farben[(k) as usize] = appdir.symbol_load(a)
+        let nm: u64 = appdir.name_of(a)
+        var j: u64 = 0
+        while (*((nm + j) as *mut u8)) != 0 as u8 && lp < 1000 {
+            liste[(lp) as usize] = *((nm + j) as *mut u8)
+            lp = lp + 1
+            j = j + 1
+        }
+        // Beschreibung dahinter, durch zwei Striche getrennt -- eine
+        // Zeile, weil das Listen-Widget eine Zeile je Eintrag zeigt.
+        var strich: [u8; 6] = "  --  "
+        j = 0
+        while j < 6 && lp < 1000 {
+            liste[(lp) as usize] = strich[(j) as usize]
+            lp = lp + 1
+            j = j + 1
+        }
+        let inf: u64 = appdir.info_of(a)
+        j = 0
+        while (*((inf + j) as *mut u8)) != 0 as u8 && lp < 1000 {
+            liste[(lp) as usize] = *((inf + j) as *mut u8)
+            lp = lp + 1
+            j = j + 1
+        }
+        liste[(lp) as usize] = 10 as u8
+        lp = lp + 1
+        k = k + 1
+    }
+    // UND DARUNTER DIE DATEIEN. Erst die Programme, dann die Treffer aus
+    // dem Namensindex -- das ist die Reihenfolge, die der Auftrag
+    // verlangt, und sie ist auch die richtige: wer "editor" tippt, meint
+    // in neun von zehn Faellen das Programm und nicht eine Datei, die so
+    // heisst.
+    ndatei = 0
+    dgesamt = 0
+    if !ohne_index && ulib.length((&suchfeld[0 as usize]) as u64) != 0 {
+        dgesamt = nidx.find((&suchfeld[0 as usize]) as u64,
+            (&dtreffer[0 as usize]) as u64, DMAX)
+        ndatei = dgesamt
+        if napp + ndatei > 32 {
+            ndatei = 32 - napp
+        }
+        var d: u64 = 0
+        while d < ndatei && lp < 900 {
+            let t: u64 = dtreffer[(d) as usize]
+            nidx.path_of(t, (&pfad[0 as usize]) as u64, 250)
+            farben[((napp + d)) as usize] = 0x00707880
+            var j2: u64 = 0
+            while (*(((&pfad[0 as usize]) as u64 + j2) as *mut u8))
+                != 0 as u8 && lp < 990 {
+                liste[(lp) as usize] =
+                    *(((&pfad[0 as usize]) as u64 + j2) as *mut u8)
+                lp = lp + 1
+                j2 = j2 + 1
+            }
+            liste[(lp) as usize] = 10 as u8
+            lp = lp + 1
+            d = d + 1
+        }
+        ntreffer = napp + ndatei
+    }
+    liste[(lp) as usize] = 0 as u8
+    wlib.set_text(ls, (&liste[0 as usize]) as u64)
+    wlib.list_icons(ls, (&farben[0 as usize]) as u64)
+    say((&s_s[0 as usize]) as u64)
+    say((&suchfeld[0 as usize]) as u64)
+    say((&s_t[0 as usize]) as u64)
+    ulib.sayn(ntreffer)
+    var s_ap: [u8; 8] = " apps=\0\0"
+    var s_da: [u8; 12] = "  dateien=\0\0"
+    kv((&s_ap[0 as usize]) as u64, napp)
+    kv((&s_da[0 as usize]) as u64, ndatei)
+    ulib.nl()
+    var d2: u64 = 0
+    while d2 < ndatei {
+        var s_df: [u8; 20] = "starter: datei \0\0\0\0\0"
+        nidx.path_of(dtreffer[(d2) as usize], (&pfad[0 as usize]) as u64,
+            250)
+        say((&s_df[0 as usize]) as u64)
+        kv((&si[0 as usize]) as u64, napp + d2)
+        say((&sn[0 as usize]) as u64)
+        say((&pfad[0 as usize]) as u64)
+        say((&sz[0 as usize]) as u64)
+        ulib.nl()
+        d2 = d2 + 1
+    }
+    k = 0
+    while k < ntreffer {
+        let a: u64 = treffer[(k) as usize]
+        say((&s_e[0 as usize]) as u64)
+        kv((&si[0 as usize]) as u64, k)
+        say((&sn[0 as usize]) as u64)
+        say(appdir.name_of(a))
+        say((&sx[0 as usize]) as u64)
+        say(appdir.exec_of(a))
+        say((&sz[0 as usize]) as u64)
+        ulib.nl()
+        k = k + 1
+    }
+}
+
+fn starten(zeile: u64) {
+    var s_go: [u8; 20] = "starter: start \0\0\0\0\0"
+    var s_p: [u8; 8] = " pid=\0\0\0"
+    var arg: [u8; 160] = [0 as u8; 160]
+    if zeile >= ntreffer {
+        return
+    }
+    if zeile >= napp {
+        // EINE DATEI IST KEIN PROGRAMM. Was ein Doppelklick auf sie tun
+        // soll, entscheidet nicht der Starter -- er sagt, welche es ist,
+        // und der Dateimanager ist das Programm, das Dateien oeffnet.
+        var s_df: [u8; 24] = "starter: waehle datei [\0"
+        var s_zu2: [u8; 4] = "]\0\0\0"
+        nidx.path_of(dtreffer[((zeile - napp)) as usize],
+            (&pfad[0 as usize]) as u64, 250)
+        say((&s_df[0 as usize]) as u64)
+        say((&pfad[0 as usize]) as u64)
+        say((&s_zu2[0 as usize]) as u64)
+        ulib.nl()
+        return
+    }
+    let a: u64 = treffer[(zeile) as usize]
+    ulib.strncpy((&arg[0 as usize]) as u64, appdir.exec_of(a), 150)
+    let pid: u64 = ulib.sys(ulib.SYS_SPAWN, (&arg[0 as usize]) as u64, 0, 0)
+    say((&s_go[0 as usize]) as u64)
+    say((&arg[0 as usize]) as u64)
+    say((&s_p[0 as usize]) as u64)
+    ulib.sayn(pid)
+    ulib.nl()
+}
+
+fn u_start(args: u64) -> u64 {
+    var s_no: [u8; 8] = "nohit\0\0\0"
+    var s_nc: [u8; 8] = "noclip\0\0"
+    var s_nk: [u8; 8] = "nokeys\0\0"
+    var s_ni: [u8; 8] = "noidx\0\0\0"
+    var s_bad: [u8; 24] = "starter: keine Flaeche\0\0"
+    var s_n: [u8; 20] = "starter: apps=\0\0\0\0\0\0"
+    var s_go: [u8; 20] = "starter: ready\0\0\0\0\0\0"
+    var s_geo: [u8; 20] = "starter: geom \0\0\0\0\0\0"
+    var sx: [u8; 4] = "x=\0\0"
+    var sy: [u8; 4] = "y=\0\0"
+    var sw: [u8; 4] = "w=\0\0"
+    var sh: [u8; 4] = "h=\0\0"
+    var s_vor: [u8; 24] = "starter: vorgabe [\0\0\0\0\0\0"
+    var s_zu: [u8; 4] = "]\0\0\0"
+
+    var nohit: bool = false
+    var noclip: bool = false
+    var nokeys: bool = false
+    var vorgabe: u64 = 0
+    let argc: u64 = ulib.arg_count(args)
+    var a: u64 = 1
+    while a < argc {
+        let p: u64 = ulib.arg_at(args, a)
+        if ulib.streq(p, (&s_no[0 as usize]) as u64) {
+            nohit = true
+        } else if ulib.streq(p, (&s_nc[0 as usize]) as u64) {
+            noclip = true
+        } else if ulib.streq(p, (&s_nk[0 as usize]) as u64) {
+            nokeys = true
+        } else if ulib.streq(p, (&s_ni[0 as usize]) as u64) {
+            // GEGENPROBE: derselbe Starter ohne Namensindex. Dann findet
+            // "blau" das Programm nicht (es heisst nicht so) und die
+            // Datei auch nicht (es gibt keinen Index), also nichts.
+            ohne_index = true
+        } else {
+            // Alles andere ist ein Suchbegriff. So laesst sich die Suche
+            // auch OHNE Tastatur messen -- und mit Tastatur sowieso.
+            vorgabe = p
+        }
+        a = a + 1
+    }
+    if !wlib.begin(nohit, noclip) {
+        say((&s_bad[0 as usize]) as u64)
+        ulib.nl()
+        return 1
+    }
+    let n: u64 = appdir.load((&t_dir[0 as usize]) as u64, nokeys)
+    say((&s_n[0 as usize]) as u64)
+    ulib.sayn(n)
+    ulib.nl()
+    // DER NAMENSINDEX. Einmal gebaut, danach im Speicher -- und die Zeit
+    // dafuer steht auf der seriellen Leitung, damit sie niemand raten
+    // muss.
+    var s_ix: [u8; 20] = "starter: index n=\0\0\0"
+    var s_us: [u8; 8] = "  us=\0\0\0"
+    if !ohne_index {
+        let t0: u64 = nidx.mono_us()
+        idxn = nidx.build()
+        idxus = nidx.mono_us() -% t0
+    }
+    say((&s_ix[0 as usize]) as u64)
+    ulib.sayn(idxn)
+    say((&s_us[0 as usize]) as u64)
+    ulib.sayn(idxus)
+    ulib.nl()
+    var s_titel: [u8; 24] = "starter: name [\0\0\0\0\0\0\0\0\0"
+    var s_end: [u8; 4] = "]\0\0\0"
+    var k3: u64 = 0
+    while k3 < n {
+        if ulib.streq(appdir.exec_of(k3), (&t_selbst[0 as usize]) as u64) {
+            ulib.strncpy((&t_titel[0 as usize]) as u64,
+                appdir.name_of(k3), 62)
+            k3 = n
+        } else {
+            k3 = k3 + 1
+        }
+    }
+    if (t_titel[0 as usize]) == 0 as u8 {
+        ulib.strncpy((&t_titel[0 as usize]) as u64, ulib.arg_at(args, 0),
+            62)
+    }
+    say((&s_titel[0 as usize]) as u64)
+    say((&t_titel[0 as usize]) as u64)
+    say((&s_end[0 as usize]) as u64)
+    ulib.nl()
+    if vorgabe != 0 {
+        ulib.strncpy((&suchfeld[0 as usize]) as u64, vorgabe, 62)
+        say((&s_vor[0 as usize]) as u64)
+        say((&suchfeld[0 as usize]) as u64)
+        say((&s_zu[0 as usize]) as u64)
+        ulib.nl()
+    }
+
+    let bx: u64 = 190
+    let by: u64 = 110
+    let bw: u64 = 440
+    let bh: u64 = 300
+    let w: u64 = wlib.window(bx, by, bw, bh, (&t_titel[0 as usize]) as u64)
+    if w >= wlib.MAXWN {
+        say((&s_bad[0 as usize]) as u64)
+        ulib.nl()
+        return 1
+    }
+    say((&s_geo[0 as usize]) as u64)
+    kv((&sx[0 as usize]) as u64, bx)
+    kv((&sy[0 as usize]) as u64, by)
+    kv((&sw[0 as usize]) as u64, bw)
+    kv((&sh[0 as usize]) as u64, bh)
+    ulib.nl()
+
+    wlib.box_v(w, 0, 0, bw, 84, 12, 8)
+    let lb: u64 = wlib.label((&t_frage[0 as usize]) as u64)
+    wlib.size(0, 26)
+    let fe: u64 = wlib.entry((&suchfeld[0 as usize]) as u64, 62)
+    wlib.box_end()
+
+    wlib.box_v(w, 12, 82, bw - 24, 170, 0, 0)
+    wlib.size(0, 166)
+    let ls: u64 = wlib.list((&liste[0 as usize]) as u64, 7)
+    wlib.box_end()
+
+    wlib.box_h(w, bw - 130, 256, 118, 30, 0, 8)
+    wlib.size(110, 28)
+    let bt: u64 = wlib.button((&t_los[0 as usize]) as u64)
+    wlib.box_end()
+
+    wlib.set_focus(fe)
+    neu_suchen(ls)
+    wlib.draw_all()
+    say_rects(lb, fe, ls, bt)
+    say((&s_go[0 as usize]) as u64)
+    ulib.nl()
+
+    var vorher: u64 = ulib.length((&suchfeld[0 as usize]) as u64)
+    var runden: u64 = 0
+    while wlib.alive() && runden < 4000000 {
+        runden = runden + 1
+        let id: u64 = wlib.step()
+        if id < wlib.MAXWD {
+            let kind: u64 = wlib.fired_kind()
+            let idx: u64 = wlib.fired_index()
+            if kind == wlib.K_ENTRY && id == fe {
+                starten(wlib.value(ls))
+            } else if kind == wlib.K_LIST && id == ls {
+                starten(idx)
+            } else if kind == wlib.K_BUTTON && id == bt {
+                starten(wlib.value(ls))
+            }
+        }
+        // WAEHREND MAN TIPPT wird die Liste kuerzer. Das Textfeld meldet
+        // keinen Tastendruck (es meldet die Eingabetaste), also wird
+        // hier nachgesehen, ob sich der Inhalt geaendert hat -- eine
+        // Zeile, und sie ist der Unterschied zwischen einem Suchfeld und
+        // einem Eingabefeld mit einem Knopf daneben.
+        let jetzt: u64 = ulib.length((&suchfeld[0 as usize]) as u64)
+        if jetzt != vorher {
+            vorher = jetzt
+            neu_suchen(ls)
+        }
+    }
+    return 0
+}
+
+fn say_rects(lb: u64, fe: u64, ls: u64, bt: u64) {
+    say_rect(lb)
+    say_rect(fe)
+    say_rect(ls)
+    say_rect(bt)
+    var a: [u8; 20] = "starter: rows \0\0\0\0\0\0"
+    var sx: [u8; 4] = "x=\0\0"
+    var sb: [u8; 8] = "base=\0\0\0"
+    var sh: [u8; 4] = "zh=\0"
+    var sf: [u8; 4] = "fg=\0"
+    var sg: [u8; 4] = "bg=\0"
+    var ss: [u8; 6] = "sel=\0\0"
+    var sc: [u8; 8] = "selfg=\0\0"
+    var si: [u8; 6] = "ix=\0\0\0"
+    var sj: [u8; 6] = "iy=\0\0\0"
+    say((&a[0 as usize]) as u64)
+    kv((&sx[0 as usize]) as u64, wlib.row_x(ls))
+    kv((&sb[0 as usize]) as u64, wlib.row_base(ls, 0))
+    kv((&sh[0 as usize]) as u64, wlib.row_h())
+    kv((&sf[0 as usize]) as u64, wlibc.theme(wlibc.T_FG))
+    kv((&sg[0 as usize]) as u64, wlibc.theme(wlibc.T_ENTRY))
+    kv((&ss[0 as usize]) as u64, wlibc.theme(wlibc.T_SEL))
+    kv((&sc[0 as usize]) as u64, wlibc.theme(wlibc.T_SELFG))
+    kv((&si[0 as usize]) as u64, wlib.icon_x(ls))
+    kv((&sj[0 as usize]) as u64, wlib.icon_y(ls, 0))
+    var sl: [u8; 6] = "lx=\0\0\0"
+    var sm: [u8; 6] = "lb=\0\0\0"
+    kv((&sl[0 as usize]) as u64,
+        wlib.icon_letter_x(ls, appdir.name_of(0)))
+    kv((&sm[0 as usize]) as u64, wlib.icon_letter_base(ls, 0))
+    ulib.nl()
+}
+
+fn say_rect(i: u64) {
+    var a: [u8; 20] = "starter: rect \0\0\0\0\0\0"
+    var si: [u8; 4] = "id=\0"
+    var sk: [u8; 8] = "kind=\0\0\0"
+    var sx: [u8; 4] = "x=\0\0"
+    var sy: [u8; 4] = "y=\0\0"
+    var sw: [u8; 4] = "w=\0\0"
+    var sh: [u8; 4] = "h=\0\0"
+    say((&a[0 as usize]) as u64)
+    kv((&si[0 as usize]) as u64, i)
+    kv((&sk[0 as usize]) as u64, wlib.kind_of(i))
+    kv((&sx[0 as usize]) as u64, wlib.rect_x(i))
+    kv((&sy[0 as usize]) as u64, wlib.rect_y(i))
+    kv((&sw[0 as usize]) as u64, wlib.rect_w(i))
+    kv((&sh[0 as usize]) as u64, wlib.rect_h(i))
+    ulib.nl()
+}
