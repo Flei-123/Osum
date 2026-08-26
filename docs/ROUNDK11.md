@@ -332,6 +332,21 @@ warum es keine Behauptung ist:
    keine Kollisionen und der Bereich dieser Runde steht darin; keine
    Aufrufnummer ist zweimal vergeben.
 
+### Die Zahlen
+
+`bash tools/k11/run.sh` — **85 Zusagen, 0 Fehler.**
+
+| | |
+|---|---|
+| neue Programme | 21 (20 Werkzeuge + `edit`), dazu `tools.fi` und `flate.fi` |
+| neue Zeilen Firn im Userland | rund 5400 |
+| neue Zeilen im Kern | `ansi.fi` 330, `kbd.fi` +150, `sh.fi` +1200 |
+| Tasten, die der Testlauf wirklich drückt | 8 Läufe über den QEMU-Monitor |
+| `gzip`: 20000 Oktette Text | 7979 (GNU `-9`: 5701) |
+| `gzip`: 2048 Oktette Zufall | 2071, als gespeicherte Blöcke |
+| die Shell aus firnc1 | 279096 Oktette (Runde K6: 147288) |
+| das Userland aus firnc1, gesamt | 1987632 von erlaubten 1997152 |
+
 ---
 
 ## 6. Was am Übersetzer aufgefallen ist
