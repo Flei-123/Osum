@@ -1,0 +1,1806 @@
+// kernel/hv.fi -- Runde K12: ein Wirt fuer fremde Betriebssysteme.
+//
+// WARUM DIESER WEG UND KEIN ANDERER. Wer fremde Systeme laufen lassen
+// will, hat zwei Moeglichkeiten. Die eine ist, ihre Schnittstellen
+// nachzubauen -- Linux-Systemaufrufe, Linux-Geraete, Linux-Dateisystem.
+// Das ist eine Arbeit ohne Ende: es gibt ueber dreihundert Aufrufe, sie
+// aendern sich, und jedes Programm, das einen benutzt, den man nicht
+// nachgebaut hat, geht nicht. Die andere ist, den PROZESSOR zu
+// virtualisieren. Diese Aufgabe ist endlich, sie steht vollstaendig in
+// den Handbuechern von Intel und AMD, und wenn sie stimmt, stimmt sie
+// fuer JEDES Gastsystem -- weil ein Gastsystem nichts anderes sieht als
+// einen Prozessor.
+//
+// AMD-V UND NICHT INTEL VT-x, UND WARUM. Der Auftrag sagt "Intel zuerst".
+// Das geht hier nicht, und das ist gemessen und nicht vermutet:
+//
+//   qemu-system-x86_64 -accel tcg -cpu qemu64,+vmx
+//     -> "warning: TCG doesn't support requested feature: CPUID.01H:ECX.vmx"
+//
+// QEMUs Softwareemulation kann VMX NICHT. Sie kann SVM. Der Rechner, auf
+// dem dieses Projekt gemessen wird, hat keinen /dev/kvm und ist ein AMD
+// EPYC -- es gibt also weder eine Beschleunigung noch einen Intel-Kern,
+// gegen den sich etwas messen liesse. Ein VMX-Wirt waere in dieser
+// Umgebung NICHT MESSBAR, und dieses Projekt misst. Also AMD-V. Was hier
+// steht, ist der Sache nach dasselbe: Steuerblock, Gastzustand,
+// Abfangbits, Eintritt, Austritt, Austrittsgrund -- nur die Namen und
+// die Zahlen sind andere.
+//
+// WAS DIE MASCHINE HIER KANN, UND WAS NICHT. Gemessen mit einem eigenen
+// Pruefling (CPUID 0x8000000A):
+//
+//   nested paging     JA    (mit -cpu max, EPYC, Opteron_G5)
+//   nrip save         NEIN  -> der Wirt muss RIP SELBST weiterruecken
+//   decode assists    NEIN  -> bei Steuerregistern muss der Wirt den
+//                             Befehl selbst aus dem Gastspeicher holen
+//   vmcb clean bits   NEIN  -> jeder Eintritt laedt alles neu
+//   flush by asid     NEIN  -> beim Eintritt wird alles verworfen
+//
+// UND EINE FALLE, DIE EINE HALBE STUNDE GEKOSTET HAT. Verschachtelte
+// Seitentabellen haengen QEMU auf, wenn der WIRT kein Paging hat. Der
+// Grund steht in QEMUs Quelltext (v7.2, target/i386/tcg/sysemu/
+// svm_helper.c, Zeile 284):
+//
+//   env->nested_pg_mode = get_pg_mode(env) & PG_MODE_SVM_MASK;
+//
+// Diese Zeile steht VOR dem Laden des Gastzustands, liest also CR0/CR4/
+// EFER DES WIRTS, und `get_pg_mode` gibt bei CR0.PG = 0 sofort 0 zurueck.
+// Eine vierstufige Tabelle wird dann als zweistufige gelesen, und der
+// Seitenlauf dreht sich im Kreis. Osum laeuft im langen Modus mit
+// Paging; deshalb traegt es hier. Ein Wirt im geschuetzten Modus koennte
+// es nicht -- und das steht hier, damit es niemand noch einmal sucht.
+//
+// WO DER ZUSTAND LIEGT. Wie ueberall in diesem Kernel: in der
+// uebergebenen Datenregion, denn Stufe 0 von Firn hat keine globalen
+// veraenderlichen Variablen. EINE Seite (`HV_OFF`) traegt die Skalare,
+// die Zaehler je Austrittsgrund, die Werte, die Gaeste gemeldet haben,
+// die Maschinenverzeichnisse und die Registerbloecke. Alles Grosse --
+// Steuerbloecke, Seitentabellen, Bitkarten, der Speicher der Gaeste --
+// kommt aus dem RAHMENVERWALTER und nicht aus `kdata`: eine Gastmaschine
+// ist so gross, wie ihr Gast Speicher braucht, und das gehoert nicht in
+// eine feste Seite.
+//
+// ARITHMETIK. Steuerblockfelder, Abfangbits, physische Adressen und
+// Seitentabelleneintraege sind BITMUSTER. Dort steht `+%`, `-%`, `*%`.
+// Die gepruefte Arithmetik (Runde 72) bleibt den Zaehlern -- da ist ein
+// Ueberlauf wirklich ein Fehler.
+
+import serial
+import kstate
+import mem
+import vmcb
+import cap
+import sched
+
+export {
+    parse, stage, mode_of, on,
+    HV_OFF, HV_MAX,
+    M_HV, M_LOOP, M_NOSVM, M_NONPT, M_CR, M_MESS, M_FREI,
+    ready, rev, nasid, feat,
+    vm_create, vm_run, vm_destroy, vm_free_all,
+    vm_state, vm_result, vm_exits, vm_guest, vm_owner, vm_valid,
+    exits_total, exits_bucket, runs, cycles_run, cycles_exit,
+    npfs, killed, calls, injected, guest_out, ioports, msrs, crs,
+    value_of, value_seen, vms_made,
+    G_HELLO, G_PM, G_LOOP, G_FAULT, G_CRASH, G_BENCH, G_MAX,
+    ST_FREE, ST_READY, ST_HALT, ST_DONE, ST_DEAD,
+    R_MORE, R_HALT, R_DONE, R_SHUTDOWN, R_EXC, R_BUDGET, R_ERR, R_FAULT,
+    B_CRRD, B_CRWR, B_EXC, B_INTR, B_CPUID, B_HLT, B_IOIO, B_MSR,
+    B_SHUTDOWN, B_VMMCALL, B_NPF, B_ERR, B_OTHER, B_COUNT,
+    MAX_VMS, GUEST_PAGES
+}
+
+// ----------------------------------------------------------- der Bereich
+//
+// EINE Seite in `kdata`. Sie liegt bei 0x40000, und das ist die erste
+// Seite HINTER allem, was es bis zu dieser Runde gab: 0x3C000 gehoert
+// dem Rahmenpuffer (`fb.fi`, Runde K7B), und die Runde K10, die neben
+// dieser hier laeuft, hat 0x3D000 bis 0x40000 belegt. `kdata` war damit
+// randvoll -- deshalb waechst KDATA_SIZE in dieser Runde von 0x40000 auf
+// 0x50000 (`kernel/boot.s` und `kstate.fi`), und `tools/kernel/karte.py`
+// rechnet nach, dass sich nichts ueberschneidet.
+const HV_OFF: u64 = 0x40000
+const HV_MAX: u64 = 4096
+
+// Die Skalare, 0x000..0x0FF.
+const S_MODE: u64 = 0x000 // die Woerter der Kommandozeile
+const S_READY: u64 = 0x008 // 1 = SVM steht
+const S_HSAVE: u64 = 0x010 // VM_HSAVE_PA: was VMRUN selbst rettet
+const S_HOSTVMCB: u64 = 0x018 // was `vmsave`/`vmload` rettet
+const S_IOPM: u64 = 0x020 // Bitkarte der Anschluesse, drei Seiten
+const S_MSRPM: u64 = 0x028 // Bitkarte der MSRs, zwei Seiten
+const S_REV: u64 = 0x030 // CPUID 0x8000000A eax
+const S_NASID: u64 = 0x038 // ebx: wie viele Adressraumkennungen
+const S_FEAT: u64 = 0x040 // edx: nested paging, nrip save, ...
+const S_VMS: u64 = 0x048 // angelegte Maschinen
+const S_RUNS: u64 = 0x050 // ausgefuehrte VMRUN
+const S_EXITS: u64 = 0x058 // Austritte insgesamt
+const S_CYC_RUN: u64 = 0x060 // Zyklen IM Gast
+const S_CYC_EXIT: u64 = 0x068 // Zyklen in der Behandlung
+const S_NPFS: u64 = 0x070 // Seiten auf Zuruf
+const S_KILLED: u64 = 0x078 // abgeraeumte Maschinen
+const S_CALLS: u64 = 0x080 // Hypercalls
+const S_OUT: u64 = 0x088 // Oktette, die ein Gast ausgegeben hat
+const S_INJ: u64 = 0x090 // eingeworfene Ereignisse
+const S_ASID: u64 = 0x098 // naechste Adressraumkennung
+const S_IOPORTS: u64 = 0x0A0
+const S_MSRS: u64 = 0x0A8
+const S_CRS: u64 = 0x0B0
+const S_DECFAIL: u64 = 0x0B8 // Befehle, die der Wirt nicht lesen konnte
+const S_LASTERR: u64 = 0x0C0
+
+// Die Zaehler je Austrittsgrund, 0x100..0x1FF.
+const CNT_OFF: u64 = 0x100
+const B_CRRD: u64 = 0
+const B_CRWR: u64 = 1
+const B_EXC: u64 = 2
+const B_INTR: u64 = 3
+const B_CPUID: u64 = 4
+const B_HLT: u64 = 5
+const B_IOIO: u64 = 6
+const B_MSR: u64 = 7
+const B_SHUTDOWN: u64 = 8
+const B_VMMCALL: u64 = 9
+const B_NPF: u64 = 10
+const B_ERR: u64 = 11
+const B_OTHER: u64 = 12
+const B_COUNT: u64 = 13
+
+// Was Gaeste gemeldet haben, 0x200..0x2FF, plus eine Maske bei 0x300.
+const VAL_OFF: u64 = 0x200
+const VAL_MASK: u64 = 0x300
+const VAL_MAX: u64 = 32
+
+// Die Maschinenverzeichnisse, 0x400..0x7FF.
+const VM_OFF: u64 = 0x400
+const VM_BYTES: u64 = 128
+const MAX_VMS: u64 = 8
+
+// Die Registerbloecke, 0x800..0xB7F. Vierzehn Woerter je Maschine --
+// alles, was der Prozessor beim Weltwechsel NICHT selbst rettet.
+const GPR_OFF: u64 = 0x800
+const GPR_BYTES: u64 = 112
+
+const V_STATE: u64 = 0x00
+const V_VMCB: u64 = 0x08
+const V_NPML4: u64 = 0x10 // vier zusammenhaengende Rahmen
+const V_RAM: u64 = 0x18 // der Speicher des Gasts, GUEST_PAGES Rahmen
+const V_PAGES: u64 = 0x20
+const V_ASID: u64 = 0x28
+const V_EXITS: u64 = 0x30
+const V_RESULT: u64 = 0x38
+const V_DONE: u64 = 0x40
+const V_OWNER: u64 = 0x48 // welche Aufgabe die Maschine besitzt
+const V_GUEST: u64 = 0x50
+const V_CYCLES: u64 = 0x58
+const V_LAST: u64 = 0x60 // der letzte Austrittsgrund
+const V_WHY: u64 = 0x68 // warum sie abgeraeumt wurde
+const V_BUDGET: u64 = 0x70
+
+const ST_FREE: u64 = 0
+const ST_READY: u64 = 1
+const ST_HALT: u64 = 2
+const ST_DONE: u64 = 3
+const ST_DEAD: u64 = 4
+
+const R_MORE: u64 = 0
+const R_HALT: u64 = 1
+const R_DONE: u64 = 2
+const R_SHUTDOWN: u64 = 3
+const R_EXC: u64 = 4
+const R_BUDGET: u64 = 5
+const R_ERR: u64 = 6
+const R_FAULT: u64 = 7
+
+// Die eingebauten Gaeste (`kernel/hv.s`).
+const G_HELLO: u64 = 0
+const G_PM: u64 = 1
+const G_LOOP: u64 = 2
+const G_FAULT: u64 = 3
+const G_CRASH: u64 = 4
+const G_BENCH: u64 = 5
+const G_MAX: u64 = 6
+
+// Die Woerter der Kommandozeile. KEINES ausser dem ersten enthaelt die
+// zwei Buchstaben `hv` -- sonst schaltete die Gegenprobe, die `hv`
+// weglaesst, die Runde ueber ihr eigenes Argument wieder ein. Dieselbe
+// Ueberlegung steht in `hw.fi` bei `nic`.
+const M_HV: u64 = 1 // die Runde ueberhaupt
+const M_LOOP: u64 = 2 // `gastlauf`: auch den Laeufer laufen lassen
+const M_NOSVM: u64 = 4 // `nosvm`:   GEGENPROBE, SVM bleibt aus
+const M_NONPT: u64 = 8 // `nonpt`:   GEGENPROBE, keine NPT
+const M_CR: u64 = 16 // `gastcr`:  Steuerregister abfangen
+const M_MESS: u64 = 32 // `gastmess`: den Preis eines Austritts messen
+// `gastfrei`: V_INTR_MASKING AUSschalten. Das ist die GEGENPROBE zu der
+// einen Zusage, die einen Wirt zum Wirt macht -- siehe `vmcb_setup`.
+const M_FREI: u64 = 64
+
+// Indizes in `hv_vectors` (kernel/hv.s), erreichbar ueber Platz 69 der
+// Tabelle aus `isr.s`.
+const V_HV: u64 = 69
+const HV_VMRUN: u64 = 0
+const HV_G_FIRST: u64 = 1 // je Gast ein Paar Anfang/Ende
+
+// Der Gastspeicher: acht Seiten. Sieben davon bildet der Wirt beim
+// Anlegen ab; die achte (gastphysisch 0x7000) bleibt ABSICHTLICH frei,
+// damit ein Gast dagegenlaufen kann und der Wirt zeigen muss, dass er
+// eine Seite auf Zuruf nachlegen kann.
+const GUEST_PAGES: u64 = 8
+const GUEST_MAPPED: u64 = 7
+const GUEST_LOAD: u64 = 0x1000 // wohin das Abbild kommt
+const GUEST_PATTERN: u64 = 0x0800 // was der Gast dort finden soll
+const PATTERN: u64 = 0x5A5A
+
+// Seitentabelleneintraege der NPT. Vorhanden, schreibbar, Nutzer -- das
+// dritte Bit ist kein Versehen: ein verschachtelter Seitenlauf laeuft
+// IMMER mit Nutzerrechten (AMD APM 15.25.5), und ohne U bekaeme jeder
+// Gastzugriff einen Seitenfehler.
+const NPT_P: u64 = 1
+const NPT_W: u64 = 2
+const NPT_U: u64 = 4
+const NPT_FLAGS: u64 = 7
+const ADDR_MASK: u64 = 0x000FFFFFFFFFF000
+
+const MSR_EFER: u64 = 0xC0000080
+const MSR_VM_CR: u64 = 0xC0010114
+const MSR_VM_HSAVE: u64 = 0xC0010117
+const VM_CR_SVMDIS: u64 = 16
+
+const BUDGET: u64 = 4096 // hoechstens so viele Austritte je Lauf
+const LOOP_BUDGET: u64 = 64 // fuer den Laeufer reicht viel weniger
+
+// -------------------------------------------------------- die Zugriffe
+
+fn get(state: u64, off: u64) -> u64 {
+    return kstate.get(state, HV_OFF +% off)
+}
+
+fn set(state: u64, off: u64, v: u64) {
+    kstate.set(state, HV_OFF +% off, v)
+}
+
+fn bump(state: u64, off: u64, v: u64) {
+    set(state, off, get(state, off) +% v)
+}
+
+fn vm_at(state: u64, i: u64) -> u64 {
+    return HV_OFF +% VM_OFF +% i *% VM_BYTES
+}
+
+fn vget(state: u64, i: u64, f: u64) -> u64 {
+    return kstate.get(state, vm_at(state, i) +% f)
+}
+
+fn vset(state: u64, i: u64, f: u64, v: u64) {
+    kstate.set(state, vm_at(state, i) +% f, v)
+}
+
+fn gpr_block(state: u64, i: u64) -> u64 {
+    return state +% HV_OFF +% GPR_OFF +% i *% GPR_BYTES
+}
+
+fn gpr(block: u64, n: u64) -> u64 {
+    return __mmio_read64((block +% n *% 8) as *mut u64)
+}
+
+fn gpr_set(block: u64, n: u64, v: u64) {
+    __mmio_write64((block +% n *% 8) as *mut u64, v)
+}
+
+// Die Reihenfolge, in der `hv.s` sie hin- und hertraegt.
+const G_RBX: u64 = 0
+const G_RCX: u64 = 1
+const G_RDX: u64 = 2
+const G_RBP: u64 = 3
+const G_R8: u64 = 4
+const G_RDI: u64 = 12
+const G_RSI: u64 = 13
+
+fn vector(state: u64, i: u64) -> u64 {
+    return __mmio_read64((kstate.get(state, kstate.VECTORS) +% i *% 8) as *mut u64)
+}
+
+fn hvv(state: u64, i: u64) -> u64 {
+    return __mmio_read64((vector(state, V_HV) +% i *% 8) as *mut u64)
+}
+
+fn tsc() -> u64 {
+    var lo: u64 = 0
+    var hi: u64 = 0
+    asm("rdtsc", out("rax") & lo, out("rdx") & hi)
+    return (hi << 32) | (lo & 0xFFFFFFFF)
+}
+
+fn wrmsr(index: u64, value: u64) {
+    asm("wrmsr", in("rcx") index, in("rax") value & 0xFFFFFFFF,
+        in("rdx") value >> 32)
+}
+
+fn rdmsr(index: u64) -> u64 {
+    var lo: u64 = 0
+    var hi: u64 = 0
+    asm("rdmsr", in("rcx") index, out("rax") & lo, out("rdx") & hi)
+    return (hi << 32) | (lo & 0xFFFFFFFF)
+}
+
+// ------------------------------------------------------------- die Woerter
+
+fn find(hay: u64, needle: u64, n: u64) -> u64 {
+    if hay == 0 {
+        return 0
+    }
+    var i: u64 = 0
+    while kstate.get8(hay +% i) != 0 {
+        var k: u64 = 0
+        var hit: bool = true
+        while k < n {
+            if kstate.get8(hay +% i +% k) != kstate.get8(needle +% k) {
+                hit = false
+                k = n
+            } else {
+                k = k + 1
+            }
+        }
+        if hit {
+            return hay +% i
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+fn mode_of(cmd: u64) -> u64 {
+    var w_hv: [u8; 3] = "hv\0"
+    var w_loop: [u8; 9] = "gastlauf\0"
+    var w_nosvm: [u8; 6] = "nosvm\0"
+    var w_nonpt: [u8; 6] = "nonpt\0"
+    var w_cr: [u8; 7] = "gastcr\0"
+    var w_mess: [u8; 9] = "gastmess\0"
+    var w_frei: [u8; 9] = "gastfrei\0"
+    var m: u64 = 0
+    if find(cmd, (&w_hv[0]) as u64, 2) != 0 {
+        m = m | M_HV
+    }
+    if find(cmd, (&w_loop[0]) as u64, 8) != 0 {
+        m = m | M_LOOP
+    }
+    if find(cmd, (&w_nosvm[0]) as u64, 5) != 0 {
+        m = m | M_NOSVM
+    }
+    if find(cmd, (&w_nonpt[0]) as u64, 5) != 0 {
+        m = m | M_NONPT
+    }
+    if find(cmd, (&w_cr[0]) as u64, 6) != 0 {
+        m = m | M_CR
+    }
+    if find(cmd, (&w_mess[0]) as u64, 8) != 0 {
+        m = m | M_MESS
+    }
+    if find(cmd, (&w_frei[0]) as u64, 8) != 0 {
+        m = m | M_FREI
+    }
+    return m
+}
+
+// Wie in `hw.fi`: die Kommandozeile wird gelesen, BEVOR der
+// Rahmenverwalter den Speicher, in dem sie steht, als Halde ausgibt.
+fn parse(state: u64, cmd: u64) {
+    set(state, S_MODE, mode_of(cmd))
+}
+
+fn on(state: u64, bit: u64) -> bool {
+    return (get(state, S_MODE) & bit) != 0
+}
+
+fn ready(state: u64) -> bool {
+    return get(state, S_READY) != 0
+}
+
+fn rev(state: u64) -> u64 {
+    return get(state, S_REV)
+}
+
+fn nasid(state: u64) -> u64 {
+    return get(state, S_NASID)
+}
+
+fn feat(state: u64) -> u64 {
+    return get(state, S_FEAT)
+}
+
+fn runs(state: u64) -> u64 {
+    return get(state, S_RUNS)
+}
+
+fn exits_total(state: u64) -> u64 {
+    return get(state, S_EXITS)
+}
+
+fn cycles_run(state: u64) -> u64 {
+    return get(state, S_CYC_RUN)
+}
+
+fn cycles_exit(state: u64) -> u64 {
+    return get(state, S_CYC_EXIT)
+}
+
+fn npfs(state: u64) -> u64 {
+    return get(state, S_NPFS)
+}
+
+fn killed(state: u64) -> u64 {
+    return get(state, S_KILLED)
+}
+
+fn calls(state: u64) -> u64 {
+    return get(state, S_CALLS)
+}
+
+fn injected(state: u64) -> u64 {
+    return get(state, S_INJ)
+}
+
+fn guest_out(state: u64) -> u64 {
+    return get(state, S_OUT)
+}
+
+fn ioports(state: u64) -> u64 {
+    return get(state, S_IOPORTS)
+}
+
+fn msrs(state: u64) -> u64 {
+    return get(state, S_MSRS)
+}
+
+fn crs(state: u64) -> u64 {
+    return get(state, S_CRS)
+}
+
+fn vms_made(state: u64) -> u64 {
+    return get(state, S_VMS)
+}
+
+fn exits_bucket(state: u64, b: u64) -> u64 {
+    if b >= B_COUNT {
+        return 0
+    }
+    return get(state, CNT_OFF +% b *% 8)
+}
+
+fn count(state: u64, b: u64) {
+    bump(state, CNT_OFF +% b *% 8, 1)
+}
+
+fn value_of(state: u64, n: u64) -> u64 {
+    if n >= VAL_MAX {
+        return 0
+    }
+    return get(state, VAL_OFF +% n *% 8)
+}
+
+fn value_seen(state: u64, n: u64) -> bool {
+    if n >= VAL_MAX {
+        return false
+    }
+    return (get(state, VAL_MASK) & (1 << n)) != 0
+}
+
+fn value_put(state: u64, n: u64, v: u64) {
+    if n >= VAL_MAX {
+        return
+    }
+    set(state, VAL_OFF +% n *% 8, v)
+    set(state, VAL_MASK, get(state, VAL_MASK) | (1 << n))
+}
+
+// ------------------------------------------------------- kann der Prozessor?
+
+// CPUID 0x80000001, ECX Bit 2. Ohne dieses Bit gibt es weder `vmrun`
+// noch EFER.SVME, und jeder Versuch waere ein #UD im Kernel.
+fn cpu_has_svm() -> bool {
+    var c: u64 = 0
+    asm("push rbx\nmov eax, 0x80000001\ncpuid\nmov rax, rcx\npop rbx",
+        out("rax") & c, clobber("rcx"), clobber("rdx"))
+    return (c & 4) != 0
+}
+
+fn cpu_max_ext() -> u64 {
+    var a: u64 = 0
+    asm("push rbx\nmov eax, 0x80000000\ncpuid\npop rbx",
+        out("rax") & a, clobber("rcx"), clobber("rdx"))
+    return a & 0xFFFFFFFF
+}
+
+fn svm_rev() -> u64 {
+    var a: u64 = 0
+    asm("push rbx\nmov eax, 0x8000000A\ncpuid\npop rbx",
+        out("rax") & a, clobber("rcx"), clobber("rdx"))
+    return a & 0xFFFFFFFF
+}
+
+fn svm_nasid() -> u64 {
+    var b: u64 = 0
+    asm("push rbx\nmov eax, 0x8000000A\ncpuid\nmov rax, rbx\npop rbx",
+        out("rax") & b, clobber("rcx"), clobber("rdx"))
+    return b & 0xFFFFFFFF
+}
+
+fn svm_feat() -> u64 {
+    var d: u64 = 0
+    asm("push rbx\nmov eax, 0x8000000A\ncpuid\npop rbx",
+        out("rdx") & d, clobber("rax"), clobber("rcx"))
+    return d & 0xFFFFFFFF
+}
+
+// ------------------------------------------------------------ aufsetzen
+//
+// Fuenf Schritte, und jeder einzelne kann fehlschlagen, ohne dass es
+// auffiele -- deshalb gibt jeder eine Zahl zurueck und `stage` sagt sie.
+//
+//   1. Kann der Prozessor es?              CPUID 0x80000001 ECX Bit 2
+//   2. Hat die Firmware es freigegeben?    VM_CR Bit 4 (SVMDIS)
+//   3. EFER.SVME setzen                    sonst ist `vmrun` ein #UD
+//   4. Einen Rettungsbereich hinstellen    VM_HSAVE_PA
+//   5. Die beiden Bitkarten                Anschluesse und MSRs
+//
+// Zu Schritt 5, und das ist eine Falle, die diesen Kernel haette
+// stillschweigend falsch machen lassen: QEMU liest die Bitkarten
+// WIRKLICH aus dem Speicher (svm_check_intercept_param). Stuende dort
+// eine 0 als Basis, wuerde die physische Adresse 0 als Bitkarte gelesen
+// -- und was dort steht, entscheidet dann darueber, welche Anschluesse
+// abgefangen werden. Es waere ein Wirt, dessen Verhalten davon abhaengt,
+// was zufaellig im ersten Kilobyte des Rechners liegt.
+fn enable(state: u64) -> u64 {
+    if !cpu_has_svm() {
+        return 1
+    }
+    if cpu_max_ext() < 0x8000000A {
+        return 2
+    }
+    set(state, S_REV, svm_rev())
+    set(state, S_NASID, svm_nasid())
+    set(state, S_FEAT, svm_feat())
+    if (rdmsr(MSR_VM_CR) & VM_CR_SVMDIS) != 0 {
+        return 3
+    }
+    if svm_nasid() < 2 {
+        return 4
+    }
+
+    let hsave: u64 = mem.frame_alloc(state)
+    let host: u64 = mem.frame_alloc(state)
+    let iopm: u64 = mem.frame_run(state, 3)
+    let msrpm: u64 = mem.frame_run(state, 2)
+    if hsave == 0 || host == 0 || iopm == 0 || msrpm == 0 {
+        return 5
+    }
+    vmcb.zero_page(hsave)
+    vmcb.zero_page(host)
+
+    // Alle Anschluesse und alle MSRs abfangen. Ein Gast hat keinen
+    // einzigen Anschluss fuer sich -- was er ansprechen darf, entscheidet
+    // der Wirt bei jedem Zugriff einzeln, und nicht eine Bitkarte, die
+    // irgendwann einmal gesetzt wurde.
+    fill(iopm, 3 *% 4096, 0xFF)
+    fill(msrpm, 2 *% 4096, 0xFF)
+
+    set(state, S_HSAVE, hsave)
+    set(state, S_HOSTVMCB, host)
+    set(state, S_IOPM, iopm)
+    set(state, S_MSRPM, msrpm)
+    set(state, S_ASID, 1)
+
+    wrmsr(MSR_EFER, rdmsr(MSR_EFER) | vmcb.EFER_SVME)
+    if (rdmsr(MSR_EFER) & vmcb.EFER_SVME) == 0 {
+        return 6
+    }
+    wrmsr(MSR_VM_HSAVE, hsave)
+    if rdmsr(MSR_VM_HSAVE) != hsave {
+        return 7
+    }
+    set(state, S_READY, 1)
+    return 0
+}
+
+fn fill(p: u64, n: u64, v: u64) {
+    var i: u64 = 0
+    let word: u64 = v | (v << 8) | (v << 16) | (v << 24)
+        | (v << 32) | (v << 40) | (v << 48) | (v << 56)
+    while i < n {
+        __mmio_write64((p +% i) as *mut u64, word)
+        i = i +% 8
+    }
+}
+
+fn copy(dst: u64, src: u64, n: u64) {
+    var i: u64 = 0
+    while i < n {
+        kstate.set8(dst +% i, kstate.get8(src +% i) as u8)
+        i = i +% 1
+    }
+}
+
+// ------------------------------------------ verschachtelte Seitentabellen
+//
+// Der Gast bekommt einen eigenen physischen Adressraum. Was er fuer
+// Adresse 0x1000 haelt, ist irgendein Rahmen, den der Rahmenverwalter
+// gerade uebrig hatte -- und er kann es nicht merken, weil er die
+// Uebersetzung weder sieht noch anfassen kann.
+//
+// VIER EBENEN, wie im langen Modus, denn das ist das Format, das die
+// Hardware fuer verschachtelte Tabellen verlangt (und das QEMU aus dem
+// Zustand des WIRTS ableitet -- siehe oben). Vier Rahmen am Stueck: PML4,
+// PDPT, PD, PT. Eine PT deckt 2 MiB, und mehr braucht keiner dieser
+// Gaeste.
+fn npt_build(state: u64, i: u64) -> bool {
+    let base: u64 = vget(state, i, V_NPML4)
+    let ram: u64 = vget(state, i, V_RAM)
+    if base == 0 || ram == 0 {
+        return false
+    }
+    let pdpt: u64 = base +% 4096
+    let pd: u64 = base +% 8192
+    let pt: u64 = base +% 12288
+    vmcb.zero_page(base)
+    vmcb.zero_page(pdpt)
+    vmcb.zero_page(pd)
+    vmcb.zero_page(pt)
+    __mmio_write64(base as *mut u64, pdpt | NPT_FLAGS)
+    __mmio_write64(pdpt as *mut u64, pd | NPT_FLAGS)
+    __mmio_write64(pd as *mut u64, pt | NPT_FLAGS)
+    var p: u64 = 0
+    while p < GUEST_MAPPED {
+        __mmio_write64((pt +% p *% 8) as *mut u64,
+            (ram +% p *% 4096) | NPT_FLAGS)
+        p = p +% 1
+    }
+    return true
+}
+
+// Eine einzelne gastphysische Seite nachtraeglich abbilden. Das ist,
+// was der Wirt bei einem NPF tut, wenn die Adresse zum Gast gehoert:
+// Seiten auf Zuruf, fuer eine ganze Maschine statt fuer einen Prozess.
+fn npt_map(state: u64, i: u64, gpa: u64) -> bool {
+    let base: u64 = vget(state, i, V_NPML4)
+    let ram: u64 = vget(state, i, V_RAM)
+    let pages: u64 = vget(state, i, V_PAGES)
+    let page: u64 = gpa >> 12
+    if base == 0 || page >= pages {
+        return false
+    }
+    let pt: u64 = base +% 12288
+    let e: u64 = __mmio_read64((pt +% page *% 8) as *mut u64)
+    if (e & NPT_P) != 0 {
+        return false // war schon da: das ist kein fehlender Rahmen
+    }
+    __mmio_write64((pt +% page *% 8) as *mut u64,
+        (ram +% page *% 4096) | NPT_FLAGS)
+    return true
+}
+
+// ---------------------------------------------------- eine Maschine anlegen
+
+fn vm_valid(state: u64, i: u64) -> bool {
+    if i >= MAX_VMS {
+        return false
+    }
+    return vget(state, i, V_STATE) != ST_FREE
+}
+
+fn vm_state(state: u64, i: u64) -> u64 {
+    if i >= MAX_VMS {
+        return ST_FREE
+    }
+    return vget(state, i, V_STATE)
+}
+
+fn vm_result(state: u64, i: u64) -> u64 {
+    if i >= MAX_VMS {
+        return 0
+    }
+    return vget(state, i, V_RESULT)
+}
+
+fn vm_exits(state: u64, i: u64) -> u64 {
+    if i >= MAX_VMS {
+        return 0
+    }
+    return vget(state, i, V_EXITS)
+}
+
+fn vm_guest(state: u64, i: u64) -> u64 {
+    if i >= MAX_VMS {
+        return 0
+    }
+    return vget(state, i, V_GUEST)
+}
+
+fn vm_owner(state: u64, i: u64) -> u64 {
+    if i >= MAX_VMS {
+        return 0
+    }
+    return vget(state, i, V_OWNER)
+}
+
+fn vm_slot(state: u64) -> u64 {
+    var i: u64 = 0
+    while i < MAX_VMS {
+        if vget(state, i, V_STATE) == ST_FREE {
+            return i
+        }
+        i = i +% 1
+    }
+    return MAX_VMS
+}
+
+// Legt eine Gastmaschine an: Steuerblock, Seitentabellen, Speicher,
+// Gastzustand. Gibt den Platz zurueck, oder MAX_VMS.
+//
+// Der Gast startet im REALMODUS, und das ist Absicht: so faengt jeder
+// x86-Rechner an, und ein Gast, der etwas anderes will, schaltet selbst
+// um -- genau das tut der zweite Gast dieser Runde.
+fn vm_create(state: u64, guest: u64, owner: u64) -> u64 {
+    if !ready(state) || guest >= G_MAX {
+        return MAX_VMS
+    }
+    let i: u64 = vm_slot(state)
+    if i >= MAX_VMS {
+        return MAX_VMS
+    }
+    let blk: u64 = mem.frame_alloc(state)
+    let npt: u64 = mem.frame_run(state, 4)
+    let ram: u64 = mem.frame_run(state, GUEST_PAGES)
+    if blk == 0 || npt == 0 || ram == 0 {
+        if blk != 0 {
+            mem.frame_free(state, blk)
+        }
+        return MAX_VMS
+    }
+    vset(state, i, V_VMCB, blk)
+    vset(state, i, V_NPML4, npt)
+    vset(state, i, V_RAM, ram)
+    vset(state, i, V_PAGES, GUEST_PAGES)
+    vset(state, i, V_GUEST, guest)
+    vset(state, i, V_OWNER, owner)
+    vset(state, i, V_EXITS, 0)
+    vset(state, i, V_CYCLES, 0)
+    vset(state, i, V_RESULT, 0)
+    vset(state, i, V_DONE, 0)
+    vset(state, i, V_WHY, 0)
+    vset(state, i, V_LAST, 0)
+    vset(state, i, V_BUDGET, BUDGET)
+    if guest == G_LOOP {
+        vset(state, i, V_BUDGET, LOOP_BUDGET)
+    }
+
+    // Eine eigene Adressraumkennung. Die 0 ist verboten -- der Prozessor
+    // weist den Eintritt sonst zurueck, und QEMU tut es auch
+    // (`if (asid == 0) cpu_vmexit(SVM_EXIT_ERR)`).
+    var asid: u64 = get(state, S_ASID)
+    if asid == 0 {
+        asid = 1
+    }
+    vset(state, i, V_ASID, asid)
+    set(state, S_ASID, asid +% 1)
+
+    // Der Speicher des Gasts: erst leeren, dann das Abbild hinein.
+    var p: u64 = 0
+    while p < GUEST_PAGES {
+        vmcb.zero_page(ram +% p *% 4096)
+        p = p +% 1
+    }
+    let von: u64 = hvv(state, HV_G_FIRST +% guest *% 2)
+    let bis: u64 = hvv(state, HV_G_FIRST +% guest *% 2 +% 1)
+    copy(ram +% GUEST_LOAD, von, bis -% von)
+    // Das Muster, an dem der Gast merkt, dass er wirklich Speicher hat.
+    __mmio_write16((ram +% GUEST_PATTERN) as *mut u16, PATTERN as u16)
+
+    if !npt_build(state, i) {
+        return MAX_VMS
+    }
+    vmcb_setup(state, i)
+    var g: u64 = 0
+    let block: u64 = gpr_block(state, i)
+    while g < 14 {
+        gpr_set(block, g, 0)
+        g = g +% 1
+    }
+    vset(state, i, V_STATE, ST_READY)
+    bump(state, S_VMS, 1)
+    return i
+}
+
+// Der Steuerblock. Alles, was hier NICHT gesetzt wird, ist Null -- und
+// Null ist ueberall die richtige Vorgabe ausser bei den vier Feldern,
+// die das Handbuch anders will.
+fn vmcb_setup(state: u64, i: u64) {
+    let b: u64 = vget(state, i, V_VMCB)
+    let guest: u64 = vget(state, i, V_GUEST)
+    vmcb.zero_page(b)
+
+    // 1. Was abgefangen wird.
+    var i3: u64 = vmcb.I3_CPUID | vmcb.I3_HLT | vmcb.I3_IOIO
+        | vmcb.I3_MSR | vmcb.I3_SHUTDOWN | vmcb.I3_INTR
+        | vmcb.I3_NMI | vmcb.I3_INIT
+    if on(state, M_CR) {
+        // Ohne Decode Assists muss der Wirt den Befehl selbst lesen --
+        // deshalb ist das ein Schalter und nicht die Vorgabe. Fuer die
+        // Uebersetzung braucht es dieses Abfangen nicht: mit NPT gehoert
+        // dem Gast sein CR3 ganz allein.
+        vmcb.wr32(b, vmcb.C_ICPT_CR, (1 << 16) | (1 << 19) | (1 << 20))
+    }
+    vmcb.wr32(b, vmcb.C_ICPT_1, i3)
+    // VMRUN MUSS abgefangen werden, sonst weist der Prozessor den
+    // Eintritt zurueck. VMMCALL ist der Weg, auf dem sich ein Gast beim
+    // Wirt meldet.
+    vmcb.wr32(b, vmcb.C_ICPT_2, vmcb.I4_VMRUN | vmcb.I4_VMMCALL
+        | vmcb.I4_VMLOAD | vmcb.I4_VMSAVE | vmcb.I4_STGI | vmcb.I4_CLGI
+        | vmcb.I4_SKINIT)
+    // Ein ungueltiger Befehl im Gast soll den Wirt nichts angehen -- der
+    // fuenfte Gast lebt davon, dass daraus ein Dreifachfehler wird und
+    // NICHT ein Absturz des Wirts.
+    vmcb.wr32(b, vmcb.C_ICPT_EXC, 0)
+
+    vmcb.wr(b, vmcb.C_IOPM, get(state, S_IOPM))
+    vmcb.wr(b, vmcb.C_MSRPM, get(state, S_MSRPM))
+    vmcb.wr32(b, vmcb.C_ASID, vget(state, i, V_ASID))
+    vmcb.wr8(b, vmcb.C_TLBCTL, vmcb.TLB_FLUSH_ALL)
+
+    // 2. Verschachtelte Seitentabellen. Die GEGENPROBE `nonpt` laesst
+    //    das weg -- dann steht der Gast unmittelbar im physischen
+    //    Speicher des Wirts, und das MUSS sich messen lassen.
+    if !on(state, M_NONPT) {
+        vmcb.wr(b, vmcb.C_NPENABLE, vmcb.NP_ENABLE)
+        vmcb.wr(b, vmcb.C_NCR3, vget(state, i, V_NPML4))
+    }
+
+    // 3. WEM GEHOERT DIE PHYSISCHE UNTERBRECHUNG. Das ist die eine
+    //    Einstellung, die einen Wirt zum Wirt macht.
+    //
+    //    Mit V_INTR_MASKING entscheidet NICHT das Flag des Gasts
+    //    darueber, ob der Wirt seinen Zeitgeber zurueckbekommt. Ein
+    //    Gast, der `cli` sagt und dann im Kreis laeuft, haette die
+    //    Maschine sonst fuer immer -- und ein "Wirt", dem sein eigener
+    //    Gast den Prozessor abnehmen kann, ist keiner.
+    //
+    //    DAS KOSTETE EINE STUNDE, UND DER FEHLER WAR MEINER. Der Laeufer
+    //    dieser Runde blieb haengen, und es sah nach einer Grenze von
+    //    QEMU aus. Es war keine. QEMU nimmt die Unterbrechung im Gast
+    //    genau dann, wenn (HF2_VINTR und HF2_HIF) oder (nicht HF2_VINTR
+    //    und EFLAGS.IF des Gasts) gilt (cpu.c, `x86_cpu_pending_
+    //    interrupt`, Zeile 6872) -- und HF2_HIF setzt `helper_vmrun` aus
+    //    dem EFLAGS.IF DES WIRTS, gelesen im Augenblick des Eintritts.
+    //    Der Austrittsbehandler machte damals ein `sti; nop; cli`, um
+    //    die Unterbrechung hereinzulassen. Das `cli` am Ende loeschte
+    //    das IF des Wirts -- und der ZWEITE Eintritt war blind. Der
+    //    erste Austritt kam noch, danach nie wieder.
+    //
+    //    Zwei Zeilen weiter unten steht die Lehre: der Behandler dreht
+    //    an IF ueberhaupt nicht mehr. `stgi` am Ende von `hv_vmrun`
+    //    macht das globale Flag auf, das IF des Wirts kommt beim
+    //    Austritt aus dem Rettungsbereich zurueck, und die Unterbrechung
+    //    wird noch im Stumpf zugestellt.
+    //
+    //    GEMESSEN (`gastlauf`, QEMU 7.2, Gast mit `cli` in der Schleife):
+    //      V_INTR_MASKING AN  -> 64 INTR-Austritte, der Wirt lebt
+    //      V_INTR_MASKING AUS -> VMRUN kehrt NIE zurueck  (`gastfrei`)
+    if on(state, M_FREI) {
+        vmcb.wr32(b, vmcb.C_INTCTL, 0)
+    } else {
+        vmcb.wr32(b, vmcb.C_INTCTL, vmcb.INT_MASKING)
+    }
+
+    // 4. Der Gastzustand: Realmodus, so wie ein x86 anfaengt.
+    let cs_base: u64 = GUEST_LOAD
+    vmcb.seg(b, vmcb.S_CS, 0x0100, vmcb.ATTR_CODE16, 0xFFFF, cs_base)
+    vmcb.seg(b, vmcb.S_ES, 0, vmcb.ATTR_DATA16, 0xFFFF, 0)
+    vmcb.seg(b, vmcb.S_SS, 0, vmcb.ATTR_DATA16, 0xFFFF, 0)
+    vmcb.seg(b, vmcb.S_DS, 0, vmcb.ATTR_DATA16, 0xFFFF, 0)
+    vmcb.seg(b, vmcb.S_FS, 0, vmcb.ATTR_DATA16, 0xFFFF, 0)
+    vmcb.seg(b, vmcb.S_GS, 0, vmcb.ATTR_DATA16, 0xFFFF, 0)
+    vmcb.seg(b, vmcb.S_GDTR, 0, 0, 0xFFFF, 0)
+    vmcb.seg(b, vmcb.S_LDTR, 0, vmcb.ATTR_LDTR, 0xFFFF, 0)
+    vmcb.seg(b, vmcb.S_TR, 0, vmcb.ATTR_TR, 0xFFFF, 0)
+    // Der fuenfte Gast bekommt KEINE Vektortabelle. Aus seinem
+    // ungueltigen Befehl wird damit zwingend ein Dreifachfehler.
+    if guest == G_CRASH {
+        vmcb.seg(b, vmcb.S_IDTR, 0, 0, 0, 0)
+    } else {
+        vmcb.seg(b, vmcb.S_IDTR, 0, 0, 0xFFFF, 0)
+    }
+    vmcb.wr8(b, vmcb.S_CPL, 0)
+    // EFER.SVME MUSS im Gast-EFER stehen, auch wenn der Gast nichts
+    // davon weiss (AMD APM 15.5.1: sonst ist der Zustand ungueltig).
+    vmcb.wr(b, vmcb.S_EFER, vmcb.EFER_SVME)
+    vmcb.wr(b, vmcb.S_CR0, 0x10) // PE aus, ET an: Realmodus
+    vmcb.wr(b, vmcb.S_CR3, 0)
+    vmcb.wr(b, vmcb.S_CR4, 0)
+    vmcb.wr(b, vmcb.S_DR6, 0xFFFF0FF0)
+    vmcb.wr(b, vmcb.S_DR7, 0x400)
+    // Wie ein echter Rechner anfaengt: IF aus. Dass der Wirt seinen
+    // Zeitgeber trotzdem zurueckbekommt, ist NICHT die Freundlichkeit
+    // des Gasts, sondern V_INTR_MASKING -- siehe Punkt 3.
+    vmcb.wr(b, vmcb.S_RFLAGS, 2)
+    vmcb.wr(b, vmcb.S_RIP, 0)
+    vmcb.wr(b, vmcb.S_RSP, 0x0FF0)
+    vmcb.wr(b, vmcb.S_RAX, 0)
+    vmcb.wr(b, vmcb.S_GPAT, 0x0007040600070406)
+}
+
+fn vm_destroy(state: u64, i: u64) -> bool {
+    if i >= MAX_VMS {
+        return false
+    }
+    if vget(state, i, V_STATE) == ST_FREE {
+        return false
+    }
+    let blk: u64 = vget(state, i, V_VMCB)
+    let npt: u64 = vget(state, i, V_NPML4)
+    let ram: u64 = vget(state, i, V_RAM)
+    if blk != 0 {
+        mem.frame_free(state, blk)
+    }
+    var k: u64 = 0
+    while k < 4 {
+        mem.frame_free(state, npt +% k *% 4096)
+        k = k +% 1
+    }
+    k = 0
+    while k < vget(state, i, V_PAGES) {
+        mem.frame_free(state, ram +% k *% 4096)
+        k = k +% 1
+    }
+    vset(state, i, V_STATE, ST_FREE)
+    vset(state, i, V_VMCB, 0)
+    vset(state, i, V_NPML4, 0)
+    vset(state, i, V_RAM, 0)
+    return true
+}
+
+fn vm_free_all(state: u64) -> u64 {
+    var n: u64 = 0
+    var i: u64 = 0
+    while i < MAX_VMS {
+        if vget(state, i, V_STATE) != ST_FREE {
+            vm_destroy(state, i)
+            n = n + 1
+        }
+        i = i +% 1
+    }
+    return n
+}
+
+// ------------------------------------------------------------ der Lauf
+//
+// DAS HERZ DER RUNDE. Eintritt, Austritt, Grund auswerten, wieder
+// hinein -- bis der Gast fertig ist, stirbt oder sein Kontingent
+// aufbraucht.
+//
+// Warum ein Kontingent: ein Gast kann sich weigern, jemals wieder
+// auszutreten. Der Laeufer dieser Runde tut genau das. Das Abfangen der
+// physischen Unterbrechung holt den Wirt zurueck; das Kontingent ist der
+// Guertel zum Hosentraeger, damit selbst dann Schluss ist, wenn der
+// Zeitgeber schwiege.
+fn vm_run(state: u64, i: u64) -> u64 {
+    if i >= MAX_VMS {
+        return R_ERR
+    }
+    let st: u64 = vget(state, i, V_STATE)
+    if st != ST_READY && st != ST_HALT {
+        return R_ERR
+    }
+    let b: u64 = vget(state, i, V_VMCB)
+    let block: u64 = gpr_block(state, i)
+    let host: u64 = get(state, S_HOSTVMCB)
+    vset(state, i, V_STATE, ST_READY)
+
+    var budget: u64 = vget(state, i, V_BUDGET)
+    var out: u64 = R_BUDGET
+    var lauf: bool = true
+    while lauf {
+        if budget == 0 {
+            out = R_BUDGET
+            lauf = false
+        } else {
+            budget = budget -% 1
+            let t0: u64 = tsc()
+            asm("call rax", in("rax") hvv(state, HV_VMRUN),
+                in("rdi") b, in("rsi") block, in("rdx") host,
+                clobber("memory"))
+            let t1: u64 = tsc()
+            bump(state, S_CYC_RUN, t1 -% t0)
+            bump(state, S_RUNS, 1)
+            bump(state, S_EXITS, 1)
+            vset(state, i, V_EXITS, vget(state, i, V_EXITS) +% 1)
+            let code: u64 = vmcb.rd(b, vmcb.C_EXITCODE)
+            vset(state, i, V_LAST, code)
+            let r: u64 = handle(state, i, b, block, code)
+            let t2: u64 = tsc()
+            bump(state, S_CYC_EXIT, t2 -% t1)
+            if r != R_MORE {
+                out = r
+                lauf = false
+            }
+        }
+    }
+    vset(state, i, V_BUDGET, budget)
+    if out == R_DONE {
+        vset(state, i, V_STATE, ST_DONE)
+    }
+    if out == R_HALT {
+        vset(state, i, V_STATE, ST_HALT)
+    }
+    if out == R_SHUTDOWN || out == R_EXC || out == R_ERR || out == R_FAULT {
+        vset(state, i, V_STATE, ST_DEAD)
+        vset(state, i, V_WHY, out)
+        bump(state, S_KILLED, 1)
+    }
+    return out
+}
+
+// Den Austrittsgrund in einen Zaehler stecken. Die Gruende sind Bereiche,
+// keine einzelnen Zahlen -- 0x00..0x0F ist "irgendein Steuerregister
+// gelesen", 0x40..0x5F "irgendeine Ausnahme".
+fn bucket(code: u64) -> u64 {
+    if code == vmcb.X_ERR {
+        return B_ERR
+    }
+    if code == vmcb.X_NPF {
+        return B_NPF
+    }
+    if code <= 0x00F {
+        return B_CRRD
+    }
+    if code <= 0x01F {
+        return B_CRWR
+    }
+    if code >= 0x040 && code <= 0x05F {
+        return B_EXC
+    }
+    if code == vmcb.X_INTR {
+        return B_INTR
+    }
+    if code == vmcb.X_CPUID {
+        return B_CPUID
+    }
+    if code == vmcb.X_HLT {
+        return B_HLT
+    }
+    if code == vmcb.X_IOIO {
+        return B_IOIO
+    }
+    if code == vmcb.X_MSR {
+        return B_MSR
+    }
+    if code == vmcb.X_SHUTDOWN {
+        return B_SHUTDOWN
+    }
+    if code == vmcb.X_VMMCALL {
+        return B_VMMCALL
+    }
+    return B_OTHER
+}
+
+fn skip(b: u64, n: u64) {
+    vmcb.wr(b, vmcb.S_RIP, vmcb.rd(b, vmcb.S_RIP) +% n)
+}
+
+// ----------------------------------------------------- die Austritte
+//
+// Gibt R_MORE zurueck, wenn der Gast weiterlaufen darf.
+fn handle(state: u64, i: u64, b: u64, block: u64, code: u64) -> u64 {
+    count(state, bucket(code))
+
+    if code == vmcb.X_ERR {
+        // Der Prozessor hat den Eintritt selbst zurueckgewiesen. Eine
+        // Adressraumkennung von 0, ein verbotenes Bit in CR0, eine
+        // Bitkarte jenseits des Speichers -- der Gast ist nie gelaufen.
+        set(state, S_LASTERR, vmcb.rd(b, vmcb.C_EXITINFO1))
+        return R_ERR
+    }
+    if code == vmcb.X_CPUID {
+        do_cpuid(state, b, block)
+        skip(b, 2)
+        return R_MORE
+    }
+    if code == vmcb.X_VMMCALL {
+        let r: u64 = do_hypercall(state, i, b, block)
+        skip(b, 3)
+        return r
+    }
+    if code == vmcb.X_IOIO {
+        do_io(state, b, block)
+        // Bei einem Anschlusszugriff steht der naechste RIP in
+        // EXITINFO2. Das ist eine der wenigen Stellen, an denen der
+        // Prozessor die Laenge des Befehls verraet, auch ohne "nrip
+        // save" -- ueberall sonst muss der Wirt sie kennen.
+        vmcb.wr(b, vmcb.S_RIP, vmcb.rd(b, vmcb.C_EXITINFO2))
+        return R_MORE
+    }
+    if code == vmcb.X_MSR {
+        do_msr(state, b, block)
+        skip(b, 2)
+        return R_MORE
+    }
+    if code == vmcb.X_HLT {
+        skip(b, 1)
+        return R_HALT
+    }
+    if code == vmcb.X_INTR {
+        // Der Wirt hat seinen Prozessor zurueck, und mehr ist hier nicht
+        // zu tun: `stgi` am Ende von `hv_vmrun` macht das globale
+        // Unterbrechungsflag wieder auf, und das IF des Wirts kam beim
+        // Austritt aus dem Rettungsbereich zurueck -- die Unterbrechung
+        // wird also noch im Stumpf zugestellt, bevor diese Zeile laeuft.
+        // Der Gast hat davon nichts gesehen und laeuft weiter.
+        return R_MORE
+    }
+    if code == vmcb.X_NPF {
+        return do_npf(state, i, b)
+    }
+    if code == vmcb.X_SHUTDOWN {
+        return R_SHUTDOWN
+    }
+    if code >= 0x010 && code <= 0x01F {
+        return do_crwrite(state, i, b, block, code -% 0x010)
+    }
+    if code >= 0x040 && code <= 0x05F {
+        return R_EXC
+    }
+    return R_EXC
+}
+
+// ------------------------------------- was der Gast ueber die Maschine hoert
+//
+// Der Wirt LUEGT hier, und das ist der Zweck der Uebung: der Gast soll
+// nicht erfahren, auf welchem Rechner er wirklich liegt, und er soll
+// keine Faehigkeit sehen, die der Wirt ihm nicht nachbauen kann. Was er
+// hoert, ist eine Maschine, die es nicht gibt -- aber eine, die in sich
+// stimmt.
+fn do_cpuid(state: u64, b: u64, block: u64) {
+    let leaf: u64 = vmcb.rd(b, vmcb.S_RAX) & 0xFFFFFFFF
+    var a: u64 = 0
+    var bx: u64 = 0
+    var c: u64 = 0
+    var d: u64 = 0
+    if leaf == 0 {
+        a = 1
+        bx = 0x6D75734F // "Osum"
+        d = 0x65707948 // "Hype"
+        c = 0x73697672 // "rvis"
+    }
+    if leaf == 1 {
+        // Familie 6, Modell 1, Stufe 0 -- eine Zahl, die niemanden
+        // ueberrascht. Bit 31 von ecx ist die eine Wahrheit, die jeder
+        // Wirt sagen soll: hier laeuft etwas unter dir.
+        a = 0x00000601
+        c = 0x80000000
+        // FPU, TSC, MSR, PAE, CX8, PGE, CMOV, FXSR -- nichts, was
+        // dieser Wirt nicht durchreichen koennte.
+        d = 1 | 16 | 32 | 64 | 256 | 8192 | 32768 | 16777216
+    }
+    if leaf == 0x40000000 {
+        a = 0x40000001
+        bx = 0x6D75734F
+        c = 0x65707948
+        d = 0x73697672
+    }
+    vmcb.wr(b, vmcb.S_RAX, a)
+    gpr_set(block, G_RBX, bx)
+    gpr_set(block, G_RCX, c)
+    gpr_set(block, G_RDX, d)
+}
+
+// ----------------------------------------------------- Ein- und Ausgabe
+//
+// EXITINFO1 sagt alles, was man braucht, und zwar architektonisch --
+// hier muss nichts geraten und nichts nachgelesen werden:
+//   Bit 0     0 = hinaus, 1 = herein
+//   Bit 2     Zeichenkettenbefehl
+//   Bit 3     mit REP
+//   Bit 4/5/6 ein, zwei oder vier Oktette
+//   Bit 16..  der Anschluss
+fn do_io(state: u64, b: u64, block: u64) {
+    let info: u64 = vmcb.rd(b, vmcb.C_EXITINFO1)
+    let port: u64 = (info >> 16) & 0xFFFF
+    let herein: bool = (info & 1) != 0
+    bump(state, S_IOPORTS, 1)
+    if !herein {
+        // Der Gast hat eine serielle Schnittstelle, die es nicht gibt.
+        // Was er hineinschreibt, schreibt der Wirt weiter -- mit einem
+        // Vorspann, damit im Protokoll zu sehen ist, wer geredet hat.
+        if port == 0x3F8 {
+            let ch: u64 = vmcb.rd(b, vmcb.S_RAX) & 0xFF
+            guest_putc(state, ch)
+        }
+        return
+    }
+    // Ein Lesen von einem Anschluss, den der Gast nicht hat: der offene
+    // Bus. Alle Bits gesetzt ist, was ein echter Rechner an einer
+    // unbestueckten Adresse liefert -- und keine Erfindung, die ein
+    // Gast fuer ein Geraet halten koennte.
+    let alt: u64 = vmcb.rd(b, vmcb.S_RAX)
+    if (info & 16) != 0 {
+        vmcb.wr(b, vmcb.S_RAX, (alt & 0xFFFFFFFFFFFFFF00) | 0xFF)
+    } else {
+        if (info & 32) != 0 {
+            vmcb.wr(b, vmcb.S_RAX, (alt & 0xFFFFFFFFFFFF0000) | 0xFFFF)
+        } else {
+            vmcb.wr(b, vmcb.S_RAX, 0xFFFFFFFF)
+        }
+    }
+}
+
+// Ein Zeichen des Gasts. Am Zeilenanfang steht, von wem es kommt.
+fn guest_putc(state: u64, ch: u64) {
+    var s_pre: [u8; 7] = "gast| \0"
+    if get(state, S_OUT) == 0 {
+        serial.puts((&s_pre[0]) as u64)
+    }
+    bump(state, S_OUT, 1)
+    if ch == 10 {
+        serial.nl()
+        return
+    }
+    serial.put(ch as u8)
+}
+
+// --------------------------------------------------------------- MSR
+//
+// EXITINFO1 ist 0 beim Lesen und 1 beim Schreiben; die Nummer steht in
+// ecx. Dieser Wirt gibt auf jedes Lesen eine Null und schluckt jedes
+// Schreiben -- ausser bei denen, die ein Gast wirklich braucht.
+fn do_msr(state: u64, b: u64, block: u64) {
+    let write: bool = vmcb.rd(b, vmcb.C_EXITINFO1) != 0
+    let nr: u64 = gpr(block, G_RCX) & 0xFFFFFFFF
+    bump(state, S_MSRS, 1)
+    if write {
+        return
+    }
+    var v: u64 = 0
+    if nr == MSR_EFER {
+        v = vmcb.rd(b, vmcb.S_EFER)
+    }
+    if nr == 0x10 {
+        v = tsc() // die Uhr des Gasts ist die des Wirts
+    }
+    vmcb.wr(b, vmcb.S_RAX, v & 0xFFFFFFFF)
+    gpr_set(block, G_RDX, v >> 32)
+}
+
+// ------------------------------------------------- ein Seitenfehler des Gasts
+//
+// EXITINFO2 traegt die GASTPHYSISCHE Adresse, EXITINFO1 die Gruende
+// (Bit 0: es war eine Rechteverletzung und keine fehlende Seite).
+//
+// Gehoert die Adresse zum Speicher der Maschine, legt der Wirt einen
+// Rahmen unter und laesst weiterlaufen. Gehoert sie nicht dazu, ist der
+// Gast an eine Wand gelaufen, die es fuer ihn nicht geben sollte -- und
+// dann ist die Maschine hin, der Wirt aber nicht.
+fn do_npf(state: u64, i: u64, b: u64) -> u64 {
+    let gpa: u64 = vmcb.rd(b, vmcb.C_EXITINFO2)
+    if npt_map(state, i, gpa) {
+        bump(state, S_NPFS, 1)
+        return R_MORE
+    }
+    return R_FAULT
+}
+
+// ----------------------------------------------- Schreiben auf ein Steuerregister
+//
+// OHNE "decode assists" sagt der Prozessor NICHT, aus welchem Register
+// der Wert kam. Der Wirt muss den Befehl selbst aus dem Gastspeicher
+// holen und lesen. Das geht, solange der Gast noch kein eigenes Paging
+// hat -- dann ist gastlinear gleich gastphysisch, und die
+// verschachtelte Tabelle sagt, wo die Seite wirklich liegt. Hat der Gast
+// sein Paging schon an, muesste der Wirt ausserdem SEINE Tabellen
+// laufen; das tut diese Runde nicht, und sie sagt es, statt es zu
+// verschweigen.
+fn do_crwrite(state: u64, i: u64, b: u64, block: u64, nr: u64) -> u64 {
+    bump(state, S_CRS, 1)
+    let len: u64 = decode_movcr(state, i, b, block, nr)
+    if len == 0 {
+        bump(state, S_DECFAIL, 1)
+        return R_EXC
+    }
+    skip(b, len)
+    return R_MORE
+}
+
+// Liest bis zu vier Oktette Gastcode an RIP und deutet sie als
+// `mov CRn, r32` (0F 22 /r). Gibt die Laenge zurueck, oder 0.
+fn decode_movcr(state: u64, i: u64, b: u64, block: u64, nr: u64) -> u64 {
+    let cr0: u64 = vmcb.rd(b, vmcb.S_CR0)
+    if (cr0 & 0x80000000) != 0 {
+        return 0 // der Gast hat sein eigenes Paging an: hier nicht
+    }
+    let lin: u64 = vmcb.seg_base(b, vmcb.S_CS) +% vmcb.rd(b, vmcb.S_RIP)
+    var off: u64 = 0
+    var op: u64 = 0
+    // Vorsatzoktette ueberspringen. Ein `mov cr` traegt oft 0x66 oder
+    // 0x67, weil der Uebersetzer im Realmodus 32-Bit-Register meint.
+    var weiter: bool = true
+    while weiter {
+        op = guest_byte(state, i, lin +% off)
+        if op == 0x66 || op == 0x67 || op == 0xF0 || op == 0x2E
+            || op == 0x36 || op == 0x3E || op == 0x26 {
+            off = off +% 1
+            if off > 4 {
+                return 0
+            }
+        } else {
+            weiter = false
+        }
+    }
+    if op != 0x0F {
+        return 0
+    }
+    if guest_byte(state, i, lin +% off +% 1) != 0x22 {
+        return 0
+    }
+    let modrm: u64 = guest_byte(state, i, lin +% off +% 2)
+    if (modrm & 0xC0) != 0xC0 {
+        return 0
+    }
+    if ((modrm >> 3) & 7) != nr {
+        return 0
+    }
+    let reg: u64 = modrm & 7
+    var v: u64 = 0
+    if reg == 0 {
+        v = vmcb.rd(b, vmcb.S_RAX)
+    }
+    if reg == 3 {
+        v = gpr(block, G_RBX)
+    }
+    if reg == 1 {
+        v = gpr(block, G_RCX)
+    }
+    if reg == 2 {
+        v = gpr(block, G_RDX)
+    }
+    if reg == 5 {
+        v = gpr(block, G_RBP)
+    }
+    if reg == 6 {
+        v = gpr(block, G_RSI)
+    }
+    if reg == 7 {
+        v = gpr(block, G_RDI)
+    }
+    v = v & 0xFFFFFFFF
+    if nr == 0 {
+        vmcb.wr(b, vmcb.S_CR0, v)
+    }
+    if nr == 3 {
+        vmcb.wr(b, vmcb.S_CR3, v)
+    }
+    if nr == 4 {
+        vmcb.wr(b, vmcb.S_CR4, v)
+    }
+    return off +% 3
+}
+
+// Ein Oktett aus dem Speicher des Gasts, ueber die verschachtelte
+// Tabelle -- also genau so, wie der Gast es sehen wuerde.
+fn guest_byte(state: u64, i: u64, gpa: u64) -> u64 {
+    let ram: u64 = vget(state, i, V_RAM)
+    let pages: u64 = vget(state, i, V_PAGES)
+    if (gpa >> 12) >= pages {
+        return 0
+    }
+    return kstate.get8(ram +% gpa)
+}
+
+// ------------------------------------------------------------ der Hypercall
+
+fn do_hypercall(state: u64, i: u64, b: u64, block: u64) -> u64 {
+    let cmd: u64 = vmcb.rd(b, vmcb.S_RAX) & 0xFFFFFFFF
+    let arg: u64 = gpr(block, G_RBX) & 0xFFFFFFFF
+    let nr: u64 = gpr(block, G_RCX) & 0xFFFFFFFF
+    bump(state, S_CALLS, 1)
+    if cmd == 1 {
+        value_put(state, nr, arg)
+        return R_MORE
+    }
+    if cmd == 2 {
+        vset(state, i, V_RESULT, arg)
+        vset(state, i, V_DONE, 1)
+        return R_DONE
+    }
+    if cmd == 3 {
+        // "Wirf mir eine Unterbrechung ein." EVENTINJ, Art 0 (eine
+        // aeussere Unterbrechung), Vektor 0x20, gueltig. Der Prozessor
+        // stellt sie beim naechsten Eintritt zu -- vor dem naechsten
+        // Befehl des Gasts, und ohne dass der Gast sie erwarten muesste.
+        vmcb.wr(b, vmcb.C_EVENTINJ, 0x20 | (0 << 8) | 0x80000000)
+        bump(state, S_INJ, 1)
+        return R_MORE
+    }
+    return R_MORE
+}
+
+// ====================================================================
+//                          DIE MESSUNG
+// ====================================================================
+//
+// Was hier ausgegeben wird, ist die Runde. `tools/hv/run.sh` liest jede
+// dieser Zeilen EINZELN nach -- eine Sammelzahl allein waere zu leicht,
+// und ein Gast, der "nicht abstuerzt", ist kein Beweis fuer irgendetwas.
+
+// DIE ZUSAGE, AN DER DER WELTWECHSEL HAENGT. `vmrun` sichert MSR_LSTAR
+// NICHT (AMD APM 15.5.1, und QEMU tut es genauso -- helper_vmrun laedt
+// nur ES/CS/SS/DS). Wer `vmsave`/`vmload` weglaesst, gibt dem Gast die
+// Systemaufruf-Einsprungadresse des Wirts und bekommt die des Gasts
+// zurueck; der naechste `syscall` aus Ring 3 springt dann irgendwohin.
+// Diese Zeile liest sie zurueck und vergleicht sie mit dem, was
+// `user.setup` hineingeschrieben hat.
+const MSR_LSTAR: u64 = 0xC0000082
+const V_SYSCALL: u64 = 48 // Platz in der Tabelle aus isr.s
+
+fn host_intact(state: u64) -> bool {
+    return rdmsr(MSR_LSTAR) == vector(state, V_SYSCALL)
+}
+
+fn say(p: u64) {
+    serial.puts(p)
+}
+
+fn kv(name: u64, v: u64) {
+    var s_eq: [u8; 2] = "=\0"
+    var s_sp: [u8; 2] = " \0"
+    serial.puts(name)
+    serial.puts((&s_eq[0]) as u64)
+    serial.dec(v)
+    serial.puts((&s_sp[0]) as u64)
+}
+
+fn kx(name: u64, v: u64) {
+    var s_eq: [u8; 2] = "=\0"
+    var s_sp: [u8; 2] = " \0"
+    serial.puts(name)
+    serial.puts((&s_eq[0]) as u64)
+    serial.hex(v)
+    serial.puts((&s_sp[0]) as u64)
+}
+
+fn yesno(name: u64, b: bool) {
+    var s_eq: [u8; 2] = "=\0"
+    var s_y: [u8; 5] = "yes \0"
+    var s_n: [u8; 4] = "no \0"
+    serial.puts(name)
+    serial.puts((&s_eq[0]) as u64)
+    if b {
+        serial.puts((&s_y[0]) as u64)
+    } else {
+        serial.puts((&s_n[0]) as u64)
+    }
+}
+
+// Eine Zahl gegen eine Erwartung. Das ist die Form, in der diese Runde
+// ihre Zusagen macht: nicht "es lief", sondern "es kam GENAU das heraus".
+fn zusage(name: u64, ist: u64, soll: u64) -> u64 {
+    var s_ok: [u8; 9] = "hv: OK  \0"
+    var s_no: [u8; 9] = "hv: BAD \0"
+    var s_ist: [u8; 9] = "  ist=0x\0"
+    var s_soll: [u8; 10] = "  soll=0x\0"
+    if ist == soll {
+        serial.puts((&s_ok[0]) as u64)
+        serial.puts(name)
+        serial.nl()
+        return 1
+    }
+    serial.puts((&s_no[0]) as u64)
+    serial.puts(name)
+    serial.puts((&s_ist[0]) as u64)
+    serial.hex(ist)
+    serial.puts((&s_soll[0]) as u64)
+    serial.hex(soll)
+    serial.nl()
+    return 0
+}
+
+fn zusage_true(name: u64, b: bool) -> u64 {
+    if b {
+        return zusage(name, 1, 1)
+    }
+    return zusage(name, 0, 1)
+}
+
+// Einen Gast anlegen, laufen lassen, und sagen, was dabei herauskam.
+fn lauf(state: u64, guest: u64, name: u64) -> u64 {
+    var s_run: [u8; 12] = "hv: guest \0\0"
+    var s_slot: [u8; 6] = "slot\0\0"
+    var s_ex: [u8; 6] = "exits\0"
+    var s_out: [u8; 4] = "out\0"
+    var s_res: [u8; 7] = "result\0"
+    var s_st: [u8; 6] = "state\0"
+    var s_cyc: [u8; 7] = "cycles\0"
+    let vm: u64 = vm_create(state, guest, 0)
+    if vm >= MAX_VMS {
+        return MAX_VMS
+    }
+    let vor: u64 = get(state, S_CYC_RUN)
+    let r: u64 = vm_run(state, vm)
+    serial.puts((&s_run[0]) as u64)
+    serial.puts(name)
+    serial.put(32 as u8)
+    kv((&s_slot[0]) as u64, vm)
+    kv((&s_ex[0]) as u64, vm_exits(state, vm))
+    kv((&s_out[0]) as u64, r)
+    kx((&s_res[0]) as u64, vm_result(state, vm))
+    kv((&s_st[0]) as u64, vm_state(state, vm))
+    kv((&s_cyc[0]) as u64, get(state, S_CYC_RUN) -% vor)
+    serial.nl()
+    return vm
+}
+
+// Der Kopf: was dieser Prozessor kann. Ohne diese Zeile weiss niemand,
+// unter welchen Voraussetzungen die Zahlen darunter entstanden sind.
+fn report_cpu(state: u64) {
+    var s_h: [u8; 9] = "hv: cpu \0"
+    var s_rev: [u8; 4] = "rev\0"
+    var s_as: [u8; 6] = "asids\0"
+    var s_ft: [u8; 5] = "feat\0"
+    var s_np: [u8; 3] = "np\0"
+    var s_nr: [u8; 5] = "nrip\0"
+    var s_de: [u8; 7] = "decode\0"
+    var s_cl: [u8; 6] = "clean\0"
+    var s_fl: [u8; 12] = "host-rflags\0"
+    let f: u64 = feat(state)
+    let fl: u64 = asm("pushfq\npop rax", out("rax"))
+    serial.puts((&s_h[0]) as u64)
+    kx((&s_fl[0]) as u64, fl)
+    kv((&s_rev[0]) as u64, rev(state) & 0xFF)
+    kv((&s_as[0]) as u64, nasid(state))
+    kx((&s_ft[0]) as u64, f)
+    yesno((&s_np[0]) as u64, (f & 1) != 0)
+    yesno((&s_nr[0]) as u64, (f & 8) != 0)
+    yesno((&s_de[0]) as u64, (f & 128) != 0)
+    yesno((&s_cl[0]) as u64, (f & 32) != 0)
+    serial.nl()
+}
+
+// Die Austritte, nach Grund. DIESE ZEILE IST DER AUFTRAG: "Zaehl die
+// VM-Austritte nach Grund und schreib die Zahlen in die Doku."
+fn report_exits(state: u64) {
+    var s_h: [u8; 11] = "hv: exits \0"
+    var s_tot: [u8; 6] = "total\0"
+    var s_cpuid: [u8; 6] = "cpuid\0"
+    var s_io: [u8; 5] = "ioio\0"
+    var s_msr: [u8; 4] = "msr\0"
+    var s_hlt: [u8; 4] = "hlt\0"
+    var s_vmm: [u8; 8] = "vmmcall\0"
+    var s_npf: [u8; 4] = "npf\0"
+    var s_intr: [u8; 5] = "intr\0"
+    var s_sd: [u8; 9] = "shutdown\0"
+    var s_exc: [u8; 4] = "exc\0"
+    var s_crw: [u8; 5] = "crwr\0"
+    var s_err: [u8; 4] = "err\0"
+    var s_oth: [u8; 6] = "other\0"
+    serial.puts((&s_h[0]) as u64)
+    kv((&s_tot[0]) as u64, exits_total(state))
+    kv((&s_cpuid[0]) as u64, exits_bucket(state, B_CPUID))
+    kv((&s_io[0]) as u64, exits_bucket(state, B_IOIO))
+    kv((&s_msr[0]) as u64, exits_bucket(state, B_MSR))
+    kv((&s_hlt[0]) as u64, exits_bucket(state, B_HLT))
+    kv((&s_vmm[0]) as u64, exits_bucket(state, B_VMMCALL))
+    kv((&s_npf[0]) as u64, exits_bucket(state, B_NPF))
+    kv((&s_intr[0]) as u64, exits_bucket(state, B_INTR))
+    kv((&s_sd[0]) as u64, exits_bucket(state, B_SHUTDOWN))
+    kv((&s_exc[0]) as u64, exits_bucket(state, B_EXC))
+    kv((&s_crw[0]) as u64, exits_bucket(state, B_CRWR))
+    kv((&s_err[0]) as u64, exits_bucket(state, B_ERR))
+    kv((&s_oth[0]) as u64, exits_bucket(state, B_OTHER))
+    serial.nl()
+}
+
+// Was ein Austritt kostet. Der Messgast tut nichts ausser austreten, und
+// sein Kontingent ist die Zahl der Runden -- damit ist der Wert eine
+// Zeit je Runde und keine Schaetzung.
+fn bench(state: u64) {
+    var s_h: [u8; 11] = "hv: bench \0"
+    var s_n: [u8; 7] = "rounds\0"
+    var s_c: [u8; 7] = "cycles\0"
+    var s_p: [u8; 9] = "per-exit\0"
+    var s_g: [u8; 10] = "in-guest\0\0"
+    var s_x: [u8; 8] = "in-host\0"
+    let vm: u64 = vm_create(state, G_BENCH, 0)
+    if vm >= MAX_VMS {
+        return
+    }
+    let r0: u64 = get(state, S_CYC_RUN)
+    let e0: u64 = get(state, S_CYC_EXIT)
+    vset(state, vm, V_BUDGET, 512)
+    vm_run(state, vm)
+    let n: u64 = vm_exits(state, vm)
+    let dr: u64 = get(state, S_CYC_RUN) -% r0
+    let de: u64 = get(state, S_CYC_EXIT) -% e0
+    serial.puts((&s_h[0]) as u64)
+    kv((&s_n[0]) as u64, n)
+    kv((&s_c[0]) as u64, dr +% de)
+    if n > 0 {
+        kv((&s_p[0]) as u64, (dr +% de) / n)
+        kv((&s_g[0]) as u64, dr / n)
+        kv((&s_x[0]) as u64, de / n)
+    }
+    serial.nl()
+    vm_destroy(state, vm)
+}
+
+// --------------------------------------------------------------- stage
+//
+// Der Abschnitt dieser Runde, aufgerufen aus `kmain.fi` mit EINER Zeile
+// -- wie `hw.stage`. Mehrere Runden arbeiten gleichzeitig an dieser
+// Datei, und eine Naht ist billiger zu verschmelzen als ein Eingriff.
+fn stage(state: u64) {
+    var s_skip: [u8; 12] = "hv: skipped\0"
+    var s_head: [u8; 42] = "hv: a hypervisor -- AMD-V, nested paging\n\0"
+    var s_novt: [u8; 61] = "hv: no vmx here: TCG cannot do VT-x, so this is SVM instead\n\0"
+    var s_rc: [u8; 12] = "hv: enable \0"
+    var s_rcn: [u8; 3] = "rc\0"
+    var s_nosvm: [u8; 40] = "hv: counter-check nosvm: SVM stays off\n\0"
+    var s_hello: [u8; 6] = "hello\0"
+    var s_pm: [u8; 3] = "pm\0"
+    var s_fault: [u8; 6] = "fault\0"
+    var s_crash: [u8; 6] = "crash\0"
+    var s_loop: [u8; 5] = "loop\0"
+    var s_frames: [u8; 12] = "hv: frames \0"
+    var s_before: [u8; 7] = "before\0"
+    var s_after: [u8; 6] = "after\0"
+    var s_leak: [u8; 5] = "leak\0"
+    var s_pr: [u8; 12] = "hv: proofs \0"
+    var s_of: [u8; 4] = " / \0"
+    var s_done: [u8; 9] = "hv: done\0"
+    var s_alive: [u8; 15] = "hv: host alive\0"
+
+    // Die Zusagen, jede mit ihrem Namen, damit eine geloeschte auffaellt.
+    var n_svm: [u8; 25] = "the processor can do svm\0"
+    var n_np: [u8; 30] = "it can do nested page tables\0\0"
+    var n_en: [u8; 25] = "svm switched on, rc = 0\0\0"
+    var n_h_res: [u8; 32] = "guest 1 signed off with 0x1234\0\0"
+    var n_h_cpu: [u8; 38] = "guest 1 was told the host's cpu name\0\0"
+    var n_h_hv: [u8; 44] = "guest 1 sees the hypervisor bit in cpuid 1\0\0"
+    var n_h_pat: [u8; 44] = "guest 1 read the pattern through the npt\0\0\0\0"
+    var n_h_inj: [u8; 44] = "guest 1 took the interrupt the host threw\0\0\0"
+    var n_h_out: [u8; 39] = "guest 1 printed through a port it has\0\0"
+    var n_p_res: [u8; 32] = "guest 2 signed off with 0x2222\0\0"
+    var n_p_pg: [u8; 47] = "guest 2 read back through its OWN page table\0\0\0"
+    var n_p_cr0: [u8; 41] = "guest 2 really turned on pe and paging\0\0\0"
+    var n_p_cr3: [u8; 36] = "guest 2 runs on its own cr3 0x2000\0\0"
+    var n_f_res: [u8; 32] = "guest 4 signed off with 0x3333\0\0"
+    var n_f_val: [u8; 46] = "guest 4 read back what it wrote after the npf\0"
+    var n_f_npf: [u8; 43] = "the host laid a frame under it on demand\0\0\0"
+    var n_c_dead: [u8; 42] = "guest 5 was shut down by a triple fault\0\0\0"
+    var n_c_host: [u8; 45] = "and the host's syscall path is untouched\0\0\0\0\0"
+    var n_c_val: [u8; 41] = "guest 5 still reported 0x4444 before it\0\0"
+    var n_leak: [u8; 40] = "every frame of every guest came back\0\0\0\0"
+    var n_intr: [u8; 46] = "the host took the runaway guest's processor\0\0\0"
+    var n_intr2: [u8; 38] = "and the runaway guest counted onwards\0"
+
+    if !on(state, M_HV) {
+        serial.puts((&s_skip[0]) as u64)
+        serial.nl()
+        return
+    }
+    serial.puts((&s_head[0]) as u64)
+    serial.puts((&s_novt[0]) as u64)
+
+    var gut: u64 = 0
+    var alle: u64 = 0
+
+    // 1. Was der Prozessor kann.
+    alle = alle + 1
+    gut = gut + zusage_true((&n_svm[0]) as u64, cpu_has_svm())
+
+    // 2. Einschalten -- oder die GEGENPROBE.
+    if on(state, M_NOSVM) {
+        serial.puts((&s_nosvm[0]) as u64)
+        set(state, S_READY, 0)
+        serial.puts((&s_done[0]) as u64)
+        serial.nl()
+        return
+    }
+    let rc: u64 = enable(state)
+    serial.puts((&s_rc[0]) as u64)
+    kv((&s_rcn[0]) as u64, rc)
+    serial.nl()
+    alle = alle + 1
+    gut = gut + zusage((&n_en[0]) as u64, rc, 0)
+    if rc != 0 {
+        serial.puts((&s_done[0]) as u64)
+        serial.nl()
+        return
+    }
+    report_cpu(state)
+    alle = alle + 1
+    gut = gut + zusage_true((&n_np[0]) as u64, (feat(state) & 1) != 0)
+
+    // Waehrend der Gaeste soll der Zeitgeber schlagen (er ist der
+    // Notausgang), aber nicht die Aufgabe wechseln -- sonst stuenden
+    // zwei Ausgaben ineinander.
+    let pre: u64 = kstate.get(state, kstate.PREEMPT)
+    kstate.set(state, kstate.PREEMPT, 0)
+    let frames0: u64 = mem.frames_free(state)
+
+    // 3. Der erste Gast: Realmodus, Anschluss, CPUID, NPT, Einwurf.
+    let v1: u64 = lauf(state, G_HELLO, (&s_hello[0]) as u64)
+    alle = alle + 6
+    gut = gut + zusage((&n_h_res[0]) as u64, vm_result(state, v1), 0x1234)
+    gut = gut + zusage((&n_h_cpu[0]) as u64, value_of(state, 1), 0x6D75734F)
+    gut = gut + zusage((&n_h_hv[0]) as u64,
+        value_of(state, 2) & 0x80000000, 0x80000000)
+    gut = gut + zusage((&n_h_pat[0]) as u64, value_of(state, 3), PATTERN)
+    gut = gut + zusage((&n_h_inj[0]) as u64, value_of(state, 4), 0xABCD)
+    gut = gut + zusage((&n_h_out[0]) as u64, guest_out(state), 15)
+
+    // 4. Der zweite Gast: geschuetzter Modus und ein eigenes Paging.
+    let v2: u64 = lauf(state, G_PM, (&s_pm[0]) as u64)
+    alle = alle + 4
+    gut = gut + zusage((&n_p_res[0]) as u64, vm_result(state, v2), 0x2222)
+    gut = gut + zusage((&n_p_pg[0]) as u64, value_of(state, 5), 0x5A5AC0DE)
+    gut = gut + zusage((&n_p_cr0[0]) as u64,
+        value_of(state, 6) & 0x80000001, 0x80000001)
+    gut = gut + zusage((&n_p_cr3[0]) as u64, value_of(state, 7), 0x2000)
+
+    // 5. Der dritte Gast: eine Seite auf Zuruf.
+    let npf0: u64 = npfs(state)
+    let v4: u64 = lauf(state, G_FAULT, (&s_fault[0]) as u64)
+    alle = alle + 3
+    gut = gut + zusage((&n_f_res[0]) as u64, vm_result(state, v4), 0x3333)
+    gut = gut + zusage((&n_f_val[0]) as u64, value_of(state, 8), 0xC0DE)
+    gut = gut + zusage_true((&n_f_npf[0]) as u64, npfs(state) > npf0)
+
+    // 6. Der vierte Gast: der Absturz, den der Wirt ueberleben MUSS.
+    let v5: u64 = lauf(state, G_CRASH, (&s_crash[0]) as u64)
+    alle = alle + 3
+    gut = gut + zusage((&n_c_val[0]) as u64, value_of(state, 9), 0x4444)
+    gut = gut + zusage((&n_c_dead[0]) as u64, vm_state(state, v5), ST_DEAD)
+    gut = gut + zusage_true((&n_c_host[0]) as u64, host_intact(state))
+
+    // 7. Der Laeufer -- nur auf Verlangen, denn er haengt an der Frage,
+    //    ob der Zeitgeber den Wirt wirklich zurueckholt.
+    if on(state, M_LOOP) {
+        let i0: u64 = exits_bucket(state, B_INTR)
+        let v3: u64 = lauf(state, G_LOOP, (&s_loop[0]) as u64)
+        alle = alle + 2
+        gut = gut + zusage_true((&n_intr[0]) as u64,
+            exits_bucket(state, B_INTR) > i0)
+        gut = gut + zusage_true((&n_intr2[0]) as u64, vm_exits(state, v3) > 1)
+        vm_destroy(state, v3)
+    }
+
+    if on(state, M_MESS) {
+        bench(state)
+    }
+
+    report_exits(state)
+
+    // 8. Alles abraeumen -- und nachzaehlen. Ein Wirt, der bei jeder
+    //    Gastmaschine Rahmen liegen laesst, ist ein Wirt mit einem Leck,
+    //    und ein Leck sieht man nur, wenn man zaehlt.
+    vm_destroy(state, v1)
+    vm_destroy(state, v2)
+    vm_destroy(state, v4)
+    vm_destroy(state, v5)
+    let frames1: u64 = mem.frames_free(state)
+    serial.puts((&s_frames[0]) as u64)
+    kv((&s_before[0]) as u64, frames0)
+    kv((&s_after[0]) as u64, frames1)
+    kv((&s_leak[0]) as u64, frames0 -% frames1)
+    serial.nl()
+    alle = alle + 1
+    gut = gut + zusage((&n_leak[0]) as u64, frames0, frames1)
+
+    kstate.set(state, kstate.PREEMPT, pre)
+
+    serial.puts((&s_alive[0]) as u64)
+    serial.nl()
+    serial.puts((&s_pr[0]) as u64)
+    serial.dec(gut)
+    serial.puts((&s_of[0]) as u64)
+    serial.dec(alle)
+    serial.nl()
+    serial.puts((&s_done[0]) as u64)
+    serial.nl()
+}
