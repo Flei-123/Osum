@@ -64,7 +64,8 @@ Waisen an und fährt die Maschine über **echtes ACPI** herunter.
 | SHA-256("abc") in Firn | `ba7816bf…f20015ad`, identisch mit FIPS 180-4 und Pythons `hashlib` |
 | HMAC-SHA256 in Firn | identisch mit Pythons `hmac` |
 | PBKDF2-HMAC-SHA256, 2048 Runden | identisch mit Pythons `hashlib.pbkdf2_hmac` |
-| Rechtefragen in einem Lauf mit `su`/`login` | 1300–1600, davon 3–8 abgelehnt |
+| Rechtefragen im Lauf `rechte.sh` | 177, davon 2 abgelehnt |
+| setuid-Bit gegriffen im selben Lauf | 6 mal |
 | tiefster Kernstapel, `main` | 14224 von 16384 Oktetten |
 | tiefster Kernstapel, diese Runde | 14560 von 16384 Oktetten (+336) |
 | Dateigröße höchstens, vorher | 2.135.552 Oktette |
@@ -150,8 +151,8 @@ Dateien, in einem einzigen Lauf zweimal — einmal als root, einmal nach
 
 **Gegenprobe** (`noperm`): derselbe Kernel, dieselben Dateien, `may`
 sagt immer ja. Beide Nullen werden zu Einsen — und der Zähler der
-Ablehnungen steht trotzdem bei 3, weil `noperm` erst **nach** dem Zählen
-umbiegt. Gezählt wird, nur nicht gewirkt.
+Ablehnungen steht trotzdem über null, weil `noperm` erst **nach** dem
+Zählen umbiegt. Gezählt wird, nur nicht gewirkt.
 
 Was `chmod`/`chown` getan haben, liest der Wirt **aus dem Abbild**
 zurück (`mkfs.py meta`), nicht aus einem Mitschnitt der seriellen
