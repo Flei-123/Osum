@@ -526,7 +526,47 @@ kollidiert mit keiner Aufrufnummer. Ein Test, der einen Fehler meldet, wo
 keiner ist, ist genauso schlecht wie einer, der keinen meldet, wo einer
 ist; gesucht wird jetzt nach `const SYS_...`.
 
-**7. Der Bildschirm wurde aus dem Unterbrechungspfad heraus neu
+**7. Ein Rahmen fehlte — und war keiner.** `tools/kernel/run.sh` meldete
+*„frames after the processes: 31928, before: 31929"*. Der Rahmen war
+nicht verloren, er wurde absichtlich genommen, und die **Messklammer
+stand an der falschen Stelle**.
+
+`proc.map_programs` macht die Seiten von `uprog.fi` für Ring 3
+erreichbar und nimmt sich dafür **je angefangener 2-MiB-Kachel** eine
+Seitentabelle. Solange `.utext` in *eine* Kachel passte, war das die
+feste Tabelle aus der Datenregion und kostete keinen Rahmen. Der
+Kommentar dort sagt das seit Runde K6 wörtlich voraus:
+
+> Solange `.utext` in eine Kachel passt (firnc0), ändert diese Schleife
+> nichts an dem, was die Runden 59 bis K6 gemessen haben.
+
+Diese Runde hat drei Programme in Ring 3 dazugelegt. Gemessen:
+
+| | `__user_begin` | `__user_end` | Seiten | Kacheln |
+|---|---|---|---:|---|
+| Basis | `0x1f4000` | `0x200000` | 12 | **eine** |
+| K18 | `0x1fc000` | `0x20a000` | 14 | **zwei** |
+
+Die zweite Kachel bekommt einen eigenen Rahmen, und der bleibt den ganzen
+Lauf stehen, weil er den ganzen Lauf gebraucht wird. Die Zusage heißt
+„jeder Adressraum ist zurückgekommen"; ein Rahmen, der absichtlich stehen
+bleibt, ist kein verlorener Adressraum. Die Klammer umschließt jetzt
+genau das, worüber die Zusage spricht — und der einmalige Preis wird
+**sichtbar gemeldet** statt verschluckt:
+
+```
+proc: pages=14  ptframes=1
+proc: frames_free=31928 of 31928
+```
+
+Das ist ausdrücklich **keine nachgezogene Erwartung**: die Zahl, die
+vorher fehlte, steht jetzt als eigene Zahl da.
+
+**8. Drei Aufrufnummern fehlten in der libc.** `tools/posix/run.sh` hält
+die Liste aus `kernel/sys.fi` gegen die aus `lib/libc/kcall.fi` und
+meldete drei Abweichungen — genau dafür ist er da. Nachgetragen.
+
+**9. Der Bildschirm wurde aus dem Unterbrechungspfad heraus neu
 gerechnet.** Die erste Fassung ließ `screen_tick` im Zeitgeber direkt
 `blank()` rufen — und damit eine Umrechnung über 480.000 Bildpunkte
 **im Interrupt-Handler**. Das fiel bei der Fehlersuche zu Punkt 2 auf und
@@ -572,3 +612,9 @@ Bildschirm im Bild · `/bin/power` über die Platte · die Buchführung.
 aus B3. Jeder Wertvergleich geht über `sagt`/`ksagt`/`pw`, und ein
 **fehlender** Wert lässt die Zusage *fallen*, statt sie durchzuwinken;
 mehrere der Fehler in Abschnitt 14 sind genau dadurch aufgefallen.
+
+**Die Vollabnahme `./test.sh` hat zwei Regressionen gefunden, die
+`tools/k18/run.sh` nicht finden konnte** (Fehler 7 und 8 in Abschnitt
+14) — eine im Rahmenverwalter und eine in der libc. Beide sind behoben;
+sie sind der Grund, warum eine Runde nicht mit ihrem eigenen Läufer
+fertig ist.
