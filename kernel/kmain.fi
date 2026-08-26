@@ -758,6 +758,15 @@ fn gfx_hold(state: u64) {
         if fb.want(state, fb.M_PATTERN) {
             pattern(state, (&s_pat[0]) as u64, (&s_pat2[0]) as u64)
         }
+        // RUNDE K18: das Pruefbild der Helligkeit. HIER und nicht oben in
+        // `power_stage`, und das ist gemessen und nicht ueberlegt: dort
+        // gemalt, war es im Bildschirmfoto nicht mehr zu finden -- die
+        // Konsole schreibt zwischen `power_stage` und dem Stillhalten
+        // noch drei Dutzend Zeilen auf denselben Schirm und rollt ihn
+        // dabei. Die Kernelmeldung stimmte trotzdem (px_a=0xc86432), das
+        // Bild war leer. Genau die Art Unterschied, wegen der in diesem
+        // Projekt im BILD nachgemessen wird und nicht nur im Bericht.
+        power_screen(state)
         fb.flush(state)
     }
     // STILLGEHALTEN WIRD AUCH OHNE BILDSCHIRM, und das ist der Grund,
@@ -2246,6 +2255,90 @@ fn power_stage(state: u64) {
     power_report(state)
 }
 
+// 4.6 DER BILDSCHIRM, AN EINER AUSGERECHNETEN STELLE GEMESSEN.
+//
+// Ein Pruefbild von 64 mal 64 Bildpunkten bei (100,100), in einer Farbe,
+// die sich halbieren laesst, ohne dass eine Rundung ins Spiel kommt:
+// 200/100/50 wird zu 100/50/25 und wieder zurueck zu 200/100/50. Der
+// Kernel liest den Bildpunkt bei (120,120) aus dem Rahmenpuffer ZURUECK
+// und meldet ihn -- und `tools/k18/run.sh` prueft DIESELBE Stelle noch
+// einmal im BILDSCHIRMFOTO.
+//
+// DAS IST DIE LEHRE AUS RUNDE K7B, und sie steht in der Aufgabe dieser
+// Runde noch einmal: dort schien Text zu 87 Prozent zu stimmen, waehrend
+// jeder Buchstabe fehlte -- die 87 Prozent waren schwarzer Hintergrund.
+// Also wird hier keine Flaeche gezaehlt und kein Mittelwert gebildet,
+// sondern EIN Bildpunkt an EINER Stelle gegen EINEN ausgerechneten Wert.
+const PX_X: u64 = 120
+const PX_Y: u64 = 120
+const PX_COLOR: u64 = 13132850 // 0xC86432 = 200,100,50
+
+fn power_screen(state: u64) {
+    var n_a: [u8; 6] = "px_a\0\0"
+    var n_b: [u8; 6] = "px_b\0\0"
+    var n_c: [u8; 6] = "px_c\0\0"
+    var n_d: [u8; 6] = "px_d\0\0"
+    var n_e: [u8; 6] = "px_e\0\0"
+    var n_no: [u8; 9] = "px_none\0\0"
+    if !fb.ready(state) {
+        pnum((&n_no[0]) as u64, 1)
+        return
+    }
+    // DIE KONSOLE WIRD FUER DIE DAUER DER MESSUNG STUMMGESCHALTET, und
+    // das ist keine Kosmetik: jede Zeile, die auf den Schirm geht, ROLLT
+    // ihn um sechzehn Bildpunkte. In der ersten Fassung stand das
+    // Pruefbild deshalb in jedem Lauf woanders -- bei (100,68), wenn
+    // eine Zeile danach kam, und bei (100,36), wenn es drei waren. Die
+    // Farben stimmten auf den Punkt, die Stelle nicht, und ein Test, der
+    // an einer festen Stelle nachsieht, haette das fuer einen Fehler der
+    // Helligkeit gehalten. Ab hier geht alles nur noch auf die serielle
+    // Leitung, und das Bild steht still.
+    let echo_vorher: bool = fb.echo_on(state)
+    fb.set_echo(state, false)
+    fb.fill(state, 100, 100, 64, 64, PX_COLOR)
+    fb.flush(state)
+    phex((&n_a[0]) as u64, fb.get_pixel(state, PX_X, PX_Y) & 0xFFFFFF)
+
+    if (kstate.get(state, kstate.MODE) & kstate.M_PWRDIM) != 0 {
+        pwr.set_bright(state, 50)
+        phex((&n_b[0]) as u64, fb.get_pixel(state, PX_X, PX_Y) & 0xFFFFFF)
+        // Und wieder hoch. 200*50/100*100/50 ist wieder 200 -- die Farbe
+        // ist mit Absicht so gewaehlt, dass die Ganzzahlrechnung hier
+        // nichts verliert. Bei 201 waere es 200, und dann muesste diese
+        // Zusage anders lauten.
+        pwr.set_bright(state, 100)
+        phex((&n_c[0]) as u64, fb.get_pixel(state, PX_X, PX_Y) & 0xFFFFFF)
+        pwr.set_bright(state, 50)
+    }
+    if (kstate.get(state, kstate.MODE) & kstate.M_PWRBLANK) != 0 {
+        pwr.blank(state)
+        phex((&n_d[0]) as u64, fb.get_pixel(state, PX_X, PX_Y) & 0xFFFFFF)
+        pnum((&n_e[0]) as u64, pwr.value(state, pwr.PW_BLANKS))
+    }
+    // EIN EIGENES STILLHALTEN FUER DIESE RUNDE, und der Grund ist
+    // gemessen: das Stillhalten von Runde K7 (`fbhold`) meldet sich mit
+    // einer Zeile, die auf DEMSELBEN Schirm landet -- die Konsole rollt,
+    // und das Pruefbild war im Bildschirmfoto nicht mehr zu finden,
+    // obwohl der Kernel es beim Zurueckesen noch sah. Also: erst die
+    // Marke, dann malen, dann warten, und dazwischen sagt niemand mehr
+    // etwas. Das Bild, das der Testlaeufer aufnimmt, ist genau das, was
+    // hier gemalt wurde.
+    fb.flush(state)
+    var s_shot: [u8; 12] = "pwr: shot\0\0\0"
+    serial.puts((&s_shot[0]) as u64)
+    serial.nl()
+    let hz: u64 = apic.tsc_hz(state)
+    if hz != 0 {
+        let bis: u64 = apic.tsc() + hz * 5
+        while apic.tsc() < bis {
+        }
+    }
+    var s_go: [u8; 12] = "pwr: shotgo\0"
+    serial.puts((&s_go[0]) as u64)
+    serial.nl()
+    fb.set_echo(state, echo_vorher)
+}
+
 fn pnum(name: u64, v: u64) {
     var s_p: [u8; 6] = "pwr: \0"
     var s_e: [u8; 2] = "=\0"
@@ -2653,6 +2746,14 @@ fn mode_of(cmd: u64) -> u64 {
     }
     if find(cmd, (&pwnb[0]) as u64, 7) != 0 {
         mode = mode | kstate.M_NOBLANK
+    }
+    var pwd: [u8; 7] = "pwrdim\0"
+    var pwbl: [u8; 9] = "pwrblank\0"
+    if find(cmd, (&pwd[0]) as u64, 6) != 0 {
+        mode = mode | kstate.M_PWRDIM
+    }
+    if find(cmd, (&pwbl[0]) as u64, 8) != 0 {
+        mode = mode | kstate.M_PWRBLANK
     }
     if find(cmd, (&unixw[0]) as u64, 4) != 0 {
         mode = mode | M_UNIX
