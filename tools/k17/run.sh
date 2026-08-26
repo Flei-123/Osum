@@ -123,6 +123,9 @@ sagt() { # datei name soll beschreibung
 # Eine Zahl aus der Zusammenfassung `usb: keys=... reports=...`.
 uz() { grep -a "^usb: keys=" "$1" 2>/dev/null | tail -1 | tr -d '\000' \
         | grep -oE "$2=[0-9]+" | tail -1 | cut -d= -f2; }
+# Eine Zahl aus der Zeile `usb: devices=... enums=... cmds=...`.
+us() { grep -a "^usb: devices=" "$1" 2>/dev/null | tail -1 | tr -d '\000' \
+        | grep -oE "$2=[0-9]+" | tail -1 | cut -d= -f2; }
 number_in() { grep -aE "^const $2: u64 = [0-9]+" "$1" | head -1 \
         | sed -E 's/^const [A-Za-z0-9_]+: u64 = ([0-9]+).*/\1/'; }
 
@@ -201,7 +204,7 @@ gleich "und ist auf 0x58000 gewachsen" "0x58000" "$a"
 # Bereich herausgelegt MUSS auffallen. Ohne diese Zeile prueft die neue
 # Karte nur das, woran jemand gedacht hat.
 GG="$TMPD/kernel-gg"; mkdir -p "$GG"; cp kernel/*.fi "$GG/"
-sed -i 's/^const EVT_OFF: u64 = 0x52000$/const EVT_OFF: u64 = 0x4C000/' "$GG/xhci.fi"
+sed -i 's/^const EVT_OFF: u64 = 0x52000/const EVT_OFF: u64 = 0x4C000/' "$GG/xhci.fi"
 if python3 tools/kernel/karte.py "$GG" > "$TMPD/karte-gg.txt" 2>&1; then
     bad "GEGENPROBE: EVT_OFF auf 0x4C000 gelegt und der Pruefer schweigt"
 else
@@ -209,7 +212,7 @@ else
 fi
 # Und eine zweite: zwei Stuecke INNERHALB des Bereichs uebereinander.
 cp kernel/*.fi "$GG/"
-sed -i 's/^const DESC_OFF: u64 = 0x56000$/const DESC_OFF: u64 = 0x55000/' "$GG/usb.fi"
+sed -i 's/^const DESC_OFF: u64 = 0x56000/const DESC_OFF: u64 = 0x55000/' "$GG/usb.fi"
 if python3 tools/kernel/karte.py "$GG" > "$TMPD/karte-gg2.txt" 2>&1; then
     bad "GEGENPROBE: DESC_OFF auf die Uebertragungsringe gelegt, Pruefer schweigt"
 else
@@ -303,10 +306,6 @@ lauf() { # name kernel kommandozeile [qemu-argumente...]
         "$@" -device isa-debug-exit,iobase=0xf4,iosize=0x04 > /dev/null 2>&1
     echo $?
 }
-stick_fuer() { # name -> die zwei Argumentpaare fuer den Stick
-    printf '%s\0' -device "usb-storage,drive=stk" \
-        -drive "id=stk,file=$TMPD/live2-$1.img,format=raw,if=none"
-}
 lauf_stick() { # name kernel kommandozeile [weitere qemu-argumente...]
     local name=$1 img=$2 app=$3
     shift 3
@@ -315,9 +314,9 @@ lauf_stick() { # name kernel kommandozeile [weitere qemu-argumente...]
     timeout 240 qemu-system-x86_64 -kernel "$img" -m 256 -append "$app" \
         -serial "file:$TMPD/$name.txt" -display none -no-reboot -vga std \
         -drive "file=$TMPD/live-$name.img,format=raw,if=ide,index=0" \
+        "$@" -drive "id=stk,file=$TMPD/live2-$name.img,format=raw,if=none" \
         -device usb-storage,drive=stk \
-        -drive "id=stk,file=$TMPD/live2-$name.img,format=raw,if=none" \
-        "$@" -device isa-debug-exit,iobase=0xf4,iosize=0x04 > /dev/null 2>&1
+        -device isa-debug-exit,iobase=0xf4,iosize=0x04 > /dev/null 2>&1
     echo $?
 }
 
@@ -425,7 +424,7 @@ hat "$H" "class=03:01:01 driver=kbd" "die Tastatur, an Klasse 03:01:01 (HID/Boot
 hat "$H" "class=03:01:02 driver=mouse" "die Maus, an Klasse 03:01:02 (HID/Boot/Maus)"
 hat "$H" "class=08:06:50 driver=msc" "der Stick, an Klasse 08:06:50 (Massenspeicher/SCSI/BOT)"
 num "aufgezaehlte Geraete" "$(uz "$H" devices)" eq 3
-num "Aufzaehlungen, die durchgelaufen sind" "$(uz "$H" enums)" eq 3
+num "Aufzaehlungen, die durchgelaufen sind" "$(us "$H" enums)" eq 3
 # Jedes Geraet hat einen EIGENEN Steckplatz bekommen -- eine Nummer,
 # die der REGLER vergeben hat, nicht der Treiber.
 sl=$(grep -a 'usb: port=' "$H" | grep -oE 'slot=[0-9]+' | cut -d= -f2 | sort -u | wc -l)
@@ -435,7 +434,7 @@ num "verschiedene Anschluesse" "$pt" eq 3
 # Die Paketgroesse des Steuerungsendpunkts kommt aus dem Deskriptor --
 # also hat der Treiber ihn wirklich gelesen.
 num "Kommandos an den Regler (Steckplatz, Adresse, Endpunkte)" \
-    "$(uz "$H" cmds)" ge 9
+    "$(us "$H" cmds)" ge 9
 
 # GEGENPROBE: `nohid` -- die Geraete werden gefunden, aber kein
 # Eingabetreiber nimmt sie an.
@@ -588,7 +587,11 @@ fi
 mdir -i "$TMPD/live2-stick.img@@1048576" :: > "$TMPD/mdir.txt" 2>&1
 hat "$TMPD/mdir.txt" "host" "und host.txt liegt unveraendert daneben"
 if command -v fsck.fat >/dev/null 2>&1; then
-    if fsck.fat -n "$TMPD/live2-stick.img@@1048576" > "$TMPD/fsck.txt" 2>&1; then
+    # `fsck.fat` kennt die `@@versatz`-Schreibweise von mtools nicht --
+    # die Partition wird deshalb herausgeschnitten und fuer sich geprueft.
+    dd if="$TMPD/live2-stick.img" of="$TMPD/nach.part" bs=512 skip=2048 \
+        status=none
+    if fsck.fat -n "$TMPD/nach.part" > "$TMPD/fsck.txt" 2>&1; then
         ok "fsck.fat: das Dateisystem ist nach Osums Schreibzugriff noch eines"
     else
         bad "fsck.fat meckert"; head -6 "$TMPD/fsck.txt" | sed 's/^/        /'
@@ -599,7 +602,7 @@ fi
 
 # UND AUS DER SHELL: /dev/usb0 ist ein Blockgeraet, und `mount` nimmt es.
 rc=$(lauf_stick shellmount "$TMPD/k0.mb" \
-    "osum usb vfs nokbd nosched noproc script=mount /dev/usb0 /usb vfat;ls /usb;cat /usb/host.txt;umount /usb" \
+    "osum usb vfs nokbd nosched noproc script=mount /dev/usb1 /usb vfat;ls /usb;cat /usb/host.txt;umount /usb" \
     "${XHCI[@]}")
 num "der Lauf mit mount aus der Shell beendet sich selbst" "$rc" eq 21
 hat "$TMPD/shellmount.txt" "host.txt" "/bin/mount haengt /dev/usb0 ein und ls sieht die Datei"
@@ -607,11 +610,35 @@ hat "$TMPD/shellmount.txt" "von linux auf den stick" "und cat liest sie"
 
 # GEGENPROBE: ohne Stick am Bus gibt es weder Geraet noch /dev/usb0.
 rc=$(lauf ohnestick "$TMPD/k0.mb" \
-    "osum usb vfs nokbd nosched noproc script=mount /dev/usb0 /usb vfat;ls /dev" \
+    "osum usb vfs nokbd nosched noproc script=ls /dev" \
     "${XHCI[@]}" "${KBD[@]}")
 num "GEGENPROBE ohne Stick: der Kern beendet sich sauber" "$rc" eq 21
 hat_nicht "$TMPD/ohnestick.txt" "usb: msc blocks=" "GEGENPROBE: kein Massenspeicher"
-hat_nicht "$TMPD/ohnestick.txt" "usb0" "GEGENPROBE: und /dev/usb0 gibt es nicht"
+# NUR DIE ZEILE VON `ls /dev` ANSEHEN. Der erste Entwurf hat die ganze
+# Ausgabe durchsucht -- und `usb` steht dort auch in der Kommandozeile,
+# die der Kern beim Start ausgibt. Die Zusage war damit immer rot, und
+# zwar aus einem Grund, der mit dem Geraeteverzeichnis nichts zu tun hat.
+devzeile() { sed -n '/sh: ready/,$p' "$1" | tr -d '\000' \
+    | grep -a '^\./ \.\./ null' | tail -1; }
+devA=$(devzeile "$TMPD/ohnestick.txt")
+if [ -z "$devA" ]; then
+    bad "GEGENPROBE: `ls /dev` hat gar nichts ausgegeben"
+elif printf '%s' "$devA" | grep -qE '(^| )usb( |$)'; then
+    bad "GEGENPROBE: /dev/usb steht im Verzeichnis, obwohl kein Stick da ist"
+else
+    ok "GEGENPROBE: /dev/usb steht NICHT im Verzeichnis ($devA)"
+fi
+# UND DIE GEGENPROBE ZUR GEGENPROBE: mit Stick steht er da. Sonst
+# prueft die Zeile darueber nur, dass irgendetwas fehlt.
+rc=$(lauf_stick mitstick "$TMPD/k0.mb" \
+    "osum usb vfs nokbd nosched noproc script=ls /dev" "${XHCI[@]}")
+num "der Lauf MIT Stick beendet sich sauber" "$rc" eq 21
+devB=$(devzeile "$TMPD/mitstick.txt")
+if printf '%s' "$devB" | grep -qE '(^| )usb( |$)'; then
+    ok "mit Stick steht /dev/usb im Verzeichnis ($devB)"
+else
+    bad "mit Stick fehlt /dev/usb im Verzeichnis: $devB"
+fi
 
 # ================================== 8. abziehen im Betrieb
 
