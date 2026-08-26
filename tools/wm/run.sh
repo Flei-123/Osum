@@ -181,7 +181,7 @@ done
 # Und die Gegenprobe zum Pruefer: legt man WM auf die Seite des
 # Rahmenpuffers, MUSS er anschlagen.
 GG="$TMPD/kernel-gg"; mkdir -p "$GG"; cp kernel/*.fi "$GG/"
-sed -i 's/^const WM_OFF: u64 = 0x3D000/const WM_OFF: u64 = 0x3C000/' "$GG/kstate.fi"
+sed -i 's/^const WM_OFF: u64 = 0x1E000/const WM_OFF: u64 = 0x3C000/' "$GG/kstate.fi"
 gg=$(python3 tools/kernel/karte.py "$GG" 2>&1)
 if [ $? -ne 0 ] && printf '%s' "$gg" | grep -q 'KOLLISION'; then
     ok "mit WM_OFF auf 0x3C000 findet der Pruefer die Kollision mit FB"
