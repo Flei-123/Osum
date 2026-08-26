@@ -169,7 +169,7 @@ import fb
 export {
     probe, ready, cur_profile, set_profile, apply, caps, value,
     idle_wait, note_activity, tick,
-    set_bright, blank, unblank, screen_tick, scale_rgb, bright,
+    set_bright, blank, unblank, screen_tick, screen_work, scale_rgb, bright,
     PW_BRIGHT, PW_BLANKED, PW_BLANKS, PW_LASTACT, PW_BLANKAFTER,
     temp_c, temp_ok, throttle_check,
     perfctl_word, hwp_word, misc_word, ratio_of,
@@ -722,6 +722,10 @@ fn throttle_check(state: u64) {
 // herum ist es richtig, und so herum macht es jedes Unix.
 fn idle_wait(state: u64, allow: bool) {
     bump(state, PW_IDLERUNS)
+    // Erst die Arbeit, die der Zeitgeber angemeldet hat -- danach wird
+    // geschlafen. Anders herum laege der Bildschirm eine Aufweckung lang
+    // falsch.
+    screen_work(state)
     let me: u64 = cpu.here(state)
     if allow && (g(state, PW_CAPS) & C_MONITOR) != 0 {
         // Jeder Kern bekommt eine eigene Zeile. Zwei Kerne auf derselben
@@ -761,10 +765,12 @@ fn idle_wait(state: u64, allow: bool) {
 // den Rahmenpuffer kennt. `note_activity` wird von der Tastatur und dem
 // Zeigegeraet gerufen, `tick` vom Zeitgeber.
 
+// Wird aus dem Tastatur- und dem Maus-Unterbrechungspfad gerufen, also
+// gilt hier dasselbe wie bei `screen_tick`: anmelden, nicht malen.
 fn note_activity(state: u64) {
     s(state, PW_LASTACT, kstate.get(state, kstate.TICKS))
     if g(state, PW_BLANKED) != 0 {
-        unblank(state)
+        s(state, PW_BLANKWANT, 2)
     }
 }
 
@@ -884,6 +890,10 @@ fn set_bright(state: u64, pct: u64) {
 // Ein Bildschirm, der nach dem Aufwecken auf 100 statt auf den 40
 // Prozent steht, die der Nutzer eingestellt hatte, ist kaputt.
 const PW_BEFORE: u64 = 264 + 512 // hinter den monitor-Zeilen
+// WAS DER ZEITGEBER WILL, ABER NICHT SELBST TUN DARF.
+// 0 = nichts, 1 = abschalten, 2 = wieder anschalten. Warum das ein
+// Merkzeichen ist und keine Tat, steht bei `screen_tick`.
+const PW_BLANKWANT: u64 = 784
 
 fn blank(state: u64) {
     if g(state, PW_BLANKED) != 0 {
@@ -926,8 +936,24 @@ fn unblank(state: u64) {
 // Die Frist steht in PW_BLANKAFTER und haengt am Profil -- ein Laptop im
 // Sparbetrieb schaltet frueher ab als einer am Netz, und genau das ist
 // der Sinn der drei Profile. 0 heisst "nie".
+// DER ZEITGEBER SETZT NUR EIN MERKZEICHEN. GEMALT WIRD WOANDERS.
+//
+// Das ist gemessen und nicht ueberlegt. Die erste Fassung rief hier
+// direkt `blank()`, und `blank()` rechnet den GANZEN Bildschirm um --
+// bei 800 mal 600 sind das 480.000 Bildpunkte, je einmal gelesen und
+// einmal geschrieben, IM UNTERBRECHUNGSPFAD. Unter TCG dauert das lange
+// genug, dass die Maschine daran stehenbleibt: `tools/gfx/run.sh` hat
+// den Lauf mit der Shell auf dem Rahmenpuffer mit Beendigungscode 124
+// beendet -- Zeitlimit -- statt mit 21.
+//
+// Ein Unterbrechungspfad hat kurz zu sein. Er stellt hier fest, DASS der
+// Bildschirm aus soll, und `pwr.idle_wait` tut es -- in Aufgabenkontext,
+// wo Zeit da ist, und genau dann, wenn ohnehin nichts zu tun ist.
 fn screen_tick(state: u64) {
     if g(state, PW_BLANKED) != 0 {
+        return
+    }
+    if g(state, PW_BLANKWANT) != 0 {
         return
     }
     let after: u64 = g(state, PW_BLANKAFTER)
@@ -937,6 +963,22 @@ fn screen_tick(state: u64) {
     let now: u64 = kstate.get(state, kstate.TICKS)
     let last: u64 = g(state, PW_LASTACT)
     if now > last && now -% last >= after {
+        s(state, PW_BLANKWANT, 1)
+    }
+}
+
+// Was der Zeitgeber (oder die Tastatur) angemeldet hat, wird HIER
+// ausgefuehrt: im Leerlauf, mit gewoehnlichem Stapel und ohne dass eine
+// Unterbrechung darauf wartet.
+fn screen_work(state: u64) {
+    let want: u64 = g(state, PW_BLANKWANT)
+    if want == 0 {
+        return
+    }
+    s(state, PW_BLANKWANT, 0)
+    if want == 1 {
         blank(state)
+    } else {
+        unblank(state)
     }
 }
