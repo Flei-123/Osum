@@ -1,0 +1,256 @@
+// kernel/user/k16.fi -- RUNDE K16: was Ring 3 von der Dateiart-Tabelle
+// und vom Ausleger sieht.
+//
+// Dasselbe Muster wie `posix.fi` (Runde K4) und `unix.fi` (Runde K9): ein
+// Programm auf der Platte, das die neuen Aufrufe MACHT und jede Antwort
+// als eine Zeile meldet, die der Testlaeufer auf dem Wirt gegen eine
+// Erwartung haelt. Nichts hier prueft sich selbst -- geprueft wird
+// draussen, gegen Zahlen, die vorher aufgeschrieben wurden
+// (`tools/k16/run.sh`).
+//
+// Die Dateien, die es dafuer braucht, legt der Wirt ins Plattenabbild:
+//
+//   /bin/hello     ein ELF -- magische Zahl 0x7F E L F
+//   /p.fi          Firn-Quelltext, keine magische Zahl
+//   /q.txt         Text
+//   /tarn.fi       heisst `.fi`, ist aber ein ELF. DER FALL, AN DEM SICH
+//                  Inhalt und Endung UNTERSCHEIDEN.
+//   /fremd.zzz     weder magische Zahl noch bekannte Endung
+//   /s1.sh         `#!/bin/echo ausleger` -- ein Skript mit Ausleger
+//   /r1.sh         `#!/r2.sh`, und /r2.sh ist `#!/r1.sh` -- im Kreis
+
+profile kernel
+
+import ulib
+
+export { u_start }
+
+const SYS_FTYPE: u64 = 1900
+const SYS_FOPEN: u64 = 1901
+const SYS_FLIST: u64 = 1902
+const SYS_FREG: u64 = 1903
+
+// Der Satz aus `kernel/ftype.fi`, hier ein zweites Mal -- wie `mkfs.py`
+// das Plattenformat ein zweites Mal fuehrt. Zwei Fassungen, die
+// auseinanderlaufen, fallen auf.
+const R_USED: u64 = 0
+const R_ACTION: u64 = 8
+const R_MAGOFF: u64 = 16
+const R_MAGLEN: u64 = 24
+const R_MAGIC: u64 = 32
+const R_EXT: u64 = 48
+const R_PROG: u64 = 64
+const R_LABEL: u64 = 112
+const SLOT: u64 = 128
+
+fn sagen(name: u64, wert: u64) {
+    var k: [u8; 6] = "k16: \0"
+    var g: [u8; 4] = " = \0"
+    ulib.say((&k[0]) as u64)
+    ulib.say(name)
+    ulib.say((&g[0]) as u64)
+    ulib.sayn(wert as u64)
+    ulib.nl()
+}
+
+fn sagen_text(name: u64, wert: u64) {
+    var k: [u8; 6] = "k16: \0"
+    var g: [u8; 4] = " = \0"
+    ulib.say((&k[0]) as u64)
+    ulib.say(name)
+    ulib.say((&g[0]) as u64)
+    ulib.say(wert)
+    ulib.nl()
+}
+
+// Vorzeichenbehaftet melden: die Aufrufe geben negative Fehler zurueck,
+// und -8 muss als -8 in der Ausgabe stehen und nicht als 2^64-8.
+fn sagen_i(name: u64, wert: u64) {
+    var k: [u8; 6] = "k16: \0"
+    var g: [u8; 4] = " = \0"
+    var m: [u8; 2] = "-\0"
+    ulib.say((&k[0]) as u64)
+    ulib.say(name)
+    ulib.say((&g[0]) as u64)
+    if ulib.bad(wert) {
+        ulib.say((&m[0]) as u64)
+        ulib.sayn(0 -% wert)
+    } else {
+        ulib.sayn(wert)
+    }
+    ulib.nl()
+}
+
+fn u_start(args: u64) -> u64 {
+    var satz: [u8; 128] = [0 as u8; 128]
+    let rec: u64 = (&satz[0]) as u64
+
+    // ZWEITE BETRIEBSART: `k16 open <pfad>` ruft `SYS_OSUM_FOPEN` und
+    // meldet, was dabei herauskam. Damit misst der Testlaeufer den
+    // Doppelklick auf eine `.fi` -- einmal auf eine, die uebersetzt, und
+    // einmal auf eine, die es nicht tut. Das MUSS sich unterscheiden.
+    if ulib.arg_count(args) >= 3 {
+        var w_open: [u8; 5] = "open\0"
+        if ulib.streq(ulib.arg_at(args, 1), (&w_open[0]) as u64) {
+            var argv0: [u64; 2] = [0; 2]
+            var n_op: [u8; 8] = "fopen\0\0\0"
+            let pid: u64 = ulib.sys(SYS_FOPEN, ulib.arg_at(args, 2),
+                (&argv0[0]) as u64, 0)
+            sagen_i((&n_op[0]) as u64, pid)
+            if !ulib.bad(pid) {
+                var n_opc: [u8; 9] = "fopen_c\0\0"
+                sagen((&n_opc[0]) as u64, ulib.wait_code(pid))
+            }
+            var f2: [u8; 12] = "k16: fertig\0"
+            ulib.say((&f2[0]) as u64)
+            ulib.nl()
+            return 0
+        }
+    }
+
+    // ------------------------------------------------ 1. die Einordnung
+    var p_hello: [u8; 11] = "/bin/hello\0"
+    var p_fi: [u8; 6] = "/p.fi\0"
+    var p_txt: [u8; 7] = "/q.txt\0"
+    var p_tarn: [u8; 9] = "/tarn.fi\0"
+    var p_fremd: [u8; 11] = "/fremd.zzz\0"
+    var p_s1: [u8; 7] = "/s1.sh\0"
+    var p_r1: [u8; 7] = "/r1.sh\0"
+    var p_weg: [u8; 12] = "/gibtsnicht\0"
+
+    var n_elf: [u8; 9] = "art_elf\0\0"
+    var n_fi: [u8; 7] = "art_fi\0"
+    var n_txt: [u8; 8] = "art_txt\0"
+    var n_tarn: [u8; 9] = "art_tarn\0"
+    var n_fremd: [u8; 10] = "art_fremd\0"
+    var n_weg: [u8; 8] = "art_weg\0"
+
+    let a_elf: u64 = ulib.sys(SYS_FTYPE, (&p_hello[0]) as u64, rec, SLOT)
+    sagen_i((&n_elf[0]) as u64, a_elf)
+    var n_elf_l: [u8; 11] = "art_elf_l\0\0"
+    sagen_text((&n_elf_l[0]) as u64, rec + R_LABEL)
+    var n_elf_a: [u8; 11] = "art_elf_a\0\0"
+    sagen((&n_elf_a[0]) as u64, ulib_get(rec + R_ACTION))
+    var n_elf_m: [u8; 11] = "art_elf_m\0\0"
+    sagen((&n_elf_m[0]) as u64, ulib_get(rec + R_MAGLEN))
+
+    let a_fi: u64 = ulib.sys(SYS_FTYPE, (&p_fi[0]) as u64, rec, SLOT)
+    sagen_i((&n_fi[0]) as u64, a_fi)
+    var n_fi_l: [u8; 10] = "art_fi_l\0\0"
+    sagen_text((&n_fi_l[0]) as u64, rec + R_LABEL)
+    var n_fi_p: [u8; 10] = "art_fi_p\0\0"
+    sagen_text((&n_fi_p[0]) as u64, rec + R_PROG)
+    var n_fi_e: [u8; 10] = "art_fi_e\0\0"
+    sagen_text((&n_fi_e[0]) as u64, rec + R_EXT)
+
+    let a_txt: u64 = ulib.sys(SYS_FTYPE, (&p_txt[0]) as u64, rec, SLOT)
+    sagen_i((&n_txt[0]) as u64, a_txt)
+    var n_txt_p: [u8; 11] = "art_txt_p\0\0"
+    sagen_text((&n_txt_p[0]) as u64, rec + R_PROG)
+
+    // DER FALL, AN DEM SICH DIE BEIDEN WEGE UNTERSCHEIDEN. `/tarn.fi`
+    // heisst wie Firn-Quelltext und IST ein Programm. Der Inhalt geht
+    // vor, also muss hier dieselbe Art herauskommen wie bei /bin/hello.
+    let a_tarn: u64 = ulib.sys(SYS_FTYPE, (&p_tarn[0]) as u64, rec, SLOT)
+    sagen_i((&n_tarn[0]) as u64, a_tarn)
+    var n_tarn_l: [u8; 12] = "art_tarn_l\0\0"
+    sagen_text((&n_tarn_l[0]) as u64, rec + R_LABEL)
+
+    sagen_i((&n_fremd[0]) as u64,
+        ulib.sys(SYS_FTYPE, (&p_fremd[0]) as u64, rec, SLOT))
+    sagen_i((&n_weg[0]) as u64,
+        ulib.sys(SYS_FTYPE, (&p_weg[0]) as u64, rec, SLOT))
+
+    // ---------------------------------------------- 2. die Tabelle lesen
+    var n_tab: [u8; 9] = "tab_anz\0\0"
+    var i: u64 = 0
+    var anz: u64 = 0
+    while i < 32 {
+        if !ulib.bad(ulib.sys(SYS_FLIST, i, rec, SLOT)) {
+            anz = anz + 1
+        }
+        i = i + 1
+    }
+    sagen((&n_tab[0]) as u64, anz)
+    var n_tab_end: [u8; 9] = "tab_end\0\0"
+    sagen_i((&n_tab_end[0]) as u64, ulib.sys(SYS_FLIST, 31, rec, SLOT))
+
+    // -------------------------------------------- 3. einen Eintrag setzen
+    //
+    // `.zzz` bekommt `/bin/cat`. Danach MUSS `/fremd.zzz` eine Art haben
+    // -- und vorher hatte es keine. Das ist die Gegenprobe zur
+    // Gegenprobe: die Tabelle wirkt wirklich, und sie ist nicht fest
+    // verdrahtet.
+    var k: u64 = 0
+    while k < SLOT {
+        satz[k as usize] = 0 as u8
+        k = k + 1
+    }
+    var e_zzz: [u8; 5] = ".zzz\0"
+    var p_cat: [u8; 9] = "/bin/cat\0"
+    var l_zzz: [u8; 5] = "zzz\0\0"
+    ulib.strcpy(rec + R_EXT, (&e_zzz[0]) as u64)
+    ulib.strcpy(rec + R_PROG, (&p_cat[0]) as u64)
+    ulib.strcpy(rec + R_LABEL, (&l_zzz[0]) as u64)
+    ulib_put(rec + R_ACTION, 2) // A_OPEN
+    ulib_put(rec + R_USED, 1)
+    var n_reg: [u8; 8] = "reg_nr\0\0"
+    sagen_i((&n_reg[0]) as u64, ulib.sys(SYS_FREG, rec, SLOT, 0))
+    var n_reg2: [u8; 11] = "reg_danach\0"
+    let a2: u64 = ulib.sys(SYS_FTYPE, (&p_fremd[0]) as u64, rec, SLOT)
+    sagen_i((&n_reg2[0]) as u64, a2)
+    var n_reg3: [u8; 11] = "reg_prog\0\0\0"
+    sagen_text((&n_reg3[0]) as u64, rec + R_PROG)
+    var n_reg4: [u8; 9] = "reg_kurz\0"
+    sagen_i((&n_reg4[0]) as u64, ulib.sys(SYS_FREG, rec, 64, 0))
+
+    // -------------------------------------------------- 4. `fopen`
+    var argv: [u64; 4] = [0; 4]
+    var n_op1: [u8; 9] = "open_elf\0"
+    let pid1: u64 = ulib.sys(SYS_FOPEN, (&p_hello[0]) as u64,
+        (&argv[0]) as u64, 0)
+    sagen_i((&n_op1[0]) as u64, pid1)
+    if !ulib.bad(pid1) {
+        var n_op1c: [u8; 11] = "open_elf_c\0"
+        sagen((&n_op1c[0]) as u64, ulib.wait_code(pid1))
+    }
+    var n_op2: [u8; 11] = "open_fremd\0"
+    sagen_i((&n_op2[0]) as u64, ulib.sys(SYS_FOPEN,
+        (&p_weg[0]) as u64, (&argv[0]) as u64, 0))
+
+    // -------------------------------------------------- 5. der Ausleger
+    //
+    // `/s1.sh` ist `#!/bin/echo ausleger`. Was `echo` ausgibt, sagt
+    // ALLES: es muss `ausleger /s1.sh` sein -- der Ausleger, sein
+    // Argument aus der ersten Zeile und der Pfad des Skripts, in dieser
+    // Reihenfolge, und das urspruengliche argv[0] gefallen.
+    var n_sh: [u8; 9] = "shebang\0\0"
+    let pid2: u64 = ulib.sys(ulib.SYS_EXEC, (&p_s1[0]) as u64,
+        (&argv[0]) as u64, 0)
+    sagen_i((&n_sh[0]) as u64, pid2)
+    if !ulib.bad(pid2) {
+        var n_shc: [u8; 10] = "shebang_c\0"
+        sagen((&n_shc[0]) as u64, ulib.wait_code(pid2))
+    }
+    // Im Kreis: -ELOOP (40), und NICHTS ist gestartet.
+    var n_loop: [u8; 13] = "shebang_ring\0"
+    sagen_i((&n_loop[0]) as u64, ulib.sys(ulib.SYS_EXEC,
+        (&p_r1[0]) as u64, (&argv[0]) as u64, 0))
+    // Und eine Datei, die weder `#!` noch ELF ist, bleibt, was sie war.
+    var n_kein: [u8; 14] = "kein_programm\0"
+    sagen_i((&n_kein[0]) as u64, ulib.sys(ulib.SYS_EXEC,
+        (&p_fi[0]) as u64, (&argv[0]) as u64, 0))
+
+    var fertig: [u8; 12] = "k16: fertig\0"
+    ulib.say((&fertig[0]) as u64)
+    ulib.nl()
+    return 0
+}
+
+fn ulib_get(p: u64) -> u64 {
+    return __mmio_read64(p as *mut u64)
+}
+
+fn ulib_put(p: u64, v: u64) {
+    __mmio_write64(p as *mut u64, v)
+}

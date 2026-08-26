@@ -157,6 +157,26 @@
 #      `nofocus` (die Taste kommt beim falschen Fenster an), `nomouse`,
 #      `nompoll` und der Lauf ganz ohne das Wort `wm`.
 #
+#  22. DER UEBERSETZER LAEUFT AUF DEM SYSTEM SELBST (tools/k16/run.sh,
+#      Runde K16). `firnc` -- der in Firn geschriebene Uebersetzer --
+#      liest auf OSUM eine `.fi` von der Platte, uebersetzt sie und
+#      schreibt eine `.s` dorthin zurueck; `fas`, ein Assembler und
+#      Binder in Firn (kernel/user/fas.fi), macht daraus unmittelbar ein
+#      ELF -- ohne `as`, ohne `ld`, die es auf diesem System nicht gibt.
+#      Das Programm LAEUFT dann auf Osum. Und die Steigerung davon: was
+#      Osum erzeugt, ist ZEICHENGLEICH mit dem, was derselbe Uebersetzer
+#      auf Linux aus derselben Quelle macht -- der Fixpunktgedanke von
+#      Firns Runde 31, eine Ebene hoeher. Dazu die Schicht unter dem
+#      Doppelklick: eine Tabelle "Dateiart -> womit oeffnen" im KERN
+#      (kernel/ftype.fi, Erkennung am Inhalt UND an der Endung, Inhalt
+#      geht vor) und `#!` in `execve`. Gegenproben: `nostackgrow` (der
+#      Stapel waechst nicht -- der Uebersetzer MUSS an einem
+#      Seitenfehler sterben), `nobigmem` (die grosse Arena ist aus), eine
+#      ANDERE Quelle (darf NICHT zeichengleich herauskommen), ein
+#      unbekannter Befehl im Assembler, eine `.s` ohne `_start`, ein
+#      Sprung ins Nichts, ein `#!` im Kreis und eine `.fi`, die nicht
+#      uebersetzt -- die darf NICHT als Erfolg gemeldet werden.
+#
 # Kein '|| true', kein Verschlucken von Beendigungscodes.
 set -uo pipefail
 
@@ -294,6 +314,13 @@ lauf "17. die Oberflaeche: Maus, Fensterserver, TrueType (tools/wm/run.sh, Runde
 
 lauf "18. ein Wirt fuer fremde Prozessoren: AMD-V, verschachtelte Seitentabellen, Gaeste (tools/hv/run.sh, Runde K12)" \
      tools/hv/run.sh hv '^HV:|^        (bench|exits|cpu):'
+
+# ABSCHNITT 22 STEHT AM ENDE DER ABSCHNITTSLISTE UND VOR DER SCHLUSSBILANZ.
+# Zweimal an einem Tag hat ein Skript, das bis zum Dateiende reichte, die
+# Bilanz mitgerissen -- danach lief der Test durch und sagte nicht mehr,
+# ob er bestanden hat.
+lauf "22. der Uebersetzer laeuft auf dem System selbst, und eine Datei weiss, womit man sie oeffnet (tools/k16/run.sh, Runde K16)" \
+     tools/k16/run.sh k16 '^K16: |^  OK    (ZEICHENGLEICH|DAS AUF OSUM|DER DOPPELKLICK|DER AUSLEGER|DER INHALT GEHT VOR|fas uebersetzt|16 von 16)'
 
 echo
 echo "=================================================================="

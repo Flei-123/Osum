@@ -1,0 +1,2423 @@
+// kernel/user/fas.fi -- RUNDE K16: DER ASSEMBLER UND BINDER, IN FIRN.
+//
+// DAS LOCH, DAS DIESE DATEI ZUMACHT. `firnc` hoert bei einem `.s` auf: es
+// schreibt Assemblertext und ruft dann `/usr/bin/as` und `/usr/bin/ld`.
+// Auf Linux ist das vernuenftig -- die beiden sind da. Auf Osum sind sie
+// nicht da, und sie werden auch nicht da sein, denn sie sind zwei
+// Programme aus einem anderen Projekt in einer anderen Sprache. Solange
+// der Uebersetzer sie braucht, kann er auf diesem System nicht arbeiten,
+// egal wie vollstaendig der Kernel darunter ist.
+//
+// Also erzeugt dieses Programm aus dem `.s` UNMITTELBAR eine
+// ausfuehrbare Datei. Kein Objektformat dazwischen, keine
+// Verschiebungseintraege, kein Binder -- weil es nichts zu binden gibt:
+// ein Firn-Programm ist EINE Uebersetzungseinheit, alle Namen darin sind
+// innere Namen, und die Aufteilung in `.text`, `.rodata`, `.data` und
+// `.bss` macht der Uebersetzer schon. Was fehlt, ist genau zweierlei:
+// die Befehle in Oktette und die vier Abschnitte in ein ELF.
+//
+// WARUM DAS UEBERHAUPT GEHT -- DIE ZAHL, DIE ALLES ENTSCHEIDET. Ein
+// vollstaendiger x86-64-Assembler ist ein Lebenswerk: der Befehlssatz hat
+// ueber tausend Befehle und ein Dutzend Adressierungsarten. Der
+// Uebersetzer benutzt davon NICHTS. Gemessen ueber alle 52 Programme
+// dieses Userlands und ueber `firnc1` selbst (1.533.513 Zeilen
+// Assemblertext, `tools/k16/mnemonik.py`):
+//
+//     58 verschiedene Mnemoniken
+//     96 verschiedene Paare aus Mnemonik und Operandenform
+//      8 Direktiven
+//      4 Speicherausdruecke:  [reg]   [reg+N]   [rbp-N]   [rip + name]
+//
+// KEIN Indexregister, KEIN Massstab, KEIN Segment. Das ist kein
+// Assembler fuer x86-64; das ist ein Assembler fuer die Sprache, die
+// `lib/firnc1/codegen.fi` spricht, und deshalb passt er in eine Datei.
+//
+// DREI ENTSCHEIDUNGEN, DIE IHN KURZ HALTEN:
+//
+//   1. JEDER SPRUNG IST EIN rel32, JEDE VERSCHIEBUNG EIN disp32. Ein
+//      echter Assembler waehlt die kuerzeste Form und muss dafuer so
+//      lange iterieren, bis sich nichts mehr bewegt ("branch
+//      relaxation"). Hier steht die Laenge jedes Befehls nach dem ersten
+//      Blick fest, also genuegen ZWEI Durchgaenge: einer zaehlt und sammelt
+//      die Marken ein, der zweite schreibt. Der Preis sind ein paar
+//      Prozent groessere Programme, und der ist es wert.
+//   2. KEINE VERSCHIEBUNGSEINTRAEGE. Nach dem ersten Durchgang stehen die
+//      Laengen aller vier Abschnitte fest, daraus stehen ihre Adressen
+//      fest, und im zweiten Durchgang ist jede Marke eine Zahl.
+//   3. WAS NICHT VORKOMMT, WIRD ABGELEHNT -- LAUT. Ein Befehl, den dieses
+//      Programm nicht kennt, ist ein Abbruch mit Zeilennummer und Text,
+//      kein stilles Auslassen. Die Gleitkommabefehle (`movsd`, `mulsd`,
+//      `divsd`, `cvtsi2sd`, `cvtsd2ss`, `movd`) sind AUSDRUECKLICH nicht
+//      unterstuetzt: `firnc1` erzeugt sie nur fuer `f64`-Rechnung, kein
+//      Programm dieses Userlands hat eine, und ein halb richtiger
+//      SSE-Encoder waere schlimmer als keiner.
+//
+// AUFRUF:
+//     fas quelle.s -o ziel            ein Programm fuer Osum (0x40100000)
+//     fas quelle.s -o ziel --wirt     dasselbe fuer Linux (0x400000)
+//
+// DAS ABBILD, das dabei entsteht, ist Zeile fuer Zeile das, was
+// `kernel/user/user.ld` beschreibt und was `kernel/elf.fi` verlangt:
+// drei PT_LOAD, jedes auf eigenen Seiten, Kopf und Programmkoepfe INNEN
+// im ersten. Der Einsprungpunkt ist `_start`.
+
+profile kernel
+
+import ulib
+import libc.mem
+
+export { u_start }
+
+// ------------------------------------------------------- die Abschnitte
+
+const SEC_TEXT: u64 = 0
+const SEC_RODATA: u64 = 1
+const SEC_DATA: u64 = 2
+const SEC_BSS: u64 = 3
+const SEC_NONE: u64 = 4 // `.note.GNU-stack` und alles, was verfaellt
+
+// Die Operandenarten.
+const K_NONE: u64 = 0
+const K_REG: u64 = 1
+const K_MEM: u64 = 2
+const K_IMM: u64 = 3
+const K_LBL: u64 = 4
+
+// ELF
+const EHSIZE: u64 = 64
+const PHENTSIZE: u64 = 56
+const PHNUM: u64 = 3
+const HDRS: u64 = 232 // EHSIZE + PHNUM * PHENTSIZE
+const PAGE: u64 = 4096
+
+static mut src: u64 = 0
+static mut src_n: u64 = 0
+static mut pos: u64 = 0
+static mut zeile: u64 = 0
+static mut durchgang: u64 = 0
+static mut cur: u64 = 0
+static mut fehler: u64 = 0
+
+static mut len_t: u64 = 0
+static mut len_r: u64 = 0
+static mut len_d: u64 = 0
+static mut len_b: u64 = 0
+
+static mut buf_t: u64 = 0
+static mut buf_r: u64 = 0
+static mut buf_d: u64 = 0
+
+static mut adr_t: u64 = 0
+static mut adr_r: u64 = 0
+static mut adr_d: u64 = 0
+static mut adr_b: u64 = 0
+
+static mut basis: u64 = 0x40100000
+
+// Die Markentafel.
+static mut nm: u64 = 0 // Namenspool
+static mut nm_n: u64 = 0
+static mut nm_max: u64 = 0
+static mut lb_name: u64 = 0
+static mut lb_sec: u64 = 0
+static mut lb_off: u64 = 0
+static mut lb_n: u64 = 0
+static mut lb_max: u64 = 0
+static mut hb: u64 = 0
+static mut hb_n: u64 = 0
+
+// Die beiden Operanden der Zeile.
+static mut k0: u64 = 0
+static mut r0: u64 = 0
+static mut s0: u64 = 0
+static mut b0: u64 = 0
+static mut d0: u64 = 0
+static mut p0: u64 = 0 // rip-relativ?
+static mut n0: u64 = 0 // Name: Anfang im Quelltext
+static mut e0: u64 = 0 // Name: Ende
+
+static mut k1: u64 = 0
+static mut r1: u64 = 0
+static mut s1: u64 = 0
+static mut b1: u64 = 0
+static mut d1: u64 = 0
+static mut p1: u64 = 0
+static mut n1: u64 = 0
+static mut e1: u64 = 0
+
+static mut nops: u64 = 0
+
+// --------------------------------------------------------- Kleinkram
+
+fn ld8(p: u64) -> u64 {
+    return __mmio_read8(p as *mut u8) as u64
+}
+
+fn st8(p: u64, v: u64) {
+    __mmio_write8((p) as *mut u8, v as u8)
+}
+
+fn ld64(p: u64) -> u64 {
+    return __mmio_read64(p as *mut u64)
+}
+
+fn st64(p: u64, v: u64) {
+    __mmio_write64(p as *mut u64, v)
+}
+
+fn at(i: u64) -> u64 {
+    if i >= src_n {
+        return 0
+    }
+    return ld8(src + i)
+}
+
+fn ist_luecke(c: u64) -> bool {
+    return c == 32 || c == 9 || c == 13
+}
+
+// Ein Zeichen, das zu einem Namen gehoert: Buchstaben, Ziffern, `_`, `.`,
+// `$`. `.L_F1.ulib__say__bb0` ist ein Name, und `.text` ist einer.
+fn ist_namenszeichen(c: u64) -> bool {
+    if c >= 97 && c <= 122 {
+        return true
+    }
+    if c >= 65 && c <= 90 {
+        return true
+    }
+    if c >= 48 && c <= 57 {
+        return true
+    }
+    return c == 95 || c == 46 || c == 36
+}
+
+fn ist_ziffer(c: u64) -> bool {
+    return c >= 48 && c <= 57
+}
+
+// --------------------------------------------------------- Beschwerden
+
+fn sagn(v: u64) {
+    ulib.eput(text_of(v))
+}
+
+// EIN KLEINER PUFFER AUS DER HALDE UND KEIN `static`-FELD. `firnc1`
+// uebersetzt ein `static`-Feld und liest daraus, kann aber seine ADRESSE
+// nicht nehmen (docs/SELF_HOSTING.md im Firn-Repo, Abschnitt 7); beide
+// Uebersetzer muessen dieses Programm bauen koennen.
+static mut kratz: u64 = 0
+
+fn text_of(v: u64) -> u64 {
+    var i: u64 = 23
+    st8(kratz + 23, 0)
+    if v == 0 {
+        i = 22
+        st8(kratz + 22, 48)
+    }
+    var x: u64 = v
+    while x > 0 {
+        i = i - 1
+        st8(kratz + i, 48 + x % 10)
+        x = x / 10
+    }
+    return kratz + i
+}
+
+// Ein Abbruch mit Zeilennummer. DAS ist der Unterschied zwischen einem
+// Werkzeug, mit dem man arbeiten kann, und einem, das "geht nicht" sagt.
+fn oops(t: u64) {
+    var f: [u8; 12] = "fas: Zeile \0"
+    var d: [u8; 3] = ": \0"
+    ulib.eput((&f[0]) as u64)
+    sagn(zeile)
+    ulib.eput((&d[0]) as u64)
+    ulib.eput(t)
+    var nl: [u8; 2] = "\n\0"
+    ulib.eput((&nl[0]) as u64)
+    fehler = fehler + 1
+}
+
+fn oops_wort(t: u64, a: u64, b: u64) {
+    var f: [u8; 12] = "fas: Zeile \0"
+    var d: [u8; 3] = ": \0"
+    var q: [u8; 3] = " '\0"
+    var q2: [u8; 3] = "'\n\0"
+    ulib.eput((&f[0]) as u64)
+    sagn(zeile)
+    ulib.eput((&d[0]) as u64)
+    ulib.eput(t)
+    ulib.eput((&q[0]) as u64)
+    var i: u64 = a
+    while i < b {
+        put_one(at(i))
+        i = i + 1
+    }
+    ulib.eput((&q2[0]) as u64)
+    fehler = fehler + 1
+}
+
+fn put_one(c: u64) {
+    st8(kratz + 32, c)
+    st8(kratz + 33, 0)
+    ulib.eput(kratz + 32)
+}
+
+// ------------------------------------------------------- die Ausgabe
+
+fn cur_len() -> u64 {
+    if cur == SEC_TEXT {
+        return len_t
+    }
+    if cur == SEC_RODATA {
+        return len_r
+    }
+    if cur == SEC_DATA {
+        return len_d
+    }
+    if cur == SEC_BSS {
+        return len_b
+    }
+    return 0
+}
+
+fn set_len(v: u64) {
+    if cur == SEC_TEXT {
+        len_t = v
+        return
+    }
+    if cur == SEC_RODATA {
+        len_r = v
+        return
+    }
+    if cur == SEC_DATA {
+        len_d = v
+        return
+    }
+    if cur == SEC_BSS {
+        len_b = v
+    }
+}
+
+fn cur_buf() -> u64 {
+    if cur == SEC_TEXT {
+        return buf_t
+    }
+    if cur == SEC_RODATA {
+        return buf_r
+    }
+    if cur == SEC_DATA {
+        return buf_d
+    }
+    return 0
+}
+
+// Die Adresse, an der der laufende Abschnitt gerade steht.
+fn hier() -> u64 {
+    if cur == SEC_TEXT {
+        return adr_t + len_t
+    }
+    if cur == SEC_RODATA {
+        return adr_r + len_r
+    }
+    if cur == SEC_DATA {
+        return adr_d + len_d
+    }
+    if cur == SEC_BSS {
+        return adr_b + len_b
+    }
+    return 0
+}
+
+fn emit(v: u64) {
+    let n: u64 = cur_len()
+    if durchgang == 2 {
+        let b: u64 = cur_buf()
+        if b != 0 {
+            st8(b + n, v & 255)
+        }
+    }
+    set_len(n + 1)
+}
+
+fn emit16(v: u64) {
+    emit(v & 255)
+    emit((v >> 8) & 255)
+}
+
+fn emit32(v: u64) {
+    emit(v & 255)
+    emit((v >> 8) & 255)
+    emit((v >> 16) & 255)
+    emit((v >> 24) & 255)
+}
+
+fn emit64(v: u64) {
+    emit32(v & 0xFFFFFFFF)
+    emit32((v >> 32) & 0xFFFFFFFF)
+}
+
+// -------------------------------------------------------- die Marken
+
+fn hash_of(a: u64, b: u64) -> u64 {
+    var h: u64 = 14695981039346656037
+    var i: u64 = a
+    while i < b {
+        h = h ^ at(i)
+        h = h *% 1099511628211
+        i = i + 1
+    }
+    return h
+}
+
+fn name_eq(off: u64, a: u64, b: u64) -> bool {
+    var i: u64 = a
+    var p: u64 = nm + off
+    while i < b {
+        if ld8(p) != at(i) {
+            return false
+        }
+        p = p + 1
+        i = i + 1
+    }
+    return ld8(p) == 0
+}
+
+fn label_find(a: u64, b: u64) -> u64 {
+    var s: u64 = hash_of(a, b) & (hb_n - 1)
+    var k: u64 = 0
+    while k < hb_n {
+        let e: u64 = ld64(hb + s * 8)
+        if e == 0 {
+            return lb_max
+        }
+        if name_eq(ld64(lb_name + (e - 1) * 8), a, b) {
+            return e - 1
+        }
+        s = (s + 1) & (hb_n - 1)
+        k = k + 1
+    }
+    return lb_max
+}
+
+fn label_add(a: u64, b: u64, sec: u64, off: u64) {
+    if label_find(a, b) < lb_max {
+        var t: [u8; 26] = "diese Marke gibt es zwei\0\0"
+        oops_wort((&t[0]) as u64, a, b)
+        return
+    }
+    if lb_n >= lb_max {
+        var t2: [u8; 26] = "zu viele Marken in einem\0\0"
+        oops((&t2[0]) as u64)
+        return
+    }
+    if nm_n + (b - a) + 1 > nm_max {
+        var t3: [u8; 24] = "zu viele Namen in einem\0"
+        oops((&t3[0]) as u64)
+        return
+    }
+    let off_nm: u64 = nm_n
+    var i: u64 = a
+    while i < b {
+        st8(nm + nm_n, at(i))
+        nm_n = nm_n + 1
+        i = i + 1
+    }
+    st8(nm + nm_n, 0)
+    nm_n = nm_n + 1
+    st64(lb_name + lb_n * 8, off_nm)
+    st64(lb_sec + lb_n * 8, sec)
+    st64(lb_off + lb_n * 8, off)
+    lb_n = lb_n + 1
+    var s: u64 = hash_of(a, b) & (hb_n - 1)
+    while ld64(hb + s * 8) != 0 {
+        s = (s + 1) & (hb_n - 1)
+    }
+    st64(hb + s * 8, lb_n)
+}
+
+fn sec_addr(s: u64) -> u64 {
+    if s == SEC_TEXT {
+        return adr_t
+    }
+    if s == SEC_RODATA {
+        return adr_r
+    }
+    if s == SEC_DATA {
+        return adr_d
+    }
+    if s == SEC_BSS {
+        return adr_b
+    }
+    return 0
+}
+
+// Die Adresse einer Marke. Im ERSTEN Durchgang steht sie noch nicht fest
+// -- dort zaehlt nur die Laenge des Befehls, und die haengt nicht davon
+// ab. Deshalb 0.
+fn label_addr(a: u64, b: u64) -> u64 {
+    if durchgang == 1 {
+        return 0
+    }
+    let i: u64 = label_find(a, b)
+    if i >= lb_max {
+        var t: [u8; 24] = "diesen Namen gibt es n\0\0"
+        oops_wort((&t[0]) as u64, a, b)
+        return 0
+    }
+    return sec_addr(ld64(lb_sec + i * 8)) + ld64(lb_off + i * 8)
+}
+
+// ------------------------------------------------------- die Register
+
+// "ax" -> 0, "cx" -> 1, ... "di" -> 7, sonst 8.
+fn kern2(a: u64, b: u64) -> u64 {
+    if a == 97 && b == 120 {
+        return 0 // ax
+    }
+    if a == 99 && b == 120 {
+        return 1 // cx
+    }
+    if a == 100 && b == 120 {
+        return 2 // dx
+    }
+    if a == 98 && b == 120 {
+        return 3 // bx
+    }
+    if a == 115 && b == 112 {
+        return 4 // sp
+    }
+    if a == 98 && b == 112 {
+        return 5 // bp
+    }
+    if a == 115 && b == 105 {
+        return 6 // si
+    }
+    if a == 100 && b == 105 {
+        return 7 // di
+    }
+    return 8
+}
+
+fn zahl_von(a: u64, b: u64) -> u64 {
+    var v: u64 = 0
+    var i: u64 = a
+    while i < b {
+        v = v * 10 + (at(i) - 48)
+        i = i + 1
+    }
+    return v
+}
+
+// Ein Register erkennen. Zurueck: Groesse * 256 + Nummer, oder 0xFFFF.
+// Groessen: 1, 2, 4, 8, 16 (=xmm).
+fn reg_of(a: u64, b: u64) -> u64 {
+    let n: u64 = b - a
+    if n < 2 || n > 5 {
+        return 0xFFFF
+    }
+    let c0: u64 = at(a)
+    let c1: u64 = at(a + 1)
+    if n >= 4 && c0 == 120 && c1 == 109 && at(a + 2) == 109 {
+        let v: u64 = zahl_von(a + 3, b)
+        if v > 15 {
+            return 0xFFFF
+        }
+        return 16 * 256 + v
+    }
+    if c0 == 114 {
+        if ist_ziffer(c1) {
+            // r8 .. r15, mit den Endungen d/w/b
+            var e: u64 = b
+            var gr: u64 = 8
+            let letzt: u64 = at(b - 1)
+            if letzt == 100 {
+                gr = 4
+                e = b - 1
+            } else {
+                if letzt == 119 {
+                    gr = 2
+                    e = b - 1
+                } else {
+                    if letzt == 98 {
+                        gr = 1
+                        e = b - 1
+                    }
+                }
+            }
+            var i: u64 = a + 1
+            while i < e {
+                if !ist_ziffer(at(i)) {
+                    return 0xFFFF
+                }
+                i = i + 1
+            }
+            let v: u64 = zahl_von(a + 1, e)
+            if v < 8 || v > 15 {
+                return 0xFFFF
+            }
+            return gr * 256 + v
+        }
+        if n == 3 {
+            let k: u64 = kern2(c1, at(a + 2))
+            if k < 8 {
+                return 8 * 256 + k
+            }
+        }
+        return 0xFFFF
+    }
+    if c0 == 101 && n == 3 {
+        let k: u64 = kern2(c1, at(a + 2))
+        if k < 8 {
+            return 4 * 256 + k
+        }
+        return 0xFFFF
+    }
+    if n == 2 {
+        let k: u64 = kern2(c0, c1)
+        if k < 8 {
+            return 2 * 256 + k
+        }
+        // al, cl, dl, bl
+        if c1 == 108 {
+            if c0 == 97 {
+                return 1 * 256 + 0
+            }
+            if c0 == 99 {
+                return 1 * 256 + 1
+            }
+            if c0 == 100 {
+                return 1 * 256 + 2
+            }
+            if c0 == 98 {
+                return 1 * 256 + 3
+            }
+        }
+        return 0xFFFF
+    }
+    if n == 3 && at(a + 2) == 108 {
+        // spl, bpl, sil, dil
+        let k: u64 = kern2(c0, c1)
+        if k >= 4 && k < 8 {
+            return 1 * 256 + k
+        }
+    }
+    return 0xFFFF
+}
+
+// --------------------------------------------------------- die Zeile
+
+fn wort_ende(a: u64, grenze: u64) -> u64 {
+    var i: u64 = a
+    while i < grenze && ist_namenszeichen(at(i)) {
+        i = i + 1
+    }
+    return i
+}
+
+fn luecke_weg(a: u64, grenze: u64) -> u64 {
+    var i: u64 = a
+    while i < grenze && ist_luecke(at(i)) {
+        i = i + 1
+    }
+    return i
+}
+
+fn lit_eq(a: u64, b: u64, p: u64) -> bool {
+    var i: u64 = a
+    var q: u64 = p
+    while i < b {
+        if ld8(q) == 0 {
+            return false
+        }
+        if at(i) != ld8(q) {
+            return false
+        }
+        q = q + 1
+        i = i + 1
+    }
+    return ld8(q) == 0
+}
+
+// ------------------------------------------------------- die Operanden
+
+// Zahl mit Vorzeichen und 0x. Liefert den Wert; `neg` sagt, ob ein Minus
+// davor stand (dann ist der Wert das Zweierkomplement).
+fn imm_von(a: u64, b: u64) -> u64 {
+    var i: u64 = a
+    var minus: bool = false
+    if i < b && at(i) == 45 {
+        minus = true
+        i = i + 1
+    }
+    var v: u64 = 0
+    if i + 1 < b && at(i) == 48 && (at(i + 1) == 120 || at(i + 1) == 88) {
+        i = i + 2
+        while i < b {
+            let c: u64 = at(i)
+            var d: u64 = 16
+            if ist_ziffer(c) {
+                d = c - 48
+            } else {
+                if c >= 97 && c <= 102 {
+                    d = c - 87
+                } else {
+                    if c >= 65 && c <= 70 {
+                        d = c - 55
+                    }
+                }
+            }
+            if d >= 16 {
+                return 0
+            }
+            v = v *% 16 +% d
+            i = i + 1
+        }
+    } else {
+        while i < b {
+            if !ist_ziffer(at(i)) {
+                return 0
+            }
+            v = v *% 10 +% (at(i) - 48)
+            i = i + 1
+        }
+    }
+    if minus {
+        return 0 -% v
+    }
+    return v
+}
+
+// Einen Operanden lesen. `nr` ist 0 oder 1.
+fn operand(a: u64, b: u64, nr: u64) {
+    var i: u64 = luecke_weg(a, b)
+    var groesse: u64 = 0
+    // "qword ptr [", "dword ptr [", "word ptr [", "byte ptr ["
+    let w: u64 = wort_ende(i, b)
+    if w > i {
+        var qw: [u8; 6] = "qword\0"
+        var dw: [u8; 6] = "dword\0"
+        var ww: [u8; 5] = "word\0"
+        var bw: [u8; 5] = "byte\0"
+        var xw: [u8; 8] = "xmmword\0"
+        if lit_eq(i, w, (&qw[0]) as u64) {
+            groesse = 8
+        }
+        if lit_eq(i, w, (&dw[0]) as u64) {
+            groesse = 4
+        }
+        if lit_eq(i, w, (&ww[0]) as u64) {
+            groesse = 2
+        }
+        if lit_eq(i, w, (&bw[0]) as u64) {
+            groesse = 1
+        }
+        if lit_eq(i, w, (&xw[0]) as u64) {
+            groesse = 16
+        }
+        if groesse != 0 {
+            i = luecke_weg(w, b)
+            let w2: u64 = wort_ende(i, b)
+            var pw: [u8; 4] = "ptr\0"
+            if !lit_eq(i, w2, (&pw[0]) as u64) {
+                var t: [u8; 20] = "'ptr' fehlt hier\0\0\0\0"
+                oops((&t[0]) as u64)
+                return
+            }
+            i = luecke_weg(w2, b)
+        }
+    }
+    if i < b && at(i) == 91 {
+        mem_operand(i + 1, b, nr, groesse)
+        return
+    }
+    if groesse != 0 {
+        var t2: [u8; 23] = "nach 'ptr' fehlt '['\0\0\0"
+        oops((&t2[0]) as u64)
+        return
+    }
+    let we: u64 = wort_ende(i, b)
+    if we > i {
+        let rg: u64 = reg_of(i, we)
+        if rg != 0xFFFF {
+            setz(nr, K_REG, rg & 255, (rg >> 8) & 255, 0, 0, 0, i, we)
+            return
+        }
+        if ist_ziffer(at(i)) {
+            setz(nr, K_IMM, 0, 0, 0, imm_von(i, we), 0, i, we)
+            return
+        }
+        setz(nr, K_LBL, 0, 0, 0, 0, 0, i, we)
+        return
+    }
+    if i < b && at(i) == 45 {
+        let we2: u64 = wort_ende(i + 1, b)
+        setz(nr, K_IMM, 0, 0, 0, imm_von(i, we2), 0, i, we2)
+        return
+    }
+    var t3: [u8; 20] = "Operand unklar\0\0\0\0\0\0"
+    oops((&t3[0]) as u64)
+}
+
+// `[rbp-40]`, `[rax]`, `[rax+8]`, `[rip + name]`
+fn mem_operand(a: u64, b: u64, nr: u64, groesse: u64) {
+    var i: u64 = luecke_weg(a, b)
+    let w: u64 = wort_ende(i, b)
+    var rip: [u8; 4] = "rip\0"
+    if lit_eq(i, w, (&rip[0]) as u64) {
+        var j: u64 = luecke_weg(w, b)
+        if j < b && at(j) == 43 {
+            j = luecke_weg(j + 1, b)
+        }
+        let ne: u64 = wort_ende(j, b)
+        setz(nr, K_MEM, 0, groesse, 0, 0, 1, j, ne)
+        return
+    }
+    let rg: u64 = reg_of(i, w)
+    if rg == 0xFFFF || (rg >> 8) != 8 {
+        var t: [u8; 30] = "kein Grundregister in [ ]\0\0\0\0\0"
+        oops_wort((&t[0]) as u64, i, w)
+        return
+    }
+    var j2: u64 = luecke_weg(w, b)
+    var d: u64 = 0
+    if j2 < b && at(j2) != 93 {
+        let vz: u64 = at(j2)
+        j2 = luecke_weg(j2 + 1, b)
+        let ze: u64 = wort_ende(j2, b)
+        let v: u64 = imm_von(j2, ze)
+        if vz == 45 {
+            d = 0 -% v
+        } else {
+            d = v
+        }
+    }
+    setz(nr, K_MEM, rg & 255, groesse, rg & 255, d, 0, 0, 0)
+}
+
+fn setz(nr: u64, k: u64, r: u64, s: u64, bb: u64, d: u64, p: u64,
+    na: u64, ne: u64) {
+    if nr == 0 {
+        k0 = k
+        r0 = r
+        s0 = s
+        b0 = bb
+        d0 = d
+        p0 = p
+        n0 = na
+        e0 = ne
+        return
+    }
+    k1 = k
+    r1 = r
+    s1 = s
+    b1 = bb
+    d1 = d
+    p1 = p
+    n1 = na
+    e1 = ne
+}
+
+// --------------------------------------------------------- Kodierung
+
+fn rex(w: bool, r: u64, x: u64, bb: u64, zwang: bool) {
+    var v: u64 = 0x40
+    if w {
+        v = v | 8
+    }
+    if r >= 8 {
+        v = v | 4
+    }
+    if x >= 8 {
+        v = v | 2
+    }
+    if bb >= 8 {
+        v = v | 1
+    }
+    if v != 0x40 || zwang {
+        emit(v)
+    }
+}
+
+// Braucht dieses 8-Bit-Register ein REX, damit es nicht ah/ch/dh/bh wird?
+fn braucht_rex8(gr: u64, r: u64) -> bool {
+    if gr != 1 {
+        return false
+    }
+    return r >= 4
+}
+
+fn modrm_reg(reg: u64, rm: u64) {
+    emit(0xC0 | ((reg & 7) << 3) | (rm & 7))
+}
+
+// Der Speicheroperand steht in b?/d?/p? -- `wo` sagt, welcher (0 oder 1).
+fn modrm_mem(reg: u64, wo: u64) {
+    var basisreg: u64 = b0
+    var disp: u64 = d0
+    var riprel: u64 = p0
+    if wo == 1 {
+        basisreg = b1
+        disp = d1
+        riprel = p1
+    }
+    if riprel != 0 {
+        emit(((reg & 7) << 3) | 5)
+        // Der Abstand zaehlt ab dem ENDE des Befehls, und das Ende ist
+        // vier Oktette hinter dem Feld, das gerade geschrieben wird --
+        // hinter diesen Befehlen steht in dieser Sprache nie noch etwas.
+        var ziel: u64 = 0
+        if wo == 0 {
+            ziel = label_addr(n0, e0)
+        } else {
+            ziel = label_addr(n1, e1)
+        }
+        emit32((ziel -% (hier() + 4)) & 0xFFFFFFFF)
+        return
+    }
+    emit(0x80 | ((reg & 7) << 3) | (basisreg & 7))
+    if (basisreg & 7) == 4 {
+        emit(0x24)
+    }
+    emit32(disp & 0xFFFFFFFF)
+}
+
+// Der REX-Anteil des Speicheroperanden: nur das Grundregister.
+fn mem_base(wo: u64) -> u64 {
+    if wo == 1 {
+        if p1 != 0 {
+            return 0
+        }
+        return b1
+    }
+    if p0 != 0 {
+        return 0
+    }
+    return b0
+}
+
+fn praefix16(gr: u64) {
+    if gr == 2 {
+        emit(0x66)
+    }
+}
+
+fn passt_i32(v: u64) -> bool {
+    if v < 0x80000000 {
+        return true
+    }
+    return v >= (0 -% 0x80000000)
+}
+
+// ---------------------------------------------------------- Befehle
+
+fn ist(a: u64, b: u64, p: u64) -> bool {
+    return lit_eq(a, b, p)
+}
+
+// Ein Sprungbefehl: 0 = keiner, sonst 0x100 + Bedingungscode, und
+// 0x1FF fuer den unbedingten.
+fn sprung_code(a: u64, b: u64) -> u64 {
+    var w_jmp: [u8; 4] = "jmp\0"
+    if ist(a, b, (&w_jmp[0]) as u64) {
+        return 0x1FF
+    }
+    var w: [u8; 4] = "je\0\0"
+    if ist(a, b, (&w[0]) as u64) {
+        return 0x184
+    }
+    var w2: [u8; 4] = "jz\0\0"
+    if ist(a, b, (&w2[0]) as u64) {
+        return 0x184
+    }
+    var w3: [u8; 4] = "jne\0"
+    if ist(a, b, (&w3[0]) as u64) {
+        return 0x185
+    }
+    var w4: [u8; 4] = "jnz\0"
+    if ist(a, b, (&w4[0]) as u64) {
+        return 0x185
+    }
+    var w5: [u8; 3] = "jb\0"
+    if ist(a, b, (&w5[0]) as u64) {
+        return 0x182
+    }
+    var w6: [u8; 3] = "jc\0"
+    if ist(a, b, (&w6[0]) as u64) {
+        return 0x182
+    }
+    var w7: [u8; 4] = "jae\0"
+    if ist(a, b, (&w7[0]) as u64) {
+        return 0x183
+    }
+    var w8: [u8; 4] = "jnc\0"
+    if ist(a, b, (&w8[0]) as u64) {
+        return 0x183
+    }
+    var w9: [u8; 4] = "jbe\0"
+    if ist(a, b, (&w9[0]) as u64) {
+        return 0x186
+    }
+    var wa: [u8; 3] = "ja\0"
+    if ist(a, b, (&wa[0]) as u64) {
+        return 0x187
+    }
+    var wb: [u8; 3] = "jl\0"
+    if ist(a, b, (&wb[0]) as u64) {
+        return 0x18C
+    }
+    var wc: [u8; 4] = "jge\0"
+    if ist(a, b, (&wc[0]) as u64) {
+        return 0x18D
+    }
+    var wd: [u8; 4] = "jle\0"
+    if ist(a, b, (&wd[0]) as u64) {
+        return 0x18E
+    }
+    var we: [u8; 3] = "jg\0"
+    if ist(a, b, (&we[0]) as u64) {
+        return 0x18F
+    }
+    var wf: [u8; 3] = "jo\0"
+    if ist(a, b, (&wf[0]) as u64) {
+        return 0x180
+    }
+    var wg: [u8; 4] = "jno\0"
+    if ist(a, b, (&wg[0]) as u64) {
+        return 0x181
+    }
+    var wh: [u8; 3] = "js\0"
+    if ist(a, b, (&wh[0]) as u64) {
+        return 0x188
+    }
+    var wi: [u8; 4] = "jns\0"
+    if ist(a, b, (&wi[0]) as u64) {
+        return 0x189
+    }
+    return 0
+}
+
+// `setCC` -> 0x100 + zweites Oktett, sonst 0.
+fn setz_code(a: u64, b: u64) -> u64 {
+    var w: [u8; 5] = "sete\0"
+    if ist(a, b, (&w[0]) as u64) {
+        return 0x194
+    }
+    var w1: [u8; 5] = "setz\0"
+    if ist(a, b, (&w1[0]) as u64) {
+        return 0x194
+    }
+    var w2: [u8; 6] = "setne\0"
+    if ist(a, b, (&w2[0]) as u64) {
+        return 0x195
+    }
+    var w3: [u8; 5] = "setb\0"
+    if ist(a, b, (&w3[0]) as u64) {
+        return 0x192
+    }
+    var w4: [u8; 5] = "setc\0"
+    if ist(a, b, (&w4[0]) as u64) {
+        return 0x192
+    }
+    var w5: [u8; 6] = "setae\0"
+    if ist(a, b, (&w5[0]) as u64) {
+        return 0x193
+    }
+    var w6: [u8; 6] = "setbe\0"
+    if ist(a, b, (&w6[0]) as u64) {
+        return 0x196
+    }
+    var w7: [u8; 5] = "seta\0"
+    if ist(a, b, (&w7[0]) as u64) {
+        return 0x197
+    }
+    var w8: [u8; 5] = "setl\0"
+    if ist(a, b, (&w8[0]) as u64) {
+        return 0x19C
+    }
+    var w9: [u8; 6] = "setge\0"
+    if ist(a, b, (&w9[0]) as u64) {
+        return 0x19D
+    }
+    var wa: [u8; 6] = "setle\0"
+    if ist(a, b, (&wa[0]) as u64) {
+        return 0x19E
+    }
+    var wb: [u8; 5] = "setg\0"
+    if ist(a, b, (&wb[0]) as u64) {
+        return 0x19F
+    }
+    var wc: [u8; 5] = "sets\0"
+    if ist(a, b, (&wc[0]) as u64) {
+        return 0x198
+    }
+    var wd: [u8; 6] = "setns\0"
+    if ist(a, b, (&wd[0]) as u64) {
+        return 0x199
+    }
+    return 0
+}
+
+// Die Rechenbefehle mit zwei Operanden: 0x100 + Grundopcode, und die
+// Erweiterung fuer die Sofortform in den naechsten acht Bit.
+fn arith_code(a: u64, b: u64) -> u64 {
+    var w: [u8; 4] = "add\0"
+    if ist(a, b, (&w[0]) as u64) {
+        return 0x10000 | (0 << 8) | 0x00
+    }
+    var w1: [u8; 3] = "or\0"
+    if ist(a, b, (&w1[0]) as u64) {
+        return 0x10000 | (1 << 8) | 0x08
+    }
+    var w2: [u8; 4] = "and\0"
+    if ist(a, b, (&w2[0]) as u64) {
+        return 0x10000 | (4 << 8) | 0x20
+    }
+    var w3: [u8; 4] = "sub\0"
+    if ist(a, b, (&w3[0]) as u64) {
+        return 0x10000 | (5 << 8) | 0x28
+    }
+    var w4: [u8; 4] = "xor\0"
+    if ist(a, b, (&w4[0]) as u64) {
+        return 0x10000 | (6 << 8) | 0x30
+    }
+    var w5: [u8; 4] = "cmp\0"
+    if ist(a, b, (&w5[0]) as u64) {
+        return 0x10000 | (7 << 8) | 0x38
+    }
+    return 0
+}
+
+// Die Ein-Operanden-Gruppe F7: 0x100 + Erweiterung.
+fn grp3_code(a: u64, b: u64) -> u64 {
+    var w: [u8; 4] = "not\0"
+    if ist(a, b, (&w[0]) as u64) {
+        return 0x102
+    }
+    var w1: [u8; 4] = "neg\0"
+    if ist(a, b, (&w1[0]) as u64) {
+        return 0x103
+    }
+    var w2: [u8; 4] = "mul\0"
+    if ist(a, b, (&w2[0]) as u64) {
+        return 0x104
+    }
+    var w3: [u8; 5] = "imul\0"
+    if ist(a, b, (&w3[0]) as u64) {
+        return 0x105
+    }
+    var w4: [u8; 4] = "div\0"
+    if ist(a, b, (&w4[0]) as u64) {
+        return 0x106
+    }
+    var w5: [u8; 5] = "idiv\0"
+    if ist(a, b, (&w5[0]) as u64) {
+        return 0x107
+    }
+    return 0
+}
+
+fn shift_code(a: u64, b: u64) -> u64 {
+    var w: [u8; 4] = "shl\0"
+    if ist(a, b, (&w[0]) as u64) {
+        return 0x104
+    }
+    var w1: [u8; 4] = "sal\0"
+    if ist(a, b, (&w1[0]) as u64) {
+        return 0x104
+    }
+    var w2: [u8; 4] = "shr\0"
+    if ist(a, b, (&w2[0]) as u64) {
+        return 0x105
+    }
+    var w3: [u8; 4] = "sar\0"
+    if ist(a, b, (&w3[0]) as u64) {
+        return 0x107
+    }
+    return 0
+}
+
+// ================================================== ein Befehl, kodiert
+
+fn tue_befehl(a: u64, m: u64, b: u64) {
+    // a..m = Mnemonik, m..b = die Operanden
+    k0 = K_NONE
+    k1 = K_NONE
+    var i: u64 = luecke_weg(m, b)
+    if i < b {
+        // Bei den beiden Ketten-Praefixen steht ein zweiter Befehl dahinter.
+        var repw: [u8; 4] = "rep\0"
+        if ist(a, m, (&repw[0]) as u64) {
+            let we: u64 = wort_ende(i, b)
+            var msb: [u8; 6] = "movsb\0"
+            var stb: [u8; 6] = "stosb\0"
+            if ist(i, we, (&msb[0]) as u64) {
+                emit(0xF3)
+                emit(0xA4)
+                return
+            }
+            if ist(i, we, (&stb[0]) as u64) {
+                emit(0xF3)
+                emit(0xAA)
+                return
+            }
+            var t: [u8; 25] = "nach 'rep' unbekannt\0\0\0\0\0"
+            oops_wort((&t[0]) as u64, i, we)
+            return
+        }
+        // In zwei Operanden trennen. Ein Komma innerhalb von [ ] kommt in
+        // dieser Sprache nicht vor, ein Komma innerhalb von " " auch nicht.
+        var komma: u64 = b
+        var j: u64 = i
+        while j < b {
+            if at(j) == 44 {
+                komma = j
+                j = b
+            } else {
+                j = j + 1
+            }
+        }
+        if komma < b {
+            operand(i, komma, 0)
+            operand(komma + 1, b, 1)
+        } else {
+            operand(i, b, 0)
+        }
+    }
+    if fehler != 0 {
+        return
+    }
+    kodiere(a, m)
+}
+
+// Die Groesse, in der dieser Befehl arbeitet.
+fn groesse_von() -> u64 {
+    if k0 == K_REG {
+        return s0
+    }
+    if k0 == K_MEM && s0 != 0 {
+        return s0
+    }
+    if k1 == K_REG {
+        return s1
+    }
+    if k1 == K_MEM && s1 != 0 {
+        return s1
+    }
+    return 8
+}
+
+// reg = das Registerfeld, rm = der andere Operand (Register oder Speicher).
+// `wo_mem` sagt, welcher der beiden der Speicheroperand ist (0, 1 oder 2 =
+// keiner).
+fn rm_form(w: bool, gr: u64, reg: u64, rmreg: u64, wo_mem: u64,
+    op: u64, zweites: u64, rex8: bool) {
+    praefix16(gr)
+    var bb: u64 = rmreg
+    if wo_mem < 2 {
+        bb = mem_base(wo_mem)
+    }
+    rex(w, reg, 0, bb, rex8)
+    if zweites != 0 {
+        emit(0x0F)
+    }
+    emit(op)
+    if wo_mem < 2 {
+        modrm_mem(reg, wo_mem)
+    } else {
+        modrm_reg(reg, rmreg)
+    }
+}
+
+fn kodiere(a: u64, m: u64) {
+    // ---- ohne Operanden
+    var w_ret: [u8; 4] = "ret\0"
+    if ist(a, m, (&w_ret[0]) as u64) {
+        emit(0xC3)
+        return
+    }
+    var w_lv: [u8; 6] = "leave\0"
+    if ist(a, m, (&w_lv[0]) as u64) {
+        emit(0xC9)
+        return
+    }
+    var w_sc: [u8; 8] = "syscall\0"
+    if ist(a, m, (&w_sc[0]) as u64) {
+        emit(0x0F)
+        emit(0x05)
+        return
+    }
+    var w_hl: [u8; 4] = "hlt\0"
+    if ist(a, m, (&w_hl[0]) as u64) {
+        emit(0xF4)
+        return
+    }
+    var w_ud: [u8; 4] = "ud2\0"
+    if ist(a, m, (&w_ud[0]) as u64) {
+        emit(0x0F)
+        emit(0x0B)
+        return
+    }
+    var w_nop: [u8; 4] = "nop\0"
+    if ist(a, m, (&w_nop[0]) as u64) {
+        emit(0x90)
+        return
+    }
+    var w_cqo: [u8; 4] = "cqo\0"
+    if ist(a, m, (&w_cqo[0]) as u64) {
+        emit(0x48)
+        emit(0x99)
+        return
+    }
+    var w_cdq: [u8; 4] = "cdq\0"
+    if ist(a, m, (&w_cdq[0]) as u64) {
+        emit(0x99)
+        return
+    }
+    // ---- Spruenge
+    let sp: u64 = sprung_code(a, m)
+    if sp != 0 {
+        if k0 != K_LBL {
+            var t: [u8; 24] = "Sprungziel ist kein Nam\0"
+            oops((&t[0]) as u64)
+            return
+        }
+        let ziel: u64 = label_addr(n0, e0)
+        if sp == 0x1FF {
+            emit(0xE9)
+            emit32((ziel -% (hier() + 4)) & 0xFFFFFFFF)
+            return
+        }
+        emit(0x0F)
+        emit(0x80 | (sp & 0x0F))
+        emit32((ziel -% (hier() + 4)) & 0xFFFFFFFF)
+        return
+    }
+    var w_call: [u8; 5] = "call\0"
+    if ist(a, m, (&w_call[0]) as u64) {
+        if k0 == K_LBL {
+            let ziel: u64 = label_addr(n0, e0)
+            emit(0xE8)
+            emit32((ziel -% (hier() + 4)) & 0xFFFFFFFF)
+            return
+        }
+        if k0 == K_REG {
+            rex(false, 0, 0, r0, false)
+            emit(0xFF)
+            modrm_reg(2, r0)
+            return
+        }
+        if k0 == K_MEM {
+            rex(false, 0, 0, mem_base(0), false)
+            emit(0xFF)
+            modrm_mem(2, 0)
+            return
+        }
+    }
+    // ---- setCC
+    let sc: u64 = setz_code(a, m)
+    if sc != 0 {
+        if k0 == K_REG {
+            rex(false, 0, 0, r0, braucht_rex8(s0, r0))
+            emit(0x0F)
+            emit(sc & 255)
+            modrm_reg(0, r0)
+            return
+        }
+        if k0 == K_MEM {
+            rex(false, 0, 0, mem_base(0), false)
+            emit(0x0F)
+            emit(sc & 255)
+            modrm_mem(0, 0)
+            return
+        }
+        var t: [u8; 24] = "setCC braucht ein Regis\0"
+        oops((&t[0]) as u64)
+        return
+    }
+    // ---- push / pop
+    var w_push: [u8; 5] = "push\0"
+    if ist(a, m, (&w_push[0]) as u64) {
+        if k0 == K_REG {
+            rex(false, 0, 0, r0, false)
+            emit(0x50 + (r0 & 7))
+            return
+        }
+        if k0 == K_MEM {
+            rex(false, 0, 0, mem_base(0), false)
+            emit(0xFF)
+            modrm_mem(6, 0)
+            return
+        }
+        if k0 == K_IMM {
+            emit(0x68)
+            emit32(d0 & 0xFFFFFFFF)
+            return
+        }
+    }
+    var w_pop: [u8; 4] = "pop\0"
+    if ist(a, m, (&w_pop[0]) as u64) {
+        if k0 == K_REG {
+            rex(false, 0, 0, r0, false)
+            emit(0x58 + (r0 & 7))
+            return
+        }
+    }
+    // ---- movabs
+    var w_mab: [u8; 7] = "movabs\0"
+    if ist(a, m, (&w_mab[0]) as u64) {
+        if k0 == K_REG && k1 == K_IMM {
+            rex(s0 == 8, 0, 0, r0, false)
+            emit(0xB8 + (r0 & 7))
+            if s0 == 8 {
+                emit64(d1)
+            } else {
+                emit32(d1 & 0xFFFFFFFF)
+            }
+            return
+        }
+        if k0 == K_REG && k1 == K_LBL {
+            let ziel: u64 = label_addr(n1, e1)
+            rex(true, 0, 0, r0, false)
+            emit(0xB8 + (r0 & 7))
+            emit64(ziel)
+            return
+        }
+    }
+    // ---- lea
+    var w_lea: [u8; 4] = "lea\0"
+    if ist(a, m, (&w_lea[0]) as u64) {
+        if k0 == K_REG && k1 == K_MEM {
+            rex(s0 == 8, r0, 0, mem_base(1), false)
+            emit(0x8D)
+            modrm_mem(r0, 1)
+            return
+        }
+        var t: [u8; 22] = "lea braucht [ ]\0\0\0\0\0\0\0"
+        oops((&t[0]) as u64)
+        return
+    }
+    // ---- movzx / movsx
+    var w_mz: [u8; 6] = "movzx\0"
+    var w_ms: [u8; 6] = "movsx\0"
+    let zx: bool = ist(a, m, (&w_mz[0]) as u64)
+    let sx: bool = ist(a, m, (&w_ms[0]) as u64)
+    if zx || sx {
+        if k0 != K_REG {
+            var t: [u8; 26] = "movzx/movsx: Ziel ist kei\0"
+            oops((&t[0]) as u64)
+            return
+        }
+        var qgr: u64 = 0
+        if k1 == K_REG {
+            qgr = s1
+        } else {
+            qgr = s1
+        }
+        if qgr == 0 {
+            var t2: [u8; 26] = "Quellgroesse steht nicht\0\0"
+            oops((&t2[0]) as u64)
+            return
+        }
+        var wo: u64 = 2
+        var rmr: u64 = r1
+        if k1 == K_MEM {
+            wo = 1
+            rmr = 0
+        }
+        if sx && qgr == 4 {
+            // movsxd
+            rm_form(s0 == 8, 0, r0, rmr, wo, 0x63, 0, false)
+            return
+        }
+        var op2: u64 = 0xB6
+        if qgr == 2 {
+            op2 = 0xB7
+        }
+        if sx {
+            op2 = op2 + 8 // BE / BF
+        }
+        let r8zwang: bool = k1 == K_REG && braucht_rex8(qgr, r1)
+        rm_form(s0 == 8, 0, r0, rmr, wo, op2, 1, r8zwang)
+        return
+    }
+    // ---- mov
+    var w_mov: [u8; 4] = "mov\0"
+    if ist(a, m, (&w_mov[0]) as u64) {
+        let gr: u64 = groesse_von()
+        if k0 == K_REG && k1 == K_REG {
+            var op: u64 = 0x89
+            if gr == 1 {
+                op = 0x88
+            }
+            let rz: bool = braucht_rex8(gr, r0) || braucht_rex8(gr, r1)
+            rm_form(gr == 8, gr, r1, r0, 2, op, 0, rz)
+            return
+        }
+        if k0 == K_REG && k1 == K_MEM {
+            var op2: u64 = 0x8B
+            if gr == 1 {
+                op2 = 0x8A
+            }
+            rm_form(gr == 8, gr, r0, 0, 1, op2, 0, braucht_rex8(gr, r0))
+            return
+        }
+        if k0 == K_MEM && k1 == K_REG {
+            var op3: u64 = 0x89
+            if gr == 1 {
+                op3 = 0x88
+            }
+            rm_form(gr == 8, gr, r1, 0, 0, op3, 0, braucht_rex8(gr, r1))
+            return
+        }
+        if k0 == K_REG && (k1 == K_IMM || k1 == K_LBL) {
+            var wert: u64 = d1
+            if k1 == K_LBL {
+                wert = label_addr(n1, e1)
+            }
+            if gr == 8 {
+                if passt_i32(wert) {
+                    rm_form(true, gr, 0, r0, 2, 0xC7, 0, false)
+                    emit32(wert & 0xFFFFFFFF)
+                    return
+                }
+                rex(true, 0, 0, r0, false)
+                emit(0xB8 + (r0 & 7))
+                emit64(wert)
+                return
+            }
+            if gr == 1 {
+                rex(false, 0, 0, r0, braucht_rex8(1, r0))
+                emit(0xB0 + (r0 & 7))
+                emit(wert & 255)
+                return
+            }
+            praefix16(gr)
+            rex(false, 0, 0, r0, false)
+            emit(0xB8 + (r0 & 7))
+            if gr == 2 {
+                emit16(wert & 0xFFFF)
+            } else {
+                emit32(wert & 0xFFFFFFFF)
+            }
+            return
+        }
+        if k0 == K_MEM && (k1 == K_IMM || k1 == K_LBL) {
+            var wert2: u64 = d1
+            if k1 == K_LBL {
+                wert2 = label_addr(n1, e1)
+            }
+            var op4: u64 = 0xC7
+            if gr == 1 {
+                op4 = 0xC6
+            }
+            rm_form(gr == 8, gr, 0, 0, 0, op4, 0, false)
+            if gr == 1 {
+                emit(wert2 & 255)
+            } else {
+                if gr == 2 {
+                    emit16(wert2 & 0xFFFF)
+                } else {
+                    emit32(wert2 & 0xFFFFFFFF)
+                }
+            }
+            return
+        }
+    }
+    // ---- add/or/and/sub/xor/cmp
+    let ar: u64 = arith_code(a, m)
+    if ar != 0 {
+        let grund: u64 = ar & 255
+        let erw: u64 = (ar >> 8) & 255
+        let gr: u64 = groesse_von()
+        if k0 == K_REG && k1 == K_REG {
+            var op: u64 = grund + 1
+            if gr == 1 {
+                op = grund
+            }
+            let rz: bool = braucht_rex8(gr, r0) || braucht_rex8(gr, r1)
+            rm_form(gr == 8, gr, r1, r0, 2, op, 0, rz)
+            return
+        }
+        if k0 == K_REG && k1 == K_MEM {
+            var op2: u64 = grund + 3
+            if gr == 1 {
+                op2 = grund + 2
+            }
+            rm_form(gr == 8, gr, r0, 0, 1, op2, 0, braucht_rex8(gr, r0))
+            return
+        }
+        if k0 == K_MEM && k1 == K_REG {
+            var op3: u64 = grund + 1
+            if gr == 1 {
+                op3 = grund
+            }
+            rm_form(gr == 8, gr, r1, 0, 0, op3, 0, braucht_rex8(gr, r1))
+            return
+        }
+        if k0 != K_NONE && (k1 == K_IMM || k1 == K_LBL) {
+            var wert: u64 = d1
+            if k1 == K_LBL {
+                wert = label_addr(n1, e1)
+            }
+            var opi: u64 = 0x81
+            if gr == 1 {
+                opi = 0x80
+            }
+            var wo: u64 = 2
+            var rmr: u64 = r0
+            if k0 == K_MEM {
+                wo = 0
+                rmr = 0
+            }
+            let rz2: bool = k0 == K_REG && braucht_rex8(gr, r0)
+            rm_form(gr == 8, gr, erw, rmr, wo, opi, 0, rz2)
+            if gr == 1 {
+                emit(wert & 255)
+            } else {
+                if gr == 2 {
+                    emit16(wert & 0xFFFF)
+                } else {
+                    emit32(wert & 0xFFFFFFFF)
+                }
+            }
+            return
+        }
+    }
+    // ---- test
+    var w_test: [u8; 5] = "test\0"
+    if ist(a, m, (&w_test[0]) as u64) {
+        let gr: u64 = groesse_von()
+        if k0 != K_NONE && (k1 == K_IMM || k1 == K_LBL) {
+            var wert: u64 = d1
+            if k1 == K_LBL {
+                wert = label_addr(n1, e1)
+            }
+            var opi: u64 = 0xF7
+            if gr == 1 {
+                opi = 0xF6
+            }
+            var wo: u64 = 2
+            var rmr: u64 = r0
+            if k0 == K_MEM {
+                wo = 0
+                rmr = 0
+            }
+            rm_form(gr == 8, gr, 0, rmr, wo, opi, 0,
+                k0 == K_REG && braucht_rex8(gr, r0))
+            if gr == 1 {
+                emit(wert & 255)
+            } else {
+                if gr == 2 {
+                    emit16(wert & 0xFFFF)
+                } else {
+                    emit32(wert & 0xFFFFFFFF)
+                }
+            }
+            return
+        }
+        if k1 == K_REG {
+            var op: u64 = 0x85
+            if gr == 1 {
+                op = 0x84
+            }
+            var wo2: u64 = 2
+            var rmr2: u64 = r0
+            if k0 == K_MEM {
+                wo2 = 0
+                rmr2 = 0
+            }
+            rm_form(gr == 8, gr, r1, rmr2, wo2, op, 0,
+                braucht_rex8(gr, r1))
+            return
+        }
+    }
+    // ---- imul mit zwei Operanden
+    var w_imul: [u8; 5] = "imul\0"
+    if ist(a, m, (&w_imul[0]) as u64) && k1 != K_NONE {
+        let gr: u64 = groesse_von()
+        var wo: u64 = 2
+        var rmr: u64 = r1
+        if k1 == K_MEM {
+            wo = 1
+            rmr = 0
+        }
+        rm_form(gr == 8, gr, r0, rmr, wo, 0xAF, 1, false)
+        return
+    }
+    // ---- inc / dec
+    var w_inc: [u8; 4] = "inc\0"
+    var w_dec: [u8; 4] = "dec\0"
+    let inc: bool = ist(a, m, (&w_inc[0]) as u64)
+    let dec: bool = ist(a, m, (&w_dec[0]) as u64)
+    if inc || dec {
+        let gr: u64 = groesse_von()
+        var erw: u64 = 0
+        if dec {
+            erw = 1
+        }
+        var opi: u64 = 0xFF
+        if gr == 1 {
+            opi = 0xFE
+        }
+        var wo: u64 = 2
+        var rmr: u64 = r0
+        if k0 == K_MEM {
+            wo = 0
+            rmr = 0
+        }
+        rm_form(gr == 8, gr, erw, rmr, wo, opi, 0, false)
+        return
+    }
+    // ---- not/neg/mul/imul/div/idiv mit EINEM Operanden
+    let g3: u64 = grp3_code(a, m)
+    if g3 != 0 && k1 == K_NONE {
+        let gr: u64 = groesse_von()
+        var opi: u64 = 0xF7
+        if gr == 1 {
+            opi = 0xF6
+        }
+        var wo: u64 = 2
+        var rmr: u64 = r0
+        if k0 == K_MEM {
+            wo = 0
+            rmr = 0
+        }
+        rm_form(gr == 8, gr, g3 & 255, rmr, wo, opi, 0, false)
+        return
+    }
+    // ---- shl / shr / sar
+    let sh: u64 = shift_code(a, m)
+    if sh != 0 {
+        let gr: u64 = groesse_von()
+        var wo: u64 = 2
+        var rmr: u64 = r0
+        if k0 == K_MEM {
+            wo = 0
+            rmr = 0
+        }
+        if k1 == K_REG {
+            // nur cl ist erlaubt
+            if r1 != 1 || s1 != 1 {
+                var t: [u8; 30] = "Schieben nur um cl oder Zahl\0\0"
+                oops((&t[0]) as u64)
+                return
+            }
+            var opd: u64 = 0xD3
+            if gr == 1 {
+                opd = 0xD2
+            }
+            rm_form(gr == 8, gr, sh & 255, rmr, wo, opd, 0, false)
+            return
+        }
+        if k1 == K_IMM {
+            var opc: u64 = 0xC1
+            if gr == 1 {
+                opc = 0xC0
+            }
+            rm_form(gr == 8, gr, sh & 255, rmr, wo, opc, 0, false)
+            emit(d1 & 255)
+            return
+        }
+    }
+    // ---- und sonst: sagen, was fehlt
+    var t: [u8; 34] = "diesen Befehl kennt fas nicht\0\0\0\0\0"
+    oops_wort((&t[0]) as u64, a, m)
+}
+
+// ====================================================== die Direktiven
+
+fn richte_aus(n: u64) {
+    let mask: u64 = n - 1
+    var l: u64 = cur_len()
+    while (l & mask) != 0 {
+        if cur == SEC_TEXT {
+            emit(0x90)
+        } else {
+            emit(0)
+        }
+        l = cur_len()
+    }
+}
+
+fn tue_direktive(a: u64, w: u64, b: u64) {
+    var d_text: [u8; 6] = ".text\0"
+    if ist(a, w, (&d_text[0]) as u64) {
+        cur = SEC_TEXT
+        return
+    }
+    var d_data: [u8; 6] = ".data\0"
+    if ist(a, w, (&d_data[0]) as u64) {
+        cur = SEC_DATA
+        return
+    }
+    var d_bss: [u8; 5] = ".bss\0"
+    if ist(a, w, (&d_bss[0]) as u64) {
+        cur = SEC_BSS
+        return
+    }
+    var d_ro: [u8; 8] = ".rodata\0"
+    if ist(a, w, (&d_ro[0]) as u64) {
+        cur = SEC_RODATA
+        return
+    }
+    var d_sec: [u8; 9] = ".section\0"
+    if ist(a, w, (&d_sec[0]) as u64) {
+        var i: u64 = luecke_weg(w, b)
+        let e: u64 = wort_ende(i, b)
+        if ist(i, e, (&d_text[0]) as u64) {
+            cur = SEC_TEXT
+            return
+        }
+        if ist(i, e, (&d_data[0]) as u64) {
+            cur = SEC_DATA
+            return
+        }
+        if ist(i, e, (&d_bss[0]) as u64) {
+            cur = SEC_BSS
+            return
+        }
+        if ist(i, e, (&d_ro[0]) as u64) {
+            cur = SEC_RODATA
+            return
+        }
+        // `.note.GNU-stack` und alles andere: verfaellt.
+        cur = SEC_NONE
+        return
+    }
+    var d_glob: [u8; 7] = ".globl\0"
+    if ist(a, w, (&d_glob[0]) as u64) {
+        return
+    }
+    var d_glob2: [u8; 8] = ".global\0"
+    if ist(a, w, (&d_glob2[0]) as u64) {
+        return
+    }
+    var d_int: [u8; 14] = ".intel_syntax\0"
+    if ist(a, w, (&d_int[0]) as u64) {
+        return
+    }
+    var d_type: [u8; 6] = ".type\0"
+    if ist(a, w, (&d_type[0]) as u64) {
+        return
+    }
+    var d_size: [u8; 6] = ".size\0"
+    if ist(a, w, (&d_size[0]) as u64) {
+        return
+    }
+    var d_file: [u8; 6] = ".file\0"
+    if ist(a, w, (&d_file[0]) as u64) {
+        return
+    }
+    var d_p2: [u8; 9] = ".p2align\0"
+    if ist(a, w, (&d_p2[0]) as u64) {
+        let i: u64 = luecke_weg(w, b)
+        let e: u64 = wort_ende(i, b)
+        let n: u64 = zahl_von(i, e)
+        if n > 12 {
+            var t: [u8; 20] = "p2align zu gross\0\0\0\0"
+            oops((&t[0]) as u64)
+            return
+        }
+        richte_aus(1 << n)
+        return
+    }
+    var d_align: [u8; 7] = ".align\0"
+    if ist(a, w, (&d_align[0]) as u64) {
+        let i: u64 = luecke_weg(w, b)
+        let e: u64 = wort_ende(i, b)
+        let n: u64 = zahl_von(i, e)
+        if n != 0 {
+            richte_aus(n)
+        }
+        return
+    }
+    var d_zero: [u8; 6] = ".zero\0"
+    var d_skip: [u8; 6] = ".skip\0"
+    if ist(a, w, (&d_zero[0]) as u64) || ist(a, w, (&d_skip[0]) as u64) {
+        let i: u64 = luecke_weg(w, b)
+        let e: u64 = wort_ende(i, b)
+        var n: u64 = zahl_von(i, e)
+        while n > 0 {
+            emit(0)
+            n = n - 1
+        }
+        return
+    }
+    var d_byte: [u8; 6] = ".byte\0"
+    if ist(a, w, (&d_byte[0]) as u64) {
+        liste(w, b, 1)
+        return
+    }
+    var d_word: [u8; 6] = ".word\0"
+    var d_short: [u8; 7] = ".short\0"
+    if ist(a, w, (&d_word[0]) as u64) || ist(a, w, (&d_short[0]) as u64) {
+        liste(w, b, 2)
+        return
+    }
+    var d_long: [u8; 6] = ".long\0"
+    if ist(a, w, (&d_long[0]) as u64) {
+        liste(w, b, 4)
+        return
+    }
+    var d_quad: [u8; 6] = ".quad\0"
+    if ist(a, w, (&d_quad[0]) as u64) {
+        liste(w, b, 8)
+        return
+    }
+    var d_asc: [u8; 7] = ".ascii\0"
+    var d_ascz: [u8; 8] = ".asciz\0\0"
+    let asc: bool = ist(a, w, (&d_asc[0]) as u64)
+    let ascz: bool = ist(a, w, (&d_ascz[0]) as u64)
+    if asc || ascz {
+        zeichenkette(w, b)
+        if ascz {
+            emit(0)
+        }
+        return
+    }
+    var t2: [u8; 34] = "diese Direktive kennt fas nicht\0\0\0"
+    oops_wort((&t2[0]) as u64, a, w)
+}
+
+fn liste(a: u64, b: u64, breite: u64) {
+    var i: u64 = luecke_weg(a, b)
+    while i < b {
+        var neg: bool = false
+        if at(i) == 45 {
+            neg = true
+        }
+        var e: u64 = i
+        if neg {
+            e = wort_ende(i + 1, b)
+        } else {
+            e = wort_ende(i, b)
+        }
+        if e == i {
+            return
+        }
+        let v: u64 = imm_von(i, e)
+        if breite == 1 {
+            emit(v & 255)
+        } else {
+            if breite == 2 {
+                emit16(v & 0xFFFF)
+            } else {
+                if breite == 4 {
+                    emit32(v & 0xFFFFFFFF)
+                } else {
+                    emit64(v)
+                }
+            }
+        }
+        i = luecke_weg(e, b)
+        if i < b && at(i) == 44 {
+            i = luecke_weg(i + 1, b)
+        } else {
+            i = b
+        }
+    }
+}
+
+fn zeichenkette(a: u64, b: u64) {
+    var i: u64 = luecke_weg(a, b)
+    if i >= b || at(i) != 34 {
+        var t: [u8; 30] = "hier fehlt eine Zeichenkette\0\0"
+        oops((&t[0]) as u64)
+        return
+    }
+    i = i + 1
+    while i < b {
+        let c: u64 = at(i)
+        if c == 34 {
+            return
+        }
+        if c == 92 {
+            i = i + 1
+            let e: u64 = at(i)
+            if e == 110 {
+                emit(10)
+            } else {
+                if e == 116 {
+                    emit(9)
+                } else {
+                    if e == 114 {
+                        emit(13)
+                    } else {
+                        if e == 48 {
+                            emit(0)
+                        } else {
+                            emit(e)
+                        }
+                    }
+                }
+            }
+            i = i + 1
+        } else {
+            emit(c)
+            i = i + 1
+        }
+    }
+    var t2: [u8; 29] = "Zeichenkette ohne Ende\0\0\0\0\0\0\0"
+    oops((&t2[0]) as u64)
+}
+
+// ========================================================= eine Zeile
+
+fn tue_zeile(a0z: u64, b: u64) {
+    var i: u64 = luecke_weg(a0z, b)
+    if i >= b {
+        return
+    }
+    let c: u64 = at(i)
+    if c == 35 {
+        return
+    }
+    if c == 47 && at(i + 1) == 47 {
+        return
+    }
+    let w: u64 = wort_ende(i, b)
+    if w > i {
+        var j: u64 = w
+        if j < b && at(j) == 58 {
+            if durchgang == 1 {
+                label_add(i, w, cur, cur_len())
+            }
+            let rest: u64 = luecke_weg(j + 1, b)
+            if rest < b {
+                tue_zeile(rest, b)
+            }
+            return
+        }
+    }
+    if c == 46 {
+        tue_direktive(i, w, b)
+        return
+    }
+    if w == i {
+        var t: [u8; 24] = "hier faengt kein Wort a\0"
+        oops((&t[0]) as u64)
+        return
+    }
+    tue_befehl(i, w, b)
+}
+
+fn durchlauf() {
+    pos = 0
+    zeile = 1
+    cur = SEC_TEXT
+    len_t = 0
+    len_r = 0
+    len_d = 0
+    len_b = 0
+    while pos < src_n {
+        var e: u64 = pos
+        while e < src_n && at(e) != 10 {
+            e = e + 1
+        }
+        tue_zeile(pos, e)
+        pos = e + 1
+        zeile = zeile + 1
+    }
+}
+
+// ============================================================== das ELF
+
+fn hoch4k(v: u64) -> u64 {
+    return (v + PAGE - 1) & 0xFFFFFFFFFFFFF000
+}
+
+fn hoch8(v: u64) -> u64 {
+    return (v + 7) & 0xFFFFFFFFFFFFFFF8
+}
+
+// Die Adresse einer Marke, gesucht ueber einen nullbeendeten Text.
+fn marke_von_text(p: u64) -> u64 {
+    var i: u64 = 0
+    while i < lb_n {
+        var q: u64 = nm + ld64(lb_name + i * 8)
+        var r: u64 = p
+        var gleich: bool = true
+        while gleich && ld8(q) != 0 && ld8(r) != 0 {
+            if ld8(q) != ld8(r) {
+                gleich = false
+            }
+            q = q + 1
+            r = r + 1
+        }
+        if gleich && ld8(q) == 0 && ld8(r) == 0 {
+            return sec_addr(ld64(lb_sec + i * 8)) + ld64(lb_off + i * 8)
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+static mut kopf: u64 = 0
+
+fn k8(off: u64, v: u64) {
+    st8(kopf + off, v & 255)
+}
+
+fn k16(off: u64, v: u64) {
+    st8(kopf + off, v & 255)
+    st8(kopf + off + 1, (v >> 8) & 255)
+}
+
+fn k32(off: u64, v: u64) {
+    k16(off, v & 0xFFFF)
+    k16(off + 2, (v >> 16) & 0xFFFF)
+}
+
+fn k64(off: u64, v: u64) {
+    k32(off, v & 0xFFFFFFFF)
+    k32(off + 4, (v >> 32) & 0xFFFFFFFF)
+}
+
+fn ph(nr: u64, flags: u64, off: u64, vaddr: u64, filesz: u64, memsz: u64) {
+    let a: u64 = EHSIZE + nr * PHENTSIZE
+    k32(a + 0, 1) // PT_LOAD
+    k32(a + 4, flags)
+    k64(a + 8, off)
+    k64(a + 16, vaddr)
+    k64(a + 24, vaddr) // p_paddr
+    k64(a + 32, filesz)
+    k64(a + 40, memsz)
+    k64(a + 48, PAGE)
+}
+
+// Der Kopf, so wie `kernel/user/user.ld` ihn erzeugt: ELF-Kopf und
+// Programmkoepfe liegen INNEN im ersten Segment (FILEHDR PHDRS), und
+// deshalb faengt `.text` bei HDRS an und nicht bei null.
+fn baue_kopf(einsprung: u64, off_r: u64, off_d: u64) {
+    var i: u64 = 0
+    while i < HDRS {
+        st8(kopf + i, 0)
+        i = i + 1
+    }
+    k8(0, 0x7F)
+    k8(1, 69) // E
+    k8(2, 76) // L
+    k8(3, 70) // F
+    k8(4, 2) // ELFCLASS64
+    k8(5, 1) // wenig zuerst
+    k8(6, 1) // Version
+    k16(16, 2) // ET_EXEC
+    k16(18, 62) // x86-64
+    k32(20, 1)
+    k64(24, einsprung)
+    k64(32, EHSIZE) // e_phoff
+    k64(40, 0) // e_shoff
+    k32(48, 0)
+    k16(52, EHSIZE)
+    k16(54, PHENTSIZE)
+    k16(56, PHNUM)
+    k16(58, 64) // e_shentsize
+    k16(60, 0)
+    k16(62, 0)
+    ph(0, 5, 0, basis, HDRS + len_t, HDRS + len_t)
+    ph(1, 4, off_r, basis + off_r, len_r, len_r)
+    let bss_a: u64 = hoch8(basis + off_d + len_d)
+    ph(2, 6, off_d, basis + off_d, len_d, (bss_a + len_b) - (basis + off_d))
+}
+
+fn schreib_alles(fd: u64, p: u64, n: u64) -> bool {
+    var at2: u64 = 0
+    while at2 < n {
+        let r: u64 = ulib.sys(ulib.SYS_WRITE, fd, p + at2, n - at2)
+        if ulib.bad(r) || r == 0 {
+            return false
+        }
+        at2 = at2 + r
+    }
+    return true
+}
+
+fn fuellen(fd: u64, n: u64) -> bool {
+    var rest: u64 = n
+    var i: u64 = 0
+    while i < 4096 {
+        st8(kratz + 256 + i, 0)
+        i = i + 1
+    }
+    while rest > 0 {
+        var k: u64 = rest
+        if k > 4096 {
+            k = 4096
+        }
+        if !schreib_alles(fd, kratz + 256, k) {
+            return false
+        }
+        rest = rest - k
+    }
+    return true
+}
+
+fn schreib_elf(ziel: u64, off_r: u64, off_d: u64) -> bool {
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, ziel, ulib.O_MAKE, 493)
+    if ulib.bad(fd) {
+        var t: [u8; 30] = "fas: Ziel laesst sich nicht \0\0"
+        var t2: [u8; 10] = "anlegen\n\0\0"
+        ulib.eput((&t[0]) as u64)
+        ulib.eput((&t2[0]) as u64)
+        return false
+    }
+    var gut: bool = schreib_alles(fd, kopf, HDRS)
+    if gut {
+        gut = schreib_alles(fd, buf_t, len_t)
+    }
+    if gut {
+        gut = fuellen(fd, off_r - (HDRS + len_t))
+    }
+    if gut && len_r > 0 {
+        gut = schreib_alles(fd, buf_r, len_r)
+    }
+    if gut {
+        gut = fuellen(fd, off_d - (off_r + len_r))
+    }
+    if gut && len_d > 0 {
+        gut = schreib_alles(fd, buf_d, len_d)
+    }
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    return gut
+}
+
+// ====================================== der eingebaute Anlauf ("crt")
+//
+// WARUM EIN BINDER EINEN ANLAUF MITBRINGT. Die 52 Programme dieses
+// Userlands werden mit `kernel/user/crt.s` gebunden, und dort stehen die
+// vier Dinge, die eine Sprache nicht ausdruecken kann: der Einsprung
+// `_start`, der Weg hinaus (`exit`), `osum_panic` fuer eine gepruefte
+// Rechnung, die ueberlaeuft, und drei Signalroutinen samt ihren Zaehlern.
+// `as` und `ld` bekommen das als zweite Objektdatei; `fas` kennt keine
+// zweite Objektdatei, weil es keine Objektdateien kennt.
+//
+// Also traegt es den Anlauf als TEXT bei sich und haengt ihn an die
+// Quelle. Das ist nicht gespart, sondern richtig: der Anlauf ist Teil des
+// Binders und nicht des Programms, genau wie `crt1.o` bei jedem anderen
+// Unix -- nur dass er hier nicht als Datei irgendwo liegt, sondern
+// nachlesbar in dieser Datei steht.
+//
+// `--crt NAME` sagt, welche Funktion `_start` rufen soll (`_F0.u_start`
+// oder `_F1.u_start`, je nach Uebersetzerstufe -- dieselbe Zahl, die
+// `ld --defsym=USER_ENTRY=` bekommt).
+static mut crt_ziel: u64 = 0
+
+fn anh(p: u64, t: u64) -> u64 {
+    var i: u64 = 0
+    while ld8(t + i) != 0 {
+        st8(p + i, ld8(t + i))
+        i = i + 1
+    }
+    return p + i
+}
+
+fn crt_text(p: u64, name: u64) -> u64 {
+    var q: u64 = p
+    var a1: [u8; 64] = "\n.text\n.globl _start\n_start:\n    xor rbp, rbp\n    mov rdi, rsp\n\0"
+    var a2: [u8; 27] = "    and rsp, -16\n    call \0"
+    var a3: [u8; 85] = "\n    mov rdi, rax\n    mov rax, 60\n    syscall\n    hlt\n.globl osum_panic\nosum_panic:\n\0"
+    var a4: [u8; 129] = "    mov rdx, rsi\n    mov rsi, rdi\n    mov rdi, 2\n    mov rax, 1\n    syscall\n    mov rdi, 70\n    mov rax, 60\n    syscall\n    hlt\n\0"
+    var a5: [u8; 133] = ".globl osum_sighandler\nosum_sighandler:\n    inc qword ptr [rip + osum_sigcount]\n    mov qword ptr [rip + osum_siglast], rdi\n    ret\n\0"
+    var a6: [u8; 136] = ".globl osum_sighandler2\nosum_sighandler2:\n    inc qword ptr [rip + osum_sigcount2]\n    mov qword ptr [rip + osum_siglast], rdi\n    ret\n\0"
+    var a7: [u8; 171] = ".globl osum_sigexit\nosum_sigexit:\n    inc qword ptr [rip + osum_sigcount]\n    mov qword ptr [rip + osum_siglast], rdi\n    add rdi, 40\n    mov rax, 60\n    syscall\n    hlt\n\0"
+    var a8: [u8; 180] = ".section .bss\n    .p2align 3\n.globl osum_sigcount\nosum_sigcount:\n    .zero 8\n.globl osum_sigcount2\nosum_sigcount2:\n    .zero 8\n.globl osum_siglast\nosum_siglast:\n    .zero 8\n.text\n\0"
+    q = anh(q, (&a1[0]) as u64)
+    q = anh(q, (&a2[0]) as u64)
+    q = anh(q, name)
+    q = anh(q, (&a3[0]) as u64)
+    q = anh(q, (&a4[0]) as u64)
+    q = anh(q, (&a5[0]) as u64)
+    q = anh(q, (&a6[0]) as u64)
+    q = anh(q, (&a7[0]) as u64)
+    q = anh(q, (&a8[0]) as u64)
+    return q
+}
+
+// ================================================================ main
+
+fn hole(n: u64) -> u64 {
+    let p: u64 = mem.map_pages(n)
+    if ulib.bad(p) || p == 0 {
+        var t: [u8; 34] = "fas: kein Speicher mehr fuer den\n\0"
+        ulib.eput((&t[0]) as u64)
+        return 0
+    }
+    var i: u64 = 0
+    while i < n {
+        st8(p + i, 0)
+        i = i + 1
+    }
+    return p
+}
+
+fn lies_datei(pfad: u64) -> bool {
+    let n: u64 = ulib.size_of(pfad)
+    if ulib.bad(n) {
+        var t: [u8; 30] = "fas: diese Quelle gibt es ni\0\0"
+        var nl: [u8; 3] = "\n\0\0"
+        ulib.eput((&t[0]) as u64)
+        ulib.eput(pfad)
+        ulib.eput((&nl[0]) as u64)
+        return false
+    }
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, pfad, 0, 0)
+    if ulib.bad(fd) {
+        var t2: [u8; 32] = "fas: die Quelle geht nicht auf\n\0"
+        ulib.eput((&t2[0]) as u64)
+        return false
+    }
+    src = hole(n + 2048) // Platz fuer den eingebauten Anlauf
+    if src == 0 {
+        return false
+    }
+    var at2: u64 = 0
+    while at2 < n {
+        let r: u64 = ulib.sys(ulib.SYS_READ, fd, src + at2, n - at2)
+        if ulib.bad(r) || r == 0 {
+            at2 = n
+        } else {
+            at2 = at2 + r
+        }
+    }
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    src_n = n
+    return true
+}
+
+fn potenz2_ueber(n: u64) -> u64 {
+    var v: u64 = 1024
+    while v < n {
+        v = v * 2
+    }
+    return v
+}
+
+fn u_start(args: u64) -> u64 {
+    kratz = mem.map_pages(8192)
+    if ulib.bad(kratz) {
+        return 3
+    }
+    let argc: u64 = ulib.arg_count(args)
+    var quelle: u64 = 0
+    var ziel: u64 = 0
+    var i: u64 = 1
+    var w_o: [u8; 3] = "-o\0"
+    var w_wirt: [u8; 7] = "--wirt\0"
+    var w_crt: [u8; 6] = "--crt\0"
+    while i < argc {
+        let p: u64 = ulib.arg_at(args, i)
+        if ulib.streq(p, (&w_o[0]) as u64) {
+            i = i + 1
+            if i < argc {
+                ziel = ulib.arg_at(args, i)
+            }
+        } else {
+            if ulib.streq(p, (&w_crt[0]) as u64) {
+                i = i + 1
+                if i < argc {
+                    crt_ziel = ulib.arg_at(args, i)
+                }
+            } else {
+            if ulib.streq(p, (&w_wirt[0]) as u64) {
+                basis = 0x400000
+            } else {
+                if quelle == 0 {
+                    quelle = p
+                }
+            }
+            }
+        }
+        i = i + 1
+    }
+    if quelle == 0 || ziel == 0 {
+        var u: [u8; 44] = "Aufruf: fas quelle.s -o ziel [--wirt]\n\0\0\0\0\0\0"
+        ulib.eput((&u[0]) as u64)
+        return 2
+    }
+    if !lies_datei(quelle) {
+        return 2
+    }
+    if crt_ziel != 0 {
+        // Er wird ANGEHAENGT und nicht vorangestellt: so bleiben die
+        // Zeilennummern in jeder Fehlermeldung die der Quelle.
+        let ende: u64 = crt_text(src + src_n, crt_ziel)
+        src_n = ende - src
+    }
+
+    // Die Tafeln. Ihre Groesse haengt an der Quelle: mehr Marken als
+    // Zeilen kann es nicht geben, und eine Zeile ist mindestens zwei
+    // Oktette lang.
+    lb_max = src_n / 8 + 256
+    nm_max = src_n / 2 + 4096
+    hb_n = potenz2_ueber(lb_max * 2)
+    lb_name = hole(lb_max * 8)
+    lb_sec = hole(lb_max * 8)
+    lb_off = hole(lb_max * 8)
+    hb = hole(hb_n * 8)
+    nm = hole(nm_max)
+    kopf = hole(HDRS + 64)
+    if lb_name == 0 || lb_sec == 0 || lb_off == 0 || hb == 0 || nm == 0 {
+        return 3
+    }
+    if kopf == 0 {
+        return 3
+    }
+
+    // ERSTER DURCHGANG: zaehlen und die Marken einsammeln. Die Adressen
+    // der Abschnitte stehen dabei noch nicht fest, und sie muessen es
+    // auch nicht -- kein Befehl dieser Sprache aendert seine LAENGE,
+    // wenn sich eine Adresse aendert. Genau darum genuegen zwei
+    // Durchgaenge und nicht n.
+    durchgang = 1
+    durchlauf()
+    if fehler != 0 {
+        return 1
+    }
+
+    // Jetzt stehen die vier Laengen fest, also auch die vier Adressen.
+    let off_r: u64 = hoch4k(HDRS + len_t)
+    let off_d: u64 = hoch4k(off_r + len_r)
+    adr_t = basis + HDRS
+    adr_r = basis + off_r
+    adr_d = basis + off_d
+    adr_b = hoch8(adr_d + len_d)
+
+    buf_t = hole(len_t + 16)
+    buf_r = hole(len_r + 16)
+    buf_d = hole(len_d + 16)
+    if buf_t == 0 {
+        return 3
+    }
+
+    // ZWEITER DURCHGANG: dasselbe noch einmal, und diesmal wird
+    // geschrieben. Dass beide Durchgaenge dieselben Laengen ergeben,
+    // wird gleich nachgerechnet -- ein Assembler, bei dem sie
+    // auseinanderlaufen, erzeugt stillen Unsinn.
+    let t1: u64 = len_t
+    let r1x: u64 = len_r
+    let d1x: u64 = len_d
+    let b1x: u64 = len_b
+    durchgang = 2
+    durchlauf()
+    if fehler != 0 {
+        return 1
+    }
+    if len_t != t1 || len_r != r1x || len_d != d1x || len_b != b1x {
+        var t: [u8; 47] = "fas: die zwei Durchgaenge sind ungleich lang\n\0\0"
+        ulib.eput((&t[0]) as u64)
+        return 4
+    }
+
+    var sname: [u8; 7] = "_start\0"
+    let einsprung: u64 = marke_von_text((&sname[0]) as u64)
+    if einsprung == 0 {
+        var t2: [u8; 34] = "fas: die Marke _start fehlt\n\0\0\0\0\0\0"
+        ulib.eput((&t2[0]) as u64)
+        return 5
+    }
+    baue_kopf(einsprung, off_r, off_d)
+    if !schreib_elf(ziel, off_r, off_d) {
+        return 6
+    }
+    return 0
+}
