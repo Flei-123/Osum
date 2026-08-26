@@ -355,6 +355,7 @@ bash tools/unix/run.sh        # Signale, Terminal, Uhr, Zufall (K9)
 bash tools/net/run.sh         # virtio-net und der TCP/IP-Stack (K8)
 bash tools/guard/run.sh       # SMEP/SMAP und das Boot-Modul (K10)
 bash tools/wm/run.sh          # Maus, Fenster, TrueType (K10)
+bash tools/hv/run.sh          # der Hypervisor: AMD-V, NPT, Gaeste (K12)
 ```
 
 Den Kernel mit Bildschirm starten und selbst hinsehen — `-vga std` ist
@@ -476,9 +477,8 @@ nachtraeglich umgeschrieben.
 | `docs/ROUNDK9.md` | Signale, Terminals, Uhr und Zufall |
 | `docs/ROUNDK10.md` | SMEP/SMAP und das Boot-Modul — die letzten zwei Punkte des Kernelwechsels |
 | `docs/ROUNDK11.md` | **man kann darauf arbeiten**: der Editor, zwanzig Werkzeuge, die Shell als Sprache |
-| `docs/ROUNDK8.md` | virtio-net und der Stack aus K3 am Kernel |
-| `docs/ROUNDK9.md` | Signale, Terminals, Uhr und Zufall |
-| `docs/ROUNDK10.md` | die Oberflaeche: Maus, Fensterserver, TrueType mit Kantenglaettung |
+| `docs/ROUNDK10W.md` | die Oberflaeche: Maus, Fensterserver, TrueType mit Kantenglaettung |
+| `docs/ROUNDK12.md` | ein Wirt fuer fremde Prozessoren: AMD-V, verschachtelte Seitentabellen, Gaeste, Gastmaschinen aus Ring 3 |
 
 `ENTFERNEN-AUS-FIRN.md` beschreibt, was im Firn-Repository geloescht
 werden muss, damit dort nichts doppelt liegt. **Ausgefuehrt ist das

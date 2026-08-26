@@ -121,7 +121,7 @@ echo "== 1. build: a kernel, and a userland of twenty-five programs =="
 # a link without `smp.s` and without that symbol stops with two undefined
 # references. `tools/osum/run.sh` already links it; these three lines are
 # the same three.
-for f in boot isr switch smp; do
+for f in boot isr switch smp hv; do
     as --64 -o "$TMPD/$f.o" "kernel/$f.s" 2>"$TMPD/as.err" \
         || { bad "$f.s does not assemble"; sed 's/^/        /' "$TMPD/as.err" | head -5; }
 done
@@ -143,7 +143,7 @@ build_stage() { # 0 = firnc0, 1 = firnc1
         --defsym=KERNEL_USER_START="_F$s.proc__user_start" \
         --defsym=KERNEL_AP_MAIN="_F$s.smp__ap_main" \
         --defsym=USER_MAIN="_F$s.u_enter" \
-        -o "$TMPD/k$s.elf" "$TMPD/boot.o" "$TMPD/isr.o" "$TMPD/switch.o" "$TMPD/smp.o" \
+        -o "$TMPD/k$s.elf" "$TMPD/boot.o" "$TMPD/isr.o" "$TMPD/switch.o" "$TMPD/smp.o" "$TMPD/hv.o" \
         "$TMPD/k$s.o" "$TMPD/u$s.o" 2>"$TMPD/ld$s.err" \
         || { bad "firnc$s: ld failed on the kernel"; return 1; }
     objcopy -O elf32-i386 "$TMPD/k$s.elf" "$TMPD/k$s.mb" 2>/dev/null
