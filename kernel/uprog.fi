@@ -51,6 +51,9 @@ const SYS_EXIT: u64 = 60
 const SYS_SPAWN: u64 = 1000
 // ROUNDE K7: die beiden, die /dev/fb braucht.
 const SYS_LSEEK: u64 = 8
+// RUNDE K18: die Energieschicht (kernel/sys.fi, Vorrat 1750..1799).
+const SYS_OSUM_PWRGET: u64 = 1750
+const SYS_OSUM_PWRSET: u64 = 1751
 // RUNDE K13. Die Nummern sind die von Linux (kernel/sys.fi).
 const SYS_FORK: u64 = 57
 const SYS_UMASK: u64 = 95
@@ -169,6 +172,13 @@ const P_WCLICK: u64 = 14
 // RUNDE K13: die beiden Nummern, die dieser Runde zugeteilt sind.
 const P_USER: u64 = 16 // Kennungen und Kennungswechsel, aus Ring 3
 const P_ZOMBIE: u64 = 17 // ein Kind ohne `wait` -- die Waise
+// RUNDE K18: die drei Nummern, die dieser Runde zugeteilt sind (45..47).
+// Sie sind absichtlich NICHT 18/19/20 -- am Tag dieser Runde arbeiten
+// mehrere Runden gleichzeitig an diesem Baum, und die Vorraete sind
+// vorher verteilt worden.
+const P_PWR: u64 = 45 // liest die ganze Energieschicht aus Ring 3 aus
+const P_PWRIDLE: u64 = 46 // schlaeft, damit der Leerlaufpfad laeuft
+const P_PWRLOAD: u64 = 47 // rechnet, damit er NICHT laeuft
 
 // ------------------------------------------------------ the system call
 
@@ -326,6 +336,15 @@ fn u_enter(packed: u64) {
     }
     if prog == P_ZOMBIE {
         u_zombie(arg)
+    }
+    if prog == P_PWR {
+        u_pwr(arg)
+    }
+    if prog == P_PWRIDLE {
+        u_pwridle(arg)
+    }
+    if prog == P_PWRLOAD {
+        u_pwrload(arg)
     }
     u_sys(SYS_EXIT, 0, 0, 0)
     while true {
@@ -1600,5 +1619,232 @@ fn u_zombie(arg: u64) {
     var nl: [u8; 2] = "\n\0"
     u_say((&nl[0]) as u64)
     // KEIN `wait`. Genau das ist der Punkt.
+    u_sys(SYS_EXIT, 0, 0, 0)
+}
+
+// ==================================================== RUNDE K18
+//
+// DIE ENERGIESCHICHT, GEFRAGT AUS RING 3.
+//
+// Alles, was dieses Programm meldet, kommt ueber `syscall` aus dem Kernel
+// -- es hat keinen Zugriff auf `kdata` und kann keine Zahl selbst setzen.
+// Das ist der Grund, warum die Abnahme dieser Runde die Werte HIER liest
+// und nicht aus der Kernelmeldung: eine Zahl, die den Weg durch Ring 3
+// gegangen ist, ist wirklich durch die Schnittstelle gekommen.
+//
+// DER KERN DES PROGRAMMS IST DIE DREIFACHE MESSUNG. Es schaltet die drei
+// Profile der Reihe nach durch und liest nach JEDEM Wechsel dieselben
+// drei Stellen: was in IA32_PERF_CTL geschrieben wurde, was in
+// IA32_MISC_ENABLE geschrieben wurde -- und was aus IA32_MISC_ENABLE
+// ZURUECKGELESEN wurde. Die letzte Zahl ist die einzige auf diesem Wirt,
+// die wirklich aus dem Prozessor kommt; sie muss dreimal verschieden
+// sein, und der Testlauf rechnet nach, dass sie die Werte aus dem
+// Handbuch traegt.
+
+const PG_PROFILE: u64 = 1
+const PG_CAPS: u64 = 2
+const PG_RATIOS: u64 = 3
+const PG_RATIOSRC: u64 = 4
+const PG_PERFCTL: u64 = 5
+const PG_PERFBACK: u64 = 6
+const PG_HWPREQ: u64 = 7
+const PG_MISC: u64 = 9
+const PG_MISCBACK: u64 = 10
+const PG_MISCORIG: u64 = 11
+const PG_CSTATE: u64 = 12
+const PG_MWAITS: u64 = 13
+const PG_HLTS: u64 = 14
+const PG_IDLERUNS: u64 = 15
+const PG_TEMP: u64 = 16
+const PG_TEMPOK: u64 = 17
+const PG_THROTTLES: u64 = 19
+const PG_THROTTLED: u64 = 20
+const PG_APPLIES: u64 = 21
+const PG_SWITCHES: u64 = 22
+const PG_MWAITHINT: u64 = 23
+const PG_BATPRESENT: u64 = 24
+const PG_BATPERCENT: u64 = 25
+const PG_BATMINUTES: u64 = 26
+const PG_BATSTATE: u64 = 27
+const PG_BATRATE: u64 = 28
+const PG_BATREMAIN: u64 = 29
+const PG_BATFULL: u64 = 30
+const PG_ACOK: u64 = 33
+const PG_AC: u64 = 34
+const PG_BATWHY: u64 = 35
+const PG_TABLES: u64 = 36
+const PG_TZRAW: u64 = 37
+const PG_BRIGHT: u64 = 38
+const PG_BLANKED: u64 = 39
+const PG_BLANKS: u64 = 40
+const PS_PROFILE: u64 = 0
+
+// "k18: NAME = WERT" -- dieselbe Form wie `/bin/k14` in Runde K14, damit
+// der Testlaeufer denselben Leser benutzen kann.
+fn u_k18(name: u64, v: u64) {
+    var head: [u8; 7] = "k18: \0\0"
+    var mid: [u8; 4] = " = \0"
+    u_say((&head[0]) as u64)
+    u_say(name)
+    u_say((&mid[0]) as u64)
+    u_say_num(v)
+    var nl: [u8; 2] = "\n\0"
+    u_say((&nl[0]) as u64)
+}
+
+fn u_get(field: u64) -> u64 {
+    return u_sys(SYS_OSUM_PWRGET, field, 0, 0)
+}
+
+fn u_pwr(arg: u64) {
+    var n_caps: [u8; 5] = "caps\0"
+    var n_rat: [u8; 7] = "ratios\0"
+    var n_rsrc: [u8; 9] = "ratiosrc\0"
+    var n_cst: [u8; 7] = "cstate\0"
+    var n_orig: [u8; 9] = "miscorig\0"
+    var n_tab: [u8; 7] = "tables\0"
+    var n_bp: [u8; 11] = "batpresent\0"
+    var n_bw: [u8; 7] = "batwhy\0"
+    var n_pc: [u8; 8] = "percent\0"
+    var n_mi: [u8; 8] = "minutes\0"
+    var n_bs: [u8; 9] = "batstate\0"
+    var n_br: [u8; 8] = "batrate\0"
+    var n_bre: [u8; 10] = "batremain\0"
+    var n_bf: [u8; 8] = "batfull\0"
+    var n_ao: [u8; 6] = "acok\0\0"
+    var n_ac: [u8; 3] = "ac\0"
+    var n_tp: [u8; 5] = "temp\0"
+    var n_to: [u8; 7] = "tempok\0"
+    var n_tz: [u8; 6] = "tzraw\0"
+    var n_th: [u8; 10] = "throttles\0"
+    var n_td: [u8; 10] = "throttled\0"
+    var n_ap: [u8; 8] = "applies\0"
+    var n_sw: [u8; 9] = "switches\0"
+    var n_end: [u8; 4] = "end\0"
+
+    u_k18((&n_caps[0]) as u64, u_get(PG_CAPS))
+    u_k18((&n_rat[0]) as u64, u_get(PG_RATIOS))
+    u_k18((&n_rsrc[0]) as u64, u_get(PG_RATIOSRC))
+    u_k18((&n_cst[0]) as u64, u_get(PG_CSTATE))
+    u_k18((&n_orig[0]) as u64, u_get(PG_MISCORIG))
+    u_k18((&n_tab[0]) as u64, u_get(PG_TABLES))
+
+    // DIE DREI PROFILE, DER REIHE NACH.
+    prof_round(0)
+    prof_round(1)
+    prof_round(2)
+    // und wieder zurueck auf ausgeglichen, damit der Rest des Laufs
+    // nicht in einem Sonderzustand steht.
+    u_sys(SYS_OSUM_PWRSET, PS_PROFILE, 1, 0)
+
+    u_k18((&n_bp[0]) as u64, u_get(PG_BATPRESENT))
+    u_k18((&n_bw[0]) as u64, u_get(PG_BATWHY))
+    u_k18((&n_pc[0]) as u64, u_get(PG_BATPERCENT))
+    u_k18((&n_mi[0]) as u64, u_get(PG_BATMINUTES))
+    u_k18((&n_bs[0]) as u64, u_get(PG_BATSTATE))
+    u_k18((&n_br[0]) as u64, u_get(PG_BATRATE))
+    u_k18((&n_bre[0]) as u64, u_get(PG_BATREMAIN))
+    u_k18((&n_bf[0]) as u64, u_get(PG_BATFULL))
+    u_k18((&n_ao[0]) as u64, u_get(PG_ACOK))
+    u_k18((&n_ac[0]) as u64, u_get(PG_AC))
+    u_k18((&n_tp[0]) as u64, u_get(PG_TEMP))
+    u_k18((&n_to[0]) as u64, u_get(PG_TEMPOK))
+    u_k18((&n_tz[0]) as u64, u_get(PG_TZRAW))
+    u_k18((&n_th[0]) as u64, u_get(PG_THROTTLES))
+    u_k18((&n_td[0]) as u64, u_get(PG_THROTTLED))
+    u_k18((&n_ap[0]) as u64, u_get(PG_APPLIES))
+    u_k18((&n_sw[0]) as u64, u_get(PG_SWITCHES))
+
+    // DER LEERLAUFPFAD. Schlafen legen und danach nachsehen, wie oft der
+    // Kern wirklich in mwait war und wie oft er auf hlt zurueckfallen
+    // musste. Vorher/nachher, damit man den Zuwachs sieht und nicht nur
+    // einen Endstand.
+    var n_m0: [u8; 8] = "mwaits0\0"
+    var n_h0: [u8; 7] = "hlts0\0\0"
+    var n_i0: [u8; 10] = "idleruns0\0"
+    var n_m1: [u8; 8] = "mwaits1\0"
+    var n_h1: [u8; 7] = "hlts1\0\0"
+    var n_i1: [u8; 10] = "idleruns1\0"
+    var n_hint: [u8; 10] = "mwaithint\0"
+    u_k18((&n_m0[0]) as u64, u_get(PG_MWAITS))
+    u_k18((&n_h0[0]) as u64, u_get(PG_HLTS))
+    u_k18((&n_i0[0]) as u64, u_get(PG_IDLERUNS))
+    u_sleep(0, 600)
+    u_k18((&n_m1[0]) as u64, u_get(PG_MWAITS))
+    u_k18((&n_h1[0]) as u64, u_get(PG_HLTS))
+    u_k18((&n_i1[0]) as u64, u_get(PG_IDLERUNS))
+    u_k18((&n_hint[0]) as u64, u_get(PG_MWAITHINT))
+
+    u_k18((&n_end[0]) as u64, arg)
+    u_sys(SYS_EXIT, 0, 0, 0)
+}
+
+// EIN PROFIL SETZEN UND DIESELBEN DREI STELLEN LESEN.
+fn prof_round(p: u64) {
+    var n_set: [u8; 8] = "setrc$\0\0"
+    var n_pr: [u8; 7] = "prof$\0\0"
+    var n_pc: [u8; 10] = "perfctl$\0\0"
+    var n_pb: [u8; 11] = "perfback$\0\0"
+    var n_mi: [u8; 7] = "misc$\0\0"
+    var n_mb: [u8; 11] = "miscback$\0\0"
+    var n_hw: [u8; 9] = "hwpreq$\0\0"
+    // Das '$' wird durch die Profilnummer ersetzt -- so heissen die
+    // Zeilen `perfctl0`, `perfctl1`, `perfctl2` und der Testlaeufer kann
+    // sie einzeln greifen.
+    stamp((&n_set[0]) as u64, p)
+    stamp((&n_pr[0]) as u64, p)
+    stamp((&n_pc[0]) as u64, p)
+    stamp((&n_pb[0]) as u64, p)
+    stamp((&n_mi[0]) as u64, p)
+    stamp((&n_mb[0]) as u64, p)
+    stamp((&n_hw[0]) as u64, p)
+    let rc: u64 = u_sys(SYS_OSUM_PWRSET, PS_PROFILE, p, 0)
+    u_k18((&n_set[0]) as u64, rc)
+    u_k18((&n_pr[0]) as u64, u_get(PG_PROFILE))
+    u_k18((&n_pc[0]) as u64, u_get(PG_PERFCTL))
+    u_k18((&n_pb[0]) as u64, u_get(PG_PERFBACK))
+    u_k18((&n_mi[0]) as u64, u_get(PG_MISC))
+    u_k18((&n_mb[0]) as u64, u_get(PG_MISCBACK))
+    u_k18((&n_hw[0]) as u64, u_get(PG_HWPREQ))
+}
+
+fn stamp(p: u64, n: u64) {
+    var i: u64 = 0
+    while i < 16 {
+        let c: u64 = (*((p + i) as *mut u8)) as u64
+        if c == 0 {
+            i = 16
+        } else {
+            if c == 36 {
+                *((p + i) as *mut u8) = (48 + n) as u8
+                i = 16
+            } else {
+                i = i + 1
+            }
+        }
+    }
+}
+
+// SCHLAFEN, damit der Leerlaufpfad wirklich laeuft. Der Kern hat dann
+// nichts zu tun und geht in `pwr.idle_wait`.
+fn u_pwridle(arg: u64) {
+    var n: [u8; 5] = "idle\0"
+    u_sleep(0, arg)
+    u_k18((&n[0]) as u64, arg)
+    u_sys(SYS_EXIT, 0, 0, 0)
+}
+
+// RECHNEN statt schlafen -- die Gegenprobe. Solange dieses Programm
+// laeuft, hat der Kern etwas zu tun und der Leerlaufpfad wird NICHT
+// betreten.
+fn u_pwrload(arg: u64) {
+    var n: [u8; 5] = "load\0"
+    var acc: u64 = 1
+    var i: u64 = 0
+    while i < arg {
+        acc = acc *% 6364136223846793005 +% 1442695040888963407
+        i = i + 1
+    }
+    u_k18((&n[0]) as u64, acc & 0xFF)
     u_sys(SYS_EXIT, 0, 0, 0)
 }
