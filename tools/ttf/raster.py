@@ -160,7 +160,9 @@ class Ttf:
         deckung = u16(self.d, o + 8)
         if (deckung >> 8) != 0 or (deckung & 1) != 1:
             return 0, 0
-        return o + 14, u16(self.d, o + 10)
+        # +18: siehe `kernel/ttf.fi` -- der Kopf des Formats 0 ist acht
+        # Oktette lang, nicht vier.
+        return o + 18, u16(self.d, o + 10)
 
     def kern(self, g1, g2):
         if self.kern_off == 0:
