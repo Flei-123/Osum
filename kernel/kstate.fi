@@ -60,7 +60,10 @@
 //   0x3C000  der Rahmenpuffer-Zustand samt Zeichensatz (Runde K7B)
 //   0x40000  die Gastmaschinen des Hypervisors (Runde K12, `hv.fi`)
 //   0x41000  die Zaehler der Benutzer/Rechte-Schicht (Runde K13)
-//   0x43000  frei, bis KDATA_SIZE (0x50000)
+//   0x43000  die VFS-Schicht, FAT32, procfs (Runde K14)
+//   0x46000  die Naht zur Widget-Bibliothek, drei Seiten (Runde K15)
+//   0x49000  die Tabelle der Dateiarten (Runde K16)
+//   0x4C000  frei, bis KDATA_SIZE (0x50000)
 //
 // RUNDE K12 HAT DIESEN BEREICH WACHSEN LASSEN, von 0x40000 auf 0x50000.
 // Der Grund steht hier, damit ihn niemand suchen muss: mit dem
@@ -113,7 +116,10 @@ export {
     M_NOSTACK, K16_OFF, K16_MAX, FT_TAB, FT_SCALARS, FT_HEAD,
     FT_SB, FT_LINE, FT_REC, FT_ARGS, FT_IPATH, FT_SLOTS,
     FT_SLOT, FT_HEAD_MAX, FT_CLASSIFIED, FT_BY_MAGIC, FT_BY_EXT, FT_OPENED,
-    FT_SHEBANGS, FT_REGISTERED, FT_REFUSED, STACKGROW, get, set,
+    FT_SHEBANGS, FT_REGISTERED, FT_REFUSED, STACKGROW,
+    WIG_OFF, WIG_MAX, FSG_OFF, JRNL_OFF, JRNL_MAX,
+    M_WIG, M_WIGFILES, M_WIGNOHIT, M_WIGNOCLIP, M_WIGLONG,
+    M_WIGSTART, M_WIGNOKEYS, M_WIGNOIDX, get, set,
     add, get32, get16, get8, set8
 }
 
@@ -731,6 +737,47 @@ const FT_REFUSED: u64 = 0x30 // wie oft `fopen` abgelehnt hat
 // K16-Bereich, weil `proc.fi` ihn schreibt und `proc.fi` den K16-Bereich
 // sonst nicht kennt.
 const STACKGROW: u64 = 1024 // RUNDE K16: naechster freier Skalar
+// RUNDE K15: die Naht zwischen Fensterserver und Widget-Bibliothek
+// (`kernel/wig.fi`). Drei Seiten aus dem Vorrat, den diese Runde
+// zugeteilt bekommen hat -- 0x46000..0x49000, und keine andere:
+//
+//   +0x0000  die Skalare
+//   +0x1000  die Zwischenablage, vier Kilooktett
+//   +0x2000  der Umschlagpuffer -- EINE Bildpunktzeile oder EINE Glyphe
+//
+// Was gross ist, liegt auch hier NICHT in `kdata`: die Zeichenflaeche
+// der Bibliothek ist ein `mmap` in Ring 3, und der Glyphenspeicher
+// gehoert weiter `ttf.fi`.
+const WIG_OFF: u64 = 0x46000
+const WIG_MAX: u64 = 0x3000
+
+// RUNDE K15, ZWEITER NACHTRAG: DIE SEITE DER SKALARE WIRD GETEILT.
+//
+// `wig.fi` braucht von der ersten Seite dieses Vorrats 0x40 Oktette.
+// Der Rest der Seite ist Platz dieser Runde und keiner anderen, und der
+// zweite Nachtrag braucht zwei Dinge darin:
+//
+//   +0x0080  FSG -- DIE GEOMETRIE DES DATEISYSTEMS, zwei Woerter, aus
+//            dem Superblock beim Einhaengen. Bis hierher standen die
+//            Zahl der Inodes (128) und der erste Datenblock (34) als
+//            Konstanten in `fs.fi`; ein Abbild mit mehreren Tausend
+//            Dateien braucht mehr Inodes, und die Zahl steht seit jeher
+//            IM SUPERBLOCK -- sie wurde nur nie gelesen. Zwei Woerter,
+//            und die alten Abbilder bleiben Oktett fuer Oktett dieselben.
+//   +0x0100  JRNL -- DAS AENDERUNGSJOURNAL. Ein Ring, in den `fs.fi` an
+//            genau zwei Stellen schreibt (`dir_add`, `dir_remove`), und
+//            aus dem der Namensindex in Ring 3 nachzieht, ohne neu zu
+//            bauen. Das Gegenstueck zum USN-Journal von NTFS, an dem
+//            "Everything" haengt. Laeuft er ueber, sagt er das, und der
+//            Index baut neu -- genau wie dort.
+//
+// Warum nicht in den allgemeinen Skalaren am Anfang von `kdata`: dort
+// vergeben mehrere Runden gleichzeitig Plaetze, und genau daran sind in
+// dieser Runde schon drei Zusammenfuehrungen fast gescheitert. Hier
+// gehoert die Seite dieser Runde allein.
+const FSG_OFF: u64 = 0x46080
+const JRNL_OFF: u64 = 0x46100
+const JRNL_MAX: u64 = 0xF00
 
 // Runde K12 hat kdata von 0x40000 auf 0x50000 wachsen lassen; dieselbe
 // Zahl steht in kernel/boot.s und tools/hv/run.sh vergleicht beide.
@@ -802,6 +849,25 @@ const M_NOBIG: u64 = 2147483648
 // null. Ein Stapel, der auch ohne die Eigenschaft reicht, beweist
 // nichts.
 const M_NOSTACK: u64 = 4294967296
+// RUNDE K15. `wig` startet die Anwendung mit der Widget-Bibliothek,
+// `wigfiles` den Dateimanager. Die Gegenproben stehen daneben:
+// `wignohit` nimmt der Bibliothek die Trefferpruefung (ein Klick landet
+// bei keinem Widget), `wignoclip` die Zwischenablage. Beide werden der
+// Anwendung als ARGUMENT mitgegeben und nicht als Kernelmodus -- die
+// Eigenschaft, die abgeschaltet wird, liegt in Ring 3.
+const M_WIG: u64 = 549755813888 // 1 << 39
+const M_WIGFILES: u64 = 1099511627776 // 1 << 40
+const M_WIGNOHIT: u64 = 2199023255552 // 1 << 41
+const M_WIGNOCLIP: u64 = 4398046511104 // 1 << 42
+const M_WIGLONG: u64 = 8796093022208 // 1 << 43
+const M_WIGSTART: u64 = 17592186044416 // 1 << 44
+const M_WIGNOKEYS: u64 = 35184372088832 // 1 << 45
+// ZWEITER NACHTRAG: DIESELBE SUCHE OHNE DEN NAMENSINDEX. Dann findet
+// "blau" nichts -- kein Programm heisst so, und ohne Index gibt es keine
+// Dateitreffer. Das ist die Gegenprobe zu der Zusage, dass die Suche im
+// GANZEN Dateisystem sucht und nicht nur in einer Anwendungsliste.
+const M_WIGNOIDX: u64 = 70368744177664 // 1 << 46
+
 
 // --------------------------------------------------------- the accesses
 

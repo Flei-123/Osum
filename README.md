@@ -537,6 +537,7 @@ nachtraeglich umgeschrieben.
 | `docs/ROUNDK11.md` | **man kann darauf arbeiten**: der Editor, zwanzig Werkzeuge, die Shell als Sprache |
 | `docs/ROUNDK10W.md` | die Oberflaeche: Maus, Fensterserver, TrueType mit Kantenglaettung |
 | `docs/ROUNDK12.md` | ein Wirt fuer fremde Prozessoren: AMD-V, verschachtelte Seitentabellen, Gaeste, Gastmaschinen aus Ring 3 |
+| `docs/ROUNDK15.md` | **Widgets, der Dateimanager und die Suche**: die Bibliothek in Ring 3, `/bin/explorer`, Programme als Bündel unter `/apps/*.prog/`, ein Namensindex über das ganze Dateisystem nach dem Vorbild von „Everything" — zehn Aufrufe im Kernel |
 | `docs/ROUNDK13.md` | **Benutzer, Rechte und `init`**: uid/gid, chmod/chown, /etc/passwd und /etc/shadow, Anmeldung, der erste Prozess |
 | `docs/ROUNDK14.md` | **VFS und fremde Dateisysteme**: die Tafel der neun Verrichtungen, /proc, /dev, FAT32 gegen `mkfs.vfat`/`mcopy`/`fsck.fat`, MBR und GPT |
 | `docs/ROUNDK16.md` | **der Uebersetzer laeuft auf dem System selbst**: `firnc` und ein Assembler in Firn auf Osum, das Ergebnis zeichengleich mit dem vom Wirt — dazu die Tabelle "Dateiart → womit oeffnen" im Kern und `#!` in `execve` |
