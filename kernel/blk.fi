@@ -175,10 +175,51 @@ fn present(state: u64) -> bool {
     return true
 }
 
+// ROUNDE K14: WAS NACH EINER ZEITUEBERSCHREITUNG UEBRIGBLEIBT.
+//
+// `ata_wait` gibt auf, wenn das Laufwerk nach vier Millionen
+// Abfragen nicht antwortet -- und liess es bis zu dieser Runde in
+// GENAU DEM ZUSTAND stehen, in dem es gerade war: mitten in einem
+// Befehl, womoeglich mit 256 Woertern im Datenregister, die niemand
+// abholt. Der NAECHSTE Befehl trifft dann auf ein Laufwerk, das noch
+// den vorigen zu Ende bringen will, und schlaegt auch fehl. So wird
+// aus einer einzelnen langsamen Antwort eine Platte, die fuer den
+// Rest des Laufs kaputt ist.
+//
+// Gesehen wurde das in der Vollabnahme dieser Runde: unter Last hat
+// EIN Sektorlesen die Grenze gerissen, und danach fand
+// `part.scan` keine Partitionstafel mehr -- `mount` sagte -ENODEV
+// auf einer Platte, die eine Sekunde vorher noch gelesen worden war.
+//
+// Der Ausweg ist der, den jedes ATA-Laufwerk kennt: das SRST-Bit im
+// Steuerregister setzen, kurz warten, zuruecknehmen. Danach ist das
+// Laufwerk wieder am Anfang. Der Rueckgabewert bleibt `false` -- der
+// Lesevorgang IST fehlgeschlagen, und das soll er auch sagen.
+fn ata_recover(slave: bool) {
+    serial.out8(ATA_CTRL, 0x04 as u8) // SRST
+    var i: u64 = 0
+    while i < 1000 {
+        serial.io_wait()
+        i = i + 1
+    }
+    serial.out8(ATA_CTRL, 0x00 as u8)
+    i = 0
+    while i < 1000000 && (serial.in8(ATA_CMD) as u64 & ST_BSY) != 0 {
+        i = i + 1
+    }
+    var top: u64 = 0xE0
+    if slave {
+        top = 0xF0
+    }
+    serial.out8(ATA_DRIVE, top as u8)
+    serial.io_wait()
+}
+
 fn ata_read_on(lba: u64, dst: u64, slave: bool) -> bool {
     ata_select_on(lba, slave)
     serial.out8(ATA_CMD, ATA_READ)
     if !ata_wait(true) {
+        ata_recover(slave)
         return false
     }
     var i: u64 = 0
@@ -193,6 +234,7 @@ fn ata_write_on(lba: u64, src: u64, slave: bool) -> bool {
     ata_select_on(lba, slave)
     serial.out8(ATA_CMD, ATA_WRITE)
     if !ata_wait(true) {
+        ata_recover(slave)
         return false
     }
     var i: u64 = 0
@@ -309,15 +351,26 @@ fn dev_name(dev: u64) -> u64 {
     return dev
 }
 
+// EIN ZWEITER VERSUCH, UND NUR EINER. Nach `ata_recover` steht das
+// Laufwerk wieder am Anfang; eine einzelne langsame Antwort ist dann
+// kein Grund, die Platte fuer kaputt zu erklaeren. Ein DRITTER Versuch
+// waere Aberglaube -- was zweimal nicht antwortet, antwortet nicht.
+fn ata_read_twice(lba: u64, dst: u64, slave: bool) -> bool {
+    if ata_read_on(lba, dst, slave) {
+        return true
+    }
+    return ata_read_on(lba, dst, slave)
+}
+
 fn read_on(state: u64, dev: u64, lba: u64, dst: u64) -> bool {
     if lba >= blocks_on(state, dev) {
         return false
     }
     if dev == DEV_ATA {
-        return ata_read_on(lba, dst, false)
+        return ata_read_twice(lba, dst, false)
     }
     if dev == DEV_ATA1 {
-        return ata_read_on(lba, dst, true)
+        return ata_read_twice(lba, dst, true)
     }
     if dev == DEV_NVME {
         return nvme.read_block(state, lba, dst)
