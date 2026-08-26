@@ -73,11 +73,11 @@ const BS: u64 = 512
 
 // ------------------------------------------------- die Seite, aufgeteilt
 
-const SB_OFF: u64 = 0x000 // 8 Einhaengungen zu 64 Oktetten
-const SB_BYTES: u64 = 64
-const NODE_OFF: u64 = 0x200 // 24 Knoten zu 48 Oktetten
+const SB_OFF: u64 = 0x000 // 8 Einhaengungen zu 128 Oktetten
+const SB_BYTES: u64 = 128
+const NODE_OFF: u64 = 0x400 // 16 Knoten zu 48 Oktetten
 const NODE_BYTES: u64 = 48
-const MAX_NODES: u64 = 24
+const MAX_NODES: u64 = 16
 const FATBUF: u64 = 0x700 // ein Sektor der Zuordnungstafel
 const DIRBUF: u64 = 0x900 // ein Verzeichnissektor
 const DATBUF: u64 = 0xB00 // ein Datensektor
@@ -93,6 +93,34 @@ const S_ROOT: u64 = 32 // Wurzelverband
 const S_CLUSTERS: u64 = 40 // wie viele Verbaende es gibt
 const S_FATSEC: u64 = 48 // Sektoren je Tafel
 const S_NFATS: u64 = 56 // wie viele Tafeln
+// ROUNDE K14, ZWEITER ANLAUF: die Zahl der FREIEN VERBAENDE, laufend
+// mitgefuehrt. Der erste Anlauf hat sie beim Aushaengen EINMAL
+// gerechnet -- und dafuer die ganze Zuordnungstafel gelesen: bei
+// 129022 Verbaenden sind das 1008 Sektoren, und zwar mit
+// ABGESCHALTETEN UNTERBRECHUNGEN, weil die Sperre der Platte gehalten
+// wird. In der Vollabnahme hat unter Last genau darin ein Lesevorgang
+// die Zeitgrenze gerissen, und danach war die Platte fuer den Rest
+// des Laufs unlesbar.
+//
+// Jetzt wird die Zahl beim Einhaengen EINMAL aus der FSInfo-Seite
+// gelesen (`mkfs.vfat` schreibt sie hinein) und danach bei jeder
+// Zuteilung und jeder Freigabe um eins veraendert. Das ist O(1) statt
+// O(Platte) -- und es ist genau das, was Linux' vfat tut.
+//
+// S_KNOWN sagt, ob die Zahl ueberhaupt etwas bedeutet: eine Platte,
+// die unsauber ausgehaengt wurde, traegt dort 0xFFFFFFFF, und dann
+// wird beim Aushaengen doch gerechnet -- der seltene Fall, fuer den
+// die teure Schleife gedacht war.
+const S_FREE: u64 = 64 // freie Verbaende
+const S_KNOWN: u64 = 72 // 1 = die Zahl oben stimmt
+const S_FSINFO: u64 = 80 // Sektor der FSInfo-Seite, relativ zur Partition
+// 1 = an dieser Platte wurde geschrieben, seit sie eingehaengt ist.
+// Die FSInfo-Seite traegt dann "unbekannt" -- und zwar EINMAL
+// geschrieben und nicht bei jedem `write`. Ein `cp` von fuenftausend
+// Oktetten sind zehn Sektoren; zehnmal denselben Sektor zu lesen und
+// zurueckzuschreiben, nur um dieselbe Null hineinzusetzen, waere
+// doppelt so viel Plattenverkehr wie die Datei selbst.
+const S_DIRTY: u64 = 88
 
 // die Felder je Knoten
 const N_MNT: u64 = 0 // Einhaengung + 1, 0 = frei
@@ -291,6 +319,7 @@ fn clus_alloc(state: u64, m: u64) -> u64 {
             if !fat_set(state, m, c, MASK28) {
                 return 0
             }
+            free_sub(state, m, 1)
             return c
         }
         c = c + 1
@@ -318,6 +347,7 @@ fn chain_free(state: u64, m: u64, c: u64) {
     while cur >= 2 && cur < MASK28 && !is_eoc(cur) && guard < 1000000 {
         let next: u64 = fat_get(state, m, cur)
         fat_set(state, m, cur, 0)
+        free_add(state, m, 1)
         cur = next
         guard = guard + 1
     }
@@ -418,6 +448,13 @@ fn sync__inner(state: u64, m: u64) -> u64 {
     if sget(state, m, S_VALID) == 0 {
         return 0
     }
+    // DER REGELFALL: die Zahl wurde die ganze Zeit mitgefuehrt. Dann
+    // ist Aushaengen ein einziger Sektor und keine tausend.
+    if sget(state, m, S_KNOWN) != 0 {
+        fsinfo_store(state, m, true)
+        sset(state, m, S_DIRTY, 0)
+        return sget(state, m, S_FREE)
+    }
     let total: u64 = sget(state, m, S_CLUSTERS)
     let secs: u64 = sget(state, m, S_FATSEC)
     var free: u64 = 0
@@ -441,24 +478,9 @@ fn sync__inner(state: u64, m: u64) -> u64 {
             idx = idx + 1
         }
     }
-    let base: u64 = mnt.first(state, m)
-    if !rd(state, m, base, buf(state, DIRBUF)) {
-        return free
-    }
-    let fs_sec: u64 = le16(buf(state, DIRBUF) + 48)
-    if fs_sec == 0 || fs_sec == 0xFFFF {
-        return free
-    }
-    if !rd(state, m, base + fs_sec, buf(state, DIRBUF)) {
-        return free
-    }
-    let b: u64 = buf(state, DIRBUF)
-    if le32(b) != 0x41615252 || le32(b + 484) != 0x61417272 {
-        return free
-    }
-    put32(b + 488, free)
-    put32(b + 492, 2)
-    wr(state, m, base + fs_sec, b)
+    sset(state, m, S_FREE, free)
+    sset(state, m, S_KNOWN, 1)
+    fsinfo_store(state, m, true)
     return free
 }
 
@@ -560,6 +582,11 @@ fn mount_probe__inner(state: u64, m: u64) -> u64 {
     sset(state, m, S_FATSEC, fatsz32)
     sset(state, m, S_NFATS, nfats)
     sset(state, m, S_VALID, 1)
+    sset(state, m, S_FSINFO, le16(b + 48))
+    sset(state, m, S_FREE, 0)
+    sset(state, m, S_KNOWN, 0)
+    sset(state, m, S_DIRTY, 0)
+    fsinfo_load(state, m)
     serial.puts((&s_ok[0]) as u64)
     serial.dec(spc)
     serial.puts((&s_c[0]) as u64)
@@ -1112,7 +1139,7 @@ fn f_write__inner(state: u64, m: u64, node: u64, off: u64, src: u64,
         nset(state, node, N_SIZE, off + wrote)
     }
     entry_update(state, m, node)
-    fsinfo_unknown(state, m)
+    mark_dirty(state, m)
     return wrote
 }
 
@@ -1174,28 +1201,89 @@ fn stamp(state: u64, e: u64) {
 // fuehren hiesse, bei jedem Verband die ganze Tafel zu durchsuchen
 // (129022 Eintraege, 504 KiB), und eine GERATENE Zahl waere schlimmer
 // als keine.
-fn fsinfo_unknown(state: u64, m: u64) {
-    let base: u64 = mnt.first(state, m)
-    if !rd(state, m, base, buf(state, DIRBUF)) {
-        return
-    }
-    let sec: u64 = le16(buf(state, DIRBUF) + 48)
+// Die Zahl der freien Verbaende AUS der FSInfo-Seite holen. 0xFFFFFFFF
+// heisst dort ausdruecklich "unbekannt"; dann wird nichts geglaubt.
+fn fsinfo_load(state: u64, m: u64) {
+    let sec: u64 = sget(state, m, S_FSINFO)
     if sec == 0 || sec == 0xFFFF {
         return
     }
-    if !rd(state, m, base + sec, buf(state, DIRBUF)) {
+    let base: u64 = mnt.first(state, m)
+    if !rd(state, m, base + sec, buf(state, DATBUF)) {
         return
     }
-    let b: u64 = buf(state, DIRBUF)
-    if le32(b) != 0x41615252 {
+    let b: u64 = buf(state, DATBUF)
+    if le32(b) != 0x41615252 || le32(b + 484) != 0x61417272 {
         return
     }
-    if le32(b + 484) != 0x61417272 {
+    let v: u64 = le32(b + 488)
+    if v == 0xFFFFFFFF {
         return
     }
-    put32(b + 488, 0xFFFFFFFF)
-    put32(b + 492, 0xFFFFFFFF)
+    if v > sget(state, m, S_CLUSTERS) {
+        return
+    }
+    sset(state, m, S_FREE, v)
+    sset(state, m, S_KNOWN, 1)
+}
+
+// Und zurueckschreiben. `known` = 0 schreibt das "unbekannt" hinein --
+// das ist der ehrliche Zustand einer Platte, an der gearbeitet wurde
+// und die nicht ausgehaengt wurde.
+fn fsinfo_store(state: u64, m: u64, known: bool) {
+    let sec: u64 = sget(state, m, S_FSINFO)
+    if sec == 0 || sec == 0xFFFF {
+        return
+    }
+    let base: u64 = mnt.first(state, m)
+    if !rd(state, m, base + sec, buf(state, DATBUF)) {
+        return
+    }
+    let b: u64 = buf(state, DATBUF)
+    if le32(b) != 0x41615252 || le32(b + 484) != 0x61417272 {
+        return
+    }
+    if known {
+        put32(b + 488, sget(state, m, S_FREE))
+        put32(b + 492, 2)
+    } else {
+        put32(b + 488, 0xFFFFFFFF)
+        put32(b + 492, 0xFFFFFFFF)
+    }
     wr(state, m, base + sec, b)
+}
+
+// EINMAL "unbekannt" auf die Platte, beim ersten Schreiben. Wer die
+// Maschine danach ausschaltet, hinterlaesst genau diesen Zustand --
+// und `fsck.fat` sagt es dann auch.
+fn mark_dirty(state: u64, m: u64) {
+    if sget(state, m, S_DIRTY) != 0 {
+        return
+    }
+    sset(state, m, S_DIRTY, 1)
+    fsinfo_store(state, m, false)
+}
+
+// Die laufende Buchfuehrung. Sie wird nur gefuehrt, solange sie stimmt.
+fn free_add(state: u64, m: u64, n: u64) {
+    if sget(state, m, S_KNOWN) == 0 {
+        return
+    }
+    sset(state, m, S_FREE, sget(state, m, S_FREE) + n)
+}
+
+fn free_sub(state: u64, m: u64, n: u64) {
+    if sget(state, m, S_KNOWN) == 0 {
+        return
+    }
+    let have: u64 = sget(state, m, S_FREE)
+    if have < n {
+        // Wenn die Zahl nicht mehr aufgeht, war sie falsch. Dann sagt
+        // dieser Treiber "unbekannt" statt eine kleinere Luege.
+        sset(state, m, S_KNOWN, 0)
+        return
+    }
+    sset(state, m, S_FREE, have - n)
 }
 
 // ------------------------------------------------- Eintraege anlegen
@@ -1699,7 +1787,7 @@ fn f_create__inner(state: u64, m: u64, path: u64, art: u64) -> u64 {
         }
         let made: u64 = dir_add(state, m, dir_clus, (&name[0]) as u64,
             fresh, A_DIR, 0)
-        fsinfo_unknown(state, m)
+        mark_dirty(state, m)
         return made
     }
     return dir_add(state, m, dir_clus, (&name[0]) as u64, 0, 0x20, 0)
@@ -1832,7 +1920,7 @@ fn f_unlink__inner(state: u64, m: u64, path: u64) -> u64 {
     if clus >= 2 {
         chain_free(state, m, clus)
     }
-    fsinfo_unknown(state, m)
+    mark_dirty(state, m)
     return 0
 }
 
@@ -1898,7 +1986,7 @@ fn f_trunc__inner(state: u64, m: u64, node: u64) -> u64 {
     nset(state, node, N_CLUS, 0)
     nset(state, node, N_SIZE, 0)
     entry_update(state, m, node)
-    fsinfo_unknown(state, m)
+    mark_dirty(state, m)
     return 0
 }
 
