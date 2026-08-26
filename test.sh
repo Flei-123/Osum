@@ -131,6 +131,31 @@
 #      dann weiss der Index von keiner), `nodirty`, `nofocus`, `nomouse`
 #      und der Lauf ganz ohne `wig`.
 #
+#  23. USB (tools/k17/run.sh, Runde K17): ein xHCI-Regler
+#      (`kernel/xhci.fi`) -- ueber PCI an seiner Klasse 0c:03:30
+#      gefunden, Register aus dem Geraet gelesen, Kommandoring,
+#      Ereignisring und je Endpunkt ein Uebertragungsring, Steckplaetze,
+#      Adressvergabe, MSI-X auf Vektor 43. Darauf ein USB-Kern
+#      (`kernel/usb.fi`): Aufzaehlung beim Anstecken, Deskriptoren,
+#      Konfiguration, Treiberzuordnung an der KLASSE, Anstecken und
+#      Abziehen im Betrieb. Und drei Klassen: Tastatur und Maus im
+#      Boot-Protokoll, die BEIDE in den Eingabeweg von Runde 59 und K10
+#      muenden (der HID-Gebrauchscode wird zu einem PS/2-Abtastcode und
+#      geht durch `kbd.on_code`), und Massenspeicher ueber
+#      Bulk-Only-Transport und SCSI als viertes Geraet von `blk.fi`.
+#      DIE MESSUNG: derselbe Testlauf zweimal, einmal mit `-device
+#      usb-kbd` und einmal mit PS/2, und die `key:`-Zeilen und die
+#      Shell-Sitzung werden OKTETT FUER OKTETT verglichen -- plus die
+#      Zahl `usb: keys=`, ohne die der Vergleich wertlos waere. Der
+#      Stick wird von `mkfs.vfat` und `sfdisk` gebaut, von Osum
+#      beschrieben und danach von `mtools` auf dem WIRT wieder gelesen.
+#      Abziehen im Betrieb: der Deskriptor bleibt offen, das Geraet
+#      verschwindet, jeder Zugriff gibt -ENODEV, und derselbe Prozess
+#      schreibt danach auf der Wurzel weiter. Gegenproben: `nousb`,
+#      `nohid`, `nomsc`, `usbnoirq` (Vektor maskiert -- keine Taste
+#      kommt an), `usbpoll` (derselbe maskierte Vektor, aber der Kern
+#      sieht selbst nach), ein Lauf ohne Regler und einer ohne Geraete.
+#
 #  15. EIN WIRT FUER FREMDE PROZESSOREN (tools/hv/run.sh, Runde K12):
 #      AMD-V, verschachtelte Seitentabellen, sechs Gaeste. Der Kernel
 #      legt eine Gastmaschine an, tritt ein, wertet den Austrittsgrund
@@ -404,6 +429,8 @@ lauf "20. die VFS-Schicht und die fremden Dateisysteme: /proc, /dev, FAT32, MBR 
 # ob er bestanden hat.
 lauf "21. der Uebersetzer laeuft auf dem System selbst, und eine Datei weiss, womit man sie oeffnet (tools/k16/run.sh, Runde K16)" \
      tools/k16/run.sh k16 '^K16: |^  OK    (ZEICHENGLEICH|DAS AUF OSUM|DER DOPPELKLICK|DER AUSLEGER|DER INHALT GEHT VOR|fas uebersetzt|16 von 16)'
+lauf "23. USB: xHCI, Aufzaehlung, Tastatur, Maus und ein Stick (tools/k17/run.sh, Runde K17)" \
+     tools/k17/run.sh k17 '^K17: |^  OK    (DIESELBEN ZEICHEN|DIESELBE SHELL|WAS OSUM SCHRIEB|die Tastatur, an Klasse|die Maus, an Klasse|der Stick, an Klasse|der Zeiger steht|GEGENPROBE usbnoirq|lesen auf dem OFFENEN)'
 lauf "22. Widgets und der Dateimanager: eine Bibliothek in Ring 3 (tools/k15/run.sh, Runde K15)" \
      tools/k15/run.sh k15 '^K15: |^        -> |^  OK    (die Anordnung|ein Klick auf das Kaestchen|mit Bereichsverfolgung|und /daten/neu|der Verweis spart|getippt |OHNE (die Schluesselwoerter|das Journal|den Namensindex)|[0-9]\. (DER AUFBAU|DIE SUCHE|DIE GEGENPROBE|der Index)|und DIESELBEN NAMEN|nach dem (Anlegen|Umbenennen)|das Symbol des Dateimanagers)'
 
