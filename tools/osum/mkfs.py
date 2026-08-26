@@ -474,11 +474,13 @@ def load(path):
     inodes = struct.unpack_from("<Q", raw, SB["INODES"])[0] or INODE_COUNT
     fs = Fs(max(len(raw) // BS, INODE_START
                 + (inodes + INODES_PER_BLOCK - 1) // INODES_PER_BLOCK + 8),
-            inodes)
+            OFS_V2, inodes)
     fs.d[:len(raw)] = raw
     if fs.g64(SB["MAGIC"]) != MAGIC:
         return None
     fs.root = fs.g64(SB["ROOT"])
+    # RUNDE K13: die Fassung steht im Superblock; eine 0 heisst 1.
+    fs.version = fs.g64(SB["VERSION"]) or OFS_V1
     return fs
 
 

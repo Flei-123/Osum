@@ -72,7 +72,11 @@ def main():
         p = os.path.join(roh, name)
         with open(p, "wb") as f:
             f.write(inhalt)
-        zeilen.append("/daten/%s=%s" % (name, p))
+        # DIE RECHTE STEHEN DABEI, seit K13 im selben Baum liegt: eine
+        # DATEI ist 0644 und kein Programm. Ohne die Angabe bekaeme sie
+        # 0755 von `mkfs.addfile`, und die Spalte "Rechte" des
+        # Dateimanagers zeigte -rwxr-xr-x fuer eine Textdatei.
+        zeilen.append("/daten/%s=%s@644" % (name, p))
         soll.append((name, len(inhalt), "-"))
     for o in ORDNER:
         zeilen.append("/daten/%s/" % o)
@@ -81,7 +85,7 @@ def main():
             p = os.path.join(roh, "%s_%s" % (o, name))
             with open(p, "wb") as f:
                 f.write(inhalt)
-            zeilen.append("/daten/%s/%s=%s" % (o, name, p))
+            zeilen.append("/daten/%s/%s=%s@644" % (o, name, p))
 
     with open(os.path.join(d, "liste"), "w") as f:
         for z in zeilen:
