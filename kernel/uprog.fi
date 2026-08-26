@@ -79,6 +79,15 @@ const R_WRITE: u64 = 2
 const R_DUPLICATE: u64 = 8
 const R_TRANSFER: u64 = 16
 const R_INSPECT: u64 = 32
+const R_MANAGE: u64 = 64
+// RUNDE K12: die fuenf Aufrufe fuer Gastmaschinen (`kernel/sys.fi`).
+const SYS_VM_CREATE: u64 = 1400
+const SYS_VM_RUN: u64 = 1401
+const SYS_VM_STAT: u64 = 1402
+const SYS_VM_KILL: u64 = 1403
+const SYS_VM_VALUE: u64 = 1404
+const G_HELLO: u64 = 0
+const E_WRONGTYPE: u64 = 6
 const R_ALL: u64 = 1023
 
 const O_RDONLY: u64 = 0
@@ -122,6 +131,7 @@ const P_FORK: u64 = 10
 const P_FORKCHILD: u64 = 11
 const P_CAPS: u64 = 12
 const P_FB: u64 = 13
+const P_HV: u64 = 14 // RUNDE K12: eine Gastmaschine aus Ring 3
 
 // ------------------------------------------------------ the system call
 
@@ -267,6 +277,9 @@ fn u_enter(packed: u64) {
     }
     if prog == P_FB {
         u_fb(arg)
+    }
+    if prog == P_HV {
+        u_hv(arg)
     }
     u_sys(SYS_EXIT, 0, 0, 0)
     while true {
@@ -1069,4 +1082,169 @@ fn u_fb(arg: u64) {
     u_say_num(gut)
     u_say((&s_of[0]) as u64)
     u_say((&nl[0]) as u64)
+}
+
+// ============================================================ RUNDE K12
+//
+// EIN PROGRAMM IN RING 3, DAS EINE GASTMASCHINE FUEHRT.
+//
+// Es hat keine Sonderrechte. Es hat kein `vmrun`, keine physische
+// Adresse, keine Seitentabelle und keinen Weg an den Steuerblock. Was es
+// hat, ist EIN HANDLE -- und was es damit darf, entscheidet der Kernel
+// bei jedem einzelnen Aufruf an den Rechtebits, die in diesem Handle
+// stehen.
+//
+// ES MELDET VIERZEHN ZUSAGEN, und die Haelfte davon ist eine Ablehnung.
+// Eine Schnittstelle, die nur den richtigen Fall kann, ist keine:
+//
+//    1. `vm_create` gibt ein Handle und keine kleine Zahl.
+//    2. Die Auskunft sagt: die Maschine ist bereit, Gast 0, 0 Austritte.
+//    3. `vm_run` laesst den Gast wirklich laufen.
+//    4. Danach hat sie Austritte -- der Gast hat also etwas getan.
+//    5. Der Gast hat sich mit 0x1234 abgemeldet.
+//    6. Was der Gast gemeldet hat, ist lesbar: das Muster 0x5A5A, das er
+//       durch die verschachtelte Seitentabelle gelesen hat.
+//    7. Ein ERFUNDENES Handle trifft nichts: BadHandle.
+//    8. Das Handle 0 ist kein stdin, auch hier nicht.
+//    9. Ein gueltiges Handle der FALSCHEN ART (die Konsole) gibt
+//       WrongType -- und nicht BadHandle. Der Unterschied ist der Punkt.
+//   10. Eine Kopie OHNE R_MANAGE laesst sich anlegen.
+//   11. Die Kopie darf die Maschine laufen lassen.
+//   12. Die Kopie darf sie NICHT abraeumen: RightsDenied, NICHT
+//       BadHandle. Dasselbe Objekt, dasselbe Programm, ein anderes Recht.
+//   13. Das Urhandle darf es.
+//   14. Danach trifft das Handle nichts mehr.
+//
+// `arg` ist ohne Bedeutung; die Maschine legt sich das Programm selbst an.
+fn hv_err(v: u64) -> bool {
+    return v >= 0 -% 16
+}
+
+fn u_hv(arg: u64) {
+    var s_head: [u8; 22] = "hvuser: ring 3 begin\n\0"
+    var s_h: [u8; 16] = "hvuser: handle=\0"
+    var s_run: [u8; 13] = "hvuser: run=\0"
+    var s_st: [u8; 15] = "hvuser: state=\0"
+    var s_ex: [u8; 15] = "hvuser: exits=\0"
+    var s_res: [u8; 16] = "hvuser: result=\0"
+    var s_val: [u8; 15] = "hvuser: value=\0"
+    var s_tail: [u8; 9] = "hvuser: \0"
+    var s_of: [u8; 6] = " / 14\0"
+    var nl: [u8; 2] = "\n\0"
+    var w: [u64; 5] = [0 as u64; 5]
+    var gut: u64 = 0
+
+    u_say((&s_head[0]) as u64)
+
+    // 1. ANLEGEN. Was zurueckkommt, ist ein Handle und keine kleine Zahl.
+    let alle: u64 = R_READ | R_WRITE | R_INSPECT | R_MANAGE | R_DUPLICATE
+    let h: u64 = u_sys(SYS_VM_CREATE, G_HELLO, alle, 0)
+    u_say((&s_h[0]) as u64)
+    u_say_num(h)
+    u_say((&nl[0]) as u64)
+    if hv_err(h) {
+        u_say((&s_tail[0]) as u64)
+        u_say_num(0)
+        u_say((&s_of[0]) as u64)
+        u_say((&nl[0]) as u64)
+        u_sys(SYS_EXIT, 14, 0, 0)
+        return
+    }
+    gut = gut + 1
+
+    // 2. AUSKUNFT VOR DEM LAUF: bereit, Gast 0, noch kein Austritt.
+    if u_sys(SYS_VM_STAT, h, (&w[0]) as u64, 0) == 0 {
+        if w[0] == 1 && w[1] == 0 && w[3] == G_HELLO {
+            gut = gut + 1
+        }
+    }
+
+    // 3. EINE KOPIE OHNE DAS RECHT ABZURAEUMEN. Sie entsteht, BEVOR der
+    //    Gast gelaufen ist -- nur so laesst sich zeigen, dass sie ihn
+    //    wirklich fuehren darf und nicht bloss einen fertigen erbt.
+    let klein: u64 = u_sys(CAP_DUP, h, R_READ | R_WRITE | R_INSPECT, 0)
+    if !hv_err(klein) {
+        gut = gut + 1
+    }
+
+    // 4. UND DIE KOPIE LAESST IHN LAUFEN. 2 = der Gast hat sich
+    //    abgemeldet. Das Handle des Aufrufers hat R_WRITE, also darf es.
+    let r: u64 = u_sys(SYS_VM_RUN, klein, 0, 0)
+    u_say((&s_run[0]) as u64)
+    u_say_num(r)
+    u_say((&nl[0]) as u64)
+    if r == 2 {
+        gut = gut + 1
+    }
+
+    // 5. bis 7. WAS DABEI HERAUSKAM.
+    u_sys(SYS_VM_STAT, h, (&w[0]) as u64, 0)
+    u_say((&s_st[0]) as u64)
+    u_say_num(w[0])
+    u_say((&nl[0]) as u64)
+    u_say((&s_ex[0]) as u64)
+    u_say_num(w[1])
+    u_say((&nl[0]) as u64)
+    u_say((&s_res[0]) as u64)
+    u_say_num(w[2])
+    u_say((&nl[0]) as u64)
+    if w[1] > 10 {
+        gut = gut + 1
+    }
+    if w[2] == 4660 { // 0x1234
+        gut = gut + 1
+    }
+    // Wert 3 ist das Muster, das der Gast durch die verschachtelte
+    // Seitentabelle gelesen hat. Ring 3 bekommt es hier zu sehen, ohne
+    // je eine physische Adresse in der Hand gehabt zu haben.
+    let v: u64 = u_sys(SYS_VM_VALUE, h, 3, 0)
+    u_say((&s_val[0]) as u64)
+    u_say_num(v)
+    u_say((&nl[0]) as u64)
+    if v == 23130 { // 0x5A5A
+        gut = gut + 1
+    }
+
+    // 8. EIN ERFUNDENES HANDLE trifft nichts. Die Generation traegt den
+    //    Wuerfelwert der Tabelle -- Raten hilft nicht.
+    if u_sys(SYS_VM_RUN, h + 0x100000000, 0, 0) == 0 -% E_BADHANDLE {
+        gut = gut + 1
+    }
+    // 9. Die 0 ist auch hier kein stdin.
+    if u_sys(SYS_VM_RUN, 0, 0, 0) == 0 -% E_BADHANDLE {
+        gut = gut + 1
+    }
+    // 10. EIN GUELTIGES HANDLE DER FALSCHEN ART. Die Konsole ist ein
+    //     Strom, keine Maschine: WrongType, NICHT BadHandle. Genau
+    //     dieser Unterschied ist der Grund, warum dieser Kernel Handles
+    //     hat und nicht Deskriptoren.
+    let konsole: u64 = (arg << 32) | 1
+    if u_sys(SYS_VM_RUN, konsole, 0, 0) == 0 -% E_WRONGTYPE {
+        gut = gut + 1
+    }
+    // 11. EIN GAST, DER FERTIG IST, laeuft nicht noch einmal -- und das
+    //     ist eine Ablehnung und kein Absturz.
+    if u_sys(SYS_VM_RUN, klein, 0, 0) == 6 {
+        gut = gut + 1
+    }
+
+    // 12. DIE KOPIE DARF NICHT ABRAEUMEN. RightsDenied, NICHT BadHandle:
+    //     dasselbe Objekt, dasselbe Programm, ein anderes Recht.
+    if u_sys(SYS_VM_KILL, klein, 0, 0) == 0 -% E_RIGHTS {
+        gut = gut + 1
+    }
+    // 13. Das Urhandle darf es.
+    if u_sys(SYS_VM_KILL, h, 0, 0) == 0 {
+        gut = gut + 1
+    }
+    // 14. Und danach trifft es nichts mehr.
+    if u_sys(SYS_VM_RUN, h, 0, 0) == 0 -% E_BADHANDLE {
+        gut = gut + 1
+    }
+
+    u_say((&s_tail[0]) as u64)
+    u_say_num(gut)
+    u_say((&s_of[0]) as u64)
+    u_say((&nl[0]) as u64)
+    u_sys(SYS_EXIT, 14 - gut, 0, 0)
 }
