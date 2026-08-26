@@ -203,18 +203,29 @@ ein Prozessor, 256 MiB, `-vga std`.)*
 
 ### 5.1 Was ein Neuzeichnen kostet
 
-| | Bildpunkte |
-|---|---:|
-| das ganze Fenster (480 × 400) | 192 000 |
-| ein Klick auf das Kontrollkästchen, samt Zeigerweg darüber | siehe Läufer |
-| Aufrufe hinüber dafür | ≤ 11 |
+Zwanzig Bildschirmfotos, jedes aus einem eigenen Lauf, alle auf derselben
+Maschine. Gemessen wird die Zahl der Bildpunkte, die **Ring 3** in sein
+Fenster geschoben hat (`wig: pixels`) — nicht eine Zeit, denn unter TCG
+ist eine Zeit die Zeit des Wirts.
+
+| Vorgang | Bildpunkte | Aufrufe hinüber |
+|---|---:|---:|
+| der ganze Aufbau des Fensters (480 × 400) | **192 000** | 5 |
+| ein Klick auf das Kontrollkästchen, samt Zeigerweg darüber | **18 184** | **2** |
+| **Faktor** | **10,6** | |
 
 **Und die Gegenprobe, ohne die die Zahl nichts bedeutet:** derselbe Klick
 mit `nodirty`. Dann wird jede Meldung eines schmutzigen Bereichs zu „der
 ganze Schirm", und der Server setzt für denselben Klick das ganze Bild
-neu zusammen. Der Läufer rechnet den Faktor aus und prüft dazu, dass die
-Anwendung in **beiden** Läufen dasselbe getan hat — sonst wäre die Zahl
-ein Vergleich zweier verschiedener Dinge.
+neu zusammen:
+
+| | mit Bereichsverfolgung | mit `nodirty` |
+|---|---:|---:|
+| Bildpunkte, die der Server zusammengesetzt hat | **18 966 648** | **40 800 000** |
+
+Der Läufer prüft dazu, dass die Anwendung in **beiden** Läufen dasselbe
+getan hat (`haken=1`) — sonst wäre die Zahl ein Vergleich zweier
+verschiedener Dinge.
 
 ### 5.2 Der Glyphenspeicher in Ring 3
 
@@ -230,7 +241,31 @@ wig: ... glyphs=45    (der Dateimanager mit acht Zeilen Tabelle)
 ```
 
 37 beziehungsweise 45 verschiedene Zeichen — das ist die Zahl der
-*verschiedenen* Zeichen auf dem Schirm, nicht die der gemalten.
+*verschiedenen* Zeichen auf dem Schirm, nicht die der gemalten. Die
+Anwendung malt in einem Lauf ein Vielfaches davon; der Läufer prüft, dass
+die Zahl der Aufrufe unter 90 bleibt.
+
+### 5.3 Eine benannte Toleranz, und die gemessene Zahl dazu
+
+Zwei Zusagen dieses Läufers rechnen nicht mit Toleranz 0, und das gehört
+gesagt. Wo sich zwei **Glyphenkästen überlappen** — „ff" in „Oeffnen",
+„rw" in „-rw-r--r--" —, mischt die Bibliothek (und `wm.text` genauso)
+Zeichen *auf* Zeichen, während der Referenzrasterer jedes auf den reinen
+Grund mischt. Gemessen an der Menüzeile „Oeffnen":
+
+| Toleranz | falsche Tintenpunkte von 345 |
+|---:|---:|
+| 0 | 4 |
+| 32 | 2 |
+| 64 | 1 |
+| 96 | **0** |
+
+Die größte Abweichung ist also kleiner als 96 von 255 Stufen und betrifft
+vier Bildpunkte. Dass die Zusage damit trotzdem etwas prüft, steht als
+Gegenprobe daneben: ein **anderes Wort** an derselben Stelle fällt auch
+bei Toleranz 128 durch — 146 falsche Tintenpunkte und zwei Zeichen ganz
+ohne Tinte. Alle übrigen Textzusagen dieser Runde laufen mit **Toleranz
+0**.
 
 ---
 
@@ -389,9 +424,22 @@ Null zurück, statt in die nächste Seite zu schreiben.
 
 `bash tools/k15/run.sh` ist Abschnitt 21 von `./test.sh`.
 
-Die dreizehn Abschnitte des Läufers: bauen aus beiden Übersetzern · die
+Die vierzehn Abschnitte des Läufers: bauen aus beiden Übersetzern · die
 Speicherkarte · die Anwendung steht da (Anordnung) · der Text je Zeichen
 · die Widgets an ihrer Stelle · bedienen mit echten Klicks · die Tastatur
 samt Zwischenablage · Menüs und Dialoge · der Dateimanager gegen die
 Platte · hineingehen, sortieren, anlegen · die Zeiten · die Gegenproben ·
 das Farbschema aus einer Datei · das Zeigerbild.
+
+**152 Zusagen, 0 Fehler.**
+
+Zwölf QEMU-Läufe, jeder mit eigenem Plattenabbild, jeder mit
+Bildschirmfoto: `ruhe` · `klick` · `haken` · `reiter` · `tast` · `noclip`
+· `tabkey` · `pop` · `popw` · `dlg` · `dlgok` · `files` · `fdbl` ·
+`fsort` · `fneu` · `haken_nd` · `nohit` · `nomaus` · `nofok` · `ohne` ·
+`theme2` · `beam`.
+
+Die 1486 Zusagen der Runden 52 bis K12 sind unverändert da — diese Runde
+fasst von ihnen nur `kernel/kbd.fi` (eine Taste, die vorher nicht ankam)
+und `kernel/wm.fi` (die rechte Maustaste, ein zweites Zeigerbild) an, und
+`tools/wm/run.sh` misst beides weiter Zeile für Zeile.
