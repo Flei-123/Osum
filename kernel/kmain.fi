@@ -69,6 +69,7 @@ import mnt
 import vfsops
 import part
 import devfs
+import ftype
 
 // Indices in the table out of isr.s.
 const V_DF_STACK: u64 = 52
@@ -199,6 +200,10 @@ fn kernel_main(mbi: u64, vectors: u64, state: u64, kernel_end: u64,
     // before the first task does, they belong to no process, and every
     // process is handed them at its creation (`proc.create_bare`).
     file.init(state)
+    // RUNDE K16: die Tabelle "Dateiart -> womit oeffnen". Sie steht vor
+    // dem ersten Programmstart, weil `execve` seit dieser Runde `#!`
+    // versteht und ein Doppelklick von Runde K15 auf sie zugreift.
+    ftype.init(state)
     serial.puts((&s_mb[0]) as u64)
     serial.hex(kstate.get32(mbi))
     serial.puts((&s_cmd[0]) as u64)
@@ -2002,6 +2007,36 @@ fn say_posix(state: u64) {
     serial.puts((&s_open[0]) as u64)
     serial.dec(kstate.get(state, kstate.OPENS))
     serial.nl()
+    say_k16(state)
+}
+
+// RUNDE K16: drei Zahlen, an denen die Abnahme misst, und jede von ihnen
+// ist die Grundlage einer GEGENPROBE.
+//
+//   stackgrow  wie viele Stapelseiten bei Bedarf entstanden sind. Mit
+//              `nostackgrow` MUSS hier null stehen -- und der
+//              Uebersetzer MUSS dann sterben.
+//   shebangs   wie oft `execve` ein `#!` gefunden hat.
+//   ftype      wie oft eine Datei eingeordnet wurde, und wie oft davon
+//              am INHALT statt am Namen.
+fn say_k16(state: u64) {
+    var s_h: [u8; 18] = "osum: stackgrow=\0\0"
+    var s_sb: [u8; 12] = " shebangs=\0\0"
+    var s_ft: [u8; 9] = " ftype=\0\0"
+    var s_mg: [u8; 10] = " magisch=\0"
+    var s_ex: [u8; 10] = " endung=\0\0"
+    let sk: u64 = kstate.K16_OFF + kstate.FT_SCALARS
+    serial.puts((&s_h[0]) as u64)
+    serial.dec(kstate.get(state, kstate.STACKGROW))
+    serial.puts((&s_sb[0]) as u64)
+    serial.dec(kstate.get(state, sk + kstate.FT_SHEBANGS))
+    serial.puts((&s_ft[0]) as u64)
+    serial.dec(kstate.get(state, sk + kstate.FT_CLASSIFIED))
+    serial.puts((&s_mg[0]) as u64)
+    serial.dec(kstate.get(state, sk + kstate.FT_BY_MAGIC))
+    serial.puts((&s_ex[0]) as u64)
+    serial.dec(kstate.get(state, sk + kstate.FT_BY_EXT))
+    serial.nl()
 }
 
 // `wait_for` gives a process twenty seconds, which is right for a program
@@ -2319,6 +2354,9 @@ fn mode_of(cmd: u64) -> u64 {
     if find(cmd, (&zomw[0]) as u64, 6) != 0 {
         mode = mode | kstate.M_ZOMBIE
     }
+    // RUNDE K16: die Gegenprobe zur grossen Arena.
+    var nbw: [u8; 9] = "nobigmem\0"
+    var nsw: [u8; 12] = "nostackgrow\0"
     if find(cmd, (&wmw[0]) as u64, 2) != 0 {
         mode = mode | kstate.M_WM
     }
@@ -2342,6 +2380,12 @@ fn mode_of(cmd: u64) -> u64 {
     }
     if find(cmd, (&tdw[0]) as u64, 7) != 0 {
         mode = mode | kstate.M_TTFDUMP
+    }
+    if find(cmd, (&nbw[0]) as u64, 8) != 0 {
+        mode = mode | kstate.M_NOBIG
+    }
+    if find(cmd, (&nsw[0]) as u64, 11) != 0 {
+        mode = mode | kstate.M_NOSTACK
     }
     if find(cmd, (&unixw[0]) as u64, 4) != 0 {
         mode = mode | M_UNIX

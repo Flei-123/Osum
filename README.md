@@ -413,6 +413,7 @@ bash tools/guard/run.sh       # SMEP/SMAP und das Boot-Modul (K10)
 bash tools/wm/run.sh          # Maus, Fenster, TrueType (K10)
 bash tools/hv/run.sh          # der Hypervisor: AMD-V, NPT, Gaeste (K12)
 bash tools/k14/run.sh         # VFS, /proc, /dev, FAT32, MBR/GPT (K14)
+bash tools/k16/run.sh         # der Uebersetzer auf Osum selbst (K16)
 ```
 
 Den Kernel mit Bildschirm starten und selbst hinsehen — `-vga std` ist
@@ -538,6 +539,7 @@ nachtraeglich umgeschrieben.
 | `docs/ROUNDK12.md` | ein Wirt fuer fremde Prozessoren: AMD-V, verschachtelte Seitentabellen, Gaeste, Gastmaschinen aus Ring 3 |
 | `docs/ROUNDK13.md` | **Benutzer, Rechte und `init`**: uid/gid, chmod/chown, /etc/passwd und /etc/shadow, Anmeldung, der erste Prozess |
 | `docs/ROUNDK14.md` | **VFS und fremde Dateisysteme**: die Tafel der neun Verrichtungen, /proc, /dev, FAT32 gegen `mkfs.vfat`/`mcopy`/`fsck.fat`, MBR und GPT |
+| `docs/ROUNDK16.md` | **der Uebersetzer laeuft auf dem System selbst**: `firnc` und ein Assembler in Firn auf Osum, das Ergebnis zeichengleich mit dem vom Wirt — dazu die Tabelle "Dateiart → womit oeffnen" im Kern und `#!` in `execve` |
 
 `ENTFERNEN-AUS-FIRN.md` beschreibt, was im Firn-Repository geloescht
 werden muss, damit dort nichts doppelt liegt. **Ausgefuehrt ist das
