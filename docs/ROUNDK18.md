@@ -566,7 +566,60 @@ vorher fehlte, steht jetzt als eigene Zahl da.
 die Liste aus `kernel/sys.fi` gegen die aus `lib/libc/kcall.fi` und
 meldete drei Abweichungen — genau dafür ist er da. Nachgetragen.
 
-**9. Der Bildschirm wurde aus dem Unterbrechungspfad heraus neu
+**9. Das Prüfbild lag in JEDEM `gfx`-Lauf auf dem Schirm.**
+`power_screen` prüfte nur `fb.ready()` und nicht das Wort der Runde.
+`tools/gfx/run.sh` hält den ganzen Bildschirm gegen den seriellen
+Mitschnitt und meldete *„804 Zellen, 102912 Bildpunkte, 14757 falsch"*.
+Eine Runde darf das Bild einer anderen nicht bemalen, nur weil sie
+mitübersetzt wurde. Ohne `pwr` kehrt `power_screen` jetzt sofort zurück.
+
+**10. Ein DREIFACHFEHLER, der älter ist als diese Runde.** Der
+schwerwiegendste Fund, und er gehört ins Logbuch, auch wenn er nicht aus
+dieser Runde stammt.
+
+`tools/gfx/run.sh` endete mit Beendigungscode **0** statt 21. Null heißt
+hier nicht „sauber": `-d cpu_reset` zeigt den Rücksprung in den
+Realmodus — ein **Dreifachfehler**. Nimmt man die Haken dieser Runde aus
+`trap.fi` und `tasks.fi` heraus, wird daraus ein gemeldeter Fehler, und
+der sagt, worum es geht:
+
+```
+*** EXCEPTION 14 #PF  err=0x0  cr2=0x3c1000
+  rip=0x16fb8a  ->  _F0.fb__copy_words +167   (rep movsq)
+```
+
+Der Kernel liest beim Übertragen des Zweitpuffers auf den Schirm eine
+Adresse, die nicht mehr abgebildet ist. `0x3c1000` liegt in der
+2-MiB-Kachel `0x200000..0x400000` — und genau die teilt
+`proc.map_programs`, seit `.utext` über die Kachelgrenze reicht.
+
+**Die Ursache liegt in `map_programs`:** für die *erste* berührte Kachel
+nimmt es die feste Tabelle aus `kdata` (`PT_OFF`), für **jede weitere**
+einen Rahmen aus dem Rahmenverwalter — und dieser zweite Pfad ist
+kaputt. Der Beweis, dass es nicht an K18 liegt: **derselbe Kernel ohne
+diese Runde fällt genauso**, sobald man seinem `uprog.fi` genug Füllcode
+gibt, dass `.utext` von `0x1f4000` bis `0x205000` reicht — gemessen im
+Zweig `eed1edd`, Beendigungscode 0 statt 21. Der Kommentar bei
+`map_programs` sagt seit Runde K6 voraus, dass hier etwas passiert,
+*„solange `.utext` in eine Kachel passt"*.
+
+K18 hat drei Programme in Ring 3 dazugelegt und damit als erste den
+**Anlass** geliefert: 12 Seiten → 14, und die vierzehnte liegt jenseits
+von `0x200000`.
+
+**Behoben wurde der Anlass, nicht der Fehler**, und das steht auch so im
+Bindeskript: `.utext` bekommt `ALIGN(2M)` statt `ALIGN(4K)`. Damit fängt
+der Abschnitt immer am Anfang einer Kachel an und passt in **eine**,
+solange er unter zwei Megabyte bleibt — heute stehen 56 KiB darin.
+`map_programs` nimmt wieder nur die feste Tabelle. Gemessen: `osum gfx`
+endet wieder mit 21, `__user_begin=0x200000`, `__user_end=0x20e000`, und
+das Abbild ist mit 1.703.324 Oktetten nicht größer als vorher.
+
+Der Pfad für die zweite Kachel **bleibt kaputt** — er wird nur nicht
+mehr betreten. Das gehört einer Runde, die sich den Rahmenverwalter
+vornimmt; siehe Abschnitt 15.
+
+**11. Der Bildschirm wurde aus dem Unterbrechungspfad heraus neu
 gerechnet.** Die erste Fassung ließ `screen_tick` im Zeitgeber direkt
 `blank()` rufen — und damit eine Umrechnung über 480.000 Bildpunkte
 **im Interrupt-Handler**. Das fiel bei der Fehlersuche zu Punkt 2 auf und
@@ -580,9 +633,17 @@ Kante dieser Runde und steht in Abschnitt 15.
 
 ## 15. Offene Kanten
 
-* **Blanking gehört aus dem Zeitgeber heraus.** Siehe Fehler 7: die
-  Umrechnung sollte ein Merkzeichen setzen und im Leerlaufpfad (also in
-  Aufgabenkontext) ausgeführt werden.
+* **`map_programs` kann keine zweite 2-MiB-Kachel.** Siehe Fehler 10.
+  Diese Runde hat dem Fehler den Anlass genommen (`.utext` mit
+  `ALIGN(2M)`), nicht den Fehler behoben. Wer `.utext` über zwei
+  Megabyte wachsen lässt, fällt wieder hinein. Das ist die wichtigste
+  offene Kante, die diese Runde hinterlässt — und sie war schon vorher
+  da.
+* **Der Kernstapel ist randvoll.** `osum: kstack deepest=16384 of 16384`,
+  auch ohne diese Runde. Alles, was künftig in den Unterbrechungspfad
+  gelegt wird, muss flach sein; K18 hat deshalb Wärme und Bildschirm
+  in den Aufgabenkontext verschoben. Eine Runde, die den Stapel
+  vergrößert oder den tiefsten Pfad kürzt, wäre gut angelegt.
 * **`_BST` als Methode** — ohne AML-Interpreter bleibt jeder echte Laptop
   außen vor. Das ist der größte Abstand zwischen „geht in Osum" und „geht
   auf Hardware".
@@ -595,7 +656,51 @@ Kante dieser Runde und steht in Abschnitt 15.
 
 ---
 
-## 16. Abnahme
+## 16. Was `main` schon vorher nicht konnte
+
+Diese Runde ist von `c5fe12f` abgezweigt, und dieser Stand ist in
+schlechterem Zustand, als er aussieht. Damit beim Verschmelzen niemand
+K18 dafür verantwortlich macht, hier die Messung — jeweils derselbe
+Läufer, einmal im Zweig `eed1edd` (das ist `main` plus die zwei
+Übersetzungsfehler aus Abschnitt 14.1) und einmal auf `k18-power`:
+
+| Läufer | `main` + Baufix | `k18-power` |
+|---|---|---|
+| `tools/kernel/run.sh` | 176 / 0 | **176 / 0** |
+| `tools/posix/run.sh` | — | **134 / 0** |
+| `tools/caps/run.sh` | 67 / 0 | **67 / 0** |
+| `tools/gfx/run.sh` | 76 / 0 | **76 / 0** |
+| `tools/smp/run.sh` | 59 / 0 | **59 / 0** |
+| `tools/k13/run.sh` | 77 / **22** | 82 / **17** |
+| `tools/k14/run.sh` | 140 / **12** | 144 / **8** |
+| `tools/k16/run.sh` | 58 / **6** | 58 / **6** |
+| `tools/k18/run.sh` | — | **170 / 0** |
+
+**K13, K14 und K16 sind auf `main` rot, unabhängig von dieser Runde** —
+bei K13 und K14 sogar deutlicher als hier. Beispiel aus K13: `mkfs.py`
+liest ein Abbild der Fassung 1 mit den Feldversätzen der Fassung 2 und
+gibt `/bin/passwd 1265 694 695` statt `755 0 0` aus. Das ist reines
+Python auf dem Wirt und hat mit dem Kernel nichts zu tun.
+
+**Zur Belastung der Messmaschine:** an dem Tag liefen drei Abnahmen
+gleichzeitig auf demselben Rechner (zwölf Kerne, Lastmittel bis 14,6).
+Unter dieser Last fallen mehrere Läufer in Zeitlimits, die einzeln grün
+sind — `tools/k11/run.sh` mit Beendigungscode 124, `tools/gfx/run.sh`
+mit fehlenden Bildschirmfotos, und die Gegenprobe von `tools/smp/run.sh`
+(„ohne die Sperre kommt derselbe Rahmen in zwei Hände") braucht ein
+Wettrennen, das unter Last nicht stattfindet. Einzeln nachgemessen sind
+alle drei grün. Wer die Zahlen nachrechnet, sollte die Läufer einzeln
+und auf einer ruhigen Maschine fahren.
+
+Eine Anmerkung, die hierher gehört: die SMP-Gegenprobe zählte auf `main`
+sechs Kollisionen und auf `k18-power` eine — verlangt ist ≥ 1. Der
+Abstand ist kleiner geworden, weil diese Runde die Verzahnung der Kerne
+verändert (ein zusätzlicher Zweig im Zeitgeber, ein anderer
+Leerlaufpfad). Die Zusage hält, aber sie hält knapper.
+
+---
+
+## 17. Abnahme
 
 ```
 bash tools/k18/run.sh
