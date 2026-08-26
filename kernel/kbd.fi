@@ -16,6 +16,7 @@
 import serial
 import kstate
 import tty
+import wm
 
 export { irq, translate, shifted, take, waiting, MAX_KEYS }
 
@@ -127,8 +128,27 @@ fn deliver(state: u64, c: u64) {
         kstate.set8(state + kstate.KEYBUF + n % MAX_KEYS, c as u8)
         kstate.set(state, kstate.KEYLEN, n + 1)
     }
-    if kstate.get(state, kstate.TTY_READY) != 0 {
-        tty.push(state, tty.console(), c)
+    // ROUND K9. Dieselbe Taste geht AUSSERDEM durch die Zeilendisziplin
+    // der Konsole (`kernel/tty.fi`). Der Ring darueber bleibt, wo er ist:
+    // an ihm haengen der Zaehler und die Ausgabe der Runden 59 und K1,
+    // und die sollen weiter messen, was sie gemessen haben. Was ein
+    // Prozess liest, kommt von hier an aus dem Terminal -- mit Echo,
+    // Zeilenbearbeitung und STRG-C.
+    // ROUNDE K10. Liegt ein Fensterserver darueber, entscheidet ER, wer
+    // die Taste bekommt -- das ist genau das, was ein EINGABEFOKUS ist.
+    // Ein Terminalfenster reicht sie an sein Terminal weiter (und damit
+    // an die Shell, die darin laeuft); jedes andere Fenster bekommt ein
+    // Ereignis in seinen Ring und holt es sich aus Ring 3 ab.
+    if wm.ready(state) {
+        wm.on_key(state, c as u64)
+        let ziel: u64 = wm.key_tty(state)
+        if ziel < tty.MAX_TTY && kstate.get(state, kstate.TTY_READY) != 0 {
+            tty.push(state, ziel, c as u64)
+        }
+    } else {
+        if kstate.get(state, kstate.TTY_READY) != 0 {
+            tty.push(state, tty.console(), c as u64)
+        }
     }
 }
 

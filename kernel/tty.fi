@@ -43,6 +43,7 @@
 
 import serial
 import kstate
+import wm
 import sched
 import signal
 import errno
@@ -57,7 +58,8 @@ export {
     ICRNL, INLCR, IGNCR, OPOST, ONLCR,
     VINTR, VQUIT, VERASE, VKILL, VEOF, VTIME, VMIN, VSUSP,
     K_CONSOLE, K_PTY_SLAVE, K_PTY_MASTER,
-    SINK_SERIAL, SINK_SCREEN, SINK_PEER,
+    SINK_SERIAL, SINK_SCREEN, SINK_PEER, SINK_WINDOW,
+    set_window, window_of,
     TCGETS, TCSETS, TIOCGPGRP, TIOCSPGRP, TIOCGWINSZ, TIOCSWINSZ,
     MAX_TTY, I_COUNT, I_LFLAG, I_PGRP, I_ROWS, I_COLS, I_QUEUED, I_SIGS
 }
@@ -76,6 +78,7 @@ const T_PGRP: u64 = 48 // die Vordergrund-Prozessgruppe
 const T_ROWS: u64 = 56
 const T_COLS: u64 = 64
 const T_SINK: u64 = 72
+const T_WIN: u64 = 80 // Runde K10: das Fenster bei SINK_WINDOW
 const T_LHEAD: u64 = 96 // der Ring der fertigen Zeilen
 const T_LTAIL: u64 = 104
 const T_OHEAD: u64 = 112 // der Ring der Ausgabe (Steuerseite liest ihn)
@@ -97,6 +100,16 @@ const K_PTY_MASTER: u64 = 2
 const SINK_SERIAL: u64 = 0
 const SINK_SCREEN: u64 = 1 // Runde K7 traegt sich hier ein
 const SINK_PEER: u64 = 2
+// RUNDE K10. DER TAG, VON DEM DER KOMMENTAR IN RUNDE K7B SPRACH, IST DA:
+// "Der Schalter bleibt stehen fuer den Tag, an dem der Schirm eine
+// eigene Flaeche bekommt."  Ein Terminal mit SINK_WINDOW schreibt in ein
+// FENSTER des Fensterservers -- und ZUSAETZLICH weiter auf die serielle
+// Leitung.  Das zweite ist kein Rest, sondern Absicht: der serielle
+// Mitschnitt ist in diesem Projekt die Grundwahrheit, gegen die ein
+// Bildschirmfoto gerechnet wird (`tools/gfx/schau.py konsole`).  Ginge
+// er hier verloren, waere der Text im Fenster gegen nichts mehr zu
+// halten.
+const SINK_WINDOW: u64 = 3
 
 // Die Bits von `c_lflag`, Linux' Werte (`include/uapi/asm-generic/
 // termbits.h`).
@@ -185,6 +198,14 @@ fn sink(state: u64, t: u64) -> u64 {
 // DIE EINE ZEILE, DIE RUNDE K7 SPAETER AENDERT. Steht hier SINK_SCREEN,
 // geht die Ausgabe auf den Bildschirm statt auf die serielle Leitung --
 // und keine andere Zeile dieser Datei weiss davon.
+fn set_window(state: u64, t: u64, w: u64) {
+    s(state, t, T_WIN, w)
+}
+
+fn window_of(state: u64, t: u64) -> u64 {
+    return g(state, t, T_WIN)
+}
+
 fn set_sink(state: u64, t: u64, v: u64) {
     s(state, t, T_SINK, v)
 }
@@ -432,6 +453,14 @@ fn emit(state: u64, t: u64, c: u64) {
     // nach `fb` und SINK_SERIAL und SINK_SCREEN gehen auseinander.
     // Solange sie dasselbe tun, sagt es dieser Kommentar statt eines
     // Namens, der etwas verspricht.
+    if k == SINK_WINDOW {
+        // BEIDES, und in dieser Reihenfolge: erst die Leitung, dann das
+        // Fenster.  Die serielle Ausgabe bleibt Oktett fuer Oktett die,
+        // die die Runden 59 bis K9 gemessen haben.
+        serial.put(c as u8)
+        wm.term_out(state, g(state, t, T_WIN), c)
+        return
+    }
     serial.put(c as u8)
 }
 

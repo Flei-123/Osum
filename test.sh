@@ -82,23 +82,6 @@
 #      Strom, die statistische Pruefung faellt durch), und drei Neustarts
 #      mit drei verschiedenen Saaten.
 #
-#  15. Man kann auf diesem System ARBEITEN (tools/k11/run.sh, Runde
-#      K11): ein bildschirmorientierter Editor in Ring 3 ueber den rohen
-#      Terminalmodus aus Runde K9, zwanzig Werkzeuge (find, sed, diff,
-#      patch, tar, gzip/gunzip, xargs, du, top, mount/umount, basename,
-#      dirname, tee, cut, tr, seq, env, which) und eine Shell, die eine
-#      Sprache ist (if/elif/else, while, until, for, case, Funktionen,
-#      return/break/continue/shift, test und `[`). Der Editor wird
-#      WIRKLICH BEDIENT: die Tasten kommen ueber den QEMU-Monitor am Tor
-#      0x60 an, und danach liest der WIRT die gesicherte Datei aus dem
-#      Plattenabbild und haelt sie Oktett fuer Oktett gegen die
-#      Erwartung. Jedes Werkzeug steht gegen sein GNU-Gegenstueck;
-#      `tar` und `gzip` arbeiten in BEIDE Richtungen mit dem echten
-#      `tar` und `gzip` des Wirts zusammen. Gegenproben: ohne Sichern
-#      aendert sich die Platte nicht, ohne Umschalttaste gibt es keine
-#      Grossbuchstaben, ohne `gfx` kein Bild, und nach `umount` startet
-#      kein Programm mehr von der Platte.
-#
 #  14. Das Netz (tools/net/run.sh, Runde K8): ein virtio-net-Treiber in
 #      Firn (`kernel/virtio.fi`), der TCP/IP-Stack aus Runde K3 als
 #      ABHAENGIGKEIT ueber vendor/firn/COMMIT (`vendor/net/HERKUNFT.md`),
@@ -126,6 +109,38 @@
 #      liegen, und die Summe wird am Ende des Laufs NOCH EINMAL gerechnet
 #      -- haette `mem.scan` den Bereich nicht reserviert, waere sie eine
 #      andere.
+#
+#  16. Man kann auf diesem System ARBEITEN (tools/k11/run.sh, Runde
+#      K11): ein bildschirmorientierter Editor in Ring 3 ueber den rohen
+#      Terminalmodus aus Runde K9, zwanzig Werkzeuge (find, sed, diff,
+#      patch, tar, gzip/gunzip, xargs, du, top, mount/umount, basename,
+#      dirname, tee, cut, tr, seq, env, which) und eine Shell, die eine
+#      Sprache ist (if/elif/else, while, until, for, case, Funktionen,
+#      return/break/continue/shift, test und `[`). Der Editor wird
+#      WIRKLICH BEDIENT: die Tasten kommen ueber den QEMU-Monitor am Tor
+#      0x60 an, und danach liest der WIRT die gesicherte Datei aus dem
+#      Plattenabbild und haelt sie Oktett fuer Oktett gegen die
+#      Erwartung. Jedes Werkzeug steht gegen sein GNU-Gegenstueck;
+#      `tar` und `gzip` arbeiten in BEIDE Richtungen mit dem echten
+#      `tar` und `gzip` des Wirts zusammen. Gegenproben: ohne Sichern
+#      aendert sich die Platte nicht, ohne Umschalttaste gibt es keine
+#      Grossbuchstaben, ohne `gfx` kein Bild, und nach `umount` startet
+#      kein Programm mehr von der Platte.
+#
+#
+#  17. Die Oberflaeche (tools/wm/run.sh, Runde K10): ein Zeigegeraet am
+#      zweiten Anschluss des Tastaturbausteins (`kernel/ps2m.fi`), ein
+#      Fensterserver mit Stapelreihenfolge, Eingabefokus und
+#      Bereichsverfolgung (`kernel/wm.fi`) und ein TrueType-Leser samt
+#      Rasterer mit Kantenglaettung, ganz in Firn (`kernel/ttf.fi`).
+#      Gemessen an echten Bildschirmfotos, in die ueber den QEMU-Monitor
+#      echte Mausbewegungen, Klicks und Tastendruecke eingespeist wurden
+#      -- und der Text darin nicht gegen eine Flaeche, sondern JE
+#      ZEICHEN gegen eine zweite, unabhaengige Rasterung desselben
+#      Umrisses (`tools/ttf/raster.py`). Gegenproben: `nodirty`
+#      (Bereichsverfolgung aus -- die Messung MUSS einbrechen),
+#      `nofocus` (die Taste kommt beim falschen Fenster an), `nomouse`,
+#      `nompoll` und der Lauf ganz ohne das Wort `wm`.
 #
 # Kein '|| true', kein Verschlucken von Beendigungscodes.
 set -uo pipefail
@@ -258,6 +273,9 @@ lauf "15. die Schutzbits und das Boot-Modul: SMEP, SMAP, CRC32 (tools/guard/run.
 
 lauf "16. man kann darauf arbeiten: ein Editor, zwanzig Werkzeuge, eine Shell mit Sprache (tools/k11/run.sh, Runde K11)" \
      tools/k11/run.sh k11 '^K11: |^  OK    (DIE GESICHERTE|EINE DATEI|AUF DEM BILDSCHIRM|GNU )'
+
+lauf "17. die Oberflaeche: Maus, Fensterserver, TrueType (tools/wm/run.sh, Runde K10)" \
+     tools/wm/run.sh wm '^WM: |^   wmbench: |^        im Regellauf|^        ohne Bereichsverfolgung'
 
 echo
 echo "=================================================================="
