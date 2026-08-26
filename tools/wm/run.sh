@@ -188,6 +188,27 @@ if [ $? -ne 0 ] && printf '%s' "$gg" | grep -q 'KOLLISION'; then
 else
     bad "der Kollisionspruefer findet die neue Kollision NICHT: $gg"
 fi
+# DIE VEKTORTABELLE, und sie steht hier, weil diese Runde denselben
+# Fehler eine Ebene hoeher gemacht hat: `VEC_MOUSE` bekam die 44, und 44
+# ist seit Runde K2 der NVMe-Regler.  Die Weiche in `trap.fi` ist eine
+# Kette von `if`s -- die Maus stand davor, und die Abschlussmeldungen des
+# Reglers gingen an den Maustreiber.  `nvme: irqs=0` statt `irqs=5`, in
+# JEDEM Lauf, auch ohne das Wort `wm`.  Gefunden hat es Abschnitt 6 von
+# `./test.sh`.  Ab jetzt findet es ein Programm.
+vt=$(python3 tools/kernel/karte.py kernel -v 2>/dev/null | grep -A9 'die Vektortabelle' | tail -8 | tr -s ' ' | sed 's/^ //' | tr '\n' ' ')
+if python3 tools/kernel/karte.py kernel >/dev/null 2>&1; then
+    ok "die Vektortabelle ist ueberschneidungsfrei ($vt)"
+else
+    bad "die Vektortabelle kollidiert"
+fi
+GV="$TMPD/kernel-gv"; mkdir -p "$GV"; cp kernel/*.fi "$GV/"
+sed -i 's/^const VEC_MOUSE: u64 = 46/const VEC_MOUSE: u64 = 44/' "$GV/trap.fi"
+gv=$(python3 tools/kernel/karte.py "$GV" 2>&1)
+if [ $? -ne 0 ] && printf '%s' "$gv" | grep -q 'Vektor 44 haben zwei Namen'; then
+    ok "mit VEC_MOUSE zurueck auf 44 findet der Pruefer die Kollision mit VEC_NVME"
+else
+    bad "der Vektorpruefer findet den Fehler dieser Runde NICHT: $gv"
+fi
 
 echo "== 3. die Schriften: reproduzierbar aus DejaVu geschnitten =="
 DEJAVU=${DEJAVU:-/usr/share/fonts/truetype/dejavu}
