@@ -92,6 +92,45 @@
 #      bricht jede Messung zusammen, `nicnobm` nimmt das Busmaster-Bit,
 #      `nicnoirq` maskiert den Vektor, `nicintx` nimmt den Stift statt
 #      MSI-X.
+#  21. WIDGETS UND EIN DATEIMANAGER (tools/k15/run.sh, Runde K15):
+#      zwischen dem Rechteck, das Runde K10 einer Anwendung gab, und
+#      einer Anwendung fehlte alles. Diese Runde baut es -- als
+#      BIBLIOTHEK IN RING 3 (`kernel/user/wlib.fi`, `wlibc.fi`), nicht im
+#      Kernel: Knoepfe, Beschriftungen, Textfelder mit Einfuegemarke,
+#      Auswahl und Zwischenablage, Listen und Tabellen mit
+#      Bildlaufleisten, Menues und Kontextmenues, Kontrollkaestchen,
+#      Auswahlfelder, Reiter, Dialoge, eine Ereignisschleife, drei
+#      Anordnungen und die Tastaturweiterschaltung. Im Kernel stehen
+#      sieben Aufrufe (1800..1899, `kernel/wig.fi`), die kein Widget
+#      kennen. Darauf sitzt `/bin/explorer`, die grafische Fassung von
+#      `ls` -- fuer den Nutzer "Datei-Explorer", und wer `files` tippt,
+#      landet am selben Ort: `/bin/files` ist ein ZWEITER NAME auf
+#      dieselbe Inode, kein zweites Exemplar. Dazu ein
+#      ANWENDUNGSVERZEICHNIS: ein Programm ist ein VERZEICHNIS
+#      (`/apps/<name>.prog/` mit INFO, start, symbol und daten/ --
+#      installieren heisst kopieren), und darueber ein STARTER mit
+#      Suchfeld: man tippt "folder" und findet den Dateimanager, obwohl
+#      das Wort weder im Namen noch in der Beschreibung steht.
+#      DAZU EIN NAMENSINDEX UEBER DAS GANZE DATEISYSTEM, nach dem
+#      Vorbild von "Everything": der Kernel gibt die Inode-Tabelle am
+#      Stueck heraus (1807) und fuehrt ein Aenderungsjournal (1808), und
+#      Ring 3 haelt daraus eine Liste NUR AUS NAMEN im Speicher. An 4021
+#      Namen gemessen, immer PAARWEISE gegen einen rekursiven
+#      Baumdurchlauf: dieselben Treffer, Name fuer Name, und der Index um
+#      ein Vielfaches schneller.
+#      Gemessen an echten Bildschirmfotos, in die ueber den
+#      QEMU-Monitor echte Klicks und Tastendruecke gespeist wurden --
+#      und der Text darin JE ZEICHEN gegen `tools/ttf/raster.py`, das
+#      Symbol BILDPUNKT FUER BILDPUNKT gegen `tools/k15/symbol.py`.
+#      Gegenproben: `wignohit` (keine Trefferpruefung -- kein Widget
+#      erfaehrt vom Klick), `wignoclip` (keine Zwischenablage),
+#      `wignokeys` (dieselbe Suche ohne die Schluesselwoerter -- dann
+#      findet "folder" NICHTS), `wignoidx` (dieselbe Suche ohne den
+#      Namensindex -- dann findet "blau" NICHTS), `suchen -n` (dieselben
+#      drei Dateiaenderungen, aber das Journal wird nicht abgeholt --
+#      dann weiss der Index von keiner), `nodirty`, `nofocus`, `nomouse`
+#      und der Lauf ganz ohne `wig`.
+#
 #  15. EIN WIRT FUER FREMDE PROZESSOREN (tools/hv/run.sh, Runde K12):
 #      AMD-V, verschachtelte Seitentabellen, sechs Gaeste. Der Kernel
 #      legt eine Gastmaschine an, tritt ein, wertet den Austrittsgrund
@@ -365,6 +404,8 @@ lauf "20. die VFS-Schicht und die fremden Dateisysteme: /proc, /dev, FAT32, MBR 
 # ob er bestanden hat.
 lauf "21. der Uebersetzer laeuft auf dem System selbst, und eine Datei weiss, womit man sie oeffnet (tools/k16/run.sh, Runde K16)" \
      tools/k16/run.sh k16 '^K16: |^  OK    (ZEICHENGLEICH|DAS AUF OSUM|DER DOPPELKLICK|DER AUSLEGER|DER INHALT GEHT VOR|fas uebersetzt|16 von 16)'
+lauf "22. Widgets und der Dateimanager: eine Bibliothek in Ring 3 (tools/k15/run.sh, Runde K15)" \
+     tools/k15/run.sh k15 '^K15: |^        -> |^  OK    (die Anordnung|ein Klick auf das Kaestchen|mit Bereichsverfolgung|und /daten/neu|der Verweis spart|getippt |OHNE (die Schluesselwoerter|das Journal|den Namensindex)|[0-9]\. (DER AUFBAU|DIE SUCHE|DIE GEGENPROBE|der Index)|und DIESELBEN NAMEN|nach dem (Anlegen|Umbenennen)|das Symbol des Dateimanagers)'
 
 echo
 echo "=================================================================="

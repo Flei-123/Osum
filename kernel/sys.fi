@@ -52,6 +52,9 @@ import cap
 import hv
 import guard
 import wm
+import wig
+import nidx
+import ps2m
 import fb
 import ftype
 
@@ -141,6 +144,9 @@ export {
 // der Stelle, an der dieser Kernel seine eigenen Aufrufe fuehrt.
 //
 //         1400..1499   RUNDE K11 -- Umgebung und Einhaengen
+//         1800..1899   RUNDE K15 -- die Naht zur Widget-Bibliothek
+//                      (kernel/wig.fi). Sieben Aufrufe, und keiner
+//                      davon weiss, was ein Knopf ist.
 //
 // ZUR VORGABE "ab Nummer 120 aufwaerts" fuer Runde K11: auf DIESER Karte
 // gelesen ist das der naechste freie EIGENE Hunderterblock, also 1400.
@@ -360,6 +366,49 @@ const WM_MOVE: u64 = 2106 // (h, xy) -> 0
 const WM_CLOSE: u64 = 2107 // (h) -> 0
 const WM_WRITE: u64 = 2108 // (h, p, n) -> Oktette (nur Terminalfenster)
 const WM_MAXNR: u64 = 2108
+
+// ---------------------------------------------------- RUNDE K15
+//
+// DIE NAHT ZUR WIDGET-BIBLIOTHEK. Sieben Aufrufe, alle klein, und der
+// Grund fuer jeden steht in `kernel/wig.fi`. Sie liegen bei 1800 und
+// nicht in der nativen ABI bei 2100, weil sie KEINE Autoritaet
+// verteilen: eine Glyphe, eine Unterschneidung und die Zwischenablage
+// sind kein Fenster. Der einzige, der ein Handle braucht, ist der, der
+// in ein Fenster schreibt -- WIG_BLIT.
+const WIG_BASE: u64 = 1800
+const WIG_BLIT: u64 = 1800 // (h, xy, wh, quelle, zeilenlaenge) -> Bildpunkte
+const WIG_GLYPH: u64 = 1801 // (schrift, px, zeichen, aus, max) -> Oktette
+const WIG_KERN: u64 = 1802 // (schrift, px, c1, c2) -> 26.6
+const WIG_CLIPSET: u64 = 1803 // (quelle, n) -> n
+const WIG_CLIPGET: u64 = 1804 // (ziel, max) -> n
+const WIG_SCREEN: u64 = 1805 // (was) -> Zahl
+const WIG_CURSOR: u64 = 1806 // (form) -> 0
+// ZWEITER NACHTRAG -- DER NAMENSINDEX. Drei Aufrufe, und sie verlangen
+// KEINE Oberflaeche: gesucht wird auch in einem Terminal, und der
+// Messlauf faehrt ohne Fensterserver.
+const WIG_SCAN: u64 = 1807 // (zeiger auf lauf, ziel, saetze) -> saetze
+const WIG_JRNL: u64 = 1808 // (ab nummer, ziel, saetze) -> saetze
+const WIG_IDXINFO: u64 = 1809 // (was) -> Zahl
+const WIG_MAXNR: u64 = 1809
+
+// Was WIG_IDXINFO beantwortet.
+const WX_INODES: u64 = 0 // wie viele Inodes die Tabelle hat
+const WX_IUSED: u64 = 1 // wie viele davon belegt sind
+const WX_JSEQ: u64 = 2 // wie viele Aenderungen es je gab
+const WX_JLOST: u64 = 3 // wie viele der Ring verworfen hat
+const WX_JRING: u64 = 4 // wie viele Saetze der Ring fasst
+const WX_REC: u64 = 5 // wie lang ein Satz ist
+
+// Was WIG_SCREEN beantwortet. Die Bildschirmgroesse braucht jede
+// Bibliothek, die ein Menue aufklappt: ein Menue, das unten aus dem Bild
+// laeuft, klappt nach oben auf, und das laesst sich nur entscheiden,
+// wenn man weiss, wo unten ist.
+const WS_W: u64 = 0
+const WS_H: u64 = 1
+const WS_MX: u64 = 2
+const WS_MY: u64 = 3
+const WS_BTN: u64 = 4
+const WS_CLIPLEN: u64 = 5
 
 const WI_W: u64 = 0
 const WI_H: u64 = 1
@@ -1043,6 +1092,11 @@ fn k13_call(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64,
     }
     if number == SYS_OSUM_USERINFO {
         return do_userinfo(state, me, a0)
+    }
+
+    // RUNDE K15: die Naht zur Widget-Bibliothek.
+    if number >= WIG_BASE && number <= WIG_MAXNR {
+        return wig_call(state, me, number, a0, a1, a2, a3, a4)
     }
     return neg(errno.E_NOSYS)
 }
@@ -2570,10 +2624,27 @@ fn do_getdents(state: u64, me: u64, fd: u64, out: u64, size: u64) -> u64 {
     var written: u64 = 0
     var pos: u64 = file.open_off(state, of)
     var going: bool = true
+    // RUNDE K15, ZWEITER NACHTRAG: DIE STELLE IM VERZEICHNIS UND NICHT
+    // DIE LAUFENDE NUMMER. `fs.entry_at` zaehlt fuer JEDEN Aufruf von
+    // vorn, wie viele belegte Eintraege davor lagen -- diese Schleife war
+    // damit quadratisch. Unsichtbar bei acht Dateien; bei viertausend
+    // lief der Baumdurchlauf zehn Minuten und war nicht fertig.
+    //
+    // Es MUSSTE auffallen, denn die Gegenprobe dieser Runde IST der
+    // Baumdurchlauf: ein Durchlauf, den ein quadratischer Kernelaufruf
+    // ausbremst, liesse den Namensindex besser aussehen, als er ist.
+    //
+    // `d_off` heisst in jedem Unix "wo im Verzeichnis" und nicht "der
+    // wievielte" -- was jetzt drinsteht, ist also auch das richtige.
+    let plaetze: u64 = fs.slot_count(state, dir)
     while going {
-        let ino: u64 = fs.entry_at(state, dir, pos, named)
-        if ino == 0 {
+        if pos >= plaetze {
             going = false
+        } else {
+        let ino: u64 = fs.entry_slot(state, dir, pos, named)
+        if ino == 0 {
+            pos = pos + 1
+            file.open_set_off(state, of, pos)
         } else {
             // What the file system writes is its own directory entry: the
             // inode number in the first eight octets, the name in the
@@ -2616,6 +2687,7 @@ fn do_getdents(state: u64, me: u64, fd: u64, out: u64, size: u64) -> u64 {
                 pos = pos + 1
                 file.open_set_off(state, of, pos)
             }
+        }
         }
     }
     return written
@@ -5519,4 +5591,206 @@ fn do_userinfo(state: u64, me: u64, out: u64) -> u64 {
         return neg(errno.E_FAULT)
     }
     return 0
+}
+
+// ----------------------------------------- RUNDE K15, ZWEITER NACHTRAG
+//
+// DER TABELLENLAUF UND DAS JOURNAL. Zusammen sind sie die Naht, an der
+// ein Namensindex in Ring 3 haengt -- das Gegenstueck zu dem, was
+// "Everything" auf NTFS aus der Master File Table und dem USN-Journal
+// holt. Der INDEX selbst steht nicht hier und nicht im Kernel: er ist
+// eine Liste von Namen im Speicher des suchenden Programms
+// (`kernel/user/nidx.fi`). Der Kernel gibt die Tabelle heraus, mehr
+// nicht.
+//
+// WARUM DAS UEBERHAUPT EIN SYSTEMAUFRUF IST: Ring 3 kann Verzeichnisse
+// lesen (`getdents64`), aber nur EINZELN und nur ueber PFADE -- und
+// genau das ist der Baumdurchlauf, gegen den der Index sich beweisen
+// soll. Die Tabelle am Stueck zu lesen heisst, an den Bloecken zu sein,
+// und dort ist der Kernel.
+//
+// Der Puffer in der Mitte ist `kstate.BLOCK_OFF`, die Seite, die
+// Systemaufrufe ohnehin zum Hin- und Herkopieren nehmen: 4096 Oktette,
+// also 63 Saetze je Aufruf (die ersten 64 Oktette haelt der Lauf selbst).
+// Ein Aufruf je 63 Namen ist bei 4000 Dateien 64 Aufrufe -- der Grund,
+// warum die Grenze hier steht und nicht bei einem Satz je Aufruf.
+const SCAN_MAX: u64 = 63 // (BLOCK_MAX - 64) / nidx.REC
+
+fn do_scan(state: u64, me: u64, curp: u64, dst: u64, max: u64) -> u64 {
+    if kstate.get(state, kstate.FS_READY) == 0 {
+        return neg(errno.E_NODEV)
+    }
+    var n: u64 = max
+    if n == 0 {
+        return 0
+    }
+    if n > SCAN_MAX {
+        n = SCAN_MAX
+    }
+    if !proc.user_ok(state, me, curp, 8) {
+        return neg(errno.E_FAULT)
+    }
+    if !proc.user_ok(state, me, dst, n * nidx.REC) {
+        return neg(errno.E_FAULT)
+    }
+    let cur: u64 = state + kstate.BLOCK_OFF
+    let buf: u64 = cur + 64
+    if !copy_in(state, me, cur, curp, 8) {
+        return neg(errno.E_FAULT)
+    }
+    let got: u64 = fs.scan(state, cur, buf, n)
+    if !copy_out(state, me, curp, cur, 8) {
+        return neg(errno.E_FAULT)
+    }
+    if got != 0 {
+        if !copy_out(state, me, dst, buf, got * nidx.REC) {
+            return neg(errno.E_FAULT)
+        }
+    }
+    return got
+}
+
+fn do_jrnl(state: u64, me: u64, from: u64, dst: u64, max: u64) -> u64 {
+    var n: u64 = max
+    if n == 0 {
+        return 0
+    }
+    if n > nidx.MAXJ {
+        n = nidx.MAXJ
+    }
+    if !proc.user_ok(state, me, dst, n * nidx.REC) {
+        return neg(errno.E_FAULT)
+    }
+    let buf: u64 = state + kstate.BLOCK_OFF
+    let got: u64 = nidx.take(state, from, buf, n)
+    if got != 0 {
+        if !copy_out(state, me, dst, buf, got * nidx.REC) {
+            return neg(errno.E_FAULT)
+        }
+    }
+    return got
+}
+
+// ------------------------------------------------------------ RUNDE K15
+//
+// DIE NAHT ZUR WIDGET-BIBLIOTHEK, und sie ist mit Absicht so klein, dass
+// sie auf eine Seite passt. Alles, was ein Widget ist -- ein Knopf, ein
+// Textfeld, eine Bildlaufleiste, ein Menue -- steht in
+// `kernel/user/wlib.fi`, in Ring 3. Was hier steht, kann dort nicht
+// stehen: der Rasterer, die Fensterpuffer, die Zwischenablage und das
+// Zeigerbild.
+//
+// EINE ABSICHTLICHE UNGLEICHHEIT: WIG_BLIT verlangt ein Handle mit
+// R_WRITE, die uebrigen sechs verlangen keins. Das ist keine Nachlaessig-
+// keit, sondern die Trennlinie dieser ABI: ein Fenster ist Autoritaet
+// (wer es nicht bekommen hat, malt nicht hinein), eine Glyphe ist es
+// nicht. Die Zwischenablage ist der Grenzfall, und er ist benannt: sie
+// ist SYSTEMWEIT, jeder Prozess darf lesen und schreiben, und das ist
+// genau das, was eine Zwischenablage ist. Wer das nicht will, braucht
+// einen Zwischenablagedienst mit eigenen Handles -- das ist eine Runde
+// fuer sich und steht so in docs/ROUNDK15.md.
+fn wig_call(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64,
+    a3: u64, a4: u64) -> u64 {
+    // DIE DREI DES ZWEITEN NACHTRAGS STEHEN VOR DER PRUEFUNG AUF EINE
+    // OBERFLAECHE. Ein Namensindex hat mit Fenstern nichts zu tun; der
+    // Messlauf `wigidx` faehrt ohne `wm`, und ein `find` im Terminal
+    // koennte denselben Index benutzen.
+    if number == WIG_SCAN {
+        return do_scan(state, me, a0, a1, a2)
+    }
+    if number == WIG_JRNL {
+        return do_jrnl(state, me, a0, a1, a2)
+    }
+    if number == WIG_IDXINFO {
+        if a0 == WX_INODES {
+            return fs.inode_count(state)
+        }
+        if a0 == WX_IUSED {
+            return fs.used_inodes(state)
+        }
+        if a0 == WX_JSEQ {
+            return nidx.seq(state)
+        }
+        if a0 == WX_JLOST {
+            return nidx.lost(state)
+        }
+        if a0 == WX_JRING {
+            return nidx.MAXJ
+        }
+        if a0 == WX_REC {
+            return nidx.REC
+        }
+        return neg(errno.E_INVAL)
+    }
+    if !wm.ready(state) || !wig.ready(state) {
+        return neg(errno.E_NODEV)
+    }
+    if number == WIG_KERN {
+        return wig.kern_of(state, a0, a1, a2, a3) as u64
+    }
+    if number == WIG_GLYPH {
+        let n: u64 = wig.glyph_into(state, me, a0, a1, a2, a3, a4)
+        if n == 0 {
+            return neg(errno.E_INVAL)
+        }
+        return n
+    }
+    if number == WIG_CLIPSET {
+        if a1 > wig.CLIP_MAX {
+            return neg(errno.E_RANGE)
+        }
+        return wig.clip_set(state, me, a0, a1)
+    }
+    if number == WIG_CLIPGET {
+        return wig.clip_get(state, me, a0, a1)
+    }
+    if number == WIG_SCREEN {
+        if a0 == WS_W {
+            return fb.width(state)
+        }
+        if a0 == WS_H {
+            return fb.height(state)
+        }
+        if a0 == WS_MX {
+            return ps2m.x(state)
+        }
+        if a0 == WS_MY {
+            return ps2m.y(state)
+        }
+        if a0 == WS_BTN {
+            return ps2m.buttons(state)
+        }
+        if a0 == WS_CLIPLEN {
+            return wig.clip_len(state)
+        }
+        return neg(errno.E_INVAL)
+    }
+    if number == WIG_CURSOR {
+        if a0 > 1 {
+            return neg(errno.E_INVAL)
+        }
+        wig.set_shape(state, a0)
+        return 0
+    }
+    // Bleibt WIG_BLIT, und der braucht ein Fenster.
+    let slot: u64 = cap.find(state, me, a0)
+    if slot >= cap.MAX_CAPS {
+        return neg(errno.E_BADF)
+    }
+    if cap.kind_at(state, me, slot) != cap.K_CHANNEL {
+        return neg(errno.E_INVAL)
+    }
+    if !cap.rights_contains(cap.rights_at(state, me, slot), cap.R_WRITE) {
+        return neg(errno.E_ACCES)
+    }
+    let i: u64 = win_of(state, cap.object_at(state, me, slot))
+    if i >= wm.MAX_WIN {
+        return neg(errno.E_BADF)
+    }
+    var stride: u64 = a4
+    if stride == 0 {
+        stride = (a2 >> 16) & 0xFFFF
+    }
+    return wig.blit(state, me, i, (a1 >> 16) & 0xFFFF, a1 & 0xFFFF,
+        (a2 >> 16) & 0xFFFF, a2 & 0xFFFF, a3, stride)
 }

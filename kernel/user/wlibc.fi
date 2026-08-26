@@ -1,0 +1,862 @@
+// kernel/user/wlibc.fi -- Runde K15: DER ZEICHENKERN DER
+// WIDGET-BIBLIOTHEK. Ring 3, kein Kernel.
+//
+// Hier steht alles, was ein Widget zum Malen braucht und was kein
+// Widget kennt: die Zeichenflaeche, die Grundformen, der
+// Glyphenspeicher, die Textsetzung und das Farbschema. `wlib.fi` liegt
+// darueber und weiss, was ein Knopf ist; diese Datei weiss es nicht.
+//
+// DIE ZEICHENFLAECHE IST EIN STREIFEN, UND DAS IST DIE WICHTIGSTE
+// ENTSCHEIDUNG DIESER DATEI.
+//
+// Ein Prozess hat in diesem System 0x40020000..0x400F0000 fuer Halde
+// und Abbildungen -- 832 Kilooktett, und der Grund steht in
+// `kernel/sys.fi`: `brk` waechst von unten, `mmap` von oben, und
+// dazwischen ist Schluss. Ein Fensterpuffer von 640 x 420 Bildpunkten
+// ist 1 075 200 Oktette. Er passt nicht. Zwei davon (Fenster und
+// Dialog) erst recht nicht.
+//
+// Also wird nicht das Fenster gemalt, sondern ein STREIFEN daraus:
+// 800 Bildpunkte breit (der ganze Schirm) und 81 Zeilen hoch, 256
+// Kilooktett. Ein Neuzeichnen laeuft ueber so viele Streifen, wie der
+// schmutzige Bereich hoch ist, und schiebt jeden mit EINEM Aufruf
+// hinueber (WIG_BLIT). Was das kostet: jedes Widget wird je Streifen
+// einmal gezeichnet, den es beruehrt -- also ein- bis zweimal, nicht
+// sechsmal. Was es spart: den ganzen Puffer.
+//
+// UND ES IST DER GRUND, WARUM DIE BEREICHSVERFOLGUNG HIER SICHTBAR
+// WIRD. Eine blinkende Einfuegemarke ist 2 x 16 Bildpunkte. Sie kostet
+// EINEN Streifen von 2 x 16, einen Aufruf und 32 Bildpunkte im Kernel.
+// Wer statt dessen das Fenster flusht, kostet 851 200. Der Faktor steht
+// gemessen in docs/ROUNDK15.md, und `nodirty` ist die Gegenprobe.
+//
+// TEXT WIRD NICHT VOM SERVER GESETZT, SONDERN HIER. Der Kernel liefert
+// je Zeichen das DECKUNGSFELD (WIG_GLYPH) und die Unterschneidung
+// (WIG_KERN); gemischt wird in Ring 3, mit derselben Zeile wie
+// `wm.blend` und `tools/gfx/schau.py`. Nur so gehoert der Bibliothek
+// die Farbe, der Beschnitt und der Auswahlhintergrund -- und nur so
+// laesst sich ein Bildschirmfoto JE ZEICHEN gegen
+// `tools/ttf/raster.py` rechnen.
+
+profile kernel
+
+import ulib
+import libc.io
+import libc.mem
+
+export {
+    start, ready, screen_w, screen_h, mouse_x, mouse_y,
+    surf_w, surf_rows, band_y, set_band, surface,
+    clip_set, clip_x0, clip_y0, clip_x1, clip_y1,
+    px, hline, vline, rect, frame, frame3, blend,
+    text_at, text_w, text_h, glyph_w, ascent_of, mono_cell,
+    push, push_rect, cursor_shape,
+    clip_put, clip_take, clip_len,
+    theme, theme_load, theme_named, theme_count, theme_name_at,
+    F_UI, F_MONO, PX_UI, PX_MONO,
+    T_BG, T_FG, T_DIM, T_PANEL, T_BTN, T_BTNHI, T_BTNDN, T_LINE,
+    T_SEL, T_SELFG, T_FOCUS, T_ENTRY, T_HEAD, T_SCROLL, T_THUMB,
+    T_ACCENT, T_DLG, T_MENU, T_COUNT,
+    WIG_BLIT, WIG_GLYPH, WIG_KERN, WIG_CLIPSET, WIG_CLIPGET,
+    WIG_SCREEN, WIG_CURSOR,
+    WM_CREATE, WM_FILL, WM_TEXT, WM_EVENT, WM_INFO, WM_FLUSH, WM_MOVE,
+    WM_CLOSE, WI_W, WI_H, WI_X, WI_Y, WI_ID, WI_EVENTS, WI_FOCUS,
+    EV_KEY, EV_DOWN, EV_UP, EV_MOVE, EV_CLOSE, EV_FOCUS, EV_RESIZE,
+    sys5, sys3w
+}
+
+// ------------------------------------------------------- die Nummern
+
+const WIG_BLIT: u64 = 1800
+const WIG_GLYPH: u64 = 1801
+const WIG_KERN: u64 = 1802
+const WIG_CLIPSET: u64 = 1803
+const WIG_CLIPGET: u64 = 1804
+const WIG_SCREEN: u64 = 1805
+const WIG_CURSOR: u64 = 1806
+
+const WM_CREATE: u64 = 2100
+const WM_FILL: u64 = 2101
+const WM_TEXT: u64 = 2102
+const WM_EVENT: u64 = 2103
+const WM_INFO: u64 = 2104
+const WM_FLUSH: u64 = 2105
+const WM_MOVE: u64 = 2106
+const WM_CLOSE: u64 = 2107
+
+const WI_W: u64 = 0
+const WI_H: u64 = 1
+const WI_X: u64 = 2
+const WI_Y: u64 = 3
+const WI_ID: u64 = 4
+const WI_EVENTS: u64 = 5
+const WI_FOCUS: u64 = 8
+
+const EV_KEY: u64 = 1
+const EV_DOWN: u64 = 2
+const EV_UP: u64 = 3
+const EV_MOVE: u64 = 4
+const EV_CLOSE: u64 = 5
+const EV_FOCUS: u64 = 6
+const EV_RESIZE: u64 = 7
+
+const SYS_MMAP: u64 = 9
+const PROT_RW: u64 = 3
+const MAP_ANON_PRIV: u64 = 34
+
+// Die beiden Schriften, die der Server geladen hat, und die Groessen,
+// in denen er sie setzt (`kmain.fi`: PX_UI 15, PX_MONO 16). Dieselben
+// Zahlen hier, weil eine Oberflaeche, die den Titel in 15 und ihren
+// eigenen Text in 14 setzt, zwei Schriftbilder hat.
+const F_UI: u64 = 0
+const F_MONO: u64 = 1
+const PX_UI: u64 = 15
+const PX_MONO: u64 = 16
+
+// ------------------------------------------------------- die Flaeche
+
+// 800 x 81 Bildpunkte = 259 200 Oktette, aufgerundet 64 Seiten.
+const SURF_W: u64 = 800
+const SURF_ROWS: u64 = 81
+const SURF_BYTES: u64 = 259200
+
+static mut s_surf: u64 = 0
+static mut s_band: u64 = 0
+static mut s_scr_w: u64 = 0
+static mut s_scr_h: u64 = 0
+static mut s_cx0: u64 = 0
+static mut s_cy0: u64 = 0
+static mut s_cx1: u64 = 0
+static mut s_cy1: u64 = 0
+static mut s_ready: u64 = 0
+static mut s_noclip: u64 = 0
+static mut s_shape: u64 = 0
+
+fn sys5(number: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> u64 {
+    return asm("syscall", out("rax"), in("rax") number, in("rdi") a0,
+        in("rsi") a1, in("rdx") a2, in("r10") a3, in("r8") a4,
+        clobber("rcx"), clobber("r11"), clobber("memory"))
+}
+
+fn sys3w(number: u64, a0: u64, a1: u64, a2: u64) -> u64 {
+    return asm("syscall", out("rax"), in("rax") number, in("rdi") a0,
+        in("rsi") a1, in("rdx") a2, clobber("rcx"), clobber("r11"),
+        clobber("memory"))
+}
+
+fn map_surface() -> u64 {
+    let no: u64 = 0 -% 1
+    return asm("syscall", out("rax"), in("rax") SYS_MMAP, in("rdi") 0,
+        in("rsi") SURF_BYTES, in("rdx") PROT_RW, in("r10") MAP_ANON_PRIV,
+        in("r8") no, in("r9") 0, clobber("rcx"), clobber("r11"),
+        clobber("memory"))
+}
+
+fn start(noclip: bool) -> bool {
+    if s_ready != 0 {
+        return true
+    }
+    let p: u64 = map_surface()
+    if ulib.bad(p) || p == 0 {
+        return false
+    }
+    s_surf = p
+    s_scr_w = sys3w(WIG_SCREEN, 0, 0, 0)
+    s_scr_h = sys3w(WIG_SCREEN, 1, 0, 0)
+    if ulib.bad(s_scr_w) || s_scr_w == 0 || s_scr_w > SURF_W {
+        return false
+    }
+    if noclip {
+        s_noclip = 1
+    }
+    theme_defaults()
+    s_ready = 1
+    return true
+}
+
+fn ready() -> bool {
+    return s_ready != 0
+}
+
+fn surface() -> u64 {
+    return s_surf
+}
+
+fn surf_w() -> u64 {
+    return SURF_W
+}
+
+fn surf_rows() -> u64 {
+    return SURF_ROWS
+}
+
+fn band_y() -> u64 {
+    return s_band
+}
+
+fn screen_w() -> u64 {
+    return s_scr_w
+}
+
+fn screen_h() -> u64 {
+    return s_scr_h
+}
+
+fn mouse_x() -> u64 {
+    return sys3w(WIG_SCREEN, 2, 0, 0)
+}
+
+fn mouse_y() -> u64 {
+    return sys3w(WIG_SCREEN, 3, 0, 0)
+}
+
+// Der Streifen faengt bei dieser Fensterzeile an. Alles, was danach
+// gemalt wird, rechnet in FENSTERKOORDINATEN -- die Umrechnung auf die
+// Flaeche steht an genau einer Stelle, in `px`.
+fn set_band(y: u64) {
+    s_band = y
+}
+
+fn clip_set(x0: u64, y0: u64, x1: u64, y1: u64) {
+    s_cx0 = x0
+    s_cy0 = y0
+    s_cx1 = x1
+    s_cy1 = y1
+}
+
+fn clip_x0() -> u64 {
+    return s_cx0
+}
+
+fn clip_y0() -> u64 {
+    return s_cy0
+}
+
+fn clip_x1() -> u64 {
+    return s_cx1
+}
+
+fn clip_y1() -> u64 {
+    return s_cy1
+}
+
+// ---------------------------------------------------- die Grundformen
+
+fn px(x: u64, y: u64, color: u64) {
+    if x < s_cx0 || x >= s_cx1 || y < s_cy0 || y >= s_cy1 {
+        return
+    }
+    if x >= SURF_W || y < s_band {
+        return
+    }
+    let r: u64 = y - s_band
+    if r >= SURF_ROWS {
+        return
+    }
+    __mmio_write32((s_surf +% (r *% SURF_W +% x) *% 4) as *mut u32,
+        color as u32)
+}
+
+fn get(x: u64, y: u64) -> u64 {
+    if x >= SURF_W || y < s_band {
+        return 0
+    }
+    let r: u64 = y - s_band
+    if r >= SURF_ROWS {
+        return 0
+    }
+    return __mmio_read32((s_surf +% (r *% SURF_W +% x) *% 4)
+        as *mut u32) as u64
+}
+
+// DIESELBE ZEILE WIE `wm.blend` UND WIE `mische` in
+// tools/gfx/schau.py. Sie steht dreimal, in drei Sprachen, und das ist
+// kein Versehen: ein bildpunktgenauer Vergleich eines
+// kantengeglaetteten Zeichens ist nur moeglich, wenn alle drei
+// dieselbe Rundung nehmen.
+fn blend(alt: u64, neu: u64, a: u64) -> u64 {
+    if a == 0 {
+        return alt
+    }
+    if a >= 255 {
+        return neu
+    }
+    let ia: u64 = 255 - a
+    let r: u64 = (((alt >> 16) & 0xFF) * ia + ((neu >> 16) & 0xFF) * a) / 255
+    let g: u64 = (((alt >> 8) & 0xFF) * ia + ((neu >> 8) & 0xFF) * a) / 255
+    let b: u64 = ((alt & 0xFF) * ia + (neu & 0xFF) * a) / 255
+    return (r << 16) | (g << 8) | b
+}
+
+fn rect(x: u64, y: u64, w: u64, h: u64, color: u64) {
+    if w == 0 || h == 0 {
+        return
+    }
+    var r: u64 = 0
+    while r < h {
+        var c: u64 = 0
+        while c < w {
+            px(x + c, y + r, color)
+            c = c + 1
+        }
+        r = r + 1
+    }
+}
+
+fn hline(x: u64, y: u64, w: u64, color: u64) {
+    rect(x, y, w, 1, color)
+}
+
+fn vline(x: u64, y: u64, h: u64, color: u64) {
+    rect(x, y, 1, h, color)
+}
+
+// Ein Rahmen von einem Bildpunkt -- vier Linien und KEINE Fuellung.
+// `tools/gfx/schau.py rechteck` rechnet genau diese vier Kanten nach
+// und prueft dazu, dass einen Bildpunkt daneben die Farbe NICHT steht.
+fn frame(x: u64, y: u64, w: u64, h: u64, color: u64) {
+    if w < 2 || h < 2 {
+        return
+    }
+    hline(x, y, w, color)
+    hline(x, y + h - 1, w, color)
+    vline(x, y, h, color)
+    vline(x + w - 1, y, h, color)
+}
+
+// Ein Rahmen, der eine Kante hat: hell oben und links, dunkel unten und
+// rechts (oder umgekehrt, wenn `ein` gesetzt ist). Zwei Zeilen Code und
+// der ganze Unterschied zwischen "ein Rechteck" und "ein Knopf".
+fn frame3(x: u64, y: u64, w: u64, h: u64, hell: u64, dunkel: u64,
+    ein: bool) {
+    var o: u64 = hell
+    var u: u64 = dunkel
+    if ein {
+        o = dunkel
+        u = hell
+    }
+    if w < 2 || h < 2 {
+        return
+    }
+    hline(x, y, w, o)
+    vline(x, y, h, o)
+    hline(x, y + h - 1, w, u)
+    vline(x + w - 1, y, h, u)
+}
+
+// ------------------------------------------------- der Glyphenspeicher
+//
+// Der Kernel rastert und speichert zwischen (`kernel/ttf.fi`); DIESER
+// Speicher hier spart den SYSTEMAUFRUF. Ohne ihn kostet jede Textzeile
+// je Zeichen einen Aufruf samt Kopie des Deckungsfeldes -- bei sechs
+// Streifen je Neuzeichnen sechsmal. Mit ihm kostet ein Zeichen den
+// Aufruf genau einmal im ganzen Programmlauf.
+//
+// Offene Adressierung mit linearem Sondieren, wie im Kernel. Der
+// Schluessel traegt Schrift, Groesse und Zeichen. Freigegeben wird
+// nichts.
+
+const GC_SLOTS: u64 = 512
+const GC_KEY: u64 = 0
+const GC_W: u64 = 1
+const GC_H: u64 = 2
+const GC_L: u64 = 3
+const GC_T: u64 = 4
+const GC_ADV: u64 = 5
+const GC_DATA: u64 = 6
+const GC_FIELDS: u64 = 8
+
+static mut gc: [u64; 4096] = [0 as u64; 4096]
+static mut gc_used: u64 = 0
+static mut gc_calls: u64 = 0
+static mut gbuf: [u8; 2048] = [0 as u8; 2048]
+
+fn gkey(f: u64, px_: u64, c: u64) -> u64 {
+    return (f << 24) | (px_ << 16) | (c & 0xFFFF) | 0x8000000000000000
+}
+
+fn ghash(k: u64) -> u64 {
+    var h: u64 = k *% 1099511628211
+    h = h ^ (h >> 29)
+    return h % GC_SLOTS
+}
+
+fn gfind(f: u64, px_: u64, c: u64) -> u64 {
+    let k: u64 = gkey(f, px_, c)
+    var i: u64 = ghash(k)
+    var n: u64 = 0
+    while n < GC_SLOTS {
+        let at: u64 = i * GC_FIELDS
+        if gc[(at + GC_KEY) as usize] == k {
+            return at
+        }
+        if gc[(at + GC_KEY) as usize] == 0 {
+            return gload(at, f, px_, c, k)
+        }
+        i = (i + 1) % GC_SLOTS
+        n = n + 1
+    }
+    return 0xFFFFFFFFFFFFFFFF
+}
+
+fn gload(at: u64, f: u64, px_: u64, c: u64, k: u64) -> u64 {
+    let n: u64 = sys5(WIG_GLYPH, f, px_, c, (&gbuf[0 as usize]) as u64,
+        2048)
+    if ulib.bad(n) || n < 48 {
+        return 0xFFFFFFFFFFFFFFFF
+    }
+    gc_calls = gc_calls + 1
+    let b: u64 = (&gbuf[0 as usize]) as u64
+    let gw: u64 = __mmio_read64((b + 0) as *mut u64)
+    let gh: u64 = __mmio_read64((b + 8) as *mut u64)
+    gc[(at + GC_KEY) as usize] = k
+    gc[(at + GC_W) as usize] = gw
+    gc[(at + GC_H) as usize] = gh
+    gc[(at + GC_L) as usize] = __mmio_read64((b + 16) as *mut u64)
+    gc[(at + GC_T) as usize] = __mmio_read64((b + 24) as *mut u64)
+    gc[(at + GC_ADV) as usize] = __mmio_read64((b + 32) as *mut u64)
+    gc[(at + GC_DATA) as usize] = 0
+    if gw * gh > 0 {
+        let p: u64 = mem.alloc(gw * gh)
+        if p != 0 {
+            mem.copy(p, b + 48, gw * gh)
+            gc[(at + GC_DATA) as usize] = p
+        } else {
+            gc[(at + GC_W) as usize] = 0
+            gc[(at + GC_H) as usize] = 0
+        }
+    }
+    gc_used = gc_used + 1
+    return at
+}
+
+fn kern26(f: u64, px_: u64, c1: u64, c2: u64) -> i64 {
+    return sys5(WIG_KERN, f, px_, c1, c2, 0) as i64
+}
+
+// EINE GLYPHE AUF DIE FLAECHE, in der Farbe, die der Aufrufer will --
+// und auf den Beschnitt beschnitten. Genau `wm.draw_glyph_clip`, nur in
+// Ring 3 und mit einer Farbe je Widget statt einer je Fenster.
+fn draw_glyph(at: u64, x: i64, y: i64, color: u64) {
+    let gw: u64 = gc[(at + GC_W) as usize]
+    let gh: u64 = gc[(at + GC_H) as usize]
+    let data: u64 = gc[(at + GC_DATA) as usize]
+    if gw == 0 || gh == 0 || data == 0 {
+        return
+    }
+    let x0: i64 = x + gc[(at + GC_L) as usize] as i64
+    let y0: i64 = y - gc[(at + GC_T) as usize] as i64
+    var r: u64 = 0
+    while r < gh {
+        let py: i64 = y0 + r as i64
+        if py >= 0 {
+            var c: u64 = 0
+            while c < gw {
+                let pxx: i64 = x0 + c as i64
+                if pxx >= 0 {
+                    let a: u64 = (*((data + r * gw + c) as *mut u8)) as u64
+                    if a != 0 {
+                        let ux: u64 = pxx as u64
+                        let uy: u64 = py as u64
+                        px(ux, uy, blend(get(ux, uy), color, a))
+                    }
+                }
+                c = c + 1
+            }
+        }
+        r = r + 1
+    }
+}
+
+// Eine Zeile Text. `y` ist die GRUNDLINIE. Gibt die Stelle HINTER dem
+// Text zurueck, damit ein Aufrufer zwei Stuecke aneinandersetzen kann.
+//
+// DIE REIHENFOLGE IST DIE VON `wm.text` UND VON
+// `tools/ttf/raster.py stellen`: Unterschneidung VOR dem Zeichen,
+// Laufweite DANACH, und gemalt wird bei `cx >> 6`. Wer eines davon
+// vertauscht, hat eine Oberflaeche, deren Text sich nicht mehr gegen
+// die zweite Rasterung rechnen laesst.
+fn text_at(f: u64, px_: u64, x: u64, y: u64, p: u64, n: u64,
+    color: u64) -> u64 {
+    var cx: i64 = (x as i64) * 64
+    var vorher: u64 = 0
+    var k: u64 = 0
+    while k < n {
+        let c: u64 = (*((p + k) as *mut u8)) as u64
+        if c == 0 {
+            k = n
+        } else {
+            if vorher != 0 {
+                cx = cx + kern26(f, px_, vorher, c)
+            }
+            let at: u64 = gfind(f, px_, c)
+            if at != 0xFFFFFFFFFFFFFFFF {
+                draw_glyph(at, cx >> 6, y as i64, color)
+                cx = cx + gc[(at + GC_ADV) as usize] as i64
+            }
+            vorher = c
+            k = k + 1
+        }
+    }
+    return (cx >> 6) as u64
+}
+
+// Dieselbe Rechnung OHNE zu malen -- fuer die Anordnung, fuer das
+// Mittigsetzen und fuer die Stelle, an der eine Einfuegemarke steht.
+fn text_w(f: u64, px_: u64, p: u64, n: u64) -> u64 {
+    var cx: i64 = 0
+    var vorher: u64 = 0
+    var k: u64 = 0
+    while k < n {
+        let c: u64 = (*((p + k) as *mut u8)) as u64
+        if c == 0 {
+            k = n
+        } else {
+            if vorher != 0 {
+                cx = cx + kern26(f, px_, vorher, c)
+            }
+            let at: u64 = gfind(f, px_, c)
+            if at != 0xFFFFFFFFFFFFFFFF {
+                cx = cx + gc[(at + GC_ADV) as usize] as i64
+            }
+            vorher = c
+            k = k + 1
+        }
+    }
+    return (cx >> 6) as u64
+}
+
+fn glyph_w(f: u64, px_: u64, c: u64) -> u64 {
+    let at: u64 = gfind(f, px_, c)
+    if at == 0xFFFFFFFFFFFFFFFF {
+        return 0
+    }
+    return (gc[(at + GC_ADV) as usize] as i64 >> 6) as u64
+}
+
+// Der Aufsteiger der Schrift in Bildpunkten -- die Strecke von der
+// Oberkante einer Zeile bis zur Grundlinie. Gemessen am Zeichen, das
+// die Oberkante bestimmt, statt geraten: `M` reicht bis zur
+// Versalhoehe, `l` und `k` bis zum Aufsteiger.
+fn ascent_of(f: u64, px_: u64) -> u64 {
+    let at: u64 = gfind(f, px_, 108)
+    if at == 0xFFFFFFFFFFFFFFFF {
+        return px_
+    }
+    return gc[(at + GC_T) as usize]
+}
+
+fn text_h(px_: u64) -> u64 {
+    return px_ + px_ / 4
+}
+
+// Die Zellenbreite der Festbreitenschrift: die Laufweite von `0`,
+// aufgerundet. Genau die Rechnung, mit der `wm.term_setup` sein Raster
+// legt -- ein Dateimanager, der eine Spalte aus Ziffern setzt, will
+// dieselbe.
+fn mono_cell(px_: u64) -> u64 {
+    let at: u64 = gfind(F_MONO, px_, 48)
+    if at == 0xFFFFFFFFFFFFFFFF {
+        return px_
+    }
+    return ((gc[(at + GC_ADV) as usize] as i64 + 63) >> 6) as u64
+}
+
+// ------------------------------------------------- hinueber ins Fenster
+
+// EIN STREIFEN, EIN AUFRUF. `x` und `y` sind Fensterkoordinaten, die
+// Quelle ist die Flaeche mit ihrer eigenen Zeilenlaenge.
+fn push(h: u64, x: u64, y: u64, w: u64, hh: u64) -> u64 {
+    if w == 0 || hh == 0 {
+        return 0
+    }
+    let src: u64 = s_surf +% (y -% s_band) *% SURF_W *% 4 +% x *% 4
+    return sys5(WIG_BLIT, h, (x << 16) | y, (w << 16) | hh, src, SURF_W)
+}
+
+fn push_rect(h: u64, x: u64, y: u64, w: u64, hh: u64) -> u64 {
+    return push(h, x, y, w, hh)
+}
+
+fn cursor_shape(s: u64) {
+    if s == s_shape {
+        return
+    }
+    s_shape = s
+    sys3w(WIG_CURSOR, s, 0, 0)
+}
+
+// ------------------------------------------------- die Zwischenablage
+//
+// Sie liegt im Kernel, weil sie per Definition das ist, was ZWEI
+// Prozesse teilen. `noclip` ist die Gegenprobe: dieselbe Anwendung, nur
+// dass Kopieren und Einfuegen nichts tun -- und die Messung, die zeigt,
+// dass ein Text von einem Feld ins andere gewandert ist, MUSS dann
+// einbrechen.
+
+fn clip_put(p: u64, n: u64) -> u64 {
+    if s_noclip != 0 {
+        return 0
+    }
+    return sys3w(WIG_CLIPSET, p, n, 0)
+}
+
+fn clip_take(p: u64, max: u64) -> u64 {
+    if s_noclip != 0 {
+        return 0
+    }
+    let n: u64 = sys3w(WIG_CLIPGET, p, max, 0)
+    if ulib.bad(n) {
+        return 0
+    }
+    return n
+}
+
+fn clip_len() -> u64 {
+    if s_noclip != 0 {
+        return 0
+    }
+    return sys3w(WIG_SCREEN, 5, 0, 0)
+}
+
+// ------------------------------------------------------- das Farbschema
+//
+// ES STEHT NICHT IM QUELLTEXT, SONDERN IN EINER DATEI. Achtzehn Farben
+// mit Namen; `/etc/theme` darf jede davon ueberschreiben:
+//
+//     # Anmerkung
+//     bg=101820
+//     fg=e8eef4
+//
+// Was in der Datei fehlt, behaelt seinen Wert. Eine Zeile, die keinen
+// Namen trifft, wird gezaehlt und nicht stillschweigend verschluckt --
+// sonst tippt man sich einen Namen falsch und sucht die Farbe.
+
+const T_BG: u64 = 0
+const T_FG: u64 = 1
+const T_DIM: u64 = 2
+const T_PANEL: u64 = 3
+const T_BTN: u64 = 4
+const T_BTNHI: u64 = 5
+const T_BTNDN: u64 = 6
+const T_LINE: u64 = 7
+const T_SEL: u64 = 8
+const T_SELFG: u64 = 9
+const T_FOCUS: u64 = 10
+const T_ENTRY: u64 = 11
+const T_HEAD: u64 = 12
+const T_SCROLL: u64 = 13
+const T_THUMB: u64 = 14
+const T_ACCENT: u64 = 15
+const T_DLG: u64 = 16
+const T_MENU: u64 = 17
+const T_COUNT: u64 = 18
+
+static mut th: [u64; 18] = [0 as u64; 18]
+static mut th_read: u64 = 0
+static mut th_bad: u64 = 0
+
+fn theme_defaults() {
+    th[(T_BG) as usize] = 0x00202830
+    th[(T_FG) as usize] = 0x00E8EEF4
+    th[(T_DIM) as usize] = 0x00909CA8
+    th[(T_PANEL) as usize] = 0x00283440
+    th[(T_BTN) as usize] = 0x003C4C5C
+    th[(T_BTNHI) as usize] = 0x00506478
+    th[(T_BTNDN) as usize] = 0x001C242C
+    th[(T_LINE) as usize] = 0x00101418
+    th[(T_SEL) as usize] = 0x00305888
+    th[(T_SELFG) as usize] = 0x00FFFFFF
+    th[(T_FOCUS) as usize] = 0x00FFC020
+    th[(T_ENTRY) as usize] = 0x00141A20
+    th[(T_HEAD) as usize] = 0x00344250
+    th[(T_SCROLL) as usize] = 0x00181E24
+    th[(T_THUMB) as usize] = 0x00586878
+    th[(T_ACCENT) as usize] = 0x0060C0FF
+    th[(T_DLG) as usize] = 0x00242C34
+    th[(T_MENU) as usize] = 0x002C3844
+}
+
+fn theme(i: u64) -> u64 {
+    if i >= T_COUNT {
+        return 0
+    }
+    return th[(i) as usize]
+}
+
+fn theme_count() -> u64 {
+    return th_read
+}
+
+// Der Name der Farbe `i` -- als Zeiger auf einen NUL-abgeschlossenen
+// Text. Eine Tabelle und keine Kette von `if`s, damit das Lesen und
+// das Melden dieselbe Liste benutzen.
+static mut tn: [u8; 224] = [0 as u8; 224]
+static mut tn_at: [u64; 18] = [0 as u64; 18]
+static mut tn_ok: u64 = 0
+
+fn tn_add(i: u64, a: u64, b: u64, c: u64, d: u64, e: u64, f: u64,
+    at: u64) -> u64 {
+    tn_at[(i) as usize] = (&tn[0 as usize]) as u64 + at
+    var n: u64 = at
+    tn[(n) as usize] = a as u8
+    n = n + 1
+    if b != 0 {
+        tn[(n) as usize] = b as u8
+        n = n + 1
+    }
+    if c != 0 {
+        tn[(n) as usize] = c as u8
+        n = n + 1
+    }
+    if d != 0 {
+        tn[(n) as usize] = d as u8
+        n = n + 1
+    }
+    if e != 0 {
+        tn[(n) as usize] = e as u8
+        n = n + 1
+    }
+    if f != 0 {
+        tn[(n) as usize] = f as u8
+        n = n + 1
+    }
+    tn[(n) as usize] = 0 as u8
+    return n + 1
+}
+
+fn theme_names() {
+    if tn_ok != 0 {
+        return
+    }
+    var a: u64 = 0
+    a = tn_add(T_BG, 98, 103, 0, 0, 0, 0, a) // bg
+    a = tn_add(T_FG, 102, 103, 0, 0, 0, 0, a) // fg
+    a = tn_add(T_DIM, 100, 105, 109, 0, 0, 0, a) // dim
+    a = tn_add(T_PANEL, 112, 97, 110, 101, 108, 0, a) // panel
+    a = tn_add(T_BTN, 98, 116, 110, 0, 0, 0, a) // btn
+    a = tn_add(T_BTNHI, 98, 116, 110, 104, 105, 0, a) // btnhi
+    a = tn_add(T_BTNDN, 98, 116, 110, 100, 110, 0, a) // btndn
+    a = tn_add(T_LINE, 108, 105, 110, 101, 0, 0, a) // line
+    a = tn_add(T_SEL, 115, 101, 108, 0, 0, 0, a) // sel
+    a = tn_add(T_SELFG, 115, 101, 108, 102, 103, 0, a) // selfg
+    a = tn_add(T_FOCUS, 102, 111, 99, 117, 115, 0, a) // focus
+    a = tn_add(T_ENTRY, 101, 110, 116, 114, 121, 0, a) // entry
+    a = tn_add(T_HEAD, 104, 101, 97, 100, 0, 0, a) // head
+    a = tn_add(T_SCROLL, 115, 99, 114, 111, 108, 108, a) // scroll
+    a = tn_add(T_THUMB, 116, 104, 117, 109, 98, 0, a) // thumb
+    a = tn_add(T_ACCENT, 97, 99, 99, 101, 110, 116, a) // accent
+    a = tn_add(T_DLG, 100, 108, 103, 0, 0, 0, a) // dlg
+    a = tn_add(T_MENU, 109, 101, 110, 117, 0, 0, a) // menu
+    tn_ok = 1
+}
+
+fn theme_name_at(i: u64) -> u64 {
+    theme_names()
+    if i >= T_COUNT {
+        return 0
+    }
+    return tn_at[(i) as usize]
+}
+
+fn theme_named(p: u64, n: u64) -> u64 {
+    theme_names()
+    var i: u64 = 0
+    while i < T_COUNT {
+        let q: u64 = tn_at[(i) as usize]
+        var k: u64 = 0
+        var gleich: bool = true
+        while k < n {
+            if *((q + k) as *mut u8) != *((p + k) as *mut u8) {
+                gleich = false
+                k = n
+            } else {
+                k = k + 1
+            }
+        }
+        if gleich {
+            if *((q + n) as *mut u8) == 0 as u8 {
+                return i
+            }
+        }
+        i = i + 1
+    }
+    return T_COUNT
+}
+
+fn hex4(c: u64) -> u64 {
+    if c >= 48 && c <= 57 {
+        return c - 48
+    }
+    if c >= 97 && c <= 102 {
+        return c - 87
+    }
+    if c >= 65 && c <= 70 {
+        return c - 55
+    }
+    return 16
+}
+
+// Die Datei lesen. Gibt zurueck, wie viele Farben WIRKLICH gesetzt
+// wurden -- nicht, ob die Datei da war. Ohne Datei bleiben die
+// eingebauten Werte, und das ist der Regelfall auf einem Abbild, das
+// keine mitbringt.
+fn theme_load(pfad: u64) -> u64 {
+    theme_names()
+    var buf: [u8; 1024] = [0 as u8; 1024]
+    th_read = 0
+    th_bad = 0
+    let fd: u64 = io.open(pfad, 0)
+    if ulib.bad(fd) {
+        return 0
+    }
+    let n: u64 = io.read(fd, (&buf[0 as usize]) as u64, 1023)
+    io.close(fd)
+    if ulib.bad(n) || n == 0 {
+        return 0
+    }
+    let b: u64 = (&buf[0 as usize]) as u64
+    var i: u64 = 0
+    while i < n {
+        // eine Zeile abgrenzen
+        var e: u64 = i
+        while e < n && *((b + e) as *mut u8) != 10 as u8 {
+            e = e + 1
+        }
+        // Kommentare und leere Zeilen
+        if e > i && *((b + i) as *mut u8) != 35 as u8 {
+            var g: u64 = i
+            while g < e && *((b + g) as *mut u8) != 61 as u8 {
+                g = g + 1
+            }
+            if g < e {
+                let idx: u64 = theme_named(b + i, g - i)
+                var v: u64 = 0
+                var k: u64 = g + 1
+                var stellen: u64 = 0
+                var gut: bool = true
+                while k < e {
+                    let d: u64 = hex4((*((b + k) as *mut u8)) as u64)
+                    if d >= 16 {
+                        gut = false
+                        k = e
+                    } else {
+                        v = (v << 4) | d
+                        stellen = stellen + 1
+                        k = k + 1
+                    }
+                }
+                if gut && stellen == 6 && idx < T_COUNT {
+                    th[(idx) as usize] = v
+                    th_read = th_read + 1
+                } else {
+                    th_bad = th_bad + 1
+                }
+            } else {
+                th_bad = th_bad + 1
+            }
+        }
+        i = e + 1
+    }
+    return th_read
+}
