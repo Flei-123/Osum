@@ -66,6 +66,8 @@ import tty
 import inet
 import perm
 import power
+import pwr
+import batt
 
 // RUNDE K14: die VFS-Schicht. `vfs` zieht die Treiber mit herein;
 // `mnt` ist die Einhaengetafel, `devfs` wird an genau einer Stelle
@@ -558,6 +560,83 @@ const MNT_KNOWN: u64 = 1
 // oeffnen" und das Starten. K15 ruft `fopen` und bekommt eine
 // Prozessnummer -- oder einen negativen Fehler, und dann hat nichts
 // gestartet.
+// ================================================= RUNDE K18: 1750..1799
+//
+// Der Zahlenraum dieser Runde. Er liegt in der zweiten Haelfte des
+// Hunderters, den Runde K14 bekommen hat (1700..1799) -- K14 hat davon
+// genau EINE Nummer belegt (1700), und die Verteilung fuer den Tag, an
+// dem mehrere Runden gleichzeitig liefen, hat K18 die 1750..1799
+// zugeteilt. `tools/k18/run.sh` rechnet nach, dass keine dieser Nummern
+// anderswo im Baum vorkommt.
+//
+// Drei Aufrufe, und die Bauart ist die von SYS_OSUM_MNTSTAT und
+// SYS_OSUM_PSTAT: EINE ZAHL JE AUFRUF, kein Zeiger in den Kernel, kein
+// Aufbau, der sich zwischen Ring 3 und Ring 0 einigen muesste. Das ist
+// bei einem Dutzend Werten ein Dutzend Aufrufe -- und dafuer gibt es
+// keine Struktur, deren Felder auseinanderlaufen koennen, und der
+// Testlauf kann jeden Wert einzeln gegen die Meldung des Kernels halten.
+//
+//   1750  osum_pwrget(feld)          -> Wert
+//   1751  osum_pwrset(feld, wert)    -> 0 oder -errno
+//   1752  osum_pwrstr(welche, puffer, len) -> Laenge
+const SYS_OSUM_PWRGET: u64 = 1750
+const SYS_OSUM_PWRSET: u64 = 1751
+const SYS_OSUM_PWRSTR: u64 = 1752
+
+// Die Felder von `osum_pwrget`. Die Nummern sind Teil der Schnittstelle
+// nach Ring 3 und stehen genauso in `kernel/user/power.fi`.
+const PG_READY: u64 = 0
+const PG_PROFILE: u64 = 1
+const PG_CAPS: u64 = 2
+const PG_RATIOS: u64 = 3
+const PG_RATIOSRC: u64 = 4
+const PG_PERFCTL: u64 = 5
+const PG_PERFBACK: u64 = 6
+const PG_HWPREQ: u64 = 7
+const PG_HWPBACK: u64 = 8
+const PG_MISC: u64 = 9
+const PG_MISCBACK: u64 = 10
+const PG_MISCORIG: u64 = 11
+const PG_CSTATE: u64 = 12
+const PG_MWAITS: u64 = 13
+const PG_HLTS: u64 = 14
+const PG_IDLERUNS: u64 = 15
+const PG_TEMP: u64 = 16
+const PG_TEMPOK: u64 = 17
+const PG_TJMAX: u64 = 18
+const PG_THROTTLES: u64 = 19
+const PG_THROTTLED: u64 = 20
+const PG_APPLIES: u64 = 21
+const PG_SWITCHES: u64 = 22
+const PG_MWAITHINT: u64 = 23
+const PG_BATPRESENT: u64 = 24
+const PG_BATPERCENT: u64 = 25
+const PG_BATMINUTES: u64 = 26
+const PG_BATSTATE: u64 = 27
+const PG_BATRATE: u64 = 28
+const PG_BATREMAIN: u64 = 29
+const PG_BATFULL: u64 = 30
+const PG_BATDESIGN: u64 = 31
+const PG_BATVOLT: u64 = 32
+const PG_ACOK: u64 = 33
+const PG_AC: u64 = 34
+const PG_BATWHY: u64 = 35
+const PG_TABLES: u64 = 36
+const PG_TZRAW: u64 = 37
+const PG_BRIGHT: u64 = 38
+const PG_BLANKED: u64 = 39
+const PG_BLANKS: u64 = 40
+const PG_BATWARN: u64 = 41
+const PG_BATLOW: u64 = 42
+const PG_BATUNIT: u64 = 43
+const PG_LIMIT: u64 = 44
+const PG_COUNT: u64 = 45
+
+// Die Felder von `osum_pwrset`.
+const PS_PROFILE: u64 = 0
+const PS_BRIGHT: u64 = 1
+const PS_BLANK: u64 = 2
+
 const SYS_OSUM_FTYPE: u64 = 1900 // (pfad, aus, len) -> Art oder -ENOEXEC
 const SYS_OSUM_FOPEN: u64 = 1901 // (pfad, argv, argc) -> pid
 const SYS_OSUM_FLIST: u64 = 1902 // (nr, aus, len) -> Art oder -ENOENT
@@ -976,6 +1055,10 @@ fn dispatch(number: u64, frame: u64, state: u64) -> u64 {
     // hierher geholt, wo `a4` steht und die Nummer wirklich ankommt.
     if number >= WIG_BASE && number <= WIG_MAXNR {
         return wig_call(state, me, number, a0, a1, a2, a3, a4)
+    }
+    // RUNDE K18: die Energieschicht.
+    if number >= SYS_OSUM_PWRGET && number <= SYS_OSUM_PWRSTR {
+        return pwr_call(state, me, number, a0, a1, a2)
     }
     // ------------------------------------------------------ RUNDE K13
     //
@@ -3827,6 +3910,260 @@ fn do_rename(state: u64, me: u64, from: u64, to: u64) -> u64 {
 
 // Ein Feld eines Eintrags der Einhaengetafel. Dieselbe Bauart wie
 // SYS_OSUM_PSTAT: eine Zahl je Aufruf, kein Puffer, kein Zeiger.
+// ==================================================== RUNDE K18
+//
+// DIE ENERGIESCHICHT AUS RING 3. Eigene Funktion und keine dreissig
+// Zeilen in `dispatch`, aus demselben Grund wie bei `k13_call`,
+// `vm_call` und `wig_call`: der Rahmen entsteht erst, wenn wirklich eine
+// dieser Nummern kommt, und der tiefste Kernstapel eines Laufs ist
+// gezaehlt (`osum: kstack deepest=`).
+fn pwr_call(state: u64, me: u64, number: u64, a0: u64, a1: u64,
+    a2: u64) -> u64 {
+    if number == SYS_OSUM_PWRGET {
+        return do_pwrget(state, a0)
+    }
+    if number == SYS_OSUM_PWRSET {
+        return do_pwrset(state, me, a0, a1)
+    }
+    return do_pwrstr(state, me, a0, a1, a2)
+}
+
+fn do_pwrget(state: u64, field: u64) -> u64 {
+    if field == PG_COUNT {
+        return PG_COUNT
+    }
+    if field == PG_READY {
+        if pwr.ready(state) {
+            return 1
+        }
+        return 0
+    }
+    // OHNE ERKUNDUNG GIBT ES KEINE ZAHLEN. Das ist nicht Vorsicht,
+    // sondern die Gegenprobe `nopwr`: ein Kernel, der die Schicht nicht
+    // angeschaltet hat, muss auf JEDE Frage -ENODEV sagen und nicht eine
+    // Null, die wie ein Messwert aussieht.
+    if !pwr.ready(state) {
+        return neg(errno.E_NODEV)
+    }
+    if field == PG_PROFILE {
+        return pwr.cur_profile(state)
+    }
+    if field == PG_CAPS {
+        return pwr.caps(state)
+    }
+    if field == PG_RATIOS {
+        return pwr.value(state, pwr.PW_RATIOS)
+    }
+    if field == PG_RATIOSRC {
+        return pwr.value(state, pwr.PW_RATIOSRC)
+    }
+    if field == PG_PERFCTL {
+        return pwr.value(state, pwr.PW_PERFCTL)
+    }
+    if field == PG_PERFBACK {
+        return pwr.value(state, pwr.PW_PERFBACK)
+    }
+    if field == PG_HWPREQ {
+        return pwr.value(state, pwr.PW_HWPREQ)
+    }
+    if field == PG_HWPBACK {
+        return pwr.value(state, pwr.PW_HWPBACK)
+    }
+    if field == PG_MISC {
+        return pwr.value(state, pwr.PW_MISC)
+    }
+    if field == PG_MISCBACK {
+        return pwr.value(state, pwr.PW_MISCBACK)
+    }
+    if field == PG_MISCORIG {
+        return pwr.value(state, pwr.PW_MISCORIG)
+    }
+    if field == PG_CSTATE {
+        return pwr.value(state, pwr.PW_CSTATE)
+    }
+    if field == PG_MWAITS {
+        return pwr.value(state, pwr.PW_MWAITS)
+    }
+    if field == PG_HLTS {
+        return pwr.value(state, pwr.PW_HLTS)
+    }
+    if field == PG_IDLERUNS {
+        return pwr.value(state, pwr.PW_IDLERUNS)
+    }
+    if field == PG_TEMP {
+        return pwr.temp_c(state)
+    }
+    if field == PG_TEMPOK {
+        return pwr.value(state, pwr.PW_TEMPOK)
+    }
+    if field == PG_TJMAX {
+        return pwr.value(state, pwr.PW_TJMAX)
+    }
+    if field == PG_THROTTLES {
+        return pwr.value(state, pwr.PW_THROTTLES)
+    }
+    if field == PG_THROTTLED {
+        return pwr.value(state, pwr.PW_THROTTLED)
+    }
+    if field == PG_APPLIES {
+        return pwr.value(state, pwr.PW_APPLIES)
+    }
+    if field == PG_SWITCHES {
+        return pwr.value(state, pwr.PW_SWITCHES)
+    }
+    if field == PG_MWAITHINT {
+        return pwr.value(state, pwr.PW_MWAITHINT)
+    }
+    if field == PG_LIMIT {
+        return pwr.value(state, pwr.PW_LIMIT)
+    }
+    if field == PG_TZRAW {
+        return pwr.value(state, pwr.PW_TZRAW)
+    }
+    if field == PG_BRIGHT {
+        return pwr.value(state, pwr.PW_BRIGHT)
+    }
+    if field == PG_BLANKED {
+        return pwr.value(state, pwr.PW_BLANKED)
+    }
+    if field == PG_BLANKS {
+        return pwr.value(state, pwr.PW_BLANKS)
+    }
+    // ---- der Akku
+    if field == PG_BATPRESENT {
+        if batt.present(state) {
+            return 1
+        }
+        return 0
+    }
+    if field == PG_BATWHY {
+        return batt.why(state)
+    }
+    if field == PG_TABLES {
+        return batt.value(state, batt.BT_TABLES)
+    }
+    if field == PG_ACOK {
+        if batt.ac_known(state) {
+            return 1
+        }
+        return 0
+    }
+    if field == PG_AC {
+        if batt.ac_online(state) {
+            return 1
+        }
+        return 0
+    }
+    // Ohne Akku gibt es keine Akkuzahlen -- und zwar -ENODEV und nicht
+    // eine Null. Eine Null hiesse "leer", und das waere gelogen.
+    if !batt.present(state) {
+        return neg(errno.E_NODEV)
+    }
+    if field == PG_BATPERCENT {
+        return batt.percent(state)
+    }
+    if field == PG_BATMINUTES {
+        return batt.minutes(state)
+    }
+    if field == PG_BATSTATE {
+        return batt.value(state, batt.BT_STATE)
+    }
+    if field == PG_BATRATE {
+        return batt.value(state, batt.BT_RATE)
+    }
+    if field == PG_BATREMAIN {
+        return batt.value(state, batt.BT_REMAIN)
+    }
+    if field == PG_BATFULL {
+        return batt.value(state, batt.BT_FULL)
+    }
+    if field == PG_BATDESIGN {
+        return batt.value(state, batt.BT_DESIGN)
+    }
+    if field == PG_BATVOLT {
+        return batt.value(state, batt.BT_VOLT)
+    }
+    if field == PG_BATWARN {
+        return batt.value(state, batt.BT_WARN)
+    }
+    if field == PG_BATLOW {
+        return batt.value(state, batt.BT_LOW)
+    }
+    if field == PG_BATUNIT {
+        return batt.value(state, batt.BT_UNIT)
+    }
+    return neg(errno.E_INVAL)
+}
+
+// DAS UMSCHALTEN. Wer das Profil aendert, aendert die Energieaufnahme der
+// ganzen Maschine -- das ist eine Sache des Verwalters, wie bei jedem
+// anderen System auch. `perm.is_root` gibt es seit Runde K13.
+fn do_pwrset(state: u64, me: u64, field: u64, v: u64) -> u64 {
+    if !pwr.ready(state) {
+        return neg(errno.E_NODEV)
+    }
+    if sched.tget(state, me, sched.T_EUID) != 0 {
+        return neg(errno.E_PERM)
+    }
+    if field == PS_PROFILE {
+        if v >= pwr.PROF_COUNT {
+            return neg(errno.E_INVAL)
+        }
+        if !pwr.set_profile(state, v) {
+            return neg(errno.E_INVAL)
+        }
+        return 0
+    }
+    if field == PS_BRIGHT {
+        if v > 100 {
+            return neg(errno.E_INVAL)
+        }
+        if !fb.ready(state) {
+            return neg(errno.E_NODEV)
+        }
+        pwr.set_bright(state, v)
+        return 0
+    }
+    if field == PS_BLANK {
+        if !fb.ready(state) {
+            return neg(errno.E_NODEV)
+        }
+        if v != 0 {
+            pwr.blank(state)
+        } else {
+            pwr.unblank(state)
+        }
+        return 0
+    }
+    return neg(errno.E_INVAL)
+}
+
+// Die vier Zeichenketten aus `_BIF`: Modell, Seriennummer, Art,
+// Hersteller. Gibt die Laenge ohne die Null zurueck.
+fn do_pwrstr(state: u64, me: u64, which: u64, dst: u64, len: u64) -> u64 {
+    if !pwr.ready(state) {
+        return neg(errno.E_NODEV)
+    }
+    if which > 3 {
+        return neg(errno.E_INVAL)
+    }
+    if !batt.present(state) {
+        return neg(errno.E_NODEV)
+    }
+    let src: u64 = batt.text_at(state, which)
+    var n: u64 = 0
+    while n < 63 && kstate.get8(src + n) != 0 {
+        n = n + 1
+    }
+    if len < n + 1 {
+        return neg(errno.E_INVAL)
+    }
+    if !copy_out(state, me, dst, src, n + 1) {
+        return neg(errno.E_FAULT)
+    }
+    return n
+}
+
 fn do_mntstat(state: u64, index: u64, field: u64) -> u64 {
     if field == MS_COUNT {
         return mnt.count(state)

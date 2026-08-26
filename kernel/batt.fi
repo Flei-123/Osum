@@ -1,0 +1,487 @@
+// kernel/batt.fi -- RUNDE K18: AKKU, NETZTEIL UND THERMALZONE AUS ACPI.
+//
+// Ein Betriebssystem erfaehrt den Ladestand eines Akkus nicht durch
+// Nachsehen. Es gibt kein Register und keinen Anschluss, an dem eine
+// Prozentzahl staende; die Zahl existiert nur in einem AML-Objekt, das
+// die Firmware in ihren Tabellen hinterlegt hat, und der Weg dorthin
+// heisst `_BIF` (was der Akku IST) und `_BST` (wie es ihm GERADE geht).
+//
+//   _BIF  Package(13) { Einheit, Auslegungskapazitaet, letzte volle
+//                       Ladung, Technik, Auslegungsspannung, Warnung,
+//                       Untergrenze, Koernung1, Koernung2,
+//                       "Modell", "Seriennummer", "Art", "Hersteller" }
+//   _BST  Package(4)  { Zustand, Strom, Restkapazitaet, Spannung }
+//   _PSR  Integer     { 0 = Akkubetrieb, 1 = am Netz }
+//   _TMP  Integer     { Temperatur in ZEHNTELKELVIN }
+//
+// Der Ladestand ist dann Restkapazitaet geteilt durch letzte volle
+// Ladung; die Restzeit ist Restkapazitaet geteilt durch den Strom. Beides
+// rechnet diese Datei aus, und beides ist nur so gut wie die Tabelle.
+//
+// ------------------------------------------------------------------
+// WAS DIESE DATEI KANN UND WAS NICHT -- OHNE BESCHOENIGUNG
+//
+// Vollstaendig richtig waere ein AML-Interpreter. `_BST` ist auf einem
+// echten Laptop naemlich eine METHODE: sie liest ueber den Embedded
+// Controller sechs Register aus, rechnet und gibt erst dann ein Paket
+// zurueck. Ein Interpreter dafuer ist eine eigene Runde und mehr Code als
+// dieser ganze Kernel-Ordner.
+//
+// Was hier steht, ist derselbe Weg, den `kernel/power.fi` seit Runde K13
+// fuer `_S5_` geht, und er ist aus demselben Grund vertretbar: die
+// Tabellen nach den vier Oktetten des Namens absuchen und das, was
+// dahinter steht, VON HAND lesen -- solange es eine KONSTANTE ist.
+// `Name(_BST, Package(4){...})` wird gefunden, `Method(_BST){...}` nicht.
+//
+// Das ist eine ehrliche Teilmenge, keine vollstaendige. Sie deckt:
+//   * jede selbstgebaute SSDT (und damit die Abnahme dieser Runde),
+//   * die Firmware einiger einfacher Geraete und fast jeder virtuellen
+//     Maschine, die einen Akku nachbildet,
+// und sie deckt NICHT den handelsueblichen Laptop mit Embedded
+// Controller. Findet sie nichts, sagt sie das (`BT_PRESENT` bleibt 0,
+// `BT_WHY` sagt warum) -- sie erfindet keinen Ladestand.
+//
+// ------------------------------------------------------------------
+// WARUM DAS TROTZDEM EINE ECHTE MESSUNG IST
+//
+// Die Messmaschine ist QEMU 7.2. Ein `-device battery` gibt es dort noch
+// nicht (das kam erst in QEMU 8.2), also gaebe es ohne weiteres nichts zu
+// lesen. Was es gibt, ist `-acpitable`: QEMU nimmt eine FERTIGE Tabelle
+// entgegen und haengt sie in die RSDT/XSDT ein, wo jeder Kernel sie
+// findet.
+//
+// Damit wird die Zusage dieser Runde ueberpruefbar, ohne dass irgendwo
+// eine Zahl im Kernel steht: `tools/k18/ssdt.py` BAUT eine SSDT mit einem
+// Akku, dessen Werte der Testlauf VORGIBT, QEMU haengt sie ein, und
+// `/bin/power` muss genau diese Werte zeigen. Andere Werte in der Tabelle
+// -> andere Ausgabe. Keine Tabelle -> "kein Akku". Das ist der
+// Unterschied zwischen einer Messung und einer Zahl, die das Programm
+// sich selbst gesetzt hat.
+
+import kstate
+import serial
+import acpi
+
+export {
+    scan, present, ac_online, ac_known, percent, minutes, value,
+    text_at, why,
+    BT_PRESENT, BT_STATE, BT_RATE, BT_REMAIN, BT_VOLT, BT_UNIT,
+    BT_DESIGN, BT_FULL, BT_TECH, BT_DVOLT, BT_WARN, BT_LOW,
+    BT_AC, BT_ACOK, BT_TABLES, BT_WHY, BT_TZ, BT_TZOK, BT_STA,
+    BT_MODEL, BT_SERIAL, BT_TYPE, BT_OEM, BT_NAMES,
+    W_OK, W_NORSDP, W_NONAME, W_NOPKG, W_SHORT
+}
+
+// ------------------------------------------------ die Plaetze in `kdata`
+//
+// EINE SEITE, 0x59000, aus dem Vorrat dieser Runde (0x58000..0x60000).
+// Die erste haelt `pwr.fi`.
+
+const BT_PRESENT: u64 = 0 // 1 = ein _BST wurde wirklich gelesen
+const BT_STATE: u64 = 8 // _BST[0]: Bit 0 entladen, Bit 1 laedt, Bit 2 leer
+const BT_RATE: u64 = 16 // _BST[1]: mW oder mA
+const BT_REMAIN: u64 = 24 // _BST[2]: mWh oder mAh
+const BT_VOLT: u64 = 32 // _BST[3]: mV
+const BT_UNIT: u64 = 40 // _BIF[0]: 0 = mW/mWh, 1 = mA/mAh
+const BT_DESIGN: u64 = 48 // _BIF[1]
+const BT_FULL: u64 = 56 // _BIF[2]: die letzte volle Ladung
+const BT_TECH: u64 = 64 // _BIF[3]
+const BT_DVOLT: u64 = 72 // _BIF[4]
+const BT_WARN: u64 = 80 // _BIF[5]
+const BT_LOW: u64 = 88 // _BIF[6]
+const BT_AC: u64 = 96 // _PSR: 1 = am Netz
+const BT_ACOK: u64 = 104 // 1 = ein Netzteilgeraet wurde gefunden
+const BT_TABLES: u64 = 112 // wie viele Tabellen durchsucht wurden
+const BT_WHY: u64 = 120 // warum kein Akku, siehe W_*
+const BT_TZ: u64 = 128 // _TMP roh, in Zehntelkelvin
+const BT_TZOK: u64 = 136 // 1 = eine Thermalzone wurde gefunden
+const BT_STA: u64 = 144 // _STA des Akkugeraets
+const BT_BIFOK: u64 = 152 // 1 = auch _BIF wurde gelesen
+
+// Die vier Zeichenketten aus _BIF, je 64 Oktette.
+const BT_NAMES: u64 = 256
+const BT_MODEL: u64 = 0
+const BT_SERIAL: u64 = 1
+const BT_TYPE: u64 = 2
+const BT_OEM: u64 = 3
+const NAME_BYTES: u64 = 64
+
+// Warum nichts gefunden wurde.
+const W_OK: u64 = 0
+const W_NORSDP: u64 = 1 // keine ACPI-Tabellen ueberhaupt
+const W_NONAME: u64 = 2 // die Tabellen sind da, _BST steht in keiner
+const W_NOPKG: u64 = 3 // _BST steht da, aber kein konstantes Paket
+const W_SHORT: u64 = 4 // das Paket hat zu wenige Elemente
+
+fn g(state: u64, off: u64) -> u64 {
+    return kstate.get(state, kstate.BATT_OFF + off)
+}
+
+fn s(state: u64, off: u64, v: u64) {
+    kstate.set(state, kstate.BATT_OFF + off, v)
+}
+
+fn value(state: u64, off: u64) -> u64 {
+    return g(state, off)
+}
+
+fn present(state: u64) -> bool {
+    return g(state, BT_PRESENT) != 0
+}
+
+fn ac_known(state: u64) -> bool {
+    return g(state, BT_ACOK) != 0
+}
+
+fn ac_online(state: u64) -> bool {
+    return g(state, BT_AC) != 0
+}
+
+fn why(state: u64) -> u64 {
+    return g(state, BT_WHY)
+}
+
+// Die Adresse der i-ten Zeichenkette.
+fn text_at(state: u64, which: u64) -> u64 {
+    return state + kstate.BATT_OFF + BT_NAMES + which * NAME_BYTES
+}
+
+// ------------------------------------------------------- die Rechnungen
+
+// Der Ladestand in Prozent. GANZZAHLIG und mit Aufrundung auf die halbe
+// Einheit, damit 3299 von 4400 nicht als 74 erscheint, wenn es 74,98
+// sind. Ohne letzte volle Ladung gibt es keinen Prozentsatz -- dann 0
+// und `present` ist ohnehin falsch.
+fn percent(state: u64) -> u64 {
+    let full: u64 = g(state, BT_FULL)
+    if full == 0 {
+        return 0
+    }
+    var p: u64 = (g(state, BT_REMAIN) * 100 + full / 2) / full
+    if p > 100 {
+        p = 100
+    }
+    return p
+}
+
+// Die Restzeit in Minuten. Beim Laden ist es die Zeit BIS VOLL, beim
+// Entladen die Zeit BIS LEER -- dieselbe Division, andere Zaehler. Ohne
+// Strom gibt es keine Restzeit: dann 0, und der Aufrufer schreibt "--"
+// statt einer Zahl.
+fn minutes(state: u64) -> u64 {
+    let rate: u64 = g(state, BT_RATE)
+    if rate == 0 || rate == 0xFFFFFFFF {
+        return 0
+    }
+    var menge: u64 = g(state, BT_REMAIN)
+    if (g(state, BT_STATE) & 2) != 0 {
+        let full: u64 = g(state, BT_FULL)
+        if full <= menge {
+            return 0
+        }
+        menge = full -% menge
+    }
+    return (menge * 60) / rate
+}
+
+// ------------------------------------------------------------ AML lesen
+//
+// Nur so viel AML, wie eine KONSTANTE braucht. Alles andere wird nicht
+// gelesen, sondern uebersprungen.
+
+// Eine PkgLength. Die oberen zwei Bits des ersten Oktetts sagen, wie
+// viele Oktette noch folgen; bei null ist der Rest des ersten Oktetts
+// schon die ganze Laenge.
+fn pkglen(p: u64, out_len: u64) -> u64 {
+    let lead: u64 = kstate.get8(p)
+    let extra: u64 = (lead >> 6) & 3
+    if extra == 0 {
+        __mmio_write64(out_len as *mut u64, lead & 0x3F)
+        return 1
+    }
+    var v: u64 = lead & 0x0F
+    var i: u64 = 0
+    while i < extra {
+        v = v | (kstate.get8(p + 1 + i) << (4 + i * 8))
+        i = i + 1
+    }
+    __mmio_write64(out_len as *mut u64, v)
+    return 1 + extra
+}
+
+// Ein konstanter ganzzahliger Wert. Gibt die Zahl der gelesenen Oktette
+// zurueck, oder 0, wenn dort keine Konstante steht.
+fn aml_int(p: u64, out: u64) -> u64 {
+    let op: u64 = kstate.get8(p)
+    if op == 0x00 {
+        __mmio_write64(out as *mut u64, 0)
+        return 1
+    }
+    if op == 0x01 {
+        __mmio_write64(out as *mut u64, 1)
+        return 1
+    }
+    if op == 0xFF {
+        __mmio_write64(out as *mut u64, 0xFFFFFFFF)
+        return 1
+    }
+    if op == 0x0A {
+        __mmio_write64(out as *mut u64, kstate.get8(p + 1))
+        return 2
+    }
+    if op == 0x0B {
+        __mmio_write64(out as *mut u64,
+            kstate.get8(p + 1) | (kstate.get8(p + 2) << 8))
+        return 3
+    }
+    if op == 0x0C {
+        __mmio_write64(out as *mut u64, kstate.get32(p + 1))
+        return 5
+    }
+    if op == 0x0E {
+        __mmio_write64(out as *mut u64, __mmio_read64((p + 1) as *mut u64))
+        return 9
+    }
+    return 0
+}
+
+// Eine Zeichenkette (0x0D, dann ASCII bis zur Null). Kopiert hoechstens
+// NAME_BYTES-1 Oktette und schliesst immer mit einer Null ab.
+fn aml_str(p: u64, dst: u64) -> u64 {
+    if kstate.get8(p) != 0x0D {
+        return 0
+    }
+    var i: u64 = 0
+    while i < NAME_BYTES -% 1 {
+        let c: u64 = kstate.get8(p + 1 + i)
+        if c == 0 {
+            i = NAME_BYTES
+        } else {
+            kstate.set8(dst + i, c as u8)
+            i = i + 1
+        }
+    }
+    var n: u64 = 0
+    while n < NAME_BYTES -% 1 && kstate.get8(p + 1 + n) != 0 {
+        n = n + 1
+    }
+    kstate.set8(dst + n, 0 as u8)
+    return n + 2
+}
+
+// Ein Element ueberspringen, dessen Wert nicht gebraucht wird.
+fn aml_skip(p: u64) -> u64 {
+    var v: u64 = 0
+    let n: u64 = aml_int(p, (&v) as u64)
+    if n != 0 {
+        return n
+    }
+    if kstate.get8(p) == 0x0D {
+        var i: u64 = 0
+        while i < 256 && kstate.get8(p + 1 + i) != 0 {
+            i = i + 1
+        }
+        return i + 2
+    }
+    return 0
+}
+
+// -------------------------------------------------------- die Suche
+
+// Vier Oktette vergleichen.
+fn seg_is(p: u64, a: u64, b: u64, c: u64, d: u64) -> bool {
+    return kstate.get8(p) == a && kstate.get8(p + 1) == b
+        && kstate.get8(p + 2) == c && kstate.get8(p + 3) == d
+}
+
+// Der Bereich einer Tabelle, in dem AML stehen kann.
+fn body(t: u64, out_end: u64) -> u64 {
+    if t == 0 {
+        return 0
+    }
+    let len: u64 = kstate.get32(t + 4)
+    if len < 36 || len > 0x100000 {
+        return 0
+    }
+    __mmio_write64(out_end as *mut u64, t + len)
+    return t + 36
+}
+
+// EIN NAME, GEFOLGT VON EINEM PAKET. Gibt den Anfang des ersten Elements
+// zurueck und legt die Zahl der Elemente ab, oder 0.
+fn find_package(t: u64, a: u64, b: u64, c: u64, d: u64, out_n: u64) -> u64 {
+    var end: u64 = 0
+    var p: u64 = body(t, (&end) as u64)
+    if p == 0 {
+        return 0
+    }
+    while p + 8 < end {
+        if seg_is(p, a, b, c, d) {
+            var q: u64 = p + 4
+            if kstate.get8(q) == 0x12 {
+                var plen: u64 = 0
+                q = q + 1 + pkglen(q + 1, (&plen) as u64)
+                __mmio_write64(out_n as *mut u64, kstate.get8(q))
+                return q + 1
+            }
+        }
+        p = p + 1
+    }
+    return 0
+}
+
+// EIN NAME, GEFOLGT VON EINER ZAHL.
+fn find_int(t: u64, a: u64, b: u64, c: u64, d: u64, out: u64) -> bool {
+    var end: u64 = 0
+    var p: u64 = body(t, (&end) as u64)
+    if p == 0 {
+        return false
+    }
+    while p + 8 < end {
+        if seg_is(p, a, b, c, d) {
+            var v: u64 = 0
+            if aml_int(p + 4, (&v) as u64) != 0 {
+                __mmio_write64(out as *mut u64, v)
+                return true
+            }
+        }
+        p = p + 1
+    }
+    return false
+}
+
+// ------------------------------------------------------- der Durchgang
+
+// ALLE TABELLEN ABSUCHEN, nicht nur die DSDT. Ein Akku steht auf einem
+// echten Geraet fast immer in einer SSDT, und die selbstgebaute Tabelle
+// der Abnahme ist auch eine.
+fn scan(state: u64) {
+    s(state, BT_PRESENT, 0)
+    s(state, BT_ACOK, 0)
+    s(state, BT_TZOK, 0)
+    s(state, BT_BIFOK, 0)
+    s(state, BT_WHY, W_NORSDP)
+
+    let n: u64 = acpi.table_count(state)
+    s(state, BT_TABLES, n)
+    if n == 0 {
+        return
+    }
+    s(state, BT_WHY, W_NONAME)
+
+    var i: u64 = 0
+    while i < n {
+        let t: u64 = acpi.table_at(state, i)
+        if t != 0 {
+            look_in(state, t)
+        }
+        i = i + 1
+    }
+
+    var name_s: [u8; 20] = "batt: tables=\0\0\0\0\0\0\0"
+    var name_b: [u8; 8] = " batt=\0\0"
+    var name_a: [u8; 6] = " ac=\0\0"
+    var name_t: [u8; 8] = " tz=\0\0\0\0"
+    serial.puts((&name_s[0]) as u64)
+    serial.dec(n)
+    serial.puts((&name_b[0]) as u64)
+    serial.dec(g(state, BT_PRESENT))
+    serial.puts((&name_a[0]) as u64)
+    serial.dec(g(state, BT_ACOK))
+    serial.puts((&name_t[0]) as u64)
+    serial.dec(g(state, BT_TZOK))
+    serial.nl()
+}
+
+fn look_in(state: u64, t: u64) {
+    // _BST -- Package(4)
+    if g(state, BT_PRESENT) == 0 {
+        var cnt: u64 = 0
+        let e: u64 = find_package(t, 0x5F, 0x42, 0x53, 0x54, (&cnt) as u64)
+        if e != 0 {
+            if cnt < 4 {
+                s(state, BT_WHY, W_SHORT)
+            } else {
+                var p: u64 = e
+                var v: u64 = 0
+                var k: u64 = 0
+                var ok: bool = true
+                while k < 4 {
+                    let w: u64 = aml_int(p, (&v) as u64)
+                    if w == 0 {
+                        ok = false
+                        k = 4
+                    } else {
+                        s(state, BT_STATE + k * 8, v)
+                        p = p + w
+                        k = k + 1
+                    }
+                }
+                if ok {
+                    s(state, BT_PRESENT, 1)
+                    s(state, BT_WHY, W_OK)
+                } else {
+                    s(state, BT_WHY, W_NOPKG)
+                }
+            }
+        }
+    }
+    // _BIF -- Package(13): neun Zahlen, dann vier Zeichenketten.
+    if g(state, BT_BIFOK) == 0 {
+        var cnt2: u64 = 0
+        let e2: u64 = find_package(t, 0x5F, 0x42, 0x49, 0x46, (&cnt2) as u64)
+        if e2 != 0 && cnt2 >= 9 {
+            var p2: u64 = e2
+            var v2: u64 = 0
+            var k2: u64 = 0
+            var ok2: bool = true
+            while k2 < 9 {
+                let w2: u64 = aml_int(p2, (&v2) as u64)
+                if w2 == 0 {
+                    ok2 = false
+                    k2 = 9
+                } else {
+                    if k2 < 7 {
+                        s(state, BT_UNIT + k2 * 8, v2)
+                    }
+                    p2 = p2 + w2
+                    k2 = k2 + 1
+                }
+            }
+            if ok2 {
+                s(state, BT_BIFOK, 1)
+                var k3: u64 = 0
+                while k3 < 4 && k3 + 9 < cnt2 {
+                    let w3: u64 = aml_str(p2, text_at(state, k3))
+                    if w3 == 0 {
+                        k3 = 4
+                    } else {
+                        p2 = p2 + w3
+                        k3 = k3 + 1
+                    }
+                }
+            }
+        }
+    }
+    // _PSR -- das Netzteil.
+    if g(state, BT_ACOK) == 0 {
+        var ac: u64 = 0
+        if find_int(t, 0x5F, 0x50, 0x53, 0x52, (&ac) as u64) {
+            s(state, BT_AC, ac)
+            s(state, BT_ACOK, 1)
+        }
+    }
+    // _STA -- ist das Geraet ueberhaupt da?
+    var sta: u64 = 0
+    if find_int(t, 0x5F, 0x53, 0x54, 0x41, (&sta) as u64) {
+        s(state, BT_STA, sta)
+    }
+    // _TMP -- die Thermalzone, in Zehntelkelvin.
+    if g(state, BT_TZOK) == 0 {
+        var tz: u64 = 0
+        if find_int(t, 0x5F, 0x54, 0x4D, 0x50, (&tz) as u64) {
+            s(state, BT_TZ, tz)
+            s(state, BT_TZOK, 1)
+        }
+    }
+}

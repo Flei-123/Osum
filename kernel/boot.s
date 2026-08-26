@@ -52,7 +52,7 @@
     .set MB_FLAGS, 0x00000007
     .set MB_CHECK, -(MB_MAGIC + MB_FLAGS)
 
-    .set KDATA_SIZE, 0x50000            /* 320 KiB, see kstate.fi (round K12) */
+    .set KDATA_SIZE, 0x60000            /* 384 KiB, see kstate.fi (round K18) */
 
     .section .multiboot, "a"
     .align 4

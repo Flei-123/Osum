@@ -34,7 +34,8 @@
 import serial
 import kstate
 
-export { find, cpus, ioapic_addr, lapic_addr, revision, oem, valid, table }
+export { find, cpus, ioapic_addr, lapic_addr, revision, oem, valid, table,
+    table_count, table_at }
 
 // ------------------------------------------------------ the search area
 
@@ -339,4 +340,98 @@ fn valid(state: u64) -> bool {
 // really read and not invented.
 fn oem(state: u64) -> u64 {
     return sget(state, S_OEM)
+}
+
+// ------------------------------------- RUNDE K18: ALLE Tabellen durchgehen
+//
+// `table` sucht EINE Tabelle nach ihrer Signatur. Runde K18 braucht das
+// Gegenteil: JEDE Tabelle der Reihe nach, weil das Objekt, das sie sucht
+// (ein Akku, eine Thermalzone), nicht an einer Signatur haengt -- es kann
+// in der DSDT stehen oder in irgendeiner der SSDTs, und auf einer echten
+// Maschine sind das ein Dutzend.
+//
+// Zaehlung: Platz 0 ist die DSDT. Die steht NICHT in der RSDT -- sie
+// haengt an der FADT, Versatz 40 -- und wuerde bei einem reinen
+// RSDT-Durchgang fehlen. Die Plaetze 1..n sind die Eintraege der
+// RSDT beziehungsweise der XSDT.
+
+const F_DSDT_OFF: u64 = 40
+
+fn root_of(state: u64, out_width: u64) -> u64 {
+    var rsdp: u64 = sget(state, S_RSDP)
+    if rsdp == 0 {
+        rsdp = find_rsdp()
+        if rsdp == 0 {
+            return 0
+        }
+        sset(state, S_RSDP, rsdp)
+    }
+    let rev: u64 = kstate.get8(rsdp + P_REVISION)
+    if rev >= 2 {
+        let len: u64 = kstate.get32(rsdp + P_LENGTH)
+        if len >= 33 && sum_zero(rsdp, len) {
+            let x: u64 = __mmio_read64((rsdp + P_XSDT) as *mut u64)
+            if header_ok(x) {
+                __mmio_write64(out_width as *mut u64, 8)
+                return x
+            }
+        }
+    }
+    let r: u64 = kstate.get32(rsdp + P_RSDT)
+    if !header_ok(r) {
+        return 0
+    }
+    __mmio_write64(out_width as *mut u64, 4)
+    return r
+}
+
+fn table_count(state: u64) -> u64 {
+    var width: u64 = 4
+    let root: u64 = root_of(state, (&width) as u64)
+    if root == 0 {
+        return 0
+    }
+    let len: u64 = kstate.get32(root + H_LENGTH)
+    if len < H_SIZE {
+        return 0
+    }
+    return 1 + (len - H_SIZE) / width
+}
+
+fn table_at(state: u64, i: u64) -> u64 {
+    if i == 0 {
+        var w_facp: [u8; 5] = "FACP\0"
+        let fadt: u64 = table(state, (&w_facp[0]) as u64)
+        if fadt == 0 {
+            return 0
+        }
+        let d: u64 = kstate.get32(fadt + F_DSDT_OFF)
+        if !header_ok(d) {
+            return 0
+        }
+        return d
+    }
+    var width: u64 = 4
+    let root: u64 = root_of(state, (&width) as u64)
+    if root == 0 {
+        return 0
+    }
+    let len: u64 = kstate.get32(root + H_LENGTH)
+    if len < H_SIZE {
+        return 0
+    }
+    let n: u64 = (len - H_SIZE) / width
+    if i - 1 >= n {
+        return 0
+    }
+    var t: u64 = 0
+    if width == 4 {
+        t = kstate.get32(root + H_SIZE + (i - 1) * 4)
+    } else {
+        t = __mmio_read64((root + H_SIZE + (i - 1) * 8) as *mut u64)
+    }
+    if !header_ok(t) {
+        return 0
+    }
+    return t
 }
