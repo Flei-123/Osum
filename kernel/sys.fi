@@ -1915,7 +1915,16 @@ fn mnt_gone(state: u64, m: u64) -> bool {
     if m >= vfs.MAX_MNT || !mnt.used(state, m) {
         return false
     }
-    return !blk.present_on(state, mnt.dev(state, m))
+    // NUR GERAETE FRAGEN, DIE VERSCHWINDEN KOENNEN. Der Grund steht in
+    // `blk.removable`, und er hat eine Stunde gekostet: `present_on`
+    // schreibt fuer eine ATA-Platte in das Laufwerksregister, und das
+    // bei jedem Lesen und Schreiben zu tun, greift in die Uebertragung
+    // ein, die gerade laeuft.
+    let dev: u64 = mnt.dev(state, m)
+    if !blk.removable(dev) {
+        return false
+    }
+    return !blk.present_on(state, dev)
 }
 
 fn vfs_read(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
@@ -3730,7 +3739,7 @@ fn source_dev(state: u64, p: u64, out_part: u64) -> u64 {
     var n_hdb: [u8; 9] = "/dev/hdb "
     var n_ram: [u8; 10] = "/dev/ram0 "
     var n_nvme: [u8; 11] = "/dev/nvme0 "
-    var n_usb: [u8; 10] = "/dev/usb0 "
+    var n_usb: [u8; 9] = "/dev/usb "
     var base: [u8; 32] = [0 as u8; 32]
     var n: u64 = 0
     while kstate.get8(p + n) != 0 && n < 31 {
@@ -3745,12 +3754,6 @@ fn source_dev(state: u64, p: u64, out_part: u64) -> u64 {
     if name_is(state, (&base[0]) as u64, (&n_nvme[0]) as u64) {
         return blk.DEV_NVME
     }
-    // RUNDE K17: der Stick. Steht VOR der Ziffernpruefung unten, aus
-    // genau demselben Grund wie /dev/ram0: die Null gehoert zum Namen
-    // und ist keine Partitionsnummer.
-    if name_is(state, (&base[0]) as u64, (&n_usb[0]) as u64) {
-        return blk.DEV_USB
-    }
     // Eine Ziffer am Ende: Partitionsnummer.
     if n > 1 {
         let last: u64 = base[(n - 1) as usize] as u64
@@ -3764,6 +3767,14 @@ fn source_dev(state: u64, p: u64, out_part: u64) -> u64 {
     }
     if name_is(state, (&base[0]) as u64, (&n_hdb[0]) as u64) {
         return blk.DEV_ATA1
+    }
+    // RUNDE K17: der Stick. Er steht HIER und nicht bei /dev/ram0 oben,
+    // weil sein Name KEINE Ziffer traegt -- `/dev/usb` ist der ganze
+    // Traeger, `/dev/usb1` seine erste Partition, genau wie `/dev/hdb`
+    // und `/dev/hdb1`. Das ist die Regel dieses Kernels, und ein Geraet,
+    // das sich nicht daran haelt, waere ein Sonderfall im Namensraum.
+    if name_is(state, (&base[0]) as u64, (&n_usb[0]) as u64) {
+        return blk.DEV_USB
     }
     return 99
 }
