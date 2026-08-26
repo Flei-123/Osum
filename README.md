@@ -479,6 +479,7 @@ nachtraeglich umgeschrieben.
 | `docs/ROUNDK11.md` | **man kann darauf arbeiten**: der Editor, zwanzig Werkzeuge, die Shell als Sprache |
 | `docs/ROUNDK10W.md` | die Oberflaeche: Maus, Fensterserver, TrueType mit Kantenglaettung |
 | `docs/ROUNDK12.md` | ein Wirt fuer fremde Prozessoren: AMD-V, verschachtelte Seitentabellen, Gaeste, Gastmaschinen aus Ring 3 |
+| `docs/ROUNDK15.md` | **Widgets und der Dateimanager**: die Bibliothek in Ring 3, `/bin/files`, sieben Aufrufe im Kernel |
 
 `ENTFERNEN-AUS-FIRN.md` beschreibt, was im Firn-Repository geloescht
 werden muss, damit dort nichts doppelt liegt. **Ausgefuehrt ist das
