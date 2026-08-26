@@ -321,10 +321,10 @@ schau "der Hintergrund neben den Fenstern gehoert dem Server" \
     flaeche "$TMPD/w.ppm" 700 60 80 80 30 42 56
 # Der Zeiger: die Spitze steht in der Mitte, und der Umriss ist schwarz.
 gsi=$(grep -aoE 'gsi=0x[0-9a-f]+' "$TMPD/w.txt" | head -1 | sed 's/.*=//')
-if [ "$gsi" = "0x2c" ]; then
-    ok "der Eintrag der Umleitungstabelle fuer GSI 12: $gsi (Vektor 44, nicht maskiert)"
+if [ "$gsi" = "0x2e" ]; then
+    ok "der Eintrag der Umleitungstabelle fuer GSI 12: $gsi (Vektor 46, nicht maskiert)"
 else
-    bad "GSI 12 zeigt '$gsi' statt 0x2c"
+    bad "GSI 12 zeigt '$gsi' statt 0x2e"
 fi
 schau "die Spitze des Zeigers steht in der Bildmitte" \
     punkt "$TMPD/w.ppm" 399 299 0 0 0

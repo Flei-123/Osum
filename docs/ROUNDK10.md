@@ -137,7 +137,7 @@ je herzugeben. Darin kam **genau eine** Unterbrechung an, und danach
 nichts mehr: `irqs=1 packets=0 status=0x3d` — das Zustandstor meldete
 „es liegt ein Oktett vom zweiten Anschluss bereit", und die Leitung blieb
 stumm. Der Eintrag der Umleitungstabelle war dabei in Ordnung
-(`gsi=0x2c`: Vektor 44, nicht maskiert).
+(`gsi=0x2e`: Vektor 46, nicht maskiert).
 
 Zwei Gegenmittel wurden gebaut, und **beide** stehen noch im Baum, weil
 beide etwas messen:
