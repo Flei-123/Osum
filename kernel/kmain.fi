@@ -1833,12 +1833,45 @@ fn usb_stage(state: u64) {
     if usb.have_mouse(state) {
         ps2m.adopt(state, 1024, 768)
     }
+    usb_hold(state)
     // DIE GEGENPROBE ZUM ABZIEHEN. Sie steht hier und nicht in der
     // Bibliothek, weil sie eine Anforderung der Kommandozeile ist und
     // kein Zustand des Geraets.
     if (kstate.get(state, kstate.MODE) & kstate.M_UNPLUG) != 0 {
         usb_unplug(state)
     }
+}
+
+// STILLHALTEN, DAMIT VON AUSSEN JEMAND TIPPEN KANN. Dasselbe, was
+// `wmhold` seit Runde K10 fuer das Bildschirmfoto tut: der Kern kommt
+// zur Ruhe, meldet das auf der seriellen Leitung, und erst danach
+// schickt der Testlaeufer seine Maus- und Tastenbefehle in den
+// QEMU-Monitor. Ohne diese Marke faellt der erste Klick in einen Kern,
+// der noch aufzaehlt.
+//
+// Mit `usbpoll` wird waehrenddessen SELBST nachgesehen statt auf die
+// Meldung zu warten -- die Gegenprobe zu `usbnoirq`.
+fn usb_hold(state: u64) {
+    var s_h: [u8; 10] = "k17: hold\0"
+    var s_r: [u8; 10] = "k17: free\0"
+    let mode: u64 = kstate.get(state, kstate.MODE)
+    if (mode & kstate.M_USBHOLD) == 0 {
+        return
+    }
+    let pollen: bool = (mode & kstate.M_USBPOLL) != 0
+    serial.puts((&s_h[0]) as u64)
+    serial.nl()
+    var i: u64 = 0
+    while i < 900 {
+        if pollen {
+            usb.poll(state)
+        }
+        sched.sleep_ticks(state, 1)
+        i = i + 1
+    }
+    usb.report(state)
+    serial.puts((&s_r[0]) as u64)
+    serial.nl()
 }
 
 // Was nach dem Abziehen noch geht. Drei Zeilen, und jede einzelne ist
@@ -2611,6 +2644,7 @@ fn mode_of(cmd: u64) -> u64 {
     var w_unplug: [u8; 7] = "unplug\0"
     var w_noirq2: [u8; 9] = "usbnoirq\0"
     var w_stick: [u8; 9] = "usbstick\0"
+    var w_hold: [u8; 8] = "usbhold\0"
     if find(cmd, (&w_usb[0]) as u64, 3) != 0 {
         mode = mode | kstate.M_USB
     }
@@ -2634,6 +2668,9 @@ fn mode_of(cmd: u64) -> u64 {
     }
     if find(cmd, (&w_stick[0]) as u64, 8) != 0 {
         mode = mode | kstate.M_USBSTICK
+    }
+    if find(cmd, (&w_hold[0]) as u64, 7) != 0 {
+        mode = mode | kstate.M_USBHOLD
     }
     return mode
 }
