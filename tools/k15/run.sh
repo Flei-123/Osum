@@ -163,7 +163,7 @@ for s in 0 1; do
 done
 [ -f "$TMPD/k0.mb" ] || { echo "K15: $pass passed, $((fail + 1)) failed"; exit 1; }
 
-PROGS="wigdemo files sh echo ls cat"
+PROGS="wigdemo explorer starter sh echo ls cat edit"
 as --64 -o "$TMPD/crt.o" kernel/user/crt.s 2>/dev/null \
     || bad "crt.s laesst sich nicht assemblieren"
 baue() { # stufe
@@ -183,14 +183,14 @@ baue() { # stufe
     done
     return $rc
 }
-baue 0 && ok "firnc0: $(echo $PROGS | wc -w) Programme gebaut, davon /bin/files mit $(stat -c%s "$TMPD/files0.elf") Oktetten" \
+baue 0 && ok "firnc0: $(echo $PROGS | wc -w) Programme gebaut, davon /bin/explorer mit $(stat -c%s "$TMPD/explorer0.elf") Oktetten" \
     || bad "firnc0: die Programme dieser Runde lassen sich nicht bauen"
 baue 1 && ok "firnc1: dieselben aus dem Uebersetzer, der in Firn geschrieben ist" \
     || bad "firnc1: die Programme dieser Runde lassen sich nicht bauen"
 # DIE BIBLIOTHEK IST EINE BIBLIOTHEK: sie hat kein `u_start`, sie wird
 # EINGEBUNDEN. Das ist die Zusage "in Ring 3, nicht im Kernel" in ihrer
 # pruefbaren Form -- und dazu, dass der Kernel sie NICHT enthaelt.
-if nm "$TMPD/files0.elf" 2>/dev/null | grep -q . ; then :; fi
+if nm "$TMPD/explorer0.elf" 2>/dev/null | grep -q . ; then :; fi
 for sym in wig__button wig__step wigc__text_at; do
     if nm -a "$TMPD/k0.mb.elf" 2>/dev/null | grep -q "$sym"; then
         bad "der Kernel traegt $sym -- die Bibliothek gehoert nach Ring 3"
@@ -210,7 +210,10 @@ python3 tools/k15/baum.py "$TMPD/baum" > "$TMPD/baum.log" 2>&1 \
 ARGS=(build "$TMPD/disk.img" 4096 /lib/
       "/lib/mono.ttf=$MONO" "/lib/sans.ttf=$SANS" /bin/)
 for p in $PROGS; do ARGS+=("/bin/$p=$TMPD/${p}0.elf"); done
+ARGS+=("/bin/files@/bin/explorer")
 ARGS+=(/etc/ "/etc/theme=$TMPD/baum/theme")
+ARGS+=(/usr/ /usr/share/ /usr/share/apps/)
+for a in assets/apps/*.app; do ARGS+=("/usr/share/apps/$(basename "$a")=$a"); done
 while read -r z; do ARGS+=("$z"); done < "$TMPD/baum/liste"
 python3 tools/osum/mkfs.py "${ARGS[@]}" > "$TMPD/mkfs.txt" 2>&1 \
     && ok "mkfs.py baut ein Abbild mit den Schriften, den Programmen und /etc/theme" \
@@ -649,27 +652,27 @@ schau_nicht "danach ist auch das Dialogfenster weg" \
 echo "== 9. der Dateimanager: /bin/files gegen die Platte =="
 foto files "gfx wm wigfiles wmhold wiglong $GRUND"
 num "der Kern beendet sich sauber" "$RC" eq 21
-has "$TMPD/files.txt" "k15: start /bin/files" "/bin/files kommt von der Platte"
-has "$TMPD/files.txt" "files: ready" "und hat sein Fenster gemalt"
-FN=$(feld "$TMPD/files.txt" "files: cd" n)
+has "$TMPD/files.txt" "k15: start /bin/explorer" "/bin/explorer kommt von der Platte"
+has "$TMPD/files.txt" "explorer: ready" "und hat sein Fenster gemalt"
+FN=$(feld "$TMPD/files.txt" "explorer: cd" n)
 SOLLN=$(wc -l < "$TMPD/baum/soll.txt")
 num "er zaehlt so viele Stuecke in /daten, wie baum.py angelegt hat" "$FN" eq "$SOLLN"
-FBW=$(feld "$TMPD/files.txt" "files: geom" w); FBH=$(feld "$TMPD/files.txt" "files: geom" h)
-FWX=$(feld "$TMPD/files.txt" "files: geom" x); FWY=$(feld "$TMPD/files.txt" "files: geom" y)
+FBW=$(feld "$TMPD/files.txt" "explorer: geom" w); FBH=$(feld "$TMPD/files.txt" "explorer: geom" h)
+FWX=$(feld "$TMPD/files.txt" "explorer: geom" x); FWY=$(feld "$TMPD/files.txt" "explorer: geom" y)
 FCX=$((FWX + BORDER)); FCY=$((FWY + TITLE))
-aus=$(python3 tools/k15/anordnung.py "$TMPD/files.txt" files "$FBW" "$FBH" 8 2>&1)
+aus=$(python3 tools/k15/anordnung.py "$TMPD/files.txt" explorer "$FBW" "$FBH" 8 2>&1)
 if [ $? -eq 0 ]; then ok "die Anordnung des Dateimanagers: $aus"
 else bad "die Anordnung des Dateimanagers stimmt nicht"; echo "$aus" | sed 's/^/        /' | head -6; fi
-TX=$(feld "$TMPD/files.txt" "files: rows" x)
-TB=$(feld "$TMPD/files.txt" "files: rows" base)
-TZH=$(feld "$TMPD/files.txt" "files: rows" zh)
-TKOPF=$(feld "$TMPD/files.txt" "files: rows" kopf)
-TFG=$(frgb "$TMPD/files.txt" "files: rows" fg)
-TBG=$(frgb "$TMPD/files.txt" "files: rows" bg)
-TSEL=$(frgb "$TMPD/files.txt" "files: rows" sel)
-TSFG=$(frgb "$TMPD/files.txt" "files: rows" selfg)
-TDIM=$(frgb "$TMPD/files.txt" "files: rows" dim)
-SP=($(grep -a '^files: spalten' "$TMPD/files.txt" | tail -1 | sed 's/^files: spalten //'))
+TX=$(feld "$TMPD/files.txt" "explorer: rows" x)
+TB=$(feld "$TMPD/files.txt" "explorer: rows" base)
+TZH=$(feld "$TMPD/files.txt" "explorer: rows" zh)
+TKOPF=$(feld "$TMPD/files.txt" "explorer: rows" kopf)
+TFG=$(frgb "$TMPD/files.txt" "explorer: rows" fg)
+TBG=$(frgb "$TMPD/files.txt" "explorer: rows" bg)
+TSEL=$(frgb "$TMPD/files.txt" "explorer: rows" sel)
+TSFG=$(frgb "$TMPD/files.txt" "explorer: rows" selfg)
+TDIM=$(frgb "$TMPD/files.txt" "explorer: rows" dim)
+SP=($(grep -a '^explorer: spalten' "$TMPD/files.txt" | tail -1 | sed 's/^explorer: spalten //'))
 schau "die Kopfzeile: die erste Spalte heisst 'Name'" \
     ttext "$TMPD/files.ppm" "$SANS" 15 $((FCX + TX)) $((FCY + TKOPF)) \
     $TFG $(rgb 3293262) "Name"
@@ -734,8 +737,8 @@ warte 1.0
 mouse_move 120 120
 EOF
 foto fdbl "gfx wm wigfiles wmhold wiglong $GRUND" "$M"
-has "$TMPD/fdbl.txt" "files: cd /daten/bilder" "der Doppelklick geht in das Verzeichnis hinein"
-n2=$(grep -a '^files: cd' "$TMPD/fdbl.txt" | tail -1 | grep -oE 'n=[0-9]+' | sed 's/.*=//')
+has "$TMPD/fdbl.txt" "explorer: cd /daten/bilder" "der Doppelklick geht in das Verzeichnis hinein"
+n2=$(grep -a '^explorer: cd' "$TMPD/fdbl.txt" | tail -1 | grep -oE 'n=[0-9]+' | sed 's/.*=//')
 num "und darin liegen zwei Dateien" "$n2" eq 2
 schau "die erste davon steht im Bild" \
     ttext "$TMPD/fdbl.ppm" "$SANS" 15 $((FCX + TX)) $((FCY + TB)) \
@@ -754,8 +757,8 @@ warte 0.8
 mouse_move 120 120
 EOF
 foto fsort "gfx wm wigfiles wmhold wiglong $GRUND" "$M"
-has "$TMPD/fsort.txt" "files: op" "ein Klick auf die Kopfzeile sortiert um"
-sb=$(grep -a '^files: op' "$TMPD/fsort.txt" | tail -1 | grep -oE 'w=[0-9]+' | sed 's/.*=//')
+has "$TMPD/fsort.txt" "explorer: op" "ein Klick auf die Kopfzeile sortiert um"
+sb=$(grep -a '^explorer: op' "$TMPD/fsort.txt" | tail -1 | grep -oE 'w=[0-9]+' | sed 's/.*=//')
 num "und zwar nach Spalte 1 (Groesse)" "$sb" eq 1
 # delta.txt ist leer (0 Oktette) und steht nach der Groesse ganz oben
 # unter den Dateien -- Verzeichnisse bleiben davor.
@@ -791,8 +794,8 @@ mouse_button 0
 warte 1.2
 EOF
 foto fneu "gfx wm wigfiles wmhold wiglong $GRUND" "$M"
-has "$TMPD/fneu.txt" "files: tat 2" "der Dialog legt ein Verzeichnis an"
-rc2=$(grep -a '^files: tat' "$TMPD/fneu.txt" | tail -1 | grep -oE 'rc=[0-9]+' | sed 's/.*=//')
+has "$TMPD/fneu.txt" "explorer: tat 2" "der Dialog legt ein Verzeichnis an"
+rc2=$(grep -a '^explorer: tat' "$TMPD/fneu.txt" | tail -1 | grep -oE 'rc=[0-9]+' | sed 's/.*=//')
 num "und der Kernel nimmt es an" "$rc2" eq 0
 # DIE OKTETTE AUF DER PLATTE, nicht das Bild.
 python3 tools/osum/mkfs.py list "$TMPD/live-fneu.img" > "$TMPD/fneu.ls" 2>&1
@@ -891,7 +894,10 @@ sed 's/^btn=.*/btn=804020/' "$TMPD/baum/theme" > "$TMPD/theme2"
 ARGS2=(build "$TMPD/disk2.img" 4096 /lib/
       "/lib/mono.ttf=$MONO" "/lib/sans.ttf=$SANS" /bin/)
 for p in $PROGS; do ARGS2+=("/bin/$p=$TMPD/${p}0.elf"); done
+ARGS2+=("/bin/files@/bin/explorer")
 ARGS2+=(/etc/ "/etc/theme=$TMPD/theme2")
+ARGS2+=(/usr/ /usr/share/ /usr/share/apps/)
+for a in assets/apps/*.app; do ARGS2+=("/usr/share/apps/$(basename "$a")=$a"); done
 while read -r z; do ARGS2+=("$z"); done < "$TMPD/baum/liste"
 python3 tools/osum/mkfs.py "${ARGS2[@]}" > "$TMPD/mkfs2.txt" 2>&1
 cp -f "$TMPD/disk.img" "$TMPD/disk1.img"
@@ -927,6 +933,189 @@ schau "die Mitte des Balkens ist weiss" \
     punkt "$TMPD/beam.ppm" $((E1X + 6)) $((CY + E1Y + E1H / 2 + 9)) 255 255 255
 schau_nicht "und drei Bildpunkte weiter rechts ist nichts vom Zeiger" \
     punkt "$TMPD/beam.ppm" $((E1X + 9)) $((CY + E1Y + E1H / 2 + 9)) 255 255 255
+
+echo "== 14. der Name, der zweite Name und die Auffindbarkeit =="
+# DER NAME IST DIE BESCHREIBUNG. Kein Nautilus, kein Finder, kein
+# Kunstwort: das Programm heisst `/bin/explorer` und traegt fuer den
+# Nutzer den Namen "Datei-Explorer" -- und dieser Name steht NICHT im
+# Quelltext, sondern in `/usr/share/apps/explorer.app`.
+# EIN `grep` PRUEFT DAS NICHT: der Kopfkommentar von explorer.fi
+# ERKLAERT, warum das Programm "Datei-Explorer" heisst, und ein
+# `grep -q` schlaegt darauf an. `tools/k15/keinname.py` entfernt die
+# Anmerkungen und sieht nur im Code nach.
+aus=$(python3 tools/k15/keinname.py kernel/user/explorer.fi "Datei-Explorer" 2>&1)
+if [ $? -eq 0 ]; then ok "der Anzeigename steht NICHT im Code ($aus)"
+else bad "der Anzeigename steht im Code: $aus"; fi
+aus=$(python3 tools/k15/keinname.py kernel/user/starter.fi "Starten" 2>&1)
+if [ $? -eq 0 ]; then ok "und der des Starters auch nicht"
+else bad "der Name des Starters steht im Code: $aus"; fi
+# Und die Gegenprobe zum Pruefer selbst: eine Zeichenkette, die WIRKLICH
+# im Code steht, MUSS er finden -- sonst prueft er nichts.
+if python3 tools/k15/keinname.py kernel/user/starter.fi "Ausfuehren" >/dev/null 2>&1; then
+    bad "der Pruefer findet eine Zeichenkette nicht, die im Code steht"
+else
+    ok "eine Zeichenkette, die wirklich im Code steht, findet er (die Gegenprobe)"
+fi
+grep -q '^name=Datei-Explorer' assets/apps/explorer.app \
+    && ok "sondern in assets/apps/explorer.app" \
+    || bad "assets/apps/explorer.app fuehrt keinen Anzeigenamen"
+has "$TMPD/files.txt" "explorer: name [Datei-Explorer] aus [explorer.app]" \
+    "und das Programm holt ihn von dort"
+# UND ER STEHT IN DER TITELLEISTE. Die malt der FENSTERSERVER -- damit
+# ist der ganze Weg gemessen: Datei auf der Platte, Ring 3, WM_CREATE,
+# Titelleiste, Bildpunkte.
+schau "der Anzeigename steht bildpunktgenau in der Titelleiste" \
+    ttext "$TMPD/files.ppm" "$SANS" 15 $((FWX + 7)) $((FWY + 15)) \
+    255 255 255 28 78 126 "Datei-Explorer" 96
+schau_nicht "und ein anderer Name steht dort NICHT" \
+    ttext "$TMPD/files.ppm" "$SANS" 15 $((FWX + 7)) $((FWY + 15)) \
+    255 255 255 28 78 126 "Dateimanager" 96
+
+# DER ZWEITE NAME. `/bin/files` und `/bin/explorer` sind ZWEI
+# Verzeichniseintraege auf DIESELBE Inode -- ein Exemplar der Oktette.
+python3 tools/osum/mkfs.py list "$TMPD/disk.img" > "$TMPD/disk.ls" 2>&1
+grep -q '^/bin/explorer ' "$TMPD/disk.ls" && ok "/bin/explorer liegt auf der Platte" \
+    || bad "/bin/explorer fehlt auf der Platte"
+grep -q '^/bin/files ' "$TMPD/disk.ls" && ok "und /bin/files daneben" \
+    || bad "/bin/files fehlt auf der Platte"
+python3 tools/osum/mkfs.py cat "$TMPD/disk.img" /bin/explorer > "$TMPD/e1.bin" 2>/dev/null
+python3 tools/osum/mkfs.py cat "$TMPD/disk.img" /bin/files > "$TMPD/e2.bin" 2>/dev/null
+cmp -s "$TMPD/e1.bin" "$TMPD/e2.bin" \
+    && ok "beide Namen geben dieselben $(stat -c%s "$TMPD/e1.bin") Oktette" \
+    || bad "die beiden Namen geben verschiedene Oktette"
+# UND ES IST WIRKLICH EIN VERWEIS UND KEINE KOPIE, gemessen an den
+# freien Bloecken: dasselbe Abbild einmal so und einmal so.
+python3 tools/osum/mkfs.py build "$TMPD/kopie.img" 4096 /bin/ \
+    "/bin/explorer=$TMPD/explorer0.elf" "/bin/files=$TMPD/explorer0.elf" \
+    > "$TMPD/kopie.txt" 2>&1
+python3 tools/osum/mkfs.py build "$TMPD/verweis.img" 4096 /bin/ \
+    "/bin/explorer=$TMPD/explorer0.elf" "/bin/files@/bin/explorer" \
+    > "$TMPD/verweis.txt" 2>&1
+fk=$(grep -oE 'free=[0-9]+' "$TMPD/kopie.txt" | sed 's/.*=//')
+fv=$(grep -oE 'free=[0-9]+' "$TMPD/verweis.txt" | sed 's/.*=//')
+ik=$(grep -oE 'inodes=[0-9]+' "$TMPD/kopie.txt" | sed 's/.*=//')
+iv=$(grep -oE 'inodes=[0-9]+' "$TMPD/verweis.txt" | sed 's/.*=//')
+if [ -n "$fk" ] && [ -n "$fv" ] && [ "$fv" -gt "$fk" ]; then
+    ok "der Verweis spart $((fv - fk)) Bloecke gegen die Kopie ($fv frei statt $fk)"
+else
+    bad "der Verweis spart nichts: $fv gegen $fk"
+fi
+num "und er braucht eine Inode weniger" $((ik - iv)) eq 1
+
+echo "== 14b. das Anwendungsverzeichnis und der Starter =="
+foto start "gfx wm wigstart wmhold wiglong $GRUND"
+num "der Kern beendet sich sauber" "$RC" eq 21
+has "$TMPD/start.txt" "k15: start /bin/starter" "der Starter kommt von der Platte"
+na=$(feld "$TMPD/start.txt" "starter: apps" apps)
+soll=$(ls assets/apps/*.app | wc -l)
+num "er findet so viele Programme, wie .app-Dateien im Baum liegen" "$na" eq "$soll"
+has "$TMPD/start.txt" "starter: treffer i=0 name=[Datei-Explorer] exec=[/bin/explorer]" \
+    "und das Verzeichnis fuehrt den Dateimanager mit Name UND Befehl"
+SBX=190; SBY=110
+SCX=$((SBX + BORDER)); SCY=$((SBY + TITLE))
+SRX=$(feld "$TMPD/start.txt" "starter: rows" x)
+SRB=$(feld "$TMPD/start.txt" "starter: rows" base)
+SZH=$(feld "$TMPD/start.txt" "starter: rows" zh)
+SIX=$(feld "$TMPD/start.txt" "starter: rows" ix)
+SIY=$(feld "$TMPD/start.txt" "starter: rows" iy)
+SLX=$(feld "$TMPD/start.txt" "starter: rows" lx)
+SLB=$(feld "$TMPD/start.txt" "starter: rows" lb)
+SSEL=$(frgb "$TMPD/start.txt" "starter: rows" sel)
+SSFG=$(frgb "$TMPD/start.txt" "starter: rows" selfg)
+SFG=$(frgb "$TMPD/start.txt" "starter: rows" fg)
+SBG=$(frgb "$TMPD/start.txt" "starter: rows" bg)
+schau "die erste Zeile des Starters, je Zeichen" \
+    ttext "$TMPD/start.ppm" "$SANS" 15 $((SCX + SRX)) $((SCY + SRB)) \
+    $SSFG $SSEL "Datei-Explorer  --  Dateien und Ordner ansehen" 96
+schau "und die zweite" \
+    ttext "$TMPD/start.ppm" "$SANS" 15 $((SCX + SRX)) $((SCY + SRB + SZH)) \
+    $SFG $SBG "Editor  --  Text schreiben und aendern" 96
+# DAS SYMBOL. Es gibt in diesem System keine Bilddateien; `icon=` ist
+# eine Farbe, und der Starter malt daraus ein Plaettchen mit dem ersten
+# Buchstaben darauf. Beides ist messbar -- die Farbe als Zahl von
+# Bildpunkten, der Buchstabe je Zeichen.
+n1=$(python3 tools/k15/zaehl.py "$TMPD/start.ppm" $((SCX + SIX + 1)) $((SCY + SIY + 1)) 12 12 74 144 208)
+n2=$(python3 tools/k15/zaehl.py "$TMPD/start.ppm" $((SCX + SIX + 1)) $((SCY + SIY + 1)) 12 12 192 128 64)
+num "das Plaettchen des Dateimanagers hat die Farbe aus icon=4a90d0" "$n1" gt 50
+num "und KEINEN Bildpunkt der Farbe des Editors (die Gegenprobe)" "$n2" eq 0
+n3=$(python3 tools/k15/zaehl.py "$TMPD/start.ppm" $((SCX + SIX + 1)) $((SCY + SIY + 1 + SZH)) 12 12 192 128 64)
+num "und das Plaettchen des Editors umgekehrt" "$n3" gt 50
+schau "der Anfangsbuchstabe steht auf dem Plaettchen, je Zeichen" \
+    ttext "$TMPD/start.ppm" "$SANS" 15 $((SCX + SLX)) $((SCY + SLB)) \
+    255 255 255 74 144 208 "D"
+
+echo "== 14c. die Suche -- und dass wirklich die Schluesselwoerter greifen =="
+# DIE ZUSAGE, UM DIE ES GEHT: man tippt "folder" und findet den
+# Dateimanager, OBWOHL das Wort weder im Anzeigenamen "Datei-Explorer"
+# noch in der Beschreibung "Dateien und Ordner ansehen" steht. Es steht
+# nur in `keys=`. Zuerst wird das ueberhaupt nachgerechnet -- sonst
+# waere die Zusage eine ueber einen Zufall.
+for w in folder files manager verzeichnis; do
+    if grep -iE '^(name|info)=' assets/apps/*.app | grep -qi "$w"; then
+        bad "'$w' steht in einem Anzeigenamen oder einer Beschreibung -- die Zusage waere wertlos"
+    else
+        ok "'$w' steht in KEINEM Anzeigenamen und in KEINER Beschreibung"
+    fi
+done
+FX2=$((SCX + 12 + 100))
+FY2=$((SCY + 38 + 13))
+M="$TMPD/suche.mon"; : > "$M"
+zeiger "$M" "$FX2" "$FY2"
+cat >> "$M" <<EOF
+mouse_button 1
+mouse_button 0
+warte 0.4
+sendkey f
+sendkey o
+sendkey l
+sendkey d
+sendkey e
+sendkey r
+warte 1.0
+mouse_move 120 120
+mouse_move 60 60
+EOF
+foto suche "gfx wm wigstart wmhold wiglong $GRUND" "$M"
+has "$TMPD/suche.txt" "starter: suche [folder] treffer=1" \
+    "getippt 'folder': GENAU EIN Treffer"
+has "$TMPD/start.txt" "starter: name [Starten]" \
+    "auch der Starter holt seinen eigenen Namen aus den Daten"
+tf=$(grep -aA1 'starter: suche \[folder\]' "$TMPD/suche.txt" | grep -a 'name=' | tail -1)
+case "$tf" in
+    *"name=[Datei-Explorer]"*) ok "der Treffer ist der Datei-Explorer" ;;
+    *) bad "der Treffer ist nicht der Datei-Explorer: $tf" ;;
+esac
+# UND ER STEHT IM BILD -- als einzige Zeile der Liste.
+schau "im Bild steht er in Zeile 0 der Trefferliste" \
+    ttext "$TMPD/suche.ppm" "$SANS" 15 $((SCX + SRX)) $((SCY + SRB)) \
+    $SSFG $SSEL "Datei-Explorer  --  Dateien und Ordner ansehen" 96
+schau_nicht "und in Zeile 1 steht nichts mehr" \
+    ttext "$TMPD/suche.ppm" "$SANS" 15 $((SCX + SRX)) $((SCY + SRB + SZH)) \
+    $SFG $SBG "Editor  --  Text schreiben und aendern" 96
+# DIE GEGENPROBE, DIE DIE ZUSAGE ERST WERTVOLL MACHT: dieselben
+# Tastendruecke, dieselben Dateien, nur OHNE das Feld `keys`.
+foto nokeys "gfx wm wigstart wignokeys wmhold wiglong $GRUND" "$M"
+has "$TMPD/nokeys.txt" "starter: suche [folder] treffer=0" \
+    "OHNE die Schluesselwoerter findet 'folder' NICHTS"
+has "$TMPD/nokeys.txt" "starter: apps=$soll" \
+    "obwohl dasselbe Verzeichnis mit denselben $soll Programmen gelesen wurde"
+schau_nicht "und im Bild steht dann auch keine Zeile" \
+    ttext "$TMPD/nokeys.ppm" "$SANS" 15 $((SCX + SRX)) $((SCY + SRB)) \
+    $SSFG $SSEL "Datei-Explorer  --  Dateien und Ordner ansehen" 96
+# UND EIN WORT, DAS NIRGENDS STEHT, FINDET NICHTS. Eine Suche, die immer
+# etwas findet, ist keine Suche.
+sed 's/^sendkey f$/sendkey q/; s/^sendkey o$/sendkey u/; s/^sendkey l$/sendkey a/; s/^sendkey d$/sendkey s/; s/^sendkey e$/sendkey t/; s/^sendkey r$/sendkey e/' \
+    "$M" > "$TMPD/unsinn.mon"
+foto unsinn "gfx wm wigstart wmhold wiglong $GRUND" "$TMPD/unsinn.mon"
+has "$TMPD/unsinn.txt" "starter: suche [quaste] treffer=0" \
+    "ein Wort, das nirgends steht, findet NICHTS"
+grep -qi 'quaste' assets/apps/*.app \
+    && bad "'quaste' steht doch in einer .app-Datei" \
+    || ok "und 'quaste' steht wirklich in keiner .app-Datei"
+# Und dass die Suche ueberhaupt etwas findet, wenn sie soll: der leere
+# Begriff zeigt alle.
+has "$TMPD/start.txt" "starter: suche [] treffer=$soll" \
+    "ohne Suchbegriff stehen alle $soll Programme in der Liste"
 
 echo
 echo "K15: $pass passed, $fail failed"

@@ -312,6 +312,144 @@ darin steht.
 
 ---
 
+## 6b. Der Name, der zweite Name und die Auffindbarkeit
+
+*(Nachtrag zum Auftrag, 26.08.2026.)*
+
+### Er heißt Datei-Explorer, und der Name steht nicht im Quelltext
+
+Justins Entscheidung: **kein Eigenname.** Der Name IST die Beschreibung
+— so wie das Programm unter Windows für den Nutzer schlicht
+„Datei-Explorer" heißt und die Datei dahinter `explorer.exe`. Kein
+Nautilus, kein Finder, kein Kunstwort, das man erst lernen muss.
+
+* Die Datei heißt **`/bin/explorer`**.
+* Der angezeigte Name ist **„Datei-Explorer"** — und er steht in
+  `/usr/share/apps/explorer.app`, **nicht** im Quelltext. Dasselbe
+  Prinzip wie `brands/*.toml` im OrientOS-Repo: austauschbare
+  Zeichenketten gehören in Daten. Der Läufer prüft beides — dass die
+  Zeichenkette in `kernel/user/explorer.fi` *nicht* vorkommt und dass
+  das Programm sie aus der Datei holt.
+* Findet sich die Datei nicht, nimmt das Fenster den **Aufrufnamen** und
+  behauptet keinen schöneren.
+
+Gemessen wird der ganze Weg: die Datei auf der Platte → Ring 3 →
+`WM_CREATE` → die Titelleiste, die der **Fensterserver** malt, je Zeichen
+gegen den Referenzrasterer.
+
+### `/bin/files` ist ein zweiter Name, kein zweites Exemplar
+
+Ein Verzeichniseintrag ist eine Inode-Nummer und ein Name (32 Oktette,
+`kernel/fs.fi`). **Zwei Einträge mit derselben Nummer sind zwei Namen für
+eine Datei** — ein harter Verweis, und er braucht in diesem Format keine
+einzige neue Zeile im Kernel. `tools/osum/mkfs.py` hat dafür die
+Schreibweise `<neu>@<vorhanden>` bekommen; die Verweiszahl im Inode
+(`I_NLINK`) gab es schon und wird jetzt hochgezählt.
+
+**Gemessen, nicht behauptet.** Dasselbe Abbild einmal mit Verweis und
+einmal mit zwei Kopien:
+
+| | freie Blöcke | Inodes |
+|---|---:|---:|
+| zwei Kopien | 3 160 | 4 |
+| ein Verweis | **3 610** | **3** |
+
+450 Blöcke und eine Inode gespart — bei einem Programm von 226 256
+Oktetten auf einem Abbild von 2 MiB ist das der Unterschied zwischen
+„geht" und „geht nicht". Dazu die Zusage, dass beide Namen **Oktett für
+Oktett dasselbe** liefern (`mkfs.py cat`).
+
+**Was dieser Kernel dabei noch nicht kann, und es gehört gesagt:**
+`unlink` zählt die Verweiszahl nicht herunter, es gibt den Inode frei.
+Wer einen der beiden Namen löscht, macht den anderen unbrauchbar. Auf
+`/bin`, das nur gelesen wird, fällt das nicht an — ein `rm /bin/files`
+wäre trotzdem falsch.
+
+### Das Anwendungsverzeichnis: `/usr/share/apps/*.app`
+
+Osum hatte bis hierher **keinen Ort, an dem steht, welche Programme es
+gibt**. `/bin` listet Dateinamen — `sh`, `edit`, `wc`, `explorer` —, und
+ein Dateiname ist kein Name: er sagt nicht, was das Programm tut, und man
+kann nicht danach suchen, wenn man ihn nicht schon kennt.
+
+Eine Datei je Programm, `schlüssel=wert`, eine Zeile je Feld, `#` für
+Anmerkungen:
+
+```
+name=Datei-Explorer
+info=Dateien und Ordner ansehen
+exec=/bin/explorer
+icon=4a90d0
+keys=datei,dateien,explorer,ordner,verzeichnis,manager,file,files,folder
+```
+
+**Warum dieses Format und nicht `.desktop`.** Der *Gedanke* ist der von
+Freedesktop und er ist der richtige: eine Textdatei je Programm mit
+Anzeigename, Beschreibung, Befehl, Symbol und Schlüsselwörtern, und ein
+Verzeichnis voll davon. Was `.desktop` darüber hinaus mitbringt, hat
+dieses System nicht:
+
+| in `.desktop` | warum hier nicht |
+|---|---|
+| `[Desktop Entry]` | es gibt genau eine Gruppe |
+| `Name[de]=` | es gibt eine Sprache |
+| `Exec=… %f %U` | der Starter übergibt nichts |
+| `\s`, `\n`, `\\`, Anführungszeichen | ein Wert ist alles bis zum Zeilenende, roh |
+| `Type=`, `Categories=`, `MimeType=`, `StartupNotify=` | Felder für Dinge, die es hier nicht gibt |
+
+Ein `.desktop`-Leser wäre zu neun Zehnteln Leser für Sachen, die nie
+vorkommen — und jedes dieser Zehntel eine Stelle, an der er sich anders
+verhält als der echte.
+
+**Das Symbol.** Es gibt in diesem System keine Bilddateien und keinen
+Leser dafür. `icon=` ist deshalb eine **Farbe**; der Starter malt daraus
+ein Plättchen von 14 × 14 und setzt den ersten Buchstaben des
+Anzeigenamens mittig darauf. Das ist ein Symbol, das man messen kann —
+die Farbe als Zahl von Bildpunkten, der Buchstabe je Zeichen gegen den
+Rasterer — und es ist nicht die Behauptung, es gäbe Symbole.
+
+### Der Starter, und die Gegenprobe, um die es geht
+
+Ein Fenster mit einem Suchfeld über dem Anwendungsverzeichnis. Man tippt,
+und **während man tippt** wird die Liste kürzer; Eingabetaste,
+Doppelklick oder der Knopf starten das Programm. Erreichbar über die
+Schaltfläche **„Start"** in der Pfadleiste des Datei-Explorers und über
+das Kommandozeilenwort `wigstart`.
+
+Gesucht wird in **drei** Feldern: Anzeigename, Beschreibung **und
+Schlüsselwörter**. Das dritte ist der Grund für die ganze Sache:
+
+```
+starter: suche [fol]    treffer=1
+starter: suche [fold]   treffer=1
+starter: suche [folder] treffer=1
+starter: treffer i=0 name=[Datei-Explorer] exec=[/bin/explorer]
+```
+
+**„folder" steht weder in „Datei-Explorer" noch in „Dateien und Ordner
+ansehen".** Es steht nur in `keys=`. Der Läufer rechnet das zuerst nach —
+er durchsucht *alle* `name=`- und `info=`-Zeilen nach `folder`, `files`,
+`manager` und `verzeichnis` und fällt, wenn eines davon dort auftaucht;
+sonst wäre die Zusage eine über einen Zufall.
+
+Und dann die drei Gegenproben:
+
+| Lauf | getippt | Treffer |
+|---|---|---:|
+| Regellauf | `folder` | **1** (Datei-Explorer) |
+| **`wignokeys`** — dieselben Dateien, dieselbe Suche, **ohne das Feld `keys`** | `folder` | **0** |
+| Regellauf | `quaste` (steht in keiner `.app`-Datei) | **0** |
+| Regellauf | *(leer)* | **4** — alle |
+
+Die zweite Zeile ist die wichtige: sie zeigt, dass wirklich die
+Schlüsselwörter greifen und nicht zufällig der Name. Die dritte zeigt,
+dass die Suche überhaupt etwas ablehnt — **eine Suche, die immer etwas
+findet, ist keine Suche.** Und alle drei werden im Bild nachgeprüft, je
+Zeichen: im Regellauf steht der Datei-Explorer in Zeile 0 der Liste und
+in Zeile 1 nichts mehr; mit `wignokeys` steht auch in Zeile 0 nichts.
+
+---
+
 ## 7. Die Fehler dieser Runde
 
 Sie stehen hier, weil sie mehr über den Baum sagen als die grünen Zeilen.
@@ -395,6 +533,14 @@ Null zurück, statt in die nächste Seite zu schreiben.
 
 ## 8. Was diese Runde NICHT hat
 
+* **Ein `.app`-Eintrag kann keinen Argumentsatz mitgeben.** `exec=` ist
+  ein Pfad, kein Kommando mit Argumenten — der Starter ruft `spawn` mit
+  genau diesem Pfad. Wer `edit /etc/theme` als Eintrag will, braucht ein
+  Feld mehr und einen Zerleger dafür.
+* **Sechzehn Programme, 4 KiB Zeichenketten.** Das Anwendungsverzeichnis
+  liest höchstens sechzehn `.app`-Dateien und legt ihre Werte in einen
+  Bereich von vier Kilooktett. Was darüber hinausgeht, wird übergangen —
+  nicht abgeschnitten.
 * **Kein Hintergrundbild.** Der Schreibtisch ist eine Farbe, und der
   Fensterserver malt ihn (`wm.compose`, `S_DESK`). Ein Bild dahinter
   hieße entweder ein Bild im Kernel oder ein Fenster, das *unter* alle

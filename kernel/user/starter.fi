@@ -1,0 +1,339 @@
+// kernel/user/starter.fi -- Runde K15, Nachtrag: DER STARTER.
+//
+// Ein Fenster mit einem Suchfeld. Man tippt, und waehrend man tippt
+// wird die Liste kuerzer; man drueckt die Eingabetaste oder klickt
+// doppelt, und das Programm laeuft.
+//
+// GESUCHT WIRD IN DREI FELDERN: Anzeigename, Beschreibung UND
+// SCHLUESSELWOERTER (`kernel/user/appdir.fi`). Das dritte ist der Grund
+// fuer die ganze Sache. "Datei-Explorer" findet man mit "datei" und mit
+// "explorer" -- das kann jeder Namensvergleich. Mit "folder", "files",
+// "manager" oder "verzeichnis" findet man ihn NUR ueber die
+// Schluesselwoerter, denn keines dieser Woerter steht im Namen oder in
+// der Beschreibung. Genau das misst `tools/k15/run.sh`, und genau
+// deshalb gibt es das Argument `nokeys`: dieselbe Suche ohne das Feld,
+// und dann findet "folder" nichts. Eine Suche, die immer etwas findet,
+// ist keine Suche.
+//
+// WAS ER MELDET, damit man ihn von aussen nachrechnen kann: wie viele
+// Programme das Verzeichnis hat, welchen Suchbegriff er gerade hat, wie
+// viele Treffer, und je Treffer Name und Befehl.
+
+profile kernel
+
+import ulib
+import libc.io
+import wigc
+import wig
+import appdir
+
+export { u_start }
+
+static mut suchfeld: [u8; 64] = [0 as u8; 64]
+static mut liste: [u8; 1024] = [0 as u8; 1024]
+static mut farben: [u64; 16] = [0 as u64; 16]
+static mut treffer: [u64; 16] = [0 as u64; 16]
+static mut ntreffer: u64 = 0
+// AUCH SEIN EIGENER NAME STEHT IN DEN DATEN. Er nimmt sich nicht aus:
+// der Titel kommt aus dem Eintrag, dessen `exec` auf dieses Programm
+// zeigt -- genauso wie beim Datei-Explorer. Ohne Eintrag steht der
+// Aufrufname da und nichts Schoeneres.
+static mut t_titel: [u8; 64] = [0 as u8; 64]
+static mut t_selbst: [u8; 16] = "/bin/starter\0\0\0\0"
+static mut t_frage: [u8; 24] = "Programm suchen:\0\0\0\0\0\0\0\0"
+// Die Aufschrift des Knopfes, nicht der Name des Programms: der
+// steht in den Daten. "Ausfuehren" und nicht noch einmal
+// "Starten" -- das Fenster heisst schon so.
+static mut t_los: [u8; 12] = "Ausfuehren\0\0"
+static mut t_dir: [u8; 20] = "/usr/share/apps\0\0\0\0\0"
+
+fn say(p: u64) {
+    ulib.say(p)
+}
+
+fn kv(name: u64, v: u64) {
+    var sp: [u8; 2] = " \0"
+    say(name)
+    ulib.sayn(v)
+    say((&sp[0 as usize]) as u64)
+}
+
+// Die Trefferliste neu bauen: ein Textblock fuer das Listen-Widget, ein
+// Feld aus Farben fuer die Symbole. Und dieselbe Auskunft auf die
+// serielle Leitung, damit der Laeufer draussen nachrechnen kann, was
+// drinnen ausgewaehlt wurde.
+fn neu_suchen(ls: u64) {
+    var s_s: [u8; 24] = "starter: suche [\0\0\0\0\0\0\0\0"
+    var s_t: [u8; 16] = "] treffer=\0\0\0\0\0\0"
+    var s_e: [u8; 20] = "starter: treffer \0\0\0"
+    var si: [u8; 4] = "i=\0\0"
+    var sn: [u8; 8] = "name=[\0\0"
+    var sx: [u8; 10] = "] exec=[\0\0"
+    var sz: [u8; 4] = "]\0\0\0"
+    ntreffer = appdir.search((&suchfeld[0 as usize]) as u64,
+        (&treffer[0 as usize]) as u64, 16)
+    var lp: u64 = 0
+    var k: u64 = 0
+    while k < ntreffer {
+        let a: u64 = treffer[(k) as usize]
+        farben[(k) as usize] = appdir.icon_of(a)
+        let nm: u64 = appdir.name_of(a)
+        var j: u64 = 0
+        while (*((nm + j) as *mut u8)) != 0 as u8 && lp < 1000 {
+            liste[(lp) as usize] = *((nm + j) as *mut u8)
+            lp = lp + 1
+            j = j + 1
+        }
+        // Beschreibung dahinter, durch zwei Striche getrennt -- eine
+        // Zeile, weil das Listen-Widget eine Zeile je Eintrag zeigt.
+        var strich: [u8; 6] = "  --  "
+        j = 0
+        while j < 6 && lp < 1000 {
+            liste[(lp) as usize] = strich[(j) as usize]
+            lp = lp + 1
+            j = j + 1
+        }
+        let inf: u64 = appdir.info_of(a)
+        j = 0
+        while (*((inf + j) as *mut u8)) != 0 as u8 && lp < 1000 {
+            liste[(lp) as usize] = *((inf + j) as *mut u8)
+            lp = lp + 1
+            j = j + 1
+        }
+        liste[(lp) as usize] = 10 as u8
+        lp = lp + 1
+        k = k + 1
+    }
+    liste[(lp) as usize] = 0 as u8
+    wig.set_text(ls, (&liste[0 as usize]) as u64)
+    wig.list_icons(ls, (&farben[0 as usize]) as u64)
+    say((&s_s[0 as usize]) as u64)
+    say((&suchfeld[0 as usize]) as u64)
+    say((&s_t[0 as usize]) as u64)
+    ulib.sayn(ntreffer)
+    ulib.nl()
+    k = 0
+    while k < ntreffer {
+        let a: u64 = treffer[(k) as usize]
+        say((&s_e[0 as usize]) as u64)
+        kv((&si[0 as usize]) as u64, k)
+        say((&sn[0 as usize]) as u64)
+        say(appdir.name_of(a))
+        say((&sx[0 as usize]) as u64)
+        say(appdir.exec_of(a))
+        say((&sz[0 as usize]) as u64)
+        ulib.nl()
+        k = k + 1
+    }
+}
+
+fn starten(zeile: u64) {
+    var s_go: [u8; 20] = "starter: start \0\0\0\0\0"
+    var s_p: [u8; 8] = " pid=\0\0\0"
+    var arg: [u8; 160] = [0 as u8; 160]
+    if zeile >= ntreffer {
+        return
+    }
+    let a: u64 = treffer[(zeile) as usize]
+    ulib.strncpy((&arg[0 as usize]) as u64, appdir.exec_of(a), 150)
+    let pid: u64 = ulib.sys(ulib.SYS_SPAWN, (&arg[0 as usize]) as u64, 0, 0)
+    say((&s_go[0 as usize]) as u64)
+    say((&arg[0 as usize]) as u64)
+    say((&s_p[0 as usize]) as u64)
+    ulib.sayn(pid)
+    ulib.nl()
+}
+
+fn u_start(args: u64) -> u64 {
+    var s_no: [u8; 8] = "nohit\0\0\0"
+    var s_nc: [u8; 8] = "noclip\0\0"
+    var s_nk: [u8; 8] = "nokeys\0\0"
+    var s_bad: [u8; 24] = "starter: keine Flaeche\0\0"
+    var s_n: [u8; 20] = "starter: apps=\0\0\0\0\0\0"
+    var s_go: [u8; 20] = "starter: ready\0\0\0\0\0\0"
+    var s_geo: [u8; 20] = "starter: geom \0\0\0\0\0\0"
+    var sx: [u8; 4] = "x=\0\0"
+    var sy: [u8; 4] = "y=\0\0"
+    var sw: [u8; 4] = "w=\0\0"
+    var sh: [u8; 4] = "h=\0\0"
+    var s_vor: [u8; 24] = "starter: vorgabe [\0\0\0\0\0\0"
+    var s_zu: [u8; 4] = "]\0\0\0"
+
+    var nohit: bool = false
+    var noclip: bool = false
+    var nokeys: bool = false
+    var vorgabe: u64 = 0
+    let argc: u64 = ulib.arg_count(args)
+    var a: u64 = 1
+    while a < argc {
+        let p: u64 = ulib.arg_at(args, a)
+        if ulib.streq(p, (&s_no[0 as usize]) as u64) {
+            nohit = true
+        } else if ulib.streq(p, (&s_nc[0 as usize]) as u64) {
+            noclip = true
+        } else if ulib.streq(p, (&s_nk[0 as usize]) as u64) {
+            nokeys = true
+        } else {
+            // Alles andere ist ein Suchbegriff. So laesst sich die Suche
+            // auch OHNE Tastatur messen -- und mit Tastatur sowieso.
+            vorgabe = p
+        }
+        a = a + 1
+    }
+    if !wig.begin(nohit, noclip) {
+        say((&s_bad[0 as usize]) as u64)
+        ulib.nl()
+        return 1
+    }
+    let n: u64 = appdir.load((&t_dir[0 as usize]) as u64, nokeys)
+    say((&s_n[0 as usize]) as u64)
+    ulib.sayn(n)
+    ulib.nl()
+    var s_titel: [u8; 24] = "starter: name [\0\0\0\0\0\0\0\0\0"
+    var s_end: [u8; 4] = "]\0\0\0"
+    var k3: u64 = 0
+    while k3 < n {
+        if ulib.streq(appdir.exec_of(k3), (&t_selbst[0 as usize]) as u64) {
+            ulib.strncpy((&t_titel[0 as usize]) as u64,
+                appdir.name_of(k3), 62)
+            k3 = n
+        } else {
+            k3 = k3 + 1
+        }
+    }
+    if (t_titel[0 as usize]) == 0 as u8 {
+        ulib.strncpy((&t_titel[0 as usize]) as u64, ulib.arg_at(args, 0),
+            62)
+    }
+    say((&s_titel[0 as usize]) as u64)
+    say((&t_titel[0 as usize]) as u64)
+    say((&s_end[0 as usize]) as u64)
+    ulib.nl()
+    if vorgabe != 0 {
+        ulib.strncpy((&suchfeld[0 as usize]) as u64, vorgabe, 62)
+        say((&s_vor[0 as usize]) as u64)
+        say((&suchfeld[0 as usize]) as u64)
+        say((&s_zu[0 as usize]) as u64)
+        ulib.nl()
+    }
+
+    let bx: u64 = 190
+    let by: u64 = 110
+    let bw: u64 = 440
+    let bh: u64 = 300
+    let w: u64 = wig.window(bx, by, bw, bh, (&t_titel[0 as usize]) as u64)
+    if w >= wig.MAXWN {
+        say((&s_bad[0 as usize]) as u64)
+        ulib.nl()
+        return 1
+    }
+    say((&s_geo[0 as usize]) as u64)
+    kv((&sx[0 as usize]) as u64, bx)
+    kv((&sy[0 as usize]) as u64, by)
+    kv((&sw[0 as usize]) as u64, bw)
+    kv((&sh[0 as usize]) as u64, bh)
+    ulib.nl()
+
+    wig.box_v(w, 0, 0, bw, 84, 12, 8)
+    let lb: u64 = wig.label((&t_frage[0 as usize]) as u64)
+    wig.size(0, 26)
+    let fe: u64 = wig.entry((&suchfeld[0 as usize]) as u64, 62)
+    wig.box_end()
+
+    wig.box_v(w, 12, 82, bw - 24, 170, 0, 0)
+    wig.size(0, 166)
+    let ls: u64 = wig.list((&liste[0 as usize]) as u64, 7)
+    wig.box_end()
+
+    wig.box_h(w, bw - 130, 256, 118, 30, 0, 8)
+    wig.size(110, 28)
+    let bt: u64 = wig.button((&t_los[0 as usize]) as u64)
+    wig.box_end()
+
+    wig.set_focus(fe)
+    neu_suchen(ls)
+    wig.draw_all()
+    say_rects(lb, fe, ls, bt)
+    say((&s_go[0 as usize]) as u64)
+    ulib.nl()
+
+    var vorher: u64 = ulib.length((&suchfeld[0 as usize]) as u64)
+    var runden: u64 = 0
+    while wig.alive() && runden < 4000000 {
+        runden = runden + 1
+        let id: u64 = wig.step()
+        if id < wig.MAXWD {
+            let kind: u64 = wig.fired_kind()
+            let idx: u64 = wig.fired_index()
+            if kind == wig.K_ENTRY && id == fe {
+                starten(wig.value(ls))
+            } else if kind == wig.K_LIST && id == ls {
+                starten(idx)
+            } else if kind == wig.K_BUTTON && id == bt {
+                starten(wig.value(ls))
+            }
+        }
+        // WAEHREND MAN TIPPT wird die Liste kuerzer. Das Textfeld meldet
+        // keinen Tastendruck (es meldet die Eingabetaste), also wird
+        // hier nachgesehen, ob sich der Inhalt geaendert hat -- eine
+        // Zeile, und sie ist der Unterschied zwischen einem Suchfeld und
+        // einem Eingabefeld mit einem Knopf daneben.
+        let jetzt: u64 = ulib.length((&suchfeld[0 as usize]) as u64)
+        if jetzt != vorher {
+            vorher = jetzt
+            neu_suchen(ls)
+        }
+    }
+    return 0
+}
+
+fn say_rects(lb: u64, fe: u64, ls: u64, bt: u64) {
+    say_rect(lb)
+    say_rect(fe)
+    say_rect(ls)
+    say_rect(bt)
+    var a: [u8; 20] = "starter: rows \0\0\0\0\0\0"
+    var sx: [u8; 4] = "x=\0\0"
+    var sb: [u8; 8] = "base=\0\0\0"
+    var sh: [u8; 4] = "zh=\0"
+    var sf: [u8; 4] = "fg=\0"
+    var sg: [u8; 4] = "bg=\0"
+    var ss: [u8; 6] = "sel=\0\0"
+    var sc: [u8; 8] = "selfg=\0\0"
+    var si: [u8; 6] = "ix=\0\0\0"
+    var sj: [u8; 6] = "iy=\0\0\0"
+    say((&a[0 as usize]) as u64)
+    kv((&sx[0 as usize]) as u64, wig.row_x(ls))
+    kv((&sb[0 as usize]) as u64, wig.row_base(ls, 0))
+    kv((&sh[0 as usize]) as u64, wig.row_h())
+    kv((&sf[0 as usize]) as u64, wigc.theme(wigc.T_FG))
+    kv((&sg[0 as usize]) as u64, wigc.theme(wigc.T_ENTRY))
+    kv((&ss[0 as usize]) as u64, wigc.theme(wigc.T_SEL))
+    kv((&sc[0 as usize]) as u64, wigc.theme(wigc.T_SELFG))
+    kv((&si[0 as usize]) as u64, wig.icon_x(ls))
+    kv((&sj[0 as usize]) as u64, wig.icon_y(ls, 0))
+    var sl: [u8; 6] = "lx=\0\0\0"
+    var sm: [u8; 6] = "lb=\0\0\0"
+    kv((&sl[0 as usize]) as u64,
+        wig.icon_letter_x(ls, appdir.name_of(0)))
+    kv((&sm[0 as usize]) as u64, wig.icon_letter_base(ls, 0))
+    ulib.nl()
+}
+
+fn say_rect(i: u64) {
+    var a: [u8; 20] = "starter: rect \0\0\0\0\0\0"
+    var si: [u8; 4] = "id=\0"
+    var sk: [u8; 8] = "kind=\0\0\0"
+    var sx: [u8; 4] = "x=\0\0"
+    var sy: [u8; 4] = "y=\0\0"
+    var sw: [u8; 4] = "w=\0\0"
+    var sh: [u8; 4] = "h=\0\0"
+    say((&a[0 as usize]) as u64)
+    kv((&si[0 as usize]) as u64, i)
+    kv((&sk[0 as usize]) as u64, wig.kind_of(i))
+    kv((&sx[0 as usize]) as u64, wig.rect_x(i))
+    kv((&sy[0 as usize]) as u64, wig.rect_y(i))
+    kv((&sw[0 as usize]) as u64, wig.rect_w(i))
+    kv((&sh[0 as usize]) as u64, wig.rect_h(i))
+    ulib.nl()
+}

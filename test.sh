@@ -102,13 +102,23 @@
 #      Auswahlfelder, Reiter, Dialoge, eine Ereignisschleife, drei
 #      Anordnungen und die Tastaturweiterschaltung. Im Kernel stehen
 #      sieben Aufrufe (1800..1899, `kernel/wig.fi`), die kein Widget
-#      kennen. Darauf sitzt `/bin/files`, die grafische Fassung von
-#      `ls`. Gemessen an echten Bildschirmfotos, in die ueber den
+#      kennen. Darauf sitzt `/bin/explorer`, die grafische Fassung von
+#      `ls` -- fuer den Nutzer "Datei-Explorer", und wer `files` tippt,
+#      landet am selben Ort: `/bin/files` ist ein ZWEITER NAME auf
+#      dieselbe Inode, kein zweites Exemplar. Dazu ein
+#      ANWENDUNGSVERZEICHNIS (`/usr/share/apps/*.app`: Anzeigename,
+#      Beschreibung, Befehl, Symbol, Schluesselwoerter) und ein
+#      STARTER mit Suchfeld darueber -- man tippt "folder" und findet
+#      den Dateimanager, obwohl das Wort weder im Namen noch in der
+#      Beschreibung steht.
+#      Gemessen an echten Bildschirmfotos, in die ueber den
 #      QEMU-Monitor echte Klicks und Tastendruecke gespeist wurden --
 #      und der Text darin JE ZEICHEN gegen `tools/ttf/raster.py`.
 #      Gegenproben: `wignohit` (keine Trefferpruefung -- kein Widget
 #      erfaehrt vom Klick), `wignoclip` (keine Zwischenablage),
-#      `nodirty`, `nofocus`, `nomouse` und der Lauf ganz ohne `wig`.
+#      `wignokeys` (dieselbe Suche ohne die Schluesselwoerter -- dann
+#      findet "folder" NICHTS), `nodirty`, `nofocus`, `nomouse` und
+#      der Lauf ganz ohne `wig`.
 #
 #  15. EIN WIRT FUER FREMDE PROZESSOREN (tools/hv/run.sh, Runde K12):
 #      AMD-V, verschachtelte Seitentabellen, sechs Gaeste. Der Kernel
@@ -314,7 +324,7 @@ lauf "18. ein Wirt fuer fremde Prozessoren: AMD-V, verschachtelte Seitentabellen
      tools/hv/run.sh hv '^HV:|^        (bench|exits|cpu):'
 
 lauf "21. Widgets und der Dateimanager: eine Bibliothek in Ring 3 (tools/k15/run.sh, Runde K15)" \
-     tools/k15/run.sh k15 '^K15: |^  OK    (die Anordnung|ein Klick auf das Kaestchen|mit Bereichsverfolgung|und /daten/neu)'
+     tools/k15/run.sh k15 '^K15: |^  OK    (die Anordnung|ein Klick auf das Kaestchen|mit Bereichsverfolgung|und /daten/neu|der Verweis spart|getippt |OHNE die Schluesselwoerter)'
 
 echo
 echo "=================================================================="

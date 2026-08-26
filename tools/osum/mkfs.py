@@ -25,7 +25,12 @@ The format, from `kernel/fs.fi`:
     a dirent       32 octets: inode number, then 24 for the name
 
 Usage:
-    mkfs.py build <image> <blocks> [<path>=<hostfile> | <path>/ ] ...
+    mkfs.py build <image> <blocks>
+            [ <path>=<hostfile> | <path>/ | <neu>@<vorhanden> ] ...
+
+`<neu>@<vorhanden>` ist ein ZWEITER NAME fuer dieselbe Datei (Runde K15):
+zwei Verzeichniseintraege mit derselben Inode-Nummer, ein Exemplar der
+Oktette.
     mkfs.py list  <image>
     mkfs.py cat   <image> <path>
 
@@ -277,6 +282,38 @@ class Fs:
         self.dir_add(dirino, name, ino)
         return ino
 
+    # RUNDE K15: EIN ZWEITER NAME FUER DIESELBE DATEI.
+    #
+    # Ein Verzeichniseintrag ist eine Inode-Nummer und ein Name (32
+    # Oktette, `kernel/fs.fi`). Zwei Eintraege mit DERSELBEN Nummer sind
+    # deshalb zwei Namen fuer eine Datei -- ein harter Verweis, wie ihn
+    # jedes Unix hat, und er braucht in diesem Format keine einzige neue
+    # Zeile. Die Verweiszahl im Inode gibt es auch schon (`I_NLINK`); sie
+    # wird hier hochgezaehlt, damit sie die Wahrheit sagt.
+    #
+    # WARUM DAS UND NICHT ZWEIMAL DIESELBE DATEI: `/bin/explorer` ist
+    # 205 KiB. Zweimal waeren 410 KiB auf einem Abbild von 2 MiB, und die
+    # beiden koennten auseinanderlaufen. Der Testlaeufer misst genau das:
+    # er baut dasselbe Abbild einmal mit Verweis und einmal mit Kopie und
+    # vergleicht die freien Bloecke.
+    #
+    # WAS DIESER KERNEL DABEI NOCH NICHT KANN, und es gehoert gesagt:
+    # `unlink` zaehlt die Verweiszahl nicht herunter, es gibt den Inode
+    # frei. Wer einen der beiden Namen loescht, macht den anderen
+    # unbrauchbar. Auf einem Abbild, das nur gelesen wird -- und `/bin`
+    # wird nur gelesen --, faellt das nicht an; ein `rm /bin/files` waere
+    # trotzdem falsch, und das steht in docs/ROUNDK15.md.
+    def link(self, newpath, oldpath):
+        ino = self.resolve(oldpath)
+        if not ino:
+            raise SystemExit("mkfs: '%s' gibt es nicht" % oldpath)
+        dirino, name = self.parent_of(newpath)
+        if self.dir_find(dirino, name):
+            raise SystemExit("mkfs: '%s' ist schon da" % newpath)
+        self.dir_add(dirino, name, ino)
+        self.iset(ino, I_NLINK, self.iget(ino, I_NLINK) + 1)
+        return ino
+
     def addfile(self, path, data):
         dirino, name = self.parent_of(path)
         if self.dir_find(dirino, name):
@@ -372,6 +409,12 @@ def main(argv):
     for spec in argv[4:]:
         if spec.endswith("/"):
             fs.mkdir(spec[:-1])
+            continue
+        if "@" in spec and "=" not in spec:
+            # <neuer pfad>@<vorhandener pfad> -- ein zweiter NAME fuer
+            # dieselbe Datei, kein zweites Exemplar.
+            path, _, alt = spec.partition("@")
+            fs.link(path, alt)
             continue
         path, _, host = spec.partition("=")
         if not host:
