@@ -28,7 +28,9 @@ Tastendrücke** in die laufende Maschine speist und das Ergebnis auf dem
 Bildschirmfoto nachrechnet.
 
 **Abnahme:** `bash tools/wm/run.sh` (Abschnitt 15 von `./test.sh`) —
-**101 Zusagen, 0 Fehler.**
+**103 Zusagen, 0 Fehler.** `./test.sh` insgesamt: **1228 Zusagen**, davon
+14 von 15 Abschnitten grün; die eine rote Zeile gehört Abschnitt 14 (Netz)
+und ist auf `main` dieselbe — siehe Abschnitt 9.
 
 ---
 
@@ -645,7 +647,51 @@ Klickfleck, im Mitschnitt stand nichts. Das Gegenmittel war eine Zeile
 
 ---
 
-## 9. Die Speicherkarte
+## 9. Die Abnahme, und die eine rote Zeile, die nicht dieser Runde gehört
+
+`./test.sh` auf diesem Zweig:
+
+```
+FREESTANDING 41 · CORE 46 · KERNEL 175 · OSUM 130 · PCI 97 · POSIX 134 ·
+SMP 58 · USERLAND 91 · CAPS 67 · BOOT 20 · GFX 76 · UNIX 107 ·
+NET 74 (von 75) · WM 103
+14 Abschnitte bestanden, 1 fehlgeschlagen, 1228 Zusagen
+```
+
+Die **1126 Zusagen von vorher sind vollständig da** und keine ist
+gesunken; dazu kommen die **103** dieser Runde. Die eine rote Zeile steht
+in Abschnitt 14 (Netz):
+
+```
+FAIL  and all of them arrived: 64240, expected eq 65536
+```
+
+Das ist der Fall mit **zehn Prozent Paketverlust auf dem Weg hinaus**
+(`tools/net/run.sh`, Abschnitt 9, zweite Hälfte). `docs/ROUNDK7B.md`
+Abschnitt 6 nennt genau diese Stelle bereits als „wetterfühlig" und
+schreibt sie K8 zu.
+
+**Nachgemessen, statt behauptet.** Derselbe Läufer auf `main` — dem
+unveränderten Stand, von dem dieser Zweig ausgeht — auf derselben
+Maschine:
+
+```
+main:      NET: 66 passed, 9 failed
+k10-wm:    NET: 74 passed, 1 failed
+```
+
+und die rote Zeile ist dort **wortgleich und zahlengleich** dieselbe
+(`64240, expected eq 65536`). Der Fehler ist also älter als diese Runde
+und wird von ihr nicht verursacht — sie berührt keinen Netzpfad. Dass
+`main` in diesem Lauf schlechter abschnitt, hat einen benennbaren Grund:
+`tools/net/run.sh` legt seine Leitung unter **festen globalen Namen** an
+(Namensraum `k8net`, veth-Paar `v0`/`v1`, 10.9.0.1/2) und beginnt mit
+`ip link del v0`. Laufen zwei Abnahmen aus zwei Arbeitsverzeichnissen
+gleichzeitig, reißt die eine der anderen die Leitung unter dem
+laufenden TCP-Strom weg. Das gehört K8 und steht hier, damit es nicht
+noch einmal jemand sucht.
+
+## 10. Die Speicherkarte
 
 Drei neue Bereiche, und sie stehen in `kernel/kstate.fi` — dort, wo Runde
 K7 ihren nicht hingeschrieben hat:
@@ -670,7 +716,7 @@ Megabyte, die niemand mehr sieht.
 
 ---
 
-## 10. Was offen bleibt
+## 11. Was offen bleibt
 
 * **Der Server läuft im Kernel.** Der Weg nach Ring 3 führt über ein
   Speicherobjekt, das zwei Prozesse abbilden können (`K_MEMORY` +
