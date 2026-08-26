@@ -101,6 +101,11 @@ const R_ARGS: u64 = 22 // the arguments do not fit on the page
 // beide gleich beantwortet bekommt, kann sie nicht auseinanderhalten.
 const R_PERM: u64 = 23
 
+// RUNDE K16: `#!` zeigt auf einen Ausleger, der selbst wieder einer ist,
+// vier Stufen tief -- oder im Kreis. Linux nennt das ELOOP und hoert nach
+// vier Stufen auf; dieser Kern tut dasselbe.
+const R_INTERP: u64 = 24
+
 // ---------------------------------------------------------- the format
 
 const PT_LOAD: u64 = 1
@@ -496,6 +501,18 @@ fn write_args(state: u64, t: u64, args: u64, argc: u64) -> bool {
     if argc > proc.MAX_ARGS {
         return false
     }
+    // RUNDE K16: DIE SEITE MUSS ERST ENTSTEHEN. Bis zu dieser Runde war
+    // `ARGS_BASE` die oberste der acht Stapelseiten, die `space_build`
+    // ohnehin anlegt; jetzt liegt sie 476 KiB hoeher, damit der Stapel
+    // dazwischen wachsen kann (`proc.grow_stack`). EIN Rahmen mehr je
+    // Prozess von der Platte -- die acht von frueher bleiben, wo sie
+    // sind, und die Rahmenzaehlungen der Runden 62 bis K12 vergleichen
+    // vorher gegen nachher und nicht gegen eine feste Zahl.
+    if proc.page_free(state, t, proc.ARGS_BASE) {
+        if proc.map_page(state, t, proc.ARGS_BASE, true, false) == 0 {
+            return false
+        }
+    }
     let frame: u64 = proc.translate(state, t, proc.ARGS_BASE)
     if frame == 0 {
         return false
@@ -586,25 +603,269 @@ fn spawn(state: u64, path: u64, args: u64, argc: u64, prio: u64) -> u64 {
     return t
 }
 
+// ================================================ RUNDE K16: DER AUSLEGER
+//
+// `#!/bin/sh` in der ersten Zeile. Das ist der aelteste Trick von Unix und
+// der Grund, warum eine Skriptsprache dort kein Sonderfall ist: das
+// Betriebssystem startet nicht die Datei, sondern das Programm, das in
+// ihrer ersten Zeile steht, und reicht ihr den Pfad der Datei als
+// Argument.
+//
+// WARUM DAS HIER STEHT UND NICHT IN DER SHELL. Eine Shell, die `#!` selbst
+// auswertet, hat es fuer sich geloest. `execve` ist die Stelle, durch die
+// JEDER Programmstart dieses Systems geht -- die Shell, `exec` aus Ring 3,
+// der Doppelklick von Runde K15, ein Programm, das ein anderes startet.
+// Steht es hier, koennen alle es, und keines von ihnen weiss davon.
+//
+// DIE REGEL, WORT FUER WORT WIE BEI LINUX:
+//
+//     Datei:   #!/bin/sh -e
+//     Aufruf:  execve("/tmp/x.sh", ["x.sh", "a"])
+//     wird zu: execve("/bin/sh", ["/bin/sh", "-e", "/tmp/x.sh", "a"])
+//
+// Das urspruengliche argv[0] FAELLT WEG -- an seine Stelle tritt der
+// Ausleger. Hoechstens EIN Argument wird aus der Zeile genommen; alles
+// weitere darin ist ein Wort dieses einen Arguments (auch das ist
+// Linux' Regel, und sie ist der Grund, warum `#!/usr/bin/env python3`
+// geht und `#!/usr/bin/env -S a b` nicht).
+//
+// GRENZEN, ausdruecklich:
+//   * hoechstens MAX_INTERP Stufen, dann -ELOOP. Ein Skript, dessen
+//     Ausleger es selbst ist, haelt den Kern damit nicht an.
+//   * der Pfad des Auslegers hoechstens IPATH_MAX-1 Oktette.
+//   * die Argumente zusammen hoechstens proc.MAX_ARGS Stueck -- die
+//     Argumentseite eines Prozesses fasst nicht mehr, und das war vor
+//     dieser Runde genauso.
+const MAX_INTERP: u64 = 4
+const IPATH_MAX: u64 = 128
+const IARGS_MAX: u64 = 2048
+const IWORD_MAX: u64 = 256 // ein Wort der Argumentliste
+
+fn ist_luecke(c: u64) -> bool {
+    return c == 32 || c == 9
+}
+
+// Liest die erste Zeile der Datei. 0 = kein `#!`, sonst die Zahl der
+// Woerter (1 = nur der Ausleger, 2 = Ausleger und ein Argument),
+// 0xFFFFFFFFFFFFFFFF = es IST ein `#!`, aber unbrauchbar.
+fn read_shebang(state: u64, ino: u64, dst_path: u64, dst_arg: u64) -> u64 {
+    let buf: u64 = state + kstate.K16_OFF + kstate.FT_SB
+    var i: u64 = 0
+    while i < 256 {
+        kstate.set8(buf + i, 0 as u8)
+        i = i + 1
+    }
+    let n: u64 = fs.read_at(state, ino, 0, buf, 255)
+    if n < 3 {
+        return 0
+    }
+    if kstate.get8(buf) != 35 {
+        return 0 // '#'
+    }
+    if kstate.get8(buf + 1) != 33 {
+        return 0 // '!'
+    }
+    // Die Zeile endet am Zeilenvorschub oder am Ende dessen, was gelesen
+    // wurde. Ein Wagenruecklauf davor zaehlt als Ende -- eine Datei mit
+    // CRLF ist sonst ein Ausleger namens "/bin/sh\r", den es nicht gibt.
+    var ende: u64 = 2
+    var suche: bool = true
+    while suche {
+        if ende >= n {
+            suche = false
+        } else {
+            let c: u64 = kstate.get8(buf + ende)
+            if c == 10 || c == 13 || c == 0 {
+                suche = false
+            } else {
+                ende = ende + 1
+            }
+        }
+    }
+    var p: u64 = 2
+    while p < ende && ist_luecke(kstate.get8(buf + p)) {
+        p = p + 1
+    }
+    if p >= ende {
+        return 0 -% 1 // `#!` und sonst nichts
+    }
+    var k: u64 = 0
+    while p < ende && !ist_luecke(kstate.get8(buf + p)) {
+        if k + 1 >= IPATH_MAX {
+            return 0 -% 1
+        }
+        kstate.set8(dst_path + k, kstate.get8(buf + p) as u8)
+        k = k + 1
+        p = p + 1
+    }
+    kstate.set8(dst_path + k, 0 as u8)
+    if k == 0 {
+        return 0 -% 1
+    }
+    while p < ende && ist_luecke(kstate.get8(buf + p)) {
+        p = p + 1
+    }
+    if p >= ende {
+        return 1
+    }
+    // Der REST der Zeile ist EIN Argument, mitsamt seinen Leerzeichen --
+    // aber ohne die am Ende, weil ein Argument, das auf ein Leerzeichen
+    // endet, in keiner Datei so gemeint war.
+    var e2: u64 = ende
+    while e2 > p && ist_luecke(kstate.get8(buf + e2 - 1)) {
+        e2 = e2 - 1
+    }
+    k = 0
+    while p < e2 {
+        if k + 1 >= IPATH_MAX {
+            return 0 -% 1
+        }
+        kstate.set8(dst_arg + k, kstate.get8(buf + p) as u8)
+        k = k + 1
+        p = p + 1
+    }
+    kstate.set8(dst_arg + k, 0 as u8)
+    return 2
+}
+
+fn copy_word(dst: u64, src: u64, max: u64) -> u64 {
+    var i: u64 = 0
+    while i < max {
+        let c: u64 = kstate.get8(src + i)
+        kstate.set8(dst + i, c as u8)
+        if c == 0 {
+            return i + 1
+        }
+        i = i + 1
+    }
+    kstate.set8(dst + max - 1, 0 as u8)
+    return max
+}
+
+// Wie viele Oktette das k-te Wort in einer Argumentliste vorne liegt.
+fn word_at(args: u64, k: u64) -> u64 {
+    var at: u64 = 0
+    var i: u64 = 0
+    while i < k {
+        while kstate.get8(args + at) != 0 {
+            at = at + 1
+        }
+        at = at + 1
+        i = i + 1
+    }
+    return args + at
+}
+
 // ROUND K4. `spawn` above is this plus `sched.start`, and the split is
 // what `execve` needed: it does not want a second RUNNING process, it
 // wants an address space with the image in it that it can take over
 // (`sys.do_execve`, `proc.swap_space`). What comes back is a task that is
 // complete and S_NEW -- the scheduler will not touch it until somebody
 // says so, and if nobody does, `proc.discard` takes it apart again.
+// Den Ausleger aufloesen. Zurueck kommt die neue Zahl der Argumente,
+// oder ein Fehler; Pfad und Argumentliste stehen danach in kdata
+// (IPATH_SLOT, IARGS_SLOT). Getrennt von `build`, damit die Ortsvariablen
+// dieser Schleife nicht waehrend `load` auf dem Kernelstapel stehen --
+// siehe den Kommentar dort.
+const IPATH_SLOT: u64 = 0x40
+const IARGS_SLOT: u64 = 0x48
+
+fn aufloesen(state: u64, path: u64, args: u64, argc: u64) -> u64 {
+    var p: u64 = path
+    var a: u64 = args
+    var n: u64 = argc
+    var stufe: u64 = 0
+    var seite: u64 = 0
+    var suchen: bool = true
+    while suchen {
+        let ino: u64 = fs.path(state, p)
+        if ino == 0 {
+            fail(state, R_NOFILE)
+            return errno.neg(errno.E_NOENT)
+        }
+        if fs.inode_type(state, ino) != fs.T_FILE {
+            fail(state, R_ISDIR)
+            return errno.neg(errno.E_ISDIR)
+        }
+        let k16: u64 = state + kstate.K16_OFF
+        let ip: u64 = k16 + kstate.FT_IPATH + seite * IPATH_MAX
+        let ia: u64 = k16 + kstate.FT_IPATH + 2 * IPATH_MAX + seite * IPATH_MAX
+        let w: u64 = read_shebang(state, ino, ip, ia)
+        if w == 0 {
+            suchen = false
+        } else {
+            if w == (0 -% 1) {
+                fail(state, R_INTERP)
+                return errno.neg(errno.E_LOOP)
+            }
+            if stufe >= MAX_INTERP {
+                fail(state, R_INTERP)
+                return errno.neg(errno.E_LOOP)
+            }
+            let na: u64 = k16 + kstate.FT_ARGS + seite * IARGS_MAX
+            var at: u64 = 0
+            var neu: u64 = 0
+            at = at + copy_word(na + at, ip, IWORD_MAX)
+            neu = neu + 1
+            if w == 2 {
+                at = at + copy_word(na + at, ia, IWORD_MAX)
+                neu = neu + 1
+            }
+            at = at + copy_word(na + at, p, IWORD_MAX)
+            neu = neu + 1
+            var k: u64 = 1
+            while k < n {
+                if at + IWORD_MAX > IARGS_MAX {
+                    fail(state, R_ARGS)
+                    return errno.neg(errno.E_2BIG)
+                }
+                at = at + copy_word(na + at, word_at(a, k), IWORD_MAX)
+                neu = neu + 1
+                k = k + 1
+            }
+            if neu > proc.MAX_ARGS {
+                fail(state, R_ARGS)
+                return errno.neg(errno.E_2BIG)
+            }
+            let z: u64 = kstate.K16_OFF + kstate.FT_SCALARS
+                + kstate.FT_SHEBANGS
+            kstate.set(state, z, kstate.get(state, z) + 1)
+            p = ip
+            a = na
+            n = neu
+            seite = 1 - seite
+            stufe = stufe + 1
+        }
+    }
+    kstate.set(state, kstate.K16_OFF + kstate.FT_SCALARS + IPATH_SLOT, p)
+    kstate.set(state, kstate.K16_OFF + kstate.FT_SCALARS + IARGS_SLOT, a)
+    return n
+}
+
 fn build(state: u64, path: u64, args: u64, argc: u64, prio: u64) -> u64 {
     fail(state, R_OK)
     if kstate.get(state, kstate.FS_READY) == 0 {
         fail(state, R_NOFILE)
         return 0
     }
-    let ino: u64 = fs.path(state, path)
-    if ino == 0 {
-        fail(state, R_NOFILE)
+    // RUNDE K16: DER AUSLEGER. Die Arbeit steht in `aufloesen`, und das
+    // ist KEINE Geschmacksfrage: der tiefste Punkt, den der Kernelstapel
+    // dieses Systems je erreicht, liegt in `load` -> `fs.read_at` -> dem
+    // Plattentreiber, und er lag beim Bau dieser Runde bei 16.208 von
+    // 16.384 Oktetten. Jede Ortsvariable, die hier steht, steht waehrend
+    // `load` noch da. Also stehen sie in einer Funktion, die VORHER
+    // fertig ist, und was sie hinterlaesst, sind zwei Zeiger in kdata.
+    let n: u64 = aufloesen(state, path, args, argc)
+    if errno.is_error(n) {
         return 0
     }
-    if fs.inode_type(state, ino) != fs.T_FILE {
-        fail(state, R_ISDIR)
+    let p: u64 = kstate.get(state, kstate.K16_OFF + kstate.FT_SCALARS
+        + IPATH_SLOT)
+    let a: u64 = kstate.get(state, kstate.K16_OFF + kstate.FT_SCALARS
+        + IARGS_SLOT)
+    let ino: u64 = fs.path(state, p)
+    if ino == 0 {
+        fail(state, R_NOFILE)
         return 0
     }
     // RUNDE K13, UND SIE STEHT HIER UND NUR HIER. Jeder Weg, auf dem in
@@ -638,7 +899,7 @@ fn build(state: u64, path: u64, args: u64, argc: u64, prio: u64) -> u64 {
     // Kennungen von dort in den Aufrufer ein, `spawn` startet diese
     // Aufgabe unmittelbar -- beide Wege kommen hier vorbei.
     perm.apply_exec(state, t, ino)
-    if !write_args(state, t, args, argc) {
+    if !write_args(state, t, a, n) {
         proc.discard(state, t)
         sched.irq_restore(flags)
         fail(state, R_ARGS)
@@ -646,7 +907,26 @@ fn build(state: u64, path: u64, args: u64, argc: u64, prio: u64) -> u64 {
     }
     let h: u64 = head(state)
     sched.tset(state, t, sched.T_ENTRY, get64(h + E_ENTRY))
-    sched.tset(state, t, sched.T_USTACK, proc.ARGS_BASE - 16)
+    // RUNDE K16: DER STAPELZEIGER ZEIGT AUF DEN ARGUMENTBLOCK.
+    //
+    // Bis zu dieser Runde stand er 16 Oktette darunter, und der Block war
+    // NUR ueber rdi zu finden. Das ging, solange jedes Programm dieses
+    // Systems mit `kernel/user/crt.s` gebunden wurde -- der liest rdi.
+    //
+    // Ein Programm, das der UNVERAENDERTE `firnc` gebaut hat, liest ihn
+    // nicht. Sein `_start` steht in `lib/firnc1/codegen.fi` und lautet
+    // `xor rbp,rbp / mov rdi,rsp / and rsp,-16 / call main` -- die
+    // Uebergabe von Linux, wo argc bei `_start` AUF dem Stapel liegt.
+    // Und der Block, den `write_args` baut, hat genau diese Form: argc,
+    // dann die Zeiger, dann eine Null (der Kommentar darueber sagt es
+    // seit Runde K1, `tools/k11/hostcrt.s` nutzt es seit K11 in die
+    // andere Richtung).
+    //
+    // Es fehlten also 16 Oktette, und die sind hier. rdi bleibt, wie es
+    // war -- die 52 Programme mit crt.s merken nichts davon; was sich
+    // aendert, ist eine Zahl in der Startzeile (`tools/osum/run.sh`
+    // prueft sie und ist mitgezogen).
+    sched.tset(state, t, sched.T_USTACK, proc.ARGS_BASE)
     sched.tset(state, t, sched.T_ARG, 0)
     sched.tset(state, t, sched.T_WORK, proc.ARGS_BASE)
     kstate.add(state, kstate.SPAWNS, 1)
@@ -697,6 +977,9 @@ fn errno_of(r: u64) -> u64 {
     }
     if r == R_PERM {
         return errno.E_ACCES
+    }
+    if r == R_INTERP {
+        return errno.E_LOOP
     }
     return errno.E_NOEXEC
 }

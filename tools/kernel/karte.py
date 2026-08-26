@@ -98,6 +98,10 @@ BEREICHE = [
     ("MOUSE",      "kstate.fi", "MOUSE_OFF",      "MOUSE_MAX"),
     ("WM",         "kstate.fi", "WM_OFF",         "WM_MAX"),
     ("TTF",        "kstate.fi", "TTF_OFF",        "TTF_MAX"),
+    # RUNDE K16: die Dateiarten (0x49000..0x4C000).  Der Vorrat dieser
+    # Runde ist VOR dem Bauen verteilt worden, weil am 26.08.2026 vier
+    # Runden gleichzeitig liefen und drei dieselbe Seite genommen haben.
+    ("K16",        "kstate.fi", "K16_OFF",        "K16_MAX"),
     # RUNDE K12: die Gastmaschinen des Hypervisors.  Der Bereich steht
     # in `hv.fi` und nicht in `kstate.fi` -- absichtlich, denn er ist die
     # EINZIGE Seite, die diese Runde in `kdata` braucht; alles andere
