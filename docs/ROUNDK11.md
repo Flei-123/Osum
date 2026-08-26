@@ -338,9 +338,12 @@ warum es keine Behauptung ist:
 
 | | |
 |---|---|
-| neue Programme | 21 (20 Werkzeuge + `edit`), dazu `tools.fi` und `flate.fi` |
-| neue Zeilen Firn im Userland | rund 5400 |
-| neue Zeilen im Kern | `ansi.fi` 330, `kbd.fi` +150, `sh.fi` +1200 |
+| neue Programme | 21 (20 Werkzeuge + `edit`), dazu die Module `tools.fi` und `flate.fi` |
+| neue Dateien im Userland | 6001 Zeilen Firn |
+| `edit.fi` | 1400 Zeilen |
+| `flate.fi` (deflate, ein- und auspacken) | 683 Zeilen |
+| `kernel/ansi.fi` (VT100 auf dem Schirm) | 345 Zeilen |
+| der Zweig insgesamt | 10037 Zeilen dazu, 1458 weg |
 | Tasten, die der Testlauf wirklich drückt | 8 Läufe über den QEMU-Monitor |
 | `gzip`: 20000 Oktette Text | 7979 (GNU `-9`: 5701) |
 | `gzip`: 2048 Oktette Zufall | 2071, als gespeicherte Blöcke |
