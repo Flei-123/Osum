@@ -1853,6 +1853,7 @@ fn mode_of(cmd: u64) -> u64 {
     var whw: [u8; 7] = "wmhold\0"
     var wsw: [u8; 8] = "wmshell\0"
     var npw: [u8; 8] = "nompoll\0"
+    var tdw: [u8; 9] = "ttfdump\0\0"
     if find(cmd, (&wmw[0]) as u64, 2) != 0 {
         mode = mode | kstate.M_WM
     }
@@ -1873,6 +1874,9 @@ fn mode_of(cmd: u64) -> u64 {
     }
     if find(cmd, (&npw[0]) as u64, 7) != 0 {
         mode = mode | kstate.M_NOMPOLL
+    }
+    if find(cmd, (&tdw[0]) as u64, 7) != 0 {
+        mode = mode | kstate.M_TTFDUMP
     }
     if find(cmd, (&unixw[0]) as u64, 4) != 0 {
         mode = mode | M_UNIX
@@ -2159,6 +2163,17 @@ fn surface(state: u64) {
         }
     }
 
+    // Auf Verlangen: einige Glyphen als Text auf die Leitung, damit
+    // `tools/wm/run.sh` den Rasterer selbst gegen die zweite Fassung
+    // halten kann, ohne den Umweg ueber das Bild.
+    if (kstate.get(state, kstate.MODE) & kstate.M_TTFDUMP) != 0 {
+        var zeichen: [u8; 9] = "AVROegW.\0"
+        var zi: u64 = 0
+        while zi < 8 {
+            say_glyph(state, f_tx, PX_MONO, zeichen[zi as usize] as u64)
+            zi = zi + 1
+        }
+    }
     wm_bench(state, f_tx, PX_MONO)
     wm.damage_all(state)
     wm.compose(state)
@@ -2400,6 +2415,79 @@ fn load_font(state: u64, pfad: u64) -> u64 {
 //      bedienbare Oberflaeche von einer unbedienbaren trennt.
 //   2. SCHRIFTRASTERUNG MIT UND OHNE ZWISCHENSPEICHER. Fuenfundneunzig
 //      Zeichen frisch gerastert gegen fuenfundneunzig aus dem Speicher.
+// EINE GLYPHE ALS TEXT AUF DIE SERIELLE LEITUNG.
+//
+// Der Rasterer sitzt im Kernel; ein Bildschirmfoto zeigt sein Ergebnis
+// erst, nachdem es durch Fenster, Zusammensetzung und Zweitpuffer
+// gelaufen ist. Wenn dort etwas fehlt, ist die erste Frage: liegt es am
+// Rasterer oder am Weg dahinter? Diese Ausgabe beantwortet sie -- sie
+// zeigt die Deckung, wie sie aus `ttf.glyph` herauskommt, und
+// `tools/wm/run.sh` haelt sie gegen `tools/ttf/raster.py`.
+fn glyph_sum(state: u64, slot: u64) -> u64 {
+    var acc: u64 = 2166136261
+    var i: u64 = 0
+    let n: u64 = ttf.g_w(state, slot) * ttf.g_h(state, slot)
+    while i < n {
+        let a: u64 = ttf.g_pixel(state, slot, i % ttf.g_w(state, slot),
+            i / ttf.g_w(state, slot))
+        acc = ((acc ^ a) *% 16777619) & 0xFFFFFFFF
+        i = i + 1
+    }
+    return acc
+}
+
+fn say_glyph(state: u64, f: u64, px: u64, c: u64) {
+    var s_g: [u8; 12] = "ttfglyph c=\0"
+    var s_px: [u8; 6] = "  px=\0"
+    var s_w: [u8; 5] = "  w=\0"
+    var s_h: [u8; 5] = "  h=\0"
+    var s_l: [u8; 8] = "  left=\0"
+    var s_t: [u8; 7] = "  top=\0"
+    var s_a: [u8; 7] = "  adv=\0"
+    var s_s: [u8; 7] = "  sum=\0"
+    var s_r: [u8; 10] = "ttfrow \0\0\0"
+    var stufen: [u8; 11] = " .:-=+*#%@\0"
+    let slot: u64 = ttf.glyph(state, f, c, px)
+    serial.puts((&s_g[0]) as u64)
+    serial.dec(c)
+    serial.puts((&s_px[0]) as u64)
+    serial.dec(px)
+    serial.puts((&s_w[0]) as u64)
+    serial.dec(ttf.g_w(state, slot))
+    serial.puts((&s_h[0]) as u64)
+    serial.dec(ttf.g_h(state, slot))
+    serial.puts((&s_l[0]) as u64)
+    serial.dec(ttf.g_left(state, slot) as u64)
+    serial.puts((&s_t[0]) as u64)
+    serial.dec(ttf.g_top(state, slot) as u64)
+    serial.puts((&s_a[0]) as u64)
+    serial.dec(ttf.g_adv(state, slot) as u64)
+    // EINE PRUEFSUMME UEBER DIE ROHEN DECKUNGSWERTE. Die Zeilen darunter
+    // sind auf zehn Stufen gerundet, damit ein Mensch sie lesen kann;
+    // diese Zahl ist es nicht. `tools/ttf/raster.py` rechnet dieselbe
+    // Summe aus seiner eigenen Rasterung -- stimmen die beiden, sind die
+    // zwei Fassungen des Rasterers OKTETT FUER OKTETT einig.
+    serial.puts((&s_s[0]) as u64)
+    serial.dec(glyph_sum(state, slot))
+    serial.nl()
+    var y: u64 = 0
+    while y < ttf.g_h(state, slot) {
+        serial.puts((&s_r[0]) as u64)
+        serial.dec(y)
+        serial.put(32 as u8)
+        serial.put(124 as u8)
+        var x: u64 = 0
+        while x < ttf.g_w(state, slot) {
+            let a: u64 = ttf.g_pixel(state, slot, x, y)
+            serial.put(stufen[(a * 10 / 256) as usize])
+            x = x + 1
+        }
+        serial.put(124 as u8)
+        serial.nl()
+        y = y + 1
+    }
+}
+
 fn wm_bench(state: u64, f: u64, px: u64) {
     var s_c: [u8; 23] = "wmbench: compose full=\0"
     var s_us: [u8; 4] = " us\0"

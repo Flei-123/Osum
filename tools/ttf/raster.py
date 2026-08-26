@@ -45,7 +45,10 @@ Verwendung:
     raster.py glyphe  <ttf> <px> <zeichen>        -- als Text ausgeben
     raster.py breite  <ttf> <px> <text>           -- Laufweite in 26.6
     raster.py zeile   <ttf> <px> <text>           -- die ganze Zeile
+    raster.py summe   <ttf> <px> <zeichen>        -- die Pruefsumme
+    raster.py vergleich <ttf> <mitschnitt>        -- gegen `ttfdump`
 """
+import re
 import struct
 import sys
 
@@ -490,6 +493,74 @@ class Schrift:
 
 # ------------------------------------------------------------ Befehle
 
+def summe(g):
+    """FNV-1a ueber die rohen Deckungswerte -- dieselbe Zeile wie
+    `kmain.glyph_sum`."""
+    acc = 2166136261
+    for i in range(g.w * g.h):
+        a = g.punkt(i % g.w, i // g.w)
+        acc = ((acc ^ a) * 16777619) & 0xFFFFFFFF
+    return acc
+
+
+def vergleich(pfad_ttf, mitschnitt):
+    """DIE ZUSAGE DIESER RUNDE UEBER DEN RASTERER.
+
+    Der Kernel gibt auf das Wort `ttfdump` hin einige Glyphen als Text
+    aus (`kmain.say_glyph`): Groesse, Lage, Laufweite, eine Pruefsumme
+    ueber die rohen Deckungswerte und die Zeilen auf zehn Stufen
+    gerundet.  Dieses Programm rastert dieselben Zeichen selbst und
+    haelt ALLES dagegen.
+
+    Zwei unabhaengige Fassungen desselben Algorithmus, in zwei Sprachen.
+    Stimmen ihre Pruefsummen ueberein, ist der Kernel-Rasterer nicht
+    "ungefaehr richtig", sondern gleich."""
+    roh = open(mitschnitt, "rb").read().decode("latin1")
+    faelle = re.findall(
+        r"ttfglyph c=(\d+)\s+px=(\d+)\s+w=(\d+)\s+h=(\d+)\s+"
+        r"left=(-?\d+)\s+top=(-?\d+)\s+adv=(\d+)\s+sum=(\d+)"
+        r"((?:\s*\nttfrow \d+ \|.*\|)*)", roh)
+    if not faelle:
+        print("keine ttfglyph-Ausgabe im Mitschnitt")
+        return 1
+    stufen = " .:-=+*#%@"
+    schriften = {}
+    schlecht = []
+    geprueft = 0
+    tinte = 0
+    for (c, px, w, h, left, top, adv, sm, zeilen) in faelle:
+        c, px = int(c), int(px)
+        if px not in schriften:
+            schriften[px] = Schrift(pfad_ttf, px)
+        g = schriften[px].glyphe(c)
+        name = "'%c' (0x%02x)" % (c if 32 <= c < 127 else 63, c)
+        geprueft += 1
+        tinte += g.gesetzt()
+        if (g.w, g.h, g.links, g.oben, g.adv26) != (int(w), int(h),
+                                                    int(left), int(top),
+                                                    int(adv)):
+            schlecht.append("%s Masse: Kern %sx%s l=%s t=%s a=%s, "
+                            "Wirt %dx%d l=%d t=%d a=%d"
+                            % (name, w, h, left, top, adv, g.w, g.h,
+                               g.links, g.oben, g.adv26))
+            continue
+        if summe(g) != int(sm):
+            schlecht.append("%s Pruefsumme: Kern %s, Wirt %d"
+                            % (name, sm, summe(g)))
+            continue
+        soll = [ "".join(stufen[min(9, g.punkt(x, y) * 10 // 256)]
+                         for x in range(g.w)) for y in range(g.h) ]
+        ist = re.findall(r"ttfrow \d+ \|(.*)\|", zeilen)
+        if ist != soll:
+            schlecht.append("%s Bildzeilen weichen ab" % name)
+    print("%d Glyphen, %d Tintenpunkte: %d abweichend"
+          % (geprueft, tinte, len(schlecht)))
+    for z in schlecht[:8]:
+        print("    " + z)
+    return 1 if schlecht else 0
+
+
+
 def main(argv):
     if len(argv) < 2:
         print(__doc__)
@@ -511,6 +582,13 @@ def main(argv):
             print("".join(stufen[min(9, g.punkt(x, y) * 10 // 256)]
                           for x in range(g.w)))
         return 0
+    if cmd == "summe":
+        s = Schrift(argv[2], int(argv[3]))
+        g = s.glyphe(ord(argv[4]))
+        print(summe(g))
+        return 0
+    if cmd == "vergleich":
+        return vergleich(argv[2], argv[3])
     if cmd == "breite":
         s = Schrift(argv[2], int(argv[3]))
         print("%d/64 = %d Bildpunkte" % (s.laufweite(argv[4]),

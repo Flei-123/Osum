@@ -27,6 +27,14 @@ PPM in P6), und dieses Programm rechnet sie nach:
              "beide Ausgaben zeigen dasselbe".
   font       der Zeichensatz in kernel/font.fi gegen die Rust-Vorlage, aus
              der er portiert wurde.
+  ttext      eine Zeile ECHTER Schrift (TrueType, kantengeglaettet) --
+             gegen `tools/ttf/raster.py`, die zweite Fassung des
+             Rasterers aus `kernel/ttf.fi`.
+  tgrid      dasselbe fuer ein ZEICHENRASTER (ein Terminalfenster).
+  glatt      ist es wirklich eine Kantenglaettung? Zaehlt die
+             Zwischenstufen -- eine Rasterung ohne Glaettung hat keine.
+  rechteck   ein Fensterrahmen: die vier Kanten in der Farbe, einen
+             Bildpunkt daneben nicht.
   lesen      das Bild ZURUECK IN TEXT: jede Zelle wird gegen alle 95
              Glyphen gehalten und der Buchstabe ausgegeben, der dort
              wirklich steht.  Damit sieht man, was der Bildschirm zeigt,
@@ -486,6 +494,240 @@ def cmd_lesen(a):
     return 0
 
 
+
+# ---------------------------------------------- RUNDE K10: echte Schriften
+#
+# Der 8x16-Zeichensatz aus Runde K7 ist eine Bitmaske: ein Bildpunkt ist
+# an oder aus, und `text` oben vergleicht ihn Bit fuer Bit.  Bei einer
+# KANTENGEGLAETTETEN Schrift gibt es das nicht mehr -- es gibt
+# Zwischenstufen, und die haengen an einem Algorithmus.  Also wird gegen
+# den Algorithmus geprueft: `tools/ttf/raster.py` ist die zweite Fassung
+# des Rasterers aus `kernel/ttf.fi`, und beide muessen dasselbe liefern.
+#
+# UND DIE LEHRE AUS RUNDE K7B STEHT HIER IM MITTELPUNKT.  Dort schien
+# Text zu 87 Prozent zu stimmen, waehrend in Wahrheit JEDER BUCHSTABE
+# fehlte -- die 87 Prozent waren schwarzer Hintergrund.  Deshalb zaehlt
+# dieser Pruefer nicht Bildpunkte gegen die Flaeche, sondern:
+#
+#   * je Zeichen die GESETZTEN Bildpunkte (Deckkraft > 0) der Vorlage,
+#   * wie viele davon im Bild wirklich stehen,
+#   * und er FAELLT, wenn ein Zeichen mit Umriss im Bild keine Tinte hat.
+#
+# Ein leeres Rechteck geht hier nicht durch, egal wie gross es ist.
+
+def _raster_laden():
+    import os
+    hier = os.path.dirname(os.path.abspath(__file__))
+    sys.path.insert(0, os.path.join(hier, "..", "ttf"))
+    import raster
+    return raster
+
+
+def mische(alt, neu, a):
+    """Dieselbe Zeile wie `wm.blend` -- ganzzahlig, ohne Rundungsbeiwerk."""
+    if a == 0:
+        return alt
+    if a >= 255:
+        return neu
+    ia = 255 - a
+    return tuple((alt[k] * ia + neu[k] * a) // 255 for k in range(3))
+
+
+def _pruefe_glyphen(bild, schrift, stellen, grund_y, vg, hg, toleranz,
+                    breite=0):
+    """stellen: [(zeichen, x_in_bildpunkten, y_grundlinie)] -- prueft jede.
+
+    Gibt (zeichen_geprueft, tinte_geprueft, tinte_falsch, leere_zeichen,
+          bericht)."""
+    zeichen = 0
+    tinte = 0
+    falsch = 0
+    leer = []
+    schlecht = []
+    for (c, gx, gy) in stellen:
+        g = schrift.glyphe(c)
+        if g.w == 0 or g.h == 0:
+            continue                      # Leerzeichen haben keinen Umriss
+        # Im Zeichenraster wird auf die ZELLE beschnitten -- genau so,
+        # wie `wm.draw_glyph_clip` es tut.
+        lo = gx if breite else None
+        hi = gx + breite if breite else None
+        zeichen += 1
+        gesetzt = 0
+        getroffen = 0
+        schlimm = 0
+        for r in range(g.h):
+            for k in range(g.w):
+                a = g.punkt(k, r)
+                if a == 0:
+                    continue
+                px = gx + g.links + k
+                py = gy - g.oben + r
+                if lo is not None and (px < lo or px >= hi):
+                    continue
+                gesetzt += 1
+                soll = mische(hg, vg, a)
+                ist = bild.punkt(px, py)
+                if ist is None:
+                    schlimm += 1
+                    continue
+                if max(abs(ist[j] - soll[j]) for j in range(3)) <= toleranz:
+                    getroffen += 1
+                else:
+                    schlimm += 1
+        tinte += gesetzt
+        falsch += schlimm
+        # DIE ZUSAGE GEGEN DEN SCHWARZEN HINTERGRUND: hat die Stelle im
+        # BILD ueberhaupt Tinte?  Ein Zeichen, dessen Vorlage sechzig
+        # gesetzte Bildpunkte hat und im Bild keinen einzigen vom
+        # Hintergrund verschiedenen, ist nicht "zu 87 Prozent richtig",
+        # sondern gar nicht da.
+        ink_im_bild = 0
+        for r in range(g.h):
+            for k in range(g.w):
+                if g.punkt(k, r) == 0:
+                    continue
+                if lo is not None:
+                    if gx + g.links + k < lo or gx + g.links + k >= hi:
+                        continue
+                ist = bild.punkt(gx + g.links + k, gy - g.oben + r)
+                if ist is not None and ist != hg:
+                    ink_im_bild += 1
+        if gesetzt > 0 and ink_im_bild == 0:
+            leer.append(sichtbar(c))
+        if schlimm and len(schlecht) < 8:
+            schlecht.append("'%s' bei x=%d: %d von %d Tintenpunkten falsch"
+                            % (sichtbar(c), gx, schlimm, gesetzt))
+    return zeichen, tinte, falsch, leer, schlecht
+
+
+def cmd_ttext(a):
+    """ttext <ppm> <ttf> <px> <x> <grundlinie> <vg r g b> <hg r g b> <text>
+
+    Eine Zeile freien Textes -- Laufweite und Unterschneidung aus der
+    Schrift, so wie der Fensterserver sie setzt."""
+    raster = _raster_laden()
+    bild = Bild(a[0])
+    schrift = raster.Schrift(a[1], int(a[2]))
+    x, y = int(a[3]), int(a[4])
+    vg = (int(a[5]), int(a[6]), int(a[7]))
+    hg = (int(a[8]), int(a[9]), int(a[10]))
+    text = a[11]
+    tol = int(a[12]) if len(a) > 12 else 0
+    stellen = [(c, x + (dx >> 6), y) for (c, dx) in schrift.stellen(text)]
+    n, tinte, falsch, leer, schlecht = _pruefe_glyphen(
+        bild, schrift, stellen, y, vg, hg, tol)
+    print("%d Zeichen, %d Tintenpunkte geprueft, %d falsch"
+          % (n, tinte, falsch), end="")
+    if leer:
+        print(" -- LEER: %s" % " ".join(leer))
+        return 1
+    if falsch:
+        print()
+        for z in schlecht:
+            print("    " + z)
+        return 1
+    print("")
+    return 0
+
+
+def cmd_tgrid(a):
+    """tgrid <ppm> <ttf> <px> <x0> <y0> <zellw> <zellh> <zeile> <spalte>
+             <vg r g b> <hg r g b> <text>
+
+    Ein Zeichenraster -- so, wie ein Terminalfenster es setzt: Spalte c
+    beginnt bei x0 + c * zellw, die Grundlinie von Zeile r liegt bei
+    y0 + r * zellh + Aufsteiger."""
+    raster = _raster_laden()
+    bild = Bild(a[0])
+    schrift = raster.Schrift(a[1], int(a[2]))
+    x0, y0 = int(a[3]), int(a[4])
+    zw, zh = int(a[5]), int(a[6])
+    zeile, spalte = int(a[7]), int(a[8])
+    vg = (int(a[9]), int(a[10]), int(a[11]))
+    hg = (int(a[12]), int(a[13]), int(a[14]))
+    text = a[15]
+    tol = int(a[16]) if len(a) > 16 else 0
+    grund = y0 + zeile * zh + schrift.aufsteiger()
+    stellen = [(ord(ch), x0 + (spalte + i) * zw, grund)
+               for i, ch in enumerate(text)]
+    n, tinte, falsch, leer, schlecht = _pruefe_glyphen(
+        bild, schrift, stellen, grund, vg, hg, tol, zw)
+    print("Zeile %d ab Spalte %d: %d Zeichen, %d Tintenpunkte, %d falsch"
+          % (zeile, spalte, n, tinte, falsch), end="")
+    if leer:
+        print(" -- LEER: %s" % " ".join(leer))
+        return 1
+    if falsch:
+        print()
+        for z in schlecht:
+            print("    " + z)
+        return 1
+    print("")
+    return 0
+
+
+def cmd_glatt(a):
+    """glatt <ppm> <x> <y> <w> <h> <vg r g b> <hg r g b> [mindestens]
+
+    IST ES WIRKLICH EINE KANTENGLAETTUNG?  Zaehlt die Bildpunkte des
+    Rechtecks, die WEDER Vorder- NOCH Hintergrundfarbe haben, also
+    Zwischenstufen sind.  Eine Rasterung ohne Glaettung hat davon keinen
+    einzigen -- und wuerde durch jede Zusage gehen, die nur "da steht
+    Text" prueft."""
+    bild = Bild(a[0])
+    x, y, w, h = int(a[1]), int(a[2]), int(a[3]), int(a[4])
+    vg = (int(a[5]), int(a[6]), int(a[7]))
+    hg = (int(a[8]), int(a[9]), int(a[10]))
+    mind = int(a[11]) if len(a) > 11 else 1
+    zwischen = 0
+    ganz = 0
+    for py in range(y, y + h):
+        for px in range(x, x + w):
+            p = bild.punkt(px, py)
+            if p is None:
+                continue
+            ganz += 1
+            if p != vg and p != hg:
+                zwischen += 1
+    print("%d von %d Bildpunkten sind Zwischenstufen (mindestens %d)"
+          % (zwischen, ganz, mind))
+    return 0 if zwischen >= mind else 1
+
+
+def cmd_rechteck(a):
+    """rechteck <ppm> <x> <y> <w> <h> <r g b>
+
+    Ein Rahmen: die vier Kanten des Rechtecks haben die Farbe, und einen
+    Bildpunkt AUSSERHALB hat sie nicht.  Damit laesst sich nachrechnen,
+    dass ein Fenster wirklich an der Stelle und in der Groesse liegt, an
+    der der Server es fuehrt."""
+    bild = Bild(a[0])
+    x, y, w, h = int(a[1]), int(a[2]), int(a[3]), int(a[4])
+    farbe = (int(a[5]), int(a[6]), int(a[7]))
+    falsch = 0
+    ganz = 0
+    for px in range(x, x + w):
+        for py in (y, y + h - 1):
+            ganz += 1
+            if bild.punkt(px, py) != farbe:
+                falsch += 1
+    for py in range(y, y + h):
+        for px in (x, x + w - 1):
+            ganz += 1
+            if bild.punkt(px, py) != farbe:
+                falsch += 1
+    aussen = 0
+    for px in range(x - 1, x + w + 1):
+        for py in (y - 1, y + h):
+            if bild.punkt(px, py) == farbe:
+                aussen += 1
+    print("Rahmen %dx%d bei (%d,%d): %d von %d Kantenpunkten falsch, "
+          "%d Treffer eine Reihe daneben" % (w, h, x, y, falsch, ganz, aussen))
+    return 0 if falsch == 0 and aussen == 0 else 1
+
+
+
 BEFEHLE = {
     "groesse": cmd_groesse,
     "punkt": cmd_punkt,
@@ -496,6 +738,10 @@ BEFEHLE = {
     "finde": cmd_finde,
     "font": cmd_font,
     "lesen": cmd_lesen,
+    "ttext": cmd_ttext,
+    "tgrid": cmd_tgrid,
+    "glatt": cmd_glatt,
+    "rechteck": cmd_rechteck,
 }
 
 
