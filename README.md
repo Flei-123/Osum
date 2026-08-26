@@ -365,7 +365,7 @@ cd osum
 # einmalig: den festgenagelten Firn-Uebersetzer bauen
 FIRN_REPO=/pfad/zu/firn ./vendor/firn/hole-firnc.sh
 
-# die ganze Abnahme (fuenfzehn Abschnitte, 1181 Zusagen, QEMU pro Fall)
+# die ganze Abnahme (neunzehn Abschnitte, 1638 Zusagen, QEMU pro Fall)
 ./test.sh
 ```
 
