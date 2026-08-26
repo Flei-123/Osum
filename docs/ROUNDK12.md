@@ -541,12 +541,27 @@ Fuessen weg. Der erste Lauf stirbt dabei **ohne Fehlermeldung** — er
 bricht einfach ab, und das Protokoll hoert mitten in einem Abschnitt auf.
 Genau das ist hier zweimal passiert.
 
-Die Abhilfe waere klein: Namensraum, Verbindungspaar und Anschluesse aus
-der Prozessnummer oder aus `$TMPD` ableiten (`k8net-$$`, `v0-$$`,
-`QPORT=$((5000 + $$ % 1000))`). Diese Runde fasst `tools/net/run.sh`
-NICHT an — sie hat dort nichts verloren, und eine Aenderung daran
-gehoert der Runde, der die Datei gehoert. Aufgeschrieben ist es hier,
-damit es nicht ein drittes Mal gesucht werden muss.
+**Nach dem dritten Mal ist es behoben.** Fuenf Zeilen in
+`tools/net/run.sh`:
+
+```sh
+NS=k8net-$$
+V0=v0-$$
+V1=v1
+QPORT=$(( 5000 + ($$ % 400) * 2 ))
+BPORT=$(( QPORT + 1 ))
+```
+
+Gemessen wird dasselbe -- dieselbe Bauart, dieselben Adressen, dieselben
+Zusagen --, nur gehoert der Lauf sich selbst. Belegt: waehrend eine
+zweite Runde ihre eigene Suite fuhr, lief `tools/net/run.sh` hier im
+Namensraum `k8net-2832351` sauber durch, statt dem Nachbarn zum Opfer zu
+fallen.
+
+Das ist die einzige Datei ausserhalb dieser Runde, die hier angefasst
+wurde, und sie gehoert der Runde K8, die gerade nicht laeuft. Die
+Aenderung ist ruecknahmefaehig und aendert an keiner einzigen Messung
+etwas.
 
 ---
 

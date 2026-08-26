@@ -55,11 +55,29 @@ ULD=kernel/user/user.ld
 NETPROGS="sh ls cat echo ping wget"
 BLOCKS=4096
 
-NS=k8net
+# RUNDE K12 HAT DIESE FUENF ZEILEN GEAENDERT, und der Grund gehoert hierher.
+#
+# Namensraum, Verbindungspaar und die beiden Anschluesse waren FEST:
+# `k8net`, `v0`/`v1`, 5555 und 5556. Solange nur ein Arbeitsbaum durch
+# `./test.sh` laeuft, ist das richtig. Laufen zwei gleichzeitig -- und im
+# Augenblick laufen drei Runden nebeneinander an diesem Repo --, dann
+# reisst der zweite dem ersten mitten in Abschnitt 14 den Namensraum
+# weg (`ip netns del k8net` steht in der Vorbereitung JEDES Laufs), und
+# der erste stirbt ohne Fehlermeldung oder misst 40 rote Zusagen, weil
+# seine Pakete in den fremden Namensraum gehen. Genau das ist beim
+# Messen der Runde K12 dreimal passiert.
+#
+# Die Namen haengen jetzt an der Prozessnummer. GEMESSEN WIRD DASSELBE:
+# dieselbe Bauart, dieselben Adressen, dieselben Zusagen -- nur der Lauf
+# gehoert sich selbst. Der Name des Namensraums steht ausserdem unten in
+# der Kopfzeile, damit man ihn im Protokoll wiederfindet.
+NS=k8net-$$
+V0=v0-$$
+V1=v1
 OSUM_IP=10.9.0.2
 HOST_IP=10.9.0.1
-QPORT=5555
-BPORT=5556
+QPORT=$(( 5000 + ($$ % 400) * 2 ))
+BPORT=$(( QPORT + 1 ))
 
 TMPD=$(mktemp -d)
 BRPID=""
@@ -71,7 +89,7 @@ cleanup() {
     [ -n "$QPID" ] && kill "$QPID" 2>/dev/null
     [ -n "$SRVPID" ] && kill "$SRVPID" 2>/dev/null
     ip netns del "$NS" 2>/dev/null
-    ip link del v0 2>/dev/null
+    ip link del "$V0" 2>/dev/null
     rm -rf "$TMPD"
 }
 trap cleanup EXIT
@@ -108,7 +126,7 @@ done
 # nothing below can run, and saying so is better than failing sixty
 # times.
 ip netns del "$NS" 2>/dev/null
-ip link del v0 2>/dev/null
+ip link del "$V0" 2>/dev/null
 if ! ip netns add "$NS" 2>/dev/null; then
     echo "NET: skipped, network namespaces are not available here"
     exit 0
@@ -215,32 +233,32 @@ python3 tools/osum/mkfs.py build "$TMPD/disk.img" $BLOCKS $SPEC \
 # retransmissions and calling them ours.
 wire_up() {
     ip netns del "$NS" 2>/dev/null
-    ip link del v0 2>/dev/null
+    ip link del "$V0" 2>/dev/null
     ip netns add "$NS"
-    ip link add v0 type veth peer name v1
-    ip link set v1 netns "$NS"
-    ip netns exec "$NS" ip addr add "$HOST_IP/24" dev v1
-    ip netns exec "$NS" ip link set v1 up
+    ip link add "$V0" type veth peer name "$V1"
+    ip link set "$V1" netns "$NS"
+    ip netns exec "$NS" ip addr add "$HOST_IP/24" dev "$V1"
+    ip netns exec "$NS" ip link set "$V1" up
     ip netns exec "$NS" ip link set lo up
-    ip link set v0 up
-    ethtool -K v0 tx off rx off tso off gso off gro off >/dev/null 2>&1
-    ip netns exec "$NS" ethtool -K v1 tx off rx off tso off gso off gro off >/dev/null 2>&1
+    ip link set "$V0" up
+    ethtool -K "$V0" tx off rx off tso off gso off gro off >/dev/null 2>&1
+    ip netns exec "$NS" ethtool -K "$V1" tx off rx off tso off gso off gro off >/dev/null 2>&1
     if [ -n "${1:-}" ]; then
-        ip netns exec "$NS" tc qdisc add dev v1 root netem loss "$1" ${3:+delay $3} \
+        ip netns exec "$NS" tc qdisc add dev "$V1" root netem loss "$1" ${3:+delay $3} \
             >/dev/null 2>&1
     fi
     if [ -n "${2:-}" ]; then
-        tc qdisc add dev v0 root netem loss "$2" ${3:+delay $3} >/dev/null 2>&1
+        tc qdisc add dev "$V0" root netem loss "$2" ${3:+delay $3} >/dev/null 2>&1
     fi
 }
 
 wire_down() {
     ip netns del "$NS" 2>/dev/null
-    ip link del v0 2>/dev/null
+    ip link del "$V0" 2>/dev/null
 }
 
 bridge_up() {
-    "$TMPD/bruecke" v0 "$BPORT" "$QPORT" 2>"$TMPD/br.log" &
+    "$TMPD/bruecke" "$V0" "$BPORT" "$QPORT" 2>"$TMPD/br.log" &
     BRPID=$!
     sleep 0.4
 }
