@@ -50,11 +50,12 @@ fi
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
-# Die vier Assemblerdateien. Was in ihnen steht, kann eine Sprache nicht
+# Die fuenf Assemblerdateien. Was in ihnen steht, kann eine Sprache nicht
 # ausdruecken: der Multiboot-Kopf, der Sprung in den langen Modus, die
-# Einsprungpunkte der Unterbrechungen, der Kontextwechsel und der
-# Trampolinsprung der anderen Prozessoren.
-for f in boot isr switch smp; do
+# Einsprungpunkte der Unterbrechungen, der Kontextwechsel, der
+# Trampolinsprung der anderen Prozessoren -- und seit Runde K12 der
+# Weltwechsel in eine Gastmaschine samt den Gaesten selbst (hv.s).
+for f in boot isr switch smp hv; do
     as --64 -o "$TMP/$f.o" "kernel/$f.s" || exit 1
 done
 
@@ -73,7 +74,7 @@ ld -n -T kernel/kernel.ld \
     --defsym=KERNEL_AP_MAIN="${P}smp__ap_main" \
     --defsym=USER_MAIN="${P}u_enter" \
     -o "$TMP/osum.elf" "$TMP/boot.o" "$TMP/isr.o" "$TMP/switch.o" \
-    "$TMP/smp.o" "$TMP/k.o" "$TMP/uprog.o" 2> >(grep -vE \
+    "$TMP/smp.o" "$TMP/hv.o" "$TMP/k.o" "$TMP/uprog.o" 2> >(grep -vE \
         'GNU-stack|deprecated|LOAD segment with RWX' >&2) || exit 1
 
 mkdir -p "$(dirname "$AUS")"

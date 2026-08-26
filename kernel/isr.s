@@ -432,6 +432,9 @@ vectors:
      * complete context (iretq instead of sysret). */
     .quad sigreturn_tramp           /* 67: kernel/signal.fi */
     .quad user_iret                 /* 68: kernel/signal.fi */
+    /* Runde K12: der Hypervisor. EIN Eintrag, wie bei smp_vectors --
+     * der Weltwechsel und die Gaeste stehen in kernel/hv.s. */
+    .quad hv_vectors                /* 69: kernel/hv.s */
 
     .section .bss, "aw", @nobits
     .align 8

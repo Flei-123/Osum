@@ -90,6 +90,13 @@ BEREICHE = [
     # zu dieser Runde als einziger Bereich NICHT in `kstate.fi`, sondern
     # nur in `fb.fi` -- und genau deshalb ging er bei K9 unter.
     ("FB",         "kstate.fi", "FB_OFF",         "FB_MAX"),
+    # RUNDE K12: die Gastmaschinen des Hypervisors.  Der Bereich steht
+    # in `hv.fi` und nicht in `kstate.fi` -- absichtlich, denn er ist die
+    # EINZIGE Seite, die diese Runde in `kdata` braucht; alles andere
+    # (Steuerbloecke, verschachtelte Seitentabellen, Bitkarten, der
+    # Speicher der Gaeste) kommt aus dem Rahmenverwalter.  Eingetragen
+    # ist er hier, damit der Kollisionspruefer ihn trotzdem sieht.
+    ("HV",         "hv.fi",     "HV_OFF",         "HV_MAX"),
 ]
 
 # `_OFF`-Konstanten, die KEINE Bereiche in `kdata` sind -- Offsets
@@ -111,6 +118,10 @@ KEINE_KDATA = {
     ("virtio.fi", "RXB_OFF"),
     ("virtio.fi", "TXB_OFF"),
     ("pci.fi", "K2_OFF"),       # derselbe Wert wie TABLE_OFF
+    ("hv.fi", "CNT_OFF"),       # Versaetze INNERHALB von HV_OFF (Runde K12)
+    ("hv.fi", "VAL_OFF"),
+    ("hv.fi", "VM_OFF"),
+    ("hv.fi", "GPR_OFF"),
     ("virtio.fi", "C_QNOTIFY_OFF"),  # ein Register im Konfigurationsraum
 }
 
@@ -150,7 +161,7 @@ def main():
 
     dateien = {}
     for d in ("kstate.fi", "pci.fi", "nvme.fi", "fb.fi", "inet.fi",
-              "virtio.fi"):
+              "virtio.fi", "hv.fi"):
         p = os.path.join(kdir, d)
         if os.path.exists(p):
             dateien[d] = konstanten(p)
