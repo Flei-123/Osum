@@ -1,0 +1,104 @@
+// kernel/user/chown.fi -- Runde K13: Besitzer und Gruppe einer Datei.
+//
+//     chown justin datei
+//     chown justin:rat datei
+//     chown :rat datei          nur die Gruppe
+//     chown 1000 datei          eine Zahl geht auch
+//
+// Namen werden ueber /etc/passwd aufgeloest; eine Zahl wird als Zahl
+// genommen. Ein Name, der dort nicht steht, ist ein Fehler und keine
+// stille Null -- eine Datei, die versehentlich root gehoert, ist genau
+// die Sorte Fehler, die man erst Wochen spaeter bemerkt.
+//
+// DEN BESITZER DARF NUR root WECHSELN. Das entscheidet der Kern
+// (`sys.chown_ino`), nicht dieses Programm; hier steht nur die
+// Fehlermeldung dazu.
+
+profile kernel
+
+import ulib
+import tools
+import pw
+
+export { u_start }
+
+const SYS_CHOWN: u64 = 92
+const KEEP: u64 = 0xFFFFFFFFFFFFFFFF
+
+fn is_num(p: u64) -> bool {
+    if *((p) as *mut u8) == 0 as u8 {
+        return false
+    }
+    var i: u64 = 0
+    while *((p + i) as *mut u8) != 0 as u8 {
+        let c: u64 = (*((p + i) as *mut u8)) as u64
+        if c < 48 || c > 57 {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn u_start(args: u64) -> u64 {
+    var e_use: [u8; 31] = "chown: chown BESITZER DATEI...\0"
+    var e_no: [u8; 24] = "chown: no such user: \0\0\0"
+    var e_fail: [u8; 9] = "chown: \0\0"
+    let n: u64 = ulib.arg_count(args)
+    if n < 3 {
+        ulib.esay_line((&e_use[0]) as u64, 0)
+        return 2
+    }
+    var who: [u8; 96] = [0 as u8; 96]
+    ulib.strncpy((&who[0]) as u64, ulib.arg_at(args, 1), 96)
+
+    // Vor dem Doppelpunkt der Besitzer, dahinter die Gruppe.
+    var uid: u64 = KEEP
+    var gid: u64 = KEEP
+    var at: u64 = 0
+    while who[at as usize] != 0 as u8 && who[at as usize] != 58 as u8 {
+        at = at + 1
+    }
+    let hascolon: bool = who[at as usize] == 58 as u8
+    if hascolon {
+        who[at as usize] = 0 as u8
+    }
+    if at > 0 {
+        let name: u64 = (&who[0]) as u64
+        if is_num(name) {
+            uid = ulib.to_num(name)
+        } else {
+            uid = pw.uid_of_name(name)
+            if uid == ulib.EOF {
+                ulib.esay_line((&e_no[0]) as u64, name)
+                return 1
+            }
+        }
+    }
+    if hascolon {
+        let g: u64 = (&who[0]) as u64 + at + 1
+        if *((g) as *mut u8) != 0 as u8 {
+            if is_num(g) {
+                gid = ulib.to_num(g)
+            } else {
+                gid = pw.gid_of_name(g)
+                if gid == ulib.EOF {
+                    ulib.esay_line((&e_no[0]) as u64, g)
+                    return 1
+                }
+            }
+        }
+    }
+
+    var rc: u64 = 0
+    var i: u64 = 2
+    while i < n {
+        let path: u64 = ulib.arg_at(args, i)
+        if ulib.bad(ulib.sys(SYS_CHOWN, path, uid, gid)) {
+            ulib.esay_line((&e_fail[0]) as u64, path)
+            rc = 1
+        }
+        i = i + 1
+    }
+    return rc
+}

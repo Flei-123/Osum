@@ -47,7 +47,9 @@ export {
     T_END, T_FD, T_FDOFF, T_FAULTS, FD_SLOTS, T_BRK, T_MMAP,
     S_FREE, S_READY, S_RUN, S_SLEEP, S_WAIT, S_ZOMBIE, S_NEW, S_STOP,
     T_SIGPEND, T_SIGMASK, T_SIGLAST, T_PGID, T_SID, T_TTY, T_SIGDEL, T_STOPSIG,
-    T_SIGRET, T_ALARM, T_TGID, T_SHARED, T_FUTEX, T_FUTEXVAL, T_KILLCODE, K_BOOT,
+    T_SIGRET, T_ALARM, T_TGID, T_SHARED, T_FUTEX, T_FUTEXVAL, T_KILLCODE,
+    T_UID, T_GID, T_EUID, T_EGID, T_SUID, T_SGID, T_UMASK,
+    K_BOOT,
     K_IDLE, K_WORKER, K_USER, K_GRIND, KSTACK_FRAMES, K_NETD,
 }
 
@@ -121,6 +123,36 @@ const T_FUTEXVAL: u64 = 376 // und der Wert, auf den er sich berufen hat
 // vektorbasierte ein, und wo sie steht, gilt sie. 0 = es gilt die
 // Signalnummer.
 const T_KILLCODE: u64 = 384
+
+// ------------------------------------------------- RUNDE K13: WER ES IST
+//
+// Sieben Woerter, und sie liegen im AUFGABENSATZ und nicht in einem
+// eigenen Bereich von `kdata`. Der Satz ist seit Runde K4 512 Oktette
+// gross und war bis T_KILLCODE (384) belegt; 392 bis 511 lagen leer. Ein
+// Attribut, das zu einem Prozess gehoert, gehoert in den Satz dieses
+// Prozesses -- eine zweite Tabelle daneben waere eine zweite Stelle, an
+// der man vergessen kann, sie mitzuloeschen (`sched.create` nullt den
+// ganzen Satz, und damit ist ein frischer Prozess root, bis eine Zeile
+// weiter unten die Kennungen des Elternteils darueberkommen).
+//
+// SECHS UND NICHT ZWEI, und der Grund ist `su`. POSIX kennt je Kennung
+// drei Werte: die ECHTE (wer angemeldet ist), die WIRKSAME (nach der
+// entschieden wird) und die GESICHERTE (wohin ein Programm mit setuid-Bit
+// zurueckkann). Ein Programm mit nur zwei Werten kann seine Rechte
+// ablegen und nicht wiederholen -- oder es kann sie nie ablegen. Beides
+// ist falsch.
+//
+// T_UMASK ist die Maske, die `open` und `mkdir` von den Rechten einer
+// NEUEN Datei abziehen. Sie wird ueber `fork` und `execve` vererbt wie
+// die Kennungen; 0 heisst "nichts abziehen", und der Kernel setzt sie
+// nirgends selbst -- das tut die Shell.
+const T_UID: u64 = 392 // die echte Benutzerkennung
+const T_GID: u64 = 400 // die echte Gruppenkennung
+const T_EUID: u64 = 408 // die wirksame -- nach ihr wird entschieden
+const T_EGID: u64 = 416
+const T_SUID: u64 = 424 // die gesicherte (setuid-Bit, `su`)
+const T_SGID: u64 = 432
+const T_UMASK: u64 = 440 // was `open`/`mkdir` abziehen
 
 // The three descriptor slots of round 62. Nothing writes them any more;
 // they stay named so that a reader of a task dump knows what the hole in
@@ -522,6 +554,21 @@ fn create(state: u64, kind: u64, prio: u64, arg: u64, entry: u64) -> u64 {
     tset(state, slot, T_KIND, kind)
     tset(state, slot, T_ARG, arg)
     tset(state, slot, T_PARENT, current(state))
+    // RUNDE K13: DIE KENNUNGEN KOMMEN VOM ELTERNTEIL, und sie kommen
+    // HIER und nicht in `proc.create_bare`, weil sonst nur PROZESSE sie
+    // erben wuerden. Der Satz wurde eine Schleife weiter oben genullt --
+    // ohne diese vier Zeilen waere jedes Kind root, und `fork` in einer
+    // Shell, die als `justin` laeuft, gaebe einen Prozess mit allen
+    // Rechten. Genau das ist die Zusage, die `tools/k13/run.sh` misst:
+    // die Kennung ueberlebt fork UND exec.
+    let par: u64 = current(state)
+    tset(state, slot, T_UID, tget(state, par, T_UID))
+    tset(state, slot, T_GID, tget(state, par, T_GID))
+    tset(state, slot, T_EUID, tget(state, par, T_EUID))
+    tset(state, slot, T_EGID, tget(state, par, T_EGID))
+    tset(state, slot, T_SUID, tget(state, par, T_SUID))
+    tset(state, slot, T_SGID, tget(state, par, T_SGID))
+    tset(state, slot, T_UMASK, tget(state, par, T_UMASK))
     tset(state, slot, T_CR3, kstate.get(state, kstate.KPML4))
     tset(state, slot, T_CWD, kstate.get(state, kstate.FS_ROOT))
     tset(state, slot, T_RSP, frame_build(state, ktop, real_entry, state,
@@ -910,6 +957,7 @@ fn exit_task(state: u64, code: u64) {
     tset(state, cur, T_EXIT, code)
     tset(state, cur, T_END, kstate.get(state, kstate.TICKS))
     tset(state, cur, T_STATE, S_ZOMBIE)
+    reparent(state, cur)
     wake_pid(state, tget(state, cur, T_PID))
     schedule_locked(state)
     irq_restore(flags)
@@ -917,6 +965,43 @@ fn exit_task(state: u64, code: u64) {
     // is broken enough that going on would be worse.
     while true {
         asm("hlt")
+    }
+}
+
+// RUNDE K13: DIE WAISEN. Stirbt ein Prozess, der noch Kinder hat, so
+// hatten diese Kinder bis zu dieser Runde einen Elternteil, dessen Platz
+// gleich wieder vergeben wird -- ihr `T_PARENT` zeigte danach auf einen
+// fremden Prozess, und beim Sterben fand sie niemand mehr: sie blieben
+// als Leichen in der Tafel stehen, bis der Lauf endete. GENAU DAS ist die
+// Zahl, die die Gegenprobe dieser Runde misst (`zombie` ohne init).
+//
+// Von hier an fallen sie an den Prozess 1, wie in jedem Unix. Der Platz
+// steht in `kstate.K13_OFF + U_INITSLOT`, um eins erhoeht, damit die Null
+// weiter "es gibt keinen" heisst -- ohne init aendert sich also nichts,
+// und das ist der Sinn: die Gegenprobe soll ohne init zusammenbrechen.
+//
+// Steht unter der Laufliste-Sperre, weil der Aufrufer sie haelt. Es wird
+// nur ein Wort je Kind geschrieben, kein Zustand veraendert und keine
+// zweite Sperre genommen.
+fn reparent(state: u64, dying: u64) {
+    let slot: u64 = kstate.get(state, kstate.K13_OFF + kstate.U_INITSLOT)
+    if slot == 0 {
+        return
+    }
+    let init: u64 = slot - 1
+    if init == dying {
+        return
+    }
+    let n: u64 = kstate.get(state, kstate.TASKS)
+    var i: u64 = 0
+    while i < n {
+        if tget(state, i, T_STATE) != S_FREE {
+            if tget(state, i, T_PARENT) == dying && i != dying {
+                tset(state, i, T_PARENT, init)
+                kstate.add(state, kstate.K13_OFF + kstate.U_ORPHANS, 1)
+            }
+        }
+        i = i + 1
     }
 }
 

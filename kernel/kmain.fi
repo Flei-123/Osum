@@ -58,6 +58,7 @@ import tty
 import signal
 import guard
 import bootmod
+import perm
 
 // Indices in the table out of isr.s.
 const V_DF_STACK: u64 = 52
@@ -99,6 +100,9 @@ const P_SHELL: u64 = 8
 const P_STEAL: u64 = 9
 const P_FORK: u64 = 10
 const P_CAPS: u64 = 12
+// RUNDE K13: die beiden Programmnummern dieser Runde (kernel/uprog.fi).
+const P_USER: u64 = 16
+const P_ZOMBIE: u64 = 17
 const P_FB: u64 = 13
 const P_WCLICK: u64 = 14
 const P_HV: u64 = 15 // RUNDE K12: die Gastmaschine aus Ring 3 (14 nahm K10s Fenster)
@@ -283,6 +287,12 @@ fn kernel_main(mbi: u64, vectors: u64, state: u64, kernel_end: u64,
     // 7b. processes with an address space of their own.
     processes(state)
     capabilities(state)
+    // 7b-bis. RUNDE K13: Kennungen aus Ring 3, ohne Platte. Hier und
+    //     nicht spaeter, weil es KEIN Dateisystem braucht -- die Zusagen
+    //     ueber uid/gid gelten auch in einem Lauf `nofs`, und ein Test,
+    //     der ohne Platte auskommt, kann sich nicht an ihr vertun.
+    //     Ohne das Wort `k13` eine Zeile und sonst nichts.
+    users(state)
 
     // 7c. the file system.
     filesystem(state)
@@ -1249,6 +1259,55 @@ fn capabilities(state: u64) {
 
 // The boot task waits for a task the way `wait` does it for a process:
 // sleep until it is a corpse, read the exit code, clear it away.
+// ==================================================== RUNDE K13
+//
+// Zwei Programme aus `uprog.fi`, beide in Ring 3, beide ohne Platte:
+//
+//   P_USER    fragt nach seinen Kennungen, wechselt sie, laesst sich
+//             ablehnen und gibt sie an ein Kind weiter. Vierzehn
+//             Zeilen "k13u: NAME=WERT" auf der seriellen Leitung.
+//   P_ZOMBIE  laesst ein Kind zurueck, ohne auf es zu warten. Ohne
+//             einen Prozess 1 bleibt die Leiche stehen -- das ist die
+//             GEGENPROBE zu init, und sie steht hier, weil sie ohne
+//             Userland auskommt und deshalb nicht an einem kaputten
+//             Abbild scheitern kann.
+fn users(state: u64) {
+    var s_skip: [u8; 14] = "k13: skipped\0\0"
+    var s_begin: [u8; 12] = "k13: begin\0\0"
+    var s_exit: [u8; 18] = "k13: ring 3 exit=\0"
+    var s_z: [u8; 16] = "k13: zombies=\0\0\0"
+    var s_a: [u8; 8] = " after=\0"
+    if (kstate.get(state, kstate.MODE) & kstate.M_K13) == 0 {
+        serial.puts((&s_skip[0]) as u64)
+        serial.nl()
+        return
+    }
+    serial.puts((&s_begin[0]) as u64)
+    serial.nl()
+    let t: u64 = proc.create(state, P_USER, 0, 2)
+    let e: u64 = wait_for(state, t)
+    serial.puts((&s_exit[0]) as u64)
+    serial.dec(e)
+    serial.nl()
+    if (kstate.get(state, kstate.MODE) & kstate.M_ZOMBIE) != 0 {
+        let before: u64 = sched.zombies(state, sched.K_USER)
+        let z: u64 = proc.create(state, P_ZOMBIE, 0, 2)
+        wait_for(state, z)
+        // Dem Enkel Zeit lassen, seinerseits zu sterben. Danach steht
+        // eine Leiche in der Tafel, um die sich niemand kuemmert.
+        var w: u64 = 0
+        while w < 40 {
+            sched.sleep_ticks(state, 2)
+            w = w + 1
+        }
+        serial.puts((&s_z[0]) as u64)
+        serial.dec(before)
+        serial.puts((&s_a[0]) as u64)
+        serial.dec(sched.zombies(state, sched.K_USER))
+        serial.nl()
+    }
+}
+
 fn wait_for(state: u64, i: u64) -> u64 {
     if i == 0 {
         return 0xFFFFFFFFFFFFFFFF
@@ -1585,6 +1644,8 @@ fn osum(state: u64) {
     var s_free: [u8; 20] = "osum: frames_free=\0\0"
     var s_of: [u8; 5] = " of \0"
     var p_sh: [u8; 8] = "/bin/sh\0"
+    var p_init: [u8; 11] = "/sbin/init\0"
+    var a_init: [u8; 5] = "init\0"
     var p_bin: [u8; 5] = "/bin\0"
     var a_sh: [u8; 3] = "sh\0"
     var s_mod: [u8; 20] = "osum: from module \0\0"
@@ -1630,21 +1691,93 @@ fn osum(state: u64) {
     }
     list_dir(state, (&p_bin[0]) as u64, (&s_bin[0]) as u64)
 
-    // argv[0] is the name of the program, the way every system has done
-    // it since 1975 -- and the way `/bin/sh` finds out what it is called.
+    // ================================================== RUNDE K13
+    //
+    // DER ERSTE PROZESS. Bis zu dieser Runde startete der Kern die Shell
+    // -- und damit hatte dieses System keinen Ort, an dem `login`
+    // haette laufen koennen, keinen Prozess, der Waisen einsammelt, und
+    // keinen, der beim Abschalten aufraeumt. Von hier an startet er
+    // `/sbin/init`, und die Shell ist etwas, das init startet.
+    //
+    // ZWEI NOTWEGE, UND BEIDE SIND GEPRUEFT:
+    //
+    //   1. Das Wort `initsh` auf der Kommandozeile nimmt den alten Weg.
+    //      Ein System, das nur noch ueber init startet, startet bei
+    //      einem kaputten init gar nicht mehr -- das ist genau die
+    //      Sorte Abhaengigkeit, die man sich nicht ohne Hintertuer
+    //      einbaut.
+    //   2. LIEGT KEIN /sbin/init AUF DER PLATTE, wird /bin/sh genommen,
+    //      und es steht eine Zeile darueber auf der seriellen Leitung.
+    //      Das ist nicht nur Vorsicht: JEDES Abbild, das die Runden K1
+    //      bis K12 bauen, hat kein /sbin/init, und alle ihre Messungen
+    //      sollen weiter genau das messen, was sie gemessen haben.
     let abuf: u64 = state + kstate.EARG_OFF
+    var use_init: bool = false
+    if (kstate.get(state, kstate.MODE) & kstate.M_INITSH) == 0 {
+        if fs.path(state, (&p_init[0]) as u64) != 0 {
+            use_init = true
+        }
+    }
+    var first: u64 = (&p_sh[0]) as u64
     var k: u64 = 0
-    while k < 3 {
-        kstate.set8(abuf + k, a_sh[k as usize])
-        k = k + 1
+    if use_init {
+        first = (&p_init[0]) as u64
+        while k < 5 {
+            kstate.set8(abuf + k, a_init[k as usize])
+            k = k + 1
+        }
+        kstate.set(state, kstate.K13_OFF + kstate.U_INITOK, 1)
+    } else {
+        while k < 3 {
+            kstate.set8(abuf + k, a_sh[k as usize])
+            k = k + 1
+        }
+    }
+    var s_first: [u8; 15] = "osum: first = \0"
+    serial.puts((&s_first[0]) as u64)
+    serial.puts(first)
+    serial.nl()
+    // PID 1 GEHOERT DEM ERSTEN PROZESS, und bis zu dieser Runde gehoerte
+    // sie der BOOTAUFGABE (`sched.init` setzt sie dort seit Runde 62).
+    // Das war richtig, solange es keinen ersten Prozess gab: die
+    // Bootaufgabe ist der Anfang jeder Elternkette und musste eine
+    // Nummer haben. Jetzt gibt es einen, und `init` prueft als erstes,
+    // ob er sie hat -- ein `init`, das irgendwo mittendrin laeuft,
+    // wuerde fremde Kinder einsammeln.
+    //
+    // Also getauscht: die Bootaufgabe nimmt die naechste freie Nummer,
+    // der Zaehler geht auf 1, und die Aufgabe, die gleich entsteht,
+    // bekommt sie. Danach laeuft der Zaehler dort weiter, wo er war --
+    // sonst bekaeme der naechste Prozess die 2, die die Leerlaufaufgabe
+    // schon hat.
+    //
+    // ES GESCHIEHT NUR, WENN WIRKLICH `/sbin/init` STARTET. Jedes Abbild
+    // der Runden K1 bis K12 hat keines, und dort aendert sich damit
+    // keine einzige Zahl -- die Bootaufgabe behaelt ihre 1, und alle
+    // Messungen dieser Runden messen, was sie gemessen haben.
+    var keep: u64 = 0
+    if use_init {
+        keep = kstate.get(state, kstate.NEXT_PID)
+        sched.tset(state, 0, sched.T_PID, keep)
+        kstate.set(state, kstate.NEXT_PID, 1)
     }
     let before: u64 = mem.frames_free(state)
-    let t: u64 = elf.spawn(state, (&p_sh[0]) as u64, abuf, 1, 2)
+    let t: u64 = elf.spawn(state, first, abuf, 1, 2)
+    if use_init {
+        kstate.set(state, kstate.NEXT_PID, keep + 1)
+    }
     if t == 0 {
         serial.puts((&s_fail[0]) as u64)
         serial.nl()
         elf.say_reason(kstate.get(state, kstate.ELF_ERR))
         return
+    }
+    // DER PLATZ DES PROZESSES 1, damit `sched.reparent` die Waisen
+    // dorthin haengen kann. Um eins erhoeht, damit die Null weiter
+    // "es gibt keinen" heisst -- ohne init bleibt alles wie vorher, und
+    // genau das misst die Gegenprobe.
+    if use_init {
+        kstate.set(state, kstate.K13_OFF + kstate.U_INITSLOT, t + 1)
     }
     // No line of its own for the pid: `elf.spawn` printed it BEFORE the
     // task became runnable (`elf: start ...`), and anything this task
@@ -1664,12 +1797,9 @@ fn osum(state: u64) {
     serial.dec(before)
     serial.nl()
     say_posix(state)
+    perm.report(state)
 }
 
-// ROUND K4: what the system call layer did in this run. Six counters, one
-// line -- and every one of them is a number `tools/posix/run.sh` reads
-// back. A round that adds `fork` and cannot say how often it forked has
-// nothing to show when the number is wrong.
 fn say_posix(state: u64) {
     var s_head: [u8; 17] = "osum: syscalls=\0\0"
     var s_fork: [u8; 8] = " forks=\0"
@@ -1971,6 +2101,42 @@ fn mode_of(cmd: u64) -> u64 {
     var wsw: [u8; 8] = "wmshell\0"
     var npw: [u8; 8] = "nompoll\0"
     var tdw: [u8; 9] = "ttfdump\0\0"
+    // RUNDE K13. `k13` schaltet den Selbsttest dieser Runde in Ring 3
+    // an; die sechs anderen sind GEGENPROBEN, und ohne sie beweist die
+    // Runde nichts. Was sie tun, steht bei ihren Bits in kstate.fi.
+    // `k13run` und nicht `k13`: die Kommandozeile wird nach TEILWORTEN
+    // durchsucht, und `script=k13t` enthaelt `k13`. Dieser Fehler war
+    // eine Stunde lang in dieser Runde und sah aus wie eine Verklemmung
+    // im Scheduler -- er war es nicht, es lief nur ein Selbsttest mit,
+    // den niemand angefordert hatte.
+    var k13w: [u8; 7] = "k13run\0"
+    var npw13: [u8; 7] = "noperm\0"
+    var ishw: [u8; 7] = "initsh\0"
+    var nsuw: [u8; 7] = "nosuid\0"
+    var nacw: [u8; 7] = "noacpi\0"
+    var v2rw: [u8; 9] = "ofsv2raw\0"
+    var zomw: [u8; 7] = "zombie\0"
+    if find(cmd, (&k13w[0]) as u64, 6) != 0 {
+        mode = mode | kstate.M_K13
+    }
+    if find(cmd, (&npw13[0]) as u64, 6) != 0 {
+        mode = mode | kstate.M_NOPERM
+    }
+    if find(cmd, (&ishw[0]) as u64, 6) != 0 {
+        mode = mode | kstate.M_INITSH
+    }
+    if find(cmd, (&nsuw[0]) as u64, 6) != 0 {
+        mode = mode | kstate.M_NOSUID
+    }
+    if find(cmd, (&nacw[0]) as u64, 6) != 0 {
+        mode = mode | kstate.M_NOACPI
+    }
+    if find(cmd, (&v2rw[0]) as u64, 8) != 0 {
+        mode = mode | kstate.M_FORCEV2
+    }
+    if find(cmd, (&zomw[0]) as u64, 6) != 0 {
+        mode = mode | kstate.M_ZOMBIE
+    }
     if find(cmd, (&wmw[0]) as u64, 2) != 0 {
         mode = mode | kstate.M_WM
     }

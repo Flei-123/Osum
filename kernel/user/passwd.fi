@@ -1,0 +1,115 @@
+// kernel/user/passwd.fi -- Runde K13: ein Passwort setzen.
+//
+//     passwd            das eigene
+//     passwd NAME       das eines anderen -- nur root darf das
+//     passwd NAME < d   die zwei Zeilen kommen aus einer Datei
+//
+// DAS PROGRAMM TRAEGT DAS setuid-BIT (`chmod 4755 /bin/passwd`), und
+// deshalb ist genau hier die Stelle, an der ein System aufgemacht wird,
+// wenn man nicht aufpasst. Was es tut, ist deshalb so wenig wie moeglich:
+//
+//   1. Es entscheidet nach der ECHTEN Kennung, wer davorsteht -- nicht
+//      nach der wirksamen. Die wirksame ist 0, weil das setuid-Bit sie
+//      auf 0 gesetzt hat; sie sagt ueber den Menschen nichts.
+//   2. Wer nicht root ist, darf nur SEIN EIGENES Passwort setzen und muss
+//      dafuer das ALTE nennen.
+//   3. Es schreibt genau eine Zeile in /etc/shadow und sonst nichts.
+//
+// Das neue Passwort wird ZWEIMAL gefragt und muss beide Male gleich sein
+// -- ein vertipptes Passwort, das ohne Rueckfrage gesetzt wird, sperrt
+// den Menschen aus seinem eigenen Konto aus.
+
+profile kernel
+
+import ulib
+import tools
+import pw
+
+export { u_start }
+
+const SYS_GETUID: u64 = 102
+
+fn u_start(args: u64) -> u64 {
+    var q_old: [u8; 20] = "altes Passwort: \0\0\0\0"
+    var q_new: [u8; 20] = "neues Passwort: \0\0\0\0"
+    var q_again: [u8; 24] = "noch einmal: \0\0\0\0\0\0\0\0\0\0\0"
+    var e_who: [u8; 32] = "passwd: nur root darf das\0\0\0\0\0\0\0"
+    var e_no: [u8; 26] = "passwd: unbekannt: \0\0\0\0\0\0\0"
+    var e_wrong: [u8; 26] = "passwd: falsches Passwort\0"
+    var e_match: [u8; 33] = "passwd: die beiden sind ungleich\0"
+    var e_short: [u8; 34] = "passwd: mindestens vier Zeichen\0\0\0"
+    var e_write: [u8; 34] = "passwd: /etc/shadow nicht lesbar\0\0"
+    var e_rand: [u8; 30] = "passwd: kein Zufall vom Kern\0\0"
+    var s_ok: [u8; 26] = "passwd: gesetzt fuer \0\0\0\0\0"
+
+    let real: u64 = ulib.sys(SYS_GETUID, 0, 0, 0)
+    var name: [u8; 64] = [0 as u8; 64]
+    if ulib.arg_count(args) > 1 {
+        ulib.strncpy((&name[0]) as u64, ulib.arg_at(args, 1), 64)
+    } else {
+        if !pw.name_of_uid(real, (&name[0]) as u64, 64) {
+            ulib.esay_line((&e_no[0]) as u64, 0)
+            return 1
+        }
+    }
+    // Gibt es den Benutzer ueberhaupt? Ein Passwort fuer einen Namen, den
+    // /etc/passwd nicht kennt, waere ein Eintrag, an dem sich niemand
+    // anmelden kann.
+    if pw.uid_of_name((&name[0]) as u64) == ulib.EOF {
+        ulib.esay_line((&e_no[0]) as u64, (&name[0]) as u64)
+        return 1
+    }
+    // Wer nicht root ist, darf nur sich selbst.
+    if real != 0 {
+        var mine: [u8; 64] = [0 as u8; 64]
+        if !pw.name_of_uid(real, (&mine[0]) as u64, 64) {
+            ulib.esay_line((&e_who[0]) as u64, 0)
+            return 1
+        }
+        if !ulib.streq((&mine[0]) as u64, (&name[0]) as u64) {
+            ulib.esay_line((&e_who[0]) as u64, 0)
+            return 1
+        }
+        // ...und muss das alte nennen. Steht keines in /etc/shadow, gibt
+        // es nichts zu nennen -- ein Konto ohne Passwort ist eines, das
+        // sein erstes bekommt.
+        var have: [u8; 128] = [0 as u8; 128]
+        if pw.shadow_of((&name[0]) as u64, (&have[0]) as u64, 128) {
+            if *((&have[0]) as u64 as *mut u8) != 0 as u8 {
+                var old: [u8; 128] = [0 as u8; 128]
+                pw.read_pass((&q_old[0]) as u64, (&old[0]) as u64, 128)
+                if !pw.check_hash((&have[0]) as u64, (&old[0]) as u64) {
+                    ulib.esay_line((&e_wrong[0]) as u64, 0)
+                    return 1
+                }
+            }
+        }
+    }
+
+    var a: [u8; 128] = [0 as u8; 128]
+    var b: [u8; 128] = [0 as u8; 128]
+    let n: u64 = pw.read_pass((&q_new[0]) as u64, (&a[0]) as u64, 128)
+    pw.read_pass((&q_again[0]) as u64, (&b[0]) as u64, 128)
+    if !ulib.streq((&a[0]) as u64, (&b[0]) as u64) {
+        ulib.esay_line((&e_match[0]) as u64, 0)
+        return 1
+    }
+    if n < 4 {
+        ulib.esay_line((&e_short[0]) as u64, 0)
+        return 1
+    }
+    var rec: [u8; 160] = [0 as u8; 160]
+    if !pw.make_hash((&a[0]) as u64, (&rec[0]) as u64) {
+        ulib.esay_line((&e_rand[0]) as u64, 0)
+        return 1
+    }
+    if !pw.set_shadow((&name[0]) as u64, (&rec[0]) as u64) {
+        ulib.esay_line((&e_write[0]) as u64, 0)
+        return 1
+    }
+    tools.ob_str((&s_ok[0]) as u64)
+    tools.ob_str((&name[0]) as u64)
+    tools.ob_nl()
+    tools.ob_flush()
+    return 0
+}

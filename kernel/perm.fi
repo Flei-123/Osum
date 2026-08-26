@@ -1,0 +1,285 @@
+// kernel/perm.fi -- Runde K13: WER DARF WAS, an genau EINER Stelle.
+//
+// Bis zu dieser Runde hatte Osum keine Benutzer. Jeder Prozess durfte
+// jede Datei lesen und jede Datei ueberschreiben; `open` fragte, ob es
+// den Namen gibt, und wenn ja, war die Antwort ja. Das ist die Bauart
+// eines Kernels, der noch keine zwei Menschen kennt.
+//
+// DIESE DATEI IST DIE EINZIGE STELLE, AN DER "DARF ER?" BEANTWORTET
+// WIRD, und das ist die Auflage dieser Runde, nicht ihr Schmuck. Ein
+// System mit fuenf Rechtepruefungen an fuenf Stellen hat vier Stellen,
+// an denen jemand einen Fall vergessen hat -- und Rechte sind genau die
+// Sorte Code, bei der ein vergessener Fall nicht auffaellt, weil das
+// System dann MEHR tut als es soll und nicht weniger. Also: `may` unten
+// ist die Funktion, `sys.fi` ruft sie im Oeffnen-Pfad, in `mkdir`, in
+// `unlink`, in `chdir` und in `execve` auf, und es gibt keine zweite
+// Fassung dieser sechzehn Zeilen irgendwo sonst im Baum. Wer eine
+// schreiben will, findet hier den Grund, es nicht zu tun.
+//
+// DIE REGEL SELBST ist die von Unix, und sie ist absichtlich nicht
+// klueger als die:
+//
+//   1. Ist die wirksame Benutzerkennung 0, gilt: lesen und schreiben ja,
+//      immer. AUSFUEHREN nur, wenn IRGENDEIN Ausfuehrungsbit gesetzt ist
+//      -- root darf keine Textdatei starten, und das ist kein Detail,
+//      sondern der Unterschied zwischen "root darf alles" und "root darf
+//      Unsinn".
+//   2. Sonst entscheidet GENAU EINE der drei Dreiergruppen: Besitzer,
+//      wenn die Kennungen gleich sind; sonst Gruppe, wenn die Gruppen
+//      gleich sind; sonst der Rest. Nicht die Vereinigung -- eine Datei
+//      0o077 ist fuer ihren Besitzer wirklich verschlossen, und wer die
+//      Gruppen ODER-verknuepft, hat Unix falsch abgeschrieben.
+//   3. Gefragt wird mit der WIRKSAMEN Kennung (T_EUID), nicht mit der
+//      echten. Das ist der ganze Sinn des setuid-Bits.
+//
+// GEZAEHLT WIRD JEDE FRAGE. `U_CHECKS` und `U_DENIED` in `kdata` sind
+// die beiden Zahlen, an denen `tools/k13/run.sh` festmacht, dass hier
+// ueberhaupt jemand gefragt hat -- eine Rechtepruefung, die niemand
+// aufruft, ist von einer, die immer ja sagt, sonst nicht zu
+// unterscheiden.
+//
+// DIE GEGENPROBE STEHT IN DIESER DATEI, in drei Zeilen: mit `noperm` auf
+// der Kommandozeile sagt `may` immer ja -- gezaehlt wird trotzdem. Der
+// Zugriff, der scheitern MUSS, gelingt dann, und der Testlaeufer haelt
+// beide Laeufe gegeneinander. Ohne diese drei Zeilen misst die Runde nur
+// sich selbst.
+
+profile kernel
+
+import kstate
+import sched
+import fs
+import serial
+
+export {
+    may, may_real, may_ids, on_create, apply_exec, umask_of,
+    euid, egid, uid_of, gid_of, is_root, may_signal,
+    R_READ, R_WRITE, R_EXEC,
+    checks, denied, report
+}
+
+// Was gefragt wird -- dieselben drei Bits, die in den Rechten stehen.
+const R_EXEC: u64 = 1
+const R_WRITE: u64 = 2
+const R_READ: u64 = 4
+
+// ------------------------------------------------------- die Kennungen
+
+fn uid_of(state: u64, t: u64) -> u64 {
+    return sched.tget(state, t, sched.T_UID)
+}
+
+fn gid_of(state: u64, t: u64) -> u64 {
+    return sched.tget(state, t, sched.T_GID)
+}
+
+fn euid(state: u64, t: u64) -> u64 {
+    return sched.tget(state, t, sched.T_EUID)
+}
+
+fn egid(state: u64, t: u64) -> u64 {
+    return sched.tget(state, t, sched.T_EGID)
+}
+
+fn is_root(state: u64, t: u64) -> bool {
+    return euid(state, t) == 0
+}
+
+fn umask_of(state: u64, t: u64) -> u64 {
+    return sched.tget(state, t, sched.T_UMASK) & 4095
+}
+
+fn checks(state: u64) -> u64 {
+    return kstate.get(state, kstate.K13_OFF + kstate.U_CHECKS)
+}
+
+fn denied(state: u64) -> u64 {
+    return kstate.get(state, kstate.K13_OFF + kstate.U_DENIED)
+}
+
+// ------------------------------------------------------- DIE PRUEFUNG
+
+// DIE EINE FRAGE, UND SIE STEHT GENAU EINMAL. `want` ist eine
+// Oder-Verknuepfung aus R_READ, R_WRITE und R_EXEC; die Antwort gilt
+// fuer ALLE gesetzten Bits zusammen.
+//
+// Die Kennungen kommen als Argument herein und werden nicht aus dem
+// Prozess geholt, und das hat einen Grund: `access` fragt nach POSIX mit
+// der ECHTEN Kennung und alles andere mit der WIRKSAMEN. Zwei
+// Regelwerke waeren zwei Gelegenheiten, sich zu unterscheiden -- so ist
+// es EIN Regelwerk mit zwei Eingaengen (`may` und `may_real` darunter).
+fn may_ids(state: u64, ino: u64, want: u64, id: u64, gid: u64) -> bool {
+    kstate.add(state, kstate.K13_OFF + kstate.U_CHECKS, 1)
+    if ino == 0 {
+        return false
+    }
+    let mode: u64 = fs.inode_mode(state, ino)
+    let owner: u64 = fs.inode_uid(state, ino)
+    let group: u64 = fs.inode_gid(state, ino)
+    var okay: bool = true
+    if id == 0 {
+        // Regel 1: root liest und schreibt alles. Ausfuehren nur, wenn
+        // die Datei ueberhaupt ausfuehrbar gemeint ist.
+        if (want & R_EXEC) != 0 {
+            if (mode & 73) == 0 { // 0o111
+                okay = false
+            }
+        }
+    } else {
+        var have: u64 = mode & 7
+        if id == owner {
+            have = (mode >> 6) & 7
+        } else {
+            if gid == group {
+                have = (mode >> 3) & 7
+            }
+        }
+        if (want & have) != want {
+            okay = false
+        }
+    }
+    if okay {
+        return true
+    }
+    // Ab hier ist die Antwort NEIN -- und sie wird gezaehlt, bevor die
+    // Gegenprobe sie umbiegt. Genau darum ist `noperm` eine Gegenprobe
+    // und keine Abkuerzung: die Zahl der abgelehnten Zugriffe bleibt
+    // dieselbe, nur die Wirkung faellt weg, und der Testlaeufer sieht
+    // beides.
+    kstate.add(state, kstate.K13_OFF + kstate.U_DENIED, 1)
+    kstate.set(state, kstate.K13_OFF + kstate.U_LASTDENY, (ino << 8) | want)
+    if (kstate.get(state, kstate.MODE) & kstate.M_NOPERM) != 0 {
+        return true
+    }
+    return false
+}
+
+// Mit der WIRKSAMEN Kennung -- das ist der Normalfall und der Weg, den
+// `open`, `mkdir`, `unlink`, `chdir` und `execve` nehmen.
+fn may(state: u64, t: u64, ino: u64, want: u64) -> bool {
+    return may_ids(state, ino, want, euid(state, t), egid(state, t))
+}
+
+// Mit der ECHTEN Kennung. Genau ein Aufrufer: `access`. POSIX will es so,
+// damit ein setuid-Programm fragen kann, ob DER MENSCH davor die Datei
+// haette lesen duerfen -- nicht, ob es selbst es darf.
+fn may_real(state: u64, t: u64, ino: u64, want: u64) -> bool {
+    return may_ids(state, ino, want, uid_of(state, t), gid_of(state, t))
+}
+
+// Darf dieser Prozess jenem ein Signal schicken? Die Regel von POSIX:
+// root darf jedem, sonst muss eine der beiden Kennungen passen. Steht
+// hier und nicht in `signal.fi`, weil es dieselbe Frage ist und weil es
+// sonst eine zweite Stelle waere.
+fn may_signal(state: u64, from: u64, to: u64) -> bool {
+    kstate.add(state, kstate.K13_OFF + kstate.U_CHECKS, 1)
+    if is_root(state, from) {
+        return true
+    }
+    let a: u64 = euid(state, from)
+    if a == uid_of(state, to) || a == euid(state, to) {
+        return true
+    }
+    kstate.add(state, kstate.K13_OFF + kstate.U_DENIED, 1)
+    if (kstate.get(state, kstate.MODE) & kstate.M_NOPERM) != 0 {
+        return true
+    }
+    return false
+}
+
+// ------------------------------------------------- eine NEUE Datei
+
+// Was eine gerade entstandene Datei traegt. Der Inode kommt genullt aus
+// `fs.inode_alloc` -- ohne diese Zeilen haette jede neue Datei die
+// Rechte 0 und gehoerte root, und ein Benutzer koennte anlegen, was er
+// danach selbst nicht mehr lesen darf.
+//
+// `mode` ist, was der Aufrufer wollte (0o666 bei `open`, 0o777 bei
+// `mkdir`), die Maske des Prozesses wird abgezogen, und Besitzer und
+// Gruppe sind die WIRKSAMEN Kennungen des Erzeugers.
+fn on_create(state: u64, t: u64, ino: u64, mode: u64) -> bool {
+    let m: u64 = mode & (~umask_of(state, t)) & 4095
+    return fs.set_meta(state, ino, m, euid(state, t), egid(state, t))
+}
+
+// ------------------------------------------------- das setuid-Bit
+
+// Ein Programm, dessen Datei das setuid-Bit traegt, laeuft mit der
+// Kennung des BESITZERS der Datei und nicht mit der des Aufrufers. Das
+// ist der einzige Weg, auf dem ein gewoehnlicher Benutzer etwas tun
+// kann, was nur root darf -- `passwd` schreibt in /etc/shadow, und
+// /etc/shadow darf sonst niemand anfassen.
+//
+// Es wird auf die AUFGABE angewandt, die der Lader gerade gebaut hat.
+// `execve` tauscht danach die Adressraeume und traegt die Kennungen von
+// dort in den Aufrufer ein; `spawn` startet die Aufgabe unmittelbar.
+// Beide Wege gehen durch `elf.build`, und darum steht der Aufruf dort.
+//
+// DIE GESICHERTE KENNUNG WIRD MITGESETZT. Ohne sie koennte ein
+// setuid-Programm seine Rechte ablegen und nie zurueckholen; mit ihr ist
+// `setuid(0)` nach `setuid(getuid())` erlaubt, solange die gesicherte
+// Kennung 0 ist. Das ist genau die Zusage, auf der `su` steht.
+//
+// `nosuid` schaltet es ab -- die Gegenprobe: `passwd` scheitert dann
+// beim Schreiben, und zwar mit -EACCES und nicht mit einem stillen
+// Nichts.
+fn apply_exec(state: u64, t: u64, ino: u64) {
+    if (kstate.get(state, kstate.MODE) & kstate.M_NOSUID) != 0 {
+        return
+    }
+    let mode: u64 = fs.inode_mode(state, ino)
+    if (mode & fs.S_ISUID) != 0 {
+        let owner: u64 = fs.inode_uid(state, ino)
+        sched.tset(state, t, sched.T_EUID, owner)
+        sched.tset(state, t, sched.T_SUID, owner)
+        kstate.add(state, kstate.K13_OFF + kstate.U_SUIDEXEC, 1)
+    }
+    if (mode & fs.S_ISGID) != 0 {
+        let group: u64 = fs.inode_gid(state, ino)
+        sched.tset(state, t, sched.T_EGID, group)
+        sched.tset(state, t, sched.T_SGID, group)
+    }
+}
+
+// ------------------------------------------------------- der Bericht
+//
+// Acht Zahlen, eine Zeile. Sie steht HIER und nicht in `kmain.fi`, und
+// der Grund ist eine gemessene Enttaeuschung: sobald `init` die Maschine
+// ueber ACPI abschaltet, kehrt `kmain.osum` NIE zurueck -- der Bericht am
+// Ende des Laufs kam dann nicht, und der Testlaeufer las leere Zahlen.
+// Von hier aus koennen ihn beide rufen: `kmain` am Ende eines Laufs ohne
+// init, und `sys.do_reboot` als letzte Amtshandlung mit init.
+fn report(state: u64) {
+    var s_head: [u8; 15] = "k13: ofsver=\0\0\0"
+    var s_chk: [u8; 9] = " checks=\0"
+    var s_den: [u8; 9] = " denied=\0"
+    var s_set: [u8; 9] = " setids=\0"
+    var s_chm: [u8; 9] = " chmods=\0"
+    var s_cho: [u8; 9] = " chowns=\0"
+    var s_sui: [u8; 11] = " suidexec=\0"
+    var s_orp: [u8; 10] = " orphans=\0"
+    var s_zom: [u8; 10] = " zombies=\0"
+    var s_ini: [u8; 7] = " init=\0"
+    let b: u64 = kstate.K13_OFF
+    serial.puts((&s_head[0]) as u64)
+    serial.dec(fs.version(state))
+    serial.puts((&s_chk[0]) as u64)
+    serial.dec(kstate.get(state, b + kstate.U_CHECKS))
+    serial.puts((&s_den[0]) as u64)
+    serial.dec(kstate.get(state, b + kstate.U_DENIED))
+    serial.puts((&s_set[0]) as u64)
+    serial.dec(kstate.get(state, b + kstate.U_SETIDS))
+    serial.puts((&s_chm[0]) as u64)
+    serial.dec(kstate.get(state, b + kstate.U_CHMODS))
+    serial.puts((&s_cho[0]) as u64)
+    serial.dec(kstate.get(state, b + kstate.U_CHOWNS))
+    serial.puts((&s_sui[0]) as u64)
+    serial.dec(kstate.get(state, b + kstate.U_SUIDEXEC))
+    serial.puts((&s_orp[0]) as u64)
+    serial.dec(kstate.get(state, b + kstate.U_ORPHANS))
+    serial.puts((&s_zom[0]) as u64)
+    serial.dec(sched.zombies(state, sched.K_USER))
+    serial.puts((&s_ini[0]) as u64)
+    serial.dec(kstate.get(state, b + kstate.U_INITOK))
+    serial.nl()
+}
