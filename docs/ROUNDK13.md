@@ -307,7 +307,7 @@ herein.
 
 ---
 
-## 8. Zwei Dinge, die schiefgingen, und was sie gekostet haben
+## 8. Drei Dinge, die schiefgingen, und was sie gekostet haben
 
 **Ein Wort, das zu kurz war.** Die Kommandozeile wird nach **Teilworten**
 durchsucht (`kmain.find`). Das Wort dieser Runde hieß zuerst `k13` — und
@@ -332,6 +332,21 @@ eigene Funktion `k13_call` (wie `vm_call` seit K12), der
 Ausgabepuffer von `do_userinfo` in `kdata` statt auf den Stapel, und die
 Rechteentscheidung von `do_open` in zwei kleine Hilfsfunktionen.
 Ergebnis: **14560 von 16384**, also +336 gegenüber `main` statt +1904.
+
+**Ein Suchen-und-Ersetzen, das zu weit griff.** Beim Umbau von
+`do_userinfo` (der Ausgabepuffer sollte von `w[i] = …` auf `kdata`
+umgestellt werden) lief eine Ersetzung über die **ganze** Datei
+`kernel/sys.fi` — und traf damit auch `do_vm_stat`, die Auskunft des
+Hypervisors aus Runde K12: ihre fünf Zeilen schrieben danach in **meinen**
+`kdata`-Bereich statt in das Feld, das gleich darauf nach Ring 3 kopiert
+wurde. Der Kernel-Teil des Hypervisors blieb dabei vollständig grün
+(22/22 Zusagen, alle sechs Gäste), nur das Programm in Ring 3 bekam
+Nullen: `state=0 exits=0 result=0` statt `3/23/4660`, 11 von 14 Zusagen.
+
+Gefunden hat es **Abschnitt 18 von `./test.sh`**, nicht ich — und genau
+deshalb steht in diesem Projekt die Regel, dass am Ende der ganze Lauf
+durchgeht und nicht nur der eigene Abschnitt. Eine Runde, die nur ihren
+eigenen Testläufer laufen lässt, hätte das nicht bemerkt.
 
 ---
 
