@@ -268,7 +268,7 @@ cd osum
 # einmalig: den festgenagelten Firn-Uebersetzer bauen
 FIRN_REPO=/pfad/zu/firn ./vendor/firn/hole-firnc.sh
 
-# die ganze Abnahme (zwoelf Abschnitte, QEMU pro Fall)
+# die ganze Abnahme (fuenfzehn Abschnitte, 1181 Zusagen, QEMU pro Fall)
 ./test.sh
 ```
 
@@ -286,6 +286,9 @@ bash tools/posix/run.sh       # POSIX-Schicht und libc (K4)
 bash tools/smp/run.sh         # vier Prozessoren (K5)
 bash tools/userland/run.sh    # Shell und Werkzeuge (K6)
 bash tools/gfx/run.sh         # der Bildschirm (K7)
+bash tools/unix/run.sh        # Signale, Terminal, Uhr, Zufall (K9)
+bash tools/net/run.sh         # virtio-net und der TCP/IP-Stack (K8)
+bash tools/guard/run.sh       # SMEP/SMAP und das Boot-Modul (K10)
 ```
 
 Den Kernel mit Bildschirm starten und selbst hinsehen — `-vga std` ist
