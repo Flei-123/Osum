@@ -1869,11 +1869,33 @@ fn dir_allowed(state: u64, me: u64, path: u64, ino: u64) -> bool {
 // ist Regel 3 aus dem Kopf dieser Datei, und sie gilt fuer einen
 // fremden Treiber erst recht: FAT32 rechnet mit Zahlen aus einem
 // Bootsektor, den irgendjemand geschrieben hat.
+// RUNDE K17: DAS GERAET UNTER DIESER EINHAENGUNG KANN WEG SEIN.
+//
+// Bis zu dieser Runde konnte es das nicht: eine ATA-Platte, ein
+// NVMe-Regler und eine RAM-Platte verschwinden nicht im Betrieb. Ein
+// USB-Stick tut es -- und dann steht ein Prozess mit einem offenen
+// Deskriptor da, dessen Dateisystem es nicht mehr gibt.
+//
+// Die Antwort ist ENODEV und nicht EIO: EIO hiesse "der Lesevorgang ist
+// schiefgegangen", und das laedt zum Wiederholen ein. ENODEV heisst "das
+// Geraet gibt es nicht mehr", und dabei bleibt es. Die Pruefung steht an
+// EINER Stelle -- am Deskriptor, nicht im Treiber -- und gilt damit fuer
+// jedes Dateisystem auf jedem Geraet, das verschwinden kann.
+fn mnt_gone(state: u64, m: u64) -> bool {
+    if m >= vfs.MAX_MNT || !mnt.used(state, m) {
+        return false
+    }
+    return !blk.present_on(state, mnt.dev(state, m))
+}
+
 fn vfs_read(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
     if !readable(state, of) {
         return neg(errno.E_BADF)
     }
     let m: u64 = file.open_mnt(state, of)
+    if mnt_gone(state, m) {
+        return neg(errno.E_NODEV)
+    }
     let node: u64 = file.open_ino(state, of)
     let off: u64 = file.open_off(state, of)
     let bounce: u64 = state + kstate.BLOCK_OFF
@@ -1894,6 +1916,9 @@ fn vfs_write(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
         return neg(errno.E_BADF)
     }
     let m: u64 = file.open_mnt(state, of)
+    if mnt_gone(state, m) {
+        return neg(errno.E_NODEV)
+    }
     let node: u64 = file.open_ino(state, of)
     var off: u64 = file.open_off(state, of)
     if (file.open_flags(state, of) & O_APPEND) != 0 {
@@ -3666,6 +3691,7 @@ fn source_dev(state: u64, p: u64, out_part: u64) -> u64 {
     var n_hdb: [u8; 9] = "/dev/hdb "
     var n_ram: [u8; 10] = "/dev/ram0 "
     var n_nvme: [u8; 11] = "/dev/nvme0 "
+    var n_usb: [u8; 10] = "/dev/usb0 "
     var base: [u8; 32] = [0 as u8; 32]
     var n: u64 = 0
     while kstate.get8(p + n) != 0 && n < 31 {
@@ -3679,6 +3705,12 @@ fn source_dev(state: u64, p: u64, out_part: u64) -> u64 {
     }
     if name_is(state, (&base[0]) as u64, (&n_nvme[0]) as u64) {
         return blk.DEV_NVME
+    }
+    // RUNDE K17: der Stick. Steht VOR der Ziffernpruefung unten, aus
+    // genau demselben Grund wie /dev/ram0: die Null gehoert zum Namen
+    // und ist keine Partitionsnummer.
+    if name_is(state, (&base[0]) as u64, (&n_usb[0]) as u64) {
+        return blk.DEV_USB
     }
     // Eine Ziffer am Ende: Partitionsnummer.
     if n > 1 {
