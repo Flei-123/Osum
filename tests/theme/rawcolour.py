@@ -61,7 +61,6 @@ FILES = [
     "kernel/user/taskbar.fi",
     "kernel/user/desktop.fi",
     "kernel/user/settings.fi",
-    "kernel/user/settings.fi",
     "kernel/user/explorer.fi",
     "kernel/user/launcher.fi",
     "kernel/user/locate.fi",
@@ -125,10 +124,36 @@ def main():
     hits = []
     uses = 0
     seen = 0
+    # A NAME IN THIS LIST THAT IS NOT A FILE IS AN ERROR, NOT A SKIP.
+    #
+    # It used to `continue`, and that is how the list came to hold
+    # "kernel/user/settings.fi" for weeks before any such file existed,
+    # right next to "einstellungen.fi", which was the same program under
+    # its old name. The checker reported "files 10" and nobody counted
+    # the eleven entries. A checker that quietly examines one file fewer
+    # than it says it does is worse than no checker: it is a green light
+    # with a hole in it.
+    # ...ON THE CURRENT TREE. Given an explicit root -- the historical
+    # checkout the counter-test below unpacks, or a directory a test
+    # builds with one file in it -- files are missing ON PURPOSE, and
+    # the list of this tree says nothing about that one.
+    given = len(sys.argv) > 1
+    missing = [] if given else [
+        r for r in FILES if not os.path.isfile(os.path.join(root, r))]
+    if missing:
+        for r in missing:
+            print("rawcolour: LISTED BUT NOT THERE: %s" % r)
+        print("rawcolour: files 0 tokens 0 raw %d" % len(missing))
+        return 2
+    dupes = sorted({r for r in FILES if FILES.count(r) > 1})
+    if dupes:
+        for r in dupes:
+            print("rawcolour: LISTED TWICE: %s" % r)
+        return 2
     for rel in FILES:
         p = os.path.join(root, rel)
         if not os.path.isfile(p):
-            continue
+            continue          # only reachable with an explicit root
         seen += 1
         h, u = scan(p, rel)
         hits += h
