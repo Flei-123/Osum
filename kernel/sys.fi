@@ -66,6 +66,7 @@ import tty
 import inet
 import netview
 import netmon
+import share
 import perm
 import power
 import pwr
@@ -646,6 +647,37 @@ const NP_USED: u64 = 6
 // that is not decoration: a program that could roll its own counters
 // could empty them, and the history would then say it used nothing.
 const SYS_OSUM_NETMONROLL: u64 = 1321
+
+// ============================================ ROUND NETMON, PART TWO
+//
+//   SHARE(what, index) -> number
+//
+// Everything the sharing of `kernel/share.fi` will tell a program:
+// whether it is on, what the shared side's address and pool are, and
+// one row per connected device. Reading is allowed for anybody, for the
+// same reason as everywhere else in this round -- the person has a
+// right to know which devices are hanging off their machine.
+//
+// SWITCHING IT ON AND OFF IS ROOT ONLY (`SH_SET`). Anything else and
+// any process could hand this machine's connection to the room.
+const SYS_OSUM_SHARE: u64 = 1322
+
+const SH_ON: u64 = 0 // 1 = the connection is being handed on
+const SH_SET: u64 = 1 // (index = 0 or 1) switch it -- euid 0
+const SH_IP: u64 = 2 // this machine's address on the shared side
+const SH_MASK: u64 = 3
+const SH_P0: u64 = 4 // the first address handed out
+const SH_P1: u64 = 5 // and the last
+const SH_NCLIENT: u64 = 6 // how many devices are known
+const SH_CLIENT: u64 = 7 // (index) 1 = that slot is in use
+const SH_CMAC: u64 = 8 // its hardware address, six octets in one word
+const SH_CIP: u64 = 9 // and the address it was given
+const SH_CIN: u64 = 10 // octets it sent
+const SH_COUT: u64 = 11 // and octets it received
+const SH_NAT: u64 = 12 // records in the NAT table right now
+const SH_STAT: u64 = 13 // (index) one of `share.S_*`
+const SH_UPLINK: u64 = 14
+const SH_SHARED: u64 = 15
 
 const SYS_OSUM_SETENV: u64 = 1400
 const SYS_OSUM_MOUNT: u64 = 1401
@@ -1276,7 +1308,7 @@ fn dispatch(number: u64, frame: u64, state: u64) -> u64 {
     }
     // RUNDE DESKTOP: das Netz jenseits der Sockets. Zwei Nummern aus
     // dem Block, den Runde K8 dafuer ausgewiesen und nie benutzt hat.
-    if number >= SYS_OSUM_NETGET && number <= SYS_OSUM_NETMONROLL {
+    if number >= SYS_OSUM_NETGET && number <= SYS_OSUM_SHARE {
         return net_call(state, me, number, a0, a1, a2)
     }
     // ------------------------------------------------------ RUNDE K13
@@ -5821,11 +5853,94 @@ fn do_netmon(state: u64, me: u64, kind: u64, index: u64,
     return neg(errno.E_INVAL)
 }
 
+// ROUND NETMON PART TWO: one number about the sharing.
+fn do_share(state: u64, me: u64, what: u64, index: u64) -> u64 {
+    if what == SH_SET {
+        if sched.tget(state, me, sched.T_EUID) != 0 {
+            return neg(errno.E_PERM)
+        }
+        // SWITCHED ON MEANS SWITCHED ON, not brought up: the card is
+        // claimed once at boot (`netsvc.stage`) because claiming a PCI
+        // device out of a system call would mean a driver coming up
+        // while the network task is already turning the crank on it.
+        // What this does is open and close the gate.
+        if index != 0 && !share.on(state) {
+            if share.uplink(state) == share.shared(state) {
+                return neg(errno.E_NODEV)
+            }
+        }
+        var v: u64 = 0
+        if index != 0 {
+            v = 1
+        }
+        share.set_on(state, v)
+        return 0
+    }
+    if what == SH_ON {
+        if share.on(state) {
+            return 1
+        }
+        return 0
+    }
+    if what == SH_IP {
+        return share.my_ip(state)
+    }
+    if what == SH_MASK {
+        return share.mask(state)
+    }
+    if what == SH_P0 {
+        return share.pool_first(state)
+    }
+    if what == SH_P1 {
+        return share.pool_last(state)
+    }
+    if what == SH_NCLIENT {
+        return share.CLIENT_MAX
+    }
+    if what == SH_UPLINK {
+        return share.uplink(state)
+    }
+    if what == SH_SHARED {
+        return share.shared(state)
+    }
+    if what == SH_NAT {
+        return share.nat_live(state)
+    }
+    if what == SH_STAT {
+        return share.stat(state, index)
+    }
+    if index >= share.CLIENT_MAX {
+        return neg(errno.E_INVAL)
+    }
+    if what == SH_CLIENT {
+        if share.client_at(state, index, share.C_USE) != 0 {
+            return 1
+        }
+        return 0
+    }
+    if what == SH_CMAC {
+        return share.client_at(state, index, share.C_MAC)
+    }
+    if what == SH_CIP {
+        return share.client_at(state, index, share.C_IP)
+    }
+    if what == SH_CIN {
+        return share.client_at(state, index, share.C_IN)
+    }
+    if what == SH_COUT {
+        return share.client_at(state, index, share.C_OUT)
+    }
+    return neg(errno.E_INVAL)
+}
+
 fn net_call(state: u64, me: u64, number: u64, a0: u64, a1: u64,
     a2: u64) -> u64 {
     // ======================================================= ROUND NETMON
     if number == SYS_OSUM_NETMON {
         return do_netmon(state, me, a0, a1, a2)
+    }
+    if number == SYS_OSUM_SHARE {
+        return do_share(state, me, a0, a1)
     }
     if number == SYS_OSUM_NETMONROLL {
         if sched.tget(state, me, sched.T_EUID) != 0 {

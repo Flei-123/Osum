@@ -35,7 +35,7 @@ FIRNC=${FIRNC:-vendor/firn/bin/firnc}
 FC1=${FIRNC1:-vendor/firn/bin/firnc1}
 LDSCRIPT=kernel/kernel.ld
 ULD=kernel/user/user.ld
-PROGS="sh ls cat echo ping wget netstat sleep dhcp"
+PROGS="sh ls cat echo ping wget netstat sleep dhcp netmon wigdemo"
 # `/var/net/` has to exist on the image: the history file lives there.
 BLOCKS=4096
 
@@ -620,6 +620,45 @@ num "frames the forwarder would not carry" "${DR:-}" le 2
 note "the router's own accounting puts every forwarded frame in the SYSTEM"
 note "bucket, and that is right: a frame belonging to another machine belongs"
 note "to no process on this one."
+
+# =====================================================================
+echo "== 8. the window, and the honest counter-check about it =="
+# =====================================================================
+# `/bin/netmon` is the window of this round. It builds, it links, and
+# its whole data path runs -- but started from `/bin/sh` it cannot get a
+# drawing surface and says so.
+#
+# THE COUNTER-CHECK IS THE POINT OF THIS SECTION. `/bin/wigdemo` is the
+# reference application of round K15, the program the widget library is
+# MEASURED against. It is on the same disk, started from the same shell,
+# in the same boot -- and it fails identically. So the limit is the
+# shell path, not this round's application, and this section proves that
+# rather than asserting it in a document.
+n=$(stat -c%s "$TMPD/netmon0.elf" 2>/dev/null)
+num "/bin/netmon, octets" "${n:-}" gt 10000
+wire_up; bridge_up; srv_up
+cp "$TMPD/disk.img" "$TMPD/live5.img"
+qemu_bg "$TMPD/k0.mb" \
+    "gfx wm wig osum $BASE $NETARGS nsvc=0 nwait=0 script=wget -q http://$HOST_IP:8000/x;netstat -w;wigdemo;netmon -n 2000;exit" \
+    "$TMPD/c5.txt" -vga std -drive "file=$TMPD/live5.img,format=raw,if=ide,index=0"
+qemu_wait
+srv_down; bridge_down; wire_down
+R="$TMPD/c5.txt"
+has "$R" "wget: octets $BODY" "the same boot really moved octets first"
+has "$R" "netstat: programs written" "and wrote them into the history"
+if grep -qaF "netmon: no window server" "$R"; then
+    if grep -qaF "wigdemo: keine Flaeche" "$R"; then
+        ok "netmon cannot raise a window from a shell -- AND NEITHER CAN wigdemo,"
+        note "the reference application of round K15, in the same boot. The limit is"
+        note "the shell path and not this round. docs/NETMON.md says so under"
+        note "'what is not done', and this is the line that makes it a fact."
+    else
+        bad "netmon has no window but wigdemo does -- then it IS this round's fault"
+    fi
+else
+    has "$R" "netmon: rows programs=" "the window came up and reported its rows"
+fi
+hasnot "$R" "*** EXCEPTION" "and nothing faulted either way"
 
 echo
 echo "NETMON: $pass passed, $fail failed"
