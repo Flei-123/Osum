@@ -497,6 +497,13 @@ resolved there, not here.
 
 ---
 
+## Naming
+
+Paths, directory names, configuration keys, command names and device
+names are **always English** and are never localized. Only the display
+text of the user interface is translated. `docs/NAMING.md` says why, and
+lists what was renamed for it.
+
 ## Documentation
 
 The round reports in `docs/` were taken over from the Firn repository
@@ -524,7 +531,7 @@ after the fact.
 | `docs/ROUNDK11.md` | **you can work on it**: the editor, twenty tools, the shell as a language |
 | `docs/ROUNDK10W.md` | the user interface: mouse, window server, TrueType with antialiasing |
 | `docs/ROUNDK12.md` | a host for foreign processors: AMD-V, nested page tables, guests, guest machines from ring 3 |
-| `docs/ROUNDK15.md` | **widgets, the file manager and search**: the library in ring 3, `/bin/explorer`, programs as bundles under `/apps/*.prog/`, a name index across the whole file system modelled on "Everything" — ten calls in the kernel |
+| `docs/ROUNDK15.md` | **widgets, the file manager and search**: the library in ring 3, `/bin/explorer`, programs as bundles under `/apps/*.osp/`, a name index across the whole file system modelled on "Everything" — ten calls in the kernel |
 | `docs/ROUNDK13.md` | **users, permissions and `init`**: uid/gid, chmod/chown, /etc/passwd and /etc/shadow, login, the first process |
 | `docs/ROUNDK14.md` | **VFS and foreign file systems**: the table of nine operations, /proc, /dev, FAT32 against `mkfs.vfat`/`mcopy`/`fsck.fat`, MBR and GPT |
 | `docs/ROUNDK16.md` | **the compiler runs on the system itself**: `firnc` and an assembler in Firn on Osum, the result character-identical with the one from the host — plus the table "file kind → what opens it" in the kernel and `#!` in `execve` |

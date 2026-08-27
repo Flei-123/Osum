@@ -49,7 +49,7 @@ for p in $PROGS; do ARGS+=("/bin/$p=$OUT/$p.elf"); done
 # Der ZWEITE NAME: ein Verzeichniseintrag mehr auf dieselbe Inode.
 ARGS+=("/bin/files@/bin/explorer")
 ARGS+=(/etc/ "/etc/theme=$OUT/baum/theme")
-# DIE BUENDEL: /apps/<name>.prog/{INFO,start,symbol,data/}
+# DIE BUENDEL: /apps/<name>.osp/{INFO,start,symbol,data/}
 while read -r zeile; do ARGS+=("$zeile"); done < <(python3 tools/k15/bundle.py assets/apps "$OUT/buendel")
 while read -r pfad; do ARGS+=("$pfad"); done < "$OUT/baum/liste"
 python3 tools/osum/mkfs.py "${ARGS[@]}" > "$OUT/mkfs.log" 2>&1 || {
