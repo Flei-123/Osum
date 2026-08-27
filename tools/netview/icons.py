@@ -61,19 +61,39 @@ QUELLE = os.path.join(WURZEL, "..", "assets", "netview")
 ZUSTAENDE = ["state-nocarrier", "state-noip", "state-noroute", "state-online"]
 MERKMALE = ["mark-filtered", "mark-faked", "mark-none"]
 
-# DIE ZWEI SCHEMEN, GEGEN DIE GERECHNET WIRD. Die dunklen Werte sind die
-# aus `wlibc.theme_defaults`; die hellen sind die, die diese Runde als
-# `/etc/schemas/tag` mitliefert. Was hier steht, muss mit beiden Dateien
-# uebereinstimmen -- `pruefe` rechnet es nach.
+# DIE ZWEI SCHEMEN, GEGEN DIE GERECHNET WIRD -- AUS DEN DATEIEN, mit
+# denen die gemessenen Laeufe wirklich booten
+# (`assets/netview/theme-dark`, `theme-light`). Sie standen hier erst als
+# Zahlen im Quelltext; das waere eine zweite Fassung derselben Farben
+# gewesen, und die erste Aenderung an einer der Dateien haette diese
+# Pruefung zu einer Aussage ueber nichts gemacht.
+#
+# Der Name der Rolle ist der Name des Schluessels in der Datei, mit
+# einer Ausnahme: `ink` heisst dort `fg`, weil die Datei die Namen der
+# Runde K15 traegt und die nicht dieser Runde gehoren.
+DATEI_NAME = {"ink": "fg", "dim": "dim", "accent": "accent",
+              "warn": "focus", "panel": "panel"}
+
+
+def schema_lesen(pfad):
+    werte = {}
+    for roh in open(pfad, encoding="ascii"):
+        roh = roh.strip()
+        if not roh or roh.startswith("#") or "=" not in roh:
+            continue
+        k, _, v = roh.partition("=")
+        werte[k.strip()] = int(v.strip(), 16)
+    aus = {}
+    for rolle, schluessel in DATEI_NAME.items():
+        if schluessel not in werte:
+            raise SystemExit("icons: %s hat kein %s=" % (pfad, schluessel))
+        aus[rolle] = werte[schluessel]
+    return aus
+
+
 SCHEMEN = {
-    "dark": {
-        "ink": 0xE8EEF4, "dim": 0x909CA8, "accent": 0x60C0FF,
-        "warn": 0xFFC020, "panel": 0x283440,
-    },
-    "light": {
-        "ink": 0x181C22, "dim": 0x5A6470, "accent": 0x0A5CA8,
-        "warn": 0x8A5A00, "panel": 0xE6EAEE,
-    },
+    "dark": schema_lesen(os.path.join(QUELLE, "theme-dark")),
+    "light": schema_lesen(os.path.join(QUELLE, "theme-light")),
 }
 
 MIN_KONTRAST = 4.5

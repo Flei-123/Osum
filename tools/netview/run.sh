@@ -365,6 +365,239 @@ has "$B" "NET" "/bin/ps has a NET column"
 
 cp "$TMPD"/keep-*.txt "${NVLOGS:-/tmp}/" 2>/dev/null
 
+# =====================================================================
+echo "== 5. the symbols: seven drawings, measured before anything is drawn =="
+# =====================================================================
+# The design rules of the addendum are checked BEFORE the machine boots,
+# because they are properties of the drawings and not of the run: the
+# contrast of every role against the panel it lies on, in both schemes,
+# and the SILHOUETTES of the seven signs against each other. The second
+# one is the colour-blind test: flatten every colour to one and the
+# shapes still have to differ.
+if python3 tools/netview/icons.py pruefe > "$TMPD/icons.txt" 2>&1; then
+    ok "tools/netview/icons.py: every rule of the addendum holds"
+    grep -aE '  (dark|light) ' "$TMPD/icons.txt" | sed 's/^/        /'
+    grep -aE 'vs ' "$TMPD/icons.txt" | sed 's/^/        /'
+else
+    bad "the icons break a rule of the addendum"
+    sed 's/^/        /' "$TMPD/icons.txt" | head -20
+fi
+n=$(grep -acE '  (dark|light) ' "$TMPD/icons.txt")
+num "roles whose contrast was computed against the panel (4.5:1 or better)" "$n" eq 8
+n=$(grep -ac 'ZU AEHNLICH\|ZU WENIG' "$TMPD/icons.txt")
+num "rules broken" "$n" eq 0
+python3 tools/netview/icons.py kern "$TMPD/netmark.fi" >/dev/null 2>&1
+if cmp -s "$TMPD/netmark.fi" kernel/netmark.fi; then
+    ok "kernel/netmark.fi is the drawing, octet for octet -- one source, two places"
+else
+    bad "kernel/netmark.fi does not match assets/netview/mark-*.txt"
+fi
+
+# =====================================================================
+echo "== 6. the two displays, on a real screen =="
+# =====================================================================
+# THE POINT OF THIS SECTION IS THE SECOND SHOT. Windows has ONE icon in
+# the corner and it describes the machine; here the network is a
+# property of the PROCESS, so the corner cannot say it. The measurement
+# is therefore in two halves:
+#
+#   the CORNER  -- four boots, four states of the machine, four icons
+#   the BUTTONS -- ONE boot with FOUR programs in FOUR views, and four
+#                  different marks on four buttons of the same bar
+#
+# and both halves are read out of the PICTURE, pixel by pixel, at the
+# coordinates the taskbar itself reported on the serial line. A bar that
+# reported one thing and drew another would fail here and not pass
+# quietly -- that is the lesson of round K7B and it is why nothing in
+# this section is judged by eye.
+SHOTS=${NVSHOTS:-docs/shots/netview}
+mkdir -p "$SHOTS"
+GPROGS="schreibtisch leiste einstellungen starter explorer wigdemo suchen netview sh echo ls cat ps"
+MONO=assets/osum-mono.ttf
+SANS=assets/osum-sans.ttf
+GBASE="gfx wm wig desk wmhold wiglong nokbd nosched noproc nofs"
+
+grc=0
+as --64 -o "$TMPD/crt.o" kernel/user/crt.s 2>/dev/null
+for pgm in $GPROGS; do
+    "$FIRNC" "kernel/user/$pgm.fi" -o "$TMPD/g$pgm.o" > "$TMPD/ge$pgm" 2>&1 \
+        && ld -T kernel/user/user.ld --defsym=USER_ENTRY="_F0.u_start" \
+            -o "$TMPD/g$pgm.elf" "$TMPD/crt.o" "$TMPD/g$pgm.o" 2>/dev/null \
+        && strip --strip-all "$TMPD/g$pgm.elf" \
+        || { bad "the graphical userland does not build: $pgm"; sed 's/^/        /' "$TMPD/ge$pgm" | head -6; grc=1; }
+done
+[ "$grc" = 0 ] && ok "the graphical userland builds ($(echo $GPROGS | wc -w) programs)"
+
+python3 tools/netview/icons.py bauen "$TMPD/icons" > "$TMPD/ib.txt" 2>&1 \
+    && ok "the seven symbols are built into OSYM files" \
+    || bad "tools/netview/icons.py bauen failed"
+python3 tools/k15/baum.py "$TMPD/baum" > "$TMPD/baum.log" 2>&1 \
+    || bad "tools/k15/baum.py failed"
+
+printf '# taskbar.conf\nedge=bottom\nheight=28\nwidth=104\nautohide=0\nontop=1\n' \
+    > "$TMPD/taskbar.conf"
+
+mk_gimage() { # image theme-file
+    local img=$1 th=$2
+    local ARGS=(build "$img" 8192 /lib/
+        "/lib/mono.ttf=$MONO" "/lib/sans.ttf=$SANS" /bin/)
+    local q
+    for q in $GPROGS; do ARGS+=("/bin/$q=$TMPD/g$q.elf"); done
+    ARGS+=("/bin/files@/bin/explorer")
+    ARGS+=(/etc/ "/etc/theme=$th" "/etc/taskbar.conf=$TMPD/taskbar.conf")
+    ARGS+=(/etc/netview/)
+    for q in state-nocarrier state-noip state-noroute state-online \
+             mark-filtered mark-faked mark-none; do
+        ARGS+=("/etc/netview/$q=$TMPD/icons/$q")
+    done
+    while read -r z; do ARGS+=("$z"); done < <(python3 tools/k15/buendel.py assets/apps "$TMPD/buendel")
+    while read -r z; do ARGS+=("$z"); done < "$TMPD/baum/liste"
+    python3 tools/osum/mkfs.py "${ARGS[@]}" > "$TMPD/mkfsg.txt" 2>&1
+}
+
+# gshot <name> <theme> <extra-cmdline> [wire]
+gshot() {
+    local name=$1 th=$2 extra=$3 wire=${4:-}
+    local sock="$TMPD/gm-$name.sock" out="$TMPD/$name.txt" ppm="$TMPD/$name.ppm"
+    rm -f "$out" "$ppm" "$sock"
+    mk_gimage "$TMPD/gd-$name.img" "$th" || { bad "mkfs for $name failed"; return 1; }
+    cp -f "$TMPD/gd-$name.img" "$TMPD/gl-$name.img"
+    local NET=()
+    if [ -n "$wire" ]; then
+        NET=(-netdev "socket,id=n0,udp=127.0.0.1:$BPORT,localaddr=127.0.0.1:$QPORT"
+             -device "virtio-net-pci,netdev=n0,mac=52:54:00:aa:bb:cc")
+    fi
+    timeout 300 qemu-system-x86_64 -kernel "$TMPD/k0.mb" -m 256 \
+        -append "$GBASE $extra" -serial "file:$out" -display none -no-reboot \
+        -vga std -monitor "unix:$sock,server,nowait" \
+        -drive "file=$TMPD/gl-$name.img,format=raw,if=ide,index=0" \
+        "${NET[@]}" \
+        -device isa-debug-exit,iobase=0xf4,iosize=0x04 > "$TMPD/$name.qemu" 2>&1 &
+    local pid=$!
+    local i=0
+    while [ $i -lt 1600 ]; do
+        grep -qaE '^wm: hold' "$out" 2>/dev/null && break
+        kill -0 "$pid" 2>/dev/null || break
+        sleep 0.15
+        i=$((i + 1))
+    done
+    # ONLINE needs the gateway to have ANSWERED, and nothing here sends
+    # traffic on its own. A ping from the Linux side fills the address
+    # cache -- which is exactly what "there is a way to the first hop"
+    # means, and why the state is not simply "an address is configured".
+    if [ "$wire" = "ping" ]; then
+        ip netns exec "$NS" ping -c 4 -i 0.3 -W 2 "$OSUM_IP" >/dev/null 2>&1
+        sleep 2
+    fi
+    python3 tools/gfx/schuss.py "$sock" "$ppm" 30 > "$TMPD/$name.shot" 2>&1
+    kill "$pid" 2>/dev/null
+    wait "$pid" 2>/dev/null
+    [ -s "$ppm" ]
+}
+
+png() { python3 - "$1" "$SHOTS/$2.png" <<'PYX' 2>/dev/null
+import sys
+from PIL import Image
+Image.open(sys.argv[1]).save(sys.argv[2])
+PYX
+}
+
+# The state the bar reported, and where it drew the icon.
+st_of()  { grep -aoE '^taskbar: state s=[0-9]+' "$1" | tail -1 | cut -d= -f2; }
+st_x()   { grep -aoE '^taskbar: state s=[0-9]+ x=[0-9]+' "$1" | tail -1 | grep -oE 'x=[0-9]+' | cut -d= -f2; }
+st_y()   { grep -aoE '^taskbar: state s=[0-9]+ x=[0-9]+ y=[0-9]+' "$1" | tail -1 | grep -oE 'y=[0-9]+$' | cut -d= -f2; }
+
+echo "   the CORNER: four states of the machine, four boots, four icons"
+declare -A WANT=( [nocarrier]=0 [noip]=1 [noroute]=2 [online]=3 )
+wire_down
+for cs in nocarrier noip noroute online; do
+    case $cs in
+        nocarrier) EX="netvdemo"; W="" ;;
+        noip)      EX="netvdemo nic"; W="1" ;;
+        noroute)   EX="netvdemo nic nip=$OSUM_IP/24 ngw=$HOST_IP"; W="1" ;;
+        online)    EX="netvdemo nic nip=$OSUM_IP/24 ngw=$HOST_IP"; W="ping" ;;
+    esac
+    if [ -n "$W" ]; then wire_up; bridge_up; fi
+    if gshot "st-$cs" "assets/netview/theme-dark" "$EX" "$W"; then
+        L="$TMPD/st-$cs.txt"; P="$TMPD/st-$cs.ppm"
+        png "$P" "state-$cs"
+        got=$(st_of "$L")
+        num "$cs: the kernel reported state" "${got:-99}" eq "${WANT[$cs]}"
+        x=$(st_x "$L"); y=$(st_y "$L")
+        if [ -n "$x" ] && [ -n "$y" ]; then
+            r=$(python3 tools/netview/schau.py "$P" "$x" "$y" \
+                "assets/netview/state-$cs.txt" assets/netview/theme-dark 2>&1)
+            case "$r" in ok*) ok "$cs: the icon is on the screen at $x,$y -- $r" ;;
+                         *)   bad "$cs: $r" ;; esac
+        else
+            bad "$cs: the bar did not report where it drew the icon"
+        fi
+    else
+        bad "$cs: no screenshot"
+    fi
+    if [ -n "$W" ]; then bridge_down; wire_down; fi
+done
+
+echo "   THE PROBE: four programs, four views, one bar, one picture"
+# The marks the bar reported, per button: `taskbar: btn i=N ... netv=V mkx=X mky=Y`
+mk_line() { grep -aE "^taskbar: btn i=$2 " "$1" | tail -1; }
+
+for scheme in dark light; do
+    wire_up; bridge_up
+    if gshot "four-$scheme" "assets/netview/theme-$scheme" \
+        "netvdemo nic nip=$OSUM_IP/24 ngw=$HOST_IP" "ping"; then
+        L="$TMPD/four-$scheme.txt"; P="$TMPD/four-$scheme.ppm"
+        png "$P" "four-views-$scheme"
+        seen_r=0; seen_1=0; seen_2=0; seen_3=0
+        for b in 0 1 2 3 4 5 6 7 8 9; do
+            line=$(mk_line "$L" "$b")
+            [ -z "$line" ] && continue
+            v=$(echo "$line" | grep -oE 'netv=[0-9]+' | cut -d= -f2)
+            mx=$(echo "$line" | grep -oE 'mkx=[0-9]+' | cut -d= -f2)
+            my=$(echo "$line" | grep -oE 'mky=[0-9]+' | cut -d= -f2)
+            case "${v:-0}" in
+                0) seen_r=$((seen_r+1)) ;;
+                1) name=mark-filtered; seen_1=$((seen_1+1)) ;;
+                2) name=mark-faked;    seen_2=$((seen_2+1)) ;;
+                3) name=mark-none;     seen_3=$((seen_3+1)) ;;
+            esac
+            if [ "${v:-0}" != 0 ] && [ -n "$mx" ]; then
+                r=$(python3 tools/netview/schau.py "$P" "$mx" "$my" \
+                    "assets/netview/$name.txt" "assets/netview/theme-$scheme" 2>&1)
+                case "$r" in ok*) ok "$scheme: button $b carries $name at $mx,$my -- $r" ;;
+                             *)   bad "$scheme: button $b, $name: $r" ;; esac
+            fi
+        done
+        num "$scheme: buttons whose process sees the REAL network (no mark)" "$seen_r" ge 1
+        num "$scheme: buttons marked filtered" "$seen_1" eq 1
+        num "$scheme: buttons marked faked" "$seen_2" eq 1
+        num "$scheme: buttons marked none" "$seen_3" eq 1
+        # THE COUNTER-CHECK: the unmarked button must be EMPTY where a
+        # mark would be. A checker that only ever looks where it expects
+        # something is a checker that would pass on a bar that draws the
+        # same mark on everything.
+        rl=$(grep -aE '^taskbar: btn i=[0-9]+ .* netv=0( |$)' "$L" | tail -1)
+        if [ -n "$rl" ]; then
+            rx=$(echo "$rl" | grep -oE ' x=[0-9]+' | tr -d ' x=')
+            ry=$(echo "$rl" | grep -oE ' y=[0-9]+' | tr -d ' y=')
+            r=$(python3 tools/netview/schau.py "$P" "$((rx + 3))" "$((ry + 5))" \
+                assets/netview/mark-faked.txt "assets/netview/theme-$scheme" --nicht 2>&1)
+            case "$r" in ok*) ok "$scheme: and the REAL one carries nothing -- $r" ;;
+                         *)   bad "$scheme: the real button has a mark: $r" ;; esac
+        fi
+        has "$L" "taskbar: icons=4 marks=3" "$scheme: the bar found all seven pictures"
+    else
+        bad "$scheme: no screenshot of the four views"
+    fi
+    bridge_down; wire_down
+done
+
+# The icon sheet: the seven signs at the size they are shown at, in both
+# schemes, side by side. Not a measurement -- a picture for a person.
+python3 tools/netview/blatt.py "$SHOTS/icons-sheet.png" > "$TMPD/sheet.txt" 2>&1 \
+    && ok "the sheet of all seven signs, 1:1 and magnified, light and dark" \
+    || bad "tools/netview/blatt.py failed"
+
 echo
 echo "NETVIEW: $pass passed, $fail failed"
 [ "$fail" -eq 0 ] || exit 1
