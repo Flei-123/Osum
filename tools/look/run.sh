@@ -180,42 +180,30 @@ for v in "classic day light" "modern day light" "modern night dark" "classic nig
         bad "$n did not boot"
     fi
 done
-# THE CORNER ITSELF, on the dark pair, where face and surface are far
-# enough apart that the reading cannot be an artefact of the tolerance.
+# THE CORNER ITSELF, on the dark pair.
 #
-# WHERE IT LOOKS IS COMPUTED, NOT REMEMBERED -- the same lesson
-# tools/desktop/run.sh had to learn in this round's addendum. These
-# were two numbers read off a picture (474 and 504), and the moment
-# the settings window moved up by 31 pixels to make its Apply button
-# reachable, they pointed at empty background and the round's central
-# claim -- "the corner is round" -- would have failed for a reason
-# that had nothing to do with corners.
+# WHERE, AND WHY NOT WHERE THE PROGRAM SAYS. The first version of this
+# read the corner at the coordinates the settings program reports for
+# its edge chooser, which sounds obviously right and measures nothing:
+# in `night`/`dark` the face of a control and the surface of the window
+# behind it are THE SAME COLOUR (#1e293b). A rounded corner against an
+# identical background has no corner to see -- the probe comes back
+# "background 0, antialiased 0" at every offset for five pixels around,
+# and it says so whether the corner is round or square.
 #
-# The program says where its widgets are. The inner origin of a window
-# is x+2, y+22: border and title bar, drawn by the server.
-for v in "classic 0" "modern 2"; do
+# So it is read at x=12, where a control sits on the DESKTOP
+# (#0f172a) and the two colours are 6 : 1 apart. That is a real corner
+# of a real widget with a real background behind it, and it is the only
+# place in this picture where the question can be answered at all.
+# The y comes from the shape: classic controls are 26 high, modern 32,
+# so the same widget starts at a different line.
+for v in "classic 474 0" "modern 504 2"; do
     set -- $v
-    S="$TMPD/D-$1-night/serial.txt"
-    # ONE RECORD, ABSOLUTE COORDINATES. The program reports `ax`/`ay`
-    # -- where the widget really is on the screen -- in the same line
-    # as everything else about it, so this needs no second lookup and
-    # no arithmetic. A record that carries everything belonging to it
-    # can only arrive whole or not at all.
-    E=$(grep -a 'settings: rect name=' "$S" \
-        | grep -oE 'name=edge x=[0-9]+ y=[0-9]+ w=[0-9]+ h=[0-9]+ ax=[0-9]+ ay=[0-9]+' \
-        | tail -1)
-    CX=$(echo "$E" | grep -oE ' ax=[0-9]+' | grep -oE '[0-9]+')
-    CY=$(echo "$E" | grep -oE ' ay=[0-9]+' | grep -oE '[0-9]+')
-    if [ -z "$CX" ] || [ -z "$CY" ]; then
-        bad "$1: the settings did not report a complete edge rectangle"
-        continue
-    fi
-    echo "        reading the corner of the edge chooser at $CX,$CY"
-    C=$(python3 tools/look/corner.py "$TMPD/D-$1-night/desktop.ppm" "$CX" "$CY" \
+    C=$(python3 tools/look/corner.py "$TMPD/D-$1-night/desktop.ppm" 12 "$2" \
         30 41 59 15 23 42 8 2>&1)
     echo "$C" | sed 's/^/        /'
     B=$(echo "$C" | grep -oE 'background [0-9]+' | grep -oE '[0-9]+')
-    is "$1: background pixels on the corner diagonal" "${B:-x}" "$2"
+    is "$1: background pixels on the corner diagonal" "${B:-x}" "$3"
 done
 
 echo "== E. where the buttons sit =="
