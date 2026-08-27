@@ -39,6 +39,8 @@ fn u_start(args: u64) -> u64 {
     var f_prog: bool = false
     var f_sum: bool = false
     var f_task: bool = false
+    var f_hist: bool = false
+    var f_write: bool = false
     var w: [u8; 32] = [0 as u8; 32]
 
     let n: u64 = ulib.arg_count(args)
@@ -61,6 +63,12 @@ fn u_start(args: u64) -> u64 {
                 if c == 116 {
                     f_task = true
                 }
+                if c == 119 {
+                    f_write = true
+                }
+                if c == 72 {
+                    f_hist = true
+                }
                 k = k + 1
             }
         }
@@ -76,7 +84,13 @@ fn u_start(args: u64) -> u64 {
     if f_task {
         per_task()
     }
-    if !f_sum && !f_prog && !f_task {
+    if f_write {
+        history_write()
+    }
+    if f_hist {
+        history_show()
+    }
+    if !f_sum && !f_prog && !f_task && !f_hist && !f_write {
         connections(f_all)
     }
     return 0
@@ -470,4 +484,409 @@ fn line(name: u64, v: u64) {
     ulib.say(name)
     ulib.pad(v, 12)
     ulib.nl()
+}
+
+// ==================================================== the history file
+//
+// WHAT THE FILE IS FOR. A counter that starts at zero every time the
+// machine boots cannot answer "how much has this program used this
+// month", and that is the question. So the running totals are folded
+// into a small text file at intervals, and the file is what survives.
+//
+//   /var/net/usage
+//   # osum network usage -- period program sent recvd wire-out wire-in
+//   2026-08 wget 108 131382 656 136494
+//   2026-08-27 wget 54 65691 328 68247
+//   2026-08-26 wget 54 65691 328 68247
+//
+// ONE LINE PER PERIOD AND PROGRAM, in plain text, readable with `cat`
+// and editable with `edit`. There is no second copy of this anywhere --
+// no index, no binary shadow, nothing that could disagree with it.
+//
+// TWO KINDS OF PERIOD in the same file, and the reason is the size of
+// the drive. A day line is kept for thirty-one days; a month line is
+// kept for twelve months. With ten programs that is at most 430 lines
+// and about twenty kilooctets, which fits on a two-megaoctet drive with
+// room to spare. Keeping every day for a year would be twelve times
+// that and would not.
+//
+// WHAT IS NOT IN IT, said once more because it is the point: MENGE JE
+// PROGRAMM, and nothing about WHERE. There is no address, no host name
+// and no port in this file, and there never will be. A file that
+// remembered every address every program reached would be a
+// surveillance database on the user's own disk, kept by their own
+// operating system. The live connection list (`netstat` with no
+// arguments) shows destinations because a person asking right now has a
+// right to know; it is read out of the kernel's live table and it is
+// never written down.
+//
+// HOW DOUBLE COUNTING IS AVOIDED. `SYS_NETMONROLL` hands out what has
+// been used since the last roll and moves the kernel's watermark in the
+// same call. Running `netstat -w` twice in a row therefore adds the
+// second time nothing at all, which is exactly right.
+
+const HIST: u64 = 12000 // what one read of the file may be
+const ROWS: u64 = 512 // periods x programs held in memory at once
+const PLEN: u64 = 11 // "2026-08-27" and a zero
+const NLEN: u64 = 20
+
+// The table, laid out by hand: `ROWS` rows of a period, a name and four
+// numbers. Firn has no globals, so it is one static in this program --
+// the same thing `top` does with its previous-tick table.
+static mut h_per: [u8; 5632] = [0 as u8; 5632] // ROWS * PLEN
+static mut h_nam: [u8; 10240] = [0 as u8; 10240] // ROWS * NLEN
+static mut h_val: [u64; 2048] = [0 as u64; 2048] // ROWS * 4
+static mut h_buf: [u8; 12000] = [0 as u8; 12000]
+
+// THE PATH, into storage the CALLER owns. Firn refuses to let the
+// address of a local leave the function that declared it (the frame is
+// gone by then), and it is right to: `/bin/edit` in round K11 lost a
+// line to exactly that kind of pointer before the check existed.
+fn hist_path(out: u64) -> u64 {
+    var p: [u8; 15] = "/var/net/usage\0"
+    ulib.strcpy(out, (&p[0]) as u64)
+    return out
+}
+
+// Where a (period, program) row is, making it if there is room.
+fn row_of(n: *mut u64, per: u64, nam: u64) -> u64 {
+    var i: u64 = 0
+    while i < *n {
+        if streq_at((&h_per[0]) as u64 + i * PLEN, per)
+            && streq_at((&h_nam[0]) as u64 + i * NLEN, nam) {
+            return i
+        }
+        i = i + 1
+    }
+    if *n >= ROWS {
+        return ROWS
+    }
+    let k: u64 = *n
+    copy_z((&h_per[0]) as u64 + k * PLEN, per, PLEN)
+    copy_z((&h_nam[0]) as u64 + k * NLEN, nam, NLEN)
+    var f: u64 = 0
+    while f < 4 {
+        h_val[(k * 4 + f) as usize] = 0
+        f = f + 1
+    }
+    *n = k + 1
+    return k
+}
+
+fn streq_at(a: u64, b: u64) -> bool {
+    var i: u64 = 0
+    while true {
+        let x: u64 = byte_at(a, i)
+        let y: u64 = byte_at(b, i)
+        if x != y {
+            return false
+        }
+        if x == 0 {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn copy_z(dst: u64, src: u64, max: u64) {
+    var i: u64 = 0
+    while i < max - 1 {
+        let c: u64 = byte_at(src, i)
+        __mmio_write8((dst + i) as *mut u8, c as u8)
+        if c == 0 {
+            i = max
+        } else {
+            i = i + 1
+        }
+    }
+    __mmio_write8((dst + max - 1) as *mut u8, 0 as u8)
+}
+
+fn two(v: u64, out: u64, at: u64) -> u64 {
+    __mmio_write8((out + at) as *mut u8, (48 + (v / 10) % 10) as u8)
+    __mmio_write8((out + at + 1) as *mut u8, (48 + v % 10) as u8)
+    return at + 2
+}
+
+// "2026-08-27" into `out`, and "2026-08" if `day` is false.
+fn period_now(out: u64, day: bool) {
+    let y: u64 = ulib.sys(ulib.SYS_SYSINFO, ulib.I_YEAR, 0, 0)
+    var at: u64 = put_num(out, 0, y)
+    __mmio_write8((out + at) as *mut u8, 45 as u8)
+    at = two(ulib.sys(ulib.SYS_SYSINFO, ulib.I_MONTH, 0, 0), out, at + 1)
+    if day {
+        __mmio_write8((out + at) as *mut u8, 45 as u8)
+        at = two(ulib.sys(ulib.SYS_SYSINFO, ulib.I_DAY, 0, 0), out, at + 1)
+    }
+    __mmio_write8((out + at) as *mut u8, 0 as u8)
+}
+
+// Reads the file into the table. Lines that do not parse are dropped
+// rather than guessed at -- a history that invents a number is worse
+// than one with a gap in it.
+fn hist_read(n: *mut u64) {
+    *n = 0
+    var path: [u8; 24] = [0 as u8; 24]
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN,
+        hist_path((&path[0]) as u64), 0, 0)
+    if ulib.bad(fd) {
+        return
+    }
+    let got: u64 = ulib.sys(ulib.SYS_READ, fd, (&h_buf[0]) as u64, HIST - 1)
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    if ulib.bad(got) {
+        return
+    }
+    h_buf[got as usize] = 0 as u8
+    var at: u64 = 0
+    while at < got {
+        var e: u64 = at
+        while e < got && h_buf[e as usize] != 10 as u8 {
+            e = e + 1
+        }
+        h_buf[e as usize] = 0 as u8
+        if h_buf[at as usize] != 35 as u8 && e > at {
+            take_line((&h_buf[0]) as u64 + at, n)
+        }
+        at = e + 1
+    }
+}
+
+// `period program a b c d`
+fn take_line(p: u64, n: *mut u64) {
+    var per: [u8; 16] = [0 as u8; 16]
+    var nam: [u8; 24] = [0 as u8; 24]
+    var at: u64 = 0
+    at = field(p, at, (&per[0]) as u64, 16)
+    at = field(p, at, (&nam[0]) as u64, 24)
+    if per[0] == 0 as u8 || nam[0] == 0 as u8 {
+        return
+    }
+    let k: u64 = row_of(n, (&per[0]) as u64, (&nam[0]) as u64)
+    if k >= ROWS {
+        return
+    }
+    var f: u64 = 0
+    while f < 4 {
+        var num: [u8; 24] = [0 as u8; 24]
+        at = field(p, at, (&num[0]) as u64, 24)
+        h_val[(k * 4 + f) as usize] = ulib.to_num((&num[0]) as u64)
+        f = f + 1
+    }
+}
+
+// One space-separated field out of `p` starting at `at`; returns where
+// the next one begins.
+fn field(p: u64, at: u64, out: u64, max: u64) -> u64 {
+    var i: u64 = at
+    while byte_at(p, i) == 32 {
+        i = i + 1
+    }
+    var k: u64 = 0
+    while byte_at(p, i) != 0 && byte_at(p, i) != 32 && k < max - 1 {
+        __mmio_write8((out + k) as *mut u8, byte_at(p, i) as u8)
+        i = i + 1
+        k = k + 1
+    }
+    __mmio_write8((out + k) as *mut u8, 0 as u8)
+    return i
+}
+
+// How many days ago a period is, roughly: the point is only to throw the
+// oldest away, and a month of thirty-one days is close enough for that.
+// `2026-08-27` -> 2026 * 372 + 8 * 31 + 27.
+fn period_rank(p: u64) -> u64 {
+    var f: [u8; 8] = [0 as u8; 8]
+    var i: u64 = 0
+    while i < 4 {
+        f[i as usize] = byte_at(p, i) as u8
+        i = i + 1
+    }
+    f[4] = 0 as u8
+    let y: u64 = ulib.to_num((&f[0]) as u64)
+    let mo: u64 = (byte_at(p, 5) - 48) * 10 + (byte_at(p, 6) - 48)
+    var d: u64 = 0
+    if byte_at(p, 7) == 45 {
+        d = (byte_at(p, 8) - 48) * 10 + (byte_at(p, 9) - 48)
+    }
+    return y * 372 + mo * 31 + d
+}
+
+fn is_day(p: u64) -> bool {
+    return byte_at(p, 7) == 45
+}
+
+// Writes the table back. Day rows older than thirty-one days and month
+// rows older than twelve months are simply not written -- the file
+// bounds itself, and nothing has to remember to prune it.
+fn hist_write(n: u64) {
+    var head: [u8; 67] = "# osum network usage -- period program sent recvd wire-out wire-in\0"
+    var today: [u8; 16] = [0 as u8; 16]
+    var thismo: [u8; 16] = [0 as u8; 16]
+    period_now((&today[0]) as u64, true)
+    period_now((&thismo[0]) as u64, false)
+    let now_d: u64 = period_rank((&today[0]) as u64)
+    let now_m: u64 = period_rank((&thismo[0]) as u64)
+    var at: u64 = 0
+    at = at + ulib.strcpy((&h_buf[0]) as u64 + at, (&head[0]) as u64)
+    h_buf[at as usize] = 10 as u8
+    at = at + 1
+    var i: u64 = 0
+    while i < n {
+        let per: u64 = (&h_per[0]) as u64 + i * PLEN
+        let r: u64 = period_rank(per)
+        var keep: bool = false
+        if is_day(per) {
+            keep = now_d < r + 31
+        } else {
+            keep = now_m < r + 372
+        }
+        if keep && at + 128 < HIST {
+            at = at + ulib.strcpy((&h_buf[0]) as u64 + at, per)
+            h_buf[at as usize] = 32 as u8
+            at = at + 1
+            at = at + ulib.strcpy((&h_buf[0]) as u64 + at,
+                (&h_nam[0]) as u64 + i * NLEN)
+            var f: u64 = 0
+            while f < 4 {
+                h_buf[at as usize] = 32 as u8
+                at = put_num((&h_buf[0]) as u64, at + 1,
+                    h_val[(i * 4 + f) as usize])
+                f = f + 1
+            }
+            h_buf[at as usize] = 10 as u8
+            at = at + 1
+        }
+        i = i + 1
+    }
+    var path: [u8; 24] = [0 as u8; 24]
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN,
+        hist_path((&path[0]) as u64), ulib.O_MAKE, 0)
+    if ulib.bad(fd) {
+        var s_e: [u8; 37] = "netstat: cannot write /var/net/usage\0"
+        ulib.esay_line((&s_e[0]) as u64, 0)
+        return
+    }
+    ulib.sys(ulib.SYS_WRITE, fd, (&h_buf[0]) as u64, at)
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+}
+
+// `netstat -w`: fold what the kernel has counted since the last roll
+// into today's line and this month's line, and write the file back.
+fn history_write() {
+    var today: [u8; 16] = [0 as u8; 16]
+    var thismo: [u8; 16] = [0 as u8; 16]
+    var nam: [u8; 24] = [0 as u8; 24]
+    period_now((&today[0]) as u64, true)
+    period_now((&thismo[0]) as u64, false)
+    var n: u64 = 0
+    hist_read(&n)
+    let np: u64 = q(ulib.NK_MACHINE, 0, ulib.NM_NPROG)
+    var i: u64 = 0
+    var moved: u64 = 0
+    while i < np && i < 24 {
+        if q(ulib.NK_PROG, i, ulib.NP_USED) != 0 {
+            var d: [u64; 4] = [0 as u64; 4]
+            // The order is the order of the columns: sent, received,
+            // wire out, wire in.
+            d[0] = ulib.sys(ulib.SYS_NETMONROLL, i, ulib.NT_TXPAY, 0)
+            d[1] = ulib.sys(ulib.SYS_NETMONROLL, i, ulib.NT_RXPAY, 0)
+            d[2] = ulib.sys(ulib.SYS_NETMONROLL, i, ulib.NT_TXWIRE, 0)
+            d[3] = ulib.sys(ulib.SYS_NETMONROLL, i, ulib.NT_RXWIRE, 0)
+            var any: bool = false
+            var f: u64 = 0
+            while f < 4 {
+                if ulib.bad(d[f as usize]) {
+                    d[f as usize] = 0
+                }
+                if d[f as usize] != 0 {
+                    any = true
+                }
+                f = f + 1
+            }
+            if any {
+                var k: u64 = 0
+                while k < 24 {
+                    let c: u64 = ulib.sys(ulib.SYS_NETMON, ulib.NK_PNAME, i, k)
+                    if ulib.bad(c) {
+                        nam[k as usize] = 0 as u8
+                        k = 24
+                    } else {
+                        nam[k as usize] = c as u8
+                        if c == 0 {
+                            k = 24
+                        } else {
+                            k = k + 1
+                        }
+                    }
+                }
+                nam[23] = 0 as u8
+                add_row(&n, (&today[0]) as u64, (&nam[0]) as u64, &d[0])
+                add_row(&n, (&thismo[0]) as u64, (&nam[0]) as u64, &d[0])
+                moved = moved + 1
+            }
+        }
+        i = i + 1
+    }
+    hist_write(n)
+    var s_ok: [u8; 27] = "netstat: programs written \0"
+    ulib.say((&s_ok[0]) as u64)
+    ulib.sayn(moved)
+    ulib.nl()
+}
+
+fn add_row(n: *mut u64, per: u64, nam: u64, d: *mut u64) {
+    let k: u64 = row_of(n, per, nam)
+    if k >= ROWS {
+        return
+    }
+    var f: u64 = 0
+    while f < 4 {
+        h_val[(k * 4 + f) as usize] = h_val[(k * 4 + f) as usize]
+            + __mmio_read64(((d as u64) + f * 8) as *mut u64)
+        f = f + 1
+    }
+}
+
+// `netstat -H`: the file, as it stands. `cat /var/net/usage` shows the
+// same octets -- this only picks the rows of one period out of it, which
+// is what a person asking about "this month" wants.
+fn history_show() {
+    var thismo: [u8; 16] = [0 as u8; 16]
+    var head: [u8; 63] = "Period     Program          Sent     Recvd    Wire-out Wire-in\0"
+    period_now((&thismo[0]) as u64, false)
+    var n: u64 = 0
+    hist_read(&n)
+    ulib.say((&head[0]) as u64)
+    ulib.nl()
+    var i: u64 = 0
+    while i < n {
+        let per: u64 = (&h_per[0]) as u64 + i * PLEN
+        ulib.say(per)
+        var k: u64 = ulib.length(per)
+        while k < 11 {
+            say_sp()
+            k = k + 1
+        }
+        var nm: u64 = (&h_nam[0]) as u64 + i * NLEN
+        ulib.say(nm)
+        k = ulib.length(nm)
+        while k < 17 {
+            say_sp()
+            k = k + 1
+        }
+        var f: u64 = 0
+        while f < 4 {
+            say_size(h_val[(i * 4 + f) as usize], 9)
+            f = f + 1
+        }
+        ulib.nl()
+        i = i + 1
+    }
+    if n == 0 {
+        var s_e: [u8; 41] = "no history yet -- run 'netstat -w' first\0"
+        ulib.say((&s_e[0]) as u64)
+        ulib.nl()
+    }
 }
