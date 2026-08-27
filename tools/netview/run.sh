@@ -492,14 +492,17 @@ gshot() {
         NET=(-netdev "socket,id=n0,udp=127.0.0.1:$BPORT,localaddr=127.0.0.1:$QPORT"
              -device "virtio-net-pci,netdev=n0,mac=52:54:00:aa:bb:cc")
     fi
-    # 420 AND NOT 300, and the reason is measured: `gshot` already waits
+    # 600 AND NOT 300, and the reason is measured: `gshot` already waits
     # up to 240 seconds for `wm: hold`, and a run that also drives the
     # mouse spends another fifty on top -- the script, the pauses, the
     # ping and the screendump. On a machine where another suite is
     # booting QEMUs at the same time (which is normal in this
     # repository) that crossed 300 and the picture was simply missing,
-    # with the runner saying "no screenshot" and no reason.
-    timeout 420 qemu-system-x86_64 -kernel "$TMPD/k0.mb" -m 256 \
+    # with the runner saying "no screenshot" and no reason. 420 was not
+    # enough either: the run that drives a mouse spends sixteen seconds
+    # on the script alone, and a boot to `wm: hold` under a competing
+    # suite has been seen at three hundred and eighty.
+    timeout 600 qemu-system-x86_64 -kernel "$TMPD/k0.mb" -m 256 \
         -append "$GBASE $extra" -serial "file:$out" -display none -no-reboot \
         -vga std -monitor "unix:$sock,server,nowait" \
         -drive "file=$TMPD/gl-$name.img,format=raw,if=ide,index=0" \
