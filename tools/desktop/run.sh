@@ -469,6 +469,33 @@ if [ -z "$WX" ] || [ -z "$EX" ] || [ -z "$AX" ]; then
     grep -a 'settings: rect' "$P" | sed 's/^/        /' | head -8
 else
     ok "the settings report where their taskbar widgets are (win $WX,$WY  edge $EX,$EY  apply $AX,$AY)"
+    # A WIDGET OUTSIDE ITS WINDOW IS DRAWN NOWHERE, NOT DRAWN WRONG.
+    #
+    # `wlib` lays a widget out at the position the box gives it and does
+    # not clamp it. If the page is taller than the window, the last
+    # controls are simply placed past the bottom edge: no error, no
+    # warning, nothing on the screen, and no way to click them. Round
+    # LOOK put two more controls on the Darstellung page and pushed
+    # Apply out that way, and the only symptom was six assertions in
+    # this section failing for what looked like an unrelated reason.
+    #
+    # The inner height of a window is its height minus the border and
+    # the title bar the server draws (2 + 22).
+    WH=$(rect win h)
+    INNER=$((WH - 24))
+    OVER=0
+    while read -r nm ry rh; do
+        [ "$nm" = win ] && continue
+        [ -z "$ry" ] && continue
+        [ $((ry + rh)) -gt "$INNER" ] && {
+            echo "        outside: $nm ends at $((ry + rh)), the window is $INNER high"
+            OVER=$((OVER + 1)); }
+    done < <(grep -a 'settings: rect name=' "$P" \
+             | grep -oE 'name=[a-z]+ x=[0-9]+ y=[0-9]+ w=[0-9]+ h=[0-9]+' \
+             | sed -E 's/name=([a-z]+) x=[0-9]+ y=([0-9]+) w=[0-9]+ h=([0-9]+)/\1 \2 \3/' \
+             | sort -u)
+    num "every reported widget is INSIDE its window (a widget outside it cannot be clicked)" \
+        "$OVER" eq 0
     IX=$((WX + 2)); IY=$((WY + 22))
     CX=$((IX + EX + EW / 2)); CY=$((IY + EY + EH / 2))
     # the menu opens at the chooser's own x and directly under it
