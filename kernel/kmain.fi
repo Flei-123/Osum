@@ -33,6 +33,8 @@ import trap
 import kbd
 import user
 import power
+import pwr
+import batt
 import sched
 import tasks
 import proc
@@ -114,6 +116,9 @@ const P_STEAL: u64 = 9
 const P_FORK: u64 = 10
 const P_CAPS: u64 = 12
 // RUNDE K13: die beiden Programmnummern dieser Runde (kernel/uprog.fi).
+const P_PWR: u64 = 45
+const P_PWRIDLE: u64 = 46
+const P_PWRLOAD: u64 = 47
 const P_USER: u64 = 16
 const P_ZOMBIE: u64 = 17
 const P_FB: u64 = 13
@@ -321,6 +326,23 @@ fn kernel_main(mbi: u64, vectors: u64, state: u64, kernel_end: u64,
     //     Ohne das Wort `k13` eine Zeile und sonst nichts.
     users(state)
 
+    // 7b-ter. RUNDE K18: DIE ENERGIESCHICHT UND IHRE MESSUNG.
+    //     Hier und nicht weiter unten, und der Grund ist derselbe wie
+    //     eine Zeile darueber bei K13: das hier braucht KEIN
+    //     Dateisystem, keine Platte und keinen zweiten Prozessor. Die
+    //     ACPI-Tabellen findet `acpi.table_count` selbst, wenn `find`
+    //     noch nicht gelaufen ist -- genau dafuer hat Runde K13 den
+    //     nachtraeglichen RSDP-Suchlauf in `acpi.table` eingebaut.
+    //
+    //     IN DER ERSTEN FASSUNG STAND ES HINTER `smp.stage`, und dort
+    //     kam das Messprogramm aus seinem `nanosleep` nicht zurueck:
+    //     `smp.stage` laesst die Rechenaufgaben seiner eigenen Messung
+    //     laufen, und der Schlaefer wartete hinter ihnen, bis die Frist
+    //     von `wait_for` abgelaufen war. Zwanzig Sekunden, Ausgang -2,
+    //     und keine einzige Zahl. Weiter oben ist das Bild ruhig.
+    power_stage(state)
+    power_test(state)
+
     // 7c. the file system.
     filesystem(state)
 
@@ -353,6 +375,7 @@ fn kernel_main(mbi: u64, vectors: u64, state: u64, kernel_end: u64,
     //     kernel behaves as it did; under `-smp 4` it starts the other
     //     three and hands them work.
     smp.stage(state)
+
 
     // 7i. RUNDE K12: ein Wirt fuer fremde Betriebssysteme. Hier und
     //     nicht frueher, aus drei Gruenden: der Rahmenverwalter muss
@@ -735,6 +758,15 @@ fn gfx_hold(state: u64) {
         if fb.want(state, fb.M_PATTERN) {
             pattern(state, (&s_pat[0]) as u64, (&s_pat2[0]) as u64)
         }
+        // RUNDE K18: das Pruefbild der Helligkeit. HIER und nicht oben in
+        // `power_stage`, und das ist gemessen und nicht ueberlegt: dort
+        // gemalt, war es im Bildschirmfoto nicht mehr zu finden -- die
+        // Konsole schreibt zwischen `power_stage` und dem Stillhalten
+        // noch drei Dutzend Zeilen auf denselben Schirm und rollt ihn
+        // dabei. Die Kernelmeldung stimmte trotzdem (px_a=0xc86432), das
+        // Bild war leer. Genau die Art Unterschied, wegen der in diesem
+        // Projekt im BILD nachgemessen wird und nicht nur im Bericht.
+        power_screen(state)
         fb.flush(state)
     }
     // STILLGEHALTEN WIRD AUCH OHNE BILDSCHIRM, und das ist der Grund,
@@ -1121,10 +1153,46 @@ fn processes(state: u64) {
         serial.nl()
         return
     }
-    let before: u64 = mem.frames_free(state)
+    // DIE ZAEHLUNG BEGINNT HINTER `map_programs` UND NICHT DAVOR.
+    //
+    // Das war bis Runde K18 dasselbe und ist es jetzt nicht mehr.
+    // `map_programs` macht die Seiten von `uprog.fi` fuer Ring 3
+    // erreichbar, EINMAL fuer den ganzen Lauf, und es nimmt sich dafuer
+    // je angefangener 2-MiB-Kachel eine Seitentabelle. Solange `.utext`
+    // in EINE Kachel passte, war das die feste Tabelle aus der
+    // Datenregion und kostete keinen Rahmen -- der Kommentar bei
+    // `proc.map_programs` sagt das seit Runde K6 ausdruecklich voraus:
+    // "Solange `.utext` in eine Kachel passt, aendert diese Schleife
+    // nichts an dem, was die Runden 59 bis K6 gemessen haben."
+    //
+    // RUNDE K18 HAT DREI PROGRAMME DAZUGELEGT, und damit reicht `.utext`
+    // von 0x1FC000 bis 0x20A000 -- ueber die Kachelgrenze bei 0x200000.
+    // Die zweite Kachel bekommt einen eigenen Rahmen, und der wird nie
+    // freigegeben, weil er den ganzen Lauf gebraucht wird.
+    //
+    // Die Zusage, um die es hier geht, heisst "jeder Adressraum ist
+    // zurueckgekommen". Ein Rahmen, der absichtlich stehen bleibt, ist
+    // kein verlorener Adressraum -- er stand nur bis hierher zufaellig
+    // ausserhalb der Messung, weil `.utext` zufaellig in eine Kachel
+    // passte. Die Klammer umschliesst jetzt genau das, worueber die
+    // Zusage spricht.
     serial.puts((&s_pages[0]) as u64)
+    let vorher_map: u64 = mem.frames_free(state)
     serial.dec(proc.map_programs(state))
     serial.nl()
+    // EIGENE ZEILE, NICHT ANGEHAENGT. Die erste Fassung schrieb
+    // "proc: pages=14  ptframes=1" -- und `tools/caps/run.sh` liest die
+    // Seitenzahl mit `sed 's/.*=//'` heraus. `.*` ist GIERIG: aus der
+    // laengeren Zeile wurde die 1 statt der 14, und zwei Zusagen einer
+    // fremden Runde fielen um. Genau derselbe Fehler steht als Warnung
+    // im Kopf von `tools/k15/run.sh`. Wer eine Zeile ergaenzt, die
+    // andere lesen, ergaenzt sie nicht -- er schreibt eine neue.
+    let kachelrahmen: u64 = vorher_map -% mem.frames_free(state)
+    var s_kachel: [u8; 18] = "proc: ptframes=\0\0\0"
+    serial.puts((&s_kachel[0]) as u64)
+    serial.dec(kachelrahmen)
+    serial.nl()
+    let before: u64 = mem.frames_free(state)
 
     // 1. one process: it says who it is, and its exit code is its pid.
     let one: u64 = proc.create(state, P_HELLO, 7, 2)
@@ -2175,6 +2243,313 @@ fn keyboard(state: u64) {
 
 // ------------------------------------------------------------- ring 3
 
+// ==================================================== RUNDE K18
+//
+// DIE ENERGIESCHICHT WIRD ANGESCHALTET UND MELDET, WAS SIE VORFINDET.
+//
+// Die Reihenfolge ist nicht beliebig:
+//
+//   1. `pwr.probe` fragt den PROZESSOR (CPUID und ein paar MSR): gibt es
+//      SpeedStep, HWP, Turbo, MONITOR/MWAIT, eine Temperaturanzeige, und
+//      welche Taktstufen nennt die Maschine?
+//   2. `batt.scan` fragt die FIRMWARE (die ACPI-Tabellen): gibt es einen
+//      Akku, ein Netzteil, eine Thermalzone?
+//   3. Was dabei an Temperatur herauskam, wird in die Energieschicht
+//      gereicht. Die beiden Dateien importieren einander NICHT -- ein
+//      Modulgraph mit einem Kreis darin uebersetzt nicht, und ein Wort
+//      hier ist billiger als eine dritte Datei dazwischen.
+//   4. Erst dann wird ein Profil gesetzt. "Ausgeglichen" ist der
+//      Anfangswert, wie bei jedem System, das diese drei Schalter hat.
+//
+// Alles, was gemeldet wird, ist eine Zahl in der Form `pwr: NAME=WERT`
+// -- der Testlauf liest sie zeilenweise, und was der Kernel nicht
+// wirklich gelesen hat, meldet er als `ok=0` statt als Null in Grad
+// Celsius.
+fn power_stage(state: u64) {
+    var s_off: [u8; 14] = "pwr: skipped\0\0"
+    if (kstate.get(state, kstate.MODE) & kstate.M_NOPWR) != 0 {
+        serial.puts((&s_off[0]) as u64)
+        serial.nl()
+        return
+    }
+    pwr.probe(state)
+    batt.scan(state)
+    // Die Thermalzone aus den Tabellen in die Energieschicht reichen.
+    if batt.value(state, batt.BT_TZOK) != 0 {
+        kstate.set(state, kstate.K18_OFF + pwr.PW_TZRAW,
+            batt.value(state, batt.BT_TZ))
+        kstate.set(state, kstate.K18_OFF + pwr.PW_CAPS,
+            pwr.caps(state) | pwr.C_ACPITZ)
+    }
+    // `pwrhot` taeuscht eine Temperatur ueber der Schwelle vor. NUR zum
+    // Fehlersuchen -- die Abnahme benutzt dafuer eine echte SSDT.
+    if (kstate.get(state, kstate.MODE) & kstate.M_PWRHOT) != 0 {
+        kstate.set(state, kstate.K18_OFF + pwr.PW_TZRAW, 3632) // 90 Grad
+    }
+    pwr.set_profile(state, pwr.PROF_BALANCED)
+    pwr.throttle_check(state)
+    power_report(state)
+}
+
+// 4.6 DER BILDSCHIRM, AN EINER AUSGERECHNETEN STELLE GEMESSEN.
+//
+// Ein Pruefbild von 64 mal 64 Bildpunkten bei (100,100), in einer Farbe,
+// die sich halbieren laesst, ohne dass eine Rundung ins Spiel kommt:
+// 200/100/50 wird zu 100/50/25 und wieder zurueck zu 200/100/50. Der
+// Kernel liest den Bildpunkt bei (120,120) aus dem Rahmenpuffer ZURUECK
+// und meldet ihn -- und `tools/k18/run.sh` prueft DIESELBE Stelle noch
+// einmal im BILDSCHIRMFOTO.
+//
+// DAS IST DIE LEHRE AUS RUNDE K7B, und sie steht in der Aufgabe dieser
+// Runde noch einmal: dort schien Text zu 87 Prozent zu stimmen, waehrend
+// jeder Buchstabe fehlte -- die 87 Prozent waren schwarzer Hintergrund.
+// Also wird hier keine Flaeche gezaehlt und kein Mittelwert gebildet,
+// sondern EIN Bildpunkt an EINER Stelle gegen EINEN ausgerechneten Wert.
+const PX_X: u64 = 120
+const PX_Y: u64 = 120
+const PX_COLOR: u64 = 13132850 // 0xC86432 = 200,100,50
+
+fn power_screen(state: u64) {
+    var n_a: [u8; 6] = "px_a\0\0"
+    var n_b: [u8; 6] = "px_b\0\0"
+    var n_c: [u8; 6] = "px_c\0\0"
+    var n_d: [u8; 6] = "px_d\0\0"
+    var n_e: [u8; 6] = "px_e\0\0"
+    var n_no: [u8; 9] = "px_none\0\0"
+    // OHNE DAS WORT `pwr` WIRD HIER GAR NICHTS GEMALT.
+    //
+    // Das fehlte in der ersten Fassung, und `tools/gfx/run.sh` hat es
+    // gefunden: dort wird der GANZE Bildschirm gegen den seriellen
+    // Mitschnitt gehalten, Bildpunkt fuer Bildpunkt -- und ein
+    // Pruefbild von 64 mal 64, das in JEDEM `gfx`-Lauf ueber der
+    // Konsole lag, machte daraus "14757 Bildpunkte falsch". Eine Runde
+    // darf das Bild einer anderen nicht bemalen, nur weil sie
+    // uebersetzt wurde.
+    if (kstate.get(state, kstate.MODE) & kstate.M_PWR) == 0 {
+        return
+    }
+    if !fb.ready(state) {
+        pnum((&n_no[0]) as u64, 1)
+        return
+    }
+    // DIE KONSOLE WIRD FUER DIE DAUER DER MESSUNG STUMMGESCHALTET, und
+    // das ist keine Kosmetik: jede Zeile, die auf den Schirm geht, ROLLT
+    // ihn um sechzehn Bildpunkte. In der ersten Fassung stand das
+    // Pruefbild deshalb in jedem Lauf woanders -- bei (100,68), wenn
+    // eine Zeile danach kam, und bei (100,36), wenn es drei waren. Die
+    // Farben stimmten auf den Punkt, die Stelle nicht, und ein Test, der
+    // an einer festen Stelle nachsieht, haette das fuer einen Fehler der
+    // Helligkeit gehalten. Ab hier geht alles nur noch auf die serielle
+    // Leitung, und das Bild steht still.
+    let echo_vorher: bool = fb.echo_on(state)
+    fb.set_echo(state, false)
+    fb.fill(state, 100, 100, 64, 64, PX_COLOR)
+    fb.flush(state)
+    phex((&n_a[0]) as u64, fb.get_pixel(state, PX_X, PX_Y) & 0xFFFFFF)
+
+    if (kstate.get(state, kstate.MODE) & kstate.M_PWRDIM) != 0 {
+        pwr.set_bright(state, 50)
+        phex((&n_b[0]) as u64, fb.get_pixel(state, PX_X, PX_Y) & 0xFFFFFF)
+        // Und wieder hoch. 200*50/100*100/50 ist wieder 200 -- die Farbe
+        // ist mit Absicht so gewaehlt, dass die Ganzzahlrechnung hier
+        // nichts verliert. Bei 201 waere es 200, und dann muesste diese
+        // Zusage anders lauten.
+        pwr.set_bright(state, 100)
+        phex((&n_c[0]) as u64, fb.get_pixel(state, PX_X, PX_Y) & 0xFFFFFF)
+        pwr.set_bright(state, 50)
+    }
+    if (kstate.get(state, kstate.MODE) & kstate.M_PWRBLANK) != 0 {
+        pwr.blank(state)
+        phex((&n_d[0]) as u64, fb.get_pixel(state, PX_X, PX_Y) & 0xFFFFFF)
+        pnum((&n_e[0]) as u64, pwr.value(state, pwr.PW_BLANKS))
+    }
+    // EIN EIGENES STILLHALTEN FUER DIESE RUNDE, und der Grund ist
+    // gemessen: das Stillhalten von Runde K7 (`fbhold`) meldet sich mit
+    // einer Zeile, die auf DEMSELBEN Schirm landet -- die Konsole rollt,
+    // und das Pruefbild war im Bildschirmfoto nicht mehr zu finden,
+    // obwohl der Kernel es beim Zurueckesen noch sah. Also: erst die
+    // Marke, dann malen, dann warten, und dazwischen sagt niemand mehr
+    // etwas. Das Bild, das der Testlaeufer aufnimmt, ist genau das, was
+    // hier gemalt wurde.
+    fb.flush(state)
+    var s_shot: [u8; 12] = "pwr: shot\0\0\0"
+    serial.puts((&s_shot[0]) as u64)
+    serial.nl()
+    let hz: u64 = apic.tsc_hz(state)
+    if hz != 0 {
+        let bis: u64 = apic.tsc() + hz * 5
+        while apic.tsc() < bis {
+        }
+    }
+    var s_go: [u8; 12] = "pwr: shotgo\0"
+    serial.puts((&s_go[0]) as u64)
+    serial.nl()
+    fb.set_echo(state, echo_vorher)
+}
+
+fn pnum(name: u64, v: u64) {
+    var s_p: [u8; 6] = "pwr: \0"
+    var s_e: [u8; 2] = "=\0"
+    serial.puts((&s_p[0]) as u64)
+    serial.puts(name)
+    serial.puts((&s_e[0]) as u64)
+    serial.dec(v)
+    serial.nl()
+}
+
+fn phex(name: u64, v: u64) {
+    var s_p: [u8; 6] = "pwr: \0"
+    var s_e: [u8; 2] = "=\0"
+    serial.puts((&s_p[0]) as u64)
+    serial.puts(name)
+    serial.puts((&s_e[0]) as u64)
+    serial.hex(v)
+    serial.nl()
+}
+
+fn power_report(state: u64) {
+    var n_caps: [u8; 5] = "caps\0"
+    var n_prof: [u8; 8] = "profile\0"
+    var n_rat: [u8; 7] = "ratios\0"
+    var n_rsrc: [u8; 10] = "ratiosrc\0\0"
+    var n_pc: [u8; 8] = "perfctl\0"
+    var n_pb: [u8; 9] = "perfback\0"
+    var n_hw: [u8; 7] = "hwpreq\0"
+    var n_hb: [u8; 8] = "hwpback\0"
+    var n_mi: [u8; 5] = "misc\0"
+    var n_mb: [u8; 9] = "miscback\0"
+    var n_mo: [u8; 9] = "miscorig\0"
+    var n_cst: [u8; 7] = "cstate\0"
+    var n_tmp: [u8; 5] = "temp\0"
+    var n_tok: [u8; 8] = "tempok\0\0"
+    var n_tjm: [u8; 6] = "tjmax\0"
+    var n_thr: [u8; 10] = "throttles\0"
+    var n_ap: [u8; 8] = "applies\0"
+    var n_tz: [u8; 6] = "tzraw\0"
+    phex((&n_caps[0]) as u64, pwr.caps(state))
+    pnum((&n_prof[0]) as u64, pwr.cur_profile(state))
+    phex((&n_rat[0]) as u64, pwr.value(state, pwr.PW_RATIOS))
+    pnum((&n_rsrc[0]) as u64, pwr.value(state, pwr.PW_RATIOSRC))
+    phex((&n_pc[0]) as u64, pwr.value(state, pwr.PW_PERFCTL))
+    phex((&n_pb[0]) as u64, pwr.value(state, pwr.PW_PERFBACK))
+    phex((&n_hw[0]) as u64, pwr.value(state, pwr.PW_HWPREQ))
+    phex((&n_hb[0]) as u64, pwr.value(state, pwr.PW_HWPBACK))
+    phex((&n_mi[0]) as u64, pwr.value(state, pwr.PW_MISC))
+    phex((&n_mb[0]) as u64, pwr.value(state, pwr.PW_MISCBACK))
+    phex((&n_mo[0]) as u64, pwr.value(state, pwr.PW_MISCORIG))
+    pnum((&n_cst[0]) as u64, pwr.value(state, pwr.PW_CSTATE))
+    pnum((&n_tmp[0]) as u64, pwr.temp_c(state))
+    pnum((&n_tok[0]) as u64, pwr.value(state, pwr.PW_TEMPOK))
+    pnum((&n_tjm[0]) as u64, pwr.value(state, pwr.PW_TJMAX))
+    pnum((&n_thr[0]) as u64, pwr.value(state, pwr.PW_THROTTLES))
+    pnum((&n_ap[0]) as u64, pwr.value(state, pwr.PW_APPLIES))
+    pnum((&n_tz[0]) as u64, pwr.value(state, pwr.PW_TZRAW))
+    // UND DIE AKKUWERTE. Sie stehen hier, damit der Testlauf die
+    // Meldung des KERNELS gegen das halten kann, was `/bin/power` aus
+    // RING 3 ueber `syscall` herausbekommt. Gehen die beiden
+    // auseinander, ist die Schnittstelle kaputt -- und ohne diese Zeilen
+    // gaebe es die eine Haelfte des Vergleichs gar nicht.
+    var n_bpres: [u8; 11] = "batpresent\0"
+    var n_bpct: [u8; 8] = "percent\0"
+    var n_bmin: [u8; 8] = "minutes\0"
+    var n_bre: [u8; 10] = "batremain\0"
+    var n_bfull: [u8; 8] = "batfull\0"
+    var n_brt: [u8; 8] = "batrate\0"
+    var n_bst: [u8; 9] = "batstate\0"
+    var n_bac: [u8; 3] = "ac\0"
+    var n_bacok: [u8; 5] = "acok\0"
+    var n_btab: [u8; 7] = "tables\0"
+    var vor: u64 = 0
+    if batt.present(state) {
+        vor = 1
+    }
+    pnum((&n_bpres[0]) as u64, vor)
+    pnum((&n_bpct[0]) as u64, batt.percent(state))
+    pnum((&n_bmin[0]) as u64, batt.minutes(state))
+    pnum((&n_bre[0]) as u64, batt.value(state, batt.BT_REMAIN))
+    pnum((&n_bfull[0]) as u64, batt.value(state, batt.BT_FULL))
+    pnum((&n_brt[0]) as u64, batt.value(state, batt.BT_RATE))
+    pnum((&n_bst[0]) as u64, batt.value(state, batt.BT_STATE))
+    var netz: u64 = 0
+    if batt.ac_online(state) {
+        netz = 1
+    }
+    var nok: u64 = 0
+    if batt.ac_known(state) {
+        nok = 1
+    }
+    pnum((&n_bac[0]) as u64, netz)
+    pnum((&n_bacok[0]) as u64, nok)
+    pnum((&n_btab[0]) as u64, batt.value(state, batt.BT_TABLES))
+}
+
+// RUNDE K18: DIE ENERGIESCHICHT, GEMESSEN AUS RING 3.
+//
+// Warum aus Ring 3 und nicht aus dem Kernel: eine Zahl, die den Weg
+// durch `syscall` gegangen ist, ist wirklich durch die Schnittstelle
+// gekommen -- und die Schnittstelle ist das, was `/bin/power` benutzt.
+// Der Kernel meldet dieselben Werte oben in `power_report`; dass beide
+// Wege dasselbe sagen, ist eine der Zusagen dieser Runde.
+//
+// Danach zweimal dasselbe mit verschiedener Beschaeftigung: ein
+// Programm, das SCHLAEFT (dann laeuft der Leerlaufpfad), und eines, das
+// RECHNET (dann laeuft er nicht). Der Unterschied zwischen den beiden
+// Zaehlerstaenden ist die Messung von 4.2 -- und er kommt aus der
+// Beschaeftigung der Maschine, nicht aus einem Schalter.
+fn power_test(state: u64) {
+    var s_skip: [u8; 19] = "k18: skipped\0\0\0\0\0\0\0"
+    var s_beg: [u8; 12] = "k18: begin\0\0"
+    var s_exit: [u8; 18] = "k18: ring3 exit=\0\0"
+    var n_mA: [u8; 12] = "mwaits_load\0"
+    var n_hA: [u8; 10] = "hlts_load\0"
+    var n_iA: [u8; 14] = "idleruns_load\0"
+    var n_mB: [u8; 12] = "mwaits_idle\0"
+    var n_hB: [u8; 10] = "hlts_idle\0"
+    var n_iB: [u8; 14] = "idleruns_idle\0"
+    if (kstate.get(state, kstate.MODE) & kstate.M_PWR) == 0 {
+        serial.puts((&s_skip[0]) as u64)
+        serial.nl()
+        return
+    }
+    serial.puts((&s_beg[0]) as u64)
+    serial.nl()
+    let t: u64 = proc.create(state, P_PWR, 0, 2)
+    let e: u64 = wait_for(state, t)
+    serial.puts((&s_exit[0]) as u64)
+    serial.dec(e)
+    serial.nl()
+
+    // 1. RECHNEN. Solange das laeuft, ist der Kern beschaeftigt.
+    let m0: u64 = pwr.value(state, pwr.PW_MWAITS)
+    let h0: u64 = pwr.value(state, pwr.PW_HLTS)
+    let i0: u64 = pwr.value(state, pwr.PW_IDLERUNS)
+    let l: u64 = proc.create(state, P_PWRLOAD, 4000000, 2)
+    wait_for(state, l)
+    kpair((&n_mA[0]) as u64, pwr.value(state, pwr.PW_MWAITS) -% m0)
+    kpair((&n_hA[0]) as u64, pwr.value(state, pwr.PW_HLTS) -% h0)
+    kpair((&n_iA[0]) as u64, pwr.value(state, pwr.PW_IDLERUNS) -% i0)
+
+    // 2. SCHLAFEN. Jetzt hat der Kern nichts zu tun.
+    let m1: u64 = pwr.value(state, pwr.PW_MWAITS)
+    let h1: u64 = pwr.value(state, pwr.PW_HLTS)
+    let i1: u64 = pwr.value(state, pwr.PW_IDLERUNS)
+    let d: u64 = proc.create(state, P_PWRIDLE, 800, 2)
+    wait_for(state, d)
+    kpair((&n_mB[0]) as u64, pwr.value(state, pwr.PW_MWAITS) -% m1)
+    kpair((&n_hB[0]) as u64, pwr.value(state, pwr.PW_HLTS) -% h1)
+    kpair((&n_iB[0]) as u64, pwr.value(state, pwr.PW_IDLERUNS) -% i1)
+}
+
+fn kpair(name: u64, v: u64) {
+    var s_h: [u8; 6] = "k18: \0"
+    var s_m: [u8; 4] = " = \0"
+    serial.puts((&s_h[0]) as u64)
+    serial.puts(name)
+    serial.puts((&s_m[0]) as u64)
+    serial.dec(v)
+    serial.nl()
+}
+
 fn ring3(state: u64) {
     var s_off: [u8; 20] = "ring3: skipped\0\0\0\0\0\0"
     var s_bad: [u8; 15] = "ring3: FAILED\0\0"
@@ -2435,6 +2810,35 @@ fn mode_of(cmd: u64) -> u64 {
     }
     if find(cmd, (&wni[0]) as u64, 8) != 0 {
         mode = mode | kstate.M_WIGNOIDX
+    }
+    // RUNDE K18: die Energieschicht und ihre Gegenproben.
+    var pww: [u8; 4] = "pwr\0"
+    var pwnc: [u8; 10] = "nocstates\0"
+    var pwno: [u8; 6] = "nopwr\0"
+    var pwho: [u8; 7] = "pwrhot\0"
+    var pwnb: [u8; 8] = "noblank\0"
+    if find(cmd, (&pww[0]) as u64, 3) != 0 {
+        mode = mode | kstate.M_PWR
+    }
+    if find(cmd, (&pwnc[0]) as u64, 9) != 0 {
+        mode = mode | kstate.M_NOCSTATES
+    }
+    if find(cmd, (&pwno[0]) as u64, 5) != 0 {
+        mode = mode | kstate.M_NOPWR
+    }
+    if find(cmd, (&pwho[0]) as u64, 6) != 0 {
+        mode = mode | kstate.M_PWRHOT
+    }
+    if find(cmd, (&pwnb[0]) as u64, 7) != 0 {
+        mode = mode | kstate.M_NOBLANK
+    }
+    var pwd: [u8; 7] = "pwrdim\0"
+    var pwbl: [u8; 9] = "pwrblank\0"
+    if find(cmd, (&pwd[0]) as u64, 6) != 0 {
+        mode = mode | kstate.M_PWRDIM
+    }
+    if find(cmd, (&pwbl[0]) as u64, 8) != 0 {
+        mode = mode | kstate.M_PWRBLANK
     }
     if find(cmd, (&unixw[0]) as u64, 4) != 0 {
         mode = mode | M_UNIX
