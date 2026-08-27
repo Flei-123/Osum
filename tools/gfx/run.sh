@@ -187,7 +187,7 @@ echo "== 3. die Fensterplaetze und die Speicherkarte von kdata =="
 # Belegungsliste.  Laufen die Zahlen auseinander, nehmen sich zwei Treiber
 # gegenseitig die Abbildung weg -- und das faellt erst auf, wenn beide
 # gleichzeitig gebraucht werden.
-w_apic=$(grep -E '^const WIN_SLOTS|^const WIN_FIRST|^const WIN_VIRT|^const HUGE_SIZE' kernel/apic.fi | sed 's/ *\/\/.*//' | sort)
+w_apic=$(grep -E '^const WIN_SLOTS|^const WIN_FIRST|^const WIN_VIRT|^const HUGE_SIZE' kernel/arch/x86_64/apic.fi | sed 's/ *\/\/.*//' | sort)
 w_fb=$(grep -E '^const WIN_SLOTS|^const WIN_FIRST|^const WIN_VIRT|^const HUGE_SIZE' kernel/fb.fi | sed 's/ *\/\/.*//' | sort)
 if [ -n "$w_apic" ] && [ "$w_apic" = "$w_fb" ]; then
     ok "WIN_SLOTS, WIN_FIRST, WIN_VIRT und HUGE_SIZE stehen in beiden gleich"
@@ -198,7 +198,7 @@ fi
 # Und die Belegungsliste: fb.fi rechnet sie sich aus pci.K2_SCALARS und
 # apic.S_WIN selbst zusammen, weil es pci.fi nicht einbinden darf.
 k2=$(grep -E '^const K2_SCALARS' kernel/pci.fi | grep -oE '0x[0-9A-Fa-f]+')
-sw=$(grep -E '^const S_WIN' kernel/apic.fi | grep -oE '0x[0-9A-Fa-f]+')
+sw=$(grep -E '^const S_WIN' kernel/arch/x86_64/apic.fi | grep -oE '0x[0-9A-Fa-f]+')
 fbl=$(grep -E '^const WIN_LIST' kernel/fb.fi | sed 's/.*= *//; s/ *\/\/.*//')
 if [ "$fbl" = "$k2 + $sw" ]; then
     ok "fb.WIN_LIST ist pci.K2_SCALARS + apic.S_WIN ($k2 + $sw)"
