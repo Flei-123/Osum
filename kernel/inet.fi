@@ -63,12 +63,14 @@ import pci
 import net.wire
 import net.tcp
 import net.stack
+import netmon
 
 export {
     init, ready, pump, netd_body, wake, configure, readdr, us, set_task,
     ip, mask, gw, mac_at, stat, pumps, frames_in, frames_out,
     bounce, saddr,
     tcp_stat, task_slot, print_state,
+    card_octets,
     sock_new, sock_free, sock_kind, sock_handle,
     sock_bind, sock_listen, sock_accept, sock_connect,
     sock_send, sock_recv, sock_sendto, sock_recvfrom,
@@ -199,6 +201,18 @@ fn bounce(state: u64) -> u64 {
 
 fn saddr(state: u64) -> u64 {
     return kstate.get(state, sc(S_SADDR))
+}
+
+// ROUND NETMON: what the CARD counted, which is the only number in this
+// kernel that is not derived from anything. `which` 0 = out, 1 = in.
+// The per-process counters are checked against it: their sum plus the
+// system bucket has to come out at this, and `tools/netmon/run.sh` says
+// by how much it does not.
+fn card_octets(state: u64, which: u64) -> u64 {
+    if which == 0 {
+        return virtio.tx_octets(state)
+    }
+    return virtio.rx_octets(state)
 }
 
 fn task_slot(state: u64) -> u64 {
@@ -413,6 +427,10 @@ fn pump(state: u64) -> u64 {
         } else {
             learn(state, frame, len)
             icmp_catch(state, frame, len)
+            // ROUND NETMON: the frame is classified BEFORE it goes into
+            // the stack, because the stack may consume it and because
+            // this is the only place it exists as octets with a length.
+            netmon.frame_seen(state, frame, len, false)
             stack.net_input(s, frame as *mut u8, len as usize, now)
             virtio.rx_recycle(state, slot)
             kstate.add(state, sc(S_IN), 1)
@@ -434,6 +452,7 @@ fn pump(state: u64) -> u64 {
             if len == 0 {
                 n = PUMP_BATCH
             } else {
+                netmon.frame_seen(state, out, len as u64, true)
                 virtio.tx_frame(state, out, len as u64)
                 kstate.add(state, sc(S_OUT), 1)
                 work = work + 1
@@ -568,6 +587,10 @@ fn arp_ask(state: u64, target: u64) {
     wire.arp_build(&f[14], wire.ARP_REQUEST, &me[0],
         (ip(state) & 0xFFFFFFFF) as u32, &zero[0],
         (target & 0xFFFFFFFF) as u32)
+    // ROUND NETMON: the same reason as in `icmp_send`. An ARP request
+    // belongs to nobody -- it goes into the system bucket, which is
+    // what that bucket is for.
+    netmon.frame_seen(state, (&f[0]) as u64, 14 + wire.ARP_LEN as u64, true)
     virtio.tx_frame(state, (&f[0]) as u64, 14 + wire.ARP_LEN as u64)
 }
 
@@ -667,6 +690,14 @@ fn icmp_send(state: u64, dst: u64, body: u64, n: u64) -> u64 {
     wire.ip_build(&f[14], (seq & 0xFFFF) as u16, wire.IP_ICMP,
         (ip(state) & 0xFFFFFFFF) as u32, (dst & 0xFFFFFFFF) as u32,
         n as usize)
+    // ROUND NETMON: ICMP IS THE ONE PATH THAT DOES NOT GO THROUGH THE
+    // PUMP. The stack cannot send an echo request, so this function
+    // builds the frame and hands it to the card itself -- which means
+    // `pump` never sees it and the outgoing side of a `ping` would be
+    // counted as zero while its answers were counted in full. The first
+    // measured run of this round showed exactly that: `ping  192 <- 192
+    // payload, wire 0 <- 294`. Here is the missing half.
+    netmon.frame_seen(state, (&f[0]) as u64, 14 + 20 + n, true)
     if !virtio.tx_frame(state, (&f[0]) as u64, 14 + 20 + n) {
         return errno.neg(errno.E_AGAIN)
     }
@@ -740,6 +771,22 @@ fn sock_new(state: u64, kind: u64) -> u64 {
             kstate.set(state, so_at(i) + SO_H, NOHANDLE)
             kstate.set(state, so_at(i) + SO_PORT, 0)
             kstate.set(state, so_at(i) + SO_FLAGS, 0)
+            // ROUND NETMON: a slot that changes hands starts at zero.
+            // Here and not in `sys.fi`: this is the one function that
+            // knows a slot was TAKEN, and a record left over from the
+            // last owner would put that owner's octets on this one.
+            netmon.sock_gone(state, i)
+            // ROUND NETMON: AND IT GETS AN OWNER HERE, not only in
+            // `sys.do_socket`. The kernel's own network service
+            // (`netsvc.fi`) opens sockets by calling this file
+            // directly, never through a system call -- and a socket
+            // with no owner puts every one of its frames in the system
+            // bucket. The first measured run of the throughput case
+            // showed exactly that: `hit=0 miss=774`. `sys.fi` writes
+            // the same task in again a moment later, which costs four
+            // stores and keeps the two paths independent.
+            netmon.sock_open(state, i, sched.current(state),
+                sched.tget(state, sched.current(state), sched.T_PID), kind)
             kstate.add(state, sc(S_SOCKS), 1)
             return i
         }
@@ -752,6 +799,10 @@ fn sock_free(state: u64, i: u64) {
     if i >= SOCK_MAX {
         return
     }
+    // ROUND NETMON: the live record goes, the process totals stay. What
+    // a connection did is part of what its program used; what it did it
+    // WITH is not kept a second longer than the connection lives.
+    netmon.sock_gone(state, i)
     kstate.set(state, so_at(i) + SO_KIND, SK_FREE)
     kstate.set(state, so_at(i) + SO_H, NOHANDLE)
     kstate.set(state, so_at(i) + SO_PORT, 0)
@@ -776,6 +827,7 @@ fn sock_bind(state: u64, i: u64, port: u64) -> u64 {
         kstate.set(state, so_at(i) + SO_H, h as u64)
     }
     kstate.set(state, so_at(i) + SO_PORT, port)
+    netmon.sset(state, i, netmon.S_LPORT, port)
     return 0
 }
 
@@ -825,6 +877,20 @@ fn sock_accept(state: u64, i: u64) -> u64 {
     }
     kstate.set(state, so_at(n) + SO_H, h as u64)
     kstate.set(state, so_at(n) + SO_FLAGS, SF_CONNECTED)
+    // ROUND NETMON: the accepted connection carries the port of the
+    // listener and the address of whoever called. `sys.do_accept` is
+    // what gives it an owner; the numbers belong here, where the handle
+    // is.
+    let f3: u64 = hold(state)
+    let t2: *mut tcp.Tcp = stack.net_tcp(st(state))
+    let alp: u64 = tcp.tcp_local_port(t2, h) as u64
+    let aip: u64 = tcp.tcp_peer_ip(t2, h) as u64
+    let apt: u64 = tcp.tcp_peer_port(t2, h) as u64
+    drop_lock(state, f3)
+    kstate.set(state, so_at(n) + SO_PORT, alp)
+    netmon.sset(state, n, netmon.S_LPORT, alp)
+    netmon.sset(state, n, netmon.S_RADDR, aip)
+    netmon.sset(state, n, netmon.S_RPORT, apt)
     return n
 }
 
@@ -851,6 +917,20 @@ fn sock_connect(state: u64, i: u64, addr: u64, port: u64) -> u64 {
         return errno.neg(errno.E_NFILE)
     }
     kstate.set(state, so_at(i) + SO_H, h as u64)
+    // ROUND NETMON: THE LOCAL PORT, NOW AND NOT LATER. An outgoing
+    // connection has no port until the stack picks one, and after this
+    // call it has. Every frame of this connection carries that number,
+    // and it is the only thing that ties the frame back to the process.
+    // Asked for later it would be right too -- but `pump` runs with the
+    // lock held and may not take it a second time.
+    let f2: u64 = hold(state)
+    let t: *mut tcp.Tcp = stack.net_tcp(st(state))
+    let lp: u16 = tcp.tcp_local_port(t, h as i32)
+    drop_lock(state, f2)
+    kstate.set(state, so_at(i) + SO_PORT, lp as u64)
+    netmon.sset(state, i, netmon.S_LPORT, lp as u64)
+    netmon.sset(state, i, netmon.S_RADDR, addr)
+    netmon.sset(state, i, netmon.S_RPORT, port)
     return 0
 }
 
@@ -943,6 +1023,7 @@ fn sock_send(state: u64, i: u64, src: u64, n: u64) -> u64 {
         if got == 0 && n != 0 {
             return errno.neg(errno.E_AGAIN)
         }
+        netmon.pay_out(state, i, got as u64)
         return got as u64
     }
     return errno.neg(errno.E_DESTADDRREQ)
@@ -966,6 +1047,7 @@ fn sock_recv(state: u64, i: u64, dst: u64, n: u64) -> u64 {
     let s: u32 = stack.net_state(st(state), h as i32)
     drop_lock(state, flags)
     if got > 0 {
+        netmon.pay_in(state, i, got as u64)
         return got as u64
     }
     // Nothing there. Whether that is "not yet" or "never again" is the
@@ -993,6 +1075,10 @@ fn sock_sendto(state: u64, i: u64, src: u64, n: u64, addr: u64,
         let flags: u64 = hold(state)
         let r: u64 = icmp_send(state, addr, src, n)
         drop_lock(state, flags)
+        if !errno.is_error(r) {
+            netmon.sset(state, i, netmon.S_RADDR, addr)
+            netmon.pay_out(state, i, r)
+        }
         return r
     }
     if k != SK_UDP {
@@ -1002,7 +1088,10 @@ fn sock_sendto(state: u64, i: u64, src: u64, n: u64, addr: u64,
     if sport == 0 {
         sport = 40000 + (kstate.add(state, sc(S_SEQ), 1) & 4095)
         kstate.set(state, so_at(i) + SO_PORT, sport)
+        netmon.sset(state, i, netmon.S_LPORT, sport)
     }
+    netmon.sset(state, i, netmon.S_RADDR, addr)
+    netmon.sset(state, i, netmon.S_RPORT, port)
     let flags: u64 = hold(state)
     let ok: bool = stack.udp_send(st(state), (sport & 0xFFFF) as u16,
         (addr & 0xFFFFFFFF) as u32, (port & 0xFFFF) as u16,
@@ -1011,6 +1100,7 @@ fn sock_sendto(state: u64, i: u64, src: u64, n: u64, addr: u64,
     if !ok {
         return errno.neg(errno.E_AGAIN)
     }
+    netmon.pay_out(state, i, n)
     return n
 }
 
@@ -1027,6 +1117,9 @@ fn sock_recvfrom(state: u64, i: u64, dst: u64, n: u64, addr: *mut u64,
         let r: u64 = icmp_take(state, dst, n, addr)
         drop_lock(state, flags)
         *port = 0
+        if !errno.is_error(r) {
+            netmon.pay_in(state, i, r)
+        }
         return r
     }
     if k != SK_UDP {
@@ -1047,6 +1140,7 @@ fn sock_recvfrom(state: u64, i: u64, dst: u64, n: u64, addr: *mut u64,
     }
     *addr = fip as u64
     *port = fport as u64
+    netmon.pay_in(state, i, got as u64)
     return got as u64
 }
 
