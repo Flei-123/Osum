@@ -137,7 +137,7 @@ ip netns del "$NS" 2>/dev/null
 echo "== 1. build: the kernel with virtio.fi, inet.fi and netsvc.fi =="
 # =====================================================================
 for f in boot isr switch smp hv; do
-    as --64 -o "$TMPD/$f.o" "kernel/$f.s" 2>"$TMPD/as.err" \
+    as --64 -o "$TMPD/$f.o" "kernel/arch/x86_64/$f.s" 2>"$TMPD/as.err" \
         || bad "$f.s does not assemble"
 done
 as --64 -o "$TMPD/crt.o" kernel/user/crt.s 2>/dev/null || bad "crt.s"

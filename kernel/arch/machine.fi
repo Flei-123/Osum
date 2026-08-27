@@ -1,0 +1,533 @@
+// kernel/arch/machine.fi -- BOTH MACHINES, ONE FILE.
+//
+// Round ARM built this as `kernel/arch/x86_64/machine.fi` plus one line in
+// `arch.fi` that named the machine, because that was the best a compiler
+// without `#[arch(...)]` allowed. Round ARM-FREESTANDING added the
+// attribute, and this file is what it is for: every operation below has a
+// body for x86-64 and a body for AArch64, exactly one of them is compiled,
+// and WHICH ONE IS DECIDED BY `--target=` AND BY NOTHING ELSE.
+//
+// No file has to be edited to build for the other machine. That is the
+// difference between a boundary and a switch, and it is worth the two extra
+// lines per function.
+//
+// WHAT THE ATTRIBUTE ACTUALLY DOES, measured before this file was written
+// (`tools/arch/archsel.sh`): the body that does not belong to the active
+// machine is DROPPED BEFORE IT IS CHECKED. An `asm("out dx, al", in("dx")
+// …)` inside an `#[arch(x86_64)]` function does not even produce an
+// "unknown register name 'dx'" when building for aarch64. What the compiler
+// does insist on is that EVERY name carries a body for the machine being
+// built -- a function with only an `#[arch(x86_64)]` version is an error on
+// aarch64, not a silent omission. That rule is why this file cannot quietly
+// forget half of itself.
+//
+// WHERE THE TWO MACHINES REALLY DIFFER, and it is not the notation:
+//
+//   * PORTS. `in`/`out` address a sixteen-bit space of their own with their
+//     own instructions, which the processor does not reorder against
+//     memory. AArch64 has neither. The port functions below therefore have
+//     an AArch64 body that TRAPS (`brk #1`) rather than one that quietly
+//     writes somewhere. A caller that needs a port asks `has_io_ports()`
+//     first; one that does not ask finds out loudly, at the instruction,
+//     with the address in the fault report.
+//   * ORDERING. x86-64 is TSO: a store is never seen before an older store.
+//     AArch64 promises nothing of the kind. `atomic_store` below is a plain
+//     store on x86 and a STORE-RELEASE on AArch64, and that single
+//     difference is the defect round ARM found in `kernel/atomic.fi` and
+//     could not yet fix (docs/ARCH.md section 7).
+//   * THE CYCLE COUNTER. `rdtsc` counts at an unknown rate and `time.fi`
+//     has to calibrate it against the 8254. `CNTVCT_EL0` counts at the rate
+//     `CNTFRQ_EL0` states. The port gains something here.
+
+profile kernel
+
+export {
+    out8, out16, out32, in8, in16, in32, io_wait, has_io_ports,
+    read8, read16, read32, read64,
+    write8, write16, write32, write64,
+    atomic_load, atomic_store,
+    barrier, barrier_read, barrier_write, barrier_device,
+    irq_on, irq_off, irq_save, irq_restore, irq_are_on, idle, pause,
+    fill_words, copy_words, copy_octets, kdata_base,
+    page_root, page_root_set, tlb_flush_all, tlb_flush_page,
+    cycles, trap_here,
+    PAGE_SIZE, PAGE_BITS
+}
+
+// -------------------------------------------------- what both machines share
+
+const PAGE_SIZE: u64 = 4096
+const PAGE_BITS: u64 = 12
+
+// ------------------------------------------------------------- device ports
+
+#[arch(x86_64)]
+fn has_io_ports() -> bool {
+    return true
+}
+
+#[arch(aarch64)]
+fn has_io_ports() -> bool {
+    return false
+}
+
+#[arch(x86_64)]
+fn out8(port: u16, value: u8) {
+    asm("out dx, al", in("dx") port, in("al") value)
+}
+
+// There is no such thing here. Not "there is another way to do it" -- the
+// instruction does not exist and the address space does not exist. `brk #1`
+// is a synchronous exception the kernel's own vector table catches, so this
+// shows up as a fault with a return address that points at the caller,
+// which is the shortest path from "somebody used a port" to the line that
+// did it.
+#[arch(aarch64)]
+fn out8(port: u16, value: u8) {
+    trap_here()
+}
+
+#[arch(x86_64)]
+fn out16(port: u16, value: u16) {
+    asm("out dx, ax", in("dx") port, in("ax") value)
+}
+
+#[arch(aarch64)]
+fn out16(port: u16, value: u16) {
+    trap_here()
+}
+
+#[arch(x86_64)]
+fn out32(port: u16, value: u32) {
+    asm("out dx, eax", in("dx") port, in("eax") value)
+}
+
+#[arch(aarch64)]
+fn out32(port: u16, value: u32) {
+    trap_here()
+}
+
+#[arch(x86_64)]
+fn in8(port: u16) -> u8 {
+    // ROUND 72: `in al, dx` only ever DEFINES the low octet of `rax`; the
+    // upper 56 bits keep whatever was in the register. `movzx eax, al`
+    // makes the whole register well defined from the octet that was read.
+    return asm("in al, dx\nmovzx eax, al", out("rax"), in("dx") port) as u8
+}
+
+#[arch(aarch64)]
+fn in8(port: u16) -> u8 {
+    trap_here()
+    return 0 as u8
+}
+
+#[arch(x86_64)]
+fn in16(port: u16) -> u16 {
+    return asm("in ax, dx\nmovzx eax, ax", out("rax"), in("dx") port) as u16
+}
+
+#[arch(aarch64)]
+fn in16(port: u16) -> u16 {
+    trap_here()
+    return 0 as u16
+}
+
+#[arch(x86_64)]
+fn in32(port: u16) -> u32 {
+    return asm("in eax, dx", out("rax"), in("dx") port) as u32
+}
+
+#[arch(aarch64)]
+fn in32(port: u16) -> u32 {
+    trap_here()
+    return 0 as u32
+}
+
+// A write to the unused port 0x80 costs roughly one bus cycle. The old PIC
+// needs that pause between two command octets. There is no counterpart and
+// none is needed: what the pause buys is a delay on a bus this machine does
+// not have.
+#[arch(x86_64)]
+fn io_wait() {
+    out8(0x80 as u16, 0 as u8)
+}
+
+#[arch(aarch64)]
+fn io_wait() {
+}
+
+// Stop here and say so. `ud2` and `brk #1` are the two machines' ways of
+// raising a fault that no legitimate code raises by accident.
+#[arch(x86_64)]
+fn trap_here() {
+    asm("ud2")
+}
+
+#[arch(aarch64)]
+fn trap_here() {
+    asm("brk #1")
+}
+
+// -------------------------------------------------- memory mapped registers
+//
+// `__mmio_*` is the language's promise from round 52: exactly one memory
+// access per line, never moved, never merged, never removed. That promise is
+// the same on both machines and these eight functions therefore have ONE
+// body. What is NOT the same is the ordering AROUND them -- see
+// `barrier_device` below, and section 7 of docs/ARCH.md.
+
+fn read8(addr: u64) -> u8 {
+    return __mmio_read8(addr as *mut u8)
+}
+
+fn read16(addr: u64) -> u16 {
+    return __mmio_read16(addr as *mut u16)
+}
+
+fn read32(addr: u64) -> u32 {
+    return __mmio_read32(addr as *mut u32)
+}
+
+fn read64(addr: u64) -> u64 {
+    return __mmio_read64(addr as *mut u64)
+}
+
+fn write8(addr: u64, v: u8) {
+    __mmio_write8(addr as *mut u8, v)
+}
+
+fn write16(addr: u64, v: u16) {
+    __mmio_write16(addr as *mut u16, v)
+}
+
+fn write32(addr: u64, v: u32) {
+    __mmio_write32(addr as *mut u32, v)
+}
+
+fn write64(addr: u64, v: u64) {
+    __mmio_write64(addr as *mut u64, v)
+}
+
+// ------------------------------------------------- an atomic load and store
+//
+// THIS PAIR IS THE POINT OF THE WHOLE ROUND. `kernel/atomic.fi` has said
+// since round K5, in as many words:
+//
+//     "On x86-64 an ALIGNED 64-bit read or write is atomic in the hardware
+//      ... On a machine with a weaker memory model it would not be, and
+//      then this file is the one place that has to change."
+//
+// It was half right. The ACCESS is single-copy atomic on AArch64 too; what
+// is missing is the ORDER. A plain store releasing a lock can become
+// visible before the data it was protecting, and a plain load taking one
+// can be overtaken by the reads that follow it. So:
+//
+//   x86-64   plain, because the hardware already orders stores against
+//            stores and loads against loads (TSO). Identical to what
+//            round K5 wrote, octet for octet.
+//   AArch64  `ldar` and `stlr` -- the ordering is built into the access
+//            rather than standing next to it, which is what this machine
+//            wants and is cheaper than a `dmb` on either side.
+
+#[arch(x86_64)]
+fn atomic_load(addr: u64) -> u64 {
+    return __mmio_read64(addr as *mut u64)
+}
+
+#[arch(aarch64)]
+fn atomic_load(addr: u64) -> u64 {
+    return asm("ldar x0, [x1]", out("x0"), in("x1") addr)
+}
+
+#[arch(x86_64)]
+fn atomic_store(addr: u64, v: u64) {
+    __mmio_write64(addr as *mut u64, v)
+}
+
+#[arch(aarch64)]
+fn atomic_store(addr: u64, v: u64) {
+    asm("stlr x1, [x0]", in("x0") addr, in("x1") v)
+}
+
+// ------------------------------------------------------------------ ordering
+
+#[arch(x86_64)]
+fn barrier() {
+    asm("mfence")
+}
+
+#[arch(aarch64)]
+fn barrier() {
+    asm("dmb sy")
+}
+
+#[arch(x86_64)]
+fn barrier_read() {
+    asm("lfence")
+}
+
+#[arch(aarch64)]
+fn barrier_read() {
+    asm("dmb ishld")
+}
+
+#[arch(x86_64)]
+fn barrier_write() {
+    asm("sfence")
+}
+
+#[arch(aarch64)]
+fn barrier_write() {
+    asm("dmb ishst")
+}
+
+// Between filling a descriptor in memory and ringing a device's doorbell.
+// On x86-64 nothing has to stand there: an older store is visible before a
+// younger one, full stop, and `nvme.fi` and `virtio.fi` were written on
+// that. On AArch64 it is a `dsb sy`, and `dsb` and not `dmb`: the write must
+// have COMPLETED, not merely be ordered, before the device is told to go
+// looking for it.
+#[arch(x86_64)]
+fn barrier_device() {
+    asm("sfence")
+}
+
+#[arch(aarch64)]
+fn barrier_device() {
+    asm("dsb sy")
+}
+
+// ----------------------------------------------------------- interrupt state
+
+#[arch(x86_64)]
+fn irq_on() {
+    asm("sti")
+}
+
+// DAIF: Debug, SError, IRQ, FIQ. Bit 1 of the `daifclr` immediate is the I
+// bit, and it has an instruction of its own instead of a general move.
+#[arch(aarch64)]
+fn irq_on() {
+    asm("msr daifclr, #2")
+}
+
+#[arch(x86_64)]
+fn irq_off() {
+    asm("cli")
+}
+
+#[arch(aarch64)]
+fn irq_off() {
+    asm("msr daifset, #2")
+}
+
+// Returns the state so that it can be put back exactly as it was. A lock
+// that unconditionally re-enables interrupts on release turns a nested lock
+// into a deadlock the first time an interrupt lands inside one.
+#[arch(x86_64)]
+fn irq_save() -> u64 {
+    return asm("pushfq\npop rax\ncli", out("rax"))
+}
+
+#[arch(aarch64)]
+fn irq_save() -> u64 {
+    return asm("mrs x0, daif\nmsr daifset, #2", out("x0"))
+}
+
+// The x86 form has to look at bit 9 because `popfq` would restore every
+// other flag with it. On AArch64 DAIF holds nothing else, so the saved word
+// goes back whole.
+#[arch(x86_64)]
+fn irq_restore(state: u64) {
+    if (state & 0x200) != 0 {
+        asm("sti")
+    }
+}
+
+#[arch(aarch64)]
+fn irq_restore(state: u64) {
+    asm("msr daif, x0", in("x0") state)
+}
+
+// Whether interrupts are currently on, without changing anything. `nvme.fi`
+// asks before it decides to wait for one instead of polling.
+#[arch(x86_64)]
+fn irq_are_on() -> bool {
+    let flags: u64 = asm("pushfq\npop rax", out("rax"))
+    return (flags & 0x200) != 0
+}
+
+// DAIF bit 7 is the I mask, and it is set when interrupts are OFF -- the
+// opposite polarity to x86's flag, which is one of the small differences
+// that produces a working-looking kernel that never sleeps.
+#[arch(aarch64)]
+fn irq_are_on() -> bool {
+    let daif: u64 = asm("mrs x0, daif", out("x0"))
+    return ((daif >> 7) & 1) == 0
+}
+
+#[arch(x86_64)]
+fn idle() {
+    asm("hlt")
+}
+
+// NOT `hlt`. AArch64 HAS an instruction called `hlt`, it takes an immediate,
+// and it means "trap to the debugger". `asm("hlt #0")` would assemble
+// without a word of complaint and do something else entirely -- round ARM
+// measured that (`tools/arch/a64gap.sh`) and it is the reason this comment
+// exists. What waits for an interrupt here is `wfi`.
+#[arch(aarch64)]
+fn idle() {
+    asm("wfi")
+}
+
+#[arch(x86_64)]
+fn pause() {
+    asm("pause")
+}
+
+#[arch(aarch64)]
+fn pause() {
+    asm("yield")
+}
+
+// ------------------------------------------------------------ block memory
+//
+// `wm.fi` clears and copies whole scan lines, `wig.fi` moves a window's
+// pixels across the ring boundary. On x86-64 that is one instruction with a
+// prefix, and it is a hot path in the window server -- the reason those two
+// files carried inline assembly at all. There is no `rep` on AArch64; what
+// there is instead is a loop, and it is written here rather than in the two
+// callers so that a better one (`ldp`/`stp` pairs, or the `cpy` instructions
+// of FEAT_MOPS on a newer core) has ONE place to land.
+
+#[arch(x86_64)]
+fn fill_words(p: u64, value: u64, words: u64) {
+    asm("cld\nrep stosq", in("rdi") p, in("rax") value, in("rcx") words,
+        clobber("rdi"), clobber("rcx"), clobber("memory"))
+}
+
+#[arch(aarch64)]
+fn fill_words(p: u64, value: u64, words: u64) {
+    var i: u64 = 0
+    while i < words {
+        __mmio_write64((p + i * 8) as *mut u64, value)
+        i = i + 1
+    }
+}
+
+#[arch(x86_64)]
+fn copy_words(dst: u64, src: u64, words: u64) {
+    asm("cld\nrep movsq", in("rdi") dst, in("rsi") src, in("rcx") words,
+        clobber("rdi"), clobber("rsi"), clobber("rcx"), clobber("memory"))
+}
+
+#[arch(aarch64)]
+fn copy_words(dst: u64, src: u64, words: u64) {
+    var i: u64 = 0
+    while i < words {
+        __mmio_write64((dst + i * 8) as *mut u64,
+            __mmio_read64((src + i * 8) as *mut u64))
+        i = i + 1
+    }
+}
+
+#[arch(x86_64)]
+fn copy_octets(dst: u64, src: u64, n: u64) {
+    asm("cld\nrep movsb", in("rdi") dst, in("rsi") src, in("rcx") n,
+        clobber("rdi"), clobber("rsi"), clobber("rcx"), clobber("memory"))
+}
+
+#[arch(aarch64)]
+fn copy_octets(dst: u64, src: u64, n: u64) {
+    var i: u64 = 0
+    while i < n {
+        __mmio_write8((dst + i) as *mut u8, __mmio_read8((src + i) as *mut u8))
+        i = i + 1
+    }
+}
+
+// -------------------------------------------------------- the data region
+//
+// The kernel's mutable state does not live in the language -- stage 0 of
+// Firn has `const` and no mutable globals (SPEC 14) -- it lives in a region
+// whose address the assembly hands over. `kdata` is that symbol on x86-64
+// (`kernel/arch/x86_64/boot.s`, 0x60000 octets) and on AArch64
+// (`kernel/arch/aarch64/start.S`, where it is another name for
+// `kstate_a64`). Two ways of taking the address of a symbol, one name.
+
+#[arch(x86_64)]
+fn kdata_base() -> u64 {
+    return asm("lea rax, [rip + kdata]", out("rax"))
+}
+
+#[arch(aarch64)]
+fn kdata_base() -> u64 {
+    return asm("adrp x0, kdata\nadd x0, x0, :lo12:kdata", out("x0"))
+}
+
+// ----------------------------------------------------------------- page root
+
+// CR3 here, TTBR0_EL1 there -- and there are TWO of those. The interface
+// cannot hide that and does not try to; `page_root` is the one that
+// translates addresses with the top bits clear, which is what a process
+// address space is on both machines.
+#[arch(x86_64)]
+fn page_root() -> u64 {
+    return asm("mov rax, cr3", out("rax"))
+}
+
+#[arch(aarch64)]
+fn page_root() -> u64 {
+    return asm("mrs x0, ttbr0_el1", out("x0"))
+}
+
+#[arch(x86_64)]
+fn page_root_set(root: u64) {
+    asm("mov cr3, rdi", in("rdi") root)
+}
+
+// Writing CR3 is itself the ordering point on x86. Here the write has to be
+// bracketed by hand, or the next instruction can still be fetched through
+// the old translation.
+#[arch(aarch64)]
+fn page_root_set(root: u64) {
+    asm("msr ttbr0_el1, x0\ndsb ish\nisb", in("x0") root)
+}
+
+#[arch(x86_64)]
+fn tlb_flush_all() {
+    asm("mov rax, cr3\nmov cr3, rax", out("rax"))
+}
+
+#[arch(aarch64)]
+fn tlb_flush_all() {
+    asm("dsb ishst\ntlbi vmalle1\ndsb ish\nisb")
+}
+
+#[arch(x86_64)]
+fn tlb_flush_page(addr: u64) {
+    asm("invlpg [rdi]", in("rdi") addr)
+}
+
+// `tlbi vaae1is` takes the address SHIFTED RIGHT BY TWELVE, not the address.
+// A page number where the hardware wants a page number; passing the address
+// invalidates something 4096 pages away and reports nothing.
+#[arch(aarch64)]
+fn tlb_flush_page(addr: u64) {
+    asm("dsb ishst\ntlbi vaae1is, x0\ndsb ish\nisb", in("x0") addr >> 12)
+}
+
+// ---------------------------------------------------------- the cycle counter
+
+#[arch(x86_64)]
+fn cycles() -> u64 {
+    return asm("rdtsc\nshl rdx, 32\nor rax, rdx", out("rax"))
+}
+
+// And its rate is CNTFRQ_EL0, which the machine states -- so the whole
+// calibration routine in `time.fi` has nothing to do on this side.
+#[arch(aarch64)]
+fn cycles() -> u64 {
+    return asm("isb\nmrs x0, cntvct_el0", out("x0"))
+}

@@ -90,15 +90,15 @@ fi
 # ---------------------------------------------------------------- build
 
 echo "== 1. build the kernel with both compilers =="
-as --64 -o "$TMPD/boot.o" kernel/boot.s 2>/dev/null \
+as --64 -o "$TMPD/boot.o" kernel/arch/x86_64/boot.s 2>/dev/null \
     && ok "boot.s assembles" || bad "boot.s"
-as --64 -o "$TMPD/isr.o" kernel/isr.s 2>/dev/null \
+as --64 -o "$TMPD/isr.o" kernel/arch/x86_64/isr.s 2>/dev/null \
     && ok "isr.s assembles" || bad "isr.s"
-as --64 -o "$TMPD/switch.o" kernel/switch.s 2>/dev/null \
+as --64 -o "$TMPD/switch.o" kernel/arch/x86_64/switch.s 2>/dev/null \
     && ok "switch.s assembles" || bad "switch.s"
-as --64 -o "$TMPD/smp.o" kernel/smp.s 2>/dev/null \
+as --64 -o "$TMPD/smp.o" kernel/arch/x86_64/smp.s 2>/dev/null \
     && ok "smp.s assembles" || bad "smp.s"
-as --64 -o "$TMPD/hv.o" kernel/hv.s 2>/dev/null \
+as --64 -o "$TMPD/hv.o" kernel/arch/x86_64/hv.s 2>/dev/null \
     && ok "hv.s assembles" || bad "hv.s"
 
 for s in 0 1; do
@@ -134,7 +134,7 @@ for s in 0 1; do
     [ -f "$TMPD/k$s.o" ] || continue
     # ROUND K7 added `kdata` to the two allowed names: the framebuffer
     # console takes the address of the kernel data area off the linker
-    # symbol `kernel/boot.s` exports, because `serial.put` has no argument
+    # symbol `kernel/arch/x86_64/boot.s` exports, because `serial.put` has no argument
     # for it and must not grow one. Resolved out of boot.o at link time,
     # exactly like `osum_panic` out of isr.o. The reason is written out in
     # tools/kernel/run.sh and in kernel/fb.fi.

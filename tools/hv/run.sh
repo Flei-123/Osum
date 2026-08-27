@@ -143,7 +143,7 @@ fi
 # in `boot.s` UND in `kstate.fi`. Runde K12 hat ihn wachsen lassen, weil
 # er voll war -- geht das auseinander, nullt der Kernel weniger, als er
 # benutzt, und der Fehler zeigt sich irgendwo ganz anders.
-KB=$(grep -oE 'KDATA_SIZE, 0x[0-9A-Fa-f]+' kernel/boot.s | grep -oE '0x[0-9A-Fa-f]+')
+KB=$(grep -oE 'KDATA_SIZE, 0x[0-9A-Fa-f]+' kernel/arch/x86_64/boot.s | grep -oE '0x[0-9A-Fa-f]+')
 KS=$(grep -oE 'KDATA_SIZE: u64 = 0x[0-9A-Fa-f]+' kernel/kstate.fi | grep -oE '0x[0-9A-Fa-f]+$')
 [ "$KB" = "$KS" ] && ok "kdata ist in boot.s und kstate.fi dieselbe Zahl ($KB)" \
     || bad "kdata: boot.s sagt $KB, kstate.fi sagt $KS"

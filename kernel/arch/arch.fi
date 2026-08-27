@@ -1,0 +1,302 @@
+// kernel/arch/arch.fi -- THE BOUNDARY. One file, and the machine is behind it.
+//
+// Round ARM, step B. Up to this round Osum had exactly one machine, and it
+// was not written down anywhere -- every place that touched hardware simply
+// touched x86-64 hardware, and the line between "the kernel" and "this
+// processor" was not drawn, only believed. Round 80 of the Firn compiler
+// had the same problem one level down and solved it the same way: a file
+// that says which machine, and a code generator per machine behind it.
+//
+// WHAT IS ON WHICH SIDE
+//
+//   kernel/*.fi                 the kernel. File systems, TCP/IP, the
+//                               scheduler's logic, the window server, the
+//                               eighty-two programs. 20,422 lines that do
+//                               not contain one machine instruction, and
+//                               another 20,155 that contain a handful each
+//                               (`tools/arch/inventory.py` counts them).
+//   kernel/arch/arch.fi         this file: the questions.
+//   kernel/arch/x86_64/         the x86-64 answers. Nine assembly and
+//                               eight Firn files.
+//   kernel/arch/aarch64/        the AArch64 answers. Nine assembly files;
+//                               no Firn yet, and the reason is in
+//                               docs/ARCH.md and is not a matter of taste.
+//
+// NO LINE IN THIS FILE NAMES A MACHINE ANY MORE. Round ARM had one -- an
+// `import arch.x86_64.machine` that would have to be edited to build for
+// the other side -- because `#[arch(...)]` did not exist yet. It does now
+// (Firn round ARM-FREESTANDING), so `kernel/arch/machine.fi` carries BOTH
+// machines and `--target=` alone decides which half is compiled. A boundary
+// you have to edit is a switch; this one is a boundary.
+//
+// WHAT THE BOUNDARY COVERS, and where each side answers it:
+//
+//   subject             x86-64                     AArch64
+//   ------------------- -------------------------- ------------------------
+//   startup             arch/x86_64/boot.s,        arch/aarch64/start.S
+//                       arch/x86_64/start.s        (EL2 -> EL1, no climb
+//                       (protected -> long mode)   into another mode)
+//   page tables         arch/x86_64/machine.fi     arch/aarch64/mmu.S
+//                       page_root, CR3             TTBR0 and TTBR1, MAIR
+//   exception entry     arch/x86_64/isr.s          arch/aarch64/vectors.S
+//                       256 vectors by number      16 entries by situation
+//   exception handling  arch/x86_64/trap.fi        arch/aarch64/probe.S
+//   interrupt control   arch/x86_64/apic.fi        arch/aarch64/gic.S
+//                       local APIC, I/O APIC       GICv2 distributor + CPU
+//   timer               arch/x86_64/idt.fi (8254)  arch/aarch64/timer.S
+//                       calibrated                 CNTFRQ_EL0 states it
+//   context switch      arch/x86_64/switch.s       arch/aarch64/switch.S
+//                       7 registers, ret           13 registers, x30 by hand
+//   barriers, atomics   arch/x86_64/machine.fi     arch/aarch64/atomic.S
+//                       TSO: almost nothing to do  acquire/release, dmb, dsb
+//   device registers    dev_* below                dev_* below
+//                       `in`/`out`, a space of     memory, with a device
+//                       their own                  attribute and a barrier
+//   processor identity  arch/x86_64/cpu.fi         MPIDR_EL1 (not yet used)
+//   starting the others arch/x86_64/smp.s,         PSCI (round ARM does not)
+//                       arch/x86_64/smp.fi
+//
+// WHAT DELIBERATELY HAS NO ENTRY: the hypervisor. `arch/x86_64/hv.fi` and
+// `hv.s` are AMD-V with a VMCB, 2,388 lines, and the AArch64 counterpart is
+// EL2, which is not the same design in another notation. It stays where it
+// is, x86 only, and `kmain.fi` reaches it directly rather than through this
+// file. Pretending otherwise would put an interface in front of something
+// that has one implementation for ever.
+//
+// WHY THIS FILE FORWARDS INSTEAD OF BEING EMPTY. Firn's module system
+// merges every file into one program; there are no interface files and no
+// separate object files (`compiler/src/modules.rs`, "LIMIT, honestly").
+// So an interface here can only be a set of functions that call the chosen
+// implementation.
+//
+// WHAT THAT COSTS, MEASURED AND NOT ASSUMED. The call is NOT removed. The
+// pinned compiler at the optimisation level `tools/build-kernel.sh` uses
+// does not inline across modules, so `serial.out8` is now
+//
+//     serial__out8 -> arch__dev_out8 -> machine__out8 -> `out dx, al`
+//
+// three frames deep where it used to be one, and the image grew by 2,804
+// octets (1,707,416 -> 1,710,220, +0.16 %). Read off the disassembly of
+// `_F0.serial__out8`, not guessed.
+//
+// Whether that matters: an `out` to a device port is a bus cycle, hundreds
+// of processor cycles, and the two extra calls are single digits. For the
+// MMIO forms it is a worse trade, which is why nothing in the fast paths of
+// `nvme.fi` or `virtio.fi` was rerouted in this round -- they keep their
+// `__mmio_*` calls and will be moved when there is something to measure the
+// move against. Claiming a boundary is free when it is not is how a
+// boundary gets torn out again three rounds later.
+
+profile kernel
+
+import machine
+
+export {
+    dev_out8, dev_out16, dev_out32, dev_in8, dev_in16, dev_in32, dev_io_wait,
+    dev_read8, dev_read16, dev_read32, dev_read64,
+    dev_write8, dev_write16, dev_write32, dev_write64,
+    atomic_load, atomic_store,
+    barrier, barrier_read, barrier_write, barrier_device,
+    irq_on, irq_off, irq_save, irq_restore, irq_are_on, idle, pause,
+    fill_words, copy_words, copy_octets, kdata_base,
+    page_root, page_root_set, tlb_flush_all, tlb_flush_page,
+    cycles, page_size, has_io_ports
+}
+
+// --------------------------------------------------------------- device access
+//
+// A device register, named by whatever this machine uses to name one. On
+// x86-64 that is a PORT NUMBER and the access is an `out`/`in` instruction;
+// on AArch64 it is an ADDRESS and the access is a store or a load to a page
+// mapped Device-nGnRnE, followed by a barrier. The two are not the same
+// thing wearing different names, which is why `has_io_ports` exists: a
+// caller that genuinely needs a port has to ask, and on the machine that
+// has none it gets `false` and has to be rewritten rather than silently
+// writing into address 0x3F8.
+
+fn dev_out8(port: u16, value: u8) {
+    machine.out8(port, value)
+}
+
+fn dev_out16(port: u16, value: u16) {
+    machine.out16(port, value)
+}
+
+fn dev_out32(port: u16, value: u32) {
+    machine.out32(port, value)
+}
+
+fn dev_in8(port: u16) -> u8 {
+    return machine.in8(port)
+}
+
+fn dev_in16(port: u16) -> u16 {
+    return machine.in16(port)
+}
+
+fn dev_in32(port: u16) -> u32 {
+    return machine.in32(port)
+}
+
+fn dev_io_wait() {
+    machine.io_wait()
+}
+
+fn dev_read8(addr: u64) -> u8 {
+    return machine.read8(addr)
+}
+
+fn dev_read16(addr: u64) -> u16 {
+    return machine.read16(addr)
+}
+
+fn dev_read32(addr: u64) -> u32 {
+    return machine.read32(addr)
+}
+
+fn dev_read64(addr: u64) -> u64 {
+    return machine.read64(addr)
+}
+
+fn dev_write8(addr: u64, v: u8) {
+    machine.write8(addr, v)
+}
+
+fn dev_write16(addr: u64, v: u16) {
+    machine.write16(addr, v)
+}
+
+fn dev_write32(addr: u64, v: u32) {
+    machine.write32(addr, v)
+}
+
+fn dev_write64(addr: u64, v: u64) {
+    machine.write64(addr, v)
+}
+
+// --------------------------------------------------- an atomic load and store
+//
+// Single-copy atomic on both machines, and ORDERED on both -- which on
+// AArch64 it would not be without `ldar`/`stlr`. `kernel/atomic.fi` goes
+// through these two rather than through `__mmio_read64`/`__mmio_write64`,
+// and that is the fix for the one real defect round ARM found and could not
+// yet repair (docs/ARCH.md section 7.2).
+
+fn atomic_load(addr: u64) -> u64 {
+    return machine.atomic_load(addr)
+}
+
+fn atomic_store(addr: u64, v: u64) {
+    machine.atomic_store(addr, v)
+}
+
+// -------------------------------------------------------------------- ordering
+
+fn barrier() {
+    machine.barrier()
+}
+
+fn barrier_read() {
+    machine.barrier_read()
+}
+
+fn barrier_write() {
+    machine.barrier_write()
+}
+
+// Between filling a descriptor and telling a device to go and read it.
+// Costs nothing on x86-64 and is the difference between working and not on
+// AArch64 (docs/ARCH.md, "the weak memory model").
+fn barrier_device() {
+    machine.barrier_device()
+}
+
+// ------------------------------------------------------------- interrupt state
+
+fn irq_on() {
+    machine.irq_on()
+}
+
+fn irq_off() {
+    machine.irq_off()
+}
+
+fn irq_save() -> u64 {
+    return machine.irq_save()
+}
+
+fn irq_restore(state: u64) {
+    machine.irq_restore(state)
+}
+
+fn irq_are_on() -> bool {
+    return machine.irq_are_on()
+}
+
+fn idle() {
+    machine.idle()
+}
+
+// ------------------------------------------------------------ block memory
+//
+// One instruction with a `rep` prefix on x86-64, a loop on AArch64. The
+// window server and the window calls used to carry that instruction
+// themselves; now they ask for the operation and get whichever the machine
+// has.
+
+fn fill_words(p: u64, value: u64, words: u64) {
+    machine.fill_words(p, value, words)
+}
+
+fn copy_words(dst: u64, src: u64, words: u64) {
+    machine.copy_words(dst, src, words)
+}
+
+fn copy_octets(dst: u64, src: u64, n: u64) {
+    machine.copy_octets(dst, src, n)
+}
+
+// The address of the kernel's data region, taken the way this machine takes
+// the address of a symbol.
+fn kdata_base() -> u64 {
+    return machine.kdata_base()
+}
+
+fn pause() {
+    machine.pause()
+}
+
+// ---------------------------------------------------------------- translation
+
+fn page_root() -> u64 {
+    return machine.page_root()
+}
+
+fn page_root_set(root: u64) {
+    machine.page_root_set(root)
+}
+
+fn tlb_flush_all() {
+    machine.tlb_flush_all()
+}
+
+fn tlb_flush_page(addr: u64) {
+    machine.tlb_flush_page(addr)
+}
+
+// ------------------------------------------------------------------- the rest
+
+fn cycles() -> u64 {
+    return machine.cycles()
+}
+
+fn page_size() -> u64 {
+    return machine.PAGE_SIZE
+}
+
+// On AArch64 this is `false`, and a caller that reaches for a port without
+// asking does not write into address 0x3F8 -- it takes a `brk #1` with the
+// return address pointing at itself.
+fn has_io_ports() -> bool {
+    return machine.has_io_ports()
+}
