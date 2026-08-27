@@ -254,8 +254,10 @@ not. Anyone who says a glyph is faster to draw than a bitmap is guessing.
   characters keeps them in the same 512 slots.
 * **One file instead of one file per icon per size.** 13 584 octets for
   42 icons at every size, against 1036 octets for *one* icon at *one*
-  size — 42 icons at three sizes as OSYM would be about 88 000 octets and
-  126 files.
+  size. The 42 icons at the three sizes this interface uses, stored as
+  OSYM, would be `(12 + 16²·4 + 12 + 20²·4 + 12 + 24²·4) · 42` =
+  **208 488 octets in 126 files** — **15.3× the whole font**, and still
+  wrong at any fourth size.
 * **Light and dark for free.** No second set of pictures. Measured above.
 * **Any size from one outline.** 16, 20 and 24 come out of the same
   glyph. A bitmap needs a redraw per size or it blurs.
