@@ -98,15 +98,23 @@ FAS="$TMPD/fas"
 
 # ---- 1a. ALLE Programme dieses Userlands gehen durch den Assembler.
 #
-# `flate`, `tools` und `ulib` sind KEINE Programme dieser Platte: die
-# ersten beiden sind Bibliotheksmodule ohne `u_start`, `ulib` hat ein
-# `fn main` und damit ein eigenes `_start`. Sie stehen hier als
-# Ausnahme, damit die Zahl darunter eine Zahl ueber PROGRAMME ist.
+# ACHT MODULE SIND KEINE PROGRAMME DIESER PLATTE, und die Liste war
+# stehengeblieben. `flate`, `tools` und `ulib` standen hier von Anfang
+# an; `appdir`, `nidx`, `pw`, `wlib` und `wlibc` sind seit den Runden
+# K15/K16 dazugekommen und stehen selbst in ihrer ersten Zeile, was sie
+# sind ("eine Bibliothek ohne `u_start`"). Der Binder hat sie trotzdem
+# als Programme gebunden bekommen und ist an genau dem Namen gescheitert,
+# den es in einer Bibliothek nicht gibt: `_F1.u_start`.
+#
+# Das ist ein Fehler DIESES LAEUFERS und keiner des Systems -- er faellt
+# auf `main` (3389fbd) mit denselben fuenf Namen und derselben Zahl
+# ("70, erwartet eq 75"), mit einem eigenen Arbeitsbaum nachgemessen.
+# Repariert ist er, indem die Ausnahmeliste sagt, was wahr ist.
 mkdir -p "$TMPD/s"
 PROGS=""
 for f in kernel/user/*.fi; do
     n=$(basename "$f" .fi)
-    case "$n" in flate|tools|ulib) continue;; esac
+    case "$n" in appdir|flate|nidx|pw|tools|ulib|wlib|wlibc) continue;; esac
     PROGS="$PROGS $n"
 done
 gebaut=0; nichtgebaut=""
