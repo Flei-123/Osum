@@ -192,16 +192,54 @@ for v in "classic 474 0" "modern 504 2"; do
 done
 
 echo "== E. where the buttons sit =="
-for v in "left 4" "center 112"; do
-    set -- $v
-    if shot "E-$1" align=$1 lang=de keep=yes; then
-        S="$TMPD/E-$1/serial.txt"
-        X=$(grep -a 'taskbar: start x=' "$S" | tail -1 | grep -oE 'x=[0-9]+' | grep -oE '[0-9]+')
-        is "align=$1: the start button's x" "${X:-x}" "$2"
+# THE NUMBER IS NOT FIXED, AND IT MUST NOT BE.
+#
+# Where a centred block starts depends on how wide the block is, which
+# depends on how many windows are open, and on where the status corner
+# begins, which depends on whether there is an icon font on the disk.
+# An assertion like "x = 112" passes on one image and fails on the next
+# for a reason that has nothing to do with centring -- it happened here
+# and it is why this section measures the PROPERTY instead: the run of
+# empty bar to the left of the block and the run to its right are the
+# same, to within the rounding of one halving.
+run_e() { # align
+    shot "E-$1" align=$1 lang=de keep=yes || { bad "E-$1 did not boot"; return 1; }
+    local S="$TMPD/E-$1/serial.txt"
+    SX=$(grep -a 'taskbar: start x=' "$S" | tail -1 | grep -oE 'x=[0-9]+' | grep -oE '[0-9]+')
+    SW=$(grep -a 'taskbar: start x=' "$S" | tail -1 | grep -oE ' w=[0-9]+' | grep -oE '[0-9]+')
+    # the right edge of the last window button that has a width
+    RE=0
+    while read -r bx bw; do
+        [ -z "$bx" ] && continue
+        [ "$bw" = 0 ] && continue
+        [ $((bx + bw)) -gt "$RE" ] && RE=$((bx + bw))
+    done < <(grep -a 'taskbar: btn i=' "$S" \
+             | grep -oE ' x=[0-9]+ y=[0-9]+ w=[0-9]+' \
+             | sed -E 's/ x=([0-9]+) y=[0-9]+ w=([0-9]+)/\1 \2/')
+    [ "$RE" = 0 ] && RE=$((SX + SW))
+    FX=$(grep -a 'taskbar: field net' "$S" | tail -1 | grep -oE 'x=[0-9]+' | grep -oE '[0-9]+')
+    return 0
+}
+if run_e left; then
+    is "align=left: the start button's x" "${SX:-x}" "4"
+    LX=$SX
+fi
+if run_e center; then
+    L=$((SX - 3))
+    R=$((FX - 4 - RE))
+    D=$((L - R)); [ "$D" -lt 0 ] && D=$((-D))
+    echo "        block $SX..$RE  free left $L  free right $R  in a bar of 800"
+    if [ "$D" -le 6 ]; then
+        ok "align=center: the block is centred in the empty run (left $L, right $R)"
     else
-        bad "E-$1 did not boot"
+        bad "align=center: left $L against right $R"
     fi
-done
+    if [ "${SX:-0}" -gt $(( ${LX:-4} + 50 )) ]; then
+        ok "align=center: the start button really moved: $LX -> $SX"
+    else
+        bad "align=center: the start button did not move: $LX -> ${SX:-?}"
+    fi
+fi
 if shot E-vert align=center edge=left lang=de keep=yes; then
     Y=$(grep -a 'taskbar: start x=' "$TMPD/E-vert/serial.txt" | tail -1 \
         | grep -oE ' y=[0-9]+' | grep -oE '[0-9]+')
