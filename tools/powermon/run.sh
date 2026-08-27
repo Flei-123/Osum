@@ -46,6 +46,13 @@
 # passing quietly. That is the lesson of round B3 and of round K18 before
 # this one: two empty pages are not an agreement.
 #
+# `pmonsay` on every command line below: without it the kernel prints no
+# report at all. That word exists because the first version printed one in
+# every boot, and `kmain.power_stage` runs in every boot that does not say
+# `nopwr` -- which scrolled the shell's own line off the mirrored console
+# in tools/gfx/run.sh. A round that talks in runs that did not ask it to
+# is a round that breaks other people's measurements.
+#
 # Usage:  bash tools/powermon/run.sh
 set -uo pipefail
 cd "$(dirname "$0")/../.."
@@ -249,19 +256,19 @@ run() { # name commandline [ssdt] [timeout]
 
 echo "== 4. the measured draw comes from the firmware and from nowhere else =="
 
-RC=$(run low "osum pwr nokbd script=powermon raw;exit" low)
+RC=$(run low "osum pwr pmonsay nokbd script=powermon raw;exit" low)
 num "the run with the 1200 mW battery ends cleanly" "$RC" eq 21
 says "$TMPD/low.txt" rate 1200 "ring 3 reports the rate that stands in the table"
 says "$TMPD/low.txt" rateok 1 "and says that it really read it"
 
-RC=$(run high "osum pwr nokbd script=powermon raw;exit" high)
+RC=$(run high "osum pwr pmonsay nokbd script=powermon raw;exit" high)
 num "the run with the 7700 mW battery ends cleanly" "$RC" eq 21
 says "$TMPD/high.txt" rate 7700 "another table, another rate -- the number is not in the kernel"
 
 # THE COUNTER-CHECK THAT MATTERS MOST: no battery, no numbers. A monitor
 # that prints a zero where it measured nothing is worse than one that
 # prints nothing, because a zero in milliwatts looks like a measurement.
-RC=$(run none "osum pwr nokbd script=powermon raw;powermon;exit" none)
+RC=$(run none "osum pwr pmonsay nokbd script=powermon raw;powermon;exit" none)
 num "the run without a battery ends cleanly" "$RC" eq 21
 says "$TMPD/none.txt" rateok 0 "GEGENPROBE without a battery: nothing was measured"
 says "$TMPD/none.txt" rate 0 "and the rate stays zero instead of being invented"
@@ -300,9 +307,9 @@ echo "== 5. the system floor -- and what the display looks like without it =="
 # once with `pmonnofloor`. Without a floor, whichever program happens to
 # be awake gets the backlight, the radios and the chipset hung around its
 # neck; with one, they are called what they are.
-RC=$(run floor "osum pwr nokbd script=burn 6;powermon raw;exit" high 300)
+RC=$(run floor "osum pwr pmonsay nokbd script=burn 6;powermon raw;exit" high 300)
 num "the run with the floor ends cleanly" "$RC" eq 21
-RC=$(run nofloor "osum pwr pmonnofloor nokbd script=burn 6;powermon raw;exit" high 300)
+RC=$(run nofloor "osum pwr pmonsay pmonnofloor nokbd script=burn 6;powermon raw;exit" high 300)
 num "the run without the floor ends cleanly" "$RC" eq 21
 
 says "$TMPD/floor.txt" baseok 1 "with the floor: it was really measured"
@@ -349,9 +356,9 @@ echo "== 6. the split: it follows the load and the column adds to a hundred =="
 # it is runnable on every timer tick. `ls` is the opposite: it waits on a
 # disk, so it collects almost no ticks -- the correct answer for `ls`,
 # and the reason a load test needs a program like `burn`.
-RC=$(run idle "osum pwr pmonnofloor nokbd script=echo x;powermon raw;exit" high)
+RC=$(run idle "osum pwr pmonsay pmonnofloor nokbd script=echo x;powermon raw;exit" high)
 num "the quiet run ends cleanly" "$RC" eq 21
-RC=$(run load "osum pwr pmonnofloor nokbd script=burn 60;powermon raw;exit" high 400)
+RC=$(run load "osum pwr pmonsay pmonnofloor nokbd script=burn 60;powermon raw;exit" high 400)
 num "the busy run ends cleanly" "$RC" eq 21
 
 bt=$(prow "$TMPD/load.txt" burn 3)
@@ -415,7 +422,7 @@ echo "== 7. ageing, runtime left, mains against battery =="
 
 # LAST FULL CHARGE AGAINST DESIGN CHARGE. The table says 3000 of 6000, so
 # the answer is fifty, and it is fifty because the table says so.
-RC=$(run worn "osum pwr nokbd script=powermon raw;powermon;exit" worn)
+RC=$(run worn "osum pwr pmonsay nokbd script=powermon raw;powermon;exit" worn)
 num "the run with the worn battery ends cleanly" "$RC" eq 21
 says "$TMPD/worn.txt" health 50 "the ageing of the battery: 3000 of 6000 mWh is fifty percent"
 says "$TMPD/worn.txt" healthok 1 "and both numbers were really read"
@@ -428,7 +435,7 @@ says "$TMPD/high.txt" minutes 25 "runtime left at 7700 mW: 25 minutes"
 says "$TMPD/low.txt" minutes 165 "the same charge at 1200 mW: 165 minutes"
 
 # MAINS AGAINST BATTERY, kept apart.
-RC=$(run mains "osum pwr nokbd script=powermon raw;powermon;exit" mains)
+RC=$(run mains "osum pwr pmonsay nokbd script=powermon raw;powermon;exit" mains)
 num "the run on mains ends cleanly" "$RC" eq 21
 says "$TMPD/mains.txt" acrate 900 "on mains the rate is booked as the mains rate"
 says "$TMPD/mains.txt" batrate 0 "and nothing is booked as a battery rate"
@@ -442,9 +449,9 @@ echo "== 8. what the accounting itself costs, measured =="
 
 # THE SAME WORKLOAD, ONCE COUNTED AND ONCE NOT. `nopowermon` is the
 # counter-check and the difference between the two runs is the price.
-RC=$(run cost_on "osum pwr nokbd script=burn 60;powermon raw;exit" high 400)
+RC=$(run cost_on "osum pwr pmonsay nokbd script=burn 60;powermon raw;exit" high 400)
 num "the counted run ends cleanly" "$RC" eq 21
-RC=$(run cost_off "osum pwr nopowermon nokbd script=burn 60;powermon raw;exit" high 400)
+RC=$(run cost_off "osum pwr pmonsay nopowermon nokbd script=burn 60;powermon raw;exit" high 400)
 num "the uncounted run ends cleanly" "$RC" eq 21
 
 ksays "$TMPD/cost_off.txt" on 0 "GEGENPROBE nopowermon: the accounting really is off"
@@ -493,7 +500,7 @@ fi
 
 echo "== 9. the day file -- plain text, readable with cat, and it stops growing =="
 
-RC=$(run day "osum pwr pmonnofloor nokbd script=burn 6;powermon day;powermon day;powermon day;cat /etc/powermon.days;exit" high 300)
+RC=$(run day "osum pwr pmonsay pmonnofloor nokbd script=burn 6;powermon day;powermon day;powermon day;cat /etc/powermon.days;exit" high 300)
 num "the run that writes the day file ends cleanly" "$RC" eq 21
 has "$TMPD/day.txt" "# osum powermon -- one line per day" "the file starts with a line saying what it is"
 has "$TMPD/day.txt" "day=" "and holds a day line"
@@ -522,7 +529,7 @@ ksays "$TMPD/day.txt" days 3 "the day mark moved once per write and no more"
 
 echo "== 10. the page: what it shows and what it refuses to claim =="
 
-RC=$(run page "osum pwr pmonnofloor nokbd script=burn 6;powermon;powermon graph;powermon bright;exit" high 300)
+RC=$(run page "osum pwr pmonsay pmonnofloor nokbd script=burn 6;powermon;powermon graph;powermon bright;exit" high 300)
 num "the run that draws the page ends cleanly" "$RC" eq 21
 has "$TMPD/page.txt" "Battery usage by program" "the page carries the heading Windows uses"
 has "$TMPD/page.txt" "measured total, proportionally attributed" \
@@ -535,7 +542,7 @@ has "$TMPD/page.txt" "Health" "the ageing of the battery is on the page"
 has "$TMPD/page.txt" "Runtime left" "and so is the runtime left"
 
 # On this host the page says the awkward thing itself.
-RC=$(run note "osum pwr nokbd script=burn 6;powermon;exit" high 300)
+RC=$(run note "osum pwr pmonsay nokbd script=burn 6;powermon;exit" high 300)
 num "the run with the floor on ends cleanly" "$RC" eq 21
 has "$TMPD/note.txt" "the measured draw did not change with the load on this" \
     "ON THIS HOST THE PAGE SAYS SO ITSELF: nothing could be attributed"
@@ -569,7 +576,7 @@ WSOCK="$TMPD/win.sock"; WOUT="$TMPD/win.txt"; WPPM="$TMPD/win.ppm"
 rm -f "$WSOCK" "$WOUT" "$WPPM"
 cp -f "$TMPD/gui.img" "$TMPD/live-win.img"
 timeout 240 qemu-system-x86_64 -kernel "$TMPD/k0.mb" -m 256 \
-    -append "gfx wm wig wmhold wiglong pmonnofloor wigapp=/bin/powermon nokbd nosched noproc nofs" \
+    -append "gfx wm wig wmhold wiglong pmonsay pmonnofloor wigapp=/bin/powermon nokbd nosched noproc nofs" \
     -serial "file:$WOUT" -display none -no-reboot -vga std \
     -monitor "unix:$WSOCK,server,nowait" \
     -drive "file=$TMPD/live-win.img,format=raw,if=ide,index=0" \
