@@ -1,0 +1,335 @@
+// lib/socks/socks5.fi -- SOCKS5 (RFC 1928) and HTTP CONNECT (RFC 7231).
+//
+// TWO SMALL PROTOCOLS THAT BUY MORE THAN THE TUNNEL DOES, for a system
+// this size. A VPN moves every packet of the machine; a proxy moves one
+// connection of one program, which is often exactly what is wanted -- and
+// it is also the seam through which Osum reaches Tor without pretending
+// to implement Tor. See docs/TUNNEL.md, section "Tor".
+//
+// Like `lib/wg/proto.fi` this file is PROTOCOL ONLY: it fills buffers and
+// reads buffers. It opens no socket. `kernel/user/proxy.fi` is the ring 3
+// half that owns the descriptor, and `tools/tunnel/socksdrv.fi` is the
+// same code driven against a real proxy on Linux.
+//
+// ================================================================ SOCKS5
+//
+// Three exchanges, all of them fixed shape:
+//
+//   1. GREETING          05 <n> <methods...>
+//      ANSWER            05 <method>            0x00 none, 0x02 user/pass,
+//                                               0xFF no acceptable method
+//   2. USERNAME/PASSWORD (RFC 1929, only if the answer was 0x02)
+//                        01 <ulen> <user> <plen> <pass>
+//      ANSWER            01 <status>            0 = ok
+//   3. REQUEST           05 <cmd> 00 <atyp> <addr> <port:2>
+//      ANSWER            05 <rep> 00 <atyp> <addr> <port:2>
+//
+// with ATYP 0x01 = four octets of IPv4, 0x03 = one length octet then a
+// host NAME, 0x04 = sixteen octets of IPv6.
+//
+// ============================ THE ONE THING THAT MATTERS MOST ============
+//
+// THE HOST NAME MUST GO OVER THE WIRE UNRESOLVED, as ATYP 0x03. This is
+// not a convenience, it is the whole point when the proxy is Tor. If the
+// program resolves `example.onion` or `forum.example` locally first, the
+// DNS query leaves the machine in the clear, from the real address, past
+// the proxy -- and the resolver, the ISP and everyone on the path learn
+// exactly who is about to visit what. The connection that follows is then
+// perfectly anonymous and perfectly pointless. curl calls the difference
+// `socks5h://` versus `socks5://`; Firefox calls it
+// `network.proxy.socks_remote_dns`. It is the single most common way a
+// proxy setup leaks.
+//
+// So `req_connect_name` exists and `req_connect_ip` is there for the case
+// where the caller genuinely has an address and no name. Osum has no
+// resolver at all (`lib/libc/net.fi`: "THERE IS NO NAME RESOLUTION"),
+// which for once is a help: there is no local lookup to leak through.
+//
+// ============================================================= HTTP PROXY
+//
+// The other half of "proxy support", and it is four lines:
+//
+//     CONNECT host:port HTTP/1.1\r\nHost: host:port\r\n\r\n
+//
+// then a status line, then the connection is a tunnel. The status line is
+// the only thing to parse and only the code matters. HTTP proxies also
+// take absolute-form request lines (`GET http://host/path`) for plain
+// HTTP; that is left to the caller, because it is a change to the request
+// the program was going to send anyway and not a protocol of its own.
+//
+// ================================================================= HONEST
+//
+// S1 NO BIND AND NO UDP ASSOCIATE. Only CONNECT. Tor supports neither
+//    either, and Osum has nothing that would use them.
+// S2 NO GSSAPI. Method 0x01 is not offered. Tor does not support it.
+// S3 USERNAME/PASSWORD IS SENT IN THE CLEAR, because RFC 1929 sends it in
+//    the clear. It is used here for Tor's STREAM ISOLATION and not for
+//    security: Tor takes any distinct credential pair as a request for a
+//    separate circuit, which is the supported way to keep two identities
+//    off the same exit node. Anyone using it as real authentication over
+//    an untrusted network has a problem this file cannot fix.
+// S4 TOR'S EXTENDED REPLY CODES 0xF0..0xF7 (onion service errors) are
+//    recognised by name so that a caller can say something better than
+//    "unknown error". They are not RFC 1928 and a strict client would
+//    call them a protocol violation.
+
+export {
+    greeting, greeting_reply, auth_userpass, auth_reply,
+    req_connect_name, req_connect_ip, reply_status, reply_len,
+    http_connect, http_status,
+    M_NONE, M_USERPASS, M_NONE_ACCEPTABLE,
+    R_OK, R_GENERAL, R_NOT_ALLOWED, R_NET_UNREACH, R_HOST_UNREACH,
+    R_REFUSED, R_TTL, R_CMD_UNSUP, R_ATYP_UNSUP,
+    R_ONION_DESC, R_ONION_DESC_BAD, R_ONION_INTRO, R_ONION_REND,
+    R_ONION_AUTH, R_ONION_AUTH_GONE, R_ONION_BAD_ADDR, R_ONION_TIMEOUT,
+    ATYP_IP4, ATYP_NAME, ATYP_IP6
+}
+
+const M_NONE: u64 = 0
+const M_USERPASS: u64 = 2
+const M_NONE_ACCEPTABLE: u64 = 255
+
+const ATYP_IP4: u64 = 1
+const ATYP_NAME: u64 = 3
+const ATYP_IP6: u64 = 4
+
+const R_OK: u64 = 0
+const R_GENERAL: u64 = 1
+const R_NOT_ALLOWED: u64 = 2
+const R_NET_UNREACH: u64 = 3
+const R_HOST_UNREACH: u64 = 4
+const R_REFUSED: u64 = 5
+const R_TTL: u64 = 6
+const R_CMD_UNSUP: u64 = 7
+const R_ATYP_UNSUP: u64 = 8
+
+// Tor's own additions (its socks-extensions specification).
+const R_ONION_DESC: u64 = 240
+const R_ONION_DESC_BAD: u64 = 241
+const R_ONION_INTRO: u64 = 242
+const R_ONION_REND: u64 = 243
+const R_ONION_AUTH: u64 = 244
+const R_ONION_AUTH_GONE: u64 = 245
+const R_ONION_BAD_ADDR: u64 = 246
+const R_ONION_TIMEOUT: u64 = 247
+
+fn ld8(p: u64, i: u64) -> u64 {
+    return (*((p + i) as *mut u8)) as u64
+}
+
+fn st8(p: u64, i: u64, v: u64) {
+    *((p + i) as *mut u8) = (v & 255) as u8
+}
+
+// The greeting. Two methods are offered when a credential is going to be
+// used, one when it is not -- offering user/password unconditionally
+// would make every connection look like an authenticated one, which is a
+// difference a proxy can log.
+fn greeting(out: u64, want_auth: bool) -> u64 {
+    st8(out, 0, 5)
+    if want_auth {
+        st8(out, 1, 2)
+        st8(out, 2, M_NONE)
+        st8(out, 3, M_USERPASS)
+        return 4
+    }
+    st8(out, 1, 1)
+    st8(out, 2, M_NONE)
+    return 3
+}
+
+// The two octet answer. Returns the method, or 255 for anything wrong.
+fn greeting_reply(inp: u64, n: u64) -> u64 {
+    if n < 2 || ld8(inp, 0) != 5 {
+        return M_NONE_ACCEPTABLE
+    }
+    return ld8(inp, 1)
+}
+
+// RFC 1929. `user` and `pass` are pointers and lengths; both are capped
+// at 255 octets by the wire format.
+fn auth_userpass(out: u64, user: u64, ulen: u64, pass: u64,
+    plen: u64) -> u64 {
+    if ulen > 255 || plen > 255 {
+        return 0
+    }
+    st8(out, 0, 1)
+    st8(out, 1, ulen)
+    var i: u64 = 0
+    while i < ulen {
+        st8(out, 2 + i, ld8(user, i))
+        i = i + 1
+    }
+    st8(out, 2 + ulen, plen)
+    i = 0
+    while i < plen {
+        st8(out, 3 + ulen + i, ld8(pass, i))
+        i = i + 1
+    }
+    return 3 + ulen + plen
+}
+
+fn auth_reply(inp: u64, n: u64) -> bool {
+    return n >= 2 && ld8(inp, 1) == 0
+}
+
+// CONNECT to a NAME. This is the form that matters -- see the note at the
+// top of the file. The name is passed through untouched and unresolved.
+fn req_connect_name(out: u64, name: u64, nlen: u64, port: u64) -> u64 {
+    if nlen == 0 || nlen > 255 {
+        return 0
+    }
+    st8(out, 0, 5)
+    st8(out, 1, 1) // CONNECT
+    st8(out, 2, 0)
+    st8(out, 3, ATYP_NAME)
+    st8(out, 4, nlen)
+    var i: u64 = 0
+    while i < nlen {
+        st8(out, 5 + i, ld8(name, i))
+        i = i + 1
+    }
+    st8(out, 5 + nlen, (port >> 8) & 255)
+    st8(out, 6 + nlen, port & 255)
+    return 7 + nlen
+}
+
+fn req_connect_ip(out: u64, ip: u64, port: u64) -> u64 {
+    st8(out, 0, 5)
+    st8(out, 1, 1)
+    st8(out, 2, 0)
+    st8(out, 3, ATYP_IP4)
+    st8(out, 4, (ip >> 24) & 255)
+    st8(out, 5, (ip >> 16) & 255)
+    st8(out, 6, (ip >> 8) & 255)
+    st8(out, 7, ip & 255)
+    st8(out, 8, (port >> 8) & 255)
+    st8(out, 9, port & 255)
+    return 10
+}
+
+// How long the reply is, given what has arrived so far. A SOCKS5 reply is
+// variable length because it echoes a bound address whose type is only
+// known from octet 3, so a caller has to be told how much more to read.
+// Returns 0 when it cannot be decided yet.
+fn reply_len(inp: u64, have: u64) -> u64 {
+    if have < 5 {
+        return 0
+    }
+    let atyp: u64 = ld8(inp, 3)
+    if atyp == ATYP_IP4 {
+        return 10
+    }
+    if atyp == ATYP_IP6 {
+        return 22
+    }
+    if atyp == ATYP_NAME {
+        return 7 + ld8(inp, 4)
+    }
+    return 0
+}
+
+// The reply code, or R_GENERAL if the answer is malformed.
+fn reply_status(inp: u64, n: u64) -> u64 {
+    if n < 2 || ld8(inp, 0) != 5 {
+        return R_GENERAL
+    }
+    return ld8(inp, 1)
+}
+
+// ------------------------------------------------------------ HTTP proxy
+
+fn digit(v: u64) -> u64 {
+    return 48 + (v % 10)
+}
+
+// `CONNECT host:port HTTP/1.1` with the Host header a 1.1 proxy requires.
+fn http_connect(out: u64, name: u64, nlen: u64, port: u64) -> u64 {
+    let c: [u8; 8] = [67, 79, 78, 78, 69, 67, 84, 32] // "CONNECT "
+    var w: u64 = 0
+    var i: u64 = 0
+    while i < 8 {
+        st8(out, w, c[i as usize] as u64)
+        w = w + 1
+        i = i + 1
+    }
+    // host:port, twice: once in the request line, once in the header.
+    var round: u64 = 0
+    while round < 2 {
+        i = 0
+        while i < nlen {
+            st8(out, w, ld8(name, i))
+            w = w + 1
+            i = i + 1
+        }
+        st8(out, w, 58) // ':'
+        w = w + 1
+        var p: u64 = port
+        var d: [u8; 8] = [0; 8]
+        var nd: u64 = 0
+        if p == 0 {
+            d[0] = 48
+            nd = 1
+        }
+        while p > 0 {
+            d[nd as usize] = digit(p) as u8
+            p = p / 10
+            nd = nd + 1
+        }
+        i = 0
+        while i < nd {
+            st8(out, w, d[(nd - 1 - i) as usize] as u64)
+            w = w + 1
+            i = i + 1
+        }
+        if round == 0 {
+            let h: [u8; 17] = [32, 72, 84, 84, 80, 47, 49, 46, 49, 13, 10,
+                72, 111, 115, 116, 58, 32] // " HTTP/1.1\r\nHost: "
+            i = 0
+            while i < 17 {
+                st8(out, w, h[i as usize] as u64)
+                w = w + 1
+                i = i + 1
+            }
+        }
+        round = round + 1
+    }
+    st8(out, w, 13)
+    st8(out, w + 1, 10)
+    st8(out, w + 2, 13)
+    st8(out, w + 3, 10)
+    return w + 4
+}
+
+// The three digit status of an HTTP status line, or 0. A proxy that says
+// anything other than 2xx has refused, and the body it sends after that
+// is not the tunnel the caller asked for.
+fn http_status(inp: u64, n: u64) -> u64 {
+    if n < 12 {
+        return 0
+    }
+    // "HTTP/1.x NNN"
+    if ld8(inp, 0) != 72 || ld8(inp, 1) != 84 || ld8(inp, 2) != 84
+        || ld8(inp, 3) != 80 {
+        return 0
+    }
+    var i: u64 = 4
+    while i < n && ld8(inp, i) != 32 {
+        i = i + 1
+    }
+    i = i + 1
+    if i + 3 > n {
+        return 0
+    }
+    var v: u64 = 0
+    var k: u64 = 0
+    while k < 3 {
+        let c: u64 = ld8(inp, i + k)
+        if c < 48 || c > 57 {
+            return 0
+        }
+        v = v * 10 + (c - 48)
+        k = k + 1
+    }
+    return v
+}

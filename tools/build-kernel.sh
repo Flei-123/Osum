@@ -9,6 +9,14 @@
 # etwas leicht anderes.
 #
 #   ./tools/build-kernel.sh AUSGABE [--stufe 0|1] [--cmdline "..."]
+#                                  [--ohne-tunnel]
+#
+# --ohne-tunnel baut den Kern mit `kernel/wg-aus.fi` statt `kernel/wg.fi`:
+# ohne WireGuard, ohne die Krypto darunter, ohne Notaus. Das ist die
+# Fassung fuer eine Auslieferung, die das Paket `vpn` nicht anbietet --
+# der Tunnel ist darin nicht abgeschaltet, sondern NICHT VORHANDEN. Der
+# Groessenunterschied zwischen beiden Abbildern ist der Preis des
+# Tunnels und steht in docs/TUNNEL-PAKETE.md.
 #
 # Ergebnis: AUSGABE ist ein Multiboot-Abbild (ELF32-Huelle, damit sowohl
 # `qemu-system-x86_64 -kernel` als auch ein Multiboot-Lader wie Limine es
@@ -29,8 +37,10 @@ fi
 shift
 
 STUFE=0
+OHNE_TUNNEL=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        --ohne-tunnel) OHNE_TUNNEL=1; shift ;;
         --stufe) STUFE=$2; shift 2 ;;
         *) echo "unbekannte Option: $1" >&2; exit 1 ;;
     esac
@@ -59,8 +69,24 @@ for f in boot isr switch smp hv; do
     as --64 -o "$TMP/$f.o" "kernel/arch/x86_64/$f.s" || exit 1
 done
 
-"$FIRNC" -o "$TMP/k.o" kernel/kmain.fi || exit 1
-"$FIRNC" -o "$TMP/uprog.o" kernel/uprog.fi || exit 1
+# Firn uebersetzt von `kmain.fi` aus den ganzen Baum. Um eine Datei
+# WEGZULASSEN, wird der Kernbaum kopiert und `wg.fi` durch den Stummel
+# ersetzt -- das Abbild entsteht dann ohne eine Zeile des Tunnels.
+# IMMER aus der Kopie uebersetzen, auch mit Tunnel. Sonst waeren die
+# beiden Abbilder auf verschiedenen Wegen entstanden, und der
+# Groessenunterschied in docs/TUNNEL-PAKETE.md waere nicht mehr allein
+# der Tunnel -- eine Gegenprobe hat genau das gezeigt: derselbe Kern,
+# einmal direkt und einmal aus /tmp uebersetzt, ergibt ein anderes
+# Abbild. Gleicher Weg fuer beide, dann ist die Differenz der Inhalt.
+cp -a kernel "$TMP/kernel" || exit 1
+if [[ $OHNE_TUNNEL == 1 ]]; then
+    cp -f kernel/wg-aus.fi "$TMP/kernel/wg.fi" || exit 1
+fi
+rm -f "$TMP/kernel/wg-aus.fi"
+KDIR="$TMP/kernel"
+
+"$FIRNC" -o "$TMP/k.o" "$KDIR/kmain.fi" || exit 1
+"$FIRNC" -o "$TMP/uprog.o" "$KDIR/uprog.fi" || exit 1
 
 # firnc0 stellt jedem Symbol `_F0.` voran, firnc1 `_F1.`
 # (docs/SELF_HOSTING.md im Firn-Repo).
