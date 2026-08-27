@@ -6,11 +6,11 @@
 //      guessing is not allowed. Multiboot puts a list of regions
 //      somewhere in memory and names its address in the information
 //      structure. Everything of type 1 is usable RAM.
-//   2. THE FRAME ALLOCATOR. One bit per 4 KiB page: set means taken. The
-//      bitmap lies in the kernel data area, 16 KiB for 512 MiB of RAM.
+//   2. THE FRAME ALLOCATOR. One bit per 4 KiB page: set means taken.
 //      Everything the boot loader did not report as usable stays taken
 //      forever, as does everything below `kernel_end` -- the kernel is
-//      standing in it.
+//      standing in it. HOW BIG THAT BITMAP IS COMES FROM THE MEMORY MAP
+//      AND NOT FROM A CONSTANT; the three steps are described below.
 //   3. THE HEAP. Frames are 4 KiB; a kernel needs 24 octets as well.
 //      Above the frames sits an implicit free list: every block carries
 //      its size and a flag, `kfree` merges neighbours again. First fit,
@@ -20,6 +20,79 @@
 // itself and print what they measured; `tools/kernel/run.sh` reads the
 // lines and compares. Allocating, freeing, allocating again -- and no two
 // blocks that overlap.
+//
+// ==================================================================
+// ROUND MEM: 512 MiB WAS NOT A PROPERTY OF THIS MACHINE.
+// IT WAS A PROPERTY OF TWO CONSTANTS.
+// ==================================================================
+//
+// The line above used to say: "the bitmap lies in the kernel data area,
+// 16 KiB for 512 MiB of RAM". That was true, and it was the whole
+// ceiling of the system. `kstate.BITMAP_BYTES` is 0x4000, and `frames`
+// was `BITMAP_BYTES * 8` -- 131072 frames, 512 MiB, no matter what the
+// loader reported. Measured on `main` (3389fbd), the same kernel with
+// four different `-m`:
+//
+//   -m 512   mmap: 523775 KiB usable   frames: 131072 covered   exit 21
+//   -m 2G    mmap: 2096639 KiB usable  frames: 131072 covered   exit 63
+//   -m 8G    mmap: 8388095 KiB usable  frames: 131072 covered   exit 63
+//   -m 64G   mmap: 67108351 KiB usable frames: 131072 covered   exit 63
+//
+// Read the third column: the kernel SAW every octet the loader
+// reported and MANAGED 512 MiB of it. And read the fourth: 63 is an
+// exception, not a shutdown. Above 512 MiB this kernel did not merely
+// waste memory, IT DIED --
+//
+//   *** EXCEPTION 14 #PF  err=0x0  cr2=0x7ffe1adc
+//
+// -- err=0x0 is "page not there", and 0x7ffe1adc is just under two
+// gibioctets, where QEMU puts the ACPI tables. That is the SECOND
+// constant: `kernel/boot.s` builds ONE page directory, 512 entries of
+// 2 MiB, and that is exactly ONE GIBIOCTET of identity mapping. A
+// bigger bitmap alone would have changed nothing; the kernel could not
+// have touched the frames it was handing out.
+//
+// THE ORDER IN WHICH IT IS UNDONE, and the order is the whole point --
+// each step may only use what the step before it has already made
+// usable. This is the hen and the egg, written down:
+//
+//   STEP 1  THE SMALL MAP, exactly as before. 16 KiB in the kernel data
+//           area (`kstate.BITMAP_OFF`), 131072 frames, the first 512 MiB.
+//           It needs no allocator, because it is not allocated: it is a
+//           fixed part of a data area the kernel already stands in. The
+//           memory map is walked, everything usable BELOW 512 MiB is
+//           released, the kernel, the map, the multiboot structure and
+//           the boot modules are taken back. After this step there is a
+//           working frame allocator -- a small one.
+//   STEP 2  THE MAP OF PAGES, grown with frames from step 1. For every
+//           gibioctet above the first that the memory map reports, ONE
+//           frame becomes a page directory of 512 entries of 2 MiB, and
+//           the PDPT gets a pointer to it. The frames for this come out
+//           of step 1, so they all lie below 512 MiB, so they are all
+//           inside the one gibioctet that `boot.s` mapped -- writable
+//           without a fault. The PDPT is found through CR3, not through
+//           a symbol: `cr3 -> PML4 -> PML4[0] -> PDPT`. After this step
+//           every octet the machine has can be READ AND WRITTEN.
+//   STEP 3  THE BIG MAP, allocated from step 1 and covering everything.
+//           `ceil(top / 4096 / 8)` octets, rounded up to whole frames,
+//           taken as ONE contiguous run (`frame_run_inner`). Every bit
+//           starts as "taken"; then the 16 KiB of step 1 are copied over
+//           the front, so the first 512 MiB keep their exact state --
+//           INCLUDING the run that was just handed out for the bitmap
+//           itself. Only then is the memory map walked a second time and
+//           everything above 512 MiB released. Whoever swaps steps 1 and
+//           3 gets a kernel that allocates its own bitmap out of a
+//           bitmap that does not exist yet.
+//
+// WHAT IT COSTS: one bit per 4 KiB frame is 32 KiB of bitmap per
+// gibioctet of RAM. Sixty-four gibioctets are 2 MiB of bitmap and 64
+// frames of page directories -- 2.25 MiB out of 65536, or 0.0034 %.
+// The numbers of a real run are in `docs/ROUNDMEM.md`.
+//
+// WHERE IT STOPS, honestly: the PDPT of this kernel has 512 entries and
+// one PML4 entry is used, so the identity map cannot go past 512 GiB.
+// `MAX_GIB` below is the number this kernel will map, and anything the
+// map reports above it is left alone rather than claimed.
 
 import serial
 import kstate
@@ -28,6 +101,8 @@ import cpu
 
 export {
     scan, frame_alloc, frame_free, frame_run, frame_free_run, frames_free,
+    // ---- round MEM ----
+    bitmap_octets, mapped_gib, frames_total, stress, probe_high,
     heap_init, kalloc, kfree, heap_blocks,
     frame_selftest, heap_selftest,
     FRAME_SIZE, cmdline, mods, mod_start, mod_end
@@ -35,6 +110,20 @@ export {
 
 const FRAME_SIZE: u64 = 4096
 const HEADER: u64 = 16 // size + flag per heap block
+
+// ---------------------------------------------------------- round MEM
+// One gibioctet in octets, and how many of them this kernel is willing
+// to map. 512 is the hard limit of one PDPT; 64 is what has been
+// measured (`tools/mem/run.sh`), and the two numbers are deliberately
+// not the same one.
+const GIB: u64 = 1073741824
+const PD_ENTRIES: u64 = 512
+const MAX_GIB: u64 = 512
+// Present | writable, and for a page directory entry also "huge page".
+const PTE_P_W: u64 = 0x3
+const PDE_HUGE: u64 = 0x83
+// The bits of a page table entry that are the physical address.
+const PTE_ADDR: u64 = 0x000FFFFFFFFFF000
 
 // ------------------------------------------------- the multiboot header
 
@@ -174,16 +263,273 @@ fn scan(state: u64, mbi: u64, kernel_end: u64) -> u64 {
         }
     }
 
+    kstate.set(state, kstate.FRAMES_FREE, count_free(state))
+
+    // ---------------------------------------------------- round MEM
+    // Step 1 is done: there is a frame allocator, and it manages the
+    // first 512 MiB. Steps 2 and 3 use it. Both do nothing at all when
+    // the machine has no more than that, so a small machine gets
+    // exactly the boot it got before this round.
+    idmap_grow(state, top)
+    bitmap_grow(state, mbi, kernel_end, top)
+    return entries
+}
+
+// ==================================================================
+// ROUND MEM, STEP 2: THE IDENTITY MAP FOLLOWS THE MEMORY MAP
+// ==================================================================
+//
+// `kernel/boot.s` builds PML4[0] -> PDPT[0] -> one page directory of
+// 512 entries of 2 MiB. That is one gibioctet, and it was enough for as
+// long as the frame allocator stopped at 512 MiB anyway. It is not
+// enough for eight gibioctets, and the proof of that is an exception,
+// not an opinion: with `-m 2G` the old kernel died reading the ACPI
+// tables at 0x7ffe1adc with err=0x0.
+//
+// The PDPT is not a symbol here. It is found the way the processor
+// finds it: CR3 holds the PML4, entry 0 of the PML4 holds the PDPT.
+// That keeps the assembler file out of it and cannot go stale.
+//
+// One frame per gibioctet, taken from step 1 -- so it lies below
+// 512 MiB, so it lies inside the gibioctet `boot.s` already mapped, so
+// writing 512 entries into it cannot fault. That is the reason this is
+// step 2 and not step 1.
+fn idmap_grow(state: u64, top: u64) -> u64 {
+    var want: u64 = (top + GIB - 1) / GIB
+    if want > MAX_GIB {
+        want = MAX_GIB
+    }
+    if want <= 1 {
+        kstate.set(state, kstate.MAPPED_GIB, 1)
+        return 1
+    }
+    let pml4: u64 = asm("mov rax, cr3", out("rax")) & PTE_ADDR
+    let pdpt: u64 = __mmio_read64(pml4 as *mut u64) & PTE_ADDR
+    if pdpt == 0 {
+        kstate.set(state, kstate.MAPPED_GIB, 1)
+        return 1
+    }
+    var g: u64 = 1
+    while g < want {
+        // Already mapped? Then leave it alone -- a second directory for
+        // the same gibioctet would leak a frame per boot.
+        if (__mmio_read64((pdpt + g * 8) as *mut u64) & (1 as u64)) == 0 {
+            let pd: u64 = frame_alloc_inner(state)
+            if pd == 0 {
+                g = want // out of frames: stop, do not pretend
+            } else {
+                var j: u64 = 0
+                while j < PD_ENTRIES {
+                    __mmio_write64((pd + j * 8) as *mut u64,
+                        (g * GIB + j * 2097152) | PDE_HUGE)
+                    j = j + 1
+                }
+                __mmio_write64((pdpt + g * 8) as *mut u64, pd | PTE_P_W)
+                g = g + 1
+            }
+        } else {
+            g = g + 1
+        }
+    }
+    // The processor may have cached the old, empty entries. Writing CR3
+    // with the value it already has throws the whole TLB away, and that
+    // is exactly what is wanted here -- this happens once per boot.
+    let cr3: u64 = asm("mov rax, cr3", out("rax"))
+    asm("mov cr3, rdi", in("rdi") cr3)
+    var have: u64 = 0
+    var k: u64 = 0
+    while k < want {
+        if (__mmio_read64((pdpt + k * 8) as *mut u64) & (1 as u64)) != 0 {
+            have = have + 1
+        }
+        k = k + 1
+    }
+    kstate.set(state, kstate.MAPPED_GIB, have)
+    return have
+}
+
+// ==================================================================
+// ROUND MEM, STEP 3: THE BITMAP IS AS BIG AS THE MACHINE
+// ==================================================================
+//
+// One bit per frame, so `ceil(top / 4096 / 8)` octets, rounded up to
+// whole frames and taken as ONE contiguous run. Sixty-four gibioctets
+// are 16777216 frames, so 2 MiB of bitmap, so 512 frames.
+//
+// The copy at the end is the careful part. The new map starts as all
+// ones -- everything taken -- and then the 16 KiB of step 1 are written
+// over its front. That carries over EVERY decision step 1 made,
+// including the run that `frame_run_inner` has just marked as taken for
+// this very bitmap. Only after that does the memory map get walked a
+// second time, and only frames at or above the old ceiling are
+// released; the low ones already have the right answer.
+fn bitmap_grow(state: u64, mbi: u64, kernel_end: u64, top: u64) -> u64 {
+    let old_frames: u64 = kstate.BITMAP_BYTES * 8
+    var want_frames: u64 = (top + FRAME_SIZE - 1) / FRAME_SIZE
+    let mapped: u64 = kstate.get(state, kstate.MAPPED_GIB)
+    // Never claim a frame that step 2 could not map. A number that big
+    // would be a lie the first time somebody wrote to it.
+    if want_frames > mapped * (GIB / FRAME_SIZE) {
+        want_frames = mapped * (GIB / FRAME_SIZE)
+    }
+    if want_frames <= old_frames {
+        kstate.set(state, kstate.BITMAP_OCTETS, kstate.BITMAP_BYTES)
+        return old_frames
+    }
+    let octets: u64 = (want_frames + 7) / 8
+    let need: u64 = (octets + FRAME_SIZE - 1) / FRAME_SIZE
+    let base: u64 = frame_run_inner(state, need)
+    if base == 0 {
+        // No room for the big map. The small one keeps working, and the
+        // machine boots with 512 MiB instead of dying.
+        kstate.set(state, kstate.BITMAP_OCTETS, kstate.BITMAP_BYTES)
+        return old_frames
+    }
+    fill8(base, need * FRAME_SIZE, 0xFF)
+    let old: u64 = state + kstate.BITMAP_OFF
+    var i: u64 = 0
+    while i < kstate.BITMAP_BYTES {
+        kstate.set8(base + i, kstate.get8(old + i) as u8)
+        i = i + 1
+    }
+    kstate.set(state, kstate.BITMAP, base)
+    kstate.set(state, kstate.BITMAP_FRAMES, want_frames)
+    kstate.set(state, kstate.BITMAP_OCTETS, octets)
+
+    // The second walk. Only what lies at or above the old ceiling.
+    if (kstate.get32(mbi + MB_FLAGS) & 64) != 0 {
+        let len: u64 = kstate.get32(mbi + MB_MMAP_LEN)
+        let addr: u64 = kstate.get32(mbi + MB_MMAP_ADDR)
+        var p: u64 = addr
+        while p < addr + len {
+            let size: u64 = kstate.get32(p)
+            let b: u64 = __mmio_read64((p + 4) as *mut u64)
+            let l: u64 = __mmio_read64((p + 12) as *mut u64)
+            if kstate.get32(p + 20) == 1 {
+                release_from(base, want_frames, b, l, old_frames)
+            }
+            if size == 0 {
+                p = addr + len
+            } else {
+                p = p + size + 4
+            }
+        }
+        reserve(base, want_frames, kstate.get32(mbi + MB_MMAP_ADDR),
+            kstate.get32(mbi + MB_MMAP_LEN))
+    }
+    reserve(base, want_frames, 0, kernel_end)
+    reserve(base, want_frames, mbi, 4096)
+    let mc: u64 = mods(mbi)
+    if mc != 0 {
+        reserve(base, want_frames, kstate.get32(mbi + MB_MODS_ADDR),
+            mc * MOD_ENTRY)
+        var m: u64 = 0
+        while m < mc {
+            let von: u64 = mod_start(mbi, m)
+            let bis: u64 = mod_end(mbi, m)
+            if bis > von {
+                reserve(base, want_frames, von, bis - von)
+            }
+            m = m + 1
+        }
+    }
+    kstate.set(state, kstate.FRAMES_FREE, count_free(state))
+    return want_frames
+}
+
+// How many octets the frame bitmap really occupies, and how many
+// gibioctets are identity mapped. Two numbers `kmain.fi` prints and
+// `tools/mem/run.sh` reads.
+fn bitmap_octets(state: u64) -> u64 {
+    return kstate.get(state, kstate.BITMAP_OCTETS)
+}
+
+fn mapped_gib(state: u64) -> u64 {
+    return kstate.get(state, kstate.MAPPED_GIB)
+}
+
+fn frames_total(state: u64) -> u64 {
+    return kstate.get(state, kstate.BITMAP_FRAMES)
+}
+
+fn fill8(at: u64, n: u64, v: u64) {
+    var i: u64 = 0
+    // Eight octets at a time. At 64 GiB this loop runs over two
+    // mebioctets, and one octet at a time is a measurable part of the
+    // boot in TCG.
+    let w: u64 = v * 0x0101010101010101
+    while i + 8 <= n {
+        __mmio_write64((at + i) as *mut u64, w)
+        i = i + 8
+    }
+    while i < n {
+        kstate.set8(at + i, v as u8)
+        i = i + 1
+    }
+}
+
+// OCTET BY OCTET WHERE IT CAN BE. A machine with 64 GiB has 16777216
+// frames; counting them one bit at a time is 16 million iterations of
+// interpreted code, and the boot takes visibly longer for a number
+// nobody reads twice.
+fn count_free(state: u64) -> u64 {
+    let bitmap: u64 = kstate.get(state, kstate.BITMAP)
+    let frames: u64 = kstate.get(state, kstate.BITMAP_FRAMES)
     var free: u64 = 0
     var f: u64 = 0
     while f < frames {
-        if !bit_get(bitmap, f) {
-            free = free + 1
+        if (f % 8) == 0 && f + 8 <= frames {
+            let o: u64 = kstate.get8(bitmap + f / 8)
+            if o == 0 {
+                free = free + 8
+                f = f + 8
+            } else if o == 0xFF {
+                f = f + 8
+            } else {
+                var k: u64 = 0
+                while k < 8 {
+                    if (o & (1 << k)) == 0 {
+                        free = free + 1
+                    }
+                    k = k + 1
+                }
+                f = f + 8
+            }
+        } else {
+            if !bit_get(bitmap, f) {
+                free = free + 1
+            }
+            f = f + 1
         }
-        f = f + 1
     }
-    kstate.set(state, kstate.FRAMES_FREE, free)
-    return entries
+    return free
+}
+
+// `release`, but it leaves everything below `from` alone. That is what
+// makes the second walk of the memory map safe: the low frames already
+// carry the answer step 1 worked out, kernel and modules included.
+fn release_from(bitmap: u64, frames: u64, base: u64, length: u64,
+    from: u64) {
+    var f: u64 = (base + FRAME_SIZE - 1) / FRAME_SIZE
+    if f < from {
+        f = from
+    }
+    var last: u64 = (base + length) / FRAME_SIZE
+    if last > frames {
+        last = frames
+    }
+    while f < last {
+        // A whole octet of eight frames at once, when the run is long
+        // enough and starts on an octet boundary. On 64 GiB this is the
+        // difference between a boot and a coffee break.
+        if (f % 8) == 0 && f + 8 <= last {
+            kstate.set8(bitmap + f / 8, 0 as u8)
+            f = f + 8
+        } else {
+            bit_clear(bitmap, f)
+            f = f + 1
+        }
+    }
 }
 
 // Mark a region as free -- only whole frames that lie completely in it.
@@ -251,10 +597,40 @@ fn frame_alloc(state: u64) -> u64 {
     return r
 }
 
+// ROUND MEM: WHERE THE SEARCH STARTS.
+//
+// This used to start at frame 0 every single time. With 131072 frames
+// that was a quarter of a mebioctet of bitmap to walk in the worst case
+// and nobody noticed. With 16777216 frames it is two mebioctets per
+// call, and taking two hundred thousand frames in a row turns into
+// something quadratic: measured, the stress test did not finish.
+//
+// The fix is the one `fs.fi` already uses for the block bitmap: keep
+// the last frame that was handed out and start there, and let a free
+// take the hint back down if it frees something lower. It is a hint and
+// not a promise -- the search still wraps around to 0 and covers the
+// whole map, so nothing can be lost, only found sooner.
+fn hint_of(state: u64) -> u64 {
+    let h: u64 = kstate.get(state, kstate.FRAME_HINT)
+    if h >= kstate.get(state, kstate.BITMAP_FRAMES) {
+        return 0
+    }
+    return h
+}
+
 fn frame_alloc_inner(state: u64) -> u64 {
+    let r: u64 = scan_range(state, hint_of(state),
+        kstate.get(state, kstate.BITMAP_FRAMES))
+    if r != 0 {
+        return r
+    }
+    return scan_range(state, 0, hint_of(state))
+}
+
+fn scan_range(state: u64, from: u64, to: u64) -> u64 {
     let bitmap: u64 = kstate.get(state, kstate.BITMAP)
-    let frames: u64 = kstate.get(state, kstate.BITMAP_FRAMES)
-    var f: u64 = 0
+    let frames: u64 = to
+    var f: u64 = from
     while f < frames {
         // A full octet is skipped in one go: that is the reason for the
         // bitmap in the first place.
@@ -264,6 +640,7 @@ fn frame_alloc_inner(state: u64) -> u64 {
             if !bit_get(bitmap, f) {
                 bit_set(bitmap, f)
                 kstate.set(state, kstate.FRAMES_FREE, frames_free(state) - 1)
+                kstate.set(state, kstate.FRAME_HINT, f)
                 return f * FRAME_SIZE
             }
             f = f + 1
@@ -287,6 +664,11 @@ fn frame_free_inner(state: u64, addr: u64) {
     if bit_get(bitmap, f) {
         bit_clear(bitmap, f)
         kstate.set(state, kstate.FRAMES_FREE, frames_free(state) + 1)
+        // A frame that was just given back is the best candidate there
+        // is; the next search may start there.
+        if f < kstate.get(state, kstate.FRAME_HINT) {
+            kstate.set(state, kstate.FRAME_HINT, f)
+        }
     }
 }
 
@@ -344,6 +726,115 @@ fn frame_free_run(state: u64, addr: u64, n: u64) {
         i = i + 1
     }
     unlock(state, flags)
+}
+
+// ==================================================================
+// ROUND MEM: THE STRESS TEST, AND WHY IT IS BUILT THIS WAY
+// ==================================================================
+//
+// The claim is "many frames taken and given back, and not one lost".
+// A test that only counts would pass on a kernel that hands out the
+// same frame twice, so this one WRITES INTO EVERY FRAME IT GETS and
+// reads it back before it lets go. Two things are proved at once: the
+// bookkeeping adds up, and every frame is really there -- which is the
+// part that the old kernel could not do above one gibioctet.
+//
+// THE LIST LIVES IN THE FRAMES THEMSELVES. Two hundred thousand
+// addresses are 1.6 MiB, and a kernel that needs a table that size to
+// test its allocator has a second problem. Instead each frame carries
+// the address of the one before it in its first eight octets and a
+// value derived from its own address in the next eight:
+//
+//     [0]  the previous frame, 0 at the end of the chain
+//     [8]  addr XOR 0xA5A5A5A5A5A5A5A5   -- computed, not remembered
+//
+// A frame handed out twice breaks the chain or the check word, and both
+// are noticed. A value that is merely remembered would not notice
+// anything.
+fn stress(state: u64, want: u64) -> bool {
+    let dreh: u64 = 0xA5A5A5A5A5A5A5A5
+    let before: u64 = frames_free(state)
+    var head: u64 = 0
+    var got: u64 = 0
+    var high: u64 = 0
+    var going: bool = true
+    while got < want && going {
+        let f: u64 = frame_alloc(state)
+        if f == 0 {
+            going = false
+        } else {
+            __mmio_write64(f as *mut u64, head)
+            __mmio_write64((f + 8) as *mut u64, f ^ dreh)
+            head = f
+            if f > high {
+                high = f
+            }
+            got = got + 1
+        }
+    }
+    kstate.set(state, kstate.STRESS_GOT, got)
+    kstate.set(state, kstate.STRESS_HIGH, high)
+    kstate.set(state, kstate.STRESS_BEFORE, before)
+    kstate.set(state, kstate.STRESS_LOW, frames_free(state))
+
+    var bad: u64 = 0
+    var seen: u64 = 0
+    var f2: u64 = head
+    while f2 != 0 {
+        if __mmio_read64((f2 + 8) as *mut u64) != (f2 ^ dreh) {
+            bad = bad + 1
+        }
+        let next: u64 = __mmio_read64(f2 as *mut u64)
+        frame_free(state, f2)
+        seen = seen + 1
+        f2 = next
+    }
+    kstate.set(state, kstate.STRESS_BAD, bad)
+    kstate.set(state, kstate.STRESS_SEEN, seen)
+    kstate.set(state, kstate.STRESS_AFTER, frames_free(state))
+    return bad == 0 && seen == got && frames_free(state) == before
+}
+
+// THE HIGHEST FRAME THE MACHINE HAS, touched once.
+//
+// The stress test above walks upwards from the bottom; to reach the top
+// of a machine with 64 GiB it would have to take sixteen million
+// frames. This does it in one step instead: take the second to last
+// frame the memory map covers, write a pattern into it, read it back,
+// give it up again. If step 2 did not map that gibioctet, this faults --
+// which is exactly what the old kernel did at 0x7ffe1adc.
+fn probe_high(state: u64) -> bool {
+    let marke: u64 = 0xDEADBEEFCAFEBABE
+    let dreh: u64 = 0x5A5A5A5A5A5A5A5A
+    let bitmap: u64 = kstate.get(state, kstate.BITMAP)
+    let frames: u64 = kstate.get(state, kstate.BITMAP_FRAMES)
+    if frames < 2 {
+        return false
+    }
+    var f: u64 = frames - 1
+    var found: u64 = 0
+    // Downwards from the top to the first frame that is really free.
+    // The very last frames of a machine are often the ACPI tables.
+    while f > 0 && found == 0 {
+        if !bit_get(bitmap, f) {
+            found = f
+        }
+        f = f - 1
+    }
+    if found == 0 {
+        return false
+    }
+    bit_set(bitmap, found)
+    let addr: u64 = found * FRAME_SIZE
+    __mmio_write64(addr as *mut u64, marke)
+    __mmio_write64((addr + FRAME_SIZE - 8) as *mut u64,
+        addr ^ dreh)
+    let ok1: bool = __mmio_read64(addr as *mut u64) == marke
+    let ok2: bool = __mmio_read64((addr + FRAME_SIZE - 8) as *mut u64)
+        == (addr ^ dreh)
+    bit_clear(bitmap, found)
+    kstate.set(state, kstate.PROBE_ADDR, addr)
+    return ok1 && ok2
 }
 
 // ---------------------------------------------------------- the heap
