@@ -74,6 +74,9 @@ import vfsops
 import part
 import devfs
 import ftype
+// RUNDE K17: der USB-Baum -- Regler, Kern, Klassen.
+import xhci
+import usb
 
 // Indices in the table out of isr.s.
 const V_DF_STACK: u64 = 52
@@ -346,6 +349,16 @@ fn kernel_main(mbi: u64, vectors: u64, state: u64, kernel_end: u64,
     //     kernel it saw before.
     netsvc.stage(state)
 
+    // 7e-ter. RUNDE K17: DER USB-BAUM. Hier und nicht spaeter, aus drei
+    //     Gruenden: der Bus muss gelesen sein (`hw.stage`, Runde K2),
+    //     die Meldungen muessen ankommen koennen (der APIC steht seit
+    //     derselben Runde), und alles darunter braucht ihn -- die Shell,
+    //     die gleich in `osum` startet, liest von einer Tastatur, und
+    //     der Stick, den sie einhaengen soll, muss vorher ein
+    //     Blockgeraet sein. Ohne das Wort `usb` ist das hier EINE
+    //     gedruckte Zeile und sonst nichts.
+    usb_stage(state)
+
     // 7f. round K1: a system on that disk. Mount what the host built,
     //     load /bin/sh out of it, and let it run until it is done.
     osum(state)
@@ -397,6 +410,7 @@ fn kernel_main(mbi: u64, vectors: u64, state: u64, kernel_end: u64,
     // hat. Haette `mem.scan` seinen Bereich nicht reserviert, stuende
     // hier jetzt eine andere Summe.
     bootmod.recheck(state)
+    usb.report(state)
 
     serial.puts((&s_done[0]) as u64)
     serial.nl()
@@ -1015,7 +1029,6 @@ fn scheduler(state: u64) {
     var s_done: [u8; 13] = "sched: done\0\0"
     var s_sp: [u8; 2] = " \0"
 
-    let mode: u64 = kstate.get(state, kstate.MODE)
     if kstate.mode_on(state, kstate.M_NOSCHED) {
         serial.puts((&s_skip[0]) as u64)
         serial.nl()
@@ -1745,8 +1758,10 @@ fn k14_setup(state: u64) {
     var p_proc: [u8; 6] = "/proc "
     var p_dev: [u8; 5] = "/dev "
     var p_mnt: [u8; 5] = "/mnt "
-    let mode: u64 = kstate.get(state, kstate.MODE)
-    kstate.set(state, kstate.K14_MODE, mode)
+    // RUNDE K17: K14_MODE ist die Kopie DES WORTES, in dem die Schalter
+    // dieser Runde liegen -- seit dem Modusvektor ist das Wort 3 und
+    // nicht mehr Wort 0.
+    kstate.set(state, kstate.K14_MODE, kstate.mode_word(state, 3))
     if !kstate.mode_on(state, kstate.M_VFS) {
         return
     }
@@ -1856,6 +1871,138 @@ fn say_k14(state: u64) {
     serial.nl()
 }
 
+// RUNDE K17. Die Naht ist absichtlich duenn: was USB ist, steht in
+// `usb.fi` und `xhci.fi`, und `kmain.fi` bekommt vier Zeilen statt
+// vierzig. Dieselbe Ueberlegung wie bei `hw.stage` in Runde K2 -- an
+// dieser Datei arbeiten mehrere Runden gleichzeitig, und eine Naht laesst
+// sich verschmelzen, ein ueber tausend Zeilen verteilter Unterschied
+// nicht.
+fn usb_stage(state: u64) {
+    usb.stage(state)
+    if !usb.ready(state) {
+        return
+    }
+    // Ein Zeigegeraet braucht einen Anschlag, auch wenn es nicht am 8042
+    // haengt. Steht schon ein PS/2-Zeiger, bleibt dessen Einstellung.
+    if usb.have_mouse(state) {
+        ps2m.adopt(state, 1024, 768)
+    }
+    usb_hold(state)
+    // DIE GEGENPROBE ZUM ABZIEHEN. Sie steht hier und nicht in der
+    // Bibliothek, weil sie eine Anforderung der Kommandozeile ist und
+    // kein Zustand des Geraets.
+    if kstate.mode_on(state, kstate.M_UNPLUG) {
+        usb_unplug(state)
+    }
+}
+
+// STILLHALTEN, DAMIT VON AUSSEN JEMAND TIPPEN KANN. Dasselbe, was
+// `wmhold` seit Runde K10 fuer das Bildschirmfoto tut: der Kern kommt
+// zur Ruhe, meldet das auf der seriellen Leitung, und erst danach
+// schickt der Testlaeufer seine Maus- und Tastenbefehle in den
+// QEMU-Monitor. Ohne diese Marke faellt der erste Klick in einen Kern,
+// der noch aufzaehlt.
+//
+// Mit `usbpoll` wird waehrenddessen SELBST nachgesehen statt auf die
+// Meldung zu warten -- die Gegenprobe zu `usbnoirq`.
+fn usb_hold(state: u64) {
+    var s_h: [u8; 10] = "k17: hold\0"
+    var s_r: [u8; 10] = "k17: free\0"
+    if !kstate.mode_on(state, kstate.M_USBHOLD) {
+        return
+    }
+    let pollen: bool = kstate.mode_on(state, kstate.M_USBPOLL)
+    serial.puts((&s_h[0]) as u64)
+    serial.nl()
+    var i: u64 = 0
+    while i < 900 {
+        if pollen {
+            usb.poll(state)
+        }
+        sched.sleep_ticks(state, 1)
+        i = i + 1
+    }
+    usb.report(state)
+    serial.puts((&s_r[0]) as u64)
+    serial.nl()
+}
+
+// Was nach dem Abziehen noch geht. Drei Zeilen, und jede einzelne ist
+// eine Zusage: der Kern laeuft weiter, das Blockgeraet meldet sich als
+// nicht da, und ein offener Deskriptor darauf gibt ENODEV (das prueft
+// `/bin/k17` aus Ring 3, nicht der Kern).
+fn usb_unplug(state: u64) {
+    var s_a: [u8; 22] = "k17: before unplug=\0\0\0"
+    var s_b: [u8; 21] = "k17: after unplug=\0\0\0"
+    var s_p: [u8; 11] = "  present=\0"
+    var s_d: [u8; 11] = "  devices=\0"
+    serial.puts((&s_a[0]) as u64)
+    serial.dec(yes(blk.present_on(state, blk.DEV_USB)))
+    serial.puts((&s_d[0]) as u64)
+    serial.dec(usb.count(state))
+    serial.nl()
+    usb.unplug_now(state)
+    serial.puts((&s_b[0]) as u64)
+    serial.dec(yes(blk.present_on(state, blk.DEV_USB)))
+    serial.puts((&s_d[0]) as u64)
+    serial.dec(usb.count(state))
+    serial.puts((&s_p[0]) as u64)
+    serial.dec(usb.unplugs(state))
+    serial.nl()
+}
+
+// RUNDE K17: EIN STICK, EINGEHAENGT WIE JEDE ANDERE PLATTE.
+//
+// Hier steht keine einzige Zeile ueber USB. `part.scan` bekommt eine
+// Geraetenummer, `vfs.mount_at` bekommt eine Geraetenummer, und `fat.fi`
+// liest Bloecke ueber `blk.read_on`. Dass diese Bloecke ueber vier
+// Endpunkte, einen Befehlsblock und eine Quittung gekommen sind, weiss
+// keiner davon -- und genau das IST die Zusage der Schnittstelle aus
+// Runde 62. Sie wird hier zum dritten Mal eingeloest (nach NVMe in K2
+// und dem ATA-Sklaven in K14).
+fn usb_mount(state: u64) {
+    var s_h: [u8; 12] = "k17: stick \0"
+    var s_p: [u8; 8] = "parts=\0\0"
+    var s_f: [u8; 9] = "  first=\0"
+    var s_n: [u8; 10] = "  blocks=\0"
+    var s_m: [u8; 9] = "  mount=\0"
+    var p_usb: [u8; 5] = "/usb\0"
+    if !kstate.mode_on(state, kstate.M_USBSTICK) {
+        return
+    }
+    if !usb.msc_ready(state) {
+        return
+    }
+    if !vfs.ready(state) {
+        return
+    }
+    var first: u64 = 0
+    var anzahl: u64 = blk.blocks_on(state, blk.DEV_USB)
+    let nparts: u64 = part.scan(state, blk.DEV_USB)
+    if nparts != 0 {
+        var pick: u64 = part.find_kind(state, blk.DEV_USB, part.T_FAT32)
+        if pick >= part.MAX_PARTS {
+            pick = part.find_kind(state, blk.DEV_USB, part.T_BASIC)
+        }
+        if pick < part.MAX_PARTS {
+            first = part.start(state, pick)
+            anzahl = part.blocks(state, pick)
+        }
+    }
+    let m: u64 = vfs.mount_at(state, vfsops.FS_FAT, blk.DEV_USB, first,
+        anzahl, (&p_usb[0]) as u64, 0)
+    serial.puts((&s_h[0]) as u64)
+    serial.puts((&s_p[0]) as u64)
+    serial.dec(nparts)
+    serial.puts((&s_f[0]) as u64)
+    serial.dec(first)
+    serial.puts((&s_n[0]) as u64)
+    serial.dec(anzahl)
+    serial.puts((&s_m[0]) as u64)
+    serial.dec(yes(m < vfs.MAX_MNT))
+    serial.nl()
+}
+
 fn osum(state: u64) {
     if wm_owns_shell(state) {
         return
@@ -1918,6 +2065,7 @@ fn osum(state: u64) {
     // Shell, die /proc erst nach ihrem Start bekaeme, haette es zum
     // Zeitpunkt ihres eigenen `open` noch nicht.
     k14_setup(state)
+    usb_mount(state)
     list_dir(state, (&p_bin[0]) as u64, (&s_bin[0]) as u64)
 
     // ================================================== RUNDE K13
@@ -2041,6 +2189,7 @@ fn osum(state: u64) {
     say_k14(state)
     say_posix(state)
     perm.report(state)
+    usb.report(state)
 }
 
 // ROUND K4: what the system call layer did in this run. Six counters, one
@@ -2872,6 +3021,50 @@ fn mode_of(state: u64, cmd: u64) {
     }
     if find(cmd, (&w_vfsall[0]) as u64, 6) != 0 {
         kstate.mode_add(state, kstate.M_VFSALL)
+    }
+    // ROUNDE K17. `usb` schaltet den Baum an; die acht anderen sind
+    // GEGENPROBEN. `nousb` und nicht `noxhci`: die Gegenprobe soll die
+    // GANZE Runde ausschalten und nicht nur den Regler -- und sie darf
+    // sich nicht selbst wieder einschalten, weshalb `usb` erst gesucht
+    // wird und `nousb` danach das Bit wieder loeschen koennte. Es wird
+    // stattdessen ein zweites Bit gesetzt und `usb.stage` sieht beide
+    // an; ein Schalter, den sein eigenes Argument aufhebt, ist keiner
+    // (die Lehre aus `nic`/`net` in Runde K8).
+    var w_usb: [u8; 4] = "usb\0"
+    var w_nousb: [u8; 6] = "nousb\0"
+    var w_upoll: [u8; 8] = "usbpoll\0"
+    var w_nohid: [u8; 6] = "nohid\0"
+    var w_nomsc: [u8; 6] = "nomsc\0"
+    var w_unplug: [u8; 7] = "unplug\0"
+    var w_noirq2: [u8; 9] = "usbnoirq\0"
+    var w_stick: [u8; 9] = "usbstick\0"
+    var w_hold: [u8; 8] = "usbhold\0"
+    if find(cmd, (&w_usb[0]) as u64, 3) != 0 {
+        kstate.mode_add(state, kstate.M_USB)
+    }
+    if find(cmd, (&w_nousb[0]) as u64, 5) != 0 {
+        kstate.mode_add(state, kstate.M_NOUSB)
+    }
+    if find(cmd, (&w_upoll[0]) as u64, 7) != 0 {
+        kstate.mode_add(state, kstate.M_USBPOLL)
+    }
+    if find(cmd, (&w_nohid[0]) as u64, 5) != 0 {
+        kstate.mode_add(state, kstate.M_NOHID)
+    }
+    if find(cmd, (&w_nomsc[0]) as u64, 5) != 0 {
+        kstate.mode_add(state, kstate.M_NOMSC)
+    }
+    if find(cmd, (&w_unplug[0]) as u64, 6) != 0 {
+        kstate.mode_add(state, kstate.M_UNPLUG)
+    }
+    if find(cmd, (&w_noirq2[0]) as u64, 8) != 0 {
+        kstate.mode_add(state, kstate.M_NOUSBIRQ)
+    }
+    if find(cmd, (&w_stick[0]) as u64, 8) != 0 {
+        kstate.mode_add(state, kstate.M_USBSTICK)
+    }
+    if find(cmd, (&w_hold[0]) as u64, 7) != 0 {
+        kstate.mode_add(state, kstate.M_USBHOLD)
     }
 }
 
