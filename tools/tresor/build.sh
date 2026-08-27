@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# tools/tresor/bauen.sh -- builds the programs of this round into a
+# tools/tresor/build.sh -- builds the programs of this round into a
 # directory, so that the runner and a person poking at it by hand use the
 # very same command.
 #
-#   bash tools/tresor/bauen.sh <zielverzeichnis> [stufe] [programm ...]
+#   bash tools/tresor/build.sh <zielverzeichnis> [stufe] [programm ...]
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)

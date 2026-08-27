@@ -14,5 +14,5 @@ if [ "$NEU" = 1 ]; then
     rm -f "$OUT/ziel.img"
     head -c $((${ZIEL_MIB:-256} * 1024 * 1024)) /dev/zero > "$OUT/ziel.img"
 fi
-OUT="$OUT" bash tools/install/lauf.sh "$NAME" "$WIE" "$SKRIPT" "$LIMIT"
+OUT="$OUT" bash tools/install/oneshot.sh "$NAME" "$WIE" "$SKRIPT" "$LIMIT"
 echo "ENDE $NAME"

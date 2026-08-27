@@ -46,7 +46,7 @@ Anstecken/Abziehen im Zeitgeber), `devfs.fi` (`/dev/usb`), `sys.fi`
 (zwei Aufrufe, `mnt_gone`, `source_dev`), `sched.fi` (`KSTACK_FRAMES`
 4 → 8), `kstate.fi` (`kdata` 0x50000 → 0x58000, der Vorrat `K17_OFF`,
 neun Modusbits), `boot.s`, `kmain.fi`, `lib/libc/kcall.fi`,
-`tools/kernel/karte.py`, `test.sh`.
+`tools/kernel/memmap.py`, `test.sh`.
 
 ---
 
@@ -169,7 +169,7 @@ oben; und eine Radumdrehung nach vorn ist bei USB +1, bei PS/2 0x0F.
 > Zeichen wie die PS/2-Tastatur — derselbe Test, zweimal gefahren.
 
 Gemacht, und zwar so: dieselbe Folge von `sendkey`-Befehlen aus dem
-QEMU-Monitor (`tools/k11/tasten.py` aus Runde K11), dasselbe
+QEMU-Monitor (`tools/k11/keys.py` aus Runde K11), dasselbe
 Plattenabbild, dieselbe Shell — einmal mit `-device usb-kbd` und einmal
 ohne. Verglichen werden
 
@@ -358,7 +358,7 @@ Seitenfehler unter seinem eigenen Stapel — **acht Zusagen von K14
 fielen**, und zwar an einer Gegenprobe, die mit Stapeln nichts zu tun
 hat.
 
-Behoben (Commit `da5debe`), und dazu die Konsequenz: **`tools/kernel/karte.py`
+Behoben (Commit `da5debe`), und dazu die Konsequenz: **`tools/kernel/memmap.py`
 rechnet die Modusbits ab sofort nach**, dieselbe Regel wie bei `kdata`
 und bei den Vektoren — derselbe Name darf mehrfach dastehen, zwei
 verschiedene Namen nicht auf demselben Wert. Geprüft werden `kstate.fi`
@@ -391,7 +391,7 @@ wirklich gefragt.
 * Die Antwort auf `READ CAPACITY` überschrieb die von `INQUIRY`, und
   danach war der Herstellername in der Meldung leer. Ein Fehler, der nur
   in der **Ausgabe** stand und nicht im Treiber.
-* `hole-firnc.sh` baut in `/tmp/firn-pin-<commit>`, und mehrere Runden
+* `fetch-firnc.sh` baut in `/tmp/firn-pin-<commit>`, und mehrere Runden
   arbeiten gleichzeitig an diesem Baum. Zwei gleichzeitige Läufe räumen
   einander das Bauverzeichnis weg. Umgangen, nicht behoben: der fertige
   Übersetzer wurde aus dem Hauptbaum kopiert.

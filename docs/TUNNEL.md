@@ -72,7 +72,7 @@ ChaCha20, Poly1305 and X25519 were written in Firn's round B5 for a TLS
 1.3 client. Osum cannot reach them: `vendor/firn/COMMIT` pins Firn at
 `c66c6bcd5`, a commit from before round B5, and that pin is what makes a
 kernel bug distinguishable from a compiler bug while Firn moves
-(`vendor/firn/hole-firnc.sh` states the reasoning). Moving the pin would
+(`vendor/firn/fetch-firnc.sh` states the reasoning). Moving the pin would
 swap the compiler out from under the fourteen rounds working in this
 repository at the same time, in order to import three files.
 

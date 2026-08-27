@@ -129,7 +129,7 @@ us() { grep -a "^usb: devices=" "$1" 2>/dev/null | tail -1 | tr -d '\000' \
 number_in() { grep -aE "^const $2: u64 = [0-9]+" "$1" | head -1 \
         | sed -E 's/^const [A-Za-z0-9_]+: u64 = ([0-9]+).*/\1/'; }
 
-bash vendor/firn/hole-firnc.sh >/dev/null || { echo "vendor/firn/hole-firnc.sh fehlgeschlagen"; exit 1; }
+bash vendor/firn/fetch-firnc.sh >/dev/null || { echo "vendor/firn/fetch-firnc.sh fehlgeschlagen"; exit 1; }
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
     echo "K17: uebersprungen, qemu-system-x86_64 fehlt"
     exit 0
@@ -183,10 +183,10 @@ grep -q 'const VEC_XHCI: u64 = 43' kernel/xhci.fi \
 # Die Speicherkarte. `karte.py` rechnet seit dieser Runde AUCH die
 # Untergliederung des USB-Bereichs nach -- sie ist kein eigener
 # kdata-Bereich, kann sich aber selbst ueberschneiden.
-if python3 tools/kernel/karte.py kernel > "$TMPD/karte.txt" 2>&1; then
+if python3 tools/kernel/memmap.py kernel > "$TMPD/karte.txt" 2>&1; then
     ok "die Speicherkarte von kdata: $(tail -1 "$TMPD/karte.txt")"
 else
-    bad "tools/kernel/karte.py meldet Kollisionen"
+    bad "tools/kernel/memmap.py meldet Kollisionen"
     sed 's/^/        /' "$TMPD/karte.txt" | head -10
 fi
 hat "$TMPD/karte.txt" "0 Kollisionen" "keine zwei Bereiche ueberschneiden sich"
@@ -237,14 +237,14 @@ num "Stellen im Kernel, die den Modus noch als MASKE lesen" "${masken:-1}" eq 0
 # woran jemand gedacht hat.
 cp kernel/*.fi "$GG/"
 sed -i 's/^const M_USB: u64 = 384/const M_USB: u64 = 321/' "$GG/kstate.fi"
-if python3 tools/kernel/karte.py "$GG" > "$TMPD/karte-gg3.txt" 2>&1; then
+if python3 tools/kernel/memmap.py "$GG" > "$TMPD/karte-gg3.txt" 2>&1; then
     bad "GEGENPROBE: M_USB auf den Index von M_PWR gelegt und der Pruefer schweigt"
 else
     ok "GEGENPROBE: zwei Modusnamen auf einem Index -- der Pruefer schlaegt an"
 fi
 cp kernel/*.fi "$GG/"
 sed -i 's/^const M_USB: u64 = 384/const M_USB: u64 = 140737488355328/' "$GG/kstate.fi"
-if python3 tools/kernel/karte.py "$GG" > "$TMPD/karte-gg4.txt" 2>&1; then
+if python3 tools/kernel/memmap.py "$GG" > "$TMPD/karte-gg4.txt" 2>&1; then
     bad "GEGENPROBE: eine alte Maske als Modusindex und der Pruefer schweigt"
 else
     ok "GEGENPROBE: eine vergessene Maske (1<<47) hinter dem Vektor -- der Pruefer schlaegt an"
@@ -255,7 +255,7 @@ fi
 # Karte nur das, woran jemand gedacht hat.
 cp kernel/*.fi "$GG/"
 sed -i 's/^const EVT_OFF: u64 = 0x52000/const EVT_OFF: u64 = 0x4C000/' "$GG/xhci.fi"
-if python3 tools/kernel/karte.py "$GG" > "$TMPD/karte-gg.txt" 2>&1; then
+if python3 tools/kernel/memmap.py "$GG" > "$TMPD/karte-gg.txt" 2>&1; then
     bad "GEGENPROBE: EVT_OFF auf 0x4C000 gelegt und der Pruefer schweigt"
 else
     ok "GEGENPROBE: ein Ring ausserhalb des Vorrats -- der Kartenpruefer schlaegt an"
@@ -263,7 +263,7 @@ fi
 # Und eine zweite: zwei Stuecke INNERHALB des Bereichs uebereinander.
 cp kernel/*.fi "$GG/"
 sed -i 's/^const DESC_OFF: u64 = 0x56000/const DESC_OFF: u64 = 0x55000/' "$GG/usb.fi"
-if python3 tools/kernel/karte.py "$GG" > "$TMPD/karte-gg2.txt" 2>&1; then
+if python3 tools/kernel/memmap.py "$GG" > "$TMPD/karte-gg2.txt" 2>&1; then
     bad "GEGENPROBE: DESC_OFF auf die Uebertragungsringe gelegt, Pruefer schweigt"
 else
     ok "GEGENPROBE: zwei Stuecke des USB-Bereichs uebereinander -- der Pruefer schlaegt an"
@@ -398,7 +398,7 @@ mauslauf() { # name kernel kommandozeile marke monitordatei [qemu-args...]
     RC=$(cat "$TMPD/$name.rc" 2>/dev/null || echo 99)
 }
 
-# Ein Lauf, in dem GETIPPT wird (ueber tools/k11/tasten.py, Runde K11):
+# Ein Lauf, in dem GETIPPT wird (ueber tools/k11/keys.py, Runde K11):
 # die Tasten gehen als echte `sendkey`-Befehle in die laufende Maschine.
 tastenlauf() { # name kernel kommandozeile marke -- tasten... -- qemu-args...
     local name=$1 img=$2 app=$3 marke=$4
@@ -417,7 +417,7 @@ tastenlauf() { # name kernel kommandozeile marke -- tasten... -- qemu-args...
         "$@" -device isa-debug-exit,iobase=0xf4,iosize=0x04 > /dev/null 2>&1
       echo $? > "$TMPD/$name.rc" ) &
     local pid=$!
-    python3 tools/k11/tasten.py "$sock" "$TMPD/$name.txt" "$marke" \
+    python3 tools/k11/keys.py "$sock" "$TMPD/$name.txt" "$marke" \
         "${tasten[@]}" > "$TMPD/$name.tasten" 2>&1
     wait $pid 2>/dev/null
     rm -f "$sock"

@@ -82,13 +82,13 @@ uw()  { grep -a -m1 "^dispctl: $2=" "$1" 2>/dev/null | sed 's/^[^=]*=//' | tr -d
 uwl() { grep -a "^dispctl: $2=" "$1" 2>/dev/null | tail -1 | sed 's/^[^=]*=//' | tr -d '\r\000'; }
 
 schau() { local name=$1; shift; local aus rc
-    aus=$(python3 tools/gfx/schau.py "$@" 2>&1); rc=$?
+    aus=$(python3 tools/gfx/checkshot.py "$@" 2>&1); rc=$?
     if [ "$rc" -eq 0 ]; then ok "$name ($aus)"; else bad "$name -- $aus"; fi; }
 schau_nicht() { local name=$1; shift; local aus rc
-    aus=$(python3 tools/gfx/schau.py "$@" 2>&1); rc=$?
+    aus=$(python3 tools/gfx/checkshot.py "$@" 2>&1); rc=$?
     if [ "$rc" -ne 0 ]; then ok "$name ($aus)"; else bad "$name -- ging durch: $aus"; fi; }
 
-bash vendor/firn/hole-firnc.sh >/dev/null || { echo "vendor/firn/hole-firnc.sh fehlgeschlagen"; exit 1; }
+bash vendor/firn/fetch-firnc.sh >/dev/null || { echo "vendor/firn/fetch-firnc.sh fehlgeschlagen"; exit 1; }
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
     echo "DISPLAY: skipped, qemu-system-x86_64 ist nicht da"; exit 0
 fi
@@ -129,10 +129,10 @@ fremd=$(grep -ran --include='*.fi' -E '^const SYS_[A-Za-z0-9_]+: u64 = 18(1[0-9]
 eigen=$(grep -ahE '^const SYS_[A-Za-z0-9_]+: u64 = 181[0-9]' kernel/sys.fi | wc -l | tr -d ' ')
 gleich "in kernel/sys.fi stehen genau drei Nummern aus dem Vorrat" "3" "$eigen"
 
-if python3 tools/kernel/karte.py kernel > "$TMPD/karte.txt" 2>&1; then
+if python3 tools/kernel/memmap.py kernel > "$TMPD/karte.txt" 2>&1; then
     ok "die Speicherkarte von kdata: $(tail -1 "$TMPD/karte.txt")"
 else
-    bad "tools/kernel/karte.py meldet Kollisionen"; sed 's/^/        /' "$TMPD/karte.txt" | head -8
+    bad "tools/kernel/memmap.py meldet Kollisionen"; sed 's/^/        /' "$TMPD/karte.txt" | head -8
 fi
 
 # ============================================== 2. bauen
@@ -214,7 +214,7 @@ foto() { # name kommandozeile
         sleep 0.1; i=$((i + 1))
     done
     sleep 0.4
-    python3 tools/gfx/schuss.py "$sock" "$ppm" 25 > "$TMPD/$name.shot" 2>&1
+    python3 tools/gfx/screenshot.py "$sock" "$ppm" 25 > "$TMPD/$name.shot" 2>&1
     wait "$pid"; RC=$?
     rm -f "$sock"
 }

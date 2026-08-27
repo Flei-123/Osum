@@ -470,14 +470,14 @@ work under TCG, which round K18 measured.
 
 `wigapp=/bin/powermon` starts this program in the window server of round
 K15. That mechanism is new in this round and it is not a fourth
-hard-wired name: round K15 knows `wigdemo`, `explorer` and `starter`, the
+hard-wired name: round K15 knows `widgetdemo`, `explorer` and `starter`, the
 next round to want a window would have needed a fifth, and the one after
 that a sixth. The path is read out of the command line — and **copied at
 boot**, because the command line of the boot loader lies above
 `kernel_end` and the frame allocator hands exactly those frames out. The
 first draft read it in `k15_start`, long after the first heap of the run
 was standing on those octets, and got the unchanged default back:
-`k15: start /bin/wigdemo`. Nothing crashed and nothing was right.
+`k15: start /bin/widgetdemo`. Nothing crashed and nothing was right.
 
 Measured: `k15: start /bin/powermon`, `wm: windows=1`, and — the part
 that matters — **20 distinct colours** on a grid across the window

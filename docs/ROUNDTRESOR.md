@@ -31,7 +31,7 @@ was built and what the measurements said.
 | `tools/tresor/orphans.py` | *addendum*: the reference producer of the orphan list |
 
 kdata grew by two pages at `0x5A000` (`HWID_OFF`), entered in
-`tools/kernel/karte.py`. The second page is not padding: it is the DMA
+`tools/kernel/memmap.py`. The second page is not padding: it is the DMA
 target of the NVMe controller identify, and a PRP entry over 4096 octets
 with a non-zero offset would need a second entry.
 
@@ -422,10 +422,10 @@ image**: 4 of 4 identical.
    space and never a backup that lies. This kernel has no `rename`, so
    the last step is a copy of a small text file; if that fails the
    half-written `S-` is removed again.
-3. **Backing up into your own source would have eaten itself.** `/daten`
+3. **Backing up into your own source would have eaten itself.** `/data`
    is the source, and the first thing a user points at is a folder inside
-   `/daten`; the store would have grown while being walked. Refused now,
-   with the prefix check written so that `/datenkram` is not caught by it.
+   `/data`; the store would have grown while being walked. Refused now,
+   with the prefix check written so that `/datakram` is not caught by it.
 
 **What is NOT proven, and it is the honest hole in this addendum:** the
 menu item is built and compiles, but `tools/tresor/gui.sh` does not yet
@@ -434,7 +434,7 @@ the menu item and the engine is not measured end to end**. The engine
 under it is measured, and it is the same module. The runner is left in
 the tree red and labelled rather than deleted or wired into `test.sh`.
 An earlier version of it *passed* that step falsely, because
-`grep 'explorer: cd /'` also matches `cd /daten` -- the assertion is now
+`grep 'explorer: cd /'` also matches `cd /data` -- the assertion is now
 exact, which is why it is honestly red instead of dishonestly green.
 
 Two useful things survive the attempt: the file manager now reports

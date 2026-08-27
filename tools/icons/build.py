@@ -16,7 +16,7 @@ WHAT IT DOES, in order:
      maps an icon NAME to the code point Lucide put it at.  That file
      ships in the package; nothing here is typed in by hand.
   3. Cut those glyphs out of `lucide.ttf` and REMAP them onto the code
-     points from `icons.map`.  This is the step `tools/ttf/schnitt.py`
+     points from `icons.map`.  This is the step `tools/ttf/subset.py`
      does not do -- it keeps the code points it finds.  We do not want
      Lucide's numbering as an interface: it moves between releases.
   4. Write a font with the seven tables `kernel/ttf.fi` reads, and
@@ -28,7 +28,7 @@ WHAT IT DOES, in order:
      map file again.
 
 REPRODUCIBLE AND WITHOUT A FOREIGN LIBRARY, the same rule as
-`tools/ttf/schnitt.py` and `tools/osum/mkfs.py`: plain `struct`, no
+`tools/ttf/subset.py` and `tools/osum/mkfs.py`: plain `struct`, no
 fontTools, no FreeType.  The table writer is imported from `schnitt.py`
 rather than written a second time -- one arrangement of a TrueType file
 in this tree, not two.

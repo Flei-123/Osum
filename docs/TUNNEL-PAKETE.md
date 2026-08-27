@@ -296,7 +296,7 @@ Es gibt drei Zustände und sie sind **unterscheidbar**, nicht geraten:
 | Zustand | woran man ihn erkennt | was die Oberfläche zeigt |
 |---|---|---|
 | Kern ohne Tunnel | `wgget(WG_READY)` → `-ENODEV` | die Seite erscheint **gar nicht** |
-| Kern mit Tunnel, Paket fehlt | `WG_READY` → 0/1, `/apps/vpn.prog` fehlt | „VPN ist nicht installiert" + Knopf **Installieren** |
+| Kern mit Tunnel, Paket fehlt | `WG_READY` → 0/1, `/apps/vpn.osp` fehlt | „VPN ist nicht installiert" + Knopf **Installieren** |
 | Paket da | beides vorhanden | die richtige Seite |
 
 Der erste Zustand ist der wichtige: `-ENODEV` ist genau die Antwort, an

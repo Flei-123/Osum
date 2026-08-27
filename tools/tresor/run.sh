@@ -86,7 +86,7 @@ nicht() { grep -qaF "$2" "$1" && bad "$3 -- '$2' steht da und sollte nicht" || o
 # Der Wert hinter `schluessel: ` aus einer Ausgabe.
 wert() { grep -a "^$2: " "$1" | tail -1 | sed "s/^$2: //"; }
 
-bash vendor/firn/hole-firnc.sh >/dev/null || { echo "hole-firnc.sh fehlgeschlagen"; exit 1; }
+bash vendor/firn/fetch-firnc.sh >/dev/null || { echo "fetch-firnc.sh fehlgeschlagen"; exit 1; }
 [ -x "$FIRNC" ] || { echo "firnc0 fehlt: $FIRNC"; exit 1; }
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
     echo "TRESOR: uebersprungen, qemu-system-x86_64 fehlt"
@@ -104,7 +104,7 @@ bash tools/build-kernel.sh "$TMPD/k0.img" --stufe 0 > "$TMPD/b0.txt" 2>&1 \
     || { bad "firnc0 baut den Kern nicht"; sed 's/^/        /' "$TMPD/b0.txt" | head -10; }
 [ -f "$TMPD/k0.img" ] || { echo "TRESOR: $pass passed, $((fail+1)) failed"; exit 1; }
 
-bash tools/tresor/bauen.sh "$TMPD/bin" 0 $PROGS > "$TMPD/bprog.txt" 2>&1 \
+bash tools/tresor/build.sh "$TMPD/bin" 0 $PROGS > "$TMPD/bprog.txt" 2>&1 \
     && ok "firnc0 baut $(echo $PROGS | wc -w) Programme in Ring 3" \
     || { bad "firnc0 baut nicht alle Programme"; sed 's/^/        /' "$TMPD/bprog.txt" | head -12; }
 
@@ -117,19 +117,19 @@ done
 [ -z "$undef" ] && ok "kein neues Programm hat ein undefiniertes Symbol" \
                || bad "undefinierte Symbole:$undef"
 
-if python3 tools/kernel/karte.py kernel > "$TMPD/karte.txt" 2>&1; then
+if python3 tools/kernel/memmap.py kernel > "$TMPD/karte.txt" 2>&1; then
     ok "$(tail -1 "$TMPD/karte.txt")"
 else
     bad "der Kartenpruefer schlaegt an"; sed 's/^/        /' "$TMPD/karte.txt" | head -8
 fi
-grep -q '"HWID_OFF"' tools/kernel/karte.py \
+grep -q '"HWID_OFF"' tools/kernel/memmap.py \
     && ok "der Bereich dieser Runde (0x5A000..0x5C000) steht in der Karte" \
-    || bad "HWID_OFF fehlt in tools/kernel/karte.py"
+    || bad "HWID_OFF fehlt in tools/kernel/memmap.py"
 
 # GEGENPROBE: der Bereich auf die Seite von K18 gelegt MUSS auffallen.
 mkdir -p "$TMPD/kbad" && cp kernel/*.fi "$TMPD/kbad/"
 sed -i 's/^const HWID_OFF: u64 = 0x5A000/const HWID_OFF: u64 = 0x59000/' "$TMPD/kbad/kstate.fi"
-if python3 tools/kernel/karte.py "$TMPD/kbad" > "$TMPD/karte-bad.txt" 2>&1; then
+if python3 tools/kernel/memmap.py "$TMPD/kbad" > "$TMPD/karte-bad.txt" 2>&1; then
     bad "GEGENPROBE: HWID auf 0x59000 (dem Akku) faellt NICHT auf"
 else
     ok "GEGENPROBE: HWID auf 0x59000 kollidiert mit BATT und faellt auf"
@@ -903,19 +903,19 @@ for d in ("x", "y", "z"):
     os.makedirs(t + "/drei/" + d, exist_ok=True)
     open(t + "/drei/%s/gleich.bin" % d, "wb").write(gleich)
 # 2. DER BAUM, zweimal gesichert -- und einmal mit EINER kleinen Aenderung.
-os.makedirs(t + "/daten/sub", exist_ok=True)
+os.makedirs(t + "/data/sub", exist_ok=True)
 a = bytes(nxt() for _ in range(20000))
 b = bytes(nxt() for _ in range(16384))   # genau vier Bloecke
 c = bytes(nxt() for _ in range(8000))
-open(t + "/daten/a.txt", "wb").write(a)
-open(t + "/daten/b.bin", "wb").write(b)
-open(t + "/daten/sub/c.txt", "wb").write(c)
+open(t + "/data/a.txt", "wb").write(a)
+open(t + "/data/b.bin", "wb").write(b)
+open(t + "/data/sub/c.txt", "wb").write(c)
 # Dieselben Dateien, EIN Oktett anders -- im ERSTEN Block von b.bin.
-os.makedirs(t + "/daten2/sub", exist_ok=True)
+os.makedirs(t + "/data2/sub", exist_ok=True)
 b2 = bytearray(b); b2[100] ^= 0xFF
-open(t + "/daten2/a.txt", "wb").write(a)
-open(t + "/daten2/b.bin", "wb").write(bytes(b2))
-open(t + "/daten2/sub/c.txt", "wb").write(c)
+open(t + "/data2/a.txt", "wb").write(a)
+open(t + "/data2/b.bin", "wb").write(bytes(b2))
+open(t + "/data2/sub/c.txt", "wb").write(c)
 open(t + "/BADLIST", "wb").write(b"deadbeefdeadbeefdead\n")
 print("%d %d %d" % (len(a), len(b), len(c)))
 PY2
@@ -924,11 +924,11 @@ cat > "$TMPD/t_mess.sh" <<'EOS'
 echo ==DEDUP==
 backup save /drei /st1 d1
 echo ==RUN1==
-backup save /daten /st3 r1
+backup save /data /st3 r1
 echo ==RUN2==
-backup save /daten /st3 r2
+backup save /data /st3 r2
 echo ==RUN3==
-backup save /daten2 /st3 r3
+backup save /data2 /st3 r3
 echo ==GET==
 backup get /st3 r1 /a.txt /got.bin
 echo ==REST==
@@ -936,7 +936,7 @@ backup restore /st3 r1 /out
 echo ==LIST==
 backup list /st3
 echo ==ABBRUCH==
-backup save /daten /st4 k1 /BADLIST /daten
+backup save /data /st4 k1 /BADLIST /data
 echo ==NACHABBRUCH==
 backup list /st4
 echo ==RESTABBRUCH==
@@ -946,17 +946,17 @@ EOS
 
 python3 tools/osum/mkfs.py build "$TMPD/dmess.img" $BLOCKS \
     /bin/ /t/ /drei/ /drei/x/ /drei/y/ /drei/z/ \
-    /daten/ /daten/sub/ /daten2/ /daten2/sub/ \
+    /data/ /data/sub/ /data2/ /data2/sub/ \
     /st1/ /st3/ /st4/ /out/ /out2/ /proc/ /dev/ \
     /bin/sh="$TMPD/bin/sh.elf" /bin/cat="$TMPD/bin/cat.elf" \
     /bin/echo="$TMPD/bin/echo.elf" /bin/backup="$TMPD/bin/backup.elf" \
     /drei/x/gleich.bin="$TMPD/drei/x/gleich.bin" \
     /drei/y/gleich.bin="$TMPD/drei/y/gleich.bin" \
     /drei/z/gleich.bin="$TMPD/drei/z/gleich.bin" \
-    /daten/a.txt="$TMPD/daten/a.txt" /daten/b.bin="$TMPD/daten/b.bin" \
-    /daten/sub/c.txt="$TMPD/daten/sub/c.txt" \
-    /daten2/a.txt="$TMPD/daten2/a.txt" /daten2/b.bin="$TMPD/daten2/b.bin" \
-    /daten2/sub/c.txt="$TMPD/daten2/sub/c.txt" \
+    /data/a.txt="$TMPD/data/a.txt" /data/b.bin="$TMPD/data/b.bin" \
+    /data/sub/c.txt="$TMPD/data/sub/c.txt" \
+    /data2/a.txt="$TMPD/data2/a.txt" /data2/b.bin="$TMPD/data2/b.bin" \
+    /data2/sub/c.txt="$TMPD/data2/sub/c.txt" \
     /BADLIST="$TMPD/BADLIST" /t/mess.sh="$TMPD/t_mess.sh" \
     > "$TMPD/mkfs-mess.txt" 2>&1 \
     && ok "mkfs.py baut den Messbaum" \
@@ -1013,8 +1013,8 @@ def cat(p):
     r = subprocess.run(["python3", "tools/osum/mkfs.py", "cat", img, p],
                        capture_output=True)
     return r.stdout if r.returncode == 0 else None
-paare = [("/daten/a.txt", "/out/a.txt"), ("/daten/b.bin", "/out/b.bin"),
-         ("/daten/sub/c.txt", "/out/sub/c.txt"), ("/daten/a.txt", "/got.bin")]
+paare = [("/data/a.txt", "/out/a.txt"), ("/data/b.bin", "/out/b.bin"),
+         ("/data/sub/c.txt", "/out/sub/c.txt"), ("/data/a.txt", "/got.bin")]
 gleich = 0
 for a, b in paare:
     da, db = cat(a), cat(b)

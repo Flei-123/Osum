@@ -436,11 +436,11 @@ compiles, links (234 128 octets) and its whole data path runs — but
 started from `/bin/sh` it reports `netmon: no window server`, because
 `wlibc.start()` cannot get its drawing surface on that path. This is
 **not this round's fault and section 8 of the run proves it**:
-`/bin/wigdemo`, the reference application of round K15 and the program
+`/bin/widgetdemo`, the reference application of round K15 and the program
 the widget library is measured against, is on the same disk and started
-from the same shell in the same boot, and says `wigdemo: keine Flaeche`
+from the same shell in the same boot, and says `widgetdemo: keine Flaeche`
 — the identical failure. The section fails if `netmon` has no window
-while `wigdemo` does, which is the case in which it WOULD be this
+while `widgetdemo` does, which is the case in which it WOULD be this
 round's fault. Applications of that library are started by the
 kernel's `wig` stage, not by a shell. Wiring `/bin/netmon` into a
 desktop session is one commit and one measured run; it is not in this

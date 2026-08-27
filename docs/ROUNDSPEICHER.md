@@ -21,7 +21,7 @@ Kernelspeicher, beschrieben an genau zwei Stellen — `fs.dir_add` und
 aufbaut und nachfuehrt.
 
 Diese Runde legt die **Groesse** dazu, aufsummiert bis zur Wurzel. Damit
-ist die Antwort auf "wie gross ist /daten" ein Feldzugriff und kein
+ist die Antwort auf "wie gross ist /data" ein Feldzugriff und kein
 Durchlauf.
 
 ## Die Zahlen
@@ -29,14 +29,14 @@ Durchlauf.
 Gemessen im Gast, mit derselben Uhr, unmittelbar hintereinander — damit
 Last auf dem Wirt beide Zahlen gleich trifft. Abbild `inhalt.img`:
 4000 Dateien in 17 Ordnern, davon 308 mit Inhalt, 419.868 Oktette unter
-`/daten`, Inode-Tabelle mit 4096 Eintraegen, Abbild zwei Megaoktett.
+`/data`, Inode-Tabelle mit 4096 Eintraegen, Abbild zwei Megaoktett.
 QEMU ohne KVM, emulierte IDE.
 
 | | |
 |---|---|
 | Aufbau des Index (einmalig, 4030 Inodes) | **1.365.386 µs** = 1,37 s |
-| Abfrage aus dem Index (`/daten`) | **13,4 µs** (zehn Abfragen in 134 µs) |
-| Vollstaendiger Verzeichnisdurchlauf (`/daten`) | **220.661.633 µs** = 220,66 s |
+| Abfrage aus dem Index (`/data`) | **13,4 µs** (zehn Abfragen in 134 µs) |
+| Vollstaendiger Verzeichnisdurchlauf (`/data`) | **220.661.633 µs** = 220,66 s |
 | Verhaeltnis Abfrage : Durchlauf | **1 : 16.467.286** |
 | Verhaeltnis Aufbau : Durchlauf | **1 : 161,6** |
 
@@ -83,7 +83,7 @@ gerechnet:
 2. aus einem **echten Verzeichnisdurchlauf** im selben Lauf
    (`nidx.walk_total`),
 3. auf dem **Wirt**, in Python, aus der Liste, aus der das Abbild gebaut
-   wurde (`tools/speicher/baum.py` schreibt `soll`).
+   wurde (`tools/speicher/tree.py` schreibt `soll`).
 
 Der dritte Weg ist der wichtigste. Die ersten beiden stehen in derselben
 Datei, lesen dieselben Inodes ueber dieselben Systemaufrufe, und ein
@@ -97,9 +97,9 @@ drin. Der Wirt weiss vom Kernel nichts.
 ```
 pruefen: 21 Verzeichnisse aus dem Gast, davon 17 auch gegen die Arithmetik des Wirts
   /                        idx=1101656  lauf=1101656  kb=1357   OK
-  /daten                   idx=419868   lauf=419868   kb=686    OK
-  /daten/messing           idx=77993    lauf=77993    kb=111    OK
-  /daten/nickel/tief       idx=50288    lauf=50288    kb=67     OK
+  /data                   idx=419868   lauf=419868   kb=686    OK
+  /data/messing           idx=77993    lauf=77993    kb=111    OK
+  /data/nickel/tief       idx=50288    lauf=50288    kb=67     OK
   ... (alle 21)
 pruefen: alle 21 Verzeichnisse Oktett fuer Oktett gleich (Index = Durchlauf = Wirt)
 ```
@@ -129,7 +129,7 @@ Groesse einer Inode fortschreibt. Nicht verstreut ueber `write`,
 rechnet nach:
 
 ```
-du: schreib datei=/daten/schreibprobe.bin bloecke=80  okt=40960
+du: schreib datei=/data/schreibprobe.bin bloecke=80  okt=40960
 du: schreib nachgezogen gezogen=81 lost=0  vorher=1101656  nachher=1142616  erwartet=1142616  ok=1
 du: schreib weg        gezogen=2  lost=0  jetzt=1101656   vorher=1101656                     ok=1
 du: schreib bauten=1
@@ -182,7 +182,7 @@ Der ganze Aufbau der Anzeige — Baum, die 24 groessten Dateien, Kacheln —
 braucht **5.882 µs**:
 
 ```
-speicher: cd /daten ino=15  kinder=8  okt=419868  kb=686  us=5882  gross=24
+speicher: cd /data ino=15  kinder=8  okt=419868  kb=686  us=5882  gross=24
 speicher: zeile i=0 okt=77993 pm=185 dir=1 name=messing
 ...
 speicher: kachel i=0 x=9 y=307 w=130 h=62 farbe=5273279 name=messing
@@ -225,7 +225,7 @@ ist.
    null, jede Kachel gleich gross — und die Gegenprobe meldete
    `okt=0 oktok=1`, weil 0 + 0 eben 0 ergibt. Ein Fehler in der
    Aufsummierung waere unsichtbar geblieben. Behoben mit
-   `tools/speicher/baum.py`.
+   `tools/speicher/tree.py`.
 2. **Die Gegenprobe der Schreibprobe senkte ihre eigene Messlatte.** Sie
    setzte fuer den Lauf ohne Journal `erwartet = vorher` und bestand
    dadurch immer. Behoben in `kernel/user/du.fi`: erwartet wird in beiden
@@ -305,7 +305,7 @@ kollisionsfrei:
 | Syscall-Nummern | keine neue (nur Unter-Code `WX_ROOT = 6`) | 1822, 1823 |
 | Modusbits | `M_WIGSPEICHER` = 1 << 54 | keines |
 
-`tools/kernel/karte.py` sagt auf beiden Zweigen 0 Kollisionen (speicher:
+`tools/kernel/memmap.py` sagt auf beiden Zweigen 0 Kollisionen (speicher:
 52 Bereiche in 0x60000; ofs3: 52 Bereiche in 0x70000). Der Merge sollte
 sich auf `kstate.fi` (zwei benachbarte Konstantenbloecke), `sys.fi` und
 `karte.py` beschraenken.
@@ -369,9 +369,9 @@ Das ist der wichtigste Abschnitt, und er ist absichtlich lang.
 | `kernel/user/nidx.fi` | Summen den Baum hinauf, `total_of_ino`, `walk_total` |
 | `kernel/user/speicher.fi` | `/bin/speicher` — Baum, groesste Dateien, Treemap |
 | `kernel/user/du.fi` | `-m` messen, `-p` alles pruefen, `-w`/`-W` schreiben |
-| `tools/speicher/bauen.sh` | Kernel, Programme, beide Abbilder |
+| `tools/speicher/build.sh` | Kernel, Programme, beide Abbilder |
 | `tools/speicher/run.sh` | der Laeufer mit den Messungen |
-| `tools/speicher/baum.py` | das Abbild mit Inhalt **und** die Wahrheit dazu |
+| `tools/speicher/tree.py` | das Abbild mit Inhalt **und** die Wahrheit dazu |
 | `tools/speicher/pruefen.py` | die drei Zahlen nebeneinander |
 | `tools/speicher/kachelprobe.py` | die Treemap im Bild nachgemessen |
 | `tools/gfx/ppm2png.py` | PPM → PNG, nur mit `zlib` |

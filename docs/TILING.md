@@ -74,7 +74,7 @@ equivalent here is `/bin/tiling` over four system calls.
 ### The data structure
 
 A node is 128 octets in `kstate.TILE_OFF` (0x4C000..0x50000, four pages,
-entered in `tools/kernel/karte.py`):
+entered in `tools/kernel/memmap.py`):
 
 ```
 parent, first child, last child, next/prev sibling   the n-ary links
@@ -319,7 +319,7 @@ entry point for the parallel DISPLAY round.
 
 ### The screenshots
 
-Three, machine-checked pixel by pixel by `tools/gfx/schau.py`; each
+Three, machine-checked pixel by pixel by `tools/gfx/checkshot.py`; each
 window has its own colour.
 
 They are in the tree: `docs/tiling/tiling-split.png`,

@@ -79,18 +79,18 @@ hasnot() { grep -qaF "$2" "$1" && bad "$3 -- '$2' sollte nicht da sein" || ok "$
 
 schau() { local name=$1; shift
     local aus rc
-    aus=$(python3 tools/gfx/schau.py "$@" 2>&1); rc=$?
+    aus=$(python3 tools/gfx/checkshot.py "$@" 2>&1); rc=$?
     if [ "$rc" -eq 0 ]; then ok "$name ($aus)"; else bad "$name -- $aus"; fi
 }
 schau_nicht() { local name=$1; shift
     local aus rc
-    aus=$(python3 tools/gfx/schau.py "$@" 2>&1); rc=$?
+    aus=$(python3 tools/gfx/checkshot.py "$@" 2>&1); rc=$?
     if [ "$rc" -ne 0 ]; then ok "$name ($aus)"; else bad "$name -- ging durch: $aus"; fi
 }
 zahl() { grep -aoE "$2" "$1" | head -1 | grep -oE '[0-9]+' | tail -1; }
 feld() { grep -aoE "$2" "$1" | head -1 | grep -oE '[0-9]+$'; }
 
-bash vendor/firn/hole-firnc.sh >/dev/null || { echo "vendor/firn/hole-firnc.sh fehlgeschlagen"; exit 1; }
+bash vendor/firn/fetch-firnc.sh >/dev/null || { echo "vendor/firn/fetch-firnc.sh fehlgeschlagen"; exit 1; }
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
     echo "TILING: skipped, qemu-system-x86_64 ist nicht da"
     exit 0
@@ -128,7 +128,7 @@ foto() { # abbild kommandozeile ausgabe ppm abbilddatei
         sleep 0.15
         i=$((i + 1))
     done
-    python3 tools/gfx/schuss.py "$sock" "$ppm" 25 > "$TMPD/schuss.txt" 2>&1
+    python3 tools/gfx/screenshot.py "$sock" "$ppm" 25 > "$TMPD/schuss.txt" 2>&1
     wait "$pid"
     RC=$?
     rm -f "$sock"
@@ -148,10 +148,10 @@ K0="$TMPD/k0.mb"
 [ -f "$K0" ] || { echo "TILING: $pass passed, $((fail + 1)) failed"; exit 1; }
 
 echo "== 2. die Speicherkarte: vier Seiten fuer den Fensterbaum =="
-kart=$(python3 tools/kernel/karte.py kernel 2>&1)
+kart=$(python3 tools/kernel/memmap.py kernel 2>&1)
 if [ $? -eq 0 ]; then ok "die Speicherkarte von kdata: $kart"
 else bad "die Speicherkarte von kdata kollidiert"; echo "$kart" | sed 's/^/        /'; fi
-if python3 tools/kernel/karte.py kernel -v 2>/dev/null | grep -q " TILE  *kstate.fi:"; then
+if python3 tools/kernel/memmap.py kernel -v 2>/dev/null | grep -q " TILE  *kstate.fi:"; then
     ok "der Bereich TILE steht in der Karte"
 else
     bad "der Bereich TILE steht NICHT in der Karte"
@@ -160,7 +160,7 @@ fi
 # Energieschicht, MUSS er anschlagen.  Genau so ist Runde K7 gescheitert.
 GG="$TMPD/kernel-gg"; mkdir -p "$GG"; cp kernel/*.fi "$GG/"
 sed -i 's/^const TILE_OFF: u64 = 0x4C000/const TILE_OFF: u64 = 0x58000/' "$GG/kstate.fi"
-gg=$(python3 tools/kernel/karte.py "$GG" 2>&1)
+gg=$(python3 tools/kernel/memmap.py "$GG" 2>&1)
 if [ $? -ne 0 ] && printf '%s' "$gg" | grep -q 'KOLLISION'; then
     ok "mit TILE_OFF auf 0x58000 findet der Pruefer die Kollision mit K18"
 else

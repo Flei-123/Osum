@@ -9,16 +9,16 @@ ueber dieselben Systemaufrufe, und ein Denkfehler in der Regel, WAS
 eigentlich gezaehlt wird ("zaehlt ein Verzeichnis seine eigene
 Eintragstabelle mit?"), stuende in beiden gleich falsch drin.
 
-Deshalb rechnet `tools/speicher/baum.py` auf dem WIRT aus der Liste, aus
+Deshalb rechnet `tools/speicher/tree.py` auf dem WIRT aus der Liste, aus
 der das Abbild gebaut wurde, dieselben Summen noch einmal -- in Python,
 von einem anderen Programm, ohne Kenntnis des Kernels. Diese Datei haelt
 die drei Zahlen nebeneinander. Erst wenn ALLE DREI auf dasselbe Oktett
 kommen, ist die Zusage der Runde eingeloest.
 
 WAS NICHT VERGLICHEN WIRD, UND WARUM: die Wurzel `/`. Im Abbild liegen
-neben `/daten` auch `/bin`, `/lib` und `/etc` -- Programme und
+neben `/data` auch `/bin`, `/lib` und `/etc` -- Programme und
 Schriften, die `baum.py` nicht kennt, weil `bauen.sh` sie dazulegt. Fuer
-`/` bleibt deshalb nur der Vergleich Index gegen Durchlauf; ab `/daten`
+`/` bleibt deshalb nur der Vergleich Index gegen Durchlauf; ab `/data`
 abwaerts gilt die volle Probe zu dritt.
 
     pruefen.py <soll-datei> <serielle-ausgabe> [...weitere Ausgaben]
@@ -27,7 +27,7 @@ abwaerts gilt die volle Probe zu dritt.
 import re
 import sys
 
-# du: probe pfad=/daten idx=419868 lauf=419868 idxkb=686 laufkb=686 ok=1
+# du: probe pfad=/data idx=419868 lauf=419868 idxkb=686 laufkb=686 ok=1
 # ZWISCHENRAUM IST \s+ UND NICHT " ". Der Gast trennt seine Felder mit
 # einem oder zwei Leerzeichen -- `kv()` schreibt eines, und manche
 # Zeichenkette traegt selbst schon eines. Die erste Fassung dieser
@@ -38,7 +38,7 @@ PROBE = re.compile(
     r"du: probe pfad=(\S+)\s+idx=(\d+)\s+lauf=(\d+)\s+idxkb=(\d+)\s+"
     r"laufkb=(\d+)\s+ok=(\d+)")
 FERTIG = re.compile(r"du: probe fertig geprueft=(\d+)\s+falsch=(\d+)")
-# du: index [/daten] okt=419868 kb=686  us10=158
+# du: index [/data] okt=419868 kb=686  us10=158
 MESS = re.compile(r"du: (index|durchlauf) \[(\S+)\] okt=(\d+) kb=(\d+)")
 
 
