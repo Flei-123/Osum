@@ -70,6 +70,7 @@ profile kernel
 import ulib
 import libc.io
 import wlibc
+import qs
 
 export { u_start }
 
@@ -639,6 +640,13 @@ fn apply() {
         layer = wlibc.L_NORMAL
     }
     let _l: u64 = wlibc.win_state(w_h, wlibc.WS_LAYER, layer)
+    // THIRD ADDENDUM, and this is the whole of the panel in this file:
+    // it is told WHERE, and it decides everything else. The rectangle
+    // it gets is the WORK AREA -- what is left of the screen after this
+    // bar reserved its edge -- and not the screen, so the panel appears
+    // beside the bar on all four edges instead of under it on three.
+    qs.anchor(cf_edge, wlibc.work_x(w_h), wlibc.work_y(w_h),
+        wlibc.work_w(w_h), wlibc.work_h(w_h))
 }
 
 // ============================================ ROUND NETVIEW, addendum
@@ -1958,6 +1966,8 @@ static mut p_start: [u8; 13] = "/bin/starter\0"
 static mut z_start: [u8; 6] = "start\0"
 static mut z_task: [u8; 7] = "window\0"
 static mut z_none: [u8; 5] = "none\0"
+static mut z_qs: [u8; 6] = "quick\0"
+static mut s_noqs: [u8; 28] = "taskbar: no quick settings\0\0"
 
 fn click(x: u64, y: u64) {
     clicks = clicks + 1
@@ -1965,6 +1975,20 @@ fn click(x: u64, y: u64) {
     ulib.sayn(x)
     say((&s_cy[0 as usize]) as u64)
     ulib.sayn(y)
+    // THIRD ADDENDUM: the icon group in the corner opens the quick
+    // settings, the way the same corner does on every system that has
+    // such a panel. Before the window buttons, because it is a field
+    // and not a button and would otherwise fall through to the drag.
+    if x >= f_x[(F_NET) as usize]
+        && x < f_x[(F_NET) as usize] + f_w[(F_NET) as usize]
+        && y >= f_y[(F_NET) as usize]
+        && y < f_y[(F_NET) as usize] + f_h[(F_NET) as usize] {
+        say((&s_ct[0 as usize]) as u64)
+        say((&z_qs[0 as usize]) as u64)
+        ulib.nl()
+        qs.toggle()
+        return
+    }
     if x >= st_x && x < st_x + st_w && y >= st_y && y < st_y + st_h {
         say((&s_ct[0 as usize]) as u64)
         say((&z_start[0 as usize]) as u64)
@@ -2103,6 +2127,15 @@ fn u_start(args: u64) -> u64 {
     ulib.nl()
     let _u: bool = status_build()
     let _l: bool = list_read()
+    // THIRD ADDENDUM: the quick settings own a second window of this
+    // process, created here and kept hidden. Opening it is a move and a
+    // repaint and NOT a program start -- which is why it can be timed
+    // in microseconds.
+    if !qs.init(cf_autohide) {
+        say((&s_noqs[0 as usize]) as u64)
+        ulib.nl()
+    }
+    apply()
     layout()
     paint(true)
     geom_say()
@@ -2128,6 +2161,29 @@ fn u_start(args: u64) -> u64 {
         }
         if dragging != 0 {
             drag_step()
+        }
+        // THIRD ADDENDUM. The panel polls its own window, the hotkey
+        // latch and the pointer; the only thing it hands back is the
+        // one setting that lives in a FILE THIS BAR OWNS. Two writers
+        // of `/etc/taskbar.conf` inside one process would be two
+        // answers to one question.
+        let _qsc: bool = qs.step()
+        let hw: u64 = qs.want_hide()
+        if hw != 0 {
+            if hw == 1 {
+                cf_autohide = 1
+            } else {
+                cf_autohide = 0
+            }
+            let _cw: bool = conf_write()
+            conf_say()
+            geometry()
+            shown = 1
+            apply()
+            layout()
+            paint(true)
+            geom_say()
+            qs.took_hide(cf_autohide)
         }
         autohide_step()
         round = round + 1
@@ -2199,6 +2255,13 @@ fn u_start(args: u64) -> u64 {
             ulib.sayn(writes)
             ulib.nl()
         }
+        // AND ONCE MORE BEFORE THE SLEEP. Measured, not guessed: with
+        // one look per turn the hotkey took 93 to 128 milliseconds,
+        // because a key pressed early in a turn waits out the whole
+        // repaint of the bar -- WITH its report on the serial line --
+        // before anything looks at the latch. A second look here costs
+        // one system call and takes the repaint out of the wait.
+        let _qs2: bool = qs.step()
         ulib.sleep_ms(25)
     }
     return 0
