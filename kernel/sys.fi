@@ -53,6 +53,7 @@ import arch.x86_64.hv
 import arch.x86_64.guard
 import wm
 import wig
+import tile
 import nidx
 import ps2m
 import fb
@@ -107,6 +108,8 @@ export {
     SYS_MOUNT, SYS_UMOUNT2, SYS_RENAME, SYS_OSUM_MNTSTAT,
     SYS_LINK, SYS_SYNC,
     SYS_OSUM_FTYPE, SYS_OSUM_FOPEN, SYS_OSUM_FLIST, SYS_OSUM_FREG,
+    SYS_OSUM_TILEGET, SYS_OSUM_TILEDO, SYS_OSUM_TILECONF,
+    SYS_OSUM_TILEBIND,
     CAP_BASE, CAP_VERSION, CAP_READ, CAP_WRITE, CAP_CLOSE, CAP_DUP,
     CAP_INSPECT, CAP_TRANSFER, CAP_COUNT, CAP_MAXNR,
     SYS_SOCKET, SYS_CONNECT, SYS_ACCEPT, SYS_SENDTO, SYS_RECVFROM,
@@ -758,6 +761,49 @@ const MNT_KNOWN: u64 = 1
 //   1750  osum_pwrget(feld)          -> Wert
 //   1751  osum_pwrset(feld, wert)    -> 0 oder -errno
 //   1752  osum_pwrstr(welche, puffer, len) -> Laenge
+// ============================================ RUNDE TILING: der Baum
+//
+// VIER AUFRUFE, Vorrat 1820..1849, und die Bauart ist die von
+// SYS_OSUM_PWRGET aus Runde K18: EINE ZAHL JE AUFRUF, kein Zeiger in den
+// Kernel ausser bei der Belegungsdatei -- und die geht durch `copy_in`
+// wie jeder andere Puffer aus Ring 3.
+//
+// WARUM ES SIE GIBT: die Bedienung des Kachelbetriebs gehoert nach Ring
+// 3. Der Kernel rechnet den Baum aus, weil der Fensterserver hier liegt;
+// WELCHE Taste was tut, welches Menue es dazu gibt und wie die
+// Einstellungen aussehen, ist Sache eines Programms. `/bin/tiling` ist
+// dieses Programm, und diese vier Nummern sind alles, was es braucht.
+// (1800..1809 gehoeren seit Runde K15 der Widget-Naht `wig.fi` -- diese
+// Runde hat sie zuerst genommen und musste weiter nach oben. Der
+// Kollisionspruefer `tools/kernel/karte.py` rechnet Speicherseiten nach,
+// keine Aufrufnummern; gefunden hat es ein Programm in Ring 3, das auf
+// jede Frage -ENODEV bekam.)
+const SYS_OSUM_TILEGET: u64 = 1820 // (feld) -> Zahl
+const SYS_OSUM_TILEDO: u64 = 1821 // (handlung) -> 0 oder -EINVAL
+const SYS_OSUM_TILECONF: u64 = 1822 // (text, len) -> Zahl der Eintraege
+const SYS_OSUM_TILEBIND: u64 = 1823 // (nr, feld) -> Taste/Modifikator/Handlung
+
+// Die Felder von `osum_tileget`. Die Nummern sind Teil der Schnittstelle
+// nach Ring 3 und stehen genauso in `kernel/user/tiling.fi`.
+const TL_ON: u64 = 0
+const TL_NODES: u64 = 1
+const TL_LEAVES: u64 = 2
+const TL_MAXLEAF: u64 = 3
+const TL_MAXNODES: u64 = 4
+const TL_BINDS: u64 = 5
+const TL_RELAYOUTS: u64 = 6
+const TL_OPS: u64 = 7
+const TL_CHECK: u64 = 8 // rechnet die Invariante JETZT nach
+const TL_HOTKEYS: u64 = 9
+const TL_FOCUS: u64 = 10
+const TL_LAYOUT: u64 = 11
+const TL_DIR: u64 = 12
+const TL_X: u64 = 13
+const TL_Y: u64 = 14
+const TL_W: u64 = 15
+const TL_H: u64 = 16
+const TL_COUNT: u64 = 17
+
 const SYS_OSUM_PWRGET: u64 = 1750
 const SYS_OSUM_PWRSET: u64 = 1751
 const SYS_OSUM_PWRSTR: u64 = 1752
@@ -1398,6 +1444,10 @@ fn dispatch(number: u64, frame: u64, state: u64) -> u64 {
     // dem Block, den Runde K8 dafuer ausgewiesen und nie benutzt hat.
     if number >= SYS_OSUM_NETGET && number <= SYS_OSUM_NETSET {
         return net_call(state, me, number, a0, a1, a2)
+    }
+    // RUNDE TILING: der Fensterbaum, bedient aus Ring 3.
+    if number >= SYS_OSUM_TILEGET && number <= SYS_OSUM_TILEBIND {
+        return tile_call(state, me, number, a0, a1)
     }
     // ------------------------------------------------------ RUNDE K13
     //
@@ -7486,4 +7536,134 @@ fn wig_call(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64,
     }
     return wig.blit(state, me, i, (a1 >> 16) & 0xFFFF, a1 & 0xFFFF,
         (a2 >> 16) & 0xFFFF, a2 & 0xFFFF, a3, stride)
+}
+
+// ============================================== RUNDE TILING: der Baum
+
+fn tile_call(state: u64, me: u64, number: u64, a0: u64, a1: u64) -> u64 {
+    if number == SYS_OSUM_TILEGET {
+        return do_tileget(state, a0)
+    }
+    if number == SYS_OSUM_TILEDO {
+        return do_tiledo(state, a0)
+    }
+    if number == SYS_OSUM_TILECONF {
+        return do_tileconf(state, me, a0, a1)
+    }
+    return do_tilebind(state, a0, a1)
+}
+
+fn do_tileget(state: u64, field: u64) -> u64 {
+    if field == TL_COUNT {
+        return TL_COUNT
+    }
+    if field == TL_MAXLEAF {
+        return tile.MAX_LEAVES
+    }
+    if field == TL_MAXNODES {
+        return tile.MAX_NODES
+    }
+    // OHNE FENSTERSERVER GIBT ES KEINE ZAHLEN, und schon gar keine Null,
+    // die wie eine Messung aussieht -- dieselbe Regel wie bei `pwrget`.
+    if !wm.ready(state) || !tile.ready(state) {
+        return neg(errno.E_NODEV)
+    }
+    if field == TL_ON {
+        if wm.tile_on(state) {
+            return 1
+        }
+        return 0
+    }
+    if field == TL_NODES {
+        return tile.nodes(state)
+    }
+    if field == TL_LEAVES {
+        return tile.leaves(state)
+    }
+    if field == TL_BINDS {
+        return tile.bind_count(state)
+    }
+    if field == TL_RELAYOUTS {
+        return tile.relayouts(state)
+    }
+    if field == TL_OPS {
+        return tile.ops(state)
+    }
+    if field == TL_CHECK {
+        return tile.check(state)
+    }
+    if field == TL_HOTKEYS {
+        return wm.hotkeys_seen(state)
+    }
+    let f: u64 = tile.focus(state)
+    if f == tile.NONE {
+        return neg(errno.E_NOENT)
+    }
+    if field == TL_FOCUS {
+        return tile.n_client(state, f)
+    }
+    if field == TL_X {
+        return tile.n_x(state, f)
+    }
+    if field == TL_Y {
+        return tile.n_y(state, f)
+    }
+    if field == TL_W {
+        return tile.n_w(state, f)
+    }
+    if field == TL_H {
+        return tile.n_h(state, f)
+    }
+    let p: u64 = tile.n_parent(state, f)
+    if p == tile.NONE {
+        return neg(errno.E_NOENT)
+    }
+    if field == TL_LAYOUT {
+        return tile.n_layout(state, p)
+    }
+    if field == TL_DIR {
+        return tile.n_dir(state, p)
+    }
+    return neg(errno.E_INVAL)
+}
+
+fn do_tiledo(state: u64, act: u64) -> u64 {
+    if !wm.ready(state) {
+        return neg(errno.E_NODEV)
+    }
+    if act == 0 || act >= tile.A_MAX {
+        return neg(errno.E_INVAL)
+    }
+    if !wm.tile_action(state, act) {
+        return neg(errno.E_INVAL)
+    }
+    wm.compose(state)
+    return 0
+}
+
+// DIE BELEGUNG KOMMT AUS RING 3, und zwar als TEXT. Das Programm liest
+// /users/<name>/config/tiling.conf -- es weiss, wer der Benutzer ist,
+// der Kernel weiss es nicht -- und schiebt den Inhalt herueber.
+fn do_tileconf(state: u64, me: u64, text: u64, len: u64) -> u64 {
+    if len == 0 || len > kstate.BLOCK_MAX {
+        return neg(errno.E_INVAL)
+    }
+    let buf: u64 = state + kstate.BLOCK_OFF
+    if !copy_in(state, me, buf, text, len) {
+        return neg(errno.E_FAULT)
+    }
+    return tile.bind_parse(state, buf, len)
+}
+
+fn do_tilebind(state: u64, nr: u64, field: u64) -> u64 {
+    if nr >= tile.MAX_BINDS {
+        return neg(errno.E_INVAL)
+    }
+    if field == 0 {
+        return tile.bind_key(state, nr)
+    }
+    if field == 1 {
+        return tile.bind_mods(state, nr)
+    }
+    return tile.bind_action(state, nr)
 }

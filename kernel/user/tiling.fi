@@ -1,0 +1,633 @@
+// kernel/user/tiling.fi -- /bin/tiling, das Bedienprogramm des
+// Fensterbaums. RING 3, und das ist der Punkt.
+//
+// Der Baum selbst wird im Kernel gerechnet (`kernel/tile.fi`), und dafuer
+// gibt es einen Grund, der im Kopf von `kernel/wm.fi` steht: der
+// Fensterserver liegt dort, weil dieser Kernel keinen Speicher zwischen
+// Prozessen teilen kann. Die BEDIENUNG hat damit nichts zu tun. Welche
+// Taste was tut, wo die Datei liegt, was auf dem Schirm steht, wenn man
+// nachsieht -- das ist Sache eines Programms, und hier ist es.
+//
+//     tiling                 was der Baum gerade ist
+//     tiling keys            die Tastenbelegung, wie sie im Kern steht
+//     tiling load [datei]    die Belegung neu einlesen
+//                            (Vorgabe: /users/$USER/config/tiling.conf)
+//     tiling on | off        Kachelbetrieb an oder aus
+//     tiling <handlung>      eine Handlung ausfuehren, zum Beispiel
+//                            `tiling rotate`, `tiling layout-tabbed`,
+//                            `tiling snap-left`, `tiling balance`
+//
+// KEINE ZAHL IN DIESEM PROGRAMM IST VON DIESEM PROGRAMM. Jede kommt
+// ueber `osum_tileget` aus dem Kernel. Was der Kernel nicht hat, meldet
+// er als Fehler, und dann steht hier ein Strich und keine Null.
+//
+// DIE NAMEN DER HANDLUNGEN stehen hier UND in `kernel/tile.fi`, und das
+// ist Absicht und keine Doppelung aus Versehen: die Datei
+// tiling.conf wird vom Kernel gelesen (beim Hochlauf, ohne dass ein
+// Programm laeuft) und von hier geschickt (wenn man sie geaendert hat).
+// Beide muessen dieselben Woerter verstehen. Dass sie es tun, prueft
+// `tools/tiling/run.sh`: die Zahl der Eintraege muss auf beiden Wegen
+// dieselbe sein.
+
+profile kernel
+
+import ulib
+
+export { u_start }
+
+// Die Aufrufe dieser Runde (kernel/sys.fi, Vorrat 1820..1849).
+const SYS_TILEGET: u64 = 1820
+const SYS_TILEDO: u64 = 1821
+const SYS_TILECONF: u64 = 1822
+const SYS_TILEBIND: u64 = 1823
+
+// Die Felder. Dieselben Nummern wie in `kernel/sys.fi`.
+const TL_ON: u64 = 0
+const TL_NODES: u64 = 1
+const TL_LEAVES: u64 = 2
+const TL_MAXLEAF: u64 = 3
+const TL_MAXNODES: u64 = 4
+const TL_BINDS: u64 = 5
+const TL_RELAYOUTS: u64 = 6
+const TL_OPS: u64 = 7
+const TL_CHECK: u64 = 8
+const TL_HOTKEYS: u64 = 9
+const TL_FOCUS: u64 = 10
+const TL_LAYOUT: u64 = 11
+const TL_DIR: u64 = 12
+const TL_X: u64 = 13
+const TL_Y: u64 = 14
+const TL_W: u64 = 15
+const TL_H: u64 = 16
+
+// Die Handlungen. Dieselben Nummern wie in `kernel/tile.fi`.
+const A_LAYOUT_SPLIT: u64 = 11
+const A_LAYOUT_TABBED: u64 = 12
+const A_LAYOUT_STACKED: u64 = 13
+const A_TILE_TOGGLE: u64 = 29
+const A_MAX: u64 = 30
+
+const MAX_BINDS: u64 = 56
+const MOD_ALT: u64 = 1
+const MOD_SHIFT: u64 = 2
+const MOD_CTRL: u64 = 4
+
+fn is_err(v: u64) -> bool {
+    return v > 0xFFFFFFFFFFFFF000
+}
+
+fn get(field: u64) -> u64 {
+    return ulib.sys(SYS_TILEGET, field, 0, 0)
+}
+
+fn zahl_oder_strich(v: u64) {
+    var s_strich: [u8; 2] = "-\0"
+    if is_err(v) {
+        ulib.say((&s_strich[0 as usize]) as u64)
+        return
+    }
+    ulib.sayu(v)
+}
+
+fn u_start(args: u64) -> u64 {
+    var w_keys: [u8; 5] = "keys\0"
+    var w_load: [u8; 5] = "load\0"
+    var w_on: [u8; 3] = "on\0"
+    var w_off: [u8; 4] = "off\0"
+
+    let n: u64 = ulib.arg_count(args)
+    if n < 2 {
+        return zeig(args)
+    }
+    let a1: u64 = ulib.arg_at(args, 1)
+    if ulib.streq(a1, (&w_keys[0 as usize]) as u64) {
+        return zeig_keys()
+    }
+    if ulib.streq(a1, (&w_load[0 as usize]) as u64) {
+        return lade(args, n)
+    }
+    if ulib.streq(a1, (&w_on[0 as usize]) as u64) {
+        return schalten(1)
+    }
+    if ulib.streq(a1, (&w_off[0 as usize]) as u64) {
+        return schalten(0)
+    }
+    // sonst: ein Handlungsname
+    let act: u64 = action_of(a1)
+    if act == 0 {
+        var s_un: [u8; 26] = "tiling: kenne ich nicht: \0"
+        ulib.esay_line((&s_un[0 as usize]) as u64, a1)
+        return 1
+    }
+    let rc: u64 = ulib.sys(SYS_TILEDO, act, 0, 0)
+    if is_err(rc) {
+        var s_ab: [u8; 40] = "tiling: die Handlung hat nichts getan\0\0\0"
+        ulib.esay_line((&s_ab[0 as usize]) as u64, 0)
+        return 1
+    }
+    return 0
+}
+
+fn zeig(args: u64) -> u64 {
+    var s_aus: [u8; 34] = "tiling: der Kachelbetrieb ist aus\0"
+    var s_an: [u8; 33] = "tiling: der Kachelbetrieb laeuft\0"
+    var s_kein: [u8; 38] = "tiling: kein Fensterserver auf diesem\0"
+    var s_bl: [u8; 12] = "  Fenster: \0"
+    var s_von: [u8; 6] = " von \0"
+    var s_kn: [u8; 11] = "  Knoten: \0"
+    var s_lay: [u8; 12] = "  Aufbau:  \0"
+    var s_rec: [u8; 12] = "  Rechteck:\0"
+    var s_x: [u8; 2] = "x\0"
+    var s_kom: [u8; 2] = ",\0"
+    var s_sp: [u8; 2] = " \0"
+    var s_bi: [u8; 12] = "  Tasten:  \0"
+    var s_iv: [u8; 24] = "  Invariante: Fehler   \0"
+    var s_io: [u8; 22] = "  Invariante: haelt  \0"
+    var s_op: [u8; 14] = "  Operationen\0"
+    var s_ss: [u8; 8] = "split \0\0"
+    var s_st: [u8; 8] = "tabbed\0\0"
+    var s_sk: [u8; 8] = "stacked\0"
+    var s_wa: [u8; 13] = " waagerecht\0\0"
+    var s_se: [u8; 12] = " senkrecht\0\0"
+
+    let on: u64 = get(TL_ON)
+    if is_err(on) {
+        ulib.say((&s_kein[0 as usize]) as u64)
+        ulib.nl()
+        return 1
+    }
+    if on == 1 {
+        ulib.say((&s_an[0 as usize]) as u64)
+    } else {
+        ulib.say((&s_aus[0 as usize]) as u64)
+    }
+    ulib.nl()
+    ulib.say((&s_bl[0 as usize]) as u64)
+    zahl_oder_strich(get(TL_LEAVES))
+    ulib.say((&s_von[0 as usize]) as u64)
+    zahl_oder_strich(get(TL_MAXLEAF))
+    ulib.nl()
+    ulib.say((&s_kn[0 as usize]) as u64)
+    zahl_oder_strich(get(TL_NODES))
+    ulib.say((&s_von[0 as usize]) as u64)
+    zahl_oder_strich(get(TL_MAXNODES))
+    ulib.nl()
+    let lay: u64 = get(TL_LAYOUT)
+    ulib.say((&s_lay[0 as usize]) as u64)
+    if is_err(lay) {
+        zahl_oder_strich(lay)
+    } else {
+        if lay == 0 {
+            ulib.say((&s_ss[0 as usize]) as u64)
+            if get(TL_DIR) == 0 {
+                ulib.say((&s_wa[0 as usize]) as u64)
+            } else {
+                ulib.say((&s_se[0 as usize]) as u64)
+            }
+        }
+        if lay == 1 {
+            ulib.say((&s_st[0 as usize]) as u64)
+        }
+        if lay == 2 {
+            ulib.say((&s_sk[0 as usize]) as u64)
+        }
+    }
+    ulib.nl()
+    ulib.say((&s_rec[0 as usize]) as u64)
+    ulib.say((&s_sp[0 as usize]) as u64)
+    zahl_oder_strich(get(TL_X))
+    ulib.say((&s_kom[0 as usize]) as u64)
+    zahl_oder_strich(get(TL_Y))
+    ulib.say((&s_sp[0 as usize]) as u64)
+    zahl_oder_strich(get(TL_W))
+    ulib.say((&s_x[0 as usize]) as u64)
+    zahl_oder_strich(get(TL_H))
+    ulib.nl()
+    ulib.say((&s_bi[0 as usize]) as u64)
+    zahl_oder_strich(get(TL_BINDS))
+    ulib.nl()
+    // DIE INVARIANTE WIRD JETZT NACHGERECHNET, nicht aus einem Zaehler
+    // abgelesen: `osum_tileget(TL_CHECK)` laesst den Kern den Baum
+    // durchgehen und meldet die Zahl der Verletzungen.
+    let v: u64 = get(TL_CHECK)
+    if is_err(v) || v != 0 {
+        ulib.say((&s_iv[0 as usize]) as u64)
+        zahl_oder_strich(v)
+    } else {
+        ulib.say((&s_io[0 as usize]) as u64)
+        ulib.sayu(get(TL_OPS))
+        ulib.say((&s_op[0 as usize]) as u64)
+    }
+    ulib.nl()
+    return 0
+}
+
+fn zeig_keys() -> u64 {
+    var s_kopf: [u8; 30] = "tiling: die Tastenbelegung\0\0\0\0"
+    var s_leer: [u8; 46] = "tiling: es ist keine Belegung geladen (load)\0\0"
+    var s_mod: [u8; 5] = "mod+\0"
+    var s_sh: [u8; 7] = "shift+\0"
+    var s_ct: [u8; 6] = "ctrl+\0"
+    var s_sp: [u8; 3] = "  \0"
+    let k: u64 = get(TL_BINDS)
+    if is_err(k) || k == 0 {
+        ulib.say((&s_leer[0 as usize]) as u64)
+        ulib.nl()
+        return 1
+    }
+    ulib.say((&s_kopf[0 as usize]) as u64)
+    ulib.nl()
+    var i: u64 = 0
+    var gezeigt: u64 = 0
+    while i < MAX_BINDS && gezeigt < k {
+        let key: u64 = ulib.sys(SYS_TILEBIND, i, 0, 0)
+        if !is_err(key) && key != 0 {
+            gezeigt = gezeigt + 1
+            let mods: u64 = ulib.sys(SYS_TILEBIND, i, 1, 0)
+            let act: u64 = ulib.sys(SYS_TILEBIND, i, 2, 0)
+            if (mods & MOD_ALT) != 0 {
+                ulib.say((&s_mod[0 as usize]) as u64)
+            }
+            if (mods & MOD_SHIFT) != 0 {
+                ulib.say((&s_sh[0 as usize]) as u64)
+            }
+            if (mods & MOD_CTRL) != 0 {
+                ulib.say((&s_ct[0 as usize]) as u64)
+            }
+            say_key(key)
+            ulib.say((&s_sp[0 as usize]) as u64)
+            say_action(act)
+            ulib.nl()
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+fn say_key(key: u64) {
+    var s_l: [u8; 5] = "left\0"
+    var s_r: [u8; 6] = "right\0"
+    var s_u: [u8; 3] = "up\0"
+    var s_d: [u8; 5] = "down\0"
+    var s_ret: [u8; 7] = "return\0"
+    var s_spc: [u8; 6] = "space\0"
+    var s_tab: [u8; 4] = "tab\0"
+    if key == 0x81 {
+        ulib.say((&s_l[0 as usize]) as u64)
+        return
+    }
+    if key == 0x82 {
+        ulib.say((&s_r[0 as usize]) as u64)
+        return
+    }
+    if key == 0x83 {
+        ulib.say((&s_u[0 as usize]) as u64)
+        return
+    }
+    if key == 0x84 {
+        ulib.say((&s_d[0 as usize]) as u64)
+        return
+    }
+    if key == 13 {
+        ulib.say((&s_ret[0 as usize]) as u64)
+        return
+    }
+    if key == 32 {
+        ulib.say((&s_spc[0 as usize]) as u64)
+        return
+    }
+    if key == 9 {
+        ulib.say((&s_tab[0 as usize]) as u64)
+        return
+    }
+    var eins: [u8; 2] = [0 as u8; 2]
+    __mmio_write8((&eins[0 as usize]) as u64 as *mut u8, key as u8)
+    ulib.say((&eins[0 as usize]) as u64)
+}
+
+fn schalten(an: u64) -> u64 {
+    let on: u64 = get(TL_ON)
+    if is_err(on) {
+        return 1
+    }
+    if on == an {
+        return 0
+    }
+    let rc: u64 = ulib.sys(SYS_TILEDO, A_TILE_TOGGLE, 0, 0)
+    if is_err(rc) {
+        return 1
+    }
+    return 0
+}
+
+// DIE DATEI LIEGT BEIM BENUTZER, und dieses Programm weiss, wer das ist
+// -- der Kernel weiss es nicht. Ohne $USER wird `osum` genommen; das ist
+// derselbe Pfad, den der Kern beim Hochlauf versucht.
+fn lade(args: u64, n: u64) -> u64 {
+    var pfad: [u8; 128] = [0 as u8; 128]
+    var vor: [u8; 8] = "/users/\0"
+    var nach: [u8; 21] = "/config/tiling.conf\0\0"
+    var wuser: [u8; 5] = "USER\0"
+    var vorgabe: [u8; 5] = "osum\0"
+    var puffer: [u8; 2048] = [0 as u8; 2048]
+    var s_ok: [u8; 26] = "tiling: Eintraege gelesen\0"
+    var s_no: [u8; 34] = "tiling: die Datei ist nicht da:  \0"
+    var s_sp: [u8; 2] = " \0"
+
+    let p: u64 = (&pfad[0 as usize]) as u64
+    if n >= 3 {
+        ulib.strncpy(p, ulib.arg_at(args, 2), 120)
+    } else {
+        ulib.strcpy(p, (&vor[0 as usize]) as u64)
+        var u: u64 = ulib.env_get(args, (&wuser[0 as usize]) as u64)
+        if u == 0 {
+            u = (&vorgabe[0 as usize]) as u64
+        }
+        ulib.strcat(p, u)
+        ulib.strcat(p, (&nach[0 as usize]) as u64)
+    }
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, p, 0, 0)
+    if is_err(fd) {
+        ulib.esay_line((&s_no[0 as usize]) as u64, p)
+        return 1
+    }
+    let buf: u64 = (&puffer[0 as usize]) as u64
+    var len: u64 = 0
+    var weiter: bool = true
+    while weiter && len < 2000 {
+        let got: u64 = ulib.sys(ulib.SYS_READ, fd, buf + len, 2000 - len)
+        if is_err(got) || got == 0 {
+            weiter = false
+        } else {
+            len = len + got
+        }
+    }
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    if len == 0 {
+        return 1
+    }
+    let k: u64 = ulib.sys(SYS_TILECONF, buf, len, 0)
+    if is_err(k) {
+        return 1
+    }
+    ulib.sayu(k)
+    ulib.say((&s_sp[0 as usize]) as u64)
+    ulib.say((&s_ok[0 as usize]) as u64)
+    ulib.nl()
+    return 0
+}
+
+// ------------------------------------------------- die Handlungsnamen
+//
+// Dieselben Woerter, die auch in tiling.conf stehen duerfen. Sie stehen
+// in zwei Teilen, weil `firnc` jedem Zwischenwert jedes Zweiges einen
+// eigenen Platz auf dem Stapel gibt -- dieselbe Ueberlegung, die in
+// `kernel/sys.fi` hinter `k13_call` steht, nur in Ring 3.
+fn action_of(p: u64) -> u64 {
+    var n1: [u8; 11] = "focus-left\0"
+    var n2: [u8; 12] = "focus-right\0"
+    var n3: [u8; 9] = "focus-up\0"
+    var n4: [u8; 11] = "focus-down\0"
+    var n5: [u8; 10] = "move-left\0"
+    var n6: [u8; 11] = "move-right\0"
+    var n7: [u8; 8] = "move-up\0"
+    var n8: [u8; 10] = "move-down\0"
+    var n9: [u8; 8] = "split-h\0"
+    var n10: [u8; 8] = "split-v\0"
+    var n11: [u8; 13] = "layout-split\0"
+    var n12: [u8; 14] = "layout-tabbed\0"
+    var n13: [u8; 15] = "layout-stacked\0"
+    var n14: [u8; 7] = "rotate\0"
+    var n15: [u8; 7] = "mirror\0"
+    if ulib.streq(p, (&n1[0 as usize]) as u64) {
+        return 1
+    }
+    if ulib.streq(p, (&n2[0 as usize]) as u64) {
+        return 2
+    }
+    if ulib.streq(p, (&n3[0 as usize]) as u64) {
+        return 3
+    }
+    if ulib.streq(p, (&n4[0 as usize]) as u64) {
+        return 4
+    }
+    if ulib.streq(p, (&n5[0 as usize]) as u64) {
+        return 5
+    }
+    if ulib.streq(p, (&n6[0 as usize]) as u64) {
+        return 6
+    }
+    if ulib.streq(p, (&n7[0 as usize]) as u64) {
+        return 7
+    }
+    if ulib.streq(p, (&n8[0 as usize]) as u64) {
+        return 8
+    }
+    if ulib.streq(p, (&n9[0 as usize]) as u64) {
+        return 9
+    }
+    if ulib.streq(p, (&n10[0 as usize]) as u64) {
+        return 10
+    }
+    if ulib.streq(p, (&n11[0 as usize]) as u64) {
+        return 11
+    }
+    if ulib.streq(p, (&n12[0 as usize]) as u64) {
+        return 12
+    }
+    if ulib.streq(p, (&n13[0 as usize]) as u64) {
+        return 13
+    }
+    if ulib.streq(p, (&n14[0 as usize]) as u64) {
+        return 14
+    }
+    if ulib.streq(p, (&n15[0 as usize]) as u64) {
+        return 15
+    }
+    return action_of2(p)
+}
+
+fn action_of2(p: u64) -> u64 {
+    var m1: [u8; 8] = "balance\0"
+    var m2: [u8; 6] = "float\0"
+    var m3: [u8; 6] = "close\0"
+    var m4: [u8; 5] = "grow\0"
+    var m5: [u8; 7] = "shrink\0"
+    var m6: [u8; 10] = "snap-left\0"
+    var m7: [u8; 11] = "snap-right\0"
+    var m8: [u8; 9] = "snap-top\0"
+    var m9: [u8; 12] = "snap-bottom\0"
+    var m10: [u8; 13] = "snap-topleft\0"
+    var m11: [u8; 14] = "snap-topright\0"
+    var m12: [u8; 16] = "snap-bottomleft\0"
+    var m13: [u8; 17] = "snap-bottomright\0"
+    var m14: [u8; 14] = "tiling-toggle\0"
+    if ulib.streq(p, (&m1[0 as usize]) as u64) {
+        return 16
+    }
+    if ulib.streq(p, (&m2[0 as usize]) as u64) {
+        return 17
+    }
+    if ulib.streq(p, (&m3[0 as usize]) as u64) {
+        return 18
+    }
+    if ulib.streq(p, (&m4[0 as usize]) as u64) {
+        return 19
+    }
+    if ulib.streq(p, (&m5[0 as usize]) as u64) {
+        return 20
+    }
+    if ulib.streq(p, (&m6[0 as usize]) as u64) {
+        return 21
+    }
+    if ulib.streq(p, (&m7[0 as usize]) as u64) {
+        return 22
+    }
+    if ulib.streq(p, (&m8[0 as usize]) as u64) {
+        return 23
+    }
+    if ulib.streq(p, (&m9[0 as usize]) as u64) {
+        return 24
+    }
+    if ulib.streq(p, (&m10[0 as usize]) as u64) {
+        return 25
+    }
+    if ulib.streq(p, (&m11[0 as usize]) as u64) {
+        return 26
+    }
+    if ulib.streq(p, (&m12[0 as usize]) as u64) {
+        return 27
+    }
+    if ulib.streq(p, (&m13[0 as usize]) as u64) {
+        return 28
+    }
+    if ulib.streq(p, (&m14[0 as usize]) as u64) {
+        return 29
+    }
+    return 0
+}
+
+fn say_action(a: u64) {
+    var n1: [u8; 11] = "focus-left\0"
+    var n2: [u8; 12] = "focus-right\0"
+    var n3: [u8; 9] = "focus-up\0"
+    var n4: [u8; 11] = "focus-down\0"
+    var n5: [u8; 10] = "move-left\0"
+    var n6: [u8; 11] = "move-right\0"
+    var n7: [u8; 8] = "move-up\0"
+    var n8: [u8; 10] = "move-down\0"
+    var n9: [u8; 8] = "split-h\0"
+    var n10: [u8; 8] = "split-v\0"
+    var n11: [u8; 13] = "layout-split\0"
+    var n12: [u8; 14] = "layout-tabbed\0"
+    var n13: [u8; 15] = "layout-stacked\0"
+    var n14: [u8; 7] = "rotate\0"
+    var n15: [u8; 7] = "mirror\0"
+    if a == 1 {
+        ulib.say((&n1[0 as usize]) as u64)
+    }
+    if a == 2 {
+        ulib.say((&n2[0 as usize]) as u64)
+    }
+    if a == 3 {
+        ulib.say((&n3[0 as usize]) as u64)
+    }
+    if a == 4 {
+        ulib.say((&n4[0 as usize]) as u64)
+    }
+    if a == 5 {
+        ulib.say((&n5[0 as usize]) as u64)
+    }
+    if a == 6 {
+        ulib.say((&n6[0 as usize]) as u64)
+    }
+    if a == 7 {
+        ulib.say((&n7[0 as usize]) as u64)
+    }
+    if a == 8 {
+        ulib.say((&n8[0 as usize]) as u64)
+    }
+    if a == 9 {
+        ulib.say((&n9[0 as usize]) as u64)
+    }
+    if a == 10 {
+        ulib.say((&n10[0 as usize]) as u64)
+    }
+    if a == 11 {
+        ulib.say((&n11[0 as usize]) as u64)
+    }
+    if a == 12 {
+        ulib.say((&n12[0 as usize]) as u64)
+    }
+    if a == 13 {
+        ulib.say((&n13[0 as usize]) as u64)
+    }
+    if a == 14 {
+        ulib.say((&n14[0 as usize]) as u64)
+    }
+    if a == 15 {
+        ulib.say((&n15[0 as usize]) as u64)
+    }
+    if a > 15 {
+        say_action2(a)
+    }
+}
+
+fn say_action2(a: u64) {
+    var m1: [u8; 8] = "balance\0"
+    var m2: [u8; 6] = "float\0"
+    var m3: [u8; 6] = "close\0"
+    var m4: [u8; 5] = "grow\0"
+    var m5: [u8; 7] = "shrink\0"
+    var m6: [u8; 10] = "snap-left\0"
+    var m7: [u8; 11] = "snap-right\0"
+    var m8: [u8; 9] = "snap-top\0"
+    var m9: [u8; 12] = "snap-bottom\0"
+    var m10: [u8; 13] = "snap-topleft\0"
+    var m11: [u8; 14] = "snap-topright\0"
+    var m12: [u8; 16] = "snap-bottomleft\0"
+    var m13: [u8; 17] = "snap-bottomright\0"
+    var m14: [u8; 14] = "tiling-toggle\0"
+    if a == 16 {
+        ulib.say((&m1[0 as usize]) as u64)
+    }
+    if a == 17 {
+        ulib.say((&m2[0 as usize]) as u64)
+    }
+    if a == 18 {
+        ulib.say((&m3[0 as usize]) as u64)
+    }
+    if a == 19 {
+        ulib.say((&m4[0 as usize]) as u64)
+    }
+    if a == 20 {
+        ulib.say((&m5[0 as usize]) as u64)
+    }
+    if a == 21 {
+        ulib.say((&m6[0 as usize]) as u64)
+    }
+    if a == 22 {
+        ulib.say((&m7[0 as usize]) as u64)
+    }
+    if a == 23 {
+        ulib.say((&m8[0 as usize]) as u64)
+    }
+    if a == 24 {
+        ulib.say((&m9[0 as usize]) as u64)
+    }
+    if a == 25 {
+        ulib.say((&m10[0 as usize]) as u64)
+    }
+    if a == 26 {
+        ulib.say((&m11[0 as usize]) as u64)
+    }
+    if a == 27 {
+        ulib.say((&m12[0 as usize]) as u64)
+    }
+    if a == 28 {
+        ulib.say((&m13[0 as usize]) as u64)
+    }
+    if a == 29 {
+        ulib.say((&m14[0 as usize]) as u64)
+    }
+}

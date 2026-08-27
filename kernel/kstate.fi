@@ -67,6 +67,8 @@
 //   0x4D000  frei
 //   0x50000  USB: xHCI-Ringe und Geraetesaetze (Runde K17, K17_OFF)
 //   0x64000  Fenstertafel und Ereignisringe (Runde DESKTOP, `wm.fi`)
+//   0x68000  der Fensterbaum und die Tastenbelegung (Runde TILING,
+//            `tile.fi`), vier Seiten bis 0x6C000
 //   0x58000  die Energieschicht (Runde K18, `pwr.fi`)
 //   0x59000  Akku, Netzteil und Thermalzone (Runde K18, `batt.fi`)
 //   0x5A000  OFS in Fassung 3: die Pfadpuffer des Dateisystems,
@@ -78,7 +80,7 @@
 //            lagen bis dahin auf 0x29000, eine Seite)
 //   0x5C000  die Bildschirmmodi und die Nachschlagetabelle
 //            (Runde DISPLAY, `vmode.fi`)
-//   0x68000  frei, bis KDATA_SIZE (0x70000)
+//   0x6C000  frei, bis KDATA_SIZE (0x70000)
 //
 // RUNDE K12 HAT DIESEN BEREICH WACHSEN LASSEN, von 0x40000 auf 0x50000.
 // Der Grund steht hier, damit ihn niemand suchen muss: mit dem
@@ -144,6 +146,8 @@ export {
     M_WIGSTART, M_WIGNOKEYS, M_WIGNOIDX, M_WIGSPEICHER,
     K18_OFF, K18_MAX, BATT_OFF, BATT_MAX,
     DISP_OFF, DISP_MAX, DLUT_OFF, DLUT_MAX,
+    TILE_OFF, TILE_MAX, KB_ALT, KB_HOT, KB_HHEAD, KB_HTAIL, KB_HOTS,
+    M_TILE, M_TILEFUZZ, M_TILESHOT, M_TILETABS, M_TILEROT, M_NOTILEDIRTY,
     M_PWR, M_NOCSTATES, M_NOPWR, M_PWRHOT, M_NOBLANK,
     M_PWRDIM, M_PWRBLANK,
     OFS3_OFF, OFS3_MAX,
@@ -600,6 +604,26 @@ const KB_SHIFT: u64 = 0x00
 const KB_CTRL: u64 = 0x08
 const KB_EXT: u64 = 0x10 // das Vorzeichen 0xE0 ist gekommen
 const KB_SEQS: u64 = 0x18 // Fluchtfolgen, die die Tastatur erzeugt hat
+
+// RUNDE TILING: DIE ALT-TASTE UND DER RING DER TASTENKUERZEL.
+//
+// Ein Fensterserver mit einem Baum braucht einen Modifikator, der NICHT
+// in die Anwendung durchgereicht wird -- i3 nennt ihn `$mod` und legt
+// ihn auf Alt oder auf die Windows-Taste. Dieser Kernel kannte bis
+// hierher Umschalt und Steuerung; Steuerung geht an die Shell (STRG-C),
+// also bleibt Alt.
+//
+// WARUM EIN EIGENER RING UND NICHT `deliver`: eine Taste mit Alt ist
+// KEINE Eingabe fuer die Anwendung. Sie darf nicht in der
+// Zeilendisziplin landen, sonst steht `h` in der Shell, wenn man das
+// Fenster nach links wechselt. `kbd.irq` legt sie deshalb hier ab, und
+// `wm.poll` holt sie ab -- dieselbe Richtung wie beim Zeigegeraet, und
+// `kbd.fi` muss den Fensterserver dafuer nicht kennen.
+const KB_ALT: u64 = 0x58 // Alt wird gehalten
+const KB_HHEAD: u64 = 0x60
+const KB_HTAIL: u64 = 0x68
+const KB_HOTS: u64 = 0x70 // wie viele Kuerzel insgesamt kamen
+const KB_HOT: u64 = 0xC0 // 16 Plaetze zu zwei Oktetten: Zeichen, Modifikatoren
 
 // Der Terminalautomat der Bildschirmkonsole.
 const AN_STATE: u64 = 0x20 // 0 = Text, 1 = nach ESC, 2 = in ESC[
@@ -1091,6 +1115,61 @@ const DLUT_MAX: u64 = 0x1000
 const DSK_OFF: u64 = 0x64000
 const DSK_MAX: u64 = 0x4000
 
+// ========================================================= RUNDE TILING
+//
+// VIER SEITEN, 0x4C000..0x50000, AUS DEM VORRAT 0x4C000..0x58000, DER
+// SEIT RUNDE K16 ALS FREI AUSGEWIESEN IST. Sie gehoeren dem
+// FENSTERBAUM. Waehrend diese Runde lief, liefen sechs weitere an
+// demselben Baum; die Bereiche sind deshalb vorher verteilt worden, so
+// wie bei K13 bis K16:
+//
+//     TILING   0x4C000..0x50000   <- hier, alle vier Seiten belegt
+//     frei     0x50000..0x54000
+//     DESKTOP  0x54000..0x58000
+//
+// WAS DRIN LIEGT, und die Rechnung dazu steht in `kernel/tile.fi`:
+//
+//   +0x0000  die Skalare des Baumes (Wurzel, Fokus, Flaeche, Zaehler)
+//   +0x0200  die Knotentafel: 96 Knoten zu 128 Oktetten = 12288
+//   +0x3200  die Tastenbelegung: 56 Eintraege zu 64 Oktetten = 3584
+//
+// Die 96 sind nicht geraten. Ein Baum mit N Blaettern hat hoechstens
+// 2N-1 Knoten (jeder innere Knoten mit genau zwei Kindern); 96 Knoten
+// tragen also 48 Fenster, und 48 heisst in `tile.fi` MAX_LEAVES. Wer
+// das 49. anlegt, bekommt eine Absage und keinen stillen Ueberlauf.
+// MERGE-VERSCHIEBUNG: 0x4C000 -> 0x68000. Diese Runde hat aus dem
+// Vorrat gegriffen, den K16 als frei ausgewiesen hatte; Runde K17 hat
+// dort inzwischen den Modusvektor (0x4C000) und ihre USB-Seiten
+// (0x50000..0x58000). Der Fensterbaum zieht hinter die Fenstertafel der
+// Runde DESKTOP.
+const TILE_OFF: u64 = 0x68000
+const TILE_MAX: u64 = 0x4000
+
+// RUNDE TILING. Wie in jeder Runde davor sind zwei davon GEGENPROBEN:
+//
+//   `tile`         den Fensterbaum anschalten: neue Fenster werden
+//                  gekachelt statt frei schwebend gelegt.
+//   `tilefuzz`     zehntausend zufaellige Baumoperationen, nach jeder
+//                  die Invariante pruefen. Ohne Verletzung oder gar
+//                  nicht.
+//   `tileshot`     vier Fenster fuer das Bildschirmfoto anlegen.
+//   `tiletabs`     dieselben vier als Reiter (`tabbed`).
+//   `tilerot`      dieselben vier nach einer Vierteldrehung.
+//   `notiledirty`  GEGENPROBE zur Bereichsverfolgung des Baumes: beim
+//                  Teilen wird der GANZE Schirm schmutzig statt nur der
+//                  betroffene Teilbaum. Die gemalte Flaeche MUSS damit
+//                  deutlich groesser werden -- sonst misst die
+//                  Teilbaumverfolgung nichts.
+// RUNDE TILING, in den Modusvektor der Runde K17 eingehaengt. Die alten
+// Masken 1 << 33 .. 1 << 38 lagen mitten in dem Bereich, den die Runden
+// K13 bis K16 schon belegt hatten -- diese Runde ist von einem AELTEREN
+// Stand abgezweigt. Kacheln ist Oberflaeche, also Wort 1.
+const M_TILE: u64 = 87 // Wort 1, Bit 23
+const M_TILEFUZZ: u64 = 88 // Wort 1, Bit 24
+const M_TILESHOT: u64 = 89 // Wort 1, Bit 25
+const M_TILETABS: u64 = 90 // Wort 1, Bit 26
+const M_TILEROT: u64 = 91 // Wort 1, Bit 27
+const M_NOTILEDIRTY: u64 = 92 // Wort 1, Bit 28
 
 // RUNDE K18. Die Woerter dieser Runde auf der Befehlszeile. Wie in jeder
 // Runde davor sind die meisten davon GEGENPROBEN, und ohne sie beweist
@@ -1247,7 +1326,7 @@ const KDATA_SIZE: u64 = 0x70000
 //                      Schriften) und Runde K15 (Widgets, Dateimanager,
 //                      Starter, Speicherplatzanalyse) und Runde DESKTOP
 //                      (Schreibtisch, Einstellungen) und Runde
-//                      TASKBAR-EDGE. Frei ab Bit 23.
+//                      TASKBAR-EDGE und Runde TILING. Frei ab Bit 29.
 //   Wort  2  128..191  BENUTZER UND RECHTE -- Runde K13. Frei ab Bit 6.
 //   Wort  3  192..255  DIE DATEISYSTEME -- Runde K14 (VFS, /proc, /dev,
 //                      FAT32, Partitionen). Frei ab Bit 8.
