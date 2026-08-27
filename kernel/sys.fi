@@ -40,6 +40,7 @@ import serial
 import kstate
 import mem
 import sched
+import wg
 import proc
 import user
 import fs
@@ -791,6 +792,53 @@ const SYS_OSUM_FOPEN: u64 = 1901 // (pfad, argv, argc) -> pid
 const SYS_OSUM_FLIST: u64 = 1902 // (nr, aus, len) -> Art oder -ENOENT
 const SYS_OSUM_FREG: u64 = 1903 // (satz, len) -> Platz in der Tabelle
 
+// ---------------------------------------------------------- RUNDE TUNNEL
+// Der Tunnel wird zum PAKET (docs/TUNNEL-PAKETE.md). Ein Paket liegt in
+// Ring 3, der Tunnel in Ring 0 -- also braucht es eine Tuer, und das
+// sind diese zwei Nummern. Vorher nahm `kernel/wg.fi` seine Einstellung
+// NUR von der Kommandozeile; damit laesst sich ein Testlauf steuern,
+// aber kein Programm, das der Benutzer installiert und wieder entfernt.
+//
+// WARUM EIN ZEIGER AUF ARGUMENTE und nicht sechs Register: `allow` will
+// Index, Adresse und Praefix, `awg` will zehn Zahlen. Ein Aufruf mit
+// fester Argumentzahl haette entweder Felder gepackt (und jeder Leser
+// muesste die Packung kennen) oder eine zweite Nummer gebraucht. Ein
+// Block aus u64 ist beides nicht.
+//
+// WER DARF: `wgset` nur euid 0. Der private Schluessel des Tunnels ist
+// das Geheimnis, an dem alles haengt; er darf hinein und NIE wieder
+// heraus. Es gibt deshalb keinen Getter fuer ihn -- `WG_PUBLIC` gibt
+// den OEFFENTLICHEN Schluessel, und der ist zum Weitergeben da.
+const SYS_OSUM_WGGET: u64 = 1950 // (feld, zeiger, len) -> Zahl oder -E
+const SYS_OSUM_WGSET: u64 = 1951 // (feld, zeiger, anzahl) -> 0 oder -E
+
+// wgget
+const WG_READY: u64 = 0
+const WG_UP: u64 = 1
+const WG_PEERS: u64 = 2
+const WG_HANDSHAKES: u64 = 3
+const WG_KILLED: u64 = 4
+const WG_KILLARMED: u64 = 5
+const WG_PORT: u64 = 6
+const WG_ERR: u64 = 7
+const WG_PUBLIC: u64 = 8 // schreibt 32 Oktette nach `zeiger`
+const WG_STAT: u64 = 9 // `zeiger` ist hier die Kennzahl, nicht ein Zeiger
+const WG_ESTAB: u64 = 10
+
+// wgset -- `zeiger` zeigt auf `anzahl` u64, ausser wo es 32 Oktette sind
+const WS_INIT: u64 = 0 // -
+const WS_CLEAR: u64 = 1 // -
+const WS_PRIVATE: u64 = 2 // 32 Oktette
+const WS_PEER: u64 = 3 // 32 Oktette -> Index
+const WS_ALLOW: u64 = 4 // i, ip, praefix
+const WS_ENDPOINT: u64 = 5 // i, ip, port
+const WS_PSK: u64 = 6 // i (u64) dann 32 Oktette dahinter
+const WS_KEEPALIVE: u64 = 7 // i, sekunden
+const WS_ADDR: u64 = 8 // ip, praefix, mtu
+const WS_UP: u64 = 9 // 0 oder 1
+const WS_KILL: u64 = 10 // 0 oder 1
+const WS_AWG: u64 = 11 // jc,jmin,jmax,s1,s2,h1,h2,h3,h4
+
 // ------------------------------------------------------------ the frame
 
 // The sixteen words `isr.s` saved. Offsets from the pointer it hands over.
@@ -1339,6 +1387,9 @@ fn k13_call(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64,
     }
     if number == SYS_REBOOT {
         return do_reboot(state, me, a0)
+    }
+    if number == SYS_OSUM_WGGET || number == SYS_OSUM_WGSET {
+        return wg_call(state, me, number, a0, a1, a2)
     }
     if number == SYS_OSUM_USERINFO {
         return do_userinfo(state, me, a0)
@@ -4094,6 +4145,193 @@ fn pwr_call(state: u64, me: u64, number: u64, a0: u64, a1: u64,
         return do_pwrset(state, me, a0, a1)
     }
     return do_pwrstr(state, me, a0, a1, a2)
+}
+
+// ------------------------------------------------------- RUNDE TUNNEL
+// Wie `pwr_call`: ein eigener Rahmen, der nur entsteht, wenn wirklich
+// eine dieser Nummern kommt.
+fn wg_call(state: u64, me: u64, number: u64, a0: u64, a1: u64,
+    a2: u64) -> u64 {
+    if number == SYS_OSUM_WGGET {
+        return do_wgget(state, me, a0, a1, a2)
+    }
+    return do_wgset(state, me, a0, a1, a2)
+}
+
+fn do_wgget(state: u64, me: u64, field: u64, ptr: u64, len: u64) -> u64 {
+    if field == WG_READY {
+        if wg.ready(state) {
+            return 1
+        }
+        return 0
+    }
+    // Alles Weitere setzt voraus, dass ueberhaupt ein Tunnel da ist.
+    // Ein Kern mit `kernel/wg-aus.fi` sagt hier immer -ENODEV, und das
+    // ist die Antwort, an der ein Programm merkt, dass dieses System
+    // ohne Tunnel gebaut wurde.
+    if !wg.ready(state) {
+        return neg(errno.E_NODEV)
+    }
+    if field == WG_UP {
+        if wg.up(state) {
+            return 1
+        }
+        return 0
+    }
+    if field == WG_PEERS {
+        return wg.peers(state)
+    }
+    if field == WG_HANDSHAKES {
+        return wg.handshakes(state)
+    }
+    if field == WG_KILLED {
+        return wg.killed_octets(state)
+    }
+    if field == WG_KILLARMED {
+        if wg.kill_armed(state) {
+            return 1
+        }
+        return 0
+    }
+    if field == WG_PORT {
+        return wg.port(state)
+    }
+    if field == WG_ERR {
+        return wg.last_error(state)
+    }
+    if field == WG_STAT {
+        return wg.stat(state, ptr)
+    }
+    if field == WG_ESTAB {
+        if wg.established(state, ptr) {
+            return 1
+        }
+        return 0
+    }
+    if field == WG_PUBLIC {
+        if len < 32 {
+            return neg(errno.E_INVAL)
+        }
+        var key: [u8; 32] = [0 as u8; 32]
+        if !wg.public_key(state, (&key[0]) as u64) {
+            return neg(errno.E_NODEV)
+        }
+        if !copy_out(state, me, ptr, (&key[0]) as u64, 32) {
+            return neg(errno.E_FAULT)
+        }
+        return 32
+    }
+    return neg(errno.E_INVAL)
+}
+
+fn do_wgset(state: u64, me: u64, field: u64, ptr: u64, n: u64) -> u64 {
+    // Nur root. Siehe die Anmerkung bei den Nummern.
+    if sched.tget(state, me, sched.T_EUID) != 0 {
+        return neg(errno.E_PERM)
+    }
+    if field == WS_INIT {
+        if !wg.init(state) {
+            return neg(errno.E_NODEV)
+        }
+        return 0
+    }
+    if !wg.ready(state) && field != WS_CLEAR {
+        return neg(errno.E_NODEV)
+    }
+    if field == WS_CLEAR {
+        wg.clear(state)
+        return 0
+    }
+    // Die zwei Felder, die Oktette und keine Zahlen tragen.
+    if field == WS_PRIVATE || field == WS_PEER {
+        var key: [u8; 32] = [0 as u8; 32]
+        if !copy_in(state, me, (&key[0]) as u64, ptr, 32) {
+            return neg(errno.E_FAULT)
+        }
+        if field == WS_PRIVATE {
+            if !wg.set_private(state, (&key[0]) as u64) {
+                return neg(errno.E_INVAL)
+            }
+            return 0
+        }
+        let idx: i64 = wg.add_peer(state, (&key[0]) as u64)
+        if idx < 0 {
+            return neg(errno.E_NOSPC)
+        }
+        return idx as u64
+    }
+    if field == WS_PSK {
+        // ein u64 Index, dann 32 Oktette
+        var arg: [u64; 1] = [0 as u64; 1]
+        var key: [u8; 32] = [0 as u8; 32]
+        if !copy_in(state, me, (&arg[0]) as u64, ptr, 8) {
+            return neg(errno.E_FAULT)
+        }
+        if !copy_in(state, me, (&key[0]) as u64, ptr + 8, 32) {
+            return neg(errno.E_FAULT)
+        }
+        if !wg.psk(state, arg[0], (&key[0]) as u64) {
+            return neg(errno.E_INVAL)
+        }
+        return 0
+    }
+    // Alles Uebrige ist ein Block aus u64. Neun ist das Groesste, was
+    // gebraucht wird (`awg`); mehr wird abgelehnt, statt den Stapel
+    // nach der Laune des Aufrufers zu bemessen.
+    if n > 9 {
+        return neg(errno.E_INVAL)
+    }
+    var a: [u64; 9] = [0 as u64; 9]
+    if n > 0 {
+        if !copy_in(state, me, (&a[0]) as u64, ptr, n * 8) {
+            return neg(errno.E_FAULT)
+        }
+    }
+    if field == WS_ALLOW {
+        if n < 3 || !wg.allow(state, a[0], a[1], a[2]) {
+            return neg(errno.E_INVAL)
+        }
+        return 0
+    }
+    if field == WS_ENDPOINT {
+        if n < 3 || !wg.endpoint(state, a[0], a[1], a[2]) {
+            return neg(errno.E_INVAL)
+        }
+        return 0
+    }
+    if field == WS_KEEPALIVE {
+        if n < 2 || !wg.keepalive(state, a[0], a[1]) {
+            return neg(errno.E_INVAL)
+        }
+        return 0
+    }
+    if field == WS_ADDR {
+        if n < 3 || !wg.set_addr(state, a[0], a[1], a[2]) {
+            return neg(errno.E_INVAL)
+        }
+        return 0
+    }
+    if field == WS_UP {
+        if n < 1 || !wg.set_up(state, a[0]) {
+            return neg(errno.E_INVAL)
+        }
+        return 0
+    }
+    if field == WS_KILL {
+        if n < 1 {
+            return neg(errno.E_INVAL)
+        }
+        wg.arm_kill(state, a[0])
+        return 0
+    }
+    if field == WS_AWG {
+        if n < 9 || !wg.awg(state, a[0], a[1], a[2], a[3], a[4], a[5],
+            a[6], a[7], a[8]) {
+            return neg(errno.E_INVAL)
+        }
+        return 0
+    }
+    return neg(errno.E_INVAL)
 }
 
 fn do_pwrget(state: u64, field: u64) -> u64 {

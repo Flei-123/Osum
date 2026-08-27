@@ -1,0 +1,282 @@
+// kernel/user/vpn.fi -- /apps/vpn.prog/start, DIE BEDIENSEITE DES TUNNELS.
+//
+// Der Tunnel selbst liegt in Ring 0 (`kernel/wg.fi`) und muss dort
+// liegen: der Notaus sitzt unter dem einzigen Aufruf von
+// `virtio.tx_frame`, und ein Notaus in Ring 3 waere keiner. Was NICHT
+// dort liegen muss, ist alles, was ein Mensch bedient -- Profile lesen,
+// Schluessel erzeugen, sagen, ob es laeuft. Das ist dieses Programm, und
+// es ist der Inhalt des Pakets `vpn`.
+//
+// DIE GRENZE, und sie ist der ganze Grund fuer die Aufteilung:
+//
+//   im Kern     das Geraet, die Wegewahl, der Notaus, die Krypto --
+//               alles, was JEDES Paket entweder hat oder nicht hat.
+//               Kostet ohne eingerichteten Tunnel 0 Seiten (gemessen,
+//               tools/tunnel/kosten.sh); wer es gar nicht will, baut
+//               mit `--ohne-tunnel` und spart 203 424 Oktette Abbild.
+//   im Paket    die Profile, die Textform, die Schluesselerzeugung,
+//               die Anzeige. Laesst sich installieren und entfernen,
+//               ohne den Kern anzufassen.
+//
+// PROFILE liegen unter /users/<name>/config/vpn/<name>.conf im Format,
+// das `wg-quick` benutzt -- nicht weil es schoen waere, sondern weil
+// jeder Anbieter genau diese Datei ausliefert und niemand sie abtippen
+// koennen soll.
+//
+// WAS BEIM ENTFERNEN DES PAKETS BLEIBT: /users/<name>/config/vpn und
+// /users/<name>/state/vpn. Da liegen die privaten Schluessel. `opk
+// entfernen` fasst sie nicht an, und das ist Absicht -- ein Profil ist
+// wertvoll, ein versehentlich geloeschter Schluessel unwiederbringlich.
+// Wer sie wirklich los sein will, ruft `vpn vergessen`, und das fragt
+// vorher.
+//
+//   vpn                 Zustand
+//   vpn schluessel      ein neues Schluesselpaar, oeffentlichen zeigen
+//   vpn an <profil>     Profil lesen und den Tunnel hochbringen
+//   vpn aus             Tunnel herunter
+//   vpn notaus an|aus   Kill Switch
+//   vpn vergessen       Schluessel und Profile loeschen -- fragt nach
+
+profile kernel
+
+import ulib
+
+export { u_start }
+
+const SYS_WGGET: u64 = 1950
+const SYS_WGSET: u64 = 1951
+
+const WG_READY: u64 = 0
+const WG_UP: u64 = 1
+const WG_PEERS: u64 = 2
+const WG_HANDSHAKES: u64 = 3
+const WG_KILLED: u64 = 4
+const WG_KILLARMED: u64 = 5
+const WG_PORT: u64 = 6
+const WG_PUBLIC: u64 = 8
+
+const WS_INIT: u64 = 0
+const WS_CLEAR: u64 = 1
+const WS_PRIVATE: u64 = 2
+const WS_PEER: u64 = 3
+const WS_ALLOW: u64 = 4
+const WS_ENDPOINT: u64 = 5
+const WS_KEEPALIVE: u64 = 7
+const WS_ADDR: u64 = 8
+const WS_UP: u64 = 9
+const WS_KILL: u64 = 10
+
+fn wgget(field: u64, ptr: u64, len: u64) -> i64 {
+    return ulib.sys(SYS_WGGET, field, ptr, len) as i64
+}
+
+fn wgset(field: u64, ptr: u64, n: u64) -> i64 {
+    return ulib.sys(SYS_WGSET, field, ptr, n) as i64
+}
+
+// ------------------------------------------------------------- Basis64
+//
+// Ein WireGuard-Schluessel steht in jeder Konfigurationsdatei der Welt
+// als Basis64. Wer das nicht liest, kann kein Profil eines Anbieters
+// nehmen -- und genau das soll das Paket koennen.
+
+static mut B64: [u8; 65] =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/\0"
+
+fn b64_val(c: u64) -> i64 {
+    var i: u64 = 0
+    while i < 64 {
+        if B64[(i) as usize] as u64 == c {
+            return i as i64
+        }
+        i = i + 1
+    }
+    if c == 61 { // '='
+        return -2
+    }
+    return -1
+}
+
+// 44 Zeichen Basis64 -> 32 Oktette. Gibt false zurueck, wenn auch nur
+// ein Zeichen nicht passt: ein halb gelesener Schluessel ist schlimmer
+// als gar keiner, weil der Tunnel dann still nicht zustande kommt.
+fn b64_key(src: u64, dst: u64) -> bool {
+    var acc: u64 = 0
+    var bits: u64 = 0
+    var out: u64 = 0
+    var i: u64 = 0
+    while i < 44 {
+        let c: u64 = __mmio_read8((src + i) as *mut u8) as u64
+        let v: i64 = b64_val(c)
+        if v == -1 {
+            return false
+        }
+        if v >= 0 {
+            acc = (acc << 6) | (v as u64)
+            bits = bits + 6
+            if bits >= 8 {
+                bits = bits - 8
+                if out < 32 {
+                    __mmio_write8((dst + out) as *mut u8, ((acc >> bits) & 255) as u8)
+                    out = out + 1
+                }
+            }
+        }
+        i = i + 1
+    }
+    return out == 32
+}
+
+fn b64_encode(src: u64, dst: u64) {
+    var i: u64 = 0
+    var o: u64 = 0
+    while i < 30 {
+        let a: u64 = __mmio_read8((src + i) as *mut u8) as u64
+        let b: u64 = __mmio_read8((src + i + 1) as *mut u8) as u64
+        let c: u64 = __mmio_read8((src + i + 2) as *mut u8) as u64
+        __mmio_write8((dst + o) as *mut u8, B64[(a >> 2) as usize])
+        __mmio_write8((dst + o + 1) as *mut u8, B64[(((a & 3) << 4) | (b >> 4)) as usize])
+        __mmio_write8((dst + o + 2) as *mut u8, B64[(((b & 15) << 2) | (c >> 6)) as usize])
+        __mmio_write8((dst + o + 3) as *mut u8, B64[(c & 63) as usize])
+        i = i + 3
+        o = o + 4
+    }
+    // die letzten zwei Oktette -> drei Zeichen und ein '='
+    let a: u64 = __mmio_read8((src + 30) as *mut u8) as u64
+    let b: u64 = __mmio_read8((src + 31) as *mut u8) as u64
+    __mmio_write8((dst + o) as *mut u8, B64[(a >> 2) as usize])
+    __mmio_write8((dst + o + 1) as *mut u8, B64[(((a & 3) << 4) | (b >> 4)) as usize])
+    __mmio_write8((dst + o + 2) as *mut u8, B64[((b & 15) << 2) as usize])
+    __mmio_write8((dst + o + 3) as *mut u8, 61 as u8)
+    __mmio_write8((dst + o + 4) as *mut u8, 0 as u8)
+}
+
+// ------------------------------------------------------- kleine Helfer
+
+// -------------------------------------------------------------- Zustand
+
+fn zeigen() {
+    var s_aus: [u8; 42] = "vpn: kein Tunnel in diesem Kern (-ENODEV)\0"
+    var s_bereit: [u8; 26] = "vpn: eingerichtet, aus\0\0\0\0"
+    var s_an: [u8; 14] = "vpn: laeuft\0\0\0"
+    var s_leer: [u8; 30] = "vpn: nicht eingerichtet\0\0\0\0\0\0\0"
+    var s_peer: [u8; 16] = "  Gegenstellen \0"
+    var s_hs: [u8; 16] = "  Handschlaege \0"
+    var s_port: [u8; 16] = "  Port         \0"
+    var s_kill: [u8; 16] = "  Notaus       \0"
+    var s_koct: [u8; 16] = "  verworfen    \0"
+
+    let r: i64 = wgget(WG_READY, 0, 0)
+    if r < 0 {
+        ulib.say((&s_aus[0]) as u64)
+        ulib.nl()
+        return
+    }
+    if r == 0 {
+        ulib.say((&s_leer[0]) as u64)
+        ulib.nl()
+        return
+    }
+    if wgget(WG_UP, 0, 0) == 1 {
+        ulib.say((&s_an[0]) as u64)
+        ulib.nl()
+    } else {
+        ulib.say((&s_bereit[0]) as u64)
+        ulib.nl()
+    }
+    ulib.say((&s_peer[0]) as u64)
+    ulib.sayu(wgget(WG_PEERS, 0, 0) as u64)
+    ulib.nl()
+    ulib.say((&s_hs[0]) as u64)
+    ulib.sayu(wgget(WG_HANDSHAKES, 0, 0) as u64)
+    ulib.nl()
+    ulib.say((&s_port[0]) as u64)
+    ulib.sayu(wgget(WG_PORT, 0, 0) as u64)
+    ulib.nl()
+    ulib.say((&s_kill[0]) as u64)
+    ulib.sayu(wgget(WG_KILLARMED, 0, 0) as u64)
+    ulib.nl()
+    ulib.say((&s_koct[0]) as u64)
+    ulib.sayu(wgget(WG_KILLED, 0, 0) as u64)
+    ulib.nl()
+}
+
+// Der oeffentliche Schluessel, in der Form, die man einem Anbieter
+// schickt. Der PRIVATE kommt nie heraus -- es gibt keinen Aufruf dafuer.
+fn pubkey_zeigen() {
+    var key: [u8; 32] = [0 as u8; 32]
+    var txt: [u8; 48] = [0 as u8; 48]
+    var s_kein: [u8; 34] = "vpn: noch kein Schluessel gesetzt\0"
+    if wgget(WG_PUBLIC, (&key[0]) as u64, 32) != 32 {
+        ulib.say((&s_kein[0]) as u64)
+        ulib.nl()
+        return
+    }
+    b64_encode((&key[0]) as u64, (&txt[0]) as u64)
+    ulib.say((&txt[0]) as u64)
+    ulib.nl()
+}
+
+fn u_start(args: u64) -> u64 {
+    var s_use1: [u8; 34] = "vpn [an <profil>|aus|schluessel]\0\0"
+    var s_use2: [u8; 30] = "vpn notaus an|aus | vergessen\0"
+    var c_an: [u8; 3] = "an\0"
+    var c_aus: [u8; 4] = "aus\0"
+    var c_sch: [u8; 12] = "schluessel\0\0"
+    var c_not: [u8; 7] = "notaus\0"
+    var c_hilf: [u8; 6] = "hilfe\0"
+
+    let n: u64 = ulib.arg_count(args)
+    if n < 2 {
+        zeigen()
+        return 0
+    }
+    let a1: u64 = ulib.arg_at(args, 1)
+    if ulib.streq(a1, (&c_hilf[0]) as u64) {
+        ulib.say((&s_use1[0]) as u64)
+        ulib.nl()
+        ulib.say((&s_use2[0]) as u64)
+        ulib.nl()
+        return 0
+    }
+    if ulib.streq(a1, (&c_sch[0]) as u64) {
+        pubkey_zeigen()
+        return 0
+    }
+    if ulib.streq(a1, (&c_aus[0]) as u64) {
+        var arg: [u64; 1] = [0 as u64; 1]
+        arg[0] = 0
+        var s_ok: [u8; 13] = "vpn: aus\0\0\0\0\0"
+        var s_no: [u8; 25] = "vpn: das ging nicht\0\0\0\0\0\0"
+        if wgset(WS_UP, (&arg[0]) as u64, 1) == 0 {
+            ulib.say((&s_ok[0]) as u64)
+            ulib.nl()
+        } else {
+            ulib.say((&s_no[0]) as u64)
+            ulib.nl()
+        }
+        return 0
+    }
+    if ulib.streq(a1, (&c_not[0]) as u64) && n >= 3 {
+        var arg: [u64; 1] = [0 as u64; 1]
+        var s_ok: [u8; 22] = "vpn: Notaus gesetzt\0\0\0"
+        var s_no: [u8; 25] = "vpn: das ging nicht\0\0\0\0\0\0"
+        arg[0] = 0
+        if ulib.streq(ulib.arg_at(args, 2), (&c_an[0]) as u64) {
+            arg[0] = 1
+        }
+        if wgset(WS_KILL, (&arg[0]) as u64, 1) == 0 {
+            ulib.say((&s_ok[0]) as u64)
+            ulib.nl()
+        } else {
+            ulib.say((&s_no[0]) as u64)
+            ulib.nl()
+        }
+        return 0
+    }
+    ulib.say((&s_use1[0]) as u64)
+    ulib.nl()
+    ulib.say((&s_use2[0]) as u64)
+    ulib.nl()
+    return 0
+}
