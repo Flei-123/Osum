@@ -180,18 +180,27 @@ def classify(base, marked):
     return "DEPENDENT"
 
 
-def rows_of(kdir):
+def rows_of(kdir, prefix=""):
     rows = []
+    if not os.path.isdir(kdir):
+        return rows
     for f in sorted(os.listdir(kdir)):
-        if not (f.endswith(".fi") or f.endswith(".s")):
+        if not (f.endswith(".fi") or f.endswith(".s") or f.endswith(".S")):
             continue
         total, codelines, marked, per = scan(os.path.join(kdir, f))
-        rows.append((f, total, codelines, marked, per, classify(f, marked)))
+        rows.append((prefix + f, total, codelines, marked, per,
+                     classify(f, marked)))
     return rows
 
 
 def main():
+    # Since round ARM the machine has a directory of its own. Everything in
+    # it is machine code by definition, so it is counted apart -- mixing it
+    # into the table above would make the boundary look like a failure.
     rows = rows_of(os.path.join(ROOT, "kernel"))
+    x86 = rows_of(os.path.join(ROOT, "kernel", "arch", "x86_64"), "arch/x86_64/")
+    a64 = rows_of(os.path.join(ROOT, "kernel", "arch", "aarch64"), "arch/aarch64/")
+    boundary = rows_of(os.path.join(ROOT, "kernel", "arch"), "arch/")
 
     if "--csv" in sys.argv:
         print("file,lines,code_lines,machine_lines,class,marks")
@@ -223,6 +232,29 @@ def main():
               100.0 * tot.get(cls, 0) / all_lines, mach.get(cls, 0)))
     print("| **total** | %d | %d | 100 %% | %d |" %
           (sum(cnt.values()), all_lines, sum(mach.values())))
+
+    def block(title, rr, count_marks=True, note=None):
+        if not rr:
+            return
+        print()
+        head = "%s: %d files, %d lines" % (title, len(rr), sum(r[1] for r in rr))
+        if count_marks:
+            head += ", %d machine lines" % sum(r[3] for r in rr)
+        print(head)
+        if note:
+            print("   (%s)" % note)
+        for f, n, c, m, per, cls in sorted(rr, key=lambda r: -r[1]):
+            if count_marks:
+                print("   %-28s %5d lines, %4d machine lines" % (f, n, m))
+            else:
+                print("   %-28s %5d lines" % (f, n))
+
+    block("kernel/arch/ (the boundary itself)", boundary)
+    block("kernel/arch/x86_64/ (the x86-64 answers)", x86)
+    block("kernel/arch/aarch64/ (the AArch64 answers)", a64, count_marks=False,
+          note="every line is machine code by construction; the marks this "
+               "tool looks for are x86 ones and would read zero here, which "
+               "would be a lie by omission rather than a measurement")
 
     urows = rows_of(os.path.join(ROOT, "kernel", "user"))
     un = sum(r[1] for r in urows)
