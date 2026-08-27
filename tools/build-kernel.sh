@@ -56,7 +56,7 @@ trap 'rm -rf "$TMP"' EXIT
 # Trampolinsprung der anderen Prozessoren -- und seit Runde K12 der
 # Weltwechsel in eine Gastmaschine samt den Gaesten selbst (hv.s).
 for f in boot isr switch smp hv; do
-    as --64 -o "$TMP/$f.o" "kernel/$f.s" || exit 1
+    as --64 -o "$TMP/$f.o" "kernel/arch/x86_64/$f.s" || exit 1
 done
 
 "$FIRNC" -o "$TMP/k.o" kernel/kmain.fi || exit 1
