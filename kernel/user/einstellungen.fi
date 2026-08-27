@@ -47,6 +47,7 @@ import libc.io
 import wlibc
 import wlib
 import pw
+import nv
 
 export { u_start }
 
@@ -64,7 +65,12 @@ const R_SCHIRM: u64 = 1
 const R_ZEIT: u64 = 2
 const R_NETZ: u64 = 3
 const R_BENUT: u64 = 4
-const R_ANZ: u64 = 5
+// ROUND NETVIEW: der sechste Reiter. Er steht NEBEN "Netz" und nicht
+// darin, und das ist Absicht: "Netz" ist die Anschrift DIESER MASCHINE,
+// hier steht, welches Netz die einzelnen PROGRAMME sehen. Zwei Fragen,
+// zwei Seiten.
+const R_NETV: u64 = 5
+const R_ANZ: u64 = 6
 
 static mut w: u64 = 0
 static mut ids: [u64; 64] = [0 as u64; 64]
@@ -101,7 +107,16 @@ static mut geschrieben: u64 = 0
 // Zeiger auf nichts. Sechzehn Uebersetzungsfehler haben genau das
 // gesagt, und sie hatten recht.
 static mut t_titel: [u8; 14] = "Einstellungen\0"
-static mut t_tabs: [u8; 42] = "Darstellung\nBildschirm\nZeit\nNetz\nBenutzer\0"
+static mut t_tabs: [u8; 54] = "Darstellung\nBildschirm\nZeit\nNetz\nBenutzer\nNetzzugriff\0"
+// ROUND NETVIEW: die Liste der laufenden Prozesse mit ihrer Netzsicht,
+// eine Zeile je Prozess, und die vier Sichten als Auswahl darunter.
+static mut nv_liste: [u8; 1024] = [0 as u8; 1024]
+static mut nv_pids: [u64; 32] = [0 as u64; 32]
+static mut nv_n: u64 = 0
+static mut c_view: [u8; 25] = "real\nfiltered\nfaked\nnone\0"
+static mut l_nv1: [u8; 44] = "Welches Netz die einzelnen Programme sehen:\0"
+static mut l_nv2: [u8; 52] = "Getaeuscht wird das PROGRAMM, nie der Mensch davor.\0"
+static mut l_nv3: [u8; 24] = "Sicht fuer die Auswahl:\0"
 static mut l_far: [u8; 31] = "Farbschema (aus /etc/schemas):\0"
 static mut l_bil: [u8; 38] = "Hintergrundbild -- Quelldatei (OSYM):\0"
 static mut b_uber: [u8; 12] = "Uebernehmen\0"
@@ -157,8 +172,7 @@ static mut tk_height: [u8; 7] = "height\0"
 static mut tk_width: [u8; 6] = "width\0"
 static mut tk_ah: [u8; 9] = "autohide\0"
 static mut tk_ot: [u8; 6] = "ontop\0"
-static mut tb_head: [u8; 64] =
-    "# taskbar.conf -- written by /bin/leiste and /bin/einstellungen\0"
+static mut tb_head: [u8; 64] = "# taskbar.conf -- written by /bin/leiste and /bin/einstellungen\0"
 
 fn tb_key_is(p: u64, n: u64, k: u64) -> bool {
     var i: u64 = 0
@@ -783,6 +797,8 @@ fn u_start(args: u64) -> u64 {
     var m_kwne: [u8; 34] = "Die beiden Eingaben sind ungleich\0"
     var m_kwku: [u8; 24] = "Mindestens vier Zeichen\0"
     var m_kwno: [u8; 39] = "/etc/shadow liess sich nicht schreiben\0"
+    var m_nvok: [u8; 28] = "Netzsicht gesetzt fuer pid \0"
+    var m_nvno: [u8; 45] = "Nicht erlaubt -- lockern darf nur die Wurzel\0"
     var k_modus: [u8; 7] = "modus=\0"
     var k_800: [u8; 9] = "800x600\n\0"
     var k_1024: [u8; 10] = "1024x768\n\0"
@@ -889,6 +905,16 @@ fn u_start(args: u64) -> u64 {
         R_BENUT)
     wlib.size(160, 26)
     let b5: u64 = merke(wlib.button((&b_kw[0 as usize]) as u64), R_BENUT)
+    // ---- Netzzugriff (ROUND NETVIEW)
+    let _v1: u64 = merke(wlib.label((&l_nv1[0 as usize]) as u64), R_NETV)
+    let _v2: u64 = merke(wlib.label((&l_nv2[0 as usize]) as u64), R_NETV)
+    nv_lesen()
+    wlib.size(0, 150)
+    let lv: u64 = merke(wlib.list((&nv_liste[0 as usize]) as u64, 8), R_NETV)
+    let _v3: u64 = merke(wlib.label((&l_nv3[0 as usize]) as u64), R_NETV)
+    let cv: u64 = merke(wlib.choice((&c_view[0 as usize]) as u64, 0), R_NETV)
+    wlib.size(140, 26)
+    let b6: u64 = merke(wlib.button((&b_uber[0 as usize]) as u64), R_NETV)
     // ---- immer sichtbar
     let st: u64 = merke(wlib.label((&l_stat[0 as usize]) as u64), R_ANZ)
     wlib.box_end()
@@ -950,6 +976,9 @@ fn u_start(args: u64) -> u64 {
                     } else if id == ce {
                         items = (&c_tb[0 as usize]) as u64
                         cnt = 4
+                    } else if id == cv {
+                        items = (&c_view[0 as usize]) as u64
+                        cnt = 4
                     }
                     let mx: u64 = wlib.win_x(w) + 2 + wlib.rect_x(id)
                     let my: u64 = wlib.win_y(w) + 22 + wlib.rect_y(id)
@@ -960,7 +989,8 @@ fn u_start(args: u64) -> u64 {
             } else if kind == wlib.K_MENUBAR {
                 // The library re-fires the chosen row at the widget that
                 // opened the menu. That is the answer to the choice.
-                if id == cs || id == cz || id == cn || id == ce {
+                if id == cs || id == cz || id == cn || id == ce
+                    || id == cv {
                     wlib.set_value(id, wlib.fired_index())
                     if id == ce {
                         tb_edge = wlib.fired_index()
@@ -1145,6 +1175,39 @@ fn u_start(args: u64) -> u64 {
                     }
                     wlib.set_text(st, (&l_stat[0 as usize]) as u64)
                     melde_stand()
+                } else if id == b6 {
+                    // ==================================== ROUND NETVIEW
+                    //
+                    // Die Sicht eines LAUFENDEN Prozesses aendern. Der
+                    // Kern entscheidet, ob das erlaubt ist
+                    // (`netview.may_set`): enger machen darf jeder sich
+                    // selbst, alles andere darf nur die Wurzel. Diese
+                    // Seite fragt und schoent die Antwort nicht -- ein
+                    // -EPERM steht als Satz in der Statuszeile und nicht
+                    // als stilles Nichts.
+                    let z: u64 = wlib.value(lv)
+                    if z < nv_n {
+                        let want: u64 = wlib.value(cv)
+                        let r: u64 = nv.view_set(nv_pids[(z) as usize],
+                            want)
+                        if ulib.bad(r) {
+                            let _f1: u64 = text_an(
+                                (&l_stat[0 as usize]) as u64, 0,
+                                (&m_nvno[0 as usize]) as u64)
+                        } else {
+                            let a6: u64 = text_an(
+                                (&l_stat[0 as usize]) as u64, 0,
+                                (&m_nvok[0 as usize]) as u64)
+                            let _f2: u64 = zahl_an(
+                                (&l_stat[0 as usize]) as u64, a6,
+                                nv_pids[(z) as usize])
+                        }
+                        nv_lesen()
+                        wlib.set_text(lv, (&nv_liste[0 as usize]) as u64)
+                    }
+                    wlib.set_text(st, (&l_stat[0 as usize]) as u64)
+                    wlib.dirty_all(w)
+                    melde_stand()
                 }
             }
         }
@@ -1157,4 +1220,41 @@ fn u_start(args: u64) -> u64 {
     let _q6: u64 = ep2
     let _q7: u64 = (&s_pfad[0 as usize]) as u64
     return 0
+}
+
+// ====================================================== ROUND NETVIEW
+//
+// EINE ZEILE JE LAUFENDEM PROZESS: "<pid> <sicht>". Die Zahlen kommen
+// aus der AUFGABENTAFEL (SYS_PSTAT) und die Sicht aus dem Kern
+// (SYS_NETVGET) -- diese Seite fuehrt keine eigene Liste, weil eine
+// zweite Liste eine zweite Gelegenheit waere, etwas anderes anzuzeigen
+// als der Fall ist. Und genau das ist der Grundsatz der Runde: getaeuscht
+// wird das Programm, nie der Mensch davor.
+fn nv_lesen() {
+    var sp: [u8; 2] = " \0"
+    var nl: [u8; 2] = "\n\0"
+    var nm: [u8; 16] = [0 as u8; 16]
+    var at: u64 = 0
+    nv_n = 0
+    var i: u64 = 0
+    while i < 32 && at < 900 {
+        let zu: u64 = ulib.sys(ulib.SYS_PSTAT, i, ulib.P_STATE, 0)
+        if !ulib.bad(zu) && zu != 0 {
+            if ulib.sys(ulib.SYS_PSTAT, i, ulib.P_KIND, 0) == 3 {
+                let pid: u64 = ulib.sys(ulib.SYS_PSTAT, i, ulib.P_PID, 0)
+                nv_pids[(nv_n) as usize] = pid
+                at = zahl_an((&nv_liste[0 as usize]) as u64, at, pid)
+                at = text_an((&nv_liste[0 as usize]) as u64, at,
+                    (&sp[0 as usize]) as u64)
+                let _n: u64 = nv.view_name(nv.view_of(pid),
+                    (&nm[0 as usize]) as u64)
+                at = text_an((&nv_liste[0 as usize]) as u64, at,
+                    (&nm[0 as usize]) as u64)
+                at = text_an((&nv_liste[0 as usize]) as u64, at,
+                    (&nl[0 as usize]) as u64)
+                nv_n = nv_n + 1
+            }
+        }
+        i = i + 1
+    }
 }
