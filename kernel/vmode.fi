@@ -515,8 +515,25 @@ fn probe(state: u64) -> u64 {
         return 0
     }
 
-    // Was gerade eingestellt ist, wird gerettet: dieses Modul erkundet
-    // im laufenden Betrieb, waehrend ein Bild auf dem Schirm steht.
+    // WAS GERADE EINGESTELLT IST, WIRD GERETTET -- UND ZWAR MEHR, ALS
+    // DIE ERSTE FASSUNG DIESER RUNDE GERETTET HAT.
+    //
+    // Der Fehler, den das gekostet hat, ist der lehrreichste dieser
+    // Runde. Die Erkundung schreibt zweiundzwanzigmal andere Zahlen in
+    // XRES und YRES. Solange VBE_ENABLE dabei AN bleibt, ist das kein
+    // stiller Registerzugriff: QEMU rechnet aus XRES sofort die
+    // Zeilenlaenge des laufenden Bildes neu (VBE_VIRT_WIDTH), und die
+    // bleibt danach stehen. XRES und YRES zurueckzuschreiben genuegt
+    // NICHT -- die Karte gab weiter eine andere Zeilenlaenge aus, als
+    // der Kernel annahm, und das Bildschirmfoto zeigte statt vier
+    // Farbfeldern einen Streifenteppich, der sich alle paar Zeilen um
+    // ein Stueck verschob. Der Kernel hielt sich fuer richtig: seine
+    // Geometrie stimmte auf jede Zahl.
+    //
+    // Also wird der alte Modus danach ueber DENSELBEN Weg wieder
+    // eingestellt, den `set_mode` geht -- aus, Zahlen, an --, und die
+    // Zeilenlaenge wird ZURUECKGELESEN und mit der verglichen, die
+    // `fb.fi` fuehrt. Weichen sie ab, wird neu abgebildet.
     let a_x: u64 = vbe_read(VBE_XRES)
     let a_y: u64 = vbe_read(VBE_YRES)
     let a_b: u64 = vbe_read(VBE_BPP)
@@ -597,13 +614,25 @@ fn probe(state: u64) -> u64 {
     }
     s(state, S_COUNT, n)
 
-    // Und alles wieder so hinstellen, wie es war. Ohne diese vier Zeilen
-    // stuende nach der Erkundung 3840 in XRES, und der naechste, der
-    // VBE_ENABLE schreibt, saehe ein Bild, das niemand bestellt hat.
-    vbe_write(VBE_XRES, a_x)
-    vbe_write(VBE_YRES, a_y)
-    vbe_write(VBE_BPP, a_b)
-    vbe_write(VBE_ENABLE, a_e)
+    // Und alles wieder so hinstellen, wie es war -- siehe den langen
+    // Absatz oben. Vier Registerschreibvorgaenge genuegen dafuer nicht.
+    if (a_e & VBE_ENABLED) != 0 && a_x != 0 && a_y != 0 {
+        let neu_pt: u64 = vbe_set(a_x, a_y, a_b)
+        if neu_pt != 0 {
+            if neu_pt != fb.panel_pitch(state) || a_x != fb.panel_w(state)
+                || a_y != fb.panel_h(state) {
+                fb.remap(state, g(state, S_LFB), a_x, a_y, neu_pt,
+                    fb.uncached(state))
+            }
+        }
+        fb.dirty_all(state)
+        fb.flush(state)
+    } else {
+        vbe_write(VBE_XRES, a_x)
+        vbe_write(VBE_YRES, a_y)
+        vbe_write(VBE_BPP, a_b)
+        vbe_write(VBE_ENABLE, a_e)
+    }
 
     // Welcher der gefundenen Modi laeuft gerade?
     let cur: u64 = find_mode(state, fb.panel_w(state), fb.panel_h(state), 32)
@@ -1380,6 +1409,59 @@ const M_EDID: u64 = 128
 
 // Eigene Fassung, aus demselben Grund wie die in `fb.fi`: dieses Modul
 // bindet `kmain.fi` nicht ein.
+// EIN GANZES WORT UND KEIN TEILSTUECK.
+//
+// `fb.fi` sucht seine Woerter als Teilzeichenkette, und das ging gut,
+// solange kein anderes Wort auf der Befehlszeile eines davon enthielt.
+// Diese Runde hat genau das gebrochen: die Gegenprobe startet
+// `script=dispctl raw` OHNE das Wort `disp` -- und `dispctl` ENTHAELT
+// `disp`. Der Kernel erkundete also brav die Karte, und die Gegenprobe,
+// die beweisen sollte, dass ohne das Wort nichts passiert, bewies das
+// Gegenteil von dem, was sie sollte. Ein Test, der aus dem falschen
+// Grund gruen wird, ist schlimmer als keiner.
+//
+// Also: der Treffer muss am Anfang oder hinter einem Leerzeichen
+// beginnen und vor einem Leerzeichen oder dem Ende aufhoeren.
+fn find_word(heu: u64, nadel: u64, n: u64) -> u64 {
+    if heu == 0 || n == 0 {
+        return 0
+    }
+    var i: u64 = 0
+    while true {
+        let c: u64 = kstate.get8(heu + i)
+        if c == 0 {
+            return 0
+        }
+        var passt: bool = true
+        if i > 0 {
+            let v: u64 = kstate.get8(heu + i - 1)
+            if v != 32 && v != 9 {
+                passt = false
+            }
+        }
+        if passt {
+            var k: u64 = 0
+            while k < n {
+                let a: u64 = kstate.get8(heu + i + k)
+                if a == 0 || a != kstate.get8(nadel + k) {
+                    passt = false
+                    k = n
+                } else {
+                    k = k + 1
+                }
+            }
+        }
+        if passt {
+            let e: u64 = kstate.get8(heu + i + n)
+            if e == 0 || e == 32 || e == 9 {
+                return heu + i
+            }
+        }
+        i = i + 1
+    }
+    return 0
+}
+
 fn find(heu: u64, nadel: u64, n: u64) -> u64 {
     if heu == 0 || n == 0 {
         return 0
@@ -1420,28 +1502,28 @@ fn parse(state: u64, cmd: u64) {
     var w_edid: [u8; 9] = "dispedid\0"
     var m: u64 = 0
     if cmd != 0 {
-        if find(cmd, (&w_disp[0]) as u64, 4) != 0 {
+        if find_word(cmd, (&w_disp[0]) as u64, 4) != 0 {
             m = m | M_DISP
         }
-        if find(cmd, (&w_big[0]) as u64, 7) != 0 {
+        if find_word(cmd, (&w_big[0]) as u64, 7) != 0 {
             m = m | M_BIG
         }
-        if find(cmd, (&w_back[0]) as u64, 8) != 0 {
+        if find_word(cmd, (&w_back[0]) as u64, 8) != 0 {
             m = m | M_BACK
         }
-        if find(cmd, (&w_bad[0]) as u64, 7) != 0 {
+        if find_word(cmd, (&w_bad[0]) as u64, 7) != 0 {
             m = m | M_BAD
         }
-        if find(cmd, (&w_bench[0]) as u64, 9) != 0 {
+        if find_word(cmd, (&w_bench[0]) as u64, 9) != 0 {
             m = m | M_BENCH
         }
-        if find(cmd, (&w_rot[0]) as u64, 7) != 0 {
+        if find_word(cmd, (&w_rot[0]) as u64, 7) != 0 {
             m = m | M_ROT
         }
-        if find(cmd, (&w_conf[0]) as u64, 11) != 0 {
+        if find_word(cmd, (&w_conf[0]) as u64, 11) != 0 {
             m = m | M_CONFIRM
         }
-        if find(cmd, (&w_edid[0]) as u64, 8) != 0 {
+        if find_word(cmd, (&w_edid[0]) as u64, 8) != 0 {
             m = m | M_EDID
         }
     }
