@@ -961,7 +961,9 @@ if gshot "qs-key" "assets/netview/theme-dark" \
     n_key=$(grep -ac '^key: a$' "$L")
     n_hk=$(grep -ac '^hk: super+a$' "$L")
     num "9a: plain 'a' still reaches the keyboard as a character" "$n_key" eq 1
-    num "9a: Super+A produced exactly one hotkey" "$n_hk" eq 1
+    # TWO presses in this run: one to open, one to open again after
+    # Escape closed it.
+    num "9a: both Super+A presses became hotkeys" "$n_hk" eq 2
     num "9a: and Super+A typed NO letter (still exactly one 'key: a')" "$n_key" eq 1
     # AND IT CLOSES. Escape, which only works because the panel takes
     # the focus when it opens -- a panel the keyboard cannot get out of
@@ -1016,7 +1018,7 @@ for ed in bottom top left right; do
             # tile, and two text rows touching. Neither is visible in a
             # source file.
             r=$(python3 tools/netview/kachel.py "$P" "$qx" "$qy" "$qw" "$qh" \
-                10 180 74 8 3 2>&1 | tail -1)
+                10 180 74 8 3 28 2>&1 | tail -1)
             case "$r" in ok*) ok "$ed: the tiles hold their labels -- $r" ;;
                          *)   bad "$ed: tile layout: $r" ;; esac
             # AND THE SYMBOLS at the places the panel said it drew them,
