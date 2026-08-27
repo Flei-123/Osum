@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-only
 """tools/tunnel/against_wg.py -- Osum's WireGuard against Linux's.
 
 THIS IS THE MEASUREMENT THE ROUND STANDS OR FALLS ON. Everything else in

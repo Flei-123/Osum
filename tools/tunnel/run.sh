@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-2.0-only
 # tools/tunnel/run.sh -- ROUND TUNNEL: THE WHOLE THING, MEASURED.
 #
 # Five stages, and each one measures against something this repository did

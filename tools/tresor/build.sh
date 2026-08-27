@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-2.0-only
 # tools/tresor/build.sh -- builds the programs of this round into a
 # directory, so that the runner and a person poking at it by hand use the
 # very same command.

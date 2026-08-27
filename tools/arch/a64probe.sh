@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-2.0-only
 # tools/arch/a64probe.sh -- HOW MUCH OF THIS KERNEL IS ALREADY AArch64 CODE?
 #
 # Round ARM, step E. `tools/arch/inventory.py` answers that question by

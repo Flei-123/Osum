@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-only
 """tools/theme/model.py -- THE SECOND IMPLEMENTATION OF THE TOKEN SYSTEM.
 
 `kernel/user/wlibc.fi` resolves the three token layers inside Osum, in

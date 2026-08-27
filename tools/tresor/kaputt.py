@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-only
 """tools/tresor/kaputt.py -- flip ONE octet inside a file of an OFS image.
 
 This is the counter-check of `backup verify`. A verifier that only ever sees

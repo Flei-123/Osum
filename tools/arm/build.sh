@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-2.0-only
 # tools/arm/build.sh -- ONE AArch64 image, out of the repository.
 #
 #   ./tools/arm/build.sh OUTPUT [-DSWITCH ...]

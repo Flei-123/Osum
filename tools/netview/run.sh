@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-2.0-only
 # tools/netview/run.sh -- ROUND NETVIEW: FOUR NETWORKS, ONE MACHINE.
 #
 # What has to be proved, and none of it by assertion:

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-only
 # tools/i18n/quota.py -- WIEVIEL IST WIRKLICH UEBERSETZT?
 #
 #   python3 tools/i18n/quota.py [locale-verzeichnis]

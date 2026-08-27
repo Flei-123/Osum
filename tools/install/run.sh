@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-2.0-only
 # tools/install/run.sh -- RUNDE INSTALL: DAS SYSTEM AUF EINE ECHTE PLATTE,
 # UND DER AKTUALISIERUNGSWEG BIS ZUM STROMAUSFALL.
 #

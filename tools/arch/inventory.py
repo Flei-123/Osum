@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-only
 """tools/arch/inventory.py -- WHAT IS ACTUALLY TIED TO x86-64, COUNTED.
 
 Round ARM, step A. Before anything is moved, the size of the job has to be

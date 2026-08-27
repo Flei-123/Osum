@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-2.0-only
 # tools/install/oneshot.sh -- EINEN Lauf machen, zum Iterieren.
 #
 #   bash tools/install/oneshot.sh <name> <wie> "<skript>" [zeitlimit]

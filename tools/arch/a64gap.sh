@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-2.0-only
 # tools/arch/a64gap.sh -- THE GAP THE REGISTER CHECK LEAVES OPEN.
 #
 # Round ARM found this while measuring, and it is worth four lines of its

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-2.0-only
 # tools/userland/run.sh -- THE PROOF THAT OSUM HAS A USERLAND.
 #
 # Round K1 proved that a program comes off the disk: the kernel reads

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-2.0-only
 # tools/arch/order.sh -- THE ONE DEFECT ROUND ARM FOUND, AND THE PROOF IT IS GONE.
 #
 # `kernel/atomic.fi` released a lock with a plain 64-bit store. On x86-64

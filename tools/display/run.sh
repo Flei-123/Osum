@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-2.0-only
 # tools/display/run.sh -- DIE ABNAHME DER RUNDE DISPLAY.
 #
 # WAS DIESE RUNDE BEHAUPTET, UND WAS HIER DAVON GEMESSEN WIRD.

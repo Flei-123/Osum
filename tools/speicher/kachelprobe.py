@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-only
 """tools/speicher/kachelprobe.py -- die Treemap NACHMESSEN, im Bild.
 
 Runde SPEICHER. `/bin/speicher` meldet ueber die serielle Leitung, welche

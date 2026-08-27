@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-only
 """tools/tresor/orphans.py -- the PRODUCER side of the orphan interface.
 
 Round TRESOR, addendum of 27.08.2026. See docs/ORPHANS.md for the

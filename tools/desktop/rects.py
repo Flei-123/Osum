@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-only
 """tools/desktop/rects.py -- CHECK THE TASKBAR AND THE WORK AREA BY
 ARITHMETIC, not by looking at the picture.
 

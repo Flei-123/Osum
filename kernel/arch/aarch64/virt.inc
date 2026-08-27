@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /* kernel/arch/aarch64/virt.inc -- the addresses of `qemu-system-aarch64 -M virt`.
  *
  * NOT taken from a manual and NOT guessed. Every number below was read out

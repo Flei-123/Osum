@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-2.0-only
 # tools/install/hg.sh -- einen Lauf im Hintergrund anstossen, damit die
 # Werkzeugsitzung nicht auf ihn warten muss.
 #   bash tools/install/hg.sh <name> <wie> "<skript>" [zeitlimit] [neuePlatte?]

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-2.0-only
 # tools/k15/build.sh -- Kernel, Programme und ein Plattenabbild dieser
 # Runde, zum Iterieren waehrend der Arbeit. Die Abnahme baut in
 # tools/k15/run.sh alles noch einmal aus BEIDEN Uebersetzern.

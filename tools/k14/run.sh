@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-2.0-only
 # tools/k14/run.sh -- DIE VFS-SCHICHT UND DIE FREMDEN DATEISYSTEME.
 #
 # Bis zu dieser Runde kannte Osum genau EIN Dateisystem: sein eigenes.

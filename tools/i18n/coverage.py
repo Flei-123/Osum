@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-only
 # tools/i18n/coverage.py -- WHICH CHARACTERS DO THE SHIPPED FONTS COVER?
 #
 # Round I18N asks a question that has to be answered with a number, not

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-only
 """tools/tresor/dump.py -- den ECHTEN Speicher der Maschine holen.
 
     dump.py <kernelabbild> <ausgabe.bin> [serielle-ausgabe]
