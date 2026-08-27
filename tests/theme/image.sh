@@ -43,7 +43,7 @@ for s in assets/schemes/*.scheme; do
     ARGS+=("/etc/schemas/$(basename "$s" .scheme)=$s@0644")
 done
 while read -r zeile; do ARGS+=("$zeile"); done \
-    < <(python3 tools/k15/buendel.py "$OUT/apps" "$OUT/buendel")
+    < <(python3 tools/k15/bundle.py "$OUT/apps" "$OUT/buendel")
 while read -r pfad; do ARGS+=("$pfad"); done < "$OUT/baum/liste"
 python3 tools/osum/mkfs.py "${ARGS[@]}" > "$OUT/mkfs-$SCHEME-$MODE.log" 2>&1 || {
     echo "== mkfs.py fehlgeschlagen"; tail -20 "$OUT/mkfs-$SCHEME-$MODE.log"

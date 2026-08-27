@@ -51,10 +51,10 @@ hasnot() { grep -qaF "$2" "$1" && bad "$3 -- '$2' steht da und sollte nicht" || 
 # -- eine Zahl wie "526 Tintenpunkte geprueft, 0 falsch" ist die Messung,
 # nicht das Wort "OK".
 schau() { local was=$1; shift
-    local aus; aus=$(python3 tools/gfx/schau.py "$@" 2>&1)
+    local aus; aus=$(python3 tools/gfx/checkshot.py "$@" 2>&1)
     if [ $? = 0 ]; then ok "$was: $aus"; else bad "$was: $aus"; fi; }
 schau_nicht() { local was=$1; shift
-    local aus; aus=$(python3 tools/gfx/schau.py "$@" 2>&1)
+    local aus; aus=$(python3 tools/gfx/checkshot.py "$@" 2>&1)
     if [ $? = 0 ]; then bad "$was -- es steht doch da"; else ok "$was"; fi; }
 
 command -v qemu-system-x86_64 >/dev/null 2>&1 || {
@@ -89,7 +89,7 @@ done
 # Messung oben nur eine Zahl ohne Vergleich.
 DEJAVU=${DEJAVU:-/usr/share/fonts/truetype/dejavu}
 if [ -f "$DEJAVU/DejaVuSans.ttf" ]; then
-    python3 tools/ttf/schnitt.py "$DEJAVU/DejaVuSans.ttf" "$TMPD/alt.ttf" \
+    python3 tools/ttf/subset.py "$DEJAVU/DejaVuSans.ttf" "$TMPD/alt.ttf" \
         --set ascii > "$TMPD/alt.txt" 2>&1
     python3 tools/i18n/coverage.py "$TMPD/alt.ttf" > "$TMPD/altd.txt" 2>&1
     az=$(grep -a 'i18n-coverage' "$TMPD/altd.txt" | grep -oE ' mapped=[0-9]+' | sed 's/.*=//')
@@ -100,9 +100,9 @@ if [ -f "$DEJAVU/DejaVuSans.ttf" ]; then
     else
         bad "GEGENPROBE: dem alten Ausschnitt fehlt angeblich nichts"
     fi
-    python3 tools/ttf/schnitt.py "$DEJAVU/DejaVuSans.ttf" "$TMPD/neu.ttf" \
+    python3 tools/ttf/subset.py "$DEJAVU/DejaVuSans.ttf" "$TMPD/neu.ttf" \
         >/dev/null 2>&1
-    python3 tools/ttf/schnitt.py "$DEJAVU/DejaVuSansMono.ttf" "$TMPD/neum.ttf" \
+    python3 tools/ttf/subset.py "$DEJAVU/DejaVuSansMono.ttf" "$TMPD/neum.ttf" \
         >/dev/null 2>&1
     cmp -s "$TMPD/neu.ttf" "$SANS" \
         && ok "osum-sans.ttf entsteht Oktett fuer Oktett neu aus DejaVu Sans" \
@@ -197,7 +197,7 @@ lauf() { # verzeichnis name [monitordatei]
     sleep 1
     [ -n "$mon" ] && python3 tools/wm/monitor.py "$sock" "$mon" \
         > "$d/$n.monlog" 2>&1
-    python3 tools/gfx/schuss.py "$sock" "$d/$n.ppm" 25 > "$d/$n.shot" 2>&1
+    python3 tools/gfx/screenshot.py "$sock" "$d/$n.ppm" 25 > "$d/$n.shot" 2>&1
     kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
     rm -f "$sock"
 }

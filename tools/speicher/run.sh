@@ -19,7 +19,7 @@
 #   2. RICHTIGKEIT VOR GESCHWINDIGKEIT. Eine sofortige, aber falsche Zahl
 #      ist wertlos. Also wird JEDES Verzeichnis des Abbilds Oktett fuer
 #      Oktett gegen den echten Durchlauf gehalten (`du -p`) -- und
-#      zusaetzlich gegen eine DRITTE Zahl, die `tools/speicher/baum.py`
+#      zusaetzlich gegen eine DRITTE Zahl, die `tools/speicher/tree.py`
 #      auf dem WIRT ausrechnet, in Python, ohne den Kernel zu kennen
 #      (`tools/speicher/pruefen.py`). Zwei Wege koennen denselben
 #      Denkfehler haben; drei ist unwahrscheinlicher.
@@ -74,11 +74,11 @@ feld() { grep -aoE "(^|[^a-z])$3=[0-9]+" <(grep -aF "$2" "$1" | tail -1) \
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
     echo "SPEICHER: uebersprungen, qemu-system-x86_64 ist nicht da"; exit 0
 fi
-bash vendor/firn/hole-firnc.sh >/dev/null || {
-    echo "vendor/firn/hole-firnc.sh fehlgeschlagen"; exit 1; }
+bash vendor/firn/fetch-firnc.sh >/dev/null || {
+    echo "vendor/firn/fetch-firnc.sh fehlgeschlagen"; exit 1; }
 
 echo "== bauen"
-bash tools/speicher/bauen.sh "$TMPD" || exit 1
+bash tools/speicher/build.sh "$TMPD" || exit 1
 
 # --------------------------------------------------------------- Laeufe
 #
@@ -119,7 +119,7 @@ foto() { # name kommandozeile [marke]
         i=$((i + 1))
     done
     sleep 2
-    python3 tools/gfx/schuss.py "$sock" "$ppm" 25 > "$TMPD/$name.shot" 2>&1
+    python3 tools/gfx/screenshot.py "$sock" "$ppm" 25 > "$TMPD/$name.shot" 2>&1
     kill "$pid" 2>/dev/null
     wait "$pid" 2>/dev/null
     rm -f "$sock"
@@ -128,10 +128,10 @@ foto() { # name kommandozeile [marke]
 
 echo "== 1. Zeit: der Index gegen den vollstaendigen Durchlauf"
 echo "   (auf gross.img, viertausend Dateien -- das dauert Minuten)"
-lauf zeit 'du -m /daten' gross.img
-IUS=$(feld "$TMPD/zeit.txt" "du: index [/daten]" us10)
-WUS=$(feld "$TMPD/zeit.txt" "du: durchlauf [/daten]" us)
-NDAT=$(feld "$TMPD/zeit.txt" "du: durchlauf [/daten]" dateien)
+lauf zeit 'du -m /data' gross.img
+IUS=$(feld "$TMPD/zeit.txt" "du: index [/data]" us10)
+WUS=$(feld "$TMPD/zeit.txt" "du: durchlauf [/data]" us)
+NDAT=$(feld "$TMPD/zeit.txt" "du: durchlauf [/data]" dateien)
 BUS=$(feld "$TMPD/zeit.txt" "du: bauen" us)
 has "$TMPD/zeit.txt" "du: vergleich" "die Messung ist durchgelaufen"
 num "Dateien im Durchlauf" "$NDAT" ge 4000
@@ -151,10 +151,10 @@ else
 fi
 
 echo "== 2. Richtigkeit: dieselbe Frage auf einem Abbild MIT Inhalt"
-lauf mess 'du -m /daten'
-MOKT=$(feld "$TMPD/mess.txt" "du: index [/daten]" okt)
-MWOKT=$(feld "$TMPD/mess.txt" "du: durchlauf [/daten]" okt)
-SOLL=$(awk '$1=="/daten"{print $2}' "$TMPD/baum/soll")
+lauf mess 'du -m /data'
+MOKT=$(feld "$TMPD/mess.txt" "du: index [/data]" okt)
+MWOKT=$(feld "$TMPD/mess.txt" "du: durchlauf [/data]" okt)
+SOLL=$(awk '$1=="/data"{print $2}' "$TMPD/baum/soll")
 num "die Summe ist nicht null" "${MOKT:-0}" gt 0
 if [ "${MOKT:-x}" = "${MWOKT:-y}" ]; then ok "Index = Durchlauf: $MOKT Oktette"
 else bad "Index $MOKT, Durchlauf $MWOKT"; fi
@@ -212,7 +212,7 @@ GRUND="nokbd nosched noproc nofs"
 foto ruhe "gfx wm wig wigspeicher wmhold wiglong $GRUND" '^speicher: ready'
 has "$TMPD/ruhe.txt" "k15: start /bin/speicher" "/bin/speicher kommt VON DER PLATTE"
 has "$TMPD/ruhe.txt" "speicher: kachel" "es hat seine Kacheln gerechnet"
-SOKT=$(feld "$TMPD/ruhe.txt" "speicher: cd /daten" okt)
+SOKT=$(feld "$TMPD/ruhe.txt" "speicher: cd /data" okt)
 if [ "${SOKT:-x}" = "${SOLL:-y}" ]; then
     ok "die Oberflaeche zeigt dieselbe Zahl wie du und wie der Wirt: $SOKT"
 else

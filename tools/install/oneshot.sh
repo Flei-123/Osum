@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# tools/install/lauf.sh -- EINEN Lauf machen, zum Iterieren.
+# tools/install/oneshot.sh -- EINEN Lauf machen, zum Iterieren.
 #
-#   bash tools/install/lauf.sh <name> <wie> "<skript>" [zeitlimit]
+#   bash tools/install/oneshot.sh <name> <wie> "<skript>" [zeitlimit]
 #
 # <wie> ist eines von
 #

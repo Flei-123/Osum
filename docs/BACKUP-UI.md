@@ -142,7 +142,7 @@ on the serial line so it can be measured rather than admired:
 explorer: backup ziel=/sicherung name=sicherung1 dateien=3 oktette=44384 neu=45056 rc=0
 ```
 
-**What gets backed up is `/daten`**, and that is stated here rather than
+**What gets backed up is `/data`**, and that is stated here rather than
 buried: the target you point at is where it is *written*, not what is
 *read*.
 
@@ -163,7 +163,7 @@ way you walk down anywhere else. Right-click → **"Zurueckholen"** brings
 back either one file (in a snapshot) or a whole snapshot (in the list).
 
 So "this one file from last week" is an ordinary copy, not a
-production. Restored things land in **`/daten`** -- a fixed, stated
+production. Restored things land in **`/data`** -- a fixed, stated
 destination, because inside a snapshot there is no "here" on the disk to
 put them.
 
@@ -253,7 +253,7 @@ needs to know exactly how far the ground is solid.
   window server and the file manager, reads their reported rectangles and
   gets as far as proving that the right mouse button opens a window --
   and then fails to land the click on the tree row that navigates up out
-  of `/daten`. Everything after that click goes nowhere.
+  of `/data`. Everything after that click goes nowhere.
 
 So: the *engine* under the button is proven, and it is literally the same
 module the button calls (§ 8). The *wiring between the menu item and that

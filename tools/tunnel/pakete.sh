@@ -138,7 +138,7 @@ python3 "$OPK" bauen "$TMPD/bleibt.rezept" -o "$TMPD/pak/bleibt.opk" >/dev/null 
 python3 "$OPK" installieren "$TMPD/pak/bleibt.opk" --wurzel "$WURZEL" >/dev/null 2>&1 \
     && ok "ein drittes Paket 'bleibt' ist installiert und bleibt es" \
     || note "das dritte Paket liess sich nicht installieren"
-BLEIBT_HASH=$(sha256sum "$WURZEL/apps/bleibt.prog/start" 2>/dev/null | cut -c1-16)
+BLEIBT_HASH=$(sha256sum "$WURZEL/apps/bleibt.osp/start" 2>/dev/null | cut -c1-16)
 
 aufnehmen "$WURZEL" > "$TMPD/vorher.txt"
 N_VORHER=$(wc -l < "$TMPD/vorher.txt")
@@ -153,10 +153,10 @@ for prog in vpn proxy; do
 done
 
 for prog in vpn proxy; do
-    if [ -f "$WURZEL/apps/$prog.prog/start" ]; then
-        ok "/apps/$prog.prog/start liegt da"
+    if [ -f "$WURZEL/apps/$prog.osp/start" ]; then
+        ok "/apps/$prog.osp/start liegt da"
     else
-        bad "/apps/$prog.prog/start fehlt nach der Installation"
+        bad "/apps/$prog.osp/start fehlt nach der Installation"
     fi
 done
 N_NACH_INST=$(aufnehmen "$WURZEL" | wc -l)
@@ -246,7 +246,7 @@ note "     mit --behalte-daten laesst opk alle drei stehen, auch die leeren -- e
 note "     Verzeichnis ist der Preis dafuer, dass ein volles nicht aus Versehen verschwindet"
 
 # ------------------- 6c. das dritte Paket ist unberuehrt geblieben
-NEU=$(sha256sum "$WURZEL/apps/bleibt.prog/start" 2>/dev/null | cut -c1-16)
+NEU=$(sha256sum "$WURZEL/apps/bleibt.osp/start" 2>/dev/null | cut -c1-16)
 if [ -n "$BLEIBT_HASH" ] && [ "$NEU" = "$BLEIBT_HASH" ]; then
     ok "das Paket 'bleibt' ist Oktett fuer Oktett unberuehrt ($NEU)"
 else

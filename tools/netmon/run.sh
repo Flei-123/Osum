@@ -21,7 +21,7 @@
 #      octets the program saw, and the run says by how much and why.
 #
 # The wire is the one round K8 built: QEMU's UDP socket backend, the
-# AF_PACKET bridge of `tools/net/bruecke.c`, a veth pair and a network
+# AF_PACKET bridge of `tools/net/bridge.c`, a veth pair and a network
 # namespace -- `/dev/net/tun` does not exist in the container this
 # repository is measured in.
 #
@@ -35,7 +35,7 @@ FIRNC=${FIRNC:-vendor/firn/bin/firnc}
 FC1=${FIRNC1:-vendor/firn/bin/firnc1}
 LDSCRIPT=kernel/kernel.ld
 ULD=kernel/user/user.ld
-PROGS="sh ls cat echo ping wget netstat sleep dhcp netmon wigdemo"
+PROGS="sh ls cat echo ping wget netstat sleep dhcp netmon widgetdemo"
 # `/var/net/` has to exist on the image: the history file lives there.
 BLOCKS=4096
 
@@ -87,7 +87,7 @@ monval() { grep -a "^netmon: on=" "$1" 2>/dev/null | tail -1 \
            | grep -aoE "(^|[ :])$2=[0-9]+" | tail -1 | cut -d= -f2; }
 
 # ------------------------------------------------------- the tools
-bash vendor/firn/hole-firnc.sh >/dev/null || { echo "hole-firnc.sh failed"; exit 1; }
+bash vendor/firn/fetch-firnc.sh >/dev/null || { echo "fetch-firnc.sh failed"; exit 1; }
 [ -x "$FIRNC" ] || { echo "firnc0 is missing"; exit 1; }
 for t in qemu-system-x86_64 ip gcc python3; do
     command -v "$t" >/dev/null 2>&1 || { echo "NETMON: skipped, $t is not available"; exit 0; }
@@ -150,8 +150,8 @@ num "netmon.frame_seen is really linked into the kernel" "$n" ge 1
 n=$(stat -c%s "$TMPD/netstat0.elf")
 num "/bin/netstat, octets" "$n" gt 1000
 
-gcc -O2 -o "$TMPD/bruecke" tools/net/bruecke.c 2>"$TMPD/gcc.err" \
-    && ok "tools/net/bruecke.c: the UDP/AF_PACKET wire is built" \
+gcc -O2 -o "$TMPD/bruecke" tools/net/bridge.c 2>"$TMPD/gcc.err" \
+    && ok "tools/net/bridge.c: the UDP/AF_PACKET wire is built" \
     || { bad "bruecke.c does not compile"; head -5 "$TMPD/gcc.err" | sed 's/^/        /'; }
 
 SPEC="/bin/"
@@ -628,7 +628,7 @@ echo "== 8. the window, and the honest counter-check about it =="
 # its whole data path runs -- but started from `/bin/sh` it cannot get a
 # drawing surface and says so.
 #
-# THE COUNTER-CHECK IS THE POINT OF THIS SECTION. `/bin/wigdemo` is the
+# THE COUNTER-CHECK IS THE POINT OF THIS SECTION. `/bin/widgetdemo` is the
 # reference application of round K15, the program the widget library is
 # MEASURED against. It is on the same disk, started from the same shell,
 # in the same boot -- and it fails identically. So the limit is the
@@ -639,7 +639,7 @@ num "/bin/netmon, octets" "${n:-}" gt 10000
 wire_up; bridge_up; srv_up
 cp "$TMPD/disk.img" "$TMPD/live5.img"
 qemu_bg "$TMPD/k0.mb" \
-    "gfx wm wig osum $BASE $NETARGS nsvc=0 nwait=0 script=wget -q http://$HOST_IP:8000/x;netstat -w;wigdemo;netmon -n 2000;exit" \
+    "gfx wm wig osum $BASE $NETARGS nsvc=0 nwait=0 script=wget -q http://$HOST_IP:8000/x;netstat -w;widgetdemo;netmon -n 2000;exit" \
     "$TMPD/c5.txt" -vga std -drive "file=$TMPD/live5.img,format=raw,if=ide,index=0"
 qemu_wait
 srv_down; bridge_down; wire_down
@@ -647,13 +647,13 @@ R="$TMPD/c5.txt"
 has "$R" "wget: octets $BODY" "the same boot really moved octets first"
 has "$R" "netstat: programs written" "and wrote them into the history"
 if grep -qaF "netmon: no window server" "$R"; then
-    if grep -qaF "wigdemo: keine Flaeche" "$R"; then
-        ok "netmon cannot raise a window from a shell -- AND NEITHER CAN wigdemo,"
+    if grep -qaF "widgetdemo: keine Flaeche" "$R"; then
+        ok "netmon cannot raise a window from a shell -- AND NEITHER CAN widgetdemo,"
         note "the reference application of round K15, in the same boot. The limit is"
         note "the shell path and not this round. docs/NETMON.md says so under"
         note "'what is not done', and this is the line that makes it a fact."
     else
-        bad "netmon has no window but wigdemo does -- then it IS this round's fault"
+        bad "netmon has no window but widgetdemo does -- then it IS this round's fault"
     fi
 else
     has "$R" "netmon: rows programs=" "the window came up and reported its rows"

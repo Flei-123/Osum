@@ -4,7 +4,7 @@
 Abnahme: `bash tools/ofs3/run.sh` → **75 Zusagen, 0 Fehler**, Laufzeit 65 s ·
 Nummernvorrat: kdata `0x5A000..0x5C000` (OFS3) und `0x60000..0x64000`
 (uio, umgezogen), Systemaufrufe 6 / 88 / 89 / 280, Modusbits in einem
-**eigenen** Wort (`kstate.OFS3_MODE`) · `tools/kernel/karte.py`: **52
+**eigenen** Wort (`kstate.OFS3_MODE`) · `tools/kernel/memmap.py`: **52
 Bereiche, 0 Kollisionen**
 
 ---
@@ -357,7 +357,7 @@ die Laeufer nacheinander.
 
 ```
 bash tools/ofs3/run.sh          # 75 Zusagen, ~65 s
-python3 tools/kernel/karte.py   # 52 Bereiche, 0 Kollisionen
+python3 tools/kernel/memmap.py   # 52 Bereiche, 0 Kollisionen
 
 # eine Platte von vier Gibioktett von Hand
 python3 tools/osum/mkfs.py build /tmp/4g.img 8388608 --v3 --inodes=256 \

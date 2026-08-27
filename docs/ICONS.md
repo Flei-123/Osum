@@ -1,7 +1,7 @@
 # Round ICONS — a font for the shell, bitmaps for the applications
 
 Until this round Osum had two kinds of picture and no system. Application
-bundles carried an **OSYM** bitmap (`tools/k15/symbol.py`, round K15), and
+bundles carried an **OSYM** bitmap (`tools/k15/icon.py`, round K15), and
 everywhere else the interface used **letters**: the file manager's
 toolbar said `<`, `>` and `^`, a list without a bundle icon drew a
 coloured tile with the first letter of the name on it, and a window's
@@ -146,7 +146,7 @@ is a driver there will be an icon, in the gap at E006.
 | upm / ascent / descent | 1000 / 1000 / 0 |
 
 `tools/icons/build.py` does the cutting. It **imports the table writer
-from `tools/ttf/schnitt.py`** rather than repeating it — one arrangement
+from `tools/ttf/subset.py`** rather than repeating it — one arrangement
 of a TrueType file in this tree, not two. What it adds is the step
 `schnitt.py` does not do: **remapping**. Lucide's own numbering moves
 between releases and is not something to build an interface on, so the

@@ -15,7 +15,7 @@ die einen Monat spaeter zwei verschiedene Zeichen fuer dieselbe Sache
 ergibt. Also: die ZEICHNUNG unter `assets/netview/*.txt` ist die Quelle,
 und dieses Werkzeug macht daraus
 
-  1. die OSYM-Dateien fuer die Platte (ueber `tools/k15/symbol.py`,
+  1. die OSYM-Dateien fuer die Platte (ueber `tools/k15/icon.py`,
      dasselbe Format wie jedes Buendelsymbol -- kein zweites),
   2. `kernel/netmark.fi`, den Kern-Teil: dieselben Zeichen als
      Bitreihen, damit `wm.fi` sie ohne Dateisystem malen kann.

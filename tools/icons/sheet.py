@@ -22,7 +22,7 @@ twelve; the grey sheet is where that shows up, because in it a warning
 and an error and a success have nothing left but their outline.
 
 PNG IS WRITTEN BY HAND, with `zlib` from the standard library and
-nothing else -- same rule as `tools/ttf/schnitt.py` and
+nothing else -- same rule as `tools/ttf/subset.py` and
 `tools/osum/mkfs.py`.  A picture that is evidence should not depend on
 an image library being installed.
 
