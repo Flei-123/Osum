@@ -72,6 +72,9 @@ export {
     theme_scheme_keys, theme_count, theme_token_count,
     theme_semantic_count,
     theme_override_count, theme_load, theme_set, theme_sum,
+    // ---- ROUND NETVIEW, addendum: icons whose colours come from
+    // the scheme (OSYM coverage 1..5 = a role, not an alpha).
+    icon_ok, icon_w, icon_h, icon_role, icon_draw, ICON_ROLES,
     F_UI, F_MONO, F_ICON, PX_UI, PX_MONO,
     RGB24, MODE_LIGHT, MODE_DARK, MODE_AUTO,
     NEUTRAL_STEPS, RAMP_STEPS, R_ACCENT, R_DANGER, R_WARNING, R_SUCCESS,
@@ -109,7 +112,8 @@ export {
     win_strut, win_max, work_x, work_y, work_w, work_h, edge_name,
     edge_by_name,
     WL_ID, WL_X, WL_Y, WL_W, WL_H, WL_LAYER, WL_FLAGS, WL_FOCUS,
-    WL_TITLE, WL_BYTES, L_DESK, L_NORMAL, L_TOP, F_HIDDEN, F_NODECO,
+    WL_TITLE, WL_NETV, WL_BYTES, L_DESK, L_NORMAL, L_TOP,
+    F_HIDDEN, F_NODECO,
     win_state, win_list, win_act, deco_push, DECO_SLOTS,
     EV_KEY, EV_DOWN, EV_UP, EV_MOVE, EV_CLOSE, EV_FOCUS, EV_RESIZE,
     sys5, sys3w
@@ -185,7 +189,9 @@ const WL_LAYER: u64 = 40
 const WL_FLAGS: u64 = 48
 const WL_FOCUS: u64 = 56
 const WL_TITLE: u64 = 64
-const WL_BYTES: u64 = 96
+// ROUND NETVIEW: the network view of the process the window belongs to.
+const WL_NETV: u64 = 96
+const WL_BYTES: u64 = 104
 
 const L_DESK: u64 = 0
 const L_NORMAL: u64 = 1
@@ -2823,5 +2829,110 @@ fn icon_at(id: u64, x: u64, y: u64, px_: u64, color: u64) -> bool {
         return false
     }
     draw_glyph(at, x as i64, (y + px_) as i64, color)
+    return true
+}
+
+// ============================================ ROUND NETVIEW, addendum
+//
+// AN ICON WHOSE COLOURS COME FROM THE SCHEME.
+//
+// OSYM (`tools/k15/symbol.py`) stores four octets per pixel: blue,
+// green, red, coverage. Coverage 0 has always meant transparent and 255
+// has always meant "these three octets are the colour". This round uses
+// the numbers in between -- 1 to 5 -- to mean "ask the scheme": ink,
+// dim, accent, warn, panel.
+//
+// WHY IN THE COVERAGE OCTET AND NOT IN A SECOND FILE FORMAT. Because
+// every symbol that existed before this addendum carries 0 and 255 and
+// therefore does not change by one octet; `tools/k15/run.sh` reads all
+// five bundle symbols back pixel by pixel and would say so. A second
+// format would have been a second reader, a second writer and a second
+// place to be wrong.
+//
+// AND THIS IS WHAT MAKES ONE DRAWING RIGHT IN BOTH SCHEMES. A taskbar
+// icon with 0xE8EEF4 written into it is a light icon; on a light scheme
+// it is a white shape on a white bar, which is not an icon. A drawing
+// that says `@ink` is whatever the running scheme calls its foreground,
+// and the same file is right in both.
+const ICON_ROLES: u64 = 5
+
+fn icon_role(a: u64) -> u64 {
+    if a == 1 {
+        return theme(T_FG)
+    }
+    if a == 2 {
+        return theme(T_DIM)
+    }
+    if a == 3 {
+        return theme(T_ACCENT)
+    }
+    if a == 4 {
+        return theme(T_FOCUS)
+    }
+    if a == 5 {
+        return theme(T_PANEL)
+    }
+    return theme(T_FG)
+}
+
+// "OSYM", octet by octet -- read as one number it would depend on the
+// byte order of the machine, and the header of a file does not.
+fn icon_ok(p: u64) -> bool {
+    if p == 0 {
+        return false
+    }
+    if __mmio_read8((p) as *mut u8) != 79 as u8 {
+        return false
+    }
+    if __mmio_read8((p + 1) as *mut u8) != 83 as u8 {
+        return false
+    }
+    if __mmio_read8((p + 2) as *mut u8) != 89 as u8 {
+        return false
+    }
+    return __mmio_read8((p + 3) as *mut u8) == 77 as u8
+}
+
+fn icon_w(p: u64) -> u64 {
+    if !icon_ok(p) {
+        return 0
+    }
+    return __mmio_read32((p + 4) as *mut u32) as u64
+}
+
+fn icon_h(p: u64) -> u64 {
+    if !icon_ok(p) {
+        return 0
+    }
+    return __mmio_read32((p + 8) as *mut u32) as u64
+}
+
+// The picture at x, y. Transparent pixels leave what is underneath
+// alone -- so an icon on a taskbar button keeps the button's face, and
+// a pixel checker that measures the face at the corners still finds it.
+fn icon_draw(p: u64, x: u64, y: u64) -> bool {
+    let w: u64 = icon_w(p)
+    let h: u64 = icon_h(p)
+    if w == 0 || h == 0 || w > 64 || h > 64 {
+        return false
+    }
+    var r: u64 = 0
+    while r < h {
+        var c: u64 = 0
+        while c < w {
+            let v: u64 = __mmio_read32((p + 12 + (r * w + c) * 4)
+                as *mut u32) as u64
+            let a: u64 = (v >> 24) & 0xFF
+            if a != 0 {
+                if a == 255 {
+                    px(x + c, y + r, v & 0x00FFFFFF)
+                } else {
+                    px(x + c, y + r, icon_role(a))
+                }
+            }
+            c = c + 1
+        }
+        r = r + 1
+    }
     return true
 }

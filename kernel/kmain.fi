@@ -46,6 +46,7 @@ import elf
 import hw
 import netsvc
 import arch.x86_64.smp
+import netview
 import cap
 import fb
 import vmode
@@ -188,6 +189,12 @@ fn kernel_main(mbi: u64, vectors: u64, state: u64, kernel_end: u64,
     // `kernel_end`, and the frame allocator hands exactly those frames
     // out. The first heap of the run stands on it. See docs/OSUM-K2.md.
     hw.parse(state, cmd)
+    // RUNDE NETVIEW, ZWEITER NACHTRAG: die systemweite Voreinstellung
+    // aus derselben Befehlszeile, EINMAL hierher gestellt. Sie steht
+    // nicht in `netsvc.stage`, weil die Stufe ohne das Wort `nic` sofort
+    // zurueckkehrt -- und eine Maschine ohne Karte ist genau der Fall,
+    // fuer den `when-offline` gebaut ist.
+    netview.fallback_set(state, hw.net_fallback(state))
     smp.parse(state, cmd)
     fb.parse(state, cmd)
     vmode.parse(state, cmd)
@@ -2836,6 +2843,7 @@ fn osum(state: u64) {
     say_posix(state)
     perm.report(state)
     usb.report(state)
+    netview.report(state)
 }
 
 // ROUND K4: what the system call layer did in this run. Six counters, one
@@ -3703,6 +3711,11 @@ fn mode_of(state: u64, cmd: u64) {
     if find(cmd, (&nstw[0]) as u64, 7) != 0 {
         kstate.mode_add(state, kstate.M_NOSTART)
     }
+    // RUNDE NETVIEW, NACHTRAG.
+    var dnv: [u8; 9] = "netvdemo\0"
+    if find(cmd, (&dnv[0]) as u64, 8) != 0 {
+        kstate.mode_add(state, kstate.M_NETVDEMO)
+    }
     if find(cmd, (&dnl[0]) as u64, 7) != 0 {
         kstate.mode_add(state, kstate.M_NOLAYER)
     }
@@ -4444,6 +4457,16 @@ fn say_wins(state: u64) {
 // EIN PROGRAMM VON DER PLATTE STARTEN, mit genau einem Argument. Die
 // drei Zeilen standen in `k15_start` viermal untereinander; hier
 // stehen sie einmal.
+fn desk_spawn(state: u64, pfad: u64, arg: u64, n: u64) -> u64 {
+    return desk_spawn_n(state, pfad, arg, n, 1)
+}
+
+// RUNDE NETVIEW, NACHTRAG: DASSELBE MIT MEHR ALS EINEM ARGUMENT. Bis
+// hierher stand die Eins fest im Aufruf von `elf.spawn`, weil jedes
+// Programm des Schreibtischs genau seinen eigenen Namen bekam.
+// `/bin/netview faked /bin/wigdemo` sind drei, und `n` war schon immer
+// die Zahl der OKTETTE und nie die der Argumente -- die beiden waren
+// nur nie zu unterscheiden, weil es immer eines war.
 fn desk_spawn_n(state: u64, pfad: u64, arg: u64, n: u64,
     argc: u64) -> u64 {
     let abuf: u64 = state + kstate.EARG_OFF
@@ -4461,10 +4484,6 @@ fn desk_spawn_n(state: u64, pfad: u64, arg: u64, n: u64,
     serial.dec(pid)
     serial.nl()
     return pid
-}
-
-fn desk_spawn(state: u64, pfad: u64, arg: u64, n: u64) -> u64 {
-    return desk_spawn_n(state, pfad, arg, n, 1)
 }
 
 // ============================================ RUNDE I18N: WAS ES KOSTET
@@ -4640,6 +4659,26 @@ fn desk_start(state: u64) -> u64 {
         let _d: u64 = desk_spawn(state, (&p_dhcp[0]) as u64,
             (&a_dhcp[0]) as u64, 5)
     }
+    // ==================================== RUNDE NETVIEW, NACHTRAG
+    //
+    // DREI PROGRAMME UNTER DREI SICHTEN, damit ein Bildschirmfoto die
+    // eigentliche Zusage dieser Runde zeigen kann: VIER Anwendungen
+    // gleichzeitig, jede mit einer anderen Vorstellung davon, ob es ein
+    // Netz gibt. Der Starter, den der Schreibtisch ohnehin aufmacht,
+    // ist die vierte -- er laeuft `real` und traegt darum KEIN Zeichen.
+    //
+    // `/bin/suchen` stand hier zuerst und war falsch: das ist der
+    // Namensindex auf der Kommandozeile und macht kein Fenster auf. Der
+    // erste Lauf zeigte drei Knoepfe statt vier, und das ist der Grund,
+    // warum diese Runde die Zahl der Knoepfe MISST und nicht ansieht.
+    //
+    // Sie gehen durch `/bin/netview` und nicht ueber einen eigenen
+    // Weg: das ist derselbe Ablauf, den die Shell, der Starter und der
+    // Dateimanager nehmen, und ein Messaufbau, der einen anderen Weg
+    // nimmt, misst den anderen Weg.
+    if (kstate.get(state, kstate.MODE) & kstate.M_NETVDEMO) != 0 {
+        netv_demo(state)
+    }
     runden = 0
     while runden < 500 {
         wm.poll(state)
@@ -4648,6 +4687,43 @@ fn desk_start(state: u64) -> u64 {
         runden = runden + 1
     }
     return pid
+}
+
+// RUNDE NETVIEW, NACHTRAG: drei Fenster, drei Sichten. Die Argumente
+// stehen hintereinander mit je einer Null dazwischen, so wie
+// `desk_spawn` sie erwartet.
+fn netv_demo(state: u64) {
+    var p_nv: [u8; 13] = "/bin/netview\0"
+    var a_flt: [u8; 31] = "netview\0filtered\0/bin/explorer\0"
+    var a_fak: [u8; 27] = "netview\0faked\0/bin/wigdemo\0"
+    var a_non: [u8; 32] = "netview\0none\0/bin/einstellungen\0"
+    let _a: u64 = desk_spawn_n(state, (&p_nv[0]) as u64,
+        (&a_flt[0]) as u64, 31, 3)
+    var runden: u64 = 0
+    while runden < 200 {
+        wm.poll(state)
+        wm.compose(state)
+        sched.sleep_ticks(state, 1)
+        runden = runden + 1
+    }
+    let _b: u64 = desk_spawn_n(state, (&p_nv[0]) as u64,
+        (&a_fak[0]) as u64, 27, 3)
+    runden = 0
+    while runden < 200 {
+        wm.poll(state)
+        wm.compose(state)
+        sched.sleep_ticks(state, 1)
+        runden = runden + 1
+    }
+    let _c: u64 = desk_spawn_n(state, (&p_nv[0]) as u64,
+        (&a_non[0]) as u64, 32, 3)
+    runden = 0
+    while runden < 400 {
+        wm.poll(state)
+        wm.compose(state)
+        sched.sleep_ticks(state, 1)
+        runden = runden + 1
+    }
 }
 
 // RUNDE K15: DIE ANWENDUNG DIESER RUNDE STARTEN. Sie kommt von der

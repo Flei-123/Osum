@@ -1,0 +1,1014 @@
+// kernel/netview.fi -- round NETVIEW: ONE NETWORK PER PROCESS.
+//
+// A great many programs refuse to work without a network although they
+// would work perfectly well without one. They do not need the network
+// for what the person in front of the screen asked for; they need it to
+// fetch an advertisement, to report a start, to check a licence. The
+// answer this system gives is not "block them" -- a blocked program
+// shows an error box and stops. The answer is: GIVE THE PROGRAM A
+// NETWORK THAT LOOKS NORMAL AND LEADS NOWHERE.
+//
+// WHY THIS IS CHEAP HERE AND EXPENSIVE EVERYWHERE ELSE. Osum carries its
+// own TCP/IP stack (`kernel/inet.fi` over the stack of round K3) and its
+// own socket layer (`kernel/sys.fi`). Every octet a process wants to put
+// on the wire passes through eleven functions that this repository
+// wrote. So a per-process network is a FIELD IN THE TASK RECORD and a
+// question asked at the door -- not a virtual device, not a namespace,
+// not a packet filter. `docs/NETVIEW.md` holds that comparison against
+// Android, Linux and Windows; it is not repeated here.
+//
+// THE FOUR VIEWS:
+//
+//   real      the wire, exactly as before. The default, and what every
+//             process that existed before this round still gets.
+//   filtered  a list of destinations is reachable for real; everything
+//             else is answered as in `faked`.
+//   faked     there is an address, a gateway, a name server and a
+//             connection -- and nothing behind them. Described below.
+//   none      no network. Every attempt fails at once with
+//             -ENETUNREACH, the way a machine with the cable pulled
+//             fails.
+//
+// The numbers are ordered BY HOW MUCH THEY ALLOW, real (0) lowest and
+// none (3) highest, and one rule is written on that order: a process may
+// always RAISE its own number and never lower it (`may_set`). That is
+// what lets `/bin/netview faked <program>` work with no privilege at
+// all, and what stops the faked program from handing itself the wire
+// back -- or handing it to a sibling.
+//
+// HOW A FAKED CONNECTION ENDS, and this is the whole design decision of
+// the round. Three answers were possible and two of them are wrong:
+//
+//   REFUSE (RST at once).  Honest, fast -- and useless. A program that
+//   sees ECONNREFUSED knows it is offline and shows the error box this
+//   round exists to avoid.
+//
+//   SWALLOW (accept the SYN, never answer).  This is the worst of the
+//   three and it is what a naive "drop the packets" firewall does. The
+//   program hangs in `connect` until ITS timeout runs out -- thirty
+//   seconds, sixty, sometimes forever. Offline would have been better.
+//
+//   ACCEPT AND END IT (what is built here).  The connection succeeds
+//   IMMEDIATELY, in the same system call, with no wire and no wait. What
+//   the program writes is taken and dropped. What it reads is a defined,
+//   short answer and then an ordinary end of stream. The program's own
+//   error path for "the server said nothing useful" runs, which is the
+//   path it is tested on -- and it runs in microseconds instead of
+//   minutes.
+//
+// AND ONE ANSWER IS NOT EMPTY. Very many programs decide whether they
+// are online by fetching one URL and looking at the status. Android asks
+// for a 204, Windows for a short text file, GNOME for a fixed body. So
+// if what the program wrote LOOKS LIKE AN HTTP REQUEST, what it reads
+// back is a well-formed `HTTP/1.1 204 No Content` with no body. The
+// reachability check SUCCEEDS, the download stays EMPTY. That is
+// precisely the point of the round.
+//
+// NAMES RESOLVE. A program that fails at `getaddrinfo` never reaches the
+// interesting code. So a datagram to port 53 is answered here, out of
+// the question that was asked, with an A record pointing at
+// 198.51.100.80. Every address this file invents comes out of TEST-NET-2
+// (RFC 5737), which is reserved for documentation and is guaranteed by
+// the registry never to be routed anywhere. An answer this file makes up
+// therefore cannot collide with a machine that exists.
+//
+// NOT ONE OCTET LEAVES. A faked socket never calls a function of
+// `inet.fi` or `stack.fi`, and those are the only two things in this
+// kernel that can hand a frame to `virtio.tx_frame`. The proof is not
+// this sentence: `tools/netview/run.sh` runs the same image twice, once
+// `real` and once `faked`, and reads `nic: tx_o=` out of the kernel's
+// own report. Real: some thousands. Faked: zero.
+//
+// WHERE THE STATE LIVES. The view and the allow list live in the TASK
+// RECORD (`sched.T_NETV`, `sched.T_NETOK`) and nowhere else -- there is
+// no second table to forget. What lives here, in `pci.K2_SCALARS`, is
+// something different and it is per SOCKET, not per process: whether
+// THIS connection was faked, what it was aimed at, and how far the
+// canned answer has been handed out. A process can hold four sockets and
+// they need four read positions; that cannot live in the process. The
+// view itself is read out of the task on every single call and never
+// copied here.
+//
+// WHAT THIS FILE DOES NOT DO, said plainly:
+//
+//   * TLS. A faked answer to a connection on port 443 is impossible --
+//     the client would have to be able to verify a certificate for a
+//     name, and forging one means being a certificate authority the
+//     client trusts. A faked TLS connection therefore gets an immediate,
+//     clean end of stream, and the program sees "the server hung up",
+//     not "no network". That is the best available answer and it is a
+//     limit, not a feature.
+//   * A LISTENING socket in `faked` or `none` binds and listens without
+//     ever touching the stack, and `accept` says -EAGAIN at once. Nobody
+//     will ever connect to it, because there is no wire under it.
+//   * ONE view per process, not one per socket. A program that wants the
+//     real network for one connection and a faked one for another is
+//     asking for a policy engine; this is a field.
+//
+// ==================================== SECOND ADDENDUM: THE FALLBACK
+//
+// THIRD ADDENDUM, AND IT CORRECTS THIS BLOCK. Justin's ruling, and it
+// takes precedence over everything below: `when-offline` is NOT a
+// default and must never engage by itself. It never was the default --
+// `off` was and stays -- but the second addendum offered it as if the
+// three values were equal, and they are not:
+//
+//   THE SWITCH HAS TWO POSITIONS, `off` and `always`. That is what the
+//   tile in the quick settings toggles, what `netview fallback on|off`
+//   sets, and what a person means by "fake a network". One question,
+//   one answer, and the answer does not change under them because the
+//   wire changed.
+//
+//   `when-offline` IS A THIRD VALUE THAT MUST BE PICKED OUT OF A LIST
+//   ON PURPOSE. It keeps its place -- it is built, measured and there
+//   is a real case for it -- and it loses its claim to being an equal
+//   option. Nothing reaches it without somebody typing the word.
+//
+// WHY IT WAS NOT DELETED. The value is fine; what was wrong was handing
+// somebody a switch whose meaning depends on what the cable is doing
+// this second. Naming it explicitly is a different act from flipping a
+// switch, and that difference is the whole of the correction.
+//
+// Setting every program by hand is work, and the case where it is
+// needed is the case where the person has the least patience for work:
+// the machine has no network at all. So there is ONE systemwide
+// preference, three values, and it decides what a program gets WHEN
+// NOTHING ELSE WAS SAID ABOUT IT:
+//
+//   off           nothing is faked. What every machine did before this
+//                 addendum, and the default.
+//   when-offline  while there is no way out, a program that nobody
+//                 configured starts in `faked`. The moment there is a
+//                 way out again, the next program to start gets `real`.
+//   always        everything faked, network or not -- for shutting the
+//                 machine up on purpose.
+//
+// AND IT IS THE WEAKEST OF THE THREE SOURCES. `docs/NETVIEW.md` carries
+// the table; the rule in one line is that AN EXPLICIT SETTING ON A
+// PROGRAM ALWAYS WINS. A program the person put on `real` is not
+// quietly forced into `faked`, and a program the person put on `none`
+// stays without a network even when the preference says to fake one.
+// The preference fills a blank; it does not overrule an answer.
+//
+// WHAT IT DOES NOT DO, AND THIS IS A DECISION: it does not touch a
+// RUNNING process. See `docs/NETVIEW.md`; the short form is that a view
+// that changes under a program's feet changes it in the middle of a
+// connection, and the failure that produces is both rare and
+// unfindable. New programs get the new view, running ones keep theirs,
+// and the mark on the window says which is which.
+//
+// WHERE IT IS APPLIED. Not here. This file STORES the preference and
+// ANSWERS what it currently amounts to (`fallback_view`); the place
+// that puts a view on a starting program is `appdir.view_for` in ring
+// 3, where the other two sources already live. A blank filled in three
+// different places would be three rules.
+
+profile kernel
+
+import kstate
+import sched
+import pci
+import errno
+import serial
+import inet
+import virtio
+
+export {
+    V_REAL, V_FILTERED, V_FAKED, V_NONE, V_LAST,
+    view_of, set_view, may_set, inherit, restrictive,
+    allow_count, allow_at, allow_add, allow_clear, allowed,
+    D_REAL, D_DENY, D_FAKE, decide,
+    NS_NOCARRIER, NS_NOADDR, NS_NOROUTE, NS_ONLINE, link_state,
+    FB_OFF, FB_WHENOFF, FB_ALWAYS, FB_LAST,
+    fallback, fallback_set, fallback_view, faking,
+    reset, release, is_fake, marked,
+    open_fake, send_fake, recv_fake, sendto_fake, recvfrom_fake,
+    peer_of,
+    FAKE_IP, FAKE_MASK, FAKE_GW, FAKE_DNS, FAKE_SINK,
+    FAKE_MAC0, FAKE_MAC1,
+    sa_scratch, peek_buf, PEEK_MAX,
+    dropped, opened, denials, replies, report
+}
+
+// ------------------------------------------------------------ the views
+//
+// Ordered by how much they allow. `may_set` depends on that order.
+
+const V_REAL: u64 = 0
+const V_FILTERED: u64 = 1
+const V_FAKED: u64 = 2
+const V_NONE: u64 = 3
+const V_LAST: u64 = 3
+
+// What `decide` answers.
+const D_REAL: u64 = 0 // let it through to the stack
+const D_DENY: u64 = 1 // -ENETUNREACH, at once
+const D_FAKE: u64 = 2 // answer it here
+
+// ------------------------------------------- what the MACHINE has
+//
+// Four steps, and they rise: each one presumes the one before it.
+//
+//   0 no carrier   no card, or nothing plugged in
+//   1 no address   the wire is there, an address is not (DHCP is still
+//                  running)
+//   2 no route     an address is there, the gateway never answered --
+//                  this is Windows' "connected, no internet", one hop
+//                  earlier and without any probe traffic of its own
+//   3 online       address, and the gateway answered an ARP
+//
+// CABLE AND RADIO ARE NOT TOLD APART, and that is not laziness: there
+// is not one line of 802.11 in this tree. A radio symbol for something
+// that does not exist would be the worst of all shortcuts in a round
+// about not lying. When radio arrives, a number is added here.
+//
+// IT LIVES HERE AND NOT IN `sys.fi` because two things ask it now: the
+// system call the taskbar uses, and `fallback_view` two functions
+// below. Asked in two places, computed once.
+const NS_NOCARRIER: u64 = 0
+const NS_NOADDR: u64 = 1
+const NS_NOROUTE: u64 = 2
+const NS_ONLINE: u64 = 3
+
+// MEASURED AT THE WIRE AND NOT AT THE STACK. The first version of this
+// asked `inet.ready` and answered "no carrier" when it said no --
+// measured, a machine WITH a card and WITHOUT an address came out as
+// "no carrier" too, because the stack is not built at all without an
+// address. That very step ("the wire is there, the address is missing")
+// is what the second icon is for, so it is computed the way it is
+// shown: the card first, then the stack, then the address, then the
+// first hop.
+fn link_state(state: u64) -> u64 {
+    if !inet.carrier(state) {
+        return NS_NOCARRIER
+    }
+    if !inet.ready(state) || inet.ip(state) == 0 {
+        return NS_NOADDR
+    }
+    if !inet.gw_known(state) {
+        return NS_NOROUTE
+    }
+    return NS_ONLINE
+}
+
+// ------------------------------------ THE SYSTEMWIDE FALLBACK
+//
+// Three values, ordered by how much they fake, so that a comparison
+// reads the way it sounds.
+const FB_OFF: u64 = 0
+const FB_WHENOFF: u64 = 1
+const FB_ALWAYS: u64 = 2
+const FB_LAST: u64 = 2
+
+fn fallback(state: u64) -> u64 {
+    let v: u64 = kstate.get(state, sc(NV_FALL))
+    if v > FB_LAST {
+        return FB_OFF
+    }
+    return v
+}
+
+fn fallback_set(state: u64, v: u64) {
+    if v > FB_LAST {
+        return
+    }
+    kstate.set(state, sc(NV_FALL), v)
+}
+
+// WHAT A PROGRAM WITH NOTHING SAID ABOUT IT WOULD GET IF IT STARTED
+// NOW. One function, asked by the launcher, by the settings page and by
+// the taskbar -- the three of them cannot disagree because there is
+// nothing for them to disagree about.
+//
+// `off` answers `real` and NOT `none`, and that is deliberate. A
+// machine with no network already fails every connection; answering
+// `none` on top of that would be a second way of being offline, with
+// its own error number, for programs that never asked for one. The
+// default of this system has to be the behaviour this system had.
+fn fallback_view(state: u64) -> u64 {
+    let f: u64 = fallback(state)
+    if f == FB_ALWAYS {
+        return V_FAKED
+    }
+    if f == FB_WHENOFF {
+        if link_state(state) != NS_ONLINE {
+            return V_FAKED
+        }
+    }
+    return V_REAL
+}
+
+// Is the system faking right now? What the corner of the taskbar asks
+// in order to draw the sign that says so. It is a QUESTION ABOUT THE
+// MACHINE and not about the asking process, which is why it is not
+// masked per view -- see `docs/NETVIEW.md` on why this leaks nothing
+// that `netview show` did not already tell.
+fn faking(state: u64) -> bool {
+    return fallback_view(state) == V_FAKED
+}
+
+// ------------------------------------------- the invented network
+//
+// TEST-NET-2, 198.51.100.0/24 (RFC 5737). Reserved for documentation,
+// never routed. An address made up in this file can therefore not be an
+// address that exists.
+const FAKE_IP: u64 = 0xC6336402 // 198.51.100.2
+const FAKE_MASK: u64 = 0xFFFFFF00 // /24
+const FAKE_GW: u64 = 0xC6336401 // 198.51.100.1
+const FAKE_DNS: u64 = 0xC6336435 // 198.51.100.53
+const FAKE_SINK: u64 = 0xC6336450 // 198.51.100.80 -- what names resolve to
+
+// A locally administered hardware address (bit 1 of the first octet).
+// The real one of the card is not handed to a faked process: it is a
+// number that identifies the machine, and this round is about not
+// leaking such numbers.
+const FAKE_MAC0: u64 = 0x02005645 // 02:00:56:45
+const FAKE_MAC1: u64 = 0x0002 // :00:02
+
+// --------------------------------------------- the place in `kdata`
+//
+// `pci.K2_SCALARS` is 0x12000..0x14000. Round K2 uses up to 0x2A0,
+// `hw.fi` and `netsvc.fi` up to 0x3F8, `inet.fi` puts its socket table
+// at 0x400, its address cache at 0x600 and its ICMP queue at 0x700..
+// 0xB00. This round takes 0xB00 upwards and stays under 0x1400.
+
+const NV_SOCK: u64 = 0xB00 // one record per socket
+const NV_BYTES: u64 = 64
+const NV_BUF: u64 = 0x1000 // the canned answer of each socket
+const NV_BUFB: u64 = 256
+
+// Two scratch areas, and they exist for a reason that is older than
+// this round: `inet.saddr` and `inet.bounce` are FRAMES THE CARD'S
+// DRIVER ALLOCATES. On a machine with no network card there is no card,
+// no `inet.init`, and both of them are zero -- and a faked network is
+// exactly the thing that has to work on such a machine, because that is
+// the machine the person is sitting at when the aeroplane has no wifi.
+// So the faked paths use these, which are part of `kdata` and therefore
+// exist from the first instruction.
+const NV_SA: u64 = 0x1400 // two sockaddr_in, in and out
+const NV_PEEK: u64 = 0x1480 // what a faked `send` is looked at through
+const PEEK_MAX: u64 = 256
+
+const NV_DROPPED: u64 = 0xF00 // octets a faked socket swallowed
+const NV_OPENED: u64 = 0xF08 // faked connections opened
+const NV_DENIED: u64 = 0xF10 // attempts answered -ENETUNREACH
+const NV_REPLIES: u64 = 0xF18 // canned answers built
+// SECOND ADDENDUM: the systemwide fallback, and there is one of it. Set
+// from the command line at boot (`hw.net_fallback`), changed at run time
+// through SYS_OSUM_NETVFB, and read by everybody who needs it.
+const NV_FALL: u64 = 0xF20
+
+// The fields of one faked socket.
+const F_USE: u64 = 0 // 0 = an ordinary socket, 1 = a faked one
+const F_KIND: u64 = 8 // inet.SK_TCP / SK_UDP / SK_ICMP
+const F_ADDR: u64 = 16 // where the program thinks it is talking
+const F_PORT: u64 = 24
+const F_POS: u64 = 32 // how much of the answer was handed out
+const F_LEN: u64 = 40 // how long the answer is
+const F_SENT: u64 = 48 // octets this socket swallowed
+const F_SEEN: u64 = 56 // 1 = the first block was already looked at
+
+fn sc(off: u64) -> u64 {
+    return pci.K2_SCALARS + off
+}
+
+fn at(i: u64) -> u64 {
+    return sc(NV_SOCK + i * NV_BYTES)
+}
+
+fn buf(i: u64) -> u64 {
+    return sc(NV_BUF + i * NV_BUFB)
+}
+
+fn sa_scratch(state: u64) -> u64 {
+    return state + sc(NV_SA)
+}
+
+fn peek_buf(state: u64) -> u64 {
+    return state + sc(NV_PEEK)
+}
+
+// ------------------------------------------------------- the counters
+
+fn dropped(state: u64) -> u64 {
+    return kstate.get(state, sc(NV_DROPPED))
+}
+
+fn opened(state: u64) -> u64 {
+    return kstate.get(state, sc(NV_OPENED))
+}
+
+fn denials(state: u64) -> u64 {
+    return kstate.get(state, sc(NV_DENIED))
+}
+
+fn replies(state: u64) -> u64 {
+    return kstate.get(state, sc(NV_REPLIES))
+}
+
+// ------------------------------------------------- the view of a task
+//
+// ONE PLACE. `sched.T_NETV` in the task record, read on every call, and
+// there is no copy of it anywhere -- not in the socket, not in a table
+// beside the task table. A view that is changed while a program runs is
+// therefore in force for the next call and not "the next time it starts".
+
+fn view_of(state: u64, t: u64) -> u64 {
+    let v: u64 = sched.tget(state, t, sched.T_NETV)
+    if v > V_LAST {
+        return V_REAL
+    }
+    return v
+}
+
+// Is `to` at least as restrictive as `from`?
+fn restrictive(from: u64, to: u64) -> bool {
+    return to >= from
+}
+
+// May `who` set the view of `whom` to `want`? The rule of the round:
+//
+//   * TIGHTENING YOUR OWN VIEW is always allowed and needs no
+//     privilege. This is the one that matters: it is how a launcher
+//     drops its own network between `fork` and `execve`, and how
+//     `/bin/netview faked <program>` works for an ordinary user.
+//   * EVERYTHING ELSE needs euid 0 -- loosening your own view, and
+//     touching another process at all, in either direction.
+//
+// The second half is not caution, it is the whole guarantee. Were a
+// process allowed to loosen its own view, the faked program would set
+// itself back to `real` in one call. Were it allowed to touch a process
+// with the same user, it would set a SIBLING to `real` and have the
+// sibling fetch. Both are escapes, and both are closed by the same line.
+fn may_set(state: u64, who: u64, whom: u64, want: u64) -> bool {
+    if want > V_LAST {
+        return false
+    }
+    if sched.tget(state, who, sched.T_EUID) == 0 {
+        return true
+    }
+    if who != whom {
+        return false
+    }
+    return restrictive(view_of(state, who), want)
+}
+
+// Sets it. The caller has already asked `may_set`; this function is the
+// write and nothing else, so that there is exactly one of each.
+fn set_view(state: u64, t: u64, v: u64) {
+    if v > V_LAST {
+        return
+    }
+    sched.tset(state, t, sched.T_NETV, v)
+}
+
+// ---------------------------------------------------- the allow list
+//
+// Six entries in the task record, one word each, 0 = empty:
+//
+//   bits 63..32  the address
+//   bits 31..16  the port, 0 = any port
+//   bits 15..8   the prefix length, 0..32
+//   bit 0        in use
+//
+// Six and not sixty: this is the list of "the one service this program
+// really needs", and a list long enough to be a firewall rule set would
+// be a firewall, in the wrong place, in a task record.
+
+fn allow_at(state: u64, t: u64, i: u64) -> u64 {
+    if i >= sched.NETOK_MAX {
+        return 0
+    }
+    return sched.tget(state, t, sched.T_NETOK + i * 8)
+}
+
+fn allow_count(state: u64, t: u64) -> u64 {
+    var n: u64 = 0
+    var i: u64 = 0
+    while i < sched.NETOK_MAX {
+        if (allow_at(state, t, i) & 1) != 0 {
+            n = n + 1
+        }
+        i = i + 1
+    }
+    return n
+}
+
+fn allow_clear(state: u64, t: u64) {
+    var i: u64 = 0
+    while i < sched.NETOK_MAX {
+        sched.tset(state, t, sched.T_NETOK + i * 8, 0)
+        i = i + 1
+    }
+}
+
+fn allow_add(state: u64, t: u64, addr: u64, port: u64,
+    prefix: u64) -> bool {
+    if prefix > 32 || port > 65535 {
+        return false
+    }
+    var i: u64 = 0
+    while i < sched.NETOK_MAX {
+        if (allow_at(state, t, i) & 1) == 0 {
+            sched.tset(state, t, sched.T_NETOK + i * 8,
+                ((addr & 0xFFFFFFFF) << 32) | ((port & 0xFFFF) << 16)
+                | ((prefix & 0xFF) << 8) | 1)
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+// The mask of a prefix length. Written out rather than shifted blindly:
+// `0xFFFFFFFF << 32` is not a mask of /0, it is a word of zeros in the
+// low half, and a /0 entry means EVERY address.
+fn mask_of(prefix: u64) -> u64 {
+    if prefix == 0 {
+        return 0
+    }
+    if prefix >= 32 {
+        return 0xFFFFFFFF
+    }
+    return (0xFFFFFFFF << (32 - prefix)) & 0xFFFFFFFF
+}
+
+fn allowed(state: u64, t: u64, addr: u64, port: u64) -> bool {
+    var i: u64 = 0
+    while i < sched.NETOK_MAX {
+        let e: u64 = allow_at(state, t, i)
+        if (e & 1) != 0 {
+            let ea: u64 = (e >> 32) & 0xFFFFFFFF
+            let ep: u64 = (e >> 16) & 0xFFFF
+            let m: u64 = mask_of((e >> 8) & 0xFF)
+            if ((addr & 0xFFFFFFFF) & m) == (ea & m) {
+                if ep == 0 || ep == port {
+                    return true
+                }
+            }
+        }
+        i = i + 1
+    }
+    return false
+}
+
+// -------------------------------------------------------- THE DOOR
+//
+// Every outbound socket call in `sys.fi` asks this and nothing else.
+// One question, one place, four answers -- the shape `perm.may` gave the
+// file rights in round K13, for the same reason.
+fn decide(state: u64, t: u64, addr: u64, port: u64) -> u64 {
+    let v: u64 = view_of(state, t)
+    if v == V_REAL {
+        return D_REAL
+    }
+    if v == V_NONE {
+        kstate.add(state, sc(NV_DENIED), 1)
+        return D_DENY
+    }
+    if v == V_FILTERED {
+        if allowed(state, t, addr, port) {
+            return D_REAL
+        }
+        return D_FAKE
+    }
+    return D_FAKE
+}
+
+// -------------------------------------------- the faked socket itself
+
+fn is_fake(state: u64, i: u64) -> bool {
+    if i >= inet.SOCK_MAX {
+        return false
+    }
+    return kstate.get(state, at(i) + F_USE) != 0
+}
+
+// Does this process have any faked socket open at all? What the taskbar
+// asks in order to put a mark on the window, and the reason the mark is
+// truthful rather than decorative.
+fn marked(state: u64, t: u64) -> bool {
+    return view_of(state, t) != V_REAL
+}
+
+// A socket slot is handed out again. Called from `sys.do_socket` and
+// `sys.do_accept` right after `inet.sock_new`, unconditionally -- so a
+// slot that some earlier close forgot to clear cannot make a real
+// socket of a real process look faked.
+fn reset(state: u64, i: u64) {
+    if i >= inet.SOCK_MAX {
+        return
+    }
+    let a: u64 = at(i)
+    kstate.set(state, a + F_USE, 0)
+    kstate.set(state, a + F_KIND, 0)
+    kstate.set(state, a + F_ADDR, 0)
+    kstate.set(state, a + F_PORT, 0)
+    kstate.set(state, a + F_POS, 0)
+    kstate.set(state, a + F_LEN, 0)
+    kstate.set(state, a + F_SENT, 0)
+    kstate.set(state, a + F_SEEN, 0)
+}
+
+fn release(state: u64, i: u64) {
+    reset(state, i)
+}
+
+fn peer_of(state: u64, i: u64, addr: *mut u64, port: *mut u64) {
+    *addr = 0
+    *port = 0
+    if i >= inet.SOCK_MAX {
+        return
+    }
+    *addr = kstate.get(state, at(i) + F_ADDR)
+    *port = kstate.get(state, at(i) + F_PORT)
+}
+
+// A connection into the invented network. It succeeds in this call, on
+// this stack, with no wire and no waiting -- that is the whole promise
+// of the mode and the reason `connect` in `faked` costs microseconds.
+fn open_fake(state: u64, i: u64, kind: u64, addr: u64, port: u64) -> u64 {
+    if i >= inet.SOCK_MAX {
+        return errno.neg(errno.E_BADF)
+    }
+    let a: u64 = at(i)
+    kstate.set(state, a + F_USE, 1)
+    kstate.set(state, a + F_KIND, kind)
+    kstate.set(state, a + F_ADDR, addr)
+    kstate.set(state, a + F_PORT, port)
+    kstate.set(state, a + F_POS, 0)
+    kstate.set(state, a + F_LEN, 0)
+    kstate.set(state, a + F_SEEN, 0)
+    kstate.add(state, sc(NV_OPENED), 1)
+    return 0
+}
+
+// ---------------------------------------------------- writing a line
+//
+// The canned answers are built octet by octet into the socket's own 256
+// octets. `\r\n` is written as the two numbers and not as an escape,
+// because what an HTTP header ends with is exactly 13 and 10 and a
+// reader of this file should be able to see that.
+
+fn put(state: u64, i: u64, off: u64, v: u64) -> u64 {
+    if off >= NV_BUFB {
+        return off
+    }
+    kstate.set8(state + buf(i) + off, (v & 0xFF) as u8)
+    return off + 1
+}
+
+fn put_text(state: u64, i: u64, off: u64, text: u64) -> u64 {
+    var o: u64 = off
+    var k: u64 = 0
+    while kstate.get8(text + k) != 0 {
+        o = put(state, i, o, kstate.get8(text + k))
+        k = k + 1
+    }
+    return o
+}
+
+fn put_line(state: u64, i: u64, off: u64, text: u64) -> u64 {
+    var o: u64 = put_text(state, i, off, text)
+    o = put(state, i, o, 13)
+    return put(state, i, o, 10)
+}
+
+// Does what the program wrote look like an HTTP request? Four methods
+// and a space, which is all that is needed to tell an HTTP client from
+// anything else -- and being wrong here costs nothing: a program that
+// gets a 204 it did not ask for reads it as garbage and closes, which
+// is what it would have done with an empty stream anyway.
+fn looks_http(src: u64, n: u64) -> bool {
+    if n < 5 {
+        return false
+    }
+    let a: u64 = kstate.get8(src)
+    let b: u64 = kstate.get8(src + 1)
+    let c: u64 = kstate.get8(src + 2)
+    let d: u64 = kstate.get8(src + 3)
+    if a == 71 && b == 69 && c == 84 && d == 32 { // "GET "
+        return true
+    }
+    if a == 80 && b == 79 && c == 83 && d == 84 { // "POST"
+        return true
+    }
+    if a == 72 && b == 69 && c == 65 && d == 68 { // "HEAD"
+        return true
+    }
+    if a == 80 && b == 85 && c == 84 && d == 32 { // "PUT "
+        return true
+    }
+    return false
+}
+
+// `HTTP/1.1 204 No Content`, no body, and the connection closes after
+// it. 204 and not 200: a 200 with zero octets is a page that failed to
+// load, and a browser or an updater will retry it. 204 MEANS "there is
+// nothing here, and that is the answer" -- it is what Android's own
+// connectivity check asks for, and every HTTP client in existence
+// handles it without complaining.
+fn build_http(state: u64, i: u64) {
+    var l1: [u8; 25] = "HTTP/1.1 204 No Content\0\0"
+    var l2: [u8; 24] = "Server: osum-netview\0\0\0\0"
+    var l3: [u8; 20] = "Content-Length: 0\0\0\0"
+    var l4: [u8; 20] = "Connection: close\0\0\0"
+    var o: u64 = 0
+    o = put_line(state, i, o, (&l1[0]) as u64)
+    o = put_line(state, i, o, (&l2[0]) as u64)
+    o = put_line(state, i, o, (&l3[0]) as u64)
+    o = put_line(state, i, o, (&l4[0]) as u64)
+    o = put(state, i, o, 13)
+    o = put(state, i, o, 10)
+    kstate.set(state, at(i) + F_LEN, o)
+    kstate.set(state, at(i) + F_POS, 0)
+    kstate.add(state, sc(NV_REPLIES), 1)
+}
+
+// -------------------------------------------------------------- TCP
+
+// Everything the program writes is taken and thrown away, and the count
+// of what was thrown away is kept -- because "no octet left the machine"
+// is only worth something next to "and this many were offered".
+fn send_fake(state: u64, i: u64, src: u64, n: u64) -> u64 {
+    if i >= inet.SOCK_MAX {
+        return errno.neg(errno.E_BADF)
+    }
+    let a: u64 = at(i)
+    kstate.set(state, a + F_SENT, kstate.get(state, a + F_SENT) + n)
+    kstate.add(state, sc(NV_DROPPED), n)
+    if kstate.get(state, a + F_SEEN) == 0 {
+        kstate.set(state, a + F_SEEN, 1)
+        if looks_http(src, n) {
+            build_http(state, i)
+        }
+    }
+    return n
+}
+
+// What is left of the canned answer, then an ordinary end of stream.
+// NEVER -EAGAIN: a faked socket must not make the caller in `sys.fi`
+// sleep, because a mode whose whole purpose is not to hang may not hang.
+fn recv_fake(state: u64, i: u64, dst: u64, n: u64) -> u64 {
+    if i >= inet.SOCK_MAX {
+        return errno.neg(errno.E_BADF)
+    }
+    let a: u64 = at(i)
+    let len: u64 = kstate.get(state, a + F_LEN)
+    let pos: u64 = kstate.get(state, a + F_POS)
+    if pos >= len {
+        return 0
+    }
+    var take: u64 = len - pos
+    if take > n {
+        take = n
+    }
+    var k: u64 = 0
+    while k < take {
+        kstate.set8(dst + k, kstate.get8(state + buf(i) + pos + k) as u8)
+        k = k + 1
+    }
+    kstate.set(state, a + F_POS, pos + take)
+    return take
+}
+
+// ------------------------------------------------------ UDP and DNS
+
+// The length of the question section of a DNS message, from octet 12:
+// labels until the zero octet, then four for QTYPE and QCLASS. Returns 0
+// if the message runs out first -- an answer built on a malformed
+// question would be worse than no answer.
+fn question_len(src: u64, n: u64) -> u64 {
+    var o: u64 = 12
+    var going: bool = true
+    while going {
+        if o >= n {
+            return 0
+        }
+        let l: u64 = kstate.get8(src + o)
+        if l == 0 {
+            o = o + 1
+            going = false
+        } else if l >= 64 {
+            return 0 // a compression pointer in a question: refuse
+        } else {
+            o = o + 1 + l
+        }
+    }
+    if o + 4 > n {
+        return 0
+    }
+    return o + 4 - 12
+}
+
+// The answer to a name: the same identifier, the same question, and one
+// A record pointing at FAKE_SINK. A question that is not an A record is
+// answered with NOERROR and no records -- the resolver then stops
+// instead of retrying, which is the whole point.
+fn build_dns(state: u64, i: u64, src: u64, n: u64) -> bool {
+    if n < 17 {
+        return false
+    }
+    let qlen: u64 = question_len(src, n)
+    if qlen == 0 || 12 + qlen + 16 > NV_BUFB {
+        return false
+    }
+    let qtype: u64 = (kstate.get8(src + 12 + qlen - 4) << 8)
+        | kstate.get8(src + 12 + qlen - 3)
+    var o: u64 = 0
+    o = put(state, i, o, kstate.get8(src)) // the identifier, unchanged
+    o = put(state, i, o, kstate.get8(src + 1))
+    // Flags: QR=1, the opcode of the question, AA=0, TC=0,
+    // RD as it was asked, RA=1, RCODE=0.
+    o = put(state, i, o, 0x80 | (kstate.get8(src + 2) & 0x7A))
+    o = put(state, i, o, 0x80)
+    o = put(state, i, o, 0) // QDCOUNT = 1
+    o = put(state, i, o, 1)
+    var answers: u64 = 0
+    if qtype == 1 {
+        answers = 1
+    }
+    o = put(state, i, o, 0) // ANCOUNT
+    o = put(state, i, o, answers)
+    o = put(state, i, o, 0) // NSCOUNT = 0
+    o = put(state, i, o, 0)
+    o = put(state, i, o, 0) // ARCOUNT = 0
+    o = put(state, i, o, 0)
+    var k: u64 = 0
+    while k < qlen {
+        o = put(state, i, o, kstate.get8(src + 12 + k))
+        k = k + 1
+    }
+    if answers == 1 {
+        o = put(state, i, o, 0xC0) // a pointer back to octet 12
+        o = put(state, i, o, 0x0C)
+        o = put(state, i, o, 0) // TYPE A
+        o = put(state, i, o, 1)
+        o = put(state, i, o, 0) // CLASS IN
+        o = put(state, i, o, 1)
+        o = put(state, i, o, 0) // TTL 60 seconds
+        o = put(state, i, o, 0)
+        o = put(state, i, o, 0)
+        o = put(state, i, o, 60)
+        o = put(state, i, o, 0) // RDLENGTH 4
+        o = put(state, i, o, 4)
+        o = put(state, i, o, (FAKE_SINK >> 24) & 0xFF)
+        o = put(state, i, o, (FAKE_SINK >> 16) & 0xFF)
+        o = put(state, i, o, (FAKE_SINK >> 8) & 0xFF)
+        o = put(state, i, o, FAKE_SINK & 0xFF)
+    }
+    kstate.set(state, at(i) + F_LEN, o)
+    kstate.set(state, at(i) + F_POS, 0)
+    kstate.add(state, sc(NV_REPLIES), 1)
+    return true
+}
+
+// An echo request turns into an echo reply. The kernel's ping socket
+// hands the whole ICMP message down (`kernel/user/ping.fi` builds it,
+// `inet.icmp_send` fills the checksum), so the reply is that message
+// with the type changed from 8 to 0. `ping` in a faked process therefore
+// answers itself, in microseconds, and says so.
+fn build_icmp(state: u64, i: u64, src: u64, n: u64) -> bool {
+    if n < 8 || n > NV_BUFB {
+        return false
+    }
+    var o: u64 = 0
+    o = put(state, i, o, 0) // ICMP echo REPLY
+    var k: u64 = 1
+    while k < n {
+        o = put(state, i, o, kstate.get8(src + k))
+        k = k + 1
+    }
+    kstate.set(state, at(i) + F_LEN, o)
+    kstate.set(state, at(i) + F_POS, 0)
+    kstate.add(state, sc(NV_REPLIES), 1)
+    return true
+}
+
+fn sendto_fake(state: u64, i: u64, src: u64, n: u64, addr: u64,
+    port: u64) -> u64 {
+    if i >= inet.SOCK_MAX {
+        return errno.neg(errno.E_BADF)
+    }
+    let a: u64 = at(i)
+    let kind: u64 = kstate.get(state, a + F_KIND)
+    kstate.set(state, a + F_SENT, kstate.get(state, a + F_SENT) + n)
+    kstate.add(state, sc(NV_DROPPED), n)
+    kstate.set(state, a + F_ADDR, addr)
+    kstate.set(state, a + F_PORT, port)
+    if kind == inet.SK_ICMP {
+        build_icmp(state, i, src, n)
+        return n
+    }
+    if kind == inet.SK_TCP {
+        return send_fake(state, i, src, n)
+    }
+    if port == 53 {
+        build_dns(state, i, src, n)
+    }
+    return n
+}
+
+// A datagram is not a stream: what is there comes out in ONE call, and
+// what is not there is -EAGAIN and not an end of stream, because a
+// datagram socket has no end. -EAGAIN comes back AT ONCE -- `sys.fi`
+// does not put a faked socket into its waiting loop.
+fn recvfrom_fake(state: u64, i: u64, dst: u64, n: u64, addr: *mut u64,
+    port: *mut u64) -> u64 {
+    *addr = 0
+    *port = 0
+    if i >= inet.SOCK_MAX {
+        return errno.neg(errno.E_BADF)
+    }
+    let a: u64 = at(i)
+    if kstate.get(state, a + F_KIND) == inet.SK_TCP {
+        return recv_fake(state, i, dst, n)
+    }
+    let len: u64 = kstate.get(state, a + F_LEN)
+    let pos: u64 = kstate.get(state, a + F_POS)
+    if pos >= len {
+        return errno.neg(errno.E_AGAIN)
+    }
+    var take: u64 = len - pos
+    if take > n {
+        take = n
+    }
+    var k: u64 = 0
+    while k < take {
+        kstate.set8(dst + k, kstate.get8(state + buf(i) + pos + k) as u8)
+        k = k + 1
+    }
+    kstate.set(state, a + F_POS, len)
+    *addr = kstate.get(state, a + F_ADDR)
+    *port = kstate.get(state, a + F_PORT)
+    return take
+}
+
+// ----------------------------------------------------- inheritance
+//
+// A child gets the view of its parent, and its allow list with it.
+// `execve` needs no line here at all: it keeps the same task record, so
+// the view survives the new image by itself -- which is the behaviour
+// that matters, because `netview faked <program>` IS a `fork`, a
+// tightening and an `execve`.
+fn inherit(state: u64, parent: u64, child: u64) {
+    sched.tset(state, child, sched.T_NETV,
+        sched.tget(state, parent, sched.T_NETV))
+    var i: u64 = 0
+    while i < sched.NETOK_MAX {
+        sched.tset(state, child, sched.T_NETOK + i * 8,
+            sched.tget(state, parent, sched.T_NETOK + i * 8))
+        i = i + 1
+    }
+}
+
+// ------------------------------------------------------- the report
+//
+// Four numbers at the end of a run, in the `key value` shape every other
+// measured file of this repository uses. Next to `nic: tx_o=` from
+// `netsvc.report` they are the whole acceptance of this round: octets
+// offered by faked programs, and octets that left the machine.
+fn report(state: u64) {
+    var s_drop: [u8; 15] = "nv: dropped=\0\0\0"
+    var s_open: [u8; 14] = "nv: opened=\0\0\0"
+    var s_deny: [u8; 14] = "nv: denied=\0\0\0"
+    var s_rep: [u8; 15] = "nv: replies=\0\0\0"
+    var s_wire: [u8; 15] = "nv: wire_o=\0\0\0\0"
+    var s_fall: [u8; 14] = "nv: fallb=\0\0\0\0"
+    var s_link: [u8; 13] = "nv: link=\0\0\0\0"
+    var s_fbv: [u8; 13] = "nv: fbview=\0\0"
+    serial.puts((&s_drop[0]) as u64)
+    serial.dec(dropped(state))
+    serial.nl()
+    serial.puts((&s_open[0]) as u64)
+    serial.dec(opened(state))
+    serial.nl()
+    serial.puts((&s_deny[0]) as u64)
+    serial.dec(denials(state))
+    serial.nl()
+    serial.puts((&s_rep[0]) as u64)
+    serial.dec(replies(state))
+    serial.nl()
+    // THE NUMBER OF THE ROUND, and it does not come out of this file:
+    // it is the octet counter of the CARD DRIVER, kept in
+    // `virtio.tx_frame`, which every frame of this kernel has to pass
+    // through. A run in which only faked processes worked has to have a
+    // 0 here -- and that is a measurement taken at a place that knows
+    // nothing about this round.
+    serial.puts((&s_wire[0]) as u64)
+    serial.dec(virtio.tx_octets(state))
+    serial.nl()
+    // SECOND ADDENDUM: the preference as it was set, the state of the
+    // machine as it was measured, and what the two of them amount to
+    // for the next program to start. Three numbers and not one, because
+    // `fbview=2` alone would not say WHY.
+    serial.puts((&s_fall[0]) as u64)
+    serial.dec(fallback(state))
+    serial.nl()
+    serial.puts((&s_link[0]) as u64)
+    serial.dec(link_state(state))
+    serial.nl()
+    serial.puts((&s_fbv[0]) as u64)
+    serial.dec(fallback_view(state))
+    serial.nl()
+}
