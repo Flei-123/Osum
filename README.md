@@ -52,6 +52,29 @@ The size, counted:
 | `lib/libc/*.fi` — the libc from round K4 | 1,598 |
 | `tools/` — the test runners | 9,650 |
 
+Round **TILING** turned the floating windows into a **window tree**, the
+way i3, sway and bspwm keep one: leaves are windows, inner nodes are
+splits with a *ratio* (not with pixels), a container can be `split`,
+`tabbed` or `stacked`, and rotating, mirroring and balancing a subtree
+come with it. The Windows-style quick snap (half left, a quarter) is a
+*special case* of that tree and not a second mechanism.
+
+    tile: selftest 24/24  failed=0x0
+    tile: fuzz ops=10000  violations=0  peak=85  checks=10000
+    tile: bench relay2=5419 ns  relay8=28644 ns  relay32=94061 ns
+    tile: dirty split=240000  close=240000  screen=480000
+
+The middle line is the one that matters: ten thousand random operations
+(open, close, move, change mode, resize, rotate, mirror, snap), and after
+**every single one** the kernel recomputes the invariant on two
+independent paths — no gap, no overlap, the sum of the children is
+exactly the parent. Zero violations. It found two bugs that nobody would
+have found by hand; both are named in `docs/TILING.md`, together with
+what does not work and why. The key map is a text file in
+`/users/<name>/config/tiling.conf`, not source code — without the file
+there is no key map at all, and the acceptance run boots a second image
+to prove it. `kernel/tile.fi`, `kernel/user/tiling.fi`, `tools/tiling/`.
+
 Most recently added: round K10 has TWO parts that ran in parallel.
 The user interface -- `kernel/wm.fi` (the window server), `kernel/ttf.fi`
 (TrueType reader and rasteriser) and `kernel/ps2m.fi` (the pointing
