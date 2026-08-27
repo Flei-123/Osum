@@ -28,9 +28,17 @@ FLAECHE: alles, was nicht die Kachelfarbe und nicht die Rahmenfarbe ist,
 ist Inhalt. Die Umrandung der Kachel wird ausgespart (zwei Bildpunkte
 innen), damit der Rahmen selbst nicht als Beschriftung zaehlt.
 
+DAS SYMBOLBAND WIRD AUSGESPART, und das ist keine Bequemlichkeit: die
+Frage "kleben die Zeilen?" ist eine Frage nach den TEXTZEILEN. Die erste
+Fassung fragte sie ueber die ganze Kachel und schlug bei `tile-hide` an,
+dessen Zeichnung selbst aus zwei Teilen besteht -- ein Pfeil und eine
+Linie darunter, mit einer leeren Reihe dazwischen. Das Werkzeug hatte
+recht ueber die Bildpunkte und unrecht ueber die Frage. `oben` sagt ihm,
+wie viele Reihen am oberen Rand der Kachel das Symbol einnimmt.
+
 Verwendung:
     kachel.py <schirm.ppm> <panel-x> <panel-y> <panel-w> <panel-h>
-              <pad> <tw> <th> <gap> <kacheln>
+              <pad> <tw> <th> <gap> <kacheln> <oben>
     -> "ok" und Rueckgabe 0, oder je Beanstandung eine Zeile und 1
 """
 
@@ -60,11 +68,11 @@ def ppm(pfad):
 
 
 def main(argv):
-    if len(argv) < 11:
+    if len(argv) < 12:
         print(__doc__)
         return 2
-    (schirm, px, py, pw, ph, pad, tw, th, gap, n) = (
-        argv[1], *[int(v) for v in argv[2:11]])
+    (schirm, px, py, pw, ph, pad, tw, th, gap, n, oben) = (
+        argv[1], *[int(v) for v in argv[2:12]])
     w, h, roh = ppm(schirm)
 
     def pixel(x, y):
@@ -95,6 +103,9 @@ def main(argv):
 
         # Alles, was nicht die Flaeche ist, ist Inhalt. Zeilenweise, weil
         # die Frage nach dem Ueberlappen eine Frage nach ZEILEN ist.
+        # UEBER DIE GANZE KACHEL fuer die Frage nach dem Rand -- ein
+        # Symbol, das ueberlaeuft, waere derselbe Fehler --, aber die
+        # Bloecke werden erst UNTERHALB des Symbolbandes gezaehlt.
         zeilen = []
         rechts = tx + 2
         links = tx + tw - 3
@@ -127,7 +138,7 @@ def main(argv):
         # Pruefung fragt nur nach dem Fehler.
         bloecke = []
         anf = None
-        for y, n_in in zeilen:
+        for y, n_in in [(y, k) for (y, k) in zeilen if y >= ty + oben]:
             if n_in > 0 and anf is None:
                 anf = y
             elif n_in == 0 and anf is not None:
@@ -135,9 +146,9 @@ def main(argv):
                 anf = None
         if anf is not None:
             bloecke.append((anf, zeilen[-1][0]))
-        if len(bloecke) < 3:
-            fehler.append("Kachel %d: %d Bloecke statt drei (Symbol, "
-                          "Beschriftung, Wort) -- %s"
+        if len(bloecke) != 2:
+            fehler.append("Kachel %d: %d Textbloecke statt zwei "
+                          "(Beschriftung, Wort) -- %s"
                           % (t, len(bloecke), bloecke))
         else:
             for i in range(len(bloecke) - 1):
