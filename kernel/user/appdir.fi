@@ -66,6 +66,7 @@ export {
     load, count, name_of, info_of, exec_of, icon_of, keys_of, datei_of,
     fassung_of, symbol_of, symbol_load,
     search, matches, lower, contains,
+    net_of, net_user, view_for, view_word,
     MAXAPP, SYMBYTES
 }
 
@@ -79,9 +80,17 @@ const A_KEYS: u64 = 4
 const A_FILE: u64 = 5
 const A_FASS: u64 = 6
 const A_SYM: u64 = 7
-const A_FIELDS: u64 = 8
+// ================================================== ROUND NETVIEW
+//
+// `net=real|filtered|faked|none` in INFO -- WHICH NETWORK THIS BUNDLE
+// WANTS. Stored as the view PLUS ONE, so that 0 keeps meaning "the file
+// does not say", which is not the same thing as "it says real": a
+// bundle that says nothing may be overruled by a default one day, and a
+// bundle that says `real` has made a statement.
+const A_NET: u64 = 8
+const A_FIELDS: u64 = 9
 
-static mut ap: [u64; 128] = [0 as u64; 128] // MAXAPP * A_FIELDS
+static mut ap: [u64; 144] = [0 as u64; 144] // MAXAPP * A_FIELDS
 static mut folge: [u64; 16] = [0 as u64; 16]
 static mut nap: u64 = 0
 static mut arena: [u8; 6144] = [0 as u8; 6144]
@@ -215,6 +224,7 @@ fn eine_datei(pfad: u64, i: u64) -> bool {
     var f_icon: [u8; 5] = "icon\0"
     var f_keys: [u8; 5] = "keys\0"
     var f_fass: [u8; 8] = "fassung\0"
+    var f_net: [u8; 4] = "net\0"
     let fd: u64 = io.open(pfad, 0)
     if ulib.bad(fd) {
         return false
@@ -252,6 +262,12 @@ fn eine_datei(pfad: u64, i: u64) -> bool {
                 } else if feld_gleich(b + at, g2 - at,
                     (&f_keys[0 as usize]) as u64) {
                     ap[((i * A_FIELDS + A_KEYS)) as usize] = put(wert, wlen)
+                } else if feld_gleich(b + at, g2 - at,
+                    (&f_net[0 as usize]) as u64) {
+                    let v: u64 = view_word(wert, wlen)
+                    if v < 4 {
+                        ap[((i * A_FIELDS + A_NET)) as usize] = v + 1
+                    }
                 } else if feld_gleich(b + at, g2 - at,
                     (&f_icon[0 as usize]) as u64) {
                     var v: u64 = 0
@@ -500,4 +516,132 @@ fn search(term: u64, out: u64, max: u64) -> u64 {
         i = i + 1
     }
     return n
+}
+
+// ================================================== ROUND NETVIEW
+//
+// WHICH NETWORK A BUNDLE IS STARTED WITH, and WHERE THAT IS WRITTEN.
+// There are exactly two places and they are ordered; the order is here
+// and nowhere else, so that "where does this number come from" has one
+// answer:
+//
+//   1. THE PERSON. `/users/<name>/config/netview`, one line per bundle:
+//
+//          explorer faked
+//          browser  filtered
+//
+//      This is what the settings application writes and what the
+//      person changed by hand. It wins, because a system that lets a
+//      package overrule its user is a system that works for the
+//      package.
+//   2. THE PACKAGE. `net=` in `/apps/<name>.prog/INFO`. This is the
+//      author of the program saying what it needs -- a reasonable
+//      default and never more than that.
+//   3. Neither: `real`. What every program got before this round.
+//
+// AND THERE IS NO THIRD PLACE. In particular the view is not written
+// into the task record from here: what this returns is handed to
+// `/bin/netview`, which tightens ITSELF and then starts the program.
+// The running state lives in exactly one place (`sched.T_NETV`), and
+// these files are what it is set FROM, not a second copy of it.
+
+fn view_word(p: u64, n: u64) -> u64 {
+    var w0: [u8; 5] = "real\0"
+    var w1: [u8; 9] = "filtered\0"
+    var w2: [u8; 6] = "faked\0"
+    var w3: [u8; 5] = "none\0"
+    if feld_gleich(p, n, (&w0[0 as usize]) as u64) {
+        return 0
+    }
+    if feld_gleich(p, n, (&w1[0 as usize]) as u64) {
+        return 1
+    }
+    if feld_gleich(p, n, (&w2[0 as usize]) as u64) {
+        return 2
+    }
+    if feld_gleich(p, n, (&w3[0 as usize]) as u64) {
+        return 3
+    }
+    return 9
+}
+
+// What the bundle asked for, or 9 if it did not ask.
+fn net_of(i: u64) -> u64 {
+    let v: u64 = g(i, A_NET)
+    if v == 0 {
+        return 9
+    }
+    return v - 1
+}
+
+// What the person wrote, or 9 if there is no line for this name. `who`
+// is the user name; the caller has it and this file will not go and
+// fetch a second copy of it.
+fn net_user(who: u64, name: u64) -> u64 {
+    var pfad: [u8; 128] = [0 as u8; 128]
+    var buf: [u8; 1024] = [0 as u8; 1024]
+    var p1: [u8; 8] = "/users/\0"
+    var p2: [u8; 16] = "/config/netview\0"
+    if who == 0 || ulib.length(who) == 0 {
+        return 9
+    }
+    let a: u64 = ulib.strcpy((&pfad[0 as usize]) as u64,
+        (&p1[0 as usize]) as u64)
+    let b2: u64 = ulib.strcpy((&pfad[0 as usize]) as u64 + a, who)
+    let _c: u64 = ulib.strcpy((&pfad[0 as usize]) as u64 + a + b2,
+        (&p2[0 as usize]) as u64)
+    let fd: u64 = io.open((&pfad[0 as usize]) as u64, 0)
+    if ulib.bad(fd) {
+        return 9
+    }
+    let n: u64 = io.read(fd, (&buf[0 as usize]) as u64, 1023)
+    io.close(fd)
+    if ulib.bad(n) || n == 0 {
+        return 9
+    }
+    let b: u64 = (&buf[0 as usize]) as u64
+    var at: u64 = 0
+    while at < n {
+        var e: u64 = at
+        while e < n && (*((b + e) as *mut u8)) != 10 as u8 {
+            e = e + 1
+        }
+        if e > at && (*((b + at) as *mut u8)) != 35 as u8 {
+            // `<name> <view>`, separated by one or more spaces.
+            var s: u64 = at
+            while s < e && (*((b + s) as *mut u8)) != 32 as u8 {
+                s = s + 1
+            }
+            if s < e && feld_gleich(b + at, s - at, name) {
+                var v: u64 = s
+                while v < e && (*((b + v) as *mut u8)) == 32 as u8 {
+                    v = v + 1
+                }
+                var w: u64 = v
+                while w < e && (*((b + w) as *mut u8)) != 32 as u8 {
+                    w = w + 1
+                }
+                let got: u64 = view_word(b + v, w - v)
+                if got < 4 {
+                    return got
+                }
+            }
+        }
+        at = e + 1
+    }
+    return 9
+}
+
+// The two above, in the order the comment gives. `who` may be 0 -- then
+// there is no person to ask and only the package speaks.
+fn view_for(who: u64, i: u64, name: u64) -> u64 {
+    let u: u64 = net_user(who, name)
+    if u < 4 {
+        return u
+    }
+    let a: u64 = net_of(i)
+    if a < 4 {
+        return a
+    }
+    return 0
 }
