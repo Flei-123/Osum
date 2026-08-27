@@ -222,7 +222,14 @@ run_e() { # align
              | grep -oE ' x=[0-9]+ y=[0-9]+ w=[0-9]+ h=[0-9]+ hidden=' \
              | sed -E 's/ x=([0-9]+) y=[0-9]+ w=([0-9]+) h=[0-9]+ hidden=/\1 \2/')
     [ "$RE" = 0 ] && RE=$((SX + SW))
-    FX=$(grep -a 'taskbar: field net' "$S" | tail -1 | grep -oE 'x=[0-9]+' | grep -oE '[0-9]+')
+    # ONLY A COMPLETE FIELD LINE, and only its own x. A line cut in
+    # half by another process can carry two or three `x=` in it, and
+    # `grep -o` then hands back three numbers where the caller expects
+    # one -- which is an arithmetic error in the shell, not a failed
+    # measurement. Anchor on the shape of the whole field record.
+    FX=$(grep -a 'taskbar: field net' "$S" \
+         | grep -oE ' x=[0-9]+ y=[0-9]+ w=[0-9]+ h=[0-9]+ lines=' \
+         | tail -1 | grep -oE ' x=[0-9]+' | grep -oE '[0-9]+')
     return 0
 }
 if run_e left; then
