@@ -163,7 +163,7 @@ for s in 0 1; do
 done
 [ -f "$TMPD/k0.mb" ] || { echo "K15: $pass passed, $((fail + 1)) failed"; exit 1; }
 
-PROGS="wigdemo explorer starter suchen sh echo ls cat edit"
+PROGS="widgetdemo explorer launcher locate sh echo ls cat edit"
 as --64 -o "$TMPD/crt.o" kernel/user/crt.s 2>/dev/null \
     || bad "crt.s laesst sich nicht assemblieren"
 baue() { # stufe
@@ -265,22 +265,22 @@ num "der Kern beendet sich sauber" "$RC" eq 21
 has "$TMPD/ruhe.txt" "wm: hold" "der Kern haelt fuer das Foto still"
 ws=$(zahl "$TMPD/ruhe.txt" 'wig: selftest [0-9]+')
 num "die Zusagen der Naht ueber sich selbst" "$ws" eq 7
-has "$TMPD/ruhe.txt" "k15: start /bin/wigdemo" "die Anwendung kommt VON DER PLATTE"
-has "$TMPD/ruhe.txt" "wigdemo: ready" "sie hat ihr Fenster angelegt und gemalt"
+has "$TMPD/ruhe.txt" "k15: start /bin/widgetdemo" "die Anwendung kommt VON DER PLATTE"
+has "$TMPD/ruhe.txt" "widgetdemo: ready" "sie hat ihr Fenster angelegt und gemalt"
 WX=60; WY=60
-BW=$(feld "$TMPD/ruhe.txt" "wigdemo: geom" w)
-BH=$(feld "$TMPD/ruhe.txt" "wigdemo: geom" h)
+BW=$(feld "$TMPD/ruhe.txt" "widgetdemo: geom" w)
+BH=$(feld "$TMPD/ruhe.txt" "widgetdemo: geom" h)
 num "das Fenster ist so breit, wie die Anwendung es bestellt hat" "$BW" eq 480
 num "und so hoch" "$BH" eq 400
 CX=$((WX + BORDER)); CY=$((WY + TITLE))
-aus=$(python3 tools/k15/anordnung.py "$TMPD/ruhe.txt" wigdemo "$BW" "$BH" 12 2>&1)
+aus=$(python3 tools/k15/anordnung.py "$TMPD/ruhe.txt" widgetdemo "$BW" "$BH" 12 2>&1)
 if [ $? -eq 0 ]; then ok "die Anordnung: $aus"
 else bad "die Anordnung stimmt nicht"; echo "$aus" | sed 's/^/        /' | head -8; fi
 # Und die Gegenprobe zum Pruefer selbst: ein Rechteck, das aus dem
 # Fenster ragt, MUSS auffallen -- sonst prueft er nichts.
-sed 's/^wigdemo: rect id=11 .*/wigdemo: rect id=11 kind=5 x=12 y=372 w=456 h=112 /' \
+sed 's/^widgetdemo: rect id=11 .*/widgetdemo: rect id=11 kind=5 x=12 y=372 w=456 h=112 /' \
     "$TMPD/ruhe.txt" > "$TMPD/ruhe-gg.txt"
-if python3 tools/k15/anordnung.py "$TMPD/ruhe-gg.txt" wigdemo "$BW" "$BH" 12 >/dev/null 2>&1; then
+if python3 tools/k15/anordnung.py "$TMPD/ruhe-gg.txt" widgetdemo "$BW" "$BH" 12 >/dev/null 2>&1; then
     bad "der Anordnungspruefer laesst ein Rechteck durch, das aus dem Fenster ragt"
 else
     ok "ein Rechteck, das aus dem Fenster ragt, faellt dem Pruefer auf"
@@ -293,7 +293,7 @@ echo "== 4. der Text -- JE ZEICHEN gegen die zweite Rasterung =="
 pruef_text() { # marke erwarteter-text
     local marke=$1 soll=$2
     local zeile x base fg bg text
-    zeile=$(grep -a "^wigdemo: text $marke " "$TMPD/ruhe.txt" | tail -1)
+    zeile=$(grep -a "^widgetdemo: text $marke " "$TMPD/ruhe.txt" | tail -1)
     if [ -z "$zeile" ]; then bad "die Anwendung meldet die Textstelle '$marke' nicht"; return; fi
     x=$(printf '%s' "$zeile" | grep -oE 'x=[0-9]+' | head -1 | sed 's/.*=//')
     base=$(printf '%s' "$zeile" | grep -oE 'base=[0-9]+' | sed 's/.*=//')
@@ -311,13 +311,13 @@ pruef_text e1 "Kopiermich"
 # Die Liste: fuenf Zeilen, jede an ihrer eigenen Grundlinie, und die
 # erste in der AUSWAHLFARBE -- zwei verschiedene Farbpaare in einem
 # Widget, und beide muessen aufgehen.
-RX=$(feld "$TMPD/ruhe.txt" "wigdemo: rows" x)
-RB=$(feld "$TMPD/ruhe.txt" "wigdemo: rows" base)
-ZH=$(feld "$TMPD/ruhe.txt" "wigdemo: rows" zh)
-RFG=$(frgb "$TMPD/ruhe.txt" "wigdemo: rows" fg)
-RBG=$(frgb "$TMPD/ruhe.txt" "wigdemo: rows" bg)
-RSEL=$(frgb "$TMPD/ruhe.txt" "wigdemo: rows" sel)
-RSFG=$(frgb "$TMPD/ruhe.txt" "wigdemo: rows" selfg)
+RX=$(feld "$TMPD/ruhe.txt" "widgetdemo: rows" x)
+RB=$(feld "$TMPD/ruhe.txt" "widgetdemo: rows" base)
+ZH=$(feld "$TMPD/ruhe.txt" "widgetdemo: rows" zh)
+RFG=$(frgb "$TMPD/ruhe.txt" "widgetdemo: rows" fg)
+RBG=$(frgb "$TMPD/ruhe.txt" "widgetdemo: rows" bg)
+RSEL=$(frgb "$TMPD/ruhe.txt" "widgetdemo: rows" sel)
+RSFG=$(frgb "$TMPD/ruhe.txt" "widgetdemo: rows" selfg)
 num "die Zeilenhoehe der Liste" "$ZH" eq 20
 schau "Zeile 0 der Liste, in der AUSWAHLFARBE" \
     ttext "$TMPD/ruhe.ppm" "$SANS" 15 $((CX + RX)) $((CY + RB)) \
@@ -348,19 +348,19 @@ schau "der Text der Bibliothek ist wirklich kantengeglaettet" \
 echo "== 5. die Widgets stehen da, wo die Anordnung sie hingelegt hat =="
 # Der Fokusring: ein Rahmen von einem Bildpunkt um GENAU das Widget mit
 # dem Eingabefokus -- und einen Bildpunkt daneben ist er nicht.
-FX=$(rect "$TMPD/ruhe.txt" wigdemo 1 x); FY=$(rect "$TMPD/ruhe.txt" wigdemo 1 y)
-FW=$(rect "$TMPD/ruhe.txt" wigdemo 1 w); FH=$(rect "$TMPD/ruhe.txt" wigdemo 1 h)
+FX=$(rect "$TMPD/ruhe.txt" widgetdemo 1 x); FY=$(rect "$TMPD/ruhe.txt" widgetdemo 1 y)
+FW=$(rect "$TMPD/ruhe.txt" widgetdemo 1 w); FH=$(rect "$TMPD/ruhe.txt" widgetdemo 1 h)
 schau "der Fokusring liegt bildpunktgenau um die Reiter" \
     rechteck "$TMPD/ruhe.ppm" $((CX + FX)) $((CY + FY)) "$FW" "$FH" 255 192 32
-BX=$(rect "$TMPD/ruhe.txt" wigdemo 5 x); BY=$(rect "$TMPD/ruhe.txt" wigdemo 5 y)
-BBW=$(rect "$TMPD/ruhe.txt" wigdemo 5 w); BBH=$(rect "$TMPD/ruhe.txt" wigdemo 5 h)
+BX=$(rect "$TMPD/ruhe.txt" widgetdemo 5 x); BY=$(rect "$TMPD/ruhe.txt" widgetdemo 5 y)
+BBW=$(rect "$TMPD/ruhe.txt" widgetdemo 5 w); BBH=$(rect "$TMPD/ruhe.txt" widgetdemo 5 h)
 schau_nicht "und um den Knopf, der ihn NICHT hat, liegt keiner" \
     rechteck "$TMPD/ruhe.ppm" $((CX + BX)) $((CY + BY)) "$BBW" "$BBH" 255 192 32
 schau "die Flaeche des Knopfes hat die Farbe aus /etc/theme (btn=3a4a5e)" \
     flaeche "$TMPD/ruhe.ppm" $((CX + BX + 3)) $((CY + BY + 3)) 16 5 58 74 94
 # Das Textfeld hat einen dunkleren Grund als das Fenster -- sonst waere
 # nicht zu sehen, dass es eines ist.
-EX=$(rect "$TMPD/ruhe.txt" wigdemo 3 x); EY=$(rect "$TMPD/ruhe.txt" wigdemo 3 y)
+EX=$(rect "$TMPD/ruhe.txt" widgetdemo 3 x); EY=$(rect "$TMPD/ruhe.txt" widgetdemo 3 y)
 schau "das Textfeld hat seine eigene Flaeche" \
     flaeche "$TMPD/ruhe.ppm" $((CX + EX + 300)) $((CY + EY + 6)) 60 10 18 24 32
 
@@ -369,20 +369,20 @@ echo "== 6. bedienen: echte Klicks aus dem QEMU-Monitor =="
 # -- nicht aus Zahlen, die hier stehen.
 mitte() { # id -> "x y" auf dem BILDSCHIRM
     local x y w h
-    x=$(rect "$TMPD/ruhe.txt" wigdemo "$1" x); y=$(rect "$TMPD/ruhe.txt" wigdemo "$1" y)
-    w=$(rect "$TMPD/ruhe.txt" wigdemo "$1" w); h=$(rect "$TMPD/ruhe.txt" wigdemo "$1" h)
+    x=$(rect "$TMPD/ruhe.txt" widgetdemo "$1" x); y=$(rect "$TMPD/ruhe.txt" widgetdemo "$1" y)
+    w=$(rect "$TMPD/ruhe.txt" widgetdemo "$1" w); h=$(rect "$TMPD/ruhe.txt" widgetdemo "$1" h)
     echo "$((CX + x + w / 2)) $((CY + y + h / 2))"
 }
-KNOPF=$(mitte 5); HAKEN_X=$((CX + $(rect "$TMPD/ruhe.txt" wigdemo 7 x) + 7))
-HAKEN_Y=$((CY + $(rect "$TMPD/ruhe.txt" wigdemo 7 y) + 14))
-LX=$(rect "$TMPD/ruhe.txt" wigdemo 11 x); LY=$(rect "$TMPD/ruhe.txt" wigdemo 11 y)
-E1Y=$(rect "$TMPD/ruhe.txt" wigdemo 3 y); E2Y=$(rect "$TMPD/ruhe.txt" wigdemo 4 y)
-E1H=$(rect "$TMPD/ruhe.txt" wigdemo 3 h)
+KNOPF=$(mitte 5); HAKEN_X=$((CX + $(rect "$TMPD/ruhe.txt" widgetdemo 7 x) + 7))
+HAKEN_Y=$((CY + $(rect "$TMPD/ruhe.txt" widgetdemo 7 y) + 14))
+LX=$(rect "$TMPD/ruhe.txt" widgetdemo 11 x); LY=$(rect "$TMPD/ruhe.txt" widgetdemo 11 y)
+E1Y=$(rect "$TMPD/ruhe.txt" widgetdemo 3 y); E2Y=$(rect "$TMPD/ruhe.txt" widgetdemo 4 y)
+E1H=$(rect "$TMPD/ruhe.txt" widgetdemo 3 h)
 # Der zweite Reiter: hinter dem ersten. Seine Breite steht nicht im
 # Mitschnitt, also wird der Punkt so gewaehlt, dass er sicher im
 # zweiten liegt -- und die Zusage prueft, WELCHER Reiter aktiv wurde.
-TABX=$((CX + $(rect "$TMPD/ruhe.txt" wigdemo 1 x) + 130))
-TABY=$((CY + $(rect "$TMPD/ruhe.txt" wigdemo 1 y) + 13))
+TABX=$((CX + $(rect "$TMPD/ruhe.txt" widgetdemo 1 x) + 130))
+TABY=$((CY + $(rect "$TMPD/ruhe.txt" widgetdemo 1 y) + 13))
 
 M="$TMPD/klick.mon"; : > "$M"
 zeiger "$M" ${KNOPF% *} ${KNOPF#* }
@@ -394,10 +394,10 @@ warte 0.3
 EOF
 foto klick "gfx wm wig wmhold wiglong $GRUND" "$M"
 num "der Kern beendet sich sauber" "$RC" eq 21
-has "$TMPD/klick.txt" "wigdemo: fired id=5 kind=2" "der Knopf meldet sich -- mit seiner Nummer und seiner Art"
-kl=$(feld "$TMPD/klick.txt" "wigdemo: state" klicks)
+has "$TMPD/klick.txt" "widgetdemo: fired id=5 kind=2" "der Knopf meldet sich -- mit seiner Nummer und seiner Art"
+kl=$(feld "$TMPD/klick.txt" "widgetdemo: state" klicks)
 num "und genau EINMAL" "$kl" eq 1
-hasnot "$TMPD/ruhe.txt" "wigdemo: fired" "ohne Klick meldet sich kein Widget"
+hasnot "$TMPD/ruhe.txt" "widgetdemo: fired" "ohne Klick meldet sich kein Widget"
 
 M="$TMPD/haken.mon"; : > "$M"
 zeiger "$M" "$HAKEN_X" "$HAKEN_Y"
@@ -410,10 +410,10 @@ mouse_move 120 120
 mouse_move 60 60
 EOF
 foto haken "gfx wm wig wmhold wiglong $GRUND" "$M"
-has "$TMPD/haken.txt" "wigdemo: fired id=7 kind=3 ix=1" "das Kaestchen kippt und meldet seinen neuen Wert"
+has "$TMPD/haken.txt" "widgetdemo: fired id=7 kind=3 ix=1" "das Kaestchen kippt und meldet seinen neuen Wert"
 # UND DAS IST IM BILD ZU SEHEN: der Haken ist aus zwei Strichen in der
 # Betonungsfarbe. Ohne Klick ist dort KEIN einziger solcher Bildpunkt.
-HKX=$((CX + $(rect "$TMPD/ruhe.txt" wigdemo 7 x))); HKY=$((CY + $(rect "$TMPD/ruhe.txt" wigdemo 7 y) + 7))
+HKX=$((CX + $(rect "$TMPD/ruhe.txt" widgetdemo 7 x))); HKY=$((CY + $(rect "$TMPD/ruhe.txt" widgetdemo 7 y) + 7))
 mit=$(python3 tools/k15/zaehl.py "$TMPD/haken.ppm" "$HKX" "$HKY" 14 14 92 200 255)
 ohne=$(python3 tools/k15/zaehl.py "$TMPD/ruhe.ppm" "$HKX" "$HKY" 14 14 92 200 255)
 num "Bildpunkte des Hakens NACH dem Klick" "$mit" gt 12
@@ -428,9 +428,9 @@ mouse_button 0
 warte 0.4
 EOF
 foto reiter "gfx wm wig wmhold wiglong $GRUND" "$M"
-rt=$(feld "$TMPD/reiter.txt" "wigdemo: state" reiter)
+rt=$(feld "$TMPD/reiter.txt" "widgetdemo: state" reiter)
 num "der zweite Reiter ist aktiv" "$rt" eq 1
-has "$TMPD/reiter.txt" "wigdemo: fired id=1 kind=7 ix=1" "und der Reiter meldet den Wechsel"
+has "$TMPD/reiter.txt" "widgetdemo: fired id=1 kind=7 ix=1" "und der Reiter meldet den Wechsel"
 
 echo "== 7. die Tastatur: Weiterschaltung, Tippen, Zwischenablage =="
 # Klick in das erste Textfeld, alles auswaehlen, kopieren; in das
@@ -474,10 +474,10 @@ cg=$(feld "$TMPD/tast.txt" "wig: blits" clipget)
 num "in die Zwischenablage geschrieben" "$cs" ge 1
 num "und daraus gelesen" "$cg" ge 1
 # UND ES STEHT IM BILD, Zeichen fuer Zeichen.
-EBG=$(frgb "$TMPD/ruhe.txt" "wigdemo: text e1" bg)
-EFG=$(frgb "$TMPD/ruhe.txt" "wigdemo: text e1" fg)
-EBASE=$(feld "$TMPD/ruhe.txt" "wigdemo: text e1" base)
-E1TX=$(feld "$TMPD/ruhe.txt" "wigdemo: text e1" x)
+EBG=$(frgb "$TMPD/ruhe.txt" "widgetdemo: text e1" bg)
+EFG=$(frgb "$TMPD/ruhe.txt" "widgetdemo: text e1" fg)
+EBASE=$(feld "$TMPD/ruhe.txt" "widgetdemo: text e1" base)
+E1TX=$(feld "$TMPD/ruhe.txt" "widgetdemo: text e1" x)
 schau "und es steht bildpunktgenau im zweiten Feld" \
     ttext "$TMPD/tast.ppm" "$SANS" 15 $((CX + E1TX)) $((CY + EBASE + E2Y - E1Y)) \
     $EFG $EBG "Kopiermich-ab"
@@ -513,12 +513,12 @@ gleich "nach der Tabulatortaste tippt man in das NAECHSTE Feld" "xy" "$e2t"
 e1t=$(python3 tools/k15/felder.py "$TMPD/tabkey.txt" e1)
 gleich "und im vorigen steht unveraendert, was darin stand" "Kopiermich" "$e1t"
 schau "der Fokusring ist mitgewandert -- er liegt jetzt um das zweite Feld" \
-    rechteck "$TMPD/tabkey.ppm" $((CX + $(rect "$TMPD/ruhe.txt" wigdemo 4 x))) \
-    $((CY + E2Y)) $(rect "$TMPD/ruhe.txt" wigdemo 4 w) \
-    $(rect "$TMPD/ruhe.txt" wigdemo 4 h) 255 192 32
+    rechteck "$TMPD/tabkey.ppm" $((CX + $(rect "$TMPD/ruhe.txt" widgetdemo 4 x))) \
+    $((CY + E2Y)) $(rect "$TMPD/ruhe.txt" widgetdemo 4 w) \
+    $(rect "$TMPD/ruhe.txt" widgetdemo 4 h) 255 192 32
 schau_nicht "und NICHT mehr um das erste" \
-    rechteck "$TMPD/tabkey.ppm" $((CX + $(rect "$TMPD/ruhe.txt" wigdemo 3 x))) \
-    $((CY + E1Y)) $(rect "$TMPD/ruhe.txt" wigdemo 3 w) "$E1H" 255 192 32
+    rechteck "$TMPD/tabkey.ppm" $((CX + $(rect "$TMPD/ruhe.txt" widgetdemo 3 x))) \
+    $((CY + E1Y)) $(rect "$TMPD/ruhe.txt" widgetdemo 3 w) "$E1H" 255 192 32
 
 echo "== 8. Menues und Dialoge -- eigene Fenster beim Server =="
 # Die rechte Maustaste auf der Liste. SIE IST BIT 1 UND NICHT BIT 2:
@@ -544,13 +544,13 @@ mouse_move 120 -30
 warte 0.5
 EOF
 foto pop "gfx wm wig wmhold wiglong $GRUND" "$M"
-has "$TMPD/pop.txt" "wigdemo: fired id=11 kind=11" "die rechte Taste kommt bei der Liste an, mit der Zeile"
-has "$TMPD/pop.txt" "wigdemo: menu " "und die Bibliothek macht ein EIGENES Fenster dafuer auf"
-MNX=$(feld "$TMPD/pop.txt" "wigdemo: menu" x)
-MNY=$(feld "$TMPD/pop.txt" "wigdemo: menu" y)
-MNW=$(feld "$TMPD/pop.txt" "wigdemo: menu" w)
-MNH=$(feld "$TMPD/pop.txt" "wigdemo: menu" h)
-MZH=$(feld "$TMPD/pop.txt" "wigdemo: menu" zh)
+has "$TMPD/pop.txt" "widgetdemo: fired id=11 kind=11" "die rechte Taste kommt bei der Liste an, mit der Zeile"
+has "$TMPD/pop.txt" "widgetdemo: menu " "und die Bibliothek macht ein EIGENES Fenster dafuer auf"
+MNX=$(feld "$TMPD/pop.txt" "widgetdemo: menu" x)
+MNY=$(feld "$TMPD/pop.txt" "widgetdemo: menu" y)
+MNW=$(feld "$TMPD/pop.txt" "widgetdemo: menu" w)
+MNH=$(feld "$TMPD/pop.txt" "widgetdemo: menu" h)
+MZH=$(feld "$TMPD/pop.txt" "widgetdemo: menu" zh)
 gleich "es liegt genau am Zeiger" "$POPX $POPY" "$MNX $MNY"
 num "und ist so hoch, wie drei Punkte brauchen" "$MNH" eq $((3 * MZH + 4))
 # DAS MENUE LIEGT AM ZEIGER, also an einer Stelle, die kein Testlaeufer
@@ -598,8 +598,8 @@ mouse_button 0
 warte 0.6
 EOF
 foto popw "gfx wm wig wmhold wiglong $GRUND" "$M"
-has "$TMPD/popw.txt" "wigdemo: fired id=11 kind=8" "ein Klick auf einen Menuepunkt meldet ihn beim Besitzer"
-mn=$(feld "$TMPD/popw.txt" "wigdemo: state" menues)
+has "$TMPD/popw.txt" "widgetdemo: fired id=11 kind=8" "ein Klick auf einen Menuepunkt meldet ihn beim Besitzer"
+mn=$(feld "$TMPD/popw.txt" "widgetdemo: state" menues)
 num "und das Menue hat genau EINMAL gefeuert" "$mn" ge 1
 schau_nicht "danach ist das Menuefenster wieder weg" \
     ttext "$TMPD/popw.ppm" "$SANS" 15 $((MNX + BORDER + 8)) \
@@ -615,25 +615,25 @@ mouse_button 0
 warte 1.0
 EOF
 foto dlg "gfx wm wig wmhold wiglong $GRUND" "$M"
-has "$TMPD/dlg.txt" "wigdemo: dlgwin" "der Dialog ist ein eigenes Fenster"
-DW=$(feld "$TMPD/dlg.txt" "wigdemo: dlgwin" w)
-DH=$(feld "$TMPD/dlg.txt" "wigdemo: dlgwin" h)
+has "$TMPD/dlg.txt" "widgetdemo: dlgwin" "der Dialog ist ein eigenes Fenster"
+DW=$(feld "$TMPD/dlg.txt" "widgetdemo: dlgwin" w)
+DH=$(feld "$TMPD/dlg.txt" "widgetdemo: dlgwin" h)
 num "er ist so breit, wie die Bibliothek ihn baut" "$DW" eq 340
 DLX=$(( (800 - DW) / 2 )); DLY=$(( (600 - DH) / 2 ))
 schau "und er steht mittig auf dem Schirm, bildpunktgenau" \
     rechteck "$TMPD/dlg.ppm" "$DLX" "$DLY" $((DW + 4)) $((DH + 24)) 76 154 232
-DTX=$(feld "$TMPD/dlg.txt" "wigdemo: text dlg" x)
-DTB=$(feld "$TMPD/dlg.txt" "wigdemo: text dlg" base)
-DTF=$(frgb "$TMPD/dlg.txt" "wigdemo: text dlg" fg)
-DTG=$(frgb "$TMPD/dlg.txt" "wigdemo: text dlg" bg)
+DTX=$(feld "$TMPD/dlg.txt" "widgetdemo: text dlg" x)
+DTB=$(feld "$TMPD/dlg.txt" "widgetdemo: text dlg" base)
+DTF=$(frgb "$TMPD/dlg.txt" "widgetdemo: text dlg" fg)
+DTG=$(frgb "$TMPD/dlg.txt" "widgetdemo: text dlg" bg)
 schau "seine Frage steht darin, je Zeichen" \
     ttext "$TMPD/dlg.ppm" "$SANS" 15 $((DLX + BORDER + DTX)) \
     $((DLY + TITLE + DTB)) $DTF $DTG "Neuer Name"
 # Den Knopf anklicken, den die Bibliothek gemeldet hat.
-OKX=$(grep -a 'wigdemo: dlgrect' "$TMPD/dlg.txt" | head -1 | grep -oE 'x=[0-9]+' | sed 's/.*=//')
-OKY=$(grep -a 'wigdemo: dlgrect' "$TMPD/dlg.txt" | head -1 | grep -oE 'y=[0-9]+' | sed 's/.*=//')
-OKW=$(grep -a 'wigdemo: dlgrect' "$TMPD/dlg.txt" | head -1 | grep -oE 'w=[0-9]+' | sed 's/.*=//')
-OKH=$(grep -a 'wigdemo: dlgrect' "$TMPD/dlg.txt" | head -1 | grep -oE 'h=[0-9]+' | sed 's/.*=//')
+OKX=$(grep -a 'widgetdemo: dlgrect' "$TMPD/dlg.txt" | head -1 | grep -oE 'x=[0-9]+' | sed 's/.*=//')
+OKY=$(grep -a 'widgetdemo: dlgrect' "$TMPD/dlg.txt" | head -1 | grep -oE 'y=[0-9]+' | sed 's/.*=//')
+OKW=$(grep -a 'widgetdemo: dlgrect' "$TMPD/dlg.txt" | head -1 | grep -oE 'w=[0-9]+' | sed 's/.*=//')
+OKH=$(grep -a 'widgetdemo: dlgrect' "$TMPD/dlg.txt" | head -1 | grep -oE 'h=[0-9]+' | sed 's/.*=//')
 M="$TMPD/dlgok.mon"; : > "$M"
 zeiger "$M" ${DEL% *} ${DEL#* }
 cat >> "$M" <<EOF
@@ -648,8 +648,8 @@ mouse_button 0
 warte 0.8
 EOF
 foto dlgok "gfx wm wig wmhold wiglong $GRUND" "$M"
-has "$TMPD/dlgok.txt" "wigdemo: dlg state=2" "der Dialog wird mit OK bestaetigt und gibt seinen Text zurueck"
-dt=$(grep -a 'wigdemo: dlg state=2' "$TMPD/dlgok.txt" | tail -1 | sed 's/.*text=//')
+has "$TMPD/dlgok.txt" "widgetdemo: dlg state=2" "der Dialog wird mit OK bestaetigt und gibt seinen Text zurueck"
+dt=$(grep -a 'widgetdemo: dlg state=2' "$TMPD/dlgok.txt" | tail -1 | sed 's/.*text=//')
 gleich "und der Text ist der, mit dem er aufgemacht wurde" "Kopiermich" "$dt"
 schau_nicht "danach ist auch das Dialogfenster weg" \
     rechteck "$TMPD/dlgok.ppm" "$DLX" "$DLY" $((DW + 4)) $((DH + 24)) 76 154 232
@@ -850,15 +850,15 @@ else
 fi
 # Und die Anwendung tut in beiden Laeufen DASSELBE -- sonst waere die
 # Zahl ein Vergleich zweier verschiedener Dinge.
-hnd=$(feld "$TMPD/haken_nd.txt" "wigdemo: state" haken)
+hnd=$(feld "$TMPD/haken_nd.txt" "widgetdemo: state" haken)
 gleich "und die Anwendung hat in beiden Laeufen dasselbe getan" "1" "$hnd"
 
 echo "== 11. die Gegenproben =="
 # 11a. OHNE TREFFERPRUEFUNG. Dieselben Klicks, dieselben Ereignisse --
 #      und kein Widget erfaehrt davon.
 foto nohit "gfx wm wig wignohit wmhold wiglong $GRUND" "$TMPD/haken.mon"
-hasnot "$TMPD/nohit.txt" "wigdemo: fired" "mit 'nohit' meldet sich KEIN Widget"
-nh=$(feld "$TMPD/nohit.txt" "wigdemo: state" haken)
+hasnot "$TMPD/nohit.txt" "widgetdemo: fired" "mit 'nohit' meldet sich KEIN Widget"
+nh=$(feld "$TMPD/nohit.txt" "widgetdemo: state" haken)
 gleich "und das Kaestchen bleibt leer" "0" "$nh"
 nhp=$(python3 tools/k15/zaehl.py "$TMPD/nohit.ppm" "$HKX" "$HKY" 14 14 92 200 255)
 num "auch im Bild: kein Bildpunkt des Hakens" "$nhp" eq 0
@@ -866,8 +866,8 @@ nhd=$(zahl2 "$TMPD/nohit.txt" 'downs=[0-9]+')
 num "obwohl der Klick beim Fenster ANGEKOMMEN ist" "$nhd" ge 1
 # 11b. OHNE ZEIGEGERAET.
 foto nomaus "gfx wm wig nomouse wmhold wiglong $GRUND" "$TMPD/haken.mon"
-hasnot "$TMPD/nomaus.txt" "wigdemo: fired" "mit 'nomouse' kommt gar kein Klick an"
-has "$TMPD/nomaus.txt" "wigdemo: ready" "die Anwendung malt trotzdem -- nur bedienen kann man sie nicht"
+hasnot "$TMPD/nomaus.txt" "widgetdemo: fired" "mit 'nomouse' kommt gar kein Klick an"
+has "$TMPD/nomaus.txt" "widgetdemo: ready" "die Anwendung malt trotzdem -- nur bedienen kann man sie nicht"
 # 11c. OHNE EINGABEFOKUS. Die Taste geht dann an JEDES Fenster, also
 #      auch an das Terminal -- und das ist die Zusage aus Runde K10 in
 #      der Form, in der sie diese Runde braucht.
@@ -880,7 +880,7 @@ num "mit 'nofocus' bekommt es sie alle" "$k0n" ge 3
 #      andere verhaelt sich wie in Runde K10.
 foto ohne "gfx wm wmhold $GRUND"
 hasnot "$TMPD/ohne.txt" "k15: start" "ohne das Wort 'wig' wird keine Anwendung gestartet"
-hasnot "$TMPD/ohne.txt" "wigdemo:" "und es meldet sich keine"
+hasnot "$TMPD/ohne.txt" "widgetdemo:" "und es meldet sich keine"
 has "$TMPD/ohne.txt" "wclick: passed 10 / 10" "statt dessen laeuft die Anwendung der Runde K10 wie vorher"
 wz=$(zahl "$TMPD/ohne.txt" 'wm: selftest [0-9]+')
 num "und der Fensterserver sagt dasselbe wie vorher" "$wz" eq 17
@@ -889,7 +889,7 @@ ob=$(feld "$TMPD/ohne.txt" "wig: blits" blits)
 num "die Naht hat in diesem Lauf nichts hinuebergeschoben" "$ob" eq 0
 
 echo "== 12. das Farbschema kommt aus einer Datei =="
-tn=$(zahl "$TMPD/ruhe.txt" 'wigdemo: theme n=[0-9]+')
+tn=$(zahl "$TMPD/ruhe.txt" 'widgetdemo: theme n=[0-9]+')
 soll=$(grep -cE '^[a-z]+=' "$TMPD/baum/theme")
 num "Farben, die aus /etc/theme gelesen wurden" "$tn" eq "$soll"
 # UND SIE WIRKEN. Der Knopf hat die Farbe aus der Datei; mit einer
@@ -915,8 +915,8 @@ schau_nicht "und die vorige hat er dann NICHT mehr" \
 # Der Text steht trotzdem, und zwar auf dem NEUEN Grund -- also wird die
 # Farbe wirklich beim Mischen benutzt und nicht nur beim Fuellen.
 schau "und der Text darauf ist gegen den neuen Grund gemischt" \
-    ttext "$TMPD/theme2.ppm" "$SANS" 15 $((CX + $(feld "$TMPD/ruhe.txt" "wigdemo: text knopf" x))) \
-    $((CY + $(feld "$TMPD/ruhe.txt" "wigdemo: text knopf" base))) \
+    ttext "$TMPD/theme2.ppm" "$SANS" 15 $((CX + $(feld "$TMPD/ruhe.txt" "widgetdemo: text knopf" x))) \
+    $((CY + $(feld "$TMPD/ruhe.txt" "widgetdemo: text knopf" base))) \
     $(rgb 15265524) 128 64 32 "Knopf"
 
 echo "== 13. das Zeigerbild -- die einzige Stelle, an der Ring 3 dem Server etwas ueber den Zeiger sagt =="
@@ -950,12 +950,12 @@ echo "== 14. der Name, der zweite Name und die Auffindbarkeit =="
 aus=$(python3 tools/k15/keinname.py kernel/user/explorer.fi "Datei-Explorer" 2>&1)
 if [ $? -eq 0 ]; then ok "der Anzeigename steht NICHT im Code ($aus)"
 else bad "der Anzeigename steht im Code: $aus"; fi
-aus=$(python3 tools/k15/keinname.py kernel/user/starter.fi "Suchen" 2>&1)
+aus=$(python3 tools/k15/keinname.py kernel/user/launcher.fi "Suchen" 2>&1)
 if [ $? -eq 0 ]; then ok "und der des Starters auch nicht"
 else bad "der Name des Starters steht im Code: $aus"; fi
 # Und die Gegenprobe zum Pruefer selbst: eine Zeichenkette, die WIRKLICH
 # im Code steht, MUSS er finden -- sonst prueft er nichts.
-if python3 tools/k15/keinname.py kernel/user/starter.fi "Ausfuehren" >/dev/null 2>&1; then
+if python3 tools/k15/keinname.py kernel/user/launcher.fi "Ausfuehren" >/dev/null 2>&1; then
     bad "der Pruefer findet eine Zeichenkette nicht, die im Code steht"
 else
     ok "eine Zeichenkette, die wirklich im Code steht, findet er (die Gegenprobe)"
@@ -1009,11 +1009,11 @@ num "und er braucht eine Inode weniger" $((ik - iv)) eq 1
 echo "== 14b. das Anwendungsverzeichnis und der Starter =="
 foto start "gfx wm wigstart wmhold wiglong $GRUND"
 num "der Kern beendet sich sauber" "$RC" eq 21
-has "$TMPD/start.txt" "k15: start /bin/starter" "der Starter kommt von der Platte"
-na=$(feld "$TMPD/start.txt" "starter: apps" apps)
+has "$TMPD/start.txt" "k15: start /bin/launcher" "der Starter kommt von der Platte"
+na=$(feld "$TMPD/start.txt" "launcher: apps" apps)
 soll=$(ls -d assets/apps/*.prog | wc -l)
 num "er findet so viele Programme, wie .prog-Buendel im Baum liegen" "$na" eq "$soll"
-has "$TMPD/start.txt" "starter: treffer i=0 name=[Datei-Explorer] exec=[/apps/explorer.prog/start]" \
+has "$TMPD/start.txt" "launcher: treffer i=0 name=[Datei-Explorer] exec=[/apps/explorer.prog/start]" \
     "und das Buendel fuehrt den Dateimanager mit Name UND Befehl"
 # EIN PROGRAMM IST EIN VERZEICHNIS, und das steht nicht im Quelltext,
 # sondern auf der Platte. Was ausgefuehrt wird, ist `start` IM Buendel --
@@ -1030,17 +1030,17 @@ hasnot "$TMPD/disk.ls" "/usr/share/apps" \
     "und der alte Ort ist weg -- eine Beschreibung, zwei Orte, waeren einer zu viel"
 SBX=190; SBY=110
 SCX=$((SBX + BORDER)); SCY=$((SBY + TITLE))
-SRX=$(feld "$TMPD/start.txt" "starter: rows" x)
-SRB=$(feld "$TMPD/start.txt" "starter: rows" base)
-SZH=$(feld "$TMPD/start.txt" "starter: rows" zh)
-SIX=$(feld "$TMPD/start.txt" "starter: rows" ix)
-SIY=$(feld "$TMPD/start.txt" "starter: rows" iy)
-SLX=$(feld "$TMPD/start.txt" "starter: rows" lx)
-SLB=$(feld "$TMPD/start.txt" "starter: rows" lb)
-SSEL=$(frgb "$TMPD/start.txt" "starter: rows" sel)
-SSFG=$(frgb "$TMPD/start.txt" "starter: rows" selfg)
-SFG=$(frgb "$TMPD/start.txt" "starter: rows" fg)
-SBG=$(frgb "$TMPD/start.txt" "starter: rows" bg)
+SRX=$(feld "$TMPD/start.txt" "launcher: rows" x)
+SRB=$(feld "$TMPD/start.txt" "launcher: rows" base)
+SZH=$(feld "$TMPD/start.txt" "launcher: rows" zh)
+SIX=$(feld "$TMPD/start.txt" "launcher: rows" ix)
+SIY=$(feld "$TMPD/start.txt" "launcher: rows" iy)
+SLX=$(feld "$TMPD/start.txt" "launcher: rows" lx)
+SLB=$(feld "$TMPD/start.txt" "launcher: rows" lb)
+SSEL=$(frgb "$TMPD/start.txt" "launcher: rows" sel)
+SSFG=$(frgb "$TMPD/start.txt" "launcher: rows" selfg)
+SFG=$(frgb "$TMPD/start.txt" "launcher: rows" fg)
+SBG=$(frgb "$TMPD/start.txt" "launcher: rows" bg)
 schau "die erste Zeile des Starters, je Zeichen" \
     ttext "$TMPD/start.ppm" "$SANS" 15 $((SCX + SRX)) $((SCY + SRB)) \
     $SSFG $SSEL "Datei-Explorer  --  Dateien und Ordner ansehen" 96
@@ -1111,11 +1111,11 @@ mouse_move 120 120
 mouse_move 60 60
 EOF
 foto suche "gfx wm wigstart wmhold wiglong $GRUND" "$M"
-has "$TMPD/suche.txt" "starter: suche [folder] treffer=1 apps=1" \
+has "$TMPD/suche.txt" "launcher: suche [folder] treffer=1 apps=1" \
     "getippt 'folder': GENAU EIN Treffer, und es ist ein Programm"
-has "$TMPD/start.txt" "starter: name [Suchen]" \
+has "$TMPD/start.txt" "launcher: name [Suchen]" \
     "auch der Starter holt seinen eigenen Namen aus den Daten"
-tf=$(grep -aA1 'starter: suche \[folder\]' "$TMPD/suche.txt" | grep -a 'name=' | tail -1)
+tf=$(grep -aA1 'launcher: suche \[folder\]' "$TMPD/suche.txt" | grep -a 'name=' | tail -1)
 case "$tf" in
     *"name=[Datei-Explorer]"*) ok "der Treffer ist der Datei-Explorer" ;;
     *) bad "der Treffer ist nicht der Datei-Explorer: $tf" ;;
@@ -1130,9 +1130,9 @@ schau_nicht "und in Zeile 1 steht nichts mehr" \
 # DIE GEGENPROBE, DIE DIE ZUSAGE ERST WERTVOLL MACHT: dieselben
 # Tastendruecke, dieselben Dateien, nur OHNE das Feld `keys`.
 foto nokeys "gfx wm wigstart wignokeys wmhold wiglong $GRUND" "$M"
-has "$TMPD/nokeys.txt" "starter: suche [folder] treffer=0 apps=0" \
+has "$TMPD/nokeys.txt" "launcher: suche [folder] treffer=0 apps=0" \
     "OHNE die Schluesselwoerter findet 'folder' NICHTS"
-has "$TMPD/nokeys.txt" "starter: apps=$soll" \
+has "$TMPD/nokeys.txt" "launcher: apps=$soll" \
     "obwohl dasselbe Verzeichnis mit denselben $soll Programmen gelesen wurde"
 schau_nicht "und im Bild steht dann auch keine Zeile" \
     ttext "$TMPD/nokeys.ppm" "$SANS" 15 $((SCX + SRX)) $((SCY + SRB)) \
@@ -1142,14 +1142,14 @@ schau_nicht "und im Bild steht dann auch keine Zeile" \
 sed 's/^sendkey f$/sendkey q/; s/^sendkey o$/sendkey u/; s/^sendkey l$/sendkey a/; s/^sendkey d$/sendkey s/; s/^sendkey e$/sendkey t/; s/^sendkey r$/sendkey e/' \
     "$M" > "$TMPD/unsinn.mon"
 foto unsinn "gfx wm wigstart wmhold wiglong $GRUND" "$TMPD/unsinn.mon"
-has "$TMPD/unsinn.txt" "starter: suche [quaste] treffer=0 apps=0   dateien=0" \
+has "$TMPD/unsinn.txt" "launcher: suche [quaste] treffer=0 apps=0   dateien=0" \
     "ein Wort, das nirgends steht, findet NICHTS -- kein Programm und keine Datei"
 grep -qi 'quaste' assets/apps/*.prog/INFO \
     && bad "'quaste' steht doch in einer INFO" \
     || ok "und 'quaste' steht wirklich in keiner INFO"
 # Und dass die Suche ueberhaupt etwas findet, wenn sie soll: der leere
 # Begriff zeigt alle.
-has "$TMPD/start.txt" "starter: suche [] treffer=$soll" \
+has "$TMPD/start.txt" "launcher: suche [] treffer=$soll" \
     "ohne Suchbegriff stehen alle $soll Programme in der Liste"
 
 echo "== 15. der Namensindex: das GANZE Dateisystem, und sofort =="
@@ -1168,7 +1168,7 @@ echo "== 15. der Namensindex: das GANZE Dateisystem, und sofort =="
 # derselbe Suchbegriff einmal ueber den Index und einmal als rekursiver
 # Baumdurchlauf, im selben Prozess, auf demselben Dateisystem, im selben
 # Augenblick -- und beide muessen DIESELBEN NAMEN liefern, sortiert und
-# Oktett fuer Oktett verglichen (`kernel/user/suchen.fi`, `vergleiche`).
+# Oktett fuer Oktett verglichen (`kernel/user/locate.fi`, `vergleiche`).
 #
 # UND ES BRAUCHT EIN ERNSTHAFTES DATEISYSTEM. An zwanzig Dateien beweist
 # sich nichts. `tools/k15/gross.py` legt viertausend an, in einem Baum
@@ -1186,7 +1186,7 @@ python3 tools/k15/gross.py "$TMPD/gross" 4000 > "$TMPD/gross.log" 2>&1 \
     && ok "tools/k15/gross.py: $(cat "$TMPD/gross.log")" \
     || bad "gross.py fehlgeschlagen"
 GARGS=(build "$TMPD/gross.img" 4096 /bin/
-       "/bin/sh=$TMPD/sh0.elf" "/bin/suchen=$TMPD/suchen0.elf"
+       "/bin/sh=$TMPD/sh0.elf" "/bin/locate=$TMPD/locate0.elf"
        "/bin/ls=$TMPD/ls0.elf")
 while read -r z; do GARGS+=("$z"); done < "$TMPD/gross/angaben"
 python3 tools/osum/mkfs.py "${GARGS[@]}" > "$TMPD/gmkfs.txt" 2>&1 \
@@ -1215,13 +1215,13 @@ gross() { # name skript
 # und die halbe Messung haengt an dieser Zahl.
 gfeld() { grep -a "$2" "$1" | tail -1 | grep -oE "(^| )$3=[0-9]+" | tail -1 | sed 's/.*=//'; }
 
-gross gkupfer "suchen -m kupfer"
+gross gkupfer "locate -m kupfer"
 num "der Kern beendet sich sauber" "$RC" eq 21
-GB_N=$(gfeld "$TMPD/gkupfer.txt" 'suchen: bauen' 'n')
-GB_S=$(gfeld "$TMPD/gkupfer.txt" 'suchen: bauen' 'saetze')
-GB_C=$(gfeld "$TMPD/gkupfer.txt" 'suchen: bauen' 'aufrufe')
-GB_U=$(gfeld "$TMPD/gkupfer.txt" 'suchen: bauen' 'us')
-GB_T=$(gfeld "$TMPD/gkupfer.txt" 'suchen: bauen' 'abgeschn')
+GB_N=$(gfeld "$TMPD/gkupfer.txt" 'locate: bauen' 'n')
+GB_S=$(gfeld "$TMPD/gkupfer.txt" 'locate: bauen' 'saetze')
+GB_C=$(gfeld "$TMPD/gkupfer.txt" 'locate: bauen' 'aufrufe')
+GB_U=$(gfeld "$TMPD/gkupfer.txt" 'locate: bauen' 'us')
+GB_T=$(gfeld "$TMPD/gkupfer.txt" 'locate: bauen' 'abgeschn')
 num "1. DER AUFBAU: so viele Namen aus der Inode-Tabelle" "$GB_N" eq "$GN"
 gleich "und kein Satz ist unterwegs verlorengegangen" "$GB_N" "$GB_S"
 num "abgeschnitten wurde nichts" "$GB_T" eq 0
@@ -1229,11 +1229,11 @@ num "und das in so wenigen Systemaufrufen (63 Saetze je Aufruf)" "$GB_C" lt 100
 num "Mikrosekunden fuer den ganzen Aufbau" "$GB_U" gt 0
 echo "        -> $GB_N Namen in $GB_U us, $GB_C Aufrufe; das ist $((GB_U / GB_N)) us je Name"
 
-GI_U=$(gfeld "$TMPD/gkupfer.txt" 'suchen: index' 'us10')
-GI_T=$(grep -a 'suchen: index' "$TMPD/gkupfer.txt" | tail -1 | grep -oE 'treffer=[0-9]+' | sed 's/.*=//')
-GW_U=$(gfeld "$TMPD/gkupfer.txt" 'suchen: baum' 'us')
-GW_T=$(grep -a 'suchen: baum' "$TMPD/gkupfer.txt" | tail -1 | grep -oE 'treffer=[0-9]+' | sed 's/.*=//')
-GW_G=$(gfeld "$TMPD/gkupfer.txt" 'suchen: baum' 'gesehen')
+GI_U=$(gfeld "$TMPD/gkupfer.txt" 'locate: index' 'us10')
+GI_T=$(grep -a 'locate: index' "$TMPD/gkupfer.txt" | tail -1 | grep -oE 'treffer=[0-9]+' | sed 's/.*=//')
+GW_U=$(gfeld "$TMPD/gkupfer.txt" 'locate: baum' 'us')
+GW_T=$(grep -a 'locate: baum' "$TMPD/gkupfer.txt" | tail -1 | grep -oE 'treffer=[0-9]+' | sed 's/.*=//')
+GW_G=$(gfeld "$TMPD/gkupfer.txt" 'locate: baum' 'gesehen')
 GI_1=$((GI_U / 10))
 num "2. DIE SUCHE: sie ist um Groessenordnungen billiger als der Aufbau" \
     $((GB_U / (GI_1 + 1))) ge 20
@@ -1247,13 +1247,13 @@ num "und der Index ist dabei um ein Vielfaches schneller" \
 echo "        -> Baumdurchlauf $GW_U us, Suche im Index $GI_1 us"
 SOLLK=$(grep '^kupfer ' "$TMPD/gross/erwartet" | awk '{print $2}')
 num "und beide finden so viele, wie die Liste des Abbilds hergibt" "$GI_T" eq "$SOLLK"
-has "$TMPD/gkupfer.txt" "suchen: pfad /daten/kupfer" \
+has "$TMPD/gkupfer.txt" "locate: pfad /daten/kupfer" \
     "und der Treffer traegt seinen ganzen Pfad, aus den Elternnummern gebaut"
 
-gross gviele "suchen -m 07"
+gross gviele "locate -m 07"
 SOLL7=$(grep '^07 ' "$TMPD/gross/erwartet" | awk '{print $2}')
-V_I=$(grep -a 'suchen: index' "$TMPD/gviele.txt" | tail -1 | grep -oE 'treffer=[0-9]+' | sed 's/.*=//')
-V_B=$(grep -a 'suchen: baum' "$TMPD/gviele.txt" | tail -1 | grep -oE 'treffer=[0-9]+' | sed 's/.*=//')
+V_I=$(grep -a 'locate: index' "$TMPD/gviele.txt" | tail -1 | grep -oE 'treffer=[0-9]+' | sed 's/.*=//')
+V_B=$(grep -a 'locate: baum' "$TMPD/gviele.txt" | tail -1 | grep -oE 'treffer=[0-9]+' | sed 's/.*=//')
 num "ein Wort, das VIELE trifft: der Index findet so viele" "$V_I" eq "$SOLL7"
 gleich "und der Baumdurchlauf genauso viele" "$V_I" "$V_B"
 has "$TMPD/gviele.txt" "ungleich=0" "und wieder Name fuer Name dieselben"
@@ -1261,22 +1261,22 @@ has "$TMPD/gviele.txt" "ungleich=0" "und wieder Name fuer Name dieselben"
 # 5. UND EIN WORT, DAS NIRGENDS STEHT. Eine Suche, die immer etwas
 # findet, ist keine Suche -- und das gilt fuer den Index genauso wie fuer
 # den Durchlauf.
-gross gquaste "suchen -m quaste"
+gross gquaste "locate -m quaste"
 SOLLQ=$(grep '^quaste ' "$TMPD/gross/erwartet" | awk '{print $2}')
 num "die Liste des Abbilds kennt 'quaste' so oft" "$SOLLQ" eq 0
-has "$TMPD/gquaste.txt" "suchen: index [quaste] treffer=0" \
+has "$TMPD/gquaste.txt" "locate: index [quaste] treffer=0" \
     "5. der Index findet 'quaste' NICHT"
-has "$TMPD/gquaste.txt" "suchen: baum [quaste] treffer=0" \
+has "$TMPD/gquaste.txt" "locate: baum [quaste] treffer=0" \
     "und der Baumdurchlauf auch nicht"
-Q_G=$(gfeld "$TMPD/gquaste.txt" 'suchen: baum' 'gesehen')
+Q_G=$(gfeld "$TMPD/gquaste.txt" 'locate: baum' 'gesehen')
 num "obwohl er dabei alle $Q_G Namen angesehen hat" "$Q_G" eq "$GB_N"
 
 echo "== 15b. das Journal: anlegen, umbenennen, loeschen -- ohne Neuaufbau =="
-# 4. DER INDEX MUSS ES WISSEN, OHNE NEU ZU BAUEN. `suchen -j` legt eine
+# 4. DER INDEX MUSS ES WISSEN, OHNE NEU ZU BAUEN. `locate -j` legt eine
 # Datei an, benennt sie um (kopieren und loeschen -- dieser Kernel hat
 # kein `rename`) und loescht sie, und holt nach jedem Schritt das Journal
 # ab. Was danach im Index steht, wird nicht behauptet, sondern GESUCHT.
-gross gjrnl "suchen -j kupfer"
+gross gjrnl "locate -j kupfer"
 num "der Kern beendet sich sauber" "$RC" eq 21
 has "$TMPD/gjrnl.txt" "schritt=1  zwiebel=1  apfel=0" \
     "nach dem Anlegen findet der Index die neue Datei"
@@ -1292,13 +1292,13 @@ has "$TMPD/gjrnl.txt" "lost=0" "und der Ring hat keinen Satz verworfen"
 # UND DAS ALLES OHNE EINEN ZWEITEN AUFBAU. Das ist die eigentliche
 # Zusage: ein Index, der nach jeder Aenderung neu baut, ist kein Index,
 # sondern ein Cache mit einer Sekunde Wartezeit.
-nb=$(grep -ac 'suchen: bauen' "$TMPD/gjrnl.txt")
+nb=$(grep -ac 'locate: bauen' "$TMPD/gjrnl.txt")
 num "genau EIN Aufbau im ganzen Lauf, und danach nur noch Journal" "$nb" eq 1
 
 # DIE GEGENPROBE ZUM JOURNAL: dieselben drei Schritte, aber es wird nicht
 # abgeholt. Der Index weiss dann von nichts -- und das ist der Beweis,
 # dass oben wirklich das Journal gewirkt hat und nicht ein Zufall.
-gross gnojrnl "suchen -n kupfer"
+gross gnojrnl "locate -n kupfer"
 has "$TMPD/gnojrnl.txt" "schritt=1  zwiebel=0  apfel=0" \
     "OHNE das Journal weiss der Index von der neuen Datei nichts"
 has "$TMPD/gnojrnl.txt" "schritt=4  zwiebel=0  apfel=0" \
@@ -1334,9 +1334,9 @@ mouse_move 120 120
 mouse_move 60 60
 EOF
 foto dsuche "gfx wm wigstart wmhold wiglong $GRUND" "$M"
-has "$TMPD/dsuche.txt" "starter: suche [blau] treffer=1 apps=0   dateien=1" \
+has "$TMPD/dsuche.txt" "launcher: suche [blau] treffer=1 apps=0   dateien=1" \
     "getippt 'blau': ein Treffer, und er ist KEIN Programm, sondern eine Datei"
-has "$TMPD/dsuche.txt" "starter: datei i=0 name=[/daten/bilder/blau.ppm]" \
+has "$TMPD/dsuche.txt" "launcher: datei i=0 name=[/daten/bilder/blau.ppm]" \
     "und es ist die Datei, die wirklich dort liegt"
 grep -q '^/daten/bilder/blau.ppm ' "$TMPD/disk.ls" \
     && ok "was das Abbild an dieser Stelle auch wirklich fuehrt" \
@@ -1344,17 +1344,17 @@ grep -q '^/daten/bilder/blau.ppm ' "$TMPD/disk.ls" \
 schau "und im Bild steht der Pfad in Zeile 0 der Trefferliste, je Zeichen" \
     ttext "$TMPD/dsuche.ppm" "$SANS" 15 $((SCX + SRX)) $((SCY + SRB)) \
     $SSFG $SSEL "/daten/bilder/blau.ppm" 96
-DIX=$(feld "$TMPD/dsuche.txt" "starter: index" n)
+DIX=$(feld "$TMPD/dsuche.txt" "launcher: index" n)
 num "der Starter hat dafuer einen Index ueber so viele Namen gebaut" "$DIX" ge 40
 # DIE GEGENPROBE: derselbe Starter, dieselben Tastendruecke, nur OHNE den
 # Namensindex. Dann findet "blau" nichts -- und das zeigt, dass der
 # Treffer oben WIRKLICH aus dem Index kam und nicht aus der Programmliste.
 foto noidx "gfx wm wigstart wignoidx wmhold wiglong $GRUND" "$M"
-has "$TMPD/noidx.txt" "starter: suche [blau] treffer=0 apps=0   dateien=0" \
+has "$TMPD/noidx.txt" "launcher: suche [blau] treffer=0 apps=0   dateien=0" \
     "OHNE den Namensindex findet 'blau' NICHTS"
-has "$TMPD/noidx.txt" "starter: index n=0" \
+has "$TMPD/noidx.txt" "launcher: index n=0" \
     "weil gar keiner gebaut wurde"
-has "$TMPD/noidx.txt" "starter: apps=$soll" \
+has "$TMPD/noidx.txt" "launcher: apps=$soll" \
     "obwohl dasselbe Anwendungsverzeichnis mit denselben $soll Buendeln gelesen wurde"
 schau_nicht "und im Bild steht dann auch kein Pfad" \
     ttext "$TMPD/noidx.ppm" "$SANS" 15 $((SCX + SRX)) $((SCY + SRB)) \

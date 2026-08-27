@@ -21,7 +21,7 @@ verlangt, und nicht im Kernel:
 | `kernel/user/wlib.fi` — die Widgets, die Anordnung, die Ereignisschleife | 2688 | **Ring 3** |
 | `kernel/user/wlibc.fi` — Zeichenfläche, Grundformen, Glyphen, Farbschema | 862 | **Ring 3** |
 | `kernel/user/files.fi` — `/bin/files`, der Dateimanager | 939 | **Ring 3** |
-| `kernel/user/wigdemo.fi` — die Anwendung, an der gemessen wird | 448 | **Ring 3** |
+| `kernel/user/widgetdemo.fi` — die Anwendung, an der gemessen wird | 448 | **Ring 3** |
 | `kernel/wig.fi` — die Naht: sieben Aufrufe, die kein Widget kennen | 484 | Ring 0 |
 
 **3 550 Zeilen in Ring 3 gegen 484 im Kernel**, und die 484 sind zu
@@ -37,11 +37,11 @@ Nach `gfx wm wig wmhold wiglong` auf der Kommandozeile:
 ```
 wig: selftest 7 / 7
 wm: term win=0  cols=56  rows=20  cell=10x19
-k15: start /bin/wigdemo  pid=2
-wigdemo: theme n=12
-wigdemo: rect id=0 kind=8 x=12 y=12 w=456 h=22
+k15: start /bin/widgetdemo  pid=2
+widgetdemo: theme n=12
+widgetdemo: rect id=0 kind=8 x=12 y=12 w=456 h=22
 ...
-wigdemo: ready
+widgetdemo: ready
 wig: blits=5  rows=430  pixels=192000  glyphs=37  clipset=0  clipget=0  shape=0
 ```
 
@@ -60,7 +60,7 @@ unten die Statuszeile.
 
 | Wort | Wirkung |
 |---|---|
-| `wig` | `/bin/wigdemo` von der Platte starten |
+| `wig` | `/bin/widgetdemo` von der Platte starten |
 | `wigfiles` | statt dessen `/bin/files` |
 | `wiglong` | zwanzig statt fünf Sekunden stillhalten |
 | `wignohit` | **Gegenprobe**: die Bibliothek prüft keine Treffer mehr |
@@ -168,8 +168,8 @@ der ausrechnet, wo ein Knopftext stehen müsste, baut die Anordnung nach
 wohin sie schreibt, bevor sie es tut:
 
 ```
-wigdemo: text knopf x=40 base=216 fg=15265524 bg=3820126 t=Knopf
-wigdemo: rows x=18 base=287 zh=20 fg=15265524 bg=1185824 sel=3104668 selfg=16777215
+widgetdemo: text knopf x=40 base=216 fg=15265524 bg=3820126 t=Knopf
+widgetdemo: rows x=18 base=287 zh=20 fg=15265524 bg=1185824 sel=3104668 selfg=16777215
 ```
 
 und der Läufer rechnet im **Bild** nach, ob dort wirklich steht, was
@@ -420,10 +420,10 @@ Gesucht wird in **drei** Feldern: Anzeigename, Beschreibung **und
 Schlüsselwörter**. Das dritte ist der Grund für die ganze Sache:
 
 ```
-starter: suche [fol]    treffer=1
-starter: suche [fold]   treffer=1
-starter: suche [folder] treffer=1
-starter: treffer i=0 name=[Datei-Explorer] exec=[/bin/explorer]
+launcher: suche [fol]    treffer=1
+launcher: suche [fold]   treffer=1
+launcher: suche [folder] treffer=1
+launcher: treffer i=0 name=[Datei-Explorer] exec=[/bin/explorer]
 ```
 
 **„folder" steht weder in „Datei-Explorer" noch in „Dateien und Ordner
@@ -683,7 +683,7 @@ um etwa ein Fünftel, die Größenordnung nicht.*
 
 Der Durchlauf hat dabei jedes Mal **4021 Namen** gesehen — genau so viele,
 wie im Index stehen. **Beide Wege liefern nicht nur dieselbe Zahl,
-sondern dieselben Namen**: `suchen` holt sich die Namen beider Listen,
+sondern dieselben Namen**: `locate` holt sich die Namen beider Listen,
 sortiert sie und vergleicht sie Oktett für Oktett (`ungleich=0`). Zwei
 Suchen, die beide „179" sagen, könnten 179 verschiedene Dateien meinen.
 
@@ -691,7 +691,7 @@ Und `07` trifft genau **179**, weil die Liste, aus der das Abbild gebaut
 wurde, 179 Namen mit `07` enthält — nachgerechnet auf dem Wirt, nicht in
 der Maschine.
 
-**4. Nachziehen ohne Neuaufbau.** `suchen -j` legt eine Datei an, benennt
+**4. Nachziehen ohne Neuaufbau.** `locate -j` legt eine Datei an, benennt
 sie um (kopieren und löschen — dieser Kernel hat kein `rename`) und
 löscht sie, und holt nach jedem Schritt das Journal ab. Was danach im
 Index steht, wird nicht behauptet, sondern **gesucht**:
@@ -706,7 +706,7 @@ Index steht, wird nicht behauptet, sondern **gesucht**:
 neu baut, ist kein Index, sondern ein Zwischenspeicher mit einer Sekunde
 Wartezeit.
 
-**5. Und die Gegenprobe dazu** (`suchen -n`): dieselben drei Schritte,
+**5. Und die Gegenprobe dazu** (`locate -n`): dieselben drei Schritte,
 aber das Journal wird **nicht** abgeholt.
 
 | Schritt | Journal geholt | Namen im Index | `zwiebel` | `apfel` |
@@ -887,7 +887,7 @@ Null zurück, statt in die nächste Seite zu schreiben.
 * **Die serielle Leitung gehört zwei Schreibern.** Der Kernel und die
   Anwendung in Ring 3 schreiben beide darauf, und gelegentlich schiebt
   sich eine Kernelzeile mitten in eine Anwendungszeile:
-  `wigdemo: state ... sel=wm: go`. Ein `sed 's/.*e2=\[//'` darauf liefert
+  `widgetdemo: state ... sel=wm: go`. Ein `sed 's/.*e2=\[//'` darauf liefert
   Unsinn, und zwei Zusagen fielen aus einem Grund, der mit der Sache
   nichts zu tun hat. `tools/k15/felder.py` sucht seither das
   **vollständige** Muster — `e1=[…] e2=[…]` mit beiden schließenden

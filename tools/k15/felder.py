@@ -9,7 +9,7 @@ Anwendung in Ring 3.  Beide schreiben, wann sie fertig sind, und
 gelegentlich schiebt sich eine Kernelzeile mitten in eine
 Anwendungszeile:
 
-    wigdemo: state klicks=0 ... sel=wm: go
+    widgetdemo: state klicks=0 ... sel=wm: go
 
 Ein `sed 's/.*e2=\\[//'` darauf liefert Unsinn, und die Zusage faellt aus
 einem Grund, der mit der Sache nichts zu tun hat -- genau das ist in

@@ -5,7 +5,7 @@
 
 Die Anwendungen dieser Runde melden Zeilen der Form
 
-    wigdemo: rows x=18 base=287 zh=20 fg=15265524 bg=1185824 sel=... selfg=...
+    widgetdemo: rows x=18 base=287 zh=20 fg=15265524 bg=1185824 sel=... selfg=...
 
 und ein `grep -oE '.*fg=[0-9]+'` darauf holt `selfg` statt `fg` -- weil
 `.*` gierig ist und `selfg` auf `fg` endet.  Genau dieser Fehler hat in

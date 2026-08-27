@@ -85,7 +85,7 @@ def main(argv):
             f.write("%s/%s\n" % (pfad, name))
 
     # Was jedes Wort treffen MUSS -- gezaehlt ueber die NAMEN, nicht
-    # ueber die Pfade: der Index haelt Namen, und `suchen` vergleicht
+    # ueber die Pfade: der Index haelt Namen, und `locate` vergleicht
     # Namen. Die Ordner zaehlen mit, sie haben auch Namen.
     alle = [name for _, name in liste]
     alle += [p.strip("/").split("/")[-1] for p in sorted(gesehen)]

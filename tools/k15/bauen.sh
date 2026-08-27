@@ -11,7 +11,7 @@ CC=${FIRNC:-vendor/firn/bin/firnc}
 OUT=${1:-/tmp/k15}
 mkdir -p "$OUT"
 
-PROGS="wigdemo explorer starter suchen sh echo ls cat edit"
+PROGS="widgetdemo explorer launcher locate sh echo ls cat edit"
 
 bash tools/build-kernel.sh "$OUT/k.mb" > "$OUT/k.log" 2>&1 || {
     echo "== der Kern laesst sich nicht bauen"; tail -20 "$OUT/k.log"; exit 1; }

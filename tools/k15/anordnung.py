@@ -6,7 +6,7 @@
 Die Anwendung meldet vor dem ersten Malen jedes Rechteck, das die
 Anordnung ausgerechnet hat:
 
-    wigdemo: rect id=5 kind=2 x=12 y=196 w=100 h=28
+    widgetdemo: rect id=5 kind=2 x=12 y=196 w=100 h=28
 
 DIESES PROGRAMM PRUEFT DIE RECHTECKE GEGENEINANDER, und das ist der
 Teil, den ein Bildschirmfoto NICHT prueft: ein Foto zeigt, dass da ein
