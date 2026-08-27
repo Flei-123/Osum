@@ -1,0 +1,909 @@
+// kernel/user/speicher.fi -- Runde SPEICHER: /bin/speicher.
+//
+// WAS DAS IST UND WOGEGEN ES ANTRITT. TreeSize und WizTree beantworten
+// eine einzige Frage -- "was frisst meinen Platz" -- und beide muessen
+// dafuer beim Start die Platte durchlaufen. WizTree liest dazu die
+// Master File Table von NTFS am Stueck und ist deshalb schnell; TreeSize
+// laeuft die Verzeichnisse ab und ist deshalb langsam. BEIDE fangen bei
+// jedem Start von vorn an, und beide haben einen Fortschrittsbalken.
+//
+// DIESES PROGRAMM HAT KEINEN. Es hat auch keinen noetig: der Index steht
+// schon (`kernel/user/nidx.fi`), er wird vom Aenderungsjournal des
+// Kernels nachgefuehrt (`kernel/nidx.fi`), und seit dieser Runde traegt
+// er nicht nur die Namen, sondern auch die GROESSEN -- aufsummiert bis
+// zur Wurzel. Die Antwort auf "wie gross ist /daten" ist eine
+// Feldabfrage und kein Durchlauf.
+//
+// DAS IST EINE BEHAUPTUNG, UND SIE WIRD GEMESSEN. `/bin/du -m` haelt
+// beide Zahlen und beide Zeiten nebeneinander, `/bin/du -p` rechnet
+// JEDES Verzeichnis des Index gegen einen echten Durchlauf, und dieses
+// Programm selbst macht bei jedem Ortswechsel dieselbe Gegenprobe und
+// schreibt sie auf die serielle Schnittstelle. Ein sofortiger, aber
+// falscher Wert ist wertlos.
+//
+// WAS ZU SEHEN IST:
+//
+//   links   der Baum: was in diesem Verzeichnis liegt, mit Groesse und
+//           Anteil, das Groesste zuerst. Ein Ordner traegt die Summe
+//           seines ganzen Teilbaums, nicht seine Eintragstabelle.
+//   rechts  die groessten DATEIEN unter diesem Ort -- egal wie tief.
+//           Genau das ist die Frage, die man wirklich hat.
+//   unten   die Kacheln: eine Flaeche je Eintrag, so gross wie sein
+//           Anteil. Geschnitten wird abwechselnd laengs und quer
+//           ("slice and dice", Shneiderman 1991) -- die einfachste
+//           Treemap, die es gibt, und die einzige, die ohne Gleitkomma
+//           auskommt.
+//
+//   Loeschen geht aus dem Programm heraus, und danach stimmen die Zahlen
+//   SOFORT wieder -- nicht durch einen neuen Durchlauf, sondern weil das
+//   Journal den Wegfall meldet und die Summen um den Unterschied
+//   nachgezogen werden.
+//
+// DREI EHRLICHE ANGABEN:
+//
+//   1. GEZAEHLT WIRD DIE GROESSE, NICHT DER BELEGTE PLATZ. Eine Datei
+//      von einem Oktett belegt auf der Platte einen Block zu 512.
+//      Dieses Programm sagt "1". Das ist dieselbe Regel wie bei `du`
+//      seit Runde K11 und dieselbe wie bei `du --apparent-size`; sie
+//      steht hier, weil TreeSize standardmaessig das andere tut.
+//   2. EIN VERZEICHNIS SELBST ZAEHLT NULL. Seine Eintragstabelle ist
+//      Verwaltung, kein Inhalt. Auch das ist die Regel von `du` in
+//      diesem System, und nur so kommen Index und Durchlauf auf
+//      dasselbe Oktett.
+//   3. DER INDEX FASST 4200 NAMEN. Was darueber liegt, sagt `nidx`
+//      selbst ("abgeschnitten"), und dieses Fenster zeigt es in der
+//      Statuszeile. Eine Summe, der stillschweigend Dateien fehlen,
+//      waere schlimmer als gar keine.
+
+profile kernel
+
+import ulib
+import libc.io
+import libc.errno
+import wlibc
+import wlib
+import nidx
+
+export { u_start }
+
+const MAXK: u64 = 64 // Eintraege, die die linke Tafel zeigt
+const MAXG: u64 = 24 // groesste Dateien rechts
+const NAMEB: u64 = 32
+
+// Das Fenster
+const BW: u64 = 720
+const BH: u64 = 440
+// Die Kachelflaeche -- in FENSTERKOORDINATEN. Sie ist absichtlich
+// hoechstens 81 Zeilen hoch: so viele hat der Streifen, mit dem
+// `wlibc` malt, und eine Kachelflaeche, die ueber zwei Streifen ginge,
+// braeuchte zwei Aufrufe statt einem.
+const TMX: u64 = 8
+const TMY: u64 = 306
+const TMW: u64 = 704
+const TMH: u64 = 64
+
+static mut pfad: [u8; 192] = "/\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"
+static mut vollpfad: [u8; 256] = [0 as u8; 256]
+
+// Die Eintraege dieses Ortes, nach Groesse absteigend.
+static mut knam: [u8; 2048] = [0 as u8; 2048] // MAXK * NAMEB
+static mut kwert: [u64; 64] = [0 as u64; 64]
+static mut kidx: [u64; 64] = [0 as u64; 64]
+static mut kart: [u64; 64] = [0 as u64; 64] // 1 = Verzeichnis
+static mut kanz: u64 = 0
+
+// Die groessten Dateien unter diesem Ort.
+static mut gnam: [u8; 768] = [0 as u8; 768] // MAXG * NAMEB
+static mut gwert: [u64; 24] = [0 as u64; 24]
+static mut gidx: [u64; 24] = [0 as u64; 24]
+static mut ganz: u64 = 0
+
+static mut lblob: [u8; 6144] = [0 as u8; 6144]
+static mut rblob: [u8; 3072] = [0 as u8; 3072]
+static mut zeile: [u8; 160] = [0 as u8; 160]
+static mut lauf: [u8; 160] = [0 as u8; 160]
+static mut lspalten: [u64; 3] = [0 as u64; 3]
+static mut rspalten: [u64; 2] = [0 as u64; 2]
+static mut farben: [u64; 8] = [0 as u64; 8]
+
+static mut ino_now: u64 = 0
+static mut ganzheit: u64 = 0 // Oktette unter diesem Ort
+static mut kbheit: u64 = 0 // dieselben in Kilooktett-Bloecken
+static mut bp: u64 = 0
+
+static mut t_titel: [u8; 32] = "Speicher\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"
+static mut t_auf: [u8; 4] = "^\0\0\0"
+static mut t_neu: [u8; 16] = "Aktualisieren\0\0\0"
+static mut t_del: [u8; 12] = "Loeschen\0\0\0\0"
+static mut t_wurz: [u8; 4] = "/\0\0\0"
+static mut t_lkopf: [u8; 40] = "Name\tGroesse\tAnteil\n\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"
+static mut t_rkopf: [u8; 32] = "Groesste Dateien\tGroesse\n\0\0\0\0\0\0\0"
+static mut t_frage: [u8; 32] = "Wirklich loeschen?\0\0\0\0\0\0\0\0\0\0\0\0\0\0"
+static mut t_delt: [u8; 16] = "Loeschen\0\0\0\0\0\0\0\0"
+
+fn say(p: u64) {
+    ulib.say(p)
+}
+
+fn kv(name: u64, v: u64) {
+    var sp: [u8; 2] = " \0"
+    say(name)
+    ulib.sayn(v)
+    say((&sp[0 as usize]) as u64)
+}
+
+fn knptr(i: u64) -> u64 {
+    return (&knam[0 as usize]) as u64 + i * NAMEB
+}
+
+fn gnptr(i: u64) -> u64 {
+    return (&gnam[0 as usize]) as u64 + i * NAMEB
+}
+
+// ------------------------------------------------------- Text bauen
+
+fn bput(c: u64) {
+    if bp + 1 < 6144 {
+        __mmio_write8(((&lblob[0 as usize]) as u64 + bp) as *mut u8, c as u8)
+        bp = bp + 1
+    }
+}
+
+fn bputs(p: u64) {
+    var i: u64 = 0
+    while __mmio_read8((p + i) as *mut u8) != 0 as u8 && i < 200 {
+        bput(__mmio_read8((p + i) as *mut u8) as u64)
+        i = i + 1
+    }
+}
+
+fn bputn(v: u64) {
+    var buf: [u8; 26] = [0 as u8; 26]
+    let n: u64 = ulib.digits(v, (&buf[0 as usize]) as u64)
+    var i: u64 = 0
+    while i < n {
+        bput(buf[(i) as usize] as u64)
+        i = i + 1
+    }
+}
+
+static mut rp: u64 = 0
+
+fn rput(c: u64) {
+    if rp + 1 < 3072 {
+        __mmio_write8(((&rblob[0 as usize]) as u64 + rp) as *mut u8, c as u8)
+        rp = rp + 1
+    }
+}
+
+fn rputs(p: u64) {
+    var i: u64 = 0
+    while __mmio_read8((p + i) as *mut u8) != 0 as u8 && i < 200 {
+        rput(__mmio_read8((p + i) as *mut u8) as u64)
+        i = i + 1
+    }
+}
+
+fn rputn(v: u64) {
+    var buf: [u8; 26] = [0 as u8; 26]
+    let n: u64 = ulib.digits(v, (&buf[0 as usize]) as u64)
+    var i: u64 = 0
+    while i < n {
+        rput(buf[(i) as usize] as u64)
+        i = i + 1
+    }
+}
+
+// DER ANTEIL MIT EINER NACHKOMMASTELLE, ohne Gleitkomma: erst mal
+// tausend, dann durch die Summe. `37,4%` steht als "374" da und wird
+// beim Ausgeben geteilt. Firn hat keine Gleitkommazahlen im Kernprofil,
+// und eine Prozentangabe braucht auch keine.
+fn promille(teil: u64, ganz: u64) -> u64 {
+    if ganz == 0 {
+        return 0
+    }
+    return teil *% 1000 / ganz
+}
+
+fn bput_pct(pm: u64) {
+    bputn(pm / 10)
+    bput(44) // Komma
+    bputn(pm % 10)
+    bput(37) // Prozentzeichen
+}
+
+// ------------------------------------------------- den Ort einlesen
+//
+// KEIN SYSTEMAUFRUF AUSSER EINEM. `stat` sagt, welche Inode dieser Pfad
+// ist -- danach kommt alles aus dem Index im Speicher. Das ist der
+// ganze Unterschied zu einem Werkzeug, das hier ein Verzeichnis oeffnet.
+
+fn kinder_lesen() {
+    kanz = 0
+    var i: u64 = 0
+    while i < nidx.count() {
+        if nidx.parent_at(i) == ino_now && kanz < MAXK {
+            var wert: u64 = 0
+            var ist_dir: u64 = 0
+            if nidx.is_dir_at(i) {
+                wert = nidx.sub_at(i)
+                ist_dir = 1
+            } else {
+                wert = nidx.size_at(i)
+            }
+            ulib.strncpy(knptr(kanz), nidx.name_at(i), NAMEB - 1)
+            kwert[(kanz) as usize] = wert
+            kidx[(kanz) as usize] = i
+            kart[(kanz) as usize] = ist_dir
+            kanz = kanz + 1
+        }
+        i = i + 1
+    }
+    sortiere_k()
+}
+
+// Einfuegen, absteigend. Hoechstens 64 Eintraege -- das ist die Zahl,
+// bei der ein Sortierverfahren mit Namen sich nicht lohnt.
+fn sortiere_k() {
+    var i: u64 = 1
+    while i < kanz {
+        var k: u64 = i
+        while k > 0 && kwert[(k) as usize] > kwert[(k - 1) as usize] {
+            tausche_k(k, k - 1)
+            k = k - 1
+        }
+        i = i + 1
+    }
+}
+
+fn tausche_k(a: u64, b: u64) {
+    let w: u64 = kwert[(a) as usize]
+    kwert[(a) as usize] = kwert[(b) as usize]
+    kwert[(b) as usize] = w
+    let x: u64 = kidx[(a) as usize]
+    kidx[(a) as usize] = kidx[(b) as usize]
+    kidx[(b) as usize] = x
+    let y: u64 = kart[(a) as usize]
+    kart[(a) as usize] = kart[(b) as usize]
+    kart[(b) as usize] = y
+    var tmp: [u8; 32] = [0 as u8; 32]
+    ulib.strncpy((&tmp[0 as usize]) as u64, knptr(a), NAMEB - 1)
+    ulib.strncpy(knptr(a), knptr(b), NAMEB - 1)
+    ulib.strncpy(knptr(b), (&tmp[0 as usize]) as u64, NAMEB - 1)
+}
+
+// LIEGT DIESER EINTRAG UNTER DEM AKTUELLEN ORT? Die Elternkette hinauf,
+// hoechstens 32 Schritte. Das ist der Preis dafuer, dass der Index
+// Namen haelt und keine Pfade -- und er faellt nur fuer die Suche nach
+// den groessten Dateien an, nicht bei jeder Anzeige.
+fn unter_uns(i: u64) -> bool {
+    var p: u64 = nidx.parent_at(i)
+    var wache: u64 = 0
+    while wache < 32 {
+        if p == ino_now {
+            return true
+        }
+        let j: u64 = nidx.slot_of_ino(p)
+        if j >= nidx.ROOT {
+            return false
+        }
+        p = nidx.parent_at(j)
+        wache = wache + 1
+    }
+    return false
+}
+
+fn gross_lesen() {
+    ganz_leeren()
+    var i: u64 = 0
+    while i < nidx.count() {
+        if !nidx.is_dir_at(i) {
+            let sz: u64 = nidx.size_at(i)
+            if sz > 0 && unter_uns(i) {
+                einfuegen_gross(i, sz)
+            }
+        }
+        i = i + 1
+    }
+}
+
+fn ganz_leeren() {
+    ganz = 0
+    var i: u64 = 0
+    while i < MAXG {
+        gwert[(i) as usize] = 0
+        gidx[(i) as usize] = 0
+        i = i + 1
+    }
+}
+
+// Die Bestenliste: hoechstens MAXG Plaetze, absteigend. Wer nicht
+// hineinpasst, faellt heraus -- das ist kein Verlust, sondern die
+// Frage: "die groessten" sind endlich viele.
+fn einfuegen_gross(i: u64, sz: u64) {
+    var wo: u64 = ganz
+    if ganz >= MAXG {
+        if sz <= gwert[(MAXG - 1) as usize] {
+            return
+        }
+        wo = MAXG - 1
+    } else {
+        ganz = ganz + 1
+    }
+    gwert[(wo) as usize] = sz
+    gidx[(wo) as usize] = i
+    ulib.strncpy(gnptr(wo), nidx.name_at(i), NAMEB - 1)
+    var k: u64 = wo
+    while k > 0 && gwert[(k) as usize] > gwert[(k - 1) as usize] {
+        tausche_g(k, k - 1)
+        k = k - 1
+    }
+}
+
+fn tausche_g(a: u64, b: u64) {
+    let w: u64 = gwert[(a) as usize]
+    gwert[(a) as usize] = gwert[(b) as usize]
+    gwert[(b) as usize] = w
+    let x: u64 = gidx[(a) as usize]
+    gidx[(a) as usize] = gidx[(b) as usize]
+    gidx[(b) as usize] = x
+    var tmp: [u8; 32] = [0 as u8; 32]
+    ulib.strncpy((&tmp[0 as usize]) as u64, gnptr(a), NAMEB - 1)
+    ulib.strncpy(gnptr(a), gnptr(b), NAMEB - 1)
+    ulib.strncpy(gnptr(b), (&tmp[0 as usize]) as u64, NAMEB - 1)
+}
+
+fn baue_links() {
+    bp = 0
+    bputs((&t_lkopf[0 as usize]) as u64)
+    var i: u64 = 0
+    while i < kanz {
+        if kart[(i) as usize] != 0 {
+            bput(91) // eckige Klammer auf: ein Ordner
+            bputs(knptr(i))
+            bput(93)
+        } else {
+            bputs(knptr(i))
+        }
+        bput(9)
+        bputn(kwert[(i) as usize])
+        bput(9)
+        bput_pct(promille(kwert[(i) as usize], ganzheit))
+        bput(10)
+        i = i + 1
+    }
+    bput(0)
+}
+
+fn baue_rechts() {
+    rp = 0
+    rputs((&t_rkopf[0 as usize]) as u64)
+    var i: u64 = 0
+    while i < ganz {
+        rputs(gnptr(i))
+        rput(9)
+        rputn(gwert[(i) as usize])
+        rput(10)
+        i = i + 1
+    }
+    rput(0)
+}
+
+// Die Statuszeile: was hier liegt, in Oktetten und in Kilooktett, und
+// wie viele Namen der Index insgesamt haelt. Und wenn er abgeschnitten
+// hat, steht das da -- eine Summe, der Dateien fehlen, muss das sagen.
+fn baue_status() {
+    var t1: [u8; 12] = " Oktette, \0\0"
+    var t2: [u8; 16] = " KiB, Namen: \0\0\0"
+    var t3: [u8; 24] = ", ABGESCHNITTEN: \0\0\0\0\0\0\0"
+    var buf: [u8; 26] = [0 as u8; 26]
+    let s: u64 = (&lauf[0 as usize]) as u64
+    ulib.strncpy(s, (&pfad[0 as usize]) as u64, 60)
+    var at: u64 = ulib.length(s)
+    __mmio_write8((s + at) as *mut u8, 58 as u8)
+    at = at + 1
+    __mmio_write8((s + at) as *mut u8, 32 as u8)
+    at = at + 1
+    at = at + anhaengen(s + at, ganzheit, (&buf[0 as usize]) as u64)
+    ulib.strcat(s, (&t1[0 as usize]) as u64)
+    at = ulib.length(s)
+    at = at + anhaengen(s + at, kbheit, (&buf[0 as usize]) as u64)
+    ulib.strcat(s, (&t2[0 as usize]) as u64)
+    at = ulib.length(s)
+    at = at + anhaengen(s + at, nidx.count(), (&buf[0 as usize]) as u64)
+    if nidx.truncated() > 0 {
+        ulib.strcat(s, (&t3[0 as usize]) as u64)
+        at = ulib.length(s)
+        at = at + anhaengen(s + at, nidx.truncated(),
+            (&buf[0 as usize]) as u64)
+    }
+}
+
+fn anhaengen(ziel: u64, v: u64, buf: u64) -> u64 {
+    let n: u64 = ulib.digits(v, buf)
+    var i: u64 = 0
+    while i < n {
+        __mmio_write8((ziel + i) as *mut u8,
+            __mmio_read8((buf + i) as *mut u8))
+        i = i + 1
+    }
+    __mmio_write8((ziel + n) as *mut u8, 0 as u8)
+    return n
+}
+
+// ------------------------------------------------------- die Kacheln
+//
+// SLICE AND DICE, und mehr ist es nicht: das Rechteck wird an seiner
+// LAENGEREN Seite im Verhaeltnis des groessten verbleibenden Anteils
+// geteilt, das Stueck ist die Kachel, der Rest geht in die naechste
+// Runde. Abwechselnd laengs und quer, weil die laengere Seite von Mal zu
+// Mal wechselt -- ohne das waeren es 64 duenne Streifen und keine
+// Flaechen.
+//
+// GERECHNET WIRD IN GANZEN ZAHLEN. `teil * breite / rest` -- kein
+// Gleitkomma, keine Rundungsfrage. Was durch das Abrunden verlorengeht,
+// bekommt die letzte Kachel, weil sie den Rest des Rechtecks nimmt.
+fn kacheln_malen(w: u64) {
+    let h: u64 = wlib.handle(w)
+    if h == 0 {
+        return
+    }
+    wlibc.set_band(TMY)
+    wlibc.clip_set(TMX, TMY, TMX + TMW, TMY + TMH)
+    wlibc.rect(TMX, TMY, TMW, TMH, wlibc.theme(wlibc.T_PANEL))
+    var x: u64 = TMX + 1
+    var y: u64 = TMY + 1
+    var bw: u64 = TMW - 2
+    var bh: u64 = TMH - 2
+    var rest: u64 = 0
+    var i: u64 = 0
+    while i < kanz {
+        rest = rest + kwert[(i) as usize]
+        i = i + 1
+    }
+    i = 0
+    while i < kanz && rest > 0 && bw > 2 && bh > 2 {
+        let teil: u64 = kwert[(i) as usize]
+        if teil == 0 {
+            i = kanz
+        } else {
+            var kx: u64 = x
+            var ky: u64 = y
+            var kw: u64 = bw
+            var kh: u64 = bh
+            if bw >= bh {
+                kw = bw *% teil / rest
+                if kw < 2 {
+                    kw = 2
+                }
+                if kw > bw {
+                    kw = bw
+                }
+                x = x + kw
+                bw = bw - kw
+            } else {
+                kh = bh *% teil / rest
+                if kh < 2 {
+                    kh = 2
+                }
+                if kh > bh {
+                    kh = bh
+                }
+                y = y + kh
+                bh = bh - kh
+            }
+            eine_kachel(i, kx, ky, kw, kh)
+            rest = rest - teil
+            i = i + 1
+        }
+    }
+    wlibc.frame(TMX, TMY, TMW, TMH, wlibc.theme(wlibc.T_LINE))
+    wlibc.push(h, TMX, TMY, TMW, TMH)
+}
+
+fn eine_kachel(i: u64, x: u64, y: u64, w: u64, h: u64) {
+    var s_k: [u8; 20] = "speicher: kachel i=\0"
+    var sx: [u8; 4] = "x=\0\0"
+    var sy: [u8; 4] = "y=\0\0"
+    var sw: [u8; 4] = "w=\0\0"
+    var sh: [u8; 4] = "h=\0\0"
+    var sf: [u8; 8] = "farbe=\0\0"
+    var sn: [u8; 8] = "name=\0\0\0"
+    let f: u64 = farben[((i % 8)) as usize]
+    wlibc.rect(x, y, w, h, f)
+    wlibc.frame(x, y, w, h, wlibc.theme(wlibc.T_BG))
+    // DER NAME NUR, WENN ER HINEINPASST. Ein abgeschnittener Name in
+    // einer Kachel ist schlimmer als keiner: er sieht aus wie ein
+    // anderer Name.
+    let ln: u64 = ulib.length(knptr(i))
+    let tw: u64 = wlibc.text_w(wlibc.F_UI, wlibc.PX_UI, knptr(i), ln)
+    if w > tw + 6 && h > wlibc.text_h(wlibc.PX_UI) + 2 {
+        wlibc.text_at(wlibc.F_UI, wlibc.PX_UI, x + 3,
+            y + wlibc.ascent_of(wlibc.F_UI, wlibc.PX_UI) + 2,
+            knptr(i), ln, wlibc.theme(wlibc.T_BG))
+    }
+    say((&s_k[0 as usize]) as u64)
+    ulib.sayn(i)
+    var sp: [u8; 2] = " \0"
+    say((&sp[0 as usize]) as u64)
+    kv((&sx[0 as usize]) as u64, x)
+    kv((&sy[0 as usize]) as u64, y)
+    kv((&sw[0 as usize]) as u64, w)
+    kv((&sh[0 as usize]) as u64, h)
+    kv((&sf[0 as usize]) as u64, f)
+    say((&sn[0 as usize]) as u64)
+    say(knptr(i))
+    ulib.nl()
+}
+
+// ------------------------------------------------------- der Ortswechsel
+
+fn neu_lesen(ltab: u64, rtab: u64, stat: u64, fpfad: u64, w: u64) {
+    var s_cd: [u8; 20] = "speicher: cd \0\0\0\0\0\0\0"
+    var s_i: [u8; 8] = " ino=\0\0\0"
+    var s_k: [u8; 12] = " kinder=\0\0\0\0"
+    var s_g: [u8; 12] = " okt=\0\0\0\0\0\0\0"
+    var s_b: [u8; 8] = " kb=\0\0\0\0"
+    var s_u: [u8; 8] = " us=\0\0\0\0"
+    var s_d: [u8; 12] = " gross=\0\0\0\0\0"
+    let t0: u64 = nidx.mono_us()
+    ino_now = nidx.ino_of_path((&pfad[0 as usize]) as u64)
+    ganzheit = nidx.total_of_ino(ino_now)
+    kbheit = nidx.blocks_of_ino(ino_now)
+    let us: u64 = nidx.mono_us() -% t0
+    kinder_lesen()
+    gross_lesen()
+    baue_links()
+    baue_rechts()
+    baue_status()
+    wlib.set_text(ltab, (&lblob[0 as usize]) as u64)
+    wlib.set_text(rtab, (&rblob[0 as usize]) as u64)
+    wlib.set_text(stat, (&lauf[0 as usize]) as u64)
+    wlib.set_text(fpfad, (&pfad[0 as usize]) as u64)
+    say((&s_cd[0 as usize]) as u64)
+    say((&pfad[0 as usize]) as u64)
+    kv((&s_i[0 as usize]) as u64, ino_now)
+    kv((&s_k[0 as usize]) as u64, kanz)
+    kv((&s_g[0 as usize]) as u64, ganzheit)
+    kv((&s_b[0 as usize]) as u64, kbheit)
+    kv((&s_u[0 as usize]) as u64, us)
+    kv((&s_d[0 as usize]) as u64, ganz)
+    ulib.nl()
+    zeilen_melden()
+}
+
+// WAS DIE TAFEL ZEIGT, ALS ZAHLEN -- damit der Testlaeufer es gegen das
+// Abbild rechnen kann und nicht gegen das Bild raten muss.
+fn zeilen_melden() {
+    var s_z: [u8; 20] = "speicher: zeile i=\0\0"
+    var so: [u8; 6] = "okt=\0\0"
+    var sp2: [u8; 6] = "pm=\0\0\0"
+    var sd: [u8; 6] = "dir=\0\0"
+    var sn: [u8; 8] = "name=\0\0\0"
+    var s_g: [u8; 20] = "speicher: gross i=\0\0"
+    var i: u64 = 0
+    while i < kanz && i < 24 {
+        say((&s_z[0 as usize]) as u64)
+        ulib.sayn(i)
+        var sp: [u8; 2] = " \0"
+        say((&sp[0 as usize]) as u64)
+        kv((&so[0 as usize]) as u64, kwert[(i) as usize])
+        kv((&sp2[0 as usize]) as u64,
+            promille(kwert[(i) as usize], ganzheit))
+        kv((&sd[0 as usize]) as u64, kart[(i) as usize])
+        say((&sn[0 as usize]) as u64)
+        say(knptr(i))
+        ulib.nl()
+        i = i + 1
+    }
+    i = 0
+    while i < ganz && i < 12 {
+        say((&s_g[0 as usize]) as u64)
+        ulib.sayn(i)
+        var sp: [u8; 2] = " \0"
+        say((&sp[0 as usize]) as u64)
+        kv((&so[0 as usize]) as u64, gwert[(i) as usize])
+        say((&sn[0 as usize]) as u64)
+        say(gnptr(i))
+        ulib.nl()
+        i = i + 1
+    }
+}
+
+// DIE GEGENPROBE, AUS DEM PROGRAMM HERAUS. Derselbe Ort, der andere
+// Weg: ein echter Verzeichnisdurchlauf mit `stat` je Datei. Beide Zahlen
+// werden gemeldet, und `ok=1` heisst: Oktett fuer Oktett dasselbe.
+fn gegenprobe() {
+    var s_p: [u8; 24] = "speicher: probe idx=\0\0\0\0"
+    var s_l: [u8; 8] = " lauf=\0\0"
+    var s_k: [u8; 10] = " idxkb=\0\0\0"
+    var s_m: [u8; 10] = " laufkb=\0\0"
+    var s_o: [u8; 6] = " ok=\0\0"
+    var s_u: [u8; 8] = " us=\0\0\0\0"
+    let t0: u64 = nidx.mono_us()
+    let lauf2: u64 = nidx.walk_total((&pfad[0 as usize]) as u64)
+    let us: u64 = nidx.mono_us() -% t0
+    var ok: u64 = 0
+    if lauf2 == ganzheit && nidx.walk_blocks() == kbheit {
+        ok = 1
+    }
+    say((&s_p[0 as usize]) as u64)
+    ulib.sayn(ganzheit)
+    kv((&s_l[0 as usize]) as u64, lauf2)
+    kv((&s_k[0 as usize]) as u64, kbheit)
+    kv((&s_m[0 as usize]) as u64, nidx.walk_blocks())
+    kv((&s_o[0 as usize]) as u64, ok)
+    kv((&s_u[0 as usize]) as u64, us)
+    ulib.nl()
+}
+
+fn hinein(z: u64) -> bool {
+    if z >= kanz {
+        return false
+    }
+    if kart[(z) as usize] == 0 {
+        return false
+    }
+    let out: u64 = (&vollpfad[0 as usize]) as u64
+    ulib.strncpy(out, (&pfad[0 as usize]) as u64, 200)
+    if ulib.length(out) > 1 {
+        var schraeg: [u8; 2] = "/\0"
+        ulib.strcat(out, (&schraeg[0 as usize]) as u64)
+    }
+    ulib.strcat(out, knptr(z))
+    ulib.strncpy((&pfad[0 as usize]) as u64, out, 190)
+    return true
+}
+
+fn hinauf() {
+    let p: u64 = (&pfad[0 as usize]) as u64
+    var n: u64 = ulib.length(p)
+    if n <= 1 {
+        return
+    }
+    while n > 1 && __mmio_read8((p + n - 1) as *mut u8) != 47 as u8 {
+        n = n - 1
+    }
+    if n > 1 {
+        n = n - 1
+    }
+    __mmio_write8((p + n) as *mut u8, 0 as u8)
+    if n == 0 {
+        ulib.strcpy(p, (&t_wurz[0 as usize]) as u64)
+    }
+}
+
+// LOESCHEN, UND DAS IST DIE EINZIGE STELLE, AN DER DIESES PROGRAMM DIE
+// PLATTE AENDERT. Danach wird NICHT neu gebaut: `nidx.poll` holt die
+// Saetze des Journals ab, und die Summen ziehen sich um den Unterschied
+// nach. Genau das ist die Zusage dieser Runde, und sie steht in der
+// Meldung: `gezogen=` sagt, wie viele Saetze es waren, `bauten=0` waere
+// gelogen, wenn hier ein `build` staende -- es steht keines.
+fn loeschen(z: u64) -> u64 {
+    var s_t: [u8; 24] = "speicher: tat loeschen \0"
+    var s_r: [u8; 8] = " rc=\0\0\0\0"
+    var s_g: [u8; 12] = " gezogen=\0\0\0"
+    var s_v: [u8; 12] = " vorher=\0\0\0\0"
+    var s_n: [u8; 12] = " nachher=\0\0\0"
+    if z >= kanz {
+        return 1
+    }
+    let out: u64 = (&vollpfad[0 as usize]) as u64
+    ulib.strncpy(out, (&pfad[0 as usize]) as u64, 200)
+    if ulib.length(out) > 1 {
+        var schraeg: [u8; 2] = "/\0"
+        ulib.strcat(out, (&schraeg[0 as usize]) as u64)
+    }
+    ulib.strcat(out, knptr(z))
+    let vorher: u64 = nidx.total_of_ino(ino_now)
+    let rc: u64 = io.unlink(out)
+    let gezogen: u64 = nidx.poll()
+    let nachher: u64 = nidx.total_of_ino(ino_now)
+    say((&s_t[0 as usize]) as u64)
+    say(out)
+    kv((&s_r[0 as usize]) as u64, rc)
+    kv((&s_g[0 as usize]) as u64, gezogen)
+    kv((&s_v[0 as usize]) as u64, vorher)
+    kv((&s_n[0 as usize]) as u64, nachher)
+    ulib.nl()
+    return rc
+}
+
+// ------------------------------------------------------------ das Fenster
+
+fn say_rect(i: u64) {
+    var a: [u8; 16] = "speicher: rect \0"
+    var si: [u8; 4] = "id=\0"
+    var sk: [u8; 8] = "kind=\0\0\0"
+    var sx: [u8; 4] = "x=\0\0"
+    var sy: [u8; 4] = "y=\0\0"
+    var sw: [u8; 4] = "w=\0\0"
+    var sh: [u8; 4] = "h=\0\0"
+    say((&a[0 as usize]) as u64)
+    kv((&si[0 as usize]) as u64, i)
+    kv((&sk[0 as usize]) as u64, wlib.kind_of(i))
+    kv((&sx[0 as usize]) as u64, wlib.rect_x(i))
+    kv((&sy[0 as usize]) as u64, wlib.rect_y(i))
+    kv((&sw[0 as usize]) as u64, wlib.rect_w(i))
+    kv((&sh[0 as usize]) as u64, wlib.rect_h(i))
+    ulib.nl()
+}
+
+fn u_start(args: u64) -> u64 {
+    var s_bad: [u8; 28] = "speicher: keine Flaeche\0\0\0\0\0"
+    var s_go: [u8; 20] = "speicher: ready\0\0\0\0\0"
+    var s_b: [u8; 24] = "speicher: bauen n=\0\0\0\0\0\0"
+    var s_u: [u8; 8] = " us=\0\0\0\0"
+    var s_g: [u8; 12] = " gesamt=\0\0\0\0"
+    var s_l: [u8; 10] = " lost=\0\0\0\0"
+    var s_a: [u8; 12] = " abgeschn=\0\0"
+    var s_no: [u8; 8] = "nohit\0\0\0"
+    var s_nc: [u8; 8] = "noclip\0\0"
+    var s_ni: [u8; 8] = "noidx\0\0\0"
+    var s_st: [u8; 12] = "/daten\0\0\0\0\0\0"
+
+    var nohit: bool = false
+    var noclip: bool = false
+    var noidx: bool = false
+    let argc: u64 = ulib.arg_count(args)
+    var a: u64 = 1
+    while a < argc {
+        let p: u64 = ulib.arg_at(args, a)
+        if ulib.streq(p, (&s_no[0 as usize]) as u64) {
+            nohit = true
+        }
+        if ulib.streq(p, (&s_nc[0 as usize]) as u64) {
+            noclip = true
+        }
+        // GEGENPROBE: ohne Index. Dann steht in jeder Zeile eine Null,
+        // die Kacheln verschwinden, und die Statuszeile sagt 0 Oktette.
+        // Eine Oberflaeche, die auch ohne ihre Quelle noch Zahlen zeigt,
+        // zeigt erfundene.
+        if ulib.streq(p, (&s_ni[0 as usize]) as u64) {
+            noidx = true
+        }
+        a = a + 1
+    }
+    if !wlib.begin(nohit, noclip) {
+        say((&s_bad[0 as usize]) as u64)
+        ulib.nl()
+        return 1
+    }
+    farben[(0) as usize] = 5273279
+    farben[(1) as usize] = 12556117
+    farben[(2) as usize] = 6274437
+    farben[(3) as usize] = 10510773
+    farben[(4) as usize] = 12559693
+    farben[(5) as usize] = 5285288
+    farben[(6) as usize] = 10505039
+    farben[(7) as usize] = 8355967
+
+    // DER AUFBAU. Einmal, beim Start -- danach traegt das Journal nach.
+    let t0: u64 = nidx.mono_us()
+    var n: u64 = 0
+    var gesamt: u64 = 0
+    if !noidx {
+        n = nidx.build()
+        gesamt = nidx.size_build()
+    }
+    let us: u64 = nidx.mono_us() -% t0
+    say((&s_b[0 as usize]) as u64)
+    ulib.sayn(n)
+    kv((&s_u[0 as usize]) as u64, us)
+    kv((&s_g[0 as usize]) as u64, gesamt)
+    kv((&s_l[0 as usize]) as u64, nidx.lost_seen())
+    kv((&s_a[0 as usize]) as u64, nidx.truncated())
+    ulib.nl()
+
+    if ulib.is_dir((&s_st[0 as usize]) as u64) {
+        ulib.strcpy((&pfad[0 as usize]) as u64, (&s_st[0 as usize]) as u64)
+    }
+
+    lspalten[(0) as usize] = 210
+    lspalten[(1) as usize] = 100
+    lspalten[(2) as usize] = 74
+    rspalten[(0) as usize] = 210
+    rspalten[(1) as usize] = 100
+
+    let w: u64 = wlib.window(40, 40, BW, BH, (&t_titel[0 as usize]) as u64)
+    if w >= wlib.MAXWN {
+        say((&s_bad[0 as usize]) as u64)
+        ulib.nl()
+        return 1
+    }
+
+    wlib.box_h(w, 8, 8, BW - 16, 28, 0, 6)
+    wlib.size(30, 26)
+    let bauf: u64 = wlib.button((&t_auf[0 as usize]) as u64)
+    wlib.size(96, 26)
+    let bneu: u64 = wlib.button((&t_neu[0 as usize]) as u64)
+    wlib.size(80, 26)
+    let bdel: u64 = wlib.button((&t_del[0 as usize]) as u64)
+    wlib.size(0, 26)
+    let fpfad: u64 = wlib.entry((&pfad[0 as usize]) as u64, 180)
+    wlib.box_end()
+
+    wlib.box_h(w, 8, 44, BW - 16, 254, 0, 8)
+    wlib.size(392, 254)
+    let ltab: u64 = wlib.table((&lblob[0 as usize]) as u64, 9, 3,
+        (&lspalten[0 as usize]) as u64)
+    wlib.size(0, 254)
+    let rtab: u64 = wlib.table((&rblob[0 as usize]) as u64, 9, 2,
+        (&rspalten[0 as usize]) as u64)
+    wlib.box_end()
+
+    wlib.box_v(w, 8, 376, BW - 16, 24, 0, 0)
+    wlib.size(0, 20)
+    let stat: u64 = wlib.label((&lauf[0 as usize]) as u64)
+    wlib.box_end()
+
+    neu_lesen(ltab, rtab, stat, fpfad, w)
+    wlib.draw_all()
+    kacheln_malen(w)
+    gegenprobe()
+    say((&s_go[0 as usize]) as u64)
+    ulib.nl()
+    say_rect(bauf)
+    say_rect(bneu)
+    say_rect(bdel)
+    say_rect(fpfad)
+    say_rect(ltab)
+    say_rect(rtab)
+    say_rect(stat)
+
+    var wartet: u64 = 0
+    var runden: u64 = 0
+    while wlib.alive() && runden < 4000000 {
+        runden = runden + 1
+        let id: u64 = wlib.step()
+        if id < wlib.MAXWD {
+            let kind: u64 = wlib.fired_kind()
+            let idx: u64 = wlib.fired_index()
+            if kind == wlib.K_BUTTON {
+                if id == bauf {
+                    hinauf()
+                    neu_lesen(ltab, rtab, stat, fpfad, w)
+                    wlib.draw_all()
+                    kacheln_malen(w)
+                    gegenprobe()
+                } else if id == bneu {
+                    nidx.poll()
+                    nidx.size_build()
+                    neu_lesen(ltab, rtab, stat, fpfad, w)
+                    wlib.draw_all()
+                    kacheln_malen(w)
+                    gegenprobe()
+                } else if id == bdel {
+                    wlib.dlg_ask((&t_delt[0 as usize]) as u64,
+                        (&t_frage[0 as usize]) as u64)
+                    wartet = 1
+                }
+            } else if kind == wlib.K_ENTRY && id == fpfad {
+                neu_lesen(ltab, rtab, stat, fpfad, w)
+                wlib.draw_all()
+                kacheln_malen(w)
+                gegenprobe()
+            } else if kind == wlib.K_LIST {
+                if id == ltab {
+                    if hinein(idx) {
+                        neu_lesen(ltab, rtab, stat, fpfad, w)
+                        wlib.draw_all()
+                        kacheln_malen(w)
+                        gegenprobe()
+                    }
+                }
+            }
+        }
+        if wlib.dlg_state() > 1 {
+            if wlib.dlg_state() == 2 && wartet == 1 {
+                loeschen(wlib.value(ltab))
+                neu_lesen(ltab, rtab, stat, fpfad, w)
+            }
+            wartet = 0
+            wlib.dlg_close()
+            wlib.draw_all()
+            kacheln_malen(w)
+        }
+    }
+    return 0
+}
