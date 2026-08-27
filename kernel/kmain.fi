@@ -3176,6 +3176,37 @@ fn mode_of(state: u64, cmd: u64) {
     if find(cmd, (&wsp[0]) as u64, 11) != 0 {
         kstate.mode_add(state, kstate.M_WIGSPEICHER)
     }
+    // RUNDE DESKTOP: der Schreibtisch, die Taskleiste, die
+    // Einstellungen, der DHCP-Klient -- und die drei Gegenproben.
+    var dkw: [u8; 5] = "desk\0"
+    var dew: [u8; 6] = "einst\0"
+    var dnl: [u8; 8] = "nolayer\0"
+    var dnm: [u8; 6] = "nomin\0"
+    var ddh: [u8; 5] = "dhcp\0"
+    var dnd: [u8; 7] = "nodhcp\0"
+    if find(cmd, (&dkw[0]) as u64, 4) != 0 {
+        kstate.mode_add(state, kstate.M_DESK)
+    }
+    if find(cmd, (&dew[0]) as u64, 5) != 0 {
+        kstate.mode_add(state, kstate.M_EINST)
+    }
+    if find(cmd, (&dnl[0]) as u64, 7) != 0 {
+        kstate.mode_add(state, kstate.M_NOLAYER)
+    }
+    if find(cmd, (&dnm[0]) as u64, 5) != 0 {
+        kstate.mode_add(state, kstate.M_NOMIN)
+    }
+    // ZUERST `nodhcp`, DANN `dhcp` -- sonst findet die Suche nach
+    // "dhcp" das Wort INNERHALB von "nodhcp" und schaltet beides an.
+    // Genau das ist beim Bauen dieser Runde passiert.
+    if find(cmd, (&dnd[0]) as u64, 6) != 0 {
+        kstate.mode_add(state, kstate.M_NODHCP)
+    }
+    if find(cmd, (&ddh[0]) as u64, 4) != 0 {
+        if !kstate.mode_on(state, kstate.M_NODHCP) {
+            kstate.mode_add(state, kstate.M_DHCP)
+        }
+    }
     // RUNDE K18: die Energieschicht und ihre Gegenproben.
     var pww: [u8; 4] = "pwr\0"
     var pwnc: [u8; 10] = "nocstates\0"
@@ -3468,6 +3499,12 @@ fn surface(state: u64) {
     if !wm.init(state, w, h, nodirty, nofocus) {
         return
     }
+    // RUNDE DESKTOP: die beiden Gegenproben. Sie stehen hier und nicht
+    // in `wm.init`, weil `init` schon vier Argumente hat und weil
+    // dieselbe Zeile in `tools/desktop/run.sh` als ein Wort auf der
+    // Befehlszeile erscheint.
+    wm.set_nolayer(state, kstate.mode_on(state, kstate.M_NOLAYER))
+    wm.set_nomin(state, kstate.mode_on(state, kstate.M_NOMIN))
     wm.set_fonts(state, f_ui, PX_UI, f_tx, PX_MONO)
     if kstate.mode_on(state, kstate.M_NOMOUSE) {
         wm.set_cursor(state, false)
@@ -3555,12 +3592,15 @@ fn surface(state: u64) {
     var t: u64 = 0
     if !kstate.mode_on(state, kstate.M_WIG)
        && !kstate.mode_on(state, kstate.M_WIGFILES)
-       && !kstate.mode_on(state, kstate.M_WIGSTART) {
+       && !kstate.mode_on(state, kstate.M_WIGSTART)
+       && !kstate.mode_on(state, kstate.M_DESK) {
         t = proc.create(state, P_WCLICK, (w << 16) | h, 2)
         // Ein paar Marken, damit sie ihr Fenster wirklich anlegt, bevor
         // gemessen wird.
         sched.sleep_ticks(state, 12)
         wm.compose(state)
+    } else if kstate.mode_on(state, kstate.M_DESK) {
+        t = desk_start(state)
     } else {
         t = k15_start(state)
     }
@@ -3659,7 +3699,169 @@ fn surface(state: u64) {
     serial.nl()
     say_wm_input(state)
     say_wig(state)
+    say_wins(state)
     let _unused: u64 = t
+}
+
+// ====================================================== RUNDE DESKTOP
+//
+// WAS WIRKLICH IN DER FENSTERTAFEL STEHT, Satz fuer Satz, auf die
+// serielle Leitung. Ohne das waere jede Aussage dieser Runde ueber
+// Ebenen und ueber Minimieren eine Aussage ueber etwas, das man im Bild
+// gerade NICHT sieht -- ein verborgenes Fenster ist im Bild
+// ununterscheidbar von einem geschlossenen.
+//
+//   wm: win nr=<platz> id=<nummer> z=<stufe> layer=<ebene> hidden=<0/1>
+//       deco=<0/1> x= y= w= h= focus=<0/1> t=[<titel>]
+fn say_wins(state: u64) {
+    var s_a: [u8; 12] = "wm: win nr=\0"
+    var s_b: [u8; 6] = " id=\0\0"
+    var s_c: [u8; 5] = " z=\0\0"
+    var s_d: [u8; 9] = " layer=\0\0"
+    var s_e: [u8; 10] = " hidden=\0\0"
+    var s_f: [u8; 8] = " deco=\0\0"
+    var s_g: [u8; 5] = " x=\0\0"
+    var s_h: [u8; 5] = " y=\0\0"
+    var s_i: [u8; 5] = " w=\0\0"
+    var s_j: [u8; 5] = " h=\0\0"
+    var s_k: [u8; 9] = " focus=\0\0"
+    var s_l: [u8; 6] = " t=[\0\0"
+    var s_m: [u8; 4] = "]\0\0\0"
+    var s_n: [u8; 16] = "wm: wins n=\0\0\0\0\0"
+    var s_o: [u8; 10] = " hides=\0\0\0"
+    var s_p: [u8; 10] = " shows=\0\0\0"
+    var s_q: [u8; 12] = " nolayer=\0\0\0"
+    var s_r: [u8; 10] = " nomin=\0\0\0"
+    var i: u64 = 0
+    while i < wm.MAX_WIN {
+        if wm.valid(state, i) {
+            serial.puts((&s_a[0]) as u64)
+            serial.dec(i)
+            serial.puts((&s_b[0]) as u64)
+            serial.dec(wm.win_id(state, i))
+            serial.puts((&s_c[0]) as u64)
+            serial.dec(wm.win_z(state, i))
+            serial.puts((&s_d[0]) as u64)
+            serial.dec(wm.win_layer(state, i))
+            serial.puts((&s_e[0]) as u64)
+            serial.dec(bnum(wm.win_hidden(state, i)))
+            serial.puts((&s_f[0]) as u64)
+            serial.dec(bnum(wm.win_deco(state, i)))
+            serial.puts((&s_g[0]) as u64)
+            serial.dec(wm.win_x(state, i) as u64)
+            serial.puts((&s_h[0]) as u64)
+            serial.dec(wm.win_y(state, i) as u64)
+            serial.puts((&s_i[0]) as u64)
+            serial.dec(wm.win_w(state, i))
+            serial.puts((&s_j[0]) as u64)
+            serial.dec(wm.win_h(state, i))
+            serial.puts((&s_k[0]) as u64)
+            serial.dec(bnum(wm.focus(state) == i))
+            serial.puts((&s_l[0]) as u64)
+            serial.puts(wm.win_title(state, i))
+            serial.puts((&s_m[0]) as u64)
+            serial.nl()
+        }
+        i = i + 1
+    }
+    serial.puts((&s_n[0]) as u64)
+    serial.dec(wm.count(state))
+    serial.puts((&s_o[0]) as u64)
+    serial.dec(wm.hides(state))
+    serial.puts((&s_p[0]) as u64)
+    serial.dec(wm.shows(state))
+    serial.puts((&s_q[0]) as u64)
+    serial.dec(bnum(wm.nolayer(state)))
+    serial.puts((&s_r[0]) as u64)
+    serial.dec(bnum(wm.nomin(state)))
+    serial.nl()
+}
+
+// EIN PROGRAMM VON DER PLATTE STARTEN, mit genau einem Argument. Die
+// drei Zeilen standen in `k15_start` viermal untereinander; hier
+// stehen sie einmal.
+fn desk_spawn(state: u64, pfad: u64, arg: u64, n: u64) -> u64 {
+    let abuf: u64 = state + kstate.EARG_OFF
+    var k: u64 = 0
+    while k < n {
+        kstate.set8(abuf + k, kstate.get8(arg + k) as u8)
+        k = k + 1
+    }
+    let pid: u64 = elf.spawn(state, pfad, abuf, 1, 2)
+    var s_st: [u8; 13] = "desk: start \0"
+    var s_pid: [u8; 7] = "  pid=\0"
+    serial.puts((&s_st[0]) as u64)
+    serial.puts(pfad)
+    serial.puts((&s_pid[0]) as u64)
+    serial.dec(pid)
+    serial.nl()
+    return pid
+}
+
+// DER SCHREIBTISCH. Vier Programme von der Platte, in dieser
+// Reihenfolge, und die Reihenfolge ist keine Laune:
+//
+//   1. /bin/schreibtisch  legt das Fenster auf Ebene 0 an. Es entsteht
+//      als erstes und ist trotzdem HINTEN -- ohne Ebenen ginge das
+//      nicht, und genau das ist die Zusage dieser Runde.
+//   2. /bin/leiste        legt ihres auf Ebene 2 an. Es entsteht als
+//      zweites und bleibt trotzdem VORN, auch wenn danach noch drei
+//      Fenster aufgehen.
+//   3. /bin/starter       ein gewoehnliches Fenster dazwischen.
+//   4. /bin/einstellungen nur auf Wort (`einst`), und /bin/dhcp nur
+//      auf Wort (`dhcp`) -- der DHCP-Lauf braucht eine Karte, und
+//      nicht jeder Messlauf hat eine.
+fn desk_start(state: u64) -> u64 {
+    var p_desk: [u8; 18] = "/bin/schreibtisch\0"
+    var p_leis: [u8; 12] = "/bin/leiste\0"
+    var p_star: [u8; 13] = "/bin/starter\0"
+    var p_eins: [u8; 20] = "/bin/einstellungen\0\0"
+    var p_dhcp: [u8; 10] = "/bin/dhcp\0"
+    var a_desk: [u8; 13] = "schreibtisch\0"
+    var a_leis: [u8; 7] = "leiste\0"
+    var a_star: [u8; 8] = "starter\0"
+    var a_eins: [u8; 15] = "einstellungen\0\0"
+    var a_dhcp: [u8; 5] = "dhcp\0"
+    var pid: u64 = desk_spawn(state, (&p_desk[0]) as u64,
+        (&a_desk[0]) as u64, 13)
+    // Dem Schreibtisch Zeit geben, sein Fenster anzulegen und seine
+    // Ebene zu setzen, BEVOR die Leiste kommt. Ohne das ist die
+    // Reihenfolge in der Tafel eine Frage des Zufalls, und eine
+    // Messung ueber eine Reihenfolge, die sich bei jedem Lauf anders
+    // einstellt, misst nichts.
+    var runden: u64 = 0
+    while runden < 250 {
+        wm.poll(state)
+        wm.compose(state)
+        sched.sleep_ticks(state, 1)
+        runden = runden + 1
+    }
+    let _l: u64 = desk_spawn(state, (&p_leis[0]) as u64,
+        (&a_leis[0]) as u64, 7)
+    runden = 0
+    while runden < 250 {
+        wm.poll(state)
+        wm.compose(state)
+        sched.sleep_ticks(state, 1)
+        runden = runden + 1
+    }
+    pid = desk_spawn(state, (&p_star[0]) as u64, (&a_star[0]) as u64, 8)
+    if kstate.mode_on(state, kstate.M_EINST) {
+        pid = desk_spawn(state, (&p_eins[0]) as u64,
+            (&a_eins[0]) as u64, 15)
+    }
+    if kstate.mode_on(state, kstate.M_DHCP) {
+        let _d: u64 = desk_spawn(state, (&p_dhcp[0]) as u64,
+            (&a_dhcp[0]) as u64, 5)
+    }
+    runden = 0
+    while runden < 500 {
+        wm.poll(state)
+        wm.compose(state)
+        sched.sleep_ticks(state, 1)
+        runden = runden + 1
+    }
+    return pid
 }
 
 // RUNDE K15: DIE ANWENDUNG DIESER RUNDE STARTEN. Sie kommt von der

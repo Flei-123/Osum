@@ -65,6 +65,8 @@
 //   0x49000  die Tabelle der Dateiarten (Runde K16)
 //   0x4C000  der Modusvektor (Runde K17, MODE_OFF)
 //   0x4D000  frei
+//   0x50000  USB: xHCI-Ringe und Geraetesaetze (Runde K17, K17_OFF)
+//   0x64000  Fenstertafel und Ereignisringe (Runde DESKTOP, `wm.fi`)
 //   0x58000  die Energieschicht (Runde K18, `pwr.fi`)
 //   0x59000  Akku, Netzteil und Thermalzone (Runde K18, `batt.fi`)
 //   0x5A000  OFS in Fassung 3: die Pfadpuffer des Dateisystems,
@@ -74,7 +76,7 @@
 //            (Runde SPEICHER, `nidx.fi`)
 //   0x60000  die Arbeitsverzeichnisse, vier Seiten (Runde OFS3;
 //            lagen bis dahin auf 0x29000, eine Seite)
-//   0x64000  frei, bis KDATA_SIZE (0x70000)
+//   0x68000  frei, bis KDATA_SIZE (0x70000)
 //
 // RUNDE K12 HAT DIESEN BEREICH WACHSEN LASSEN, von 0x40000 auf 0x50000.
 // Der Grund steht hier, damit ihn niemand suchen muss: mit dem
@@ -145,6 +147,8 @@ export {
     O_NOLINKS, O_OFS3, O_OFS3FMT, O_NOATIME,
     OP_NAME, OP_NAME2, OP_OLD, OP_NEW, OP_PATH, OP_WORK, OP_BUILD,
     OP_LINK, OP_TMP, OP_ENT,
+    DSK_OFF, DSK_MAX,
+    M_DESK, M_EINST, M_NOLAYER, M_NOMIN, M_DHCP, M_NODHCP,
     MODE_OFF, MODE_MAX, MODE_WORDS, MODE_FREE,
     M_NORING3, M_NOTIMER, M_R3FAULT, M_NOSCHED, M_NOPREEMPT,
     M_NOPROC, M_NOFS, M_ATA, M_CAPS,
@@ -990,11 +994,6 @@ const OP_BUILD: u64 = 0xC00 // der neu gebaute Pfad nach einem Verweis
 const OP_LINK: u64 = 0x1000 // das Ziel eines symbolischen Verweises, 1024
 const OP_TMP: u64 = 0x1400 // Zwischenlage fuer `symlink`/`readlink`
 const OP_ENT: u64 = 0x1800 // ein Verzeichniseintrag, 512
-// Die Schalter dieser Runde. Sie stehen NICHT im allgemeinen MODE-Wort:
-// dort waere nur noch Bit 63 frei, und das ist gesperrt -- `fs.enter`
-// benutzt es als Merker fuer eine verschachtelte Sperre (`fs.NESTED`).
-// Ein Modusbit an derselben Stelle waere eine Falle fuer den naechsten
-// Leser.
 // RUNDE OFS3, jetzt in Wort 7 des Modusvektors statt in einem eigenen
 // Moduswort in `OFS3_OFF`. Der Grund fuer das eigene Wort war, dass die
 // 64 Bits des alten Modus voll waren; seit Runde K17 gibt es dafuer
@@ -1026,6 +1025,44 @@ const O_NOATIME: u64 = 452 // Wort 7, Bit 4 -- keine Zugriffszeit
 //   `nolinks`   GEGENPROBE: `fs.path` folgt keinem symbolischen Verweis.
 //               Jeder Pfad ueber einen Verweis MUSS dann ins Leere
 //               laufen.
+
+// ======================================================= RUNDE DESKTOP
+//
+// VIER SEITEN, 0x54000..0x58000, UND SIE GEHOEREN DIESER RUNDE ALLEIN.
+//
+// WARUM DIESE RUNDE UEBERHAUPT EINE SEITE BRAUCHT, und der Grund ist
+// eine Zahl: der Fensterserver konnte ACHT Fenster. Ein Schreibtisch
+// mit Hintergrund (1), eine Taskleiste (1), der Starter (1), der
+// Datei-Explorer mit Kontextmenue und Dialog (3) und die Einstellungen
+// mit Dialog (2) sind ACHT -- die neunte Anwendung bekaeme kein
+// Fenster mehr. MAX_WIN steigt deshalb von 8 auf 16, und damit passen
+// Fenstertafel (16 x 256 = 0x1000) und Ereignisringe (16 x 512 =
+// 0x2000) nicht mehr in die zwei Seiten von WM_OFF. Beide ziehen
+// hierher; in WM_OFF bleiben die Skalare des Servers.
+//
+//   +0x0000  die Fenstertafel: 16 Saetze zu 256 Oktetten
+//   +0x1000  die Ereignisringe: 16 Ringe zu 32 Plaetzen a 16 Oktetten
+//   +0x3000  Vorrat dieser Runde
+//
+// WARUM NICHT 0x4C000, die naechste freie Seite. Am 27.08.2026 laufen
+// wieder mehrere Runden an diesem Baum, darunter eine am Dateisystem.
+// Wer sequentiell greift, greift 0x4C000. Diese Runde greift deshalb
+// ans ANDERE Ende des freien Vorrats und laesst 0x4C000..0x54000 (32
+// KiB) fuer die Runde, die der Reihe nach nimmt. Das ist keine Feinheit
+// -- genau an dieser Stelle sind in diesem Baum schon vier
+// Zusammenfuehrungen gescheitert (siehe tools/kernel/karte.py).
+// MERGE-VERSCHIEBUNG: 0x54000 -> 0x64000. Diese Runde hatte
+// ausdruecklich ans ANDERE Ende des freien Vorrats gegriffen (0x54000)
+// und 0x4C000..0x54000 fuer die Runde freigelassen, die der Reihe nach
+// nimmt. Runde K17 hat dann NICHT der Reihe nach genommen, sondern
+// 0x50000..0x58000 -- acht Seiten mitten hinein. Der Kartenpruefer hat
+// die Ueberschneidung beim Zusammenfuehren sofort gemeldet. Verschoben
+// wird DIESE Runde und nicht K17, weil vier Seiten leichter umziehen als
+// acht; der Vorrat hinter den Arbeitsverzeichnissen (0x64000..0x70000,
+// aus Runde OFS3) nimmt sie auf.
+const DSK_OFF: u64 = 0x64000
+const DSK_MAX: u64 = 0x4000
+
 
 // RUNDE K18. Die Woerter dieser Runde auf der Befehlszeile. Wie in jeder
 // Runde davor sind die meisten davon GEGENPROBEN, und ohne sie beweist
@@ -1073,6 +1110,38 @@ const M_PWRBLANK: u64 = 327 // Wort 5, Bit 7
 // frames taken and given back is a second of boot that nobody needs
 // twice.
 const M_MEMSTRESS: u64 = 448 // Wort 7, Bit 0
+
+// RUNDE DESKTOP. Die Woerter dieser Runde auf der Befehlszeile -- und
+// wie in jeder Runde davor ist die Haelfte davon GEGENPROBE:
+//
+//   `desk`       Schreibtisch und Taskleiste starten
+//                (/bin/schreibtisch und /bin/leiste).
+//   `einst`      zusaetzlich /bin/einstellungen.
+//   `nolayer`    GEGENPROBE zu den Ebenen: `raise_win` achtet NICHT
+//                mehr auf die Ebene. Dann kommt der Schreibtisch beim
+//                ersten Klick nach vorn und verdeckt alles -- genau der
+//                Zustand, den Logbuch K15 als "geht heute nicht"
+//                beschrieben hat.
+//   `nomin`      GEGENPROBE zum Minimieren: das Verbergen tut nichts.
+//                Ein Fenster, auf dessen Leistenknopf geklickt wurde,
+//                bleibt dann sichtbar.
+//   `dhcp`       den DHCP-Klienten in Ring 3 starten (/bin/dhcp).
+//   `nodhcp`     GEGENPROBE: derselbe Lauf ohne ihn -- die Adresse
+//                bleibt die statische aus `inet.init`.
+// RUNDE DESKTOP, in den Modusvektor der Runde K17 eingehaengt. Diese
+// Runde hatte 1 << 54 bis 1 << 59 genommen -- und 1 << 54 hatten die
+// Runden MEM und SPEICHER auch schon genommen. DREI Runden auf demselben
+// Bit; keine von ihnen konnte es sehen, weil keine zwei von ihnen je in
+// einem Baum lagen. Der Schreibtisch, die Einstellungen und die zwei
+// Gegenproben gehoeren in das Wort der OBERFLAECHE (Wort 1, wie K10 und
+// K15); der DHCP-Klient macht das Wort des NETZES auf (Wort 8), in dem
+// die Netzrunden danach weiterzaehlen.
+const M_DESK: u64 = 81 // Wort 1, Bit 17
+const M_EINST: u64 = 82 // Wort 1, Bit 18
+const M_NOLAYER: u64 = 83 // Wort 1, Bit 19
+const M_NOMIN: u64 = 84 // Wort 1, Bit 20
+const M_DHCP: u64 = 512 // Wort 8, Bit 0
+const M_NODHCP: u64 = 513 // Wort 8, Bit 1
 
 // Runde K12 hat kdata von 0x40000 auf 0x50000 wachsen lassen, Runde K18
 // von 0x50000 auf 0x60000 -- ihr Vorrat (0x58000..0x60000) liegt hinter
@@ -1132,7 +1201,8 @@ const KDATA_SIZE: u64 = 0x70000
 //                      23..63 sind frei.
 //   Wort  1   64..127  DIE OBERFLAECHE -- Runde K10 (Maus, Fensterserver,
 //                      Schriften) und Runde K15 (Widgets, Dateimanager,
-//                      Starter, Speicherplatzanalyse). Frei ab Bit 17.
+//                      Starter, Speicherplatzanalyse) und Runde DESKTOP
+//                      (Schreibtisch, Einstellungen). Frei ab Bit 21.
 //   Wort  2  128..191  BENUTZER UND RECHTE -- Runde K13. Frei ab Bit 6.
 //   Wort  3  192..255  DIE DATEISYSTEME -- Runde K14 (VFS, /proc, /dev,
 //                      FAT32, Partitionen). Frei ab Bit 8.
@@ -1147,7 +1217,9 @@ const KDATA_SIZE: u64 = 0x70000
 //                      Runde MEM (`memstress`) und Runde OFS3
 //                      (`nolinks`, `ofs3`, `ofs3fmt`, `noatime`).
 //                      Frei ab Bit 5.
-//   Wort  8..15        FREI. Wird auch das knapp, waechst MODE_WORDS;
+//   Wort  8  512..575  DAS NETZ -- der DHCP-Klient der Runde DESKTOP.
+//                      Frei ab Bit 2.
+//   Wort  9..15        FREI. Wird auch das knapp, waechst MODE_WORDS;
 //                      die Seite fasst 512 Woerter.
 //
 // Die Namen selbst stehen bei ihrer Runde, dort wo auch steht, wofuer
