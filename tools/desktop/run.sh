@@ -431,7 +431,65 @@ same "so the work area is the screen minus that sliver" "598" "$wk"
 png "$TMPD/hide.ppm" "autohide"
 
 echo "== 8. the settings write the same file, and the bar follows =="
-python3 - > "$TMPD/mon-set" <<'PYEOF'
+# THE CLICKS ARE COMPUTED, NOT REMEMBERED.
+#
+# This used to be three pairs of coordinates somebody had read off a
+# screenshot once: (172,328), (174,443), (212,471). Round LOOK put a
+# shape chooser and an alignment chooser on this page above the taskbar
+# section, every control below them moved down, and the three clicks
+# landed on the wrong widgets. Six assertions went red and not one of
+# them said "the page moved" -- they said the drop-down had not opened.
+#
+# So the run is in TWO PASSES. The first boots the settings program and
+# clicks nothing; the program reports where it put its widgets
+# (`settings: rect name=... x= y= w= h=`) and where the window is. From
+# those the second pass works out where to press:
+#
+#   the chooser   the middle of the `edge` rectangle
+#   row 3         the drop-down opens directly under the chooser at the
+#                 x/y the program reports when it opens, `rh` per row
+#   Apply         the middle of the `apply` rectangle
+#
+# All of it inside the window, whose inner origin is x+2, y+22 -- the
+# border and the title bar the SERVER draws, which is why a window
+# clamped into a corner reports its OUTER position.
+conf bottom 28 104 0 1 > "$TMPD/conf-set"
+: > "$TMPD/mon-probe"
+run set-probe "$TMPD/conf-set" "einst" "$TMPD/mon-probe" || true
+P="$TMPD/set-probe.txt"
+rect() { # name field -> value
+    grep -a "settings: rect name=$1 " "$P" | tail -1 \
+        | grep -oE " $2=[0-9]+" | tail -1 | grep -oE '[0-9]+'
+}
+WX=$(rect win x);  WY=$(rect win y)
+EX=$(rect edge x); EY=$(rect edge y); EW=$(rect edge w); EH=$(rect edge h)
+AX=$(rect apply x); AY=$(rect apply y); AW=$(rect apply w); AH=$(rect apply h)
+if [ -z "$WX" ] || [ -z "$EX" ] || [ -z "$AX" ]; then
+    bad "the settings did not report their geometry -- no clicks can be computed"
+    grep -a 'settings: rect' "$P" | sed 's/^/        /' | head -8
+else
+    ok "the settings report where their taskbar widgets are (win $WX,$WY  edge $EX,$EY  apply $AX,$AY)"
+    IX=$((WX + 2)); IY=$((WY + 22))
+    CX=$((IX + EX + EW / 2)); CY=$((IY + EY + EH / 2))
+    # the menu opens at the chooser's own x and directly under it
+    MX=$((IX + EX)); MY=$((IY + EY + EH))
+    # The row height of a drop-down is `zeilen_hoehe() + 2`, and
+    # `zeilen_hoehe()` is the `row` token the program prints when it
+    # starts. Read it, do not assume it: it is 20 under `classic` and
+    # 24 under `modern`, and a runner that assumes one of them is a
+    # runner that works on one appearance.
+    RH=$(grep -a 'settings: shape file=' "$P" | tail -1 \
+         | grep -oE ' row=[0-9]+' | grep -oE '[0-9]+')
+    if [ -z "$RH" ]; then
+        bad "the settings did not report their row height"
+        RH=20
+    fi
+    RH=$((RH + 2))
+    # row 3 is "right": bottom, top, left, right
+    RX=$((MX + 20)); RY=$((MY + 3 * RH + RH / 2))
+    BX=$((IX + AX + AW / 2)); BY=$((IY + AY + AH / 2))
+    python3 - "$CX" "$CY" "$RX" "$RY" "$BX" "$BY" > "$TMPD/mon-set" <<'PYEOF'
+import sys
 def go(x, y):
     out = ["mouse_move -120 -120"] * 6
     dx, dy = x, y
@@ -441,26 +499,27 @@ def go(x, y):
         dx -= sx
         dy -= sy
     return out
-L = go(172, 328) + ["warte 1", "mouse_button 1", "mouse_button 0", "warte 2"]
-L += go(174, 443) + ["warte 1", "mouse_button 1", "mouse_button 0", "warte 2"]
-L += go(212, 471) + ["warte 1", "mouse_button 1", "mouse_button 0", "warte 3"]
+a = [int(v) for v in sys.argv[1:7]]
+L = go(a[0], a[1]) + ["warte 1", "mouse_button 1", "mouse_button 0", "warte 2"]
+L += go(a[2], a[3]) + ["warte 1", "mouse_button 1", "mouse_button 0", "warte 2"]
+L += go(a[4], a[5]) + ["warte 1", "mouse_button 1", "mouse_button 0", "warte 3"]
 print("\n".join(L))
 PYEOF
-conf bottom 28 104 0 1 > "$TMPD/conf-set"
-run settings "$TMPD/conf-set" "einst" "$TMPD/mon-set"
-L="$TMPD/settings.txt"
-has "$L" "settings: rect name=edge" "the settings report where their taskbar widgets are"
-has "$L" "settings: menu open" "the click opened the drop-down"
-r=$(grep -a 'settings: menu took ' "$L" | tail -1 | grep -oE 'row=[0-9]+' | sed 's/.*=//')
-same "and the row that was clicked is 'right'" "3" "$r"
-has "$L" "settings: taskbar edge=right" "'Uebernehmen' wrote edge=right"
-wr=$(grep -a 'settings: taskbar ' "$L" | tail -1 | grep -oE 'wrote=[0-9]+' | sed 's/.*=//')
-num "and it really wrote a file" "$wr" ge 1
-ename=$(grep -a 'taskbar: conf ' "$L" | tail -1 | grep -oE 'ename=[a-z]+' | sed 's/.*=//')
-same "the taskbar -- a different process -- re-read the file and moved to" "right" "$ename"
-g=$(grep -a 'taskbar: geom ' "$L" | tail -1 | grep -oE 'x=[0-9]+ y=[0-9]+ w=[0-9]+ h=[0-9]+')
-same "to exactly the right edge" "x=696 y=0 w=104 h=600" "$g"
-png "$TMPD/settings.ppm" "settings"
+    echo "        clicks: chooser $CX,$CY   row3 $RX,$RY   apply $BX,$BY   (rh=$RH)"
+    run settings "$TMPD/conf-set" "einst" "$TMPD/mon-set"
+    L="$TMPD/settings.txt"
+    has "$L" "settings: menu open" "the click opened the drop-down"
+    r=$(grep -a 'settings: menu took ' "$L" | tail -1 | grep -oE 'row=[0-9]+' | sed 's/.*=//')
+    same "and the row that was clicked is 'right'" "3" "$r"
+    has "$L" "settings: taskbar edge=right" "'Uebernehmen' wrote edge=right"
+    wr=$(grep -a 'settings: taskbar ' "$L" | tail -1 | grep -oE 'wrote=[0-9]+' | sed 's/.*=//')
+    num "and it really wrote a file" "$wr" ge 1
+    ename=$(grep -a 'taskbar: conf ' "$L" | tail -1 | grep -oE 'ename=[a-z]+' | sed 's/.*=//')
+    same "the taskbar -- a different process -- re-read the file and moved to" "right" "$ename"
+    g=$(grep -a 'taskbar: geom ' "$L" | tail -1 | grep -oE 'x=[0-9]+ y=[0-9]+ w=[0-9]+ h=[0-9]+')
+    same "to exactly the right edge" "x=696 y=0 w=104 h=600" "$g"
+    png "$TMPD/settings.ppm" "settings"
+fi
 
 echo "== 9. what the older runners said, and still say =="
 for t in tools/wm/run.sh tools/k15/run.sh; do
