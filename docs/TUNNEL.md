@@ -466,48 +466,96 @@ only changes to the packet path.
   transport keepalive that Linux authenticated and counted. Linux would
   not count either unless both decrypted and verified.
 
-### What does not work
-
-**Data does not yet flow through the tunnel inside the kernel.** The
-handshake completes and then almost nothing more arrives at the card. The
-diagnosis, from a packet capture on the far end of the veth:
+### Data through the tunnel, in the kernel
 
 ```
-09:31:09.259  ARP, Request who-has 10.9.0.2 tell 10.9.0.1
-09:31:09.987  IP 10.9.0.1.51820 > 10.9.0.2.51820: UDP, length 128
-09:31:10.283  ARP, Request who-has 10.9.0.2 tell 10.9.0.1
-09:31:10.492  IP 10.9.0.1.51820 > 10.9.0.2.51820: UDP, length 128
-09:31:10.996  IP 10.9.0.1.51820 > 10.9.0.2.51820: UDP, length 128
+-- 5b. the handshake, kernel to kernel --
+  OK    the Linux kernel completed a handshake with Osum
+  OK    Linux received 180 octets from the Osum tunnel
+  OK    Linux pinged Osum THROUGH the tunnel: 4 of 4,
+        rtt min/avg/max/mdev = 3.744/5.590/7.347/1.333 ms
 ```
 
-Linux *is* sending the encrypted pings — three 128-octet datagrams, which
-is exactly an encrypted 84-octet ICMP echo plus the 32-octet WireGuard
-header and tag. Osum's counters say `rx_f=6`, `decap=0`, `rx_bad=0`:
-those datagrams **never reached the virtio ring**, so `rx_hook` was never
-given the chance to refuse them. Osum also stopped transmitting after
-three frames, and Linux is re-ARPing for 10.9.0.2 without an answer.
-Traffic stops in **both directions about a second into the run**, while
-the handshake — which happens in that first second — succeeds.
+`ping 10.91.0.1` inside the namespace goes to the Linux `wg0`, is
+encrypted by the Linux kernel, arrives at Osum's virtio card as a UDP
+datagram, is decrypted by `kernel/wg.fi`, has its inner destination
+rewritten, is handed to `inet.fi` as an ordinary frame, is answered by
+Osum's own ICMP, is encrypted again on the way out and is decrypted by
+Linux. **Four of four, at 5.6 ms.** On the wire it is visible as the
+pairs it should be:
 
-That points at the measurement wire (QEMU's UDP socket backend and
-`tools/net/bruecke`), not at the tunnel: the tunnel's own datagrams and
-the ordinary ARP reply stop at the same moment, and `kernel/wg.fi` is not
-in the path of either. It is **not proven**, and it is written here as an
-open fault rather than explained away. The same protocol code carrying
-the same traffic against the same Linux WireGuard **does** work — that is
-section 4, where Linux's ping goes through it at 0.9 ms.
+```
+IP 10.9.0.1.51820 > 10.9.0.2.51820: UDP, length 128
+IP 10.9.0.2.51820 > 10.9.0.1.51820: UDP, length 128
+```
 
-**Consequently the kill switch has no number yet.** The measurement is
-built (`tools/tunnel/run.sh` stage 5c: `tcpdump` inside the namespace
-counts IPv4 octets sourced from Osum, with a counter-check run without
-`wgkill` first) and it is written so that the count comes from *outside*
-the kernel — a kill switch that reports its own success is a claim, not a
-measurement. But a run whose wire delivers six frames cannot produce a
-meaningful leak counter-check, so **the target of 0 octets is not
-demonstrated in this round.** The mechanism is one branch in `tx_hook`,
-below the only call to `virtio.tx_frame` in the system, and ARP is
-deliberately exempt (it carries no user data and does not leave the
-segment) — but until the wire works, that is a design and not a result.
+128 octets is exactly an encrypted 84-octet ICMP echo plus WireGuard's
+16-octet header and 16-octet tag, twice. The kernel's own counters agree:
+`encap=3 decap=4 rx_good=4 rx_bad=0 icmp=3`.
+
+### The kill switch: 0 octets
+
+The count does not come from the kernel — a kill switch that reports its
+own success is a claim, not a measurement. `tcpdump` runs inside the
+namespace on the far end of the veth and records everything that arrives;
+a script counts the octets of IPv4 packets whose source is Osum. Nothing
+in the kernel can influence that number.
+
+The same kernel image is run twice with the same service (`nsvc=4`, which
+makes Osum open a TCP connection outwards by itself), the same
+unreachable tunnel endpoint, and the only difference is the word
+`wgkill`:
+
+```
+  counter-check: WITHOUT wgkill the same kernel put 44 IP octets on the wire   OK
+  KILL SWITCH: 0 IP octets on the wire, counted by tcpdump outside the kernel  OK
+  --  ARP frames, allowed on purpose: 5 without, 2 with the switch
+  --  the kernel says it refused 290 octets
+```
+
+**Zero.** The kernel's own counter agrees that it refused 290 octets, and
+the independent count on the wire is 0.
+
+Two honest qualifications:
+
+* **ARP is exempt on purpose and is counted separately** — 2 frames got
+  out with the switch armed. `kernel/wg.fi` lets ARP through because
+  without it the endpoint cannot be resolved and the tunnel could never
+  come back up. An ARP frame carries a MAC and an IP the local segment
+  already knows and it does not leave the segment. That is a decision,
+  not an oversight, and it is why the count is of *IPv4* octets.
+* **The counter-check is thin.** 44 octets is one packet, not a stream.
+  The contrast 44 → 0 is real and the direction is right, but a
+  counter-check that leaked kilobytes would be a stronger statement and
+  this one does not make it.
+
+The mechanism is one branch in `tx_hook`, sitting below the only call to
+`virtio.tx_frame` there is in the system — which is why nothing in the
+system can route around it.
+
+### The fault this round spent an afternoon on, and what it really was
+
+For most of the round stage 5b failed with `0 of 4 replies`, and the
+capture showed Linux sending the encrypted pings while Osum's counters
+said `rx_f=6, decap=0`. The obvious reading was that the tunnel was
+dropping them. It was not. **`nwait` is counted in TICKS, not seconds**
+(`kernel/netsvc.fi`, `idle_service`); the runner passed `nwait=55`, and at
+100 Hz that is 0.55 seconds. The kernel finished its service, printed its
+counters and stopped — one second into a run whose handshake happens in
+that first second. Everything after it, in both directions, was being
+measured after the machine had already reported.
+
+It is written down because the wrong diagnosis was written down first, in
+this file, and because the shape of the mistake is general: a counter that
+stops growing looks exactly like a component that is dropping packets.
+
+### The regression
+
+Round K8's own network acceptance — the section this round changed —
+is **75 passed, 0 failed** with `kernel/wg.fi` compiled in and hooked
+into `inet.pump` on both sides, at 5382 KiB/s on a clean wire. Both
+compiler stages build the kernel with the tunnel in it.
+
 
 ### The one-address problem
 
@@ -594,7 +642,6 @@ sales document:
   between them and the milliseconds that takes — designed, not built.
   `kernel/wg.fi` takes its configuration from the kernel command line,
   which is enough for a test runner and not enough for a user.
-* **The kill switch measurement** — see section 7.
 * **The system-wide proxy setting.** `lib/socks/socks5.fi` is a library
   with no `/etc/proxy.conf` behind it and no per-program override yet.
 * **AmneziaWG 1.5 and above** — see section 5.
