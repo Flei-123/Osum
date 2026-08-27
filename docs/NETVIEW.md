@@ -1155,7 +1155,109 @@ pulls `libc.io` into the two programs that imported it without one
 userland against the 2 MiB of the drive. The number is in the round's
 report.
 
-### 14.8 What this addendum does not do
+### 14.8 Measured
+
+`tools/netview/run.sh`, section 9. Everything here came off a boot.
+
+**The Super key, which did not arrive before this addendum.** A real key
+through the PS/2 controller (`sendkey meta_l-a` on the QEMU monitor):
+
+| | |
+|---|---|
+| `hk: super+a` on the serial line | yes, once per press |
+| a plain `a` still a character | **1** `key: a` |
+| and Super+A typed no letter | still **1** `key: a` |
+| Escape closes it | `qs: closed by escape` |
+| opened twice in one boot | **2** |
+
+**The panel at all four edges**, laid out against the work area the
+server reports, not the screen:
+
+| edge | the panel | the work area |
+|---|---|---|
+| bottom | 408,360 388x208 | 0,0 800x572 |
+| top | 408,32 388x208 | 0,28 800x572 |
+| left | 108,388 388x208 | 104,0 696x600 |
+| right | 304,388 388x208 | 0,0 696x600 |
+
+and on every one of them the three tile symbols read back out of the
+picture pixel for pixel (82/82, 58/58, 58/58) and the tile layout check
+passing -- nothing overflowing, no two text rows touching.
+
+**The time, in two halves**, on one clock stamped in the keyboard
+interrupt and read after the paint:
+
+| | |
+|---|---|
+| key press to the **window standing** | **26 800 – 39 500 µs** |
+| of which is waiting for the taskbar's poll | all of it; the loop sleeps 25 ms |
+| the **drawing** itself, 388 x 208 | **45 300 – 55 200 µs** |
+| key press to the **panel painted** | **74 000 – 90 400 µs** |
+
+The first number is the poll interval and nothing else; the second is
+three bands of `WIG_BLIT` and the window server composing them. Neither
+is a place worth optimising until somebody complains, and both are
+written down so that somebody can.
+
+**The tile really switches**, on a machine that is genuinely online --
+the case where the corner sign matters most and the one hardest to fake
+past:
+
+| | |
+|---|---|
+| the machine's own state | **3**, online: carrier, address, gateway answered |
+| the click | `qs: tile n=0 to=1 rc=0` |
+| what the taskbar then says | `taskbar: faking fb=2` |
+| the sign in the picture | **61 of 61** pixels, at 524,580 |
+| the running `filtered` window | kept its view |
+| the running `faked` window | kept its view |
+| the running `none` window | kept its view |
+
+The last three are the counter-check: a preference does not touch a
+running process, and one click on it may not have moved a single one.
+The whole path is in those rows -- click, system call, kernel state,
+taskbar poll, pixels -- and not one step of it is asserted.
+
+**The correction, on a machine told nothing anywhere:**
+
+| | |
+|---|---|
+| the preference | **0**, off |
+| what a new program would get | **0**, real |
+| what it did get | **0**, real |
+| and in words | `netview: fallback off` |
+
+**The switch, two positions, same boot:**
+
+| | |
+|---|---|
+| `fallback on` says | `netview: fallback always` |
+| the file holds | `fallback=always` |
+| the word `when-offline` appears | **nowhere** |
+| switch ON, a new program | faked, status **204**, body **0** |
+| switch OFF, a new program | real, status **200**, the real page |
+
+**The network tile**, which is not a view:
+
+| | |
+|---|---|
+| before | status **200**, 46 octets |
+| address gone | connect **fails** (-110), body **0** |
+| address back | status **200**, **46** octets again |
+
+The failure with the address gone is a **timeout**, not an instant
+refusal -- the stack tries and gives up. That is a difference from
+`none`, which answers `-ENETUNREACH` at once, and it is worth knowing:
+"network off" here is the cable being unplugged, not the view saying no.
+
+**Nothing else moved.** `tools/kernel/run.sh` **176 / 0** and
+`tools/unix/run.sh` **107 / 0** were re-run against the Escape key
+change and neither number differs. `tools/userland/run.sh` **91 / 0**,
+and the whole userland is **1 996 080** octets against the 2 097 152 of
+the drive -- 101 072 to spare, with `libc.io` now pulled into `ps` and
+`nvcheck` by `nv.fi`.
+
+### 14.9 What this addendum does not do
 
 * **No key map.** One hotkey, `Super+A`, in the source. `Super` with any
   other letter is latched and ignored -- which means it is also swallowed,
