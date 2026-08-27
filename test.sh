@@ -459,9 +459,40 @@
 #      /users/<name>/config/tiling.conf, und ohne die Datei gibt es
 #      KEINE Belegung. Dazu drei Bildschirmfotos (Teilung, Reiter,
 #      Drehung), bildpunktgenau nachgerechnet, und /bin/tiling in Ring 3.
+#  25. DIEBSTAHL (tools/tresor/run.sh, Runde TRESOR): was passiert, wenn
+#      die Maschine weg ist. Eine GERAETEIDENTITAET, die eine
+#      Neuinstallation ueberlebt (`kernel/hwid.fi`: SMBIOS ueber den
+#      Suchlauf im F-Segment, die Seriennummer des NVMe-Laufwerks aus
+#      IDENTIFY CONTROLLER, die MAC-Adresse) -- gemessen gegen eine
+#      ZWEITE, unabhaengige Umsetzung des SMBIOS-Lesers in Python, die
+#      denselben Speicherabzug entschluesselt. Eine SICHERUNG, die wie
+#      `opk` inhaltsadressiert ist (`kernel/user/backup.fi`): der zweite
+#      Lauf schreibt NULL Oktette, und Sichern-Loeschen-Wiederherstellen
+#      ergibt einen Baum, den der WIRT aus dem Plattenabbild
+#      zurueckliest und Oktett fuer Oktett vergleicht. Und die
+#      SCHLUESSELVERWALTUNG (`kernel/user/key.fi`), gegen Pythons
+#      `hashlib.pbkdf2_hmac`.
+#      WAS DIESE RUNDE AUSDRUECKLICH NICHT KANN, steht in docs/THEFT.md
+#      und ist genauso gemessen: dieselbe Kommandozeile mit `-smbios`
+#      macht aus der Seriennummer, was man will, und acht Oktette VORNE
+#      an einer Datei zerstoeren die Doppelerkennung vollstaendig.
+#      Gegenproben: ohne `nvme` keine Laufwerksnummer, ohne Karte keine
+#      MAC, ohne `hwidefi` kein EFI-Pfad, ein gekipptes Oktett in der
+#      Packdatei MUSS auffallen, und der Bereich auf der Seite von K18
+#      MUSS den Kartenpruefer ausloesen.
 #
 # Kein '|| true', kein Verschlucken von Beendigungscodes.
 set -uo pipefail
+#      NACHTRAG 27.08.2026: verwaiste Pakete. Programme werden NICHT
+#      gesichert, weil eine Quelle sie liefern kann -- ausser wenn keine
+#      Quelle sie liefern kann. Gemessen: +29 128 Oktette (+67,6 %), und
+#      ein zweiter Rechner OHNE den Baum stellt das Paket oktettgleich
+#      wieder her und FUEHRT es aus (docs/ORPHANS.md).
+#      ZWEITER NACHTRAG: der Knopf im Dateimanager. Gesichert wird in
+#      ein VERZEICHNIS aus geteilten Bloecken, nicht in ein ZIP -- zweiter
+#      Lauf 0 Oktette, ein geaendertes Oktett kostet 4096 statt 44384.
+#      Der Knopf SELBST ist noch nicht von Ende zu Ende gemessen
+#      (tools/tresor/gui.sh, docs/BACKUP-UI.md Abschnitt 7).
 
 cd "$(dirname "$0")"
 ROOT=$(pwd)
@@ -659,6 +690,8 @@ lauf "26. der Tunnel als PAKET: was er kostet, wenn keiner laeuft (tools/tunnel/
      tools/tunnel/kosten.sh tunnelkosten '^  OK    (der Tunnel kostet|ein EINGERICHTETER|der Haken)'
 lauf "27. installieren, benutzen, entfernen -- und nichts bleibt (tools/tunnel/pakete.sh, Nachtrag TUNNEL)" \
      tools/tunnel/pakete.sh tunnelpakete '^  OK    (SPURLOS|zweimal gebaut|GEGENPROBE|das Paket .bleibt.|mit --behalte-daten)'
+lauf "25. Diebstahl: Geraeteidentitaet, Sicherung, Schluesselverwaltung (tools/tresor/run.sh, Runde TRESOR)" \
+     tools/tresor/run.sh tresor '^TRESOR: |^  OK    (SMBIOS |SHA-256 |PBKDF2|DER ZWEITE LAUF|der wiederhergestellte Baum|ACHT OKTETTE|im beschaedigten|GEGENPROBE|eine (NEUE PLATTE|ANDERE Maschine)|der Fingerabdruck ist|die Seriennummer des Laufwerks|crypto erase|open mit dem richtigen|1000 Oktette|bei 0xF1031|und seine Pruefsumme|PREIS DER AUSNAHME|MIT Liste sichert|DAS WIEDERHERGESTELLTE PAKET|das verwaiste Paket ist OKTETT|ZWEITER LAUF SCHREIBT NULL|GESCHRIEBEN nur|FAKTOR der kleinen|kein halbes Backup)'
 
 echo
 echo "=================================================================="

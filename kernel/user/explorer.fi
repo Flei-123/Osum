@@ -64,6 +64,7 @@ import ulib
 import libc.io
 import libc.errno
 import wlibc
+import bstore
 import wlib
 import icons
 import msg
@@ -129,6 +130,50 @@ static mut k_del: [u8; 24] = "explorer.confirm_delete\0"
 // prints. A word that means the same thing must not have two spellings.
 static mut t_views: [u8; 25] = "real\nfiltered\nfaked\nnone\0"
 
+// ===================================================================
+// RUNDE TRESOR, ZWEITER NACHTRAG: SICHERN UND ZURUECKHOLEN.
+//
+// Der ganze Sinn ist ein Satz: Stick anstecken, hineingehen, "Backup
+// hierhin sichern" -- fertig. Was darunter liegt, ist KEINE grosse
+// Datei und kein ZIP, sondern ein VERZEICHNIS aus Bloecken, die sich
+// alle Sicherungen teilen (`kernel/user/bstore.fi` erklaert, warum).
+// Kluges Format unten, ein Menuepunkt oben.
+//
+// UND ES IST DIESELBE UMSETZUNG wie in `/bin/backup`. Der Dateimanager
+// hat KEINE eigene Fassung von "Baum durchgehen und hashen" -- er ruft
+// `bstore` auf. Zwei Fassungen driften, und der Tag, an dem sie sich
+// uneins sind, ist der Tag, an dem jemand eine Wiederherstellung
+// braucht.
+//
+// DREI ANSICHTEN, und `vmodus` sagt, welche gilt:
+//   0  ein ganz gewoehnliches Verzeichnis
+//   1  ein Sicherungsspeicher: die Liste der SICHERUNGEN, mit Datum,
+//      Anzahl Dateien und Groesse
+//   2  IN einer Sicherung: die Dateien darin, zum Hineingehen wie in
+//      einen Ordner und zum einzelnen Zurueckholen
+static mut vmodus: u64 = 0
+static mut vspeicher: [u8; 128] = [0 as u8; 128] // wo der Speicher liegt
+static mut vsicher: [u8; 64] = [0 as u8; 64]     // welche Sicherung
+static mut vunter: [u8; 160] = [0 as u8; 160]    // wo darin
+static mut vctx: [u8; 528] = [0 as u8; 528]
+static mut vpfad: [u8; 256] = [0 as u8; 256]
+static mut vinfo: [u64; 4] = [0 as u64; 4]
+static mut zeiten: [u8; 1920] = [0 as u8; 1920]  // MAXENT * 20, das Datum
+static mut pbuf: [u8; 128] = [0 as u8; 128]      // der Fortschrittstext
+static mut plabel: u64 = 0xFFFFFFFFFFFFFFFF
+static mut pziel: [u8; 128] = [0 as u8; 128]
+
+static mut t_pop: [u8; 64] = "Oeffnen\nUmbenennen\nLoeschen\nNeuer Ordner\nBackup hierhin sichern\0"
+static mut t_popb: [u8; 21] = "Oeffnen\nZurueckholen\0"
+static mut t_bak: [u8; 10] = "Sicherung\0"
+static mut t_bfrage: [u8; 25] = "Hier ein Backup anlegen?\0"
+static mut t_bquelle: [u8; 7] = "/daten\0"
+static mut t_bwohin: [u8; 7] = "/daten\0"
+static mut t_lauft: [u8; 19] = "Sichern laeuft ...\0"
+static mut t_snap: [u8; 10] = "sicherung\0"
+static mut t_selbst2: [u8; 44] = "Nicht in /daten selbst -- waehle den Stick.\0"
+
+static mut dlg_gemeldet: bool = false
 static mut sortby: u64 = 0
 static mut sortrev: u64 = 0
 
@@ -223,6 +268,108 @@ fn scan(dir: u64) -> u64 {
     }
     io.close(fd)
     return anzahl
+}
+
+// Wo das Datum der Zeile i liegt (wie `nptr`, nur fuer die Zeitspalte).
+fn zptr(i: u64) -> u64 {
+    return (&zeiten[0 as usize]) as u64 + i * 20
+}
+
+// ANSICHT 1: die Sicherungen eines Speichers. Jede bekommt ihr Datum aus
+// dem Kopf des Schnappschusses und ihre Zahlen aus dessen `end`-Zeile --
+// eine Sicherung OHNE `end` ist unvollstaendig und wird gar nicht erst
+// angezeigt, denn sie ist keine.
+fn scan_speicher() -> u64 {
+    var namebuf: [u8; 64] = [0 as u8; 64]
+    anzahl = 0
+    let fd: u64 = bstore.snaps_open((&vspeicher[0 as usize]) as u64)
+    if ulib.bad(fd) {
+        return 0
+    }
+    var weiter: bool = true
+    while weiter {
+        if !bstore.snaps_next(fd, (&namebuf[0 as usize]) as u64, 60) {
+            weiter = false
+        } else if anzahl < MAXENT {
+            if bstore.snap_head((&vspeicher[0 as usize]) as u64,
+                    (&namebuf[0 as usize]) as u64, zptr(anzahl),
+                    (&vinfo[0 as usize]) as u64) {
+                if vinfo[(2) as usize] != 0 {
+                    ulib.strncpy(nptr(anzahl), (&namebuf[0 as usize]) as u64,
+                        NAMEB - 1)
+                    groesse[(anzahl) as usize] = vinfo[(1) as usize]
+                    art[(anzahl) as usize] = 1
+                    modus[(anzahl) as usize] = 16877
+                    anzahl = anzahl + 1
+                }
+            }
+        }
+    }
+    io.close(fd)
+    return anzahl
+}
+
+// ANSICHT 2: was IN einer Sicherung unter `vunter` liegt. Der
+// Schnappschuss ist eine Textdatei mit vollen Pfaden; angezeigt wird,
+// was genau eine Ebene tiefer liegt -- damit laesst er sich begehen wie
+// ein Ordner, ohne dass irgendwo ein Baum gebaut werden muss.
+fn scan_sicherung() -> u64 {
+    anzahl = 0
+    let pl: u64 = ulib.length((&vunter[0 as usize]) as u64)
+    let fd: u64 = bstore.entries_open((&vspeicher[0 as usize]) as u64,
+        (&vsicher[0 as usize]) as u64, (&vctx[0 as usize]) as u64)
+    if ulib.bad(fd) {
+        return 0
+    }
+    var weiter: bool = true
+    while weiter {
+        if !bstore.entries_next(fd, (&vctx[0 as usize]) as u64,
+                (&vpfad[0 as usize]) as u64, (&vinfo[0 as usize]) as u64) {
+            weiter = false
+        } else if anzahl < MAXENT {
+            // Passt der Anfang? Und ist danach GENAU EIN Namensteil?
+            if pl == 0 || ulib.strneq((&vpfad[0 as usize]) as u64,
+                    (&vunter[0 as usize]) as u64, pl) {
+                let rest: u64 = (&vpfad[0 as usize]) as u64 + pl
+                if (*((rest) as *mut u8)) == 47 as u8 {
+                    var k: u64 = 1
+                    var tiefer: bool = false
+                    while (*((rest + k) as *mut u8)) != 0 as u8 {
+                        if (*((rest + k) as *mut u8)) == 47 as u8 {
+                            tiefer = true
+                        }
+                        k = k + 1
+                    }
+                    if !tiefer && k > 1 {
+                        ulib.strncpy(nptr(anzahl), rest + 1, NAMEB - 1)
+                        groesse[(anzahl) as usize] = vinfo[(1) as usize]
+                        modus[(anzahl) as usize] = vinfo[(0) as usize]
+                        if (vinfo[(0) as usize] & 61440) == 16384 {
+                            art[(anzahl) as usize] = 1
+                        } else {
+                            art[(anzahl) as usize] = 0
+                        }
+                        __mmio_write8((zptr(anzahl)) as *mut u8, 0 as u8)
+                        anzahl = anzahl + 1
+                    }
+                }
+            }
+        }
+    }
+    io.close(fd)
+    return anzahl
+}
+
+// DER VOLLE PFAD EINER ZEILE INNERHALB DER SICHERUNG -- `vunter` plus
+// der Name. Das ist genau der Schluessel, unter dem `bstore.get` die
+// Datei wiederfindet.
+fn in_sicherung(e: u64) -> u64 {
+    var sl: [u8; 2] = "/\0"
+    ulib.strncpy((&vpfad[0 as usize]) as u64,
+        (&vunter[0 as usize]) as u64, 200)
+    ulib.strcat((&vpfad[0 as usize]) as u64, (&sl[0 as usize]) as u64)
+    ulib.strcat((&vpfad[0 as usize]) as u64, nptr(e))
+    return (&vpfad[0 as usize]) as u64
 }
 
 fn punkt(name: u64) -> bool {
@@ -437,9 +584,16 @@ fn baue_tabelle() {
             putn(groesse[(e) as usize])
         }
         put(9)
-        // DIE ZEIT: es gibt keine. Siehe den Kopf dieser Datei.
-        put(45)
-        put(45)
+        // DIE ZEIT: fuer DATEIEN gibt es keine, siehe den Kopf dieser
+        // Datei. Fuer eine SICHERUNG gibt es sehr wohl eine -- sie steht
+        // im Kopf des Schnappschusses und kommt aus der CMOS-Uhr. Genau
+        // deshalb ist die Spalte damals stehen geblieben.
+        if (*((zptr(e)) as *mut u8)) != 0 as u8 {
+            puts(zptr(e))
+        } else {
+            put(45)
+            put(45)
+        }
         put(9)
         putmode(modus[(e) as usize], art[(e) as usize])
         put(10)
@@ -788,9 +942,21 @@ fn u_start(args: u64) -> u64 {
             } else if kind == wlib.K_SCROLL {
                 // rechte Taste auf der Tabelle
                 if id == tab {
-                    wlib.menu_open(id, wlibc.mouse_x(), wlibc.mouse_y(),
-                        msg.get((&k_ctx[0 as usize]) as u64), 5)
-                    offen = 1
+                    // IN EINER SICHERUNG kann man nichts umbenennen und
+                    // nichts loeschen -- da liegt keine Datei, da liegt
+                    // ein Eintrag in einer Textdatei. Also ein anderes
+                    // Menue, statt Punkte anzubieten, die nicht gehen.
+                    if vmodus != 0 {
+                        wlib.menu_open(id, wlibc.mouse_x(), wlibc.mouse_y(),
+                            (&t_popb[0 as usize]) as u64, 2)
+                        say_menurect()
+                        offen = 4
+                    } else {
+                        wlib.menu_open(id, wlibc.mouse_x(), wlibc.mouse_y(),
+                            msg.get((&k_ctx[0 as usize]) as u64), 5)
+                        say_menurect()
+                        offen = 1
+                    }
                 }
             } else if kind == wlib.K_MENUBAR {
                 if idx >= 0x1000 {
@@ -825,6 +991,15 @@ fn u_start(args: u64) -> u64 {
                 }
             }
         }
+        if wlib.dlg_state() == 1 && !dlg_gemeldet {
+            say_dlgrect()
+            dlg_gemeldet = true
+        }
+        if wlib.dlg_state() <= 1 {
+            // nichts
+        } else {
+            dlg_gemeldet = false
+        }
         if wlib.dlg_state() > 1 {
             if wlib.dlg_state() == 2 {
                 vollziehen(wartet, tab, baum, stat, fpfad)
@@ -854,7 +1029,17 @@ fn starter_auf() {
 fn neu_lesen(baum: u64, tab: u64, stat: u64, fpfad: u64) {
     var s_cd: [u8; 16] = "explorer: cd \0\0\0"
     var s_n: [u8; 8] = " n=\0\0\0\0\0"
-    let r: u64 = scan((&pfad[0 as usize]) as u64)
+    // WELCHE ANSICHT. Der Rest dieser Funktion ist fuer alle drei
+    // gleich -- Tabelle, Baum, Statuszeile kennen den Unterschied nicht.
+    var r: u64 = 0
+    if vmodus == 1 {
+        r = scan_speicher()
+    } else if vmodus == 2 {
+        r = scan_sicherung()
+    } else {
+        loesche_zeiten()
+        r = scan((&pfad[0 as usize]) as u64)
+    }
     if ulib.bad(r) {
         anzahl = 0
     }
@@ -880,9 +1065,39 @@ fn oeffnen(zeile: u64, baum: u64, tab: u64, stat: u64, fpfad: u64,
     }
     let e: u64 = folge[(zeile) as usize]
     let name: u64 = nptr(e)
+    // IN EINER SICHERUNG: hineingehen heisst tiefer in den
+    // Schnappschuss, nicht auf die Platte.
+    if vmodus == 2 {
+        if art[(e) as usize] != 0 {
+            var sl2: [u8; 2] = "/\0"
+            ulib.strcat((&vunter[0 as usize]) as u64,
+                (&sl2[0 as usize]) as u64)
+            ulib.strcat((&vunter[0 as usize]) as u64, name)
+            zeige_ort(fpfad)
+            neu_lesen(baum, tab, stat, fpfad)
+        }
+        return
+    }
+    // IM SPEICHER: eine Zeile ist eine SICHERUNG.
+    if vmodus == 1 {
+        vmodus = 2
+        ulib.strncpy((&vsicher[0 as usize]) as u64, name, 60)
+        vunter[(0) as usize] = 0 as u8
+        zeige_ort(fpfad)
+        neu_lesen(baum, tab, stat, fpfad)
+        return
+    }
     if art[(e) as usize] != 0 {
         let voll: u64 = join((&pfad[0 as usize]) as u64, name)
         ulib.strncpy((&pfad[0 as usize]) as u64, voll, 126)
+        // EIN SICHERUNGSSPEICHER SIEHT AUS WIE EIN ORDNER UND IST
+        // KEINER. Wer hineingeht, will die Sicherungen sehen und nicht
+        // PACK, INDEX und ein paar S-Dateien.
+        if bstore.is_store((&pfad[0 as usize]) as u64) {
+            vmodus = 1
+            ulib.strncpy((&vspeicher[0 as usize]) as u64,
+                (&pfad[0 as usize]) as u64, 120)
+        }
         hist_push((&pfad[0 as usize]) as u64)
         neu_lesen(baum, tab, stat, fpfad)
         return
@@ -903,11 +1118,279 @@ fn oeffnen(zeile: u64, baum: u64, tab: u64, stat: u64, fpfad: u64,
     ulib.nl()
 }
 
+fn loesche_zeiten() {
+    var i: u64 = 0
+    while i < MAXENT {
+        __mmio_write8((zptr(i)) as *mut u8, 0 as u8)
+        i = i + 1
+    }
+}
+
+// Wie `eltern`, aber fuer den Weg INNERHALB einer Sicherung: der letzte
+// Namensteil faellt weg, und "" ist die Wurzel der Sicherung.
+fn eltern_v(p: u64) {
+    var n: u64 = ulib.length(p)
+    while n > 0 && (*((p + n - 1) as *mut u8)) != 47 as u8 {
+        n = n - 1
+    }
+    if n > 0 {
+        n = n - 1
+    }
+    __mmio_write8((p + n) as *mut u8, 0 as u8)
+}
+
+// Was in der Pfadleiste steht. In einer Sicherung ist das kein Pfad auf
+// der Platte, und deshalb steht das Datum mit drin -- sonst koennte man
+// eine Sicherung fuer einen Ordner halten und sich wundern, warum sich
+// nichts aendern laesst.
+fn zeige_ort(fpfad: u64) {
+    var sl: [u8; 2] = "/\0"
+    if vmodus != 2 {
+        wlib.set_text(fpfad, (&pfad[0 as usize]) as u64)
+        return
+    }
+    ulib.strncpy((&vpfad[0 as usize]) as u64,
+        (&vspeicher[0 as usize]) as u64, 120)
+    ulib.strcat((&vpfad[0 as usize]) as u64, (&sl[0 as usize]) as u64)
+    ulib.strcat((&vpfad[0 as usize]) as u64, (&vsicher[0 as usize]) as u64)
+    ulib.strcat((&vpfad[0 as usize]) as u64, (&vunter[0 as usize]) as u64)
+    wlib.set_text(fpfad, (&vpfad[0 as usize]) as u64)
+}
+
+// ------------------------------------------------- sichern, mit Anzeige
+
+// DER FORTSCHRITT. `bstore` ruft das nach JEDER Datei; gemalt wird nur
+// jede achte, weil sonst das Zeichnen den Lauf beherrscht und die Zahl,
+// die dabei herauskommt, das Malen misst und nicht das Sichern.
+//
+// DIE INTERESSANTE ZAHL IST "neu". Gelesen wird beim zweiten Mal wieder
+// alles; GESCHRIEBEN wird fast nichts, und genau das soll der Benutzer
+// sehen, denn es ist der Unterschied zwischen diesem Entwurf und einem
+// ZIP, das jedes Mal von vorn anfaengt.
+fn fortschritt(n: u64) -> u64 {
+    if plabel == 0xFFFFFFFFFFFFFFFF {
+        return 0
+    }
+    if (n & 7) != 0 {
+        return 0
+    }
+    baue_fortschritt()
+    wlib.set_text(plabel, (&pbuf[0 as usize]) as u64)
+    wlib.draw_all()
+    return 0
+}
+
+fn baue_fortschritt() {
+    var s_d: [u8; 10] = "Dateien: \0"
+    var s_b: [u8; 12] = "  Oktette: \0"
+    var s_n: [u8; 8] = "  neu: \0"
+    var d: [u8; 24] = [0 as u8; 24]
+    var lp: u64 = 0
+    lp = pfeld(lp, (&s_d[0 as usize]) as u64, (&d[0 as usize]) as u64,
+        bstore.files_of())
+    lp = pfeld(lp, (&s_b[0 as usize]) as u64, (&d[0 as usize]) as u64,
+        bstore.read_of())
+    lp = pfeld(lp, (&s_n[0 as usize]) as u64, (&d[0 as usize]) as u64,
+        bstore.written_of())
+    pbuf[(lp) as usize] = 0 as u8
+}
+
+fn pfeld(lp0: u64, txt: u64, d: u64, wert: u64) -> u64 {
+    var lp: u64 = lp0
+    var k: u64 = 0
+    while (*((txt + k) as *mut u8)) != 0 as u8 && lp < 120 {
+        pbuf[(lp) as usize] = *((txt + k) as *mut u8)
+        lp = lp + 1
+        k = k + 1
+    }
+    let n: u64 = ulib.digits(wert, d)
+    var i: u64 = 0
+    while i < n && lp < 120 {
+        pbuf[(lp) as usize] = *((d + i) as *mut u8)
+        lp = lp + 1
+        i = i + 1
+    }
+    return lp
+}
+
+// EINE SICHERUNG ANLEGEN ODER DAZULEGEN. `ziel` ist das Verzeichnis, in
+// das der Benutzer gezeigt hat -- der Stick, die zweite Platte, irgendein
+// Ordner. Gesichert wird `/daten`, und das steht hier und nicht im
+// Kleingedruckten.
+// SICH SELBST ZU SICHERN GEHT NICHT. Liegt das Ziel INNERHALB der
+// Quelle, waechst der Speicher, waehrend er durchgegangen wird -- der
+// Lauf frisst seine eigenen Bloecke und hoert nie auf. Das ist keine
+// theoretische Sorge: `/daten` ist die Quelle, und das erste, worauf ein
+// Benutzer im Dateimanager zeigt, ist ein Ordner in `/daten`.
+fn im_eigenen_baum(ziel: u64) -> bool {
+    let q: u64 = ulib.length((&t_bquelle[0 as usize]) as u64)
+    if !ulib.strneq(ziel, (&t_bquelle[0 as usize]) as u64, q) {
+        return false
+    }
+    // Genau die Quelle selbst, oder etwas darunter -- aber NICHT
+    // `/datenkram`, das nur so anfaengt.
+    let c: u64 = (*((ziel + q) as *mut u8)) as u64
+    return c == 0 || c == 47
+}
+
+fn sichern(ziel: u64, baum: u64, tab: u64, stat: u64, fpfad: u64) {
+    var s_fertig: [u8; 12] = "  -- fertig\0"
+    var s_fehler: [u8; 20] = "  -- FEHLGESCHLAGEN\0"
+    var d: [u8; 24] = [0 as u8; 24]
+    var nam: [u8; 32] = [0 as u8; 32]
+
+    if im_eigenen_baum(ziel) {
+        wlib.dlg_ask((&t_bak[0 as usize]) as u64,
+            (&t_selbst2[0 as usize]) as u64)
+        sag_sicherung(ziel, (&t_snap[0 as usize]) as u64, 2)
+        return
+    }
+    // DER NAME DER SICHERUNG. Durchnummeriert, weil zwei Sicherungen im
+    // selben Speicher nicht denselben Namen haben duerfen -- die zweite
+    // wuerde die erste ueberschreiben.
+    ulib.strcpy((&nam[0 as usize]) as u64, (&t_snap[0 as usize]) as u64)
+    let k: u64 = ulib.digits(naechste_nummer(ziel), (&d[0 as usize]) as u64)
+    var i: u64 = 0
+    let l0: u64 = ulib.length((&nam[0 as usize]) as u64)
+    while i < k {
+        nam[((l0 + i)) as usize] = *(((&d[0 as usize]) as u64 + i) as *mut u8)
+        i = i + 1
+    }
+    nam[((l0 + k)) as usize] = 0 as u8
+
+    wlib.dlg_ask((&t_bak[0 as usize]) as u64,
+        (&t_lauft[0 as usize]) as u64)
+    plabel = wlib.dlg_label()
+    wlib.draw_all()
+    let rc: u64 = bstore.save((&t_bquelle[0 as usize]) as u64, ziel,
+        (&nam[0 as usize]) as u64, 0, (&t_bquelle[0 as usize]) as u64,
+        fortschritt)
+    plabel = 0xFFFFFFFFFFFFFFFF
+    // DIE ZUSAMMENFASSUNG steht in derselben Zeile, in der eben noch der
+    // Fortschritt stand.
+    baue_fortschritt()
+    var lp: u64 = ulib.length((&pbuf[0 as usize]) as u64)
+    var q: u64 = 0
+    var txt: u64 = (&s_fertig[0 as usize]) as u64
+    if rc != 0 {
+        txt = (&s_fehler[0 as usize]) as u64
+    }
+    while (*((txt + q) as *mut u8)) != 0 as u8 && lp < 126 {
+        pbuf[(lp) as usize] = *((txt + q) as *mut u8)
+        lp = lp + 1
+        q = q + 1
+    }
+    pbuf[(lp) as usize] = 0 as u8
+    wlib.set_text(wlib.dlg_label(), (&pbuf[0 as usize]) as u64)
+    wlib.draw_all()
+    sag_sicherung(ziel, (&nam[0 as usize]) as u64, rc)
+    neu_lesen(baum, tab, stat, fpfad)
+}
+
+// Wieviele Sicherungen liegen schon da? Die naechste bekommt die
+// naechste Nummer.
+fn naechste_nummer(ziel: u64) -> u64 {
+    var namebuf: [u8; 64] = [0 as u8; 64]
+    let fd: u64 = bstore.snaps_open(ziel)
+    if ulib.bad(fd) {
+        return 1
+    }
+    var n: u64 = 0
+    var weiter: bool = true
+    while weiter {
+        if !bstore.snaps_next(fd, (&namebuf[0 as usize]) as u64, 60) {
+            weiter = false
+        } else {
+            n = n + 1
+        }
+    }
+    io.close(fd)
+    return n + 1
+}
+
+// Auf die serielle Leitung, damit der Lauf MESSBAR ist und nicht nur
+// huebsch aussieht.
+fn sag_sicherung(ziel: u64, nam: u64, rc: u64) {
+    var s1: [u8; 23] = "explorer: backup ziel=\0"
+    var s2: [u8; 7] = " name=\0"
+    var s3: [u8; 10] = " dateien=\0"
+    var s4: [u8; 10] = " oktette=\0"
+    var s5: [u8; 6] = " neu=\0"
+    var s6: [u8; 5] = " rc=\0"
+    say((&s1[0 as usize]) as u64)
+    say(ziel)
+    say((&s2[0 as usize]) as u64)
+    say(nam)
+    say((&s3[0 as usize]) as u64)
+    ulib.sayn(bstore.files_of())
+    say((&s4[0 as usize]) as u64)
+    ulib.sayn(bstore.read_of())
+    say((&s5[0 as usize]) as u64)
+    ulib.sayn(bstore.written_of())
+    say((&s6[0 as usize]) as u64)
+    ulib.sayn(rc)
+    ulib.nl()
+}
+
+// EINE DATEI ODER EINE GANZE SICHERUNG ZURUECKHOLEN. Zurueck geht es
+// nach `/daten` -- ein fester, genannter Ort ist ehrlicher als ein
+// geratener, und wo man gerade steht, ist in einer Sicherung kein Ort
+// auf der Platte.
+fn zurueckholen(baum: u64, tab: u64, stat: u64, fpfad: u64) {
+    var z1: [u8; 19] = "explorer: zurueck \0"
+    var z2: [u8; 5] = " rc=\0"
+    var rc: u64 = 1
+    if vmodus == 1 {
+        let z: u64 = wlib.value(tab)
+        if z < anzahl {
+            let e: u64 = folge[(z) as usize]
+            ulib.strncpy((&pziel[0 as usize]) as u64,
+                (&t_bwohin[0 as usize]) as u64, 120)
+            rc = bstore.restore((&vspeicher[0 as usize]) as u64, nptr(e),
+                (&pziel[0 as usize]) as u64, 0)
+        }
+    } else if vmodus == 2 {
+        let z: u64 = wlib.value(tab)
+        if z < anzahl {
+            let e: u64 = folge[(z) as usize]
+            let voll: u64 = in_sicherung(e)
+            let wohin: u64 = join((&t_bwohin[0 as usize]) as u64, nptr(e))
+            ulib.strncpy((&pziel[0 as usize]) as u64, wohin, 120)
+            rc = bstore.get((&vspeicher[0 as usize]) as u64,
+                (&vsicher[0 as usize]) as u64, voll,
+                (&pziel[0 as usize]) as u64)
+        }
+    }
+    say((&z1[0 as usize]) as u64)
+    say((&pziel[0 as usize]) as u64)
+    say((&z2[0 as usize]) as u64)
+    ulib.sayn(rc)
+    ulib.nl()
+}
+
 fn baum_gehen(zeile: u64, baum: u64, tab: u64, stat: u64, fpfad: u64) {
     if zeile == 0 {
+        // HINAUF, und der Weg zurueck geht durch dieselben drei
+        // Ansichten, in denen man hineingegangen ist.
+        if vmodus == 2 {
+            if vunter[(0) as usize] != 0 as u8 {
+                eltern_v((&vunter[0 as usize]) as u64)
+            } else {
+                vmodus = 1
+            }
+            zeige_ort(fpfad)
+            neu_lesen(baum, tab, stat, fpfad)
+            return
+        }
+        if vmodus == 1 {
+            vmodus = 0
+        }
         eltern((&pfad[0 as usize]) as u64)
         hist_push((&pfad[0 as usize]) as u64)
         neu_lesen(baum, tab, stat, fpfad)
+        return
+    }
+    if vmodus != 0 {
         return
     }
     // Zeile n zeigt auf das n-te Verzeichnis in der Folge.
@@ -957,9 +1440,43 @@ fn menue_wahl(welches: u64, idx: u64, tab: u64, baum: u64, stat: u64,
                 msg.get((&k_del[0 as usize]) as u64))
             return 3
         }
-        wlib.dlg_open(msg.get((&k_newdir[0 as usize]) as u64),
-            msg.get((&k_name[0 as usize]) as u64), 0)
-        return 2
+        if idx == 3 {
+            wlib.dlg_open(msg.get((&k_newdir[0 as usize]) as u64),
+                msg.get((&k_name[0 as usize]) as u64), 0)
+            return 2
+        }
+        // BACKUP HIERHIN SICHERN. Wohin: in das Verzeichnis, in dem man
+        // steht, oder in das ausgewaehlte, wenn eines ausgewaehlt ist --
+        // so wie man es von "hier ablegen" erwartet.
+        ulib.strncpy((&pziel[0 as usize]) as u64,
+            (&pfad[0 as usize]) as u64, 120)
+        let z2: u64 = wlib.value(tab)
+        if z2 < anzahl {
+            let e2: u64 = folge[(z2) as usize]
+            if art[(e2) as usize] != 0 {
+                ulib.strncpy((&pziel[0 as usize]) as u64,
+                    join((&pfad[0 as usize]) as u64, nptr(e2)), 120)
+            }
+        }
+        // LIEGT DA SCHON EIN SPEICHER, wird ohne Rueckfrage eine WEITERE
+        // Sicherung hineingelegt -- nicht ein zweiter Speicher daneben.
+        // Nur beim ERSTEN Mal wird gefragt.
+        if bstore.is_store((&pziel[0 as usize]) as u64) {
+            sichern((&pziel[0 as usize]) as u64, baum, tab, stat, fpfad)
+            return 0
+        }
+        wlib.dlg_ask((&t_bak[0 as usize]) as u64,
+            (&t_bfrage[0 as usize]) as u64)
+        return 4
+    }
+    if welches == 4 {
+        if idx == 0 {
+            oeffnen(wlib.value(tab), baum, tab, stat, fpfad,
+                (&t_bak[0 as usize]) as u64)
+            return 0
+        }
+        zurueckholen(baum, tab, stat, fpfad)
+        return 0
     }
     if welches == 2 {
         if idx == 0 {
@@ -1051,6 +1568,10 @@ fn vollziehen(was: u64, tab: u64, baum: u64, stat: u64, fpfad: u64) {
         return
     }
     var rc: u64 = 0
+    if was == 4 {
+        sichern((&pziel[0 as usize]) as u64, baum, tab, stat, fpfad)
+        return
+    }
     if was == 2 {
         let voll: u64 = join((&pfad[0 as usize]) as u64, wlib.dlg_text())
         rc = io.make_dir(voll)
@@ -1149,6 +1670,49 @@ fn say_rects(mb: u64, bzur: u64, bvor: u64, bauf: u64, fpfad: u64,
         say((&sp[0 as usize]) as u64)
         i = i + 1
     }
+    ulib.nl()
+}
+
+// WO DER OK-KNOPF EINES DIALOGS LIEGT. Gemeldet aus demselben Grund wie
+// jedes andere Rechteck dieser Anwendung (`say_rect`): der Laeufer soll
+// die Oberflaeche BEDIENEN koennen, ohne zu raten, wo etwas hingemalt
+// wurde. Ohne das muesste ein Test Bildpunkte suchen -- und ein Test,
+// der Bildpunkte sucht, findet irgendwann den falschen.
+// WO DAS KONTEXTMENUE AUFGEKLAPPT IST. Aus demselben Grund gemeldet wie
+// `say_dlgrect`, und mit einem konkreten Anlass: `wlib.menu_open` klappt
+// ein Menue NACH OBEN, wenn es sonst unten aus dem Bild liefe. Ein Test,
+// der die Zeilenhoehe und die Aufklapprichtung raet, trifft dann den
+// falschen Punkt -- und meldet einen Fehler, den es nicht gibt.
+fn say_menurect() {
+    var a: [u8; 20] = "explorer: menurect \0"
+    var swx: [u8; 4] = "wx=\0"
+    var swy: [u8; 4] = "wy=\0"
+    var szh: [u8; 4] = "wh=\0"
+    let w: u64 = wlib.menu_win()
+    say((&a[0 as usize]) as u64)
+    kv((&swx[0 as usize]) as u64, wlib.win_x(w))
+    kv((&swy[0 as usize]) as u64, wlib.win_y(w))
+    kv((&szh[0 as usize]) as u64, wlib.win_h(w))
+    ulib.nl()
+}
+
+fn say_dlgrect() {
+    var a: [u8; 19] = "explorer: dlgrect \0"
+    var sx: [u8; 3] = "x=\0"
+    var sy: [u8; 3] = "y=\0"
+    var sw: [u8; 3] = "w=\0"
+    var sh: [u8; 3] = "h=\0"
+    var swx: [u8; 4] = "wx=\0"
+    var swy: [u8; 4] = "wy=\0"
+    let b: u64 = wlib.dlg_button(0)
+    let w: u64 = wlib.dlg_win()
+    say((&a[0 as usize]) as u64)
+    kv((&swx[0 as usize]) as u64, wlib.win_x(w))
+    kv((&swy[0 as usize]) as u64, wlib.win_y(w))
+    kv((&sx[0 as usize]) as u64, wlib.rect_x(b))
+    kv((&sy[0 as usize]) as u64, wlib.rect_y(b))
+    kv((&sw[0 as usize]) as u64, wlib.rect_w(b))
+    kv((&sh[0 as usize]) as u64, wlib.rect_h(b))
     ulib.nl()
 }
 
