@@ -424,6 +424,15 @@ lauf "22. Widgets und der Dateimanager: eine Bibliothek in Ring 3 (tools/k15/run
 lauf "24. Energie und Leistung: drei Profile, Ruhezustand, Waerme, Akku (tools/k18/run.sh, Runde K18)" \
      tools/k18/run.sh k18 '^K18: |^  OK    (dieselbe Stelle|IA32_PERF_CTL bekommt|Turbo ist bei|SpeedStep ist bei|jeder Durchlauf ging|schlafend |aber es wird kein|zwei Tabellen|GEGENPROBE|GEDROSSELT|im BILD|dasselbe Pruefbild|und einen Bildpunkt DANEBEN|keine AUFRUFNUMMER)'
 
+# ABSCHNITT 25 -- RUNDE ICONS. Die Symbolschrift: aus Lucide (ISC)
+# zweiundvierzig Glyphen geschnitten, im privaten Bereich von Unicode,
+# und der ganze Rest dieser Runde haengt an EINER Zusage -- dass im
+# Zeichencode NULL rohe Codepunkte stehen. Dazu die Gegenprobe, die den
+# Abschnitt erst zu einem Beweis macht: eine Platte OHNE /lib/icons.ttf
+# muss hochkommen und die Oberflaeche ohne Symbole malen.
+lauf "25. das Symbolsystem: eine Schrift fuer die Oberflaeche, Bitmaps fuer die Anwendungen (tools/icons/run.sh, Runde ICONS)" \
+     tools/icons/run.sh icons '^icons: |^  OK    (assets/osum-icons.ttf|lib/icons.fi|raw code points|counterproof|the kernel loaded|the kernel says|and Ring 3 sees|assertions|an icon in memory|screenshot)|^        (per mixed pixel|one icon cold|in memory:|both mix)'
+
 echo
 echo "=================================================================="
 if [ "$FAIL" -eq 0 ]; then
