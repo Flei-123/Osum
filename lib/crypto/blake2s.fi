@@ -1,0 +1,396 @@
+// lib/crypto/blake2s.fi -- BLAKE2s (RFC 7693), round TUNNEL.
+//
+// WHY THIS FILE EXISTS AT ALL. WireGuard has no algorithm negotiation.
+// It does not offer a menu of hashes and let the two ends agree; it names
+// exactly one, and that one is BLAKE2s. There is no fallback to SHA-256
+// and no way to configure it away, so a WireGuard implementation without
+// BLAKE2s is not a slow WireGuard implementation -- it is not one at all.
+// That absence of choice is the single best property of the protocol and
+// the reason this round could be attempted; see docs/TUNNEL.md.
+//
+// WHY IT IS HERE AND NOT IN THE FIRN LIBRARY. Crypto belongs next to the
+// other crypto, and the other crypto is in the Firn repository under
+// `lib/std/crypto/`. This repository cannot reach it. Osum pins the
+// compiler AND the library it compiles against to one commit
+// (`vendor/firn/COMMIT`, currently c66c6bcd5), for the reason written down
+// in `vendor/firn/hole-firnc.sh`: while Firn moves, a pinned compiler is
+// what makes a kernel bug distinguishable from a compiler bug. That
+// pinned commit predates Firn's round B5, which is where ChaCha20,
+// Poly1305 and X25519 were written. Moving the pin would swap the
+// compiler out from under fourteen rounds working in this repository at
+// the same time, in order to import three files. So the primitives live
+// here, in this repository's own library, and `docs/TUNNEL.md` records
+// which Firn files they should be reconciled with when the pin moves.
+//
+// Osum has done this twice before and for the same reason:
+// `kernel/rand.fi` carries its own ChaCha20 and `kernel/user/pw.fi` its
+// own SHA-256, HMAC and PBKDF2.
+//
+// WHAT THE FILE MAY NOT DO. It is imported by the kernel (`profile
+// kernel`), by ring 3 programs and by a hosted test runner, so it has NO
+// profile line, NO imports, no allocator, no global mutable state and no
+// system call. Everything it touches is memory the caller handed it.
+//
+// ============================================================ THE ALGORITHM
+//
+// BLAKE2s is the 32 bit member of the BLAKE2 family: eight words of
+// state, a 64 octet block, ten rounds of the ChaCha quarter-round over a
+// sixteen word working vector. RFC 7693 2.4 and 3.2 are followed
+// directly.
+//
+// Three things distinguish it from a plain Merkle-Damgard hash and all
+// three matter here:
+//
+//   1. THE PARAMETER BLOCK IS XORED INTO THE STATE. The digest length,
+//      the key length, fanout and depth go into h[0] before a single
+//      octet is compressed (RFC 7693 2.5). Two calls that differ only in
+//      the requested digest length therefore produce unrelated output --
+//      BLAKE2s-128 is NOT BLAKE2s-256 truncated. WireGuard uses both
+//      lengths, 32 octets for the hash chain and 16 for mac1/mac2, and
+//      an implementation that truncated instead of parameterising would
+//      interoperate on the handshake and fail on the MACs.
+//   2. KEYING IS BUILT IN. A keyed BLAKE2s is a MAC by itself, with no
+//      HMAC construction around it: the key, zero padded to 64 octets,
+//      is simply the first block (RFC 7693 2.9). WireGuard's mac1 and
+//      mac2 are exactly this.
+//   3. THE COUNTER AND THE FINAL FLAG. `t` counts octets fed in so far
+//      and `f0` marks the last block. Both go into the working vector,
+//      which is what makes length extension impossible.
+//
+// THE ARITHMETIC. The words are 32 bits wide and add modulo 2^32. Firn
+// traps on integer overflow, so every word is carried in a `u64` and
+// masked back to 32 bits after each operation. `G` adds three such words
+// at once; three values below 2^32 sum to below 2^34, so the intermediate
+// cannot trap and the mask is a definition rather than a repair. The same
+// choice is written down in `lib/std/crypto/sha1.fi` of the Firn
+// repository and for the same reason: `u32` arithmetic would inherit its
+// overflow behaviour from the build mode, and a hash that differs between
+// `--debug` and `--release-fast` is the worst bug there is.
+//
+// THE LAST BLOCK IS NEVER COMPRESSED EARLY. `update` deliberately keeps a
+// full 64 octet buffer instead of compressing it, because it cannot know
+// whether more input follows, and the final flag has to be set on the
+// last block. A version that compressed as soon as the buffer filled
+// would produce the right answer for every message that is not a multiple
+// of 64 octets and the wrong one for every message that is -- which is
+// the kind of bug that passes a careless test suite.
+//
+// ================================================================== HONEST
+//
+// B1 NOT AUDITED. This is a from-scratch implementation checked against
+//    the published vectors of RFC 7693 and against Python's `hashlib`.
+//    Passing test vectors proves it computes the right function. It does
+//    not prove it is free of side channels and it is not a substitute
+//    for review. See the warning in docs/TUNNEL.md.
+// B2 NO TREE HASHING. Fanout 1, depth 1, no leaf or node offsets. That
+//    is the sequential mode, which is all RFC 7693 3.2 and all WireGuard
+//    need. The parameter block fields for tree mode are written as zero.
+// B3 NO SALT AND NO PERSONALISATION. Octets 16..31 of the parameter
+//    block stay zero. Nothing in this round uses them.
+// B4 THE KEY IS AT MOST 32 OCTETS and the digest at most 32, which are
+//    the limits of BLAKE2s itself (RFC 7693 2.5, kk <= 32, nn <= 32).
+//    Longer is refused rather than silently truncated.
+
+export {
+    Blake2s, blake2s_new, blake2s_new_keyed, blake2s_update,
+    blake2s_final, blake2s, blake2s_keyed,
+    hmac_blake2s, mac_equal,
+    BLAKE2S_OUT, BLAKE2S_BLOCK, BLAKE2S_MAC
+}
+
+const M32: u64 = 4294967295
+
+// The digest this round asks for, the block size, and the 16 octet MAC
+// WireGuard uses for mac1/mac2.
+const BLAKE2S_OUT: usize = 32
+const BLAKE2S_BLOCK: usize = 64
+const BLAKE2S_MAC: usize = 16
+
+// The state. `buf` holds octets that have arrived but are not compressed
+// yet, precisely because the final block needs the final flag.
+struct Blake2s {
+    h: [u64; 8],
+    buf: [u8; 64],
+    used: usize,
+    total: u64, // octets fed in altogether -- the counter `t`
+    outlen: usize,
+}
+
+// -------------------------------------------------------------- primitives
+
+fn ld8(p: u64, i: u64) -> u64 {
+    return (*((p + i) as *mut u8)) as u64
+}
+
+fn st8(p: u64, i: u64, v: u64) {
+    *((p + i) as *mut u8) = (v & 255) as u8
+}
+
+fn rotr32(x: u64, n: u64) -> u64 {
+    let v: u64 = x & M32
+    return ((v >> n) | (v << (32 - n))) & M32
+}
+
+// The initialisation vector: the first 32 bits of the fractional parts of
+// the square roots of the first eight primes -- the same eight words
+// SHA-256 starts from (RFC 7693 2.6).
+fn iv(i: usize) -> u64 {
+    let t: [u64; 8] = [
+        1779033703, 3144134277, 1013904242, 2773480762,
+        1359893119, 2600822924, 528734635, 1541459225]
+    return t[i]
+}
+
+// The message schedule, RFC 7693 2.7. Ten permutations of sixteen
+// indices; round `r` uses row `r`.
+fn sigma(r: usize, i: usize) -> u64 {
+    let s: [u8; 160] = [
+        0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
+        14, 10, 4, 8, 9, 15, 13, 6, 1, 12, 0, 2, 11, 7, 5, 3,
+        11, 8, 12, 0, 5, 2, 15, 13, 10, 14, 3, 6, 7, 1, 9, 4,
+        7, 9, 3, 1, 13, 12, 11, 14, 2, 6, 5, 10, 4, 0, 15, 8,
+        9, 0, 5, 7, 2, 4, 10, 15, 14, 1, 11, 12, 6, 8, 3, 13,
+        2, 12, 6, 10, 0, 11, 8, 3, 4, 13, 7, 5, 15, 14, 1, 9,
+        12, 5, 1, 15, 14, 13, 4, 10, 0, 7, 6, 3, 9, 2, 8, 11,
+        13, 11, 7, 14, 12, 1, 3, 9, 5, 0, 15, 4, 8, 6, 2, 10,
+        6, 15, 14, 9, 11, 3, 0, 8, 12, 2, 13, 7, 1, 4, 10, 5,
+        10, 2, 8, 4, 7, 6, 1, 5, 15, 11, 9, 14, 3, 12, 13, 0]
+    return s[r * 16 + i] as u64
+}
+
+// The mixing function G, RFC 7693 3.1. It is the ChaCha quarter-round
+// with two message words folded in.
+fn g(v: *mut [u64; 16], a: usize, b: usize, c: usize, d: usize,
+    x: u64, y: u64) {
+    (*v)[a] = ((*v)[a] + (*v)[b] + x) & M32
+    (*v)[d] = rotr32((*v)[d] ^ (*v)[a], 16)
+    (*v)[c] = ((*v)[c] + (*v)[d]) & M32
+    (*v)[b] = rotr32((*v)[b] ^ (*v)[c], 12)
+    (*v)[a] = ((*v)[a] + (*v)[b] + y) & M32
+    (*v)[d] = rotr32((*v)[d] ^ (*v)[a], 8)
+    (*v)[c] = ((*v)[c] + (*v)[d]) & M32
+    (*v)[b] = rotr32((*v)[b] ^ (*v)[c], 7)
+}
+
+// The compression function F, RFC 7693 3.2. `p` points at 64 octets,
+// `t` is the octet counter AFTER this block, `last` sets f0.
+fn compress(s: *mut Blake2s, p: u64, t: u64, last: bool) {
+    var m: [u64; 16] = [0; 16]
+    var i: usize = 0
+    while i < 16 {
+        // LITTLE ENDIAN. BLAKE2 is little endian throughout, which is the
+        // opposite of SHA-2 and the single most common place to get a
+        // BLAKE2 implementation wrong.
+        m[i] = ld8(p, i as u64 * 4)
+            | (ld8(p, i as u64 * 4 + 1) << 8)
+            | (ld8(p, i as u64 * 4 + 2) << 16)
+            | (ld8(p, i as u64 * 4 + 3) << 24)
+        i = i + 1
+    }
+    var v: [u64; 16] = [0; 16]
+    i = 0
+    while i < 8 {
+        v[i] = (*s).h[i]
+        v[i + 8] = iv(i)
+        i = i + 1
+    }
+    v[12] = v[12] ^ (t & M32)
+    v[13] = v[13] ^ ((t >> 32) & M32)
+    if last {
+        v[14] = v[14] ^ M32
+    }
+    var r: usize = 0
+    while r < 10 {
+        g(&v, 0, 4, 8, 12, m[sigma(r, 0) as usize], m[sigma(r, 1) as usize])
+        g(&v, 1, 5, 9, 13, m[sigma(r, 2) as usize], m[sigma(r, 3) as usize])
+        g(&v, 2, 6, 10, 14, m[sigma(r, 4) as usize], m[sigma(r, 5) as usize])
+        g(&v, 3, 7, 11, 15, m[sigma(r, 6) as usize], m[sigma(r, 7) as usize])
+        g(&v, 0, 5, 10, 15, m[sigma(r, 8) as usize], m[sigma(r, 9) as usize])
+        g(&v, 1, 6, 11, 12, m[sigma(r, 10) as usize], m[sigma(r, 11) as usize])
+        g(&v, 2, 7, 8, 13, m[sigma(r, 12) as usize], m[sigma(r, 13) as usize])
+        g(&v, 3, 4, 9, 14, m[sigma(r, 14) as usize], m[sigma(r, 15) as usize])
+        r = r + 1
+    }
+    i = 0
+    while i < 8 {
+        (*s).h[i] = (*s).h[i] ^ v[i] ^ v[i + 8]
+        i = i + 1
+    }
+}
+
+// -------------------------------------------------------------- the state
+
+fn blake2s_new() -> Blake2s {
+    return blake2s_new_keyed(0, 0, BLAKE2S_OUT)
+}
+
+// The general entry. `keylen` 0 means unkeyed; `outlen` is the requested
+// digest length in octets and goes INTO the state, it is not a truncation
+// (see note 1 in the header).
+fn blake2s_new_keyed(key: u64, keylen: usize, outlen: usize) -> Blake2s {
+    var s: Blake2s = Blake2s {
+        h: [0; 8], buf: [0; 64], used: 0, total: 0, outlen: outlen }
+    if outlen == 0 || outlen > 32 || keylen > 32 {
+        // Refused rather than silently corrected: a caller that asks for
+        // a digest BLAKE2s cannot produce has a bug, and returning a
+        // different length would hide it.
+        s.outlen = 0
+        return s
+    }
+    var i: usize = 0
+    while i < 8 {
+        s.h[i] = iv(i)
+        i = i + 1
+    }
+    // The parameter block, RFC 7693 2.5: digest length, key length,
+    // fanout 1, depth 1. Everything above octet 3 is zero here (notes B2
+    // and B3), so only the first word has to be mixed in. 16842752 is
+    // 0x01010000 -- fanout 1 in octet 2, depth 1 in octet 3.
+    s.h[0] = s.h[0] ^ 16842752 ^ ((keylen as u64) << 8) ^ (outlen as u64)
+    if keylen > 0 {
+        // RFC 7693 2.9: the key, zero padded to a full block, IS the
+        // first block. It is fed through `update` so that the counter
+        // and the buffering behave exactly as for any other block.
+        var kb: [u8; 64] = [0; 64]
+        i = 0
+        while i < keylen {
+            kb[i] = ld8(key, i as u64) as u8
+            i = i + 1
+        }
+        blake2s_update(&s, (&kb[0]) as u64, 64)
+    }
+    return s
+}
+
+fn blake2s_update(s: *mut Blake2s, p: u64, n: usize) {
+    if (*s).outlen == 0 {
+        return
+    }
+    var at: usize = 0
+    while at < n {
+        if (*s).used == 64 {
+            // The buffer is full and MORE is coming, so this block is not
+            // the last one and may be compressed now. See the header note
+            // on why a full buffer is never compressed on arrival.
+            (*s).total = (*s).total + 64
+            compress(s, (&(*s).buf[0]) as u64, (*s).total, false)
+            (*s).used = 0
+        }
+        let room: usize = 64 - (*s).used
+        var take: usize = n - at
+        if take > room {
+            take = room
+        }
+        var i: usize = 0
+        while i < take {
+            (*s).buf[(*s).used + i] = ld8(p, (at + i) as u64) as u8
+            i = i + 1
+        }
+        (*s).used = (*s).used + take
+        at = at + take
+    }
+}
+
+fn blake2s_final(s: *mut Blake2s, out: u64) -> bool {
+    if (*s).outlen == 0 {
+        return false
+    }
+    // Whatever is left in the buffer is the last block: zero padded, the
+    // counter advanced by the REAL number of octets (not by 64), the
+    // final flag set.
+    var i: usize = (*s).used
+    while i < 64 {
+        (*s).buf[i] = 0
+        i = i + 1
+    }
+    (*s).total = (*s).total + (*s).used as u64
+    compress(s, (&(*s).buf[0]) as u64, (*s).total, true)
+    i = 0
+    while i < (*s).outlen {
+        st8(out, i as u64, ((*s).h[i / 4] >> ((i % 4) as u64 * 8)) & 255)
+        i = i + 1
+    }
+    return true
+}
+
+// ----------------------------------------------------------- the one-shots
+
+// BLAKE2s-256 over one buffer. This is WireGuard's HASH().
+fn blake2s(p: u64, n: usize, out: u64) -> bool {
+    var s: Blake2s = blake2s_new()
+    blake2s_update(&s, p, n)
+    return blake2s_final(&s, out)
+}
+
+// Keyed BLAKE2s with a chosen digest length. This is WireGuard's MAC(),
+// called with outlen = 16.
+fn blake2s_keyed(key: u64, keylen: usize, p: u64, n: usize,
+    out: u64, outlen: usize) -> bool {
+    var s: Blake2s = blake2s_new_keyed(key, keylen, outlen)
+    blake2s_update(&s, p, n)
+    return blake2s_final(&s, out)
+}
+
+// HMAC-BLAKE2s (RFC 2104) with a 32 octet digest.
+//
+// WHY HMAC AT ALL, when BLAKE2s is already a MAC when keyed: because
+// WireGuard's key derivation is HKDF (RFC 5869), HKDF is defined over
+// HMAC, and WireGuard instantiates that HMAC with BLAKE2s. The keyed mode
+// of BLAKE2s is NOT what the protocol asks for here and would produce a
+// handshake that no other implementation can complete. This is one of the
+// few places where the obvious simplification is wrong.
+fn hmac_blake2s(key: u64, keylen: usize, msg: u64, msglen: usize,
+    out: u64) -> bool {
+    var k: [u8; 64] = [0; 64]
+    var i: usize = 0
+    if keylen > 64 {
+        var kd: [u8; 32] = [0; 32]
+        if !blake2s(key, keylen, (&kd[0]) as u64) {
+            return false
+        }
+        while i < 32 {
+            k[i] = kd[i]
+            i = i + 1
+        }
+    } else {
+        while i < keylen {
+            k[i] = ld8(key, i as u64) as u8
+            i = i + 1
+        }
+    }
+    var ipad: [u8; 64] = [0; 64]
+    var opad: [u8; 64] = [0; 64]
+    i = 0
+    while i < 64 {
+        ipad[i] = (((k[i] as u64) ^ 54) & 255) as u8
+        opad[i] = (((k[i] as u64) ^ 92) & 255) as u8
+        i = i + 1
+    }
+    var inner: [u8; 32] = [0; 32]
+    var a: Blake2s = blake2s_new()
+    blake2s_update(&a, (&ipad[0]) as u64, 64)
+    blake2s_update(&a, msg, msglen)
+    if !blake2s_final(&a, (&inner[0]) as u64) {
+        return false
+    }
+    var b: Blake2s = blake2s_new()
+    blake2s_update(&b, (&opad[0]) as u64, 64)
+    blake2s_update(&b, (&inner[0]) as u64, 32)
+    return blake2s_final(&b, out)
+}
+
+// Constant time comparison of two MACs.
+//
+// A comparison that stops at the first differing octet tells an attacker
+// how many leading octets he guessed right, and that turns forging a 16
+// octet MAC from 2^128 tries into 16 * 256. Everything is xored together
+// and only the accumulated difference is tested.
+fn mac_equal(a: u64, b: u64, n: usize) -> bool {
+    var d: u64 = 0
+    var i: usize = 0
+    while i < n {
+        d = d | (ld8(a, i as u64) ^ ld8(b, i as u64))
+        i = i + 1
+    }
+    return d == 0
+}
