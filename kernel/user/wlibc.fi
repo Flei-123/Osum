@@ -43,17 +43,20 @@ profile kernel
 import ulib
 import libc.io
 import libc.mem
+import icons
 
 export {
     start, ready, screen_w, screen_h, mouse_x, mouse_y,
     surf_w, surf_rows, band_y, set_band, surface,
     clip_set, clip_x0, clip_y0, clip_x1, clip_y1,
-    px, hline, vline, rect, frame, frame3, blend,
+    px, get, hline, vline, rect, frame, frame3, blend,
     text_at, text_w, text_h, glyph_w, ascent_of, mono_cell,
+    icon_at, icon_box, icon_have, icon_ink_w, icon_ink_h,
+    ICON_SMALL, ICON_MENU, ICON_TASKBAR, ICON_LARGE,
     push, push_rect, cursor_shape,
     clip_put, clip_take, clip_len,
     theme, theme_load, theme_named, theme_count, theme_name_at,
-    F_UI, F_MONO, PX_UI, PX_MONO,
+    F_UI, F_MONO, F_ICON, PX_UI, PX_MONO,
     T_BG, T_FG, T_DIM, T_PANEL, T_BTN, T_BTNHI, T_BTNDN, T_LINE,
     T_SEL, T_SELFG, T_FOCUS, T_ENTRY, T_HEAD, T_SCROLL, T_THUMB,
     T_ACCENT, T_DLG, T_MENU, T_COUNT,
@@ -112,6 +115,30 @@ const F_UI: u64 = 0
 const F_MONO: u64 = 1
 const PX_UI: u64 = 15
 const PX_MONO: u64 = 16
+
+// ROUND ICONS: the third role.  Same number as `wig.F_ICON`, and it has
+// to be -- the value travels through WIG_GLYPH unchanged.
+const F_ICON: u64 = 2
+
+// THE FOUR SIZES AN ICON IS DRAWN AT, and they are four and not any
+// number the caller likes for one reason: an icon has to be CHECKED at
+// the size it is used.  A drawing that turns to mush at sixteen pixels
+// is worthless, and it only shows if the sheet is rendered at sixteen
+// -- not at ninety-six and then shrunk.
+//
+//   ICON_SMALL    16  list rows, the file manager, status in a line
+//   ICON_MENU     16  next to a menu entry, same box as the text line
+//   ICON_TASKBAR  20  the taskbar, where the row is taller
+//   ICON_LARGE    24  buttons with an icon above the label, dialogues
+//
+// SMALL and MENU are the same number today.  They are two names because
+// they answer to different things: SMALL follows the row height of a
+// list, MENU follows PX_UI.  When one of the two moves, the other must
+// not move with it by accident.
+const ICON_SMALL: u64 = 16
+const ICON_MENU: u64 = 16
+const ICON_TASKBAR: u64 = 20
+const ICON_LARGE: u64 = 24
 
 // ------------------------------------------------------- die Flaeche
 
@@ -859,4 +886,87 @@ fn theme_load(pfad: u64) -> u64 {
         i = e + 1
     }
     return th_read
+}
+
+
+// ---------------------------------------------------------- ROUND ICONS
+//
+// AN ICON IS A GLYPH.  Everything below goes through the same path as a
+// letter -- `gfind` into the Ring 3 glyph cache, WIG_GLYPH into the
+// kernel rasteriser, `draw_glyph` onto the surface -- and that is the
+// whole point of the round.  What it buys, measured in docs/ICONS.md:
+//
+//   * ONE COLOUR, PASSED IN.  The glyph is a coverage field, so the
+//     caller mixes it with whatever colour it likes.  Light theme and
+//     dark theme need no second set of pictures; they pass a different
+//     colour.  A bitmap icon cannot do that -- its colours are baked.
+//   * ONE OUTLINE, ANY SIZE.  16, 20 and 24 pixels come out of the same
+//     outline, rasterised once each and then cached.  A bitmap needs
+//     one file per size.
+//   * THE CACHE IS SHARED WITH TEXT.  An interface that draws forty
+//     icons and eight hundred characters keeps them in the same 512
+//     slots and pays one system call per (font, size, glyph).
+//
+// WHAT THE CALLER MUST NOT DO: write a code point here.  Every one of
+// these takes `id`, and every `id` comes from `icons.fi` by name.
+// `tools/icons/rawcp.py` counts the ones that do not and the count has
+// to stay 0.
+
+// Is there an icon font at all?  A system whose disk has no
+// /lib/icons.ttf is a system without icons, not a broken one -- the
+// caller draws its text and leaves the box empty.
+fn icon_have() -> bool {
+    return gfind(F_ICON, ICON_SMALL, icons.NETWORK_WIRED)
+        != 0xFFFFFFFFFFFFFFFF
+}
+
+// The box an icon occupies at size `px_`: square, `px_` on a side.
+//
+// This holds because the icon font's ascent is its whole em (the
+// builder prints it: upm 1000, ascent 1000, descent 0) and every glyph
+// is one em wide.  So the em box sits entirely ABOVE the baseline, and
+// an icon placed with its baseline at `y + px_` fills exactly
+// `y .. y + px_`.  It is a property of the font, so it is asserted in
+// `kernel/user/icont.fi` rather than assumed here.
+fn icon_box(px_: u64) -> u64 {
+    return px_
+}
+
+// The ink of an icon -- what it actually covers, which is smaller than
+// the box.  Wanted by anyone centring an icon against text.
+fn icon_ink_w(id: u64, px_: u64) -> u64 {
+    let at: u64 = gfind(F_ICON, px_, id)
+    if at == 0xFFFFFFFFFFFFFFFF {
+        return 0
+    }
+    return gc[(at + GC_W) as usize]
+}
+
+fn icon_ink_h(id: u64, px_: u64) -> u64 {
+    let at: u64 = gfind(F_ICON, px_, id)
+    if at == 0xFFFFFFFFFFFFFFFF {
+        return 0
+    }
+    return gc[(at + GC_H) as usize]
+}
+
+// ONE ICON, top left corner at (x, y), `px_` on a side, in `color`.
+//
+// `color` is a value the caller got from the theme (`theme(T_...)`),
+// never a literal -- that is round THEME's rule and this round does not
+// break it.  What this round adds is that the SAME call works in light
+// and in dark: the glyph carries no colour of its own.
+//
+// Returns false when there is no such glyph, so that a caller can fall
+// back to a label instead of silently drawing nothing.
+fn icon_at(id: u64, x: u64, y: u64, px_: u64, color: u64) -> bool {
+    let at: u64 = gfind(F_ICON, px_, id)
+    if at == 0xFFFFFFFFFFFFFFFF {
+        return false
+    }
+    if gc[(at + GC_W) as usize] == 0 || gc[(at + GC_H) as usize] == 0 {
+        return false
+    }
+    draw_glyph(at, x as i64, (y + px_) as i64, color)
+    return true
 }
