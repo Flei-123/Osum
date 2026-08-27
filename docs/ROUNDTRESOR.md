@@ -19,7 +19,7 @@ was built and what the measurements said.
 | `kernel/procfs.fi` | *additive*: `/proc/hwid` |
 | `kernel/user/sha.fi` | SHA-256 as a stream, any length |
 | `kernel/user/hwid.fi` | the raw values and a fingerprint over the stable ones |
-| `kernel/user/bak.fi` | `/bin/bak`: content-addressed backup |
+| `kernel/user/bak.fi` | `/bin/backup`: content-addressed backup |
 | `kernel/user/key.fi` | key management: wrap, unwrap, destroy |
 | `kernel/user/shat.fi` | the SHA-256 measurement, in ring 3 |
 | `tools/tresor/` | the runner, a second SMBIOS decoder, a memory dumper, a corrupter |
@@ -158,7 +158,7 @@ Restore is byte-identical, and that is checked **out of the disk image**
 rather than off the serial line: **6 entries compared, 6 identical, 0
 different**.
 
-`bak verify` re-hashes every chunk. The host flips **one octet** in the
+`backup verify` re-hashes every chunk. The host flips **one octet** in the
 pack file inside the image, from outside the kernel; `cmp` confirms
 exactly one octet differs. The same run then finds **1 corrupt chunk in
 the damaged store and 0 in an intact one**.

@@ -313,13 +313,13 @@ already had -- and the MAC address. Readable as `/proc/hwid`, with
 fields that a reinstall does not change. Measured against a **second,
 independent SMBIOS reader in Python** that decodes the same memory dump.
 
-A **backup** that is content addressed like `opk` (`/bin/bak`): every
+A **backup** that is content addressed like `opk` (`/bin/backup`): every
 chunk is named by its SHA-256, so identical chunks are stored once and
-"incremental" is not a separate mechanism. Measured: the second `bak save`
+"incremental" is not a separate mechanism. Measured: the second `backup save`
 of an unchanged tree reads all 25,491 octets and writes **0**; save,
 delete and restore give a tree that the HOST reads back out of the disk
 image and compares octet for octet (6 entries, 6 identical); and one
-flipped octet in the pack file is found by `bak verify`.
+flipped octet in the pack file is found by `backup verify`.
 
 And the **key management** that disk encryption would hang off
 (`/bin/key`): a random data key, wrapped by a passphrase-derived key
