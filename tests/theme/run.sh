@@ -123,10 +123,19 @@ num "rohe Farbwerte im Zeichencode" "$roh" eq 0
 num "Marken, die statt dessen benutzt werden" "$mrk" ge 100
 # DIE GEGENPROBE ZUR NULL: derselbe Pruefer auf den Stand VOR dieser
 # Runde. Findet er dort auch nichts, prueft er nichts.
-# Der juengste Commit, der NICHT aus dieser Runde ist -- also der
-# Stand, auf dem sie aufsetzt. `git log --grep='^THEME'` traf daneben:
-# git verankert das Muster nicht am Zeilenanfang der Meldung.
-VOR=$(git log --format='%H %s' | awk '$2 !~ /^THEME/ {print $1; exit}')
+#
+# RUNDE MERGE: DER STAND "VOR DER RUNDE" WIRD JETZT AM PRUEFER SELBST
+# FESTGEMACHT. Vorher war es "der juengste Commit, dessen Meldung nicht
+# mit THEME anfaengt" -- solange die Runde die Spitze des Zweiges war,
+# stimmte das, und in dem Augenblick, in dem irgendein anderer Commit
+# obendrauf kam, zeigte es auf einen Baum, der die Null laengst hatte.
+# Der Lauf meldete dann, der Pruefer pruefe nichts, und der Pruefer war
+# in Ordnung. Der Commit, der `rawcolour.py` ANGELEGT hat, ist der
+# Anfang dieser Runde; sein Elternteil ist der Stand davor, und das
+# bleibt richtig, egal was seither obendrauf liegt.
+VOR=$(git rev-parse --verify \
+    "$(git log --diff-filter=A --format=%H -- tests/theme/rawcolour.py | tail -1)^" \
+    2>/dev/null)
 if [ -n "$VOR" ]; then
     rm -rf "$TMPD/vor"; mkdir -p "$TMPD/vor"
     git archive "$VOR" kernel/user kernel/wm.fi 2>/dev/null \
