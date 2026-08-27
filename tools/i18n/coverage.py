@@ -216,6 +216,21 @@ def main():
         miss = sorted(k for k, v in c["probe"].items() if not v)
         print("   probe of the characters a German surface needs: %s" %
               ("all present" if not miss else "MISSING " + " ".join(miss)))
+        # EINE ZEILE FUER DEN TESTLAEUFER. Die Ausgabe darueber ist fuer
+        # Menschen -- ein Laeufer, der sie mit `grep -A1` zerlegt, bricht
+        # beim naechsten Wort, das sich aendert. Diese Zeile ist der
+        # Vertrag: ein Name, ein Gleichheitszeichen, eine Zahl.
+        def hab(name):
+            for b in c["blocks"]:
+                if b["block"].startswith(name):
+                    return b["have"]
+            return 0
+        print("i18n-coverage: file=%s mapped=%d glyphs=%d octets=%d"
+              " latin1=%d latin_a=%d fffd=%d missing=%d format12=%d"
+              % (c["file"], c["mapped"], c["glyphs_in_file"], c["bytes"],
+                 hab("Latin-1 Supplement"), hab("Latin Extended-A"),
+                 hab("Specials"), len(miss),
+                 1 if c["has_format12"] else 0))
         print("")
 
 
