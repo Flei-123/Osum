@@ -82,7 +82,23 @@ EOF
 printf 'en\n' > "$OUT/locale-en"
 printf 'de\n' > "$OUT/locale-de"
 
-ARGS=(build "$OUT/disk.img" 4096 /lib/
+# 16384 BLOCKS AND NOT 4096. mkfs' block is 512 octets, so this is
+# 8 MiB and used to be 2. Round LOOK made the three programs of the
+# desktop considerably bigger -- the shape tokens and the rounded,
+# antialiased drawing in settings, the icon glyphs and the second
+# status field in the taskbar, and a message catalogue that went
+# from 72 keys to 154:
+#
+#     settings  384200 -> 565248     taskbar  278032 -> 371248
+#     desktop   181568 -> 249368     (+342 KiB together)
+#
+# and the image stopped fitting. The failure is loud but it is loud
+# in the WRONG PLACE: `mkfs: the disk is full`, then twenty-nine
+# assertions about drag, autohide and the settings page fail because
+# there was no image to boot. tools/look/shot.sh and
+# tools/netview/run.sh were already on 8192 for the same set of
+# programs, which is why they did not notice.
+ARGS=(build "$OUT/disk.img" 16384 /lib/
       "/lib/mono.ttf=assets/osum-mono.ttf" "/lib/sans.ttf=assets/osum-sans.ttf"
       /bin/)
 for p in $PROGS; do ARGS+=("/bin/$p=$OUT/$p.elf"); done
