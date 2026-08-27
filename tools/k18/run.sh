@@ -204,7 +204,7 @@ gleich "die kdata-Seite des Akkus" "0x59000" "$batoff"
 # kdata musste wachsen, weil der Vorrat dieser Runde hinter der alten
 # Grenze liegt -- und die Zahl steht ZWEIMAL. Beide muessen gleich sein.
 kd_fi=$(grep -aE '^const KDATA_SIZE' kernel/kstate.fi | sed 's/.*= //')
-kd_s=$(grep -aE '\.set KDATA_SIZE' kernel/boot.s | sed -E 's/.*KDATA_SIZE, *([0-9a-fx]+).*/\1/')
+kd_s=$(grep -aE '\.set KDATA_SIZE' kernel/arch/x86_64/boot.s | sed -E 's/.*KDATA_SIZE, *([0-9a-fx]+).*/\1/')
 gleich "KDATA_SIZE in kstate.fi und boot.s ist dieselbe Zahl" "$kd_fi" "$kd_s"
 if [ "$(hexdez "${kd_fi:-0}")" -ge "$(hexdez 0x60000)" ]; then
     ok "kdata reicht ueber den Vorrat dieser Runde hinaus: $kd_fi"

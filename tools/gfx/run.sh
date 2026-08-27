@@ -187,7 +187,7 @@ echo "== 3. die Fensterplaetze und die Speicherkarte von kdata =="
 # Belegungsliste.  Laufen die Zahlen auseinander, nehmen sich zwei Treiber
 # gegenseitig die Abbildung weg -- und das faellt erst auf, wenn beide
 # gleichzeitig gebraucht werden.
-w_apic=$(grep -E '^const WIN_SLOTS|^const WIN_FIRST|^const WIN_VIRT|^const HUGE_SIZE' kernel/apic.fi | sed 's/ *\/\/.*//' | sort)
+w_apic=$(grep -E '^const WIN_SLOTS|^const WIN_FIRST|^const WIN_VIRT|^const HUGE_SIZE' kernel/arch/x86_64/apic.fi | sed 's/ *\/\/.*//' | sort)
 w_fb=$(grep -E '^const WIN_SLOTS|^const WIN_FIRST|^const WIN_VIRT|^const HUGE_SIZE' kernel/fb.fi | sed 's/ *\/\/.*//' | sort)
 if [ -n "$w_apic" ] && [ "$w_apic" = "$w_fb" ]; then
     ok "WIN_SLOTS, WIN_FIRST, WIN_VIRT und HUGE_SIZE stehen in beiden gleich"
@@ -198,7 +198,7 @@ fi
 # Und die Belegungsliste: fb.fi rechnet sie sich aus pci.K2_SCALARS und
 # apic.S_WIN selbst zusammen, weil es pci.fi nicht einbinden darf.
 k2=$(grep -E '^const K2_SCALARS' kernel/pci.fi | grep -oE '0x[0-9A-Fa-f]+')
-sw=$(grep -E '^const S_WIN' kernel/apic.fi | grep -oE '0x[0-9A-Fa-f]+')
+sw=$(grep -E '^const S_WIN' kernel/arch/x86_64/apic.fi | grep -oE '0x[0-9A-Fa-f]+')
 fbl=$(grep -E '^const WIN_LIST' kernel/fb.fi | sed 's/.*= *//; s/ *\/\/.*//')
 if [ "$fbl" = "$k2 + $sw" ]; then
     ok "fb.WIN_LIST ist pci.K2_SCALARS + apic.S_WIN ($k2 + $sw)"
@@ -228,9 +228,12 @@ else bad "die Speicherkarte von kdata kollidiert"; echo "$kart" | sed 's/^/     
 # etwas findet, ist von einem, der nichts prueft, nicht zu unterscheiden.
 # Also wird die alte Adresse in einer KOPIE zurueckgesetzt -- der Baum
 # bleibt unangetastet -- und der Pruefer MUSS anschlagen.
+# RUNDE ARM: siehe tools/wm/run.sh -- die Kopie braucht arch/x86_64/ mit,
+# sonst findet der Pruefer `hv.fi` nicht und stirbt an einem KeyError.
 GG="$TMPD/kernel-gg"
-mkdir -p "$GG"
+mkdir -p "$GG/arch/x86_64"
 cp kernel/*.fi "$GG/"
+cp kernel/arch/x86_64/*.fi "$GG/arch/x86_64/"
 sed -i 's/^const FB_OFF: u64 = 0x3C000/const FB_OFF: u64 = 0x2F000/; s/^const FONT_OFF: u64 = 0x3C100/const FONT_OFF: u64 = 0x2F100/' "$GG/fb.fi" "$GG/kstate.fi"
 gg=$(python3 tools/kernel/karte.py "$GG" 2>&1)
 if [ $? -ne 0 ] && printf '%s' "$gg" | grep -q 'KOLLISION: FB'; then

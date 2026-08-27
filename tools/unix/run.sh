@@ -165,7 +165,7 @@ num "Nummern von K9, die im Socket-Block 41..55 von K8 liegen" "$clash" eq 0
 
 echo "== 2. bauen: der Kernel, das Userland und das messende Programm =="
 for f in boot isr switch smp hv; do
-    as --64 -o "$TMPD/$f.o" "kernel/$f.s" 2>"$TMPD/as.err" \
+    as --64 -o "$TMPD/$f.o" "kernel/arch/x86_64/$f.s" 2>"$TMPD/as.err" \
         || { bad "$f.s laesst sich nicht assemblieren"; sed 's/^/        /' "$TMPD/as.err" | head -5; }
 done
 as --64 -o "$TMPD/crt.o" kernel/user/crt.s 2>"$TMPD/ascrt.err" \

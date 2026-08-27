@@ -1,0 +1,697 @@
+// kernel/arch/aarch64/amain.fi -- THE AArch64 SIDE, IN FIRN.
+//
+// Round ARM built this as 1,166 lines of A64 assembly, because the pinned
+// compiler answered `--target=aarch64-linux` with "does not support the
+// kernel profile yet". Firn's round ARM-FREESTANDING removed that answer.
+// This file is what the assembly said, said in the language the rest of
+// Osum is written in.
+//
+// WHAT IS STILL ASSEMBLY, AND WHY -- the same three things as on x86-64:
+//
+//   start.S    the machine is not yet in a state a compiled function can
+//              run in: no stack, .bss not cleared, possibly the wrong
+//              exception level. Plus `osum_panic`, which the compiler
+//              leaves undefined on purpose.
+//   vectors.S  the sixteen entries are 0x80 octets of INSTRUCTION SPACE
+//              each; a compiler cannot promise that, and the register save
+//              has to happen before anything that could clobber a register.
+//   switch.S   swapping the stack pointer under a running function is not
+//              something a language can express.
+//
+// Everything else -- the UART, the page tables, the GIC, the timer, the
+// exception handling, the measurements -- is here, in Firn, and goes through
+// `kernel/arch/arch.fi` wherever the operation has a name on both machines.
+// `arch.dev_write32` is what replaces `out dx, eax`; on this machine it is a
+// store to a page mapped Device-nGnRnE.
+//
+// WHAT THIS IS NOT. It is not Osum booting on ARM. `kmain.fi` still reaches
+// for `arch.x86_64.apic`, `idt`, `trap`, `guard`, `user`, `smp` and `hv`,
+// and none of those has an AArch64 counterpart yet. What this file proves is
+// narrower and is the thing that had to be proved first: FIRN KERNEL CODE
+// RUNS ON THIS MACHINE, through the same boundary the x86 kernel uses, and
+// it can drive the four devices a kernel cannot do without.
+
+import arch.arch
+import arch.aarch64.virt
+
+export { kmain, kexception }
+
+// ------------------------------------------------------------------- the UART
+//
+// PL011 at 0x09000000. The counterpart of `kernel/serial.fi`, and the
+// difference is not the chip, it is the way there: on x86 the 16550 lives in
+// the port space and is reached with `out dx, al`, here it is memory and
+// every access is ordered by hand plus a device attribute in the page
+// descriptor. Both halves are needed.
+
+fn uart_init() {
+    arch.dev_write32(virt.UART0 + virt.UART_CR, 0 as u32)
+    arch.barrier_device()
+    arch.dev_write32(virt.UART0 + virt.UART_ICR, 0x7FF as u32)
+    // 24 MHz UARTCLK (the device tree's /apb-pclk), 115200 baud:
+    // 24e6 / (16 * 115200) = 13.0208 -> IBRD 13, FBRD 1.
+    arch.dev_write32(virt.UART0 + virt.UART_IBRD, 13 as u32)
+    arch.dev_write32(virt.UART0 + virt.UART_FBRD, 1 as u32)
+    arch.dev_write32(virt.UART0 + virt.UART_LCRH, 0x70 as u32)
+    arch.dev_write32(virt.UART0 + virt.UART_IMSC, 0 as u32)
+    arch.dev_write32(virt.UART0 + virt.UART_CR, 0x301 as u32)
+    arch.barrier_device()
+}
+
+fn put(c: u8) {
+    while (arch.dev_read32(virt.UART0 + virt.UART_FR) & 0x20 as u32) != 0 as u32 {
+    }
+    arch.dev_write32(virt.UART0 + virt.UART_DR, c as u32)
+    arch.barrier_device()
+}
+
+// A string in the C sense: everything up to the first zero octet. The kernel
+// profile has no string type -- the standard library is barred here -- so
+// texts are `[u8; n]` with a closing zero, exactly as `serial.puts` wants
+// them on the other machine.
+fn puts(p: u64) {
+    var i: u64 = 0
+    while true {
+        let c: u8 = __mmio_read8((p + i) as *mut u8)
+        if c == 0 as u8 {
+            return
+        }
+        put(c)
+        i = i + 1
+    }
+}
+
+fn nl() {
+    put(10 as u8)
+}
+
+fn dec(v: u64) {
+    if v == 0 {
+        put(48 as u8)
+        return
+    }
+    var digits: [u8; 24] = [0 as u8; 24]
+    var n: u64 = 0
+    var x: u64 = v
+    while x != 0 {
+        digits[n as usize] = (48 + (x % 10)) as u8
+        x = x / 10
+        n = n + 1
+    }
+    while n != 0 {
+        n = n - 1
+        put(digits[n as usize])
+    }
+}
+
+fn hex(v: u64) {
+    var i: u64 = 16
+    while i != 0 {
+        i = i - 1
+        let d: u64 = (v >> (i * 4)) & 15
+        if d < 10 {
+            put((48 + d) as u8)
+        } else {
+            put((87 + d) as u8)
+        }
+    }
+}
+
+// ------------------------------------------------------------- system registers
+//
+// MRS and MSR need no language form of their own: the register name is part
+// of the assembler text and GNU as checks it. That is the whole reason round
+// ARM-FREESTANDING did not have to invent a syntax for them.
+
+fn current_el() -> u64 {
+    return asm("mrs x0, currentel\nlsr x0, x0, #2", out("x0"))
+}
+
+fn sctlr() -> u64 {
+    return asm("mrs x0, sctlr_el1", out("x0"))
+}
+
+fn set_vbar(p: u64) {
+    asm("msr vbar_el1, x0\nisb", in("x0") p)
+}
+
+fn timer_freq() -> u64 {
+    return asm("mrs x0, cntfrq_el0", out("x0"))
+}
+
+fn timer_arm(ticks: u64) {
+    asm("msr cntv_tval_el0, x0\nmov x1, #1\nmsr cntv_ctl_el0, x1\nisb",
+        in("x0") ticks, clobber("x1"))
+}
+
+fn timer_off() {
+    asm("msr cntv_ctl_el0, xzr\nisb")
+}
+
+// ------------------------------------------------------------- the page tables
+//
+// 4 KiB granule, 39-bit virtual addresses (T0SZ = T1SZ = 25), so the walk
+// starts at level 1 and one entry there covers a gigabyte.
+//
+//   TTBR0  L1[0]  1 GiB block, device   0x00000000..0x3FFFFFFF (UART, GIC,
+//                                        virtio)
+//          L1[1]  1 GiB block, normal   0x40000000..0x7FFFFFFF (RAM)
+//          L1[2]  -> L2[0] -> L3[0] -> one 4 KiB page at 0x80000000
+//   TTBR1  L1[1]  the same RAM again, at 0xFFFFFF8040000000
+//
+// THE ACCESS FLAG IS NOT OPTIONAL. Bit 10 clear means "never touched" and
+// the hardware faults on first use. A descriptor right in every other bit
+// and with AF clear stops the machine dead -- no message, because the fault
+// vector cannot be fetched either. The x86 format has no such bit and
+// nothing reminds you (docs/ARCH.md 5.2).
+
+const D_VALID: u64 = 1
+const D_TABLE: u64 = 2
+const D_PAGE: u64 = 2
+const D_ATTR_DEV: u64 = 4          // MAIR index 1, shifted into bits 4..2
+const D_SH_INNER: u64 = 768        // 3 << 8
+const D_AF: u64 = 1024             // 1 << 10
+const D_PXN: u64 = 9007199254740992     // 1 << 53
+const D_UXN: u64 = 18014398509481984    // 1 << 54
+
+const TBL_DESC: u64 = D_VALID | D_TABLE
+
+// The access flag comes through a function so that the counter-check can
+// take it away without touching another bit of another descriptor. A build
+// with it cleared is the sharpest test this port has: everything else is
+// identical and the machine goes SILENT.
+fn af() -> u64 {
+    if broken(SW_NO_AF) {
+        return 0
+    }
+    return D_AF
+}
+
+fn blk_dev() -> u64 {
+    return D_VALID | D_ATTR_DEV | af() | D_PXN | D_UXN
+}
+
+fn blk_norm() -> u64 {
+    return D_VALID | D_SH_INNER | af() | D_UXN
+}
+
+fn page_norm() -> u64 {
+    return D_VALID | D_PAGE | D_SH_INNER | af() | D_UXN
+}
+
+// attr0 = 0xFF Normal write-back, attr1 = 0x00 Device-nGnRnE, attr2 = 0x04
+const MAIR_VALUE: u64 = 0x400FF
+
+// T0SZ 25 | IRGN0 1 | ORGN0 1 | SH0 3 | TG0 0 | T1SZ 25 | IRGN1 1 | ORGN1 1
+// | SH1 3 | TG1 2 | IPS 2.
+// TG0 = 0 and TG1 = 2 both mean 4 KiB. One digit, two encodings, and the
+// wrong one gives a translation fault on the first high address with no
+// other symptom (docs/ARCH.md 5.3).
+const TCR_VALUE: u64 = 25 | (1 << 8) | (1 << 10) | (3 << 12) | (25 << 16)
+    | (1 << 24) | (1 << 26) | (3 << 28) | (2 << 30) | (2 << 32)
+
+// The tables live in the `.pagetables` section that `virt.ld` reserves.
+// Their addresses come out of the linker, not out of an allocator -- there
+// is no allocator at this point on either machine.
+fn pt_base() -> u64 {
+    return asm("adrp x0, __pt_start\nadd x0, x0, :lo12:__pt_start", out("x0"))
+}
+
+fn pt_end() -> u64 {
+    return asm("adrp x0, __pt_end\nadd x0, x0, :lo12:__pt_end", out("x0"))
+}
+
+fn image_start() -> u64 {
+    return asm("adrp x0, __image_start\nadd x0, x0, :lo12:__image_start", out("x0"))
+}
+
+const L1_LO: u64 = 0
+const L1_HI: u64 = 4096
+const L2: u64 = 8192
+const L3: u64 = 12288
+const TEST_PAGE: u64 = 16384
+
+// The virtual address of the one page that is mapped by hand, and the bottom
+// of the 39-bit high half that TTBR1 translates.
+const TEST_VA: u64 = 0x80000000
+const HIGH_BASE: u64 = 0xFFFFFF8000000000
+
+fn mmu_init() {
+    let base: u64 = pt_base()
+
+    // `.pagetables` is NOLOAD; nothing in the ELF zeroes it and `start.S`
+    // only clears `.bss`.
+    var p: u64 = base
+    let e: u64 = pt_end()
+    while p < e {
+        __mmio_write64(p as *mut u64, 0)
+        p = p + 8
+    }
+
+    __mmio_write64((base + L1_LO) as *mut u64, blk_dev())
+    __mmio_write64((base + L1_LO + 8) as *mut u64, virt.RAM_BASE | blk_norm())
+    __mmio_write64((base + L1_LO + 16) as *mut u64, (base + L2) | TBL_DESC)
+    __mmio_write64((base + L2) as *mut u64, (base + L3) | TBL_DESC)
+    __mmio_write64((base + L3) as *mut u64, (base + TEST_PAGE) | page_norm())
+    __mmio_write64((base + L1_HI + 8) as *mut u64, virt.RAM_BASE | blk_norm())
+
+    // The table walker is not the load/store unit. On a machine with a weak
+    // memory model the stores above may still sit in a buffer when the first
+    // walk happens, and the walk would read zeroes out of a table this code
+    // has just filled. `dsb ishst` is the sentence "everything I stored is
+    // visible now". There is no x86 counterpart: writing CR3 there is itself
+    // the ordering point.
+    asm("dsb ishst")
+
+    asm("msr mair_el1, x0", in("x0") MAIR_VALUE)
+    asm("msr tcr_el1, x0", in("x0") TCR_VALUE)
+    asm("msr ttbr0_el1, x0", in("x0") base + L1_LO)
+    asm("msr ttbr1_el1, x0\nisb", in("x0") base + L1_HI)
+    arch.tlb_flush_all()
+
+    asm("mrs x0, sctlr_el1\norr x0, x0, #1\norr x0, x0, #4\norr x0, x0, #4096\nmsr sctlr_el1, x0\nisb",
+        out("x0"))
+}
+
+// ---------------------------------------------------------------- the GIC
+//
+// `kernel/arch/x86_64/apic.fi` is 575 lines and 47 of them touch the
+// machine. The GIC does the same job with a different shape:
+//
+//   * TWO blocks. The distributor is shared and decides where an interrupt
+//     goes; the CPU interface belongs to this processor and is where one is
+//     acknowledged and finished. The local APIC merges both.
+//   * THE NUMBER IS THE IDENTITY. On x86 a device is wired to a pin and the
+//     kernel picks which vector that pin raises, so `apic.fi` carries a map.
+//     Here an interrupt HAS a number all the way through, every interrupt
+//     arrives at the SAME vector entry, and the handler asks GICC_IAR who it
+//     was.
+//   * ACKNOWLEDGING AND FINISHING ARE TWO WRITES. Skip the second and the
+//     controller never delivers anything of equal or lower priority again --
+//     the machine goes quiet and nothing says why.
+
+fn gic_init() {
+    arch.dev_write32(virt.GICD + virt.GICD_CTLR, 0 as u32)
+    arch.barrier_device()
+
+    // GICD_TYPER's low five bits give (lines / 32 - 1).
+    let lines: u64 = ((arch.dev_read32(virt.GICD + virt.GICD_TYPER) as u64 & 31) + 1) * 32
+    var i: u64 = 32
+    while i < lines {
+        arch.dev_write8(virt.GICD + virt.GICD_IPRIORITY + i, 0xA0 as u8)
+        arch.dev_write8(virt.GICD + virt.GICD_ITARGETSR + i, 1 as u8)
+        i = i + 1
+    }
+    arch.dev_write32(virt.GICD + virt.GICD_CTLR, 1 as u32)
+    arch.barrier_device()
+
+    arch.dev_write32(virt.GICC + virt.GICC_PMR, 0xF0 as u32)
+    arch.dev_write32(virt.GICC + virt.GICC_CTLR, 1 as u32)
+    arch.barrier_device()
+}
+
+fn gic_enable(intid: u64) {
+    let word: u64 = intid >> 5
+    let bit: u32 = (1 << (intid & 31)) as u32
+    arch.dev_write32(virt.GICD + virt.GICD_ISENABLER + word * 4, bit)
+    // A private interrupt (16..31) keeps its priority in this processor's own
+    // copy of the register, so it is set here and not in `gic_init`.
+    arch.dev_write8(virt.GICD + virt.GICD_IPRIORITY + intid, 0xA0 as u8)
+    arch.barrier_device()
+}
+
+fn gic_ack() -> u64 {
+    return arch.dev_read32(virt.GICC + virt.GICC_IAR) as u64
+}
+
+fn gic_eoi(intid: u64) {
+    arch.dev_write32(virt.GICC + virt.GICC_EOIR, intid as u32)
+    arch.barrier_device()
+}
+
+// ------------------------------------------------------------------- state
+//
+// The same arrangement `kstate.fi` uses on x86: mutable kernel state does not
+// live in the language, it lives in a region whose address comes from the
+// linker. Stage 0 of Firn has `const` and no mutable globals (SPEC 14), and
+// that limit is the same on both machines.
+
+fn state() -> u64 {
+    return asm("adrp x0, kstate_a64\nadd x0, x0, :lo12:kstate_a64", out("x0"))
+}
+
+const S_TICKS: u64 = 0
+const S_PERIOD: u64 = 8
+const S_SVC: u64 = 16
+const S_ESR: u64 = 24
+const S_TRAPS: u64 = 32
+// The counter-check switches, put here by `start.S` from its `#ifdef`s.
+const S_SWITCH: u64 = 40
+
+const SW_NO_MMU: u64 = 1
+const SW_NO_AF: u64 = 2
+const SW_NO_TIMER_IRQ: u64 = 4
+const SW_NO_EOI: u64 = 8
+
+fn get(off: u64) -> u64 {
+    return __mmio_read64((state() + off) as *mut u64)
+}
+
+fn set(off: u64, v: u64) {
+    __mmio_write64((state() + off) as *mut u64, v)
+}
+
+fn broken(bit: u64) -> bool {
+    return (get(S_SWITCH) & bit) != 0
+}
+
+// -------------------------------------------------------------- the handler
+//
+// Called from `vectors.S` with the frame it pushed and the index of the entry
+// that was taken. AArch64 tells you the SITUATION for free and the CAUSE only
+// through ESR_EL1 -- the opposite of x86, where the vector number is the
+// cause and the situation has to be worked out.
+
+const F_ELR: u64 = 248
+const F_ESR: u64 = 264
+const F_FAR: u64 = 272
+
+const KIND_SYNC: u64 = 4
+const KIND_IRQ: u64 = 5
+
+fn kexception(frame: u64, kind: u64) {
+    if kind == KIND_IRQ {
+        let id: u64 = gic_ack()
+        if id == virt.TIMER_INTID {
+            set(S_TICKS, get(S_TICKS) + 1)
+            timer_arm(get(S_PERIOD))
+        }
+        if !broken(SW_NO_EOI) {
+            gic_eoi(id)
+        }
+        return
+    }
+
+    let esr: u64 = __mmio_read64((frame + F_ESR) as *mut u64)
+    if kind == KIND_SYNC && (esr >> 26) == 0x15 {
+        // A deliberate `svc #0`. ELR_EL1 already points past it.
+        set(S_SVC, get(S_SVC) + 1)
+        set(S_ESR, esr)
+        return
+    }
+
+    var s_trap: [u8; 21] = "osum-arm: TRAP kind=\0"
+    set(S_TRAPS, get(S_TRAPS) + 1)
+    puts((&s_trap[0]) as u64)
+    dec(kind)
+    put(32 as u8)
+    hex(esr)
+    put(32 as u8)
+    hex(__mmio_read64((frame + F_FAR) as *mut u64))
+    put(32 as u8)
+    hex(__mmio_read64((frame + F_ELR) as *mut u64))
+    nl()
+    poweroff()
+}
+
+// --------------------------------------------------------- the context switch
+//
+// `switch.S` holds the thirteen registers AAPCS64 makes the callee's problem
+// and the two things that genuinely cannot be said in a language: swapping
+// the stack pointer under a running function, and writing an entry point
+// into a saved x30 so that a task that has never run comes out of
+// `arch_switch` as if it had gone in.
+//
+// Calling it from Firn needs one trick, and it is the price A64 charges for
+// keeping the return address in a REGISTER. `blr` destroys x30, and x30 is
+// not a register the inline assembler lets a caller name in a clobber list
+// (x0-x17 only, with good reason). So the block saves it on the stack
+// itself. That works across the switch because `arch_switch` saves and
+// restores the stack pointer: when this task is scheduled again, its own sp
+// is back and the slot is still where it was put.
+//
+// On x86-64 none of this comes up: `call` pushed the return address onto the
+// stack, so switching the stack switches the return address with it, and
+// `kernel/sched.fi` gets away with a plain `asm("call rax", ...)`.
+
+fn sym_switch() -> u64 {
+    return asm("adrp x0, arch_switch\nadd x0, x0, :lo12:arch_switch", out("x0"))
+}
+
+fn sym_prepare() -> u64 {
+    return asm("adrp x0, task_prepare\nadd x0, x0, :lo12:task_prepare", out("x0"))
+}
+
+fn call4(f: u64, a0: u64, a1: u64, a2: u64, a3: u64) {
+    asm("str x30, [sp, #-16]!\nblr x4\nldr x30, [sp], #16",
+        in("x0") a0, in("x1") a1, in("x2") a2, in("x3") a3, in("x4") f,
+        clobber("x5"), clobber("x6"), clobber("x7"), clobber("x8"),
+        clobber("x9"), clobber("x10"), clobber("x11"), clobber("x12"),
+        clobber("x13"), clobber("x14"), clobber("x15"), clobber("x16"),
+        clobber("x17"), clobber("memory"))
+}
+
+fn switch_to(old_ctx: u64, new_ctx: u64) {
+    call4(sym_switch(), old_ctx, new_ctx, 0, 0)
+}
+
+fn task_prepare(ctx: u64, stack_top: u64, entry: u64, arg: u64) {
+    call4(sym_prepare(), ctx, stack_top, entry, arg)
+}
+
+// The three contexts and the two stacks live in the page the linker set
+// aside for measurements -- there is no allocator here, on either machine.
+const CTX_BYTES: u64 = 112
+const CTX_MAIN: u64 = 512
+const CTX_A: u64 = 640
+const CTX_B: u64 = 768
+const STACK_A_TOP: u64 = 2048
+const STACK_B_TOP: u64 = 3072
+const S_ROUNDS: u64 = 48
+const S_HANDOVERS: u64 = 56
+
+fn scratch() -> u64 {
+    return pt_base() + TEST_PAGE
+}
+
+fn handover(c: u8) {
+    put(c)
+    set(S_HANDOVERS, get(S_HANDOVERS) + 1)
+}
+
+// Ten rounds, then back to where the measurement started. `task_b` never
+// returns; it is left standing in the middle of its own `arch_switch`, which
+// is exactly what a task that is not running looks like.
+fn task_a(arg: u64) {
+    var i: u64 = 0
+    while i < 10 {
+        handover(65 as u8)
+        switch_to(scratch() + CTX_A, scratch() + CTX_B)
+        i = i + 1
+    }
+    switch_to(scratch() + CTX_A, scratch() + CTX_MAIN)
+}
+
+fn task_b(arg: u64) {
+    while true {
+        handover(66 as u8)
+        switch_to(scratch() + CTX_B, scratch() + CTX_A)
+    }
+}
+
+fn sym_task_a() -> u64 {
+    return asm("adrp x0, _F0.amain__task_a\nadd x0, x0, :lo12:_F0.amain__task_a", out("x0"))
+}
+
+fn sym_task_b() -> u64 {
+    return asm("adrp x0, _F0.amain__task_b\nadd x0, x0, :lo12:_F0.amain__task_b", out("x0"))
+}
+
+// PSCI: `-M virt` says `method = "hvc"` in its device tree.
+fn poweroff() {
+    asm("mov x0, #0x0008\nmovk x0, #0x8400, lsl #16\nhvc #0",
+        clobber("x0"), clobber("memory"))
+    while true {
+        arch.idle()
+    }
+}
+
+// The texts live where they are used. Stage 0 of Firn has `const` and no
+// mutable globals (SPEC 14), and a `[u8; n]` initialised from a string
+// literal is a local -- exactly the arrangement `kernel/atomic.fi` uses for
+// its own messages on the other machine.
+
+// --------------------------------------------------------------------- kmain
+//
+// Every line below is a claim with a number attached, and `tools/arm/run.sh`
+// reads them back off the serial line. A line that says "ok" without a number
+// is a line that cannot fail, and there are none of those.
+
+fn kmain(dtb: u64) {
+    var s_hello: [u8; 17] = "osum-arm: hello\n\0"
+    var s_lang: [u8; 24] = "osum-arm: language=firn\0"
+    var s_el: [u8; 14] = "osum-arm: el=\0"
+    var s_svc: [u8; 15] = "osum-arm: svc=\0"
+    var s_mmu: [u8; 15] = "osum-arm: mmu=\0"
+    var s_page: [u8; 18] = "osum-arm: page=0x\0"
+    var s_ttbr1: [u8; 19] = "osum-arm: ttbr1=0x\0"
+    var s_freq: [u8; 16] = "osum-arm: freq=\0"
+    var s_ticks: [u8; 17] = "osum-arm: ticks=\0"
+    var s_ports: [u8; 17] = "osum-arm: ports=\0"
+    var s_order: [u8; 17] = "osum-arm: order=\0"
+    var s_virtio: [u8; 18] = "osum-arm: virtio=\0"
+    var s_done: [u8; 16] = "osum-arm: done\n\0"
+
+    uart_init()
+    puts((&s_hello[0]) as u64)
+
+    // The line that is the point of this round: this text was produced by
+    // Firn code compiled for aarch64-none, not by hand-written assembly.
+    puts((&s_lang[0]) as u64)
+    nl()
+
+    puts((&s_el[0]) as u64)
+    dec(current_el())
+    nl()
+
+    // A deliberate exception, caught by the kernel's own vector table.
+    set(S_SVC, 0)
+    asm("svc #0", clobber("memory"))
+    puts((&s_svc[0]) as u64)
+    dec(get(S_SVC))
+    put(32 as u8)
+    hex(get(S_ESR) >> 26)
+    nl()
+
+    if !broken(SW_NO_MMU) {
+        mmu_init()
+    }
+    puts((&s_mmu[0]) as u64)
+    dec(sctlr() & 1)
+    nl()
+
+    // One page mapped by hand through three levels: written through the
+    // mapping, read back through the physical address it points at. Without
+    // translation there is nothing at 0x80000000 and the write is a data
+    // abort, so the counter-check build does not reach this at all -- which
+    // is why it is guarded rather than allowed to "fail".
+    if broken(SW_NO_MMU) {
+        puts((&s_done[0]) as u64)
+        poweroff()
+    }
+    let want: u64 = 0x0BADC0DE0DDBA11
+    __mmio_write64(TEST_VA as *mut u64, want)
+    arch.barrier()
+    let got: u64 = __mmio_read64((pt_base() + TEST_PAGE) as *mut u64)
+    puts((&s_page[0]) as u64)
+    hex(TEST_VA)
+    put(32 as u8)
+    hex(got)
+    put(32 as u8)
+    if got == want {
+        dec(1)
+    } else {
+        dec(0)
+    }
+    nl()
+
+    // The same octet through TTBR0 and through TTBR1.
+    let lo: u64 = image_start()
+    let hi: u64 = HIGH_BASE | lo
+    puts((&s_ttbr1[0]) as u64)
+    hex(hi)
+    put(32 as u8)
+    if __mmio_read64(hi as *mut u64) == __mmio_read64(lo as *mut u64) {
+        dec(1)
+    } else {
+        dec(0)
+    }
+    nl()
+
+    // The boundary answers a question about itself, and the answer differs
+    // between the machines. On x86 this prints 1.
+    puts((&s_ports[0]) as u64)
+    if arch.has_io_ports() {
+        dec(1)
+    } else {
+        dec(0)
+    }
+    nl()
+
+    // And the ordering primitives really are the ordered ones: a value goes
+    // out through `arch.atomic_store` (a store-release here) and comes back
+    // through `arch.atomic_load` (a load-acquire). This is the pair that was
+    // wrong in `atomic.fi` until this round.
+    let cell: u64 = pt_base() + TEST_PAGE + 64
+    arch.atomic_store(cell, 0x5EC0DE)
+    puts((&s_order[0]) as u64)
+    hex(arch.atomic_load(cell))
+    nl()
+
+    gic_init()
+    if !broken(SW_NO_TIMER_IRQ) {
+        gic_enable(virt.TIMER_INTID)
+    }
+
+    puts((&s_freq[0]) as u64)
+    let f: u64 = timer_freq()
+    dec(f)
+    nl()
+
+    set(S_TICKS, 0)
+    set(S_PERIOD, f / 100)
+    timer_arm(f / 100)
+    arch.irq_on()
+
+    // `wfi` and not a spin: if the interrupt never arrives the machine sleeps
+    // and the runner's time limit reports it, instead of a busy loop that
+    // looks like work.
+    while get(S_TICKS) < 100 {
+        arch.idle()
+    }
+    arch.irq_off()
+    timer_off()
+    puts((&s_ticks[0]) as u64)
+    dec(get(S_TICKS))
+    nl()
+
+    // virtio is MEMORY on this machine, not a bus. On the PC these devices
+    // sit on PCI and `virtio.fi` walks configuration space over the ports
+    // 0xCF8/0xCFC. Here there are thirty-two fixed addresses, 0x200 apart,
+    // each either holding the magic number 0x74726976 ("virt") or reading
+    // back empty. There is no bus to walk.
+    var answering: u64 = 0
+    var named: u64 = 0
+    var s: u64 = 0
+    while s < virt.VIRTIO_SLOTS {
+        let a: u64 = virt.VIRTIO_MMIO + s * virt.VIRTIO_STRIDE
+        if arch.dev_read32(a) == 0x74726976 as u32 {
+            answering = answering + 1
+            if arch.dev_read32(a + 8) != 0 as u32 {
+                named = named + 1
+            }
+        }
+        s = s + 1
+    }
+    puts((&s_virtio[0]) as u64)
+    dec(answering)
+    put(32 as u8)
+    dec(named)
+    nl()
+
+    // Two tasks on one processor, handing it back and forth through
+    // `arch_switch`. The pattern is the proof: a switch that half works
+    // prints ABBB, or stops.
+    var s_switch: [u8; 18] = "osum-arm: switch=\0"
+    set(S_HANDOVERS, 0)
+    task_prepare(scratch() + CTX_A, scratch() + STACK_A_TOP, sym_task_a(), 0)
+    task_prepare(scratch() + CTX_B, scratch() + STACK_B_TOP, sym_task_b(), 0)
+    puts((&s_switch[0]) as u64)
+    switch_to(scratch() + CTX_MAIN, scratch() + CTX_A)
+    put(32 as u8)
+    dec(get(S_HANDOVERS))
+    nl()
+
+    puts((&s_done[0]) as u64)
+    poweroff()
+}

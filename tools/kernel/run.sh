@@ -106,20 +106,20 @@ value() { # file pattern
 }
 
 echo "== 1. build the kernel and the user programs with both compilers =="
-as --64 -o "$TMPD/boot.o" kernel/boot.s 2>"$TMPD/as1.err" \
+as --64 -o "$TMPD/boot.o" kernel/arch/x86_64/boot.s 2>"$TMPD/as1.err" \
     && ok "boot.s assembles (multiboot, long mode, GDT, TSS)" \
     || { bad "boot.s"; sed 's/^/        /' "$TMPD/as1.err" | head -5; }
-as --64 -o "$TMPD/isr.o" kernel/isr.s 2>"$TMPD/as2.err" \
+as --64 -o "$TMPD/isr.o" kernel/arch/x86_64/isr.s 2>"$TMPD/as2.err" \
     && ok "isr.s assembles (48 vectors, syscall, ring 3)" \
     || { bad "isr.s"; sed 's/^/        /' "$TMPD/as2.err" | head -5; }
-as --64 -o "$TMPD/switch.o" kernel/switch.s 2>"$TMPD/as3.err" \
+as --64 -o "$TMPD/switch.o" kernel/arch/x86_64/switch.s 2>"$TMPD/as3.err" \
     && ok "switch.s assembles (context switch, into ring 3)" \
     || { bad "switch.s"; sed 's/^/        /' "$TMPD/as3.err" | head -5; }
-as --64 -o "$TMPD/smp.o" kernel/smp.s 2>"$TMPD/as4.err" \
+as --64 -o "$TMPD/smp.o" kernel/arch/x86_64/smp.s 2>"$TMPD/as4.err" \
     && ok "smp.s assembles (the trampoline of the other processors)" \
     || { bad "smp.s"; sed 's/^/        /' "$TMPD/as4.err" | head -5; }
 # RUNDE K12: die fuenfte Assemblerdatei -- der Weltwechsel und die Gaeste.
-as --64 -o "$TMPD/hv.o" kernel/hv.s 2>"$TMPD/as5.err" \
+as --64 -o "$TMPD/hv.o" kernel/arch/x86_64/hv.s 2>"$TMPD/as5.err" \
     && ok "hv.s assembles (the world switch and the guests)" \
     || { bad "hv.s"; sed 's/^/        /' "$TMPD/as5.err" | head -5; }
 
@@ -168,7 +168,7 @@ for f in k0 k1 uprog0 uprog1; do
     # ROUND 72: `osum_panic` is the ONE name allowed to stay undefined in an
     # object file. Checked arithmetic (SPEC section 13, item L9) calls it
     # under `profile kernel` when a value goes out of range, on purpose;
-    # `kernel/isr.s` defines it and the link step above resolves it.
+    # `kernel/arch/x86_64/isr.s` defines it and the link step above resolves it.
     #
     # ROUND K7 ADDS A SECOND ONE, `kdata`, AND ONLY FOR THE KERNEL OBJECT.
     # `serial.put` mirrors every octet onto the framebuffer console
@@ -177,7 +177,7 @@ for f in k0 k1 uprog0 uprog1; do
     # it and must not grow one: it is called from roughly a thousand
     # places, from `kmain` into the exception report, and none of them
     # should change for a console. So `fb.kdata()` takes the address off
-    # the LINKER SYMBOL that `kernel/boot.s` already exports
+    # the LINKER SYMBOL that `kernel/arch/x86_64/boot.s` already exports
     # (`.globl kdata`), with one `lea`. The name is resolved by the link
     # step above, out of boot.o, exactly like `osum_panic` out of isr.o.
     #
