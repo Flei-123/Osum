@@ -19,12 +19,14 @@ was built and what the measurements said.
 | `kernel/procfs.fi` | *additive*: `/proc/hwid` |
 | `kernel/user/sha.fi` | SHA-256 as a stream, any length |
 | `kernel/user/hwid.fi` | the raw values and a fingerprint over the stable ones |
-| `kernel/user/bak.fi` | `/bin/backup`: content-addressed backup |
+| `kernel/user/backup.fi` | `/bin/backup`: content-addressed backup |
 | `kernel/user/key.fi` | key management: wrap, unwrap, destroy |
 | `kernel/user/shat.fi` | the SHA-256 measurement, in ring 3 |
 | `tools/tresor/` | the runner, a second SMBIOS decoder, a memory dumper, a corrupter |
 | `docs/THEFT.md` | the threat model |
 | `docs/CRYPTO-ERASE.md` | why the key and not the data, and what is missing |
+| `docs/ORPHANS.md` | *addendum*: the three backup rules and the `opk` interface |
+| `tools/tresor/orphans.py` | *addendum*: the reference producer of the orphan list |
 
 kdata grew by two pages at `0x5A000` (`HWID_OFF`), entered in
 `tools/kernel/karte.py`. The second page is not padding: it is the DMA
@@ -191,12 +193,27 @@ SHA-256 of it does.
 
 ## 4. Decisions taken
 
-**The tool is called `bak`, not `sich`.** Every other program in this
-`/bin` has an English or traditional Unix name -- `cat`, `cp`, `find`,
-`sed`, `tar`, `gzip`, `du`, `xargs` -- and the documentation language was
-settled as English on 27.08.2026. `sich` would have been the only German
-name in the directory, and a userland with half its vocabulary in each
-language makes every future name an argument.
+**The tool is called `backup`.** Not `sich`, and not `bak` either. The
+owner rejected `sich` on 27.08.2026 and rejected my abbreviation `bak`
+with it, settling the rule that now stands above every name in this
+system: EVERY command, subcommand, option, field and format name in
+Osum/OrientOS is ENGLISH -- no German stems, no German abbreviations, no
+umlauts. The sole exception is the proper noun `opk` and its `.opk`
+suffix.
+
+`bak` failed that rule twice: it is a truncation, and a reader has to be
+told what it stands for. The rename reached the file name
+(`kernel/user/backup.fi`), the build target, the snapshot magic
+(`backup1`, not `bak1`) and the test scratch names.
+
+**A caught mistake worth recording.** The first rename replaced the text
+`bak` with `backup` inside the error strings and did **not** adjust the
+declared array lengths -- and Firn requires `[u8; N]` to match its string
+literal exactly. Thirteen declarations were three octets short, so the
+round did not compile at all after its own rename commit. `PROGS` still
+listed `bak` as well, against a `kernel/user/bak.fi` that no longer
+existed. Both are fixed, and the lesson is that a rename in this language
+is not a text substitution.
 
 **A pack file, not one file per chunk.** A directory entry in OFS is 32
 octets: an inode number and 24 for the name. A file name is therefore at
@@ -237,7 +254,7 @@ exercised. It is *not* claimed to work on real UEFI firmware.
   section 2 and 3 argue why Activation Lock and Find My are not
   reproducible without our own silicon, our own firmware and an installed
   base of millions.
-* **No network backend for `bak`.** The seam is a path and nothing else,
+* **No network backend for `backup`.** The seam is a path and nothing else,
   which is what makes adding one later small. It needs a transport that
   can be trusted with the octets.
 * **No content-defined chunking.**
@@ -279,6 +296,75 @@ concurrently (load average around 9, fourteen QEMU processes). Runners
 that boot QEMU under a timeout are sensitive to that, which is the likely
 reason a counter-check moved between runs.
 
+## 5b. Addendum, 27.08.2026: orphaned packages
+
+The owner asked what happens to programs that are in no source -- built
+by hand, never published -- when a new machine is set up from a backup.
+
+The answer was that the backup loses them, and the design said so without
+noticing. A backup here is `PLAN` + `config/` + `state/`, and programs are
+left out because their hash in the PLAN names them exactly and a source
+can hand the octets back. That argument holds only while a source
+actually can. For a self-built package the hash names something nobody
+can deliver: it is **orphaned**, and `opk rebuild` on the new machine
+stops at a hash it cannot resolve.
+
+**Three rules now, and no fourth** (`docs/ORPHANS.md`):
+
+1. ALWAYS -- `PLAN`, secrets, `config/`, `state/`.
+2. NEVER -- store entries a source can deliver, `apps/`, `etc/`, `cache/`.
+3. ONLY IF ORPHANED -- a store entry no registered source can deliver.
+
+Rule 3 is the precondition of rule 2 written down, not an exception to it.
+
+**The interface, defined here because PLAN2's subcommand was not yet
+there.** A plain text file, one store entry name per line, lower-case hex,
+16 to 64 digits. `backup save <set> <store> <name> [orphans [tree]]` walks
+`<tree>/store/<name>` for each and puts it in the snapshot at
+`/store/<name>`. The name is treated as an **opaque path component**: the
+rule that shortens a SHA-256 to 20 hex digits belongs to `opk`, and if
+this side recomputed it, a change over there would break backups here
+silently. `tools/tresor/orphans.py` is a working producer that imports the
+real `opk.py`; run against a tree with one published and one self-built
+package, it names exactly the self-built one.
+
+**Measured** (`tools/tresor/run.sh` § 11, 20 assertions):
+
+| run | orphan entries | octets written |
+|---|---:|---:|
+| no orphan list | 0 | 43,092 |
+| one orphan | 1 | 72,220 |
+
+**+29,128 octets, +67.6 %** -- and the growth equals the reported `orphan
+bytes` exactly, which is asserted. The backup set is sized to match the
+one PLAN2 measured on a real tree (44,076 octets); with the 812-octet toy
+set I first used, the same package read as "+3587 %", a true number that
+means nothing.
+
+The restore is proved on a **second machine that has only the backup
+store** -- no tree, no set, no package -- so the octets cannot come from
+anywhere but `PACK`. There the entry restores, `verify` says `corrupt: 0`,
+the restored program is **executed and prints its line**, and the host
+compares it out of the disk image: 29,104 octets, byte for byte identical.
+
+**Two bugs this addendum caught:**
+
+* `restore` recorded the mode and never applied it. H6 said "the mode is
+  kept" and half of it was false; nothing restored before had needed to
+  *run*. Fixed with `chmod` (syscall 90).
+* The earlier rename commit substituted `bak` -> `backup` inside string
+  literals without adjusting the `[u8; N]` lengths, which Firn requires to
+  match exactly. Thirteen declarations were three octets short and the
+  round **did not compile at all**; `PROGS` also still named a file that
+  no longer existed. A rename in this language is not a text substitution.
+
+**What this side deliberately does not do:** it does not verify that a
+listed entry really is unreachable. It has no source list and no network.
+It checks the *shape* of every line -- which is what stops `../..` from
+reaching a path -- and that the entry exists, and stores what it is told.
+A wrong list costs space or loses a program, and both faults belong to the
+producer, which is the side that has the information.
+
 ## 6. What the next round would need
 
 Effort in rounds of this project:
@@ -288,9 +374,12 @@ Effort in rounds of this project:
    the block layer. The open design decision is length preservation: XTS
    (confidentiality only, what LUKS and BitLocker ship) versus an AEAD
    with a separate tag area (real integrity, slower, more space).
-2. **Content-defined chunking in `bak`** -- well under a round. One
+2. **Content-defined chunking in `backup`** -- well under a round. One
    rolling hash, and the table in 3.6 changes from 100 % to a few per
    cent.
 3. **Multiboot 2 in `boot.s`**, which makes the EFI path in `hwid.fi`
    reachable and is a prerequisite for a serious UEFI story -- 1 round.
 4. **A boot on real hardware**, to replace expectation with measurement.
+5. **`opk orphans` in PLAN2**, after which `tools/tresor/orphans.py`
+   becomes the cross-check rather than the source, and the runner should
+   assert the two outputs are equal.
