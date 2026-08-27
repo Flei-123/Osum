@@ -421,12 +421,41 @@ const WM_WRITE: u64 = 2108 // (h, p, n) -> Oktette (nur Terminalfenster)
 const WM_STATE: u64 = 2109 // (h, was, wert) -> 0, braucht R_MANAGE
 const WM_LIST: u64 = 2110 // (platz, aus, max) -> 1 belegt, 0 frei
 const WM_ACT: u64 = 2111 // (fensternummer, was) -> 0
-const WM_MAXNR: u64 = 2111
+// ---------------------------------------- ADDENDUM TASKBAR: the strut
+//
+// WM_STRUT declares that the caller's own window occupies `size` pixels
+// of screen edge `edge`; the server subtracts every such reservation
+// from the screen and calls the rest the work area (kernel/wm.fi). It
+// needs R_MANAGE like WM_MOVE, and beyond that the window must lie on
+// layer L_DESK or L_TOP -- reserving a screen edge is what a panel
+// does, not what an application does, and layer L_TOP already belongs
+// to root alone.
+const WM_STRUT: u64 = 2112 // (h, edge, size) -> 0, braucht R_MANAGE
+// WM_SIZE resizes the caller's OWN window. Until this addendum a window
+// had the size it was created with, for ever: `wm.resize_win` existed
+// and only the server itself called it, from the resize grip. A taskbar
+// that changes from a horizontal to a vertical bar needs it, and so
+// does auto-hide, which slides the bar out to a two-pixel sliver and
+// back. The buffer is NOT reallocated -- a window cannot grow past the
+// buffer it was created with, and `wm.resize_win` refuses instead of
+// lying.
+const WM_SIZE: u64 = 2113 // (h, wh) -> 0, braucht R_MANAGE
+const WM_MAXNR: u64 = 2113
+
+// The four edges. Identical numbers in kernel/wm.fi, in wlibc.fi, in
+// /bin/taskbar and in /bin/settings -- one set of numbers, no table.
+const WE_BOTTOM: u64 = 0
+const WE_TOP: u64 = 1
+const WE_LEFT: u64 = 2
+const WE_RIGHT: u64 = 3
 
 // Was WM_STATE setzt.
 const WS_LAYER: u64 = 0 // 0 Schreibtisch, 1 normal, 2 Taskleiste
 const WS_HIDDEN: u64 = 1 // 1 = minimieren, 0 = wiederherstellen
 const WS_DECO: u64 = 2 // 0 = ohne Rahmen und Titelleiste
+// ADDENDUM TASKBAR: fill the WORK AREA, not the screen -- and follow it
+// when it changes. `0` puts the window back where it was.
+const WS_MAXIMIZED: u64 = 3
 
 // Was WM_ACT tut.
 const WA_RAISE: u64 = 0 // hervorholen, heben, Fokus
@@ -510,6 +539,15 @@ const WI_FOCUS: u64 = 8
 // weiter in ein Fenster, das niemand sieht.
 const WI_LAYER: u64 = 9
 const WI_HIDDEN: u64 = 10
+// ADDENDUM TASKBAR: the work area, readable by ANY window with a
+// handle -- reserving an edge is a privilege, knowing where the free
+// rectangle is, is not. This is the interface the round TILING uses
+// for the root rectangle of its frame tree.
+const WI_WORKX: u64 = 11
+const WI_WORKY: u64 = 12
+const WI_WORKW: u64 = 13
+const WI_WORKH: u64 = 14
+const WI_MAXIMIZED: u64 = 15
 
 const SYS_OSUM_SYSINFO: u64 = 1002
 const SYS_OSUM_PSTAT: u64 = 1003
@@ -5877,7 +5915,15 @@ fn ist_leiste(state: u64, me: u64) -> bool {
     var i: u64 = 0
     while i < wm.MAX_WIN {
         if wm.valid(state, i) && wm.win_owner(state, i) == me {
-            if wm.win_layer(state, i) == wm.L_TOP {
+            // ADDENDUM TASKBAR: THE TEST IS THE STRUT AND NO LONGER THE
+            // LAYER. A panel is a process that has RESERVED A SCREEN
+            // EDGE -- and only root can do that (WM_STRUT). The old
+            // test asked for layer L_TOP, and it was wrong the moment
+            // the taskbar got a setting for "always on top": with that
+            // setting off the bar drops to the ordinary layer, and it
+            // would have lost the right to list windows while still
+            // being the taskbar.
+            if wm.win_strut_size(state, i) != 0 {
                 return true
             }
         }
@@ -6127,6 +6173,24 @@ fn wm_call(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64,
             }
             return 0
         }
+        if a1 == WI_WORKX {
+            return wm.work_x(state)
+        }
+        if a1 == WI_WORKY {
+            return wm.work_y(state)
+        }
+        if a1 == WI_WORKW {
+            return wm.work_w(state)
+        }
+        if a1 == WI_WORKH {
+            return wm.work_h(state)
+        }
+        if a1 == WI_MAXIMIZED {
+            if wm.is_max(state, i) {
+                return 1
+            }
+            return 0
+        }
         if a1 == WI_LAYER {
             return wm.win_layer(state, i)
         }
@@ -6194,7 +6258,56 @@ fn wm_call(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64,
             wm.compose(state)
             return 0
         }
+        if a1 == WS_MAXIMIZED {
+            // MAXIMIZE CAN FAIL, and it says so. The window keeps the
+            // buffer it was created with; a window created small cannot
+            // grow past it (`wm.resize_win`), and pretending otherwise
+            // would leave the caller drawing into a rectangle that is
+            // not there.
+            if !wm.maximize(state, i, a2 != 0) {
+                return cap.err(cap.E_INVALID)
+            }
+            wm.compose(state)
+            return 0
+        }
         return cap.err(cap.E_INVALID)
+    }
+    if number == WM_SIZE {
+        if !cap.rights_contains(rights, cap.R_MANAGE) {
+            return cap.err(cap.E_RIGHTS)
+        }
+        if !wm.resize_win(state, i, (a1 >> 16) & 0xFFFF, a1 & 0xFFFF) {
+            return cap.err(cap.E_INVALID)
+        }
+        wm.compose(state)
+        return 0
+    }
+    if number == WM_STRUT {
+        if !cap.rights_contains(rights, cap.R_MANAGE) {
+            return cap.err(cap.E_RIGHTS)
+        }
+        // RESERVING A SCREEN EDGE IS WHAT A PANEL DOES. A window that
+        // can take 400 pixels off the screen shrinks the world of every
+        // other application without being visible at all, so this is
+        // root and nothing less.
+        //
+        // WHY ROOT AND NOT "MUST BE ON LAYER L_TOP", which was the
+        // first version: because the taskbar has a setting called
+        // `ontop`, and switching it off puts the bar on the ordinary
+        // layer. A rule tied to the layer would have taken the strut
+        // away at exactly that moment, and the work area would have
+        // grown over a bar that is still on the screen.
+        if !perm.is_root(state, me) {
+            return cap.err(cap.E_RIGHTS)
+        }
+        if a1 > WE_RIGHT {
+            return cap.err(cap.E_INVALID)
+        }
+        if !wm.set_strut(state, i, a1, a2) {
+            return cap.err(cap.E_INVALID)
+        }
+        wm.compose(state)
+        return 0
     }
     if number == WM_WRITE {
         if !cap.rights_contains(rights, cap.R_WRITE) {

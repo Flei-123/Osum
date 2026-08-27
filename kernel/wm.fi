@@ -73,6 +73,9 @@ export {
     win_layer, set_layer, win_hidden, set_hidden, win_deco, set_deco,
     win_title, by_id, hides, shows, top_visible, deko, inx, iny,
     set_nolayer, set_nomin, nolayer, nomin,
+    set_strut, win_strut_edge, win_strut_size, work_x, work_y, work_w,
+    work_h, recalc_work, maximize, is_max, struts, workcalcs,
+    set_nostrut, nostrut,
     fill, text, blit_in, flush_win, hit,
     ev_push, ev_pop, ev_waiting,
     on_mouse, on_key, term_write, term_out, term_cols, term_rows, term_cx, term_cy,
@@ -82,9 +85,10 @@ export {
     downs, moves_seen, hits_seen, win_keys,
     set_fonts, font_ui, font_mono, px_ui, px_mono,
     selftest, selftest_max,
-    MAX_WIN, K_RAW, K_TERM, TITLE_H, BORDER, GRIP,
+    MAX_WIN, K_RAW, K_TERM, TITLE_H, BORDER, GRIP, MAX_W, MAX_H,
     E_KEY, E_DOWN, E_UP, E_MOVE, E_CLOSE, E_FOCUS, E_RESIZE,
-    L_DESK, L_NORMAL, L_TOP, F_HIDDEN, F_NODECO
+    L_DESK, L_NORMAL, L_TOP, F_HIDDEN, F_NODECO,
+    EDGE_BOTTOM, EDGE_TOP, EDGE_LEFT, EDGE_RIGHT, F_MAXIMIZED
 }
 
 // ------------------------------------------------------- die Zahlen
@@ -113,6 +117,13 @@ const CLOSE_W: u64 = 14
 const K_RAW: u64 = 0 // die Anwendung malt selbst
 const K_TERM: u64 = 1 // ein Zeichenraster, der Server malt
 
+// ADDENDUM TASKBAR: the largest window this server will make. It is
+// the screen, and it is exported because whoever wants a window that
+// can be maximized to ANY work area has to ask for this size when the
+// window is created -- the buffer is never reallocated.
+const MAX_W: u64 = 800
+const MAX_H: u64 = 600
+
 // ------------------------------------------- RUNDE DESKTOP: die Ebenen
 //
 // DREI EBENEN, UND SIE SIND DER GRUND, WARUM ES EINEN SCHREIBTISCH
@@ -140,6 +151,21 @@ const L_TOP: u64 = 2 // die Taskleiste, immer ganz vorn
 //             Taskleiste sind so.
 const F_HIDDEN: u64 = 1
 const F_NODECO: u64 = 2
+// ADDENDUM TASKBAR: a maximized window is not a window that happens to
+// be as large as the work area -- it is a window that FOLLOWS the work
+// area. Without the flag the server cannot tell the two apart, and a
+// taskbar that moves to another edge would leave every window where it
+// was.
+const F_MAXIMIZED: u64 = 4
+
+// ADDENDUM TASKBAR: the four screen edges. The numbers are written to
+// /etc/taskbar.conf as words ("bottom", "top", "left", "right") and
+// they are the same four numbers in the kernel, in the taskbar and in
+// the settings application -- there is no translation table.
+const EDGE_BOTTOM: u64 = 0
+const EDGE_TOP: u64 = 1
+const EDGE_LEFT: u64 = 2
+const EDGE_RIGHT: u64 = 3
 
 const E_KEY: u64 = 1
 const E_DOWN: u64 = 2
@@ -198,6 +224,17 @@ const S_NOLAYER: u64 = 0x120 // GEGENPROBE: die Ebenen abschalten
 const S_NOMIN: u64 = 0x128 // GEGENPROBE: das Verbergen abschalten
 const S_HIDES: u64 = 0x130 // wie oft ein Fenster verborgen wurde
 const S_SHOWS: u64 = 0x138 // und wie oft es wieder auftauchte
+// ADDENDUM TASKBAR: the work area and its two counters. It is kept as
+// four scalars and NOT recomputed on demand: `compose` runs sixty
+// times a second and would walk the window table each time for an
+// answer that changes when a strut changes and at no other moment.
+const S_WORK_X: u64 = 0x140
+const S_WORK_Y: u64 = 0x148
+const S_WORK_W: u64 = 0x150
+const S_WORK_H: u64 = 0x158
+const S_NOSTRUT: u64 = 0x160 // COUNTER-TEST: ignore every strut
+const S_STRUTS: u64 = 0x168 // how often a strut was declared or cleared
+const S_WORKCALC: u64 = 0x170 // how often the work area was recomputed
 
 // ein Fenster
 const W_USED: u64 = 0x00
@@ -233,7 +270,18 @@ const W_TITLE: u64 = 0xC0 // 32 Oktette, bis 0xE0
 // Satz ist 256 Oktette lang, der Titel endet bei 0xE0 -- vier Woerter
 // waren frei, zwei sind es noch.
 const W_LAYER: u64 = 0xE0 // L_DESK, L_NORMAL oder L_TOP
-const W_FLAGS: u64 = 0xE8 // F_HIDDEN | F_NODECO
+const W_FLAGS: u64 = 0xE8 // F_HIDDEN | F_NODECO | F_MAXIMIZED
+// ADDENDUM TASKBAR: the last two free words of the record. After this
+// the 256 octets are full; the next round that needs a field has to
+// enlarge WIN_BYTES, and that moves the window table (see `wat`).
+//   W_STRUT  0 = this window reserves nothing.
+//            otherwise (edge + 1) | (size << 8).
+//   W_SAVE   the rectangle to go back to when a maximized window is
+//            restored: x, y, w, h packed into four 16-bit fields, the
+//            two coordinates biased by 4096 because a window may sit
+//            at a negative one.
+const W_STRUT: u64 = 0xF0
+const W_SAVE: u64 = 0xF8
 
 // "kein Terminal". Absichtlich eine Zahl und kein Ruf nach `tty.fi`:
 // dieses Modul darf `tty` NICHT einbinden, weil `tty` es einbindet
@@ -521,6 +569,8 @@ fn init(state: u64, w: u64, h: u64, nodirty: bool, nofocus: bool) -> bool {
         wsv(state, i, W_ETAIL, 0)
         wsv(state, i, W_LAYER, L_NORMAL)
         wsv(state, i, W_FLAGS, 0)
+        wsv(state, i, W_STRUT, 0)
+        wsv(state, i, W_SAVE, 0)
         i = i + 1
     }
     ss(state, S_COUNT, 0)
@@ -550,6 +600,13 @@ fn init(state: u64, w: u64, h: u64, nodirty: bool, nofocus: bool) -> bool {
     }
     ss(state, S_HIDES, 0)
     ss(state, S_SHOWS, 0)
+    // ADDENDUM TASKBAR: before the first strut the work area IS the
+    // screen. `recalc_work` reads S_SW and S_SH, so it has to run after
+    // both are set -- they are, twelve lines above this one.
+    ss(state, S_NOSTRUT, 0)
+    ss(state, S_STRUTS, 0)
+    ss(state, S_WORKCALC, 0)
+    recalc_work(state)
     ss(state, S_DESK, fb.rgb(state, 0x1E, 0x2A, 0x38))
     ss(state, S_FONT_UI, ttf.MAX_FONTS)
     ss(state, S_FONT_MONO, ttf.MAX_FONTS)
@@ -674,6 +731,8 @@ fn create(state: u64, owner: u64, x: i64, y: i64, w: u64, h: u64,
             wsv(state, i, W_KEYS, 0)
             wsv(state, i, W_LAYER, L_NORMAL)
             wsv(state, i, W_FLAGS, 0)
+            wsv(state, i, W_STRUT, 0)
+            wsv(state, i, W_SAVE, 0)
             wsv(state, i, W_Z, gs(state, S_COUNT))
             ss(state, S_COUNT, gs(state, S_COUNT) + 1)
             // RUNDE DESKTOP: ein neues Fenster kommt an die Oberkante
@@ -719,6 +778,12 @@ fn destroy(state: u64, i: u64) -> bool {
     }
     damage_win(state, i)
     let z: u64 = wg(state, i, W_Z)
+    // ADDENDUM TASKBAR: a window that reserved a screen edge gives the
+    // edge back when it dies. Without this the work area would stay
+    // small after the taskbar exits, and every window maximized after
+    // that would leave a strip of empty desktop.
+    let hatte_strut: bool = wg(state, i, W_STRUT) != 0
+    wsv(state, i, W_STRUT, 0)
     wsv(state, i, W_USED, 0)
     if wg(state, i, W_BUF) != 0 {
         mem.frame_free_run(state, wg(state, i, W_BUF),
@@ -755,6 +820,9 @@ fn destroy(state: u64, i: u64) -> bool {
     }
     if gs(state, S_SIZING) == i + 1 {
         ss(state, S_SIZING, 0)
+    }
+    if hatte_strut {
+        recalc_work(state)
     }
     return true
 }
@@ -918,6 +986,10 @@ fn set_hidden(state: u64, i: u64, h: bool) {
         }
         wsv(state, i, W_FLAGS, f | F_HIDDEN)
         ss(state, S_HIDES, gs(state, S_HIDES) + 1)
+        // ADDENDUM TASKBAR: a window nobody can see reserves nothing.
+        if wg(state, i, W_STRUT) != 0 {
+            recalc_work(state)
+        }
         damage_win(state, i)
         if focus(state) == i {
             ss(state, S_FOCUS, 0)
@@ -938,6 +1010,9 @@ fn set_hidden(state: u64, i: u64, h: bool) {
         }
         wsv(state, i, W_FLAGS, f & ~F_HIDDEN)
         ss(state, S_SHOWS, gs(state, S_SHOWS) + 1)
+        if wg(state, i, W_STRUT) != 0 {
+            recalc_work(state)
+        }
         damage_win(state, i)
     }
 }
@@ -954,6 +1029,276 @@ fn set_deco(state: u64, i: u64, on: bool) {
         wsv(state, i, W_FLAGS, f | F_NODECO)
     }
     damage_win(state, i) // und das neue, ohne
+}
+
+// ==================== ADDENDUM TASKBAR: STRUTS AND THE WORK AREA ====
+//
+// THE PROBLEM, stated plainly. Round DESKTOP gave this system a
+// taskbar, and it is a window like any other. A window made as large as
+// the screen is therefore drawn OVER it; a window placed under it is
+// invisible. As long as the taskbar always sat at the bottom edge one
+// could hard-code 28 pixels somewhere and move on. It no longer always
+// sits at the bottom.
+//
+// X11 solved this in 1997 with a window property named `_NET_WM_STRUT`:
+// a window declares how many pixels of which screen edge it occupies,
+// the window manager subtracts every strut from the screen, and calls
+// what is left the WORK AREA. All layout arithmetic uses the work area
+// and not the screen. This is the same idea in a form that fits a
+// kernel with no properties and no atoms: ONE WORD in the window
+// record, and four scalars for the result.
+//
+// WHY IT LIVES IN THE SERVER AND NOT IN THE TASKBAR. Because the
+// taskbar is not the only one who needs the answer. The round TILING
+// running in parallel on this tree turns the window system into a tree
+// of frames, and the ROOT RECTANGLE of that tree is exactly this work
+// area -- not the screen. If the reservation lived inside the taskbar,
+// every other client would have to ask the taskbar, and a client that
+// does not know a taskbar exists would get it wrong and never find out.
+//
+// THE INTERFACE, and TILING should need nothing beyond it:
+//
+//     work_x(state), work_y(state), work_w(state), work_h(state)
+//         the free rectangle. Never degenerate: a strut that would eat
+//         the screen is refused, see `recalc_work`.
+//     set_strut(state, i, edge, size) -> bool
+//         declare (size > 0) or clear (size == 0) a reservation.
+//         Recomputes the work area and refits every maximized window
+//         in the same breath.
+//     maximize(state, i, on) -> bool
+//         fill the WORK AREA, not the screen, and remember where the
+//         window was. This is the one call a tiling layout would
+//         replace; the work area underneath it stays as it is.
+//
+// THE RULE, one sentence: whoever changes a strut, a screen size or the
+// visibility of a strut-holding window calls `recalc_work`, and
+// `recalc_work` refits the maximized windows. Nobody caches the work
+// area anywhere else. There is exactly one copy of this state.
+//
+// THE COUNTER-TEST is `nostrut` and it is one branch: with it the work
+// area is the whole screen again, a maximized window covers the taskbar
+// and the taskbar is gone from the picture. That is the state this
+// addendum removes, and it has to be reachable to be measurable.
+
+fn work_x(state: u64) -> u64 {
+    return gs(state, S_WORK_X)
+}
+
+fn work_y(state: u64) -> u64 {
+    return gs(state, S_WORK_Y)
+}
+
+fn work_w(state: u64) -> u64 {
+    return gs(state, S_WORK_W)
+}
+
+fn work_h(state: u64) -> u64 {
+    return gs(state, S_WORK_H)
+}
+
+fn struts(state: u64) -> u64 {
+    return gs(state, S_STRUTS)
+}
+
+fn workcalcs(state: u64) -> u64 {
+    return gs(state, S_WORKCALC)
+}
+
+fn nostrut(state: u64) -> bool {
+    return gs(state, S_NOSTRUT) != 0
+}
+
+fn win_strut_edge(state: u64, i: u64) -> u64 {
+    if i >= MAX_WIN {
+        return EDGE_BOTTOM
+    }
+    let v: u64 = wg(state, i, W_STRUT)
+    if v == 0 {
+        return EDGE_BOTTOM
+    }
+    return (v & 0xFF) - 1
+}
+
+fn win_strut_size(state: u64, i: u64) -> u64 {
+    if i >= MAX_WIN {
+        return 0
+    }
+    return wg(state, i, W_STRUT) >> 8
+}
+
+// THE WORK AREA, recomputed from scratch. Not incrementally: an
+// incremental work area is a cache, and a cache of four numbers that
+// three modules write is the kind of thing that is right in every test
+// and wrong on the machine.
+fn recalc_work(state: u64) {
+    let sw: u64 = gs(state, S_SW)
+    let sh: u64 = gs(state, S_SH)
+    var x0: u64 = 0
+    var y0: u64 = 0
+    var x1: u64 = sw
+    var y1: u64 = sh
+    if gs(state, S_NOSTRUT) == 0 {
+        var i: u64 = 0
+        while i < MAX_WIN {
+            if wg(state, i, W_USED) != 0 && wg(state, i, W_STRUT) != 0 {
+                if (wg(state, i, W_FLAGS) & F_HIDDEN) == 0 {
+                    let e: u64 = (wg(state, i, W_STRUT) & 0xFF) - 1
+                    let n: u64 = wg(state, i, W_STRUT) >> 8
+                    if e == EDGE_TOP {
+                        if n > y0 {
+                            y0 = n
+                        }
+                    } else if e == EDGE_BOTTOM {
+                        if n < sh && sh - n < y1 {
+                            y1 = sh - n
+                        }
+                    } else if e == EDGE_LEFT {
+                        if n > x0 {
+                            x0 = n
+                        }
+                    } else {
+                        if n < sw && sw - n < x1 {
+                            x1 = sw - n
+                        }
+                    }
+                }
+            }
+            i = i + 1
+        }
+    }
+    // A STRUT THAT EATS THE SCREEN IS NOT A STRUT. The smallest window
+    // this server will make is 32 x 16 (see `resize_win`), plus the
+    // decoration; below 64 x 64 of work area nothing can be laid out at
+    // all, and the honest answer is to refuse the reservation rather
+    // than to hand out a rectangle nobody can use.
+    if x1 < x0 + 64 || y1 < y0 + 64 {
+        x0 = 0
+        y0 = 0
+        x1 = sw
+        y1 = sh
+    }
+    ss(state, S_WORK_X, x0)
+    ss(state, S_WORK_Y, y0)
+    ss(state, S_WORK_W, x1 - x0)
+    ss(state, S_WORK_H, y1 - y0)
+    ss(state, S_WORKCALC, gs(state, S_WORKCALC) + 1)
+    refit_max(state)
+}
+
+fn set_nostrut(state: u64, on: bool) {
+    if on {
+        ss(state, S_NOSTRUT, 1)
+    } else {
+        ss(state, S_NOSTRUT, 0)
+    }
+    recalc_work(state)
+}
+
+fn set_strut(state: u64, i: u64, edge: u64, size: u64) -> bool {
+    if !valid(state, i) {
+        return false
+    }
+    if edge > EDGE_RIGHT {
+        return false
+    }
+    if size > 0xFFFFFF {
+        return false
+    }
+    if size == 0 {
+        wsv(state, i, W_STRUT, 0)
+    } else {
+        wsv(state, i, W_STRUT, (edge + 1) | (size << 8))
+    }
+    ss(state, S_STRUTS, gs(state, S_STRUTS) + 1)
+    recalc_work(state)
+    return true
+}
+
+fn is_max(state: u64, i: u64) -> bool {
+    if i >= MAX_WIN {
+        return false
+    }
+    return (wg(state, i, W_FLAGS) & F_MAXIMIZED) != 0
+}
+
+// PUT A WINDOW ON THE WORK AREA. The OUTER rectangle of the window --
+// frame, title bar and all -- becomes the work area exactly; the
+// drawing surface is that minus the decoration. A window without
+// decoration (desktop, taskbar) has no such difference, which is why
+// this goes through `deko` and not through BORDER and TITLE_H.
+fn fit_work(state: u64, i: u64) -> bool {
+    var iw: u64 = gs(state, S_WORK_W)
+    var ih: u64 = gs(state, S_WORK_H)
+    if deko(state, i) {
+        if iw <= BORDER * 2 || ih <= TITLE_H + BORDER {
+            return false
+        }
+        iw = iw - BORDER * 2
+        ih = ih - TITLE_H - BORDER
+    }
+    if !resize_win(state, i, iw, ih) {
+        return false
+    }
+    move_win(state, i, gs(state, S_WORK_X) as i64,
+        gs(state, S_WORK_Y) as i64)
+    return true
+}
+
+// EVERY MAXIMIZED WINDOW FOLLOWS THE WORK AREA. This is the whole point
+// of the flag: the taskbar moves from the bottom edge to the left edge,
+// the work area changes, and the windows that were filling it fill the
+// new one. Without this they would keep the old rectangle and half of
+// them would sit under the taskbar.
+fn refit_max(state: u64) {
+    var i: u64 = 0
+    while i < MAX_WIN {
+        if wg(state, i, W_USED) != 0 {
+            if (wg(state, i, W_FLAGS) & F_MAXIMIZED) != 0 {
+                let _r: bool = fit_work(state, i)
+            }
+        }
+        i = i + 1
+    }
+}
+
+fn maximize(state: u64, i: u64, on: bool) -> bool {
+    if !valid(state, i) {
+        return false
+    }
+    let f: u64 = wg(state, i, W_FLAGS)
+    if on {
+        if (f & F_MAXIMIZED) != 0 {
+            return true
+        }
+        // Where to go back to. Biased by 4096 because a window may sit
+        // at a negative coordinate and these are sixteen unsigned bits.
+        let sx: u64 = ((win_x(state, i) + 4096) as u64) & 0xFFFF
+        let sy: u64 = ((win_y(state, i) + 4096) as u64) & 0xFFFF
+        wsv(state, i, W_SAVE, (sx << 48) | (sy << 32)
+            | ((wg(state, i, W_W) & 0xFFFF) << 16)
+            | (wg(state, i, W_H) & 0xFFFF))
+        wsv(state, i, W_FLAGS, f | F_MAXIMIZED)
+        if !fit_work(state, i) {
+            // It did not fit -- most often because the buffer this
+            // window was created with is smaller than the work area
+            // (`resize_win` refuses to grow past it). Then it is NOT
+            // maximized, and saying so is the whole difference between
+            // a measurement and a claim.
+            wsv(state, i, W_FLAGS, f)
+            return false
+        }
+        return true
+    }
+    if (f & F_MAXIMIZED) == 0 {
+        return true
+    }
+    let v: u64 = wg(state, i, W_SAVE)
+    wsv(state, i, W_FLAGS, f & ~F_MAXIMIZED)
+    let _r: bool = resize_win(state, i, (v >> 16) & 0xFFFF, v & 0xFFFF)
+    let bx: i64 = ((v >> 48) & 0xFFFF) as i64 - 4096
+    let by: i64 = ((v >> 32) & 0xFFFF) as i64 - 4096
+    move_win(state, i, bx, by)
+    return true
 }
 
 fn set_focus(state: u64, i: u64) {
@@ -1497,7 +1842,13 @@ fn title_text(state: u64, i: u64, f: u64, x: i64, y: i64, color: u64,
     var vorher: u64 = 0
     var k: u64 = 0
     while k < 31 {
-        let c: u64 = kstate.get8(state + kstate.WM_OFF + wat(i) + W_TITLE + k)
+        // `wat` ALREADY CARRIES kstate.DSK_OFF since round DESKTOP moved
+        // the window table out of WM_OFF. This one reader kept adding
+        // WM_OFF on top of it and has been reading zeros ever since:
+        // every window title on the screen was empty, and three claims
+        // in tools/wm/run.sh said so ("LEER: K l i c k m i c h").
+        // `set_title` twelve hundred lines up was changed, this was not.
+        let c: u64 = kstate.get8(state + wat(i) + W_TITLE + k)
         if c == 0 {
             k = 31
         } else {
@@ -2286,11 +2637,119 @@ fn selftest(state: u64) -> u64 {
         }
         destroy(state, d)
     }
+    // -------------------------------- ADDENDUM TASKBAR: struts and work
+    // `bar` plays the taskbar, `mw` is the window that gets maximized.
+    // A WINDOW OF ITS OWN AND NOT `a`, and the reason is a measurement:
+    // `a` was created 200 x 100, a window never gets a bigger buffer
+    // than it was created with, and `maximize` therefore refused it --
+    // correctly. Five of these nine claims failed on that, and the
+    // server was right every time.
+    var tb: [u8; 4] = "bar\0"
+    var tm: [u8; 4] = "max\0"
+    let sw2: u64 = gs(state, S_SW)
+    let sh2: u64 = gs(state, S_SH)
+    // THIS SECTION MEASURES THE STRUTS AND THEREFORE HAS TO SWITCH THEM
+    // ON, even when the machine was started with the counter-test
+    // `nostrut`. It puts the setting back afterwards -- the first
+    // version did not, and left the whole system with the struts
+    // enabled after a `nostrut` run, so the counter-test proved nothing
+    // and looked like it passed.
+    let strut_was: bool = nostrut(state)
+    set_nostrut(state, false)
+    // 22. WITHOUT A STRUT THE WORK AREA IS THE SCREEN. Anything else
+    //     and every number after this one measures the wrong rectangle.
+    if work_x(state) == 0 && work_y(state) == 0
+        && work_w(state) == sw2 && work_h(state) == sh2 {
+        n = n + 1
+    }
+    let bar: u64 = create(state, 0, 0, (sh2 - 28) as i64, sw2, 28, K_RAW,
+        (&tb[0]) as u64)
+    if bar < MAX_WIN {
+        set_deco(state, bar, false)
+        // 23. A BOTTOM STRUT OF 28 TAKES 28 ROWS OFF THE BOTTOM -- and
+        //     off the bottom only. The origin does not move.
+        let s23: bool = set_strut(state, bar, EDGE_BOTTOM, 28)
+        if s23 && work_x(state) == 0 && work_y(state) == 0
+            && work_w(state) == sw2 && work_h(state) == sh2 - 28 {
+            n = n + 1
+        }
+        // 24. MAXIMIZE FILLS THE WORK AREA, NOT THE SCREEN. Compared on
+        //     the OUTER rectangle, because that is what covers pixels.
+        let mw: u64 = create(state, 0, 40, 40, MAX_W, MAX_H, K_RAW,
+            (&tm[0]) as u64)
+        if mw < MAX_WIN && maximize(state, mw, true) {
+            let ox: i64 = win_x(state, mw)
+            let oy: i64 = win_y(state, mw)
+            let ow: u64 = outer_w(state, mw)
+            let oh: u64 = outer_h(state, mw)
+            if ox == work_x(state) as i64 && oy == work_y(state) as i64
+                && ow == work_w(state) && oh == work_h(state) {
+                n = n + 1
+            }
+            // 25. AND IT DOES NOT TOUCH THE BAR. The two rectangles are
+            //     disjoint: the bottom of the window is at or above the
+            //     top of the bar. This is the claim of the whole
+            //     addendum, and it is one comparison.
+            if oy + oh as i64 <= win_y(state, bar) {
+                n = n + 1
+            }
+        }
+        // 26. THE BAR MOVES TO THE LEFT EDGE AND THE WINDOW FOLLOWS.
+        //     Nobody calls `maximize` again -- `set_strut` refits.
+        move_win(state, bar, 0, 0)
+        let s26: bool = resize_win(state, bar, 44, sh2)
+        let _u26: bool = s26
+        if set_strut(state, bar, EDGE_LEFT, 44) {
+            if work_x(state) == 44 && work_y(state) == 0
+                && work_w(state) == sw2 - 44 && work_h(state) == sh2 {
+                n = n + 1
+            }
+            if win_x(state, mw) == 44 && outer_w(state, mw) == sw2 - 44
+                && outer_h(state, mw) == sh2 {
+                n = n + 1
+            }
+        }
+        // 27. THE COUNTER-TEST: with `nostrut` the work area is the
+        //     whole screen again and the maximized window covers the
+        //     bar. That is the state this addendum removes.
+        set_nostrut(state, true)
+        let deckt: bool = win_x(state, mw) == 0
+            && outer_w(state, mw) == sw2
+        set_nostrut(state, false)
+        if deckt && win_x(state, mw) == 44 {
+            n = n + 1
+        }
+        // 28. CLEARING THE STRUT GIVES THE EDGE BACK.
+        let _s28: bool = set_strut(state, bar, EDGE_LEFT, 0)
+        if work_x(state) == 0 && work_w(state) == sw2 {
+            n = n + 1
+        }
+        // 29. AND SO DOES DYING. Set it once more, then destroy.
+        let _s29: bool = set_strut(state, bar, EDGE_TOP, 30)
+        let vorher: u64 = work_y(state)
+        destroy(state, bar)
+        if vorher == 30 && work_y(state) == 0 && work_h(state) == sh2 {
+            n = n + 1
+        }
+        // 30. RESTORING PUTS THE WINDOW BACK WHERE IT WAS: it was
+        //     created at (40, 40) with the full screen and has been
+        //     maximized to two different work areas since.
+        let _m30: bool = maximize(state, mw, false)
+        if win_x(state, mw) == 40 && win_y(state, mw) == 40
+            && win_w(state, mw) == MAX_W && win_h(state, mw) == MAX_H
+            && !is_max(state, mw) {
+            n = n + 1
+        }
+        if mw < MAX_WIN {
+            destroy(state, mw)
+        }
+    }
     destroy(state, a)
+    set_nostrut(state, strut_was)
     damage_all(state)
     return n
 }
 
 fn selftest_max() -> u64 {
-    return 21
+    return 30
 }
