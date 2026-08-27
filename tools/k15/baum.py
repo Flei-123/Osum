@@ -72,7 +72,14 @@ def main():
         p = os.path.join(roh, name)
         with open(p, "wb") as f:
             f.write(inhalt)
-        zeilen.append("/daten/%s=%s" % (name, p))
+        # 0644 AUSDRUECKLICH, und hier steht warum. Seit K13 traegt jeder
+        # Inode echte Rechte, und `mkfs.py` faellt ohne Angabe auf 0755
+        # zurueck -- ein Wert, der fuer ein Programm richtig ist und fuer
+        # eine Datendatei falsch. Der Dateimanager zeigt, was wirklich im
+        # Inode steht; ohne diese Angabe stuende dort `-rwxr-xr-x` an einer
+        # Textdatei. Die Rechte gehoeren an die Stelle, die die Datei
+        # anlegt, nicht in einen Rueckfall.
+        zeilen.append("/daten/%s=%s@0644" % (name, p))
         soll.append((name, len(inhalt), "-"))
     for o in ORDNER:
         zeilen.append("/daten/%s/" % o)
@@ -81,7 +88,7 @@ def main():
             p = os.path.join(roh, "%s_%s" % (o, name))
             with open(p, "wb") as f:
                 f.write(inhalt)
-            zeilen.append("/daten/%s/%s=%s" % (o, name, p))
+            zeilen.append("/daten/%s/%s=%s@0644" % (o, name, p))
 
     with open(os.path.join(d, "liste"), "w") as f:
         for z in zeilen:
