@@ -1871,6 +1871,70 @@ fn say_k14(state: u64) {
     serial.nl()
 }
 
+// ================================================== RUNDE INSTALL
+//
+// DIE WURZEL VON EINER PARTITION.
+//
+// Bis zu dieser Runde kannte dieser Kern genau zwei Wurzeln: das
+// Boot-Modul (ein ISO hat keine Platte) und Block 0 einer Platte (die
+// Testabbilder liegen dort roh). Eine Platte, die ein
+// Installationsprogramm beschrieben hat, hat WEDER: in Block 0 steht ein
+// Schutz-MBR, und das Dateisystem faengt irgendwo dahinter an. Genau der
+// Fall, den `part.fi` seit Runde K14 lesen kann und fuer den ihn bis
+// heute niemand gefragt hat.
+//
+// DIE REIHENFOLGE IST ABSICHTLICH DIESE:
+//
+//   1. Boot-Modul, wenn die Kommandozeile eines verlangt und die Summe
+//      stimmt. Unveraendert.
+//   2. OFS ab Block 0 der Platte. Unveraendert -- und deshalb sieht
+//      JEDE Messung vor dieser Runde genau das, was sie sah.
+//   3. ERST WENN DAS FEHLSCHLAEGT: die Partitionstafel lesen und die
+//      erste Partition mit UNSERER Typkennung als Wurzel nehmen.
+//
+// Ein Schritt 3, der vor Schritt 2 laege, wuerde auf einer rohen
+// OFS-Platte eine Partitionstafel suchen, die es nicht gibt -- und in
+// den 1486 bestehenden Zusagen steht keine einzige Partition.
+fn root_from_part(state: u64) -> bool {
+    var s_try: [u8; 20] = "osum: rootpart scan\0"
+    var s_at: [u8; 16] = "osum: rootpart=\0"
+    var s_fi: [u8; 9] = "  first=\0"
+    var s_bl: [u8; 10] = "  blocks=\0"
+    var s_none: [u8; 26] = "osum: no ofs partition\0\0\0\0"
+    serial.puts((&s_try[0]) as u64)
+    serial.nl()
+    let n: u64 = part.scan(state, blk.DEV_ATA)
+    if n == 0 {
+        serial.puts((&s_none[0]) as u64)
+        serial.nl()
+        blk.use_ata(state, OSUM_BLOCKS)
+        return false
+    }
+    let i: u64 = part.find_kind(state, blk.DEV_ATA, part.T_OFS)
+    if i >= part.MAX_PARTS {
+        serial.puts((&s_none[0]) as u64)
+        serial.nl()
+        blk.use_ata(state, OSUM_BLOCKS)
+        return false
+    }
+    let first: u64 = part.start(state, i)
+    let cnt: u64 = part.blocks(state, i)
+    blk.use_at(state, blk.DEV_ATA, first, cnt)
+    if !fs.mount(state) {
+        blk.use_ata(state, OSUM_BLOCKS)
+        return false
+    }
+    kstate.set(state, kstate.ROOT_PART, i)
+    serial.puts((&s_at[0]) as u64)
+    serial.dec(i)
+    serial.puts((&s_fi[0]) as u64)
+    serial.dec(first)
+    serial.puts((&s_bl[0]) as u64)
+    serial.dec(cnt)
+    serial.nl()
+    return true
+}
+
 fn osum(state: u64) {
     if wm_owns_shell(state) {
         return
@@ -1890,6 +1954,7 @@ fn osum(state: u64) {
     var a_sh: [u8; 3] = "sh\0"
     var s_mod: [u8; 20] = "osum: from module \0\0"
     var s_blk: [u8; 10] = "  blocks=\0"
+    var s_sect: [u8; 20] = "osum: ata0 sectors=\0"
 
     if (kstate.get(state, kstate.MODE) & M_OSUM) == 0 {
         serial.puts((&s_off[0]) as u64)
@@ -1907,6 +1972,22 @@ fn osum(state: u64) {
     // aendert sich dabei nichts: es sind dieselben 512 Oktette je
     // Block, nur aus einem anderen Geraet. Genau dafuer gibt es die
     // Schnittstelle in `blk.fi`.
+    // RUNDE INSTALL: WIE GROSS IST DIE ERSTE PLATTE WIRKLICH.
+    //
+    // Das steht VOR der Entscheidung ueber die Wurzel und nicht darin,
+    // und der Grund ist genau der Fall, um den es in dieser Runde geht:
+    // ein System, das von einem ISO startet und sich auf die Platte
+    // installieren soll, hat seine Wurzel im Modul und die Platte
+    // daneben. Stuende die Frage im `else`-Zweig, wuesste `/dev/hda`
+    // in genau diesem Fall seine Groesse nicht -- und ein
+    // Installationsprogramm, das die Groesse der Zielplatte nicht
+    // kennt, kann keine Partitionstafel schreiben.
+    if blk.present(state) {
+        let sekt: u64 = blk.probe_ata0(state)
+        serial.puts((&s_sect[0]) as u64)
+        serial.dec(sekt)
+        serial.nl()
+    }
     if bootmod.ready(state) {
         blk.ram_init(state, bootmod.base(state), bootmod.blocks(state))
         serial.puts((&s_mod[0]) as u64)
@@ -1922,7 +2003,10 @@ fn osum(state: u64) {
         }
         blk.use_ata(state, OSUM_BLOCKS)
     }
-    let mounted: bool = fs.mount(state)
+    var mounted: bool = fs.mount(state)
+    if !mounted && !bootmod.ready(state) {
+        mounted = root_from_part(state)
+    }
     serial.puts((&s_mount[0]) as u64)
     serial.dec(yes(mounted))
     serial.nl()

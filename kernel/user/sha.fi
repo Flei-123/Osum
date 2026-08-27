@@ -1,0 +1,260 @@
+// kernel/user/sha.fi -- RUNDE INSTALL: SHA-256 UEBER BELIEBIG VIELE
+// OKTETTE, in Ring 3.
+//
+// WARUM ES DIESE DATEI GIBT, obwohl `kernel/user/pw.fi` seit Runde K13
+// SHA-256 hat: die Fassung dort sagt in ihrer zweiten Zeile
+// `if len > 256 { return false }`. Sie kopiert die ganze Nachricht in
+// einen festen Puffer von 320 Oktetten, und das reicht genau fuer das,
+// wofuer sie gebaut wurde -- HMAC ueber ein Passwort. Ein Paket ist
+// zweihunderttausend Oktette gross.
+//
+// DIE RECHNUNG IST DIESELBE, und das ist wichtig: dieselben acht
+// Anfangswoerter, dieselbe Tabelle, derselbe Rundenkoerper wie in
+// `pw.fi`. Was anders ist, ist NUR, woher die Oktette kommen -- hier
+// aus einem Zeiger statt aus einer Kopie, und die Fuellung wird am Ende
+// in einem Puffer von 128 Oktetten gebaut statt hinter der ganzen
+// Nachricht. Die Gegenprobe steht im Laeufer: derselbe Text durch beide
+// Umsetzungen muss dieselben zweiunddreissig Oktette ergeben, und
+// zusaetzlich dieselben wie `sha256sum` auf dem Wirt.
+
+profile kernel
+
+export { sha256, hex_out, hex_eq, hexval }
+
+const M32: u64 = 0xFFFFFFFF
+
+static mut kt: [u64; 64] = [0 as u64; 64]
+static mut kt_ready: u64 = 0
+static mut tail: [u8; 128] = [0 as u8; 128]
+
+fn ktab() {
+    if kt_ready != 0 {
+        return
+    }
+    kt[0] = 0x428a2f98
+    kt[1] = 0x71374491
+    kt[2] = 0xb5c0fbcf
+    kt[3] = 0xe9b5dba5
+    kt[4] = 0x3956c25b
+    kt[5] = 0x59f111f1
+    kt[6] = 0x923f82a4
+    kt[7] = 0xab1c5ed5
+    kt[8] = 0xd807aa98
+    kt[9] = 0x12835b01
+    kt[10] = 0x243185be
+    kt[11] = 0x550c7dc3
+    kt[12] = 0x72be5d74
+    kt[13] = 0x80deb1fe
+    kt[14] = 0x9bdc06a7
+    kt[15] = 0xc19bf174
+    kt[16] = 0xe49b69c1
+    kt[17] = 0xefbe4786
+    kt[18] = 0x0fc19dc6
+    kt[19] = 0x240ca1cc
+    kt[20] = 0x2de92c6f
+    kt[21] = 0x4a7484aa
+    kt[22] = 0x5cb0a9dc
+    kt[23] = 0x76f988da
+    kt[24] = 0x983e5152
+    kt[25] = 0xa831c66d
+    kt[26] = 0xb00327c8
+    kt[27] = 0xbf597fc7
+    kt[28] = 0xc6e00bf3
+    kt[29] = 0xd5a79147
+    kt[30] = 0x06ca6351
+    kt[31] = 0x14292967
+    kt[32] = 0x27b70a85
+    kt[33] = 0x2e1b2138
+    kt[34] = 0x4d2c6dfc
+    kt[35] = 0x53380d13
+    kt[36] = 0x650a7354
+    kt[37] = 0x766a0abb
+    kt[38] = 0x81c2c92e
+    kt[39] = 0x92722c85
+    kt[40] = 0xa2bfe8a1
+    kt[41] = 0xa81a664b
+    kt[42] = 0xc24b8b70
+    kt[43] = 0xc76c51a3
+    kt[44] = 0xd192e819
+    kt[45] = 0xd6990624
+    kt[46] = 0xf40e3585
+    kt[47] = 0x106aa070
+    kt[48] = 0x19a4c116
+    kt[49] = 0x1e376c08
+    kt[50] = 0x2748774c
+    kt[51] = 0x34b0bcb5
+    kt[52] = 0x391c0cb3
+    kt[53] = 0x4ed8aa4a
+    kt[54] = 0x5b9cca4f
+    kt[55] = 0x682e6ff3
+    kt[56] = 0x748f82ee
+    kt[57] = 0x78a5636f
+    kt[58] = 0x84c87814
+    kt[59] = 0x8cc70208
+    kt[60] = 0x90befffa
+    kt[61] = 0xa4506ceb
+    kt[62] = 0xbef9a3f7
+    kt[63] = 0xc67178f2
+    kt_ready = 1
+}
+
+fn rotr(x: u64, n: u64) -> u64 {
+    let v: u64 = x & M32
+    return ((v >> n) | (v << (32 - n))) & M32
+}
+
+fn g8(p: u64) -> u64 {
+    return (*((p) as *mut u8)) as u64
+}
+
+// Ein Block von 64 Oktetten AUS EINEM ZEIGER in den Zustand.
+fn block(h: u64, p: u64) {
+    var w: [u64; 64] = [0 as u64; 64]
+    var i: u64 = 0
+    while i < 16 {
+        w[i as usize] = (g8(p + i * 4) << 24) | (g8(p + i * 4 + 1) << 16)
+            | (g8(p + i * 4 + 2) << 8) | g8(p + i * 4 + 3)
+        i = i + 1
+    }
+    while i < 64 {
+        let a: u64 = w[(i - 15) as usize]
+        let b: u64 = w[(i - 2) as usize]
+        let s0: u64 = rotr(a, 7) ^ rotr(a, 18) ^ ((a & M32) >> 3)
+        let s1: u64 = rotr(b, 17) ^ rotr(b, 19) ^ ((b & M32) >> 10)
+        w[i as usize] = (w[(i - 16) as usize] + s0 + w[(i - 7) as usize]
+            + s1) & M32
+        i = i + 1
+    }
+    var a: u64 = *((h) as *mut u64)
+    var b: u64 = *((h + 8) as *mut u64)
+    var c: u64 = *((h + 16) as *mut u64)
+    var d: u64 = *((h + 24) as *mut u64)
+    var e: u64 = *((h + 32) as *mut u64)
+    var f: u64 = *((h + 40) as *mut u64)
+    var g: u64 = *((h + 48) as *mut u64)
+    var hh: u64 = *((h + 56) as *mut u64)
+    var t: u64 = 0
+    while t < 64 {
+        let S1: u64 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25)
+        let ch: u64 = (e & f) ^ ((~e) & g & M32)
+        let t1: u64 = (hh + S1 + ch + kt[t as usize] + w[t as usize]) & M32
+        let S0: u64 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22)
+        let mj: u64 = (a & b) ^ (a & c) ^ (b & c)
+        let t2: u64 = (S0 + mj) & M32
+        hh = g
+        g = f
+        f = e
+        e = (d + t1) & M32
+        d = c
+        c = b
+        b = a
+        a = (t1 + t2) & M32
+        t = t + 1
+    }
+    __mmio_write64((h) as *mut u64, (*((h) as *mut u64) + a) & M32)
+    __mmio_write64((h + 8) as *mut u64, (*((h + 8) as *mut u64) + b) & M32)
+    __mmio_write64((h + 16) as *mut u64, (*((h + 16) as *mut u64) + c) & M32)
+    __mmio_write64((h + 24) as *mut u64, (*((h + 24) as *mut u64) + d) & M32)
+    __mmio_write64((h + 32) as *mut u64, (*((h + 32) as *mut u64) + e) & M32)
+    __mmio_write64((h + 40) as *mut u64, (*((h + 40) as *mut u64) + f) & M32)
+    __mmio_write64((h + 48) as *mut u64, (*((h + 48) as *mut u64) + g) & M32)
+    __mmio_write64((h + 56) as *mut u64, (*((h + 56) as *mut u64) + hh) & M32)
+}
+
+// SHA-256 ueber `len` Oktette ab `p`, 32 Oktette nach `out`.
+fn sha256(p: u64, len: u64, out: u64) -> bool {
+    ktab()
+    var h: [u64; 8] = [0 as u64; 8]
+    h[0] = 0x6a09e667
+    h[1] = 0xbb67ae85
+    h[2] = 0x3c6ef372
+    h[3] = 0xa54ff53a
+    h[4] = 0x510e527f
+    h[5] = 0x9b05688c
+    h[6] = 0x1f83d9ab
+    h[7] = 0x5be0cd19
+    let hp: u64 = (&h[0]) as u64
+    // Die vollen Bloecke unmittelbar aus der Nachricht.
+    var at: u64 = 0
+    while at + 64 <= len {
+        block(hp, p + at)
+        at = at + 64
+    }
+    // Der Rest, die Eins, die Nullen und die Laenge in Bits -- ein oder
+    // zwei Bloecke, je nachdem ob die acht Oktette der Laenge noch in
+    // den angefangenen Block passen.
+    let rest: u64 = len - at
+    var i: u64 = 0
+    while i < 128 {
+        tail[i as usize] = 0 as u8
+        i = i + 1
+    }
+    i = 0
+    while i < rest {
+        tail[i as usize] = *((p + at + i) as *mut u8)
+        i = i + 1
+    }
+    tail[rest as usize] = 0x80 as u8
+    var total: u64 = 64
+    if rest + 9 > 64 {
+        total = 128
+    }
+    let bits: u64 = len * 8
+    i = 0
+    while i < 8 {
+        tail[(total - 1 - i) as usize] = ((bits >> (i * 8)) & 255) as u8
+        i = i + 1
+    }
+    block(hp, (&tail[0]) as u64)
+    if total == 128 {
+        block(hp, (&tail[64]) as u64)
+    }
+    i = 0
+    while i < 8 {
+        let v: u64 = h[i as usize]
+        __mmio_write8((out + i * 4) as *mut u8, ((v >> 24) & 255) as u8)
+        __mmio_write8((out + i * 4 + 1) as *mut u8, ((v >> 16) & 255) as u8)
+        __mmio_write8((out + i * 4 + 2) as *mut u8, ((v >> 8) & 255) as u8)
+        __mmio_write8((out + i * 4 + 3) as *mut u8, (v & 255) as u8)
+        i = i + 1
+    }
+    return true
+}
+
+fn hex_out(p: u64, n: u64, out: u64) {
+    var d: [u8; 17] = "0123456789abcdef\0"
+    var i: u64 = 0
+    while i < n {
+        let v: u64 = (*((p + i) as *mut u8)) as u64
+        __mmio_write8((out + i * 2) as *mut u8, d[((v >> 4) & 15) as usize])
+        __mmio_write8((out + i * 2 + 1) as *mut u8, d[(v & 15) as usize])
+        i = i + 1
+    }
+    __mmio_write8((out + n * 2) as *mut u8, 0 as u8)
+}
+
+fn hexval(c: u64) -> u64 {
+    if c >= 48 && c <= 57 {
+        return c - 48
+    }
+    if c >= 97 && c <= 102 {
+        return c - 87
+    }
+    if c >= 65 && c <= 70 {
+        return c - 55
+    }
+    return 16
+}
+
+// Die ersten `n` Hexziffern zweier Zeichenketten vergleichen.
+fn hex_eq(a: u64, b: u64, n: u64) -> bool {
+    var i: u64 = 0
+    while i < n {
+        if hexval((*((a + i) as *mut u8)) as u64)
+            != hexval((*((b + i) as *mut u8)) as u64) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}

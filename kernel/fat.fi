@@ -121,6 +121,47 @@ const S_FSINFO: u64 = 80 // Sektor der FSInfo-Seite, relativ zur Partition
 // zurueckzuschreiben, nur um dieselbe Null hineinzusetzen, waere
 // doppelt so viel Plattenverkehr wie die Datei selbst.
 const S_DIRTY: u64 = 88
+// RUNDE INSTALL: WO DIE SUCHE NACH EINEM FREIEN VERBAND ANFAENGT.
+//
+// `clus_alloc` hat bis heute IMMER bei Verband 2 angefangen. Bei einer
+// Handvoll Dateien faellt das nicht auf; eine Datei von 1,7 Megaoktett
+// auf eine frische Partition mit 512-Oktett-Verbaenden zu schreiben,
+// braucht 3400 Zuteilungen, und die n-te davon liest n Eintraege der
+// Zuordnungstafel -- also 5,8 Millionen Leseoperationen fuer EINE Datei.
+// Gemessen: der Lauf stand nach sechs Minuten immer noch bei derselben
+// Datei.
+//
+// Der Hinweis ist genau das, was die FSInfo-Seite dafuer vorsieht
+// ("next free cluster"), und was Linux' vfat und Windows benutzen: die
+// Suche faengt dort an, wo die letzte aufgehoert hat, und laeuft
+// hoechstens EINMAL um. Damit ist die Zuteilung im Mittel konstant statt
+// linear -- und sie findet immer noch jeden freien Verband, weil das
+// Umlaufen die zweite Haelfte abdeckt.
+const S_NEXT: u64 = 96
+// RUNDE INSTALL, ZWEITER FUND: DER ZEIGER AUF DEN ZULETZT BESUCHTEN
+// VERBAND.
+//
+// `chain_at` ist bis heute fuer JEDEN Sektor vom ANFANG der Kette
+// gelaufen. Eine Datei von 1,7 Megaoktett auf 512-Oktett-Verbaende
+// geschrieben sind 3400 Sektoren, und der 3400. Sektor liest 3400
+// Kettenglieder -- zusammen 5,8 Millionen Leseoperationen auf der
+// Zuordnungstafel FUER EINE DATEI. Genau daran stand der erste
+// Installationslauf dieser Runde nach zehn Minuten immer noch.
+//
+// Drei Woerter beheben es: die Kette, der Platz darin und der Verband.
+// Ist der naechste Zugriff auf DIESELBE Kette und NICHT weiter vorn,
+// faengt der Lauf dort an, wo der letzte aufgehoert hat. Sequentielles
+// Schreiben -- also der Normalfall -- wird damit linear statt
+// quadratisch. Jedes FAT-Dateisystem hat diesen Zeiger; Linux' vfat
+// nennt ihn `fat_cache`.
+//
+// ES IST EIN ZWISCHENSPEICHER UND KEINE ZWEITE WAHRHEIT: er wird
+// verworfen, sobald etwas an der Kette haengt, das er nicht gesehen hat
+// (`chain_free`), und wer ihn nicht trifft, laeuft von vorn und bekommt
+// dasselbe Ergebnis.
+const S_CFIRST: u64 = 104
+const S_CIDX: u64 = 112
+const S_CCLUS: u64 = 120
 
 // die Felder je Knoten
 const N_MNT: u64 = 0 // Einhaengung + 1, 0 = frei
@@ -313,18 +354,41 @@ fn is_eoc(v: u64) -> bool {
 // Rueckgabe: seine Nummer, oder 0.
 fn clus_alloc(state: u64, m: u64) -> u64 {
     let total: u64 = sget(state, m, S_CLUSTERS)
-    var c: u64 = 2
-    while c < total + 2 {
-        if fat_get(state, m, c) == 0 {
-            if !fat_set(state, m, c, MASK28) {
-                return 0
-            }
-            free_sub(state, m, 1)
-            return c
-        }
-        c = c + 1
+    var start: u64 = sget(state, m, S_NEXT)
+    if start < 2 || start >= total + 2 {
+        start = 2
     }
-    return 0
+    // Zwei Durchgaenge und keiner mehr: vom Hinweis bis zum Ende, dann
+    // von vorn bis zum Hinweis. Zusammen ist das genau EINMAL die ganze
+    // Tafel -- ein Verband, den es gibt, wird also gefunden, und ein
+    // voller Datentraeger wird nicht endlos abgesucht.
+    var c: u64 = start
+    var gefunden: u64 = 0
+    var runde: u64 = 0
+    while runde < 2 && gefunden == 0 {
+        var ende: u64 = total + 2
+        if runde == 1 {
+            c = 2
+            ende = start
+        }
+        while c < ende && gefunden == 0 {
+            if fat_get(state, m, c) == 0 {
+                gefunden = c
+            } else {
+                c = c + 1
+            }
+        }
+        runde = runde + 1
+    }
+    if gefunden == 0 {
+        return 0
+    }
+    if !fat_set(state, m, gefunden, MASK28) {
+        return 0
+    }
+    sset(state, m, S_NEXT, gefunden + 1)
+    free_sub(state, m, 1)
+    return gefunden
 }
 
 fn clus_zero(state: u64, m: u64, c: u64) -> bool {
@@ -342,6 +406,13 @@ fn clus_zero(state: u64, m: u64, c: u64) -> bool {
 
 // Die ganze Kette ab `c` freigeben.
 fn chain_free(state: u64, m: u64, c: u64) {
+    // Was hier verschwindet, darf der Zwischenspeicher nicht mehr
+    // kennen. Er wird verworfen und nicht nachgefuehrt -- eine
+    // Nachfuehrung waere eine zweite Stelle, an der dieselbe Kette
+    // beschrieben ist.
+    sset(state, m, S_CFIRST, 0)
+    sset(state, m, S_CIDX, 0)
+    sset(state, m, S_CCLUS, 0)
     var cur: u64 = c
     var guard: u64 = 0
     while cur >= 2 && cur < MASK28 && !is_eoc(cur) && guard < 1000000 {
@@ -360,6 +431,14 @@ fn chain_at(state: u64, m: u64, first: u64, n: u64, grow: bool) -> u64 {
     }
     var cur: u64 = first
     var k: u64 = 0
+    // RUNDE INSTALL: den Zwischenspeicher benutzen, wenn er passt.
+    if sget(state, m, S_CFIRST) == first && sget(state, m, S_CCLUS) >= 2 {
+        let idx: u64 = sget(state, m, S_CIDX)
+        if idx <= n {
+            cur = sget(state, m, S_CCLUS)
+            k = idx
+        }
+    }
     while k < n {
         let next: u64 = fat_get(state, m, cur)
         if next < 2 || is_eoc(next) {
@@ -382,6 +461,9 @@ fn chain_at(state: u64, m: u64, first: u64, n: u64, grow: bool) -> u64 {
         }
         k = k + 1
     }
+    sset(state, m, S_CFIRST, first)
+    sset(state, m, S_CIDX, n)
+    sset(state, m, S_CCLUS, cur)
     return cur
 }
 
@@ -586,6 +668,10 @@ fn mount_probe__inner(state: u64, m: u64) -> u64 {
     sset(state, m, S_FREE, 0)
     sset(state, m, S_KNOWN, 0)
     sset(state, m, S_DIRTY, 0)
+    sset(state, m, S_NEXT, 2)
+    sset(state, m, S_CFIRST, 0)
+    sset(state, m, S_CIDX, 0)
+    sset(state, m, S_CCLUS, 0)
     fsinfo_load(state, m)
     serial.puts((&s_ok[0]) as u64)
     serial.dec(spc)
@@ -1225,6 +1311,15 @@ fn fsinfo_load(state: u64, m: u64) {
     }
     sset(state, m, S_FREE, v)
     sset(state, m, S_KNOWN, 1)
+    // Der Hinweis aus derselben Seite. Er ist nur ein Hinweis: steht
+    // dort Unsinn, faengt die Suche bei 2 an und findet dasselbe, nur
+    // langsamer. Deshalb wird er geprueft und nicht geglaubt.
+    let nf: u64 = le32(b + 492)
+    if nf >= 2 && nf < sget(state, m, S_CLUSTERS) + 2 {
+        sset(state, m, S_NEXT, nf)
+    } else {
+        sset(state, m, S_NEXT, 2)
+    }
 }
 
 // Und zurueckschreiben. `known` = 0 schreibt das "unbekannt" hinein --
