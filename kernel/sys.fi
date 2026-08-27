@@ -57,6 +57,7 @@ import nidx
 import ps2m
 import fb
 import ftype
+import pmon
 
 import signal
 import time
@@ -102,6 +103,7 @@ export {
     SYS_OSUM_SETENV, SYS_OSUM_MOUNT,
     SYS_MOUNT, SYS_UMOUNT2, SYS_RENAME, SYS_OSUM_MNTSTAT,
     SYS_OSUM_FTYPE, SYS_OSUM_FOPEN, SYS_OSUM_FLIST, SYS_OSUM_FREG,
+    SYS_OSUM_PMON,
     CAP_BASE, CAP_VERSION, CAP_READ, CAP_WRITE, CAP_CLOSE, CAP_DUP,
     CAP_INSPECT, CAP_TRANSFER, CAP_COUNT, CAP_MAXNR,
     SYS_SOCKET, SYS_CONNECT, SYS_ACCEPT, SYS_SENDTO, SYS_RECVFROM,
@@ -583,6 +585,47 @@ const SYS_OSUM_PWRGET: u64 = 1750
 const SYS_OSUM_PWRSET: u64 = 1751
 const SYS_OSUM_PWRSTR: u64 = 1752
 
+// ================================================= ROUND POWERMON: 1830
+//
+// ONE NUMBER PER CALL, no pointer into the kernel, no buffer -- the
+// shape round K13 settled on with `SYS_OSUM_PSTAT` and round NETMON
+// repeated with `SYS_OSUM_NETMON`, and it is the right shape here for
+// the same reason: a monitor asks for a hundred small numbers and never
+// for a structure, and a structure would have to be versioned.
+//
+//     osum_pmon(kind, index, field) -> value
+//
+//     kind 0  the machine: the scalars of `pmon.fi`, `field` = PM_*/8
+//     kind 1  a task: `field` 0..5 are `pmon.PT_*`, above that PT_PID
+//             and the two answers only the scheduler has
+//     kind 2  one octet of the program name of a task
+//     kind 3  one entry of the sample ring: `field` 0 = rate, 1 = tick
+//     kind 4  one brightness bucket: 0 = count, 1 = sum, 2 = percent
+//     kind 5  set something: `index` says what, `field` is the value
+//     kind 6  a PROGRAM row: `field` is `pmon.PR_*`
+//     kind 7  one octet of the name of a program row
+//
+// READING IS ALLOWED FOR ANYBODY, exactly as with PSTAT and NETMON. A
+// machine that will not tell the person which of their own programs is
+// emptying their battery is not protecting anybody. WRITING (kind 5) is
+// not: it moves the day mark and clears the split, and a program that
+// could silently zero the accounting of every other program would make
+// the display worth less than nothing.
+const SYS_OSUM_PMON: u64 = 1830
+
+// kind 1, above the six counters of `pmon.PT_*`.
+const PT_PID: u64 = 6
+const PT_ALIVE: u64 = 7 // 1 = the slot still holds a live task
+const PT_KIND: u64 = 8 // `sched.K_*` -- which of them is the idle task
+const PT_STATE: u64 = 9 // `sched.S_*`
+const PT_SCHEDTICKS: u64 = 10 // what the SCHEDULER counted, unfiltered
+
+// kind 5, what may be set.
+const PS_ROLLDAY: u64 = 0 // move the day mark, after the file was written
+const PS_RESET: u64 = 1 // throw the split away, keep the measured floor
+const PS_EVERY: u64 = 2 // ticks between two samples
+const PS_ONOFF: u64 = 3 // switch the accounting off and on again
+
 // Die Felder von `osum_pwrget`. Die Nummern sind Teil der Schnittstelle
 // nach Ring 3 und stehen genauso in `kernel/user/power.fi`.
 const PG_READY: u64 = 0
@@ -909,6 +952,9 @@ fn dispatch(number: u64, frame: u64, state: u64) -> u64 {
         // record keeps what the process really said, because the dumps of
         // rounds 62 and K1 read that number and a process that leaves with
         // 12345 did not leave with 57.
+        // ROUND POWERMON: the last ticks of this process, before the
+        // scheduler stops being able to tell anybody about them.
+        pmon.flush(state, me)
         sched.exit_task(state, a0)
         return 0 // not reached
     }
@@ -1063,6 +1109,10 @@ fn dispatch(number: u64, frame: u64, state: u64) -> u64 {
     // RUNDE K18: die Energieschicht.
     if number >= SYS_OSUM_PWRGET && number <= SYS_OSUM_PWRSTR {
         return pwr_call(state, me, number, a0, a1, a2)
+    }
+    // ROUND POWERMON: the power accounting.
+    if number == SYS_OSUM_PMON {
+        return do_pmon(state, me, a0, a1, a2)
     }
     // ------------------------------------------------------ RUNDE K13
     //
@@ -3551,6 +3601,13 @@ fn do_execve(state: u64, me: u64, frame: u64, path: u64, argv: u64) -> u64 {
     fset(frame, F_RSP, ustack)
     fset(frame, F_RDI, args)
     fset(frame, F_RFLAGS, 0x202)
+    // ROUND POWERMON: the process is a different program from this
+    // instruction on. Its power record starts again, and it starts with
+    // the new name -- otherwise `sh` would carry away everything the
+    // program it exec'd into ever spent, which is the plainest form of
+    // the lie this round exists to avoid.
+    pmon.task_clear(state, me, sched.tget(state, me, sched.T_PID))
+    pmon.name_set(state, me, name)
     kstate.add(state, kstate.EXECVES, 1)
     sched.irq_restore(flags)
     return 0
@@ -3669,6 +3726,9 @@ fn do_exec(state: u64, me: u64, path: u64, argv: u64, argc: u64) -> u64 {
         at = at + n + 1
         k = k + 1
     }
+    // ROUND POWERMON does not hook here: `elf.spawn` goes through
+    // `elf.build`, and the naming sits there so that all six ways of
+    // starting a program are covered by one line instead of five.
     let t: u64 = elf.spawn(state, name, abuf, argc, 2)
     if t == 0 {
         let why: u64 = kstate.get(state, kstate.ELF_ERR)
@@ -3921,6 +3981,115 @@ fn do_rename(state: u64, me: u64, from: u64, to: u64) -> u64 {
 // `vm_call` und `wig_call`: der Rahmen entsteht erst, wenn wirklich eine
 // dieser Nummern kommt, und der tiefste Kernstapel eines Laufs ist
 // gezaehlt (`osum: kstack deepest=`).
+// ================================================== ROUND POWERMON
+//
+// `osum_pmon(kind, index, field)`. Its own function and not sixty
+// branches in `dispatch`, for the reason written out at length above
+// `k13_call`: every branch of `dispatch` costs stack whether it is taken
+// or not, and this kernel has already overflowed its kernel stack once
+// for exactly that reason.
+fn do_pmon(state: u64, me: u64, kind: u64, index: u64, field: u64) -> u64 {
+    if kind == 0 {
+        if field >= pmon.PM_SCALARS {
+            return neg(errno.E_INVAL)
+        }
+        return pmon.scalar(state, field)
+    }
+    if kind == 1 {
+        if index >= kstate.MAX_TASKS {
+            return neg(errno.E_SRCH)
+        }
+        if field < pmon.PT_FIELDS {
+            return pmon.tget(state, index, field)
+        }
+        if field == PT_PID {
+            return pmon.task_pid(state, index)
+        }
+        if field == PT_ALIVE {
+            if pmon.task_alive(state, index) {
+                return 1
+            }
+            return 0
+        }
+        if field == PT_KIND {
+            return sched.tget(state, index, sched.T_KIND)
+        }
+        if field == PT_STATE {
+            return sched.tget(state, index, sched.T_STATE)
+        }
+        if field == PT_SCHEDTICKS {
+            return sched.tget(state, index, sched.T_TICKS)
+        }
+        return neg(errno.E_INVAL)
+    }
+    if kind == 2 {
+        if index >= kstate.MAX_TASKS {
+            return neg(errno.E_SRCH)
+        }
+        return pmon.name_at(state, index, field)
+    }
+    if kind == 3 {
+        if index >= pmon.NSAMPLE {
+            return neg(errno.E_INVAL)
+        }
+        if field == 0 {
+            return pmon.sample_rate(state, index)
+        }
+        if field == 1 {
+            return pmon.sample_tick(state, index)
+        }
+        return neg(errno.E_INVAL)
+    }
+    if kind == 4 {
+        if index >= pmon.NBUCKET || field > 2 {
+            return neg(errno.E_INVAL)
+        }
+        return pmon.bucket_at(state, index, field)
+    }
+    if kind == 6 {
+        // A PROGRAM ROW. This is the table a person is shown: a process
+        // is not a program, and slot seven was `ls` a moment ago.
+        if index >= pmon.NPROG || field >= pmon.PR_FIELDS {
+            return neg(errno.E_INVAL)
+        }
+        return pmon.prog_get(state, index, field)
+    }
+    if kind == 7 {
+        if index >= pmon.NPROG {
+            return neg(errno.E_INVAL)
+        }
+        return pmon.prog_name_at(state, index, field)
+    }
+    if kind == 5 {
+        // WRITING IS FOR THE OWNER OF THE MACHINE. Everything under
+        // kind 5 destroys somebody else's numbers.
+        if sched.tget(state, me, sched.T_EUID) != 0 {
+            return neg(errno.E_PERM)
+        }
+        if index == PS_ROLLDAY {
+            pmon.roll_day(state)
+            return 0
+        }
+        if index == PS_RESET {
+            pmon.reset_window(state)
+            return 0
+        }
+        if index == PS_EVERY {
+            if field == 0 || field > 1000 {
+                return neg(errno.E_INVAL)
+            }
+            pmon.set_scalar(state, pmon.PM_EVERY / 8, field)
+            return 0
+        }
+        if index == PS_ONOFF {
+            pmon.set_on(state, field)
+            return 0
+        }
+        return neg(errno.E_INVAL)
+    }
+    return neg(errno.E_INVAL)
+}
+
 fn pwr_call(state: u64, me: u64, number: u64, a0: u64, a1: u64,
     a2: u64) -> u64 {
     if number == SYS_OSUM_PWRGET {
