@@ -60,6 +60,7 @@ export {
     theme_scheme_name, theme_scheme_file, theme_contrast,
     theme_luminance, theme_linear, theme_on, theme_light_start,
     theme_dark_start, theme_tz_offset, theme_auto_dark,
+    theme_frame_end,
     theme_name_at, theme_semantic_name_at, theme_named,
     theme_apply, theme_reload, theme_poll, theme_set_mode,
     theme_set_accent, theme_clear_accent, theme_bad_keys,
@@ -893,6 +894,9 @@ static mut live: u64 = 0
 static mut generation: u64 = 0
 static mut paint_base: u64 = 0
 static mut paint_gen: u64 = 0
+static mut frame_open: u64 = 0
+static mut conf_copy: [u8; 512] = [0 as u8; 512]
+static mut conf_len: u64 = 0
 static mut booted: u64 = 0
 
 static mut sch_mode: u64 = 1
@@ -1397,7 +1401,14 @@ fn publish() {
     }
     live = shadow
     generation = generation + 1
-    paint_base = live * C_COUNT
+    // A program that is NOT inside a paint reads the live bank at
+    // once. A program that IS inside one keeps the bank it latched --
+    // that is the entire promise, and moving `paint_base` here would
+    // break it. It was broken exactly once, and the latch test said so
+    // in one line: L_INNER came back dark inside a light frame.
+    if frame_open == 0 {
+        paint_base = live * C_COUNT
+    }
 }
 
 // ----------------------------------------------------------- reading
@@ -1452,9 +1463,19 @@ fn theme_gen() -> u64 {
 
 // Latch the live bank for one paint and answer the generation it got.
 fn theme_frame_begin() -> u64 {
+    frame_open = 1
     paint_base = live * C_COUNT
     paint_gen = generation
     return paint_gen
+}
+
+// Close the paint and answer whether the theme moved while it ran.
+// Closing matters: after it, `theme()` follows the live bank again.
+fn theme_frame_end() -> bool {
+    frame_open = 0
+    let stale: bool = paint_gen != generation
+    paint_base = live * C_COUNT
+    return stale
 }
 
 // Did the theme move while that paint was running? Then the window
@@ -1844,38 +1865,25 @@ fn scheme_key(kp: u64, kn: u64, vp: u64, vn: u64) -> bool {
         sch_success = v
         return true
     }
+    // `neutral<step>`. The literal is exactly seven characters, so
+    // comparing seven of them IS the prefix test -- `name_eq` insists
+    // that the literal end there, and here it does.
     if kn > 7 {
-        if name_eq(kp, 7, (&k_neutral[0 as usize]) as u64) == false {
-            // `name_eq` wants the whole literal; for the prefix the
-            // comparison is done by hand below.
-            var pre: bool = true
-            var z: u64 = 0
-            while z < 7 {
-                if (*((kp + z) as *mut u8)) as u64
-                    != (*((((&k_neutral[0 as usize]) as u64) + z)
-                        as *mut u8)) as u64 {
-                    pre = false
-                    z = 7
-                } else {
-                    z = z + 1
-                }
+        if name_eq(kp, 7, (&k_neutral[0 as usize]) as u64) {
+            let step: u64 = parse_dec(kp + 7, kn - 7)
+            if step == DEC_BAD {
+                return false
             }
-            if pre {
-                let step: u64 = parse_dec(kp + 7, kn - 7)
-                if step == DEC_BAD {
-                    return false
-                }
-                let idx: u64 = neutral_index(step)
-                if idx >= NEUTRAL_STEPS {
-                    return false
-                }
-                let v: u64 = parse_hex(vp, vn)
-                if v == RGB_BAD {
-                    return false
-                }
-                neutral[(idx) as usize] = v
-                return true
+            let idx: u64 = neutral_index(step)
+            if idx >= NEUTRAL_STEPS {
+                return false
             }
+            let v: u64 = parse_hex(vp, vn)
+            if v == RGB_BAD {
+                return false
+            }
+            neutral[(idx) as usize] = v
+            return true
         }
     }
     return false
@@ -1986,6 +1994,16 @@ fn kv_read(path: u64, which: u64) -> u64 {
                             ve - g - 1)
                     } else if which == 1 {
                         ok = conf_key(b + i, g - i, b + g + 1, ve - g - 1)
+                    } else if which == 3 {
+                        var k_off: [u8; 7] = "offset\0"
+                        if name_eq(b + i, g - i,
+                            (&k_off[0 as usize]) as u64) {
+                            let v: u64 = parse_dec(b + g + 1, ve - g - 1)
+                            if v != DEC_BAD && v <= 1440 {
+                                tz_offset = v
+                                ok = true
+                            }
+                        }
                     } else {
                         let idx: u64 = theme_named(b + i, g - i)
                         let v: u64 = parse_hex(b + g + 1, ve - g - 1)
@@ -2024,42 +2042,19 @@ fn kv_read(path: u64, which: u64) -> u64 {
 fn timezone_read() {
     var p_new: [u8; 15] = "/etc/time.conf\0"
     var p_old: [u8; 15] = "/etc/zeit.conf\0"
-    var buf: [u8; 64] = [0 as u8; 64]
-    var fd: u64 = io.open((&p_new[0 as usize]) as u64, 0)
-    if ulib.bad(fd) {
-        // The file was called /etc/zeit.conf before the names were
-        // translated. Reading both is four lines; a machine that loses
-        // its timezone on an upgrade is not.
-        fd = io.open((&p_old[0 as usize]) as u64, 0)
-        if ulib.bad(fd) {
-            return
-        }
-    }
-    let n: u64 = io.read(fd, (&buf[0 as usize]) as u64, 63)
-    io.close(fd)
-    if ulib.bad(n) || n == 0 {
+    // The FILE and not sixty-four octets of it. The first attempt read
+    // 63 bytes into a small buffer, and /etc/time.conf opens with two
+    // lines of comment -- so the whole read was comment, `offset=` was
+    // never reached, and the machine ran on UTC while the file said
+    // otherwise. `kv_read` reads the file and skips comments, which is
+    // what a parser is for.
+    if kv_read((&p_new[0 as usize]) as u64, 3) > 0 {
         return
     }
-    let b: u64 = (&buf[0 as usize]) as u64
-    var i: u64 = 0
-    var v: u64 = 0
-    var digits: u64 = 0
-    var in_value: bool = false
-    while i < n {
-        let c: u64 = (*((b + i) as *mut u8)) as u64
-        if c == 61 {
-            in_value = true
-        } else if in_value && c >= 48 && c <= 57 {
-            v = v * 10 + (c - 48)
-            digits = digits + 1
-        } else if digits > 0 {
-            i = n
-        }
-        i = i + 1
-    }
-    if digits > 0 && v <= 1440 {
-        tz_offset = v
-    }
+    // The file was called /etc/zeit.conf before the names were
+    // translated. Reading both is one line; a machine that loses its
+    // timezone on an upgrade is not.
+    let _o: u64 = kv_read((&p_old[0 as usize]) as u64, 3)
 }
 
 fn local_minutes() -> u64 {
@@ -2220,17 +2215,90 @@ fn theme_reload() -> u64 {
     timezone_read()
     theme_apply()
     booted = 1
+    let _c: bool = conf_changed()
     return generation
 }
 
-// What a program calls in its event loop: re-read, and answer whether
-// the resolved tokens actually CHANGED -- not whether a file was
-// touched. A desktop that repaints because somebody ran `touch` is a
-// desktop that repaints for nothing.
+// HAT SICH /etc/theme.conf GEAENDERT? Ein Vergleich der Oktette und
+// nicht ein Zeitstempel -- dieses Dateisystem fuehrt keinen, und die
+// Groesse allein sagt nichts (`mode=dark` und `mode=auto` sind gleich
+// lang).
+fn conf_changed() -> bool {
+    var p_conf: [u8; 16] = "/etc/theme.conf\0"
+    var buf: [u8; 512] = [0 as u8; 512]
+    var n: u64 = 0
+    let fd: u64 = io.open((&p_conf[0 as usize]) as u64, 0)
+    if !ulib.bad(fd) {
+        let r: u64 = io.read(fd, (&buf[0 as usize]) as u64, 511)
+        io.close(fd)
+        if !ulib.bad(r) {
+            n = r
+        }
+    }
+    var same: bool = n == conf_len
+    if same {
+        var k: u64 = 0
+        while k < n {
+            if buf[(k) as usize] != conf_copy[(k) as usize] {
+                same = false
+                k = n
+            } else {
+                k = k + 1
+            }
+        }
+    }
+    if same {
+        return false
+    }
+    var k2: u64 = 0
+    while k2 < n {
+        conf_copy[(k2) as usize] = buf[(k2) as usize]
+        k2 = k2 + 1
+    }
+    conf_len = n
+    return true
+}
+
+// WAS EIN PROGRAMM IN SEINER EREIGNISSCHLEIFE AUFRUFT.
+//
+// Der teure Weg ist der ganze Neuaufbau: drei Dateien lesen, vier
+// Rampen bauen, die Kontrastsuche laufen lassen. Gemessen kostet das
+// ein Vielfaches dessen, was das Aufloesen allein kostet, und fast
+// alles davon ist die Platte -- die Zahlen stehen in
+// docs/ROUNDTHEME.md. Ein Schreibtisch, der das zehnmal in der
+// Sekunde tut, tut nichts anderes mehr.
+//
+// Also zwei billige Fragen zuerst:
+//
+//   1. Haben sich die Oktette von /etc/theme.conf geaendert? Das ist
+//      EINE kleine Datei statt dreien und der einzige Weg, auf dem
+//      eine Einstellung hereinkommt.
+//   2. Steht der Modus auf `auto` und hat die UHR die Bindung
+//      umgelegt? Das kostet zwei Systemaufrufe und keine Platte.
+//
+// WAS DAMIT NICHT ERKANNT WIRD, und es steht hier und nicht in einer
+// Fussnote: eine Aenderung IN einer Schemadatei unter /etc/schemas/,
+// waehrend dieses Schema ausgewaehlt ist. Wer eine Schemadatei
+// bearbeitet, muss /etc/theme.conf anfassen -- oder das Programm neu
+// starten. Ein Schema ist Inhalt und keine Einstellung.
 fn theme_poll() -> bool {
-    let before: u64 = theme_sum()
-    let _g: u64 = theme_reload()
-    return theme_sum() != before
+    if conf_changed() {
+        let before: u64 = theme_sum()
+        let _g: u64 = theme_reload()
+        return theme_sum() != before
+    }
+    if set_mode == MODE_AUTO {
+        var want: u64 = 0
+        if auto_is_dark() {
+            want = 1
+        }
+        if want != cur_dark {
+            let before: u64 = theme_sum()
+            theme_apply()
+            return theme_sum() != before
+        }
+    }
+    return false
 }
 
 fn theme_set_mode(m: u64) {

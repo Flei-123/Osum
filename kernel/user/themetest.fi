@@ -1,0 +1,582 @@
+// kernel/user/themetest.fi -- Runde THEME: was das Thema BEHAUPTET,
+// als Text auf die serielle Leitung.
+//
+// Dieses Programm rechnet NICHTS nach. Es druckt, was
+// `kernel/user/wlibc.fi` aufgeloest hat -- die drei Ebenen, die
+// Kontrastverhaeltnisse, die 256 Werte der sRGB-Kennlinie und die
+// Zeiten --, und `tests/theme/run.sh` haelt jede Zeile gegen
+// `tools/theme/model.py`, das dieselben drei Ebenen ein zweites Mal
+// aufloest, in Python, ohne einen Blick in den Firn-Quelltext.
+//
+// Zwei Fassungen desselben Algorithmus in zwei Sprachen. Eine Tabelle,
+// die nur die Sache erzeugt, die geprueft werden soll, beweist ueber
+// diese Sache gar nichts -- das ist die Lehre aus Runde K7B, wo Text
+// zu 87 Prozent zu stimmen schien und in Wahrheit jeder Buchstabe
+// fehlte.
+//
+// Aufrufe:
+//   themetest srgb                  die 256 Werte der Kennlinie
+//   themetest scheme <datei>        Marken und Kontraste, hell + dunkel
+//   themetest accent <hex> ...      was mit einer Akzentfarbe passiert
+//   themetest time                  die Zeiten des Umschaltens
+//   themetest latch                 die Zusage "kein halbes Fenster"
+//   themetest clock                 die Automatik nach der Tageszeit
+
+profile kernel
+
+import ulib
+import libc.io
+import wlibc
+
+export { u_start }
+
+const CONF: u64 = 0
+
+static mut buf: [u8; 512] = [0 as u8; 512]
+
+fn say(p: u64) {
+    ulib.say(p)
+}
+
+fn nl() {
+    ulib.nl()
+}
+
+fn n(v: u64) {
+    ulib.sayn(v)
+}
+
+fn sp() {
+    var s: [u8; 2] = " \0"
+    say((&s[0 as usize]) as u64)
+}
+
+// Sechs Stellen hexadezimal, mit fuehrenden Nullen. `sayn` wuerde
+// dezimal schreiben, und eine Farbe dezimal zu vergleichen ist eine
+// Einladung, sich zu vertun.
+fn hex6(v: u64) {
+    var t: [u8; 8] = [0 as u8; 8]
+    var k: u64 = 6
+    var x: u64 = v
+    while k > 0 {
+        k = k - 1
+        let d: u64 = x & 15
+        var c: u64 = 48 + d
+        if d > 9 {
+            c = 87 + d
+        }
+        __mmio_write8(((&t[0 as usize]) as u64 + k) as *mut u8, c as u8)
+        x = x >> 4
+    }
+    __mmio_write8(((&t[0 as usize]) as u64 + 6) as *mut u8, 0 as u8)
+    say((&t[0 as usize]) as u64)
+}
+
+fn text_an(p: u64, at: u64, q: u64) -> u64 {
+    var k: u64 = 0
+    while *((q + k) as *mut u8) != 0 as u8 {
+        __mmio_write8((p + at + k) as *mut u8, *((q + k) as *mut u8))
+        k = k + 1
+    }
+    __mmio_write8((p + at + k) as *mut u8, 0 as u8)
+    return at + k
+}
+
+fn write_file(path: u64, src: u64, len: u64) -> bool {
+    let fd: u64 = io.create(path)
+    if ulib.bad(fd) {
+        return false
+    }
+    let g: u64 = io.write_all(fd, src, len)
+    io.close(fd)
+    return !ulib.bad(g) && g >= len
+}
+
+// /etc/theme.conf schreiben: Schema, Modus, Akzent. Der Weg ueber die
+// DATEI und nicht ueber `theme_set_mode`, weil genau dieser Weg das
+// ist, was die Einstellungen benutzen.
+fn conf_write(scheme: u64, dark: bool, accent: u64) -> bool {
+    var k_s: [u8; 8] = "scheme=\0"
+    var k_m1: [u8; 13] = "\nmode=light\n\0"
+    var k_m2: [u8; 12] = "\nmode=dark\n\0"
+    var k_a: [u8; 8] = "accent=\0"
+    var k_nl: [u8; 2] = "\n\0"
+    var p_conf: [u8; 16] = "/etc/theme.conf\0"
+    let b: u64 = (&buf[0 as usize]) as u64
+    var at: u64 = text_an(b, 0, (&k_s[0 as usize]) as u64)
+    at = text_an(b, at, scheme)
+    if dark {
+        at = text_an(b, at, (&k_m2[0 as usize]) as u64)
+    } else {
+        at = text_an(b, at, (&k_m1[0 as usize]) as u64)
+    }
+    if accent != CONF {
+        at = text_an(b, at, (&k_a[0 as usize]) as u64)
+        var t: [u8; 8] = [0 as u8; 8]
+        var k: u64 = 6
+        var x: u64 = accent - 1
+        while k > 0 {
+            k = k - 1
+            let d: u64 = x & 15
+            var c: u64 = 48 + d
+            if d > 9 {
+                c = 87 + d
+            }
+            __mmio_write8(((&t[0 as usize]) as u64 + k) as *mut u8, c as u8)
+            x = x >> 4
+        }
+        __mmio_write8(((&t[0 as usize]) as u64 + 6) as *mut u8, 0 as u8)
+        at = text_an(b, at, (&t[0 as usize]) as u64)
+        at = text_an(b, at, (&k_nl[0 as usize]) as u64)
+    }
+    return write_file((&p_conf[0 as usize]) as u64, b, at)
+}
+
+// ------------------------------------------------------ die Ausgaben
+
+fn dump_primitives() {
+    var s_n: [u8; 6] = "PRIM \0"
+    var s_r: [u8; 6] = "RAMP \0"
+    var i: u64 = 0
+    while i < wlibc.NEUTRAL_STEPS {
+        say((&s_n[0 as usize]) as u64)
+        n(i)
+        sp()
+        hex6(wlibc.theme_neutral(i))
+        nl()
+        i = i + 1
+    }
+    var sl: u64 = 0
+    while sl < wlibc.R_COUNT {
+        var st: u64 = 0
+        while st < wlibc.RAMP_STEPS {
+            say((&s_r[0 as usize]) as u64)
+            n(sl)
+            sp()
+            n(st)
+            sp()
+            hex6(wlibc.theme_ramp(sl, st))
+            nl()
+            st = st + 1
+        }
+        sl = sl + 1
+    }
+}
+
+fn dump_semantic() {
+    var s_s: [u8; 5] = "SEM \0"
+    var i: u64 = 0
+    while i < wlibc.theme_semantic_count() {
+        say((&s_s[0 as usize]) as u64)
+        n(i)
+        sp()
+        say(wlibc.theme_semantic_name_at(i))
+        sp()
+        hex6(wlibc.theme_semantic(i))
+        nl()
+        i = i + 1
+    }
+}
+
+// Jede Komponente MIT IHRER ROLLE. Das ist die Zusage der dritten
+// Ebene, und sie laesst sich nur pruefen, wenn die Rolle mit
+// herauskommt: eine Komponente, die eine Farbe traegt, die zu keiner
+// Rolle gehoert, faellt hier auf.
+fn dump_component() {
+    var s_c: [u8; 6] = "COMP \0"
+    var i: u64 = 0
+    while i < wlibc.theme_count() {
+        say((&s_c[0 as usize]) as u64)
+        n(i)
+        sp()
+        say(wlibc.theme_name_at(i))
+        sp()
+        hex6(wlibc.theme_live(i))
+        sp()
+        say(wlibc.theme_semantic_name_at(wlibc.theme_role_of(i)))
+        nl()
+        i = i + 1
+    }
+}
+
+fn pair(fg: u64, bg: u64) {
+    var s_p: [u8; 6] = "PAIR \0"
+    say((&s_p[0 as usize]) as u64)
+    say(wlibc.theme_semantic_name_at(fg))
+    sp()
+    say(wlibc.theme_semantic_name_at(bg))
+    sp()
+    hex6(wlibc.theme_semantic(fg))
+    sp()
+    hex6(wlibc.theme_semantic(bg))
+    sp()
+    n(wlibc.theme_contrast(wlibc.theme_semantic(fg),
+        wlibc.theme_semantic(bg)))
+    nl()
+}
+
+// ALLE Paarungen, die das System wirklich erzeugt -- nicht eine
+// Auswahl der schmeichelhaften.
+fn dump_contrast() {
+    pair(wlibc.S_TEXT_PRIMARY, wlibc.S_SURFACE)
+    pair(wlibc.S_TEXT_PRIMARY, wlibc.S_SURFACE_RAISED)
+    pair(wlibc.S_TEXT_PRIMARY, wlibc.S_SURFACE_SUNKEN)
+    pair(wlibc.S_TEXT_PRIMARY, wlibc.S_SURFACE_HOVER)
+    pair(wlibc.S_TEXT_PRIMARY, wlibc.S_SURFACE_PRESSED)
+    pair(wlibc.S_TEXT_PRIMARY, wlibc.S_OVERLAY)
+    pair(wlibc.S_TEXT_SECONDARY, wlibc.S_SURFACE)
+    pair(wlibc.S_TEXT_SECONDARY, wlibc.S_SURFACE_RAISED)
+    pair(wlibc.S_TEXT_SECONDARY, wlibc.S_SURFACE_SUNKEN)
+    pair(wlibc.S_TEXT_SECONDARY, wlibc.S_SURFACE_HOVER)
+    pair(wlibc.S_ON_ACCENT, wlibc.S_ACCENT)
+    pair(wlibc.S_ON_ACCENT, wlibc.S_ACCENT_HOVER)
+    pair(wlibc.S_ON_ACCENT, wlibc.S_ACCENT_PRESSED)
+    pair(wlibc.S_ON_SELECTION, wlibc.S_SELECTION)
+    pair(wlibc.S_DANGER, wlibc.S_SURFACE)
+    pair(wlibc.S_WARNING, wlibc.S_SURFACE)
+    pair(wlibc.S_SUCCESS, wlibc.S_SURFACE)
+    pair(wlibc.S_ACCENT, wlibc.S_SURFACE)
+    pair(wlibc.S_BORDER_FOCUS, wlibc.S_SURFACE)
+    pair(wlibc.S_BORDER_STRONG, wlibc.S_SURFACE)
+    pair(wlibc.S_BORDER, wlibc.S_SURFACE)
+}
+
+fn dump_state() {
+    var s_m: [u8; 7] = "MODE \0 "
+    var s_a: [u8; 8] = "ACCENT \0"
+    var s_s: [u8; 8] = "SCHEME \0"
+    say((&s_s[0 as usize]) as u64)
+    say(wlibc.theme_scheme_file())
+    sp()
+    n(wlibc.theme_scheme_keys())
+    sp()
+    n(wlibc.theme_bad_keys())
+    nl()
+    say((&s_m[0 as usize]) as u64)
+    n(wlibc.theme_mode())
+    sp()
+    if wlibc.theme_dark() {
+        n(1)
+    } else {
+        n(0)
+    }
+    sp()
+    if wlibc.theme_high() {
+        n(1)
+    } else {
+        n(0)
+    }
+    nl()
+    say((&s_a[0 as usize]) as u64)
+    hex6(wlibc.theme_accent_wanted())
+    sp()
+    hex6(wlibc.theme_semantic(wlibc.S_ACCENT))
+    sp()
+    if wlibc.theme_accent_ok() {
+        n(1)
+    } else {
+        n(0)
+    }
+    sp()
+    if wlibc.theme_accent_exact() {
+        n(1)
+    } else {
+        n(0)
+    }
+    sp()
+    n(wlibc.theme_accent_moved())
+    sp()
+    n(wlibc.theme_accent_ratio_text())
+    sp()
+    n(wlibc.theme_accent_ratio_ui())
+    nl()
+}
+
+fn dump_all() {
+    dump_state()
+    dump_primitives()
+    dump_semantic()
+    dump_component()
+    dump_contrast()
+}
+
+// -------------------------------------------------------- die Zeiten
+//
+// Die Uhr ist `clock_gettime(CLOCK_MONOTONIC)`. Der Tickzaehler des
+// Systems laeuft mit 100 Hz -- 10 Millisekunden je Schritt --, und eine
+// Sache, die zwei Millisekunden dauert, laesst sich damit nicht messen,
+// sondern nur runden.
+const SYS_CLOCK_GETTIME: u64 = 228
+const CLOCK_MONOTONIC: u64 = 1
+
+fn now_ns() -> u64 {
+    var ts: [u64; 2] = [0 as u64; 2]
+    let r: u64 = ulib.sys(SYS_CLOCK_GETTIME, CLOCK_MONOTONIC,
+        (&ts[0 as usize]) as u64, 0)
+    if ulib.bad(r) {
+        return 0
+    }
+    return ts[(0) as usize] * 1000000000 + ts[(1) as usize]
+}
+
+fn time_test() {
+    var s_r: [u8; 12] = "T_RESOLVE \0 "
+    var s_l: [u8; 11] = "T_RELOAD \0 "
+    var s_g: [u8; 8] = "T_GEN \0 "
+    let runs: u64 = 200
+
+    // 1. NUR AUFLOESEN: Rampen, Bindung, Kontrastsuche, veroeffentlichen.
+    //    Das ist, was ein Umschalten hell/dunkel wirklich kostet, wenn
+    //    die Dateien schon gelesen sind.
+    let a0: u64 = now_ns()
+    var i: u64 = 0
+    while i < runs {
+        wlibc.theme_set_mode(wlibc.MODE_LIGHT)
+        wlibc.theme_set_mode(wlibc.MODE_DARK)
+        i = i + 1
+    }
+    let a1: u64 = now_ns()
+    say((&s_r[0 as usize]) as u64)
+    n((a1 - a0) / (runs * 2))
+    nl()
+
+    // 2. MIT DEN DATEIEN: einlesen, aufloesen, veroeffentlichen. Das
+    //    ist, was ein Programm zahlt, das nachsieht, ob sich etwas
+    //    geaendert hat.
+    let b0: u64 = now_ns()
+    i = 0
+    while i < runs {
+        let _g: u64 = wlibc.theme_reload()
+        i = i + 1
+    }
+    let b1: u64 = now_ns()
+    say((&s_l[0 as usize]) as u64)
+    n((b1 - b0) / runs)
+    nl()
+
+    // 3. DAS NACHSEHEN IM RUHEZUSTAND. Das ist die Zahl, die ein
+    //    Schreibtisch zehnmal in der Sekunde zahlt, und deshalb die
+    //    einzige, die im Betrieb wirklich zaehlt.
+    var s_p: [u8; 9] = "T_POLL \0 "
+    let c0: u64 = now_ns()
+    i = 0
+    while i < runs {
+        let _p: bool = wlibc.theme_poll()
+        i = i + 1
+    }
+    let c1: u64 = now_ns()
+    say((&s_p[0 as usize]) as u64)
+    n((c1 - c0) / runs)
+    nl()
+
+    say((&s_g[0 as usize]) as u64)
+    n(wlibc.theme_gen())
+    nl()
+}
+
+// ------------------------------------------------------- die Zusage
+//
+// EIN BILD, DAS ANGEFANGEN HAT, LIEST BIS ZUM SCHLUSS AUS DERSELBEN
+// BANK. Hier wird genau das nachgewiesen: Bank einrasten, Farbe lesen,
+// MITTENDRIN umschalten, dieselbe Farbe noch einmal lesen -- sie MUSS
+// gleich sein --, und danach muss `theme_frame_stale` wahr sein.
+fn latch_test() {
+    var s_1: [u8; 9] = "L_BEFORE\0"
+    var s_2: [u8; 8] = "L_INNER\0"
+    var s_3: [u8; 8] = "L_AFTER\0"
+    var s_4: [u8; 8] = "L_STALE\0"
+    var s_5: [u8; 8] = "L_FRESH\0"
+    wlibc.theme_set_mode(wlibc.MODE_LIGHT)
+    let g0: u64 = wlibc.theme_frame_begin()
+    let _g0: u64 = g0
+    let c0: u64 = wlibc.theme(wlibc.C_WINDOW_BG)
+    say((&s_1[0 as usize]) as u64)
+    sp()
+    hex6(c0)
+    nl()
+    // mitten im Bild umschalten
+    wlibc.theme_set_mode(wlibc.MODE_DARK)
+    let c1: u64 = wlibc.theme(wlibc.C_WINDOW_BG)
+    say((&s_2[0 as usize]) as u64)
+    sp()
+    hex6(c1)
+    nl()
+    say((&s_3[0 as usize]) as u64)
+    sp()
+    hex6(wlibc.theme_live(wlibc.C_WINDOW_BG))
+    nl()
+    say((&s_4[0 as usize]) as u64)
+    sp()
+    if wlibc.theme_frame_stale() {
+        n(1)
+    } else {
+        n(0)
+    }
+    nl()
+    // das naechste Bild rastet frisch ein
+    let _e1: bool = wlibc.theme_frame_end()
+    let _g1: u64 = wlibc.theme_frame_begin()
+    let stale2: bool = wlibc.theme_frame_end()
+    say((&s_5[0 as usize]) as u64)
+    sp()
+    hex6(wlibc.theme(wlibc.C_WINDOW_BG))
+    sp()
+    if stale2 {
+        n(1)
+    } else {
+        n(0)
+    }
+    nl()
+}
+
+fn clock_test() {
+    var s_c: [u8; 8] = "CLOCK \0 "
+    say((&s_c[0 as usize]) as u64)
+    n(wlibc.theme_tz_offset())
+    sp()
+    n(wlibc.theme_light_start())
+    sp()
+    n(wlibc.theme_dark_start())
+    sp()
+    if wlibc.theme_auto_dark() {
+        n(1)
+    } else {
+        n(0)
+    }
+    sp()
+    n(ulib.sys(ulib.SYS_SYSINFO, ulib.I_HOUR, 0, 0))
+    sp()
+    n(ulib.sys(ulib.SYS_SYSINFO, ulib.I_MIN, 0, 0))
+    nl()
+}
+
+fn srgb_test() {
+    var s_s: [u8; 7] = "SRGB \0 "
+    var c: u64 = 0
+    while c < 256 {
+        say((&s_s[0 as usize]) as u64)
+        n(c)
+        sp()
+        n(wlibc.theme_linear(c))
+        nl()
+        c = c + 1
+    }
+}
+
+fn u_start(args: u64) -> u64 {
+    var w_srgb: [u8; 5] = "srgb\0"
+    var w_scheme: [u8; 7] = "scheme\0"
+    var w_accent: [u8; 7] = "accent\0"
+    var w_time: [u8; 5] = "time\0"
+    var w_latch: [u8; 6] = "latch\0"
+    var w_clock: [u8; 6] = "clock\0"
+    var s_go: [u8; 15] = "themetest: los\0"
+    var s_end: [u8; 21] = "themetest: fertig r=\0"
+    var s_mode: [u8; 7] = "MODE_\0 "
+    var s_light: [u8; 6] = "light\0"
+    var s_dark: [u8; 5] = "dark\0"
+
+    say((&s_go[0 as usize]) as u64)
+    nl()
+    let _g: u64 = wlibc.theme_reload()
+
+    let argc: u64 = ulib.arg_count(args)
+    if argc < 2 {
+        dump_all()
+        say((&s_end[0 as usize]) as u64)
+        n(0)
+        nl()
+        return 0
+    }
+    let cmd: u64 = ulib.arg_at(args, 1)
+    if ulib.streq(cmd, (&w_srgb[0 as usize]) as u64) {
+        srgb_test()
+    } else if ulib.streq(cmd, (&w_time[0 as usize]) as u64) {
+        time_test()
+    } else if ulib.streq(cmd, (&w_latch[0 as usize]) as u64) {
+        latch_test()
+    } else if ulib.streq(cmd, (&w_clock[0 as usize]) as u64) {
+        clock_test()
+    } else if ulib.streq(cmd, (&w_scheme[0 as usize]) as u64) {
+        // themetest scheme <name>: derselbe Satz zweimal, hell und
+        // dunkel, ueber die DATEI -- also den Weg, den die
+        // Einstellungen gehen.
+        if argc < 3 {
+            return 1
+        }
+        let name: u64 = ulib.arg_at(args, 2)
+        var d: u64 = 0
+        while d < 2 {
+            let ok: bool = conf_write(name, d == 1, CONF)
+            if !ok {
+                return 1
+            }
+            let _r: u64 = wlibc.theme_reload()
+            say((&s_mode[0 as usize]) as u64)
+            if d == 1 {
+                say((&s_dark[0 as usize]) as u64)
+            } else {
+                say((&s_light[0 as usize]) as u64)
+            }
+            nl()
+            dump_all()
+            d = d + 1
+        }
+    } else if ulib.streq(cmd, (&w_accent[0 as usize]) as u64) {
+        // themetest accent <schema> <hex> ...
+        if argc < 4 {
+            return 1
+        }
+        let name: u64 = ulib.arg_at(args, 2)
+        var a: u64 = 3
+        while a < argc {
+            let hp: u64 = ulib.arg_at(args, a)
+            var v: u64 = 0
+            var k: u64 = 0
+            while k < 6 {
+                let c: u64 = (*((hp + k) as *mut u8)) as u64
+                var dg: u64 = 16
+                if c >= 48 && c <= 57 {
+                    dg = c - 48
+                } else if c >= 97 && c <= 102 {
+                    dg = c - 87
+                } else if c >= 65 && c <= 70 {
+                    dg = c - 55
+                }
+                if dg >= 16 {
+                    k = 6
+                    v = 0
+                } else {
+                    v = (v << 4) | dg
+                    k = k + 1
+                }
+            }
+            var d2: u64 = 0
+            while d2 < 2 {
+                // +1, weil 0 in `conf_write` "keine Akzentfarbe" heisst
+                let ok: bool = conf_write(name, d2 == 1, v + 1)
+                if !ok {
+                    return 1
+                }
+                let _r2: u64 = wlibc.theme_reload()
+                say((&s_mode[0 as usize]) as u64)
+                if d2 == 1 {
+                    say((&s_dark[0 as usize]) as u64)
+                } else {
+                    say((&s_light[0 as usize]) as u64)
+                }
+                nl()
+                dump_state()
+                dump_contrast()
+                d2 = d2 + 1
+            }
+            a = a + 1
+        }
+    } else {
+        dump_all()
+    }
+    say((&s_end[0 as usize]) as u64)
+    n(0)
+    nl()
+    return 0
+}
