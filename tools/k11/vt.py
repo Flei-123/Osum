@@ -11,7 +11,7 @@ Damit lassen sich zwei Dinge messen, die sonst niemand messen kann:
   1. WAS AUF DER SERIELLEN LEITUNG ZU SEHEN WAERE -- gegen eine von Hand
      geschriebene Erwartung.
   2. DASS BEIDE AUSGABEWEGE DASSELBE ZEIGEN: dieses Bild gegen das, was
-     `tools/gfx/schau.py lesen` aus einem echten Bildschirmfoto liest.
+     `tools/gfx/checkshot.py lesen` aus einem echten Bildschirmfoto liest.
      Stimmen sie ueberein, dann tut `kernel/ansi.fi` auf dem Schirm genau
      das, was ein Terminal an der Leitung taete -- und das ist die
      Zusage "der Editor laeuft auf beiden".

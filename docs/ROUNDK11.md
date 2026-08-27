@@ -317,7 +317,7 @@ warum es keine Behauptung ist:
 2. **Beide Ausgabewege zeigen dasselbe.** Derselbe Lauf schreibt auf die
    serielle Leitung *und* auf den Bildschirm. Der Mitschnitt geht durch
    ein Terminal in Python (`tools/k11/vt.py`), das Bildschirmfoto durch
-   den Zeichensatzleser aus Runde K7B (`tools/gfx/schau.py lesen`) — und
+   den Zeichensatzleser aus Runde K7B (`tools/gfx/checkshot.py lesen`) — und
    der Mitschnitt wird **im selben Augenblick** festgehalten wie das Foto,
    sonst vergleicht man zwei Zeitpunkte miteinander.
 3. **Fehlerfälle**: Datei gibt es nicht, Verzeichnis statt Datei, kein
@@ -374,12 +374,12 @@ Netzweg nicht verlangsamt, sie hat nur beim Messen daneben gestanden.
 
 Und noch eine Falle derselben Art, für die nächste Runde aufgeschrieben:
 **wer einen laufenden `tools/net/run.sh` abbricht, lässt das Hilfsprogramm
-`bruecke` am Leben**, und das hält die UDP-Tore 5555/5556. Der nächste
+`bridge` am Leben**, und das hält die UDP-Tore 5555/5556. Der nächste
 Netzlauf scheitert dann an allem auf einmal (34 Fehler statt einem). Vor
 einem Netzlauf gehört also:
 
 ```sh
-pkill -f bruecke ; ip netns del k8net ; ip link del v0
+pkill -f bridge ; ip netns del k8net ; ip link del v0
 ```
 
 ---

@@ -72,7 +72,7 @@ matches() { grep -qE "$2" "$1" && ok "$3" || bad "$3 -- nothing matches /$2/"; }
 # Der FESTGENAGELTE Uebersetzer aus vendor/ (vendor/firn/COMMIT). Beide
 # Stufen kommen aus EINEM Firn-Commit; nichts wird gegen ein bewegliches
 # Ziel gebaut. Das Skript baut nur, wenn noetig.
-bash vendor/firn/hole-firnc.sh >/dev/null || { echo "vendor/firn/hole-firnc.sh failed"; exit 1; }
+bash vendor/firn/fetch-firnc.sh >/dev/null || { echo "vendor/firn/fetch-firnc.sh failed"; exit 1; }
 [ -x "$FIRNC" ] || { echo "firnc0 is missing: $FIRNC"; exit 1; }
 [ -x "$FC1" ]   || { echo "firnc1 is missing: $FC1"; exit 1; }
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then

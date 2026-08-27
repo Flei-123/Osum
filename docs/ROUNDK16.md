@@ -362,7 +362,7 @@ und gibt **42** durch (den Code, den die Quelle nennt).
 ## Was diese Runde NICHT angefasst hat
 
 Der Weg über den Linux-Wirt bleibt vollständig bestehen:
-`vendor/firn/hole-firnc.sh` baut `firnc0` und `firnc1` weiter wie bisher,
+`vendor/firn/fetch-firnc.sh` baut `firnc0` und `firnc1` weiter wie bisher,
 `tools/build-kernel.sh` baut den Kernel weiter mit ihnen, und die
 Abschnitte 1 bis 18 der Abnahme messen unverändert dasselbe. Nichts
 wurde gelöscht, bevor der Ersatz lief — und der Ersatz *ersetzt* auch
@@ -438,4 +438,4 @@ verschwunden.
 | `kernel/kstate.fi` | `K16_OFF` 0x49000, `STACKGROW`, `M_NOBIG`, `M_NOSTACK` |
 | `kernel/errno.fi`, `lib/libc/*` | `E_LOOP`, die vier Nummern (beide Listen) |
 | `tools/k16/run.sh` | Abschnitt 22 der Abnahme |
-| `tools/kernel/karte.py` | K16 eingetragen |
+| `tools/kernel/memmap.py` | K16 eingetragen |

@@ -16,7 +16,7 @@
 #      serielle Leitung UND auf den Bildschirm. Der Mitschnitt geht durch
 #      ein Terminal in Python (`tools/k11/vt.py`), das Bildschirmfoto
 #      durch den Zeichensatzleser aus Runde K7B
-#      (`tools/gfx/schau.py lesen`). Die beiden Bilder muessen
+#      (`tools/gfx/checkshot.py lesen`). Die beiden Bilder muessen
 #      uebereinstimmen.
 #   3. JEDES WERKZEUG GEGEN SEIN LINUX-GEGENSTUECK. Dieselben Eingaben,
 #      dieselbe Ausgabe, Oktett fuer Oktett. Wo bewusst abgewichen wird,
@@ -79,7 +79,7 @@ num() { # name wert op soll
 hat() { grep -qaF "$2" "$1" && ok "$3" || bad "$3 -- '$2' fehlt"; }
 hat_nicht() { grep -qaF "$2" "$1" && bad "$3 -- '$2' steht da und sollte nicht" || ok "$3"; }
 
-bash vendor/firn/hole-firnc.sh >/dev/null || { echo "vendor/firn/hole-firnc.sh fehlgeschlagen"; exit 1; }
+bash vendor/firn/fetch-firnc.sh >/dev/null || { echo "vendor/firn/fetch-firnc.sh fehlgeschlagen"; exit 1; }
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
     echo "K11: uebersprungen, qemu-system-x86_64 fehlt"
     exit 0
@@ -715,7 +715,7 @@ tipp_lauf() { # name abbild kommandozeile muster tasten...
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1
       echo $? > "$TMPD/$name.rc" ) &
     local pid=$!
-    python3 tools/k11/tasten.py "$sock" "$TMPD/$name.txt" "$muster" "$@" \
+    python3 tools/k11/keys.py "$sock" "$TMPD/$name.txt" "$muster" "$@" \
         > "$TMPD/$name.tasten" 2>&1
     wait $pid 2>/dev/null
     cp "$TMPD/live-$name.img" "$TMPD/nach-$name.img"
@@ -757,10 +757,10 @@ grep -qa '\^O Write' "$TMPD/edA.vt" \
     || bad "die Tastenzeile fehlt"
 
 # Und dasselbe Bild aus einem echten BILDSCHIRMFOTO, Zelle fuer Zelle
-# gegen den Zeichensatz gerechnet (`tools/gfx/schau.py lesen`, Runde K7B).
+# gegen den Zeichensatz gerechnet (`tools/gfx/checkshot.py lesen`, Runde K7B).
 if [ -s "$TMPD/edA.ppm" ]; then
     ok "das Bildschirmfoto steht ($(stat -c%s "$TMPD/edA.ppm") Oktette)"
-    python3 tools/gfx/schau.py lesen "$TMPD/edA.ppm" kernel/font.fi \
+    python3 tools/gfx/checkshot.py lesen "$TMPD/edA.ppm" kernel/font.fi \
         > "$TMPD/edA.schirm" 2>&1
     sed -n 's/^ *[0-9]\+ |\(.*\)|$/\1/p' "$TMPD/edA.schirm" | sed 's/ *$//' \
         > "$TMPD/edA.schirm.txt"
@@ -916,7 +916,7 @@ tipp_lauf gegE "$TMPD/d0.img" \
     "edit: ready" \
     warte:0.5 "foto:$TMPD/kein.ppm" ctrl-x
 if [ -s "$TMPD/kein.ppm" ]; then
-    python3 tools/gfx/schau.py groesse "$TMPD/kein.ppm" 800 600 >/dev/null 2>&1 \
+    python3 tools/gfx/checkshot.py groesse "$TMPD/kein.ppm" 800 600 >/dev/null 2>&1 \
         && bad "GEGENPROBE: ohne 'gfx' gibt es trotzdem 800x600" \
         || ok "GEGENPROBE: ohne 'gfx' ist der Bildmodus nicht gesetzt"
 else
@@ -926,12 +926,12 @@ fi
 # (f) Die Speicherkarte von kdata: der neue Bereich K11 darf sich mit
 #     keinem anderen ueberschneiden. Genau dieser Fehler hat Runde K7
 #     den Zeichensatz geloescht.
-python3 tools/kernel/karte.py kernel > "$TMPD/karte.txt" 2>&1 \
+python3 tools/kernel/memmap.py kernel > "$TMPD/karte.txt" 2>&1 \
     && ok "$(tail -1 "$TMPD/karte.txt")" \
     || { bad "die Speicherkarte von kdata hat Kollisionen"; tail -6 "$TMPD/karte.txt" | sed 's/^/        /'; }
-grep -qa 'K11' tools/kernel/karte.py \
+grep -qa 'K11' tools/kernel/memmap.py \
     && ok "und der Bereich dieser Runde steht in der Karte" \
-    || bad "K11_OFF fehlt in tools/kernel/karte.py"
+    || bad "K11_OFF fehlt in tools/kernel/memmap.py"
 
 # (g) Die Aufrufnummern dieser Runde stehen in der Karte in sys.fi und
 #     kollidieren mit keiner anderen Runde.

@@ -40,7 +40,7 @@
 #      ZURUECKGELESEN. Dieselbe Stelle, dreimal gelesen, drei
 #      verschiedene Werte -- und die Werte stehen im Handbuch. Nachgerechnet
 #      wird nicht gegen eine Konstante in diesem Skript, sondern gegen
-#      `tools/k18/soll.py`, eine zweite, unabhaengige Fassung derselben
+#      `tools/k18/expect.py`, eine zweite, unabhaengige Fassung derselben
 #      Kodierung.
 #   2. DER LEERLAUFPFAD BENUTZT WIRKLICH `mwait`. Zaehler vorher/nachher,
 #      und zwei Gegenlaeufe, die einbrechen MUESSEN: `nocstates` (der
@@ -132,14 +132,14 @@ ksagt() { # datei name soll beschreibung
     else bad "$4 -- $2 = $got, erwartet $3"; fi
 }
 hexdez() { python3 -c "import sys;print(int(sys.argv[1],0))" "$1" 2>/dev/null; }
-soll() { python3 tools/k18/soll.py "$@" 2>/dev/null; }
+soll() { python3 tools/k18/expect.py "$@" 2>/dev/null; }
 number_in() { # datei name
     grep -aE "^const $2: u64 = [0-9]+" "$1" | head -1 \
         | sed -E 's/^const [A-Za-z0-9_]+: u64 = ([0-9]+).*/\1/'
 }
-punkt() { python3 tools/gfx/schau.py punkt "$@" 2>/dev/null; }
+punkt() { python3 tools/gfx/checkshot.py punkt "$@" 2>/dev/null; }
 
-bash vendor/firn/hole-firnc.sh >/dev/null || { echo "vendor/firn/hole-firnc.sh fehlgeschlagen"; exit 1; }
+bash vendor/firn/fetch-firnc.sh >/dev/null || { echo "vendor/firn/fetch-firnc.sh fehlgeschlagen"; exit 1; }
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
     echo "K18: uebersprungen, qemu-system-x86_64 fehlt"
     exit 0
@@ -221,10 +221,10 @@ else
     bad "kdata ist zu klein fuer 0x58000..0x60000: $kd_fi"
 fi
 
-if python3 tools/kernel/karte.py kernel > "$TMPD/karte.txt" 2>&1; then
+if python3 tools/kernel/memmap.py kernel > "$TMPD/karte.txt" 2>&1; then
     ok "die Speicherkarte von kdata: $(tail -1 "$TMPD/karte.txt")"
 else
-    bad "tools/kernel/karte.py meldet Kollisionen"
+    bad "tools/kernel/memmap.py meldet Kollisionen"
     sed 's/^/        /' "$TMPD/karte.txt" | head -8
 fi
 hat "$TMPD/karte.txt" "0 Kollisionen" "keine zwei Bereiche ueberschneiden sich"
@@ -336,7 +336,7 @@ lauf_bild() { # name kommandozeile
         sleep 0.1; i=$((i + 1))
     done
     sleep 0.4
-    python3 tools/gfx/schuss.py "$sock" "$ppm" 25 > "$TMPD/$name.shot" 2>&1
+    python3 tools/gfx/screenshot.py "$sock" "$ppm" 25 > "$TMPD/$name.shot" 2>&1
     wait "$pid"
     rm -f "$sock"
 }
@@ -359,14 +359,14 @@ if [ -z "$orig" ]; then bad "miscorig fehlt -- ohne den Anfangswert ist keine Zu
 
 # --- DIE ZUSAGE DER RUNDE ---
 # Dreimal dieselbe Stelle, dreimal ein anderer Wert, und die Werte sind
-# die aus dem Handbuch -- nachgerechnet von `soll.py`, nicht von hier.
+# die aus dem Handbuch -- nachgerechnet von `expect.py`, nicht von hier.
 for i in 0 1 2; do
     sagt "$P" "setrc$i" "0" "das Profil $i liess sich setzen"
     sagt "$P" "prof$i" "$i" "der Kernel steht danach wirklich auf Profil $i"
     want=$(soll perfctl "${ratios:-0}" "$i")
-    sagt "$P" "perfctl$i" "$want" "IA32_PERF_CTL fuer Profil $i (Handbuch: soll.py)"
+    sagt "$P" "perfctl$i" "$want" "IA32_PERF_CTL fuer Profil $i (Handbuch: expect.py)"
     wantm=$(soll misc "${orig:-0}" "$i")
-    sagt "$P" "misc$i" "$wantm" "IA32_MISC_ENABLE fuer Profil $i (Handbuch: soll.py)"
+    sagt "$P" "misc$i" "$wantm" "IA32_MISC_ENABLE fuer Profil $i (Handbuch: expect.py)"
     # UND DAS IST DER EIGENTLICHE BEWEIS: derselbe Wert, aus dem
     # PROZESSOR ZURUECKGELESEN.
     sagt "$P" "miscback$i" "$wantm" "IA32_MISC_ENABLE Profil $i ZURUECKGELESEN"
@@ -423,7 +423,7 @@ gleich "CPUID meldet KEIN HWP auf diesem Wirt (der Pfad bleibt unbetreten)" "0" 
 sagt "$P" "hwpreq0" "0" "und folglich wird IA32_HWP_REQUEST nie beschrieben"
 
 # Die HWP-KODIERUNG wird trotzdem geprueft -- als reine Funktion, gegen
-# soll.py. Das prueft die Kodierung, NICHT die Wirkung, und wird auch
+# expect.py. Das prueft die Kodierung, NICHT die Wirkung, und wird auch
 # genau so benannt.
 for i in 0 1 2; do
     a=$(soll hwp "${ratios:-0}" "$i")

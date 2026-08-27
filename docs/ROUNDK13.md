@@ -72,7 +72,7 @@ einzige verloren.
 | tiefster Kernstapel, diese Runde | 14560 von 16384 Oktetten (+336) |
 | Dateigröße höchstens, vorher | 2.135.552 Oktette |
 | Dateigröße höchstens, jetzt | 2.134.016 Oktette (−1536, −0,07 %) |
-| Bereiche in `kdata` | 44, 0 Kollisionen (`tools/kernel/karte.py`) |
+| Bereiche in `kdata` | 44, 0 Kollisionen (`tools/kernel/memmap.py`) |
 
 Der Gesamtlauf, Abschnitt für Abschnitt (`./test.sh`, alle 19 grün):
 9 · 41 · 46 · 176 · 130 · 98 · 134 · 59 · 91 · 67 · 20 · 76 · 107 · 75 ·
@@ -360,7 +360,7 @@ eigenen Testläufer laufen lässt, hätte das nicht bemerkt.
 
     bash tools/k13/run.sh            # Abschnitt 19 allein
     ./test.sh                        # alle 19 Abschnitte
-    python3 tools/kernel/karte.py kernel -v   # die Speicherkarte
+    python3 tools/kernel/memmap.py kernel -v   # die Speicherkarte
 
 Ein System von Hand starten:
 
