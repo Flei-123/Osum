@@ -119,9 +119,9 @@ export {
     PM_BATRATE, PM_BATOK, PM_HEALTH, PM_HEALTHOK, PM_MINUTES,
     PM_COST, PM_COSTN, PM_MISSES, PM_DAYSTART, PM_HEAD, PM_EVERY,
     PM_MAXRATE, PM_MINRATE, PM_DAYS, PM_WINDOWS, PM_ORPHAN, PM_ORPHANS,
-    PM_SCALARS,
+    PM_STAGED, PM_SCALARS,
     PT_TICKS, PT_ENERGY, PT_DAYT, PT_DAYE, PT_LAST, PT_NOW, PT_FIELDS,
-    M_NONE, M_EAGER, M_NOFLOOR,
+    M_NONE, M_EAGER, M_NOFLOOR, M_SAY,
     NSAMPLE, NBUCKET, NPROG, NAME_MAX,
     PR_TICKS, PR_ENERGY, PR_DAYT, PR_DAYE, PR_PROCS, PR_PEND, PR_FIELDS
 }
@@ -206,7 +206,8 @@ const PM_DAYS: u64 = 0x108 // how often the day counters were rolled
 const PM_WINDOWS: u64 = 0x110 // windows in which something was split
 const PM_ORPHAN: u64 = 0x118 // ticks of dead tasks waiting to be paid
 const PM_ORPHANS: u64 = 0x120 // how many processes ended that way
-const PM_SCALARS: u64 = 38 // how many of the above there are
+const PM_STAGED: u64 = 0x128 // 1 = `arm` ran, so the power layer exists
+const PM_SCALARS: u64 = 39 // how many of the above there are
 
 // The fields of a task record, in words. The first four are the
 // counters and ring 3 reads them by number.
@@ -305,6 +306,7 @@ fn prat(i: u64) -> u64 {
 const M_NONE: u64 = 1 // `nopowermon` -- account nothing
 const M_EAGER: u64 = 2 // `pmonfast` -- one sample per tick
 const M_NOFLOOR: u64 = 4 // `pmonnofloor` -- never measure the floor
+const M_SAY: u64 = 8 // `pmonsay` -- print the report at the end of the run
 
 // The first occurrence of a word in the command line, or 0. The same
 // six lines `kmain.mode_of` uses; they are here because this file is
@@ -374,6 +376,7 @@ fn parse(state: u64, cmd: u64) {
     var w_no: [u8; 11] = "nopowermon\0"
     var w_fast: [u8; 9] = "pmonfast\0"
     var w_nof: [u8; 12] = "pmonnofloor\0"
+    var w_say: [u8; 8] = "pmonsay\0"
     var m: u64 = 0
     if find(cmd, (&w_no[0]) as u64, 10) != 0 {
         m = m | M_NONE
@@ -383,6 +386,9 @@ fn parse(state: u64, cmd: u64) {
     }
     if find(cmd, (&w_nof[0]) as u64, 11) != 0 {
         m = m | M_NOFLOOR
+    }
+    if find(cmd, (&w_say[0]) as u64, 7) != 0 {
+        m = m | M_SAY
     }
     init(state, m)
     take_wigapp(state, cmd)
@@ -429,6 +435,11 @@ fn init(state: u64, mode: u64) {
 // accounting -- and `tools/powermon/run.sh` measures the difference
 // between the two rather than asserting it is small.
 fn arm(state: u64) {
+    // SET FIRST, AND ALSO WHEN THE ACCOUNTING STAYS OFF. It says the
+    // POWER LAYER was brought up, not that the counting was; `report`
+    // hangs on it so that `nopowermon` still gets its counter-check
+    // printed while a run without the word `pwr` at all prints nothing.
+    kstate.set(state, pm(PM_STAGED), 1)
     if (kstate.get(state, pm(PM_MODE)) & M_NONE) != 0 {
         return
     }
@@ -1051,6 +1062,23 @@ fn say(name: u64, v: u64) {
 }
 
 fn report(state: u64) {
+    // ONLY WHEN THE RUN ASKED FOR IT (`pmonsay`), and that is not
+    // tidiness -- it is a regression this round caused and had to undo.
+    //
+    // `kmain.power_stage` runs in EVERY boot that does not say `nopwr`,
+    // so this report was printing in runs that have nothing to do with
+    // power. In a run with `gfx` the serial port is MIRRORED TO THE
+    // SCREEN, and twenty-four more lines at the end of a transcript that
+    // already fills the screen scrolled the shell's own line off the top
+    // of it. `tools/gfx/run.sh` caught it, and the SHAPE of the catch is
+    // worth keeping: the whole-screen comparison against the transcript
+    // still passed, and the two checks that look for ONE NAMED LINE at a
+    // COMPUTED PLACE failed. "The picture is right and the picture is
+    // wrong" is what area counting looks like from the inside, and it is
+    // exactly what round K7B built those checks to catch.
+    if (mode_word(state) & M_SAY) == 0 {
+        return
+    }
     var n_on: [u8; 3] = "on\0"
     var n_sa: [u8; 8] = "samples\0"
     var n_ra: [u8; 5] = "rate\0"
