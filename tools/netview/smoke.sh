@@ -11,7 +11,7 @@ TMPD=${SMOKED:-$(mktemp -d)}
 mkdir -p "$TMPD"
 echo "workdir $TMPD"
 
-GPROGS="schreibtisch leiste einstellungen launcher explorer widgetdemo locate netview edit sh echo ls cat ps"
+GPROGS="desktop taskbar settings launcher explorer widgetdemo locate netview edit sh echo ls cat ps"
 MONO=assets/osum-mono.ttf
 SANS=assets/osum-sans.ttf
 GBASE="gfx wm wig desk wmhold wiglong nokbd nosched noproc nofs"

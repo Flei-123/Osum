@@ -103,7 +103,7 @@ for s in 0 1; do
 done
 [ -f "$TMPD/k0.mb" ] || { echo "TASKBAR: $pass passed, $((fail + 1)) failed"; exit 1; }
 
-PROGS="schreibtisch leiste einstellungen launcher dhcp explorer widgetdemo locate sh echo ls cat edit"
+PROGS="desktop taskbar settings launcher dhcp explorer widgetdemo locate sh echo ls cat edit"
 as --64 -o "$TMPD/crt.o" kernel/user/crt.s 2>/dev/null \
     || bad "crt.s does not assemble"
 build_progs() { # stage
@@ -121,14 +121,14 @@ build_progs() { # stage
     done
     return $rc
 }
-build_progs 0 && ok "firnc0: $(echo $PROGS | wc -w) programs built, /bin/leiste is $(stat -c%s "$TMPD/leiste0.elf") octets" \
+build_progs 0 && ok "firnc0: $(echo $PROGS | wc -w) programs built, /bin/taskbar is $(stat -c%s "$TMPD/taskbar0.elf") octets" \
     || bad "firnc0: the programs do not build"
 build_progs 1 && ok "firnc1: the same ones out of the compiler written in Firn" \
     || bad "firnc1: the programs do not build"
 
 # THE BAR IS A PROGRAM IN RING 3. Not a claim -- the kernel image does
 # not carry a single one of its symbols.
-for sym in leiste__paint leiste__conf_read leiste__drag_step; do
+for sym in taskbar__paint taskbar__conf_read taskbar__drag_step; do
     if nm -a "$TMPD/k0.mb.elf" 2>/dev/null | grep -q "$sym"; then
         bad "the kernel carries $sym -- the taskbar belongs in ring 3"
     else
@@ -178,7 +178,7 @@ for f in kernel/wm.fi kernel/sys.fi kernel/user/wlibc.fi; do
         bad "$f numbers the edges differently"
     fi
 done
-grep -q 'edge=' kernel/user/leiste.fi && grep -q 'edge=' kernel/user/einstellungen.fi \
+grep -q 'edge=' kernel/user/taskbar.fi && grep -q 'edge=' kernel/user/settings.fi \
     && ok "both writers of /etc/taskbar.conf spell the key 'edge'" \
     || bad "the two writers of /etc/taskbar.conf disagree about the key"
 

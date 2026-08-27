@@ -130,6 +130,10 @@ git show i18n:kernel/user/einstellungen.fi | grep -c 'msg\.'   ->  64
 grep -c 'msg\.' kernel/user/einstellungen.fi   (mergeline)     ->   0
 ```
 
+(The file is `kernel/user/settings.fi` since section F below. The two
+commands above are left spelled the way they were RUN, because a
+command against a commit has to name the path that commit had.)
+
 Round I18N had moved all of the settings program onto the message
 catalogue. When the seventeen branches were merged (`3b4db03`), the
 netview/theme/display versions of that file won every conflict, and
@@ -144,12 +148,12 @@ language in the interface at all.
 Every other file survived the merge intact — that was checked, not
 assumed:
 
-| file | on branch `i18n` | on `mergeline` |
+| file (name at the time) | on branch `i18n` | on `mergeline` |
 |---|---|---|
-| `einstellungen.fi` | 64 | **0** |
-| `leiste.fi` | 8 | 8 |
+| `einstellungen.fi` → now `settings.fi` | 64 | **0** |
+| `leiste.fi` → now `taskbar.fi` | 8 | 8 |
 | `explorer.fi` | 18 | 18 |
-| `schreibtisch.fi` | 2 | 2 |
+| `schreibtisch.fi` → now `desktop.fi` | 2 | 2 |
 
 Restored, and carried forward over the four pages the other branches had
 added in the meantime (display, netview, the taskbar section, the theme
@@ -496,7 +500,7 @@ which a divider is not.
 
 ### Switching, at run time
 
-`/bin/einstellungen`, page **Darstellung**, beside the colour scheme and
+`/bin/settings`, page **Darstellung**, beside the colour scheme and
 the mode. Apply writes `/etc/theme.conf`, calls `theme_reload`, and then
 `wlib.reshape()`.
 

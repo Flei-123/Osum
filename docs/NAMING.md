@@ -43,8 +43,11 @@ directory name and its `start=` path are not.
 
 ## The state of the tree
 
-Every path in the running system is English. The four German ones were
-renamed in the round `rename-etc`:
+Every path and every program name in the running system is English.
+
+**The four German configuration paths**, renamed by `b5c796e`
+(the round `rename-etc` wrote the rule down; its branch was never
+merged, see the note at the end):
 
 | was | is |
 |---|---|
@@ -52,6 +55,27 @@ renamed in the round `rename-etc`:
 | `/etc/schirm.conf` | `/etc/display.conf` |
 | `/etc/zeit.conf` | `/etc/time.conf` |
 | `/etc/netz.conf` | `/etc/network.conf` |
+
+**The three German program names**, renamed by round LOOK's addendum.
+Round `rename-en` (`d89f512`) had renamed `suchen`, `starter` and
+`wigdemo` and left these three alone, because four rounds were editing
+them at the same time and a rename that collides with four merges is a
+rename nobody thanks you for. The file name, the `/bin` path, the
+argv[0] the kernel passes and the prefix the program writes on the
+serial line are ONE name and all four moved together:
+
+| was | is |
+|---|---|
+| `kernel/user/leiste.fi`, `/bin/leiste`, `leiste: …` | `kernel/user/taskbar.fi`, `/bin/taskbar`, `taskbar: …` |
+| `kernel/user/schreibtisch.fi`, `/bin/schreibtisch`, `schreibtisch: …` | `kernel/user/desktop.fi`, `/bin/desktop`, `desktop: …` |
+| `kernel/user/einstellungen.fi`, `/bin/einstellungen`, `einstellungen: …` | `kernel/user/settings.fi`, `/bin/settings`, `settings: …` |
+
+A module name in Firn is also a SYMBOL PREFIX, so `leiste__paint`
+became `taskbar__paint`. `tools/desktop/run.sh` proves the taskbar is a
+ring-3 program by looking for exactly those symbols in the kernel image
+and failing if it finds them; a counter-test that looks for a symbol
+which no longer exists always passes and tests nothing, so it moved
+with the name.
 
 Unchanged because they were already English or are the Unix names:
 `/etc/passwd`, `/etc/shadow`, `/etc/inittab`, `/etc/resolv.conf`,
@@ -69,6 +93,25 @@ outside the running system:
   German in most of this repository. That is the language the code is
   written in; it is not an interface.
 
-There is no backwards compatibility for the old names anywhere. The
-system has not shipped, so a rename is a rename — supporting two spellings
-of the same file would have made the rule unenforceable on the first day.
+There is ONE piece of backwards compatibility in the whole tree, and it
+is named rather than hidden: `wlibc.timezone_read()` reads
+`/etc/time.conf` and, if that is not there, `/etc/zeit.conf`. A machine
+that silently loses its timezone on an upgrade is not an upgrade. It is
+a READ, never a write — nothing in the system creates the old name — and
+it is the only such fallback. Everything else is a rename and nothing
+else: the system has not shipped, and supporting two spellings of the
+same file would have made this rule unenforceable on the first day.
+
+## The branch `rename-etc` must NOT be merged
+
+It was cut before `rename-en` and before the seventeen branches that
+became `mergeline`. `git diff --name-status -M mergeline..rename-etc`
+is a list of BACKWARDS renames — `assets/apps/launcher.osp` →
+`suchen.prog`, `REMOVE-FROM-FIRN.md` → `ENTFERNEN-AUS-FIRN.md` — and it
+deletes `LICENSE.MIT`, `THIRD_PARTY.md`, `assets/icons/LICENSE.lucide`
+and the whole of `assets/netview/`. Merging it would undo this document.
+
+Its one piece of real content, commit `283b378`, is the four `/etc`
+paths above, and that content is already in the tree: `b5c796e` applied
+it mechanically to the finished files instead of replaying a diff that
+would have conflicted in every one of them. The branch can be deleted.

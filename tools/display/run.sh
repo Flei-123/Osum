@@ -141,7 +141,7 @@ gleich "und sie folgt unmittelbar auf den Modustreiber" \
 # beansprucht, meldet die Nachbarn als Eindringlinge.
 fremd=$(grep -ran --include='*.fi' -E '^const SYS_[A-Za-z0-9_]+: u64 = 181[0-9]' kernel/ \
     | grep -v -e '^kernel/sys.fi' -e '^kernel/user/dispctl.fi' \
-              -e '^kernel/user/einstellungen.fi' || true)
+              -e '^kernel/user/settings.fi' || true)
 [ -z "$fremd" ] && ok "keine Aufrufnummer aus 1810..1819 steht ausserhalb der Dateien dieser Runde" \
                 || bad "Aufrufnummern aus 1810..1819 stehen auch in: $(echo $fremd | tr '\n' ' ')"
 eigen=$(grep -ahE '^const SYS_[A-Za-z0-9_]+: u64 = 181[0-9]' kernel/sys.fi | wc -l | tr -d ' ')
@@ -174,14 +174,14 @@ done
 # hier ZUSAETZLICH uebersetzt und gebunden -- nicht auf die Platte
 # gelegt, denn dazu braeuchte es einen laufenden Fensterserver, sondern
 # damit ein Fehler in der neuen Seite auffaellt, bevor jemand sie oeffnet.
-if "$FIRNC" kernel/user/einstellungen.fi -o "$TMPD/eins.o" > "$TMPD/eins.err" 2>&1 \
+if "$FIRNC" kernel/user/settings.fi -o "$TMPD/eins.o" > "$TMPD/eins.err" 2>&1 \
     && ld -T "$ULD" --defsym=USER_ENTRY=_F0.u_start -o "$TMPD/eins.elf" \
         "$TMPD/crt.o" "$TMPD/eins.o" 2>/dev/null; then
     u=$(nm -u "$TMPD/eins.elf" 2>/dev/null | awk '{print $NF}' | sed '/^$/d')
     [ -z "$u" ] && ok "das Einstellungen-Programm mit der neuen Bildschirmseite baut frei" \
-                || bad "einstellungen.elf hat undefinierte Symbole: $u"
+                || bad "settings.elf hat undefinierte Symbole: $u"
 else
-    bad "einstellungen.fi laesst sich nicht bauen"; head -8 "$TMPD/eins.err" | sed 's/^/        /'
+    bad "settings.fi laesst sich nicht bauen"; head -8 "$TMPD/eins.err" | sed 's/^/        /'
 fi
 # Und die Zusage ueber den Inhalt: der Satz, den diese Runde falsch
 # gemacht hat, steht nicht mehr da.
@@ -197,10 +197,10 @@ for f in locale/de/messages locale/en/messages; do
     hat_nicht "$f" "this kernel cannot change it" \
         "und auch nicht in seiner englischen Fassung in $f"
 done
-grep -v '^\s*//' kernel/user/einstellungen.fi > "$TMPD/eins-code.fi"
+grep -v '^\s*//' kernel/user/settings.fi > "$TMPD/eins-code.fi"
 hat_nicht "$TMPD/eins-code.fi" "kann dieser Kernel ihn nicht wechseln" \
     "der Satz 'im Betrieb kann dieser Kernel ihn nicht wechseln' ist aus dem Programm weg"
-hat kernel/user/einstellungen.fi "SYS_DISPSET" \
+hat kernel/user/settings.fi "SYS_DISPSET" \
     "das Einstellungen-Programm ruft wirklich den Kernel und schreibt keine Datei mehr"
 
 if bash tools/build-kernel.sh "$TMPD/k1.mb" --stufe 1 > "$TMPD/k1.log" 2>&1; then

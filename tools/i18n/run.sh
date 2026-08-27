@@ -127,9 +127,9 @@ is "fest eingebaute deutsche Oberflaechentexte" "${n:-?}" "0"
 # GEGENPROBE FUER DEN PRUEFER SELBST: er MUSS anschlagen, wenn wirklich
 # einer dasteht. Ein Pruefer ohne Gegenprobe prueft nichts.
 mkdir -p "$TMPD/schlecht/kernel/user"
-cp kernel/user/schreibtisch.fi "$TMPD/schlecht/kernel/user/"
+cp kernel/user/desktop.fi "$TMPD/schlecht/kernel/user/"
 printf 'static mut x: [u8; 12] = "Uebernehmen\\0"\n' \
-    >> "$TMPD/schlecht/kernel/user/schreibtisch.fi"
+    >> "$TMPD/schlecht/kernel/user/desktop.fi"
 if python3 tools/i18n/scan.py "$TMPD/schlecht" > "$TMPD/scanbad.txt" 2>&1; then
     bad "GEGENPROBE: der Pruefer uebersieht einen eingebauten deutschen Text"
 else
@@ -211,10 +211,10 @@ lauf "$TMPD/de" de
     || bad "kein deutsches Bildschirmfoto"
 
 feld() { # datei id was
-    grep -a "einstellungen: feld id=$2 " "$1" | tail -1 \
+    grep -a "settings: feld id=$2 " "$1" | tail -1 \
         | grep -oE " $3=[0-9]+" | tail -1 | grep -oE '[0-9]+$'
 }
-text_von() { grep -a "einstellungen: feld id=$2 " "$1" | tail -1 | sed 's/.* t=//'; }
+text_von() { grep -a "settings: feld id=$2 " "$1" | tail -1 | sed 's/.* t=//'; }
 
 EF="$TMPD/en/en.txt"; DF="$TMPD/de/de.txt"
 is "der Knopf heisst auf Englisch"  "$(text_von "$EF" 5)" "Apply"
@@ -249,10 +249,10 @@ schau "der uebersetzte Satz mit dem unuebersetzten Pfad steht auf dem Schirm" \
     230 230 230 30 34 40 "Farbschema (aus /etc/schemas):" 8
 
 # Die Taskleiste -- ein ANDERER Prozess, dieselbe Sprache.
-has "$EF" "leiste: text netz" "die Taskleiste meldet ihr Netzfeld"
-grep -a 'leiste: text netz' "$EF" | tail -1 | grep -q 'no network' \
+has "$EF" "taskbar: text netz" "die Taskleiste meldet ihr Netzfeld"
+grep -a 'taskbar: text netz' "$EF" | tail -1 | grep -q 'no network' \
     && ok "auf Englisch: no network" || bad "die Taskleiste ist nicht englisch"
-grep -a 'leiste: text netz' "$DF" | tail -1 | grep -q 'kein Netz' \
+grep -a 'taskbar: text netz' "$DF" | tail -1 | grep -q 'kein Netz' \
     && ok "auf Deutsch: kein Netz" || bad "die Taskleiste ist nicht deutsch"
 
 # UND DIE BEIDEN BILDER SIND WIRKLICH VERSCHIEDEN. Ohne diese Zahl
@@ -281,7 +281,7 @@ echo "== 7. die Sprache wechseln -- mit der Maus, in EINEM Lauf =="
 # das Foto misst eine andere Hintergrundfarbe, als das Programm
 # gemeldet hat.
 lauf "$TMPD/en" vor
-rfeld() { grep -a "einstellungen: reiter nr=$1" "$2" | tail -1 \
+rfeld() { grep -a "settings: reiter nr=$1" "$2" | tail -1 \
           | grep -oE " $3=[0-9]+" | grep -oE '[0-9]+$'; }
 rx=$(rfeld 5 "$TMPD/en/vor.txt" x)
 ry=$(rfeld 5 "$TMPD/en/vor.txt" y)
@@ -297,13 +297,13 @@ else
     has "$TMPD/en/tab.txt" "t=Language of the surface:" \
         "ein Klick auf den Reiter oeffnet die Sprachseite"
     # Das Auswahlfeld (kind=9) und der Knopf (kind=2) dieser Seite.
-    zeile_von() { grep -a 'einstellungen: feld' "$1" | grep " kind=$2 " \
+    zeile_von() { grep -a 'settings: feld' "$1" | grep " kind=$2 " \
                   | tail -1; }
     # Das LETZTE Auswahlfeld ist die Tastaturbelegung; das ERSTE die
     # Sprache. Also das erste nehmen.
-    cx=$(grep -a 'einstellungen: feld' "$TMPD/en/tab.txt" | grep ' kind=9 ' \
+    cx=$(grep -a 'settings: feld' "$TMPD/en/tab.txt" | grep ' kind=9 ' \
          | head -1 | grep -oE ' x=[0-9]+' | grep -oE '[0-9]+')
-    cb=$(grep -a 'einstellungen: feld' "$TMPD/en/tab.txt" | grep ' kind=9 ' \
+    cb=$(grep -a 'settings: feld' "$TMPD/en/tab.txt" | grep ' kind=9 ' \
          | head -1 | grep -oE ' base=[0-9]+' | grep -oE '[0-9]+')
     bx=$(zeile_von "$TMPD/en/tab.txt" 2 | grep -oE ' x=[0-9]+' | grep -oE '[0-9]+')
     bb=$(zeile_von "$TMPD/en/tab.txt" 2 | grep -oE ' base=[0-9]+' | grep -oE '[0-9]+')
@@ -321,16 +321,16 @@ else
             ok "NACH DEN DREI KLICKS STEHT DIE OBERFLAECHE AUF DEUTSCH -- ohne Neustart"
         else
             bad "die Oberflaeche ist nach dem Klick nicht deutsch"
-            grep -a 'einstellungen: feld' "$W" | tail -8 | sed 's/^/        /'
+            grep -a 'settings: feld' "$W" | tail -8 | sed 's/^/        /'
         fi
         has "$W" "t=Sprache gewechselt: de" "und das Statusfeld sagt es"
         # UND EIN ANDERER PROZESS ZIEHT MIT. Das ist die eigentliche
         # Zusage: die Taskleiste liest die Wahl des Benutzers nach, so
         # wie sie /etc/theme nachliest.
-        if grep -a 'leiste: text netz' "$W" | tail -1 | grep -q 'kein Netz'; then
+        if grep -a 'taskbar: text netz' "$W" | tail -1 | grep -q 'kein Netz'; then
             ok "und die TASKLEISTE, ein ANDERER Prozess, zieht mit: kein Netz statt no network"
         else
-            bad "die Taskleiste bleibt englisch: $(grep -a 'leiste: text netz' "$W" | tail -1)"
+            bad "die Taskleiste bleibt englisch: $(grep -a 'taskbar: text netz' "$W" | tail -1)"
         fi
         # BILDPUNKTGENAU, in DEMSELBEN Lauf, in dem vorher Englisch stand.
         wx=$(zeile_von "$W" 2 | grep -oE ' x=[0-9]+' | grep -oE '[0-9]+')
@@ -338,8 +338,8 @@ else
         schau "der umgestellte Knopf steht bildpunktgenau auf dem Schirm" \
             ttext "$TMPD/en/wechsel.ppm" "$SANS" 15 $((CX + wx)) $((CY + wb)) \
             230 230 230 57 64 74 "Übernehmen" 8
-        nx=$(grep -a 'leiste: text netz' "$W" | tail -1 | grep -oE ' x=[0-9]+' | grep -oE '[0-9]+')
-        nb=$(grep -a 'leiste: text netz' "$W" | tail -1 | grep -oE ' base=[0-9]+' | grep -oE '[0-9]+')
+        nx=$(grep -a 'taskbar: text netz' "$W" | tail -1 | grep -oE ' x=[0-9]+' | grep -oE '[0-9]+')
+        nb=$(grep -a 'taskbar: text netz' "$W" | tail -1 | grep -oE ' base=[0-9]+' | grep -oE '[0-9]+')
         schau "und die umgestellte Taskleiste auch" \
             ttext "$TMPD/en/wechsel.ppm" "$SANS" 15 "$nx" $((572 + nb)) \
             230 230 230 42 47 55 "kein Netz" 8

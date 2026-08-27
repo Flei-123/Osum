@@ -36,7 +36,7 @@ justification -- 800x600x4 = 1 920 000 octets fit into one 2 MiB tile,
 | `kernel/fb.fi` (+700 lines) | window remapping, panel/image split, rotation, scaling, lookup-table transfer path |
 | `kernel/sys.fi` | three calls for ring 3: 1810 `osum_dispget`, 1811 `osum_dispset`, 1812 `osum_dispstr` |
 | `kernel/user/dispctl.fi` (new) | `/bin/dispctl` -- the same thing from ring 3, one number per line |
-| `kernel/user/einstellungen.fi` | the "Bildschirm" page rebuilt: the list comes from the card, Apply applies, the confirmation counts down |
+| `kernel/user/settings.fi` | the "Bildschirm" page rebuilt: the list comes from the card, Apply applies, the confirmation counts down |
 | `tools/display/run.sh` (new) | the acceptance run, eleven sections |
 
 Two pages of `kdata` are taken, `0x5A000` (scalars and mode list) and
@@ -563,7 +563,7 @@ belong to round DESKTOP, which raised `MAX_WIN` from 8 to 16 and added
 three assertions to `wm.selftest` (its runner still expects 17, and gets
 20) and changed the title bar rendering (three pixel-exact title
 comparisons come out blank). The single K18 failure is the same story:
-round DESKTOP's taskbar `kernel/user/leiste.fi` declares
+round DESKTOP's taskbar `kernel/user/taskbar.fi` declares
 `SYS_PWRGET: u64 = 1750`, and the K18 runner asserts that no file outside
 its own round names a number from 1750..1799.
 

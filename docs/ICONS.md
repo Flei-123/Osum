@@ -553,7 +553,7 @@ carry the column geometry.
 ## 12. What is missing
 
 **The taskbar.** The order asked for a taskbar screenshot before and
-after. `main` has no taskbar — `kernel/user/leiste.fi` exists only on the
+after. `main` has no taskbar — `kernel/user/taskbar.fi` exists only on the
 DESKTOP branch, which is not merged. The network and battery icons this
 round cut (`E000`–`E005`, `E020`–`E025`) exist and are measured, but
 nothing draws them yet. Round DESKTOP can, with
