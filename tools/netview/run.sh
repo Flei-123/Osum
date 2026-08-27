@@ -131,7 +131,12 @@ for s in 0 1; do
     [ "$rc" = 0 ] && ok "firnc$s: $(echo $PROGS | wc -w) programs, /bin/netview and /bin/nvcheck among them"
 done
 
-SPEC="/bin/"
+# `/etc/` is on this image because of the second addendum: `netview
+# fallback <word>` writes `/etc/netview.conf`, and a directory that is
+# not there is not a place a file can be created. The first run of
+# section 8f said exactly that, out loud, because `conf_write` reports
+# its failure instead of half-succeeding quietly.
+SPEC="/bin/ /etc/"
 for p in $PROGS; do SPEC="$SPEC /bin/$p=$TMPD/${p}0.elf"; done
 python3 tools/osum/mkfs.py build "$TMPD/disk.img" $BLOCKS $SPEC \
     > "$TMPD/mkfs.txt" 2>&1 \
@@ -213,16 +218,27 @@ server_down() {
 BASE="osum nokbd nosched noproc nofs noring3"
 NETARGS="nic nip=$OSUM_IP/24 ngw=$HOST_IP nsvc=0 nwait=0"
 
-# run_script <script> <outfile>
+# run_script <script> <outfile> [extra-kernel-words] [no-nic]
+#
+# The third argument is what the second addendum measures with: the
+# WHOLE difference between "it fails" and "it works" has to be one word
+# on the kernel command line, with the same image, the same script and
+# the same wire. Anything else and the two runs are not comparable.
 run_script() {
-    local script=$1 out=$2
+    local script=$1 out=$2 extra=${3:-} nonic=${4:-}
+    local net="$NETARGS"
+    [ -n "$nonic" ] && net=""
+    local NET=()
+    if [ -z "$nonic" ]; then
+        NET=(-netdev "socket,id=n0,udp=127.0.0.1:$BPORT,localaddr=127.0.0.1:$QPORT"
+             -device "virtio-net-pci,netdev=n0,mac=52:54:00:aa:bb:cc")
+    fi
     cp "$TMPD/disk.img" "$TMPD/live.img"
     rm -f "$out"
     timeout 240 qemu-system-x86_64 -kernel "$TMPD/k0.mb" -m 256 \
-        -append "$BASE $NETARGS script=$script" \
+        -append "$BASE $net $extra script=$script" \
         -serial "file:$out" -display none -no-reboot \
-        -netdev "socket,id=n0,udp=127.0.0.1:$BPORT,localaddr=127.0.0.1:$QPORT" \
-        -device "virtio-net-pci,netdev=n0,mac=52:54:00:aa:bb:cc" \
+        "${NET[@]}" \
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
         -drive "file=$TMPD/live.img,format=raw,if=ide,index=0" \
         >/dev/null 2>&1
@@ -429,7 +445,7 @@ done
 [ "$grc" = 0 ] && ok "the graphical userland builds ($(echo $GPROGS | wc -w) programs)"
 
 python3 tools/netview/icons.py bauen "$TMPD/icons" > "$TMPD/ib.txt" 2>&1 \
-    && ok "the seven symbols are built into OSYM files" \
+    && ok "the eight symbols are built into OSYM files" \
     || bad "tools/netview/icons.py bauen failed"
 python3 tools/k15/baum.py "$TMPD/baum" > "$TMPD/baum.log" 2>&1 \
     || bad "tools/k15/baum.py failed"
@@ -447,7 +463,7 @@ mk_gimage() { # image theme-file
     ARGS+=(/etc/ "/etc/theme=$th" "/etc/taskbar.conf=$TMPD/taskbar.conf")
     ARGS+=(/etc/netview/)
     for q in state-nocarrier state-noip state-noroute state-online \
-             mark-filtered mark-faked mark-none; do
+             mark-filtered mark-faked mark-none sys-faking; do
         ARGS+=("/etc/netview/$q=$TMPD/icons/$q")
     done
     while read -r z; do ARGS+=("$z"); done < <(python3 tools/k15/buendel.py assets/apps "$TMPD/buendel")
@@ -560,6 +576,72 @@ for cs in nocarrier noip noroute online; do
     if [ -n "$W" ]; then bridge_down; wire_down; fi
 done
 
+echo "   SECOND ADDENDUM: online AND faking -- the two signs beside each other"
+# THE CASE THE WHOLE SIGN EXISTS FOR. The machine is genuinely online:
+# carrier, address, and a gateway that answered. And the preference is
+# `always`, so every new program gets a faked network anyway. The state
+# icon on its own would be TRUE AND MISLEADING at the same time, which
+# is the one thing a round about not lying may not ship.
+#
+# So the picture has to carry BOTH signs, and both are read back out of
+# it at the coordinates the bar itself reported.
+wire_up; bridge_up
+if gshot "st-faking" "assets/netview/theme-dark" \
+    "netvdemo nic nip=$OSUM_IP/24 ngw=$HOST_IP nvfall=2" "ping"; then
+    L="$TMPD/st-faking.txt"; P="$TMPD/st-faking.ppm"
+    png "$P" "state-online-faking"
+    num "faking: the machine really is online" "$(st_of "$L")" eq 3
+    GX=$(gx_of "$L"); GY=$(gy_of "$L")
+    if [ -z "$GX" ] || [ -z "$GY" ]; then
+        bad "faking: the bar never reported an unspliced position"
+        GX=0; GY=0
+    fi
+    fl=$(grep -aoE '^taskbar: faking fb=[0-9]+ x=[0-9]+ y=[0-9]+' "$L" | tail -1)
+    if [ -n "$fl" ]; then
+        fb=$(echo "$fl" | grep -oE 'fb=[0-9]+' | cut -d= -f2)
+        fx=$(echo "$fl" | grep -oE ' x=[0-9]+' | tr -d ' x=')
+        fy=$(echo "$fl" | grep -oE 'y=[0-9]+$' | cut -d= -f2)
+        num "faking: the bar read the preference as 'always'" "${fb:-9}" eq 2
+        r=$(python3 tools/netview/schau.py "$P" "$((fx + GX))" "$((fy + GY))" \
+            assets/netview/sys-faking.txt assets/netview/theme-dark 2>&1)
+        case "$r" in ok*) ok "faking: the sys-faking sign is on the screen at $((fx+GX)),$((fy+GY)) -- $r" ;;
+                     *)   bad "faking: sys-faking: $r" ;; esac
+    else
+        bad "faking: the bar never said where it drew the faking sign"
+    fi
+    # AND THE STATE ICON IS STILL THERE, BESIDE IT, SAYING THE TRUTH
+    # ABOUT THE MACHINE. The faking sign ADDS to it, it does not replace
+    # it -- a person who wants to know whether there is a cable must
+    # still be able to find out.
+    sx=$(st_x "$L"); sy=$(st_y "$L")
+    if [ -n "$sx" ] && [ -n "$sy" ]; then
+        r=$(python3 tools/netview/schau.py "$P" "$((sx + GX))" "$((sy + GY))" \
+            assets/netview/state-online.txt assets/netview/theme-dark 2>&1)
+        case "$r" in ok*) ok "faking: and 'online' is still there beside it -- $r" ;;
+                     *)   bad "faking: the state icon went missing: $r" ;; esac
+        num "faking: the faking sign comes FIRST (further left)" "$fx" lt "$sx"
+    else
+        bad "faking: the bar did not report the state icon"
+    fi
+else
+    bad "faking: no screenshot"
+fi
+bridge_down; wire_down
+
+# THE COUNTER-CHECK, and without it the shot above proves nothing: the
+# SAME machine, the SAME wire, the preference left at `off`. The sign
+# must NOT be there, and the pixels where it stood must be empty.
+wire_up; bridge_up
+if gshot "st-nofake" "assets/netview/theme-dark" \
+    "netvdemo nic nip=$OSUM_IP/24 ngw=$HOST_IP" "ping"; then
+    L="$TMPD/st-nofake.txt"
+    has "$L" "taskbar: notfaking fb=0" "counter-check: with the preference off the bar draws no sign"
+    hasnot "$L" "taskbar: faking fb=" "counter-check: and it never reported drawing one"
+else
+    bad "counter-check: no screenshot"
+fi
+bridge_down; wire_down
+
 echo "   THE PROBE: four programs, four views, one bar, one picture"
 # The marks the bar reported, per button: `taskbar: btn i=N ... netv=V mkx=X mky=Y`
 mk_line() { grep -aE "^taskbar: btn i=$2 " "$1" | tail -1; }
@@ -617,18 +699,204 @@ for scheme in dark light; do
             case "$r" in ok*) ok "$scheme: and the REAL one carries nothing -- $r" ;;
                          *)   bad "$scheme: the real button has a mark: $r" ;; esac
         fi
-        has "$L" "taskbar: icons=4 marks=3" "$scheme: the bar found all seven pictures"
+        has "$L" "taskbar: icons=4 marks=3 sys=1" "$scheme: the bar found all eight pictures"
     else
         bad "$scheme: no screenshot of the four views"
     fi
     bridge_down; wire_down
 done
 
-# The icon sheet: the seven signs at the size they are shown at, in both
+# The icon sheet: the eight signs at the size they are shown at, in both
 # schemes, side by side. Not a measurement -- a picture for a person.
 python3 tools/netview/blatt.py "$SHOTS/icons-sheet.png" > "$TMPD/sheet.txt" 2>&1 \
-    && ok "the sheet of all seven signs, 1:1 and magnified, light and dark" \
+    && ok "the sheet of all eight signs, 1:1 and magnified, light and dark" \
     || bad "tools/netview/blatt.py failed"
+
+
+# =====================================================================
+echo "== 8. SECOND ADDENDUM: the systemwide fallback =="
+# =====================================================================
+# THE MEASUREMENT IS A DIFFERENCE OF ONE WORD. Same image, same script,
+# same wire (or same absence of one); the only thing that changes
+# between the runs of 8a and 8b is `nvfall=` on the kernel command
+# line. If a program fails in one and works in the other, that
+# difference has exactly one cause.
+#
+# `netview default <cmd>` is what the shell says; it is not a fifth
+# view. It asks the kernel the same question the launcher asks for
+# every program nobody configured (`appdir.view_for` -> NV_FBVIEW) and
+# uses the answer. Written out from a shell so that the acceptance can
+# measure it without driving a mouse.
+
+fbk() { grep -aoE "^nv: $2=[0-9]+" "$1" 2>/dev/null | tail -1 | cut -d= -f2; }
+
+echo "   8a. NO NETWORK AT ALL, fallback OFF -- it fails, as it should"
+# No `nic` on the command line and no virtio device on the bus: this is
+# a machine with the cable pulled, which is the machine the person is
+# sitting at when this addendum matters.
+run_script "/bin/netview default /bin/nvcheck fboff $HOST_IP $HTTP_PORT;/bin/netview fallback;exit" \
+    "$TMPD/fb-off.txt" "nvfall=0" nonic
+A="$TMPD/fb-off.txt"
+num "8a: the machine reports no carrier"          "$(fbk "$A" link)"   eq 0
+num "8a: the preference is off"                   "$(fbk "$A" fallb)"  eq 0
+num "8a: so a new program gets the REAL view"     "$(fbk "$A" fbview)" eq 0
+num "8a: and the program did get it"              "$(nvc "$A" fboff view)" eq 0
+c=$(nvc "$A" fboff conn)
+if [ -n "$c" ] && [ "$c" != 0 ]; then
+    ok "8a: connect FAILED, as it must on a machine with no network: $c"
+else
+    bad "8a: connect returned ${c:-nothing} -- it was supposed to fail"
+fi
+num "8a: nothing was loaded"                      "$(nvc "$A" fboff body)" eq 0
+num "8a: and it failed FAST, not into a timeout (us)" \
+    "$(nvc "$A" fboff conn_us)" lt 200000
+
+echo "   8b. THE SAME MACHINE, THE SAME COMMAND, fallback WHEN-OFFLINE"
+run_script "/bin/netview default /bin/nvcheck fbwo $HOST_IP $HTTP_PORT;/bin/netview fallback;exit" \
+    "$TMPD/fb-wo.txt" "nvfall=1" nonic
+B="$TMPD/fb-wo.txt"
+num "8b: the machine still reports no carrier"    "$(fbk "$B" link)"   eq 0
+num "8b: the preference is when-offline"          "$(fbk "$B" fallb)"  eq 1
+num "8b: so a new program gets FAKED"             "$(fbk "$B" fbview)" eq 2
+num "8b: and the program did get it"              "$(nvc "$B" fbwo view)" eq 2
+num "8b: connect SUCCEEDED on a machine with no network" \
+    "$(nvc "$B" fbwo conn)" eq 0
+num "8b: the reachability check got 204 No Content" \
+    "$(nvc "$B" fbwo status)" eq 204
+num "8b: the body is EMPTY -- nothing was loaded" "$(nvc "$B" fbwo body)" eq 0
+num "8b: a name still resolved"                   "$(nvc "$B" fbwo dns)" eq 3325256784
+num "8b: and it took microseconds"                "$(nvc "$B" fbwo total_us)" lt 200000
+# THE NUMBER THIS ADDENDUM STANDS OR FALLS ON. `when-offline` invents a
+# whole working network; if one octet of it reached the card driver the
+# invention would be a leak.
+num "8b: OCTETS THAT LEFT THE MACHINE" "$(kv "$B" wire_o)" eq 0
+has "$B" "netview: fallback when-offline" "8b: and /bin/netview says so in words"
+
+echo "   8c. PRECEDENCE: an explicit setting beats the preference"
+# A real wire this time, and `always` -- the case where the preference
+# would fake everything. A program the person put on `real` must come
+# out of it with the real network, or the preference is not a default,
+# it is an override.
+wire_up; bridge_up; server_up
+run_script "/bin/netview real /bin/nvcheck expl $HOST_IP $HTTP_PORT;/bin/netview none /bin/nvcheck expn $HOST_IP $HTTP_PORT;/bin/netview default /bin/nvcheck alw $HOST_IP $HTTP_PORT;exit" \
+    "$TMPD/fb-alw.txt" "nvfall=2"
+server_down; bridge_down; wire_down
+C="$TMPD/fb-alw.txt"
+num "8c: the preference is always"                "$(fbk "$C" fallb)"  eq 2
+num "8c: a program with NO setting gets faked"    "$(nvc "$C" alw view)" eq 2
+num "8c: and reads a 204"                         "$(nvc "$C" alw status)" eq 204
+num "8c: EXPLICIT real STAYS REAL under 'always'" "$(nvc "$C" expl view)" eq 0
+num "8c: and really reached the python server"    "$(nvc "$C" expl status)" eq 200
+num "8c: with the real page (46 octets)"          "$(nvc "$C" expl body)" eq 46
+num "8c: EXPLICIT none STAYS NONE under 'always'" "$(nvc "$C" expn view)" eq 3
+num "8c: and got -ENETUNREACH, not a faked 204"   "$(nvc "$C" expn conn)" eq $ENETUNREACH
+num "8c: it loaded nothing"                       "$(nvc "$C" expn body)" eq 0
+
+echo "   8d. when-offline on a machine that IS online -- back to real"
+wire_up; bridge_up; server_up
+# The ping comes first ON PURPOSE and it is not a trick. `when-offline`
+# asks whether the FIRST HOP has ever answered, and a machine that has
+# not spoken yet honestly does not know. One exchange settles it -- and
+# on a normal desktop the DHCP client has already had that exchange
+# before the first program starts. The limit is written down in
+# docs/NETVIEW.md rather than hidden behind a probe of our own.
+run_script "/bin/ping -c 2 $HOST_IP;/bin/netview default /bin/nvcheck onl $HOST_IP $HTTP_PORT;/bin/netview fallback;exit" \
+    "$TMPD/fb-onl.txt" "nvfall=1"
+server_down; bridge_down; wire_down
+D="$TMPD/fb-onl.txt"
+num "8d: the machine reports itself online"       "$(fbk "$D" link)"   eq 3
+num "8d: the preference is still when-offline"    "$(fbk "$D" fallb)"  eq 1
+num "8d: but a new program now gets REAL"         "$(fbk "$D" fbview)" eq 0
+num "8d: and the program did get it"              "$(nvc "$D" onl view)" eq 0
+num "8d: it reached the python server"            "$(nvc "$D" onl status)" eq 200
+num "8d: and got the real page"                   "$(nvc "$D" onl body)" eq 46
+
+echo "   8e. changing the preference moves NO RUNNING PROCESS"
+# The claim of point 3 of the assignment, measured in one boot: the same
+# list of processes before and after the preference is changed, and it
+# has to be IDENTICAL -- while the very next program to start comes out
+# different. New programs get the new view, running ones keep theirs.
+wire_up; bridge_up; server_up
+run_script "/bin/netview list;/bin/netview fallback always;/bin/netview list;/bin/netview default /bin/nvcheck late $HOST_IP $HTTP_PORT;exit" \
+    "$TMPD/fb-live.txt" "nvfall=0"
+server_down; bridge_down; wire_down
+E="$TMPD/fb-live.txt"
+# The two listings, each of them the lines that name a view. The first
+# `netview list` runs before the change, the second after it.
+python3 - "$E" "$TMPD/fb-live-a.txt" "$TMPD/fb-live-b.txt" <<'PYX'
+import sys, re
+raw = open(sys.argv[1], 'rb').read().decode('latin-1').splitlines()
+runs, cur, seen = [], None, False
+for line in raw:
+    if line.startswith('  PID KIND'):
+        if cur is not None:
+            runs.append(cur)
+        cur = []
+        continue
+    if cur is None:
+        continue
+    m = re.match(r'^\s*(\d+) (user|kernel)\s+(real|filtered|faked|none)', line)
+    if m:
+        # The listing includes /bin/netview ITSELF, whose pid differs
+        # between the two runs -- so it is matched on view, not on pid.
+        cur.append(m.group(3))
+    elif line.strip() and not line.startswith(' '):
+        runs.append(cur); cur = None
+if cur is not None:
+    runs.append(cur)
+runs = [r for r in runs if r]
+open(sys.argv[2], 'w').write(' '.join(runs[0]) if len(runs) > 0 else '')
+open(sys.argv[3], 'w').write(' '.join(runs[1]) if len(runs) > 1 else '')
+print("listings=%d" % len(runs))
+PYX
+LA=$(cat "$TMPD/fb-live-a.txt" 2>/dev/null)
+LB=$(cat "$TMPD/fb-live-b.txt" 2>/dev/null)
+if [ -n "$LA" ] && [ "$LA" = "$LB" ]; then
+    ok "8e: every running process kept its view across the change [$LA]"
+elif [ -z "$LA" ]; then
+    bad "8e: no process listing came back at all"
+else
+    bad "8e: a running process changed view: before [$LA] after [$LB]"
+fi
+case "$LA" in
+    *faked*) bad "8e: something was already faked before the change" ;;
+    "")      ;;
+    *)       ok "8e: and none of them was faked to begin with" ;;
+esac
+num "8e: the preference ends up at always"        "$(fbk "$E" fallb)"  eq 2
+num "8e: while the NEXT program to start is faked" "$(nvc "$E" late view)" eq 2
+num "8e: and reads a 204 instead of the page"     "$(nvc "$E" late status)" eq 204
+has "$E" "netview: fallback always" "8e: /bin/netview reported the change"
+
+echo "   8f. the preference survives a reboot -- /etc/netview.conf"
+# `netview fallback <word>` writes the file; `netview boot` reads it
+# back. Two boots of the same image: the second one is never told
+# anything on its command line and has to come up faking all the same.
+wire_up; bridge_up
+run_script "/bin/netview fallback always;/bin/cat /etc/netview.conf;exit" \
+    "$TMPD/fb-w.txt" "nvfall=0"
+# The SECOND boot deliberately reuses the image the first one wrote to.
+cp "$TMPD/live.img" "$TMPD/persist.img"
+rm -f "$TMPD/fb-r.txt"
+timeout 240 qemu-system-x86_64 -kernel "$TMPD/k0.mb" -m 256 \
+    -append "$BASE $NETARGS script=/bin/netview boot;/bin/netview fallback;exit" \
+    -serial "file:$TMPD/fb-r.txt" -display none -no-reboot \
+    -netdev "socket,id=n0,udp=127.0.0.1:$BPORT,localaddr=127.0.0.1:$QPORT" \
+    -device "virtio-net-pci,netdev=n0,mac=52:54:00:aa:bb:cc" \
+    -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
+    -drive "file=$TMPD/persist.img,format=raw,if=ide,index=0" >/dev/null 2>&1
+bridge_down; wire_down
+has "$TMPD/fb-w.txt" "fallback=always" "8f: /etc/netview.conf holds the word, not a number"
+num "8f: the first boot ends at always"           "$(fbk "$TMPD/fb-w.txt" fallb)" eq 2
+G="$TMPD/fb-r.txt"
+# The second boot is told NOTHING on its command line, so the kernel
+# starts it at `off`; the only thing that can have moved it is the file.
+num "8f: the second boot ends at always, read out of the file alone" \
+    "$(fbk "$G" fallb)" eq 2
+has "$G" "netview: fallback always" "8f: and 'netview boot' read the file back"
+
+hasnot "$TMPD/fb-wo.txt" "*** EXCEPTION" "8: no exception in the offline run"
+hasnot "$TMPD/fb-alw.txt" "*** EXCEPTION" "8: no exception in the 'always' run"
 
 echo
 echo "NETVIEW: $pass passed, $fail failed"
