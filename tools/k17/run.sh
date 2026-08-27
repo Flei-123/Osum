@@ -172,11 +172,15 @@ doppelt=$(grep -rn "u64 = 170[12]$" kernel/ lib/ 2>/dev/null \
     | grep -cv 'USBSTAT\|USBPULL\|USB_MINNR\|USB_MAXNR' || true)
 num "andere Verwendungen der Nummern 1701/1702 im Baum" "${doppelt:-0}" eq 0
 
+# RUNDE MERGE: `trap.fi` und `boot.s` liegen seit Runde ARM unter
+# `kernel/arch/x86_64/`. Dieser Laeufer suchte sie an der alten Stelle,
+# fand nichts und meldete drei Fehler ueber Dinge, die unveraendert da
+# waren.
 # Der Vektor. 43, und keiner sonst -- `karte.py` rechnet die
 # Vektortafel seit Runde K10 nach.
-grep -q 'const VEC_XHCI: u64 = 43' kernel/trap.fi \
-    && ok "der Meldevektor des Reglers ist 43 (kernel/trap.fi)" \
-    || bad "VEC_XHCI ist nicht 43 in kernel/trap.fi"
+grep -q 'const VEC_XHCI: u64 = 43' kernel/arch/x86_64/trap.fi \
+    && ok "der Meldevektor des Reglers ist 43 (kernel/arch/x86_64/trap.fi)" \
+    || bad "VEC_XHCI ist nicht 43 in kernel/arch/x86_64/trap.fi"
 grep -q 'const VEC_XHCI: u64 = 43' kernel/xhci.fi \
     && ok "und dieselbe Zahl steht im Treiber" \
     || bad "VEC_XHCI in kernel/xhci.fi passt nicht"
@@ -197,7 +201,7 @@ gleich "der Vorrat dieser Runde faengt bei 0x50000 an" "0x50000" "$k17off"
 gleich "und ist acht Seiten gross" "0x8000" "$k17max"
 # kdata musste dafuer wachsen -- und die Zahl steht ZWEIMAL.
 a=$(grep -aE '^const KDATA_SIZE: u64 = 0x[0-9A-Fa-f]+' kernel/kstate.fi | grep -oE '0x[0-9A-Fa-f]+')
-b=$(grep -aE '\.set KDATA_SIZE, 0x[0-9A-Fa-f]+' kernel/boot.s | grep -oE '0x[0-9A-Fa-f]+' | head -1)
+b=$(grep -aE '\.set KDATA_SIZE, 0x[0-9A-Fa-f]+' kernel/arch/x86_64/boot.s | grep -oE '0x[0-9A-Fa-f]+' | head -1)
 gleich "KDATA_SIZE steht in kstate.fi und boot.s gleich" "$a" "$b"
 # Der Vorrat dieser Runde endet bei 0x58000. Als K17 zuerst geschrieben
 # wurde, WAR das die Grenze; Runde K18 hat kdata inzwischen auf 0x60000
@@ -723,8 +727,8 @@ hat_nicht "$TMPD/nopull.txt" "usb: unplug port=" "GEGENPROBE: und nichts wird ab
 # Zaehler, der ohne Stecker hochlaeuft, waere Rauschen.
 num "Anstecken im Betrieb im Regellauf (darf nicht anschlagen)" \
     "$(uz "$H" hotplugs)" eq 0
-grep -qa 'usb.unplug_check' kernel/trap.fi \
-    && ok "der Zeitgeber sieht wirklich nach (kernel/trap.fi)" \
+grep -qa 'usb.unplug_check' kernel/arch/x86_64/trap.fi \
+    && ok "der Zeitgeber sieht wirklich nach (kernel/arch/x86_64/trap.fi)" \
     || bad "im Zeitgeber steht kein Blick auf die Anschluesse"
 
 # ======================================= 9. dieselben Zahlen aus firnc1

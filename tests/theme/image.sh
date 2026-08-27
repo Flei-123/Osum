@@ -32,7 +32,7 @@ light_start=07:00
 dark_start=19:00
 EOF
 
-ARGS=(build "$IMG" 4096 /lib/
+ARGS=(build "$IMG" 8192 /lib/
       "/lib/mono.ttf=assets/osum-mono.ttf" "/lib/sans.ttf=assets/osum-sans.ttf"
       /bin/)
 for p in $PROGS; do ARGS+=("/bin/$p=$OUT/$p.elf"); done
