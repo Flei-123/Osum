@@ -29,9 +29,28 @@ Oktettklumpen im Baum liegt, kann niemand in einem Unterschied lesen.
     # X = 4a90d0        eine Farbe je Zeichen, RGB in sechs Hexziffern
     # o = ffffff
     # . =               nichts dahinter heisst DURCHSICHTIG
+    # I = @ink          eine ROLLE statt eines Wertes (Runde NETVIEW)
     ................
     ..XXXXXXXXXXXX..
     ...
+
+ROLLEN STATT WERTE -- RUNDE NETVIEW, NACHTRAG. Ein Symbol, das in einem
+hellen und in einem dunklen Farbschema richtig aussehen soll, darf seine
+Farbe nicht selbst kennen. Ein Palettenwert, der mit `@` anfaengt, ist
+darum keine Farbe, sondern eine ROLLE:
+
+    # I = @ink          die Vordergrundfarbe des laufenden Schemas
+    # D = @dim          die gedaempfte
+    # A = @accent       die Akzentfarbe
+    # W = @warn         die Aufmerksamkeitsfarbe
+    # P = @panel        die Flaeche, auf der gemalt wird
+
+Sie stehen im DECKUNGSOKTETT und nicht in den Farboktetten: 0 heisst
+durchsichtig wie bisher, 255 heisst "die drei Oktette sind die Farbe"
+wie bisher, und 1 bis 5 heissen "hol dir die Farbe aus dem Schema".
+Jedes Symbol, das es vor diesem Nachtrag gab, traegt weiter 0 und 255
+und aendert sich um kein Oktett -- gemessen in tools/k15/run.sh, das
+alle fuenf Buendelsymbole Punkt fuer Punkt zurueckliest.
 
 Verwendung:
     symbol.py <zeichnung.txt> <ausgabe>
@@ -40,6 +59,17 @@ Verwendung:
 
 import struct
 import sys
+
+# Die Rollen und ihre Nummer im Deckungsoktett. Die Liste steht AUCH in
+# `kernel/user/wlibc.fi` (`icon_draw`) und in `tools/netview/icons.py`;
+# dass die drei uebereinstimmen, misst `tools/netview/run.sh`.
+ROLLEN = {
+    "ink": 1,
+    "dim": 2,
+    "accent": 3,
+    "warn": 4,
+    "panel": 5,
+}
 
 
 def lies(pfad):
@@ -57,6 +87,13 @@ def lies(pfad):
                         "symbol: '%s' ist kein einzelnes Zeichen" % zeichen)
                 if not wert:
                     palette[zeichen] = None  # durchsichtig
+                elif wert.startswith("@"):
+                    name = wert[1:]
+                    if name not in ROLLEN:
+                        raise SystemExit(
+                            "symbol: '@%s' ist keine Rolle (%s)"
+                            % (name, ", ".join(sorted(ROLLEN))))
+                    palette[zeichen] = ("rolle", ROLLEN[name])
                 else:
                     if len(wert) != 6:
                         raise SystemExit(
@@ -91,6 +128,10 @@ def baue(pfad):
             rgb = palette[c]
             if rgb is None:
                 aus += bytes(4)
+            elif isinstance(rgb, tuple):
+                # Eine Rolle: die drei Farboktette sind null, das
+                # Deckungsoktett traegt die Nummer.
+                aus += bytes((0, 0, 0, rgb[1]))
             else:
                 aus += bytes(((rgb & 255), (rgb >> 8) & 255,
                               (rgb >> 16) & 255, 255))
@@ -113,7 +154,12 @@ def zurueck(pfad):
         reihe = []
         for x in range(w):
             b, g, r, a = d[12 + (y * w + x) * 4:12 + (y * w + x) * 4 + 4]
-            reihe.append(None if a == 0 else (r << 16) | (g << 8) | b)
+            if a == 0:
+                reihe.append(None)
+            elif a != 255:
+                reihe.append(("rolle", a))
+            else:
+                reihe.append((r << 16) | (g << 8) | b)
         aus.append(reihe)
     return w, h, aus
 
