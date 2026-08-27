@@ -63,8 +63,13 @@ has() { grep -qaF "$2" "$1" && ok "$3" || bad "$3 -- '$2' fehlt"; }
 # EIN FELD AUS EINER GEMELDETEN ZEILE. `grep -oE '.*okt=[0-9]+'` waere
 # gierig und faende bei `laufkb=` das falsche Feld; deshalb wird der
 # Feldname mit Wortgrenze davor gesucht.
+# DIE ZAHL HINTER DEM GLEICHHEITSZEICHEN, und zwar NUR sie. Die erste
+# Fassung schloss mit `grep -oE '[0-9]+'` ab und gab fuer `us10=161`
+# zwei Zahlen zurueck ("10" aus dem Feldnamen und "161"); jede Zusage,
+# die darauf rechnete, verglich Unsinn. Also wird der Feldname mit
+# `sed` abgeschnitten statt nach Ziffern gesucht.
 feld() { grep -aoE "(^|[^a-z])$3=[0-9]+" <(grep -aF "$2" "$1" | tail -1) \
-         | tail -1 | grep -oE '[0-9]+'; }
+         | tail -1 | sed 's/.*=//'; }
 
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
     echo "SPEICHER: uebersprungen, qemu-system-x86_64 ist nicht da"; exit 0
@@ -173,14 +178,26 @@ has "$TMPD/schreib.txt" "du: schreib" "die Schreibprobe ist gelaufen"
 num "kein Satz ist verlorengegangen" "$(feld "$TMPD/schreib.txt" 'du: schreib nachgezogen' lost)" eq 0
 num "die Summe wurde nachgezogen, ohne neu zu bauen" \
     "$(feld "$TMPD/schreib.txt" 'du: schreib bauten' bauten)" eq 1
-has "$TMPD/schreib.txt" "ok=1" "die nachgezogene Summe stimmt"
+num "die nachgezogene Summe stimmt" \
+    "$(feld "$TMPD/schreib.txt" 'du: schreib nachgezogen' ok)" eq 1
+num "und nach dem Loeschen steht wieder der alte Stand da" \
+    "$(feld "$TMPD/schreib.txt" 'du: schreib weg' ok)" eq 1
 
 echo "== 5. Gegenprobe: ohne Nachziehen MUSS die Zahl falsch werden"
 lauf schreibW 'du -W'
-if grep -qa "ok=0" "$TMPD/schreibW.txt"; then
-    ok "ohne Journal geht die Summe daneben -- also zog vorher wirklich das Journal"
+# GEPRUEFT WIRD DAS FELD, NICHT DIE ZEICHENFOLGE. `grep -qa "ok=0"`
+# stand hier zuerst und ging IMMER durch: die Energieschicht schreibt
+# beim Hochfahren `pwr: tempok=0` und `pwr: acok=0`, und beides enthaelt
+# "ok=0". Die Gegenprobe haette also auch dann bestanden, wenn sie
+# durchgefallen waere -- genau der Fehler, den diese Runde an anderer
+# Stelle schon einmal gemacht hat.
+WOK=$(feld "$TMPD/schreibW.txt" 'du: schreib nachgezogen' ok)
+WNACH=$(feld "$TMPD/schreibW.txt" 'du: schreib nachgezogen' nachher)
+WERW=$(feld "$TMPD/schreibW.txt" 'du: schreib nachgezogen' erwartet)
+if [ "${WOK:-1}" = "0" ] && [ "${WNACH:-0}" != "${WERW:-0}" ]; then
+    ok "ohne Journal steht die Summe daneben ($WNACH statt $WERW) -- also zog vorher wirklich das Journal"
 else
-    bad "auch OHNE Journal stimmte alles: dann misst die Probe nichts"
+    bad "ohne Journal stimmte trotzdem alles (ok=$WOK, $WNACH gegen $WERW): dann misst die Probe nichts"
 fi
 
 echo "== 6. Die Oberflaeche"

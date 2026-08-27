@@ -212,6 +212,36 @@ das ist ihr Rahmen, links und rechts einer.
 Bildschirmfotos: `docs/bilder/speicher/speicher.png` (und `-ohne-index.png`
 als Gegenprobe), erzeugt von `tools/speicher/run.sh`.
 
+## Drei Pruefungen, die sich selbst bestanden haetten
+
+Das ist der Abschnitt, der in einem Logbuch am leichtesten fehlt. Alle
+drei Fehler lagen nicht im Programm, sondern in dem, was das Programm
+pruefen sollte — und alle drei haetten gemeldet, dass alles in Ordnung
+ist.
+
+1. **Das Testabbild hatte nur leere Dateien.** Aus Runde K15 uebernommen,
+   wo es richtig war: ein Namensindex haelt Namen. Fuer eine
+   Speicherplatzanalyse waren damit alle Summen null, jede Prozentangabe
+   null, jede Kachel gleich gross — und die Gegenprobe meldete
+   `okt=0 oktok=1`, weil 0 + 0 eben 0 ergibt. Ein Fehler in der
+   Aufsummierung waere unsichtbar geblieben. Behoben mit
+   `tools/speicher/baum.py`.
+2. **Die Gegenprobe der Schreibprobe senkte ihre eigene Messlatte.** Sie
+   setzte fuer den Lauf ohne Journal `erwartet = vorher` und bestand
+   dadurch immer. Behoben in `kernel/user/du.fi`: erwartet wird in beiden
+   Faellen die Wahrheit auf der Platte.
+3. **Der Laeufer suchte nach einer Zeichenfolge statt nach einem Feld.**
+   `grep -qa "ok=0"` sollte belegen, dass die Gegenprobe durchfaellt —
+   und ging immer durch, weil die Energieschicht beim Hochfahren
+   `pwr: tempok=0` und `pwr: acok=0` schreibt. Dazu gab die Hilfsfunktion
+   `feld` fuer `us10=161` zwei Zahlen zurueck (die `10` aus dem
+   Feldnamen). Beides behoben in `tools/speicher/run.sh`.
+
+Die Lehre ist jedesmal dieselbe und steht schon im Kopf von
+`tools/k15/run.sh`: **eine Pruefung, die nicht durchfallen kann, misst
+nichts.** Vor jeder Zusage in dieser Runde steht deshalb die Frage, wie
+sie zum Scheitern zu bringen waere — und ein Lauf, der genau das tut.
+
 ## Weg B — noch einmal geprueft, und warum es bei A bleibt
 
 Der Kommentarkopf von `kernel/nidx.fi` nennt zwei Wege und einen
