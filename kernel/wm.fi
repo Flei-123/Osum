@@ -70,6 +70,9 @@ export {
     create, destroy, valid, count, focus, set_focus, raise_win,
     move_win, resize_win, win_x, win_y, win_w, win_h, win_z, win_buf,
     win_owner, win_kind, win_id, outer_w, outer_h,
+    win_layer, set_layer, win_hidden, set_hidden, win_deco, set_deco,
+    win_title, by_id, hides, shows, top_visible, deko, inx, iny,
+    set_nolayer, set_nomin, nolayer, nomin,
     fill, text, blit_in, flush_win, hit,
     ev_push, ev_pop, ev_waiting,
     on_mouse, on_key, term_write, term_out, term_cols, term_rows, term_cx, term_cy,
@@ -80,15 +83,24 @@ export {
     set_fonts, font_ui, font_mono, px_ui, px_mono,
     selftest, selftest_max,
     MAX_WIN, K_RAW, K_TERM, TITLE_H, BORDER, GRIP,
-    E_KEY, E_DOWN, E_UP, E_MOVE, E_CLOSE, E_FOCUS, E_RESIZE
+    E_KEY, E_DOWN, E_UP, E_MOVE, E_CLOSE, E_FOCUS, E_RESIZE,
+    L_DESK, L_NORMAL, L_TOP, F_HIDDEN, F_NODECO
 }
 
 // ------------------------------------------------------- die Zahlen
 
-const MAX_WIN: u64 = 8
+// RUNDE DESKTOP: SECHZEHN STATT ACHT, und die Zahl ist keine Laune.
+// Ein Schreibtisch (1) mit einer Taskleiste (1), dem Starter (1), dem
+// Datei-Explorer samt Kontextmenue und Dialog (3) und den
+// Einstellungen samt Dialog (2) sind ACHT Fenster -- das neunte bekam
+// -E_EXHAUSTED. Mit sechzehn passen Fenstertafel (0x1000) und
+// Ereignisringe (0x2000) nicht mehr in die zwei Seiten von WM_OFF;
+// beide liegen deshalb in `kstate.DSK_OFF` (0x54000..0x58000), dem
+// Vorrat dieser Runde. In WM_OFF stehen nur noch die Skalare.
+const MAX_WIN: u64 = 16
 const WIN_BYTES: u64 = 256
-const W_OFF: u64 = 0x400 // die Fenstertafel in WM_OFF
-const EV_OFF: u64 = 0x1000 // die Ereignisringe
+const W_OFF: u64 = 0x0 // die Fenstertafel, Versatz IN kstate.DSK_OFF
+const EV_OFF: u64 = 0x1000 // die Ereignisringe, ebenfalls in DSK_OFF
 const EV_SLOTS: u64 = 32
 const EV_BYTES: u64 = 16
 const EV_RING: u64 = 512 // EV_SLOTS * EV_BYTES
@@ -100,6 +112,34 @@ const CLOSE_W: u64 = 14
 
 const K_RAW: u64 = 0 // die Anwendung malt selbst
 const K_TERM: u64 = 1 // ein Zeichenraster, der Server malt
+
+// ------------------------------------------- RUNDE DESKTOP: die Ebenen
+//
+// DREI EBENEN, UND SIE SIND DER GRUND, WARUM ES EINEN SCHREIBTISCH
+// GEBEN KANN. Bis zu dieser Runde war die Stapelreihenfolge EINE Kette:
+// wer angeklickt wurde, kam nach ganz oben. Ein Hintergrundbild ist
+// aber ein Fenster, das NIE nach oben darf, und eine Taskleiste ist ein
+// Fenster, das IMMER oben bleiben muss -- beides ist in einer einzigen
+// Kette nicht ausdrueckbar. Logbuch K15 hat genau das als "geht heute
+// nicht" vermerkt.
+//
+// Die Ordnung ist jetzt zweistufig: erst die Ebene, dann innerhalb der
+// Ebene die Reihenfolge. `raise_win` hebt ein Fenster nur bis an die
+// Oberkante SEINER Ebene. Die Gegenprobe heisst `nolayer` und schaltet
+// genau diese eine Zeile ab -- dann kommt der Schreibtisch beim ersten
+// Klick nach vorn und verdeckt alles.
+const L_DESK: u64 = 0 // der Schreibtisch, immer ganz hinten
+const L_NORMAL: u64 = 1 // gewoehnliche Anwendungen
+const L_TOP: u64 = 2 // die Taskleiste, immer ganz vorn
+
+// Die Merkmale eines Fensters.
+//   F_HIDDEN  minimiert: es wird nicht zusammengesetzt und nimmt keinen
+//             Klick an. Es lebt weiter, sein Puffer bleibt.
+//   F_NODECO  ohne Schmuck: kein Rahmen, keine Titelleiste, kein
+//             Schliessfeld, kein Groessengriff. Schreibtisch und
+//             Taskleiste sind so.
+const F_HIDDEN: u64 = 1
+const F_NODECO: u64 = 2
 
 const E_KEY: u64 = 1
 const E_DOWN: u64 = 2
@@ -151,6 +191,13 @@ const S_HITS: u64 = 0x110 // die Farbe des Hintergrunds
 // zeichnete, zeichnete ihn in ihr eigenes Rechteck und damit unter alle
 // anderen. `kernel/wig.fi` setzt ihn auf Verlangen aus Ring 3.
 const S_SHAPE: u64 = 0x118
+// RUNDE DESKTOP. Vier Skalare: die beiden Gegenproben und die beiden
+// Zaehler, ohne die "das Fenster wurde minimiert" eine Behauptung
+// ueber etwas waere, das man im Bild gerade NICHT sieht.
+const S_NOLAYER: u64 = 0x120 // GEGENPROBE: die Ebenen abschalten
+const S_NOMIN: u64 = 0x128 // GEGENPROBE: das Verbergen abschalten
+const S_HIDES: u64 = 0x130 // wie oft ein Fenster verborgen wurde
+const S_SHOWS: u64 = 0x138 // und wie oft es wieder auftauchte
 
 // ein Fenster
 const W_USED: u64 = 0x00
@@ -181,7 +228,12 @@ const W_CELLH: u64 = 0xA8
 // worden waere. Dieselbe Sorte Fehler wie Runde K7B, eine Ebene tiefer.
 const W_KEYS: u64 = 0xB8
 const W_TTY: u64 = 0xB0 // Runde K10: das Terminal + 1, 0 = keines
-const W_TITLE: u64 = 0xC0 // 32 Oktette
+const W_TITLE: u64 = 0xC0 // 32 Oktette, bis 0xE0
+// RUNDE DESKTOP: die beiden letzten freien Woerter des Satzes. Der
+// Satz ist 256 Oktette lang, der Titel endet bei 0xE0 -- vier Woerter
+// waren frei, zwei sind es noch.
+const W_LAYER: u64 = 0xE0 // L_DESK, L_NORMAL oder L_TOP
+const W_FLAGS: u64 = 0xE8 // F_HIDDEN | F_NODECO
 
 // "kein Terminal". Absichtlich eine Zahl und kein Ruf nach `tty.fi`:
 // dieses Modul darf `tty` NICHT einbinden, weil `tty` es einbindet
@@ -198,16 +250,20 @@ fn ss(state: u64, off: u64, v: u64) {
     kstate.set(state + kstate.WM_OFF, off, v)
 }
 
+// DIE FENSTERTAFEL LIEGT SEIT DER RUNDE DESKTOP IN `kstate.DSK_OFF`
+// UND NICHT MEHR IN `WM_OFF`. Die Skalare stehen weiter in WM_OFF; das
+// ist die einzige Stelle, an der die beiden Bereiche auseinanderfallen,
+// und sie steht deshalb hier in einer einzigen Funktion.
 fn wat(i: u64) -> u64 {
-    return W_OFF + i * WIN_BYTES
+    return kstate.DSK_OFF + W_OFF + i * WIN_BYTES
 }
 
 fn wg(state: u64, i: u64, off: u64) -> u64 {
-    return kstate.get(state + kstate.WM_OFF, wat(i) + off)
+    return kstate.get(state, wat(i) + off)
 }
 
 fn wsv(state: u64, i: u64, off: u64, v: u64) {
-    kstate.set(state + kstate.WM_OFF, wat(i) + off, v)
+    kstate.set(state, wat(i) + off, v)
 }
 
 fn ready(state: u64) -> bool {
@@ -320,12 +376,120 @@ fn win_id(state: u64, i: u64) -> u64 {
     return wg(state, i, W_ID)
 }
 
+// HAT DIESES FENSTER SCHMUCK? Rahmen, Titelleiste, Schliessfeld und
+// Griff kosten links BORDER und oben TITLE_H. Ein Schreibtisch, der
+// zwei Bildpunkte neben dem Bildschirmrand anfaengt, ist kein
+// Schreibtisch; eine Taskleiste mit Titelleiste ist keine Taskleiste.
+fn deko(state: u64, i: u64) -> bool {
+    return (wg(state, i, W_FLAGS) & F_NODECO) == 0
+}
+
+// Der Versatz der Malflaeche innerhalb des aeusseren Rechtecks. An
+// EINER Stelle, weil dieselbe Rechnung im Zusammensetzen, im Treffer
+// und in der Ereignisverteilung vorkommt -- und weil sie in der ersten
+// Fassung dieser Runde an zweien davon stand und an der dritten nicht.
+fn inx(state: u64, i: u64) -> u64 {
+    if deko(state, i) {
+        return BORDER
+    }
+    return 0
+}
+
+fn iny(state: u64, i: u64) -> u64 {
+    if deko(state, i) {
+        return TITLE_H
+    }
+    return 0
+}
+
 fn outer_w(state: u64, i: u64) -> u64 {
+    if !deko(state, i) {
+        return wg(state, i, W_W)
+    }
     return wg(state, i, W_W) + BORDER * 2
 }
 
 fn outer_h(state: u64, i: u64) -> u64 {
+    if !deko(state, i) {
+        return wg(state, i, W_H)
+    }
     return wg(state, i, W_H) + TITLE_H + BORDER
+}
+
+fn win_layer(state: u64, i: u64) -> u64 {
+    if i >= MAX_WIN {
+        return L_NORMAL
+    }
+    return wg(state, i, W_LAYER)
+}
+
+fn win_hidden(state: u64, i: u64) -> bool {
+    if i >= MAX_WIN {
+        return false
+    }
+    return (wg(state, i, W_FLAGS) & F_HIDDEN) != 0
+}
+
+fn win_deco(state: u64, i: u64) -> bool {
+    if i >= MAX_WIN {
+        return false
+    }
+    return deko(state, i)
+}
+
+// Die Adresse des Titels IM KERNEL. Nur `sys.fi` benutzt sie, um ihn
+// nach Ring 3 zu kopieren -- die Taskleiste braucht Namen.
+fn win_title(state: u64, i: u64) -> u64 {
+    if i >= MAX_WIN {
+        return 0
+    }
+    return state + wat(i) + W_TITLE
+}
+
+// Das Fenster mit dieser Nummer. Die Taskleiste kennt FREMDE Fenster
+// nur ueber ihre Nummer -- ein Handle bekommt sie nicht, und ein Platz
+// in der Tafel waere eine Zahl, die sich unter ihr aendert.
+fn by_id(state: u64, id: u64) -> u64 {
+    var i: u64 = 0
+    while i < MAX_WIN {
+        if wg(state, i, W_USED) != 0 && wg(state, i, W_ID) == id {
+            return i
+        }
+        i = i + 1
+    }
+    return MAX_WIN
+}
+
+fn hides(state: u64) -> u64 {
+    return gs(state, S_HIDES)
+}
+
+fn shows(state: u64) -> u64 {
+    return gs(state, S_SHOWS)
+}
+
+fn nolayer(state: u64) -> bool {
+    return gs(state, S_NOLAYER) != 0
+}
+
+fn nomin(state: u64) -> bool {
+    return gs(state, S_NOMIN) != 0
+}
+
+fn set_nolayer(state: u64, on: bool) {
+    if on {
+        ss(state, S_NOLAYER, 1)
+    } else {
+        ss(state, S_NOLAYER, 0)
+    }
+}
+
+fn set_nomin(state: u64, on: bool) {
+    if on {
+        ss(state, S_NOMIN, 1)
+    } else {
+        ss(state, S_NOMIN, 0)
+    }
 }
 
 fn term_cols(state: u64, i: u64) -> u64 {
@@ -355,6 +519,8 @@ fn init(state: u64, w: u64, h: u64, nodirty: bool, nofocus: bool) -> bool {
         wsv(state, i, W_USED, 0)
         wsv(state, i, W_EHEAD, 0)
         wsv(state, i, W_ETAIL, 0)
+        wsv(state, i, W_LAYER, L_NORMAL)
+        wsv(state, i, W_FLAGS, 0)
         i = i + 1
     }
     ss(state, S_COUNT, 0)
@@ -382,6 +548,8 @@ fn init(state: u64, w: u64, h: u64, nodirty: bool, nofocus: bool) -> bool {
     if nofocus {
         ss(state, S_NOFOCUS, 1)
     }
+    ss(state, S_HIDES, 0)
+    ss(state, S_SHOWS, 0)
     ss(state, S_DESK, fb.rgb(state, 0x1E, 0x2A, 0x38))
     ss(state, S_FONT_UI, ttf.MAX_FONTS)
     ss(state, S_FONT_MONO, ttf.MAX_FONTS)
@@ -504,8 +672,16 @@ fn create(state: u64, owner: u64, x: i64, y: i64, w: u64, h: u64,
             wsv(state, i, W_BG, fb.rgb(state, 0x10, 0x14, 0x1A))
             wsv(state, i, W_GRID, 0)
             wsv(state, i, W_KEYS, 0)
+            wsv(state, i, W_LAYER, L_NORMAL)
+            wsv(state, i, W_FLAGS, 0)
             wsv(state, i, W_Z, gs(state, S_COUNT))
             ss(state, S_COUNT, gs(state, S_COUNT) + 1)
+            // RUNDE DESKTOP: ein neues Fenster kommt an die Oberkante
+            // SEINER Ebene und nicht an die Oberkante von allem. Solange
+            // es keine Taskleiste gibt, ist das dasselbe; sobald es eine
+            // gibt, ist es der Unterschied zwischen einer Leiste und
+            // einem Fenster, das sie verdeckt.
+            raise_win(state, i)
             set_title(state, i, title)
             fill(state, i, 0, 0, w, h, wg(state, i, W_BG))
             if kind == K_TERM {
@@ -527,14 +703,14 @@ fn set_title(state: u64, i: u64, p: u64) {
         if p != 0 {
             c = kstate.get8(p + k)
         }
-        kstate.set8(state + kstate.WM_OFF + wat(i) + W_TITLE + k, c as u8)
+        kstate.set8(state + wat(i) + W_TITLE + k, c as u8)
         if c == 0 {
             k = 31
         } else {
             k = k + 1
         }
     }
-    kstate.set8(state + kstate.WM_OFF + wat(i) + W_TITLE + 31, 0 as u8)
+    kstate.set8(state + wat(i) + W_TITLE + 31, 0 as u8)
 }
 
 fn destroy(state: u64, i: u64) -> bool {
@@ -566,8 +742,10 @@ fn destroy(state: u64, i: u64) -> bool {
     ss(state, S_COUNT, gs(state, S_COUNT) - 1)
     if focus(state) == i {
         ss(state, S_FOCUS, 0)
-        // Der Fokus geht an das oberste verbliebene Fenster.
-        let o: u64 = topmost(state)
+        // Der Fokus geht an das oberste verbliebene SICHTBARE Fenster
+        // der normalen Ebene -- nicht an den Schreibtisch und nicht an
+        // die Taskleiste.
+        let o: u64 = top_visible(state)
         if o < MAX_WIN {
             set_focus(state, o)
         }
@@ -597,6 +775,76 @@ fn topmost(state: u64) -> u64 {
     return beste
 }
 
+// DAS OBERSTE SICHTBARE FENSTER DER NORMALEN EBENE. Es ist das, an das
+// der Fokus faellt, wenn eines geschlossen oder minimiert wird -- und
+// es ist ausdruecklich NICHT der Schreibtisch und NICHT die
+// Taskleiste. Beide nehmen die Tastatur nicht an; wer in einer
+// Taskleiste tippt, hat kein Fenster mehr, in dem der Text landet.
+fn top_visible(state: u64) -> u64 {
+    var beste: u64 = MAX_WIN
+    var bz: u64 = 0
+    var i: u64 = 0
+    while i < MAX_WIN {
+        if wg(state, i, W_USED) != 0 && wg(state, i, W_LAYER) == L_NORMAL {
+            if (wg(state, i, W_FLAGS) & F_HIDDEN) == 0 {
+                if beste == MAX_WIN || wg(state, i, W_Z) >= bz {
+                    beste = i
+                    bz = wg(state, i, W_Z)
+                }
+            }
+        }
+        i = i + 1
+    }
+    return beste
+}
+
+// AUF WELCHE STUFE GEHOERT EIN FENSTER DER EBENE `l` GANZ OBEN. Gezaehlt
+// werden alle belegten Fenster mit kleinerer ODER GLEICHER Ebene --
+// einschliesslich des Fensters selbst, wenn es schon belegt ist. Die
+// gesuchte Stufe ist eine weniger.
+fn zslot(state: u64, l: u64) -> u64 {
+    var n: u64 = 0
+    var k: u64 = 0
+    while k < MAX_WIN {
+        if wg(state, k, W_USED) != 0 && wg(state, k, W_LAYER) <= l {
+            n = n + 1
+        }
+        k = k + 1
+    }
+    return n
+}
+
+// EIN FENSTER AUF EINE ANDERE STUFE, in beide Richtungen. Runde K10
+// hatte nur `raise_win`, und das konnte nur nach oben: es zog alles
+// ueber dem Fenster eine Stufe herunter und setzte es an die Spitze.
+// Mit Ebenen muss ein Fenster auch SINKEN koennen (ein Schreibtisch,
+// der als letztes entsteht, gehoert nach ganz hinten), und das ist die
+// andere Haelfte derselben Verschiebung.
+fn move_to_z(state: u64, i: u64, ziel: u64) {
+    let z: u64 = wg(state, i, W_Z)
+    if ziel == z || ziel >= gs(state, S_COUNT) {
+        return
+    }
+    var k: u64 = 0
+    while k < MAX_WIN {
+        if wg(state, k, W_USED) != 0 && k != i {
+            let kz: u64 = wg(state, k, W_Z)
+            if z < ziel {
+                if kz > z && kz <= ziel {
+                    wsv(state, k, W_Z, kz - 1)
+                }
+            } else {
+                if kz >= ziel && kz < z {
+                    wsv(state, k, W_Z, kz + 1)
+                }
+            }
+        }
+        k = k + 1
+    }
+    wsv(state, i, W_Z, ziel)
+    damage_win(state, i)
+}
+
 // Das Fenster auf einer Stufe der Stapelreihenfolge.
 fn at_z(state: u64, z: u64) -> u64 {
     var i: u64 = 0
@@ -609,28 +857,112 @@ fn at_z(state: u64, z: u64) -> u64 {
     return MAX_WIN
 }
 
+// HEBEN HEISST SEIT DER RUNDE DESKTOP: an die Oberkante SEINER EBENE.
+// Mit `nolayer` ist es wieder die Oberkante von allem -- und genau
+// dann verdeckt der Schreibtisch beim ersten Klick den ganzen
+// Bildschirm. Das ist die Gegenprobe, und sie ist eine Zeile.
 fn raise_win(state: u64, i: u64) {
     if !valid(state, i) {
         return
     }
-    let z: u64 = wg(state, i, W_Z)
-    let oben: u64 = gs(state, S_COUNT) - 1
-    if z == oben {
+    var ziel: u64 = gs(state, S_COUNT) - 1
+    if gs(state, S_NOLAYER) == 0 {
+        ziel = zslot(state, wg(state, i, W_LAYER)) - 1
+    }
+    move_to_z(state, i, ziel)
+}
+
+// DIE EBENE EINES FENSTERS SETZEN. Danach wandert es sofort an die
+// Oberkante der neuen Ebene -- ein Schreibtisch, der seine Ebene
+// bekommt und liegen bleibt, wo er war, waere kein Schreibtisch.
+fn set_layer(state: u64, i: u64, l: u64) {
+    if !valid(state, i) || l > L_TOP {
         return
     }
-    var k: u64 = 0
-    while k < MAX_WIN {
-        if wg(state, k, W_USED) != 0 && wg(state, k, W_Z) > z {
-            wsv(state, k, W_Z, wg(state, k, W_Z) - 1)
-        }
-        k = k + 1
+    if wg(state, i, W_LAYER) == l {
+        return
     }
-    wsv(state, i, W_Z, oben)
-    damage_win(state, i)
+    wsv(state, i, W_LAYER, l)
+    // Ein Fenster, das aus der normalen Ebene verschwindet, darf den
+    // Eingabefokus nicht mitnehmen.
+    if l != L_NORMAL && focus(state) == i {
+        ss(state, S_FOCUS, 0)
+        let o: u64 = top_visible(state)
+        if o < MAX_WIN {
+            set_focus(state, o)
+        }
+    }
+    raise_win(state, i)
+    damage_all(state)
+}
+
+// MINIMIEREN UND WIEDERHERSTELLEN. Ein verborgenes Fenster wird nicht
+// zusammengesetzt und nimmt keinen Klick an -- es LEBT aber weiter, sein
+// Puffer bleibt liegen, seine Ereignisse laufen weiter auf. Das ist der
+// ganze Unterschied zu `destroy`, und er ist der Grund, warum ein
+// Leistenknopf ein Fenster zurueckholen kann.
+//
+// `nomin` ist die Gegenprobe und tut hier NICHTS -- und deshalb bleibt
+// das Fenster dann stehen, obwohl der Knopf gedrueckt wurde.
+fn set_hidden(state: u64, i: u64, h: bool) {
+    if !valid(state, i) {
+        return
+    }
+    if gs(state, S_NOMIN) != 0 {
+        return
+    }
+    let f: u64 = wg(state, i, W_FLAGS)
+    if h {
+        if (f & F_HIDDEN) != 0 {
+            return
+        }
+        wsv(state, i, W_FLAGS, f | F_HIDDEN)
+        ss(state, S_HIDES, gs(state, S_HIDES) + 1)
+        damage_win(state, i)
+        if focus(state) == i {
+            ss(state, S_FOCUS, 0)
+            let o: u64 = top_visible(state)
+            if o < MAX_WIN {
+                set_focus(state, o)
+            }
+        }
+        if gs(state, S_DRAG) == i + 1 {
+            ss(state, S_DRAG, 0)
+        }
+        if gs(state, S_SIZING) == i + 1 {
+            ss(state, S_SIZING, 0)
+        }
+    } else {
+        if (f & F_HIDDEN) == 0 {
+            return
+        }
+        wsv(state, i, W_FLAGS, f & ~F_HIDDEN)
+        ss(state, S_SHOWS, gs(state, S_SHOWS) + 1)
+        damage_win(state, i)
+    }
+}
+
+fn set_deco(state: u64, i: u64, on: bool) {
+    if !valid(state, i) {
+        return
+    }
+    let f: u64 = wg(state, i, W_FLAGS)
+    damage_win(state, i) // das ALTE Rechteck, samt Rahmen
+    if on {
+        wsv(state, i, W_FLAGS, f & ~F_NODECO)
+    } else {
+        wsv(state, i, W_FLAGS, f | F_NODECO)
+    }
+    damage_win(state, i) // und das neue, ohne
 }
 
 fn set_focus(state: u64, i: u64) {
     if !valid(state, i) {
+        return
+    }
+    // Ein verborgenes Fenster bekommt die Tastatur nicht. Sonst tippt
+    // man in etwas, das nicht auf dem Schirm steht.
+    if (wg(state, i, W_FLAGS) & F_HIDDEN) != 0 {
         return
     }
     let alt: u64 = focus(state)
@@ -979,7 +1311,10 @@ fn compose(state: u64) -> u64 {
     var z: u64 = 0
     while z < gs(state, S_COUNT) {
         let i: u64 = at_z(state, z)
-        if i < MAX_WIN {
+        // RUNDE DESKTOP: ein minimiertes Fenster wird uebergangen. Es
+        // ist der einzige Unterschied zwischen "minimiert" und
+        // "geschlossen", den das Zusammensetzen sieht.
+        if i < MAX_WIN && (wg(state, i, W_FLAGS) & F_HIDDEN) == 0 {
             paint_win(state, i, x0, y0, x1, y1)
         }
         z = z + 1
@@ -1045,6 +1380,31 @@ fn paint_win(state: u64, i: u64, cx0: u64, cy0: u64, cx1: u64, cy1: u64) {
     let ax1: i64 = imin(wx + ow, cx1 as i64)
     let ay1: i64 = imin(wy + oh, cy1 as i64)
     if ax1 <= ax0 || ay1 <= ay0 {
+        return
+    }
+    // OHNE SCHMUCK: kein Rahmen, keine Titelleiste, kein Schliessfeld.
+    // Die Flaeche der Anwendung faengt am aeusseren Rechteck an, und der
+    // ganze Rest dieser Funktion entfaellt. Ein Schreibtisch mit
+    // Titelleiste waere keiner.
+    if !deko(state, i) {
+        let bx0: i64 = imax(wx, cx0 as i64)
+        let by0: i64 = imax(wy, cy0 as i64)
+        let bx1: i64 = imin(wx + wg(state, i, W_W) as i64, cx1 as i64)
+        let by1: i64 = imin(wy + wg(state, i, W_H) as i64, cy1 as i64)
+        if bx1 <= bx0 || by1 <= by0 {
+            return
+        }
+        let bw: u64 = wg(state, i, W_W)
+        let bq: u64 = wg(state, i, W_BUF)
+        let bn: u64 = (bx1 - bx0) as u64
+        var br: i64 = by0
+        while br < by1 {
+            fb_row(state, bx0 as u64, br as u64,
+                bq +% (br - wy) as u64 *% bw *% 4
+                +% (bx0 - wx) as u64 *% 4, bn)
+            br = br + 1
+        }
+        ss(state, S_BLITS, gs(state, S_BLITS) + 1)
         return
     }
     let aktiv: bool = focus(state) == i
@@ -1225,7 +1585,8 @@ fn paint_cursor(state: u64, cx0: u64, cy0: u64, cx1: u64, cy1: u64) {
 // ------------------------------------------------------- die Ereignisse
 
 fn ev_at(state: u64, i: u64, k: u64) -> u64 {
-    return state + kstate.WM_OFF + EV_OFF + i * EV_RING + (k % EV_SLOTS) * EV_BYTES
+    return state + kstate.DSK_OFF + EV_OFF + i * EV_RING
+        + (k % EV_SLOTS) * EV_BYTES
 }
 
 fn ev_push(state: u64, i: u64, typ: u64, a: u64, b: u64, c: u64) {
@@ -1277,7 +1638,7 @@ fn hit(state: u64, x: i64, y: i64) -> u64 {
     while z > 0 {
         z = z - 1
         let i: u64 = at_z(state, z)
-        if i < MAX_WIN {
+        if i < MAX_WIN && (wg(state, i, W_FLAGS) & F_HIDDEN) == 0 {
             let rx: i64 = win_x(state, i) + outer_w(state, i) as i64
             let ry: i64 = win_y(state, i) + outer_h(state, i) as i64
             if x >= win_x(state, i) && y >= win_y(state, i) {
@@ -1333,8 +1694,8 @@ fn on_mouse(state: u64) {
         if (btn & ps2m.B_LEFT) == 0 {
             ss(state, S_SIZING, 0)
         } else {
-            var nw: i64 = x - win_x(state, i) - BORDER as i64
-            var nh: i64 = y - win_y(state, i) - TITLE_H as i64
+            var nw: i64 = x - win_x(state, i) - inx(state, i) as i64
+            var nh: i64 = y - win_y(state, i) - iny(state, i) as i64
             if nw < 32 {
                 nw = 32
             }
@@ -1351,8 +1712,9 @@ fn on_mouse(state: u64) {
         return
     }
     ss(state, S_HITS, gs(state, S_HITS) + 1)
-    let lokal_x: i64 = x - win_x(state, i) - BORDER as i64
-    let lokal_y: i64 = y - win_y(state, i) - TITLE_H as i64
+    let lokal_x: i64 = x - win_x(state, i) - inx(state, i) as i64
+    let lokal_y: i64 = y - win_y(state, i) - iny(state, i) as i64
+    let mit_schmuck: bool = deko(state, i)
     // Tastenwechsel erkennen: `ps2m` fuehrt den Zustand, hier steht der
     // zuletzt GESEHENE.
     let alt: u64 = gs(state, S_KEYS) & 7
@@ -1360,31 +1722,42 @@ fn on_mouse(state: u64) {
         ss(state, S_KEYS, (gs(state, S_KEYS) & ~7) | btn)
         if (btn & ps2m.B_LEFT) != 0 && (alt & ps2m.B_LEFT) == 0 {
             raise_win(state, i)
-            set_focus(state, i)
-            // Schliessfeld?
-            let bx: i64 = win_x(state, i) + outer_w(state, i) as i64
-                - BORDER as i64 - CLOSE_W as i64 - 3
-            let by: i64 = win_y(state, i) + 4
-            let im_feld: bool = x >= bx && x < bx + CLOSE_W as i64
-            let im_feld2: bool = y >= by && y < by + CLOSE_W as i64
-            if im_feld && im_feld2 {
-                ev_push(state, i, E_CLOSE, 0, 0, 0)
-                destroy(state, i)
-                return
+            // RUNDE DESKTOP: SCHREIBTISCH UND TASKLEISTE NEHMEN DIE
+            // TASTATUR NICHT. Wer auf die Leiste klickt, will ein
+            // Fenster wechseln und nicht in die Leiste tippen -- und
+            // ein Schreibtisch, der den Fokus an sich zieht, macht
+            // jeden Tastendruck danach wirkungslos.
+            if wg(state, i, W_LAYER) == L_NORMAL {
+                set_focus(state, i)
             }
-            if lokal_y < 0 {
-                // die Titelleiste: ziehen
-                ss(state, S_DRAG, i + 1)
-                ss(state, S_DRAGX, (x - win_x(state, i)) as u64)
-                ss(state, S_DRAGY, (y - win_y(state, i)) as u64)
-                return
-            }
-            // der Griff unten rechts
-            let gx: bool = lokal_x >= wg(state, i, W_W) as i64 - GRIP as i64
-            let gy: bool = lokal_y >= wg(state, i, W_H) as i64 - GRIP as i64
-            if gx && gy {
-                ss(state, S_SIZING, i + 1)
-                return
+            if mit_schmuck {
+                // Schliessfeld?
+                let bx: i64 = win_x(state, i) + outer_w(state, i) as i64
+                    - BORDER as i64 - CLOSE_W as i64 - 3
+                let by: i64 = win_y(state, i) + 4
+                let im_feld: bool = x >= bx && x < bx + CLOSE_W as i64
+                let im_feld2: bool = y >= by && y < by + CLOSE_W as i64
+                if im_feld && im_feld2 {
+                    ev_push(state, i, E_CLOSE, 0, 0, 0)
+                    destroy(state, i)
+                    return
+                }
+                if lokal_y < 0 {
+                    // die Titelleiste: ziehen
+                    ss(state, S_DRAG, i + 1)
+                    ss(state, S_DRAGX, (x - win_x(state, i)) as u64)
+                    ss(state, S_DRAGY, (y - win_y(state, i)) as u64)
+                    return
+                }
+                // der Griff unten rechts
+                let gx: bool = lokal_x
+                    >= wg(state, i, W_W) as i64 - GRIP as i64
+                let gy: bool = lokal_y
+                    >= wg(state, i, W_H) as i64 - GRIP as i64
+                if gx && gy {
+                    ss(state, S_SIZING, i + 1)
+                    return
+                }
             }
             ss(state, S_DOWNS, gs(state, S_DOWNS) + 1)
             ev_push(state, i, E_DOWN, lokal_x as u64, lokal_y as u64, btn)
@@ -1871,11 +2244,53 @@ fn selftest(state: u64) -> u64 {
     if t < MAX_WIN {
         destroy(state, t)
     }
+    // ---------------------------------------------- RUNDE DESKTOP
+    // 18. Ein Fenster der Ebene L_DESK liegt UNTER einem gewoehnlichen,
+    //     obwohl es SPAETER angelegt wurde. Ohne Ebenen ist das
+    //     unmoeglich, und genau das stand in Logbuch K15.
+    var td: [u8; 6] = "tisch\0"
+    let d: u64 = create(state, 0, 0, 0, 320, 200, K_RAW, (&td[0]) as u64)
+    if d < MAX_WIN {
+        set_layer(state, d, L_DESK)
+        if win_z(state, d) < win_z(state, a) {
+            n = n + 1
+        }
+        // 19. Und ein Klick darauf hebt ihn NICHT ueber das andere.
+        raise_win(state, d)
+        if win_z(state, d) < win_z(state, a) || gs(state, S_NOLAYER) != 0 {
+            n = n + 1
+        }
+        // 20. Verbergen nimmt ein Fenster aus der Trefferpruefung --
+        //     und Wiederherstellen bringt es zurueck. Der Puffer bleibt
+        //     dabei derselbe: minimiert ist nicht geschlossen.
+        let puf: u64 = win_buf(state, a)
+        let vorher: u64 = hit(state, 60, 60)
+        set_hidden(state, a, true)
+        let nachher: u64 = hit(state, 60, 60)
+        set_hidden(state, a, false)
+        if gs(state, S_NOMIN) == 0 {
+            if vorher == a && nachher != a && win_buf(state, a) == puf {
+                n = n + 1
+            }
+        } else {
+            if vorher == a && nachher == a {
+                n = n + 1
+            }
+        }
+        // 21. Ohne Schmuck ist das aeussere Rechteck die Malflaeche --
+        //     keine Titelleiste, kein Rahmen.
+        set_deco(state, d, false)
+        if outer_w(state, d) == win_w(state, d)
+            && outer_h(state, d) == win_h(state, d) && iny(state, d) == 0 {
+            n = n + 1
+        }
+        destroy(state, d)
+    }
     destroy(state, a)
     damage_all(state)
     return n
 }
 
 fn selftest_max() -> u64 {
-    return 17
+    return 21
 }
