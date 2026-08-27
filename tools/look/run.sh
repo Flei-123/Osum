@@ -182,13 +182,34 @@ for v in "classic day light" "modern day light" "modern night dark" "classic nig
 done
 # THE CORNER ITSELF, on the dark pair, where face and surface are far
 # enough apart that the reading cannot be an artefact of the tolerance.
-for v in "classic 474 0" "modern 504 2"; do
+#
+# WHERE IT LOOKS IS COMPUTED, NOT REMEMBERED -- the same lesson
+# tools/desktop/run.sh had to learn in this round's addendum. These
+# were two numbers read off a picture (474 and 504), and the moment
+# the settings window moved up by 31 pixels to make its Apply button
+# reachable, they pointed at empty background and the round's central
+# claim -- "the corner is round" -- would have failed for a reason
+# that had nothing to do with corners.
+#
+# The program says where its widgets are. The inner origin of a window
+# is x+2, y+22: border and title bar, drawn by the server.
+for v in "classic 0" "modern 2"; do
     set -- $v
-    C=$(python3 tools/look/corner.py "$TMPD/D-$1-night/desktop.ppm" 12 "$2" \
+    S="$TMPD/D-$1-night/serial.txt"
+    r() { grep -a "settings: rect name=$1 " "$S" | tail -1 \
+          | grep -oE " $2=[0-9]+" | tail -1 | grep -oE '[0-9]+'; }
+    wx=$(r win x); wy=$(r win y); ex=$(r edge x); ey=$(r edge y)
+    if [ -z "$wx" ] || [ -z "$ex" ]; then
+        bad "$1: the settings did not report their geometry"
+        continue
+    fi
+    CX=$((wx + 2 + ex)); CY=$((wy + 22 + ey))
+    echo "        reading the corner of the edge chooser at $CX,$CY"
+    C=$(python3 tools/look/corner.py "$TMPD/D-$1-night/desktop.ppm" "$CX" "$CY" \
         30 41 59 15 23 42 8 2>&1)
     echo "$C" | sed 's/^/        /'
     B=$(echo "$C" | grep -oE 'background [0-9]+' | grep -oE '[0-9]+')
-    is "$1: background pixels on the corner diagonal" "${B:-x}" "$3"
+    is "$1: background pixels on the corner diagonal" "${B:-x}" "$2"
 done
 
 echo "== E. where the buttons sit =="
