@@ -159,6 +159,8 @@ BEREICHE = [
     # naechste Runde sonst genau diese Seite naehme.
     ("MODE",       "kstate.fi", "MODE_OFF",       "MODE_MAX"),
     ("K18",        "kstate.fi", "K18_OFF",        "K18_MAX"),
+    # RUNDE POWERMON: die Akkuanalyse je Programm (0x5C000..0x5E000).
+    ("PMON",       "kstate.fi", "PMON_OFF",       "PMON_MAX"),
     ("K18BATT",    "kstate.fi", "BATT_OFF",       "BATT_MAX"),
     # RUNDE DISPLAY: der Modustreiber.  Zwei Seiten aus demselben Vorrat
     # (0x5A000 und 0x5B000) -- die Modusliste samt Skalaren und die

@@ -1,0 +1,1185 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/pmon.fi -- round POWERMON: WHERE THE BATTERY GOES.
+//
+// Windows has a page called "Battery usage by app". It shows a bar per
+// program and a percentage, and almost nobody who reads it knows what
+// the number is. It is not a measurement. Nothing in a laptop measures
+// the current drawn by ONE program -- there is no shunt resistor per
+// process, and there cannot be one. Windows estimates: it weighs
+// processor time, screen time, disk activity and network activity
+// against each other with coefficients, and prints the result as if it
+// were amperes.
+//
+// THIS FILE DOES SOMETHING BETTER, AND THE DIFFERENCE IS THE WHOLE
+// POINT OF THE ROUND. Round K18 taught this kernel to read `_BST`, and
+// the second field of `_BST` is the PRESENT RATE OF DRAW -- the real
+// power the whole machine is taking right now, in milliwatts, measured
+// by the battery's own gas gauge and handed over by the firmware. That
+// number is a measurement. So this file does not estimate the total; it
+// TAKES the measured total and DIVIDES it.
+//
+//     measured total (mW, from _BST)
+//       = system floor (measured while nothing ran)
+//       + the rest, split between processes by processor time
+//
+// The sum is right BY CONSTRUCTION -- it cannot drift away from the
+// battery, because it never left it. Only the SPLIT is an approximation,
+// and it is the same approximation Windows makes, applied to a real
+// number instead of a modelled one.
+//
+// ------------------------------------------------------------------
+// THE FLOOR, AND WHY A MONITOR WITHOUT ONE LIES
+//
+// A large part of the draw belongs to no program at all: the backlight,
+// the radios, the chipset, the memory refresh, the fans. If a monitor
+// distributes the WHOLE measured power over the running processes, then
+// whichever program happens to be awake gets the backlight hung around
+// its neck. Open a text editor on an idle laptop and the editor appears
+// to draw eight watts. That is the commonest mistake in this kind of
+// display and it is why this file measures the floor FIRST:
+//
+//   A sampling window in which NO process got a single timer tick --
+//   only the idle task ran -- is an IDLE WINDOW. The rate measured in an
+//   idle window is a measurement of the floor, and nothing else. The
+//   running mean of those samples is `PM_BASE`, and it is booked to
+//   "System". Only `rate - base` is ever split between programs.
+//
+// If no idle window has happened yet, `PM_BASEOK` stays zero and the
+// whole measured rate goes to "System". A floor that was never measured
+// is not guessed at.
+//
+// ------------------------------------------------------------------
+// WHY THE ENERGY IS KEPT IN mW-TICKS AND NOT IN PERCENT
+//
+// Percentages have to be divided, and division loses remainders; add up
+// thirty-two rounded percentages and you get 99 or 101. So nothing is
+// divided here. In each window of `dt` ticks:
+//
+//     for every process p:  E[p]   += attrib * dticks[p]
+//     system:               E[sys] += base * dt + attrib * (dt - busy)
+//
+// where `busy` is the sum of `dticks[p]`. Add those up:
+//
+//     sum(E) = attrib * busy + base * dt + attrib * dt - attrib * busy
+//            = (base + attrib) * dt
+//            = rate * dt
+//
+// which is the measured total over that window, exactly, in integers,
+// with no rounding anywhere. `tools/powermon/run.sh` checks that
+// identity on the numbers of a real run rather than trusting this
+// comment. The percentages a person sees are computed once, at the end,
+// in ring 3, out of these exact sums.
+//
+// ------------------------------------------------------------------
+// WHAT THIS FILE CANNOT DO, SAID HERE AND NOT IN A FOOTNOTE
+//
+//   * IT CANNOT SEE THE SCREEN. Backlight power is in the floor, undivided.
+//     A program that is bright and idle and a program that is dark and
+//     idle look identical from here.
+//   * IT CANNOT SEE DMA. A process that sets a device copying and then
+//     sleeps gets no ticks and therefore no share, while the device
+//     draws current. Disk and network work is counted separately (the
+//     counters of round NETMON, when that branch lands) but it is
+//     REPORTED beside the share, not folded into it with an invented
+//     coefficient.
+//   * PROCESSOR TIME IS NOT ENERGY. Two tasks that get the same number
+//     of ticks can draw very different power -- one hammering the vector
+//     unit, one waiting on memory. Weighing that needs performance
+//     counters this host does not deliver (round K18 measured that:
+//     under TCG the MSRs read back as zero).
+//   * ON QEMU 7.2 THE MEASURED TOTAL DOES NOT RESPOND TO LOAD. There is
+//     no `-device battery` before QEMU 8.2; the rate comes out of a
+//     static ACPI table the test writes. The SPLIT is real and moves
+//     with the load, because the tick counts are real. The PHYSICS is
+//     not, and `docs/POWERMON.md` says so in as many words.
+//
+// The honest phrasing for the display, and it is the phrasing the
+// userland program uses, is: "measured total, proportionally
+// attributed" -- never "this program draws 2.3 W".
+
+profile kernel
+
+import kstate
+import sched
+import batt
+import pwr
+import time
+import serial
+
+export {
+    init, parse, arm, tick, sample, flush, on, set_on, mode_word, report,
+    wigapp,
+    scalar, set_scalar, tget, task_pid, task_alive,
+    name_at, name_set, task_clear,
+    sample_rate, sample_tick, bucket_at, roll_day, reset_window,
+    prog_get, prog_name_at, prog_used,
+    PM_ON, PM_MODE, PM_SAMPLES, PM_LASTTICK, PM_HZ, PM_RATE, PM_UNIT,
+    PM_RATEOK, PM_BASE, PM_BASEOK, PM_BASEN, PM_BASESUM, PM_BASEMIN,
+    PM_ATTRIB, PM_BUSY, PM_IDLE, PM_TOTE, PM_SYSE, PM_ACRATE, PM_ACOK,
+    PM_BATRATE, PM_BATOK, PM_HEALTH, PM_HEALTHOK, PM_MINUTES,
+    PM_COST, PM_COSTN, PM_MISSES, PM_DAYSTART, PM_HEAD, PM_EVERY,
+    PM_MAXRATE, PM_MINRATE, PM_DAYS, PM_WINDOWS, PM_ORPHAN, PM_ORPHANS,
+    PM_STAGED, PM_SCALARS,
+    PT_TICKS, PT_ENERGY, PT_DAYT, PT_DAYE, PT_LAST, PT_NOW, PT_FIELDS,
+    M_NONE, M_EAGER, M_NOFLOOR, M_SAY,
+    NSAMPLE, NBUCKET, NPROG, NAME_MAX,
+    PR_TICKS, PR_ENERGY, PR_DAYT, PR_DAYE, PR_PROCS, PR_PEND, PR_FIELDS
+}
+
+// ---------------------------------------------------------- the pages
+//
+// TWO PAGES OF `kdata`, 0x5C000..0x5E000, out of the store round K18
+// left open (0x58000..0x60000). Round NETMON took 0x5A000 and round
+// DISPLAY took 0x5A000..0x5C000 on their own branches; this round starts
+// above both of them on purpose, so that the three can be merged in any
+// order without the collision that has cost this project four rounds
+// already. The area is entered in `tools/kernel/karte.py`, and that
+// checker -- not this comment -- is what says it overlaps nothing.
+//
+//   0x0000..0x01FF  the scalars of this round (36 of them, 288 octets)
+//   0x0200..0x0DFF  thirty-two task records of 96 octets
+//   0x0E00..0x0F07  eleven brightness buckets of 24 octets
+//   0x0F40..0x0F7F  the path out of `wigapp=`, copied at boot
+//   0x1000..0x1FFF  the sample ring, 256 samples of 16 octets
+//   0x2000..0x25FF  sixteen PROGRAM records of 96 octets
+//
+// THE FIRST DRAFT PUT THE TASK TABLE AT 0x0100 AND THE SCALARS RAN INTO
+// IT. Thirty-six scalars are 288 octets, not 256, so `PM_MINRATE`,
+// `PM_DAYS` and `PM_WINDOWS` were the first three words of task slot
+// zero. The run said `windows=65` out of `samples=21`, which is what
+// caught it: a counter that cannot exceed another one did. This is the
+// same class of mistake as the four `kdata` collisions in `kstate.fi`,
+// two levels down, and the same rule fixes it -- write the map out and
+// then make the numbers obey it.
+
+const SCAL: u64 = 0x0000
+const TASKS: u64 = 0x0200
+const TBYTES: u64 = 96
+const BUCKETS: u64 = 0x0E00
+const BBYTES: u64 = 24
+const NBUCKET: u64 = 11 // 0, 10, 20 .. 100 percent
+const WAPP: u64 = 0x0F40 // `wigapp=`, 64 octets, zero terminated
+const WAPP_MAX: u64 = 64
+const RING: u64 = 0x1000
+const RBYTES: u64 = 16
+const NSAMPLE: u64 = 256
+const PROGS: u64 = 0x2000
+const PRBYTES: u64 = 96
+const NPROG: u64 = 16
+
+// The scalars. Ring 3 reads them by number through `SYS_OSUM_PMON`, so
+// the ORDER IS PART OF THE SYSTEM CALL and may not be shuffled.
+const PM_ON: u64 = 0x00 // 1 = accounting runs
+const PM_MODE: u64 = 0x08 // the words of the command line of this round
+const PM_SAMPLES: u64 = 0x10 // samples taken since boot
+const PM_LASTTICK: u64 = 0x18 // the tick of the last sample
+const PM_HZ: u64 = 0x20 // ticks per second, so ring 3 need not assume
+const PM_RATE: u64 = 0x28 // the last rate out of _BST, mW or mA
+const PM_UNIT: u64 = 0x30 // 0 = mW/mWh, 1 = mA/mAh (_BIF[0])
+const PM_RATEOK: u64 = 0x38 // 1 = a battery really answered
+const PM_BASE: u64 = 0x40 // the MEASURED floor, same unit as PM_RATE
+const PM_BASEOK: u64 = 0x48 // 1 = the floor was measured, not assumed
+const PM_BASEN: u64 = 0x50 // how many idle windows went into it
+const PM_BASESUM: u64 = 0x58 // their sum, so the mean stays exact
+const PM_BASEMIN: u64 = 0x60 // the lowest idle rate ever seen
+const PM_ATTRIB: u64 = 0x68 // rate - base: what gets split, mW
+const PM_BUSY: u64 = 0x70 // process ticks in the last window
+const PM_IDLE: u64 = 0x78 // idle ticks in the last window
+const PM_TOTE: u64 = 0x80 // energy booked to processes, mW-ticks
+const PM_SYSE: u64 = 0x88 // energy booked to System, mW-ticks
+const PM_ACRATE: u64 = 0x90 // a rate seen while on mains
+const PM_ACOK: u64 = 0x98 // 1 = that number is real
+const PM_BATRATE: u64 = 0xA0 // a rate seen while on battery
+const PM_BATOK: u64 = 0xA8 // 1 = that number is real
+const PM_HEALTH: u64 = 0xB0 // last full charge / design charge, percent
+const PM_HEALTHOK: u64 = 0xB8 // 1 = both numbers were really read
+const PM_MINUTES: u64 = 0xC0 // runtime left out of the CURRENT rate
+const PM_COST: u64 = 0xC8 // cycles spent inside this file
+const PM_COSTN: u64 = 0xD0 // how often it ran
+const PM_MISSES: u64 = 0xD8 // samples with no battery to read
+const PM_DAYSTART: u64 = 0xE0 // tick at which the day counters began
+const PM_HEAD: u64 = 0xE8 // write position in the sample ring
+const PM_EVERY: u64 = 0xF0 // ticks between two samples
+const PM_MAXRATE: u64 = 0xF8 // highest rate seen
+const PM_MINRATE: u64 = 0x100 // lowest rate seen, 0 = none yet
+const PM_DAYS: u64 = 0x108 // how often the day counters were rolled
+const PM_WINDOWS: u64 = 0x110 // windows in which something was split
+const PM_ORPHAN: u64 = 0x118 // ticks of dead tasks waiting to be paid
+const PM_ORPHANS: u64 = 0x120 // how many processes ended that way
+const PM_STAGED: u64 = 0x128 // 1 = `arm` ran, so the power layer exists
+const PM_SCALARS: u64 = 39 // how many of the above there are
+
+// The fields of a task record, in words. The first four are the
+// counters and ring 3 reads them by number.
+const PT_TICKS: u64 = 0 // processor ticks attributed, since boot
+const PT_ENERGY: u64 = 1 // mW-ticks attributed, since boot
+const PT_DAYT: u64 = 2 // the same two since the day mark
+const PT_DAYE: u64 = 3
+const PT_LAST: u64 = 4 // the `sched.T_TICKS` seen at the last sample
+const PT_NOW: u64 = 5 // ticks in the window being processed
+const PT_FIELDS: u64 = 6
+
+// After the counters: the pid the record belongs to, and the name of
+// the program. THE PID IS WHAT MAKES A REUSED SLOT START AT ZERO. Task
+// slot 7 may be `burn` this second and `sh` the next, and adding the two
+// together would be a lie in the plainest possible form -- the same rule
+// round NETMON writes down for its own table.
+const PT_ROW: u64 = 80 // program row + 1, 0 = not placed yet
+const PT_PIDOF: u64 = 48
+const PT_NAME: u64 = 56 // 24 octets, zero terminated
+const NAME_MAX: u64 = 24
+
+// ---------------------------------------------------- the program table
+//
+// A PROCESS IS NOT A PROGRAM, AND THE PERSON ASKED ABOUT PROGRAMS.
+// Windows calls its page "Battery usage by app" and it is right to: a
+// shell script that runs `ls` forty times has forty processes and one
+// program, and forty rows of one tick each answer nobody's question.
+//
+// It is also the only way to keep the arithmetic honest across a slot
+// that changes hands. The task table has thirty-two slots and a machine
+// runs more than thirty-two programs in an afternoon; when slot 7 is
+// handed from `ls` to `cat`, `ls`'s record is cleared -- it has to be,
+// or the two would be added together. Without a second table the
+// energy in it is simply gone, and the run said so before this table
+// existed: the sum of the per-task rows was 285000 mW-ticks while the
+// machine's own total was 302100. Seventeen thousand of them had
+// belonged to three `ls` processes whose slots had been reused.
+//
+// So the split books TWICE, into the process row and into the program
+// row, out of the same number. The process rows say what is running now;
+// the program rows say where the charge went, and they are what the
+// table on the screen is built from. Sixteen rows, and the sixteenth is
+// called `other`: a program table that silently drops the seventeenth
+// program is the same lie one level up.
+
+const PR_TICKS: u64 = 0
+const PR_ENERGY: u64 = 1
+const PR_DAYT: u64 = 2
+const PR_DAYE: u64 = 3
+const PR_PROCS: u64 = 4 // how many processes have carried this name
+const PR_PEND: u64 = 5 // ticks flushed out of a dying task, not yet paid
+const PR_FIELDS: u64 = 6
+// AND THE NAME AT 48, NOT AT 40. The first draft put it at 40, which is
+// word five, which is where `PR_PEND` went when it was added -- so the
+// pending tick count and the first eight letters of the name were the
+// same eight octets. The run said `panic: integer overflow in u64 * u64`
+// and the multiplier was the word "system" read as a number. Third
+// overlap of this round after the two in `kdata`; the lesson is that a
+// record layout needs the same arithmetic as a memory map.
+const PR_NAME: u64 = 48 // 24 octets, zero terminated
+
+// The fields of a brightness bucket, in words.
+const PB_N: u64 = 0 // samples in this bucket
+const PB_SUM: u64 = 1 // their rates added up
+const PB_LEVEL: u64 = 2 // the percent this bucket stands for
+
+fn pm(off: u64) -> u64 {
+    return kstate.PMON_OFF + off
+}
+
+fn tat(t: u64) -> u64 {
+    return pm(TASKS + t * TBYTES)
+}
+
+fn bat(b: u64) -> u64 {
+    return pm(BUCKETS + b * BBYTES)
+}
+
+fn rat(i: u64) -> u64 {
+    return pm(RING + i * RBYTES)
+}
+
+fn prat(i: u64) -> u64 {
+    return pm(PROGS + i * PRBYTES)
+}
+
+// ------------------------------------------------------ the command line
+//
+// A MODE WORD OF THIS ROUND'S OWN, and not three more bits of
+// `kstate.MODE`. That word has two bits left out of sixty-four and a
+// dozen rounds are running beside this one; a round that eats the last
+// bits so the next has to widen the field has made somebody else's work
+// harder for no reason. `K9_MODE`, `K14_MODE`, `SMP_MODE` and round
+// NETMON's `NM_MODE` did the same thing before this.
+
+const M_NONE: u64 = 1 // `nopowermon` -- account nothing
+const M_EAGER: u64 = 2 // `pmonfast` -- one sample per tick
+const M_NOFLOOR: u64 = 4 // `pmonnofloor` -- never measure the floor
+const M_SAY: u64 = 8 // `pmonsay` -- print the report at the end of the run
+
+// The first occurrence of a word in the command line, or 0. The same
+// six lines `kmain.mode_of` uses; they are here because this file is
+// asked before `kmain` has anything to give it.
+fn find(hay: u64, needle: u64, n: u64) -> u64 {
+    var i: u64 = 0
+    while kstate.get8(hay + i) != 0 {
+        var k: u64 = 0
+        var hit: bool = true
+        while k < n {
+            if kstate.get8(hay + i + k) != kstate.get8(needle + k) {
+                hit = false
+                k = n
+            } else {
+                k = k + 1
+            }
+        }
+        if hit {
+            return hay + i
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+// THE COMMAND LINE HAS TO BE READ WHILE IT IS STILL THERE.
+//
+// `wigapp=/bin/NAME` says which program the window server of round K15
+// should start. It is read here, at the same moment as everything else,
+// and COPIED -- because the command line of the boot loader lies above
+// `kernel_end` and the frame allocator hands exactly those frames out
+// (the comment on that is at the top of `kernel_main` and has been there
+// since round K2). By the time `k15_start` runs, the first heap of the
+// run is standing on those octets. The first draft of this read the
+// string there and got `/bin/wigdemo` back, because that is what the
+// unchanged default was; nothing crashed and nothing was right.
+fn take_wigapp(state: u64, cmd: u64) {
+    var w: [u8; 8] = "wigapp=\0"
+    if cmd == 0 {
+        return
+    }
+    let at: u64 = find(cmd, (&w[0]) as u64, 7)
+    if at == 0 {
+        return
+    }
+    var i: u64 = 0
+    while i < WAPP_MAX - 1 {
+        let c: u64 = kstate.get8(at + 7 + i)
+        if c == 0 || c == 32 {
+            i = WAPP_MAX - 1
+        } else {
+            kstate.set8(state + pm(WAPP) + i, c as u8)
+            i = i + 1
+        }
+    }
+}
+
+// The address of that path, or 0 if the command line did not name one.
+fn wigapp(state: u64) -> u64 {
+    if kstate.get8(state + pm(WAPP)) == 0 {
+        return 0
+    }
+    return state + pm(WAPP)
+}
+
+fn parse(state: u64, cmd: u64) {
+    var w_no: [u8; 11] = "nopowermon\0"
+    var w_fast: [u8; 9] = "pmonfast\0"
+    var w_nof: [u8; 12] = "pmonnofloor\0"
+    var w_say: [u8; 8] = "pmonsay\0"
+    var m: u64 = 0
+    if find(cmd, (&w_no[0]) as u64, 10) != 0 {
+        m = m | M_NONE
+    }
+    if find(cmd, (&w_fast[0]) as u64, 8) != 0 {
+        m = m | M_EAGER
+    }
+    if find(cmd, (&w_nof[0]) as u64, 11) != 0 {
+        m = m | M_NOFLOOR
+    }
+    if find(cmd, (&w_say[0]) as u64, 7) != 0 {
+        m = m | M_SAY
+    }
+    init(state, m)
+    take_wigapp(state, cmd)
+}
+
+// ------------------------------------------------------------- the init
+
+// Everything at zero and the accounting ON. `init` runs out of `kmain`
+// before the first process exists, so no record can be in use while it
+// clears them.
+fn init(state: u64, mode: u64) {
+    var i: u64 = 0
+    while i < kstate.PMON_MAX / 8 {
+        kstate.set(state, pm(i * 8), 0)
+        i = i + 1
+    }
+    kstate.set(state, pm(PM_MODE), mode)
+    kstate.set(state, pm(PM_HZ), time.TICK_HZ)
+    // Ten samples a second. Every sample walks the ACPI tables once and
+    // the task table once; at 100 Hz that is one walk in ten ticks, and
+    // `PM_COST` below says what it really costs in cycles rather than
+    // leaving it to be guessed at.
+    if (mode & M_EAGER) != 0 {
+        kstate.set(state, pm(PM_EVERY), 1)
+    } else {
+        kstate.set(state, pm(PM_EVERY), 10)
+    }
+    // OFF UNTIL `arm`. `init` runs while the command line is being read,
+    // long before `power_stage` has asked the firmware whether there is a
+    // battery at all -- and `tick` walks the ACPI tables. A sample taken
+    // before those tables are mapped would read nothing and count as a
+    // miss, which is a wrong number rather than a missing one.
+    kstate.set(state, pm(PM_ON), 0)
+    // The eleven brightness buckets stand for 0, 10 .. 100 percent.
+    var b: u64 = 0
+    while b < NBUCKET {
+        kstate.set(state, bat(b) + PB_LEVEL * 8, b * 10)
+        b = b + 1
+    }
+}
+
+// Switched on once the power layer of round K18 has finished probing.
+// `nopowermon` is the counter-check: the same image, the same run, no
+// accounting -- and `tools/powermon/run.sh` measures the difference
+// between the two rather than asserting it is small.
+fn arm(state: u64) {
+    // SET FIRST, AND ALSO WHEN THE ACCOUNTING STAYS OFF. It says the
+    // POWER LAYER was brought up, not that the counting was; `report`
+    // hangs on it so that `nopowermon` still gets its counter-check
+    // printed while a run without the word `pwr` at all prints nothing.
+    kstate.set(state, pm(PM_STAGED), 1)
+    if (kstate.get(state, pm(PM_MODE)) & M_NONE) != 0 {
+        return
+    }
+    kstate.set(state, pm(PM_ON), 1)
+    kstate.set(state, pm(PM_LASTTICK), kstate.get(state, kstate.TICKS))
+    kstate.set(state, pm(PM_DAYSTART), kstate.get(state, kstate.TICKS))
+}
+
+fn on(state: u64) -> bool {
+    return kstate.get(state, pm(PM_ON)) != 0
+}
+
+fn set_on(state: u64, v: u64) {
+    kstate.set(state, pm(PM_ON), v)
+}
+
+fn mode_word(state: u64) -> u64 {
+    return kstate.get(state, pm(PM_MODE))
+}
+
+fn scalar(state: u64, which: u64) -> u64 {
+    if which >= PM_SCALARS {
+        return 0
+    }
+    return kstate.get(state, pm(which * 8))
+}
+
+fn set_scalar(state: u64, which: u64, v: u64) {
+    if which >= PM_SCALARS {
+        return
+    }
+    kstate.set(state, pm(which * 8), v)
+}
+
+// ------------------------------------------------------ the task record
+
+fn tget(state: u64, t: u64, field: u64) -> u64 {
+    if t >= kstate.MAX_TASKS || field >= PT_FIELDS {
+        return 0
+    }
+    return kstate.get(state, tat(t) + field * 8)
+}
+
+fn tadd(state: u64, t: u64, field: u64, n: u64) {
+    if t >= kstate.MAX_TASKS || field >= PT_FIELDS {
+        return
+    }
+    kstate.add(state, tat(t) + field * 8, n)
+}
+
+fn tset(state: u64, t: u64, field: u64, v: u64) {
+    if t >= kstate.MAX_TASKS || field >= PT_FIELDS {
+        return
+    }
+    kstate.set(state, tat(t) + field * 8, v)
+}
+
+fn task_pid(state: u64, t: u64) -> u64 {
+    if t >= kstate.MAX_TASKS {
+        return 0
+    }
+    return kstate.get(state, tat(t) + PT_PIDOF)
+}
+
+fn task_alive(state: u64, t: u64) -> bool {
+    if t >= kstate.MAX_TASKS {
+        return false
+    }
+    return sched.tget(state, t, sched.T_STATE) != sched.S_FREE
+}
+
+// A SLOT THAT CHANGES HANDS STARTS AT ZERO. Called from `exec` and from
+// the creation of a task; the pid decides, not the slot.
+fn task_clear(state: u64, t: u64, pid: u64) {
+    if t >= kstate.MAX_TASKS {
+        return
+    }
+    var i: u64 = 0
+    while i < TBYTES / 8 {
+        kstate.set(state, tat(t) + i * 8, 0)
+        i = i + 1
+    }
+    kstate.set(state, tat(t) + PT_PIDOF, pid)
+    kstate.set(state, tat(t) + PT_ROW, 0)
+    // The tick counter of the SCHEDULER keeps running across `execve` --
+    // the task does not change, only its image does. So the mark this
+    // file measures deltas against is taken again here; without this
+    // line the first window after an `execve` would hand the new program
+    // every tick the old one ever spent.
+    kstate.set(state, tat(t) + PT_LAST * 8,
+        sched.tget(state, t, sched.T_TICKS))
+}
+
+fn name_at(state: u64, t: u64, i: u64) -> u64 {
+    if t >= kstate.MAX_TASKS || i >= NAME_MAX {
+        return 0
+    }
+    return kstate.get8(state + tat(t) + PT_NAME + i)
+}
+
+// The LAST component of the path, so the table shows `burn` and not
+// `/bin/burn` -- a column of twenty-four characters that all begin with
+// the same five tells nobody anything.
+fn name_set(state: u64, t: u64, path: u64) {
+    if t >= kstate.MAX_TASKS {
+        return
+    }
+    // The task is a different program now, so the row it was placed in
+    // is the wrong row. It gets looked up again at the next window.
+    kstate.set(state, tat(t) + PT_ROW, 0)
+    var start: u64 = 0
+    var i: u64 = 0
+    while kstate.get8(path + i) != 0 {
+        if kstate.get8(path + i) == 47 {
+            start = i + 1
+        }
+        i = i + 1
+    }
+    var k: u64 = 0
+    while k < NAME_MAX - 1 && kstate.get8(path + start + k) != 0 {
+        kstate.set8(state + tat(t) + PT_NAME + k,
+            kstate.get8(path + start + k) as u8)
+        k = k + 1
+    }
+    while k < NAME_MAX {
+        kstate.set8(state + tat(t) + PT_NAME + k, 0 as u8)
+        k = k + 1
+    }
+}
+
+// ------------------------------------------------------ the program row
+
+fn prog_get(state: u64, i: u64, field: u64) -> u64 {
+    if i >= NPROG || field >= PR_FIELDS {
+        return 0
+    }
+    return kstate.get(state, prat(i) + field * 8)
+}
+
+fn prog_name_at(state: u64, i: u64, k: u64) -> u64 {
+    if i >= NPROG || k >= NAME_MAX {
+        return 0
+    }
+    return kstate.get8(state + prat(i) + PR_NAME + k)
+}
+
+fn prog_used(state: u64, i: u64) -> bool {
+    if i >= NPROG {
+        return false
+    }
+    return kstate.get8(state + prat(i) + PR_NAME) != 0
+}
+
+fn same_name(state: u64, row: u64, t: u64) -> bool {
+    var k: u64 = 0
+    while k < NAME_MAX {
+        if kstate.get8(state + prat(row) + PR_NAME + k)
+            != kstate.get8(state + tat(t) + PT_NAME + k) {
+            return false
+        }
+        k = k + 1
+    }
+    return true
+}
+
+// The row a task belongs to, found once and then remembered in the task
+// record -- a string comparison against sixteen rows on every window for
+// every running task would be the most expensive thing in this file.
+//
+// A task with no name is a task the kernel started itself (the boot
+// task, the idle task, the workers of round 59). They get the row
+// `system` rather than being dropped: they really did use the
+// processor, and a table whose rows do not add up to the total is the
+// thing this round exists to avoid.
+fn prog_row(state: u64, t: u64) -> u64 {
+    let known: u64 = kstate.get(state, tat(t) + PT_ROW)
+    if known != 0 {
+        return known - 1
+    }
+    if kstate.get8(state + tat(t) + PT_NAME) == 0 {
+        var kn: [u8; 7] = "system\0"
+        name_set_row(state, NPROG - 2, (&kn[0]) as u64)
+        kstate.set(state, tat(t) + PT_ROW, NPROG - 1)
+        kstate.add(state, prat(NPROG - 2) + PR_PROCS * 8, 1)
+        return NPROG - 2
+    }
+    var i: u64 = 0
+    while i < NPROG - 2 {
+        if kstate.get8(state + prat(i) + PR_NAME) == 0 {
+            // a free row: take it
+            var k: u64 = 0
+            while k < NAME_MAX {
+                kstate.set8(state + prat(i) + PR_NAME + k,
+                    kstate.get8(state + tat(t) + PT_NAME + k) as u8)
+                k = k + 1
+            }
+            kstate.set(state, tat(t) + PT_ROW, i + 1)
+            kstate.add(state, prat(i) + PR_PROCS * 8, 1)
+            return i
+        }
+        if same_name(state, i, t) {
+            kstate.set(state, tat(t) + PT_ROW, i + 1)
+            kstate.add(state, prat(i) + PR_PROCS * 8, 1)
+            return i
+        }
+        i = i + 1
+    }
+    // THE SEVENTEENTH PROGRAM. It is not dropped; it is added to a row
+    // that says what it is. A table that quietly loses rows makes the
+    // total wrong, and the total is the only number here that was
+    // measured rather than divided.
+    var on: [u8; 6] = "other\0"
+    name_set_row(state, NPROG - 1, (&on[0]) as u64)
+    kstate.set(state, tat(t) + PT_ROW, NPROG)
+    kstate.add(state, prat(NPROG - 1) + PR_PROCS * 8, 1)
+    return NPROG - 1
+}
+
+fn name_set_row(state: u64, i: u64, lit: u64) {
+    if kstate.get8(state + prat(i) + PR_NAME) != 0 {
+        return
+    }
+    var k: u64 = 0
+    while k < NAME_MAX - 1 && kstate.get8(lit + k) != 0 {
+        kstate.set8(state + prat(i) + PR_NAME + k, kstate.get8(lit + k) as u8)
+        k = k + 1
+    }
+    kstate.set8(state + prat(i) + PR_NAME + k, 0 as u8)
+}
+
+// ------------------------------------------------------- the sample ring
+
+fn sample_rate(state: u64, i: u64) -> u64 {
+    if i >= NSAMPLE {
+        return 0
+    }
+    return kstate.get(state, rat(i))
+}
+
+fn sample_tick(state: u64, i: u64) -> u64 {
+    if i >= NSAMPLE {
+        return 0
+    }
+    return kstate.get(state, rat(i) + 8)
+}
+
+fn ring_push(state: u64, rate: u64, at: u64) {
+    let h: u64 = kstate.get(state, pm(PM_HEAD))
+    kstate.set(state, rat(h), rate)
+    kstate.set(state, rat(h) + 8, at)
+    var n: u64 = h + 1
+    if n >= NSAMPLE {
+        n = 0
+    }
+    kstate.set(state, pm(PM_HEAD), n)
+}
+
+// `which` 0 = count, 1 = sum of rates, 2 = the percent the bucket stands
+// for. The mean is `sum / count` and ring 3 does that division, because
+// ring 3 is where a division that loses a remainder does no harm.
+fn bucket_at(state: u64, b: u64, which: u64) -> u64 {
+    if b >= NBUCKET || which > 2 {
+        return 0
+    }
+    return kstate.get(state, bat(b) + which * 8)
+}
+
+// ------------------------------------------------------------ the sample
+//
+// One window. Everything below is integer arithmetic on numbers that
+// were either measured (`rate`, out of `_BST`) or counted (`T_TICKS`, by
+// the scheduler). Nothing here has a coefficient in it.
+
+fn sample(state: u64) {
+    let now: u64 = kstate.get(state, kstate.TICKS)
+    let last: u64 = kstate.get(state, pm(PM_LASTTICK))
+    var dt: u64 = 0
+    if now > last {
+        dt = now -% last
+    }
+    kstate.set(state, pm(PM_LASTTICK), now)
+    kstate.add(state, pm(PM_SAMPLES), 1)
+
+    // ---- 1. the machine's own number, read again from the tables.
+    batt.refresh(state)
+    var rate: u64 = 0
+    var have: bool = false
+    if batt.present(state) {
+        rate = batt.value(state, batt.BT_RATE)
+        // 0xFFFFFFFF is what ACPI says for "the rate is unknown". It is
+        // not a very large draw and it may not be treated as one.
+        if rate != 0xFFFFFFFF {
+            have = true
+        } else {
+            rate = 0
+        }
+    }
+    if have {
+        kstate.set(state, pm(PM_RATE), rate)
+        kstate.set(state, pm(PM_RATEOK), 1)
+        kstate.set(state, pm(PM_UNIT), batt.value(state, batt.BT_UNIT))
+        kstate.set(state, pm(PM_MINUTES), batt.minutes(state))
+        if rate > kstate.get(state, pm(PM_MAXRATE)) {
+            kstate.set(state, pm(PM_MAXRATE), rate)
+        }
+        let lo: u64 = kstate.get(state, pm(PM_MINRATE))
+        if lo == 0 || rate < lo {
+            kstate.set(state, pm(PM_MINRATE), rate)
+        }
+        // Mains against battery. Two numbers, kept apart, because the
+        // difference between them is the one thing about a power supply
+        // that a person can act on.
+        if batt.ac_known(state) {
+            if batt.ac_online(state) {
+                kstate.set(state, pm(PM_ACRATE), rate)
+                kstate.set(state, pm(PM_ACOK), 1)
+            } else {
+                kstate.set(state, pm(PM_BATRATE), rate)
+                kstate.set(state, pm(PM_BATOK), 1)
+            }
+        }
+        // AGEING. Last full charge against design charge, in percent.
+        // Windows does not put this in front of a person; it is the
+        // number that says whether a battery is worn out, and it costs
+        // one division of two numbers that are already read.
+        let full: u64 = batt.value(state, batt.BT_FULL)
+        let design: u64 = batt.value(state, batt.BT_DESIGN)
+        if full != 0 && design != 0 {
+            var h: u64 = (full * 100) / design
+            if h > 100 {
+                h = 100
+            }
+            kstate.set(state, pm(PM_HEALTH), h)
+            kstate.set(state, pm(PM_HEALTHOK), 1)
+        }
+        ring_push(state, rate, now)
+        // The brightness bucket. On this host it will not move the rate
+        // -- the table is static -- and the run says so. The mechanism
+        // is here so that the first time this kernel boots a machine
+        // with a real gas gauge, the answer is already being collected.
+        var b: u64 = pwr.bright(state) / 10
+        if b >= NBUCKET {
+            b = NBUCKET - 1
+        }
+        kstate.add(state, bat(b) + PB_N * 8, 1)
+        kstate.add(state, bat(b) + PB_SUM * 8, rate)
+    } else {
+        kstate.add(state, pm(PM_MISSES), 1)
+        kstate.set(state, pm(PM_RATEOK), 0)
+    }
+
+    // ---- 2. what each task did with the processor since the last window.
+    var busy: u64 = 0
+    var idle: u64 = 0
+    var t: u64 = 0
+    while t < kstate.MAX_TASKS {
+        // NOT cleared here: `flush` may have put the last ticks of a
+        // process that has already died into this field, and they are
+        // paid for below like everybody else's. The field is cleared
+        // after the split, at the end of this function.
+        if sched.tget(state, t, sched.T_STATE) != sched.S_FREE {
+            let pid: u64 = sched.tget(state, t, sched.T_PID)
+            if task_pid(state, t) != pid {
+                task_clear(state, t, pid)
+            }
+            let cur: u64 = sched.tget(state, t, sched.T_TICKS)
+            let seen: u64 = tget(state, t, PT_LAST)
+            var d: u64 = 0
+            if cur > seen {
+                d = cur -% seen
+            }
+            tset(state, t, PT_LAST, cur)
+            // THE IDLE TASK IS NOT A PROGRAM. Its ticks are the ticks in
+            // which the machine had nothing to do, and folding them into
+            // the split would give the floor a name and a bar in the
+            // table.
+            if sched.tget(state, t, sched.T_KIND) == sched.K_IDLE {
+                idle = idle + d
+                tset(state, t, PT_NOW, 0)
+            } else {
+                tadd(state, t, PT_NOW, d)
+            }
+        }
+        busy = busy + tget(state, t, PT_NOW)
+        t = t + 1
+    }
+    // The processor time of programs that ended since the last window.
+    // It is real time on a real processor and it belongs in the split.
+    let orphan: u64 = kstate.get(state, pm(PM_ORPHAN))
+    busy = busy + orphan
+    kstate.set(state, pm(PM_BUSY), busy)
+    kstate.set(state, pm(PM_IDLE), idle)
+
+    // ---- 3. the floor. An idle window is one in which no process ran.
+    if have && busy == 0 && (mode_word(state) & M_NOFLOOR) == 0 {
+        kstate.add(state, pm(PM_BASESUM), rate)
+        kstate.add(state, pm(PM_BASEN), 1)
+        let n: u64 = kstate.get(state, pm(PM_BASEN))
+        kstate.set(state, pm(PM_BASE),
+            kstate.get(state, pm(PM_BASESUM)) / n)
+        kstate.set(state, pm(PM_BASEOK), 1)
+        let mn: u64 = kstate.get(state, pm(PM_BASEMIN))
+        if mn == 0 || rate < mn {
+            kstate.set(state, pm(PM_BASEMIN), rate)
+        }
+    }
+
+    // ---- 4. the split. Integers, no division, sum exact.
+    var base: u64 = 0
+    if kstate.get(state, pm(PM_BASEOK)) != 0 {
+        base = kstate.get(state, pm(PM_BASE))
+    }
+    if base > rate {
+        // The floor cannot exceed the measurement. If it does, the
+        // machine is drawing less than it ever drew idle -- the floor was
+        // measured under worse conditions and this window has nothing
+        // above it to share out.
+        base = rate
+    }
+    var attrib: u64 = 0
+    if have {
+        attrib = rate -% base
+    }
+    kstate.set(state, pm(PM_ATTRIB), attrib)
+    if dt != 0 && have {
+        // Everything the floor drew for the whole window, plus everything
+        // ABOVE the floor that was drawn while no process held the
+        // processor. Both belong to the system and to nothing else.
+        var sys: u64 = base * dt
+        if dt > busy {
+            sys = sys + attrib * (dt -% busy)
+        }
+        kstate.add(state, pm(PM_SYSE), sys)
+        if busy != 0 {
+            kstate.add(state, pm(PM_WINDOWS), 1)
+            var k: u64 = 0
+            while k < kstate.MAX_TASKS {
+                let d: u64 = tget(state, k, PT_NOW)
+                if d != 0 {
+                    tadd(state, k, PT_TICKS, d)
+                    tadd(state, k, PT_DAYT, d)
+                    tadd(state, k, PT_ENERGY, attrib * d)
+                    tadd(state, k, PT_DAYE, attrib * d)
+                    kstate.add(state, pm(PM_TOTE), attrib * d)
+                    // ... and into the row of the PROGRAM, which is what
+                    // survives the slot being handed to somebody else.
+                    let r: u64 = prog_row(state, k)
+                    kstate.add(state, prat(r) + PR_TICKS * 8, d)
+                    kstate.add(state, prat(r) + PR_DAYT * 8, d)
+                    kstate.add(state, prat(r) + PR_ENERGY * 8, attrib * d)
+                    kstate.add(state, prat(r) + PR_DAYE * 8, attrib * d)
+                }
+                k = k + 1
+            }
+            // And the rows of the programs that ended. Same rate, same
+            // window, same arithmetic -- they just have no task left.
+            var pr: u64 = 0
+            while pr < NPROG {
+                let d2: u64 = kstate.get(state, prat(pr) + PR_PEND * 8)
+                if d2 != 0 {
+                    kstate.add(state, prat(pr) + PR_TICKS * 8, d2)
+                    kstate.add(state, prat(pr) + PR_DAYT * 8, d2)
+                    kstate.add(state, prat(pr) + PR_ENERGY * 8, attrib * d2)
+                    kstate.add(state, prat(pr) + PR_DAYE * 8, attrib * d2)
+                    kstate.add(state, pm(PM_TOTE), attrib * d2)
+                    kstate.set(state, prat(pr) + PR_PEND * 8, 0)
+                }
+                pr = pr + 1
+            }
+            kstate.set(state, pm(PM_ORPHAN), 0)
+        }
+    }
+    // The window is closed. Whatever was not paid for -- because there
+    // was no battery to read, or no time had passed -- is not carried
+    // forward: it would be booked at the NEXT window's rate, and a
+    // number moved to a moment it did not happen in is worse than a
+    // number that is missing.
+    var z: u64 = 0
+    while z < kstate.MAX_TASKS {
+        tset(state, z, PT_NOW, 0)
+        z = z + 1
+    }
+}
+
+// A TASK THAT DIES BETWEEN TWO SAMPLES MUST NOT TAKE ITS TICKS WITH IT.
+// The sweep in `sample` reads `T_TICKS` out of the scheduler, and a task
+// that was created, ran and was reaped inside one hundred-millisecond
+// window is gone from the table before the sweep ever sees it. Its
+// processor time then belongs to nobody, the shares no longer add up to
+// what the machine really did, and the error is worst for exactly the
+// programs a person runs from a shell: short ones.
+//
+// So `exit` flushes the slot first. What is booked here is the same
+// delta the sweep would have booked; the energy for it is settled by the
+// next window, out of the same `PT_NOW` the sweep uses.
+fn flush(state: u64, t: u64) {
+    if t >= kstate.MAX_TASKS || kstate.get(state, pm(PM_ON)) == 0 {
+        return
+    }
+    if sched.tget(state, t, sched.T_KIND) == sched.K_IDLE {
+        return
+    }
+    let cur: u64 = sched.tget(state, t, sched.T_TICKS)
+    let seen: u64 = tget(state, t, PT_LAST)
+    if cur <= seen {
+        return
+    }
+    let d: u64 = cur -% seen
+    tset(state, t, PT_LAST, cur)
+    // NOT INTO `PT_NOW`. The slot may be handed to the next program
+    // before the next window opens, and `task_clear` would wipe it --
+    // which is exactly the case this function exists for. The ticks go
+    // into the PROGRAM's row, which nothing clears, and into one global
+    // counter so that the window that pays them also counts them as
+    // busy. Without that second number the same ticks would be paid
+    // twice: once here and once as "drawn while nothing ran".
+    let r: u64 = prog_row(state, t)
+    kstate.add(state, prat(r) + PR_PEND * 8, d)
+    kstate.add(state, pm(PM_ORPHAN), d)
+    kstate.add(state, pm(PM_ORPHANS), 1)
+}
+
+// The timer path. Called from `trap.fi` once per tick, and it is the
+// only entry point that runs with interrupts off, so it does the least
+// it can get away with: one comparison, and on nine ticks out of ten
+// that is all.
+fn tick(state: u64) {
+    if kstate.get(state, pm(PM_ON)) == 0 {
+        return
+    }
+    let now: u64 = kstate.get(state, kstate.TICKS)
+    let last: u64 = kstate.get(state, pm(PM_LASTTICK))
+    let every: u64 = kstate.get(state, pm(PM_EVERY))
+    if now < last + every {
+        return
+    }
+    // WHAT THE BOOKKEEPING ITSELF COSTS, in cycles, measured rather than
+    // asserted. A monitor whose own cost is a guess is a monitor in the
+    // wrong place -- and this one runs inside a timer interrupt.
+    let t0: u64 = time.tsc()
+    sample(state)
+    let t1: u64 = time.tsc()
+    if t1 > t0 {
+        kstate.add(state, pm(PM_COST), t1 -% t0)
+    }
+    kstate.add(state, pm(PM_COSTN), 1)
+}
+
+// ---------------------------------------------------------- the day mark
+//
+// The per-day counters are not a second accounting: they are the same
+// numbers with a mark under them. Ring 3 writes the finished day into a
+// text file and then asks for the mark to be moved; the kernel keeps no
+// history of its own, because a kernel that keeps ninety days of
+// anything in `kdata` has run out of `kdata`.
+
+fn roll_day(state: u64) {
+    var t: u64 = 0
+    while t < kstate.MAX_TASKS {
+        tset(state, t, PT_DAYT, 0)
+        tset(state, t, PT_DAYE, 0)
+        t = t + 1
+    }
+    var r: u64 = 0
+    while r < NPROG {
+        kstate.set(state, prat(r) + PR_DAYT * 8, 0)
+        kstate.set(state, prat(r) + PR_DAYE * 8, 0)
+        r = r + 1
+    }
+    kstate.set(state, pm(PM_DAYSTART), kstate.get(state, kstate.TICKS))
+    kstate.add(state, pm(PM_DAYS), 1)
+}
+
+// Throw the split away and start again -- what a person means by
+// "reset". The floor is NOT thrown away: it was measured, and measuring
+// it again costs an idle machine and several seconds.
+fn reset_window(state: u64) {
+    var t: u64 = 0
+    while t < kstate.MAX_TASKS {
+        tset(state, t, PT_TICKS, 0)
+        tset(state, t, PT_ENERGY, 0)
+        tset(state, t, PT_DAYT, 0)
+        tset(state, t, PT_DAYE, 0)
+        t = t + 1
+    }
+    var r: u64 = 0
+    while r < NPROG {
+        var f: u64 = 0
+        while f < PRBYTES / 8 {
+            kstate.set(state, prat(r) + f * 8, 0)
+            f = f + 1
+        }
+        r = r + 1
+    }
+    var q: u64 = 0
+    while q < kstate.MAX_TASKS {
+        kstate.set(state, tat(q) + PT_ROW, 0)
+        q = q + 1
+    }
+    kstate.set(state, pm(PM_TOTE), 0)
+    kstate.set(state, pm(PM_SYSE), 0)
+    kstate.set(state, pm(PM_WINDOWS), 0)
+}
+
+// ------------------------------------------------------------- the report
+//
+// The same numbers ring 3 gets, on the serial line, so that the
+// acceptance run can hold the two against each other. Where they differ,
+// the system call is broken -- that is the check, and it is the reason
+// this function exists at all.
+
+fn say(name: u64, v: u64) {
+    var pre: [u8; 7] = "pmon: \0"
+    var eq: [u8; 2] = "=\0"
+    serial.puts((&pre[0]) as u64)
+    serial.puts(name)
+    serial.puts((&eq[0]) as u64)
+    serial.dec(v)
+    serial.nl()
+}
+
+fn report(state: u64) {
+    // ONLY WHEN THE RUN ASKED FOR IT (`pmonsay`), and that is not
+    // tidiness -- it is a regression this round caused and had to undo.
+    //
+    // `kmain.power_stage` runs in EVERY boot that does not say `nopwr`,
+    // so this report was printing in runs that have nothing to do with
+    // power. In a run with `gfx` the serial port is MIRRORED TO THE
+    // SCREEN, and twenty-four more lines at the end of a transcript that
+    // already fills the screen scrolled the shell's own line off the top
+    // of it. `tools/gfx/run.sh` caught it, and the SHAPE of the catch is
+    // worth keeping: the whole-screen comparison against the transcript
+    // still passed, and the two checks that look for ONE NAMED LINE at a
+    // COMPUTED PLACE failed. "The picture is right and the picture is
+    // wrong" is what area counting looks like from the inside, and it is
+    // exactly what round K7B built those checks to catch.
+    if (mode_word(state) & M_SAY) == 0 {
+        return
+    }
+    var n_on: [u8; 3] = "on\0"
+    var n_sa: [u8; 8] = "samples\0"
+    var n_ra: [u8; 5] = "rate\0"
+    var n_ro: [u8; 7] = "rateok\0"
+    var n_ba: [u8; 5] = "base\0"
+    var n_bo: [u8; 7] = "baseok\0"
+    var n_bn: [u8; 6] = "basen\0"
+    var n_at: [u8; 7] = "attrib\0"
+    var n_te: [u8; 7] = "proce\0\0"
+    var n_se: [u8; 6] = "syse\0\0"
+    var n_hz: [u8; 3] = "hz\0"
+    var n_he: [u8; 7] = "health\0"
+    var n_ho: [u8; 9] = "healthok\0"
+    var n_mi: [u8; 8] = "minutes\0"
+    var n_co: [u8; 5] = "cost\0"
+    var n_cn: [u8; 6] = "costn\0"
+    var n_ms: [u8; 7] = "misses\0"
+    var n_wi: [u8; 8] = "windows\0"
+    var n_bu: [u8; 5] = "busy\0"
+    var n_id: [u8; 5] = "idle\0"
+    var n_dy: [u8; 5] = "days\0"
+    var n_or: [u8; 8] = "orphans\0"
+    var n_un: [u8; 5] = "unit\0"
+    say((&n_on[0]) as u64, kstate.get(state, pm(PM_ON)))
+    say((&n_hz[0]) as u64, kstate.get(state, pm(PM_HZ)))
+    say((&n_sa[0]) as u64, kstate.get(state, pm(PM_SAMPLES)))
+    say((&n_ra[0]) as u64, kstate.get(state, pm(PM_RATE)))
+    say((&n_ro[0]) as u64, kstate.get(state, pm(PM_RATEOK)))
+    say((&n_ba[0]) as u64, kstate.get(state, pm(PM_BASE)))
+    say((&n_bo[0]) as u64, kstate.get(state, pm(PM_BASEOK)))
+    say((&n_bn[0]) as u64, kstate.get(state, pm(PM_BASEN)))
+    say((&n_at[0]) as u64, kstate.get(state, pm(PM_ATTRIB)))
+    say((&n_te[0]) as u64, kstate.get(state, pm(PM_TOTE)))
+    say((&n_se[0]) as u64, kstate.get(state, pm(PM_SYSE)))
+    say((&n_he[0]) as u64, kstate.get(state, pm(PM_HEALTH)))
+    say((&n_ho[0]) as u64, kstate.get(state, pm(PM_HEALTHOK)))
+    say((&n_mi[0]) as u64, kstate.get(state, pm(PM_MINUTES)))
+    say((&n_co[0]) as u64, kstate.get(state, pm(PM_COST)))
+    say((&n_cn[0]) as u64, kstate.get(state, pm(PM_COSTN)))
+    say((&n_ms[0]) as u64, kstate.get(state, pm(PM_MISSES)))
+    say((&n_wi[0]) as u64, kstate.get(state, pm(PM_WINDOWS)))
+    say((&n_bu[0]) as u64, kstate.get(state, pm(PM_BUSY)))
+    say((&n_id[0]) as u64, kstate.get(state, pm(PM_IDLE)))
+    say((&n_dy[0]) as u64, kstate.get(state, pm(PM_DAYS)))
+    say((&n_or[0]) as u64, kstate.get(state, pm(PM_ORPHANS)))
+    // 0 = mW/mWh, 1 = mA/mAh (_BIF[0]). A gauge that answers in
+    // milliamperes needs the voltage as well, and this round does not
+    // silently treat the one as the other.
+    say((&n_un[0]) as u64, kstate.get(state, pm(PM_UNIT)))
+    // One line per task that got anything, so the run can add the shares
+    // up itself instead of believing the total.
+    var t: u64 = 0
+    while t < kstate.MAX_TASKS {
+        if tget(state, t, PT_TICKS) != 0 {
+            var pre: [u8; 8] = "pmon: t\0"
+            var sep: [u8; 2] = " \0"
+            serial.puts((&pre[0]) as u64)
+            serial.dec(t)
+            serial.puts((&sep[0]) as u64)
+            serial.dec(task_pid(state, t))
+            serial.puts((&sep[0]) as u64)
+            serial.dec(tget(state, t, PT_TICKS))
+            serial.puts((&sep[0]) as u64)
+            serial.dec(tget(state, t, PT_ENERGY))
+            serial.puts((&sep[0]) as u64)
+            var i: u64 = 0
+            while i < NAME_MAX && name_at(state, t, i) != 0 {
+                serial.put(name_at(state, t, i) as u8)
+                i = i + 1
+            }
+            if i == 0 {
+                var dash: [u8; 2] = "-\0"
+                serial.puts((&dash[0]) as u64)
+            }
+            serial.nl()
+        }
+        t = t + 1
+    }
+    // AND THE PROGRAM ROWS, which are what the table on the screen is
+    // built from and what the acceptance run adds up.
+    var r: u64 = 0
+    while r < NPROG {
+        if prog_used(state, r) {
+            var pp: [u8; 8] = "pmon: p\0"
+            var sp: [u8; 2] = " \0"
+            serial.puts((&pp[0]) as u64)
+            serial.dec(r)
+            serial.puts((&sp[0]) as u64)
+            serial.dec(prog_get(state, r, PR_TICKS))
+            serial.puts((&sp[0]) as u64)
+            serial.dec(prog_get(state, r, PR_ENERGY))
+            serial.puts((&sp[0]) as u64)
+            serial.dec(prog_get(state, r, PR_PROCS))
+            serial.puts((&sp[0]) as u64)
+            var j: u64 = 0
+            while j < NAME_MAX && prog_name_at(state, r, j) != 0 {
+                serial.put(prog_name_at(state, r, j) as u8)
+                j = j + 1
+            }
+            serial.nl()
+        }
+        r = r + 1
+    }
+}

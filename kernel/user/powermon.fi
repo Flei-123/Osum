@@ -1,0 +1,1163 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/powermon.fi -- round POWERMON: /bin/powermon.
+//
+// The page Windows calls "Battery usage by app", built out of numbers
+// that were measured instead of modelled -- and labelled as what they
+// are, which is the part Windows leaves out.
+//
+//     powermon            the table
+//     powermon raw        every number on its own line, for the run
+//     powermon graph      the measured draw over the last samples
+//     powermon day        write today into /etc/powermon.days and roll
+//     powermon reset      throw the split away, keep the measured floor
+//     powermon window     the same page as a window
+//
+// THE SENTENCE THIS PROGRAM IS BUILT AROUND, and it stands on the screen
+// and not in a footnote: "measured total, proportionally attributed".
+// The total is real -- it is the battery's own gas gauge, read out of
+// `_BST`. The split between programs is an approximation out of
+// processor time. "This program draws 2.3 W" would be a measurement and
+// it is not one; "this program is 34 percent of a measured 6.8 W" is
+// what actually happened.
+//
+// NO NUMBER IN THIS PROGRAM IS FROM THIS PROGRAM. Every one comes over
+// `osum_pmon` out of the kernel. Where the kernel says it did not
+// measure something, a dash is printed and not a zero -- a zero in
+// milliwatts looks exactly like a measurement, and that is the mistake
+// round K18 wrote down and this round inherits.
+
+profile kernel
+
+import ulib
+import tools
+import wlib
+import wlibc
+
+export { u_start }
+
+// The call of this round (`kernel/sys.fi`, store 1830..1839).
+const SYS_PMON: u64 = 1830
+
+// kind 0 -- the machine. These are `pmon.PM_*` divided by eight.
+const PM_ON: u64 = 0
+const PM_MODE: u64 = 1
+const PM_SAMPLES: u64 = 2
+const PM_LASTTICK: u64 = 3
+const PM_HZ: u64 = 4
+const PM_RATE: u64 = 5
+const PM_UNIT: u64 = 6
+const PM_RATEOK: u64 = 7
+const PM_BASE: u64 = 8
+const PM_BASEOK: u64 = 9
+const PM_BASEN: u64 = 10
+const PM_BASESUM: u64 = 11
+const PM_BASEMIN: u64 = 12
+const PM_ATTRIB: u64 = 13
+const PM_BUSY: u64 = 14
+const PM_IDLE: u64 = 15
+const PM_TOTE: u64 = 16
+const PM_SYSE: u64 = 17
+const PM_ACRATE: u64 = 18
+const PM_ACOK: u64 = 19
+const PM_BATRATE: u64 = 20
+const PM_BATOK: u64 = 21
+const PM_HEALTH: u64 = 22
+const PM_HEALTHOK: u64 = 23
+const PM_MINUTES: u64 = 24
+const PM_COST: u64 = 25
+const PM_COSTN: u64 = 26
+const PM_MISSES: u64 = 27
+const PM_DAYSTART: u64 = 28
+const PM_HEAD: u64 = 29
+const PM_EVERY: u64 = 30
+const PM_MAXRATE: u64 = 31
+const PM_MINRATE: u64 = 32
+const PM_DAYS: u64 = 33
+const PM_WINDOWS: u64 = 34
+const PM_ORPHAN: u64 = 35
+const PM_ORPHANS: u64 = 36
+const PM_STAGED: u64 = 37
+
+// kind 6 -- a program row.
+const PR_TICKS: u64 = 0
+const PR_ENERGY: u64 = 1
+const PR_DAYT: u64 = 2
+const PR_DAYE: u64 = 3
+const PR_PROCS: u64 = 4
+const PR_PEND: u64 = 5
+const NPROG: u64 = 16
+const NSAMPLE: u64 = 256
+const NBUCKET: u64 = 11
+
+// kind 5 -- what may be set.
+const PS_ROLLDAY: u64 = 0
+const PS_RESET: u64 = 1
+
+// The charge itself still comes from round K18's call: this round did
+// not copy those numbers, because two places that both know the state of
+// the battery is one place too many.
+const SYS_PWRGET: u64 = 1750
+const PG_BATPERCENT: u64 = 25
+const PG_BATFULL: u64 = 30
+const PG_BATDESIGN: u64 = 31
+const PG_ACOK: u64 = 33
+const PG_AC: u64 = 34
+const PG_TEMP: u64 = 16
+const PG_TEMPOK: u64 = 17
+const PG_BRIGHT: u64 = 38
+
+const KEEP_DAYS: u64 = 90
+
+// ------------------------------------------------------------- helpers
+
+fn pm(kind: u64, index: u64, field: u64) -> u64 {
+    return ulib.sys(SYS_PMON, kind, index, field)
+}
+
+fn scal(which: u64) -> u64 {
+    return pm(0, 0, which)
+}
+
+fn pwr(field: u64) -> u64 {
+    return ulib.sys(SYS_PWRGET, field, 0, 0)
+}
+
+fn is_err(v: u64) -> bool {
+    return (v >> 63) != 0
+}
+
+fn ch(c: u64) {
+    var b: [u8; 2] = [0 as u8; 2]
+    b[(0) as usize] = c as u8
+    ulib.put((&b[0 as usize]) as u64, 1)
+}
+
+fn spaces(n: u64) {
+    var i: u64 = 0
+    while i < n {
+        ch(32)
+        i = i + 1
+    }
+}
+
+fn width_of(v: u64) -> u64 {
+    var d: u64 = 1
+    var t: u64 = v
+    while t >= 10 {
+        t = t / 10
+        d = d + 1
+    }
+    return d
+}
+
+// A number right-aligned in `w` columns, so a table of them reads as a
+// table and not as a paragraph.
+fn num_w(v: u64, w: u64) {
+    let d: u64 = width_of(v)
+    if w > d {
+        spaces(w -% d)
+    }
+    ulib.sayu(v)
+}
+
+fn dash_w(w: u64) {
+    if w > 2 {
+        spaces(w -% 2)
+    }
+    ch(45)
+    ch(45)
+}
+
+// ONE MILLIWATT-TICK IS ONE MILLIJOULE DIVIDED BY THE TICK RATE. The
+// kernel counts in mW-ticks because that multiplication is exact and
+// needs no division anywhere; a person wants joules. The conversion
+// happens here and nowhere else.
+fn to_mj(mwticks: u64, hz: u64) -> u64 {
+    if hz == 0 {
+        return 0
+    }
+    return mwticks / hz
+}
+
+// ---------------------------------------------------------- the shares
+//
+// SHARES THAT ADD UP TO A HUNDRED, AND NOT TO 99 OR 101. Rounding each
+// row on its own loses a remainder per row, and sixteen rows lose up to
+// sixteen. So the rounding is done on the RUNNING SUM and each row is
+// the difference of two rounded cumulative values: the differences
+// telescope, the last cumulative value is the rounded whole, and the
+// whole is a hundred by definition. Same reasoning as the exact integer
+// split in `kernel/pmon.fi`, one level up.
+
+static mut cum: u64 = 0
+static mut cum_pct: u64 = 0
+
+fn share_reset() {
+    cum = 0
+    cum_pct = 0
+}
+
+fn share_next(part: u64, total: u64) -> u64 {
+    if total == 0 {
+        return 0
+    }
+    cum = cum + part
+    let now: u64 = (cum * 100 + total / 2) / total
+    let d: u64 = now -% cum_pct
+    cum_pct = now
+    return d
+}
+
+// ------------------------------------------------------ the program rows
+
+static mut r_ticks: [u64; 16] = [0 as u64; 16]
+static mut r_energy: [u64; 16] = [0 as u64; 16]
+static mut r_procs: [u64; 16] = [0 as u64; 16]
+static mut r_name: [u8; 384] = [0 as u8; 384]
+static mut r_order: [u64; 16] = [0 as u64; 16]
+static mut r_n: u64 = 0
+static mut t_ticks: u64 = 0
+static mut t_energy: u64 = 0
+
+fn load_rows() {
+    r_n = 0
+    t_ticks = 0
+    t_energy = 0
+    var i: u64 = 0
+    while i < NPROG {
+        let first: u64 = pm(7, i, 0)
+        if !is_err(first) && first != 0 {
+            var k: u64 = 0
+            while k < 24 {
+                let c: u64 = pm(7, i, k)
+                if is_err(c) {
+                    r_name[(r_n * 24 + k) as usize] = 0 as u8
+                } else {
+                    r_name[(r_n * 24 + k) as usize] = c as u8
+                }
+                k = k + 1
+            }
+            r_ticks[(r_n) as usize] = pm(6, i, PR_TICKS)
+            r_energy[(r_n) as usize] = pm(6, i, PR_ENERGY)
+            r_procs[(r_n) as usize] = pm(6, i, PR_PROCS)
+            t_ticks = t_ticks + r_ticks[(r_n) as usize]
+            t_energy = t_energy + r_energy[(r_n) as usize]
+            r_order[(r_n) as usize] = r_n
+            r_n = r_n + 1
+        }
+        i = i + 1
+    }
+    // Biggest first: sixteen rows, so the simplest sort there is. A
+    // person reads the top of this list and nothing else, and a table
+    // that does not put the biggest consumer first has not answered the
+    // question it was opened for.
+    var a: u64 = 0
+    while a < r_n {
+        var b: u64 = a + 1
+        while b < r_n {
+            if r_ticks[(r_order[(b) as usize]) as usize]
+                > r_ticks[(r_order[(a) as usize]) as usize] {
+                let tmp: u64 = r_order[(a) as usize]
+                r_order[(a) as usize] = r_order[(b) as usize]
+                r_order[(b) as usize] = tmp
+            }
+            b = b + 1
+        }
+        a = a + 1
+    }
+}
+
+fn name_len(row: u64) -> u64 {
+    var i: u64 = 0
+    while i < 24 && r_name[(row * 24 + i) as usize] != 0 as u8 {
+        i = i + 1
+    }
+    return i
+}
+
+fn say_name(row: u64, pad: u64) {
+    let n: u64 = name_len(row)
+    ulib.put((&r_name[(row * 24) as usize]) as u64, n)
+    if pad > n {
+        spaces(pad -% n)
+    }
+}
+
+// ------------------------------------------------------------- the table
+
+fn line_mw(label: u64, v: u64, ok: bool) {
+    var unit: [u8; 4] = " mW\0"
+    ulib.say(label)
+    if ok {
+        num_w(v, 8)
+        ulib.say((&unit[0 as usize]) as u64)
+    } else {
+        dash_w(8)
+    }
+    ulib.nl()
+}
+
+fn machine() {
+    var h1: [u8; 25] = "Battery usage by program\0"
+    var h2: [u8; 42] = "measured total, proportionally attributed\0"
+    var l_now: [u8; 16] = "  Power now    \0"
+    var l_base: [u8; 16] = "  System floor \0"
+    var l_att: [u8; 16] = "  Attributable \0"
+    var l_bat: [u8; 16] = "  Charge       \0"
+    var l_hp: [u8; 16] = "  Health       \0"
+    var l_rt: [u8; 16] = "  Runtime left \0"
+    var l_ac: [u8; 16] = "  On mains     \0"
+    var l_tp: [u8; 16] = "  Temperature  \0"
+    var l_br: [u8; 16] = "  Brightness   \0"
+    var s_pct: [u8; 3] = " %\0"
+    var s_of: [u8; 5] = " of \0"
+    var s_mwh: [u8; 5] = " mWh\0"
+    var s_min: [u8; 5] = " min\0"
+    var s_yes: [u8; 9] = "     yes\0"
+    var s_no: [u8; 9] = "      no\0"
+    var s_c: [u8; 3] = " C\0"
+    var s_meas: [u8; 19] = "   (measured over \0"
+    var s_idle: [u8; 16] = " idle windows)\0\0"
+    var s_none: [u8; 39] = "   (no idle window yet -- all of it is\0"
+    var s_none2: [u8; 19] = " booked to System)\0"
+    var s_des: [u8; 8] = " design\0"
+
+    ulib.say((&h1[0 as usize]) as u64)
+    ulib.nl()
+    ulib.say((&h2[0 as usize]) as u64)
+    ulib.nl()
+    ulib.nl()
+
+    let ok: bool = scal(PM_RATEOK) != 0
+    line_mw((&l_now[0 as usize]) as u64, scal(PM_RATE), ok)
+    let bok: bool = scal(PM_BASEOK) != 0
+    line_mw((&l_base[0 as usize]) as u64, scal(PM_BASE), bok)
+    if bok {
+        ulib.say((&s_meas[0 as usize]) as u64)
+        ulib.sayu(scal(PM_BASEN))
+        ulib.say((&s_idle[0 as usize]) as u64)
+        ulib.nl()
+    } else {
+        ulib.say((&s_none[0 as usize]) as u64)
+        ulib.say((&s_none2[0 as usize]) as u64)
+        ulib.nl()
+    }
+    line_mw((&l_att[0 as usize]) as u64, scal(PM_ATTRIB), ok)
+
+    let pct: u64 = pwr(PG_BATPERCENT)
+    ulib.say((&l_bat[0 as usize]) as u64)
+    if is_err(pct) {
+        dash_w(8)
+    } else {
+        num_w(pct, 8)
+        ulib.say((&s_pct[0 as usize]) as u64)
+        ulib.say((&s_of[0 as usize]) as u64)
+        ulib.sayu(pwr(PG_BATFULL))
+        ulib.say((&s_mwh[0 as usize]) as u64)
+    }
+    ulib.nl()
+
+    // THE NUMBER NOBODY IS SHOWN. Last full charge against design
+    // charge: how much of the battery is left after however many years
+    // it has had. Windows knows it and does not put it on this page.
+    ulib.say((&l_hp[0 as usize]) as u64)
+    if scal(PM_HEALTHOK) != 0 {
+        num_w(scal(PM_HEALTH), 8)
+        ulib.say((&s_pct[0 as usize]) as u64)
+        ulib.say((&s_of[0 as usize]) as u64)
+        ulib.sayu(pwr(PG_BATDESIGN))
+        ulib.say((&s_mwh[0 as usize]) as u64)
+        ulib.say((&s_des[0 as usize]) as u64)
+    } else {
+        dash_w(8)
+    }
+    ulib.nl()
+
+    // FROM THE RATE THAT WAS JUST MEASURED, and not from an average of
+    // the last hour. An average is smoother and it is also wrong at
+    // exactly the moment a person looks -- they look because something
+    // changed.
+    ulib.say((&l_rt[0 as usize]) as u64)
+    let mins: u64 = scal(PM_MINUTES)
+    if ok && mins != 0 {
+        num_w(mins, 8)
+        ulib.say((&s_min[0 as usize]) as u64)
+    } else {
+        dash_w(8)
+    }
+    ulib.nl()
+
+    ulib.say((&l_ac[0 as usize]) as u64)
+    if pwr(PG_ACOK) == 1 {
+        if pwr(PG_AC) == 1 {
+            ulib.say((&s_yes[0 as usize]) as u64)
+        } else {
+            ulib.say((&s_no[0 as usize]) as u64)
+        }
+    } else {
+        dash_w(8)
+    }
+    ulib.nl()
+
+    ulib.say((&l_tp[0 as usize]) as u64)
+    if pwr(PG_TEMPOK) == 1 {
+        num_w(pwr(PG_TEMP), 8)
+        ulib.say((&s_c[0 as usize]) as u64)
+    } else {
+        dash_w(8)
+    }
+    ulib.nl()
+
+    let br: u64 = pwr(PG_BRIGHT)
+    ulib.say((&l_br[0 as usize]) as u64)
+    if is_err(br) {
+        dash_w(8)
+    } else {
+        num_w(br, 8)
+        ulib.say((&s_pct[0 as usize]) as u64)
+    }
+    ulib.nl()
+    ulib.nl()
+}
+
+fn table() {
+    var h: [u8; 47] = "PROGRAM             CPU   SHARE       mJ  RUNS\0"
+    var s_pct: [u8; 3] = " %\0"
+    var note1: [u8; 22] = "  Sum of the shares: \0"
+    var flat: [u8; 63] = "  NOTE: the measured draw did not change with the load on this\0"
+    var flat2: [u8; 62] = "  machine, so the floor swallowed all of it and nothing could\0"
+    var flat3: [u8; 62] = "  be attributed. The CPU column below is measured; SHARE is a\0"
+    var flat4: [u8; 43] = "  share of attributed processor time only.\0"
+
+    let hz: u64 = scal(PM_HZ)
+    ulib.say((&h[0 as usize]) as u64)
+    ulib.nl()
+    share_reset()
+    var i: u64 = 0
+    var total: u64 = 0
+    while i < r_n {
+        let row: u64 = r_order[(i) as usize]
+        say_name(row, 20)
+        num_w(r_ticks[(row) as usize], 5)
+        let sh: u64 = share_next(r_ticks[(row) as usize], t_ticks)
+        total = total + sh
+        num_w(sh, 6)
+        ulib.say((&s_pct[0 as usize]) as u64)
+        num_w(to_mj(r_energy[(row) as usize], hz), 9)
+        num_w(r_procs[(row) as usize], 6)
+        ulib.nl()
+        i = i + 1
+    }
+    ulib.nl()
+    ulib.say((&note1[0 as usize]) as u64)
+    ulib.sayu(total)
+    ulib.say((&s_pct[0 as usize]) as u64)
+    ulib.nl()
+    if scal(PM_RATEOK) != 0 && scal(PM_ATTRIB) == 0 {
+        ulib.say((&flat[0 as usize]) as u64)
+        ulib.nl()
+        ulib.say((&flat2[0 as usize]) as u64)
+        ulib.nl()
+        ulib.say((&flat3[0 as usize]) as u64)
+        ulib.nl()
+        ulib.say((&flat4[0 as usize]) as u64)
+        ulib.nl()
+    }
+}
+
+// ------------------------------------------------------------- the graph
+//
+// A bar per sample, out of the ring the kernel keeps. It is made of
+// characters and not of pixels, and that is not laziness: a widget
+// window in this tree is painted by the widget library, and ring 3 has
+// no call in this branch that paints into one. A row of blocks scaled
+// against the highest rate seen says what a plot would say.
+
+fn graph(rows: u64) {
+    var h: [u8; 51] = "Measured draw, newest last (one row = one sample)\0\0"
+    var s_mw: [u8; 5] = " mW \0"
+    var none: [u8; 32] = "  no sample with a battery yet\0\0"
+    let head_i: u64 = scal(PM_HEAD)
+    let n: u64 = scal(PM_SAMPLES)
+    let hi: u64 = scal(PM_MAXRATE)
+    if n == 0 || hi == 0 {
+        ulib.say((&none[0 as usize]) as u64)
+        ulib.nl()
+        return
+    }
+    ulib.say((&h[0 as usize]) as u64)
+    ulib.nl()
+    var have: u64 = n
+    if have > NSAMPLE {
+        have = NSAMPLE
+    }
+    var show: u64 = rows
+    if show > have {
+        show = have
+    }
+    var k: u64 = 0
+    while k < show {
+        // Walk back `show - k` places from the write head.
+        let back: u64 = show -% k
+        var idx: u64 = 0
+        if head_i >= back {
+            idx = head_i -% back
+        } else {
+            idx = NSAMPLE + head_i -% back
+        }
+        let v: u64 = pm(3, idx, 0)
+        if !is_err(v) {
+            spaces(2)
+            num_w(v, 6)
+            ulib.say((&s_mw[0 as usize]) as u64)
+            let bars: u64 = (v * 40) / hi
+            var b: u64 = 0
+            while b < bars {
+                ch(35)
+                b = b + 1
+            }
+            ulib.nl()
+        }
+        k = k + 1
+    }
+}
+
+// ------------------------------------------------------- brightness
+//
+// WHAT THE BACKLIGHT COSTS -- one row per ten percent, with the mean
+// measured draw beside it. On a machine whose gauge answers, this is the
+// most useful table on the page: brightness is the largest single thing
+// a person can turn down. On THIS machine it will be flat, and a flat
+// column is the finding, printed rather than hidden.
+
+fn brightness() {
+    var h: [u8; 48] = "Brightness against measured draw (mean per 10%)\0"
+    var s_n: [u8; 12] = "   samples \0"
+    var s_mw: [u8; 4] = " mW\0"
+    var s_pct: [u8; 3] = "% \0"
+    var none: [u8; 39] = "  no bucket has a sample in it yet\0\0\0\0\0"
+    var any: bool = false
+    var b: u64 = 0
+    while b < NBUCKET {
+        if pm(4, b, 0) != 0 {
+            any = true
+        }
+        b = b + 1
+    }
+    if !any {
+        ulib.say((&none[0 as usize]) as u64)
+        ulib.nl()
+        return
+    }
+    ulib.say((&h[0 as usize]) as u64)
+    ulib.nl()
+    b = 0
+    while b < NBUCKET {
+        let n: u64 = pm(4, b, 0)
+        if n != 0 {
+            spaces(2)
+            num_w(pm(4, b, 2), 3)
+            ulib.say((&s_pct[0 as usize]) as u64)
+            num_w(pm(4, b, 1) / n, 7)
+            ulib.say((&s_mw[0 as usize]) as u64)
+            ulib.say((&s_n[0 as usize]) as u64)
+            ulib.sayu(n)
+            ulib.nl()
+        }
+        b = b + 1
+    }
+}
+
+// --------------------------------------------------------------- raw
+//
+// Every number on its own line, in the same shape the kernel puts them
+// on the serial port. The acceptance run holds the two sides against
+// each other; where they differ, the system call is broken, and there is
+// no other way to find that out.
+
+fn raw_one(name: u64, v: u64) {
+    var pre: [u8; 11] = "powermon: \0"
+    var eq: [u8; 2] = "=\0"
+    ulib.say((&pre[0 as usize]) as u64)
+    ulib.say(name)
+    ulib.say((&eq[0 as usize]) as u64)
+    if is_err(v) {
+        ulib.sayn(v)
+    } else {
+        ulib.sayu(v)
+    }
+    ulib.nl()
+}
+
+fn raw() {
+    var n_on: [u8; 3] = "on\0"
+    var n_hz: [u8; 3] = "hz\0"
+    var n_sa: [u8; 8] = "samples\0"
+    var n_ra: [u8; 5] = "rate\0"
+    var n_ro: [u8; 7] = "rateok\0"
+    var n_ba: [u8; 5] = "base\0"
+    var n_bo: [u8; 7] = "baseok\0"
+    var n_bn: [u8; 6] = "basen\0"
+    var n_at: [u8; 7] = "attrib\0"
+    var n_te: [u8; 6] = "proce\0"
+    var n_se: [u8; 5] = "syse\0"
+    var n_he: [u8; 7] = "health\0"
+    var n_ho: [u8; 9] = "healthok\0"
+    var n_mi: [u8; 8] = "minutes\0"
+    var n_co: [u8; 5] = "cost\0"
+    var n_cn: [u8; 6] = "costn\0"
+    var n_ms: [u8; 7] = "misses\0"
+    var n_wi: [u8; 8] = "windows\0"
+    var n_ac: [u8; 7] = "acrate\0"
+    var n_bt: [u8; 8] = "batrate\0"
+    var n_pn: [u8; 6] = "progn\0"
+    var n_pt: [u8; 10] = "progticks\0"
+    var n_pe: [u8; 7] = "progmw\0"
+    var n_su: [u8; 9] = "sumshare\0"
+    var n_un: [u8; 5] = "unit\0"
+    var pre: [u8; 11] = "powermon: \0"
+    var sp: [u8; 2] = " \0"
+    raw_one((&n_on[0 as usize]) as u64, scal(PM_ON))
+    raw_one((&n_hz[0 as usize]) as u64, scal(PM_HZ))
+    raw_one((&n_sa[0 as usize]) as u64, scal(PM_SAMPLES))
+    raw_one((&n_ra[0 as usize]) as u64, scal(PM_RATE))
+    raw_one((&n_ro[0 as usize]) as u64, scal(PM_RATEOK))
+    raw_one((&n_ba[0 as usize]) as u64, scal(PM_BASE))
+    raw_one((&n_bo[0 as usize]) as u64, scal(PM_BASEOK))
+    raw_one((&n_bn[0 as usize]) as u64, scal(PM_BASEN))
+    raw_one((&n_at[0 as usize]) as u64, scal(PM_ATTRIB))
+    raw_one((&n_te[0 as usize]) as u64, scal(PM_TOTE))
+    raw_one((&n_se[0 as usize]) as u64, scal(PM_SYSE))
+    raw_one((&n_he[0 as usize]) as u64, scal(PM_HEALTH))
+    raw_one((&n_ho[0 as usize]) as u64, scal(PM_HEALTHOK))
+    raw_one((&n_mi[0 as usize]) as u64, scal(PM_MINUTES))
+    raw_one((&n_co[0 as usize]) as u64, scal(PM_COST))
+    raw_one((&n_cn[0 as usize]) as u64, scal(PM_COSTN))
+    raw_one((&n_ms[0 as usize]) as u64, scal(PM_MISSES))
+    raw_one((&n_wi[0 as usize]) as u64, scal(PM_WINDOWS))
+    raw_one((&n_ac[0 as usize]) as u64, scal(PM_ACRATE))
+    raw_one((&n_bt[0 as usize]) as u64, scal(PM_BATRATE))
+    raw_one((&n_un[0 as usize]) as u64, scal(PM_UNIT))
+    raw_one((&n_pn[0 as usize]) as u64, r_n)
+    raw_one((&n_pt[0 as usize]) as u64, t_ticks)
+    raw_one((&n_pe[0 as usize]) as u64, t_energy)
+    // One line per program with its share, so the run can add the column
+    // up for itself instead of believing a total.
+    share_reset()
+    var sum: u64 = 0
+    var i: u64 = 0
+    while i < r_n {
+        let row: u64 = r_order[(i) as usize]
+        let sh: u64 = share_next(r_ticks[(row) as usize], t_ticks)
+        sum = sum + sh
+        ulib.say((&pre[0 as usize]) as u64)
+        say_name(row, 0)
+        ulib.say((&sp[0 as usize]) as u64)
+        ulib.sayu(r_ticks[(row) as usize])
+        ulib.say((&sp[0 as usize]) as u64)
+        ulib.sayu(r_energy[(row) as usize])
+        ulib.say((&sp[0 as usize]) as u64)
+        ulib.sayu(sh)
+        ulib.say((&sp[0 as usize]) as u64)
+        ulib.sayu(r_procs[(row) as usize])
+        ulib.nl()
+        i = i + 1
+    }
+    raw_one((&n_su[0 as usize]) as u64, sum)
+}
+
+// --------------------------------------------------------- the day file
+//
+// ONE LINE PER DAY, PLAIN TEXT, READABLE WITH `cat`, AND IT STOPS
+// GROWING. Ninety lines of about a hundred octets is nine kilobytes and
+// it never becomes ten: the file is read back, the oldest lines are
+// dropped when there would be more than ninety, and the whole is written
+// again. OFS still has a two-megabyte ceiling per volume (round OFS3 is
+// lifting it), and a monitor that fills the disk it is monitoring is a
+// bad monitor.
+
+static mut fbuf: [u8; 16384] = [0 as u8; 16384]
+static mut flen: u64 = 0
+static mut old: [u8; 16384] = [0 as u8; 16384]
+
+fn put_ch(c: u64) {
+    if flen < 16383 {
+        fbuf[(flen) as usize] = c as u8
+        flen = flen + 1
+    }
+}
+
+fn put_str(p: u64) {
+    var i: u64 = 0
+    let n: u64 = ulib.length(p)
+    while i < n {
+        put_ch(__mmio_read8((p + i) as *mut u8) as u64)
+        i = i + 1
+    }
+}
+
+fn put_num(v: u64) {
+    var d: [u8; 24] = [0 as u8; 24]
+    var n: u64 = 0
+    var t: u64 = v
+    if t == 0 {
+        put_ch(48)
+        return
+    }
+    while t != 0 {
+        d[(n) as usize] = (48 + t -% (t / 10) * 10) as u8
+        t = t / 10
+        n = n + 1
+    }
+    while n != 0 {
+        n = n -% 1
+        put_ch(d[(n) as usize] as u64)
+    }
+}
+
+fn day_write() -> u64 {
+    var path: [u8; 19] = "/etc/powermon.days\0"
+    var s_h1: [u8; 62] = "# osum powermon -- one line per day, newest last, at most 90.\0"
+    var s_h2: [u8; 62] = "# mJ is milliwatt-ticks divided by the tick rate: millijoules\0"
+    var s_h3: [u8; 62] = "# total = system + programs, and it is measured, not modelled\0"
+    var s_open: [u8; 32] = "powermon: cannot write the file\0"
+    var s_wrote: [u8; 17] = "powermon: wrote \0"
+    var s_oct: [u8; 8] = " octets\0"
+    var s_day: [u8; 5] = "day=\0"
+    var s_tot: [u8; 10] = " totalmJ=\0"
+    var s_sys: [u8; 11] = " systemmJ=\0"
+    var s_base: [u8; 9] = " basemW=\0"
+    var s_sam: [u8; 10] = " samples=\0"
+    var s_hlt: [u8; 9] = " health=\0"
+    var s_p: [u8; 7] = " prog=\0"
+    var s_col: [u8; 2] = ":\0"
+
+    let hz: u64 = scal(PM_HZ)
+    flen = 0
+
+    // 1. read what is already there.
+    var oldn: u64 = 0
+    let fd: u64 = tools.openr((&path[0 as usize]) as u64)
+    if !ulib.bad(fd) {
+        let got: u64 = ulib.sys(ulib.SYS_READ, fd, (&old[0 as usize]) as u64,
+            16383)
+        if !ulib.bad(got) {
+            oldn = got
+        }
+        ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    }
+
+    // 2. count the DATA lines (a comment is not a day).
+    var data: u64 = 0
+    var i: u64 = 0
+    var at_start: bool = true
+    while i < oldn {
+        if at_start && old[(i) as usize] != 35 as u8 {
+            data = data + 1
+        }
+        at_start = false
+        if old[(i) as usize] == 10 as u8 {
+            at_start = true
+        }
+        i = i + 1
+    }
+    var drop: u64 = 0
+    if data + 1 > KEEP_DAYS {
+        drop = data + 1 -% KEEP_DAYS
+    }
+
+    // 3. the header, rebuilt every time -- a file whose header somebody
+    //    edited by hand comes back correct.
+    put_str((&s_h1[0 as usize]) as u64)
+    put_ch(10)
+    put_str((&s_h2[0 as usize]) as u64)
+    put_ch(10)
+    put_str((&s_h3[0 as usize]) as u64)
+    put_ch(10)
+
+    // 4. the old data lines, minus the ones that fell off the front.
+    var seen: u64 = 0
+    var skip: bool = false
+    i = 0
+    at_start = true
+    while i < oldn {
+        if at_start {
+            skip = false
+            if old[(i) as usize] == 35 as u8 {
+                skip = true
+            } else {
+                if seen < drop {
+                    skip = true
+                }
+                seen = seen + 1
+            }
+        }
+        at_start = false
+        if !skip {
+            put_ch(old[(i) as usize] as u64)
+        }
+        if old[(i) as usize] == 10 as u8 {
+            at_start = true
+        }
+        i = i + 1
+    }
+    if flen != 0 && fbuf[(flen - 1) as usize] != 10 as u8 {
+        put_ch(10)
+    }
+
+    // 5. today.
+    put_str((&s_day[0 as usize]) as u64)
+    put_num(ulib.sys(ulib.SYS_SYSINFO, ulib.I_YEAR, 0, 0) * 10000
+        + ulib.sys(ulib.SYS_SYSINFO, ulib.I_MONTH, 0, 0) * 100
+        + ulib.sys(ulib.SYS_SYSINFO, ulib.I_DAY, 0, 0))
+    put_str((&s_tot[0 as usize]) as u64)
+    put_num(to_mj(scal(PM_SYSE) + scal(PM_TOTE), hz))
+    put_str((&s_sys[0 as usize]) as u64)
+    put_num(to_mj(scal(PM_SYSE), hz))
+    put_str((&s_base[0 as usize]) as u64)
+    put_num(scal(PM_BASE))
+    put_str((&s_sam[0 as usize]) as u64)
+    put_num(scal(PM_SAMPLES))
+    put_str((&s_hlt[0 as usize]) as u64)
+    put_num(scal(PM_HEALTH))
+    var k: u64 = 0
+    while k < r_n && k < 5 {
+        let row: u64 = r_order[(k) as usize]
+        put_str((&s_p[0 as usize]) as u64)
+        var j: u64 = 0
+        while j < 24 && r_name[(row * 24 + j) as usize] != 0 as u8 {
+            put_ch(r_name[(row * 24 + j) as usize] as u64)
+            j = j + 1
+        }
+        put_str((&s_col[0 as usize]) as u64)
+        put_num(to_mj(r_energy[(row) as usize], hz))
+        k = k + 1
+    }
+    put_ch(10)
+
+    // 6. write it back.
+    let out: u64 = tools.openw((&path[0 as usize]) as u64)
+    if ulib.bad(out) {
+        ulib.esay_line((&s_open[0 as usize]) as u64, 0)
+        return 1
+    }
+    ulib.sys(ulib.SYS_WRITE, out, (&fbuf[0 as usize]) as u64, flen)
+    ulib.sys(ulib.SYS_CLOSE, out, 0, 0)
+    // THE DAY MARK MOVES ONLY ONCE THE FILE REALLY HOLDS THE DAY. The
+    // other order loses a day whenever the disk is full, and the day it
+    // loses is the one somebody was about to look at.
+    ulib.sys(SYS_PMON, 5, PS_ROLLDAY, 0)
+    ulib.say((&s_wrote[0 as usize]) as u64)
+    ulib.sayu(flen)
+    ulib.say((&s_oct[0 as usize]) as u64)
+    ulib.nl()
+    return 0
+}
+
+// ------------------------------------------------------------ the window
+//
+// The same page, in a window, out of the widget library of round K15.
+// The colours come out of the theme the library resolved (`wlib.begin`
+// reads it), so this page follows the scheme the person chose without
+// knowing a single colour value; when round THEME lands, its semantic
+// roles arrive here through the same call and nothing in this file has
+// to change.
+
+static mut blob: [u8; 2048] = [0 as u8; 2048]
+static mut bn: u64 = 0
+static mut head: [u8; 512] = [0 as u8; 512]
+static mut hn: u64 = 0
+
+fn b_ch(c: u64) {
+    if bn < 2047 {
+        blob[(bn) as usize] = c as u8
+        bn = bn + 1
+    }
+}
+
+fn b_str(p: u64) {
+    var i: u64 = 0
+    let n: u64 = ulib.length(p)
+    while i < n {
+        b_ch(__mmio_read8((p + i) as *mut u8) as u64)
+        i = i + 1
+    }
+}
+
+fn b_num(v: u64) {
+    var d: [u8; 24] = [0 as u8; 24]
+    var n: u64 = 0
+    var t: u64 = v
+    if t == 0 {
+        b_ch(48)
+        return
+    }
+    while t != 0 {
+        d[(n) as usize] = (48 + t -% (t / 10) * 10) as u8
+        t = t / 10
+        n = n + 1
+    }
+    while n != 0 {
+        n = n -% 1
+        b_ch(d[(n) as usize] as u64)
+    }
+}
+
+fn h_ch(c: u64) {
+    if hn < 511 {
+        head[(hn) as usize] = c as u8
+        hn = hn + 1
+    }
+}
+
+fn h_str(p: u64) {
+    var i: u64 = 0
+    let n: u64 = ulib.length(p)
+    while i < n {
+        h_ch(__mmio_read8((p + i) as *mut u8) as u64)
+        i = i + 1
+    }
+}
+
+fn h_num(v: u64) {
+    var d: [u8; 24] = [0 as u8; 24]
+    var n: u64 = 0
+    var t: u64 = v
+    if t == 0 {
+        h_ch(48)
+        return
+    }
+    while t != 0 {
+        d[(n) as usize] = (48 + t -% (t / 10) * 10) as u8
+        t = t / 10
+        n = n + 1
+    }
+    while n != 0 {
+        n = n -% 1
+        h_ch(d[(n) as usize] as u64)
+    }
+}
+
+// The table as one blob: columns separated by a tab, rows by a newline.
+// That is what `wlib.table` takes, and it is what a program builds
+// anyway.
+fn build_blob() {
+    var s_pct: [u8; 3] = " %\0"
+    let hz: u64 = scal(PM_HZ)
+    bn = 0
+    share_reset()
+    var i: u64 = 0
+    while i < r_n {
+        let row: u64 = r_order[(i) as usize]
+        var j: u64 = 0
+        while j < 24 && r_name[(row * 24 + j) as usize] != 0 as u8 {
+            b_ch(r_name[(row * 24 + j) as usize] as u64)
+            j = j + 1
+        }
+        b_ch(9)
+        b_num(share_next(r_ticks[(row) as usize], t_ticks))
+        b_str((&s_pct[0 as usize]) as u64)
+        b_ch(9)
+        b_num(r_ticks[(row) as usize])
+        b_ch(9)
+        b_num(to_mj(r_energy[(row) as usize], hz))
+        b_ch(10)
+        i = i + 1
+    }
+    b_ch(0)
+}
+
+fn build_head() {
+    var s_now: [u8; 12] = "Power now: \0"
+    var s_mw: [u8; 5] = " mW\0\0"
+    var s_fl: [u8; 17] = "   System floor \0"
+    var s_at: [u8; 17] = "   Attributable \0"
+    var s_hl: [u8; 12] = "   Health: \0"
+    var s_pc: [u8; 3] = " %\0"
+    var s_rt: [u8; 12] = "   Left: \0\0\0"
+    var s_mn: [u8; 5] = " min\0"
+    var s_un: [u8; 3] = "--\0"
+    hn = 0
+    h_str((&s_now[0 as usize]) as u64)
+    if scal(PM_RATEOK) != 0 {
+        h_num(scal(PM_RATE))
+        h_str((&s_mw[0 as usize]) as u64)
+    } else {
+        h_str((&s_un[0 as usize]) as u64)
+    }
+    h_str((&s_fl[0 as usize]) as u64)
+    if scal(PM_BASEOK) != 0 {
+        h_num(scal(PM_BASE))
+        h_str((&s_mw[0 as usize]) as u64)
+    } else {
+        h_str((&s_un[0 as usize]) as u64)
+    }
+    h_str((&s_at[0 as usize]) as u64)
+    h_num(scal(PM_ATTRIB))
+    h_str((&s_mw[0 as usize]) as u64)
+    h_str((&s_hl[0 as usize]) as u64)
+    if scal(PM_HEALTHOK) != 0 {
+        h_num(scal(PM_HEALTH))
+        h_str((&s_pc[0 as usize]) as u64)
+    } else {
+        h_str((&s_un[0 as usize]) as u64)
+    }
+    h_str((&s_rt[0 as usize]) as u64)
+    if scal(PM_MINUTES) != 0 {
+        h_num(scal(PM_MINUTES))
+        h_str((&s_mn[0 as usize]) as u64)
+    } else {
+        h_str((&s_un[0 as usize]) as u64)
+    }
+    h_ch(0)
+}
+
+// THE WIDGET LIBRARY KEEPS THE POINTER IT IS GIVEN -- a label is drawn
+// again out of the same memory on every redraw. So these live in static
+// storage and not on the stack of `window`, and it is the compiler that
+// says so: it refuses the call outright rather than letting a window be
+// painted out of a stack frame that has already returned. A nice thing
+// to be told at build time instead of finding it as a flickering label.
+static mut t_win: [u8; 25] = "Battery usage by program\0"
+static mut t_sub: [u8; 42] = "measured total, proportionally attributed\0"
+static mut t_close: [u8; 6] = "Close\0"
+static mut breiten: [u64; 4] = [200 as u64, 90 as u64, 130 as u64, 120 as u64]
+
+fn window(hold: bool) -> u64 {
+    var s_bad: [u8; 29] = "powermon: no drawing surface\0"
+    var s_win: [u8; 23] = "powermon: window w=\0\0\0\0"
+    var s_h: [u8; 4] = " h=\0"
+    var s_rows: [u8; 19] = "powermon: rows=\0\0\0\0"
+    var s_ready: [u8; 17] = "powermon: ready\0\0"
+
+    if !wlib.begin(false, false) {
+        ulib.esay_line((&s_bad[0 as usize]) as u64, 0)
+        return 1
+    }
+    let bw: u64 = 620
+    let bh: u64 = 420
+    let w: u64 = wlib.window(70, 70, bw, bh, (&t_win[0 as usize]) as u64)
+    if w >= wlib.MAXWN {
+        ulib.esay_line((&s_bad[0 as usize]) as u64, 0)
+        return 1
+    }
+    ulib.say((&s_win[0 as usize]) as u64)
+    ulib.sayu(bw)
+    ulib.say((&s_h[0 as usize]) as u64)
+    ulib.sayu(bh)
+    ulib.nl()
+
+    build_head()
+    build_blob()
+
+    wlib.box_v(w, 0, 0, bw, bh, 12, 8)
+    wlib.label((&head[0 as usize]) as u64)
+    wlib.label((&t_sub[0 as usize]) as u64)
+    wlib.table((&blob[0 as usize]) as u64, 12, 4,
+        (&breiten[0 as usize]) as u64)
+    let bt: u64 = wlib.button((&t_close[0 as usize]) as u64)
+    wlib.box_end()
+    wlib.draw_all()
+    ulib.say((&s_rows[0 as usize]) as u64)
+    ulib.sayu(r_n)
+    ulib.nl()
+    ulib.say((&s_ready[0 as usize]) as u64)
+    ulib.nl()
+    if !hold {
+        wlib.close(w)
+        return 0
+    }
+    while wlib.alive() {
+        let id: u64 = wlib.step()
+        if id == bt {
+            wlib.quit()
+        }
+    }
+    return 0
+}
+
+// ---------------------------------------------------------------- main
+
+fn u_start(args: u64) -> u64 {
+    var w_raw: [u8; 4] = "raw\0"
+    var w_graph: [u8; 6] = "graph\0"
+    var w_day: [u8; 4] = "day\0"
+    var w_reset: [u8; 6] = "reset\0"
+    var w_win: [u8; 7] = "window\0"
+    var w_hold: [u8; 5] = "hold\0"
+    var w_bright: [u8; 7] = "bright\0"
+    var s_off: [u8; 47] = "powermon: the power accounting is not running.\0"
+    var s_reset: [u8; 28] = "powermon: the split is gone\0"
+    var s_noperm: [u8; 41] = "powermon: only the owner may do that (0)\0"
+
+    let argc: u64 = ulib.arg_count(args)
+    var mode: u64 = 0 // 0 table, 1 raw, 2 graph, 3 day, 4 reset, 5 window
+    var hold: bool = false
+    var a: u64 = 1
+    while a < argc {
+        let p: u64 = ulib.arg_at(args, a)
+        if ulib.streq(p, (&w_raw[0 as usize]) as u64) {
+            mode = 1
+        }
+        if ulib.streq(p, (&w_graph[0 as usize]) as u64) {
+            mode = 2
+        }
+        if ulib.streq(p, (&w_day[0 as usize]) as u64) {
+            mode = 3
+        }
+        if ulib.streq(p, (&w_reset[0 as usize]) as u64) {
+            mode = 4
+        }
+        if ulib.streq(p, (&w_win[0 as usize]) as u64) {
+            mode = 5
+        }
+        if ulib.streq(p, (&w_bright[0 as usize]) as u64) {
+            mode = 6
+        }
+        if ulib.streq(p, (&w_hold[0 as usize]) as u64) {
+            hold = true
+        }
+        a = a + 1
+    }
+
+    // THE COUNTER-CHECK, AND IT PRINTS INSTEAD OF COMPUTING. Without the
+    // accounting there are no numbers, and a table of zeros looks exactly
+    // like a machine that used no power.
+    if scal(PM_ON) == 0 && mode != 4 {
+        ulib.esay_line((&s_off[0 as usize]) as u64, 0)
+        return 1
+    }
+
+    load_rows()
+    if mode == 1 {
+        raw()
+        return 0
+    }
+    if mode == 2 {
+        graph(24)
+        return 0
+    }
+    if mode == 3 {
+        return day_write()
+    }
+    if mode == 4 {
+        let r: u64 = ulib.sys(SYS_PMON, 5, PS_RESET, 0)
+        if is_err(r) {
+            ulib.esay_line((&s_noperm[0 as usize]) as u64, 0)
+            return 1
+        }
+        ulib.say((&s_reset[0 as usize]) as u64)
+        ulib.nl()
+        return 0
+    }
+    if mode == 5 {
+        return window(hold)
+    }
+    if mode == 6 {
+        brightness()
+        return 0
+    }
+    machine()
+    table()
+    return 0
+}

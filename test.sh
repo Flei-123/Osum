@@ -404,6 +404,25 @@
 #      Uebertragen. Gemessen wird mit Bildschirmfotos vorher und
 #      nachher; die Gegenprobe nimmt das Wort `disp` weg und erwartet
 #      nichts davon.
+#  25. AKKUANALYSE JE PROGRAMM (tools/powermon/run.sh, Runde POWERMON):
+#      "Akkunutzung nach App", aber aus gemessenen Zahlen. Niemand kann
+#      den Verbrauch EINES Programms messen -- Windows auch nicht, es
+#      schaetzt aus Rechenzeit, Bildschirm, Platte und Netz. Diese Runde
+#      nimmt statt dessen die WIRKLICHE Gesamtleistung aus `_BST` (Runde
+#      K18 liest sie) und VERTEILT sie: Grundlast getrennt gemessen und
+#      als "System" ausgewiesen, der Rest nach Rechenzeit auf die
+#      Programme. Die Summe stimmt per Konstruktion mit der Wirklichkeit
+#      ueberein -- nur die Aufteilung ist eine Naeherung, und genau das
+#      steht in der Oberflaeche.
+#      WAS DIESER WIRT NICHT HERGIBT, steht ausdruecklich im Laeufer:
+#      QEMU 7.2 hat kein `-device battery`, der Akku kommt aus einer
+#      STATISCHEN Tabelle, und deshalb aendert sich die gemessene
+#      Leistung unter Last NICHT. Die AUFTEILUNG ist gemessen (T_TICKS
+#      ist echt), die PHYSIK nicht. Gegenproben: `nopowermon` (nichts
+#      wird gezaehlt), `pmonnofloor` (ohne Grundlast bekommt jedes
+#      laufende Programm den ganzen Bildschirm angehaengt -- der
+#      haeufigste Fehler solcher Anzeigen, hier als Zahl).
+#
 #  24. ENERGIE UND LEISTUNG (tools/k18/run.sh, Runde K18): bis dahin
 #      konnte dieser Kernel ueber ACPI genau eine Sache -- abschalten.
 #      Zwischen "laeuft" und "aus" gab es nichts. Diese Runde baut die
@@ -692,6 +711,8 @@ lauf "27. installieren, benutzen, entfernen -- und nichts bleibt (tools/tunnel/p
      tools/tunnel/pakete.sh tunnelpakete '^  OK    (SPURLOS|zweimal gebaut|GEGENPROBE|das Paket .bleibt.|mit --behalte-daten)'
 lauf "25. Diebstahl: Geraeteidentitaet, Sicherung, Schluesselverwaltung (tools/tresor/run.sh, Runde TRESOR)" \
      tools/tresor/run.sh tresor '^TRESOR: |^  OK    (SMBIOS |SHA-256 |PBKDF2|DER ZWEITE LAUF|der wiederhergestellte Baum|ACHT OKTETTE|im beschaedigten|GEGENPROBE|eine (NEUE PLATTE|ANDERE Maschine)|der Fingerabdruck ist|die Seriennummer des Laufwerks|crypto erase|open mit dem richtigen|1000 Oktette|bei 0xF1031|und seine Pruefsumme|PREIS DER AUSNAHME|MIT Liste sichert|DAS WIEDERHERGESTELLTE PAKET|das verwaiste Paket ist OKTETT|ZWEITER LAUF SCHREIBT NULL|GESCHRIEBEN nur|FAKTOR der kleinen|kein halbes Backup)'
+lauf "25. Akkuanalyse je Programm: die gemessene Gesamtleistung, anteilig zugeordnet (tools/powermon/run.sh, Runde POWERMON)" \
+     tools/powermon/run.sh powermon '^POWERMON: |^        |^  OK    (another table|GEGENPROBE|the two displays|the same energy|the sum of the program|and the kernel.s own rows|the shares add up|the ageing|runtime left|one sample costs|counted and uncounted|at 10 samples|the file stays|AND THE SENTENCE|ON THIS HOST|wigapp= really|the window server counts|distinct colours)'
 
 echo
 echo "=================================================================="
