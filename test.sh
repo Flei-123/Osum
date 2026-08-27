@@ -299,6 +299,11 @@ set -uo pipefail
 #      Quelle sie liefern kann. Gemessen: +29 128 Oktette (+67,6 %), und
 #      ein zweiter Rechner OHNE den Baum stellt das Paket oktettgleich
 #      wieder her und FUEHRT es aus (docs/ORPHANS.md).
+#      ZWEITER NACHTRAG: der Knopf im Dateimanager. Gesichert wird in
+#      ein VERZEICHNIS aus geteilten Bloecken, nicht in ein ZIP -- zweiter
+#      Lauf 0 Oktette, ein geaendertes Oktett kostet 4096 statt 44384.
+#      Der Knopf SELBST ist noch nicht von Ende zu Ende gemessen
+#      (tools/tresor/gui.sh, docs/BACKUP-UI.md Abschnitt 7).
 
 cd "$(dirname "$0")"
 ROOT=$(pwd)
@@ -451,7 +456,7 @@ lauf "22. Widgets und der Dateimanager: eine Bibliothek in Ring 3 (tools/k15/run
 lauf "24. Energie und Leistung: drei Profile, Ruhezustand, Waerme, Akku (tools/k18/run.sh, Runde K18)" \
      tools/k18/run.sh k18 '^K18: |^  OK    (dieselbe Stelle|IA32_PERF_CTL bekommt|Turbo ist bei|SpeedStep ist bei|jeder Durchlauf ging|schlafend |aber es wird kein|zwei Tabellen|GEGENPROBE|GEDROSSELT|im BILD|dasselbe Pruefbild|und einen Bildpunkt DANEBEN|keine AUFRUFNUMMER)'
 lauf "25. Diebstahl: Geraeteidentitaet, Sicherung, Schluesselverwaltung (tools/tresor/run.sh, Runde TRESOR)" \
-     tools/tresor/run.sh tresor '^TRESOR: |^  OK    (SMBIOS |SHA-256 |PBKDF2|DER ZWEITE LAUF|der wiederhergestellte Baum|ACHT OKTETTE|im beschaedigten|GEGENPROBE|eine (NEUE PLATTE|ANDERE Maschine)|der Fingerabdruck ist|die Seriennummer des Laufwerks|crypto erase|open mit dem richtigen|1000 Oktette|bei 0xF1031|und seine Pruefsumme|PREIS DER AUSNAHME|MIT Liste sichert|DAS WIEDERHERGESTELLTE PAKET|das verwaiste Paket ist OKTETT)'
+     tools/tresor/run.sh tresor '^TRESOR: |^  OK    (SMBIOS |SHA-256 |PBKDF2|DER ZWEITE LAUF|der wiederhergestellte Baum|ACHT OKTETTE|im beschaedigten|GEGENPROBE|eine (NEUE PLATTE|ANDERE Maschine)|der Fingerabdruck ist|die Seriennummer des Laufwerks|crypto erase|open mit dem richtigen|1000 Oktette|bei 0xF1031|und seine Pruefsumme|PREIS DER AUSNAHME|MIT Liste sichert|DAS WIEDERHERGESTELLTE PAKET|das verwaiste Paket ist OKTETT|ZWEITER LAUF SCHREIBT NULL|GESCHRIEBEN nur|FAKTOR der kleinen|kein halbes Backup)'
 
 echo
 echo "=================================================================="
