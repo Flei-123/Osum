@@ -1209,6 +1209,7 @@ past:
 | the click | `qs: tile n=0 to=1 rc=0` |
 | what the taskbar then says | `taskbar: faking fb=2` |
 | the sign in the picture | **61 of 61** pixels, at 524,580 |
+| the tile itself, repainted "on" | **82 of 82** pixels |
 | the running `filtered` window | kept its view |
 | the running `faked` window | kept its view |
 | the running `none` window | kept its view |
@@ -1217,6 +1218,15 @@ The last three are the counter-check: a preference does not touch a
 running process, and one click on it may not have moved a single one.
 The whole path is in those rows -- click, system call, kernel state,
 taskbar poll, pixels -- and not one step of it is asserted.
+
+`docs/shots/netview/qs-switch.png` came out of a **standalone
+reproduction** (`tools/netview/smoke.sh`) and not out of the suite, and
+that is worth saying rather than hiding: on this machine another round
+was booting QEMUs at the same time, the graphical boot to `wm: hold`
+took over three hundred seconds, and the screendump ran out of clock
+twice. The serial half of the measurement is unaffected -- it is
+written whatever the picture does, which is exactly why 9d was
+restructured to read it either way. The limit is now 600 seconds.
 
 **The correction, on a machine told nothing anywhere:**
 
