@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""tools/k15/wert.py -- EIN Feld aus einer gemeldeten Zeile holen.
+"""tools/k15/value.py -- EIN Feld aus einer gemeldeten Zeile holen.
 
-    wert.py <mitschnitt> <zeilenanfang> <schluessel> [rgb]
+    value.py <mitschnitt> <zeilenanfang> <schluessel> [rgb]
 
 Die Anwendungen dieser Runde melden Zeilen der Form
 
@@ -15,7 +15,7 @@ Tintenpunkten falsch, weil gegen WEISS statt gegen die Textfarbe
 gerechnet wurde.
 
 Also wird hier auf WORTGRENZEN geachtet und nicht auf Teilzeichenketten.
-Mit `rgb` kommt der Wert als "r g b" heraus, wie `schau.py` ihn will.
+Mit `rgb` kommt der Wert als "r g b" heraus, wie `checkshot.py` ihn will.
 """
 import re
 import sys

@@ -55,7 +55,7 @@ Dazu geändert: `blk.fi` (zweite Platte, gerätebezogenes Lesen/Schreiben),
 (`rename_path`), `bootmod.fi` (CRC32 fortschreibbar), `atomic.fi`
 (`L_PROC`), `kstate.fi`, `sys.fi`, `kmain.fi`, `kernel/user/mount.fi`,
 `kernel/user/umount.fi`, `ulib.fi`, `lib/libc/kcall.fi`,
-`tools/kernel/karte.py`, `test.sh`.
+`tools/kernel/memmap.py`, `test.sh`.
 
 ---
 
@@ -390,7 +390,7 @@ den Sklaven auch dann antworten, wenn gar kein `-drive` daran hängt.
 
 Der Auftrag hat sie zugeteilt, weil weitere Runden **gleichzeitig** an
 diesem Baum arbeiten. Genau diese Lage hat dem Projekt viermal dieselbe
-kdata-Kollision beschert (siehe den Kopf von `tools/kernel/karte.py`).
+kdata-Kollision beschert (siehe den Kopf von `tools/kernel/memmap.py`).
 
 | Vorrat | genommen |
 |---|---|
@@ -405,7 +405,7 @@ weil Linux die Aufrufe hat — Regel 1 der Karte in `kernel/sys.fi` ist
 älter als der Auftrag: eine abweichende Nummer wäre eine
 Übersetzungstabelle, die jemand pflegen muss.
 
-Die drei kdata-Seiten stehen in `tools/kernel/karte.py`
+Die drei kdata-Seiten stehen in `tools/kernel/memmap.py`
 (BEREICHE + `dateien` + KEINE_KDATA), und der Prüfer rechnet nach:
 **46 Bereiche in 0x50000 Oktetten kdata, 0 Kollisionen.**
 Gegenprobe: `PROCFS_OFF` versuchsweise auf `FB_OFF` (0x3C000) gelegt —

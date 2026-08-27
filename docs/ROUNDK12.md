@@ -397,7 +397,7 @@ Steuerblöcke, verschachtelte Seitentabellen, Bitkarten, der Speicher der
 Gäste. Eine Gastmaschine ist so groß, wie ihr Gast Speicher braucht, und
 das gehört nicht in eine feste Seite.
 
-Der Bereich ist in `tools/kernel/karte.py` eingetragen — als bisher
+Der Bereich ist in `tools/kernel/memmap.py` eingetragen — als bisher
 einziger neben `fb.fi` in einer anderen Datei als `kstate.fi`, mit den
 vier Innen-Versätzen ausdrücklich als „kein kdata“ erklärt. Der
 Kartenprüfer rechnet nach: **39 Bereiche, 0 Kollisionen.**
@@ -584,5 +584,5 @@ etwas.
 Berührt: `boot.s` und `kstate.fi` (`kdata` 0x40000 → 0x50000), `isr.s`
 (**eine** Zeile: Platz 69 = `hv_vectors`), `kmain.fi` (vier Zeilen),
 `cap.fi` (`K_VM`), `sys.fi` (Karte + fünf Aufrufe), `uprog.fi` (`u_hv`),
-`tools/build-kernel.sh` (die fünfte Assemblerdatei), `tools/kernel/karte.py`
+`tools/build-kernel.sh` (die fünfte Assemblerdatei), `tools/kernel/memmap.py`
 (der Bereich `HV`), `test.sh` (Abschnitt 15).

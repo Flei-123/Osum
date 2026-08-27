@@ -14,7 +14,7 @@
 #
 #   1. DIE ANORDNUNG WIRD GEGEN SICH SELBST GERECHNET. Die Anwendung
 #      meldet jedes Rechteck, das sie ausgerechnet hat, BEVOR sie malt.
-#      `tools/k15/anordnung.py` prueft, dass keines aus dem Fenster
+#      `tools/k15/layout.py` prueft, dass keines aus dem Fenster
 #      ragt, dass sich keine zwei ueberschneiden und dass die
 #      Reihenfolge stimmt. Ein Bildschirmfoto sieht das nicht: zwei
 #      Knoepfe uebereinander sehen aus wie einer.
@@ -24,7 +24,7 @@
 #      fehlte -- die 87 Prozent waren schwarzer Hintergrund. Also wird
 #      hier keine Flaeche gezaehlt, sondern je Zeichen die gesetzten
 #      Bildpunkte gegen eine zweite, unabhaengige Rasterung desselben
-#      Umrisses (`tools/ttf/raster.py` ueber `tools/gfx/schau.py`) --
+#      Umrisses (`tools/ttf/raster.py` ueber `tools/gfx/checkshot.py`) --
 #      und ein Zeichen ohne Tinte im Bild laesst die Zusage fallen.
 #      Die Stelle und die beiden Farben sagt die ANWENDUNG; nachgerechnet
 #      wird im BILD.
@@ -38,7 +38,7 @@
 #      `nodirty` (keine Bereichsverfolgung), `nofocus`, `nomouse`, und
 #      der Lauf ganz ohne das Wort `wig`.
 #   5. DER DATEIMANAGER WIRD GEGEN DIE PLATTE GERECHNET.
-#      `tools/k15/baum.py` legt den Baum an UND schreibt auf, was
+#      `tools/k15/tree.py` legt den Baum an UND schreibt auf, was
 #      darin steht; was `/bin/files` zeigt, wird Zeichen fuer Zeichen
 #      dagegen gehalten. Und was er AENDERT, wird nicht im Bild
 #      geglaubt, sondern im Plattenabbild nachgesehen (`mkfs.py list`).
@@ -68,28 +68,28 @@ gleich() { if [ "$2" = "$3" ]; then ok "$1: $2"; else bad "$1: '$3' statt '$2'";
 
 schau() { local name=$1; shift
     local aus rc
-    aus=$(python3 tools/gfx/schau.py "$@" 2>&1); rc=$?
+    aus=$(python3 tools/gfx/checkshot.py "$@" 2>&1); rc=$?
     if [ "$rc" -eq 0 ]; then ok "$name ($aus)"; else bad "$name -- $aus"; fi
 }
 schau_nicht() { local name=$1; shift
     local aus rc
-    aus=$(python3 tools/gfx/schau.py "$@" 2>&1); rc=$?
+    aus=$(python3 tools/gfx/checkshot.py "$@" 2>&1); rc=$?
     if [ "$rc" -ne 0 ]; then ok "$name"; else bad "$name -- ging durch: $aus"; fi
 }
 zahl()  { grep -aoE "$2" "$1" | head -1 | grep -oE '[0-9]+' | tail -1; }
 zahl2() { grep -aoE "$2" "$1" | tail -1 | grep -oE '[0-9]+' | tail -1; }
-# EIN FELD AUS EINER GEMELDETEN ZEILE. Ueber `tools/k15/wert.py` und
+# EIN FELD AUS EINER GEMELDETEN ZEILE. Ueber `tools/k15/value.py` und
 # nicht ueber `grep -oE '.*fg=[0-9]+'`: `.*` ist gierig, und `selfg`
 # endet auf `fg`. Genau daran sind in der ersten Fassung dieses Laeufers
 # vier Zusagen gescheitert -- gegen WEISS gerechnet statt gegen die
 # Textfarbe, und die Meldung sah aus wie ein Zeichenfehler.
-feld() { python3 tools/k15/wert.py "$1" "$2" "$3" 2>/dev/null; }
-frgb() { python3 tools/k15/wert.py "$1" "$2" "$3" rgb 2>/dev/null; }
+feld() { python3 tools/k15/value.py "$1" "$2" "$3" 2>/dev/null; }
+frgb() { python3 tools/k15/value.py "$1" "$2" "$3" rgb 2>/dev/null; }
 rgb() { python3 -c "v=int('${1:-0}');print((v>>16)&255,(v>>8)&255,v&255)"; }
 # Das Rechteck eines Widgets, wie die Anwendung es gemeldet hat.
 rect() { grep -aoE "^$2: rect id=$3 .*" "$1" | tail -1 | grep -oE "$4=[0-9]+" | sed 's/.*=//'; }
 
-bash vendor/firn/hole-firnc.sh >/dev/null || { echo "vendor/firn/hole-firnc.sh fehlgeschlagen"; exit 1; }
+bash vendor/firn/fetch-firnc.sh >/dev/null || { echo "vendor/firn/fetch-firnc.sh fehlgeschlagen"; exit 1; }
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
     echo "K15: uebersprungen, qemu-system-x86_64 ist nicht da"
     exit 0
@@ -127,7 +127,7 @@ foto() { # name kommandozeile [monitordatei] [marke]
     if [ -n "$mon" ]; then
         python3 tools/wm/monitor.py "$sock" "$mon" > "$TMPD/$name.monlog" 2>&1
     fi
-    python3 tools/gfx/schuss.py "$sock" "$ppm" 25 > "$TMPD/$name.shot" 2>&1
+    python3 tools/gfx/screenshot.py "$sock" "$ppm" 25 > "$TMPD/$name.shot" 2>&1
     wait "$pid"
     RC=$?
     rm -f "$sock"
@@ -204,26 +204,26 @@ num "Zeilen der Bibliothek in Ring 3" "$wigzeilen" gt 1500
 num "Zeilen der Naht im Kernel -- so wenig Kernel wie moeglich" "$kernzeilen" lt 600
 
 # Das Abbild: die Schriften, die Programme, das Farbschema, der Baum.
-python3 tools/k15/baum.py "$TMPD/baum" > "$TMPD/baum.log" 2>&1 \
+python3 tools/k15/tree.py "$TMPD/baum" > "$TMPD/baum.log" 2>&1 \
     && ok "der Verzeichnisbaum fuer den Dateimanager ist gebaut ($(head -1 "$TMPD/baum.log"))" \
-    || bad "tools/k15/baum.py fehlgeschlagen"
+    || bad "tools/k15/tree.py fehlgeschlagen"
 ARGS=(build "$TMPD/disk.img" 4096 /lib/
       "/lib/mono.ttf=$MONO" "/lib/sans.ttf=$SANS" /bin/)
 for p in $PROGS; do ARGS+=("/bin/$p=$TMPD/${p}0.elf"); done
 ARGS+=("/bin/files@/bin/explorer")
 ARGS+=(/etc/ "/etc/theme=$TMPD/baum/theme")
-# DIE BUENDEL: /apps/<name>.prog/{INFO,start,symbol,daten/}
-while read -r zeile; do ARGS+=("$zeile"); done < <(python3 tools/k15/buendel.py assets/apps "$TMPD/buendel")
+# DIE BUENDEL: /apps/<name>.prog/{INFO,start,symbol,data/}
+while read -r zeile; do ARGS+=("$zeile"); done < <(python3 tools/k15/bundle.py assets/apps "$TMPD/buendel")
 while read -r z; do ARGS+=("$z"); done < "$TMPD/baum/liste"
 python3 tools/osum/mkfs.py "${ARGS[@]}" > "$TMPD/mkfs.txt" 2>&1 \
     && ok "mkfs.py baut ein Abbild mit den Schriften, den Programmen und /etc/theme" \
     || { bad "mkfs.py fehlgeschlagen"; sed 's/^/        /' "$TMPD/mkfs.txt" | head -6; }
 
 echo "== 2. die Speicherkarte: drei Seiten, und nur die drei =="
-kart=$(python3 tools/kernel/karte.py kernel 2>&1)
+kart=$(python3 tools/kernel/memmap.py kernel 2>&1)
 if [ $? -eq 0 ]; then ok "die Speicherkarte von kdata: $kart"
 else bad "die Speicherkarte von kdata kollidiert"; echo "$kart" | sed 's/^/        /'; fi
-if python3 tools/kernel/karte.py kernel -v 2>/dev/null | grep -q " WIG  *kstate.fi:"; then
+if python3 tools/kernel/memmap.py kernel -v 2>/dev/null | grep -q " WIG  *kstate.fi:"; then
     ok "der Bereich WIG steht in der Karte"
 else
     bad "der Bereich WIG steht NICHT in der Karte"
@@ -231,7 +231,7 @@ fi
 # DER VORRAT, DER DIESER RUNDE GEHOERT. Drei Runden liefen gleichzeitig;
 # genau daran waeren drei Merges beinahe gescheitert. Also wird
 # nachgerechnet, dass diese Runde in ihrem Vorrat geblieben ist.
-wo=$(python3 tools/kernel/karte.py kernel -v 2>/dev/null | grep ' WIG ' | grep -oE '0x[0-9A-Fa-f]+' | head -2 | tr '\n' ' ')
+wo=$(python3 tools/kernel/memmap.py kernel -v 2>/dev/null | grep ' WIG ' | grep -oE '0x[0-9A-Fa-f]+' | head -2 | tr '\n' ' ')
 gleich "der Bereich liegt im zugeteilten Vorrat" "0x46000 0x49000 " "$wo"
 # ZEHN AUFRUFE: sieben aus der Runde, drei aus dem zweiten Nachtrag
 # (1807 Tabellenlauf, 1808 Journal, 1809 Auskunft).
@@ -252,7 +252,7 @@ fi
 # Fensterservers, MUSS er anschlagen.
 GG="$TMPD/kernel-gg"; mkdir -p "$GG"; cp kernel/*.fi "$GG/"
 sed -i 's/^const WIG_OFF: u64 = 0x46000/const WIG_OFF: u64 = 0x1E000/' "$GG/kstate.fi"
-gg=$(python3 tools/kernel/karte.py "$GG" 2>&1)
+gg=$(python3 tools/kernel/memmap.py "$GG" 2>&1)
 if [ $? -ne 0 ] && printf '%s' "$gg" | grep -q 'KOLLISION'; then
     ok "mit WIG_OFF auf 0x1E000 findet der Pruefer die Kollision mit WM"
 else
@@ -273,14 +273,14 @@ BH=$(feld "$TMPD/ruhe.txt" "widgetdemo: geom" h)
 num "das Fenster ist so breit, wie die Anwendung es bestellt hat" "$BW" eq 480
 num "und so hoch" "$BH" eq 400
 CX=$((WX + BORDER)); CY=$((WY + TITLE))
-aus=$(python3 tools/k15/anordnung.py "$TMPD/ruhe.txt" widgetdemo "$BW" "$BH" 12 2>&1)
+aus=$(python3 tools/k15/layout.py "$TMPD/ruhe.txt" widgetdemo "$BW" "$BH" 12 2>&1)
 if [ $? -eq 0 ]; then ok "die Anordnung: $aus"
 else bad "die Anordnung stimmt nicht"; echo "$aus" | sed 's/^/        /' | head -8; fi
 # Und die Gegenprobe zum Pruefer selbst: ein Rechteck, das aus dem
 # Fenster ragt, MUSS auffallen -- sonst prueft er nichts.
 sed 's/^widgetdemo: rect id=11 .*/widgetdemo: rect id=11 kind=5 x=12 y=372 w=456 h=112 /' \
     "$TMPD/ruhe.txt" > "$TMPD/ruhe-gg.txt"
-if python3 tools/k15/anordnung.py "$TMPD/ruhe-gg.txt" widgetdemo "$BW" "$BH" 12 >/dev/null 2>&1; then
+if python3 tools/k15/layout.py "$TMPD/ruhe-gg.txt" widgetdemo "$BW" "$BH" 12 >/dev/null 2>&1; then
     bad "der Anordnungspruefer laesst ein Rechteck durch, das aus dem Fenster ragt"
 else
     ok "ein Rechteck, das aus dem Fenster ragt, faellt dem Pruefer auf"
@@ -414,8 +414,8 @@ has "$TMPD/haken.txt" "widgetdemo: fired id=7 kind=3 ix=1" "das Kaestchen kippt 
 # UND DAS IST IM BILD ZU SEHEN: der Haken ist aus zwei Strichen in der
 # Betonungsfarbe. Ohne Klick ist dort KEIN einziger solcher Bildpunkt.
 HKX=$((CX + $(rect "$TMPD/ruhe.txt" widgetdemo 7 x))); HKY=$((CY + $(rect "$TMPD/ruhe.txt" widgetdemo 7 y) + 7))
-mit=$(python3 tools/k15/zaehl.py "$TMPD/haken.ppm" "$HKX" "$HKY" 14 14 92 200 255)
-ohne=$(python3 tools/k15/zaehl.py "$TMPD/ruhe.ppm" "$HKX" "$HKY" 14 14 92 200 255)
+mit=$(python3 tools/k15/count.py "$TMPD/haken.ppm" "$HKX" "$HKY" 14 14 92 200 255)
+ohne=$(python3 tools/k15/count.py "$TMPD/ruhe.ppm" "$HKX" "$HKY" 14 14 92 200 255)
 num "Bildpunkte des Hakens NACH dem Klick" "$mit" gt 12
 num "und VOR dem Klick (die Gegenprobe)" "$ohne" eq 0
 
@@ -465,9 +465,9 @@ num "der Kern beendet sich sauber" "$RC" eq 21
 # schiebt sich eine Kernelzeile mitten in eine Anwendungszeile
 # ("... sel=wm: go"). Ein `sed 's/.*e2=\[//'` darauf liefert Unsinn, und
 # die Zusage faellt aus einem Grund, der mit der Sache nichts zu tun hat.
-# `tools/k15/felder.py` sucht das VOLLSTAENDIGE Muster mit beiden
+# `tools/k15/fields.py` sucht das VOLLSTAENDIGE Muster mit beiden
 # schliessenden Klammern und nimmt die letzte Zeile, die es enthaelt.
-e2=$(python3 tools/k15/felder.py "$TMPD/tast.txt" e2)
+e2=$(python3 tools/k15/fields.py "$TMPD/tast.txt" e2)
 gleich "was im zweiten Textfeld steht" "Kopiermich-ab" "$e2"
 cs=$(feld "$TMPD/tast.txt" "wig: blits" clipset)
 cg=$(feld "$TMPD/tast.txt" "wig: blits" clipget)
@@ -487,7 +487,7 @@ schau_nicht "im Lauf OHNE Tastendruecke steht dort NICHTS" \
 # DIE GEGENPROBE, DIE DIE ZUSAGE ERST WERTVOLL MACHT: dieselben
 # Tastendruecke mit abgeschalteter Zwischenablage.
 foto noclip "gfx wm wig wignoclip wmhold wiglong $GRUND" "$M"
-e2n=$(python3 tools/k15/felder.py "$TMPD/noclip.txt" e2)
+e2n=$(python3 tools/k15/fields.py "$TMPD/noclip.txt" e2)
 gleich "mit 'noclip' kommt NUR das Getippte an" "-ab" "$e2n"
 schau_nicht "und im Bild steht der eingefuegte Text dann nicht" \
     ttext "$TMPD/noclip.ppm" "$SANS" 15 $((CX + E1TX)) $((CY + EBASE + E2Y - E1Y)) \
@@ -508,9 +508,9 @@ mouse_move 120 120
 mouse_move 60 60
 EOF
 foto tabkey "gfx wm wig wmhold wiglong $GRUND" "$M"
-e2t=$(python3 tools/k15/felder.py "$TMPD/tabkey.txt" e2)
+e2t=$(python3 tools/k15/fields.py "$TMPD/tabkey.txt" e2)
 gleich "nach der Tabulatortaste tippt man in das NAECHSTE Feld" "xy" "$e2t"
-e1t=$(python3 tools/k15/felder.py "$TMPD/tabkey.txt" e1)
+e1t=$(python3 tools/k15/fields.py "$TMPD/tabkey.txt" e1)
 gleich "und im vorigen steht unveraendert, was darin stand" "Kopiermich" "$e1t"
 schau "der Fokusring ist mitgewandert -- er liegt jetzt um das zweite Feld" \
     rechteck "$TMPD/tabkey.ppm" $((CX + $(rect "$TMPD/ruhe.txt" widgetdemo 4 x))) \
@@ -661,11 +661,11 @@ has "$TMPD/files.txt" "k15: start /bin/explorer" "/bin/explorer kommt von der Pl
 has "$TMPD/files.txt" "explorer: ready" "und hat sein Fenster gemalt"
 FN=$(feld "$TMPD/files.txt" "explorer: cd" n)
 SOLLN=$(wc -l < "$TMPD/baum/soll.txt")
-num "er zaehlt so viele Stuecke in /daten, wie baum.py angelegt hat" "$FN" eq "$SOLLN"
+num "er zaehlt so viele Stuecke in /data, wie tree.py angelegt hat" "$FN" eq "$SOLLN"
 FBW=$(feld "$TMPD/files.txt" "explorer: geom" w); FBH=$(feld "$TMPD/files.txt" "explorer: geom" h)
 FWX=$(feld "$TMPD/files.txt" "explorer: geom" x); FWY=$(feld "$TMPD/files.txt" "explorer: geom" y)
 FCX=$((FWX + BORDER)); FCY=$((FWY + TITLE))
-aus=$(python3 tools/k15/anordnung.py "$TMPD/files.txt" explorer "$FBW" "$FBH" 8 2>&1)
+aus=$(python3 tools/k15/layout.py "$TMPD/files.txt" explorer "$FBW" "$FBH" 8 2>&1)
 if [ $? -eq 0 ]; then ok "die Anordnung des Dateimanagers: $aus"
 else bad "die Anordnung des Dateimanagers stimmt nicht"; echo "$aus" | sed 's/^/        /' | head -6; fi
 TX=$(feld "$TMPD/files.txt" "explorer: rows" x)
@@ -684,7 +684,7 @@ schau "die Kopfzeile: die erste Spalte heisst 'Name'" \
 schau "und die zweite 'Groesse'" \
     ttext "$TMPD/files.ppm" "$SANS" 15 $((FCX + ${SP[1]})) $((FCY + TKOPF)) \
     $TFG $(rgb 3293262) "Groesse"
-# JEDE ZEILE, JE ZEICHEN, GEGEN DAS, WAS baum.py ANGELEGT HAT -- und in
+# JEDE ZEILE, JE ZEICHEN, GEGEN DAS, WAS tree.py ANGELEGT HAT -- und in
 # derselben Reihenfolge: Verzeichnisse zuerst, dann nach Namen.
 zeile=0
 while IFS=$'\t' read -r name gr kind; do
@@ -742,7 +742,7 @@ warte 1.0
 mouse_move 120 120
 EOF
 foto fdbl "gfx wm wigfiles wmhold wiglong $GRUND" "$M"
-has "$TMPD/fdbl.txt" "explorer: cd /daten/bilder" "der Doppelklick geht in das Verzeichnis hinein"
+has "$TMPD/fdbl.txt" "explorer: cd /data/bilder" "der Doppelklick geht in das Verzeichnis hinein"
 n2=$(grep -a '^explorer: cd' "$TMPD/fdbl.txt" | tail -1 | grep -oE 'n=[0-9]+' | sed 's/.*=//')
 num "und darin liegen zwei Dateien" "$n2" eq 2
 schau "die erste davon steht im Bild" \
@@ -804,15 +804,15 @@ rc2=$(grep -a '^explorer: tat' "$TMPD/fneu.txt" | tail -1 | grep -oE 'rc=[0-9]+'
 num "und der Kernel nimmt es an" "$rc2" eq 0
 # DIE OKTETTE AUF DER PLATTE, nicht das Bild.
 python3 tools/osum/mkfs.py list "$TMPD/live-fneu.img" > "$TMPD/fneu.ls" 2>&1
-if grep -qE '/daten/neu' "$TMPD/fneu.ls"; then
-    ok "und /daten/neu steht WIRKLICH im Plattenabbild"
+if grep -qE '/data/neu' "$TMPD/fneu.ls"; then
+    ok "und /data/neu steht WIRKLICH im Plattenabbild"
 else
-    bad "/daten/neu steht nicht im Plattenabbild"
+    bad "/data/neu steht nicht im Plattenabbild"
     grep -c . "$TMPD/fneu.ls" | sed 's/^/        Zeilen: /'
 fi
 python3 tools/osum/mkfs.py list "$TMPD/live-files.img" > "$TMPD/files.ls" 2>&1
-if grep -qE '/daten/neu' "$TMPD/files.ls"; then
-    bad "im Abbild OHNE die Bedienung steht /daten/neu auch -- die Zusage sagt nichts"
+if grep -qE '/data/neu' "$TMPD/files.ls"; then
+    bad "im Abbild OHNE die Bedienung steht /data/neu auch -- die Zusage sagt nichts"
 else
     ok "im Abbild ohne die Bedienung steht es NICHT (die Gegenprobe)"
 fi
@@ -860,7 +860,7 @@ foto nohit "gfx wm wig wignohit wmhold wiglong $GRUND" "$TMPD/haken.mon"
 hasnot "$TMPD/nohit.txt" "widgetdemo: fired" "mit 'nohit' meldet sich KEIN Widget"
 nh=$(feld "$TMPD/nohit.txt" "widgetdemo: state" haken)
 gleich "und das Kaestchen bleibt leer" "0" "$nh"
-nhp=$(python3 tools/k15/zaehl.py "$TMPD/nohit.ppm" "$HKX" "$HKY" 14 14 92 200 255)
+nhp=$(python3 tools/k15/count.py "$TMPD/nohit.ppm" "$HKX" "$HKY" 14 14 92 200 255)
 num "auch im Bild: kein Bildpunkt des Hakens" "$nhp" eq 0
 nhd=$(zahl2 "$TMPD/nohit.txt" 'downs=[0-9]+')
 num "obwohl der Klick beim Fenster ANGEKOMMEN ist" "$nhd" ge 1
@@ -901,7 +901,7 @@ ARGS2=(build "$TMPD/disk2.img" 4096 /lib/
 for p in $PROGS; do ARGS2+=("/bin/$p=$TMPD/${p}0.elf"); done
 ARGS2+=("/bin/files@/bin/explorer")
 ARGS2+=(/etc/ "/etc/theme=$TMPD/theme2")
-while read -r zeile; do ARGS2+=("$zeile"); done < <(python3 tools/k15/buendel.py assets/apps "$TMPD/buendel")
+while read -r zeile; do ARGS2+=("$zeile"); done < <(python3 tools/k15/bundle.py assets/apps "$TMPD/buendel")
 while read -r z; do ARGS2+=("$z"); done < "$TMPD/baum/liste"
 python3 tools/osum/mkfs.py "${ARGS2[@]}" > "$TMPD/mkfs2.txt" 2>&1
 cp -f "$TMPD/disk.img" "$TMPD/disk1.img"
@@ -945,17 +945,17 @@ echo "== 14. der Name, der zweite Name und die Auffindbarkeit =="
 # Quelltext, sondern in `/apps/explorer.prog/INFO`.
 # EIN `grep` PRUEFT DAS NICHT: der Kopfkommentar von explorer.fi
 # ERKLAERT, warum das Programm "Datei-Explorer" heisst, und ein
-# `grep -q` schlaegt darauf an. `tools/k15/keinname.py` entfernt die
+# `grep -q` schlaegt darauf an. `tools/k15/noname.py` entfernt die
 # Anmerkungen und sieht nur im Code nach.
-aus=$(python3 tools/k15/keinname.py kernel/user/explorer.fi "Datei-Explorer" 2>&1)
+aus=$(python3 tools/k15/noname.py kernel/user/explorer.fi "Datei-Explorer" 2>&1)
 if [ $? -eq 0 ]; then ok "der Anzeigename steht NICHT im Code ($aus)"
 else bad "der Anzeigename steht im Code: $aus"; fi
-aus=$(python3 tools/k15/keinname.py kernel/user/launcher.fi "Suchen" 2>&1)
+aus=$(python3 tools/k15/noname.py kernel/user/launcher.fi "Suchen" 2>&1)
 if [ $? -eq 0 ]; then ok "und der des Starters auch nicht"
 else bad "der Name des Starters steht im Code: $aus"; fi
 # Und die Gegenprobe zum Pruefer selbst: eine Zeichenkette, die WIRKLICH
 # im Code steht, MUSS er finden -- sonst prueft er nichts.
-if python3 tools/k15/keinname.py kernel/user/launcher.fi "Ausfuehren" >/dev/null 2>&1; then
+if python3 tools/k15/noname.py kernel/user/launcher.fi "Ausfuehren" >/dev/null 2>&1; then
     bad "der Pruefer findet eine Zeichenkette nicht, die im Code steht"
 else
     ok "eine Zeichenkette, die wirklich im Code steht, findet er (die Gegenprobe)"
@@ -1019,7 +1019,7 @@ has "$TMPD/start.txt" "launcher: treffer i=0 name=[Datei-Explorer] exec=[/apps/e
 # sondern auf der Platte. Was ausgefuehrt wird, ist `start` IM Buendel --
 # und `start` ist derselbe Inode wie die Datei unter `/bin`, kein zweites
 # Exemplar (das misst 14a).
-for teil in INFO symbol start daten/LIESMICH; do
+for teil in INFO symbol start data/README; do
     grep -q "^/apps/explorer.prog/$teil " "$TMPD/disk.ls" \
         && ok "das Buendel traegt $teil" \
         || bad "/apps/explorer.prog/$teil fehlt auf der Platte"
@@ -1050,7 +1050,7 @@ schau "und die zweite" \
 # DAS SYMBOL IST EINE DATEI. Im ersten Nachtrag war es sechs Hexziffern
 # in einer Textdatei -- ehrlich, solange dieses System kein Bild lesen
 # konnte, aber eben kein Bild. Seit dem zweiten liegt in jedem Buendel
-# `symbol` im Format OSYM (`tools/k15/symbol.py`), und deshalb wird hier
+# `symbol` im Format OSYM (`tools/k15/icon.py`), und deshalb wird hier
 # nicht eine Farbflaeche gezaehlt, sondern BILDPUNKT GEGEN BILDPUNKT
 # gegen eine zweite Umsetzung, die dieselbe Datei unabhaengig von Firn
 # zurueckliest. Das ist die Lehre aus Runde K7B, angewandt auf ein Bild:
@@ -1061,13 +1061,13 @@ schau "und die zweite" \
 # gehoert der Liste.
 sym() { echo "$TMPD/buendel/$1.prog.symbol"; }
 pruef() { local name=$1; shift
-    local aus rc; aus=$(python3 tools/k15/symbolbild.py "$@" 2>&1); rc=$?
+    local aus rc; aus=$(python3 tools/k15/iconpixels.py "$@" 2>&1); rc=$?
     if [ "$rc" -eq 0 ]; then ok "$name ($aus)"; else bad "$name -- $aus"; fi; }
 pruef_nicht() { local name=$1; shift
-    local aus rc; aus=$(python3 tools/k15/symbolbild.py "$@" 2>&1); rc=$?
+    local aus rc; aus=$(python3 tools/k15/iconpixels.py "$@" 2>&1); rc=$?
     if [ "$rc" -ne 0 ]; then ok "$name ($aus)"; else bad "$name -- ging durch"; fi; }
 for a in explorer editor; do
-    python3 tools/k15/symbol.py --pruefe "$(sym $a)" "assets/apps/$a.prog/symbol.txt" \
+    python3 tools/k15/icon.py --pruefe "$(sym $a)" "assets/apps/$a.prog/symbol.txt" \
         > "$TMPD/sym-$a.txt" 2>&1 \
         && ok "das Symbol von $a im Abbild ist die Zeichnung aus dem Quellbaum ($(cat "$TMPD/sym-$a.txt"))" \
         || bad "das Symbol von $a stimmt nicht mit seiner Zeichnung ueberein"
@@ -1171,7 +1171,7 @@ echo "== 15. der Namensindex: das GANZE Dateisystem, und sofort =="
 # Oktett fuer Oktett verglichen (`kernel/user/locate.fi`, `vergleiche`).
 #
 # UND ES BRAUCHT EIN ERNSTHAFTES DATEISYSTEM. An zwanzig Dateien beweist
-# sich nichts. `tools/k15/gross.py` legt viertausend an, in einem Baum
+# sich nichts. `tools/k15/bigfs.py` legt viertausend an, in einem Baum
 # aus siebzehn Ordnern, und schreibt daneben auf, wie viele Namen jedes
 # gesuchte Wort treffen MUSS -- der Laeufer glaubt weder dem Index noch
 # dem Durchlauf, sondern der Liste, aus der das Abbild gebaut wurde.
@@ -1182,9 +1182,9 @@ echo "== 15. der Namensindex: das GANZE Dateisystem, und sofort =="
 # `mount`). Abbilder mit 128 bleiben Oktett fuer Oktett, was sie waren --
 # Abschnitt 15d rechnet das nach.
 
-python3 tools/k15/gross.py "$TMPD/gross" 4000 > "$TMPD/gross.log" 2>&1 \
-    && ok "tools/k15/gross.py: $(cat "$TMPD/gross.log")" \
-    || bad "gross.py fehlgeschlagen"
+python3 tools/k15/bigfs.py "$TMPD/gross" 4000 > "$TMPD/gross.log" 2>&1 \
+    && ok "tools/k15/bigfs.py: $(cat "$TMPD/gross.log")" \
+    || bad "bigfs.py fehlgeschlagen"
 GARGS=(build "$TMPD/gross.img" 4096 /bin/
        "/bin/sh=$TMPD/sh0.elf" "/bin/locate=$TMPD/locate0.elf"
        "/bin/ls=$TMPD/ls0.elf")
@@ -1247,7 +1247,7 @@ num "und der Index ist dabei um ein Vielfaches schneller" \
 echo "        -> Baumdurchlauf $GW_U us, Suche im Index $GI_1 us"
 SOLLK=$(grep '^kupfer ' "$TMPD/gross/erwartet" | awk '{print $2}')
 num "und beide finden so viele, wie die Liste des Abbilds hergibt" "$GI_T" eq "$SOLLK"
-has "$TMPD/gkupfer.txt" "locate: pfad /daten/kupfer" \
+has "$TMPD/gkupfer.txt" "locate: pfad /data/kupfer" \
     "und der Treffer traegt seinen ganzen Pfad, aus den Elternnummern gebaut"
 
 gross gviele "locate -m 07"
@@ -1336,14 +1336,14 @@ EOF
 foto dsuche "gfx wm wigstart wmhold wiglong $GRUND" "$M"
 has "$TMPD/dsuche.txt" "launcher: suche [blau] treffer=1 apps=0   dateien=1" \
     "getippt 'blau': ein Treffer, und er ist KEIN Programm, sondern eine Datei"
-has "$TMPD/dsuche.txt" "launcher: datei i=0 name=[/daten/bilder/blau.ppm]" \
+has "$TMPD/dsuche.txt" "launcher: datei i=0 name=[/data/bilder/blau.ppm]" \
     "und es ist die Datei, die wirklich dort liegt"
-grep -q '^/daten/bilder/blau.ppm ' "$TMPD/disk.ls" \
+grep -q '^/data/bilder/blau.ppm ' "$TMPD/disk.ls" \
     && ok "was das Abbild an dieser Stelle auch wirklich fuehrt" \
-    || bad "/daten/bilder/blau.ppm steht gar nicht im Abbild"
+    || bad "/data/bilder/blau.ppm steht gar nicht im Abbild"
 schau "und im Bild steht der Pfad in Zeile 0 der Trefferliste, je Zeichen" \
     ttext "$TMPD/dsuche.ppm" "$SANS" 15 $((SCX + SRX)) $((SCY + SRB)) \
-    $SSFG $SSEL "/daten/bilder/blau.ppm" 96
+    $SSFG $SSEL "/data/bilder/blau.ppm" 96
 DIX=$(feld "$TMPD/dsuche.txt" "launcher: index" n)
 num "der Starter hat dafuer einen Index ueber so viele Namen gebaut" "$DIX" ge 40
 # DIE GEGENPROBE: derselbe Starter, dieselben Tastendruecke, nur OHNE den
@@ -1358,7 +1358,7 @@ has "$TMPD/noidx.txt" "launcher: apps=$soll" \
     "obwohl dasselbe Anwendungsverzeichnis mit denselben $soll Buendeln gelesen wurde"
 schau_nicht "und im Bild steht dann auch kein Pfad" \
     ttext "$TMPD/noidx.ppm" "$SANS" 15 $((SCX + SRX)) $((SCY + SRB)) \
-    $SSFG $SSEL "/daten/bilder/blau.ppm" 96
+    $SSFG $SSEL "/data/bilder/blau.ppm" 96
 
 echo "== 15d. und die alten Abbilder sind Oktett fuer Oktett die alten =="
 # DIE BEDINGUNG, UNTER DER `fs.fi` UEBERHAUPT ANGEFASST WERDEN DURFTE.

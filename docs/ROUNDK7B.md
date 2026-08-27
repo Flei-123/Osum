@@ -34,12 +34,12 @@ war der erste Mangel und er lag im Werkzeug, nicht im Kernel.
 
 ## 2. Wie es gefunden wurde
 
-`tools/gfx/schau.py` zählte falsche Bildpunkte. Jetzt nennt es die
+`tools/gfx/checkshot.py` zählte falsche Bildpunkte. Jetzt nennt es die
 abweichenden Zellen **einzeln, mit Soll und erkanntem Ist** — das Ist
 wird gegen alle 95 Glyphen des Zeichensatzes gehalten, nicht geraten.
 Dazu kam der Unterbefehl `lesen`: das Bild zurück in Text.
 
-    $ python3 tools/gfx/schau.py lesen pat.ppm kernel/font.fi 13 4
+    $ python3 tools/gfx/checkshot.py lesen pat.ppm kernel/font.fi 13 4
     800x600, 100 Spalten, 37 Zeilen
      13 |                                                ##                   |
      14 |      7             01234                                            |
@@ -115,7 +115,7 @@ führt denselben Wert ein zweites Mal, weil Firn keine Konstante eines
 anderen Moduls in einen `const` einsetzt; dass die beiden gleich sind,
 wird nachgerechnet statt gehofft.
 
-**`tools/kernel/karte.py`** (neu) — rechnet **38 Bereiche aus vier
+**`tools/kernel/memmap.py`** (neu) — rechnet **38 Bereiche aus vier
 Dateien** paarweise gegeneinander, prüft, dass keiner über `KDATA_SIZE`
 hinausragt, und verlangt, dass jede `_OFF`-Konstante entweder in der
 Karte steht oder ausdrücklich als „kein `kdata`" erklärt ist. Ohne den
@@ -128,9 +128,9 @@ letzten Punkt schützt eine Karte nur das, woran jemand gedacht hat.
       0x3C000..0x3D000  FB           kstate.fi:FB_OFF
            ---- frei 0x3D000..0x40000 (12 KiB)
 
-**`tools/gfx/schau.py`** — nennt abweichende Zellen einzeln:
+**`tools/gfx/checkshot.py`** — nennt abweichende Zellen einzeln:
 
-    $ schau.py text pat.ppm kernel/font.fi 14 0 "OSUM X7 FRAMEBUFFEQ 01234"
+    $ checkshot.py text pat.ppm kernel/font.fi 14 0 "OSUM X7 FRAMEBUFFEQ 01234"
     3200 Bildpunkte geprueft, 37 falsch
       2 abweichende Zellen:
         Zeile 14 Spalte 5: soll 'X' (0x58), ist 'K' -- 16 Bildpunkte falsch
@@ -217,7 +217,7 @@ laufen.
 
 ## 7. Was offen bleibt
 
-* **Die Karte ist eine Liste von Hand.** `tools/kernel/karte.py` kennt
+* **Die Karte ist eine Liste von Hand.** `tools/kernel/memmap.py` kennt
   38 Bereiche, weil sie dort eingetragen sind. Der Vollständigkeitstest
   fängt neue `_OFF`-Konstanten ab, aber ein Bereich, der anders heißt
   (`nvme.BUF_A` heißt so), fällt nur auf, wenn ihn jemand einträgt.

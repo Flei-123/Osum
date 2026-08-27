@@ -98,8 +98,8 @@ lauf() {
 # ------------------------------------------------------------ 1. bauen
 
 echo "== 1. der Kern und ein Userland, aus beiden Uebersetzern =="
-bash vendor/firn/hole-firnc.sh >/dev/null 2>&1 \
-    || { echo "GUARD: vendor/firn/hole-firnc.sh fehlgeschlagen"; exit 1; }
+bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1 \
+    || { echo "GUARD: vendor/firn/fetch-firnc.sh fehlgeschlagen"; exit 1; }
 
 for s in 0 1; do
     if bash tools/build-kernel.sh "$TMPD/k$s.mb" --stufe "$s" > "$TMPD/b$s.log" 2>&1; then

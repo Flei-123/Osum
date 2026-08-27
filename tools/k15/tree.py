@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""tools/k15/baum.py -- der Verzeichnisbaum, den der Dateimanager zeigt.
+"""tools/k15/tree.py -- der Verzeichnisbaum, den der Dateimanager zeigt.
 
 Er wird HIER gebaut und nicht von Hand in `run.sh` aufgezaehlt, aus
 einem Grund: der Laeufer muss wissen, was in der Liste stehen MUSS --
@@ -7,12 +7,12 @@ und zwar in derselben Reihenfolge, in der der Dateimanager sortiert.
 Zwei Listen, die man getrennt pflegt, gehen auseinander; eine, die
 beide benutzen, nicht.
 
-    baum.py <verzeichnis>
+    tree.py <verzeichnis>
 
 Legt darin an:
     theme      das Farbschema, das `/etc/theme` wird
     liste      die Argumente fuer mkfs.py, eine Zeile je Stueck
-    soll.txt   was der Dateimanager in /daten zeigen MUSS, sortiert
+    soll.txt   was der Dateimanager in /data zeigen MUSS, sortiert
                nach Namen -- Name, Groesse, Art
 """
 import os
@@ -66,7 +66,7 @@ def main():
     with open(os.path.join(d, "theme"), "wb") as f:
         f.write(THEME)
 
-    zeilen = ["/daten/"]
+    zeilen = ["/data/"]
     soll = []
     for name, inhalt in DATEIEN:
         p = os.path.join(roh, name)
@@ -79,16 +79,16 @@ def main():
         # Inode steht; ohne diese Angabe stuende dort `-rwxr-xr-x` an einer
         # Textdatei. Die Rechte gehoeren an die Stelle, die die Datei
         # anlegt, nicht in einen Rueckfall.
-        zeilen.append("/daten/%s=%s@0644" % (name, p))
+        zeilen.append("/data/%s=%s@0644" % (name, p))
         soll.append((name, len(inhalt), "-"))
     for o in ORDNER:
-        zeilen.append("/daten/%s/" % o)
+        zeilen.append("/data/%s/" % o)
         soll.append((o, 0, "d"))
         for name, inhalt in UNTER.get(o, []):
             p = os.path.join(roh, "%s_%s" % (o, name))
             with open(p, "wb") as f:
                 f.write(inhalt)
-            zeilen.append("/daten/%s/%s=%s@0644" % (o, name, p))
+            zeilen.append("/data/%s/%s=%s@0644" % (o, name, p))
 
     with open(os.path.join(d, "liste"), "w") as f:
         for z in zeilen:
@@ -98,7 +98,7 @@ def main():
     with open(os.path.join(d, "soll.txt"), "w") as f:
         for name, groesse, art in soll:
             f.write("%s\t%d\t%s\n" % (name, groesse, art))
-    print("baum: %d Stueck in /daten, %d Zeilen fuer mkfs"
+    print("baum: %d Stueck in /data, %d Zeilen fuer mkfs"
           % (len(soll), len(zeilen)))
     return 0
 

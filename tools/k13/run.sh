@@ -60,7 +60,7 @@ has() { grep -qaF "$2" "$1" && ok "$3" || bad "$3 -- '$2' fehlt"; }
 hasnot() { grep -qaF "$2" "$1" && bad "$3 -- '$2' steht da und sollte nicht" || ok "$3"; }
 val() { grep -aoE "$2" "$1" | tail -1 | grep -oE '\-?[0-9]+$'; }
 
-bash vendor/firn/hole-firnc.sh >/dev/null || { echo "vendor/firn/hole-firnc.sh fehlgeschlagen"; exit 1; }
+bash vendor/firn/fetch-firnc.sh >/dev/null || { echo "vendor/firn/fetch-firnc.sh fehlgeschlagen"; exit 1; }
 [ -x "$FIRNC" ] || { echo "firnc0 fehlt: $FIRNC"; exit 1; }
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
     echo "K13: uebersprungen, qemu-system-x86_64 fehlt"
@@ -103,17 +103,17 @@ done
 [ -z "$undef" ] && ok "kein neues Programm hat ein undefiniertes Symbol" \
                || bad "undefinierte Symbole:$undef"
 
-if python3 tools/kernel/karte.py kernel > "$TMPD/karte.txt" 2>&1; then
+if python3 tools/kernel/memmap.py kernel > "$TMPD/karte.txt" 2>&1; then
     ok "$(tail -1 "$TMPD/karte.txt")"
 else
     bad "der Kartenpruefer schlaegt an"; sed 's/^/        /' "$TMPD/karte.txt" | head -8
 fi
-grep -q '"K13_OFF"' tools/kernel/karte.py \
+grep -q '"K13_OFF"' tools/kernel/memmap.py \
     && ok "der Bereich dieser Runde (0x41000..0x43000) steht in der Karte" \
-    || bad "K13_OFF fehlt in tools/kernel/karte.py"
+    || bad "K13_OFF fehlt in tools/kernel/memmap.py"
 mkdir -p "$TMPD/kbad" && cp kernel/*.fi "$TMPD/kbad/"
 sed -i 's/^const K13_OFF: u64 = 0x41000/const K13_OFF: u64 = 0x40000/' "$TMPD/kbad/kstate.fi"
-if python3 tools/kernel/karte.py "$TMPD/kbad" > "$TMPD/karte-bad.txt" 2>&1; then
+if python3 tools/kernel/memmap.py "$TMPD/kbad" > "$TMPD/karte-bad.txt" 2>&1; then
     bad "GEGENPROBE: K13 auf 0x40000 (dem Hypervisor) faellt NICHT auf"
 else
     ok "GEGENPROBE: K13 auf 0x40000 kollidiert mit HV und faellt auf"

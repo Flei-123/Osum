@@ -305,7 +305,7 @@ Zwischenstufen.
 ### 4.4 Woher die Schriften kommen
 
 **Von der Platte.** Ein Zeichensatzleser, der seinen Zeichensatz im
-Kernelabbild trägt, liest keinen. `tools/ttf/schnitt.py` schneidet aus
+Kernelabbild trägt, liest keinen. `tools/ttf/subset.py` schneidet aus
 DejaVu die sieben (mit `kern` acht) Tabellen und 95 Zeichen heraus, die
 ein Rasterer braucht:
 
@@ -390,8 +390,8 @@ werden aus dem Speicher beantwortet.
 
 ## 6. Wie die Bildschirmfotos geprüft werden
 
-Der Weg ist der aus Runde K7 (`tools/gfx/schuss.py` holt über den
-QEMU-Monitor ein PPM, `tools/gfx/schau.py` rechnet es nach) und diese
+Der Weg ist der aus Runde K7 (`tools/gfx/screenshot.py` holt über den
+QEMU-Monitor ein PPM, `tools/gfx/checkshot.py` rechnet es nach) und diese
 Runde legt zwei Dinge dazu.
 
 ### 6.1 Eingabe von außen — `tools/wm/monitor.py`
@@ -448,7 +448,7 @@ Und die Gegenprobe zum Prüfer selbst: dieselbe Rechnung auf eine **leere**
 Rasterzeile geht *nicht* auf, und sie sagt auch warum —
 `1413 falsch -- LEER: O S U M K 1 0 W I N D O W S E R V E R 0 1 2 3`.
 
-Dazu `schau.py glatt`: wie viele Bildpunkte eines Rechtecks sind **weder**
+Dazu `checkshot.py glatt`: wie viele Bildpunkte eines Rechtecks sind **weder**
 Vorder- **noch** Hintergrundfarbe? Eine Rasterung ohne Kantenglättung hat
 davon keinen einzigen und ginge durch alles oben hindurch.
 
@@ -573,7 +573,7 @@ auf `0x14000`, und dort liegen die Flaggen der Punkte. Die erste Glyphe
 und der Kern las bei `0x40000000` weiter — der ersten Adresse jenseits des
 abgebildeten Gigabytes: **`#PF, cr2=0x40000000`**.
 
-Genau die Fehlerklasse, die `tools/kernel/karte.py` seit K7B für `kdata`
+Genau die Fehlerklasse, die `tools/kernel/memmap.py` seit K7B für `kdata`
 abfängt. Im Arbeitsbereich des Rasterers gibt es keinen solchen Prüfer,
 also stehen die Rechnungen jetzt als Kommentar neben den Adressen.
 
@@ -609,7 +609,7 @@ brach, die mit der Oberfläche nichts zu tun hat, und weil `tools/wm/run.sh`
 ihn *nicht* sehen konnte. Gefunden hat ihn **Abschnitt 6 von `./test.sh`**
 — genau dafür läuft die ganze Abnahme und nicht nur der Läufer der Runde.
 
-`tools/kernel/karte.py` rechnet seither auch die **Vektortabelle** nach.
+`tools/kernel/memmap.py` rechnet seither auch die **Vektortabelle** nach.
 Die Regel ist dieselbe wie bei `kdata`: derselbe Name darf mehrfach
 dastehen (`trap.fi` und `nvme.fi` führen `VEC_NVME` beide, weil Firn keine
 Konstante eines anderen Moduls in einen `const` einsetzt), **zwei
@@ -702,7 +702,7 @@ K7 ihren nicht hingeschrieben hat:
 0x3F000..0x40000  TTF     die Zeichensatzplaetze des Schriftlesers
 ```
 
-`tools/kernel/karte.py` rechnet jetzt **41 Bereiche** paarweise
+`tools/kernel/memmap.py` rechnet jetzt **41 Bereiche** paarweise
 gegeneinander — und seit dieser Runde zusätzlich die **Vektortabelle**
 (siehe 8.3), und der Läufer prüft zusätzlich, dass jeder der drei neuen
 Namen wirklich in der Karte steht. Dazu die Gegenprobe zum Prüfer selbst:

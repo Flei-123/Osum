@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""tools/k15/symbol.py -- aus einer Zeichnung ein BILD.
+"""tools/k15/icon.py -- aus einer Zeichnung ein BILD.
 
 Runde K15, zweiter Nachtrag. Ein Programm ist ein Buendel
 (`/apps/<name>.prog/`), und in ein Buendel gehoert ein Symbol. Der erste
@@ -34,8 +34,8 @@ Oktettklumpen im Baum liegt, kann niemand in einem Unterschied lesen.
     ...
 
 Verwendung:
-    symbol.py <zeichnung.txt> <ausgabe>
-    symbol.py --pruefe <ausgabe> <zeichnung.txt>   liest zurueck
+    icon.py <zeichnung.txt> <ausgabe>
+    icon.py --pruefe <ausgabe> <zeichnung.txt>   liest zurueck
 """
 
 import struct

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""tools/kernel/karte.py -- DIE SPEICHERKARTE VON `kdata` MECHANISCH PRUEFEN.
+"""tools/kernel/memmap.py -- DIE SPEICHERKARTE VON `kdata` MECHANISCH PRUEFEN.
 
 Der Kernel hat EINEN zusammenhaengenden Datenbereich (`kernel/boot.s`,
 Symbol `kdata`, KDATA_SIZE Oktette), und jede Runde nimmt sich daraus
@@ -31,7 +31,7 @@ Ein Textverschmelzer kann so etwas nicht sehen: die Kollision steht in
 keiner gemeinsamen Zeile.  Also rechnet dieses Programm sie aus.
 
 Verwendung:
-    python3 tools/kernel/karte.py [kernelverzeichnis]
+    python3 tools/kernel/memmap.py [kernelverzeichnis]
 
 Ausgabe: eine Zeile je Bereich (nur mit -v), am Ende die Zahl der Bereiche
 und der Kollisionen.  Rueckgabe 0, wenn sich nichts ueberschneidet und

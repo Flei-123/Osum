@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""tools/k15/felder.py -- den Inhalt der beiden Textfelder aus dem
+"""tools/k15/fields.py -- den Inhalt der beiden Textfelder aus dem
 Mitschnitt holen, und zwar aus einer Zeile, die WIRKLICH vollstaendig ist.
 
-    felder.py <mitschnitt> e1|e2
+    fields.py <mitschnitt> e1|e2
 
 Die serielle Leitung teilen sich in diesem System der KERNEL und die
 Anwendung in Ring 3.  Beide schreiben, wann sie fertig sind, und

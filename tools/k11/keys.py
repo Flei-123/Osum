@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""tools/k11/tasten.py -- TASTEN UEBER DEN QEMU-MONITOR.
+"""tools/k11/keys.py -- TASTEN UEBER DEN QEMU-MONITOR.
 
 Ein Editor, der nur "startet ohne Absturz" beweist, beweist nichts. Diese
 Datei ist der Mensch vor der Tastatur: sie uebersetzt einen Text in die
@@ -8,7 +8,7 @@ Rechner. Was ankommt, sind echte Abtastcodes am Tor 0x60, echte
 IRQ1-Unterbrechungen und der Weg durch `kernel/kbd.fi` und die
 Zeilendisziplin -- kein eingeschleustes Oktett irgendwo weiter oben.
 
-    tasten.py <monitor-socket> <warte-auf-datei> <muster> <taste> ...
+    keys.py <monitor-socket> <warte-auf-datei> <muster> <taste> ...
 
 Eine Taste ist entweder ein QEMU-Name (`ret`, `spc`, `ctrl-o`, `up`,
 `shift-a`, `pgdn`, ...) oder `text:HALLO WELT`, das in einzelne Tasten
@@ -56,7 +56,7 @@ def tasten_fuer(text):
         elif c in UMSCHALT:
             aus.append('shift-' + UMSCHALT[c])
         else:
-            raise SystemExit("tasten.py: fuer %r gibt es keine Taste" % c)
+            raise SystemExit("keys.py: fuer %r gibt es keine Taste" % c)
     return aus
 
 
@@ -86,7 +86,7 @@ def main():
             pass
         time.sleep(0.2)
     if not bereit:
-        print("tasten.py: '%s' ist nie in %s aufgetaucht" % (muster, warte))
+        print("keys.py: '%s' ist nie in %s aufgetaucht" % (muster, warte))
         return 1
 
     s = None
@@ -101,7 +101,7 @@ def main():
             s = None
             time.sleep(0.2)
     if s is None:
-        print("tasten.py: kein Monitor an %s" % sock)
+        print("keys.py: kein Monitor an %s" % sock)
         return 1
     time.sleep(0.3)
     try:

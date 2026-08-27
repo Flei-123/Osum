@@ -12,7 +12,7 @@
 # ueber einen Bildschirm gar nichts: ein Treiber, der in den falschen
 # Speicher schreibt, stuerzt nicht ab, er zeigt nur nichts.  Also macht
 # dieser Laeufer echte Bildschirmfotos ueber den QEMU-Monitor
-# (`screendump`) und rechnet sie MASCHINELL nach (`tools/gfx/schau.py`):
+# (`screendump`) und rechnet sie MASCHINELL nach (`tools/gfx/checkshot.py`):
 # Bildgroesse, erwartete Farben an erwarteten Stellen, und -- das ist die
 # eigentliche Zusage -- ob geschriebener Text wirklich als Bildpunkte
 # erscheint, Bit fuer Bit gegen den Zeichensatz gerechnet.
@@ -31,7 +31,7 @@
 #      gegenseitig die Abbildung ueberschreiben.
 #      DAZU SEIT RUNDE K7B: die ganze Karte von `kdata`, 38 Bereiche aus
 #      vier Dateien, paarweise gegeneinander gerechnet
-#      (`tools/kernel/karte.py`).  Runde K7 legte den Zeichensatz auf
+#      (`tools/kernel/memmap.py`).  Runde K7 legte den Zeichensatz auf
 #      0x2F000 und Runde K9 die Signaltabelle -- beide Zweige waren fuer
 #      sich gruen, und der Textverschmelzer konnte das nicht sehen, weil
 #      sich keine gemeinsame ZEILE ueberschnitt, nur zwei ADRESSEN.
@@ -86,11 +86,11 @@ num() { # name wert op erwartet
 has() { grep -qaF "$2" "$1" && ok "$3" || bad "$3 -- '$2' fehlt"; }
 hasnot() { grep -qaF "$2" "$1" && bad "$3 -- '$2' sollte nicht da sein" || ok "$3"; }
 
-# Ein Aufruf von schau.py als Zusage.
+# Ein Aufruf von checkshot.py als Zusage.
 schau() { # name unterbefehl args...
     local name=$1; shift
     local aus rc
-    aus=$(python3 tools/gfx/schau.py "$@" 2>&1); rc=$?
+    aus=$(python3 tools/gfx/checkshot.py "$@" 2>&1); rc=$?
     if [ "$rc" -eq 0 ]; then ok "$name ($aus)"; else bad "$name -- $aus"; fi
 }
 
@@ -98,11 +98,11 @@ schau() { # name unterbefehl args...
 schau_nicht() { # name unterbefehl args...
     local name=$1; shift
     local aus rc
-    aus=$(python3 tools/gfx/schau.py "$@" 2>&1); rc=$?
+    aus=$(python3 tools/gfx/checkshot.py "$@" 2>&1); rc=$?
     if [ "$rc" -ne 0 ]; then ok "$name ($aus)"; else bad "$name -- ging durch: $aus"; fi
 }
 
-bash vendor/firn/hole-firnc.sh >/dev/null || { echo "vendor/firn/hole-firnc.sh fehlgeschlagen"; exit 1; }
+bash vendor/firn/fetch-firnc.sh >/dev/null || { echo "vendor/firn/fetch-firnc.sh fehlgeschlagen"; exit 1; }
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
     echo "GFX: skipped, qemu-system-x86_64 ist nicht da"
     exit 0
@@ -148,7 +148,7 @@ foto() { # abbild kommandozeile ausgabe ppm [weitere qemu-argumente]
         sleep 0.15
         i=$((i + 1))
     done
-    python3 tools/gfx/schuss.py "$sock" "$ppm" > "$TMPD/schuss.txt" 2>&1
+    python3 tools/gfx/screenshot.py "$sock" "$ppm" > "$TMPD/schuss.txt" 2>&1
     wait "$pid"
     RC=$?
     rm -f "$sock"
@@ -220,7 +220,7 @@ fi
 # Dasselbe ist in diesem Baum viermal passiert (K4/K2, K5/K2, K6/K5,
 # K7/K9), und dreimal endete es als Kommentar statt als Zusage.  Ab hier
 # ist es eine Zusage.
-kart=$(python3 tools/kernel/karte.py kernel 2>&1)
+kart=$(python3 tools/kernel/memmap.py kernel 2>&1)
 if [ $? -eq 0 ]; then ok "die Speicherkarte von kdata: $kart"
 else bad "die Speicherkarte von kdata kollidiert"; echo "$kart" | sed 's/^/        /'; fi
 
@@ -232,7 +232,7 @@ GG="$TMPD/kernel-gg"
 mkdir -p "$GG"
 cp kernel/*.fi "$GG/"
 sed -i 's/^const FB_OFF: u64 = 0x3C000/const FB_OFF: u64 = 0x2F000/; s/^const FONT_OFF: u64 = 0x3C100/const FONT_OFF: u64 = 0x2F100/' "$GG/fb.fi" "$GG/kstate.fi"
-gg=$(python3 tools/kernel/karte.py "$GG" 2>&1)
+gg=$(python3 tools/kernel/memmap.py "$GG" 2>&1)
 if [ $? -ne 0 ] && printf '%s' "$gg" | grep -q 'KOLLISION: FB'; then
     ok "mit FB_OFF zurueck auf 0x2F000 findet der Pruefer die Kollision mit SIG"
 else
