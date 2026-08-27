@@ -412,7 +412,7 @@ echo "== 6. the two displays, on a real screen =="
 # this section is judged by eye.
 SHOTS=${NVSHOTS:-docs/shots/netview}
 mkdir -p "$SHOTS"
-GPROGS="schreibtisch leiste einstellungen starter explorer wigdemo suchen netview sh echo ls cat ps"
+GPROGS="schreibtisch leiste einstellungen starter explorer wigdemo suchen netview edit sh echo ls cat ps"
 MONO=assets/osum-mono.ttf
 SANS=assets/osum-sans.ttf
 GBASE="gfx wm wig desk wmhold wiglong nokbd nosched noproc nofs"
@@ -439,7 +439,7 @@ printf '# taskbar.conf\nedge=bottom\nheight=28\nwidth=104\nautohide=0\nontop=1\n
 
 mk_gimage() { # image theme-file
     local img=$1 th=$2
-    local ARGS=(build "$img" 8192 /lib/
+    local ARGS=(build "$img" 4096 /lib/
         "/lib/mono.ttf=$MONO" "/lib/sans.ttf=$SANS" /bin/)
     local q
     for q in $GPROGS; do ARGS+=("/bin/$q=$TMPD/g$q.elf"); done
@@ -502,7 +502,14 @@ Image.open(sys.argv[1]).save(sys.argv[2])
 PYX
 }
 
-# The state the bar reported, and where it drew the icon.
+# WHAT THE BAR REPORTS IS INSIDE ITS OWN WINDOW; WHAT THE PICTURE HAS IS
+# THE SCREEN. The offset between the two is the position of the bar's
+# window, which the bar also reports (`taskbar: geom ... x= y=`). The
+# first run of this section forgot that and measured the icon against the
+# wrong 62 pixels -- so the offset is read out of the log and never
+# assumed.
+gx_of() { grep -a '^taskbar: geom ' "$1" | tail -1 | grep -oE ' x=[0-9]+' | head -1 | tr -dc '0-9'; }
+gy_of() { grep -a '^taskbar: geom ' "$1" | tail -1 | grep -oE ' y=[0-9]+' | head -1 | tr -dc '0-9'; }
 st_of()  { grep -aoE '^taskbar: state s=[0-9]+' "$1" | tail -1 | cut -d= -f2; }
 st_x()   { grep -aoE '^taskbar: state s=[0-9]+ x=[0-9]+' "$1" | tail -1 | grep -oE 'x=[0-9]+' | cut -d= -f2; }
 st_y()   { grep -aoE '^taskbar: state s=[0-9]+ x=[0-9]+ y=[0-9]+' "$1" | tail -1 | grep -oE 'y=[0-9]+$' | cut -d= -f2; }
@@ -524,7 +531,9 @@ for cs in nocarrier noip noroute online; do
         got=$(st_of "$L")
         num "$cs: the kernel reported state" "${got:-99}" eq "${WANT[$cs]}"
         x=$(st_x "$L"); y=$(st_y "$L")
+        GX=$(gx_of "$L"); GY=$(gy_of "$L"); GX=${GX:-0}; GY=${GY:-0}
         if [ -n "$x" ] && [ -n "$y" ]; then
+            x=$((x + GX)); y=$((y + GY))
             r=$(python3 tools/netview/schau.py "$P" "$x" "$y" \
                 "assets/netview/state-$cs.txt" assets/netview/theme-dark 2>&1)
             case "$r" in ok*) ok "$cs: the icon is on the screen at $x,$y -- $r" ;;
@@ -548,6 +557,7 @@ for scheme in dark light; do
         "netvdemo nic nip=$OSUM_IP/24 ngw=$HOST_IP" "ping"; then
         L="$TMPD/four-$scheme.txt"; P="$TMPD/four-$scheme.ppm"
         png "$P" "four-views-$scheme"
+        GX=$(gx_of "$L"); GY=$(gy_of "$L"); GX=${GX:-0}; GY=${GY:-0}
         seen_r=0; seen_1=0; seen_2=0; seen_3=0
         for b in 0 1 2 3 4 5 6 7 8 9; do
             line=$(mk_line "$L" "$b")
@@ -562,6 +572,7 @@ for scheme in dark light; do
                 3) name=mark-none;     seen_3=$((seen_3+1)) ;;
             esac
             if [ "${v:-0}" != 0 ] && [ -n "$mx" ]; then
+                mx=$((mx + GX)); my=$((my + GY))
                 r=$(python3 tools/netview/schau.py "$P" "$mx" "$my" \
                     "assets/netview/$name.txt" "assets/netview/theme-$scheme" 2>&1)
                 case "$r" in ok*) ok "$scheme: button $b carries $name at $mx,$my -- $r" ;;
@@ -580,7 +591,7 @@ for scheme in dark light; do
         if [ -n "$rl" ]; then
             rx=$(echo "$rl" | grep -oE ' x=[0-9]+' | tr -d ' x=')
             ry=$(echo "$rl" | grep -oE ' y=[0-9]+' | tr -d ' y=')
-            r=$(python3 tools/netview/schau.py "$P" "$((rx + 3))" "$((ry + 5))" \
+            r=$(python3 tools/netview/schau.py "$P" "$((rx + GX + 3))" "$((ry + GY + 5))" \
                 assets/netview/mark-faked.txt "assets/netview/theme-$scheme" --nicht 2>&1)
             case "$r" in ok*) ok "$scheme: and the REAL one carries nothing -- $r" ;;
                          *)   bad "$scheme: the real button has a mark: $r" ;; esac
