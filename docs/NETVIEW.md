@@ -1033,6 +1033,21 @@ There is **one** hotkey and it is spelled out in the source rather than
 configured. A key map is a round of its own, and half of one here would
 be exactly the kind of half-thing this round keeps refusing.
 
+**And the Escape key had never arrived either.** Scan code 1, and
+position 1 of the table in `translate` is a NUL -- so pressing Escape
+in this system produced nothing at all, and had produced nothing since
+round 59. It was found the same way round K15 found the tab key: by
+needing it and measuring that nothing happened. It is now a 27.
+
+What that changes for everyone else, written down rather than left to be
+discovered: a program that reads keys now sees a 27 where it saw
+nothing. `/bin/edit` reads arrow keys as `ESC [ x` and will take a lone
+Escape for the start of one, swallowing the next character -- which is
+what a real terminal does with a lone Escape too, and is why terminals
+have had a timeout for it since the seventies. This round does not build
+that timeout. `tools/unix/run.sh` (107) and `tools/kernel/run.sh` (176)
+were re-run against the change and neither moved.
+
 ### 14.5 The tiles, and why there are three drawings and not six
 
 The obvious build is two drawings per tile, one for on and one for off,
@@ -1105,6 +1120,27 @@ the long one -- a tile that reported the long label and painted a
 clipped one would pass a checker that compares the two, which is the
 trap round DESKTOP wrote down for the status fields.
 
+Two more, from the same habit of driving the thing instead of reading
+it, and **neither was what it looked like**:
+
+3. **The panel was on `L_TOP` and could not be typed at.** The window
+   server gives the keyboard only to a window on the normal layer:
+   `wm.set_layer` takes the focus away from anything that leaves it, and
+   `wm.on_mouse` calls `set_focus` only for `L_NORMAL`. That is round
+   DESKTOP's rule and a good one -- a taskbar that swallowed the
+   keyboard would make every key after a click on it useless. But this
+   panel is not a taskbar. It lives on the normal layer now and is
+   raised when it opens. The price is one line in `leiste.list_read`: a
+   normal-layer window gets a button in the bar, and a panel that
+   belongs to the bar must not stand beside the programs.
+4. **The key is at bits 32..47 of the event word, not at 0.**
+   `wm.ev_push` packs three numbers as `(a << 32) | (b << 16) | c`, and
+   for a key the character is the first of them. Read as the whole word
+   it is `27 << 32`, which is never 27 -- so every Escape was silently
+   ignored, and the symptom was indistinguishable from the focus problem
+   above. It cost two runs to stop believing the first explanation after
+   it had been fixed.
+
 ### 14.7 A seam closed rather than widened
 
 Section 13.6 admitted a seam: the shape of the line `fallback=<word>`
@@ -1170,7 +1206,7 @@ report.
 | `tools/netview/blatt.py` | the sheet of all eight signs |
 | `tools/netview/run.sh` | the acceptance run |
 | `kernel/user/qs.fi` | third addendum: the quick settings panel -- layout, tiles, drawing, the hotkey |
-| `kernel/kbd.fi` | third addendum: the Super key as a modifier, and the hotkey latch |
+| `kernel/kbd.fi` | third addendum: the Super key as a modifier, the hotkey latch, and the Escape key that had never arrived |
 | `kernel/kstate.fi` | third addendum: `KB_SUPER`, `HK_SEQ`, `HK_KEY`, `HK_NS` in the K11 block |
 | `assets/netview/tile-fake.txt`, `tile-net.txt`, `tile-hide.txt` | third addendum: the three tile drawings |
 | `tools/netview/kachel.py` | third addendum: reads the panel back out of a screenshot -- overflowing labels and touching rows |
