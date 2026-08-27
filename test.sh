@@ -126,7 +126,7 @@
 #      erfaehrt vom Klick), `wignoclip` (keine Zwischenablage),
 #      `wignokeys` (dieselbe Suche ohne die Schluesselwoerter -- dann
 #      findet "folder" NICHTS), `wignoidx` (dieselbe Suche ohne den
-#      Namensindex -- dann findet "blau" NICHTS), `suchen -n` (dieselben
+#      Namensindex -- dann findet "blau" NICHTS), `locate -n` (dieselben
 #      drei Dateiaenderungen, aber das Journal wird nicht abgeholt --
 #      dann weiss der Index von keiner), `nodirty`, `nofocus`, `nomouse`
 #      und der Lauf ganz ohne `wig`.
