@@ -302,6 +302,43 @@ editor, `cd`, `exit` — and twenty-five tools: `cat`, `cp`, `date`, `df`,
 `ps`, `rm`, `rmdir`, `sleep`, `sort`, `tail`, `touch`, `true`, `uname`,
 `uniq`, `wc`, `wget`.
 
+**What happens when the machine is stolen (round TRESOR).** A **device
+identity** that survives a reinstall (`kernel/hwid.fi`): the SMBIOS tables
+the firmware leaves in memory (entry point found by a 16-aligned,
+checksummed scan of `0xF0000..0xFFFFF`; type 1 system and type 2
+baseboard), the serial number of the NVMe drive out of **IDENTIFY
+CONTROLLER** -- a second command, not the namespace identify the driver
+already had -- and the MAC address. Readable as `/proc/hwid`, with
+`/bin/hwid` showing the raw values and a SHA-256 fingerprint over the
+fields that a reinstall does not change. Measured against a **second,
+independent SMBIOS reader in Python** that decodes the same memory dump.
+
+A **backup** that is content addressed like `opk` (`/bin/bak`): every
+chunk is named by its SHA-256, so identical chunks are stored once and
+"incremental" is not a separate mechanism. Measured: the second `bak save`
+of an unchanged tree reads all 25,491 octets and writes **0**; save,
+delete and restore give a tree that the HOST reads back out of the disk
+image and compares octet for octet (6 entries, 6 identical); and one
+flipped octet in the pack file is found by `bak verify`.
+
+And the **key management** that disk encryption would hang off
+(`/bin/key`): a random data key, wrapped by a passphrase-derived key
+(PBKDF2-HMAC-SHA256, measured against Python), authenticated before it is
+unwrapped, and destroyable in milliseconds -- which is what remote wipe
+has to mean, because overwriting a terabyte is not something a stolen
+machine stays online long enough to do.
+
+**What this round explicitly cannot do is written down and measured too**
+(`docs/THEFT.md`): Apple's Activation Lock needs our own silicon, our own
+signed firmware and a vendor server, and Find My needs an installed base
+of millions of foreign devices -- neither is a programming problem. SMBIOS
+serial numbers are a claim made by firmware: the same kernel image, with
+`-smbios` on the QEMU command line, reports whatever was put there, and a
+default virtual machine gives an empty serial, a zero UUID and no
+baseboard structure at all. And the backup's fixed 4096 octet chunking is
+measured at its worst: eight octets appended to a file cost 1 new chunk
+of 3, the same eight octets inserted at the FRONT cost 3 of 3.
+
 ---
 
 ## What it lacks
