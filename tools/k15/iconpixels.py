@@ -3,7 +3,7 @@
 auf dem Schirm? Bildpunkt fuer Bildpunkt.
 
 Runde K15, zweiter Nachtrag. Das Symbol eines Programms ist seit diesem
-Nachtrag eine DATEI im Buendel (`/apps/<name>.prog/symbol`, Format OSYM)
+Nachtrag eine DATEI im Buendel (`/apps/<name>.osp/symbol`, Format OSYM)
 und keine Farbe mehr in einer Textdatei. Damit laesst sich die Zusage
 "es wird gemalt" so pruefen, wie diese Runde Text prueft: nicht als
 Flaeche gegen einen Mittelwert, sondern Punkt gegen Punkt gegen eine

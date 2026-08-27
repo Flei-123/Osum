@@ -107,7 +107,7 @@
 #      landet am selben Ort: `/bin/files` ist ein ZWEITER NAME auf
 #      dieselbe Inode, kein zweites Exemplar. Dazu ein
 #      ANWENDUNGSVERZEICHNIS: ein Programm ist ein VERZEICHNIS
-#      (`/apps/<name>.prog/` mit INFO, start, symbol und data/ --
+#      (`/apps/<name>.osp/` mit INFO, start, symbol und data/ --
 #      installieren heisst kopieren), und darueber ein STARTER mit
 #      Suchfeld: man tippt "folder" und findet den Dateimanager, obwohl
 #      das Wort weder im Namen noch in der Beschreibung steht.

@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""tools/k15/bundle.py -- aus `assets/apps/*.prog` die Angaben fuer mkfs.
+"""tools/k15/bundle.py -- aus `assets/apps/*.osp` die Angaben fuer mkfs.
 
 Runde K15, zweiter Nachtrag. Ein Programm ist ein VERZEICHNIS:
 
-    /apps/explorer.prog/
+    /apps/explorer.osp/
         INFO            Anzeigename, Beschreibung, Schluesselwoerter,
                         Fassung
         start           die ausfuehrbare Datei
@@ -24,7 +24,7 @@ das Programm -- `/bin/explorer` ist 205 KiB, und ein Abbild hat zwei
 Megaoktett.
 
 Verwendung:
-    bundle.py <assets/apps> <arbeitsverzeichnis> [<zusatz.prog>=...]
+    bundle.py <assets/apps> <arbeitsverzeichnis> [<zusatz.osp>=...]
 """
 
 import os
@@ -51,7 +51,7 @@ def main(argv):
     os.makedirs(arbeit, exist_ok=True)
     zeilen = ["/apps/"]
     for name in sorted(os.listdir(quelle)):
-        if not name.endswith(".prog"):
+        if not name.endswith(".osp"):
             continue
         pfad = os.path.join(quelle, name)
         ziel = "/apps/%s" % name

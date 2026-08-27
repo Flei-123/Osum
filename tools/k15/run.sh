@@ -212,7 +212,7 @@ ARGS=(build "$TMPD/disk.img" 4096 /lib/
 for p in $PROGS; do ARGS+=("/bin/$p=$TMPD/${p}0.elf"); done
 ARGS+=("/bin/files@/bin/explorer")
 ARGS+=(/etc/ "/etc/theme=$TMPD/baum/theme")
-# DIE BUENDEL: /apps/<name>.prog/{INFO,start,symbol,data/}
+# DIE BUENDEL: /apps/<name>.osp/{INFO,start,symbol,data/}
 while read -r zeile; do ARGS+=("$zeile"); done < <(python3 tools/k15/bundle.py assets/apps "$TMPD/buendel")
 while read -r z; do ARGS+=("$z"); done < "$TMPD/baum/liste"
 python3 tools/osum/mkfs.py "${ARGS[@]}" > "$TMPD/mkfs.txt" 2>&1 \
@@ -942,7 +942,7 @@ echo "== 14. der Name, der zweite Name und die Auffindbarkeit =="
 # DER NAME IST DIE BESCHREIBUNG. Kein Nautilus, kein Finder, kein
 # Kunstwort: das Programm heisst `/bin/explorer` und traegt fuer den
 # Nutzer den Namen "Datei-Explorer" -- und dieser Name steht NICHT im
-# Quelltext, sondern in `/apps/explorer.prog/INFO`.
+# Quelltext, sondern in `/apps/explorer.osp/INFO`.
 # EIN `grep` PRUEFT DAS NICHT: der Kopfkommentar von explorer.fi
 # ERKLAERT, warum das Programm "Datei-Explorer" heisst, und ein
 # `grep -q` schlaegt darauf an. `tools/k15/noname.py` entfernt die
@@ -960,10 +960,10 @@ if python3 tools/k15/noname.py kernel/user/launcher.fi "Ausfuehren" >/dev/null 2
 else
     ok "eine Zeichenkette, die wirklich im Code steht, findet er (die Gegenprobe)"
 fi
-grep -q '^name=Datei-Explorer' assets/apps/explorer.prog/INFO \
-    && ok "sondern in assets/apps/explorer.prog/INFO" \
-    || bad "assets/apps/explorer.prog/INFO fuehrt keinen Anzeigenamen"
-has "$TMPD/files.txt" "explorer: name [Datei-Explorer] aus [explorer.prog]" \
+grep -q '^name=Datei-Explorer' assets/apps/explorer.osp/INFO \
+    && ok "sondern in assets/apps/explorer.osp/INFO" \
+    || bad "assets/apps/explorer.osp/INFO fuehrt keinen Anzeigenamen"
+has "$TMPD/files.txt" "explorer: name [Datei-Explorer] aus [explorer.osp]" \
     "und das Programm holt ihn aus dem Buendel"
 # UND ER STEHT IN DER TITELLEISTE. Die malt der FENSTERSERVER -- damit
 # ist der ganze Weg gemessen: Datei auf der Platte, Ring 3, WM_CREATE,
@@ -1011,20 +1011,20 @@ foto start "gfx wm wigstart wmhold wiglong $GRUND"
 num "der Kern beendet sich sauber" "$RC" eq 21
 has "$TMPD/start.txt" "k15: start /bin/launcher" "der Starter kommt von der Platte"
 na=$(feld "$TMPD/start.txt" "launcher: apps" apps)
-soll=$(ls -d assets/apps/*.prog | wc -l)
-num "er findet so viele Programme, wie .prog-Buendel im Baum liegen" "$na" eq "$soll"
-has "$TMPD/start.txt" "launcher: treffer i=0 name=[Datei-Explorer] exec=[/apps/explorer.prog/start]" \
+soll=$(ls -d assets/apps/*.osp | wc -l)
+num "er findet so viele Programme, wie .osp-Buendel im Baum liegen" "$na" eq "$soll"
+has "$TMPD/start.txt" "launcher: treffer i=0 name=[Datei-Explorer] exec=[/apps/explorer.osp/start]" \
     "und das Buendel fuehrt den Dateimanager mit Name UND Befehl"
 # EIN PROGRAMM IST EIN VERZEICHNIS, und das steht nicht im Quelltext,
 # sondern auf der Platte. Was ausgefuehrt wird, ist `start` IM Buendel --
 # und `start` ist derselbe Inode wie die Datei unter `/bin`, kein zweites
 # Exemplar (das misst 14a).
 for teil in INFO symbol start data/README; do
-    grep -q "^/apps/explorer.prog/$teil " "$TMPD/disk.ls" \
+    grep -q "^/apps/explorer.osp/$teil " "$TMPD/disk.ls" \
         && ok "das Buendel traegt $teil" \
-        || bad "/apps/explorer.prog/$teil fehlt auf der Platte"
+        || bad "/apps/explorer.osp/$teil fehlt auf der Platte"
 done
-gb=$(grep -c '^/apps/[a-z]*\.prog/$' "$TMPD/disk.ls")
+gb=$(grep -c '^/apps/[a-z]*\.osp/$' "$TMPD/disk.ls")
 num "so viele Buendel liegen unter /apps" "$gb" eq "$soll"
 hasnot "$TMPD/disk.ls" "/usr/share/apps" \
     "und der alte Ort ist weg -- eine Beschreibung, zwei Orte, waeren einer zu viel"
@@ -1059,7 +1059,7 @@ schau "und die zweite" \
 # GEZAEHLT WERDEN NUR DIE DECKENDEN BILDPUNKTE. Ueber die durchsichtigen
 # sagt ein Symbol nichts aus -- dort steht die Zeilenfarbe, und die
 # gehoert der Liste.
-sym() { echo "$TMPD/buendel/$1.prog.symbol"; }
+sym() { echo "$TMPD/buendel/$1.osp.symbol"; }
 pruef() { local name=$1; shift
     local aus rc; aus=$(python3 tools/k15/iconpixels.py "$@" 2>&1); rc=$?
     if [ "$rc" -eq 0 ]; then ok "$name ($aus)"; else bad "$name -- $aus"; fi; }
@@ -1067,7 +1067,7 @@ pruef_nicht() { local name=$1; shift
     local aus rc; aus=$(python3 tools/k15/iconpixels.py "$@" 2>&1); rc=$?
     if [ "$rc" -ne 0 ]; then ok "$name ($aus)"; else bad "$name -- ging durch"; fi; }
 for a in explorer editor; do
-    python3 tools/k15/icon.py --pruefe "$(sym $a)" "assets/apps/$a.prog/symbol.txt" \
+    python3 tools/k15/icon.py --pruefe "$(sym $a)" "assets/apps/$a.osp/symbol.txt" \
         > "$TMPD/sym-$a.txt" 2>&1 \
         && ok "das Symbol von $a im Abbild ist die Zeichnung aus dem Quellbaum ($(cat "$TMPD/sym-$a.txt"))" \
         || bad "das Symbol von $a stimmt nicht mit seiner Zeichnung ueberein"
@@ -1086,7 +1086,7 @@ echo "== 14c. die Suche -- und dass wirklich die Schluesselwoerter greifen =="
 # nur in `keys=`. Zuerst wird das ueberhaupt nachgerechnet -- sonst
 # waere die Zusage eine ueber einen Zufall.
 for w in folder files manager verzeichnis; do
-    if grep -ihE '^(name|info)=' assets/apps/*.prog/INFO | grep -qi "$w"; then
+    if grep -ihE '^(name|info)=' assets/apps/*.osp/INFO | grep -qi "$w"; then
         bad "'$w' steht in einem Anzeigenamen oder einer Beschreibung -- die Zusage waere wertlos"
     else
         ok "'$w' steht in KEINEM Anzeigenamen und in KEINER Beschreibung"
@@ -1144,7 +1144,7 @@ sed 's/^sendkey f$/sendkey q/; s/^sendkey o$/sendkey u/; s/^sendkey l$/sendkey a
 foto unsinn "gfx wm wigstart wmhold wiglong $GRUND" "$TMPD/unsinn.mon"
 has "$TMPD/unsinn.txt" "launcher: suche [quaste] treffer=0 apps=0   dateien=0" \
     "ein Wort, das nirgends steht, findet NICHTS -- kein Programm und keine Datei"
-grep -qi 'quaste' assets/apps/*.prog/INFO \
+grep -qi 'quaste' assets/apps/*.osp/INFO \
     && bad "'quaste' steht doch in einer INFO" \
     || ok "und 'quaste' steht wirklich in keiner INFO"
 # Und dass die Suche ueberhaupt etwas findet, wenn sie soll: der leere
@@ -1316,7 +1316,7 @@ echo "== 15c. der Starter sucht Dateien, nicht nur Programme =="
 # Anwendungsliste. "blau" ist kein Programm und steht in keiner INFO; es
 # ist eine Datei auf der Platte. Getippt wird ueber den QEMU-Monitor,
 # gemessen wird der Schirm.
-grep -qi 'blau' assets/apps/*.prog/INFO \
+grep -qi 'blau' assets/apps/*.osp/INFO \
     && bad "'blau' steht in einer INFO -- die Zusage waere wertlos" \
     || ok "'blau' steht in KEINER INFO: was gefunden wird, kann nur eine Datei sein"
 M="$TMPD/dsuche.mon"; : > "$M"
