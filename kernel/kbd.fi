@@ -18,7 +18,8 @@ import kstate
 import tty
 import wm
 
-export { irq, translate, shifted, take, waiting, MAX_KEYS }
+export { irq, translate, shifted, take, waiting, hot_take, hot_waiting,
+    MAX_KEYS, HOT_SLOTS }
 
 // How many octets fit into the buffer in the data area.
 const MAX_KEYS: u64 = 64
@@ -73,8 +74,31 @@ fn irq(state: u64) {
         kstate.set(state, kstate.K11_OFF + kstate.KB_EXT, 0)
         return
     }
+    // RUNDE TILING: DIE ALT-TASTE. 0x38 ist links, mit dem Vorzeichen
+    // 0xE0 davor die rechte (AltGr) -- beide zaehlen gleich. Sie erzeugt
+    // wie Umschalt und Steuerung kein Zeichen und meldet nichts.
+    if code == 0x38 {
+        kstate.set(state, kstate.K11_OFF + kstate.KB_ALT, 1)
+        kstate.set(state, kstate.K11_OFF + kstate.KB_EXT, 0)
+        return
+    }
+    if code == 0xB8 {
+        kstate.set(state, kstate.K11_OFF + kstate.KB_ALT, 0)
+        kstate.set(state, kstate.K11_OFF + kstate.KB_EXT, 0)
+        return
+    }
     kstate.set(state, kstate.K11_OFF + kstate.KB_EXT, 0)
     if code >= 0x80 {
+        return
+    }
+    // RUNDE TILING: MIT ALT IST DIE TASTE EIN KUERZEL UND KEINE EINGABE.
+    // Sie darf deshalb NICHT durch `deliver` gehen -- sonst steht ein `h`
+    // in der Shell, wenn man den Fokus nach links wechselt. Sie landet in
+    // einem eigenen Ring, den `wm.poll` abholt. Diese Richtung ist die
+    // gleiche wie beim Zeigegeraet, und sie ist der Grund, warum `kbd.fi`
+    // den Fensterserver dafuer nicht kennen muss.
+    if kstate.get(state, kstate.K11_OFF + kstate.KB_ALT) == 1 {
+        alt_key(state, code)
         return
     }
     // Die Pfeiltaste nach oben: ein Oktett, unveraendert seit Runde K6.
@@ -284,4 +308,76 @@ fn shifted(code: u64) -> u8 {
         return 0 as u8
     }
     return table[code as usize]
+}
+
+// ------------------------------------------- RUNDE TILING: die Kuerzel
+
+const HOT_SLOTS: u64 = 16
+
+// Die Tasten, die kein Zeichen sind, bekommen Nummern ueber 0x80 --
+// dieselben, die `kernel/tile.fi` als KEY_LEFT..KEY_DOWN fuehrt.
+fn alt_key(state: u64, code: u64) {
+    var c: u64 = 0
+    if code == 0x4B {
+        c = 0x81
+    }
+    if code == 0x4D {
+        c = 0x82
+    }
+    if code == 0x48 {
+        c = 0x83
+    }
+    if code == 0x50 {
+        c = 0x84
+    }
+    if c == 0 {
+        c = (translate(code)) as u64
+    }
+    if c == 0 {
+        return
+    }
+    var m: u64 = 1 // MOD_ALT
+    if kstate.get(state, kstate.K11_OFF + kstate.KB_SHIFT) == 1 {
+        m = m | 2
+    }
+    if kstate.get(state, kstate.K11_OFF + kstate.KB_CTRL) == 1 {
+        m = m | 4
+    }
+    push_hot(state, c, m)
+}
+
+fn push_hot(state: u64, c: u64, m: u64) {
+    var kopf: u64 = kstate.get(state, kstate.K11_OFF + kstate.KB_HHEAD)
+    let schwanz: u64 = kstate.get(state, kstate.K11_OFF + kstate.KB_HTAIL)
+    if kopf - schwanz >= HOT_SLOTS {
+        // Ein Ring, der ueberlaeuft, verliert das AELTESTE -- wie der
+        // Ereignisring des Fensterservers.
+        kstate.set(state, kstate.K11_OFF + kstate.KB_HTAIL, schwanz + 1)
+    }
+    let p: u64 = state + kstate.K11_OFF + kstate.KB_HOT
+        + (kopf % HOT_SLOTS) * 2
+    kstate.set8(p, c as u8)
+    kstate.set8(p + 1, m as u8)
+    kstate.set(state, kstate.K11_OFF + kstate.KB_HHEAD, kopf + 1)
+    kstate.add(state, kstate.K11_OFF + kstate.KB_HOTS, 1)
+}
+
+fn hot_waiting(state: u64) -> u64 {
+    return kstate.get(state, kstate.K11_OFF + kstate.KB_HHEAD)
+        - kstate.get(state, kstate.K11_OFF + kstate.KB_HTAIL)
+}
+
+// Ein Kuerzel abholen: Modifikatoren im oberen Oktett, Taste im unteren.
+// Null heisst: da war keines.
+fn hot_take(state: u64) -> u64 {
+    if hot_waiting(state) == 0 {
+        return 0
+    }
+    let schwanz: u64 = kstate.get(state, kstate.K11_OFF + kstate.KB_HTAIL)
+    let p: u64 = state + kstate.K11_OFF + kstate.KB_HOT
+        + (schwanz % HOT_SLOTS) * 2
+    let c: u64 = kstate.get8(p)
+    let m: u64 = kstate.get8(p + 1)
+    kstate.set(state, kstate.K11_OFF + kstate.KB_HTAIL, schwanz + 1)
+    return (m << 8) | c
 }

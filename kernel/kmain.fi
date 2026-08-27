@@ -51,6 +51,7 @@ import fb
 import ttf
 import ps2m
 import wm
+import tile
 import wig
 import nidx
 import apic
@@ -2736,6 +2737,35 @@ fn mode_of(cmd: u64) -> u64 {
     if find(cmd, (&zomw[0]) as u64, 6) != 0 {
         mode = mode | kstate.M_ZOMBIE
     }
+    // RUNDE TILING. `tile` schaltet den Fensterbaum an; `tilefuzz` laesst
+    // zehntausend zufaellige Operationen darauf los, `tileshot`,
+    // `tiletabs` und `tilerot` bauen die drei Anordnungen fuer die
+    // Bildschirmfotos, und `notiledirty` ist die GEGENPROBE zur
+    // Teilbaumverfolgung.
+    var tiw: [u8; 5] = "tile\0"
+    var tfw: [u8; 9] = "tilefuzz\0"
+    var tsw: [u8; 9] = "tileshot\0"
+    var ttw: [u8; 9] = "tiletabs\0"
+    var trw: [u8; 8] = "tilerot\0"
+    var ntw: [u8; 12] = "notiledirty\0"
+    if find(cmd, (&tiw[0]) as u64, 4) != 0 {
+        mode = mode | kstate.M_TILE
+    }
+    if find(cmd, (&tfw[0]) as u64, 8) != 0 {
+        mode = mode | kstate.M_TILEFUZZ
+    }
+    if find(cmd, (&tsw[0]) as u64, 8) != 0 {
+        mode = mode | kstate.M_TILESHOT
+    }
+    if find(cmd, (&ttw[0]) as u64, 8) != 0 {
+        mode = mode | kstate.M_TILETABS
+    }
+    if find(cmd, (&trw[0]) as u64, 7) != 0 {
+        mode = mode | kstate.M_TILEROT
+    }
+    if find(cmd, (&ntw[0]) as u64, 11) != 0 {
+        mode = mode | kstate.M_NOTILEDIRTY
+    }
     // RUNDE K16: die Gegenprobe zur grossen Arena.
     var nbw: [u8; 9] = "nobigmem\0"
     var nsw: [u8; 12] = "nostackgrow\0"
@@ -3104,6 +3134,18 @@ fn surface(state: u64) {
     serial.dec(wig.selftest_max())
     serial.nl()
 
+    // RUNDE TILING. Sie kommt HIER, vor dem ersten Fenster: der
+    // Selbsttest, der Zufallstest und die Zeitmessung bauen sich ihre
+    // eigenen Baeume und raeumen sie wieder ab. Danach steht der Baum
+    // leer und der Fensterserver kann ihn benutzen.
+    tile_stage(state, w, h)
+    let willtile: bool = (kstate.get(state, kstate.MODE) & kstate.M_TILE) != 0
+    let tileshot: bool =
+        (kstate.get(state, kstate.MODE) & kstate.M_TILESHOT) != 0
+    if willtile && !tileshot {
+        wm.set_tile_on(state, true)
+    }
+
     // 6. der Bildschirm gehoert ab hier dem Server. Der Spiegel der
     //    Textkonsole geht AUS -- zwei Zeichner auf einer Flaeche war
     //    genau das Problem, das Runde K7 offen gelassen hat.
@@ -3153,7 +3195,8 @@ fn surface(state: u64) {
     // Fenster liegt genau dort, wo der Dateimanager steht.
     var t: u64 = 0
     if (kstate.get(state, kstate.MODE)
-        & (kstate.M_WIG | kstate.M_WIGFILES | kstate.M_WIGSTART)) == 0 {
+        & (kstate.M_WIG | kstate.M_WIGFILES | kstate.M_WIGSTART
+            | kstate.M_TILESHOT)) == 0 {
         t = proc.create(state, P_WCLICK, (w << 16) | h, 2)
         // Ein paar Marken, damit sie ihr Fenster wirklich anlegt, bevor
         // gemessen wird.
@@ -3193,6 +3236,10 @@ fn surface(state: u64) {
             say_glyph(state, f_tx, PX_MONO, zeichen[zi as usize] as u64)
             zi = zi + 1
         }
+    }
+    if willtile && tileshot {
+        wm.set_tile_on(state, true)
+        tile_shot(state, w, h)
     }
     wm_bench(state, f_tx, PX_MONO)
     wm.damage_all(state)
@@ -3734,4 +3781,322 @@ fn wm_bench(state: u64, f: u64, px: u64) {
         serial.puts((&s_pc[0]) as u64)
         serial.nl()
     }
+}
+
+// =============================================== RUNDE TILING: die Buehne
+//
+// Was hier steht, ist NICHT der Fensterbaum -- der steht in
+// `kernel/tile.fi`. Hier steht, was gemessen und gemeldet wird, und in
+// welcher Reihenfolge: erst die Tastenbelegung aus der Datei, dann der
+// Selbsttest, dann die Zeiten, dann der Zufallstest. Alle drei bauen
+// sich eigene Baeume und raeumen sie wieder ab; danach ist der Baum leer
+// und der Fensterserver kann ihn benutzen.
+//
+// TAUSEND LAEUFE JE ZAHL, und das ist der Grund, warum die Zahlen in
+// NANOSEKUNDEN dastehen: `us_of` rechnet in ganzen Mikrosekunden, und
+// eine Neuberechnung fuer zwei Fenster ist schneller als das. Bei
+// tausend Laeufen ist die Mikrosekundenzahl des GANZEN Laufs zugleich
+// die Nanosekundenzahl EINES Laufs -- ohne eine einzige Division, die
+// etwas beschoenigen koennte.
+const TILE_RUNDEN: u64 = 1000
+
+fn tile_conf(state: u64) -> u64 {
+    if kstate.get(state, kstate.FS_READY) == 0 {
+        return 0
+    }
+    var pfad: [u8; 31] = "/users/osum/config/tiling.conf\0"
+    let ino: u64 = fs.path(state, (&pfad[0]) as u64)
+    if ino == 0 {
+        return 0
+    }
+    let n: u64 = fs.inode_size(state, ino)
+    if n == 0 || n > 4000 {
+        return 0
+    }
+    let buf: u64 = mem.frame_run(state, 1)
+    if buf == 0 {
+        return 0
+    }
+    var off: u64 = 0
+    while off < n {
+        var c: u64 = n - off
+        if c > 4096 {
+            c = 4096
+        }
+        let got: u64 = fs.read_at(state, ino, off, buf + off, c)
+        if got == 0 {
+            off = n
+        } else {
+            off = off + got
+        }
+    }
+    let k: u64 = tile.bind_parse(state, buf, n)
+    mem.frame_free_run(state, buf, 1)
+    return k
+}
+
+fn tile_build(state: u64, n: u64, w: u64, h: u64) {
+    tile.init(state, 0, 0, w, h)
+    var k: u64 = 0
+    while k < n {
+        k = k + 1
+        tile.insert(state, 0)
+    }
+}
+
+fn tile_time(state: u64, n: u64, w: u64, h: u64, pruefen: bool) -> u64 {
+    tile_build(state, n, w, h)
+    let t: u64 = apic.tsc()
+    var i: u64 = 0
+    while i < TILE_RUNDEN {
+        if pruefen {
+            tile.check(state)
+        } else {
+            tile.relayout(state)
+        }
+        i = i + 1
+    }
+    return us_of(state, apic.tsc() - t)
+}
+
+fn tile_stage(state: u64, w: u64, h: u64) {
+    var s_t: [u8; 7] = "tile: \0"
+    var s_x: [u8; 2] = "x\0"
+    var s_nd: [u8; 10] = "  nodes=\0\0"
+    var s_lv: [u8; 12] = "  maxleaf=\0\0"
+    var s_bd: [u8; 10] = "  binds=\0\0"
+    var s_st: [u8; 11] = "selftest \0\0"
+    var s_of: [u8; 4] = "/\0\0\0"
+    var s_be: [u8; 20] = "tile: bench relay2=\0"
+    var s_r8: [u8; 10] = "  relay8=\0"
+    var s_r32: [u8; 11] = "  relay32=\0"
+    var s_ck: [u8; 11] = "  check32=\0"
+    var s_ns: [u8; 4] = " ns\0"
+    var s_fz: [u8; 18] = "tile: fuzz ops=\0\0\0"
+    var s_vi: [u8; 15] = "  violations=\0\0"
+    var s_pk: [u8; 9] = "  peak=\0\0"
+    var s_ch: [u8; 11] = "  checks=\0\0"
+    var s_nos: [u8; 22] = "  (notiledirty: an)\0\0\0"
+
+    serial.puts((&s_t[0]) as u64)
+    serial.dec(w)
+    serial.puts((&s_x[0]) as u64)
+    serial.dec(h)
+    serial.puts((&s_nd[0]) as u64)
+    serial.dec(tile.MAX_NODES)
+    serial.puts((&s_lv[0]) as u64)
+    serial.dec(tile.MAX_LEAVES)
+    serial.nl()
+
+    serial.puts((&s_t[0]) as u64)
+    serial.puts((&s_st[0]) as u64)
+    serial.dec(tile.selftest(state))
+    serial.puts((&s_of[0]) as u64)
+    serial.dec(tile.selftest_max())
+    var s_fb: [u8; 11] = "  failed=\0\0"
+    serial.puts((&s_fb[0]) as u64)
+    serial.hex(tile.failbits(state))
+    serial.nl()
+
+    // DIE TASTENBELEGUNG KOMMT NACH DEM SELBSTTEST -- der raeumt die
+    // Tabelle am Ende ab, und eine Belegung, die danach leer ist, waere
+    // eine, die es nur auf dem Papier gibt.
+    let nb: u64 = tile_conf(state)
+    serial.puts((&s_t[0]) as u64)
+    serial.puts((&s_bd[0]) as u64 + 2)
+    serial.dec(nb)
+    serial.nl()
+
+    if apic.tsc_hz(state) != 0 {
+        let r2: u64 = tile_time(state, 2, w, h, false)
+        let r8: u64 = tile_time(state, 8, w, h, false)
+        let r32: u64 = tile_time(state, 32, w, h, false)
+        let c32: u64 = tile_time(state, 32, w, h, true)
+        serial.puts((&s_be[0]) as u64)
+        serial.dec(r2)
+        serial.puts((&s_ns[0]) as u64)
+        serial.puts((&s_r8[0]) as u64)
+        serial.dec(r8)
+        serial.puts((&s_ns[0]) as u64)
+        serial.puts((&s_r32[0]) as u64)
+        serial.dec(r32)
+        serial.puts((&s_ns[0]) as u64)
+        serial.puts((&s_ck[0]) as u64)
+        serial.dec(c32)
+        serial.puts((&s_ns[0]) as u64)
+        serial.nl()
+    }
+
+    if (kstate.get(state, kstate.MODE) & kstate.M_TILEFUZZ) != 0 {
+        tile.init(state, 0, 0, w, h)
+        let v: u64 = tile.fuzz(state, 10000)
+        serial.puts((&s_fz[0]) as u64)
+        serial.dec(10000)
+        serial.puts((&s_vi[0]) as u64)
+        serial.dec(v)
+        serial.puts((&s_pk[0]) as u64)
+        serial.dec(tile.peak(state))
+        serial.puts((&s_ch[0]) as u64)
+        serial.dec(tile.checks(state))
+        serial.nl()
+    }
+
+    tile.init(state, 0, 0, w, h)
+    if (kstate.get(state, kstate.MODE) & kstate.M_NOTILEDIRTY) != 0 {
+        tile.set_nosub(state, true)
+        serial.puts((&s_t[0]) as u64)
+        serial.puts((&s_nos[0]) as u64)
+        serial.nl()
+    }
+}
+
+// ------------------------------------------ die drei Anordnungen fuers Foto
+//
+// VIER FENSTER, und zwar in einer Anordnung, die sich AUSRECHNEN laesst:
+// erst waagerecht in zwei Haelften, dann jede Haelfte senkrecht. Das
+// ergibt vier Kacheln zu 400x300 an den Stellen (0,0), (400,0), (0,300)
+// und (400,300) -- Zahlen, die `tools/gfx/schau.py` Bildpunkt fuer
+// Bildpunkt nachrechnen kann. Mit `tiletabs` werden aus denselben vier
+// Fenstern vier REITER in einem Container, mit `tilerot` wird die
+// Anordnung um eine Vierteldrehung gedreht.
+fn tile_shot(state: u64, w: u64, h: u64) {
+    var t1: [u8; 6] = "Eins\0\0"
+    var t2: [u8; 6] = "Zwei\0\0"
+    var t3: [u8; 6] = "Drei\0\0"
+    var t4: [u8; 6] = "Vier\0\0"
+    var s_w: [u8; 11] = "tile: win=\0"
+    var s_k: [u8; 3] = " \0\0"
+    var s_c: [u8; 2] = ",\0"
+    var s_x: [u8; 2] = "x\0"
+    var s_d: [u8; 19] = "tile: dirty split=\0"
+    var s_cl: [u8; 9] = "  close=\0"
+    var s_sc: [u8; 10] = "  screen=\0"
+    var s_tb: [u8; 13] = "tile: tabs=\0\0"
+    var s_hd: [u8; 10] = "  hidden=\0"
+
+    let tabs: bool = (kstate.get(state, kstate.MODE) & kstate.M_TILETABS) != 0
+    let rot: bool = (kstate.get(state, kstate.MODE) & kstate.M_TILEROT) != 0
+    var a: u64 = wm.MAX_WIN
+    var b: u64 = wm.MAX_WIN
+    var c: u64 = wm.MAX_WIN
+    var d: u64 = wm.MAX_WIN
+    // Das Terminalfenster bleibt fuer das Foto AUSSERHALB des Baumes --
+    // sonst zeigt das Bild fuenf Kacheln und die Aufgabe verlangt vier.
+    // Es schwebt weiter an seinem Platz und liegt unter den vier neuen.
+    var f: u64 = 0
+    while f < wm.MAX_WIN {
+        if wm.valid(state, f) {
+            wm.tile_release(state, f)
+        }
+        f = f + 1
+    }
+    tile.set_next_split(state, 0)
+    a = wm.create(state, 0, 0, 0, w / 2, h / 2, wm.K_RAW, (&t1[0]) as u64)
+    tile.set_next_split(state, 1)
+    b = wm.create(state, 0, 0, 0, w / 2, h / 2, wm.K_RAW, (&t2[0]) as u64)
+    if tabs {
+        tile.set_layout(state, tile.root(state), tile.LAY_TABBED)
+        wm.tile_apply(state)
+        c = wm.create(state, 0, 0, 0, w / 2, h / 2, wm.K_RAW, (&t3[0]) as u64)
+        d = wm.create(state, 0, 0, 0, w / 2, h / 2, wm.K_RAW, (&t4[0]) as u64)
+    } else {
+        wm.set_focus(state, b)
+        tile.set_next_split(state, 2)
+        c = wm.create(state, 0, 0, 0, w / 2, h / 2, wm.K_RAW, (&t3[0]) as u64)
+        wm.set_focus(state, a)
+        tile.set_next_split(state, 2)
+        d = wm.create(state, 0, 0, 0, w / 2, h / 2, wm.K_RAW, (&t4[0]) as u64)
+    }
+    if rot {
+        tile.rotate(state, tile.root(state), 1)
+        wm.tile_apply(state)
+    }
+    wm.damage_all(state)
+    // Jedes Fenster bekommt eine eigene Farbe -- das ist es, was auf dem
+    // Foto nachgerechnet wird.
+    tile_paint(state, a, fb.rgb(state, 0xC0, 0x30, 0x30))
+    tile_paint(state, b, fb.rgb(state, 0x30, 0xB0, 0x50))
+    tile_paint(state, c, fb.rgb(state, 0x30, 0x60, 0xE0))
+    tile_paint(state, d, fb.rgb(state, 0xE0, 0xC0, 0x30))
+    tile_say(state, a, (&s_w[0]) as u64, (&s_k[0]) as u64,
+        (&s_c[0]) as u64, (&s_x[0]) as u64)
+    tile_say(state, b, (&s_w[0]) as u64, (&s_k[0]) as u64,
+        (&s_c[0]) as u64, (&s_x[0]) as u64)
+    tile_say(state, c, (&s_w[0]) as u64, (&s_k[0]) as u64,
+        (&s_c[0]) as u64, (&s_x[0]) as u64)
+    tile_say(state, d, (&s_w[0]) as u64, (&s_k[0]) as u64,
+        (&s_c[0]) as u64, (&s_x[0]) as u64)
+    var versteckt: u64 = 0
+    var k: u64 = 0
+    while k < wm.MAX_WIN {
+        if wm.valid(state, k) && wm.win_hidden(state, k) {
+            versteckt = versteckt + 1
+        }
+        k = k + 1
+    }
+    serial.puts((&s_tb[0]) as u64)
+    serial.dec(bnum(tabs))
+    serial.puts((&s_hd[0]) as u64)
+    serial.dec(versteckt)
+    serial.nl()
+    // DIE MESSUNG, UM DIE ES GEHT: wie viele Bildpunkte kostet ein
+    // Teilen, und wie viele ein Schliessen? Gemessen wird der ZAEHLER
+    // des Fensterservers, nicht eine Schaetzung -- `compose` addiert die
+    // Flaeche, die es wirklich zusammengesetzt hat.
+    let paar: u64 = tile_dirty(state)
+    serial.puts((&s_d[0]) as u64)
+    serial.dec(paar & 0xFFFFFFFF)
+    serial.puts((&s_cl[0]) as u64)
+    serial.dec(paar >> 32)
+    serial.puts((&s_sc[0]) as u64)
+    serial.dec(w * h)
+    serial.nl()
+}
+
+fn tile_paint(state: u64, i: u64, farbe: u64) {
+    if i >= wm.MAX_WIN {
+        return
+    }
+    wm.fill(state, i, 0, 0, wm.win_w(state, i), wm.win_h(state, i), farbe)
+}
+
+fn tile_say(state: u64, i: u64, sw: u64, sk: u64, sc: u64, sx: u64) {
+    if i >= wm.MAX_WIN {
+        return
+    }
+    serial.puts(sw)
+    serial.dec(i)
+    serial.puts(sk)
+    serial.dec(wm.win_x(state, i) as u64)
+    serial.puts(sc)
+    serial.dec(wm.win_y(state, i) as u64)
+    serial.puts(sk)
+    serial.dec(wm.outer_w(state, i))
+    serial.puts(sx)
+    serial.dec(wm.outer_h(state, i))
+    serial.nl()
+}
+
+// Schliessen und wieder Teilen, jedes fuer sich gemessen. Der Rueckgabe
+// traegt beide Zahlen: Teilen unten, Schliessen oben.
+fn tile_dirty(state: u64) -> u64 {
+    let f: u64 = wm.focus(state)
+    if f >= wm.MAX_WIN || !wm.tiled(state, f) {
+        return 0
+    }
+    wm.damage_all(state)
+    wm.compose(state)
+    let p0: u64 = wm.pixels(state)
+    wm.tile_release(state, f)
+    wm.compose(state)
+    let zu: u64 = wm.pixels(state) - p0
+    wm.damage_all(state)
+    wm.compose(state)
+    let p1: u64 = wm.pixels(state)
+    wm.tile_take(state, f)
+    wm.compose(state)
+    let auf: u64 = wm.pixels(state) - p1
+    wm.damage_all(state)
+    wm.compose(state)
+    return (zu << 32) | (auf & 0xFFFFFFFF)
 }
