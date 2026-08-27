@@ -11,11 +11,13 @@ document that stops being true in the first week.
 
     rawcolour.py [root]        exit 0 when the count is zero
 
-WHAT IS SCANNED. The ring-3 files that paint the interface, listed by
-name below. Not the whole tree: `kernel/fb.fi` maps a framebuffer and
-`kernel/wm.fi` composites buffers -- neither decides what a button
-looks like, and both legitimately contain a test pattern and a size
-mask. A checker whose output is mostly noise is a checker nobody reads.
+WHAT IS SCANNED. The files that decide what the interface LOOKS LIKE,
+listed by name below: the drawing core, the widget library, the six
+programs with a window, and `kernel/wm.fi`, which paints frame and
+title bar because it composites the screen. Not the whole tree --
+`kernel/fb.fi` maps a framebuffer and does not decide what a button
+looks like, and a checker whose output is mostly noise is a checker
+nobody reads.
 
 WHAT COUNTS AS A COLOUR. A hexadecimal literal of exactly six digits,
 or of eight digits whose top two are zero: 0x00RRGGBB is how this
@@ -40,10 +42,19 @@ import re
 import sys
 
 PAT = re.compile(r"0x(?:00)?([0-9A-Fa-f]{6})\b")
+# The OTHER way a colour hides in this tree: three channel literals in
+# a row. `fb.rgb(state, 0x10, 0x14, 0x1A)` is every bit as much a
+# hardcoded colour as 0x0010141A, and the first version of this script
+# walked straight past four of them -- the terminal window kept its
+# dark background in a light theme and the screenshot showed it.
+PAT_RGB = re.compile(r"\brgb\(\s*state\s*,\s*(0x[0-9A-Fa-f]{1,2}|\d{1,3})"
+                     r"\s*,\s*(0x[0-9A-Fa-f]{1,2}|\d{1,3})"
+                     r"\s*,\s*(0x[0-9A-Fa-f]{1,2}|\d{1,3})\s*\)")
 
 # The files that paint the interface. wlibc draws the shapes, wlib the
 # widgets, and the six programs are everything with a window in it.
 FILES = [
+    "kernel/wm.fi",
     "kernel/user/wlibc.fi",
     "kernel/user/wlib.fi",
     "kernel/user/leiste.fi",
@@ -56,10 +67,24 @@ FILES = [
     "kernel/user/wigdemo.fi",
 ]
 
+# Named constants that are shaped like a colour and are not one: a
+# field mask, two markers, the two ends the ramp generator mixes
+# towards, a size bound, and the two probe values of the window
+# server's self test. Every one of them is listed BY NAME. An exception
+# granted by a pattern is an exception that grows.
 ALLOWED_CONSTS = ("const RGB24", "const RGB_WHITE", "const RGB_BLACK",
-                  "const RGB_BAD", "const ACCENT_BLACK")
-ALLOWED_FN_FILE = "kernel/user/wlibc.fi"
-ALLOWED_FN = "fn primitives_builtin"
+                  "const RGB_BAD", "const ACCENT_BLACK",
+                  "const STRUT_MAX", "const PROBE_IN", "const PROBE_OUT",
+                  "const CURSOR_BODY", "const CURSOR_EDGE")
+# file -> the one function in it that may hold raw values
+ALLOWED_FN = {
+    "kernel/user/wlibc.fi": "fn primitives_builtin",
+    # The server paints frame and title bar because it composites the
+    # screen. Ring 3 hands it eight numbers (WM_DECO); `deco_fallback`
+    # is what it draws with until somebody does, and a machine whose
+    # taskbar has not started yet may not be black on black.
+    "kernel/wm.fi": "fn deco_fallback",
+}
 
 
 def is_colour(code, m):
@@ -75,8 +100,8 @@ def scan(path, rel):
     hits = []
     uses = 0
     for no, line in enumerate(text.split("\n"), 1):
-        if rel == ALLOWED_FN_FILE:
-            if line.startswith(ALLOWED_FN):
+        if rel in ALLOWED_FN:
+            if line.startswith(ALLOWED_FN[rel]):
                 inside = True
             elif line.startswith("}"):
                 inside = False
@@ -89,6 +114,8 @@ def scan(path, rel):
         for m in PAT.finditer(code):
             if is_colour(code, m):
                 hits.append((rel, no, code.strip()))
+        for m in PAT_RGB.finditer(code):
+            hits.append((rel, no, code.strip()))
     return hits, uses
 
 

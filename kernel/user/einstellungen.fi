@@ -7,13 +7,22 @@
 //
 // FUENF REITER, und jeder von ihnen SCHREIBT WIRKLICH ETWAS:
 //
-//   Darstellung  waehlt eines der Farbschemata aus `/etc/schemas/` und
-//                kopiert es nach `/etc/theme`. Schreibtisch und
-//                Taskleiste lesen die Datei nach und wechseln die
-//                Farbe OHNE Neustart -- das ist die Zusage, und sie
-//                ist im Bildschirmfoto zu sehen. Dazu: ein
-//                Hintergrundbild aus einer Datei nach
-//                `/etc/hintergrund` kopieren.
+//   Darstellung  RUNDE THEME: der Reiter schreibt `/etc/theme.conf`
+//                -- Schema, Modus (hell / dunkel / automatisch) und
+//                Akzentfarbe. Er kopiert NICHTS mehr nach `/etc/theme`:
+//                ein Schema unter `/etc/schemas/` traegt rohe Rampen,
+//                und was daraus wird, rechnet `wlibc.theme_reload()`
+//                aus. Schreibtisch, Taskleiste und jedes Fenster sehen
+//                nach und wechseln OHNE Neustart.
+//                UND ER PRUEFT DEN KONTRAST. Wer eine Akzentfarbe
+//                eintraegt, bekommt die gemessenen Verhaeltnisse zu
+//                sehen (WCAG 2.1: 4,5:1 fuer Text, 3:1 fuer ein
+//                Bedienelement) und die Meldung, um wie viele Stufen
+//                die Farbe verschoben werden musste. Eine Oberflaeche,
+//                die eine unlesbare Farbe stumm annimmt, hat den
+//                Benutzer belogen.
+//                Dazu: ein Hintergrundbild aus einer Datei nach
+//                `/etc/wallpaper` kopieren.
 //   Bildschirm   schreibt `/etc/schirm.conf`. EHRLICH: dieser Kernel
 //                setzt den Bildmodus beim Start (`fbbig`, kernel/fb.fi)
 //                und kann ihn im Betrieb NICHT wechseln. Das steht so
@@ -91,6 +100,9 @@ static mut e_gw: [u8; 24] = [0 as u8; 24]
 static mut e_pw1: [u8; 64] = [0 as u8; 64]
 static mut e_pw2: [u8; 64] = [0 as u8; 64]
 static mut puffer: [u8; 2048] = [0 as u8; 2048]
+static mut e_akzent: [u8; 16] = [0 as u8; 16]
+static mut l_kon: [u8; 96] = [0 as u8; 96]
+static mut l_warn: [u8; 96] = [0 as u8; 96]
 static mut name: [u8; 64] = [0 as u8; 64]
 static mut geschrieben: u64 = 0
 
@@ -105,6 +117,9 @@ static mut t_tabs: [u8; 42] = "Darstellung\nBildschirm\nZeit\nNetz\nBenutzer\0"
 static mut l_far: [u8; 31] = "Farbschema (aus /etc/schemas):\0"
 static mut l_bil: [u8; 38] = "Hintergrundbild -- Quelldatei (OSYM):\0"
 static mut b_uber: [u8; 12] = "Uebernehmen\0"
+static mut l_mod: [u8; 7] = "Modus:\0"
+static mut c_mod: [u8; 36] = "Hell\nDunkel\nAutomatisch (Tageszeit)\0"
+static mut l_akz: [u8; 45] = "Akzentfarbe RRGGBB (leer = die des Schemas):\0"
 static mut l_aufl: [u8; 33] = "Aufloesung beim naechsten Start:\0"
 static mut c_aufl: [u8; 29] = "800 x 600\n1024 x 768 (fbbig)\0"
 static mut l_ehr1: [u8; 50] = "Der Bildmodus wird beim Start gesetzt; im Betrieb\0"
@@ -364,6 +379,112 @@ fn schema_pfad(i: u64, ziel: u64) -> bool {
     return true
 }
 
+// EIN KONTRASTVERHAELTNIS ALS TEXT. `theme_contrast` liefert es mit
+// hundert malgenommen -- 493 heisst 4,93 zu 1 --, und ein Benutzer,
+// dem man 493 hinschreibt, liest keine Zahl, sondern einen Fehler.
+fn quote_an(p: u64, at: u64, v: u64) -> u64 {
+    var a: u64 = zahl_an(p, at, v / 100)
+    __mmio_write8((p + a) as *mut u8, 44 as u8)
+    a = a + 1
+    __mmio_write8((p + a) as *mut u8, (48 + ((v / 10) % 10)) as u8)
+    a = a + 1
+    __mmio_write8((p + a) as *mut u8, (48 + (v % 10)) as u8)
+    a = a + 1
+    __mmio_write8((p + a) as *mut u8, 0 as u8)
+    return a
+}
+
+// WAS DER KONTRAST WIRKLICH IST, in zwei Zeilen unter der Farbe.
+// Beide Zahlen kommen aus `wlibc` und werden hier nur gesetzt -- die
+// Oberflaeche rechnet nichts nach, sonst gaebe es zwei Rechnungen und
+// eines Tages zwei Ergebnisse.
+fn kontrast_zeigen() {
+    var m_t: [u8; 16] = "Text/Akzent \0   "
+    var m_f: [u8; 18] = "  Akzent/Flaeche \0"
+    var m_ok: [u8; 19] = "  -- WCAG erfuellt\0"
+    var m_no: [u8; 21] = "  -- WCAG NICHT ganz\0"
+    var m_v: [u8; 25] = "Akzentfarbe verschoben: \0"
+    var m_st: [u8; 32] = " Stufe(n) auf der eigenen Rampe\0"
+    var m_ex: [u8; 37] = "Akzentfarbe unveraendert uebernommen\0"
+    var m_bad: [u8; 46] = "Keine Stufe erfuellt beides -- beste genommen\0"
+    let k: u64 = (&l_kon[0 as usize]) as u64
+    var a: u64 = text_an(k, 0, (&m_t[0 as usize]) as u64)
+    a = quote_an(k, a, wlibc.theme_accent_ratio_text())
+    a = text_an(k, a, (&m_f[0 as usize]) as u64)
+    a = quote_an(k, a, wlibc.theme_accent_ratio_ui())
+    if wlibc.theme_accent_ok() {
+        let _a2: u64 = text_an(k, a, (&m_ok[0 as usize]) as u64)
+    } else {
+        let _a3: u64 = text_an(k, a, (&m_no[0 as usize]) as u64)
+    }
+    var m_bk: [u8; 48] = "Nicht verstandene Zeilen in den Einstellungen: \0"
+    let w: u64 = (&l_warn[0 as usize]) as u64
+    if wlibc.theme_bad_keys() > 0 {
+        // EINE FALSCH GETIPPTE ZEILE WIRD NICHT VERSCHLUCKT. Wer
+        // "2563e" statt "2563eb" eintraegt, bekommt sonst stumm die
+        // Farbe des Schemas und sucht den Fehler bei sich.
+        let c: u64 = text_an(w, 0, (&m_bk[0 as usize]) as u64)
+        let _c2: u64 = zahl_an(w, c, wlibc.theme_bad_keys())
+    } else if !wlibc.theme_accent_ok() {
+        let _b0: u64 = text_an(w, 0, (&m_bad[0 as usize]) as u64)
+    } else if wlibc.theme_accent_exact() {
+        let _b1: u64 = text_an(w, 0, (&m_ex[0 as usize]) as u64)
+    } else {
+        var b: u64 = text_an(w, 0, (&m_v[0 as usize]) as u64)
+        b = zahl_an(w, b, wlibc.theme_accent_moved())
+        let _b2: u64 = text_an(w, b, (&m_st[0 as usize]) as u64)
+    }
+}
+
+// /etc/theme.conf schreiben. DAS ist der Knopf: nicht eine Datei
+// kopieren, sondern die vier Angaben hinlegen, aus denen der Satz
+// gerechnet wird.
+fn theme_conf_schreiben(schema: u64, modus: u64, akzent: u64) -> bool {
+    var k_s: [u8; 8] = "scheme=\0"
+    var k_m: [u8; 7] = "\nmode=\0"
+    var k_a: [u8; 9] = "\naccent=\0"
+    var k_l: [u8; 14] = "\nlight_start=\0"
+    var k_d: [u8; 13] = "\ndark_start=\0"
+    var k_nl: [u8; 2] = "\n\0"
+    var v_l: [u8; 6] = "light\0"
+    var v_d: [u8; 5] = "dark\0"
+    var v_a: [u8; 5] = "auto\0"
+    var t_conf: [u8; 16] = "/etc/theme.conf\0"
+    let b: u64 = (&puffer[0 as usize]) as u64
+    var at: u64 = text_an(b, 0, (&k_s[0 as usize]) as u64)
+    at = text_an(b, at, schema)
+    at = text_an(b, at, (&k_m[0 as usize]) as u64)
+    if modus == 0 {
+        at = text_an(b, at, (&v_l[0 as usize]) as u64)
+    } else if modus == 1 {
+        at = text_an(b, at, (&v_d[0 as usize]) as u64)
+    } else {
+        at = text_an(b, at, (&v_a[0 as usize]) as u64)
+    }
+    at = text_an(b, at, (&k_a[0 as usize]) as u64)
+    at = text_an(b, at, akzent)
+    at = text_an(b, at, (&k_l[0 as usize]) as u64)
+    at = uhr_an(b, at, wlibc.theme_light_start())
+    at = text_an(b, at, (&k_d[0 as usize]) as u64)
+    at = uhr_an(b, at, wlibc.theme_dark_start())
+    at = text_an(b, at, (&k_nl[0 as usize]) as u64)
+    return datei_schreiben((&t_conf[0 as usize]) as u64, b, at)
+}
+
+// 450 -> "07:30". Die Datei traegt die Uhrzeit und nicht die Minuten,
+// weil ein Mensch sie liest.
+fn uhr_an(p: u64, at: u64, min: u64) -> u64 {
+    let h: u64 = min / 60
+    let m: u64 = min % 60
+    __mmio_write8((p + at) as *mut u8, (48 + (h / 10)) as u8)
+    __mmio_write8((p + at + 1) as *mut u8, (48 + (h % 10)) as u8)
+    __mmio_write8((p + at + 2) as *mut u8, 58 as u8)
+    __mmio_write8((p + at + 3) as *mut u8, (48 + (m / 10)) as u8)
+    __mmio_write8((p + at + 4) as *mut u8, (48 + (m % 10)) as u8)
+    __mmio_write8((p + at + 5) as *mut u8, 0 as u8)
+    return at + 5
+}
+
 // ------------------------------------------------------ die Anzeigen
 
 fn stand_lesen() {
@@ -488,7 +609,7 @@ fn u_start(args: u64) -> u64 {
     var s_hh: [u8; 4] = " h=\0"
     var t_theme: [u8; 11] = "/etc/theme\0"
     var t_schemas: [u8; 13] = "/etc/schemas\0"
-    var t_hint: [u8; 17] = "/etc/hintergrund\0"
+    var t_hint: [u8; 15] = "/etc/wallpaper\0"
     var t_schirm: [u8; 17] = "/etc/schirm.conf\0"
     var t_zeit: [u8; 15] = "/etc/zeit.conf\0"
     var t_netz: [u8; 15] = "/etc/netz.conf\0"
@@ -524,16 +645,17 @@ fn u_start(args: u64) -> u64 {
         ulib.nl()
         return 1
     }
-    let _t: u64 = wlibc.theme_load((&t_theme[0 as usize]) as u64)
+    let _t: u64 = wlibc.theme_reload()
     let _n: u64 = schemas_lesen((&t_schemas[0 as usize]) as u64)
+    kontrast_zeigen()
     let _h: u64 = text_an((&e_bild[0 as usize]) as u64, 0,
         (&t_hint[0 as usize]) as u64)
     let _s: u64 = text_an((&l_stat[0 as usize]) as u64, 0,
         (&m_ok[0 as usize]) as u64)
     stand_lesen()
 
-    let bw: u64 = 520
-    let bh: u64 = 400
+    let bw: u64 = 560
+    let bh: u64 = 470
     w = wlib.window(140, 60, bw, bh, (&t_titel[0 as usize]) as u64)
     if w >= wlib.MAXWN {
         say((&s_bad[0 as usize]) as u64)
@@ -550,8 +672,18 @@ fn u_start(args: u64) -> u64 {
     let tb: u64 = merke(wlib.tabs((&t_tabs[0 as usize]) as u64), R_ANZ)
     // ---- Darstellung
     let _d1: u64 = merke(wlib.label((&l_far[0 as usize]) as u64), R_DARST)
-    wlib.size(0, 110)
-    let ls: u64 = merke(wlib.list((&schemas[0 as usize]) as u64, 5), R_DARST)
+    wlib.size(0, 92)
+    let ls: u64 = merke(wlib.list((&schemas[0 as usize]) as u64, 4), R_DARST)
+    // RUNDE THEME: Modus und Akzentfarbe. Beide gehen in dieselbe
+    // Datei wie das Schema, weil beide dasselbe sind -- eine
+    // EINSTELLUNG, und kein Inhalt.
+    let _d3: u64 = merke(wlib.label((&l_mod[0 as usize]) as u64), R_DARST)
+    let cm: u64 = merke(wlib.choice((&c_mod[0 as usize]) as u64, 2), R_DARST)
+    let _d4: u64 = merke(wlib.label((&l_akz[0 as usize]) as u64), R_DARST)
+    let ea: u64 = merke(wlib.entry((&e_akzent[0 as usize]) as u64, 12),
+        R_DARST)
+    let lk: u64 = merke(wlib.label((&l_kon[0 as usize]) as u64), R_DARST)
+    let lw: u64 = merke(wlib.label((&l_warn[0 as usize]) as u64), R_DARST)
     let _d2: u64 = merke(wlib.label((&l_bil[0 as usize]) as u64), R_DARST)
     let eb: u64 = merke(wlib.entry((&e_bild[0 as usize]) as u64, 90),
         R_DARST)
@@ -619,18 +751,26 @@ fn u_start(args: u64) -> u64 {
                 melde_stand()
             } else if kind == wlib.K_BUTTON {
                 if id == b1 {
-                    // Farbschema und Hintergrundbild
-                    var pf: [u8; 96] = [0 as u8; 96]
-                    if schema_pfad(wlib.value(ls), (&pf[0 as usize]) as u64) {
-                        if datei_kopieren((&pf[0 as usize]) as u64,
-                            (&t_theme[0 as usize]) as u64) > 0 {
+                    // RUNDE THEME: nicht mehr eine Datei kopieren,
+                    // sondern /etc/theme.conf schreiben und den Satz
+                    // neu aufloesen. Danach stehen die gemessenen
+                    // Kontraste im Fenster -- vor dem naechsten Klick
+                    // und nicht in einem Protokoll.
+                    if wlib.value(ls) < nschema {
+                        if theme_conf_schreiben(
+                            (&snamen[0 as usize]) as u64
+                                + wlib.value(ls) * 32,
+                            wlib.value(cm),
+                            (&e_akzent[0 as usize]) as u64) {
+                            let _r: u64 = wlibc.theme_reload()
+                            kontrast_zeigen()
+                            wlib.set_text(lk, (&l_kon[0 as usize]) as u64)
+                            wlib.set_text(lw, (&l_warn[0 as usize]) as u64)
                             let a: u64 = text_an((&l_stat[0 as usize]) as u64,
                                 0, (&m_schema[0 as usize]) as u64)
                             let _b: u64 = text_an((&l_stat[0 as usize])
                                 as u64, a, (&snamen[0 as usize]) as u64
                                 + wlib.value(ls) * 32)
-                            let _r: u64 = wlibc.theme_load(
-                                (&t_theme[0 as usize]) as u64)
                         } else {
                             let _c: u64 = text_an((&l_stat[0 as usize])
                                 as u64, 0, (&m_schemano[0 as usize]) as u64)
