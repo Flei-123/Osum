@@ -391,8 +391,8 @@ over this kernel as addresses and masks, and a checker that flags those
 is a checker people learn to ignore. What counts as drawing code is
 `kernel/user/*.fi`, `kernel/wig.fi`, `kernel/wm.fi`, `kernel/ttf.fi` and
 `lib/*.fi` except the generated one. Three spellings are looked for —
-`0xE041`, `57409`, `` — because a checker that knows one spelling
-can be walked around.
+`0xE041`, `57409` and the escape `\uE041` — because a checker that
+knows one spelling can be walked around.
 
 **And there is a counterproof**, without which the 0 could just mean the
 checker is broken: the run plants a code point in a throwaway tree and
