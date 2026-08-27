@@ -51,6 +51,7 @@ BASIS="sh ls cat echo sleep true false wc grep"
 
 TMPD=$(mktemp -d)
 trap 'rm -rf "$TMPD"' EXIT
+[ -n "${KEEP_TMPD:-}" ] && trap - EXIT && echo "TMPD=$TMPD"
 
 pass=0
 fail=0
@@ -60,6 +61,13 @@ is()  { if [ "$2" = "$3" ]; then ok "$1: $2"; else bad "$1: '$2', erwartet '$3'"
 has() { grep -qaF "$2" "$1" && ok "$3" || bad "$3 -- '$2' fehlt"; }
 hasnot() { grep -qaF "$2" "$1" && bad "$3 -- '$2' steht da und sollte nicht" || ok "$3"; }
 val() { grep -aoE "$2" "$1" | tail -1 | grep -oE '\-?[0-9]+$'; }
+# ROUND MERGE: the counters of THIS round and no other. `val` takes the
+# LAST match in the file, and since round NETVIEW the same boot also
+# prints `nv: denied=0` -- three lines after `k13: ... denied=2`. Every
+# question about a permission counter was answered with netview's zero.
+# The line of this round carries its own prefix; use it.
+k13val() { grep -aoE "^k13: .*" "$1" | tail -1 \
+    | grep -oE "(^| )$2=[0-9]+" | tail -1 | grep -oE '[0-9]+$'; }
 
 bash vendor/firn/fetch-firnc.sh >/dev/null || { echo "vendor/firn/fetch-firnc.sh fehlgeschlagen"; exit 1; }
 [ -x "$FIRNC" ] || { echo "firnc0 fehlt: $FIRNC"; exit 1; }
@@ -328,8 +336,8 @@ is "chown justin:justin steht wirklich im Inode" "$m" "/w/rootneu.txt 640 1000 1
 m=$(python3 tools/osum/mkfs.py meta "$A" /w/ju.txt)
 is "die Datei, die justin angelegt hat, gehoert justin" "$m" "/w/ju.txt 644 1000 1000"
 
-kc=$(val "$F" 'checks=[0-9]+')
-kd=$(val "$F" 'denied=[0-9]+')
+kc=$(k13val "$F" checks)
+kd=$(k13val "$F" denied)
 if [ "${kc:-0}" -gt 100 ]; then ok "der Kern hat $kc Rechtefragen beantwortet"
 else bad "nur ${kc:-0} Rechtefragen -- da fragt niemand"; fi
 if [ "${kd:-0}" -gt 0 ]; then ok "davon $kd abgelehnt"
@@ -345,7 +353,7 @@ G="$TMPD/noperm.txt"
 is "GEGENPROBE noperm: justin darf jetzt die Datei mit 0o000 lesen" \
    "$(nth "$G" opendeny 2)" "1"
 is "GEGENPROBE noperm: justin liest jetzt auch /etc/shadow" "$(nth "$G" wdeny 2)" "1"
-kd=$(val "$G" 'denied=[0-9]+')
+kd=$(k13val "$G" denied)
 if [ "${kd:-0}" -gt 0 ]; then
     ok "und der Zaehler der Ablehnungen steht trotzdem bei $kd -- gezaehlt wird, nur nicht gewirkt"
 else bad "mit noperm wird nicht einmal mehr gezaehlt"; fi
