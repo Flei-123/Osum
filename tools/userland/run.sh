@@ -567,8 +567,8 @@ matches "$TMPD/t7.got" "^inodes total=128 used=[0-9]+$" "df counts the inodes"
 matches "$TMPD/t7.got" "^2[0-9]{3}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}$" \
     "date reads the CMOS clock of the machine"
 matches "$TMPD/t7.got" "^up [0-9]+ ms$" "date -u reads the timer instead"
-matches "$TMPD/t7.got" "^  PID PPID STATE   KIND   PRIO TICKS$" "ps prints its table"
-matches "$TMPD/t7.got" "^ +[0-9]+ +[0-9]+ (run|ready|sleep|wait) +user +[0-9]+ +[0-9]+$" \
+matches "$TMPD/t7.got" "^  PID PPID STATE   KIND   PRIO TICKS NET$" "ps prints its table"
+matches "$TMPD/t7.got" "^ +[0-9]+ +[0-9]+ (run|ready|sleep|wait) +user +[0-9]+ +[0-9]+ (real|filtered|faked|none)$" \
     "and a line of it is the running process itself"
 matches "$TMPD/t7.got" "^ +[0-9]+ +[0-9]+ (ready|run|sleep) +idle" "the idle task is in the table"
 has "$TMPD/t7.got" "slept=0" "sleep ends with 0"
