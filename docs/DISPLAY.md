@@ -41,7 +41,7 @@ justification -- 800x600x4 = 1 920 000 octets fit into one 2 MiB tile,
 
 Two pages of `kdata` are taken, `0x5A000` (scalars and mode list) and
 `0x5B000` (lookup table and EDID block). Both are entered in
-`tools/kernel/karte.py`; the collision checker reports 54 areas and 0
+`tools/kernel/memmap.py`; the collision checker reports 54 areas and 0
 collisions.
 
 ---

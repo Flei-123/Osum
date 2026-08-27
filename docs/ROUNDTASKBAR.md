@@ -181,7 +181,7 @@ a checker that accepts both states checks nothing.
 
 Position and both colours come from what the application reported;
 every inked pixel of every glyph is recomputed in the picture against a
-second, independent rasterization (`tools/gfx/schau.py tkette`).
+second, independent rasterization (`tools/gfx/checkshot.py tkette`).
 Tolerance zero. This is the lesson of round K7B, where text was "87 per
 cent correct" while every letter was missing.
 

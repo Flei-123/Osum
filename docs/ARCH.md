@@ -239,7 +239,7 @@ kernel/hv.s      -> kernel/arch/x86_64/hv.s
 
 and the fourteen scripts that name them by path: `tools/build-kernel.sh`,
 `tools/core/run.sh`, `tools/freestanding/run.sh`, `tools/hv/run.sh`,
-`tools/k18/run.sh`, `tools/kernel/run.sh`, `tools/kernel/karte.py`,
+`tools/k18/run.sh`, `tools/kernel/run.sh`, `tools/kernel/memmap.py`,
 `tools/net/run.sh`, `tools/osum/run.sh`, `tools/pci/run.sh`,
 `tools/posix/run.sh`, `tools/smp/run.sh`, `tools/unix/run.sh`,
 `tools/userland/run.sh`.

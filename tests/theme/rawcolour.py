@@ -62,9 +62,9 @@ FILES = [
     "kernel/user/einstellungen.fi",
     "kernel/user/settings.fi",
     "kernel/user/explorer.fi",
-    "kernel/user/starter.fi",
-    "kernel/user/suchen.fi",
-    "kernel/user/wigdemo.fi",
+    "kernel/user/launcher.fi",
+    "kernel/user/locate.fi",
+    "kernel/user/widgetdemo.fi",
 ]
 
 # Named constants that are shaped like a colour and are not one: a

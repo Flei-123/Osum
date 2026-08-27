@@ -24,8 +24,8 @@ bewiesen ist, steht am Ende, und es ist der laengste Abschnitt.
 | `kernel/user/opk.fi` | 1314 | `/bin/opk` — installieren, entfernen, liste, aktualisieren, generationen, zurueck, richten, pruefen |
 | `kernel/user/sha.fi` | 260 | SHA-256 fuer beliebige Laengen, in Ring 3 |
 | `tools/install/run.sh` | 435 | der Laeufer, sieben Teile mit Gegenproben |
-| `tools/install/lauf.sh` | 112 | EIN QEMU-Lauf, drei Startarten: `iso`, `platte`, `roh` |
-| `tools/install/bauen.sh` | 119 | Kern, 34 Programme, zwei signierte Quellen, leere Zielplatte |
+| `tools/install/oneshot.sh` | 112 | EIN QEMU-Lauf, drei Startarten: `iso`, `platte`, `roh` |
+| `tools/install/build.sh` | 119 | Kern, 34 Programme, zwei signierte Quellen, leere Zielplatte |
 
 `/bin/install` braucht **keinen einzigen neuen Systemaufruf**: `/dev/hda`
 ist seit K14 eine echte Datei mit `lseek`/`read`/`write`, und damit ist
@@ -34,7 +34,7 @@ zwei Aufrufe, die dem Paketweg fehlten: **`SYS_LINK` (86)** und
 **`SYS_SYNC` (162)**.
 
 **Modusbits wurden KEINE zugeteilt.** Der u64-Modusraum steht
-unveraendert bei vier freien Bits (38, 61, 62, 63). `tools/kernel/karte.py`
+unveraendert bei vier freien Bits (38, 61, 62, 63). `tools/kernel/memmap.py`
 vor und nach der Runde: *51 Bereiche in 0x60000 Oktetten kdata,
 6 Vektoren, **0 Kollisionen***.
 

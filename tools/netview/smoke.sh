@@ -10,7 +10,7 @@ TMPD=${SMOKED:-$(mktemp -d)}
 mkdir -p "$TMPD"
 echo "workdir $TMPD"
 
-GPROGS="schreibtisch leiste einstellungen starter explorer wigdemo suchen netview edit sh echo ls cat ps"
+GPROGS="schreibtisch leiste einstellungen launcher explorer widgetdemo locate netview edit sh echo ls cat ps"
 MONO=assets/osum-mono.ttf
 SANS=assets/osum-sans.ttf
 GBASE="gfx wm wig desk wmhold wiglong nokbd nosched noproc nofs"
@@ -30,7 +30,7 @@ done
 echo "userland built"
 
 python3 tools/netview/icons.py bauen "$TMPD/icons" > /dev/null 2>&1 || exit 1
-python3 tools/k15/baum.py "$TMPD/baum" > /dev/null 2>&1 || exit 1
+python3 tools/k15/tree.py "$TMPD/baum" > /dev/null 2>&1 || exit 1
 printf '# taskbar.conf\nedge=%s\nheight=28\nwidth=104\nautohide=0\nontop=1\n' \
     "${EDGE:-bottom}" > "$TMPD/taskbar.conf"
 
@@ -45,7 +45,7 @@ for q in state-nocarrier state-noip state-noroute state-online \
          tile-fake tile-net tile-hide; do
     ARGS+=("/etc/netview/$q=$TMPD/icons/$q")
 done
-while read -r z; do ARGS+=("$z"); done < <(python3 tools/k15/buendel.py assets/apps "$TMPD/buendel")
+while read -r z; do ARGS+=("$z"); done < <(python3 tools/k15/bundle.py assets/apps "$TMPD/buendel")
 while read -r z; do ARGS+=("$z"); done < "$TMPD/baum/liste"
 python3 tools/osum/mkfs.py "${ARGS[@]}" > "$TMPD/mkfs.txt" 2>&1 || { tail -5 "$TMPD/mkfs.txt"; exit 1; }
 cp -f "$TMPD/d.img" "$TMPD/l.img"
@@ -68,7 +68,7 @@ while [ $i -lt 1200 ]; do
 done
 python3 tools/wm/monitor.py "$TMPD/mon.sock" "$TMPD/drive" 0.12 > "$TMPD/mon.log" 2>&1
 sleep 2
-python3 tools/gfx/schuss.py "$TMPD/mon.sock" "$TMPD/s.ppm" 30 > "$TMPD/shot.txt" 2>&1
+python3 tools/gfx/screenshot.py "$TMPD/mon.sock" "$TMPD/s.ppm" 30 > "$TMPD/shot.txt" 2>&1
 kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
 
 echo "=========== what the machine said ==========="

@@ -9,7 +9,7 @@
 #
 # WAS GEPRUEFT WIRD:
 #
-#   1. Der Dateimanager kommt hoch und zeigt `/daten`.
+#   1. Der Dateimanager kommt hoch und zeigt `/data`.
 #   2. Die rechte Maustaste auf der Tabelle gibt ein Kontextmenue, das
 #      den Punkt "Backup hierhin sichern" HAT -- fuenf Punkte, nicht vier.
 #   3. Ein Klick darauf, wenn nirgends ein Speicher liegt, FRAGT nach
@@ -33,7 +33,7 @@
 # einlesen und nachweisen, dass die rechte Maustaste ein Fenster
 # aufmacht. Was er NICHT kann: den Klick auf die Baumzeile ".." landen
 # lassen. Der Zeiger trifft die Zeile nicht, der Dateimanager bleibt in
-# `/daten`, und alles danach klickt ins Leere.
+# `/data`, und alles danach klickt ins Leere.
 #
 # Solange das so ist, ist der KNOPF im Dateimanager NICHT von Ende zu
 # Ende gemessen. Der Sicherungsvorgang selbst ist es sehr wohl -- ueber
@@ -66,10 +66,10 @@ num() { local n=$1 w=$2 op=$3 e=$4
     if [ -z "$w" ]; then bad "$n: keine Zahl"; return; fi
     if [ "$w" -"$op" "$e" ] 2>/dev/null; then ok "$n: $w"; else bad "$n: $w, erwartet $op $e"; fi
 }
-feld() { python3 tools/k15/wert.py "$1" "$2" "$3" 2>/dev/null; }
+feld() { python3 tools/k15/value.py "$1" "$2" "$3" 2>/dev/null; }
 rect() { grep -aoE "^explorer: rect id=$2 .*" "$1" | tail -1 | grep -oE "$3=[0-9]+" | sed 's/.*=//'; }
 
-bash vendor/firn/hole-firnc.sh >/dev/null || { echo "hole-firnc.sh fehlgeschlagen"; exit 1; }
+bash vendor/firn/fetch-firnc.sh >/dev/null || { echo "fetch-firnc.sh fehlgeschlagen"; exit 1; }
 command -v qemu-system-x86_64 >/dev/null 2>&1 || { echo "TRESOR-GUI: uebersprungen, qemu fehlt"; exit 0; }
 MONO=assets/osum-mono.ttf
 SANS=assets/osum-sans.ttf
@@ -81,23 +81,23 @@ bash tools/build-kernel.sh "$TMPD/k0.mb" --stufe 0 > "$TMPD/b0.log" 2>&1 \
     && ok "der Kern ist gebaut" \
     || { bad "der Kern laesst sich nicht bauen"; sed 's/^/        /' "$TMPD/b0.log" | head -12; exit 1; }
 
-PROGS="explorer starter suchen sh echo ls cat edit wigdemo"
+PROGS="explorer launcher locate sh echo ls cat edit widgetdemo"
 mkdir -p "$TMPD/bin"
-bash tools/tresor/bauen.sh "$TMPD/bin" 0 $PROGS > "$TMPD/bp.log" 2>&1 \
+bash tools/tresor/build.sh "$TMPD/bin" 0 $PROGS > "$TMPD/bp.log" 2>&1 \
     && ok "die Programme sind gebaut, darunter /bin/explorer mit dem Sicherungspunkt" \
     || { bad "die Programme lassen sich nicht bauen"; sed 's/^/        /' "$TMPD/bp.log" | head -12; exit 1; }
 
-# DER BAUM: /daten ist die Quelle, /sicherung ist der "Stick".
-python3 tools/k15/baum.py "$TMPD/baum" > "$TMPD/baum.log" 2>&1 \
-    && ok "der Verzeichnisbaum ist gebaut" || bad "tools/k15/baum.py fehlgeschlagen"
+# DER BAUM: /data ist die Quelle, /sicherung ist der "Stick".
+python3 tools/k15/tree.py "$TMPD/baum" > "$TMPD/baum.log" 2>&1 \
+    && ok "der Verzeichnisbaum ist gebaut" || bad "tools/k15/tree.py fehlgeschlagen"
 
 ARGS=(build "$TMPD/disk.img" 4096 /lib/ "/lib/mono.ttf=$MONO" "/lib/sans.ttf=$SANS" /bin/)
 for p in $PROGS; do ARGS+=("/bin/$p=$TMPD/bin/${p}.elf"); done
 ARGS+=("/bin/files@/bin/explorer" /sicherung/ /etc/ "/etc/theme=$TMPD/baum/theme")
-while read -r z; do ARGS+=("$z"); done < <(python3 tools/k15/buendel.py assets/apps "$TMPD/buendel")
+while read -r z; do ARGS+=("$z"); done < <(python3 tools/k15/bundle.py assets/apps "$TMPD/buendel")
 while read -r z; do ARGS+=("$z"); done < "$TMPD/baum/liste"
 python3 tools/osum/mkfs.py "${ARGS[@]}" > "$TMPD/mkfs.txt" 2>&1 \
-    && ok "mkfs.py baut das Abbild mit /daten (Quelle) und /sicherung (der Stick)" \
+    && ok "mkfs.py baut das Abbild mit /data (Quelle) und /sicherung (der Stick)" \
     || { bad "mkfs.py fehlgeschlagen"; sed 's/^/        /' "$TMPD/mkfs.txt" | head -8; exit 1; }
 
 RC=0
@@ -138,8 +138,8 @@ echo "== 2. der Dateimanager kommt hoch =="
 foto grund "gfx wm wigfiles wmhold wiglong $GRUND"
 grep -qa 'explorer: ready' "$TMPD/grund.txt" \
     && ok "/bin/explorer hat sein Fenster gemalt" || bad "explorer meldet kein ready"
-grep -qa 'explorer: cd /daten' "$TMPD/grund.txt" \
-    && ok "und steht in /daten -- der Quelle" || bad "explorer steht nicht in /daten"
+grep -qa 'explorer: cd /data' "$TMPD/grund.txt" \
+    && ok "und steht in /data -- der Quelle" || bad "explorer steht nicht in /data"
 
 WX=$(feld "$TMPD/grund.txt" "explorer: geom" x)
 WY=$(feld "$TMPD/grund.txt" "explorer: geom" y)
@@ -228,11 +228,11 @@ M="$TMPD/a.mon"; : > "$M"
 zum_stick "$M"
 foto wurzel "gfx wm wigfiles wmhold wiglong $GRUND" "$M"
 # ACHTUNG, HIER STAND EIN FEHLER: `grep 'cd /'` passt AUCH auf
-# `cd /daten`. Die Zusage war damit immer erfuellt und hat einen Klick
+# `cd /data`. Die Zusage war damit immer erfuellt und hat einen Klick
 # bestaetigt, der nie angekommen ist. Jetzt wird der Pfad GENAU geprueft.
 grep -qaE 'explorer: cd / n=' "$TMPD/wurzel.txt" \
     && ok "der Klick auf die Baumzeile 0 geht hinauf nach /" \
-    || bad "der Klick auf die Baumzeile 0 geht NICHT hinauf -- er bleibt in /daten"
+    || bad "der Klick auf die Baumzeile 0 geht NICHT hinauf -- er bleibt in /data"
 
 SZ=$(python3 - "$TMPD/live-wurzel.img" <<'PY2'
 import subprocess, sys

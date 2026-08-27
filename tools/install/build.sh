@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# tools/install/bauen.sh -- Kern, Programme und die beiden Platten dieser
+# tools/install/build.sh -- Kern, Programme und die beiden Platten dieser
 # Runde, zum Iterieren waehrend der Arbeit.
 #
 # WAS HIER ENTSTEHT, und warum genau das:
@@ -19,7 +19,7 @@
 #                WACHSEN, ohne die Inodetabelle zu verschieben.
 #   ziel.img     eine leere Platte.
 #
-# Verwendung:  bash tools/install/bauen.sh [ausgabeverzeichnis]
+# Verwendung:  bash tools/install/build.sh [ausgabeverzeichnis]
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
@@ -36,7 +36,7 @@ mkdir -p "$OUT/bin"
 
 PROGS=${PROGS:-"sh ls cat echo cp mv rm mkdir rmdir touch head tail wc grep sort uniq true false sleep ps kill uname date df mount umount install opk sync tar find du chmod id whoami"}
 
-bash vendor/firn/hole-firnc.sh > "$OUT/firnc.log" 2>&1 || {
+bash vendor/firn/fetch-firnc.sh > "$OUT/firnc.log" 2>&1 || {
     echo "== firnc laesst sich nicht bauen"; tail -20 "$OUT/firnc.log"; exit 1; }
 
 bash tools/build-kernel.sh "$OUT/k.mb" > "$OUT/k.log" 2>&1 || {

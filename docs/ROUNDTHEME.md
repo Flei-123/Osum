@@ -24,7 +24,7 @@ Everything below is from a run. Where a number is missing, it says so.
 | where they came from | `theme_defaults()` in `kernel/user/wlibc.fi`, overridden by `/etc/theme` |
 | light/dark | **none**. `grep -ri 'dark\|light\|accent'` over the tree: no hit that meant an appearance |
 | accent colour | one entry in the list, `accent`, with no derived states |
-| schemes shipped | 0 files. `/etc/schemas/` was read by the settings program and was empty; the one scheme on the disk was generated in `tools/k15/baum.py` and written to `/etc/theme` |
+| schemes shipped | 0 files. `/etc/schemas/` was read by the settings program and was empty; the one scheme on the disk was generated in `tools/k15/tree.py` and written to `/etc/theme` |
 | raw colour literals in painting code | **21** (`tests/theme/rawcolour.py` against the commit this branch starts from) |
 
 The window server was worse than the list: `kernel/wm.fi` painted the

@@ -68,8 +68,8 @@ num() { # name value op expected
 same() { if [ "$2" = "$3" ]; then ok "$1: $2"; else bad "$1: '$2', wanted '$3'"; fi; }
 wert() { grep -a -m1 -oE "$2" "$1" 2>/dev/null | head -1; }
 
-bash vendor/firn/hole-firnc.sh >/dev/null 2>&1 || {
-    echo "icons: hole-firnc.sh failed"; exit 1; }
+bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1 || {
+    echo "icons: fetch-firnc.sh failed"; exit 1; }
 
 # ===================================================================
 echo "== 1. the font comes back out of the map =="
@@ -186,7 +186,7 @@ bash tools/build-kernel.sh "$TMPD/k.mb" > "$TMPD/k.log" 2>&1 \
     || { bad "the kernel does not build"; tail -20 "$TMPD/k.log"; }
 as --64 -o "$TMPD/crt.o" kernel/user/crt.s 2>/dev/null
 
-PROGS="icont explorer starter suchen wigdemo sh ls cat edit"
+PROGS="icont explorer launcher locate widgetdemo sh ls cat edit"
 rc=0
 for p in $PROGS; do
     "$CC" "kernel/user/$p.fi" -o "$TMPD/$p.o" > "$TMPD/$p.err" 2>&1 || {
@@ -198,7 +198,7 @@ for p in $PROGS; do
 done
 [ $rc = 0 ] && ok "the programs of this round are built"
 
-python3 tools/k15/baum.py "$TMPD/baum" > /dev/null 2>&1
+python3 tools/k15/tree.py "$TMPD/baum" > /dev/null 2>&1
 bau_img() { # ziel [--noicons]
     local ziel=$1 mit=${2:-mit}
     local ARGS=(build "$ziel" 4096 /lib/
@@ -210,7 +210,7 @@ bau_img() { # ziel [--noicons]
     ARGS+=("/bin/files@/bin/explorer")
     ARGS+=(/etc/ "/etc/theme=$TMPD/baum/theme")
     while read -r zeile; do ARGS+=("$zeile"); done \
-        < <(python3 tools/k15/buendel.py assets/apps "$TMPD/buendel")
+        < <(python3 tools/k15/bundle.py assets/apps "$TMPD/buendel")
     while read -r pfad; do ARGS+=("$pfad"); done < "$TMPD/baum/liste"
     python3 tools/osum/mkfs.py "${ARGS[@]}" > "$TMPD/mkfs.log" 2>&1
 }
@@ -235,7 +235,7 @@ lauf() { # name kommandozeile abbild [marke]
         sleep 0.15
         i=$((i + 1))
     done
-    python3 tools/gfx/schuss.py "$sock" "$ppm" 25 > "$TMPD/$name.shot" 2>&1
+    python3 tools/gfx/screenshot.py "$sock" "$ppm" 25 > "$TMPD/$name.shot" 2>&1
     wait "$pid"
     rm -f "$sock"
     return 0

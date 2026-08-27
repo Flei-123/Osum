@@ -10,7 +10,7 @@
 # SIEBEN TEILE, UND JEDER HAT SEINE GEGENPROBE:
 #
 #   1. DIE KARTE UND DAS FORMAT (auf dem Wirt, ohne QEMU).
-#      `tools/kernel/karte.py` rechnet nach, dass sich in `kdata` nichts
+#      `tools/kernel/memmap.py` rechnet nach, dass sich in `kdata` nichts
 #      ueberschneidet. Und die mehrblockige Blockkarte, die diese Runde
 #      dem Dateisystem gibt, wird gegen die EINBLOCKIGE gehalten: ein
 #      Abbild ohne `--karten` muss Oktett fuer Oktett dasselbe sein wie
@@ -79,7 +79,7 @@ hat() { grep -qaF "$2" "$1" && ok "$3" || bad "$3 -- '$2' fehlt"; }
 hatnicht() { grep -qaF "$2" "$1" && bad "$3 -- '$2' steht da und sollte nicht" || ok "$3"; }
 
 lauf() { # name wie skript [limit]
-    OUT="$OUT" bash tools/install/lauf.sh "$1" "$2" "${3:-}" "${4:-900}" > /dev/null 2>&1
+    OUT="$OUT" bash tools/install/oneshot.sh "$1" "$2" "${3:-}" "${4:-900}" > /dev/null 2>&1
     sed -i -e 's/\x1b\[[0-9;=]*[a-zA-Z]//g' "$OUT/$1.txt" 2>/dev/null
     cat "$OUT/$1.rc" 2>/dev/null
 }
@@ -91,7 +91,7 @@ neue_platte() {
 
 echo "== 1. die Karte, und das Format, das sich NICHT geaendert haben darf =="
 
-k=$(python3 tools/kernel/karte.py kernel 2>&1 | tail -1)
+k=$(python3 tools/kernel/memmap.py kernel 2>&1 | tail -1)
 echo "        $k"
 case "$k" in *"0 Kollisionen"*) ok "kdata ohne Kollision" ;; *) bad "kdata: $k" ;; esac
 
@@ -134,7 +134,7 @@ gleich "Superblock mit Vorrat (karten itab data)" "$kar" "8 9 41"
 echo
 echo "== 2. die Installation, und was der WIRT auf der Platte findet =="
 
-bash tools/install/bauen.sh "$OUT" > "$OUT/bauen.log" 2>&1 || {
+bash tools/install/build.sh "$OUT" > "$OUT/bauen.log" 2>&1 || {
     echo "== bauen.sh fehlgeschlagen"; tail -20 "$OUT/bauen.log"; exit 1; }
 grep -aE '^   (kern|programme|quelle|pakete)' "$OUT/bauen.log" | sed 's/^/        /'
 
@@ -333,7 +333,7 @@ for z in open('$OUT/quelle2/INDEX'):
 echo "        hallo 1.0.0 = ${h1:0:16}"
 echo "        hallo 2.0.0 = ${h2:0:16}"
 
-rc=$(lauf pak1 platte "opk installieren /quelle1/hallo-1.opk;opk liste;/apps/hallo.prog/start;opk pruefen;exit" 600)
+rc=$(lauf pak1 platte "opk installieren /quelle1/hallo-1.opk;opk liste;/apps/hallo.osp/start;opk pruefen;exit" 600)
 gleich "installieren: Beendigungscode" "$rc" "21"
 hat "$OUT/pak1.txt" "opk: installiert hallo" "opk meldet die Installation"
 hat "$OUT/pak1.txt" "paket-hallo fassung 1" "das installierte Paket LAEUFT aus /apps"
@@ -343,11 +343,11 @@ rc=$(lauf pak2 platte "opk aktualisieren hallo --quelle /quelle2;opk liste;exit"
 hat "$OUT/pak2.txt" "opk: installiert hallo" "aktualisieren nimmt die neue Fassung an"
 hat "$OUT/pak2.txt" "${h2:0:12}" "und die Liste nennt den Hash aus dem INDEX der Quelle"
 
-rc=$(lauf pak3 platte "/apps/hallo.prog/start;opk generationen;exit" 600)
+rc=$(lauf pak3 platte "/apps/hallo.osp/start;opk generationen;exit" 600)
 hat "$OUT/pak3.txt" "paket-hallo fassung 2" "nach dem NEUSTART laeuft die neue Fassung"
 hat "$OUT/pak3.txt" "generation 1" "es gibt zwei Generationen"
 
-rc=$(lauf pak4 platte "opk zurueck 0;/apps/hallo.prog/start;opk liste;exit" 600)
+rc=$(lauf pak4 platte "opk zurueck 0;/apps/hallo.osp/start;opk liste;exit" 600)
 hat "$OUT/pak4.txt" "opk: zurueck auf 0" "eine Generation zurueck"
 hat "$OUT/pak4.txt" "paket-hallo fassung 1" "und die ALTE Fassung laeuft wieder"
 hat "$OUT/pak4.txt" "${h1:0:12}" "die Liste nennt wieder den alten Hash"
@@ -365,7 +365,7 @@ EOF
 cp -f "$OUT/pak/hallo-2.opk" "$OUT/falsch.opk"
 KAPUTT="$OUT/kaputt.opk" FALSCH="$OUT/falsch.opk" \
     EXTRA="/quelle1/kaputt.opk=$OUT/kaputt.opk /quelle1/falsch.opk=$OUT/falsch.opk" \
-    bash tools/install/bauen.sh "$OUT" > "$OUT/bauen2.log" 2>&1
+    bash tools/install/build.sh "$OUT" > "$OUT/bauen2.log" 2>&1
 neue_platte
 rc=$(lauf ginst iso "install /dev/hda --ja;exit" 900)
 rc=$(lauf gpak platte "opk installieren /quelle1/kaputt.opk;opk installieren /quelle1/hallo-1.opk;opk aktualisieren hallo --quelle /quelle1;exit" 600)
@@ -395,7 +395,7 @@ ausfaelle=0
 heil=0
 for ms in 300 700 1200 1800 2600 3600; do
     cp -f "$OUT/basis.img" "$OUT/ziel.img"
-    OUT="$OUT" bash tools/install/lauf.sh strom-$ms platte \
+    OUT="$OUT" bash tools/install/oneshot.sh strom-$ms platte \
         "opk aktualisieren hallo --quelle /quelle2;exit" 600 > /dev/null 2>&1 &
     lpid=$!
     # warten, bis die Shell den Befehl wirklich angefangen hat
@@ -411,7 +411,7 @@ for ms in 300 700 1200 1800 2600 3600; do
     wait $lpid 2>/dev/null
     ausfaelle=$((ausfaelle + 1))
     # und jetzt: startet die Platte noch?
-    rc=$(lauf nach-$ms platte "opk liste;/apps/hallo.prog/start;opk pruefen;exit" 600)
+    rc=$(lauf nach-$ms platte "opk liste;/apps/hallo.osp/start;opk pruefen;exit" 600)
     gestartet=0
     grep -qaF "osum: mount=1" "$OUT/nach-$ms.txt" && gestartet=1
     hh=""

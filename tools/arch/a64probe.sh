@@ -62,7 +62,7 @@ ROOT=$(pwd)
 
 FIRNC=${FIRNC_A64:-$ROOT/vendor/firn/bin/firnc}
 if [[ ! -x $FIRNC ]]; then
-    bash vendor/firn/hole-firnc.sh >/dev/null 2>&1
+    bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
 fi
 [[ -x $FIRNC ]] || { echo "the compiler is missing: $FIRNC" >&2; exit 2; }
 

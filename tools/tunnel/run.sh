@@ -164,7 +164,7 @@ fi
 ./tools/build-kernel.sh "$TMPD/osum.mb" >"$TMPD/build" 2>&1 \
     && ok "the kernel builds with kernel/wg.fi in it" \
     || { bad "the kernel does not build"; tail -8 "$TMPD/build" | sed 's/^/        /'; }
-gcc -O2 -o "$TMPD/bruecke" tools/net/bruecke.c 2>"$TMPD/gcc.err" \
+gcc -O2 -o "$TMPD/bruecke" tools/net/bridge.c 2>"$TMPD/gcc.err" \
     && ok "the UDP/AF_PACKET wire is built" \
     || bad "bruecke.c does not compile"
 

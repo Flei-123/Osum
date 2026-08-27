@@ -110,7 +110,7 @@ ksays() { # file name want description
 number_in() { grep -aE "^const $2: u64 = [0-9]+" "$1" | head -1 \
     | sed -E 's/^const [A-Za-z0-9_]+: u64 = ([0-9]+).*/\1/'; }
 
-bash vendor/firn/hole-firnc.sh >/dev/null || { echo "vendor/firn/hole-firnc.sh failed"; exit 1; }
+bash vendor/firn/fetch-firnc.sh >/dev/null || { echo "vendor/firn/fetch-firnc.sh failed"; exit 1; }
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
     echo "POWERMON: skipped, qemu-system-x86_64 is missing"
     exit 0
@@ -148,10 +148,10 @@ same "how many of them" "0x3000" "$pmmax"
 
 # THE MAP CHECKER is the only thing that can see a collision that stands
 # in no shared line of text.
-if python3 tools/kernel/karte.py kernel > "$TMPD/map.txt" 2>&1; then
+if python3 tools/kernel/memmap.py kernel > "$TMPD/map.txt" 2>&1; then
     ok "the memory map of kdata: $(tail -1 "$TMPD/map.txt")"
 else
-    bad "tools/kernel/karte.py reports collisions"
+    bad "tools/kernel/memmap.py reports collisions"
     sed 's/^/        /' "$TMPD/map.txt" | head -8
 fi
 has "$TMPD/map.txt" "0 Kollisionen" "no two areas of kdata overlap"
@@ -590,12 +590,12 @@ while [ $i -lt 900 ]; do
     sleep 0.15
     i=$((i + 1))
 done
-python3 tools/gfx/schuss.py "$WSOCK" "$WPPM" 25 > "$TMPD/shot.log" 2>&1
+python3 tools/gfx/screenshot.py "$WSOCK" "$WPPM" 25 > "$TMPD/shot.log" 2>&1
 wait "$WPID"
 RC=$?
 num "the run with the window ends cleanly" "$RC" eq 21
 has "$WOUT" "k15: start /bin/powermon" "wigapp= really started THIS program and not the default"
-has_not "$WOUT" "k15: start /bin/wigdemo" "GEGENPROBE: it did not start the built-in default"
+has_not "$WOUT" "k15: start /bin/widgetdemo" "GEGENPROBE: it did not start the built-in default"
 has "$WOUT" "wm: windows=1" "the window server counts the window /bin/powermon opened"
 has "$WOUT" "ttf: sans" "the fonts are on the disk, so there is something to draw with"
 

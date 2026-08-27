@@ -76,7 +76,7 @@ OBERFLAECHE = [
     "kernel/user/leiste.fi",
     "kernel/user/schreibtisch.fi",
     "kernel/user/explorer.fi",
-    "kernel/user/starter.fi",
+    "kernel/user/launcher.fi",
     "kernel/user/wlib.fi",
     "kernel/user/wlibc.fi",
     "kernel/user/msg.fi",
@@ -86,7 +86,7 @@ OBERFLAECHE = [
 # Wo AUSSERDEM gesucht wird -- zum BERICHTEN, nicht zum Scheitern.
 #
 # EHRLICH GEZAEHLT UND NICHT VERSTECKT. Unter kernel/user/ liegen
-# ausserdem `power.fi`, `wigdemo.fi`, `fas.fi` und `firun.fi`. Das sind
+# ausserdem `power.fi`, `widgetdemo.fi`, `fas.fi` und `firun.fi`. Das sind
 # BEFEHLSZEILENPROGRAMME (und eine Widget-Vorfuehrung aus Runde K15);
 # ihr Text geht nach stdout, nicht durch den Fensterserver, und diese
 # Runde hat sie nicht angefasst. Sie werden trotzdem gezaehlt und

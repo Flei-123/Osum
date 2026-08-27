@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""tools/speicher/baum.py -- ein Dateisystem mit vielen Dateien UND mit
+"""tools/speicher/tree.py -- ein Dateisystem mit vielen Dateien UND mit
 Inhalt, und daneben die Wahrheit darueber, in Zahlen.
 
-Runde SPEICHER. `tools/k15/gross.py` baut viertausend LEERE Dateien --
+Runde SPEICHER. `tools/k15/bigfs.py` baut viertausend LEERE Dateien --
 fuer einen Namensindex genau richtig, denn der haelt Namen. Fuer eine
 Speicherplatzanalyse ist es wertlos: alle Summen waeren null, jede
 Prozentangabe null, jede Kachel gleich gross, und ein Fehler in der
@@ -42,13 +42,13 @@ ORDNER = ["messing", "kupfer", "zinn", "blei", "zink", "nickel",
 
 def namen(n):
     """Die Namen, in der Reihenfolge, in der sie angelegt werden --
-    dieselbe Aufteilung wie in tools/k15/gross.py, damit die beiden
+    dieselbe Aufteilung wie in tools/k15/bigfs.py, damit die beiden
     Abbilder vergleichbar bleiben."""
     aus = []
     for i in range(n):
         ordner = ORDNER[i % len(ORDNER)]
         unten = (i // len(ORDNER)) % 2 == 1
-        pfad = "/daten/%s%s" % (ordner, "/tief" if unten else "")
+        pfad = "/data/%s%s" % (ordner, "/tief" if unten else "")
         aus.append((pfad, "datei%04d.txt" % i))
     return aus
 
@@ -64,7 +64,7 @@ def groessen(n, budget):
     # Der Ordner einer Datei ist `i % 8`, ihre Ebene `(i // 8) % 2` --
     # also wiederholt sich die Zuordnung alle 16. Wer jede SECHZEHNTE
     # nimmt, legt allen Inhalt in denselben Ordner: die erste Fassung
-    # dieses Werkzeugs tat das, und im Abbild hatte `/daten/messing`
+    # dieses Werkzeugs tat das, und im Abbild hatte `/data/messing`
     # 600 000 Oktette und jeder andere Ordner null. 13 ist zu 16
     # teilerfremd, also laeuft die Auswahl durch alle sechzehn
     # Kombinationen.
@@ -96,7 +96,7 @@ def main(argv):
     liste = namen(n)
     sz = groessen(n, budget)
 
-    zeilen = ["--inodes=4096", "/daten/"]
+    zeilen = ["--inodes=4096", "/data/"]
     gesehen = set()
     for pfad, _ in liste:
         teile = pfad.strip("/").split("/")
@@ -104,7 +104,7 @@ def main(argv):
             p = "/" + "/".join(teile[:k]) + "/"
             if p not in gesehen:
                 gesehen.add(p)
-                if p != "/daten/":
+                if p != "/data/":
                     zeilen.append(p)
 
     # Die Dateien.  Wer Inhalt bekommt, bekommt ihn als eigene Datei auf
@@ -161,7 +161,7 @@ def main(argv):
     mit = sum(1 for x in sz if x > 0)
     print("baum: %d Dateien (%d mit Inhalt), %d Ordner, %d Oktette, "
           "%d KiB-Bloecke"
-          % (n, mit, len(gesehen), okt["/daten"], kb["/daten"]))
+          % (n, mit, len(gesehen), okt["/data"], kb["/data"]))
     return 0
 
 

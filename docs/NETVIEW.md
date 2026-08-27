@@ -329,7 +329,7 @@ in `kernel/sys.fi`, `lib/libc/kcall.fi` and `kernel/user/ulib.fi`, and
 
 `bash tools/netview/run.sh` -- **53 passed, 0 failed**. The wire is the
 one round K8 built: QEMU's virtio-net over a UDP socket to
-`tools/net/bruecke.c`, from there over `AF_PACKET` onto a `veth` pair
+`tools/net/bridge.c`, from there over `AF_PACKET` onto a `veth` pair
 into a network namespace with the Linux kernel and a python HTTP server
 on the other end. Nothing talks to itself.
 
@@ -535,7 +535,7 @@ designed larger.
 the fourth is coverage; 0 has always meant transparent and 255 "these
 three octets are the colour". This round uses **1 to 5** to mean *ask
 the scheme*: ink, dim, accent, warn, panel
-(`tools/k15/symbol.py`, `wlibc.icon_draw`). One file is therefore right
+(`tools/k15/icon.py`, `wlibc.icon_draw`). One file is therefore right
 in a light scheme and in a dark one, and every symbol that existed
 before this addendum carries 0 and 255 and does not change by one octet.
 
@@ -609,7 +609,7 @@ the number above proves it. When THEME lands, one expression changes.
 out of what the taskbar **reported** on the serial line and then checked
 in the **picture** at that coordinate, pixel by pixel, with the role
 colours resolved against the scheme the run booted with
-(`tools/netview/schau.py`). A bar that reported one thing and drew
+(`tools/netview/checkshot.py`). A bar that reported one thing and drew
 another fails here.
 
 | | |
@@ -1302,7 +1302,7 @@ the drive -- 101 072 to spare, with `libc.io` now pulled into `ps` and
 | `kernel/user/leiste.fi` | the mark in the taskbar |
 | `kernel/user/einstellungen.fi` | the page "Netzzugriff" |
 | `kernel/user/explorer.fi` | the context menu entry |
-| `kernel/user/starter.fi` | starting a bundle with its view |
+| `kernel/user/launcher.fi` | starting a bundle with its view |
 | `kernel/user/appdir.fi` | `net=` in INFO, `/users/<name>/config/netview`, and the order between them |
 | `lib/libc/kcall.fi`, `kernel/user/ulib.fi` | the three call numbers |
 | `kernel/netmark.fi` | GENERATED from the drawings: the three marks as bit rows, for the window server |
@@ -1314,7 +1314,7 @@ the drive -- 101 072 to spare, with `libc.io` now pulled into `ps` and
 | `/etc/netview.conf` | second addendum: `fallback=<word>`, written by `netview fallback`, read by `netview boot` |
 | `assets/netview/theme-dark`, `theme-light` | the two schemes the measured runs boot with, and the numbers the contrast is computed from |
 | `tools/netview/icons.py` | builds the OSYM files and `netmark.fi`, and checks contrast and silhouettes |
-| `tools/netview/schau.py` | reads a sign back out of a screenshot with the roles resolved |
+| `tools/netview/checkshot.py` | reads a sign back out of a screenshot with the roles resolved |
 | `tools/netview/blatt.py` | the sheet of all eight signs |
 | `tools/netview/run.sh` | the acceptance run |
 | `kernel/user/qs.fi` | third addendum: the quick settings panel -- layout, tiles, drawing, the hotkey |

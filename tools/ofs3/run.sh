@@ -73,7 +73,7 @@ hasnot() { grep -qaF "$2" "$1" && bad "$3 -- '$2' sollte nicht da sein" || ok "$
 # eine `ofs3: <name> = <zahl>`-Zeile
 val3() { tr -d '\000' < "$1" | grep -a "^ofs3: $2 = " | head -1 | sed 's/.* = //'; }
 
-bash vendor/firn/hole-firnc.sh >/dev/null || { echo "vendor/firn/hole-firnc.sh fehlgeschlagen"; exit 1; }
+bash vendor/firn/fetch-firnc.sh >/dev/null || { echo "vendor/firn/fetch-firnc.sh fehlgeschlagen"; exit 1; }
 [ -x "$FIRNC" ] || { echo "firnc0 fehlt: $FIRNC"; exit 1; }
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
     echo "OFS3: uebersprungen, qemu-system-x86_64 fehlt"

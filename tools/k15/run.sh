@@ -999,7 +999,7 @@ else bad "der Name des Starters steht im Code: $aus"; fi
 # dieser Runde, und tools/i18n/scan.py misst genau das. Die Gegenprobe
 # fuer den Namenspruefer braucht also eine Zeichenkette, die WIRKLICH
 # noch dasteht: der Schluessel selbst.
-if python3 tools/k15/noname.py kernel/user/launcher.fi "starter.run" >/dev/null 2>&1; then
+if python3 tools/k15/noname.py kernel/user/launcher.fi "launcher.run" >/dev/null 2>&1; then
     bad "der Pruefer findet eine Zeichenkette nicht, die im Code steht"
 else
     ok "eine Zeichenkette, die wirklich im Code steht, findet er (die Gegenprobe)"

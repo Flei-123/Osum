@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""tools/netview/schau.py -- steht das Symbol WIRKLICH auf dem Schirm?
+"""tools/netview/checkshot.py -- steht das Symbol WIRKLICH auf dem Schirm?
 
-Runde NETVIEW, Nachtrag. `tools/k15/symbolbild.py` kann das schon, aber
+Runde NETVIEW, Nachtrag. `tools/k15/iconpixels.py` kann das schon, aber
 nur fuer Symbole mit festen Farben. Die Symbole dieser Runde tragen
 ROLLEN (`@ink`, `@dim`, `@accent`, `@warn`) und keine Werte -- was auf
 dem Schirm stehen MUSS, haengt also vom Farbschema ab, mit dem der Lauf

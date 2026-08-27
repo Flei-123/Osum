@@ -23,7 +23,7 @@
 #      the position and the two colours are taken from what the
 #      APPLICATION reported, and every inked pixel of every glyph is
 #      recomputed in the picture against a second, independent
-#      rasterization (`tools/gfx/schau.py tkette`). A vertical bar is
+#      rasterization (`tools/gfx/checkshot.py tkette`). A vertical bar is
 #      where this matters most: it is the place where a lazy
 #      implementation clips the text instead of wrapping it, and clipped
 #      text passes an area test and fails this one.
@@ -82,8 +82,8 @@ if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
     echo "TASKBAR: skipped, qemu-system-x86_64 is not here"
     exit 0
 fi
-bash vendor/firn/hole-firnc.sh >/dev/null || {
-    echo "vendor/firn/hole-firnc.sh failed"; exit 1; }
+bash vendor/firn/fetch-firnc.sh >/dev/null || {
+    echo "vendor/firn/fetch-firnc.sh failed"; exit 1; }
 
 MONO=assets/osum-mono.ttf
 SANS=assets/osum-sans.ttf
@@ -102,7 +102,7 @@ for s in 0 1; do
 done
 [ -f "$TMPD/k0.mb" ] || { echo "TASKBAR: $pass passed, $((fail + 1)) failed"; exit 1; }
 
-PROGS="schreibtisch leiste einstellungen starter dhcp explorer wigdemo suchen sh echo ls cat edit"
+PROGS="schreibtisch leiste einstellungen launcher dhcp explorer widgetdemo locate sh echo ls cat edit"
 as --64 -o "$TMPD/crt.o" kernel/user/crt.s 2>/dev/null \
     || bad "crt.s does not assemble"
 build_progs() { # stage
@@ -135,8 +135,8 @@ for sym in leiste__paint leiste__conf_read leiste__drag_step; do
     fi
 done
 
-python3 tools/k15/baum.py "$TMPD/baum" > "$TMPD/baum.log" 2>&1 \
-    && ok "the directory tree is built" || bad "tools/k15/baum.py failed"
+python3 tools/k15/tree.py "$TMPD/baum" > "$TMPD/baum.log" 2>&1 \
+    && ok "the directory tree is built" || bad "tools/k15/tree.py failed"
 
 conf() { # edge height width autohide ontop -> file
     printf '# taskbar.conf\nedge=%s\nheight=%s\nwidth=%s\nautohide=%s\nontop=%s\n' \
@@ -150,13 +150,13 @@ mk_image() { # image conf-file
     for p in $PROGS; do ARGS+=("/bin/$p=$TMPD/${p}0.elf"); done
     ARGS+=("/bin/files@/bin/explorer")
     ARGS+=(/etc/ "/etc/theme=$TMPD/baum/theme" "/etc/taskbar.conf=$cf")
-    while read -r z; do ARGS+=("$z"); done < <(python3 tools/k15/buendel.py assets/apps "$TMPD/buendel")
+    while read -r z; do ARGS+=("$z"); done < <(python3 tools/k15/bundle.py assets/apps "$TMPD/buendel")
     while read -r z; do ARGS+=("$z"); done < "$TMPD/baum/liste"
     python3 tools/osum/mkfs.py "${ARGS[@]}" > "$TMPD/mkfs.txt" 2>&1
 }
 
 echo "== 2. the memory map, the call numbers and the mode words =="
-kart=$(python3 tools/kernel/karte.py kernel 2>&1)
+kart=$(python3 tools/kernel/memmap.py kernel 2>&1)
 if [ $? -eq 0 ]; then ok "the memory map of kdata: $kart"
 else bad "the memory map collides"; echo "$kart" | sed 's/^/        /'; fi
 for n in 2112 2113; do
@@ -210,7 +210,7 @@ run() { # name conf-file cmdline-extra [monitor-file] [reuse-image]
     if [ -n "$mon" ]; then
         python3 tools/wm/monitor.py "$sock" "$mon" > "$TMPD/$name.monlog" 2>&1
     fi
-    python3 tools/gfx/schuss.py "$sock" "$ppm" 25 > "$TMPD/$name.shot" 2>&1
+    python3 tools/gfx/screenshot.py "$sock" "$ppm" 25 > "$TMPD/$name.shot" 2>&1
     wait "$pid"
     RC=$?
     rm -f "$sock"
@@ -255,7 +255,7 @@ check_text() { # log ppm mark
         text=$(printf '%s' "$line" | sed 's/^.* t=//')
         [ -z "$text" ] && continue
         tried=$((tried + 1))
-        aus=$(python3 tools/gfx/schau.py tkette "$ppm" "$SANS" 15 \
+        aus=$(python3 tools/gfx/checkshot.py tkette "$ppm" "$SANS" 15 \
             "$((x + gx))" "$((base + gy))" \
             $(rgb "$fg") $(rgb "$bg") "$text" 2>&1)
         if [ $? -eq 0 ]; then

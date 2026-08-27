@@ -26,7 +26,7 @@
 #      one `faked` program run concurrently against the same server, and
 #      the server has to see exactly one of them.
 #
-# THE WIRE is the one round K8 built (`tools/net/bruecke.c`): QEMU's
+# THE WIRE is the one round K8 built (`tools/net/bridge.c`): QEMU's
 # virtio-net over a UDP socket to a bridge process, from there over
 # AF_PACKET onto a veth pair into a network namespace with the Linux
 # kernel on the other end. Nothing here talks to itself.
@@ -103,7 +103,7 @@ ip netns list >/dev/null 2>&1 || { echo "NETVIEW: skipped, no network namespaces
 # =====================================================================
 echo "== 1. building: the kernel out of both compilers, and the programs =="
 # =====================================================================
-bash vendor/firn/hole-firnc.sh >/dev/null || { echo "hole-firnc.sh failed"; exit 1; }
+bash vendor/firn/fetch-firnc.sh >/dev/null || { echo "fetch-firnc.sh failed"; exit 1; }
 
 for s in 0 1; do
     if bash tools/build-kernel.sh "$TMPD/k$s.mb" --stufe "$s" > "$TMPD/b$s.log" 2>&1; then
@@ -176,8 +176,8 @@ bridge_down() {
     sleep 0.2
 }
 
-gcc -O2 -o "$TMPD/bruecke" tools/net/bruecke.c 2>"$TMPD/gcc.err" \
-    && ok "tools/net/bruecke.c: the wire of round K8 is built" \
+gcc -O2 -o "$TMPD/bruecke" tools/net/bridge.c 2>"$TMPD/gcc.err" \
+    && ok "tools/net/bridge.c: the wire of round K8 is built" \
     || bad "bruecke.c does not compile"
 
 # A server that COUNTS. Every request it answers is one line in its log,
@@ -428,7 +428,7 @@ echo "== 6. the two displays, on a real screen =="
 # this section is judged by eye.
 SHOTS=${NVSHOTS:-docs/shots/netview}
 mkdir -p "$SHOTS"
-GPROGS="schreibtisch leiste einstellungen starter explorer wigdemo suchen netview edit sh echo ls cat ps"
+GPROGS="schreibtisch leiste einstellungen launcher explorer widgetdemo locate netview edit sh echo ls cat ps"
 MONO=assets/osum-mono.ttf
 SANS=assets/osum-sans.ttf
 GBASE="gfx wm wig desk wmhold wiglong nokbd nosched noproc nofs"
@@ -447,8 +447,8 @@ done
 python3 tools/netview/icons.py bauen "$TMPD/icons" > "$TMPD/ib.txt" 2>&1 \
     && ok "the eight symbols are built into OSYM files" \
     || bad "tools/netview/icons.py bauen failed"
-python3 tools/k15/baum.py "$TMPD/baum" > "$TMPD/baum.log" 2>&1 \
-    || bad "tools/k15/baum.py failed"
+python3 tools/k15/tree.py "$TMPD/baum" > "$TMPD/baum.log" 2>&1 \
+    || bad "tools/k15/tree.py failed"
 
 printf '# taskbar.conf\nedge=bottom\nheight=28\nwidth=104\nautohide=0\nontop=1\n' \
     > "$TMPD/taskbar.conf"
@@ -475,7 +475,7 @@ mk_gimage() { # image theme-file
              tile-fake tile-net tile-hide; do
         ARGS+=("/etc/netview/$q=$TMPD/icons/$q")
     done
-    while read -r z; do ARGS+=("$z"); done < <(python3 tools/k15/buendel.py assets/apps "$TMPD/buendel")
+    while read -r z; do ARGS+=("$z"); done < <(python3 tools/k15/bundle.py assets/apps "$TMPD/buendel")
     while read -r z; do ARGS+=("$z"); done < "$TMPD/baum/liste"
     python3 tools/osum/mkfs.py "${ARGS[@]}" > "$TMPD/mkfsg.txt" 2>&1
 }
@@ -533,7 +533,7 @@ gshot() {
             > "$TMPD/$name.mon" 2>&1
         sleep 2
     fi
-    python3 tools/gfx/schuss.py "$sock" "$ppm" 30 > "$TMPD/$name.shot" 2>&1
+    python3 tools/gfx/screenshot.py "$sock" "$ppm" 30 > "$TMPD/$name.shot" 2>&1
     kill "$pid" 2>/dev/null
     wait "$pid" 2>/dev/null
     # AND SAY WHY WHEN THERE IS NO PICTURE. "no screenshot" on its own
@@ -599,7 +599,7 @@ for cs in nocarrier noip noroute online; do
         fi
         if [ -n "$x" ] && [ -n "$y" ]; then
             x=$((x + GX)); y=$((y + GY))
-            r=$(python3 tools/netview/schau.py "$P" "$x" "$y" \
+            r=$(python3 tools/netview/checkshot.py "$P" "$x" "$y" \
                 "assets/netview/state-$cs.txt" assets/netview/theme-dark 2>&1)
             case "$r" in ok*) ok "$cs: the icon is on the screen at $x,$y -- $r" ;;
                          *)   bad "$cs: $r" ;; esac
@@ -638,7 +638,7 @@ if gshot "st-faking" "assets/netview/theme-dark" \
         fx=$(echo "$fl" | grep -oE ' x=[0-9]+' | tr -d ' x=')
         fy=$(echo "$fl" | grep -oE 'y=[0-9]+$' | cut -d= -f2)
         num "faking: the bar read the preference as 'always'" "${fb:-9}" eq 2
-        r=$(python3 tools/netview/schau.py "$P" "$((fx + GX))" "$((fy + GY))" \
+        r=$(python3 tools/netview/checkshot.py "$P" "$((fx + GX))" "$((fy + GY))" \
             assets/netview/sys-faking.txt assets/netview/theme-dark 2>&1)
         case "$r" in ok*) ok "faking: the sys-faking sign is on the screen at $((fx+GX)),$((fy+GY)) -- $r" ;;
                      *)   bad "faking: sys-faking: $r" ;; esac
@@ -651,7 +651,7 @@ if gshot "st-faking" "assets/netview/theme-dark" \
     # still be able to find out.
     sx=$(st_x "$L"); sy=$(st_y "$L")
     if [ -n "$sx" ] && [ -n "$sy" ]; then
-        r=$(python3 tools/netview/schau.py "$P" "$((sx + GX))" "$((sy + GY))" \
+        r=$(python3 tools/netview/checkshot.py "$P" "$((sx + GX))" "$((sy + GY))" \
             assets/netview/state-online.txt assets/netview/theme-dark 2>&1)
         case "$r" in ok*) ok "faking: and 'online' is still there beside it -- $r" ;;
                      *)   bad "faking: the state icon went missing: $r" ;; esac
@@ -712,7 +712,7 @@ for scheme in dark light; do
             esac
             if [ "${v:-0}" != 0 ] && [ -n "$mx" ]; then
                 mx=$((mx + GX)); my=$((my + GY))
-                r=$(python3 tools/netview/schau.py "$P" "$mx" "$my" \
+                r=$(python3 tools/netview/checkshot.py "$P" "$mx" "$my" \
                     "assets/netview/$name.txt" "assets/netview/theme-$scheme" 2>&1)
                 case "$r" in ok*) ok "$scheme: button $b carries $name at $mx,$my -- $r" ;;
                              *)   bad "$scheme: button $b, $name: $r" ;; esac
@@ -730,7 +730,7 @@ for scheme in dark light; do
         if [ -n "$rl" ]; then
             rx=$(echo "$rl" | grep -oE ' x=[0-9]+' | tr -d ' x=')
             ry=$(echo "$rl" | grep -oE ' y=[0-9]+' | tr -d ' y=')
-            r=$(python3 tools/netview/schau.py "$P" "$((rx + GX + 3))" "$((ry + GY + 5))" \
+            r=$(python3 tools/netview/checkshot.py "$P" "$((rx + GX + 3))" "$((ry + GY + 5))" \
                 assets/netview/mark-faked.txt "assets/netview/theme-$scheme" --nicht 2>&1)
             case "$r" in ok*) ok "$scheme: and the REAL one carries nothing -- $r" ;;
                          *)   bad "$scheme: the real button has a mark: $r" ;; esac
@@ -1049,7 +1049,7 @@ for ed in bottom top left right; do
                 sx=$(echo "$sl" | grep -oE ' x=[0-9]+' | tr -d ' x=')
                 sy=$(echo "$sl" | grep -oE ' y=[0-9]+' | tr -d ' y=')
                 case $t in 0) dr=tile-fake ;; 1) dr=tile-net ;; 2) dr=tile-hide ;; esac
-                r=$(python3 tools/netview/schau.py "$P" "$sx" "$sy" \
+                r=$(python3 tools/netview/checkshot.py "$P" "$sx" "$sy" \
                     "assets/netview/$dr.txt" assets/netview/theme-dark 2>&1)
                 case "$r" in ok*) ok "$ed: $dr stands at $sx,$sy -- $r" ;;
                              *)   bad "$ed: $dr at $sx,$sy: $r" ;; esac
@@ -1135,7 +1135,7 @@ if [ -s "$L" ]; then
         fy=$(echo "$fl" | grep -oE ' y=[0-9]+' | tr -d ' y=')
         num "9d: the taskbar now says the system is faking" "${fb:-0}" eq 2
         if [ "$SHOT_OK" = 0 ]; then
-            r=$(python3 tools/netview/schau.py "$P" "$((fx + GX))" "$((fy + GY))" \
+            r=$(python3 tools/netview/checkshot.py "$P" "$((fx + GX))" "$((fy + GY))" \
                 assets/netview/sys-faking.txt assets/netview/theme-dark 2>&1)
             case "$r" in ok*) ok "9d: and the sign is IN THE PICTURE at $((fx+GX)),$((fy+GY)) -- $r" ;;
                          *)   bad "9d: the sign is not in the picture: $r" ;; esac
