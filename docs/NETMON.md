@@ -527,6 +527,15 @@ Unchanged by this round, measured after it:
 | `tools/net/run.sh` | 75 / 0 | **75 / 0** |
 | `tools/userland/run.sh` | 91 / 0 | **91 / 0** |
 | `tools/netview/run.sh` | 53 / 0 | **53 / 0** |
+| `tools/unix/run.sh` | 107 / 0 | **107 / 0** |
+| `tools/posix/run.sh` | 133 / 1 | **133 / 1** |
+
+The one POSIX failure is older than this round (round NETVIEW recorded
+the same 133 / 1). It briefly got WORSE here — three system call numbers
+added to `kernel/sys.fi` and not to `lib/libc/kcall.fi` took the count of
+disagreements from 2 to 5 — and that is exactly what section 1 of that
+suite exists to catch. The three are in the libc's table now and the
+count is back to the 2 it was.
 
 ## Where it lives
 
