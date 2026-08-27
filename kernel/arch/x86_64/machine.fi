@@ -1,0 +1,218 @@
+// kernel/arch/x86_64/machine.fi -- THE x86-64 SIDE OF THE BOUNDARY.
+//
+// Round ARM, step B. Everything in this file is an instruction of one
+// machine, and nothing in this file makes a decision. It is the answer
+// sheet to `kernel/arch/arch.fi`, which asks the questions; the AArch64
+// answer sheet is `kernel/arch/aarch64/` and is written in assembly for as
+// long as the pinned Firn compiler refuses `profile kernel` for
+// `--target=aarch64-linux`.
+//
+// NOTHING HERE IS NEW. Every function is the same one or two instructions
+// that already stood somewhere in the kernel -- `serial.out8` since round
+// 59, `__mmio_read*` since round 52, `pushfq/pop/cli` since round K5. What
+// is new is that they now have ONE address instead of a dozen, and that the
+// dozen call sites can be pointed at a different machine by changing ONE
+// line in `arch.fi`.
+//
+// WHY THE PORT FUNCTIONS ARE THE INTERESTING ONES. `in` and `out` are not
+// "reading and writing an address". They are instructions with an address
+// space of their own, sixteen bits wide, that no pointer can name and that
+// the processor does not reorder against memory. AArch64 has neither the
+// instructions nor the space: everything is memory, and every access needs
+// an attribute in a page descriptor plus a barrier to get the same
+// guarantee. That is why `arch.fi` speaks of DEVICE ACCESS and not of
+// ports, and why `dev_out8(port, value)` on this side is one instruction
+// and on the other side will be a store plus a `dsb`.
+
+profile kernel
+
+export {
+    out8, out16, out32, in8, in16, in32, io_wait,
+    read8, read16, read32, read64,
+    write8, write16, write32, write64,
+    barrier, barrier_read, barrier_write, barrier_device,
+    irq_on, irq_off, irq_save, irq_restore, idle, pause,
+    page_root, page_root_set, tlb_flush_all, tlb_flush_page,
+    cycles,
+    PAGE_SIZE, PAGE_BITS, HAS_IO_PORTS
+}
+
+// ------------------------------------------------------- what this machine is
+
+const PAGE_SIZE: u64 = 4096
+const PAGE_BITS: u64 = 12
+
+// Whether `out8`/`in8` mean anything at all. On AArch64 this is false and
+// every caller that reaches for a port has to be found and changed --
+// which is why it is a constant a compiler can see and not a comment.
+const HAS_IO_PORTS: bool = true
+
+// ------------------------------------------------------------- device access
+
+fn out8(port: u16, value: u8) {
+    asm("out dx, al", in("dx") port, in("al") value)
+}
+
+fn out16(port: u16, value: u16) {
+    asm("out dx, ax", in("dx") port, in("ax") value)
+}
+
+fn out32(port: u16, value: u32) {
+    asm("out dx, eax", in("dx") port, in("eax") value)
+}
+
+fn in8(port: u16) -> u8 {
+    // ROUND 72: `in al, dx` only ever DEFINES the low octet of `rax`; the
+    // upper 56 bits keep whatever was in the register. `movzx eax, al`
+    // makes the whole register well defined from the octet that was read.
+    return asm("in al, dx\nmovzx eax, al", out("rax"), in("dx") port) as u8
+}
+
+fn in16(port: u16) -> u16 {
+    return asm("in ax, dx\nmovzx eax, ax", out("rax"), in("dx") port) as u16
+}
+
+fn in32(port: u16) -> u32 {
+    return asm("in eax, dx", out("rax"), in("dx") port) as u32
+}
+
+// A write to the unused port 0x80 costs roughly one bus cycle. The old PIC
+// needs that pause between two command octets.
+fn io_wait() {
+    out8(0x80 as u16, 0 as u8)
+}
+
+// --- memory mapped registers. `__mmio_*` is the language's promise from
+// round 52: exactly one memory access per line, never moved, never merged,
+// never removed. On x86-64 that is the whole story, because the machine is
+// TSO and a store is never seen out of order with an older store. On
+// AArch64 it is HALF the story -- see `barrier_device` and docs/ARCH.md.
+
+fn read8(addr: u64) -> u8 {
+    return __mmio_read8(addr as *mut u8)
+}
+
+fn read16(addr: u64) -> u16 {
+    return __mmio_read16(addr as *mut u16)
+}
+
+fn read32(addr: u64) -> u32 {
+    return __mmio_read32(addr as *mut u32)
+}
+
+fn read64(addr: u64) -> u64 {
+    return __mmio_read64(addr as *mut u64)
+}
+
+fn write8(addr: u64, v: u8) {
+    __mmio_write8(addr as *mut u8, v)
+}
+
+fn write16(addr: u64, v: u16) {
+    __mmio_write16(addr as *mut u16, v)
+}
+
+fn write32(addr: u64, v: u32) {
+    __mmio_write32(addr as *mut u32, v)
+}
+
+fn write64(addr: u64, v: u64) {
+    __mmio_write64(addr as *mut u64, v)
+}
+
+// ------------------------------------------------------------------ barriers
+
+// A full fence, both directions.
+fn barrier() {
+    asm("mfence")
+}
+
+// Nothing after this may be read before it.
+fn barrier_read() {
+    asm("lfence")
+}
+
+// Nothing before this may become visible after it. On x86-64 stores are
+// already ordered against each other, so this is a compiler fence and the
+// instruction is there for the ONE case the manual allows to move: a
+// non-temporal store. Named separately so that the AArch64 side, where it
+// is a real `dmb ishst`, has something to be.
+fn barrier_write() {
+    asm("sfence")
+}
+
+// What has to stand between filling a descriptor in memory and ringing a
+// device's doorbell. On x86-64 nothing has to: an older store is visible
+// before a younger one, full stop, and `nvme.fi` and `virtio.fi` were
+// written on that. On AArch64 it is a `dsb sy` and leaving it out gives a
+// device that reads a descriptor still sitting in a store buffer. This
+// function exists so that the call sites can be written once and be right
+// on both machines.
+fn barrier_device() {
+    asm("sfence")
+}
+
+// ----------------------------------------------------------- interrupt state
+
+fn irq_on() {
+    asm("sti")
+}
+
+fn irq_off() {
+    asm("cli")
+}
+
+// Returns the state so it can be put back exactly as it was -- a lock that
+// unconditionally re-enables interrupts on release turns a nested lock into
+// a deadlock the first time an interrupt lands inside one.
+fn irq_save() -> u64 {
+    return asm("pushfq\npop rax\ncli", out("rax"))
+}
+
+fn irq_restore(flags: u64) {
+    if (flags & 0x200) != 0 {
+        asm("sti")
+    }
+}
+
+// Wait for the next interrupt without burning the processor.
+fn idle() {
+    asm("hlt")
+}
+
+// What goes in a spin loop: tells the processor this is one.
+fn pause() {
+    asm("pause")
+}
+
+// ------------------------------------------------------------- page tables
+
+// The root of the current translation. CR3 here, TTBR0_EL1 there -- and
+// there are TWO of those, which is the difference the interface cannot hide
+// and does not try to (docs/ARCH.md).
+fn page_root() -> u64 {
+    return asm("mov rax, cr3", out("rax"))
+}
+
+fn page_root_set(root: u64) {
+    asm("mov cr3, rdi", in("rdi") root)
+}
+
+// Writing CR3 flushes everything that is not marked global.
+fn tlb_flush_all() {
+    asm("mov rax, cr3\nmov cr3, rax", out("rax"))
+}
+
+fn tlb_flush_page(addr: u64) {
+    asm("invlpg [rdi]", in("rdi") addr)
+}
+
+// -------------------------------------------------------------- the counter
+
+// A monotone counter of processor cycles. Its RATE is unknown on this
+// machine and `time.fi` has to calibrate it against the 8254 -- on AArch64
+// CNTFRQ_EL0 simply states it, which is the one place where the port gains
+// something over the original.
+fn cycles() -> u64 {
+    return asm("rdtsc\nshl rdx, 32\nor rax, rdx", out("rax"))
+}
