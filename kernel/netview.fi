@@ -328,12 +328,20 @@ const FAKE_MAC1: u64 = 0x0002 // :00:02
 
 // --------------------------------------------- the place in `kdata`
 //
-// `pci.K2_SCALARS` is 0x12000..0x14000. Round K2 uses up to 0x2A0,
-// `hw.fi` and `netsvc.fi` up to 0x3F8, `inet.fi` puts its socket table
-// at 0x400, its address cache at 0x600 and its ICMP queue at 0x700..
-// 0xB00. This round takes 0xB00 upwards and stays under 0x1400.
+// THREE PAGES OF ITS OWN, `kstate.NETVIEW_OFF` (0x77000..0x7A000).
+// This round used to cut its area out of `pci.K2_SCALARS` and the
+// merge showed why that could not hold: round TUNNEL copies the whole
+// kernel command line into 0xE00..0x1200 of that page and round NETMON
+// puts the scalars of its second card at 0x1400. Inside this block the
+// layout is:
+//
+//   0x0000..0x0400  sixteen socket records of 64 octets
+//   0x0400..0x0428  the counters and the systemwide fallback
+//   0x1000..0x2000  sixteen canned answers of 256 octets
+//   0x2000..0x2080  the two sockaddr_in a faked call is given
+//   0x2080..0x2180  what a faked `send` is looked at through
 
-const NV_SOCK: u64 = 0xB00 // one record per socket
+const NV_SOCK: u64 = 0x000 // one record per socket
 const NV_BYTES: u64 = 64
 const NV_BUF: u64 = 0x1000 // the canned answer of each socket
 const NV_BUFB: u64 = 256
@@ -346,18 +354,23 @@ const NV_BUFB: u64 = 256
 // the machine the person is sitting at when the aeroplane has no wifi.
 // So the faked paths use these, which are part of `kdata` and therefore
 // exist from the first instruction.
-const NV_SA: u64 = 0x1400 // two sockaddr_in, in and out
-const NV_PEEK: u64 = 0x1480 // what a faked `send` is looked at through
+//
+// AFTER the buffers and not inside them: sixteen buffers of 256 octets
+// from 0x1000 reach to 0x2000, and the old 0x1400 was the fifth of
+// them. A machine with five faked sockets open wrote its fifth answer
+// over the address a faked `sendto` was about to read.
+const NV_SA: u64 = 0x2000 // two sockaddr_in, in and out
+const NV_PEEK: u64 = 0x2080 // what a faked `send` is looked at through
 const PEEK_MAX: u64 = 256
 
-const NV_DROPPED: u64 = 0xF00 // octets a faked socket swallowed
-const NV_OPENED: u64 = 0xF08 // faked connections opened
-const NV_DENIED: u64 = 0xF10 // attempts answered -ENETUNREACH
-const NV_REPLIES: u64 = 0xF18 // canned answers built
+const NV_DROPPED: u64 = 0x400 // octets a faked socket swallowed
+const NV_OPENED: u64 = 0x408 // faked connections opened
+const NV_DENIED: u64 = 0x410 // attempts answered -ENETUNREACH
+const NV_REPLIES: u64 = 0x418 // canned answers built
 // SECOND ADDENDUM: the systemwide fallback, and there is one of it. Set
 // from the command line at boot (`hw.net_fallback`), changed at run time
 // through SYS_OSUM_NETVFB, and read by everybody who needs it.
-const NV_FALL: u64 = 0xF20
+const NV_FALL: u64 = 0x420
 
 // The fields of one faked socket.
 const F_USE: u64 = 0 // 0 = an ordinary socket, 1 = a faked one
@@ -369,8 +382,14 @@ const F_LEN: u64 = 40 // how long the answer is
 const F_SENT: u64 = 48 // octets this socket swallowed
 const F_SEEN: u64 = 56 // 1 = the first block was already looked at
 
+// MERGE FIX: THIS ROUND HAS ITS OWN PAGES NOW (kstate.NETVIEW_OFF).
+// The reason is written out where the block is handed out; the short
+// version is that three other rounds write into the page this round
+// used to live in, and one of those writes is the copy of the kernel
+// command line, which is 1024 octets long and crossed both the socket
+// table and the counters.
 fn sc(off: u64) -> u64 {
-    return pci.K2_SCALARS + off
+    return kstate.NETVIEW_OFF + off
 }
 
 fn at(i: u64) -> u64 {
