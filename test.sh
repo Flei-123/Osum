@@ -148,6 +148,29 @@
 #      `nosvm` schaltet alles ab, `-cpu qemu64` bietet keine NPT an.
 #
 #
+#  25. DER TUNNEL (tools/tunnel/run.sh, Runde TUNNEL): ein VPN. Fuenf
+#      Stufen, und jede misst gegen etwas, das dieses Repo nicht
+#      geschrieben hat. Die vier Bausteine, die WireGuard NENNT --
+#      BLAKE2s, ChaCha20, Poly1305, Curve25519 -- gegen 1522
+#      Testvektoren aus RFC 7693, 8439, 7748 und draft-xchacha, dazu
+#      gegen libb2, OpenSSL und libsodium. Das PROTOKOLL (Noise IK,
+#      Schluesselwechsel, Cookie-Antwort, Wiederholungsfenster,
+#      Cryptokey Routing) gegen die WireGuard-Umsetzung IM
+#      LINUX-KERN ueber ein veth-Paar -- Linux' eigenes `ping` geht
+#      hindurch. Die AmneziaWG-Verschleierung: ein unveraendertes
+#      Linux-WireGuard IGNORIERT die verschleierten Pakete, und
+#      dasselbe Programm mit denselben Schluesseln bekommt ohne die
+#      Parameter eine Antwort. SOCKS5 und HTTP CONNECT gegen einen
+#      echten Proxy und den ECHTEN TOR-DIENST -- eine Seite wurde
+#      wirklich ueber das Tor-Netz geholt. Und der Kernel selbst:
+#      X25519 in Ring 0 stimmt mit libsodium ueberein, der Osum-Kern
+#      schliesst einen Handschlag mit dem Linux-Kern ab, und der
+#      NOTAUS laesst 0 IP-Oktette hinaus -- gezaehlt mit tcpdump
+#      AUSSERHALB des Kerns, gegen 44 in der Gegenprobe ohne ihn.
+#      Was NICHT geht, steht in docs/TUNNEL.md und wird dort nicht
+#      wegerklaert: Nutzdaten fliessen im Kern noch nicht durch den
+#      Tunnel, und die Krypto ist NICHT auditiert.
+#
 #  15. Die zwei Schutzbits und das Boot-Modul (tools/guard/run.sh, Runde
 #      K10): die letzten zwei Faehigkeiten aus OrientOS' Rust-Kernel, die
 #      dieser hier noch nicht hatte. SMEP und SMAP in CR4
@@ -423,6 +446,9 @@ lauf "22. Widgets und der Dateimanager: eine Bibliothek in Ring 3 (tools/k15/run
      tools/k15/run.sh k15 '^K15: |^        -> |^  OK    (die Anordnung|ein Klick auf das Kaestchen|mit Bereichsverfolgung|und /daten/neu|der Verweis spart|getippt |OHNE (die Schluesselwoerter|das Journal|den Namensindex)|[0-9]\. (DER AUFBAU|DIE SUCHE|DIE GEGENPROBE|der Index)|und DIESELBEN NAMEN|nach dem (Anlegen|Umbenennen)|das Symbol des Dateimanagers)'
 lauf "24. Energie und Leistung: drei Profile, Ruhezustand, Waerme, Akku (tools/k18/run.sh, Runde K18)" \
      tools/k18/run.sh k18 '^K18: |^  OK    (dieselbe Stelle|IA32_PERF_CTL bekommt|Turbo ist bei|SpeedStep ist bei|jeder Durchlauf ging|schlafend |aber es wird kein|zwei Tabellen|GEGENPROBE|GEDROSSELT|im BILD|dasselbe Pruefbild|und einen Bildpunkt DANEBEN|keine AUFRUFNUMMER)'
+
+lauf "25. der Tunnel: WireGuard, AmneziaWG, SOCKS5 und Tor (tools/tunnel/run.sh, Runde TUNNEL)" \
+     tools/tunnel/run.sh tunnel '^  OK    ([0-9]+ vectors|all [0-9]+|X25519 in the kernel|the Linux kernel completed|Linux pinged|KILL SWITCH|counter-check)|^     .*(all passed|ok   [0-9]+ of|rtt )'
 
 echo
 echo "=================================================================="

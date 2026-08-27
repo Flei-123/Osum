@@ -74,9 +74,11 @@ fi
 # =====================================================================
 [ -z "$ONLY" ] && echo "== 1. the four primitives against their RFCs =="
 # =====================================================================
-[ -z "$ONLY" ] && $FIRNC tools/tunnel/oracle.fi -o .probe/oracle 2>"$TMPD/e" \
-    && [ -z "$ONLY" ] && ok "tools/tunnel/oracle.fi builds against lib/crypto/" \
-    || { bad "the oracle does not build"; head -6 "$TMPD/e" | sed 's/^/        /'; }
+if [ -z "$ONLY" ]; then
+    $FIRNC tools/tunnel/oracle.fi -o .probe/oracle 2>"$TMPD/e" \
+        && ok "tools/tunnel/oracle.fi builds against lib/crypto/" \
+        || { bad "the oracle does not build"; head -6 "$TMPD/e" | sed 's/^/        /'; }
+fi
 if [ -x .probe/oracle ] && [ -z "$ONLY" ]; then
     if python3 tools/tunnel/vectors.py >"$TMPD/vec" 2>&1; then
         ok "$(tail -1 "$TMPD/vec")"
@@ -90,12 +92,14 @@ fi
 # =====================================================================
 echo "== 2. the protocol against the Linux kernel's WireGuard =="
 # =====================================================================
-[ -n "$ONLY" ] || $FIRNC tools/tunnel/peer.fi -o .probe/peer 2>"$TMPD/e" \
-    && ok "tools/tunnel/peer.fi builds against lib/wg/proto.fi" \
-    || { bad "peer.fi does not build"; head -6 "$TMPD/e" | sed 's/^/        /'; }
-[ -n "$ONLY" ] || $FIRNC tools/tunnel/socksdrv.fi -o .probe/socksdrv 2>"$TMPD/e" \
-    && ok "tools/tunnel/socksdrv.fi builds against lib/socks/" \
-    || { bad "socksdrv.fi does not build"; head -6 "$TMPD/e" | sed 's/^/        /'; }
+if [ -z "$ONLY" ]; then
+    $FIRNC tools/tunnel/peer.fi -o .probe/peer 2>"$TMPD/e" \
+        && ok "tools/tunnel/peer.fi builds against lib/wg/proto.fi" \
+        || { bad "peer.fi does not build"; head -6 "$TMPD/e" | sed 's/^/        /'; }
+    $FIRNC tools/tunnel/socksdrv.fi -o .probe/socksdrv 2>"$TMPD/e" \
+        && ok "tools/tunnel/socksdrv.fi builds against lib/socks/" \
+        || { bad "socksdrv.fi does not build"; head -6 "$TMPD/e" | sed 's/^/        /'; }
+fi
 
 HAVE_ROOT=0
 [ "$(id -u)" = 0 ] && HAVE_ROOT=1
@@ -233,7 +237,7 @@ val() { grep -aoE "$2=[0-9]+" "$1" 2>/dev/null | tail -1 | cut -d= -f2; }
 echo "-- 5a. the kernel derives the same public key as wg(8) --"
 # --------------------------------------------------------------------
 wire_up
-run_osum "nic nip=$OSUM_IP nprefix=24 ngw=$HOST_IP nsvc=0 nwait=60 \
+run_osum "nic nip=$OSUM_IP nprefix=24 ngw=$HOST_IP nsvc=0 nwait=1200 \
 wgpriv=$OUR_PRIV wgaddr=$OSUM_TUN/24 wgport=$WGPORT" 60 "$TMPD/a.log"
 KPUB=$(grep -ao 'pub=[0-9a-f]*' "$TMPD/a.log" | tail -1 | cut -d= -f2)
 if [ "$KPUB" = "$OUR_PUB" ]; then
@@ -250,12 +254,12 @@ echo "-- 5b. the handshake, kernel to kernel --"
 # --------------------------------------------------------------------
 wire_up
 wg_up
-APPEND="nic nip=$OSUM_IP nprefix=24 ngw=$HOST_IP nsvc=0 nwait=110 \
+APPEND="nic nip=$OSUM_IP nprefix=24 ngw=$HOST_IP nsvc=0 nwait=3000 \
 wgpriv=$OUR_PRIV wgpeer=$LX_PUB_HEX wgep=$HOST_IP:$WGPORT \
-wgallow=$HOST_TUN/32 wgaddr=$OSUM_TUN/24 wgport=$WGPORT wgup"
-run_osum "$APPEND" 110 "$TMPD/b.log" &
+wgallow=$HOST_TUN/32 wgaddr=$OSUM_TUN/24 wgport=$WGPORT wgkeep=15 wgup"
+run_osum "$APPEND" 70 "$TMPD/b.log" &
 QRUN=$!
-sleep 14
+sleep 16
 LATEST=$(ip netns exec "$NS" wg show wg0 latest-handshakes 2>/dev/null | awk '{print $2}')
 XFER=$(ip netns exec "$NS" wg show wg0 transfer 2>/dev/null | awk '{print $2}')
 if [ -n "${LATEST:-}" ] && [ "${LATEST:-0}" != 0 ]; then
@@ -307,7 +311,7 @@ echo "-- 5c. THE KILL SWITCH: 0 octets on the wire while the tunnel is down --"
 # the measurement below means nothing.
 DEAD_EP=10.9.0.250 # nothing answers there, so the tunnel never comes up
 BASE="nic nip=$OSUM_IP nprefix=24 ngw=$HOST_IP nsvc=4 nport=9099 \
-nbytes=65536 nwait=45 wgpriv=$OUR_PRIV wgpeer=$LX_PUB_HEX \
+nbytes=65536 nwait=1500 wgpriv=$OUR_PRIV wgpeer=$LX_PUB_HEX \
 wgep=$DEAD_EP:$WGPORT wgallow=0.0.0.0/0 wgaddr=$OSUM_TUN/24 \
 wgport=$WGPORT"
 
@@ -355,11 +359,11 @@ PYEOF
 
 sniff_run() { # append, pcap
     wire_up
-    ip netns exec "$NS" timeout 55 tcpdump -i "$V1" -n -s 128 -U \
+    ip netns exec "$NS" timeout 45 tcpdump -i "$V1" -n -s 128 -U \
         -w "$2" >/dev/null 2>&1 &
     local TDPID=$!
     sleep 1
-    run_osum "$1" 50 "$TMPD/sniff.log"
+    run_osum "$1" 40 "$TMPD/sniff.log"
     sleep 1
     kill $TDPID 2>/dev/null
     wait $TDPID 2>/dev/null
