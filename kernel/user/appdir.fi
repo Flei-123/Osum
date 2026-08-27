@@ -66,7 +66,7 @@ export {
     load, count, name_of, info_of, exec_of, icon_of, keys_of, datei_of,
     fassung_of, symbol_of, symbol_load,
     search, matches, lower, contains,
-    net_of, net_user, view_for, view_word,
+    net_of, net_user, view_for, view_word, view_default,
     MAXAPP, SYMBYTES
 }
 
@@ -537,13 +537,42 @@ fn search(term: u64, out: u64, max: u64) -> u64 {
 //   2. THE PACKAGE. `net=` in `/apps/<name>.prog/INFO`. This is the
 //      author of the program saying what it needs -- a reasonable
 //      default and never more than that.
-//   3. Neither: `real`. What every program got before this round.
+//   3. SECOND ADDENDUM -- THE SYSTEMWIDE PREFERENCE, and only if
+//      neither of the two above said anything at all. `off` answers
+//      `real`, which is what every program got before this round;
+//      `when-offline` answers `faked` while there is no way out;
+//      `always` answers `faked`. It is worked out in the kernel
+//      (`netview.fallback_view`) because it depends on the state of the
+//      wire, which ring 3 cannot measure.
 //
-// AND THERE IS NO THIRD PLACE. In particular the view is not written
+// SO THE RULE IN ONE LINE: AN EXPLICIT SETTING ON A PROGRAM ALWAYS
+// BEATS THE PREFERENCE. A program the person put on `real` is not
+// quietly forced into `faked` by `always`, and a program put on `none`
+// stays without a network even while the preference is faking one for
+// everybody else. The preference fills a BLANK; it does not overrule an
+// ANSWER. The table is in `docs/NETVIEW.md`.
+//
+// AND THERE IS NO FOURTH PLACE. In particular the view is not written
 // into the task record from here: what this returns is handed to
 // `/bin/netview`, which tightens ITSELF and then starts the program.
 // The running state lives in exactly one place (`sched.T_NETV`), and
 // these files are what it is set FROM, not a second copy of it.
+//
+// WHY THE PREFERENCE IS APPLIED HERE AND NOT IN THE KERNEL AT `exec`.
+// Putting it in the kernel would catch every program in the system and
+// was tried first on paper; it collapses on the launcher. The launcher
+// is what puts an explicit view on a program, and it does that by
+// TIGHTENING ITSELF and then starting the program -- so a launcher that
+// the kernel had already forced into `faked` could never start anything
+// as `real` again, because `netview.may_set` refuses every loosening,
+// on purpose and for good reason. Loosening it for this would open
+// exactly the escape the main round closed: a faked program setting
+// itself back to `real` in one call. So the preference stays where the
+// other two sources are, at the door a program is started through, and
+// the price is written down honestly in `docs/NETVIEW.md`: a program
+// started from a SHELL keeps `real`, because a shell is somebody saying
+// exactly what to run, and `netview default <cmd>` is that same
+// sentence spelled out.
 
 fn view_word(p: u64, n: u64) -> u64 {
     var w0: [u8; 5] = "real\0"
@@ -632,8 +661,8 @@ fn net_user(who: u64, name: u64) -> u64 {
     return 9
 }
 
-// The two above, in the order the comment gives. `who` may be 0 -- then
-// there is no person to ask and only the package speaks.
+// The three above, in the order the comment gives. `who` may be 0 --
+// then there is no person to ask and only the package speaks.
 fn view_for(who: u64, i: u64, name: u64) -> u64 {
     let u: u64 = net_user(who, name)
     if u < 4 {
@@ -643,5 +672,18 @@ fn view_for(who: u64, i: u64, name: u64) -> u64 {
     if a < 4 {
         return a
     }
-    return 0
+    return view_default()
+}
+
+// Nobody said anything: what the systemwide preference makes of that,
+// right now. Asked of the kernel every time and never remembered --
+// `when-offline` changes its answer the moment the gateway answers an
+// ARP, and a copy of it in this file would be stale by exactly that
+// moment.
+fn view_default() -> u64 {
+    let v: u64 = ulib.sys(ulib.SYS_NETVGET, 0, ulib.NV_FBVIEW, 0)
+    if ulib.bad(v) || v > 3 {
+        return 0
+    }
+    return v
 }
