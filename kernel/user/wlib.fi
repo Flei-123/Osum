@@ -250,6 +250,7 @@ static mut tr_b: [u8; 8] = " base=\0\0"
 static mut tr_f: [u8; 6] = " fg=\0\0"
 static mut tr_g: [u8; 6] = " bg=\0\0"
 static mut tr_t: [u8; 5] = " t=\0\0"
+static mut tr_buf: [u8; 320] = [0 as u8; 320]
 // RUNDE THEME. Was das Umschalten kostet, gezaehlt an der Stelle, an
 // der es passiert -- nicht geschaetzt.
 static mut s_thpoll: u64 = 0 // Tick des letzten Nachsehens
@@ -1356,21 +1357,84 @@ fn say_painted(w: u64, kind: u64, base: u64, fg: u64, bg: u64, p: u64,
     if s_trace == 0 || p == 0 || n == 0 {
         return
     }
-    ulib.say((&tr_a[0 as usize]) as u64)
-    ulib.sayn(ng(w, N_H))
-    ulib.say((&tr_k[0 as usize]) as u64)
-    ulib.sayn(kind)
-    ulib.say((&tr_x[0 as usize]) as u64)
-    ulib.sayn(s_tx)
-    ulib.say((&tr_b[0 as usize]) as u64)
-    ulib.sayn(base)
-    ulib.say((&tr_f[0 as usize]) as u64)
-    ulib.sayn(fg)
-    ulib.say((&tr_g[0 as usize]) as u64)
-    ulib.sayn(bg)
-    ulib.say((&tr_t[0 as usize]) as u64)
-    ulib.say(p)
-    ulib.nl()
+    // ONE WRITE AND NOT TWELVE.
+    //
+    // The first version of this called `ulib.say` and `ulib.sayn`
+    // twelve times per line, and on a desktop that is five processes
+    // sharing one serial port that came out interleaved: a checker
+    // looking for a complete line found one in most runs and none in
+    // some, which is the worst thing a measurement can be. The taskbar
+    // has lived with it since round DESKTOP because it repaints often
+    // enough that SOME line survives; a proof should not depend on
+    // that.
+    //
+    // So the line is built in a buffer and handed to the kernel in a
+    // single `write`, which is where the serialisation is. Same octets,
+    // same order, one call.
+    let b: u64 = (&tr_buf[0 as usize]) as u64
+    var at: u64 = tr_put(b, 0, (&tr_a[0 as usize]) as u64)
+    at = tr_num(b, at, ng(w, N_H))
+    at = tr_put(b, at, (&tr_k[0 as usize]) as u64)
+    at = tr_num(b, at, kind)
+    at = tr_put(b, at, (&tr_x[0 as usize]) as u64)
+    at = tr_num(b, at, s_tx)
+    at = tr_put(b, at, (&tr_b[0 as usize]) as u64)
+    at = tr_num(b, at, base)
+    at = tr_put(b, at, (&tr_f[0 as usize]) as u64)
+    at = tr_num(b, at, fg)
+    at = tr_put(b, at, (&tr_g[0 as usize]) as u64)
+    at = tr_num(b, at, bg)
+    at = tr_put(b, at, (&tr_t[0 as usize]) as u64)
+    var i: u64 = 0
+    while i < n && at + 2 < 320 {
+        __mmio_write8((b + at) as *mut u8,
+            __mmio_read8((p + i) as *mut u8))
+        at = at + 1
+        i = i + 1
+    }
+    __mmio_write8((b + at) as *mut u8, 10 as u8)
+    at = at + 1
+    let _w: u64 = ulib.put(b, at)
+}
+
+// Text into the buffer, without the terminating zero. Returns where the
+// next thing goes.
+fn tr_put(b: u64, at: u64, p: u64) -> u64 {
+    var i: u64 = 0
+    var a: u64 = at
+    while __mmio_read8((p + i) as *mut u8) != 0 as u8 && a + 2 < 320 {
+        __mmio_write8((b + a) as *mut u8,
+            __mmio_read8((p + i) as *mut u8))
+        a = a + 1
+        i = i + 1
+    }
+    return a
+}
+
+// A decimal number into the same buffer, most significant digit first.
+fn tr_num(b: u64, at: u64, v: u64) -> u64 {
+    var d: [u8; 24] = [0 as u8; 24]
+    var n: u64 = 0
+    var q: u64 = v
+    if q == 0 {
+        __mmio_write8(((&d[0 as usize]) as u64) as *mut u8, 48 as u8)
+        n = 1
+    }
+    while q > 0 && n < 24 {
+        __mmio_write8((((&d[0 as usize]) as u64) + n) as *mut u8,
+            (48 + q % 10) as u8)
+        q = q / 10
+        n = n + 1
+    }
+    var a: u64 = at
+    var i: u64 = n
+    while i > 0 && a + 2 < 320 {
+        i = i - 1
+        __mmio_write8((b + a) as *mut u8,
+            __mmio_read8((((&d[0 as usize]) as u64) + i) as *mut u8))
+        a = a + 1
+    }
+    return a
 }
 
 // ROUND LOOK: the ring is as thick as the shape says and follows the
