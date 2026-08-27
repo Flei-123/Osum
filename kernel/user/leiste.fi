@@ -71,6 +71,7 @@ profile kernel
 import ulib
 import libc.io
 import wlibc
+import icons
 import msg
 import qs
 
@@ -137,6 +138,10 @@ const F_N: u64 = 3
 const SYS_PWRGET: u64 = 1750
 const PG_BATPRESENT: u64 = 24
 const PG_BATPERCENT: u64 = 25
+// ROUND LOOK: bit 1 is the ACPI _BST charging bit. Same number as in
+// kernel/sys.fi and kernel/user/power.fi -- the numbers are the
+// interface to ring 3 and this bar does not invent a second one.
+const PG_BATSTATE: u64 = 27
 const SYS_NETGET: u64 = 1300
 const NG_READY: u64 = 0
 const NG_IP: u64 = 1
@@ -159,6 +164,125 @@ const ICON_MAX: u64 = 1100
 const MARK_MAX: u64 = 640
 const IC_W: u64 = 16
 const MK_W: u64 = 12
+// ROUND LOOK: the side of a status glyph. `wlibc.ICON_SMALL` is the
+// size the icon font was cut and measured for (docs/ICONS.md: 25.0
+// solid pixels per icon at 16, against 11.4 for the runner-up), so
+// it is the size that is used, and it is written here once.
+const GL_W: u64 = 16 // = wlibc.ICON_SMALL
+
+// ================================ ROUND LOOK: THE SYMBOLS IN THE CORNER
+//
+// Justin looked at the booted image and said: no symbol for the battery
+// and none for the network, only text. He was right, and there were two
+// separate reasons.
+//
+//   * THE NETWORK had a symbol since round NETVIEW -- an OSYM bitmap
+//     out of /etc/netview/. The image simply did not carry the
+//     directory, so `icons_load` counted 0 and the bar fell back to
+//     text, exactly as it is supposed to. That is fixed in the image
+//     (tools/look/shot.sh) and NOT here.
+//   * THE BATTERY never had one at all. Round K18 gave the bar a
+//     percentage and round ICONS gave the system six battery glyphs,
+//     and nothing ever joined the two.
+//
+// So this round adds the glyph path, and it adds it BENEATH the OSYM
+// path and not instead of it: `tools/netview/run.sh` reads the state
+// pictures pixel by pixel out of the screenshot, and a round that
+// swapped them for something else would have broken twenty-nine
+// assertions to change a picture nobody complained about. The order is
+//
+//   1. the OSYM file from /etc/netview/  (round NETVIEW, measured there)
+//   2. the glyph from /lib/icons.ttf     (this round)
+//   3. the text alone                    (round DESKTOP, still true)
+//
+// and each step is only taken when the one before it has nothing.
+//
+// NO SYMBOL FOR SOMETHING THE MACHINE CANNOT MEASURE. The battery
+// grades come from `PG_BATPERCENT` and `PG_BATSTATE`, both out of the
+// kernel's ACPI reader; when `PG_BATPRESENT` is 0 the symbol is
+// BATTERY_ABSENT, which is a statement about the firmware's answer and
+// not a decoration for a missing one. The four network grades are the
+// four states `sys.NG_STATE` already computes -- this bar does not ask
+// three questions and draw its own conclusion.
+
+// The grade of the battery, as a code point out of lib/icons.fi.
+// The thresholds are the ones Lucide draws for: `battery-full` has
+// three bars, `battery-medium` two, `battery-low` one, `battery` none.
+// So the cuts are at thirds, not at some rounder-looking number --
+// a symbol with two bars that means "over 35 percent" is a symbol
+// that is telling a third of a truth.
+fn bat_icon() -> u64 {
+    if bat_have == 0 {
+        return icons.BATTERY_ABSENT
+    }
+    if bat_chg != 0 {
+        return icons.BATTERY_CHARGING
+    }
+    if bat_pct >= 67 {
+        return icons.BATTERY_FULL
+    }
+    if bat_pct >= 34 {
+        return icons.BATTERY_MEDIUM
+    }
+    if bat_pct >= 10 {
+        return icons.BATTERY_LOW
+    }
+    return icons.BATTERY_EMPTY
+}
+
+// And its colour -- a ROLE and not a value, so it is right in every
+// scheme. Below ten percent the thing is an alarm and says so; the
+// rest of the time it is text and looks like text.
+fn bat_colour() -> u64 {
+    if bat_have == 0 {
+        return wlibc.theme(wlibc.T_DIM)
+    }
+    if bat_chg == 0 && bat_pct < 10 {
+        return wlibc.theme(wlibc.C_DANGER)
+    }
+    if bat_chg == 0 && bat_pct < 20 {
+        return wlibc.theme(wlibc.C_WARNING)
+    }
+    return wlibc.theme(wlibc.T_FG)
+}
+
+// The four states of the machine, as glyphs. Same four the OSYM
+// pictures draw and in the same order, because they are the same four
+// states -- `sys.NG_STATE` numbers them and nothing here renumbers them.
+//   0 no carrier  nothing plugged in        -> unplug
+//   1 no address  carrier, no address yet   -> ban
+//   2 no route    address, no way out       -> cloud-off
+//   3 online      a way out                 -> cable
+fn net_glyph(st: u64) -> u64 {
+    if st == 3 {
+        return icons.NETWORK_WIRED
+    }
+    if st == 2 {
+        return icons.NETWORK_NO_INTERNET
+    }
+    if st == 1 {
+        return icons.NETWORK_BLOCKED
+    }
+    return icons.NETWORK_OFFLINE
+}
+
+fn net_colour(st: u64) -> u64 {
+    if st == 3 {
+        return wlibc.theme(wlibc.T_FG)
+    }
+    if st == 0 {
+        return wlibc.theme(wlibc.T_DIM)
+    }
+    return wlibc.theme(wlibc.C_WARNING)
+}
+
+// Is there a glyph path at all? One question, asked once per repaint,
+// so that the room reserved in `layout` and the drawing in `paint`
+// cannot disagree -- which is the bug round NETVIEW's addendum found
+// the hard way when the icon took room it had not been given.
+fn glyphs_ok() -> bool {
+    return wlibc.icon_have()
+}
 
 // ------------------------------------------------------------- state
 
@@ -229,6 +353,16 @@ static mut ic_ok: u64 = 0
 static mut mk_ok: u64 = 0
 static mut sy_ok: u64 = 0
 static mut net_state: u64 = 0
+// ROUND LOOK: what the battery is doing, as the two numbers the kernel
+// gives and nothing worked out here. `bat_have` is `PG_BATPRESENT`,
+// `bat_pct` is `PG_BATPERCENT`, `bat_chg` is bit 1 of `PG_BATSTATE`
+// (the ACPI _BST charging bit). A machine that cannot answer leaves
+// them at 0 and gets the "no battery" symbol -- which is a MEASUREMENT
+// and not a guess: `PG_BATPRESENT` returning 0 means the firmware says
+// there is none.
+static mut bat_have: u64 = 0
+static mut bat_pct: u64 = 0
+static mut bat_chg: u64 = 0
 static mut nv_fall: u64 = 0 // 0 off, 1 when-offline, 2 always
 static mut nv_faking: u64 = 0 // is it faking RIGHT NOW
 // WAS ZULETZT GEMELDET WURDE. Der Zustand der Maschine aendert sich
@@ -534,6 +668,14 @@ static mut lk_sy: [u8; 5] = " y=\0\0"
 static mut lk_sw: [u8; 5] = " w=\0\0"
 static mut lk_sh: [u8; 5] = " h=\0\0"
 static mut lk_sg: [u8; 8] = " align=\0"
+static mut lk_ic: [u8; 21] = "taskbar: icon field=\0"
+static mut lk_no: [u8; 24] = "taskbar: noglyph field=\0"
+static mut lk_bat: [u8; 4] = "bat\0"
+static mut lk_net: [u8; 4] = "net\0"
+static mut lk_id: [u8; 6] = " id=\0\0"
+static mut lk_px: [u8; 6] = " px=\0\0"
+static mut lk_ink: [u8; 9] = " inkbox=\0"
+static mut lk_st: [u8; 8] = " state=\0"
 static mut s_sr: [u8; 6] = " src=\0"
 static mut s_file: [u8; 5] = "file\0"
 static mut s_dflt: [u8; 8] = "default\0"
@@ -1108,13 +1250,22 @@ fn status_build() -> bool {
     __mmio_write8((c + 5) as *mut u8, 0 as u8)
     let a: u64 = full_of(F_BAT)
     let have: u64 = ulib.sys(SYS_PWRGET, PG_BATPRESENT, 0, 0)
+    bat_have = 0
+    bat_pct = 0
+    bat_chg = 0
+    let bst: u64 = ulib.sys(SYS_PWRGET, PG_BATSTATE, 0, 0)
+    if !ulib.bad(bst) && (bst & 2) != 0 {
+        bat_chg = 1
+    }
     if ulib.bad(have) || have == 0 {
         let _q: u64 = text_at_p(a, 0, s_kA)
     } else {
+        bat_have = 1
         let pc: u64 = ulib.sys(SYS_PWRGET, PG_BATPERCENT, 0, 0)
         if ulib.bad(pc) {
             let _q: u64 = text_at_p(a, 0, s_kA)
         } else {
+            bat_pct = pc
             var at: u64 = text_at_p(a, 0, s_ak)
             at = num_at(a, at, pc)
             let _q: u64 = text_at_p(a, at, (&s_pct[0 as usize]) as u64)
@@ -1301,6 +1452,11 @@ fn layout() {
             var vroom: u64 = 0
             if f == F_NET && state_icon(net_state) != 0 {
                 vroom = IC_W + 2
+            } else if f == F_NET && glyphs_ok() {
+                vroom = IC_W + 2
+            }
+            if f == F_BAT && glyphs_ok() {
+                vroom = GL_W + 2
             }
             if f == F_NET && sys_icon() != 0 {
                 vroom = vroom + MK_W + 2
@@ -1376,6 +1532,15 @@ fn layout() {
         var room: u64 = 0
         if f == F_NET && state_icon(net_state) != 0 {
             room = IC_W + 2
+        } else if f == F_NET && glyphs_ok() {
+            // ROUND LOOK: the glyph takes exactly the room the OSYM
+            // picture would have taken, so a bar with the icon font and
+            // no /etc/netview looks like a bar with both minus the
+            // drawing -- and no rectangle moves.
+            room = IC_W + 2
+        }
+        if f == F_BAT && glyphs_ok() {
+            room = GL_W + 2
         }
         // SECOND ADDENDUM: and the faking sign takes its room off the
         // same share. The lesson of the first addendum, applied before
@@ -1769,6 +1934,40 @@ fn paint_band(y0: u64, hh: u64, report: bool) {
         // says at a glance which of four things is true, the address
         // says which address -- and neither of them replaces the other.
         var icx: u64 = 0
+        // ROUND LOOK: THE BATTERY GETS A SYMBOL. It never had one -- the
+        // percentage came from round K18 and the glyphs from round
+        // ICONS, and the two were never joined.
+        if f == F_BAT && glyphs_ok() {
+            let bid: u64 = bat_icon()
+            let bx: u64 = f_x[(f) as usize] + 2
+            let by: u64 = f_y[(f) as usize] + (f_h[(f) as usize] - GL_W) / 2
+            if wlibc.icon_at(bid, bx, by, GL_W, bat_colour()) {
+                icx = GL_W + 2
+                if report {
+                    say((&lk_ic[0 as usize]) as u64)
+                    say((&lk_bat[0 as usize]) as u64)
+                    say((&lk_id[0 as usize]) as u64)
+                    ulib.sayn(bid)
+                    say((&s_tX[0 as usize]) as u64)
+                    ulib.sayn(bx)
+                    say((&s_gy[0 as usize]) as u64)
+                    ulib.sayn(by)
+                    say((&lk_px[0 as usize]) as u64)
+                    ulib.sayn(GL_W)
+                    say((&lk_ink[0 as usize]) as u64)
+                    ulib.sayn(wlibc.icon_ink_w(bid, GL_W)
+                        * wlibc.icon_ink_h(bid, GL_W))
+                    ulib.nl()
+                }
+            } else if report {
+                // A GLYPH THAT IS NOT THERE IS SAID SO. Silence here
+                // and a missing picture on screen look the same, and
+                // one of them is a defect.
+                say((&lk_no[0 as usize]) as u64)
+                say((&lk_bat[0 as usize]) as u64)
+                ulib.nl()
+            }
+        }
         if f == F_NET {
             // SECOND ADDENDUM, and the ORDER is the argument: the
             // faking sign comes FIRST, before the state of the machine.
@@ -1801,6 +2000,39 @@ fn paint_band(y0: u64, hh: u64, report: bool) {
                 ulib.nl()
             }
             let ic: u64 = state_icon(net_state)
+            if ic == 0 && glyphs_ok() {
+                // ROUND LOOK: no OSYM file on this disk, but there is an
+                // icon font. Same four states, same place, same room.
+                let nid: u64 = net_glyph(net_state)
+                let nx: u64 = f_x[(f) as usize] + 2 + icx
+                let ny: u64 = f_y[(f) as usize]
+                    + (f_h[(f) as usize] - GL_W) / 2
+                if wlibc.icon_at(nid, nx, ny, GL_W, net_colour(net_state)) {
+                    icx = icx + GL_W + 2
+                    if report {
+                        say((&lk_ic[0 as usize]) as u64)
+                        say((&lk_net[0 as usize]) as u64)
+                        say((&lk_id[0 as usize]) as u64)
+                        ulib.sayn(nid)
+                        say((&s_tX[0 as usize]) as u64)
+                        ulib.sayn(nx)
+                        say((&s_gy[0 as usize]) as u64)
+                        ulib.sayn(ny)
+                        say((&lk_px[0 as usize]) as u64)
+                        ulib.sayn(GL_W)
+                        say((&lk_ink[0 as usize]) as u64)
+                        ulib.sayn(wlibc.icon_ink_w(nid, GL_W)
+                            * wlibc.icon_ink_h(nid, GL_W))
+                        say((&lk_st[0 as usize]) as u64)
+                        ulib.sayn(net_state)
+                        ulib.nl()
+                    }
+                } else if report {
+                    say((&lk_no[0 as usize]) as u64)
+                    say((&lk_net[0 as usize]) as u64)
+                    ulib.nl()
+                }
+            }
             if ic != 0 {
                 let ix: u64 = f_x[(f) as usize] + 2 + icx
                 let _i: bool = wlibc.icon_draw(ic, ix,
