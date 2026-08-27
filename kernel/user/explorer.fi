@@ -65,6 +65,7 @@ import libc.io
 import libc.errno
 import wlibc
 import wlib
+import icons
 import appdir
 
 export { u_start }
@@ -77,6 +78,13 @@ static mut groesse: [u64; 96] = [0 as u64; 96]
 static mut art: [u64; 96] = [0 as u64; 96] // 1 = Verzeichnis
 static mut modus: [u64; 96] = [0 as u64; 96]
 static mut folge: [u64; 96] = [0 as u64; 96]
+// ROUND ICONS: one icon per table row, filled by `baue_tabelle` at the
+// same moment the row's text is built.  Two loops over the same list
+// would be two places to get the order wrong -- and the order is what
+// puts an icon next to the right name.
+static mut symbole: [u64; 96] = [0 as u64; 96]
+// The tree on the left: the way up and then one folder per directory.
+static mut bsymbole: [u64; 96] = [0 as u64; 96]
 static mut anzahl: u64 = 0
 
 static mut tblob: [u8; 6144] = [0 as u8; 6144]
@@ -341,12 +349,77 @@ fn putmode(m: u64, dir: u64) {
     }
 }
 
+// WHICH ICON A FILE GETS, and it is decided from what `stat` said and
+// from the name -- not from a table of file types, which this system
+// does not have in Ring 3.  Four kinds, and no more, because a fifth
+// that cannot be told apart at sixteen pixels is decoration:
+//
+//   a directory              a folder
+//   anything executable      the terminal glyph, "this one runs"
+//   a name ending in .fi,
+//   .md, .txt, .s, .sh       a page with lines on it
+//   everything else          a blank page
+//
+// A FILE THAT IS BOTH -- executable AND named .sh -- IS A PROGRAM.
+// What a thing DOES beats what it is called; that is the same rule
+// round K16 put into `kernel/ftype.fi` when `/tarn.fi` turned out to be
+// a program.
+fn symbol_fuer(e: u64) -> u64 {
+    if art[(e) as usize] != 0 {
+        return wlib.icon_id(icons.FILE_FOLDER)
+    }
+    if (modus[(e) as usize] & 73) != 0 {
+        return wlib.icon_id(icons.FILE_PROGRAM)
+    }
+    if endet_auf(nptr(e)) {
+        return wlib.icon_id(icons.FILE_TEXT)
+    }
+    return wlib.icon_id(icons.FILE_FILE)
+}
+
+// Does the name end in one of the endings that mean readable text?
+// Written out rather than table-driven: five endings, and a table of
+// five entries in a language without string arrays is more code than
+// the five comparisons.
+fn endet_auf(p: u64) -> bool {
+    var n: u64 = 0
+    while (*((p + n) as *mut u8)) != 0 as u8 {
+        n = n + 1
+    }
+    if n < 3 {
+        return false
+    }
+    let a: u64 = (*((p + n - 3) as *mut u8)) as u64
+    let b: u64 = (*((p + n - 2) as *mut u8)) as u64
+    let c: u64 = (*((p + n - 1) as *mut u8)) as u64
+    if a == 46 && b == 102 && c == 105 {
+        return true // .fi
+    }
+    if a == 46 && b == 109 && c == 100 {
+        return true // .md
+    }
+    if a == 46 && b == 115 && c == 104 {
+        return true // .sh
+    }
+    if b == 46 && c == 115 {
+        return true // .s
+    }
+    if n >= 4 {
+        let d: u64 = (*((p + n - 4) as *mut u8)) as u64
+        if d == 46 && a == 116 && b == 120 && c == 116 {
+            return true // .txt
+        }
+    }
+    return false
+}
+
 fn baue_tabelle() {
     tp = 0
     puts((&t_kopf[0 as usize]) as u64)
     var i: u64 = 0
     while i < anzahl {
         let e: u64 = folge[(i) as usize]
+        symbole[(i) as usize] = symbol_fuer(e)
         puts(nptr(e))
         put(9)
         if art[(e) as usize] != 0 {
@@ -370,6 +443,10 @@ fn baue_tabelle() {
 fn baue_baum() {
     var bp: u64 = 0
     var auf: [u8; 4] = "..\0\0"
+    // The first row of the tree is the way up, and it is not a folder --
+    // it is a MOVE.  An arrow says that and a folder does not.
+    bsymbole[0 as usize] = wlib.icon_id(icons.NAV_UP)
+    var bz: u64 = 1
     var k: u64 = 0
     while (*(((&auf[0 as usize]) as u64 + k) as *mut u8)) != 0 as u8 {
         bblob[(bp) as usize] = auf[(k) as usize]
@@ -382,6 +459,10 @@ fn baue_baum() {
     while i < anzahl {
         let e: u64 = folge[(i) as usize]
         if art[(e) as usize] != 0 && bp < 980 {
+            if bz < 96 {
+                bsymbole[(bz) as usize] = wlib.icon_id(icons.FILE_FOLDER)
+                bz = bz + 1
+            }
             let p: u64 = nptr(e)
             k = 0
             while (*((p + k) as *mut u8)) != 0 as u8 && bp < 980 {
@@ -612,6 +693,13 @@ fn u_start(args: u64) -> u64 {
     wlib.size(0, 316)
     let tab: u64 = wlib.table((&tblob[0 as usize]) as u64, 12, 4,
         (&spalten[0 as usize]) as u64)
+    // ROUND ICONS: the two arrays are handed over ONCE and stay the
+    // same address for the life of the window.  `baue_tabelle` and
+    // `baue_baum` refill them in place whenever the directory changes,
+    // exactly as they refill the text blocks -- so a sort or a step
+    // into a folder cannot leave the icons behind.
+    wlib.row_icons(tab, (&symbole[0 as usize]) as u64)
+    wlib.row_icons(baum, (&bsymbole[0 as usize]) as u64)
     wlib.box_end()
 
     wlib.box_v(w, 8, 390, bw - 16, 26, 0, 0)

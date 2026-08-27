@@ -72,6 +72,7 @@ import arch.arch
 export {
     init, ready,
     blit, glyph_into, kern_of, clip_set, clip_get, clip_len,
+    set_icon_font, icon_font, F_UI, F_MONO, F_ICON, FONT_ROLES,
     shape, set_shape,
     blits, rows_copied, pixels, glyph_calls, clip_writes, clip_reads,
     fetch,
@@ -107,6 +108,20 @@ const S_GLYPHS: u64 = 0x028
 const S_CLIPW: u64 = 0x030
 const S_CLIPR: u64 = 0x038
 const S_SHAPE: u64 = 0x040
+// ROUND ICONS: the icon font's slot in the font reader, raised by one
+// so that 0 can mean "none loaded".  `kmain` sets it after it has read
+// /lib/icons.ttf.
+const S_ICONFONT: u64 = 0x048
+
+// THE THREE FONT ROLES Ring 3 is allowed to name.  They are ROLES and
+// not slot numbers: which slot the font reader gave a file depends on
+// the order things came up at boot and is none of Ring 3's business.
+// A role, by contrast, is a promise -- 0 is the interface font, 1 the
+// terminal font, 2 the icons.
+const F_UI: u64 = 0
+const F_MONO: u64 = 1
+const F_ICON: u64 = 2
+const FONT_ROLES: u64 = 3
 
 fn base(state: u64) -> u64 {
     return state + kstate.WIG_OFF
@@ -332,15 +347,46 @@ fn blit(state: u64, me: u64, i: u64, x: u64, y: u64, w: u64, h: u64,
 // dritte gibt es nicht, und eine Nummer, die auf einen Platz zeigt, der
 // nie gefuellt wurde, waere ein Leseversuch in fremdem Speicher.
 fn font_of(state: u64, f: u64) -> u64 {
-    if f == 0 {
+    if f == F_UI {
         return wm.font_ui(state)
+    }
+    if f == F_ICON {
+        // Zero means "no icon font loaded".  The caller then gets
+        // MAX_FONTS back and draws nothing -- no substitute letter, no
+        // empty box.  A system without /lib/icons.ttf should look like
+        // one without icons, not like one with broken ones.
+        let n: u64 = gs(state, S_ICONFONT)
+        if n == 0 {
+            return ttf.MAX_FONTS
+        }
+        return n - 1
     }
     return wm.font_mono(state)
 }
 
+// ROUND ICONS: `kmain` reports here which slot the icon font ended up
+// in.  It does NOT live in `wm.fi` next to the other two: the window
+// server sets no icons -- it sets titles and terminal text -- and a
+// role it never uses does not belong in its state.
+fn set_icon_font(state: u64, f: u64) {
+    if f >= ttf.MAX_FONTS {
+        ss(state, S_ICONFONT, 0)
+        return
+    }
+    ss(state, S_ICONFONT, f + 1)
+}
+
+fn icon_font(state: u64) -> u64 {
+    let n: u64 = gs(state, S_ICONFONT)
+    if n == 0 {
+        return ttf.MAX_FONTS
+    }
+    return n - 1
+}
+
 fn glyph_into(state: u64, me: u64, f: u64, px: u64, c: u64, out: u64,
     max: u64) -> u64 {
-    if f > 1 || px == 0 || px > 128 {
+    if f >= FONT_ROLES || px == 0 || px > 128 {
         return 0
     }
     let font: u64 = font_of(state, f)
@@ -399,7 +445,7 @@ fn glyph_into(state: u64, me: u64, f: u64, px: u64, c: u64, out: u64,
 // --------------------------------------------- 3. die Unterschneidung
 
 fn kern_of(state: u64, f: u64, px: u64, c1: u64, c2: u64) -> i64 {
-    if f > 1 {
+    if f >= FONT_ROLES {
         return 0
     }
     let font: u64 = font_of(state, f)

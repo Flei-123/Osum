@@ -1,0 +1,506 @@
+// kernel/user/icont.fi -- ROUND ICONS: THE PROMISES OF THIS ROUND,
+// MEASURED.
+//
+// A Ring 3 program, like `k13t.fi`, `k14.fi` and `k16.fi`.  It reports
+// one line per promise on the serial line:
+//
+//     icons: ok   <name>
+//     icons: bad  <name> got=<number> want=<number>
+//
+// and at the end `icons: pass=<n> fail=<m>`.  `tools/icons/run.sh`
+// reads it.
+//
+// AND IT REPORTS FIVE NUMBERS THAT ARE NOT PASS OR FAIL, because the
+// question this round has to answer is not "does it work" but "is a
+// glyph cheaper than a bitmap":
+//
+//     icons: ns_cold=<n>    one icon, rasterised in the kernel first
+//     icons: ns_warm=<n>    one icon, out of the Ring 3 glyph cache
+//     icons: ns_osym=<n>    one OSYM bitmap of the same size, blitted
+//     icons: bytes_glyph=<n>  what one cached icon costs in memory
+//     icons: bytes_osym=<n>   what the same picture costs as OSYM
+//
+// WHY THE MEASUREMENT IS IN RING 3 AND NOT ON THE HOST: the rasteriser,
+// the cache and the blitter run on THIS machine, with THIS compiler, on
+// THE font from THIS disk.  A Python program on the host that walks the
+// same outlines measures the host.
+//
+// WHAT IS NOT CHECKED HERE, and where it is:
+//   * How the icons LOOK -- `tools/icons/sheet.py` renders every one of
+//     them at its target size against `tools/ttf/raster.py`, the second
+//     rasteriser, on the host, because that is where the font file is.
+//   * That no code point is written into drawing code --
+//     `tools/icons/rawcp.py`, on the host, because it reads the source.
+//   * That the font in the tree can be rebuilt octet for octet --
+//     `tools/icons/run.sh`, for the same reason.
+
+profile kernel
+
+import ulib
+import libc.kcall
+import wlibc
+import icons
+
+export { u_start }
+
+static mut pass: u64 = 0
+static mut fail: u64 = 0
+
+const SYS_CLOCK_GETTIME: u64 = 228
+const CLOCK_MONOTONIC: u64 = 1
+
+// The three sizes this system actually draws icons at.  The names come
+// from `wlibc`; they are not repeated as numbers here, because a size
+// that appears twice is a size that will disagree with itself one day.
+const SIZES: u64 = 3
+
+// HOW OFTEN A COST IS MEASURED.  One draw of one icon is a few
+// microseconds and the monotonic clock is good to a nanosecond only
+// when the cycle counter was calibrated -- which is not guaranteed.  So
+// the loop runs many times and the result is divided; that turns a
+// clock granularity of ten milliseconds into a granularity of ten
+// microseconds divided by RUNS.
+const RUNS: u64 = 2000
+
+// An OSYM picture of the same size as a small icon, built here rather
+// than read from disk: the comparison is about the COST OF DRAWING, and
+// reading a file would measure the file system.  Twelve octets of
+// header and 16 * 16 pixels of four octets -- exactly the format of
+// `tools/k15/symbol.py`.
+const OSYM_W: u64 = 16
+const OSYM_H: u64 = 16
+static mut osym: [u8; 1036] = [0 as u8; 1036]
+
+fn say(p: u64) {
+    ulib.say(p)
+}
+
+fn ok(name: u64) {
+    var a: [u8; 13] = "icons: ok   \0"
+    pass = pass + 1
+    say((&a[0 as usize]) as u64)
+    say(name)
+    ulib.nl()
+}
+
+fn bad(name: u64, got: u64, want: u64) {
+    var a: [u8; 13] = "icons: bad  \0"
+    var g: [u8; 7] = "  got=\0"
+    var w: [u8; 7] = " want=\0"
+    fail = fail + 1
+    say((&a[0 as usize]) as u64)
+    say(name)
+    say((&g[0 as usize]) as u64)
+    ulib.sayu(got)
+    say((&w[0 as usize]) as u64)
+    ulib.sayu(want)
+    ulib.nl()
+}
+
+fn want(name: u64, got: u64, soll: u64) {
+    if got == soll {
+        ok(name)
+    } else {
+        bad(name, got, soll)
+    }
+}
+
+fn num(name: u64, v: u64) {
+    var a: [u8; 8] = "icons: \0"
+    say((&a[0 as usize]) as u64)
+    say(name)
+    ulib.sayu(v)
+    ulib.nl()
+}
+
+fn mono_ns() -> u64 {
+    var ts: [u64; 2] = [0 as u64; 2]
+    kcall.sys2(SYS_CLOCK_GETTIME, CLOCK_MONOTONIC,
+        (&ts[0 as usize]) as u64)
+    return ts[0 as usize] *% 1000000000 +% ts[1 as usize]
+}
+
+fn size_at(i: u64) -> u64 {
+    if i == 0 {
+        return wlibc.ICON_SMALL
+    }
+    if i == 1 {
+        return wlibc.ICON_TASKBAR
+    }
+    return wlibc.ICON_LARGE
+}
+
+// ------------------------------------------------- the OSYM comparison
+//
+// The same blit `kernel/user/wlib.fi` does for a bundle icon: read the
+// header, then one pixel at a time, mixed over what is there.  Written
+// out here instead of called, because `wlib`'s copy is inside the list
+// painter and cannot be timed on its own.
+
+// THE OSYM PICTURE IS BUILT OUT OF THE ICON ITSELF, and that is the
+// only way the comparison means anything.
+//
+// The first version drew a ring into the bitmap and timed that against
+// the gear icon.  The two had a different number of covered pixels, so
+// the measurement compared two different amounts of work and called the
+// difference a property of the format.  It is not.
+//
+// So: draw the icon once, in white on black, read the surface back, and
+// take the red channel as the coverage.  What comes out is a bitmap
+// with EXACTLY the same pixels, at exactly the same coverages, as the
+// glyph.  What is left between the two paths is what this round wanted
+// to know: one octet per pixel and a colour from the caller, against
+// four octets per pixel and a colour per pixel.
+fn osym_build(id: u64) {
+    osym[0 as usize] = 79 as u8
+    osym[1 as usize] = 83 as u8
+    osym[2 as usize] = 89 as u8
+    osym[3 as usize] = 77 as u8
+    var i: u64 = 0
+    while i < 4 {
+        osym[(4 + i) as usize] = ((OSYM_W >> (i * 8)) & 255) as u8
+        osym[(8 + i) as usize] = ((OSYM_H >> (i * 8)) & 255) as u8
+        i = i + 1
+    }
+    let bx: u64 = 400
+    let by: u64 = 40
+    wlibc.rect(bx, by, OSYM_W, OSYM_H, 0)
+    let _drawn = wlibc.icon_at(id, bx, by, wlibc.ICON_SMALL, 16777215)
+    var y: u64 = 0
+    while y < OSYM_H {
+        var x: u64 = 0
+        while x < OSYM_W {
+            let at: u64 = 12 + (y * OSYM_W + x) * 4
+            let a: u64 = wlibc.get(bx + x, by + y) & 255
+            osym[(at + 0) as usize] = 208 as u8
+            osym[(at + 1) as usize] = 144 as u8
+            osym[(at + 2) as usize] = 74 as u8
+            osym[(at + 3) as usize] = a as u8
+            x = x + 1
+        }
+        y = y + 1
+    }
+    wlibc.rect(bx, by, OSYM_W, OSYM_H, 16777215)
+}
+
+// How many pixels of the bitmap actually get mixed -- the same pixels
+// the glyph mixes, since one was made from the other.  Reported so the
+// two costs can be divided by it and compared per pixel.
+fn osym_ink() -> u64 {
+    var n: u64 = 0
+    var k: u64 = 0
+    while k < OSYM_W * OSYM_H {
+        if osym[(12 + k * 4 + 3) as usize] != 0 as u8 {
+            n = n + 1
+        }
+        k = k + 1
+    }
+    return n
+}
+
+fn osym_draw(x: u64, y: u64) {
+    let p: u64 = (&osym[0 as usize]) as u64
+    let w: u64 = (*((p + 4) as *mut u8)) as u64
+        | (((*((p + 5) as *mut u8)) as u64) << 8)
+        | (((*((p + 6) as *mut u8)) as u64) << 16)
+        | (((*((p + 7) as *mut u8)) as u64) << 24)
+    let h: u64 = (*((p + 8) as *mut u8)) as u64
+        | (((*((p + 9) as *mut u8)) as u64) << 8)
+        | (((*((p + 10) as *mut u8)) as u64) << 16)
+        | (((*((p + 11) as *mut u8)) as u64) << 24)
+    var r: u64 = 0
+    while r < h {
+        var c: u64 = 0
+        while c < w {
+            let at: u64 = p + 12 + (r * w + c) * 4
+            let a: u64 = (*((at + 3) as *mut u8)) as u64
+            if a != 0 {
+                let b: u64 = (*((at + 0) as *mut u8)) as u64
+                let g: u64 = (*((at + 1) as *mut u8)) as u64
+                let rd: u64 = (*((at + 2) as *mut u8)) as u64
+                let col: u64 = (rd << 16) | (g << 8) | b
+                let ux: u64 = x + c
+                let uy: u64 = y + r
+                wlibc.px(ux, uy, wlibc.blend(wlibc.get(ux, uy), col, a))
+            }
+            c = c + 1
+        }
+        r = r + 1
+    }
+}
+
+// ---------------------------------------------------------- the checks
+
+fn check_present() {
+    var n1: [u8; 20] = "font-loaded\0\0\0\0\0\0\0\0\0"
+    var n2: [u8; 20] = "all-glyphs-16\0\0\0\0\0\0\0"
+    var n3: [u8; 20] = "all-glyphs-20\0\0\0\0\0\0\0"
+    var n4: [u8; 20] = "all-glyphs-24\0\0\0\0\0\0\0"
+    var da: u64 = 0
+    if wlibc.icon_have() {
+        da = 1
+    }
+    want((&n1[0 as usize]) as u64, da, 1)
+    var s: u64 = 0
+    while s < SIZES {
+        let px_: u64 = size_at(s)
+        var n: u64 = 0
+        var i: u64 = 0
+        while i < icons.COUNT {
+            if wlibc.icon_ink_w(icons.at_index(i), px_) > 0 {
+                n = n + 1
+            }
+            i = i + 1
+        }
+        if s == 0 {
+            want((&n2[0 as usize]) as u64, n, icons.COUNT)
+        } else if s == 1 {
+            want((&n3[0 as usize]) as u64, n, icons.COUNT)
+        } else {
+            want((&n4[0 as usize]) as u64, n, icons.COUNT)
+        }
+        s = s + 1
+    }
+}
+
+// THE BOX PROMISE.  `wlibc.icon_box` says an icon at size `px` fills a
+// square `px` on a side.  Everything that lays out a taskbar or a list
+// row depends on it, so it is measured and not assumed: no icon's ink
+// may be wider or taller than its box at any of the three sizes.
+fn check_box() {
+    var n: [u8; 20] = "ink-fits-box\0\0\0\0\0\0\0\0"
+    var zu_gross: u64 = 0
+    var s: u64 = 0
+    while s < SIZES {
+        let px_: u64 = size_at(s)
+        var i: u64 = 0
+        while i < icons.COUNT {
+            let id: u64 = icons.at_index(i)
+            if wlibc.icon_ink_w(id, px_) > wlibc.icon_box(px_) {
+                zu_gross = zu_gross + 1
+            } else if wlibc.icon_ink_h(id, px_) > wlibc.icon_box(px_) {
+                zu_gross = zu_gross + 1
+            }
+            i = i + 1
+        }
+        s = s + 1
+    }
+    want((&n[0 as usize]) as u64, zu_gross, 0)
+}
+
+// THE COLOUR PROMISE, and it is the reason a font was chosen over a set
+// of pictures: the SHAPE does not depend on the colour.  The same icon
+// drawn in two colours has to touch the same pixels -- if it did not,
+// there would be a second set of drawings hidden somewhere.
+fn check_colour() {
+    var n: [u8; 20] = "shape-not-colour\0\0\0\0"
+    let px_: u64 = wlibc.ICON_SMALL
+    let id: u64 = icons.WARNING
+    let x: u64 = 4
+    let y: u64 = 4
+    wlibc.rect(x, y, px_, px_, 0)
+    let _a: bool = wlibc.icon_at(id, x, y, px_, 16777215)
+    var hell: u64 = 0
+    var r: u64 = 0
+    while r < px_ {
+        var c: u64 = 0
+        while c < px_ {
+            if wlibc.get(x + c, y + r) != 0 {
+                hell = hell + 1
+            }
+            c = c + 1
+        }
+        r = r + 1
+    }
+    wlibc.rect(x, y, px_, px_, 16777215)
+    let _b: bool = wlibc.icon_at(id, x, y, px_, 0)
+    var dunkel: u64 = 0
+    r = 0
+    while r < px_ {
+        var c: u64 = 0
+        while c < px_ {
+            if wlibc.get(x + c, y + r) != 16777215 {
+                dunkel = dunkel + 1
+            }
+            c = c + 1
+        }
+        r = r + 1
+    }
+    want((&n[0 as usize]) as u64, hell, dunkel)
+    // AND THE NUMBER ITSELF, because "the two agree" is only worth
+    // something if it is not "both are zero" or "both are the whole
+    // box".  It has to be the INK of the icon: more than nothing, less
+    // than the box.
+    var c: [u8; 14] = "colour_px=\0\0\0\0"
+    num((&c[0 as usize]) as u64, hell)
+}
+
+// A code point inside the private use area that this system did not
+// give away.  It has to come back as "no glyph" and NOT as a box, a
+// question mark or somebody else's outline -- a caller that gets false
+// can fall back to a label.
+fn check_unknown() {
+    var n: [u8; 20] = "unknown-is-false\0\0\0\0"
+    var g: u64 = 0
+    if wlibc.icon_at(icons.LAST + 1, 200, 200, wlibc.ICON_SMALL, 0) {
+        g = 1
+    }
+    want((&n[0 as usize]) as u64, g, 0)
+}
+
+// index_of and at_index have to be each other's inverse for every icon.
+// The sheet, the settings page and the loops in this file all walk the
+// dense index; if it did not line up with the code points, every one of
+// them would be measuring a different set.
+fn check_index() {
+    var n: [u8; 20] = "index-round-trip\0\0\0\0"
+    var schlecht: u64 = 0
+    var i: u64 = 0
+    while i < icons.COUNT {
+        let id: u64 = icons.at_index(i)
+        if icons.index_of(id) != i {
+            schlecht = schlecht + 1
+        }
+        if !icons.is_icon(id) {
+            schlecht = schlecht + 1
+        }
+        i = i + 1
+    }
+    want((&n[0 as usize]) as u64, schlecht, 0)
+}
+
+// ----------------------------------------------------- the three costs
+
+fn cost() {
+    var c1: [u8; 12] = "ns_cold=\0\0\0\0"
+    var c2: [u8; 12] = "ns_warm=\0\0\0\0"
+    var c3: [u8; 12] = "ns_osym=\0\0\0\0"
+    var b1: [u8; 16] = "bytes_glyph=\0\0\0\0"
+    var b2: [u8; 16] = "bytes_osym=\0\0\0\0\0"
+    let px_: u64 = wlibc.ICON_SMALL
+
+    // COLD: the icon has never been asked for at this size, so the
+    // kernel has to raster the outline and Ring 3 has to fetch the
+    // coverage field through WIG_GLYPH.  Measured over every icon once,
+    // at a size none of them has been drawn at, so that nothing is in
+    // either cache.  ICON_LARGE + 1 is a size no interface uses -- that
+    // is exactly why it is free.
+    let kalt_px: u64 = wlibc.ICON_LARGE + 1
+    let t0: u64 = mono_ns()
+    var i: u64 = 0
+    while i < icons.COUNT {
+        let _ = wlibc.icon_at(icons.at_index(i), 300, 40, kalt_px, 0)
+        i = i + 1
+    }
+    let t1: u64 = mono_ns()
+    num((&c1[0 as usize]) as u64, (t1 -% t0) / icons.COUNT)
+
+    // WARM: the same icon out of the Ring 3 cache.  This is what an
+    // interface actually pays after the first frame.
+    let _w = wlibc.icon_at(icons.SETTINGS, 300, 40, px_, 0)
+    let t2: u64 = mono_ns()
+    var k: u64 = 0
+    while k < RUNS {
+        let _ = wlibc.icon_at(icons.SETTINGS, 300, 40, px_, 4886224)
+        k = k + 1
+    }
+    let t3: u64 = mono_ns()
+    num((&c2[0 as usize]) as u64, (t3 -% t2) / RUNS)
+
+    // OSYM: the same 16 x 16 box as a bitmap, blitted the way a bundle
+    // icon is blitted today.
+    osym_build(icons.SETTINGS)
+    osym_draw(300, 40)
+    let t4: u64 = mono_ns()
+    var j: u64 = 0
+    while j < RUNS {
+        osym_draw(300, 40)
+        j = j + 1
+    }
+    let t5: u64 = mono_ns()
+    num((&c3[0 as usize]) as u64, (t5 -% t4) / RUNS)
+
+    // WHAT EACH COSTS IN MEMORY at 16 pixels.  A glyph is ONE octet of
+    // coverage per pixel of its ink; an OSYM picture is FOUR per pixel
+    // of its whole box plus twelve of header.  The glyph number is the
+    // ink of one icon, so it is smaller than the box -- that is real,
+    // the cache does not store the empty margin.
+    num((&b1[0 as usize]) as u64,
+        wlibc.icon_ink_w(icons.SETTINGS, px_)
+        * wlibc.icon_ink_h(icons.SETTINGS, px_))
+    num((&b2[0 as usize]) as u64, 12 + OSYM_W * OSYM_H * 4)
+    var b3: [u8; 12] = "ink_px=\0\0\0\0\0"
+    num((&b3[0 as usize]) as u64, osym_ink())
+}
+
+// A STRIP OF EVERY ICON, drawn onto the surface at all three sizes and
+// pushed to the screen, so that `tools/icons/run.sh` can photograph it
+// and count ink against `tools/ttf/raster.py`.  Nothing is asserted
+// here -- the picture is the assertion, and it is checked on the host.
+fn sheet(w: u64) {
+    var s: u64 = 0
+    var y: u64 = 4
+    while s < SIZES {
+        let px_: u64 = size_at(s)
+        var x: u64 = 4
+        var i: u64 = 0
+        while i < icons.COUNT {
+            if x + px_ + 4 > wlibc.surf_w() {
+                x = 4
+                y = y + px_ + 4
+            }
+            let _ = wlibc.icon_at(icons.at_index(i), x, y, px_, 0)
+            x = x + px_ + 4
+            i = i + 1
+        }
+        y = y + px_ + 6
+        s = s + 1
+    }
+    let _ignore_w = w
+}
+
+fn u_start(argc: u64, argv: u64) {
+    var t_head: [u8; 24] = "icons: start\0\0\0\0\0\0\0\0\0\0\0\0"
+    var t_now: [u8; 20] = "pass=\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"
+    var t_f: [u8; 12] = " fail=\0\0\0\0\0\0"
+    var t_nostart: [u8; 28] = "icons: no surface\0\0\0\0\0\0\0\0\0\0\0"
+    let _ignore_argc = argc
+    let _ignore_argv = argv
+    say((&t_head[0 as usize]) as u64)
+    ulib.nl()
+    if !wlibc.start(false) {
+        say((&t_nostart[0 as usize]) as u64)
+        ulib.nl()
+        ulib.sys(ulib.SYS_EXIT, 1, 0, 0)
+        return
+    }
+    // THE CLIP HAS TO BE OPENED FIRST.  `wlibc.px` drops every pixel
+    // outside the clip rectangle, and a fresh library has that
+    // rectangle at zero -- the widget library sets it per widget.  This
+    // program has no widgets, so it says once that the whole surface is
+    // fair game.  The first version left it out, drew nothing at all,
+    // and still reported timings: the loops ran, the pixels went
+    // nowhere.  Numbers from a run that did not happen are worse than
+    // no numbers.
+    wlibc.clip_set(0, 0, wlibc.surf_w(), wlibc.surf_rows())
+    wlibc.rect(0, 0, wlibc.surf_w(), wlibc.surf_rows(), 16777215)
+    check_present()
+    check_box()
+    check_colour()
+    check_unknown()
+    check_index()
+    cost()
+    sheet(wlibc.surf_w())
+    var a: [u8; 8] = "icons: \0"
+    say((&a[0 as usize]) as u64)
+    say((&t_now[0 as usize]) as u64)
+    ulib.sayu(pass)
+    say((&t_f[0 as usize]) as u64)
+    ulib.sayu(fail)
+    ulib.nl()
+    var code: u64 = 0
+    if fail != 0 {
+        code = 1
+    }
+    ulib.sys(ulib.SYS_EXIT, code, 0, 0)
+}
