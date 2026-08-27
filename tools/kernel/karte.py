@@ -140,6 +140,8 @@ BEREICHE = [
     # was aus den ACPI-Tabellen ueber Akku, Netzteil und Thermalzone
     # gelesen wurde.  Der Rest des Vorrats bleibt frei.
     ("K18",        "kstate.fi", "K18_OFF",        "K18_MAX"),
+    # RUNDE POWERMON: die Akkuanalyse je Programm (0x5C000..0x5E000).
+    ("PMON",       "kstate.fi", "PMON_OFF",       "PMON_MAX"),
     ("K18BATT",    "kstate.fi", "BATT_OFF",       "BATT_MAX"),
     # RUNDE K15, ZWEITER NACHTRAG.  Die erste Seite dieses Vorrats wird
     # geteilt: `wig.fi` braucht davon 0x40 Oktette, der Rest gehoert der
