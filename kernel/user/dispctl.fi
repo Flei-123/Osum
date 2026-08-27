@@ -1,0 +1,453 @@
+// kernel/user/dispctl.fi -- Runde DISPLAY: /bin/dispctl, aus Ring 3.
+//
+// WOZU DAS NEBEN DEM EINSTELLUNGEN-PROGRAMM. Das Bedienfeld ist eine
+// Oberflaeche; was es tut, ist von aussen nur an Bildpunkten zu sehen.
+// Dieses Programm tut dasselbe ueber dieselben drei Aufrufe, meldet aber
+// JEDE Zahl als Zeile auf der seriellen Leitung -- und `tools/display/
+// run.sh` haelt sie gegen die Zahlen, die der KERNEL ueber sich selbst
+// gemeldet hat. Zwei Wege, eine Wahrheit; laufen sie auseinander,
+// stimmt die Naht zwischen Ring 0 und Ring 3 nicht.
+//
+//     dispctl              alles anzeigen
+//     dispctl raw          jede Zahl einzeln, fuer den Testlauf
+//     dispctl modes        nur die Modusliste
+//     dispctl set W H      auf W x H wechseln
+//     dispctl rot GRAD     0, 90, 180 oder 270
+//     dispctl gamma N      30..300 (100 = 1,00)
+//     dispctl hell N       0..200
+//     dispctl kontrast N   0..200
+//     dispctl saettigung N 0..200
+//     dispctl skal N       0 Vollbild, 1 Seitenverhaeltnis, 2 keine
+//     dispctl behalten     die Bestaetigungsfrage bejahen
+//     dispctl zurueck      auf den alten Modus zurueck
+//     dispctl test         die Zusagen dieser Runde aus Ring 3
+//
+// KEINE ZAHL IN DIESEM PROGRAMM IST VON DIESEM PROGRAMM -- dieselbe
+// Regel wie in /bin/power. Was der Kernel nicht wirklich gelesen hat,
+// meldet er als Fehler, und dann steht hier ein Strich und keine Null.
+
+profile kernel
+
+import ulib
+
+export { u_start }
+
+const SYS_DISPGET: u64 = 1810
+const SYS_DISPSET: u64 = 1811
+const SYS_DISPSTR: u64 = 1812
+
+const DG_READY: u64 = 0
+const DG_COUNT: u64 = 1
+const DG_VRAM: u64 = 2
+const DG_DEPTHS: u64 = 3
+const DG_MAPLIMIT: u64 = 4
+const DG_EDIDOK: u64 = 5
+const DG_EDIDWHY: u64 = 6
+const DG_NATW: u64 = 7
+const DG_NATH: u64 = 8
+const DG_CUR: u64 = 9
+const DG_PANELW: u64 = 10
+const DG_PANELH: u64 = 11
+const DG_IMGW: u64 = 12
+const DG_IMGH: u64 = 13
+const DG_ROT: u64 = 14
+const DG_SCALE: u64 = 15
+const DG_BRIGHT: u64 = 16
+const DG_CONTRAST: u64 = 17
+const DG_GAMMA: u64 = 18
+const DG_SAT: u64 = 19
+const DG_PENDING: u64 = 20
+const DG_REMAIN: u64 = 21
+const DG_SWITCHES: u64 = 22
+const DG_FAILS: u64 = 23
+const DG_REVERTS: u64 = 24
+const DG_CONFIRMS: u64 = 25
+const DG_PRESENTS: u64 = 26
+const DG_PROBED: u64 = 27
+const DG_REFUSED: u64 = 28
+const DG_TOOBIG: u64 = 29
+const DG_PITCH: u64 = 30
+const DG_BPP: u64 = 31
+const DG_MODE: u64 = 1000
+
+const DS_MODE: u64 = 0
+const DS_ROT: u64 = 1
+const DS_SCALE: u64 = 2
+const DS_BRIGHT: u64 = 3
+const DS_CONTRAST: u64 = 4
+const DS_GAMMA: u64 = 5
+const DS_SAT: u64 = 6
+const DS_CONFIRM: u64 = 7
+const DS_REVERT: u64 = 8
+
+fn dget(f: u64) -> u64 {
+    return ulib.sys(SYS_DISPGET, f, 0, 0)
+}
+
+fn dset(f: u64, v: u64) -> u64 {
+    return ulib.sys(SYS_DISPSET, f, v, 0)
+}
+
+// "dispctl: name=zahl" -- eine Zeile, die ein Testlaeufer mit einem
+// Muster fassen kann, ohne zu raten.
+fn zeile(name: u64, feld: u64) {
+    var t_p: [u8; 10] = "dispctl: \0"
+    var t_g: [u8; 2] = "=\0"
+    var t_x: [u8; 2] = "-\0"
+    ulib.say((&t_p[0 as usize]) as u64)
+    ulib.say(name)
+    ulib.say((&t_g[0 as usize]) as u64)
+    let v: u64 = dget(feld)
+    if ulib.bad(v) {
+        ulib.say((&t_x[0 as usize]) as u64)
+    } else {
+        ulib.sayn(v)
+    }
+    ulib.nl()
+}
+
+fn zahl_zeile(name: u64, v: u64) {
+    var t_p: [u8; 10] = "dispctl: \0"
+    var t_g: [u8; 2] = "=\0"
+    ulib.say((&t_p[0 as usize]) as u64)
+    ulib.say(name)
+    ulib.say((&t_g[0 as usize]) as u64)
+    ulib.sayn(v)
+    ulib.nl()
+}
+
+fn zahl_lesen(p: u64) -> u64 {
+    var v: u64 = 0
+    var i: u64 = 0
+    while i < 12 {
+        let c: u64 = (*((p + i) as *mut u8)) as u64
+        if c < 48 || c > 57 {
+            i = 12
+        } else {
+            v = v * 10 + (c - 48)
+            i = i + 1
+        }
+    }
+    return v
+}
+
+fn modi_zeigen() {
+    var t_m: [u8; 15] = "dispctl: mode \0"
+    var t_x: [u8; 4] = " x \0"
+    var t_b: [u8; 4] = " x \0"
+    let n: u64 = dget(DG_COUNT)
+    if ulib.bad(n) {
+        return
+    }
+    var i: u64 = 0
+    while i < n {
+        let m: u64 = dget(DG_MODE + i)
+        if !ulib.bad(m) {
+            ulib.say((&t_m[0 as usize]) as u64)
+            ulib.sayn(i)
+            ulib.say((&t_b[0 as usize]) as u64)
+            ulib.sayn((m >> 32) & 0xFFFF)
+            ulib.say((&t_x[0 as usize]) as u64)
+            ulib.sayn((m >> 16) & 0xFFFF)
+            ulib.say((&t_x[0 as usize]) as u64)
+            ulib.sayn(m & 0xFFFF)
+            ulib.nl()
+        }
+        i = i + 1
+    }
+}
+
+fn alles() {
+    var n_ready: [u8; 6] = "ready\0"
+    var n_count: [u8; 6] = "count\0"
+    var n_vram: [u8; 5] = "vram\0"
+    var n_dep: [u8; 7] = "depths\0"
+    var n_lim: [u8; 9] = "maplimit\0"
+    var n_ed: [u8; 7] = "edidok\0"
+    var n_edw: [u8; 8] = "edidwhy\0"
+    var n_nw: [u8; 5] = "natw\0"
+    var n_nh: [u8; 5] = "nath\0"
+    var n_cur: [u8; 4] = "cur\0"
+    var n_pw: [u8; 7] = "panelw\0"
+    var n_ph: [u8; 7] = "panelh\0"
+    var n_iw: [u8; 5] = "imgw\0"
+    var n_ih: [u8; 5] = "imgh\0"
+    var n_pt: [u8; 6] = "pitch\0"
+    var n_bpp: [u8; 4] = "bpp\0"
+    var n_rot: [u8; 4] = "rot\0"
+    var n_sc: [u8; 6] = "scale\0"
+    var n_br: [u8; 7] = "bright\0"
+    var n_co: [u8; 9] = "contrast\0"
+    var n_ga: [u8; 6] = "gamma\0"
+    var n_sa: [u8; 4] = "sat\0"
+    var n_pe: [u8; 8] = "pending\0"
+    var n_re: [u8; 7] = "remain\0"
+    var n_sw: [u8; 9] = "switches\0"
+    var n_fa: [u8; 6] = "fails\0"
+    var n_rv: [u8; 8] = "reverts\0"
+    var n_cf: [u8; 9] = "confirms\0"
+    var n_pr: [u8; 9] = "presents\0"
+    var n_pb: [u8; 7] = "probed\0"
+    var n_rf: [u8; 8] = "refused\0"
+    var n_tb: [u8; 7] = "toobig\0"
+    zeile((&n_ready[0 as usize]) as u64, DG_READY)
+    zeile((&n_count[0 as usize]) as u64, DG_COUNT)
+    zeile((&n_vram[0 as usize]) as u64, DG_VRAM)
+    zeile((&n_dep[0 as usize]) as u64, DG_DEPTHS)
+    zeile((&n_lim[0 as usize]) as u64, DG_MAPLIMIT)
+    zeile((&n_ed[0 as usize]) as u64, DG_EDIDOK)
+    zeile((&n_edw[0 as usize]) as u64, DG_EDIDWHY)
+    zeile((&n_nw[0 as usize]) as u64, DG_NATW)
+    zeile((&n_nh[0 as usize]) as u64, DG_NATH)
+    zeile((&n_cur[0 as usize]) as u64, DG_CUR)
+    zeile((&n_pw[0 as usize]) as u64, DG_PANELW)
+    zeile((&n_ph[0 as usize]) as u64, DG_PANELH)
+    zeile((&n_iw[0 as usize]) as u64, DG_IMGW)
+    zeile((&n_ih[0 as usize]) as u64, DG_IMGH)
+    zeile((&n_pt[0 as usize]) as u64, DG_PITCH)
+    zeile((&n_bpp[0 as usize]) as u64, DG_BPP)
+    zeile((&n_rot[0 as usize]) as u64, DG_ROT)
+    zeile((&n_sc[0 as usize]) as u64, DG_SCALE)
+    zeile((&n_br[0 as usize]) as u64, DG_BRIGHT)
+    zeile((&n_co[0 as usize]) as u64, DG_CONTRAST)
+    zeile((&n_ga[0 as usize]) as u64, DG_GAMMA)
+    zeile((&n_sa[0 as usize]) as u64, DG_SAT)
+    zeile((&n_pe[0 as usize]) as u64, DG_PENDING)
+    zeile((&n_re[0 as usize]) as u64, DG_REMAIN)
+    zeile((&n_sw[0 as usize]) as u64, DG_SWITCHES)
+    zeile((&n_fa[0 as usize]) as u64, DG_FAILS)
+    zeile((&n_rv[0 as usize]) as u64, DG_REVERTS)
+    zeile((&n_cf[0 as usize]) as u64, DG_CONFIRMS)
+    zeile((&n_pr[0 as usize]) as u64, DG_PRESENTS)
+    zeile((&n_pb[0 as usize]) as u64, DG_PROBED)
+    zeile((&n_rf[0 as usize]) as u64, DG_REFUSED)
+    zeile((&n_tb[0 as usize]) as u64, DG_TOOBIG)
+    modi_zeigen()
+    let e: u64 = dget(DG_EDIDOK)
+    if e == 1 {
+        var t_v: [u8; 18] = "dispctl: vendor=\0\0"
+        var t_m: [u8; 17] = "dispctl: model=\0\0"
+        var buf: [u8; 32] = [0 as u8; 32]
+        let a: u64 = ulib.sys(SYS_DISPSTR, 0, (&buf[0 as usize]) as u64, 32)
+        if !ulib.bad(a) {
+            ulib.say((&t_v[0 as usize]) as u64)
+            ulib.say((&buf[0 as usize]) as u64)
+            ulib.nl()
+        }
+        let b: u64 = ulib.sys(SYS_DISPSTR, 1, (&buf[0 as usize]) as u64, 32)
+        if !ulib.bad(b) {
+            ulib.say((&t_m[0 as usize]) as u64)
+            ulib.say((&buf[0 as usize]) as u64)
+            ulib.nl()
+        }
+    }
+}
+
+// DIE ZUSAGEN AUS RING 3. Jede einzelne davon ist ein Aufruf ueber die
+// Aufrufschwelle und zurueck -- was hier gruen wird, ist nicht der
+// Kernel, der sich selbst prueft, sondern ein Programm ohne Rechte, das
+// den Kernel fragt.
+fn test() -> u64 {
+    var t_t: [u8; 15] = "dispctl: test \0"
+    var t_o: [u8; 4] = " / \0"
+    var n: u64 = 0
+    let ganz: u64 = 12
+
+    // 1. Der Kernel hat erkundet.
+    if dget(DG_READY) == 1 {
+        n = n + 1
+    }
+    // 2. Es gibt eine Liste, und sie ist nicht leer.
+    let anz: u64 = dget(DG_COUNT)
+    if !ulib.bad(anz) && anz > 0 {
+        n = n + 1
+    }
+    // 3. Jeder Eintrag hat Breite, Hoehe und 32 Bit.
+    var gut: bool = true
+    var i: u64 = 0
+    while i < anz {
+        let m: u64 = dget(DG_MODE + i)
+        if ulib.bad(m) {
+            gut = false
+        } else {
+            if ((m >> 32) & 0xFFFF) == 0 || ((m >> 16) & 0xFFFF) == 0 {
+                gut = false
+            }
+            if (m & 0xFFFF) != 32 {
+                gut = false
+            }
+        }
+        i = i + 1
+    }
+    if gut {
+        n = n + 1
+    }
+    // 4. Ein Eintrag hinter dem Ende gibt einen Fehler und keine Null.
+    if ulib.bad(dget(DG_MODE + anz)) {
+        n = n + 1
+    }
+    // 5. Ein Feld, das es nicht gibt, ebenso.
+    if ulib.bad(dget(900)) {
+        n = n + 1
+    }
+    // 6. Der laufende Modus steht in der Liste, und die Tafel passt
+    //    zu seinem Eintrag.
+    let cur: u64 = dget(DG_CUR)
+    if cur < anz {
+        let m: u64 = dget(DG_MODE + cur)
+        if ((m >> 32) & 0xFFFF) == dget(DG_PANELW) {
+            if ((m >> 16) & 0xFFFF) == dget(DG_PANELH) {
+                n = n + 1
+            }
+        }
+    }
+    // 7. Ein Modus, den es nicht gibt, wird abgelehnt -- und der
+    //    Bildschirm bleibt derselbe.
+    let vor: u64 = dget(DG_PANELW)
+    if ulib.bad(dset(DS_MODE, (4096 << 16) | 4096)) {
+        if dget(DG_PANELW) == vor {
+            n = n + 1
+        }
+    }
+    // 8. Eine Drehung, die es nicht gibt, ebenso.
+    let rvor: u64 = dget(DG_ROT)
+    if ulib.bad(dset(DS_ROT, 45)) && dget(DG_ROT) == rvor {
+        n = n + 1
+    }
+    // 9. Gamma setzen und zurueckLESEN.
+    if !ulib.bad(dset(DS_GAMMA, 220)) && dget(DG_GAMMA) == 220 {
+        n = n + 1
+    }
+    // 10. Ein Gamma ausserhalb des Bereichs wird abgelehnt, und der
+    //     alte Wert bleibt stehen.
+    if ulib.bad(dset(DS_GAMMA, 5)) && dget(DG_GAMMA) == 220 {
+        n = n + 1
+    }
+    let _z: u64 = dset(DS_GAMMA, 100)
+    // 11. Eine Vierteldrehung tauscht die MASSE des Bildes, nicht die
+    //     der Tafel. Das ist die Zusage, an der eine Drehung von einer
+    //     bloss anders gemalten Flaeche zu unterscheiden ist.
+    let pw: u64 = dget(DG_PANELW)
+    let ph: u64 = dget(DG_PANELH)
+    if !ulib.bad(dset(DS_ROT, 90)) {
+        if dget(DG_IMGW) == ph && dget(DG_IMGH) == pw {
+            if dget(DG_PANELW) == pw && dget(DG_PANELH) == ph {
+                n = n + 1
+            }
+        }
+    }
+    let _y: u64 = dset(DS_ROT, 0)
+    // 12. ... und danach ist alles wieder, wie es war.
+    if dget(DG_IMGW) == pw && dget(DG_IMGH) == ph && dget(DG_ROT) == 0 {
+        n = n + 1
+    }
+
+    ulib.say((&t_t[0 as usize]) as u64)
+    ulib.sayn(n)
+    ulib.say((&t_o[0 as usize]) as u64)
+    ulib.sayn(ganz)
+    ulib.nl()
+    return n
+}
+
+fn u_start(args: u64) -> u64 {
+    var w_raw: [u8; 4] = "raw\0"
+    var w_modes: [u8; 6] = "modes\0"
+    var w_set: [u8; 4] = "set\0"
+    var w_rot: [u8; 4] = "rot\0"
+    var w_gam: [u8; 6] = "gamma\0"
+    var w_hell: [u8; 5] = "hell\0"
+    var w_kon: [u8; 10] = "kontrast\0\0"
+    var w_sat: [u8; 12] = "saettigung\0\0"
+    var w_skal: [u8; 5] = "skal\0"
+    var w_beh: [u8; 10] = "behalten\0\0"
+    var w_zur: [u8; 8] = "zurueck\0"
+    var w_test: [u8; 5] = "test\0"
+    var m_no: [u8; 40] = "dispctl: der Bildschirm ist nicht da\0\0\0\0"
+    var m_perm: [u8; 43] = "dispctl: abgelehnt -- nicht die Wurzel?\0\0\0\0"
+    var m_ok: [u8; 17] = "dispctl: gesetzt\0"
+    var n_rc: [u8; 3] = "rc\0"
+
+    let argc: u64 = ulib.arg_count(args)
+    if dget(DG_READY) != 1 {
+        ulib.say((&m_no[0 as usize]) as u64)
+        ulib.nl()
+        // Auch dann noch die Zeilen, damit die GEGENPROBE des Laeufers
+        // an ihnen sieht, dass wirklich nichts gemeldet wird.
+        alles()
+        return 1
+    }
+    if argc < 2 {
+        alles()
+        return 0
+    }
+    let a1: u64 = ulib.arg_at(args, 1)
+    if ulib.streq(a1, (&w_raw[0 as usize]) as u64) {
+        alles()
+        return 0
+    }
+    if ulib.streq(a1, (&w_modes[0 as usize]) as u64) {
+        modi_zeigen()
+        return 0
+    }
+    if ulib.streq(a1, (&w_test[0 as usize]) as u64) {
+        let n: u64 = test()
+        if n == 12 {
+            return 0
+        }
+        return 1
+    }
+    if ulib.streq(a1, (&w_beh[0 as usize]) as u64) {
+        let r: u64 = dset(DS_CONFIRM, 0)
+        zahl_zeile((&n_rc[0 as usize]) as u64, r)
+        return 0
+    }
+    if ulib.streq(a1, (&w_zur[0 as usize]) as u64) {
+        let r: u64 = dset(DS_REVERT, 0)
+        zahl_zeile((&n_rc[0 as usize]) as u64, r)
+        alles()
+        return 0
+    }
+    if argc < 3 {
+        alles()
+        return 0
+    }
+    let a2: u64 = ulib.arg_at(args, 2)
+    var feld: u64 = 99
+    var wert: u64 = zahl_lesen(a2)
+    if ulib.streq(a1, (&w_set[0 as usize]) as u64) {
+        if argc < 4 {
+            return 1
+        }
+        feld = DS_MODE
+        wert = (zahl_lesen(a2) << 16) | zahl_lesen(ulib.arg_at(args, 3))
+    } else if ulib.streq(a1, (&w_rot[0 as usize]) as u64) {
+        feld = DS_ROT
+    } else if ulib.streq(a1, (&w_gam[0 as usize]) as u64) {
+        feld = DS_GAMMA
+    } else if ulib.streq(a1, (&w_hell[0 as usize]) as u64) {
+        feld = DS_BRIGHT
+    } else if ulib.streq(a1, (&w_kon[0 as usize]) as u64) {
+        feld = DS_CONTRAST
+    } else if ulib.streq(a1, (&w_sat[0 as usize]) as u64) {
+        feld = DS_SAT
+    } else if ulib.streq(a1, (&w_skal[0 as usize]) as u64) {
+        feld = DS_SCALE
+    }
+    if feld == 99 {
+        alles()
+        return 0
+    }
+    let r: u64 = dset(feld, wert)
+    if ulib.bad(r) {
+        ulib.say((&m_perm[0 as usize]) as u64)
+        ulib.nl()
+        zahl_zeile((&n_rc[0 as usize]) as u64, r)
+        alles()
+        return 1
+    }
+    ulib.say((&m_ok[0 as usize]) as u64)
+    ulib.nl()
+    alles()
+    return 0
+}
