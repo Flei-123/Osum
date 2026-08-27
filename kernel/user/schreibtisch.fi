@@ -1,0 +1,336 @@
+// kernel/user/schreibtisch.fi -- Runde DESKTOP: /bin/schreibtisch.
+//
+// DAS FENSTER, DAS GANZ HINTEN LIEGT. Es ist so gross wie der
+// Bildschirm, es hat keinen Rahmen und keine Titelleiste, und es kommt
+// NIE nach vorn -- auch dann nicht, wenn man daraufklickt.
+//
+// WARUM DAS BIS ZU DIESER RUNDE NICHT GING, und es steht so im Logbuch
+// K15: der Fensterserver konnte ein Fenster HEBEN und sonst nichts. Es
+// gab keine Moeglichkeit, eines nach hinten zu stellen; ein
+// Hintergrundbild waere ein Fenster gewesen, das beim ersten Klick vor
+// allen anderen liegt. Die Loesung steht im SERVER (`kernel/wm.fi`,
+// L_DESK/L_NORMAL/L_TOP) und nicht hier als Trick -- ein Programm, das
+// sich alle 100 Millisekunden selbst nach hinten sortiert, ist keine
+// Loesung, sondern ein Flackern.
+//
+// WAS ER MALT, und in dieser Reihenfolge:
+//
+//   1. EIN BILD, wenn `/etc/hintergrund` da ist und mit "OSYM" anfaengt
+//      -- dasselbe Format wie die Programmsymbole (`tools/k15/symbol.py`,
+//      zwoelf Oktette Kopf, danach B,G,R,A je Bildpunkt). Es wird auf
+//      den Bildschirm GESTRECKT, mit dem naechsten Nachbarn.
+//   2. SONST EINEN VERLAUF zwischen zwei Farben des Schemas. Die beiden
+//      Farben und die Rechnung stehen unten; `tools/desktop/run.sh`
+//      rechnet einzelne Bildpunkte damit nach, statt "sieht dunkel aus"
+//      zu messen.
+//
+// WARUM DAS BILD KLEIN SEIN MUSS. Ein Prozess hat in diesem System
+// 832 Kilooktett fuer Halde und Abbildungen (`kernel/sys.fi`), und
+// 253 davon liegen schon in der Zeichenflaeche der Widget-Bibliothek.
+// 800 x 600 x 4 sind 1 875 Kilooktett und passen nicht -- nicht
+// annaehernd. Also ist die Quelle hoechstens BILD_MAX_W x BILD_MAX_H
+// gross und wird gestreckt. Das ist eine ehrliche Grenze und keine
+// Ausrede: sie steht als Konstante da, und wer sie hebt, hebt sie an
+// einer Stelle.
+
+profile kernel
+
+import ulib
+import libc.io
+import libc.mem
+import wlibc
+
+export { u_start }
+
+// Die Grenze der Quelle. 240 x 180 x 4 = 172 800 Oktette.
+const BILD_MAX_W: u64 = 240
+const BILD_MAX_H: u64 = 180
+
+static mut w_h: u64 = 0 // das Handle des Fensters
+static mut sw: u64 = 0
+static mut sh: u64 = 0
+static mut bild: u64 = 0 // die Bildpunkte, oder 0
+static mut bw: u64 = 0
+static mut bh: u64 = 0
+static mut c_oben: u64 = 0
+static mut c_unten: u64 = 0
+static mut kopf: [u8; 16] = [0 as u8; 16]
+static mut ev: [u8; 16] = [0 as u8; 16]
+
+fn say(p: u64) {
+    ulib.say(p)
+}
+
+fn u32_at(p: u64) -> u64 {
+    return (__mmio_read8((p) as *mut u8) as u64)
+        | ((__mmio_read8((p + 1) as *mut u8) as u64) << 8)
+        | ((__mmio_read8((p + 2) as *mut u8) as u64) << 16)
+        | ((__mmio_read8((p + 3) as *mut u8) as u64) << 24)
+}
+
+// DIE FARBE AN EINER STELLE -- und sie ist EINE Funktion, weil der
+// Laeufer draussen genau diese Rechnung nachrechnet. Waere sie an zwei
+// Stellen im Quelltext (einmal beim Malen, einmal beim Melden), waere
+// die Messung eine Tautologie.
+fn farbe_bei(x: u64, y: u64) -> u64 {
+    if bild != 0 && bw != 0 && bh != 0 {
+        var qx: u64 = 0
+        var qy: u64 = 0
+        if sw > 1 {
+            qx = x * bw / sw
+        }
+        if sh > 1 {
+            qy = y * bh / sh
+        }
+        if qx >= bw {
+            qx = bw - 1
+        }
+        if qy >= bh {
+            qy = bh - 1
+        }
+        let at: u64 = bild + (qy * bw + qx) * 4
+        let b: u64 = __mmio_read8((at) as *mut u8) as u64
+        let g: u64 = __mmio_read8((at + 1) as *mut u8) as u64
+        let r: u64 = __mmio_read8((at + 2) as *mut u8) as u64
+        return (r << 16) | (g << 8) | b
+    }
+    // Der Verlauf: linear von oben nach unten, je Kanal, mit
+    // Abrundung -- dieselbe ganzzahlige Division wie im Laeufer.
+    if sh < 2 {
+        return c_oben
+    }
+    let t: u64 = y * 255 / (sh - 1)
+    let r: u64 = (((c_oben >> 16) & 255) * (255 - t)
+        + ((c_unten >> 16) & 255) * t) / 255
+    let g: u64 = (((c_oben >> 8) & 255) * (255 - t)
+        + ((c_unten >> 8) & 255) * t) / 255
+    let b: u64 = ((c_oben & 255) * (255 - t) + (c_unten & 255) * t) / 255
+    return (r << 16) | (g << 8) | b
+}
+
+// Das Bild laden. Gibt true, wenn wirklich Bildpunkte da sind.
+fn bild_laden(pfad: u64) -> bool {
+    let fd: u64 = io.open(pfad, 0)
+    if ulib.bad(fd) {
+        return false
+    }
+    let k: u64 = (&kopf[0 as usize]) as u64
+    let n: u64 = io.read_full(fd, k, 12)
+    if ulib.bad(n) || n < 12 {
+        io.close(fd)
+        return false
+    }
+    if kopf[(0) as usize] != 79 as u8 || kopf[(1) as usize] != 83 as u8 {
+        io.close(fd)
+        return false
+    }
+    if kopf[(2) as usize] != 89 as u8 || kopf[(3) as usize] != 77 as u8 {
+        io.close(fd)
+        return false
+    }
+    let iw: u64 = u32_at(k + 4)
+    let ih: u64 = u32_at(k + 8)
+    if iw == 0 || ih == 0 || iw > BILD_MAX_W || ih > BILD_MAX_H {
+        io.close(fd)
+        return false
+    }
+    let bytes: u64 = iw * ih * 4
+    let p: u64 = mem.alloc(bytes)
+    if p == 0 {
+        io.close(fd)
+        return false
+    }
+    let g: u64 = io.read_full(fd, p, bytes)
+    io.close(fd)
+    if ulib.bad(g) || g < bytes {
+        return false
+    }
+    bild = p
+    bw = iw
+    bh = ih
+    return true
+}
+
+// EINEN STREIFEN MALEN UND HINUEBERSCHIEBEN. Genau der Weg, den die
+// Widget-Bibliothek geht (`kernel/user/wlibc.fi`): die Flaeche ist 800
+// mal 81 Bildpunkte gross, ein Fenster von 800 mal 600 passt nicht in
+// den Speicher eines Prozesses, also wird es in Streifen gemalt.
+fn streifen(y0: u64, hoehe: u64) {
+    wlibc.set_band(y0)
+    wlibc.clip_set(0, y0, sw, y0 + hoehe)
+    var y: u64 = y0
+    while y < y0 + hoehe {
+        var x: u64 = 0
+        while x < sw {
+            wlibc.px(x, y, farbe_bei(x, y))
+            x = x + 1
+        }
+        y = y + 1
+    }
+    let _n: u64 = wlibc.push(w_h, 0, y0, sw, hoehe)
+}
+
+fn alles_malen() {
+    var y: u64 = 0
+    while y < sh {
+        var hoehe: u64 = wlibc.surf_rows()
+        if y + hoehe > sh {
+            hoehe = sh - y
+        }
+        streifen(y, hoehe)
+        y = y + hoehe
+    }
+}
+
+fn u_start(args: u64) -> u64 {
+    var s_nb: [u8; 7] = "nobild\0"
+    var s_bad: [u8; 28] = "schreibtisch: keine Flaeche\0"
+    var s_nol: [u8; 49] = "schreibtisch: keine Ebene 0 -- nicht die Wurzel?\0"
+    var s_rd: [u8; 21] = "schreibtisch: ready \0"
+    var s_w: [u8; 3] = "w=\0"
+    var s_h: [u8; 4] = " h=\0"
+    var s_l: [u8; 8] = " layer=\0"
+    var s_d: [u8; 7] = " deco=\0"
+    var s_bi: [u8; 22] = "schreibtisch: bild w=\0"
+    var s_bh: [u8; 4] = " h=\0"
+    var s_bq: [u8; 10] = " quelle=[\0"
+    var s_zu: [u8; 2] = "]\0"
+    var s_vl: [u8; 28] = "schreibtisch: verlauf oben=\0"
+    var s_un: [u8; 8] = " unten=\0"
+    var s_pt: [u8; 23] = "schreibtisch: punkt x=\0"
+    var s_py: [u8; 4] = " y=\0"
+    var s_pc: [u8; 4] = " c=\0"
+    var s_hg: [u8; 17] = "/etc/hintergrund\0"
+    var s_th: [u8; 11] = "/etc/theme\0"
+    var s_ti: [u8; 13] = "Schreibtisch\0"
+    var s_ne: [u8; 26] = "schreibtisch: neu schema=\0"
+
+    var ohne_bild: bool = false
+    let argc: u64 = ulib.arg_count(args)
+    var a: u64 = 1
+    while a < argc {
+        if ulib.streq(ulib.arg_at(args, a), (&s_nb[0 as usize]) as u64) {
+            ohne_bild = true
+        }
+        a = a + 1
+    }
+    if !wlibc.start(false) {
+        say((&s_bad[0 as usize]) as u64)
+        ulib.nl()
+        return 1
+    }
+    var schema: u64 = wlibc.theme_load((&s_th[0 as usize]) as u64)
+    let _s0: u64 = schema
+    sw = wlibc.screen_w()
+    sh = wlibc.screen_h()
+    // DAS FENSTER IST DER GANZE BILDSCHIRM. Ohne Schmuck heisst: das
+    // aeussere Rechteck IST die Malflaeche, es geht kein Rahmen ab.
+    let h: u64 = wlibc.sys5(wlibc.WM_CREATE, 0, (sw << 16) | sh,
+        (&s_ti[0 as usize]) as u64, 0, 0)
+    if ulib.bad(h) || h == 0 {
+        say((&s_bad[0 as usize]) as u64)
+        ulib.nl()
+        return 1
+    }
+    w_h = h
+    if ulib.bad(wlibc.win_state(h, wlibc.WS_DECO, 0)) {
+        say((&s_bad[0 as usize]) as u64)
+        ulib.nl()
+        return 1
+    }
+    // UND JETZT NACH GANZ HINTEN. Schlaegt das fehl, hoert dieses
+    // Programm auf -- ein Schreibtisch, der vor den Fenstern liegt,
+    // ist schlimmer als keiner.
+    if ulib.bad(wlibc.win_state(h, wlibc.WS_LAYER, wlibc.L_DESK)) {
+        say((&s_nol[0 as usize]) as u64)
+        ulib.nl()
+        let _c: u64 = wlibc.sys3w(wlibc.WM_CLOSE, h, 0, 0)
+        return 1
+    }
+    c_oben = wlibc.theme(wlibc.T_PANEL)
+    c_unten = wlibc.theme(wlibc.T_BG)
+    var mit_bild: bool = false
+    if !ohne_bild {
+        mit_bild = bild_laden((&s_hg[0 as usize]) as u64)
+    }
+    alles_malen()
+
+    say((&s_rd[0 as usize]) as u64)
+    say((&s_w[0 as usize]) as u64)
+    ulib.sayn(sw)
+    say((&s_h[0 as usize]) as u64)
+    ulib.sayn(sh)
+    say((&s_l[0 as usize]) as u64)
+    ulib.sayn(wlibc.sys3w(wlibc.WM_INFO, h, wlibc.WI_LAYER, 0))
+    say((&s_d[0 as usize]) as u64)
+    ulib.sayn(0)
+    ulib.nl()
+    if mit_bild {
+        say((&s_bi[0 as usize]) as u64)
+        ulib.sayn(bw)
+        say((&s_bh[0 as usize]) as u64)
+        ulib.sayn(bh)
+        say((&s_bq[0 as usize]) as u64)
+        say((&s_hg[0 as usize]) as u64)
+        say((&s_zu[0 as usize]) as u64)
+        ulib.nl()
+    } else {
+        say((&s_vl[0 as usize]) as u64)
+        ulib.sayn(c_oben)
+        say((&s_un[0 as usize]) as u64)
+        ulib.sayn(c_unten)
+        ulib.nl()
+    }
+    // FUENF STUETZSTELLEN, und der Laeufer haelt sie gegen das Bild.
+    // Sie stehen bewusst NICHT alle in einer Zeile: eine Stuetzstelle,
+    // die zufaellig stimmt, faellt neben vier anderen auf.
+    var k: u64 = 0
+    while k < 5 {
+        let px_: u64 = sw * (2 * k + 1) / 10
+        let py_: u64 = sh * (2 * k + 1) / 10
+        say((&s_pt[0 as usize]) as u64)
+        ulib.sayn(px_)
+        say((&s_py[0 as usize]) as u64)
+        ulib.sayn(py_)
+        say((&s_pc[0 as usize]) as u64)
+        ulib.sayn(farbe_bei(px_, py_))
+        ulib.nl()
+        k = k + 1
+    }
+
+    // DIE SCHLEIFE. Sie holt Ereignisse ab (sonst laeuft der Ring des
+    // Servers ueber) und sieht ab und zu nach, ob sich das Farbschema
+    // geaendert hat -- die Einstellungen schreiben `/etc/theme`, und
+    // ein Schreibtisch, der dafuer einen Neustart braucht, ist keiner.
+    var summe: u64 = wlibc.theme_sum()
+    var runde: u64 = 0
+    var lebt: bool = true
+    while lebt {
+        var n: u64 = 0
+        while n < 32 && wlibc.sys3w(wlibc.WM_EVENT, h,
+            (&ev[0 as usize]) as u64, 0) == 1 {
+            let typ: u64 = __mmio_read64(((&ev[0 as usize]) as u64)
+                as *mut u64)
+            if typ == wlibc.EV_CLOSE {
+                lebt = false
+            }
+            n = n + 1
+        }
+        runde = runde + 1
+        if (runde % 40) == 0 {
+            schema = wlibc.theme_load((&s_th[0 as usize]) as u64)
+            let neu: u64 = wlibc.theme_sum()
+            if neu != summe {
+                summe = neu
+                c_oben = wlibc.theme(wlibc.T_PANEL)
+                c_unten = wlibc.theme(wlibc.T_BG)
+                alles_malen()
+                say((&s_ne[0 as usize]) as u64)
+                ulib.sayn(schema)
+                ulib.nl()
+            }
+        }
+        ulib.sleep_ms(25)
+    }
+    return 0
+}

@@ -141,6 +141,14 @@ BEREICHE = [
     # gelesen wurde.  Der Rest des Vorrats bleibt frei.
     ("K18",        "kstate.fi", "K18_OFF",        "K18_MAX"),
     ("K18BATT",    "kstate.fi", "BATT_OFF",       "BATT_MAX"),
+    # RUNDE DESKTOP: die Fenstertafel und die Ereignisringe des
+    # Fensterservers.  Sie standen bis zu dieser Runde in WM_OFF (zwei
+    # Seiten); mit MAX_WIN 16 statt 8 sind das 0x1000 Oktette Tafel und
+    # 0x2000 Oktette Ringe und passen dort nicht mehr hinein.  Der
+    # Vorrat dieser Runde ist 0x54000..0x58000, und er liegt ABSICHTLICH
+    # am oberen Ende des freien Bereichs: wer sequentiell greift, greift
+    # 0x4C000, und am 27.08.2026 laufen wieder mehrere Runden.
+    ("DESK",       "kstate.fi", "DSK_OFF",        "DSK_MAX"),
     # RUNDE K15, ZWEITER NACHTRAG.  Die erste Seite dieses Vorrats wird
     # geteilt: `wig.fi` braucht davon 0x40 Oktette, der Rest gehoert der
     # Geometrie des Dateisystems (FSG, zwei Woerter aus dem Superblock)
