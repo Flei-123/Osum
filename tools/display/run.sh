@@ -75,8 +75,11 @@ hat_nicht() { grep -qaF "$2" "$1" && bad "$3 -- '$2' steht da und sollte nicht" 
 # ist schlimmer als keiner.
 kw() { grep -ao "^disp:.*[ =]$2=[0-9a-fx]*" "$1" 2>/dev/null | head -1 \
        | grep -ao "$2=[0-9a-fx]*" | head -1 | sed 's/.*=//' | tr -d '\r\000'; }
-# Ein Wert aus `dispctl: name=zahl` (Ring 3).
-uw() { grep -a -m1 "^dispctl: $2=" "$1" 2>/dev/null | sed 's/^[^=]*=//' | tr -d '\r\000'; }
+# Ein Wert aus `dispctl: name=zahl` (Ring 3) -- der ERSTE bzw. der LETZTE.
+# Beide werden gebraucht: ein Lauf, der erst umschaltet und dann anzeigt,
+# hat DIESELBE Zeile zweimal im Mitschnitt, mit verschiedenen Zahlen.
+uw()  { grep -a -m1 "^dispctl: $2=" "$1" 2>/dev/null | sed 's/^[^=]*=//' | tr -d '\r\000'; }
+uwl() { grep -a "^dispctl: $2=" "$1" 2>/dev/null | tail -1 | sed 's/^[^=]*=//' | tr -d '\r\000'; }
 
 schau() { local name=$1; shift; local aus rc
     aus=$(python3 tools/gfx/schau.py "$@" 2>&1); rc=$?
@@ -446,7 +449,7 @@ ok "je Bildpunkt: flush $((d_fl * 1000 / px)) ns · Tabelle $((d_lu * 1000 / px)
 # ============================================== 10. Ring 3
 
 echo "== 10. dieselben Zahlen aus Ring 3, ueber 1800..1802 =="
-rc=$(lauf_platte ring3 "osum gfx disp nokbd nosched noproc script=dispctl test;dispctl raw;dispctl modes")
+rc=$(lauf_platte ring3 "osum gfx disp nokbd nosched noproc script=dispctl test;dispctl raw")
 num "der Lauf mit /bin/dispctl endet sauber" "$rc" eq 21
 R="$TMPD/ring3.txt"
 hat "$R" "osum\$ dispctl" "das Programm ist gestartet"
@@ -488,11 +491,16 @@ gleich "und die Liste kommt Zeile fuer Zeile heraus" "$anz" "$n_modes"
 rc=$(lauf_platte ring3b "osum gfx disp nokbd nosched noproc script=dispctl set 1024 768;dispctl behalten;dispctl raw")
 num "der Lauf endet sauber" "$rc" eq 21
 R2="$TMPD/ring3b.txt"
-gleich "ein Programm in Ring 3 hat die Tafel umgestellt" "1024" "$(uw "$R2" panelw)"
-gleich "und die Hoehe" "768" "$(uw "$R2" panelh)"
-gleich "die Zeilenlaenge ist mitgewandert" "4096" "$(uw "$R2" pitch)"
-gleich "der Kernel zaehlt genau einen Wechsel" "1" "$(uw "$R2" switches)"
-gleich "und die Frist ist bestaetigt, also zu" "0" "$(uw "$R2" pending)"
+gleich "ein Programm in Ring 3 hat die Tafel umgestellt" "1024" "$(uwl "$R2" panelw)"
+gleich "und die Hoehe" "768" "$(uwl "$R2" panelh)"
+gleich "die Zeilenlaenge ist mitgewandert" "4096" "$(uwl "$R2" pitch)"
+gleich "der Kernel zaehlt genau einen Wechsel" "1" "$(uwl "$R2" switches)"
+# Direkt nach dem Wechsel steht die Frist offen ...
+gleich "direkt nach dem Wechsel laeuft die Bestaetigungsfrist" "1" "$(uw "$R2" pending)"
+# ... und nach `dispctl behalten` ist sie zu. Beide Zahlen aus DEMSELBEN
+# Mitschnitt, die erste und die letzte Zeile desselben Namens.
+gleich "nach dem Bestaetigen ist sie zu" "0" "$(uwl "$R2" pending)"
+gleich "und der Kernel hat die Bestaetigung gezaehlt" "1" "$(uwl "$R2" confirms)"
 
 # ============================================== 11. die Gegenprobe
 
@@ -507,6 +515,12 @@ hat "$O" "fb: 800x600x32" "der Bildschirm von Runde K7 steht unveraendert"
 hat "$O" "fb: selftest 13 / 13" "und seine dreizehn Zusagen auch"
 # UND AUS RING 3: jeder Aufruf muss -ENODEV sagen und nicht eine Null,
 # die wie ein Messwert aussieht.
+# HIER STAND EIN FEHLER, DER DIE GEGENPROBE WERTLOS MACHTE. Der Kernel
+# suchte seine Woerter als TEILZEICHENKETTE, und `script=dispctl raw`
+# enthaelt `disp`. Diese Gegenprobe erkundete die Karte also und bewies
+# das Gegenteil von dem, was sie sollte. Der Kernel sucht seit dem
+# ganze Woerter (`vmode.find_word`); die Zeile hier bleibt, wie sie ist,
+# weil genau sie den Fehler auffliegen laesst.
 rc=$(lauf_platte ohne3 "osum gfx nokbd nosched noproc script=dispctl raw;dispctl test")
 num "der Lauf endet sauber" "$rc" eq 21
 O3="$TMPD/ohne3.txt"
