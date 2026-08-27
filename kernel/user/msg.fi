@@ -81,6 +81,7 @@ import utf8
 export {
     init, set_lang, save_lang, lang, get, changed,
     keys_total, translated, unknown, truncated, user_path,
+    read_lang, lang_source, sys_path,
     LANG_MAX, SLOTS, VALW, KEYW
 }
 
@@ -88,23 +89,29 @@ export {
 // die Reserve ist da, damit die naechste Runde nicht sofort hier
 // nachziehen muss. Laeuft er ueber, wird das GEMELDET und nicht still
 // abgeschnitten.
-const SLOTS: u64 = 160
+const SLOTS: u64 = 224
 const KEYW: u64 = 40 // Oktette je Schluessel, laengster gemessen: 31
 const VALW: u64 = 96 // Oktette je Text, laengster gemessen: 54
 const LANG_MAX: u64 = 8 // "en", "de" -- ISO 639, zwei bis drei Oktette
-const FILE_MAX: u64 = 8192 // groesste Katalogdatei, gemessen: 4967
+const FILE_MAX: u64 = 16384 // groesste Katalogdatei, gemessen: 8952
 
-static mut kbuf: [u8; 6400] = [0 as u8; 6400] // SLOTS * KEYW
-static mut vbuf: [u8; 15360] = [0 as u8; 15360] // SLOTS * VALW
-static mut khash: [u64; 160] = [0 as u64; 160]
+static mut kbuf: [u8; 8960] = [0 as u8; 8960] // SLOTS * KEYW
+static mut vbuf: [u8; 21504] = [0 as u8; 21504] // SLOTS * VALW
+static mut khash: [u64; 224] = [0 as u64; 224]
 static mut nkeys: u64 = 0
 
-static mut fbuf: [u8; 8192] = [0 as u8; 8192]
+static mut fbuf: [u8; 16384] = [0 as u8; 16384]
 static mut cur: [u8; 8] = [0 as u8; 8]
 static mut n_trans: u64 = 0 // wie viele Texte die Uebersetzung ersetzt hat
 static mut n_unknown: u64 = 0 // Schluessel, die es auf Englisch nicht gibt
 static mut n_trunc: u64 = 0 // Texte, die nicht in VALW passten
 static mut bereit: bool = false
+// WOHER DIE SPRACHE KAM: 0 keine Datei (also die Quellsprache),
+// 1 die Wahl des Benutzers, 2 die Vorgabe des Systems. Eine Zahl
+// und kein Text, weil ein Testlaeufer sie vergleichen muss, und
+// gemeldet, weil "es steht Englisch da" sonst drei verschiedene
+// Ursachen haben kann, die man am Bildschirm nicht unterscheidet.
+static mut src: u64 = 0
 
 // ------------------------------------------------------- die Plaetze
 
@@ -505,6 +512,139 @@ fn read_user_lang(out: u64) -> bool {
     return at > 0
 }
 
+// ------------------------------- DIE VORGABE DES SYSTEMS: /etc/locale.conf
+//
+// RUNDE LOOK. Bis hierher gab es GENAU EINE Stelle, an der eine Sprache
+// stehen konnte: `/users/<name>/config/locale`. Das ist richtig -- die
+// Sprache gehoert dem Benutzer -- und es hat eine Luecke, die diese
+// Runde als Fehlerbild vor sich hatte:
+//
+//   Ein frisch gebautes Abbild hat noch keinen Benutzer, der etwas
+//   gewaehlt haette. `read_user_lang` findet nichts, `init` bleibt bei
+//   der Quellsprache, und auf dem Bildschirm steht ASCII-Englisch --
+//   auf einer Maschine, deren Schrift 339 Zeichen kann und deren
+//   deutscher Katalog vollstaendig auf der Platte liegt. Der Benutzer
+//   sieht "keine Umlaute" und vermutet die Schrift. Gemessen (Runde
+//   LOOK, Abschnitt A): die Schrift war nie das Problem.
+//
+// Also eine ZWEITE Stelle, und zwar unter /etc/, weil sie eine
+// Eigenschaft der MASCHINE ist: mit welcher Sprache ein Benutzer
+// anfaengt, der noch keine gewaehlt hat. Das ist genau das, was
+// /etc/default/locale unter Debian ist und was `LANG` in einer frisch
+// installierten Maschine setzt.
+//
+// DIE REIHENFOLGE IST DIE GANZE AUSSAGE, und sie widerspricht der
+// Regel von Runde I18N nicht, sondern vervollstaendigt sie:
+//
+//   1. /users/<name>/config/locale  -- die WAHL des Benutzers. Gibt es
+//      sie, gilt sie, und nichts unter /etc/ kommt daran vorbei.
+//   2. /etc/locale.conf             -- die VORGABE des Systems.
+//   3. "en"                         -- die Quellsprache.
+//
+// UND DAS EINSTELLUNGSPROGRAMM SCHREIBT WEITERHIN NUR (1). Die Vorgabe
+// wird beim Bauen des Abbilds gesetzt (`tools/look/shot.sh`) oder von
+// Hand; `save_lang` fasst sie nicht an. Deshalb bleibt die Zusage von
+// `tools/i18n/run.sh` -- "nach dem Klick liegt die Sprache NICHT unter
+// /etc/" -- Wort fuer Wort gueltig, und der Testlauf misst sie weiter.
+//
+// Das Format ist `key=value`, wie jede andere Konfigurationsdatei
+// dieses Systems, mit `#` als Kommentar. Der Schluessel heisst `lang`.
+fn sys_path(out: u64) -> bool {
+    var a: [u8; 20] = "/etc/locale.conf\0\0\0\0"
+    var i: u64 = 0
+    while rd((&a[0 as usize]) as u64, i) != 0 {
+        wr(out, i, rd((&a[0 as usize]) as u64, i))
+        i = i + 1
+    }
+    wr(out, i, 0)
+    return true
+}
+
+fn read_sys_lang(out: u64) -> bool {
+    var pfad: [u8; 24] = [0 as u8; 24]
+    let _p: bool = sys_path((&pfad[0 as usize]) as u64)
+    let fd: u64 = io.open((&pfad[0 as usize]) as u64, 0)
+    if ulib.bad(fd) {
+        return false
+    }
+    var roh: [u8; 256] = [0 as u8; 256]
+    let n: u64 = io.read(fd, (&roh[0 as usize]) as u64, 255)
+    io.close(fd)
+    if ulib.bad(n) || n == 0 {
+        return false
+    }
+    let b: u64 = (&roh[0 as usize]) as u64
+    var i: u64 = 0
+    while i < n {
+        var e: u64 = i
+        while e < n && rd(b, e) != 10 {
+            e = e + 1
+        }
+        var t: u64 = i
+        while t < e && (rd(b, t) == 32 || rd(b, t) == 9) {
+            t = t + 1
+        }
+        // `#` ist ein Kommentar, und eine leere Zeile ist keine Angabe.
+        if t < e && rd(b, t) != 35 {
+            if rd(b, t) == 108 && rd(b, t + 1) == 97
+               && rd(b, t + 2) == 110 && rd(b, t + 3) == 103 {
+                var q: u64 = t + 4
+                while q < e && (rd(b, q) == 32 || rd(b, q) == 9) {
+                    q = q + 1
+                }
+                if q < e && rd(b, q) == 61 {
+                    q = q + 1
+                    while q < e && (rd(b, q) == 32 || rd(b, q) == 9) {
+                        q = q + 1
+                    }
+                    var at: u64 = 0
+                    var lauf: bool = true
+                    while lauf && q < e && at + 1 < LANG_MAX {
+                        let c: u64 = rd(b, q)
+                        // Ein Sprachcode ist ein Kleinbuchstabe. Alles
+                        // andere beendet ihn -- genau wie in
+                        // `read_user_lang`, und mit Absicht dieselbe
+                        // Regel: zwei Leser mit zwei Vorstellungen von
+                        // einem Sprachcode sind ein Fehler auf Vorrat.
+                        if c < 97 || c > 122 {
+                            lauf = false
+                        } else {
+                            wr(out, at, c)
+                            at = at + 1
+                            q = q + 1
+                        }
+                    }
+                    wr(out, at, 0)
+                    return at > 0
+                }
+            }
+        }
+        i = e + 1
+    }
+    return false
+}
+
+// DIE DREI STELLEN IN IHRER REIHENFOLGE, an EINER Stelle. Gibt zurueck,
+// woher die Antwort kam: 1 der Benutzer, 2 das System, 0 niemand -- und
+// dann steht in `out` die Quellsprache `en`, damit ein Aufrufer nie
+// einen leeren Code weiterreicht.
+fn read_lang(out: u64) -> u64 {
+    if read_user_lang(out) {
+        return 1
+    }
+    if read_sys_lang(out) {
+        return 2
+    }
+    wr(out, 0, 101)
+    wr(out, 1, 110)
+    wr(out, 2, 0)
+    return 0
+}
+
+fn lang_source() -> u64 {
+    return src
+}
+
 // Die Wahl SCHREIBEN. Legt /users/<name>/ und /users/<name>/config/ an,
 // falls sie fehlen -- ein Benutzer, dessen Verzeichnis es noch nicht
 // gibt, soll seine Sprache trotzdem behalten koennen.
@@ -626,8 +766,15 @@ fn init() -> u64 {
     wr((&cur[0 as usize]) as u64, 1, 110)
     wr((&cur[0 as usize]) as u64, 2, 0)
     var gewaehlt: [u8; 8] = [0 as u8; 8]
-    if read_user_lang((&gewaehlt[0 as usize]) as u64) {
-        set_lang((&gewaehlt[0 as usize]) as u64)
+    src = read_lang((&gewaehlt[0 as usize]) as u64)
+    if src != 0 {
+        if !set_lang((&gewaehlt[0 as usize]) as u64) {
+            // Die Datei nennt eine Sprache, die es auf dieser Platte
+            // nicht gibt. Dann gilt die Quellsprache -- und die Zahl
+            // sagt es, statt dass ein englischer Bildschirm wie eine
+            // fehlende Wahl aussieht.
+            src = 0
+        }
     }
     return nkeys
 }
@@ -642,12 +789,20 @@ fn changed() -> bool {
         return false
     }
     var neu: [u8; 8] = [0 as u8; 8]
-    if !read_user_lang((&neu[0 as usize]) as u64) {
-        return false
-    }
+    // RUNDE LOOK: DIESELBE Reihenfolge wie beim Start und nicht nur die
+    // Benutzerdatei. Ohne das haette ein Wechsel von der Vorgabe des
+    // Systems her nie gewirkt, und schlimmer: wer seine Benutzerdatei
+    // LOESCHT, waere in der alten Sprache steckengeblieben, weil der
+    // Ruecksprung auf die Vorgabe gar nicht gelesen worden waere.
+    let q: u64 = read_lang((&neu[0 as usize]) as u64)
     if same((&neu[0 as usize]) as u64, (&cur[0 as usize]) as u64,
         slen((&neu[0 as usize]) as u64)) {
+        src = q
         return false
     }
-    return set_lang((&neu[0 as usize]) as u64)
+    if !set_lang((&neu[0 as usize]) as u64) {
+        return false
+    }
+    src = q
+    return true
 }
