@@ -13,6 +13,40 @@ something does not work, it says so and says why.
 
 ---
 
+## 0. What changed in round OSUM-ARM2
+
+Round ARM was blocked on one thing and said so: the pinned Firn compiler
+answered `--target=aarch64-linux` with *"does not support the kernel profile
+yet (round 80)"*, so the whole AArch64 side had to be written in assembly and
+the one real defect it found could not be fixed. Firn's round
+ARM-FREESTANDING removed that answer. This is what came of it.
+
+| | round ARM | round OSUM-ARM2 |
+|---|---|---|
+| pinned compiler | `c66c6bcd` (no freestanding AArch64) | `a751b3dbf` (`aarch64-none`) |
+| the x86 image under the new pin | — | **octet for octet identical**, sha256 `e3699d9b…` both ways |
+| the AArch64 side | 1,166 lines of assembly | **688 lines of Firn**, 419 of assembly |
+| what drives the UART, MMU, GIC, timer, faults | hand-written A64 | compiled Firn, `--target=aarch64-none` |
+| the line in `arch.fi` that names the machine | one, had to be edited | **none** — `#[arch(…)]` and `--target=` |
+| `atomic.fi` | 4 asm blocks, `lock_give` a plain `str` on ARM | **0 asm blocks**, `lock_give` a `stlr` |
+| modules compiling for `aarch64-none` unchanged | 31 of 53 (58.5 %) | **40 of 55 (72.7 %)**, 67.3 % by lines |
+| `tools/arm/run.sh` | 39 proofs | **48 proofs**, 0 failures |
+| measured with | a work-in-progress binary from another repository | the compiler this repository pins |
+
+Three findings of round ARM are now closed, and it is worth saying which:
+
+* **§7.2, the release store.** Fixed and proved, `tools/arch/order.sh`,
+  15 proofs. See §7 below, which has been rewritten.
+* **§6, the borrowed compiler.** The number is now measured with the pinned
+  build.
+* **§2, the switch.** There is no line to edit any more.
+
+Two are still open and are named again in §10: the barrier-less SMP
+handshake in `smp.fi` (§7.4) and the compiler's register-only check on
+inline assembly (§5.4).
+
+---
+
 ## 1. How big the job really is
 
 Before anything was moved, `tools/arch/inventory.py` counted it. The tool
@@ -115,32 +149,57 @@ The full per-file table:
 
 Reproduce with `./tools/arch/inventory.py`.
 
+### And where it stands now
+
+The same tool on the same tree after two rounds. `kernel/` no longer contains
+the machine layer at all -- it is in `kernel/arch/`, counted separately.
+
+| class | files | lines | share | machine lines |
+|---|---:|---:|---:|---:|
+| INDEPENDENT | 30 | 24,198 | 54.8 % | 0 |
+| SEAM | 15 | 13,741 | 31.1 % | 73 |
+| DEPENDENT | 4 | 3,174 | 7.2 % | 111 |
+| X86-ONLY | 6 | 3,052 | 6.9 % | 63 |
+| **total** | **55** | **44,165** | 100 % | **247** |
+
+616 machine lines became 247, and 23 INDEPENDENT files became 30. The
+difference did not evaporate: 6,853 lines of it moved into
+`kernel/arch/x86_64/`, 835 into `kernel/arch/` and 1,373 into
+`kernel/arch/aarch64/`, where it is machine code on purpose and says so in
+its path.
+
 ---
 
 ## 2. Where the line runs
 
 ```
 kernel/*.fi                 the kernel. No knowledge of a machine.
-kernel/arch/arch.fi         THE BOUNDARY. One file. It asks the questions,
-                            and ONE LINE IN IT names the machine.
-kernel/arch/x86_64/         the x86-64 answers. 9 assembly and 8 Firn files,
-                            6,853 lines.
-kernel/arch/aarch64/        the AArch64 answers. 9 assembly files,
-                            1,528 lines. No Firn yet, see section 6.
+kernel/arch/arch.fi         THE BOUNDARY. It asks the questions.
+kernel/arch/machine.fi      BOTH MACHINES ANSWER, in one file, one
+                            `#[arch(...)]` pair per operation.
+kernel/arch/x86_64/         what only x86-64 has: the APIC, the IDT, the
+                            descriptor tables, SMEP/SMAP, ring 3, SMP,
+                            the hypervisor. 8 Firn and 6 assembly files.
+kernel/arch/aarch64/        what only AArch64 has: amain.fi (the kernel
+                            side, in Firn), virt.fi/virt.inc (the
+                            addresses), start.S, vectors.S, switch.S.
+kernel/kmain.fi             the root of the x86-64 build.
+kernel/kmain_a64.fi         the root of the AArch64 build.
 ```
 
-The one line is
+**No line names a machine.** Round ARM had one -- an
+`import arch.x86_64.machine` in `arch.fi` that would have had to be edited to
+build for the other side -- because `#[arch(...)]` did not exist yet. It does
+now, so `kernel/arch/machine.fi` carries both bodies of every operation and
+`--target=` alone decides which half is compiled. A boundary you have to edit
+is a switch.
 
-```firn
-import arch.x86_64.machine
-```
-
-in `kernel/arch/arch.fi`. Firn's module system addresses a module under the
-LAST part of its path (`compiler/src/modules.rs`), so everything below that
-line says `machine.out8(...)` and does not know which machine it got. When
-the AArch64 side can be compiled from Firn, that line becomes
-`import arch.aarch64.machine` and nothing above the boundary changes. That
-is the only test of whether a boundary is in the right place.
+What the attribute does, measured before it was relied on: the body that does
+not belong to the active machine is **dropped before it is checked** -- an
+`asm("out dx, al", in("dx") …)` inside an `#[arch(x86_64)]` function does not
+even produce an "unknown register name 'dx'" when building for aarch64. And
+the compiler insists that every NAME has a body for the machine being built,
+so this file cannot quietly forget half of itself.
 
 What each side answers:
 
@@ -209,6 +268,24 @@ New files: `kernel/arch/arch.fi`, `kernel/arch/x86_64/machine.fi`,
 `kernel/arch/aarch64/*` (9), `tools/arm/*` (4), `tools/arch/*` (3).
 `kernel/serial.fi` keeps its exports and its signatures; the bodies of
 `out8`, `in8` and `io_wait` now forward across the boundary.
+
+**Round OSUM-ARM2** moved one more file and deleted six:
+
+```
+kernel/arch/x86_64/machine.fi -> kernel/arch/machine.fi   (it is both machines now)
+
+deleted, because kernel/arch/aarch64/amain.fi says the same in Firn:
+  kernel/arch/aarch64/probe.S   kernel/arch/aarch64/uart.S
+  kernel/arch/aarch64/mmu.S     kernel/arch/aarch64/gic.S
+  kernel/arch/aarch64/timer.S   kernel/arch/aarch64/atomic.S
+```
+
+New: `kernel/kmain_a64.fi`, `kernel/arch/aarch64/amain.fi`,
+`kernel/arch/aarch64/virt.fi`, `tools/arch/order.sh`, `tools/arch/a64gap.sh`.
+Changed bodies, no changed signatures: `atomic.fi`, `tasks.fi`, `virtio.fi`,
+`nvme.fi`, `mem.fi`, `blk.fi`, `ansi.fi`, `wm.fi`, `wig.fi` -- each of them
+gained `import arch.arch` and lost its inline assembly. `vendor/firn/COMMIT`
+moved from `c66c6bcd` to `a751b3dbf`.
 
 **Which files were deliberately NOT moved, and why.** `serial.fi` (38
 importers), `kstate.fi` (55), `sched.fi` (18), `mem.fi` (14), `cpu.fi` (11),
@@ -293,7 +370,27 @@ It does not build Osum for AArch64 — see section 6 for why it cannot yet.
 ## 4. What the AArch64 side does, measured
 
 Built by `tools/arm/build.sh`, run by `tools/arm/run.sh`:
-**39 proofs, 0 failures**, of which 6 are counter-checks.
+**48 proofs, 0 failures**, of which 6 are counter-checks.
+
+**And it is Firn.** `kernel/kmain_a64.fi` -> `kernel/arch/aarch64/amain.fi`
+is compiled with `--target=aarch64-none` and drives the UART, builds the page
+tables, brings up the GIC, arms the timer, handles the exceptions and runs
+the two tasks. 688 lines of Firn against 419 lines of assembly, and the
+assembly is the same three things it is on x86-64: the machine before there
+is a stack (`start.S`, plus `osum_panic`), the sixteen vector entries of
+0x80 octets each (`vectors.S`), and swapping the stack pointer under a
+running function (`switch.S`). The runner checks the claim rather than
+repeating it: 111 symbols in the image carry firnc0's `_F0.` prefix,
+`_F0.amain__kmain` and `_F0.arch__dev_write32` among them, and the kernel
+prints `language=firn` on a line it produced itself.
+
+Two more lines than round ARM had, and both are about the boundary rather
+than the hardware:
+
+| what | the number |
+|---|---|
+| `arch.has_io_ports()` | **0** here. The same source line answers 1 on x86-64. |
+| `arch.atomic_store` then `arch.atomic_load` | 0x5ec0de out and back -- a `stlr` and an `ldar` on this machine, a plain store and load on the other |
 
 | what | the number |
 |---|---|
@@ -373,9 +470,10 @@ and `aarch64-linux-gnu-as` says, three steps later,
 `unknown mnemonic 'mfence'`. **`hlt` is the dangerous one: AArch64 HAS an
 instruction of that name, it takes an immediate, and it means "trap to the
 debugger" and not "wait for an interrupt".** `asm("hlt #0")` would assemble
-without complaint and do something else entirely. In Osum, `atomic.fi` and
-`virtio.fi` are exactly this case: they pass the register check and would
-die in the assembler. They are counted as NOT ported in section 6.
+without complaint and do something else entirely. In Osum this hit `atomic.fi` and `virtio.fi`; both went through the boundary
+in round OSUM-ARM2 and the class is down to one module. The compiler gap
+itself is unchanged and is item 3 of section 10 -- one module in that class
+is one too many, because the class is invisible without this test.
 
 ### 5.5 There are no I/O ports, and that is a concept, not a keyword
 
@@ -416,48 +514,83 @@ and it stalls after `freq=`, one interrupt in.
 
 ## 6. How much of the kernel already compiles for AArch64
 
-`tools/arch/a64probe.sh`, with the WIP compiler of the parallel Firn round
-ARM-FREESTANDING (`/root/firn-arm`, commit `cbf17d3a0`, "the two axes of a
-target"). **Not** with the compiler `vendor/firn/COMMIT` pins — that one
-answers `--target=aarch64-linux` with "does not support the kernel profile
-yet (round 80)". The number below is a number about that binary on that day.
+`tools/arch/a64probe.sh`, **with the compiler this repository pins**
+(`vendor/firn/COMMIT` = `a751b3dbf`). Round ARM had to borrow a
+work-in-progress binary from the Firn repository for this number and said so;
+it does not any more.
 
 The control run matters: with `--target=x86_64-none`, `kernel/kmain.fi` and
 everything it imports compiles freestanding with **0 errors**. So the
 compiler is not the variable.
 
-Of the 53 modules under `kernel/` that pass the control:
+A module counts as unchanged only if it produces no error of its own AND
+holds no inline assembly at all. The second condition is not pedantry -- see
+§5.4: the back end checks register NAMES, not instructions, so `asm("mfence")`
+passes the compiler and dies in the assembler.
 
-| | modules | lines |
-|---|---:|---:|
-| unchanged for `aarch64-none` (no inline assembly, no error) | **31** | 24,178 |
-| pass the register check but carry x86 instructions the assembler would reject (section 5.4) | 2 | 1,178 |
-| rejected by the compiler outright | 20 | 18,605 |
-| **share unchanged** | **58.5 %** | **55.0 %** |
+Of the 55 modules under `kernel/` that pass the control:
 
-The 31: `acpi`, `batt`, `bootmod`, `cap`, `cpu`, `devfs`, `elf`, `errno`,
-`fat`, `file`, `font`, `fs`, `ftype`, `hw`, `inet`, `kbd`, `kstate`, `mnt`,
-`netsvc`, `nidx`, `ofs`, `part`, `perm`, `procfs`, `serial`, `sys`, `ttf`,
-`tty`, `uio`, `vfs`, `vfsops`.
+| | round ARM | now | lines now |
+|---|---:|---:|---:|
+| unchanged for `aarch64-none` | 31 of 53 | **40 of 55** | 30,155 |
+| pass the register check, carry x86 instructions | 2 | 1 | 533 |
+| rejected by the compiler outright | 20 | 14 | 14,135 |
+| **share unchanged** | 58.5 % | **72.7 %** | **67.3 %** |
 
-`serial.fi` is in that list **because of step B**: before this round it held
-two `asm` blocks with x86 register names, and now it forwards across the
-boundary. That is one file's worth of evidence that the boundary is in a
-useful place, and it is the only such evidence this round produced.
+The nine that crossed over in this round, and what it took:
 
-`kernel/arch/x86_64/` is not counted. Those files are x86 by construction —
+| module | what it held | what it says now |
+|---|---|---|
+| `atomic.fi` | `pause`, `mfence`, `cli`, `hlt` | `arch.pause`, `arch.barrier`, `arch.irq_off`, `arch.idle` |
+| `tasks.fi` | `pause` | `arch.pause` |
+| `virtio.fi` | `pause`, `lfence` | `arch.pause`, `arch.barrier_read` |
+| `nvme.fi` | `pushfq/pop`, `hlt` | `arch.irq_are_on`, `arch.idle` |
+| `mem.fi` | `pushfq/pop/cli`, `sti` | `arch.irq_save`, `arch.irq_restore` |
+| `blk.fi` | `in ax, dx` / `out dx, ax` | `arch.dev_in16` / `arch.dev_out16` |
+| `ansi.fi` | `lea rax, [rip + kdata]` | `arch.kdata_base` |
+| `wm.fi` | `rep stosq`, `rep movsq` | `arch.fill_words`, `arch.copy_words` |
+| `wig.fi` | `rep movsb` (twice) | `arch.copy_octets` |
+
+Two of those are worth a sentence each.
+
+**`blk.fi` did not become portable, and that is the honest outcome.** ATA
+lives in the I/O port space and there is no such space here. What changed is
+that the driver now asks the boundary for a port access instead of emitting
+one, and on AArch64 the boundary answers with `brk #1` -- a synchronous
+exception whose return address points at the caller. A driver for a disk this
+machine does not have should stop loudly at the instruction, not write into
+whatever happens to sit at 0x1F0.
+
+**`wm.fi` and `wig.fi` gave up a hot path, and it was measured.** `rep stosq`
+and `rep movsq` are one instruction on x86-64 and the window server's fill
+and blit run on them. `arch.fill_words` keeps exactly that instruction on
+x86-64 -- the same octets -- and is a loop on AArch64. The x86 image got
+3,728 octets SMALLER for it, because four copies of the same asm block became
+one function. A better AArch64 loop (`ldp`/`stp` pairs, or FEAT_MOPS `cpy` on
+a newer core) now has ONE place to land instead of four.
+
+`kernel/arch/x86_64/` is not counted. Those files are x86 by construction --
 counting them would be measuring how portable a port is.
 
----
+**What is left, and why.** The fourteen that the compiler still rejects are
+`fb.fi` (the graphics ports 0x1CE/0x1CF), `pci.fi` (0xCF8/0xCFC), `proc.fi`
+and `sched.fi` (CR3 and the ring change), `sys.fi`'s caller `kmain.fi`,
+`signal.fi` (an indirect `call rax` into the assembly), `rand.fi`
+(`cpuid`/`rdrand`/`rdseed`), `time.fi` (`rdtsc` calibration), `uprog.fi`
+(`syscall`), `pwr.fi`, `power.fi`, `ps2m.fi`, `core.fi` and `kcore.fi` (the
+round-52 demo kernels, which are x86 on purpose). Every one of those needs a
+DECISION about the hardware, not a rewrite of a line -- which is exactly the
+boundary between what this round could finish and what the next one has to
+design.
 
 ## 7. The weak memory model
 
-x86-64 is TSO: a store is never seen out of order with an older store, a
-load never with an older load. AArch64 promises neither. Code that ran
-correctly on x86 by accident is wrong here, and it does not announce itself
-— it produces a value that is stale on one processor out of four, rarely.
+x86-64 is TSO: a store is never seen out of order with an older store, a load
+never with an older load. AArch64 promises neither. Code that ran correctly
+on x86 by accident is wrong here, and it does not announce itself -- it
+produces a value that is stale on one processor out of four, rarely.
 
-`kernel/atomic.fi` states the problem in its own header, in 2025:
+`kernel/atomic.fi` stated the problem in its own header, in 2025:
 
 > On x86-64 an ALIGNED 64-bit read or write is atomic in the hardware …
 > So `load` and `store` below are `__mmio_read64`/`__mmio_write64` and
@@ -465,14 +598,15 @@ correctly on x86 by accident is wrong here, and it does not announce itself
 > architecture. **On a machine with a weaker memory model it would not be,
 > and then this file is the one place that has to change.**
 
-This is that machine. What the audit found, and it is not all bad news.
+Round ARM found that the sentence was half right and could not act on it.
+This round did.
 
-### 7.1 The lock TAKE is already right — measured, not assumed
+### 7.1 The lock TAKE was already right -- measured, not assumed
 
 `atomic.cas` is `__atomic_swap`, and the AArch64 back end lowers it to
 
 ```
-.La64_cas:  ldaxr x9, [x10]      // load-ACQUIRE exclusive
+.La64_cas:  ldaxr x9, [x10]        // load-ACQUIRE exclusive
             cmp   x9, x11
             b.ne  out
             stlxr w14, x13, [x10]  // store-RELEASE exclusive
@@ -481,38 +615,44 @@ out:        clrex
 ```
 
 `__atomic_add` the same. So `lock_take` and `lock_try` carry acquire
-semantics on AArch64 for free, and nothing after them can be hoisted above
-them. Read out of `--emit=asm`, not out of a manual.
+semantics on AArch64 for free.
 
-### 7.2 The lock GIVE is wrong, and it is the one real defect
+### 7.2 The lock GIVE was wrong. It is not any more.
+
+Before:
 
 ```firn
 fn store(p: u64, v: u64) { __mmio_write64(p as *mut u64, v) }
 fn lock_give(state: u64, id: u64) { store(slot(state, id) + OWNER, 0) }
 ```
 
-`__mmio_write64` lowers to a plain `str` on AArch64 — measured, no `stlr`
-anywhere in the emitted text. On x86 that is a correct release, because the
-hardware will not move it ahead of the stores it protects. **On AArch64 the
-unlocking store can become visible before the data the holder wrote.**
-Another processor takes the lock, reads the protected structure, and sees
-what was there before.
+`__mmio_write64` lowers to a plain `str` on AArch64 -- no `stlr` anywhere in
+the emitted text. On x86 that is a correct release. On AArch64 the unlocking
+store can become visible before the data the holder wrote, and another
+processor takes the lock and reads what was there before.
 
-That is one function. `kernel/arch/aarch64/atomic.S` already has the answer
-— `stlr` plus `dsb ishst` plus `sev` — and the same file's `lock_take` uses
-`wfe` so the waiters really sleep. What is missing is the Firn side, and it
-is missing because the compiler cannot yet build it.
+After: `atomic.load` and `atomic.store` go through `arch.atomic_load` and
+`arch.atomic_store`, and `kernel/arch/machine.fi` answers with the same two
+MMIO forms on x86-64 -- octet for octet what round K5 wrote -- and with
+`ldar`/`stlr` on AArch64. `kernel/atomic.fi` now holds **zero inline assembly
+blocks**; it had four.
 
-`atomic.load` has the same gap in the other direction: a plain `ldr`, where
-a lock-free reader needs `ldar`. It is used lock-free in exactly two places,
-both found:
+`tools/arch/order.sh` reads all of that out of the emitted assembler of both
+machines. **15 proofs, 0 failures**, and three of them are the checks that
+make the other twelve mean something:
 
-* `kernel/time.fi:331..337`, `mono_ns` — the monotonic clock's
-  compare-and-swap loop reads the cell with `atomic.load` before and after
-  the CAS. The CAS is fine; the two reads are not ordered.
-* `kernel/arch/x86_64/smp.fi`, the bring-up handshake, see below.
+* **x86-64 did not get slower for it.** `atomic_store` is a plain store, no
+  `lock` prefix, no `xchg`. A release store that quietly became a locked
+  instruction would be correct and forty times slower, and nobody would
+  notice for a year.
+* **`idle` on AArch64 is `wfi` and NOT `hlt`.** `hlt` exists here and means
+  "trap to the debugger" (§5.4).
+* **The counter-check to the method itself:** a plain `__mmio_write64`
+  compiled for aarch64 still comes out as a bare `str`. If it did not, the
+  `stlr` above would prove nothing about the boundary, because the compiler
+  would be emitting release stores by itself.
 
-### 7.3 A store-store fence that was written by hand, and does not exist here
+### 7.3 A store-store fence written by hand, in an instruction that does not exist here
 
 `kernel/arch/x86_64/smp.fi:509..511`:
 
@@ -522,14 +662,16 @@ atomic.barrier()
 atomic.store(sp(state, S_PHASE), ph)
 ```
 
-Whoever wrote that knew what they were doing — and `atomic.barrier()` is
-`asm("mfence")`, which does not exist on AArch64 and, per section 5.4, would
-pass the compiler and die in the assembler.
+Whoever wrote that knew what they were doing. `atomic.barrier()` is now
+`arch.barrier()`, which is `mfence` on x86-64 and `dmb sy` on AArch64, so
+this line has stopped being a landmine. The file itself is still x86-only --
+it starts processors with INIT/SIPI -- but the ordering it relies on now has
+a name on both machines.
 
-### 7.4 A handshake with no fence at all, which x86 made correct by accident
+### 7.4 STILL OPEN: a handshake with no fence at all
 
 `kernel/arch/x86_64/smp.fi:257..285`. The parameter block for a processor
-that is about to be woken is filled:
+about to be woken is filled:
 
 ```firn
 atomic.store(param + P_CR3,   ...)
@@ -542,65 +684,72 @@ atomic.store(param + P_FLAG,  0)
 wake(state, cpu.apic_id(state, k), base >> 12)
 ```
 
-and the woken processor reads CR3, the stack and the entry point out of that
-block. **There is no barrier between filling the block and waking the
-processor.** On x86-64 that is correct and needs no barrier: stores are seen
-in program order. On AArch64 the wake-up can overtake the block, and the new
-processor starts with a stack pointer that has not been written yet. On the
-receiving side, `atomic.load(param + P_FLAG)` is a plain `ldr`, so the
-waiting loop can also read a stale flag for ever.
+and the woken processor reads CR3, the stack and the entry point out of it.
+**There is no barrier between filling the block and waking the processor.**
+On x86-64 that is correct and needs none. On AArch64 the wake-up can overtake
+the block and the new processor starts with a stack pointer that has not been
+written yet.
 
-Nothing is wrong with this code today. It is the clearest example in the
-whole kernel of the thing that has to be looked for: **the absence of a
-barrier is not visible in the source.** There are 22 `atomic.store` /
-`atomic.load` call sites outside `atomic.fi`, all but two of them in
-`smp.fi`, and every one of them will have to be read this way.
+Since 7.2 the individual stores are release stores on AArch64, which happens
+to close most of this hole -- a release store cannot be reordered before the
+stores that precede it. That is luck, not design, and it is written down here
+as luck. The `wake()` itself is an MMIO write to the APIC and is not ordered
+against them by anything. The fix is one `arch.barrier_device()` before
+`wake`, and it is not in this round because there is no second processor on
+the AArch64 side to measure it with, and a barrier added blind is a comment
+with a cost.
 
 ### 7.5 What the scheduler needs
 
-`kernel/sched.fi` accesses shared state only inside `lock_take` /
-`lock_give` — thirteen bracketed regions, checked. **So the scheduler needs
-no change of its own once `lock_give` is a store-release.** What it does
-need is the six x86 instructions in it: `pushfq/pop/cli` and `sti` for
-`irq_save`/`irq_restore` (`arch.fi` already has `irq_save`/`irq_restore`,
-`gic.S` already has the AArch64 form), `mov rax, cr3` and `mov cr3, rax` on
-the switch path (`arch.page_root` / `arch.page_root_set` exist), `hlt` in
-the idle loop (`arch.idle`), and `call rax` into the assembly switch.
-Every one of those has a name on the other side already.
+`kernel/sched.fi` touches shared state only inside `lock_take`/`lock_give` --
+thirteen bracketed regions, checked. **So the scheduler needs no change of
+its own now that `lock_give` is a store-release.** What it still needs is the
+six x86 instructions in it: `pushfq/pop/cli` and `sti`
+(`arch.irq_save`/`irq_restore` exist), `mov rax, cr3` and `mov cr3, rax`
+(`arch.page_root`/`page_root_set` exist), `hlt` (`arch.idle` exists), and
+`call rax` into the assembly switch. Every one has a name on the other side
+already; what is missing is an AArch64 task structure to point them at.
 
 ### 7.6 The device drivers
 
-`nvme.fi` and `virtio.fi` fill a descriptor in memory and then write a
-doorbell register. On x86 the older store is visible first, guaranteed. On
-AArch64 the device can read a descriptor that is still in a store buffer.
-`arch.barrier_device()` exists for exactly that call site and is `sfence` on
-x86 and `dsb sy` on AArch64. It is not yet called anywhere: rerouting
-`nvme.fi`'s and `virtio.fi`'s hot paths through the boundary costs two extra
-call frames per access (section 8) and there is nothing on AArch64 yet to
-measure the change against. Named here so it is not forgotten.
+`nvme.fi` and `virtio.fi` fill a descriptor and then write a doorbell. On x86
+the older store is visible first, guaranteed. On AArch64 the device can read
+a descriptor still sitting in a store buffer. `arch.barrier_device()` exists
+for exactly that call site -- `sfence` on x86, `dsb sy` on AArch64 -- and
+`amain.fi` uses it after every device register write. In `nvme.fi` and
+`virtio.fi` it is still not called: they run on hardware this machine does
+not have, and putting a barrier in a path nothing exercises would be a
+change nobody could measure. Named so it is not forgotten.
 
----
 
 ## 8. What the boundary costs
 
-Measured, not assumed. The pinned compiler at the optimisation level
-`tools/build-kernel.sh` uses does not inline across modules, so
+Measured, not assumed, and the answer changed sign in this round.
+
+Round ARM: the pinned compiler does not inline across modules, so
+`serial.out8` went from one frame to three and the x86 image grew by 2,804
+octets (+0.16 %).
+
+Round OSUM-ARM2, after nine more modules crossed:
 
 ```
-serial__out8 -> arch__dev_out8 -> machine__out8 -> `out dx, al`
+1,710,512 octets   before this round's rewiring
+1,706,784 octets   after
+   -3,728 octets   (-0.22 %)
 ```
 
-is three frames where it used to be one, and the image grew from 1,707,416
-to 1,710,220 octets (**+2,804, +0.16 %**). Read off the disassembly of
-`_F0.serial__out8`.
+The image got SMALLER. The reason is not clever code generation, it is that
+four copies of `rep movsq`/`rep stosq` inline assembly in `wm.fi` and
+`wig.fi` became one function each. An interface that removes duplication pays
+for its own call frames; one that does not, does not. Both numbers are in
+here because only having the second one would be a nicer story than the
+truth.
 
-Whether that matters: an `out` to a device port is a bus cycle, hundreds of
-processor cycles, and two extra calls are single digits. For the MMIO forms
-it is a worse trade, which is why nothing in the fast paths of `nvme.fi` or
-`virtio.fi` was rerouted this round. Claiming a boundary is free when it is
-not is how a boundary gets torn out again three rounds later.
+For a device port the trade was never in doubt: an `out` is a bus cycle,
+hundreds of processor cycles, and two extra calls are single digits. For the
+MMIO forms it is a worse trade, and that is why the fast paths of `nvme.fi`
+and `virtio.fi` still hold their own `__mmio_*` calls.
 
----
 
 ## 9. What deliberately stays out
 
@@ -628,23 +777,26 @@ not is how a boundary gets torn out again three rounds later.
 
 ## 10. What the next round needs
 
-1. **The freestanding AArch64 target, finished and pinned.** Part 1 exists
-   (`aarch64-none`, the kernel profile accepted). What section 5.4 shows is
-   still open: the register check has to become an instruction check, or
-   every operand-less x86 `asm` block in the kernel is a landmine. And
-   `vendor/firn/COMMIT` has to move, which is the moment this repository
-   stops measuring against a compiler it does not control.
-2. **`__mmio_read`/`__mmio_write` need acquire/release forms**, or
-   `atomic.fi` needs `__atomic_load_acquire`/`__atomic_store_release`.
-   Section 7.2 cannot be fixed in Firn without them.
-3. **The rest of the move**: `serial.fi`, `kstate.fi`, `sched.fi`,
-   `mem.fi`, `cpu.fi`, `atomic.fi`, `fb.fi`, `blk.fi`, `pci.fi`,
-   `virtio.fi`, `nvme.fi`, `time.fi`, `rand.fi`, `proc.fi`, `signal.fi`.
-   Best done when fewer branches are open (section 3).
-4. **An AArch64 `machine.fi` in Firn**, answering `arch.fi` question for
-   question. The assembly in `kernel/arch/aarch64/` is the specification for
-   it and every function in it already has the right name.
-5. **virtio-mmio as a driver, not as a count.** Section 4 proves the slots
-   are there and that attaching a device changes what they say. Reading a
-   block off one of them is the next honest step, and it is the step that
-   makes a RAM disk and then a shell possible.
+1. **An AArch64 process.** Everything below the scheduler now has a name on
+   both machines (§7.5); what does not exist is a task on this side -- a
+   context in the task table, a page table per address space, and the drop to
+   EL0 that is this machine's ring 3. `kernel/arch/x86_64/user.fi` is 268
+   lines and it is the shape of what has to be written.
+2. **`smp.fi`'s missing barrier (§7.4)**, and a second processor on the ARM
+   side to measure it with. PSCI `CPU_ON` instead of INIT/SIPI; `start.S`
+   already parks the others in a `wfe` loop.
+3. **The instruction check in the compiler (§5.4).** The register-only check
+   still lets operand-less x86 mnemonics through to the assembler. One module
+   is still in that class, and it is one module too many.
+4. **A driver for virtio-mmio.** §4 proves the slots are there and that
+   attaching a device changes what they say. Reading a block off one of them
+   is the step that makes a RAM disk, then a file system, then a shell.
+5. **`fb.fi` and `pci.fi`**, which are the two biggest remaining refusals and
+   are refusals of the same kind: both find their hardware through the port
+   space. On `-M virt` there is no VGA and no PCI configuration space at
+   0xCF8 -- there is a device tree, and §5.6 says why we do not have it yet.
+   That is a design decision, not a rewrite.
+6. **`firnc1` on AArch64.** The self-hosted compiler refuses
+   `--target=aarch64-*` and says so, so `tools/arm/build.sh` has no
+   `--stufe 1`. Until it does, the ARM image is built by one compiler and the
+   x86 image by two, and only the x86 one has that particular check under it.
