@@ -1,0 +1,272 @@
+// kernel/user/sha.fi -- round TRESOR: SHA-256 for programs in ring 3,
+// over any length.
+//
+// WHY A SECOND ONE. `kernel/user/pw.fi` already has SHA-256, and it is
+// measured against Python's `hashlib` (round K13). It also has a hard
+// limit: `if len > 256 { return false }`. That was the right shape for
+// what it does -- a password and a 64 octet HMAC pad never come close --
+// but this round hashes FILE CONTENT in chunks of four kibioctets, and a
+// hash function that refuses its input is not a hash function.
+//
+// So: the same algorithm (FIPS 180-4), written as a STREAM. `begin`,
+// `update` as often as you like, `finish`. The one-shot `hash` is the
+// same three calls behind one name.
+//
+// THE STATE IS A MODULE VARIABLE and not a caller-supplied context. That
+// is a real restriction -- two interleaved hashes would tread on each
+// other -- and it is deliberate: this userland has no allocator, and
+// every user of this module (`hwid`, `bak`) hashes one thing at a time
+// from start to finish. `begin` resets everything, so the restriction is
+// visible at the call site rather than hidden.
+//
+// EVERY ARITHMETIC IS MASKED TO 32 BIT. Firn's integers here are 64 bit;
+// SHA-256 is a 32 bit algorithm. A single missing `& M32` produces a hash
+// that is stable, looks random, and agrees with nothing in the world --
+// which is why this file is not trusted but MEASURED: `tools/tresor/run.sh`
+// runs the standard vectors of FIPS 180-4 ("abc", the empty string, the
+// 448 bit message) plus a 4096 octet block through this code AND through
+// the host's `hashlib`, and compares the hex digit by digit.
+
+profile kernel
+
+import ulib
+
+export { begin, update, finish, hash, hex_out, equal, DIGEST, BLOCK }
+
+const DIGEST: u64 = 32
+const BLOCK: u64 = 64
+const M32: u64 = 0xFFFFFFFF
+
+static mut kt: [u64; 64] = [0 as u64; 64]
+static mut kt_ready: u64 = 0
+static mut hv: [u64; 8] = [0 as u64; 8]
+static mut buf: [u8; 64] = [0 as u8; 64]
+static mut have: u64 = 0 // octets sitting in `buf`
+static mut total: u64 = 0 // octets fed in altogether
+
+fn ktab() {
+    if kt_ready != 0 {
+        return
+    }
+    kt[0] = 0x428a2f98
+    kt[1] = 0x71374491
+    kt[2] = 0xb5c0fbcf
+    kt[3] = 0xe9b5dba5
+    kt[4] = 0x3956c25b
+    kt[5] = 0x59f111f1
+    kt[6] = 0x923f82a4
+    kt[7] = 0xab1c5ed5
+    kt[8] = 0xd807aa98
+    kt[9] = 0x12835b01
+    kt[10] = 0x243185be
+    kt[11] = 0x550c7dc3
+    kt[12] = 0x72be5d74
+    kt[13] = 0x80deb1fe
+    kt[14] = 0x9bdc06a7
+    kt[15] = 0xc19bf174
+    kt[16] = 0xe49b69c1
+    kt[17] = 0xefbe4786
+    kt[18] = 0x0fc19dc6
+    kt[19] = 0x240ca1cc
+    kt[20] = 0x2de92c6f
+    kt[21] = 0x4a7484aa
+    kt[22] = 0x5cb0a9dc
+    kt[23] = 0x76f988da
+    kt[24] = 0x983e5152
+    kt[25] = 0xa831c66d
+    kt[26] = 0xb00327c8
+    kt[27] = 0xbf597fc7
+    kt[28] = 0xc6e00bf3
+    kt[29] = 0xd5a79147
+    kt[30] = 0x06ca6351
+    kt[31] = 0x14292967
+    kt[32] = 0x27b70a85
+    kt[33] = 0x2e1b2138
+    kt[34] = 0x4d2c6dfc
+    kt[35] = 0x53380d13
+    kt[36] = 0x650a7354
+    kt[37] = 0x766a0abb
+    kt[38] = 0x81c2c92e
+    kt[39] = 0x92722c85
+    kt[40] = 0xa2bfe8a1
+    kt[41] = 0xa81a664b
+    kt[42] = 0xc24b8b70
+    kt[43] = 0xc76c51a3
+    kt[44] = 0xd192e819
+    kt[45] = 0xd6990624
+    kt[46] = 0xf40e3585
+    kt[47] = 0x106aa070
+    kt[48] = 0x19a4c116
+    kt[49] = 0x1e376c08
+    kt[50] = 0x2748774c
+    kt[51] = 0x34b0bcb5
+    kt[52] = 0x391c0cb3
+    kt[53] = 0x4ed8aa4a
+    kt[54] = 0x5b9cca4f
+    kt[55] = 0x682e6ff3
+    kt[56] = 0x748f82ee
+    kt[57] = 0x78a5636f
+    kt[58] = 0x84c87814
+    kt[59] = 0x8cc70208
+    kt[60] = 0x90befffa
+    kt[61] = 0xa4506ceb
+    kt[62] = 0xbef9a3f7
+    kt[63] = 0xc67178f2
+    kt_ready = 1
+}
+
+fn rotr(x: u64, n: u64) -> u64 {
+    return (((x & M32) >> n) | ((x & M32) << (32 - n))) & M32
+}
+
+// One compression over the sixty-four octets in `buf`.
+fn compress() {
+    var w: [u64; 64] = [0 as u64; 64]
+    var i: u64 = 0
+    while i < 16 {
+        w[i as usize] = ((buf[(i * 4) as usize] as u64) << 24)
+            | ((buf[(i * 4 + 1) as usize] as u64) << 16)
+            | ((buf[(i * 4 + 2) as usize] as u64) << 8)
+            | (buf[(i * 4 + 3) as usize] as u64)
+        i = i + 1
+    }
+    while i < 64 {
+        let a: u64 = w[(i - 15) as usize]
+        let b: u64 = w[(i - 2) as usize]
+        let s0: u64 = rotr(a, 7) ^ rotr(a, 18) ^ ((a & M32) >> 3)
+        let s1: u64 = rotr(b, 17) ^ rotr(b, 19) ^ ((b & M32) >> 10)
+        w[i as usize] = (w[(i - 16) as usize] + s0 + w[(i - 7) as usize]
+            + s1) & M32
+        i = i + 1
+    }
+    var a: u64 = hv[0]
+    var b: u64 = hv[1]
+    var c: u64 = hv[2]
+    var d: u64 = hv[3]
+    var e: u64 = hv[4]
+    var f: u64 = hv[5]
+    var g: u64 = hv[6]
+    var hh: u64 = hv[7]
+    var t: u64 = 0
+    while t < 64 {
+        let S1: u64 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25)
+        let ch: u64 = (e & f) ^ ((~e) & g & M32)
+        let t1: u64 = (hh + S1 + ch + kt[t as usize] + w[t as usize]) & M32
+        let S0: u64 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22)
+        let mj: u64 = (a & b) ^ (a & c) ^ (b & c)
+        let t2: u64 = (S0 + mj) & M32
+        hh = g
+        g = f
+        f = e
+        e = (d + t1) & M32
+        d = c
+        c = b
+        b = a
+        a = (t1 + t2) & M32
+        t = t + 1
+    }
+    hv[0] = (hv[0] + a) & M32
+    hv[1] = (hv[1] + b) & M32
+    hv[2] = (hv[2] + c) & M32
+    hv[3] = (hv[3] + d) & M32
+    hv[4] = (hv[4] + e) & M32
+    hv[5] = (hv[5] + f) & M32
+    hv[6] = (hv[6] + g) & M32
+    hv[7] = (hv[7] + hh) & M32
+}
+
+fn begin() {
+    ktab()
+    hv[0] = 0x6a09e667
+    hv[1] = 0xbb67ae85
+    hv[2] = 0x3c6ef372
+    hv[3] = 0xa54ff53a
+    hv[4] = 0x510e527f
+    hv[5] = 0x9b05688c
+    hv[6] = 0x1f83d9ab
+    hv[7] = 0x5be0cd19
+    have = 0
+    total = 0
+}
+
+fn update(p: u64, n: u64) {
+    var i: u64 = 0
+    while i < n {
+        buf[have as usize] = *((p + i) as *mut u8)
+        have = have + 1
+        if have == BLOCK {
+            compress()
+            have = 0
+        }
+        i = i + 1
+    }
+    total = total + n
+}
+
+// The padding of FIPS 180-4: one bit set, zeros, and the LENGTH IN BITS
+// as a 64 bit big-endian number. The length is the length of the whole
+// message, not of the last block -- getting that wrong gives a hash that
+// is right for short inputs and wrong for long ones, which is the worst
+// kind of wrong.
+fn finish(out: u64) {
+    let bits: u64 = total * 8
+    buf[have as usize] = 0x80 as u8
+    have = have + 1
+    if have > 56 {
+        while have < BLOCK {
+            buf[have as usize] = 0 as u8
+            have = have + 1
+        }
+        compress()
+        have = 0
+    }
+    while have < 56 {
+        buf[have as usize] = 0 as u8
+        have = have + 1
+    }
+    var i: u64 = 0
+    while i < 8 {
+        buf[(56 + i) as usize] = ((bits >> ((7 - i) * 8)) & 255) as u8
+        i = i + 1
+    }
+    compress()
+    i = 0
+    while i < 8 {
+        let v: u64 = hv[i as usize]
+        __mmio_write8((out + i * 4) as *mut u8, ((v >> 24) & 255) as u8)
+        __mmio_write8((out + i * 4 + 1) as *mut u8, ((v >> 16) & 255) as u8)
+        __mmio_write8((out + i * 4 + 2) as *mut u8, ((v >> 8) & 255) as u8)
+        __mmio_write8((out + i * 4 + 3) as *mut u8, (v & 255) as u8)
+        i = i + 1
+    }
+}
+
+fn hash(p: u64, n: u64, out: u64) {
+    begin()
+    update(p, n)
+    finish(out)
+}
+
+// Thirty-two octets as sixty-four lower-case hex digits, NUL terminated.
+fn hex_out(dig: u64, out: u64) {
+    var tab: [u8; 17] = "0123456789abcdef\0"
+    var i: u64 = 0
+    while i < DIGEST {
+        let c: u64 = (*((dig + i) as *mut u8)) as u64
+        __mmio_write8((out + i * 2) as *mut u8, tab[((c >> 4) & 15) as usize])
+        __mmio_write8((out + i * 2 + 1) as *mut u8, tab[(c & 15) as usize])
+        i = i + 1
+    }
+    __mmio_write8((out + DIGEST * 2) as *mut u8, 0 as u8)
+}
+
+fn equal(a: u64, b: u64) -> bool {
+    var i: u64 = 0
+    while i < DIGEST {
+        if *((a + i) as *mut u8) != *((b + i) as *mut u8) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
