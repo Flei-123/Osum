@@ -368,7 +368,52 @@ const WM_FLUSH: u64 = 2105 // (h) -> 0
 const WM_MOVE: u64 = 2106 // (h, xy) -> 0
 const WM_CLOSE: u64 = 2107 // (h) -> 0
 const WM_WRITE: u64 = 2108 // (h, p, n) -> Oktette (nur Terminalfenster)
-const WM_MAXNR: u64 = 2108
+// ------------------------------------------------- RUNDE DESKTOP
+//
+// DREI AUFRUFE, und sie stehen hier im Block des Fensterservers und
+// nicht in einem eigenen Hunderterblock: sie reden ueber FENSTER, und
+// eine zweite Nummernfamilie fuer dieselbe Sache waere genau die
+// Uebersetzungstabelle, die die Regel oben vermeidet.
+//
+// WM_STATE aendert das EIGENE Fenster und braucht R_MANAGE, wie
+// WM_MOVE. Ebene 0 (Schreibtisch) und Ebene 2 (Taskleiste) sind
+// zusaetzlich der Wurzel vorbehalten -- wer sich selbst nach ganz vorn
+// legen darf, kann jede Oberflaeche nachbauen.
+//
+// WM_LIST und WM_ACT reden ueber FREMDE Fenster und haben deshalb KEIN
+// Handle: die Taskleiste bekommt fuer das Fenster eines anderen
+// Prozesses keines, und ein Platz in der Tafel waere eine Zahl, die
+// sich unter ihr aendert. Beide verlangen dafuer, dass der Rufende
+// selbst ein Fenster auf Ebene L_TOP hat -- er MUSS eine Taskleiste
+// sein. Eine gewoehnliche Anwendung bekommt -E_RIGHTS und sieht die
+// Titel der anderen NICHT.
+const WM_STATE: u64 = 2109 // (h, was, wert) -> 0, braucht R_MANAGE
+const WM_LIST: u64 = 2110 // (platz, aus, max) -> 1 belegt, 0 frei
+const WM_ACT: u64 = 2111 // (fensternummer, was) -> 0
+const WM_MAXNR: u64 = 2111
+
+// Was WM_STATE setzt.
+const WS_LAYER: u64 = 0 // 0 Schreibtisch, 1 normal, 2 Taskleiste
+const WS_HIDDEN: u64 = 1 // 1 = minimieren, 0 = wiederherstellen
+const WS_DECO: u64 = 2 // 0 = ohne Rahmen und Titelleiste
+
+// Was WM_ACT tut.
+const WA_RAISE: u64 = 0 // hervorholen, heben, Fokus
+const WA_HIDE: u64 = 1 // minimieren
+const WA_TOGGLE: u64 = 2 // das eine oder das andere, je nach Zustand
+
+// Die Felder eines Satzes von WM_LIST -- 96 Oktette, acht Woerter und
+// zweiunddreissig Oktette Titel.
+const WL_ID: u64 = 0
+const WL_X: u64 = 8
+const WL_Y: u64 = 16
+const WL_W: u64 = 24
+const WL_H: u64 = 32
+const WL_LAYER: u64 = 40
+const WL_FLAGS: u64 = 48
+const WL_FOCUS: u64 = 56
+const WL_TITLE: u64 = 64
+const WL_BYTES: u64 = 96
 
 // ---------------------------------------------------- RUNDE K15
 //
@@ -422,6 +467,11 @@ const WI_EVENTS: u64 = 5
 const WI_COLS: u64 = 6
 const WI_ROWS: u64 = 7
 const WI_FOCUS: u64 = 8
+// RUNDE DESKTOP: die Anwendung darf wissen, auf welcher Ebene sie liegt
+// und ob sie gerade minimiert ist. Ohne das zweite malt ein Programm
+// weiter in ein Fenster, das niemand sieht.
+const WI_LAYER: u64 = 9
+const WI_HIDDEN: u64 = 10
 
 const SYS_OSUM_SYSINFO: u64 = 1002
 const SYS_OSUM_PSTAT: u64 = 1003
@@ -438,6 +488,30 @@ const SYS_OSUM_KILL: u64 = 1004
 // 2 haengt aus. Mehr gibt es nicht zu sagen -- dieses System hat EIN
 // Dateisystem auf EINER Platte, und ein `mount` mit Geraetenamen und
 // Typen waere eine Behauptung ueber etwas, das es nicht gibt.
+// ----------------------------------------------- RUNDE DESKTOP: das Netz
+//
+// Der Hunderterblock 1300..1399 gehoert seit Runde K8 dem Netz "soweit
+// es ueber Sockets hinausgeht" und war bis heute LEER: die Adresse
+// wurde in `inet.init` festgenagelt, und kein Programm konnte sie
+// lesen oder aendern. Ein DHCP-Klient in Ring 3 kann ohne diese beiden
+// Aufrufe nichts tun -- er bekommt eine Adresse angeboten und hat
+// keinen Weg, sie dem Kernel zu sagen.
+//
+// SETZEN DARF NUR DIE WURZEL. Eine Adresse, die jeder Prozess aendern
+// kann, ist keine Konfiguration, sondern eine Einladung.
+const SYS_OSUM_NETGET: u64 = 1300 // (was) -> Zahl
+const SYS_OSUM_NETSET: u64 = 1301 // (ip, maske, gateway) -> 0
+
+// Was NETGET beantwortet.
+const NG_READY: u64 = 0 // 1 = der Stapel laeuft
+const NG_IP: u64 = 1
+const NG_MASK: u64 = 2
+const NG_GW: u64 = 3
+const NG_MAC0: u64 = 4 // die ersten vier Oktette der Hardwareadresse
+const NG_MAC1: u64 = 5 // die letzten zwei
+const NG_IN: u64 = 6 // Rahmen herein
+const NG_OUT: u64 = 7 // Rahmen hinaus
+
 const SYS_OSUM_SETENV: u64 = 1400
 const SYS_OSUM_MOUNT: u64 = 1401
 
@@ -1138,6 +1212,11 @@ fn dispatch(number: u64, frame: u64, state: u64) -> u64 {
     // dieser Nummern kommt.
     if number >= SYS_OSUM_DISPGET && number <= SYS_OSUM_DISPSTR {
         return disp_call(state, me, number, a0, a1, a2)
+    }
+    // RUNDE DESKTOP: das Netz jenseits der Sockets. Zwei Nummern aus
+    // dem Block, den Runde K8 dafuer ausgewiesen und nie benutzt hat.
+    if number >= SYS_OSUM_NETGET && number <= SYS_OSUM_NETSET {
+        return net_call(state, me, number, a0, a1, a2)
     }
     // ------------------------------------------------------ RUNDE K13
     //
@@ -5546,6 +5625,166 @@ fn win_of(state: u64, object: u64) -> u64 {
     return i
 }
 
+// ====================================================== RUNDE DESKTOP
+//
+// DIE ADRESSE DES RECHNERS, LESBAR UND SETZBAR AUS RING 3.
+//
+// EHRLICHER AUSGANGSPUNKT, und er steht im Auftrag dieser Runde: der
+// Kernel hat TCP/IP (`kernel/inet.fi`), aber die Adresse wurde in
+// `inet.init` FESTGENAGELT. Es gab kein DHCP, und es gab auch keinen
+// Weg, die Adresse ueberhaupt zu erfahren -- `ping` und `wget` bekamen
+// sie nie zu sehen. Ein DHCP-Klient in Ring 3 braucht genau zwei
+// Dinge: die Hardwareadresse der Karte (er muss sie in das Paket
+// schreiben) und einen Weg, das Ergebnis dem Kernel zu sagen.
+//
+// SETZEN DARF NUR DIE WURZEL. Und `readdr` und nicht `configure`:
+// letzteres holt sich jedes Mal neue Rahmen und verliert die alten --
+// die Begruendung steht in `kernel/inet.fi`.
+fn net_call(state: u64, me: u64, number: u64, a0: u64, a1: u64,
+    a2: u64) -> u64 {
+    if number == SYS_OSUM_NETGET {
+        if a0 == NG_READY {
+            if inet.ready(state) {
+                return 1
+            }
+            return 0
+        }
+        if !inet.ready(state) {
+            return errno.neg(errno.E_NODEV)
+        }
+        if a0 == NG_IP {
+            return inet.ip(state)
+        }
+        if a0 == NG_MASK {
+            return inet.mask(state)
+        }
+        if a0 == NG_GW {
+            return inet.gw(state)
+        }
+        if a0 == NG_MAC0 {
+            return (inet.mac_at(state, 0) << 24) | (inet.mac_at(state, 1) << 16)
+                | (inet.mac_at(state, 2) << 8) | inet.mac_at(state, 3)
+        }
+        if a0 == NG_MAC1 {
+            return (inet.mac_at(state, 4) << 8) | inet.mac_at(state, 5)
+        }
+        if a0 == NG_IN {
+            return inet.frames_in(state)
+        }
+        if a0 == NG_OUT {
+            return inet.frames_out(state)
+        }
+        return errno.neg(errno.E_INVAL)
+    }
+    // NETSET: (ip, maske, gateway), alle drei als eine Zahl in
+    // Netzreihenfolge -- 0x0A00020F ist 10.0.2.15.
+    if !perm.is_root(state, me) {
+        return errno.neg(errno.E_PERM)
+    }
+    if !inet.ready(state) {
+        return errno.neg(errno.E_NODEV)
+    }
+    if a0 == 0 {
+        return errno.neg(errno.E_INVAL)
+    }
+    // Die Praefixlaenge aus der Maske. Eine Maske mit Loechern
+    // (0xFF00FF00) ist keine Maske; sie wird hier NICHT stillschweigend
+    // geglaettet, sondern abgelehnt.
+    var praefix: u64 = 0
+    var bit: u64 = 32
+    var gesehen_null: bool = false
+    while bit > 0 {
+        bit = bit - 1
+        if ((a1 >> bit) & 1) != 0 {
+            if gesehen_null {
+                return errno.neg(errno.E_INVAL)
+            }
+            praefix = praefix + 1
+        } else {
+            gesehen_null = true
+        }
+    }
+    if !inet.readdr(state, (a0 >> 24) & 255, (a0 >> 16) & 255,
+        (a0 >> 8) & 255, a0 & 255, praefix, a2 & 0xFFFFFFFF) {
+        return errno.neg(errno.E_IO)
+    }
+    return 0
+}
+
+// RUNDE DESKTOP: IST DIESER PROZESS EINE TASKLEISTE? Er ist es genau
+// dann, wenn ihm ein Fenster auf Ebene L_TOP gehoert -- und das
+// bekommt er nur als Wurzel (WM_STATE, WS_LAYER). Das ist die ganze
+// Rechtepruefung fuer WM_LIST und WM_ACT, und sie ist ABSICHTLICH so
+// klein: eine Liste aller Fenstertitel ist eine Auskunft ueber fremde
+// Prozesse, und die gibt dieser Kernel nicht jedem.
+fn ist_leiste(state: u64, me: u64) -> bool {
+    var i: u64 = 0
+    while i < wm.MAX_WIN {
+        if wm.valid(state, i) && wm.win_owner(state, i) == me {
+            if wm.win_layer(state, i) == wm.L_TOP {
+                return true
+            }
+        }
+        i = i + 1
+    }
+    return false
+}
+
+// EIN SATZ AUS DER FENSTERTAFEL NACH RING 3. In einer eigenen Funktion
+// und nicht als Zweig in `wm_call`: der Rahmen von `dispatch` ist in
+// diesem Kernel schon einmal fast uebergelaufen (siehe die Begruendung
+// bei `k13_call`), und ein Zweig mit zehn Zwischenwerten kostet dort
+// Stapel, auch wenn er nie genommen wird.
+fn wm_list(state: u64, me: u64, platz: u64, aus: u64, max: u64) -> u64 {
+    if !ist_leiste(state, me) {
+        return cap.err(cap.E_RIGHTS)
+    }
+    if platz >= wm.MAX_WIN || max < WL_BYTES {
+        return cap.err(cap.E_INVALID)
+    }
+    let puffer: u64 = state + kstate.BLOCK_OFF + 3600
+    var k: u64 = 0
+    while k < WL_BYTES {
+        kstate.set8(puffer + k, 0 as u8)
+        k = k + 1
+    }
+    if !wm.valid(state, platz) {
+        if !copy_out(state, me, aus, puffer, WL_BYTES) {
+            return cap.err(cap.E_INVALID)
+        }
+        return 0
+    }
+    kstate.set(puffer, WL_ID, wm.win_id(state, platz))
+    kstate.set(puffer, WL_X, wm.win_x(state, platz) as u64)
+    kstate.set(puffer, WL_Y, wm.win_y(state, platz) as u64)
+    kstate.set(puffer, WL_W, wm.win_w(state, platz))
+    kstate.set(puffer, WL_H, wm.win_h(state, platz))
+    kstate.set(puffer, WL_LAYER, wm.win_layer(state, platz))
+    var fl: u64 = 0
+    if wm.win_hidden(state, platz) {
+        fl = fl | wm.F_HIDDEN
+    }
+    if !wm.win_deco(state, platz) {
+        fl = fl | wm.F_NODECO
+    }
+    kstate.set(puffer, WL_FLAGS, fl)
+    var f: u64 = 0
+    if wm.focus(state) == platz {
+        f = 1
+    }
+    kstate.set(puffer, WL_FOCUS, f)
+    let t: u64 = wm.win_title(state, platz)
+    k = 0
+    while k < 31 {
+        kstate.set8(puffer + WL_TITLE + k, kstate.get8(t + k) as u8)
+        k = k + 1
+    }
+    if !copy_out(state, me, aus, puffer, WL_BYTES) {
+        return cap.err(cap.E_INVALID)
+    }
+    return 1
+}
+
 fn wm_call(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64,
     a3: u64, a4: u64) -> u64 {
     if number > WM_MAXNR {
@@ -5594,6 +5833,52 @@ fn wm_call(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64,
             return cap.err(cap.E_EXHAUSTED)
         }
         return hh
+    }
+    // RUNDE DESKTOP: DIE BEIDEN AUFRUFE OHNE HANDLE. Sie stehen VOR der
+    // Handle-Suche, weil ihr erstes Argument keines ist -- eine
+    // Taskleiste redet ueber die Fenster ANDERER Prozesse und bekommt
+    // fuer die kein Handle. Was sie statt dessen vorweisen muss, ist ein
+    // EIGENES Fenster auf der obersten Ebene: sie muss eine Taskleiste
+    // SEIN. Eine gewoehnliche Anwendung bekommt -E_RIGHTS und sieht die
+    // Titel der anderen nicht.
+    if number == WM_LIST {
+        return wm_list(state, me, a0, a1, a2)
+    }
+    if number == WM_ACT {
+        if !ist_leiste(state, me) {
+            return cap.err(cap.E_RIGHTS)
+        }
+        let w: u64 = wm.by_id(state, a0)
+        if w >= wm.MAX_WIN {
+            return cap.err(cap.E_NOTFOUND)
+        }
+        // Die Leiste fasst nur gewoehnliche Fenster an. Sie kann den
+        // Schreibtisch nicht minimieren und sich selbst nicht schliessen.
+        if wm.win_layer(state, w) != wm.L_NORMAL {
+            return cap.err(cap.E_RIGHTS)
+        }
+        if a1 == WA_HIDE {
+            wm.set_hidden(state, w, true)
+        } else if a1 == WA_RAISE {
+            wm.set_hidden(state, w, false)
+            wm.raise_win(state, w)
+            wm.set_focus(state, w)
+        } else if a1 == WA_TOGGLE {
+            // DIE REGEL EINER TASKLEISTE, in zwei Zeilen: ist das
+            // Fenster verborgen ODER nicht das aktive, hol es nach
+            // vorn; ist es beides nicht, leg es weg.
+            if wm.win_hidden(state, w) || wm.focus(state) != w {
+                wm.set_hidden(state, w, false)
+                wm.raise_win(state, w)
+                wm.set_focus(state, w)
+            } else {
+                wm.set_hidden(state, w, true)
+            }
+        } else {
+            return cap.err(cap.E_INVALID)
+        }
+        wm.compose(state)
+        return 0
     }
     // Alles Weitere braucht ein gueltiges Handle DIESES Prozesses.
     let slot: u64 = cap.find(state, me, a0)
@@ -5686,6 +5971,15 @@ fn wm_call(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64,
             }
             return 0
         }
+        if a1 == WI_LAYER {
+            return wm.win_layer(state, i)
+        }
+        if a1 == WI_HIDDEN {
+            if wm.win_hidden(state, i) {
+                return 1
+            }
+            return 0
+        }
         return cap.err(cap.E_INVALID)
     }
     if number == WM_FLUSH {
@@ -5711,6 +6005,40 @@ fn wm_call(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64,
         wm.destroy(state, i)
         cap.close(state, me, a0)
         return 0
+    }
+    if number == WM_STATE {
+        if !cap.rights_contains(rights, cap.R_MANAGE) {
+            return cap.err(cap.E_RIGHTS)
+        }
+        if a1 == WS_LAYER {
+            if a2 > wm.L_TOP {
+                return cap.err(cap.E_INVALID)
+            }
+            // WER SICH SELBST NACH GANZ VORN LEGEN DARF, KANN JEDE
+            // OBERFLAECHE NACHBAUEN -- ein Fenster auf Ebene L_TOP
+            // liegt ueber allem, auch ueber einem Kennwortdialog.
+            // Ebene 0 und 2 sind deshalb der Wurzel vorbehalten; Ebene
+            // 1 darf jeder, es ist die, die er ohnehin hat.
+            if a2 != wm.L_NORMAL {
+                if !perm.is_root(state, me) {
+                    return cap.err(cap.E_RIGHTS)
+                }
+            }
+            wm.set_layer(state, i, a2)
+            wm.compose(state)
+            return 0
+        }
+        if a1 == WS_HIDDEN {
+            wm.set_hidden(state, i, a2 != 0)
+            wm.compose(state)
+            return 0
+        }
+        if a1 == WS_DECO {
+            wm.set_deco(state, i, a2 != 0)
+            wm.compose(state)
+            return 0
+        }
+        return cap.err(cap.E_INVALID)
     }
     if number == WM_WRITE {
         if !cap.rights_contains(rights, cap.R_WRITE) {
