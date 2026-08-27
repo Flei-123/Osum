@@ -3,17 +3,21 @@
 #
 #   ./tools/arm/build.sh OUTPUT [-DSWITCH ...]
 #
-# The counterpart to tools/build-kernel.sh, and deliberately a separate
-# script rather than a flag on that one: the two builds have nothing in
-# common except the word "kernel". The x86 image is a Multiboot ELF32 shell
-# around ELF64 with six assembly files and two Firn modules; this one is an
-# ELF64 for `-M virt` built out of assembly ALONE, because the pinned Firn
-# compiler refuses `profile kernel` for `--target=aarch64-linux`
-# (`codegen_a64.rs`, "does not support the kernel profile yet"). The moment
-# that refusal goes away, the Firn modules join in here and this script
-# grows the two lines that call the compiler -- and not before, because a
-# build script that pretends to compile something is worse than one that
-# does not try.
+# The counterpart to tools/build-kernel.sh. Round ARM built the image out of
+# assembly ALONE, because the pinned compiler refused `profile kernel` for
+# aarch64. Firn's round ARM-FREESTANDING removed that refusal, so this script
+# now does what the x86 one does: it calls the compiler, and what is left in
+# assembly is what a language cannot say.
+#
+#   kernel/kmain_a64.fi -> firnc --target=aarch64-none   the kernel
+#   start.S    the machine before there is a stack, and `osum_panic`
+#   vectors.S  sixteen entries of 0x80 octets each
+#   switch.S   swapping the stack pointer under a running function
+#
+# BUILD IT WITH firnc0. `firnc1`, the compiler written in Firn, refuses
+# `--target=aarch64-*` and says so -- there is no A64 code generator in Firn
+# yet. So this script has no `--stufe 1`, and pretending otherwise would be
+# a build option that cannot work.
 #
 # The switches are the counter-checks (`tools/arm/run.sh`):
 #   -DNO_MMU        do not switch translation on
@@ -45,18 +49,39 @@ trap 'rm -rf "$TMP"' EXIT
 # The order is the link order and it is not alphabetical: `start.S` holds
 # `.text.boot`, which `virt.ld` keeps first, and the entry point has to be
 # the first thing in the image for a loader that ignores the ELF header.
-FILES=(start vectors uart mmu gic timer switch atomic probe)
+FILES=(start vectors switch)
 
 for f in "${FILES[@]}"; do
     "$AS" -x assembler-with-cpp -c -I"$SRC" "${DEFS[@]}" \
         -o "$TMP/$f.o" "$SRC/$f.S" || { echo "assembling $f.S failed" >&2; exit 1; }
 done
 
+export FIRNLIB="$ROOT/lib"
+bash vendor/firn/hole-firnc.sh >/dev/null || {
+    echo "vendor/firn/hole-firnc.sh failed" >&2; exit 1; }
+FIRNC="$ROOT/vendor/firn/bin/firnc"
+[[ -x $FIRNC ]] || { echo "the compiler is missing: $FIRNC" >&2; exit 1; }
+
+# The counter-check switches of tools/arm/run.sh reach the Firn side as
+# `--define`d constants would on the assembly side; there is no preprocessor
+# here, so they are passed as a source-level switch instead. `-DNO_*` that
+# the assembly does not know is simply not used by it.
+FIRNDEFS=()
+for d in "${DEFS[@]}"; do FIRNDEFS+=("$d"); done
+
+"$FIRNC" --target=aarch64-none -c -o "$TMP/kernel.o" "$ROOT/kernel/kmain_a64.fi" \
+    || { echo "compiling kernel/kmain_a64.fi for aarch64-none failed" >&2; exit 1; }
+
 OBJS=()
 for f in "${FILES[@]}"; do OBJS+=("$TMP/$f.o"); done
+OBJS+=("$TMP/kernel.o")
 
 mkdir -p "$(dirname "$OUT")"
-"$LD" -T "$SRC/virt.ld" -o "$OUT" "${OBJS[@]}" 2> >(grep -vE 'LOAD segment with RWX' >&2) \
+"$LD" -T "$SRC/virt.ld" \
+    --defsym=KERN_MAIN=_F0.start \
+    --defsym=KERN_TRAP=_F0.amain__kexception \
+    -o "$OUT" "${OBJS[@]}" 2> >(grep -vE 'LOAD segment with RWX' >&2) \
     || { echo "linking failed" >&2; exit 1; }
 
-echo "$OUT ($(stat -c%s "$OUT") octets${DEFS[*]:+, ${DEFS[*]}})"
+fi_octets=$(stat -c%s "$TMP/kernel.o")
+echo "$OUT ($(stat -c%s "$OUT") octets, of which the Firn object is $fi_octets${DEFS[*]:+, ${DEFS[*]}})"
