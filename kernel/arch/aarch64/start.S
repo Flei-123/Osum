@@ -91,6 +91,33 @@ at_el1:
     b       2b
 3:
 
+    /* --- the counter-check switches.
+     *
+     * `tools/arm/run.sh` builds the image four more times with one thing
+     * deliberately broken, and the kernel has to KNOW which thing. Round ARM
+     * did that with `#ifdef` inside the assembly. The kernel is Firn now and
+     * Firn has no preprocessor, so the switches travel the way every other
+     * piece of kernel state travels on this side: as a word in `kstate_a64`,
+     * written here, read there. `.bss` was cleared four instructions ago, so
+     * this store has to come after it and not before.
+     */
+    mov     x1, #0
+#ifdef NO_MMU
+    orr     x1, x1, #1
+#endif
+#ifdef NO_AF
+    orr     x1, x1, #2
+#endif
+#ifdef NO_TIMER_IRQ
+    orr     x1, x1, #4
+#endif
+#ifdef NO_EOI
+    orr     x1, x1, #8
+#endif
+    adrp    x2, kstate_a64
+    add     x2, x2, :lo12:kstate_a64
+    str     x1, [x2, #40]
+
     /* --- the vector table. VBAR_EL1 wants a 2048-byte aligned address;
      * `vectors.S` guarantees it with `.balign 2048`. */
     adrp    x1, vector_table
@@ -98,8 +125,12 @@ at_el1:
     msr     vbar_el1, x1
     isb
 
-    /* --- into the kernel, with the device tree pointer that arrived in x0. */
-    bl      arch_main
+    /* --- into the kernel, with the device tree pointer that arrived in x0.
+     * KERN_MAIN is `_F0.start` out of `kernel/kmain_a64.fi`, put in at the
+     * link step with `--defsym` -- the same arrangement `kernel/arch/x86_64/
+     * start.s` uses, and for the same reason: this file cannot know which
+     * compiler stage prefixed the symbol. */
+    bl      KERN_MAIN
 
     /* If it ever returns: stop the machine the way this platform does. */
     b       arch_halt
@@ -122,6 +153,43 @@ arch_poweroff:
     hvc     #0
     b       arch_halt
 
+/* ------------------------------------------------------------- osum_panic ---
+ *
+ * Where the checked arithmetic of round 72 ends up when a value really does
+ * go out of range. The compiler leaves the symbol UNDEFINED on purpose: a
+ * kernel that never defines it gets a link error, which is the honest
+ * outcome (SPEC section 13).
+ *
+ * The hand-over is plain AAPCS64, and this is the one place A64 is simpler
+ * than x86-64 -- there the trampoline has to shuffle r9 into r8 first:
+ *   x0 = message pointer (into .rodata, no closing zero)
+ *   x1 = message length
+ *   x2, x3 = the two operands
+ *   x4 = which kind of overflow (PANIC_ADD=1 .. PANIC_CAST=6)
+ *   x5 = 1 when the two values are to be read as unsigned
+ *
+ * It prints the message on the PL011 and stops. No formatting of the
+ * operands: the message names the operation and the file, and a kernel that
+ * is already wrong is not the place to run more arithmetic.
+ */
+    .globl osum_panic
+osum_panic:
+    mov     x9, x0
+    mov     x10, x1
+    ldr     x11, =UART0
+5:  cbz     x10, 7f
+6:  ldr     w12, [x11, #UART_FR]
+    tst     w12, #UART_FR_TXFF
+    b.ne    6b
+    ldrb    w12, [x9], #1
+    str     w12, [x11, #UART_DR]
+    sub     x10, x10, #1
+    b       5b
+7:  mov     w12, #'\n'
+    str     w12, [x11, #UART_DR]
+    dsb     sy
+    b       arch_halt
+
 /* ------------------------------------------------------------------ stack */
 
     .section .bss
@@ -131,3 +199,17 @@ stack_bottom:
     .space  65536
     .globl stack_top
 stack_top:
+
+/* --- The kernel's own mutable state.
+ *
+ * Stage 0 of Firn has `const` and no mutable globals (SPEC 14, item 5). On
+ * x86-64 the kernel solves that by putting its state in a region whose
+ * address the assembly hands over -- `kdata` in `kernel/arch/x86_64/boot.s`,
+ * 0x60000 octets of it. This is the same idea at the size this side needs:
+ * five words, and `kernel/arch/aarch64/amain.fi` reaches them through
+ * `adrp`/`add` on this symbol.
+ */
+    .balign 64
+    .globl kstate_a64
+kstate_a64:
+    .space  256

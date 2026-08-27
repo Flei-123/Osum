@@ -114,7 +114,10 @@ vector_common:
 
     mov     x1, x0                          /* which entry */
     mov     x0, sp                          /* the frame   */
-    bl      arch_exception
+    /* KERN_TRAP is `_F0.amain__kexception`, put in with `--defsym` at the
+     * link step. The handler is Firn; only the register save above and the
+     * `eret` below have to be assembly. */
+    bl      KERN_TRAP
 
     ldr     x0,       [sp, #F_ELR]
     msr     elr_el1, x0
