@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-2.0-only
 # tools/k11/run.sh -- DER BEWEIS, DASS MAN AUF OSUM ARBEITEN KANN.
 #
 # Bis zu dieser Runde konnte auf diesem System niemand eine Datei

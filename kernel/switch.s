@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /* kernel/switch.s -- round 62: the context switch.
  *
  * The third and last non-Firn file of the kernel, and it is here for the
