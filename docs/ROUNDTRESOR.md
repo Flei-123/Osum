@@ -19,7 +19,9 @@ was built and what the measurements said.
 | `kernel/procfs.fi` | *additive*: `/proc/hwid` |
 | `kernel/user/sha.fi` | SHA-256 as a stream, any length |
 | `kernel/user/hwid.fi` | the raw values and a fingerprint over the stable ones |
-| `kernel/user/backup.fi` | `/bin/backup`: content-addressed backup |
+| `kernel/user/bstore.fi` | *addendum 2*: the block store, snapshots, restore -- the whole engine |
+| `kernel/user/backup.fi` | `/bin/backup`: a command line over `bstore` |
+| `kernel/user/explorer.fi` | *addendum 2*: "Backup hierhin sichern", and snapshots as folders |
 | `kernel/user/key.fi` | key management: wrap, unwrap, destroy |
 | `kernel/user/shat.fi` | the SHA-256 measurement, in ring 3 |
 | `tools/tresor/` | the runner, a second SMBIOS decoder, a memory dumper, a corrupter |
@@ -365,6 +367,80 @@ reaching a path -- and that the entry exists, and stores what it is told.
 A wrong list costs space or loses a program, and both faults belong to the
 producer, which is the side that has the information.
 
+## 5c. Addendum, 27.08.2026: the button in the file manager
+
+The owner described what he wanted in one sentence -- *plug in a stick,
+go into it, say "save a backup here", done* -- and asked whether that
+produces "a backup file, a ZIP or something".
+
+**It does not, and the answer carries the design.** What lands on the
+stick is a **directory**: a block store plus one text file per snapshot.
+`docs/BACKUP-UI.md` is the full argument; the short version is that a
+lump cannot share, cannot be partially rewritten, and cannot be browsed.
+Time Machine is a directory of shared files; Windows' Backup is a lump,
+and that is why the second one takes as long as the first.
+
+**One implementation, two front ends.** The store moved out of
+`backup.fi` into **`kernel/user/bstore.fi`**, and `/bin/backup` became a
+119-line command line over it. The file manager calls the same functions.
+The alternative -- letting the file manager run `/bin/backup` and scrape
+its output -- was less code on the day and a second definition of the
+format for ever after. The seam is a **function pointer**: `bstore` calls
+a progress hook after every file, which is how the dialog can show
+"Dateien / Oktette / neu" while the run is going.
+
+**Three views in the file manager**, and the whole of the browsing story:
+an ordinary directory; a store, showing its **snapshots** with the date
+they were taken and their size; and the inside of a snapshot, walkable
+like a folder, with "Zurueckholen" on one file or on the lot. The "Zeit"
+column, empty since round K15 because OFS inodes carry no timestamp,
+finally has something true to show: the snapshot header carries a **real
+date from the CMOS clock**, the same source `/bin/date` reads.
+
+**Measured** (`tools/tresor/run.sh` § 12):
+
+| | |
+|---|---:|
+| first backup of the tree | 44,384 octets written |
+| **second backup, nothing changed** | **0 octets** |
+| one octet changed in a 16,384-octet file | 4,096 octets, **11× less** |
+| same file in three folders | read 24,576, **written 8,192** |
+
+Restore of one file and of the whole tree compared **out of the disk
+image**: 4 of 4 identical.
+
+**Three faults found and fixed on the way:**
+
+1. `restore` recorded the mode and never applied it (found in the first
+   addendum, and it is what makes a restored program runnable).
+2. **A snapshot could be left half written.** Fixed properly rather than
+   narrowly: blocks go to `PACK` first, the snapshot is written under a
+   temporary `T-` name, `INDEX` follows, and `S-` appears last. Every
+   snapshot ends with an **`end` line**, and `restore`, `verify` and the
+   listing all refuse one without it. So a run that dies leaves wasted
+   space and never a backup that lies. This kernel has no `rename`, so
+   the last step is a copy of a small text file; if that fails the
+   half-written `S-` is removed again.
+3. **Backing up into your own source would have eaten itself.** `/daten`
+   is the source, and the first thing a user points at is a folder inside
+   `/daten`; the store would have grown while being walked. Refused now,
+   with the prefix check written so that `/datenkram` is not caught by it.
+
+**What is NOT proven, and it is the honest hole in this addendum:** the
+menu item is built and compiles, but `tools/tresor/gui.sh` does not yet
+land the mouse on the tree row that navigates up, so the **wiring between
+the menu item and the engine is not measured end to end**. The engine
+under it is measured, and it is the same module. The runner is left in
+the tree red and labelled rather than deleted or wired into `test.sh`.
+An earlier version of it *passed* that step falsely, because
+`grep 'explorer: cd /'` also matches `cd /daten` -- the assertion is now
+exact, which is why it is honestly red instead of dishonestly green.
+
+Two useful things survive the attempt: the file manager now reports
+`explorer: menurect` and `explorer: dlgrect`, so a test can click a menu
+item or a dialog button without guessing. The missing one is where the
+rows of the tree list sit.
+
 ## 6. What the next round would need
 
 Effort in rounds of this project:
@@ -383,3 +459,8 @@ Effort in rounds of this project:
 5. **`opk orphans` in PLAN2**, after which `tools/tresor/orphans.py`
    becomes the cross-check rather than the source, and the runner should
    assert the two outputs are equal.
+6. **Finish `tools/tresor/gui.sh`** -- it needs the file manager to report
+   where the rows of its tree list are, the way it now reports its menu
+   and its dialog. Small, and it closes the one hole in addendum 2.
+7. **A backup onto a FAT32 stick**, which `kernel/fat.fi` can already
+   write; and OFS3, after which an OFS target stops being a toy.

@@ -868,6 +868,185 @@ grep -qa 'gleich=True' "$TMPD/orphcmp.txt" \
     && ok "das verwaiste Paket ist OKTETT FUER OKTETT wieder da, aus dem Abbild gelesen" \
     || bad "das wiederhergestellte verwaiste Paket ist NICHT oktettgleich"
 
+# ====== 12. was der Entwurf taugt: Deduplizierung, Zuwachs, Rueckweg
+#
+# Der ZWEITE NACHTRAG vom 27.08.2026. Justins Frage war, ob beim Sichern
+# "eine Backup-Datei, ein ZIP oder so" herauskommt. Die Antwort ist nein,
+# und hier stehen die Zahlen, die erklaeren, warum das die bessere
+# Antwort ist:
+#
+#   * DIESELBE DATEI IN DREI ORDNERN liegt EINMAL im Speicher.
+#   * DERSELBE BAUM ZWEIMAL gesichert schreibt beim zweiten Mal NICHTS.
+#   * EINE GROSSE DATEI MINIMAL GEAENDERT kostet die geaenderten Bloecke
+#     und keinen Oktett mehr -- ein ZIP haette alles neu geschrieben.
+#   * WIEDERHERSTELLEN geht einzeln (eine Datei) und ganz (der Baum),
+#     und der WIRT vergleicht die Oktette aus dem Plattenabbild.
+#   * EIN ABGEBROCHENER LAUF hinterlaesst NICHTS, was wie eine fertige
+#     Sicherung aussieht.
+
+echo "== 12. Deduplizierung, Zuwachs und der Rueckweg =="
+
+python3 - "$TMPD" <<'PY2'
+import sys, os
+t = sys.argv[1]
+st = 0x139408DCBBF7A44
+def nxt():
+    global st
+    st ^= (st << 13) & 0xFFFFFFFFFFFFFFFF
+    st ^= st >> 7
+    st ^= (st << 17) & 0xFFFFFFFFFFFFFFFF
+    return st & 0xFF
+# 1. DIESELBE DATEI IN DREI ORDNERN. 8192 Oktette = genau zwei Bloecke.
+gleich = bytes(nxt() for _ in range(8192))
+for d in ("x", "y", "z"):
+    os.makedirs(t + "/drei/" + d, exist_ok=True)
+    open(t + "/drei/%s/gleich.bin" % d, "wb").write(gleich)
+# 2. DER BAUM, zweimal gesichert -- und einmal mit EINER kleinen Aenderung.
+os.makedirs(t + "/daten/sub", exist_ok=True)
+a = bytes(nxt() for _ in range(20000))
+b = bytes(nxt() for _ in range(16384))   # genau vier Bloecke
+c = bytes(nxt() for _ in range(8000))
+open(t + "/daten/a.txt", "wb").write(a)
+open(t + "/daten/b.bin", "wb").write(b)
+open(t + "/daten/sub/c.txt", "wb").write(c)
+# Dieselben Dateien, EIN Oktett anders -- im ERSTEN Block von b.bin.
+os.makedirs(t + "/daten2/sub", exist_ok=True)
+b2 = bytearray(b); b2[100] ^= 0xFF
+open(t + "/daten2/a.txt", "wb").write(a)
+open(t + "/daten2/b.bin", "wb").write(bytes(b2))
+open(t + "/daten2/sub/c.txt", "wb").write(c)
+open(t + "/BADLIST", "wb").write(b"deadbeefdeadbeefdead\n")
+print("%d %d %d" % (len(a), len(b), len(c)))
+PY2
+
+cat > "$TMPD/t_mess.sh" <<'EOS'
+echo ==DEDUP==
+backup save /drei /st1 d1
+echo ==RUN1==
+backup save /daten /st3 r1
+echo ==RUN2==
+backup save /daten /st3 r2
+echo ==RUN3==
+backup save /daten2 /st3 r3
+echo ==GET==
+backup get /st3 r1 /a.txt /got.bin
+echo ==REST==
+backup restore /st3 r1 /out
+echo ==LIST==
+backup list /st3
+echo ==ABBRUCH==
+backup save /daten /st4 k1 /BADLIST /daten
+echo ==NACHABBRUCH==
+backup list /st4
+echo ==RESTABBRUCH==
+backup restore /st4 k1 /out2
+echo ==END==
+EOS
+
+python3 tools/osum/mkfs.py build "$TMPD/dmess.img" $BLOCKS \
+    /bin/ /t/ /drei/ /drei/x/ /drei/y/ /drei/z/ \
+    /daten/ /daten/sub/ /daten2/ /daten2/sub/ \
+    /st1/ /st3/ /st4/ /out/ /out2/ /proc/ /dev/ \
+    /bin/sh="$TMPD/bin/sh.elf" /bin/cat="$TMPD/bin/cat.elf" \
+    /bin/echo="$TMPD/bin/echo.elf" /bin/backup="$TMPD/bin/backup.elf" \
+    /drei/x/gleich.bin="$TMPD/drei/x/gleich.bin" \
+    /drei/y/gleich.bin="$TMPD/drei/y/gleich.bin" \
+    /drei/z/gleich.bin="$TMPD/drei/z/gleich.bin" \
+    /daten/a.txt="$TMPD/daten/a.txt" /daten/b.bin="$TMPD/daten/b.bin" \
+    /daten/sub/c.txt="$TMPD/daten/sub/c.txt" \
+    /daten2/a.txt="$TMPD/daten2/a.txt" /daten2/b.bin="$TMPD/daten2/b.bin" \
+    /daten2/sub/c.txt="$TMPD/daten2/sub/c.txt" \
+    /BADLIST="$TMPD/BADLIST" /t/mess.sh="$TMPD/t_mess.sh" \
+    > "$TMPD/mkfs-mess.txt" 2>&1 \
+    && ok "mkfs.py baut den Messbaum" \
+    || { bad "mkfs.py fehlgeschlagen"; sed 's/^/        /' "$TMPD/mkfs-mess.txt" | head -6; }
+
+rc=$(lauf mess "$TMPD/dmess.img" "osum vfs nokbd script=sh /t/mess.sh;exit")
+is "der Messlauf endet ordentlich" "$rc" "21"
+M="$TMPD/mess.txt"
+mfeld() { sed -n "/^==$1==/,/^==/p" "$M" | grep -a "^$2: " | tail -1 | sed "s/^$2: //"; }
+
+# ---- 1. DIESELBE DATEI IN DREI ORDNERN -----------------------------------
+is "drei Ordner, dieselbe Datei: 6 Bloecke gesehen" "$(mfeld DEDUP 'chunks')" "6"
+is "aber nur ZWEI davon sind neu" "$(mfeld DEDUP 'new chunks')" "2"
+is "gelesen wurden alle 24576 Oktette" "$(mfeld DEDUP 'read bytes')" "24576"
+is "GESCHRIEBEN nur 8192 -- die Datei liegt EINMAL im Speicher" \
+   "$(mfeld DEDUP 'written bytes')" "8192"
+
+# ---- 2. ZWEITER LAUF, NICHTS GEAENDERT -----------------------------------
+W1=$(mfeld RUN1 'written bytes'); W2=$(mfeld RUN2 'written bytes')
+T1=$(mfeld RUN1 'ms');            T2=$(mfeld RUN2 'ms')
+R1=$(mfeld RUN1 'read bytes');    R2=$(mfeld RUN2 'read bytes')
+is "erster Lauf schreibt den ganzen Baum" "$W1" "44384"
+is "und das ist genau, was er gelesen hat -- ein letzter Block wird NICHT auf 4096 aufgefuellt" \
+   "$W1" "$R1"
+is "ZWEITER LAUF SCHREIBT NULL OKTETTE" "$W2" "0"
+is "und liest dabei trotzdem alles wieder" "$R2" "$R1"
+ok "ZAHLEN: 1. Lauf $W1 Oktette in ${T1} ms, 2. Lauf $W2 Oktette in ${T2} ms"
+echo "        (der Faktor ist kein Verhaeltnis, sondern eine Null:"
+echo "         $W1 -> $W2 Oktette bei gleichem Lesen von $R1)"
+
+# ---- 3. EINE GROSSE DATEI, EIN OKTETT ANDERS -----------------------------
+W3=$(mfeld RUN3 'written bytes'); N3=$(mfeld RUN3 'new chunks')
+is "EIN Oktett in b.bin geaendert: genau EIN neuer Block" "$N3" "1"
+is "das sind 4096 Oktette von 44384 gelesenen" "$W3" "4096"
+if [ -n "$W1" ] && [ -n "$W3" ] && [ "$W3" -gt 0 ] 2>/dev/null; then
+    F=$(awk -v a="$W1" -v b="$W3" 'BEGIN{printf "%.0f", a/b}')
+    ok "FAKTOR der kleinen Aenderung: $W1 -> $W3 Oktette, ${F}x weniger"
+fi
+
+# ---- 4. DER RUECKWEG -----------------------------------------------------
+sed -n '/^==GET==/,/^==REST==/p' "$M" | grep -qa 'backup:' \
+    && bad "backup get meldet einen Fehler" \
+    || ok "backup get holt die einzelne Datei ohne Fehler (die Oktette werden unten verglichen)"
+is "der ganze Baum kommt zurueck: die Wurzel und sub" "$(mfeld REST 'restored dirs')" "2"
+is "und 3 Dateien" "$(mfeld REST 'restored files')" "3"
+is "und 44384 Oktette" "$(mfeld REST 'restored bytes')" "44384"
+sed -n '/^==LIST==/,/^==ABBRUCH==/p' "$M" | grep -qa '^r1$' \
+    && ok "backup list nennt die drei Sicherungen" || bad "backup list nennt r1 nicht"
+
+python3 - "$TMPD/live-mess.img" "$TMPD" > "$TMPD/messcmp.txt" 2>&1 <<'PY2'
+import subprocess, sys
+img, t = sys.argv[1], sys.argv[2]
+def cat(p):
+    r = subprocess.run(["python3", "tools/osum/mkfs.py", "cat", img, p],
+                       capture_output=True)
+    return r.stdout if r.returncode == 0 else None
+paare = [("/daten/a.txt", "/out/a.txt"), ("/daten/b.bin", "/out/b.bin"),
+         ("/daten/sub/c.txt", "/out/sub/c.txt"), ("/daten/a.txt", "/got.bin")]
+gleich = 0
+for a, b in paare:
+    da, db = cat(a), cat(b)
+    if da is not None and db is not None and da == db:
+        gleich += 1
+    else:
+        print("UNGLEICH %s <-> %s" % (a, b))
+print("verglichen=%d gleich=%d" % (len(paare), gleich))
+PY2
+sed 's/^/        /' "$TMPD/messcmp.txt" | grep -v 'verglichen=' | head -4
+is "aus dem Abbild geprueft: jede Datei OKTETT FUER OKTETT (3 Dateien + 1 einzeln)" \
+   "$(grep -a '^verglichen=' "$TMPD/messcmp.txt")" "verglichen=4 gleich=4"
+
+# ---- 5. EIN ABGEBROCHENER LAUF HINTERLAESST NICHTS -----------------------
+sed -n '/^==ABBRUCH==/,/^==NACHABBRUCH==/p' "$M" | grep -qa 'could not be completed' \
+    && ok "ein Lauf, der scheitert, sagt es" \
+    || bad "der gescheiterte Lauf meldet nichts"
+sed -n '/^==NACHABBRUCH==/,/^==RESTABBRUCH==/p' "$M" | grep -qa '^k1$' \
+    && bad "die abgebrochene Sicherung k1 wird aufgelistet -- sie sieht aus wie eine fertige" \
+    || ok "danach steht KEINE Sicherung im Speicher -- kein halbes Backup"
+sed -n '/^==RESTABBRUCH==/,/^==END==/p' "$M" | grep -qa 'no such snapshot' \
+    && ok "und wiederherstellen laesst sich daraus auch nichts" \
+    || bad "aus dem abgebrochenen Lauf laesst sich etwas wiederherstellen"
+
+# GEGENPROBE AM ABBILD: liegt da wirklich kein S-, und auch kein T-?
+python3 tools/osum/mkfs.py list "$TMPD/live-mess.img" > "$TMPD/mess.ls" 2>&1
+grep -qE '/st4/S-' "$TMPD/mess.ls" \
+    && bad "im Abbild liegt eine S-Datei aus dem abgebrochenen Lauf" \
+    || ok "GEGENPROBE im Abbild: /st4 hat keine S-Datei"
+grep -qE '/st4/T-' "$TMPD/mess.ls" \
+    && bad "die halbfertige T-Datei ist liegengeblieben" \
+    || ok "GEGENPROBE im Abbild: die halbfertige T-Datei ist weggeraeumt"
+
 # ============================================================= Schluss
 
 echo

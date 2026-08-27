@@ -329,6 +329,18 @@ octets nobody else has. Measured: one such package costs **+29,128
 octets, +67.6 %** on a realistic backup set, and a second machine holding
 *only* the backup store restores it byte for byte and **runs** it.
 
+Backing up is **a menu entry in the file manager**, not a command to
+learn: right-click a folder or a stick → *"Backup hierhin sichern"*. What
+lands there is a **directory**, not a ZIP -- a block store plus one text
+file per snapshot -- so the second backup of an unchanged tree writes
+**0 octets**, one changed octet in a 16 KiB file costs **4,096 instead of
+44,384** (11× less), and the same file in three folders is stored once.
+Going *into* a backup shows the snapshots with the date they were taken,
+and you can walk into one and fetch a single file back like any other
+copy. `docs/BACKUP-UI.md` has the numbers and the honest limits --
+including that the menu entry itself is built but not yet measured end to
+end.
+
 And the **key management** that disk encryption would hang off
 (`/bin/key`): a random data key, wrapped by a passphrase-derived key
 (PBKDF2-HMAC-SHA256, measured against Python), authenticated before it is
