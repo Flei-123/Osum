@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """tools/kernel/karte.py -- DIE SPEICHERKARTE VON `kdata` MECHANISCH PRUEFEN.
 
-Der Kernel hat EINEN zusammenhaengenden Datenbereich (`kernel/boot.s`,
+Der Kernel hat EINEN zusammenhaengenden Datenbereich (`kernel/arch/x86_64/boot.s`,
 Symbol `kdata`, KDATA_SIZE Oktette), und jede Runde nimmt sich daraus
 Seiten: die Aufgabentabelle, die Seitentabellen, das PCI-Geraeteverzeichnis,
 die NVMe-Warteschlangen, die Deskriptoren, die Signale, die Terminals, der
@@ -135,7 +135,7 @@ BEREICHE = [
     # RUNDE K18: die Energieschicht.  Ihr Vorrat ist 0x58000..0x60000 --
     # er liegt HINTER der alten Grenze KDATA_SIZE (0x50000), und deshalb
     # hat diese Runde `kdata` von 0x50000 auf 0x60000 wachsen lassen
-    # (kstate.fi UND kernel/boot.s, beide Zahlen muessen gleich sein).
+    # (kstate.fi UND kernel/arch/x86_64/boot.s, beide Zahlen muessen gleich sein).
     # Belegt sind zwei Seiten: die Skalare der Energieschicht und das,
     # was aus den ACPI-Tabellen ueber Akku, Netzteil und Thermalzone
     # gelesen wurde.  Der Rest des Vorrats bleibt frei.

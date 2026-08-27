@@ -10,7 +10,7 @@
 #      `_start`, no runtime -- EXCEPT `osum_panic` (round 72: `core.fi`
 #      now uses checked arithmetic, and `profile kernel` calls that one
 #      external symbol on an out-of-range value on purpose, SPEC section
-#      13; `kernel/start.s` defines it, resolved at the link step
+#      13; `kernel/arch/x86_64/start.s` defines it, resolved at the link step
 #      in part 3 below). (`nm -u` yields at most that one name.)
 #   3. It contains not a single `syscall` instruction (`objdump -d`).
 #   4. It can be linked with `ld -T kernel/linker.ld` into an image
@@ -77,7 +77,7 @@ for s in 0 1; do
     # as u16`), and under `profile kernel` a checked site that goes out of
     # range calls that external symbol on purpose (SPEC section 13, `L9`);
     # this object file is freestanding and has not been linked against
-    # `kernel/start.s`'s own definition of it yet (section 3 below
+    # `kernel/arch/x86_64/start.s`'s own definition of it yet (section 3 below
     # is where that happens, and where the reference gets resolved for
     # real). Anything ELSE undefined is still a hard failure.
     undef=$(nm -u "$f" 2>/dev/null | awk '{print $NF}' | sed '/^$/d' | grep -vxF osum_panic)
@@ -95,7 +95,7 @@ for s in 0 1; do
 done
 
 echo "== 3. link against the linker script (no libc, no crt files) =="
-as --64 -o "$TMPD/start.o" kernel/start.s 2>"$TMPD/as.err" \
+as --64 -o "$TMPD/start.o" kernel/arch/x86_64/start.s 2>"$TMPD/as.err" \
     && ok "start.s assembles (multiboot header, long mode)" \
     || { bad "start.s"; sed 's/^/        /' "$TMPD/as.err" | head -5; }
 for s in 0 1; do

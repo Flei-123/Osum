@@ -79,7 +79,7 @@ for s in 0 1; do
     # ROUND 72: `osum_panic` is the ONE name allowed to stay undefined here.
     # Checked arithmetic (SPEC section 13, item L9) calls that external
     # symbol under `profile kernel` when a value goes out of range, on
-    # purpose; `kernel/start.s` defines it and the link step resolves
+    # purpose; `kernel/arch/x86_64/start.s` defines it and the link step resolves
     # it. Anything ELSE undefined is still a hard failure. The same
     # exception is made in tools/freestanding/run.sh and tools/kernel/run.sh.
     undef=$(nm -u "$f" 2>/dev/null | awk '{print $NF}' | sed '/^$/d' | grep -vxF osum_panic)
@@ -110,7 +110,7 @@ for s in 0 1; do
 done
 
 echo "== 3. it boots, and it says what it computed =="
-as --64 -o "$TMPD/start.o" kernel/start.s 2>"$TMPD/as.err" \
+as --64 -o "$TMPD/start.o" kernel/arch/x86_64/start.s 2>"$TMPD/as.err" \
     && ok "start.s assembles" \
     || { bad "start.s"; sed 's/^/        /' "$TMPD/as.err" | head -5; }
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
