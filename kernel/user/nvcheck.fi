@@ -1,0 +1,301 @@
+// kernel/user/nvcheck.fi -- round NETVIEW: the program that is MEASURED.
+//
+// Every other program in this round exists to do something. This one
+// exists to produce numbers, in the shape `tools/netview/run.sh` reads
+// back:
+//
+//     nvc: <tag>_<key> <value>
+//
+//     nvcheck <tag> <a.b.c.d> <port>
+//
+// WHAT IT DOES, in this order, timing each step with CLOCK_MONOTONIC:
+//
+//   socket -> connect -> send an HTTP/1.0 request -> read to the end ->
+//   close
+//
+// and it prints, per step, the microseconds it took and what came back.
+// It does NOT set its own view: it is started under `netview <view>
+// nvcheck ...`, so what it measures is whatever view it inherited. That
+// is on purpose -- a program that could see its own view here would be
+// measuring the measurement.
+//
+// WHY MICROSECONDS AND NOT TICKS. `/bin/ping` prints milliseconds out of
+// the tick counter and says in its own comment that the resolution is
+// ten of them. The whole claim of the faked view is that it does not
+// wait, and "under ten milliseconds" is not a measurement of that -- a
+// faked connect takes a few microseconds and a real one on this wire
+// takes hundreds. CLOCK_MONOTONIC comes out of the cycle counter (round
+// K9) and can tell them apart.
+//
+// THE COUNTER-CHECK IS BUILT IN: the same program, the same arguments,
+// four different views, one image. A run in which `faked` and `real`
+// produced the same numbers would mean the view did nothing.
+
+profile kernel
+
+import ulib
+import libc.kcall
+import libc.net
+import libc.stdio
+
+export { u_start }
+
+const CLOCK_MONOTONIC: u64 = 1
+const CAP: u64 = 2048
+
+fn now_us() -> u64 {
+    var ts: [u64; 2] = [0 as u64; 2]
+    kcall.sys2(kcall.SYS_CLOCK_GETTIME, CLOCK_MONOTONIC,
+        (&ts[0 as usize]) as u64)
+    return (ts[0 as usize] *% 1000000) +% (ts[1 as usize] / 1000)
+}
+
+// `nvc: <tag>_<key> <value>`. The tag is what the runner uses to tell
+// the four views apart in one serial log.
+fn tell(tag: u64, key: u64, v: u64) {
+    var head: [u8; 6] = "nvc: \0"
+    var us: [u8; 2] = "_\0"
+    var sp: [u8; 2] = " \0"
+    stdio.say((&head[0]) as u64)
+    stdio.say(tag)
+    stdio.say((&us[0]) as u64)
+    stdio.say(key)
+    stdio.say((&sp[0]) as u64)
+    stdio.say_num(v)
+    stdio.nl()
+    stdio.flush()
+}
+
+fn u_start(args: u64) -> u64 {
+    var s_use: [u8; 39] = "usage: nvcheck <tag> <a.b.c.d> <port>\0\0"
+    var k_view: [u8; 5] = "view\0"
+    var k_sock: [u8; 5] = "sock\0"
+    var k_conn: [u8; 5] = "conn\0"
+    var k_cus: [u8; 8] = "conn_us\0"
+    var k_send: [u8; 5] = "send\0"
+    var k_body: [u8; 5] = "body\0"
+    var k_rus: [u8; 8] = "read_us\0"
+    var k_tus: [u8; 9] = "total_us\0"
+    var k_stat: [u8; 7] = "status\0"
+    var k_ip: [u8; 3] = "ip\0"
+    var k_gw: [u8; 3] = "gw\0"
+    var k_rdy: [u8; 6] = "ready\0"
+    var k_dns: [u8; 4] = "dns\0"
+    var req: [u8; 128] = [0 as u8; 128]
+    var buf: [u8; 2048] = [0 as u8; 2048]
+
+    if ulib.arg_count(args) < 4 {
+        ulib.esay_line((&s_use[0]) as u64, 0)
+        return 1
+    }
+    let tag: u64 = ulib.arg_at(args, 1)
+    let host: u64 = net.parse_ip(ulib.arg_at(args, 2))
+    let port: u64 = ulib.to_num(ulib.arg_at(args, 3))
+
+    // What the process BELIEVES about its network, before it tries to
+    // use it. In `faked` these three are the invented ones out of
+    // TEST-NET-2 and the program cannot tell.
+    tell(tag, (&k_view[0]) as u64, ulib.view_of(0))
+    tell(tag, (&k_rdy[0]) as u64, netget(0))
+    tell(tag, (&k_ip[0]) as u64, netget(1))
+    tell(tag, (&k_gw[0]) as u64, netget(3))
+
+    let t_all: u64 = now_us()
+    let fd: u64 = net.tcp_socket()
+    tell(tag, (&k_sock[0]) as u64, coded(fd))
+    if net.failed(fd) {
+        tell(tag, (&k_tus[0]) as u64, now_us() -% t_all)
+        return 0
+    }
+
+    let t0: u64 = now_us()
+    let c: u64 = net.connect_to(fd, host, port)
+    let t1: u64 = now_us()
+    tell(tag, (&k_conn[0]) as u64, coded(c))
+    tell(tag, (&k_cus[0]) as u64, t1 -% t0)
+    if net.failed(c) {
+        net.close(fd)
+        tell(tag, (&k_tus[0]) as u64, now_us() -% t_all)
+        return 0
+    }
+
+    let n: u64 = build_request((&req[0]) as u64)
+    let w: u64 = net.send_all(fd, (&req[0]) as u64, n)
+    tell(tag, (&k_send[0]) as u64, coded(w))
+
+    // Read until the end of the stream. A view that hangs would hang
+    // HERE, and the runner's own time limit would catch it -- but the
+    // number below says it in microseconds instead.
+    let t2: u64 = now_us()
+    var got: u64 = 0
+    var status: u64 = 0
+    var going: bool = true
+    while going {
+        let r: u64 = net.recv_some(fd, (&buf[0]) as u64, CAP)
+        if net.failed(r) || r == 0 {
+            going = false
+        } else {
+            if got == 0 {
+                status = status_of((&buf[0]) as u64, r)
+            }
+            got = got + r
+            if got >= 65536 {
+                going = false
+            }
+        }
+    }
+    let t3: u64 = now_us()
+    net.close(fd)
+    tell(tag, (&k_body[0]) as u64, got)
+    tell(tag, (&k_stat[0]) as u64, status)
+    tell(tag, (&k_rus[0]) as u64, t3 -% t2)
+    tell(tag, (&k_tus[0]) as u64, now_us() -% t_all)
+
+    // And one datagram to port 53, because a program that cannot
+    // resolve a name never reaches the code above. What comes back in
+    // `faked` is an A record; what comes back in `none` is nothing.
+    tell(tag, (&k_dns[0]) as u64, dns_probe(host, (&buf[0]) as u64))
+    return 0
+}
+
+// A negative kernel answer is turned into 1000000 + the error number, so
+// that ONE unsigned column can carry both "it worked" and "it said
+// -ENETUNREACH" and the runner can tell them apart without parsing text.
+fn coded(v: u64) -> u64 {
+    if net.failed(v) {
+        return 1000000 + (0 -% v)
+    }
+    return v
+}
+
+fn netget(what: u64) -> u64 {
+    let v: u64 = ulib.sys(1300, what, 0, 0)
+    if ulib.bad(v) {
+        return 0
+    }
+    return v
+}
+
+fn build_request(dst: u64) -> u64 {
+    var line: [u8; 20] = "GET /probe HTTP/1.0\0"
+    var hh: [u8; 19] = "Host: netview.test\0"
+    var at: u64 = 0
+    at = copy_text(dst, at, (&line[0]) as u64)
+    at = crlf(dst, at)
+    at = copy_text(dst, at, (&hh[0]) as u64)
+    at = crlf(dst, at)
+    at = crlf(dst, at)
+    return at
+}
+
+fn copy_text(dst: u64, at: u64, src: u64) -> u64 {
+    var o: u64 = at
+    var i: u64 = 0
+    while byte_at(src, i) != 0 {
+        put_byte(dst, o, byte_at(src, i))
+        o = o + 1
+        i = i + 1
+    }
+    return o
+}
+
+fn crlf(dst: u64, at: u64) -> u64 {
+    put_byte(dst, at, 13)
+    put_byte(dst, at + 1, 10)
+    return at + 2
+}
+
+fn byte_at(p: u64, i: u64) -> u64 {
+    return (*((p + i) as *mut u8)) as u64
+}
+
+fn put_byte(p: u64, i: u64, v: u64) {
+    __mmio_write8((p + i) as *mut u8, (v & 0xFF) as u8)
+}
+
+// The three digits after `HTTP/1.x `. 0 if what came back does not look
+// like a status line at all -- which is itself a measurement.
+fn status_of(p: u64, n: u64) -> u64 {
+    if n < 12 {
+        return 0
+    }
+    if byte_at(p, 0) != 72 || byte_at(p, 1) != 84 {
+        return 0
+    }
+    var v: u64 = 0
+    var i: u64 = 9
+    while i < 12 {
+        let c: u64 = byte_at(p, i)
+        if c < 48 || c > 57 {
+            return 0
+        }
+        v = v * 10 + (c - 48)
+        i = i + 1
+    }
+    return v
+}
+
+// One DNS question for `netview.test`, and what the answer says the
+// address is. 0 means no answer came. The question is built by hand
+// because this system has no resolver -- which is exactly why the faked
+// view has to answer one.
+fn dns_probe(server: u64, buf: u64) -> u64 {
+    var q: [u8; 64] = [0 as u8; 64]
+    let fd: u64 = net.udp_socket()
+    if net.failed(fd) {
+        return 0
+    }
+    var at: u64 = 0
+    put_byte((&q[0]) as u64, 0, 0x4E) // identifier
+    put_byte((&q[0]) as u64, 1, 0x56)
+    put_byte((&q[0]) as u64, 2, 0x01) // recursion desired
+    put_byte((&q[0]) as u64, 3, 0x00)
+    put_byte((&q[0]) as u64, 4, 0x00) // QDCOUNT 1
+    put_byte((&q[0]) as u64, 5, 0x01)
+    at = 6
+    while at < 12 {
+        put_byte((&q[0]) as u64, at, 0)
+        at = at + 1
+    }
+    var l1: [u8; 8] = "netview\0"
+    var l2: [u8; 5] = "test\0"
+    at = put_label((&q[0]) as u64, at, (&l1[0]) as u64)
+    at = put_label((&q[0]) as u64, at, (&l2[0]) as u64)
+    put_byte((&q[0]) as u64, at, 0) // end of name
+    put_byte((&q[0]) as u64, at + 1, 0) // QTYPE A
+    put_byte((&q[0]) as u64, at + 2, 1)
+    put_byte((&q[0]) as u64, at + 3, 0) // QCLASS IN
+    put_byte((&q[0]) as u64, at + 4, 1)
+    at = at + 5
+    let s: u64 = net.sendto_ip(fd, (&q[0]) as u64, at, server, 53)
+    if net.failed(s) {
+        net.close(fd)
+        return 0
+    }
+    var from: u64 = 0
+    let r: u64 = net.recvfrom_ip(fd, buf, 512, &from)
+    net.close(fd)
+    if net.failed(r) || r < 16 {
+        return 0
+    }
+    // The last four octets of an answer that carries one A record.
+    if byte_at(buf, 7) == 0 {
+        return 0
+    }
+    return (byte_at(buf, r - 4) << 24) | (byte_at(buf, r - 3) << 16)
+        | (byte_at(buf, r - 2) << 8) | byte_at(buf, r - 1)
+}
+
+fn put_label(p: u64, at: u64, text: u64) -> u64 {
+    var n: u64 = 0
+    while byte_at(text, n) != 0 {
+        n = n + 1
+    }
+    put_byte(p, at, n)
+    var i: u64 = 0
+    while i < n {
+        put_byte(p, at + 1 + i, byte_at(text, i))
+        i = i + 1
+    }
+    return at + 1 + n
+}

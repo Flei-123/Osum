@@ -139,8 +139,11 @@ measure is not printed as zero.)
 
 ## 4. What was measured
 
-`bash tools/desktop/run.sh` — real QEMU boots, real mouse packets through
-the QEMU monitor, screenshots through `screendump`.
+`bash tools/desktop/run.sh` — **102 claims, 0 failures**, eleven QEMU
+boots, real mouse packets through the QEMU monitor, eight screenshots
+through `screendump`. They are committed as PNG under
+[`docs/shots/taskbar/`](shots/taskbar): `bottom`, `top`, `left`,
+`right`, `nostrut`, `after-drag`, `autohide`, `settings`.
 
 ### 4.1 The four edges, by arithmetic
 
@@ -182,14 +185,20 @@ second, independent rasterization (`tools/gfx/schau.py tkette`).
 Tolerance zero. This is the lesson of round K7B, where text was "87 per
 cent correct" while every letter was missing.
 
-| edge | `Start` | clock | battery | net | window button |
-|---|---:|---:|---:|---:|---:|
-| bottom | 200 / 0 wrong | 216 / 0 | 406 / 0 | 435 / 0 | 458 / 0 |
-| top | 200 / 0 | 216 / 0 | 406 / 0 | 435 / 0 | 458 / 0 |
-| left | 200 / 0 | 249 / 0 | 406 / 0 | 435 / 0 | 361 / 0 |
-| right | 200 / 0 | 214 / 0 | 406 / 0 | 435 / 0 | 361 / 0 |
+| edge | `Start` | clock | battery | net | window button | total |
+|---|---:|---:|---:|---:|---:|---:|
+| bottom | 200 / **0** | 210 / **0** | 406 / **0** | 435 / **0** | 458 / **0** | 1709 / **0** |
+| top | 200 / **0** | 210 / **0** | 406 / **0** | 435 / **0** | 458 / **0** | 1709 / **0** |
+| left | 200 / **0** | 216 / **0** | 406 / **0** | 435 / **0** | 361 / **0** | 1618 / **0** |
+| right | 200 / **0** | 216 / **0** | 406 / **0** | 435 / **0** | 361 / **0** | 1618 / **0** |
 
-(inked pixels checked / wrong)
+(inked pixels checked / wrong — **6654 pixels, 0 wrong**, tolerance zero)
+
+The window button reads `Terminal -- sh` at the horizontal edges and
+`Terminal -- ` at the vertical ones: 98 pixels of button width instead
+of 132, so the label was shortened — and the SHORTENED text is what was
+reported and what was checked. That is the difference between shortening
+and clipping.
 
 ### 4.4 Dragging
 
@@ -218,7 +227,7 @@ The same disk image, booted a second time, no monitor input:
 | | |
 |---|---:|
 | pointer leaves the bar → bar slides out | yes |
-| pointer reaches the edge → **bar stands there again after** | see run |
+| pointer reaches the edge → **bar stands there again after** | **60 ms** |
 | reservation while out, and while in | **2 px, both** |
 | work area with auto-hide on | 800 × 598 |
 
@@ -265,7 +274,7 @@ the round shipped anyway. Measured, not guessed:
 |---|---|
 | `main` (3389fbd) | 103 passed, 0 failed |
 | round DESKTOP (d7bdcfc) | 100 passed, **3 failed** — the three titles |
-| this branch | see section 6 |
+| this branch | 103 passed, 0 failed — the one-line fix |
 
 **2. `kernel/user/leiste.fi` had never been compiled.** Round DESKTOP
 wrote 695 lines of taskbar and no runner to build them; the file did not
@@ -285,11 +294,15 @@ taskbar edge.
 
 ## 6. Self-tests and the older runners
 
-| | before | after |
-|---|---:|---:|
-| `wm.selftest` | 21 claims (20 passing at d7bdcfc) | **30 / 30** |
-| `tools/wm/run.sh` | 103 / 0 on `main`, 100 / 3 at d7bdcfc | see run |
-| `tools/k15/run.sh` | — | see run |
+| | `main` (3389fbd) | round DESKTOP (d7bdcfc) | this branch |
+|---|---:|---:|---:|
+| `wm.selftest` | 17 / 17 | **20 / 21** | **30 / 30** |
+| `tools/wm/run.sh` | **103 passed, 0 failed** | 100 passed, **3 failed** | **103 passed, 0 failed** |
+| `tools/k15/run.sh` | 251 passed, 0 failed | — | **251 passed, 0 failed** |
+| `tools/desktop/run.sh` | did not exist | did not exist | **102 passed, 0 failed** |
+
+All three numbers were measured, not assumed: `main` and `d7bdcfc` were
+checked out into their own worktrees and run.
 
 Claims 22–30 in `wm.selftest` are the new ones: work area without a
 strut, a bottom strut, maximize into the work area, disjointness, moving
