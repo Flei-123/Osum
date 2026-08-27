@@ -71,6 +71,7 @@ import cpu
 import atomic
 import uio
 import blk
+import hwid
 
 export { ops, node_root }
 
@@ -101,7 +102,12 @@ const G_UPTIME: u64 = 3
 const G_MOUNTS: u64 = 4
 const G_STAT: u64 = 5
 const G_VERSION: u64 = 6
-const G_LAST: u64 = 6
+// RUNDE TRESOR: /proc/hwid -- die Geraeteidentitaet. Sie steht HIER und
+// nicht hinter einem eigenen Systemaufruf, weil sie genau das ist, was
+// /proc gut kann: ein Blick auf den Kernzustand, den ein Programm in Ring
+// 3 ohne eigene ABI lesen darf.
+const G_HWID: u64 = 7
+const G_LAST: u64 = 7
 
 // Die Dateien je Prozess.
 const F_STATUS: u64 = 1
@@ -508,6 +514,159 @@ fn make_version(state: u64) -> u64 {
     return p
 }
 
+// ---------------------------------------------- RUNDE TRESOR: /proc/hwid
+//
+// Zeilen der Form `schluessel: wert`, weil das Format von /proc/meminfo
+// dasselbe ist und ein Werkzeug, das eines lesen kann, dann beide kann.
+//
+// EIN LEERER WERT IST EINE AUSSAGE, keine Luecke: er heisst "diese
+// Maschine gibt das nicht her". Genau deshalb steht auch `..._valid`
+// daneben -- sechzehn Nulloktette sind eine UUID, die keine ist, und ein
+// Fingerabdruck, der sie mitrechnet, waere auf jeder Standard-VM dieser
+// Welt derselbe.
+
+fn w_field(state: u64, at: u64, label: u64, which: u64) -> u64 {
+    var p: u64 = at
+    p = w_str(state, p, label)
+    let src: u64 = hwid.field(state, which)
+    let n: u64 = hwid.field_len(state, which)
+    var i: u64 = 0
+    while i < n {
+        p = w_ch(state, p, kstate.get8(src + i))
+        i = i + 1
+    }
+    return w_nl(state, p)
+}
+
+fn w_hexb(state: u64, at: u64, v: u64) -> u64 {
+    var p: u64 = at
+    let hi: u64 = (v >> 4) & 15
+    let lo: u64 = v & 15
+    if hi < 10 {
+        p = w_ch(state, p, hi + 48)
+    } else {
+        p = w_ch(state, p, hi + 87)
+    }
+    if lo < 10 {
+        p = w_ch(state, p, lo + 48)
+    } else {
+        p = w_ch(state, p, lo + 87)
+    }
+    return p
+}
+
+// Die UUID in der gewohnten Schreibweise 8-4-4-4-12. Die ersten drei
+// Gruppen stehen im Speicher KLEINENDIG (SMBIOS 2.6 und spaeter), die
+// letzten beiden so, wie sie geschrieben werden -- wer alle sechzehn
+// Oktette der Reihe nach ausgibt, bekommt eine andere UUID als jedes
+// andere Werkzeug auf derselben Maschine.
+fn w_uuid(state: u64, at: u64) -> u64 {
+    let src: u64 = hwid.field(state, hwid.F_UUID)
+    var p: u64 = at
+    var order: [u8; 16] = [3 as u8, 2 as u8, 1 as u8, 0 as u8,
+        5 as u8, 4 as u8, 7 as u8, 6 as u8,
+        8 as u8, 9 as u8, 10 as u8, 11 as u8,
+        12 as u8, 13 as u8, 14 as u8, 15 as u8]
+    var i: u64 = 0
+    while i < 16 {
+        if i == 4 || i == 6 || i == 8 || i == 10 {
+            p = w_ch(state, p, 45)
+        }
+        p = w_hexb(state, p, kstate.get8(src + kstate.get8((&order[0]) as u64 + i)))
+        i = i + 1
+    }
+    return p
+}
+
+fn make_hwid(state: u64) -> u64 {
+    var l_sm: [u8; 22] = "system_manufacturer: \0"
+    var l_sp: [u8; 17] = "system_product: \0"
+    var l_sv: [u8; 17] = "system_version: \0"
+    var l_ss: [u8; 16] = "system_serial: \0"
+    var l_bm: [u8; 21] = "board_manufacturer: \0"
+    var l_bp: [u8; 16] = "board_product: \0"
+    var l_bs: [u8; 15] = "board_serial: \0"
+    var l_uu: [u8; 7] = "uuid: \0"
+    var l_uv: [u8; 13] = "uuid_valid: \0"
+    var l_ns: [u8; 14] = "nvme_serial: \0"
+    var l_nm: [u8; 13] = "nvme_model: \0"
+    var l_nv: [u8; 13] = "nvme_valid: \0"
+    var l_ma: [u8; 6] = "mac: \0"
+    var l_mv: [u8; 12] = "mac_valid: \0"
+    var l_sb: [u8; 10] = "smbios: \0\0"
+    var l_sc: [u8; 20] = "smbios_structures: \0"
+    var l_ok: [u8; 12] = "smbios_ok: \0"
+    var dot: [u8; 2] = ".\0"
+
+    // Die spaeten Quellen nachholen. `hwid.refresh` weiss selbst, dass es
+    // hoechstens achtmal fragt -- eine Maschine ohne Laufwerk soll nicht
+    // bei jedem `cat` einen Admin-Befehl bezahlen.
+    hwid.refresh(state)
+
+    var p: u64 = 0
+    p = w_field(state, p, (&l_sm[0]) as u64, hwid.F_SYS_MANUF)
+    p = w_field(state, p, (&l_sp[0]) as u64, hwid.F_SYS_PRODUCT)
+    p = w_field(state, p, (&l_sv[0]) as u64, hwid.F_SYS_VERSION)
+    p = w_field(state, p, (&l_ss[0]) as u64, hwid.F_SYS_SERIAL)
+    p = w_field(state, p, (&l_bm[0]) as u64, hwid.F_BOARD_MANUF)
+    p = w_field(state, p, (&l_bp[0]) as u64, hwid.F_BOARD_PRODUCT)
+    p = w_field(state, p, (&l_bs[0]) as u64, hwid.F_BOARD_SERIAL)
+    p = w_str(state, p, (&l_uu[0]) as u64)
+    p = w_uuid(state, p)
+    p = w_nl(state, p)
+    p = w_str(state, p, (&l_uv[0]) as u64)
+    if hwid.have_uuid(state) {
+        p = w_num(state, p, 1)
+    } else {
+        p = w_num(state, p, 0)
+    }
+    p = w_nl(state, p)
+    p = w_field(state, p, (&l_ns[0]) as u64, hwid.F_NVME_SERIAL)
+    p = w_field(state, p, (&l_nm[0]) as u64, hwid.F_NVME_MODEL)
+    p = w_str(state, p, (&l_nv[0]) as u64)
+    if hwid.have_nvme(state) {
+        p = w_num(state, p, 1)
+    } else {
+        p = w_num(state, p, 0)
+    }
+    p = w_nl(state, p)
+    // Die MAC-Adresse in der gewohnten Schreibweise mit Doppelpunkten.
+    p = w_str(state, p, (&l_ma[0]) as u64)
+    let m: u64 = hwid.field(state, hwid.F_MAC)
+    var i: u64 = 0
+    while i < 6 {
+        if i > 0 {
+            p = w_ch(state, p, 58)
+        }
+        p = w_hexb(state, p, kstate.get8(m + i))
+        i = i + 1
+    }
+    p = w_nl(state, p)
+    p = w_str(state, p, (&l_mv[0]) as u64)
+    if hwid.have_mac(state) {
+        p = w_num(state, p, 1)
+    } else {
+        p = w_num(state, p, 0)
+    }
+    p = w_nl(state, p)
+    p = w_str(state, p, (&l_sb[0]) as u64)
+    p = w_num(state, p, hwid.version_major(state))
+    p = w_str(state, p, (&dot[0]) as u64)
+    p = w_num(state, p, hwid.version_minor(state))
+    p = w_nl(state, p)
+    p = w_str(state, p, (&l_sc[0]) as u64)
+    p = w_num(state, p, hwid.structures(state))
+    p = w_nl(state, p)
+    p = w_str(state, p, (&l_ok[0]) as u64)
+    if hwid.ok(state) {
+        p = w_num(state, p, 1)
+    } else {
+        p = w_num(state, p, 0)
+    }
+    p = w_nl(state, p)
+    return p
+}
+
 // ------------------------------------------------- die Dateien je Prozess
 
 fn make_status(state: u64, t: u64) -> u64 {
@@ -779,6 +938,9 @@ fn build(state: u64, n: u64) -> u64 {
         if sub == G_VERSION {
             return make_version(state)
         }
+        if sub == G_HWID {
+            return make_hwid(state)
+        }
         return 0
     }
     if art == K_PIDFILE {
@@ -864,8 +1026,12 @@ fn global_of(name: u64) -> u64 {
     var d: [u8; 7] = "mounts\0"
     var e: [u8; 5] = "stat\0"
     var f: [u8; 8] = "version\0"
+    var g: [u8; 5] = "hwid\0"
     if streq(name, (&a[0]) as u64) {
         return G_MEMINFO
+    }
+    if streq(name, (&g[0]) as u64) {
+        return G_HWID
     }
     if streq(name, (&b[0]) as u64) {
         return G_CPUINFO
@@ -983,6 +1149,7 @@ fn global_name(state: u64, sub: u64, out: u64) {
     var d: [u8; 7] = "mounts\0"
     var e: [u8; 5] = "stat\0"
     var f: [u8; 8] = "version\0"
+    var g: [u8; 5] = "hwid\0"
     var src: u64 = (&a[0]) as u64
     if sub == G_CPUINFO {
         src = (&b[0]) as u64
@@ -994,6 +1161,8 @@ fn global_name(state: u64, sub: u64, out: u64) {
         src = (&e[0]) as u64
     } else if sub == G_VERSION {
         src = (&f[0]) as u64
+    } else if sub == G_HWID {
+        src = (&g[0]) as u64
     }
     var i: u64 = 0
     while kstate.get8(src + i) != 0 {

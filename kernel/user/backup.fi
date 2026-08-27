@@ -1,0 +1,203 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/backup.fi -- round TRESOR: /bin/backup, the command line.
+//
+//     backup save <set> <store> <name> [orphans [tree]]  write a snapshot
+//     backup list    <store>                     which snapshots are there
+//     backup restore <store> <name> <target>     the whole tree back
+//     backup get     <store> <name> <path> <to>  ONE file back
+//     backup verify  <store> <name>              every block against its hash
+//
+// and on every one of them except `list`, at the END of the line:
+//
+//     -p<password>     the STORE password: encrypt (or open) ordinary data
+//     -m<password>     the MASTER password: carry (or open) SECRETS
+//
+// THE PASSWORD IS ATTACHED TO THE LETTER, `-pfoo` and not `-p foo`, and
+// that is not a style choice: this kernel gives a program at most
+// `proc.MAX_ARGS` = 8 arguments, and `backup save <set> <store> <name>
+// -p <a> -m <b>` is nine. The shell then says "too many arguments" and
+// drops the command -- which it did, silently, until this was measured.
+// The separated form is accepted too, for the lines that fit.
+//
+// TWO SEPARATE SECRETS ON PURPOSE. `-p` protects documents; `-m` protects
+// the password vault. Handing somebody `-p` so they can fetch a file must
+// not hand them your logins. `kernel/user/bsec.fi` has the whole argument
+// and the three classes of data it rests on.
+//
+// WITHOUT `-m`, SECRETS ARE NOT BACKED UP. That is the default and it is
+// not configurable: carrying them is a deliberate act with the master
+// password in hand. Without `-m` on a RESTORE of a snapshot that has
+// them, the run STOPS and says so -- it does not quietly return a tree
+// with no credentials in it.
+//
+// THE WORK IS NOT HERE. It is in `kernel/user/bstore.fi`, and so is the
+// explanation of the format -- why a backup is a DIRECTORY of shared
+// blocks and not one big file, what a snapshot looks like, and why it
+// carries an `end` line. This file is the command line over that module,
+// and `/bin/explorer` is a second caller of the very same functions.
+//
+// ONE IMPLEMENTATION, TWO FRONT ENDS. When the file manager grew a "back
+// up to here" entry, the alternative was to let it shell out to this
+// program and scrape its output. That would have been less code today and
+// a second definition of the format tomorrow.
+//
+// ============================================================== THE NAME
+//
+// It is `backup`. Not `sich`, and not `bak` either -- the owner rejected
+// both on 27.08.2026 and settled the rule that stands above every name in
+// this system: EVERY command, subcommand, option, field and format name in
+// Osum/OrientOS is ENGLISH. No German stems, no German abbreviations, no
+// umlauts. The one exception is the proper noun `opk` and the `.opk`
+// suffix that belongs to it.
+
+profile kernel
+
+import ulib
+import bstore
+
+export { u_start }
+
+// ------------------------------------------------------------- the entry
+
+// An option is `-p<value>` (attached, the form that fits in eight
+// arguments) or `-p <value>` (separated). It returns the VALUE, or 0.
+fn opt_of(args: u64, argc: u64, letter: u64) -> u64 {
+    var i: u64 = 2
+    while i < argc {
+        let a: u64 = ulib.arg_at(args, i)
+        if *((a) as *mut u8) == 45 as u8
+                && ((*((a + 1) as *mut u8)) as u64) == letter {
+            if *((a + 2) as *mut u8) != 0 as u8 {
+                return a + 2
+            }
+            if i + 1 < argc {
+                return ulib.arg_at(args, i + 1)
+            }
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+// How many arguments there are BEFORE the first option. The positional
+// arguments keep their old places, so every command line that worked
+// before this addendum still works.
+fn npos(args: u64, argc: u64) -> u64 {
+    var i: u64 = 1
+    while i < argc {
+        if *((ulib.arg_at(args, i)) as *mut u8) == 45 as u8 {
+            return i
+        }
+        i = i + 1
+    }
+    return argc
+}
+
+fn u_start(args: u64) -> u64 {
+    var c_save: [u8; 5] = "save\0"
+    var c_list: [u8; 5] = "list\0"
+    var c_rest: [u8; 8] = "restore\0"
+    var c_get: [u8; 4] = "get\0"
+    var c_ver: [u8; 7] = "verify\0"
+    var e_use: [u8; 53] = "backup: save <set> <store> <name> [orphans [tree]] | "
+    var e_use2: [u8; 47] = "list | restore | get | verify -- see backup.fi "
+    var e_use3: [u8; 45] = "  [-p<store password>] [-m<master password>]\0"
+
+    let argc: u64 = ulib.arg_count(args)
+    if argc < 2 {
+        ulib.esay_line((&e_use[0]) as u64, 0)
+        ulib.esay_line((&e_use2[0]) as u64, 0)
+        ulib.esay_line((&e_use3[0]) as u64, 0)
+        return 1
+    }
+    let cmd: u64 = ulib.arg_at(args, 1)
+    let np: u64 = npos(args, argc)
+    let spass: u64 = opt_of(args, argc, 112) // 'p'
+    let mpass: u64 = opt_of(args, argc, 109) // 'm'
+
+    if ulib.streq(cmd, (&c_save[0]) as u64) {
+        if np < 5 {
+            ulib.esay_line((&e_use[0]) as u64, 0)
+            ulib.esay_line((&e_use3[0]) as u64, 0)
+            return 1
+        }
+        // The orphan list is optional: without it this is the backup the
+        // round started with, and the default stays "programs are not
+        // backed up".
+        //
+        // The optional FIFTH path is the tree the store lives under. It
+        // exists because `<src>` is the BACKUP SET -- PLAN, config, state
+        // -- and the store is deliberately NOT inside it. Left out, it is
+        // `<src>`, which is the case where somebody hands over a whole
+        // tree and wants a few of its store entries carried along.
+        var orph: u64 = 0
+        var tree: u64 = ulib.arg_at(args, 2)
+        if np >= 6 {
+            orph = ulib.arg_at(args, 5)
+        }
+        if np >= 7 {
+            tree = ulib.arg_at(args, 6)
+        }
+        // `true`: only a save may CREATE a layer. A read never invents a
+        // salt, because a salt invented on a read would open nothing and
+        // would look like a wrong password.
+        let u: u64 = bstore.unlock(ulib.arg_at(args, 3), spass, mpass, true)
+        if u != 0 {
+            return u
+        }
+        return bstore.save(ulib.arg_at(args, 2), ulib.arg_at(args, 3),
+            ulib.arg_at(args, 4), orph, tree, bstore.no_tick)
+    }
+    if ulib.streq(cmd, (&c_list[0]) as u64) {
+        if np < 3 {
+            ulib.esay_line((&e_use[0]) as u64, 0)
+            ulib.esay_line((&e_use2[0]) as u64, 0)
+            return 1
+        }
+        return bstore.list(ulib.arg_at(args, 2))
+    }
+    if ulib.streq(cmd, (&c_rest[0]) as u64) {
+        if np < 5 {
+            ulib.esay_line((&e_use[0]) as u64, 0)
+            ulib.esay_line((&e_use3[0]) as u64, 0)
+            return 1
+        }
+        let u: u64 = bstore.unlock(ulib.arg_at(args, 2), spass, mpass, false)
+        if u != 0 {
+            return u
+        }
+        return bstore.restore(ulib.arg_at(args, 2), ulib.arg_at(args, 3),
+            ulib.arg_at(args, 4), 0)
+    }
+    if ulib.streq(cmd, (&c_get[0]) as u64) {
+        if np < 6 {
+            ulib.esay_line((&e_use[0]) as u64, 0)
+            ulib.esay_line((&e_use3[0]) as u64, 0)
+            return 1
+        }
+        let u: u64 = bstore.unlock(ulib.arg_at(args, 2), spass, mpass, false)
+        if u != 0 {
+            return u
+        }
+        return bstore.get(ulib.arg_at(args, 2), ulib.arg_at(args, 3),
+            ulib.arg_at(args, 4), ulib.arg_at(args, 5))
+    }
+    if ulib.streq(cmd, (&c_ver[0]) as u64) {
+        if np < 4 {
+            ulib.esay_line((&e_use[0]) as u64, 0)
+            ulib.esay_line((&e_use3[0]) as u64, 0)
+            return 1
+        }
+        let u: u64 = bstore.unlock(ulib.arg_at(args, 2), spass, mpass, false)
+        if u != 0 {
+            return u
+        }
+        return bstore.verify(ulib.arg_at(args, 2), ulib.arg_at(args, 3))
+    }
+    ulib.esay_line((&e_use[0]) as u64, 0)
+    ulib.esay_line((&e_use2[0]) as u64, 0)
+    ulib.esay_line((&e_use3[0]) as u64, 0)
+    return 1
+}
+
+// ---------------------------------------------------------- small helpers
