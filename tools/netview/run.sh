@@ -562,6 +562,10 @@ for scheme in dark light; do
         for b in 0 1 2 3 4 5 6 7 8 9; do
             line=$(mk_line "$L" "$b")
             [ -z "$line" ] && continue
+            # NO `netv=` MEANS `real`. The bar stopped printing the
+            # normal case: three programs share this serial line and a
+            # line about nothing is how two of them end up written into
+            # the middle of each other's words.
             v=$(echo "$line" | grep -oE 'netv=[0-9]+' | cut -d= -f2)
             mx=$(echo "$line" | grep -oE 'mkx=[0-9]+' | cut -d= -f2)
             my=$(echo "$line" | grep -oE 'mky=[0-9]+' | cut -d= -f2)
@@ -587,7 +591,7 @@ for scheme in dark light; do
         # mark would be. A checker that only ever looks where it expects
         # something is a checker that would pass on a bar that draws the
         # same mark on everything.
-        rl=$(grep -aE '^taskbar: btn i=[0-9]+ .* netv=0( |$)' "$L" | tail -1)
+        rl=$(grep -aE '^taskbar: btn i=[0-9]+ ' "$L" | grep -av 'netv=' | tail -1)
         if [ -n "$rl" ]; then
             rx=$(echo "$rl" | grep -oE ' x=[0-9]+' | tr -d ' x=')
             ry=$(echo "$rl" | grep -oE ' y=[0-9]+' | tr -d ' y=')
