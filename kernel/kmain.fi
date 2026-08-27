@@ -35,6 +35,7 @@ import user
 import power
 import pwr
 import batt
+import pmon
 import sched
 import tasks
 import proc
@@ -186,6 +187,7 @@ fn kernel_main(mbi: u64, vectors: u64, state: u64, kernel_end: u64,
     guard.parse(state, cmd)
     bootmod.parse(state, cmd)
     hv.parse(state, cmd)
+    pmon.parse(state, cmd)
 
     // ROUND K9. Die Uhr wird gelesen, BEVOR irgendetwas anderes Zeit
     // braucht: TIME_BOOT und TIME_TSC0 muessen aus demselben Augenblick
@@ -2056,6 +2058,9 @@ fn osum(state: u64) {
     say_k14(state)
     say_posix(state)
     perm.report(state)
+    // ROUND POWERMON: the same numbers ring 3 reads, on the serial line,
+    // so the acceptance run can hold the two sides against each other.
+    pmon.report(state)
 }
 
 // ROUND K4: what the system call layer did in this run. Six counters, one
@@ -2288,6 +2293,10 @@ fn power_stage(state: u64) {
     }
     pwr.set_profile(state, pwr.PROF_BALANCED)
     pwr.throttle_check(state)
+    // ROUND POWERMON: the accounting starts HERE and not in `pmon.parse`.
+    // Its sample walks the ACPI tables, and the tables are only good for
+    // walking once `batt.scan` above has been over them.
+    pmon.arm(state)
     power_report(state)
 }
 
@@ -3296,6 +3305,39 @@ fn k15_start(state: u64) -> u64 {
         pfad = (&p_start[0]) as u64
         arg0 = (&a_start[0]) as u64
         n0 = 8
+    }
+    // ROUND POWERMON: `wigapp=/bin/NAME` starts THAT program in the
+    // window server instead of one of the three above. Not a new bit in
+    // `kstate.MODE` -- that word has two bits left out of sixty-four and
+    // a dozen rounds are working on this tree at once. And not a fourth
+    // hard-wired name either: the next round that wants to show a window
+    // would need a fifth, and the one after that a sixth. The path is
+    // read out of the command line, the name after the last slash
+    // becomes argv[0], and nothing here has to change again.
+    var wpath: [u8; 64] = [0 as u8; 64]
+    var wname: [u8; 32] = [0 as u8; 32]
+    let wa: u64 = pmon.wigapp(state)
+    if wa != 0 {
+        var wi: u64 = 0
+        var slash: u64 = 0
+        while wi < 63 && kstate.get8(wa + wi) != 0 {
+            let c: u64 = kstate.get8(wa + wi)
+            wpath[wi as usize] = c as u8
+            if c == 47 {
+                slash = wi + 1
+            }
+            wi = wi + 1
+        }
+        var wj: u64 = 0
+        while wj < 31 && wpath[(slash + wj) as usize] != 0 as u8 {
+            wname[wj as usize] = wpath[(slash + wj) as usize]
+            wj = wj + 1
+        }
+        if wj != 0 {
+            pfad = (&wpath[0]) as u64
+            arg0 = (&wname[0]) as u64
+            n0 = wj
+        }
     }
     var at: u64 = 0
     var k: u64 = 0
