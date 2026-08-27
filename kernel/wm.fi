@@ -84,7 +84,7 @@ export {
     downs, moves_seen, hits_seen, win_keys,
     set_fonts, font_ui, font_mono, px_ui, px_mono,
     selftest, selftest_max,
-    MAX_WIN, K_RAW, K_TERM, TITLE_H, BORDER, GRIP,
+    MAX_WIN, K_RAW, K_TERM, TITLE_H, BORDER, GRIP, MAX_W, MAX_H,
     E_KEY, E_DOWN, E_UP, E_MOVE, E_CLOSE, E_FOCUS, E_RESIZE,
     L_DESK, L_NORMAL, L_TOP, F_HIDDEN, F_NODECO,
     EDGE_BOTTOM, EDGE_TOP, EDGE_LEFT, EDGE_RIGHT, F_MAXIMIZED
@@ -115,6 +115,13 @@ const CLOSE_W: u64 = 14
 
 const K_RAW: u64 = 0 // die Anwendung malt selbst
 const K_TERM: u64 = 1 // ein Zeichenraster, der Server malt
+
+// ADDENDUM TASKBAR: the largest window this server will make. It is
+// the screen, and it is exported because whoever wants a window that
+// can be maximized to ANY work area has to ask for this size when the
+// window is created -- the buffer is never reallocated.
+const MAX_W: u64 = 800
+const MAX_H: u64 = 600
 
 // ------------------------------------------- RUNDE DESKTOP: die Ebenen
 //
@@ -2626,11 +2633,24 @@ fn selftest(state: u64) -> u64 {
         destroy(state, d)
     }
     // -------------------------------- ADDENDUM TASKBAR: struts and work
-    // The window `a` still exists here and is the one that gets
-    // maximized; `bar` plays the taskbar.
+    // `bar` plays the taskbar, `mw` is the window that gets maximized.
+    // A WINDOW OF ITS OWN AND NOT `a`, and the reason is a measurement:
+    // `a` was created 200 x 100, a window never gets a bigger buffer
+    // than it was created with, and `maximize` therefore refused it --
+    // correctly. Five of these nine claims failed on that, and the
+    // server was right every time.
     var tb: [u8; 4] = "bar\0"
+    var tm: [u8; 4] = "max\0"
     let sw2: u64 = gs(state, S_SW)
     let sh2: u64 = gs(state, S_SH)
+    // THIS SECTION MEASURES THE STRUTS AND THEREFORE HAS TO SWITCH THEM
+    // ON, even when the machine was started with the counter-test
+    // `nostrut`. It puts the setting back afterwards -- the first
+    // version did not, and left the whole system with the struts
+    // enabled after a `nostrut` run, so the counter-test proved nothing
+    // and looked like it passed.
+    let strut_was: bool = nostrut(state)
+    set_nostrut(state, false)
     // 22. WITHOUT A STRUT THE WORK AREA IS THE SCREEN. Anything else
     //     and every number after this one measures the wrong rectangle.
     if work_x(state) == 0 && work_y(state) == 0
@@ -2650,11 +2670,13 @@ fn selftest(state: u64) -> u64 {
         }
         // 24. MAXIMIZE FILLS THE WORK AREA, NOT THE SCREEN. Compared on
         //     the OUTER rectangle, because that is what covers pixels.
-        if maximize(state, a, true) {
-            let ox: i64 = win_x(state, a)
-            let oy: i64 = win_y(state, a)
-            let ow: u64 = outer_w(state, a)
-            let oh: u64 = outer_h(state, a)
+        let mw: u64 = create(state, 0, 40, 40, MAX_W, MAX_H, K_RAW,
+            (&tm[0]) as u64)
+        if mw < MAX_WIN && maximize(state, mw, true) {
+            let ox: i64 = win_x(state, mw)
+            let oy: i64 = win_y(state, mw)
+            let ow: u64 = outer_w(state, mw)
+            let oh: u64 = outer_h(state, mw)
             if ox == work_x(state) as i64 && oy == work_y(state) as i64
                 && ow == work_w(state) && oh == work_h(state) {
                 n = n + 1
@@ -2677,8 +2699,8 @@ fn selftest(state: u64) -> u64 {
                 && work_w(state) == sw2 - 44 && work_h(state) == sh2 {
                 n = n + 1
             }
-            if win_x(state, a) == 44 && outer_w(state, a) == sw2 - 44
-                && outer_h(state, a) == sh2 {
+            if win_x(state, mw) == 44 && outer_w(state, mw) == sw2 - 44
+                && outer_h(state, mw) == sh2 {
                 n = n + 1
             }
         }
@@ -2686,9 +2708,10 @@ fn selftest(state: u64) -> u64 {
         //     whole screen again and the maximized window covers the
         //     bar. That is the state this addendum removes.
         set_nostrut(state, true)
-        let deckt: bool = win_x(state, a) == 0 && outer_w(state, a) == sw2
+        let deckt: bool = win_x(state, mw) == 0
+            && outer_w(state, mw) == sw2
         set_nostrut(state, false)
-        if deckt && win_x(state, a) == 44 {
+        if deckt && win_x(state, mw) == 44 {
             n = n + 1
         }
         // 28. CLEARING THE STRUT GIVES THE EDGE BACK.
@@ -2703,16 +2726,21 @@ fn selftest(state: u64) -> u64 {
         if vorher == 30 && work_y(state) == 0 && work_h(state) == sh2 {
             n = n + 1
         }
-    }
-    // 30. RESTORING PUTS THE WINDOW BACK WHERE IT WAS: it was created
-    //     at (40, 40) with 200 x 100 and has been maximized twice since.
-    let _m30: bool = maximize(state, a, false)
-    if win_x(state, a) == 40 && win_y(state, a) == 40
-        && win_w(state, a) == 200 && win_h(state, a) == 100
-        && !is_max(state, a) {
-        n = n + 1
+        // 30. RESTORING PUTS THE WINDOW BACK WHERE IT WAS: it was
+        //     created at (40, 40) with the full screen and has been
+        //     maximized to two different work areas since.
+        let _m30: bool = maximize(state, mw, false)
+        if win_x(state, mw) == 40 && win_y(state, mw) == 40
+            && win_w(state, mw) == MAX_W && win_h(state, mw) == MAX_H
+            && !is_max(state, mw) {
+            n = n + 1
+        }
+        if mw < MAX_WIN {
+            destroy(state, mw)
+        }
     }
     destroy(state, a)
+    set_nostrut(state, strut_was)
     damage_all(state)
     return n
 }
