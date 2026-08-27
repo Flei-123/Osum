@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-2.0-only
 # tools/mem/run.sh -- ROUND MEM: 512 MiB WAS NOT A PROPERTY OF THE MACHINE.
 #
 # It was a property of two constants:

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-2.0-only
 # tools/netview/smoke.sh -- ONE graphical boot, one Super+A, one picture.
 # Not the acceptance: the fast loop while the panel is being built.
 set -uo pipefail

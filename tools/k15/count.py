@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-only
 """tools/k15/count.py -- Bildpunkte einer Farbe in einem Rechteck zaehlen.
 
     count.py <ppm> <x> <y> <w> <h> <r> <g> <b>

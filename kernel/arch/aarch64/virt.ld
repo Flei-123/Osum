@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /* kernel/arch/aarch64/virt.ld -- the counterpart to kernel/kernel.ld.
  *
  * `-M virt` puts its RAM at 0x40000000 and every AArch64 loader in the

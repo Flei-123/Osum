@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-only
 """tools/gfx/ppm2png.py -- ein PPM in ein PNG, ohne Fremdbibliothek.
 
 QEMU schreibt Bildschirmfotos als PPM (`screendump`), und PPM ist fuer

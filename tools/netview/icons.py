@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-only
 """tools/netview/icons.py -- die Symbole der Runde NETVIEW, aus EINER Quelle.
 
 Der Nachtrag der Runde verlangt zwei Anzeigen, und sie werden an ZWEI

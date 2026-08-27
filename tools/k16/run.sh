@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-2.0-only
 # tools/k16/run.sh -- RUNDE K16: DER UEBERSETZER LAEUFT AUF DEM SYSTEM
 # SELBST, UND EINE DATEI WEISS, WOMIT MAN SIE OEFFNET.
 #

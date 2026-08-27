@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-2.0-only
 # tools/tiling/run.sh -- DER BEWEIS, DASS OSUM EINEN FENSTERBAUM HAT.
 #
 # Bis zu dieser Runde schwebten die Fenster frei.  Runde K10 gab ihnen

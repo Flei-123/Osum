@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-2.0-only
 # tools/tunnel/pakete.sh -- DIE ZWEI PAKETE BAUEN, INSTALLIEREN,
 # BENUTZEN UND WIEDER ENTFERNEN -- UND NACHWEISEN, DASS NICHTS BLEIBT.
 #

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-only
 """tools/netview/blatt.py -- die sieben Zeichen nebeneinander, 1:1 und gross.
 
 Runde NETVIEW, Nachtrag. Das hier ist die EINZIGE Ausgabe dieser Runde,

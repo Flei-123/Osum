@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-only
 """tools/netview/checkshot.py -- steht das Symbol WIRKLICH auf dem Schirm?
 
 Runde NETVIEW, Nachtrag. `tools/k15/iconpixels.py` kann das schon, aber

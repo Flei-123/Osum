@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-2.0-only
 # tools/k15/run.sh -- DER BEWEIS, DASS OSUM WIDGETS HAT UND EINEN
 # DATEIMANAGER.
 #

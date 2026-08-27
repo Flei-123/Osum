@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /* kernel/boot.s -- round 59: the boot prologue of the small kernel.
  *
  * This is one of the two non-Firn files of `kernel/kmain.fi` (the

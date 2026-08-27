@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-only
 """tools/icons/build.py -- cut an icon font out of Lucide and generate
 the names the code uses.
 

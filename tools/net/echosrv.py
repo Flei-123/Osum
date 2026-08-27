@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-only
 """tools/net/echosrv.py -- round K8: the Linux end of the active test.
 
 Osum opens the connection for once, and this is what it opens it to: an

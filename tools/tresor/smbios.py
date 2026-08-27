@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-only
 """tools/tresor/smbios.py -- SMBIOS, ZUM ZWEITEN MAL gelesen.
 
     smbios.py <speicherabzug.bin>            die Felder, als schluessel=wert

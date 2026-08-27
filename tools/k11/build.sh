@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-2.0-only
 # tools/k11/build.sh -- ein einzelnes Programm dieser Runde uebersetzen
 # und binden. Nur zum Iterieren waehrend der Arbeit; die Abnahme baut in
 # tools/k11/run.sh alles noch einmal aus BEIDEN Uebersetzern.
