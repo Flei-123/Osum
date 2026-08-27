@@ -213,9 +213,14 @@ run_e() { # align
         [ -z "$bx" ] && continue
         [ "$bw" = 0 ] && continue
         [ $((bx + bw)) -gt "$RE" ] && RE=$((bx + bw))
+    # ONLY COMPLETE LINES. The serial port is shared, and a button line
+    # cut in half by the launcher's had `w=416` in it -- the launcher's
+    # window, not a taskbar button -- which put the block's right edge
+    # 284 pixels past the end of the bar. Requiring the whole shape of
+    # the line, up to and including `hidden=`, throws the fragments out.
     done < <(grep -a 'taskbar: btn i=' "$S" \
-             | grep -oE ' x=[0-9]+ y=[0-9]+ w=[0-9]+' \
-             | sed -E 's/ x=([0-9]+) y=[0-9]+ w=([0-9]+)/\1 \2/')
+             | grep -oE ' x=[0-9]+ y=[0-9]+ w=[0-9]+ h=[0-9]+ hidden=' \
+             | sed -E 's/ x=([0-9]+) y=[0-9]+ w=([0-9]+) h=[0-9]+ hidden=/\1 \2/')
     [ "$RE" = 0 ] && RE=$((SX + SW))
     FX=$(grep -a 'taskbar: field net' "$S" | tail -1 | grep -oE 'x=[0-9]+' | grep -oE '[0-9]+')
     return 0
