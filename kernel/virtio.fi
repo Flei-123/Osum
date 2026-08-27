@@ -90,7 +90,13 @@ export {
     rx_take, rx_recycle, tx_frame, tx_room, poll,
     irq, irqs, rx_frames, tx_frames, tx_drops, rx_octets, tx_octets,
     features, queue_size, msix, notified, link_up,
-    shut_down, VEC_NET, QSIZE, BUFSZ
+    shut_down, VEC_NET, QSIZE, BUFSZ,
+    // ROUND NETMON: the same driver, on a chosen card.
+    MAX_CARDS,
+    init_on, present_on, ready_on, up_on, mac_at_on, bdf_on, idx_on,
+    rx_take_on, rx_recycle_on, tx_frame_on, tx_room_on, poll_on, irq_on,
+    rx_frames_on, tx_frames_on, rx_octets_on, tx_octets_on,
+    tx_drops_on, link_up_on
 }
 
 // ------------------------------------------ the K8 part of the scalars
@@ -126,6 +132,11 @@ const S_RXB: u64 = 0x2C0
 const S_TXB: u64 = 0x2C8
 const S_NOTIFIED: u64 = 0x2D0 // how often the doorbell was rung
 const S_LINK: u64 = 0x2D8
+
+// Where the second card's copy of all of the above begins. `sc()` adds
+// it; nothing else in this file knows the number.
+const CARD1: u64 = 0x1400
+const MAX_CARDS: u64 = 2
 
 // ------------------------------------------------ the ring memory
 
@@ -216,6 +227,10 @@ const NS_LINK_UP: u64 = 1
 // The vector the card reports on. 44 belongs to the disk since round K2,
 // 45 was the next free stub in the table of `isr.s` -- no assembly had to
 // change for this round either.
+// ROUND NETMON: card 0 keeps 45 and card 1 takes 46. One vector per
+// card, because an interrupt that cannot say WHICH card rang is an
+// interrupt that has to poll both -- and polling the card that did not
+// ring is how a driver reads a ring that is being written.
 const VEC_NET: u64 = 45
 
 // How long a wait for the device may last before it is called dead. The
@@ -226,87 +241,99 @@ const SPIN_LIMIT: u64 = 2000000
 
 // -------------------------------------------------------- small helpers
 
-fn sc(off: u64) -> u64 {
-    return pci.K2_SCALARS + off
+// THE SCALARS OF ONE CARD. Round K8 had one card and one block of
+// scalars at a fixed offset; round NETMON needs TWO -- one uplink and
+// one shared side -- so the block is chosen by the card number. Card 0
+// stands exactly where it stood, octet for octet, which is why every
+// measurement of round K8 still reads the same numbers.
+//
+// Card 1 goes to 0x1600, which is the first free run in
+// `pci.K2_SCALARS` after round NETVIEW's area (it reaches to 0x1580).
+// The page ends at 0x2000 and this block is 224 octets long.
+fn sc(c: u64, off: u64) -> u64 {
+    if c == 0 {
+        return pci.K2_SCALARS + off
+    }
+    return pci.K2_SCALARS + CARD1 + off
 }
 
-fn common(state: u64) -> u64 {
-    return kstate.get(state, sc(S_COMMON))
+fn common(state: u64, c: u64) -> u64 {
+    return kstate.get(state, sc(c, S_COMMON))
 }
 
-fn present(state: u64) -> bool {
-    return common(state) != 0
+fn present_on(state: u64, c: u64) -> bool {
+    return common(state, c) != 0
 }
 
-fn ready(state: u64) -> bool {
-    return kstate.get(state, sc(S_READY)) != 0
+fn ready_on(state: u64, c: u64) -> bool {
+    return kstate.get(state, sc(c, S_READY)) != 0
 }
 
-fn up(state: u64) -> bool {
-    return ready(state)
+fn up_on(state: u64, c: u64) -> bool {
+    return ready_on(state, c)
 }
 
-fn bdf(state: u64) -> u64 {
-    return kstate.get(state, sc(S_BDF))
+fn bdf_on(state: u64, c: u64) -> u64 {
+    return kstate.get(state, sc(c, S_BDF))
 }
 
-fn idx(state: u64) -> u64 {
-    return kstate.get(state, sc(S_IDX))
+fn idx_on(state: u64, c: u64) -> u64 {
+    return kstate.get(state, sc(c, S_IDX))
 }
 
-fn irqs(state: u64) -> u64 {
-    return kstate.get(state, sc(S_IRQS))
+fn irqs_on(state: u64, c: u64) -> u64 {
+    return kstate.get(state, sc(c, S_IRQS))
 }
 
-fn rx_frames(state: u64) -> u64 {
-    return kstate.get(state, sc(S_RXP))
+fn rx_frames_on(state: u64, c: u64) -> u64 {
+    return kstate.get(state, sc(c, S_RXP))
 }
 
-fn tx_frames(state: u64) -> u64 {
-    return kstate.get(state, sc(S_TXP))
+fn tx_frames_on(state: u64, c: u64) -> u64 {
+    return kstate.get(state, sc(c, S_TXP))
 }
 
-fn tx_drops(state: u64) -> u64 {
-    return kstate.get(state, sc(S_TXDROP))
+fn tx_drops_on(state: u64, c: u64) -> u64 {
+    return kstate.get(state, sc(c, S_TXDROP))
 }
 
-fn rx_octets(state: u64) -> u64 {
-    return kstate.get(state, sc(S_RXB))
+fn rx_octets_on(state: u64, c: u64) -> u64 {
+    return kstate.get(state, sc(c, S_RXB))
 }
 
-fn tx_octets(state: u64) -> u64 {
-    return kstate.get(state, sc(S_TXB))
+fn tx_octets_on(state: u64, c: u64) -> u64 {
+    return kstate.get(state, sc(c, S_TXB))
 }
 
-fn features(state: u64) -> u64 {
-    return kstate.get(state, sc(S_FEAT))
-        | (kstate.get(state, sc(S_FEATHI)) << 32)
+fn features_on(state: u64, c: u64) -> u64 {
+    return kstate.get(state, sc(c, S_FEAT))
+        | (kstate.get(state, sc(c, S_FEATHI)) << 32)
 }
 
-fn queue_size(state: u64) -> u64 {
-    return kstate.get(state, sc(S_QSIZE))
+fn queue_size_on(state: u64, c: u64) -> u64 {
+    return kstate.get(state, sc(c, S_QSIZE))
 }
 
-fn msix(state: u64) -> bool {
-    return kstate.get(state, sc(S_MSIX)) != 0
+fn msix_on(state: u64, c: u64) -> bool {
+    return kstate.get(state, sc(c, S_MSIX)) != 0
 }
 
-fn notified(state: u64) -> u64 {
-    return kstate.get(state, sc(S_NOTIFIED))
+fn notified_on(state: u64, c: u64) -> u64 {
+    return kstate.get(state, sc(c, S_NOTIFIED))
 }
 
-fn link_up(state: u64) -> bool {
-    return kstate.get(state, sc(S_LINK)) != 0
+fn link_up_on(state: u64, c: u64) -> bool {
+    return kstate.get(state, sc(c, S_LINK)) != 0
 }
 
 // The six octets of the Ethernet address, one at a time. They travel in
 // ONE word because a kernel without global variables has nowhere else to
 // put six octets that several modules read.
-fn mac_at(state: u64, i: u64) -> u64 {
+fn mac_at_on(state: u64, c: u64, i: u64) -> u64 {
     if i >= 6 {
         return 0
     }
-    return (kstate.get(state, sc(S_MAC)) >> (i * 8)) & 0xFF
+    return (kstate.get(state, sc(c, S_MAC)) >> (i * 8)) & 0xFF
 }
 
 fn rd8(b: u64, off: u64) -> u64 {
@@ -337,8 +364,8 @@ fn wr64(b: u64, off: u64, v: u64) {
     __mmio_write64((b + off) as *mut u64, v)
 }
 
-fn ring(state: u64) -> u64 {
-    return kstate.get(state, sc(S_RING))
+fn ring(state: u64, c: u64) -> u64 {
+    return kstate.get(state, sc(c, S_RING))
 }
 
 // --------------------------------------------------- the split ring
@@ -384,12 +411,12 @@ fn used_len(u: u64, slot: u64) -> u64 {
 
 // The doorbell. One 16-bit write of the queue number into the address
 // the notification capability named for THIS queue.
-fn kick(state: u64, door: u64, queue: u64) {
+fn kick(state: u64, c: u64, door: u64, queue: u64) {
     if door == 0 {
         return
     }
     wr16(door, 0, queue)
-    kstate.add(state, sc(S_NOTIFIED), 1)
+    kstate.add(state, sc(c, S_NOTIFIED), 1)
 }
 
 // ---------------------------------------------------- the capabilities
@@ -421,7 +448,7 @@ fn find_vcap(d: u64, want: u64) -> u64 {
 // the device answers ON THE BUS, and `apic.map_device` makes that
 // reachable in the first gigabyte. Confusing the two is the classic way
 // to read zeroes forever.
-fn region(state: u64, i: u64, d: u64, cap: u64) -> u64 {
+fn region(state: u64, c: u64, i: u64, d: u64, cap: u64) -> u64 {
     if cap == 0 {
         return 0
     }
@@ -439,12 +466,12 @@ fn region(state: u64, i: u64, d: u64, cap: u64) -> u64 {
 
 // ------------------------------------------------------------- status
 
-fn status(state: u64) -> u64 {
-    return rd8(common(state), C_STATUS)
+fn status(state: u64, c: u64) -> u64 {
+    return rd8(common(state, c), C_STATUS)
 }
 
-fn status_add(state: u64, bits: u64) {
-    wr8(common(state), C_STATUS, status(state) | bits)
+fn status_add(state: u64, c: u64, bits: u64) {
+    wr8(common(state, c), C_STATUS, status(state, c) | bits)
 }
 
 // A reset is a write of zero AND a read that says the device has seen
@@ -452,11 +479,11 @@ fn status_add(state: u64, bits: u64) {
 // zero to come back; a device that is reset while it still owns
 // descriptors would otherwise write into memory that has been handed
 // out again.
-fn reset(state: u64) -> bool {
-    wr8(common(state), C_STATUS, 0)
+fn reset(state: u64, c: u64) -> bool {
+    wr8(common(state, c), C_STATUS, 0)
     var spin: u64 = 0
     while spin < SPIN_LIMIT {
-        if rd8(common(state), C_STATUS) == 0 {
+        if rd8(common(state, c), C_STATUS) == 0 {
             return true
         }
         asm("pause")
@@ -467,14 +494,25 @@ fn reset(state: u64) -> bool {
 
 // ------------------------------------------------------------ the init
 
-fn find(state: u64) -> u64 {
+// THE c-TH virtio-net ON THE BUS, in the order the scan found them. Not
+// "the first one" any more: with two cards the second driver would
+// otherwise take the first card's registers away from the first driver
+// and both would be broken in a way that looks like a hardware fault.
+// The order is the bus order, which is the order QEMU was given the
+// `-device` arguments in, and that is what makes `share=1` mean the
+// same card on every boot.
+fn find(state: u64, c: u64) -> u64 {
     let n: u64 = pci.count(state)
     var i: u64 = 0
+    var seen: u64 = 0
     while i < n {
         if pci.get(state, i, pci.E_VENDOR) == VENDOR_VIRTIO {
             if pci.get(state, i, pci.E_CLASS) == CLASS_NET {
                 if pci.get(state, i, pci.E_SUBCLASS) == SUB_ETHERNET {
-                    return i
+                    if seen == c {
+                        return i
+                    }
+                    seen = seen + 1
                 }
             }
         }
@@ -486,15 +524,15 @@ fn find(state: u64) -> u64 {
 // `armed` decides whether the interrupt is unmasked; `use_msix` which of
 // the two paths it takes. Both are switches of `tools/net/run.sh`, and
 // both have a run in which the measurement has to collapse.
-fn init(state: u64, use_msix: bool, armed: bool) -> bool {
-    kstate.set(state, sc(S_READY), 0)
-    let i: u64 = find(state)
+fn init_on(state: u64, c: u64, use_msix: bool, armed: bool) -> bool {
+    kstate.set(state, sc(c, S_READY), 0)
+    let i: u64 = find(state, c)
     if i >= pci.MAX_DEV {
         return false
     }
     let d: u64 = pci.get(state, i, pci.E_BDF)
-    kstate.set(state, sc(S_IDX), i)
-    kstate.set(state, sc(S_BDF), d)
+    kstate.set(state, sc(c, S_IDX), i)
+    kstate.set(state, sc(c, S_BDF), d)
 
     // The four regions, read out of the device.
     let c_cap: u64 = find_vcap(d, CFG_COMMON)
@@ -504,28 +542,28 @@ fn init(state: u64, use_msix: bool, armed: bool) -> bool {
     if c_cap == 0 || n_cap == 0 {
         return false // not a modern device: nothing here would hold
     }
-    let cbase: u64 = region(state, i, d, c_cap)
+    let cbase: u64 = region(state, c, i, d, c_cap)
     if cbase == 0 {
         return false
     }
-    kstate.set(state, sc(S_COMMON), cbase)
-    kstate.set(state, sc(S_NOTIFY), region(state, i, d, n_cap))
-    kstate.set(state, sc(S_NMULT), pci.cfg_read32(d, n_cap + VC_NOTIFY_MULT))
-    kstate.set(state, sc(S_ISR), region(state, i, d, i_cap))
-    kstate.set(state, sc(S_DEVCFG), region(state, i, d, v_cap))
+    kstate.set(state, sc(c, S_COMMON), cbase)
+    kstate.set(state, sc(c, S_NOTIFY), region(state, c, i, d, n_cap))
+    kstate.set(state, sc(c, S_NMULT), pci.cfg_read32(d, n_cap + VC_NOTIFY_MULT))
+    kstate.set(state, sc(c, S_ISR), region(state, c, i, d, i_cap))
+    kstate.set(state, sc(c, S_DEVCFG), region(state, c, i, d, v_cap))
 
     // Without this bit the card may answer registers but may not fetch a
     // descriptor. `tools/net/run.sh` runs this whole function once
     // without it, and nothing may arrive then.
     pci.enable_master(d)
 
-    if !reset(state) {
+    if !reset(state, c) {
         return false
     }
-    status_add(state, ST_ACK)
-    status_add(state, ST_DRIVER)
+    status_add(state, c, ST_ACK)
+    status_add(state, c, ST_DRIVER)
 
-    if !negotiate(state) {
+    if !negotiate(state, c) {
         wr8(cbase, C_STATUS, ST_FAILED)
         return false
     }
@@ -543,8 +581,8 @@ fn init(state: u64, use_msix: bool, armed: bool) -> bool {
         __mmio_write64((r + z) as *mut u64, 0)
         z = z + 8
     }
-    kstate.set(state, sc(S_RING), r)
-    kstate.set(state, sc(S_QSIZE), QSIZE)
+    kstate.set(state, sc(c, S_RING), r)
+    kstate.set(state, sc(c, S_QSIZE), QSIZE)
 
     // THE INTERRUPT IS ARMED BEFORE THE QUEUES ARE ENABLED, for the same
     // reason it was on the disk: a queue remembers which vector it
@@ -552,39 +590,39 @@ fn init(state: u64, use_msix: bool, armed: bool) -> bool {
     // vector is one no queue knows about, and every completion lands in
     // memory in silence.
     if use_msix {
-        if !msix_arm(state, i, VEC_NET, armed) {
+        if !msix_arm(state, c, i, VEC_NET + c, armed) {
             wr8(cbase, C_STATUS, ST_FAILED)
             return false
         }
-        kstate.set(state, sc(S_MSIX), 1)
+        kstate.set(state, sc(c, S_MSIX), 1)
     } else {
-        intx_arm(state, i, VEC_NET, armed)
-        kstate.set(state, sc(S_MSIX), 0)
+        intx_arm(state, c, i, VEC_NET + c, armed)
+        kstate.set(state, sc(c, S_MSIX), 0)
     }
 
-    if !queue_setup(state, 0, r + RXD_OFF, r + RXA_OFF, r + RXU_OFF,
+    if !queue_setup(state, c, 0, r + RXD_OFF, r + RXA_OFF, r + RXU_OFF,
         S_RX_DOOR, use_msix) {
         wr8(cbase, C_STATUS, ST_FAILED)
         return false
     }
-    if !queue_setup(state, 1, r + TXD_OFF, r + TXA_OFF, r + TXU_OFF,
+    if !queue_setup(state, c, 1, r + TXD_OFF, r + TXA_OFF, r + TXU_OFF,
         S_TX_DOOR, use_msix) {
         wr8(cbase, C_STATUS, ST_FAILED)
         return false
     }
 
-    read_mac(state)
-    rx_fill(state)
+    read_mac(state, c)
+    rx_fill(state, c)
 
-    status_add(state, ST_DRIVER_OK)
-    if (status(state) & ST_DRIVER_OK) == 0 {
+    status_add(state, c, ST_DRIVER_OK)
+    if (status(state, c) & ST_DRIVER_OK) == 0 {
         return false
     }
-    kstate.set(state, sc(S_READY), 1)
+    kstate.set(state, sc(c, S_READY), 1)
     // The card only starts writing into the receive buffers once it has
     // been told the ring is full of them.
-    kick(state, kstate.get(state, sc(S_RX_DOOR)), 0)
-    read_link(state)
+    kick(state, c, kstate.get(state, sc(c, S_RX_DOOR)), 0)
+    read_link(state, c)
     return true
 }
 
@@ -592,8 +630,8 @@ fn init(state: u64, use_msix: bool, armed: bool) -> bool {
 // writes back what it understands, then ASKS whether that is acceptable
 // -- FEATURES_OK reads back as zero if the device refuses, and a driver
 // that does not check goes on to build queues the device will not serve.
-fn negotiate(state: u64) -> bool {
-    let b: u64 = common(state)
+fn negotiate(state: u64, c: u64) -> bool {
+    let b: u64 = common(state, c)
     wr32(b, C_DFSELECT, 0)
     let dev_lo: u64 = rd32(b, C_DFEATURE)
     wr32(b, C_DFSELECT, 1)
@@ -618,19 +656,19 @@ fn negotiate(state: u64) -> bool {
     wr32(b, C_GFEATURE, lo)
     wr32(b, C_GFSELECT, 1)
     wr32(b, C_GFEATURE, hi)
-    kstate.set(state, sc(S_FEAT), lo)
-    kstate.set(state, sc(S_FEATHI), hi)
+    kstate.set(state, sc(c, S_FEAT), lo)
+    kstate.set(state, sc(c, S_FEATHI), hi)
 
-    status_add(state, ST_FEATURES_OK)
-    if (status(state) & ST_FEATURES_OK) == 0 {
+    status_add(state, c, ST_FEATURES_OK)
+    if (status(state, c) & ST_FEATURES_OK) == 0 {
         return false
     }
     return true
 }
 
-fn queue_setup(state: u64, q: u64, desc: u64, avail: u64, used: u64,
+fn queue_setup(state: u64, c: u64, q: u64, desc: u64, avail: u64, used: u64,
     door_slot: u64, use_msix: bool) -> bool {
-    let b: u64 = common(state)
+    let b: u64 = common(state, c)
     wr16(b, C_QSELECT, q)
     let offered: u64 = rd16(b, C_QSIZE)
     if offered == 0 {
@@ -657,9 +695,9 @@ fn queue_setup(state: u64, q: u64, desc: u64, avail: u64, used: u64,
     }
     // WHERE this queue is notified. Not a fixed address: the capability
     // gives a base and a multiplier, and the queue says its own offset.
-    let door: u64 = kstate.get(state, sc(S_NOTIFY))
-        + rd16(b, C_QNOTIFY_OFF) * kstate.get(state, sc(S_NMULT))
-    kstate.set(state, sc(door_slot), door)
+    let door: u64 = kstate.get(state, sc(c, S_NOTIFY))
+        + rd16(b, C_QNOTIFY_OFF) * kstate.get(state, sc(c, S_NMULT))
+    kstate.set(state, sc(c, door_slot), door)
     wr16(b, C_QENABLE, 1)
     return rd16(b, C_QENABLE) == 1
 }
@@ -669,9 +707,9 @@ fn queue_setup(state: u64, q: u64, desc: u64, avail: u64, used: u64,
 // one, and this driver refuses instead -- an invented address on a wire
 // that a real Linux kernel is listening on is a bug that looks like
 // packet loss.
-fn read_mac(state: u64) {
-    let cfg: u64 = kstate.get(state, sc(S_DEVCFG))
-    if cfg == 0 || (kstate.get(state, sc(S_FEAT)) & (1 << F_NET_MAC)) == 0 {
+fn read_mac(state: u64, c: u64) {
+    let cfg: u64 = kstate.get(state, sc(c, S_DEVCFG))
+    if cfg == 0 || (kstate.get(state, sc(c, S_FEAT)) & (1 << F_NET_MAC)) == 0 {
         return
     }
     var v: u64 = 0
@@ -680,20 +718,20 @@ fn read_mac(state: u64) {
         v = v | (rd8(cfg, N_MAC + i) << (i * 8))
         i = i + 1
     }
-    kstate.set(state, sc(S_MAC), v)
+    kstate.set(state, sc(c, S_MAC), v)
 }
 
-fn read_link(state: u64) {
-    let cfg: u64 = kstate.get(state, sc(S_DEVCFG))
-    if cfg == 0 || (kstate.get(state, sc(S_FEAT)) & (1 << F_NET_STATUS)) == 0 {
-        kstate.set(state, sc(S_LINK), 1) // no status bit: assume a wire
+fn read_link(state: u64, c: u64) {
+    let cfg: u64 = kstate.get(state, sc(c, S_DEVCFG))
+    if cfg == 0 || (kstate.get(state, sc(c, S_FEAT)) & (1 << F_NET_STATUS)) == 0 {
+        kstate.set(state, sc(c, S_LINK), 1) // no status bit: assume a wire
         return
     }
     var v: u64 = 0
     if (rd16(cfg, N_STATUS) & NS_LINK_UP) != 0 {
         v = 1
     }
-    kstate.set(state, sc(S_LINK), v)
+    kstate.set(state, sc(c, S_LINK), v)
 }
 
 // ------------------------------------------------------- the receive side
@@ -702,8 +740,8 @@ fn read_link(state: u64) {
 // device is the one that fills them. All sixty-four go into the
 // available ring at once; from here on the ring is kept full by
 // `rx_recycle`.
-fn rx_fill(state: u64) {
-    let r: u64 = ring(state)
+fn rx_fill(state: u64, c: u64) {
+    let r: u64 = ring(state, c)
     let d: u64 = r + RXD_OFF
     let a: u64 = r + RXA_OFF
     var i: u64 = 0
@@ -713,10 +751,10 @@ fn rx_fill(state: u64) {
         i = i + 1
     }
     avail_publish(a, QSIZE)
-    kstate.set(state, sc(S_RX_AVAIL), QSIZE)
-    kstate.set(state, sc(S_RX_USED), 0)
-    kstate.set(state, sc(S_TX_AVAIL), 0)
-    kstate.set(state, sc(S_TX_USED), 0)
+    kstate.set(state, sc(c, S_RX_AVAIL), QSIZE)
+    kstate.set(state, sc(c, S_RX_USED), 0)
+    kstate.set(state, sc(c, S_TX_AVAIL), 0)
+    kstate.set(state, sc(c, S_TX_USED), 0)
 }
 
 // One frame, or 0. What comes back is the address of the frame in
@@ -727,13 +765,13 @@ fn rx_fill(state: u64) {
 // The virtio header of twelve octets sits in front of every frame and is
 // skipped here: without merged buffers and without any offload
 // negotiated it carries nothing this kernel acts on.
-fn rx_take(state: u64, frame: *mut u64, slot: *mut u64) -> u64 {
-    if !ready(state) {
+fn rx_take_on(state: u64, c: u64, frame: *mut u64, slot: *mut u64) -> u64 {
+    if !ready_on(state, c) {
         return 0
     }
-    let r: u64 = ring(state)
+    let r: u64 = ring(state, c)
     let u: u64 = r + RXU_OFF
-    let last: u64 = kstate.get(state, sc(S_RX_USED))
+    let last: u64 = kstate.get(state, sc(c, S_RX_USED))
     let now: u64 = used_idx(u)
     if last == now {
         return 0
@@ -745,30 +783,30 @@ fn rx_take(state: u64, frame: *mut u64, slot: *mut u64) -> u64 {
     let i: u64 = last % QSIZE
     let id: u64 = used_id(u, i) % QSIZE
     let len: u64 = used_len(u, i)
-    kstate.set(state, sc(S_RX_USED), (last +% 1) & 0xFFFF)
+    kstate.set(state, sc(c, S_RX_USED), (last +% 1) & 0xFFFF)
     if len <= 12 || len > BUFSZ {
         // Nothing usable -- but the descriptor still has to go back,
         // otherwise the ring runs dry one buffer at a time.
-        rx_recycle(state, id)
+        rx_recycle_on(state, c, id)
         return 0
     }
     *frame = r + RXB_OFF + id * BUFSZ + 12
     *slot = id
-    kstate.add(state, sc(S_RXP), 1)
-    kstate.add(state, sc(S_RXB), len - 12)
+    kstate.add(state, sc(c, S_RXP), 1)
+    kstate.add(state, sc(c, S_RXB), len - 12)
     return len - 12
 }
 
 // The buffer is free again. Descriptor and length are unchanged, so only
 // the available ring has to point at it once more.
-fn rx_recycle(state: u64, id: u64) {
-    let r: u64 = ring(state)
+fn rx_recycle_on(state: u64, c: u64, id: u64) {
+    let r: u64 = ring(state, c)
     let a: u64 = r + RXA_OFF
-    let idx: u64 = kstate.get(state, sc(S_RX_AVAIL))
+    let idx: u64 = kstate.get(state, sc(c, S_RX_AVAIL))
     avail_put(a, idx % QSIZE, id)
     avail_publish(a, (idx +% 1) & 0xFFFF)
-    kstate.set(state, sc(S_RX_AVAIL), (idx +% 1) & 0xFFFF)
-    kick(state, kstate.get(state, sc(S_RX_DOOR)), 0)
+    kstate.set(state, sc(c, S_RX_AVAIL), (idx +% 1) & 0xFFFF)
+    kick(state, c, kstate.get(state, sc(c, S_RX_DOOR)), 0)
 }
 
 // ------------------------------------------------------- the send side
@@ -779,12 +817,12 @@ fn rx_recycle(state: u64, id: u64) {
 // operator is checked and would rightly panic the kernel at the first
 // wraparound, which happens after 65 536 frames and would therefore be
 // found in a measurement rather than in a test.
-fn tx_room(state: u64) -> u64 {
-    if !ready(state) {
+fn tx_room_on(state: u64, c: u64) -> u64 {
+    if !ready_on(state, c) {
         return 0
     }
-    let inflight: u64 = (kstate.get(state, sc(S_TX_AVAIL))
-        -% used_idx(ring(state) + TXU_OFF)) & 0xFFFF
+    let inflight: u64 = (kstate.get(state, sc(c, S_TX_AVAIL))
+        -% used_idx(ring(state, c) + TXU_OFF)) & 0xFFFF
     if inflight >= QSIZE {
         return 0
     }
@@ -793,16 +831,16 @@ fn tx_room(state: u64) -> u64 {
 
 // One frame out. `false` means the ring was full -- the caller decides
 // whether to drop it or try again; TCP is built for both.
-fn tx_frame(state: u64, src: u64, n: u64) -> bool {
-    if !ready(state) || n == 0 || n + 12 > BUFSZ {
+fn tx_frame_on(state: u64, c: u64, src: u64, n: u64) -> bool {
+    if !ready_on(state, c) || n == 0 || n + 12 > BUFSZ {
         return false
     }
-    if tx_room(state) == 0 {
-        kstate.add(state, sc(S_TXDROP), 1)
+    if tx_room_on(state, c) == 0 {
+        kstate.add(state, sc(c, S_TXDROP), 1)
         return false
     }
-    let r: u64 = ring(state)
-    let idx: u64 = kstate.get(state, sc(S_TX_AVAIL))
+    let r: u64 = ring(state, c)
+    let idx: u64 = kstate.get(state, sc(c, S_TX_AVAIL))
     let id: u64 = idx % QSIZE
     let buf: u64 = r + TXB_OFF + id * BUFSZ
     // The twelve octets of header, zeroed: no offload was negotiated, so
@@ -825,10 +863,10 @@ fn tx_frame(state: u64, src: u64, n: u64) -> bool {
     // it too.
     avail_put(r + TXA_OFF, idx % QSIZE, id)
     avail_publish(r + TXA_OFF, (idx +% 1) & 0xFFFF)
-    kstate.set(state, sc(S_TX_AVAIL), (idx +% 1) & 0xFFFF)
-    kstate.add(state, sc(S_TXP), 1)
-    kstate.add(state, sc(S_TXB), n)
-    kick(state, kstate.get(state, sc(S_TX_DOOR)), 1)
+    kstate.set(state, sc(c, S_TX_AVAIL), (idx +% 1) & 0xFFFF)
+    kstate.add(state, sc(c, S_TXP), 1)
+    kstate.add(state, sc(c, S_TXB), n)
+    kick(state, c, kstate.get(state, sc(c, S_TX_DOOR)), 1)
     return true
 }
 
@@ -842,24 +880,24 @@ fn tx_frame(state: u64, src: u64, n: u64) -> bool {
 // ring by `inet.pump`, in a task of its own: a TCP state machine in
 // interrupt context would run on whichever kernel stack happened to be
 // current, with interrupts off, for as long as a retransmission takes.
-fn irq(state: u64) {
-    kstate.add(state, sc(S_IRQS), 1)
-    let isr: u64 = kstate.get(state, sc(S_ISR))
+fn irq_on(state: u64, c: u64) {
+    kstate.add(state, sc(c, S_IRQS), 1)
+    let isr: u64 = kstate.get(state, sc(c, S_ISR))
     if isr != 0 {
         let v: u64 = rd8(isr, 0)
         if (v & 2) != 0 {
-            read_link(state)
+            read_link(state, c)
         }
     }
 }
 
 // Is there anything to take? Cheap enough to ask on every turn of the
 // idle loop: two reads of ordinary memory.
-fn poll(state: u64) -> bool {
-    if !ready(state) {
+fn poll_on(state: u64, c: u64) -> bool {
+    if !ready_on(state, c) {
         return false
     }
-    return kstate.get(state, sc(S_RX_USED)) != used_idx(ring(state) + RXU_OFF)
+    return kstate.get(state, sc(c, S_RX_USED)) != used_idx(ring(state, c) + RXU_OFF)
 }
 
 // ---------------------------------------------------- arming the vector
@@ -867,7 +905,7 @@ fn poll(state: u64) -> bool {
 // MSI-X entry 0, exactly as `nvme.fi` does it: the PHYSICAL address of
 // the local APIC as the target, the vector as the data. The device puts
 // that word on the bus itself and never sees a page table.
-fn msix_arm(state: u64, i: u64, vector: u64, armed: bool) -> bool {
+fn msix_arm(state: u64, c: u64, i: u64, vector: u64, armed: bool) -> bool {
     let d: u64 = pci.get(state, i, pci.E_BDF)
     let cap: u64 = pci.get(state, i, pci.E_MSIX)
     if cap == 0 {
@@ -899,7 +937,7 @@ fn msix_arm(state: u64, i: u64, vector: u64, armed: bool) -> bool {
 
 // The other path: the interrupt PIN through the I/O APIC. PCI lines are
 // level triggered and active low.
-fn intx_arm(state: u64, i: u64, vector: u64, armed: bool) {
+fn intx_arm(state: u64, c: u64, i: u64, vector: u64, armed: bool) {
     let d: u64 = pci.get(state, i, pci.E_BDF)
     pci.cfg_write16(d, 0x04, pci.cfg_read16(d, 0x04) & 0xFBFF)
     let gsi: u64 = pci.get(state, i, pci.E_IRQLINE)
@@ -915,11 +953,58 @@ fn intx_arm(state: u64, i: u64, vector: u64, armed: bool) {
 // The counter-check needs a way to take the card away from a kernel that
 // is otherwise identical. `nonet` never calls `init`; this is for the
 // case where it came up and has to go down again.
-fn shut_down(state: u64) {
-    if common(state) == 0 {
+fn shut_down_on(state: u64, c: u64) {
+    if common(state, c) == 0 {
         return
     }
-    wr8(common(state), C_STATUS, 0)
-    kstate.set(state, sc(S_READY), 0)
-    pci.disable_master(bdf(state))
+    wr8(common(state, c), C_STATUS, 0)
+    kstate.set(state, sc(c, S_READY), 0)
+    pci.disable_master(bdf_on(state, c))
+}
+
+// ==================================================== ONE CARD, OR TWO
+//
+// Everything above takes a card number. Everything that existed before
+// round NETMON did not, and there is no reason to make forty call sites
+// in four files learn about a second card that most machines do not
+// have. So the old names stay, they mean card 0, and they are these
+// eleven lines.
+//
+// The `_on` names are what `kernel/share.fi` uses, and nothing else.
+
+fn init(state: u64, use_msix: bool, armed: bool) -> bool {
+    return init_on(state, 0, use_msix, armed)
+}
+
+fn present(state: u64) -> bool { return present_on(state, 0) }
+fn ready(state: u64) -> bool { return ready_on(state, 0) }
+fn up(state: u64) -> bool { return up_on(state, 0) }
+fn bdf(state: u64) -> u64 { return bdf_on(state, 0) }
+fn idx(state: u64) -> u64 { return idx_on(state, 0) }
+fn irqs(state: u64) -> u64 { return irqs_on(state, 0) }
+fn rx_frames(state: u64) -> u64 { return rx_frames_on(state, 0) }
+fn tx_frames(state: u64) -> u64 { return tx_frames_on(state, 0) }
+fn tx_drops(state: u64) -> u64 { return tx_drops_on(state, 0) }
+fn rx_octets(state: u64) -> u64 { return rx_octets_on(state, 0) }
+fn tx_octets(state: u64) -> u64 { return tx_octets_on(state, 0) }
+fn features(state: u64) -> u64 { return features_on(state, 0) }
+fn queue_size(state: u64) -> u64 { return queue_size_on(state, 0) }
+fn msix(state: u64) -> bool { return msix_on(state, 0) }
+fn notified(state: u64) -> u64 { return notified_on(state, 0) }
+fn link_up(state: u64) -> bool { return link_up_on(state, 0) }
+fn shut_down(state: u64) { shut_down_on(state, 0) }
+fn poll(state: u64) -> bool { return poll_on(state, 0) }
+fn irq(state: u64) { irq_on(state, 0) }
+fn tx_room(state: u64) -> u64 { return tx_room_on(state, 0) }
+
+fn mac_at(state: u64, i: u64) -> u64 { return mac_at_on(state, 0, i) }
+
+fn rx_take(state: u64, frame: *mut u64, slot: *mut u64) -> u64 {
+    return rx_take_on(state, 0, frame, slot)
+}
+
+fn rx_recycle(state: u64, id: u64) { rx_recycle_on(state, 0, id) }
+
+fn tx_frame(state: u64, src: u64, n: u64) -> bool {
+    return tx_frame_on(state, 0, src, n)
 }
