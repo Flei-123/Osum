@@ -6,7 +6,7 @@ Uebersetzer festgenagelt ist: `vendor/firn/COMMIT`.
 
 ## Der Weg, in einem Satz
 
-`vendor/firn/hole-firnc.sh` packt den Firn-Commit aus `COMMIT` aus und
+`vendor/firn/fetch-firnc.sh` packt den Firn-Commit aus `COMMIT` aus und
 kopiert **die ganze Firn-Bibliothek** dieses Commits nach
 `vendor/firn/lib/`. Darin liegt `lib/net/`. Beide Uebersetzerstufen
 suchen ein `import` zuletzt in `<Verzeichnis der Uebersetzerdatei>/../lib`
@@ -37,7 +37,7 @@ und `<repo>/lib/net/` existiert absichtlich nicht.
 
 Die drei Blob-Hashes stehen in `vendor/net/BLOBS` und werden in
 Abschnitt 1 von `./test.sh` gegen die Dateien geprueft, die
-`hole-firnc.sh` wirklich ausgepackt hat — `git hash-object` rechnet
+`fetch-firnc.sh` wirklich ausgepackt hat — `git hash-object` rechnet
 denselben Wert aus, den Firn im Baum stehen hat. Zieht jemand `COMMIT`
 nach und der Stack hat sich dabei geaendert, faellt das dort auf und
 nicht erst in einer Messung.

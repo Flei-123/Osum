@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""tools/k15/keinname.py -- steht dieser Anzeigename als ZEICHENKETTE im
+"""tools/k15/noname.py -- steht dieser Anzeigename als ZEICHENKETTE im
 Quelltext?
 
-    keinname.py <quelldatei> <name>
+    noname.py <quelldatei> <name>
 
 Die Zusage lautet: der Anzeigename eines Programms steht in Daten
 (`/usr/share/apps/*.app`) und nicht im Code -- dieselbe Regel, nach der

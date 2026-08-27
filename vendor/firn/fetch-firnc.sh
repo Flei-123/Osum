@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# vendor/firn/hole-firnc.sh -- besorgt den FESTGENAGELTEN Firn-Uebersetzer.
+# vendor/firn/fetch-firnc.sh -- besorgt den FESTGENAGELTEN Firn-Uebersetzer.
 #
 # Warum festgenagelt: Firn wird gerade aktiv weiterentwickelt. Wuerde Osum
 # immer gegen den neuesten Stand bauen, waere bei jedem Fehler unklar, ob er
@@ -21,8 +21,8 @@
 # dafuer tun muss -- und $FIRNLIB bleibt frei fuer die libc dieses Repos
 # (lib/libc, `import libc.io`).
 #
-#   ./vendor/firn/hole-firnc.sh          baut, wenn noetig
-#   ./vendor/firn/hole-firnc.sh --force  baut in jedem Fall neu
+#   ./vendor/firn/fetch-firnc.sh          baut, wenn noetig
+#   ./vendor/firn/fetch-firnc.sh --force  baut in jedem Fall neu
 set -euo pipefail
 cd "$(dirname "$0")"
 HIER=$(pwd)

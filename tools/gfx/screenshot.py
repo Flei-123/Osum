@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""tools/gfx/schuss.py -- EIN Bildschirmfoto ueber den QEMU-Monitor.
+"""tools/gfx/screenshot.py -- EIN Bildschirmfoto ueber den QEMU-Monitor.
 
-    schuss.py <monitor-socket> <ziel.ppm> [wartesekunden]
+    screenshot.py <monitor-socket> <ziel.ppm> [wartesekunden]
 
 QEMU kann den Inhalt seines Bildschirms als PPM schreiben (`screendump`),
 auch mit `-display none`: die Bildflaeche existiert, sie wird nur nicht

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""tools/k15/gross.py -- ein Dateisystem mit einer ernsthaften Zahl von
+"""tools/k15/bigfs.py -- ein Dateisystem mit einer ernsthaften Zahl von
 Dateien, und die Liste dessen, was drin steht.
 
 Runde K15, zweiter Nachtrag. Der Namensindex soll sich gegen einen
@@ -18,7 +18,7 @@ WAS DIESES ABBILD ANDERS MACHT ALS DIE UEBRIGEN:
     Dateien mit Inhalt passten nicht auf ein Abbild von zwei Megaoktett.
   * EIN BAUM UND NICHT EIN ORDNER. Der Baumdurchlauf soll absteigen
     muessen, sonst misst man ihn zu guenstig: er hat hier acht Ordner
-    unter `/daten`, jeder mit einem Unterordner.
+    unter `/data`, jeder mit einem Unterordner.
 
 WAS DABEI HERAUSKOMMT, IST NACHRECHENBAR: dieses Werkzeug schreibt
 neben die Angaben fuer `mkfs.py` auch eine Liste der Namen und, fuer
@@ -27,7 +27,7 @@ haelt die Zahlen aus der Maschine dagegen -- er glaubt weder dem Index
 noch dem Durchlauf.
 
 Verwendung:
-    gross.py <arbeitsverzeichnis> [<zahl der dateien>]
+    bigfs.py <arbeitsverzeichnis> [<zahl der dateien>]
 """
 
 import os
@@ -51,7 +51,7 @@ def namen(n):
     for i in range(n):
         ordner = ORDNER[i % len(ORDNER)]
         unten = (i // len(ORDNER)) % 2 == 1
-        pfad = "/daten/%s%s" % (ordner, "/tief" if unten else "")
+        pfad = "/data/%s%s" % (ordner, "/tief" if unten else "")
         aus.append((pfad, "datei%04d.txt" % i))
     return aus
 
@@ -65,7 +65,7 @@ def main(argv):
     os.makedirs(arbeit, exist_ok=True)
     liste = namen(n)
 
-    zeilen = ["--inodes=4096", "/daten/"]
+    zeilen = ["--inodes=4096", "/data/"]
     gesehen = set()
     for pfad, _ in liste:
         teile = pfad.strip("/").split("/")
@@ -73,7 +73,7 @@ def main(argv):
             p = "/" + "/".join(teile[:k]) + "/"
             if p not in gesehen:
                 gesehen.add(p)
-                if p != "/daten/":
+                if p != "/data/":
                     zeilen.append(p)
     for pfad, name in liste:
         zeilen.append("%s/%s=" % (pfad, name))
@@ -89,7 +89,7 @@ def main(argv):
     # Namen. Die Ordner zaehlen mit, sie haben auch Namen.
     alle = [name for _, name in liste]
     alle += [p.strip("/").split("/")[-1] for p in sorted(gesehen)]
-    alle += ["daten"]
+    alle += ["data"]
     with open(os.path.join(arbeit, "erwartet"), "w") as f:
         for w in WOERTER:
             f.write("%s %d\n"

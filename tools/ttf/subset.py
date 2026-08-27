@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""tools/ttf/schnitt.py -- eine TrueType-Datei auf das Noetige zusammenschneiden.
+"""tools/ttf/subset.py -- eine TrueType-Datei auf das Noetige zusammenschneiden.
 
 Runde K10 liest im Kernel echte TrueType-Umrisse (`kernel/ttf.fi`).  Eine
 vollstaendige DejaVu-Datei ist 760 KiB gross und traegt 6253 Glyphen,
@@ -24,7 +24,7 @@ Spezifikation heraus versteht.  Sind sich beide nicht einig, faellt es
 sofort auf -- ein Umriss an der falschen Stelle ist im Bild zu sehen.
 
 Verwendung:
-    schnitt.py <vorlage.ttf> <ziel.ttf> [erstes] [letztes]
+    subset.py <vorlage.ttf> <ziel.ttf> [erstes] [letztes]
 
 Vorgabe fuer den Bereich ist 0x20..0x7E, also derselbe wie beim
 8x16-Zeichensatz aus Runde K7 (`kernel/font.fi`).

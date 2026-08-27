@@ -1,4 +1,4 @@
-/* tools/net/bruecke.c -- round K8: the wire between QEMU and Linux.
+/* tools/net/bridge.c -- round K8: the wire between QEMU and Linux.
  *
  * WHY THIS FILE EXISTS AT ALL, and it is worth writing down because it
  * is the same wall round K3 ran into. The obvious way to give a QEMU
@@ -34,7 +34,7 @@
  *   hardware was supposed to. A stack that CHECKS the checksum -- and
  *   `lib/net/wire.fi` does -- rightly throws every one of them away.
  *
- *   bruecke <interface> <own udp port> <qemu udp port>
+ *   bridge <interface> <own udp port> <qemu udp port>
  *
  * On SIGTERM it prints its two counters, which run.sh reads to tell
  * "the bridge saw nothing" from "Osum sent nothing".
@@ -67,7 +67,7 @@ static void on_signal(int s) { (void)s; stop = 1; }
 int main(int argc, char **argv)
 {
     if (argc < 4) {
-        fprintf(stderr, "usage: bruecke <if> <own port> <qemu port>\n");
+        fprintf(stderr, "usage: bridge <if> <own port> <qemu port>\n");
         return 2;
     }
     const char *ifname = argv[1];
@@ -95,7 +95,7 @@ int main(int argc, char **argv)
     /* Not fatal on an old kernel -- but then the counters below lie, so
      * say so rather than go on in silence. */
     if (setsockopt(pk, SOL_PACKET, PACKET_IGNORE_OUTGOING, &one, sizeof one) < 0)
-        fprintf(stderr, "bruecke: PACKET_IGNORE_OUTGOING is not available\n");
+        fprintf(stderr, "bridge: PACKET_IGNORE_OUTGOING is not available\n");
 
     /* Promiscuous: the frames Osum sends carry ITS hardware address as
      * the source and the peer's as the destination; the veth end this
@@ -164,7 +164,7 @@ int main(int argc, char **argv)
             }
         }
     }
-    fprintf(stderr, "bruecke: to_qemu=%lu to_wire=%lu drops=%lu\n",
+    fprintf(stderr, "bridge: to_qemu=%lu to_wire=%lu drops=%lu\n",
             to_qemu, to_wire, drops);
     return 0;
 }

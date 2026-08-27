@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""tools/k15/symbolbild.py -- steht das Symbol aus dem Buendel wirklich
+"""tools/k15/iconpixels.py -- steht das Symbol aus dem Buendel wirklich
 auf dem Schirm? Bildpunkt fuer Bildpunkt.
 
 Runde K15, zweiter Nachtrag. Das Symbol eines Programms ist seit diesem
@@ -7,7 +7,7 @@ Nachtrag eine DATEI im Buendel (`/apps/<name>.prog/symbol`, Format OSYM)
 und keine Farbe mehr in einer Textdatei. Damit laesst sich die Zusage
 "es wird gemalt" so pruefen, wie diese Runde Text prueft: nicht als
 Flaeche gegen einen Mittelwert, sondern Punkt gegen Punkt gegen eine
-ZWEITE Umsetzung -- hier `tools/k15/symbol.py`, die die Datei
+ZWEITE Umsetzung -- hier `tools/k15/icon.py`, die die Datei
 unabhaengig von Firn zurueckliest.
 
 DIE LEHRE AUS RUNDE K7B GILT AUCH HIER: 87 Prozent richtige Bildpunkte
@@ -17,7 +17,7 @@ durchsichtigen sagen ueber das Zeichnen nichts aus --, und es muss JEDER
 davon stimmen.
 
 Verwendung:
-    symbolbild.py <schirm.ppm> <x> <y> <breite> <hoehe> <symbol> [<abweichung>]
+    iconpixels.py <schirm.ppm> <x> <y> <breite> <hoehe> <symbol> [<abweichung>]
     -> "ok <deckend> von <gepruefte> gleich"    Rueckgabe 0
     -> "falsch <n> von <deckend>"               Rueckgabe 1
 """

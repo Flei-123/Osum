@@ -110,7 +110,7 @@ number_in() { # datei name
         | sed -E 's/^const [A-Za-z0-9_]+: u64 = ([0-9]+).*/\1/'
 }
 
-bash vendor/firn/hole-firnc.sh >/dev/null || { echo "vendor/firn/hole-firnc.sh fehlgeschlagen"; exit 1; }
+bash vendor/firn/fetch-firnc.sh >/dev/null || { echo "vendor/firn/fetch-firnc.sh fehlgeschlagen"; exit 1; }
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
     echo "K14: uebersprungen, qemu-system-x86_64 fehlt"
     exit 0
@@ -149,12 +149,12 @@ kfile=$(number_in kernel/file.fi "K_VFILE")
 kdir=$(number_in kernel/file.fi "K_VDIR")
 gleich "die Deskriptorarten dieser Runde sind 12 und 13" "12 13" "$kfile $kdir"
 
-# Die kdata-Karte. `karte.py` rechnet jede Ueberschneidung nach -- diese
+# Die kdata-Karte. `memmap.py` rechnet jede Ueberschneidung nach -- diese
 # Stelle hat dem Projekt viermal denselben Fehler beschert.
-if python3 tools/kernel/karte.py kernel > "$TMPD/karte.txt" 2>&1; then
+if python3 tools/kernel/memmap.py kernel > "$TMPD/karte.txt" 2>&1; then
     ok "die Speicherkarte von kdata: $(tail -1 "$TMPD/karte.txt")"
 else
-    bad "tools/kernel/karte.py meldet Kollisionen"
+    bad "tools/kernel/memmap.py meldet Kollisionen"
     sed 's/^/        /' "$TMPD/karte.txt" | head -8
 fi
 hat "$TMPD/karte.txt" "0 Kollisionen" "keine zwei Bereiche ueberschneiden sich"
@@ -173,7 +173,7 @@ done
 mkdir -p "$TMPD/kollision"
 cp kernel/*.fi "$TMPD/kollision/"
 sed -i 's/^const PROCFS_OFF: u64 = 0x45000$/const PROCFS_OFF: u64 = 0x3C000/' "$TMPD/kollision/kstate.fi"
-if python3 tools/kernel/karte.py "$TMPD/kollision" > "$TMPD/karte2.txt" 2>&1; then
+if python3 tools/kernel/memmap.py "$TMPD/kollision" > "$TMPD/karte2.txt" 2>&1; then
     bad "GEGENPROBE: PROCFS_OFF auf 0x3C000 (= FB_OFF) und der Pruefer schweigt"
 else
     ok "GEGENPROBE: PROCFS_OFF auf FB_OFF gelegt -- der Kartenpruefer schlaegt an"
