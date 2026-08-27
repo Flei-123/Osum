@@ -112,6 +112,18 @@ const PG_BATPERCENT: u64 = 25
 const SYS_NETGET: u64 = 1300
 const NG_READY: u64 = 0
 const NG_IP: u64 = 1
+// ROUND NETVIEW, addendum.
+const NG_MASK: u64 = 2
+const NG_GW: u64 = 3
+const NG_STATE: u64 = 8
+
+// The two icon sets. `/etc/netview/` is where the image puts them, and
+// a bar that does not find them falls back to text -- a missing icon
+// must not take the address off the screen with it.
+const ICON_MAX: u64 = 1100
+const MARK_MAX: u64 = 640
+const IC_W: u64 = 16
+const MK_W: u64 = 12
 
 // ------------------------------------------------------------- state
 
@@ -165,6 +177,17 @@ static mut knv: [u64; 10] = [0 as u64; 10]
 static mut ktit: [u8; 400] = [0 as u8; 400]
 static mut klab: [u8; 400] = [0 as u8; 400]
 static mut nk: u64 = 0
+
+// ROUND NETVIEW, addendum: the pictures, read once at start. Four
+// states of 16x16 and three marks of 12x12, in the order the kernel
+// (`sys.NS_*`) and `kernel/netview.fi` (`V_*`) count them.
+static mut ic_buf: [u8; 4400] = [0 as u8; 4400]
+static mut mk_buf: [u8; 1920] = [0 as u8; 1920]
+static mut ic_ok: u64 = 0
+static mut mk_ok: u64 = 0
+static mut net_state: u64 = 0
+static mut hover_txt: [u8; 96] = [0 as u8; 96]
+static mut hover_on: u64 = 0
 
 static mut rec: [u8; 104] = [0 as u8; 104]
 static mut ev: [u8; 16] = [0 as u8; 16]
@@ -585,6 +608,227 @@ fn apply() {
     let _l: u64 = wlibc.win_state(w_h, wlibc.WS_LAYER, layer)
 }
 
+// ============================================ ROUND NETVIEW, addendum
+//
+// TWO ANSWERS AND NOT ONE, and that is the whole of this part.
+//
+// Windows shows ONE icon in the corner and it describes THE MACHINE.
+// Here the network is a property of a PROCESS, so one icon cannot say
+// it: this machine can be genuinely online while three programs see a
+// faked network, one sees none and two see the real one. A single
+// symbol would have to be wrong about five of them.
+//
+// So there are two displays, answering two different questions:
+//
+//   the CORNER  -- what the machine really has: carrier, address,
+//                  route. Four states, one icon, and the details as
+//                  text while the pointer rests on it.
+//   the BUTTON  -- what THIS program sees. A mark, and only when it is
+//                  not the normal case; `real` gets nothing, because a
+//                  mark on every window is a mark that says nothing.
+//
+// THE SAME DRAWING IN BOTH SCHEMES. The pictures are OSYM files whose
+// colours are ROLES and not values (`wlibc.icon_draw`), so a light
+// scheme and a dark one get the same shapes in their own colours, out
+// of one file.
+
+static mut p_icons: [u8; 14] = "/etc/netview/\0"
+static mut n_state: [u8; 54] = "state-nocarrier\0state-noip\0state-noroute\0state-online\0"
+static mut n_mark: [u8; 35] = "mark-filtered\0mark-faked\0mark-none\0"
+
+fn nth(p: u64, i: u64) -> u64 {
+    var at: u64 = p
+    var k: u64 = 0
+    while k < i {
+        while __mmio_read8((at) as *mut u8) != 0 as u8 {
+            at = at + 1
+        }
+        at = at + 1
+        k = k + 1
+    }
+    return at
+}
+
+// One picture into `dst`. 0 if there is no such file -- which is not
+// fatal and not silent: `icons_load` counts what it got and the count
+// goes into the report, so a run with no pictures says so.
+fn icon_read(name: u64, dst: u64, max: u64) -> u64 {
+    var path: [u8; 64] = [0 as u8; 64]
+    let a: u64 = ulib.strcpy((&path[0 as usize]) as u64,
+        (&p_icons[0 as usize]) as u64)
+    let _b: u64 = ulib.strcpy((&path[0 as usize]) as u64 + a, name)
+    let fd: u64 = io.open((&path[0 as usize]) as u64, 0)
+    if ulib.bad(fd) {
+        return 0
+    }
+    let n: u64 = io.read(fd, dst, max)
+    io.close(fd)
+    if ulib.bad(n) {
+        return 0
+    }
+    return n
+}
+
+fn icons_load() {
+    ic_ok = 0
+    mk_ok = 0
+    var i: u64 = 0
+    while i < 4 {
+        if icon_read(nth((&n_state[0 as usize]) as u64, i),
+            (&ic_buf[0 as usize]) as u64 + i * ICON_MAX, ICON_MAX) > 12 {
+            ic_ok = ic_ok + 1
+        }
+        i = i + 1
+    }
+    i = 0
+    while i < 3 {
+        if icon_read(nth((&n_mark[0 as usize]) as u64, i),
+            (&mk_buf[0 as usize]) as u64 + i * MARK_MAX, MARK_MAX) > 12 {
+            mk_ok = mk_ok + 1
+        }
+        i = i + 1
+    }
+}
+
+fn state_icon(s: u64) -> u64 {
+    if s > 3 || ic_ok < 4 {
+        return 0
+    }
+    return (&ic_buf[0 as usize]) as u64 + s * ICON_MAX
+}
+
+// The view of a process minus one: `real` is 0 and gets no mark, so
+// `filtered` is mark 0, `faked` mark 1, `none` mark 2. 0 means "this
+// one gets nothing".
+fn mark_icon(v: u64) -> u64 {
+    if v == 0 || v > 3 || mk_ok < 3 {
+        return 0
+    }
+    return (&mk_buf[0 as usize]) as u64 + (v - 1) * MARK_MAX
+}
+
+
+// ============================================ ROUND NETVIEW, addendum
+//
+// WHAT THE POINTER IS RESTING ON, AS A SENTENCE. An icon that says
+// something the person cannot look up is a rune. There is no tooltip
+// window in this system and a bar that is 28 pixels high cannot open
+// one; what there IS is the empty space between the last window button
+// and the first status field, and that is where the sentence goes.
+//
+// It is drawn in the DIM role, so it reads as an explanation and not as
+// another control, and it is reported on the serial line like every
+// other piece of text in this bar -- so `tools/netview/run.sh` can hold
+// the reported sentence against the picture, character by character,
+// the way round DESKTOP does it for the clock.
+
+static mut h_none: [u8; 57] = "Netzzugriff: keiner -- dieses Programm bekommt kein Netz\0"
+static mut h_fake: [u8; 75] = "Netzzugriff: vorgetaeuscht -- dieses Programm erreicht nichts von draussen\0"
+static mut h_filt: [u8; 54] = "Netzzugriff: gefiltert -- nur die eingetragenen Ziele\0"
+static mut h_s0: [u8; 46] = "Kein Verbindungstraeger -- nichts eingesteckt\0"
+static mut h_s1: [u8; 31] = "Traeger da, noch keine Adresse\0"
+static mut h_s2: [u8; 40] = "Adresse da, aber kein Weg nach draussen\0"
+static mut h_s3: [u8; 22] = "Verbunden ueber Kabel\0"
+static mut h_sp2: [u8; 3] = "  \0"
+static mut h_msk: [u8; 9] = "  Maske \0"
+static mut h_gw: [u8; 6] = "  gw \0"
+static mut s_hv: [u8; 16] = "taskbar: hover \0"
+
+fn hover_clear() {
+    hover_on = 0
+    __mmio_write8(((&hover_txt[0 as usize]) as u64) as *mut u8, 0 as u8)
+}
+
+fn hover_set(txt: u64) {
+    hover_on = 1
+    let _a: u64 = ulib.strncpy((&hover_txt[0 as usize]) as u64, txt, 95)
+}
+
+// The corner: the state in words, and then the three numbers Windows
+// hides behind two more clicks.
+fn hover_state() {
+    var w: u64 = (&h_s0[0 as usize]) as u64
+    if net_state == 1 {
+        w = (&h_s1[0 as usize]) as u64
+    } else if net_state == 2 {
+        w = (&h_s2[0 as usize]) as u64
+    } else if net_state == 3 {
+        w = (&h_s3[0 as usize]) as u64
+    }
+    var at: u64 = ulib.strncpy((&hover_txt[0 as usize]) as u64, w, 40)
+    if net_state >= 2 {
+        let h: u64 = (&hover_txt[0 as usize]) as u64
+        at = text_at_p(h, at, (&h_sp2[0 as usize]) as u64)
+        at = ip_at(h, at, ulib.sys(SYS_NETGET, NG_IP, 0, 0))
+        at = text_at_p(h, at, (&h_msk[0 as usize]) as u64)
+        at = ip_at(h, at, ulib.sys(SYS_NETGET, NG_MASK, 0, 0))
+        at = text_at_p(h, at, (&h_gw[0 as usize]) as u64)
+        at = ip_at(h, at, ulib.sys(SYS_NETGET, NG_GW, 0, 0))
+    }
+    hover_on = 1
+}
+
+fn ip_at(p: u64, at: u64, v: u64) -> u64 {
+    if ulib.bad(v) {
+        return at
+    }
+    var o: u64 = num_at(p, at, (v >> 24) & 255)
+    o = text_at_p(p, o, (&s_dot[0 as usize]) as u64)
+    o = num_at(p, o, (v >> 16) & 255)
+    o = text_at_p(p, o, (&s_dot[0 as usize]) as u64)
+    o = num_at(p, o, (v >> 8) & 255)
+    o = text_at_p(p, o, (&s_dot[0 as usize]) as u64)
+    return num_at(p, o, v & 255)
+}
+
+// Which of the two displays the pointer is on. Called once per poll,
+// and it changes nothing but `hover_txt` -- the repaint is decided by
+// the caller, so that a pointer standing still costs no drawing.
+fn hover_step() -> bool {
+    let mx: u64 = wlibc.mouse_x()
+    let my: u64 = wlibc.mouse_y()
+    let was: u64 = hover_on
+    var old: [u8; 96] = [0 as u8; 96]
+    let _c: u64 = ulib.strncpy((&old[0 as usize]) as u64,
+        (&hover_txt[0 as usize]) as u64, 95)
+    hover_clear()
+    if inside_bar(mx, my) {
+        let lx: u64 = mx - bar_x
+        let ly: u64 = my - bar_y
+        if lx >= f_x[(F_NET) as usize]
+            && lx < f_x[(F_NET) as usize] + f_w[(F_NET) as usize]
+            && ly >= f_y[(F_NET) as usize]
+            && ly < f_y[(F_NET) as usize] + f_h[(F_NET) as usize] {
+            hover_state()
+        } else {
+            var i: u64 = 0
+            while i < nk {
+                if kw[(i) as usize] != 0 && knv[(i) as usize] != 0
+                    && lx >= kx[(i) as usize]
+                    && lx < kx[(i) as usize] + kw[(i) as usize]
+                    && ly >= ky[(i) as usize]
+                    && ly < ky[(i) as usize] + kh[(i) as usize] {
+                    if knv[(i) as usize] == 1 {
+                        hover_set((&h_filt[0 as usize]) as u64)
+                    } else if knv[(i) as usize] == 2 {
+                        hover_set((&h_fake[0 as usize]) as u64)
+                    } else {
+                        hover_set((&h_none[0 as usize]) as u64)
+                    }
+                    i = nk
+                } else {
+                    i = i + 1
+                }
+            }
+        }
+    }
+    if was != hover_on {
+        return true
+    }
+    return !ulib.streq((&old[0 as usize]) as u64,
+        (&hover_txt[0 as usize]) as u64)
+}
+
 // ================================================== the status fields
 //
 // Three strings out of three system calls, and then the only
@@ -675,6 +919,16 @@ fn status_build() -> bool {
         }
     }
     let ne: u64 = full_of(F_NET)
+    // ROUND NETVIEW, addendum: the four states of the MACHINE. The
+    // kernel works them out (`sys.NG_STATE`) so that this bar does not
+    // ask three questions and draw its own conclusion -- the next
+    // reader of those three would conclude something else.
+    let st: u64 = ulib.sys(SYS_NETGET, NG_STATE, 0, 0)
+    if ulib.bad(st) {
+        net_state = 0
+    } else {
+        net_state = st
+    }
     let rd: u64 = ulib.sys(SYS_NETGET, NG_READY, 0, 0)
     var ip: u64 = 0
     if !ulib.bad(rd) && rd != 0 {
@@ -694,7 +948,7 @@ fn status_build() -> bool {
         at = text_at_p(ne, at, (&s_dot[0 as usize]) as u64)
         at = num_at(ne, at, ip & 255)
     }
-    var sum: u64 = 1469598103934665603
+    var sum: u64 = 1469598103934665603 ^ (net_state *% 2654435761)
     var q: u64 = 0
     while q < F_N {
         let p: u64 = full_of(q)
@@ -938,44 +1192,21 @@ fn list_read() -> bool {
                     knv[(n) as usize] = nv
                     // ================================ ROUND NETVIEW
                     //
-                    // GETAEUSCHT WIRD DAS PROGRAMM, NIE DER MENSCH. A
-                    // program whose network is not the real one carries
-                    // a mark in front of its name in the taskbar, and
-                    // the mark is put here, in front of the title, so
-                    // that everything downstream -- shortening,
-                    // centring, painting, and the runner that reads the
-                    // pixels back -- goes on working unchanged.
-                    //
-                    //   ~  faked     a network that leads nowhere
-                    //   +  filtered  a list of destinations, and no more
-                    //   x  none      no network at all
-                    //
-                    // One character and a space, because a taskbar
-                    // button is narrow and a word would be the first
-                    // thing the shortening throws away -- which would
-                    // mean the mark disappears exactly when there are
-                    // many windows.
-                    var pre: u64 = 0
-                    if nv == 2 {
-                        ktit[((n * 40)) as usize] = 126 as u8
-                        pre = 2
-                    } else if nv == 1 {
-                        ktit[((n * 40)) as usize] = 43 as u8
-                        pre = 2
-                    } else if nv == 3 {
-                        ktit[((n * 40)) as usize] = 120 as u8
-                        pre = 2
-                    }
-                    if pre == 2 {
-                        ktit[((n * 40 + 1)) as usize] = 32 as u8
-                    }
+                    // GETAEUSCHT WIRD DAS PROGRAMM, NIE DER MENSCH. The
+                    // first version of this round put a CHARACTER in
+                    // front of the title -- `~`, `+`, `x`. That was
+                    // honest and it was ugly, and the addendum replaces
+                    // it with a real picture (`paint_band` draws
+                    // `mark_icon` in the button). The title is the title
+                    // again; what the process sees stands beside it and
+                    // not inside it.
                     var k: u64 = 0
                     while k < 31 {
-                        ktit[((n * 40 + pre + k)) as usize] =
+                        ktit[((n * 40 + k)) as usize] =
                             __mmio_read8((b + wlibc.WL_TITLE + k) as *mut u8)
                         k = k + 1
                     }
-                    ktit[((n * 40 + pre + 31)) as usize] = 0 as u8
+                    ktit[((n * 40 + 31)) as usize] = 0 as u8
                     let mix: u64 = id *% 131 +% (fl & 1) *% 7 +% fo +% nv *% 17
                     sum = (sum ^ mix) *% 1099511628211
                     n = n + 1
@@ -1011,6 +1242,12 @@ static mut s_bv: [u8; 9] = " hidden=\0"
 static mut s_bf: [u8; 8] = " focus=\0"
 static mut s_fl: [u8; 17] = "taskbar: field \0\0"
 static mut s_fn: [u8; 8] = " lines=\0"
+static mut s_bn: [u8; 7] = " netv=\0"
+static mut s_bmx: [u8; 8] = " mkx=\0\0\0"
+static mut s_bmy: [u8; 8] = " mky=\0\0\0"
+static mut s_ic: [u8; 18] = "taskbar: state s=\0"
+static mut s_ico: [u8; 17] = "taskbar: icons=\0\0"
+static mut s_icm: [u8; 8] = " marks=\0"
 
 fn say_text(mark: u64, x: u64, base: u64, fg: u64, bg: u64, txt: u64) {
     say((&s_tx[0 as usize]) as u64)
@@ -1033,6 +1270,16 @@ fn say_text(mark: u64, x: u64, base: u64, fg: u64, bg: u64, txt: u64) {
 // picture, per character.
 fn button(x: u64, y: u64, w: u64, h: u64, txt: u64, on: bool,
     dim: bool) -> u64 {
+    return button_mark(x, y, w, h, txt, on, dim, 0)
+}
+
+// THE SAME BUTTON WITH A MARK IN FRONT OF THE LABEL. `mark` is a
+// picture or 0; 0 is the normal case and costs nothing, which is the
+// point -- `real` gets no mark, so most buttons go through here
+// unchanged and the runner that measures the label position still
+// measures the same number for them.
+fn button_mark(x: u64, y: u64, w: u64, h: u64, txt: u64, on: bool,
+    dim: bool, mark: u64) -> u64 {
     var bg: u64 = wlibc.theme(wlibc.T_BTN)
     if on {
         bg = wlibc.theme(wlibc.T_SEL)
@@ -1048,16 +1295,68 @@ fn button(x: u64, y: u64, w: u64, h: u64, txt: u64, on: bool,
     } else if dim {
         fg = wlibc.theme(wlibc.T_DIM)
     }
+    var room: u64 = 0
+    if mark != 0 {
+        room = MK_W + 3
+    }
     let n: u64 = tlen(txt)
     var tw: u64 = wlibc.text_w(wlibc.F_UI, wlibc.PX_UI, txt, n)
-    if tw + 8 > w {
-        tw = w - 8
+    if tw + 8 + room > w {
+        if w > 8 + room {
+            tw = w - 8 - room
+        } else {
+            tw = 0
+        }
     }
-    let tx: u64 = x + (w - tw) / 2
+    let tx: u64 = x + room + (w - room - tw) / 2
     let base: u64 = y + (h + asc) / 2 - 1
+    if mark != 0 {
+        // FLUSH LEFT AND VERTICALLY CENTRED. Left, because a mark that
+        // moves with the length of the title is a mark the eye has to
+        // look for; the whole value of it is that it is always in the
+        // same place.
+        let _m: bool = wlibc.icon_draw(mark, x + 3, y + (h - MK_W) / 2)
+    }
     let _e: u64 = wlibc.text_at(wlibc.F_UI, wlibc.PX_UI, tx, base, txt, n,
         fg)
     return (tx << 32) | base
+}
+
+// Where the free space of a horizontal bar begins and ends: behind the
+// last window button, in front of the first status field.
+fn hover_left() -> u64 {
+    var x: u64 = st_x + st_w + GAP
+    var i: u64 = 0
+    while i < nk {
+        if kw[(i) as usize] != 0 && kx[(i) as usize] + kw[(i) as usize] + GAP > x {
+            x = kx[(i) as usize] + kw[(i) as usize] + GAP
+        }
+        i = i + 1
+    }
+    return x
+}
+
+fn hover_right() -> u64 {
+    var x: u64 = win_w
+    var f: u64 = 0
+    while f < F_N {
+        if f_w[(f) as usize] != 0 && f_x[(f) as usize] < x {
+            x = f_x[(f) as usize]
+        }
+        f = f + 1
+    }
+    if x < GAP {
+        return 0
+    }
+    return x - GAP
+}
+
+fn put_n(p: u64, n: u64) {
+    var i: u64 = 0
+    while i < n {
+        let _c: u64 = ulib.sys(ulib.SYS_WRITE, ulib.OUT, p + i, 1)
+        i = i + 1
+    }
 }
 
 fn paint_band(y0: u64, hh: u64, report: bool) {
@@ -1084,9 +1383,10 @@ fn paint_band(y0: u64, hh: u64, report: bool) {
     while i < nk {
         if kw[(i) as usize] != 0 {
             let lab: u64 = (&klab[0 as usize]) as u64 + i * 40
-            let rc: u64 = button(kx[(i) as usize], ky[(i) as usize],
+            let mk: u64 = mark_icon(knv[(i) as usize])
+            let rc: u64 = button_mark(kx[(i) as usize], ky[(i) as usize],
                 kw[(i) as usize], kh[(i) as usize], lab,
-                kfok[(i) as usize] != 0, kver[(i) as usize] != 0)
+                kfok[(i) as usize] != 0, kver[(i) as usize] != 0, mk)
             if report {
                 var bg: u64 = wlibc.theme(wlibc.T_BTN)
                 var fg: u64 = wlibc.theme(wlibc.T_FG)
@@ -1115,6 +1415,19 @@ fn paint_band(y0: u64, hh: u64, report: bool) {
                 ulib.sayn(kfok[(i) as usize])
                 say((&s_tt[0 as usize]) as u64)
                 say(lab)
+                // ROUND NETVIEW, addendum: WHICH mark, and WHERE. A
+                // picture that is reported but not drawn and a picture
+                // that is drawn but not reported both fail in
+                // `tools/netview/run.sh`, which reads these numbers and
+                // then reads the pixels.
+                say((&s_bn[0 as usize]) as u64)
+                ulib.sayn(knv[(i) as usize])
+                if mk != 0 {
+                    say((&s_bmx[0 as usize]) as u64)
+                    ulib.sayn(kx[(i) as usize] + 3)
+                    say((&s_bmy[0 as usize]) as u64)
+                    ulib.sayn(ky[(i) as usize] + (kh[(i) as usize] - MK_W) / 2)
+                }
                 ulib.nl()
                 say_text((&m_btn[0 as usize]) as u64, rc >> 32,
                     rc & 0xFFFFFFFF, fg, bg, lab)
@@ -1126,11 +1439,34 @@ fn paint_band(y0: u64, hh: u64, report: bool) {
     while f < F_N {
         wlibc.rect(f_x[(f) as usize], f_y[(f) as usize], f_w[(f) as usize],
             f_h[(f) as usize], wlibc.theme(wlibc.T_PANEL))
+        // ROUND NETVIEW, addendum: the state of the MACHINE, in the
+        // corner, where every system has put it for thirty years. It
+        // goes in FRONT of the address and not instead of it: the icon
+        // says at a glance which of four things is true, the address
+        // says which address -- and neither of them replaces the other.
+        var icx: u64 = 0
+        if f == F_NET {
+            let ic: u64 = state_icon(net_state)
+            if ic != 0 {
+                let _i: bool = wlibc.icon_draw(ic, f_x[(f) as usize] + 2,
+                    f_y[(f) as usize] + (f_h[(f) as usize] - IC_W) / 2)
+                icx = IC_W + 2
+                if report {
+                    say((&s_ic[0 as usize]) as u64)
+                    ulib.sayn(net_state)
+                    say((&s_tX[0 as usize]) as u64)
+                    ulib.sayn(f_x[(f) as usize] + 2)
+                    say((&s_gy[0 as usize]) as u64)
+                    ulib.sayn(f_y[(f) as usize] + (f_h[(f) as usize] - IC_W) / 2)
+                    ulib.nl()
+                }
+            }
+        }
         var l: u64 = 0
         while l < f_lines[(f) as usize] {
             let p: u64 = line_of(f, l)
             let n: u64 = tlen(p)
-            var tx: u64 = f_x[(f) as usize] + 4
+            var tx: u64 = f_x[(f) as usize] + 4 + icx
             var base: u64 = f_y[(f) as usize] + (f_h[(f) as usize] + asc) / 2 - 1
             if f_lines[(f) as usize] > 1 {
                 base = f_y[(f) as usize] + 2 + asc + l * LINE_H
@@ -1171,6 +1507,40 @@ fn paint_band(y0: u64, hh: u64, report: bool) {
             ulib.nl()
         }
         f = f + 1
+    }
+    // ROUND NETVIEW, addendum: WHAT THE POINTER IS RESTING ON, as a
+    // sentence, in the empty space between the last window button and
+    // the first status field. There is no tooltip window in this system
+    // and a bar 28 pixels high cannot open one; this is the room there
+    // is, and an icon nobody can look up is a rune.
+    if hover_on != 0 && vertical == 0 {
+        let hb: u64 = hover_left()
+        let he: u64 = hover_right()
+        if he > hb + 20 {
+            wlibc.clip_set(hb, y0, he, y0 + hh)
+            wlibc.rect(hb, st_y, he - hb, BTN_H,
+                wlibc.theme(wlibc.T_PANEL))
+            let hp: u64 = (&hover_txt[0 as usize]) as u64
+            var hn: u64 = tlen(hp)
+            while hn > 1 && wlibc.text_w(wlibc.F_UI, wlibc.PX_UI, hp, hn)
+                + 6 > he - hb {
+                hn = hn - 1
+            }
+            let hbase: u64 = st_y + (BTN_H + asc) / 2 - 1
+            let _h: u64 = wlibc.text_at(wlibc.F_UI, wlibc.PX_UI, hb + 3,
+                hbase, hp, hn, wlibc.theme(wlibc.T_DIM))
+            wlibc.clip_set(0, y0, win_w, y0 + hh)
+            if report {
+                say((&s_hv[0 as usize]) as u64)
+                say((&s_tX[0 as usize]) as u64)
+                ulib.sayn(hb + 3)
+                say((&s_tb[0 as usize]) as u64)
+                ulib.sayn(hbase)
+                say((&s_tt[0 as usize]) as u64)
+                put_n(hp, hn)
+                ulib.nl()
+            }
+        }
     }
     let _p: u64 = wlibc.push(w_h, 0, y0, win_w, hh)
     if report {
@@ -1508,6 +1878,15 @@ fn u_start(args: u64) -> u64 {
         return 1
     }
     let _t0: u64 = wlibc.theme_load((&s_theme[0 as usize]) as u64)
+    // ROUND NETVIEW, addendum: the seven pictures, once, at the start.
+    // A bar that reads them every repaint would read them sixty times a
+    // second for something that never changes.
+    icons_load()
+    say((&s_ico[0 as usize]) as u64)
+    ulib.sayn(ic_ok)
+    say((&s_icm[0 as usize]) as u64)
+    ulib.sayn(mk_ok)
+    ulib.nl()
     sw = wlibc.screen_w()
     sh = wlibc.screen_h()
     asc = wlibc.ascent_of(wlibc.F_UI, wlibc.PX_UI)
@@ -1579,6 +1958,13 @@ fn u_start(args: u64) -> u64 {
         autohide_step()
         round = round + 1
         var fresh: bool = false
+        // ROUND NETVIEW, addendum. Every poll, because the pointer
+        // moves between polls and a sentence that appears half a second
+        // after the pointer arrived is a sentence nobody waits for. It
+        // costs a comparison unless something changed.
+        if hover_step() {
+            fresh = true
+        }
         if (round % 5) == 0 {
             if list_read() {
                 fresh = true
