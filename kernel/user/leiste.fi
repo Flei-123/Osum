@@ -116,6 +116,13 @@ const NG_IP: u64 = 1
 const NG_MASK: u64 = 2
 const NG_GW: u64 = 3
 const NG_STATE: u64 = 8
+// ROUND NETVIEW, second addendum: the systemwide fallback. Asked
+// through NETVGET, which anybody may ask about anything -- see
+// `sys.do_netvget`; a bar that could not read it could not be honest
+// about it.
+const SYS_NETVGET: u64 = 1310
+const NV_FALLBACK: u64 = 13
+const NV_FBVIEW: u64 = 14
 
 // The two icon sets. `/etc/netview/` is where the image puts them, and
 // a bar that does not find them falls back to text -- a missing icon
@@ -183,9 +190,18 @@ static mut nk: u64 = 0
 // (`sys.NS_*`) and `kernel/netview.fi` (`V_*`) count them.
 static mut ic_buf: [u8; 4400] = [0 as u8; 4400]
 static mut mk_buf: [u8; 1920] = [0 as u8; 1920]
+// SECOND ADDENDUM: the sign for "the machine is faking". Its own
+// buffer, because it is neither a state icon nor a window mark -- it
+// stands NEXT to the state icon and says something about the machine
+// that the four states cannot: a machine can be genuinely online AND
+// faking a network for every new program at the same time.
+static mut sy_buf: [u8; 640] = [0 as u8; 640]
 static mut ic_ok: u64 = 0
 static mut mk_ok: u64 = 0
+static mut sy_ok: u64 = 0
 static mut net_state: u64 = 0
+static mut nv_fall: u64 = 0 // 0 off, 1 when-offline, 2 always
+static mut nv_faking: u64 = 0 // is it faking RIGHT NOW
 // WAS ZULETZT GEMELDET WURDE. Der Zustand der Maschine aendert sich
 // fast nie, und eine Zeile, die er bei JEDEM Neuzeichnen noch einmal
 // schreibt, ist keine Meldung, sondern Laerm auf der seriellen Leitung
@@ -193,7 +209,17 @@ static mut net_state: u64 = 0
 // schreiben. Genau daran ist eine Zusage in `tools/desktop/run.sh`
 // zerbrochen: zwei Programme haben sich mitten in ein Wort geschrieben.
 static mut st_said: u64 = 99
-static mut hover_txt: [u8; 96] = [0 as u8; 96]
+static mut fk_said: u64 = 99
+// SECOND ADDENDUM: 224 and not 96, and this was a REAL fault and not a
+// precaution. The longest sentence the corner could already build --
+// "Adresse da, aber kein Weg nach draussen" plus address, mask and
+// gateway -- is 99 octets, and `text_at_p` writes without looking. It
+// has been three octets over the end since the first addendum and
+// nothing noticed, because the fields behind it are written every
+// second anyway. The two sentences of this addendum would have made it
+// 184. So: room for the longest, and `hover_add` below, which counts.
+const HOVER_MAX: u64 = 223
+static mut hover_txt: [u8; 224] = [0 as u8; 224]
 static mut hover_on: u64 = 0
 
 static mut rec: [u8; 104] = [0 as u8; 104]
@@ -642,6 +668,7 @@ fn apply() {
 static mut p_icons: [u8; 14] = "/etc/netview/\0"
 static mut n_state: [u8; 54] = "state-nocarrier\0state-noip\0state-noroute\0state-online\0"
 static mut n_mark: [u8; 35] = "mark-filtered\0mark-faked\0mark-none\0"
+static mut n_sys: [u8; 11] = "sys-faking\0"
 
 fn nth(p: u64, i: u64) -> u64 {
     var at: u64 = p
@@ -695,6 +722,21 @@ fn icons_load() {
         }
         i = i + 1
     }
+    sy_ok = 0
+    if icon_read((&n_sys[0 as usize]) as u64,
+        (&sy_buf[0 as usize]) as u64, MARK_MAX) > 12 {
+        sy_ok = 1
+    }
+}
+
+// The sign, or 0 when the machine is not faking. `real` gets nothing --
+// the same rule the window marks follow, and for the same reason: a
+// sign that is always there says nothing when it matters.
+fn sys_icon() -> u64 {
+    if nv_faking == 0 || sy_ok == 0 {
+        return 0
+    }
+    return (&sy_buf[0 as usize]) as u64
 }
 
 fn state_icon(s: u64) -> u64 {
@@ -736,6 +778,13 @@ static mut h_s0: [u8; 46] = "Kein Verbindungstraeger -- nichts eingesteckt\0"
 static mut h_s1: [u8; 31] = "Traeger da, noch keine Adresse\0"
 static mut h_s2: [u8; 40] = "Adresse da, aber kein Weg nach draussen\0"
 static mut h_s3: [u8; 22] = "Verbunden ueber Kabel\0"
+// SECOND ADDENDUM. The sentence that has to be there, because the sign
+// alone is a rune: an icon nobody can look up is not honesty, it is
+// decoration. Two sentences and not one -- WHAT is happening, and on
+// WHOSE orders, so that the person knows where to go and undo it.
+static mut h_fb1: [u8; 62] = "  --  Das System taeuscht neuen Programmen ein Netz vor\0\0\0\0\0\0\0"
+static mut h_fb2: [u8; 26] = " (Voreinstellung: immer)\0\0"
+static mut h_fb3: [u8; 34] = " (Voreinstellung: wenn offline)\0\0\0"
 static mut h_sp2: [u8; 3] = "  \0"
 static mut h_msk: [u8; 9] = "  Maske \0"
 static mut h_gw: [u8; 6] = "  gw \0"
@@ -753,6 +802,22 @@ fn hover_set(txt: u64) {
 
 // The corner: the state in words, and then the three numbers Windows
 // hides behind two more clicks.
+// Append, and STOP AT THE END. `text_at_p` does not count, which is
+// fine for a field that is built out of numbers of known length and is
+// not fine for a sentence that grows with the state of the machine.
+fn hover_add(at: u64, q: u64) -> u64 {
+    let p: u64 = (&hover_txt[0 as usize]) as u64
+    var k: u64 = 0
+    while __mmio_read8((q + k) as *mut u8) != 0 as u8
+        && at + k < HOVER_MAX {
+        __mmio_write8((p + at + k) as *mut u8,
+            __mmio_read8((q + k) as *mut u8))
+        k = k + 1
+    }
+    __mmio_write8((p + at + k) as *mut u8, 0 as u8)
+    return at + k
+}
+
 fn hover_state() {
     var w: u64 = (&h_s0[0 as usize]) as u64
     if net_state == 1 {
@@ -763,14 +828,25 @@ fn hover_state() {
         w = (&h_s3[0 as usize]) as u64
     }
     var at: u64 = ulib.strncpy((&hover_txt[0 as usize]) as u64, w, 40)
+    let h: u64 = (&hover_txt[0 as usize]) as u64
     if net_state >= 2 {
-        let h: u64 = (&hover_txt[0 as usize]) as u64
-        at = text_at_p(h, at, (&h_sp2[0 as usize]) as u64)
+        at = hover_add(at, (&h_sp2[0 as usize]) as u64)
         at = ip_at(h, at, ulib.sys(SYS_NETGET, NG_IP, 0, 0))
-        at = text_at_p(h, at, (&h_msk[0 as usize]) as u64)
+        at = hover_add(at, (&h_msk[0 as usize]) as u64)
         at = ip_at(h, at, ulib.sys(SYS_NETGET, NG_MASK, 0, 0))
-        at = text_at_p(h, at, (&h_gw[0 as usize]) as u64)
+        at = hover_add(at, (&h_gw[0 as usize]) as u64)
         at = ip_at(h, at, ulib.sys(SYS_NETGET, NG_GW, 0, 0))
+    }
+    // AND WHAT THE SIGN BESIDE IT MEANS. It goes AFTER the state of the
+    // machine on purpose: the machine's own truth is not replaced by
+    // the fact that the system is dressing it up, it is added to.
+    if nv_faking != 0 {
+        at = hover_add(at, (&h_fb1[0 as usize]) as u64)
+        if nv_fall == 2 {
+            at = hover_add(at, (&h_fb2[0 as usize]) as u64)
+        } else {
+            at = hover_add(at, (&h_fb3[0 as usize]) as u64)
+        }
     }
     hover_on = 1
 }
@@ -936,6 +1012,22 @@ fn status_build() -> bool {
     } else {
         net_state = st
     }
+    // SECOND ADDENDUM: the preference, and what it amounts to right
+    // now. Both out of the kernel, neither worked out here -- the bar
+    // must not be the second place that decides what `when-offline`
+    // means.
+    let fb: u64 = ulib.sys(SYS_NETVGET, 0, NV_FALLBACK, 0)
+    if ulib.bad(fb) {
+        nv_fall = 0
+    } else {
+        nv_fall = fb
+    }
+    let fv: u64 = ulib.sys(SYS_NETVGET, 0, NV_FBVIEW, 0)
+    if !ulib.bad(fv) && fv == 2 {
+        nv_faking = 1
+    } else {
+        nv_faking = 0
+    }
     let rd: u64 = ulib.sys(SYS_NETGET, NG_READY, 0, 0)
     var ip: u64 = 0
     if !ulib.bad(rd) && rd != 0 {
@@ -956,6 +1048,10 @@ fn status_build() -> bool {
         at = num_at(ne, at, ip & 255)
     }
     var sum: u64 = 1469598103934665603 ^ (net_state *% 2654435761)
+    // The sign is not part of any of the three texts, so without this
+    // line the bar would not repaint when the preference changed --
+    // the person would set `always` and see nothing happen.
+    sum = sum ^ ((nv_faking * 3 + nv_fall) *% 40503)
     var q: u64 = 0
     while q < F_N {
         let p: u64 = full_of(q)
@@ -1087,6 +1183,9 @@ fn layout() {
             if f == F_NET && state_icon(net_state) != 0 {
                 vroom = IC_W + 2
             }
+            if f == F_NET && sys_icon() != 0 {
+                vroom = vroom + MK_W + 2
+            }
             fit_field(f, inner - 8 - vroom)
             let hh: u64 = f_lines[(f) as usize] * LINE_H + 4
             y = y - hh
@@ -1142,6 +1241,13 @@ fn layout() {
         var room: u64 = 0
         if f == F_NET && state_icon(net_state) != 0 {
             room = IC_W + 2
+        }
+        // SECOND ADDENDUM: and the faking sign takes its room off the
+        // same share. The lesson of the first addendum, applied before
+        // it had to be learned twice: an icon that is added ON TOP of
+        // the field's width pushes the address into the battery.
+        if f == F_NET && sys_icon() != 0 {
+            room = room + MK_W + 2
         }
         fit_field(f, bar_w / 4 - room)
         var ww: u64 = width_of(line_of(f, 0)) + 10 + room
@@ -1271,8 +1377,11 @@ static mut s_bn: [u8; 7] = " netv=\0"
 static mut s_bmx: [u8; 8] = " mkx=\0\0\0"
 static mut s_bmy: [u8; 8] = " mky=\0\0\0"
 static mut s_ic: [u8; 18] = "taskbar: state s=\0"
+static mut s_fk: [u8; 21] = "taskbar: faking fb=\0\0"
+static mut s_fkno: [u8; 24] = "taskbar: notfaking fb=\0\0"
 static mut s_ico: [u8; 17] = "taskbar: icons=\0\0"
 static mut s_icm: [u8; 8] = " marks=\0"
+static mut s_ics: [u8; 7] = " sys=\0\0"
 
 fn say_text(mark: u64, x: u64, base: u64, fg: u64, bg: u64, txt: u64) {
     say((&s_tx[0 as usize]) as u64)
@@ -1477,17 +1586,48 @@ fn paint_band(y0: u64, hh: u64, report: bool) {
         // says which address -- and neither of them replaces the other.
         var icx: u64 = 0
         if f == F_NET {
+            // SECOND ADDENDUM, and the ORDER is the argument: the
+            // faking sign comes FIRST, before the state of the machine.
+            // What is read first is what is read at all, and "this
+            // system is telling programs a story" is the more important
+            // of the two sentences -- especially in the one case that
+            // needs it, `always` on a machine that is genuinely online,
+            // where the state icon on its own would be true and
+            // misleading at once.
+            let sy: u64 = sys_icon()
+            if sy != 0 {
+                let _s: bool = wlibc.icon_draw(sy, f_x[(f) as usize] + 2,
+                    f_y[(f) as usize] + (f_h[(f) as usize] - MK_W) / 2)
+                icx = MK_W + 2
+                if report && nv_faking != fk_said {
+                    fk_said = nv_faking
+                    say((&s_fk[0 as usize]) as u64)
+                    ulib.sayn(nv_fall)
+                    say((&s_tX[0 as usize]) as u64)
+                    ulib.sayn(f_x[(f) as usize] + 2)
+                    say((&s_gy[0 as usize]) as u64)
+                    ulib.sayn(f_y[(f) as usize]
+                        + (f_h[(f) as usize] - MK_W) / 2)
+                    ulib.nl()
+                }
+            } else if report && nv_faking != fk_said {
+                fk_said = nv_faking
+                say((&s_fkno[0 as usize]) as u64)
+                ulib.sayn(nv_fall)
+                ulib.nl()
+            }
             let ic: u64 = state_icon(net_state)
             if ic != 0 {
-                let _i: bool = wlibc.icon_draw(ic, f_x[(f) as usize] + 2,
+                let ix: u64 = f_x[(f) as usize] + 2 + icx
+                let _i: bool = wlibc.icon_draw(ic, ix,
                     f_y[(f) as usize] + (f_h[(f) as usize] - IC_W) / 2)
-                icx = IC_W + 2
+                icx = icx + IC_W + 2
                 if report && net_state != st_said {
                     st_said = net_state
                     say((&s_ic[0 as usize]) as u64)
                     ulib.sayn(net_state)
                     say((&s_tX[0 as usize]) as u64)
-                    ulib.sayn(f_x[(f) as usize] + 2)
+                    ulib.sayn(ix)
                     say((&s_gy[0 as usize]) as u64)
                     ulib.sayn(f_y[(f) as usize] + (f_h[(f) as usize] - IC_W) / 2)
                     ulib.nl()
@@ -1918,6 +2058,8 @@ fn u_start(args: u64) -> u64 {
     ulib.sayn(ic_ok)
     say((&s_icm[0 as usize]) as u64)
     ulib.sayn(mk_ok)
+    say((&s_ics[0 as usize]) as u64)
+    ulib.sayn(sy_ok)
     ulib.nl()
     sw = wlibc.screen_w()
     sh = wlibc.screen_h()
