@@ -104,6 +104,42 @@
 //   * ONE view per process, not one per socket. A program that wants the
 //     real network for one connection and a faked one for another is
 //     asking for a policy engine; this is a field.
+//
+// ==================================== SECOND ADDENDUM: THE FALLBACK
+//
+// Setting every program by hand is work, and the case where it is
+// needed is the case where the person has the least patience for work:
+// the machine has no network at all. So there is ONE systemwide
+// preference, three values, and it decides what a program gets WHEN
+// NOTHING ELSE WAS SAID ABOUT IT:
+//
+//   off           nothing is faked. What every machine did before this
+//                 addendum, and the default.
+//   when-offline  while there is no way out, a program that nobody
+//                 configured starts in `faked`. The moment there is a
+//                 way out again, the next program to start gets `real`.
+//   always        everything faked, network or not -- for shutting the
+//                 machine up on purpose.
+//
+// AND IT IS THE WEAKEST OF THE THREE SOURCES. `docs/NETVIEW.md` carries
+// the table; the rule in one line is that AN EXPLICIT SETTING ON A
+// PROGRAM ALWAYS WINS. A program the person put on `real` is not
+// quietly forced into `faked`, and a program the person put on `none`
+// stays without a network even when the preference says to fake one.
+// The preference fills a blank; it does not overrule an answer.
+//
+// WHAT IT DOES NOT DO, AND THIS IS A DECISION: it does not touch a
+// RUNNING process. See `docs/NETVIEW.md`; the short form is that a view
+// that changes under a program's feet changes it in the middle of a
+// connection, and the failure that produces is both rare and
+// unfindable. New programs get the new view, running ones keep theirs,
+// and the mark on the window says which is which.
+//
+// WHERE IT IS APPLIED. Not here. This file STORES the preference and
+// ANSWERS what it currently amounts to (`fallback_view`); the place
+// that puts a view on a starting program is `appdir.view_for` in ring
+// 3, where the other two sources already live. A blank filled in three
+// different places would be three rules.
 
 profile kernel
 
@@ -120,6 +156,9 @@ export {
     view_of, set_view, may_set, inherit, restrictive,
     allow_count, allow_at, allow_add, allow_clear, allowed,
     D_REAL, D_DENY, D_FAKE, decide,
+    NS_NOCARRIER, NS_NOADDR, NS_NOROUTE, NS_ONLINE, link_state,
+    FB_OFF, FB_WHENOFF, FB_ALWAYS, FB_LAST,
+    fallback, fallback_set, fallback_view, faking,
     reset, release, is_fake, marked,
     open_fake, send_fake, recv_fake, sendto_fake, recvfrom_fake,
     peer_of,
@@ -143,6 +182,108 @@ const V_LAST: u64 = 3
 const D_REAL: u64 = 0 // let it through to the stack
 const D_DENY: u64 = 1 // -ENETUNREACH, at once
 const D_FAKE: u64 = 2 // answer it here
+
+// ------------------------------------------- what the MACHINE has
+//
+// Four steps, and they rise: each one presumes the one before it.
+//
+//   0 no carrier   no card, or nothing plugged in
+//   1 no address   the wire is there, an address is not (DHCP is still
+//                  running)
+//   2 no route     an address is there, the gateway never answered --
+//                  this is Windows' "connected, no internet", one hop
+//                  earlier and without any probe traffic of its own
+//   3 online       address, and the gateway answered an ARP
+//
+// CABLE AND RADIO ARE NOT TOLD APART, and that is not laziness: there
+// is not one line of 802.11 in this tree. A radio symbol for something
+// that does not exist would be the worst of all shortcuts in a round
+// about not lying. When radio arrives, a number is added here.
+//
+// IT LIVES HERE AND NOT IN `sys.fi` because two things ask it now: the
+// system call the taskbar uses, and `fallback_view` two functions
+// below. Asked in two places, computed once.
+const NS_NOCARRIER: u64 = 0
+const NS_NOADDR: u64 = 1
+const NS_NOROUTE: u64 = 2
+const NS_ONLINE: u64 = 3
+
+// MEASURED AT THE WIRE AND NOT AT THE STACK. The first version of this
+// asked `inet.ready` and answered "no carrier" when it said no --
+// measured, a machine WITH a card and WITHOUT an address came out as
+// "no carrier" too, because the stack is not built at all without an
+// address. That very step ("the wire is there, the address is missing")
+// is what the second icon is for, so it is computed the way it is
+// shown: the card first, then the stack, then the address, then the
+// first hop.
+fn link_state(state: u64) -> u64 {
+    if !inet.carrier(state) {
+        return NS_NOCARRIER
+    }
+    if !inet.ready(state) || inet.ip(state) == 0 {
+        return NS_NOADDR
+    }
+    if !inet.gw_known(state) {
+        return NS_NOROUTE
+    }
+    return NS_ONLINE
+}
+
+// ------------------------------------ THE SYSTEMWIDE FALLBACK
+//
+// Three values, ordered by how much they fake, so that a comparison
+// reads the way it sounds.
+const FB_OFF: u64 = 0
+const FB_WHENOFF: u64 = 1
+const FB_ALWAYS: u64 = 2
+const FB_LAST: u64 = 2
+
+fn fallback(state: u64) -> u64 {
+    let v: u64 = kstate.get(state, sc(NV_FALL))
+    if v > FB_LAST {
+        return FB_OFF
+    }
+    return v
+}
+
+fn fallback_set(state: u64, v: u64) {
+    if v > FB_LAST {
+        return
+    }
+    kstate.set(state, sc(NV_FALL), v)
+}
+
+// WHAT A PROGRAM WITH NOTHING SAID ABOUT IT WOULD GET IF IT STARTED
+// NOW. One function, asked by the launcher, by the settings page and by
+// the taskbar -- the three of them cannot disagree because there is
+// nothing for them to disagree about.
+//
+// `off` answers `real` and NOT `none`, and that is deliberate. A
+// machine with no network already fails every connection; answering
+// `none` on top of that would be a second way of being offline, with
+// its own error number, for programs that never asked for one. The
+// default of this system has to be the behaviour this system had.
+fn fallback_view(state: u64) -> u64 {
+    let f: u64 = fallback(state)
+    if f == FB_ALWAYS {
+        return V_FAKED
+    }
+    if f == FB_WHENOFF {
+        if link_state(state) != NS_ONLINE {
+            return V_FAKED
+        }
+    }
+    return V_REAL
+}
+
+// Is the system faking right now? What the corner of the taskbar asks
+// in order to draw the sign that says so. It is a QUESTION ABOUT THE
+// MACHINE and not about the asking process, which is why it is not
+// masked per view -- see `docs/NETVIEW.md` on why this leaks nothing
+// that `netview show` did not already tell.
+fn faking(state: u64) -> bool {
+    return fallback_view(state) == V_FAKED
+}
 
 // ------------------------------------------- the invented network
 //
@@ -190,6 +331,10 @@ const NV_DROPPED: u64 = 0xF00 // octets a faked socket swallowed
 const NV_OPENED: u64 = 0xF08 // faked connections opened
 const NV_DENIED: u64 = 0xF10 // attempts answered -ENETUNREACH
 const NV_REPLIES: u64 = 0xF18 // canned answers built
+// SECOND ADDENDUM: the systemwide fallback, and there is one of it. Set
+// from the command line at boot (`hw.net_fallback`), changed at run time
+// through SYS_OSUM_NETVFB, and read by everybody who needs it.
+const NV_FALL: u64 = 0xF20
 
 // The fields of one faked socket.
 const F_USE: u64 = 0 // 0 = an ordinary socket, 1 = a faked one
@@ -807,6 +952,9 @@ fn report(state: u64) {
     var s_deny: [u8; 14] = "nv: denied=\0\0\0"
     var s_rep: [u8; 15] = "nv: replies=\0\0\0"
     var s_wire: [u8; 15] = "nv: wire_o=\0\0\0\0"
+    var s_fall: [u8; 14] = "nv: fallb=\0\0\0\0"
+    var s_link: [u8; 13] = "nv: link=\0\0\0\0"
+    var s_fbv: [u8; 13] = "nv: fbview=\0\0"
     serial.puts((&s_drop[0]) as u64)
     serial.dec(dropped(state))
     serial.nl()
@@ -819,13 +967,26 @@ fn report(state: u64) {
     serial.puts((&s_rep[0]) as u64)
     serial.dec(replies(state))
     serial.nl()
-    // DIE ZAHL DER RUNDE, und sie kommt nicht aus dieser Datei: es ist
-    // der Oktettzaehler des KARTENTREIBERS, gefuehrt in
-    // `virtio.tx_frame`, wo jeder Rahmen dieses Kernels durchmuss. Ein
-    // Lauf, in dem nur vorgetaeuschte Prozesse gearbeitet haben, muss
-    // hier 0 stehen haben -- und das ist eine Messung an einer Stelle,
-    // die von dieser Runde nichts weiss.
+    // THE NUMBER OF THE ROUND, and it does not come out of this file:
+    // it is the octet counter of the CARD DRIVER, kept in
+    // `virtio.tx_frame`, which every frame of this kernel has to pass
+    // through. A run in which only faked processes worked has to have a
+    // 0 here -- and that is a measurement taken at a place that knows
+    // nothing about this round.
     serial.puts((&s_wire[0]) as u64)
     serial.dec(virtio.tx_octets(state))
+    serial.nl()
+    // SECOND ADDENDUM: the preference as it was set, the state of the
+    // machine as it was measured, and what the two of them amount to
+    // for the next program to start. Three numbers and not one, because
+    // `fbview=2` alone would not say WHY.
+    serial.puts((&s_fall[0]) as u64)
+    serial.dec(fallback(state))
+    serial.nl()
+    serial.puts((&s_link[0]) as u64)
+    serial.dec(link_state(state))
+    serial.nl()
+    serial.puts((&s_fbv[0]) as u64)
+    serial.dec(fallback_view(state))
     serial.nl()
 }

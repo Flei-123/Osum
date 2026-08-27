@@ -577,10 +577,9 @@ const NG_OUT: u64 = 7 // Rahmen hinaus
 // kommt hier eine Zahl dazu.
 const NG_STATE: u64 = 8
 
-const NS_NOCARRIER: u64 = 0
-const NS_NOADDR: u64 = 1
-const NS_NOROUTE: u64 = 2
-const NS_ONLINE: u64 = 3
+// ZWEITER NACHTRAG: die vier Stufen stehen jetzt in
+// `kernel/netview.fi`, weil sie dort auch gerechnet werden. Hier waeren
+// sie eine zweite Fassung derselben vier Zahlen.
 
 // ====================================================== RUNDE NETVIEW
 //
@@ -610,6 +609,17 @@ const NV_OPENED: u64 = 9 // vorgetaeuschte Verbindungen
 const NV_DENIED: u64 = 10 // Versuche mit -ENETUNREACH beantwortet
 const NV_REPLIES: u64 = 11 // gebaute Antworten (204, DNS, ICMP)
 const NV_PID: u64 = 12 // die pid, die NETVGET gerade gelesen hat
+// ZWEITER NACHTRAG: die systemweite Voreinstellung. Drei Auskuenfte und
+// nicht eine, weil `fbview` allein nicht sagt, WARUM es das sagt.
+const NV_FALLBACK: u64 = 13 // 0 off, 1 when-offline, 2 always
+const NV_FBVIEW: u64 = 14 // die Sicht, die ein Programm OHNE eigene
+                          // Einstellung JETZT bekaeme
+const NV_LINK: u64 = 15 // der Zustand der Maschine, ungefiltert
+
+// SETZEN DARF NUR EUID 0. Es ist die einzige Einstellung dieser Runde,
+// die ALLE Prozesse betrifft; ein Programm, das sie selbst umlegen
+// duerfte, koennte jedem anderen sein Netz nehmen.
+const SYS_OSUM_NETVFB: u64 = 1313
 
 const SYS_OSUM_SETENV: u64 = 1400
 const SYS_OSUM_MOUNT: u64 = 1401
@@ -1240,7 +1250,7 @@ fn dispatch(number: u64, frame: u64, state: u64) -> u64 {
     }
     // RUNDE DESKTOP: das Netz jenseits der Sockets. Zwei Nummern aus
     // dem Block, den Runde K8 dafuer ausgewiesen und nie benutzt hat.
-    if number >= SYS_OSUM_NETGET && number <= SYS_OSUM_NETVALLOW {
+    if number >= SYS_OSUM_NETGET && number <= SYS_OSUM_NETVFB {
         return net_call(state, me, number, a0, a1, a2)
     }
     // ------------------------------------------------------ RUNDE K13
@@ -5563,6 +5573,21 @@ fn do_netvget(state: u64, me: u64, pid: u64, what: u64) -> u64 {
     if what == NV_REPLIES {
         return netview.replies(state)
     }
+    // ZWEITER NACHTRAG. Drei Fragen ueber die MASCHINE, nicht ueber
+    // einen Prozess -- darum vor dem Nachschlagen der pid und darum
+    // ohne Maske je Sicht. Ein vorgetaeuschter Prozess erfaehrt hier,
+    // dass vorgetaeuscht wird; das ist kein neues Leck, denn `netview
+    // show` sagt ihm seine eigene Sicht seit dem Hauptauftrag. Getaeuscht
+    // wird das Programm an der STECKDOSE, nicht an der Auskunft.
+    if what == NV_FALLBACK {
+        return netview.fallback(state)
+    }
+    if what == NV_FBVIEW {
+        return netview.fallback_view(state)
+    }
+    if what == NV_LINK {
+        return netview.link_state(state)
+    }
     let t: u64 = task_of_pid(state, me, pid)
     if t == 0 || t >= kstate.MAX_TASKS {
         return neg(errno.E_SRCH)
@@ -5638,9 +5663,29 @@ fn do_netvallow(state: u64, me: u64, pid: u64, addr: u64,
     return 0
 }
 
+// ZWEITER NACHTRAG: DIE SYSTEMWEITE VOREINSTELLUNG SETZEN.
+//
+// Sie aendert KEINEN LAUFENDEN PROZESS, und das ist die Entscheidung
+// dieses Nachtrags: eine Sicht, die sich unter einem Programm wegdreht,
+// tut es mitten in einer Verbindung. Diese Funktion schreibt eine Zahl,
+// die erst der NAECHSTE Programmstart liest.
+fn do_netvfb(state: u64, me: u64, want: u64) -> u64 {
+    if sched.tget(state, me, sched.T_EUID) != 0 {
+        return neg(errno.E_PERM)
+    }
+    if want > netview.FB_LAST {
+        return neg(errno.E_INVAL)
+    }
+    netview.fallback_set(state, want)
+    return 0
+}
+
 fn net_call(state: u64, me: u64, number: u64, a0: u64, a1: u64,
     a2: u64) -> u64 {
     // ====================================================== RUNDE NETVIEW
+    if number == SYS_OSUM_NETVFB {
+        return do_netvfb(state, me, a0)
+    }
     if number == SYS_OSUM_NETVGET {
         return do_netvget(state, me, a0, a1)
     }
@@ -5666,7 +5711,7 @@ fn net_call(state: u64, me: u64, number: u64, a0: u64, a1: u64,
             // Gezogenes Kabel, und zwar auch fuer den, der nach dem
             // Zustand fragt.
             if a0 == NG_STATE {
-                return NS_NOCARRIER
+                return netview.NS_NOCARRIER
             }
             return errno.neg(errno.E_NODEV)
         }
@@ -5696,7 +5741,7 @@ fn net_call(state: u64, me: u64, number: u64, a0: u64, a1: u64,
             // Und der Zustand: vollstaendig verbunden. Ein Programm, das
             // hier die Wahrheit erfuehre, waere nicht getaeuscht.
             if a0 == NG_STATE {
-                return NS_ONLINE
+                return netview.NS_ONLINE
             }
             return errno.neg(errno.E_INVAL)
         }
@@ -5706,27 +5751,12 @@ fn net_call(state: u64, me: u64, number: u64, a0: u64, a1: u64,
             }
             return 0
         }
-        // DER ZUSTAND WIRD AM DRAHT GEMESSEN UND NICHT AM STAPEL, und
-        // das ist der Unterschied zwischen zwei Stufen, die man sonst
-        // nie auseinanderhaelt. Die erste Fassung fragte hier
-        // `inet.ready` und gab bei Nein "kein Traeger" -- gemessen kam
-        // dabei fuer eine Maschine MIT Karte und OHNE Adresse ebenfalls
-        // "kein Traeger" heraus, weil der Stapel ohne Adresse gar nicht
-        // erst aufgebaut wird. Genau diese Stufe ("der Draht ist da,
-        // die Adresse fehlt noch") soll das zweite Symbol zeigen, also
-        // wird sie hier auch so gerechnet: erst die KARTE, dann der
-        // Stapel, dann die Adresse, dann der erste Sprung.
+        // Der Zustand wird AM DRAHT gemessen und nicht am Stapel. Die
+        // Rechnung steht seit dem zweiten Nachtrag in
+        // `netview.link_state`, weil sie inzwischen zwei Frager hat --
+        // diesen hier und `netview.fallback_view`.
         if a0 == NG_STATE {
-            if !inet.carrier(state) {
-                return NS_NOCARRIER
-            }
-            if !inet.ready(state) || inet.ip(state) == 0 {
-                return NS_NOADDR
-            }
-            if !inet.gw_known(state) {
-                return NS_NOROUTE
-            }
-            return NS_ONLINE
+            return netview.link_state(state)
         }
         if !inet.ready(state) {
             return errno.neg(errno.E_NODEV)
