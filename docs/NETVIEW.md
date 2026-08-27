@@ -405,9 +405,29 @@ why the count is 2 and not 5.
 2 097 152 octets of the drive, and that measurement caught a real
 mistake in this round: the four ring-3 helper functions first stood in
 `kernel/user/ulib.fi`, which all twenty-eight programs link, and the
-userland grew from 1 991 728 to 2 097 416 octets -- over the drive. They
-are in `kernel/user/nv.fi` now and only the six programs that ask about
-the network view link it.
+userland grew from 1 991 728 to 2 097 416 octets -- **over the drive**.
+They are in `kernel/user/nv.fi` now, and the only program of those
+twenty-eight that this round touches is `ps`.
+
+That is not free either, and the number is worth writing down because it
+is uncomfortable: the NET column costs `ps` **4 296 octets** in firnc1
+(63 888 -> 68 184) for about ten lines of source. The userland now
+totals **1 996 080** octets against a limit of 1 997 152 -- **1 072
+octets of room left**. Anything the next round adds to a program on that
+drive will hit the limit before it hits anything else, and the honest
+reading is that the drive wants to grow, not that this round should have
+left the column out.
+
+Two runs of `tools/net/run.sh` on this branch failed one assertion each
+in section 9 (`tc netem`, 20 % loss inbound and 10 % outbound), and they
+failed DIFFERENT assertions. The measuring machine was carrying a load
+average of 13 with a dozen other suites of this repository running at the
+same time, and the runner's own comment warns that this case walks into
+the thirty-second stall guard of `netsvc.connect_service` when it is
+starved. A third run under the same load passed all 75. Neither of those
+two cases goes through `kernel/sys.fi` at all -- `nsvc=1` and `nsvc=4`
+are kernel-side services and never touch a socket call -- so this round
+cannot be what moved them. It is written down rather than left out.
 
 ## 10. What does not work, plainly
 
