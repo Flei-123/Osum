@@ -3207,6 +3207,15 @@ fn mode_of(state: u64, cmd: u64) {
             kstate.mode_add(state, kstate.M_DHCP)
         }
     }
+    // ADDENDUM TASKBAR: maximize, and the counter-test to the struts.
+    var dwm: [u8; 5] = "wmax\0"
+    var dns: [u8; 8] = "nostrut\0"
+    if find(cmd, (&dwm[0]) as u64, 4) != 0 {
+        kstate.mode_add(state, kstate.M_WMAX)
+    }
+    if find(cmd, (&dns[0]) as u64, 7) != 0 {
+        kstate.mode_add(state, kstate.M_NOSTRUT)
+    }
     // RUNDE K18: die Energieschicht und ihre Gegenproben.
     var pww: [u8; 4] = "pwr\0"
     var pwnc: [u8; 10] = "nocstates\0"
@@ -3505,6 +3514,7 @@ fn surface(state: u64) {
     // Befehlszeile erscheint.
     wm.set_nolayer(state, kstate.mode_on(state, kstate.M_NOLAYER))
     wm.set_nomin(state, kstate.mode_on(state, kstate.M_NOMIN))
+    wm.set_nostrut(state, kstate.mode_on(state, kstate.M_NOSTRUT))
     wm.set_fonts(state, f_ui, PX_UI, f_tx, PX_MONO)
     if kstate.mode_on(state, kstate.M_NOMOUSE) {
         wm.set_cursor(state, false)
@@ -3685,9 +3695,23 @@ fn surface(state: u64) {
     if kstate.mode_on(state, kstate.M_WIGLONG) {
         sek = 20
     }
+    // ADDENDUM TASKBAR: MAXIMIZE ONE SECOND IN, and not before the
+    // loop. The taskbar is a program in ring 3; it needs the first
+    // moments of the hold to read its configuration file, place itself
+    // and declare its strut. A window maximized before that would be
+    // measured against a work area that is still the whole screen, and
+    // the measurement would pass for the wrong reason.
+    var maxed: bool = false
     if hz != 0 {
-        let bis: u64 = apic.tsc() + hz * sek
+        let ab: u64 = apic.tsc()
+        let bis: u64 = ab + hz * sek
         while apic.tsc() < bis {
+            if !maxed && kstate.mode_on(state, kstate.M_WMAX) {
+                if apic.tsc() > ab + hz {
+                    maxed = true
+                    say_max(state)
+                }
+            }
             wm.poll(state)
             wm.compose(state)
             sched.sleep_ticks(state, 1)
@@ -3701,6 +3725,53 @@ fn surface(state: u64) {
     say_wig(state)
     say_wins(state)
     let _unused: u64 = t
+}
+
+// ==================================================== ADDENDUM TASKBAR
+//
+// MAXIMIZE THE TOPMOST ORDINARY WINDOW AND SAY WHAT CAME OF IT. The
+// point of the exercise is the pair of rectangles that follows: the
+// window that fills the work area, and the bar that owns the edge. If
+// the strut works they touch and do not overlap; with `nostrut` the
+// window is the whole screen and the bar is under it.
+fn say_max(state: u64) {
+    var s_a: [u8; 16] = "wm: max win=\0\0\0\0"
+    var s_b: [u8; 6] = " ok=\0\0"
+    var s_c: [u8; 6] = " wx=\0\0"
+    var s_d: [u8; 6] = " wy=\0\0"
+    var s_e: [u8; 6] = " ww=\0\0"
+    var s_f: [u8; 6] = " wh=\0\0"
+    var s_t: [u8; 10] = "Maximized\0"
+    // A WINDOW OF ITS OWN AND NOT THE ONE THAT HAPPENS TO BE ON TOP.
+    // The first version maximized the topmost application window and
+    // got `ok=0` every time, for a reason worth keeping: a window keeps
+    // the buffer it was created with, the starter asked for 440 x 300,
+    // and 796 x 568 does not fit into it. That is the server refusing
+    // to lie, not a defect -- so the measurement gets a window that was
+    // created large enough, and the refusal keeps its meaning.
+    let i: u64 = wm.create(state, 0, 0, 0, wm.MAX_W, wm.MAX_H, wm.K_RAW,
+        (&s_t[0]) as u64)
+    if i >= wm.MAX_WIN {
+        return
+    }
+    wm.fill(state, i, 0, 0, wm.MAX_W, wm.MAX_H,
+        fb.rgb(state, 0x24, 0x50, 0x30))
+    let ok: bool = wm.maximize(state, i, true)
+    wm.damage_all(state)
+    wm.compose(state)
+    serial.puts((&s_a[0]) as u64)
+    serial.dec(i)
+    serial.puts((&s_b[0]) as u64)
+    serial.dec(bnum(ok))
+    serial.puts((&s_c[0]) as u64)
+    serial.dec(wm.work_x(state))
+    serial.puts((&s_d[0]) as u64)
+    serial.dec(wm.work_y(state))
+    serial.puts((&s_e[0]) as u64)
+    serial.dec(wm.work_w(state))
+    serial.puts((&s_f[0]) as u64)
+    serial.dec(wm.work_h(state))
+    serial.nl()
 }
 
 // ====================================================== RUNDE DESKTOP
@@ -3732,6 +3803,12 @@ fn say_wins(state: u64) {
     var s_p: [u8; 10] = " shows=\0\0\0"
     var s_q: [u8; 12] = " nolayer=\0\0\0"
     var s_r: [u8; 10] = " nomin=\0\0\0"
+    var s_s1: [u8; 8] = " strut=\0"
+    var s_s2: [u8; 12] = " strutedge=\0"
+    var s_s3: [u8; 6] = " max=\0"
+    var s_s4: [u8; 6] = " ow=\0\0"
+    var s_s5: [u8; 6] = " oh=\0\0"
+    var s_w1: [u8; 16] = "wm: work x=\0\0\0\0\0"
     var i: u64 = 0
     while i < wm.MAX_WIN {
         if wm.valid(state, i) {
@@ -3757,6 +3834,16 @@ fn say_wins(state: u64) {
             serial.dec(wm.win_h(state, i))
             serial.puts((&s_k[0]) as u64)
             serial.dec(bnum(wm.focus(state) == i))
+            serial.puts((&s_s1[0]) as u64)
+            serial.dec(wm.win_strut_size(state, i))
+            serial.puts((&s_s2[0]) as u64)
+            serial.dec(wm.win_strut_edge(state, i))
+            serial.puts((&s_s3[0]) as u64)
+            serial.dec(bnum(wm.is_max(state, i)))
+            serial.puts((&s_s4[0]) as u64)
+            serial.dec(wm.outer_w(state, i))
+            serial.puts((&s_s5[0]) as u64)
+            serial.dec(wm.outer_h(state, i))
             serial.puts((&s_l[0]) as u64)
             serial.puts(wm.win_title(state, i))
             serial.puts((&s_m[0]) as u64)
@@ -3774,6 +3861,20 @@ fn say_wins(state: u64) {
     serial.dec(bnum(wm.nolayer(state)))
     serial.puts((&s_r[0]) as u64)
     serial.dec(bnum(wm.nomin(state)))
+    serial.nl()
+    // THE WORK AREA, from the server itself. The taskbar says the same
+    // thing from ring 3 (`taskbar: work`); the two lines must agree,
+    // and the runner checks that they do.
+    serial.puts((&s_w1[0]) as u64)
+    serial.dec(wm.work_x(state))
+    serial.puts((&s_h[0]) as u64)
+    serial.dec(wm.work_y(state))
+    serial.puts((&s_i[0]) as u64)
+    serial.dec(wm.work_w(state))
+    serial.puts((&s_j[0]) as u64)
+    serial.dec(wm.work_h(state))
+    serial.puts((&s_q[0]) as u64)
+    serial.dec(bnum(wm.nostrut(state)))
     serial.nl()
 }
 

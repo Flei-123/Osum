@@ -888,7 +888,7 @@ hasnot "$TMPD/ohne.txt" "k15: start" "ohne das Wort 'wig' wird keine Anwendung g
 hasnot "$TMPD/ohne.txt" "wigdemo:" "und es meldet sich keine"
 has "$TMPD/ohne.txt" "wclick: passed 10 / 10" "statt dessen laeuft die Anwendung der Runde K10 wie vorher"
 wz=$(zahl "$TMPD/ohne.txt" 'wm: selftest [0-9]+')
-num "und der Fensterserver sagt dasselbe wie vorher" "$wz" eq 17
+num "und der Fensterserver sagt dasselbe wie vorher" "$wz" eq 30
 # Die Naht ist trotzdem da und sagt, dass sie nichts getan hat.
 ob=$(feld "$TMPD/ohne.txt" "wig: blits" blits)
 num "die Naht hat in diesem Lauf nichts hinuebergeschoben" "$ob" eq 0
