@@ -137,9 +137,21 @@ fn size_at(i: u64) -> u64 {
 // out here instead of called, because `wlib`'s copy is inside the list
 // painter and cannot be timed on its own.
 
-fn osym_build() {
-    let p: u64 = (&osym[0 as usize]) as u64
-    // "OSYM"
+// THE OSYM PICTURE IS BUILT OUT OF THE ICON ITSELF, and that is the
+// only way the comparison means anything.
+//
+// The first version drew a ring into the bitmap and timed that against
+// the gear icon.  The two had a different number of covered pixels, so
+// the measurement compared two different amounts of work and called the
+// difference a property of the format.  It is not.
+//
+// So: draw the icon once, in white on black, read the surface back, and
+// take the red channel as the coverage.  What comes out is a bitmap
+// with EXACTLY the same pixels, at exactly the same coverages, as the
+// glyph.  What is left between the two paths is what this round wanted
+// to know: one octet per pixel and a colour from the caller, against
+// four octets per pixel and a colour per pixel.
+fn osym_build(id: u64) {
     osym[0 as usize] = 79 as u8
     osym[1 as usize] = 83 as u8
     osym[2 as usize] = 89 as u8
@@ -150,21 +162,16 @@ fn osym_build() {
         osym[(8 + i) as usize] = ((OSYM_H >> (i * 8)) & 255) as u8
         i = i + 1
     }
-    // A ring, so that roughly as many pixels are transparent as in a
-    // monoline icon -- a full square would be an unfair comparison in
-    // the other direction.
+    let bx: u64 = 400
+    let by: u64 = 40
+    wlibc.rect(bx, by, OSYM_W, OSYM_H, 0)
+    let _drawn = wlibc.icon_at(id, bx, by, wlibc.ICON_SMALL, 16777215)
     var y: u64 = 0
     while y < OSYM_H {
         var x: u64 = 0
         while x < OSYM_W {
             let at: u64 = 12 + (y * OSYM_W + x) * 4
-            var a: u64 = 0
-            if x == 0 || y == 0 || x == OSYM_W - 1 || y == OSYM_H - 1 {
-                a = 255
-            }
-            if x == y || x + y == OSYM_W - 1 {
-                a = 255
-            }
+            let a: u64 = wlibc.get(bx + x, by + y) & 255
             osym[(at + 0) as usize] = 208 as u8
             osym[(at + 1) as usize] = 144 as u8
             osym[(at + 2) as usize] = 74 as u8
@@ -173,7 +180,22 @@ fn osym_build() {
         }
         y = y + 1
     }
-    let _ignore_p = p
+    wlibc.rect(bx, by, OSYM_W, OSYM_H, 16777215)
+}
+
+// How many pixels of the bitmap actually get mixed -- the same pixels
+// the glyph mixes, since one was made from the other.  Reported so the
+// two costs can be divided by it and compared per pixel.
+fn osym_ink() -> u64 {
+    var n: u64 = 0
+    var k: u64 = 0
+    while k < OSYM_W * OSYM_H {
+        if osym[(12 + k * 4 + 3) as usize] != 0 as u8 {
+            n = n + 1
+        }
+        k = k + 1
+    }
+    return n
 }
 
 fn osym_draw(x: u64, y: u64) {
@@ -381,7 +403,7 @@ fn cost() {
 
     // OSYM: the same 16 x 16 box as a bitmap, blitted the way a bundle
     // icon is blitted today.
-    osym_build()
+    osym_build(icons.SETTINGS)
     osym_draw(300, 40)
     let t4: u64 = mono_ns()
     var j: u64 = 0
@@ -401,6 +423,8 @@ fn cost() {
         wlibc.icon_ink_w(icons.SETTINGS, px_)
         * wlibc.icon_ink_h(icons.SETTINGS, px_))
     num((&b2[0 as usize]) as u64, 12 + OSYM_W * OSYM_H * 4)
+    var b3: [u8; 12] = "ink_px=\0\0\0\0\0"
+    num((&b3[0 as usize]) as u64, osym_ink())
 }
 
 // A STRIP OF EVERY ICON, drawn onto the surface at all three sizes and
@@ -444,6 +468,15 @@ fn u_start(argc: u64, argv: u64) {
         ulib.sys(ulib.SYS_EXIT, 1, 0, 0)
         return
     }
+    // THE CLIP HAS TO BE OPENED FIRST.  `wlibc.px` drops every pixel
+    // outside the clip rectangle, and a fresh library has that
+    // rectangle at zero -- the widget library sets it per widget.  This
+    // program has no widgets, so it says once that the whole surface is
+    // fair game.  The first version left it out, drew nothing at all,
+    // and still reported timings: the loops ran, the pixels went
+    // nowhere.  Numbers from a run that did not happen are worse than
+    // no numbers.
+    wlibc.clip_set(0, 0, wlibc.surf_w(), wlibc.surf_rows())
     wlibc.rect(0, 0, wlibc.surf_w(), wlibc.surf_rows(), 16777215)
     check_present()
     check_box()
