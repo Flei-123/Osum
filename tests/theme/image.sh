@@ -32,7 +32,9 @@ light_start=07:00
 dark_start=19:00
 EOF
 
-ARGS=(build "$IMG" 8192 /lib/
+# 8192 blocks (4 MiB) held these programs with 4 per cent to spare
+# after round LOOK. That is not spare room, that is a countdown.
+ARGS=(build "$IMG" 16384 /lib/
       "/lib/mono.ttf=assets/osum-mono.ttf" "/lib/sans.ttf=assets/osum-sans.ttf"
       /bin/)
 for p in $PROGS; do ARGS+=("/bin/$p=$OUT/$p.elf"); done
