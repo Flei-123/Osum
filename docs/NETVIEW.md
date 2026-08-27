@@ -469,7 +469,182 @@ cannot be what moved them. It is written down rather than left out.
   the real network. That is the price of the rule in §6 and it is the
   right price.
 
-## 11. Files
+## 11. The two displays (addendum)
+
+Windows puts one icon in the corner: a globe with no connection, a
+monitor with a cable for LAN, bars for wifi. That icon describes **the
+machine**. Here the network is a property of a **process**, and one icon
+cannot say that: this machine can be genuinely online while three
+programs see a faked network, one sees none and two see the real one. A
+single symbol would have to be wrong about five of them.
+
+So there are **two** displays and they answer two different questions.
+
+### 11.1 The corner: what the machine really has
+
+Four states, worked out in the kernel (`sys.NG_STATE`) so that the
+taskbar does not ask three questions and draw its own conclusion:
+
+| n | state | when | icon |
+|---|-------|------|------|
+| 0 | no carrier | no card, or the link bit is down | the screen, with a slash right across the whole icon |
+| 1 | no address | link up, no IP yet (DHCP still running) | an empty screen with three dots on it |
+| 2 | no route | IP set, the gateway never answered ARP | a warning triangle in the corner, bang cut out |
+| 3 | online | IP set and the gateway answered | the screen, filled |
+
+`no route` is Windows' "connected, no internet", one hop earlier: this
+kernel cannot know whether the far side of the world answers, but it
+knows whether the **first hop** ever did. That is `inet.gw_known`, it
+costs no probing traffic of its own, and the limit is written down
+rather than dressed up.
+
+**Wired only, and no wifi icon.** There is not one line of 802.11 in
+this tree. An icon for a carrier that does not exist would be, in a
+round about not lying to the user, the worst possible shortcut. When
+wifi arrives, a number is added here.
+
+While the pointer rests on the corner, the sentence and the three
+numbers appear in the free space of the bar: *"Verbunden ueber Kabel
+10.9.0.2 Maske 255.255.255.0 gw 10.9.0.1"*.
+
+### 11.2 The button and the title bar: what THIS program sees
+
+A mark, on the taskbar button **and** in the window's own title bar --
+the second one because a window is visible when the bar is covered,
+moved or hidden.
+
+| view | mark | why that shape |
+|------|------|----------------|
+| `real` | **none** | the normal case gets no sign. A mark on every window is a screen full of marks that say nothing, and the one that means something drowns in it. |
+| `filtered` | a ring with a **funnel** | it lets some through and holds the rest |
+| `faked` | a ring with a **wave** | the shape of a signal that is drawn and not received |
+| `none` | a ring with a **slash** | what a crossed-out thing has looked like for a century |
+
+All three are a ring, so that somebody who has seen one knows the next
+one is about the same thing. Hovering gives the sentence: *"Netzzugriff:
+vorgetaeuscht -- dieses Programm erreicht nichts von draussen"*.
+
+### 11.3 The rules the drawings are held to, and the numbers
+
+**Drawn at the size they are shown at.** 16x16 for the corner, 12x12 for
+the mark on a 22-pixel button. An icon designed at 24 and squeezed to 16
+loses exactly the pixel it was recognisable by, so nothing here was
+designed larger.
+
+**Colours are roles, not values.** OSYM stores four octets per pixel and
+the fourth is coverage; 0 has always meant transparent and 255 "these
+three octets are the colour". This round uses **1 to 5** to mean *ask
+the scheme*: ink, dim, accent, warn, panel
+(`tools/k15/symbol.py`, `wlibc.icon_draw`). One file is therefore right
+in a light scheme and in a dark one, and every symbol that existed
+before this addendum carries 0 and 255 and does not change by one octet.
+
+**Contrast**, computed out of the two scheme files that the measured
+runs actually boot with, against the panel the icon lies on:
+
+| role | dark | light |
+|------|------|-------|
+| ink | 10.85:1 | 14.14:1 |
+| dim | 4.53:1 | 4.97:1 |
+| accent | 6.33:1 | 5.59:1 |
+| warn | 7.74:1 | 4.90:1 |
+
+All eight over the 4.5:1 WCAG asks for small elements. `dim` in the dark
+scheme is the tightest at 4.53:1, and it is only ever used for a whole
+badge or a slash -- never for a one-pixel line.
+
+**Form carries the difference, not colour.** Somebody who cannot tell
+the accent from the warning colour still has to tell the icons apart, so
+every drawing is flattened to a silhouette -- every colour to one -- and
+the silhouettes are compared. Of every pixel either shape inks, this
+many are inked by only one of them:
+
+| | vs | | |
+|---|---|---|---|
+| nocarrier | noip | 32 of 73 | **43 %** |
+| nocarrier | noroute | 50 of 90 | 55 % |
+| nocarrier | online | 52 of 98 | 53 % |
+| noip | noroute | 36 of 78 | 46 % |
+| noip | online | 30 of 82 | **36 %** |
+| noroute | online | 66 of 108 | 61 % |
+| filtered | faked | 25 of 64 | **39 %** |
+| filtered | none | 26 of 66 | 39 % |
+| faked | none | 27 of 64 | 42 % |
+
+The threshold is a third, and it caught two real mistakes. The first
+pair of state icons differed **0 pixels** in silhouette -- both were a
+filled round badge and only the colour inside differed, which is exactly
+the mistake this section tells other people not to make. The second
+attempt cut the sign out of the badge as a hole and got to 19 %, still
+two corner badges of the same size. Only the third -- a warning triangle
+against three dots inside the screen -- passed.
+
+### 11.4 One drawing, two renderers
+
+The same mark is drawn in two places that have nothing to do with each
+other: the taskbar (ring 3, reads an OSYM file off the disk) and the
+window server (the kernel, in the middle of painting a window, with no
+file system). Writing the twelve rows twice is how two signs for one
+thing appear a month later, so the **drawing is the source**:
+
+```
+assets/netview/mark-*.txt
+      |
+      +-- tools/netview/icons.py bauen  -> /etc/netview/mark-*   (OSYM)
+      +-- tools/netview/icons.py kern   -> kernel/netmark.fi     (bit rows)
+```
+
+and `tools/netview/run.sh` regenerates `kernel/netmark.fi` on every run
+and fails if it differs from the file in the tree by one octet.
+
+**The title-bar mark is one colour.** The window server on this branch
+has no colour roles -- round THEME is giving it some (`WM_DECO`) -- so
+the mark is drawn in the colour the title text already has. That costs
+nothing, because the three shapes are distinguishable by form alone and
+the number above proves it. When THEME lands, one expression changes.
+
+### 11.5 What was measured, on a real screen
+
+`bash tools/netview/run.sh`, sections 5 and 6. Every coordinate is read
+out of what the taskbar **reported** on the serial line and then checked
+in the **picture** at that coordinate, pixel by pixel, with the role
+colours resolved against the scheme the run booted with
+(`tools/netview/schau.py`). A bar that reported one thing and drew
+another fails here.
+
+| | |
+|---|---|
+| four boots, four states of the machine | every icon pixel-perfect at the reported place: 62, 52, 68 and 82 opaque pixels, none wrong |
+| one boot, FOUR programs in FOUR views | `filtered` 54 of 54, `faked` 49 of 49, `none` 52 of 52 -- and the `real` button checked for **absence**: 49 of 49 pixels differ from a mark |
+| the same again in the light scheme | identical, out of the same seven files |
+| the bar found its pictures | `taskbar: icons=4 marks=3` |
+
+The screenshots are in `docs/shots/netview/`: `state-*.png` (the four
+corner states), `four-views-dark.png` and `four-views-light.png` (four
+programs, four marks, one bar), and `icons-sheet.png` (all seven signs
+1:1 and magnified, in both schemes).
+
+The offset between the two was itself a fault this measurement found:
+the bar reports coordinates inside its own window and the picture is the
+whole screen. The first run measured the icon against the wrong 62
+pixels and said so.
+
+### 11.6 What the addendum does not do
+
+* **No wifi icon**, see above.
+* **`no route` is one hop, not the internet.** A gateway that answers
+  ARP and drops everything after it reads as `online` here. Probing
+  further would mean sending traffic nobody asked for, which is the
+  opposite of what this round is about.
+* **The hover sentence is drawn in the bar, not in a window of its own.**
+  There is no tooltip layer in this system and a bar 28 pixels high
+  cannot open one. On a **vertical** bar there is no free space for it at
+  all, and there it is left out rather than crammed in.
+* **The title-bar mark is one colour** until round THEME lands.
+* **The corner icon has no click.** Windows opens a network panel from
+  it; there is nothing here to open yet.
+
+## 12. Files
 
 | file | what |
 |---|---|
@@ -487,4 +662,12 @@ cannot be what moved them. It is written down rather than left out.
 | `kernel/user/starter.fi` | starting a bundle with its view |
 | `kernel/user/appdir.fi` | `net=` in INFO, `/users/<name>/config/netview`, and the order between them |
 | `lib/libc/kcall.fi`, `kernel/user/ulib.fi` | the three call numbers |
+| `kernel/netmark.fi` | GENERATED from the drawings: the three marks as bit rows, for the window server |
+| `kernel/wm.fi` | the only change this round makes there: the mark in the title bar |
+| `kernel/kmain.fi` | `netvdemo`, a measurement word that starts three programs under three views |
+| `assets/netview/*.txt` | the seven drawings -- the single source of every sign |
+| `assets/netview/theme-dark`, `theme-light` | the two schemes the measured runs boot with, and the numbers the contrast is computed from |
+| `tools/netview/icons.py` | builds the OSYM files and `netmark.fi`, and checks contrast and silhouettes |
+| `tools/netview/schau.py` | reads a sign back out of a screenshot with the roles resolved |
+| `tools/netview/blatt.py` | the sheet of all seven signs |
 | `tools/netview/run.sh` | the acceptance run |
