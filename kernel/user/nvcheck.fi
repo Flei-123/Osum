@@ -74,6 +74,7 @@ fn u_start(args: u64) -> u64 {
     var k_cus: [u8; 8] = "conn_us\0"
     var k_send: [u8; 5] = "send\0"
     var k_body: [u8; 5] = "body\0"
+    var k_bytes: [u8; 6] = "bytes\0"
     var k_rus: [u8; 8] = "read_us\0"
     var k_tus: [u8; 9] = "total_us\0"
     var k_stat: [u8; 7] = "status\0"
@@ -104,7 +105,19 @@ fn u_start(args: u64) -> u64 {
     let fd: u64 = net.tcp_socket()
     tell(tag, (&k_sock[0]) as u64, coded(fd))
     if net.failed(fd) {
+        // EVERY KEY ON EVERY PATH. A run that ends early must still
+        // print every line, or the runner cannot tell "the number was
+        // zero" from "the program never got that far" -- and those two
+        // are exactly what the four views differ in.
+        tell(tag, (&k_conn[0]) as u64, coded(fd))
+        tell(tag, (&k_cus[0]) as u64, 0)
+        tell(tag, (&k_send[0]) as u64, 0)
+        tell(tag, (&k_body[0]) as u64, 0)
+        tell(tag, (&k_bytes[0]) as u64, 0)
+        tell(tag, (&k_stat[0]) as u64, 0)
+        tell(tag, (&k_rus[0]) as u64, 0)
         tell(tag, (&k_tus[0]) as u64, now_us() -% t_all)
+        tell(tag, (&k_dns[0]) as u64, dns_probe(host, (&buf[0]) as u64))
         return 0
     }
 
@@ -115,7 +128,13 @@ fn u_start(args: u64) -> u64 {
     tell(tag, (&k_cus[0]) as u64, t1 -% t0)
     if net.failed(c) {
         net.close(fd)
+        tell(tag, (&k_send[0]) as u64, 0)
+        tell(tag, (&k_body[0]) as u64, 0)
+        tell(tag, (&k_bytes[0]) as u64, 0)
+        tell(tag, (&k_stat[0]) as u64, 0)
+        tell(tag, (&k_rus[0]) as u64, 0)
         tell(tag, (&k_tus[0]) as u64, now_us() -% t_all)
+        tell(tag, (&k_dns[0]) as u64, dns_probe(host, (&buf[0]) as u64))
         return 0
     }
 
@@ -126,9 +145,22 @@ fn u_start(args: u64) -> u64 {
     // Read until the end of the stream. A view that hangs would hang
     // HERE, and the runner's own time limit would catch it -- but the
     // number below says it in microseconds instead.
+    //
+    // THE HEADER AND THE BODY ARE COUNTED APART, and that distinction is
+    // the whole result of the round. A faked answer is 87 octets of
+    // header and ZERO octets of body: the reachability check succeeds
+    // and the download is empty. Counting them together would hide
+    // exactly the thing being measured.
+    //
+    // The end of the header is CRLFCRLF, and it may fall across two
+    // reads, so the four octets are followed by a state machine over the
+    // whole stream rather than looked for inside one buffer.
     let t2: u64 = now_us()
     var got: u64 = 0
+    var body: u64 = 0
     var status: u64 = 0
+    var seen: u64 = 0 // how many of the four end-of-header octets match
+    var in_body: bool = false
     var going: bool = true
     while going {
         let r: u64 = net.recv_some(fd, (&buf[0]) as u64, CAP)
@@ -138,6 +170,29 @@ fn u_start(args: u64) -> u64 {
             if got == 0 {
                 status = status_of((&buf[0]) as u64, r)
             }
+            var i: u64 = 0
+            while i < r {
+                if in_body {
+                    body = body + 1
+                } else {
+                    let c: u64 = byte_at((&buf[0]) as u64, i)
+                    if seen == 0 && c == 13 {
+                        seen = 1
+                    } else if seen == 1 && c == 10 {
+                        seen = 2
+                    } else if seen == 2 && c == 13 {
+                        seen = 3
+                    } else if seen == 3 && c == 10 {
+                        in_body = true
+                        seen = 0
+                    } else if c == 13 {
+                        seen = 1
+                    } else {
+                        seen = 0
+                    }
+                }
+                i = i + 1
+            }
             got = got + r
             if got >= 65536 {
                 going = false
@@ -146,7 +201,8 @@ fn u_start(args: u64) -> u64 {
     }
     let t3: u64 = now_us()
     net.close(fd)
-    tell(tag, (&k_body[0]) as u64, got)
+    tell(tag, (&k_body[0]) as u64, body)
+    tell(tag, (&k_bytes[0]) as u64, got)
     tell(tag, (&k_stat[0]) as u64, status)
     tell(tag, (&k_rus[0]) as u64, t3 -% t2)
     tell(tag, (&k_tus[0]) as u64, now_us() -% t_all)
