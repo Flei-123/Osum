@@ -1,0 +1,262 @@
+// kernel/user/hwid.fi -- round TRESOR: what this machine is, and one
+// number that stands for it.
+//
+//     hwid           the raw values, then the fingerprint
+//     hwid -f        only the fingerprint (sixty-four hex digits)
+//     hwid -r        only the raw values
+//
+// THE RAW VALUES come from /proc/hwid and are printed unchanged. If a
+// field is empty, it is printed empty: this machine does not give it.
+//
+// ============================================================ THE FINGERPRINT
+//
+// SHA-256 over a CANONICAL TEXT built from the fields that survive a
+// reinstall. The text is written out by `-r` in the same order it is
+// hashed, so nobody has to trust this program about what went in.
+//
+// WHAT GOES IN, and why exactly these:
+//
+//     system_manufacturer   board identity, written by the firmware
+//     system_product
+//     system_serial
+//     uuid                  only when `uuid_valid` is 1
+//     board_serial
+//     nvme_serial           the drive, burned in at the factory
+//
+// WHAT STAYS OUT, and why:
+//
+//     system_version   firmware versions change with a BIOS update. A
+//                      fingerprint that a firmware update invalidates is
+//                      a fingerprint that will be wrong exactly when
+//                      somebody needs it.
+//     nvme_model       not an identity. Ten thousand machines share it.
+//     mac              it identifies the CARD, not the machine, and on
+//                      most operating systems it can be set from software
+//                      in one line. It is printed, it is not hashed.
+//     uuid, when zero  sixteen zero octets are what QEMU delivers by
+//                      default. Hashing them would give every default
+//                      virtual machine on earth the same fingerprint --
+//                      and it would look just as convincing as a real one.
+//
+// AN EMPTY FIELD IS SKIPPED ENTIRELY rather than hashed as an empty
+// string, and `sources=` says how many really contributed. That number is
+// the honest part of this program: a fingerprint over ZERO sources is
+// printed with `sources=0` next to it, and it means nothing at all.
+//
+// WHAT THIS IS NOT. It is a NAME, not a lock. Every field above is
+// written by firmware or by a device, and on a machine whose firmware the
+// attacker controls, every one of them can be made to say anything. See
+// docs/THEFT.md, which measures exactly that with two QEMU runs.
+
+profile kernel
+
+import ulib
+import sha
+
+export { u_start }
+
+const BUF: u64 = 2048
+const VAL: u64 = 96
+
+static mut file: [u8; 2048] = [0 as u8; 2048]
+static mut canon: [u8; 1024] = [0 as u8; 1024]
+
+fn u_start(args: u64) -> u64 {
+    var s_open: [u8; 32] = "hwid: cannot read /proc/hwid\0\0\0\0"
+    var p_proc: [u8; 11] = "/proc/hwid\0"
+    var f_flag: [u8; 3] = "-f\0"
+    var r_flag: [u8; 3] = "-r\0"
+    var l_fp: [u8; 14] = "fingerprint: \0"
+    var l_src: [u8; 10] = "sources: \0"
+    var l_none: [u8; 46] = "hwid: no stable source -- this is not an id.\0\0"
+
+    var only_fp: bool = false
+    var only_raw: bool = false
+    let argc: u64 = ulib.arg_count(args)
+    var k: u64 = 1
+    while k < argc {
+        let a: u64 = ulib.arg_at(args, k)
+        if ulib.streq(a, (&f_flag[0]) as u64) {
+            only_fp = true
+        }
+        if ulib.streq(a, (&r_flag[0]) as u64) {
+            only_raw = true
+        }
+        k = k + 1
+    }
+
+    let n: u64 = slurp((&p_proc[0]) as u64)
+    if n == 0 {
+        ulib.esay_line((&s_open[0]) as u64, 0)
+        return 1
+    }
+
+    if !only_fp {
+        ulib.put((&file[0]) as u64, n)
+    }
+    if only_raw {
+        return 0
+    }
+
+    let used: u64 = build_canonical(n)
+    var dig: [u8; 32] = [0 as u8; 32]
+    var hex: [u8; 65] = [0 as u8; 65]
+    sha.hash((&canon[0]) as u64, canon_len, (&dig[0]) as u64)
+    sha.hex_out((&dig[0]) as u64, (&hex[0]) as u64)
+
+    if only_fp {
+        ulib.say((&hex[0]) as u64)
+        ulib.nl()
+    } else {
+        ulib.say((&l_fp[0]) as u64)
+        ulib.say((&hex[0]) as u64)
+        ulib.nl()
+        ulib.say((&l_src[0]) as u64)
+        ulib.sayn(used)
+        ulib.nl()
+    }
+    if used == 0 {
+        ulib.esay_line((&l_none[0]) as u64, 0)
+        return 2
+    }
+    return 0
+}
+
+// ------------------------------------------------------------- reading
+
+fn slurp(path: u64) -> u64 {
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, path, 0, 0)
+    if ulib.bad(fd) {
+        return 0
+    }
+    var at: u64 = 0
+    var going: bool = true
+    while going && at < BUF {
+        let got: u64 = ulib.sys(ulib.SYS_READ, fd, (&file[0]) as u64 + at,
+            BUF - at)
+        if got == 0 || ulib.bad(got) {
+            going = false
+        } else {
+            at = at + got
+        }
+    }
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    return at
+}
+
+// Finds the line `key: value` and copies the value (without the newline)
+// into `out`. Returns the length; 0 means "not there or empty", and for
+// this program those two are the same thing.
+fn value_of(n: u64, key: u64, out: u64, max: u64) -> u64 {
+    let klen: u64 = ulib.length(key)
+    var at: u64 = 0
+    while at < n {
+        // Does the line at `at` start with the key, then ": "?
+        var hit: bool = true
+        var i: u64 = 0
+        while i < klen {
+            if at + i >= n || file[(at + i) as usize] != *((key + i) as *mut u8) {
+                hit = false
+                i = klen
+            } else {
+                i = i + 1
+            }
+        }
+        if hit && at + klen + 1 < n && file[(at + klen) as usize] == 58 as u8 {
+            var v: u64 = at + klen + 1
+            if v < n && file[v as usize] == 32 as u8 {
+                v = v + 1
+            }
+            var m: u64 = 0
+            while v < n && file[v as usize] != 10 as u8 && m < max - 1 {
+                __mmio_write8((out + m) as *mut u8, file[v as usize])
+                m = m + 1
+                v = v + 1
+            }
+            __mmio_write8((out + m) as *mut u8, 0 as u8)
+            return m
+        }
+        // Next line.
+        while at < n && file[at as usize] != 10 as u8 {
+            at = at + 1
+        }
+        at = at + 1
+    }
+    __mmio_write8(out as *mut u8, 0 as u8)
+    return 0
+}
+
+static mut canon_len: u64 = 0
+
+fn emit(key: u64, val: u64, vlen: u64) {
+    var i: u64 = 0
+    let klen: u64 = ulib.length(key)
+    while i < klen && canon_len < 1000 {
+        canon[canon_len as usize] = *((key + i) as *mut u8)
+        canon_len = canon_len + 1
+        i = i + 1
+    }
+    canon[canon_len as usize] = 61 as u8 // '='
+    canon_len = canon_len + 1
+    i = 0
+    while i < vlen && canon_len < 1000 {
+        canon[canon_len as usize] = *((val + i) as *mut u8)
+        canon_len = canon_len + 1
+        i = i + 1
+    }
+    canon[canon_len as usize] = 10 as u8 // '\n'
+    canon_len = canon_len + 1
+}
+
+// Builds the canonical text and returns how many sources really went in.
+fn build_canonical(n: u64) -> u64 {
+    var k_sm: [u8; 20] = "system_manufacturer\0"
+    var k_sp: [u8; 15] = "system_product\0"
+    var k_ss: [u8; 14] = "system_serial\0"
+    var k_uu: [u8; 5] = "uuid\0"
+    var k_uv: [u8; 11] = "uuid_valid\0"
+    var k_bs: [u8; 13] = "board_serial\0"
+    var k_ns: [u8; 12] = "nvme_serial\0"
+    var one: [u8; 2] = "1\0"
+
+    var val: [u8; 96] = [0 as u8; 96]
+    canon_len = 0
+    var used: u64 = 0
+
+    var m: u64 = value_of(n, (&k_sm[0]) as u64, (&val[0]) as u64, VAL)
+    if m > 0 {
+        emit((&k_sm[0]) as u64, (&val[0]) as u64, m)
+        used = used + 1
+    }
+    m = value_of(n, (&k_sp[0]) as u64, (&val[0]) as u64, VAL)
+    if m > 0 {
+        emit((&k_sp[0]) as u64, (&val[0]) as u64, m)
+        used = used + 1
+    }
+    m = value_of(n, (&k_ss[0]) as u64, (&val[0]) as u64, VAL)
+    if m > 0 {
+        emit((&k_ss[0]) as u64, (&val[0]) as u64, m)
+        used = used + 1
+    }
+    // The UUID only when the kernel says it is one.
+    var flag: [u8; 8] = [0 as u8; 8]
+    value_of(n, (&k_uv[0]) as u64, (&flag[0]) as u64, 8)
+    if ulib.streq((&flag[0]) as u64, (&one[0]) as u64) {
+        m = value_of(n, (&k_uu[0]) as u64, (&val[0]) as u64, VAL)
+        if m > 0 {
+            emit((&k_uu[0]) as u64, (&val[0]) as u64, m)
+            used = used + 1
+        }
+    }
+    m = value_of(n, (&k_bs[0]) as u64, (&val[0]) as u64, VAL)
+    if m > 0 {
+        emit((&k_bs[0]) as u64, (&val[0]) as u64, m)
+        used = used + 1
+    }
+    m = value_of(n, (&k_ns[0]) as u64, (&val[0]) as u64, VAL)
+    if m > 0 {
+        emit((&k_ns[0]) as u64, (&val[0]) as u64, m)
+        used = used + 1
+    }
+    return used
+}

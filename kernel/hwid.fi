@@ -1,0 +1,988 @@
+// kernel/hwid.fi -- round TRESOR: what this machine IS.
+//
+// A stolen machine is only findable if it can be recognised again, and a
+// backup only belongs to a machine if the machine has a name that a
+// reinstall does not change. Both need the same thing: an identity that
+// does NOT live in the file system, because the file system is the first
+// thing a thief overwrites.
+//
+// So the identity is read out of the HARDWARE, from three independent
+// sources, and every one of them can be missing:
+//
+//   1. SMBIOS (this file). The firmware leaves a table in memory that
+//      describes the board: system manufacturer, product, serial number,
+//      a UUID, and the serial of the baseboard. It survives every
+//      reinstall because no operating system writes it.
+//   2. THE NVMe CONTROLLER (`nvme.fi`, additive: `identify_ctrl`). Its
+//      serial number and model are burned into the drive. They survive a
+//      reinstall too -- but not a drive swap, which is exactly the point
+//      of having more than one source.
+//   3. THE MAC ADDRESS of the network card (`virtio.fi`, `mac_at`).
+//
+// ============================================================== HOW MUCH
+// ============================================================== IT PROVES
+//
+// Not as much as one would like, and the honest version is in
+// docs/THEFT.md. The short form:
+//
+//   * SMBIOS is WRITTEN BY THE FIRMWARE, and on many boards the vendor's
+//     own tool can write it again. A serial number in SMBIOS is a claim
+//     by the firmware, not a property of the silicon.
+//   * IN A VIRTUAL MACHINE the values are whatever the host says. This is
+//     MEASURED, not assumed: under plain QEMU 7.2 the system serial is
+//     the EMPTY STRING, the UUID is sixteen zero octets, and there is no
+//     baseboard structure at all. With `-smbios type=1,serial=...` the
+//     same kernel reads whatever was put on the command line. Both runs
+//     are in `tools/tresor/run.sh`.
+//   * Therefore: a fingerprint over these fields identifies a machine
+//     that is COOPERATING. It does not resist an attacker who controls
+//     the firmware. It is a name, not a lock.
+//
+// ============================================================ THE SEARCH
+//
+// Two ways in, and this kernel can only walk one of them today.
+//
+// A. THE LEGACY SCAN. The entry point is 16-octet aligned somewhere in
+//    0x000F0000..0x000FFFFF and starts with "_SM3_" (SMBIOS 3, 64-bit
+//    table address) or "_SM_" (SMBIOS 2). The checksum over its own
+//    length has to be zero.
+//
+//    THE CHECKSUM IS NOT DECORATION, and this is measured: SeaBIOS
+//    carries the CHARACTERS "_SM3_" in its own string table at 0x000F1031
+//    -- the literal that its code uses to build the real entry point. A
+//    scanner that trusts the four characters reads a string table as a
+//    table of hardware. Two things stop it here: the checksum, and the
+//    16-octet alignment (0x...031 is not aligned). Either alone would do;
+//    both are cheap.
+//
+// B. THE EFI CONFIGURATION TABLE. Under UEFI there may be no legacy
+//    F-segment at all, and the entry point is then found through the EFI
+//    system table: `NumberOfTableEntries` pairs of {GUID, pointer}, and
+//    the two GUIDs to look for are
+//
+//        SMBIOS_TABLE_GUID   eb9d2d31-2d88-11d3-9a16-0090273fc14d
+//        SMBIOS3_TABLE_GUID  f2fd1544-9794-4a2c-992e-e5bbcf20e394
+//
+//    `from_efi` below implements this in full. WHAT DOES NOT EXIST is a
+//    caller with a real address: Osum boots MULTIBOOT 1 (`kernel/boot.s`,
+//    section `.multiboot`), and multiboot 1 has NO field for the EFI
+//    system table -- that arrived with multiboot 2 (tags 11 and 12). So
+//    the path is written, and it is measured against a system table that
+//    the test builds BY HAND (`hwidefi` on the command line), and it is
+//    NOT reachable from a real UEFI boot until the loader speaks
+//    multiboot 2. Saying it any other way would be a claim, not a fact.
+//
+// ======================================================= THE STRING RULE
+//
+// SMBIOS 6.1.3, and it is the one place where a plausible reading is
+// wrong. A structure is `length` octets of body, then a set of strings.
+// Each string is NUL terminated, and the SET ends with ONE MORE NUL after
+// the last string. A structure with no strings at all is the special
+// case: exactly two NULs.
+//
+// The plausible-but-wrong reading is "the set ends at two NULs in a row".
+// It costs nothing on a structure whose last string is followed by the
+// terminator and the next structure's type octet -- which is 1, not 0.
+// Measured: with that rule this parser found ONE structure of nine and
+// then read the type octet of the next as a length of zero. With the
+// correct rule it finds all nine.
+
+profile kernel
+
+import kstate
+import serial
+import nvme
+import virtio
+
+export {
+    stage, find, ok, entry, entry_kind, version_major, version_minor,
+    table_addr, table_len, structures,
+    F_SYS_MANUF, F_SYS_PRODUCT, F_SYS_VERSION, F_SYS_SERIAL,
+    F_BOARD_MANUF, F_BOARD_PRODUCT, F_BOARD_SERIAL,
+    F_UUID, F_NVME_SERIAL, F_NVME_MODEL, F_MAC,
+    field, field_len, have_uuid, have_nvme, have_mac,
+    from_efi, dump, ctrl_buffer, collect_nvme, collect_mac, refresh, late,
+    efi_selftest,
+    FIELD_MAX
+}
+
+// ------------------------------------------------------------ the region
+//
+// kdata, two pages. The first holds the scalars and the extracted fields;
+// the SECOND is the DMA target for the NVMe controller identify, and that
+// is why it has to be page aligned -- a PRP entry of a 4096 octet
+// transfer with a non-zero offset needs a second entry, and there is no
+// reason to need one.
+//
+// Both are entered in `tools/kernel/karte.py`; the map checker refuses an
+// overlap and refuses anything past KDATA_SIZE.
+
+const S_OK: u64 = 0 // 1 as soon as a table was really read
+const S_ENTRY: u64 = 8 // where the entry point was found
+const S_KIND: u64 = 16 // 2 = "_SM_", 3 = "_SM3_"
+const S_MAJOR: u64 = 24
+const S_MINOR: u64 = 32
+const S_TABLE: u64 = 40
+const S_TLEN: u64 = 48
+const S_COUNT: u64 = 56 // structures really walked
+const S_UUID_OK: u64 = 64
+const S_NVME_OK: u64 = 72
+const S_MAC_OK: u64 = 80
+const S_TRIED: u64 = 88 // entry points looked at and rejected
+const S_LATE: u64 = 96 // how often the late sources were asked again
+
+// The fields, each in a slot of FIELD_MAX octets, NUL terminated.
+const FIELD_MAX: u64 = 64
+const FIELDS_OFF: u64 = 0x100
+
+const F_SYS_MANUF: u64 = 0
+const F_SYS_PRODUCT: u64 = 1
+const F_SYS_VERSION: u64 = 2
+const F_SYS_SERIAL: u64 = 3
+const F_BOARD_MANUF: u64 = 4
+const F_BOARD_PRODUCT: u64 = 5
+const F_BOARD_SERIAL: u64 = 6
+const F_UUID: u64 = 7 // sixteen raw octets, NOT text
+const F_NVME_SERIAL: u64 = 8
+const F_NVME_MODEL: u64 = 9
+const F_MAC: u64 = 10 // six raw octets
+const F_LAST: u64 = 10
+
+// The second page: the NVMe controller identify lands here.
+const CTRL_OFF: u64 = 0x1000
+
+// The search area of the legacy scan.
+const BIOS_LOW: u64 = 0x000F0000
+const BIOS_HIGH: u64 = 0x00100000
+
+// Offsets in the SMBIOS 2 entry point.
+const E2_LEN: u64 = 5
+const E2_MAJOR: u64 = 6
+const E2_MINOR: u64 = 7
+const E2_TLEN: u64 = 0x16
+const E2_TADDR: u64 = 0x18
+const E2_COUNT: u64 = 0x1C
+
+// Offsets in the SMBIOS 3 entry point.
+const E3_LEN: u64 = 6
+const E3_MAJOR: u64 = 7
+const E3_MINOR: u64 = 8
+const E3_TLEN: u64 = 0x0C
+const E3_TADDR: u64 = 0x10
+
+// Offsets in the EFI system table (64 bit) and its configuration table.
+const EFI_SIG_LO: u64 = 0x20494249 // "IBI "
+const EFI_SIG_HI: u64 = 0x54535953 // "SYST"
+const EFI_NTABLES: u64 = 0x68
+const EFI_CFGTAB: u64 = 0x70
+const EFI_CFG_STRIDE: u64 = 24
+
+fn base(state: u64) -> u64 {
+    return state + kstate.HWID_OFF
+}
+
+fn sget(state: u64, off: u64) -> u64 {
+    return kstate.get(state, kstate.HWID_OFF + off)
+}
+
+fn sset(state: u64, off: u64, v: u64) {
+    kstate.set(state, kstate.HWID_OFF + off, v)
+}
+
+fn field(state: u64, which: u64) -> u64 {
+    return base(state) + FIELDS_OFF + which * FIELD_MAX
+}
+
+fn ctrl_buffer(state: u64) -> u64 {
+    return base(state) + CTRL_OFF
+}
+
+fn field_len(state: u64, which: u64) -> u64 {
+    let p: u64 = field(state, which)
+    var i: u64 = 0
+    while i < FIELD_MAX && kstate.get8(p + i) != 0 {
+        i = i + 1
+    }
+    return i
+}
+
+fn clear_field(state: u64, which: u64) {
+    let p: u64 = field(state, which)
+    var i: u64 = 0
+    while i < FIELD_MAX {
+        kstate.set8(p + i, 0 as u8)
+        i = i + 1
+    }
+}
+
+fn ok(state: u64) -> bool {
+    return sget(state, S_OK) != 0
+}
+
+fn entry(state: u64) -> u64 {
+    return sget(state, S_ENTRY)
+}
+
+fn entry_kind(state: u64) -> u64 {
+    return sget(state, S_KIND)
+}
+
+fn version_major(state: u64) -> u64 {
+    return sget(state, S_MAJOR)
+}
+
+fn version_minor(state: u64) -> u64 {
+    return sget(state, S_MINOR)
+}
+
+fn table_addr(state: u64) -> u64 {
+    return sget(state, S_TABLE)
+}
+
+fn table_len(state: u64) -> u64 {
+    return sget(state, S_TLEN)
+}
+
+fn structures(state: u64) -> u64 {
+    return sget(state, S_COUNT)
+}
+
+fn have_uuid(state: u64) -> bool {
+    return sget(state, S_UUID_OK) != 0
+}
+
+fn have_nvme(state: u64) -> bool {
+    return sget(state, S_NVME_OK) != 0
+}
+
+fn have_mac(state: u64) -> bool {
+    return sget(state, S_MAC_OK) != 0
+}
+
+// --------------------------------------------------------- the checksum
+
+// Wrapping addition over `n` octets; a valid structure sums to zero.
+fn sum_zero(p: u64, n: u64) -> bool {
+    var i: u64 = 0
+    var s: u64 = 0
+    while i < n {
+        s = (s + kstate.get8(p + i)) & 0xFF
+        i = i + 1
+    }
+    return s == 0
+}
+
+fn tag(p: u64, a: u64, n: u64) -> bool {
+    var i: u64 = 0
+    while i < n {
+        if kstate.get8(p + i) != kstate.get8(a + i) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+// -------------------------------------------------------- the string set
+//
+// `p` points at the first octet AFTER the formatted body. Returns the
+// address of the octet after the whole string set, or 0 if the set runs
+// past `limit` -- a malformed table must not make this loop for ever.
+
+fn set_end(p: u64, limit: u64) -> u64 {
+    if p + 1 >= limit {
+        return 0
+    }
+    if kstate.get8(p) == 0 && kstate.get8(p + 1) == 0 {
+        return p + 2
+    }
+    var q: u64 = p
+    var guard: u64 = 0
+    while guard < 1024 {
+        // Skip the body of one string.
+        while q < limit && kstate.get8(q) != 0 {
+            q = q + 1
+        }
+        if q >= limit {
+            return 0
+        }
+        q = q + 1 // past its NUL
+        if q >= limit {
+            return 0
+        }
+        if kstate.get8(q) == 0 {
+            return q + 1 // the extra NUL closes the set
+        }
+        guard = guard + 1
+    }
+    return 0
+}
+
+// Copies string number `idx` (1 based, 0 = "no string") of the set at `p`
+// into the field slot `which`. A missing string leaves the slot empty --
+// which is a fact about the firmware and not an error.
+fn take_string(state: u64, p: u64, limit: u64, idx: u64, which: u64) {
+    clear_field(state, which)
+    if idx == 0 || p + 1 >= limit {
+        return
+    }
+    if kstate.get8(p) == 0 && kstate.get8(p + 1) == 0 {
+        return // the structure carries no strings at all
+    }
+    var q: u64 = p
+    var n: u64 = 1
+    while n < idx {
+        while q < limit && kstate.get8(q) != 0 {
+            q = q + 1
+        }
+        if q >= limit {
+            return
+        }
+        q = q + 1
+        if q >= limit || kstate.get8(q) == 0 {
+            return // the set ended before the wanted index
+        }
+        n = n + 1
+    }
+    let dst: u64 = field(state, which)
+    var i: u64 = 0
+    while i < FIELD_MAX - 1 && q + i < limit {
+        let c: u64 = kstate.get8(q + i)
+        if c == 0 {
+            i = i + 1
+            break
+        }
+        kstate.set8(dst + i, c as u8)
+        i = i + 1
+    }
+}
+
+// ------------------------------------------------------- the entry point
+
+// Checks one candidate address. Returns the kind (2 or 3) or 0.
+fn entry_kind_at(p: u64) -> u64 {
+    var w3: [u8; 6] = "_SM3_\0"
+    var w2: [u8; 5] = "_SM_\0"
+    if tag(p, (&w3[0]) as u64, 5) {
+        let len: u64 = kstate.get8(p + E3_LEN)
+        if len >= 24 && len <= 64 && sum_zero(p, len) {
+            return 3
+        }
+        return 0
+    }
+    if tag(p, (&w2[0]) as u64, 4) {
+        let len: u64 = kstate.get8(p + E2_LEN)
+        if len >= 24 && len <= 64 && sum_zero(p, len) {
+            return 2
+        }
+        return 0
+    }
+    return 0
+}
+
+// Reads an entry point that has already been checked into the scalars.
+fn adopt(state: u64, p: u64, kind: u64) -> bool {
+    var tadr: u64 = 0
+    var tlen: u64 = 0
+    if kind == 3 {
+        tadr = __mmio_read64((p + E3_TADDR) as *mut u64)
+        tlen = kstate.get32(p + E3_TLEN)
+        sset(state, S_MAJOR, kstate.get8(p + E3_MAJOR))
+        sset(state, S_MINOR, kstate.get8(p + E3_MINOR))
+        sset(state, S_COUNT, 0)
+    } else {
+        tadr = kstate.get32(p + E2_TADDR)
+        tlen = kstate.get16(p + E2_TLEN)
+        sset(state, S_MAJOR, kstate.get8(p + E2_MAJOR))
+        sset(state, S_MINOR, kstate.get8(p + E2_MINOR))
+        sset(state, S_COUNT, kstate.get16(p + E2_COUNT))
+    }
+    if tadr == 0 || tlen < 4 || tlen > 0x100000 {
+        return false
+    }
+    sset(state, S_ENTRY, p)
+    sset(state, S_KIND, kind)
+    sset(state, S_TABLE, tadr)
+    sset(state, S_TLEN, tlen)
+    return true
+}
+
+// The legacy scan. Prefers SMBIOS 3 over SMBIOS 2 when both are there,
+// because the 64-bit table address is the one that can point above 4 GiB.
+fn scan(state: u64) -> bool {
+    var best: u64 = 0
+    var best_kind: u64 = 0
+    var tried: u64 = 0
+    var p: u64 = BIOS_LOW
+    while p < BIOS_HIGH {
+        let k: u64 = entry_kind_at(p)
+        if k != 0 {
+            tried = tried + 1
+            if k > best_kind {
+                best = p
+                best_kind = k
+            }
+        }
+        p = p + 16
+    }
+    sset(state, S_TRIED, tried)
+    if best_kind == 0 {
+        return false
+    }
+    return adopt(state, best, best_kind)
+}
+
+// ------------------------------------------------- the EFI way in (B)
+//
+// Walks the configuration table of an EFI system table and adopts the
+// SMBIOS entry point it points at. `systab` is the physical address of
+// the EFI system table; 0 means "the loader did not give us one", which
+// is the case on every boot of this kernel today (multiboot 1).
+//
+// The GUIDs are compared as sixteen octets in their MIXED ENDIAN memory
+// form -- the first three fields little endian, the last eight as
+// written. That is why the arrays below do not read like the GUID does.
+
+fn guid_eq(p: u64, g: u64) -> bool {
+    return tag(p, g, 16)
+}
+
+fn from_efi(state: u64, systab: u64) -> bool {
+    // eb9d2d31-2d88-11d3-9a16-0090273fc14d
+    var g2: [u8; 16] = [0x31 as u8, 0x2d as u8, 0x9d as u8, 0xeb as u8,
+        0x88 as u8, 0x2d as u8, 0xd3 as u8, 0x11 as u8,
+        0x9a as u8, 0x16 as u8, 0x00 as u8, 0x90 as u8,
+        0x27 as u8, 0x3f as u8, 0xc1 as u8, 0x4d as u8]
+    // f2fd1544-9794-4a2c-992e-e5bbcf20e394
+    var g3: [u8; 16] = [0x44 as u8, 0x15 as u8, 0xfd as u8, 0xf2 as u8,
+        0x94 as u8, 0x97 as u8, 0x2c as u8, 0x4a as u8,
+        0x99 as u8, 0x2e as u8, 0xe5 as u8, 0xbb as u8,
+        0xcf as u8, 0x20 as u8, 0xe3 as u8, 0x94 as u8]
+    if systab == 0 {
+        return false
+    }
+    // The signature "IBI SYST", eight octets, before anything else is
+    // believed. A wrong pointer here would walk arbitrary memory as a
+    // table of pointers.
+    if kstate.get32(systab) != EFI_SIG_LO {
+        return false
+    }
+    if kstate.get32(systab + 4) != EFI_SIG_HI {
+        return false
+    }
+    let n: u64 = __mmio_read64((systab + EFI_NTABLES) as *mut u64)
+    let tab: u64 = __mmio_read64((systab + EFI_CFGTAB) as *mut u64)
+    if tab == 0 || n == 0 || n > 1024 {
+        return false
+    }
+    var best: u64 = 0
+    var best_kind: u64 = 0
+    var i: u64 = 0
+    while i < n {
+        let e: u64 = tab + i * EFI_CFG_STRIDE
+        let ptr: u64 = __mmio_read64((e + 16) as *mut u64)
+        if ptr != 0 {
+            var want: u64 = 0
+            if guid_eq(e, (&g3[0]) as u64) {
+                want = 3
+            } else if guid_eq(e, (&g2[0]) as u64) {
+                want = 2
+            }
+            if want != 0 {
+                // The pointer names an entry point; it still has to BE
+                // one. A GUID that says "SMBIOS3" over a structure whose
+                // checksum fails is a broken firmware, not a table.
+                let k: u64 = entry_kind_at(ptr)
+                if k != 0 && k > best_kind {
+                    best = ptr
+                    best_kind = k
+                }
+            }
+        }
+        i = i + 1
+    }
+    if best_kind == 0 {
+        return false
+    }
+    if !adopt(state, best, best_kind) {
+        return false
+    }
+    return walk(state)
+}
+
+// ---------------------------------------------------------- the walk
+
+// Goes through the structures and picks type 1 (system) and type 2
+// (baseboard) out of them. Returns true when at least one of the two was
+// there; the count of structures really seen ends up in S_COUNT.
+fn walk(state: u64) -> bool {
+    let tbl: u64 = sget(state, S_TABLE)
+    let len: u64 = sget(state, S_TLEN)
+    if tbl == 0 || len < 4 {
+        return false
+    }
+    let limit: u64 = tbl + len
+    var p: u64 = tbl
+    var seen: u64 = 0
+    var got: bool = false
+    var guard: u64 = 0
+    while p + 4 <= limit && guard < 512 {
+        let t: u64 = kstate.get8(p)
+        let l: u64 = kstate.get8(p + 1)
+        if l < 4 {
+            break
+        }
+        if p + l > limit {
+            break
+        }
+        let strings: u64 = p + l
+        let e: u64 = set_end(strings, limit)
+        if e == 0 {
+            break
+        }
+        seen = seen + 1
+        if t == 1 {
+            take_string(state, strings, limit, kstate.get8(p + 4), F_SYS_MANUF)
+            take_string(state, strings, limit, kstate.get8(p + 5), F_SYS_PRODUCT)
+            take_string(state, strings, limit, kstate.get8(p + 6), F_SYS_VERSION)
+            take_string(state, strings, limit, kstate.get8(p + 7), F_SYS_SERIAL)
+            // The UUID is sixteen RAW octets, not a string, and it is only
+            // there from SMBIOS 2.1 on (body length 25 or more).
+            clear_field(state, F_UUID)
+            if l >= 24 {
+                var i: u64 = 0
+                var any: u64 = 0
+                while i < 16 {
+                    let c: u64 = kstate.get8(p + 8 + i)
+                    kstate.set8(field(state, F_UUID) + i, c as u8)
+                    any = any | c
+                    i = i + 1
+                }
+                // Sixteen zero octets is what QEMU delivers by default.
+                // That is not a UUID, it is the absence of one, and it
+                // must not go into a fingerprint as though it were.
+                if any != 0 {
+                    sset(state, S_UUID_OK, 1)
+                }
+            }
+            got = true
+        }
+        if t == 2 {
+            take_string(state, strings, limit, kstate.get8(p + 4), F_BOARD_MANUF)
+            take_string(state, strings, limit, kstate.get8(p + 5), F_BOARD_PRODUCT)
+            take_string(state, strings, limit, kstate.get8(p + 7), F_BOARD_SERIAL)
+            got = true
+        }
+        if t == 127 {
+            break
+        }
+        p = e
+        guard = guard + 1
+    }
+    sset(state, S_COUNT, seen)
+    if got {
+        sset(state, S_OK, 1)
+    }
+    return got
+}
+
+// ------------------------------------------------------- the other two
+
+// The NVMe serial number and model. IMPORTANT and easy to get wrong: they
+// are NOT in the buffer that `nvme.identify` already has. That one is the
+// IDENTIFY NAMESPACE structure (CNS 0), whose octets 4..23 are the
+// namespace capacity, not a serial number. Serial (octets 4..23) and
+// model (24..63) live in IDENTIFY CONTROLLER (CNS 1), which is a second
+// command -- `nvme.identify_ctrl`, added for this round without touching
+// the existing path.
+//
+// Both fields are SPACE PADDED ASCII per the specification, not NUL
+// terminated. The padding is trimmed here, otherwise every fingerprint
+// would hash a run of blanks.
+fn collect_nvme(state: u64) -> bool {
+    clear_field(state, F_NVME_SERIAL)
+    clear_field(state, F_NVME_MODEL)
+    if !nvme.present(state) {
+        return false
+    }
+    // PRESENT IS NOT READY. `nvme.present` only asks the bus whether such
+    // a controller exists; the queues that `admin` writes into are built
+    // by `nvme.init`, which runs in `hw.disk` -- and that is LATER in
+    // `kernel_main` than this file is first called. An admin command
+    // before that would spin out its whole limit and return 0xFFFF.
+    // `blocks` is non-zero exactly when the controller answered its first
+    // command, so it is the honest readiness bit.
+    if nvme.blocks(state) == 0 {
+        return false
+    }
+    let buf: u64 = ctrl_buffer(state)
+    if !nvme.identify_ctrl(state, buf) {
+        return false
+    }
+    copy_trimmed(state, buf + 4, 20, F_NVME_SERIAL)
+    copy_trimmed(state, buf + 24, 40, F_NVME_MODEL)
+    if field_len(state, F_NVME_SERIAL) == 0 && field_len(state, F_NVME_MODEL) == 0 {
+        return false
+    }
+    sset(state, S_NVME_OK, 1)
+    return true
+}
+
+// Copies `n` octets and drops the trailing blanks. Anything that is not a
+// printable character becomes nothing at all -- a drive that answers with
+// zeros should produce an empty field, not sixteen invisible octets in a
+// hash.
+fn copy_trimmed(state: u64, src: u64, n: u64, which: u64) {
+    var end: u64 = n
+    while end > 0 {
+        let c: u64 = kstate.get8(src + end - 1)
+        if c != 32 && c != 0 {
+            break
+        }
+        end = end - 1
+    }
+    let dst: u64 = field(state, which)
+    var i: u64 = 0
+    while i < end && i < FIELD_MAX - 1 {
+        var c: u64 = kstate.get8(src + i)
+        if c < 32 || c > 126 {
+            c = 63 // '?' -- visible, and it does not lie about the octet
+        }
+        kstate.set8(dst + i, c as u8)
+        i = i + 1
+    }
+    kstate.set8(dst + i, 0 as u8)
+}
+
+// The MAC address of the network card, six raw octets. Only there when
+// the run has a card at all (`nic` on the command line).
+fn collect_mac(state: u64) -> bool {
+    clear_field(state, F_MAC)
+    if !virtio.present(state) {
+        return false
+    }
+    let dst: u64 = field(state, F_MAC)
+    var i: u64 = 0
+    var any: u64 = 0
+    while i < 6 {
+        let c: u64 = virtio.mac_at(state, i)
+        kstate.set8(dst + i, c as u8)
+        any = any | c
+        i = i + 1
+    }
+    if any == 0 {
+        clear_field(state, F_MAC)
+        return false
+    }
+    sset(state, S_MAC_OK, 1)
+    return true
+}
+
+// ------------------------------------------------------------ the whole
+
+// Reads everything that can be read. Safe to call twice; safe to call on
+// a machine that has none of the three sources.
+fn find(state: u64) -> bool {
+    var i: u64 = 0
+    while i <= F_LAST {
+        clear_field(state, i)
+        i = i + 1
+    }
+    sset(state, S_OK, 0)
+    sset(state, S_UUID_OK, 0)
+    sset(state, S_NVME_OK, 0)
+    sset(state, S_MAC_OK, 0)
+    sset(state, S_COUNT, 0)
+    sset(state, S_ENTRY, 0)
+    sset(state, S_KIND, 0)
+    var any: bool = false
+    if scan(state) {
+        if walk(state) {
+            any = true
+        }
+    }
+    if collect_nvme(state) {
+        any = true
+    }
+    if collect_mac(state) {
+        any = true
+    }
+    return any
+}
+
+// Fills in what was not there yet. THE ORDER OF `kernel_main` IS THE
+// REASON THIS EXISTS: SMBIOS can be read at any time, the MAC address
+// exists once `netsvc.stage` has run, but the NVMe controller is only set
+// up in `hw.disk`, which comes AFTER the userland has already started.
+// A `/proc/hwid` that was built once and early would report an empty
+// drive serial for the whole life of the machine.
+//
+// So the late sources are asked again when somebody reads, and at most
+// eight times -- a machine without a drive must not pay for a failing
+// admin command on every single read.
+fn refresh(state: u64) {
+    if sget(state, S_NVME_OK) != 0 && sget(state, S_MAC_OK) != 0 {
+        return
+    }
+    if sget(state, S_LATE) >= 8 {
+        return
+    }
+    sset(state, S_LATE, sget(state, S_LATE) + 1)
+    if sget(state, S_NVME_OK) == 0 {
+        collect_nvme(state)
+    }
+    if sget(state, S_MAC_OK) == 0 {
+        collect_mac(state)
+    }
+}
+
+// ------------------------------------------------------------ the report
+
+fn put_field(state: u64, label: u64, which: u64) {
+    serial.puts(label)
+    let p: u64 = field(state, which)
+    let n: u64 = field_len(state, which)
+    if n == 0 {
+        var empty: [u8; 8] = "(empty)\0"
+        serial.puts((&empty[0]) as u64)
+    } else {
+        var i: u64 = 0
+        while i < n {
+            serial.put(kstate.get8(p + i) as u8)
+            i = i + 1
+        }
+    }
+    serial.nl()
+}
+
+fn put_hex(state: u64, label: u64, which: u64, n: u64) {
+    var digits: [u8; 17] = "0123456789abcdef\0"
+    serial.puts(label)
+    let p: u64 = field(state, which)
+    var i: u64 = 0
+    while i < n {
+        let c: u64 = kstate.get8(p + i)
+        serial.put(kstate.get8((&digits[0]) as u64 + ((c >> 4) & 15)) as u8)
+        serial.put(kstate.get8((&digits[0]) as u64 + (c & 15)) as u8)
+        i = i + 1
+    }
+    serial.nl()
+}
+
+fn put_num(label: u64, v: u64) {
+    serial.puts(label)
+    serial.dec(v)
+    serial.nl()
+}
+
+// What the test runner reads off the serial line. Every line carries the
+// prefix `hwid:` so that a runner can pick it out of the boot messages.
+fn dump(state: u64) {
+    var l_ep: [u8; 13] = "hwid: entry=\0"
+    var l_kind: [u8; 12] = "hwid: kind=\0"
+    var l_ver: [u8; 15] = "hwid: version=\0"
+    var l_tab: [u8; 13] = "hwid: table=\0"
+    var l_tlen: [u8; 12] = "hwid: tlen=\0"
+    var l_cnt: [u8; 14] = "hwid: count=\0\0"
+    var l_tried: [u8; 14] = "hwid: tried=\0\0"
+    var l_sm: [u8; 16] = "hwid: sys_man=\0\0"
+    var l_sp: [u8; 17] = "hwid: sys_prod=\0\0"
+    var l_sv: [u8; 16] = "hwid: sys_ver=\0\0"
+    var l_ss: [u8; 16] = "hwid: sys_ser=\0\0"
+    var l_bm: [u8; 16] = "hwid: brd_man=\0\0"
+    var l_bp: [u8; 17] = "hwid: brd_prod=\0\0"
+    var l_bs: [u8; 16] = "hwid: brd_ser=\0\0"
+    var l_uu: [u8; 13] = "hwid: uuid=\0\0"
+    var l_uo: [u8; 16] = "hwid: uuid_ok=\0\0"
+    var l_ns: [u8; 17] = "hwid: nvme_ser=\0\0"
+    var l_nm: [u8; 17] = "hwid: nvme_mod=\0\0"
+    var l_no: [u8; 16] = "hwid: nvme_ok=\0\0"
+    var l_mac: [u8; 12] = "hwid: mac=\0\0"
+    var l_mo: [u8; 15] = "hwid: mac_ok=\0\0"
+    var l_ok: [u8; 11] = "hwid: ok=\0\0"
+
+    put_num((&l_ok[0]) as u64, sget(state, S_OK))
+    serial.puts((&l_ep[0]) as u64)
+    serial.hex(sget(state, S_ENTRY))
+    serial.nl()
+    put_num((&l_kind[0]) as u64, sget(state, S_KIND))
+    put_num((&l_ver[0]) as u64, sget(state, S_MAJOR) * 100 + sget(state, S_MINOR))
+    serial.puts((&l_tab[0]) as u64)
+    serial.hex(sget(state, S_TABLE))
+    serial.nl()
+    put_num((&l_tlen[0]) as u64, sget(state, S_TLEN))
+    put_num((&l_cnt[0]) as u64, sget(state, S_COUNT))
+    put_num((&l_tried[0]) as u64, sget(state, S_TRIED))
+    put_field(state, (&l_sm[0]) as u64, F_SYS_MANUF)
+    put_field(state, (&l_sp[0]) as u64, F_SYS_PRODUCT)
+    put_field(state, (&l_sv[0]) as u64, F_SYS_VERSION)
+    put_field(state, (&l_ss[0]) as u64, F_SYS_SERIAL)
+    put_field(state, (&l_bm[0]) as u64, F_BOARD_MANUF)
+    put_field(state, (&l_bp[0]) as u64, F_BOARD_PRODUCT)
+    put_field(state, (&l_bs[0]) as u64, F_BOARD_SERIAL)
+    put_hex(state, (&l_uu[0]) as u64, F_UUID, 16)
+    put_num((&l_uo[0]) as u64, sget(state, S_UUID_OK))
+    put_field(state, (&l_ns[0]) as u64, F_NVME_SERIAL)
+    put_field(state, (&l_nm[0]) as u64, F_NVME_MODEL)
+    put_num((&l_no[0]) as u64, sget(state, S_NVME_OK))
+    put_hex(state, (&l_mac[0]) as u64, F_MAC, 6)
+    put_num((&l_mo[0]) as u64, sget(state, S_MAC_OK))
+}
+
+// ------------------------------------------------- the counter-check (B)
+//
+// The EFI path above cannot be reached from a real boot of this kernel:
+// multiboot 1 hands over no EFI system table. Code that is never executed
+// is not a feature, it is a guess -- so this builds a system table BY
+// HAND in scratch memory, points its configuration table at the entry
+// point that the legacy scan already found, and lets `from_efi` walk it.
+//
+// What that proves and what it does not:
+//
+//   IT PROVES  the signature check, the walk over NumberOfTableEntries
+//              pairs of 24 octets, the GUID comparison in its mixed
+//              endian memory form, the rejection of a decoy entry, and
+//              that adopting through the EFI route yields the SAME entry
+//              point, the SAME table and the SAME strings as the scan.
+//   IT DOES NOT PROVE that a real UEFI firmware lays out its table this
+//              way. It proves this kernel reads the layout in the
+//              specification. The first real UEFI boot is still ahead,
+//              and it needs multiboot 2 in `boot.s` first.
+//
+// The scratch page is the NVMe identify buffer. That is safe HERE and
+// only here: `late` has already pulled the drive serial out of it before
+// this runs.
+
+const T_SYSTAB: u64 = 0x000 // the fake EFI system table
+const T_CFG: u64 = 0x200 // its configuration table
+
+fn efi_selftest(state: u64) {
+    var l_want: [u8; 20] = "hwidefi: scanned=\0\0\0"
+    var l_ok: [u8; 13] = "hwidefi: ok=\0"
+    var l_ent: [u8; 16] = "hwidefi: entry=\0"
+    var l_same: [u8; 15] = "hwidefi: same=\0"
+    var l_man: [u8; 18] = "hwidefi: sys_man=\0"
+    var l_nosig: [u8; 16] = "hwidefi: nosig=\0"
+    var l_zero: [u8; 15] = "hwidefi: zero=\0"
+    var l_decoy: [u8; 16] = "hwidefi: decoy=\0"
+    // eb9d2d31-2d88-11d3-9a16-0090273fc14d, in memory order
+    var g2: [u8; 16] = [0x31 as u8, 0x2d as u8, 0x9d as u8, 0xeb as u8,
+        0x88 as u8, 0x2d as u8, 0xd3 as u8, 0x11 as u8,
+        0x9a as u8, 0x16 as u8, 0x00 as u8, 0x90 as u8,
+        0x27 as u8, 0x3f as u8, 0xc1 as u8, 0x4d as u8]
+
+    let want: u64 = sget(state, S_ENTRY)
+    serial.puts((&l_want[0]) as u64)
+    serial.hex(want)
+    serial.nl()
+    if want == 0 {
+        return
+    }
+
+    let sc: u64 = ctrl_buffer(state)
+    var i: u64 = 0
+    while i < 0x400 {
+        kstate.set8(sc + i, 0 as u8)
+        i = i + 1
+    }
+    let st: u64 = sc + T_SYSTAB
+    let cfg: u64 = sc + T_CFG
+    // "IBI SYST", the eight octets of EFI_SYSTEM_TABLE_SIGNATURE.
+    __mmio_write64(st as *mut u64, 0x5453595320494249)
+    __mmio_write64((st + EFI_NTABLES) as *mut u64, 2)
+    __mmio_write64((st + EFI_CFGTAB) as *mut u64, cfg)
+    // Entry 0 is a DECOY: a GUID that is not one of the two, pointing at
+    // the system table itself. A walk that ignores the GUID would adopt
+    // it and fail; a walk that reads it steps over it.
+    i = 0
+    while i < 16 {
+        kstate.set8(cfg + i, 0xAA as u8)
+        i = i + 1
+    }
+    __mmio_write64((cfg + 16) as *mut u64, st)
+    // Entry 1 carries SMBIOS_TABLE_GUID and the real entry point.
+    i = 0
+    while i < 16 {
+        kstate.set8(cfg + EFI_CFG_STRIDE + i, kstate.get8((&g2[0]) as u64 + i) as u8)
+        i = i + 1
+    }
+    __mmio_write64((cfg + EFI_CFG_STRIDE + 16) as *mut u64, want)
+
+    // The two negative cases first, because they must not disturb what
+    // the positive one then reads.
+    var bad: u64 = 0
+    if from_efi(state, 0) {
+        bad = 1
+    }
+    serial.puts((&l_zero[0]) as u64)
+    serial.dec(1 - bad)
+    serial.nl()
+    // A pointer into the middle of the table has no signature there.
+    bad = 0
+    if from_efi(state, st + 8) {
+        bad = 1
+    }
+    serial.puts((&l_nosig[0]) as u64)
+    serial.dec(1 - bad)
+    serial.nl()
+    // A table whose ONLY entry is the decoy must not yield anything.
+    __mmio_write64((st + EFI_NTABLES) as *mut u64, 1)
+    bad = 0
+    if from_efi(state, st) {
+        bad = 1
+    }
+    serial.puts((&l_decoy[0]) as u64)
+    serial.dec(1 - bad)
+    serial.nl()
+    __mmio_write64((st + EFI_NTABLES) as *mut u64, 2)
+
+    // And now the real one, from a cleared state.
+    sset(state, S_ENTRY, 0)
+    sset(state, S_OK, 0)
+    clear_field(state, F_SYS_MANUF)
+    var got: u64 = 0
+    if from_efi(state, st) {
+        got = 1
+    }
+    serial.puts((&l_ok[0]) as u64)
+    serial.dec(got)
+    serial.nl()
+    serial.puts((&l_ent[0]) as u64)
+    serial.hex(sget(state, S_ENTRY))
+    serial.nl()
+    serial.puts((&l_same[0]) as u64)
+    if sget(state, S_ENTRY) == want {
+        serial.dec(1)
+    } else {
+        serial.dec(0)
+    }
+    serial.nl()
+    put_field(state, (&l_man[0]) as u64, F_SYS_MANUF)
+}
+
+// Called from `kernel_main` right after the network card is up. Reads
+// what can be read at that moment: SMBIOS (always) and the MAC address
+// (if there is a card). It does NOT print -- see `late`.
+fn stage(state: u64) {
+    find(state)
+}
+
+// Called from `kernel_main` AFTER `hw.disk`, which is where the NVMe
+// controller is set up. This is the first moment at which all three
+// sources can have answered, so this is where the report is written.
+//
+// WHY THE REPORT IS NOT IN `stage`: it used to be, and the measurement
+// caught it. With `-device nvme,serial=NVME-SER-4242` on the command line
+// the drive was plainly there, the driver plainly found it
+// (`nvme: blocks=16384`), and `hwid: nvme_ser` was EMPTY -- because
+// `hw.disk` runs one stage below `netsvc.stage`. The values were not
+// wrong, they were early.
+fn late(state: u64) {
+    refresh(state)
+    if (kstate.get(state, kstate.MODE) & kstate.M_HWID) != 0 {
+        dump(state)
+    }
+    if (kstate.get(state, kstate.MODE) & kstate.M_HWIDEFI) != 0 {
+        efi_selftest(state)
+    }
+}
