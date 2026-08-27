@@ -24,7 +24,11 @@ import sys
 HIER = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(HIER), "k15"))
 sys.path.insert(0, HIER)
-import symbol as symmod  # noqa: E402
+# ROUND MERGE: round rename-en renamed tools/k15/symbol.py to icon.py.
+# A python import names the module without its extension, so nothing
+# that looks like a path had to change and nothing did -- this line
+# raised ModuleNotFoundError and took the whole icon check with it.
+import icon as symmod  # noqa: E402
 import icons as iconmod  # noqa: E402
 
 ROLLE_NAME = {v: k for k, v in symmod.ROLLEN.items()}

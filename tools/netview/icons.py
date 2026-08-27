@@ -52,7 +52,11 @@ import sys
 HIER = os.path.dirname(os.path.abspath(__file__))
 WURZEL = os.path.dirname(HIER)
 sys.path.insert(0, os.path.join(WURZEL, "k15"))
-import symbol as symmod  # noqa: E402
+# ROUND MERGE: round rename-en renamed tools/k15/symbol.py to icon.py.
+# A python import names the module without its extension, so nothing
+# that looks like a path had to change and nothing did -- this line
+# raised ModuleNotFoundError and took the whole icon check with it.
+import icon as symmod  # noqa: E402
 
 QUELLE = os.path.join(WURZEL, "..", "assets", "netview")
 
@@ -259,7 +263,13 @@ def masse():
 
 # ------------------------------------------------------------ das Erzeugen
 
-KOPF = """// kernel/netmark.fi -- ERZEUGT AUS assets/netview/mark-*.txt.
+# ROUND MERGE: der Kopf traegt die SPDX-Zeile MIT. Runde INVENTORY
+# setzt eine Kopfzeile in jede Quelldatei; `kernel/netmark.fi` ist
+# erzeugt, also muss der Erzeuger sie schreiben, sonst weicht die
+# Datei im Baum von der frisch gebauten ab und dieser Laeufer faellt
+# durch -- genau so ist es passiert.
+KOPF = """// SPDX-License-Identifier: GPL-2.0-only
+// kernel/netmark.fi -- ERZEUGT AUS assets/netview/mark-*.txt.
 //
 // NICHT VON HAND AENDERN. `tools/netview/icons.py kern` schreibt diese
 // Datei, und `tools/netview/run.sh` baut sie im Abnahmelauf noch einmal
