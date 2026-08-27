@@ -1,0 +1,179 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/chacha.fi -- round TRESOR: ChaCha20 (RFC 8439), the stream
+// cipher the backup encrypts with.
+//
+// WHY THIS AND NOT AES. This tree HAS an AES: `vendor/firn/lib/std/crypto/
+// aes.fi`. Its own header says what it is -- "A4 NO GCM, NO
+// AUTHENTICATION" -- and it offers CBC and CFB8. Confidentiality without
+// authentication is how padding oracles are born, and a backup is the
+// worst possible place to learn that lesson: an attacker who can flip
+// octets in a ciphertext you will later RESTORE ONTO A RUNNING SYSTEM is
+// not a theoretical attacker.
+//
+// So the cipher here is a STREAM cipher and the authentication is
+// EXPLICIT and separate: encrypt with ChaCha20, then MAC the ciphertext
+// with HMAC-SHA256 (`kernel/user/bsec.fi`). Encrypt-then-MAC. That is the
+// composition with a proof behind it, and both halves already exist in
+// this tree in a form that has been measured against a second
+// implementation.
+//
+// WHY NOT WAIT FOR POLY1305. Round TUNNEL is building ChaCha20-Poly1305,
+// and when it lands it is the better answer -- one pass, a 128 bit tag,
+// no separate key schedule. It is not here TODAY. HMAC-SHA256 over the
+// ciphertext gives the same security property (existential unforgeability
+// of the whole message) at a worse speed, on top of a SHA-256 that this
+// round already checked digit by digit against Python's `hashlib`. When
+// TUNNEL lands, the change is in `bsec.fi` and nowhere else; the stored
+// format carries a version octet so old snapshots keep opening.
+//
+// ================================================== WHAT IT IS EXACTLY
+//
+// RFC 8439 section 2.4. A 32 octet key, a 12 octet nonce, a 32 bit block
+// counter; each block of the keystream is 64 octets, so one counter value
+// covers 64 octets and the counter must not wrap (2^32 blocks = 256 GiB
+// per nonce, and nothing here comes near it).
+//
+// EVERY ARITHMETIC IS MASKED TO 32 BIT, for the same reason `sha.fi` says
+// so: Firn's integers are 64 bit here and ChaCha20 is a 32 bit algorithm.
+// A single missing `& M32` gives a cipher that is stable, looks random,
+// and agrees with nothing in the world. That is why this file is not
+// trusted but MEASURED: `tools/tresor/run.sh` runs the two test vectors
+// of RFC 8439 (section 2.3.2, the keystream block, and section 2.4.2, the
+// encryption of the "Ladies and Gentlemen" plaintext) through THIS code
+// and compares them against the octets printed in the RFC itself.
+//
+// ==================================================== THE NONCE RULE
+//
+// A stream cipher is a one-time pad with a short seed, and the whole of
+// its security rests on ONE condition: THE SAME KEY AND THE SAME NONCE
+// ARE NEVER USED FOR TWO DIFFERENT PLAINTEXTS. Break it and an attacker
+// XORs the two ciphertexts and the key drops out entirely.
+//
+// This file cannot enforce that -- the caller picks the nonce. What
+// `bsec.fi` does about it is written down there and it is not "we hope":
+// every block is encrypted under a key DERIVED FROM ITS OWN CONTENT, so
+// two blocks with the same key are literally the same plaintext, and the
+// pad is reused on a message it already encrypted. That is the one case
+// where reuse is harmless, and it is the case that makes deduplication
+// survive encryption.
+
+profile kernel
+
+import ulib
+
+export { block, xor, KEYLEN, NONCELEN, BLOCKLEN }
+
+const KEYLEN: u64 = 32
+const NONCELEN: u64 = 12
+const BLOCKLEN: u64 = 64
+const M32: u64 = 0xFFFFFFFF
+
+static mut st: [u64; 16] = [0 as u64; 16]
+static mut x: [u64; 16] = [0 as u64; 16]
+static mut ks: [u8; 64] = [0 as u8; 64]
+
+fn rotl(v: u64, n: u64) -> u64 {
+    return (((v & M32) << n) | ((v & M32) >> (32 - n))) & M32
+}
+
+// The quarter round of RFC 8439 section 2.1, on the working state.
+fn qr(a: u64, b: u64, c: u64, d: u64) {
+    x[a as usize] = (x[a as usize] + x[b as usize]) & M32
+    x[d as usize] = rotl(x[d as usize] ^ x[a as usize], 16)
+    x[c as usize] = (x[c as usize] + x[d as usize]) & M32
+    x[b as usize] = rotl(x[b as usize] ^ x[c as usize], 12)
+    x[a as usize] = (x[a as usize] + x[b as usize]) & M32
+    x[d as usize] = rotl(x[d as usize] ^ x[a as usize], 8)
+    x[c as usize] = (x[c as usize] + x[d as usize]) & M32
+    x[b as usize] = rotl(x[b as usize] ^ x[c as usize], 7)
+}
+
+// Four octets at `p`, LITTLE endian -- ChaCha20 is little endian
+// throughout, which is the one place it differs in feel from SHA-256 in
+// the file next door.
+fn le32(p: u64) -> u64 {
+    return ((*((p + 0) as *mut u8)) as u64)
+        | (((*((p + 1) as *mut u8)) as u64) << 8)
+        | (((*((p + 2) as *mut u8)) as u64) << 16)
+        | (((*((p + 3) as *mut u8)) as u64) << 24)
+}
+
+fn put_le32(p: u64, v: u64) {
+    __mmio_write8((p + 0) as *mut u8, (v & 255) as u8)
+    __mmio_write8((p + 1) as *mut u8, ((v >> 8) & 255) as u8)
+    __mmio_write8((p + 2) as *mut u8, ((v >> 16) & 255) as u8)
+    __mmio_write8((p + 3) as *mut u8, ((v >> 24) & 255) as u8)
+}
+
+fn setup(key: u64, nonce: u64, counter: u64) {
+    // "expand 32-byte k", the constant of RFC 8439 section 2.3, as four
+    // little endian words. It is written as numbers and not as a string
+    // so that no compiler's idea of string layout can move it.
+    st[0] = 0x61707865
+    st[1] = 0x3320646E
+    st[2] = 0x79622D32
+    st[3] = 0x6B206574
+    var i: u64 = 0
+    while i < 8 {
+        st[(4 + i) as usize] = le32(key + i * 4)
+        i = i + 1
+    }
+    st[12] = counter & M32
+    st[13] = le32(nonce + 0)
+    st[14] = le32(nonce + 4)
+    st[15] = le32(nonce + 8)
+}
+
+// ONE keystream block of 64 octets, into `out`. Public because the test
+// runs the RFC's section 2.3.2 vector straight through it.
+fn block(key: u64, nonce: u64, counter: u64, out: u64) {
+    setup(key, nonce, counter)
+    var i: u64 = 0
+    while i < 16 {
+        x[i as usize] = st[i as usize]
+        i = i + 1
+    }
+    var r: u64 = 0
+    while r < 10 {
+        // the column round
+        qr(0, 4, 8, 12)
+        qr(1, 5, 9, 13)
+        qr(2, 6, 10, 14)
+        qr(3, 7, 11, 15)
+        // the diagonal round
+        qr(0, 5, 10, 15)
+        qr(1, 6, 11, 12)
+        qr(2, 7, 8, 13)
+        qr(3, 4, 9, 14)
+        r = r + 1
+    }
+    i = 0
+    while i < 16 {
+        put_le32(out + i * 4, (x[i as usize] + st[i as usize]) & M32)
+        i = i + 1
+    }
+}
+
+// XORs `n` octets at `buf` with the keystream, IN PLACE, starting at
+// block number `counter`. Encryption and decryption are the same call --
+// that is what a stream cipher is.
+fn xor(key: u64, nonce: u64, counter: u64, buf: u64, n: u64) {
+    var done: u64 = 0
+    var ctr: u64 = counter
+    while done < n {
+        block(key, nonce, ctr, (&ks[0]) as u64)
+        var i: u64 = 0
+        var lim: u64 = n - done
+        if lim > BLOCKLEN {
+            lim = BLOCKLEN
+        }
+        while i < lim {
+            let c: u64 = (*((buf + done + i) as *mut u8)) as u64
+            __mmio_write8((buf + done + i) as *mut u8,
+                (c ^ (ks[i as usize] as u64)) as u8)
+            i = i + 1
+        }
+        done = done + lim
+        ctr = ctr + 1
+    }
+}

@@ -1,0 +1,612 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/bsec.fi -- round TRESOR: WHAT A BACKUP IS ALLOWED TO CARRY,
+// and under which of two independent secrets.
+//
+// The owner's objection, 27.08.2026, and it is correct:
+//
+//     "If I make a backup and install it somewhere else, no passwords and
+//      no account may travel with it -- if somebody gets the backup, your
+//      whole account is gone."
+//
+// A backup stick is an OBJECT. Objects are lost. Whatever is on it has to
+// be assumable-compromised.
+//
+// THE WRONG ANSWER IS "THEN DO NOT BACK UP SECRETS AT ALL". A disk dies
+// far more often than a stick is stolen, and a person whose password
+// vault was not in the backup has lost every account they own, which is
+// the very outcome the objection is about. Leaving secrets out trades a
+// rare loud failure for a common quiet one.
+//
+// THE ANSWER IS TWO LAYERS UNDER TWO SEPARATE SECRETS.
+//
+// ================================================ THE THREE CLASSES
+//
+// Every path in the backup set falls into exactly one of three classes,
+// and the classification is IN THIS PROGRAM and not in a file on the
+// stick -- a policy an attacker can edit is not a policy.
+//
+//   (a) ORDINARY DATA -- documents, pictures, settings, the PLAN,
+//       `config/`, `state/`. Backed up normally. Encrypted too, IF the
+//       owner chose a store password; the octets are private either way
+//       and the choice is offered rather than assumed.
+//
+//   (b) SECRETS -- the password vault, saved logins, the private keys of
+//       VPN profiles, payment data. They MAY travel, but ONLY sealed
+//       under a MASTER PASSWORD that is never in the backup and cannot be
+//       derived from anything in it. Whoever finds the stick holds an
+//       unusable lump. THEY ARE LEFT OUT BY DEFAULT; carrying them is a
+//       deliberate act with the password typed again.
+//
+//   (c) THINGS THAT NEVER TRAVEL -- the device key, the machine identity,
+//       session tokens, TPM-bound keys. These are re-created on the
+//       target machine. Three reasons, and each alone is enough:
+//         * a TPM-bound key CANNOT travel -- it never leaves the chip;
+//         * a session token is a claim that THIS machine is logged in,
+//           and copying it is exactly the theft being defended against;
+//         * the device key of the disk encryption is what makes CRYPTO
+//           ERASE work (docs/CRYPTO-ERASE.md). A copy of it in a backup
+//           defeats the erase: destroy the key on the machine and the
+//           stick still has it. This one is not a leak, it is a
+//           CONTRADICTION with a feature already built this round.
+//
+// ============================================ WHY TWO SEPARATE SECRETS
+//
+// The store password protects (a). The master password protects (b).
+// They are independent on purpose: handing somebody the store password
+// so they can fetch a document must NOT hand them the vault. One
+// password over both would make "restore my photos" and "restore my
+// bank logins" the same act.
+//
+// ================================================ THE CONSTRUCTION
+//
+//     MK   = PBKDF2-HMAC-SHA256(password, salt, ITERS, 32)
+//     CONV = HMAC-SHA256(MK, "osum backup v1 convergence")
+//     ENC  = HMAC-SHA256(MK, "osum backup v1 blockkey")
+//     MAC  = HMAC-SHA256(MK, "osum backup v1 blockmac")
+//     CHK  = HMAC-SHA256(MK, "osum backup v1 check")
+//
+// and per block of plaintext P:
+//
+//     name = HMAC-SHA256(CONV, P)             the name in INDEX
+//     k    = HMAC-SHA256(ENC, name)           a ChaCha20 key, 32 octets
+//     C    = ChaCha20(k, nonce=0, ctr=0) XOR P
+//     tag  = HMAC-SHA256(MAC, name || C), first 16 octets
+//     PACK holds C || tag
+//
+// ENCRYPT-THEN-MAC, which is the composition with a proof behind it. The
+// tag covers the NAME as well as the ciphertext, so a block cannot be
+// swapped for another block of the same store.
+//
+// `CHK` goes in the store header. It is what lets a wrong password be
+// REFUSED IMMEDIATELY with a clear sentence, instead of the system
+// quietly restoring rubbish.
+//
+// ==================== THE HARD PART: ENCRYPTION KILLS DEDUPLICATION
+//
+// This whole store exists because identical blocks are stored once
+// (measured: the same file in three folders costs 8192 octets, not
+// 24576). Encrypt naively -- a random nonce per block -- and identical
+// plaintexts give different ciphertexts, the store never recognises a
+// repeat, and every one of those numbers collapses. Nobody says so out
+// loud; the backup just becomes three times bigger.
+//
+// THE USUAL ANSWER IS CONVERGENT ENCRYPTION: name and key both derived
+// from the plaintext hash, so identical plaintext gives identical
+// ciphertext and deduplication survives. IT IS REJECTED HERE, and the
+// reason is a real attack, not a purity argument:
+//
+//     CONFIRMATION OF A FILE. With pure convergent encryption anybody who
+//     holds the stick AND a candidate file can compute the name that file
+//     would have and look for it in INDEX. No password needed. So an
+//     encrypted backup would answer the question "does this person have
+//     THIS document" -- for any document the asker can guess or obtain.
+//     For a leaked dissident pamphlet or a specific medical form, that is
+//     the entire secret.
+//
+// WHAT IS BUILT INSTEAD IS KEYED CONVERGENT ENCRYPTION: the name is
+// HMAC-SHA256(CONV, P), and CONV comes from the password. Then:
+//
+//   * identical blocks WITHIN one store still land on the same name, so
+//     deduplication is untouched -- measured, section 13, and the numbers
+//     are the same as without encryption;
+//   * the confirmation attack fails, because computing the name of a
+//     candidate file needs CONV, which needs the password.
+//
+// THE PRICE, stated rather than hidden: deduplication no longer works
+// BETWEEN stores with different passwords. Two people cannot share one
+// deduplicated store. For a personal backup on a personal stick that
+// costs nothing; for a shared server it would, and that is the case where
+// this decision would have to be revisited.
+//
+// ================================================ THE NONCE IS ZERO
+//
+// It looks wrong and it is the point. A stream cipher dies if one key and
+// one nonce ever encrypt two DIFFERENT plaintexts. Here the key is a
+// function of the plaintext alone, so two blocks sharing a key are
+// literally the same octets -- the pad is only ever reused on the message
+// it already encrypted, which reveals what deduplication reveals anyway
+// and nothing more. A random nonce would not add security; it would
+// destroy the property above.
+//
+// ===================================================== HONEST
+//
+// B1 PBKDF2, NOT ARGON2ID. Today's guidance is Argon2id, and it is not
+//    here. Argon2id is MEMORY-HARD -- its point is to need tens of
+//    mebioctets of scratch space so that a graphics card, which has many
+//    weak cores and little memory per core, loses its advantage. This
+//    userland has NO ALLOCATOR: every buffer in it is a fixed static
+//    array. Argon2id is not a matter of writing the mixing function; it
+//    needs memory this ring cannot ask for yet. PBKDF2-HMAC-SHA256 is
+//    what SHA-256 in this tree can carry honestly, and it is NOT
+//    memory-hard: a cracker with a GPU is far better off against it.
+// B2 2048 ITERATIONS, the number `key.fi` and `pw.fi` use, for the reason
+//    given there: under software emulation the 600000 of today's guidance
+//    is minutes per unlock. The shape is right and the number is too
+//    small. It is in the header of every store, so it can be raised
+//    without invalidating what exists.
+// B3 THE PASSWORD COMES IN ON THE COMMAND LINE. `ps` can see it and a
+//    shell history keeps it. `key.fi` has the same hole. The fix is a
+//    prompt that reads from the terminal with echo off, which `pw.fi`
+//    already has as `read_pass`; wiring it through the file manager's
+//    dialog is the piece that is missing.
+// B4 THE SNAPSHOT TEXT IS NOT ENCRYPTED. Block CONTENT is. The list of
+//    PATHS, sizes and modes in `S-<name>` is readable on a found stick,
+//    so an encrypted backup still says WHAT you have, only not what is in
+//    it. This is measured in section 13 rather than hedged: the test
+//    greps a distinctive file name out of an encrypted store and finds
+//    it. The fix has a definite shape -- write `S-` as a stream of sealed
+//    4096-octet records through the same `seal`/`unseal` below -- and it
+//    touches every reader in `bstore.fi`, which is why it is named here
+//    instead of half-done.
+// B5 THE KEYS LIVE IN THE PROCESS, in ordinary static arrays. Same limit
+//    as `key.fi` K2: no keyring, no pinned pages.
+// B6 THE CLASSIFICATION IS BY PATH. A secret that a program writes
+//    somewhere unlisted is backed up in the clear. The table below is the
+//    complete list, it is in the program rather than on the stick, and a
+//    future policy file may only ever make it STRICTER.
+
+profile kernel
+
+import ulib
+import libc.io
+import libc.errno
+import sha
+import chacha
+
+export {
+    CLASS_PLAIN, CLASS_SECRET, CLASS_NEVER,
+    SET_STORE, SET_MASTER, SET_NONE,
+    TAGLEN, KEYLEN, SALTLEN, ITERS,
+    class_of, class_char, class_of_char,
+    set_up, forget, ready,
+    block_name, seal, unseal,
+    hmac, pbkdf2, to_hex, from_hex, salt_new,
+    check_of
+}
+
+const CLASS_PLAIN: u64 = 0
+const CLASS_SECRET: u64 = 1
+const CLASS_NEVER: u64 = 2
+
+const SET_STORE: u64 = 0
+const SET_MASTER: u64 = 1
+const SET_NONE: u64 = 2
+
+const KEYLEN: u64 = 32
+const SALTLEN: u64 = 16
+const TAGLEN: u64 = 16
+const ITERS: u64 = 2048
+const SYS_GETRANDOM: u64 = 318
+
+// Two key sets, side by side: 0 = the store password, 1 = the master
+// password. Each holds the four derived subkeys and a flag.
+static mut k_conv: [u8; 64] = [0 as u8; 64]
+static mut k_enc: [u8; 64] = [0 as u8; 64]
+static mut k_mac: [u8; 64] = [0 as u8; 64]
+static mut k_chk: [u8; 64] = [0 as u8; 64]
+static mut k_on: [u64; 2] = [0 as u64; 2]
+
+static mut ipadb: [u8; 64] = [0 as u8; 64]
+static mut opadb: [u8; 64] = [0 as u8; 64]
+static mut work: [u8; 128] = [0 as u8; 128]
+static mut nonce0: [u8; 12] = [0 as u8; 12]
+static mut bkey: [u8; 32] = [0 as u8; 32]
+static mut btag: [u8; 32] = [0 as u8; 32]
+static mut mbuf: [u8; 4200] = [0 as u8; 4200]
+
+// ------------------------------------------------------------ HMAC-SHA256
+
+// HMAC-SHA256 (RFC 2104) on the streaming SHA-256 of `sha.fi`. Streaming
+// matters here: the message is a 4096 octet block, so the two-buffer form
+// `key.fi` uses (which copies the message into a 128 octet array) cannot
+// be reused and would silently truncate if it were.
+fn hmac(key: u64, klen: u64, msg: u64, mlen: u64, out: u64) {
+    var i: u64 = 0
+    while i < 64 {
+        ipadb[i as usize] = 0 as u8
+        opadb[i as usize] = 0 as u8
+        i = i + 1
+    }
+    if klen > 64 {
+        sha.hash(key, klen, (&ipadb[0]) as u64)
+        i = 0
+        while i < 32 {
+            opadb[i as usize] = ipadb[i as usize]
+            i = i + 1
+        }
+    } else {
+        i = 0
+        while i < klen {
+            ipadb[i as usize] = *((key + i) as *mut u8)
+            opadb[i as usize] = ipadb[i as usize]
+            i = i + 1
+        }
+    }
+    i = 0
+    while i < 64 {
+        let b: u64 = ipadb[i as usize] as u64
+        ipadb[i as usize] = (b ^ 0x36) as u8
+        opadb[i as usize] = (b ^ 0x5C) as u8
+        i = i + 1
+    }
+    var inner: [u8; 32] = [0 as u8; 32]
+    sha.begin()
+    sha.update((&ipadb[0]) as u64, 64)
+    sha.update(msg, mlen)
+    sha.finish((&inner[0]) as u64)
+    sha.begin()
+    sha.update((&opadb[0]) as u64, 64)
+    sha.update((&inner[0]) as u64, 32)
+    sha.finish(out)
+}
+
+// PBKDF2-HMAC-SHA256 (RFC 2898), one 32 octet block, which is all this
+// file wants. More would only add code that nothing measures.
+fn pbkdf2(pw: u64, plen: u64, salt: u64, slen: u64, iters: u64, out: u64) -> bool {
+    if slen > 64 {
+        return false
+    }
+    var first: [u8; 80] = [0 as u8; 80]
+    var u: [u8; 32] = [0 as u8; 32]
+    var acc: [u8; 32] = [0 as u8; 32]
+    var i: u64 = 0
+    while i < slen {
+        first[i as usize] = *((salt + i) as *mut u8)
+        i = i + 1
+    }
+    first[slen as usize] = 0 as u8
+    first[(slen + 1) as usize] = 0 as u8
+    first[(slen + 2) as usize] = 0 as u8
+    first[(slen + 3) as usize] = 1 as u8
+    hmac(pw, plen, (&first[0]) as u64, slen + 4, (&u[0]) as u64)
+    i = 0
+    while i < 32 {
+        acc[i as usize] = u[i as usize]
+        i = i + 1
+    }
+    var r: u64 = 1
+    while r < iters {
+        hmac(pw, plen, (&u[0]) as u64, 32, (&u[0]) as u64)
+        i = 0
+        while i < 32 {
+            acc[i as usize] = (acc[i as usize] as u64 ^ (u[i as usize] as u64)) as u8
+            i = i + 1
+        }
+        r = r + 1
+    }
+    i = 0
+    while i < 32 {
+        __mmio_write8((out + i) as *mut u8, acc[i as usize])
+        i = i + 1
+    }
+    return true
+}
+
+// --------------------------------------------------------- the classes
+
+fn same(p: u64, q: u64) -> bool {
+    return ulib.streq(p, q)
+}
+
+// `p` is `b` itself, or something inside it. Written this way rather than
+// as a prefix test on "/device/" so that THE DIRECTORY ITSELF is caught
+// too: a class (c) folder must not even appear as an empty folder in the
+// snapshot, and a prefix test would let its name through. It also stops
+// `/devices/public` from matching `/device`, which a sloppy prefix test
+// would not.
+fn under(p: u64, b: u64) -> bool {
+    var i: u64 = 0
+    while *((b + i) as *mut u8) != 0 as u8 {
+        if *((p + i) as *mut u8) != *((b + i) as *mut u8) {
+            return false
+        }
+        i = i + 1
+    }
+    let c: u64 = (*((p + i) as *mut u8)) as u64
+    return c == 0 || c == 47
+}
+
+// THE TABLE. `p` is the path RELATIVE to the backup set root and starts
+// with `/`. The longest match wins, which is why `/state/session/` can be
+// NEVER while `/state/` around it is ordinary.
+//
+//   NEVER   /device/           device key, machine identity, TPM handles
+//           /state/session/    session tokens -- "this machine is logged in"
+//           /etc/machine-id    the identity a reinstall must not inherit
+//   SECRET  /secrets/          the password vault and everything like it
+//           /etc/shadow        password hashes: slow to crack, not safe
+//           /config/vpn/keys/  the private halves of VPN profiles
+//   PLAIN   everything else
+fn class_of(p: u64) -> u64 {
+    var d_dev: [u8; 8] = "/device\0"
+    var d_ses: [u8; 15] = "/state/session\0"
+    var f_mid: [u8; 16] = "/etc/machine-id\0"
+    var d_sec: [u8; 9] = "/secrets\0"
+    var f_sha: [u8; 12] = "/etc/shadow\0"
+    var d_vpn: [u8; 17] = "/config/vpn/keys\0"
+
+    if under(p, (&d_dev[0]) as u64) {
+        return CLASS_NEVER
+    }
+    if under(p, (&d_ses[0]) as u64) {
+        return CLASS_NEVER
+    }
+    if same(p, (&f_mid[0]) as u64) {
+        return CLASS_NEVER
+    }
+    if under(p, (&d_sec[0]) as u64) {
+        return CLASS_SECRET
+    }
+    if same(p, (&f_sha[0]) as u64) {
+        return CLASS_SECRET
+    }
+    if under(p, (&d_vpn[0]) as u64) {
+        return CLASS_SECRET
+    }
+    return CLASS_PLAIN
+}
+
+// One letter for the snapshot line, and it is a letter and not a number
+// so that a person reading `S-...` with `cat` can see it.
+fn class_char(c: u64) -> u64 {
+    if c == CLASS_SECRET {
+        return 115 // 's'
+    }
+    if c == CLASS_NEVER {
+        return 110 // 'n'
+    }
+    return 100 // 'd', for data
+}
+
+// The other way, for reading a snapshot back.
+fn class_of_char(c: u64) -> u64 {
+    if c == 115 {
+        return CLASS_SECRET
+    }
+    if c == 110 {
+        return CLASS_NEVER
+    }
+    return CLASS_PLAIN
+}
+
+// ---------------------------------------------------------- the key sets
+
+fn sub(mk: u64, label: u64, llen: u64, out: u64) {
+    hmac(mk, KEYLEN, label, llen, out)
+}
+
+// Derives one key set from a password and a salt. `check_of` afterwards
+// gives the 32 octets that belong in the store header, and comparing
+// those is how a wrong password is caught before anything is written.
+fn set_up(which: u64, pw: u64, plen: u64, salt: u64) -> bool {
+    var l_conv: [u8; 27] = "osum backup v1 convergence\0"
+    var l_enc: [u8; 24] = "osum backup v1 blockkey\0"
+    var l_mac: [u8; 24] = "osum backup v1 blockmac\0"
+    var l_chk: [u8; 21] = "osum backup v1 check\0"
+    var mk: [u8; 32] = [0 as u8; 32]
+
+    if which > 1 {
+        return false
+    }
+    if !pbkdf2(pw, plen, salt, SALTLEN, ITERS, (&mk[0]) as u64) {
+        return false
+    }
+    let b: u64 = which * 32
+    sub((&mk[0]) as u64, (&l_conv[0]) as u64, 26, (&k_conv[0]) as u64 + b)
+    sub((&mk[0]) as u64, (&l_enc[0]) as u64, 23, (&k_enc[0]) as u64 + b)
+    sub((&mk[0]) as u64, (&l_mac[0]) as u64, 23, (&k_mac[0]) as u64 + b)
+    sub((&mk[0]) as u64, (&l_chk[0]) as u64, 20, (&k_chk[0]) as u64 + b)
+    // The master key itself is not kept. Everything below uses only the
+    // four subkeys, so there is one fewer thing in memory to leak.
+    var i: u64 = 0
+    while i < 32 {
+        mk[i as usize] = 0 as u8
+        i = i + 1
+    }
+    k_on[which as usize] = 1
+    return true
+}
+
+fn forget(which: u64) {
+    if which > 1 {
+        return
+    }
+    let b: u64 = which * 32
+    var i: u64 = 0
+    while i < 32 {
+        k_conv[(b + i) as usize] = 0 as u8
+        k_enc[(b + i) as usize] = 0 as u8
+        k_mac[(b + i) as usize] = 0 as u8
+        k_chk[(b + i) as usize] = 0 as u8
+        i = i + 1
+    }
+    k_on[which as usize] = 0
+}
+
+fn ready(which: u64) -> bool {
+    if which > 1 {
+        return false
+    }
+    return k_on[which as usize] != 0
+}
+
+// The 32 octets that go into the store header as `check`.
+fn check_of(which: u64, out: u64) {
+    let b: u64 = which * 32
+    var i: u64 = 0
+    while i < 32 {
+        __mmio_write8((out + i) as *mut u8, k_chk[(b + i) as usize])
+        i = i + 1
+    }
+}
+
+// ------------------------------------------------------- the block layer
+
+// The name of a block: keyed convergent, so the same octets in the same
+// store get the same name (deduplication lives) and nobody without the
+// password can compute the name of a file they guess (the confirmation
+// attack dies).
+fn block_name(which: u64, p: u64, n: u64, out: u64) {
+    if which == SET_NONE {
+        sha.hash(p, n, out)
+        return
+    }
+    hmac((&k_conv[0]) as u64 + which * 32, KEYLEN, p, n, out)
+}
+
+// Encrypts `n` octets at `buf` IN PLACE and appends the 16 octet tag.
+// Returns the stored length, or 0 if the key set is not open.
+// The caller must have room for n + TAGLEN.
+fn seal(which: u64, buf: u64, n: u64, name: u64) -> u64 {
+    if which == SET_NONE {
+        return n
+    }
+    if !ready(which) {
+        return 0
+    }
+    let b: u64 = which * 32
+    // The block key is a function of the NAME, which is a function of the
+    // plaintext -- one key per distinct plaintext, which is what makes a
+    // zero nonce sound. See the header.
+    hmac((&k_enc[0]) as u64 + b, KEYLEN, name, 32, (&bkey[0]) as u64)
+    chacha.xor((&bkey[0]) as u64, (&nonce0[0]) as u64, 0, buf, n)
+    // ENCRYPT THEN MAC, over the name AND the ciphertext, so a block
+    // cannot be swapped for a different block of the same store.
+    if n + 32 > 4200 {
+        return 0
+    }
+    var i: u64 = 0
+    while i < 32 {
+        mbuf[i as usize] = *((name + i) as *mut u8)
+        i = i + 1
+    }
+    i = 0
+    while i < n {
+        mbuf[(32 + i) as usize] = *((buf + i) as *mut u8)
+        i = i + 1
+    }
+    hmac((&k_mac[0]) as u64 + b, KEYLEN, (&mbuf[0]) as u64, 32 + n,
+        (&btag[0]) as u64)
+    i = 0
+    while i < TAGLEN {
+        __mmio_write8((buf + n + i) as *mut u8, btag[i as usize])
+        i = i + 1
+    }
+    return n + TAGLEN
+}
+
+// The other way. `n` is the STORED length; returns the plaintext length,
+// or 0 when the tag does not match -- which is the only honest answer to
+// "somebody changed the stick".
+fn unseal(which: u64, buf: u64, n: u64, name: u64) -> u64 {
+    if which == SET_NONE {
+        return n
+    }
+    if !ready(which) {
+        return 0
+    }
+    if n < TAGLEN {
+        return 0
+    }
+    let plen: u64 = n - TAGLEN
+    let b: u64 = which * 32
+    if plen + 32 > 4200 {
+        return 0
+    }
+    var i: u64 = 0
+    while i < 32 {
+        mbuf[i as usize] = *((name + i) as *mut u8)
+        i = i + 1
+    }
+    i = 0
+    while i < plen {
+        mbuf[(32 + i) as usize] = *((buf + i) as *mut u8)
+        i = i + 1
+    }
+    hmac((&k_mac[0]) as u64 + b, KEYLEN, (&mbuf[0]) as u64, 32 + plen,
+        (&btag[0]) as u64)
+    // CHECK THE TAG BEFORE DECRYPTING. Decrypt-then-check is how padding
+    // oracles happen; here it would also hand `restore` octets to write
+    // before anything vouched for them.
+    i = 0
+    while i < TAGLEN {
+        if btag[i as usize] != *((buf + plen + i) as *mut u8) {
+            return 0
+        }
+        i = i + 1
+    }
+    hmac((&k_enc[0]) as u64 + b, KEYLEN, name, 32, (&bkey[0]) as u64)
+    chacha.xor((&bkey[0]) as u64, (&nonce0[0]) as u64, 0, buf, plen)
+    return plen
+}
+
+// ------------------------------------------------------------- odds
+
+fn hexch(v: u64) -> u64 {
+    if v < 10 {
+        return v + 48
+    }
+    return v + 87
+}
+
+fn unhexc(c: u64) -> u64 {
+    if c >= 48 && c <= 57 {
+        return c - 48
+    }
+    if c >= 97 && c <= 102 {
+        return c - 87
+    }
+    return 16
+}
+
+fn to_hex(src: u64, n: u64, out: u64) {
+    var i: u64 = 0
+    while i < n {
+        let c: u64 = (*((src + i) as *mut u8)) as u64
+        __mmio_write8((out + i * 2) as *mut u8, hexch((c >> 4) & 15) as u8)
+        __mmio_write8((out + i * 2 + 1) as *mut u8, hexch(c & 15) as u8)
+        i = i + 1
+    }
+    __mmio_write8((out + n * 2) as *mut u8, 0 as u8)
+}
+
+fn from_hex(src: u64, n: u64, out: u64) -> bool {
+    var i: u64 = 0
+    while i < n {
+        let a: u64 = unhexc((*((src + i * 2) as *mut u8)) as u64)
+        let b: u64 = unhexc((*((src + i * 2 + 1) as *mut u8)) as u64)
+        if a > 15 || b > 15 {
+            return false
+        }
+        __mmio_write8((out + i) as *mut u8, ((a << 4) | b) as u8)
+        i = i + 1
+    }
+    return true
+}
+
+// A fresh salt. NEVER reused: the same salt with the same password gives
+// the same keys, and the whole point of a salt is that two stores with
+// one password do not share a key.
+fn salt_new(out: u64) -> bool {
+    return !ulib.bad(ulib.sys(SYS_GETRANDOM, out, SALTLEN, 0))
+}

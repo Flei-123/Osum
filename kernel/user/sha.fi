@@ -1,31 +1,59 @@
-// kernel/user/sha.fi -- RUNDE INSTALL: SHA-256 UEBER BELIEBIG VIELE
-// OKTETTE, in Ring 3.
+// kernel/user/sha.fi -- SHA-256 for programs in ring 3, over any length.
 //
-// WARUM ES DIESE DATEI GIBT, obwohl `kernel/user/pw.fi` seit Runde K13
-// SHA-256 hat: die Fassung dort sagt in ihrer zweiten Zeile
-// `if len > 256 { return false }`. Sie kopiert die ganze Nachricht in
-// einen festen Puffer von 320 Oktetten, und das reicht genau fuer das,
-// wofuer sie gebaut wurde -- HMAC ueber ein Passwort. Ein Paket ist
-// zweihunderttausend Oktette gross.
+// MERGE (Runden INSTALL und TRESOR): ZWEI RUNDEN HABEN DIESE DATEI
+// UNABHAENGIG VONEINANDER ANGELEGT, mit demselben Grund (`pw.fi` hat
+// SHA-256, aber mit `if len > 256 { return false }`) und mit zwei
+// Schnittstellen: INSTALL eine einschuessige (`sha256`, `hex_eq`,
+// `hexval`), TRESOR eine stroemende (`begin`/`update`/`finish`).
+// GEBLIEBEN IST TRESORS RECHNUNG -- sie ist die allgemeinere, sie
+// braucht keinen Puffer von der Groesse der Nachricht, und `shat.fi`
+// misst sie gegen Pythons `hashlib`. INSTALLs Namen stehen als
+// Aufsatz darauf, damit `opk.fi` unveraendert bleibt; die Rechnung
+// steht nur EINMAL da.
 //
-// DIE RECHNUNG IST DIESELBE, und das ist wichtig: dieselben acht
-// Anfangswoerter, dieselbe Tabelle, derselbe Rundenkoerper wie in
-// `pw.fi`. Was anders ist, ist NUR, woher die Oktette kommen -- hier
-// aus einem Zeiger statt aus einer Kopie, und die Fuellung wird am Ende
-// in einem Puffer von 128 Oktetten gebaut statt hinter der ganzen
-// Nachricht. Die Gegenprobe steht im Laeufer: derselbe Text durch beide
-// Umsetzungen muss dieselben zweiunddreissig Oktette ergeben, und
-// zusaetzlich dieselben wie `sha256sum` auf dem Wirt.
+// WHY A SECOND ONE. `kernel/user/pw.fi` already has SHA-256, and it is
+// measured against Python's `hashlib` (round K13). It also has a hard
+// limit: `if len > 256 { return false }`. That was the right shape for
+// what it does -- a password and a 64 octet HMAC pad never come close --
+// but this round hashes FILE CONTENT in chunks of four kibioctets, and a
+// hash function that refuses its input is not a hash function.
+//
+// So: the same algorithm (FIPS 180-4), written as a STREAM. `begin`,
+// `update` as often as you like, `finish`. The one-shot `hash` is the
+// same three calls behind one name.
+//
+// THE STATE IS A MODULE VARIABLE and not a caller-supplied context. That
+// is a real restriction -- two interleaved hashes would tread on each
+// other -- and it is deliberate: this userland has no allocator, and
+// every user of this module (`hwid`, `backup`) hashes one thing at a time
+// from start to finish. `begin` resets everything, so the restriction is
+// visible at the call site rather than hidden.
+//
+// EVERY ARITHMETIC IS MASKED TO 32 BIT. Firn's integers here are 64 bit;
+// SHA-256 is a 32 bit algorithm. A single missing `& M32` produces a hash
+// that is stable, looks random, and agrees with nothing in the world --
+// which is why this file is not trusted but MEASURED: `tools/tresor/run.sh`
+// runs the standard vectors of FIPS 180-4 ("abc", the empty string, the
+// 448 bit message) plus a 4096 octet block through this code AND through
+// the host's `hashlib`, and compares the hex digit by digit.
 
 profile kernel
 
-export { sha256, hex_out, hex_eq, hexval }
+import ulib
 
+export { begin, update, finish, hash, hex_out, equal, DIGEST, BLOCK,
+    sha256, hexval, hex_eq }
+
+const DIGEST: u64 = 32
+const BLOCK: u64 = 64
 const M32: u64 = 0xFFFFFFFF
 
 static mut kt: [u64; 64] = [0 as u64; 64]
 static mut kt_ready: u64 = 0
-static mut tail: [u8; 128] = [0 as u8; 128]
+static mut hv: [u64; 8] = [0 as u64; 8]
+static mut buf: [u8; 64] = [0 as u8; 64]
+static mut have: u64 = 0 // octets sitting in `buf`
+static mut total: u64 = 0 // octets fed in altogether
 
 fn ktab() {
     if kt_ready != 0 {
@@ -99,21 +127,18 @@ fn ktab() {
 }
 
 fn rotr(x: u64, n: u64) -> u64 {
-    let v: u64 = x & M32
-    return ((v >> n) | (v << (32 - n))) & M32
+    return (((x & M32) >> n) | ((x & M32) << (32 - n))) & M32
 }
 
-fn g8(p: u64) -> u64 {
-    return (*((p) as *mut u8)) as u64
-}
-
-// Ein Block von 64 Oktetten AUS EINEM ZEIGER in den Zustand.
-fn block(h: u64, p: u64) {
+// One compression over the sixty-four octets in `buf`.
+fn compress() {
     var w: [u64; 64] = [0 as u64; 64]
     var i: u64 = 0
     while i < 16 {
-        w[i as usize] = (g8(p + i * 4) << 24) | (g8(p + i * 4 + 1) << 16)
-            | (g8(p + i * 4 + 2) << 8) | g8(p + i * 4 + 3)
+        w[i as usize] = ((buf[(i * 4) as usize] as u64) << 24)
+            | ((buf[(i * 4 + 1) as usize] as u64) << 16)
+            | ((buf[(i * 4 + 2) as usize] as u64) << 8)
+            | (buf[(i * 4 + 3) as usize] as u64)
         i = i + 1
     }
     while i < 64 {
@@ -125,14 +150,14 @@ fn block(h: u64, p: u64) {
             + s1) & M32
         i = i + 1
     }
-    var a: u64 = *((h) as *mut u64)
-    var b: u64 = *((h + 8) as *mut u64)
-    var c: u64 = *((h + 16) as *mut u64)
-    var d: u64 = *((h + 24) as *mut u64)
-    var e: u64 = *((h + 32) as *mut u64)
-    var f: u64 = *((h + 40) as *mut u64)
-    var g: u64 = *((h + 48) as *mut u64)
-    var hh: u64 = *((h + 56) as *mut u64)
+    var a: u64 = hv[0]
+    var b: u64 = hv[1]
+    var c: u64 = hv[2]
+    var d: u64 = hv[3]
+    var e: u64 = hv[4]
+    var f: u64 = hv[5]
+    var g: u64 = hv[6]
+    var hh: u64 = hv[7]
     var t: u64 = 0
     while t < 64 {
         let S1: u64 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25)
@@ -151,86 +176,124 @@ fn block(h: u64, p: u64) {
         a = (t1 + t2) & M32
         t = t + 1
     }
-    __mmio_write64((h) as *mut u64, (*((h) as *mut u64) + a) & M32)
-    __mmio_write64((h + 8) as *mut u64, (*((h + 8) as *mut u64) + b) & M32)
-    __mmio_write64((h + 16) as *mut u64, (*((h + 16) as *mut u64) + c) & M32)
-    __mmio_write64((h + 24) as *mut u64, (*((h + 24) as *mut u64) + d) & M32)
-    __mmio_write64((h + 32) as *mut u64, (*((h + 32) as *mut u64) + e) & M32)
-    __mmio_write64((h + 40) as *mut u64, (*((h + 40) as *mut u64) + f) & M32)
-    __mmio_write64((h + 48) as *mut u64, (*((h + 48) as *mut u64) + g) & M32)
-    __mmio_write64((h + 56) as *mut u64, (*((h + 56) as *mut u64) + hh) & M32)
+    hv[0] = (hv[0] + a) & M32
+    hv[1] = (hv[1] + b) & M32
+    hv[2] = (hv[2] + c) & M32
+    hv[3] = (hv[3] + d) & M32
+    hv[4] = (hv[4] + e) & M32
+    hv[5] = (hv[5] + f) & M32
+    hv[6] = (hv[6] + g) & M32
+    hv[7] = (hv[7] + hh) & M32
 }
 
-// SHA-256 ueber `len` Oktette ab `p`, 32 Oktette nach `out`.
-fn sha256(p: u64, len: u64, out: u64) -> bool {
+fn begin() {
     ktab()
-    var h: [u64; 8] = [0 as u64; 8]
-    h[0] = 0x6a09e667
-    h[1] = 0xbb67ae85
-    h[2] = 0x3c6ef372
-    h[3] = 0xa54ff53a
-    h[4] = 0x510e527f
-    h[5] = 0x9b05688c
-    h[6] = 0x1f83d9ab
-    h[7] = 0x5be0cd19
-    let hp: u64 = (&h[0]) as u64
-    // Die vollen Bloecke unmittelbar aus der Nachricht.
-    var at: u64 = 0
-    while at + 64 <= len {
-        block(hp, p + at)
-        at = at + 64
-    }
-    // Der Rest, die Eins, die Nullen und die Laenge in Bits -- ein oder
-    // zwei Bloecke, je nachdem ob die acht Oktette der Laenge noch in
-    // den angefangenen Block passen.
-    let rest: u64 = len - at
+    hv[0] = 0x6a09e667
+    hv[1] = 0xbb67ae85
+    hv[2] = 0x3c6ef372
+    hv[3] = 0xa54ff53a
+    hv[4] = 0x510e527f
+    hv[5] = 0x9b05688c
+    hv[6] = 0x1f83d9ab
+    hv[7] = 0x5be0cd19
+    have = 0
+    total = 0
+}
+
+fn update(p: u64, n: u64) {
     var i: u64 = 0
-    while i < 128 {
-        tail[i as usize] = 0 as u8
+    while i < n {
+        buf[have as usize] = *((p + i) as *mut u8)
+        have = have + 1
+        if have == BLOCK {
+            compress()
+            have = 0
+        }
         i = i + 1
     }
-    i = 0
-    while i < rest {
-        tail[i as usize] = *((p + at + i) as *mut u8)
+    total = total + n
+}
+
+// The padding of FIPS 180-4: one bit set, zeros, and the LENGTH IN BITS
+// as a 64 bit big-endian number. The length is the length of the whole
+// message, not of the last block -- getting that wrong gives a hash that
+// is right for short inputs and wrong for long ones, which is the worst
+// kind of wrong.
+fn finish(out: u64) {
+    let bits: u64 = total * 8
+    buf[have as usize] = 0x80 as u8
+    have = have + 1
+    if have > 56 {
+        while have < BLOCK {
+            buf[have as usize] = 0 as u8
+            have = have + 1
+        }
+        compress()
+        have = 0
+    }
+    while have < 56 {
+        buf[have as usize] = 0 as u8
+        have = have + 1
+    }
+    var i: u64 = 0
+    while i < 8 {
+        buf[(56 + i) as usize] = ((bits >> ((7 - i) * 8)) & 255) as u8
         i = i + 1
     }
-    tail[rest as usize] = 0x80 as u8
-    var total: u64 = 64
-    if rest + 9 > 64 {
-        total = 128
-    }
-    let bits: u64 = len * 8
+    compress()
     i = 0
     while i < 8 {
-        tail[(total - 1 - i) as usize] = ((bits >> (i * 8)) & 255) as u8
-        i = i + 1
-    }
-    block(hp, (&tail[0]) as u64)
-    if total == 128 {
-        block(hp, (&tail[64]) as u64)
-    }
-    i = 0
-    while i < 8 {
-        let v: u64 = h[i as usize]
+        let v: u64 = hv[i as usize]
         __mmio_write8((out + i * 4) as *mut u8, ((v >> 24) & 255) as u8)
         __mmio_write8((out + i * 4 + 1) as *mut u8, ((v >> 16) & 255) as u8)
         __mmio_write8((out + i * 4 + 2) as *mut u8, ((v >> 8) & 255) as u8)
         __mmio_write8((out + i * 4 + 3) as *mut u8, (v & 255) as u8)
         i = i + 1
     }
-    return true
 }
 
-fn hex_out(p: u64, n: u64, out: u64) {
-    var d: [u8; 17] = "0123456789abcdef\0"
+fn hash(p: u64, n: u64, out: u64) {
+    begin()
+    update(p, n)
+    finish(out)
+}
+
+// Thirty-two octets as sixty-four lower-case hex digits, NUL terminated.
+// MERGE: die DREI-Argument-Fassung der Runde INSTALL. TRESOR hatte
+// zwei und rechnete immer ueber DIGEST; `n` macht dieselbe Funktion
+// auch fuer kuerzere Felder brauchbar, und die Aufrufer von TRESOR
+// geben jetzt `sha.DIGEST` mit.
+fn hex_out(dig: u64, n: u64, out: u64) {
+    var tab: [u8; 17] = "0123456789abcdef\0"
     var i: u64 = 0
     while i < n {
-        let v: u64 = (*((p + i) as *mut u8)) as u64
-        __mmio_write8((out + i * 2) as *mut u8, d[((v >> 4) & 15) as usize])
-        __mmio_write8((out + i * 2 + 1) as *mut u8, d[(v & 15) as usize])
+        let c: u64 = (*((dig + i) as *mut u8)) as u64
+        __mmio_write8((out + i * 2) as *mut u8, tab[((c >> 4) & 15) as usize])
+        __mmio_write8((out + i * 2 + 1) as *mut u8, tab[(c & 15) as usize])
         i = i + 1
     }
     __mmio_write8((out + n * 2) as *mut u8, 0 as u8)
+}
+
+fn equal(a: u64, b: u64) -> bool {
+    var i: u64 = 0
+    while i < DIGEST {
+        if *((a + i) as *mut u8) != *((b + i) as *mut u8) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+// ---------------------------------------------------------- RUNDE INSTALL
+//
+// Die einschuessige Fassung und die zwei Hilfsmittel um Hexziffern. Die
+// Rechnung dahinter ist die von oben; hier steht nur die Schnittstelle,
+// die `opk.fi` seit der Runde INSTALL benutzt.
+fn sha256(p: u64, len: u64, out: u64) -> bool {
+    hash(p, len, out)
+    return true
 }
 
 fn hexval(c: u64) -> u64 {
@@ -246,7 +309,6 @@ fn hexval(c: u64) -> u64 {
     return 16
 }
 
-// Die ersten `n` Hexziffern zweier Zeichenketten vergleichen.
 fn hex_eq(a: u64, b: u64, n: u64) -> bool {
     var i: u64 = 0
     while i < n {
