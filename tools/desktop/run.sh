@@ -458,21 +458,23 @@ conf bottom 28 104 0 1 > "$TMPD/conf-set"
 run set-probe "$TMPD/conf-set" "einst" "$TMPD/mon-probe" || true
 P="$TMPD/set-probe.txt"
 rect() { # name field -> value
-    # THE WHOLE RECORD OR NOTHING -- see tools/look/run.sh for the same
-    # guard. Two records merged onto one line by the shared serial port
-    # would otherwise hand back the x of one and the y of the next.
+    # ONE RECORD OR NOTHING, and the record carries `ax`/`ay`: where the
+    # widget really is on the screen. Two records merged onto one line by
+    # the shared serial port would otherwise hand back the x of one and
+    # the y of the next, and needing a SECOND record (`name=win`) to do
+    # the arithmetic doubles the chance that one of them is cut in half.
     grep -a 'settings: rect name=' "$P" \
-        | grep -oE "name=$1 x=[0-9]+ y=[0-9]+ w=[0-9]+ h=[0-9]+" \
+        | grep -oE "name=$1 x=[0-9]+ y=[0-9]+ w=[0-9]+ h=[0-9]+ ax=[0-9]+ ay=[0-9]+" \
         | tail -1 | grep -oE " $2=[0-9]+" | grep -oE '[0-9]+'
 }
-WX=$(rect win x);  WY=$(rect win y)
-EX=$(rect edge x); EY=$(rect edge y); EW=$(rect edge w); EH=$(rect edge h)
-AX=$(rect apply x); AY=$(rect apply y); AW=$(rect apply w); AH=$(rect apply h)
-if [ -z "$WX" ] || [ -z "$EX" ] || [ -z "$AX" ]; then
+WH=$(rect win h)
+EAX=$(rect edge ax); EAY=$(rect edge ay); EW=$(rect edge w); EH=$(rect edge h)
+BAX=$(rect apply ax); BAY=$(rect apply ay); AW=$(rect apply w); AH=$(rect apply h)
+if [ -z "$WH" ] || [ -z "$EAX" ] || [ -z "$BAX" ]; then
     bad "the settings did not report their geometry -- no clicks can be computed"
     grep -a 'settings: rect' "$P" | sed 's/^/        /' | head -8
 else
-    ok "the settings report where their taskbar widgets are (win $WX,$WY  edge $EX,$EY  apply $AX,$AY)"
+    ok "the settings report where their taskbar widgets are (edge $EAX,$EAY  apply $BAX,$BAY)"
     # A WIDGET OUTSIDE ITS WINDOW IS DRAWN NOWHERE, NOT DRAWN WRONG.
     #
     # `wlib` lays a widget out at the position the box gives it and does
@@ -485,7 +487,6 @@ else
     #
     # The inner height of a window is its height minus the border and
     # the title bar the server draws (2 + 22).
-    WH=$(rect win h)
     INNER=$((WH - 24))
     OVER=0
     while read -r nm ry rh; do
@@ -500,10 +501,9 @@ else
              | sort -u)
     num "every reported widget is INSIDE its window (a widget outside it cannot be clicked)" \
         "$OVER" eq 0
-    IX=$((WX + 2)); IY=$((WY + 22))
-    CX=$((IX + EX + EW / 2)); CY=$((IY + EY + EH / 2))
+    CX=$((EAX + EW / 2)); CY=$((EAY + EH / 2))
     # the menu opens at the chooser's own x and directly under it
-    MX=$((IX + EX)); MY=$((IY + EY + EH))
+    MX=$EAX; MY=$((EAY + EH))
     # The row height of a drop-down is `zeilen_hoehe() + 2`, and
     # `zeilen_hoehe()` is the `row` token the program prints when it
     # starts. Read it, do not assume it: it is 20 under `classic` and
@@ -518,7 +518,7 @@ else
     RH=$((RH + 2))
     # row 3 is "right": bottom, top, left, right
     RX=$((MX + 20)); RY=$((MY + 3 * RH + RH / 2))
-    BX=$((IX + AX + AW / 2)); BY=$((IY + AY + AH / 2))
+    BX=$((BAX + AW / 2)); BY=$((BAY + AH / 2))
     python3 - "$CX" "$CY" "$RX" "$RY" "$BX" "$BY" > "$TMPD/mon-set" <<'PYEOF'
 import sys
 def go(x, y):
