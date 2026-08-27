@@ -25,7 +25,7 @@ Verwendung:
 import sys
 
 sys.path.insert(0, __file__.rsplit("/", 1)[0])
-import symbol as symmod  # noqa: E402
+import icon as symmod  # noqa: E402
 
 
 def ppm(pfad):
