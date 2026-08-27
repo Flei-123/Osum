@@ -1,0 +1,2911 @@
+// kernel/tile.fi -- Runde TILING: DER FENSTERBAUM.
+//
+// Bis hierher schwebten die Fenster frei. Runde K10 gab ihnen eine
+// Stapelreihenfolge, einen Eingabefokus und eine Bereichsverfolgung;
+// wohin ein Fenster gelegt wird, entschied der, der es anlegte. Das ist
+// der Zustand, den jedes Fenstersystem am Anfang hat, und es ist der
+// Zustand, in dem man mit acht Fenstern nicht arbeiten kann.
+//
+// WARUM EIN BAUM UND KEINE VORLAGEN. Windows 11 hat "Snap Layouts":
+// eine Handvoll fester Bilder -- zwei Haelften, drei Spalten, vier
+// Viertel -- und wer ein fuenftes Fenster hat, faellt aus dem Schema.
+// Die Vorlage ist eine Aufzaehlung, und eine Aufzaehlung hat ein Ende.
+// i3, sway und bspwm machen es umgekehrt: sie fuehren einen BAUM.
+// Blaetter sind Fenster, innere Knoten sind Aufteilungen, und jede
+// Anordnung, die man malen kann, ist ein Baum -- die zwei Haelften und
+// die vier Viertel sind Sonderfaelle davon und keine eigene Bauart.
+// Genau das ist hier gebaut: die Windows-artige Schnellablage
+// (`snap`, weiter unten) ist ein Aufruf, der einen bestimmten Baum
+// HERSTELLT, und nicht ein zweites System daneben.
+//
+// WAS VON WEM UEBERNOMMEN IST, und was nicht, steht in docs/TILING.md.
+// Die kurze Fassung: die CONTAINER-MODI (`split`, `tabbed`, `stacked`)
+// und der n-aere Baum sind von i3/sway; das DREHEN, das SPIEGELN und
+// das AUSBALANCIEREN sind von bspwm; die automatische Teilungsrichtung
+// nach dem Seitenverhaeltnis ist bspwms `automatic scheme`.
+//
+// WO ES LIEGT UND WARUM HIER. Der Fensterserver dieses Systems laeuft
+// im Kernel (`kernel/wm.fi` sagt im Kopf, warum: es fehlt geteilter
+// Speicher zwischen Prozessen). Die Layout-RECHNUNG gehoert deshalb
+// neben ihn. Sie steht in einer EIGENEN Datei und nicht in `wm.fi`,
+// weil sie von Fenstern nichts weiss: dieses Modul kennt Rechtecke,
+// Knoten und eine Zahl je Blatt (`client`). Wer diese Zahl deutet, ist
+// `wm.fi`. Damit laesst sich der Baum gegen sich selbst pruefen, ohne
+// dass ein Bildschirm da ist -- und genau das tut der Zufallstest mit
+// zehntausend Operationen.
+//
+// DIE BEDIENUNG GEHOERT NICHT HIERHER. Menue, Einstellungen und die
+// Ausgabe der Tastenbelegung stehen in Ring 3 (`kernel/user/tiling.fi`).
+// Was hier steht, ist die TABELLE der Belegung und ihr Leser -- Daten,
+// keine Oberflaeche -- und die Datei, aus der sie kommt, liegt unter
+// /users/<name>/config/tiling.conf und nicht im Quelltext.
+//
+// KEINE REKURSION. Alle Durchlaeufe dieses Moduls sind schleifend, ueber
+// `dfs_next`/`dfs_skip` (Vorordnung ohne Stapel, ueber die Elternzeiger).
+// Der Grund ist gemessen und steht in `kernel/sys.fi`: der Kernstapel
+// ist 16 KiB gross und war in Runde K13 bis auf 112 Oktette voll. Ein
+// Baum aus 48 Blaettern kann 48 tief werden -- eine rekursive Neurechnung
+// des Layouts waere ein Stapelueberlauf, der wie ein Fehler im
+// Fensterserver aussieht.
+//
+// DIE ARITHMETIK. Verhaeltnisse sind KEINE Bildpunkte, sondern Anteile
+// in FRAC_ONE-Schritten. FRAC_ONE ist 720720 und das ist keine Laune:
+// 720720 = 2^4*3^2*5*7*11*13 ist durch JEDE Zahl von 1 bis 16 teilbar,
+// also ist "alle Kinder gleich gross" fuer bis zu sechzehn Kinder eine
+// EXAKTE Aufteilung und keine gerundete. Beim Umrechnen in Bildpunkte
+// bekommt das LETZTE Kind den Rest (`end = total` statt gerechnet) --
+// damit ist die Summe der Kinder exakt der Elternknoten, in jedem Fall,
+// ohne Luecke und ohne Ueberlappung. Das ist die Zusage, die der
+// Zufallstest nach jeder einzelnen Operation nachrechnet.
+
+profile kernel
+
+import kstate
+
+export {
+    init, ready, root, nodes, leaves, focus, set_focus, focus_client,
+    area_x, area_y, area_w, area_h, set_area,
+    relayout, relayouts, check, checks, violations,
+    insert, insert_at, remove, detach, attach_at, node_of_client,
+    n_x, n_y, n_w, n_h, n_kind, n_layout, n_dir, n_parent, n_client,
+    n_active, n_first, n_next, n_used, n_frac, n_children,
+    visible, depth_of, first_leaf, dfs_next, dfs_skip,
+    set_layout, toggle_dir, set_dir, resize_at, balance, rotate, mirror,
+    dir_search, move_dir, snap, bar_of, tab_x, tab_y, tab_w, tab_h,
+    set_next_split, next_split,
+    bind_reset, bind_parse, bind_count, bind_key, bind_mods,
+    bind_action, bind_name, bind_lookup, action_of, key_of,
+    fuzz, last_x, last_y, last_w, last_h, set_nosub, nosub,
+    inserts, removes, ops, peak, splits, collapses,
+    selftest, selftest_max,
+    NONE, MAX_NODES, MAX_LEAVES, NODE_BYTES, FRAC_ONE, MIN_FRAC, BAR_H,
+    K_LEAF, K_BOX, LAY_SPLIT, LAY_TABBED, LAY_STACKED, DIR_H, DIR_V,
+    D_LEFT, D_RIGHT, D_UP, D_DOWN,
+    SNAP_LEFT, SNAP_RIGHT, SNAP_TOP, SNAP_BOTTOM,
+    SNAP_TL, SNAP_TR, SNAP_BL, SNAP_BR,
+    MAX_BINDS, MOD_ALT, MOD_SHIFT, MOD_CTRL,
+    KEY_LEFT, KEY_RIGHT, KEY_UP, KEY_DOWN,
+    A_NONE, A_FOCUS_LEFT, A_FOCUS_RIGHT, A_FOCUS_UP, A_FOCUS_DOWN,
+    A_MOVE_LEFT, A_MOVE_RIGHT, A_MOVE_UP, A_MOVE_DOWN,
+    A_SPLIT_H, A_SPLIT_V, A_LAYOUT_SPLIT, A_LAYOUT_TABBED,
+    A_LAYOUT_STACKED, A_ROTATE, A_MIRROR, A_BALANCE, A_FLOAT, A_CLOSE,
+    A_GROW, A_SHRINK, A_SNAP_LEFT, A_SNAP_RIGHT, A_SNAP_TOP,
+    A_SNAP_BOTTOM, A_SNAP_TL, A_SNAP_TR, A_SNAP_BL, A_SNAP_BR,
+    A_TILE_TOGGLE, A_MAX
+}
+
+// ------------------------------------------------------- die Zahlen
+
+const NODE_BYTES: u64 = 128
+const MAX_NODES: u64 = 96
+// EIN BAUM MIT N BLAETTERN HAT HOECHSTENS 2N-1 KNOTEN -- jeder innere
+// Knoten hat mindestens zwei Kinder, sonst faellt er beim Schliessen
+// sofort zusammen. 96 Knoten tragen also 48 Blaetter, und das 49.
+// Fenster bekommt eine ABSAGE statt eines stillen Ueberlaufs.
+const MAX_LEAVES: u64 = 48
+const NONE: u64 = 255 // kein Knoten. Absichtlich nicht MAX_NODES: eine
+// Zahl, die auch nach einem Rechenfehler kein gueltiger Platz ist.
+
+const N_OFF: u64 = 0x200 // die Knotentafel, Versatz in kstate.TILE_OFF
+const BIND_OFF: u64 = 0x3200
+const BIND_BYTES: u64 = 64
+const MAX_BINDS: u64 = 56
+
+const FRAC_ONE: u64 = 720720
+const MIN_FRAC: u64 = 36036 // FRAC_ONE / 20, die kleinste Spalte
+const BAR_H: u64 = 22 // eine Reiterzeile, so hoch wie wm.TITLE_H
+
+const K_LEAF: u64 = 0
+const K_BOX: u64 = 1
+
+const LAY_SPLIT: u64 = 0
+const LAY_TABBED: u64 = 1
+const LAY_STACKED: u64 = 2
+
+const DIR_H: u64 = 0 // Kinder nebeneinander, von links nach rechts
+const DIR_V: u64 = 1 // Kinder untereinander, von oben nach unten
+
+const D_LEFT: u64 = 0
+const D_RIGHT: u64 = 1
+const D_UP: u64 = 2
+const D_DOWN: u64 = 3
+
+const SNAP_LEFT: u64 = 0
+const SNAP_RIGHT: u64 = 1
+const SNAP_TOP: u64 = 2
+const SNAP_BOTTOM: u64 = 3
+const SNAP_TL: u64 = 4
+const SNAP_TR: u64 = 5
+const SNAP_BL: u64 = 6
+const SNAP_BR: u64 = 7
+
+const MOD_ALT: u64 = 1
+const MOD_SHIFT: u64 = 2
+const MOD_CTRL: u64 = 4
+
+// Tasten, die kein Zeichen sind. Sie liegen ueber 0x80, damit sie mit
+// keinem Oktett der Tastaturtabelle zusammenfallen.
+const KEY_LEFT: u64 = 0x81
+const KEY_RIGHT: u64 = 0x82
+const KEY_UP: u64 = 0x83
+const KEY_DOWN: u64 = 0x84
+
+// die Handlungen. Die Nummern sind Teil der Schnittstelle nach Ring 3
+// und stehen genauso in `kernel/user/tiling.fi`.
+const A_NONE: u64 = 0
+const A_FOCUS_LEFT: u64 = 1
+const A_FOCUS_RIGHT: u64 = 2
+const A_FOCUS_UP: u64 = 3
+const A_FOCUS_DOWN: u64 = 4
+const A_MOVE_LEFT: u64 = 5
+const A_MOVE_RIGHT: u64 = 6
+const A_MOVE_UP: u64 = 7
+const A_MOVE_DOWN: u64 = 8
+const A_SPLIT_H: u64 = 9
+const A_SPLIT_V: u64 = 10
+const A_LAYOUT_SPLIT: u64 = 11
+const A_LAYOUT_TABBED: u64 = 12
+const A_LAYOUT_STACKED: u64 = 13
+const A_ROTATE: u64 = 14
+const A_MIRROR: u64 = 15
+const A_BALANCE: u64 = 16
+const A_FLOAT: u64 = 17
+const A_CLOSE: u64 = 18
+const A_GROW: u64 = 19
+const A_SHRINK: u64 = 20
+const A_SNAP_LEFT: u64 = 21
+const A_SNAP_RIGHT: u64 = 22
+const A_SNAP_TOP: u64 = 23
+const A_SNAP_BOTTOM: u64 = 24
+const A_SNAP_TL: u64 = 25
+const A_SNAP_TR: u64 = 26
+const A_SNAP_BL: u64 = 27
+const A_SNAP_BR: u64 = 28
+const A_TILE_TOGGLE: u64 = 29
+const A_MAX: u64 = 30
+
+// die Felder eines Knotens
+const N_USED: u64 = 0x00
+const N_PARENT: u64 = 0x08 // Knoten + 1, 0 = keiner (die Wurzel)
+const N_FIRST: u64 = 0x10 // erstes Kind + 1
+const N_LAST: u64 = 0x18
+const N_NEXT: u64 = 0x20 // naechstes Geschwister + 1
+const N_PREV: u64 = 0x28
+const N_KIND: u64 = 0x30
+const N_LAYOUT: u64 = 0x38
+const N_DIR: u64 = 0x40
+const N_FRAC: u64 = 0x48 // Anteil AM ELTERN, in FRAC_ONE-Schritten
+const N_CLIENT: u64 = 0x50 // Fenster + 1, 0 = ein Blatt ohne Fenster
+const N_X: u64 = 0x58
+const N_Y: u64 = 0x60
+const N_W: u64 = 0x68
+const N_H: u64 = 0x70
+const N_ACTIVE: u64 = 0x78 // bei tabbed/stacked: sichtbares Kind + 1
+
+// die Skalare
+const S_READY: u64 = 0x00
+const S_ROOT: u64 = 0x08 // Knoten + 1
+const S_USED: u64 = 0x10
+const S_LEAVES: u64 = 0x18
+const S_FOCUS: u64 = 0x20 // Blatt + 1
+const S_AX: u64 = 0x28
+const S_AY: u64 = 0x30
+const S_AW: u64 = 0x38
+const S_AH: u64 = 0x40
+const S_RELAYOUTS: u64 = 0x48
+const S_CHECKS: u64 = 0x50
+const S_VIOL: u64 = 0x58
+const S_INSERTS: u64 = 0x60
+const S_REMOVES: u64 = 0x68
+const S_OPS: u64 = 0x70
+const S_PEAK: u64 = 0x78
+const S_LAX: u64 = 0x80 // der Bereich der letzten Aenderung
+const S_LAY: u64 = 0x88
+const S_LAW: u64 = 0x90
+const S_LAH: u64 = 0x98
+const S_NOSUB: u64 = 0xA0 // GEGENPROBE: immer die ganze Flaeche melden
+const S_NEXTSPLIT: u64 = 0xA8 // 0 = nach Seitenverhaeltnis, 1 = H, 2 = V
+const S_BINDS: u64 = 0xB0
+const S_SEED: u64 = 0xB8
+const S_SPLITS: u64 = 0xC0
+const S_COLLAPSES: u64 = 0xC8
+
+// ------------------------------------------------------- die Zugriffe
+
+fn tg(state: u64, off: u64) -> u64 {
+    return kstate.get(state + kstate.TILE_OFF, off)
+}
+
+fn ts(state: u64, off: u64, v: u64) {
+    kstate.set(state + kstate.TILE_OFF, off, v)
+}
+
+fn ng(state: u64, n: u64, off: u64) -> u64 {
+    if n >= MAX_NODES {
+        return 0
+    }
+    return kstate.get(state + kstate.TILE_OFF, N_OFF + n * NODE_BYTES + off)
+}
+
+fn nset(state: u64, n: u64, off: u64, v: u64) {
+    if n >= MAX_NODES {
+        return
+    }
+    kstate.set(state + kstate.TILE_OFF, N_OFF + n * NODE_BYTES + off, v)
+}
+
+fn ready(state: u64) -> bool {
+    return tg(state, S_READY) != 0
+}
+
+fn root(state: u64) -> u64 {
+    let r: u64 = tg(state, S_ROOT)
+    if r == 0 {
+        return NONE
+    }
+    return r - 1
+}
+
+fn nodes(state: u64) -> u64 {
+    return tg(state, S_USED)
+}
+
+fn leaves(state: u64) -> u64 {
+    return tg(state, S_LEAVES)
+}
+
+fn focus(state: u64) -> u64 {
+    let f: u64 = tg(state, S_FOCUS)
+    if f == 0 {
+        return NONE
+    }
+    return f - 1
+}
+
+fn focus_client(state: u64) -> u64 {
+    let f: u64 = focus(state)
+    if f == NONE {
+        return 0
+    }
+    return ng(state, f, N_CLIENT)
+}
+
+fn area_x(state: u64) -> u64 {
+    return tg(state, S_AX)
+}
+
+fn area_y(state: u64) -> u64 {
+    return tg(state, S_AY)
+}
+
+fn area_w(state: u64) -> u64 {
+    return tg(state, S_AW)
+}
+
+fn area_h(state: u64) -> u64 {
+    return tg(state, S_AH)
+}
+
+fn relayouts(state: u64) -> u64 {
+    return tg(state, S_RELAYOUTS)
+}
+
+fn checks(state: u64) -> u64 {
+    return tg(state, S_CHECKS)
+}
+
+fn violations(state: u64) -> u64 {
+    return tg(state, S_VIOL)
+}
+
+fn inserts(state: u64) -> u64 {
+    return tg(state, S_INSERTS)
+}
+
+fn removes(state: u64) -> u64 {
+    return tg(state, S_REMOVES)
+}
+
+fn ops(state: u64) -> u64 {
+    return tg(state, S_OPS)
+}
+
+fn peak(state: u64) -> u64 {
+    return tg(state, S_PEAK)
+}
+
+fn splits(state: u64) -> u64 {
+    return tg(state, S_SPLITS)
+}
+
+fn collapses(state: u64) -> u64 {
+    return tg(state, S_COLLAPSES)
+}
+
+fn last_x(state: u64) -> u64 {
+    return tg(state, S_LAX)
+}
+
+fn last_y(state: u64) -> u64 {
+    return tg(state, S_LAY)
+}
+
+fn last_w(state: u64) -> u64 {
+    return tg(state, S_LAW)
+}
+
+fn last_h(state: u64) -> u64 {
+    return tg(state, S_LAH)
+}
+
+fn nosub(state: u64) -> bool {
+    return tg(state, S_NOSUB) != 0
+}
+
+fn set_nosub(state: u64, on: bool) {
+    if on {
+        ts(state, S_NOSUB, 1)
+    } else {
+        ts(state, S_NOSUB, 0)
+    }
+}
+
+fn next_split(state: u64) -> u64 {
+    return tg(state, S_NEXTSPLIT)
+}
+
+fn set_next_split(state: u64, v: u64) {
+    if v > 2 {
+        return
+    }
+    ts(state, S_NEXTSPLIT, v)
+}
+
+fn n_used(state: u64, n: u64) -> bool {
+    return ng(state, n, N_USED) != 0
+}
+
+fn n_x(state: u64, n: u64) -> u64 {
+    return ng(state, n, N_X)
+}
+
+fn n_y(state: u64, n: u64) -> u64 {
+    return ng(state, n, N_Y)
+}
+
+fn n_w(state: u64, n: u64) -> u64 {
+    return ng(state, n, N_W)
+}
+
+fn n_h(state: u64, n: u64) -> u64 {
+    return ng(state, n, N_H)
+}
+
+fn n_kind(state: u64, n: u64) -> u64 {
+    return ng(state, n, N_KIND)
+}
+
+fn n_layout(state: u64, n: u64) -> u64 {
+    return ng(state, n, N_LAYOUT)
+}
+
+fn n_dir(state: u64, n: u64) -> u64 {
+    return ng(state, n, N_DIR)
+}
+
+fn n_frac(state: u64, n: u64) -> u64 {
+    return ng(state, n, N_FRAC)
+}
+
+fn n_client(state: u64, n: u64) -> u64 {
+    return ng(state, n, N_CLIENT)
+}
+
+fn n_parent(state: u64, n: u64) -> u64 {
+    let p: u64 = ng(state, n, N_PARENT)
+    if p == 0 {
+        return NONE
+    }
+    return p - 1
+}
+
+fn n_first(state: u64, n: u64) -> u64 {
+    let c: u64 = ng(state, n, N_FIRST)
+    if c == 0 {
+        return NONE
+    }
+    return c - 1
+}
+
+fn n_next(state: u64, n: u64) -> u64 {
+    let c: u64 = ng(state, n, N_NEXT)
+    if c == 0 {
+        return NONE
+    }
+    return c - 1
+}
+
+fn n_prev(state: u64, n: u64) -> u64 {
+    let c: u64 = ng(state, n, N_PREV)
+    if c == 0 {
+        return NONE
+    }
+    return c - 1
+}
+
+fn n_last(state: u64, n: u64) -> u64 {
+    let c: u64 = ng(state, n, N_LAST)
+    if c == 0 {
+        return NONE
+    }
+    return c - 1
+}
+
+fn n_active(state: u64, n: u64) -> u64 {
+    let c: u64 = ng(state, n, N_ACTIVE)
+    if c == 0 {
+        return NONE
+    }
+    return c - 1
+}
+
+fn n_children(state: u64, n: u64) -> u64 {
+    var k: u64 = 0
+    var c: u64 = n_first(state, n)
+    while c != NONE && k <= MAX_NODES {
+        k = k + 1
+        c = n_next(state, c)
+    }
+    return k
+}
+
+// ------------------------------------------------------------- Start
+
+fn init(state: u64, x: u64, y: u64, w: u64, h: u64) -> bool {
+    if w == 0 || h == 0 {
+        return false
+    }
+    var i: u64 = 0
+    while i < MAX_NODES {
+        var o: u64 = 0
+        while o < NODE_BYTES {
+            nset(state, i, o, 0)
+            o = o + 8
+        }
+        i = i + 1
+    }
+    ts(state, S_ROOT, 0)
+    ts(state, S_USED, 0)
+    ts(state, S_LEAVES, 0)
+    ts(state, S_FOCUS, 0)
+    ts(state, S_AX, x)
+    ts(state, S_AY, y)
+    ts(state, S_AW, w)
+    ts(state, S_AH, h)
+    ts(state, S_RELAYOUTS, 0)
+    ts(state, S_CHECKS, 0)
+    ts(state, S_VIOL, 0)
+    ts(state, S_INSERTS, 0)
+    ts(state, S_REMOVES, 0)
+    ts(state, S_OPS, 0)
+    ts(state, S_PEAK, 0)
+    ts(state, S_NEXTSPLIT, 0)
+    ts(state, S_SPLITS, 0)
+    ts(state, S_COLLAPSES, 0)
+    ts(state, S_SEED, 0x2545F4914F6CDD1D)
+    mark(state, x, y, w, h)
+    ts(state, S_READY, 1)
+    return true
+}
+
+// DIE FLAECHE AENDERN -- der Weg, auf dem ein Wechsel der
+// Bildschirmaufloesung ueberlebt wird. Der Baum wird NEU AUSGEMESSEN und
+// nicht neu aufgebaut: Struktur, Verhaeltnisse und Modi bleiben, nur die
+// Bildpunkte darunter sind andere. Genau das verlangt die Runde DISPLAY,
+// die die Aufloesung zur Laufzeit umstellt.
+fn set_area(state: u64, x: u64, y: u64, w: u64, h: u64) -> bool {
+    if !ready(state) || w == 0 || h == 0 {
+        return false
+    }
+    ts(state, S_AX, x)
+    ts(state, S_AY, y)
+    ts(state, S_AW, w)
+    ts(state, S_AH, h)
+    relayout(state)
+    mark(state, x, y, w, h)
+    return true
+}
+
+fn mark(state: u64, x: u64, y: u64, w: u64, h: u64) {
+    if tg(state, S_NOSUB) != 0 {
+        ts(state, S_LAX, tg(state, S_AX))
+        ts(state, S_LAY, tg(state, S_AY))
+        ts(state, S_LAW, tg(state, S_AW))
+        ts(state, S_LAH, tg(state, S_AH))
+        return
+    }
+    ts(state, S_LAX, x)
+    ts(state, S_LAY, y)
+    ts(state, S_LAW, w)
+    ts(state, S_LAH, h)
+}
+
+fn mark_node(state: u64, n: u64) {
+    if n == NONE {
+        ts(state, S_LAW, 0)
+        ts(state, S_LAH, 0)
+        return
+    }
+    mark(state, n_x(state, n), n_y(state, n), n_w(state, n), n_h(state, n))
+}
+
+// -------------------------------------------------- Knoten holen/geben
+
+fn alloc(state: u64) -> u64 {
+    var i: u64 = 0
+    while i < MAX_NODES {
+        if ng(state, i, N_USED) == 0 {
+            var o: u64 = 0
+            while o < NODE_BYTES {
+                nset(state, i, o, 0)
+                o = o + 8
+            }
+            nset(state, i, N_USED, 1)
+            nset(state, i, N_FRAC, FRAC_ONE)
+            ts(state, S_USED, tg(state, S_USED) + 1)
+            if tg(state, S_USED) > tg(state, S_PEAK) {
+                ts(state, S_PEAK, tg(state, S_USED))
+            }
+            return i
+        }
+        i = i + 1
+    }
+    return NONE
+}
+
+fn release(state: u64, n: u64) {
+    if n >= MAX_NODES || ng(state, n, N_USED) == 0 {
+        return
+    }
+    if ng(state, n, N_KIND) == K_LEAF {
+        if tg(state, S_LEAVES) > 0 {
+            ts(state, S_LEAVES, tg(state, S_LEAVES) - 1)
+        }
+    }
+    nset(state, n, N_USED, 0)
+    if tg(state, S_USED) > 0 {
+        ts(state, S_USED, tg(state, S_USED) - 1)
+    }
+}
+
+fn free_nodes(state: u64) -> u64 {
+    return MAX_NODES - tg(state, S_USED)
+}
+
+// ------------------------------------------------- die Kinderlisten
+
+fn append(state: u64, p: u64, c: u64) {
+    nset(state, c, N_PARENT, p + 1)
+    nset(state, c, N_NEXT, 0)
+    let l: u64 = n_last(state, p)
+    if l == NONE {
+        nset(state, c, N_PREV, 0)
+        nset(state, p, N_FIRST, c + 1)
+    } else {
+        nset(state, c, N_PREV, l + 1)
+        nset(state, l, N_NEXT, c + 1)
+    }
+    nset(state, p, N_LAST, c + 1)
+    if n_active(state, p) == NONE {
+        nset(state, p, N_ACTIVE, c + 1)
+    }
+}
+
+// `c` VOR `at` einhaengen. `at` muss ein Kind von `p` sein.
+fn insert_before(state: u64, p: u64, c: u64, at: u64) {
+    nset(state, c, N_PARENT, p + 1)
+    let pv: u64 = n_prev(state, at)
+    nset(state, c, N_NEXT, at + 1)
+    nset(state, at, N_PREV, c + 1)
+    if pv == NONE {
+        nset(state, c, N_PREV, 0)
+        nset(state, p, N_FIRST, c + 1)
+    } else {
+        nset(state, c, N_PREV, pv + 1)
+        nset(state, pv, N_NEXT, c + 1)
+    }
+    if n_active(state, p) == NONE {
+        nset(state, p, N_ACTIVE, c + 1)
+    }
+}
+
+fn insert_after(state: u64, p: u64, c: u64, at: u64) {
+    let nx: u64 = n_next(state, at)
+    if nx == NONE {
+        append(state, p, c)
+        return
+    }
+    insert_before(state, p, c, nx)
+}
+
+fn unlink(state: u64, c: u64) {
+    let p: u64 = n_parent(state, c)
+    if p == NONE {
+        return
+    }
+    let pv: u64 = n_prev(state, c)
+    let nx: u64 = n_next(state, c)
+    if pv == NONE {
+        if nx == NONE {
+            nset(state, p, N_FIRST, 0)
+        } else {
+            nset(state, p, N_FIRST, nx + 1)
+        }
+    } else {
+        if nx == NONE {
+            nset(state, pv, N_NEXT, 0)
+        } else {
+            nset(state, pv, N_NEXT, nx + 1)
+        }
+    }
+    if nx == NONE {
+        if pv == NONE {
+            nset(state, p, N_LAST, 0)
+        } else {
+            nset(state, p, N_LAST, pv + 1)
+        }
+    } else {
+        if pv == NONE {
+            nset(state, nx, N_PREV, 0)
+        } else {
+            nset(state, nx, N_PREV, pv + 1)
+        }
+    }
+    if n_active(state, p) == c {
+        let f: u64 = n_first(state, p)
+        if f == NONE {
+            nset(state, p, N_ACTIVE, 0)
+        } else {
+            nset(state, p, N_ACTIVE, f + 1)
+        }
+    }
+    nset(state, c, N_PARENT, 0)
+    nset(state, c, N_NEXT, 0)
+    nset(state, c, N_PREV, 0)
+}
+
+// DIE ANTEILE EINES KNOTENS AUF FRAC_ONE ZIEHEN. Sie werden gebraucht,
+// sobald ein Kind dazukommt oder verschwindet -- ohne das waere die
+// Summe der Kinder nicht mehr der Elternknoten, und genau daraus
+// entstehen die Luecken, die es hier nicht geben darf. Das LETZTE Kind
+// bekommt den Rest; damit stimmt die Summe exakt, auch wenn die Division
+// es nicht tut.
+fn normalize(state: u64, p: u64) {
+    let k: u64 = n_children(state, p)
+    if k == 0 {
+        return
+    }
+    var sum: u64 = 0
+    var c: u64 = n_first(state, p)
+    while c != NONE {
+        sum = sum + ng(state, c, N_FRAC)
+        c = n_next(state, c)
+    }
+    var vergeben: u64 = 0
+    var i: u64 = 0
+    c = n_first(state, p)
+    while c != NONE {
+        i = i + 1
+        var f: u64 = 0
+        if i == k {
+            f = FRAC_ONE - vergeben
+        } else {
+            if sum == 0 {
+                f = FRAC_ONE / k
+            } else {
+                f = ng(state, c, N_FRAC) * FRAC_ONE / sum
+            }
+            if f < 1 {
+                f = 1
+            }
+            if vergeben + f > FRAC_ONE {
+                f = FRAC_ONE - vergeben
+            }
+            vergeben = vergeben + f
+        }
+        nset(state, c, N_FRAC, f)
+        c = n_next(state, c)
+    }
+}
+
+// --------------------------------------- der Durchlauf ohne Rekursion
+//
+// Vorordnung: erst der Knoten, dann seine Kinder. `dfs_next` geht zum
+// naechsten Knoten der Vorordnung INNERHALB des Teilbaums von `top`,
+// `dfs_skip` ueberspringt den Teilbaum von `n` (fuer Reiter, deren
+// Inhalt nicht sichtbar ist). Beide brauchen keinen Stapel -- der Weg
+// nach oben steht in den Elternzeigern.
+
+fn dfs_next(state: u64, n: u64, top: u64) -> u64 {
+    let f: u64 = n_first(state, n)
+    if f != NONE {
+        return f
+    }
+    return dfs_skip(state, n, top)
+}
+
+fn dfs_skip(state: u64, n: u64, top: u64) -> u64 {
+    var c: u64 = n
+    var guard: u64 = 0
+    while guard <= MAX_NODES {
+        if c == top || c == NONE {
+            return NONE
+        }
+        let nx: u64 = n_next(state, c)
+        if nx != NONE {
+            return nx
+        }
+        c = n_parent(state, c)
+        guard = guard + 1
+    }
+    return NONE
+}
+
+fn depth_of(state: u64, n: u64) -> u64 {
+    var d: u64 = 0
+    var c: u64 = n_parent(state, n)
+    while c != NONE && d <= MAX_NODES {
+        d = d + 1
+        c = n_parent(state, c)
+    }
+    return d
+}
+
+// Das erste Blatt eines Teilbaums, das WIRKLICH ZU SEHEN ist: bei
+// `split` das erste Kind, bei `tabbed`/`stacked` das aktive.
+fn first_leaf(state: u64, n: u64) -> u64 {
+    var c: u64 = n
+    var guard: u64 = 0
+    while guard <= MAX_NODES {
+        if c == NONE {
+            return NONE
+        }
+        if ng(state, c, N_KIND) == K_LEAF {
+            return c
+        }
+        if ng(state, c, N_LAYOUT) == LAY_SPLIT {
+            c = n_first(state, c)
+        } else {
+            let a: u64 = n_active(state, c)
+            if a == NONE {
+                c = n_first(state, c)
+            } else {
+                c = a
+            }
+        }
+        guard = guard + 1
+    }
+    return NONE
+}
+
+// Ist dieser Knoten sichtbar? Jeder Vorfahr, der Reiter oder Stapel ist,
+// muss den Weg dorthin als aktives Kind fuehren.
+fn visible(state: u64, n: u64) -> bool {
+    var c: u64 = n
+    var guard: u64 = 0
+    while guard <= MAX_NODES {
+        let p: u64 = n_parent(state, c)
+        if p == NONE {
+            return true
+        }
+        if ng(state, p, N_LAYOUT) != LAY_SPLIT {
+            if n_active(state, p) != c {
+                return false
+            }
+        }
+        c = p
+        guard = guard + 1
+    }
+    return false
+}
+
+fn set_focus(state: u64, n: u64) {
+    if n >= MAX_NODES || ng(state, n, N_USED) == 0 {
+        return
+    }
+    if ng(state, n, N_KIND) != K_LEAF {
+        let l: u64 = first_leaf(state, n)
+        if l == NONE {
+            return
+        }
+        ts(state, S_FOCUS, l + 1)
+        show(state, l)
+        return
+    }
+    ts(state, S_FOCUS, n + 1)
+    show(state, n)
+}
+
+// Diesen Knoten in allen Reiter-/Stapelcontainern ueber ihm nach vorn
+// holen. Ohne das kann der Fokus auf einem Fenster liegen, das hinter
+// einem Reiter steht -- man tippt in etwas, das man nicht sieht.
+fn show(state: u64, n: u64) {
+    var c: u64 = n
+    var guard: u64 = 0
+    while guard <= MAX_NODES {
+        let p: u64 = n_parent(state, c)
+        if p == NONE {
+            return
+        }
+        if ng(state, p, N_LAYOUT) != LAY_SPLIT {
+            nset(state, p, N_ACTIVE, c + 1)
+        }
+        c = p
+        guard = guard + 1
+    }
+}
+
+fn node_of_client(state: u64, client: u64) -> u64 {
+    if client == 0 {
+        return NONE
+    }
+    var i: u64 = 0
+    while i < MAX_NODES {
+        if ng(state, i, N_USED) != 0 && ng(state, i, N_KIND) == K_LEAF {
+            if ng(state, i, N_CLIENT) == client {
+                return i
+            }
+        }
+        i = i + 1
+    }
+    return NONE
+}
+
+// ------------------------------------------------- die Neuberechnung
+//
+// EIN DURCHLAUF IN VORORDNUNG, und jeder Container verteilt die
+// Rechtecke SEINER KINDER. Damit ist das Rechteck eines Knotens schon
+// gesetzt, wenn er selbst an die Reihe kommt -- und es braucht keinen
+// Stapel und keine Rekursion.
+
+fn bar_of(state: u64, n: u64) -> u64 {
+    if ng(state, n, N_KIND) == K_LEAF {
+        return 0
+    }
+    let lay: u64 = ng(state, n, N_LAYOUT)
+    if lay == LAY_SPLIT {
+        return 0
+    }
+    let k: u64 = n_children(state, n)
+    if k == 0 {
+        return 0
+    }
+    var rows: u64 = 1
+    if lay == LAY_STACKED {
+        rows = k
+    }
+    var bt: u64 = rows * BAR_H
+    let h: u64 = ng(state, n, N_H)
+    if bt > h {
+        bt = h
+    }
+    return bt
+}
+
+// Das Rechteck des i-ten Reiters (tabbed) beziehungsweise der i-ten
+// Titelzeile (stacked). Der LETZTE bekommt den Rest -- dieselbe Regel
+// wie bei den Anteilen, damit die Zeile bildpunktgenau aufgeht.
+fn tab_x(state: u64, n: u64, idx: u64) -> u64 {
+    let x: u64 = ng(state, n, N_X)
+    if ng(state, n, N_LAYOUT) == LAY_STACKED {
+        return x
+    }
+    let k: u64 = n_children(state, n)
+    if k == 0 {
+        return x
+    }
+    return x + ng(state, n, N_W) * idx / k
+}
+
+fn tab_w(state: u64, n: u64, idx: u64) -> u64 {
+    let w: u64 = ng(state, n, N_W)
+    if ng(state, n, N_LAYOUT) == LAY_STACKED {
+        return w
+    }
+    let k: u64 = n_children(state, n)
+    if k == 0 {
+        return w
+    }
+    if idx + 1 == k {
+        return w - w * idx / k
+    }
+    return w * (idx + 1) / k - w * idx / k
+}
+
+fn tab_y(state: u64, n: u64, idx: u64) -> u64 {
+    let y: u64 = ng(state, n, N_Y)
+    if ng(state, n, N_LAYOUT) != LAY_STACKED {
+        return y
+    }
+    let k: u64 = n_children(state, n)
+    if k == 0 {
+        return y
+    }
+    let bt: u64 = bar_of(state, n)
+    return y + bt * idx / k
+}
+
+fn tab_h(state: u64, n: u64, idx: u64) -> u64 {
+    let bt: u64 = bar_of(state, n)
+    if ng(state, n, N_LAYOUT) != LAY_STACKED {
+        return bt
+    }
+    let k: u64 = n_children(state, n)
+    if k == 0 {
+        return bt
+    }
+    if idx + 1 == k {
+        return bt - bt * idx / k
+    }
+    return bt * (idx + 1) / k - bt * idx / k
+}
+
+fn place(state: u64, n: u64, x: u64, y: u64, w: u64, h: u64) {
+    nset(state, n, N_X, x)
+    nset(state, n, N_Y, y)
+    nset(state, n, N_W, w)
+    nset(state, n, N_H, h)
+}
+
+fn spread(state: u64, n: u64) {
+    let k: u64 = n_children(state, n)
+    if k == 0 {
+        return
+    }
+    let x: u64 = ng(state, n, N_X)
+    let y: u64 = ng(state, n, N_Y)
+    let w: u64 = ng(state, n, N_W)
+    let h: u64 = ng(state, n, N_H)
+    let lay: u64 = ng(state, n, N_LAYOUT)
+    if lay != LAY_SPLIT {
+        let bt: u64 = bar_of(state, n)
+        var ch: u64 = 0
+        if h > bt {
+            ch = h - bt
+        }
+        var c: u64 = n_first(state, n)
+        while c != NONE {
+            place(state, c, x, y + bt, w, ch)
+            c = n_next(state, c)
+        }
+        return
+    }
+    let waag: bool = ng(state, n, N_DIR) == DIR_H
+    var total: u64 = h
+    if waag {
+        total = w
+    }
+    var acc: u64 = 0
+    var pos: u64 = 0
+    var i: u64 = 0
+    var c2: u64 = n_first(state, n)
+    while c2 != NONE {
+        i = i + 1
+        acc = acc + ng(state, c2, N_FRAC)
+        var end: u64 = total
+        if i < k {
+            end = total * acc / FRAC_ONE
+            if end > total {
+                end = total
+            }
+        }
+        if end < pos {
+            end = pos
+        }
+        let size: u64 = end - pos
+        if waag {
+            place(state, c2, x + pos, y, size, h)
+        } else {
+            place(state, c2, x, y + pos, w, size)
+        }
+        pos = end
+        c2 = n_next(state, c2)
+    }
+}
+
+fn relayout(state: u64) -> u64 {
+    let r: u64 = root(state)
+    ts(state, S_RELAYOUTS, tg(state, S_RELAYOUTS) + 1)
+    if r == NONE {
+        return 0
+    }
+    place(state, r, tg(state, S_AX), tg(state, S_AY), tg(state, S_AW),
+        tg(state, S_AH))
+    var n: u64 = r
+    var seen: u64 = 0
+    while n != NONE && seen <= MAX_NODES {
+        if ng(state, n, N_KIND) == K_BOX {
+            spread(state, n)
+        }
+        seen = seen + 1
+        n = dfs_next(state, n, r)
+    }
+    return seen
+}
+
+// ------------------------------------------------------ die Zusicherung
+//
+// NACH JEDER OPERATION MUSS DER BAUM DIE FLAECHE EXAKT KACHELN: keine
+// Luecke, keine Ueberlappung, die Summe der Kinder ist der Elternknoten.
+// Geprueft wird das ZWEIMAL und auf zwei verschiedenen Wegen, weil eine
+// Pruefung, die denselben Rechenweg nimmt wie die Sache, die sie prueft,
+// nichts prueft:
+//
+//   1. OERTLICH, an jedem Container: liegen die Kinder luecken- und
+//      ueberlappungsfrei aneinander, faengt das erste am Rand des
+//      Elternknotens an und hoert das letzte an seinem anderen Rand auf?
+//      Gilt das an jedem Container, dann kachelt der ganze Baum -- das
+//      ist Induktion ueber die Tiefe und braucht keine Liste von
+//      Rechtecken.
+//   2. UEBER DIE FLAECHE: die Summe der Flaechen aller SICHTBAREN
+//      Blaetter und aller Reiterzeilen muss die Flaeche der Wurzel sein.
+//      Diese Zahl entsteht auf einem anderen Weg als (1) und faellt
+//      auch dann, wenn zwei Fehler sich oertlich aufheben.
+//
+// Dazu kommt die Buchhaltung: erreichbare Knoten = belegte Knoten (kein
+// Leck), Blaetterzahl stimmt, Elternzeiger zeigen zurueck, Anteile
+// summieren sich auf FRAC_ONE.
+
+fn check_box(state: u64, n: u64) -> u64 {
+    var v: u64 = 0
+    let k: u64 = n_children(state, n)
+    if k == 0 {
+        return 1 // ein Container ohne Kinder darf es nicht geben
+    }
+    let x: u64 = ng(state, n, N_X)
+    let y: u64 = ng(state, n, N_Y)
+    let w: u64 = ng(state, n, N_W)
+    let h: u64 = ng(state, n, N_H)
+    var sum: u64 = 0
+    var c: u64 = n_first(state, n)
+    while c != NONE {
+        sum = sum + ng(state, c, N_FRAC)
+        if n_parent(state, c) != n {
+            v = v + 1
+        }
+        c = n_next(state, c)
+    }
+    if sum != FRAC_ONE {
+        v = v + 1
+    }
+    let lay: u64 = ng(state, n, N_LAYOUT)
+    if lay != LAY_SPLIT {
+        let bt: u64 = bar_of(state, n)
+        var ch: u64 = 0
+        if h > bt {
+            ch = h - bt
+        }
+        var c2: u64 = n_first(state, n)
+        while c2 != NONE {
+            if ng(state, c2, N_X) != x || ng(state, c2, N_W) != w {
+                v = v + 1
+            }
+            if ng(state, c2, N_Y) != y + bt || ng(state, c2, N_H) != ch {
+                v = v + 1
+            }
+            c2 = n_next(state, c2)
+        }
+        // die Reiterzeilen selbst muessen den Balken exakt fuellen
+        var idx: u64 = 0
+        var deckung: u64 = 0
+        while idx < k {
+            deckung = deckung + tab_w(state, n, idx) * tab_h(state, n, idx)
+            idx = idx + 1
+        }
+        if lay == LAY_STACKED {
+            if deckung != w * bt {
+                v = v + 1
+            }
+        } else {
+            if deckung != w * bt {
+                v = v + 1
+            }
+        }
+        let a: u64 = n_active(state, n)
+        if a == NONE || n_parent(state, a) != n {
+            v = v + 1
+        }
+        return v
+    }
+    let waag: bool = ng(state, n, N_DIR) == DIR_H
+    var pos: u64 = y
+    if waag {
+        pos = x
+    }
+    var c3: u64 = n_first(state, n)
+    while c3 != NONE {
+        if waag {
+            if ng(state, c3, N_Y) != y || ng(state, c3, N_H) != h {
+                v = v + 1
+            }
+            if ng(state, c3, N_X) != pos {
+                v = v + 1
+            }
+            pos = ng(state, c3, N_X) + ng(state, c3, N_W)
+        } else {
+            if ng(state, c3, N_X) != x || ng(state, c3, N_W) != w {
+                v = v + 1
+            }
+            if ng(state, c3, N_Y) != pos {
+                v = v + 1
+            }
+            pos = ng(state, c3, N_Y) + ng(state, c3, N_H)
+        }
+        c3 = n_next(state, c3)
+    }
+    if waag {
+        if pos != x + w {
+            v = v + 1
+        }
+    } else {
+        if pos != y + h {
+            v = v + 1
+        }
+    }
+    return v
+}
+
+// Die gemalte Flaeche: sichtbare Blaetter und Reiterzeilen. Teilbaeume
+// hinter einem Reiter werden UEBERSPRUNGEN -- sie sind nicht zu sehen.
+fn painted(state: u64) -> u64 {
+    let r: u64 = root(state)
+    if r == NONE {
+        return 0
+    }
+    var a: u64 = 0
+    var n: u64 = r
+    var guard: u64 = 0
+    while n != NONE && guard <= MAX_NODES * 2 {
+        guard = guard + 1
+        if ng(state, n, N_KIND) == K_LEAF {
+            a = a + ng(state, n, N_W) * ng(state, n, N_H)
+            n = dfs_skip(state, n, r)
+        } else {
+            let lay: u64 = ng(state, n, N_LAYOUT)
+            if lay == LAY_SPLIT {
+                n = dfs_next(state, n, r)
+            } else {
+                a = a + ng(state, n, N_W) * bar_of(state, n)
+                let act: u64 = n_active(state, n)
+                if act == NONE {
+                    n = dfs_skip(state, n, r)
+                } else {
+                    n = act
+                }
+            }
+        }
+    }
+    return a
+}
+
+fn check(state: u64) -> u64 {
+    ts(state, S_CHECKS, tg(state, S_CHECKS) + 1)
+    var v: u64 = 0
+    let r: u64 = root(state)
+    if r == NONE {
+        if tg(state, S_LEAVES) != 0 || tg(state, S_USED) != 0 {
+            v = v + 1
+        }
+        ts(state, S_VIOL, tg(state, S_VIOL) + v)
+        return v
+    }
+    if ng(state, r, N_X) != tg(state, S_AX)
+        || ng(state, r, N_Y) != tg(state, S_AY) {
+        v = v + 1
+    }
+    if ng(state, r, N_W) != tg(state, S_AW)
+        || ng(state, r, N_H) != tg(state, S_AH) {
+        v = v + 1
+    }
+    if n_parent(state, r) != NONE {
+        v = v + 1
+    }
+    var erreichbar: u64 = 0
+    var blaetter: u64 = 0
+    var n: u64 = r
+    var guard: u64 = 0
+    while n != NONE && guard <= MAX_NODES + 1 {
+        guard = guard + 1
+        erreichbar = erreichbar + 1
+        if ng(state, n, N_USED) == 0 {
+            v = v + 1
+        }
+        if ng(state, n, N_KIND) == K_LEAF {
+            blaetter = blaetter + 1
+            if n_first(state, n) != NONE {
+                v = v + 1
+            }
+        } else {
+            v = v + check_box(state, n)
+        }
+        n = dfs_next(state, n, r)
+    }
+    if guard > MAX_NODES + 1 {
+        return v + 1 // ein Kreis im Baum
+    }
+    if erreichbar != tg(state, S_USED) {
+        v = v + 1
+    }
+    if blaetter != tg(state, S_LEAVES) {
+        v = v + 1
+    }
+    if painted(state) != tg(state, S_AW) * tg(state, S_AH) {
+        v = v + 1
+    }
+    let f: u64 = focus(state)
+    if f != NONE {
+        if ng(state, f, N_USED) == 0 || ng(state, f, N_KIND) != K_LEAF {
+            v = v + 1
+        }
+    }
+    ts(state, S_VIOL, tg(state, S_VIOL) + v)
+    return v
+}
+
+// -------------------------------------------- einfuegen und entfernen
+
+fn make_leaf(state: u64, client: u64) -> u64 {
+    let n: u64 = alloc(state)
+    if n == NONE {
+        return NONE
+    }
+    nset(state, n, N_KIND, K_LEAF)
+    nset(state, n, N_CLIENT, client)
+    nset(state, n, N_FRAC, FRAC_ONE)
+    ts(state, S_LEAVES, tg(state, S_LEAVES) + 1)
+    return n
+}
+
+fn make_box(state: u64, dir: u64) -> u64 {
+    let n: u64 = alloc(state)
+    if n == NONE {
+        return NONE
+    }
+    nset(state, n, N_KIND, K_BOX)
+    nset(state, n, N_LAYOUT, LAY_SPLIT)
+    nset(state, n, N_DIR, dir)
+    nset(state, n, N_FRAC, FRAC_ONE)
+    return n
+}
+
+// EINEN ABGEHAENGTEN TEILBAUM NEBEN EIN ZIEL HAENGEN. Das ist die eine
+// Stelle, an der Fenster in den Baum kommen -- neue (`insert_at`),
+// verschobene (`move_dir`), fallengelassene (die Maus in `wm.fi`) und
+// die Schnellablage (`snap`) gehen alle hier durch. Zwei Faelle:
+//
+//   * Das Ziel liegt schon in einem Container, der in die RICHTIGE
+//     Richtung teilt -- dann wird der Teilbaum GESCHWISTER und das Ziel
+//     gibt die Haelfte seines Anteils ab. (So macht es i3.)
+//   * Sonst wird das Ziel EINGEWICKELT: aus dem Blatt wird ein innerer
+//     Knoten mit zwei Kindern. (So macht es bspwm, und so steht es im
+//     Auftrag dieser Runde.)
+fn graft(state: u64, sub: u64, target: u64, side: u64) -> bool {
+    if sub >= MAX_NODES || target >= MAX_NODES {
+        return false
+    }
+    if ng(state, sub, N_USED) == 0 || ng(state, target, N_USED) == 0 {
+        return false
+    }
+    var dir: u64 = DIR_V
+    if side == D_LEFT || side == D_RIGHT {
+        dir = DIR_H
+    }
+    let davor: bool = side == D_LEFT || side == D_UP
+    let p: u64 = n_parent(state, target)
+    if p != NONE {
+        if ng(state, p, N_LAYOUT) == LAY_SPLIT && ng(state, p, N_DIR) == dir {
+            let f: u64 = ng(state, target, N_FRAC)
+            let fa: u64 = f / 2
+            nset(state, target, N_FRAC, f - fa)
+            nset(state, sub, N_FRAC, fa)
+            if davor {
+                insert_before(state, p, sub, target)
+            } else {
+                insert_after(state, p, sub, target)
+            }
+            normalize(state, p)
+            return true
+        }
+    }
+    if free_nodes(state) < 1 {
+        return false
+    }
+    let box: u64 = make_box(state, dir)
+    if box == NONE {
+        return false
+    }
+    nset(state, box, N_FRAC, ng(state, target, N_FRAC))
+    let pp: u64 = n_parent(state, target)
+    if pp == NONE {
+        ts(state, S_ROOT, box + 1)
+        nset(state, box, N_PARENT, 0)
+    } else {
+        let waract: bool = n_active(state, pp) == target
+        insert_before(state, pp, box, target)
+        unlink(state, target)
+        if waract {
+            nset(state, pp, N_ACTIVE, box + 1)
+        }
+    }
+    let halb: u64 = FRAC_ONE / 2
+    nset(state, target, N_FRAC, halb)
+    nset(state, sub, N_FRAC, FRAC_ONE - halb)
+    if davor {
+        append(state, box, sub)
+        append(state, box, target)
+    } else {
+        append(state, box, target)
+        append(state, box, sub)
+    }
+    nset(state, box, N_ACTIVE, ng(state, box, N_FIRST))
+    ts(state, S_SPLITS, tg(state, S_SPLITS) + 1)
+    return true
+}
+
+fn attach_at(state: u64, sub: u64, target: u64, side: u64) -> bool {
+    if !graft(state, sub, target, side) {
+        return false
+    }
+    relayout(state)
+    return true
+}
+
+// Die Richtung, in die ein neues Fenster geht. Ohne Vorgabe entscheidet
+// das SEITENVERHAELTNIS -- ein breites Blatt wird senkrecht geteilt, ein
+// hohes waagerecht. Das ist bspwms `automatic scheme` und der Grund,
+// warum acht Fenster ohne Zutun eine brauchbare Spirale ergeben statt
+// acht Streifen von 100 Bildpunkten.
+fn auto_side(state: u64, target: u64) -> u64 {
+    if tg(state, S_NEXTSPLIT) == 1 {
+        return D_RIGHT
+    }
+    if tg(state, S_NEXTSPLIT) == 2 {
+        return D_DOWN
+    }
+    if ng(state, target, N_W) >= ng(state, target, N_H) {
+        return D_RIGHT
+    }
+    return D_DOWN
+}
+
+fn insert_at(state: u64, target: u64, side: u64, client: u64) -> u64 {
+    if !ready(state) || target >= MAX_NODES {
+        return NONE
+    }
+    if ng(state, target, N_USED) == 0 || ng(state, target, N_KIND) != K_LEAF {
+        return NONE
+    }
+    if tg(state, S_LEAVES) >= MAX_LEAVES || free_nodes(state) < 2 {
+        return NONE
+    }
+    ts(state, S_OPS, tg(state, S_OPS) + 1)
+    // EIN NEUES FENSTER IN EINEM REITERCONTAINER WIRD EIN NEUER REITER
+    // und teilt nicht. Alles andere waere ein Reitercontainer, der beim
+    // zweiten Fenster aufhoert, einer zu sein.
+    let p: u64 = n_parent(state, target)
+    var alsreiter: bool = false
+    if p != NONE {
+        if ng(state, p, N_LAYOUT) != LAY_SPLIT && side == D_RIGHT {
+            alsreiter = true
+        }
+    }
+    if alsreiter {
+        let nl: u64 = make_leaf(state, client)
+        if nl == NONE {
+            return NONE
+        }
+        let f: u64 = ng(state, target, N_FRAC)
+        let fa: u64 = f / 2
+        nset(state, target, N_FRAC, f - fa)
+        nset(state, nl, N_FRAC, fa)
+        insert_after(state, p, nl, target)
+        normalize(state, p)
+        mark_node(state, p)
+        nset(state, p, N_ACTIVE, nl + 1)
+        ts(state, S_FOCUS, nl + 1)
+        ts(state, S_INSERTS, tg(state, S_INSERTS) + 1)
+        relayout(state)
+        return nl
+    }
+    let rx: u64 = ng(state, target, N_X)
+    let ry: u64 = ng(state, target, N_Y)
+    let rw: u64 = ng(state, target, N_W)
+    let rh: u64 = ng(state, target, N_H)
+    let nl2: u64 = make_leaf(state, client)
+    if nl2 == NONE {
+        return NONE
+    }
+    if !graft(state, nl2, target, side) {
+        release(state, nl2)
+        return NONE
+    }
+    // NUR DER BETROFFENE TEILBAUM. Das Rechteck, das sich aendert, ist
+    // das des geteilten Blattes -- nicht der Bildschirm. `notiledirty`
+    // schaltet genau diese Zeile ab, damit die Zahl etwas bedeutet.
+    let np: u64 = n_parent(state, nl2)
+    if np == NONE {
+        mark(state, rx, ry, rw, rh)
+    } else {
+        mark(state, rx, ry, rw, rh)
+    }
+    ts(state, S_FOCUS, nl2 + 1)
+    show(state, nl2)
+    ts(state, S_INSERTS, tg(state, S_INSERTS) + 1)
+    ts(state, S_NEXTSPLIT, 0)
+    relayout(state)
+    return nl2
+}
+
+fn insert(state: u64, client: u64) -> u64 {
+    if !ready(state) {
+        return NONE
+    }
+    if tg(state, S_LEAVES) >= MAX_LEAVES {
+        return NONE
+    }
+    let r: u64 = root(state)
+    if r == NONE {
+        let n: u64 = make_leaf(state, client)
+        if n == NONE {
+            return NONE
+        }
+        ts(state, S_ROOT, n + 1)
+        ts(state, S_FOCUS, n + 1)
+        ts(state, S_INSERTS, tg(state, S_INSERTS) + 1)
+        ts(state, S_OPS, tg(state, S_OPS) + 1)
+        relayout(state)
+        mark(state, tg(state, S_AX), tg(state, S_AY), tg(state, S_AW),
+            tg(state, S_AH))
+        return n
+    }
+    var t: u64 = focus(state)
+    if t == NONE || ng(state, t, N_USED) == 0
+        || ng(state, t, N_KIND) != K_LEAF {
+        t = first_leaf(state, r)
+    }
+    if t == NONE {
+        return NONE
+    }
+    return insert_at(state, t, auto_side(state, t), client)
+}
+
+// Ein Container mit genau einem Kind faellt zusammen: das Kind nimmt
+// seinen Platz und seinen Anteil. LUECKEN GIBT ES DAMIT NIE -- das ist
+// dieselbe Zusage wie beim Schliessen eines Fensters in i3.
+fn collapse(state: u64, q: u64) {
+    let c: u64 = n_first(state, q)
+    if c == NONE {
+        return
+    }
+    let up: u64 = n_parent(state, q)
+    nset(state, c, N_FRAC, ng(state, q, N_FRAC))
+    unlink(state, c)
+    if up == NONE {
+        ts(state, S_ROOT, c + 1)
+        nset(state, c, N_PARENT, 0)
+    } else {
+        let waract: bool = n_active(state, up) == q
+        insert_before(state, up, c, q)
+        unlink(state, q)
+        if waract {
+            nset(state, up, N_ACTIVE, c + 1)
+        }
+    }
+    release(state, q)
+    ts(state, S_COLLAPSES, tg(state, S_COLLAPSES) + 1)
+}
+
+fn in_subtree(state: u64, n: u64, top: u64) -> bool {
+    var c: u64 = n
+    var guard: u64 = 0
+    while c != NONE && guard <= MAX_NODES {
+        if c == top {
+            return true
+        }
+        c = n_parent(state, c)
+        guard = guard + 1
+    }
+    return false
+}
+
+fn detach(state: u64, n: u64) -> bool {
+    if n >= MAX_NODES || ng(state, n, N_USED) == 0 {
+        return false
+    }
+    let r: u64 = root(state)
+    if n == r {
+        ts(state, S_ROOT, 0)
+        ts(state, S_FOCUS, 0)
+        nset(state, n, N_PARENT, 0)
+        nset(state, n, N_NEXT, 0)
+        nset(state, n, N_PREV, 0)
+        mark(state, tg(state, S_AX), tg(state, S_AY), tg(state, S_AW),
+            tg(state, S_AH))
+        return true
+    }
+    let p: u64 = n_parent(state, n)
+    if p == NONE {
+        return false
+    }
+    mark_node(state, p)
+    unlink(state, n)
+    var q: u64 = p
+    var fertig: bool = false
+    var guard: u64 = 0
+    while !fertig && guard <= MAX_NODES {
+        guard = guard + 1
+        let k: u64 = n_children(state, q)
+        if k >= 2 {
+            normalize(state, q)
+            fertig = true
+        } else {
+            if k == 1 {
+                collapse(state, q)
+                fertig = true
+            } else {
+                let up: u64 = n_parent(state, q)
+                unlink(state, q)
+                release(state, q)
+                if up == NONE {
+                    ts(state, S_ROOT, 0)
+                    fertig = true
+                } else {
+                    q = up
+                }
+            }
+        }
+    }
+    return true
+}
+
+fn free_subtree(state: u64, n: u64) {
+    var guard: u64 = 0
+    while guard <= MAX_NODES * 2 {
+        guard = guard + 1
+        var c: u64 = n
+        var tief: u64 = 0
+        while n_first(state, c) != NONE && tief <= MAX_NODES {
+            c = n_first(state, c)
+            tief = tief + 1
+        }
+        if c == n {
+            release(state, n)
+            return
+        }
+        unlink(state, c)
+        release(state, c)
+    }
+}
+
+fn remove(state: u64, n: u64) -> bool {
+    if n >= MAX_NODES || ng(state, n, N_USED) == 0 {
+        return false
+    }
+    ts(state, S_OPS, tg(state, S_OPS) + 1)
+    let f: u64 = focus(state)
+    var fokus_weg: bool = false
+    if f != NONE {
+        fokus_weg = in_subtree(state, f, n)
+    }
+    detach(state, n)
+    free_subtree(state, n)
+    ts(state, S_REMOVES, tg(state, S_REMOVES) + 1)
+    let r: u64 = root(state)
+    if r == NONE {
+        ts(state, S_FOCUS, 0)
+    } else {
+        if fokus_weg || focus(state) == NONE {
+            let l: u64 = first_leaf(state, r)
+            if l == NONE {
+                ts(state, S_FOCUS, 0)
+            } else {
+                ts(state, S_FOCUS, l + 1)
+            }
+        }
+    }
+    relayout(state)
+    return true
+}
+
+// ------------------------------------------- die Griffe an dem Baum
+
+// Der Container, den eine Handlung meint: bei einem Blatt ist das sein
+// Elternknoten -- ein Blatt hat keinen Modus und keine Richtung.
+fn box_of(state: u64, n: u64) -> u64 {
+    if n >= MAX_NODES || ng(state, n, N_USED) == 0 {
+        return NONE
+    }
+    if ng(state, n, N_KIND) == K_BOX {
+        return n
+    }
+    return n_parent(state, n)
+}
+
+// DER MODUS EINES CONTAINERS -- der Teil, den Windows gar nicht hat.
+// `split` teilt die Flaeche, `tabbed` legt die Kinder als Reiter
+// uebereinander und zeigt eines, `stacked` stellt sie als Titelzeilen
+// untereinander. Die Fenster merken davon NICHTS: sie bekommen ein
+// Rechteck, wie vorher auch.
+fn set_layout(state: u64, n: u64, lay: u64) -> bool {
+    if lay > LAY_STACKED {
+        return false
+    }
+    let b: u64 = box_of(state, n)
+    if b == NONE {
+        return false
+    }
+    if ng(state, b, N_LAYOUT) == lay {
+        return false
+    }
+    ts(state, S_OPS, tg(state, S_OPS) + 1)
+    nset(state, b, N_LAYOUT, lay)
+    if lay != LAY_SPLIT {
+        if n_active(state, b) == NONE {
+            nset(state, b, N_ACTIVE, ng(state, b, N_FIRST))
+        }
+        if ng(state, n, N_KIND) == K_LEAF {
+            nset(state, b, N_ACTIVE, n + 1)
+        }
+    }
+    mark_node(state, b)
+    relayout(state)
+    return true
+}
+
+fn set_dir(state: u64, n: u64, dir: u64) -> bool {
+    if dir > DIR_V {
+        return false
+    }
+    let b: u64 = box_of(state, n)
+    if b == NONE {
+        return false
+    }
+    if ng(state, b, N_LAYOUT) != LAY_SPLIT || ng(state, b, N_DIR) == dir {
+        return false
+    }
+    ts(state, S_OPS, tg(state, S_OPS) + 1)
+    nset(state, b, N_DIR, dir)
+    mark_node(state, b)
+    relayout(state)
+    return true
+}
+
+fn toggle_dir(state: u64, n: u64) -> bool {
+    let b: u64 = box_of(state, n)
+    if b == NONE {
+        return false
+    }
+    if ng(state, b, N_DIR) == DIR_H {
+        return set_dir(state, b, DIR_V)
+    }
+    return set_dir(state, b, DIR_H)
+}
+
+// GROESSE AENDERN HEISST: DAS VERHAELTNIS AM INNEREN KNOTEN VERSCHIEBEN.
+// Nicht "dieses Fenster wird 30 Bildpunkte breiter" -- der Nachbar gibt
+// genau so viel ab, wie dieser bekommt, und alle Nachfahren rechnen neu.
+// Deshalb ueberlebt eine Groessenaenderung auch einen Wechsel der
+// Bildschirmaufloesung: sie steht als Anteil da und nicht als Bildpunkt.
+fn resize_at(state: u64, n: u64, delta: i64) -> bool {
+    if n >= MAX_NODES || ng(state, n, N_USED) == 0 || delta == 0 {
+        return false
+    }
+    let p: u64 = n_parent(state, n)
+    if p == NONE || ng(state, p, N_LAYOUT) != LAY_SPLIT {
+        return false
+    }
+    var partner: u64 = n_next(state, n)
+    var d: i64 = delta
+    if partner == NONE {
+        partner = n_prev(state, n)
+    }
+    if partner == NONE {
+        return false
+    }
+    let a: i64 = ng(state, n, N_FRAC) as i64
+    let b: i64 = ng(state, partner, N_FRAC) as i64
+    let na: i64 = a + d
+    let nb: i64 = b - d
+    if na < MIN_FRAC as i64 || nb < MIN_FRAC as i64 {
+        return false
+    }
+    ts(state, S_OPS, tg(state, S_OPS) + 1)
+    nset(state, n, N_FRAC, na as u64)
+    nset(state, partner, N_FRAC, nb as u64)
+    mark_node(state, p)
+    relayout(state)
+    return true
+}
+
+// AUSBALANCIEREN: alle Kinder gleich gross. Mit FRAC_ONE = 720720 ist
+// das fuer bis zu sechzehn Kinder EXAKT und nicht gerundet -- 720720 ist
+// durch jede Zahl von 1 bis 16 teilbar. Darueber bekommt das letzte Kind
+// den Rest, und das steht hier, damit niemand die Zahl fuer Zufall haelt.
+fn balance(state: u64, n: u64) -> bool {
+    var top: u64 = n
+    if top == NONE || top >= MAX_NODES || ng(state, top, N_USED) == 0 {
+        top = root(state)
+    }
+    if top == NONE {
+        return false
+    }
+    ts(state, S_OPS, tg(state, S_OPS) + 1)
+    var c: u64 = top
+    var guard: u64 = 0
+    while c != NONE && guard <= MAX_NODES {
+        guard = guard + 1
+        if ng(state, c, N_KIND) == K_BOX {
+            let k: u64 = n_children(state, c)
+            if k > 0 {
+                let base: u64 = FRAC_ONE / k
+                var i: u64 = 0
+                var ch: u64 = n_first(state, c)
+                while ch != NONE {
+                    i = i + 1
+                    if i == k {
+                        nset(state, ch, N_FRAC, FRAC_ONE - base * (k - 1))
+                    } else {
+                        nset(state, ch, N_FRAC, base)
+                    }
+                    ch = n_next(state, ch)
+                }
+            }
+        }
+        c = dfs_next(state, c, top)
+    }
+    mark_node(state, top)
+    relayout(state)
+    return true
+}
+
+fn reverse_children(state: u64, n: u64) {
+    var c: u64 = n_first(state, n)
+    var guard: u64 = 0
+    while c != NONE && guard <= MAX_NODES {
+        guard = guard + 1
+        let nx: u64 = n_next(state, c)
+        let pv: u64 = ng(state, c, N_PREV)
+        let nn: u64 = ng(state, c, N_NEXT)
+        nset(state, c, N_NEXT, pv)
+        nset(state, c, N_PREV, nn)
+        c = nx
+    }
+    let f: u64 = ng(state, n, N_FIRST)
+    let l: u64 = ng(state, n, N_LAST)
+    nset(state, n, N_FIRST, l)
+    nset(state, n, N_LAST, f)
+}
+
+// DREHEN UM EINE VIERTELDREHUNG IM UHRZEIGERSINN, wie bspwm es kann.
+// Die Regel ist keine Erfindung, sie faellt aus der Drehung selbst: bei
+// einer Vierteldrehung im Uhrzeigersinn wird aus der linken Kante die
+// obere. Ein waagerechter Container (links, rechts) wird also senkrecht
+// und BEHAELT die Reihenfolge; ein senkrechter (oben, unten) wird
+// waagerecht und KEHRT sie um -- aus oben wird rechts.
+fn rot90(state: u64, top: u64) {
+    var c: u64 = top
+    var guard: u64 = 0
+    while c != NONE && guard <= MAX_NODES {
+        guard = guard + 1
+        if ng(state, c, N_KIND) == K_BOX && ng(state, c, N_LAYOUT) == LAY_SPLIT {
+            if ng(state, c, N_DIR) == DIR_H {
+                nset(state, c, N_DIR, DIR_V)
+            } else {
+                nset(state, c, N_DIR, DIR_H)
+                reverse_children(state, c)
+            }
+        }
+        c = dfs_next(state, c, top)
+    }
+}
+
+fn rotate(state: u64, n: u64, quarters: u64) -> bool {
+    var top: u64 = n
+    if top == NONE || top >= MAX_NODES || ng(state, top, N_USED) == 0 {
+        top = root(state)
+    }
+    if top == NONE {
+        return false
+    }
+    ts(state, S_OPS, tg(state, S_OPS) + 1)
+    var q: u64 = quarters % 4
+    if q == 0 {
+        q = 1
+    }
+    while q > 0 {
+        rot90(state, top)
+        q = q - 1
+    }
+    mark_node(state, top)
+    relayout(state)
+    return true
+}
+
+// SPIEGELN: Achse 0 dreht links und rechts um, Achse 1 oben und unten.
+// Auch das ist bspwm; in i3 gibt es dafuer keinen Befehl.
+fn mirror(state: u64, n: u64, axis: u64) -> bool {
+    var top: u64 = n
+    if top == NONE || top >= MAX_NODES || ng(state, top, N_USED) == 0 {
+        top = root(state)
+    }
+    if top == NONE {
+        return false
+    }
+    var want: u64 = DIR_H
+    if axis != 0 {
+        want = DIR_V
+    }
+    ts(state, S_OPS, tg(state, S_OPS) + 1)
+    var c: u64 = top
+    var guard: u64 = 0
+    while c != NONE && guard <= MAX_NODES {
+        guard = guard + 1
+        if ng(state, c, N_KIND) == K_BOX && ng(state, c, N_LAYOUT) == LAY_SPLIT {
+            if ng(state, c, N_DIR) == want {
+                reverse_children(state, c)
+            }
+        }
+        c = dfs_next(state, c, top)
+    }
+    mark_node(state, top)
+    relayout(state)
+    return true
+}
+
+// ------------------------------------ der Fokus in eine Himmelsrichtung
+//
+// GEOMETRISCH UND NICHT UEBER DIE REIHENFOLGE. "Das Fenster links von
+// diesem" ist eine Aussage ueber Rechtecke auf dem Schirm; wer sie ueber
+// die Kinderliste beantwortet, springt bei drei Ebenen Verschachtelung
+// dorthin, wo nichts ist. Gesucht wird deshalb unter ALLEN sichtbaren
+// Blaettern das mit dem kleinsten Abstand in der gefragten Richtung --
+// und Blaetter, die sich quer dazu gar nicht ueberschneiden, kommen erst
+// danach.
+fn overlaps(a0: u64, a1: u64, b0: u64, b1: u64) -> bool {
+    if a1 <= b0 {
+        return false
+    }
+    if b1 <= a0 {
+        return false
+    }
+    return true
+}
+
+fn absdiff(a: u64, b: u64) -> u64 {
+    if a > b {
+        return a - b
+    }
+    return b - a
+}
+
+fn dir_search(state: u64, from: u64, d: u64) -> u64 {
+    if from >= MAX_NODES || ng(state, from, N_USED) == 0 {
+        return NONE
+    }
+    let fx: u64 = ng(state, from, N_X)
+    let fy: u64 = ng(state, from, N_Y)
+    let fw: u64 = ng(state, from, N_W)
+    let fh: u64 = ng(state, from, N_H)
+    let fcx: u64 = fx + fw / 2
+    let fcy: u64 = fy + fh / 2
+    var best: u64 = NONE
+    var bestwert: u64 = 0
+    var i: u64 = 0
+    while i < MAX_NODES {
+        var nimm: bool = false
+        var wert: u64 = 0
+        if ng(state, i, N_USED) != 0 && ng(state, i, N_KIND) == K_LEAF {
+            if i != from && visible(state, i) {
+                let x: u64 = ng(state, i, N_X)
+                let y: u64 = ng(state, i, N_Y)
+                let w: u64 = ng(state, i, N_W)
+                let h: u64 = ng(state, i, N_H)
+                var lueck: u64 = 0
+                var quer: bool = false
+                if d == D_LEFT {
+                    if x + w <= fx {
+                        nimm = true
+                        lueck = fx - (x + w)
+                        quer = overlaps(y, y + h, fy, fy + fh)
+                        wert = lueck * 4096 + absdiff(y + h / 2, fcy)
+                    }
+                }
+                if d == D_RIGHT {
+                    if x >= fx + fw {
+                        nimm = true
+                        lueck = x - (fx + fw)
+                        quer = overlaps(y, y + h, fy, fy + fh)
+                        wert = lueck * 4096 + absdiff(y + h / 2, fcy)
+                    }
+                }
+                if d == D_UP {
+                    if y + h <= fy {
+                        nimm = true
+                        lueck = fy - (y + h)
+                        quer = overlaps(x, x + w, fx, fx + fw)
+                        wert = lueck * 4096 + absdiff(x + w / 2, fcx)
+                    }
+                }
+                if d == D_DOWN {
+                    if y >= fy + fh {
+                        nimm = true
+                        lueck = y - (fy + fh)
+                        quer = overlaps(x, x + w, fx, fx + fw)
+                        wert = lueck * 4096 + absdiff(x + w / 2, fcx)
+                    }
+                }
+                if nimm && !quer {
+                    wert = wert + 0x10000000
+                }
+            }
+        }
+        if nimm {
+            if best == NONE || wert < bestwert {
+                best = i
+                bestwert = wert
+            }
+        }
+        i = i + 1
+    }
+    return best
+}
+
+// EIN FENSTER VERSCHIEBEN HEISST: DEN KNOTEN IM BAUM UMHAENGEN. Nicht
+// seine Koordinaten aendern -- die rechnet der Baum aus. Gesucht wird
+// das Blatt in der gefragten Richtung; der Knoten wird abgehaengt (was
+// seinen alten Container zusammenfallen laesst, falls er allein
+// zurueckbleibt) und neben dem Ziel wieder eingehaengt.
+fn move_dir(state: u64, n: u64, d: u64) -> bool {
+    if n >= MAX_NODES || ng(state, n, N_USED) == 0 {
+        return false
+    }
+    let ziel: u64 = dir_search(state, n, d)
+    if ziel == NONE {
+        return false
+    }
+    ts(state, S_OPS, tg(state, S_OPS) + 1)
+    // Der Bereich, der sich aendert: die alte Umgebung und die neue
+    // zusammen. Bei einem Verschieben ist das ehrlicherweise mehr als
+    // ein Teilbaum -- deshalb steht hier die Vereinigung und nicht die
+    // kleinere der beiden Zahlen.
+    var p1: u64 = n_parent(state, n)
+    if p1 == NONE {
+        p1 = n
+    }
+    var p2: u64 = n_parent(state, ziel)
+    if p2 == NONE {
+        p2 = ziel
+    }
+    let x0: u64 = umin(ng(state, p1, N_X), ng(state, p2, N_X))
+    let y0: u64 = umin(ng(state, p1, N_Y), ng(state, p2, N_Y))
+    let x1: u64 = umax(ng(state, p1, N_X) + ng(state, p1, N_W),
+        ng(state, p2, N_X) + ng(state, p2, N_W))
+    let y1: u64 = umax(ng(state, p1, N_Y) + ng(state, p1, N_H),
+        ng(state, p2, N_Y) + ng(state, p2, N_H))
+    detach(state, n)
+    if ng(state, ziel, N_USED) == 0 {
+        return false
+    }
+    var seite: u64 = d
+    if !graft(state, n, ziel, seite) {
+        return false
+    }
+    mark(state, x0, y0, x1 - x0, y1 - y0)
+    ts(state, S_FOCUS, n + 1)
+    show(state, n)
+    relayout(state)
+    return true
+}
+
+fn umin(a: u64, b: u64) -> u64 {
+    if a < b {
+        return a
+    }
+    return b
+}
+
+fn umax(a: u64, b: u64) -> u64 {
+    if a > b {
+        return a
+    }
+    return b
+}
+
+// -------------------------------------------------- die Schnellablage
+//
+// HALB LINKS, HALB RECHTS, EIN VIERTEL -- das, was Windows als "Snap
+// Layouts" verkauft. Hier ist es KEIN zweites System: jeder dieser
+// Griffe stellt einen bestimmten BAUM her und laesst danach alles
+// weiterlaufen wie vorher. Man kann in eine geschnappte Haelfte
+// hineinteilen, sie zu Reitern machen und sie drehen -- bei Windows
+// endet die Vorlage genau hier.
+//
+// Die Haelfte ist der einfache Fall: Wurzel wird ein Container, das
+// Fenster ist das eine Kind und der GANZE bisherige Baum das andere.
+// Das Viertel braucht einen Partner fuer die zweite Ebene und nimmt
+// dafuer das erste Kind der alten Wurzel. Gibt es keinen (der Rest ist
+// ein einzelnes Fenster), wird daraus ehrlich eine Haelfte, und der
+// Rueckgabewert sagt es.
+fn snap(state: u64, leaf: u64, where: u64) -> bool {
+    if leaf >= MAX_NODES || ng(state, leaf, N_USED) == 0 {
+        return false
+    }
+    if ng(state, leaf, N_KIND) != K_LEAF || where > SNAP_BR {
+        return false
+    }
+    ts(state, S_OPS, tg(state, S_OPS) + 1)
+    let halb: u64 = FRAC_ONE / 2
+    detach(state, leaf)
+    var rest: u64 = root(state)
+    if rest == NONE {
+        ts(state, S_ROOT, leaf + 1)
+        nset(state, leaf, N_PARENT, 0)
+        nset(state, leaf, N_FRAC, FRAC_ONE)
+        ts(state, S_FOCUS, leaf + 1)
+        relayout(state)
+        mark(state, tg(state, S_AX), tg(state, S_AY), tg(state, S_AW),
+            tg(state, S_AH))
+        return false
+    }
+    var w: u64 = where
+    var geviertelt: bool = true
+    if w > SNAP_BOTTOM {
+        if free_nodes(state) < 2 || ng(state, rest, N_KIND) == K_LEAF
+            || n_children(state, rest) < 2 {
+            geviertelt = false
+            if w == SNAP_TL || w == SNAP_BL {
+                w = SNAP_LEFT
+            } else {
+                w = SNAP_RIGHT
+            }
+        }
+    }
+    if w <= SNAP_BOTTOM {
+        if free_nodes(state) < 1 {
+            graft(state, leaf, first_leaf(state, rest), D_RIGHT)
+            relayout(state)
+            return false
+        }
+        var dir: u64 = DIR_V
+        if w <= SNAP_RIGHT {
+            dir = DIR_H
+        }
+        let davor: bool = w == SNAP_LEFT || w == SNAP_TOP
+        let box: u64 = make_box(state, dir)
+        ts(state, S_ROOT, box + 1)
+        nset(state, box, N_PARENT, 0)
+        nset(state, box, N_FRAC, FRAC_ONE)
+        nset(state, leaf, N_FRAC, halb)
+        nset(state, rest, N_FRAC, FRAC_ONE - halb)
+        if davor {
+            append(state, box, leaf)
+            append(state, box, rest)
+        } else {
+            append(state, box, rest)
+            append(state, box, leaf)
+        }
+        nset(state, box, N_ACTIVE, ng(state, box, N_FIRST))
+        ts(state, S_FOCUS, leaf + 1)
+        relayout(state)
+        mark(state, tg(state, S_AX), tg(state, S_AY), tg(state, S_AW),
+            tg(state, S_AH))
+        return geviertelt
+    }
+    // das Viertel: einen Partner aus der alten Wurzel holen
+    let partner: u64 = n_first(state, rest)
+    detach(state, partner)
+    let rest2: u64 = root(state)
+    if rest2 == NONE {
+        ts(state, S_ROOT, partner + 1)
+        nset(state, partner, N_PARENT, 0)
+        nset(state, partner, N_FRAC, FRAC_ONE)
+        graft(state, leaf, partner, D_LEFT)
+        ts(state, S_FOCUS, leaf + 1)
+        relayout(state)
+        return false
+    }
+    let oben: bool = w == SNAP_TL || w == SNAP_TR
+    let links: bool = w == SNAP_TL || w == SNAP_BL
+    let col: u64 = make_box(state, DIR_V)
+    let hb: u64 = make_box(state, DIR_H)
+    nset(state, leaf, N_FRAC, halb)
+    nset(state, partner, N_FRAC, FRAC_ONE - halb)
+    if oben {
+        append(state, col, leaf)
+        append(state, col, partner)
+    } else {
+        append(state, col, partner)
+        append(state, col, leaf)
+    }
+    nset(state, col, N_ACTIVE, ng(state, col, N_FIRST))
+    nset(state, col, N_FRAC, halb)
+    nset(state, rest2, N_FRAC, FRAC_ONE - halb)
+    ts(state, S_ROOT, hb + 1)
+    nset(state, hb, N_PARENT, 0)
+    nset(state, hb, N_FRAC, FRAC_ONE)
+    if links {
+        append(state, hb, col)
+        append(state, hb, rest2)
+    } else {
+        append(state, hb, rest2)
+        append(state, hb, col)
+    }
+    nset(state, hb, N_ACTIVE, ng(state, hb, N_FIRST))
+    ts(state, S_FOCUS, leaf + 1)
+    relayout(state)
+    mark(state, tg(state, S_AX), tg(state, S_AY), tg(state, S_AW),
+        tg(state, S_AH))
+    return true
+}
+
+// ---------------------------------------------------- der Zufallstest
+//
+// ZEHNTAUSEND ZUFAELLIGE OPERATIONEN, und nach JEDER wird die Invariante
+// nachgerechnet. Das ist der einzige Weg, auf dem man einem Baum
+// glaubt: die Faelle, an denen so etwas bricht, sind nicht die, die man
+// von Hand hinschreibt (zwei Fenster teilen, eines schliessen), sondern
+// die, auf die man nicht kommt -- ein Container, der beim Schliessen des
+// vorletzten Kindes zusammenfaellt, WAEHREND er der aktive Reiter seines
+// Elternknotens ist, und dessen Anteil dabei an den falschen Nachbarn
+// geht. Der Generator ist festgenagelt (derselbe Startwert, dieselbe
+// Folge), damit ein Fehler wiederholbar ist.
+fn rnd(state: u64) -> u64 {
+    var x: u64 = tg(state, S_SEED)
+    if x == 0 {
+        x = 0x9E3779B97F4A7C15
+    }
+    x = x ^ (x >> 30)
+    x = x *% 0xBF58476D1CE4E5B9
+    x = x ^ (x >> 27)
+    x = x *% 0x94D049BB133111EB
+    x = x ^ (x >> 31)
+    ts(state, S_SEED, x)
+    return x
+}
+
+fn clear_tree(state: u64) {
+    var g: u64 = 0
+    while root(state) != NONE && g <= MAX_NODES * 2 {
+        g = g + 1
+        let l: u64 = first_leaf(state, root(state))
+        if l == NONE {
+            g = MAX_NODES * 3
+        } else {
+            remove(state, l)
+        }
+    }
+    ts(state, S_ROOT, 0)
+    ts(state, S_FOCUS, 0)
+}
+
+fn fuzz(state: u64, rounds: u64) -> u64 {
+    if !ready(state) {
+        return 1
+    }
+    clear_tree(state)
+    ts(state, S_SEED, 0x2545F4914F6CDD1D)
+    insert(state, 1)
+    var viol: u64 = 0
+    var client: u64 = 2
+    var i: u64 = 0
+    while i < rounds {
+        i = i + 1
+        let r: u64 = rnd(state)
+        let op: u64 = r % 12
+        var f: u64 = focus(state)
+        if f == NONE {
+            f = first_leaf(state, root(state))
+        }
+        if op < 3 {
+            if tg(state, S_LEAVES) < MAX_LEAVES && free_nodes(state) >= 2 {
+                client = client + 1
+                insert(state, client)
+            }
+        }
+        if op == 3 || op == 4 {
+            if tg(state, S_LEAVES) > 1 && f != NONE {
+                remove(state, f)
+            }
+        }
+        if op == 5 {
+            if f != NONE {
+                move_dir(state, f, (r >> 8) % 4)
+            }
+        }
+        if op == 6 {
+            if f != NONE {
+                set_layout(state, f, (r >> 8) % 3)
+            }
+        }
+        if op == 7 {
+            if f != NONE {
+                var d: i64 = 36036
+                if ((r >> 8) & 1) == 0 {
+                    d = 0 - d
+                }
+                resize_at(state, f, d)
+            }
+        }
+        if op == 8 {
+            if f != NONE {
+                toggle_dir(state, f)
+            }
+        }
+        if op == 9 {
+            rotate(state, root(state), 1 + (r >> 8) % 3)
+        }
+        if op == 10 {
+            if ((r >> 8) & 1) == 0 {
+                mirror(state, root(state), 0)
+            } else {
+                balance(state, root(state))
+            }
+        }
+        if op == 11 {
+            if f != NONE {
+                snap(state, f, (r >> 8) % 8)
+            }
+        }
+        // DER FOKUS DARF NICHT INS LEERE ZEIGEN -- auch das ist Teil der
+        // Invariante und faellt sonst erst beim naechsten Tastendruck auf.
+        let nf: u64 = focus(state)
+        if nf != NONE {
+            if ng(state, nf, N_USED) == 0 {
+                viol = viol + 1
+                ts(state, S_FOCUS, 0)
+            }
+        }
+        viol = viol + check(state)
+    }
+    return viol
+}
+
+// ------------------------------------------------- die Tastenbelegung
+//
+// SIE STEHT NICHT IM QUELLTEXT. Was hier liegt, ist eine TABELLE und
+// ein Leser dafuer; die Zeilen kommen aus /users/<name>/config/tiling.conf
+// und werden von `kernel/user/tiling.fi` (Ring 3) oder beim Hochlauf von
+// `kmain` hereingereicht. Wer die Datei aendert und neu laedt, hat eine
+// andere Belegung, ohne den Kernel anzufassen -- das ist die Zusage.
+//
+// Das Format ist das von i3, auf das Noetige eingedampft:
+//
+//     # eine Bemerkung
+//     bind mod+h focus-left
+//     bind mod+shift+l move-right
+//     bind mod+w layout-tabbed
+//
+// `mod` ist die Alt-Taste (kstate.KB_ALT). Namen von Tasten, die kein
+// Zeichen sind: left, right, up, down, return, space, tab.
+
+const B_USED: u64 = 0x00
+const B_KEY: u64 = 0x08
+const B_MODS: u64 = 0x10
+const B_ACT: u64 = 0x18
+const B_NAME: u64 = 0x20 // 32 Oktette
+
+fn bat(state: u64, i: u64) -> u64 {
+    return state + kstate.TILE_OFF + BIND_OFF + i * BIND_BYTES
+}
+
+fn bg(state: u64, i: u64, off: u64) -> u64 {
+    return kstate.get(bat(state, i), off)
+}
+
+fn bs(state: u64, i: u64, off: u64, v: u64) {
+    kstate.set(bat(state, i), off, v)
+}
+
+fn bind_reset(state: u64) {
+    var i: u64 = 0
+    while i < MAX_BINDS {
+        var o: u64 = 0
+        while o < BIND_BYTES {
+            bs(state, i, o, 0)
+            o = o + 8
+        }
+        i = i + 1
+    }
+    ts(state, S_BINDS, 0)
+}
+
+fn bind_count(state: u64) -> u64 {
+    return tg(state, S_BINDS)
+}
+
+fn bind_key(state: u64, i: u64) -> u64 {
+    if i >= MAX_BINDS {
+        return 0
+    }
+    return bg(state, i, B_KEY)
+}
+
+fn bind_mods(state: u64, i: u64) -> u64 {
+    if i >= MAX_BINDS {
+        return 0
+    }
+    return bg(state, i, B_MODS)
+}
+
+fn bind_action(state: u64, i: u64) -> u64 {
+    if i >= MAX_BINDS {
+        return A_NONE
+    }
+    return bg(state, i, B_ACT)
+}
+
+fn bind_name(state: u64, i: u64) -> u64 {
+    if i >= MAX_BINDS {
+        return 0
+    }
+    return bat(state, i) + B_NAME
+}
+
+fn bind_lookup(state: u64, key: u64, mods: u64) -> u64 {
+    var i: u64 = 0
+    while i < MAX_BINDS {
+        if bg(state, i, B_USED) != 0 {
+            if bg(state, i, B_KEY) == key && bg(state, i, B_MODS) == mods {
+                return bg(state, i, B_ACT)
+            }
+        }
+        i = i + 1
+    }
+    return A_NONE
+}
+
+fn bind_add(state: u64, key: u64, mods: u64, act: u64, p: u64, a: u64,
+    b: u64) -> bool {
+    var i: u64 = 0
+    while i < MAX_BINDS {
+        if bg(state, i, B_USED) == 0 {
+            bs(state, i, B_USED, 1)
+            bs(state, i, B_KEY, key)
+            bs(state, i, B_MODS, mods)
+            bs(state, i, B_ACT, act)
+            var k: u64 = 0
+            while k < 31 {
+                var c: u64 = 0
+                if a + k < b {
+                    c = kstate.get8(p + a + k)
+                }
+                kstate.set8(bat(state, i) + B_NAME + k, c as u8)
+                k = k + 1
+            }
+            kstate.set8(bat(state, i) + B_NAME + 31, 0 as u8)
+            ts(state, S_BINDS, tg(state, S_BINDS) + 1)
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn is_ws(c: u64) -> bool {
+    return c == 32 || c == 9 || c == 13
+}
+
+fn eqs(p: u64, a: u64, b: u64, lit: u64, litlen: u64) -> bool {
+    if b <= a {
+        return false
+    }
+    if b - a != litlen {
+        return false
+    }
+    var k: u64 = 0
+    while k < litlen {
+        if kstate.get8(p + a + k) != kstate.get8(lit + k) {
+            return false
+        }
+        k = k + 1
+    }
+    return true
+}
+
+fn key_of(p: u64, a: u64, b: u64) -> u64 {
+    if b <= a {
+        return 0
+    }
+    if b - a == 1 {
+        var c: u64 = kstate.get8(p + a)
+        if c >= 65 && c <= 90 {
+            c = c + 32
+        }
+        return c
+    }
+    var s_l: [u8; 5] = "left\0"
+    var s_r: [u8; 6] = "right\0"
+    var s_u: [u8; 3] = "up\0"
+    var s_d: [u8; 5] = "down\0"
+    var s_ret: [u8; 7] = "return\0"
+    var s_sp: [u8; 6] = "space\0"
+    var s_tab: [u8; 4] = "tab\0"
+    if eqs(p, a, b, (&s_l[0]) as u64, 4) {
+        return KEY_LEFT
+    }
+    if eqs(p, a, b, (&s_r[0]) as u64, 5) {
+        return KEY_RIGHT
+    }
+    if eqs(p, a, b, (&s_u[0]) as u64, 2) {
+        return KEY_UP
+    }
+    if eqs(p, a, b, (&s_d[0]) as u64, 4) {
+        return KEY_DOWN
+    }
+    if eqs(p, a, b, (&s_ret[0]) as u64, 6) {
+        return 13
+    }
+    if eqs(p, a, b, (&s_sp[0]) as u64, 5) {
+        return 32
+    }
+    if eqs(p, a, b, (&s_tab[0]) as u64, 3) {
+        return 9
+    }
+    return 0
+}
+
+fn action_of(p: u64, a: u64, b: u64) -> u64 {
+    var n1: [u8; 11] = "focus-left\0"
+    var n2: [u8; 12] = "focus-right\0"
+    var n3: [u8; 9] = "focus-up\0"
+    var n4: [u8; 11] = "focus-down\0"
+    var n5: [u8; 10] = "move-left\0"
+    var n6: [u8; 11] = "move-right\0"
+    var n7: [u8; 8] = "move-up\0"
+    var n8: [u8; 10] = "move-down\0"
+    var n9: [u8; 8] = "split-h\0"
+    var n10: [u8; 8] = "split-v\0"
+    var n11: [u8; 13] = "layout-split\0"
+    var n12: [u8; 14] = "layout-tabbed\0"
+    var n13: [u8; 15] = "layout-stacked\0"
+    var n14: [u8; 7] = "rotate\0"
+    var n15: [u8; 7] = "mirror\0"
+    var n16: [u8; 8] = "balance\0"
+    var n17: [u8; 6] = "float\0"
+    var n18: [u8; 6] = "close\0"
+    var n19: [u8; 5] = "grow\0"
+    var n20: [u8; 7] = "shrink\0"
+    if eqs(p, a, b, (&n1[0]) as u64, 10) {
+        return A_FOCUS_LEFT
+    }
+    if eqs(p, a, b, (&n2[0]) as u64, 11) {
+        return A_FOCUS_RIGHT
+    }
+    if eqs(p, a, b, (&n3[0]) as u64, 8) {
+        return A_FOCUS_UP
+    }
+    if eqs(p, a, b, (&n4[0]) as u64, 10) {
+        return A_FOCUS_DOWN
+    }
+    if eqs(p, a, b, (&n5[0]) as u64, 9) {
+        return A_MOVE_LEFT
+    }
+    if eqs(p, a, b, (&n6[0]) as u64, 10) {
+        return A_MOVE_RIGHT
+    }
+    if eqs(p, a, b, (&n7[0]) as u64, 7) {
+        return A_MOVE_UP
+    }
+    if eqs(p, a, b, (&n8[0]) as u64, 9) {
+        return A_MOVE_DOWN
+    }
+    if eqs(p, a, b, (&n9[0]) as u64, 7) {
+        return A_SPLIT_H
+    }
+    if eqs(p, a, b, (&n10[0]) as u64, 7) {
+        return A_SPLIT_V
+    }
+    if eqs(p, a, b, (&n11[0]) as u64, 12) {
+        return A_LAYOUT_SPLIT
+    }
+    if eqs(p, a, b, (&n12[0]) as u64, 13) {
+        return A_LAYOUT_TABBED
+    }
+    if eqs(p, a, b, (&n13[0]) as u64, 14) {
+        return A_LAYOUT_STACKED
+    }
+    if eqs(p, a, b, (&n14[0]) as u64, 6) {
+        return A_ROTATE
+    }
+    if eqs(p, a, b, (&n15[0]) as u64, 6) {
+        return A_MIRROR
+    }
+    if eqs(p, a, b, (&n16[0]) as u64, 7) {
+        return A_BALANCE
+    }
+    if eqs(p, a, b, (&n17[0]) as u64, 5) {
+        return A_FLOAT
+    }
+    if eqs(p, a, b, (&n18[0]) as u64, 5) {
+        return A_CLOSE
+    }
+    if eqs(p, a, b, (&n19[0]) as u64, 4) {
+        return A_GROW
+    }
+    if eqs(p, a, b, (&n20[0]) as u64, 6) {
+        return A_SHRINK
+    }
+    return action_of2(p, a, b)
+}
+
+// Der zweite Teil der Namen. Getrennt, weil `firnc` jedem Zwischenwert
+// jedes Zweiges einen eigenen Platz auf dem Stapel gibt -- dieselbe
+// Ueberlegung, die in `kernel/sys.fi` hinter `k13_call` steht.
+fn action_of2(p: u64, a: u64, b: u64) -> u64 {
+    var m1: [u8; 10] = "snap-left\0"
+    var m2: [u8; 11] = "snap-right\0"
+    var m3: [u8; 9] = "snap-top\0"
+    var m4: [u8; 12] = "snap-bottom\0"
+    var m5: [u8; 13] = "snap-topleft\0"
+    var m6: [u8; 14] = "snap-topright\0"
+    var m7: [u8; 16] = "snap-bottomleft\0"
+    var m8: [u8; 17] = "snap-bottomright\0"
+    var m9: [u8; 14] = "tiling-toggle\0"
+    if eqs(p, a, b, (&m1[0]) as u64, 9) {
+        return A_SNAP_LEFT
+    }
+    if eqs(p, a, b, (&m2[0]) as u64, 10) {
+        return A_SNAP_RIGHT
+    }
+    if eqs(p, a, b, (&m3[0]) as u64, 8) {
+        return A_SNAP_TOP
+    }
+    if eqs(p, a, b, (&m4[0]) as u64, 11) {
+        return A_SNAP_BOTTOM
+    }
+    if eqs(p, a, b, (&m5[0]) as u64, 12) {
+        return A_SNAP_TL
+    }
+    if eqs(p, a, b, (&m6[0]) as u64, 13) {
+        return A_SNAP_TR
+    }
+    if eqs(p, a, b, (&m7[0]) as u64, 15) {
+        return A_SNAP_BL
+    }
+    if eqs(p, a, b, (&m8[0]) as u64, 16) {
+        return A_SNAP_BR
+    }
+    if eqs(p, a, b, (&m9[0]) as u64, 13) {
+        return A_TILE_TOGGLE
+    }
+    return A_NONE
+}
+
+fn parse_line(state: u64, p: u64, a: u64, b: u64) {
+    var i: u64 = a
+    while i < b && is_ws(kstate.get8(p + i)) {
+        i = i + 1
+    }
+    if i >= b {
+        return
+    }
+    if kstate.get8(p + i) == 35 {
+        return
+    }
+    let w1: u64 = i
+    while i < b && !is_ws(kstate.get8(p + i)) {
+        i = i + 1
+    }
+    let w1e: u64 = i
+    var s_bind: [u8; 5] = "bind\0"
+    if !eqs(p, w1, w1e, (&s_bind[0]) as u64, 4) {
+        return
+    }
+    while i < b && is_ws(kstate.get8(p + i)) {
+        i = i + 1
+    }
+    let w2: u64 = i
+    while i < b && !is_ws(kstate.get8(p + i)) {
+        i = i + 1
+    }
+    let w2e: u64 = i
+    while i < b && is_ws(kstate.get8(p + i)) {
+        i = i + 1
+    }
+    let w3: u64 = i
+    while i < b && !is_ws(kstate.get8(p + i)) {
+        i = i + 1
+    }
+    let w3e: u64 = i
+    if w2e <= w2 || w3e <= w3 {
+        return
+    }
+    var mods: u64 = 0
+    var key: u64 = 0
+    var s: u64 = w2
+    var s_mod: [u8; 4] = "mod\0"
+    var s_sh: [u8; 6] = "shift\0"
+    var s_ct: [u8; 5] = "ctrl\0"
+    while s < w2e {
+        var e: u64 = s
+        while e < w2e && kstate.get8(p + e) != 43 {
+            e = e + 1
+        }
+        if eqs(p, s, e, (&s_mod[0]) as u64, 3) {
+            mods = mods | MOD_ALT
+        } else {
+            if eqs(p, s, e, (&s_sh[0]) as u64, 5) {
+                mods = mods | MOD_SHIFT
+            } else {
+                if eqs(p, s, e, (&s_ct[0]) as u64, 4) {
+                    mods = mods | MOD_CTRL
+                } else {
+                    key = key_of(p, s, e)
+                }
+            }
+        }
+        s = e + 1
+    }
+    if key == 0 {
+        return
+    }
+    let act: u64 = action_of(p, w3, w3e)
+    if act == A_NONE {
+        return
+    }
+    bind_add(state, key, mods, act, p, w3, w3e)
+}
+
+fn bind_parse(state: u64, p: u64, n: u64) -> u64 {
+    bind_reset(state)
+    var i: u64 = 0
+    while i < n {
+        let ls: u64 = i
+        var le: u64 = i
+        while le < n && kstate.get8(p + le) != 10 {
+            le = le + 1
+        }
+        parse_line(state, p, ls, le)
+        i = le + 1
+    }
+    return tg(state, S_BINDS)
+}
+
+// ------------------------------------------------------------ Zusagen
+//
+// Die letzte davon ist die wichtigste: sie bricht den Baum ABSICHTLICH
+// und verlangt, dass `check` es merkt. Eine Pruefung, die nicht fallen
+// kann, prueft nichts -- das ist die Lehre aus Runde K7B, eine Ebene
+// hoeher.
+fn selftest(state: u64) -> u64 {
+    var n: u64 = 0
+    if !init(state, 0, 0, 800, 600) {
+        return 0
+    }
+    // 1. Ein leerer Baum hat keine Wurzel und keine Verletzung.
+    if root(state) == NONE && check(state) == 0 {
+        n = n + 1
+    }
+    // 2. Das erste Fenster bekommt die ganze Flaeche.
+    let a: u64 = insert(state, 1)
+    if a != NONE && n_w(state, a) == 800 && n_h(state, a) == 600 {
+        n = n + 1
+    }
+    // 3. Das zweite TEILT das erste: aus dem Blatt wird ein innerer
+    //    Knoten mit zwei Kindern.
+    let b: u64 = insert(state, 2)
+    if b != NONE && n_parent(state, a) != NONE {
+        if n_parent(state, a) == n_parent(state, b) {
+            n = n + 1
+        }
+    }
+    // 4. Und zwar bildpunktgenau in zwei Haelften, ohne Luecke.
+    if n_w(state, a) == 400 && n_w(state, b) == 400 {
+        if n_x(state, a) == 0 && n_x(state, b) == 400 {
+            n = n + 1
+        }
+    }
+    // 5. Die Invariante haelt.
+    if check(state) == 0 {
+        n = n + 1
+    }
+    // 6. NUR DER TEILBAUM WIRD SCHMUTZIG. Das dritte Fenster teilt das
+    //    zweite -- der gemeldete Bereich ist dessen Rechteck und NICHT
+    //    der Bildschirm. `notiledirty` dreht genau das um.
+    set_focus(state, b)
+    let c: u64 = insert(state, 3)
+    if c != NONE {
+        if last_w(state) * last_h(state) < 800 * 600 {
+            if last_w(state) * last_h(state) == 400 * 600 {
+                n = n + 1
+            }
+        }
+    }
+    // 7. Schliessen laesst den Container zusammenfallen: der Nachbar
+    //    bekommt den ganzen Platz, und es bleibt KEINE Luecke.
+    remove(state, c)
+    if n_w(state, b) == 400 && n_h(state, b) == 600 && check(state) == 0 {
+        n = n + 1
+    }
+    // 8. Reiter: beide Kinder bekommen DASSELBE Rechteck, und darueber
+    //    liegt eine Reiterzeile.
+    set_layout(state, a, LAY_TABBED)
+    let p: u64 = n_parent(state, a)
+    if p != NONE && n_layout(state, p) == LAY_TABBED {
+        if n_y(state, a) == BAR_H && n_h(state, a) == 600 - BAR_H {
+            if n_x(state, a) == n_x(state, b) && n_w(state, a) == n_w(state, b) {
+                n = n + 1
+            }
+        }
+    }
+    // 9. Von zwei Reitern ist genau EINER zu sehen.
+    var sichtbar: u64 = 0
+    if visible(state, a) {
+        sichtbar = sichtbar + 1
+    }
+    if visible(state, b) {
+        sichtbar = sichtbar + 1
+    }
+    if sichtbar == 1 && check(state) == 0 {
+        n = n + 1
+    }
+    // 10. Stapel: zwei Titelzeilen statt einer, und die Flaeche geht auf.
+    set_layout(state, a, LAY_STACKED)
+    if n_y(state, a) == BAR_H * 2 && check(state) == 0 {
+        n = n + 1
+    }
+    // 11. Zurueck auf Teilung, und die Fenster merken davon nichts.
+    set_layout(state, a, LAY_SPLIT)
+    if n_w(state, a) == 400 && n_w(state, b) == 400 && check(state) == 0 {
+        n = n + 1
+    }
+    // 12. Der Fokus geht GEOMETRISCH nach rechts, nicht der Reihe nach.
+    if dir_search(state, a, D_RIGHT) == b && dir_search(state, b, D_LEFT) == a {
+        if dir_search(state, a, D_LEFT) == NONE {
+            n = n + 1
+        }
+    }
+    // 13. Verschieben haengt den Knoten um: aus (a,b) wird (b,a).
+    if move_dir(state, a, D_RIGHT) {
+        if n_x(state, b) == 0 && n_x(state, a) == 400 && check(state) == 0 {
+            n = n + 1
+        }
+    }
+    // 14. Die Teilungsrichtung umschalten: nebeneinander wird
+    //     uebereinander.
+    if toggle_dir(state, a) {
+        if n_h(state, a) == 300 && n_w(state, a) == 800 && check(state) == 0 {
+            n = n + 1
+        }
+    }
+    // 15. Drehen: eine Vierteldrehung macht daraus wieder nebeneinander,
+    //     und aus oben wird rechts.
+    let obenwar: u64 = n_client(state, first_leaf(state, root(state)))
+    rotate(state, root(state), 1)
+    let linksnun: u64 = n_client(state, first_leaf(state, root(state)))
+    if n_dir(state, root(state)) == DIR_H && obenwar != linksnun {
+        if check(state) == 0 {
+            n = n + 1
+        }
+    }
+    // 16. Spiegeln kehrt die Reihenfolge um -- zweimal ist wieder wie
+    //     vorher.
+    let vor: u64 = n_client(state, first_leaf(state, root(state)))
+    mirror(state, root(state), 0)
+    let nach: u64 = n_client(state, first_leaf(state, root(state)))
+    mirror(state, root(state), 0)
+    if vor != nach && n_client(state, first_leaf(state, root(state))) == vor {
+        n = n + 1
+    }
+    // 17. Groesse aendern verschiebt das VERHAELTNIS, und die Summe
+    //     bleibt exakt der Elternknoten.
+    let erste: u64 = n_first(state, root(state))
+    if resize_at(state, erste, 72072) {
+        if n_w(state, erste) == 480 && check(state) == 0 {
+            n = n + 1
+        }
+    }
+    // 18. Ausbalancieren macht sie wieder gleich -- EXAKT, weil 720720
+    //     durch zwei teilbar ist.
+    balance(state, root(state))
+    if n_frac(state, erste) == FRAC_ONE / 2 && n_w(state, erste) == 400 {
+        n = n + 1
+    }
+    // 19. EIN WECHSEL DER BILDSCHIRMAUFLOESUNG WIRD UEBERLEBT: derselbe
+    //     Baum, neu ausgemessen. Das verlangt die Runde DISPLAY.
+    let knoten_vorher: u64 = nodes(state)
+    set_area(state, 0, 0, 1024, 768)
+    if nodes(state) == knoten_vorher && n_w(state, erste) == 512 {
+        if check(state) == 0 {
+            n = n + 1
+        }
+    }
+    set_area(state, 0, 0, 800, 600)
+    // 20. Die Schnellablage ist ein Sonderfall des Baumes: halb links
+    //     sind genau 400x600 bei (0,0).
+    let l: u64 = first_leaf(state, root(state))
+    snap(state, l, SNAP_LEFT)
+    if n_x(state, l) == 0 && n_w(state, l) == 400 && n_h(state, l) == 600 {
+        if check(state) == 0 {
+            n = n + 1
+        }
+    }
+    // 21. Und ein Viertel oben links ist 400x300 bei (0,0) -- dafuer
+    //     braucht es drei Fenster, sonst gibt es keinen Partner.
+    insert(state, 4)
+    insert(state, 5)
+    let q: u64 = node_of_client(state, 4)
+    if q != NONE {
+        if snap(state, q, SNAP_TL) {
+            if n_x(state, q) == 0 && n_y(state, q) == 0 {
+                if n_w(state, q) == 400 && n_h(state, q) == 300 {
+                    if check(state) == 0 {
+                        n = n + 1
+                    }
+                }
+            }
+        }
+    }
+    // 22. Die Obergrenze ist BENANNT und wird eingehalten: das 49.
+    //     Fenster bekommt eine Absage, keinen stillen Ueberlauf.
+    var k: u64 = 0
+    var abgelehnt: bool = false
+    while k < MAX_LEAVES + 4 {
+        if insert(state, 100 + k) == NONE {
+            abgelehnt = true
+        }
+        k = k + 1
+    }
+    if abgelehnt && leaves(state) == MAX_LEAVES && check(state) == 0 {
+        n = n + 1
+    }
+    // 23. DIE GEGENPROBE ZUR PRUEFUNG SELBST. Ein Rechteck wird um
+    //     einen Bildpunkt verstellt; findet `check` das nicht, prueft es
+    //     nichts.
+    let opfer: u64 = first_leaf(state, root(state))
+    let breit: u64 = n_w(state, opfer)
+    nset(state, opfer, N_W, breit + 1)
+    if check(state) != 0 {
+        n = n + 1
+    }
+    nset(state, opfer, N_W, breit)
+    relayout(state)
+    // 24. Die Tastenbelegung kommt aus TEXT und nicht aus dem Quelltext.
+    var conf: [u8; 57] = "# test\nbind mod+h focus-left\nbind mod+shift+l move-right\0"
+    if bind_parse(state, (&conf[0]) as u64, 56) == 2 {
+        if bind_lookup(state, 104, MOD_ALT) == A_FOCUS_LEFT {
+            if bind_lookup(state, 108, MOD_ALT | MOD_SHIFT) == A_MOVE_RIGHT {
+                if bind_lookup(state, 104, 0) == A_NONE {
+                    n = n + 1
+                }
+            }
+        }
+    }
+    clear_tree(state)
+    bind_reset(state)
+    return n
+}
+
+fn selftest_max() -> u64 {
+    return 24
+}
