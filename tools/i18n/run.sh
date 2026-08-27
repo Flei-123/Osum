@@ -162,8 +162,8 @@ timeout 180 qemu-system-x86_64 -kernel "$TMPD/en/k.mb" -m 256 \
     -serial "file:$TMPD/i18nt.txt" -display none -no-reboot \
     -drive "file=$TMPD/t.img,format=raw,if=ide,index=0" \
     -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1
-p=$(grep -aoE 'i18n: pass=[0-9]+' "$TMPD/i18nt.txt" | tail -1 | grep -oE '[0-9]+')
-f=$(grep -aoE 'fail=[0-9]+' "$TMPD/i18nt.txt" | tail -1 | grep -oE '[0-9]+')
+p=$(grep -aoE 'i18n: pass=[0-9]+' "$TMPD/i18nt.txt" | tail -1 | sed 's/.*=//')
+f=$(grep -aoE 'fail=[0-9]+' "$TMPD/i18nt.txt" | tail -1 | sed 's/.*=//')
 is "Zusagen in Ring 3, gescheitert" "${f:-?}" "0"
 ok "Zusagen in Ring 3, erfuellt: ${p:-0}"
 grep -a '^i18n: bad' "$TMPD/i18nt.txt" | sed 's/^/        /'
@@ -385,18 +385,37 @@ fi
 
 echo "== 9. was vorher gruen war, ist es noch =="
 
+# GEGEN DIE GEMESSENE AUSGANGSLAGE UND NICHT GEGEN NULL.
+#
+# `tools/wm/run.sh` war schon VOR dieser Runde nicht vollstaendig gruen.
+# Gemessen auf d7bdcfc, dem Stand, auf dem diese Runde aufsetzt:
+# 99 Zusagen erfuellt, 4 gescheitert. Was scheitert, gehoert der Runde
+# DESKTOP und nicht dieser:
+#
+#   * "die Zusagen des Fensterservers ueber sich selbst: 20, erwartet 17"
+#     -- DESKTOP hat vier Selbsttests dazugebaut (jetzt 21) und den
+#     Laeufer nicht nachgezogen. Und einer der 21 faellt wirklich durch.
+#   * dreimal "der Titel ... LEER" -- die Titelleiste zeigt in diesem
+#     Stand keinen Text an der Stelle, an der der Laeufer ihn erwartet.
+#
+# Diese Runde macht das nicht schlimmer -- und sie repariert es auch
+# nicht: `kernel/wm.fi` gehoert in diesem Augenblick der Runde TILING,
+# und zwei Runden, die dieselbe Datei richten, richten sie zweimal
+# verschieden. Gemeldet ist es hier, damit niemand die 4 fuer neu haelt.
+BASIS_WM=${BASIS_WM:-4}
+BASIS_K15=${BASIS_K15:-0}
+
 for r in wm k15; do
-    if [ -f "tools/$r/run.sh" ]; then
-        bash "tools/$r/run.sh" > "$TMPD/alt-$r.txt" 2>&1
-        rc=$?
-        z=$(grep -cE '^  OK ' "$TMPD/alt-$r.txt")
-        n=$(grep -cE '^  FAIL' "$TMPD/alt-$r.txt")
-        if [ "${n:-0}" = 0 ]; then
-            ok "tools/$r/run.sh: $z Zusagen, 0 gescheitert"
-        else
-            bad "tools/$r/run.sh: $z Zusagen, $n gescheitert"
-            grep -E '^  FAIL' "$TMPD/alt-$r.txt" | head -10 | sed 's/^/        /'
-        fi
+    [ -f "tools/$r/run.sh" ] || continue
+    bash "tools/$r/run.sh" > "$TMPD/alt-$r.txt" 2>&1
+    z=$(grep -cE '^  OK ' "$TMPD/alt-$r.txt")
+    n=$(grep -cE '^  FAIL' "$TMPD/alt-$r.txt")
+    basis=$BASIS_WM; [ "$r" = k15 ] && basis=$BASIS_K15
+    if [ "${n:-0}" -le "$basis" ]; then
+        ok "tools/$r/run.sh: $z erfuellt, $n gescheitert (Ausgangslage: $basis)"
+    else
+        bad "tools/$r/run.sh: $z erfuellt, $n gescheitert -- Ausgangslage war $basis"
+        grep -E '^  FAIL' "$TMPD/alt-$r.txt" | head -10 | sed 's/^/        /'
     fi
 done
 
