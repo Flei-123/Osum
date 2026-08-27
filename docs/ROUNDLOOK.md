@@ -643,6 +643,185 @@ somewhere better, or named as a round of its own.
 
 ---
 
+## 6a. THE ADDENDUM: THE LAST THREE GERMAN PROGRAM NAMES
+
+Justin's rule is in `docs/NAMING.md` and it is older than this round:
+**names of files, programs, commands, paths and configuration keys are
+English; only the text a person reads is translated.** Round `rename-en`
+(`d89f512`) had renamed `suchen`, `starter` and `wigdemo` and left the
+three biggest programs of the desktop alone — four rounds were editing
+them at the same time, and a rename that collides with four merges is a
+rename nobody thanks you for. This round was in those files anyway.
+
+| was | is |
+|---|---|
+| `kernel/user/leiste.fi`, `/bin/leiste` | `kernel/user/taskbar.fi`, `/bin/taskbar` |
+| `kernel/user/schreibtisch.fi`, `/bin/schreibtisch` | `kernel/user/desktop.fi`, `/bin/desktop` |
+| `kernel/user/einstellungen.fi`, `/bin/einstellungen` | `kernel/user/settings.fi`, `/bin/settings` |
+
+`git mv`, so the history stays attached to the files (`git log
+--follow` still walks back through round DESKTOP).
+
+### A NAME IN THIS SYSTEM LIVES IN FIVE PLACES
+
+This is why it was pulled through by hand and not with one `sed` over
+the tree. Three of the five would have survived a `sed` without a
+murmur, and two of those three fail *silently*.
+
+1. **The file name** — and the lists that read it: the file lists in
+   `tests/theme/rawcolour.py` and `tools/i18n/scan.py`, the exception
+   list in `tools/k18/run.sh`, the greps in `tools/display/run.sh` and
+   `tools/desktop/run.sh`. A checker whose file list has a name that no
+   longer exists checks one file fewer and says nothing.
+
+2. **The `/bin` path** — `desk_start` and `netv_demo` in
+   `kernel/kmain.fi`, `p_settings` in `kernel/user/qs.fi`, and the
+   header line of `/etc/taskbar.conf` in **both** of its writers.
+
+3. **`argv[0]`, and the LENGTH OF THE ARGV BLOCK beside it.** The
+   kernel hands the program its own name and, as a separate number,
+   how many octets that block is:
+
+   ```
+   desk_spawn(state, p_desk, a_desk, 13)   ->  8   "desktop\0"
+   desk_spawn(state, p_task, a_task,  7)   ->  8   "taskbar\0"
+   desk_spawn(state, p_set,  a_set,  15)   ->  9   "settings\0"
+   desk_spawn_n(state, p_nv, a_non,  32,3) -> 27   "netview\0none\0/bin/settings\0"
+   ```
+
+   A length that does not move with the name either truncates `argv[0]`
+   or reads past the end of it. `sed` does not know that the number two
+   lines down belongs to the string.
+
+4. **The name on the serial line.** `leiste: deko n=`,
+   `schreibtisch: ready `, `einstellungen: feld` — that is the program
+   announcing itself, so it moves too, and with it the declared length
+   of nine string literals and eleven greps in `tools/i18n/run.sh` and
+   `tools/look/shot.sh` that look for exactly those words.
+
+5. **The symbol prefix.** A module name in Firn is the prefix of every
+   symbol in it, so `leiste__paint` became `taskbar__paint`.
+   `tools/desktop/run.sh` proves the taskbar lives in ring 3 by
+   searching the kernel image for those three symbols and failing if it
+   finds them. **A counter-test that searches for a symbol which no
+   longer exists passes every time and tests nothing** — the worst kind
+   of green. It moved with the name.
+
+The declared lengths were recomputed, not estimated (`\0` is ONE
+octet): 24 declarations, each worked out and then confirmed by the
+compiler. The two writers of the `/etc/taskbar.conf` header have the
+same new text and the same new length, 60.
+
+`kernel/wm.fi` had a local variable `leiste` holding the TITLE BAR's
+colour — nothing to do with `/bin/leiste`, but an identifier, and the
+grep below is supposed to come back empty outside German prose. It is
+called `titel` now, after what it holds.
+
+**What stays German, deliberately:** `Taskleiste`, `Titelleiste`,
+`Bildlaufleiste`, `Pfadleiste`, `Menueleiste`, `Schnelleinstellungen`,
+`Voreinstellung`, and `Schreibtisch` as a *concept* in comments — plus
+the display text in `locale/de/messages` (`taskbar.title = Taskleiste`).
+That is the rule working, not the rule being broken.
+
+### THE PROOF
+
+```
+grep -rn 'leiste\|schreibtisch\|einstellungen' .   (without .git/)
+```
+
+comes back with **nothing in a path, a build list, a symbol or an
+identifier**. What is left is thirteen lines, and every one of them is
+a sentence *about* the rename:
+
+```
+docs/NAMING.md          4   the was/is table and the symbol-prefix note
+docs/ROUNDLOOK.md       5   this section, and two git commands quoted
+                            the way they were RUN (a command against a
+                            commit has to name the path that commit had)
+docs/ROUNDTASKBAR.md    2   "`taskbar.fi` (then `leiste.fi`) had ..."
+docs/ROUNDTHEME.md      1   the same
+kernel/user/taskbar.fi  1   the comment that says what it used to be
+```
+
+### A BUG THE RENAME FLUSHED OUT
+
+`tools/look/shot.sh` rebuilt the kernel only when it was **missing**.
+The programs were rebuilt whenever their source was newer; the kernel
+was not. So the first run after the rename booted the OLD kernel, which
+dutifully started `/bin/schreibtisch`, which no longer existed. The only
+sign was one line:
+
+```
+desk: start /bin/schreibtisch  pid=0
+```
+
+and a pid of 0 is not something anybody reads as an error. Both follow
+the same rule now: newer source, new build.
+
+### MEASURED
+
+```
+desk: start /bin/desktop   pid=2
+desk: start /bin/taskbar   pid=3
+desk: start /bin/settings  pid=4
+35 taskbar: lines, 7 desktop: lines, settings: lang=de src=2 keys=154
+taskbar: conf edge=0 ename=bottom height=28 autohide=0 ontop=1 align=left src=file
+```
+
+All sixteen programs compile and link; the kernel builds.
+
+---
+
+## 6b. THE BRANCH `rename-etc` — DO NOT MERGE IT, AND IT IS ALREADY DONE
+
+The four German configuration paths it was named for are **already
+English in this tree**, applied by `b5c796e` before this round started:
+
+| was | is | where it lives now |
+|---|---|---|
+| `/etc/hintergrund` | `/etc/wallpaper` | `desktop.fi`, `settings.fi` |
+| `/etc/schirm.conf` | `/etc/display.conf` | `settings.fi`, both `messages` |
+| `/etc/zeit.conf` | `/etc/time.conf` | `settings.fi`, `taskbar.fi`, both `messages`, `tests/theme/`, `tools/look/shot.sh` |
+| `/etc/netz.conf` | `/etc/network.conf` | `dhcp.fi`, `settings.fi`, both `messages` |
+
+Checked, not assumed: `grep -rn '/etc/hintergrund\|/etc/schirm\|/etc/zeit\|/etc/netz'`
+over the tree finds **no occurrence in any `.fi`, `.sh` or `.py` file** —
+only the was/is table in `docs/NAMING.md`.
+
+`b5c796e` did the same thing this addendum did and for the same reason:
+it applied the change **mechanically to the finished files** instead of
+replaying `283b378`'s diff, which was cut before seventeen branches
+touched those same files and would have conflicted in every one of
+them. It also recomputed the length literals — `/etc/network.conf` is
+three octets longer than `/etc/netz.conf`, `/etc/wallpaper` two shorter
+than `/etc/hintergrund`.
+
+**The one deliberate exception**, and it is named rather than hidden:
+`wlibc.timezone_read()` reads `/etc/time.conf` and falls back to
+`/etc/zeit.conf`. A machine that silently loses its timezone on an
+upgrade is not an upgrade. It is a READ and never a write; nothing in
+the system creates the old name. `docs/NAMING.md` said "there is no
+backwards compatibility for the old names anywhere", which was not
+true, and now says what is.
+
+**Why the branch must not be merged.** `git diff --name-status -M
+mergeline..rename-etc` is a list of BACKWARDS renames and deletions:
+
+```
+R087  assets/apps/launcher.osp/INFO  ->  assets/apps/suchen.prog/INFO
+R100  REMOVE-FROM-FIRN.md            ->  ENTFERNEN-AUS-FIRN.md
+D     LICENSE.MIT
+D     THIRD_PARTY.md
+D     assets/icons/LICENSE.lucide
+D     assets/netview/*            (all ten mark and state files)
+```
+
+Merging it would undo round RENAME, undo the licence bookkeeping and
+delete the icon and netview assets. Its only real content is `283b378`,
+which is in the tree. **The branch can be deleted.**
+
+---
+
 ## 7. HOW TO RUN IT
 
 ```
@@ -655,7 +834,21 @@ bash tools/look/shot.sh /tmp/x  shape=modern scheme=night mode=dark \
 python3 tests/look/rawmetric.py     # no painting routine names a size
 python3 tests/theme/rawcolour.py    # and none names a colour
 python3 tools/i18n/scan.py          # and none holds German text
+
+grep -rn 'leiste\|schreibtisch\|einstellungen' . | grep -v '^./.git/'
+                                    # section 6a: only sentences about
+                                    # the rename come back
+grep -rn '/etc/hintergrund\|/etc/schirm\|/etc/zeit\|/etc/netz' .
+                                    # section 6b: only docs/NAMING.md
 ```
+
+Three of these runners are NOT in `./test.sh` and were not put there by
+this round: `tools/desktop/run.sh`, `tools/i18n/run.sh` and
+`tools/look/run.sh`. That is worth knowing, because the first two are
+the ones that exercise the three renamed programs hardest. They were run
+by hand for this addendum and their numbers are in the report; adding
+sections to the acceptance suite is a decision for whoever owns it, not
+something a rename should do on the way past.
 
 `tools/look/shot.sh` builds the image the system is **supposed** to
 have — `/lib/icons.ttf`, `/etc/passwd`, `/etc/schemas/`, `/etc/shapes/`,
