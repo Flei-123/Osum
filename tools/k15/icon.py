@@ -2,7 +2,7 @@
 """tools/k15/icon.py -- aus einer Zeichnung ein BILD.
 
 Runde K15, zweiter Nachtrag. Ein Programm ist ein Buendel
-(`/apps/<name>.prog/`), und in ein Buendel gehoert ein Symbol. Der erste
+(`/apps/<name>.osp/`), und in ein Buendel gehoert ein Symbol. Der erste
 Nachtrag hatte statt eines Symbols sechs Hexziffern in einer Textdatei --
 ehrlich, solange dieses System kein Bild lesen konnte, aber eben kein
 Bild.

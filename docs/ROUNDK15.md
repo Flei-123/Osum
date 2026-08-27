@@ -480,11 +480,11 @@ der Kernel die Symbole `wlib__button`, `wlib__step` und `wlibc__text_at`
 Der erste Nachtrag legte je Programm eine Datei `/usr/share/apps/*.app`
 an. Justins Festlegung für den zweiten: **wie bei Apple, ein Bündel** —
 alles, was zu einem Programm gehört, an einer Stelle. Installieren heißt
-kopieren, entfernen heißt löschen. Die Endung ist **`.prog`** und nicht
+kopieren, entfernen heißt löschen. Die Endung ist **`.osp`** und nicht
 `.app`; wer die Form übernimmt, muss nicht auch den Namen nehmen.
 
 ```
-/apps/explorer.prog/
+/apps/explorer.osp/
     INFO            name, info, keys, fassung
     start           die ausfuehrbare Datei
     symbol          das Bild (Format OSYM)
@@ -528,7 +528,7 @@ Bündel kommen, das der Bauer dieses Systems selbst schreibt. Die Kennung
 steht am Anfang, also steht dieses Format einem PNG-Leser später nicht im
 Weg.
 
-**Die Quelle ist Text** (`assets/apps/*.prog/symbol.txt`: eine Palette,
+**Die Quelle ist Text** (`assets/apps/*.osp/symbol.txt`: eine Palette,
 dann sechzehn Zeilen zu sechzehn Zeichen) — ein Oktettklumpen im Baum
 wäre in keinem Unterschied lesbar. `tools/k15/icon.py` macht daraus die
 Datei und liest sie unabhängig zurück.
@@ -800,7 +800,7 @@ legt selten viertausend Dateien an —, ein Werkzeug auf dem Wirt nicht.
   angezeigten Treffer aus den Elternnummern gebaut — ein Durchgang je
   Ebene. Das ist billig für zwölf Treffer und wäre teuer für 4000.
 * **`unlink` zählt `I_NLINK` weiter nicht herunter.** Ein `rm
-  /apps/explorer.prog/start` macht `/bin/explorer` unbrauchbar. Auf `/bin`
+  /apps/explorer.osp/start` macht `/bin/explorer` unbrauchbar. Auf `/bin`
   und `/apps`, die nur gelesen werden, fällt das nicht an; falsch ist es
   trotzdem.
 * **Die Blockkarte bleibt ein Block** — höchstens 4096 Blöcke, also zwei
