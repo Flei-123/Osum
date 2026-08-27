@@ -43,6 +43,7 @@ profile kernel
 import ulib
 import libc.io
 import libc.mem
+import utf8
 
 export {
     start, ready, screen_w, screen_h, mouse_x, mouse_y,
@@ -50,6 +51,7 @@ export {
     clip_set, clip_x0, clip_y0, clip_x1, clip_y1,
     px, hline, vline, rect, frame, frame3, blend,
     text_at, text_w, text_h, glyph_w, ascent_of, mono_cell,
+    fit, back, chars,
     push, push_rect, cursor_shape,
     clip_put, clip_take, clip_len,
     theme, theme_load, theme_named, theme_count, theme_name_at,
@@ -412,8 +414,19 @@ static mut gc_used: u64 = 0
 static mut gc_calls: u64 = 0
 static mut gbuf: [u8; 2048] = [0 as u8; 2048]
 
+// RUNDE I18N: DER SCHLUESSEL WURDE BREITER. Er trug `c & 0xFFFF`, also
+// sechzehn Bit -- genug fuer ein Oktett, genug fuer die
+// mehrsprachige Ebene, und zu wenig fuer einen Codepunkt: Unicode
+// reicht bis U+10FFFF, das sind einundzwanzig Bit. Mit der alten Maske
+// haetten sich U+1F600 und U+F600 denselben Platz im Zwischenspeicher
+// geteilt und waeren als DASSELBE Zeichen gemalt worden. Jetzt:
+// vierundzwanzig Bit fuer den Codepunkt, acht fuer die Groesse, der
+// Rest fuer die Schrift -- dieselbe Aufteilung wie in `ttf.key_of` im
+// Kernel, damit beide Speicher dasselbe Zeichen unter derselben Zahl
+// fuehren.
 fn gkey(f: u64, px_: u64, c: u64) -> u64 {
-    return (f << 24) | (px_ << 16) | (c & 0xFFFF) | 0x8000000000000000
+    return (f << 32) | ((px_ & 0xFF) << 24) | (c & 0xFFFFFF)
+        | 0x8000000000000000
 }
 
 fn ghash(k: u64) -> u64 {
@@ -517,14 +530,23 @@ fn draw_glyph(at: u64, x: i64, y: i64, color: u64) {
 // Laufweite DANACH, und gemalt wird bei `cx >> 6`. Wer eines davon
 // vertauscht, hat eine Oberflaeche, deren Text sich nicht mehr gegen
 // die zweite Rasterung rechnen laesst.
+//
+// RUNDE I18N: EIN DURCHLAUF JE ZEICHEN. Vorher las die Schleife ein
+// Oktett, fragte den Kernel nach der Glyphe dieses Oktetts und schob den
+// Zeiger um eins weiter. Fuer "Aufloesung" mit echtem Umlaut heisst das:
+// 0xC3 und 0xB6 einzeln, zwei Glyphen, die keine Schrift hat, also zwei
+// Leerraeume -- und der Text ist auch noch zu breit, weil zweimal eine
+// Laufweite dazukam.
 fn text_at(f: u64, px_: u64, x: u64, y: u64, p: u64, n: u64,
     color: u64) -> u64 {
     var cx: i64 = (x as i64) * 64
     var vorher: u64 = 0
     var k: u64 = 0
     while k < n {
-        let c: u64 = (*((p + k) as *mut u8)) as u64
-        if c == 0 {
+        let v: u64 = utf8.next(p, n, k)
+        let l: u64 = utf8.len_of(v)
+        let c: u64 = utf8.cp_of(v)
+        if l == 0 || c == 0 {
             k = n
         } else {
             if vorher != 0 {
@@ -536,7 +558,7 @@ fn text_at(f: u64, px_: u64, x: u64, y: u64, p: u64, n: u64,
                 cx = cx + gc[(at + GC_ADV) as usize] as i64
             }
             vorher = c
-            k = k + 1
+            k = k + l
         }
     }
     return (cx >> 6) as u64
@@ -549,8 +571,10 @@ fn text_w(f: u64, px_: u64, p: u64, n: u64) -> u64 {
     var vorher: u64 = 0
     var k: u64 = 0
     while k < n {
-        let c: u64 = (*((p + k) as *mut u8)) as u64
-        if c == 0 {
+        let v: u64 = utf8.next(p, n, k)
+        let l: u64 = utf8.len_of(v)
+        let c: u64 = utf8.cp_of(v)
+        if l == 0 || c == 0 {
             k = n
         } else {
             if vorher != 0 {
@@ -561,10 +585,82 @@ fn text_w(f: u64, px_: u64, p: u64, n: u64) -> u64 {
                 cx = cx + gc[(at + GC_ADV) as usize] as i64
             }
             vorher = c
-            k = k + 1
+            k = k + l
         }
     }
     return (cx >> 6) as u64
+}
+
+// ---------------------------------------------- RUNDE I18N: UMBRECHEN
+//
+// WER TEXT ABSCHNEIDET, MUSS AN EINER ZEICHENGRENZE ABSCHNEIDEN. Das
+// klingt selbstverstaendlich und war es bis heute nicht: `wlib.fi`
+// kuerzt eine zu lange Zeile, indem es die Laenge um eins verringert,
+// bis sie passt (`while cl > 0 && text_w(...) > ...`). Ein Oktett
+// weniger heisst bei einem Umlaut: die ERSTE Haelfte des Zeichens bleibt
+// stehen. Das ist keine gekuerzte Zeichenkette mehr, das ist eine
+// kaputte -- und `text_at` malt dafuer ein Ersatzzeichen.
+//
+// Diese beiden Funktionen sind die Antwort. `back` geht von `k` aus
+// EIN Zeichen zurueck, `fit` sagt, wieviele OKTETTE hoechstens passen,
+// ohne ein Zeichen zu zerteilen.
+
+// Der Anfang des Zeichens VOR dem Oktett `k`. Sucht rueckwaerts das
+// naechste Oktett, das keine Fortsetzung (10xxxxxx) ist -- hoechstens
+// vier Schritte, denn laenger ist keine Folge.
+fn back(p: u64, k: u64) -> u64 {
+    if k == 0 {
+        return 0
+    }
+    var i: u64 = k - 1
+    var n: u64 = 0
+    while n < 3 {
+        if ((*((p + i) as *mut u8)) as u64 & 0xC0) != 0x80 {
+            return i
+        }
+        if i == 0 {
+            return 0
+        }
+        i = i - 1
+        n = n + 1
+    }
+    return i
+}
+
+// Wieviele der `n` Oktette passen in `breite` Bildpunkte, ohne ein
+// Zeichen zu zerschneiden? Gibt eine Laenge in OKTETTEN zurueck, die
+// immer auf einer Zeichengrenze endet.
+fn fit(f: u64, px_: u64, p: u64, n: u64, breite: u64) -> u64 {
+    var cx: i64 = 0
+    var vorher: u64 = 0
+    var k: u64 = 0
+    while k < n {
+        let v: u64 = utf8.next(p, n, k)
+        let l: u64 = utf8.len_of(v)
+        let c: u64 = utf8.cp_of(v)
+        if l == 0 || c == 0 {
+            return k
+        }
+        if vorher != 0 {
+            cx = cx + kern26(f, px_, vorher, c)
+        }
+        let at: u64 = gfind(f, px_, c)
+        if at != 0xFFFFFFFFFFFFFFFF {
+            cx = cx + gc[(at + GC_ADV) as usize] as i64
+        }
+        if (cx >> 6) as u64 > breite {
+            return k
+        }
+        vorher = c
+        k = k + l
+    }
+    return n
+}
+
+// Wieviele ZEICHEN in `n` Oktetten stehen. Ein Textfeld zaehlt damit
+// seine Einfuegemarke, statt Oktette zu zaehlen.
+fn chars(p: u64, n: u64) -> u64 {
+    return utf8.chars(p, n)
 }
 
 fn glyph_w(f: u64, px_: u64, c: u64) -> u64 {
