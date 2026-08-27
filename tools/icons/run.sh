@@ -259,6 +259,7 @@ OSYM=$(wert "$TMPD/icont.txt" 'ns_osym=[0-9]+' | grep -oE '[0-9]+')
 BG=$(wert "$TMPD/icont.txt" 'bytes_glyph=[0-9]+' | grep -oE '[0-9]+')
 BO=$(wert "$TMPD/icont.txt" 'bytes_osym=[0-9]+' | grep -oE '[0-9]+')
 INK=$(wert "$TMPD/icont.txt" 'ink_px=[0-9]+' | grep -oE '[0-9]+')
+CPX=$(wert "$TMPD/icont.txt" 'colour_px=[0-9]+' | grep -oE '[0-9]+')
 echo "        one icon cold ${COLD:-?} ns, warm ${WARM:-?} ns," \
      "one OSYM bitmap ${OSYM:-?} ns"
 echo "        in memory: glyph ${BG:-?} octets, OSYM ${BO:-?} octets"
@@ -269,6 +270,8 @@ if [ -n "${INK:-}" ] && [ "${INK:-0}" -gt 0 ]; then
          "OSYM $((${OSYM:-0} / INK)) ns   (QEMU without KVM, TCG)"
 fi
 num "a cached icon costs something and the clock saw it" "${WARM:-0}" ge 1
+num "the colour check touched real ink, not nothing" "${CPX:-0}" ge 1
+num "and not the whole box either" "${CPX:-999}" lt 256
 num "an icon in memory is smaller than the same OSYM picture" \
     "${BG:-999999}" lt "${BO:-0}"
 
