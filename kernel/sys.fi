@@ -621,6 +621,27 @@ const NV_LINK: u64 = 15 // der Zustand der Maschine, ungefiltert
 // duerfte, koennte jedem anderen sein Netz nehmen.
 const SYS_OSUM_NETVFB: u64 = 1313
 
+// ============================== RUNDE NETVIEW, DRITTER NACHTRAG
+//
+// EIN TASTENKUERZEL, DAS KEIN FENSTER HAT. Der Fensterserver gibt eine
+// Taste dem Fenster MIT DEM EINGABEFOKUS (`wm.on_key`); die Taskleiste
+// ist absichtlich nie dieses Fenster, und ein Kuerzel, das nur wirkt,
+// wenn man vorher die Leiste anklickt, waere keines. Die Tastatur
+// SCHREIBT den Druck deshalb auf (`kbd.fi`), und wer will, liest ihn:
+//
+//   HOTKEY(0) -> Zaehler   um eins hoeher als beim letzten Druck
+//   HOTKEY(1) -> Zeichen   welcher Buchstabe es war
+//   HOTKEY(2) -> ns        die monotone Uhr IM AUGENBLICK DES DRUCKS
+//   HOTKEY(3) -> 1/0       wird die Taste gerade gehalten
+//
+// FRAGEN DARF JEDER. Es ist die Auskunft "es wurde Super+A gedrueckt",
+// und die hat jedes Programm, das den Fokus hat, ohnehin schon.
+const SYS_OSUM_HOTKEY: u64 = 1320
+const HK_SEQ_Q: u64 = 0
+const HK_KEY_Q: u64 = 1
+const HK_NS_Q: u64 = 2
+const HK_DOWN_Q: u64 = 3
+
 const SYS_OSUM_SETENV: u64 = 1400
 const SYS_OSUM_MOUNT: u64 = 1401
 
@@ -1252,6 +1273,13 @@ fn dispatch(number: u64, frame: u64, state: u64) -> u64 {
     // dem Block, den Runde K8 dafuer ausgewiesen und nie benutzt hat.
     if number >= SYS_OSUM_NETGET && number <= SYS_OSUM_NETVFB {
         return net_call(state, me, number, a0, a1, a2)
+    }
+    // RUNDE NETVIEW, dritter Nachtrag: das globale Tastenkuerzel. Eine
+    // eigene Zeile und nicht in `net_call` hineingeschmuggelt -- es ist
+    // eine Auskunft ueber die TASTATUR, und wer sie dort suchte, wo das
+    // Netz beantwortet wird, faende sie nie.
+    if number == SYS_OSUM_HOTKEY {
+        return do_hotkey(state, a0)
     }
     // ------------------------------------------------------ RUNDE K13
     //
@@ -5680,6 +5708,27 @@ fn do_netvfb(state: u64, me: u64, want: u64) -> u64 {
     return 0
 }
 
+// RUNDE NETVIEW, DRITTER NACHTRAG: was die Tastatur aufgeschrieben hat.
+// Vier Auskuenfte und kein Abholen: der Zaehler wird hier NICHT
+// zurueckgesetzt. Ein Leser vergleicht ihn mit der Zahl, die er zuletzt
+// gesehen hat -- damit kann kein zweiter Leser dem ersten den Druck
+// wegnehmen, und ein Leser, der zweimal fragt, handelt trotzdem einmal.
+fn do_hotkey(state: u64, what: u64) -> u64 {
+    if what == HK_SEQ_Q {
+        return kbd.hotkey_seq(state)
+    }
+    if what == HK_KEY_Q {
+        return kbd.hotkey_key(state)
+    }
+    if what == HK_NS_Q {
+        return kbd.hotkey_ns(state)
+    }
+    if what == HK_DOWN_Q {
+        return kbd.super_down(state)
+    }
+    return neg(errno.E_INVAL)
+}
+
 fn net_call(state: u64, me: u64, number: u64, a0: u64, a1: u64,
     a2: u64) -> u64 {
     // ====================================================== RUNDE NETVIEW
@@ -5793,8 +5842,32 @@ fn net_call(state: u64, me: u64, number: u64, a0: u64, a1: u64,
     if !inet.ready(state) {
         return errno.neg(errno.E_NODEV)
     }
+    // RUNDE NETVIEW, DRITTER NACHTRAG: DIE ADRESSE WIEDER HERGEBEN.
+    //
+    // Bis hierher war die Null verboten, und das war richtig, solange
+    // es nur "setz die Adresse" gab: 0.0.0.0 ist keine Adresse. Die
+    // Schnelleinstellungen brauchen aber die Gegenrichtung -- ein
+    // "Netz aus", das die Maschine wirklich adresslos macht, statt nur
+    // so zu tun. Genau EINE Kombination heisst das, und sie muss
+    // vollstaendig sein: Adresse, Maske und Gateway alle drei null.
+    // Eine Adresse ohne Maske bleibt ein Fehler, so wie vorher.
+    //
+    // WAS DANACH GILT, und es ist nicht behauptet, sondern faellt aus
+    // `netview.link_state` heraus: die Karte ist weiter da, der Traeger
+    // ist weiter da, `inet.ip` ist 0 -- also meldet die Maschine
+    // "Traeger da, keine Adresse", genau die zweite der vier Stufen,
+    // und die Ecke der Taskleiste malt das Zeichen dafuer. Es gibt
+    // keinen fuenften Zustand "abgeschaltet", weil es fuer den Benutzer
+    // keinen Unterschied macht, ob die Adresse nie da war oder gerade
+    // weggenommen wurde.
     if a0 == 0 {
-        return errno.neg(errno.E_INVAL)
+        if a1 != 0 || (a2 & 0xFFFFFFFF) != 0 {
+            return errno.neg(errno.E_INVAL)
+        }
+        if !inet.readdr(state, 0, 0, 0, 0, 0, 0) {
+            return errno.neg(errno.E_IO)
+        }
+        return 0
     }
     // Die Praefixlaenge aus der Maske. Eine Maske mit Loechern
     // (0xFF00FF00) ist keine Maske; sie wird hier NICHT stillschweigend
