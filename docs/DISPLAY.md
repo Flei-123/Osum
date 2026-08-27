@@ -119,8 +119,7 @@ and `YRES` back afterwards is **not enough** -- the card kept scanning
 out with a different pitch than the kernel believed, and the screenshot
 showed a striped carpet instead of four colour fields, shifting by a
 fixed amount every few rows. The kernel thought it was correct: every
-number in its own state was right (`disp: geom 800x600 pitch=3200
-panel=800x600 ppitch=3200`). The fix is to restore the old mode through
+number in its own state was right (`disp: geom 800x600 pitch=3200 panel=800x600 ppitch=3200`). The fix is to restore the old mode through
 the *same* path `set_mode` uses -- off, numbers, on -- and then read the
 line length back and compare it with the one `fb.fi` keeps, remapping if
 they disagree. Only a screenshot found this; no assertion on the kernel's
@@ -213,7 +212,7 @@ acceptance run photographs it.
 
 ```
 fb: 800x600x32  pitch=3200  src=vbe  phys=0xfd000000  huge=1
-disp: switch 800x600 -> 1024x768   rc=0  us=9758   panel=1024x768
+disp: switch 800x600 -> 1024x768   rc=0  us=10646  panel=1024x768
 disp: switch 1024x768 -> 800x600   rc=0  us=...    panel=800x600
 disp: sw=2  fail=0  rev=0
 ```
@@ -223,7 +222,7 @@ and the screenshots: the *before* image is 800 x 600, the *after* image is
 the font (`schau.py text ... "OSUM K7 FRAMEBUFFER 01234"`). The pixel at
 (1023, 767) exists in the second image and does not exist in the first.
 
-**9.8 ms** for one switch, under QEMU/TCG. That covers the register
+**10.6 ms** for one switch, under QEMU/TCG. That covers the register
 write, freeing and re-taking the window slots, a `cr3` reload, allocating
 the back buffer, and clearing and redrawing the screen.
 
@@ -298,17 +297,17 @@ is invisible in the picture.
 
 ```
 disp: bench 2560x1080  px=2764800
-      flush=6883 us   lut=500983 us   lutline=7547 us
-      sat=1446696 us  rot90=784487 us
+      flush=8407 us   lut=496670 us   lutline=6938 us
+      sat=1445486 us  rot90=895268 us
 ```
 
 | path | per full frame | per pixel |
 | --- | --- | --- |
-| `rep movsq`, no arithmetic (round K7) | 6 883 us | 2.5 ns |
-| through the lookup table | 500 983 us | 181 ns |
-| one text line (16 rows) through the table | 7 547 us | 184 ns |
-| plus saturation | 1 446 696 us | 523 ns |
-| 90-degree rotation, no table | 784 487 us | 284 ns |
+| `rep movsq`, no arithmetic (round K7) | 8 407 us | 3 ns |
+| through the lookup table | 496 670 us | 179 ns |
+| one text line (16 rows) through the table | 6 938 us | 169 ns |
+| plus saturation | 1 445 486 us | 522 ns |
+| 90-degree rotation, no table | 895 268 us | 323 ns |
 
 **These numbers are bad, and here is why they are bad.** Two reasons,
 both of them honest and neither of them fixable inside this round:
@@ -331,8 +330,8 @@ What *is* under this round's control was done and measured:
 * A dedicated straight-line path for the case that actually occurs
   (no rotation, no scaling, table on) which honours the **dirty
   rectangle**. This is the number that matters in practice: a console
-  writing one line costs 16 screen rows, not 1080. Measured: **7 547 us
-  instead of 500 983 us**, a factor of 66.
+  writing one line costs 16 screen rows, not 1080. Measured: **6 938 us
+  instead of 496 670 us**, a factor of 72.
 * And when there is no rotation, no scaling, no table and no saturation,
   `flush` takes the K7 `rep movsq` path unchanged. The condition is one
   comparison against four scalars. `fbbench` before and after this round
@@ -531,3 +530,23 @@ Words on the kernel command line, all of them off by default:
 | `disprot` | stop with the screen rotated 90 degrees, for the photo |
 | `dispconfirm` | switch, do not confirm, let the deadline run out |
 | `dispedid` | dump the raw EDID block |
+
+---
+
+## 11. State of the acceptance run
+
+```
+DISPLAY: 140 passed, 0 failed
+```
+
+The rounds that came before are unchanged: `tools/gfx/run.sh` reports
+76 passed, 0 failed with this branch in the tree, including its thirteen
+kernel-side assertions about the framebuffer and its pixel-exact
+comparison of the whole screen against the serial transcript.
+
+One practical note for whoever runs these: they are QEMU under TCG and
+they are slow. Running six of the suites in parallel on a twelve-core
+machine made several of them fail with `exit code 0, expected 21` and
+`'fb: hold' is missing` -- the sixty-second wait for the hold marker
+simply ran out. Run them one at a time; the failures were the harness
+starving, not the kernel.
