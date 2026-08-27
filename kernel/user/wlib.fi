@@ -70,6 +70,8 @@ export {
     menu_open, menu_at, menu_win, dlg_text, dlg_open, dlg_ask, dlg_state,
     dlg_close, dlg_button, dlg_win, dlg_label,
     counts, blits_done, key_last,
+    theme_watch, theme_now, theme_switches, theme_polls, theme_pixels,
+    theme_stales, paint_all, THEME_POLL_TICKS,
     rect_x, rect_y, rect_w, rect_h, kind_of,
     text_x, text_base, text_fg, text_bg, row_base, row_x, row_h,
     head_base, cell_base, cell_x, head_h, icon_x, icon_y,
@@ -203,6 +205,14 @@ static mut s_esc: u64 = 0 // Zustand der Fluchtfolge
 static mut s_lastclick: u64 = 0
 static mut s_lastwd: u64 = 0
 static mut s_ticks: u64 = 0
+// RUNDE THEME. Was das Umschalten kostet, gezaehlt an der Stelle, an
+// der es passiert -- nicht geschaetzt.
+static mut s_thpoll: u64 = 0 // Tick des letzten Nachsehens
+static mut s_thgen: u64 = 0 // zuletzt gesehene Generation
+static mut s_thswitch: u64 = 0 // wie oft sich das Thema geaendert hat
+static mut s_thpx: u64 = 0 // Bildpunkte, die dafuer neu gemalt wurden
+static mut s_thstale: u64 = 0 // Male, die ein Bild mittendrin veraltete
+static mut s_thpolls: u64 = 0
 static mut dlgbuf: [u8; 160] = [0 as u8; 160]
 static mut ev: [u8; 16] = [0 as u8; 16]
 
@@ -1377,7 +1387,7 @@ fn bild_malen(p: u64, x: u64, y: u64, kw: u64, kh: u64) {
             // Kasten um sich, und ein Pruefer, der die Zeilenfarbe misst,
             // faende sie an den Ecken nicht.
             if (f >> 24) != 0 {
-                wlibc.px(x + c, y + r, f & 0x00FFFFFF)
+                wlibc.px(x + c, y + r, f & wlibc.RGB24)
             }
             c = c + 1
         }
@@ -1440,9 +1450,16 @@ fn paint_list(i: u64) {
                     // Plaettchens hinter ihm stand.
                     let bw2: u64 = wlibc.text_w(wlibc.F_UI, wlibc.PX_UI,
                         q, 1)
+                    // WEISS WAR FALSCH, UND ZWAR MESSBAR: die Farbe
+                    // des Plaettchens kommt aus der Anwendung, und auf
+                    // einem hellen Plaettchen ist ein weisser
+                    // Buchstabe nicht zu lesen. `theme_on` rechnet den
+                    // Kontrast beider Kandidaten aus und nimmt den
+                    // besseren -- dieselbe Rechnung, mit der die
+                    // Akzentfarbe ihre Schriftfarbe bekommt.
                     wlibc.text_at(wlibc.F_UI, wlibc.PX_UI,
                         x + 5 + sub(14, bw2) / 2, ry + 3 + 12, q, 1,
-                        0x00FFFFFF)
+                        wlibc.theme_on(f))
                 }
                 }
             }
@@ -1766,10 +1783,10 @@ fn draw_all() {
     while w < nwn {
         if ng(w, N_H) != 0 {
             dirty_all(w)
-            flush_win(w)
         }
         w = w + 1
     }
+    let _g: u64 = paint_all()
 }
 
 // ==================================================================
@@ -2650,6 +2667,98 @@ fn dlg_close() {
 // abgibt, laesst die andere Aufgabe nicht laufen, und im
 // Bildschirmfoto fehlt dann etwas, ohne dass irgendwo ein Fehler steht.
 
+// ================================================== RUNDE THEME
+//
+// DAS UMSCHALTEN ZUR LAUFZEIT, VON DER SEITE DES FENSTERS AUS.
+//
+// Ein Programm mit dieser Bibliothek muss dafuer NICHTS tun: `step()`
+// sieht zehnmal in der Sekunde nach, ob sich die aufgeloesten Marken
+// geaendert haben, und wenn ja, ist alles schmutzig. Zehnmal und nicht
+// bei jedem Durchlauf, weil ein Nachsehen drei Dateien liest und den
+// ganzen Satz neu aufloest; die Verzoegerung, die das kostet, steht
+// gemessen in docs/ROUNDTHEME.md und wird nicht kleingeredet.
+const THEME_POLL_TICKS: u64 = 25
+
+fn theme_watch() -> bool {
+    let t: u64 = ticks()
+    if t < s_thpoll + THEME_POLL_TICKS {
+        return false
+    }
+    s_thpoll = t
+    s_thpolls = s_thpolls + 1
+    if !wlibc.theme_poll() {
+        return false
+    }
+    s_thswitch = s_thswitch + 1
+    var w: u64 = 0
+    while w < nwn {
+        if ng(w, N_H) != 0 {
+            dirty_all(w)
+        }
+        w = w + 1
+    }
+    return true
+}
+
+// Sofort nachsehen, ohne auf den Takt zu warten. Der Testlaeufer
+// braucht das, um eine Zeit zu messen, in der kein Warten steckt.
+fn theme_now() -> bool {
+    s_thpoll = 0
+    return theme_watch()
+}
+
+fn theme_switches() -> u64 {
+    return s_thswitch
+}
+
+fn theme_polls() -> u64 {
+    return s_thpolls
+}
+
+fn theme_pixels() -> u64 {
+    return s_thpx
+}
+
+fn theme_stales() -> u64 {
+    return s_thstale
+}
+
+// Alle Fenster neu malen und die Flaeche zurueckgeben. EINE Stelle,
+// damit die Zahl aus der Messung und die Zahl aus dem Betrieb dieselbe
+// Rechnung sind.
+fn paint_all() -> u64 {
+    let vor: u64 = wlibc.theme_frame_begin()
+    let _v: u64 = vor
+    var gemalt: u64 = 0
+    var w: u64 = 0
+    while w < nwn {
+        if ng(w, N_H) != 0 {
+            gemalt = gemalt + flush_win(w)
+        }
+        w = w + 1
+    }
+    // DAS THEMA HAT SICH WAEHREND DES MALENS GEDREHT. Das Bild, das
+    // gerade fertig geworden ist, ist in sich stimmig -- es hat die
+    // ganze Zeit aus derselben Bank gelesen -- aber es ist nicht mehr
+    // das aktuelle. Also genau EINMAL noch, mit der neuen Bank; ein
+    // zweites Mal kann es nicht noetig werden, weil der naechste
+    // Durchlauf wieder frisch einrastet.
+    if wlibc.theme_frame_end() {
+        s_thstale = s_thstale + 1
+        let _v2: u64 = wlibc.theme_frame_begin()
+        w = 0
+        while w < nwn {
+            if ng(w, N_H) != 0 {
+                dirty_all(w)
+                gemalt = gemalt + flush_win(w)
+            }
+            w = w + 1
+        }
+        let _e2: bool = wlibc.theme_frame_end()
+    }
+    return gemalt
+}
+
 fn step() -> u64 {
     s_fired = 0
     s_fkind = 0
@@ -2727,13 +2836,10 @@ fn step() -> u64 {
             s_fired = 0
         }
     }
-    var gemalt: u64 = 0
-    w = 0
-    while w < nwn {
-        if ng(w, N_H) != 0 {
-            gemalt = gemalt + flush_win(w)
-        }
-        w = w + 1
+    let gewechselt: bool = theme_watch()
+    let gemalt: u64 = paint_all()
+    if gewechselt {
+        s_thpx = s_thpx + gemalt
     }
     if !etwas && gemalt == 0 {
         ulib.sys(ulib.SYS_YIELD, 0, 0, 0)

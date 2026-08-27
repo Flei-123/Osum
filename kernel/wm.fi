@@ -77,6 +77,9 @@ export {
     set_strut, win_strut_edge, win_strut_size, work_x, work_y, work_w,
     work_h, recalc_work, maximize, is_max, struts, workcalcs,
     set_nostrut, nostrut,
+    set_deco_colour, deco_rgb, deco_writes, DECO_SLOTS,
+    DK_FRAME, DK_TITLE, DK_TEXT, DK_FRAME_ON, DK_TITLE_ON, DK_TEXT_ON,
+    DK_CLOSE, DK_CLOSE_MARK, DK_DESK, DK_TERM_FG, DK_TERM_BG,
     fill, text, blit_in, flush_win, hit,
     ev_push, ev_pop, ev_waiting,
     on_mouse, on_key, term_write, term_out, term_cols, term_rows, term_cx, term_cy,
@@ -260,6 +263,69 @@ const S_DRAGT: u64 = 0x1C8 // das gezogene Fenster kam AUS dem Baum
 const S_HOTS: u64 = 0x1D0 // wie viele Tastenkuerzel ausgefuehrt wurden
 const S_ACTS: u64 = 0x1D8 // wie viele davon wirklich etwas getan haben
 
+// ---------------------------------------------------- RUNDE THEME
+//
+// DIE ACHT FARBEN DER FENSTERDEKORATION, und der Grund, warum sie hier
+// als DATEN stehen und nicht mehr als Zahlen im Zeichencode:
+//
+// Rahmen und Titelleiste malt der SERVER -- er muss, er setzt das Bild
+// zusammen. Damit sass bis zu dieser Runde die einzige Stelle der
+// Oberflaeche, die ihre Farbe selbst wusste, im KERNEL: sechs Werte in
+// `draw_win`, unerreichbar fuer jedes Schema. Ein helles Thema mit
+// dunkelblauer Titelleiste ist kein helles Thema.
+//
+// Die Loesung ist NICHT, den Kernel das Thema lesen zu lassen -- dann
+// haette der Kernel eine Meinung darueber, wie ein Fenster aussieht.
+// Sie ist: der Server haelt acht Zahlen, und wer sie setzt, ist Ring 3
+// (WM_DECO, `kernel/sys.fi`). Die Farbpolitik bleibt im Userland, der
+// Server bekommt das Ergebnis.
+//
+// GESPEICHERT WIRD WERT + 1. Null heisst "nie gesetzt", und dann gilt
+// `deco_fallback` -- sonst waere eine frisch gestartete Maschine, deren
+// Taskleiste noch nicht laeuft, schwarz auf schwarz.
+const S_DECO: u64 = 0x180 // acht Woerter, 0x180 .. 0x1B8
+const S_DECON: u64 = 0x1C0 // wie oft ein Wert gesetzt wurde
+const DECO_SLOTS: u64 = 11
+const DK_FRAME: u64 = 0
+const DK_TITLE: u64 = 1
+const DK_TEXT: u64 = 2
+const DK_FRAME_ON: u64 = 3
+const DK_TITLE_ON: u64 = 4
+const DK_TEXT_ON: u64 = 5
+const DK_CLOSE: u64 = 6
+const DK_CLOSE_MARK: u64 = 7
+// Drei weitere Flaechen, die der Server selbst faerbt: der Grund unter
+// allen Fenstern (sichtbar, solange kein Schreibtisch laeuft) und die
+// beiden Farben eines Terminalfensters.
+//
+// NICHT DABEI IST DER MAUSZEIGER. Er bleibt weiss mit schwarzem Rand,
+// und zwar mit Absicht: er liegt ueber den Bildpunkten der Anwendung,
+// und was dort steht, bestimmt kein Thema. Ein Zeiger, der sich mit dem
+// Thema faerbt, ist ein Zeiger, den man auf dem falschen Bild verliert.
+const DK_DESK: u64 = 8
+const DK_TERM_FG: u64 = 9
+const DK_TERM_BG: u64 = 10
+// Die Bitmaske einer 24-Bit-Farbe. Sie hat einen Namen, damit
+// tests/theme/rawcolour.py sie nicht als Farbe zaehlt -- und weil eine
+// Maske, die wie eine Farbe aussieht, es verdient, eine zu heissen.
+const RGB24: u64 = 0x00FFFFFF
+// Die groesste Strebe, die ein Fenster anmelden darf. Sie steht hier,
+// weil 0xFFFFFF mitten in einer Bedingung wie eine Farbe aussieht und
+// keine ist.
+const STRUT_MAX: u64 = 0x00FFFFFF
+// Die beiden Prueffarben des Selbsttests. Sie faerben nichts, was ein
+// Mensch sieht: sie werden geschrieben und wieder gelesen.
+const PROBE_IN: u64 = 0x0000FF00
+const PROBE_OUT: u64 = 0x00FF0000
+// DER MAUSZEIGER IST ABSICHTLICH THEMENFREI. Er liegt ueber den
+// Bildpunkten der Anwendung, und was dort steht, bestimmt kein Schema
+// -- ein Foto, ein Terminal, ein Spiel. Weiss mit schwarzem Rand ist
+// auf jedem Grund zu sehen; eine Zeigerfarbe aus dem Thema ist eine,
+// die man auf dem falschen Bild verliert. Deshalb stehen diese beiden
+// Werte hier und werden nicht ueber WM_DECO gesetzt.
+const CURSOR_BODY: u64 = 0x00FFFFFF
+const CURSOR_EDGE: u64 = 0x00000000
+
 // ein Fenster
 const W_USED: u64 = 0x00
 const W_ID: u64 = 0x08
@@ -334,6 +400,100 @@ fn gs(state: u64, off: u64) -> u64 {
 
 fn ss(state: u64, off: u64, v: u64) {
     kstate.set(state + kstate.WM_OFF, off, v)
+}
+
+// RUNDE THEME: DIE ACHT FARBEN DER DEKORATION.
+//
+// `deco_fallback` ist die EINZIGE Stelle im Server, an der eine Farbe
+// als Zahl steht. Sie sind die Werte, die bis zu dieser Runde mitten im
+// Zeichencode standen, und sie gelten genau so lange, bis ein Programm
+// in Ring 3 etwas anderes sagt.
+fn deco_fallback(i: u64) -> u64 {
+    if i == DK_FRAME {
+        return 0x003A4654
+    }
+    if i == DK_TITLE {
+        return 0x002C3848
+    }
+    if i == DK_TEXT {
+        return 0x00909CA8
+    }
+    if i == DK_FRAME_ON {
+        return 0x004C9AE8
+    }
+    if i == DK_TITLE_ON {
+        return 0x001C4E7E
+    }
+    if i == DK_TEXT_ON {
+        return 0x00FFFFFF
+    }
+    if i == DK_CLOSE {
+        return 0x00D04040
+    }
+    if i == DK_DESK {
+        return 0x001E2A38
+    }
+    if i == DK_TERM_FG {
+        return 0x00E0E6EC
+    }
+    if i == DK_TERM_BG {
+        return 0x0010141A
+    }
+    return 0x00FFFFFF
+}
+
+fn deco_rgb(state: u64, i: u64) -> u64 {
+    if i >= DECO_SLOTS {
+        return 0
+    }
+    let v: u64 = gs(state, S_DECO + i * 8)
+    if v == 0 {
+        return deco_fallback(i)
+    }
+    return v - 1
+}
+
+// 0xRRGGBB im Format des Bildschirms. Der Server rechnet um und nicht
+// der Aufrufer: welches Format der Rahmenpuffer hat, weiss `fb`.
+fn rgb24(state: u64, v: u64) -> u64 {
+    return fb.rgb(state, (v >> 16) & 255, (v >> 8) & 255, v & 255)
+}
+
+fn deco(state: u64, i: u64) -> u64 {
+    return rgb24(state, deco_rgb(state, i))
+}
+
+fn set_deco_colour(state: u64, i: u64, v: u64) -> bool {
+    if i >= DECO_SLOTS {
+        return false
+    }
+    ss(state, S_DECO + i * 8, (v & RGB24) + 1)
+    ss(state, S_DECON, gs(state, S_DECON) + 1)
+    if i == DK_DESK {
+        ss(state, S_DESK, deco(state, DK_DESK))
+    }
+    // EIN TERMINALFENSTER, DAS SCHON OFFEN IST, ZIEHT MIT. Seine
+    // beiden Farben stehen im Fenster und nicht im Server, weil jedes
+    // Terminal seine eigenen haben darf; wer nur die Voreinstellung
+    // aendert, aendert sonst nur die Fenster, die es noch nicht gibt.
+    if i == DK_TERM_FG || i == DK_TERM_BG {
+        var k: u64 = 0
+        while k < MAX_WIN {
+            if wg(state, k, W_USED) != 0 && wg(state, k, W_KIND) == K_TERM {
+                if i == DK_TERM_FG {
+                    wsv(state, k, W_FG, deco(state, DK_TERM_FG))
+                } else {
+                    wsv(state, k, W_BG, deco(state, DK_TERM_BG))
+                }
+            }
+            k = k + 1
+        }
+    }
+    return true
+}
+
+fn deco_writes(state: u64) -> u64 {
+    return gs(state, S_DECON)
 }
 
 // DIE FENSTERTAFEL LIEGT SEIT DER RUNDE DESKTOP IN `kstate.DSK_OFF`
@@ -645,7 +805,7 @@ fn init(state: u64, w: u64, h: u64, nodirty: bool, nofocus: bool) -> bool {
     ss(state, S_STRUTS, 0)
     ss(state, S_WORKCALC, 0)
     recalc_work(state)
-    ss(state, S_DESK, fb.rgb(state, 0x1E, 0x2A, 0x38))
+    ss(state, S_DESK, deco(state, DK_DESK))
     ss(state, S_FONT_UI, ttf.MAX_FONTS)
     ss(state, S_FONT_MONO, ttf.MAX_FONTS)
     ss(state, S_TILE, 0)
@@ -774,8 +934,8 @@ fn create(state: u64, owner: u64, x: i64, y: i64, w: u64, h: u64,
             wsv(state, i, W_KIND, kind)
             wsv(state, i, W_EHEAD, 0)
             wsv(state, i, W_ETAIL, 0)
-            wsv(state, i, W_FG, fb.rgb(state, 0xE0, 0xE6, 0xEC))
-            wsv(state, i, W_BG, fb.rgb(state, 0x10, 0x14, 0x1A))
+            wsv(state, i, W_FG, deco(state, DK_TERM_FG))
+            wsv(state, i, W_BG, deco(state, DK_TERM_BG))
             wsv(state, i, W_GRID, 0)
             wsv(state, i, W_KEYS, 0)
             wsv(state, i, W_LAYER, L_NORMAL)
@@ -1254,7 +1414,7 @@ fn set_strut(state: u64, i: u64, edge: u64, size: u64) -> bool {
     if edge > EDGE_RIGHT {
         return false
     }
-    if size > 0xFFFFFF {
+    if size > STRUT_MAX {
         return false
     }
     if size == 0 {
@@ -1829,13 +1989,13 @@ fn paint_win(state: u64, i: u64, cx0: u64, cy0: u64, cx1: u64, cy1: u64) {
         return
     }
     let aktiv: bool = focus(state) == i
-    var rahmen: u64 = fb.rgb(state, 0x3A, 0x46, 0x54)
-    var leiste: u64 = fb.rgb(state, 0x2C, 0x38, 0x48)
-    var schrift: u64 = fb.rgb(state, 0x90, 0x9C, 0xA8)
+    var rahmen: u64 = deco(state, DK_FRAME)
+    var leiste: u64 = deco(state, DK_TITLE)
+    var schrift: u64 = deco(state, DK_TEXT)
     if aktiv {
-        rahmen = fb.rgb(state, 0x4C, 0x9A, 0xE8)
-        leiste = fb.rgb(state, 0x1C, 0x4E, 0x7E)
-        schrift = fb.rgb(state, 0xFF, 0xFF, 0xFF)
+        rahmen = deco(state, DK_FRAME_ON)
+        leiste = deco(state, DK_TITLE_ON)
+        schrift = deco(state, DK_TEXT_ON)
     }
     // Der ganze Aussenbereich in Rahmenfarbe, danach die Leiste und die
     // Flaeche darueber. Das ist ein Rechteck mehr als noetig und spart
@@ -1855,9 +2015,9 @@ fn paint_win(state: u64, i: u64, cx0: u64, cy0: u64, cx1: u64, cy1: u64) {
     let bx: i64 = wx + ow - BORDER as i64 - CLOSE_W as i64 - 3
     let by: i64 = wy + 4
     if bx + CLOSE_W as i64 > ax0 && bx < ax1 && by + CLOSE_W as i64 > ay0 {
-        let rot: u64 = fb.rgb(state, 0xD0, 0x40, 0x40)
+        let rot: u64 = deco(state, DK_CLOSE)
         fb.fill(state, bx as u64, by as u64, CLOSE_W, CLOSE_W, rot)
-        let weiss: u64 = fb.rgb(state, 0xFF, 0xFF, 0xFF)
+        let weiss: u64 = deco(state, DK_CLOSE_MARK)
         var k: u64 = 3
         while k < CLOSE_W - 3 {
             fb.pixel(state, (bx + k as i64) as u64, (by + k as i64) as u64,
@@ -1981,8 +2141,8 @@ fn fb_glyph(state: u64, slot: u64, x: i64, y: i64, color: u64,
 fn paint_cursor(state: u64, cx0: u64, cy0: u64, cx1: u64, cy1: u64) {
     let mx: i64 = gs(state, S_CURX) as i64
     let my: i64 = gs(state, S_CURY) as i64
-    let schwarz: u64 = fb.rgb(state, 0, 0, 0)
-    let weiss: u64 = fb.rgb(state, 0xFF, 0xFF, 0xFF)
+    let schwarz: u64 = rgb24(state, CURSOR_EDGE)
+    let weiss: u64 = rgb24(state, CURSOR_BODY)
     var r: u64 = 0
     while r < CUR_H {
         let py: i64 = my + r as i64
@@ -2613,14 +2773,14 @@ fn selftest(state: u64) -> u64 {
     // 10. Das Malen bleibt IM Fenster: ein Bildpunkt jenseits der Kante
     //     wird nicht geschrieben, und der letzte darin schon.
     fill(state, a, 0, 0, 200, 100, 0)
-    wpixel(state, a, 199, 99, 0x00FF00)
-    wpixel(state, a, 200, 99, 0xFF0000)
-    if wget(state, a, 199, 99) == 0x00FF00 && wget(state, a, 0, 0) == 0 {
+    wpixel(state, a, 199, 99, PROBE_IN)
+    wpixel(state, a, 200, 99, PROBE_OUT)
+    if wget(state, a, 199, 99) == PROBE_IN && wget(state, a, 0, 0) == 0 {
         n = n + 1
     }
     // 11. Verschieben aendert die Stelle, nicht den Inhalt.
     move_win(state, a, 300, 200)
-    if win_x(state, a) == 300 && wget(state, a, 199, 99) == 0x00FF00 {
+    if win_x(state, a) == 300 && wget(state, a, 199, 99) == PROBE_IN {
         n = n + 1
     }
     // 12. Der schmutzige Bereich deckt beide Stellen -- die alte und
