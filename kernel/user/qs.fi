@@ -76,7 +76,7 @@ import libc.kcall
 
 export {
     init, anchor, step, toggle, is_open, hit, want_hide, took_hide,
-    W, H
+    win_id, W, H
 }
 
 // --------------------------------------------------------- the shape
@@ -156,6 +156,7 @@ static mut l_hide: [u8; 17] = "Leiste verbergen\0"
 static mut w_on: [u8; 4] = "an\0\0"
 static mut w_off: [u8; 4] = "aus\0"
 static mut l_all: [u8; 19] = "Alle Einstellungen\0"
+static mut t_title: [u8; 16] = "Schnelleinst.\0\0\0"
 
 static mut s_open: [u8; 12] = "qs: open x=\0"
 static mut s_y: [u8; 4] = " y=\0"
@@ -172,6 +173,7 @@ static mut s_tile: [u8; 12] = "qs: tile n=\0"
 static mut s_to: [u8; 5] = " to=\0"
 static mut s_rc: [u8; 5] = " rc=\0"
 static mut s_ico: [u8; 15] = "qs: symbols n=\0"
+static mut s_wid: [u8; 12] = "qs: win id=\0"
 static mut s_spawn: [u8; 17] = "qs: settings pid\0"
 static mut s_txt: [u8; 11] = "qs: text x\0"
 static mut s_eq: [u8; 2] = "=\0"
@@ -350,16 +352,43 @@ fn init(autohide: u64) -> bool {
     ulib.sayn(ic_ok)
     ulib.nl()
     let h: u64 = wlibc.sys5(wlibc.WM_CREATE, 0, (W << 16) | H,
-        (&l_all[0 as usize]) as u64, 0, 0)
+        (&t_title[0 as usize]) as u64, 0, 0)
     if ulib.bad(h) || h == 0 {
         return false
     }
     w_h = h
     let _d: u64 = wlibc.win_state(h, wlibc.WS_DECO, 0)
-    let _l: u64 = wlibc.win_state(h, wlibc.WS_LAYER, wlibc.L_TOP)
+    // L_NORMAL AND NOT L_TOP, and it was L_TOP first and measured
+    // wrong: Escape never arrived. The window server gives the keyboard
+    // ONLY to a window on the normal layer -- `wm.set_layer` explicitly
+    // takes the focus away from anything that leaves it, and
+    // `wm.on_mouse` only calls `set_focus` for L_NORMAL. That is a good
+    // rule and it is round DESKTOP's: a taskbar that swallowed the
+    // keyboard would make every key after a click on it useless.
+    //
+    // But this panel is not a taskbar. It has to be typed at -- Escape
+    // is one of its three ways of closing, and a panel the keyboard
+    // cannot get out of would be worse than none. So it lives on the
+    // normal layer and is RAISED when it opens, which puts it over
+    // everything except the bar itself; and since it sits beside the
+    // bar rather than on it, that is exactly right.
+    //
+    // The price is one line in the taskbar: a window on the normal
+    // layer gets a button in the bar, and this one must not
+    // (`leiste.list_read` skips this id). It is part of the bar, not an
+    // application.
+    let _l: u64 = wlibc.win_state(h, wlibc.WS_LAYER, wlibc.L_NORMAL)
     let _v: u64 = wlibc.win_state(h, wlibc.WS_HIDDEN, 1)
     w_id = wlibc.sys3w(wlibc.WM_INFO, h, wlibc.WI_ID, 0)
+    say((&s_wid[0 as usize]) as u64)
+    ulib.sayn(w_id)
+    ulib.nl()
     return true
+}
+
+// So the bar can leave itself out of its own list of windows.
+fn win_id() -> u64 {
+    return w_id
 }
 
 // WHERE THE TASKBAR IS, out of the taskbar. The work area is what is
@@ -535,7 +564,14 @@ fn step() -> bool {
         let typ: u64 = __mmio_read64((b) as *mut u64)
         let d: u64 = __mmio_read64((b + 8) as *mut u64)
         if typ == wlibc.EV_KEY {
-            if d == 27 {
+            // THE CHARACTER IS AT BITS 32..47 AND NOT AT 0. One event
+            // word carries three numbers -- `wm.ev_push` packs them
+            // `(a << 32) | (b << 16) | c` -- and for a key the
+            // character is `a`. Read as the whole word it is 27 << 32,
+            // which is never 27, so the first version of this simply
+            // ignored every Escape and looked exactly like a focus
+            // problem. It cost two runs to stop believing that.
+            if ((d >> 32) & 0xFFFF) == 27 {
                 shut((&s_esc[0 as usize]) as u64)
                 return true
             }
