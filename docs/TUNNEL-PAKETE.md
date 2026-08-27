@@ -80,7 +80,7 @@ und sie verhalten sich **verschieden**. Alle drei aus
 | Kosten | ohne eingerichteten Tunnel | mit laufendem Tunnel |
 |---|---|---|
 | **Arbeitsspeicher** | **0 Seiten** | 6 Seiten = 24 576 Oktette |
-| **Rechenzeit** | ein Vergleich gegen Null je Rahmen | der Tunnel bei der Arbeit |
+| **Rechenzeit** | **nicht messbar** — 5497/5498 gegen 5497/5497 Durchläufe | der Tunnel bei der Arbeit |
 | **Abbildgröße** | **203 424 Oktette, immer** | dieselben |
 
 **Speicher und Rechenzeit sind wirklich null**, und zwar konstruktiv,
@@ -92,6 +92,27 @@ Seitenrahmen **am Ende** des Laufs gezählt (beim Hochlauf gemessen wäre
 die Antwort immer null, weil `configure` erst später läuft) — 129 038
 gegen 129 032. Die zwölf Skalarworte auf der K2-Seite, 96 Oktette,
 stehen in einer Seite, die es ohnehin gibt.
+
+Für die **Rechenzeit** wurden zwei Kerne im *gleichen* Zustand
+verglichen — beide untätig —, so dass der einzige Unterschied ist, ob
+`rx_hook`, `tx_hook` und `tick` überhaupt aufgerufen werden. Gezählt
+wurden die Durchläufe durch den Paketpfad (`nic: pumps=`) über 15
+Sekunden:
+
+| | Lauf 1 | Lauf 2 |
+|---|---|---|
+| Kern **ohne** Tunnel | 5497 | 5498 |
+| Kern **mit** Tunnel, untätig | 5497 | 5497 |
+
+Der Unterschied liegt bei **einem einzigen Durchlauf**, also unter
+0,02 % und innerhalb der Streuung zwischen zwei Läufen desselben Kerns.
+
+Ein erster Versuch hat hier das Falsche verglichen — „Tunnel
+eingerichtet" gegen „nicht eingerichtet" — und kam auf 42 000 gegen
+5 500 Durchläufe. Das ist kein Preis für einen Haken, das ist ein
+Tunnel bei der Arbeit: `wg.tick` hält den Handschlag frisch und schickt
+Keepalives. Die Frage lautete aber, was der Haken kostet, **wenn kein
+Tunnel läuft**.
 
 **Die Abbildgröße ist die eine Kosten, die sich zur Laufzeit nicht
 wegdrücken lässt.** Osum hat keine nachladbaren Module; ein
@@ -353,6 +374,8 @@ steht nur in den Pfaden, die `opk` erzeugt.
   Pfadlängen-Falle.
 * Arbeitsspeicher: **0 Seiten** ohne eingerichteten Tunnel, 6 Seiten
   (24 576 Oktette) mit.
+* Rechenzeit: **5497/5498 gegen 5497/5497 Durchläufe** durch den
+  Paketpfad — ein Unterschied von einem einzigen Durchlauf.
 * Beide Pakete bauen reproduzierbar: zweimal gebaut, **Oktett für
   Oktett dasselbe**.
 * Installieren, benutzen, entfernen, aufräumen: **33 Einträge
