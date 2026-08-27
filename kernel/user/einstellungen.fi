@@ -119,9 +119,236 @@ static mut l_ip2: [u8; 27] = "Adresse / Maske / Gateway:\0"
 static mut l_kw1: [u8; 16] = "Neues Kennwort:\0"
 static mut l_kw2: [u8; 13] = "Noch einmal:\0"
 static mut b_kw: [u8; 16] = "Kennwort setzen\0"
+// ADDENDUM TASKBAR. English, as every new name in this tree is; the
+// older labels around them are still German and the round RENAME owns
+// that. What these five widgets write is /etc/taskbar.conf and nothing
+// else -- the same file the bar itself writes when it is dragged to an
+// edge. There is no second place where the edge is kept.
+static mut l_tb: [u8; 24] = "Taskbar -- screen edge:\0"
+static mut c_tb: [u8; 22] = "bottom\ntop\nleft\nright\0"
+static mut l_tbs: [u8; 40] = "Thickness in pixels (20..40 / 56..128):\0"
+static mut e_tbs: [u8; 3] = "28\0"
+static mut k_tbah: [u8; 40] = "hide until the pointer touches the edge\0"
+static mut k_tbot: [u8; 14] = "always on top\0"
+static mut p_tbconf: [u8; 18] = "/etc/taskbar.conf\0"
 
 fn say(p: u64) {
     ulib.say(p)
+}
+
+// ==================== ADDENDUM TASKBAR: /etc/taskbar.conf, THE READER
+// AND THE WRITER ====================================================
+//
+// The very same five keys the bar itself reads and writes
+// (kernel/user/leiste.fi). They are parsed here a second time and not
+// shared through a library, for the reason every other duplicated
+// constant in this tree carries: ring 3 programs in this system do not
+// link against each other, they agree on a FILE FORMAT. Five keys, one
+// line each, values in words for the edge and in digits for the rest.
+static mut tb_edge: u64 = 0
+static mut tb_height: u64 = 28
+static mut tb_width: u64 = 104
+static mut tb_autohide: u64 = 0
+static mut tb_ontop: u64 = 1
+static mut tb_buf: [u8; 256] = [0 as u8; 256]
+
+static mut tk_edge: [u8; 5] = "edge\0"
+static mut tk_height: [u8; 7] = "height\0"
+static mut tk_width: [u8; 6] = "width\0"
+static mut tk_ah: [u8; 9] = "autohide\0"
+static mut tk_ot: [u8; 6] = "ontop\0"
+static mut tb_head: [u8; 64] =
+    "# taskbar.conf -- written by /bin/leiste and /bin/einstellungen\0"
+
+fn tb_key_is(p: u64, n: u64, k: u64) -> bool {
+    var i: u64 = 0
+    while i < n {
+        if __mmio_read8((k + i) as *mut u8) == 0 as u8 {
+            return false
+        }
+        if __mmio_read8((p + i) as *mut u8)
+            != __mmio_read8((k + i) as *mut u8) {
+            return false
+        }
+        i = i + 1
+    }
+    return __mmio_read8((k + n) as *mut u8) == 0 as u8
+}
+
+fn tb_clamp(v: u64, lo: u64, hi: u64) -> u64 {
+    if v < lo {
+        return lo
+    }
+    if v > hi {
+        return hi
+    }
+    return v
+}
+
+fn tb_vertical() -> bool {
+    return tb_edge >= 2
+}
+
+fn tb_read() {
+    var word: [u8; 24] = [0 as u8; 24]
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&p_tbconf[0 as usize]) as u64,
+        0, 0)
+    if ulib.bad(fd) {
+        tb_show_size()
+        return
+    }
+    let b: u64 = (&tb_buf[0 as usize]) as u64
+    let n: u64 = ulib.sys(ulib.SYS_READ, fd, b, 255)
+    let _c: u64 = ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    if ulib.bad(n) || n == 0 {
+        tb_show_size()
+        return
+    }
+    var i: u64 = 0
+    while i < n {
+        let ks: u64 = i
+        var ke: u64 = i
+        while ke < n && __mmio_read8((b + ke) as *mut u8) != 61 as u8
+            && __mmio_read8((b + ke) as *mut u8) != 10 as u8 {
+            ke = ke + 1
+        }
+        if ke < n && __mmio_read8((b + ke) as *mut u8) == 61 as u8 {
+            let vs: u64 = ke + 1
+            var ve: u64 = vs
+            while ve < n && __mmio_read8((b + ve) as *mut u8) != 10 as u8
+                && __mmio_read8((b + ve) as *mut u8) != 13 as u8 {
+                ve = ve + 1
+            }
+            let wp: u64 = (&word[0 as usize]) as u64
+            var k: u64 = 0
+            var v: u64 = 0
+            var digits: u64 = 0
+            while vs + k < ve && k < 23 {
+                let c: u64 = __mmio_read8((b + vs + k) as *mut u8) as u64
+                __mmio_write8((wp + k) as *mut u8, c as u8)
+                if c >= 48 && c <= 57 {
+                    v = v * 10 + (c - 48)
+                    digits = digits + 1
+                }
+                k = k + 1
+            }
+            __mmio_write8((wp + k) as *mut u8, 0 as u8)
+            let kl: u64 = ke - ks
+            if tb_key_is(b + ks, kl, (&tk_edge[0 as usize]) as u64) {
+                let e: u64 = wlibc.edge_by_name(wp)
+                if e < 4 {
+                    tb_edge = e
+                }
+            } else if tb_key_is(b + ks, kl, (&tk_height[0 as usize]) as u64) {
+                if digits > 0 {
+                    tb_height = tb_clamp(v, 20, 40)
+                }
+            } else if tb_key_is(b + ks, kl, (&tk_width[0 as usize]) as u64) {
+                if digits > 0 {
+                    tb_width = tb_clamp(v, 56, 128)
+                }
+            } else if tb_key_is(b + ks, kl, (&tk_ah[0 as usize]) as u64) {
+                if digits > 0 {
+                    tb_autohide = v & 1
+                }
+            } else if tb_key_is(b + ks, kl, (&tk_ot[0 as usize]) as u64) {
+                if digits > 0 {
+                    tb_ontop = v & 1
+                }
+            }
+            i = ve + 1
+        } else {
+            i = ke + 1
+        }
+    }
+    tb_show_size()
+}
+
+// ONE ENTRY FIELD FOR TWO NUMBERS, and it is not a shortcut: a
+// horizontal bar and a vertical one have different thicknesses (28 is a
+// good height and a useless width), so the file keeps both. The field
+// shows the one that belongs to the edge currently chosen, and writing
+// it changes only that one -- the other keeps its value.
+fn tb_show_size() {
+    let p: u64 = (&e_tbs[0 as usize]) as u64
+    if tb_vertical() {
+        let _a: u64 = zahl_an(p, 0, tb_width)
+    } else {
+        let _a: u64 = zahl_an(p, 0, tb_height)
+    }
+}
+
+fn tb_set_size(p: u64) {
+    var v: u64 = 0
+    var digits: u64 = 0
+    var i: u64 = 0
+    while __mmio_read8((p + i) as *mut u8) != 0 as u8 && i < 8 {
+        let c: u64 = __mmio_read8((p + i) as *mut u8) as u64
+        if c >= 48 && c <= 57 {
+            v = v * 10 + (c - 48)
+            digits = digits + 1
+        }
+        i = i + 1
+    }
+    if digits == 0 {
+        return
+    }
+    if tb_vertical() {
+        tb_width = tb_clamp(v, 56, 128)
+    } else {
+        tb_height = tb_clamp(v, 20, 40)
+    }
+}
+
+fn tb_write() -> bool {
+    let b: u64 = (&tb_buf[0 as usize]) as u64
+    var at: u64 = text_an(b, 0, (&tb_head[0 as usize]) as u64)
+    __mmio_write8((b + at) as *mut u8, 10 as u8)
+    at = text_an(b, at + 1, (&tk_edge[0 as usize]) as u64)
+    __mmio_write8((b + at) as *mut u8, 61 as u8)
+    at = text_an(b, at + 1, wlibc.edge_name(tb_edge))
+    __mmio_write8((b + at) as *mut u8, 10 as u8)
+    at = text_an(b, at + 1, (&tk_height[0 as usize]) as u64)
+    __mmio_write8((b + at) as *mut u8, 61 as u8)
+    at = zahl_an(b, at + 1, tb_height)
+    __mmio_write8((b + at) as *mut u8, 10 as u8)
+    at = text_an(b, at + 1, (&tk_width[0 as usize]) as u64)
+    __mmio_write8((b + at) as *mut u8, 61 as u8)
+    at = zahl_an(b, at + 1, tb_width)
+    __mmio_write8((b + at) as *mut u8, 10 as u8)
+    at = text_an(b, at + 1, (&tk_ah[0 as usize]) as u64)
+    __mmio_write8((b + at) as *mut u8, 61 as u8)
+    at = zahl_an(b, at + 1, tb_autohide)
+    __mmio_write8((b + at) as *mut u8, 10 as u8)
+    at = text_an(b, at + 1, (&tk_ot[0 as usize]) as u64)
+    __mmio_write8((b + at) as *mut u8, 61 as u8)
+    at = zahl_an(b, at + 1, tb_ontop)
+    __mmio_write8((b + at) as *mut u8, 10 as u8)
+    at = at + 1
+    return datei_schreiben((&p_tbconf[0 as usize]) as u64, b, at)
+}
+
+static mut ts_a: [u8; 24] = "settings: taskbar edge=\0"
+static mut ts_b: [u8; 9] = " height=\0"
+static mut ts_c: [u8; 8] = " width=\0"
+static mut ts_d: [u8; 11] = " autohide=\0"
+static mut ts_e: [u8; 8] = " ontop=\0"
+static mut ts_f: [u8; 8] = " wrote=\0"
+
+fn tb_say() {
+    say((&ts_a[0 as usize]) as u64)
+    say(wlibc.edge_name(tb_edge))
+    say((&ts_b[0 as usize]) as u64)
+    ulib.sayn(tb_height)
+    say((&ts_c[0 as usize]) as u64)
+    ulib.sayn(tb_width)
+    say((&ts_d[0 as usize]) as u64)
+    ulib.sayn(tb_autohide)
+    say((&ts_e[0 as usize]) as u64)
+    ulib.sayn(tb_ontop)
+    say((&ts_f[0 as usize]) as u64)
+    ulib.sayn(geschrieben)
+    ulib.nl()
 }
 
 fn merke(i: u64, r: u64) -> u64 {
@@ -453,6 +680,54 @@ fn stand_lesen() {
     let _u: u64 = zahl_an((&l_wer[0 as usize]) as u64, a, uid)
 }
 
+static mut ms_a: [u8; 23] = "settings: menu open i=\0"
+static mut ms_b: [u8; 4] = " x=\0"
+static mut ms_c: [u8; 4] = " y=\0"
+static mut ms_d: [u8; 7] = " rows=\0"
+static mut ms_e: [u8; 23] = "settings: menu took i=\0"
+static mut ms_f: [u8; 6] = " row=\0"
+
+fn menu_say(i: u64, x: u64, y: u64, n: u64) {
+    say((&ms_a[0 as usize]) as u64)
+    ulib.sayn(i)
+    say((&ms_b[0 as usize]) as u64)
+    ulib.sayn(x)
+    say((&ms_c[0 as usize]) as u64)
+    ulib.sayn(y)
+    say((&ms_d[0 as usize]) as u64)
+    ulib.sayn(n)
+    ulib.nl()
+}
+
+fn menu_done(i: u64, r: u64) {
+    say((&ms_e[0 as usize]) as u64)
+    ulib.sayn(i)
+    say((&ms_f[0 as usize]) as u64)
+    ulib.sayn(r)
+    ulib.nl()
+}
+
+// WHERE THE TASKBAR WIDGETS ARE, in window coordinates. Without this a
+// runner cannot click them, and a setting that is only ever set from
+// inside the program is not measured from the outside.
+static mut mr_a: [u8; 21] = "settings: rect name=\0"
+static mut mr_w: [u8; 4] = " w=\0"
+static mut mr_h: [u8; 4] = " h=\0"
+
+fn rect_say(name: u64, i: u64) {
+    say((&mr_a[0 as usize]) as u64)
+    say(name)
+    say((&ms_b[0 as usize]) as u64)
+    ulib.sayn(wlib.rect_x(i))
+    say((&ms_c[0 as usize]) as u64)
+    ulib.sayn(wlib.rect_y(i))
+    say((&mr_w[0 as usize]) as u64)
+    ulib.sayn(wlib.rect_w(i))
+    say((&mr_h[0 as usize]) as u64)
+    ulib.sayn(wlib.rect_h(i))
+    ulib.nl()
+}
+
 fn melde_stand() {
     var s_m: [u8; 29] = "einstellungen: stand reiter=\0"
     var s_g: [u8; 14] = " geschrieben=\0"
@@ -531,10 +806,15 @@ fn u_start(args: u64) -> u64 {
     let _s: u64 = text_an((&l_stat[0 as usize]) as u64, 0,
         (&m_ok[0 as usize]) as u64)
     stand_lesen()
+    tb_read()
 
-    let bw: u64 = 520
-    let bh: u64 = 400
-    w = wlib.window(140, 60, bw, bh, (&t_titel[0 as usize]) as u64)
+    // THE WINDOW GREW WITH THE PAGE. 520 x 400 held the colour scheme
+    // and the background picture; five more widgets did not fit, and a
+    // widget that does not fit is not laid out badly here -- `wlib`
+    // simply puts it outside the window, where nobody can click it.
+    let bw: u64 = 560
+    let bh: u64 = 500
+    w = wlib.window(130, 34, bw, bh, (&t_titel[0 as usize]) as u64)
     if w >= wlib.MAXWN {
         say((&s_bad[0 as usize]) as u64)
         ulib.nl()
@@ -555,6 +835,16 @@ fn u_start(args: u64) -> u64 {
     let _d2: u64 = merke(wlib.label((&l_bil[0 as usize]) as u64), R_DARST)
     let eb: u64 = merke(wlib.entry((&e_bild[0 as usize]) as u64, 90),
         R_DARST)
+    let _d3: u64 = merke(wlib.label((&l_tb[0 as usize]) as u64), R_DARST)
+    let ce: u64 = merke(wlib.choice((&c_tb[0 as usize]) as u64, tb_edge),
+        R_DARST)
+    let _d4: u64 = merke(wlib.label((&l_tbs[0 as usize]) as u64), R_DARST)
+    wlib.size(80, 26)
+    let et: u64 = merke(wlib.entry((&e_tbs[0 as usize]) as u64, 8), R_DARST)
+    let ka: u64 = merke(wlib.check((&k_tbah[0 as usize]) as u64,
+        tb_autohide != 0), R_DARST)
+    let ko: u64 = merke(wlib.check((&k_tbot[0 as usize]) as u64,
+        tb_ontop != 0), R_DARST)
     wlib.size(140, 26)
     let b1: u64 = merke(wlib.button((&b_uber[0 as usize]) as u64), R_DARST)
     // ---- Bildschirm
@@ -606,6 +896,29 @@ fn u_start(args: u64) -> u64 {
     let _e0: u64 = eb
     zeige_reiter(R_DARST)
     wlib.draw_all()
+    var n_edge: [u8; 5] = "edge\0"
+    var n_size: [u8; 5] = "size\0"
+    var n_ah: [u8; 9] = "autohide\0"
+    var n_ot: [u8; 6] = "ontop\0"
+    var n_ap: [u8; 6] = "apply\0"
+    var n_win: [u8; 4] = "win\0"
+    say((&mr_a[0 as usize]) as u64)
+    say((&n_win[0 as usize]) as u64)
+    say((&ms_b[0 as usize]) as u64)
+    ulib.sayn(wlib.win_x(w))
+    say((&ms_c[0 as usize]) as u64)
+    ulib.sayn(wlib.win_y(w))
+    say((&mr_w[0 as usize]) as u64)
+    ulib.sayn(bw)
+    say((&mr_h[0 as usize]) as u64)
+    ulib.sayn(bh)
+    ulib.nl()
+    rect_say((&n_edge[0 as usize]) as u64, ce)
+    rect_say((&n_size[0 as usize]) as u64, et)
+    rect_say((&n_ah[0 as usize]) as u64, ka)
+    rect_say((&n_ot[0 as usize]) as u64, ko)
+    rect_say((&n_ap[0 as usize]) as u64, b1)
+    tb_say()
     melde_stand()
 
     var runden: u64 = 0
@@ -617,6 +930,46 @@ fn u_start(args: u64) -> u64 {
             if kind == wlib.K_TABS {
                 zeige_reiter(wlib.fired_index())
                 melde_stand()
+            } else if kind == wlib.K_CHOICE {
+                // A CHOICE THAT CANNOT BE CHANGED IS A PICTURE OF A
+                // CHOICE. Round DESKTOP put four of them into this
+                // program -- resolution, time zone, DHCP -- and none of
+                // them ever opened: `wlib` fires K_CHOICE with the index
+                // 0x1000 and leaves it to the application to open the
+                // menu, and this application did not. It does now, and
+                // the same four lines serve the taskbar edge.
+                if wlib.fired_index() == 0x1000 {
+                    var items: u64 = (&c_aufl[0 as usize]) as u64
+                    var cnt: u64 = 2
+                    if id == cz {
+                        items = (&c_zone[0 as usize]) as u64
+                        cnt = 3
+                    } else if id == cn {
+                        items = (&c_bez[0 as usize]) as u64
+                        cnt = 2
+                    } else if id == ce {
+                        items = (&c_tb[0 as usize]) as u64
+                        cnt = 4
+                    }
+                    let mx: u64 = wlib.win_x(w) + 2 + wlib.rect_x(id)
+                    let my: u64 = wlib.win_y(w) + 22 + wlib.rect_y(id)
+                        + wlib.rect_h(id)
+                    let _mo: u64 = wlib.menu_open(id, mx, my, items, cnt)
+                    menu_say(id, mx, my, cnt)
+                }
+            } else if kind == wlib.K_MENUBAR {
+                // The library re-fires the chosen row at the widget that
+                // opened the menu. That is the answer to the choice.
+                if id == cs || id == cz || id == cn || id == ce {
+                    wlib.set_value(id, wlib.fired_index())
+                    if id == ce {
+                        tb_edge = wlib.fired_index()
+                        tb_show_size()
+                        wlib.set_text(et, (&e_tbs[0 as usize]) as u64)
+                    }
+                    wlib.dirty_all(w)
+                    menu_done(id, wlib.fired_index())
+                }
             } else if kind == wlib.K_BUTTON {
                 if id == b1 {
                     // Farbschema und Hintergrundbild
@@ -654,6 +1007,25 @@ fn u_start(args: u64) -> u64 {
                                 as u64, 0, (&m_bildno[0 as usize]) as u64)
                         }
                     }
+                    // ADDENDUM TASKBAR: and the bar. Same button, same
+                    // page, one more file -- and the bar picks the
+                    // change up within half a second without a restart,
+                    // because it re-reads /etc/taskbar.conf and does not
+                    // wait for a message.
+                    tb_edge = wlib.value(ce)
+                    if wlib.value(ka) != 0 {
+                        tb_autohide = 1
+                    } else {
+                        tb_autohide = 0
+                    }
+                    if wlib.value(ko) != 0 {
+                        tb_ontop = 1
+                    } else {
+                        tb_ontop = 0
+                    }
+                    tb_set_size(wlib.text_of(et))
+                    let _tw: bool = tb_write()
+                    tb_say()
                     wlib.set_text(st, (&l_stat[0 as usize]) as u64)
                     melde_stand()
                 } else if id == b2 {
