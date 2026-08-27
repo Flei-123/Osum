@@ -66,7 +66,13 @@ export {
     // ---- Runde K14 ----
     sys4, SYS_VMOUNT, SYS_UMOUNT2, SYS_RENAME, SYS_MNTSTAT,
     MS_USED, MS_TYPE, MS_DEV, MS_FIRST, MS_BLOCKS, MS_FLAGS, MS_OPENS,
-    MS_COUNT, MS_PATHLEN, MS_PATHCH, MNT_RDONLY
+    MS_COUNT, MS_PATHLEN, MS_PATHCH, MNT_RDONLY,
+    // ---- ROUND NETVIEW ----
+    SYS_NETVGET, SYS_NETVSET, SYS_NETVALLOW,
+    NV_MODE, NV_ALLOWN, NV_ALLOW, NV_DROPPED, NV_OPENED, NV_DENIED,
+    NV_REPLIES, NV_PID, NV_CLEAR,
+    V_REAL, V_FILTERED, V_FAKED, V_NONE,
+    view_of, view_set, view_allow, view_name
 }
 
 // ------------------------------------------------------- the numbers
@@ -126,6 +132,35 @@ const MS_COUNT: u64 = 7
 const MS_PATHLEN: u64 = 8
 const MS_PATHCH: u64 = 100
 const MNT_RDONLY: u64 = 1
+
+// ----------------------------------------------------- ROUND NETVIEW
+//
+// WHICH NETWORK A PROCESS SEES. The kernel side is
+// `kernel/netview.fi`; these are the three doors to it and the names of
+// the four views. Everything a program needs in order to be honest to
+// the person in front of it -- `ps`, the taskbar and the settings
+// application all ask exactly this.
+const SYS_NETVGET: u64 = 1310
+const SYS_NETVSET: u64 = 1311
+const SYS_NETVALLOW: u64 = 1312
+
+const NV_MODE: u64 = 0
+const NV_ALLOWN: u64 = 1
+const NV_ALLOW: u64 = 2 // 2..7 = entry 0..5
+const NV_DROPPED: u64 = 8
+const NV_OPENED: u64 = 9
+const NV_DENIED: u64 = 10
+const NV_REPLIES: u64 = 11
+const NV_PID: u64 = 12
+
+// Bit 8 of the argument of NETVSET: clear the allow list at the same
+// time. A view set without it keeps the list it had.
+const NV_CLEAR: u64 = 256
+
+const V_REAL: u64 = 0
+const V_FILTERED: u64 = 1
+const V_FAKED: u64 = 2
+const V_NONE: u64 = 3
 
 // Wo die Umgebung auf der Argumentseite liegt (`kernel/elf.fi`,
 // `write_env`). Dieselbe Zahl steht dort; sie steht hier ein zweites Mal,
@@ -191,6 +226,46 @@ fn sys4(number: u64, a0: u64, a1: u64, a2: u64, a3: u64) -> u64 {
 
 // Did a call fail? A negative answer is an error, and the top 4096 values
 // are the errors -- the same rule the kernel uses.
+// The view of a process, `pid` 0 meaning this one. Reading is allowed
+// for anybody about anybody -- see `sys.do_netvget` for why that is a
+// decision and not an oversight.
+fn view_of(pid: u64) -> u64 {
+    let v: u64 = sys(SYS_NETVGET, pid, NV_MODE, 0)
+    if bad(v) {
+        return V_REAL
+    }
+    return v
+}
+
+// Tightening your own view needs no privilege; anything else needs
+// euid 0. The kernel decides, this only asks.
+fn view_set(pid: u64, v: u64) -> u64 {
+    return sys(SYS_NETVSET, pid, v, 0)
+}
+
+fn view_allow(pid: u64, addr: u64, port: u64, prefix: u64) -> u64 {
+    return sys(SYS_NETVALLOW, pid, addr, (port << 16) | (prefix & 0xFF))
+}
+
+// Four words, and they are English because everything in this system is.
+// `out` needs nine octets.
+fn view_name(v: u64, out: u64) -> u64 {
+    var w0: [u8; 5] = "real\0"
+    var w1: [u8; 9] = "filtered\0"
+    var w2: [u8; 6] = "faked\0"
+    var w3: [u8; 5] = "none\0"
+    if v == V_FILTERED {
+        return strcpy(out, (&w1[0]) as u64)
+    }
+    if v == V_FAKED {
+        return strcpy(out, (&w2[0]) as u64)
+    }
+    if v == V_NONE {
+        return strcpy(out, (&w3[0]) as u64)
+    }
+    return strcpy(out, (&w0[0]) as u64)
+}
+
 fn failed(v: u64) -> bool {
     return errno.is_error(v)
 }
