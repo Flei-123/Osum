@@ -671,6 +671,235 @@ rather than left for somebody else to find.
 * **The corner icon has no click.** Windows opens a network panel from
   it; there is nothing here to open yet.
 
+## 13. The systemwide fallback (second addendum)
+
+Setting every program by hand is work, and the moment it is needed is
+the moment there is least patience for it: the machine has no network,
+and half a dozen programs are refusing to start over it. So there is
+**one systemwide preference**, and it decides what a program gets **when
+nothing else was said about it**.
+
+| value | what it does |
+|---|---|
+| `off` | Nothing is faked. What this system did before this addendum, and the default. |
+| `when-offline` | While there is no way out, a program nobody configured starts in `faked`. The moment there is a way out again, the next program to start gets `real`. |
+| `always` | Everything faked, network or not -- for shutting the machine up on purpose. |
+
+`off` answers **`real`** and not `none`, and that is a decision rather
+than an oversight. A machine with no network already fails every
+connection; answering `none` on top of that would be a second way of
+being offline, with its own error number, handed to programs that never
+asked for one. The default of a system has to be the behaviour that
+system had.
+
+### 13.1 Precedence -- the table
+
+Three places can say what network a program sees. They are ordered, the
+order lives in one function (`appdir.view_for`), and the rule in one
+line is: **an explicit setting on a program always beats the
+preference.**
+
+| `/users/<name>/config/netview` | `net=` in the bundle's `INFO` | preference | the program gets |
+|---|---|---|---|
+| `faked` | anything | anything | **faked** |
+| `real` | anything | `always` | **real** |
+| `none` | anything | `always` | **none** |
+| -- | `filtered` | anything | **filtered** |
+| -- | `real` | `always` | **real** |
+| -- | -- | `off` | **real** |
+| -- | -- | `when-offline`, no way out | **faked** |
+| -- | -- | `when-offline`, online | **real** |
+| -- | -- | `always` | **faked** |
+
+Read the two rows that matter: a program the person put on `real` is not
+quietly forced into `faked`, and a program put on `none` stays without a
+network even while the preference is inventing one for everybody else.
+**The preference fills a blank; it does not overrule an answer.** A
+default that can overrule is not a default, it is a policy engine, and
+this system already has a place for saying "this program, this network"
+-- twice.
+
+### 13.2 A running program is never switched
+
+When the real network comes back, what happens to the program that is
+running in `faked`?
+
+**Nothing.** It keeps the view it started with. The alternative was
+considered and rejected: a view that changes under a program's feet
+changes it *in the middle of a connection*. A socket that was faked a
+moment ago and is real now has a read position into a canned answer that
+no longer exists, and the program on the other end of that gets a
+failure that depends on when the gateway happened to answer an ARP. That
+is the kind of fault that is rare, unreproducible and takes a week to
+find, and it would be bought for a convenience nobody asked for.
+
+So: **new programs get the new view, running ones keep theirs, and the
+mark on the window says which is which.** That last clause is what makes
+the rule liveable rather than confusing -- the person can see, per
+window, that this one is still faked and that one is not.
+
+This falls out of where the preference is applied rather than being
+enforced somewhere: it is read once, when a program is started, and
+written into the task record. There is no code that could change a
+running process's view, so there is no code that has to be trusted not
+to.
+
+### 13.3 Where it is applied, and the price of that
+
+Not in the kernel at `exec`. That was the first design and it collapses
+on the launcher, which is worth writing down because it looks like the
+obvious answer.
+
+The launcher is the thing that puts an explicit view on a program, and
+it does it by **tightening itself and then starting the program**
+(section 6). If the kernel had already forced the launcher into `faked`,
+the launcher could never start anything as `real` again -- because
+`netview.may_set` refuses every loosening, on purpose, and loosening it
+for this one case would re-open exactly the escape section 6 closed: a
+faked program handing itself the wire back in one call.
+
+So the preference is resolved where the other two sources already are:
+at the door a program is started through, in `appdir.view_for`. That
+covers everything started from the desktop -- the launcher, the file
+manager, the desktop icons.
+
+**The price, stated plainly:** a program started from a **shell** keeps
+`real`. A shell is somebody saying exactly what to run, and
+`netview default <cmd>` is that same sentence spelled out; it asks the
+kernel the identical question and applies the identical answer. It is a
+real limit, not a hidden one, and it is where the acceptance measures
+the preference from.
+
+### 13.4 `when-offline` is pessimistic on a silent machine
+
+`when-offline` asks whether there is a **way out**, and that is measured
+as "has the first hop ever answered" (`netview.link_state`, `NS_NOROUTE`
+against `NS_ONLINE`). A machine that has just booted with a static
+address and has not spoken to anybody yet honestly does not know, so it
+answers "no way out" and fakes.
+
+On a normal machine this never shows: the DHCP client has already
+exchanged packets with the gateway before the first program starts, and
+the address cache is filled. On a static-address machine with no traffic
+it does show, and the alternative would be for the system to send probe
+traffic of its own the way Windows' connectivity check does -- traffic
+nobody asked for, from a round about not sending traffic nobody asked
+for. So it is a limit, and it is written here instead of behind a probe.
+
+### 13.5 The corner sign
+
+Windows' corner icon describes the **machine**. Here the preference is a
+statement about the machine too -- but a different one from the four
+states, and the two can disagree in the direction that matters most:
+
+> the machine is genuinely **online**, and every new program is
+> nevertheless getting a **faked** network.
+
+One icon cannot say both, so there are two signs beside each other, and
+the faking sign comes **first**. What is read first is what is read at
+all, and "this system is telling programs a story" is the more important
+of the two sentences -- especially in exactly that case, where the state
+icon on its own would be true and misleading at the same time.
+
+The sign appears **only while the system is actually faking**
+(`netview.faking`): `off` shows nothing, and `when-offline` on a machine
+that is online shows nothing either. The normal case gets no sign, the
+same rule the window marks follow, and for the same reason.
+
+**The grammar of the round, and it is carried by the frame and not by
+the colour:**
+
+| shape | scope |
+|---|---|
+| a **ring** | one program (`mark-filtered`, `mark-faked`, `mark-none`) |
+| a **screen** | the whole machine (the four state icons, and `sys-faking`) |
+
+`sys-faking` is a screen containing the **same wave** that is inside
+`mark-faked` -- it is the same lie, told at a different scope. Somebody
+who cannot tell one colour from another still sees a ring in one place
+and a box in the other; measured, the two silhouettes differ in 79% of
+the pixels either of them colours.
+
+Resting the pointer on the corner adds the sentence:
+
+> `Das System taeuscht neuen Programmen ein Netz vor (Voreinstellung: immer)`
+
+A sign nobody can look up is not honesty, it is decoration.
+
+### 13.6 Where the preference lives
+
+| | |
+|---|---|
+| running value | `netview.fallback`, one word in `pci.K2_SCALARS`. One place. |
+| at boot | `nvfall=0\|1\|2` on the kernel command line (`hw.net_fallback`), applied by `kmain` in one line. |
+| at run time | `SYS_OSUM_NETVFB` (1313), **euid 0 only** -- it is the one setting of this round that touches every process. |
+| readable by | `NETVGET` with `NV_FALLBACK` / `NV_FBVIEW` / `NV_LINK` -- anybody, about the machine. |
+| across reboots | `/etc/netview.conf`, one line `fallback=<word>`. Written by `netview fallback <word>` and by the settings page; read back by `netview boot`, which belongs in `/etc/inittab` as a `once` line. |
+
+The kernel does not read files while it boots and this addendum is not
+the round to teach it to, so persistence is a program that runs early
+rather than a line in `kmain`. The **seam** that costs something: the
+shape of that one line is written out in two places, `kernel/user/netview.fi`
+and `kernel/user/einstellungen.fi`, because the settings application does
+not fetch a second program to save a setting. It is named here rather
+than hidden.
+
+Does `NV_FALLBACK` leak the deception to a faked program? It tells it
+that the system is faking -- but `netview show` has told any process its
+own view since the main round (section 7), on purpose, because a view
+the person cannot read is the lie this system will not tell. The
+deception lives at the **socket**, not at the information desk.
+
+### 13.7 Using it
+
+```
+netview fallback                     what it is, and what that amounts to now
+netview fallback when-offline        set it, and write /etc/netview.conf
+netview boot                         apply /etc/netview.conf   (for /etc/inittab)
+netview default /bin/wget http://... start a program the way the launcher would
+```
+
+`default` is **not a fifth view**. It is the question the launcher asks
+for every program nobody configured, asked out loud, and it is resolved
+once before the command starts -- resolving it later would mean a
+program whose view depends on when it got round to opening a socket.
+
+In the settings application it is on the **same page** as the list of
+programs, **below** the list: it is the weakest of the three sources,
+and the page reads in the order the system decides.
+
+### 13.8 Measured
+
+Same image, same script, same wire -- **one word different on the kernel
+command line**. If a program fails in one run and works in the other,
+that difference has exactly one cause.
+
+| | |
+|---|---|
+| 8a: no card at all, `nvfall=0` | link 0, preference 0, view `real`, **connect fails**, body 0 |
+| 8b: the same, `nvfall=1` | link 0, preference 1, view `faked`, **connect succeeds**, 204, body 0 |
+| 8b: octets on the wire | **0** |
+| 8c: `always` + real wire, no setting | `faked`, 204 |
+| 8c: `always` + **explicit `real`** | `real`, **200**, 46 octets of real page |
+| 8c: `always` + **explicit `none`** | `none`, `-ENETUNREACH`, not a faked 204 |
+| 8d: `when-offline` + online | view `real`, 200, the real page |
+| 8e: preference changed mid-boot | every running process keeps its view; the next program to start is `faked` |
+| 8f: reboot | second boot told nothing, comes up `always` out of `/etc/netview.conf` |
+
+### 13.9 What this addendum does not do
+
+* **It does not catch a program started from a shell.** Section 13.3.
+* **It does not switch a running program.** Section 13.2 -- deliberate.
+* **`when-offline` cannot tell "no route" from "has not asked yet".**
+  Section 13.4.
+* **There is no per-user preference.** It is one number for the machine.
+  A second one per user would need the resolution to know which user is
+  starting the program before the program starts, and
+  `/users/<name>/config/netview` already answers that question one row
+  higher in the table.
+* **The corner sign still has no click.** Neither does the state icon
+  beside it.
+
 ## 12. Files
 
 | file | what |
@@ -692,9 +921,12 @@ rather than left for somebody else to find.
 | `kernel/netmark.fi` | GENERATED from the drawings: the three marks as bit rows, for the window server |
 | `kernel/wm.fi` | the only change this round makes there: the mark in the title bar |
 | `kernel/kmain.fi` | `netvdemo`, a measurement word that starts three programs under three views |
-| `assets/netview/*.txt` | the seven drawings -- the single source of every sign |
+| `assets/netview/*.txt` | the eight drawings -- the single source of every sign |
+| `assets/netview/sys-faking.txt` | second addendum: the sign for "the machine is faking" |
+| `kernel/hw.fi` | second addendum: `nvfall=` on the kernel command line |
+| `/etc/netview.conf` | second addendum: `fallback=<word>`, written by `netview fallback`, read by `netview boot` |
 | `assets/netview/theme-dark`, `theme-light` | the two schemes the measured runs boot with, and the numbers the contrast is computed from |
 | `tools/netview/icons.py` | builds the OSYM files and `netmark.fi`, and checks contrast and silhouettes |
 | `tools/netview/schau.py` | reads a sign back out of a screenshot with the roles resolved |
-| `tools/netview/blatt.py` | the sheet of all seven signs |
+| `tools/netview/blatt.py` | the sheet of all eight signs |
 | `tools/netview/run.sh` | the acceptance run |
