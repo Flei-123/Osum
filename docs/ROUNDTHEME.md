@@ -721,7 +721,7 @@ Who may call it: whoever **is** a taskbar (owns a window on layer
 `L_TOP`) — the same right as `WM_ACT`. If any application could, any
 application could recolour any other application's title bar. The
 taskbar pushes all eleven right after it creates its window and again
-after every theme change; the run reports `leiste: deko n=11`.
+after every theme change; the run reports `taskbar: deko n=11`.
 
 Setting a value does **not** composite. The first version did, and
 because a taskbar sets eleven colours in a row that was eleven
@@ -837,7 +837,8 @@ Six faults, all found by the run and not by reading:
    a settings file the scheme's own `mode` now applies. `auto` is an
    explicit choice and may not be a default.
 
-And one that was already there: `kernel/user/leiste.fi` did not compile
+And one that was already there: `kernel/user/taskbar.fi` (then
+`leiste.fi`) did not compile
 on the commit this branch starts from — a continuation line beginning
 with `*%`. Fixed in the first commit of this branch, separately.
 
@@ -926,9 +927,9 @@ is written down rather than quietly dropped.
 |---|---|
 | `kernel/user/wlibc.fi` | the token system: fixed-point sRGB and WCAG, ramp generation, the three layers, the two banks, the parsers, the poll |
 | `kernel/user/wlib.fi` | `theme_watch`, `paint_all`, the latch around a paint, the counters |
-| `kernel/user/einstellungen.fi` | the appearance tab: scheme, mode, accent, and the measured ratios |
-| `kernel/user/leiste.fi` | pushes the eleven decoration colours to the server |
-| `kernel/user/schreibtisch.fi` | `desktop-top` / `desktop-bottom` instead of borrowed tokens |
+| `kernel/user/settings.fi` | the appearance tab: scheme, mode, accent, and the measured ratios |
+| `kernel/user/taskbar.fi` | pushes the eleven decoration colours to the server |
+| `kernel/user/desktop.fi` | `desktop-top` / `desktop-bottom` instead of borrowed tokens |
 | `kernel/user/themetest.fi` | prints what was resolved; measures; opens a window for the pictures |
 | `kernel/wm.fi` | eleven decoration slots instead of eleven literals |
 | `kernel/sys.fi` | `WM_DECO` (2112) |

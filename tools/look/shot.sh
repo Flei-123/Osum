@@ -35,7 +35,7 @@
 #     progs="..."       override the program list
 #
 # It prints, on stdout, the numbers a caller wants to assert on: the
-# QEMU exit code, the size of the picture, and every `leiste:` and
+# QEMU exit code, the size of the picture, and every `taskbar:` and
 # `wm:` line the run reported.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
@@ -58,7 +58,7 @@ keep=no
 extra=""
 uitrace=no
 autohide=0
-progs="schreibtisch leiste einstellungen launcher dhcp explorer widgetdemo locate sh echo ls cat edit"
+progs="desktop taskbar settings launcher dhcp explorer widgetdemo locate sh echo ls cat edit"
 for a in "$@"; do
     case "$a" in
         lang=*) lang=${a#*=} ;;
@@ -91,7 +91,15 @@ BUILDD=${LOOKBUILD:-/root/lookrun/build}
 mkdir -p "$BUILDD" "$OUT"
 
 # ---------------------------------------------------------- 1. kernel
-if [ ! -s "$BUILDD/k0.mb" ] || [ -n "${LOOKREBUILD:-}" ]; then
+# THE KERNEL IS CACHED, AND THE CACHE HAS TO KNOW WHEN IT IS STALE.
+# It did not: the programs were rebuilt when their source was newer,
+# the kernel was rebuilt only when it was missing, and a round that
+# changed which programs `desk_start` spawns got a picture of the OLD
+# kernel starting the OLD programs. `desk: start /bin/schreibtisch
+# pid=0` was the only sign, and pid=0 is not an error anybody reads.
+# Same rule for both now: newer source, new build.
+newer=$(find kernel tools/build-kernel.sh -newer "$BUILDD/k0.mb" -print -quit 2>/dev/null || true)
+if [ ! -s "$BUILDD/k0.mb" ] || [ -n "$newer" ] || [ -n "${LOOKREBUILD:-}" ]; then
     ./tools/build-kernel.sh "$BUILDD/k0.mb" > "$BUILDD/k.log" 2>&1 \
         || { echo "FAILED: the kernel does not build"; tail -20 "$BUILDD/k.log"; exit 1; }
 fi
@@ -218,7 +226,7 @@ print("picture %dx%d colours %d" % (im.size[0], im.size[1],
       len(im.getcolors(maxcolors=1 << 24) or [])))
 PY
 fi
-grep -aE '^(leiste|taskbar|wlib|wm|msg|i18n|theme|shape|desk|schreibtisch|einstellungen|settings): ' \
+grep -aE '^(taskbar|desktop|settings|wlib|wm|msg|i18n|theme|shape|desk): ' \
     "$OUT/serial.txt" 2>/dev/null | head -140
 if [ "$keep" = no ]; then rm -f "$OUT/disk.img" "$OUT"/*.o 2>/dev/null; fi
 exit 0
