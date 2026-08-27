@@ -34,6 +34,41 @@
 //   * Er haelt 4200 Namen. Darueber sagt `build` "abgeschnitten" statt
 //     stillschweigend die Haelfte zu vergessen.
 //   * Er sucht in NAMEN. Nicht in Inhalten. Genau wie das Vorbild.
+//
+// RUNDE SPEICHER, DRITTER NACHTRAG: DER INDEX TRAEGT AUCH DIE GROESSE,
+// UND ER SUMMIERT SIE DEN BAUM HINAUF.
+//
+// TreeSize und WizTree muessen beim Start jedes Mal die Platte
+// durchlaufen -- das ist der ganze Grund, warum sie einen Fortschritts-
+// balken haben. Osum muss das nicht: die Inode-Tabelle traegt die
+// Groesse ohnehin (`fs.scan` liefert sie seit dem zweiten Nachtrag im
+// Feld R_SIZE), und das Journal meldet seit dieser Runde auch, dass eine
+// Datei gewachsen oder geschrumpft ist. Was hier dazukommt, ist die
+// AUFSUMMIERUNG: fuer jedes Verzeichnis steht die Gesamtgroesse seines
+// Teilbaums als Zahl da, ohne dass jemand hineinsieht.
+//
+// WIE DAS GEHT, UND ES IST EINE ZEILE ARITHMETIK: eine Datei traegt ihre
+// Groesse zu JEDEM ihrer Vorfahren bei. Also wird beim Aufbau je Datei
+// die Elternkette hinaufgelaufen und die Groesse aufaddiert -- acht
+// Ebenen tief, nicht 4000. Und bei jeder spaeteren Aenderung wird
+// GENAUSO die Kette hinaufgelaufen, aber nur mit dem UNTERSCHIED. Das
+// ist der Unterschied zwischen "sofort" und "gleich".
+//
+// DAMIT DAS BILLIG BLEIBT, BRAUCHT ES EINEN WEG VON EINER INODE-NUMMER
+// ZU IHREM PLATZ IN DER LISTE. `path_of` sucht ihn linear, und das ist
+// dort richtig: es passiert fuer die paar Treffer, die jemand ansieht.
+// Beim Hinaufsummieren waere es 4200 * 8 Durchgaenge ueber 4200 Namen.
+// Also gibt es eine Tafel: `dio[Inode] = Platz + 1`, direkt adressiert,
+// keine Streuung und keine Kollision. Sie fasst HN Inodes; ein Abbild
+// mit mehr faellt auf den linearen Weg zurueck und ist dann langsam,
+// aber nicht falsch -- und `dio_voll` sagt, dass es passiert ist.
+//
+// WAS GEZAEHLT WIRD, IST DASSELBE WIE BEI `du`: die GROESSE der Dateien,
+// ein Verzeichnis zaehlt NULL. Nicht der belegte Platz, nicht die
+// Eintragstabelle des Verzeichnisses. Der Grund ist die Gegenprobe --
+// `walk_total` weiter unten laeuft den Baum wirklich ab und muss auf
+// dasselbe Oktett kommen, und `du` seit Runde K11 auch. Drei Wege, eine
+// Zahl.
 
 profile kernel
 
@@ -45,7 +80,12 @@ export {
     build, poll, find, count, name_at, ino_at, kind_at, parent_at,
     path_of, walk_find, walk_seen, contains, lower,
     calls, records, truncated, lost_seen, seq_now, mono_us,
-    MAXN, NAMEN
+    MAXN, NAMEN,
+    // ---- Runde SPEICHER ----
+    size_build, size_at, sub_at, blk_at, slot_of_ino, root_ino,
+    total_of_ino, blocks_of_ino, kilo, is_dir_at, dio_voll,
+    walk_total, walk_blocks, walk_files, walk_dirs, ino_of_path,
+    ROOT, NICHTS
 }
 
 const MAXN: u64 = 4200
@@ -63,6 +103,7 @@ const R_OP: u64 = 56
 
 const OP_ADD: u64 = 1
 const OP_DEL: u64 = 2
+const OP_SIZE: u64 = 3
 
 const K_DIR: u64 = 2
 
@@ -71,6 +112,15 @@ const WIG_JRNL: u64 = 1808
 const WIG_IDXINFO: u64 = 1809
 const WX_JSEQ: u64 = 2
 const WX_JLOST: u64 = 3
+const WX_ROOT: u64 = 6
+
+// RUNDE SPEICHER. `ROOT` ist der Platz der WURZEL in den Summenfeldern:
+// sie hat keinen Verzeichniseintrag und steht deshalb in keiner
+// Namensliste -- aber eine Summe hat sie. `NICHTS` heisst "diese Inode
+// kenne ich nicht".
+const ROOT: u64 = 4200 // == MAXN
+const NICHTS: u64 = 4201
+const HN: u64 = 8192 // so viele Inodes fasst die Platztafel
 
 const SYS_CLOCK_GETTIME: u64 = 228
 const CLOCK_MONOTONIC: u64 = 1
@@ -92,6 +142,20 @@ static mut saetze: u64 = 0
 static mut puffer: [u8; 4032] = [0 as u8; 4032] // STAPEL * REC
 static mut lauf: [u64; 2] = [0 as u64; 2]
 static mut gesehen: u64 = 0
+
+// ---- Runde SPEICHER: die Groessen -----------------------------------
+//
+// `groesse` ist die EIGENE Groesse eines Eintrags (bei einem Verzeichnis
+// bedeutungslos, es zaehlt null). `summe` und `kbsumme` sind die
+// GESAMTGROESSE des Teilbaums -- Oktette und Kilooktett-Bloecke, letztere
+// je Datei aufgerundet, weil `du` so rechnet. Beide haben einen Platz
+// mehr als es Eintraege gibt: der letzte (`ROOT`) gehoert der Wurzel.
+static mut groesse: [u32; 4200] = [0 as u32; 4200]
+static mut summe: [u64; 4201] = [0 as u64; 4201]
+static mut kbsumme: [u64; 4201] = [0 as u64; 4201]
+static mut dio: [u32; 8192] = [0 as u32; 8192]
+static mut wurzel: u64 = 0
+static mut ueberlauf: u64 = 0
 
 fn sys3(number: u64, a0: u64, a1: u64, a2: u64) -> u64 {
     return asm("syscall", out("rax"), in("rax") number, in("rdi") a0,
@@ -149,6 +213,183 @@ fn kind_at(i: u64) -> u64 {
     return art[(i) as usize] as u64
 }
 
+// -------------------------------------------- RUNDE SPEICHER: Zugriffe
+
+fn is_dir_at(i: u64) -> bool {
+    return art[(i) as usize] as u64 == K_DIR
+}
+
+fn size_at(i: u64) -> u64 {
+    return groesse[(i) as usize] as u64
+}
+
+fn sub_at(i: u64) -> u64 {
+    return summe[(i) as usize]
+}
+
+fn blk_at(i: u64) -> u64 {
+    return kbsumme[(i) as usize]
+}
+
+fn root_ino() -> u64 {
+    return wurzel
+}
+
+fn dio_voll() -> u64 {
+    return ueberlauf
+}
+
+// Aufgerundete Kilooktett-Bloecke -- DIESELBE Zeile wie in
+// `kernel/user/du.fi` seit Runde K11. Sie steht hier, damit sie nicht
+// zweimal irgendwo steht und beim naechsten Anfassen auseinanderlaeuft.
+fn kilo(sz: u64) -> u64 {
+    return (sz + 1023) / 1024
+}
+
+// DER PLATZ EINER INODE. `ROOT` fuer die Wurzel, `NICHTS`, wenn der
+// Index sie nicht kennt.
+fn slot_of_ino(ino: u64) -> u64 {
+    if ino == 0 {
+        return NICHTS
+    }
+    if ino == wurzel {
+        return ROOT
+    }
+    if ino < HN {
+        let v: u64 = dio[(ino) as usize] as u64
+        if v == 0 {
+            return NICHTS
+        }
+        return v - 1
+    }
+    // Der Notweg. Er ist langsam und er ist richtig; `dio_voll` sagt,
+    // dass er benutzt wurde.
+    ueberlauf = ueberlauf + 1
+    var i: u64 = 0
+    while i < nn {
+        if ino_[(i) as usize] as u64 == ino {
+            return i
+        }
+        i = i + 1
+    }
+    return NICHTS
+}
+
+fn dio_set(ino: u64, wert: u64) {
+    if ino != 0 && ino < HN {
+        dio[(ino) as usize] = wert as u32
+    }
+}
+
+// Die Gesamtgroesse unter einer Inode, in Oktetten. Ohne einen einzigen
+// Systemaufruf -- das ist der ganze Punkt dieser Runde.
+fn total_of_ino(ino: u64) -> u64 {
+    let s2: u64 = slot_of_ino(ino)
+    if s2 > ROOT {
+        return 0
+    }
+    return summe[(s2) as usize]
+}
+
+fn blocks_of_ino(ino: u64) -> u64 {
+    let s2: u64 = slot_of_ino(ino)
+    if s2 > ROOT {
+        return 0
+    }
+    return kbsumme[(s2) as usize]
+}
+
+// Die Inode-Nummer zu einem Pfad -- ueber `stat`, also ueber den Kernel.
+// Das ist der EINE Systemaufruf, den die Oberflaeche braucht, um zu
+// wissen, wo sie steht; alles danach kommt aus dem Speicher.
+fn ino_of_path(pfad: u64) -> u64 {
+    var st: [u8; 144] = [0 as u8; 144]
+    let r: u64 = io.stat_into(pfad, (&st[0 as usize]) as u64)
+    if ulib.bad(r) {
+        return 0
+    }
+    return __mmio_read64(((&st[0 as usize]) as u64 + io.ST_INO) as *mut u64)
+}
+
+// DIE KETTE HINAUF. Jeder Vorfahre bekommt den Betrag dazu (oder
+// abgezogen). Acht Ebenen, nicht 4000 -- und `wache` ist da, weil ein
+// Verzeichnisbaum, dessen `..` im Kreis zeigt, sonst diese Schleife nie
+// verliesse. Ein Index, der haengt, ist schlimmer als einer, der irrt.
+fn hoch(eltern: u64, okt: u64, kb: u64, minus: bool) {
+    var p: u64 = eltern
+    var wache: u64 = 0
+    var weiter: bool = true
+    while weiter && wache < 32 {
+        let j: u64 = slot_of_ino(p)
+        if j > ROOT {
+            weiter = false
+        } else {
+            if minus {
+                if summe[(j) as usize] >= okt {
+                    summe[(j) as usize] = summe[(j) as usize] - okt
+                } else {
+                    summe[(j) as usize] = 0
+                }
+                if kbsumme[(j) as usize] >= kb {
+                    kbsumme[(j) as usize] = kbsumme[(j) as usize] - kb
+                } else {
+                    kbsumme[(j) as usize] = 0
+                }
+            } else {
+                summe[(j) as usize] = summe[(j) as usize] + okt
+                kbsumme[(j) as usize] = kbsumme[(j) as usize] + kb
+            }
+            if j == ROOT {
+                weiter = false
+            } else {
+                p = pino[(j) as usize] as u64
+            }
+        }
+        wache = wache + 1
+    }
+}
+
+// Was ein Eintrag zu seinen Vorfahren beitraegt. Eine Datei ihre eigene
+// Groesse; ein Verzeichnis das, was unter ihm liegt.
+fn beitrag(i: u64) -> u64 {
+    if is_dir_at(i) {
+        return summe[(i) as usize]
+    }
+    return groesse[(i) as usize] as u64
+}
+
+fn beitrag_kb(i: u64) -> u64 {
+    if is_dir_at(i) {
+        return kbsumme[(i) as usize]
+    }
+    return kilo(groesse[(i) as usize] as u64)
+}
+
+// DIE AUFSUMMIERUNG. Einmal nach `build`, danach nie wieder -- `poll`
+// haelt sie mit Unterschieden nach.
+fn size_build() -> u64 {
+    wurzel = sys3(WIG_IDXINFO, WX_ROOT, 0, 0)
+    if ulib.bad(wurzel) || wurzel == 0 {
+        wurzel = 1
+    }
+    ueberlauf = 0
+    var i: u64 = 0
+    while i <= ROOT {
+        summe[(i) as usize] = 0
+        kbsumme[(i) as usize] = 0
+        i = i + 1
+    }
+    i = 0
+    while i < nn {
+        if !is_dir_at(i) {
+            let o: u64 = groesse[(i) as usize] as u64
+            hoch(pino[(i) as usize] as u64, o, kilo(o), false)
+        }
+        i = i + 1
+    }
+    return summe[(ROOT) as usize]
+}
+
 // ------------------------------------------------------- der Aufbau
 
 fn eintragen(rec: u64) -> bool {
@@ -166,6 +407,14 @@ fn eintragen(rec: u64) -> bool {
     ino_[(nn) as usize] = (__mmio_read64((rec + R_INO) as *mut u64)) as u32
     pino[(nn) as usize] = (__mmio_read64((rec + R_PARENT) as *mut u64)) as u32
     art[(nn) as usize] = (__mmio_read64((rec + R_KIND) as *mut u64)) as u8
+    // RUNDE SPEICHER: die Groesse steht im selben Satz, an derselben
+    // Stelle wie beim Tabellenlauf. Sie kostet hier NICHTS -- der Kernel
+    // hat den Inode-Block ohnehin gelesen.
+    groesse[(nn) as usize] =
+        (__mmio_read64((rec + R_SIZE) as *mut u64)) as u32
+    summe[(nn) as usize] = 0
+    kbsumme[(nn) as usize] = 0
+    dio_set(__mmio_read64((rec + R_INO) as *mut u64), nn + 1)
     nn = nn + 1
     return true
 }
@@ -176,6 +425,19 @@ fn loeschen(dir: u64, name: u64) -> bool {
         if pino[(i) as usize] as u64 == dir && gleich(name_at(i), name) {
             // Der letzte rueckt nach: eine Namensliste hat keine
             // Reihenfolge, die etwas bedeutet, und ein Loch haette eine.
+            // RUNDE SPEICHER: ERST ABZIEHEN, DANN WEGRAEUMEN. Was der
+            // Eintrag zu seinen Vorfahren beigetragen hat, muss er
+            // wieder hergeben, SOLANGE er noch dasteht -- danach ist
+            // seine Elternnummer weg.
+            hoch(pino[(i) as usize] as u64, beitrag(i), beitrag_kb(i),
+                true)
+            // Aus der Platztafel nur dann, wenn sie WIRKLICH auf diesen
+            // Eintrag zeigt. Beim Umbenennen steht der neue Name schon
+            // im Index und die Tafel zeigt auf IHN; wer hier blind
+            // loeschte, machte den neuen Eintrag unauffindbar.
+            if slot_of_ino(ino_[(i) as usize] as u64) == i {
+                dio_set(ino_[(i) as usize] as u64, 0)
+            }
             nn = nn - 1
             if i != nn {
                 var k: u64 = 0
@@ -187,6 +449,14 @@ fn loeschen(dir: u64, name: u64) -> bool {
                 ino_[(i) as usize] = ino_[(nn) as usize]
                 pino[(i) as usize] = pino[(nn) as usize]
                 art[(i) as usize] = art[(nn) as usize]
+                groesse[(i) as usize] = groesse[(nn) as usize]
+                summe[(i) as usize] = summe[(nn) as usize]
+                kbsumme[(i) as usize] = kbsumme[(nn) as usize]
+                // Der Nachrueckende hat einen neuen Platz -- die Tafel
+                // muss das erfahren, sonst zeigt sie ins Leere.
+                if slot_of_ino(ino_[(i) as usize] as u64) == nn {
+                    dio_set(ino_[(i) as usize] as u64, i + 1)
+                }
             }
             return true
         }
@@ -225,6 +495,15 @@ fn build() -> u64 {
     aufrufe = 0
     saetze = 0
     abgeschnitten = 0
+    // RUNDE SPEICHER: die Platztafel gehoert dem Aufbau, den es gerade
+    // gibt. Ein zweiter Aufbau mit Resten des ersten waere ein Index,
+    // der auf Eintraege zeigt, die es nicht mehr gibt.
+    var z: u64 = 0
+    while z < HN {
+        dio[(z) as usize] = 0 as u32
+        z = z + 1
+    }
+    ueberlauf = 0
     jseq = sys3(WIG_IDXINFO, WX_JSEQ, 0, 0)
     jlost = sys3(WIG_IDXINFO, WX_JLOST, 0, 0)
     lauf[(0) as usize] = 0
@@ -270,9 +549,35 @@ fn poll() -> u64 {
                     // (der Lauf hat ihn gesehen, das Journal meldet ihn
                     // noch einmal), darf nicht zweimal im Index stehen.
                     loeschen(dir, rec + R_NAME)
-                    eintragen(rec)
+                    if eintragen(rec) {
+                        let neu2: u64 = nn - 1
+                        hoch(dir, beitrag(neu2), beitrag_kb(neu2), false)
+                    }
                 } else if op == OP_DEL {
                     loeschen(dir, rec + R_NAME)
+                } else if op == OP_SIZE {
+                    // RUNDE SPEICHER: EINE DATEI HAT IHRE GROESSE
+                    // GEAENDERT. Was hinaufgetragen wird, ist der
+                    // UNTERSCHIED und nicht die Groesse -- der Rest
+                    // steht ja schon oben. Genau das ist der Grund,
+                    // warum die Antwort sofort da ist: die Arbeit ist
+                    // proportional zur AENDERUNG, nicht zum Baum.
+                    let wo: u64 = slot_of_ino(
+                        __mmio_read64((rec + R_INO) as *mut u64))
+                    if wo < ROOT {
+                        let neu3: u64 =
+                            __mmio_read64((rec + R_SIZE) as *mut u64)
+                        let alt3: u64 = groesse[(wo) as usize] as u64
+                        groesse[(wo) as usize] = neu3 as u32
+                        let e: u64 = pino[(wo) as usize] as u64
+                        if neu3 >= alt3 {
+                            hoch(e, neu3 - alt3,
+                                kilo(neu3) - kilo(alt3), false)
+                        } else {
+                            hoch(e, alt3 - neu3,
+                                kilo(alt3) - kilo(neu3), true)
+                        }
+                    }
                 }
                 n = n + 1
                 i = i + 1
@@ -515,6 +820,129 @@ fn absteigen(pfad: u64, term: u64, out: u64, max: u64, hab: u64,
         i = i + 1
     }
     return n
+}
+
+// ------------------------------- RUNDE SPEICHER: DIE GROSSE GEGENPROBE
+//
+// DIESELBE FRAGE, DER ANDERE WEG -- und dies ist die wichtigste Zusage
+// der Runde. Ein Wert, der sofort da ist und falsch, ist wertlos.
+//
+// `walk_total` tut das, was TreeSize und WizTree bei jedem Start tun:
+// von einem Verzeichnis aus jedes Unterverzeichnis oeffnen, jeden
+// Eintrag lesen, fuer jede Datei `stat` rufen und die Oktette addieren.
+// Was das teuer macht, ist nicht das Addieren -- es ist, dass jedes
+// `stat` den ganzen Pfad von der Wurzel an noch einmal aufloest.
+//
+// GEZAEHLT WIRD GENAU WIE IM INDEX: die Groesse der Dateien, ein
+// Verzeichnis null. Und daneben die aufgerundeten Kilooktett-Bloecke,
+// weil `du` in ihnen rechnet. Kaeme hier eine andere Zahl heraus als aus
+// dem Index, waere der Index eine Behauptung.
+static mut wsum: u64 = 0
+static mut wkb: u64 = 0
+static mut wdat: u64 = 0
+static mut wdir: u64 = 0
+static mut wpfad2: [u8; 512] = [0 as u8; 512]
+
+fn walk_blocks() -> u64 {
+    return wkb
+}
+
+fn walk_files() -> u64 {
+    return wdat
+}
+
+fn walk_dirs() -> u64 {
+    return wdir
+}
+
+fn walk_total(pfad: u64) -> u64 {
+    wsum = 0
+    wkb = 0
+    wdat = 0
+    wdir = 0
+    ulib.strncpy((&wpfad2[0 as usize]) as u64, pfad, 500)
+    tief((&wpfad2[0 as usize]) as u64, 0)
+    return wsum
+}
+
+fn tief(pfad: u64, tiefe: u64) {
+    if tiefe > 8 {
+        return
+    }
+    let fd: u64 = io.dir_open(pfad)
+    if ulib.bad(fd) {
+        return
+    }
+    // Dieselbe Regel wie beim Namensdurchlauf darueber: erst dieses
+    // Verzeichnis GANZ lesen, dann absteigen, und gemerkt werden nur die
+    // Unterverzeichnisse. Ein Ordner mit 4000 Dateien fuellte sonst den
+    // Puffer nach sechzig Namen, und der Durchlauf stiege in kein
+    // Unterverzeichnis mehr ab -- eine Gegenprobe, die zu wenig findet,
+    // laesst den Index falschlich gut aussehen.
+    var namen: [u8; 1024] = [0 as u8; 1024]
+    var anzahl: u64 = 0
+    var at: u64 = 0
+    var voll: [u8; 512] = [0 as u8; 512]
+    var weiter: bool = true
+    while weiter {
+        let got: u64 = io.dir_read(fd, (&wbuf[0 as usize]) as u64, 1024)
+        if ulib.bad(got) || got == 0 {
+            weiter = false
+        } else {
+            var p: u64 = 0
+            while p < got {
+                let rec: u64 = (&wbuf[0 as usize]) as u64 + p
+                let rl: u64 = io.dir_reclen(rec)
+                if rl == 0 {
+                    p = got
+                } else {
+                    let name: u64 = io.dir_name(rec)
+                    if !punkt(name) {
+                        if io.dir_kind(rec) == io.DT_DIR {
+                            wdir = wdir + 1
+                            let ln: u64 = ulib.length(name)
+                            if at + ln + 1 < 1024 {
+                                ulib.strcpy((&namen[0 as usize]) as u64 + at,
+                                    name)
+                                anzahl = anzahl + 1
+                                at = at + ln + 1
+                            }
+                        } else {
+                            fuege((&voll[0 as usize]) as u64, pfad, name)
+                            let sz: u64 =
+                                ulib.size_of((&voll[0 as usize]) as u64)
+                            if !ulib.bad(sz) {
+                                wsum = wsum + sz
+                                wkb = wkb + kilo(sz)
+                                wdat = wdat + 1
+                            }
+                        }
+                    }
+                    p = p + rl
+                }
+            }
+        }
+    }
+    io.close(fd)
+    var i: u64 = 0
+    var wo: u64 = 0
+    while i < anzahl {
+        let name: u64 = (&namen[0 as usize]) as u64 + wo
+        let ln: u64 = ulib.length(name)
+        fuege((&voll[0 as usize]) as u64, pfad, name)
+        tief((&voll[0 as usize]) as u64, tiefe + 1)
+        wo = wo + ln + 1
+        i = i + 1
+    }
+}
+
+fn fuege(out: u64, dir: u64, name: u64) {
+    var schraeg: [u8; 2] = "/\0"
+    ulib.strncpy(out, dir, 400)
+    if ulib.length(out) > 1 {
+        ulib.strcat(out, (&schraeg[0 as usize]) as u64)
+    }
+    ulib.strcat(out, name)
 }
 
 fn punkt(p: u64) -> bool {
