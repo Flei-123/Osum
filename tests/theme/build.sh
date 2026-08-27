@@ -36,7 +36,7 @@ mkdir -p "$OUT"
 # (`tools/osum/mkfs.py`), und /bin/themetest bindet seit dem Zusatz
 # `gui` die ganze Widget-Bibliothek ein. `widgetdemo`, `edit` und `suchen`
 # haben in dieser Runde nichts zu tun und passten sonst nicht mit drauf.
-PROGS="themetest explorer launcher leiste schreibtisch einstellungen sh echo ls cat"
+PROGS="themetest explorer launcher taskbar desktop settings sh echo ls cat"
 
 bash tools/build-kernel.sh "$OUT/k.mb" > "$OUT/k.log" 2>&1 || {
     echo "== der Kern laesst sich nicht bauen"; tail -20 "$OUT/k.log"; exit 1; }

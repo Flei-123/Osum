@@ -35,7 +35,7 @@ if [[ $STUFE == 0 ]]; then CC=${FIRNC:-vendor/firn/bin/firnc}
 else CC=${FIRNC1:-vendor/firn/bin/firnc1}; fi
 
 # Die Oberflaeche dieser Runde plus das, was ein Abbild sonst braucht.
-PROGS="schreibtisch leiste einstellungen launcher explorer i18nt \
+PROGS="desktop taskbar settings launcher explorer i18nt \
        sh echo ls cat"
 
 bash tools/build-kernel.sh "$OUT/k.mb" --stufe "$STUFE" > "$OUT/k.log" 2>&1 || {
