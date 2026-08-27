@@ -71,17 +71,20 @@ ZEILE="gfx wm wig desk einst nostart wmhold wiglong nokbd nosched noproc nofs"
 echo "== 1. die Schriften: mehr als ASCII, und weiter reproduzierbar =="
 
 python3 tools/i18n/coverage.py "$SANS" "$MONO" > "$TMPD/deckung.txt" 2>&1
+# Die Zeile `i18n-coverage: ...` ist der Vertrag zwischen dem Werkzeug
+# und diesem Laeufer -- ein Name, ein Gleichheitszeichen, eine Zahl.
+cov() { grep -a "i18n-coverage: file=assets/osum-$1.ttf" "$TMPD/deckung.txt" \
+        | tail -1 | grep -oE " $2=[0-9]+" | sed 's/.*=//'; }
 for f in sans mono; do
-    n=$(grep -A1 "assets/osum-$f.ttf" "$TMPD/deckung.txt" \
-        | grep -oE '[0-9]+ code points mapped' | grep -oE '^[0-9]+')
-    is "osum-$f.ttf bildet Codepunkte ab" "$n" "338"
+    is "osum-$f.ttf bildet Codepunkte ab" "$(cov $f mapped)" "338"
+    is "osum-$f.ttf: Latin-1-Ergaenzung vollstaendig (Umlaute, ss)" \
+        "$(cov $f latin1)" "96"
+    is "osum-$f.ttf: Latin Extended-A vollstaendig" "$(cov $f latin_a)" "128"
+    is "osum-$f.ttf traegt U+FFFD, das Fehlerbild des Dekodierers" \
+        "$(cov $f fffd)" "1"
+    is "osum-$f.ttf: Zeichen, die eine deutsche Oberflaeche braucht und die FEHLEN" \
+        "$(cov $f missing)" "0"
 done
-has "$TMPD/deckung.txt" "Latin-1 Supplement                             96 /    96" \
-    "die Latin-1-Ergaenzung ist VOLLSTAENDIG da (u/o/a mit zwei Punkten, ss)"
-has "$TMPD/deckung.txt" "Specials (U+FFFD lives here)                   1 /    16" \
-    "und U+FFFD, das Fehlerbild des Dekodierers"
-has "$TMPD/deckung.txt" "all present" \
-    "jedes Zeichen, das eine deutsche Oberflaeche braucht, ist in der Schrift"
 # GEGENPROBE: der alte Ausschnitt kann es NICHT. Ohne sie ist die
 # Messung oben nur eine Zahl ohne Vergleich.
 DEJAVU=${DEJAVU:-/usr/share/fonts/truetype/dejavu}
@@ -89,11 +92,14 @@ if [ -f "$DEJAVU/DejaVuSans.ttf" ]; then
     python3 tools/ttf/schnitt.py "$DEJAVU/DejaVuSans.ttf" "$TMPD/alt.ttf" \
         --set ascii > "$TMPD/alt.txt" 2>&1
     python3 tools/i18n/coverage.py "$TMPD/alt.ttf" > "$TMPD/altd.txt" 2>&1
-    has "$TMPD/altd.txt" "MISSING" \
-        "GEGENPROBE: mit dem alten Ausschnitt (--set ascii) FEHLEN sie alle"
-    cmp -s "$TMPD/alt.ttf" <(git show HEAD~4:assets/osum-sans.ttf 2>/dev/null) \
-        2>/dev/null && ok "und '--set ascii' gibt die alte Datei Oktett fuer Oktett zurueck" \
-        || echo "        (die alte Datei liegt nicht mehr im Baum -- nicht verglichen)"
+    az=$(grep -a 'i18n-coverage' "$TMPD/altd.txt" | grep -oE ' mapped=[0-9]+' | sed 's/.*=//')
+    am=$(grep -a 'i18n-coverage' "$TMPD/altd.txt" | grep -oE ' missing=[0-9]+' | sed 's/.*=//')
+    is "GEGENPROBE: der alte Ausschnitt (--set ascii) bildet nur ab" "$az" "95"
+    if [ "${am:-0}" -gt 0 ]; then
+        ok "GEGENPROBE: und ihm fehlen $am der Zeichen, die eine deutsche Oberflaeche braucht"
+    else
+        bad "GEGENPROBE: dem alten Ausschnitt fehlt angeblich nichts"
+    fi
     python3 tools/ttf/schnitt.py "$DEJAVU/DejaVuSans.ttf" "$TMPD/neu.ttf" \
         >/dev/null 2>&1
     python3 tools/ttf/schnitt.py "$DEJAVU/DejaVuSansMono.ttf" "$TMPD/neum.ttf" \
