@@ -91,6 +91,31 @@ const TASK_MIN: u64 = 48
 const MAXK: u64 = 10 // that many window buttons at most
 const PREV_T: u64 = 3 // thickness of the preview outline
 
+// ================================== ROUND LOOK: WHERE THE BUTTONS SIT
+//
+// Windows 11 centres the start button and the window buttons and leaves
+// the status corner where it was.  Windows 10 and everything before it
+// put them at the left.  Both are defensible and neither is a law, so
+// this is a SETTING and not a redesign -- `align=` in
+// /etc/taskbar.conf, and the DEFAULT IS `left`, because a round that
+// moves a user's start button without being asked has broken something
+// that was not broken.
+//
+// WHAT IS CENTRED AND WHAT IS NOT. The start button and the window
+// buttons are one group and they move together; the three status
+// fields do NOT move.  That is not an imitation of Windows for its own
+// sake, it is the only arrangement that survives a window opening: a
+// centred group grows from the middle outwards, and if the clock were
+// part of it, the clock would jump sideways every time a program
+// started.  A corner does not move.
+//
+// AND IT WORKS ON A VERTICAL BAR TOO, where "centre" means centred in
+// the HEIGHT between the top edge and the topmost status field.  A
+// setting that silently does nothing in one of four configurations is
+// worse than no setting.
+const AL_LEFT: u64 = 0
+const AL_CENTER: u64 = 1
+
 // The limits of the two thicknesses. They are limits and not
 // suggestions: `win_size` cannot grow the window past the buffer it was
 // created with, and that buffer is V_MAX * screen height.
@@ -144,6 +169,7 @@ static mut asc: u64 = 0
 
 // the configuration, and nothing else in this file decides these five
 static mut cf_edge: u64 = 0
+static mut cf_align: u64 = AL_LEFT
 static mut cf_height: u64 = 28
 static mut cf_width: u64 = 104
 static mut cf_autohide: u64 = 0
@@ -315,6 +341,9 @@ static mut k_height: [u8; 7] = "height\0"
 static mut k_width: [u8; 6] = "width\0"
 static mut k_autohide: [u8; 9] = "autohide\0"
 static mut k_ontop: [u8; 6] = "ontop\0"
+static mut k_align: [u8; 6] = "align\0"
+static mut v_left: [u8; 5] = "left\0"
+static mut v_center: [u8; 7] = "center\0"
 
 fn key_is(p: u64, n: u64, k: u64) -> bool {
     var i: u64 = 0
@@ -329,6 +358,22 @@ fn key_is(p: u64, n: u64, k: u64) -> bool {
         i = i + 1
     }
     return __mmio_read8((k + n) as *mut u8) == 0 as u8
+}
+
+// `left` or `center`, by name. Anything else is `left`, because a
+// misspelt value must not move the start button.
+fn align_by_name(p: u64) -> u64 {
+    if __mmio_read8((p) as *mut u8) == 99 as u8 {
+        return AL_CENTER
+    }
+    return AL_LEFT
+}
+
+fn align_name(a: u64) -> u64 {
+    if a == AL_CENTER {
+        return (&v_center[0 as usize]) as u64
+    }
+    return (&v_left[0 as usize]) as u64
 }
 
 fn clamp(v: u64, lo: u64, hi: u64) -> u64 {
@@ -409,6 +454,13 @@ fn conf_read() -> bool {
                 if digits > 0 {
                     cf_ontop = v & 1
                 }
+            } else if key_is(b + ks, kl, (&k_align[0 as usize]) as u64) {
+                // ROUND LOOK. A WORD AND NOT A NUMBER, like `edge=`
+                // above and unlike `ontop=`: `align=center` says what
+                // it does and `align=1` does not. An unknown word
+                // leaves the value alone -- the same rule the whole
+                // file follows.
+                cf_align = align_by_name(wp)
             }
             i = ve + 1
         } else {
@@ -446,6 +498,10 @@ fn conf_write() -> bool {
     __mmio_write8((b + at) as *mut u8, 61 as u8)
     at = num_at(b, at + 1, cf_ontop)
     __mmio_write8((b + at) as *mut u8, 10 as u8)
+    at = text_at_p(b, at + 1, (&k_align[0 as usize]) as u64)
+    __mmio_write8((b + at) as *mut u8, 61 as u8)
+    at = text_at_p(b, at + 1, align_name(cf_align))
+    __mmio_write8((b + at) as *mut u8, 10 as u8)
     at = at + 1
     let fd: u64 = io.create((&p_conf[0 as usize]) as u64)
     if ulib.bad(fd) {
@@ -467,6 +523,17 @@ static mut s_hh: [u8; 9] = " height=\0"
 static mut s_ww: [u8; 8] = " width=\0"
 static mut s_ah: [u8; 11] = " autohide=\0"
 static mut s_ot: [u8; 8] = " ontop=\0"
+static mut s_al: [u8; 8] = " align=\0"
+// ROUND LOOK: WHERE THE START BUTTON REALLY IS. Until now the bar
+// reported only where it put the WORD `Start`, which is the button's
+// x plus half the space left over by the label -- a checker that wants
+// the button has to undo that, and undoing a centring is exactly the
+// kind of recomputation this repository does not accept as proof.
+static mut lk_sx: [u8; 18] = "taskbar: start x=\0"
+static mut lk_sy: [u8; 5] = " y=\0\0"
+static mut lk_sw: [u8; 5] = " w=\0\0"
+static mut lk_sh: [u8; 5] = " h=\0\0"
+static mut lk_sg: [u8; 8] = " align=\0"
 static mut s_sr: [u8; 6] = " src=\0"
 static mut s_file: [u8; 5] = "file\0"
 static mut s_dflt: [u8; 8] = "default\0"
@@ -485,6 +552,8 @@ fn conf_say() {
     ulib.sayn(cf_autohide)
     say((&s_ot[0 as usize]) as u64)
     ulib.sayn(cf_ontop)
+    say((&s_al[0 as usize]) as u64)
+    say(align_name(cf_align))
     say((&s_sr[0 as usize]) as u64)
     if cf_from_file != 0 {
         say((&s_file[0 as usize]) as u64)
@@ -1258,9 +1327,25 @@ fn layout() {
         if y > top {
             space = y - top
         }
+        // ROUND LOOK: centred in the HEIGHT on a vertical bar. Same
+        // rule, same run: from under the start button to the top of
+        // the topmost status field.
+        var gy: u64 = st_y
+        if cf_align == AL_CENTER {
+            var block: u64 = st_h
+            if nk > 0 {
+                block = st_h + GAP + nk * BTN_H + (nk - 1) * GAP
+            }
+            let run: u64 = y + GAP - PAD
+            if run > block {
+                gy = PAD + (run - block) / 2
+            }
+        }
+        st_y = gy
+        let top2: u64 = st_y + st_h + GAP
         i = 0
         while i < nk {
-            let by: u64 = top + i * (BTN_H + GAP)
+            let by: u64 = top2 + i * (BTN_H + GAP)
             kx[(i) as usize] = PAD
             ky[(i) as usize] = by
             kw[(i) as usize] = inner
@@ -1333,9 +1418,41 @@ fn layout() {
             width = TASK_MAX
         }
     }
+    // ROUND LOOK: THE GROUP, AND WHERE IT STARTS.
+    //
+    // `left` is what this bar always did: the start button at PAD and
+    // the window buttons right after it.  `center` moves BOTH -- the
+    // start button and the run of window buttons are one block, and the
+    // block is centred in the space that is left over between the two
+    // edges of the bar and the first status field.
+    //
+    // It is centred in the SPACE and not on the screen, and that
+    // distinction is the whole of it: the status fields on the right
+    // are 250 pixels wide on this machine, so a block centred on the
+    // screen would sit visibly left of the middle of what a person sees
+    // as empty bar.  `left_edge .. x` is that empty run, and the block
+    // is centred in it.  When the block is wider than the run there is
+    // nothing to centre and it falls back to the left, which is what
+    // `sub` does here without an `if`.
+    var gx: u64 = st_x
+    if cf_align == AL_CENTER && nk > 0 && width >= TASK_MIN {
+        let block: u64 = st_w + GAP + nk * width + (nk - 1) * GAP
+        let run: u64 = x + GAP - PAD
+        if run > block {
+            gx = PAD + (run - block) / 2
+        }
+    } else if cf_align == AL_CENTER {
+        // No window buttons: the start button alone is the block.
+        let run: u64 = x + GAP - PAD
+        if run > st_w {
+            gx = PAD + (run - st_w) / 2
+        }
+    }
+    st_x = gx
+    let left2: u64 = st_x + st_w + GAP
     i = 0
     while i < nk {
-        kx[(i) as usize] = left + i * (width + GAP)
+        kx[(i) as usize] = left2 + i * (width + GAP)
         ky[(i) as usize] = st_y
         kh[(i) as usize] = BTN_H
         if width >= TASK_MIN {
@@ -1346,6 +1463,7 @@ fn layout() {
         }
         i = i + 1
     }
+    let _lu: u64 = left
 }
 
 // ========================================================== the window list
@@ -1782,6 +1900,18 @@ fn paint_band(y0: u64, hh: u64, report: bool) {
     }
     let _p: u64 = wlibc.push(w_h, 0, y0, win_w, hh)
     if report {
+        // ROUND LOOK: the RECTANGLE, not only the word inside it.
+        say((&lk_sx[0 as usize]) as u64)
+        ulib.sayn(st_x)
+        say((&lk_sy[0 as usize]) as u64)
+        ulib.sayn(st_y)
+        say((&lk_sw[0 as usize]) as u64)
+        ulib.sayn(st_w)
+        say((&lk_sh[0 as usize]) as u64)
+        ulib.sayn(st_h)
+        say((&lk_sg[0 as usize]) as u64)
+        say(align_name(cf_align))
+        ulib.nl()
         say_text((&m_start[0 as usize]) as u64, rs >> 32,
             rs & 0xFFFFFFFF, wlibc.theme(wlibc.T_FG),
             wlibc.theme(wlibc.C_BUTTON_FACE),

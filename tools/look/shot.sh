@@ -57,6 +57,7 @@ nvicons=yes
 keep=no
 extra=""
 uitrace=no
+autohide=0
 progs="schreibtisch leiste einstellungen launcher dhcp explorer widgetdemo locate sh echo ls cat edit"
 for a in "$@"; do
     case "$a" in
@@ -73,6 +74,7 @@ for a in "$@"; do
         progs=*) progs=${a#*=} ;;
         extra=*) extra=${a#*=} ;;
         uitrace=*) uitrace=${a#*=} ;;
+        autohide=*) autohide=${a#*=} ;;
         *) echo "unknown option: $a" >&2; exit 2 ;;
     esac
 done
@@ -118,8 +120,8 @@ echo "programs $(echo $progs | wc -w)"
 # ------------------------------------------------------------ 3. disk
 python3 tools/k15/tree.py "$OUT/baum" > "$OUT/baum.log" 2>&1 || exit 1
 
-printf '# taskbar.conf -- written by tools/look/shot.sh\nedge=%s\nheight=28\nwidth=104\nautohide=0\nontop=1\nalign=%s\n' \
-    "$edge" "$align" > "$OUT/taskbar.conf"
+printf '# taskbar.conf -- written by tools/look/shot.sh\nedge=%s\nheight=28\nwidth=104\nautohide=%s\nontop=1\nalign=%s\n' \
+    "$edge" "$autohide" "$align" > "$OUT/taskbar.conf"
 printf '# /etc/theme.conf\nscheme=%s\nmode=%s\naccent=\nshape=%s\nlight_start=07:00\ndark_start=19:00\n' \
     "$scheme" "$mode" "$shape" > "$OUT/theme.conf"
 printf '# /etc/time.conf\noffset=120\n' > "$OUT/time.conf"
