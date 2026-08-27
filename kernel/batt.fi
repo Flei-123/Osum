@@ -63,12 +63,13 @@ import serial
 import acpi
 
 export {
-    scan, present, ac_online, ac_known, percent, minutes, value,
+    scan, refresh, present, ac_online, ac_known, percent, minutes, value,
     text_at, why,
     BT_PRESENT, BT_STATE, BT_RATE, BT_REMAIN, BT_VOLT, BT_UNIT,
     BT_DESIGN, BT_FULL, BT_TECH, BT_DVOLT, BT_WARN, BT_LOW,
     BT_AC, BT_ACOK, BT_TABLES, BT_WHY, BT_TZ, BT_TZOK, BT_STA,
     BT_MODEL, BT_SERIAL, BT_TYPE, BT_OEM, BT_NAMES,
+    BT_BSTAT, BT_PSRAT, BT_TMPAT,
     W_OK, W_NORSDP, W_NONAME, W_NOPKG, W_SHORT
 }
 
@@ -97,6 +98,20 @@ const BT_TZ: u64 = 128 // _TMP roh, in Zehntelkelvin
 const BT_TZOK: u64 = 136 // 1 = eine Thermalzone wurde gefunden
 const BT_STA: u64 = 144 // _STA des Akkugeraets
 const BT_BIFOK: u64 = 152 // 1 = auch _BIF wurde gelesen
+// RUNDE POWERMON: WO DIE ZAHLEN STANDEN.
+//
+// `scan` durchsucht JEDE Tabelle Oktett fuer Oktett nach den vier
+// Namensoktetten. Das kostet einmal beim Start nichts und zehnmal je
+// Sekunde sehr viel: gemessen 12,8 Millionen Zyklen je Durchgang unter
+// TCG, in einem Zeitgeberunterbrecher. Die Buchfuehrung von Runde
+// POWERMON haette damit mehr Strom gekostet als sie erklaeren kann.
+//
+// Also wird der FUNDORT gemerkt. Die Tabellen liegen fest im
+// reservierten Speicher und wandern nicht; ein zweites Lesen desselben
+// Pakets ist ein paar Dutzend Oktette und keine Suche.
+const BT_BSTAT: u64 = 160 // Adresse des ersten Elements von _BST
+const BT_PSRAT: u64 = 168 // Adresse der Zahl hinter _PSR
+const BT_TMPAT: u64 = 176 // Adresse der Zahl hinter _TMP
 
 // Die vier Zeichenketten aus _BIF, je 64 Oktette.
 const BT_NAMES: u64 = 256
@@ -331,7 +346,8 @@ fn find_package(t: u64, a: u64, b: u64, c: u64, d: u64, out_n: u64) -> u64 {
 }
 
 // EIN NAME, GEFOLGT VON EINER ZAHL.
-fn find_int(t: u64, a: u64, b: u64, c: u64, d: u64, out: u64) -> bool {
+fn find_int(t: u64, a: u64, b: u64, c: u64, d: u64, out: u64,
+    out_at: u64) -> bool {
     var end: u64 = 0
     var p: u64 = body(t, (&end) as u64)
     if p == 0 {
@@ -342,6 +358,11 @@ fn find_int(t: u64, a: u64, b: u64, c: u64, d: u64, out: u64) -> bool {
             var v: u64 = 0
             if aml_int(p + 4, (&v) as u64) != 0 {
                 __mmio_write64(out as *mut u64, v)
+                // RUNDE POWERMON: der Fundort, damit das naechste Lesen
+                // nicht wieder die ganze Tabelle absuchen muss.
+                if out_at != 0 {
+                    __mmio_write64(out_at as *mut u64, p + 4)
+                }
                 return true
             }
         }
@@ -355,7 +376,47 @@ fn find_int(t: u64, a: u64, b: u64, c: u64, d: u64, out: u64) -> bool {
 // ALLE TABELLEN ABSUCHEN, nicht nur die DSDT. Ein Akku steht auf einem
 // echten Geraet fast immer in einer SSDT, und die selbstgebaute Tabelle
 // der Abnahme ist auch eine.
-fn scan(state: u64) {
+// ROUND POWERMON: THE SAME WALK, WITHOUT THE LINE ON THE SERIAL PORT.
+// `scan` runs once at boot and says what it found; the power accounting
+// of round POWERMON calls this one ten times a second, and ten lines a
+// second on the serial port would bury every other measurement in the
+// acceptance run. Same walk, one caller that talks and one that does not.
+fn refresh(state: u64) {
+    // DER SCHNELLE WEG: die Fundorte sind bekannt, also wird genau dort
+    // noch einmal gelesen und nirgends gesucht. Das ist der Unterschied
+    // zwischen einer Buchfuehrung, die zehnmal je Sekunde laufen kann,
+    // und einer, die es nicht kann.
+    let bst: u64 = g(state, BT_BSTAT)
+    if bst != 0 {
+        var p: u64 = bst
+        var v: u64 = 0
+        var k: u64 = 0
+        while k < 4 {
+            let w: u64 = aml_int(p, (&v) as u64)
+            if w == 0 {
+                k = 4
+            } else {
+                s(state, BT_STATE + k * 8, v)
+                p = p + w
+                k = k + 1
+            }
+        }
+        let pa: u64 = g(state, BT_PSRAT)
+        if pa != 0 {
+            var ac: u64 = 0
+            if aml_int(pa, (&ac) as u64) != 0 {
+                s(state, BT_AC, ac)
+            }
+        }
+        let ta: u64 = g(state, BT_TMPAT)
+        if ta != 0 {
+            var tz: u64 = 0
+            if aml_int(ta, (&tz) as u64) != 0 {
+                s(state, BT_TZ, tz)
+            }
+        }
+        return
+    }
     s(state, BT_PRESENT, 0)
     s(state, BT_ACOK, 0)
     s(state, BT_TZOK, 0)
@@ -378,6 +439,11 @@ fn scan(state: u64) {
         i = i + 1
     }
 
+}
+
+fn scan(state: u64) {
+    refresh(state)
+    let n: u64 = g(state, BT_TABLES)
     var name_s: [u8; 20] = "batt: tables=\0\0\0\0\0\0\0"
     var name_b: [u8; 8] = " batt=\0\0"
     var name_a: [u8; 6] = " ac=\0\0"
@@ -420,6 +486,7 @@ fn look_in(state: u64, t: u64) {
                 if ok {
                     s(state, BT_PRESENT, 1)
                     s(state, BT_WHY, W_OK)
+                    s(state, BT_BSTAT, e)
                 } else {
                     s(state, BT_WHY, W_NOPKG)
                 }
@@ -466,22 +533,26 @@ fn look_in(state: u64, t: u64) {
     // _PSR -- das Netzteil.
     if g(state, BT_ACOK) == 0 {
         var ac: u64 = 0
-        if find_int(t, 0x5F, 0x50, 0x53, 0x52, (&ac) as u64) {
+        var acat: u64 = 0
+        if find_int(t, 0x5F, 0x50, 0x53, 0x52, (&ac) as u64, (&acat) as u64) {
             s(state, BT_AC, ac)
             s(state, BT_ACOK, 1)
+            s(state, BT_PSRAT, acat)
         }
     }
     // _STA -- ist das Geraet ueberhaupt da?
     var sta: u64 = 0
-    if find_int(t, 0x5F, 0x53, 0x54, 0x41, (&sta) as u64) {
+    if find_int(t, 0x5F, 0x53, 0x54, 0x41, (&sta) as u64, 0) {
         s(state, BT_STA, sta)
     }
     // _TMP -- die Thermalzone, in Zehntelkelvin.
     if g(state, BT_TZOK) == 0 {
         var tz: u64 = 0
-        if find_int(t, 0x5F, 0x54, 0x4D, 0x50, (&tz) as u64) {
+        var tzat: u64 = 0
+        if find_int(t, 0x5F, 0x54, 0x4D, 0x50, (&tz) as u64, (&tzat) as u64) {
             s(state, BT_TZ, tz)
             s(state, BT_TZOK, 1)
+            s(state, BT_TMPAT, tzat)
         }
     }
 }
