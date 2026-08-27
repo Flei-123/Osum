@@ -657,6 +657,33 @@ const SYS_OSUM_PWRGET: u64 = 1750
 const SYS_OSUM_PWRSET: u64 = 1751
 const SYS_OSUM_PWRSTR: u64 = 1752
 
+// ====================================================== RUNDE I18N
+//
+// DIE TASTATURBELEGUNG AUS RING 3. Eine Nummer, zwei Richtungen:
+//
+//   1780  osum_kbd(was, wert)
+//         was = KB_GET     -> die Nummer der Belegung (0 = us, 1 = de)
+//         was = KB_SET     -> setzt sie, 0 oder -EINVAL
+//         was = KB_COUNT   -> wie viele es gibt
+//         was = KB_SWITCH  -> wie oft umgeschaltet wurde
+//
+// WARUM DAS IN DEN KERNEL GEHOERT und nicht in eine Bibliothek: die
+// Uebersetzung von Abtastcode zu Zeichen passiert IM
+// UNTERBRECHUNGSPFAD (`kbd.irq`). Ring 3 sieht die Taste nie -- es sieht
+// nur, was der Kernel daraus gemacht hat. Die Belegung ist deshalb
+// notwendig Kernelzustand, so wie der Bildmodus einer ist.
+//
+// KEINE RECHTEPRUEFUNG UEBER DAS LESEN HINAUS -- und das ist eine
+// bewusste Entscheidung, die dazugesagt gehoert: die Belegung ist EINE
+// je Maschine, also darf jeder Prozess sie umstellen. Auf einer
+// Maschine mit mehreren angemeldeten Benutzern waere das falsch. Diese
+// hat einen Bildschirm und eine Tastatur.
+const SYS_OSUM_KBD: u64 = 1780
+const KB_GET: u64 = 0
+const KB_SET: u64 = 1
+const KB_COUNT: u64 = 2
+const KB_SWITCH: u64 = 3
+
 // Die Felder von `osum_pwrget`. Die Nummern sind Teil der Schnittstelle
 // nach Ring 3 und stehen genauso in `kernel/user/power.fi`.
 const PG_READY: u64 = 0
@@ -1137,6 +1164,10 @@ fn dispatch(number: u64, frame: u64, state: u64) -> u64 {
     // RUNDE K18: die Energieschicht.
     if number >= SYS_OSUM_PWRGET && number <= SYS_OSUM_PWRSTR {
         return pwr_call(state, me, number, a0, a1, a2)
+    }
+    // RUNDE I18N: die Tastaturbelegung.
+    if number == SYS_OSUM_KBD {
+        return kbd_call(state, a0, a1)
     }
     // RUNDE DESKTOP: das Netz jenseits der Sockets. Zwei Nummern aus
     // dem Block, den Runde K8 dafuer ausgewiesen und nie benutzt hat.
@@ -5272,6 +5303,31 @@ fn win_of(state: u64, object: u64) -> u64 {
 // SETZEN DARF NUR DIE WURZEL. Und `readdr` und nicht `configure`:
 // letzteres holt sich jedes Mal neue Rahmen und verliert die alten --
 // die Begruendung steht in `kernel/inet.fi`.
+// ====================================================== RUNDE I18N
+//
+// Vier Zeilen, und sie stehen in einer eigenen Funktion aus demselben
+// Grund wie `pwr_call` und `wig_call`: `dispatch` hat ueber hundert
+// Zweige, und jeder Zwischenwert jedes Zweiges belegt einen Platz auf
+// dem Kernstapel, ob der Zweig genommen wird oder nicht.
+fn kbd_call(state: u64, was: u64, wert: u64) -> u64 {
+    if was == KB_GET {
+        return kbd.layout(state)
+    }
+    if was == KB_COUNT {
+        return kbd.LAYOUTS
+    }
+    if was == KB_SWITCH {
+        return kbd.switches(state)
+    }
+    if was == KB_SET {
+        if kbd.set_layout(state, wert) {
+            return 0
+        }
+        return errno.neg(errno.E_INVAL)
+    }
+    return errno.neg(errno.E_INVAL)
+}
+
 fn net_call(state: u64, me: u64, number: u64, a0: u64, a1: u64,
     a2: u64) -> u64 {
     if number == SYS_OSUM_NETGET {

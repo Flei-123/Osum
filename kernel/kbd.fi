@@ -12,18 +12,69 @@
 // No shift, no modifiers, no repeat: the table has one entry per code,
 // and what has none stays silent. A keyboard driver is a round of its
 // own; this is the proof that the interrupt path works.
+//
+// ============================================ RUNDE I18N: ZWEI BELEGUNGEN
+//
+// EIN ABTASTCODE IST KEIN ZEICHEN, und bis heute tat dieser Kernel so,
+// als waere er eines: zwei Zeichenkettenliterale zu achtundfuenfzig
+// Oktetten, indiziert mit dem Abtastcode, EIN Oktett heraus. Das ist die
+// amerikanische Belegung, fest verdrahtet, ohne dass irgendwo das Wort
+// "amerikanisch" stand.
+//
+// Auf einer deutschen Tastatur stimmt davon fast nichts. Y und Z sind
+// vertauscht. Wo `;` steht, liegt `o` mit zwei Punkten. Das
+// Klammeraffenzeichen liegt auf der DRITTEN Ebene von Q und ist ohne
+// AltGr ueberhaupt nicht erreichbar -- und ohne Klammeraffenzeichen
+// laesst sich in diesem System keine Postanschrift eintippen. Ein
+// Umlaut existierte gar nicht: die Tabelle ist ein Oktett breit und der
+// Zeichensatz war ASCII.
+//
+// WAS SICH DESHALB AENDERT, und zwar in dieser Reihenfolge:
+//
+//   1. EINE TASTE LIEFERT EINEN CODEPUNKT, nicht ein Oktett. `code_of`
+//      gibt eine Zahl bis 0x10FFFF zurueck.
+//   2. IN DEN RING GEHT WEITER EIN OKTETT -- aber jetzt die
+//      UTF-8-Kodierung des Codepunkts (`lib/utf8.fi`). Ein Umlaut sind
+//      zwei Oktette, sie kommen nacheinander an, und ein Textfeld setzt
+//      sie beim Zeichnen wieder zusammen. Fuer alles unter 0x80 aendert
+//      sich KEIN Oktett -- deshalb bleiben die Messungen der Runden 59,
+//      K1, K6 und K11 Zeichen fuer Zeichen dieselben.
+//   3. ZWEI BELEGUNGEN, umschaltbar: `us` (0) und `de` (1). Umgeschaltet
+//      wird mit STRG+ALT+L oder aus Ring 3 ueber SYS_OSUM_KBD.
+//   4. DIE RECHTE ALT-TASTE IST ALTGR und ist die dritte Ebene der
+//      deutschen Belegung.
+//
+// WAS DIESE RUNDE NICHT BAUT, und es steht auch in docs/I18N.md:
+// TOTE TASTEN. Auf einer deutschen Tastatur sind `^`, `´` und `` ` ``
+// tot -- sie warten auf den naechsten Buchstaben und setzen den Akzent
+// darauf (`´` dann `e` gibt `e` mit Akzent). Hier geben sie das
+// Akzentzeichen SOFORT aus. Das ist ehrlicher als ein halbes
+// Zustandsautomat: wer die franzoesischen Buchstaben braucht, braucht
+// auch eine franzoesische Belegung, und die ist eine eigene Runde. Die
+// Zeichen selbst sind in der Schrift und lassen sich einfuegen.
 
 import serial
 import kstate
 import tty
 import wm
+import utf8
 
-export { irq, translate, shifted, take, waiting, MAX_KEYS }
+export {
+    irq, translate, shifted, take, waiting, MAX_KEYS,
+    code_of, layout, set_layout, switches, LAYOUTS, L_US, L_DE
+}
 
 // How many octets fit into the buffer in the data area.
 const MAX_KEYS: u64 = 64
 
 const DATA_PORT: u16 = 0x60
+
+// Die Belegungen. Die NAMEN sind englisch und die Codes die von
+// ISO 639 -- dieselbe Regel wie bei den Sprachdateien unter
+// /usr/share/locale/.
+const L_US: u64 = 0
+const L_DE: u64 = 1
+const LAYOUTS: u64 = 2
 
 // Vector 33. Reading the data port acknowledges the key to the keyboard
 // -- without it the controller delivers nothing more.
@@ -73,8 +124,42 @@ fn irq(state: u64) {
         kstate.set(state, kstate.K11_OFF + kstate.KB_EXT, 0)
         return
     }
+    // RUNDE I18N: die Alt-Tasten. 0x38 ohne Vorzeichen ist die LINKE
+    // (Alt), 0xE0 0x38 die RECHTE (AltGr). Bis hierher fiel die linke
+    // unter "steht nicht in der Tabelle, bleibt still" und die rechte
+    // wurde mit ihrem Vorzeichen weggeworfen.
+    if code == 0x38 {
+        if ext == 1 {
+            kstate.set(state, kstate.K11_OFF + kstate.KB_ALTGR, 1)
+        } else {
+            kstate.set(state, kstate.K11_OFF + kstate.KB_ALT, 1)
+        }
+        kstate.set(state, kstate.K11_OFF + kstate.KB_EXT, 0)
+        return
+    }
+    if code == 0xB8 {
+        if ext == 1 {
+            kstate.set(state, kstate.K11_OFF + kstate.KB_ALTGR, 0)
+        } else {
+            kstate.set(state, kstate.K11_OFF + kstate.KB_ALT, 0)
+        }
+        kstate.set(state, kstate.K11_OFF + kstate.KB_EXT, 0)
+        return
+    }
     kstate.set(state, kstate.K11_OFF + kstate.KB_EXT, 0)
     if code >= 0x80 {
+        return
+    }
+    // RUNDE I18N: STRG+ALT+L SCHALTET DIE BELEGUNG UM. Der Abtastcode
+    // 0x26 ist auf BEIDEN Belegungen `l`, die Tastenkombination liegt
+    // also auf derselben Taste, egal welche Belegung gerade gilt -- was
+    // bei einer Umschalttaste zwischen Belegungen die einzige
+    // brauchbare Wahl ist. Es wird KEIN Zeichen geliefert.
+    if code == 0x26 && kstate.get(state, kstate.K11_OFF + kstate.KB_CTRL) == 1
+        && kstate.get(state, kstate.K11_OFF + kstate.KB_ALT) == 1 {
+        let l: u64 = kstate.get(state, kstate.K11_OFF + kstate.KB_LAYOUT)
+        set_layout(state, (l + 1) % LAYOUTS)
+        say_layout(kstate.get(state, kstate.K11_OFF + kstate.KB_LAYOUT))
         return
     }
     // Die Pfeiltaste nach oben: ein Oktett, unveraendert seit Runde K6.
@@ -101,10 +186,11 @@ fn irq(state: u64) {
         say_seq(final)
         return
     }
-    var c: u64 = (translate(code)) as u64
-    if kstate.get(state, kstate.K11_OFF + kstate.KB_SHIFT) == 1 {
-        c = (shifted(code)) as u64
-    }
+    // RUNDE I18N: EIN CODEPUNKT, nicht ein Oktett.
+    var c: u64 = code_of(kstate.get(state, kstate.K11_OFF + kstate.KB_LAYOUT),
+        code,
+        kstate.get(state, kstate.K11_OFF + kstate.KB_SHIFT) == 1,
+        kstate.get(state, kstate.K11_OFF + kstate.KB_ALTGR) == 1)
     if c == 0 {
         return
     }
@@ -116,8 +202,27 @@ fn irq(state: u64) {
             c = low - 96
         }
     }
-    deliver(state, c)
-    say_key(c)
+    emit(state, c)
+}
+
+// EIN CODEPUNKT IN DEN RING, ALS UTF-8.
+//
+// Bis 0x7F ist das Oktett fuer Oktett, was `deliver(state, c)` vorher
+// tat -- kein bestehender Test sieht einen Unterschied. Darueber sind es
+// zwei bis vier Oktette, die NACHEINANDER in den Ring gehen; ein Leser,
+// der Zeichen will, setzt sie mit `utf8.next` wieder zusammen.
+//
+// Gemeldet wird trotzdem GENAU EINE Zeile `key: ` -- die Zusage von
+// Runde K11, an der Abschnitt 7 von tools/kernel/run.sh haengt.
+fn emit(state: u64, cp: u64) {
+    var b: [u8; 4] = [0 as u8; 4]
+    let n: u64 = utf8.encode(cp, (&b[0]) as u64)
+    var i: u64 = 0
+    while i < n {
+        deliver(state, (b[i as usize]) as u64)
+        i = i + 1
+    }
+    say_cp(cp, (&b[0]) as u64, n)
 }
 
 // Ein Oktett in den Ring von Runde K1 UND durch die Zeilendisziplin.
@@ -185,35 +290,53 @@ fn arrow(code: u64) -> u64 {
     return 0
 }
 
-fn say_key(c: u64) {
-    var label: [u8; 6] = "key: \0"
-    serial.puts((&label[0]) as u64)
-    if c == 10 {
-        var word: [u8; 8] = "[enter]\0"
-        serial.puts((&word[0]) as u64)
-    } else if c < 32 {
-        // Ein Steuerzeichen sichtbar: ^O statt eines unsichtbaren
-        // Oktetts. Sonst steht in jedem Mitschnitt "key: " und nichts.
-        serial.put(94 as u8)
-        serial.put((c + 64) as u8)
-    } else {
-        serial.put(c as u8)
-    }
-    serial.nl()
+// ------------------------------------------------------- die Belegung
+
+fn layout(state: u64) -> u64 {
+    return kstate.get(state, kstate.K11_OFF + kstate.KB_LAYOUT)
 }
 
-fn say_seq(final: u64) {
-    var label: [u8; 6] = "key: \0"
-    serial.puts((&label[0]) as u64)
-    serial.put(27 as u8)
-    serial.put(91 as u8)
-    if final > 255 {
-        serial.put((final - 256) as u8)
-        serial.put(126 as u8)
-    } else {
-        serial.put(final as u8)
+fn switches(state: u64) -> u64 {
+    return kstate.get(state, kstate.K11_OFF + kstate.KB_SWITCH)
+}
+
+// Gibt zurueck, ob wirklich umgeschaltet wurde. Eine Nummer, die es
+// nicht gibt, wird abgelehnt und nicht stillschweigend auf 0 gerundet
+// -- sonst meldet ein Einstellungsfenster Erfolg und die Tastatur
+// bleibt, wie sie war.
+fn set_layout(state: u64, n: u64) -> bool {
+    if n >= LAYOUTS {
+        return false
     }
-    serial.nl()
+    kstate.set(state, kstate.K11_OFF + kstate.KB_LAYOUT, n)
+    kstate.add(state, kstate.K11_OFF + kstate.KB_SWITCH, 1)
+    return true
+}
+
+// ABTASTCODE -> CODEPUNKT.
+//
+// Die eine Stelle, an der eine Taste zu einem Zeichen wird. `shift` und
+// `altgr` sind die beiden Ebenen ueber der Grundebene; STRG wird
+// NACHHER angewandt (im Aufrufer), weil STRG-A auf jeder Belegung 1 ist.
+fn code_of(lay: u64, code: u64, shift: bool, altgr: bool) -> u64 {
+    // Die drei Tasten, die auf JEDER Belegung dasselbe tun und die
+    // seit Runde K1 bzw. K15 festliegen.
+    if code == 14 {
+        return 8 // Rueckschritt
+    }
+    if code == 15 {
+        return 9 // Tabulator
+    }
+    if code == 72 {
+        return 14 // die Pfeiltaste nach oben, Runde K6
+    }
+    if lay == L_DE {
+        return de_code(code, shift, altgr)
+    }
+    if shift {
+        return (shifted(code)) as u64
+    }
+    return (translate(code)) as u64
 }
 
 // ROUND K1: how many keys are waiting to be read.
@@ -240,6 +363,11 @@ fn take(state: u64) -> u64 {
 // left it silent; a shell has one, and 8 is what the correction is
 // called. Nothing else in the table changed -- the four keys of round
 // 59's case still come out as `firn`.
+//
+// RUNDE I18N: DIESE TABELLE BLEIBT, WIE SIE IST, und sie heisst ab jetzt
+// die AMERIKANISCHE Belegung. Sie ist weiterhin exportiert und wird
+// weiterhin von den Testlaeufern der Runden 59 und K11 direkt
+// aufgerufen; wer sie aendert, aendert eine gemessene Zusage.
 fn translate(code: u64) -> u8 {
     if code == 14 {
         return 8 as u8
@@ -284,4 +412,303 @@ fn shifted(code: u64) -> u8 {
         return 0 as u8
     }
     return table[code as usize]
+}
+
+// ------------------------------------------- DIE DEUTSCHE BELEGUNG
+//
+// Sie steht als KETTE VON ABFRAGEN und nicht als Tabelle, und dafuer
+// gibt es einen Grund, der aus der Sprache kommt: eine Tabelle waere
+// `[u8; 58]` und damit ein Oktett je Platz -- ein `u` mit zwei Punkten
+// ist U+00FC und passt hinein, ein Eurozeichen (U+20AC) nicht. Ein Feld
+// aus `u64` liesse sich in Stufe 0 nicht als Literal schreiben. Also
+// Abfragen; der Uebersetzer macht daraus dieselbe Sprungkette wie aus
+// jedem anderen `if`.
+//
+// Was von der amerikanischen Belegung UNVERAENDERT bleibt, steht nicht
+// noch einmal hier: Buchstaben ausser Y und Z, die Ziffern, Leertaste,
+// Eingabe, Rueckschritt, Tabulator. Diese Funktion behandelt genau die
+// Tasten, die anders liegen -- und faellt fuer alles andere auf die
+// amerikanische Tabelle zurueck.
+//
+// AUFTEILUNG DER EBENEN:
+//   Grundebene    y und z vertauscht, die drei Umlaute, ss, die
+//                 Interpunktion der unteren Reihe
+//   Umschalt      die Grossbuchstaben dazu, die Zeichen der oberen Reihe
+//   AltGr         @ (Q), Euro (E), die geschweiften und eckigen
+//                 Klammern (7 8 9 0 ss), der senkrechte Strich und die
+//                 Tilde
+fn de_code(code: u64, shift: bool, altgr: bool) -> u64 {
+    if altgr {
+        return de_altgr(code)
+    }
+    if shift {
+        return de_shift(code)
+    }
+    return de_plain(code)
+}
+
+// Die Grundebene.
+fn de_plain(code: u64) -> u64 {
+    // Y und Z sind vertauscht -- das Z, das QWERTZ seinen Namen gibt.
+    if code == 0x15 {
+        return 122 // z, wo auf der amerikanischen Belegung y liegt
+    }
+    if code == 0x2C {
+        return 121 // y, wo dort z liegt
+    }
+    // Die obere Zahlenreihe endet anders: ss und ein Akzent.
+    if code == 0x0C {
+        return 0x00DF // scharfes s
+    }
+    if code == 0x0D {
+        return 0x00B4 // Akkut, NICHT tot -- siehe Kopf dieser Datei
+    }
+    // Die drei Umlaute -- der ganze Grund, warum es diese Belegung gibt.
+    if code == 0x1A {
+        return 0x00FC // u mit zwei Punkten
+    }
+    if code == 0x27 {
+        return 0x00F6 // o mit zwei Punkten
+    }
+    if code == 0x28 {
+        return 0x00E4 // a mit zwei Punkten
+    }
+    // Der Rest der Interpunktion.
+    if code == 0x1B {
+        return 43 // +
+    }
+    if code == 0x29 {
+        return 94 // ^, ebenfalls nicht tot
+    }
+    if code == 0x2B {
+        return 35 // #
+    }
+    if code == 0x33 {
+        return 44 // ,
+    }
+    if code == 0x34 {
+        return 46 // .
+    }
+    if code == 0x35 {
+        return 45 // -
+    }
+    if code == 0x56 {
+        return 60 // <, die Taste neben der linken Umschalttaste
+    }
+    return (translate(code)) as u64
+}
+
+// Mit Umschalt.
+fn de_shift(code: u64) -> u64 {
+    if code == 0x15 {
+        return 90 // Z
+    }
+    if code == 0x2C {
+        return 89 // Y
+    }
+    // Die obere Reihe. Sie hat mit der amerikanischen nichts gemein.
+    if code == 0x02 {
+        return 33 // !
+    }
+    if code == 0x03 {
+        return 34 // "
+    }
+    if code == 0x04 {
+        return 0x00A7 // Paragraphenzeichen
+    }
+    if code == 0x05 {
+        return 36 // $
+    }
+    if code == 0x06 {
+        return 37 // %
+    }
+    if code == 0x07 {
+        return 38 // &
+    }
+    if code == 0x08 {
+        return 47 // /
+    }
+    if code == 0x09 {
+        return 40 // (
+    }
+    if code == 0x0A {
+        return 41 // )
+    }
+    if code == 0x0B {
+        return 61 // =
+    }
+    if code == 0x0C {
+        return 63 // ?
+    }
+    if code == 0x0D {
+        return 96 // Gravis, nicht tot
+    }
+    if code == 0x1A {
+        return 0x00DC // U mit zwei Punkten
+    }
+    if code == 0x27 {
+        return 0x00D6 // O mit zwei Punkten
+    }
+    if code == 0x28 {
+        return 0x00C4 // A mit zwei Punkten
+    }
+    if code == 0x1B {
+        return 42 // *
+    }
+    if code == 0x29 {
+        return 0x00B0 // Gradzeichen
+    }
+    if code == 0x2B {
+        return 39 // '
+    }
+    if code == 0x33 {
+        return 59 // ;
+    }
+    if code == 0x34 {
+        return 58 // :
+    }
+    if code == 0x35 {
+        return 95 // _
+    }
+    if code == 0x56 {
+        return 62 // >
+    }
+    return (shifted(code)) as u64
+}
+
+// Die dritte Ebene. Ohne sie hat eine deutsche Tastatur kein
+// Klammeraffenzeichen und keine geschweifte Klammer -- also weder eine
+// Postanschrift noch einen Programmtext.
+fn de_altgr(code: u64) -> u64 {
+    if code == 0x10 {
+        return 64 // @ auf Q
+    }
+    if code == 0x12 {
+        return 0x20AC // Eurozeichen auf E
+    }
+    if code == 0x03 {
+        return 0x00B2 // hochgestellte Zwei
+    }
+    if code == 0x04 {
+        return 0x00B3 // hochgestellte Drei
+    }
+    if code == 0x08 {
+        return 123 // {
+    }
+    if code == 0x09 {
+        return 91 // [
+    }
+    if code == 0x0A {
+        return 93 // ]
+    }
+    if code == 0x0B {
+        return 125 // }
+    }
+    if code == 0x0C {
+        return 92 // Rueckstrich
+    }
+    if code == 0x1B {
+        return 126 // Tilde
+    }
+    if code == 0x32 {
+        return 0x00B5 // My auf M
+    }
+    if code == 0x56 {
+        return 124 // senkrechter Strich
+    }
+    return 0
+}
+
+// --------------------------------------------------------- die Meldung
+
+fn say_key(c: u64) {
+    var label: [u8; 6] = "key: \0"
+    serial.puts((&label[0]) as u64)
+    if c == 10 {
+        var word: [u8; 8] = "[enter]\0"
+        serial.puts((&word[0]) as u64)
+    } else if c < 32 {
+        // Ein Steuerzeichen sichtbar: ^O statt eines unsichtbaren
+        // Oktetts. Sonst steht in jedem Mitschnitt "key: " und nichts.
+        serial.put(94 as u8)
+        serial.put((c + 64) as u8)
+    } else {
+        serial.put(c as u8)
+    }
+    serial.nl()
+}
+
+// RUNDE I18N: dieselbe Zeile, aber fuer einen CODEPUNKT.
+//
+// Unter 0x80 ist sie Zeichen fuer Zeichen die von `say_key` -- das ist
+// die Bedingung dafuer, dass die Mitschnitte der Runden 59, K1 und K11
+// unveraendert bleiben. Darueber kommen die UTF-8-Oktette auf die
+// Leitung UND die Nummer des Codepunkts hinterher, in der Form
+// ` U+00FC`. Ein Testlaeufer kann damit auf den NAMEN des Zeichens
+// pruefen, ohne dass die Werkzeugkette des Wirts UTF-8 richtig durch
+// eine Pipe bringen muss -- was sie erfahrungsgemaess nicht immer tut.
+fn say_cp(cp: u64, b: u64, n: u64) {
+    var label: [u8; 6] = "key: \0"
+    serial.puts((&label[0]) as u64)
+    if cp == 10 {
+        var word: [u8; 8] = "[enter]\0"
+        serial.puts((&word[0]) as u64)
+    } else if cp < 32 {
+        serial.put(94 as u8)
+        serial.put((cp + 64) as u8)
+    } else {
+        var i: u64 = 0
+        while i < n {
+            serial.put(__mmio_read8((b +% i) as *mut u8))
+            i = i + 1
+        }
+    }
+    if cp >= 0x80 {
+        var u: [u8; 4] = " U+\0"
+        serial.puts((&u[0]) as u64)
+        hex4(cp)
+    }
+    serial.nl()
+}
+
+// Vier Hexziffern, gross geschrieben -- die Schreibweise, in der
+// Unicode seine Zeichen nennt.
+fn hex4(v: u64) {
+    var i: u64 = 4
+    while i > 0 {
+        i = i - 1
+        let d: u64 = (v >> (i * 4)) & 15
+        if d < 10 {
+            serial.put((48 + d) as u8)
+        } else {
+            serial.put((55 + d) as u8)
+        }
+    }
+}
+
+fn say_layout(n: u64) {
+    var label: [u8; 14] = "kbd: layout=\0\0"
+    serial.puts((&label[0]) as u64)
+    if n == L_DE {
+        var de: [u8; 3] = "de\0"
+        serial.puts((&de[0]) as u64)
+    } else {
+        var us: [u8; 3] = "us\0"
+        serial.puts((&us[0]) as u64)
+    }
+    serial.nl()
+}
+
+fn say_seq(final: u64) {
+    var label: [u8; 6] = "key: \0"
+    serial.puts((&label[0]) as u64)
+    serial.put(27 as u8)
+    serial.put(91 as u8)
+    if final > 255 {
+        serial.put((final - 256) as u8)
+        serial.put(126 as u8)
+    } else {
+        serial.put(final as u8)
+    }
+    serial.nl()
 }
