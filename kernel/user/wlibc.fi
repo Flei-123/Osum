@@ -71,6 +71,13 @@ export {
     theme_apply, theme_reload, theme_poll, theme_set_mode,
     theme_set_accent, theme_clear_accent, theme_bad_keys,
     theme_scheme_keys, theme_count, theme_token_count,
+    // ROUND LOOK: the fourth layer -- FORM, not colour.
+    metric, shape_name, shape_file, shape_keys, shape_id,
+    M_RADIUS_WINDOW, M_RADIUS_PANEL, M_RADIUS_BUTTON, M_RADIUS_INPUT,
+    M_BORDER, M_PAD_X, M_PAD_Y, M_GAP, M_ROW, M_CTRL_H,
+    M_SHADOW, M_SHADOW_R, M_DIVIDER, M_FOCUS, M_COUNT,
+    SHAPE_CLASSIC, SHAPE_MODERN,
+    rrect, rframe, drop_shadow, divider, aa_pixels,
     theme_semantic_count,
     theme_override_count, theme_load, theme_set, theme_sum,
     // ---- ROUND NETVIEW, addendum: icons whose colours come from
@@ -483,6 +490,208 @@ fn frame3(x: u64, y: u64, w: u64, h: u64, hell: u64, dunkel: u64,
     vline(x, y, h, o)
     hline(x, y + h - 1, w, u)
     vline(x + w - 1, y, h, u)
+}
+
+// =============== ROUND LOOK: ROUNDED RECTANGLES, AND WHAT THEY COST
+//
+// A radius token is worth nothing without something that can draw one,
+// and a rounded corner drawn with hard pixels is a staircase, which at
+// radius 8 is MORE conspicuous than a square corner, not less. So the
+// corners are antialiased, and here is exactly how much that costs and
+// why it is affordable:
+//
+//   * ONLY THE FOUR CORNER SQUARES ARE SAMPLED. Everything else is the
+//     same run of `rect` it always was. A rectangle of radius r pays
+//     for 4 * r * r pixels no matter how big it is -- 256 pixels at
+//     r = 8, whether the rectangle is 60 x 26 or 796 x 576.
+//   * EACH OF THOSE PIXELS IS SAMPLED 4 x 4. Sixteen point-in-circle
+//     tests, all of them integer: (2dx+1)^2 + (2dy+1)^2 against
+//     (2r)^2 in quarter-pixel units, no square root, no division.
+//   * THE COVERAGE IS BLENDED AGAINST WHAT IS ALREADY THERE, with the
+//     SAME `blend` the glyph rasteriser uses, so a corner and a letter
+//     of the same colour over the same background come out of the same
+//     arithmetic.
+//
+// `aa_pixels()` counts every pixel that went through the sampler, so
+// the cost is a MEASUREMENT in every run and not a claim in a comment.
+//
+// If this ever turns out to be too expensive the honest fallback is
+// hard edges with the CORRECT rounding -- coverage >= 128 becomes ink,
+// below becomes background -- and not a smaller radius. That is one
+// line (`if cov >= 128`), and it is written here so that whoever needs
+// it does not have to redesign anything.
+
+// Is (dx, dy) -- the distance from the centre of the corner circle, in
+// whole pixels, of the pixel's TOP LEFT -- inside the circle? Answered
+// as a coverage 0..255 by sampling the pixel sixteen times.
+fn corner_cov(dx: u64, dy: u64, r: u64) -> u64 {
+    if r == 0 {
+        return 255
+    }
+    // The far corner of the pixel is inside: fully covered.
+    // Cheap early exits, and they carry most of the pixels.
+    let rr: u64 = r *% r
+    if (dx + 1) * (dx + 1) + (dy + 1) * (dy + 1) <= rr {
+        return 255
+    }
+    if dx * dx + dy * dy >= rr {
+        return 0
+    }
+    var hits: u64 = 0
+    var sy: u64 = 0
+    while sy < 4 {
+        var sx: u64 = 0
+        while sx < 4 {
+            // the centre of sub-sample (sx, sy), in eighths of a pixel
+            let px8: u64 = dx *% 8 +% sx *% 2 +% 1
+            let py8: u64 = dy *% 8 +% sy *% 2 +% 1
+            if px8 *% px8 +% py8 *% py8 <= (r *% 8) *% (r *% 8) {
+                hits = hits + 1
+            }
+            sx = sx + 1
+        }
+        sy = sy + 1
+    }
+    aa_px = aa_px + 1
+    return hits * 255 / 16
+}
+
+// A FILLED RECTANGLE WITH ROUNDED CORNERS.
+//
+// r == 0 is the old `rect`, call for call, and that is not an
+// optimisation -- it is the promise that `classic` is bit-identical to
+// what this system drew before the round.
+fn rrect(x: u64, y: u64, w: u64, h: u64, r0: u64, color: u64) {
+    if w == 0 || h == 0 {
+        return
+    }
+    var r: u64 = r0
+    if r > RADIUS_MAX {
+        r = RADIUS_MAX
+    }
+    if r * 2 > w {
+        r = w / 2
+    }
+    if r * 2 > h {
+        r = h / 2
+    }
+    if r == 0 {
+        rect(x, y, w, h, color)
+        return
+    }
+    // the middle band, full width
+    rect(x, y + r, w, h - 2 * r, color)
+    // the two straight parts of the top and bottom bands
+    rect(x + r, y, w - 2 * r, r, color)
+    rect(x + r, y + h - r, w - 2 * r, r, color)
+    // and the four corners
+    var dy: u64 = 0
+    while dy < r {
+        var dx: u64 = 0
+        while dx < r {
+            let cov: u64 = corner_cov(r - 1 - dx, r - 1 - dy, r)
+            if cov != 0 {
+                let x0: u64 = x + dx
+                let y0: u64 = y + dy
+                let x1: u64 = x + w - 1 - dx
+                let y1: u64 = y + h - 1 - dy
+                px(x0, y0, blend(get(x0, y0), color, cov))
+                px(x1, y0, blend(get(x1, y0), color, cov))
+                px(x0, y1, blend(get(x0, y1), color, cov))
+                px(x1, y1, blend(get(x1, y1), color, cov))
+            }
+            dx = dx + 1
+        }
+        dy = dy + 1
+    }
+}
+
+// THE OUTLINE OF THE SAME SHAPE, `bw` pixels thick.
+//
+// Drawn as two filled shapes and not as a traced curve: fill the outer
+// rounded rectangle in the border colour, then fill the inner one back
+// in the surface colour. That is four `rrect` corners' worth of
+// sampling instead of a second, differently-rounded arc -- and, more to
+// the point, the inner curve is then guaranteed concentric with the
+// outer one, which a traced curve is not.
+fn rframe(x: u64, y: u64, w: u64, h: u64, r: u64, bw: u64, color: u64,
+    inner: u64) {
+    if w < 2 || h < 2 || bw == 0 {
+        return
+    }
+    if r == 0 && bw == 1 {
+        frame(x, y, w, h, color)
+        return
+    }
+    var b: u64 = bw
+    if b * 2 >= w || b * 2 >= h {
+        b = 1
+    }
+    rrect(x, y, w, h, r, color)
+    var ri: u64 = 0
+    if r > b {
+        ri = r - b
+    }
+    rrect(x + b, y + b, w - 2 * b, h - 2 * b, ri, inner)
+}
+
+// A SOFT DROP SHADOW UNDER A RECTANGLE.
+//
+// Not a blur -- a blur needs a second buffer and two passes over it, and
+// this library paints into an 800 x 81 band. What it does instead is
+// draw `n` nested outlines, each one pixel further out and each weaker
+// than the last, in the shadow colour. That is a linear falloff instead
+// of a Gaussian one; at the four to six pixels a window shadow actually
+// uses, the difference is not visible and the cost is n outlines
+// instead of a convolution.
+//
+// `strength` is 0..100 and 0 draws nothing at all -- which is what
+// `classic` asks for, so classic pays nothing.
+fn drop_shadow(x: u64, y: u64, w: u64, h: u64, r: u64, strength: u64,
+    reach: u64, color: u64) {
+    if strength == 0 || reach == 0 || w == 0 || h == 0 {
+        return
+    }
+    var i: u64 = reach
+    while i > 0 {
+        // the outermost ring is the weakest
+        let a: u64 = strength * 255 / 100 * (reach + 1 - i) / (reach + 1)
+        if a != 0 {
+            let ox: u64 = x - i
+            // A SHADOW SITS BELOW ITS WINDOW AND NOT AROUND IT. One
+            // pixel of downward offset per ring is what every system
+            // that draws one does, and it is what makes the thing read
+            // as "above" instead of "glowing".
+            let oy: u64 = y - i + 1
+            rframe(ox, oy, w + 2 * i, h + 2 * i, r + i, 1,
+                blend(get(ox, oy + (h + 2 * i) / 2), color, a),
+                blend(get(ox, oy + (h + 2 * i) / 2), color, a))
+        }
+        i = i - 1
+    }
+}
+
+// A SEPARATING LINE AT THE OPACITY THE SHAPE ASKS FOR.
+//
+// `classic` says 100 and gets the same hard `hline` it always got.
+// `modern` says 45, and the line is mixed into what is under it -- which
+// is the single biggest reason a modern interface reads as calm: the
+// lines are still there, they are just not shouting.
+fn divider(x: u64, y: u64, w: u64, color: u64) {
+    let o: u64 = met[(M_DIVIDER) as usize]
+    if o == 0 {
+        return
+    }
+    if o >= 100 {
+        hline(x, y, w, color)
+        return
+    }
+    let a: u64 = o * 255 / 100
+    var c: u64 = 0
+    while c < w {
+        px(x + c, y, blend(get(x + c, y), color, a))
+        c = c + 1
+    }
 }
 
 // ------------------------------------------------- der Glyphenspeicher
@@ -1042,6 +1251,70 @@ const T_DLG: u64 = 16
 const T_MENU: u64 = 17
 const T_COUNT: u64 = 18
 
+// ==================== ROUND LOOK: THE FOURTH LAYER, AND WHY IT EXISTS
+//
+// Round THEME replaced eighteen hardcoded colours with three layers of
+// COLOUR tokens, and it made the interface themable in exactly one
+// direction. Justin looked at the result and said it still looks like
+// Windows XP -- and he was right, and the reason is that NOTHING ABOUT
+// THE SHAPE was ever a token. Every border in this system is one pixel,
+// every corner is square, every inner margin is a number somebody typed
+// into a painting routine, and no scheme file can reach any of it.
+// Repainting a square 1-pixel box in a nicer grey gives a nicer grey
+// square box.
+//
+// So: the same treatment, for FORM. Fourteen tokens, one file per set
+// under /etc/shapes/, chosen by `shape=` in /etc/theme.conf --
+// deliberately the same arrangement as /etc/schemas/ and `scheme=`,
+// because they are the same kind of thing.
+//
+// FORM AND COLOUR ARE TWO AXES AND NOT ONE POT. `shape=modern
+// scheme=night mode=dark` is a legal and useful combination, and so is
+// `shape=classic scheme=night`. Anyone who folds them into one
+// "theme" has to write four files to offer two shapes and two colour
+// schemes, and sixteen to offer four of each.
+//
+// WHERE THE NUMBERS COME FROM. /root/jarvis/plugins/ui-ux-pro-max --
+// design-system/references/primitive-tokens.md (the 4px spacing scale
+// and the radius scale: 2, 4, 6, 8, 12, 16) and
+// design-system/references/component-specs.md (the button and input
+// size table). `modern` uses that table's `sm` row -- 32 px high, 12 px
+// of horizontal padding, radius-md -- and NOT its `default` row (40 px,
+// 16 px). That is a deliberate, measured departure and it is written
+// down in docs/ROUNDLOOK.md: the pages this system already has are laid
+// out for windows of 400 to 800 pixels and for a 15-pixel font, and at
+// 40 px per control the settings program's Darstellung page is 720
+// pixels tall on a 600-pixel screen. A design system is a set of
+// numbers to reason with, not a set of numbers to obey.
+//
+// EVERY TOKEN IS A NUMBER OF PIXELS except the last three, which are
+// per-hundred: shadow strength, divider opacity and nothing else.
+const M_RADIUS_WINDOW: u64 = 0
+const M_RADIUS_PANEL: u64 = 1
+const M_RADIUS_BUTTON: u64 = 2
+const M_RADIUS_INPUT: u64 = 3
+const M_BORDER: u64 = 4
+const M_PAD_X: u64 = 5
+const M_PAD_Y: u64 = 6
+const M_GAP: u64 = 7
+const M_ROW: u64 = 8
+const M_CTRL_H: u64 = 9
+const M_SHADOW: u64 = 10 // 0..100, the strength of a drop shadow
+const M_SHADOW_R: u64 = 11 // how far it reaches, in pixels
+const M_DIVIDER: u64 = 12 // 0..100, how solid a separating line is
+const M_FOCUS: u64 = 13
+const M_COUNT: u64 = 14
+
+// The two sets this round ships, as NUMBERS and not as names, so that a
+// program can ask which one is running without comparing strings.
+const SHAPE_CLASSIC: u64 = 0
+const SHAPE_MODERN: u64 = 1
+
+// The biggest radius the corner routine will draw. It is a bound on
+// work and not on taste: a corner of radius r costs r*r coverage
+// samples, and four of them per rectangle.
+const RADIUS_MAX: u64 = 24
+
 const MODE_LIGHT: u64 = 0
 const MODE_DARK: u64 = 1
 const MODE_AUTO: u64 = 2
@@ -1063,6 +1336,20 @@ static mut frame_open: u64 = 0
 static mut conf_copy: [u8; 512] = [0 as u8; 512]
 static mut conf_len: u64 = 0
 static mut booted: u64 = 0
+
+// ---- ROUND LOOK: the shape state
+//
+// `met` is what every painting routine reads. It starts as `classic`,
+// octet for octet the behaviour of every round before this one, so a
+// machine with no /etc/shapes and no `shape=` line looks EXACTLY as it
+// did -- that is the condition under which this round can be landed
+// without re-measuring every screenshot in the repository.
+static mut met: [u64; 14] = [0 as u64; 14]
+static mut shp_name: [u8; 32] = [0 as u8; 32]
+static mut shp_file: [u8; 32] = [0 as u8; 32]
+static mut shp_keys: u64 = 0
+static mut shp_id: u64 = 0
+static mut aa_px: u64 = 0
 
 static mut sch_mode: u64 = 1
 static mut sch_high: u64 = 0
@@ -2056,6 +2343,7 @@ fn scheme_key(kp: u64, kn: u64, vp: u64, vn: u64) -> bool {
 
 fn conf_key(kp: u64, kn: u64, vp: u64, vn: u64) -> bool {
     var k_scheme: [u8; 7] = "scheme\0"
+    var k_shape: [u8; 6] = "shape\0"
     var k_mode: [u8; 5] = "mode\0"
     var k_accent: [u8; 7] = "accent\0"
     var k_ls: [u8; 12] = "light_start\0"
@@ -2065,6 +2353,12 @@ fn conf_key(kp: u64, kn: u64, vp: u64, vn: u64) -> bool {
 
     if name_eq(kp, kn, (&k_scheme[0 as usize]) as u64) {
         copy_bounded((&sch_file[0 as usize]) as u64, vp, vn, 32)
+        return true
+    }
+    // ROUND LOOK: the second axis, in the same file and beside the
+    // first, because they are settings of the same kind.
+    if name_eq(kp, kn, (&k_shape[0 as usize]) as u64) {
+        copy_bounded((&shp_file[0 as usize]) as u64, vp, vn, 32)
         return true
     }
     if name_eq(kp, kn, (&k_mode[0 as usize]) as u64) {
@@ -2113,13 +2407,24 @@ fn conf_key(kp: u64, kn: u64, vp: u64, vn: u64) -> bool {
 
 // which: 0 = a scheme file, 1 = the settings file, 2 = the legacy
 // /etc/theme override file.
+// ROUND LOOK: 4096 AND NOT 1536, and the reason is a bug this round
+// walked straight into. A shape file with its rationale in it is 4459
+// octets; `kv_read` read the first 1535, which were all comment, and
+// reported ZERO keys -- so the resolver fell back to `classic` and the
+// two screenshots came out identical. Nothing said so, because "no
+// keys" and "no file" took the same branch.
+//
+// Both are fixed: the buffer is big enough for a documented file, and
+// `shape_keys()` is reported on the serial line so that zero is
+// visible. The scheme files (about 1.5 kilooctets) were inside the old
+// bound by luck and are inside the new one by margin.
 fn kv_read(path: u64, which: u64) -> u64 {
-    var buf: [u8; 1536] = [0 as u8; 1536]
+    var buf: [u8; 4096] = [0 as u8; 4096]
     let fd: u64 = io.open(path, 0)
     if ulib.bad(fd) {
         return 0
     }
-    let n: u64 = io.read(fd, (&buf[0 as usize]) as u64, 1535)
+    let n: u64 = io.read(fd, (&buf[0 as usize]) as u64, 4095)
     io.close(fd)
     if ulib.bad(n) || n == 0 {
         return 0
@@ -2167,6 +2472,9 @@ fn kv_scan(b: u64, n: u64, which: u64) -> u64 {
                             ve - g - 1)
                     } else if which == 1 {
                         ok = conf_key(b + i, g - i, b + g + 1, ve - g - 1)
+                    } else if which == 4 {
+                        ok = shape_key(b + i, g - i, b + g + 1,
+                            ve - g - 1)
                     } else if which == 3 {
                         var k_off: [u8; 7] = "offset\0"
                         if name_eq(b + i, g - i,
@@ -2338,6 +2646,154 @@ fn path_join(dir: u64, name: u64, out: u64, max: u64) {
     __mmio_write8((out + at) as *mut u8, 0 as u8)
 }
 
+// ============================== ROUND LOOK: THE FORM TOKENS
+//
+// `classic` IS THE BUILT-IN. Every number below is the number that was
+// written into a painting routine before this round, read out of the
+// source it came from -- a 1-pixel border (`frame`), a 26-pixel button
+// (`wlib.button`), a 20-pixel list row (`wlib.zeilen_hoehe`), 6 pixels
+// of padding in an entry (`wlib.paint_entry`), 8 between two controls
+// (`wlib.want_gap`). Nothing here is new; it is the old behaviour,
+// named.
+fn metrics_classic() {
+    met[(M_RADIUS_WINDOW) as usize] = 0
+    met[(M_RADIUS_PANEL) as usize] = 0
+    met[(M_RADIUS_BUTTON) as usize] = 0
+    met[(M_RADIUS_INPUT) as usize] = 0
+    met[(M_BORDER) as usize] = 1
+    met[(M_PAD_X) as usize] = 12
+    met[(M_PAD_Y) as usize] = 4
+    met[(M_GAP) as usize] = 8
+    met[(M_ROW) as usize] = 20
+    met[(M_CTRL_H) as usize] = 26
+    met[(M_SHADOW) as usize] = 0
+    met[(M_SHADOW_R) as usize] = 0
+    met[(M_DIVIDER) as usize] = 100
+    met[(M_FOCUS) as usize] = 1
+    shp_id = SHAPE_CLASSIC
+}
+
+fn metric(i: u64) -> u64 {
+    if i >= M_COUNT {
+        return 0
+    }
+    return met[(i) as usize]
+}
+
+fn shape_name() -> u64 {
+    return (&shp_name[0 as usize]) as u64
+}
+
+fn shape_file() -> u64 {
+    return (&shp_file[0 as usize]) as u64
+}
+
+fn shape_keys() -> u64 {
+    return shp_keys
+}
+
+fn shape_id() -> u64 {
+    return shp_id
+}
+
+fn aa_pixels() -> u64 {
+    return aa_px
+}
+
+// One line of a shape file. Unknown keys are counted as bad, exactly
+// like a scheme file -- a misspelt `radus_button=8` must not be
+// swallowed, or the person changes it, sees nothing, and blames the
+// drawing.
+fn shape_key(kp: u64, kn: u64, vp: u64, vn: u64) -> bool {
+    var k_name: [u8; 5] = "name "
+    var k_rw: [u8; 14] = "radius_window "
+    var k_rp: [u8; 13] = "radius_panel "
+    var k_rb: [u8; 14] = "radius_button "
+    var k_ri: [u8; 13] = "radius_input "
+    var k_bo: [u8; 7] = "border "
+    var k_px: [u8; 6] = "pad_x "
+    var k_py: [u8; 6] = "pad_y "
+    var k_ga: [u8; 4] = "gap "
+    var k_ro: [u8; 4] = "row "
+    var k_ch: [u8; 7] = "ctrl_h "
+    var k_sh: [u8; 7] = "shadow "
+    var k_sr: [u8; 9] = "shadow_r "
+    var k_dv: [u8; 8] = "divider "
+    var k_fo: [u8; 6] = "focus "
+    if name_eq(kp, kn, (&k_name[0 as usize]) as u64) {
+        copy_bounded((&shp_name[0 as usize]) as u64, vp, vn, 32)
+        return true
+    }
+    let v: u64 = parse_dec(vp, vn)
+    if v == DEC_BAD {
+        return false
+    }
+    if name_eq(kp, kn, (&k_rw[0 as usize]) as u64) {
+        met[(M_RADIUS_WINDOW) as usize] = cap(v, RADIUS_MAX)
+        return true
+    }
+    if name_eq(kp, kn, (&k_rp[0 as usize]) as u64) {
+        met[(M_RADIUS_PANEL) as usize] = cap(v, RADIUS_MAX)
+        return true
+    }
+    if name_eq(kp, kn, (&k_rb[0 as usize]) as u64) {
+        met[(M_RADIUS_BUTTON) as usize] = cap(v, RADIUS_MAX)
+        return true
+    }
+    if name_eq(kp, kn, (&k_ri[0 as usize]) as u64) {
+        met[(M_RADIUS_INPUT) as usize] = cap(v, RADIUS_MAX)
+        return true
+    }
+    if name_eq(kp, kn, (&k_bo[0 as usize]) as u64) {
+        met[(M_BORDER) as usize] = cap(v, 4)
+        return true
+    }
+    if name_eq(kp, kn, (&k_px[0 as usize]) as u64) {
+        met[(M_PAD_X) as usize] = cap(v, 32)
+        return true
+    }
+    if name_eq(kp, kn, (&k_py[0 as usize]) as u64) {
+        met[(M_PAD_Y) as usize] = cap(v, 32)
+        return true
+    }
+    if name_eq(kp, kn, (&k_ga[0 as usize]) as u64) {
+        met[(M_GAP) as usize] = cap(v, 32)
+        return true
+    }
+    if name_eq(kp, kn, (&k_ro[0 as usize]) as u64) {
+        met[(M_ROW) as usize] = cap(v, 48)
+        return true
+    }
+    if name_eq(kp, kn, (&k_ch[0 as usize]) as u64) {
+        met[(M_CTRL_H) as usize] = cap(v, 48)
+        return true
+    }
+    if name_eq(kp, kn, (&k_sh[0 as usize]) as u64) {
+        met[(M_SHADOW) as usize] = cap(v, 100)
+        return true
+    }
+    if name_eq(kp, kn, (&k_sr[0 as usize]) as u64) {
+        met[(M_SHADOW_R) as usize] = cap(v, 16)
+        return true
+    }
+    if name_eq(kp, kn, (&k_dv[0 as usize]) as u64) {
+        met[(M_DIVIDER) as usize] = cap(v, 100)
+        return true
+    }
+    if name_eq(kp, kn, (&k_fo[0 as usize]) as u64) {
+        met[(M_FOCUS) as usize] = cap(v, 4)
+        return true
+    }
+    return false
+}
+
+fn cap(v: u64, hi: u64) -> u64 {
+    if v > hi {
+        return hi
+    }
+    return v
+}
+
 // A checksum over the RESOLVED component table. Equality here means
 // "the same forty-one values", which is the only question a program
 // asking "must I repaint?" actually has.
@@ -2367,6 +2823,7 @@ fn theme_sum() -> u64 {
 fn reload_inner(aus_kopie: bool) -> u64 {
     var p_conf: [u8; 16] = "/etc/theme.conf\0"
     var p_dir: [u8; 14] = "/etc/schemas/\0"
+    var p_shapes: [u8; 13] = "/etc/shapes/\0"
     var p_theme: [u8; 11] = "/etc/theme\0"
     var path: [u8; 64] = [0 as u8; 64]
     kv_bad = 0
@@ -2378,6 +2835,10 @@ fn reload_inner(aus_kopie: bool) -> u64 {
     }
     primitives_builtin()
     comp_map_init()
+    metrics_classic()
+    __mmio_write8(((&shp_file[0 as usize]) as u64) as *mut u8, 0 as u8)
+    __mmio_write8(((&shp_name[0 as usize]) as u64) as *mut u8, 0 as u8)
+    aa_px = 0
     set_mode = MODE_AUTO
     set_accent = 0
     __mmio_write8(((&sch_file[0 as usize]) as u64) as *mut u8, 0 as u8)
@@ -2396,6 +2857,26 @@ fn reload_inner(aus_kopie: bool) -> u64 {
         sch_keys = kv_read((&path[0 as usize]) as u64, 0)
     } else {
         sch_keys = 0
+    }
+    // ROUND LOOK: THE SHAPE SET, after the colour scheme and by exactly
+    // the same route. `classic` is already in `met` (it was put there
+    // before the settings file was read), so a machine with no
+    // /etc/shapes/ and no `shape=` line keeps the behaviour of every
+    // round before this one -- and a `shape=` naming a file that is not
+    // there keeps it too, instead of drawing half a set.
+    if *(((&shp_file[0 as usize]) as u64) as *mut u8) != 0 as u8 {
+        path_join((&p_shapes[0 as usize]) as u64,
+            (&shp_file[0 as usize]) as u64,
+            (&path[0 as usize]) as u64, 64)
+        shp_keys = kv_read((&path[0 as usize]) as u64, 4)
+        if shp_keys == 0 {
+            metrics_classic()
+        } else if met[(M_RADIUS_BUTTON) as usize] != 0
+            || met[(M_SHADOW) as usize] != 0 {
+            shp_id = SHAPE_MODERN
+        }
+    } else {
+        shp_keys = 0
     }
     // OHNE EINSTELLUNGSDATEI GILT DER MODUS DES SCHEMAS, nicht `auto`.
     //
