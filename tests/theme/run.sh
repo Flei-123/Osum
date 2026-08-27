@@ -122,10 +122,13 @@ num "rohe Farbwerte im Zeichencode" "$roh" eq 0
 num "Marken, die statt dessen benutzt werden" "$mrk" ge 100
 # DIE GEGENPROBE ZUR NULL: derselbe Pruefer auf den Stand VOR dieser
 # Runde. Findet er dort auch nichts, prueft er nichts.
-VOR=$(git log --format=%H --grep='^THEME' --reverse -1 2>/dev/null)
+# Der juengste Commit, der NICHT aus dieser Runde ist -- also der
+# Stand, auf dem sie aufsetzt. `git log --grep='^THEME'` traf daneben:
+# git verankert das Muster nicht am Zeilenanfang der Meldung.
+VOR=$(git log --format='%H %s' | awk '$2 !~ /^THEME/ {print $1; exit}')
 if [ -n "$VOR" ]; then
     rm -rf "$TMPD/vor"; mkdir -p "$TMPD/vor"
-    git archive "$VOR^" kernel/user kernel/wm.fi 2>/dev/null \
+    git archive "$VOR" kernel/user kernel/wm.fi 2>/dev/null \
         | tar -x -C "$TMPD/vor" 2>/dev/null
     vorn=$(python3 tests/theme/rawcolour.py "$TMPD/vor" 2>&1 \
         | awk '/^rawcolour:/ {print $7}')
@@ -242,11 +245,17 @@ echo
 echo "== 6. die Akzentfarbe und was die Oberflaeche darueber sagt"
 GUT="2563eb 7c3aed a16207"
 SCHLECHT="ffff00 22c55e ffffff"
-lauf acc "osum nokbd nosched noproc nofs script=themetest accent day $GUT $SCHLECHT" 500
+# ZWEI LAEUFE UND NICHT EINER. Sechs Farben auf einer Zeile kamen leer
+# zurueck: die Kommandozeile geht ueber `script=` durch die Shell im
+# Kernel, und die hat eine Grenze, die sie nicht meldet. Ein Test, der
+# an einer stillschweigenden Grenze scheitert, sieht aus wie ein
+# kaputtes Programm und ist keins.
+lauf accgut "osum nokbd nosched noproc nofs script=themetest accent day $GUT" 500
+lauf accbad "osum nokbd nosched noproc nofs script=themetest accent day $SCHLECHT" 500
 # Reihenfolge in der Ausgabe: je Farbe erst hell, dann dunkel.
 i=0
 for a in $GUT; do
-    zeile=$(grep -a '^ACCENT ' "$TMPD/acc.txt" | sed -n "$((i*2+1))p")
+    zeile=$(grep -a '^ACCENT ' "$TMPD/accgut.txt" | sed -n "$((i*2+1))p")
     exakt=$(echo "$zeile" | awk '{print $5}')
     verschoben=$(echo "$zeile" | awk '{print $6}')
     rt=$(echo "$zeile" | awk '{print $7}')
@@ -258,8 +267,9 @@ for a in $GUT; do
     fi
     i=$((i+1))
 done
+i=0
 for a in $SCHLECHT; do
-    zeile=$(grep -a '^ACCENT ' "$TMPD/acc.txt" | sed -n "$((i*2+1))p")
+    zeile=$(grep -a '^ACCENT ' "$TMPD/accbad.txt" | sed -n "$((i*2+1))p")
     gewuenscht=$(echo "$zeile" | awk '{print $2}')
     wirklich=$(echo "$zeile" | awk '{print $3}')
     exakt=$(echo "$zeile" | awk '{print $5}')
@@ -345,32 +355,44 @@ fi
 # ------------------------------------------------------------ 9. Bilder
 echo
 echo "== 9. sieben Bildschirme, drei Zeilen Unterschied"
-shot() { # name schema modus akzent erwartete-flaeche
-    local name=$1 sch=$2 mod=$3 akz=$4 want=$5
+# WAS HIER GEPRUEFT WIRD, und warum nicht "die haeufigste Farbe ist X":
+# welche der drei Flaechenmarken den Schirm anfuehrt, haengt daran, wie
+# gross die Fenster gerade stehen -- bei `dark` waren es in einem Lauf
+# 30 % `surface-sunken` und im naechsten 26 % `surface`, und beides ist
+# richtig. Die tragfaehige Zusage lautet: die Marke `surface` DIESES
+# Schemas in DIESEM Modus gehoert zu den drei haeufigsten Farben des
+# Bildes. Was sie ist, sagt das Modell und nicht dieses Skript.
+marke_von() { # schema modus rolle [akzent]
+    python3 tools/theme/model.py semantic "assets/schemes/$1.scheme" "$2" \
+        ${4:+"$4"} | awk -v r="$3" '$2 == r {print $3}'
+}
+shot() { # name schema modus akzent
+    local name=$1 sch=$2 mod=$3 akz=$4
     bash tests/theme/image.sh "$TMPD" "$sch" "$mod" "$akz" \
         "$TMPD/img-$name.img" > /dev/null 2>&1 || {
         bad "$name: das Abbild liess sich nicht bauen"; return; }
     foto "shot-$name" "$TMPD/img-$name.img" \
         "gfx wm wmhold desk einst themeshot nokbd nosched noproc nofs"
-    local got
-    got=$(python3 tests/theme/pixel.py "$TMPD/shot-$name.ppm" 2>/dev/null)
+    local got want
+    got=$(python3 tests/theme/pixel.py "$TMPD/shot-$name.ppm" --top 3 2>/dev/null)
+    want=$(marke_von "$sch" "$mod" surface "$akz")
     if [ -z "$got" ]; then
         bad "$name: kein Bildschirmfoto"
         return
     fi
     if echo "$got" | grep -qi "$want"; then
-        ok "$name: die haeufigste Farbe ist $want ($got)"
+        ok "$name: surface (#$want) ist unter den drei haeufigsten ($got)"
     else
-        bad "$name: erwartet $want, gemessen $got"
+        bad "$name: #$want fehlt unter den drei haeufigsten -- $got"
     fi
 }
-shot light    day      light ""       f1f5f9
-shot dark     day      dark  ""       020617
-shot green    day      light 22c55e   f1f5f9
-shot violet   day      light 7c3aed   f1f5f9
-shot gold     paper    light a16207   f5f5f4
-shot contrast contrast light ""       ffffff
-shot midnight midnight dark  ""       09090b
+shot light    day      light ""
+shot dark     day      dark  ""
+shot green    day      light 22c55e
+shot violet   day      light 7c3aed
+shot gold     paper    light a16207
+shot contrast contrast light ""
+shot midnight midnight dark  ""
 
 # DIE ZUSAGE HINTER DEN BILDERN: die Farben darin SIND die aufgeloesten
 # Marken. Nicht aehnlich -- dieselben. Die erwartete Akzentfarbe kommt
