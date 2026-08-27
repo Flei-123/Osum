@@ -170,8 +170,12 @@ done
 # GEGENPROBE ZUR KARTE: eine Seite dieser Runde auf eine fremde Adresse
 # gelegt MUSS anschlagen. Ohne diese Zeile prueft die Karte nur das,
 # woran jemand gedacht hat.
-mkdir -p "$TMPD/kollision"
+# RUNDE ARM: die Kopie braucht `kernel/arch/x86_64/` mit -- `hv.fi` liegt
+# seit dem Trennschnitt dort, und ohne sie stirbt der Kartenpruefer an
+# einem KeyError statt die Kollision zu melden, die hier gemessen wird.
+mkdir -p "$TMPD/kollision/arch/x86_64"
 cp kernel/*.fi "$TMPD/kollision/"
+cp kernel/arch/x86_64/*.fi "$TMPD/kollision/arch/x86_64/"
 sed -i 's/^const PROCFS_OFF: u64 = 0x45000$/const PROCFS_OFF: u64 = 0x3C000/' "$TMPD/kollision/kstate.fi"
 if python3 tools/kernel/karte.py "$TMPD/kollision" > "$TMPD/karte2.txt" 2>&1; then
     bad "GEGENPROBE: PROCFS_OFF auf 0x3C000 (= FB_OFF) und der Pruefer schweigt"
