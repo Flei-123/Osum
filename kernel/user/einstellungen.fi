@@ -55,6 +55,7 @@ profile kernel
 import ulib
 import libc.io
 import wlibc
+import msg
 import wlib
 import pw
 import nv
@@ -114,6 +115,13 @@ const DS_SAT: u64 = 6
 const DS_CONFIRM: u64 = 7
 const DS_REVERT: u64 = 8
 
+// RUNDE LOOK (aus Runde I18N zurueckgeholt): die Tastaturbelegung.
+// Eine Oberflaeche auf Deutsch mit einer amerikanischen Belegung waere
+// eine halbe Antwort -- also steht die Belegung auf derselben Seite.
+const SYS_KBD: u64 = 1780
+const KB_GET: u64 = 0
+const KB_SET: u64 = 1
+
 const R_DARST: u64 = 0
 const R_SCHIRM: u64 = 1
 const R_ZEIT: u64 = 2
@@ -124,7 +132,19 @@ const R_BENUT: u64 = 4
 // hier steht, welches Netz die einzelnen PROGRAMME sehen. Zwei Fragen,
 // zwei Seiten.
 const R_NETV: u64 = 5
-const R_ANZ: u64 = 6
+// RUNDE LOOK: DER SIEBTE REITER, ZURUECKGEHOLT. Runde I18N hatte ihn
+// gebaut (`R_SPRACHE = 5`); die Zusammenfuehrung der siebzehn Zweige
+// hat die uebersetzte Fassung dieser Datei verloren -- die Fassung aus
+// netview/theme/display gewann jeden Konflikt, und mit ihr fielen 64
+// Katalogzugriffe und die ganze Sprachseite weg. Gemessen: `grep -c
+// 'msg\.'` gab auf dem Zweig `i18n` 64 und auf `mergeline` 0.
+//
+// Er steht jetzt NACH "Netzzugriff" und nicht wieder auf Platz 5:
+// die Nummern der anderen sechs Seiten bleiben damit, was sie sind,
+// und kein Testlaeufer, der Reiter 5 anklickt, klickt auf etwas
+// anderes als vorher.
+const R_SPRACHE: u64 = 6
+const R_ANZ: u64 = 7
 
 static mut w: u64 = 0
 static mut ids: [u64; 64] = [0 as u64; 64]
@@ -172,77 +192,90 @@ static mut d_n: u64 = 0
 // ein Text aus dem Rahmen einer Funktion, die zurueckkehrt, ist ein
 // Zeiger auf nichts. Sechzehn Uebersetzungsfehler haben genau das
 // gesagt, und sie hatten recht.
-static mut t_titel: [u8; 14] = "Einstellungen\0"
-static mut t_tabs: [u8; 54] = "Darstellung\nBildschirm\nZeit\nNetz\nBenutzer\nNetzzugriff\0"
+static mut k_lang: [u8; 24] = "settings.language.label\0"
+static mut k_m_langok: [u8; 24] = "settings.status.lang_ok\0"
+static mut k_m_langno: [u8; 26] = "settings.status.lang_fail\0"
+static mut k_clang: [u8; 26] = "settings.language.choices\0"
+static mut k_lnote1: [u8; 24] = "settings.language.note1\0"
+static mut k_lnote2: [u8; 24] = "settings.language.note2\0"
+static mut k_kbd: [u8; 24] = "settings.keyboard.label\0"
+static mut k_ckbd: [u8; 26] = "settings.keyboard.choices\0"
+// DIE ZWEI SPRACHCODES SIND KEINE OBERFLAECHE. `en` und `de` sind
+// ISO 639 und werden nie uebersetzt -- sie werden in eine DATEI
+// geschrieben, und ein Dateiinhalt ist ein Name.
+static mut c_en: [u8; 3] = "en\0"
+static mut c_de: [u8; 3] = "de\0"
+static mut k_t_titel: [u8; 15] = "settings.title\0"
+static mut k_t_tabs: [u8; 14] = "settings.tabs\0"
 // ROUND NETVIEW: die Liste der laufenden Prozesse mit ihrer Netzsicht,
 // eine Zeile je Prozess, und die vier Sichten als Auswahl darunter.
 static mut nv_liste: [u8; 1024] = [0 as u8; 1024]
 static mut nv_pids: [u64; 32] = [0 as u64; 32]
 static mut nv_n: u64 = 0
-static mut c_view: [u8; 25] = "real\nfiltered\nfaked\nnone\0"
-static mut l_nv1: [u8; 44] = "Welches Netz die einzelnen Programme sehen:\0"
-static mut l_nv2: [u8; 52] = "Getaeuscht wird das PROGRAMM, nie der Mensch davor.\0"
-static mut l_nv3: [u8; 24] = "Sicht fuer die Auswahl:\0"
+static mut k_c_view: [u8; 25] = "settings.netview.choices\0"
+static mut k_l_nv1: [u8; 23] = "settings.netview.label\0"
+static mut k_l_nv2: [u8; 22] = "settings.netview.note\0"
+static mut k_l_nv3: [u8; 22] = "settings.netview.pick\0"
 // ZWEITER NACHTRAG: die systemweite Voreinstellung, auf DERSELBEN
 // Seite wie die Liste der Programme -- weil sie dieselbe Frage
 // beantwortet, nur fuer alle auf einmal. Sie steht UNTER der Liste und
 // nicht darueber: sie ist der schwaechste der drei Orte, an denen eine
 // Netzsicht herkommen kann, und die Seite liest sich in derselben
 // Reihenfolge, in der der Kern entscheidet.
-static mut l_fb1: [u8; 52] = "Voreinstellung fuer Programme ohne eigene Angabe:\0\0\0"
-static mut l_fb2: [u8; 56] = "Eine Angabe AM PROGRAMM schlaegt sie immer. Und sie\0\0\0\0\0"
-static mut l_fb3: [u8; 56] = "aendert nichts an schon laufenden Programmen.\0\0\0\0\0\0\0\0\0\0\0"
-static mut c_fall: [u8; 46] = "aus\nwenn offline\nimmer\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"
-static mut b_fbue: [u8; 12] = "Uebernehmen\0"
-static mut l_far: [u8; 31] = "Farbschema (aus /etc/schemas):\0"
-static mut l_bil: [u8; 38] = "Hintergrundbild -- Quelldatei (OSYM):\0"
-static mut b_uber: [u8; 12] = "Uebernehmen\0"
-static mut l_aufl: [u8; 45] = "Aufloesung (gilt sofort, nicht erst nach dem\0"
-static mut l_aufl2: [u8; 11] = "Neustart):\0"
-static mut l_ehr1: [u8; 47] = "Was hier NICHT steht: G-Sync, Kantenglaettung,\0"
-static mut l_ehr2: [u8; 53] = "3D-Profile, mehrere Monitore. Siehe docs/DISPLAY.md.\0"
-static mut l_skal: [u8; 12] = "Skalierung:\0"
-static mut c_skal: [u8; 50] = "Vollbild\nSeitenverhaeltnis halten\nnicht skalieren\0"
-static mut l_dreh: [u8; 10] = "Drehung:\0\0"
-static mut c_dreh: [u8; 33] = "0 Grad\n90 Grad\n180 Grad\n270 Grad\0"
-static mut l_hell: [u8; 23] = "Helligkeit / Kontrast:\0"
-static mut c_hell: [u8; 28] = "40%\n70%\n100%\n130%\n160%\n200%\0"
-static mut l_gam: [u8; 24] = "Gamma / Farbsaettigung:\0"
-static mut c_gam: [u8; 30] = "0,45\n0,70\n1,00\n1,40\n1,80\n2,20\0"
-static mut c_sat: [u8; 29] = "0% (grau)\n50%\n100%\n150%\n200%\0"
-static mut b_halt: [u8; 9] = "Behalten\0"
-static mut b_zur: [u8; 9] = "Zurueck\0\0"
+static mut k_l_fb1: [u8; 26] = "settings.netview.fb.label\0"
+static mut k_l_fb2: [u8; 26] = "settings.netview.fb.note1\0"
+static mut k_l_fb3: [u8; 26] = "settings.netview.fb.note2\0"
+static mut k_c_fall: [u8; 28] = "settings.netview.fb.choices\0"
+static mut k_b_fbue: [u8; 15] = "settings.apply\0"
+static mut k_l_far: [u8; 22] = "settings.scheme.label\0"
+static mut k_l_bil: [u8; 25] = "settings.wallpaper.label\0"
+static mut k_b_uber: [u8; 15] = "settings.apply\0"
+static mut k_l_aufl: [u8; 27] = "settings.display.res.note1\0"
+static mut k_l_aufl2: [u8; 27] = "settings.display.res.note2\0"
+static mut k_l_ehr1: [u8; 23] = "settings.display.note1\0"
+static mut k_l_ehr2: [u8; 23] = "settings.display.note2\0"
+static mut k_l_skal: [u8; 29] = "settings.display.scale.label\0"
+static mut k_c_skal: [u8; 31] = "settings.display.scale.choices\0"
+static mut k_l_dreh: [u8; 30] = "settings.display.rotate.label\0"
+static mut k_c_dreh: [u8; 32] = "settings.display.rotate.choices\0"
+static mut k_l_hell: [u8; 30] = "settings.display.bright.label\0"
+static mut k_c_hell: [u8; 32] = "settings.display.bright.choices\0"
+static mut k_l_gam: [u8; 29] = "settings.display.gamma.label\0"
+static mut k_c_gam: [u8; 31] = "settings.display.gamma.choices\0"
+static mut k_c_sat: [u8; 29] = "settings.display.sat.choices\0"
+static mut k_b_halt: [u8; 22] = "settings.display.keep\0"
+static mut k_b_zur: [u8; 24] = "settings.display.revert\0"
 // RUNDE THEME: die Marken der Themenseite. Ihre drei anderen
 // Zeichenketten (`l_aufl`, `l_ehr1`, `l_ehr2`) sind hier NICHT
 // uebernommen: sie sagten "Aufloesung beim naechsten Start" und "im
 // Betrieb kann dieser Kernel ihn nicht wechseln", und genau das hat die
 // Runde DISPLAY seither moeglich gemacht. Zwei Runden, ein Name, und
 // die eine Fassung ist inzwischen unwahr -- also steht die wahre da.
-static mut l_mod: [u8; 7] = "Modus:\0"
-static mut c_mod: [u8; 36] = "Hell\nDunkel\nAutomatisch (Tageszeit)\0"
-static mut l_akz: [u8; 45] = "Akzentfarbe RRGGBB (leer = die des Schemas):\0"
-static mut c_aufl: [u8; 29] = "800 x 600\n1024 x 768 (fbbig)\0"
-static mut l_zone: [u8; 27] = "Zeitzone fuer die Anzeige:\0"
-static mut c_zone: [u8; 31] = "UTC+0\nUTC+1 (MEZ)\nUTC+2 (MESZ)\0"
-static mut l_ehr3: [u8; 51] = "Die Hardware-Uhr laesst sich hier nicht stellen --\0"
-static mut l_ehr4: [u8; 42] = "dieser Kernel hat nur SYS_TIME zum Lesen.\0"
-static mut l_bez: [u8; 18] = "Adresse beziehen:\0"
-static mut c_bez: [u8; 25] = "ueber DHCP\nfeste Adresse\0"
-static mut l_ip2: [u8; 27] = "Adresse / Maske / Gateway:\0"
-static mut l_kw1: [u8; 16] = "Neues Kennwort:\0"
-static mut l_kw2: [u8; 13] = "Noch einmal:\0"
-static mut b_kw: [u8; 16] = "Kennwort setzen\0"
+static mut k_l_mod: [u8; 26] = "settings.theme.mode.label\0"
+static mut k_c_mod: [u8; 28] = "settings.theme.mode.choices\0"
+static mut k_l_akz: [u8; 28] = "settings.theme.accent.label\0"
+static mut k_c_aufl: [u8; 28] = "settings.resolution.choices\0"
+static mut k_l_zone: [u8; 24] = "settings.timezone.label\0"
+static mut k_c_zone: [u8; 26] = "settings.timezone.choices\0"
+static mut k_l_ehr3: [u8; 20] = "settings.time.note1\0"
+static mut k_l_ehr4: [u8; 20] = "settings.time.note2\0"
+static mut k_l_bez: [u8; 23] = "settings.address.label\0"
+static mut k_c_bez: [u8; 25] = "settings.address.choices\0"
+static mut k_l_ip2: [u8; 24] = "settings.address.fields\0"
+static mut k_l_kw1: [u8; 22] = "settings.password.new\0"
+static mut k_l_kw2: [u8; 24] = "settings.password.again\0"
+static mut k_b_kw: [u8; 22] = "settings.password.set\0"
 // ADDENDUM TASKBAR. English, as every new name in this tree is; the
 // older labels around them are still German and the round RENAME owns
 // that. What these five widgets write is /etc/taskbar.conf and nothing
 // else -- the same file the bar itself writes when it is dragged to an
 // edge. There is no second place where the edge is kept.
-static mut l_tb: [u8; 24] = "Taskbar -- screen edge:\0"
-static mut c_tb: [u8; 22] = "bottom\ntop\nleft\nright\0"
-static mut l_tbs: [u8; 40] = "Thickness in pixels (20..40 / 56..128):\0"
+static mut k_l_tb: [u8; 28] = "settings.taskbar.edge.label\0"
+static mut k_c_tb: [u8; 30] = "settings.taskbar.edge.choices\0"
+static mut k_l_tbs: [u8; 29] = "settings.taskbar.thick.label\0"
 static mut e_tbs: [u8; 3] = "28\0"
-static mut k_tbah: [u8; 40] = "hide until the pointer touches the edge\0"
-static mut k_tbot: [u8; 14] = "always on top\0"
+static mut k_k_tbah: [u8; 26] = "settings.taskbar.autohide\0"
+static mut k_k_tbot: [u8; 23] = "settings.taskbar.ontop\0"
 static mut p_tbconf: [u8; 18] = "/etc/taskbar.conf\0"
 
 fn say(p: u64) {
@@ -723,40 +756,40 @@ fn quote_an(p: u64, at: u64, v: u64) -> u64 {
 // Oberflaeche rechnet nichts nach, sonst gaebe es zwei Rechnungen und
 // eines Tages zwei Ergebnisse.
 fn kontrast_zeigen() {
-    var m_t: [u8; 16] = "Text/Akzent \0   "
-    var m_f: [u8; 18] = "  Akzent/Flaeche \0"
-    var m_ok: [u8; 19] = "  -- WCAG erfuellt\0"
-    var m_no: [u8; 21] = "  -- WCAG NICHT ganz\0"
-    var m_v: [u8; 25] = "Akzentfarbe verschoben: \0"
-    var m_st: [u8; 32] = " Stufe(n) auf der eigenen Rampe\0"
-    var m_ex: [u8; 37] = "Akzentfarbe unveraendert uebernommen\0"
-    var m_bad: [u8; 46] = "Keine Stufe erfuellt beides -- beste genommen\0"
+    var k_m_t: [u8; 23] = "settings.contrast.text\0"
+    var k_m_f: [u8; 21] = "settings.contrast.ui\0"
+    var k_m_ok: [u8; 21] = "settings.contrast.ok\0"
+    var k_m_no: [u8; 23] = "settings.contrast.fail\0"
+    var k_m_v: [u8; 22] = "settings.accent.moved\0"
+    var k_m_st: [u8; 22] = "settings.accent.steps\0"
+    var k_m_ex: [u8; 22] = "settings.accent.exact\0"
+    var k_m_bad: [u8; 21] = "settings.accent.none\0"
     let k: u64 = (&l_kon[0 as usize]) as u64
-    var a: u64 = text_an(k, 0, (&m_t[0 as usize]) as u64)
+    var a: u64 = text_an(k, 0, msg.get((&k_m_t[0 as usize]) as u64))
     a = quote_an(k, a, wlibc.theme_accent_ratio_text())
-    a = text_an(k, a, (&m_f[0 as usize]) as u64)
+    a = text_an(k, a, msg.get((&k_m_f[0 as usize]) as u64))
     a = quote_an(k, a, wlibc.theme_accent_ratio_ui())
     if wlibc.theme_accent_ok() {
-        let _a2: u64 = text_an(k, a, (&m_ok[0 as usize]) as u64)
+        let _a2: u64 = text_an(k, a, msg.get((&k_m_ok[0 as usize]) as u64))
     } else {
-        let _a3: u64 = text_an(k, a, (&m_no[0 as usize]) as u64)
+        let _a3: u64 = text_an(k, a, msg.get((&k_m_no[0 as usize]) as u64))
     }
-    var m_bk: [u8; 48] = "Nicht verstandene Zeilen in den Einstellungen: \0"
+    var k_m_bk: [u8; 24] = "settings.status.badkeys\0"
     let w: u64 = (&l_warn[0 as usize]) as u64
     if wlibc.theme_bad_keys() > 0 {
         // EINE FALSCH GETIPPTE ZEILE WIRD NICHT VERSCHLUCKT. Wer
         // "2563e" statt "2563eb" eintraegt, bekommt sonst stumm die
         // Farbe des Schemas und sucht den Fehler bei sich.
-        let c: u64 = text_an(w, 0, (&m_bk[0 as usize]) as u64)
+        let c: u64 = text_an(w, 0, msg.get((&k_m_bk[0 as usize]) as u64))
         let _c2: u64 = zahl_an(w, c, wlibc.theme_bad_keys())
     } else if !wlibc.theme_accent_ok() {
-        let _b0: u64 = text_an(w, 0, (&m_bad[0 as usize]) as u64)
+        let _b0: u64 = text_an(w, 0, msg.get((&k_m_bad[0 as usize]) as u64))
     } else if wlibc.theme_accent_exact() {
-        let _b1: u64 = text_an(w, 0, (&m_ex[0 as usize]) as u64)
+        let _b1: u64 = text_an(w, 0, msg.get((&k_m_ex[0 as usize]) as u64))
     } else {
-        var b: u64 = text_an(w, 0, (&m_v[0 as usize]) as u64)
+        var b: u64 = text_an(w, 0, msg.get((&k_m_v[0 as usize]) as u64))
         b = zahl_an(w, b, wlibc.theme_accent_moved())
-        let _b2: u64 = text_an(w, b, (&m_st[0 as usize]) as u64)
+        let _b2: u64 = text_an(w, b, msg.get((&k_m_st[0 as usize]) as u64))
     }
 }
 
@@ -923,11 +956,11 @@ fn stufe_von(v: u64, art: u64) -> u64 {
 fn modi_lesen() {
     var t_x: [u8; 4] = " x \0"
     var t_n: [u8; 2] = "\n\0"
-    var t_leer: [u8; 25] = "(keine Karte gefunden)\0\0\0"
+    var k_t_leer: [u8; 24] = "settings.display.nocard\0"
     d_n = 0
     if ulib.bad(dget(DG_READY)) || dget(DG_READY) == 0 {
         let _e: u64 = text_an((&d_modi[0 as usize]) as u64, 0,
-            (&t_leer[0 as usize]) as u64)
+            msg.get((&k_t_leer[0 as usize]) as u64))
         return
     }
     let n: u64 = dget(DG_COUNT)
@@ -953,51 +986,51 @@ fn modi_lesen() {
 
 // Was die Karte ueber sich sagt, und was der Monitor ueber sich sagt.
 fn karte_lesen() {
-    var t_v: [u8; 8] = "Karte: \0"
-    var t_k: [u8; 5] = " KiB\0"
-    var t_e: [u8; 9] = ", nativ \0"
+    var k_t_v: [u8; 22] = "settings.display.card\0"
+    var k_t_k: [u8; 21] = "settings.display.kib\0"
+    var k_t_e: [u8; 24] = "settings.display.native\0"
     var t_x: [u8; 4] = " x \0"
-    var t_ne: [u8; 14] = ", kein EDID\0\0\0"
-    var t_t: [u8; 14] = "Farbtiefe: 32\0"
-    var t_t2: [u8; 26] = " Bit. Die Karte kann auch\0"
-    var t_t3: [u8; 43] = "8/15/16/24; dieser Kernel zeichnet nur 32.\0"
-    var t_t4: [u8; 34] = "Farbtiefe: die Karte sagt nichts.\0"
+    var k_t_ne: [u8; 26] = "settings.display.edidless\0"
+    var k_t_t: [u8; 23] = "settings.display.depth\0"
+    var k_t_t2: [u8; 24] = "settings.display.depth2\0"
+    var k_t_t3: [u8; 24] = "settings.display.depth3\0"
+    var k_t_t4: [u8; 24] = "settings.display.depth4\0"
     let a0: u64 = text_an((&d_karte[0 as usize]) as u64, 0,
-        (&t_v[0 as usize]) as u64)
+        msg.get((&k_t_v[0 as usize]) as u64))
     if ulib.bad(dget(DG_READY)) || dget(DG_READY) == 0 {
-        var t_no: [u8; 24] = "nicht erkundet (`disp`)\0"
+        var k_t_no: [u8; 26] = "settings.display.unprobed\0"
         let _q: u64 = text_an((&d_karte[0 as usize]) as u64, a0,
-            (&t_no[0 as usize]) as u64)
+            msg.get((&k_t_no[0 as usize]) as u64))
         let _r: u64 = text_an((&d_tiefe[0 as usize]) as u64, 0,
-            (&t_t4[0 as usize]) as u64)
+            msg.get((&k_t_t4[0 as usize]) as u64))
         return
     }
     var a: u64 = zahl_an((&d_karte[0 as usize]) as u64, a0,
         dget(DG_VRAM) / 1024)
-    a = text_an((&d_karte[0 as usize]) as u64, a, (&t_k[0 as usize]) as u64)
+    a = text_an((&d_karte[0 as usize]) as u64, a, msg.get((&k_t_k[0 as usize]) as u64))
     if dget(DG_EDIDOK) == 1 {
         a = text_an((&d_karte[0 as usize]) as u64, a,
-            (&t_e[0 as usize]) as u64)
+            msg.get((&k_t_e[0 as usize]) as u64))
         a = zahl_an((&d_karte[0 as usize]) as u64, a, dget(DG_NATW))
         a = text_an((&d_karte[0 as usize]) as u64, a,
             (&t_x[0 as usize]) as u64)
         a = zahl_an((&d_karte[0 as usize]) as u64, a, dget(DG_NATH))
     } else {
         a = text_an((&d_karte[0 as usize]) as u64, a,
-            (&t_ne[0 as usize]) as u64)
+            msg.get((&k_t_ne[0 as usize]) as u64))
     }
     let b: u64 = text_an((&d_tiefe[0 as usize]) as u64, 0,
-        (&t_t[0 as usize]) as u64)
+        msg.get((&k_t_t[0 as usize]) as u64))
     let _c: u64 = text_an((&d_tiefe[0 as usize]) as u64, b,
-        (&t_t3[0 as usize]) as u64)
+        msg.get((&k_t_t3[0 as usize]) as u64))
 }
 
 // Die Zeile, die herunterzaehlt. Sie steht nur da, solange der Kernel
 // wirklich eine Frist fuehrt.
 fn frist_lesen() -> bool {
-    var t_f: [u8; 20] = "Behalten? Zurueck i\0"
-    var t_g: [u8; 3] = "n \0"
-    var t_s: [u8; 10] = " Sekunden\0"
+    var k_t_f: [u8; 28] = "settings.display.countdown1\0"
+    var k_t_g: [u8; 28] = "settings.display.countdown2\0"
+    var k_t_s: [u8; 28] = "settings.display.countdown3\0"
     var t_leer: [u8; 2] = " \0"
     if dget(DG_PENDING) != 1 {
         let _z: u64 = text_an((&d_frist[0 as usize]) as u64, 0,
@@ -1005,31 +1038,31 @@ fn frist_lesen() -> bool {
         return false
     }
     var a: u64 = text_an((&d_frist[0 as usize]) as u64, 0,
-        (&t_f[0 as usize]) as u64)
-    a = text_an((&d_frist[0 as usize]) as u64, a, (&t_g[0 as usize]) as u64)
+        msg.get((&k_t_f[0 as usize]) as u64))
+    a = text_an((&d_frist[0 as usize]) as u64, a, msg.get((&k_t_g[0 as usize]) as u64))
     a = zahl_an((&d_frist[0 as usize]) as u64, a,
         (dget(DG_REMAIN) + 999) / 1000)
     let _e: u64 = text_an((&d_frist[0 as usize]) as u64, a,
-        (&t_s[0 as usize]) as u64)
+        msg.get((&k_t_s[0 as usize]) as u64))
     return true
 }
 
 fn stand_lesen() {
-    var t_akt: [u8; 13] = "Aufloesung: \0"
+    var k_t_akt: [u8; 26] = "settings.label.resolution\0"
     var t_mal: [u8; 4] = " x \0"
-    var t_dat: [u8; 12] = "Uhr (UTC): \0"
+    var k_t_dat: [u8; 21] = "settings.label.clock\0"
     var t_pkt: [u8; 2] = ".\0"
     var t_dp: [u8; 2] = ":\0"
-    var t_ip: [u8; 10] = "Adresse: \0"
-    var t_mk: [u8; 8] = "Maske: \0"
-    var t_gw: [u8; 10] = "Gateway: \0"
-    var t_mac: [u8; 11] = "Hardware: \0"
-    var t_kn: [u8; 10] = "kein Netz\0"
-    var t_wer: [u8; 16] = "Angemeldet als \0"
-    var t_uid: [u8; 7] = ", uid \0"
+    var k_t_ip: [u8; 23] = "settings.label.address\0"
+    var k_t_mk: [u8; 20] = "settings.label.mask\0"
+    var k_t_gw: [u8; 23] = "settings.label.gateway\0"
+    var k_t_mac: [u8; 24] = "settings.label.hardware\0"
+    var k_t_kn: [u8; 21] = "settings.label.nonet\0"
+    var k_t_wer: [u8; 24] = "settings.label.loggedin\0"
+    var k_t_uid: [u8; 19] = "settings.label.uid\0"
     var t_dd: [u8; 2] = "-\0"
     var a: u64 = text_an((&l_schirm[0 as usize]) as u64, 0,
-        (&t_akt[0 as usize]) as u64)
+        msg.get((&k_t_akt[0 as usize]) as u64))
     a = zahl_an((&l_schirm[0 as usize]) as u64, a, wlibc.screen_w())
     a = text_an((&l_schirm[0 as usize]) as u64, a,
         (&t_mal[0 as usize]) as u64)
@@ -1039,7 +1072,7 @@ fn stand_lesen() {
     let _f: bool = frist_lesen()
     // Datum und Uhrzeit
     let d: u64 = (&l_datum[0 as usize]) as u64
-    a = text_an(d, 0, (&t_dat[0 as usize]) as u64)
+    a = text_an(d, 0, msg.get((&k_t_dat[0 as usize]) as u64))
     a = zahl_an(d, a, ulib.sys(ulib.SYS_SYSINFO, ulib.I_YEAR, 0, 0))
     a = text_an(d, a, (&t_dd[0 as usize]) as u64)
     a = zwei_an(d, a, ulib.sys(ulib.SYS_SYSINFO, ulib.I_MONTH, 0, 0))
@@ -1056,27 +1089,27 @@ fn stand_lesen() {
     let gw: u64 = (&l_gw[0 as usize]) as u64
     let mc: u64 = (&l_mac[0 as usize]) as u64
     if ulib.bad(rd) || rd == 0 {
-        a = text_an(ip, 0, (&t_ip[0 as usize]) as u64)
-        let _z: u64 = text_an(ip, a, (&t_kn[0 as usize]) as u64)
-        a = text_an(mk, 0, (&t_mk[0 as usize]) as u64)
-        let _y: u64 = text_an(mk, a, (&t_kn[0 as usize]) as u64)
-        a = text_an(gw, 0, (&t_gw[0 as usize]) as u64)
-        let _x: u64 = text_an(gw, a, (&t_kn[0 as usize]) as u64)
-        a = text_an(mc, 0, (&t_mac[0 as usize]) as u64)
-        let _w2: u64 = text_an(mc, a, (&t_kn[0 as usize]) as u64)
+        a = text_an(ip, 0, msg.get((&k_t_ip[0 as usize]) as u64))
+        let _z: u64 = text_an(ip, a, msg.get((&k_t_kn[0 as usize]) as u64))
+        a = text_an(mk, 0, msg.get((&k_t_mk[0 as usize]) as u64))
+        let _y: u64 = text_an(mk, a, msg.get((&k_t_kn[0 as usize]) as u64))
+        a = text_an(gw, 0, msg.get((&k_t_gw[0 as usize]) as u64))
+        let _x: u64 = text_an(gw, a, msg.get((&k_t_kn[0 as usize]) as u64))
+        a = text_an(mc, 0, msg.get((&k_t_mac[0 as usize]) as u64))
+        let _w2: u64 = text_an(mc, a, msg.get((&k_t_kn[0 as usize]) as u64))
     } else {
         let v: u64 = ulib.sys(SYS_NETGET, NG_IP, 0, 0)
         let m: u64 = ulib.sys(SYS_NETGET, NG_MASK, 0, 0)
         let g: u64 = ulib.sys(SYS_NETGET, NG_GW, 0, 0)
-        a = text_an(ip, 0, (&t_ip[0 as usize]) as u64)
+        a = text_an(ip, 0, msg.get((&k_t_ip[0 as usize]) as u64))
         let _z: u64 = ip_an(ip, a, v)
-        a = text_an(mk, 0, (&t_mk[0 as usize]) as u64)
+        a = text_an(mk, 0, msg.get((&k_t_mk[0 as usize]) as u64))
         let _y: u64 = ip_an(mk, a, m)
-        a = text_an(gw, 0, (&t_gw[0 as usize]) as u64)
+        a = text_an(gw, 0, msg.get((&k_t_gw[0 as usize]) as u64))
         let _x: u64 = ip_an(gw, a, g)
         let m0: u64 = ulib.sys(SYS_NETGET, NG_MAC0, 0, 0)
         let m1: u64 = ulib.sys(SYS_NETGET, NG_MAC1, 0, 0)
-        a = text_an(mc, 0, (&t_mac[0 as usize]) as u64)
+        a = text_an(mc, 0, msg.get((&k_t_mac[0 as usize]) as u64))
         a = zahl_an(mc, a, (m0 >> 24) & 255)
         a = text_an(mc, a, (&t_dd[0 as usize]) as u64)
         a = zahl_an(mc, a, (m0 >> 16) & 255)
@@ -1098,9 +1131,9 @@ fn stand_lesen() {
         name[(0) as usize] = 63 as u8
         name[(1) as usize] = 0 as u8
     }
-    a = text_an((&l_wer[0 as usize]) as u64, 0, (&t_wer[0 as usize]) as u64)
+    a = text_an((&l_wer[0 as usize]) as u64, 0, msg.get((&k_t_wer[0 as usize]) as u64))
     a = text_an((&l_wer[0 as usize]) as u64, a, (&name[0 as usize]) as u64)
-    a = text_an((&l_wer[0 as usize]) as u64, a, (&t_uid[0 as usize]) as u64)
+    a = text_an((&l_wer[0 as usize]) as u64, a, msg.get((&k_t_uid[0 as usize]) as u64))
     let _u: u64 = zahl_an((&l_wer[0 as usize]) as u64, a, uid)
 }
 
@@ -1192,29 +1225,29 @@ fn u_start(args: u64) -> u64 {
     var t_time: [u8; 15] = "/etc/time.conf\0"
     var t_net: [u8; 18] = "/etc/network.conf\0"
     var t_dhcp: [u8; 10] = "/bin/dhcp\0"
-    var m_ok: [u8; 7] = "bereit\0"
-    var m_schema: [u8; 25] = "Farbschema uebernommen: \0"
-    var m_schemano: [u8; 37] = "Farbschema liess sich nicht kopieren\0"
-    var m_bild: [u8; 35] = "Hintergrundbild kopiert, Oktette: \0"
-    var m_bildno: [u8; 31] = "Hintergrundbild nicht gefunden\0"
-    var m_modeok: [u8; 22] = "Modus gesetzt, Tafel \0"
+    var k_m_ok: [u8; 22] = "settings.status.ready\0"
+    var k_m_schema: [u8; 26] = "settings.status.scheme_ok\0"
+    var k_m_schemano: [u8; 28] = "settings.status.scheme_fail\0"
+    var k_m_bild: [u8; 29] = "settings.status.wallpaper_ok\0"
+    var k_m_bildno: [u8; 31] = "settings.status.wallpaper_fail\0"
+    var k_m_modeok: [u8; 24] = "settings.status.mode_ok\0"
     var m_mal: [u8; 4] = " x \0"
-    var m_modeno: [u8; 42] = "Modus abgelehnt -- nicht die Wurzel? oder\0"
-    var m_behalt: [u8; 30] = "Behalten -- Frist abgelaeutet\0"
-    var m_zurueck: [u8; 29] = "Zurueck auf den alten Modus.\0"
-    var m_time: [u8; 39] = "Zeitzone gespeichert in /etc/time.conf\0"
-    var m_net: [u8; 50] = "Adresse gesetzt und /etc/network.conf geschrieben\0"
-    var m_netzno: [u8; 23] = "Keine gueltige Adresse\0"
-    var m_netzr: [u8; 39] = "Adresse abgelehnt -- nicht die Wurzel?\0"
-    var m_dhcp: [u8; 28] = "DHCP-Klient gestartet, pid \0"
-    var m_kwok: [u8; 23] = "Kennwort gesetzt fuer \0"
-    var m_kwne: [u8; 34] = "Die beiden Eingaben sind ungleich\0"
-    var m_kwku: [u8; 24] = "Mindestens vier Zeichen\0"
-    var m_kwno: [u8; 39] = "/etc/shadow liess sich nicht schreiben\0"
-    var m_nvok: [u8; 28] = "Netzsicht gesetzt fuer pid \0"
-    var m_nvno: [u8; 45] = "Nicht erlaubt -- lockern darf nur die Wurzel\0"
-    var m_fbok: [u8; 34] = "Voreinstellung: \0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"
-    var m_fbno: [u8; 52] = "Voreinstellung: nicht erlaubt -- nur die Wurzel\0\0\0\0\0"
+    var k_m_modeno: [u8; 26] = "settings.status.mode_fail\0"
+    var k_m_behalt: [u8; 21] = "settings.status.keep\0"
+    var k_m_zurueck: [u8; 23] = "settings.status.revert\0"
+    var k_m_time: [u8; 29] = "settings.status.time_written\0"
+    var k_m_net: [u8; 28] = "settings.status.net_written\0"
+    var k_m_netzno: [u8; 24] = "settings.status.net_bad\0"
+    var k_m_netzr: [u8; 27] = "settings.status.net_denied\0"
+    var k_m_dhcp: [u8; 29] = "settings.status.dhcp_started\0"
+    var k_m_kwok: [u8; 22] = "settings.status.pw_ok\0"
+    var k_m_kwne: [u8; 28] = "settings.status.pw_mismatch\0"
+    var k_m_kwku: [u8; 25] = "settings.status.pw_short\0"
+    var k_m_kwno: [u8; 24] = "settings.status.pw_fail\0"
+    var k_m_nvok: [u8; 22] = "settings.status.nv_ok\0"
+    var k_m_nvno: [u8; 26] = "settings.status.nv_denied\0"
+    var k_m_fbok: [u8; 22] = "settings.status.fb_ok\0"
+    var k_m_fbno: [u8; 26] = "settings.status.fb_denied\0"
     var k_modus: [u8; 7] = "modus=\0"
     var k_800: [u8; 9] = "800x600\n\0"
     var k_1024: [u8; 10] = "1024x768\n\0"
@@ -1226,6 +1259,23 @@ fn u_start(args: u64) -> u64 {
     var k_gw: [u8; 10] = "\ngateway=\0"
     var s_pfad: [u8; 41] = "                                        \0"
 
+    // RUNDE I18N: DER KATALOG ALS ALLERERSTES, VOR JEDEM `msg.get`.
+    // Die Widget-Bibliothek BEHAELT den Zeiger, den sie bekommt. Wer
+    // den Katalog erst nach dem Bau der Oberflaeche startet, hat jedem
+    // Bedienelement den Zeiger auf einen Platz gegeben, in dem damals
+    // der SCHLUESSEL stand -- und auf dem Knopf steht dann bis in alle
+    // Ewigkeit `settings.apply`.
+    var s_lg: [u8; 23] = "einstellungen: lang=\0\0\0"
+    var s_lgs: [u8; 8] = " src=\0\0\0"
+    var s_lgk: [u8; 8] = " keys=\0\0"
+    let mk: u64 = msg.init()
+    say((&s_lg[0 as usize]) as u64)
+    say(msg.lang())
+    say((&s_lgs[0 as usize]) as u64)
+    ulib.sayn(msg.lang_source())
+    say((&s_lgk[0 as usize]) as u64)
+    ulib.sayn(mk)
+    ulib.nl()
     if !wlib.begin(false, false) {
         say((&s_bad[0 as usize]) as u64)
         ulib.nl()
@@ -1237,7 +1287,7 @@ fn u_start(args: u64) -> u64 {
     let _h: u64 = text_an((&e_bild[0 as usize]) as u64, 0,
         (&t_wall[0 as usize]) as u64)
     let _s: u64 = text_an((&l_stat[0 as usize]) as u64, 0,
-        (&m_ok[0 as usize]) as u64)
+        msg.get((&k_m_ok[0 as usize]) as u64))
     stand_lesen()
     tb_read()
 
@@ -1247,7 +1297,7 @@ fn u_start(args: u64) -> u64 {
     // simply puts it outside the window, where nobody can click it.
     let bw: u64 = 560
     let bh: u64 = 500
-    w = wlib.window(130, 34, bw, bh, (&t_titel[0 as usize]) as u64)
+    w = wlib.window(130, 34, bw, bh, msg.get((&k_t_titel[0 as usize]) as u64))
     if w >= wlib.MAXWN {
         say((&s_bad[0 as usize]) as u64)
         ulib.nl()
@@ -1260,68 +1310,68 @@ fn u_start(args: u64) -> u64 {
     ulib.nl()
 
     wlib.box_v(w, 0, 0, bw, bh, 10, 6)
-    let tb: u64 = merke(wlib.tabs((&t_tabs[0 as usize]) as u64), R_ANZ)
+    let tb: u64 = merke(wlib.tabs(msg.get((&k_t_tabs[0 as usize]) as u64)), R_ANZ)
     // ---- Darstellung
-    let _d1: u64 = merke(wlib.label((&l_far[0 as usize]) as u64), R_DARST)
+    let _d1: u64 = merke(wlib.label(msg.get((&k_l_far[0 as usize]) as u64)), R_DARST)
     wlib.size(0, 92)
     let ls: u64 = merke(wlib.list((&schemas[0 as usize]) as u64, 4), R_DARST)
     // RUNDE THEME: Modus und Akzentfarbe. Beide gehen in dieselbe
     // Datei wie das Schema, weil beide dasselbe sind -- eine
     // EINSTELLUNG, und kein Inhalt.
-    let _d3: u64 = merke(wlib.label((&l_mod[0 as usize]) as u64), R_DARST)
-    let cm: u64 = merke(wlib.choice((&c_mod[0 as usize]) as u64, 2), R_DARST)
-    let _d4: u64 = merke(wlib.label((&l_akz[0 as usize]) as u64), R_DARST)
+    let _d3: u64 = merke(wlib.label(msg.get((&k_l_mod[0 as usize]) as u64)), R_DARST)
+    let cm: u64 = merke(wlib.choice(msg.get((&k_c_mod[0 as usize]) as u64), 2), R_DARST)
+    let _d4: u64 = merke(wlib.label(msg.get((&k_l_akz[0 as usize]) as u64)), R_DARST)
     let ea: u64 = merke(wlib.entry((&e_akzent[0 as usize]) as u64, 12),
         R_DARST)
     let lk: u64 = merke(wlib.label((&l_kon[0 as usize]) as u64), R_DARST)
     let lw: u64 = merke(wlib.label((&l_warn[0 as usize]) as u64), R_DARST)
-    let _d2: u64 = merke(wlib.label((&l_bil[0 as usize]) as u64), R_DARST)
+    let _d2: u64 = merke(wlib.label(msg.get((&k_l_bil[0 as usize]) as u64)), R_DARST)
     let eb: u64 = merke(wlib.entry((&e_bild[0 as usize]) as u64, 90),
         R_DARST)
     // MERGE: _d3 und _d4 hiessen zweimal so -- die Runde THEME hat
     // ihre zwei Marken und der Taskleisten-Nachtrag seine zwei mit
     // denselben Namen angelegt. Der Uebersetzer hat es gemeldet.
-    let _d5: u64 = merke(wlib.label((&l_tb[0 as usize]) as u64), R_DARST)
-    let ce: u64 = merke(wlib.choice((&c_tb[0 as usize]) as u64, tb_edge),
+    let _d5: u64 = merke(wlib.label(msg.get((&k_l_tb[0 as usize]) as u64)), R_DARST)
+    let ce: u64 = merke(wlib.choice(msg.get((&k_c_tb[0 as usize]) as u64), tb_edge),
         R_DARST)
-    let _d6: u64 = merke(wlib.label((&l_tbs[0 as usize]) as u64), R_DARST)
+    let _d6: u64 = merke(wlib.label(msg.get((&k_l_tbs[0 as usize]) as u64)), R_DARST)
     wlib.size(80, 26)
     let et: u64 = merke(wlib.entry((&e_tbs[0 as usize]) as u64, 8), R_DARST)
-    let ka: u64 = merke(wlib.check((&k_tbah[0 as usize]) as u64,
+    let ka: u64 = merke(wlib.check(msg.get((&k_k_tbah[0 as usize]) as u64),
         tb_autohide != 0), R_DARST)
-    let ko: u64 = merke(wlib.check((&k_tbot[0 as usize]) as u64,
+    let ko: u64 = merke(wlib.check(msg.get((&k_k_tbot[0 as usize]) as u64),
         tb_ontop != 0), R_DARST)
     wlib.size(140, 26)
-    let b1: u64 = merke(wlib.button((&b_uber[0 as usize]) as u64), R_DARST)
+    let b1: u64 = merke(wlib.button(msg.get((&k_b_uber[0 as usize]) as u64)), R_DARST)
     // ---- Bildschirm (RUNDE DISPLAY)
     let _s1: u64 = merke(wlib.label((&l_schirm[0 as usize]) as u64),
         R_SCHIRM)
     let _sk: u64 = merke(wlib.label((&d_karte[0 as usize]) as u64), R_SCHIRM)
-    let _s2: u64 = merke(wlib.label((&l_aufl[0 as usize]) as u64), R_SCHIRM)
-    let _s2b: u64 = merke(wlib.label((&l_aufl2[0 as usize]) as u64), R_SCHIRM)
+    let _s2: u64 = merke(wlib.label(msg.get((&k_l_aufl[0 as usize]) as u64)), R_SCHIRM)
+    let _s2b: u64 = merke(wlib.label(msg.get((&k_l_aufl2[0 as usize]) as u64)), R_SCHIRM)
     wlib.size(0, 110)
     let cs: u64 = merke(wlib.list((&d_modi[0 as usize]) as u64, 5), R_SCHIRM)
-    let _s5: u64 = merke(wlib.label((&l_skal[0 as usize]) as u64), R_SCHIRM)
-    let ck: u64 = merke(wlib.choice((&c_skal[0 as usize]) as u64, 0),
+    let _s5: u64 = merke(wlib.label(msg.get((&k_l_skal[0 as usize]) as u64)), R_SCHIRM)
+    let ck: u64 = merke(wlib.choice(msg.get((&k_c_skal[0 as usize]) as u64), 0),
         R_SCHIRM)
-    let _s6: u64 = merke(wlib.label((&l_dreh[0 as usize]) as u64), R_SCHIRM)
-    let cd: u64 = merke(wlib.choice((&c_dreh[0 as usize]) as u64, 0),
+    let _s6: u64 = merke(wlib.label(msg.get((&k_l_dreh[0 as usize]) as u64)), R_SCHIRM)
+    let cd: u64 = merke(wlib.choice(msg.get((&k_c_dreh[0 as usize]) as u64), 0),
         R_SCHIRM)
-    let _s7: u64 = merke(wlib.label((&l_hell[0 as usize]) as u64), R_SCHIRM)
-    let ch: u64 = merke(wlib.choice((&c_hell[0 as usize]) as u64, 2),
+    let _s7: u64 = merke(wlib.label(msg.get((&k_l_hell[0 as usize]) as u64)), R_SCHIRM)
+    let ch: u64 = merke(wlib.choice(msg.get((&k_c_hell[0 as usize]) as u64), 2),
         R_SCHIRM)
-    let cc: u64 = merke(wlib.choice((&c_hell[0 as usize]) as u64, 2),
+    let cc: u64 = merke(wlib.choice(msg.get((&k_c_hell[0 as usize]) as u64), 2),
         R_SCHIRM)
-    let _s8: u64 = merke(wlib.label((&l_gam[0 as usize]) as u64), R_SCHIRM)
-    let cg: u64 = merke(wlib.choice((&c_gam[0 as usize]) as u64, 2),
+    let _s8: u64 = merke(wlib.label(msg.get((&k_l_gam[0 as usize]) as u64)), R_SCHIRM)
+    let cg: u64 = merke(wlib.choice(msg.get((&k_c_gam[0 as usize]) as u64), 2),
         R_SCHIRM)
-    let cq: u64 = merke(wlib.choice((&c_sat[0 as usize]) as u64, 2),
+    let cq: u64 = merke(wlib.choice(msg.get((&k_c_sat[0 as usize]) as u64), 2),
         R_SCHIRM)
     let _st2: u64 = merke(wlib.label((&d_tiefe[0 as usize]) as u64), R_SCHIRM)
-    let _s3: u64 = merke(wlib.label((&l_ehr1[0 as usize]) as u64), R_SCHIRM)
-    let _s4: u64 = merke(wlib.label((&l_ehr2[0 as usize]) as u64), R_SCHIRM)
+    let _s3: u64 = merke(wlib.label(msg.get((&k_l_ehr1[0 as usize]) as u64)), R_SCHIRM)
+    let _s4: u64 = merke(wlib.label(msg.get((&k_l_ehr2[0 as usize]) as u64)), R_SCHIRM)
     wlib.size(140, 26)
-    let b2: u64 = merke(wlib.button((&b_uber[0 as usize]) as u64), R_SCHIRM)
+    let b2: u64 = merke(wlib.button(msg.get((&k_b_uber[0 as usize]) as u64)), R_SCHIRM)
     // DIE BESTAETIGUNGSFRAGE. Zwei Knoepfe und eine Zeile, die
     // herunterzaehlt -- und sie stehen nur da, solange wirklich eine
     // Frist laeuft. Was sie WIRKLICH sicher macht, steht aber nicht
@@ -1331,59 +1381,83 @@ fn u_start(args: u64) -> u64 {
     // gerade schwarz ist, waere keines.
     let _sf: u64 = merke(wlib.label((&d_frist[0 as usize]) as u64), R_SCHIRM)
     wlib.size(120, 26)
-    let b2a: u64 = merke(wlib.button((&b_halt[0 as usize]) as u64), R_SCHIRM)
+    let b2a: u64 = merke(wlib.button(msg.get((&k_b_halt[0 as usize]) as u64)), R_SCHIRM)
     wlib.size(120, 26)
-    let b2b: u64 = merke(wlib.button((&b_zur[0 as usize]) as u64), R_SCHIRM)
+    let b2b: u64 = merke(wlib.button(msg.get((&k_b_zur[0 as usize]) as u64)), R_SCHIRM)
     // ---- Zeit
     let lz: u64 = merke(wlib.label((&l_datum[0 as usize]) as u64), R_ZEIT)
-    let _z2: u64 = merke(wlib.label((&l_zone[0 as usize]) as u64), R_ZEIT)
-    let cz: u64 = merke(wlib.choice((&c_zone[0 as usize]) as u64, 2), R_ZEIT)
-    let _z3: u64 = merke(wlib.label((&l_ehr3[0 as usize]) as u64), R_ZEIT)
-    let _z4: u64 = merke(wlib.label((&l_ehr4[0 as usize]) as u64), R_ZEIT)
+    let _z2: u64 = merke(wlib.label(msg.get((&k_l_zone[0 as usize]) as u64)), R_ZEIT)
+    let cz: u64 = merke(wlib.choice(msg.get((&k_c_zone[0 as usize]) as u64), 2), R_ZEIT)
+    let _z3: u64 = merke(wlib.label(msg.get((&k_l_ehr3[0 as usize]) as u64)), R_ZEIT)
+    let _z4: u64 = merke(wlib.label(msg.get((&k_l_ehr4[0 as usize]) as u64)), R_ZEIT)
     wlib.size(140, 26)
-    let b3: u64 = merke(wlib.button((&b_uber[0 as usize]) as u64), R_ZEIT)
+    let b3: u64 = merke(wlib.button(msg.get((&k_b_uber[0 as usize]) as u64)), R_ZEIT)
     // ---- Netz
     let _n1: u64 = merke(wlib.label((&l_ip[0 as usize]) as u64), R_NETZ)
     let _n2: u64 = merke(wlib.label((&l_maske[0 as usize]) as u64), R_NETZ)
     let _n3: u64 = merke(wlib.label((&l_gw[0 as usize]) as u64), R_NETZ)
     let _n4: u64 = merke(wlib.label((&l_mac[0 as usize]) as u64), R_NETZ)
-    let _n5: u64 = merke(wlib.label((&l_bez[0 as usize]) as u64), R_NETZ)
-    let cn: u64 = merke(wlib.choice((&c_bez[0 as usize]) as u64, 1), R_NETZ)
-    let _n6: u64 = merke(wlib.label((&l_ip2[0 as usize]) as u64), R_NETZ)
+    let _n5: u64 = merke(wlib.label(msg.get((&k_l_bez[0 as usize]) as u64)), R_NETZ)
+    let cn: u64 = merke(wlib.choice(msg.get((&k_c_bez[0 as usize]) as u64), 1), R_NETZ)
+    let _n6: u64 = merke(wlib.label(msg.get((&k_l_ip2[0 as usize]) as u64)), R_NETZ)
     let en1: u64 = merke(wlib.entry((&e_ip[0 as usize]) as u64, 20), R_NETZ)
     let en2: u64 = merke(wlib.entry((&e_maske[0 as usize]) as u64, 20),
         R_NETZ)
     let en3: u64 = merke(wlib.entry((&e_gw[0 as usize]) as u64, 20), R_NETZ)
     wlib.size(140, 26)
-    let b4: u64 = merke(wlib.button((&b_uber[0 as usize]) as u64), R_NETZ)
+    let b4: u64 = merke(wlib.button(msg.get((&k_b_uber[0 as usize]) as u64)), R_NETZ)
     // ---- Benutzer
     let _u1: u64 = merke(wlib.label((&l_wer[0 as usize]) as u64), R_BENUT)
-    let _u2: u64 = merke(wlib.label((&l_kw1[0 as usize]) as u64), R_BENUT)
+    let _u2: u64 = merke(wlib.label(msg.get((&k_l_kw1[0 as usize]) as u64)), R_BENUT)
     let ep1: u64 = merke(wlib.entry((&e_pw1[0 as usize]) as u64, 60),
         R_BENUT)
-    let _u3: u64 = merke(wlib.label((&l_kw2[0 as usize]) as u64), R_BENUT)
+    let _u3: u64 = merke(wlib.label(msg.get((&k_l_kw2[0 as usize]) as u64)), R_BENUT)
     let ep2: u64 = merke(wlib.entry((&e_pw2[0 as usize]) as u64, 60),
         R_BENUT)
     wlib.size(160, 26)
-    let b5: u64 = merke(wlib.button((&b_kw[0 as usize]) as u64), R_BENUT)
+    let b5: u64 = merke(wlib.button(msg.get((&k_b_kw[0 as usize]) as u64)), R_BENUT)
     // ---- Netzzugriff (ROUND NETVIEW)
-    let _v1: u64 = merke(wlib.label((&l_nv1[0 as usize]) as u64), R_NETV)
-    let _v2: u64 = merke(wlib.label((&l_nv2[0 as usize]) as u64), R_NETV)
+    let _v1: u64 = merke(wlib.label(msg.get((&k_l_nv1[0 as usize]) as u64)), R_NETV)
+    let _v2: u64 = merke(wlib.label(msg.get((&k_l_nv2[0 as usize]) as u64)), R_NETV)
     nv_lesen()
     wlib.size(0, 150)
     let lv: u64 = merke(wlib.list((&nv_liste[0 as usize]) as u64, 8), R_NETV)
-    let _v3: u64 = merke(wlib.label((&l_nv3[0 as usize]) as u64), R_NETV)
-    let cv: u64 = merke(wlib.choice((&c_view[0 as usize]) as u64, 0), R_NETV)
+    let _v3: u64 = merke(wlib.label(msg.get((&k_l_nv3[0 as usize]) as u64)), R_NETV)
+    let cv: u64 = merke(wlib.choice(msg.get((&k_c_view[0 as usize]) as u64), 0), R_NETV)
     wlib.size(140, 26)
-    let b6: u64 = merke(wlib.button((&b_uber[0 as usize]) as u64), R_NETV)
+    let b6: u64 = merke(wlib.button(msg.get((&k_b_uber[0 as usize]) as u64)), R_NETV)
     // ---- ZWEITER NACHTRAG: die systemweite Voreinstellung
-    let _v4: u64 = merke(wlib.label((&l_fb1[0 as usize]) as u64), R_NETV)
-    let cf: u64 = merke(wlib.choice((&c_fall[0 as usize]) as u64,
+    let _v4: u64 = merke(wlib.label(msg.get((&k_l_fb1[0 as usize]) as u64)), R_NETV)
+    let cf: u64 = merke(wlib.choice(msg.get((&k_c_fall[0 as usize]) as u64),
         nv.fallback()), R_NETV)
-    let _v5: u64 = merke(wlib.label((&l_fb2[0 as usize]) as u64), R_NETV)
-    let _v6: u64 = merke(wlib.label((&l_fb3[0 as usize]) as u64), R_NETV)
+    let _v5: u64 = merke(wlib.label(msg.get((&k_l_fb2[0 as usize]) as u64)), R_NETV)
+    let _v6: u64 = merke(wlib.label(msg.get((&k_l_fb3[0 as usize]) as u64)), R_NETV)
     wlib.size(140, 26)
-    let b7: u64 = merke(wlib.button((&b_fbue[0 as usize]) as u64), R_NETV)
+    let b7: u64 = merke(wlib.button(msg.get((&k_b_fbue[0 as usize]) as u64)), R_NETV)
+    // ---- Sprache (RUNDE I18N, von Runde LOOK zurueckgeholt)
+    let _p1: u64 = merke(wlib.label(msg.get((&k_lang[0 as usize]) as u64)),
+        R_SPRACHE)
+    var lidx: u64 = 0
+    if __mmio_read8((msg.lang()) as *mut u8) == 100 as u8 {
+        lidx = 1
+    }
+    let cl: u64 = merke(wlib.choice(msg.get((&k_clang[0 as usize]) as u64),
+        lidx), R_SPRACHE)
+    let _p2: u64 = merke(wlib.label(msg.get((&k_kbd[0 as usize]) as u64)),
+        R_SPRACHE)
+    var kidx: u64 = ulib.sys(SYS_KBD, KB_GET, 0, 0)
+    if ulib.bad(kidx) {
+        kidx = 0
+    }
+    let ck2: u64 = merke(wlib.choice(msg.get((&k_ckbd[0 as usize]) as u64),
+        kidx), R_SPRACHE)
+    let _p3: u64 = merke(wlib.label(msg.get((&k_lnote1[0 as usize]) as u64)),
+        R_SPRACHE)
+    let _p4: u64 = merke(wlib.label(msg.get((&k_lnote2[0 as usize]) as u64)),
+        R_SPRACHE)
+    wlib.size(140, 26)
+    let b8: u64 = merke(wlib.button(msg.get((&k_b_uber[0 as usize]) as u64)),
+        R_SPRACHE)
     // ---- immer sichtbar
     let st: u64 = merke(wlib.label((&l_stat[0 as usize]) as u64), R_ANZ)
     wlib.box_end()
@@ -1463,19 +1537,19 @@ fn u_start(args: u64) -> u64 {
                 // menu, and this application did not. It does now, and
                 // the same four lines serve the taskbar edge.
                 if wlib.fired_index() == 0x1000 {
-                    var items: u64 = (&c_aufl[0 as usize]) as u64
+                    var items: u64 = msg.get((&k_c_aufl[0 as usize]) as u64)
                     var cnt: u64 = 2
                     if id == cz {
-                        items = (&c_zone[0 as usize]) as u64
+                        items = msg.get((&k_c_zone[0 as usize]) as u64)
                         cnt = 3
                     } else if id == cn {
-                        items = (&c_bez[0 as usize]) as u64
+                        items = msg.get((&k_c_bez[0 as usize]) as u64)
                         cnt = 2
                     } else if id == ce {
-                        items = (&c_tb[0 as usize]) as u64
+                        items = msg.get((&k_c_tb[0 as usize]) as u64)
                         cnt = 4
                     } else if id == cv {
-                        items = (&c_view[0 as usize]) as u64
+                        items = msg.get((&k_c_view[0 as usize]) as u64)
                         cnt = 4
                     }
                     let mx: u64 = wlib.win_x(w) + 2 + wlib.rect_x(id)
@@ -1516,13 +1590,13 @@ fn u_start(args: u64) -> u64 {
                             wlib.set_text(lk, (&l_kon[0 as usize]) as u64)
                             wlib.set_text(lw, (&l_warn[0 as usize]) as u64)
                             let a: u64 = text_an((&l_stat[0 as usize]) as u64,
-                                0, (&m_schema[0 as usize]) as u64)
+                                0, msg.get((&k_m_schema[0 as usize]) as u64))
                             let _b: u64 = text_an((&l_stat[0 as usize])
                                 as u64, a, (&snamen[0 as usize]) as u64
                                 + wlib.value(ls) * 32)
                         } else {
                             let _c: u64 = text_an((&l_stat[0 as usize])
-                                as u64, 0, (&m_schemano[0 as usize]) as u64)
+                                as u64, 0, msg.get((&k_m_schemano[0 as usize]) as u64))
                         }
                     }
                     // das Bild -- nur, wenn die Quelle nicht schon das
@@ -1535,12 +1609,12 @@ fn u_start(args: u64) -> u64 {
                             (&t_wall[0 as usize]) as u64)
                         if n2 > 0 {
                             let a2: u64 = text_an((&l_stat[0 as usize])
-                                as u64, 0, (&m_bild[0 as usize]) as u64)
+                                as u64, 0, msg.get((&k_m_bild[0 as usize]) as u64))
                             let _d2b: u64 = zahl_an((&l_stat[0 as usize])
                                 as u64, a2, n2)
                         } else {
                             let _e2b: u64 = text_an((&l_stat[0 as usize])
-                                as u64, 0, (&m_bildno[0 as usize]) as u64)
+                                as u64, 0, msg.get((&k_m_bildno[0 as usize]) as u64))
                         }
                     }
                     // ADDENDUM TASKBAR: and the bar. Same button, same
@@ -1596,10 +1670,10 @@ fn u_start(args: u64) -> u64 {
                         }
                         if ulib.bad(rc) {
                             a3 = text_an((&l_stat[0 as usize]) as u64, 0,
-                                (&m_modeno[0 as usize]) as u64)
+                                msg.get((&k_m_modeno[0 as usize]) as u64))
                         } else {
                             a3 = text_an((&l_stat[0 as usize]) as u64, 0,
-                                (&m_modeok[0 as usize]) as u64)
+                                msg.get((&k_m_modeok[0 as usize]) as u64))
                             a3 = zahl_an((&l_stat[0 as usize]) as u64, a3,
                                 dget(DG_PANELW))
                             a3 = text_an((&l_stat[0 as usize]) as u64, a3,
@@ -1609,7 +1683,7 @@ fn u_start(args: u64) -> u64 {
                         }
                     } else {
                         a3 = text_an((&l_stat[0 as usize]) as u64, 0,
-                            (&m_modeno[0 as usize]) as u64)
+                            msg.get((&k_m_modeno[0 as usize]) as u64))
                     }
                     let _a3b: u64 = a3
                     stand_lesen()
@@ -1623,7 +1697,7 @@ fn u_start(args: u64) -> u64 {
                     let _k2: bool = frist_lesen()
                     wlib.set_text(_sf, (&d_frist[0 as usize]) as u64)
                     let _k3: u64 = text_an((&l_stat[0 as usize]) as u64, 0,
-                        (&m_behalt[0 as usize]) as u64)
+                        msg.get((&k_m_behalt[0 as usize]) as u64))
                     wlib.set_text(st, (&l_stat[0 as usize]) as u64)
                     melde_stand()
                 } else if id == b2b {
@@ -1632,7 +1706,7 @@ fn u_start(args: u64) -> u64 {
                     wlib.set_text(_sf, (&d_frist[0 as usize]) as u64)
                     wlib.set_text(_sk, (&d_karte[0 as usize]) as u64)
                     let _r3: u64 = text_an((&l_stat[0 as usize]) as u64, 0,
-                        (&m_zurueck[0 as usize]) as u64)
+                        msg.get((&k_m_zurueck[0 as usize]) as u64))
                     wlib.set_text(st, (&l_stat[0 as usize]) as u64)
                     wlib.neu_setzen()
                     melde_stand()
@@ -1648,7 +1722,7 @@ fn u_start(args: u64) -> u64 {
                         (&t_time[0 as usize]) as u64,
                         (&buf2[0 as usize]) as u64, a4)
                     let _s6: u64 = text_an((&l_stat[0 as usize]) as u64, 0,
-                        (&m_time[0 as usize]) as u64)
+                        msg.get((&k_m_time[0 as usize]) as u64))
                     wlib.set_text(st, (&l_stat[0 as usize]) as u64)
                     melde_stand()
                 } else if id == b4 {
@@ -1662,7 +1736,7 @@ fn u_start(args: u64) -> u64 {
                         let pid: u64 = ulib.sys(ulib.SYS_SPAWN,
                             (&t_dhcp[0 as usize]) as u64, 0, 0)
                         let a6: u64 = text_an((&l_stat[0 as usize]) as u64,
-                            0, (&m_dhcp[0 as usize]) as u64)
+                            0, msg.get((&k_m_dhcp[0 as usize]) as u64))
                         let _z7: u64 = zahl_an((&l_stat[0 as usize]) as u64,
                             a6, pid)
                     } else {
@@ -1672,12 +1746,12 @@ fn u_start(args: u64) -> u64 {
                         let vgw: u64 = ip_lesen((&e_gw[0 as usize]) as u64)
                         if vip == 0 || vmk == 0 {
                             let _s8: u64 = text_an((&l_stat[0 as usize])
-                                as u64, 0, (&m_netzno[0 as usize]) as u64)
+                                as u64, 0, msg.get((&k_m_netzno[0 as usize]) as u64))
                         } else {
                             let rc: u64 = ulib.sys(SYS_NETSET, vip, vmk, vgw)
                             if ulib.bad(rc) {
                                 let _s9: u64 = text_an((&l_stat[0 as usize])
-                                    as u64, 0, (&m_netzr[0 as usize]) as u64)
+                                    as u64, 0, msg.get((&k_m_netzr[0 as usize]) as u64))
                             } else {
                                 var buf4: [u8; 96] = [0 as u8; 96]
                                 var a7: u64 = text_an((&buf4[0 as usize])
@@ -1698,7 +1772,7 @@ fn u_start(args: u64) -> u64 {
                                     (&t_net[0 as usize]) as u64,
                                     (&buf4[0 as usize]) as u64, a7)
                                 let _sa: u64 = text_an((&l_stat[0 as usize])
-                                    as u64, 0, (&m_net[0 as usize]) as u64)
+                                    as u64, 0, msg.get((&k_m_net[0 as usize]) as u64))
                             }
                         }
                     }
@@ -1709,10 +1783,10 @@ fn u_start(args: u64) -> u64 {
                     if !ulib.streq((&e_pw1[0 as usize]) as u64,
                         (&e_pw2[0 as usize]) as u64) {
                         let _sb: u64 = text_an((&l_stat[0 as usize]) as u64,
-                            0, (&m_kwne[0 as usize]) as u64)
+                            0, msg.get((&k_m_kwne[0 as usize]) as u64))
                     } else if ulib.length((&e_pw1[0 as usize]) as u64) < 4 {
                         let _sc: u64 = text_an((&l_stat[0 as usize]) as u64,
-                            0, (&m_kwku[0 as usize]) as u64)
+                            0, msg.get((&k_m_kwku[0 as usize]) as u64))
                     } else {
                         var rec: [u8; 160] = [0 as u8; 160]
                         var gut: bool = pw.make_hash(
@@ -1725,12 +1799,12 @@ fn u_start(args: u64) -> u64 {
                         if gut {
                             geschrieben = geschrieben + 1
                             let ad: u64 = text_an((&l_stat[0 as usize])
-                                as u64, 0, (&m_kwok[0 as usize]) as u64)
+                                as u64, 0, msg.get((&k_m_kwok[0 as usize]) as u64))
                             let _sd: u64 = text_an((&l_stat[0 as usize])
                                 as u64, ad, (&name[0 as usize]) as u64)
                         } else {
                             let _se: u64 = text_an((&l_stat[0 as usize])
-                                as u64, 0, (&m_kwno[0 as usize]) as u64)
+                                as u64, 0, msg.get((&k_m_kwno[0 as usize]) as u64))
                         }
                     }
                     wlib.set_text(st, (&l_stat[0 as usize]) as u64)
@@ -1753,11 +1827,11 @@ fn u_start(args: u64) -> u64 {
                         if ulib.bad(r) {
                             let _f1: u64 = text_an(
                                 (&l_stat[0 as usize]) as u64, 0,
-                                (&m_nvno[0 as usize]) as u64)
+                                msg.get((&k_m_nvno[0 as usize]) as u64))
                         } else {
                             let a6: u64 = text_an(
                                 (&l_stat[0 as usize]) as u64, 0,
-                                (&m_nvok[0 as usize]) as u64)
+                                msg.get((&k_m_nvok[0 as usize]) as u64))
                             let _f2: u64 = zahl_an(
                                 (&l_stat[0 as usize]) as u64, a6,
                                 nv_pids[(z) as usize])
@@ -1780,12 +1854,12 @@ fn u_start(args: u64) -> u64 {
                     if ulib.bad(nv.fallback_set(f)) {
                         let _g1: u64 = text_an(
                             (&l_stat[0 as usize]) as u64, 0,
-                            (&m_fbno[0 as usize]) as u64)
+                            msg.get((&k_m_fbno[0 as usize]) as u64))
                     } else {
                         var fw: [u8; 14] = [0 as u8; 14]
                         let a7: u64 = text_an(
                             (&l_stat[0 as usize]) as u64, 0,
-                            (&m_fbok[0 as usize]) as u64)
+                            msg.get((&k_m_fbok[0 as usize]) as u64))
                         let _n7: u64 = nv.fb_name(f, (&fw[0 as usize]) as u64)
                         let _g2: u64 = text_an(
                             (&l_stat[0 as usize]) as u64, a7,
@@ -1800,6 +1874,55 @@ fn u_start(args: u64) -> u64 {
                     wlib.set_text(lv, (&nv_liste[0 as usize]) as u64)
                     wlib.set_text(st, (&l_stat[0 as usize]) as u64)
                     wlib.dirty_all(w)
+                    melde_stand()
+                } else if id == b8 {
+                    // ================ RUNDE I18N, von Runde LOOK zurueck
+                    //
+                    // DIE SPRACHE UMSTELLEN, ZUR LAUFZEIT UND OHNE
+                    // NEUSTART. Drei Schritte, und der dritte ist der,
+                    // den man leicht vergisst:
+                    //
+                    //   1. Die Wahl SCHREIBEN, nach
+                    //      /users/<name>/config/locale. Sie gehoert dem
+                    //      BENUTZER -- deshalb nicht nach /etc/. Die
+                    //      Vorgabe unter /etc/locale.conf, die Runde
+                    //      LOOK eingefuehrt hat, wird hier NICHT
+                    //      angefasst: eine Wahl schlaegt eine Vorgabe,
+                    //      und ein Programm, das die Vorgabe der
+                    //      Maschine ueberschreibt, weil ein Benutzer
+                    //      etwas gewaehlt hat, hat die beiden
+                    //      verwechselt.
+                    //   2. Den Katalog UMSTELLEN. `msg.set_lang` fuellt
+                    //      die festen Plaetze neu; die Zeiger, die jedes
+                    //      Bedienelement dieses Fensters haelt, bleiben
+                    //      dieselben Adressen. Genau dafuer sind die
+                    //      Plaetze fest.
+                    //   3. Die zusammengesetzten Beschriftungen NEU
+                    //      BAUEN. "Adresse: 10.0.2.15" ist kein
+                    //      Katalogtext, sondern ein Katalogtext PLUS
+                    //      eine Zahl; das tut `stand_lesen`.
+                    var code: u64 = (&c_en[0 as usize]) as u64
+                    if wlib.value(cl) == 1 {
+                        code = (&c_de[0 as usize]) as u64
+                    }
+                    let _kb: u64 = ulib.sys(SYS_KBD, KB_SET,
+                        wlib.value(ck2), 0)
+                    if msg.save_lang(code) {
+                        let _sl: bool = msg.set_lang(code)
+                        stand_lesen()
+                        let al: u64 = text_an((&l_stat[0 as usize]) as u64,
+                            0, msg.get((&k_m_langok[0 as usize]) as u64))
+                        let _sm: u64 = text_an((&l_stat[0 as usize]) as u64,
+                            al, code)
+                    } else {
+                        let _sn: u64 = text_an((&l_stat[0 as usize]) as u64,
+                            0, msg.get((&k_m_langno[0 as usize]) as u64))
+                    }
+                    wlib.set_text(st, (&l_stat[0 as usize]) as u64)
+                    // Jedes Bedienelement zeigt auf denselben Platz wie
+                    // vorher -- nur steht dort jetzt ein anderer Text.
+                    // Also reicht Neuzeichnen.
+                    wlib.draw_all()
                     melde_stand()
                 }
             }
