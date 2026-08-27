@@ -131,6 +131,17 @@
 #      dann weiss der Index von keiner), `nodirty`, `nofocus`, `nomouse`
 #      und der Lauf ganz ohne `wig`.
 #
+#  26. WER WIEVIEL VERBRAUCHT (tools/netmon/run.sh, Runde NETMON): die
+#      Zaehlung je Prozess und je Programm (Nutzdaten UND Draht, und der
+#      Unterschied zwischen beiden), die Verbindungsliste `/bin/netstat`,
+#      der Verlauf in `/var/net/usage` -- und der zweite Teil: eine
+#      ZWEITE Netzkarte, Weiterleitung, NAT und ein DHCP-SERVER, gemessen
+#      an einer ZWEITEN Osum-Maschine, die ihre Adresse und ihren Weg
+#      hinaus von der ersten bekommt. Kein WLAN-Hotspot: dieses System
+#      hat keine Zeile 802.11, und docs/NETMON.md sagt warum.
+#      Gegenproben: `nonetmon` (nichts wird gezaehlt), `noshare` (die
+#      zweite Karte bleibt liegen), und der Kostenmesser `netmonbench`,
+#      der sagt, was die Zaehlung wirklich kostet -- 0,3 % des Laufs.
 #  25. EINE NETZSICHT JE PROZESS (tools/netview/run.sh, Runde NETVIEW):
 #      viele Programme verweigern den Dienst ohne Netz, obwohl sie offline
 #      liefen -- sie wollen nur nachladen oder nach Hause funken. Ein
@@ -447,6 +458,10 @@ lauf "24. Energie und Leistung: drei Profile, Ruhezustand, Waerme, Akku (tools/k
      tools/k18/run.sh k18 '^K18: |^  OK    (dieselbe Stelle|IA32_PERF_CTL bekommt|Turbo ist bei|SpeedStep ist bei|jeder Durchlauf ging|schlafend |aber es wird kein|zwei Tabellen|GEGENPROBE|GEDROSSELT|im BILD|dasselbe Pruefbild|und einen Bildpunkt DANEBEN|keine AUFRUFNUMMER)'
 lauf "25. eine Netzsicht je Prozess: real, filtered, faked, none (tools/netview/run.sh, Runde NETVIEW)" \
      tools/netview/run.sh netview '^NETVIEW: |^  OK    (OCTETS THAT LEFT|faked: (connect|reading|the WHOLE|the BODY|a name resolved|and the reachability)|none: (connect|and it said)|real: connect took|and the python server)'
+
+# =====================================================================
+lauf "26. wer wieviel verbraucht, und die Verbindung weiterreichen (tools/netmon/run.sh, Runde NETMON)" \
+     tools/netmon/run.sh netmon '^NETMON: |^  OK    (what the KERNEL counted|the counting is|one frame, cache hit|wget/ping ratio|and the SECOND roll|addresses in the history|the client got an OFFER|echo replies from|files fetched over HTTP|NAT records made)'
 
 
 echo
