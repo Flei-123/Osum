@@ -544,6 +544,33 @@ The rounds that came before are unchanged: `tools/gfx/run.sh` reports
 kernel-side assertions about the framebuffer and its pixel-exact
 comparison of the whole screen against the serial transcript.
 
+### The state of the other suites, measured and not assumed
+
+| suite | on this branch | note |
+| --- | --- | --- |
+| `tools/gfx/run.sh` | 76 passed, 0 failed | the framebuffer of round K7, unchanged |
+| `tools/kernel/run.sh` | 176 passed, 0 failed | |
+| `tools/osum/run.sh` | 130 passed, 0 failed | |
+| `tools/userland/run.sh` | 91 passed, 0 failed | |
+| `tools/k18/run.sh` | 169 passed, **1 failed** | not this round -- see below |
+| `tools/wm/run.sh` | 99 passed, **4 failed** | not this round -- see below |
+
+Those five failures were **already there before this round touched
+anything**, and that is a measurement, not a claim: `tools/wm/run.sh`
+checked out at commit `d7bdcfc` (branch `desktop`, the merge parent)
+gives the same *99 passed, 4 FAILED* with the same four assertions. They
+belong to round DESKTOP, which raised `MAX_WIN` from 8 to 16 and added
+three assertions to `wm.selftest` (its runner still expects 17, and gets
+20) and changed the title bar rendering (three pixel-exact title
+comparisons come out blank). The single K18 failure is the same story:
+round DESKTOP's taskbar `kernel/user/leiste.fi` declares
+`SYS_PWRGET: u64 = 1750`, and the K18 runner asserts that no file outside
+its own round names a number from 1750..1799.
+
+This round merged `desktop` because the settings program it needed a page
+in lives there. Fixing another round's assertions is that round's work,
+not this one's -- but pretending they are green would be worse.
+
 One practical note for whoever runs these: they are QEMU under TCG and
 they are slow. Running six of the suites in parallel on a twelve-core
 machine made several of them fail with `exit code 0, expected 21` and
