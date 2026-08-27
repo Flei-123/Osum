@@ -202,9 +202,13 @@ not break it; what this round adds is that **the same call works in light
 and in dark**, because the glyph carries no colour of its own.
 
 `kernel/user/icont.fi` measures it rather than claiming it
-(`shape-not-colour`): the same icon drawn white-on-black and
-black-on-white touches **the same 256 pixels**. If there were a second
-set of drawings hidden anywhere, that number would differ.
+(`shape-not-colour`): the warning triangle drawn white-on-black and
+drawn black-on-white touches **the same 108 pixels**. If there were a
+second set of drawings hidden anywhere, the two counts would differ.
+The run also checks that 108 is neither 0 nor 256 — "both agree" is
+worth nothing if both are "nothing" or both are "the whole box", and the
+first version of this check *did* pass on 256 against 256 while drawing
+absolutely nothing.
 
 ---
 
@@ -243,9 +247,19 @@ the two paths is exactly what was being asked about — one octet per pixel
 and a colour from the caller, against four octets per pixel and a colour
 per pixel.
 
-**The honest answer: drawing an icon and drawing a bitmap cost the same,
-to within 0.7 %.** The blend is the work; where the alpha came from is
-not. Anyone who says a glyph is faster to draw than a bitmap is guessing.
+**The honest answer: drawing an icon and drawing a bitmap cost the same.**
+Measured three times, at three different machine loads:
+
+| run | icon, per mixed pixel | OSYM, per mixed pixel | difference |
+|---|---|---|---|
+| 1 | 579 ns | 583 ns | 0.7 % |
+| 2 | 595 ns | 596 ns | 0.2 % |
+| 3 | 499 ns | 500 ns | 0.2 % |
+
+The absolute numbers move with the load on the host — this is TCG, not
+hardware. The ratio does not. The blend is the work; where the alpha came
+from is not. Anyone who says a glyph is faster to draw than a bitmap is
+guessing.
 
 **What the font actually buys is therefore not speed. It is:**
 
@@ -404,7 +418,7 @@ requires it to be found. It is.
 
 ## 10. The acceptance run
 
-`bash tools/icons/run.sh` — **23 checks, 0 failed.**
+`bash tools/icons/run.sh` — **25 checks, 0 failed.**
 
 1. **The font can be rebuilt.** `assets/osum-icons.ttf`, `lib/icons.fi`
    and `assets/icons/icons.list` all come back octet for octet out of
@@ -449,34 +463,92 @@ both executable **and** named `.sh` is drawn as a program: what a thing
 
 ## 11. Existing tests
 
-`./test.sh`, fifteen sections, run on `main` (3389fbd) and on this branch:
+`./test.sh` was run end to end on `main` (3389fbd) and on this branch.
 
 | | main | icons |
 |---|---|---|
-| sections passed | *(see §11 note)* | *(see §11 note)* |
+| sections passed | 19 | **20** (the new one) |
+| sections failed | **4** — `k13`, `k14`, `k15`, `k16` | **4** — `k13`, `k14`, `k15`, `k16` |
+| assertions | 2152 | 2123 |
+| section 25 (this round) | — | **25 ok, 0 failed** |
 
-> Both runs were started; the numbers go here when they finish. If this
-> table still says "see note", the round was reported before they did and
-> the claim "nothing broke" is **not** backed by a run — treat it as
-> unverified.
+**The same four sections fail on both.** None of the four is a section
+this round could plausibly have broken, and `main` fails them by itself.
 
-The changes that could plausibly break something elsewhere, and why they
-should not:
+That is the section-level answer, but the per-assertion counts in those
+runs were nonsense on **both** branches, and it is worth writing down
+why rather than quietly reporting the better-looking half.
+
+**Both runs were made on a machine carrying four other rounds' QEMU
+suites at the same time**, at a load average of 15–21 on 12 cores. Under
+that, `mkfs.py` images come out short and stage-1 compiles get killed,
+and the suites report cascades: `k13` said *"firnc1 does not build the
+kernel"* and *"no OSUM-OFS magic"*, `k15` said *"/bin/explorer is not on
+the disk"*. Neither is a real finding — the stage-1 build of this branch
+was run by hand immediately afterwards and produced a 4 155 512 octet
+image without complaint.
+
+So the three sections that matter were re-run **as pairs, both branches
+at once, under the same load** — which is the only comparison worth
+anything:
+
+| suite | main | icons | |
+|---|---|---|---|
+| `tools/k15/run.sh` (widgets, file manager, launcher) | **251 passed, 0 failed** | **251 passed, 0 failed** | identical |
+| `tools/k13/run.sh` (users, permissions, init) | 87 passed, 12 failed | 87 passed, 12 failed | identical, same 12 |
+| `tools/k14/run.sh` (VFS, FAT, partitions), run 1 | 133 passed, 17 failed | 135 passed, 18 failed | |
+| `tools/k14/run.sh`, run 2 | 129 passed, **21** failed | 133 passed, **19** failed | |
+
+**`k15` is the one that matters here**, because it is the suite that
+measures the file manager this round put icons into — and with the icons
+in place it passes all 251 assertions, exactly as `main` does. In the
+loaded full run it had reported 206/45 against main's 218/33; both
+numbers were noise.
+
+`k13`'s twelve failures are identical on both branches, name for name
+(`su`, `/etc/shadow`, `setuid`), and they exist on `main`.
+
+`k14` is genuinely flaky on this host: the two branches fail different,
+**disjoint** subsets, and on the second run `main` failed *more* than
+this branch. Nothing in the failing set (FAT read-only mounts, procfs
+and devfs mount counts, `fsck.fat`) touches anything this round changed.
+
+### The regression this comparison DID catch
+
+Running `k15` as a pair is not a formality — it found a real bug that had
+already been committed.
+
+`paint_table` moved the first column's text right to make room for the
+icon. `cell_x` did not. And `cell_x` is the function `/bin/explorer`
+**reports to the test runner**, which then looks for ink at that x — 20
+pixels to the left of where the name now actually was. The first loaded
+run buried this under image-build cascades; the paired run would have
+shown it as eight table-row failures.
+
+Both now go through one function, `table_ein()`, so they cannot
+disagree. The indent is per **widget**, not per row: a column whose names
+start at two different x depending on whether that row happens to have an
+icon is a ragged column, and a per-row indent could not be reported by a
+per-widget function in the first place. The heading of the first column
+moves with its data; the column separator lines do not, because they
+carry the column geometry.
+
+### What could plausibly have broken elsewhere, and why it did not
 
 * `kernel/ttf.fi`: one constant, `MAX_FONTS` 2 → 3. The slots live at
   `S_FIRST (0x080)` + n × `FONT_BYTES (256)` inside a `TTF_MAX (4096)`
   octet page: `0x080 + 3 × 256 = 0x380`. Counted, not guessed; there is
-  room for fifteen.
+  room for fifteen. Section 17 (`tools/wm/run.sh`, the rasteriser and the
+  window server) reports **103 passed, 0 failed** on both branches.
 * `kernel/wig.fi`: `f > 1` became `f >= FONT_ROLES`, plus a new scalar at
   `0x048` and two functions. The page's scalar area runs to `CLIP_OFF`
   (0x1000).
 * `kernel/user/wlib.fi`: `D_FIELDS` 16 → 17 and the widget array grew
   with it (96 × 17 = 1632). A list or table without `row_icons` reads a
-  zero and behaves exactly as before.
-* `kernel/kmain.fi`: one more `load_font`, one mode word, one branch in
-  `k15_start`.
-
----
+  zero and behaves exactly as before — which is what `k15`'s 251 green
+  assertions say.
+* `kernel/kmain.fi`: one more `load_font`, one mode word (`wigicons`,
+  bit 47), one branch in `k15_start`.
 
 ## 12. What is missing
 
@@ -531,6 +603,6 @@ is open. One line in `explorer.fi` when it does.
 | `tools/icons/build.py` | the cutter and remapper |
 | `tools/icons/rawcp.py` | the "no raw code points" check |
 | `tools/icons/sheet.py` | the overview sheets and the legibility numbers |
-| `tools/icons/run.sh` | the acceptance run, 23 checks |
+| `tools/icons/run.sh` | the acceptance run, 25 checks |
 | `kernel/user/icont.fi` | eight promises and five costs, in Ring 3 |
 | `docs/icons/*.png` | the sheets and the before/after |
