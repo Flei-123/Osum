@@ -245,6 +245,40 @@ exercised. It is *not* claimed to work on real UEFI firmware.
   real hardware as *expectations*, not measurements, because this tree has
   never booted on a physical machine.
 
+## 5a. Regression check against an untouched baseline
+
+This round changed four files that other rounds depend on: `kmain.fi`
+(two calls), `kstate.fi` (constants), `nvme.fi` (one function) and
+`procfs.fi` (one more file in `/proc`). The last one is the risky one --
+`/proc` gained an entry, and a test that counted them would break.
+
+So the affected sections were run **twice**: once on this branch and once
+on a worktree of untouched `main` (`3389fbd`), same compiler, same host.
+
+| section | untouched `main` | branch `tresor` |
+|---|---|---|
+| `tools/k14/run.sh` (VFS, /proc, /dev, FAT32) | 143 passed, **9 failed** | 144 passed, **8 failed** |
+| `tools/k13/run.sh` (users, permissions, init) | 87 passed, **12 failed** | 87 passed, **12 failed** |
+| `tools/userland/run.sh` | -- | 91 passed, 0 failed |
+| `tools/posix/run.sh` | -- | 134 passed, 0 failed |
+| `tools/tresor/run.sh` (this round) | -- | **104 passed, 0 failed** |
+
+**The failures in k13 and k14 are not from this round.** They are present
+on untouched `main` in the same numbers: all eight k14 failures are the
+one `novfs` counter-check block, which produces no `k14:` lines at all on
+either tree, and k13 fails identically on both. The single difference
+(9 against 8) is one FAT32 `fsck` counter-check that failed on the
+baseline run and not on this one -- it moves between runs, so it is flaky
+rather than a verdict on either tree.
+
+That those sections are red on `main` is worth someone's attention. It is
+not this round's to fix, and this round did not make it worse.
+
+A caveat on the numbers: the host was running several other rounds
+concurrently (load average around 9, fourteen QEMU processes). Runners
+that boot QEMU under a timeout are sensitive to that, which is the likely
+reason a counter-check moved between runs.
+
 ## 6. What the next round would need
 
 Effort in rounds of this project:
