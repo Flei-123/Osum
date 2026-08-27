@@ -814,7 +814,14 @@ Six faults, all found by the run and not by reading:
 6. **`WM_DECO` composited on every call**, so a taskbar setting eleven
    colours produced eleven full-screen composites inside system calls
    and the machine stopped booting.
-7. **`mode=auto` as the default broke a round-K15 image.** Such an image
+7. **`theme_count()` quietly changed meaning.** In round K15 it answered
+   “how many colours did `/etc/theme` actually set”; this round briefly
+   made it answer “how many tokens are there”. `tools/k15/run.sh` said
+   so in one line: expected 12, got 41. The old name kept the old
+   meaning; the new question got a new name, `theme_token_count()`. A
+   function whose name stays and whose meaning moves is worse than a
+   renamed one.
+8. **`mode=auto` as the default broke a round-K15 image.** Such an image
    has no `/etc/theme.conf` but does have an `/etc/theme` with twelve
    *dark* surface colours and no text colour. With `auto` the mode then
    hangs on the machine's clock: by day the text resolved light-on-light
@@ -834,15 +841,36 @@ with `*%`. Fixed in the first commit of this branch, separately.
 | run | before this round | after |
 |---|---|---|
 | `tools/wm/run.sh` (window server, mouse, TrueType) | 99 passed, **4 failed** | 99 passed, **4 failed** — the same four |
-| `tools/k15/run.sh` (widgets, file manager, launcher) | see below | see below |
+| `tools/k15/run.sh` (widgets, file manager, launcher) | 249 passed, **2 failed** | 250 passed, **1 failed** |
 | `tests/theme/run.sh` (this round) | — | **91 passed, 0 failed** |
 
-The four `tools/wm/run.sh` failures are **older than this round**: the
-same run against the commit this branch starts from (042c1fa, in a
-separate worktree) produces the identical four — the server's self test
+Both runs were also made against the commit this branch starts from
+(042c1fa) in a separate worktree, because a failure count without the
+one from before it is not a comparison.
+
+**`tools/wm/run.sh`: the four failures are older than this round.** The
+base commit produces the identical four — the server's self test
 answering 25 of 30, and three title-text checks finding no ink at all.
-They are not this round's to fix and this round did not touch them; they
-are recorded here so that nobody has to wonder later.
+This round did not touch them and did not cause them; they are recorded
+here so that nobody has to wonder later. The same self-test failure is
+one of the two in `tools/k15/run.sh`.
+
+**`tools/k15/run.sh` went from two failures to one, and both movements
+were this round's doing.** Three menu-text checks broke first, at
+210, 325 and 253 wrong ink points of 345, 533 and 407: the K15 image has
+no `/etc/theme.conf`, `mode=auto` therefore hung on the machine's clock,
+and dark surfaces from the old `/etc/theme` got light-resolved text.
+That is fixed above (fault 7). What was left was **one** ink point of
+one glyph out of 345, and the cause was in the checker: `tools/k15/run.sh`
+had the foreground colour typed into it as `15265524` — `#E8EEF4`, the
+`fg` that `theme_defaults` built in during round K15. With the new
+`text-primary` at `#F8FAFC` that is within the run's tolerance of 96 for
+344 of 345 points and one point outside it. The literal now comes out of
+`tools/theme/model.py`, which is the same model Osum resolves from; a
+test that hangs on a number from the day before yesterday checks the
+wrong thing from then on. With that, the three menu checks report **0
+wrong** and the file manager's title-bar check, which failed on the base
+commit for the same reason, passes as well.
 
 ---
 
