@@ -55,11 +55,13 @@
 profile kernel
 
 import ulib
+import libc.io
 import wlibc
 import utf8
 
 export {
     begin, window, window_plain, window_kind, close, closed, handle,
+    trace, set_trace,
     win_w, win_h, win_x, win_y, win_hide, win_layer,
     box_v, box_h, box_grid, box_end, size, gap_after,
     label, button, check, entry, list, table, tabs, menubar, choice,
@@ -213,6 +215,41 @@ static mut s_esc: u64 = 0 // Zustand der Fluchtfolge
 static mut s_lastclick: u64 = 0
 static mut s_lastwd: u64 = 0
 static mut s_ticks: u64 = 0
+
+// =============================== RUNDE LOOK: DIE OBERFLAECHE MELDET SICH
+//
+// Die Taskleiste meldet seit Runde DESKTOP jede Zeile, die sie malt, mit
+// x, Grundlinie, Vorder- und Hintergrundfarbe -- und deshalb kann
+// `tools/netview/run.sh` sie BILDPUNKTGENAU gegen eine zweite Rasterung
+// halten, statt sie anzusehen. Jedes andere Fenster dieses Systems
+// konnte das nicht: die Widgets werden hier gemalt, und hier wurde
+// nichts gemeldet.
+//
+// Diese Runde braucht es dreimal:
+//   * Abschnitt A -- ein Text MIT UMLAUT muss Bildpunkt fuer Bildpunkt
+//     nachgerechnet werden, und dafuer muss seine Grundlinie bekannt
+//     sein und nicht nachgerechnet.
+//   * Abschnitt C/D -- eine Zusage ueber Innenabstand und Eckenradius
+//     ist eine Zusage ueber KOORDINATEN. Wer sie im Testlauf selbst
+//     ausrechnet, prueft seine eigene Rechnung.
+//
+// ES IST AUS, SOLANGE NIEMAND ES EINSCHALTET, und eingeschaltet wird es
+// durch eine DATEI auf der Platte (`/etc/uitrace`) und nicht durch ein
+// Wort auf der Kernel-Kommandozeile: die Kommandozeile gehoert dem
+// Kernel, und ein Ring-3-Programm, das darin liest, hat eine Abhaengigkeit
+// erfunden, die es nicht braucht. Ohne die Datei ist die serielle
+// Ausgabe dieses Systems Oktett fuer Oktett dieselbe wie vorher -- das
+// ist die Bedingung dafuer, dass kein bestehender Testlaeufer davon
+// etwas merkt.
+static mut s_trace: u64 = 0
+static mut s_tx: u64 = 0
+static mut tr_a: [u8; 16] = "wlib: text win=\0"
+static mut tr_k: [u8; 8] = " kind=\0\0"
+static mut tr_x: [u8; 5] = " x=\0\0"
+static mut tr_b: [u8; 8] = " base=\0\0"
+static mut tr_f: [u8; 6] = " fg=\0\0"
+static mut tr_g: [u8; 6] = " bg=\0\0"
+static mut tr_t: [u8; 5] = " t=\0\0"
 // RUNDE THEME. Was das Umschalten kostet, gezaehlt an der Stelle, an
 // der es passiert -- nicht geschaetzt.
 static mut s_thpoll: u64 = 0 // Tick des letzten Nachsehens
@@ -299,6 +336,14 @@ fn begin(nohit: bool, noclip: bool) -> bool {
     wlibc.theme_load((&pfad[0 as usize]) as u64)
     if nohit {
         s_nohit = 1
+    }
+    // RUNDE LOOK: gibt es die Datei, meldet diese Bibliothek jede Zeile,
+    // die sie malt. Gibt es sie nicht, aendert sich kein Oktett.
+    var p_tr: [u8; 14] = "/etc/uitrace\0\0"
+    let fdt: u64 = io.open((&p_tr[0 as usize]) as u64, 0)
+    if !ulib.bad(fdt) {
+        io.close(fdt)
+        s_trace = 1
     }
     return true
 }
@@ -1142,6 +1187,7 @@ fn paint_bg(w: u64, x: u64, y: u64, bw: u64, bh: u64) {
 fn put_text(f: u64, pxs: u64, x: u64, y: u64, bw: u64, p: u64, n: u64,
     farbe: u64, aus: u64) -> u64 {
     if p == 0 || n == 0 {
+        s_tx = x
         return x
     }
     var tx: u64 = x
@@ -1153,7 +1199,52 @@ fn put_text(f: u64, pxs: u64, x: u64, y: u64, bw: u64, p: u64, n: u64,
             tx = x + sub(bw, tw)
         }
     }
+    // WO DER TEXT WIRKLICH ANFAENGT. Bei `aus=1` ist das nicht `x`,
+    // sondern die Mitte -- und genau diese Zahl braucht ein Pruefer, der
+    // die Glyphen nachrastert. Sie hier zu merken ist der Unterschied
+    // zwischen "der Laeufer rechnet die Zentrierung nach" (und prueft
+    // dann seine eigene Rechnung) und "das Programm sagt, wo es gemalt
+    // hat".
+    s_tx = tx
     return wlibc.text_at(f, pxs, tx, y, p, n, farbe)
+}
+
+fn trace() -> bool {
+    return s_trace != 0
+}
+
+fn set_trace(on: bool) {
+    if on {
+        s_trace = 1
+    } else {
+        s_trace = 0
+    }
+}
+
+// EINE GEMALTE ZEILE, mit allem, was ein Pruefer braucht: das Fenster
+// (die Nummer, die der Fensterserver in `wm: win ... id=` fuehrt), die
+// Art des Bedienelements, x und Grundlinie IM FENSTER, die beiden
+// Farben und der Text.
+fn say_painted(w: u64, kind: u64, base: u64, fg: u64, bg: u64, p: u64,
+    n: u64) {
+    if s_trace == 0 || p == 0 || n == 0 {
+        return
+    }
+    ulib.say((&tr_a[0 as usize]) as u64)
+    ulib.sayn(ng(w, N_H))
+    ulib.say((&tr_k[0 as usize]) as u64)
+    ulib.sayn(kind)
+    ulib.say((&tr_x[0 as usize]) as u64)
+    ulib.sayn(s_tx)
+    ulib.say((&tr_b[0 as usize]) as u64)
+    ulib.sayn(base)
+    ulib.say((&tr_f[0 as usize]) as u64)
+    ulib.sayn(fg)
+    ulib.say((&tr_g[0 as usize]) as u64)
+    ulib.sayn(bg)
+    ulib.say((&tr_t[0 as usize]) as u64)
+    ulib.say(p)
+    ulib.nl()
 }
 
 fn focus_ring(i: u64) {
@@ -1205,6 +1296,8 @@ fn paint_button(i: u64) {
     let grund: u64 = y + (bh + wlibc.ascent_of(wlibc.F_UI, wlibc.PX_UI)) / 2
     put_text(wlibc.F_UI, wlibc.PX_UI, x, grund, bw, g(i, D_TEXT),
         tlen(g(i, D_TEXT)), farbe, 1)
+    say_painted(g(i, D_WIN), K_BUTTON, grund, farbe, flaeche,
+        g(i, D_TEXT), tlen(g(i, D_TEXT)))
     focus_ring(i)
 }
 
@@ -1212,6 +1305,21 @@ fn paint_label(i: u64) {
     let grund: u64 = g(i, D_Y) + wlibc.ascent_of(wlibc.F_UI, wlibc.PX_UI)
     put_text(wlibc.F_UI, wlibc.PX_UI, g(i, D_X), grund, g(i, D_W),
         g(i, D_TEXT), tlen(g(i, D_TEXT)), wlibc.theme(wlibc.T_FG), 0)
+    say_painted(g(i, D_WIN), K_LABEL, grund, wlibc.theme(wlibc.T_FG),
+        bg_of(g(i, D_WIN)), g(i, D_TEXT), tlen(g(i, D_TEXT)))
+}
+
+// Die Flaeche, auf der ein Etikett liegt. `paint_bg` entscheidet das
+// schon; hier steht dieselbe Entscheidung als Frage, damit die gemeldete
+// Hintergrundfarbe die ist, die wirklich unter dem Text liegt.
+fn bg_of(w: u64) -> u64 {
+    if ng(w, N_KIND) == NK_DLG {
+        return wlibc.theme(wlibc.T_DLG)
+    }
+    if ng(w, N_KIND) == NK_MENU {
+        return wlibc.theme(wlibc.T_MENU)
+    }
+    return wlibc.theme(wlibc.T_BG)
 }
 
 fn paint_check(i: u64) {
@@ -1772,9 +1880,12 @@ fn paint_choice(i: u64) {
         wlibc.theme(wlibc.T_LINE), false)
     let q: u64 = row_at(g(i, D_TEXT), g(i, D_VAL))
     if q != 0 {
-        put_text(wlibc.F_UI, wlibc.PX_UI, x + 6,
-            y + (bh + wlibc.ascent_of(wlibc.F_UI, wlibc.PX_UI)) / 2, bw, q,
+        let cgr: u64 = y + (bh
+            + wlibc.ascent_of(wlibc.F_UI, wlibc.PX_UI)) / 2
+        put_text(wlibc.F_UI, wlibc.PX_UI, x + 6, cgr, bw, q,
             row_len(q), wlibc.theme(wlibc.T_FG), 0)
+        say_painted(g(i, D_WIN), K_CHOICE, cgr, wlibc.theme(wlibc.T_FG),
+            wlibc.theme(wlibc.T_BTN), q, row_len(q))
     }
     // Das Dreieck rechts -- sechs Zeilen, von aussen nach innen.
     var n: u64 = 0
