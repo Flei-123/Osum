@@ -773,7 +773,7 @@ looked at (`tests/theme/pixel.py`):
 | picture | scheme | mode | accent asked for | three most frequent colours |
 |---|---|---|---|---|
 | ![light](theme/light.png) | `day` | light | — | `#F1F5F9` 29 %, `#F8FAFC` 26 %, `#FFFFFF` 19 % |
-| ![dark](theme/dark.png) | `day` | dark | — | `#0F172A` 26 %, `#020617` 26 %, `#1E293B` 19 % |
+| ![dark](theme/dark.png) | `day` | dark | — | `#020617` 30 %, `#0F172A` 22 %, `#1E293B` 20 % |
 | ![green](theme/acc-green.png) | `day` | light | `#22C55E` | `#F1F5F9` 34 %, `#F8FAFC` 22 %, `#FFFFFF` 19 % |
 | ![violet](theme/acc-violet.png) | `day` | light | `#7C3AED` | `#F1F5F9` 34 %, `#F8FAFC` 22 %, `#FFFFFF` 19 % |
 | ![gold](theme/acc-gold.png) | `paper` | light | `#A16207` | `#F5F5F4` 34 %, `#FAFAF9` 22 %, `#FFFFFF` 19 % |
@@ -814,6 +814,14 @@ Six faults, all found by the run and not by reading:
 6. **`WM_DECO` composited on every call**, so a taskbar setting eleven
    colours produced eleven full-screen composites inside system calls
    and the machine stopped booting.
+7. **`mode=auto` as the default broke a round-K15 image.** Such an image
+   has no `/etc/theme.conf` but does have an `/etc/theme` with twelve
+   *dark* surface colours and no text colour. With `auto` the mode then
+   hangs on the machine's clock: by day the text resolved light-on-light
+   and was laid over the old file's dark surfaces, and
+   `tools/k15/run.sh` reported a menu whose text was 60 % gone. Without
+   a settings file the scheme's own `mode` now applies. `auto` is an
+   explicit choice and may not be a default.
 
 And one that was already there: `kernel/user/leiste.fi` did not compile
 on the commit this branch starts from — a continuation line beginning
@@ -821,7 +829,24 @@ with `*%`. Fixed in the first commit of this branch, separately.
 
 ---
 
-## 11. What this round did not do
+## 11. The rest of the suite
+
+| run | before this round | after |
+|---|---|---|
+| `tools/wm/run.sh` (window server, mouse, TrueType) | 99 passed, **4 failed** | 99 passed, **4 failed** — the same four |
+| `tools/k15/run.sh` (widgets, file manager, launcher) | see below | see below |
+| `tests/theme/run.sh` (this round) | — | **91 passed, 0 failed** |
+
+The four `tools/wm/run.sh` failures are **older than this round**: the
+same run against the commit this branch starts from (042c1fa, in a
+separate worktree) produces the identical four — the server's self test
+answering 25 of 30, and three title-text checks finding no ink at all.
+They are not this round's to fix and this round did not touch them; they
+are recorded here so that nobody has to wonder later.
+
+---
+
+## 12. What this round did not do
 
 * **The screen is not switched at one instant.** Per-window atomic, up
   to 250 ms of skew across the screen. Section 6 says what the fix would
@@ -850,7 +875,7 @@ with `*%`. Fixed in the first commit of this branch, separately.
 
 ---
 
-## 12. Files
+## 13. Files
 
 | file | what |
 |---|---|
