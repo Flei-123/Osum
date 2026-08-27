@@ -25,7 +25,14 @@ CC=${2:-vendor/firn/bin/firnc}
 mkdir -p "$OUT"
 
 # Die Programme, die dieser Lauf braucht -- und nicht mehr. Ein
-# OFS-Abbild fasst 4096 Bloecke zu 512 Oktetten, also zwei Megaoktett
+# RUNDE MERGE: 8192 Bloecke statt 4096. Die zehn Programme dieses
+# Abbilds sind auf 2 236 160 Oktette gewachsen -- jedes bindet ulib,
+# tools, wlib und die libc, und die sind mit jeder Runde groesser
+# geworden -- und passten nicht mehr in die zwei Megaoktett, die vor
+# Runde OFS3 die Obergrenze einer OFS-Platte waren. `mkfs.py` sagte
+# "the disk is full", und das war die ganze Ursache dafuer, dass
+# tests/theme/run.sh als Abschnitt umfiel.
+# OFS-Abbild fasst 8192 Bloecke zu 512 Oktetten, also vier Megaoktett
 # (`tools/osum/mkfs.py`), und /bin/themetest bindet seit dem Zusatz
 # `gui` die ganze Widget-Bibliothek ein. `widgetdemo`, `edit` und `suchen`
 # haben in dieser Runde nichts zu tun und passten sonst nicht mit drauf.
@@ -86,7 +93,7 @@ cat > "$OUT/time.conf" <<'EOF'
 offset=120
 EOF
 
-ARGS=(build "$OUT/disk.img" 4096 /lib/
+ARGS=(build "$OUT/disk.img" 8192 /lib/
       "/lib/mono.ttf=assets/osum-mono.ttf" "/lib/sans.ttf=assets/osum-sans.ttf"
       /bin/)
 for p in $PROGS; do ARGS+=("/bin/$p=$OUT/$p.elf"); done
