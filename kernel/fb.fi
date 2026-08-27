@@ -75,7 +75,16 @@ export {
     SRC_NONE, SRC_MB, SRC_VBE, FB_OFF, FB_MAX, FONT_OFF, USER_BASE,
     M_GFX, M_NODBL, M_UC, M_BIG, M_NOCUR, M_HOLD, M_PATTERN, M_USER,
     WIDTH_STD, HEIGHT_STD,
-    WIDTH_BIG, HEIGHT_BIG
+    WIDTH_BIG, HEIGHT_BIG,
+    // RUNDE DISPLAY -- der Moduswechsel und das Umrechnen beim Uebertragen.
+    panel_w, panel_h, panel_pitch, slot0,
+    remap, unmap, unmap_slot, longest_run, map_span, free_slots,
+    win_slots, huge_size,
+    set_backbuf, back_bytes,
+    set_lut, lut, set_saturation, saturation, set_rotation, rotation,
+    set_logical, logical_ok, set_scale, scale, transformed, present,
+    presents, get_panel, SCALE_FULL, SCALE_ASPECT, SCALE_NONE, LUT_BYTES,
+    selftest2, selftest2_max
 }
 
 // ------------------------------------------------- der Datenbereich
@@ -127,6 +136,53 @@ const S_DIRTY_LO: u64 = 0x0E0 // erste geaenderte Bildzeile
 const S_DIRTY_HI: u64 = 0x0E8 // letzte + 1
 const S_UNCACHED: u64 = 0x0F0 // 1 = Fenster ohne Zwischenspeicher
 const S_MODE: u64 = 0x0F8 // die Worte der Kommandozeile, die hierher gehoeren
+
+// RUNDE DISPLAY. Die Skalare dieser Runde liegen NICHT bei 0x100 --
+// dort beginnt der Zeichensatz (FONT_OFF = FB_OFF + 0x100, 1520
+// Oktette, also bis 0x6F0). Sie liegen dahinter, ab 0x700, und bleiben
+// damit in derselben Seite (FB_MAX = 4096). `tools/kernel/karte.py`
+// rechnet das nach; die Zahl 0x700 ist deshalb keine Schaetzung,
+// sondern die naechste freie Adresse hinter dem Zeichensatz.
+//
+// DIE UNTERSCHEIDUNG, UM DIE ES IN DIESER RUNDE GEHT: bis hierher waren
+// "Breite des Bildschirms" und "Breite dessen, worauf gezeichnet wird"
+// dasselbe. Sobald es eine Drehung oder eine Skalierung gibt, sind es
+// zwei Dinge:
+//
+//   S_PWIDTH/S_PHEIGHT/S_PPITCH  DIE TAFEL. Was die Karte wirklich
+//                                ausgibt, was `S_ADDR` gross ist, was
+//                                /dev/fb sieht.
+//   S_WIDTH/S_HEIGHT/S_PITCH     DAS BILD. Worauf `pixel`, `fill`,
+//                                `putc` und der Fensterserver zeichnen
+//                                -- also der Zweitpuffer.
+//
+// Ohne Drehung, ohne Skalierung und ohne Nachschlagetabelle sind beide
+// gleich, und `flush` bleibt exakt der `rep movsq` von Runde K7. Nur
+// dann, wenn sie auseinanderfallen, laeuft `present` -- und das kostet,
+// was es kostet; die Zahl steht in docs/DISPLAY.md.
+const S_PWIDTH: u64 = 0x700
+const S_PHEIGHT: u64 = 0x708
+const S_PPITCH: u64 = 0x710
+const S_LUT: u64 = 0x718 // Adresse der 3x256-Tabelle, 0 = keine
+const S_ROT: u64 = 0x720 // 0, 90, 180, 270
+const S_SCALE: u64 = 0x728
+const S_PRESENTS: u64 = 0x730 // Uebertragungen ueber den langen Weg
+const S_SLOT0: u64 = 0x738 // erster benutzter Fensterplatz + 1, 0 = keiner
+const S_BACKBYTES: u64 = 0x740
+const S_SAT: u64 = 0x748 // Farbsaettigung in Hundertsteln, 100 = unberuehrt
+const S_LOGW: u64 = 0x750 // gewuenschte Bildbreite, 0 = so gross wie die Tafel
+const S_LOGH: u64 = 0x758
+
+// Die drei Arten, ein Bild auf eine Tafel anderer Groesse zu bringen.
+// Dieselben drei, die ein Monitor in seiner eigenen Elektronik hat und
+// die ein Treiberbedienfeld "Vollbild / Seitenverhaeltnis / keine
+// Skalierung" nennt.
+const SCALE_FULL: u64 = 0 // ziehen, bis die Tafel voll ist
+const SCALE_ASPECT: u64 = 1 // ziehen, aber das Seitenverhaeltnis halten
+const SCALE_NONE: u64 = 2 // gar nicht ziehen, mittig setzen
+
+// Drei Kanaele zu 256 Eintraegen, ein Oktett je Eintrag.
+const LUT_BYTES: u64 = 768
 
 // Die Worte der Kommandozeile dieser Runde. Sie stehen hier und nicht in
 // `kmain.mode_of` aus demselben Grund, aus dem `hw.fi` seine eigenen hat:
@@ -521,6 +577,17 @@ fn init(state: u64, mbi: u64, want_w: u64, want_h: u64,
     kstate.set(state, FB_OFF + S_WIDTH, w)
     kstate.set(state, FB_OFF + S_HEIGHT, h)
     kstate.set(state, FB_OFF + S_PITCH, pt)
+    // RUNDE DISPLAY: Tafel und Bild sind beim Start dasselbe. Erst ein
+    // Moduswechsel mit Drehung oder Skalierung trennt sie.
+    kstate.set(state, FB_OFF + S_PWIDTH, w)
+    kstate.set(state, FB_OFF + S_PHEIGHT, h)
+    kstate.set(state, FB_OFF + S_PPITCH, pt)
+    kstate.set(state, FB_OFF + S_SLOT0, (fenster - WIN_VIRT) / HUGE_SIZE + 1)
+    kstate.set(state, FB_OFF + S_LUT, 0)
+    kstate.set(state, FB_OFF + S_ROT, 0)
+    kstate.set(state, FB_OFF + S_SCALE, SCALE_FULL)
+    kstate.set(state, FB_OFF + S_SAT, 100)
+    kstate.set(state, FB_OFF + S_PRESENTS, 0)
     kstate.set(state, FB_OFF + S_BPP, bp)
     kstate.set(state, FB_OFF + S_BYTES, n)
     kstate.set(state, FB_OFF + S_SOURCE, quelle)
@@ -537,6 +604,7 @@ fn init(state: u64, mbi: u64, want_w: u64, want_h: u64,
     // Schreibzugriff daneben.
     if back != 0 && back_bytes >= n {
         kstate.set(state, FB_OFF + S_BACK, back)
+        kstate.set(state, FB_OFF + S_BACKBYTES, back_bytes)
         kstate.set(state, FB_OFF + S_DRAW, back)
     } else {
         kstate.set(state, FB_OFF + S_BACK, 0)
@@ -676,7 +744,14 @@ fn geometry_ok(state: u64) -> bool {
     if pitch(state) < w * (bpp(state) / 8) {
         return false
     }
-    if bytes(state) != pitch(state) * h {
+    // RUNDE DISPLAY: `bytes` ist die Groesse DER TAFEL und nicht die des
+    // Bildes. Ohne Drehung und ohne Skalierung sind beide gleich, und
+    // diese Zeile prueft dasselbe wie vor dieser Runde; sobald sie
+    // auseinanderfallen, waere die alte Zeile schlicht falsch gewesen.
+    if bytes(state) != panel_pitch(state) * panel_h(state) {
+        return false
+    }
+    if panel_pitch(state) < panel_w(state) * (bpp(state) / 8) {
         return false
     }
     if cols(state) != w / font.GLYPH_W {
@@ -960,6 +1035,16 @@ fn dirty(state: u64, y0: u64, y1: u64) {
 fn flush(state: u64) {
     let b: u64 = kstate.get(state, FB_OFF + S_BACK)
     if b == 0 {
+        return
+    }
+    // RUNDE DISPLAY: DIE WEICHE, UND WARUM SIE HIER STEHT UND NICHT IM
+    // AUFRUFER. `flush` wird aus dem Fensterserver, aus der Konsole und
+    // aus /dev/fb gerufen; keine dieser Stellen weiss, ob der Bildschirm
+    // gerade gedreht ist. Die Bedingung ist EIN Vergleich auf vier
+    // Skalare und kostet den unveraenderten Fall nichts -- gemessen in
+    // docs/DISPLAY.md, `fbbench` ist mit und ohne diese Zeile gleich.
+    if transformed(state) {
+        present(state)
         return
     }
     var lo: u64 = kstate.get(state, FB_OFF + S_DIRTY_LO)
@@ -1392,6 +1477,22 @@ fn want(state: u64, bit: u64) -> bool {
 // braucht das: sie will BEIDE Wege auf DERSELBEN Maschine und mit
 // DEMSELBEN Zeitzaehler vergleichen, und zwei QEMU-Laeufe waeren zwei
 // Maschinen.
+// RUNDE DISPLAY: der Zweitpuffer samt seiner GROESSE. `set_back` oben
+// setzt nur die Adresse -- das reichte, solange der Puffer nie wechselte
+// und immer zur einen festen Aufloesung passte. Ein Moduswechsel gibt
+// ihm eine andere Adresse UND eine andere Groesse, und ohne die zweite
+// Zahl kann `logical_ok` nicht mehr sagen, ob eine Drehung noch
+// hineinpasst.
+fn set_backbuf(state: u64, b: u64, n: u64) {
+    kstate.set(state, FB_OFF + S_BACK, b)
+    kstate.set(state, FB_OFF + S_BACKBYTES, n)
+    relayout(state)
+}
+
+fn back_bytes(state: u64) -> u64 {
+    return kstate.get(state, FB_OFF + S_BACKBYTES)
+}
+
 fn set_back(state: u64, b: u64) {
     kstate.set(state, FB_OFF + S_BACK, b)
     if b != 0 {
@@ -1517,4 +1618,886 @@ fn selftest(state: u64) -> u64 {
 // Wie viele Zusagen `selftest` hoechstens gibt.
 fn selftest_max() -> u64 {
     return 13
+}
+
+// ==================================================== RUNDE DISPLAY
+//
+// DER TEIL DES MODUSWECHSELS, DER PRIVILEGIEN BRAUCHT.
+//
+// Die Modusliste, die Bestaetigungsfrage und die Oberflaeche stehen
+// NICHT hier -- die Liste in `kernel/vmode.fi`, die Oberflaeche in Ring
+// 3. Hier steht nur, was ohne Seitentabelle nicht geht: einen anderen
+// Rahmenpuffer in die acht 2-MiB-Fensterplaetze legen, die alten wieder
+// freigeben, und das Bild beim Uebertragen drehen, ziehen und durch eine
+// Nachschlagetabelle schicken.
+//
+// WARUM `remap` BEI EINEM FEHLER NICHTS ZURUECKNIMMT. Es koennte es
+// nicht ehrlich: waere das Abbilden fehlgeschlagen, weil kein Platz frei
+// war, koennte auch das Zurueckabbilden fehlschlagen, und dann stuende
+// hier eine Zusage, die nicht haelt. Stattdessen ist die Reihenfolge so
+// gewaehlt, dass der Rueckweg IMMER gehen MUSS: `unmap` gibt n Plaetze
+// frei, `map_run` nimmt sich hoechstens dieselben n wieder -- der
+// Aufrufer (`vmode.set_mode`) ruft `remap` mit den alten Zahlen noch
+// einmal, und die passen in den Platz, aus dem sie gerade kamen.
+
+fn win_slots() -> u64 {
+    return WIN_SLOTS
+}
+
+fn huge_size() -> u64 {
+    return HUGE_SIZE
+}
+
+// Der erste Fensterplatz, in dem der Rahmenpuffer liegt (0 = keiner).
+// Intern steht dort Platz + 1, damit Platz 0 von "gar keiner" zu
+// unterscheiden ist.
+fn slot0(state: u64) -> u64 {
+    let v: u64 = kstate.get(state, FB_OFF + S_SLOT0)
+    if v == 0 {
+        return WIN_SLOTS
+    }
+    return v - 1
+}
+
+fn free_slots(state: u64) -> u64 {
+    var n: u64 = 0
+    var i: u64 = 0
+    while i < WIN_SLOTS {
+        if slot_used(state, i) == 0 {
+            n = n + 1
+        }
+        i = i + 1
+    }
+    return n
+}
+
+// Wie viele 2-MiB-Kacheln ein Puffer von `n` Oktetten ab `p` beruehrt --
+// den Versatz im ersten Block eingerechnet. Dieselbe Rechnung wie in
+// `init`, damit ein Aufrufer VORHER wissen kann, ob ein Modus ueberhaupt
+// abbildbar ist, ohne ihn zu setzen.
+fn map_span(p: u64, n: u64) -> u64 {
+    let blk: u64 = p & (~(HUGE_SIZE - 1))
+    let inner: u64 = p - blk
+    return (inner + n + HUGE_SIZE - 1) / HUGE_SIZE
+}
+
+// Gibt die Plaetze zurueck, in denen der Rahmenpuffer gerade liegt.
+// Danach zeigt keine Seitentafelzeile mehr auf die Karte, und `S_ADDR`
+// ist ungueltig -- wer hier hindurchgeht, MUSS danach `remap` rufen.
+fn unmap(state: u64) {
+    let s0: u64 = kstate.get(state, FB_OFF + S_SLOT0)
+    if s0 == 0 {
+        return
+    }
+    let first: u64 = s0 - 1
+    let n: u64 = kstate.get(state, FB_OFF + S_HUGES)
+    let pd: u64 = kernel_pd(state)
+    if pd == 0 {
+        return
+    }
+    var j: u64 = 0
+    while j < n {
+        if first + j < WIN_SLOTS {
+            __mmio_write64((pd + (WIN_FIRST + first + j) * 8) as *mut u64, 0)
+            kstate.set(state, WIN_LIST + (first + j) * 8, 0)
+        }
+        j = j + 1
+    }
+    let c: u64 = asm("mov rax, cr3", out("rax"))
+    asm("mov cr3, rax", in("rax") c)
+    kstate.set(state, FB_OFF + S_SLOT0, 0)
+    kstate.set(state, FB_OFF + S_ADDR, 0)
+}
+
+// Einen anderen (oder denselben, anders grossen) Rahmenpuffer in die
+// Fensterplaetze legen und alle Zahlen des Moduls darauf umstellen.
+// Der Zweitpuffer, die Farben, der Spiegel und die Drehung bleiben, wie
+// sie waren -- ein Moduswechsel ist kein Neustart der Konsole.
+fn remap(state: u64, p: u64, w: u64, h: u64, pt: u64, uncached: bool) -> bool {
+    if w == 0 || h == 0 || p == 0 {
+        return false
+    }
+    if pt < w * 4 {
+        return false
+    }
+    let n: u64 = pt * h
+    let blk: u64 = p & (~(HUGE_SIZE - 1))
+    let inner: u64 = p - blk
+    let kacheln: u64 = (inner + n + HUGE_SIZE - 1) / HUGE_SIZE
+    if kacheln > WIN_SLOTS {
+        return false
+    }
+    unmap(state)
+    let fenster: u64 = map_run(state, blk, kacheln, uncached)
+    if fenster == 0 {
+        return false
+    }
+    kstate.set(state, FB_OFF + S_PHYS, p)
+    kstate.set(state, FB_OFF + S_ADDR, fenster + inner)
+    kstate.set(state, FB_OFF + S_BLOCK, blk)
+    kstate.set(state, FB_OFF + S_OFFSET, inner)
+    kstate.set(state, FB_OFF + S_HUGES, kacheln)
+    kstate.set(state, FB_OFF + S_SLOT0, (fenster - WIN_VIRT) / HUGE_SIZE + 1)
+    kstate.set(state, FB_OFF + S_PWIDTH, w)
+    kstate.set(state, FB_OFF + S_PHEIGHT, h)
+    kstate.set(state, FB_OFF + S_PPITCH, pt)
+    kstate.set(state, FB_OFF + S_BYTES, n)
+    kstate.set(state, FB_OFF + S_UNCACHED, bool_num(uncached))
+    relayout(state)
+    return true
+}
+
+// EINEN EINZELNEN Fensterplatz wieder freigeben -- den, in dem eine
+// Adresse liegt. `apic.map_device` nimmt sich einen Platz und gibt ihn
+// nie zurueck; fuer die 128 Oktette eines EDID-Blocks sind 2 MiB
+// Fensterflaeche AUF DAUER zu teuer, denn dieselben acht Plaetze
+// begrenzen die groesste Aufloesung, die dieser Kernel abbilden kann.
+// Gemessen: ohne diese Funktion blieb 2048x1152 unerreichbar, obwohl
+// Karte und Bildspeicher es hergaben -- der laengste zusammenhaengende
+// freie Bereich war durch den EDID-Platz in der Mitte auf vier Kacheln
+// zerschnitten. Das ist derselbe Zugriff auf dieselbe Liste, den `unmap`
+// oben macht; der Absatz ganz oben ueber die geteilte Belegungsliste
+// gilt hier genauso.
+fn unmap_slot(state: u64, virt: u64) {
+    if virt < WIN_VIRT {
+        return
+    }
+    let i: u64 = (virt - WIN_VIRT) / HUGE_SIZE
+    if i >= WIN_SLOTS {
+        return
+    }
+    let pd: u64 = kernel_pd(state)
+    if pd == 0 {
+        return
+    }
+    __mmio_write64((pd + (WIN_FIRST + i) * 8) as *mut u64, 0)
+    kstate.set(state, WIN_LIST + i * 8, 0)
+    let c: u64 = asm("mov rax, cr3", out("rax"))
+    asm("mov cr3, rax", in("rax") c)
+}
+
+// Der laengste zusammenhaengende Bereich von Plaetzen, den ein
+// Moduswechsel bekommen KOENNTE: frei oder dem Rahmenpuffer selbst
+// gehoerend, denn den gibt er beim Wechsel ja her. Die Zahl der freien
+// Plaetze allein waere die falsche Auskunft -- acht freie Plaetze, von
+// denen einer in der Mitte fehlt, tragen keinen Puffer von 10 MiB.
+fn longest_run(state: u64) -> u64 {
+    let s0: u64 = kstate.get(state, FB_OFF + S_SLOT0)
+    var first: u64 = WIN_SLOTS
+    var n_fb: u64 = 0
+    if s0 != 0 {
+        first = s0 - 1
+        n_fb = kstate.get(state, FB_OFF + S_HUGES)
+    }
+    var best: u64 = 0
+    var lauf: u64 = 0
+    var i: u64 = 0
+    while i < WIN_SLOTS {
+        var frei: bool = slot_used(state, i) == 0
+        if i >= first && i < first + n_fb {
+            frei = true
+        }
+        if frei {
+            lauf = lauf + 1
+            if lauf > best {
+                best = lauf
+            }
+        } else {
+            lauf = 0
+        }
+        i = i + 1
+    }
+    return best
+}
+
+// ------------------------------------------- Tafel, Bild und Drehung
+
+fn panel_w(state: u64) -> u64 {
+    return kstate.get(state, FB_OFF + S_PWIDTH)
+}
+
+fn panel_h(state: u64) -> u64 {
+    return kstate.get(state, FB_OFF + S_PHEIGHT)
+}
+
+fn panel_pitch(state: u64) -> u64 {
+    return kstate.get(state, FB_OFF + S_PPITCH)
+}
+
+fn rotation(state: u64) -> u64 {
+    return kstate.get(state, FB_OFF + S_ROT)
+}
+
+fn scale(state: u64) -> u64 {
+    return kstate.get(state, FB_OFF + S_SCALE)
+}
+
+fn lut(state: u64) -> u64 {
+    return kstate.get(state, FB_OFF + S_LUT)
+}
+
+fn saturation(state: u64) -> u64 {
+    return kstate.get(state, FB_OFF + S_SAT)
+}
+
+fn presents(state: u64) -> u64 {
+    return kstate.get(state, FB_OFF + S_PRESENTS)
+}
+
+// Steht zwischen dem Zweitpuffer und der Tafel irgendeine Rechnung?
+// Nur dann laeuft `present`; sonst bleibt es beim `rep movsq` von K7.
+fn transformed(state: u64) -> bool {
+    if kstate.get(state, FB_OFF + S_ROT) != 0 {
+        return true
+    }
+    if kstate.get(state, FB_OFF + S_LUT) != 0 {
+        return true
+    }
+    if kstate.get(state, FB_OFF + S_SAT) != 100 {
+        return true
+    }
+    if kstate.get(state, FB_OFF + S_WIDTH)
+        != kstate.get(state, FB_OFF + S_PWIDTH) {
+        return true
+    }
+    return kstate.get(state, FB_OFF + S_HEIGHT)
+        != kstate.get(state, FB_OFF + S_PHEIGHT)
+}
+
+// Rechnet aus Tafelmassen, Drehung und gewuenschter Bildgroesse die
+// Masse des Zweitpuffers aus und stellt Zeilenlaenge, Zeichenraster und
+// Zeichenziel darauf ein.
+fn relayout(state: u64) {
+    let pw: u64 = kstate.get(state, FB_OFF + S_PWIDTH)
+    let ph: u64 = kstate.get(state, FB_OFF + S_PHEIGHT)
+    let rot: u64 = kstate.get(state, FB_OFF + S_ROT)
+    var lw: u64 = kstate.get(state, FB_OFF + S_LOGW)
+    var lh: u64 = kstate.get(state, FB_OFF + S_LOGH)
+    if lw == 0 || lh == 0 {
+        lw = pw
+        lh = ph
+        if rot == 90 || rot == 270 {
+            lw = ph
+            lh = pw
+        }
+    }
+    kstate.set(state, FB_OFF + S_WIDTH, lw)
+    kstate.set(state, FB_OFF + S_HEIGHT, lh)
+    let back: u64 = kstate.get(state, FB_OFF + S_BACK)
+    if transformed(state) {
+        // Gedreht oder gezogen wird IMMER aus dem Zweitpuffer heraus.
+        // Ohne ihn gaebe es nichts, woraus man umrechnen koennte -- man
+        // laege mitten im Bild der Karte und wuerde die Quelle
+        // ueberschreiben, aus der man gerade liest.
+        kstate.set(state, FB_OFF + S_PITCH, lw * 4)
+        kstate.set(state, FB_OFF + S_DRAW, back)
+    } else {
+        kstate.set(state, FB_OFF + S_PITCH,
+            kstate.get(state, FB_OFF + S_PPITCH))
+        if back != 0 {
+            kstate.set(state, FB_OFF + S_DRAW, back)
+        } else {
+            kstate.set(state, FB_OFF + S_DRAW,
+                kstate.get(state, FB_OFF + S_ADDR))
+        }
+    }
+    kstate.set(state, FB_OFF + S_COLS, lw / font.GLYPH_W)
+    kstate.set(state, FB_OFF + S_ROWS, lh / font.GLYPH_H)
+    if kstate.get(state, FB_OFF + S_CX) >= lw / font.GLYPH_W {
+        kstate.set(state, FB_OFF + S_CX, 0)
+    }
+    if kstate.get(state, FB_OFF + S_CY) >= lh / font.GLYPH_H {
+        kstate.set(state, FB_OFF + S_CY, 0)
+    }
+    dirty_all(state)
+}
+
+// Passt das Bild, das nach Drehung und Wunschgroesse herauskaeme, noch in
+// den Zweitpuffer? Ein Zweitpuffer, der zu klein ist, waere ein
+// Schreibzugriff daneben -- also wird VORHER gefragt und nicht hinterher
+// gemerkt.
+fn logical_ok(state: u64, lw: u64, lh: u64) -> bool {
+    let back: u64 = kstate.get(state, FB_OFF + S_BACK)
+    if back == 0 {
+        return false
+    }
+    if lw == 0 || lh == 0 {
+        return false
+    }
+    if lw > 16384 || lh > 16384 {
+        return false
+    }
+    return lw * 4 * lh <= kstate.get(state, FB_OFF + S_BACKBYTES)
+}
+
+fn masse_bei_drehung(state: u64, rot: u64) -> u64 {
+    var lw: u64 = kstate.get(state, FB_OFF + S_LOGW)
+    var lh: u64 = kstate.get(state, FB_OFF + S_LOGH)
+    if lw == 0 || lh == 0 {
+        lw = kstate.get(state, FB_OFF + S_PWIDTH)
+        lh = kstate.get(state, FB_OFF + S_PHEIGHT)
+        if rot == 90 || rot == 270 {
+            lw = kstate.get(state, FB_OFF + S_PHEIGHT)
+            lh = kstate.get(state, FB_OFF + S_PWIDTH)
+        }
+    }
+    return (lw << 32) | lh
+}
+
+fn set_rotation(state: u64, rot: u64) -> bool {
+    if rot != 0 && rot != 90 && rot != 180 && rot != 270 {
+        return false
+    }
+    if rot != 0 {
+        let m: u64 = masse_bei_drehung(state, rot)
+        if !logical_ok(state, m >> 32, m & 0xFFFFFFFF) {
+            return false
+        }
+    }
+    kstate.set(state, FB_OFF + S_ROT, rot)
+    relayout(state)
+    return true
+}
+
+// Das Bild ausdruecklich anders gross machen als die Tafel. 0/0 heisst
+// "so gross wie die Tafel" und ist der Normalfall.
+fn set_logical(state: u64, lw: u64, lh: u64) -> bool {
+    if lw == 0 && lh == 0 {
+        kstate.set(state, FB_OFF + S_LOGW, 0)
+        kstate.set(state, FB_OFF + S_LOGH, 0)
+        relayout(state)
+        return true
+    }
+    if !logical_ok(state, lw, lh) {
+        return false
+    }
+    kstate.set(state, FB_OFF + S_LOGW, lw)
+    kstate.set(state, FB_OFF + S_LOGH, lh)
+    relayout(state)
+    return true
+}
+
+fn set_scale(state: u64, s: u64) -> bool {
+    if s > SCALE_NONE {
+        return false
+    }
+    kstate.set(state, FB_OFF + S_SCALE, s)
+    dirty_all(state)
+    return true
+}
+
+fn set_lut(state: u64, p: u64) {
+    kstate.set(state, FB_OFF + S_LUT, p)
+    relayout(state)
+}
+
+fn set_saturation(state: u64, s: u64) -> bool {
+    if s > 200 {
+        return false
+    }
+    if s != 100 && kstate.get(state, FB_OFF + S_BACK) == 0 {
+        return false
+    }
+    kstate.set(state, FB_OFF + S_SAT, s)
+    relayout(state)
+    return true
+}
+
+// ------------------------------------------------- der lange Weg
+
+// Eine Bildzeile DER TAFEL fuellen -- nicht des Bildes. `hline` oben
+// rechnet in Bildkoordinaten und schreibt in den Zweitpuffer; hier geht
+// es um die Raender, die beim Zentrieren neben dem Bild uebrig bleiben.
+fn panel_hline(state: u64, x: u64, y: u64, n: u64, color: u64) {
+    if n == 0 {
+        return
+    }
+    let addr: u64 = kstate.get(state, FB_OFF + S_ADDR)
+    var p: u64 = addr +% y *% kstate.get(state, FB_OFF + S_PPITCH) +% x *% 4
+    var len: u64 = n
+    if (p & 7) != 0 {
+        __mmio_write32(p as *mut u32, color as u32)
+        p = p +% 4
+        len = len - 1
+    }
+    let paare: u64 = len / 2
+    fill_words(p, twice(color), paare)
+    p = p +% paare *% 8
+    len = len - paare * 2
+    while len > 0 {
+        __mmio_write32(p as *mut u32, color as u32)
+        p = p +% 4
+        len = len - 1
+    }
+}
+
+// Eine Farbe durch die Nachschlagetabelle. Drei Zugriffe auf drei
+// getrennte Kanaele -- genau das, was eine Grafikkarte in ihrer
+// Ausgabestufe hat und was Helligkeit, Kontrast und Gamma vollstaendig
+// abdeckt.
+fn lut_color(state: u64, tab: u64, c: u64) -> u64 {
+    let rs: u64 = kstate.get(state, FB_OFF + S_RSHIFT)
+    let gs: u64 = kstate.get(state, FB_OFF + S_GSHIFT)
+    let bs: u64 = kstate.get(state, FB_OFF + S_BSHIFT)
+    let r: u64 = kstate.get8(tab + ((c >> rs) & 0xFF))
+    let g: u64 = kstate.get8(tab + 256 + ((c >> gs) & 0xFF))
+    let b: u64 = kstate.get8(tab + 512 + ((c >> bs) & 0xFF))
+    return (r << rs) | (g << gs) | (b << bs)
+}
+
+// DIE FARBSAETTIGUNG IST KEINE NACHSCHLAGETABELLE, und das ist der
+// Punkt, an dem die Rechnung teurer wird. Helligkeit, Kontrast und Gamma
+// wirken auf jeden Kanal FUER SICH -- also lassen sie sich einmal in 768
+// Oktette schreiben und danach kostenlos nachschlagen. Saettigung mischt
+// die Kanaele: sie braucht das Grau des Bildpunktes, und das haengt von
+// allen dreien ab. Also steht hier eine Rechnung je Bildpunkt und keine
+// Tabelle, und sie kostet, was docs/DISPLAY.md an ihr gemessen hat.
+//
+// Die drei Gewichte 77/150/29 sind Rec.601 mal 256 (0,299/0,587/0,114);
+// sie summieren sich auf 256, damit die Verschiebung um 8 exakt ist.
+fn sat_channel(v: u64, grau: u64, s: u64) -> u64 {
+    if v >= grau {
+        let d: u64 = (v - grau) * s / 100
+        if grau + d > 255 {
+            return 255
+        }
+        return grau + d
+    }
+    let d: u64 = (grau - v) * s / 100
+    if d >= grau {
+        return 0
+    }
+    return grau - d
+}
+
+fn sat_color(state: u64, c: u64, s: u64) -> u64 {
+    let rs: u64 = kstate.get(state, FB_OFF + S_RSHIFT)
+    let gs: u64 = kstate.get(state, FB_OFF + S_GSHIFT)
+    let bs: u64 = kstate.get(state, FB_OFF + S_BSHIFT)
+    let r: u64 = (c >> rs) & 0xFF
+    let g: u64 = (c >> gs) & 0xFF
+    let b: u64 = (c >> bs) & 0xFF
+    let grau: u64 = (77 * r + 150 * g + 29 * b) >> 8
+    return (sat_channel(r, grau, s) << rs) | (sat_channel(g, grau, s) << gs)
+        | (sat_channel(b, grau, s) << bs)
+}
+
+// DER LANGE WEG: Zweitpuffer -> Tafel, mit Drehung, Skalierung und
+// Nachschlagetabelle.
+//
+// Was hier NICHT steht, ist eine Teilflaechenuebertragung. `flush` traegt
+// im ungedrehten Fall nur die geaenderten Bildzeilen ueber; sobald
+// gedreht wird, ist eine geaenderte Bildzeile eine SPALTE der Tafel, und
+// eine Spalte laesst sich nicht als Bereich beschreiben, den die
+// vorhandene Schmutzrechnung kennt. Also wird die ganze Tafel neu
+// geschrieben. Der Preis dafuer steht als Zahl in docs/DISPLAY.md und
+// wird nicht schoengeredet: eine Drehung kostet in dieser Fassung jedes
+// Mal ein volles Bild.
+//
+// Die inneren Schleifen kommen OHNE Division je Bildpunkt aus. Der
+// Schritt durch die Quelle steht als Festkommazahl mit 16 Nachkommabits
+// fest; je Bildpunkt bleiben eine Verschiebung, eine Multiplikation und
+// eine Addition. Eine Division je Bildpunkt waere bei 786432
+// Bildpunkten der ganze Messwert.
+fn present(state: u64) {
+    let b: u64 = kstate.get(state, FB_OFF + S_BACK)
+    if b == 0 {
+        return
+    }
+    let addr: u64 = kstate.get(state, FB_OFF + S_ADDR)
+    if addr == 0 {
+        return
+    }
+    let pw: u64 = kstate.get(state, FB_OFF + S_PWIDTH)
+    let ph: u64 = kstate.get(state, FB_OFF + S_PHEIGHT)
+    let ppt: u64 = kstate.get(state, FB_OFF + S_PPITCH)
+    let lw: u64 = kstate.get(state, FB_OFF + S_WIDTH)
+    let lh: u64 = kstate.get(state, FB_OFF + S_HEIGHT)
+    let lpt: u64 = kstate.get(state, FB_OFF + S_PITCH)
+    let rot: u64 = kstate.get(state, FB_OFF + S_ROT)
+    let tab: u64 = kstate.get(state, FB_OFF + S_LUT)
+    let sat: u64 = kstate.get(state, FB_OFF + S_SAT)
+    if pw == 0 || ph == 0 || lw == 0 || lh == 0 {
+        return
+    }
+
+    // 1. Das gedrehte Bild und seine Masse.
+    var rw: u64 = lw
+    var rh: u64 = lh
+    if rot == 90 || rot == 270 {
+        rw = lh
+        rh = lw
+    }
+
+    // 2. Wohin es auf die Tafel kommt.
+    let art: u64 = kstate.get(state, FB_OFF + S_SCALE)
+    var dw: u64 = pw
+    var dh: u64 = ph
+    if art == SCALE_NONE {
+        dw = min2(rw, pw)
+        dh = min2(rh, ph)
+    } else if art == SCALE_ASPECT {
+        if rw * ph <= pw * rh {
+            dh = ph
+            dw = rw * ph / rh
+        } else {
+            dw = pw
+            dh = rh * pw / rw
+        }
+        if dw == 0 {
+            dw = 1
+        }
+        if dh == 0 {
+            dh = 1
+        }
+        if dw > pw {
+            dw = pw
+        }
+        if dh > ph {
+            dh = ph
+        }
+    }
+    let dx0: u64 = (pw - dw) / 2
+    let dy0: u64 = (ph - dh) / 2
+
+    // 3. Der Rand. Er wird JEDES MAL geschrieben und nicht nur beim
+    //    Umschalten: wer nur einmal loescht, sieht nach dem ersten
+    //    Moduswechsel den Rest des alten Bildes am Rand stehen.
+    if dw != pw || dh != ph {
+        var yy: u64 = 0
+        while yy < ph {
+            if yy < dy0 || yy >= dy0 + dh {
+                panel_hline(state, 0, yy, pw, 0)
+            } else {
+                panel_hline(state, 0, yy, dx0, 0)
+                panel_hline(state, dx0 + dw, yy, pw - dx0 - dw, 0)
+            }
+            yy = yy + 1
+        }
+    }
+
+    // 4. Die Schritte durch die Quelle, als Festkomma mit 16
+    //    Nachkommabits.
+    let stepx: u64 = (rw << 16) / dw
+    let stepy: u64 = (rh << 16) / dh
+
+    // Die Verschiebungen und die drei Kanaelanfaenge EINMAL, nicht je
+    // Bildpunkt. Siehe die Messung im Rumpf der Schleife.
+    let rs: u64 = kstate.get(state, FB_OFF + S_RSHIFT)
+    let gs: u64 = kstate.get(state, FB_OFF + S_GSHIFT)
+    let bs: u64 = kstate.get(state, FB_OFF + S_BSHIFT)
+    let tabr: u64 = tab
+    let tabg: u64 = tab + 256
+    let tabb: u64 = tab + 512
+
+    // DER FALL, DER IM BETRIEB WIRKLICH VORKOMMT: nicht gedreht, nicht
+    // gezogen, nur durch die Tabelle. Dann ist die Quelle eine gerade
+    // Zeile, der Zeiger laeuft um vier Oktette weiter, und -- das ist
+    // die eigentliche Ersparnis -- es duerfen die SCHMUTZIGEN ZEILEN
+    // allein uebertragen werden, so wie es der schnelle Weg oben tut.
+    // Eine Konsole, die eine Zeile schreibt, kostet damit sechzehn
+    // Bildzeilen und nicht siebenhundertachtundsechzig. Die beiden
+    // Zahlen stehen nebeneinander in docs/DISPLAY.md.
+    if rot == 0 && dw == rw && dh == rh && tab != 0 && sat == 100 {
+        var lo: u64 = kstate.get(state, FB_OFF + S_DIRTY_LO)
+        var hi: u64 = kstate.get(state, FB_OFF + S_DIRTY_HI)
+        if hi > lh {
+            hi = lh
+        }
+        if hi > lo {
+            var y: u64 = lo
+            while y < hi {
+                var src: u64 = b +% y *% lpt
+                var dst: u64 = addr +% (dy0 + y) *% ppt +% dx0 *% 4
+                var x: u64 = 0
+                while x < dw {
+                    let c: u64 = __mmio_read32(src as *mut u32) as u64
+                    let v: u64 =
+                        ((__mmio_read8((tabr + ((c >> rs) & 0xFF)) as *mut u8)
+                            as u64) << rs)
+                        | ((__mmio_read8((tabg + ((c >> gs) & 0xFF))
+                            as *mut u8) as u64) << gs)
+                        | ((__mmio_read8((tabb + ((c >> bs) & 0xFF))
+                            as *mut u8) as u64) << bs)
+                    __mmio_write32(dst as *mut u32, v as u32)
+                    src = src +% 4
+                    dst = dst +% 4
+                    x = x + 1
+                }
+                y = y + 1
+            }
+        }
+        kstate.set(state, FB_OFF + S_DIRTY_LO, 0)
+        kstate.set(state, FB_OFF + S_DIRTY_HI, 0)
+        kstate.add(state, FB_OFF + S_FLUSHES, 1)
+        kstate.add(state, FB_OFF + S_PRESENTS, 1)
+        return
+    }
+
+    var py: u64 = 0
+    while py < dh {
+        let ry: u64 = (py * stepy) >> 16
+        // Anfang der Quellzeile und die Schrittweite darin. Bei 0 und
+        // 180 Grad laeuft der Bildpunkt waagerecht durch den
+        // Zweitpuffer (vier Oktette je Schritt), bei 90 und 270 Grad
+        // senkrecht (eine Zeilenlaenge je Schritt).
+        var basis: u64 = 0
+        var einheit: u64 = 4
+        var grenze: u64 = lw
+        var rueck: bool = false
+        if rot == 0 {
+            basis = b +% ry *% lpt
+        } else if rot == 180 {
+            basis = b +% (lh - 1 - ry) *% lpt
+            rueck = true
+        } else if rot == 90 {
+            basis = b +% ry *% 4
+            einheit = lpt
+            grenze = lh
+            rueck = true
+        } else {
+            basis = b +% (lw - 1 - ry) *% 4
+            einheit = lpt
+            grenze = lh
+        }
+        var dst: u64 = addr +% (dy0 + py) *% ppt +% dx0 *% 4
+        var px: u64 = 0
+        // DREI SCHLEIFEN STATT EINER MIT ZWEI ABFRAGEN DARIN, und das
+        // ist gemessen und nicht Geschmack. Die erste Fassung dieser
+        // Runde hatte EINE Schleife, die je Bildpunkt `lut_color` und
+        // `sat_color` rief; das waren sechs Funktionsaufrufe und drei
+        // Zugriffe auf die Verschiebungen JE BILDPUNKT, und ein volles
+        // Bild von 480000 Bildpunkten kostete 195938 Mikrosekunden --
+        // fuenf Bilder in der Sekunde. Dieselbe Rechnung mit allem im
+        // Schleifenrumpf und den Verschiebungen davor steht in
+        // docs/DISPLAY.md daneben. Der Umweg ueber die drei Faelle
+        // kostet drei Vergleiche JE BILDZEILE statt zweien je Bildpunkt.
+        if tab == 0 && sat == 100 {
+            while px < dw {
+                var idx: u64 = (px * stepx) >> 16
+                if idx >= grenze {
+                    idx = grenze - 1
+                }
+                if rueck {
+                    idx = grenze - 1 - idx
+                }
+                __mmio_write32(dst as *mut u32,
+                    __mmio_read32((basis +% idx *% einheit) as *mut u32))
+                dst = dst +% 4
+                px = px + 1
+            }
+        } else if sat == 100 {
+            while px < dw {
+                var idx: u64 = (px * stepx) >> 16
+                if idx >= grenze {
+                    idx = grenze - 1
+                }
+                if rueck {
+                    idx = grenze - 1 - idx
+                }
+                let c: u64 = __mmio_read32((basis +% idx *% einheit)
+                    as *mut u32) as u64
+                let v: u64 =
+                    ((__mmio_read8((tabr + ((c >> rs) & 0xFF)) as *mut u8)
+                        as u64) << rs)
+                    | ((__mmio_read8((tabg + ((c >> gs) & 0xFF)) as *mut u8)
+                        as u64) << gs)
+                    | ((__mmio_read8((tabb + ((c >> bs) & 0xFF)) as *mut u8)
+                        as u64) << bs)
+                __mmio_write32(dst as *mut u32, v as u32)
+                dst = dst +% 4
+                px = px + 1
+            }
+        } else {
+            while px < dw {
+                var idx: u64 = (px * stepx) >> 16
+                if idx >= grenze {
+                    idx = grenze - 1
+                }
+                if rueck {
+                    idx = grenze - 1 - idx
+                }
+                var c: u64 = __mmio_read32((basis +% idx *% einheit)
+                    as *mut u32) as u64
+                if tab != 0 {
+                    c = ((__mmio_read8((tabr + ((c >> rs) & 0xFF))
+                        as *mut u8) as u64) << rs)
+                        | ((__mmio_read8((tabg + ((c >> gs) & 0xFF))
+                        as *mut u8) as u64) << gs)
+                        | ((__mmio_read8((tabb + ((c >> bs) & 0xFF))
+                        as *mut u8) as u64) << bs)
+                }
+                let r: u64 = (c >> rs) & 0xFF
+                let gr: u64 = (c >> gs) & 0xFF
+                let bl: u64 = (c >> bs) & 0xFF
+                let grau: u64 = (77 * r + 150 * gr + 29 * bl) >> 8
+                let v: u64 = (sat_channel(r, grau, sat) << rs)
+                    | (sat_channel(gr, grau, sat) << gs)
+                    | (sat_channel(bl, grau, sat) << bs)
+                __mmio_write32(dst as *mut u32, v as u32)
+                dst = dst +% 4
+                px = px + 1
+            }
+        }
+        py = py + 1
+    }
+    kstate.set(state, FB_OFF + S_DIRTY_LO, 0)
+    kstate.set(state, FB_OFF + S_DIRTY_HI, 0)
+    kstate.add(state, FB_OFF + S_FLUSHES, 1)
+    kstate.add(state, FB_OFF + S_PRESENTS, 1)
+}
+
+// --------------------------------------------------- die Zusagen dazu
+//
+// Was der Kernel ueber Drehung, Skalierung und Nachschlagetabelle SELBST
+// pruefen kann. Wie `selftest` oben ersetzt das kein Bildschirmfoto --
+// `tools/display/run.sh` macht beides.
+fn selftest2(state: u64) -> u64 {
+    if !ready(state) {
+        return 0
+    }
+    if kstate.get(state, FB_OFF + S_BACK) == 0 {
+        return 0
+    }
+    var n: u64 = 0
+    let rot_alt: u64 = rotation(state)
+    let sat_alt: u64 = saturation(state)
+    let lut_alt: u64 = lut(state)
+    let art_alt: u64 = scale(state)
+    set_lut(state, 0)
+    set_saturation(state, 100)
+    set_rotation(state, 0)
+    set_scale(state, SCALE_FULL)
+    set_logical(state, 0, 0)
+
+    let rot: u64 = rgb(state, 0xFF, 0, 0)
+    let gruen: u64 = rgb(state, 0, 0xFF, 0)
+    let pw: u64 = panel_w(state)
+    let ph: u64 = panel_h(state)
+
+    // 1. Ohne Drehung und ohne Tabelle ist NICHTS umzurechnen -- der
+    //    schnelle Weg von Runde K7 gilt unveraendert.
+    if !transformed(state) {
+        n = n + 1
+    }
+    // 2. Bild und Tafel sind dann dasselbe.
+    if width(state) == pw && height(state) == ph {
+        n = n + 1
+    }
+    // 3. Eine ungueltige Drehung wird abgelehnt, und die alte bleibt.
+    if !set_rotation(state, 45) && rotation(state) == 0 {
+        n = n + 1
+    }
+    // 4. 180 Grad: der Bildpunkt links oben landet rechts unten.
+    clear(state, 0)
+    pixel(state, 0, 0, rot)
+    if set_rotation(state, 180) {
+        dirty_all(state)
+        present(state)
+        if get_panel(state, pw - 1, ph - 1) == rot {
+            n = n + 1
+        }
+        // 5. ... und links oben steht dann nichts.
+        if get_panel(state, 0, 0) == 0 {
+            n = n + 1
+        }
+    }
+    // 6. 90 Grad dreht auch die MASSE des Bildes: aus 800x600 wird
+    //    600x800, und der Zweitpuffer traegt das.
+    if set_rotation(state, 90) {
+        if width(state) == ph && height(state) == pw {
+            n = n + 1
+        }
+        // 7. Der Bildpunkt links oben des Bildes liegt nach einer
+        //    Vierteldrehung im Uhrzeigersinn RECHTS oben auf der Tafel.
+        clear(state, 0)
+        pixel(state, 0, 0, gruen)
+        dirty_all(state)
+        present(state)
+        if get_panel(state, pw - 1, 0) == gruen {
+            n = n + 1
+        }
+    }
+    set_rotation(state, 0)
+    // 8. Eine Nachschlagetabelle, die alles auf null bildet, macht ein
+    //    volles Bild schwarz -- und der Zweitpuffer bleibt unberuehrt.
+    let tab: u64 = state + kstate.DLUT_OFF
+    var i: u64 = 0
+    while i < LUT_BYTES {
+        kstate.set8(tab + i, 0)
+        i = i + 1
+    }
+    clear(state, 0)
+    fill(state, 0, 0, 8, 8, rot)
+    set_lut(state, tab)
+    dirty_all(state)
+    present(state)
+    if get_panel(state, 0, 0) == 0 && get_pixel(state, 0, 0) == rot {
+        n = n + 1
+    }
+    // 9. Eine Tabelle, die jeden Wert auf sich selbst bildet, aendert
+    //    nichts -- die Gegenprobe zu 8.
+    i = 0
+    while i < 256 {
+        kstate.set8(tab + i, i as u8)
+        kstate.set8(tab + 256 + i, i as u8)
+        kstate.set8(tab + 512 + i, i as u8)
+        i = i + 1
+    }
+    dirty_all(state)
+    present(state)
+    if get_panel(state, 0, 0) == rot {
+        n = n + 1
+    }
+    set_lut(state, 0)
+    // 10. Ein Bild, das kleiner ist als die Tafel, wird bei
+    //     SCALE_NONE mittig gesetzt und der Rand ist schwarz.
+    if set_logical(state, pw / 2, ph / 2) {
+        set_scale(state, SCALE_NONE)
+        clear(state, gruen)
+        dirty_all(state)
+        present(state)
+        if get_panel(state, 0, 0) == 0 && get_panel(state, pw / 2, ph / 2)
+            == gruen {
+            n = n + 1
+        }
+        // 11. Bei SCALE_FULL fuellt dasselbe Bild die ganze Tafel --
+        //     auch die Ecke, die eben noch schwarz war.
+        set_scale(state, SCALE_FULL)
+        dirty_all(state)
+        present(state)
+        if get_panel(state, 0, 0) == gruen
+            && get_panel(state, pw - 1, ph - 1) == gruen {
+            n = n + 1
+        }
+    }
+    set_logical(state, 0, 0)
+    set_scale(state, art_alt)
+    set_saturation(state, sat_alt)
+    set_lut(state, lut_alt)
+    set_rotation(state, rot_alt)
+    clear(state, 0)
+    home(state)
+    dirty_all(state)
+    flush(state)
+    return n
+}
+
+fn selftest2_max() -> u64 {
+    return 11
+}
+
+// Liest einen Bildpunkt DER TAFEL. `get_pixel` liest aus dem Ziel des
+// Zeichnens, also aus dem Zweitpuffer -- fuer eine Zusage ueber das
+// Umrechnen ist genau das die falsche Seite.
+fn get_panel(state: u64, x: u64, y: u64) -> u64 {
+    if x >= kstate.get(state, FB_OFF + S_PWIDTH) {
+        return 0
+    }
+    if y >= kstate.get(state, FB_OFF + S_PHEIGHT) {
+        return 0
+    }
+    let addr: u64 = kstate.get(state, FB_OFF + S_ADDR)
+    return __mmio_read32((addr +% y *% kstate.get(state, FB_OFF + S_PPITCH)
+        +% x *% 4) as *mut u32) as u64
 }

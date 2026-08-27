@@ -56,6 +56,7 @@ import wig
 import nidx
 import ps2m
 import fb
+import vmode
 import ftype
 
 import signal
@@ -815,6 +816,86 @@ const PS_PROFILE: u64 = 0
 const PS_BRIGHT: u64 = 1
 const PS_BLANK: u64 = 2
 
+// ==================================================== RUNDE DISPLAY
+//
+// DER BILDSCHIRM AUS RING 3.
+//
+// 1810 UND NICHT 1800, UND DAS IST EIN GEMESSENER ZUSAMMENSTOSS UND
+// KEINE VORLIEBE. Die erste Fassung dieser Runde nahm 1800..1802 -- die
+// naechste runde Zahl hinter 1750. Der Kernel uebersetzte, der Testlauf
+// baute, und JEDER Aufruf aus Ring 3 kam als -ENOSYS zurueck: 1800..1809
+// gehoeren seit Runde K15 der Widget-Bibliothek (`WIG_BASE`), und deren
+// Weiche steht in `dispatch` VOR dieser hier. Gefunden hat das nicht der
+// Uebersetzer, sondern der Abschnitt 10 von `tools/display/run.sh`, der
+// die Zahlen aus Ring 3 gegen die des Kernels haelt. Ohne diesen
+// Abschnitt waere die Runde mit einer Oberflaeche fertig geworden, die
+// auf jeden Knopfdruck nichts tut.
+//
+// Dieselbe Bauart wie 1750..1752 aus Runde K18, und aus demselben Grund: EINE Zahl je Aufruf statt einer
+// Struktur, deren Felder auseinanderlaufen koennen, und der Testlauf
+// kann jeden Wert einzeln gegen die Meldung des Kernels halten.
+//
+//   1810  osum_dispget(feld)         -> Wert
+//   1811  osum_dispset(feld, wert)   -> 0 oder -errno
+//   1812  osum_dispstr(welche, puffer, len) -> Laenge
+//
+// Ein Feld ab DG_MODE ist die Nummer eines Modus: der Rueckgabewert ist
+// Breite << 32 | Hoehe << 16 | Bit. Eine eigene Aufrufnummer dafuer
+// waere die vierte, die dasselbe tut.
+const SYS_OSUM_DISPGET: u64 = 1810
+const SYS_OSUM_DISPSET: u64 = 1811
+const SYS_OSUM_DISPSTR: u64 = 1812
+
+const DG_READY: u64 = 0
+const DG_COUNT: u64 = 1
+const DG_VRAM: u64 = 2
+const DG_DEPTHS: u64 = 3
+const DG_MAPLIMIT: u64 = 4
+const DG_EDIDOK: u64 = 5
+const DG_EDIDWHY: u64 = 6
+const DG_NATW: u64 = 7
+const DG_NATH: u64 = 8
+const DG_CUR: u64 = 9
+const DG_PANELW: u64 = 10
+const DG_PANELH: u64 = 11
+const DG_IMGW: u64 = 12
+const DG_IMGH: u64 = 13
+const DG_ROT: u64 = 14
+const DG_SCALE: u64 = 15
+const DG_BRIGHT: u64 = 16
+const DG_CONTRAST: u64 = 17
+const DG_GAMMA: u64 = 18
+const DG_SAT: u64 = 19
+const DG_PENDING: u64 = 20
+const DG_REMAIN: u64 = 21
+const DG_SWITCHES: u64 = 22
+const DG_FAILS: u64 = 23
+const DG_REVERTS: u64 = 24
+const DG_CONFIRMS: u64 = 25
+const DG_PRESENTS: u64 = 26
+const DG_PROBED: u64 = 27
+const DG_REFUSED: u64 = 28
+const DG_TOOBIG: u64 = 29
+const DG_PITCH: u64 = 30
+const DG_BPP: u64 = 31
+const DG_COUNTMAX: u64 = 32
+const DG_MODE: u64 = 1000
+
+const DS_MODE: u64 = 0 // Breite << 16 | Hoehe
+const DS_ROT: u64 = 1
+const DS_SCALE: u64 = 2
+const DS_BRIGHT: u64 = 3
+const DS_CONTRAST: u64 = 4
+const DS_GAMMA: u64 = 5
+const DS_SAT: u64 = 6
+const DS_CONFIRM: u64 = 7
+const DS_REVERT: u64 = 8
+const DS_PROBE: u64 = 9
+const DS_LOGICAL: u64 = 10 // Breite << 16 | Hoehe, 0 = wie die Tafel
+
+const DSTR_VENDOR: u64 = 0
+const DSTR_MODEL: u64 = 1
+
 const SYS_OSUM_FTYPE: u64 = 1900 // (pfad, aus, len) -> Art oder -ENOEXEC
 const SYS_OSUM_FOPEN: u64 = 1901 // (pfad, argv, argc) -> pid
 const SYS_OSUM_FLIST: u64 = 1902 // (nr, aus, len) -> Art oder -ENOENT
@@ -1306,6 +1387,12 @@ fn dispatch(number: u64, frame: u64, state: u64) -> u64 {
     // RUNDE K18: die Energieschicht.
     if number >= SYS_OSUM_PWRGET && number <= SYS_OSUM_PWRSTR {
         return pwr_call(state, me, number, a0, a1, a2)
+    }
+    // RUNDE DISPLAY: der Bildschirm. Eigene Funktion, aus demselben
+    // Grund wie oben -- der Rahmen entsteht erst, wenn wirklich eine
+    // dieser Nummern kommt.
+    if number >= SYS_OSUM_DISPGET && number <= SYS_OSUM_DISPSTR {
+        return disp_call(state, me, number, a0, a1, a2)
     }
     // RUNDE DESKTOP: das Netz jenseits der Sockets. Zwei Nummern aus
     // dem Block, den Runde K8 dafuer ausgewiesen und nie benutzt hat.
@@ -4571,6 +4658,299 @@ fn pwr_call(state: u64, me: u64, number: u64, a0: u64, a1: u64,
         return do_pwrset(state, me, a0, a1)
     }
     return do_pwrstr(state, me, a0, a1, a2)
+}
+
+// ==================================================== RUNDE DISPLAY
+
+fn disp_call(state: u64, me: u64, number: u64, a0: u64, a1: u64,
+    a2: u64) -> u64 {
+    if number == SYS_OSUM_DISPGET {
+        return do_dispget(state, a0)
+    }
+    if number == SYS_OSUM_DISPSET {
+        return do_dispset(state, me, a0, a1)
+    }
+    return do_dispstr(state, me, a0, a1, a2)
+}
+
+fn do_dispget(state: u64, field: u64) -> u64 {
+    if field == DG_COUNTMAX {
+        return DG_COUNTMAX
+    }
+    if field == DG_READY {
+        if vmode.ready(state) {
+            return 1
+        }
+        return 0
+    }
+    // OHNE ERKUNDUNG GIBT ES KEINE ZAHLEN -- dieselbe Regel wie bei der
+    // Energieschicht. Ein Kernel ohne das Wort `disp` muss auf JEDE
+    // Frage -ENODEV sagen und nicht eine Null, die wie ein Messwert
+    // aussieht. Genau das ist die Gegenprobe des Testlaufs.
+    if !vmode.ready(state) {
+        return neg(errno.E_NODEV)
+    }
+    if field >= DG_MODE {
+        let i: u64 = field - DG_MODE
+        if i >= vmode.count(state) {
+            return neg(errno.E_INVAL)
+        }
+        return (vmode.mode_w(state, i) << 32) | (vmode.mode_h(state, i) << 16)
+            | vmode.mode_bpp(state, i)
+    }
+    if field == DG_COUNT {
+        return vmode.count(state)
+    }
+    if field == DG_VRAM {
+        return vmode.vram(state)
+    }
+    if field == DG_DEPTHS {
+        return vmode.depths(state)
+    }
+    if field == DG_MAPLIMIT {
+        return vmode.map_limit(state)
+    }
+    if field == DG_EDIDOK {
+        if vmode.edid_ok(state) {
+            return 1
+        }
+        return 0
+    }
+    if field == DG_EDIDWHY {
+        return vmode.edid_why(state)
+    }
+    if field == DG_NATW {
+        return vmode.edid_native_w(state)
+    }
+    if field == DG_NATH {
+        return vmode.edid_native_h(state)
+    }
+    if field == DG_CUR {
+        return vmode.current(state)
+    }
+    if field == DG_PANELW {
+        return fb.panel_w(state)
+    }
+    if field == DG_PANELH {
+        return fb.panel_h(state)
+    }
+    if field == DG_IMGW {
+        return fb.width(state)
+    }
+    if field == DG_IMGH {
+        return fb.height(state)
+    }
+    if field == DG_PITCH {
+        return fb.panel_pitch(state)
+    }
+    if field == DG_BPP {
+        return fb.bpp(state)
+    }
+    if field == DG_ROT {
+        return fb.rotation(state)
+    }
+    if field == DG_SCALE {
+        return fb.scale(state)
+    }
+    if field == DG_BRIGHT {
+        return vmode.brightness(state)
+    }
+    if field == DG_CONTRAST {
+        return vmode.contrast(state)
+    }
+    if field == DG_GAMMA {
+        return vmode.gamma(state)
+    }
+    if field == DG_SAT {
+        return fb.saturation(state)
+    }
+    if field == DG_PENDING {
+        if vmode.pending(state) {
+            return 1
+        }
+        return 0
+    }
+    if field == DG_REMAIN {
+        return vmode.remaining(state)
+    }
+    if field == DG_SWITCHES {
+        return vmode.switches(state)
+    }
+    if field == DG_FAILS {
+        return vmode.fails(state)
+    }
+    if field == DG_REVERTS {
+        return vmode.reverts(state)
+    }
+    if field == DG_CONFIRMS {
+        return vmode.confirms(state)
+    }
+    if field == DG_PRESENTS {
+        return fb.presents(state)
+    }
+    if field == DG_PROBED {
+        return vmode.probed(state)
+    }
+    if field == DG_REFUSED {
+        return vmode.refused(state)
+    }
+    if field == DG_TOOBIG {
+        return vmode.toobig(state)
+    }
+    return neg(errno.E_INVAL)
+}
+
+// WER DEN BILDSCHIRM UMSTELLT, STELLT IHN FUER ALLE UM. Es gibt einen
+// Rahmenpuffer, eine Aufloesung und eine Gammakurve; ein Programm ohne
+// Rechte duerfte sie sonst jedem anderen wegnehmen. Also dasselbe wie
+// bei `osum_pwrset`: nur der Verwalter.
+fn do_dispset(state: u64, me: u64, field: u64, v: u64) -> u64 {
+    if !vmode.ready(state) {
+        return neg(errno.E_NODEV)
+    }
+    if sched.tget(state, me, sched.T_EUID) != 0 {
+        return neg(errno.E_PERM)
+    }
+    // Die Frist laeuft in AUFGABENKONTEXT ab und nicht im Zeitgeber --
+    // siehe den Absatz bei `vmode.poll`. Jeder Aufruf dieser Nummer
+    // sieht nach, ob sie um ist.
+    vmode.poll(state)
+    if field == DS_MODE {
+        let w: u64 = (v >> 16) & 0xFFFF
+        let h: u64 = v & 0xFFFF
+        let r: u64 = vmode.set_mode(state, w, h, 32)
+        if r == vmode.E_OK {
+            return 0
+        }
+        if r == vmode.E_NOMODE {
+            return neg(errno.E_INVAL)
+        }
+        if r == vmode.E_NOMEM {
+            return neg(errno.E_NOMEM)
+        }
+        if r == vmode.E_DEPTH {
+            return neg(errno.E_INVAL)
+        }
+        return neg(errno.E_IO)
+    }
+    if field == DS_ROT {
+        if !fb.set_rotation(state, v) {
+            return neg(errno.E_INVAL)
+        }
+        fb.dirty_all(state)
+        fb.flush(state)
+        return 0
+    }
+    if field == DS_SCALE {
+        if !fb.set_scale(state, v) {
+            return neg(errno.E_INVAL)
+        }
+        fb.dirty_all(state)
+        fb.flush(state)
+        return 0
+    }
+    if field == DS_LOGICAL {
+        let w: u64 = (v >> 16) & 0xFFFF
+        let h: u64 = v & 0xFFFF
+        if !fb.set_logical(state, w, h) {
+            return neg(errno.E_INVAL)
+        }
+        fb.dirty_all(state)
+        fb.flush(state)
+        return 0
+    }
+    if field == DS_BRIGHT {
+        return disp_picture(state, v, vmode.contrast(state),
+            vmode.gamma(state))
+    }
+    if field == DS_CONTRAST {
+        return disp_picture(state, vmode.brightness(state), v,
+            vmode.gamma(state))
+    }
+    if field == DS_GAMMA {
+        return disp_picture(state, vmode.brightness(state),
+            vmode.contrast(state), v)
+    }
+    if field == DS_SAT {
+        if !fb.set_saturation(state, v) {
+            return neg(errno.E_INVAL)
+        }
+        fb.dirty_all(state)
+        fb.flush(state)
+        return 0
+    }
+    if field == DS_CONFIRM {
+        vmode.confirm(state)
+        return 0
+    }
+    if field == DS_REVERT {
+        vmode.revert(state)
+        return 0
+    }
+    if field == DS_PROBE {
+        return vmode.probe(state)
+    }
+    return neg(errno.E_INVAL)
+}
+
+// Die Tabelle bauen UND sie an- oder abhaengen. Eine Kurve, die nichts
+// aendert, wird ABGEHAENGT und nicht angewandt: sonst kostete ein
+// Bildschirm in Grundstellung den langen Weg in `fb.present`, ohne dass
+// irgendetwas anders aussaehe. Das ist keine Feinheit -- der Unterschied
+// ist ein Faktor, und er steht in docs/DISPLAY.md.
+fn disp_picture(state: u64, b: u64, c: u64, gm: u64) -> u64 {
+    if !vmode.set_picture(state, b, c, gm) {
+        return neg(errno.E_INVAL)
+    }
+    if b == 100 && c == 100 && gm == 100 {
+        fb.set_lut(state, 0)
+    } else {
+        fb.set_lut(state, vmode.lut_addr(state))
+    }
+    fb.dirty_all(state)
+    fb.flush(state)
+    return 0
+}
+
+fn do_dispstr(state: u64, me: u64, which: u64, dst: u64, len: u64) -> u64 {
+    if !vmode.ready(state) {
+        return neg(errno.E_NODEV)
+    }
+    if !vmode.edid_ok(state) {
+        return neg(errno.E_NODEV)
+    }
+    var buf: [u8; 16] = "\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"
+    var n: u64 = 0
+    if which == DSTR_VENDOR {
+        while n < 3 {
+            buf[n as usize] = vmode.vendor_at(state, n) as u8
+            n = n + 1
+        }
+    } else if which == DSTR_MODEL {
+        // `model_at` gibt 0 zurueck, wo der Name zu Ende ist. Ein
+        // Zeichen ausserhalb des druckbaren Bereichs beendet ihn
+        // ebenfalls -- ein Monitor, der Steueroktette in seinen Namen
+        // schreibt, soll keine Konsole zerlegen.
+        var fertig: bool = false
+        while n < 13 && !fertig {
+            let c: u64 = vmode.model_at(state, n)
+            if c < 32 || c > 126 {
+                fertig = true
+            } else {
+                buf[n as usize] = c as u8
+                n = n + 1
+            }
+        }
+    } else {
+        return neg(errno.E_INVAL)
+    }
+    if len < n + 1 {
+        return neg(errno.E_INVAL)
+    }
+    if !copy_out(state, me, dst, (&buf[0]) as u64, n + 1) {
+        return neg(errno.E_FAULT)
+    }
+    return n
 }
 
 fn do_pwrget(state: u64, field: u64) -> u64 {
