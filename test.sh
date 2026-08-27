@@ -270,6 +270,27 @@
 #      Sprung ins Nichts, ein `#!` im Kreis und eine `.fi`, die nicht
 #      uebersetzt -- die darf NICHT als Erfolg gemeldet werden.
 #
+#  25. DER FENSTERBAUM (tools/tiling/run.sh, Runde TILING): bis dahin
+#      schwebten die Fenster frei -- WOHIN eines gelegt wurde, entschied
+#      der, der es anlegte. Diese Runde macht daraus einen Baum, wie i3,
+#      sway und bspwm ihn fuehren: Blaetter sind Fenster, innere Knoten
+#      sind Aufteilungen mit einem VERHAELTNIS (nicht mit Bildpunkten),
+#      Container koennen `split`, `tabbed` oder `stacked` sein, und
+#      Drehen, Spiegeln und Ausbalancieren gibt es dazu. Die
+#      Windows-artige Schnellablage (halb links, ein Viertel) ist ein
+#      SONDERFALL des Baumes und kein zweites System.
+#      WAS HIER GEMESSEN WIRD, und es ist nur eine Sache: die Fenster
+#      muessen die Flaeche EXAKT ausfuellen, nach JEDER Operation.
+#      Zehntausend zufaellige Operationen, nach jeder rechnet der Kern
+#      die Invariante auf zwei unabhaengigen Wegen nach -- null
+#      Verletzungen. Die Pruefung selbst hat eine Gegenprobe (ein
+#      Rechteck um einen Bildpunkt verstellt MUSS auffallen), die
+#      Bereichsverfolgung hat eine (`notiledirty`), und die
+#      Tastenbelegung hat eine: sie steht in
+#      /users/<name>/config/tiling.conf, und ohne die Datei gibt es
+#      KEINE Belegung. Dazu drei Bildschirmfotos (Teilung, Reiter,
+#      Drehung), bildpunktgenau nachgerechnet, und /bin/tiling in Ring 3.
+#
 # Kein '|| true', kein Verschlucken von Beendigungscodes.
 set -uo pipefail
 
@@ -421,6 +442,8 @@ lauf "21. der Uebersetzer laeuft auf dem System selbst, und eine Datei weiss, wo
      tools/k16/run.sh k16 '^K16: |^  OK    (ZEICHENGLEICH|DAS AUF OSUM|DER DOPPELKLICK|DER AUSLEGER|DER INHALT GEHT VOR|fas uebersetzt|16 von 16)'
 lauf "22. Widgets und der Dateimanager: eine Bibliothek in Ring 3 (tools/k15/run.sh, Runde K15)" \
      tools/k15/run.sh k15 '^K15: |^        -> |^  OK    (die Anordnung|ein Klick auf das Kaestchen|mit Bereichsverfolgung|und /daten/neu|der Verweis spart|getippt |OHNE (die Schluesselwoerter|das Journal|den Namensindex)|[0-9]\. (DER AUFBAU|DIE SUCHE|DIE GEGENPROBE|der Index)|und DIESELBEN NAMEN|nach dem (Anlegen|Umbenennen)|das Symbol des Dateimanagers)'
+lauf "25. der Fensterbaum: Kacheln, Reiter, Drehen -- und die Invariante nach jeder Operation (tools/tiling/run.sh, Runde TILING)" \
+     tools/tiling/run.sh tiling '^TILING: |^  OK    (die Zusagen des Fensterbaums|und KEINE davon|Verletzungen der Invariante|und nach JEDER Operation|GEGENPROBE|Fenster [0-9] |und im Bild|vier Reiter|nach der Drehung|der Aufwand waechst|und das spart|Kern und Ring 3)'
 lauf "24. Energie und Leistung: drei Profile, Ruhezustand, Waerme, Akku (tools/k18/run.sh, Runde K18)" \
      tools/k18/run.sh k18 '^K18: |^  OK    (dieselbe Stelle|IA32_PERF_CTL bekommt|Turbo ist bei|SpeedStep ist bei|jeder Durchlauf ging|schlafend |aber es wird kein|zwei Tabellen|GEGENPROBE|GEDROSSELT|im BILD|dasselbe Pruefbild|und einen Bildpunkt DANEBEN|keine AUFRUFNUMMER)'
 
