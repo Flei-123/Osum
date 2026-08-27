@@ -37,7 +37,9 @@ export {
     ram_init, use_ata, use_nvme, read, write, blocks, present,
     BLOCK_SIZE, DEV_RAM, DEV_ATA, DEV_NVME, DEV_ATA1,
     // ---- Runde K14 ----
-    read_on, write_on, blocks_on, present_on, probe_ata1, dev_name
+    read_on, write_on, blocks_on, present_on, probe_ata1, dev_name,
+    // ---- Runde OFS3 ----
+    capacity
 }
 
 const BLOCK_SIZE: u64 = 512
@@ -106,6 +108,9 @@ const ATA_CTRL: u16 = 0x3F6
 const ATA_READ: u8 = 0x20
 const ATA_WRITE: u8 = 0x30
 const ATA_FLUSH: u8 = 0xE7
+// RUNDE OFS3: der Befehl, der die Platte nach ihrer eigenen Groesse
+// fragt. Bis zu dieser Runde hat niemand ihn gestellt.
+const ATA_IDENTIFY: u8 = 0xEC
 
 const ST_BSY: u64 = 0x80
 const ST_DRQ: u64 = 0x08
@@ -314,6 +319,104 @@ fn present_on(state: u64, dev: u64) -> bool {
         return present(state)
     }
     return true
+}
+
+// ==================================================================
+// RUNDE OFS3: WIE GROSS DIE PLATTE WIRKLICH IST
+// ==================================================================
+//
+// Der Kommentar bei `probe_ata1` sagt es fuer die ZWEITE Platte so:
+// "ATA PIO sagt sie nicht von selbst, und ein IDENTIFY dafuer waere ein
+// zweites Protokoll fuer eine Zahl, die der Wirt ohnehin vorgibt". Fuer
+// die zweite Platte stimmt das weiter -- ihre Groesse steht auf der
+// Befehlszeile. Fuer die WURZELPLATTE stimmte es nie: dort gab der Wirt
+// die Zahl NICHT vor, `kmain.fi` schrieb sie als Konstante hin
+// (`OSUM_BLOCKS = 4096`), und damit hat der Kernel von JEDER Platte
+// genau zwei Megaoktett benutzt. Eine Platte von 32 MiB lief nach 2 MiB
+// voll und meldete ENOSPC, obwohl 30 MiB unberuehrt dalagen. Das war
+// der ZWEITE Deckel dieser Runde, und er sass hinter dem ersten: die
+// mehrblockige Karte haette allein gar nichts gebracht.
+//
+// IDENTIFY ist der Befehl 0xEC. Er gibt 256 Woerter zurueck; darin
+// stehen die Sektorzahl fuer LBA28 in den Woertern 60 und 61 und die
+// fuer LBA48 in 100 bis 103. Wort 83, Bit 10, sagt, ob das Laufwerk
+// LBA48 ueberhaupt kann.
+//
+// DIE OBERGRENZE IST EHRLICH: dieser Treiber legt die Blocknummer in
+// die vier unteren Bits des Laufwerksregisters -- das ist LBA28, also
+// 268.435.456 Sektoren oder 128 Gibioktett. Was darueber hinausgeht,
+// kann er nicht ansprechen, also behauptet er es auch nicht, sondern
+// schneidet die gemeldete Zahl dort ab. Eine Platte zu melden, die man
+// nicht lesen kann, waere derselbe Fehler wie die Konstante, nur mit
+// einer groesseren Zahl.
+//
+// Meldet die Platte nichts (ein Laufwerk ohne IDENTIFY, ein Wirt, der
+// das Register nicht bedient), kommt 0 zurueck, und der Aufrufer bleibt
+// bei dem, was er vorher hatte. Kein Lauf wird dadurch schlechter.
+fn capacity(state: u64) -> u64 {
+    if !present(state) {
+        return 0
+    }
+    serial.out8(ATA_DRIVE, 0xA0 as u8)
+    serial.io_wait()
+    serial.out8(ATA_COUNT, 0 as u8)
+    serial.out8(ATA_LBA0, 0 as u8)
+    serial.out8(ATA_LBA1, 0 as u8)
+    serial.out8(ATA_LBA2, 0 as u8)
+    serial.out8(ATA_CMD, ATA_IDENTIFY)
+    serial.io_wait()
+    // Status 0 heisst: an dieser Stelle des Busses ist nichts.
+    let st0: u64 = serial.in8(ATA_CMD) as u64
+    if st0 == 0 {
+        return 0
+    }
+    if !ata_wait(true) {
+        ata_recover(false)
+        return 0
+    }
+    var lba28: u64 = 0
+    var lba48: u64 = 0
+    var kann48: bool = false
+    var i: u64 = 0
+    // ALLE 256 Woerter muessen abgeholt werden, auch die, die niemanden
+    // interessieren. Ein Datenregister, in dem noch Woerter stehen,
+    // laesst den naechsten Befehl scheitern -- genau der Zustand, den
+    // `ata_recover` seit K14 aufraeumen muss.
+    while i < 256 {
+        let w: u64 = in16(ATA_DATA)
+        if i == 60 {
+            lba28 = lba28 | w
+        }
+        if i == 61 {
+            lba28 = lba28 | (w << 16)
+        }
+        if i == 83 {
+            if (w & 0x0400) != 0 {
+                kann48 = true
+            }
+        }
+        if i == 100 {
+            lba48 = lba48 | w
+        }
+        if i == 101 {
+            lba48 = lba48 | (w << 16)
+        }
+        if i == 102 {
+            lba48 = lba48 | (w << 32)
+        }
+        if i == 103 {
+            lba48 = lba48 | (w << 48)
+        }
+        i = i + 1
+    }
+    var n: u64 = lba28
+    if kann48 && lba48 > n {
+        n = lba48
+    }
+    if n > 268435456 {
+        n = 268435456 // LBA28: so weit reicht dieser Treiber, keinen Sektor weiter
+    }
+    return n
 }
 
 // Wie viele Bloecke das Geraet hat. Fuer die zweite Platte steht die

@@ -132,6 +132,10 @@ BEREICHE = [
     # gescheitert.  Der Rest der Bibliothek liegt in Ring 3 und kommt in
     # `kdata` gar nicht vor.
     ("WIG",        "kstate.fi", "WIG_OFF",        "WIG_MAX"),
+    # RUNDE OFS3: die Pfadpuffer des Dateisystems.  Sie sind hier ein
+    # EIGENER Bereich und kein Versatz -- die zwei Seiten gehoeren
+    # dieser Runde allein, und genau das soll die Karte nachrechnen.
+    ("OFS3",       "kstate.fi", "OFS3_OFF",       "OFS3_MAX"),
     # RUNDE K18: die Energieschicht.  Ihr Vorrat ist 0x58000..0x60000 --
     # er liegt HINTER der alten Grenze KDATA_SIZE (0x50000), und deshalb
     # hat diese Runde `kdata` von 0x50000 auf 0x60000 wachsen lassen
@@ -175,6 +179,27 @@ KEINE_KDATA = {
     ("wig.fi", "STAGE_OFF"),    # dito
     ("kstate.fi", "FSG_OFF"),   # Versatz IN WIG_OFF (K15, zweiter Nachtrag)
     ("kstate.fi", "JRNL_OFF"),  # dito -- das Aenderungsjournal
+    # RUNDE OFS3: Versaetze INNERHALB von OFS3_OFF, kein eigenes kdata.
+    ("kstate.fi", "OP_NAME"),
+    ("kstate.fi", "OP_NAME2"),
+    ("kstate.fi", "OP_OLD"),
+    ("kstate.fi", "OP_NEW"),
+    ("kstate.fi", "OP_PATH"),
+    ("kstate.fi", "OP_WORK"),
+    ("kstate.fi", "OP_BUILD"),
+    ("kstate.fi", "OP_LINK"),
+    ("kstate.fi", "OP_TMP"),
+    ("kstate.fi", "OP_ENT"),
+    ("fs.fi", "G_INODES"),      # Versaetze IN FSG_OFF (Runde OFS3)
+    ("fs.fi", "G_DATA"),
+    ("fs.fi", "G_BMSTART"),
+    ("fs.fi", "G_BMBLOCKS"),
+    ("fs.fi", "G_ITABLE"),
+    ("fs.fi", "G_ISIZE"),
+    ("fs.fi", "G_IPB"),
+    ("fs.fi", "G_DIRENT"),
+    ("fs.fi", "G_NAMELEN"),
+    ("fs.fi", "G_HINT"),
     ("nidx.fi", "H_BASE"),      # Versatz IM Journal, nicht kdata
     ("hv.fi", "CNT_OFF"),       # Versaetze INNERHALB von HV_OFF (Runde K12)
     ("hv.fi", "VAL_OFF"),
@@ -231,7 +256,9 @@ def main():
               # RUNDE K14 -- sonst pruefte die Karte diese Dateien gar
               # nicht, und ein vergessener Bereich fiele nie auf.
               "vfs.fi", "mnt.fi", "fat.fi", "procfs.fi", "devfs.fi",
-              "part.fi", "ofs.fi"):
+              "part.fi", "ofs.fi",
+              # RUNDE OFS3 -- die Geometriewoerter stehen hier.
+              "fs.fi"):
         p = os.path.join(kdir, d)
         if os.path.exists(p):
             dateien[d] = konstanten(p)

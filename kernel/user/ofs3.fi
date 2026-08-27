@@ -1,0 +1,336 @@
+// kernel/user/ofs3.fi -- Runde OFS3: die Zusagen dieser Runde, IN RING 3
+// gemessen.
+//
+// Warum in Ring 3 und nicht im Kernel: der Kernel kann sich selbst nicht
+// widerlegen. Was hier gemessen wird, geht durch dieselben
+// Systemaufrufe, die jedes andere Programm auch benutzt -- `open`,
+// `write`, `stat`, `lstat`, `symlink`, `readlink`, `rename`, `getdents`.
+// Ein Fehler im Format faellt damit an genau der Stelle auf, an der ihn
+// ein Benutzer auch treffen wuerde.
+//
+// Jede Zeile hat die Form `ofs3: <name> = <zahl>`; `tools/ofs3/run.sh`
+// liest sie und haelt sie gegen die Erwartung. Zahlen, keine Saetze --
+// ein Testlaeufer, der Prosa lesen muss, misst nichts.
+//
+// WAS GEMESSEN WIRD:
+//
+//   1. DIE GROESSTE DATEI. Es wird ueber die alte Grenze hinaus
+//      geschrieben (2.134.016 Oktette) und danach an drei Stellen
+//      zurueckgelesen -- am Anfang, hinter der alten Grenze und ganz
+//      hinten. Der Wert an jeder Stelle ist aus der Stelle
+//      AUSGERECHNET, nicht gemerkt; ein Dateisystem, das den falschen
+//      Block liefert, faellt damit auf, statt eine Null zu liefern, die
+//      wie eine Null aussieht.
+//   2. DER LAENGSTE NAME. 255 Zeichen, angelegt, wiedergefunden,
+//      gelesen -- und ueber `getdents` in voller Laenge zurueck.
+//   3. DIE ZEITSTEMPEL. Eine frische Datei traegt eine Zeit, die nicht
+//      null ist; wer sie beschreibt, hebt ihre Aenderungszeit.
+//   4. DER SYMBOLISCHE VERWEIS. Anlegen, `readlink`, durch ihn hindurch
+//      lesen, und `lstat` sagt `l`, waehrend `stat` die Datei sieht.
+//   5. UMBENENNEN OHNE KOPIEREN. Die Inodenummer vor und nach dem
+//      `rename` ist DIESELBE -- das ist der Unterschied zwischen
+//      Umbenennen und Kopieren, und er ist eine Zahl.
+//   6. VIELE DATEIEN IN EINEM VERZEICHNIS.
+
+profile kernel
+
+import ulib
+import libc.io
+import libc.errno
+import libc.kcall
+
+export { u_start }
+
+const ALT_MAX: u64 = 2134016 // was eine Datei in Fassung 2 fasste
+
+static mut buf: [u8; 4096] = [0 as u8; 4096]
+static mut st: [u8; 144] = [0 as u8; 144]
+static mut st2: [u8; 144] = [0 as u8; 144]
+static mut lang: [u8; 300] = [0 as u8; 300]
+static mut pfad: [u8; 400] = [0 as u8; 400]
+static mut ents: [u8; 4096] = [0 as u8; 4096]
+static mut ziel: [u8; 300] = [0 as u8; 300]
+
+fn sag(name: u64, wert: u64) {
+    var s_kopf: [u8; 7] = "ofs3: \0"
+    var s_gl: [u8; 4] = " = \0"
+    ulib.say((&s_kopf[0 as usize]) as u64)
+    ulib.say(name)
+    ulib.say((&s_gl[0 as usize]) as u64)
+    ulib.sayu(wert)
+    ulib.nl()
+}
+
+// Was an der Stelle `pos` stehen soll. Aus der Stelle ausgerechnet, damit
+// ein falscher Block auffaellt statt sich als Null zu tarnen.
+fn soll(pos: u64) -> u64 {
+    return (pos * 2654435761) % 251
+}
+
+fn u_start(args: u64) -> u64 {
+    var n_gross: [u8; 12] = "grossdatei\0\0"
+    var n_lesen1: [u8; 8] = "lesen1\0\0"
+    var n_lesen2: [u8; 8] = "lesen2\0\0"
+    var n_lesen3: [u8; 8] = "lesen3\0\0"
+    var n_namelen: [u8; 9] = "namelen\0\0"
+    var n_nameok: [u8; 8] = "nameok\0\0"
+    var n_dentlen: [u8; 9] = "dentlen\0\0"
+    var n_ctime: [u8; 7] = "ctime\0\0"
+    var n_mtime0: [u8; 8] = "mtime0\0\0"
+    var n_mtime1: [u8; 8] = "mtime1\0\0"
+    var n_linkok: [u8; 8] = "linkok\0\0"
+    var n_linklen: [u8; 9] = "linklen\0\0"
+    var n_linklstat: [u8; 11] = "linklstat\0\0"
+    var n_linkstat: [u8; 10] = "linkstat\0\0"
+    var n_linkread: [u8; 10] = "linkread\0\0"
+    var n_ino1: [u8; 6] = "ino1\0\0"
+    var n_ino2: [u8; 6] = "ino2\0\0"
+    var n_viele: [u8; 7] = "viele\0\0"
+    var n_ende: [u8; 6] = "ende\0\0"
+
+    // -------------------------------------------- 1. die grosse Datei
+    var p_gross: [u8; 12] = "/tmp/gross\0\0"
+    let fd: u64 = io.create((&p_gross[0 as usize]) as u64)
+    var geschrieben: u64 = 0
+    if !errno.failed(fd) {
+        // 2,5 MiB -- ueber der alten Grenze, und damit im dreifach
+        // indirekten Bereich noch nicht, aber weit hinter dem, was
+        // Fassung 2 konnte.
+        let will: u64 = ALT_MAX + 262144
+        var pos: u64 = 0
+        var weiter: bool = true
+        while pos < will && weiter {
+            var k: u64 = 0
+            while k < 4096 {
+                buf[(k) as usize] = soll(pos + k) as u8
+                k = k + 1
+            }
+            var n: u64 = 4096
+            if pos + n > will {
+                n = will - pos
+            }
+            let w: u64 = io.write(fd, (&buf[0 as usize]) as u64, n)
+            if errno.failed(w) || w != n {
+                weiter = false
+            } else {
+                pos = pos + n
+            }
+        }
+        geschrieben = pos
+        io.close(fd)
+    }
+    sag((&n_gross[0 as usize]) as u64, geschrieben)
+
+    // An drei Stellen zurueckgelesen.
+    var t1: u64 = 0
+    var t2: u64 = 0
+    var t3: u64 = 0
+    let rd: u64 = io.open((&p_gross[0 as usize]) as u64, 0)
+    if !errno.failed(rd) {
+        t1 = probe(rd, 0)
+        t2 = probe(rd, ALT_MAX + 1000)
+        t3 = probe(rd, geschrieben - 512)
+        io.close(rd)
+    }
+    sag((&n_lesen1[0 as usize]) as u64, t1)
+    sag((&n_lesen2[0 as usize]) as u64, t2)
+    sag((&n_lesen3[0 as usize]) as u64, t3)
+
+    // ---------------------------------------------- 2. der lange Name
+    var i: u64 = 0
+    while i < 255 {
+        lang[(i) as usize] = (97 + (i % 26)) as u8
+        i = i + 1
+    }
+    lang[(255) as usize] = 0 as u8
+    var p_tmp: [u8; 6] = "/tmp/\0"
+    ulib.strcpy((&pfad[0 as usize]) as u64, (&p_tmp[0 as usize]) as u64)
+    ulib.strcat((&pfad[0 as usize]) as u64, (&lang[0 as usize]) as u64)
+    sag((&n_namelen[0 as usize]) as u64,
+        ulib.length((&lang[0 as usize]) as u64))
+    var nameok: u64 = 0
+    let lf: u64 = io.create((&pfad[0 as usize]) as u64)
+    if !errno.failed(lf) {
+        var text: [u8; 12] = "langer name\0"
+        io.write(lf, (&text[0 as usize]) as u64, 11)
+        io.close(lf)
+        if io.size_of((&pfad[0 as usize]) as u64) == 11 {
+            nameok = 1
+        }
+    }
+    sag((&n_nameok[0 as usize]) as u64, nameok)
+
+    // Und ueber `getdents` in voller Laenge zurueck.
+    var dentlen: u64 = 0
+    var p_tmpd: [u8; 5] = "/tmp\0"
+    let dd: u64 = io.dir_open((&p_tmpd[0 as usize]) as u64)
+    if !errno.failed(dd) {
+        var going: bool = true
+        while going {
+            let n: u64 = io.dir_read(dd, (&ents[0 as usize]) as u64, 4096)
+            if n == 0 || errno.failed(n) {
+                going = false
+            } else {
+                var at: u64 = 0
+                while at < n {
+                    let rec: u64 = (&ents[0 as usize]) as u64 + at
+                    let l: u64 = ulib.length(io.dir_name(rec))
+                    if l > dentlen {
+                        dentlen = l
+                    }
+                    at = at + io.dir_reclen(rec)
+                }
+            }
+        }
+        io.close(dd)
+    }
+    sag((&n_dentlen[0 as usize]) as u64, dentlen)
+
+    // ------------------------------------------------ 3. die Zeiten
+    var p_zeit: [u8; 11] = "/tmp/zeit\0\0"
+    var ctime: u64 = 0
+    var mtime0: u64 = 0
+    var mtime1: u64 = 0
+    let zf: u64 = io.create((&p_zeit[0 as usize]) as u64)
+    if !errno.failed(zf) {
+        var a: [u8; 2] = "a\0"
+        io.write(zf, (&a[0 as usize]) as u64, 1)
+        io.close(zf)
+    }
+    if !errno.failed(io.stat_into((&p_zeit[0 as usize]) as u64,
+        (&st[0 as usize]) as u64)) {
+        ctime = io.stat_ctime((&st[0 as usize]) as u64)
+        mtime0 = io.stat_mtime((&st[0 as usize]) as u64)
+    }
+    sag((&n_ctime[0 as usize]) as u64, ctime)
+    sag((&n_mtime0[0 as usize]) as u64, mtime0)
+    // Zwei Sekunden warten und noch einmal schreiben: die
+    // Aenderungszeit MUSS danach hoeher sein. Ohne das Warten waere die
+    // Messung eine Wette darauf, dass die Sekunde umspringt.
+    ulib.sleep_ms(2100)
+    let zf2: u64 = io.open((&p_zeit[0 as usize]) as u64, kcall.O_WRONLY)
+    if !errno.failed(zf2) {
+        var b: [u8; 2] = "b\0"
+        io.write(zf2, (&b[0 as usize]) as u64, 1)
+        io.close(zf2)
+    }
+    if !errno.failed(io.stat_into((&p_zeit[0 as usize]) as u64,
+        (&st[0 as usize]) as u64)) {
+        mtime1 = io.stat_mtime((&st[0 as usize]) as u64)
+    }
+    sag((&n_mtime1[0 as usize]) as u64, mtime1)
+
+    // --------------------------------------- 4. der symbolische Verweis
+    var p_link: [u8; 11] = "/tmp/zeig\0\0"
+    var linkok: u64 = 0
+    if !errno.failed(io.symlink((&p_zeit[0 as usize]) as u64,
+        (&p_link[0 as usize]) as u64)) {
+        linkok = 1
+    }
+    sag((&n_linkok[0 as usize]) as u64, linkok)
+    let ln: u64 = io.readlink((&p_link[0 as usize]) as u64,
+        (&ziel[0 as usize]) as u64, 299)
+    var linklen: u64 = 0
+    if !errno.failed(ln) {
+        linklen = ln
+    }
+    sag((&n_linklen[0 as usize]) as u64, linklen)
+    // `lstat` sieht den Verweis, `stat` sieht die Datei dahinter.
+    var lst: u64 = 0
+    if !errno.failed(io.lstat_into((&p_link[0 as usize]) as u64,
+        (&st[0 as usize]) as u64)) {
+        if io.is_link_mode(io.stat_mode_of((&st[0 as usize]) as u64)) {
+            lst = 1
+        }
+    }
+    sag((&n_linklstat[0 as usize]) as u64, lst)
+    var sst: u64 = 0
+    if !errno.failed(io.stat_into((&p_link[0 as usize]) as u64,
+        (&st2[0 as usize]) as u64)) {
+        if !io.is_link_mode(io.stat_mode_of((&st2[0 as usize]) as u64)) {
+            sst = 1
+        }
+    }
+    sag((&n_linkstat[0 as usize]) as u64, sst)
+    // Und durch ihn hindurch lesen: das eine Oktett von `/tmp/zeit`
+    // (zweimal an dieselbe Stelle geschrieben, also ein Oktett gross).
+    var gelesen: u64 = 0
+    let lr: u64 = io.open((&p_link[0 as usize]) as u64, 0)
+    if !errno.failed(lr) {
+        let n: u64 = io.read(lr, (&buf[0 as usize]) as u64, 16)
+        if !errno.failed(n) {
+            gelesen = n
+        }
+        io.close(lr)
+    }
+    sag((&n_linkread[0 as usize]) as u64, gelesen)
+
+    // ----------------------------------------- 5. umbenennen, nicht kopieren
+    var p_a: [u8; 11] = "/tmp/name\0\0"
+    var p_b: [u8; 12] = "/tmp/name2\0\0"
+    var ino1: u64 = 0
+    var ino2: u64 = 0
+    let af: u64 = io.create((&p_a[0 as usize]) as u64)
+    if !errno.failed(af) {
+        io.write(af, (&lang[0 as usize]) as u64, 255)
+        io.close(af)
+    }
+    if !errno.failed(io.stat_into((&p_a[0 as usize]) as u64,
+        (&st[0 as usize]) as u64)) {
+        ino1 = __mmio_read64(((&st[0 as usize]) as u64 + io.ST_INO)
+            as *mut u64)
+    }
+    // Der Rueckgabewert selbst ist eine Messung: 0 heisst, dass der
+    // Kernel `rename` WIRKLICH kennt. Bis zu dieser Runde kam hier
+    // -38 (ENOSYS) zurueck, und `mv` hat kopiert und geloescht.
+    let rr: u64 = ulib.sys(ulib.SYS_RENAME, (&p_a[0 as usize]) as u64,
+        (&p_b[0 as usize]) as u64, 0)
+    var n_rr: [u8; 8] = "rename\0\0"
+    sag((&n_rr[0 as usize]) as u64, rr)
+    if !errno.failed(io.stat_into((&p_b[0 as usize]) as u64,
+        (&st[0 as usize]) as u64)) {
+        ino2 = __mmio_read64(((&st[0 as usize]) as u64 + io.ST_INO)
+            as *mut u64)
+    }
+    sag((&n_ino1[0 as usize]) as u64, ino1)
+    sag((&n_ino2[0 as usize]) as u64, ino2)
+
+    // --------------------------------------------- 6. viele Dateien
+    var p_v: [u8; 11] = "/tmp/v000\0\0"
+    var gemacht: u64 = 0
+    var k2: u64 = 0
+    while k2 < 120 {
+        p_v[(6) as usize] = (48 + (k2 / 100)) as u8
+        p_v[(7) as usize] = (48 + ((k2 / 10) % 10)) as u8
+        p_v[(8) as usize] = (48 + (k2 % 10)) as u8
+        let f2: u64 = io.create((&p_v[0 as usize]) as u64)
+        if !errno.failed(f2) {
+            io.close(f2)
+            gemacht = gemacht + 1
+        }
+        k2 = k2 + 1
+    }
+    sag((&n_viele[0 as usize]) as u64, gemacht)
+    sag((&n_ende[0 as usize]) as u64, 1)
+    return 0
+}
+
+// 512 Oktette ab `pos` lesen und zaehlen, wie viele davon stimmen.
+fn probe(fd: u64, pos: u64) -> u64 {
+    if errno.failed(io.seek(fd, pos, 0)) {
+        return 0
+    }
+    let n: u64 = io.read(fd, (&buf[0 as usize]) as u64, 512)
+    if errno.failed(n) {
+        return 0
+    }
+    var gut: u64 = 0
+    var i: u64 = 0
+    while i < n {
+        if (buf[(i) as usize]) as u64 == soll(pos + i) {
+            gut = gut + 1
+        }
+        i = i + 1
+    }
+    return gut
+}
