@@ -66,7 +66,12 @@
 //   0x4C000  frei
 //   0x58000  die Energieschicht (Runde K18, `pwr.fi`)
 //   0x59000  Akku, Netzteil und Thermalzone (Runde K18, `batt.fi`)
-//   0x5A000  frei, bis KDATA_SIZE (0x60000)
+//   0x5A000  OFS in Fassung 3: die Pfadpuffer des Dateisystems,
+//            zwei Seiten (Runde OFS3, `kernel/fs.fi`)
+//   0x5C000  frei
+//   0x60000  die Arbeitsverzeichnisse, vier Seiten (Runde OFS3;
+//            lagen bis dahin auf 0x29000, eine Seite)
+//   0x64000  frei, bis KDATA_SIZE (0x70000)
 //
 // RUNDE K12 HAT DIESEN BEREICH WACHSEN LASSEN, von 0x40000 auf 0x50000.
 // Der Grund steht hier, damit ihn niemand suchen muss: mit dem
@@ -126,6 +131,10 @@ export {
     K18_OFF, K18_MAX, BATT_OFF, BATT_MAX,
     M_PWR, M_NOCSTATES, M_NOPWR, M_PWRHOT, M_NOBLANK,
     M_PWRDIM, M_PWRBLANK,
+    OFS3_OFF, OFS3_MAX, OFS3_MODE,
+    O_NOLINKS, O_OFS3, O_OFS3FMT, O_NOATIME,
+    OP_NAME, OP_NAME2, OP_OLD, OP_NEW, OP_PATH, OP_WORK, OP_BUILD,
+    OP_LINK, OP_TMP, OP_ENT,
     get, set,
     add, get32, get16, get8, set8
 }
@@ -395,8 +404,21 @@ const SMP_MODE: u64 = 24 // the words of the command line this round reads
 // and both concluded the page was free. It is not, and the map now says
 // so. What IS free is the area behind the page of file data that round
 // K4 moved to 0x28000, and that is where this page went.
-const UIO_OFF: u64 = 0x29000
-const UIO_MAX: u64 = 4096
+// RUNDE OFS3: DIESE SEITE IST UMGEZOGEN, von 0x29000 nach 0x60000, und
+// aus einer Seite sind vier geworden. Der Grund ist eine Zahl: `uio.SLOT`
+// war 128 Oktette je Aufgabe, davon 78 fuer das Arbeitsverzeichnis -- und
+// ein einzelner DATEINAME darf in OFS 3 schon 255 Zeichen haben. Ein
+// Arbeitsverzeichnis, das kuerzer ist als ein Name darin, ist keine
+// Grenze, sondern eine Falle: `cd` in ein Verzeichnis mit langem Namen
+// haette den Pfad stumm abgeschnitten, und das naechste `ls` haette ein
+// anderes Verzeichnis gezeigt.
+//
+// Bleiben konnte sie nicht: hinter 0x29000 liegt seit Runde K3 die
+// Handle-Tafel von `cap.fi` (0x2A000..0x2E000). Der neue Platz liegt
+// hinter der alten Grenze von `kdata`, und `kdata` waechst deshalb
+// mit -- so wie in Runde K12 und in Runde K18.
+const UIO_OFF: u64 = 0x60000
+const UIO_MAX: u64 = 0x4000
 
 // Round K4. Everything a POSIX process owns besides its memory.
 //
@@ -812,6 +834,75 @@ const K18_MAX: u64 = 0x1000
 const BATT_OFF: u64 = 0x59000
 const BATT_MAX: u64 = 0x1000
 
+// ======================================================== RUNDE OFS3
+//
+// ZWEI SEITEN, 0x5A000..0x5C000, AUS DEM VORRAT, DEN DIE KARTE OBEN ALS
+// FREI FUEHRT. Sie tragen die PFADPUFFER des Dateisystems, und der Grund,
+// dass es sie gibt, ist eine Zahl: ein Name in OFS 3 darf 255 Zeichen
+// lang sein (vorher 23). `fs.path` hielt seinen Namensbestandteil in
+// `[u8; 32]` auf dem KERNELSTAPEL, `fs.parent_of` den ganzen Pfad in
+// `[u8; 96]` -- zusammen 128 Oktette. Dieselben Puffer in der neuen
+// Groesse waeren 256 + 1024, und dazu kommt beim Verfolgen eines
+// symbolischen Verweises ein zweiter Pfad. Ein Kernelstapel ist 8 KiB;
+// drei Kilooktette davon fuer ein `open` sind kein Handel, den man
+// machen will -- schon gar nicht auf dem tiefsten Weg, den dieser Kernel
+// hat.
+//
+// SICHER IST DAS, WEIL ALLE NUTZER UNTER DEM SCHLOSS DES DATEISYSTEMS
+// STEHEN (`fs.enter`/`fs.leave`, `atomic.L_FS`). Es kann keine zweite
+// gleichzeitige Benutzung geben, und die Verschachtelung ist
+// aufgeschrieben: `parent_of` benutzt OP_PATH und ruft `path`, das
+// OP_WORK, OP_BUILD und OP_NAME benutzt -- vier Puffer, die sich nicht
+// ueberdecken.
+const OFS3_OFF: u64 = 0x5A000
+const OFS3_MAX: u64 = 0x2000
+
+// Die Versaetze INNERHALB der zwei Seiten. Sie stehen in
+// `tools/kernel/karte.py` als "Versatz in OFS3_OFF" und sind deshalb
+// keine eigenen Bereiche der Karte.
+const OP_NAME: u64 = 0x000 // ein Namensbestandteil in `fs.path`, 256
+const OP_NAME2: u64 = 0x100 // was `parent_of` als Namen herausgibt, 256
+const OP_OLD: u64 = 0x200 // `rename`: der alte Name
+const OP_NEW: u64 = 0x300 // `rename`: der neue Name
+const OP_PATH: u64 = 0x400 // die Pfadkopie in `parent_of`, 1024
+const OP_WORK: u64 = 0x800 // der laufende Pfad in `fs.path`, 1024
+const OP_BUILD: u64 = 0xC00 // der neu gebaute Pfad nach einem Verweis
+const OP_LINK: u64 = 0x1000 // das Ziel eines symbolischen Verweises, 1024
+const OP_TMP: u64 = 0x1400 // Zwischenlage fuer `symlink`/`readlink`
+const OP_ENT: u64 = 0x1800 // ein Verzeichniseintrag, 512
+// Die Schalter dieser Runde. Sie stehen NICHT im allgemeinen MODE-Wort:
+// dort waere nur noch Bit 63 frei, und das ist gesperrt -- `fs.enter`
+// benutzt es als Merker fuer eine verschachtelte Sperre (`fs.NESTED`).
+// Ein Modusbit an derselben Stelle waere eine Falle fuer den naechsten
+// Leser.
+const OFS3_MODE: u64 = 0x1F00 // Versatz in OFS3_OFF
+const O_NOLINKS: u64 = 1 // `fs.path` folgt keinem symbolischen Verweis
+const O_OFS3: u64 = 2 // der Selbsttest dieser Runde in Ring 3
+const O_OFS3FMT: u64 = 4 // `fs.format` baut ein Abbild der Fassung 3
+const O_NOATIME: u64 = 8 // die Zugriffszeit wird nicht nachgefuehrt
+
+// DIE WOERTER DER RUNDE OFS3 AUF DER BEFEHLSZEILE. Drei davon sind
+// GEGENPROBEN -- ohne sie waere jede Zusage dieser Runde eine Behauptung
+// ueber sich selbst.
+//
+//   `ofs3`      der Selbsttest dieser Runde in Ring 3.
+//   `ofs3fmt`   `fs.format` baut ein Abbild der FASSUNG 3 statt der
+//               Fassung 2. DIE VORGABE IST DIE FASSUNG 2, und zwar aus
+//               demselben Grund, aus dem `mkfs.py` sie ohne `--v3`
+//               baut: eine frisch formatierte Platte soll genau die
+//               Platte sein, die alle Runden vor dieser gemessen
+//               haben. Mit dem Wort dagegen faellt derselbe Kern in die
+//               neue Fassung, und die groesste Platte steigt von zwei
+//               Megaoktett auf Gigaoktette -- derselbe Kern, ein Wort
+//               Unterschied. Waeren die neuen Grenzen im Uebersetzer
+//               statt im Superblock, koennte dieser Unterschied gar
+//               nicht entstehen.
+//   `noatime`   GEGENPROBE: die Zugriffszeit wird beim Oeffnen NICHT
+//               nachgefuehrt.
+//   `nolinks`   GEGENPROBE: `fs.path` folgt keinem symbolischen Verweis.
+//               Jeder Pfad ueber einen Verweis MUSS dann ins Leere
+//               laufen.
+
 // RUNDE K18. Die Woerter dieser Runde auf der Befehlszeile. Wie in jeder
 // Runde davor sind die meisten davon GEGENPROBEN, und ohne sie beweist
 // die Runde nichts:
@@ -848,7 +939,10 @@ const M_PWRBLANK: u64 = 9007199254740992 // 1 << 53
 // von 0x50000 auf 0x60000 -- ihr Vorrat (0x58000..0x60000) liegt hinter
 // der alten Grenze. Dieselbe Zahl steht in kernel/boot.s und
 // tools/hv/run.sh vergleicht beide.
-const KDATA_SIZE: u64 = 0x60000
+// RUNDE OFS3: 0x60000 -> 0x70000. Siehe UIO_OFF. Die Zahl steht
+// ZWEIMAL -- hier und in `kernel/boot.s` --, und `tools/hv/run.sh`
+// liest beide und vergleicht sie.
+const KDATA_SIZE: u64 = 0x70000
 
 // ------------------------------------------------------ the command line
 

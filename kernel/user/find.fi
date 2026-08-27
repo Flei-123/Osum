@@ -9,11 +9,23 @@
 // `-size [+-]N[c|k]`, `-maxdepth N`, `-empty`. Alle Bedingungen gelten
 // UND -- `-o` gibt es nicht, und ein halbes `-o` waere eine Falle.
 //
-// WAS ES NICHT KANN UND WARUM: `-newer` und `-mtime`. Ein OFS-Inode ist
-// 128 Oktette gross und die sind voll (Typ, Groesse, Verweiszahl, elf
-// direkte Bloecke, ein einfach und ein doppelt indirekter). Es gibt auf
-// dieser Platte keinen Zeitstempel, also kann `find` keinen vergleichen.
-// Siehe docs/ROUNDK11.md.
+// RUNDE OFS3: `-newer DATEI` UND `-mtime [+-]N` GIBT ES JETZT. Hier
+// stand bis dahin, warum nicht: "Ein OFS-Inode ist 128 Oktette gross und
+// die sind voll ... Es gibt auf dieser Platte keinen Zeitstempel, also
+// kann `find` keinen vergleichen." Ein Inode ist jetzt 256 Oktette und
+// traegt drei Zeiten; die Begruendung ist damit weg, und die zwei
+// Bedingungen sind da.
+//
+//   -newer DATEI   was SPAETER geaendert wurde als diese Datei.
+//   -mtime -N      in den letzten N Tagen geaendert
+//   -mtime +N      vor mehr als N Tagen
+//   -mtime N       vor genau N Tagen (auf den Tag gerundet, wie GNU)
+//   -type l        ein symbolischer Verweis
+//
+// AUF EINEM ABBILD DER FASSUNG 1 ODER 2 TRAEGT JEDE DATEI DIE ZEIT NULL.
+// `-newer` findet dort nichts, und das ist die richtige Antwort: es gibt
+// dort nichts Neueres, weil es dort keine Zeit gibt. Erfunden wird
+// nichts.
 //
 // Die Tiefe ist auf acht begrenzt, und je Ebene steht EIN Puffer im
 // .bss statt auf dem Stapel: acht Rahmen zu 512 Oktetten waeren ein
@@ -41,6 +53,46 @@ static mut size_unit: u64 = 0 // 0 = Bloecke zu 512, 99 = Oktette, 107 = KiB
 static mut maxdepth: u64 = 64
 static mut want_empty: bool = false
 static mut found: u64 = 0
+// RUNDE OFS3.
+static mut newer_than: u64 = 0 // 0 = keine Bedingung
+static mut mtime_op: u64 = 0 // 0 = keine, 43 = +, 45 = -, 61 = genau
+static mut mtime_val: u64 = 0
+static mut jetzt: u64 = 0
+static mut stbuf: [u8; 144] = [0 as u8; 144]
+
+const TAG: u64 = 86400
+
+// Die Aenderungszeit einer Datei -- mit `lstat`, nicht mit `stat`: ein
+// Verweis hat eine eigene, und `find` geht ueber Namen, nicht ueber Ziele.
+fn mtime_of(full: u64) -> u64 {
+    if errno.failed(io.lstat_into(full, (&stbuf[0 as usize]) as u64)) {
+        return 0
+    }
+    return io.stat_mtime((&stbuf[0 as usize]) as u64)
+}
+
+fn zeit_ok(full: u64) -> bool {
+    if newer_than != 0 {
+        if mtime_of(full) <= newer_than {
+            return false
+        }
+    }
+    if mtime_op != 0 {
+        let m: u64 = mtime_of(full)
+        var alter: u64 = 0
+        if jetzt > m {
+            alter = (jetzt - m) / TAG
+        }
+        if mtime_op == 43 {
+            return alter > mtime_val
+        }
+        if mtime_op == 45 {
+            return alter < mtime_val
+        }
+        return alter == mtime_val
+    }
+    return true
+}
 
 // Wie viele Einheiten diese Groesse belegt -- aufgerundet, so wie GNU
 // zaehlt (`-size 1` trifft alles von 1 bis 512 Oktetten).
@@ -70,6 +122,20 @@ fn size_ok(sz: u64) -> bool {
 }
 
 fn matches(full: u64, name: u64, isdir: bool) -> bool {
+    // RUNDE OFS3: `-type l`. Ein Verweis ist weder Datei noch
+    // Verzeichnis, und `isdir` (aus `stat`) beantwortet die Frage nach
+    // dem ZIEL -- also muss hier `lstat` gefragt werden.
+    if want_type == 108 {
+        if errno.failed(io.lstat_into(full, (&stbuf[0 as usize]) as u64)) {
+            return false
+        }
+        if !io.is_link_mode(io.stat_mode_of((&stbuf[0 as usize]) as u64)) {
+            return false
+        }
+    }
+    if !zeit_ok(full) {
+        return false
+    }
     if want_type == 102 && isdir {
         return false
     }
@@ -208,6 +274,8 @@ fn u_start(args: u64) -> u64 {
     var o_size: [u8; 6] = "-size\0"
     var o_max: [u8; 10] = "-maxdepth\0"
     var o_empty: [u8; 7] = "-empty\0"
+    var o_newer: [u8; 7] = "-newer\0"
+    var o_mtime: [u8; 7] = "-mtime\0"
     var o_print: [u8; 7] = "-print\0"
     var here: [u8; 2] = ".\0"
     let argc: u64 = ulib.arg_count(args)
@@ -242,6 +310,24 @@ fn u_start(args: u64) -> u64 {
             at = at + 2
         } else if ulib.streq(a, (&o_max[0 as usize]) as u64) && at + 1 < argc {
             maxdepth = ulib.to_num(ulib.arg_at(args, at + 1))
+            at = at + 2
+        } else if ulib.streq(a, (&o_newer[0 as usize]) as u64)
+            && at + 1 < argc {
+            // RUNDE OFS3: die Zeit der VERGLEICHSDATEI, einmal geholt.
+            newer_than = mtime_of(ulib.arg_at(args, at + 1))
+            at = at + 2
+        } else if ulib.streq(a, (&o_mtime[0 as usize]) as u64)
+            && at + 1 < argc {
+            let v: u64 = ulib.arg_at(args, at + 1)
+            var i2: u64 = 0
+            mtime_op = 61
+            if *((v) as *mut u8) == 43 as u8 || *((v) as *mut u8) == 45 as u8 {
+                mtime_op = (*((v) as *mut u8)) as u64
+                i2 = 1
+            }
+            var e2: [u64; 1] = [0 as u64; 1]
+            mtime_val = tools.dec_at(v, i2, (&e2[0 as usize]) as u64)
+            jetzt = io.now_sec()
             at = at + 2
         } else if ulib.streq(a, (&o_empty[0 as usize]) as u64) {
             want_empty = true

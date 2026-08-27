@@ -171,6 +171,34 @@ const SYS_OPEN: u64 = 2
 const SYS_CLOSE: u64 = 3
 const SYS_STAT: u64 = 4
 const SYS_FSTAT: u64 = 5
+// ======================================================== RUNDE OFS3
+//
+// VIER NUMMERN, UND ALLE VIER SIND DIE VON LINUX. Regel 1 der Karte
+// oben: was Linux hat, hat Linux' Nummer -- jede eigene Zahl waere eine
+// Uebersetzungstabelle, die jemand pflegen muss.
+//
+//     6  lstat(pfad, out)      wie `stat`, aber OHNE dem Verweis zu
+//                              folgen. Ohne diesen Aufruf koennte kein
+//                              Programm einen Verweis von seinem Ziel
+//                              unterscheiden -- `ls -l` zeigte das
+//                              Ziel, `rm` loeschte das Ziel.
+//    88  symlink(ziel, wo)     einen Verweis anlegen.
+//    89  readlink(pfad, buf, n) sein Ziel lesen. Gibt die Zahl der
+//                              Oktette OHNE Null zurueck, wie POSIX es
+//                              verlangt -- eine Null anzuhaengen ist
+//                              Sache des Aufrufers.
+//   280  utimensat(fd, pfad, zeiten, flaggen)  die Zeiten setzen.
+//                              `touch` braucht ihn, und `tar -x` wird
+//                              ihn brauchen, sobald es Zeiten aus dem
+//                              Archiv zurueckspielt.
+const SYS_LSTAT: u64 = 6
+const SYS_SYMLINK: u64 = 88
+const SYS_READLINK: u64 = 89
+const SYS_UTIMENSAT: u64 = 280
+// Die zwei besonderen Nanosekundenwerte von `utimensat`, mit den Zahlen
+// aus Linux' <sys/stat.h>.
+const UTIME_NOW: u64 = 1073741823 // (1 << 30) - 1
+const UTIME_OMIT: u64 = 1073741822 // (1 << 30) - 2
 const SYS_LSEEK: u64 = 8
 const SYS_MMAP: u64 = 9
 const SYS_MUNMAP: u64 = 11
@@ -696,9 +724,14 @@ const S_IFCHR: u64 = 8192 // 0o20000
 // sie an genau diesem Feld.
 const S_IFBLK: u64 = 24576 // 0o60000
 const S_IFIFO: u64 = 4096 // 0o10000
+// RUNDE OFS3: der symbolische Verweis, mit der Zahl von Unix.
+const S_IFLNK: u64 = 40960 // 0o120000
 
 const DT_DIR: u64 = 4
 const DT_REG: u64 = 8
+// RUNDE OFS3: damit `ls -F` und `find -type l` einen Verweis erkennen,
+// ohne fuer jeden Eintrag noch ein `lstat` zu rufen.
+const DT_LNK: u64 = 10
 
 // `struct stat` of x86-64 Linux is 144 octets; `struct linux_dirent64`
 // has 19 octets in front of the name.
@@ -715,12 +748,50 @@ const ST_RDEV: u64 = 40
 const ST_SIZE: u64 = 48
 const ST_BLKSIZE: u64 = 56
 const ST_BLOCKS: u64 = 64
+// RUNDE OFS3: DIE DREI ZEITEN WAREN SCHON DA -- als Nullen. `struct
+// stat` von Linux x86-64 ist 144 Oktette gross, und diese Datei hat
+// sie seit Runde K4 in genau dieser Groesse gefuellt; die Felder ab 72
+// blieben nur leer, weil ein OFS-Inode keine Zeit trug. Es gibt also
+// keine ABI-Aenderung an dieser Stelle, nur Zahlen, wo vorher Nullen
+// standen. Jede libc auf der Welt liest sie an denselben Versaetzen.
+const ST_ATIME: u64 = 72
+const ST_ATIME_NS: u64 = 80
+const ST_MTIME: u64 = 88
+const ST_MTIME_NS: u64 = 96
+const ST_CTIME: u64 = 104
+const ST_CTIME_NS: u64 = 112
 
 // The most a single `read` or `write` moves. The bounce buffer in the data
 // area is one page, and a call that asks for more gets a SHORT answer, the
 // way a Unix `read` may always give one -- not an error.
 const MAX_IO: u64 = 4096
-const MAX_NAME: u64 = 64
+// RUNDE OFS3: 64 WAREN ES, UND DAS WAR DIE PFADGRENZE DES GANZEN
+// SYSTEMS. Ein einzelner Name darf in OFS 3 schon 255 Zeichen haben --
+// mit 64 waere `/tmp/<255 Zeichen>` an dieser Stelle mit
+// -ENAMETOOLONG abgewiesen worden, lange bevor das Dateisystem ihn zu
+// sehen bekommt. Der Kernelpuffer dahinter (`kstate.NAME_OFF`) ist
+// 4096 Oktette gross und wird jetzt so aufgeteilt:
+//
+//     +0     ein Pfad aus Ring 3, aufgeloest         1024
+//     +1024  ein zweiter (rename, mount)             1024
+//     +2048  der Arbeitsbereich von `uio.resolve`    1024
+//     +3072  ein Verzeichniseintrag fuer getdents     512
+//     +3584  der Name einer Dateisystemart             32
+//
+// Die drei letzten Zahlen sind hier neu: `named` lag auf +512 und
+// `kbuf` auf +1536 -- beide mitten in dem, was jetzt der zweite Pfad
+// ist. Wer eine davon uebersieht, bekommt einen Kernel, in dem ein
+// langer Pfad die Verzeichnisliste ueberschreibt.
+const MAX_NAME: u64 = 1024
+// Was ein einzelnes ARGUMENT von `exec` lang sein darf. Es ist NICHT
+// MAX_NAME: acht Argumente (`proc.MAX_ARGS`) zu 1024 Oktetten waeren
+// 8200 in einem Puffer von 4096 (`kstate.EARG_MAX`) -- und dahinter
+// liegt die Seite, auf der der ELF-Lader arbeitet. Die Schranke unten
+// prueft es zusaetzlich Argument fuer Argument.
+const MAX_ARG: u64 = 448
+// Wo im Namenspuffer die drei kleineren Bereiche liegen.
+const NB_ENT: u64 = 3072
+const NB_FSTYPE: u64 = 3584
 
 // How long a blocked reader or writer waits before it gives up. At 100 Hz
 // this is four seconds. A pipe with nobody at the other end must not be
@@ -795,6 +866,21 @@ fn dispatch(number: u64, frame: u64, state: u64) -> u64 {
     }
     if number == SYS_LSEEK {
         return do_lseek(state, me, a0, a1, a2)
+    }
+    // RUNDE OFS3: die vier neuen. Sie stehen VOR `SYS_STAT`, weil
+    // `lstat` sich nur in einem Wort davon unterscheidet und die beiden
+    // nebeneinander gelesen werden sollen.
+    if number == SYS_LSTAT {
+        return do_lstat(state, me, a0, a1)
+    }
+    if number == SYS_SYMLINK {
+        return do_symlink(state, me, a0, a1)
+    }
+    if number == SYS_READLINK {
+        return do_readlink(state, me, a0, a1, a2)
+    }
+    if number == SYS_UTIMENSAT {
+        return do_utimensat(state, me, a0, a1, a2, a3)
     }
     if number == SYS_STAT {
         return do_stat(state, me, a0, a1)
@@ -2236,6 +2322,13 @@ fn do_open(state: u64, me: u64, name: u64, flags: u64) -> u64 {
         return neg(errno.E_MFILE)
     }
     file.fd_set(state, me, fd, of)
+    // RUNDE OFS3: DIE ZUGRIFFSZEIT, EINMAL JE `open` UND NICHT EINMAL JE
+    // `read`. Warum an dieser Stelle und nicht in `fs.read_at`, steht bei
+    // `fs.touch_atime`: `read_at` laeuft in der Schleife jedes Programms,
+    // das eine Datei liest, und ein Inodeschreibvorgang je Leseaufruf
+    // waere ein Schreibzugriff auf die Platte je Kilooktett. Ein
+    // Verzeichnis bekommt sie auch -- `ls` ist ein Zugriff.
+    fs.touch_atime(state, ino)
     return fd
 }
 
@@ -2470,6 +2563,13 @@ fn fill_stat(state: u64, ino: u64) -> bool {
     if kind == fs.T_DIR {
         mode = S_IFDIR | fs.inode_mode(state, ino)
     }
+    // RUNDE OFS3: der dritte Fall. Ein Verweis traegt 0o777 -- seine
+    // eigenen Rechtebits werden von keinem Unix ausgewertet, weil man
+    // durch ihn hindurch auf das Ziel zugreift, und `ls -l` zeigt sie
+    // deshalb ueberall als `lrwxrwxrwx`.
+    if kind == fs.T_LINK {
+        mode = S_IFLNK | 511
+    }
     let size: u64 = fs.inode_size(state, ino)
     __mmio_write64((s + ST_DEV) as *mut u64, 1)
     __mmio_write64((s + ST_INO) as *mut u64, ino)
@@ -2481,6 +2581,14 @@ fn fill_stat(state: u64, ino: u64) -> bool {
     __mmio_write64((s + ST_SIZE) as *mut u64, size)
     __mmio_write64((s + ST_BLKSIZE) as *mut u64, 512)
     __mmio_write64((s + ST_BLOCKS) as *mut u64, (size + 511) / 512)
+    // RUNDE OFS3: DIE DREI ZEITEN AUS DEM INODE. Bei einem Abbild der
+    // Fassung 1 oder 2 gibt `fs.fi` dort null zurueck, und null heisst
+    // 1970 -- genau das, was `ls -l` auf so einem Abbild bis heute
+    // gezeigt hat. Es aendert sich also nichts an alten Platten, und
+    // alles an neuen.
+    __mmio_write64((s + ST_MTIME) as *mut u64, fs.inode_mtime(state, ino))
+    __mmio_write64((s + ST_CTIME) as *mut u64, fs.inode_ctime(state, ino))
+    __mmio_write64((s + ST_ATIME) as *mut u64, fs.inode_atime(state, ino))
     return true
 }
 
@@ -2514,6 +2622,8 @@ fn fill_vstat(state: u64, m: u64, node: u64) -> bool {
         mode = mode | S_IFCHR
     } else if art == vfsops.N_BLK {
         mode = mode | S_IFBLK
+    } else if art == vfsops.N_LNK {
+        mode = mode | S_IFLNK
     } else {
         mode = mode | S_IFREG
     }
@@ -2530,6 +2640,15 @@ fn fill_vstat(state: u64, m: u64, node: u64) -> bool {
     if bs != 0 {
         __mmio_write64((s + ST_BLOCKS) as *mut u64, (size + 511) / 512)
     }
+    // RUNDE OFS3: dieselben drei Felder wie in `fill_stat`, nur aus der
+    // Ops-Tafel. Ein Treiber ohne Uhr gibt null, und das ist die
+    // ehrliche Antwort -- /proc-Dateien haben keine Aenderungszeit.
+    __mmio_write64((s + ST_MTIME) as *mut u64,
+        vfs.v_attr(state, m, node, vfsops.A_MTIME))
+    __mmio_write64((s + ST_CTIME) as *mut u64,
+        vfs.v_attr(state, m, node, vfsops.A_CTIME))
+    __mmio_write64((s + ST_ATIME) as *mut u64,
+        vfs.v_attr(state, m, node, vfsops.A_ATIME))
     return true
 }
 
@@ -2564,6 +2683,204 @@ fn do_stat(state: u64, me: u64, name: u64, out: u64) -> u64 {
     }
     fill_stat(state, ino)
     return stat_out(state, me, out)
+}
+
+// ======================================================== RUNDE OFS3
+//
+// `lstat` IST `stat` OHNE DEN LETZTEN SPRUNG. Der ganze Unterschied
+// steht in einem Wort: `fs.path_nofollow` statt `fs.path`. Alles
+// andere -- die Weiche auf ein eingehaengtes Dateisystem, die
+// Rechtepruefung, der Puffer -- ist dasselbe, und deshalb steht es
+// hier auch nicht noch einmal, sondern ruft dieselben Bausteine.
+//
+// WARUM ES IHN GEBEN MUSS: ohne `lstat` kann kein Programm einen
+// Verweis SEHEN. `ls -l` folgte ihm und zeigte die Groesse des Ziels,
+// `find -type l` faende nie einen, und `rm` auf einen Verweis auf ein
+// Verzeichnis waere -EISDIR. Ein Dateisystem mit Verweisen und ohne
+// `lstat` ist ein Dateisystem, das luegt.
+fn do_lstat(state: u64, me: u64, name: u64, out: u64) -> u64 {
+    if !proc.user_ok(state, me, out, STAT_BYTES) {
+        return neg(errno.E_FAULT)
+    }
+    let buf: u64 = state + kstate.NAME_OFF
+    let len: u64 = fetch_path(state, me, name, buf, MAX_NAME)
+    if errno.is_error(len) {
+        return len
+    }
+    if vfs.ready(state) {
+        let m: u64 = vfs.mount_for(state, buf)
+        if m < vfs.MAX_MNT {
+            if m != 0 || vfs.all_mode(state) {
+                let node: u64 = vfs.node_for(state, m, buf)
+                if node == 0 {
+                    return neg(errno.E_NOENT)
+                }
+                fill_vstat(state, m, node)
+                return stat_out(state, me, out)
+            }
+        }
+    }
+    if kstate.get(state, kstate.FS_READY) == 0 {
+        return neg(errno.E_NOSYS)
+    }
+    let ino: u64 = fs.path_nofollow(state, buf)
+    if ino == 0 {
+        return neg(errno.E_NOENT)
+    }
+    fill_stat(state, ino)
+    return stat_out(state, me, out)
+}
+
+// EINEN SYMBOLISCHEN VERWEIS ANLEGEN. Das Ziel wird NICHT geprueft --
+// ein Verweis auf etwas, das es noch nicht gibt, ist erlaubt und in
+// jedem Unix ueblich (er heisst dann "haengend"). Was geprueft wird,
+// ist das VERZEICHNIS, in dem er entstehen soll: wer dort nicht
+// schreiben darf, darf auch keinen Verweis hineinlegen.
+fn do_symlink(state: u64, me: u64, ziel: u64, wo: u64) -> u64 {
+    if kstate.get(state, kstate.FS_READY) == 0 {
+        return neg(errno.E_NOSYS)
+    }
+    let zbuf: u64 = state + kstate.NAME_OFF + 1024
+    let zn: u64 = fetch_name(state, me, ziel, zbuf, MAX_NAME)
+    if errno.is_error(zn) {
+        return zn
+    }
+    if zn == 0 {
+        return neg(errno.E_INVAL)
+    }
+    let buf: u64 = state + kstate.NAME_OFF
+    let len: u64 = fetch_path(state, me, wo, buf, MAX_NAME)
+    if errno.is_error(len) {
+        return len
+    }
+    if len == 0 {
+        return neg(errno.E_INVAL)
+    }
+    // Ein Verweis ist ein NAME in einem Verzeichnis -- also gilt die
+    // Frage dem Verzeichnis, genau wie bei `open` mit O_CREAT.
+    if !dir_allowed(state, me, buf, 0) {
+        return neg(errno.E_ACCES)
+    }
+    if fs.path_nofollow(state, buf) != 0 {
+        return neg(errno.E_EXIST)
+    }
+    let ino: u64 = fs.symlink_path(state, zbuf, buf)
+    if ino == 0 {
+        // Fassung 1 und 2 haben keinen Inodetyp dafuer. Das ist kein
+        // Fehler des Aufrufers, sondern eine Eigenschaft der Platte --
+        // -EPERM ist genau das, was Linux auf einem Dateisystem ohne
+        // Verweise meldet.
+        if fs.version(state) < fs.OFS_V3 {
+            return neg(errno.E_PERM)
+        }
+        return neg(errno.E_NOSPC)
+    }
+    perm.on_create(state, me, ino, 511)
+    return 0
+}
+
+// Das Ziel eines Verweises. POSIX: die Zahl der Oktette OHNE die Null,
+// und ein Puffer, der zu klein ist, bekommt eine abgeschnittene Antwort
+// und KEINEN Fehler -- der Aufrufer sieht es daran, dass die Zahl gleich
+// der Puffergroesse ist.
+fn do_readlink(state: u64, me: u64, name: u64, out: u64,
+    size: u64) -> u64 {
+    if kstate.get(state, kstate.FS_READY) == 0 {
+        return neg(errno.E_NOSYS)
+    }
+    if size == 0 {
+        return neg(errno.E_INVAL)
+    }
+    if !proc.user_ok(state, me, out, size) {
+        return neg(errno.E_FAULT)
+    }
+    let buf: u64 = state + kstate.NAME_OFF
+    let len: u64 = fetch_path(state, me, name, buf, MAX_NAME)
+    if errno.is_error(len) {
+        return len
+    }
+    let ino: u64 = fs.path_nofollow(state, buf)
+    if ino == 0 {
+        return neg(errno.E_NOENT)
+    }
+    if fs.inode_type(state, ino) != fs.T_LINK {
+        return neg(errno.E_INVAL) // POSIX: das ist kein Verweis
+    }
+    let ziel: u64 = state + kstate.NAME_OFF + 1024
+    var n: u64 = fs.readlink_at(state, ino, ziel, MAX_NAME)
+    if n > size {
+        n = size
+    }
+    if !copy_out(state, me, out, ziel, n) {
+        return neg(errno.E_FAULT)
+    }
+    return n
+}
+
+// DIE ZEITEN SETZEN. `touch` braucht ihn, und er ist die einzige Stelle,
+// an der ein Programm eine Zeit im Dateisystem BESTIMMT statt sie
+// mitzubekommen.
+//
+// Die Form ist die von Linux: ein Feld aus zwei `timespec` (Sekunden,
+// Nanosekunden), erst die Zugriffs-, dann die Aenderungszeit. Ein
+// Nullzeiger heisst "beide auf jetzt"; UTIME_NOW und UTIME_OMIT in den
+// Nanosekunden heissen "jetzt" beziehungsweise "diese lassen".
+// `fd` und `flaggen` werden angenommen und nicht ausgewertet -- dieser
+// Kernel hat kein `*at` mit Verzeichnisdeskriptor, und ein Aufruf mit
+// AT_FDCWD (-100) und einem absoluten Pfad ist genau der Fall, den er
+// beherrscht.
+fn do_utimensat(state: u64, me: u64, fd: u64, name: u64, zeiten: u64,
+    flaggen: u64) -> u64 {
+    if kstate.get(state, kstate.FS_READY) == 0 {
+        return neg(errno.E_NOSYS)
+    }
+    if name == 0 {
+        return neg(errno.E_INVAL)
+    }
+    let buf: u64 = state + kstate.NAME_OFF
+    let len: u64 = fetch_path(state, me, name, buf, MAX_NAME)
+    if errno.is_error(len) {
+        return len
+    }
+    let ino: u64 = fs.path(state, buf)
+    if ino == 0 {
+        return neg(errno.E_NOENT)
+    }
+    // Wer die Zeiten setzen will, muss schreiben duerfen. Das ist
+    // strenger als POSIX (dort reicht Eigentum fuer "auf jetzt"), und
+    // strenger ist an dieser Stelle die richtige Richtung.
+    if !perm.may(state, me, ino, perm.R_WRITE) {
+        return neg(errno.E_ACCES)
+    }
+    let nun: u64 = time.now_sec(state)
+    var a: u64 = nun
+    var m: u64 = nun
+    if zeiten != 0 {
+        if !proc.user_ok(state, me, zeiten, 32) {
+            return neg(errno.E_FAULT)
+        }
+        let as_: u64 = user_word(state, me, zeiten)
+        let an: u64 = user_word(state, me, zeiten + 8)
+        let ms: u64 = user_word(state, me, zeiten + 16)
+        let mn: u64 = user_word(state, me, zeiten + 24)
+        if an == UTIME_OMIT {
+            a = 0 // 0 heisst fuer `fs.set_times`: nicht anfassen
+        } else if an != UTIME_NOW {
+            a = as_
+        }
+        if mn == UTIME_OMIT {
+            m = 0
+        } else if mn != UTIME_NOW {
+            m = ms
+        }
+    }
+    if !fs.set_times(state, ino, 0, m, a) {
+        if fs.version(state) < fs.OFS_V3 {
+            return neg(errno.E_PERM) // diese Platte traegt keine Zeiten
+        }
+        return neg(errno.E_IO)
+    }
+    return 0
 }
 
 fn do_fstat(state: u64, me: u64, fd: u64, out: u64) -> u64 {
@@ -2640,7 +2957,7 @@ fn do_getdents_vfs(state: u64, me: u64, of: u64, out: u64,
     size: u64) -> u64 {
     let m: u64 = file.open_mnt(state, of)
     let dir: u64 = file.open_ino(state, of)
-    let named: u64 = state + kstate.NAME_OFF + 512
+    let named: u64 = state + kstate.NAME_OFF + NB_ENT
     let build: u64 = state + kstate.BLOCK_OFF + 2048
     var written: u64 = 0
     var pos: u64 = file.open_off(state, of)
@@ -2670,8 +2987,11 @@ fn do_getdents_vfs(state: u64, me: u64, of: u64, out: u64,
                 __mmio_write64((build + 8) as *mut u64, pos + 1)
                 __mmio_write16((build + 16) as *mut u16, reclen as u16)
                 var kind: u64 = DT_REG
-                if vfs.v_attr(state, m, node, vfsops.A_TYPE) == vfsops.N_DIR {
+                let vart: u64 = vfs.v_attr(state, m, node, vfsops.A_TYPE)
+                if vart == vfsops.N_DIR {
                     kind = DT_DIR
+                } else if vart == vfsops.N_LNK {
+                    kind = DT_LNK
                 }
                 kstate.set8(build + 18, kind as u8)
                 var k: u64 = 0
@@ -2710,7 +3030,7 @@ fn do_getdents(state: u64, me: u64, fd: u64, out: u64, size: u64) -> u64 {
         return neg(errno.E_FAULT)
     }
     let dir: u64 = file.open_ino(state, of)
-    let named: u64 = state + kstate.NAME_OFF + 512
+    let named: u64 = state + kstate.NAME_OFF + NB_ENT
     let build: u64 = state + kstate.BLOCK_OFF + 2048
     var written: u64 = 0
     var pos: u64 = file.open_off(state, of)
@@ -2761,8 +3081,11 @@ fn do_getdents(state: u64, me: u64, fd: u64, out: u64, size: u64) -> u64 {
                 __mmio_write64((build + 8) as *mut u64, pos + 1)
                 __mmio_write16((build + 16) as *mut u16, reclen as u16)
                 var kind: u64 = DT_REG
-                if fs.inode_type(state, ino) == fs.T_DIR {
+                let art: u64 = fs.inode_type(state, ino)
+                if art == fs.T_DIR {
                     kind = DT_DIR
+                } else if art == fs.T_LINK {
+                    kind = DT_LNK
                 }
                 kstate.set8(build + 18, kind as u8)
                 var k: u64 = 0
@@ -3495,7 +3818,14 @@ fn do_execve(state: u64, me: u64, frame: u64, path: u64, argv: u64) -> u64 {
             if p == 0 {
                 going = false
             } else {
-                let n: u64 = fetch_name(state, me, p, abuf + at, MAX_NAME)
+                // RUNDE OFS3: MAX_ARG statt MAX_NAME, UND eine Schranke
+                // gegen den Puffer. Ohne die zweite waere die erste nur
+                // eine Rechnung, die stimmt, solange niemand
+                // `proc.MAX_ARGS` erhoeht.
+                if at + MAX_ARG + 1 > kstate.EARG_MAX {
+                    return neg(errno.E_2BIG)
+                }
+                let n: u64 = fetch_name(state, me, p, abuf + at, MAX_ARG)
                 if errno.is_error(n) {
                     return n
                 }
@@ -3661,8 +3991,11 @@ fn do_exec(state: u64, me: u64, path: u64, argv: u64, argc: u64) -> u64 {
         if !proc.user_ok(state, me, argv + k * 8, 8) {
             return neg(errno.E_FAULT)
         }
+        if at + MAX_ARG + 1 > kstate.EARG_MAX {
+            return neg(errno.E_2BIG)
+        }
         let n: u64 = fetch_name(state, me,
-            user_word(state, me, argv + k * 8), abuf + at, MAX_NAME)
+            user_word(state, me, argv + k * 8), abuf + at, MAX_ARG)
         if errno.is_error(n) {
             return n
         }
@@ -3799,7 +4132,7 @@ fn do_vfs_mount(state: u64, me: u64, src: u64, target: u64, kind: u64,
     }
     let sbuf: u64 = state + kstate.NAME_OFF + 1024
     let tbuf: u64 = state + kstate.NAME_OFF
-    let kbuf: u64 = state + kstate.NAME_OFF + 1536
+    let kbuf: u64 = state + kstate.NAME_OFF + NB_FSTYPE
     if errno.is_error(fetch_name(state, me, src, sbuf, 64)) {
         return neg(errno.E_FAULT)
     }

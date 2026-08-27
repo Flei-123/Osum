@@ -24,7 +24,12 @@ export {
     fstat_into, unlink, make_dir, dup, dup2, pipe, dir_open, dir_read,
     dir_name, dir_kind, dir_reclen, cwd,
     STAT_BYTES, ST_MODE, ST_SIZE, ST_INO, S_IFMT, S_IFREG, S_IFDIR,
-    S_IFIFO, S_IFCHR, DT_DIR, DT_REG, D_RECLEN, D_TYPE, D_NAME
+    S_IFIFO, S_IFCHR, DT_DIR, DT_REG, D_RECLEN, D_TYPE, D_NAME,
+    // -------------------------------------------------- RUNDE OFS3
+    lstat_into, stat_mtime, stat_ctime, stat_atime, stat_nlink,
+    stat_mode_of, now_sec,
+    symlink, readlink, is_link_mode, set_times, touch_now,
+    ST_MTIME, ST_CTIME, ST_ATIME, ST_NLINK, S_IFLNK, DT_LNK
 }
 
 const STAT_BYTES: u64 = 144
@@ -37,9 +42,20 @@ const S_IFREG: u64 = 32768
 const S_IFDIR: u64 = 16384
 const S_IFIFO: u64 = 4096
 const S_IFCHR: u64 = 8192
+// RUNDE OFS3: der symbolische Verweis, mit der Zahl von Unix.
+const S_IFLNK: u64 = 40960 // 0o120000
+
+// RUNDE OFS3: DIE DREI ZEITEN WAREN IMMER SCHON IN `struct stat` -- als
+// Nullen. Der Kernel fuellt sie seit dieser Runde; die Versaetze sind die
+// von Linux x86-64 und haben sich nicht bewegt.
+const ST_NLINK: u64 = 16
+const ST_ATIME: u64 = 72
+const ST_MTIME: u64 = 88
+const ST_CTIME: u64 = 104
 
 const DT_DIR: u64 = 4
 const DT_REG: u64 = 8
+const DT_LNK: u64 = 10
 
 // `struct linux_dirent64`: the name begins at 19, the record length at 16.
 const D_RECLEN: u64 = 16
@@ -183,8 +199,84 @@ fn stat_size(buf: u64) -> u64 {
     return __mmio_read64((buf + ST_SIZE) as *mut u64)
 }
 
+// RUNDE OFS3: die Art aus einem SCHON GEFUELLTEN Puffer. `stat_mode`
+// darueber macht selbst einen Systemaufruf und kann deshalb nicht sagen,
+// was ein `lstat` gefunden hat.
+fn stat_mode_of(buf: u64) -> u64 {
+    return __mmio_read32((buf + ST_MODE) as *mut u32) as u64
+}
+
 fn is_dir_mode(mode: u64) -> bool {
     return (mode & S_IFMT) == S_IFDIR
+}
+
+// ========================================================== RUNDE OFS3
+
+fn is_link_mode(mode: u64) -> bool {
+    return (mode & S_IFMT) == S_IFLNK
+}
+
+// `lstat`: wie `stat`, aber es folgt dem letzten Verweis NICHT. Wer
+// wissen will, OB etwas ein Verweis ist, muss diesen hier nehmen -- `stat`
+// beantwortet die Frage nach dem ZIEL und kann deshalb nie `l` sagen.
+fn lstat_into(path: u64, buf: u64) -> u64 {
+    return errno.check(kcall.sys2(kcall.SYS_LSTAT, path, buf))
+}
+
+fn stat_mtime(buf: u64) -> u64 {
+    return __mmio_read64((buf + ST_MTIME) as *mut u64)
+}
+
+fn stat_ctime(buf: u64) -> u64 {
+    return __mmio_read64((buf + ST_CTIME) as *mut u64)
+}
+
+fn stat_atime(buf: u64) -> u64 {
+    return __mmio_read64((buf + ST_ATIME) as *mut u64)
+}
+
+fn stat_nlink(buf: u64) -> u64 {
+    return __mmio_read64((buf + ST_NLINK) as *mut u64)
+}
+
+// Einen symbolischen Verweis anlegen: `wo` zeigt danach auf `ziel`.
+// Die Reihenfolge ist die von POSIX (erst das Ziel), und sie ist genau
+// andersherum als bei `cp` -- das ist nicht schoen, aber es ist die, die
+// jedes Unix hat.
+fn symlink(ziel: u64, wo: u64) -> u64 {
+    return errno.check(kcall.sys2(kcall.SYS_SYMLINK, ziel, wo))
+}
+
+// Das Ziel eines Verweises. Gibt die Zahl der Oktette OHNE Null zurueck;
+// die Null anzuhaengen ist Sache des Aufrufers, und deshalb steht sie
+// hier gleich mit drin.
+fn readlink(path: u64, buf: u64, n: u64) -> u64 {
+    let r: u64 = errno.check(kcall.sys3(kcall.SYS_READLINK, path, buf, n))
+    if !errno.failed(r) && r < n {
+        *((buf + r) as *mut u8) = 0 as u8
+    }
+    return r
+}
+
+// Die Zeiten setzen. `zeiten` ist ein Feld aus zwei `timespec`
+// (Sekunden, Nanosekunden): erst die Zugriffs-, dann die Aenderungszeit.
+// 0 heisst "auf jetzt".
+fn set_times(path: u64, zeiten: u64) -> u64 {
+    // AT_FDCWD ist -100. Dieser Kernel wertet den Deskriptor nicht aus,
+    // aber die Zahl steht hier richtig, damit derselbe Aufruf auf einem
+    // Linux dasselbe taete.
+    return errno.check(kcall.sys4(kcall.SYS_UTIMENSAT, 0 -% 100, path,
+            zeiten, 0))
+}
+
+fn touch_now(path: u64) -> u64 {
+    return set_times(path, 0)
+}
+
+// Die Uhr, in Sekunden seit 1970 -- dieselbe Zahl, die im Inode steht.
+// `time(2)` von Linux: ein Aufruf, ein Wort, kein Puffer.
+fn now_sec() -> u64 {
+    return kcall.sys1(kcall.SYS_TIME, 0)
 }
 
 // ---------------------------------------------------------- directories

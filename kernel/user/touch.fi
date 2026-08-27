@@ -1,19 +1,32 @@
 // kernel/user/touch.fi -- round K6: a file that is there.
 //
-// There is no clock on a file in this file system, so `touch` is the half
-// of it that is left: a file that was not there is created, and one that
-// was is left exactly as it is. `open(path, create)` is the whole
-// program.
+// RUNDE OFS3: `touch` IST WIEDER GANZ. Hier stand: "There is no clock on
+// a file in this file system, so `touch` is the half of it that is left."
+// Es gibt jetzt eine -- drei sogar --, also tut dieses Programm wieder
+// das, wofuer es seinen Namen hat: es setzt die Aenderungs- und die
+// Zugriffszeit auf JETZT. Eine Datei, die es nicht gab, entsteht dabei
+// wie vorher.
+//
+//     touch DATEI...        Zeiten auf jetzt (und anlegen)
+//     touch -c DATEI...     NICHT anlegen, nur die Zeiten setzen
+//
+// Auf einem Abbild der Fassung 1 oder 2 gibt der Kernel -EPERM zurueck:
+// diese Platte traegt keine Zeiten. `touch` sagt das dann auch, statt so
+// zu tun, als haette es etwas getan.
 
 profile kernel
 
 import ulib
+import libc.io
+import libc.errno
 
 export { u_start }
 
 fn u_start(args: u64) -> u64 {
     var s_err: [u8; 22] = "touch: cannot create \0"
     var s_use: [u8; 20] = "touch: needs a path\0"
+    var s_zeit: [u8; 30] = "touch: no timestamps on this \0"
+    var o_c: [u8; 3] = "-c\0"
 
     let argc: u64 = ulib.arg_count(args)
     if argc < 2 {
@@ -21,18 +34,35 @@ fn u_start(args: u64) -> u64 {
         return 1
     }
     var code: u64 = 0
+    var nocreate: bool = false
     var k: u64 = 1
     while k < argc {
         let p: u64 = ulib.arg_at(args, k)
-        // O_CREAT without O_TRUNC: `touch` on a file that is there must
-        // not empty it. Round K1's second argument was a boolean "make
-        // it"; it is Linux's flag word since round K4.
-        let fd: u64 = ulib.sys(ulib.SYS_OPEN, p, 65, 0)
-        if ulib.bad(fd) {
-            ulib.esay_line((&s_err[0 as usize]) as u64, p)
-            code = 1
+        if ulib.streq(p, (&o_c[0 as usize]) as u64) {
+            nocreate = true
         } else {
-            ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+            // O_CREAT without O_TRUNC: `touch` on a file that is there
+            // must not empty it. Round K1's second argument was a
+            // boolean "make it"; it is Linux's flag word since round K4.
+            var da: bool = true
+            if !nocreate {
+                let fd: u64 = ulib.sys(ulib.SYS_OPEN, p, 65, 0)
+                if ulib.bad(fd) {
+                    ulib.esay_line((&s_err[0 as usize]) as u64, p)
+                    code = 1
+                    da = false
+                } else {
+                    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+                }
+            }
+            // RUNDE OFS3: und jetzt die Zeit. Ein Nullzeiger heisst
+            // "beide auf jetzt" -- genau wie bei Linux' `utimensat`.
+            if da {
+                if errno.failed(io.touch_now(p)) {
+                    ulib.esay_line((&s_zeit[0 as usize]) as u64, p)
+                    code = 1
+                }
+            }
         }
         k = k + 1
     }

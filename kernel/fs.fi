@@ -29,6 +29,57 @@
 // ATA disk without a line of difference -- and `tools/kernel/run.sh`
 // runs it on both.
 //
+// ==================================================================
+// RUNDE OFS3: DIE FASSUNG 3, UND WARUM SIE SEIN MUSSTE
+// ==================================================================
+//
+// Bis zu dieser Runde stand oben "block 1 THE BLOCK BITMAP" -- EIN
+// Block. Ein Block sind 512 Oktette, also 4096 Bits, also 4096 Bloecke,
+// also ZWEI MEGAOKTETT je Platte. Das war die harte Decke des ganzen
+// Systems, und sie stand seit Runde 62 unbemerkt da: kein Auftrag, keine
+// Roadmap, kein Logbuch hat sie je genannt. Der Quelltext selbst hat sie
+// genannt, weiter unten, in einem Nachsatz des zweiten K15-Nachtrags --
+// "Wer mehr will, braucht eine mehrblockige Karte -- das ist eine andere
+// Runde". Dies ist diese Runde.
+//
+// WAS DIE FASSUNG 3 AENDERT, und jede der vier Zahlen kommt jetzt aus dem
+// SUPERBLOCK und nicht mehr aus einer Konstanten dieser Datei:
+//
+//   1. DIE BLOCKKARTE IST MEHRBLOCKIG. `SB_BMBLOCKS` sagt, wie viele
+//      Bloecke sie hat; jeder traegt 4096 Bits. Die Karte fuer eine
+//      Platte von vier Gigaoktett sind 2048 Bloecke, also ein
+//      Megaoktett -- 0,02 % der Platte fuer das, was vorher die Grenze
+//      war.
+//   2. DER INODE IST 256 OKTETTE STATT 128. Die ersten 128 Oktette sind
+//      OKTETT FUER OKTETT die der Fassung 2 -- Art, Groesse, Verweise,
+//      acht direkte Zeiger, mode/uid/gid, einfach und doppelt indirekt.
+//      In den zweiten 128 stehen der DREIFACH indirekte Zeiger und DREI
+//      ZEITSTEMPEL (erzeugt, geaendert, zugegriffen), dahinter zwoelf
+//      Woerter Vorrat. Dass die alten Felder liegenbleiben, ist kein
+//      Zufall: es macht den Leser fuer Fassung 2 und Fassung 3 zu
+//      DEMSELBEN Leser, bis auf die Schrittweite in der Tabelle.
+//   3. EIN VERZEICHNISEINTRAG IST 264 OKTETTE STATT 32: acht fuer die
+//      Inodenummer, 256 fuer den Namen. Damit sind 255 Zeichen erlaubt,
+//      wie in POSIX und wie in jedem Unix. Der Preis steht in
+//      docs/ROUNDOFS3.md und er ist echt: ein Verzeichnis mit
+//      viertausend kurzen Namen wird von 128 KiB auf 1,06 MiB.
+//   4. ES GIBT EINEN DRITTEN INODETYP: T_LINK, den symbolischen
+//      Verweis. Sein Inhalt IST der Pfad, auf den er zeigt; `fs.path`
+//      folgt ihm, hoechstens achtmal hintereinander.
+//
+// DIE ALTEN ABBILDER BLEIBEN LESBAR, und das ist keine Nettigkeit,
+// sondern die Bedingung, unter der diese Datei angefasst werden durfte.
+// Runde K13 hat vorgemacht wie: eine FASSUNGSNUMMER im Superblock
+// (Versatz 64), und eine Null dort heisst "Fassung 1". Genauso heisst
+// eine Null in JEDEM der vier neuen Felder "so wie vorher": Karte = ein
+// Block, Inode = 128, Eintrag = 32, Name = 24. Ein Abbild aus Runde 62
+// sagt damit von selbst das Richtige, ohne dass jemand es anfasst.
+//
+// DER LOHN, IN ZAHLEN (gemessen in tools/ofs3/run.sh, nicht behauptet):
+// die groesste Platte steigt von 2 MiB auf mehrere Gigaoktett, die
+// groesste Datei von 2.134.016 auf 136.351.744 Oktette, der laengste
+// Name von 23 auf 255 Zeichen.
+//
 // The scratch blocks lie in the kernel data area (`kstate.FS_OFF`), not
 // on the stack: a kernel stack is 8 KiB, and six blocks of 512 octets on
 // it would be a third of it. Every entry point takes the interrupt flag
@@ -42,6 +93,10 @@ import blk
 import atomic
 import cpu
 import nidx
+// RUNDE OFS3: die Uhr. Ohne sie waeren die drei Zeitstempel im Inode
+// drei Nullen, und das waere derselbe Zustand wie vorher, nur mit mehr
+// Platz dafuer.
+import time
 
 export {
     format, mount, path, create_path, unlink_path, entry_at, dir_entries,
@@ -53,7 +108,13 @@ export {
     rename_path,
     // RUNDE K15, zweiter Nachtrag: die Geometrie aus dem Superblock und
     // der Weg ueber Plaetze statt ueber "der wievielte".
-    inode_count, data_start, scan, geom, entry_slot, slot_count
+    inode_count, data_start, scan, geom, entry_slot, slot_count,
+    // ---------------------------------------------------- RUNDE OFS3
+    OFS_V3, T_LINK, DIRENT_V3, NAME_V3, INODE_SIZE, INODE_SIZE_V3,
+    dirent_size, name_len, inode_bytes, bm_start, bm_blocks, itable,
+    inode_ctime, inode_mtime, inode_atime, set_times, touch_atime,
+    max_file, max_blocks, format_as, path_nofollow, symlink_path,
+    readlink_at, link_target_len, follows_links
 }
 
 const BS: u64 = 512 // one block
@@ -67,6 +128,18 @@ const INODE_BLOCKS: u64 = 32
 const DATA_START: u64 = 34
 const DIRENT: u64 = 32
 const NAME_LEN: u64 = 24
+// ---------------------------------------------------------- RUNDE OFS3
+// Die Zahlen der Fassung 3. Sie stehen als VORGABE hier und als WAHRHEIT
+// im Superblock; jede Stelle unten geht durch `dirent_size(state)`,
+// `name_len(state)` und `inode_bytes(state)` und nicht durch diese
+// Konstanten. Wer eine davon direkt benutzt, hat einen Fehler gebaut,
+// der erst auf einem alten Abbild auffaellt.
+const INODE_SIZE_V3: u64 = 256
+const IPB_V3: u64 = 2 // 512 / 256
+const DIRENT_V3: u64 = 264 // 8 Oktette Inodenummer + 256 Oktette Name
+const NAME_V3: u64 = 256 // 255 Zeichen und die Null, wie in POSIX
+// Wie viele Bloecke EIN Block der Karte verwaltet: 512 Oktette * 8 Bits.
+const BITS_PER_BLOCK: u64 = 4096
 // ROUND K4: eleven direct blocks and not twelve, because the twelfth slot
 // of the inode became the DOUBLE indirect one. What a file could hold
 // before was 12 + 64 blocks = 38912 octets, and that was the ceiling of
@@ -105,6 +178,16 @@ const PER_BLOCK: u64 = BS / 8 // pointers in one block: 64
 const T_FREE: u64 = 0
 const T_FILE: u64 = 1
 const T_DIR: u64 = 2
+// RUNDE OFS3: DER SYMBOLISCHE VERWEIS. Sein INHALT ist der Pfad, auf den
+// er zeigt -- keine eigene Tafel, kein Sonderfeld im Inode, nichts als
+// eine Datei, deren Oktette ein Name sind. Genau so macht es jedes Unix
+// seit 4.2BSD, und genau deshalb kostet er hier keinen einzigen Block
+// mehr als der Text, der drinsteht.
+const T_LINK: u64 = 3
+// Wie oft `path` einem Verweis hoechstens folgt, ehe es aufgibt. POSIX
+// nennt die Grenze SYMLOOP_MAX und den Fehler ELOOP; ohne sie waeren
+// zwei Verweise, die aufeinander zeigen, ein stehender Kernel.
+const MAX_HOPS: u64 = 8
 
 // ------------------------------------- ROUND K15, ZWEITER NACHTRAG
 //
@@ -127,6 +210,25 @@ const T_DIR: u64 = 2
 // hier, damit niemand es fuer erledigt haelt.
 const G_INODES: u64 = 0
 const G_DATA: u64 = 8
+// RUNDE OFS3: sieben weitere Woerter im selben Bereich (`kstate.FSG_OFF`,
+// 128 Oktette, davon jetzt 80 belegt). JEDE Zahl, die das Format auf der
+// Platte beschreibt, steht hier -- und in `mount` steht die eine Stelle,
+// an der sie aus dem Superblock kommen.
+const G_BMSTART: u64 = 16 // erster Block der Karte
+const G_BMBLOCKS: u64 = 24 // wie viele Bloecke die Karte hat
+const G_ITABLE: u64 = 32 // erster Block der Inodetabelle
+const G_ISIZE: u64 = 40 // Oktette je Inode
+const G_IPB: u64 = 48 // Inodes je Block
+const G_DIRENT: u64 = 56 // Oktette je Verzeichniseintrag
+const G_NAMELEN: u64 = 64 // Oktette fuer den Namen darin
+// DER MERKER DES BLOCKZUTEILERS, und er ist kein Schmuck. `block_alloc`
+// suchte den ersten freien Block IMMER ab `data_start`. Bei 4096
+// Bloecken kostet das nichts; bei einer Platte von vier Gigaoktett sind
+// es 2048 Kartenbloecke, die fuer JEDE einzelne Zuteilung noch einmal
+// gelesen werden -- eine Datei von 100 MiB waere damit nicht in Stunden
+// fertig. Hier steht, wo der letzte Fund lag; die Suche faengt dort an
+// und laeuft einmal rundherum.
+const G_HINT: u64 = 72
 
 fn inode_count(state: u64) -> u64 {
     let n: u64 = kstate.get(state, kstate.FSG_OFF + G_INODES)
@@ -149,6 +251,107 @@ fn geom(state: u64, inodes: u64, data: u64) {
     kstate.set(state, kstate.FSG_OFF + G_DATA, data)
 }
 
+// ---------------------------------------------------------- RUNDE OFS3
+//
+// DIE SIEBEN ANDEREN ZAHLEN, jede mit derselben Regel wie oben: eine
+// Null heisst "die Vorgabe", und die Vorgabe ist genau das, was vor
+// dieser Runde als Konstante dastand. Ein Abbild der Fassung 1 oder 2
+// traegt in allen sieben Feldern eine Null und verhaelt sich damit
+// Oktett fuer Oktett wie vorher.
+fn bm_start(state: u64) -> u64 {
+    let v: u64 = kstate.get(state, kstate.FSG_OFF + G_BMSTART)
+    if v == 0 {
+        return BITMAP_BLOCK
+    }
+    return v
+}
+
+fn bm_blocks(state: u64) -> u64 {
+    let v: u64 = kstate.get(state, kstate.FSG_OFF + G_BMBLOCKS)
+    if v == 0 {
+        return 1
+    }
+    return v
+}
+
+fn itable(state: u64) -> u64 {
+    let v: u64 = kstate.get(state, kstate.FSG_OFF + G_ITABLE)
+    if v == 0 {
+        return INODE_START
+    }
+    return v
+}
+
+fn inode_bytes(state: u64) -> u64 {
+    let v: u64 = kstate.get(state, kstate.FSG_OFF + G_ISIZE)
+    if v == 0 {
+        return INODE_SIZE
+    }
+    return v
+}
+
+fn inodes_per_block(state: u64) -> u64 {
+    let v: u64 = kstate.get(state, kstate.FSG_OFF + G_IPB)
+    if v == 0 {
+        return INODES_PER_BLOCK
+    }
+    return v
+}
+
+fn dirent_size(state: u64) -> u64 {
+    let v: u64 = kstate.get(state, kstate.FSG_OFF + G_DIRENT)
+    if v == 0 {
+        return DIRENT
+    }
+    return v
+}
+
+fn name_len(state: u64) -> u64 {
+    let v: u64 = kstate.get(state, kstate.FSG_OFF + G_NAMELEN)
+    if v == 0 {
+        return NAME_LEN
+    }
+    return v
+}
+
+// Die ganze Geometrie auf einmal. `mount` und `format` sind die einzigen
+// zwei Stellen, die sie schreiben.
+fn geom3(state: u64, bms: u64, bmb: u64, itab: u64, isz: u64, ipb: u64,
+    dent: u64, nlen: u64) {
+    kstate.set(state, kstate.FSG_OFF + G_BMSTART, bms)
+    kstate.set(state, kstate.FSG_OFF + G_BMBLOCKS, bmb)
+    kstate.set(state, kstate.FSG_OFF + G_ITABLE, itab)
+    kstate.set(state, kstate.FSG_OFF + G_ISIZE, isz)
+    kstate.set(state, kstate.FSG_OFF + G_IPB, ipb)
+    kstate.set(state, kstate.FSG_OFF + G_DIRENT, dent)
+    kstate.set(state, kstate.FSG_OFF + G_NAMELEN, nlen)
+    kstate.set(state, kstate.FSG_OFF + G_HINT, 0)
+}
+
+// Wie viele Bloecke dieses Abbild ueberhaupt verwalten KANN -- die Karte
+// setzt die Grenze, und sie ist die Zahl, um die es dieser Runde geht.
+fn max_blocks(state: u64) -> u64 {
+    return bm_blocks(state) * BITS_PER_BLOCK
+}
+
+// Wie gross eine Datei in diesem Abbild hoechstens wird. Acht direkte
+// Bloecke, 64 durch den einfach, 4096 durch den doppelt und 262144 durch
+// den dreifach indirekten Zeiger.
+fn max_file(state: u64) -> u64 {
+    var n: u64 = directs(state) + PER_BLOCK + PER_BLOCK * PER_BLOCK
+    if version(state) >= OFS_V3 {
+        n = n + PER_BLOCK * PER_BLOCK * PER_BLOCK
+    }
+    return n * BS
+}
+
+// Folgt dieser Kernel symbolischen Verweisen? Das Wort `nolinks` auf der
+// Befehlszeile sagt nein -- die Gegenprobe zu allem, was `T_LINK` kann.
+fn follows_links(state: u64) -> bool {
+    return (kstate.get(state, kstate.OFS3_OFF + kstate.OFS3_MODE)
+        & kstate.O_NOLINKS) == 0
+}
+
 // The fields of an inode.
 const I_TYPE: u64 = 0
 const I_SIZE: u64 = 8
@@ -156,6 +359,18 @@ const I_NLINK: u64 = 16
 const I_DIRECT: u64 = 24 // eight of them from OFS 2 on, eleven before
 const I_INDIRECT: u64 = 112
 const I_DINDIRECT: u64 = 120 // round K4: 64 blocks of 64 pointers
+// RUNDE OFS3: die zweiten 128 Oktette. Sie gibt es NUR in einem Abbild
+// der Fassung 3 -- in der Fassung 2 ist bei 128 der naechste Inode, und
+// eine Zeit dorthin zu schreiben hiesse, die Art der Nachbardatei zu
+// ueberschreiben. Jeder Zugriff unten prueft deshalb die Fassung.
+const I_TINDIRECT: u64 = 128 // dreifach indirekt: 64 * 64 * 64 Bloecke
+const I_CTIME: u64 = 136 // erzeugt, Sekunden seit 1970
+const I_MTIME: u64 = 144 // zuletzt geschrieben
+const I_ATIME: u64 = 152 // zuletzt gelesen
+// 160..255 bleiben Vorrat: zwoelf Woerter, genullt, fuer die Runde, die
+// als naechste etwas im Inode braucht. Dass sie da sind, ist der
+// eigentliche Unterschied zu Fassung 2 -- die war VOLL, und genau
+// deshalb gab es keine Zeitstempel.
 // RUNDE K13: die drei Woerter, die aus den Blockzeigern 8, 9 und 10
 // wurden. Sie haben in einem Abbild der Fassung 1 KEINE Bedeutung -- die
 // Zugriffe unten geben dort Standardwerte zurueck, statt Blocknummern als
@@ -184,8 +399,18 @@ const SB_ROOT: u64 = 56
 // Richtige, ohne dass jemand es anfassen muesste. Das ist die ganze
 // Rueckwaertsvertraeglichkeit, und sie kostet ein Wort.
 const SB_VERSION: u64 = 64
+// RUNDE OFS3. Vier Felder, alle nach demselben Muster wie SB_VERSION:
+// eine Null heisst "wie vor dieser Runde". Ein Abbild aus Runde 62 hat
+// dort Nullen, weil der Superblock beim Formatieren genullt wird -- es
+// sagt damit von selbst "ein Kartenblock, 128er Inodes, 32er Eintraege,
+// 24er Namen", und das ist die Wahrheit ueber es.
+const SB_BMBLOCKS: u64 = 72
+const SB_ISIZE: u64 = 80
+const SB_DIRENT: u64 = 88
+const SB_NAMELEN: u64 = 96
 const OFS_V1: u64 = 1
 const OFS_V2: u64 = 2
+const OFS_V3: u64 = 3
 
 // ------------------------------------------------------ the scratch area
 
@@ -330,6 +555,115 @@ fn directs(state: u64) -> u64 {
     return DIRECT_V1
 }
 
+// ---------------------------------------------------------- RUNDE OFS3
+//
+// DIE DREI ZEITEN. In einem Abbild der Fassung 1 oder 2 gibt es sie
+// nicht, und dort ist die ehrliche Antwort die Null -- `ls -l` zeigt
+// dann 1970, der Datei-Explorer zeigt "--", und `find -newer` sagt, dass
+// es nichts Neueres gibt. Eine erfundene Zeit waere schlimmer als eine
+// leere; genau das steht seit Runde K15 im Kopf von
+// `kernel/user/explorer.fi`, und diese Runde loest es ein statt es
+// wegzuerklaeren.
+fn inode_ctime(state: u64, ino: u64) -> u64 {
+    if version(state) < OFS_V3 {
+        return 0
+    }
+    return inode_get(state, ino, I_CTIME)
+}
+
+fn inode_mtime(state: u64, ino: u64) -> u64 {
+    if version(state) < OFS_V3 {
+        return 0
+    }
+    return inode_get(state, ino, I_MTIME)
+}
+
+fn inode_atime(state: u64, ino: u64) -> u64 {
+    if version(state) < OFS_V3 {
+        return 0
+    }
+    return inode_get(state, ino, I_ATIME)
+}
+
+// Die Uhr des Kernels in Sekunden seit 1970. Sie kommt aus `time.fi`
+// (CMOS beim Start, Zyklenzaehler danach) -- dieselbe Zahl, die
+// `clock_gettime` in Ring 3 liefert, und das ist die Bedingung dafuer,
+// dass `find -newer` und `tar` dasselbe meinen wie das Programm, das die
+// Datei geschrieben hat.
+fn jetzt(state: u64) -> u64 {
+    return time.now_sec(state)
+}
+
+// EIN Blockzugriff fuer drei Felder statt drei. `inode_set` liest und
+// schreibt je Aufruf einen ganzen Block; dreimal hintereinander waeren
+// sechs Zugriffe fuer denselben Block.
+fn set_times(state: u64, ino: u64, c: u64, m: u64, a: u64) -> bool {
+    if version(state) < OFS_V3 {
+        return false
+    }
+    if ino == 0 || ino > inode_count(state) {
+        return false
+    }
+    let flags: u64 = enter(state)
+    if !blk.read(state, inode_block_of(state, ino), buf_in(state)) {
+        leave(state, flags)
+        return false
+    }
+    let at: u64 = buf_in(state) + inode_off(state, ino)
+    if c != 0 {
+        put64(at + I_CTIME, c)
+    }
+    if m != 0 {
+        put64(at + I_MTIME, m)
+    }
+    if a != 0 {
+        put64(at + I_ATIME, a)
+    }
+    let r: bool = blk.write(state, inode_block_of(state, ino), buf_in(state))
+    leave(state, flags)
+    return r
+}
+
+// DIE ZUGRIFFSZEIT WIRD BEIM OEFFNEN NACHGEFUEHRT UND NICHT BEI JEDEM
+// `read`. Das ist eine Entscheidung und keine Bequemlichkeit: `read_at`
+// laeuft in der Schleife jedes Programms, das eine Datei liest, und ein
+// Inodeschreibvorgang je Leseaufruf waere ein Schreibzugriff auf die
+// Platte fuer jeden Kilooktett, den irgendwer liest -- messbar, und bei
+// einem nur lesend eingehaengten Dateisystem falsch. Linux nennt seine
+// Fassung davon `relatime`; diese hier ist `open`-genau.
+//
+// Und sie schreibt NUR, wenn sich die Sekunde geaendert hat. Ein
+// `for f in *; do cat $f; done` fasst die Platte damit einmal je Datei
+// und je Sekunde an, nicht einmal je Aufruf.
+fn touch_atime(state: u64, ino: u64) {
+    if version(state) < OFS_V3 {
+        return
+    }
+    if (kstate.get(state, kstate.OFS3_OFF + kstate.OFS3_MODE)
+        & kstate.O_NOATIME) != 0 {
+        return
+    }
+    let nun: u64 = jetzt(state)
+    if nun == 0 || inode_get(state, ino, I_ATIME) == nun {
+        return
+    }
+    set_times(state, ino, 0, 0, nun)
+}
+
+// Nach jedem Schreiben. Auch das nur, wenn sich die Sekunde geaendert
+// hat -- eine Datei, die in einer Sekunde hundertmal beschrieben wird,
+// bekommt einen Inodeschreibvorgang und nicht hundert.
+fn touch_mtime(state: u64, ino: u64) {
+    if version(state) < OFS_V3 {
+        return
+    }
+    let nun: u64 = jetzt(state)
+    if nun == 0 || inode_get(state, ino, I_MTIME) == nun {
+        return
+    }
+    set_times(state, ino, 0, nun, 0)
+}
+
 // Die Rechtebits einer Datei. In einem Abbild der Fassung 1 gibt es sie
 // nicht: dort waere I_MODE der neunte Blockzeiger, und eine Blocknummer
 // als Rechtebits zu lesen waere schlimmer als kein Recht zu kennen. Also
@@ -416,33 +750,39 @@ fn set_meta(state: u64, ino: u64, mode: u64, uid: u64, gid: u64) -> bool {
 
 // ---------------------------------------------------------- the inodes
 
-fn inode_block_of(ino: u64) -> u64 {
-    return INODE_START + (ino - 1) / INODES_PER_BLOCK
+// RUNDE OFS3: BEIDE ZAHLEN KOMMEN AUS DEM SUPERBLOCK. Vorher waren
+// `INODE_START` und `INODES_PER_BLOCK` Konstanten -- Block 2, vier je
+// Block, 128 Oktette. In der Fassung 3 liegt die Tabelle HINTER einer
+// mehrblockigen Karte und ein Inode ist 256 Oktette, also passen zwei in
+// einen Block. Wer hier eine Konstante stehenliesse, laese in einem
+// Abbild der Fassung 3 jede zweite Datei als ihren Nachbarn.
+fn inode_block_of(state: u64, ino: u64) -> u64 {
+    return itable(state) + (ino - 1) / inodes_per_block(state)
 }
 
-fn inode_off(ino: u64) -> u64 {
-    return ((ino - 1) % INODES_PER_BLOCK) * INODE_SIZE
+fn inode_off(state: u64, ino: u64) -> u64 {
+    return ((ino - 1) % inodes_per_block(state)) * inode_bytes(state)
 }
 
 fn inode_get(state: u64, ino: u64, field: u64) -> u64 {
     if ino == 0 || ino > inode_count(state) {
         return 0
     }
-    if !blk.read(state, inode_block_of(ino), buf_in(state)) {
+    if !blk.read(state, inode_block_of(state, ino), buf_in(state)) {
         return 0
     }
-    return get64(buf_in(state) + inode_off(ino) + field)
+    return get64(buf_in(state) + inode_off(state, ino) + field)
 }
 
 fn inode_set(state: u64, ino: u64, field: u64, v: u64) -> bool {
     if ino == 0 || ino > inode_count(state) {
         return false
     }
-    if !blk.read(state, inode_block_of(ino), buf_in(state)) {
+    if !blk.read(state, inode_block_of(state, ino), buf_in(state)) {
         return false
     }
-    put64(buf_in(state) + inode_off(ino) + field, v)
-    return blk.write(state, inode_block_of(ino), buf_in(state))
+    put64(buf_in(state) + inode_off(state, ino) + field, v)
+    return blk.write(state, inode_block_of(state, ino), buf_in(state))
 }
 
 fn inode_type(state: u64, ino: u64) -> u64 {
@@ -456,14 +796,25 @@ fn inode_size(state: u64, ino: u64) -> u64 {
 // A whole inode at once: cheaper than eighteen single writes, and it is
 // the only way a new inode gets a clean state.
 fn inode_init(state: u64, ino: u64, kind: u64) -> bool {
-    if !blk.read(state, inode_block_of(ino), buf_in(state)) {
+    if !blk.read(state, inode_block_of(state, ino), buf_in(state)) {
         return false
     }
-    let at: u64 = buf_in(state) + inode_off(ino)
-    zero(at, INODE_SIZE)
+    let at: u64 = buf_in(state) + inode_off(state, ino)
+    zero(at, inode_bytes(state))
     put64(at + I_TYPE, kind)
     put64(at + I_NLINK, 1)
-    return blk.write(state, inode_block_of(ino), buf_in(state))
+    // RUNDE OFS3: DIE DREI ZEITEN ENTSTEHEN MIT DER DATEI, in demselben
+    // Blockschreibvorgang. Eine Datei, die erst nach dem ersten `write`
+    // eine Zeit bekaeme, haette eine Aenderungszeit vor ihrer
+    // Erzeugungszeit -- und `find -newer` waere damit auf einem frisch
+    // ausgepackten Archiv Unsinn.
+    if version(state) >= OFS_V3 {
+        let nun: u64 = jetzt(state)
+        put64(at + I_CTIME, nun)
+        put64(at + I_MTIME, nun)
+        put64(at + I_ATIME, nun)
+    }
+    return blk.write(state, inode_block_of(state, ino), buf_in(state))
 }
 
 fn inode_alloc(state: u64, kind: u64) -> u64 {
@@ -488,11 +839,13 @@ fn used_inodes(state: u64) -> u64 {
     let letzte: u64 = inode_count(state)
     var n: u64 = 0
     var b: u64 = 0
-    while b * INODES_PER_BLOCK < letzte {
-        if blk.read(state, INODE_START + b, buf_in(state)) {
+    let ipb: u64 = inodes_per_block(state)
+    let isz: u64 = inode_bytes(state)
+    while b * ipb < letzte {
+        if blk.read(state, itable(state) + b, buf_in(state)) {
             var k: u64 = 0
-            while k < INODES_PER_BLOCK && b * INODES_PER_BLOCK + k < letzte {
-                if get64(buf_in(state) + k * INODE_SIZE + I_TYPE) != T_FREE {
+            while k < ipb && b * ipb + k < letzte {
+                if get64(buf_in(state) + k * isz + I_TYPE) != T_FREE {
                     n = n + 1
                 }
                 k = k + 1
@@ -505,24 +858,84 @@ fn used_inodes(state: u64) -> u64 {
 
 // ---------------------------------------------------------- the bitmap
 
+// ---------------------------------------------------------- RUNDE OFS3
+//
+// DIE KARTE IST MEHRBLOCKIG, und das sind die drei Zeilen, um die es
+// dieser Runde geht. Block `bm_start + k` traegt die Bits der Bloecke
+// `k * 4096` bis `k * 4096 + 4095`. Nichts sonst aendert sich: ein Bit
+// ist ein Block, gesetzt heisst belegt.
+fn bm_block_of(state: u64, b: u64) -> u64 {
+    return bm_start(state) + b / BITS_PER_BLOCK
+}
+
+// Der Versatz des Oktetts INNERHALB seines Kartenblocks. Ohne das `%`
+// zeigte die Rechnung bei Block 4096 aus dem Puffer heraus -- und weil
+// der Puffer in `kdata` liegt, waere das kein Absturz, sondern eine
+// Karte, die von einer fremden Seite liest. Genau daran ist der erste
+// Entwurf dieser Runde stumm gescheitert.
+fn bm_byte(b: u64) -> u64 {
+    return (b % BITS_PER_BLOCK) / 8
+}
+
 fn block_alloc(state: u64) -> u64 {
-    if !blk.read(state, BITMAP_BLOCK, buf_bm(state)) {
+    let last: u64 = blk.blocks(state)
+    var lim: u64 = max_blocks(state)
+    if last < lim {
+        lim = last
+    }
+    let von: u64 = data_start(state)
+    if von >= lim {
         return 0
     }
-    var b: u64 = data_start(state)
-    let last: u64 = blk.blocks(state)
-    while b < last && b < BS * 8 {
-        let p: u64 = buf_bm(state) + b / 8
-        if (kstate.get8(p) & (1 << (b % 8))) == 0 {
-            kstate.set8(p, (kstate.get8(p) | (1 << (b % 8))) as u8)
-            if !blk.write(state, BITMAP_BLOCK, buf_bm(state)) {
+    // ZWEI DURCHGAENGE: erst ab dem Merker bis zum Ende, dann von vorn
+    // bis zum Merker. Damit ist eine Zuteilung im Regelfall EIN
+    // Kartenblock und nicht zweitausend, und der zweite Durchgang sorgt
+    // dafuer, dass ein freigewordener Block davor trotzdem gefunden
+    // wird -- ein Zuteiler, der nur vorwaerts liefe, meldete auf einer
+    // halbleeren Platte "voll".
+    var start: u64 = kstate.get(state, kstate.FSG_OFF + G_HINT)
+    if start < von || start >= lim {
+        start = von
+    }
+    let got: u64 = suche(state, start, lim)
+    if got != 0 {
+        return got
+    }
+    return suche(state, von, start)
+}
+
+// Der erste freie Block in [von, bis). Liest je KARTENBLOCK einmal und
+// nicht je Bit.
+fn suche(state: u64, von: u64, bis: u64) -> u64 {
+    var b: u64 = von
+    while b < bis {
+        let kb: u64 = bm_block_of(state, b)
+        if !blk.read(state, kb, buf_bm(state)) {
+            return 0
+        }
+        var ende: u64 = (b / BITS_PER_BLOCK + 1) * BITS_PER_BLOCK
+        if ende > bis {
+            ende = bis
+        }
+        var fund: u64 = 0
+        while b < ende && fund == 0 {
+            let p: u64 = buf_bm(state) + bm_byte(b)
+            if (kstate.get8(p) & (1 << (b % 8))) == 0 {
+                kstate.set8(p, (kstate.get8(p) | (1 << (b % 8))) as u8)
+                fund = b
+            } else {
+                b = b + 1
+            }
+        }
+        if fund != 0 {
+            if !blk.write(state, kb, buf_bm(state)) {
                 return 0
             }
+            kstate.set(state, kstate.FSG_OFF + G_HINT, fund)
             zero(buf_zz(state), BS)
-            blk.write(state, b, buf_zz(state))
-            return b
+            blk.write(state, fund, buf_zz(state))
+            return fund
         }
-        b = b + 1
     }
     return 0
 }
@@ -531,26 +944,69 @@ fn block_free(state: u64, b: u64) {
     if b < data_start(state) || b >= blk.blocks(state) {
         return
     }
-    if !blk.read(state, BITMAP_BLOCK, buf_bm(state)) {
+    if b >= max_blocks(state) {
         return
     }
-    let p: u64 = buf_bm(state) + b / 8
+    let kb: u64 = bm_block_of(state, b)
+    if !blk.read(state, kb, buf_bm(state)) {
+        return
+    }
+    let p: u64 = buf_bm(state) + bm_byte(b)
     kstate.set8(p, (kstate.get8(p) & (255 ^ (1 << (b % 8)))) as u8)
-    blk.write(state, BITMAP_BLOCK, buf_bm(state))
+    blk.write(state, kb, buf_bm(state))
+    // Der naechste Fund darf hier anfangen: ein gerade freigegebener
+    // Block ist der beste Kandidat, den es gibt.
+    if b < kstate.get(state, kstate.FSG_OFF + G_HINT) {
+        kstate.set(state, kstate.FSG_OFF + G_HINT, b)
+    }
 }
 
+// OKTETTWEISE UND NICHT BITWEISE. Auf einer Platte von vier Gigaoktett
+// sind das 8.388.608 Bits; einzeln geprueft ist `df` damit eine Sache
+// von Minuten in QEMU. Ein volles Oktett (255) und ein leeres (0) sind
+// die beiden Faelle, die auf einer echten Platte fast alles ausmachen,
+// und beide kosten hier eine Abfrage statt acht.
 fn free_blocks(state: u64) -> u64 {
-    if !blk.read(state, BITMAP_BLOCK, buf_bm(state)) {
-        return 0
-    }
-    var b: u64 = 0
-    var n: u64 = 0
     let last: u64 = blk.blocks(state)
-    while b < last && b < BS * 8 {
-        if (kstate.get8(buf_bm(state) + b / 8) & (1 << (b % 8))) == 0 {
-            n = n + 1
+    var lim: u64 = max_blocks(state)
+    if last < lim {
+        lim = last
+    }
+    var n: u64 = 0
+    var b: u64 = 0
+    while b < lim {
+        let kb: u64 = bm_block_of(state, b)
+        if !blk.read(state, kb, buf_bm(state)) {
+            return n
         }
-        b = b + 1
+        var ende: u64 = (b / BITS_PER_BLOCK + 1) * BITS_PER_BLOCK
+        if ende > lim {
+            ende = lim
+        }
+        while b < ende {
+            let rest: u64 = ende - b
+            if (b % 8) == 0 && rest >= 8 {
+                let o: u64 = kstate.get8(buf_bm(state) + bm_byte(b))
+                if o == 0 {
+                    n = n + 8
+                } else if o != 255 {
+                    var k: u64 = 0
+                    while k < 8 {
+                        if (o & (1 << k)) == 0 {
+                            n = n + 1
+                        }
+                        k = k + 1
+                    }
+                }
+                b = b + 8
+            } else {
+                if (kstate.get8(buf_bm(state) + bm_byte(b))
+                    & (1 << (b % 8))) == 0 {
+                    n = n + 1
+                }
+                b = b + 1
+            }
+        }
     }
     return n
 }
@@ -576,10 +1032,20 @@ fn file_block(state: u64, ino: u64, index: u64, grow: bool) -> u64 {
         return single_block(state, ino, k, grow)
     }
     let d: u64 = k - PER_BLOCK
-    if d >= PER_BLOCK * PER_BLOCK {
+    if d < PER_BLOCK * PER_BLOCK {
+        return double_block(state, ino, d, grow)
+    }
+    // RUNDE OFS3: DIE DRITTE STUFE. Sie gibt es nur in einem Abbild der
+    // Fassung 3 -- in der Fassung 2 stuende der Zeiger bei Versatz 128,
+    // und dort faengt der naechste Inode an.
+    if version(state) < OFS_V3 {
         return 0
     }
-    return double_block(state, ino, d, grow)
+    let t: u64 = d - PER_BLOCK * PER_BLOCK
+    if t >= PER_BLOCK * PER_BLOCK * PER_BLOCK {
+        return 0
+    }
+    return triple_block(state, ino, t, grow)
 }
 
 // The block behind the ONE indirect pointer of the inode: 64 of them.
@@ -671,6 +1137,78 @@ fn double_block(state: u64, ino: u64, d: u64, grow: bool) -> u64 {
     return fresh
 }
 
+// ---------------------------------------------------------- RUNDE OFS3
+//
+// DREI STUFEN, UND SIE BRAUCHEN NUR EINEN PUFFER. `double_block`
+// darueber haelt zwei (`buf_ib` und `buf_i2`), weil es die erste Stufe
+// noch braucht, waehrend es die zweite liest. Hier ist das nicht so: nach
+// jeder Zuteilung MUSS der Puffer ohnehin neu gelesen werden -- der
+// Zuteiler schreibt selbst einen Block --, und wer neu liest, kann
+// genauso gut die naechste Stufe hineinlesen. Also wandert derselbe
+// Puffer eine Stufe tiefer, und der vierte Arbeitsblock, den diese Runde
+// sonst gebraucht haette, ist eingespart. `kstate.FS_MAX` bleibt bei
+// 4096 Oktetten, also bei acht Bloecken, also bei dem, was seit Runde 62
+// dasteht.
+//
+// 64 * 64 * 64 = 262144 Bloecke, also 134.217.728 Oktette allein durch
+// diesen einen Zeiger.
+fn triple_block(state: u64, ino: u64, t: u64, grow: bool) -> u64 {
+    var l1: u64 = inode_get(state, ino, I_TINDIRECT)
+    if l1 == 0 {
+        if !grow {
+            return 0
+        }
+        l1 = block_alloc(state)
+        if l1 == 0 {
+            return 0
+        }
+        inode_set(state, ino, I_TINDIRECT, l1)
+    }
+    let i1: u64 = t / (PER_BLOCK * PER_BLOCK)
+    let l2: u64 = stufe(state, l1, i1, grow)
+    if l2 == 0 {
+        return 0
+    }
+    let i2: u64 = (t / PER_BLOCK) % PER_BLOCK
+    let l3: u64 = stufe(state, l2, i2, grow)
+    if l3 == 0 {
+        return 0
+    }
+    return stufe(state, l3, t % PER_BLOCK, grow)
+}
+
+// Der `k`-te Zeiger AUS einem Zeigerblock, angelegt wenn noetig. Genau
+// die Bewegung, die `single_block` und `double_block` je zweimal
+// ausgeschrieben haben -- hier einmal, weil die dritte Stufe sie dreimal
+// braucht.
+//
+// DIE ZUTEILUNG PASSIERT VOR DEM LESEN DES PUFFERS, IN DEN SIE GEHOERT.
+// `block_alloc` schreibt einen Block von sich aus (er nullt den frisch
+// zugeteilten), und ein Puffer, den man ueber ihn hinweg haelt, kaeme
+// veraendert zurueck. Runde K4 hat diesen Fehler schon einmal gemacht
+// und ihn oben aufgeschrieben.
+fn stufe(state: u64, block: u64, k: u64, grow: bool) -> u64 {
+    if !blk.read(state, block, buf_ib(state)) {
+        return 0
+    }
+    let b: u64 = get64(buf_ib(state) + k * 8)
+    if b != 0 || !grow {
+        return b
+    }
+    let fresh: u64 = block_alloc(state)
+    if fresh == 0 {
+        return 0
+    }
+    if !blk.read(state, block, buf_ib(state)) {
+        return 0
+    }
+    put64(buf_ib(state) + k * 8, fresh)
+    if !blk.write(state, block, buf_ib(state)) {
+        return 0
+    }
+    return fresh
+}
+
 // Every block of a file back to the bitmap.
 fn file_truncate(state: u64, ino: u64) {
     var i: u64 = 0
@@ -710,7 +1248,62 @@ fn file_truncate(state: u64, ino: u64) {
         block_free(state, l1)
         inode_set(state, ino, I_DINDIRECT, 0)
     }
+    // RUNDE OFS3: und die DREI Stufen unter dem dreifach indirekten
+    // Zeiger. Drei Puffer, und jeder gehoert genau einer Stufe:
+    // `buf_ib` der ersten, `buf_i2` der zweiten, `buf_dt` der dritten.
+    // Dass `buf_dt` frei ist, ist keine Annahme: `file_truncate` geht
+    // nicht durch `read_at` oder `write_at`, und die beiden sind die
+    // einzigen Nutzer dieses Puffers.
+    if version(state) >= OFS_V3 {
+        let t1: u64 = inode_get(state, ino, I_TINDIRECT)
+        if t1 != 0 {
+            var k1: u64 = 0
+            while k1 < PER_BLOCK {
+                if !blk.read(state, t1, buf_ib(state)) {
+                    k1 = PER_BLOCK
+                } else {
+                    let t2: u64 = get64(buf_ib(state) + k1 * 8)
+                    if t2 != 0 {
+                        var k2: u64 = 0
+                        while k2 < PER_BLOCK {
+                            if !blk.read(state, t2, buf_i2(state)) {
+                                k2 = PER_BLOCK
+                            } else {
+                                let t3: u64 = get64(buf_i2(state) + k2 * 8)
+                                if t3 != 0 {
+                                    frei_dt(state, t3)
+                                    block_free(state, t3)
+                                }
+                                k2 = k2 + 1
+                            }
+                        }
+                        block_free(state, t2)
+                    }
+                    k1 = k1 + 1
+                }
+            }
+            block_free(state, t1)
+            inode_set(state, ino, I_TINDIRECT, 0)
+        }
+    }
     inode_set(state, ino, I_SIZE, 0)
+}
+
+// Wie `free_pointers`, nur durch `buf_dt` statt durch `buf_i2` -- damit
+// der Aufrufer die zweite Stufe behalten kann, waehrend die dritte
+// abgeraeumt wird.
+fn frei_dt(state: u64, block: u64) {
+    if !blk.read(state, block, buf_dt(state)) {
+        return
+    }
+    var k: u64 = 0
+    while k < PER_BLOCK {
+        let b: u64 = get64(buf_dt(state) + k * 8)
+        if b != 0 {
+            block_free(state, b)
+        }
+        k = k + 1
+    }
 }
 
 // Every block a pointer block points at, back to the bitmap. Reads through
@@ -805,15 +1398,22 @@ fn write_at(state: u64, ino: u64, off: u64, src: u64, len: u64) -> u64 {
     if n > 0 && off + n > inode_get(state, ino, I_SIZE) {
         inode_set(state, ino, I_SIZE, off + n)
     }
+    // RUNDE OFS3: die Aenderungszeit. Nur wenn wirklich etwas
+    // hineingegangen ist -- ein Schreibversuch auf eine volle Platte
+    // aendert nichts und darf deshalb auch keine Zeit aendern.
+    if n > 0 {
+        touch_mtime(state, ino)
+    }
     leave(state, flags)
     return n
 }
 
 // ------------------------------------------------------- the directories
 
-fn name_eq(a: u64, b: u64) -> bool {
+fn name_eq(state: u64, a: u64, b: u64) -> bool {
     var i: u64 = 0
-    while i < NAME_LEN {
+    let nl: u64 = name_len(state)
+    while i < nl {
         let x: u64 = kstate.get8(a + i)
         let y: u64 = kstate.get8(b + i)
         if x != y {
@@ -828,14 +1428,15 @@ fn name_eq(a: u64, b: u64) -> bool {
 }
 
 fn entry_read(state: u64, dir: u64, i: u64, out: u64) -> u64 {
-    if read_at(state, dir, i * DIRENT, out, DIRENT) != DIRENT {
+    let de: u64 = dirent_size(state)
+    if read_at(state, dir, i * de, out, de) != de {
         return 0
     }
     return get64(out)
 }
 
 fn dir_entries(state: u64, dir: u64) -> u64 {
-    return inode_get(state, dir, I_SIZE) / DIRENT
+    return inode_get(state, dir, I_SIZE) / dirent_size(state)
 }
 
 fn dir_find(state: u64, dir: u64, name: u64) -> u64 {
@@ -843,7 +1444,7 @@ fn dir_find(state: u64, dir: u64, name: u64) -> u64 {
     var i: u64 = 0
     while i < n {
         let ino: u64 = entry_read(state, dir, i, buf_nm(state))
-        if ino != 0 && name_eq(buf_nm(state) + 8, name) {
+        if ino != 0 && name_eq(state, buf_nm(state) + 8, name) {
             return ino
         }
         i = i + 1
@@ -897,6 +1498,8 @@ fn entry_at(state: u64, dir: u64, index: u64, out: u64) -> u64 {
 }
 
 fn dir_add(state: u64, dir: u64, name: u64, ino: u64) -> bool {
+    let de: u64 = dirent_size(state)
+    let nl: u64 = name_len(state)
     let n: u64 = dir_entries(state, dir)
     var slot: u64 = n
     var i: u64 = 0
@@ -908,14 +1511,17 @@ fn dir_add(state: u64, dir: u64, name: u64, ino: u64) -> bool {
             i = i + 1
         }
     }
-    zero(buf_nm(state), DIRENT)
+    // EIN EINTRAG IN FASSUNG 3 IST 264 OKTETTE, und `buf_nm` ist 512 --
+    // er passt, aber knapp genug, dass es hier steht. Wer den Eintrag je
+    // ueber 512 Oktette wachsen laesst, muss `kstate.FS_MAX` mitziehen.
+    zero(buf_nm(state), de)
     put64(buf_nm(state), ino)
     var k: u64 = 0
-    while k < NAME_LEN - 1 && kstate.get8(name + k) != 0 {
+    while k < nl - 1 && kstate.get8(name + k) != 0 {
         kstate.set8(buf_nm(state) + 8 + k, kstate.get8(name + k) as u8)
         k = k + 1
     }
-    if write_at(state, dir, slot * DIRENT, buf_nm(state), DIRENT) != DIRENT {
+    if write_at(state, dir, slot * de, buf_nm(state), de) != de {
         return false
     }
     // RUNDE K15: EIN NAME IST ENTSTANDEN. Das ist die eine der zwei
@@ -949,9 +1555,10 @@ fn dir_remove(state: u64, dir: u64, name: u64) -> u64 {
     var i: u64 = 0
     while i < n {
         let ino: u64 = entry_read(state, dir, i, buf_nm(state))
-        if ino != 0 && name_eq(buf_nm(state) + 8, name) {
-            zero(buf_nm(state), DIRENT)
-            write_at(state, dir, i * DIRENT, buf_nm(state), DIRENT)
+        if ino != 0 && name_eq(state, buf_nm(state) + 8, name) {
+            zero(buf_nm(state), dirent_size(state))
+            write_at(state, dir, i * dirent_size(state), buf_nm(state),
+                dirent_size(state))
             // RUNDE K15: UND DAS IST DIE ZWEITE STELLE -- ein Name
             // vergeht. Die Art wird VORHER geholt; danach kann der Inode
             // schon frei sein.
@@ -968,52 +1575,213 @@ fn dir_remove(state: u64, dir: u64, name: u64) -> u64 {
 
 // --------------------------------------------------------- the paths
 
+// Die vier Puffer dieser Datei in `kdata`. Alle vier stehen unter dem
+// Schloss des Dateisystems -- es kann keine zweite gleichzeitige
+// Benutzung geben --, und ihre Verschachtelung steht in `kstate.fi`.
+fn p_name(state: u64) -> u64 {
+    return state + kstate.OFS3_OFF + kstate.OP_NAME
+}
+
+fn p_work(state: u64) -> u64 {
+    return state + kstate.OFS3_OFF + kstate.OP_WORK
+}
+
+fn p_build(state: u64) -> u64 {
+    return state + kstate.OFS3_OFF + kstate.OP_BUILD
+}
+
+fn p_link(state: u64) -> u64 {
+    return state + kstate.OFS3_OFF + kstate.OP_LINK
+}
+
+// Wie lang ein Pfad in diesen Puffern hoechstens sein darf. 1024 Oktette
+// je Puffer, das letzte bleibt fuer die Null.
+const PATHBUF: u64 = 1024
+
+fn strlen(p: u64) -> u64 {
+    var n: u64 = 0
+    while kstate.get8(p + n) != 0 {
+        n = n + 1
+    }
+    return n
+}
+
+fn strcopy(from: u64, to: u64, max: u64) -> u64 {
+    var n: u64 = 0
+    while n + 1 < max && kstate.get8(from + n) != 0 {
+        kstate.set8(to + n, kstate.get8(from + n) as u8)
+        n = n + 1
+    }
+    kstate.set8(to + n, 0 as u8)
+    return n
+}
+
 // `/a/b/c` -> inode, 0 = not there. A leading slash is optional; without
 // one it starts at the root as well, because a process has no working
 // directory of its own yet.
+//
+// ---------------------------------------------------------- RUNDE OFS3
+//
+// ZWEI DINGE SIND ANDERS ALS VORHER, und beide sind der Grund, warum die
+// Schleife jetzt ueber einen Puffer in `kdata` laeuft statt ueber den
+// uebergebenen Zeiger:
+//
+//   1. EIN NAME DARF 255 ZEICHEN HABEN. `[u8; 32]` auf dem Kernelstapel
+//      waere `[u8; 256]`, und dieser Weg ist der tiefste, den der Kernel
+//      hat.
+//   2. EIN BESTANDTEIL KANN EIN SYMBOLISCHER VERWEIS SEIN. Dann wird der
+//      Pfad NEU GEBAUT -- Ziel des Verweises, dann der Rest -- und die
+//      Schleife faengt von vorn an. Das geht nicht in einem Puffer, der
+//      dem Aufrufer gehoert.
+//
+// `folge_ende` sagt, ob auch der LETZTE Bestandteil verfolgt wird.
+// `stat` folgt ihm (POSIX), `lstat`, `unlink` und `rename` nicht -- sonst
+// koennte man einen Verweis nicht loeschen, ohne sein Ziel zu treffen.
 fn path(state: u64, p: u64) -> u64 {
-    var name: [u8; 32] = [0 as u8; 32]
+    return resolve(state, p, true)
+}
+
+fn path_nofollow(state: u64, p: u64) -> u64 {
+    return resolve(state, p, false)
+}
+
+fn resolve(state: u64, p: u64, folge_ende: bool) -> u64 {
+    let flags: u64 = enter(state)
+    let w: u64 = p_work(state)
+    strcopy(p, w, PATHBUF)
+    let nl: u64 = name_len(state)
     var ino: u64 = root(state)
     var i: u64 = 0
+    var spruenge: u64 = 0
     var going: bool = true
+    var ergebnis: u64 = 0
     while going {
-        while kstate.get8(p + i) == 47 {
+        while kstate.get8(w + i) == 47 {
             i = i + 1
         }
-        if kstate.get8(p + i) == 0 {
+        if kstate.get8(w + i) == 0 {
             going = false
+            ergebnis = ino
         } else {
+            let von: u64 = i
             var n: u64 = 0
-            while kstate.get8(p + i) != 0 && kstate.get8(p + i) != 47 {
-                if n < NAME_LEN - 1 {
-                    name[n as usize] = kstate.get8(p + i) as u8
+            while kstate.get8(w + i) != 0 && kstate.get8(w + i) != 47 {
+                if n + 1 < nl {
+                    kstate.set8(p_name(state) + n, kstate.get8(w + i) as u8)
                     n = n + 1
                 }
                 i = i + 1
             }
-            name[n as usize] = 0 as u8
+            kstate.set8(p_name(state) + n, 0 as u8)
             if inode_type(state, ino) != T_DIR {
-                return 0
-            }
-            ino = dir_find(state, ino, (&name[0]) as u64)
-            if ino == 0 {
-                return 0
+                going = false
+            } else {
+                let naechst: u64 = dir_find(state, ino, p_name(state))
+                if naechst == 0 {
+                    going = false
+                } else {
+                    // Steht hinter diesem Bestandteil noch etwas?
+                    var j: u64 = i
+                    while kstate.get8(w + j) == 47 {
+                        j = j + 1
+                    }
+                    let mehr: bool = kstate.get8(w + j) != 0
+                    if inode_type(state, naechst) == T_LINK
+                        && (mehr || folge_ende) && follows_links(state) {
+                        if spruenge >= MAX_HOPS {
+                            going = false // ELOOP
+                        } else {
+                            spruenge = spruenge + 1
+                            if !folge(state, w, von, i, naechst) {
+                                going = false
+                            } else {
+                                // Ein absolutes Ziel faengt an der Wurzel
+                                // an, ein relatives im Verzeichnis, in dem
+                                // der Verweis liegt -- das ist `ino`, und
+                                // `folge` hat es vorn in den Pfad gesetzt.
+                                ino = root(state)
+                                i = 0
+                            }
+                        }
+                    } else {
+                        ino = naechst
+                    }
+                }
             }
         }
     }
-    return ino
+    leave(state, flags)
+    return ergebnis
+}
+
+// DEN PFAD NEU BAUEN, nachdem ein Bestandteil sich als Verweis
+// herausgestellt hat. Vorn kommt, was VOR dem Bestandteil stand (bei
+// einem absoluten Ziel: nichts), dann das Ziel, dann der Rest.
+//
+// Beispiel: `/a/link/c`, `link` zeigt auf `../b`.
+//   vorn = "/a/", ziel = "../b", rest = "/c"  ->  "/a/../b/c"
+// Das `..` loest die naechste Runde der Schleife auf, weil `..` in
+// jedem Verzeichnis dieses Dateisystems ein echter Eintrag ist.
+fn folge(state: u64, w: u64, von: u64, bis: u64, link: u64) -> bool {
+    let ziel: u64 = p_link(state)
+    let n: u64 = inode_get(state, link, I_SIZE)
+    if n == 0 || n >= PATHBUF {
+        return false
+    }
+    if read_at(state, link, 0, ziel, n) != n {
+        return false
+    }
+    kstate.set8(ziel + n, 0 as u8)
+    let b: u64 = p_build(state)
+    var at: u64 = 0
+    if kstate.get8(ziel) != 47 {
+        var k: u64 = 0
+        while k < von && at + 1 < PATHBUF {
+            kstate.set8(b + at, kstate.get8(w + k) as u8)
+            at = at + 1
+            k = k + 1
+        }
+    }
+    var k2: u64 = 0
+    while k2 < n && at + 1 < PATHBUF {
+        kstate.set8(b + at, kstate.get8(ziel + k2) as u8)
+        at = at + 1
+        k2 = k2 + 1
+    }
+    var rest: u64 = bis
+    if kstate.get8(w + rest) != 0 {
+        if at + 1 < PATHBUF && kstate.get8(b + at - 1) != 47 {
+            kstate.set8(b + at, 47 as u8)
+            at = at + 1
+        }
+        while kstate.get8(w + rest) == 47 {
+            rest = rest + 1
+        }
+        while kstate.get8(w + rest) != 0 && at + 1 < PATHBUF {
+            kstate.set8(b + at, kstate.get8(w + rest) as u8)
+            at = at + 1
+            rest = rest + 1
+        }
+    }
+    kstate.set8(b + at, 0 as u8)
+    strcopy(b, w, PATHBUF)
+    return true
 }
 
 // The directory a path lies in, and the last name of it. Returns the
 // inode of the directory, `out_name` gets the name.
+// RUNDE OFS3: DIE 96 OKTETTE AUF DEM STAPEL SIND 1024 IN `kdata`
+// GEWORDEN. Die alte Zahl war die eigentliche Pfadgrenze des ganzen
+// Systems -- `uio.PATH_MAX` stand auf 90 und nannte genau diesen Puffer
+// als Grund ("`fs.parent_of` carries a path in 96 octets"). Ein Name mit
+// 255 Zeichen passt da nicht einmal allein hinein.
+//
+// Der Puffer heisst OP_PATH und ist NICHT einer der drei, die `resolve`
+// benutzt: `parent_of` ruft `path`, und `path` arbeitet in OP_WORK,
+// OP_BUILD und OP_NAME. Vier Puffer, keine Ueberdeckung.
 fn parent_of(state: u64, p: u64, out_name: u64) -> u64 {
-    var buf: [u8; 96] = [0 as u8; 96]
-    var len: u64 = 0
-    while kstate.get8(p + len) != 0 && len < 95 {
-        buf[len as usize] = kstate.get8(p + len) as u8
-        len = len + 1
-    }
-    buf[len as usize] = 0 as u8
+    let buf: u64 = state + kstate.OFS3_OFF + kstate.OP_PATH
+    let len: u64 = strcopy(p, buf, PATHBUF)
     if len == 0 {
         return 0
     }
@@ -1021,25 +1789,26 @@ fn parent_of(state: u64, p: u64, out_name: u64) -> u64 {
     var found: bool = false
     while cut > 0 && !found {
         cut = cut - 1
-        if buf[cut as usize] == 47 as u8 {
+        if kstate.get8(buf + cut) == 47 {
             found = true
         }
     }
     var dir: u64 = root(state)
     var start: u64 = 0
     if found {
-        buf[cut as usize] = 0 as u8
+        kstate.set8(buf + cut, 0 as u8)
         start = cut + 1
         if cut > 0 {
-            dir = path(state, (&buf[0]) as u64)
+            dir = path(state, buf)
         }
     }
     if dir == 0 || inode_type(state, dir) != T_DIR {
         return 0
     }
+    let nl: u64 = name_len(state)
     var k: u64 = 0
-    while k < NAME_LEN - 1 && buf[(start + k) as usize] != 0 as u8 {
-        kstate.set8(out_name + k, buf[(start + k) as usize])
+    while k + 1 < nl && kstate.get8(buf + start + k) != 0 {
+        kstate.set8(out_name + k, kstate.get8(buf + start + k) as u8)
         k = k + 1
     }
     kstate.set8(out_name + k, 0 as u8)
@@ -1063,20 +1832,21 @@ fn parent_ino(state: u64, p: u64) -> u64 {
     // doppelt. Sicher ist es, weil der Aufruf unter der Sperre des
     // Dateisystems steht: es kann keine zweite Benutzung geben.
     let flags: u64 = enter(state)
-    let dir: u64 = parent_of(state, p, state + kstate.K13_OFF + 0x100)
+    let dir: u64 = parent_of(state, p,
+        state + kstate.OFS3_OFF + kstate.OP_NAME2)
     leave(state, flags)
     return dir
 }
 
 fn create_path(state: u64, p: u64, kind: u64) -> u64 {
     let flags: u64 = enter(state)
-    var name: [u8; 32] = [0 as u8; 32]
-    let dir: u64 = parent_of(state, p, (&name[0]) as u64)
+    let name: u64 = state + kstate.OFS3_OFF + kstate.OP_OLD
+    let dir: u64 = parent_of(state, p, name)
     if dir == 0 {
         leave(state, flags)
         return 0
     }
-    if dir_find(state, dir, (&name[0]) as u64) != 0 {
+    if dir_find(state, dir, name) != 0 {
         leave(state, flags)
         return 0
     }
@@ -1092,13 +1862,75 @@ fn create_path(state: u64, p: u64, kind: u64) -> u64 {
             return 0
         }
     }
-    if !dir_add(state, dir, (&name[0]) as u64, ino) {
+    if !dir_add(state, dir, name, ino) {
         inode_set(state, ino, I_TYPE, T_FREE)
         leave(state, flags)
         return 0
     }
     leave(state, flags)
     return ino
+}
+
+// ---------------------------------------------------------- RUNDE OFS3
+//
+// EINEN SYMBOLISCHEN VERWEIS ANLEGEN. Er ist eine Datei wie jede andere
+// -- Inode, Verzeichniseintrag, Datenbloecke --, nur mit der Art
+// `T_LINK`, und was in ihr steht, IST der Pfad. Deshalb kostet diese
+// Funktion keine einzige neue Struktur: sie legt an, schreibt und
+// haengt ein.
+//
+// WOFUER DAS SYSTEM DAS BRAUCHT, und es steht seit Runde K15 als Notloesung
+// im Baum: `/apps/<name>.prog` ist dort ein VERZEICHNIS mit einem zweiten
+// Namen darin, weil es keinen Verweis gab. Und `/bin/files` ist ein
+// zweiter harter Verweis auf `/bin/explorer` -- was `unlink` dort tut, ist
+// falsch (es gibt den Inode frei, statt die Verweiszahl zu senken), und
+// bei einem symbolischen Verweis kann das gar nicht passieren.
+//
+// Rueckgabe: die Inodenummer, 0 = ging nicht.
+fn symlink_path(state: u64, ziel: u64, wo: u64) -> u64 {
+    if version(state) < OFS_V3 {
+        return 0
+    }
+    let n: u64 = strlen(ziel)
+    if n == 0 || n >= PATHBUF {
+        return 0
+    }
+    // Das Ziel ZUERST in einen eigenen Puffer -- `create_path` benutzt
+    // OP_PATH, OP_WORK, OP_BUILD und OP_NAME, und der Aufrufer kann
+    // sein Ziel in einem davon liegen haben.
+    let t: u64 = state + kstate.OFS3_OFF + kstate.OP_TMP
+    strcopy(ziel, t, PATHBUF)
+    let ino: u64 = create_path(state, wo, T_LINK)
+    if ino == 0 {
+        return 0
+    }
+    if write_at(state, ino, 0, t, n) != n {
+        unlink_path(state, wo)
+        return 0
+    }
+    return ino
+}
+
+// Das Ziel eines Verweises. Gibt die Zahl der Oktette zurueck, ohne die
+// abschliessende Null -- wie `readlink` in POSIX.
+fn readlink_at(state: u64, ino: u64, dst: u64, max: u64) -> u64 {
+    if inode_type(state, ino) != T_LINK {
+        return 0
+    }
+    var n: u64 = inode_get(state, ino, I_SIZE)
+    if n >= max {
+        n = max - 1
+    }
+    let got: u64 = read_at(state, ino, 0, dst, n)
+    kstate.set8(dst + got, 0 as u8)
+    return got
+}
+
+fn link_target_len(state: u64, ino: u64) -> u64 {
+    if inode_type(state, ino) != T_LINK {
+        return 0
+    }
+    return inode_get(state, ino, I_SIZE)
 }
 
 // A fresh directory gets `.` and `..` -- without them it would not be one.
@@ -1113,13 +1945,13 @@ fn dir_init(state: u64, ino: u64, parent: u64) -> bool {
 
 fn unlink_path(state: u64, p: u64) -> bool {
     let flags: u64 = enter(state)
-    var name: [u8; 32] = [0 as u8; 32]
-    let dir: u64 = parent_of(state, p, (&name[0]) as u64)
+    let name: u64 = state + kstate.OFS3_OFF + kstate.OP_OLD
+    let dir: u64 = parent_of(state, p, name)
     if dir == 0 {
         leave(state, flags)
         return false
     }
-    let ino: u64 = dir_find(state, dir, (&name[0]) as u64)
+    let ino: u64 = dir_find(state, dir, name)
     if ino == 0 {
         leave(state, flags)
         return false
@@ -1144,7 +1976,7 @@ fn unlink_path(state: u64, p: u64) -> bool {
     file_truncate(state, ino)
     inode_set(state, ino, I_TYPE, T_FREE)
     inode_set(state, ino, I_NLINK, 0)
-    dir_remove(state, dir, (&name[0]) as u64)
+    dir_remove(state, dir, name)
     leave(state, flags)
     return true
 }
@@ -1171,37 +2003,37 @@ fn unlink_path(state: u64, p: u64) -> bool {
 // keinen Weg von einer Inode zu ihrem Elternteil gibt ausser ihrem
 // eigenen `..`.
 fn rename_path(state: u64, from: u64, to: u64) -> u64 {
-    var oldname: [u8; 32] = [0 as u8; 32]
-    var newname: [u8; 32] = [0 as u8; 32]
+    let oldname: u64 = state + kstate.OFS3_OFF + kstate.OP_OLD
+    let newname: u64 = state + kstate.OFS3_OFF + kstate.OP_NEW
     var dotdot: [u8; 3] = "..\0"
     let flags: u64 = enter(state)
-    let odir: u64 = parent_of(state, from, (&oldname[0]) as u64)
+    let odir: u64 = parent_of(state, from, oldname)
     if odir == 0 {
         leave(state, flags)
         return 2 // ENOENT
     }
-    let ino: u64 = dir_find(state, odir, (&oldname[0]) as u64)
+    let ino: u64 = dir_find(state, odir, oldname)
     if ino == 0 {
         leave(state, flags)
         return 2
     }
-    let ndir: u64 = parent_of(state, to, (&newname[0]) as u64)
+    let ndir: u64 = parent_of(state, to, newname)
     if ndir == 0 {
         leave(state, flags)
         return 2
     }
-    if dir_find(state, ndir, (&newname[0]) as u64) != 0 {
+    if dir_find(state, ndir, newname) != 0 {
         leave(state, flags)
         return 17 // EEXIST -- dieser Kernel ueberschreibt nicht still
     }
-    if !dir_add(state, ndir, (&newname[0]) as u64, ino) {
+    if !dir_add(state, ndir, newname, ino) {
         leave(state, flags)
         return 28 // ENOSPC
     }
-    if dir_remove(state, odir, (&oldname[0]) as u64) == 0 {
+    if dir_remove(state, odir, oldname) == 0 {
         // Der neue Eintrag steht schon; ihn stehenzulassen waere eine
         // zweite Verbindung auf dieselbe Inode, die niemand bestellt hat.
-        dir_remove(state, ndir, (&newname[0]) as u64)
+        dir_remove(state, ndir, newname)
         leave(state, flags)
         return 2
     }
@@ -1215,7 +2047,33 @@ fn rename_path(state: u64, from: u64, to: u64) -> u64 {
 
 // ------------------------------------------------------ format and mount
 
+// RUNDE OFS3: `format` LEGT WEITER EIN ABBILD DER FASSUNG 2 AN -- es
+// sei denn, die Befehlszeile sagt `ofs3fmt`.
+//
+// Der erste Entwurf dieser Runde hat es andersherum gemacht, und
+// `tools/kernel/run.sh` ist daran gefallen: eine frisch formatierte
+// RAM-Platte von 2048 Bloecken hatte danach 1980 statt 2018 freie
+// Bloecke, weil eine Tabelle aus 256-Oktett-Inodes doppelt so viele
+// Bloecke braucht. Diese Zusage ist aelter als die Runde und misst
+// etwas Richtiges. `tools/osum/mkfs.py` haelt es auf dem Wirt genauso
+// (ohne `--v3` Fassung 2) -- der Kern und der Wirt duerfen sich in
+// dieser Frage nicht widersprechen.
+//
+// Das Wort `ofs3fmt` ist damit die Gegenprobe in beide Richtungen:
+// DERSELBE Kern, ein Wort Unterschied, und die groesste Platte steigt
+// von zwei Megaoktett auf Gigaoktette. Waeren die neuen Grenzen im
+// Uebersetzer statt im Superblock, koennte dieser Unterschied gar nicht
+// entstehen.
 fn format(state: u64) -> bool {
+    var v: u64 = OFS_V2
+    if (kstate.get(state, kstate.OFS3_OFF + kstate.OFS3_MODE)
+        & kstate.O_OFS3FMT) != 0 {
+        v = OFS_V3
+    }
+    return format_as(state, v, INODE_COUNT)
+}
+
+fn format_as(state: u64, v: u64, inodes: u64) -> bool {
     let flags: u64 = enter(state)
     // RUNDE K13: DIE FASSUNG STEHT VOR DEM ERSTEN BLOCK, den dieses
     // Format schreibt. `dir_init` weiter unten geht durch `write_at` und
@@ -1223,44 +2081,107 @@ fn format(state: u64) -> bool {
     // muss die Fassung schon gelten, wenn die Wurzel entsteht. Wer sie
     // erst am Ende setzt, hat ein Wurzelverzeichnis mit elf direkten
     // Zeigern in einem Abbild, das acht liest.
-    kstate.set(state, kstate.K13_OFF + kstate.U_FSVER, OFS_V2)
+    //
+    // RUNDE OFS3: DASSELBE GILT JETZT FUER DIE GANZE GEOMETRIE. `geom3`
+    // steht deshalb vor dem ersten `inode_alloc` -- sonst legte die
+    // Wurzel ihre 256er Inode an der Stelle an, an der ein 128er Leser
+    // die zweite Datei sucht.
+    kstate.set(state, kstate.K13_OFF + kstate.U_FSVER, v)
     let total: u64 = blk.blocks(state)
-    if total < DATA_START + 8 {
+    // Die Geometrie AUSRECHNEN statt sie zu setzen. Das ist der ganze
+    // Unterschied zwischen Fassung 2 und Fassung 3 an dieser Stelle.
+    var isz: u64 = INODE_SIZE
+    var ipb: u64 = INODES_PER_BLOCK
+    var dent: u64 = DIRENT
+    var nlen: u64 = NAME_LEN
+    if v >= OFS_V3 {
+        isz = INODE_SIZE_V3
+        ipb = IPB_V3
+        dent = DIRENT_V3
+        nlen = NAME_V3
+    }
+    var bmb: u64 = 1
+    if v >= OFS_V3 {
+        bmb = (total + BITS_PER_BLOCK - 1) / BITS_PER_BLOCK
+        if bmb == 0 {
+            bmb = 1
+        }
+    }
+    let bms: u64 = BITMAP_BLOCK
+    let itab: u64 = bms + bmb
+    let itb: u64 = (inodes + ipb - 1) / ipb
+    let ds: u64 = itab + itb
+    if total < ds + 8 {
         leave(state, flags)
         return false
     }
+    geom3(state, bms, bmb, itab, isz, ipb, dent, nlen)
+    geom(state, inodes, ds)
     // The superblock.
     zero(buf_sb(state), BS)
     put64(buf_sb(state) + SB_MAGIC, MAGIC)
     put64(buf_sb(state) + SB_BSIZE, BS)
     put64(buf_sb(state) + SB_BLOCKS, total)
-    put64(buf_sb(state) + SB_INODES, INODE_COUNT)
-    put64(buf_sb(state) + SB_BITMAP, BITMAP_BLOCK)
-    put64(buf_sb(state) + SB_ITABLE, INODE_START)
-    put64(buf_sb(state) + SB_DATA, DATA_START)
+    put64(buf_sb(state) + SB_INODES, inodes)
+    put64(buf_sb(state) + SB_BITMAP, bms)
+    put64(buf_sb(state) + SB_ITABLE, itab)
+    put64(buf_sb(state) + SB_DATA, ds)
     put64(buf_sb(state) + SB_ROOT, 1)
-    put64(buf_sb(state) + SB_VERSION, OFS_V2)
+    put64(buf_sb(state) + SB_VERSION, v)
+    // Die vier neuen Felder stehen NUR in einem Abbild der Fassung 3.
+    // In der Fassung 2 bleiben sie null, und eine Null heisst dort "wie
+    // vorher" -- ein Abbild, das dieser Kernel ohne `ofs3fmt` baut, ist
+    // damit Oktett fuer Oktett eines aus Runde K13.
+    if v >= OFS_V3 {
+        put64(buf_sb(state) + SB_BMBLOCKS, bmb)
+        put64(buf_sb(state) + SB_ISIZE, isz)
+        put64(buf_sb(state) + SB_DIRENT, dent)
+        put64(buf_sb(state) + SB_NAMELEN, nlen)
+    }
     if !blk.write(state, 0, buf_sb(state)) {
         leave(state, flags)
         return false
     }
-    // The bitmap: everything up to the data area is taken.
-    zero(buf_bm(state), BS)
-    var b: u64 = 0
-    while b < DATA_START {
-        let p: u64 = buf_bm(state) + b / 8
-        kstate.set8(p, (kstate.get8(p) | (1 << (b % 8))) as u8)
-        b = b + 1
+    // The bitmap: everything up to the data area is taken. Sie ist jetzt
+    // mehrblockig, also wird sie blockweise geschrieben -- der erste
+    // Block traegt die Bits der Verwaltung, alle weiteren sind leer.
+    var kb: u64 = 0
+    while kb < bmb {
+        zero(buf_bm(state), BS)
+        var b: u64 = kb * BITS_PER_BLOCK
+        let ende: u64 = (kb + 1) * BITS_PER_BLOCK
+        while b < ende && b < ds {
+            let p: u64 = buf_bm(state) + bm_byte(b)
+            kstate.set8(p, (kstate.get8(p) | (1 << (b % 8))) as u8)
+            b = b + 1
+        }
+        // WAS HINTER DER PLATTE LIEGT, GILT ALS BELEGT. Die Karte fasst
+        // ein Vielfaches von 4096 Bloecken; eine Platte von 5000 hat
+        // also 3192 Bits, hinter denen nichts ist. Blieben sie frei,
+        // wuerde der Zuteiler sie hergeben und `blk.write` liefe ins
+        // Leere -- eine Datei, die aussieht, als waere sie geschrieben.
+        var t: u64 = kb * BITS_PER_BLOCK
+        if t < total {
+            t = total
+        }
+        while t < ende {
+            let p2: u64 = buf_bm(state) + bm_byte(t)
+            kstate.set8(p2, (kstate.get8(p2) | (1 << (t % 8))) as u8)
+            t = t + 1
+        }
+        if !blk.write(state, bms + kb, buf_bm(state)) {
+            leave(state, flags)
+            return false
+        }
+        kb = kb + 1
     }
-    blk.write(state, BITMAP_BLOCK, buf_bm(state))
     // The inode table: empty.
     zero(buf_in(state), BS)
     var k: u64 = 0
-    while k < INODE_BLOCKS {
-        blk.write(state, INODE_START + k, buf_in(state))
+    while k < itb {
+        blk.write(state, itab + k, buf_in(state))
         k = k + 1
     }
-    geom(state, INODE_COUNT, DATA_START)
     kstate.set(state, kstate.FS_ROOT, 1)
     kstate.set(state, kstate.FS_READY, 1)
     // The root directory.
@@ -1308,11 +2229,68 @@ fn mount(state: u64) -> bool {
     if ver == 0 {
         ver = OFS_V1
     }
-    if ver > OFS_V2 {
+    if ver > OFS_V3 {
         leave(state, flags) // aus der Zukunft: lieber nein sagen
         return false
     }
     kstate.set(state, kstate.K13_OFF + kstate.U_FSVER, ver)
+    // ------------------------------------------------------ RUNDE OFS3
+    //
+    // DIE VIER ZAHLEN DES FORMATS, AUS DEM SUPERBLOCK. Eine Null heisst
+    // in jedem der vier Felder "wie vor dieser Runde"; ein Abbild aus
+    // Runde 62 traegt vier Nullen und bekommt damit von selbst
+    // Kartenblock 1, 128er Inodes, 32er Eintraege, 24er Namen.
+    //
+    // UND JEDE VON IHNEN WIRD GEPRUEFT, BEVOR SIE GILT. Ein Superblock
+    // ist eine Behauptung eines fremden Programms ueber eine Platte;
+    // eine Inodegroesse von 3 oder eine Karte von null Bloecken waere
+    // kein Dateisystem, sondern ein Weg, im Kernel danebenzugreifen.
+    var bmb: u64 = get64(buf_sb(state) + SB_BMBLOCKS)
+    var isz: u64 = get64(buf_sb(state) + SB_ISIZE)
+    var dent: u64 = get64(buf_sb(state) + SB_DIRENT)
+    var nlen: u64 = get64(buf_sb(state) + SB_NAMELEN)
+    if bmb == 0 {
+        bmb = 1
+    }
+    if isz == 0 {
+        isz = INODE_SIZE
+    }
+    if dent == 0 {
+        dent = DIRENT
+    }
+    if nlen == 0 {
+        nlen = NAME_LEN
+    }
+    // Die Inodegroesse muss BS teilen und mindestens 128 sein -- sonst
+    // laege ein Inode ueber einer Blockgrenze, und `inode_get` liest
+    // einen Block.
+    if isz < INODE_SIZE || isz > BS || (BS % isz) != 0 {
+        leave(state, flags)
+        return false
+    }
+    // Ein Eintrag muss in `buf_nm` passen (ein Block) und Platz fuer die
+    // Inodenummer und mindestens einen Namen lassen.
+    if dent < DIRENT || dent > BS || nlen < NAME_LEN || nlen + 8 > dent {
+        leave(state, flags)
+        return false
+    }
+    // Die Karte muss die Platte abdecken. Eine Karte, die zu KLEIN ist,
+    // waere kein Fehler beim Lesen -- die hinteren Bloecke waeren nur
+    // unerreichbar --, aber sie waere eine Luege des Superblocks ueber
+    // seine eigene Platte, und `mount` glaubt Superbloecken nicht.
+    let bms2: u64 = get64(buf_sb(state) + SB_BITMAP)
+    if bms2 == 0 || bmb == 0 {
+        leave(state, flags)
+        return false
+    }
+    if bmb * BITS_PER_BLOCK < blk.blocks(state)
+        && bmb * BITS_PER_BLOCK < get64(buf_sb(state) + SB_BLOCKS) {
+        leave(state, flags)
+        return false
+    }
+    let ipb2: u64 = BS / isz
+    geom3(state, bms2, bmb, get64(buf_sb(state) + SB_ITABLE), isz, ipb2,
+        dent, nlen)
     // RUNDE K15: DIE GEOMETRIE KOMMT AUS DEM SUPERBLOCK und nicht mehr
     // aus zwei Konstanten. Was nicht zusammenpasst, wird NICHT
     // eingehaengt: die Inode-Tabelle muss dort liegen, wo
@@ -1329,8 +2307,11 @@ fn mount(state: u64) -> bool {
         ds = DATA_START
     }
     let itab: u64 = get64(buf_sb(state) + SB_ITABLE)
-    let noetig: u64 = (ni + INODES_PER_BLOCK - 1) / INODES_PER_BLOCK
-    if itab != INODE_START || ds < INODE_START + noetig
+    let noetig: u64 = (ni + ipb2 - 1) / ipb2
+    // RUNDE OFS3: die Tabelle muss HINTER der Karte liegen und nicht mehr
+    // bei Block 2 -- die Karte ist ja mehrblockig geworden. Alles andere
+    // an dieser Pruefung steht, wie es stand.
+    if itab < bms2 + bmb || ds < itab + noetig
         || ds >= blk.blocks(state) {
         leave(state, flags)
         return false
@@ -1339,6 +2320,8 @@ fn mount(state: u64) -> bool {
     let r: u64 = get64(buf_sb(state) + SB_ROOT)
     if inode_get(state, r, I_TYPE) != T_DIR {
         geom(state, INODE_COUNT, DATA_START)
+        geom3(state, BITMAP_BLOCK, 1, INODE_START, INODE_SIZE,
+            INODES_PER_BLOCK, DIRENT, NAME_LEN)
         leave(state, flags)
         return false
     }
@@ -1385,7 +2368,7 @@ fn mount(state: u64) -> bool {
 // Ende.
 const SCAN_SHIFT: u64 = 20
 const SCAN_MASK: u64 = 1048575
-const EPB: u64 = 16 // BS / DIRENT
+const EPB: u64 = 16 // BS / DIRENT, Fassung 1 und 2
 
 fn scan(state: u64, cur: u64, out: u64, max: u64) -> u64 {
     let flags: u64 = enter(state)
@@ -1401,22 +2384,47 @@ fn scan(state: u64, cur: u64, out: u64, max: u64) -> u64 {
     while ino <= letzte && !voll {
         if inode_get(state, ino, I_TYPE) == T_DIR {
             let cnt: u64 = dir_entries(state, ino)
+            // RUNDE OFS3: WIE VIELE EINTRAEGE IN EINEN BLOCK PASSEN,
+            // HAENGT AN DER FASSUNG. In Fassung 1 und 2 sind es sechzehn
+            // (512 / 32); in Fassung 3 ist ein Eintrag 264 Oktette und
+            // teilt 512 NICHT -- ein Eintrag laege dann ueber der
+            // Blockgrenze, und der Puffer haette nur seine erste Haelfte.
+            // Also wird in Fassung 3 EINTRAG FUER EINTRAG gelesen
+            // (`entry_read` geht durch `read_at` und kann das). Das
+            // kostet Leseaufrufe, und es steht als Preis in
+            // docs/ROUNDOFS3.md; falsch waere billiger, aber falsch.
+            let epb: u64 = BS / dirent_size(state)
             while idx < cnt && !voll {
-                let chunk: u64 = idx / EPB
-                let got: u64 = read_at(state, ino, chunk * BS,
-                    buf_zz(state), BS)
-                if got == 0 {
-                    idx = cnt
-                } else {
-                    var bis: u64 = (chunk + 1) * EPB
+                var got: u64 = 0
+                var bis: u64 = 0
+                var chunk: u64 = 0
+                if epb >= 1 && (BS % dirent_size(state)) == 0 {
+                    chunk = idx / epb
+                    got = read_at(state, ino, chunk * BS, buf_zz(state), BS)
+                    bis = (chunk + 1) * epb
                     if bis > cnt {
                         bis = cnt
                     }
-                    if bis > chunk * EPB + got / DIRENT {
-                        bis = chunk * EPB + got / DIRENT
+                    if bis > chunk * epb + got / dirent_size(state) {
+                        bis = chunk * epb + got / dirent_size(state)
                     }
+                } else {
+                    got = entry_read(state, ino, idx, buf_zz(state))
+                    if got == 0 {
+                        // Ein leerer Platz ist kein Ende -- weiterzaehlen.
+                        got = 1
+                    }
+                    chunk = idx
+                    bis = idx + 1
+                }
+                if got == 0 {
+                    idx = cnt
+                } else {
                     while idx < bis && !voll {
-                        let p: u64 = buf_zz(state) + (idx % EPB) * DIRENT
+                        var p: u64 = buf_zz(state)
+                        if (BS % dirent_size(state)) == 0 {
+                            p = buf_zz(state) + (idx % epb) * dirent_size(state)
+                        }
                         let child: u64 = get64(p)
                         if child != 0 && !punktname(p + 8) {
                             if n >= max {
@@ -1429,10 +2437,11 @@ fn scan(state: u64, cur: u64, out: u64, max: u64) -> u64 {
                                 // Felder: `inode_get` liest je Aufruf
                                 // einen Block, und Groesse und Art
                                 // stehen im selben.
-                                if blk.read(state, inode_block_of(child),
+                                if blk.read(state,
+                                    inode_block_of(state, child),
                                     buf_in(state)) {
                                     let at2: u64 = buf_in(state)
-                                        + inode_off(child)
+                                        + inode_off(state, child)
                                     put64(rec + nidx.R_SIZE,
                                         get64(at2 + I_SIZE))
                                     put64(rec + nidx.R_KIND,
@@ -1442,7 +2451,15 @@ fn scan(state: u64, cur: u64, out: u64, max: u64) -> u64 {
                                     put64(rec + nidx.R_KIND, 0)
                                 }
                                 put64(rec + nidx.R_OP, idx)
-                                copy(p + 8, rec + nidx.R_NAME, NAME_LEN)
+                                // NUR nidx.NAMEJ Oktette: der Satz des
+                                // Journals ist 64 Oktette gross und
+                                // haelt 24 davon fuer den Namen. Ein
+                                // Name der Fassung 3 kann 255 Zeichen
+                                // haben -- er wird hier ABGESCHNITTEN,
+                                // und das steht in docs/ROUNDOFS3.md
+                                // unter dem, was diese Runde NICHT
+                                // geloest hat.
+                                copy(p + 8, rec + nidx.R_NAME, nidx.NAMEJ)
                                 n = n + 1
                             }
                         }
