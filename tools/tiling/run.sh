@@ -309,8 +309,19 @@ schau "der sichtbare Reiter fuellt die Flaeche unter der Zeile" \
     flaeche "$TMPD/tb.ppm" 2 44 796 200 224 192 48
 schau "der vierte Reiter ist der aktive (helle Leiste rechts oben)" \
     flaeche "$TMPD/tb.ppm" 700 5 60 12 28 78 126
-schau "der erste ist es nicht (dunkle Leiste links oben)" \
-    flaeche "$TMPD/tb.ppm" 100 5 60 12 34 44 56
+# RUNDE MERGE: DIE FARBE STEHT NICHT MEHR IM LAEUFER. Der Reiterhinter-
+# grund war 0x222C38, weil diese Runde ihn so in `kernel/wm.fi`
+# hineingeschrieben hatte -- und genau das hat Runde THEME verboten
+# (tests/theme/rawcolour.py). Ein Reiter IST eine Titelleiste, also
+# nimmt er seit dem Zusammenfuehren den Deko-Platz DK_TITLE, und der
+# steht bei 0x2C3848. Geholt wird er hier aus `deco_fallback`, damit
+# ein neues Schema die Zusage nicht wieder umwirft.
+DKT=$(sed -n '/fn deco_fallback/,/^}/p' kernel/wm.fi \
+    | grep -A2 'i == DK_TITLE {' | grep -oE '0x00[0-9A-Fa-f]{6}' | head -1)
+DKT=${DKT:-0x002C3848}
+dkr=$(( (DKT >> 16) & 255 )); dkg=$(( (DKT >> 8) & 255 )); dkb=$(( DKT & 255 ))
+schau "der erste ist es nicht (dunkle Leiste links oben, DK_TITLE)" \
+    flaeche "$TMPD/tb.ppm" 100 5 60 12 $dkr $dkg $dkb
 schau_nicht "und in der Reiterzeile steht Text, nicht nur Farbe" \
     flaeche "$TMPD/tb.ppm" 606 4 40 16 28 78 126
 foto "$K0" "gfx wm tile tileshot tilerot wmhold $GRUND" "$TMPD/rt.txt" \
