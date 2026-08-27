@@ -63,7 +63,7 @@ export {
     label, button, check, entry, list, table, tabs, menubar, choice,
     sep, scrollarea,
     value, set_value, text_of, set_text, set_rows, set_cols, enable,
-    list_icons,
+    list_icons, row_icons, icon_id, ICON_TAG,
     focus_id, set_focus, fired_kind, fired_index, fired_win,
     step, draw_all, dirty, dirty_all, alive, quit,
     menu_open, menu_at, menu_win, dlg_text, dlg_open, dlg_ask, dlg_state,
@@ -122,7 +122,13 @@ const D_D: u64 = 12 // Hoechstlaenge / Spaltenbreiten
 const D_PW: u64 = 13 // Wunschbreite
 const D_PH: u64 = 14 // Wunschhoehe
 const D_CT: u64 = 15 // der Kasten
-const D_FIELDS: u64 = 16
+// ROUND ICONS: one word per row, an icon from the icon font.  It sits
+// next to `D_D` and not inside it on purpose: `D_D` already means two
+// different things depending on the widget (longest text for an entry,
+// column widths for a table), and a third meaning in the same slot is
+// how a widget ends up drawing a column width as a picture.
+const D_ICONS: u64 = 16
+const D_FIELDS: u64 = 17
 
 const F_FOCUSABLE: u64 = 1
 const F_PRESSED: u64 = 2
@@ -176,7 +182,7 @@ const KEY_DEL: u64 = 0x109
 
 // ------------------------------------------------------- der Zustand
 
-static mut wd: [u64; 1536] = [0 as u64; 1536] // MAXWD * D_FIELDS
+static mut wd: [u64; 1632] = [0 as u64; 1632] // MAXWD * D_FIELDS
 static mut wn: [u64; 56] = [0 as u64; 56] // MAXWN * N_FIELDS
 static mut ct: [u64; 312] = [0 as u64; 312] // MAXCT * C_FIELDS
 static mut nwd: u64 = 0
@@ -1229,6 +1235,48 @@ fn list_icons(i: u64, p: u64) {
     dirty_wd(i)
 }
 
+// ROUND ICONS: THE THIRD KIND OF ROW SYMBOL, and a list or a table can
+// carry it next to the two that already exist.
+//
+// A word in the array passed here is either 0 (this row has none) or an
+// icon out of `lib/icons.fi` with ICON_TAG set.  The tag is bit 63, and
+// it is a tag and not a range check for the same reason `ist_bild`
+// looks at "OSYM" and not at an address: a rule that depends on where
+// something happens to lie in memory falls over silently the day the
+// memory map moves.  Bit 63 is set by no pointer this process can hold
+// (Ring 3 lives at 0x40100000) and by no colour (colours are 24 bit).
+//
+// WHY NOT REUSE `list_icons`.  That array means "a picture or a
+// colour", it is only read by lists, and it puts a 14 by 14 tile with a
+// letter on it where there is no picture.  An icon is neither: it has
+// no tile, no letter and no colour of its own -- it takes the colour of
+// the row it stands in, which is exactly what makes it work in a light
+// and a dark theme without a second set of drawings.
+const ICON_TAG: u64 = 9223372036854775808 // 1 << 63
+
+fn icon_id(c: u64) -> u64 {
+    return ICON_TAG | c
+}
+
+fn row_icons(i: u64, p: u64) {
+    s(i, D_ICONS, p)
+    dirty_wd(i)
+}
+
+// The icon of visible row `z`, or 0.  One place where the array is
+// read, so a list and a table cannot disagree about what is in it.
+fn icon_at_row(i: u64, z: u64) -> u64 {
+    let p: u64 = g(i, D_ICONS)
+    if p == 0 {
+        return 0
+    }
+    let w: u64 = __mmio_read64((p + z * 8) as *mut u64)
+    if (w & ICON_TAG) == 0 {
+        return 0
+    }
+    return w & 65535
+}
+
 // "OSYM" -- vier Oktette, gelesen als eine Zahl waere es von der
 // Ausrichtung abhaengig, also Oktett fuer Oktett.
 //
@@ -1299,6 +1347,11 @@ fn list_ein(i: u64) -> u64 {
     if g(i, D_KIND) == K_LIST && g(i, D_D) != 0 {
         return 22
     }
+    // ROUND ICONS: an icon indents the text by the same amount as a
+    // tile, so that a list with icons and a list with tiles line up.
+    if g(i, D_KIND) == K_LIST && g(i, D_ICONS) != 0 {
+        return 22
+    }
     return 0
 }
 
@@ -1325,8 +1378,16 @@ fn paint_list(i: u64) {
                     wlibc.theme(wlibc.T_SEL))
                 farbe = wlibc.theme(wlibc.T_SELFG)
             }
+            // ROUND ICONS: an icon takes precedence over the tile.
+            // A row that has both was a mistake in the caller, and
+            // drawing the icon is the answer that loses no information.
+            let sym: u64 = icon_at_row(i, z)
+            if sym != 0 {
+                let _ = wlibc.icon_at(sym, x + 5, ry + 2,
+                    wlibc.ICON_SMALL, farbe)
+            }
             let ein: u64 = list_ein(i)
-            if ein != 0 {
+            if ein != 0 && sym == 0 {
                 let f: u64 = __mmio_read64((g(i, D_D) + z * 8) as *mut u64)
                 if ist_bild(f) {
                     // KEIN RAHMEN UEBER EIN BILD. Der erste Entwurf malte
@@ -1422,6 +1483,17 @@ fn paint_table(i: u64) {
                 farbe = wlibc.theme(wlibc.T_SELFG)
             }
             var tx: u64 = x + 6
+            // ROUND ICONS: the icon of the row goes in front of the
+            // FIRST column, and only the first column moves right.  A
+            // table whose every column shifted would have its header
+            // over the wrong data.
+            var einr: u64 = 0
+            let sym: u64 = icon_at_row(i, z)
+            if sym != 0 {
+                let _ = wlibc.icon_at(sym, tx, ry + 2, wlibc.ICON_SMALL,
+                    farbe)
+                einr = wlibc.ICON_SMALL + 4
+            }
             c = 0
             while c < cols {
                 let cq: u64 = col_at(q, ln, c)
@@ -1429,7 +1501,10 @@ fn paint_table(i: u64) {
                     var cl: u64 = col_len(cq, sub(ln, sub(cq, q)))
                     // was nicht in die Spalte passt, wird abgeschnitten
                     // und nicht in die naechste geschrieben
-                    let platz: u64 = sub(spalte_breit(i, c), 6)
+                    var platz: u64 = sub(spalte_breit(i, c), 6)
+                    if c == 0 {
+                        platz = sub(platz, einr)
+                    }
                     while cl > 0 && wlibc.text_w(wlibc.F_UI, wlibc.PX_UI,
                         cq, cl) > platz {
                         cl = cl - 1
@@ -1438,7 +1513,11 @@ fn paint_table(i: u64) {
                     if c > 0 && z != g(i, D_VAL) {
                         f2 = wlibc.theme(wlibc.T_DIM)
                     }
-                    wlibc.text_at(wlibc.F_UI, wlibc.PX_UI, tx,
+                    var txx: u64 = tx
+                    if c == 0 {
+                        txx = tx + einr
+                    }
+                    wlibc.text_at(wlibc.F_UI, wlibc.PX_UI, txx,
                         ry + wlibc.ascent_of(wlibc.F_UI, wlibc.PX_UI) + 1,
                         cq, cl, f2)
                 }
