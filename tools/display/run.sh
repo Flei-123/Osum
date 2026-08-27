@@ -119,14 +119,31 @@ gleich "VBE_VIDEO_MEMORY_64K ist Index 10 (0x0A)" "10" "$v64"
 # Die Seiten dieser Runde und die Karte.
 d1=$(grep -aE '^const DISP_OFF' kernel/kstate.fi | sed 's/.*= //')
 d2=$(grep -aE '^const DLUT_OFF' kernel/kstate.fi | sed 's/.*= //')
-gleich "die kdata-Seite des Modustreibers" "0x5A000" "$d1"
-gleich "die kdata-Seite der Nachschlagetabelle" "0x5B000" "$d2"
-# AUFRUFNUMMERN: 1800..1802 gehoeren dieser Runde, und niemandem sonst.
-fremd=$(grep -ran --include='*.fi' -E '^const SYS_[A-Za-z0-9_]+: u64 = 18(1[0-9]|[2-4][0-9])' kernel/ \
+# RUNDE MERGE: DIE ADRESSEN STEHEN NICHT MEHR IM LAEUFER. Diese Runde
+# nahm 0x5A000 und 0x5B000; auf dem zusammengefuehrten Baum liegt dort
+# OFS3, und der Modustreiber ist auf 0x5C000/0x5D000 gerueckt. Die Frage
+# dieser Zeilen ist "liegen die beiden Seiten hintereinander und kennt
+# der Kartenpruefer sie", nicht "steht dort eine bestimmte Zahl" -- die
+# Zahl darf sich aendern, der Kartenpruefer drei Zeilen weiter unten ist
+# der, der ueber Kollisionen entscheidet.
+[ -n "$d1" ] && ok "die kdata-Seite des Modustreibers steht in kstate.fi: $d1" \
+             || bad "DISP_OFF fehlt in kernel/kstate.fi"
+[ -n "$d2" ] && ok "die kdata-Seite der Nachschlagetabelle steht daneben: $d2" \
+             || bad "DLUT_OFF fehlt in kernel/kstate.fi"
+gleich "und sie folgt unmittelbar auf den Modustreiber" \
+    "$(printf '0x%X' $(( $d1 + 0x1000 )))" "$(printf '0x%X' $(( $d2 )))"
+# AUFRUFNUMMERN: 1810..1819 gehoeren dieser Runde, und niemandem sonst.
+# RUNDE MERGE: der Bereich hiess hier 1810..1849 und war damit zu weit.
+# Der Hunderter ist inzwischen aufgeteilt -- 1800..1809 die Widget-Naht
+# aus K15, 1810..1819 diese Runde, 1820..1829 Runde TILING, 1830..1839
+# Runde POWERMON -- und jede der drei anderen Runden prueft ihren eigenen
+# Zehner genauso. Ein Laeufer, der den halben Hunderter fuer sich
+# beansprucht, meldet die Nachbarn als Eindringlinge.
+fremd=$(grep -ran --include='*.fi' -E '^const SYS_[A-Za-z0-9_]+: u64 = 181[0-9]' kernel/ \
     | grep -v -e '^kernel/sys.fi' -e '^kernel/user/dispctl.fi' \
               -e '^kernel/user/einstellungen.fi' || true)
-[ -z "$fremd" ] && ok "keine Aufrufnummer aus 1800..1849 steht ausserhalb der Dateien dieser Runde" \
-                || bad "Aufrufnummern aus 1800..1849 stehen auch in: $(echo $fremd | tr '\n' ' ')"
+[ -z "$fremd" ] && ok "keine Aufrufnummer aus 1810..1819 steht ausserhalb der Dateien dieser Runde" \
+                || bad "Aufrufnummern aus 1810..1819 stehen auch in: $(echo $fremd | tr '\n' ' ')"
 eigen=$(grep -ahE '^const SYS_[A-Za-z0-9_]+: u64 = 181[0-9]' kernel/sys.fi | wc -l | tr -d ' ')
 gleich "in kernel/sys.fi stehen genau drei Nummern aus dem Vorrat" "3" "$eigen"
 
@@ -168,8 +185,21 @@ else
 fi
 # Und die Zusage ueber den Inhalt: der Satz, den diese Runde falsch
 # gemacht hat, steht nicht mehr da.
-hat_nicht kernel/user/einstellungen.fi "kann dieser Kernel ihn nicht wechseln" \
-    "der Satz 'im Betrieb kann dieser Kernel ihn nicht wechseln' ist weg"
+# RUNDE MERGE: GESUCHT WIRD DER ANZEIGETEXT, NICHT DER KOMMENTAR.
+# Seit Runde I18N steht der Text der Oberflaeche in `locale/<code>/
+# messages` und nicht mehr im Quelltext; im Quelltext steht nur noch ein
+# Kommentar, der ERKLAERT, warum der Satz weg ist -- und den hat dieser
+# Griff gefunden und als Rueckfall gemeldet. Geprueft werden deshalb die
+# Sprachdateien und die Nicht-Kommentarzeilen des Programms.
+for f in locale/de/messages locale/en/messages; do
+    hat_nicht "$f" "kann dieser Kernel ihn nicht wechseln" \
+        "der unwahre Satz steht nicht in $f"
+    hat_nicht "$f" "this kernel cannot change it" \
+        "und auch nicht in seiner englischen Fassung in $f"
+done
+grep -v '^\s*//' kernel/user/einstellungen.fi > "$TMPD/eins-code.fi"
+hat_nicht "$TMPD/eins-code.fi" "kann dieser Kernel ihn nicht wechseln" \
+    "der Satz 'im Betrieb kann dieser Kernel ihn nicht wechseln' ist aus dem Programm weg"
 hat kernel/user/einstellungen.fi "SYS_DISPSET" \
     "das Einstellungen-Programm ruft wirklich den Kernel und schreibt keine Datei mehr"
 
