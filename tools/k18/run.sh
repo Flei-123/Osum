@@ -186,7 +186,16 @@ done
 # Fehler gemeldet, wo keiner war, und das ist genauso schlecht wie einer,
 # der keinen meldet, wo einer ist.
 fremd=$(grep -ran --include='*.fi' --include='*.s' -E '^const SYS_[A-Za-z0-9_]+: u64 = 17(5[0-9]|[6-9][0-9])' kernel/ \
-    | grep -v -e '^kernel/sys.fi' -e '^kernel/uprog.fi' -e '^kernel/user/power.fi' || true)
+    | grep -v -e '^kernel/sys.fi' -e '^kernel/uprog.fi' -e '^kernel/user/power.fi' \
+              -e '^kernel/user/powermon.fi' || true)
+# `kernel/user/powermon.fi` steht seit Runde POWERMON in dieser Liste, und
+# das ist keine Aufweichung der Zusage. Die Frage, die diese Zeile stellt,
+# ist "vergibt eine ANDERE Runde dieselbe Nummer noch einmal fuer etwas
+# anderes" -- nicht "benutzt sonst niemand diese Runde". /bin/powermon
+# liest den Akku ueber GENAU diesen Aufruf, so wie /bin/power daneben, und
+# ein zweites Programm, das nach dem Ladestand fragt, ist der Zweck einer
+# Aufrufnummer und nicht ihr Missbrauch. Kollidieren wuerde erst eine
+# ZWEITE Vergabe, und die faende diese Suche weiterhin.
 if [ -z "$fremd" ]; then
     ok "keine AUFRUFNUMMER aus 1750..1799 steht ausserhalb der Dateien dieser Runde"
 else
