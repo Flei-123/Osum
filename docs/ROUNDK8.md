@@ -20,7 +20,7 @@ programs in `/bin` that use them.
 | services to measure | `kernel/netsvc.fi` — 605 lines |
 | system calls | `kernel/sys.fi`, the K8 section — 486 lines |
 | userland | `lib/libc/net.fi` 265, `kernel/user/ping.fi` 210, `kernel/user/wget.fi` 299 |
-| the wire | `tools/net/bruecke.c` 170, `tools/net/run.sh` 582 |
+| the wire | `tools/net/bridge.c` 170, `tools/net/run.sh` 582 |
 | stack | **not written here** — `vendor/firn/lib/net/`, 2,646 lines, pinned by `vendor/firn/COMMIT` |
 | guard | `tools/net/run.sh`, **75 proofs**, section 12 of `test.sh` |
 
@@ -34,7 +34,7 @@ down first. `lib/net/` exists once, in Firn, at the commit
 nailed down in this repository, because it is the same one the
 **compiler** comes from.
 
-`vendor/firn/hole-firnc.sh` unpacks that commit and copies the whole Firn
+`vendor/firn/fetch-firnc.sh` unpacks that commit and copies the whole Firn
 library to `vendor/firn/lib/`. Both compiler stages look for an `import`
 last in `<directory of the compiler binary>/../lib`. So
 
@@ -52,9 +52,9 @@ does not exist on purpose.
 Section 1 of `./test.sh` checks it, and not by looking: the three blob
 hashes in `vendor/net/BLOBS` are the ones Firn has in the tree of that
 commit, and `git hash-object` recomputes them against the files
-`hole-firnc.sh` really unpacked. Pull `COMMIT` forward and let the stack
+`fetch-firnc.sh` really unpacked. Pull `COMMIT` forward and let the stack
 change with it, and the acceptance run says so before any measurement
-does. `vendor/net/HERKUNFT.md` has the whole story.
+does. `vendor/net/PROVENANCE.md` has the whole story.
 
 Two diverging copies of the same code have been expensive three times in
 this project already.
@@ -217,7 +217,7 @@ node, so the wire is:
 
 ```
 Osum in QEMU <--virtio-net--> QEMU <--UDP on the loopback-->
-tools/net/bruecke <--AF_PACKET--> veth v0 | v1 <--> Linux in the
+tools/net/bridge <--AF_PACKET--> veth v0 | v1 <--> Linux in the
 network namespace k8net, 10.9.0.1/24
 ```
 

@@ -15,7 +15,7 @@ Diese Runde benutzt ihn.
 > `FONT_OFF` standen auf 0x2F000, und Runde K9 legte die Signaltabelle
 > auf dieselbe Seite. Der Signalblock der Aufgabe 1 löschte die Glyphen
 > `@` bis `o`. Der Bereich liegt jetzt auf **0x3C000**, steht in der
-> Karte in `kstate.fi`, und `tools/kernel/karte.py` rechnet bei jedem
+> Karte in `kstate.fi`, und `tools/kernel/memmap.py` rechnet bei jedem
 > Testlauf 38 Bereiche gegeneinander.
 
 Abnahme: `bash tools/gfx/run.sh` (Abschnitt 12 von `./test.sh`),
@@ -275,13 +275,13 @@ QEMU-Monitor. Der Ablauf:
    Unix-Socket.
 2. Der Kern hält auf das Wort `fbhold` hin rund **vier Sekunden** still
    und meldet das seriell (`fb: hold`).
-3. `tools/gfx/schuss.py` sieht die Zeile, ruft `screendump` und wartet,
+3. `tools/gfx/screenshot.py` sieht die Zeile, ruft `screendump` und wartet,
    bis die Datei eine Größe hat, **die sich nicht mehr ändert** — ein halb
    geschriebenes PPM ist ein Bild, das jeden Vergleich verliert, und zwar
    ohne Hinweis darauf, warum.
-4. `tools/gfx/schau.py` rechnet das PPM nach.
+4. `tools/gfx/checkshot.py` rechnet das PPM nach.
 
-`schau.py` kann fünf Dinge, und jedes ist eine Zusage:
+`checkshot.py` kann fünf Dinge, und jedes ist eine Zusage:
 
 | Unterbefehl | prüft |
 |---|---|
@@ -619,8 +619,8 @@ als schwarzes Bild zeigt, ohne zu sagen warum:
 | `kernel/serial.fi` | +14 | eine Zeile in `put`, und der Absatz darüber |
 | `kernel/file.fi` | +7 | `K_FB` |
 | `tools/gfx/run.sh` | **neu, 407** | 74 Zusagen in elf Abschnitten |
-| `tools/gfx/schau.py` | **neu, 385** | das Bildschirmfoto maschinell nachrechnen |
-| `tools/gfx/schuss.py` | **neu, 87** | `screendump` über den QEMU-Monitor |
+| `tools/gfx/checkshot.py` | **neu, 385** | das Bildschirmfoto maschinell nachrechnen |
+| `tools/gfx/screenshot.py` | **neu, 87** | `screendump` über den QEMU-Monitor |
 | `tools/kernel/run.sh`, `tools/pci/run.sh` | +2 Stellen | `kdata` als zweiter erlaubter offener Name |
 | `test.sh` | +3 | Abschnitt 12 |
 
