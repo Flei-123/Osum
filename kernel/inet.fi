@@ -65,6 +65,7 @@ import net.tcp
 import net.stack
 import netmon
 import share
+import wg
 
 export {
     init, ready, pump, netd_body, wake, configure, readdr, us, set_task,
@@ -480,11 +481,24 @@ fn pump(state: u64) -> u64 {
             // the stack, because the stack may consume it and because
             // this is the only place it exists as octets with a length.
             netmon.frame_seen(state, frame, len, false)
-            // ROUND NETMON PART TWO: is this frame a CLIENT'S answer?
-            // Asked before the stack sees it, because a frame belonging
-            // to a machine on the shared side is not this machine's
-            // business and handing it to the stack would get it an RST.
-            if !share.inbound(state, frame, len) {
+            // ROUND TUNNEL. The tunnel gets the frame before the stack
+            // does. If it says it was its own -- a WireGuard message on
+            // its port -- the stack must not also see it; what came out
+            // of it, if anything, has already been handed in as a frame
+            // of its own. `kernel/wg.fi` says why this is here and not
+            // in a socket.
+            //
+            // MERGE: DIE REIHENFOLGE DER DREI HAKEN. Erst ZAEHLEN
+            // (NETMON sieht jeden Rahmen, auch den verschluesselten --
+            // das ist die Zahl, die auf dem Draht steht), dann der
+            // TUNNEL (er nimmt seine eigenen Nachrichten heraus und
+            // reicht das Entpackte als neuen Rahmen wieder herein), dann
+            // die WEITERLEITUNG (NETMON Teil zwei: gehoert der Rahmen
+            // einer Maschine auf der geteilten Seite). Anders herum
+            // zaehlte NETMON entweder den Klartext doppelt oder den
+            // Draht gar nicht.
+            if !wg.rx_hook(state, frame, len)
+                && !share.inbound(state, frame, len) {
                 stack.net_input(s, frame as *mut u8, len as usize, now)
             }
             virtio.rx_recycle(state, slot)
@@ -508,13 +522,26 @@ fn pump(state: u64) -> u64 {
                 n = PUMP_BATCH
             } else {
                 netmon.frame_seen(state, out, len as u64, true)
-                virtio.tx_frame(state, out, len as u64)
-                kstate.add(state, sc(S_OUT), 1)
+                // ROUND TUNNEL, AND THIS IS THE KILL SWITCH. Every frame
+                // this system sends passes through this one line, because
+                // this is the only call to `virtio.tx_frame` there is. A
+                // frame the tunnel takes over (it will send the encrypted
+                // form itself) or refuses (the switch is armed and the
+                // tunnel is not carrying) never reaches the card.
+                if wg.tx_hook(state, out, len as u64) == 0 {
+                    virtio.tx_frame(state, out, len as u64)
+                    kstate.add(state, sc(S_OUT), 1)
+                }
                 work = work + 1
                 n = n + 1
             }
         }
     }
+    // The handshakes and keepalives that are due, on the network task's
+    // turn and inside the same lock -- a Curve25519 operation has no
+    // business in an interrupt handler.
+    wg.tick(state)
+
     kstate.add(state, sc(S_PUMPS), 1)
     drop_lock(state, flags)
     return work

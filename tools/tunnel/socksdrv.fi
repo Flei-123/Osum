@@ -1,0 +1,450 @@
+// tools/tunnel/socksdrv.fi -- `lib/socks/socks5.fi` against a REAL proxy.
+//
+// The same argument as `tools/tunnel/peer.fi`: a protocol measured only
+// against itself proves nothing. This program links the identical file
+// the system links, opens an ordinary Linux TCP socket, and speaks SOCKS5
+// to whatever is listening -- a plain SOCKS5 proxy, an HTTP proxy, or the
+// Tor daemon on 9050. `tools/tunnel/proxy.py` starts those and reads what
+// comes back.
+//
+//     socks5 <proxy-ip> <proxy-port> <host> <port> [<user> <pass>]
+//     http   <proxy-ip> <proxy-port> <host> <port>
+//
+// On success it sends `GET / HTTP/1.0` through the tunnel and prints
+//
+//     ok <socks-reply-code> <http-status> <first-line-of-the-answer>
+//
+// and on failure `fail <where> <code>`. That is enough for the Python to
+// tell "the proxy refused" from "the proxy worked and the site refused",
+// which are different results and are usually confused.
+import std.rt
+import std.io
+import socks.socks5
+
+const AF_INET: i64 = 2
+const SOCK_STREAM: i64 = 1
+const SYS_SOCKET: i64 = 41
+const SYS_CONNECT: i64 = 42
+const SYS_READ: i64 = 0
+const SYS_WRITE: i64 = 1
+const SYS_CLOSE: i64 = 3
+
+static mut buf: [u8; 8192] = [0; 8192]
+static mut out: [u8; 8192] = [0; 8192]
+static mut line: [u8; 4096] = [0; 4096]
+static mut inbuf: [u8; 8192] = [0; 8192]
+static mut in_len: usize = 0
+static mut in_pos: usize = 0
+static mut in_eof: usize = 0
+
+fn sa_build(p: u64, ip: u64, port: u64) {
+    var i: usize = 0
+    while i < 16 {
+        rt.st8(p, i, 0 as u8)
+        i = i + 1
+    }
+    rt.st8(p, 0, AF_INET as u8)
+    rt.st8(p, 1, 0 as u8)
+    rt.st8(p, 2, ((port >> 8) & 255) as u8)
+    rt.st8(p, 3, (port & 255) as u8)
+    rt.st8(p, 4, ((ip >> 24) & 255) as u8)
+    rt.st8(p, 5, ((ip >> 16) & 255) as u8)
+    rt.st8(p, 6, ((ip >> 8) & 255) as u8)
+    rt.st8(p, 7, (ip & 255) as u8)
+}
+
+fn tcp_connect(ip: u64, port: u64) -> i64 {
+    let fd: i64 = syscall(SYS_SOCKET, AF_INET, SOCK_STREAM, 0, 0, 0, 0)
+    if fd < 0 {
+        return -1
+    }
+    var sa: [u8; 16] = [0; 16]
+    sa_build((&sa[0]) as u64, ip, port)
+    let r: i64 = syscall(SYS_CONNECT, fd, (&sa[0]) as i64, 16, 0, 0, 0)
+    if r < 0 {
+        syscall(SYS_CLOSE, fd, 0, 0, 0, 0, 0)
+        return -1
+    }
+    return fd
+}
+
+fn write_all(fd: i64, p: u64, n: u64) -> bool {
+    var at: u64 = 0
+    while at < n {
+        let w: i64 = syscall(SYS_WRITE, fd, (p + at) as i64,
+            (n - at) as i64, 0, 0, 0)
+        if w <= 0 {
+            return false
+        }
+        at = at + w as u64
+    }
+    return true
+}
+
+// Reads EXACTLY `n` octets. A SOCKS reply is a fixed shape and a short
+// read that is treated as an answer is how a client ends up parsing a
+// half-arrived packet.
+fn read_exact(fd: i64, p: u64, n: u64) -> bool {
+    var at: u64 = 0
+    while at < n {
+        let r: i64 = syscall(SYS_READ, fd, (p + at) as i64,
+            (n - at) as i64, 0, 0, 0)
+        if r <= 0 {
+            return false
+        }
+        at = at + r as u64
+    }
+    return true
+}
+
+fn read_some(fd: i64, p: u64, n: u64) -> i64 {
+    return syscall(SYS_READ, fd, p as i64, n as i64, 0, 0, 0)
+}
+
+// ------------------------------------------------------------- line input
+
+fn refill() -> bool {
+    if in_eof != 0 {
+        return false
+    }
+    let got: i64 = syscall(SYS_READ, 0, (&inbuf[0]) as i64, 8192, 0, 0, 0)
+    if got <= 0 {
+        in_eof = 1
+        return false
+    }
+    in_len = got as usize
+    in_pos = 0
+    return true
+}
+
+fn next_line(n: *mut usize) -> bool {
+    var w: usize = 0
+    var any: bool = false
+    var going: bool = true
+    while going {
+        if in_pos >= in_len {
+            if !refill() {
+                going = false
+            }
+        }
+        if going {
+            let c: u8 = inbuf[in_pos]
+            in_pos = in_pos + 1
+            any = true
+            if c == 10 as u8 {
+                going = false
+            } else if c != 13 as u8 {
+                if w < 4096 {
+                    line[w] = c
+                    w = w + 1
+                }
+            }
+        }
+    }
+    *n = w
+    return any
+}
+
+fn field(p: u64, len: usize, at: *mut usize, dst: u64) -> usize {
+    var i: usize = *at
+    while i < len && rt.ld8(p, i) == 32 as u8 {
+        i = i + 1
+    }
+    let start: usize = i
+    while i < len && rt.ld8(p, i) != 32 as u8 {
+        i = i + 1
+    }
+    *at = i
+    var o: usize = 0
+    while o < i - start {
+        rt.st8(dst, o, rt.ld8(p, start + o))
+        o = o + 1
+    }
+    return i - start
+}
+
+fn field_num(p: u64, len: usize, at: *mut usize) -> i64 {
+    var t: [u8; 64] = [0; 64]
+    let n: usize = field(p, len, at, (&t[0]) as u64)
+    if n == 0 {
+        return -1
+    }
+    var v: i64 = 0
+    var i: usize = 0
+    while i < n {
+        let c: u64 = t[i] as u64
+        if c < 48 || c > 57 {
+            return -1
+        }
+        v = v * 10 + (c - 48) as i64
+        i = i + 1
+    }
+    return v
+}
+
+fn say(t: u64, n: usize) {
+    io.print_line_bytes(t, n)
+}
+
+fn say_fail(what: u64, wn: usize, code: i64) {
+    let o: u64 = (&out[0]) as u64
+    let f: [u8; 5] = [102, 97, 105, 108, 32] // "fail "
+    var w: usize = 0
+    while w < 5 {
+        rt.st8(o, w, f[w])
+        w = w + 1
+    }
+    var i: usize = 0
+    while i < wn {
+        rt.st8(o, w, rt.ld8(what, i))
+        w = w + 1
+        i = i + 1
+    }
+    rt.st8(o, w, 32 as u8)
+    w = w + 1
+    w = putnum(o, w, code)
+    say(o, w)
+}
+
+fn putnum(o: u64, at: usize, v: i64) -> usize {
+    var d: [u8; 24] = [0; 24]
+    var n: usize = 0
+    var neg: bool = v < 0
+    var x: u64 = 0
+    if neg {
+        x = (0 - v) as u64
+    } else {
+        x = v as u64
+    }
+    if x == 0 {
+        d[0] = 48
+        n = 1
+    }
+    while x > 0 {
+        d[n] = (48 + (x % 10)) as u8
+        x = x / 10
+        n = n + 1
+    }
+    var w: usize = at
+    if neg {
+        rt.st8(o, w, 45 as u8)
+        w = w + 1
+    }
+    var i: usize = 0
+    while i < n {
+        rt.st8(o, w, d[n - 1 - i])
+        w = w + 1
+        i = i + 1
+    }
+    return w
+}
+
+// After the proxy has connected us, ask the target for something, so the
+// measurement covers the TUNNEL and not just the handshake.
+fn fetch_and_report(fd: i64, socks_code: i64, host: u64, hn: usize) {
+    let b: u64 = (&buf[0]) as u64
+    let o: u64 = (&out[0]) as u64
+    let g: [u8; 6] = [71, 69, 84, 32, 47, 32] // "GET / "
+    let h: [u8; 11] = [72, 84, 84, 80, 47, 49, 46, 48, 13, 10, 72] // ..Host
+    var w: u64 = 0
+    var i: u64 = 0
+    while i < 6 {
+        rt.st8(b, w as usize, g[i as usize])
+        w = w + 1
+        i = i + 1
+    }
+    i = 0
+    while i < 11 {
+        rt.st8(b, w as usize, h[i as usize])
+        w = w + 1
+        i = i + 1
+    }
+    let ost: [u8; 5] = [111, 115, 116, 58, 32] // "ost: "
+    i = 0
+    while i < 5 {
+        rt.st8(b, w as usize, ost[i as usize])
+        w = w + 1
+        i = i + 1
+    }
+    i = 0
+    while i < hn as u64 {
+        rt.st8(b, w as usize, rt.ld8(host, i as usize))
+        w = w + 1
+        i = i + 1
+    }
+    rt.st8(b, w as usize, 13 as u8)
+    rt.st8(b, (w + 1) as usize, 10 as u8)
+    rt.st8(b, (w + 2) as usize, 13 as u8)
+    rt.st8(b, (w + 3) as usize, 10 as u8)
+    w = w + 4
+    if !write_all(fd, b, w) {
+        var e: [u8; 5] = [119, 114, 105, 116, 101]
+        say_fail((&e[0]) as u64, 5, 0)
+        return
+    }
+    let got: i64 = read_some(fd, b, 2048)
+    if got <= 0 {
+        var e: [u8; 4] = [114, 101, 97, 100]
+        say_fail((&e[0]) as u64, 4, got)
+        return
+    }
+    let status: u64 = socks5.http_status(b, got as u64)
+    let k: [u8; 3] = [111, 107, 32] // "ok "
+    var wo: usize = 0
+    while wo < 3 {
+        rt.st8(o, wo, k[wo])
+        wo = wo + 1
+    }
+    wo = putnum(o, wo, socks_code)
+    rt.st8(o, wo, 32 as u8)
+    wo = wo + 1
+    wo = putnum(o, wo, status as i64)
+    rt.st8(o, wo, 32 as u8)
+    wo = wo + 1
+    // the first line of the answer, so a human can see it really came
+    // from somewhere
+    var j: usize = 0
+    while j < got as usize && rt.ld8(b, j) != 13 as u8
+        && rt.ld8(b, j) != 10 as u8 && j < 120 {
+        rt.st8(o, wo, rt.ld8(b, j))
+        wo = wo + 1
+        j = j + 1
+    }
+    say(o, wo)
+}
+
+fn do_socks5(pip: u64, pport: u64, host: u64, hn: usize, port: u64,
+    user: u64, un: usize, pass: u64, pn: usize) {
+    let b: u64 = (&buf[0]) as u64
+    let fd: i64 = tcp_connect(pip, pport)
+    if fd < 0 {
+        var e: [u8; 7] = [99, 111, 110, 110, 101, 99, 116]
+        say_fail((&e[0]) as u64, 7, -1)
+        return
+    }
+    let want_auth: bool = un > 0
+    var n: u64 = socks5.greeting(b, want_auth)
+    if !write_all(fd, b, n) || !read_exact(fd, b, 2) {
+        var e: [u8; 8] = [103, 114, 101, 101, 116, 105, 110, 103]
+        say_fail((&e[0]) as u64, 8, -1)
+        syscall(SYS_CLOSE, fd, 0, 0, 0, 0, 0)
+        return
+    }
+    let method: u64 = socks5.greeting_reply(b, 2)
+    if method == socks5.M_NONE_ACCEPTABLE {
+        var e: [u8; 6] = [109, 101, 116, 104, 111, 100]
+        say_fail((&e[0]) as u64, 6, method as i64)
+        syscall(SYS_CLOSE, fd, 0, 0, 0, 0, 0)
+        return
+    }
+    if method == socks5.M_USERPASS {
+        n = socks5.auth_userpass(b, user, un as u64, pass, pn as u64)
+        if n == 0 || !write_all(fd, b, n) || !read_exact(fd, b, 2)
+            || !socks5.auth_reply(b, 2) {
+            var e: [u8; 4] = [97, 117, 116, 104]
+            say_fail((&e[0]) as u64, 4, -1)
+            syscall(SYS_CLOSE, fd, 0, 0, 0, 0, 0)
+            return
+        }
+    }
+    // THE NAME GOES OVER UNRESOLVED. See the note in lib/socks/socks5.fi.
+    n = socks5.req_connect_name(b, host, hn as u64, port)
+    if n == 0 || !write_all(fd, b, n) || !read_exact(fd, b, 5) {
+        var e: [u8; 7] = [114, 101, 113, 117, 101, 115, 116]
+        say_fail((&e[0]) as u64, 7, -1)
+        syscall(SYS_CLOSE, fd, 0, 0, 0, 0, 0)
+        return
+    }
+    let code: u64 = socks5.reply_status(b, 5)
+    let total: u64 = socks5.reply_len(b, 5)
+    if total > 5 {
+        read_exact(fd, b + 5, total - 5)
+    }
+    if code != socks5.R_OK {
+        var e: [u8; 5] = [114, 101, 112, 108, 121]
+        say_fail((&e[0]) as u64, 5, code as i64)
+        syscall(SYS_CLOSE, fd, 0, 0, 0, 0, 0)
+        return
+    }
+    fetch_and_report(fd, code as i64, host, hn)
+    syscall(SYS_CLOSE, fd, 0, 0, 0, 0, 0)
+}
+
+fn do_http(pip: u64, pport: u64, host: u64, hn: usize, port: u64) {
+    let b: u64 = (&buf[0]) as u64
+    let fd: i64 = tcp_connect(pip, pport)
+    if fd < 0 {
+        var e: [u8; 7] = [99, 111, 110, 110, 101, 99, 116]
+        say_fail((&e[0]) as u64, 7, -1)
+        return
+    }
+    let n: u64 = socks5.http_connect(b, host, hn as u64, port)
+    if !write_all(fd, b, n) {
+        var e: [u8; 5] = [119, 114, 105, 116, 101]
+        say_fail((&e[0]) as u64, 5, -1)
+        syscall(SYS_CLOSE, fd, 0, 0, 0, 0, 0)
+        return
+    }
+    let got: i64 = read_some(fd, b, 2048)
+    if got <= 0 {
+        var e: [u8; 4] = [114, 101, 97, 100]
+        say_fail((&e[0]) as u64, 4, got)
+        syscall(SYS_CLOSE, fd, 0, 0, 0, 0, 0)
+        return
+    }
+    let st: u64 = socks5.http_status(b, got as u64)
+    if st < 200 || st > 299 {
+        var e: [u8; 6] = [115, 116, 97, 116, 117, 115]
+        say_fail((&e[0]) as u64, 6, st as i64)
+        syscall(SYS_CLOSE, fd, 0, 0, 0, 0, 0)
+        return
+    }
+    fetch_and_report(fd, st as i64, host, hn)
+    syscall(SYS_CLOSE, fd, 0, 0, 0, 0, 0)
+}
+
+fn run(p: u64, len: usize) {
+    var at: usize = 0
+    var kind: [u8; 16] = [0; 16]
+    let kn: usize = field(p, len, &at, (&kind[0]) as u64)
+    var a: [u8; 4] = [0; 4]
+    var na: [i64; 4] = [0; 4]
+    var i: usize = 0
+    while i < 4 {
+        na[i] = field_num(p, len, &at)
+        i = i + 1
+    }
+    // proxy ip comes as four numbers, then the port, then the host name
+    // and its port: `socks5 127 0 0 1 9050 example.com 80`
+    let pport: i64 = field_num(p, len, &at)
+    var host: [u8; 256] = [0; 256]
+    let hn: usize = field(p, len, &at, (&host[0]) as u64)
+    let hport: i64 = field_num(p, len, &at)
+    var user: [u8; 64] = [0; 64]
+    var pass: [u8; 64] = [0; 64]
+    let un: usize = field(p, len, &at, (&user[0]) as u64)
+    let pn: usize = field(p, len, &at, (&pass[0]) as u64)
+    if na[0] < 0 || pport < 0 || hn == 0 || hport < 0 {
+        var e: [u8; 5] = [117, 115, 97, 103, 101]
+        say_fail((&e[0]) as u64, 5, 0)
+        return
+    }
+    let ip: u64 = ((na[0] as u64) << 24) | ((na[1] as u64) << 16)
+        | ((na[2] as u64) << 8) | (na[3] as u64)
+    if kn == 4 && kind[0] == 104 as u8 {
+        do_http(ip, pport as u64, (&host[0]) as u64, hn, hport as u64)
+        return
+    }
+    do_socks5(ip, pport as u64, (&host[0]) as u64, hn, hport as u64,
+        (&user[0]) as u64, un, (&pass[0]) as u64, pn)
+}
+
+fn main() -> i32 {
+    var n: usize = 0
+    while next_line(&n) {
+        if n > 0 {
+            run((&line[0]) as u64, n)
+        }
+    }
+    return 0
+}

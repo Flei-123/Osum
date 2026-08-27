@@ -1,0 +1,1742 @@
+// lib/wg/proto.fi -- the WireGuard protocol itself, round TUNNEL.
+//
+// EVERYTHING IN THIS FILE IS THE PROTOCOL AND NOTHING IN IT IS OSUM.
+// There is no socket here, no scheduler, no memory allocator and no
+// system call. It is handed a region of memory that it treats as one
+// WireGuard interface, and octet buffers that it treats as packets, and
+// that is the whole of its world. Two things use it:
+//
+//   * `kernel/wg.fi`, which owns the region, owns the UDP socket and
+//     decides which packets go through the tunnel.
+//   * `tools/tunnel/peer.fi`, a hosted program that speaks the same
+//     protocol over a Linux UDP socket to a REAL `wg` interface.
+//
+// The second one is the reason for the split, and it is worth stating
+// plainly: a protocol implementation measured only against itself is
+// worthless, because both ends share the same misunderstanding. Round K8
+// wrote that down about TCP and it is more true here. So the identical
+// file that the kernel compiles is also driven against the WireGuard
+// implementation in the Linux kernel, and `tools/tunnel/run.sh` is what
+// says whether they agree.
+//
+// ========================================================= WHY WIREGUARD
+//
+// The long answer is docs/TUNNEL.md. The short one is that this is the
+// only VPN protocol a project like this may honestly attempt:
+//
+//   * IT HAS NO ALGORITHM NEGOTIATION. There is one hash (BLAKE2s), one
+//     cipher (ChaCha20-Poly1305), one curve (Curve25519), one key
+//     derivation (HKDF). There is no cipher suite list, no version
+//     field to downgrade, no algorithm identifier to confuse. Two thirds
+//     of the attacks on TLS over twenty years were against negotiation,
+//     and WireGuard simply does not have the machinery.
+//   * IT HAS FOUR MESSAGE TYPES. All of them are fixed length except the
+//     payload of the fourth. There is no ASN.1, no length-prefixed
+//     nesting, no parser to get wrong.
+//   * IT IS SILENT BY DEFAULT. A packet whose mac1 is wrong is dropped
+//     before a single asymmetric operation. An unconfigured peer gets no
+//     answer of any kind.
+//
+// ====================================================== THE FOUR MESSAGES
+//
+// Every one begins with a little endian u32: one octet of type and three
+// reserved zero octets. All indices and counters are little endian.
+//
+//   TYPE 1  HANDSHAKE INITIATION, 148 octets
+//     0   type            4
+//     4   sender_index    4
+//     8   ephemeral      32
+//     40  enc_static     48   (32 + 16 tag)
+//     88  enc_timestamp  28   (12 TAI64N + 16 tag)
+//     116 mac1           16
+//     132 mac2           16
+//
+//   TYPE 2  HANDSHAKE RESPONSE, 92 octets
+//     0   type            4
+//     4   sender_index    4
+//     8   receiver_index  4
+//     12  ephemeral      32
+//     44  enc_nothing    16   (0 + 16 tag)
+//     60  mac1           16
+//     76  mac2           16
+//
+//   TYPE 3  COOKIE REPLY, 64 octets
+//     0   type            4
+//     4   receiver_index  4
+//     8   nonce          24
+//     32  enc_cookie     32   (16 + 16 tag)
+//
+//   TYPE 4  TRANSPORT DATA, 32 octets and up
+//     0   type            4
+//     4   receiver_index  4
+//     8   counter         8
+//     16  enc_payload    n + 16
+//
+// A transport packet with an empty payload is 32 octets and is the
+// keepalive. The plaintext is padded with zeroes to a multiple of 16
+// before encryption; the true length comes out of the inner IP header,
+// which is why no explicit length field is needed.
+//
+// ======================================================= THE HANDSHAKE
+//
+// Noise_IKpsk2_25519_ChaChaPoly_BLAKE2s. Two messages, one round trip,
+// and the initiator's identity is encrypted from the first packet --
+// that is what the `I` in IK buys and it is why WireGuard has no
+// separate identity-hiding mode.
+//
+// The chain starts from two constants:
+//
+//     ck = HASH(CONSTRUCTION)
+//     h  = HASH(HASH(ck || IDENTIFIER) || responder_static_public)
+//
+// and then every field that goes on the wire is mixed into `h` right
+// after it is produced, so the AEAD of the next field authenticates
+// everything before it. Four Diffie-Hellman results go into `ck`:
+// es (initiator ephemeral, responder static), ss (both statics), ee
+// (both ephemerals), se (responder ephemeral, initiator static). An
+// attacker needs BOTH a static and an ephemeral private key to read a
+// session, which is what gives forward secrecy while still
+// authenticating the statics.
+//
+// THE PRE-SHARED KEY is mixed in at the very end of the second message
+// (`psk2`). It is optional; absent, a 32 octet zero key is mixed in
+// instead, which is why the chain has the same shape either way. Its
+// purpose is post-quantum: an attacker who records traffic today and
+// breaks Curve25519 in twenty years still needs the PSK.
+//
+// ============================================================== THE MACS
+//
+//   mac1 = MAC(HASH(LABEL_MAC1 || receiver_static_public), msg[0..mac1])
+//   mac2 = MAC(cookie,                                     msg[0..mac2])
+//
+// where MAC is keyed BLAKE2s with a 16 octet digest. mac1 is what makes
+// the interface INVISIBLE: a scanner that does not already know the
+// public key cannot produce a correct mac1 and gets no answer, so the
+// port looks closed. mac2 is all zeroes until the peer has been handed a
+// cookie, and is only CHECKED when the receiver is under load.
+//
+// ============================================================= THE COOKIE
+//
+// Under load a responder must not perform a Curve25519 operation for an
+// address that may be forged. So it answers with a cookie reply instead:
+//
+//     cookie = MAC(secret, source_ip || source_port)
+//
+// under a secret it rotates every two minutes, encrypted with
+// XChaCha20-Poly1305 under HASH(LABEL_COOKIE || its own public key), with
+// a random 24 octet nonce and the mac1 of the offending message as
+// associated data. Only somebody who knows the public key can open it,
+// and only for the message that provoked it. The peer repeats its
+// handshake with mac2 = MAC(cookie, ...), which proves it can receive at
+// the address it claims -- with no state kept on the responder at all.
+//
+// ================================================================ HONEST
+//
+// P1 NOT AUDITED. This is a from-scratch implementation of a security
+//    protocol by one round of one project. Its primitives pass 1522
+//    published test vectors and it completes handshakes with the Linux
+//    kernel's WireGuard, which together prove that it computes the right
+//    functions in the right order. NEITHER PROVES IT IS SAFE. It has had
+//    no review, no fuzzing campaign and no side channel analysis. Do not
+//    put anything behind it you would mind losing. This warning is
+//    repeated in docs/TUNNEL.md and in the settings page, because a
+//    warning only in a source file is a warning nobody reads.
+// P2 IPv4 ONLY. AllowedIPs, endpoints and the tunnel address are v4.
+//    Osum's stack (`vendor/firn/lib/net/`) has no IPv6, so a v6 tunnel
+//    would have nothing to carry. A v6 line in a configuration file is
+//    parsed, counted and REFUSED with a message, not silently dropped.
+// P3 FOUR PEERS. `PEER_MAX` is 4. A client profile has one peer; the
+//    limit exists because this region is a fixed allocation in a kernel
+//    and not a growing table.
+// P4 NO ROAMING ON THE RESPONDER SIDE beyond updating the endpoint from
+//    an authenticated packet. There is no NAT keepalive discovery
+//    besides the configured PersistentKeepalive.
+// P5 THE REPLAY WINDOW IS THE REFERENCE ONE: 8192 bits, 8128 usable
+//    (RFC 6479). It is 1 KiB per keypair and two keypairs per peer, and
+//    that is the single biggest reason a peer is 3 KiB.
+// P6 NO PACKET IS DECRYPTED BEFORE ITS TAG IS CHECKED and no counter
+//    advances the replay window before the tag is checked. Both are
+//    ordering properties that a test cannot easily see, so they are
+//    stated here and enforced in `decap`.
+import crypto.blake2s
+import crypto.chacha
+import crypto.x25519
+
+export {
+    dev_bytes, dev_init, dev_set_private, dev_public, dev_up, dev_set_up,
+    dev_port, dev_set_port, dev_addr, dev_set_addr, dev_mask, dev_mtu,
+    dev_peers, dev_stat,
+    peer_add, peer_clear, peer_at, peer_used, peer_public,
+    peer_set_endpoint, peer_endpoint_ip, peer_endpoint_port,
+    peer_set_psk, peer_allow, peer_set_keepalive, peer_keepalive,
+    peer_rx, peer_tx, peer_last_handshake, peer_established,
+    peer_find_by_public,
+    awg_set, awg_on, awg_jc, awg_junk_len,
+    route, source_ok,
+    make_initiation, consume_initiation,
+    make_response, consume_response,
+    make_cookie_reply, consume_cookie,
+    encap, decap, message_kind,
+    needs_handshake, needs_keepalive, key_expired,
+    tai64n,
+    KIND_NONE, KIND_INIT, KIND_RESP, KIND_COOKIE, KIND_DATA,
+    LEN_INIT, LEN_RESP, LEN_COOKIE, LEN_DATA_MIN, TAG,
+    PEER_MAX, KEY_LEN,
+    REKEY_AFTER_TIME, REJECT_AFTER_TIME, REKEY_TIMEOUT, KEEPALIVE_TIMEOUT,
+    REKEY_ATTEMPT_TIME, COOKIE_REFRESH_TIME,
+    ST_RX_GOOD, ST_RX_BAD, ST_TX, ST_HS_OK, ST_HS_FAIL, ST_BLOCKED,
+    ST_COOKIES, ST_JUNK
+}
+
+// ------------------------------------------------------------- constants
+
+const KEY_LEN: u64 = 32
+const TAG: u64 = 16
+const TS_LEN: u64 = 12
+
+const KIND_NONE: u64 = 0
+const KIND_INIT: u64 = 1
+const KIND_RESP: u64 = 2
+const KIND_COOKIE: u64 = 3
+const KIND_DATA: u64 = 4
+
+const LEN_INIT: u64 = 148
+const LEN_RESP: u64 = 92
+const LEN_COOKIE: u64 = 64
+const LEN_DATA_MIN: u64 = 32
+
+// The timers of the protocol, in MICROSECONDS because that is the clock
+// `kernel/inet.fi` keeps. The values themselves are the reference ones.
+const REKEY_AFTER_TIME: u64 = 120000000 // 120 s
+const REJECT_AFTER_TIME: u64 = 180000000 // 180 s
+const REKEY_TIMEOUT: u64 = 5000000 // 5 s
+const KEEPALIVE_TIMEOUT: u64 = 10000000 // 10 s
+const REKEY_ATTEMPT_TIME: u64 = 90000000 // 90 s
+const COOKIE_REFRESH_TIME: u64 = 120000000 // 120 s
+
+// 2^60 messages before a rekey, 2^64 - 2^13 - 1 before a refusal.
+const REKEY_AFTER_MESSAGES: u64 = 1152921504606846976
+const REJECT_AFTER_MESSAGES: u64 = 18446744073709543423
+
+// The replay window of RFC 6479, in the reference size.
+const CTR_ENTRIES: u64 = 128 // u64 words
+const CTR_BITS: u64 = 8192
+const CTR_WINDOW: u64 = 8128
+
+const PEER_MAX: u64 = 4
+
+// ------------------------------------------------ the device, as octets
+//
+// The whole interface is ONE region of memory addressed by the offsets
+// below. It is not a struct because a kernel hands out frames, not
+// values, and because `kernel/inet.fi` and `kernel/rand.fi` address their
+// state the same way. Everything is a whole word unless it is key
+// material.
+
+const D_MAGIC: u64 = 0
+const D_PRIV: u64 = 8
+const D_PUB: u64 = 40
+const D_UP: u64 = 72
+const D_PORT: u64 = 80
+const D_INDEX: u64 = 88
+const D_ADDR: u64 = 96
+const D_MASK: u64 = 104
+const D_MTU: u64 = 112
+const D_NPEERS: u64 = 120
+const D_AWG: u64 = 128
+const D_JC: u64 = 136
+const D_JMIN: u64 = 144
+const D_JMAX: u64 = 152
+const D_S1: u64 = 160
+const D_S2: u64 = 168
+const D_H1: u64 = 176
+const D_H2: u64 = 184
+const D_H3: u64 = 192
+const D_H4: u64 = 200
+const D_CSECRET: u64 = 208
+const D_CSTIME: u64 = 240
+const D_STATS: u64 = 256 // eight counters
+const D_PEERS: u64 = 512
+
+const MAGIC: u64 = 6516295212019844199 // "WGosum01" little endian
+
+const ST_RX_GOOD: u64 = 0
+const ST_RX_BAD: u64 = 1
+const ST_TX: u64 = 2
+const ST_HS_OK: u64 = 3
+const ST_HS_FAIL: u64 = 4
+const ST_BLOCKED: u64 = 5
+const ST_COOKIES: u64 = 6
+const ST_JUNK: u64 = 7
+
+const PEER_BYTES: u64 = 3072
+
+const P_USED: u64 = 0
+const P_PUB: u64 = 8
+const P_PSK: u64 = 40
+const P_HASPSK: u64 = 72
+const P_MAC1KEY: u64 = 80
+const P_CKKEY: u64 = 112
+const P_SS: u64 = 144
+const P_HASSS: u64 = 176
+const P_EPIP: u64 = 184
+const P_EPPORT: u64 = 192
+const P_KEEPALIVE: u64 = 200
+const P_NALLOW: u64 = 208
+const P_ALLOW: u64 = 216 // 8 x (ip, prefix), two words each
+const ALLOW_MAX: u64 = 8
+const P_HSSTATE: u64 = 344
+const P_HSCK: u64 = 352
+const P_HSH: u64 = 384
+const P_EPRIV: u64 = 416
+const P_EPUB: u64 = 448
+const P_REMEPH: u64 = 480
+const P_LIDX: u64 = 512
+const P_RIDX: u64 = 520
+const P_HSTIME: u64 = 528
+const P_LASTTS: u64 = 536
+const P_COOKIE: u64 = 552
+const P_CKTIME: u64 = 568
+const P_HASCK: u64 = 576
+const P_LASTMAC1: u64 = 584
+const P_HASMAC1: u64 = 600
+const P_KP: u64 = 608
+const P_KPPREV: u64 = 1760
+const P_RXB: u64 = 2912
+const P_TXB: u64 = 2920
+const P_LASTHS: u64 = 2928
+const P_LASTRX: u64 = 2936
+const P_LASTTX: u64 = 2944
+const P_HSTRIES: u64 = 2952
+
+// A keypair, relative to P_KP or P_KPPREV.
+const K_VALID: u64 = 0
+const K_SEND: u64 = 8
+const K_RECV: u64 = 40
+const K_SCTR: u64 = 72
+const K_RMAX: u64 = 80
+const K_LIDX: u64 = 88
+const K_RIDX: u64 = 96
+const K_BIRTH: u64 = 104
+const K_INIT: u64 = 112
+const K_BITS: u64 = 128 // 128 words
+
+const HS_NONE: u64 = 0
+const HS_SENT_INIT: u64 = 1
+const HS_SENT_RESP: u64 = 2
+
+// ----------------------------------------------------------- raw memory
+
+fn ld8(p: u64, i: u64) -> u64 {
+    return (*((p + i) as *mut u8)) as u64
+}
+
+fn st8(p: u64, i: u64, v: u64) {
+    *((p + i) as *mut u8) = (v & 255) as u8
+}
+
+fn ldw(p: u64, i: u64) -> u64 {
+    return *((p + i) as *mut u64)
+}
+
+fn stw(p: u64, i: u64, v: u64) {
+    *((p + i) as *mut u64) = v
+}
+
+fn copy(dst: u64, src: u64, n: u64) {
+    var i: u64 = 0
+    while i < n {
+        st8(dst, i, ld8(src, i))
+        i = i + 1
+    }
+}
+
+fn zero(dst: u64, n: u64) {
+    var i: u64 = 0
+    while i < n {
+        st8(dst, i, 0)
+        i = i + 1
+    }
+}
+
+fn le32_put(p: u64, off: u64, v: u64) {
+    st8(p, off, v)
+    st8(p, off + 1, v >> 8)
+    st8(p, off + 2, v >> 16)
+    st8(p, off + 3, v >> 24)
+}
+
+fn le32_get(p: u64, off: u64) -> u64 {
+    return ld8(p, off) | (ld8(p, off + 1) << 8)
+        | (ld8(p, off + 2) << 16) | (ld8(p, off + 3) << 24)
+}
+
+fn le64_put(p: u64, off: u64, v: u64) {
+    var i: u64 = 0
+    while i < 8 {
+        st8(p, off + i, (v >> (i * 8)) & 255)
+        i = i + 1
+    }
+}
+
+fn le64_get(p: u64, off: u64) -> u64 {
+    var v: u64 = 0
+    var i: u64 = 0
+    while i < 8 {
+        v = v | (ld8(p, off + i) << (i * 8))
+        i = i + 1
+    }
+    return v
+}
+
+// ------------------------------------------------------ the four labels
+
+fn label_construction(out: u64) -> u64 {
+    let c: [u8; 37] = [
+        78, 111, 105, 115, 101, 95, 73, 75, 112, 115, 107, 50,
+        95, 50, 53, 53, 49, 57, 95, 67, 104, 97, 67, 104,
+        97, 80, 111, 108, 121, 95, 66, 76, 65, 75, 69, 50,
+        115]
+    var i: u64 = 0
+    while i < 37 {
+        st8(out, i, c[i as usize] as u64)
+        i = i + 1
+    }
+    return 37
+}
+
+fn label_identifier(out: u64) -> u64 {
+    let c: [u8; 34] = [
+        87, 105, 114, 101, 71, 117, 97, 114, 100, 32, 118, 49,
+        32, 122, 120, 50, 99, 52, 32, 74, 97, 115, 111, 110,
+        64, 122, 120, 50, 99, 52, 46, 99, 111, 109]
+    var i: u64 = 0
+    while i < 34 {
+        st8(out, i, c[i as usize] as u64)
+        i = i + 1
+    }
+    return 34
+}
+
+fn label_mac1(out: u64) -> u64 {
+    let c: [u8; 8] = [109, 97, 99, 49, 45, 45, 45, 45]
+    var i: u64 = 0
+    while i < 8 {
+        st8(out, i, c[i as usize] as u64)
+        i = i + 1
+    }
+    return 8
+}
+
+fn label_cookie(out: u64) -> u64 {
+    let c: [u8; 8] = [99, 111, 111, 107, 105, 101, 45, 45]
+    var i: u64 = 0
+    while i < 8 {
+        st8(out, i, c[i as usize] as u64)
+        i = i + 1
+    }
+    return 8
+}
+
+// ------------------------------------------------------- noise helpers
+
+// h = HASH(h || x)
+fn mix_hash(h: u64, x: u64, n: u64) {
+    var s: blake2s.Blake2s = blake2s.blake2s_new()
+    blake2s.blake2s_update(&s, h, 32)
+    blake2s.blake2s_update(&s, x, n as usize)
+    blake2s.blake2s_final(&s, h)
+}
+
+// HKDF (RFC 5869) over HMAC-BLAKE2s, in the three shapes WireGuard uses.
+// `n` says how many 32 octet outputs are wanted; `o1`, `o2`, `o3` may be
+// zero when unwanted. `ck` is overwritten with the first output when
+// `into_ck` is true -- which is the "mix key" of the Noise notation.
+fn hkdf(ck: u64, input: u64, ilen: u64, n: u64, o1: u64, o2: u64,
+    o3: u64) {
+    var temp: [u8; 32] = [0; 32]
+    var t1: [u8; 33] = [0; 33]
+    var t2: [u8; 33] = [0; 33]
+    var t3: [u8; 32] = [0; 32]
+    let pt: u64 = (&temp[0]) as u64
+    let p1: u64 = (&t1[0]) as u64
+    let p2: u64 = (&t2[0]) as u64
+    let p3: u64 = (&t3[0]) as u64
+    blake2s.hmac_blake2s(ck, 32, input, ilen as usize, pt)
+    var one: [u8; 1] = [1]
+    blake2s.hmac_blake2s(pt, 32, (&one[0]) as u64, 1, p1)
+    if o1 != 0 {
+        copy(o1, p1, 32)
+    }
+    if n >= 2 {
+        st8(p1, 32, 2)
+        blake2s.hmac_blake2s(pt, 32, p1, 33, p2)
+        if o2 != 0 {
+            copy(o2, p2, 32)
+        }
+    }
+    if n >= 3 {
+        st8(p2, 32, 3)
+        blake2s.hmac_blake2s(pt, 32, p2, 33, p3)
+        if o3 != 0 {
+            copy(o3, p3, 32)
+        }
+    }
+    zero(pt, 32)
+}
+
+// ck = HKDF1(ck, input) -- "mix key" with nothing else wanted.
+fn mix_key(ck: u64, input: u64, ilen: u64) {
+    var nc: [u8; 32] = [0; 32]
+    hkdf(ck, input, ilen, 1, (&nc[0]) as u64, 0, 0)
+    copy(ck, (&nc[0]) as u64, 32)
+}
+
+// (ck, k) = HKDF2(ck, input)
+fn mix_key2(ck: u64, input: u64, ilen: u64, k: u64) {
+    var nc: [u8; 32] = [0; 32]
+    hkdf(ck, input, ilen, 2, (&nc[0]) as u64, k, 0)
+    copy(ck, (&nc[0]) as u64, 32)
+}
+
+// The AEAD as the handshake uses it: counter 0, the running hash as
+// associated data.
+fn hs_seal(k: u64, plain: u64, n: u64, h: u64, out: u64) {
+    var nonce: [u8; 12] = [0; 12]
+    chacha.aead_seal(k, (&nonce[0]) as u64, h, 32, plain, n as usize, out)
+}
+
+fn hs_open(k: u64, ct: u64, n: u64, h: u64, out: u64) -> bool {
+    var nonce: [u8; 12] = [0; 12]
+    return chacha.aead_open(k, (&nonce[0]) as u64, h, 32, ct, n as usize,
+        out)
+}
+
+// ----------------------------------------------------- the device words
+
+fn dev_bytes() -> u64 {
+    return D_PEERS + PEER_BYTES * PEER_MAX
+}
+
+fn peer_at(d: u64, i: u64) -> u64 {
+    return d + D_PEERS + i * PEER_BYTES
+}
+
+fn peer_used(d: u64, i: u64) -> bool {
+    if i >= PEER_MAX {
+        return false
+    }
+    return ldw(peer_at(d, i), P_USED) != 0
+}
+
+fn peer_public(d: u64, i: u64) -> u64 {
+    return peer_at(d, i) + P_PUB
+}
+
+fn dev_public(d: u64) -> u64 {
+    return d + D_PUB
+}
+
+fn dev_up(d: u64) -> bool {
+    return ldw(d, D_UP) != 0
+}
+
+fn dev_set_up(d: u64, v: bool) {
+    if v {
+        stw(d, D_UP, 1)
+    } else {
+        stw(d, D_UP, 0)
+    }
+}
+
+fn dev_port(d: u64) -> u64 {
+    return ldw(d, D_PORT)
+}
+
+fn dev_set_port(d: u64, p: u64) {
+    stw(d, D_PORT, p)
+}
+
+fn dev_addr(d: u64) -> u64 {
+    return ldw(d, D_ADDR)
+}
+
+fn dev_mask(d: u64) -> u64 {
+    return ldw(d, D_MASK)
+}
+
+fn dev_mtu(d: u64) -> u64 {
+    return ldw(d, D_MTU)
+}
+
+fn dev_set_addr(d: u64, ip: u64, prefix: u64, mtu: u64) {
+    stw(d, D_ADDR, ip)
+    var m: u64 = 0
+    if prefix > 0 && prefix <= 32 {
+        m = (4294967295 << (32 - prefix)) & 4294967295
+    }
+    stw(d, D_MASK, m)
+    if mtu >= 576 && mtu <= 1500 {
+        stw(d, D_MTU, mtu)
+    } else {
+        // The reference default: 1500 outer minus 20 IP, 8 UDP and the
+        // 32 octet transport header and tag.
+        stw(d, D_MTU, 1420)
+    }
+}
+
+fn dev_peers(d: u64) -> u64 {
+    return ldw(d, D_NPEERS)
+}
+
+fn dev_stat(d: u64, which: u64) -> u64 {
+    if which >= 8 {
+        return 0
+    }
+    return ldw(d, D_STATS + which * 8)
+}
+
+fn bump(d: u64, which: u64) {
+    stw(d, D_STATS + which * 8, ldw(d, D_STATS + which * 8) + 1)
+}
+
+fn addn(d: u64, which: u64, n: u64) {
+    stw(d, D_STATS + which * 8, ldw(d, D_STATS + which * 8) + n)
+}
+
+fn peer_rx(d: u64, i: u64) -> u64 {
+    return ldw(peer_at(d, i), P_RXB)
+}
+
+fn peer_tx(d: u64, i: u64) -> u64 {
+    return ldw(peer_at(d, i), P_TXB)
+}
+
+fn peer_last_handshake(d: u64, i: u64) -> u64 {
+    return ldw(peer_at(d, i), P_LASTHS)
+}
+
+fn peer_endpoint_ip(d: u64, i: u64) -> u64 {
+    return ldw(peer_at(d, i), P_EPIP)
+}
+
+fn peer_endpoint_port(d: u64, i: u64) -> u64 {
+    return ldw(peer_at(d, i), P_EPPORT)
+}
+
+fn peer_keepalive(d: u64, i: u64) -> u64 {
+    return ldw(peer_at(d, i), P_KEEPALIVE)
+}
+
+// ------------------------------------------------------------ the setup
+
+fn dev_init(d: u64) {
+    zero(d, dev_bytes())
+    stw(d, D_MAGIC, MAGIC)
+    stw(d, D_MTU, 1420)
+    stw(d, D_INDEX, 1)
+}
+
+// The private key is CLAMPED on the way in (RFC 7748), so that whatever
+// a configuration file carries becomes a legal scalar. `wg genkey` emits
+// clamped keys already; a hand written one may not.
+fn dev_set_private(d: u64, priv32: u64) -> bool {
+    copy(d + D_PRIV, priv32, 32)
+    st8(d + D_PRIV, 0, ld8(d + D_PRIV, 0) & 248)
+    st8(d + D_PRIV, 31, (ld8(d + D_PRIV, 31) & 127) | 64)
+    if !x25519.x25519_base(d + D_PRIV, d + D_PUB) {
+        return false
+    }
+    // Every peer's precomputed static-static shared secret is now stale.
+    var i: u64 = 0
+    while i < PEER_MAX {
+        stw(peer_at(d, i), P_HASSS, 0)
+        i = i + 1
+    }
+    return true
+}
+
+fn peer_find_by_public(d: u64, pub32: u64) -> i64 {
+    var i: u64 = 0
+    while i < PEER_MAX {
+        let p: u64 = peer_at(d, i)
+        if ldw(p, P_USED) != 0 && blake2s.mac_equal(p + P_PUB, pub32, 32) {
+            return i as i64
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+fn peer_clear(d: u64, i: u64) {
+    if i >= PEER_MAX {
+        return
+    }
+    let p: u64 = peer_at(d, i)
+    if ldw(p, P_USED) != 0 {
+        stw(d, D_NPEERS, ldw(d, D_NPEERS) - 1)
+    }
+    zero(p, PEER_BYTES)
+}
+
+// Adds a peer, or returns the slot it already had. The two label hashes
+// and the static-static Diffie-Hellman are computed ONCE here: they are
+// the same for every handshake with this peer, and doing them per packet
+// would make the cheap paths as expensive as the expensive ones.
+fn peer_add(d: u64, pub32: u64) -> i64 {
+    let found: i64 = peer_find_by_public(d, pub32)
+    if found >= 0 {
+        return found
+    }
+    var i: u64 = 0
+    while i < PEER_MAX {
+        let p: u64 = peer_at(d, i)
+        if ldw(p, P_USED) == 0 {
+            zero(p, PEER_BYTES)
+            stw(p, P_USED, 1)
+            copy(p + P_PUB, pub32, 32)
+            var buf: [u8; 48] = [0; 48]
+            let b: u64 = (&buf[0]) as u64
+            let n1: u64 = label_mac1(b)
+            copy(b + n1, pub32, 32)
+            blake2s.blake2s(b, (n1 + 32) as usize, p + P_MAC1KEY)
+            let n2: u64 = label_cookie(b)
+            copy(b + n2, pub32, 32)
+            blake2s.blake2s(b, (n2 + 32) as usize, p + P_CKKEY)
+            if x25519.x25519(d + D_PRIV, pub32, p + P_SS) {
+                stw(p, P_HASSS, 1)
+            }
+            stw(d, D_NPEERS, ldw(d, D_NPEERS) + 1)
+            return i as i64
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+fn peer_set_endpoint(d: u64, i: u64, ip: u64, port: u64) {
+    if i >= PEER_MAX {
+        return
+    }
+    stw(peer_at(d, i), P_EPIP, ip)
+    stw(peer_at(d, i), P_EPPORT, port)
+}
+
+fn peer_set_psk(d: u64, i: u64, psk32: u64) {
+    if i >= PEER_MAX {
+        return
+    }
+    copy(peer_at(d, i) + P_PSK, psk32, 32)
+    stw(peer_at(d, i), P_HASPSK, 1)
+}
+
+fn peer_set_keepalive(d: u64, i: u64, seconds: u64) {
+    if i >= PEER_MAX {
+        return
+    }
+    stw(peer_at(d, i), P_KEEPALIVE, seconds)
+}
+
+fn peer_allow(d: u64, i: u64, ip: u64, prefix: u64) -> bool {
+    if i >= PEER_MAX || prefix > 32 {
+        return false
+    }
+    let p: u64 = peer_at(d, i)
+    let n: u64 = ldw(p, P_NALLOW)
+    if n >= ALLOW_MAX {
+        return false
+    }
+    var m: u64 = 0
+    if prefix > 0 {
+        m = (4294967295 << (32 - prefix)) & 4294967295
+    }
+    stw(p, P_ALLOW + n * 16, ip & m)
+    stw(p, P_ALLOW + n * 16 + 8, prefix)
+    stw(p, P_NALLOW, n + 1)
+    return true
+}
+
+// ------------------------------------------------------ cryptokey routing
+//
+// The whole routing table of a WireGuard interface is the AllowedIPs of
+// its peers, and it is read in BOTH directions. Outbound it says which
+// key a packet is encrypted with; inbound it says which source addresses
+// a peer is allowed to claim. The second half is the one implementations
+// forget, and forgetting it means any peer can impersonate any other.
+//
+// LONGEST PREFIX WINS, so that a peer with 0.0.0.0/0 can be the default
+// route while another peer keeps a specific subnet.
+
+fn route(d: u64, dst: u64) -> i64 {
+    var best: i64 = -1
+    var bestlen: u64 = 0
+    var found: bool = false
+    var i: u64 = 0
+    while i < PEER_MAX {
+        let p: u64 = peer_at(d, i)
+        if ldw(p, P_USED) != 0 {
+            var j: u64 = 0
+            let n: u64 = ldw(p, P_NALLOW)
+            while j < n {
+                let net: u64 = ldw(p, P_ALLOW + j * 16)
+                let pre: u64 = ldw(p, P_ALLOW + j * 16 + 8)
+                var m: u64 = 0
+                if pre > 0 {
+                    m = (4294967295 << (32 - pre)) & 4294967295
+                }
+                if (dst & m) == net {
+                    if !found || pre > bestlen {
+                        best = i as i64
+                        bestlen = pre
+                        found = true
+                    }
+                }
+                j = j + 1
+            }
+        }
+        i = i + 1
+    }
+    return best
+}
+
+fn source_ok(d: u64, i: u64, src: u64) -> bool {
+    if i >= PEER_MAX {
+        return false
+    }
+    let p: u64 = peer_at(d, i)
+    var j: u64 = 0
+    let n: u64 = ldw(p, P_NALLOW)
+    while j < n {
+        let net: u64 = ldw(p, P_ALLOW + j * 16)
+        let pre: u64 = ldw(p, P_ALLOW + j * 16 + 8)
+        var m: u64 = 0
+        if pre > 0 {
+            m = (4294967295 << (32 - pre)) & 4294967295
+        }
+        if (src & m) == net {
+            return true
+        }
+        j = j + 1
+    }
+    return false
+}
+
+// ------------------------------------------------------------- AmneziaWG
+//
+// The obfuscation of AmneziaWG, as an OPTION ON THIS PROTOCOL and not as
+// a second protocol. What it changes is deliberately small:
+//
+//   H1..H4  replace the u32 message type. WireGuard's types are 1, 2, 3
+//           and 4, which is a four octet constant at a fixed offset in
+//           every packet and therefore the cheapest signature a deep
+//           packet inspector can match. With H1..H4 configured the same
+//           on both ends they become arbitrary values.
+//   S1, S2  prepend random octets to the initiation and the response, so
+//           that the two handshake packets stop being exactly 148 and 92
+//           octets. The upstream README states the constraint
+//           `S1 + 56 != S2`, which is the same as saying the two padded
+//           messages must not come out the same size -- padding that made
+//           them equal would replace one signature with another.
+//   Jc, Jmin, Jmax
+//           send Jc datagrams of random length between Jmin and Jmax
+//           BEFORE every handshake, so the handshake does not begin a
+//           flow with a recognisable packet-size sequence.
+//
+// WHAT IS IMPLEMENTED HERE IS AmneziaWG 1.0 AND NOTHING ABOVE IT, and
+// that is a deliberate limit rather than an oversight. The upstream
+// project has since added I1..I5 (custom signature packets built from a
+// small tag language), S3/S4, ranges for H1..H4, header protection with
+// its own key, and content padding. Those are documented in the
+// amneziawg-go README, but several of the values a reader needs -- the
+// exact byte position of the S paddings, the distribution of the junk
+// lengths, the resolution of the contradiction between the kernel
+// module's limits (S1 <= 1132) and the documentation's (S1 <= 64) -- are
+// NOT stated anywhere this round could verify. Guessing them would
+// produce something that looks like AmneziaWG and does not interoperate,
+// which is worse than not having it. docs/TUNNEL.md lists each open
+// question by name.
+
+fn awg_on(d: u64) -> bool {
+    return ldw(d, D_AWG) != 0
+}
+
+fn awg_jc(d: u64) -> u64 {
+    if !awg_on(d) {
+        return 0
+    }
+    return ldw(d, D_JC)
+}
+
+// One junk length, from `rnd` (four octets are consumed).
+fn awg_junk_len(d: u64, rnd: u64) -> u64 {
+    let lo: u64 = ldw(d, D_JMIN)
+    let hi: u64 = ldw(d, D_JMAX)
+    if hi <= lo {
+        return lo
+    }
+    return lo + (le32_get(rnd, 0) % (hi - lo + 1))
+}
+
+// All eight parameters at once, because they only make sense together and
+// because a half configured obfuscation is a broken tunnel.
+fn awg_set(d: u64, jc: u64, jmin: u64, jmax: u64, s1: u64, s2: u64,
+    h1: u64, h2: u64, h3: u64, h4: u64) -> bool {
+    if jc == 0 && s1 == 0 && s2 == 0 && h1 == 0 {
+        stw(d, D_AWG, 0)
+        return true
+    }
+    // The constraints the upstream README states, checked rather than
+    // trusted: the four headers must differ from each other, and the two
+    // padded handshake messages must not come out the same length.
+    if h1 == h2 || h1 == h3 || h1 == h4 || h2 == h3 || h2 == h4
+        || h3 == h4 {
+        return false
+    }
+    if s1 + LEN_INIT == s2 + LEN_RESP {
+        return false
+    }
+    if jc > 128 || jmin > jmax || jmax > 1280 || s1 > 1132 || s2 > 1188 {
+        return false
+    }
+    stw(d, D_JC, jc)
+    stw(d, D_JMIN, jmin)
+    stw(d, D_JMAX, jmax)
+    stw(d, D_S1, s1)
+    stw(d, D_S2, s2)
+    stw(d, D_H1, h1)
+    stw(d, D_H2, h2)
+    stw(d, D_H3, h3)
+    stw(d, D_H4, h4)
+    stw(d, D_AWG, 1)
+    return true
+}
+
+// The u32 that goes at the front of a message of this kind.
+fn type_word(d: u64, kind: u64) -> u64 {
+    if !awg_on(d) {
+        return kind
+    }
+    if kind == KIND_INIT {
+        return ldw(d, D_H1)
+    }
+    if kind == KIND_RESP {
+        return ldw(d, D_H2)
+    }
+    if kind == KIND_COOKIE {
+        return ldw(d, D_H3)
+    }
+    return ldw(d, D_H4)
+}
+
+// How many octets of junk sit in front of a message of this kind.
+fn prefix_len(d: u64, kind: u64) -> u64 {
+    if !awg_on(d) {
+        return 0
+    }
+    if kind == KIND_INIT {
+        return ldw(d, D_S1)
+    }
+    if kind == KIND_RESP {
+        return ldw(d, D_S2)
+    }
+    return 0
+}
+
+// What kind of message is this, and where does it really start?
+//
+// With AmneziaWG on, the type word is no longer 1..4 and the message no
+// longer starts at octet 0, so the LENGTH is what identifies the packet
+// first and the type word confirms it. Without it, the ordinary rule
+// applies.
+fn message_kind(d: u64, p: u64, n: u64, off: *mut u64) -> u64 {
+    *off = 0
+    if awg_on(d) {
+        let s1: u64 = ldw(d, D_S1)
+        let s2: u64 = ldw(d, D_S2)
+        if n == LEN_INIT + s1 && le32_get(p, s1) == ldw(d, D_H1) {
+            *off = s1
+            return KIND_INIT
+        }
+        if n == LEN_RESP + s2 && le32_get(p, s2) == ldw(d, D_H2) {
+            *off = s2
+            return KIND_RESP
+        }
+        if n == LEN_COOKIE && le32_get(p, 0) == ldw(d, D_H3) {
+            return KIND_COOKIE
+        }
+        if n >= LEN_DATA_MIN && le32_get(p, 0) == ldw(d, D_H4) {
+            return KIND_DATA
+        }
+        return KIND_NONE
+    }
+    if n < 4 {
+        return KIND_NONE
+    }
+    let t: u64 = le32_get(p, 0)
+    if t == KIND_INIT && n == LEN_INIT {
+        return KIND_INIT
+    }
+    if t == KIND_RESP && n == LEN_RESP {
+        return KIND_RESP
+    }
+    if t == KIND_COOKIE && n == LEN_COOKIE {
+        return KIND_COOKIE
+    }
+    if t == KIND_DATA && n >= LEN_DATA_MIN {
+        return KIND_DATA
+    }
+    return KIND_NONE
+}
+
+// -------------------------------------------------------------- TAI64N
+//
+// Twelve octets: seconds since the TAI epoch as a big endian u64, then
+// nanoseconds as a big endian u32. It is not a clock reading that gets
+// compared to anything -- the responder only requires that each
+// initiation from a peer carries a STRICTLY GREATER value than the last
+// one it accepted, which makes an old initiation unreplayable without
+// either side needing a synchronised clock.
+//
+// THE LOW 24 BITS OF THE NANOSECONDS ARE ZEROED, exactly as the reference
+// does. A full resolution timestamp is a fingerprint of the sender's
+// clock; 16.7 ms of resolution is still far finer than the 50 handshakes
+// per second the protocol allows.
+fn tai64n(unix_seconds: u64, nanos: u64, out: u64) {
+    let s: u64 = 4611686018427387914 + unix_seconds // 0x400000000000000A
+    var i: u64 = 0
+    while i < 8 {
+        st8(out, i, (s >> ((7 - i) * 8)) & 255)
+        i = i + 1
+    }
+    let n: u64 = nanos & 4278190080 // ~0xFFFFFF, low 24 bits cleared
+    i = 0
+    while i < 4 {
+        st8(out, 8 + i, (n >> ((3 - i) * 8)) & 255)
+        i = i + 1
+    }
+}
+
+fn ts_greater(a: u64, b: u64) -> bool {
+    var i: u64 = 0
+    while i < TS_LEN {
+        let x: u64 = ld8(a, i)
+        let y: u64 = ld8(b, i)
+        if x != y {
+            return x > y
+        }
+        i = i + 1
+    }
+    return false
+}
+
+// ---------------------------------------------------------- the two MACs
+
+fn put_macs(d: u64, p: u64, base: u64, body: u64, mac1_off: u64,
+    peer: u64) {
+    // mac1 over everything before it, keyed with the hash of the label
+    // and the RECEIVER's public key.
+    blake2s.blake2s_keyed(peer + P_MAC1KEY, 32, p + base, mac1_off as usize,
+        p + base + mac1_off, 16)
+    copy(peer + P_LASTMAC1, p + base + mac1_off, 16)
+    stw(peer, P_HASMAC1, 1)
+    // mac2 is zero until a cookie has arrived, and expires with it.
+    if ldw(peer, P_HASCK) != 0 {
+        blake2s.blake2s_keyed(peer + P_COOKIE, 16, p + base,
+            (mac1_off + 16) as usize, p + base + mac1_off + 16, 16)
+    } else {
+        zero(p + base + mac1_off + 16, 16)
+    }
+}
+
+fn mac1_ok(d: u64, p: u64, base: u64, mac1_off: u64) -> bool {
+    var want: [u8; 16] = [0; 16]
+    var buf: [u8; 48] = [0; 48]
+    let b: u64 = (&buf[0]) as u64
+    let n1: u64 = label_mac1(b)
+    copy(b + n1, d + D_PUB, 32)
+    var k: [u8; 32] = [0; 32]
+    blake2s.blake2s(b, (n1 + 32) as usize, (&k[0]) as u64)
+    blake2s.blake2s_keyed((&k[0]) as u64, 32, p + base, mac1_off as usize,
+        (&want[0]) as u64, 16)
+    return blake2s.mac_equal((&want[0]) as u64, p + base + mac1_off, 16)
+}
+
+// -------------------------------------------------------- the index
+
+fn fresh_index(d: u64, rnd: u64) -> u64 {
+    // A local index has to be unpredictable to an off-path attacker and
+    // unique among our own sessions. The random word does the first, the
+    // counter in the low bits does the second.
+    let c: u64 = ldw(d, D_INDEX)
+    stw(d, D_INDEX, c + 1)
+    return ((le32_get(rnd, 0) & 4294901760) | (c & 65535)) & 4294967295
+}
+
+fn find_by_index(d: u64, idx: u64) -> i64 {
+    var i: u64 = 0
+    while i < PEER_MAX {
+        let p: u64 = peer_at(d, i)
+        if ldw(p, P_USED) != 0 {
+            if ldw(p, P_LIDX) == idx && ldw(p, P_HSSTATE) != HS_NONE {
+                return i as i64
+            }
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+// ================================================== MESSAGE 1: INITIATION
+
+// Builds a handshake initiation for peer `pi` into `out`. `rnd` must
+// point at at least 64 octets of good randomness -- 32 for the ephemeral
+// private key, 4 for the index, the rest for the AmneziaWG prefix.
+// Returns the number of octets written, or 0.
+fn make_initiation(d: u64, pi: u64, out: u64, rnd: u64, unix_s: u64,
+    nanos: u64, now: u64) -> u64 {
+    if pi >= PEER_MAX {
+        return 0
+    }
+    let p: u64 = peer_at(d, pi)
+    if ldw(p, P_USED) == 0 || ldw(p, P_HASSS) == 0 {
+        return 0
+    }
+    let base: u64 = prefix_len(d, KIND_INIT)
+    var i: u64 = 0
+    while i < base {
+        st8(out, i, ld8(rnd, 36 + (i % 28)) ^ (i * 31))
+        i = i + 1
+    }
+
+    // ck = HASH(CONSTRUCTION);  h = HASH(HASH(ck||IDENTIFIER)||S_pub_r)
+    var buf: [u8; 96] = [0; 96]
+    let b: u64 = (&buf[0]) as u64
+    let ck: u64 = p + P_HSCK
+    let h: u64 = p + P_HSH
+    let n1: u64 = label_construction(b)
+    blake2s.blake2s(b, n1 as usize, ck)
+    copy(b, ck, 32)
+    let n2: u64 = label_identifier(b + 32)
+    blake2s.blake2s(b, (32 + n2) as usize, h)
+    mix_hash(h, p + P_PUB, 32)
+
+    le32_put(out, base + 0, type_word(d, KIND_INIT))
+    let li: u64 = fresh_index(d, rnd + 32)
+    stw(p, P_LIDX, li)
+    le32_put(out, base + 4, li)
+
+    // e
+    copy(p + P_EPRIV, rnd, 32)
+    st8(p + P_EPRIV, 0, ld8(p + P_EPRIV, 0) & 248)
+    st8(p + P_EPRIV, 31, (ld8(p + P_EPRIV, 31) & 127) | 64)
+    if !x25519.x25519_base(p + P_EPRIV, p + P_EPUB) {
+        return 0
+    }
+    copy(out + base + 8, p + P_EPUB, 32)
+    mix_hash(h, out + base + 8, 32)
+    mix_key(ck, out + base + 8, 32)
+
+    // es -- the initiator's ephemeral against the responder's static
+    var dh: [u8; 32] = [0; 32]
+    var k: [u8; 32] = [0; 32]
+    if !x25519.x25519(p + P_EPRIV, p + P_PUB, (&dh[0]) as u64) {
+        return 0
+    }
+    mix_key2(ck, (&dh[0]) as u64, 32, (&k[0]) as u64)
+    hs_seal((&k[0]) as u64, d + D_PUB, 32, h, out + base + 40)
+    mix_hash(h, out + base + 40, 48)
+
+    // ss -- both statics. Precomputed in `peer_add`.
+    mix_key2(ck, p + P_SS, 32, (&k[0]) as u64)
+    var ts: [u8; 12] = [0; 12]
+    tai64n(unix_s, nanos, (&ts[0]) as u64)
+    hs_seal((&k[0]) as u64, (&ts[0]) as u64, 12, h, out + base + 88)
+    mix_hash(h, out + base + 88, 28)
+
+    put_macs(d, out, base, 0, 116, p)
+    stw(p, P_HSSTATE, HS_SENT_INIT)
+    stw(p, P_HSTIME, now)
+    stw(p, P_HSTRIES, ldw(p, P_HSTRIES) + 1)
+    zero((&dh[0]) as u64, 32)
+    zero((&k[0]) as u64, 32)
+    return base + LEN_INIT
+}
+
+// Reads an initiation. On success the peer index is returned and the
+// peer's handshake state holds ck and h, ready for `make_response`.
+// `-1` means the packet was not for us or was not authentic.
+fn consume_initiation(d: u64, inp: u64, n: u64, off: u64,
+    now: u64) -> i64 {
+    if n < off + LEN_INIT {
+        return -1
+    }
+    let m: u64 = inp + off
+    // mac1 FIRST, before any asymmetric work. This is the check that
+    // makes the interface silent to a scanner and cheap under a flood.
+    if !mac1_ok(d, inp, off, 116) {
+        bump(d, ST_HS_FAIL)
+        return -1
+    }
+
+    var ck: [u8; 32] = [0; 32]
+    var h: [u8; 32] = [0; 32]
+    let pck: u64 = (&ck[0]) as u64
+    let ph: u64 = (&h[0]) as u64
+    var buf: [u8; 96] = [0; 96]
+    let b: u64 = (&buf[0]) as u64
+    let n1: u64 = label_construction(b)
+    blake2s.blake2s(b, n1 as usize, pck)
+    copy(b, pck, 32)
+    let n2: u64 = label_identifier(b + 32)
+    blake2s.blake2s(b, (32 + n2) as usize, ph)
+    mix_hash(ph, d + D_PUB, 32)
+
+    mix_hash(ph, m + 8, 32) // their ephemeral
+    mix_key(pck, m + 8, 32)
+
+    // es, from OUR static private and their ephemeral.
+    var dh: [u8; 32] = [0; 32]
+    var k: [u8; 32] = [0; 32]
+    if !x25519.x25519(d + D_PRIV, m + 8, (&dh[0]) as u64) {
+        bump(d, ST_HS_FAIL)
+        return -1
+    }
+    mix_key2(pck, (&dh[0]) as u64, 32, (&k[0]) as u64)
+    var theirs: [u8; 32] = [0; 32]
+    if !hs_open((&k[0]) as u64, m + 40, 48, ph, (&theirs[0]) as u64) {
+        bump(d, ST_HS_FAIL)
+        return -1
+    }
+    mix_hash(ph, m + 40, 48)
+
+    let pi: i64 = peer_find_by_public(d, (&theirs[0]) as u64)
+    if pi < 0 {
+        // A correct mac1 from a key we do not carry. Silence is the
+        // right answer: an error would confirm the interface exists.
+        bump(d, ST_HS_FAIL)
+        return -1
+    }
+    let p: u64 = peer_at(d, pi as u64)
+    if ldw(p, P_HASSS) == 0 {
+        bump(d, ST_HS_FAIL)
+        return -1
+    }
+    mix_key2(pck, p + P_SS, 32, (&k[0]) as u64)
+    var ts: [u8; 12] = [0; 12]
+    if !hs_open((&k[0]) as u64, m + 88, 28, ph, (&ts[0]) as u64) {
+        bump(d, ST_HS_FAIL)
+        return -1
+    }
+    mix_hash(ph, m + 88, 28)
+
+    // THE REPLAY CHECK. The timestamp must be strictly greater than the
+    // greatest this peer has ever sent. Equal is a replay too.
+    if !ts_greater((&ts[0]) as u64, p + P_LASTTS) {
+        bump(d, ST_HS_FAIL)
+        return -1
+    }
+    copy(p + P_LASTTS, (&ts[0]) as u64, 12)
+
+    copy(p + P_HSCK, pck, 32)
+    copy(p + P_HSH, ph, 32)
+    copy(p + P_REMEPH, m + 8, 32)
+    stw(p, P_RIDX, le32_get(m, 4))
+    stw(p, P_HSTIME, now)
+    copy(p + P_LASTMAC1, m + 116, 16)
+    stw(p, P_HASMAC1, 1)
+    zero((&dh[0]) as u64, 32)
+    zero((&k[0]) as u64, 32)
+    return pi
+}
+
+// ==================================================== MESSAGE 2: RESPONSE
+
+fn make_response(d: u64, pi: u64, out: u64, rnd: u64, now: u64) -> u64 {
+    if pi >= PEER_MAX {
+        return 0
+    }
+    let p: u64 = peer_at(d, pi)
+    let base: u64 = prefix_len(d, KIND_RESP)
+    var i: u64 = 0
+    while i < base {
+        st8(out, i, ld8(rnd, 36 + (i % 28)) ^ (i * 17))
+        i = i + 1
+    }
+    let ck: u64 = p + P_HSCK
+    let h: u64 = p + P_HSH
+
+    le32_put(out, base + 0, type_word(d, KIND_RESP))
+    let li: u64 = fresh_index(d, rnd + 32)
+    stw(p, P_LIDX, li)
+    le32_put(out, base + 4, li)
+    le32_put(out, base + 8, ldw(p, P_RIDX))
+
+    copy(p + P_EPRIV, rnd, 32)
+    st8(p + P_EPRIV, 0, ld8(p + P_EPRIV, 0) & 248)
+    st8(p + P_EPRIV, 31, (ld8(p + P_EPRIV, 31) & 127) | 64)
+    if !x25519.x25519_base(p + P_EPRIV, p + P_EPUB) {
+        return 0
+    }
+    copy(out + base + 12, p + P_EPUB, 32)
+    mix_hash(h, out + base + 12, 32)
+    mix_key(ck, out + base + 12, 32)
+
+    var dh: [u8; 32] = [0; 32]
+    // ee -- both ephemerals
+    if !x25519.x25519(p + P_EPRIV, p + P_REMEPH, (&dh[0]) as u64) {
+        return 0
+    }
+    mix_key(ck, (&dh[0]) as u64, 32)
+    // se -- our ephemeral against their static
+    if !x25519.x25519(p + P_EPRIV, p + P_PUB, (&dh[0]) as u64) {
+        return 0
+    }
+    mix_key(ck, (&dh[0]) as u64, 32)
+
+    // psk2 -- the optional pre-shared key, a zero key when absent so that
+    // the chain has one shape.
+    var zero32: [u8; 32] = [0; 32]
+    var psk: u64 = (&zero32[0]) as u64
+    if ldw(p, P_HASPSK) != 0 {
+        psk = p + P_PSK
+    }
+    var t2: [u8; 32] = [0; 32]
+    var k: [u8; 32] = [0; 32]
+    var nck: [u8; 32] = [0; 32]
+    hkdf(ck, psk, 32, 3, (&nck[0]) as u64, (&t2[0]) as u64,
+        (&k[0]) as u64)
+    copy(ck, (&nck[0]) as u64, 32)
+    mix_hash(h, (&t2[0]) as u64, 32)
+
+    hs_seal((&k[0]) as u64, 0, 0, h, out + base + 44)
+    mix_hash(h, out + base + 44, 16)
+
+    put_macs(d, out, base, 0, 60, p)
+    stw(p, P_HSSTATE, HS_SENT_RESP)
+
+    // We are the RESPONDER, so the first derived key receives and the
+    // second sends. Getting this the wrong way round produces a tunnel in
+    // which every packet decrypts to noise.
+    derive_keys(d, pi, false, now)
+    zero((&dh[0]) as u64, 32)
+    zero((&k[0]) as u64, 32)
+    zero((&t2[0]) as u64, 32)
+    return base + LEN_RESP
+}
+
+fn consume_response(d: u64, inp: u64, n: u64, off: u64, now: u64) -> i64 {
+    if n < off + LEN_RESP {
+        return -1
+    }
+    let m: u64 = inp + off
+    if !mac1_ok(d, inp, off, 60) {
+        bump(d, ST_HS_FAIL)
+        return -1
+    }
+    let pi: i64 = find_by_index(d, le32_get(m, 8))
+    if pi < 0 {
+        bump(d, ST_HS_FAIL)
+        return -1
+    }
+    let p: u64 = peer_at(d, pi as u64)
+    if ldw(p, P_HSSTATE) != HS_SENT_INIT {
+        bump(d, ST_HS_FAIL)
+        return -1
+    }
+    // The handshake state is only committed if EVERYTHING below verifies,
+    // so a forged response cannot destroy a session in progress.
+    var ck: [u8; 32] = [0; 32]
+    var h: [u8; 32] = [0; 32]
+    copy((&ck[0]) as u64, p + P_HSCK, 32)
+    copy((&h[0]) as u64, p + P_HSH, 32)
+    let pck: u64 = (&ck[0]) as u64
+    let ph: u64 = (&h[0]) as u64
+
+    mix_hash(ph, m + 12, 32)
+    mix_key(pck, m + 12, 32)
+
+    var dh: [u8; 32] = [0; 32]
+    if !x25519.x25519(p + P_EPRIV, m + 12, (&dh[0]) as u64) {
+        bump(d, ST_HS_FAIL)
+        return -1
+    }
+    mix_key(pck, (&dh[0]) as u64, 32)
+    if !x25519.x25519(d + D_PRIV, m + 12, (&dh[0]) as u64) {
+        bump(d, ST_HS_FAIL)
+        return -1
+    }
+    mix_key(pck, (&dh[0]) as u64, 32)
+
+    var zero32: [u8; 32] = [0; 32]
+    var psk: u64 = (&zero32[0]) as u64
+    if ldw(p, P_HASPSK) != 0 {
+        psk = p + P_PSK
+    }
+    var t2: [u8; 32] = [0; 32]
+    var k: [u8; 32] = [0; 32]
+    var nck: [u8; 32] = [0; 32]
+    hkdf(pck, psk, 32, 3, (&nck[0]) as u64, (&t2[0]) as u64,
+        (&k[0]) as u64)
+    copy(pck, (&nck[0]) as u64, 32)
+    mix_hash(ph, (&t2[0]) as u64, 32)
+
+    var nothing: [u8; 1] = [0]
+    if !hs_open((&k[0]) as u64, m + 44, 16, ph, (&nothing[0]) as u64) {
+        bump(d, ST_HS_FAIL)
+        return -1
+    }
+    mix_hash(ph, m + 44, 16)
+
+    copy(p + P_HSCK, pck, 32)
+    copy(p + P_HSH, ph, 32)
+    stw(p, P_RIDX, le32_get(m, 4))
+    // We INITIATED, so the first derived key sends.
+    derive_keys(d, pi as u64, true, now)
+    zero((&dh[0]) as u64, 32)
+    zero((&k[0]) as u64, 32)
+    zero((&t2[0]) as u64, 32)
+    return pi
+}
+
+// The two transport keys, out of the finished chaining key.
+//
+// (T_send, T_recv) = HKDF2(ck, empty). The initiator sends with the
+// first and receives with the second; the responder is the other way
+// round. Afterwards the chaining key, the hash and the ephemeral private
+// key are wiped -- they are what an attacker who takes the machine later
+// would need to read what was recorded earlier.
+fn derive_keys(d: u64, pi: u64, we_initiated: bool, now: u64) {
+    let p: u64 = peer_at(d, pi)
+    var t1: [u8; 32] = [0; 32]
+    var t2: [u8; 32] = [0; 32]
+    var empty: [u8; 1] = [0]
+    hkdf(p + P_HSCK, (&empty[0]) as u64, 0, 2, (&t1[0]) as u64,
+        (&t2[0]) as u64, 0)
+
+    // The previous keypair keeps working for a while, because packets
+    // sent under it may still be in flight.
+    copy(p + P_KPPREV, p + P_KP, 1152)
+    let kp: u64 = p + P_KP
+    zero(kp, 1152)
+    if we_initiated {
+        copy(kp + K_SEND, (&t1[0]) as u64, 32)
+        copy(kp + K_RECV, (&t2[0]) as u64, 32)
+        stw(kp, K_INIT, 1)
+    } else {
+        copy(kp + K_RECV, (&t1[0]) as u64, 32)
+        copy(kp + K_SEND, (&t2[0]) as u64, 32)
+        stw(kp, K_INIT, 0)
+    }
+    stw(kp, K_LIDX, ldw(p, P_LIDX))
+    stw(kp, K_RIDX, ldw(p, P_RIDX))
+    stw(kp, K_BIRTH, now)
+    stw(kp, K_VALID, 1)
+    stw(p, P_LASTHS, now)
+    stw(p, P_HSTRIES, 0)
+    stw(p, P_HSSTATE, HS_NONE)
+    zero(p + P_HSCK, 32)
+    zero(p + P_HSH, 32)
+    zero(p + P_EPRIV, 32)
+    zero((&t1[0]) as u64, 32)
+    zero((&t2[0]) as u64, 32)
+    bump(d, ST_HS_OK)
+}
+
+fn peer_established(d: u64, i: u64, now: u64) -> bool {
+    if i >= PEER_MAX {
+        return false
+    }
+    let kp: u64 = peer_at(d, i) + P_KP
+    if ldw(kp, K_VALID) == 0 {
+        return false
+    }
+    return now - ldw(kp, K_BIRTH) < REJECT_AFTER_TIME
+}
+
+// ================================================= MESSAGE 3: COOKIE REPLY
+
+// Built by a RESPONDER under load. `src_ip` and `src_port` are the outer
+// UDP source of the message being refused; `mac1` is that message's mac1,
+// which becomes the associated data so the reply cannot be reused.
+fn make_cookie_reply(d: u64, recv_index: u64, src_ip: u64, src_port: u64,
+    mac1: u64, rnd: u64, now: u64, out: u64) -> u64 {
+    if now - ldw(d, D_CSTIME) > COOKIE_REFRESH_TIME || ldw(d, D_CSTIME) == 0 {
+        copy(d + D_CSECRET, rnd + 32, 32)
+        stw(d, D_CSTIME, now)
+    }
+    var am: [u8; 6] = [0; 6]
+    let a: u64 = (&am[0]) as u64
+    st8(a, 0, src_ip >> 24)
+    st8(a, 1, src_ip >> 16)
+    st8(a, 2, src_ip >> 8)
+    st8(a, 3, src_ip)
+    st8(a, 4, src_port >> 8)
+    st8(a, 5, src_port)
+    var cookie: [u8; 16] = [0; 16]
+    blake2s.blake2s_keyed(d + D_CSECRET, 32, a, 6, (&cookie[0]) as u64, 16)
+
+    le32_put(out, 0, type_word(d, KIND_COOKIE))
+    le32_put(out, 4, recv_index)
+    copy(out + 8, rnd, 24) // the 24 octet XChaCha nonce
+    var ck: [u8; 32] = [0; 32]
+    var buf: [u8; 48] = [0; 48]
+    let b: u64 = (&buf[0]) as u64
+    let n1: u64 = label_cookie(b)
+    copy(b + n1, d + D_PUB, 32)
+    blake2s.blake2s(b, (n1 + 32) as usize, (&ck[0]) as u64)
+    chacha.xaead_seal((&ck[0]) as u64, out + 8, mac1, 16,
+        (&cookie[0]) as u64, 16, out + 32)
+    bump(d, ST_COOKIES)
+    return LEN_COOKIE
+}
+
+fn consume_cookie(d: u64, inp: u64, n: u64, now: u64) -> i64 {
+    if n < LEN_COOKIE {
+        return -1
+    }
+    let pi: i64 = find_by_index(d, le32_get(inp, 4))
+    if pi < 0 {
+        return -1
+    }
+    let p: u64 = peer_at(d, pi as u64)
+    if ldw(p, P_HASMAC1) == 0 {
+        return -1
+    }
+    var cookie: [u8; 16] = [0; 16]
+    if !chacha.xaead_open(p + P_CKKEY, inp + 8, p + P_LASTMAC1, 16,
+        inp + 32, 32, (&cookie[0]) as u64) {
+        return -1
+    }
+    copy(p + P_COOKIE, (&cookie[0]) as u64, 16)
+    stw(p, P_CKTIME, now)
+    stw(p, P_HASCK, 1)
+    return pi
+}
+
+// ================================================ MESSAGE 4: TRANSPORT
+
+// Encrypts `n` octets into `out`. The plaintext is padded with zeroes to
+// a multiple of 16 first, which is why the tunnel cannot be read for the
+// exact length of small packets.
+fn encap(d: u64, pi: u64, plain: u64, n: u64, out: u64, cap: u64,
+    now: u64) -> u64 {
+    if pi >= PEER_MAX {
+        return 0
+    }
+    let p: u64 = peer_at(d, pi)
+    let kp: u64 = p + P_KP
+    if ldw(kp, K_VALID) == 0 {
+        return 0
+    }
+    if now - ldw(kp, K_BIRTH) >= REJECT_AFTER_TIME {
+        stw(kp, K_VALID, 0)
+        return 0
+    }
+    let ctr: u64 = ldw(kp, K_SCTR)
+    if ctr >= REJECT_AFTER_MESSAGES {
+        stw(kp, K_VALID, 0)
+        return 0
+    }
+    var padded: u64 = n
+    if padded % 16 != 0 {
+        padded = padded + (16 - (padded % 16))
+    }
+    if 16 + padded + 16 > cap {
+        return 0
+    }
+    // The padding is written into the output buffer, not the input --
+    // the caller's packet is not ours to change.
+    var pad: [u8; 16] = [0; 16]
+    le32_put(out, 0, type_word(d, KIND_DATA))
+    le32_put(out, 4, ldw(kp, K_RIDX))
+    le64_put(out, 8, ctr)
+    var nonce: [u8; 12] = [0; 12]
+    let np: u64 = (&nonce[0]) as u64
+    le64_put(np, 4, ctr)
+    if padded == n {
+        chacha.aead_seal(kp + K_SEND, np, 0, 0, plain, n as usize, out + 16)
+    } else {
+        // Copy through the output buffer: the tail beyond `n` is zeroed
+        // there and encrypted in one pass.
+        copy(out + 16, plain, n)
+        zero(out + 16 + n, padded - n)
+        chacha.aead_seal(kp + K_SEND, np, 0, 0, out + 16, padded as usize,
+            out + 16)
+    }
+    stw(kp, K_SCTR, ctr + 1)
+    stw(p, P_TXB, ldw(p, P_TXB) + n)
+    stw(p, P_LASTTX, now)
+    bump(d, ST_TX)
+    return 16 + padded + 16
+}
+
+// The replay window of RFC 6479: a ring of 128 words of 64 bits, so 8192
+// bits in all with a usable window of 8128 behind the highest counter
+// seen. It is only ever reached AFTER the tag has verified, which is what
+// stops a forged counter from sliding the window forward.
+fn replay_ok(kp: u64, ctr: u64) -> bool {
+    if ctr >= REJECT_AFTER_MESSAGES {
+        return false
+    }
+    let rmax: u64 = ldw(kp, K_RMAX)
+    if ctr > rmax {
+        let olde: u64 = rmax / 64
+        let newe: u64 = ctr / 64
+        var diff: u64 = newe - olde
+        if diff > CTR_ENTRIES {
+            diff = CTR_ENTRIES
+        }
+        var i: u64 = 1
+        while i <= diff {
+            stw(kp, K_BITS + ((olde + i) % CTR_ENTRIES) * 8, 0)
+            i = i + 1
+        }
+        stw(kp, K_RMAX, ctr)
+    } else if rmax - ctr > CTR_WINDOW {
+        return false
+    }
+    let e: u64 = K_BITS + ((ctr / 64) % CTR_ENTRIES) * 8
+    let bit: u64 = 1 << (ctr % 64)
+    let w: u64 = ldw(kp, e)
+    if (w & bit) != 0 {
+        return false
+    }
+    stw(kp, e, w | bit)
+    return true
+}
+
+fn try_keypair(d: u64, kp: u64, inp: u64, n: u64, out: u64,
+    now: u64) -> i64 {
+    if ldw(kp, K_VALID) == 0 {
+        return -1
+    }
+    if ldw(kp, K_LIDX) != le32_get(inp, 4) {
+        return -1
+    }
+    if now - ldw(kp, K_BIRTH) >= REJECT_AFTER_TIME {
+        stw(kp, K_VALID, 0)
+        return -1
+    }
+    let ctr: u64 = le64_get(inp, 8)
+    var nonce: [u8; 12] = [0; 12]
+    let np: u64 = (&nonce[0]) as u64
+    le64_put(np, 4, ctr)
+    let body: u64 = n - 16
+    // THE TAG IS CHECKED BEFORE THE WINDOW MOVES. `aead_open` refuses
+    // before it decrypts, and only then is `replay_ok` asked.
+    if !chacha.aead_open(kp + K_RECV, np, 0, 0, inp + 16, body as usize,
+        out) {
+        return -1
+    }
+    if !replay_ok(kp, ctr) {
+        return -1
+    }
+    return (body - 16) as i64
+}
+
+// Decrypts a transport packet. Returns the plaintext length (which may be
+// 0 for a keepalive) or -1. `pi_out` gets the peer.
+fn decap(d: u64, inp: u64, n: u64, out: u64, now: u64,
+    pi_out: *mut u64) -> i64 {
+    if n < LEN_DATA_MIN {
+        bump(d, ST_RX_BAD)
+        return -1
+    }
+    let idx: u64 = le32_get(inp, 4)
+    var i: u64 = 0
+    while i < PEER_MAX {
+        let p: u64 = peer_at(d, i)
+        if ldw(p, P_USED) != 0 {
+            var r: i64 = try_keypair(d, p + P_KP, inp, n, out, now)
+            if r >= 0 {
+                *pi_out = i
+                stw(p, P_RXB, ldw(p, P_RXB) + r as u64)
+                stw(p, P_LASTRX, now)
+                bump(d, ST_RX_GOOD)
+                return r
+            }
+            r = try_keypair(d, p + P_KPPREV, inp, n, out, now)
+            if r >= 0 {
+                *pi_out = i
+                stw(p, P_RXB, ldw(p, P_RXB) + r as u64)
+                stw(p, P_LASTRX, now)
+                bump(d, ST_RX_GOOD)
+                return r
+            }
+        }
+        i = i + 1
+    }
+    bump(d, ST_RX_BAD)
+    return -1
+}
+
+// ---------------------------------------------------------- the timers
+
+// Does this peer need a handshake right now?
+//
+// Only the side that INITIATED a session rekeys it, so that two peers do
+// not both start a handshake at the same moment and throw each other's
+// away. A handshake in progress is retried every REKEY_TIMEOUT and given
+// up after REKEY_ATTEMPT_TIME.
+fn needs_handshake(d: u64, i: u64, now: u64, want_to_send: bool) -> bool {
+    if i >= PEER_MAX {
+        return false
+    }
+    let p: u64 = peer_at(d, i)
+    if ldw(p, P_USED) == 0 || ldw(p, P_EPIP) == 0 {
+        return false
+    }
+    if ldw(p, P_HSSTATE) == HS_SENT_INIT {
+        if now - ldw(p, P_HSTIME) < REKEY_TIMEOUT {
+            return false
+        }
+        if ldw(p, P_HSTRIES) * REKEY_TIMEOUT > REKEY_ATTEMPT_TIME {
+            stw(p, P_HSSTATE, HS_NONE)
+            stw(p, P_HSTRIES, 0)
+            return false
+        }
+        return true
+    }
+    let kp: u64 = p + P_KP
+    if ldw(kp, K_VALID) == 0 {
+        return want_to_send || ldw(p, P_KEEPALIVE) != 0
+    }
+    let age: u64 = now - ldw(kp, K_BIRTH)
+    if age >= REJECT_AFTER_TIME {
+        return want_to_send || ldw(p, P_KEEPALIVE) != 0
+    }
+    if ldw(kp, K_INIT) != 0 {
+        if age >= REKEY_AFTER_TIME {
+            return true
+        }
+        if ldw(kp, K_SCTR) >= REKEY_AFTER_MESSAGES {
+            return true
+        }
+    }
+    return false
+}
+
+fn key_expired(d: u64, i: u64, now: u64) -> bool {
+    if i >= PEER_MAX {
+        return true
+    }
+    let kp: u64 = peer_at(d, i) + P_KP
+    if ldw(kp, K_VALID) == 0 {
+        return true
+    }
+    return now - ldw(kp, K_BIRTH) >= REJECT_AFTER_TIME
+}
+
+// A keepalive is due when the peer configured one and that many seconds
+// have passed since we last sent anything.
+fn needs_keepalive(d: u64, i: u64, now: u64) -> bool {
+    if i >= PEER_MAX {
+        return false
+    }
+    let p: u64 = peer_at(d, i)
+    let ka: u64 = ldw(p, P_KEEPALIVE)
+    if ka == 0 || !peer_established(d, i, now) {
+        return false
+    }
+    return now - ldw(p, P_LASTTX) >= ka * 1000000
+}
