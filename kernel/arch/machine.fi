@@ -47,7 +47,8 @@ export {
     write8, write16, write32, write64,
     atomic_load, atomic_store,
     barrier, barrier_read, barrier_write, barrier_device,
-    irq_on, irq_off, irq_save, irq_restore, idle, pause,
+    irq_on, irq_off, irq_save, irq_restore, irq_are_on, idle, pause,
+    fill_words, copy_words, copy_octets, kdata_base,
     page_root, page_root_set, tlb_flush_all, tlb_flush_page,
     cycles, trap_here,
     PAGE_SIZE, PAGE_BITS
@@ -348,6 +349,23 @@ fn irq_restore(state: u64) {
     asm("msr daif, x0", in("x0") state)
 }
 
+// Whether interrupts are currently on, without changing anything. `nvme.fi`
+// asks before it decides to wait for one instead of polling.
+#[arch(x86_64)]
+fn irq_are_on() -> bool {
+    let flags: u64 = asm("pushfq\npop rax", out("rax"))
+    return (flags & 0x200) != 0
+}
+
+// DAIF bit 7 is the I mask, and it is set when interrupts are OFF -- the
+// opposite polarity to x86's flag, which is one of the small differences
+// that produces a working-looking kernel that never sleeps.
+#[arch(aarch64)]
+fn irq_are_on() -> bool {
+    let daif: u64 = asm("mrs x0, daif", out("x0"))
+    return ((daif >> 7) & 1) == 0
+}
+
 #[arch(x86_64)]
 fn idle() {
     asm("hlt")
@@ -371,6 +389,81 @@ fn pause() {
 #[arch(aarch64)]
 fn pause() {
     asm("yield")
+}
+
+// ------------------------------------------------------------ block memory
+//
+// `wm.fi` clears and copies whole scan lines, `wig.fi` moves a window's
+// pixels across the ring boundary. On x86-64 that is one instruction with a
+// prefix, and it is a hot path in the window server -- the reason those two
+// files carried inline assembly at all. There is no `rep` on AArch64; what
+// there is instead is a loop, and it is written here rather than in the two
+// callers so that a better one (`ldp`/`stp` pairs, or the `cpy` instructions
+// of FEAT_MOPS on a newer core) has ONE place to land.
+
+#[arch(x86_64)]
+fn fill_words(p: u64, value: u64, words: u64) {
+    asm("cld\nrep stosq", in("rdi") p, in("rax") value, in("rcx") words,
+        clobber("rdi"), clobber("rcx"), clobber("memory"))
+}
+
+#[arch(aarch64)]
+fn fill_words(p: u64, value: u64, words: u64) {
+    var i: u64 = 0
+    while i < words {
+        __mmio_write64((p + i * 8) as *mut u64, value)
+        i = i + 1
+    }
+}
+
+#[arch(x86_64)]
+fn copy_words(dst: u64, src: u64, words: u64) {
+    asm("cld\nrep movsq", in("rdi") dst, in("rsi") src, in("rcx") words,
+        clobber("rdi"), clobber("rsi"), clobber("rcx"), clobber("memory"))
+}
+
+#[arch(aarch64)]
+fn copy_words(dst: u64, src: u64, words: u64) {
+    var i: u64 = 0
+    while i < words {
+        __mmio_write64((dst + i * 8) as *mut u64,
+            __mmio_read64((src + i * 8) as *mut u64))
+        i = i + 1
+    }
+}
+
+#[arch(x86_64)]
+fn copy_octets(dst: u64, src: u64, n: u64) {
+    asm("cld\nrep movsb", in("rdi") dst, in("rsi") src, in("rcx") n,
+        clobber("rdi"), clobber("rsi"), clobber("rcx"), clobber("memory"))
+}
+
+#[arch(aarch64)]
+fn copy_octets(dst: u64, src: u64, n: u64) {
+    var i: u64 = 0
+    while i < n {
+        __mmio_write8((dst + i) as *mut u8, __mmio_read8((src + i) as *mut u8))
+        i = i + 1
+    }
+}
+
+// -------------------------------------------------------- the data region
+//
+// The kernel's mutable state does not live in the language -- stage 0 of
+// Firn has `const` and no mutable globals (SPEC 14) -- it lives in a region
+// whose address the assembly hands over. `kdata` is that symbol on x86-64
+// (`kernel/arch/x86_64/boot.s`, 0x60000 octets) and on AArch64
+// (`kernel/arch/aarch64/start.S`, where it is another name for
+// `kstate_a64`). Two ways of taking the address of a symbol, one name.
+
+#[arch(x86_64)]
+fn kdata_base() -> u64 {
+    return asm("lea rax, [rip + kdata]", out("rax"))
+}
+
+#[arch(aarch64)]
+fn kdata_base() -> u64 {
+    return asm("adrp x0, kdata\nadd x0, x0, :lo12:kdata", out("x0"))
 }
 
 // ----------------------------------------------------------------- page root
