@@ -298,9 +298,7 @@ else
     # Das Auswahlfeld (kind=9) und der Knopf (kind=2) dieser Seite.
     zeile_von() { grep -a 'einstellungen: feld' "$1" | grep " kind=$2 " \
                   | tail -1; }
-    cx1=$(zeile_von "$TMPD/en/tab.txt" 9 | grep -oE ' x=[0-9]+' | grep -oE '[0-9]+')
-    cb1=$(zeile_von "$TMPD/en/tab.txt" 9 | grep -oE ' base=[0-9]+' | grep -oE '[0-9]+')
-    # Das LETZTE Auswahlfeld ist die Tastaturbelegung; das erste die
+    # Das LETZTE Auswahlfeld ist die Tastaturbelegung; das ERSTE die
     # Sprache. Also das erste nehmen.
     cx=$(grep -a 'einstellungen: feld' "$TMPD/en/tab.txt" | grep ' kind=9 ' \
          | head -1 | grep -oE ' x=[0-9]+' | grep -oE '[0-9]+')
