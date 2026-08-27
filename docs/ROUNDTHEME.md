@@ -622,11 +622,18 @@ two system calls and no disk at all.
 With the desktop, the taskbar, the file manager, the launcher and a
 widget window all running (`themegui`, 20 switches through the file):
 
-| | fastest run | note |
+| | fastest of 20 | note |
 |---|---|---|
 | detect (read, compare, reload, resolve, publish) | **37.6 ms** | five processes on one virtual CPU |
 | repaint the window | **87.1 ms** | for **165 600** of **480 000** screen pixels (34.5 %) |
 | counter-check: an ordinary full repaint with no theme change at all | **94.6 ms** | |
+
+The **fastest** of twenty runs is quoted and not the mean, and that is a
+choice worth defending: the mean on this machine says as much about what
+else was running as about the theme. A second run of the same test while
+two other QEMU suites were going gave 70.6 ms and 194.7 ms for the same
+two lines, with the baseline unchanged at 84.0 ms. The fastest run is
+the one where the scheduler got out of the way.
 
 **A theme switch costs one full repaint and nothing more.** That is the
 honest reading of those two numbers: 87 ms against 94 ms is the same
@@ -841,7 +848,7 @@ with `*%`. Fixed in the first commit of this branch, separately.
 | run | before this round | after |
 |---|---|---|
 | `tools/wm/run.sh` (window server, mouse, TrueType) | 99 passed, **4 failed** | 99 passed, **4 failed** — the same four |
-| `tools/k15/run.sh` (widgets, file manager, launcher) | 249 passed, **2 failed** | 250 passed, **1 failed** |
+| `tools/k15/run.sh` (widgets, file manager, launcher) | 249 passed, **2 failed** | 249 passed, **2 failed** — the same two |
 | `tests/theme/run.sh` (this round) | — | **91 passed, 0 failed** |
 
 Both runs were also made against the commit this branch starts from
@@ -855,22 +862,32 @@ This round did not touch them and did not cause them; they are recorded
 here so that nobody has to wonder later. The same self-test failure is
 one of the two in `tools/k15/run.sh`.
 
-**`tools/k15/run.sh` went from two failures to one, and both movements
-were this round's doing.** Three menu-text checks broke first, at
-210, 325 and 253 wrong ink points of 345, 533 and 407: the K15 image has
-no `/etc/theme.conf`, `mode=auto` therefore hung on the machine's clock,
-and dark surfaces from the old `/etc/theme` got light-resolved text.
-That is fixed above (fault 7). What was left was **one** ink point of
-one glyph out of 345, and the cause was in the checker: `tools/k15/run.sh`
-had the foreground colour typed into it as `15265524` — `#E8EEF4`, the
-`fg` that `theme_defaults` built in during round K15. With the new
-`text-primary` at `#F8FAFC` that is within the run's tolerance of 96 for
-344 of 345 points and one point outside it. The literal now comes out of
-`tools/theme/model.py`, which is the same model Osum resolves from; a
-test that hangs on a number from the day before yesterday checks the
-wrong thing from then on. With that, the three menu checks report **0
-wrong** and the file manager's title-bar check, which failed on the base
-commit for the same reason, passes as well.
+**`tools/k15/run.sh` ends where it started, and it took two fixes to get
+back there.** This round broke it twice on the way:
+
+* **Three menu-text checks**, at 210, 325 and 253 wrong ink points of
+  345, 533 and 407. The K15 image has no `/etc/theme.conf`, so
+  `mode=auto` hung on the machine's clock, and dark surfaces from the
+  old `/etc/theme` got light-resolved text laid over them. Fault 8
+  above.
+* **One** ink point of one glyph out of 345, left over after that fix.
+  The cause was in the checker, not in the system: `tools/k15/run.sh`
+  had the foreground colour typed into it as `15265524` — `#E8EEF4`,
+  the `fg` that `theme_defaults` built in during round K15. With
+  `text-primary` now at `#F8FAFC`, 344 of 345 points stay inside the
+  run's tolerance of 96 and one does not. The literal now comes out of
+  `tools/theme/model.py`, the same model Osum resolves from. A test
+  that hangs on a number from the day before yesterday checks the wrong
+  thing from then on.
+
+The two failures that remain are the two the base commit has: the
+server's self test answering 25 of 30, and the file manager's title-bar
+text finding no ink at all.
+
+One run showed a **third**, `No such file or directory: fdbl.ppm` — a
+screenshot that never arrived. Four QEMU suites were running on this
+machine at that moment. It is a load artefact and not a result, and it
+is written down rather than quietly dropped.
 
 ---
 
