@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-2.0-only
 # tools/gfx/run.sh -- DER BEWEIS, DASS OSUM EINEN BILDSCHIRM HAT.
 #
 # Bis Runde K7 war Osums Konsole die serielle Schnittstelle.  Der

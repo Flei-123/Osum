@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-only
 """tools/k15/buendel.py -- aus `assets/apps/*.prog` die Angaben fuer mkfs.
 
 Runde K15, zweiter Nachtrag. Ein Programm ist ein VERZEICHNIS:

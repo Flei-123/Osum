@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-only
 """tools/osum/break.py -- ELF files with exactly one thing wrong.
 
 A loader is only worth as much as its refusals. This tool takes a program

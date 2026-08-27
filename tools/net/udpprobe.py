@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-only
 """tools/net/udpprobe.py -- round K8: UDP, and a counter-check inside it.
 
 Five datagrams of 1400 octets each. Osum sends them back REVERSED, not

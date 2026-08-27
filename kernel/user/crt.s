@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: MIT */
 /* kernel/user/crt.s -- round K1: the four instructions a user
  * program cannot write in Firn.
  *

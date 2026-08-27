@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /* kernel/smp.s -- round K5: the sixty lines a second processor
  * cannot be started without.
  *

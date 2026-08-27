@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-2.0-only
 # tools/guard/run.sh -- RUNDE K10: DIE ZWEI SCHUTZBITS UND DAS BOOT-MODUL.
 #
 # Diese Runde hat nichts Neues erfunden. Sie holt die letzten zwei

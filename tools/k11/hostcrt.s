@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /* tools/k11/hostcrt.s -- NUR ZUM ENTWICKELN, nicht Teil des Systems.
  *
  * Dieselben Programme, gebunden fuer den WIRT. Das geht, weil die
