@@ -423,6 +423,17 @@ lauf "22. Widgets und der Dateimanager: eine Bibliothek in Ring 3 (tools/k15/run
      tools/k15/run.sh k15 '^K15: |^        -> |^  OK    (die Anordnung|ein Klick auf das Kaestchen|mit Bereichsverfolgung|und /daten/neu|der Verweis spart|getippt |OHNE (die Schluesselwoerter|das Journal|den Namensindex)|[0-9]\. (DER AUFBAU|DIE SUCHE|DIE GEGENPROBE|der Index)|und DIESELBEN NAMEN|nach dem (Anlegen|Umbenennen)|das Symbol des Dateimanagers)'
 lauf "24. Energie und Leistung: drei Profile, Ruhezustand, Waerme, Akku (tools/k18/run.sh, Runde K18)" \
      tools/k18/run.sh k18 '^K18: |^  OK    (dieselbe Stelle|IA32_PERF_CTL bekommt|Turbo ist bei|SpeedStep ist bei|jeder Durchlauf ging|schlafend |aber es wird kein|zwei Tabellen|GEGENPROBE|GEDROSSELT|im BILD|dasselbe Pruefbild|und einen Bildpunkt DANEBEN|keine AUFRUFNUMMER)'
+# ABSCHNITT 25 -- DIE ZWEITE MASCHINE (Runde ARM). Er baut KEIN Osum: der
+# festgenagelte Uebersetzer kann `profile kernel` fuer AArch64 nicht
+# (docs/ARCH.md, Abschnitt 6). Was er baut und misst, ist der Boden
+# darunter -- Start bei EL1, MMU mit TTBR0 UND TTBR1, Ausnahmevektoren,
+# GICv2, der generische Zeitgeber, PL011 und ein Kontextwechsel, auf
+# `qemu-system-aarch64 -M virt`. Sechs der Zusagen sind Gegenproben, und
+# die interessanteste davon ist `noaf`: ein einziges geloeschtes Bit im
+# Seitendeskriptor, und die Maschine sagt kein Wort mehr.
+lauf "25. die zweite Maschine: AArch64 auf qemu -M virt (tools/arm/run.sh, Runde ARM)" \
+     tools/arm/run.sh arm '^ARM: |^  OK    (der erste|the first|100 virtual|arch_switch|nomm:|noaf:|notimer:|noeoi:|32 virtio|with a disk|a page mapped|the same octet|SCTLR|CNTFRQ)|^   (first octet|to the last line)'
+
 
 echo
 echo "=================================================================="
