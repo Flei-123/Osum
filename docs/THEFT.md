@@ -128,8 +128,30 @@ afternoon. If it does not, it costs everything on it. This is the part of
 theft defence that is entirely in our hands, needs no hardware support,
 no network and no vendor.
 
-Status: **built and measured this round** (`kernel/user/bak.fi`, section
-6 below).
+Status: **built and measured this round** (`kernel/user/backup.fi`,
+section 6 below).
+
+#### What a backup carries -- three rules
+
+Losing the machine is only survivable if the backup is both *complete* and
+*small*, and those pull against each other. The resolution is three rules
+and no fourth (`docs/ORPHANS.md`, and `docs/BACKUP.md` on the OrientOS
+side):
+
+1. **ALWAYS** -- `PLAN`, the secret store, `config/`, `state/`. The work
+   and the credentials. Nothing else can produce them.
+2. **NEVER** -- store entries a source can deliver, `apps/`, `etc/`,
+   `cache/`. Every one of these is an output: derived from the PLAN, or
+   derived from use. PLAN2 measured this at about **99 % of the disk**.
+3. **ONLY IF ORPHANED** -- a store entry that **no registered source can
+   deliver**. A package built here and never published has its hash in the
+   PLAN and its octets nowhere else; rule 2's argument is that programs
+   are *reachable*, and where that is false the rule is false with it.
+
+Rule 3 is the precondition of rule 2 made explicit, not an exception to
+it. `opk` decides which entries qualify, because it is the only program
+that knows what the sources hold; `backup` is handed a plain list of store
+entry names and stores exactly those. Measured in section 6.
 
 ### (c) Recognise the device if it ever reports in
 
@@ -236,7 +258,7 @@ fingerprint ignores it.
 
 ## 6. The backup -- measured
 
-`bak` stores content-addressed: a chunk of octets is named by its
+`backup` stores content-addressed: a chunk of octets is named by its
 SHA-256, so identical chunks are stored once. Deduplication and
 "incremental" are then the same mechanism, not two.
 
@@ -269,6 +291,51 @@ disk image*, from outside the kernel (`tools/tresor/kaputt.py`; `cmp`
 confirms exactly 1 octet differs). The same run then checks the damaged
 store and an intact one: **1 corrupt chunk found in the damaged store, 0
 in the intact one.**
+
+### The one exception: orphaned packages, measured
+
+Rule 2 keeps programs out of the backup because a source can hand them
+back. Where no source can, the octets exist nowhere else, and rule 3
+applies. The cost of that exception is a measurement, not an estimate.
+
+The same backup set, saved twice into two fresh stores. The set is sized
+to match the real one PLAN2 measured (44,076 octets) so the percentage
+means something; the orphan is a real 29,104-octet program plus its
+24-octet `PAKET` metadata.
+
+| run | orphan entries | octets written |
+|---|---:|---:|
+| no orphan list | 0 | 43,092 |
+| with one orphan | **1** | **72,220** |
+
+**+29,128 octets, +67.6 %.** The growth equals the reported `orphan
+bytes` exactly, which is asserted rather than eyeballed -- so every extra
+octet is accounted for and nothing else moved.
+
+That ratio is the honest shape of the trade: one self-built program can
+be two thirds again the size of everything else worth keeping. It is
+still the right call, because the alternative is not a smaller backup but
+a restore that stops at a hash nobody can resolve.
+
+Counter-checks in the same run: the **reachable** package is *not* in the
+snapshot, `cache` is *not* in the snapshot, an empty list costs 0, a line
+that is not a lower-case hex store name is refused (which is what stops
+`../..` from reaching a path), and a listed entry that is missing from the
+store is a loud failure rather than a silent skip.
+
+**The proof does not run on the machine that made the backup** -- that
+machine still has the package. A second disk image is built containing
+*only* the backup store: no tree, no backup set, no package. On it,
+`restore` rebuilds the entry, `verify` reports `corrupt: 0`, the restored
+`/out/store/<entry>/start` is **executed and prints its line**, and the
+host reads that file back out of the disk image and compares it with the
+original: **29,104 octets, byte for byte identical.**
+
+That the program *runs* is the part worth having, because it caught a
+real bug: `restore` recorded the mode in the snapshot and never applied
+it. H6 claimed "the mode is kept" and only half of it was true -- nothing
+restored before had ever needed to execute. It now calls `chmod`
+(syscall 90) with the permission bits masked off the type bits.
 
 ### The honest limit: fixed-size chunking
 
@@ -326,7 +393,7 @@ In the order that buys the most safety per round:
    the key management this round built. That is item (a), the only
    measure that always works. Certus B6 is building the AEAD; see
    `CRYPTO-ERASE.md` for what exactly is missing.
-2. **Content-defined chunking** in `bak`, so that an insertion does not
+2. **Content-defined chunking** in `backup`, so that an insertion does not
    destroy deduplication. One rolling hash, and the table in section 6
    changes from 100 % to a few per cent.
 3. **A boot on real hardware**, to replace section 5's *expectations*
@@ -337,5 +404,5 @@ In the order that buys the most safety per round:
    and it is unreachable from a real UEFI boot because multiboot 1 hands
    over no system table pointer. Until then, a UEFI machine without a
    legacy F-segment yields no SMBIOS at all.
-5. **A network backend for `bak`**, once there is a transport that can be
+5. **A network backend for `backup`**, once there is a transport that can be
    trusted with the octets.

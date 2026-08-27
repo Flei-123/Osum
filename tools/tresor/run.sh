@@ -92,7 +92,7 @@ if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
     exit 0
 fi
 
-PROGS="sh ls cat echo hwid shat bak key"
+PROGS="sh ls cat echo hello hwid shat backup key"
 
 # ============================================================ 1. bauen
 
@@ -108,7 +108,7 @@ bash tools/tresor/bauen.sh "$TMPD/bin" 0 $PROGS > "$TMPD/bprog.txt" 2>&1 \
     || { bad "firnc0 baut nicht alle Programme"; sed 's/^/        /' "$TMPD/bprog.txt" | head -12; }
 
 undef=""
-for p in hwid bak key shat; do
+for p in hwid backup key shat; do
     [ -f "$TMPD/bin/$p.elf" ] || continue
     u=$(nm -u "$TMPD/bin/$p.elf" 2>/dev/null | awk '{print $NF}' | sed '/^$/d')
     [ -n "$u" ] && undef="$undef $p:$u"
@@ -408,7 +408,7 @@ open(t + "/empty.txt", "wb").write(b"")
 open(t + "/rand.bin", "wb").write(bytes((i * 7 + 3) % 256 for i in range(5000)))
 PY
 
-cat > "$TMPD/t_bak.sh" <<'EOS'
+cat > "$TMPD/t_backup.sh" <<'EOS'
 echo ==RUN1==
 backup save /d /store s1
 echo ==RUN2==
@@ -425,20 +425,20 @@ echo ==LIST==
 backup list /store
 echo ==END==
 EOS
-python3 tools/osum/mkfs.py build "$TMPD/dbak.img" $BLOCKS \
+python3 tools/osum/mkfs.py build "$TMPD/dbackup.img" $BLOCKS \
     /bin/ /t/ /d/ /d/sub/ /d/sub/deep/ /store/ /out/ /proc/ /dev/ \
     /bin/sh="$TMPD/bin/sh.elf" /bin/cat="$TMPD/bin/cat.elf" \
     /bin/echo="$TMPD/bin/echo.elf" /bin/ls="$TMPD/bin/ls.elf" \
-    /bin/backup="$TMPD/bin/bak.elf" \
+    /bin/backup="$TMPD/bin/backup.elf" \
     /d/a.txt="$TMPD/baum/a.txt" /d/rand.bin="$TMPD/baum/rand.bin" /d/empty.txt= \
     /d/sub/copy.txt="$TMPD/baum/sub/copy.txt" \
     /d/sub/deep/small.txt="$TMPD/baum/sub/deep/small.txt" \
-    /t/bak.sh="$TMPD/t_bak.sh" > "$TMPD/mkfs-bak.txt" 2>&1 \
+    /t/backup.sh="$TMPD/t_backup.sh" > "$TMPD/mkfs-backup.txt" 2>&1 \
     && ok "mkfs.py baut den Quellbaum" || bad "mkfs.py fehlgeschlagen"
 
-rc=$(lauf bak "$TMPD/dbak.img" "osum vfs nokbd script=sh /t/bak.sh;exit")
+rc=$(lauf backup "$TMPD/dbackup.img" "osum vfs nokbd script=sh /t/backup.sh;exit")
 is "der Sicherungslauf endet ordentlich" "$rc" "21"
-B="$TMPD/bak.txt"
+B="$TMPD/backup.txt"
 
 abschnitt() { sed -n "/^==$1==/,/^==/p" "$B"; }
 feld() { abschnitt "$1" | grep -a "^$2: " | tail -1 | sed "s/^$2: //"; }
@@ -476,7 +476,7 @@ abschnitt GETBAD | grep -qa 'no such path' \
 
 # DER EIGENTLICHE NACHWEIS: der Wirt liest den wiederhergestellten Baum
 # AUS DEM ABBILD und haelt ihn gegen das Original.
-python3 - "$TMPD/live-bak.img" > "$TMPD/vergleich.txt" 2>&1 <<'PY'
+python3 - "$TMPD/live-backup.img" > "$TMPD/vergleich.txt" 2>&1 <<'PY'
 import subprocess, sys
 img = sys.argv[1]
 def cat(p):
@@ -536,7 +536,7 @@ EOS
 python3 tools/osum/mkfs.py build "$TMPD/dshift.img" $BLOCKS \
     /bin/ /t/ /one/ /oneapp/ /onepre/ /sa/ /sb/ /proc/ /dev/ \
     /bin/sh="$TMPD/bin/sh.elf" /bin/cat="$TMPD/bin/cat.elf" \
-    /bin/echo="$TMPD/bin/echo.elf" /bin/backup="$TMPD/bin/bak.elf" \
+    /bin/echo="$TMPD/bin/echo.elf" /bin/backup="$TMPD/bin/backup.elf" \
     /one/a.bin="$TMPD/base.bin" /oneapp/a.bin="$TMPD/app.bin" \
     /onepre/a.bin="$TMPD/pre.bin" /t/shift.sh="$TMPD/t_shift.sh" \
     > /dev/null 2>&1 && ok "mkfs.py baut die drei Fassungen derselben Datei" \
@@ -665,6 +665,208 @@ if grep -qa '^key: [0-9a-f]\{64\}$' "$K"; then
 else
     ok "GEGENPROBE: der Schluessel selbst steht nirgends in der Ausgabe"
 fi
+
+# ============ 11. verwaiste Pakete: die eine Ausnahme, und was sie kostet
+#
+# Der Nachtrag vom 27.08.2026. Ein Backup traegt KEINE Programme -- ihre
+# Oktette liegen in einer Quelle und der Hash im PLAN benennt sie
+# eindeutig. Das gilt aber nur, solange eine Quelle sie auch liefern kann.
+# Ein selbst gebautes, nie veroeffentlichtes Paket ist VERWAIST: sein Hash
+# steht im PLAN, und niemand kann die Oktette herausgeben.
+#
+# Gemessen wird hier:
+#   * dasselbe Backup einmal OHNE und einmal MIT Verwaisten -- die
+#     Differenz ist der Preis der Ausnahme, in Oktetten und in Prozent;
+#   * das ERREICHBARE Paket landet NICHT im Schnappschuss (Gegenprobe);
+#   * ein zweiter Rechner, auf dem es den Baum GAR NICHT gibt, stellt aus
+#     dem Speicher allein wieder her, und der Wirt vergleicht die Oktette
+#     mit dem Original AUS DEM ABBILD;
+#   * das wiederhergestellte Paket LAEUFT -- was zugleich beweist, dass
+#     `restore` die Rechtebits wirklich setzt;
+#   * eine kaputte Zeile und ein fehlender Eintrag sind LAUTE Fehler.
+
+echo "== 11. verwaiste Pakete: sichern, Baum wegwerfen, wiederherstellen =="
+
+ORPH=8c3851919b9fcd2a889d
+REACH=bc9c62d6877b710a648c
+
+python3 - "$TMPD" "$ORPH" "$REACH" <<'PY2'
+import os, sys
+t, orph, reach = sys.argv[1], sys.argv[2], sys.argv[3]
+# DER SICHERUNGSSATZ, wie ihn PLAN2 definiert: PLAN + config + state.
+os.makedirs(t + "/set/config", exist_ok=True)
+os.makedirs(t + "/set/state", exist_ok=True)
+open(t + "/set/PLAN", "wb").write(
+    ("app mine 0.1.0\t%s\napp hallo 1.0.0\t%s\n" % (orph, reach)).encode())
+open(t + "/set/config/app.conf", "wb").write(b"theme=dark\nfont=12\n")
+# DIE GROESSE IST MIT ABSICHT GEWAEHLT. PLAN2 hat den Sicherungssatz eines
+# echten Baumes gemessen: 44 076 Oktette (docs/BACKUP.md § 2). Ein
+# Spielzeugsatz von 800 Oktetten wuerde den Aufschlag durch ein 29-KiB-Paket
+# als "+3587 %" ausweisen -- eine wahre Zahl, die nichts bedeutet. Hier
+# steht deshalb ungefaehr so viel Benutzerdatum wie dort, damit der
+# Prozentsatz mit der echten Messung VERGLEICHBAR ist.
+st = 0x2545F4914F6CDD1D
+def nxt():
+    global st
+    st ^= (st << 13) & 0xFFFFFFFFFFFFFFFF
+    st ^= st >> 7
+    st ^= (st << 17) & 0xFFFFFFFFFFFFFFFF
+    return st & 0xFF
+open(t + "/set/state/doc.txt", "wb").write(bytes(nxt() for _ in range(24000)))
+open(t + "/set/state/notes.md", "wb").write(bytes(nxt() for _ in range(19000)))
+# Die ORPHANS-Liste nach der Schnittstelle aus docs/ORPHANS.md.
+open(t + "/ORPHANS", "wb").write((orph + "\n").encode())
+open(t + "/EMPTY", "wb").write(b"")
+open(t + "/BADSHAPE", "wb").write(b"../../etc/passwd\n")
+open(t + "/MISSING", "wb").write(b"deadbeefdeadbeefdead\n")
+PY2
+
+# Das verwaiste Paket ist ein ECHTES Programm -- sonst liesse sich nicht
+# messen, dass es nach der Wiederherstellung laeuft.
+cp "$TMPD/bin/hello.elf" "$TMPD/orph-start"
+cp "$TMPD/bin/echo.elf" "$TMPD/reach-start"
+printf 'name=mine\nversion=0.1.0\n' > "$TMPD/orph-meta"
+printf 'name=hallo\nversion=1.0.0\n' > "$TMPD/reach-meta"
+
+cat > "$TMPD/t_orph.sh" <<'EOS'
+echo ==BASE==
+backup save /set /sa a1
+echo ==WITH==
+backup save /set /sb b1 /t/ORPHANS /tree
+echo ==EMPTY==
+backup save /set /sc c1 /t/EMPTY /tree
+echo ==BADSHAPE==
+backup save /set /sd d1 /t/BADSHAPE /tree
+echo ==MISSING==
+backup save /set /se e1 /t/MISSING /tree
+echo ==SNAP==
+cat /sb/S-b1
+echo ==END==
+EOS
+
+python3 tools/osum/mkfs.py build "$TMPD/dorph.img" $BLOCKS \
+    /bin/ /t/ /set/ /set/config/ /set/state/ /tree/ /tree/store/ \
+    "/tree/store/$ORPH/" "/tree/store/$REACH/" /tree/users/ /tree/users/cache/ \
+    /sa/ /sb/ /sc/ /sd/ /se/ /proc/ /dev/ \
+    /bin/sh="$TMPD/bin/sh.elf" /bin/cat="$TMPD/bin/cat.elf" \
+    /bin/echo="$TMPD/bin/echo.elf" /bin/backup="$TMPD/bin/backup.elf" \
+    /set/PLAN="$TMPD/set/PLAN" /set/config/app.conf="$TMPD/set/config/app.conf" \
+    /set/state/doc.txt="$TMPD/set/state/doc.txt" \
+    /set/state/notes.md="$TMPD/set/state/notes.md" \
+    "/tree/store/$ORPH/start=$TMPD/orph-start" \
+    "/tree/store/$ORPH/PAKET=$TMPD/orph-meta" \
+    "/tree/store/$REACH/start=$TMPD/reach-start" \
+    "/tree/store/$REACH/PAKET=$TMPD/reach-meta" \
+    /tree/users/cache/thumb.bin="$TMPD/reach-meta" \
+    /t/ORPHANS="$TMPD/ORPHANS" /t/EMPTY="$TMPD/EMPTY" \
+    /t/BADSHAPE="$TMPD/BADSHAPE" /t/MISSING="$TMPD/MISSING" \
+    /t/orph.sh="$TMPD/t_orph.sh" > "$TMPD/mkfs-orph.txt" 2>&1 \
+    && ok "mkfs.py baut den Baum mit einem verwaisten und einem erreichbaren Paket" \
+    || { bad "mkfs.py fehlgeschlagen"; sed 's/^/        /' "$TMPD/mkfs-orph.txt" | head -6; }
+
+rc=$(lauf orph "$TMPD/dorph.img" "osum vfs nokbd script=sh /t/orph.sh;exit")
+is "der Verwaisten-Lauf endet ordentlich" "$rc" "21"
+O="$TMPD/orph.txt"
+ofeld() { sed -n "/^==$1==/,/^==/p" "$O" | grep -a "^$2: " | tail -1 | sed "s/^$2: //"; }
+
+is "OHNE Liste sichert backup NULL verwaiste Eintraege" "$(ofeld BASE 'orphan entries')" "0"
+is "und schreibt dafuer auch null verwaiste Oktette" "$(ofeld BASE 'orphan bytes')" "0"
+is "MIT Liste sichert backup GENAU EINEN verwaisten Eintrag" "$(ofeld WITH 'orphan entries')" "1"
+is "eine LEERE Liste ist kein Fehler und sichert nichts" "$(ofeld EMPTY 'orphan entries')" "0"
+
+# DIE ZAHL, um die es geht: was die Ausnahme kostet.
+BASEB=$(ofeld BASE 'written bytes')
+WITHB=$(ofeld WITH 'written bytes')
+ORPHB=$(ofeld WITH 'orphan bytes')
+if [ -n "$BASEB" ] && [ -n "$WITHB" ] && [ "$BASEB" -gt 0 ] 2>/dev/null; then
+    DIFF=$((WITHB - BASEB))
+    PCT=$(awk -v a="$DIFF" -v b="$BASEB" 'BEGIN{printf "%.1f", a*100/b}')
+    is "die Differenz ist genau das, was die verwaisten Oktette ausmachen" \
+       "$DIFF" "$ORPHB"
+    ok "PREIS DER AUSNAHME: $BASEB -> $WITHB Oktette, +$DIFF (+$PCT %)"
+    echo "        (ohne Verwaiste $BASEB, mit $WITHB, Aufschlag $DIFF Oktette = $PCT %)"
+else
+    bad "die Oktettzahlen des Verwaisten-Laufs fehlen"
+fi
+
+# GEGENPROBEN am Schnappschuss selbst.
+SNAP=$(sed -n '/^==SNAP==/,/^==END==/p' "$O")
+echo "$SNAP" | grep -qa "/store/$ORPH/start" \
+    && ok "der Schnappschuss nennt das VERWAISTE Paket" \
+    || bad "der Schnappschuss nennt das verwaiste Paket nicht"
+echo "$SNAP" | grep -qa "$REACH" \
+    && bad "das ERREICHBARE Paket steht im Schnappschuss und darf nicht" \
+    || ok "GEGENPROBE: das ERREICHBARE Paket steht NICHT im Schnappschuss"
+echo "$SNAP" | grep -qa "cache" \
+    && bad "cache steht im Schnappschuss und darf nie" \
+    || ok "GEGENPROBE: cache steht NICHT im Schnappschuss"
+echo "$SNAP" | grep -qa "/state/doc.txt" \
+    && ok "die Benutzerdaten stehen drin -- Regel 1" \
+    || bad "die Benutzerdaten fehlen im Schnappschuss"
+
+# LAUTE FEHLER, beide.
+sed -n '/^==BADSHAPE==/,/^==MISSING==/p' "$O" | grep -qa 'not a lower case hex store name' \
+    && ok "eine Zeile, die kein Speichername ist, ist ein LAUTER Fehler (kein Pfad-Ausbruch)" \
+    || bad "'../../etc/passwd' in der Liste wird nicht abgewiesen"
+sed -n '/^==MISSING==/,/^==SNAP==/p' "$O" | grep -qa 'orphan is not in the store' \
+    && ok "ein verwaister Eintrag, den es nicht gibt, ist ein LAUTER Fehler" \
+    || bad "ein fehlender verwaister Eintrag wird stillschweigend uebergangen"
+
+# ---- DER EIGENTLICHE NACHWEIS: ein Rechner OHNE den Baum ----------------
+#
+# Das zweite Abbild bekommt NUR den Sicherungsspeicher. Kein /tree, kein
+# /set, kein Paket -- die Oktette koennen nirgendwo anders herkommen als
+# aus PACK.
+for f in PACK INDEX S-b1; do
+    python3 tools/osum/mkfs.py cat "$TMPD/live-orph.img" "/sb/$f" > "$TMPD/sb-$f" 2>/dev/null \
+        || bad "der Wirt kann /sb/$f nicht aus dem Abbild lesen"
+done
+[ -s "$TMPD/sb-PACK" ] && ok "der Wirt holt PACK, INDEX und den Schnappschuss aus dem Abbild" \
+                       || bad "PACK ist leer"
+
+cat > "$TMPD/t_orphr.sh" <<EOS
+echo ==RESTORE==
+backup restore /sb b1 /out
+echo ==VERIFY==
+backup verify /sb b1
+echo ==RUN==
+/out/store/$ORPH/start
+echo ==END==
+EOS
+
+python3 tools/osum/mkfs.py build "$TMPD/dorphr.img" $BLOCKS \
+    /bin/ /t/ /sb/ /out/ /proc/ /dev/ \
+    /bin/sh="$TMPD/bin/sh.elf" /bin/cat="$TMPD/bin/cat.elf" \
+    /bin/echo="$TMPD/bin/echo.elf" /bin/backup="$TMPD/bin/backup.elf" \
+    /sb/PACK="$TMPD/sb-PACK" /sb/INDEX="$TMPD/sb-INDEX" /sb/S-b1="$TMPD/sb-S-b1" \
+    /t/orphr.sh="$TMPD/t_orphr.sh" > "$TMPD/mkfs-orphr.txt" 2>&1 \
+    && ok "der zweite Rechner hat NUR den Speicher -- keinen Baum, kein Paket" \
+    || { bad "mkfs.py baut das zweite Abbild nicht"; sed 's/^/        /' "$TMPD/mkfs-orphr.txt" | head -6; }
+
+rc=$(lauf orphr "$TMPD/dorphr.img" "osum vfs nokbd script=sh /t/orphr.sh;exit")
+is "der Wiederherstellungs-Lauf endet ordentlich" "$rc" "21"
+R="$TMPD/orphr.txt"
+sed -n '/^==VERIFY==/,/^==RUN==/p' "$R" | grep -qa '^corrupt: 0$' \
+    && ok "der Speicher des zweiten Rechners ist heil (corrupt: 0)" \
+    || bad "verify meldet Schaden im uebertragenen Speicher"
+sed -n '/^==RUN==/,/^==END==/p' "$R" | grep -qa 'hello' \
+    && ok "DAS WIEDERHERGESTELLTE PAKET LAEUFT -- also sind die Rechtebits mitgekommen" \
+    || { bad "das wiederhergestellte Paket laeuft nicht"; \
+         sed -n '/^==RUN==/,/^==END==/p' "$R" | sed 's/^/        /' | head -4; }
+
+python3 - "$TMPD/live-orphr.img" "$TMPD/orph-start" "$ORPH" > "$TMPD/orphcmp.txt" 2>&1 <<'PY2'
+import subprocess, sys
+img, orig, orph = sys.argv[1], sys.argv[2], sys.argv[3]
+r = subprocess.run(["python3", "tools/osum/mkfs.py", "cat", img,
+                    "/out/store/%s/start" % orph], capture_output=True)
+got = r.stdout if r.returncode == 0 else b""
+want = open(orig, "rb").read()
+print("original=%d wieder=%d gleich=%s" % (len(want), len(got), got == want))
+PY2
+cat "$TMPD/orphcmp.txt" | sed 's/^/        /'
+grep -qa 'gleich=True' "$TMPD/orphcmp.txt" \
+    && ok "das verwaiste Paket ist OKTETT FUER OKTETT wieder da, aus dem Abbild gelesen" \
+    || bad "das wiederhergestellte verwaiste Paket ist NICHT oktettgleich"
 
 # ============================================================= Schluss
 

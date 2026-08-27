@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """tools/tresor/kaputt.py -- flip ONE octet inside a file of an OFS image.
 
-This is the counter-check of `bak verify`. A verifier that only ever sees
+This is the counter-check of `backup verify`. A verifier that only ever sees
 healthy stores proves nothing at all; so the HOST reaches into the disk
 image, changes a single octet of the pack file, and the next run of
-`bak verify` on that store has to notice -- and `bak restore` has to hand
+`backup verify` on that store has to notice -- and `backup restore` has to hand
 back something that is no longer identical.
 
 The damage is done from OUTSIDE the kernel on purpose. That is what real
