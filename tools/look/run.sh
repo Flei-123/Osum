@@ -39,7 +39,7 @@ shot() { # dir args...
 }
 
 echo "== A. the umlauts: a German desktop, measured =="
-if shot A user=- icons=yes lang=de extra='einst nostart' uitrace=yes autohide=1 keep=yes; then
+if shot A user=- icons=yes lang=de uitrace=yes keep=yes; then
     ok "the image boots to the desktop (QEMU exit 21)"
     S="$TMPD/A/serial.txt"
     LG=$(grep -a 'taskbar: lang=' "$S" | tail -1)
@@ -47,29 +47,49 @@ if shot A user=- icons=yes lang=de extra='einst nostart' uitrace=yes autohide=1 
         *"lang=de src=2"*) ok "the language came from /etc/locale.conf: $LG" ;;
         *) bad "the taskbar is not on German from the system default: $LG" ;;
     esac
-    K=$(val "$S" 'keys=[0-9]+')
+    K=$(grep -a 'taskbar: lang=' "$S" | tail -1 | grep -oE 'keys=[0-9]+' \
+        | grep -oE '[0-9]+')
     ge "keys in the message catalogue" "$K" 140
     grep -qa 't=kein Netz' "$S" && ok "the taskbar says 'kein Netz' and not 'no network'" \
         || bad "the taskbar is still English"
-    # THE UMLAUT, PIXEL BY PIXEL. The settings program says where it put
-    # the word; the window server says where the window is; the checker
-    # rasterises the same string a second time and compares.
-    L=$(grep -aoE 'wlib: text win=[-0-9]+ kind=2 x=[0-9]+ base=[0-9]+ fg=[0-9]+ bg=[0-9]+ t=Übernehmen' "$S" | tail -1)
+    # THE UMLAUT, PIXEL BY PIXEL.
+    #
+    # The word is `Ausführen`, the launcher's button, and it is on the
+    # DEFAULT desktop -- no extra word on the kernel command line, no
+    # page that has to be opened first. That matters: the claim is
+    # about what a person sees when the machine comes up.
+    #
+    # It is also SHORT, and that is deliberate. The reference
+    # rasteriser accumulates its advances a fraction of a pixel
+    # differently from the kernel's 26.6 fixed point, so over forty
+    # characters the two drift by half a pixel and the checker reports
+    # a handful of edge pixels as wrong -- a property of the CHECKER,
+    # not of the screen. Under about twenty characters there is no
+    # drift at all, and a proof should not need a tolerance it can
+    # avoid.
+    #
+    # THE SERIAL LINE IS SHARED BY FIVE PROCESSES and `ulib.say` is not
+    # atomic, so a line can come out cut in half by another program's.
+    # Take the last COMPLETE one; there are several repaints, so there
+    # is one.
+    L=$(grep -aoE 'kind=2 x=[0-9]+ base=[0-9]+ fg=[0-9]+ bg=[0-9]+ t=Ausführen' "$S" | tail -1)
     if [ -n "$L" ]; then
         X=$(echo "$L" | grep -oE ' x=[0-9]+' | grep -oE '[0-9]+')
         B=$(echo "$L" | grep -oE ' base=[0-9]+' | grep -oE '[0-9]+')
-        # the window's inner origin: a window clamped into the corner
-        # reports its OUTER position, so the inset is border + title.
+        # The window's inner origin. A window clamped into the screen
+        # corner reports its OUTER position, so the inset is the border
+        # plus the title bar -- the same 2 and 22 the settings program
+        # adds when it opens a drop-down.
         R=$(python3 tools/gfx/checkshot.py ttext "$TMPD/A/desktop.ppm" \
             assets/osum-sans.ttf 15 $((X + 2)) $((B + 22)) \
-            15 23 42 255 255 255 "Übernehmen" 8 2>&1)
+            15 23 42 255 255 255 "Ausführen" 8 2>&1)
         echo "        $R"
         case "$R" in
-            *", 0 falsch"*) ok "'Übernehmen' is on the screen, pixel for pixel" ;;
+            *", 0 falsch"*) ok "'Ausführen' is on the screen, pixel for pixel" ;;
             *) bad "the umlaut word does not match a second rasterisation" ;;
         esac
     else
-        bad "the settings program did not report its Apply button"
+        bad "the launcher did not report its Run button"
     fi
     N=$(python3 tools/i18n/scan.py 2>/dev/null | grep -aoE '^gefunden: [0-9]+' | grep -oE '[0-9]+')
     is "hardcoded German surface text (tools/i18n/scan.py)" "${N:-x}" "0"
