@@ -74,35 +74,23 @@ import vfsops
 import part
 import devfs
 import ftype
+// RUNDE K17: der USB-Baum -- Regler, Kern, Klassen.
+import xhci
+import usb
 
 // Indices in the table out of isr.s.
 const V_DF_STACK: u64 = 52
 const V_IRQ_STACK: u64 = 53
 
 // The bits of the command line, see `mode_of` at the bottom.
-const M_NOKBD: u64 = 256
-const M_NORING3: u64 = 512
-const M_NOTIMER: u64 = 1024
-const M_R3FAULT: u64 = 2048
-const M_NOSCHED: u64 = 4096
-const M_NOPREEMPT: u64 = 8192
-const M_NOPROC: u64 = 16384
-const M_NOFS: u64 = 32768
-const M_ATA: u64 = 65536
 // Round K1. The two of them live in `kstate.fi`, because `sys.fi` and
 // `elf.fi` read them too; the names are repeated here so that this file
 // reads like the rest of the list.
-const M_OSUM: u64 = 131072 // mount the drive and start /bin/sh off it
-const M_NOBSS: u64 = 262144 // and do NOT zero what the file leaves open
 // Die Capability-Runde: Handles statt Umgebungsautoritaet
 // (`kernel/cap.fi`, portiert aus OrientOS). Ein eigenes Wort auf der
 // Kommandozeile, damit KEIN bestehender Testlauf sich aendert -- die
 // Runden 59 bis K6 messen weiter genau das, was sie gemessen haben.
-const M_CAPS: u64 = 524288
 // ROUND K9, dieselben Werte wie in `kstate.fi`.
-const M_UNIX: u64 = 1048576
-const M_NOSIG: u64 = 2097152
-const M_FIXRAND: u64 = 4194304
 
 // The programs in uprog.fi.
 const P_HELLO: u64 = 1
@@ -192,9 +180,7 @@ fn kernel_main(mbi: u64, vectors: u64, state: u64, kernel_end: u64,
     kstate.set(state, kstate.KERNEL_END, kernel_end)
 
     let cmd: u64 = mem.cmdline(mbi)
-    kstate.set(state, kstate.MODE, mode_of(cmd))
-    kstate.set(state, kstate.OFS3_OFF + kstate.OFS3_MODE,
-        ofs3_mode_of(cmd))
+    mode_of(state, cmd)
     // ROUND K2: read here and not down in `hw.stage`, and the reason is
     // worth knowing -- the command line of the boot loader lies ABOVE
     // `kernel_end`, and the frame allocator hands exactly those frames
@@ -218,7 +204,7 @@ fn kernel_main(mbi: u64, vectors: u64, state: u64, kernel_end: u64,
     // `getrandom` ruehrt jeder Zeitgeber- und Tastaturschlag ein.
     time.init(state)
     rand.init(state)
-    if (kstate.get(state, kstate.MODE) & M_FIXRAND) != 0 {
+    if kstate.mode_on(state, kstate.M_FIXRAND) {
         rand.fixed_set(state, 1)
     }
     // ROUND K9. DIE TERMINALSCHICHT, und sie steht vor `file.init`:
@@ -324,7 +310,7 @@ fn kernel_main(mbi: u64, vectors: u64, state: u64, kernel_end: u64,
 
     // 4. a deliberate fault, when the command line asks for one. Comes
     //    back only if the IDT is broken -- `trap.report` stops.
-    provoke(state, kstate.get(state, kstate.MODE))
+    provoke(state)
 
     // 5. interrupts on, and the proof that they arrive.
     ticks(state)
@@ -385,6 +371,16 @@ fn kernel_main(mbi: u64, vectors: u64, state: u64, kernel_end: u64,
     //     kernel it saw before.
     netsvc.stage(state)
 
+    // 7e-ter. RUNDE K17: DER USB-BAUM. Hier und nicht spaeter, aus drei
+    //     Gruenden: der Bus muss gelesen sein (`hw.stage`, Runde K2),
+    //     die Meldungen muessen ankommen koennen (der APIC steht seit
+    //     derselben Runde), und alles darunter braucht ihn -- die Shell,
+    //     die gleich in `osum` startet, liest von einer Tastatur, und
+    //     der Stick, den sie einhaengen soll, muss vorher ein
+    //     Blockgeraet sein. Ohne das Wort `usb` ist das hier EINE
+    //     gedruckte Zeile und sonst nichts.
+    usb_stage(state)
+
     // 7f. round K1: a system on that disk. Mount what the host built,
     //     load /bin/sh out of it, and let it run until it is done.
     osum(state)
@@ -436,6 +432,7 @@ fn kernel_main(mbi: u64, vectors: u64, state: u64, kernel_end: u64,
     // hat. Haette `mem.scan` seinen Bereich nicht reserviert, stuende
     // hier jetzt eine andere Summe.
     bootmod.recheck(state)
+    usb.report(state)
 
     serial.puts((&s_done[0]) as u64)
     serial.nl()
@@ -875,7 +872,7 @@ fn clock(state: u64) {
     // Laufes verglichen wird (`tools/osum/run.sh`, Abschnitt 11;
     // `tools/kernel/run.sh`, Abschnitt 17). `tools/unix/run.sh` fragt
     // ausdruecklich danach, und nur dort werden sie gedruckt.
-    if (kstate.get(state, kstate.MODE) & M_UNIX) == 0 {
+    if !kstate.mode_on(state, kstate.M_UNIX) {
         return
     }
     if k == 0 {
@@ -892,7 +889,7 @@ fn clock(state: u64) {
         serial.puts((&s_ns[0]) as u64)
         serial.nl()
     }
-    if (kstate.get(state, kstate.MODE) & M_FIXRAND) != 0 {
+    if kstate.mode_on(state, kstate.M_FIXRAND) {
         serial.puts((&s_fix[0]) as u64)
         serial.nl()
     }
@@ -924,7 +921,7 @@ fn at(vectors: u64, i: u64) -> u64 {
 // because taking sixteen million frames on a 64 GiB machine measures
 // patience and not the allocator.
 fn mem_stress_report(state: u64) {
-    if (kstate.get(state, kstate.MODE) & kstate.M_MEMSTRESS) == 0 {
+    if !kstate.mode_on(state, kstate.M_MEMSTRESS) {
         return
     }
     var s_p: [u8; 12] = "memstress: \0"
@@ -1066,7 +1063,7 @@ fn ticks(state: u64) {
     // count exactly zero ticks. Otherwise the number below would prove
     // nothing -- a counter that somebody increments elsewhere counts up
     // as well.
-    if (kstate.get(state, kstate.MODE) & 1024) != 0 {
+    if kstate.mode_on(state, kstate.M_NOTIMER) {
         // ROUND K2: whichever clock is running gets silenced -- after
         // this round that is not necessarily the PIT.
         hw.timer_off(state)
@@ -1130,13 +1127,12 @@ fn scheduler(state: u64) {
     var s_done: [u8; 13] = "sched: done\0\0"
     var s_sp: [u8; 2] = " \0"
 
-    let mode: u64 = kstate.get(state, kstate.MODE)
-    if (mode & M_NOSCHED) != 0 {
+    if kstate.mode_on(state, kstate.M_NOSCHED) {
         serial.puts((&s_skip[0]) as u64)
         serial.nl()
         return
     }
-    if (mode & M_NOPREEMPT) != 0 {
+    if kstate.mode_on(state, kstate.M_NOPREEMPT) {
         kstate.set(state, kstate.PREEMPT, 0)
     }
     serial.puts((&s_pre[0]) as u64)
@@ -1248,7 +1244,7 @@ fn processes(state: u64) {
     var s_done: [u8; 12] = "proc: done\0\0"
     var s_fork: [u8; 24] = "proc: fork parent kept \0"
 
-    if (kstate.get(state, kstate.MODE) & M_NOPROC) != 0 {
+    if kstate.mode_on(state, kstate.M_NOPROC) {
         serial.puts((&s_skip[0]) as u64)
         serial.nl()
         return
@@ -1391,7 +1387,7 @@ fn capabilities(state: u64) {
     var s_exit: [u8; 18] = "cap: ring 3 exit=\0"
     var s_done: [u8; 10] = "cap: done\0"
 
-    if (kstate.get(state, kstate.MODE) & M_CAPS) == 0 {
+    if !kstate.mode_on(state, kstate.M_CAPS) {
         serial.puts((&s_skip[0]) as u64)
         serial.nl()
         return
@@ -1472,7 +1468,7 @@ fn users(state: u64) {
     var s_exit: [u8; 18] = "k13: ring 3 exit=\0"
     var s_z: [u8; 16] = "k13: zombies=\0\0\0"
     var s_a: [u8; 8] = " after=\0"
-    if (kstate.get(state, kstate.MODE) & kstate.M_K13) == 0 {
+    if !kstate.mode_on(state, kstate.M_K13) {
         serial.puts((&s_skip[0]) as u64)
         serial.nl()
         return
@@ -1484,7 +1480,7 @@ fn users(state: u64) {
     serial.puts((&s_exit[0]) as u64)
     serial.dec(e)
     serial.nl()
-    if (kstate.get(state, kstate.MODE) & kstate.M_ZOMBIE) != 0 {
+    if kstate.mode_on(state, kstate.M_ZOMBIE) {
         let before: u64 = sched.zombies(state, sched.K_USER)
         let z: u64 = proc.create(state, P_ZOMBIE, 0, 2)
         wait_for(state, z)
@@ -1554,7 +1550,7 @@ fn filesystem(state: u64) {
     var p_root: [u8; 2] = "/\0"
     var text: [u8; 15] = "firn round 62\n\0"
 
-    if (kstate.get(state, kstate.MODE) & M_NOFS) != 0 {
+    if kstate.mode_on(state, kstate.M_NOFS) {
         serial.puts((&s_skip[0]) as u64)
         serial.nl()
         return
@@ -1782,7 +1778,7 @@ fn console_load(state: u64, cmd: u64) -> u64 {
 // Oberflaeche. Ohne diese Abfrage hat die Shell im Terminalfenster
 // nichts mehr zu lesen, und im Bild steht eine leere Eingabezeile.
 fn wm_owns_shell(state: u64) -> bool {
-    return (kstate.get(state, kstate.MODE) & kstate.M_WMSHELL) != 0
+    return kstate.mode_on(state, kstate.M_WMSHELL)
 }
 
 fn shell(state: u64) {
@@ -1794,7 +1790,7 @@ fn shell(state: u64) {
     var s_out: [u8; 15] = "sh: commands=\0\0"
     // ROUND K1: with `osum` the shell comes off the disk, and the one
     // compiled into the kernel would eat the script before it.
-    if (kstate.get(state, kstate.MODE) & M_OSUM) != 0 {
+    if kstate.mode_on(state, kstate.M_OSUM) {
         return
     }
     if kstate.get(state, kstate.CONSOLE_LEN) == 0 {
@@ -1860,16 +1856,18 @@ fn k14_setup(state: u64) {
     var p_proc: [u8; 6] = "/proc "
     var p_dev: [u8; 5] = "/dev "
     var p_mnt: [u8; 5] = "/mnt "
-    let mode: u64 = kstate.get(state, kstate.MODE)
-    kstate.set(state, kstate.K14_MODE, mode)
-    if (mode & kstate.M_VFS) == 0 {
+    // RUNDE K17: K14_MODE ist die Kopie DES WORTES, in dem die Schalter
+    // dieser Runde liegen -- seit dem Modusvektor ist das Wort 3 und
+    // nicht mehr Wort 0.
+    kstate.set(state, kstate.K14_MODE, kstate.mode_word(state, 3))
+    if !kstate.mode_on(state, kstate.M_VFS) {
         return
     }
     vfs.init(state)
     let root_ok: bool = vfs.mount_root(state)
     serial.puts((&s_root[0]) as u64)
     serial.dec(yes(root_ok))
-    if (mode & kstate.M_NOVFS) != 0 {
+    if kstate.mode_on(state, kstate.M_NOVFS) {
         // DIE GEGENPROBE. Die Wurzel steht, alles andere nicht --
         // /proc, /dev und FAT32 gibt es in diesem Lauf nicht, und
         // jede Zusage dieser Runde ausser der ueber OFS MUSS fallen.
@@ -1880,11 +1878,11 @@ fn k14_setup(state: u64) {
     }
     var proc_m: u64 = vfs.MAX_MNT
     var dev_m: u64 = vfs.MAX_MNT
-    if (mode & kstate.M_NOPROCFS) == 0 {
+    if !kstate.mode_on(state, kstate.M_NOPROCFS) {
         proc_m = vfs.mount_at(state, vfsops.FS_PROC, 0, 0, 0,
             (&p_proc[0]) as u64, 0)
     }
-    if (mode & kstate.M_NODEVFS) == 0 {
+    if !kstate.mode_on(state, kstate.M_NODEVFS) {
         dev_m = vfs.mount_at(state, vfsops.FS_DEV, 0, 0, 0,
             (&p_dev[0]) as u64, 0)
     }
@@ -1893,7 +1891,7 @@ fn k14_setup(state: u64) {
     serial.puts((&s_dev[0]) as u64)
     serial.dec(yes(dev_m < vfs.MAX_MNT))
     serial.nl()
-    if (mode & kstate.M_NOFAT) != 0 {
+    if kstate.mode_on(state, kstate.M_NOFAT) {
         return
     }
     // Die zweite Platte. `probe_ata1` liest ihren ersten Block; ein
@@ -1908,7 +1906,7 @@ fn k14_setup(state: u64) {
     var first: u64 = 0
     var count: u64 = blk.blocks_on(state, blk.DEV_ATA1)
     var nparts: u64 = 0
-    if (mode & kstate.M_NOPART) == 0 {
+    if !kstate.mode_on(state, kstate.M_NOPART) {
         nparts = part.scan(state, blk.DEV_ATA1)
         if nparts != 0 {
             // Die erste Partition, die ein FAT32 sein koennte. Auf
@@ -1932,7 +1930,7 @@ fn k14_setup(state: u64) {
     serial.dec(nparts)
     serial.nl()
     var fflags: u64 = 0
-    if (mode & kstate.M_FATRO) != 0 {
+    if kstate.mode_on(state, kstate.M_FATRO) {
         fflags = mnt.F_RDONLY
     }
     let fat_m: u64 = vfs.mount_at(state, vfsops.FS_FAT, blk.DEV_ATA1,
@@ -1955,7 +1953,7 @@ fn say_k14(state: u64) {
     var s_c: [u8; 14] = " crossings=   "
     var s_o: [u8; 8] = " ops=   "
     var s_i: [u8; 12] = " indirect=  "
-    if (kstate.get(state, kstate.MODE) & kstate.M_VFS) == 0 {
+    if !kstate.mode_on(state, kstate.M_VFS) {
         return
     }
     serial.puts((&s[0]) as u64)
@@ -2035,6 +2033,138 @@ fn root_from_part(state: u64) -> bool {
     return true
 }
 
+// RUNDE K17. Die Naht ist absichtlich duenn: was USB ist, steht in
+// `usb.fi` und `xhci.fi`, und `kmain.fi` bekommt vier Zeilen statt
+// vierzig. Dieselbe Ueberlegung wie bei `hw.stage` in Runde K2 -- an
+// dieser Datei arbeiten mehrere Runden gleichzeitig, und eine Naht laesst
+// sich verschmelzen, ein ueber tausend Zeilen verteilter Unterschied
+// nicht.
+fn usb_stage(state: u64) {
+    usb.stage(state)
+    if !usb.ready(state) {
+        return
+    }
+    // Ein Zeigegeraet braucht einen Anschlag, auch wenn es nicht am 8042
+    // haengt. Steht schon ein PS/2-Zeiger, bleibt dessen Einstellung.
+    if usb.have_mouse(state) {
+        ps2m.adopt(state, 1024, 768)
+    }
+    usb_hold(state)
+    // DIE GEGENPROBE ZUM ABZIEHEN. Sie steht hier und nicht in der
+    // Bibliothek, weil sie eine Anforderung der Kommandozeile ist und
+    // kein Zustand des Geraets.
+    if kstate.mode_on(state, kstate.M_UNPLUG) {
+        usb_unplug(state)
+    }
+}
+
+// STILLHALTEN, DAMIT VON AUSSEN JEMAND TIPPEN KANN. Dasselbe, was
+// `wmhold` seit Runde K10 fuer das Bildschirmfoto tut: der Kern kommt
+// zur Ruhe, meldet das auf der seriellen Leitung, und erst danach
+// schickt der Testlaeufer seine Maus- und Tastenbefehle in den
+// QEMU-Monitor. Ohne diese Marke faellt der erste Klick in einen Kern,
+// der noch aufzaehlt.
+//
+// Mit `usbpoll` wird waehrenddessen SELBST nachgesehen statt auf die
+// Meldung zu warten -- die Gegenprobe zu `usbnoirq`.
+fn usb_hold(state: u64) {
+    var s_h: [u8; 10] = "k17: hold\0"
+    var s_r: [u8; 10] = "k17: free\0"
+    if !kstate.mode_on(state, kstate.M_USBHOLD) {
+        return
+    }
+    let pollen: bool = kstate.mode_on(state, kstate.M_USBPOLL)
+    serial.puts((&s_h[0]) as u64)
+    serial.nl()
+    var i: u64 = 0
+    while i < 900 {
+        if pollen {
+            usb.poll(state)
+        }
+        sched.sleep_ticks(state, 1)
+        i = i + 1
+    }
+    usb.report(state)
+    serial.puts((&s_r[0]) as u64)
+    serial.nl()
+}
+
+// Was nach dem Abziehen noch geht. Drei Zeilen, und jede einzelne ist
+// eine Zusage: der Kern laeuft weiter, das Blockgeraet meldet sich als
+// nicht da, und ein offener Deskriptor darauf gibt ENODEV (das prueft
+// `/bin/k17` aus Ring 3, nicht der Kern).
+fn usb_unplug(state: u64) {
+    var s_a: [u8; 22] = "k17: before unplug=\0\0\0"
+    var s_b: [u8; 21] = "k17: after unplug=\0\0\0"
+    var s_p: [u8; 11] = "  present=\0"
+    var s_d: [u8; 11] = "  devices=\0"
+    serial.puts((&s_a[0]) as u64)
+    serial.dec(yes(blk.present_on(state, blk.DEV_USB)))
+    serial.puts((&s_d[0]) as u64)
+    serial.dec(usb.count(state))
+    serial.nl()
+    usb.unplug_now(state)
+    serial.puts((&s_b[0]) as u64)
+    serial.dec(yes(blk.present_on(state, blk.DEV_USB)))
+    serial.puts((&s_d[0]) as u64)
+    serial.dec(usb.count(state))
+    serial.puts((&s_p[0]) as u64)
+    serial.dec(usb.unplugs(state))
+    serial.nl()
+}
+
+// RUNDE K17: EIN STICK, EINGEHAENGT WIE JEDE ANDERE PLATTE.
+//
+// Hier steht keine einzige Zeile ueber USB. `part.scan` bekommt eine
+// Geraetenummer, `vfs.mount_at` bekommt eine Geraetenummer, und `fat.fi`
+// liest Bloecke ueber `blk.read_on`. Dass diese Bloecke ueber vier
+// Endpunkte, einen Befehlsblock und eine Quittung gekommen sind, weiss
+// keiner davon -- und genau das IST die Zusage der Schnittstelle aus
+// Runde 62. Sie wird hier zum dritten Mal eingeloest (nach NVMe in K2
+// und dem ATA-Sklaven in K14).
+fn usb_mount(state: u64) {
+    var s_h: [u8; 12] = "k17: stick \0"
+    var s_p: [u8; 8] = "parts=\0\0"
+    var s_f: [u8; 9] = "  first=\0"
+    var s_n: [u8; 10] = "  blocks=\0"
+    var s_m: [u8; 9] = "  mount=\0"
+    var p_usb: [u8; 5] = "/usb\0"
+    if !kstate.mode_on(state, kstate.M_USBSTICK) {
+        return
+    }
+    if !usb.msc_ready(state) {
+        return
+    }
+    if !vfs.ready(state) {
+        return
+    }
+    var first: u64 = 0
+    var anzahl: u64 = blk.blocks_on(state, blk.DEV_USB)
+    let nparts: u64 = part.scan(state, blk.DEV_USB)
+    if nparts != 0 {
+        var pick: u64 = part.find_kind(state, blk.DEV_USB, part.T_FAT32)
+        if pick >= part.MAX_PARTS {
+            pick = part.find_kind(state, blk.DEV_USB, part.T_BASIC)
+        }
+        if pick < part.MAX_PARTS {
+            first = part.start(state, pick)
+            anzahl = part.blocks(state, pick)
+        }
+    }
+    let m: u64 = vfs.mount_at(state, vfsops.FS_FAT, blk.DEV_USB, first,
+        anzahl, (&p_usb[0]) as u64, 0)
+    serial.puts((&s_h[0]) as u64)
+    serial.puts((&s_p[0]) as u64)
+    serial.dec(nparts)
+    serial.puts((&s_f[0]) as u64)
+    serial.dec(first)
+    serial.puts((&s_n[0]) as u64)
+    serial.dec(anzahl)
+    serial.puts((&s_m[0]) as u64)
+    serial.dec(yes(m < vfs.MAX_MNT))
+    serial.nl()
+}
+
 fn osum(state: u64) {
     if wm_owns_shell(state) {
         return
@@ -2056,7 +2186,7 @@ fn osum(state: u64) {
     var s_blk: [u8; 10] = "  blocks=\0"
     var s_sect: [u8; 20] = "osum: ata0 sectors=\0"
 
-    if (kstate.get(state, kstate.MODE) & M_OSUM) == 0 {
+    if !kstate.mode_on(state, kstate.M_OSUM) {
         serial.puts((&s_off[0]) as u64)
         serial.nl()
         return
@@ -2117,6 +2247,7 @@ fn osum(state: u64) {
     // Shell, die /proc erst nach ihrem Start bekaeme, haette es zum
     // Zeitpunkt ihres eigenen `open` noch nicht.
     k14_setup(state)
+    usb_mount(state)
     list_dir(state, (&p_bin[0]) as u64, (&s_bin[0]) as u64)
 
     // ================================================== RUNDE K13
@@ -2144,7 +2275,7 @@ fn osum(state: u64) {
     // heisst. Seit dieser Runde steht dort `init`, wenn init startet.
     let abuf: u64 = state + kstate.EARG_OFF
     var use_init: bool = false
-    if (kstate.get(state, kstate.MODE) & kstate.M_INITSH) == 0 {
+    if !kstate.mode_on(state, kstate.M_INITSH) {
         if fs.path(state, (&p_init[0]) as u64) != 0 {
             use_init = true
         }
@@ -2240,6 +2371,7 @@ fn osum(state: u64) {
     say_k14(state)
     say_posix(state)
     perm.report(state)
+    usb.report(state)
 }
 
 // ROUND K4: what the system call layer did in this run. Six counters, one
@@ -2352,7 +2484,8 @@ fn ata_disk(state: u64) {
     // ROUND K1: `ata_disk` FORMATS the drive. With `osum` the drive
     // carries the file system the host built, and formatting it would
     // throw the whole userland away before the first program runs.
-    if (kstate.get(state, kstate.MODE) & (M_ATA | M_OSUM)) != M_ATA {
+    if !(kstate.mode_on(state, kstate.M_ATA)
+         && !kstate.mode_on(state, kstate.M_OSUM)) {
         serial.puts((&s_off[0]) as u64)
         serial.nl()
         return
@@ -2390,14 +2523,14 @@ fn keyboard(state: u64) {
     var s_ready: [u8; 12] = "kbd: ready\0\0"
     var s_got: [u8; 6] = "kbd: \0"
     var s_none: [u8; 7] = "(none)\0"
-    let mode: u64 = kstate.get(state, kstate.MODE)
-    if (mode & 256) != 0 || (mode & 1024) != 0 {
+    if kstate.mode_on(state, kstate.M_NOKBD)
+       || kstate.mode_on(state, kstate.M_NOTIMER) {
         return
     }
     // ROUND K1: with `osum` the keys belong to the shell, not to this
     // demonstration -- and waiting 2.5 seconds for four of them here
     // would only delay it.
-    if (mode & M_OSUM) != 0 {
+    if kstate.mode_on(state, kstate.M_OSUM) {
         return
     }
     serial.puts((&s_ready[0]) as u64)
@@ -2451,7 +2584,7 @@ fn keyboard(state: u64) {
 // Celsius.
 fn power_stage(state: u64) {
     var s_off: [u8; 14] = "pwr: skipped\0\0"
-    if (kstate.get(state, kstate.MODE) & kstate.M_NOPWR) != 0 {
+    if kstate.mode_on(state, kstate.M_NOPWR) {
         serial.puts((&s_off[0]) as u64)
         serial.nl()
         return
@@ -2467,7 +2600,7 @@ fn power_stage(state: u64) {
     }
     // `pwrhot` taeuscht eine Temperatur ueber der Schwelle vor. NUR zum
     // Fehlersuchen -- die Abnahme benutzt dafuer eine echte SSDT.
-    if (kstate.get(state, kstate.MODE) & kstate.M_PWRHOT) != 0 {
+    if kstate.mode_on(state, kstate.M_PWRHOT) {
         kstate.set(state, kstate.K18_OFF + pwr.PW_TZRAW, 3632) // 90 Grad
     }
     pwr.set_profile(state, pwr.PROF_BALANCED)
@@ -2509,7 +2642,7 @@ fn power_screen(state: u64) {
     // Konsole lag, machte daraus "14757 Bildpunkte falsch". Eine Runde
     // darf das Bild einer anderen nicht bemalen, nur weil sie
     // uebersetzt wurde.
-    if (kstate.get(state, kstate.MODE) & kstate.M_PWR) == 0 {
+    if !kstate.mode_on(state, kstate.M_PWR) {
         return
     }
     if !fb.ready(state) {
@@ -2531,7 +2664,7 @@ fn power_screen(state: u64) {
     fb.flush(state)
     phex((&n_a[0]) as u64, fb.get_pixel(state, PX_X, PX_Y) & 0xFFFFFF)
 
-    if (kstate.get(state, kstate.MODE) & kstate.M_PWRDIM) != 0 {
+    if kstate.mode_on(state, kstate.M_PWRDIM) {
         pwr.set_bright(state, 50)
         phex((&n_b[0]) as u64, fb.get_pixel(state, PX_X, PX_Y) & 0xFFFFFF)
         // Und wieder hoch. 200*50/100*100/50 ist wieder 200 -- die Farbe
@@ -2542,7 +2675,7 @@ fn power_screen(state: u64) {
         phex((&n_c[0]) as u64, fb.get_pixel(state, PX_X, PX_Y) & 0xFFFFFF)
         pwr.set_bright(state, 50)
     }
-    if (kstate.get(state, kstate.MODE) & kstate.M_PWRBLANK) != 0 {
+    if kstate.mode_on(state, kstate.M_PWRBLANK) {
         pwr.blank(state)
         phex((&n_d[0]) as u64, fb.get_pixel(state, PX_X, PX_Y) & 0xFFFFFF)
         pnum((&n_e[0]) as u64, pwr.value(state, pwr.PW_BLANKS))
@@ -2690,7 +2823,7 @@ fn power_test(state: u64) {
     var n_mB: [u8; 12] = "mwaits_idle\0"
     var n_hB: [u8; 10] = "hlts_idle\0"
     var n_iB: [u8; 14] = "idleruns_idle\0"
-    if (kstate.get(state, kstate.MODE) & kstate.M_PWR) == 0 {
+    if !kstate.mode_on(state, kstate.M_PWR) {
         serial.puts((&s_skip[0]) as u64)
         serial.nl()
         return
@@ -2737,7 +2870,7 @@ fn kpair(name: u64, v: u64) {
 fn ring3(state: u64) {
     var s_off: [u8; 20] = "ring3: skipped\0\0\0\0\0\0"
     var s_bad: [u8; 15] = "ring3: FAILED\0\0"
-    if has_word(kstate.get(state, kstate.MODE), 4) {
+    if kstate.mode_on(state, kstate.M_NORING3) {
         serial.puts((&s_off[0]) as u64)
         serial.nl()
         return
@@ -2753,9 +2886,13 @@ fn ring3(state: u64) {
 // The kernel provokes the fault itself, so that the report can be
 // checked. Each one of them ends in `trap.report` -- and there in
 // `power.shutdown`.
-fn provoke(state: u64, mode: u64) {
+fn provoke(state: u64) {
     var s_go: [u8; 22] = "trap: provoking kind \0"
-    let kind: u64 = mode & 0xFF
+    // DIE TRAP-ART IST EIN FELD, KEIN SCHALTER: Wort 0, Bits 0..2,
+    // Werte 1..4. Bis Runde K17 stand hier `& 0xFF`, und damit
+    // gehoerten die Bits 3..7 faktisch niemandem -- ein Schalter
+    // dort haette einen Prozessorfehler ausgeloest.
+    let kind: u64 = kstate.mode_word(state, 0) & 0x7
     if kind == 0 {
         return
     }
@@ -2794,29 +2931,7 @@ fn provoke(state: u64, mode: u64) {
 // --------------------------------------------------------- command line
 
 // Bits 0..7 = kind of fault, bit 8 = no keyboard, bit 9 = no ring 3.
-// RUNDE OFS3: die vier Woerter dieser Runde, als eigenes Wort.
-fn ofs3_mode_of(cmd: u64) -> u64 {
-    var o3w: [u8; 8] = "ofs3run\0"
-    var o2fw: [u8; 8] = "ofs3fmt\0"
-    var natw: [u8; 8] = "noatime\0"
-    var nlkw: [u8; 8] = "nolinks\0"
-    var o3: u64 = 0
-    if find(cmd, (&o3w[0]) as u64, 7) != 0 {
-        o3 = o3 | kstate.O_OFS3
-    }
-    if find(cmd, (&o2fw[0]) as u64, 7) != 0 {
-        o3 = o3 | kstate.O_OFS3FMT
-    }
-    if find(cmd, (&natw[0]) as u64, 7) != 0 {
-        o3 = o3 | kstate.O_NOATIME
-    }
-    if find(cmd, (&nlkw[0]) as u64, 7) != 0 {
-        o3 = o3 | kstate.O_NOLINKS
-    }
-    return o3
-}
-
-fn mode_of(cmd: u64) -> u64 {
+fn mode_of(state: u64, cmd: u64) {
     var s_trap: [u8; 6] = "trap=\0"
     var nokbd: [u8; 6] = "nokbd\0"
     var noring: [u8; 8] = "noring3\0"
@@ -2829,64 +2944,64 @@ fn mode_of(cmd: u64) -> u64 {
     var ata: [u8; 4] = "ata\0"
     var script: [u8; 8] = "script=\0"
     if cmd == 0 {
-        return 0
+        return
     }
-    var mode: u64 = 0
     let at_trap: u64 = find(cmd, (&s_trap[0]) as u64, 5)
     if at_trap != 0 {
         let a: u64 = kstate.get8(at_trap + 5)
         let b: u64 = kstate.get8(at_trap + 6)
+        // Bits 0..2 von Wort 0 sind ein FELD (die Art), kein Schalter.
         if a == 100 && b == 101 {
-            mode = 1 // de
+            kstate.set(state, kstate.MODE, 1) // de
         }
         if a == 112 && b == 102 {
-            mode = 2 // pf
+            kstate.set(state, kstate.MODE, 2) // pf
         }
         if a == 103 && b == 112 {
-            mode = 3 // gp
+            kstate.set(state, kstate.MODE, 3) // gp
         }
         if a == 100 && b == 102 {
-            mode = 4 // df
+            kstate.set(state, kstate.MODE, 4) // df
         }
     }
     var osumw: [u8; 5] = "osum\0"
     var nobss: [u8; 6] = "nobss\0"
     if find(cmd, (&osumw[0]) as u64, 4) != 0 {
-        mode = mode | M_OSUM
+        kstate.mode_add(state, kstate.M_OSUM)
     }
     if find(cmd, (&nobss[0]) as u64, 5) != 0 {
-        mode = mode | M_NOBSS
+        kstate.mode_add(state, kstate.M_NOBSS)
     }
     if find(cmd, (&nokbd[0]) as u64, 5) != 0 {
-        mode = mode | 256
+        kstate.mode_add(state, kstate.M_NOKBD)
     }
     if find(cmd, (&noring[0]) as u64, 7) != 0 {
-        mode = mode | 512
+        kstate.mode_add(state, kstate.M_NORING3)
     }
     if find(cmd, (&notimer[0]) as u64, 7) != 0 {
-        mode = mode | 1024
+        kstate.mode_add(state, kstate.M_NOTIMER)
     }
     if find(cmd, (&r3fault[0]) as u64, 10) != 0 {
-        mode = mode | M_R3FAULT
+        kstate.mode_add(state, kstate.M_R3FAULT)
     }
     if find(cmd, (&nosched[0]) as u64, 7) != 0 {
-        mode = mode | M_NOSCHED
+        kstate.mode_add(state, kstate.M_NOSCHED)
     }
     if find(cmd, (&nopre[0]) as u64, 9) != 0 {
-        mode = mode | M_NOPREEMPT
+        kstate.mode_add(state, kstate.M_NOPREEMPT)
     }
     if find(cmd, (&noproc[0]) as u64, 6) != 0 {
-        mode = mode | M_NOPROC
+        kstate.mode_add(state, kstate.M_NOPROC)
     }
     if find(cmd, (&nofs[0]) as u64, 4) != 0 {
-        mode = mode | M_NOFS
+        kstate.mode_add(state, kstate.M_NOFS)
     }
     if find(cmd, (&ata[0]) as u64, 3) != 0 {
-        mode = mode | M_ATA
+        kstate.mode_add(state, kstate.M_ATA)
     }
     var capsw: [u8; 5] = "caps\0"
     if find(cmd, (&capsw[0]) as u64, 4) != 0 {
-        mode = mode | M_CAPS
+        kstate.mode_add(state, kstate.M_CAPS)
     }
     // ROUND K9. `unix` schaltet den Selbsttest dieser Runde ein, `nosig`
     // und `fixedrand` sind die beiden GEGENPROBEN dazu -- ohne sie
@@ -2922,78 +3037,93 @@ fn mode_of(cmd: u64) -> u64 {
     var v2rw: [u8; 9] = "ofsv2raw\0"
     var zomw: [u8; 7] = "zombie\0"
     if find(cmd, (&k13w[0]) as u64, 6) != 0 {
-        mode = mode | kstate.M_K13
+        kstate.mode_add(state, kstate.M_K13)
     }
     if find(cmd, (&npw13[0]) as u64, 6) != 0 {
-        mode = mode | kstate.M_NOPERM
+        kstate.mode_add(state, kstate.M_NOPERM)
     }
     if find(cmd, (&ishw[0]) as u64, 6) != 0 {
-        mode = mode | kstate.M_INITSH
+        kstate.mode_add(state, kstate.M_INITSH)
     }
     if find(cmd, (&nsuw[0]) as u64, 6) != 0 {
-        mode = mode | kstate.M_NOSUID
+        kstate.mode_add(state, kstate.M_NOSUID)
     }
     if find(cmd, (&nacw[0]) as u64, 6) != 0 {
-        mode = mode | kstate.M_NOACPI
+        kstate.mode_add(state, kstate.M_NOACPI)
     }
     if find(cmd, (&v2rw[0]) as u64, 8) != 0 {
-        mode = mode | kstate.M_FORCEV2
+        kstate.mode_add(state, kstate.M_FORCEV2)
     }
     if find(cmd, (&zomw[0]) as u64, 6) != 0 {
-        mode = mode | kstate.M_ZOMBIE
+        kstate.mode_add(state, kstate.M_ZOMBIE)
     }
     // ==================================================== RUNDE OFS3
     //
-    // VIER WOERTER, UND DREI DAVON SIND GEGENPROBEN. Sie stehen NICHT im
-    // allgemeinen MODE-Wort, sondern in einem eigenen (`OFS3_MODE`, das
-    // erste Wort der zweiten OFS3-Seite): im MODE-Wort ist nur noch Bit
-    // 63 frei, und das ist gesperrt, weil `fs.enter` es als Merker fuer
-    // eine verschachtelte Sperre benutzt.
+    // RUNDE OFS3: VIER WOERTER, UND DREI DAVON SIND GEGENPROBEN. Sie
+    // standen bis zu diesem Zusammenfuehren in einem EIGENEN Moduswort
+    // (`OFS3_MODE`), weil im alten 64-Bit-MODE nur noch Bit 63 frei war
+    // und das gesperrt ist -- `fs.enter` benutzt es als Merker fuer eine
+    // verschachtelte Sperre. Runde K17 hat den Modus zu einem VEKTOR
+    // gemacht; die vier Bits stehen deshalb jetzt in dessen Wort 7 und
+    // werden hier gelesen wie jedes andere Wort auch.
     //
     // `ofs3run` und nicht `ofs3`: die Befehlszeile wird nach TEILWORTEN
     // durchsucht, und `ofs3fmt` faengt nicht mit `ofs3` an, aber ein
     // Pfad wie `script=ofs3t` taete es. Runde K13 hat diesen Fehler
     // schon einmal gemacht und eine Stunde lang gesucht.
-    // Die vier Bits stehen in einem EIGENEN Wort und damit in einer
-    // eigenen Funktion: `mode_of` bekommt `state` nicht und darf es auch
-    // nicht -- es beantwortet eine Frage ueber eine Zeichenkette.
+    var o3w: [u8; 8] = "ofs3run\0"
+    var o2fw: [u8; 8] = "ofs3fmt\0"
+    var natw: [u8; 8] = "noatime\0"
+    var nlkw: [u8; 8] = "nolinks\0"
+    if find(cmd, (&o3w[0]) as u64, 7) != 0 {
+        kstate.mode_add(state, kstate.O_OFS3)
+    }
+    if find(cmd, (&o2fw[0]) as u64, 7) != 0 {
+        kstate.mode_add(state, kstate.O_OFS3FMT)
+    }
+    if find(cmd, (&natw[0]) as u64, 7) != 0 {
+        kstate.mode_add(state, kstate.O_NOATIME)
+    }
+    if find(cmd, (&nlkw[0]) as u64, 7) != 0 {
+        kstate.mode_add(state, kstate.O_NOLINKS)
+    }
     // RUNDE K16: die Gegenprobe zur grossen Arena.
     var nbw: [u8; 9] = "nobigmem\0"
     // ROUND MEM: the stress test of the frame allocator.
     var msw: [u8; 11] = "memstress\0\0"
     var nsw: [u8; 12] = "nostackgrow\0"
     if find(cmd, (&wmw[0]) as u64, 2) != 0 {
-        mode = mode | kstate.M_WM
+        kstate.mode_add(state, kstate.M_WM)
     }
     if find(cmd, (&ndw[0]) as u64, 7) != 0 {
-        mode = mode | kstate.M_NODIRTY
+        kstate.mode_add(state, kstate.M_NODIRTY)
     }
     if find(cmd, (&nfw[0]) as u64, 7) != 0 {
-        mode = mode | kstate.M_NOFOCUS
+        kstate.mode_add(state, kstate.M_NOFOCUS)
     }
     if find(cmd, (&nmw[0]) as u64, 7) != 0 {
-        mode = mode | kstate.M_NOMOUSE
+        kstate.mode_add(state, kstate.M_NOMOUSE)
     }
     if find(cmd, (&whw[0]) as u64, 6) != 0 {
-        mode = mode | kstate.M_WMHOLD
+        kstate.mode_add(state, kstate.M_WMHOLD)
     }
     if find(cmd, (&wsw[0]) as u64, 7) != 0 {
-        mode = mode | kstate.M_WMSHELL
+        kstate.mode_add(state, kstate.M_WMSHELL)
     }
     if find(cmd, (&npw[0]) as u64, 7) != 0 {
-        mode = mode | kstate.M_NOMPOLL
+        kstate.mode_add(state, kstate.M_NOMPOLL)
     }
     if find(cmd, (&tdw[0]) as u64, 7) != 0 {
-        mode = mode | kstate.M_TTFDUMP
+        kstate.mode_add(state, kstate.M_TTFDUMP)
     }
     if find(cmd, (&nbw[0]) as u64, 8) != 0 {
-        mode = mode | kstate.M_NOBIG
+        kstate.mode_add(state, kstate.M_NOBIG)
     }
     if find(cmd, (&msw[0]) as u64, 9) != 0 {
-        mode = mode | kstate.M_MEMSTRESS
+        kstate.mode_add(state, kstate.M_MEMSTRESS)
     }
     if find(cmd, (&nsw[0]) as u64, 11) != 0 {
-        mode = mode | kstate.M_NOSTACK
+        kstate.mode_add(state, kstate.M_NOSTACK)
     }
     // RUNDE K15. `wig` startet die Anwendung, die auf der
     // Widget-Bibliothek sitzt, `wigfiles` den Dateimanager; die beiden
@@ -3020,31 +3150,31 @@ fn mode_of(cmd: u64) -> u64 {
     // Bildschirm mit der Anwendung teilt.
     var wsp: [u8; 12] = "wigspeicher\0"
     if find(cmd, (&wgw[0]) as u64, 3) != 0 {
-        mode = mode | kstate.M_WIG
+        kstate.mode_add(state, kstate.M_WIG)
     }
     if find(cmd, (&wfw[0]) as u64, 8) != 0 {
-        mode = mode | kstate.M_WIGFILES
+        kstate.mode_add(state, kstate.M_WIGFILES)
     }
     if find(cmd, (&wnh[0]) as u64, 8) != 0 {
-        mode = mode | kstate.M_WIGNOHIT
+        kstate.mode_add(state, kstate.M_WIGNOHIT)
     }
     if find(cmd, (&wnc[0]) as u64, 9) != 0 {
-        mode = mode | kstate.M_WIGNOCLIP
+        kstate.mode_add(state, kstate.M_WIGNOCLIP)
     }
     if find(cmd, (&wlw[0]) as u64, 7) != 0 {
-        mode = mode | kstate.M_WIGLONG
+        kstate.mode_add(state, kstate.M_WIGLONG)
     }
     if find(cmd, (&wsw2[0]) as u64, 8) != 0 {
-        mode = mode | kstate.M_WIGSTART
+        kstate.mode_add(state, kstate.M_WIGSTART)
     }
     if find(cmd, (&wnk[0]) as u64, 9) != 0 {
-        mode = mode | kstate.M_WIGNOKEYS
+        kstate.mode_add(state, kstate.M_WIGNOKEYS)
     }
     if find(cmd, (&wni[0]) as u64, 8) != 0 {
-        mode = mode | kstate.M_WIGNOIDX
+        kstate.mode_add(state, kstate.M_WIGNOIDX)
     }
     if find(cmd, (&wsp[0]) as u64, 11) != 0 {
-        mode = mode | kstate.M_WIGSPEICHER
+        kstate.mode_add(state, kstate.M_WIGSPEICHER)
     }
     // RUNDE K18: die Energieschicht und ihre Gegenproben.
     var pww: [u8; 4] = "pwr\0"
@@ -3053,36 +3183,36 @@ fn mode_of(cmd: u64) -> u64 {
     var pwho: [u8; 7] = "pwrhot\0"
     var pwnb: [u8; 8] = "noblank\0"
     if find(cmd, (&pww[0]) as u64, 3) != 0 {
-        mode = mode | kstate.M_PWR
+        kstate.mode_add(state, kstate.M_PWR)
     }
     if find(cmd, (&pwnc[0]) as u64, 9) != 0 {
-        mode = mode | kstate.M_NOCSTATES
+        kstate.mode_add(state, kstate.M_NOCSTATES)
     }
     if find(cmd, (&pwno[0]) as u64, 5) != 0 {
-        mode = mode | kstate.M_NOPWR
+        kstate.mode_add(state, kstate.M_NOPWR)
     }
     if find(cmd, (&pwho[0]) as u64, 6) != 0 {
-        mode = mode | kstate.M_PWRHOT
+        kstate.mode_add(state, kstate.M_PWRHOT)
     }
     if find(cmd, (&pwnb[0]) as u64, 7) != 0 {
-        mode = mode | kstate.M_NOBLANK
+        kstate.mode_add(state, kstate.M_NOBLANK)
     }
     var pwd: [u8; 7] = "pwrdim\0"
     var pwbl: [u8; 9] = "pwrblank\0"
     if find(cmd, (&pwd[0]) as u64, 6) != 0 {
-        mode = mode | kstate.M_PWRDIM
+        kstate.mode_add(state, kstate.M_PWRDIM)
     }
     if find(cmd, (&pwbl[0]) as u64, 8) != 0 {
-        mode = mode | kstate.M_PWRBLANK
+        kstate.mode_add(state, kstate.M_PWRBLANK)
     }
     if find(cmd, (&unixw[0]) as u64, 4) != 0 {
-        mode = mode | M_UNIX
+        kstate.mode_add(state, kstate.M_UNIX)
     }
     if find(cmd, (&nosigw[0]) as u64, 5) != 0 {
-        mode = mode | M_NOSIG
+        kstate.mode_add(state, kstate.M_NOSIG)
     }
     if find(cmd, (&fixrw[0]) as u64, 9) != 0 {
-        mode = mode | M_FIXRAND
+        kstate.mode_add(state, kstate.M_FIXRAND)
     }
     // ROUNDE K14. `vfs` schaltet die Schicht an; alles andere sind
     // GEGENPROBEN, und ohne sie beweist die Runde nichts.
@@ -3095,37 +3225,73 @@ fn mode_of(cmd: u64) -> u64 {
     var w_fatro: [u8; 6] = "fatro "
     var w_vfsall: [u8; 7] = "vfsall "
     if find(cmd, (&w_vfs[0]) as u64, 3) != 0 {
-        mode = mode | kstate.M_VFS
+        kstate.mode_add(state, kstate.M_VFS)
     }
     if find(cmd, (&w_novfs[0]) as u64, 5) != 0 {
-        mode = mode | kstate.M_NOVFS
+        kstate.mode_add(state, kstate.M_NOVFS)
     }
     if find(cmd, (&w_nopfs[0]) as u64, 8) != 0 {
-        mode = mode | kstate.M_NOPROCFS
+        kstate.mode_add(state, kstate.M_NOPROCFS)
     }
     if find(cmd, (&w_nodfs[0]) as u64, 7) != 0 {
-        mode = mode | kstate.M_NODEVFS
+        kstate.mode_add(state, kstate.M_NODEVFS)
     }
     if find(cmd, (&w_nofat[0]) as u64, 5) != 0 {
-        mode = mode | kstate.M_NOFAT
+        kstate.mode_add(state, kstate.M_NOFAT)
     }
     if find(cmd, (&w_nopart[0]) as u64, 6) != 0 {
-        mode = mode | kstate.M_NOPART
+        kstate.mode_add(state, kstate.M_NOPART)
     }
     if find(cmd, (&w_fatro[0]) as u64, 5) != 0 {
-        mode = mode | kstate.M_FATRO
+        kstate.mode_add(state, kstate.M_FATRO)
     }
     if find(cmd, (&w_vfsall[0]) as u64, 6) != 0 {
-        mode = mode | kstate.M_VFSALL
+        kstate.mode_add(state, kstate.M_VFSALL)
     }
-    return mode
-}
-
-fn has_word(mode: u64, which: u64) -> bool {
-    if which == 2 {
-        return (mode & 256) != 0
+    // ROUNDE K17. `usb` schaltet den Baum an; die acht anderen sind
+    // GEGENPROBEN. `nousb` und nicht `noxhci`: die Gegenprobe soll die
+    // GANZE Runde ausschalten und nicht nur den Regler -- und sie darf
+    // sich nicht selbst wieder einschalten, weshalb `usb` erst gesucht
+    // wird und `nousb` danach das Bit wieder loeschen koennte. Es wird
+    // stattdessen ein zweites Bit gesetzt und `usb.stage` sieht beide
+    // an; ein Schalter, den sein eigenes Argument aufhebt, ist keiner
+    // (die Lehre aus `nic`/`net` in Runde K8).
+    var w_usb: [u8; 4] = "usb\0"
+    var w_nousb: [u8; 6] = "nousb\0"
+    var w_upoll: [u8; 8] = "usbpoll\0"
+    var w_nohid: [u8; 6] = "nohid\0"
+    var w_nomsc: [u8; 6] = "nomsc\0"
+    var w_unplug: [u8; 7] = "unplug\0"
+    var w_noirq2: [u8; 9] = "usbnoirq\0"
+    var w_stick: [u8; 9] = "usbstick\0"
+    var w_hold: [u8; 8] = "usbhold\0"
+    if find(cmd, (&w_usb[0]) as u64, 3) != 0 {
+        kstate.mode_add(state, kstate.M_USB)
     }
-    return (mode & 512) != 0
+    if find(cmd, (&w_nousb[0]) as u64, 5) != 0 {
+        kstate.mode_add(state, kstate.M_NOUSB)
+    }
+    if find(cmd, (&w_upoll[0]) as u64, 7) != 0 {
+        kstate.mode_add(state, kstate.M_USBPOLL)
+    }
+    if find(cmd, (&w_nohid[0]) as u64, 5) != 0 {
+        kstate.mode_add(state, kstate.M_NOHID)
+    }
+    if find(cmd, (&w_nomsc[0]) as u64, 5) != 0 {
+        kstate.mode_add(state, kstate.M_NOMSC)
+    }
+    if find(cmd, (&w_unplug[0]) as u64, 6) != 0 {
+        kstate.mode_add(state, kstate.M_UNPLUG)
+    }
+    if find(cmd, (&w_noirq2[0]) as u64, 8) != 0 {
+        kstate.mode_add(state, kstate.M_NOUSBIRQ)
+    }
+    if find(cmd, (&w_stick[0]) as u64, 8) != 0 {
+        kstate.mode_add(state, kstate.M_USBSTICK)
+    }
+    if find(cmd, (&w_hold[0]) as u64, 7) != 0 {
+        kstate.mode_add(state, kstate.M_USBHOLD)
+    }
 }
 
 // Address of the first occurrence, or 0. The command line is a C string.
@@ -3219,7 +3385,7 @@ fn surface(state: u64) {
     var s_hit: [u8; 8] = "  hits=\0"
     var s_miss: [u8; 9] = "  miss=\0\0"
 
-    if (kstate.get(state, kstate.MODE) & kstate.M_WM) == 0 {
+    if !kstate.mode_on(state, kstate.M_WM) {
         serial.puts((&s_off[0]) as u64)
         serial.nl()
         return
@@ -3277,7 +3443,7 @@ fn surface(state: u64) {
     // 4. das Zeigegeraet
     let w: u64 = fb.width(state)
     let h: u64 = fb.height(state)
-    if (kstate.get(state, kstate.MODE) & kstate.M_NOMOUSE) != 0 {
+    if kstate.mode_on(state, kstate.M_NOMOUSE) {
         serial.puts((&s_none[0]) as u64)
         serial.nl()
     } else {
@@ -3294,16 +3460,16 @@ fn surface(state: u64) {
         serial.nl()
         ps2m.reset_counters(state)
         ps2m.set_poll(state,
-            (kstate.get(state, kstate.MODE) & kstate.M_NOMPOLL) == 0)
+            !kstate.mode_on(state, kstate.M_NOMPOLL))
     }
     // 5. der Fensterserver
-    let nodirty: bool = (kstate.get(state, kstate.MODE) & kstate.M_NODIRTY) != 0
-    let nofocus: bool = (kstate.get(state, kstate.MODE) & kstate.M_NOFOCUS) != 0
+    let nodirty: bool = kstate.mode_on(state, kstate.M_NODIRTY)
+    let nofocus: bool = kstate.mode_on(state, kstate.M_NOFOCUS)
     if !wm.init(state, w, h, nodirty, nofocus) {
         return
     }
     wm.set_fonts(state, f_ui, PX_UI, f_tx, PX_MONO)
-    if (kstate.get(state, kstate.MODE) & kstate.M_NOMOUSE) != 0 {
+    if kstate.mode_on(state, kstate.M_NOMOUSE) {
         wm.set_cursor(state, false)
     }
     serial.puts((&s_wm[0]) as u64)
@@ -3387,8 +3553,9 @@ fn surface(state: u64) {
     // teilt sich einen Prozessor mit der Anwendung dieser Runde, und ihr
     // Fenster liegt genau dort, wo der Dateimanager steht.
     var t: u64 = 0
-    if (kstate.get(state, kstate.MODE)
-        & (kstate.M_WIG | kstate.M_WIGFILES | kstate.M_WIGSTART)) == 0 {
+    if !kstate.mode_on(state, kstate.M_WIG)
+       && !kstate.mode_on(state, kstate.M_WIGFILES)
+       && !kstate.mode_on(state, kstate.M_WIGSTART) {
         t = proc.create(state, P_WCLICK, (w << 16) | h, 2)
         // Ein paar Marken, damit sie ihr Fenster wirklich anlegt, bevor
         // gemessen wird.
@@ -3400,7 +3567,7 @@ fn surface(state: u64) {
 
     // Die Shell im Terminalfenster -- auf ausdrueckliches Wort, weil sie
     // eine Platte braucht.
-    if (kstate.get(state, kstate.MODE) & kstate.M_WMSHELL) != 0 {
+    if kstate.mode_on(state, kstate.M_WMSHELL) {
         var p_sh: [u8; 8] = "/bin/sh\0"
         var a_sh: [u8; 3] = "sh\0"
         let abuf: u64 = state + kstate.EARG_OFF
@@ -3421,7 +3588,7 @@ fn surface(state: u64) {
     // Auf Verlangen: einige Glyphen als Text auf die Leitung, damit
     // `tools/wm/run.sh` den Rasterer selbst gegen die zweite Fassung
     // halten kann, ohne den Umweg ueber das Bild.
-    if (kstate.get(state, kstate.MODE) & kstate.M_TTFDUMP) != 0 {
+    if kstate.mode_on(state, kstate.M_TTFDUMP) {
         var zeichen: [u8; 9] = "AVROegW.\0"
         var zi: u64 = 0
         while zi < 8 {
@@ -3457,7 +3624,7 @@ fn surface(state: u64) {
     // Stillhalten, damit ein Bildschirmfoto entsteht -- und dabei WEITER
     // den Zeiger verfolgen und zusammensetzen. Genau darin werden von
     // aussen ueber den QEMU-Monitor Mausereignisse eingespeist.
-    if (kstate.get(state, kstate.MODE) & kstate.M_WMHOLD) == 0 {
+    if !kstate.mode_on(state, kstate.M_WMHOLD) {
         return
     }
     serial.puts((&s_hold[0]) as u64)
@@ -3475,7 +3642,7 @@ fn surface(state: u64) {
     // werden -- Bewegungen, Klicks, Tasten --, ist in fuenf Sekunden
     // nicht bedient, und ein Foto davon zeigt einen halben Vorgang.
     var sek: u64 = 5
-    if (kstate.get(state, kstate.MODE) & kstate.M_WIGLONG) != 0 {
+    if kstate.mode_on(state, kstate.M_WIGLONG) {
         sek = 20
     }
     if hz != 0 {
@@ -3524,17 +3691,17 @@ fn k15_start(state: u64) -> u64 {
     var pfad: u64 = (&p_demo[0]) as u64
     var arg0: u64 = (&a_demo[0]) as u64
     var n0: u64 = 8
-    if (kstate.get(state, kstate.MODE) & kstate.M_WIGFILES) != 0 {
+    if kstate.mode_on(state, kstate.M_WIGFILES) {
         pfad = (&p_files[0]) as u64
         arg0 = (&a_files[0]) as u64
         n0 = 9
     }
-    if (kstate.get(state, kstate.MODE) & kstate.M_WIGSTART) != 0 {
+    if kstate.mode_on(state, kstate.M_WIGSTART) {
         pfad = (&p_start[0]) as u64
         arg0 = (&a_start[0]) as u64
         n0 = 8
     }
-    if (kstate.get(state, kstate.MODE) & kstate.M_WIGSPEICHER) != 0 {
+    if kstate.mode_on(state, kstate.M_WIGSPEICHER) {
         pfad = (&p_spei[0]) as u64
         arg0 = (&a_spei[0]) as u64
         n0 = 9
@@ -3547,7 +3714,7 @@ fn k15_start(state: u64) -> u64 {
         k = k + 1
     }
     var argc: u64 = 1
-    if (kstate.get(state, kstate.MODE) & kstate.M_WIGNOHIT) != 0 {
+    if kstate.mode_on(state, kstate.M_WIGNOHIT) {
         k = 0
         while k < 6 {
             kstate.set8(abuf + at, a_nohit[k as usize])
@@ -3556,7 +3723,7 @@ fn k15_start(state: u64) -> u64 {
         }
         argc = argc + 1
     }
-    if (kstate.get(state, kstate.MODE) & kstate.M_WIGNOCLIP) != 0 {
+    if kstate.mode_on(state, kstate.M_WIGNOCLIP) {
         k = 0
         while k < 7 {
             kstate.set8(abuf + at, a_noclip[k as usize])
@@ -3565,7 +3732,7 @@ fn k15_start(state: u64) -> u64 {
         }
         argc = argc + 1
     }
-    if (kstate.get(state, kstate.MODE) & kstate.M_WIGNOKEYS) != 0 {
+    if kstate.mode_on(state, kstate.M_WIGNOKEYS) {
         k = 0
         while k < 7 {
             kstate.set8(abuf + at, a_nokeys[k as usize])
@@ -3574,7 +3741,7 @@ fn k15_start(state: u64) -> u64 {
         }
         argc = argc + 1
     }
-    if (kstate.get(state, kstate.MODE) & kstate.M_WIGNOIDX) != 0 {
+    if kstate.mode_on(state, kstate.M_WIGNOIDX) {
         k = 0
         while k < 6 {
             kstate.set8(abuf + at, a_noidx[k as usize])

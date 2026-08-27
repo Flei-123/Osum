@@ -73,7 +73,13 @@ const D_HDA: u64 = 8
 const D_HDB: u64 = 9
 const D_RAM0: u64 = 10
 const D_NVME0: u64 = 11
-const D_LAST: u64 = 11
+// RUNDE K17: der Stick. Er steht NUR dann im Verzeichnis, wenn wirklich
+// einer angesteckt ist (`readdir`/`lookup` fragen `blk.present_on`) --
+// ein Geraetename ohne Geraet dahinter waere eine Behauptung, und beim
+// Abziehen verschwindet er wieder. Deshalb aendert sich an /dev in jedem
+// Lauf ohne USB kein einziges Oktett.
+const D_USB0: u64 = 12
+const D_LAST: u64 = 12
 const D_ROOT: u64 = 100
 
 const BS: u64 = 512
@@ -127,6 +133,7 @@ fn name_at(node: u64, out: u64) -> bool {
     var n_hdb: [u8; 4] = "hdb\0"
     var n_ram: [u8; 5] = "ram0\0"
     var n_nvme: [u8; 6] = "nvme0\0"
+    var n_usb: [u8; 4] = "usb\0"
     var src: u64 = 0
     if node == D_NULL {
         src = (&n_null[0]) as u64
@@ -150,6 +157,8 @@ fn name_at(node: u64, out: u64) -> bool {
         src = (&n_ram[0]) as u64
     } else if node == D_NVME0 {
         src = (&n_nvme[0]) as u64
+    } else if node == D_USB0 {
+        src = (&n_usb[0]) as u64
     } else {
         return false
     }
@@ -175,6 +184,9 @@ fn block_of(node: u64) -> u64 {
     }
     if node == D_NVME0 {
         return blk.DEV_NVME
+    }
+    if node == D_USB0 {
+        return blk.DEV_USB
     }
     return 99
 }
@@ -208,12 +220,27 @@ fn d_lookup(state: u64, m: u64, path: u64) -> u64 {
     while node <= D_LAST {
         if name_at(node, (&name[0]) as u64) {
             if streq(p, (&name[0]) as u64) {
+                if !da(state, node) {
+                    return 0
+                }
                 return node
             }
         }
         node = node + 1
     }
     return 0
+}
+
+// RUNDE K17: GIBT ES DAS GERAET UEBERHAUPT NOCH? Fuer alles, was dieser
+// Kernel seit 1986 kennt, ist die Antwort immer ja -- eine ATA-Platte
+// verschwindet nicht im Betrieb. Ein Stick tut es, und deshalb ist
+// /dev/usb0 der erste Eintrag dieses Verzeichnisses, dessen Dasein eine
+// FRAGE ist und keine Zeile in einer Tabelle.
+fn da(state: u64, node: u64) -> bool {
+    if node == D_USB0 {
+        return blk.present_on(state, blk.DEV_USB)
+    }
+    return true
 }
 
 fn d_readdir(state: u64, m: u64, dir: u64, index: u64, out: u64) -> u64 {
@@ -236,6 +263,9 @@ fn d_readdir(state: u64, m: u64, dir: u64, index: u64, out: u64) -> u64 {
     }
     let node: u64 = index - 1
     if node > D_LAST {
+        return 0
+    }
+    if !da(state, node) {
         return 0
     }
     if !name_at(node, out) {

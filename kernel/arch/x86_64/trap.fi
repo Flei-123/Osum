@@ -30,6 +30,7 @@ import power
 import sched
 import apic
 import nvme
+import usb
 import virtio
 import inet
 import cpu
@@ -78,6 +79,14 @@ const VEC_NVME: u64 = 44
 // stub out of `isr.s`. The handler does nothing but acknowledge and
 // count; the frames are taken out of the ring by the network task.
 const VEC_NET: u64 = 45
+// RUNDE K17: der USB-Regler meldet auf 43. Die Zahl ist die letzte
+// freie unterhalb der vier vergebenen (44 Platte, 45 Netz, 46 Maus, 47
+// verirrt) und liegt in den 48 Einsprungpunkten, die `isr.s` bereithaelt
+// -- fuer diese Runde musste kein Assembler geaendert werden.
+// `tools/kernel/karte.py` rechnet die Vektortafel nach; zwei Namen auf
+// einer Zahl waeren genau der Fehler, an dem Runde K10 haengengeblieben
+// ist.
+const VEC_XHCI: u64 = 43
 const VEC_SPURIOUS: u64 = 47
 
 fn word(frame: u64, off: u64) -> u64 {
@@ -103,7 +112,7 @@ fn entry(frame: u64, state: u64) {
         // damit passiert genau das, was vor dieser Runde passiert ist --
         // der Uebersetzer stirbt an cr2 knapp unter 0x40001000.
         if vector == 14 && user_fault(frame, state) {
-            if (kstate.get(state, kstate.MODE) & kstate.M_NOSTACK) == 0 {
+            if !kstate.mode_on(state, kstate.M_NOSTACK) {
                 if proc.grow_stack(state, sched.current(state), cr2(),
                         word(frame, F_RSP)) {
                     return
@@ -160,6 +169,28 @@ fn entry(frame: u64, state: u64) {
         // controller lets nothing through until it has seen it, and the
         // task that is switched to would run without a timer.
         eoi(state, vector)
+        // RUNDE K17: ANSTECKEN UND ABZIEHEN IM BETRIEB.
+        //
+        // Ein Anschluss meldet keinen Wechsel, den niemand abholt. Alle
+        // 25 Marken (viermal je Sekunde) sieht der Kernel nach, was sich
+        // an den Anschlussregistern geaendert hat -- das ist billig
+        // (ein Lesezugriff je Anschluss), und nur wenn sich WIRKLICH
+        // etwas geaendert hat, wird ein Geraet aufgenommen oder
+        // verabschiedet.
+        //
+        // EHRLICH GESAGT: eine Aufzaehlung im Zeitgeberbehandler ist
+        // nicht schoen. Sie dauert einige Millisekunden, und in dieser
+        // Zeit steht der Zeitgeber. Der richtige Ort waere eine
+        // Kernaufgabe; die gibt es in diesem Kernel fuer Geraete noch
+        // nicht. Solange das so ist, steht die Zeile hier und nicht
+        // woanders -- und sie laeuft NUR, wenn dieser Lauf ueberhaupt
+        // USB aufgesetzt hat. Jede Messung der Runden 52 bis K16 sieht
+        // damit den Kernel, den sie vorher gesehen hat.
+        if cpu.here(state) == 0 && usb.ready(state) {
+            if (kstate.get(state, kstate.TICKS) % 25) == 0 {
+                usb.unplug_check(state)
+            }
+        }
         sched.on_tick(state)
         // ROUND K9. ZWEI DINGE, DIE NUR HIER GEHEN. Die Frist von
         // `alarm` laeuft in Marken, also wird sie hier faellig. Und ein
@@ -192,6 +223,16 @@ fn entry(frame: u64, state: u64) {
     }
     if vector == VEC_NVME {
         nvme.irq(state)
+        eoi(state, vector)
+        return
+    }
+    if vector == VEC_XHCI {
+        // Wann ein Mensch tippt, weiss vorher niemand -- dieselbe
+        // Entropiequelle wie die Tastatur an IRQ 1, nur an einem
+        // anderen Bus.
+        rand.stir(state, time.tsc())
+        usb.irq(state)
+        wm.poll(state)
         eoi(state, vector)
         return
     }

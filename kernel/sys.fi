@@ -82,6 +82,7 @@ import part
 import blk
 // RUNDE INSTALL: `sync` schreibt auch die FSInfo-Seite von FAT32.
 import fat
+import usb
 
 export {
     entry, neg, STAT_BYTES, DIRENT_HEAD,
@@ -585,6 +586,17 @@ const SYS_MOUNT: u64 = 165
 const SYS_UMOUNT2: u64 = 166
 const SYS_RENAME: u64 = 82
 const SYS_OSUM_MNTSTAT: u64 = 1700
+
+// RUNDE K17: der USB-Baum, von Ring 3 aus. Der Vorrat dieser Runde ist
+// 1700..1749; 1700 gehoert seit Runde K14 der Einhaengetafel, also faengt
+// diese Runde bei 1701 an. ZWEI Nummern und keine dreissig: was Ring 3
+// ueber USB wissen muss, ist eine Zahl je Frage, und was es TUN darf,
+// ist genau eines -- das Abziehen nachstellen, damit die Zusage
+// "abgezogen, und der Kern laeuft weiter" von aussen messbar wird.
+const SYS_OSUM_USBSTAT: u64 = 1701 // (was) -> Zahl
+const SYS_OSUM_USBPULL: u64 = 1702 // () -> wie oft abgezogen wurde
+const USB_MINNR: u64 = 1701
+const USB_MAXNR: u64 = 1702
 
 // Die Felder von `osum_mntstat`.
 const MS_USED: u64 = 0
@@ -1198,8 +1210,30 @@ fn dispatch(number: u64, frame: u64, state: u64) -> u64 {
     // dasselbe nichts, weil ihr Rahmen erst entsteht, wenn wirklich
     // eine dieser Nummern kommt. Dieselbe Ueberlegung steht seit Runde
     // K12 hinter `vm_call` und seit Runde K6 hinter `native`.
+    // RUNDE K15: die Naht zur Widget-Bibliothek.
+    if number >= WIG_BASE && number <= WIG_MAXNR {
+        return wig_call(state, me, number, a0, a1, a2, a3, a4)
+    }
     if is_k13(number) {
         return k13_call(state, me, number, a0, a1, a2, a3)
+    }
+    // RUNDE K17. Zwei Nummern, in einer eigenen Funktion -- aus genau
+    // demselben Grund, aus dem `k13_call` eine ist: der Rahmen von
+    // `dispatch` ist ohnehin der groesste dieses Kernels, und diese
+    // Runde hat den tiefsten Aufruf um vier Schichten verlaengert.
+    if number >= USB_MINNR && number <= USB_MAXNR {
+        return usb_call(state, number, a0)
+    }
+    return neg(errno.E_NOSYS)
+}
+
+fn usb_call(state: u64, number: u64, a0: u64) -> u64 {
+    if number == SYS_OSUM_USBSTAT {
+        return usb.stat(state, a0)
+    }
+    if number == SYS_OSUM_USBPULL {
+        usb.unplug_now(state)
+        return usb.unplugs(state)
     }
     return neg(errno.E_NOSYS)
 }
@@ -1769,7 +1803,7 @@ fn tty_read(state: u64, me: u64, t: u64, buf: u64, len: u64) -> u64 {
     if n != 0 {
         return n
     }
-    if t == tty.console() && (kstate.get(state, kstate.MODE) & kstate.M_NOKBD) != 0 {
+    if t == tty.console() && kstate.mode_on(state, kstate.M_NOKBD) {
         // Kein Skript mehr und keine Tastatur: das ist das ENDE DER
         // EINGABE, und null ist genau das -- kein Fehler.
         return 0
@@ -2080,11 +2114,42 @@ fn dir_allowed(state: u64, me: u64, path: u64, ino: u64) -> bool {
 // ist Regel 3 aus dem Kopf dieser Datei, und sie gilt fuer einen
 // fremden Treiber erst recht: FAT32 rechnet mit Zahlen aus einem
 // Bootsektor, den irgendjemand geschrieben hat.
+// RUNDE K17: DAS GERAET UNTER DIESER EINHAENGUNG KANN WEG SEIN.
+//
+// Bis zu dieser Runde konnte es das nicht: eine ATA-Platte, ein
+// NVMe-Regler und eine RAM-Platte verschwinden nicht im Betrieb. Ein
+// USB-Stick tut es -- und dann steht ein Prozess mit einem offenen
+// Deskriptor da, dessen Dateisystem es nicht mehr gibt.
+//
+// Die Antwort ist ENODEV und nicht EIO: EIO hiesse "der Lesevorgang ist
+// schiefgegangen", und das laedt zum Wiederholen ein. ENODEV heisst "das
+// Geraet gibt es nicht mehr", und dabei bleibt es. Die Pruefung steht an
+// EINER Stelle -- am Deskriptor, nicht im Treiber -- und gilt damit fuer
+// jedes Dateisystem auf jedem Geraet, das verschwinden kann.
+fn mnt_gone(state: u64, m: u64) -> bool {
+    if m >= vfs.MAX_MNT || !mnt.used(state, m) {
+        return false
+    }
+    // NUR GERAETE FRAGEN, DIE VERSCHWINDEN KOENNEN. Der Grund steht in
+    // `blk.removable`, und er hat eine Stunde gekostet: `present_on`
+    // schreibt fuer eine ATA-Platte in das Laufwerksregister, und das
+    // bei jedem Lesen und Schreiben zu tun, greift in die Uebertragung
+    // ein, die gerade laeuft.
+    let dev: u64 = mnt.dev(state, m)
+    if !blk.removable(dev) {
+        return false
+    }
+    return !blk.present_on(state, dev)
+}
+
 fn vfs_read(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
     if !readable(state, of) {
         return neg(errno.E_BADF)
     }
     let m: u64 = file.open_mnt(state, of)
+    if mnt_gone(state, m) {
+        return neg(errno.E_NODEV)
+    }
     let node: u64 = file.open_ino(state, of)
     let off: u64 = file.open_off(state, of)
     let bounce: u64 = state + kstate.BLOCK_OFF
@@ -2105,6 +2170,9 @@ fn vfs_write(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
         return neg(errno.E_BADF)
     }
     let m: u64 = file.open_mnt(state, of)
+    if mnt_gone(state, m) {
+        return neg(errno.E_NODEV)
+    }
     let node: u64 = file.open_ino(state, of)
     var off: u64 = file.open_off(state, of)
     if (file.open_flags(state, of) & O_APPEND) != 0 {
@@ -2143,6 +2211,15 @@ fn vfs_write(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
 // an der die Zeilendisziplin steht -- und die zweite waere irgendwann
 // die falsche.
 fn open_vfs(state: u64, me: u64, m: u64, path: u64, flags: u64) -> u64 {
+    // RUNDE K17: dieselbe Frage wie beim Lesen und Schreiben, nur
+    // frueher. Ohne diese drei Zeilen antwortet ein abgezogener Stick
+    // mit -ENOENT ("die Datei gibt es nicht"), und das ist die falsche
+    // Auskunft: die Datei gibt es sehr wohl, sie ist nur nicht mehr
+    // erreichbar. Der Unterschied ist der zwischen "loesch sie aus
+    // deiner Liste" und "steck ihn wieder ein".
+    if mnt_gone(state, m) {
+        return neg(errno.E_NODEV)
+    }
     var node: u64 = vfs.node_for(state, m, path)
     if node == 0 {
         if (flags & O_CREAT) == 0 {
@@ -3246,7 +3323,7 @@ fn big_bottom(state: u64, me: u64) -> u64 {
 }
 
 fn big_map(state: u64, me: u64, pages: u64, prot: u64) -> u64 {
-    if (kstate.get(state, kstate.MODE) & kstate.M_NOBIG) != 0 {
+    if kstate.mode_on(state, kstate.M_NOBIG) {
         return neg(errno.E_NOMEM)
     }
     let top: u64 = big_bottom(state, me)
@@ -4124,6 +4201,7 @@ fn source_dev(state: u64, p: u64, out_part: u64) -> u64 {
     var n_hdb: [u8; 9] = "/dev/hdb "
     var n_ram: [u8; 10] = "/dev/ram0 "
     var n_nvme: [u8; 11] = "/dev/nvme0 "
+    var n_usb: [u8; 9] = "/dev/usb "
     var base: [u8; 32] = [0 as u8; 32]
     var n: u64 = 0
     while kstate.get8(p + n) != 0 && n < 31 {
@@ -4151,6 +4229,14 @@ fn source_dev(state: u64, p: u64, out_part: u64) -> u64 {
     }
     if name_is(state, (&base[0]) as u64, (&n_hdb[0]) as u64) {
         return blk.DEV_ATA1
+    }
+    // RUNDE K17: der Stick. Er steht HIER und nicht bei /dev/ram0 oben,
+    // weil sein Name KEINE Ziffer traegt -- `/dev/usb` ist der ganze
+    // Traeger, `/dev/usb1` seine erste Partition, genau wie `/dev/hdb`
+    // und `/dev/hdb1`. Das ist die Regel dieses Kernels, und ein Geraet,
+    // das sich nicht daran haelt, waere ein Sonderfall im Namensraum.
+    if name_is(state, (&base[0]) as u64, (&n_usb[0]) as u64) {
+        return blk.DEV_USB
     }
     return 99
 }
@@ -6163,7 +6249,7 @@ fn owns(state: u64, me: u64, ino: u64) -> bool {
 fn chmod_ino(state: u64, me: u64, ino: u64, mode: u64) -> u64 {
     if !owns(state, me, ino) {
         kstate.add(state, kstate.K13_OFF + kstate.U_DENIED, 1)
-        if (kstate.get(state, kstate.MODE) & kstate.M_NOPERM) == 0 {
+        if !kstate.mode_on(state, kstate.M_NOPERM) {
             return neg(errno.E_PERM)
         }
     }
@@ -6188,14 +6274,14 @@ fn chown_ino(state: u64, me: u64, ino: u64, uid: u64, gid: u64) -> u64 {
     let root: bool = perm.is_root(state, me)
     if uid != (0 -% 1) && !root {
         kstate.add(state, kstate.K13_OFF + kstate.U_DENIED, 1)
-        if (kstate.get(state, kstate.MODE) & kstate.M_NOPERM) == 0 {
+        if !kstate.mode_on(state, kstate.M_NOPERM) {
             return neg(errno.E_PERM)
         }
     }
     if gid != (0 -% 1) && !root {
         if !owns(state, me, ino) || gid != perm.egid(state, me) {
             kstate.add(state, kstate.K13_OFF + kstate.U_DENIED, 1)
-            if (kstate.get(state, kstate.MODE) & kstate.M_NOPERM) == 0 {
+            if !kstate.mode_on(state, kstate.M_NOPERM) {
                 return neg(errno.E_PERM)
             }
         }
@@ -6314,7 +6400,7 @@ fn do_reboot(state: u64, me: u64, cmd: u64) -> u64 {
     serial.puts((&s_off[0]) as u64)
     serial.nl()
     if cmd == RB_POWEROFF {
-        if (kstate.get(state, kstate.MODE) & kstate.M_NOACPI) == 0 {
+        if !kstate.mode_on(state, kstate.M_NOACPI) {
             power.acpi_off(state)
         }
         power.shutdown(power.EXIT_OK)
@@ -6365,7 +6451,7 @@ fn do_userinfo(state: u64, me: u64, out: u64) -> u64 {
     kstate.set(state, kstate.K13_OFF + 0x1000 + 14 * 8, sched.tget(state, me, sched.T_SUID))
     kstate.set(state, kstate.K13_OFF + 0x1000 + 15 * 8, sched.tget(state, me, sched.T_UMASK))
     kstate.set(state, kstate.K13_OFF + 0x1000 + 16 * 8, 0)
-    if (kstate.get(state, kstate.MODE) & kstate.M_NOPERM) != 0 {
+    if kstate.mode_on(state, kstate.M_NOPERM) {
         kstate.set(state, kstate.K13_OFF + 0x1000 + 16 * 8, 1)
     }
     kstate.set(state, kstate.K13_OFF + 0x1000 + 17 * 8,
