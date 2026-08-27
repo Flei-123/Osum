@@ -21,7 +21,7 @@
 # node. So:
 #
 #   Osum in QEMU <--virtio-net--> QEMU <--UDP on the loopback-->
-#   tools/net/bruecke <--AF_PACKET--> veth v0 | v1 <--> Linux in the
+#   tools/net/bridge <--AF_PACKET--> veth v0 | v1 <--> Linux in the
 #   network namespace `k8net`, 10.9.0.1/24
 #
 # Osum is 10.9.0.2/24. Checksum offload is switched OFF on both veth
@@ -116,7 +116,7 @@ val() { # file key
 
 # ------------------------------------------------------- the compiler
 
-bash vendor/firn/hole-firnc.sh >/dev/null || { echo "vendor/firn/hole-firnc.sh failed"; exit 1; }
+bash vendor/firn/fetch-firnc.sh >/dev/null || { echo "vendor/firn/fetch-firnc.sh failed"; exit 1; }
 [ -x "$FIRNC" ] || { echo "firnc0 is missing: $FIRNC"; exit 1; }
 [ -x "$FC1" ]   || { echo "firnc1 is missing: $FC1"; exit 1; }
 for t in qemu-system-x86_64 ip gcc nc curl python3 md5sum; do
@@ -202,13 +202,13 @@ for s in 0 1; do
                    || bad "k$s.o: $n syscall instructions"
 done
 [ -d lib/net ] && bad "there is a copy of the stack in lib/net -- it belongs in vendor/" \
-               || ok "no copy of the TCP/IP stack in this repository (vendor/net/HERKUNFT.md)"
+               || ok "no copy of the TCP/IP stack in this repository (vendor/net/PROVENANCE.md)"
 n=$(nm "$TMPD/k0.o" 2>/dev/null | grep -cE 'tcp__tcp_input|stack__net_input|wire__checksum')
 num "the stack of round K3 is really linked into the kernel (symbols)" "$n" ge 3
 
-gcc -O2 -o "$TMPD/bruecke" tools/net/bruecke.c 2>"$TMPD/gcc.err" \
-    && ok "tools/net/bruecke.c: the UDP/AF_PACKET wire is built" \
-    || { bad "bruecke.c does not compile"; head -5 "$TMPD/gcc.err" | sed 's/^/        /'; }
+gcc -O2 -o "$TMPD/bridge" tools/net/bridge.c 2>"$TMPD/gcc.err" \
+    && ok "tools/net/bridge.c: the UDP/AF_PACKET wire is built" \
+    || { bad "bridge.c does not compile"; head -5 "$TMPD/gcc.err" | sed 's/^/        /'; }
 
 # The disk with the userland of this round on it.
 SPEC="/bin/"
@@ -258,7 +258,7 @@ wire_down() {
 }
 
 bridge_up() {
-    "$TMPD/bruecke" "$V0" "$BPORT" "$QPORT" 2>"$TMPD/br.log" &
+    "$TMPD/bridge" "$V0" "$BPORT" "$QPORT" 2>"$TMPD/br.log" &
     BRPID=$!
     sleep 0.4
 }

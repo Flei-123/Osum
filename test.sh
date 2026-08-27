@@ -64,7 +64,7 @@
 #      fuer Ring 3. Gemessen an echten BILDSCHIRMFOTOS ueber den
 #      QEMU-Monitor, bildpunktgenau gegen den Zeichensatz gerechnet --
 #      und dazu die Speicherkarte von `kdata`, 38 Bereiche aus vier
-#      Dateien paarweise gegeneinander (`tools/kernel/karte.py`).
+#      Dateien paarweise gegeneinander (`tools/kernel/memmap.py`).
 #      Gegenproben: ohne das Wort `gfx` bricht jede Messung zusammen, und
 #      mit der alten Adresse 0x2F000 MUSS der Kartenpruefer anschlagen.
 #  13. Was jedes Unix-Programm voraussetzt (tools/unix/run.sh, Runde
@@ -84,7 +84,7 @@
 #
 #  14. Das Netz (tools/net/run.sh, Runde K8): ein virtio-net-Treiber in
 #      Firn (`kernel/virtio.fi`), der TCP/IP-Stack aus Runde K3 als
-#      ABHAENGIGKEIT ueber vendor/firn/COMMIT (`vendor/net/HERKUNFT.md`),
+#      ABHAENGIGKEIT ueber vendor/firn/COMMIT (`vendor/net/PROVENANCE.md`),
 #      die Naht dazwischen (`kernel/inet.fi`) und Steckdosen-Aufrufe fuer
 #      Ring 3 mit den Nummern von Linux. Gemessen gegen den ECHTEN
 #      Linux-Kernel ueber veth + AF_PACKET: ping, nc, curl, ein
@@ -129,7 +129,7 @@
 #      landet am selben Ort: `/bin/files` ist ein ZWEITER NAME auf
 #      dieselbe Inode, kein zweites Exemplar. Dazu ein
 #      ANWENDUNGSVERZEICHNIS: ein Programm ist ein VERZEICHNIS
-#      (`/apps/<name>.prog/` mit INFO, start, symbol und daten/ --
+#      (`/apps/<name>.osp/` mit INFO, start, symbol und data/ --
 #      installieren heisst kopieren), und darueber ein STARTER mit
 #      Suchfeld: man tippt "folder" und findet den Dateimanager, obwohl
 #      das Wort weder im Namen noch in der Beschreibung steht.
@@ -143,12 +143,12 @@
 #      Gemessen an echten Bildschirmfotos, in die ueber den
 #      QEMU-Monitor echte Klicks und Tastendruecke gespeist wurden --
 #      und der Text darin JE ZEICHEN gegen `tools/ttf/raster.py`, das
-#      Symbol BILDPUNKT FUER BILDPUNKT gegen `tools/k15/symbol.py`.
+#      Symbol BILDPUNKT FUER BILDPUNKT gegen `tools/k15/icon.py`.
 #      Gegenproben: `wignohit` (keine Trefferpruefung -- kein Widget
 #      erfaehrt vom Klick), `wignoclip` (keine Zwischenablage),
 #      `wignokeys` (dieselbe Suche ohne die Schluesselwoerter -- dann
 #      findet "folder" NICHTS), `wignoidx` (dieselbe Suche ohne den
-#      Namensindex -- dann findet "blau" NICHTS), `suchen -n` (dieselben
+#      Namensindex -- dann findet "blau" NICHTS), `locate -n` (dieselben
 #      drei Dateiaenderungen, aber das Journal wird nicht abgeholt --
 #      dann weiss der Index von keiner), `nodirty`, `nofocus`, `nomouse`
 #      und der Lauf ganz ohne `wig`.
@@ -563,8 +563,8 @@ lauf() { # titel skript logname muster
 echo "== 1. der festgenagelte Uebersetzer (vendor/firn/COMMIT) =="
 COMMIT=$(cat vendor/firn/COMMIT)
 S1=""
-bash vendor/firn/hole-firnc.sh > "$WORK/vendor.log" 2>&1 || \
-    S1="$S1 hole-firnc.sh fehlgeschlagen (siehe .test-work/vendor.log);"
+bash vendor/firn/fetch-firnc.sh > "$WORK/vendor.log" 2>&1 || \
+    S1="$S1 fetch-firnc.sh fehlgeschlagen (siehe .test-work/vendor.log);"
 [ -x vendor/firn/bin/firnc ]  || S1="$S1 vendor/firn/bin/firnc fehlt;"
 [ -x vendor/firn/bin/firnc1 ] || S1="$S1 vendor/firn/bin/firnc1 fehlt;"
 [ -d vendor/firn/lib/std ]    || S1="$S1 vendor/firn/lib/std fehlt;"
@@ -574,7 +574,7 @@ bash vendor/firn/hole-firnc.sh > "$WORK/vendor.log" 2>&1 || \
 # herein und nicht als Kopie. Die drei Blob-Hashes in vendor/net/BLOBS
 # sind die, die Firn im Baum dieses Commits stehen hat -- zieht jemand
 # COMMIT nach und der Stack hat sich dabei geaendert, faellt es hier auf
-# und nicht erst in einer Messung. Siehe vendor/net/HERKUNFT.md.
+# und nicht erst in einer Messung. Siehe vendor/net/PROVENANCE.md.
 while read -r want name; do
     case "$want" in \#*|"") continue;; esac
     got=$(git hash-object "vendor/firn/lib/$name" 2>/dev/null)
@@ -660,7 +660,7 @@ lauf "20. die VFS-Schicht und die fremden Dateisysteme: /proc, /dev, FAT32, MBR 
 lauf "21. der Uebersetzer laeuft auf dem System selbst, und eine Datei weiss, womit man sie oeffnet (tools/k16/run.sh, Runde K16)" \
      tools/k16/run.sh k16 '^K16: |^  OK    (ZEICHENGLEICH|DAS AUF OSUM|DER DOPPELKLICK|DER AUSLEGER|DER INHALT GEHT VOR|fas uebersetzt|16 von 16)'
 lauf "22. Widgets und der Dateimanager: eine Bibliothek in Ring 3 (tools/k15/run.sh, Runde K15)" \
-     tools/k15/run.sh k15 '^K15: |^        -> |^  OK    (die Anordnung|ein Klick auf das Kaestchen|mit Bereichsverfolgung|und /daten/neu|der Verweis spart|getippt |OHNE (die Schluesselwoerter|das Journal|den Namensindex)|[0-9]\. (DER AUFBAU|DIE SUCHE|DIE GEGENPROBE|der Index)|und DIESELBEN NAMEN|nach dem (Anlegen|Umbenennen)|das Symbol des Dateimanagers)'
+     tools/k15/run.sh k15 '^K15: |^        -> |^  OK    (die Anordnung|ein Klick auf das Kaestchen|mit Bereichsverfolgung|und /data/neu|der Verweis spart|getippt |OHNE (die Schluesselwoerter|das Journal|den Namensindex)|[0-9]\. (DER AUFBAU|DIE SUCHE|DIE GEGENPROBE|der Index)|und DIESELBEN NAMEN|nach dem (Anlegen|Umbenennen)|das Symbol des Dateimanagers)'
 lauf "25. der Fensterbaum: Kacheln, Reiter, Drehen -- und die Invariante nach jeder Operation (tools/tiling/run.sh, Runde TILING)" \
      tools/tiling/run.sh tiling '^TILING: |^  OK    (die Zusagen des Fensterbaums|und KEINE davon|Verletzungen der Invariante|und nach JEDER Operation|GEGENPROBE|Fenster [0-9] |und im Bild|vier Reiter|nach der Drehung|der Aufwand waechst|und das spart|Kern und Ring 3)'
 lauf "24. Energie und Leistung: drei Profile, Ruhezustand, Waerme, Akku (tools/k18/run.sh, Runde K18)" \

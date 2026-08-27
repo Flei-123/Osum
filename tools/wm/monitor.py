@@ -4,7 +4,7 @@
     monitor.py <monitor-socket> <befehlsdatei> [pause]
 
 Runde K7 hat ueber den QEMU-Monitor Bildschirmfotos geholt
-(`tools/gfx/schuss.py`).  Runde K10 braucht denselben Weg in die andere
+(`tools/gfx/screenshot.py`).  Runde K10 braucht denselben Weg in die andere
 Richtung: ein Fensterserver, der nie eine Maus gesehen hat, ist nicht
 gemessen.  Der Monitor kann das:
 

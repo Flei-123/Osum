@@ -110,7 +110,7 @@ number_in() { # file name
         | sed -E 's/^const [A-Za-z0-9_]+: u64 = ([0-9]+).*/\1/'
 }
 
-bash vendor/firn/hole-firnc.sh >/dev/null || { echo "vendor/firn/hole-firnc.sh failed"; exit 1; }
+bash vendor/firn/fetch-firnc.sh >/dev/null || { echo "vendor/firn/fetch-firnc.sh failed"; exit 1; }
 [ -x "$FIRNC" ] || { echo "firnc0 fehlt: $FIRNC"; exit 1; }
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
     echo "UNIX: skipped, qemu-system-x86_64 ist nicht da"

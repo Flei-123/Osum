@@ -72,13 +72,13 @@ Vor ihr konnte Osum über ACPI **genau eine Sache: abschalten**
 | `tools/k18/run.sh` | 663 | Der Testläufer |
 | `tools/k18/msrprobe.s` | 496 | Die **Vorabprüfung**: was tut dieser Wirt mit den Energieregistern? |
 | `tools/k18/ssdt.py` | 256 | Baut eine ACPI-Tabelle mit einem Akku darin |
-| `tools/k18/soll.py` | 152 | Die **zweite Fassung** der Kodierungen, aus dem Handbuch |
+| `tools/k18/expect.py` | 152 | Die **zweite Fassung** der Kodierungen, aus dem Handbuch |
 
 Dazu geändert: `acpi.fi` (`table_count`/`table_at` — **alle** Tabellen
 der Reihe nach, einschließlich der DSDT), `tasks.fi` (der
 Untätigkeitspfad), `trap.fi` (Zeitgeber, Tastatur, Maus), `sys.fi` (drei
 Aufrufe), `uprog.fi` (drei Programme in Ring 3), `kmain.fi`,
-`kstate.fi`, `boot.s` (kdata wächst), `tools/kernel/karte.py`, `test.sh`.
+`kstate.fi`, `boot.s` (kdata wächst), `tools/kernel/memmap.py`, `test.sh`.
 
 ---
 
@@ -183,7 +183,7 @@ zurück, weil QEMU es schluckt** — und das steht als eigene Zusage im
 Läufer, damit es auffällt, falls ein neueres QEMU es doch behält.
 
 **Nachgerechnet wird nicht gegen eine Konstante im Testskript.**
-`tools/k18/soll.py` ist eine zweite, unabhängige Fassung derselben
+`tools/k18/expect.py` ist eine zweite, unabhängige Fassung derselben
 Kodierung, geschrieben aus dem Intel SDM und nicht aus `kernel/pwr.fi`.
 Dieselbe Bauart wie `tools/ttf/raster.py` in Runde K10 (eine zweite
 Rasterung desselben Umrisses). Sagen beide dasselbe, ist es wahrscheinlich
@@ -411,7 +411,7 @@ zweiten Weg zu liefern. Ein Vorrat ist eine Grenze, keine Pflicht.
 **kdata musste wachsen**, von `0x50000` auf `0x60000`: der Vorrat dieser
 Runde liegt hinter der alten Grenze. Die Zahl steht **zweimal**
 (`kstate.fi` und `kernel/boot.s`), und der Läufer vergleicht beide. Die
-beiden Seiten sind in `tools/kernel/karte.py` eingetragen; der
+beiden Seiten sind in `tools/kernel/memmap.py` eingetragen; der
 Kartenprüfer meldet **51 Bereiche, 0 Kollisionen**.
 
 Der Läufer prüft außerdem, dass **keine Aufrufnummer** aus 1750..1799
@@ -449,7 +449,7 @@ außerhalb der drei Dateien dieser Runde steht.
    Attrappe, die sich selbst misst; er wurde nicht gebaut.
 3. **HWP.** CPUID Blatt 6 Bit 7 ist auf jedem CPU-Modell von QEMU 7.2
    null, und `-cpu max,+hwp` gibt es nicht. Der Pfad ist gebaut und wird
-   nie betreten. Geprüft ist nur die **Kodierfunktion** gegen `soll.py`,
+   nie betreten. Geprüft ist nur die **Kodierfunktion** gegen `expect.py`,
    und der Läufer sagt bei jeder dieser drei Zusagen dazu: *„NUR die
    Kodierung, nicht die Wirkung"*.
 4. **Die Temperaturanzeige im Prozessor.** `IA32_THERM_STATUS` Bit 31 ist
