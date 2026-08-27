@@ -49,6 +49,12 @@ for p in $PROGS; do ARGS+=("/bin/$p=$OUT/$p.elf"); done
 # Der ZWEITE NAME: ein Verzeichniseintrag mehr auf dieselbe Inode.
 ARGS+=("/bin/files@/bin/explorer")
 ARGS+=(/etc/ "/etc/theme=$OUT/baum/theme")
+# RUNDE I18N: die Sprachdateien. Ohne sie zeigt jedes Bedienelement
+# seinen Schluessel -- der Rueckfall, und nicht das, was gemessen wird.
+ARGS+=(/usr/ /usr/share/ /usr/share/locale/ /usr/share/locale/en/
+       "/usr/share/locale/en/messages=locale/en/messages"
+       /usr/share/locale/de/
+       "/usr/share/locale/de/messages=locale/de/messages")
 # DIE BUENDEL: /apps/<name>.prog/{INFO,start,symbol,daten/}
 while read -r zeile; do ARGS+=("$zeile"); done < <(python3 tools/k15/buendel.py assets/apps "$OUT/buendel")
 while read -r pfad; do ARGS+=("$pfad"); done < "$OUT/baum/liste"
