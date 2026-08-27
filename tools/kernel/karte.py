@@ -141,6 +141,13 @@ BEREICHE = [
     # gelesen wurde.  Der Rest des Vorrats bleibt frei.
     ("K18",        "kstate.fi", "K18_OFF",        "K18_MAX"),
     ("K18BATT",    "kstate.fi", "BATT_OFF",       "BATT_MAX"),
+    # RUNDE TILING: der Fensterbaum.  Vier Seiten, 0x4C000..0x50000, aus
+    # dem Vorrat, den K16 als frei ausgewiesen hat.  Er steht HIER, weil
+    # zur Zeit dieser Runde sieben Runden gleichzeitig an diesem Baum
+    # gearbeitet haben -- genau die Lage, aus der die vier Kollisionen
+    # oben entstanden sind.  Die Runde DESKTOP bekommt 0x54000; dazwischen
+    # bleibt eine Seitengruppe frei.
+    ("TILE",       "kstate.fi", "TILE_OFF",       "TILE_MAX"),
     # RUNDE K15, ZWEITER NACHTRAG.  Die erste Seite dieses Vorrats wird
     # geteilt: `wig.fi` braucht davon 0x40 Oktette, der Rest gehoert der
     # Geometrie des Dateisystems (FSG, zwei Woerter aus dem Superblock)
