@@ -462,9 +462,16 @@ set_edge() { # edge
         "$1" > "$TMPD/taskbar.conf"
 }
 
+# ROUND MERGE: 8192 blocks and not 4096. The fourteen programs of this
+# graphical image have grown past the two mebioctets that were an OFS
+# disk's ceiling before round OFS3 -- every one of them links ulib,
+# tools, wlib and the libc, and those grew with every round. `mkfs.py`
+# said "the disk is full" and the six state images could not be built,
+# which cost this runner twenty-nine assertions. Same cause and same fix
+# as in tools/userland/run.sh and tests/theme/build.sh.
 mk_gimage() { # image theme-file
     local img=$1 th=$2
-    local ARGS=(build "$img" 4096 /lib/
+    local ARGS=(build "$img" 8192 /lib/
         "/lib/mono.ttf=$MONO" "/lib/sans.ttf=$SANS" /bin/)
     local q
     for q in $GPROGS; do ARGS+=("/bin/$q=$TMPD/g$q.elf"); done
