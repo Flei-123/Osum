@@ -35,7 +35,7 @@ FIRNC=${FIRNC:-vendor/firn/bin/firnc}
 FC1=${FIRNC1:-vendor/firn/bin/firnc1}
 LDSCRIPT=kernel/kernel.ld
 ULD=kernel/user/user.ld
-PROGS="sh ls cat echo ping wget netstat sleep"
+PROGS="sh ls cat echo ping wget netstat sleep dhcp"
 # `/var/net/` has to exist on the image: the history file lives there.
 BLOCKS=4096
 
@@ -156,7 +156,7 @@ gcc -O2 -o "$TMPD/bruecke" tools/net/bruecke.c 2>"$TMPD/gcc.err" \
 
 SPEC="/bin/"
 for p in $PROGS; do SPEC="$SPEC /bin/$p=$TMPD/${p}0.elf"; done
-SPEC="$SPEC /var/ /var/net/"
+SPEC="$SPEC /var/ /var/net/ /etc/"
 python3 tools/osum/mkfs.py build "$TMPD/disk.img" $BLOCKS $SPEC \
     > "$TMPD/mkfs.txt" 2>&1 \
     && ok "mkfs.py: an image with /bin/netstat on it" \
@@ -515,6 +515,111 @@ num "ports in the history file (there must be NONE)" "$n" eq 0
 note "the file records HOW MUCH per program and never WHERE. The live list"
 note "in section 5 shows destinations because a person asking now has a right"
 note "to know; nothing writes them down."
+
+# =====================================================================
+echo "== 7. handing the connection on: two machines, one wire =="
+# =====================================================================
+# NOT A WLAN HOTSPOT. Osum has no 802.11 and cannot have one; the whole
+# argument is in `docs/NETMON.md` and at the top of `kernel/share.fi`.
+# What is measured here is the other feature with the same purpose, the
+# one Windows calls Internet Connection Sharing:
+#
+#   the namespace  10.9.0.1  (a python HTTP server, "the internet")
+#         |  veth + AF_PACKET bridge + QEMU's UDP socket backend
+#   MACHINE A  10.9.0.2 on card 0   192.168.42.1 on card 1   `share`
+#         |  QEMU's UDP socket backend, card 1 to card 0
+#   MACHINE B  no address at all until it asks
+#
+# Machine B is a SECOND OSUM, booted with a link-local placeholder it
+# cannot route with (169.254.1.9/16). Everything it ends up with it got
+# from machine A. If any part of part two is a story, B reaches nothing.
+SHARE_A=$(( 21000 + ($$ % 200) * 4 ))
+SHARE_B=$(( SHARE_A + 1 ))
+NSB=nmb-$$
+wire_up; bridge_up; srv_up
+cp "$TMPD/disk.img" "$TMPD/rtr.img"
+cp "$TMPD/disk.img" "$TMPD/cli.img"
+rm -f "$TMPD/A.txt" "$TMPD/B.txt"
+# A: the router. TWO cards -- card 0 is the uplink, card 1 the shared
+# side, in the order the PCI scan finds them.
+( timeout 260 qemu-system-x86_64 -kernel "$TMPD/k0.mb" -m 256 \
+  -append "osum $BASE $NETARGS nsvc=0 nwait=0 share script=sleep 120;netstat -s;exit" \
+  -serial "file:$TMPD/A.txt" -display none -no-reboot \
+  -drive "file=$TMPD/rtr.img,format=raw,if=ide,index=0" \
+  -netdev "socket,id=n0,udp=127.0.0.1:$BPORT,localaddr=127.0.0.1:$QPORT" \
+  -device "virtio-net-pci,netdev=n0,mac=52:54:00:aa:bb:cc" \
+  -netdev "socket,id=n1,udp=127.0.0.1:$SHARE_B,localaddr=127.0.0.1:$SHARE_A" \
+  -device "virtio-net-pci,netdev=n1,mac=52:54:00:aa:bb:dd" \
+  -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1 ) &
+PA=$!
+for i in $(seq 1 150); do
+    [ -f "$TMPD/A.txt" ] && grep -qaF "share: card=" "$TMPD/A.txt" && break
+    sleep 0.2
+done
+sleep 1
+# B: the client. One card, on A's shared side, and an address it cannot
+# use.
+( timeout 220 qemu-system-x86_64 -kernel "$TMPD/k0.mb" -m 256 \
+  -append "osum $BASE nic nip=169.254.1.9/16 ngw=169.254.1.1 nsvc=0 nwait=0 script=dhcp;ping -c 2 192.168.42.1;ping -c 2 $HOST_IP;wget -q http://$HOST_IP:8000/x;wget -q http://$HOST_IP:8000/x;wget -q http://$HOST_IP:8000/x;netstat -p;exit" \
+  -serial "file:$TMPD/B.txt" -display none -no-reboot \
+  -drive "file=$TMPD/cli.img,format=raw,if=ide,index=0" \
+  -netdev "socket,id=n0,udp=127.0.0.1:$SHARE_A,localaddr=127.0.0.1:$SHARE_B" \
+  -device "virtio-net-pci,netdev=n0,mac=52:54:00:11:22:33" \
+  -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1 ) &
+PB=$!
+wait $PB 2>/dev/null
+wait $PA 2>/dev/null
+srv_down; bridge_down; wire_down
+A="$TMPD/A.txt"; B="$TMPD/B.txt"
+
+has "$A" "share: card=1" "the SECOND virtio card came up, on its own scalars and its own ring"
+grep -qaE '^share: card=1  ip=192\.168\.42\.1  pool=192\.168\.42\.100-192\.168\.42\.150' "$A" \
+    && ok "with an address and an address pool of its own" \
+    || bad "the shared side has no address"
+
+# --- the DHCP SERVER, which is not the DHCP client
+has "$B" "dhcp: offer ip=192.168.42.100" \
+    "the client got an OFFER out of the pool -- from Osum's DHCP SERVER"
+has "$B" "dhcp: ack ip=192.168.42.100" "and an ACK for it"
+grep -qaE 'gateway=192\.168\.42\.1 +server=192\.168\.42\.1' "$B" \
+    && ok "with this machine as its gateway and as the server that answered" \
+    || bad "the offer carries the wrong gateway or server"
+has "$B" "dhcp: gesetzt ip=192.168.42.100" "and the client really took the address"
+hasnot "$B" "dhcp: offer ip=169.254" \
+    "it was NOT handed back the address it booted with (a bug this round had)"
+
+# --- the shared side itself
+grep -qaE '^2 transmitted, 2 received, 0% packet loss' "$B" \
+    && ok "the client can reach its gateway (ICMP, answered on the shared side)" \
+    || bad "the client cannot ping 192.168.42.1"
+
+# --- THROUGH the NAT, to a machine that has never heard of 192.168.42.x
+n=$(grep -acE '^64 octets from 10\.9\.0\.1: icmp_seq=[0-9]+' "$B")
+num "echo replies from 10.9.0.1 -- through the NAT, from the far side" "$n" ge 2
+n=$(grep -acE '^wget: octets [0-9]+' "$B")
+num "files fetched over HTTP through the NAT" "$n" ge 3
+n=$(grep -aoE '^wget: octets [0-9]+' "$B" | tail -1 | awk '{print $3}')
+num "octets of the last one, and it is the whole file" "${n:-}" eq $BODY
+hasnot "$B" "*** EXCEPTION" "no exception on the client"
+hasnot "$A" "*** EXCEPTION" "and none on the router"
+
+# --- the counters of the forwarder
+SL=$(grep -a '^share: on=' "$A" | tail -1)
+CL=$(echo "$SL" | grep -oE 'clients=[0-9]+' | cut -d= -f2)
+MADE=$(echo "$SL" | grep -oE 'made=[0-9]+' | cut -d= -f2)
+EV=$(echo "$SL" | grep -oE 'evict=[0-9]+' | cut -d= -f2)
+OUTF=$(echo "$SL" | grep -oE ' out=[0-9]+' | cut -d= -f2)
+INF=$(echo "$SL" | grep -oE ' in=[0-9]+' | cut -d= -f2)
+DR=$(echo "$SL" | grep -oE 'drops=[0-9]+' | cut -d= -f2)
+num "clients the router knows about" "${CL:-}" eq 1
+num "NAT records made (two pings and three fetches)" "${MADE:-}" ge 4
+num "NAT records thrown out because the table was full" "${EV:-}" eq 0
+num "frames forwarded outwards" "${OUTF:-}" ge 10
+num "frames forwarded inwards" "${INF:-}" ge 10
+num "frames the forwarder would not carry" "${DR:-}" le 2
+note "the router's own accounting puts every forwarded frame in the SYSTEM"
+note "bucket, and that is right: a frame belonging to another machine belongs"
+note "to no process on this one."
 
 echo
 echo "NETMON: $pass passed, $fail failed"

@@ -64,13 +64,14 @@ import net.wire
 import net.tcp
 import net.stack
 import netmon
+import share
 
 export {
     init, ready, pump, netd_body, wake, configure, readdr, us, set_task,
     ip, mask, gw, mac_at, stat, pumps, frames_in, frames_out,
     bounce, saddr,
     tcp_stat, task_slot, print_state,
-    card_octets,
+    card_octets, hw_for,
     sock_new, sock_free, sock_kind, sock_handle,
     sock_bind, sock_listen, sock_accept, sock_connect,
     sock_send, sock_recv, sock_sendto, sock_recvfrom,
@@ -208,6 +209,21 @@ fn saddr(state: u64) -> u64 {
 // The per-process counters are checked against it: their sum plus the
 // system bucket has to come out at this, and `tools/netmon/run.sh` says
 // by how much it does not.
+// ROUND NETMON: THE HARDWARE ADDRESS FOR AN IP, for the forwarder.
+// `arp_look` is private and stays private; what `kernel/share.fi` needs
+// is "give me the address, and ask for it if you have not got it", which
+// is these five lines and not a second ARP cache. Returns 0 while the
+// question is still out.
+fn hw_for(state: u64, target: u64) -> u64 {
+    let flags: u64 = hold(state)
+    let m: u64 = arp_look(state, target)
+    if m == 0 {
+        arp_ask(state, target)
+    }
+    drop_lock(state, flags)
+    return m
+}
+
 fn card_octets(state: u64, which: u64) -> u64 {
     if which == 0 {
         return virtio.tx_octets(state)
@@ -431,7 +447,13 @@ fn pump(state: u64) -> u64 {
             // the stack, because the stack may consume it and because
             // this is the only place it exists as octets with a length.
             netmon.frame_seen(state, frame, len, false)
-            stack.net_input(s, frame as *mut u8, len as usize, now)
+            // ROUND NETMON PART TWO: is this frame a CLIENT'S answer?
+            // Asked before the stack sees it, because a frame belonging
+            // to a machine on the shared side is not this machine's
+            // business and handing it to the stack would get it an RST.
+            if !share.inbound(state, frame, len) {
+                stack.net_input(s, frame as *mut u8, len as usize, now)
+            }
             virtio.rx_recycle(state, slot)
             kstate.add(state, sc(S_IN), 1)
             work = work + 1
@@ -473,7 +495,12 @@ fn netd_body(state: u64, index: u64) {
     var hot: u64 = HOT_TURNS
     var seen: u64 = 0
     while true {
-        let w: u64 = pump(state)
+        var w: u64 = pump(state)
+        // ROUND NETMON PART TWO: the shared card gets its turn in the
+        // same task. A second task would mean a second thing taking the
+        // network lock, and the whole discipline of round K8 is that
+        // exactly one thread moves frames.
+        w = w + share.pump(state)
         let kick: u64 = kstate.get(state, sc(S_KICK))
         if w > 0 || kick != seen {
             hot = HOT_TURNS
