@@ -160,6 +160,13 @@ BEREICHE = [
     ("MODE",       "kstate.fi", "MODE_OFF",       "MODE_MAX"),
     ("K18",        "kstate.fi", "K18_OFF",        "K18_MAX"),
     ("K18BATT",    "kstate.fi", "BATT_OFF",       "BATT_MAX"),
+    # RUNDE DISPLAY: der Modustreiber.  Zwei Seiten aus demselben Vorrat
+    # (0x5A000 und 0x5B000) -- die Modusliste samt Skalaren und die
+    # Nachschlagetabelle fuer Gamma/Helligkeit/Kontrast/Saettigung samt
+    # EDID-Block.  Sie stehen hier, weil zur Zeit dieser Runde fuenf
+    # Runden gleichzeitig an diesem Baum arbeiten.
+    ("DISP",       "kstate.fi", "DISP_OFF",       "DISP_MAX"),
+    ("DLUT",       "kstate.fi", "DLUT_OFF",       "DLUT_MAX"),
     # RUNDE DESKTOP: die Fenstertafel und die Ereignisringe des
     # Fensterservers.  Sie standen bis zu dieser Runde in WM_OFF (zwei
     # Seiten); mit MAX_WIN 16 statt 8 sind das 0x1000 Oktette Tafel und
@@ -229,6 +236,9 @@ KEINE_KDATA = {
     ("wm.fi", "W_OFF"),         # Versatz IN der Fenstertafel
     ("wig.fi", "CLIP_OFF"),     # Versatz IN WIG_OFF (Runde K15)
     ("wig.fi", "STAGE_OFF"),    # dito
+    ("vmode.fi", "LUT_OFF"),    # Versatz IN DLUT_OFF (Runde DISPLAY)
+    ("vmode.fi", "EDID_OFF"),   # dito
+    ("vmode.fi", "LIST_OFF"),   # Versatz IN DISP_OFF (Runde DISPLAY)
     ("kstate.fi", "FSG_OFF"),   # Versatz IN WIG_OFF (K15, zweiter Nachtrag)
     ("kstate.fi", "JRNL_OFF"),  # dito -- das Aenderungsjournal
     # RUNDE OFS3: Versaetze INNERHALB von OFS3_OFF, kein eigenes kdata.

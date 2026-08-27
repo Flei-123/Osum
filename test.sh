@@ -260,6 +260,16 @@
 #      `nofocus` (die Taste kommt beim falschen Fenster an), `nomouse`,
 #      `nompoll` und der Lauf ganz ohne das Wort `wm`.
 #
+#  25. DER BILDSCHIRM, ZUM ZWEITEN MAL (tools/display/run.sh, Runde
+#      DISPLAY): Runde K7 hatte ZWEI Aufloesungen als vier Konstanten im
+#      Quelltext, umschaltbar nur beim Start. Diese Runde fragt die Karte
+#      -- Modusliste ueber Zuruecklesen der VBE-Register und
+#      VBE_VIDEO_MEMORY_64K, EDID aus dem Speicherbereich der Karte,
+#      Moduswechsel IM BETRIEB mit Rueckfall und einer Frist von 15
+#      Sekunden, dazu Gammarampe, Drehung und Skalierung beim
+#      Uebertragen. Gemessen wird mit Bildschirmfotos vorher und
+#      nachher; die Gegenprobe nimmt das Wort `disp` weg und erwartet
+#      nichts davon.
 #  24. ENERGIE UND LEISTUNG (tools/k18/run.sh, Runde K18): bis dahin
 #      konnte dieser Kernel ueber ACPI genau eine Sache -- abschalten.
 #      Zwischen "laeuft" und "aus" gab es nichts. Diese Runde baut die
@@ -462,6 +472,9 @@ lauf "25. die zweite Maschine: AArch64 auf qemu -M virt (tools/arm/run.sh, Runde
 
 lauf "23. USB: xHCI, Aufzaehlung, Tastatur, Maus und ein Stick (tools/k17/run.sh, Runde K17)" \
      tools/k17/run.sh k17 '^K17: |^  OK    (DIESELBEN ZEICHEN|DIESELBE SHELL|WAS OSUM SCHRIEB|die Tastatur, an Klasse|die Maus, an Klasse|der Stick, an Klasse|der Zeiger steht|GEGENPROBE usbnoirq|lesen auf dem OFFENEN)'
+
+lauf "26. Der Bildschirm, zum zweiten Mal: Modusliste, Wechsel im Betrieb, EDID, Gamma (tools/display/run.sh, Runde DISPLAY)" \
+     tools/display/run.sh display '^DISPLAY: |^  OK    (gefragt |die native |der rohe Block|er hat [0-9]+ Mikro|gemessen: |je Bildpunkt|NACHHER|VORHER|ZURUECK|Feld 1 ist rot|das Foto ist 800x600 -- der Bildmodus|und der Kernel hat von SELBST|die Aufrufnummern dieser Runde|ein Programm in Ring 3 hat)'
 
 echo
 echo "=================================================================="
