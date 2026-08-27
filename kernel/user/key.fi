@@ -1,0 +1,531 @@
+// kernel/user/key.fi -- round TRESOR: key management, and nothing else.
+//
+//     key init  <blob> <passphrase>    a new data key, wrapped, written
+//     key open  <blob> <passphrase>    unwrap it, show its FINGERPRINT
+//     key erase <blob>                 destroy the wrapping -- for ever
+//
+// ============================================ WHAT THIS IS AND IS NOT
+//
+// THIS DOES NOT ENCRYPT A DISK. It does not encrypt anything at all. It
+// manages the one secret that disk encryption would hang off, because
+// that secret -- not the cipher -- is what makes REMOTE WIPE possible in
+// milliseconds instead of hours. The reasoning is in docs/CRYPTO-ERASE.md.
+//
+// WHY NO CIPHER HERE: this tree has no authenticated cipher. Firn's
+// `lib/std/crypto/aes.fi` is AES-128 with CBC and CFB8, and its own
+// header says it: "A4 NO GCM, NO AUTHENTICATION". Confidentiality without
+// authentication is how padding oracles are born, and building disk
+// encryption on it in this round would produce something that looks
+// finished and is not. Certus B6 is building the AEAD; when it lands,
+// what is missing is the layer between the key below and the block
+// device, and not this file.
+//
+// ================================================== THE TWO-KEY SHAPE
+//
+// The passphrase does NOT encrypt the data. This matters, and it is the
+// whole trick:
+//
+//     DATA KEY   32 random octets from `getrandom`. This is what would
+//                encrypt the disk. It never leaves memory in the clear
+//                and it is never derived from anything a human knows.
+//     WRAP KEY   PBKDF2-HMAC-SHA256(passphrase, salt, iterations). It
+//                encrypts THE DATA KEY, and nothing else.
+//
+// Three things fall out of that, free:
+//
+//   1. CHANGING THE PASSPHRASE re-wraps 32 octets. It does not re-encrypt
+//      the disk. A design where the passphrase encrypts the data directly
+//      cannot change a passphrase without rewriting every block.
+//   2. SEVERAL PASSPHRASES can wrap the same data key -- yours and a
+//      recovery one. (Not built here; the shape allows it, one blob per
+//      wrapping.)
+//   3. CRYPTO ERASE. Destroy the wrapped data key and the data key is
+//      gone. Not "hard to find" -- GONE, because it existed nowhere else.
+//      Every octet on the disk is then noise for ever. That is a write of
+//      a few dozen octets instead of a pass over a terabyte.
+//
+// ==================================================== THE WRAPPING
+//
+// No AES, and no invented cipher either. The construction is:
+//
+//     wrap = PBKDF2-HMAC-SHA256(pass, salt, iters, 64 octets)
+//     pad  = wrap[0..31]      mac = wrap[32..63]
+//     wrapped = datakey XOR pad
+//     tag     = HMAC-SHA256(mac, salt || iters || wrapped)
+//
+// THAT IS A ONE-TIME PAD OVER 32 OCTETS, encrypt-then-MAC. It is sound
+// for EXACTLY this use and for no other, and the condition is stated so
+// that nobody carries it somewhere it does not hold: THE SALT IS FRESH
+// PER BLOB AND THE PAD IS NEVER USED TWICE. Re-wrap with the same salt
+// and the same passphrase and two data keys XOR to a known value -- the
+// classic two-time pad. `init` always draws a new salt; there is no code
+// path here that reuses one.
+//
+// The tag covers the salt and the iteration count, not only the wrapped
+// octets. Without that, an attacker could lower the iteration count in
+// the file and make the next unwrap cheap to brute force.
+//
+// ===================================================== HONEST
+//
+// K1 2048 ITERATIONS, the same number `pw.fi` uses and for the same
+//    reason (round K13): this system runs under software emulation, and
+//    the 600000 that today's guidance asks for would be minutes per
+//    unlock here. It is the right SHAPE with a number that is too small,
+//    the number is IN THE FILE, and it can be raised without invalidating
+//    an existing blob.
+// K2 THE KEY LIVES IN THE PROCESS. There is no kernel keyring, so it dies
+//    with the program and it sits in ordinary pages that this kernel
+//    could swap if it had swap (it has none). A real implementation pins
+//    it and keeps it out of core dumps.
+// K3 `erase` OVERWRITES THE BLOB AND UNLINKS IT. On a log-structured or
+//    flash-translated store that does NOT guarantee the old octets are
+//    physically gone -- an SSD may keep the old page. Saying otherwise
+//    would be the exact lie this round exists to avoid. The honest
+//    version of crypto erase needs the key in a place built to be
+//    destroyed (a TPM, a key slot the controller can purge), and that is
+//    named in docs/CRYPTO-ERASE.md as what is missing.
+// K4 NO ANTI-BRUTE-FORCE. Nothing counts wrong attempts, nothing waits.
+
+profile kernel
+
+import ulib
+import libc.io
+import libc.errno
+import sha
+
+export { u_start }
+
+const ITERS: u64 = 2048
+const KEYLEN: u64 = 32
+const SALTLEN: u64 = 16
+const SYS_GETRANDOM: u64 = 318
+
+static mut wrapbuf: [u8; 64] = [0 as u8; 64]
+static mut ipad: [u8; 128] = [0 as u8; 128]
+static mut opad: [u8; 128] = [0 as u8; 128]
+static mut macmsg: [u8; 128] = [0 as u8; 128]
+
+// ------------------------------------------------------------- HMAC
+
+// HMAC-SHA256 (RFC 2104) on top of the streaming SHA-256 of `sha.fi`.
+// The key is padded to the 64 octet block; a key longer than that is
+// hashed first. That case cannot happen here -- every key handed in is 32
+// octets -- and it is written anyway, because the one time somebody
+// reuses this file it will be with a longer key.
+fn hmac(key: u64, klen: u64, msg: u64, mlen: u64, out: u64) {
+    var k0: [u8; 64] = [0 as u8; 64]
+    var inner: [u8; 32] = [0 as u8; 32]
+    var i: u64 = 0
+    if klen > 64 {
+        sha.hash(key, klen, (&k0[0]) as u64)
+    } else {
+        while i < klen {
+            k0[i as usize] = *((key + i) as *mut u8)
+            i = i + 1
+        }
+    }
+    i = 0
+    while i < 64 {
+        ipad[i as usize] = (k0[i as usize] as u64 ^ 0x36) as u8
+        opad[i as usize] = (k0[i as usize] as u64 ^ 0x5C) as u8
+        i = i + 1
+    }
+    sha.begin()
+    sha.update((&ipad[0]) as u64, 64)
+    sha.update(msg, mlen)
+    sha.finish((&inner[0]) as u64)
+    sha.begin()
+    sha.update((&opad[0]) as u64, 64)
+    sha.update((&inner[0]) as u64, 32)
+    sha.finish(out)
+}
+
+// PBKDF2-HMAC-SHA256 (RFC 2898) for a derived key of `dklen` octets,
+// dklen <= 64, so at most two blocks. That covers what this file needs
+// (64) and refuses anything else rather than pretending.
+fn pbkdf2(pw: u64, plen: u64, salt: u64, slen: u64, iters: u64,
+    out: u64, dklen: u64) -> bool {
+    if dklen > 64 || slen > 64 {
+        return false
+    }
+    var block: u64 = 0
+    while block * 32 < dklen {
+        var first: [u8; 80] = [0 as u8; 80]
+        var u: [u8; 32] = [0 as u8; 32]
+        var acc: [u8; 32] = [0 as u8; 32]
+        var i: u64 = 0
+        while i < slen {
+            first[i as usize] = *((salt + i) as *mut u8)
+            i = i + 1
+        }
+        // The block index, four octets, big endian, 1 based.
+        let idx: u64 = block + 1
+        first[slen as usize] = ((idx >> 24) & 255) as u8
+        first[(slen + 1) as usize] = ((idx >> 16) & 255) as u8
+        first[(slen + 2) as usize] = ((idx >> 8) & 255) as u8
+        first[(slen + 3) as usize] = (idx & 255) as u8
+        hmac(pw, plen, (&first[0]) as u64, slen + 4, (&u[0]) as u64)
+        i = 0
+        while i < 32 {
+            acc[i as usize] = u[i as usize]
+            i = i + 1
+        }
+        var r: u64 = 1
+        while r < iters {
+            hmac(pw, plen, (&u[0]) as u64, 32, (&u[0]) as u64)
+            i = 0
+            while i < 32 {
+                acc[i as usize] = (acc[i as usize] as u64 ^ (u[i as usize] as u64)) as u8
+                i = i + 1
+            }
+            r = r + 1
+        }
+        i = 0
+        while i < 32 && block * 32 + i < dklen {
+            __mmio_write8((out + block * 32 + i) as *mut u8, acc[i as usize])
+            i = i + 1
+        }
+        block = block + 1
+    }
+    return true
+}
+
+// ------------------------------------------------------------- the blob
+//
+// A text file, so that a person can look at it -- there is nothing secret
+// in it that the passphrase does not already protect:
+//
+//     osumkey1
+//     <iterations>
+//     <salt, 32 hex>
+//     <wrapped data key, 64 hex>
+//     <tag, 64 hex>
+
+fn hexch(v: u64) -> u64 {
+    if v < 10 {
+        return v + 48
+    }
+    return v + 87
+}
+
+fn unhex(c: u64) -> u64 {
+    if c >= 48 && c <= 57 {
+        return c - 48
+    }
+    if c >= 97 && c <= 102 {
+        return c - 87
+    }
+    return 16
+}
+
+fn to_hex(src: u64, n: u64, out: u64) {
+    var i: u64 = 0
+    while i < n {
+        let c: u64 = (*((src + i) as *mut u8)) as u64
+        __mmio_write8((out + i * 2) as *mut u8, hexch((c >> 4) & 15) as u8)
+        __mmio_write8((out + i * 2 + 1) as *mut u8, hexch(c & 15) as u8)
+        i = i + 1
+    }
+    __mmio_write8((out + n * 2) as *mut u8, 0 as u8)
+}
+
+fn from_hex(src: u64, n: u64, out: u64) -> bool {
+    var i: u64 = 0
+    while i < n {
+        let a: u64 = unhex((*((src + i * 2) as *mut u8)) as u64)
+        let b: u64 = unhex((*((src + i * 2 + 1) as *mut u8)) as u64)
+        if a > 15 || b > 15 {
+            return false
+        }
+        __mmio_write8((out + i) as *mut u8, ((a << 4) | b) as u8)
+        i = i + 1
+    }
+    return true
+}
+
+// salt || iters(decimal) || wrapped -- the tag covers all three, so that
+// nobody can quietly lower the iteration count in the file.
+fn tag_over(mackey: u64, salt: u64, iters: u64, wrapped: u64, out: u64) {
+    var i: u64 = 0
+    var at: u64 = 0
+    while i < SALTLEN {
+        macmsg[at as usize] = *((salt + i) as *mut u8)
+        at = at + 1
+        i = i + 1
+    }
+    var d: [u8; 24] = [0 as u8; 24]
+    var n: u64 = 0
+    var x: u64 = iters
+    while x > 0 {
+        d[n as usize] = ((x % 10) + 48) as u8
+        x = x / 10
+        n = n + 1
+    }
+    while n > 0 {
+        n = n - 1
+        macmsg[at as usize] = d[n as usize]
+        at = at + 1
+    }
+    i = 0
+    while i < KEYLEN {
+        macmsg[at as usize] = *((wrapped + i) as *mut u8)
+        at = at + 1
+        i = i + 1
+    }
+    hmac(mackey, 32, (&macmsg[0]) as u64, at, out)
+}
+
+// ------------------------------------------------------------- the entry
+
+fn u_start(args: u64) -> u64 {
+    var c_init: [u8; 5] = "init\0"
+    var c_open: [u8; 5] = "open\0"
+    var c_erase: [u8; 6] = "erase\0"
+    var c_kdf: [u8; 4] = "kdf\0"
+    var e_use: [u8; 44] = "key: init|open <blob> <pass> | erase <blob>\0"
+
+    let argc: u64 = ulib.arg_count(args)
+    if argc < 3 {
+        ulib.esay_line((&e_use[0]) as u64, 0)
+        return 1
+    }
+    let cmd: u64 = ulib.arg_at(args, 1)
+    if ulib.streq(cmd, (&c_erase[0]) as u64) {
+        return cmd_erase(ulib.arg_at(args, 2))
+    }
+    if argc < 4 {
+        ulib.esay_line((&e_use[0]) as u64, 0)
+        return 1
+    }
+    if ulib.streq(cmd, (&c_init[0]) as u64) {
+        return cmd_init(ulib.arg_at(args, 2), ulib.arg_at(args, 3))
+    }
+    // `kdf` exists ONLY to be measured. `init` draws a random salt, so
+    // nothing about its output can be predicted on the host -- and a key
+    // derivation that is never checked against an independent
+    // implementation is a guess. This takes the salt as an argument and
+    // prints the 64 derived octets, and `tools/tresor/run.sh` puts the
+    // same three inputs through Python's `hashlib.pbkdf2_hmac`.
+    if ulib.streq(cmd, (&c_kdf[0]) as u64) {
+        if argc < 5 {
+            ulib.esay_line((&e_use[0]) as u64, 0)
+            return 1
+        }
+        return cmd_kdf(ulib.arg_at(args, 2), ulib.arg_at(args, 3),
+            ulib.arg_at(args, 4))
+    }
+    if ulib.streq(cmd, (&c_open[0]) as u64) {
+        return cmd_open(ulib.arg_at(args, 2), ulib.arg_at(args, 3))
+    }
+    ulib.esay_line((&e_use[0]) as u64, 0)
+    return 1
+}
+
+// The fingerprint of a key is SHA-256 OF THE KEY, printed instead of the
+// key. It lets a test say "the same key came back" without the key ever
+// reaching the serial line -- which is exactly the mistake this kind of
+// program gets to make once.
+fn show_fingerprint(key: u64) {
+    var l_fp: [u8; 13] = "key sha256: \0"
+    var dig: [u8; 32] = [0 as u8; 32]
+    var hex: [u8; 65] = [0 as u8; 65]
+    sha.hash(key, KEYLEN, (&dig[0]) as u64)
+    sha.hex_out((&dig[0]) as u64, (&hex[0]) as u64)
+    ulib.say((&l_fp[0]) as u64)
+    ulib.say((&hex[0]) as u64)
+    ulib.nl()
+}
+
+// `key kdf <pass> <salt-as-text> <iters>` -- the salt is taken as plain
+// text and not as hex, so that the shell of this system can express it.
+fn cmd_kdf(pass: u64, salt: u64, itxt: u64) -> u64 {
+    var l_dk: [u8; 5] = "dk: \0"
+    var out: [u8; 64] = [0 as u8; 64]
+    var hex: [u8; 136] = [0 as u8; 136]
+    let iters: u64 = ulib.to_num(itxt)
+    let slen: u64 = ulib.length(salt)
+    if iters == 0 || slen > 64 {
+        return 1
+    }
+    if !pbkdf2(pass, ulib.length(pass), salt, slen, iters,
+        (&out[0]) as u64, 64) {
+        return 1
+    }
+    to_hex((&out[0]) as u64, 64, (&hex[0]) as u64)
+    ulib.say((&l_dk[0]) as u64)
+    ulib.say((&hex[0]) as u64)
+    ulib.nl()
+    return 0
+}
+
+fn cmd_init(path: u64, pass: u64) -> u64 {
+    var e_rand: [u8; 32] = "key: the kernel gave no random\0\0"
+    var e_write: [u8; 26] = "key: cannot write \0\0\0\0\0\0\0\0"
+    var hdr: [u8; 10] = "osumkey1\n\0"
+    var nl: [u8; 2] = "\n\0"
+    var datakey: [u8; 32] = [0 as u8; 32]
+    var salt: [u8; 16] = [0 as u8; 16]
+    var wrapped: [u8; 32] = [0 as u8; 32]
+    var tag: [u8; 32] = [0 as u8; 32]
+    var hex: [u8; 72] = [0 as u8; 72]
+    var num: [u8; 24] = [0 as u8; 24]
+
+    // A FRESH SALT AND A FRESH KEY, both from the kernel's generator.
+    // If it will not give them, this stops -- a "random" key that is not
+    // random is worse than none, because it looks like one.
+    if ulib.bad(ulib.sys(SYS_GETRANDOM, (&datakey[0]) as u64, KEYLEN, 0)) {
+        ulib.esay_line((&e_rand[0]) as u64, 0)
+        return 1
+    }
+    if ulib.bad(ulib.sys(SYS_GETRANDOM, (&salt[0]) as u64, SALTLEN, 0)) {
+        ulib.esay_line((&e_rand[0]) as u64, 0)
+        return 1
+    }
+    if !pbkdf2(pass, ulib.length(pass), (&salt[0]) as u64, SALTLEN, ITERS,
+        (&wrapbuf[0]) as u64, 64) {
+        return 1
+    }
+    var i: u64 = 0
+    while i < KEYLEN {
+        wrapped[i as usize] = (datakey[i as usize] as u64
+            ^ (wrapbuf[i as usize] as u64)) as u8
+        i = i + 1
+    }
+    tag_over((&wrapbuf[0]) as u64 + 32, (&salt[0]) as u64, ITERS,
+        (&wrapped[0]) as u64, (&tag[0]) as u64)
+
+    let fd: u64 = io.create(path)
+    if errno.failed(fd) {
+        ulib.esay_line((&e_write[0]) as u64, path)
+        return 1
+    }
+    io.write_all(fd, (&hdr[0]) as u64, 9)
+    ulib.digits(ITERS, (&num[0]) as u64)
+    io.write_text(fd, (&num[0]) as u64)
+    io.write_all(fd, (&nl[0]) as u64, 1)
+    to_hex((&salt[0]) as u64, SALTLEN, (&hex[0]) as u64)
+    io.write_text(fd, (&hex[0]) as u64)
+    io.write_all(fd, (&nl[0]) as u64, 1)
+    to_hex((&wrapped[0]) as u64, KEYLEN, (&hex[0]) as u64)
+    io.write_text(fd, (&hex[0]) as u64)
+    io.write_all(fd, (&nl[0]) as u64, 1)
+    to_hex((&tag[0]) as u64, 32, (&hex[0]) as u64)
+    io.write_text(fd, (&hex[0]) as u64)
+    io.write_all(fd, (&nl[0]) as u64, 1)
+    io.close(fd)
+
+    show_fingerprint((&datakey[0]) as u64)
+    // The data key leaves this process here, and it leaves it as zeros.
+    i = 0
+    while i < KEYLEN {
+        datakey[i as usize] = 0 as u8
+        i = i + 1
+    }
+    return 0
+}
+
+fn cmd_open(path: u64, pass: u64) -> u64 {
+    var e_read: [u8; 24] = "key: cannot read \0\0\0\0\0\0\0"
+    var e_form: [u8; 23] = "key: not a key blob\0\0\0\0"
+    var e_bad: [u8; 40] = "key: wrong passphrase or damaged blob\0\0\0"
+    var ctx: [u8; 528] = [0 as u8; 528]
+    var line: [u8; 160] = [0 as u8; 160]
+    var salt: [u8; 16] = [0 as u8; 16]
+    var wrapped: [u8; 32] = [0 as u8; 32]
+    var tag: [u8; 32] = [0 as u8; 32]
+    var want: [u8; 32] = [0 as u8; 32]
+    var datakey: [u8; 32] = [0 as u8; 32]
+    var hdr: [u8; 9] = "osumkey1\0"
+
+    let fd: u64 = io.open(path, 0)
+    if errno.failed(fd) {
+        ulib.esay_line((&e_read[0]) as u64, path)
+        return 1
+    }
+    ulib.rd_init((&ctx[0]) as u64)
+    if ulib.rd_line(fd, (&ctx[0]) as u64, (&line[0]) as u64, 160) == ulib.EOF {
+        io.close(fd)
+        ulib.esay_line((&e_form[0]) as u64, 0)
+        return 1
+    }
+    if !ulib.streq((&line[0]) as u64, (&hdr[0]) as u64) {
+        io.close(fd)
+        ulib.esay_line((&e_form[0]) as u64, 0)
+        return 1
+    }
+    ulib.rd_line(fd, (&ctx[0]) as u64, (&line[0]) as u64, 160)
+    let iters: u64 = ulib.to_num((&line[0]) as u64)
+    ulib.rd_line(fd, (&ctx[0]) as u64, (&line[0]) as u64, 160)
+    let ok1: bool = from_hex((&line[0]) as u64, SALTLEN, (&salt[0]) as u64)
+    ulib.rd_line(fd, (&ctx[0]) as u64, (&line[0]) as u64, 160)
+    let ok2: bool = from_hex((&line[0]) as u64, KEYLEN, (&wrapped[0]) as u64)
+    ulib.rd_line(fd, (&ctx[0]) as u64, (&line[0]) as u64, 160)
+    let ok3: bool = from_hex((&line[0]) as u64, 32, (&tag[0]) as u64)
+    io.close(fd)
+    if !ok1 || !ok2 || !ok3 || iters == 0 {
+        ulib.esay_line((&e_form[0]) as u64, 0)
+        return 1
+    }
+    if !pbkdf2(pass, ulib.length(pass), (&salt[0]) as u64, SALTLEN, iters,
+        (&wrapbuf[0]) as u64, 64) {
+        return 1
+    }
+    // AUTHENTICATE BEFORE UNWRAPPING. The tag is checked first, so that a
+    // blob somebody edited is refused instead of yielding a key that is
+    // wrong in a way nobody notices until the data is gone.
+    tag_over((&wrapbuf[0]) as u64 + 32, (&salt[0]) as u64, iters,
+        (&wrapped[0]) as u64, (&want[0]) as u64)
+    if !sha.equal((&want[0]) as u64, (&tag[0]) as u64) {
+        ulib.esay_line((&e_bad[0]) as u64, 0)
+        return 2
+    }
+    var i: u64 = 0
+    while i < KEYLEN {
+        datakey[i as usize] = (wrapped[i as usize] as u64
+            ^ (wrapbuf[i as usize] as u64)) as u8
+        i = i + 1
+    }
+    show_fingerprint((&datakey[0]) as u64)
+    i = 0
+    while i < KEYLEN {
+        datakey[i as usize] = 0 as u8
+        i = i + 1
+    }
+    return 0
+}
+
+// CRYPTO ERASE, as far as a file system can do it: overwrite the octets
+// of the blob, then unlink it. See K3 at the head of this file for what
+// that does NOT promise on flash.
+fn cmd_erase(path: u64) -> u64 {
+    var e_no: [u8; 24] = "key: cannot erase \0\0\0\0\0\0"
+    var l_ms: [u8; 12] = "erase ms: \0\0"
+    var zero: [u8; 256] = [0 as u8; 256]
+    let t0: u64 = ulib.sys(ulib.SYS_SYSINFO, ulib.I_TICKS, 0, 0)
+    let sz: u64 = io.size_of(path)
+    if errno.failed(sz) {
+        ulib.esay_line((&e_no[0]) as u64, path)
+        return 1
+    }
+    let fd: u64 = io.open(path, 1) // O_WRONLY, no truncation: overwrite
+    if errno.failed(fd) {
+        ulib.esay_line((&e_no[0]) as u64, path)
+        return 1
+    }
+    var left: u64 = sz
+    while left > 0 {
+        var n: u64 = 256
+        if left < n {
+            n = left
+        }
+        io.write_all(fd, (&zero[0]) as u64, n)
+        left = left - n
+    }
+    io.close(fd)
+    io.unlink(path)
+    let t1: u64 = ulib.sys(ulib.SYS_SYSINFO, ulib.I_TICKS, 0, 0)
+    ulib.say((&l_ms[0]) as u64)
+    ulib.sayn((t1 - t0) * 10)
+    ulib.nl()
+    return 0
+}

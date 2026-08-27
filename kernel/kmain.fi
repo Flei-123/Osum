@@ -35,6 +35,7 @@ import user
 import power
 import pwr
 import batt
+import hwid
 import sched
 import tasks
 import proc
@@ -361,12 +362,27 @@ fn kernel_main(mbi: u64, vectors: u64, state: u64, kernel_end: u64,
     //     kernel it saw before.
     netsvc.stage(state)
 
+    // 7e-ter. RUNDE TRESOR: DIE GERAETEIDENTITAET (`kernel/hwid.fi`).
+    //     Hier und nicht frueher, weil die MAC-Adresse erst existiert,
+    //     wenn `netsvc.stage` die Karte hochgezogen hat -- und nicht
+    //     spaeter, weil `osum(state)` gleich darunter die Shell startet
+    //     und ein Programm in Ring 3 die Werte schon lesen koennen soll.
+    //     Was hier NOCH nicht dasteht, ist die Seriennummer des
+    //     NVMe-Laufwerks: die kommt aus `hw.disk`, und das laeuft eine
+    //     Stufe TIEFER. Dafuer holt `hwid.refresh` beim Lesen nach.
+    hwid.stage(state)
+
     // 7f. round K1: a system on that disk. Mount what the host built,
     //     load /bin/sh out of it, and let it run until it is done.
     osum(state)
     // 7g. ROUND K2: and once more one layer lower, on a controller that
     //     fetches its own commands out of memory (`hw.disk`).
     hw.disk(state)
+
+    // RUNDE TRESOR: JETZT ist die Geraeteidentitaet vollstaendig -- die
+    // Seriennummer des Laufwerks gibt es erst, seit `hw.disk` den
+    // Controller aufgesetzt hat. Hier wird nachgeholt und gemeldet.
+    hwid.late(state)
 
     // 7h. ROUND K5: the other processors. Deliberately here and not
     //     earlier: everything above this line is what rounds 59 to K2
@@ -2831,6 +2847,17 @@ fn mode_of(cmd: u64) -> u64 {
     }
     if find(cmd, (&pwnb[0]) as u64, 7) != 0 {
         mode = mode | kstate.M_NOBLANK
+    }
+    // RUNDE TRESOR: `hwid` schreibt die Geraeteidentitaet auf die
+    // serielle Leitung, `hwidefi` geht den EFI-Weg gegen eine von Hand
+    // gebaute Systemtafel.
+    var hwdw: [u8; 5] = "hwid\0"
+    var hwef: [u8; 8] = "hwidefi\0"
+    if find(cmd, (&hwdw[0]) as u64, 4) != 0 {
+        mode = mode | kstate.M_HWID
+    }
+    if find(cmd, (&hwef[0]) as u64, 7) != 0 {
+        mode = mode | kstate.M_HWIDEFI
     }
     var pwd: [u8; 7] = "pwrdim\0"
     var pwbl: [u8; 9] = "pwrblank\0"

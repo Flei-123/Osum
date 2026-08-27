@@ -141,6 +141,11 @@ BEREICHE = [
     # gelesen wurde.  Der Rest des Vorrats bleibt frei.
     ("K18",        "kstate.fi", "K18_OFF",        "K18_MAX"),
     ("K18BATT",    "kstate.fi", "BATT_OFF",       "BATT_MAX"),
+    # RUNDE TRESOR: die Geraeteidentitaet, zwei Seiten (0x5A000..0x5C000).
+    # Die erste traegt die Merkmale, die zweite ist das DMA-Ziel des
+    # `identify controller` von NVMe -- und deshalb MUSS sie eine eigene,
+    # seitenausgerichtete Seite sein und darf nicht in der ersten liegen.
+    ("HWID",       "kstate.fi", "HWID_OFF",       "HWID_MAX"),
     # RUNDE K15, ZWEITER NACHTRAG.  Die erste Seite dieses Vorrats wird
     # geteilt: `wig.fi` braucht davon 0x40 Oktette, der Rest gehoert der
     # Geometrie des Dateisystems (FSG, zwei Woerter aus dem Superblock)
