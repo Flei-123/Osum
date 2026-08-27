@@ -5,7 +5,7 @@
 # Faehigkeiten aus OrientOS' Rust-Kernel herueber, die Osum noch nicht
 # hatte, und misst sie hier nach. Was portiert wurde:
 #
-#   `arch/x86_64/user.rs`   -> `kernel/guard.fi`    SMEP/SMAP in CR4
+#   `arch/x86_64/user.rs`   -> `kernel/arch/x86_64/guard.fi`    SMEP/SMAP in CR4
 #   `kcore/initramfs.rs`    -> `kernel/bootmod.fi`  Boot-Modul + CRC32
 #
 # WARUM DAS NICHT ZWEI RUNDEN SIND. Beide sind klein, beide haengen an

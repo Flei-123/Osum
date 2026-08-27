@@ -111,7 +111,12 @@ fi
 grep -q '"K13_OFF"' tools/kernel/karte.py \
     && ok "der Bereich dieser Runde (0x41000..0x43000) steht in der Karte" \
     || bad "K13_OFF fehlt in tools/kernel/karte.py"
-mkdir -p "$TMPD/kbad" && cp kernel/*.fi "$TMPD/kbad/"
+# RUNDE ARM: die Kopie braucht `kernel/arch/x86_64/` mit -- `hv.fi` liegt
+# seit dem Trennschnitt dort, und ohne sie stirbt der Kartenpruefer an
+# einem KeyError statt die Kollision zu melden, die hier gemessen wird.
+mkdir -p "$TMPD/kbad/arch/x86_64"
+cp kernel/*.fi "$TMPD/kbad/"
+cp kernel/arch/x86_64/*.fi "$TMPD/kbad/arch/x86_64/"
 sed -i 's/^const K13_OFF: u64 = 0x41000/const K13_OFF: u64 = 0x40000/' "$TMPD/kbad/kstate.fi"
 if python3 tools/kernel/karte.py "$TMPD/kbad" > "$TMPD/karte-bad.txt" 2>&1; then
     bad "GEGENPROBE: K13 auf 0x40000 (dem Hypervisor) faellt NICHT auf"

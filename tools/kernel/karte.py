@@ -232,8 +232,18 @@ def main():
               # nicht, und ein vergessener Bereich fiele nie auf.
               "vfs.fi", "mnt.fi", "fat.fi", "procfs.fi", "devfs.fi",
               "part.fi", "ofs.fi"):
-        p = os.path.join(kdir, d)
-        if os.path.exists(p):
+        # RUNDE ARM: die Maschine hat seit dem Trennschnitt ein eigenes
+        # Verzeichnis (`kernel/arch/x86_64/`).  `hv.fi` liegt dort, und
+        # diese Schleife hat es vorher schlicht nicht mehr gefunden --
+        # KeyError 'hv.fi', mitten in der Abnahme.  Gesucht wird jetzt an
+        # beiden Stellen, in dieser Reihenfolge.
+        p = None
+        for kand in (os.path.join(kdir, d),
+                     os.path.join(kdir, "arch", "x86_64", d)):
+            if os.path.exists(kand):
+                p = kand
+                break
+        if p is not None:
             dateien[d] = konstanten(p)
 
     kdata = wert(dateien["kstate.fi"], "KDATA_SIZE")
@@ -323,7 +333,10 @@ def main():
     # einsetzt), ZWEI VERSCHIEDENE Namen duerfen nicht auf derselben
     # Zahl liegen.
     vektoren = {}
-    for pfad in sorted(glob.glob(os.path.join(kdir, "*.fi"))):
+    # RUNDE ARM: auch hier beide Verzeichnisse -- `trap.fi` fuehrt die
+    # Vektornummern und liegt seit dem Trennschnitt unter arch/x86_64/.
+    for pfad in sorted(glob.glob(os.path.join(kdir, "*.fi"))
+                       + glob.glob(os.path.join(kdir, "arch", "x86_64", "*.fi"))):
         datei = os.path.basename(pfad)
         for k, roh in konstanten(pfad).items():
             if not k.startswith("VEC_"):
