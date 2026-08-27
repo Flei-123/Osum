@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-2.0-only
 # tools/unix/run.sh -- WAS JEDES UNIX-PROGRAMM STILLSCHWEIGEND VORAUSSETZT.
 #
 # Runde K4 hat die POSIX-Schicht gelegt, K6 ein Userland darauf gebaut --

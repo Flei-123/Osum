@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-2.0-only
 # tools/kernel/run.sh -- THE PROOF THAT THE KERNEL IS AN OPERATING SYSTEM.
 #
 # Round 59 proved that the kernel does something: its own IDT, exceptions

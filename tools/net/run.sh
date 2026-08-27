@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-2.0-only
 # tools/net/run.sh -- ROUND K8: OSUM AGAINST THE LINUX KERNEL, ON A WIRE.
 #
 # Round K3 wrote a TCP/IP stack and measured it against Linux with no

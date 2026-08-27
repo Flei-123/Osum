@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /* tools/k18/msrprobe.s -- DIE VORABPRUEFUNG DER RUNDE K18.
  *
  * Bevor eine Zeile Kernelcode entsteht, muss die Frage beantwortet sein,

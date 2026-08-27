@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-2.0-only
 # tools/wm/run.sh -- DER BEWEIS, DASS OSUM EINE OBERFLAECHE HAT.
 #
 # Runde K7 gab Osum einen Bildschirm: 800x600, eine Textkonsole darauf,

@@ -220,3 +220,39 @@ change.** The one thing that has to be *added* is the DejaVu licence text
 | fork one of the 70 Ring 3 programs | yes, under GPL-2.0-only |
 | ship a device that runs Osum and only boots signed firmware | **yes.** That is the entire reason for GPLv2 instead of GPLv3 |
 | take Apache-2.0 code into the kernel | **no.** Incompatible. Look for MIT, BSD or ISC |
+
+
+---
+
+## 7. The SPDX headers -- what got one, and what could not
+
+Applied as one separate commit, deliberately, so a rebase can treat it in one
+go (it touches almost every file). Over ten other rounds are running on their
+own branches in this repository; that is exactly why it is one commit and not
+spread through the licence commit.
+
+| | files |
+|---|---:|
+| `SPDX-License-Identifier: MIT` written into the file | **18** |
+| `SPDX-License-Identifier: GPL-2.0-only` written into the file | **196** |
+| **together** | **214** |
+
+By kind: 149 `.fi`, 24 `.py`, 28 `.sh`, 9 `.s`, 3 `.ld`, 1 `.c`.
+
+**Files that deliberately did NOT get a header:** one program whose line 1 is
+a test directive, and everything under `vendor/`. Both are covered by path in
+`.reuse/dep5`, which is the machine-readable fallback.
+
+There are **no symbolic links** and **no generated source files** in this
+repository, so the two problems that cost Firn 2,400 files do not exist here.
+
+### What was verified after the headers were written
+
+| check | result |
+|---|---|
+| scan: any file whose line 2 now starts with `expect_` | **0** (one file was found and reverted) |
+| spot checks by hand | `lib/libc/io.fi`, `kernel/user/ulib.fi`, `kernel/user/crt.s`, `kernel/user/user.ld`, `kernel/user/wlib.fi` -> MIT; `kernel/kmain.fi`, `kernel/boot.s`, `kernel/kernel.ld`, `kernel/user/sh.fi`, `tools/ttf/schnitt.py`, `test.sh` -> GPL-2.0-only |
+| comment syntax | `//` for `.fi`, `#` after the shebang for `.py`/`.sh`, `/* ... */` for `.s` and `.ld` -- matching the style already in those files |
+
+**Not run**, because it needs QEMU and a long wall clock: `./test.sh`. Run it
+before merging this branch anywhere.

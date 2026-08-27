@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: MIT */
 /* kernel/user/user.ld -- round K1: the shape of a program on the
  * disk.
  *

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-only
 """tools/gfx/schuss.py -- EIN Bildschirmfoto ueber den QEMU-Monitor.
 
     schuss.py <monitor-socket> <ziel.ppm> [wartesekunden]

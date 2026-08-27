@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-2.0-only
 # tools/k18/run.sh -- ENERGIE UND LEISTUNG, GEMESSEN.
 #
 # Bis zu dieser Runde konnte Osum ueber ACPI genau eine Sache: abschalten.

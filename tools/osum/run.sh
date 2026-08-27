@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-2.0-only
 # tools/osum/run.sh -- THE PROOF THAT OSUM IS A SYSTEM AND NOT AN IMAGE.
 #
 # Round 62 proved that the kernel has tasks, address spaces, system calls,

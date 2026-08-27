@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-only
 """tools/osum/mkfs.py -- an OFS disk image, built on the HOST.
 
 Round K1 needs programs that the kernel has never seen. They therefore

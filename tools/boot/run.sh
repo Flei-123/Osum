@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-2.0-only
 # tools/boot/run.sh -- DER BEWEIS, DASS DER MULTIBOOT-KOPF EINEN
 # BILDSCHIRM VERLANGT -- UND WARUM DAS DER UEFI-PFAD IST.
 #

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-only
 """tools/wm/monitor.py -- Maus und Tastatur von aussen in die Maschine.
 
     monitor.py <monitor-socket> <befehlsdatei> [pause]

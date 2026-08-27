@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /* kernel/start.s — der einzige Nicht-Firn-Code des Kernels.
  *
  * Aufgabe: den Rechner aus dem 32-Bit-Zustand, in dem ein

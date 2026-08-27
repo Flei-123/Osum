@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-only
 """tools/k11/vt.py -- den SERIELLEN Mitschnitt zu einem Bildschirm rechnen.
 
 Der Editor dieser Runde schreibt Fluchtfolgen. Auf der seriellen Leitung

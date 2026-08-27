@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-only
 """tools/k15/gross.py -- ein Dateisystem mit einer ernsthaften Zahl von
 Dateien, und die Liste dessen, was drin steht.
 

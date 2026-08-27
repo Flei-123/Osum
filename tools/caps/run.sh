@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-2.0-only
 # tools/caps/run.sh -- DER BEWEIS, DASS RING 3 NUR NOCH DAS DARF,
 # WAS IN SEINEM HANDLE STEHT.
 #

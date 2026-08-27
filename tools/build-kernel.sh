@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-2.0-only
 # tools/build-kernel.sh -- EIN Kernelabbild, aus dem Repo heraus.
 #
 # Bis hierher hat jeder Testlaeufer unter tools/ den Kernel selbst gebaut,

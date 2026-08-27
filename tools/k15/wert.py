@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-only
 """tools/k15/wert.py -- EIN Feld aus einer gemeldeten Zeile holen.
 
     wert.py <mitschnitt> <zeilenanfang> <schluessel> [rgb]

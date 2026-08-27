@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-2.0-only
 # tools/k13/run.sh -- BENUTZER, RECHTE UND DER ERSTE PROZESS (Runde K13).
 #
 # Was diese Runde behauptet und was hier gemessen wird:

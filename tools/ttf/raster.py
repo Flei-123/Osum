@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-only
 """tools/ttf/raster.py -- TrueType lesen und rastern, ZWEITE Fassung.
 
 `kernel/ttf.fi` ist die erste.  Dieses Programm ist die zweite, in einer

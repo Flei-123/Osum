@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-2.0-only
 # tools/posix/run.sh -- THE PROOF THAT OSUM HAS A POSIX FLOOR.
 #
 # Round 62 gave the kernel seventeen system calls of its own invention,
