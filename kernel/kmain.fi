@@ -147,6 +147,28 @@ const KEYS_WANTED: u64 = 4
 const KEY_TIMEOUT: u64 = 250 // 2.5 s, then it goes on regardless
 
 // `KERNEL_MAIN` out of boot.s. Six arguments, System V, see boot.s.
+// ==================================================================
+// RUNDE OFS3: DIE GROESSE DER WURZELPLATTE, GEFRAGT STATT GERATEN
+// ==================================================================
+//
+// `OSUM_BLOCKS` stand seit Runde K1 als Konstante hier: 4096 Bloecke,
+// zwei Megaoktett. Sie war nie eine Eigenschaft der Platte, sondern
+// eine Eigenschaft dieser Zeile -- und sie war der zweite Deckel neben
+// der einblockigen Karte in `fs.fi`. Ein Abbild von 32 MiB lief nach
+// 2 MiB voll, und `df` sagte dazu `total=4096`, was stimmte und
+// trotzdem falsch war.
+//
+// Jetzt fragt der Kernel die Platte (`blk.capacity`, ATA IDENTIFY).
+// Antwortet sie nicht, bleibt es bei der alten Konstanten -- kein Lauf,
+// der bisher funktioniert hat, faellt dadurch aus.
+fn root_blocks(state: u64) -> u64 {
+    let n: u64 = blk.capacity(state)
+    if n == 0 {
+        return OSUM_BLOCKS
+    }
+    return n
+}
+
 fn kernel_main(mbi: u64, vectors: u64, state: u64, kernel_end: u64,
     gdt: u64, tss: u64) {
     var s_banner: [u8; 32] = "firn kernel r62, profile kernel\0"
@@ -171,6 +193,8 @@ fn kernel_main(mbi: u64, vectors: u64, state: u64, kernel_end: u64,
 
     let cmd: u64 = mem.cmdline(mbi)
     kstate.set(state, kstate.MODE, mode_of(cmd))
+    kstate.set(state, kstate.OFS3_OFF + kstate.OFS3_MODE,
+        ofs3_mode_of(cmd))
     // ROUND K2: read here and not down in `hw.stage`, and the reason is
     // worth knowing -- the command line of the boot loader lies ABOVE
     // `kernel_end`, and the frame allocator hands exactly those frames
@@ -1920,7 +1944,7 @@ fn osum(state: u64) {
             serial.nl()
             return
         }
-        blk.use_ata(state, OSUM_BLOCKS)
+        blk.use_ata(state, root_blocks(state))
     }
     let mounted: bool = fs.mount(state)
     serial.puts((&s_mount[0]) as u64)
@@ -2610,6 +2634,28 @@ fn provoke(state: u64, mode: u64) {
 // --------------------------------------------------------- command line
 
 // Bits 0..7 = kind of fault, bit 8 = no keyboard, bit 9 = no ring 3.
+// RUNDE OFS3: die vier Woerter dieser Runde, als eigenes Wort.
+fn ofs3_mode_of(cmd: u64) -> u64 {
+    var o3w: [u8; 8] = "ofs3run\0"
+    var o2fw: [u8; 8] = "ofs3fmt\0"
+    var natw: [u8; 8] = "noatime\0"
+    var nlkw: [u8; 8] = "nolinks\0"
+    var o3: u64 = 0
+    if find(cmd, (&o3w[0]) as u64, 7) != 0 {
+        o3 = o3 | kstate.O_OFS3
+    }
+    if find(cmd, (&o2fw[0]) as u64, 7) != 0 {
+        o3 = o3 | kstate.O_OFS3FMT
+    }
+    if find(cmd, (&natw[0]) as u64, 7) != 0 {
+        o3 = o3 | kstate.O_NOATIME
+    }
+    if find(cmd, (&nlkw[0]) as u64, 7) != 0 {
+        o3 = o3 | kstate.O_NOLINKS
+    }
+    return o3
+}
+
 fn mode_of(cmd: u64) -> u64 {
     var s_trap: [u8; 6] = "trap=\0"
     var nokbd: [u8; 6] = "nokbd\0"
@@ -2736,6 +2782,21 @@ fn mode_of(cmd: u64) -> u64 {
     if find(cmd, (&zomw[0]) as u64, 6) != 0 {
         mode = mode | kstate.M_ZOMBIE
     }
+    // ==================================================== RUNDE OFS3
+    //
+    // VIER WOERTER, UND DREI DAVON SIND GEGENPROBEN. Sie stehen NICHT im
+    // allgemeinen MODE-Wort, sondern in einem eigenen (`OFS3_MODE`, das
+    // erste Wort der zweiten OFS3-Seite): im MODE-Wort ist nur noch Bit
+    // 63 frei, und das ist gesperrt, weil `fs.enter` es als Merker fuer
+    // eine verschachtelte Sperre benutzt.
+    //
+    // `ofs3run` und nicht `ofs3`: die Befehlszeile wird nach TEILWORTEN
+    // durchsucht, und `ofs3fmt` faengt nicht mit `ofs3` an, aber ein
+    // Pfad wie `script=ofs3t` taete es. Runde K13 hat diesen Fehler
+    // schon einmal gemacht und eine Stunde lang gesucht.
+    // Die vier Bits stehen in einem EIGENEN Wort und damit in einer
+    // eigenen Funktion: `mode_of` bekommt `state` nicht und darf es auch
+    // nicht -- es beantwortet eine Frage ueber eine Zeichenkette.
     // RUNDE K16: die Gegenprobe zur grossen Arena.
     var nbw: [u8; 9] = "nobigmem\0"
     var nsw: [u8; 12] = "nostackgrow\0"
@@ -3003,7 +3064,7 @@ fn surface(state: u64) {
     }
     // 2. das Dateisystem, falls noetig
     if kstate.get(state, kstate.FS_READY) == 0 && blk.present(state) {
-        blk.use_ata(state, OSUM_BLOCKS)
+        blk.use_ata(state, root_blocks(state))
         let m: bool = fs.mount(state)
         serial.puts((&s_fs[0]) as u64)
         serial.dec(yes(m))
