@@ -351,4 +351,4 @@ The counter-tests on the command line are unchanged and still reachable:
   translation, and the same round renames `leiste.fi` to `taskbar.fi`,
   which is why this file still carries its old name.
 - **The clock is not a clock.** It is the hardware clock plus an offset
-  from `/etc/zeit.conf`. This kernel can read the RTC and not set it.
+  from `/etc/time.conf`. This kernel can read the RTC and not set it.
