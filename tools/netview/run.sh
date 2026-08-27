@@ -508,8 +508,17 @@ PYX
 # first run of this section forgot that and measured the icon against the
 # wrong 62 pixels -- so the offset is read out of the log and never
 # assumed.
-gx_of() { grep -a '^taskbar: geom ' "$1" | tail -1 | grep -oE ' x=[0-9]+' | head -1 | tr -dc '0-9'; }
-gy_of() { grep -a '^taskbar: geom ' "$1" | tail -1 | grep -oE ' y=[0-9]+' | head -1 | tr -dc '0-9'; }
+# THE WHOLE LINE OR NOTHING. Three programs write to this one serial
+# line at the same time, and a line that another program wrote into the
+# middle of is not a measurement -- the first version took `tail -1` of
+# anything starting with `taskbar: geom`, got a spliced line, read no
+# offset, quietly used 0 and then measured the top-left corner of the
+# screen against a taskbar icon. It said `falsch 54 von 54` and it was
+# right; the icon was perfect and the question was wrong. So: only a
+# line that matches END TO END counts, and if there is none, the runner
+# says so instead of assuming a zero.
+gx_of() { grep -aoE '^taskbar: geom edge=[0-9]+ x=[0-9]+ y=[0-9]+ ' "$1" | tail -1 | grep -oE 'x=[0-9]+' | cut -d= -f2; }
+gy_of() { grep -aoE '^taskbar: geom edge=[0-9]+ x=[0-9]+ y=[0-9]+ ' "$1" | tail -1 | grep -oE 'y=[0-9]+' | cut -d= -f2; }
 st_of()  { grep -aoE '^taskbar: state s=[0-9]+' "$1" | tail -1 | cut -d= -f2; }
 st_x()   { grep -aoE '^taskbar: state s=[0-9]+ x=[0-9]+' "$1" | tail -1 | grep -oE 'x=[0-9]+' | cut -d= -f2; }
 st_y()   { grep -aoE '^taskbar: state s=[0-9]+ x=[0-9]+ y=[0-9]+' "$1" | tail -1 | grep -oE 'y=[0-9]+$' | cut -d= -f2; }
@@ -531,7 +540,11 @@ for cs in nocarrier noip noroute online; do
         got=$(st_of "$L")
         num "$cs: the kernel reported state" "${got:-99}" eq "${WANT[$cs]}"
         x=$(st_x "$L"); y=$(st_y "$L")
-        GX=$(gx_of "$L"); GY=$(gy_of "$L"); GX=${GX:-0}; GY=${GY:-0}
+        GX=$(gx_of "$L"); GY=$(gy_of "$L")
+        if [ -z "$GX" ] || [ -z "$GY" ]; then
+            bad "$cs: the bar never reported an unspliced position"
+            GX=0; GY=0
+        fi
         if [ -n "$x" ] && [ -n "$y" ]; then
             x=$((x + GX)); y=$((y + GY))
             r=$(python3 tools/netview/schau.py "$P" "$x" "$y" \
@@ -557,7 +570,11 @@ for scheme in dark light; do
         "netvdemo nic nip=$OSUM_IP/24 ngw=$HOST_IP" "ping"; then
         L="$TMPD/four-$scheme.txt"; P="$TMPD/four-$scheme.ppm"
         png "$P" "four-views-$scheme"
-        GX=$(gx_of "$L"); GY=$(gy_of "$L"); GX=${GX:-0}; GY=${GY:-0}
+        GX=$(gx_of "$L"); GY=$(gy_of "$L")
+        if [ -z "$GX" ] || [ -z "$GY" ]; then
+            bad "$scheme: the bar never reported an unspliced position"
+            GX=0; GY=0
+        fi
         seen_r=0; seen_1=0; seen_2=0; seen_3=0
         for b in 0 1 2 3 4 5 6 7 8 9; do
             line=$(mk_line "$L" "$b")
