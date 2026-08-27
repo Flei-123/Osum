@@ -338,12 +338,29 @@ num "aufloesen bleibt unter einer Millisekunde" "$tres" lt 1000000
 
 foto gui "$TMPD/disk.img" \
     "gfx wm wmhold desk themegui nokbd nosched noproc nofs"
-gsw=$(grep -a '^G_AVG ' "$TMPD/gui.txt" | awk '{print $2}')
-gdet=$(grep -a '^G_AVG ' "$TMPD/gui.txt" | awk '{print $4}')
-gpnt=$(grep -a '^G_AVG ' "$TMPD/gui.txt" | awk '{print $6}')
-gpx=$(grep -a '^G_PX ' "$TMPD/gui.txt" | awk '{print $2}')
-gall=$(grep -a '^G_PX ' "$TMPD/gui.txt" | awk '{print $3}')
-gbase=$(grep -a '^G_BASE ' "$TMPD/gui.txt" | awk '{print $3}')
+# RUNDE MERGE: DIE ZEILE WIRD STRENG GELESEN. Auf dieser seriellen
+# Leitung schreiben seit den Runden DESKTOP und TASKBAR fuenf Prozesse
+# gleichzeitig, und ihre Zeilen schieben sich ineinander -- ein Lauf
+# lieferte fuer das sechste Feld von `G_AVG` den Text `bg=1976635` aus
+# einer Zeile der Taskleiste, und `[ "$gpnt" -lt ... ]` scheitert an
+# einem Wort. Genommen wird deshalb die LETZTE Zeile, die vollstaendig
+# die Form hat, die themetest.fi schreibt: der Name und danach nur
+# Zahlen.
+gavg=$(grep -aoE '^G_AVG( [0-9]+){5}$' "$TMPD/gui.txt" | tail -1)
+gpxl=$(grep -aoE '^G_PX( [0-9]+){2}$' "$TMPD/gui.txt" | tail -1)
+gbsl=$(grep -aoE '^G_BASE( [0-9]+){2}$' "$TMPD/gui.txt" | tail -1)
+gsw=$(echo "$gavg" | awk '{print $2}')
+gdet=$(echo "$gavg" | awk '{print $4}')
+gpnt=$(echo "$gavg" | awk '{print $6}')
+gpx=$(echo "$gpxl" | awk '{print $2}')
+gall=$(echo "$gpxl" | awk '{print $3}')
+gbase=$(echo "$gbsl" | awk '{print $3}')
+for v in gsw gdet gpnt gpx gall gbase; do
+    eval "x=\$$v"
+    case "$x" in
+        ''|*[!0-9]*) bad "themetest hat keine brauchbare Zeile fuer $v geliefert"; eval "$v=0";;
+    esac
+done
 num "Umschaltvorgaenge im laufenden Schreibtisch" "$gsw" ge 15
 ok "erkennen, schnellster Lauf: $((gdet / 1000)) us"
 ok "neu malen, schnellster Lauf: $((gpnt / 1000)) us fuer $gpx von $gall Bildpunkten"
@@ -356,7 +373,7 @@ ok "GEGENPROBE: ein gewoehnliches Vollbild ohne Themenwechsel: $((gbase / 1000))
 # schwankt darum um mehr als den Faktor zwei; die Aussage, die
 # tragfaehig ist, lautet "dieselbe Groessenordnung wie ein Vollbild",
 # und nicht "gleich".
-if [ "$gpnt" -lt $((gbase * 3)) ]; then
+if [ "$gbase" -gt 0 ] && [ "$gpnt" -lt $((gbase * 3)) ]; then
     ok "das Umschalten liegt in der Groessenordnung eines Vollbilds"
 else
     bad "das Umschalten kostet $gpnt ns gegen $gbase ns fuer ein Vollbild"
