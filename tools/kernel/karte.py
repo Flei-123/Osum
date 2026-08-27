@@ -141,6 +141,13 @@ BEREICHE = [
     # gelesen wurde.  Der Rest des Vorrats bleibt frei.
     ("K18",        "kstate.fi", "K18_OFF",        "K18_MAX"),
     ("K18BATT",    "kstate.fi", "BATT_OFF",       "BATT_MAX"),
+    # RUNDE DISPLAY: der Modustreiber.  Zwei Seiten aus demselben Vorrat
+    # (0x5A000 und 0x5B000) -- die Modusliste samt Skalaren und die
+    # Nachschlagetabelle fuer Gamma/Helligkeit/Kontrast/Saettigung samt
+    # EDID-Block.  Sie stehen hier, weil zur Zeit dieser Runde fuenf
+    # Runden gleichzeitig an diesem Baum arbeiten.
+    ("DISP",       "kstate.fi", "DISP_OFF",       "DISP_MAX"),
+    ("DLUT",       "kstate.fi", "DLUT_OFF",       "DLUT_MAX"),
     # RUNDE K15, ZWEITER NACHTRAG.  Die erste Seite dieses Vorrats wird
     # geteilt: `wig.fi` braucht davon 0x40 Oktette, der Rest gehoert der
     # Geometrie des Dateisystems (FSG, zwei Woerter aus dem Superblock)
@@ -173,6 +180,9 @@ KEINE_KDATA = {
     ("wm.fi", "W_OFF"),         # Versatz IN der Fenstertafel
     ("wig.fi", "CLIP_OFF"),     # Versatz IN WIG_OFF (Runde K15)
     ("wig.fi", "STAGE_OFF"),    # dito
+    ("vmode.fi", "LUT_OFF"),    # Versatz IN DLUT_OFF (Runde DISPLAY)
+    ("vmode.fi", "EDID_OFF"),   # dito
+    ("vmode.fi", "LIST_OFF"),   # Versatz IN DISP_OFF (Runde DISPLAY)
     ("kstate.fi", "FSG_OFF"),   # Versatz IN WIG_OFF (K15, zweiter Nachtrag)
     ("kstate.fi", "JRNL_OFF"),  # dito -- das Aenderungsjournal
     ("nidx.fi", "H_BASE"),      # Versatz IM Journal, nicht kdata

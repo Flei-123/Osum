@@ -48,6 +48,7 @@ import netsvc
 import smp
 import cap
 import fb
+import vmode
 import ttf
 import ps2m
 import wm
@@ -178,6 +179,7 @@ fn kernel_main(mbi: u64, vectors: u64, state: u64, kernel_end: u64,
     hw.parse(state, cmd)
     smp.parse(state, cmd)
     fb.parse(state, cmd)
+    vmode.parse(state, cmd)
     // ROUNDE K10: die Schutzbits und das Boot-Modul lesen ihr eigenes
     // Wort, so wie `fb` es seit K7 tut. Die Informationsstruktur wird
     // hier aufgehoben, weil sie spaeter noch gebraucht wird und
@@ -552,6 +554,13 @@ fn graphics(state: u64, mbi: u64) {
 
     gfx_bench(state, back)
 
+    // RUNDE DISPLAY: die Karte fragen, was sie kann. Hier und nicht
+    // frueher, weil `probe` die Fensterplaetze zaehlt, die `fb.init`
+    // gerade genommen hat -- und weil es im laufenden Betrieb erkundet,
+    // also einen Bildschirm braucht, den es hinterher wieder so
+    // hinstellen kann, wie es ihn vorgefunden hat.
+    vmode_stage(state)
+
     // Und JETZT der Spiegel: ab hier geht jedes Oktett, das ueber
     // `serial.put` laeuft, auch auf den Bildschirm.
     fb.clear(state, 0)
@@ -566,6 +575,404 @@ fn bnum(b: bool) -> u64 {
         return 1
     }
     return 0
+}
+
+// ================================================== RUNDE DISPLAY
+//
+// Was hier steht, ist NUR die Reihenfolge und die Meldung. Die Sache
+// selbst steht in `kernel/vmode.fi` (Liste, Wechsel, Frist, Tabelle) und
+// in `kernel/fb.fi` (Abbildung, Drehung, Skalierung). Wie ueberall in
+// diesem Kernel gilt: was gemeldet wird, ist gemessen -- die Liste ist
+// die, die die Karte angenommen hat, und nicht die, nach der gefragt
+// wurde.
+fn vmode_stage(state: u64) {
+    var s_no: [u8; 22] = "disp: keine Karte\0\0\0\0\0"
+    var s_hd: [u8; 12] = "disp: vram=\0"
+    var s_kib: [u8; 5] = " KiB\0"
+    var s_dep: [u8; 10] = "  depths=\0"
+    var s_lim: [u8; 12] = "  maplimit=\0"
+    var s_pr: [u8; 10] = "  probed=\0"
+    var s_rf: [u8; 11] = "  refused=\0"
+    var s_tb: [u8; 10] = "  toobig=\0"
+    var s_um: [u8; 15] = "  unmappable=\0\0"
+    var s_md: [u8; 13] = "disp: modes \0"
+    var s_out: [u8; 13] = "disp: out   \0"
+    var s_why2: [u8; 10] = "  reason=\0"
+    var s_one: [u8; 9] = "disp:   \0"
+    var s_x: [u8; 2] = "x\0"
+    var s_at: [u8; 3] = "x \0"
+    var s_ed: [u8; 12] = "disp: edid \0"
+    var s_yes: [u8; 4] = "ok\0\0"
+    var s_why: [u8; 5] = "why=\0"
+    var s_nat: [u8; 8] = "  nat=\0\0"
+    var s_ven: [u8; 8] = "  ven=\0\0"
+    var s_mod: [u8; 8] = "  mod=\0\0"
+    var s_st: [u8; 16] = "disp: selftest \0"
+    var s_of: [u8; 4] = " / \0"
+    var s_st2: [u8; 15] = "fb: selftest2 \0"
+    var s_raw: [u8; 12] = "disp: edid \0"
+
+    if !vmode.want(state, vmode.M_DISP) {
+        return
+    }
+    let n: u64 = vmode.probe(state)
+    if n == 0 && !vmode.ready(state) {
+        serial.puts((&s_no[0]) as u64)
+        serial.nl()
+        return
+    }
+    serial.puts((&s_hd[0]) as u64)
+    serial.dec(vmode.vram(state) / 1024)
+    serial.puts((&s_kib[0]) as u64)
+    serial.puts((&s_dep[0]) as u64)
+    serial.hex(vmode.depths(state))
+    serial.puts((&s_lim[0]) as u64)
+    serial.dec(vmode.map_limit(state))
+    serial.puts((&s_pr[0]) as u64)
+    serial.dec(vmode.probed(state))
+    serial.puts((&s_rf[0]) as u64)
+    serial.dec(vmode.refused(state))
+    serial.puts((&s_tb[0]) as u64)
+    serial.dec(vmode.toobig(state))
+    serial.puts((&s_um[0]) as u64)
+    serial.dec(vmode.probed(state) - vmode.refused(state)
+        - vmode.toobig(state) - n)
+    serial.nl()
+    serial.puts((&s_md[0]) as u64)
+    serial.dec(n)
+    serial.nl()
+    var i: u64 = 0
+    while i < n {
+        serial.puts((&s_one[0]) as u64)
+        serial.dec(vmode.mode_w(state, i))
+        serial.puts((&s_x[0]) as u64)
+        serial.dec(vmode.mode_h(state, i))
+        serial.puts((&s_at[0]) as u64)
+        serial.dec(vmode.mode_bpp(state, i))
+        serial.nl()
+        i = i + 1
+    }
+    // UND DIE ANDERE SEITE DER LISTE: was NICHT aufgenommen wurde und
+    // warum. Eine Liste ohne ihre Ausschluesse ist eine Behauptung --
+    // man sieht ihr nicht an, ob gefragt und abgelehnt oder gar nicht
+    // erst gefragt wurde.
+    i = 0
+    while i < vmode.cand_count() {
+        let grund: u64 = vmode.cand_why(state, i)
+        if grund != 0 {
+            serial.puts((&s_out[0]) as u64)
+            serial.dec(vmode.cand_w(i))
+            serial.puts((&s_x[0]) as u64)
+            serial.dec(vmode.cand_h(i))
+            serial.puts((&s_why2[0]) as u64)
+            serial.dec(grund)
+            serial.nl()
+        }
+        i = i + 1
+    }
+    serial.puts((&s_ed[0]) as u64)
+    if vmode.edid_ok(state) {
+        serial.puts((&s_yes[0]) as u64)
+        serial.puts((&s_nat[0]) as u64)
+        serial.dec(vmode.edid_native_w(state))
+        serial.puts((&s_x[0]) as u64)
+        serial.dec(vmode.edid_native_h(state))
+        serial.puts((&s_ven[0]) as u64)
+        i = 0
+        while i < 3 {
+            serial.put(vmode.vendor_at(state, i) as u8)
+            i = i + 1
+        }
+        serial.puts((&s_mod[0]) as u64)
+        i = 0
+        while i < 13 {
+            let c: u64 = vmode.model_at(state, i)
+            if c >= 32 && c < 127 {
+                serial.put(c as u8)
+            }
+            i = i + 1
+        }
+    } else {
+        serial.puts((&s_why[0]) as u64)
+        serial.dec(vmode.edid_why(state))
+    }
+    serial.nl()
+    if vmode.want(state, vmode.M_EDID) {
+        serial.puts((&s_raw[0]) as u64)
+        i = 0
+        while i < vmode.edid_bytes() {
+            serial.hex(vmode.edid_at(state, i))
+            i = i + 1
+        }
+        serial.nl()
+    }
+    serial.puts((&s_st[0]) as u64)
+    serial.dec(vmode.selftest(state))
+    serial.puts((&s_of[0]) as u64)
+    serial.dec(vmode.selftest_max())
+    serial.nl()
+    serial.puts((&s_st2[0]) as u64)
+    serial.dec(fb.selftest2(state))
+    serial.puts((&s_of[0]) as u64)
+    serial.dec(fb.selftest2_max())
+    serial.nl()
+}
+
+// Der Wechsel im laufenden Betrieb, kurz vor dem Stillhalten -- damit
+// das Bildschirmfoto das Ergebnis zeigt und nicht das, was die Konsole
+// danach darueber gerollt hat.
+fn display_hold(state: u64) {
+    var s_sw: [u8; 14] = "disp: switch \0"
+    var s_x: [u8; 2] = "x\0"
+    var s_arr: [u8; 5] = " -> \0"
+    var s_rc: [u8; 5] = " rc=\0"
+    var s_us: [u8; 5] = " us=\0"
+    var s_now: [u8; 8] = " panel=\0"
+    var s_cnt: [u8; 12] = "disp: sw=\0\0\0"
+    var s_fl: [u8; 9] = "  fail=\0\0"
+    var s_rv: [u8; 8] = "  rev=\0\0"
+    var s_rot: [u8; 12] = "disp: rot=\0\0"
+    var s_img: [u8; 8] = "  img=\0\0"
+    var s_cf: [u8; 20] = "disp: confirm pend=\0"
+    var s_left: [u8; 8] = " left=\0\0"
+    var s_rr: [u8; 9] = " after=\0\0"
+
+    if !vmode.ready(state) {
+        return
+    }
+    if vmode.want(state, vmode.M_BIG) {
+        disp_switch(state, 1024, 768, (&s_sw[0]) as u64, (&s_x[0]) as u64,
+            (&s_arr[0]) as u64, (&s_rc[0]) as u64, (&s_us[0]) as u64,
+            (&s_now[0]) as u64)
+    }
+    if vmode.want(state, vmode.M_BACK) {
+        disp_switch(state, 800, 600, (&s_sw[0]) as u64, (&s_x[0]) as u64,
+            (&s_arr[0]) as u64, (&s_rc[0]) as u64, (&s_us[0]) as u64,
+            (&s_now[0]) as u64)
+    }
+    if vmode.want(state, vmode.M_BAD) {
+        // 4096x4096 steht in keiner Liste und passt in keinen
+        // Bildspeicher. Danach MUSS derselbe Bildschirm dastehen.
+        disp_switch(state, 4096, 4096, (&s_sw[0]) as u64, (&s_x[0]) as u64,
+            (&s_arr[0]) as u64, (&s_rc[0]) as u64, (&s_us[0]) as u64,
+            (&s_now[0]) as u64)
+    }
+    if vmode.want(state, vmode.M_CONFIRM) {
+        // Wechseln, NICHT bestaetigen, die Frist ablaufen lassen.
+        disp_switch(state, 1024, 768, (&s_sw[0]) as u64, (&s_x[0]) as u64,
+            (&s_arr[0]) as u64, (&s_rc[0]) as u64, (&s_us[0]) as u64,
+            (&s_now[0]) as u64)
+        serial.puts((&s_cf[0]) as u64)
+        serial.dec(bnum(vmode.pending(state)))
+        serial.puts((&s_left[0]) as u64)
+        serial.dec(vmode.remaining(state) / 1000)
+        serial.nl()
+        disp_wait(state, vmode.CONFIRM_MS + 500)
+        let ging: bool = vmode.poll(state)
+        serial.puts((&s_cf[0]) as u64)
+        serial.dec(bnum(vmode.pending(state)))
+        serial.puts((&s_rr[0]) as u64)
+        serial.dec(bnum(ging))
+        serial.puts((&s_now[0]) as u64)
+        serial.dec(fb.panel_w(state))
+        serial.puts((&s_x[0]) as u64)
+        serial.dec(fb.panel_h(state))
+        serial.nl()
+    }
+    if vmode.want(state, vmode.M_BENCH) {
+        disp_bench(state)
+    }
+    if vmode.want(state, vmode.M_ROT) {
+        fb.set_rotation(state, 90)
+        serial.puts((&s_rot[0]) as u64)
+        serial.dec(fb.rotation(state))
+        serial.puts((&s_img[0]) as u64)
+        serial.dec(fb.width(state))
+        serial.puts((&s_x[0]) as u64)
+        serial.dec(fb.height(state))
+        serial.puts((&s_now[0]) as u64)
+        serial.dec(fb.panel_w(state))
+        serial.puts((&s_x[0]) as u64)
+        serial.dec(fb.panel_h(state))
+        serial.nl()
+    }
+    vmode.confirm(state)
+    serial.puts((&s_cnt[0]) as u64)
+    serial.dec(vmode.switches(state))
+    serial.puts((&s_fl[0]) as u64)
+    serial.dec(vmode.fails(state))
+    serial.puts((&s_rv[0]) as u64)
+    serial.dec(vmode.reverts(state))
+    serial.nl()
+}
+
+fn disp_wait(state: u64, ms: u64) {
+    let hz: u64 = apic.tsc_hz(state)
+    if hz == 0 {
+        return
+    }
+    let bis: u64 = apic.tsc() + (hz / 1000) * ms
+    while apic.tsc() < bis {
+    }
+}
+
+fn disp_switch(state: u64, w: u64, h: u64, s_sw: u64, s_x: u64, s_arr: u64,
+    s_rc: u64, s_us: u64, s_now: u64) {
+    let vw: u64 = fb.panel_w(state)
+    let vh: u64 = fb.panel_h(state)
+    let t: u64 = apic.tsc()
+    let rc: u64 = vmode.set_mode(state, w, h, 32)
+    let d: u64 = us_of(state, apic.tsc() - t)
+    serial.puts(s_sw)
+    serial.dec(vw)
+    serial.puts(s_x)
+    serial.dec(vh)
+    serial.puts(s_arr)
+    serial.dec(w)
+    serial.puts(s_x)
+    serial.dec(h)
+    serial.puts(s_rc)
+    serial.dec(rc)
+    serial.puts(s_us)
+    serial.dec(d)
+    serial.puts(s_now)
+    serial.dec(fb.panel_w(state))
+    serial.puts(s_x)
+    serial.dec(fb.panel_h(state))
+    serial.nl()
+}
+
+// DIE KOSTEN DER NACHSCHLAGETABELLE, JE BILD, BEI DER GROESSTEN
+// AUFLOESUNG, DIE DIE LISTE HERGIBT.
+//
+// Gemessen wird gegen den schnellen Weg von Runde K7 auf DERSELBEN
+// Maschine, mit DEMSELBEN Zeitzaehler und in DEMSELBEN Lauf -- zwei
+// QEMU-Laeufe waeren zwei Maschinen. Vier Zahlen, weil vier Dinge
+// verschieden teuer sind:
+//   flush  der `rep movsq` ohne jede Rechnung (die Grundlinie)
+//   lut    dieselbe Flaeche, jeder Bildpunkt durch drei Tabellen
+//   sat    dazu die Saettigung -- die eben KEINE Tabelle ist
+//   rot90  die Vierteldrehung, bei der die Quelle spaltenweise gelesen
+//          wird und jeder Zugriff in eine andere Zwischenspeicherzeile
+//          faellt
+const DISP_RUNDEN: u64 = 5
+
+fn disp_bench(state: u64) {
+    var s_h: [u8; 13] = "disp: bench \0"
+    var s_x: [u8; 2] = "x\0"
+    var s_fl: [u8; 10] = "  flush=\0\0"
+    var s_lu: [u8; 8] = "  lut=\0\0"
+    var s_sa: [u8; 8] = "  sat=\0\0"
+    var s_ro: [u8; 10] = "  rot90=\0\0"
+    var s_ln: [u8; 11] = "  lutline=\0"
+    var s_us: [u8; 4] = " us\0"
+    var s_px: [u8; 7] = "  px=\0\0"
+    var s_want: [u8; 18] = "disp: bench want \0"
+    var s_rc: [u8; 5] = " rc=\0"
+
+    // Den groessten Modus der Liste nehmen -- die Frage ist, was das
+    // Umrechnen bei VIEL Flaeche kostet, nicht bei wenig.
+    let n: u64 = vmode.count(state)
+    if n > 0 {
+        let brc: u64 = vmode.set_mode(state, vmode.mode_w(state, n - 1),
+            vmode.mode_h(state, n - 1), 32)
+        vmode.confirm(state)
+        serial.puts((&s_want[0]) as u64)
+        serial.dec(vmode.mode_w(state, n - 1))
+        serial.puts((&s_x[0]) as u64)
+        serial.dec(vmode.mode_h(state, n - 1))
+        serial.puts((&s_rc[0]) as u64)
+        serial.dec(brc)
+        serial.nl()
+    }
+    let w: u64 = fb.panel_w(state)
+    let h: u64 = fb.panel_h(state)
+    fb.clear(state, fb.rgb(state, 0x30, 0x60, 0x90))
+
+    fb.set_lut(state, 0)
+    fb.set_saturation(state, 100)
+    fb.set_rotation(state, 0)
+    var t: u64 = apic.tsc()
+    var i: u64 = 0
+    while i < DISP_RUNDEN {
+        fb.dirty_all(state)
+        fb.flush(state)
+        i = i + 1
+    }
+    let d_fl: u64 = us_of(state, apic.tsc() - t) / DISP_RUNDEN
+
+    fb.set_lut(state, vmode.lut_addr(state))
+    t = apic.tsc()
+    i = 0
+    while i < DISP_RUNDEN {
+        fb.dirty_all(state)
+        fb.flush(state)
+        i = i + 1
+    }
+    let d_lu: u64 = us_of(state, apic.tsc() - t) / DISP_RUNDEN
+
+    // UND DIE ZAHL, DIE IM BETRIEB WIRKLICH ZAEHLT: eine Textzeile, also
+    // sechzehn Bildzeilen. Eine Konsole baut fast nie ein ganzes Bild
+    // auf -- derselbe Einwand, den `bench_zeile` in Runde K7 gegen den
+    // vollen Bildaufbau erhoben hat, gilt fuer die Nachschlagetabelle
+    // genauso. Wer nur das volle Bild misst, sieht die Tabelle nur von
+    // ihrer teuersten Seite.
+    t = apic.tsc()
+    i = 0
+    while i < DISP_RUNDEN {
+        fb.dirty(state, 0, 16)
+        fb.flush(state)
+        i = i + 1
+    }
+    let d_ln: u64 = us_of(state, apic.tsc() - t) / DISP_RUNDEN
+
+    fb.set_saturation(state, 150)
+    t = apic.tsc()
+    i = 0
+    while i < DISP_RUNDEN {
+        fb.dirty_all(state)
+        fb.flush(state)
+        i = i + 1
+    }
+    let d_sa: u64 = us_of(state, apic.tsc() - t) / DISP_RUNDEN
+    fb.set_saturation(state, 100)
+
+    fb.set_lut(state, 0)
+    var d_ro: u64 = 0
+    if fb.set_rotation(state, 90) {
+        t = apic.tsc()
+        i = 0
+        while i < DISP_RUNDEN {
+            fb.dirty_all(state)
+            fb.flush(state)
+            i = i + 1
+        }
+        d_ro = us_of(state, apic.tsc() - t) / DISP_RUNDEN
+        fb.set_rotation(state, 0)
+    }
+
+    serial.puts((&s_h[0]) as u64)
+    serial.dec(w)
+    serial.puts((&s_x[0]) as u64)
+    serial.dec(h)
+    serial.puts((&s_px[0]) as u64)
+    serial.dec(w * h)
+    serial.puts((&s_fl[0]) as u64)
+    serial.dec(d_fl)
+    serial.puts((&s_us[0]) as u64)
+    serial.puts((&s_lu[0]) as u64)
+    serial.dec(d_lu)
+    serial.puts((&s_us[0]) as u64)
+    serial.puts((&s_ln[0]) as u64)
+    serial.dec(d_ln)
+    serial.puts((&s_us[0]) as u64)
+    serial.puts((&s_sa[0]) as u64)
+    serial.dec(d_sa)
+    serial.puts((&s_us[0]) as u64)
+    serial.puts((&s_ro[0]) as u64)
+    serial.dec(d_ro)
+    serial.puts((&s_us[0]) as u64)
+    serial.nl()
 }
 
 // Mikrosekunden aus Prozessortakten. `apic.tsc_hz` steht seit
@@ -767,6 +1174,12 @@ fn gfx_hold(state: u64) {
         // Bild war leer. Genau die Art Unterschied, wegen der in diesem
         // Projekt im BILD nachgemessen wird und nicht nur im Bericht.
         power_screen(state)
+        // RUNDE DISPLAY: der Wechsel zur Laufzeit. HIER und nicht in
+        // `vmode_stage`, aus demselben Grund, aus dem das Pruefbild der
+        // Helligkeit hier steht: was zwischen dem Wechsel und dem
+        // Stillhalten noch auf die Konsole geht, rollt das Bild weg.
+        // Was hier passiert, steht danach im Foto.
+        display_hold(state)
         fb.flush(state)
     }
     // STILLGEHALTEN WIRD AUCH OHNE BILDSCHIRM, und das ist der Grund,
