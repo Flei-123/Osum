@@ -143,7 +143,9 @@ root:x:0:0:root:/:/bin/sh
 justin:x:1000:1000:Justin:/users/justin:/bin/sh
 EOF
 
-ARGS=(build "$OUT/disk.img" 8192 /lib/
+# 8192 blocks (4 MiB) held these programs with 4 per cent to spare
+# after round LOOK. That is not spare room, that is a countdown.
+ARGS=(build "$OUT/disk.img" 16384 /lib/
       "/lib/mono.ttf=$MONO" "/lib/sans.ttf=$SANS")
 [ "$icons" = yes ] && ARGS+=("/lib/icons.ttf=$ICONF")
 ARGS+=(/bin/)
