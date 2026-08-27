@@ -150,8 +150,24 @@
 #      Prozesse GLEICHZEITIG in verschiedenen Sichten, und der
 #      Python-Server auf der Linux-Seite sieht genau EINEN von beiden.
 #      Grundsatz und Gegenprobe in einem: GETAEUSCHT WIRD DAS PROGRAMM,
-#      NIE DER MENSCH -- `ps` hat eine Spalte NET, die Taskleiste ein
-#      Merkmal am Fenster, die Einstellungen eine Seite.
+#      NIE DER MENSCH -- `ps` hat eine Spalte NET, die Einstellungen eine
+#      Seite, und der Nachtrag gibt dem Ganzen ZWEI ANZEIGEN: in der
+#      Ecke der Taskleiste ein Symbol fuer den Zustand der MASCHINE
+#      (kein Traeger / keine Adresse / kein Weg / verbunden, gemessen an
+#      der Karte und am ersten Sprung, nicht behauptet), und am
+#      Fensterknopf UND in der Titelleiste ein Merkmal fuer das
+#      PROGRAMM -- `real` bekommt keines. Sieben Zeichen im Format OSYM,
+#      gezeichnet in der GROSSE, in der sie haengen (16x16 und 12x12),
+#      mit ROLLEN statt Farbwerten, damit dieselbe Datei im hellen und
+#      im dunklen Schema stimmt. Gemessen: acht Kontraste ueber 4.5:1,
+#      neun Schattenrisse paarweise ueber ein Drittel verschieden (die
+#      Probe fuer Rot-Gruen-Blinde -- die Form traegt den Unterschied,
+#      nicht die Farbe), und auf echten Bildschirmfotos jeder Bildpunkt
+#      jedes Zeichens an der Stelle, die die Leiste selbst gemeldet hat.
+#      Die eigentliche Probe: VIER Programme gleichzeitig in VIER
+#      Sichten, vier verschiedene Merkmale an vier Knoepfen EINER Leiste,
+#      hell und dunkel -- und am Knopf des `real`-Programms ist
+#      nachgerechnet, dass dort NICHTS steht.
 #
 #  15. EIN WIRT FUER FREMDE PROZESSOREN (tools/hv/run.sh, Runde K12):
 #      AMD-V, verschachtelte Seitentabellen, sechs Gaeste. Der Kernel
@@ -446,7 +462,7 @@ lauf "22. Widgets und der Dateimanager: eine Bibliothek in Ring 3 (tools/k15/run
 lauf "24. Energie und Leistung: drei Profile, Ruhezustand, Waerme, Akku (tools/k18/run.sh, Runde K18)" \
      tools/k18/run.sh k18 '^K18: |^  OK    (dieselbe Stelle|IA32_PERF_CTL bekommt|Turbo ist bei|SpeedStep ist bei|jeder Durchlauf ging|schlafend |aber es wird kein|zwei Tabellen|GEGENPROBE|GEDROSSELT|im BILD|dasselbe Pruefbild|und einen Bildpunkt DANEBEN|keine AUFRUFNUMMER)'
 lauf "25. eine Netzsicht je Prozess: real, filtered, faked, none (tools/netview/run.sh, Runde NETVIEW)" \
-     tools/netview/run.sh netview '^NETVIEW: |^  OK    (OCTETS THAT LEFT|faked: (connect|reading|the WHOLE|the BODY|a name resolved|and the reachability)|none: (connect|and it said)|real: connect took|and the python server)'
+     tools/netview/run.sh netview '^NETVIEW: |^  OK    (OCTETS THAT LEFT|faked: (connect|reading|the WHOLE|the BODY|a name resolved|and the reachability)|none: (connect|and it said)|real: connect took|and the python server|(nocarrier|noip|noroute|online): the icon|(dark|light): (button|and the REAL)|kernel/netmark)'
 
 
 echo
