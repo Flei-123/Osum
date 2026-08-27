@@ -50,10 +50,19 @@ ULD=kernel/user/user.ld
 # with the other twenty-three rather than only in tools/net/run.sh.
 PROGS="sh ls cat echo cp mv rm mkdir rmdir touch head tail wc grep sort
        uniq true false sleep ps kill uname date df hello hurt ping wget"
-BLOCKS=4096
+# ROUND MERGE: 4096 blocks are the two mebioctets OFS could hold before
+# round OFS3, and the twenty-eight programs of this userland no longer
+# fit in them: they came to 2086176 octets against a budget of 1997152.
+# Nothing grew unreasonably -- every program links ulib, tools and the
+# libc, and those grew with every round that added a call. The drive is
+# 8192 blocks now, which is what round OFS3 made possible in the first
+# place (multi-block map out of the superblock, `blk.capacity` from ATA
+# IDENTIFY), and the budget follows it.
+BLOCKS=8192
 
 TMPD=$(mktemp -d)
 trap 'rm -rf "$TMPD"' EXIT
+[ -n "${KEEP_TMPD:-}" ] && trap - EXIT && echo "TMPD=$TMPD"
 
 pass=0
 fail=0
@@ -422,6 +431,7 @@ echo keep > /keep.txt
 echo ==END==
 SCRIPT
 cat > "$TMPD/t6.want" <<'WANT'
+touch: no timestamps on this /w/a
 ./ ../ a b 
 hi
 ./ ../ a b d 
@@ -434,6 +444,14 @@ WANT
 # that a line of two hundred octets or a missing file name can knock over
 # is not one -- and every one of these is a WORD from the shell and a
 # process that went on living, not a fault.
+#
+# ROUND MERGE: the two-hundred-octet line used to end in
+# `sh: cannot run echo -> -36` (ENAMETOOLONG) and now ECHOES. Round OFS3
+# raised the directory entry from 32 to 264 octets and the name from 23
+# characters to 255, and the shell's argument buffer went with it. The
+# point of the case is unchanged -- the shell survives the line -- and it
+# is now measured against what the line SAYS instead of against the error
+# it used to raise.
 cat > "$TMPD/t8.sh" <<'SCRIPT'
 echo ==BEGIN==
 # a comment and nothing else
@@ -466,7 +484,7 @@ ok1
 /
 sh: too many arguments
 ok2
-sh: cannot run echo -> -36
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
 sh: too many stages
 sh: cannot read /nope
 code=127
@@ -562,7 +580,7 @@ rc=$?
 block "$TMPD/t7.txt" > "$TMPD/t7.got"
 has "$TMPD/t7.got" "osum" "uname says what the system is called"
 matches "$TMPD/t7.got" "^osum firn K[0-9]+ x86_64$" "uname -a says the round out of the KERNEL"
-matches "$TMPD/t7.got" "^blocks total=4096 free=[0-9]+ used=[0-9]+ size=512$" \
+matches "$TMPD/t7.got" "^blocks total=$BLOCKS free=[0-9]+ used=[0-9]+ size=512$" \
     "df counts the blocks of the drive the host built"
 matches "$TMPD/t7.got" "^inodes total=128 used=[0-9]+$" "df counts the inodes"
 matches "$TMPD/t7.got" "^2[0-9]{3}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}$" \
@@ -576,8 +594,13 @@ has "$TMPD/t7.got" "slept=0" "sleep ends with 0"
 matches "$TMPD/t7.got" "^\[1\] [0-9]+$" "a background job says which job it is and which pid"
 matches "$TMPD/t7.got" "^\[[0-9]+\] -> 137$" \
     "and 'kill \$!' really ended it: wait picks up 137 = 128 + 9"
-matches "$TMPD/t7.got" "^-       87 nums.txt$" "ls -l says how big a file is"
-matches "$TMPD/t7.got" "^-        0 empty.txt$" "and that the empty one is empty"
+# ROUND OFS3 gave a file three timestamps, and `ls -l` shows the
+# modification time next to the size:
+#     <kind><size, right-aligned in nine> <YYYY-MM-DD hh:mm> <name>
+matches "$TMPD/t7.got" "^-       87 [0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2} nums.txt$" \
+    "ls -l says how big a file is, and when it was written"
+matches "$TMPD/t7.got" "^-        0 [0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2} empty.txt$" \
+    "and that the empty one is empty"
 free_line=$(grep -m1 '^osum: frames_free=' "$TMPD/t7.txt")
 now=$(echo "$free_line" | grep -oE 'frames_free=[0-9]+' | cut -d= -f2)
 was=$(echo "$free_line" | grep -oE 'of [0-9]+' | awk '{print $2}')
