@@ -900,6 +900,245 @@ that difference has exactly one cause.
 * **The corner sign still has no click.** Neither does the state icon
   beside it.
 
+## 14. The switch and the quick settings (third addendum)
+
+### 14.1 The correction, first
+
+Justin's ruling, and it takes precedence over everything in section 13:
+
+> `when-offline` shall **not** be the default and shall **not** engage by
+> itself. The switch is a plain on/off for "fake a network", at system
+> level, and a person flips it on purpose.
+
+Two things follow, and one of them is a change of substance while the
+other is only a change of shape.
+
+**The default did not move, and that is measured rather than promised.**
+`off` was already the default and still is. Section 9e of the acceptance
+boots a machine that was told nothing anywhere -- no `nvfall=` on the
+kernel command line, no `/etc/netview.conf` in the image -- and reads
+`nv: fallb=0`, `nv: fbview=0`, and a program that came up `real`. A
+default that is only asserted in a comment is not a default; this one
+comes off a boot.
+
+**The control became binary, and that is the substance.** The second
+addendum offered three values as though they were equal, and they are
+not:
+
+| | |
+|---|---|
+| **the switch** | two positions, `off` and `always`. This is what the tile toggles, what `netview fallback on\|off` sets, and what a person means by "fake a network". One question, one answer. |
+| **`when-offline`** | a third value that has to be picked out of a list on purpose: `netview fallback when-offline`, or the drop-down on the settings page. Nothing reaches it without somebody typing or choosing the word. |
+
+`on` is a fourth *spelling*, not a fourth value: it is accepted on the
+way in and `always` is what gets written to `/etc/netview.conf`, so the
+file keeps one spelling per value. Section 9f measures both halves --
+`fallback=always` in the file, and the word `when-offline` appearing
+nowhere in a run that only ever flipped the switch.
+
+**Why `when-offline` was not deleted.** It is built, it is measured, and
+there is a real case for it -- a laptop that is offline for an hour.
+What was wrong was never the value. What was wrong was handing somebody
+a *switch* whose meaning depends on what the cable is doing this second.
+Naming a thing explicitly is a different act from flipping a switch, and
+that difference is the whole of the correction.
+
+**The precedence table of 13.1 is unchanged.** A setting on a program
+still beats the system level, in both directions.
+
+### 14.2 The quick settings
+
+A small panel over the corner of the taskbar, the way `Win+A` opens one
+on Windows. It exists because of one switch; the rule that got it built
+is worth more than the panel:
+
+> **Only what really exists and what is really switched often goes in
+> here.** Four honest tiles beat twelve of which half do nothing. A tile
+> for something this system does not have is not a placeholder. It is a
+> lie with rounded corners.
+
+So the interesting part of this section is the list of what is **not**
+in it, and every line of it was checked against this tree rather than
+assumed:
+
+| left out | why |
+|---|---|
+| **Volume** | There is no sound. `grep -ri audio kernel/*.fi` finds `A_VOLUME` in the FAT driver and nothing else. A slider would move a number that reaches no speaker. |
+| **Brightness** | Round DISPLAY has not delivered a gamma ramp on this branch. What does exist is `pwr.rescale`, which multiplies every pixel in the framebuffer **in place** and says so in its own comment. That is fine for `power hell 40` typed once; a slider is dragged across fifty values and every one of them throws away low bits the next one cannot get back. A slider over a lossy operation is worse than no slider. |
+| **Light / dark** | The interface is not there. `/etc/theme` exists and is one file of colour *values*; the settings read a list of named schemes out of `/etc/schemas`, and **nothing in this tree creates that directory** -- no image builder writes it, so on a running machine it is empty. There is no mark anywhere saying which scheme is the light one. Round THEME is building exactly that, and a tile here would have had to invent their interface and then disagree with it. |
+| **Do not disturb** | There are no notifications. Nothing to silence. |
+
+What is left is three, and all three are switches a person really flips:
+
+| tile | what it does |
+|---|---|
+| **Netz vortaeuschen** | the reason the panel was asked for. `off` ↔ `always`. |
+| **Netz** | the machine's address, away and back. **This is not the same switch**: a faked program keeps believing in its invented network after the address is gone, and a real one genuinely loses everything. They sit next to each other because they are two different things, not two words for one. |
+| **Leiste verbergen** | `/etc/taskbar.conf`, `autohide`. It belongs to the taskbar, and so does this panel. |
+
+and a row that opens `/bin/einstellungen`, where the things that are
+*not* flipped often live.
+
+### 14.3 Where it appears
+
+At the edge the bar is on, in the corner the icon group is in -- and the
+rectangle it lays itself out in is the **work area** (`wlibc.work_*`,
+the interface addendum TASKBAR built), never the screen. A panel that
+assumed the screen would sit under the bar on three edges out of four.
+The acceptance opens it on all four and checks that the reported
+rectangle lies inside the reported work area, on all four.
+
+It is the taskbar's own second window, created at start and kept hidden;
+opening it is `WS_HIDDEN 0`, a move and a paint, not a program start.
+That is not a detail -- it is why the thing can be timed in
+microseconds at all.
+
+It closes three ways, and all three are measured: **Escape** (it takes
+the focus when it opens, so the key arrives), the **hotkey again**, and
+a **press anywhere outside it**, which has to be polled from the pointer
+because a press outside a window raises no event belonging to that
+window.
+
+### 14.4 The Super key did not arrive, and now it does
+
+Asked, and answered honestly before anything was written: **no.** The
+key comes in as `0xE0 0x5B` (left) or `0xE0 0x5C` (right). The prefix
+set `KB_EXT`, the code after it fell through to `arrow()`, which has no
+entry for `0x5B` and returns 0 -- so the key was dropped without a
+trace. There was not one line in this tree that mentioned `0x5B`.
+
+It is now a **modifier**, handled exactly like Shift and Control in the
+same function: it produces no character, so it produces no `key: ` line,
+and round K11's promise of exactly one such line per key holds
+unchanged.
+
+`Super` + a letter is **latched, not delivered**, and the "not
+delivered" is the important half: a `Super+A` that also typed an `a`
+into whatever window had the focus would leave a stray letter in the
+person's document every single time they opened this panel. Section 9a
+measures exactly that -- one `key: a` from a plain `a`, one
+`hk: super+a` from the combination, and *still* only one `key: a`.
+
+**Why a latch and not an event.** A hotkey has no window; that is what
+makes it global. The window server hands a key to the window with the
+focus (`wm.on_key`), and the taskbar is deliberately never that window.
+So the press is written down in the keyboard interrupt -- a counter, the
+character, and the monotone clock -- and whoever cares reads it
+(`SYS_OSUM_HOTKEY`). **The counter is the protocol**: a reader keeps the
+number it saw last and acts when it changes. Nothing is acknowledged, so
+nothing can forget to acknowledge, and two readers cannot take a press
+away from each other.
+
+There is **one** hotkey and it is spelled out in the source rather than
+configured. A key map is a round of its own, and half of one here would
+be exactly the kind of half-thing this round keeps refusing.
+
+### 14.5 The tiles, and why there are three drawings and not six
+
+The obvious build is two drawings per tile, one for on and one for off,
+so that somebody who cannot tell the colours apart still sees which way
+the switch stands. It was drawn that way first and then **measured**,
+and it failed its own test: a sixteen-by-sixteen glyph is mostly
+outline, so "the same shape with the middle changed" comes out at about
+a quarter of its pixels different -- under the third that
+`tools/netview/icons.py` demands of any two signs that mean different
+things. The tool was right. A quarter is not a difference anybody sees
+at a glance.
+
+So the switch position is carried where a toggle actually carries it,
+and **only one of the three is colour**:
+
+1. **the word** under the tile -- `an` or `aus`. Not a hue, a word.
+2. **the relief** of the frame -- raised when off, sunken when on
+   (`wlibc.frame3`, the same relief every button in this system has had
+   since K15).
+3. the fill, which is colour, and which is therefore the one of the
+   three nobody has to be able to see.
+
+The three glyphs themselves are OSYM with colour **roles**, like every
+other sign of this round, so one file is right in a light scheme and in
+a dark one. `tile-fake` is `sys-faking` enlarged, on purpose: this tile
+turns on exactly the thing that corner sign announces, and two drawings
+for one switch and its consequence would be two things to learn instead
+of one. `tile-hide` is deliberately *not* a screen, because `tile-fake`
+is one and they sit side by side.
+
+Measured, silhouette against silhouette, threshold 33 %:
+
+| | |
+|---|---|
+| fake vs net | **85 %** |
+| fake vs hide | **77 %** |
+| net vs hide | **92 %** |
+| tile-fake vs state-online | **75 %** |
+| tile-fake vs state-nocarrier | **76 %** |
+| tile-hide vs state-online | **76 %** |
+| tile-net vs state-online | **66 %** |
+
+The last four are there because the panel opens directly above the
+corner: those signs are on the screen at the same time and are the same
+size.
+
+### 14.6 Two defects the screenshots found
+
+The panel was built, it compiled, it opened, and it was wrong twice --
+in ways that are invisible in a source file and obvious in a picture.
+`tools/netview/kachel.py` reads the panel back out of the screenshot and
+found both:
+
+1. **The label ran off its own tile.** "Netz vortaeuschen" reached four
+   pixels past the right edge at `TW = 120`. In the source it says
+   `text_at(tx + 10, ...)`, which is correct.
+2. **Two text rows touched.** On the third tile, the label and the word
+   under it shared a row of pixels. Also not visible in any source: it
+   is the sum of the tile height, the ascent of the font and two
+   baselines, and nobody adds those up right in their head.
+
+The widest label turned out to be between 141 and 160 pixels, found by
+**bisection against the running system** rather than by reading the
+font: at `TW = 140` the panel's own `fit` cut it to "Netz vortaeusc", at
+160 to "Netz vortaeusche", at 180 it stands whole. The checker now runs
+on all four edges, so neither defect can come back quietly.
+
+`fit` stays as a safety net, and it reports the **shortened** label, not
+the long one -- a tile that reported the long label and painted a
+clipped one would pass a checker that compares the two, which is the
+trap round DESKTOP wrote down for the status fields.
+
+### 14.7 A seam closed rather than widened
+
+Section 13.6 admitted a seam: the shape of the line `fallback=<word>`
+stood in `netview.fi` **and** in `einstellungen.fi`. The quick settings
+would have made that three. So the reader and the writer moved into
+`nv.fi`, where `fb_name` and `fb_word` already live and where all three
+callers already come. There is one shape of that line now.
+
+The cost is honest and was measured rather than guessed: `nv.fi` now
+pulls `libc.io` into the two programs that imported it without one
+(`ps` and `nvcheck`), and `tools/userland/run.sh` measures the whole
+userland against the 2 MiB of the drive. The number is in the round's
+report.
+
+### 14.8 What this addendum does not do
+
+* **No key map.** One hotkey, `Super+A`, in the source. `Super` with any
+  other letter is latched and ignored -- which means it is also swallowed,
+  and that is a deliberate trade: swallowing it costs nothing today and
+  leaving it through would put stray letters in documents the day
+  somebody adds a second hotkey.
+* **No light/dark tile, no brightness, no volume, no do-not-disturb.**
+  See 14.2. Three of the four are waiting on other rounds; the fourth
+  has nothing behind it at all.
+* **The panel does not remember an address across a reboot.** "Network
+  off" keeps the address it took away in memory, so "network on" gives
+  the same one back; after a restart that memory is gone and DHCP is the
+  thing that answers, which is right. A remembered address in a file
+  would be a second, stale answer to a question something else already
+  answers at every start.
+* **No animation, no drop shadow.** The panel appears and disappears.
+* **The corner sign still has no click of its own** -- the icon *group*
+  opens the panel, which is one target for three icons.
+
 ## 12. Files
 
 | file | what |
@@ -930,3 +1169,9 @@ that difference has exactly one cause.
 | `tools/netview/schau.py` | reads a sign back out of a screenshot with the roles resolved |
 | `tools/netview/blatt.py` | the sheet of all eight signs |
 | `tools/netview/run.sh` | the acceptance run |
+| `kernel/user/qs.fi` | third addendum: the quick settings panel -- layout, tiles, drawing, the hotkey |
+| `kernel/kbd.fi` | third addendum: the Super key as a modifier, and the hotkey latch |
+| `kernel/kstate.fi` | third addendum: `KB_SUPER`, `HK_SEQ`, `HK_KEY`, `HK_NS` in the K11 block |
+| `assets/netview/tile-fake.txt`, `tile-net.txt`, `tile-hide.txt` | third addendum: the three tile drawings |
+| `tools/netview/kachel.py` | third addendum: reads the panel back out of a screenshot -- overflowing labels and touching rows |
+| `tools/netview/smoke.sh` | third addendum: one boot, one Super+A, one picture -- the fast loop while the panel was being built |
