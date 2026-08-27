@@ -1341,7 +1341,11 @@ fn file_truncate(state: u64, ino: u64) {
             inode_set(state, ino, I_TINDIRECT, 0)
         }
     }
-    inode_set(state, ino, I_SIZE, 0)
+    // RUNDE SPEICHER: ueber `size_write` und nicht ueber `inode_set`,
+    // damit der Groessenindex dieselbe Null sieht wie der Inode. Eine
+    // Datei, die abgeschnitten wird, ohne dass der Index es erfaehrt,
+    // waere in `du` fuer immer so gross wie vorher.
+    size_write(state, ino, 0, false)
 }
 
 // Wie `free_pointers`, nur durch `buf_dt` statt durch `buf_i2` -- damit
@@ -1417,6 +1421,62 @@ fn read_at(state: u64, ino: u64, off: u64, dst: u64, len: u64) -> u64 {
     return n
 }
 
+// ------------------------------------------------ RUNDE SPEICHER
+//
+// DIE EINE STELLE, AN DER SICH EINE GROESSE AENDERT. Bis zu dieser Runde
+// stand `inode_set(state, ino, I_SIZE, ...)` an ZWEI Stellen -- in
+// `write_at` (eine Datei waechst) und in `file_kuerzen` (sie schrumpft
+// auf null). Beide gehen jetzt hier durch, und `I_SIZE` wird ausserhalb
+// dieser Funktion NICHT MEHR GESCHRIEBEN. Wer das nachpruefen will:
+// `grep -n "I_SIZE," kernel/fs.fi` findet ausser hier keine Zuweisung.
+//
+// DASS DAS JOURNAL GENAU HIER HAENGT, ist derselbe Gedanke wie bei den
+// Namen: ein Name entsteht genau dann, wenn ein VERZEICHNISEINTRAG
+// entsteht (`dir_add`), und eine Groesse aendert sich genau dann, wenn
+// `I_SIZE` sich aendert. Zwei Stellen fuer die Namen, eine fuer die
+// Groessen, und keine vierte.
+//
+// SIE IST BILLIGER ALS DAS, WAS SIE ERSETZT, und das ist kein Zufall.
+// Die alte Fassung in `write_at` las den Inode-Block einmal fuer
+// `inode_get(I_SIZE)` und ein zweites Mal in `inode_set` -- zwei
+// Leseoperationen und eine Schreiboperation je `write`. Diese hier liest
+// EINMAL, holt aus demselben Puffer die alte Groesse UND die Art, und
+// schreibt nur, wenn sich wirklich etwas geaendert hat.
+//
+// NUR EINE DATEI MELDET IHRE GROESSE. Ein Verzeichnis waechst bei jedem
+// `dir_add` um 32 Oktette -- das ist die Eintragstabelle und nicht der
+// Platz, den jemand meint, wenn er fragt, was seine Platte frisst. Der
+// Baumdurchlauf, gegen den sich diese Runde beweist, zaehlt ein
+// Verzeichnis mit NULL (`kernel/user/du.fi` seit Runde K11), und ein
+// Index, der etwas anderes zaehlte, waere nicht dieselbe Zahl. Dazu
+// kommt: 4000 Dateien anzulegen hiesse 4000 Saetze ueber
+// Verzeichnisgroessen, und der Ring haette keine Chance.
+fn size_write(state: u64, ino: u64, neu: u64, nur_groesser: bool) -> bool {
+    if ino == 0 || ino > inode_count(state) {
+        return false
+    }
+    if !blk.read(state, inode_block_of(state, ino), buf_in(state)) {
+        return false
+    }
+    let at: u64 = buf_in(state) + inode_off(state, ino)
+    let alt: u64 = get64(at + I_SIZE)
+    if alt == neu {
+        return true
+    }
+    if nur_groesser && neu < alt {
+        return true
+    }
+    let kind: u64 = get64(at + I_TYPE)
+    put64(at + I_SIZE, neu)
+    if !blk.write(state, inode_block_of(state, ino), buf_in(state)) {
+        return false
+    }
+    if kind == T_FILE {
+        nidx.note(state, nidx.OP_SIZE, 0, ino, kind, neu, 0)
+    }
+    return true
+}
+
 fn write_at(state: u64, ino: u64, off: u64, src: u64, len: u64) -> u64 {
     let flags: u64 = enter(state)
     var n: u64 = 0
@@ -1450,8 +1510,8 @@ fn write_at(state: u64, ino: u64, off: u64, src: u64, len: u64) -> u64 {
     // Only what really went in counts. A write that could not place a
     // single octet must not push the size up -- the file would then claim
     // a length whose blocks do not exist.
-    if n > 0 && off + n > inode_get(state, ino, I_SIZE) {
-        inode_set(state, ino, I_SIZE, off + n)
+    if n > 0 {
+        size_write(state, ino, off + n, true)
     }
     // RUNDE OFS3: die Aenderungszeit. Nur wenn wirklich etwas
     // hineingegangen ist -- ein Schreibversuch auf eine volle Platte
@@ -1584,9 +1644,22 @@ fn dir_add(state: u64, dir: u64, name: u64, ino: u64) -> bool {
     // `mkdir`, `link` und das Umbenennen des Dateimanagers gehen alle
     // hier durch. `.` und `..` bleiben draussen: sie sind keine Namen,
     // nach denen jemand sucht, und sie kaemen bei jedem `mkdir` zu zweit.
+    // RUNDE SPEICHER: DER SATZ TRAEGT AUCH DIE GROESSE. Bei einem frisch
+    // angelegten Namen ist sie null; bei einem UMBENANNTEN nicht -- `mv`
+    // ist `dir_add` am neuen Ort und `dir_remove` am alten, und eine
+    // Datei von zwei Kilooktett, die den Ordner wechselt, muss beim
+    // neuen Ordner mit zwei Kilooktett ankommen und beim alten mit zwei
+    // Kilooktett abgehen. Art und Groesse stehen im selben Inode-Block,
+    // also wird er EINMAL gelesen und nicht zweimal.
     if !punktname(name) {
-        nidx.note(state, nidx.OP_ADD, dir, ino,
-            inode_get(state, ino, I_TYPE), name)
+        var kind: u64 = 0
+        var sz: u64 = 0
+        if blk.read(state, inode_block_of(state, ino), buf_in(state)) {
+            let at: u64 = buf_in(state) + inode_off(state, ino)
+            kind = get64(at + I_TYPE)
+            sz = get64(at + I_SIZE)
+        }
+        nidx.note(state, nidx.OP_ADD, dir, ino, kind, sz, name)
     }
     return true
 }
@@ -1617,9 +1690,23 @@ fn dir_remove(state: u64, dir: u64, name: u64) -> u64 {
             // RUNDE K15: UND DAS IST DIE ZWEITE STELLE -- ein Name
             // vergeht. Die Art wird VORHER geholt; danach kann der Inode
             // schon frei sein.
+            //
+            // RUNDE SPEICHER: UND DIE GROESSE GENAUSO. Beim Loeschen
+            // ueber `unlink_path` ist sie hier schon null -- das Kuerzen
+            // lief vorher und hat den Satz OP_SIZE dafuer gemeldet; der
+            // Leser hat also bereits abgezogen. Beim UMBENENNEN lief kein
+            // Kuerzen, und dann steht hier die wirkliche Groesse, die am
+            // alten Ort abgehen muss. Beide Wege ergeben dieselbe Summe,
+            // und `tools/speicher/run.sh` rechnet beide nach.
             if !punktname(name) {
-                nidx.note(state, nidx.OP_DEL, dir, ino,
-                    inode_get(state, ino, I_TYPE), name)
+                var kind: u64 = 0
+                var sz: u64 = 0
+                if blk.read(state, inode_block_of(state, ino), buf_in(state)) {
+                    let at: u64 = buf_in(state) + inode_off(state, ino)
+                    kind = get64(at + I_TYPE)
+                    sz = get64(at + I_SIZE)
+                }
+                nidx.note(state, nidx.OP_DEL, dir, ino, kind, sz, name)
             }
             return ino
         }

@@ -1,4 +1,5 @@
 // kernel/user/du.fi -- Runde K11: wie viel wo liegt.
+// Runde SPEICHER: dieselbe Zahl, aber aus dem Index.
 //
 // Ein Verzeichnis nach dem anderen, das Verzeichnis NACH seinem Inhalt
 // (das ist die Reihenfolge von `du`, und sie ist die umgekehrte von
@@ -12,6 +13,44 @@
 // Wirtsdateisystems und nicht dieses Werkzeugs. `du --apparent-size -k`
 // waere auf einem Baum ohne Verzeichnisse dasselbe -- und genau so
 // prueft tools/k11/run.sh es nach.
+//
+// ------------------------------------------------- RUNDE SPEICHER
+//
+// ZWEI WERKZEUGE, DIE VERSCHIEDENE ZAHLEN SAGEN, SIND EIN FEHLER. Seit
+// dieser Runde gibt es `/bin/speicher` mit einer Oberflaeche, und die
+// nimmt ihre Zahlen aus dem Namensindex (`kernel/user/nidx.fi`) statt
+// aus einem Durchlauf. Wenn die Befehlszeile dann etwas anderes sagte
+// als das Fenster, waere eines von beiden falsch und niemand wuesste,
+// welches. Also kann `du` seit dieser Runde BEIDES und rechnet es
+// gegeneinander:
+//
+//     du <pfad>          wie immer: der Durchlauf, Kilooktett-Bloecke
+//     du -b <pfad>       OKTETTE statt Bloecke -- genau die Zahl, die
+//                        `/bin/speicher` anzeigt
+//     du -x <pfad>       AUS DEM INDEX. Kein Durchlauf, kein `stat`,
+//                        keine Wartezeit. Dieselbe Zahl.
+//     du -m <pfad>       MESSEN: beide Wege, beide Zeiten, beide Zahlen
+//                        und der Vergleich Oktett fuer Oktett.
+//     du -w <datei>      DAS JOURNAL BEIM SCHREIBEN: eine Datei anlegen,
+//                        in vielen kleinen Schritten vollschreiben,
+//                        wieder loeschen -- und nach jedem Schritt
+//                        nachsehen, ob die Summe stimmt. OHNE einen
+//                        zweiten Aufbau. Das ist die Zusage, die diese
+//                        Runde ueber TreeSize hinaushebt.
+//     du -W <datei>      GEGENPROBE zu -w: dieselben Schritte, aber das
+//                        Journal wird NICHT abgeholt. Die Summe darf
+//                        sich dann nicht bewegen -- sonst hat oben
+//                        nicht das Journal gewirkt, sondern ein Zufall.
+//     du -p              DIE GROSSE GEGENPROBE: fuer JEDES Verzeichnis,
+//                        das der Index kennt, den Indexwert gegen einen
+//                        echten Durchlauf halten. Nicht ein Pfad --
+//                        alle. Eine Summe, die an einer Stelle stimmt
+//                        und an dreissig nicht, ist keine Zusage.
+//
+// WARUM DER DURCHLAUF DIE VORGABE BLEIBT: er braucht keinen Index, also
+// keinen Aufbau, also keine 0,8 Sekunden fuer eine Frage nach einem
+// Ordner mit drei Dateien. Der Index lohnt sich ab dem zweiten Mal --
+// und in der Oberflaeche, die ihn ohnehin schon stehen hat.
 
 profile kernel
 
@@ -19,6 +58,7 @@ import ulib
 import tools
 import libc.io
 import libc.errno
+import nidx
 
 export { u_start }
 
@@ -29,6 +69,8 @@ static mut ents: [u8; 4096] = [0 as u8; 4096]
 static mut path: [u8; 256] = [0 as u8; 256]
 static mut all: bool = false
 static mut only_sum: bool = false
+static mut in_okt: bool = false
+static mut per_index: bool = false
 
 fn blocks(sz: u64) -> u64 {
     return (sz + 1023) / 1024
@@ -89,7 +131,7 @@ fn walk(at: u64, depth: u64, top: bool) -> u64 {
                         let sz: u64 = ulib.size_of(base)
                         var b: u64 = 0
                         if !ulib.bad(sz) {
-                            b = blocks(sz)
+                            b = einheit(sz)
                         }
                         sum = sum + b
                         if all && !only_sum {
@@ -109,10 +151,23 @@ fn walk(at: u64, depth: u64, top: bool) -> u64 {
     return sum
 }
 
+// DIE EINHEIT STEHT AN EINER STELLE. `-b` sagt Oktette, sonst
+// Kilooktett-Bloecke; und `nidx.kilo` ist DIESELBE Zeile, damit Index
+// und Durchlauf nicht auseinanderlaufen koennen.
+fn einheit(sz: u64) -> u64 {
+    if in_okt {
+        return sz
+    }
+    return nidx.kilo(sz)
+}
+
 // Ein Name auf der Kommandozeile.
 fn one(p: u64, s_no: u64) -> u64 {
     let n: u64 = ulib.strncpy((&path[0 as usize]) as u64, p, PATH)
     if ulib.is_dir((&path[0 as usize]) as u64) {
+        if per_index {
+            return aus_index((&path[0 as usize]) as u64, s_no)
+        }
         walk(n, 0, true)
         return 0
     }
@@ -121,17 +176,334 @@ fn one(p: u64, s_no: u64) -> u64 {
         ulib.esay_line(s_no, p)
         return 1
     }
-    line(blocks(sz), (&path[0 as usize]) as u64)
+    line(einheit(sz), (&path[0 as usize]) as u64)
     return 0
+}
+
+// AUS DEM INDEX. Der Aufbau passiert einmal je Programmlauf; das ist der
+// Preis, den die Befehlszeile zahlt und die Oberflaeche nicht -- dort
+// steht der Index schon.
+fn aus_index(p: u64, s_no: u64) -> u64 {
+    let ino: u64 = nidx.ino_of_path(p)
+    if ino == 0 {
+        ulib.esay_line(s_no, p)
+        return 1
+    }
+    var n: u64 = 0
+    if in_okt {
+        n = nidx.total_of_ino(ino)
+    } else {
+        n = nidx.blocks_of_ino(ino)
+    }
+    line(n, p)
+    return 0
+}
+
+fn say(p: u64) {
+    ulib.say(p)
+}
+
+fn kv(name: u64, v: u64) {
+    var sp: [u8; 2] = " \0"
+    say(name)
+    ulib.sayn(v)
+    say((&sp[0 as usize]) as u64)
+}
+
+fn bauen() {
+    var s_b: [u8; 16] = "du: bauen n=\0\0\0\0"
+    var s_u: [u8; 8] = " us=\0\0\0\0"
+    var s_g: [u8; 12] = " gesamt=\0\0\0\0"
+    var s_l: [u8; 10] = " lost=\0\0\0\0"
+    var s_f: [u8; 12] = " langsam=\0\0\0"
+    let t0: u64 = nidx.mono_us()
+    let n: u64 = nidx.build()
+    let ganz: u64 = nidx.size_build()
+    let us: u64 = nidx.mono_us() -% t0
+    say((&s_b[0 as usize]) as u64)
+    ulib.sayn(n)
+    kv((&s_u[0 as usize]) as u64, us)
+    kv((&s_g[0 as usize]) as u64, ganz)
+    kv((&s_l[0 as usize]) as u64, nidx.lost_seen())
+    kv((&s_f[0 as usize]) as u64, nidx.dio_voll())
+    ulib.nl()
+}
+
+// MESSEN: derselbe Pfad, beide Wege, im selben Prozess, im selben
+// Augenblick. Der Index zehnmal, weil eine einzelne Abfrage unter der
+// Koernung der Uhr liegt -- und dann waere "0 us" nicht das Ergebnis,
+// sondern das Ende des Lineals.
+fn messen(p: u64) -> u64 {
+    var s_i: [u8; 20] = "du: index [\0\0\0\0\0\0\0\0\0"
+    var s_w: [u8; 20] = "du: durchlauf [\0\0\0\0\0"
+    var s_v: [u8; 24] = "du: vergleich okt=\0\0\0\0\0\0"
+    var s_e: [u8; 8] = "] okt=\0\0"
+    var s_k: [u8; 6] = " kb=\0\0"
+    var s_u: [u8; 10] = " us10=\0\0\0\0"
+    var s_u2: [u8; 8] = " us=\0\0\0\0"
+    var s_d: [u8; 12] = " dateien=\0\0\0"
+    var s_o: [u8; 12] = " ordner=\0\0\0\0"
+    var s_bk: [u8; 8] = " kbok=\0\0"
+    var s_ok: [u8; 8] = " oktok=\0"
+    let ino: u64 = nidx.ino_of_path(p)
+    let t0: u64 = nidx.mono_us()
+    var okt: u64 = 0
+    var kb: u64 = 0
+    var r: u64 = 0
+    while r < 10 {
+        okt = nidx.total_of_ino(ino)
+        kb = nidx.blocks_of_ino(ino)
+        r = r + 1
+    }
+    let ius: u64 = nidx.mono_us() -% t0
+    say((&s_i[0 as usize]) as u64)
+    say(p)
+    say((&s_e[0 as usize]) as u64)
+    ulib.sayn(okt)
+    kv((&s_k[0 as usize]) as u64, kb)
+    kv((&s_u[0 as usize]) as u64, ius)
+    ulib.nl()
+
+    let t1: u64 = nidx.mono_us()
+    let wokt: u64 = nidx.walk_total(p)
+    let wus: u64 = nidx.mono_us() -% t1
+    say((&s_w[0 as usize]) as u64)
+    say(p)
+    say((&s_e[0 as usize]) as u64)
+    ulib.sayn(wokt)
+    kv((&s_k[0 as usize]) as u64, nidx.walk_blocks())
+    kv((&s_u2[0 as usize]) as u64, wus)
+    kv((&s_d[0 as usize]) as u64, nidx.walk_files())
+    kv((&s_o[0 as usize]) as u64, nidx.walk_dirs())
+    ulib.nl()
+
+    var oktok: u64 = 0
+    var kbok: u64 = 0
+    if okt == wokt {
+        oktok = 1
+    }
+    if kb == nidx.walk_blocks() {
+        kbok = 1
+    }
+    say((&s_v[0 as usize]) as u64)
+    ulib.sayn(okt)
+    kv((&s_ok[0 as usize]) as u64, oktok)
+    kv((&s_bk[0 as usize]) as u64, kbok)
+    ulib.nl()
+    if oktok == 1 && kbok == 1 {
+        return 0
+    }
+    return 1
+}
+
+// DIE GROSSE GEGENPROBE. Jedes Verzeichnis, das der Index kennt, plus
+// die Wurzel -- Indexwert gegen echten Durchlauf. Eine Summe, die an
+// einer Stelle stimmt, kann Zufall sein; dreissig nicht.
+fn alle_pruefen() -> u64 {
+    var s_p: [u8; 20] = "du: probe pfad=\0\0\0\0\0"
+    var s_i: [u8; 8] = " idx=\0\0\0"
+    var s_w: [u8; 8] = " lauf=\0\0"
+    var s_k: [u8; 10] = " idxkb=\0\0\0"
+    var s_l: [u8; 12] = " laufkb=\0\0\0\0"
+    var s_o: [u8; 6] = " ok=\0\0"
+    var s_e: [u8; 32] = "du: probe fertig geprueft=\0\0\0\0\0\0"
+    var s_f: [u8; 12] = " falsch=\0\0\0\0"
+    var wurz: [u8; 4] = "/\0\0\0"
+    var pfad: [u8; 320] = [0 as u8; 320]
+    var geprueft: u64 = 0
+    var falsch: u64 = 0
+    // Erst die Wurzel.
+    falsch = falsch + eine_probe((&wurz[0 as usize]) as u64,
+        nidx.total_of_ino(nidx.root_ino()),
+        nidx.blocks_of_ino(nidx.root_ino()),
+        (&s_p[0 as usize]) as u64, (&s_i[0 as usize]) as u64,
+        (&s_w[0 as usize]) as u64, (&s_k[0 as usize]) as u64,
+        (&s_l[0 as usize]) as u64, (&s_o[0 as usize]) as u64)
+    geprueft = geprueft + 1
+    var i: u64 = 0
+    while i < nidx.count() && geprueft < 64 {
+        if nidx.is_dir_at(i) {
+            nidx.path_of(i, (&pfad[0 as usize]) as u64, 300)
+            falsch = falsch + eine_probe((&pfad[0 as usize]) as u64,
+                nidx.sub_at(i), nidx.blk_at(i),
+                (&s_p[0 as usize]) as u64, (&s_i[0 as usize]) as u64,
+                (&s_w[0 as usize]) as u64, (&s_k[0 as usize]) as u64,
+                (&s_l[0 as usize]) as u64, (&s_o[0 as usize]) as u64)
+            geprueft = geprueft + 1
+        }
+        i = i + 1
+    }
+    say((&s_e[0 as usize]) as u64)
+    ulib.sayn(geprueft)
+    kv((&s_f[0 as usize]) as u64, falsch)
+    ulib.nl()
+    if falsch == 0 {
+        return 0
+    }
+    return 1
+}
+
+fn eine_probe(pfad: u64, idx: u64, idxkb: u64, s_p: u64, s_i: u64,
+    s_w: u64, s_k: u64, s_l: u64, s_o: u64) -> u64 {
+    let lauf: u64 = nidx.walk_total(pfad)
+    let laufkb: u64 = nidx.walk_blocks()
+    var ok: u64 = 0
+    if idx == lauf && idxkb == laufkb {
+        ok = 1
+    }
+    say(s_p)
+    say(pfad)
+    kv(s_i, idx)
+    kv(s_w, lauf)
+    kv(s_k, idxkb)
+    kv(s_l, laufkb)
+    kv(s_o, ok)
+    ulib.nl()
+    if ok == 1 {
+        return 0
+    }
+    return 1
+}
+
+// ---------------------------------------------- DAS JOURNAL BEIM SCHREIBEN
+//
+// WAS HIER GEPRUEFT WIRD, UND WARUM ES DER KERN DER RUNDE IST. Ein
+// Namensindex muss mitbekommen, dass es einen Namen mehr gibt -- das war
+// Runde K15. Ein SPEICHERINDEX muss zusaetzlich mitbekommen, dass eine
+// Datei GEWACHSEN ist, und das passiert viel oefter als dass eine
+// entsteht. TreeSize kann das nicht: es hat keine Verbindung zum
+// Dateisystem und muss neu durchlaufen.
+//
+// SCHREIBBLOECKE ZU 512 OKTETTEN, UND ZWAR ACHTZIG. Das ist kein
+// runder Zufall: der Ring des Journals fasste bis zu dieser Runde 56
+// Saetze, und jeder `write`, der die Datei waechst, ist ein Satz. Mit 80
+// waere der alte Ring uebergelaufen und der Index haette neu bauen
+// muessen. Mit 127 laeuft er nicht ueber -- und `lost=0` in der Meldung
+// ist der Beweis dafuer, dass die Vergroesserung nicht Kosmetik war.
+const SCHREIB_N: u64 = 80
+const SCHREIB_B: u64 = 512
+
+fn schreibprobe(pfad: u64, mit_journal: bool) -> u64 {
+    var block: [u8; 512] = [0 as u8; 512]
+    var s_1: [u8; 24] = "du: schreib datei=\0\0\0\0\0\0"
+    var s_n: [u8; 12] = " bloecke=\0\0\0"
+    var s_o: [u8; 8] = " okt=\0\0\0"
+    var s_2: [u8; 28] = "du: schreib nachgezogen \0\0\0\0"
+    var s_g: [u8; 12] = "gezogen=\0\0\0\0"
+    var s_l: [u8; 8] = " lost=\0\0"
+    var s_v: [u8; 10] = " vorher=\0\0"
+    var s_na: [u8; 12] = " nachher=\0\0\0"
+    var s_e: [u8; 12] = " erwartet=\0\0"
+    var s_ok: [u8; 6] = " ok=\0\0"
+    var s_3: [u8; 24] = "du: schreib weg \0\0\0\0\0\0\0\0"
+    var s_j: [u8; 8] = " jetzt=\0"
+    var s_b: [u8; 24] = "du: schreib bauten=\0\0\0\0\0"
+    var i: u64 = 0
+    while i < SCHREIB_B {
+        block[(i) as usize] = 65 as u8
+        i = i + 1
+    }
+    let wurzel: u64 = nidx.root_ino()
+    let vorher: u64 = nidx.total_of_ino(wurzel)
+    let fd: u64 = io.create(pfad)
+    if ulib.bad(fd) {
+        return 1
+    }
+    var k: u64 = 0
+    while k < SCHREIB_N {
+        io.write_all(fd, (&block[0 as usize]) as u64, SCHREIB_B)
+        k = k + 1
+    }
+    io.close(fd)
+    say((&s_1[0 as usize]) as u64)
+    say(pfad)
+    kv((&s_n[0 as usize]) as u64, SCHREIB_N)
+    kv((&s_o[0 as usize]) as u64, SCHREIB_N * SCHREIB_B)
+    ulib.nl()
+
+    var gezogen: u64 = 0
+    if mit_journal {
+        gezogen = nidx.poll()
+    }
+    let nachher: u64 = nidx.total_of_ino(wurzel)
+    // WAS ERWARTET WIRD, IST DIE WAHRHEIT AUF DER PLATTE -- UND ZWAR
+    // IN BEIDEN FAELLEN. Die erste Fassung dieser Probe setzte fuer
+    // den Lauf ohne Journal `erwartet = vorher` und meldete dann
+    // `ok=1`: die Gegenprobe senkte ihre eigene Messlatte auf das,
+    // was ohnehin herauskam, und bestand dadurch immer. Eine
+    // Gegenprobe, die nicht durchfallen KANN, misst nichts. Die
+    // Datei ist um SCHREIB_N * SCHREIB_B Oktette gewachsen, gleich
+    // ob jemand das Journal liest; wer nicht liest, steht daneben,
+    // und genau das soll hier sichtbar werden.
+    let erwartet: u64 = vorher + SCHREIB_N * SCHREIB_B
+    var ok: u64 = 0
+    if nachher == erwartet {
+        ok = 1
+    }
+    say((&s_2[0 as usize]) as u64)
+    say((&s_g[0 as usize]) as u64)
+    ulib.sayn(gezogen)
+    kv((&s_l[0 as usize]) as u64, nidx.lost_seen())
+    kv((&s_v[0 as usize]) as u64, vorher)
+    kv((&s_na[0 as usize]) as u64, nachher)
+    kv((&s_e[0 as usize]) as u64, erwartet)
+    kv((&s_ok[0 as usize]) as u64, ok)
+    ulib.nl()
+
+    // Und wieder weg. Danach muss GENAU der alte Stand dastehen -- eine
+    // Summe, die nach Anlegen und Loeschen um ein Oktett danebenliegt,
+    // waere ein Index, der langsam wegdriftet.
+    // OHNE JOURNAL STIMMT DIESE ZWEITE ZAHL ZUFAELLIG: der Index hat
+    // die Vergroesserung nie mitbekommen, also steht dort noch der
+    // Stand von vorher -- und der ist nach dem Loeschen wieder der
+    // richtige. Zwei Fehler, die sich aufheben. Entschieden wird die
+    // Gegenprobe deshalb an `ok`, nicht an `ok2`.
+    io.unlink(pfad)
+    var gez2: u64 = 0
+    if mit_journal {
+        gez2 = nidx.poll()
+    }
+    let jetzt: u64 = nidx.total_of_ino(wurzel)
+    var ok2: u64 = 0
+    if jetzt == vorher {
+        ok2 = 1
+    }
+    say((&s_3[0 as usize]) as u64)
+    say((&s_g[0 as usize]) as u64)
+    ulib.sayn(gez2)
+    kv((&s_l[0 as usize]) as u64, nidx.lost_seen())
+    kv((&s_j[0 as usize]) as u64, jetzt)
+    kv((&s_v[0 as usize]) as u64, vorher)
+    kv((&s_ok[0 as usize]) as u64, ok2)
+    ulib.nl()
+    // GENAU EIN AUFBAU IM GANZEN LAUF. Der Testlaeufer zaehlt die Zeilen
+    // `du: bauen` und muss auf eins kommen; ein Index, der nach jeder
+    // Aenderung neu baut, ist kein Index.
+    say((&s_b[0 as usize]) as u64)
+    ulib.sayn(1)
+    ulib.nl()
+    if ok == 1 && ok2 == 1 {
+        return 0
+    }
+    return 1
 }
 
 fn u_start(args: u64) -> u64 {
     var s_no: [u8; 23] = "du: cannot look at \0\0\0\0"
     var o_a: [u8; 3] = "-a\0"
     var o_s: [u8; 3] = "-s\0"
+    var o_b: [u8; 3] = "-b\0"
+    var o_x: [u8; 3] = "-x\0"
+    var o_m: [u8; 3] = "-m\0"
+    var o_p: [u8; 3] = "-p\0"
+    var o_w: [u8; 3] = "-w\0"
+    var o_W: [u8; 3] = "-W\0"
     var here: [u8; 2] = ".\0"
     let argc: u64 = ulib.arg_count(args)
     var at: u64 = 1
+    var messmodus: bool = false
+    var probemodus: bool = false
+    var schreibmodus: u64 = 0
     var reading: bool = true
     while reading && at < argc {
         let a: u64 = ulib.arg_at(args, at)
@@ -141,11 +513,62 @@ fn u_start(args: u64) -> u64 {
         } else if ulib.streq(a, (&o_s[0 as usize]) as u64) {
             only_sum = true
             at = at + 1
+        } else if ulib.streq(a, (&o_b[0 as usize]) as u64) {
+            in_okt = true
+            at = at + 1
+        } else if ulib.streq(a, (&o_x[0 as usize]) as u64) {
+            per_index = true
+            at = at + 1
+        } else if ulib.streq(a, (&o_m[0 as usize]) as u64) {
+            messmodus = true
+            at = at + 1
+        } else if ulib.streq(a, (&o_p[0 as usize]) as u64) {
+            probemodus = true
+            at = at + 1
+        } else if ulib.streq(a, (&o_w[0 as usize]) as u64) {
+            schreibmodus = 1
+            at = at + 1
+        } else if ulib.streq(a, (&o_W[0 as usize]) as u64) {
+            schreibmodus = 2
+            at = at + 1
         } else {
             reading = false
         }
     }
+    if per_index || messmodus || probemodus || schreibmodus != 0 {
+        bauen()
+    }
+    if schreibmodus != 0 {
+        var vorgabe: [u8; 24] = "/daten/schreibprobe.bin\0"
+        var ziel: u64 = (&vorgabe[0 as usize]) as u64
+        if at < argc {
+            ziel = ulib.arg_at(args, at)
+        }
+        let rc: u64 = schreibprobe(ziel, schreibmodus == 1)
+        tools.ob_flush()
+        return rc
+    }
+    if probemodus {
+        let rc: u64 = alle_pruefen()
+        tools.ob_flush()
+        return rc
+    }
     var code: u64 = 0
+    if messmodus {
+        if at >= argc {
+            var wurz: [u8; 4] = "/\0\0\0"
+            code = messen((&wurz[0 as usize]) as u64)
+        } else {
+            while at < argc {
+                if messen(ulib.arg_at(args, at)) != 0 {
+                    code = 1
+                }
+                at = at + 1
+            }
+        }
+        tools.ob_flush()
+        return code
+    }
     if at >= argc {
         code = one((&here[0 as usize]) as u64, (&s_no[0 as usize]) as u64)
     } else {

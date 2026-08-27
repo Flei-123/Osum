@@ -1,5 +1,6 @@
 // kernel/nidx.fi -- Runde K15, zweiter Nachtrag: DAS AENDERUNGSJOURNAL
 // DES DATEISYSTEMS. Sechzig Zeilen Zustand, und kein Index.
+// Runde SPEICHER, dritter Nachtrag: es traegt jetzt auch die GROESSE.
 //
 // DAS VORBILD, UND ES IST NACHLESBAR. "Everything" von voidtools sucht
 // auf einer NTFS-Platte nicht. Es liest EINMAL die Master File Table --
@@ -40,6 +41,17 @@
 // des Suchprogramms aus der Tabelle gebaut, und genau dafuer wird
 // gemessen, wie lange das dauert.
 //
+// RUNDE SPEICHER HAT WEG B NOCH EINMAL GEPRUEFT, weil die Runde OFS3
+// das Format auf der Platte ohnehin aendert und damit das teuerste
+// Argument gegen B wegfaellt. Die Begruendung, warum es TROTZDEM bei A
+// bleibt, steht ausgeschrieben in `docs/ROUNDSPEICHER.md`, Abschnitt
+// "Weg B". Kurz: was B spart, ist EIN Neuaufbau je Hochfahren; was B
+// kostet, ist ein dauerhafter Blockschreibvorgang auf dem Pfad JEDES
+// `write` -- und der Pfad, der dadurch teuer wuerde, ist der, den jedes
+// Programm benutzt. Ein Index, der beim Hochfahren 0,8 Sekunden
+// braucht, ist ein besserer Handel als ein Dateisystem, das bei jedem
+// Schreiben einen Block mehr schreibt.
+//
 // WENN DER RING UEBERLAEUFT, SAGT ER DAS. `lost` zaehlt die Saetze, die
 // ueberschrieben wurden, bevor sie jemand geholt hat. Ein Leser, der
 // `lost` groesser sieht als beim letzten Mal, MUSS neu bauen. Das ist
@@ -48,6 +60,16 @@
 // zu lange nicht hinsieht, hat Pech. Ehrlich gesagt zu haben, dass man
 // etwas verpasst hat, ist der ganze Unterschied zu einem Index, der
 // luegt.
+//
+// RUNDE SPEICHER HAT DEN RING VERGROESSERT, von 56 auf 127 Saetze, und
+// der Grund ist eine Zahl: seit dieser Runde meldet das Journal auch,
+// dass eine Datei GEWACHSEN ist, und das passiert einmal je `write`.
+// Eine Datei von 30 Kilooktett, mit einem Puffer von 512 Oktetten
+// geschrieben, sind 60 Saetze -- in einem Ring von 56 laeuft das ueber,
+// in einem von 127 nicht. Der Ring liegt dafuer nicht mehr in der
+// geteilten Seite von K15, sondern in zwei eigenen (kstate.JRNL_OFF).
+// Gemessen wird beides: `tools/speicher/run.sh` schreibt genug, um den
+// alten Ring zu sprengen, und rechnet `lost` nach.
 //
 // DER SATZ IST DERSELBE WIE BEIM TABELLENLAUF -- 64 Oktette, dieselben
 // Felder an denselben Stellen. Ring 3 hat damit EINEN Satzleser und
@@ -61,7 +83,7 @@ import kstate
 export {
     init, ready, note, take, seq, lost, count,
     REC, R_INO, R_PARENT, R_SIZE, R_KIND, R_NAME, R_OP,
-    OP_ADD, OP_DEL, MAXJ, NAMEJ
+    OP_ADD, OP_DEL, OP_SIZE, MAXJ, NAMEJ
 }
 
 const REC: u64 = 64
@@ -75,14 +97,20 @@ const NAMEJ: u64 = 24
 
 const OP_ADD: u64 = 1
 const OP_DEL: u64 = 2
+// RUNDE SPEICHER: EINE DATEI IST GEWACHSEN ODER GESCHRUMPFT. Der Satz
+// traegt dann `R_INO` und `R_SIZE` -- die NEUE Groesse, nicht die
+// Aenderung. `R_PARENT` ist 0 und `R_NAME` leer: welcher Name zu dieser
+// Inode gehoert, weiss der Leser bereits, und ihn hier noch einmal
+// nachzuschlagen hiesse, im Schreibpfad ein Verzeichnis zu lesen.
+const OP_SIZE: u64 = 3
 
-// Der Kopf, dann die Saetze. 0x40 + 56 * 64 = 3648 <= JRNL_MAX (3840).
+// Der Kopf, dann die Saetze. 0x40 + 127 * 64 = 8192 = JRNL_MAX.
 const H_SEQ: u64 = 0x00 // wie viele Saetze es je gab
 const H_HEAD: u64 = 0x08 // naechster Platz im Ring
 const H_LOST: u64 = 0x10 // ueberschrieben, ehe sie jemand holte
 const H_READY: u64 = 0x18
 const H_BASE: u64 = 0x40
-const MAXJ: u64 = 56
+const MAXJ: u64 = 127
 
 fn g(state: u64, off: u64) -> u64 {
     return kstate.get(state, kstate.JRNL_OFF + off)
@@ -117,10 +145,12 @@ fn count(state: u64) -> u64 {
 }
 
 // NUR DER EIGENE BEREICH WIRD GELOESCHT, und das ist kein Detail: diese
-// Seite teilen sich drei Nutzer dieser Runde (`kstate.fi`), und `wig.init`
-// laeuft SPAETER als das erste `mkdir`. Wer hier die ganze Seite nullt,
-// loescht die Geometrie des Dateisystems unter dem laufenden Kernel weg
-// -- und genau das hat diese Runde einmal getan.
+// Seite teilte sich der Ring bis zur Runde SPEICHER mit zwei anderen
+// Nutzern (`kstate.fi`), und `wig.init` laeuft SPAETER als das erste
+// `mkdir`. Wer hier die ganze Seite nullt, loescht die Geometrie des
+// Dateisystems unter dem laufenden Kernel weg -- und genau das hat die
+// Runde K15 einmal getan. Seit Runde SPEICHER hat der Ring zwei eigene
+// Seiten; die Regel bleibt trotzdem stehen, weil sie richtig ist.
 fn init(state: u64) -> bool {
     var i: u64 = 0
     while i < kstate.JRNL_MAX {
@@ -131,9 +161,11 @@ fn init(state: u64) -> bool {
     return true
 }
 
-// EIN NAME IST ENTSTANDEN ODER VERGANGEN. Gerufen aus `fs.fi`, unter dem
-// Dateisystem-Schloss, ohne einen Block anzufassen.
-fn note(state: u64, op: u64, dir: u64, ino: u64, kind: u64, name: u64) {
+// EIN NAME IST ENTSTANDEN ODER VERGANGEN, ODER EINE DATEI HAT IHRE
+// GROESSE GEAENDERT. Gerufen aus `fs.fi`, unter dem Dateisystem-Schloss,
+// ohne einen Block anzufassen.
+fn note(state: u64, op: u64, dir: u64, ino: u64, kind: u64, size: u64,
+    name: u64) {
     if !ready(state) {
         return
     }
@@ -141,7 +173,7 @@ fn note(state: u64, op: u64, dir: u64, ino: u64, kind: u64, name: u64) {
     let off: u64 = slot_off(n)
     kstate.set(state, off + R_INO, ino)
     kstate.set(state, off + R_PARENT, dir)
-    kstate.set(state, off + R_SIZE, 0)
+    kstate.set(state, off + R_SIZE, size)
     kstate.set(state, off + R_KIND, kind)
     kstate.set(state, off + R_OP, op)
     var k: u64 = 0
