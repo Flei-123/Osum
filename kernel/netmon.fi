@@ -94,7 +94,7 @@ export {
     S_OWNER, S_PID, S_KIND, S_LPORT, S_RADDR, S_RPORT, S_T0,
     S_TXPAY, S_RXPAY, S_TXWIRE, S_RXWIRE, S_USE, S_FIELDS,
     sget, sset, sock_open, sock_gone, sock_alive, sock_owner,
-    NPROG, pget, prog_of, prog_name_at, prog_used,
+    NPROG, pget, prog_of, prog_name_at, prog_used, roll,
     pay_out, pay_in, frame_seen,
     lookups, hits, misses, sys_octets, bench,
     NSOCK, NAME_MAX, report,
@@ -103,7 +103,7 @@ export {
 
 // ------------------------------------------------------------ the page
 //
-// TWO PAGES OF `kdata`, 0x5A000..0x5C000, out of the store round K18 left open
+// THREE PAGES OF `kdata`, 0x5A000..0x5D000, out of the store round K18 left open
 // (0x5A000..0x60000, `kstate.fi`). It is entered in
 // `tools/kernel/karte.py` like every other area, and that checker is what
 // says it overlaps nothing.
@@ -111,7 +111,8 @@ export {
 //   0x0000..0x007F  the scalars of this round
 //   0x0080..0x0C7F  thirty-two task records of 96 octets
 //   0x0C80..0x127F  sixteen socket records of 96 octets
-//   0x1280..0x1B7F  twenty-four PROGRAM records of 96 octets
+//   0x1280..0x1FFF  twenty-four PROGRAM records of 144 octets
+//   0x2000..         the frame the classifier bench builds
 //
 // THE SOCKET RECORD IS 96 AND NOT 64, and the sixteen octets that
 // mistake cost are worth a sentence. It was 64 while it had eight
@@ -150,7 +151,7 @@ const SOCKS: u64 = 0x0C80
 const SBYTES: u64 = 96 // TWELVE fields of eight octets, and not eleven
 const NSOCK: u64 = 16
 const PROGS: u64 = 0x1280
-const PBYTES: u64 = 96
+const PBYTES: u64 = 144 // six counters, a flag, a name, six watermarks
 const NPROG: u64 = 24
 
 // The scalars.
@@ -200,6 +201,16 @@ const NAME_MAX: u64 = 24
 // A program record: the same six counters, a use flag and the name.
 const P_USE: u64 = 48
 const P_NAME: u64 = 56
+
+// THE WATERMARK, and it is the whole of how a running total becomes a
+// DAY. The six counters above only ever grow, from boot to shutdown.
+// What the history on the disk needs is "how much since the last time
+// anybody wrote it down", and the difference between those two is this:
+// six numbers saying where the counters stood when the last line was
+// written. `roll` hands out the difference and moves the watermark in
+// the same call, so two writers cannot both claim the same octets and a
+// crash between the two halves cannot lose them twice.
+const P_MARK: u64 = 96 // six words, 96..143
 
 // The fields of a socket record, in words.
 const S_USE: u64 = 0 // 0 = free, 1 = in use
@@ -411,6 +422,22 @@ fn prog_used(state: u64, i: u64) -> u64 {
         return 0
     }
     return kstate.get(state, pat(i) + P_USE)
+}
+
+// What this program has used since the last roll, and the watermark
+// moves to now. ONE call, because two (read, then set) would lose
+// whatever arrived between them.
+fn roll(state: u64, i: u64, field: u64) -> u64 {
+    if i >= NPROG || field >= T_FIELDS {
+        return 0
+    }
+    let now: u64 = kstate.get(state, pat(i) + field * 8)
+    let was: u64 = kstate.get(state, pat(i) + P_MARK + field * 8)
+    kstate.set(state, pat(i) + P_MARK + field * 8, now)
+    if now < was {
+        return 0
+    }
+    return now - was
 }
 
 fn prog_name_at(state: u64, i: u64, k: u64) -> u64 {
@@ -842,7 +869,7 @@ fn bench(state: u64, n: u64, matching: bool) -> u64 {
     // A frame in `kdata`, at the end of this round's own area -- not on
     // the stack, because 1514 octets of stack in a kernel with 32 KiB
     // of it is how a round breaks a different round's measurement.
-    let f: u64 = state + nm(0x1C00)
+    let f: u64 = state + nm(0x2000)
     var i: u64 = 0
     while i < 1514 {
         kstate.set8(f + i, 0 as u8)
