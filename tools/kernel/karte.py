@@ -184,6 +184,13 @@ BEREICHE = [
     # oben entstanden sind.  Die Runde DESKTOP bekommt 0x54000; dazwischen
     # bleibt eine Seitengruppe frei.
     ("TILE",       "kstate.fi", "TILE_OFF",       "TILE_MAX"),
+    # RUNDE NETMON: die Zaehlung je Prozess und der Weiterleiter mit
+    # NAT und DHCP-Server. Beide Bereiche sind beim Zusammenfuehren
+    # gewandert (0x5A000/0x5D000 waren von OFS3, DISPLAY und SPEICHER
+    # belegt) und stehen deshalb hier -- der Pruefer ist der Grund,
+    # warum das aufgefallen ist.
+    ("NETMON",     "kstate.fi", "NETMON_OFF",     "NETMON_MAX"),
+    ("SHARE",      "kstate.fi", "SHARE_OFF",      "SHARE_MAX"),
     # RUNDE K15, ZWEITER NACHTRAG.  Die erste Seite dieses Vorrats wird
     # geteilt: `wig.fi` braucht davon 0x40 Oktette, der Rest gehoert der
     # Geometrie des Dateisystems (FSG, zwei Woerter aus dem Superblock).

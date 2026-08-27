@@ -1,0 +1,858 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/netmon.fi -- round NETMON: the window that shows who is
+// using the line, and lets you stop them.
+//
+// THE POINT OF THE ROUND IN ONE WINDOW. `/bin/netstat` answers the
+// question for somebody who already knows what to ask; this is for
+// somebody who has noticed that something is using the connection and
+// wants to know what, and then wants it to stop. Those two halves are
+// deliberately in the SAME window: seeing without being able to act is
+// a diagnosis, and acting without seeing is a guess.
+//
+//   PROGRAMS      one row per program: what it is using right now, what
+//                 it has used today, what it has used this month, and
+//                 which network it can see. Below it four buttons --
+//                 `real`, `filtered`, `faked`, `none` -- which set the
+//                 view of round NETVIEW for EVERY living process of the
+//                 selected program. That is the join between the two
+//                 rounds and it is the whole reason both exist.
+//   CONNECTIONS   the live list: protocol, both ends, state, age,
+//                 program. The same table `/bin/netstat` prints.
+//   SHARING       the second card, the address range it hands out, the
+//                 devices hanging off it and what each of them has used.
+//
+// THE GRAPH IS MADE OF CHARACTERS AND THAT IS SAID OUT LOUD. Thirty-two
+// samples of the total rate, drawn as a row of ramp characters in an
+// ordinary label. A pixel graph would need a drawing surface that
+// `wlib` does not offer a program; inventing one here would be a
+// window-server round wearing a network round's name. What is on the
+// screen is a real measurement either way -- it is the resolution that
+// is coarse, not the number.
+//
+// COLOURS COME FROM THE THEME, not from constants: everything drawn
+// here goes through `wlib`, which asks `wlibc.theme()` for every colour
+// by its ROLE. The round that adds more roles changes this window
+// without touching it.
+//
+// WHAT IS NOT WIRED UP, and it is not for want of trying: the symbol
+// font of round ICONS and the language catalogue of round I18N are
+// being built on their own branches AT THE SAME TIME as this one and
+// are not in this tree. There is nothing here to import them from. The
+// texts are therefore English strings in this file and the rows have no
+// symbols; both are one commit each once those branches land, and
+// `docs/NETMON.md` says so under "what is missing".
+
+profile kernel
+
+import ulib
+import wlib
+import wlibc
+import nv
+
+export { u_start }
+
+const MAXT: u64 = 32
+const MAXP: u64 = 24
+const MAXS: u64 = 16
+const SPARK: u64 = 32
+const HIST: u64 = 12000
+
+static mut b_prog: [u8; 3072] = [0 as u8; 3072]
+static mut b_conn: [u8; 2048] = [0 as u8; 2048]
+static mut b_cli: [u8; 1024] = [0 as u8; 1024]
+static mut l_rate: [u8; 96] = [0 as u8; 96]
+static mut l_graph: [u8; 64] = [0 as u8; 64]
+static mut l_share: [u8; 128] = [0 as u8; 128]
+static mut samples: [u64; 32] = [0 as u64; 32]
+static mut prev_p: [u64; 24] = [0 as u64; 24]
+static mut day_v: [u64; 24] = [0 as u64; 24]
+static mut mon_v: [u64; 24] = [0 as u64; 24]
+static mut h_buf: [u8; 12000] = [0 as u8; 12000]
+
+// THE STRINGS THE LIBRARY KEEPS have to outlive the function that made
+// them. `wlib` stores the pointer for a label, a tab strip, a table's
+// column widths -- and Firn refuses to let the address of a local leave
+// the frame that declared it, which is exactly the bug that would be.
+// So they are statics.
+static mut t_win: [u8; 8] = "Network\0"
+static mut t_tabs: [u8; 29] = "Programs\nConnections\nSharing\0"
+static mut c_prog: [u8; 16] = "180\t70\t70\t70\t90\0"
+static mut c_conn: [u8; 21] = "50\t150\t150\t100\t45\t90\0"
+static mut c_cli: [u8; 14] = "150\t120\t90\t90\0"
+static mut b_real: [u8; 5] = "real\0"
+static mut b_filt: [u8; 9] = "filtered\0"
+static mut b_fake: [u8; 6] = "faked\0"
+static mut b_none: [u8; 5] = "none\0"
+static mut b_roll: [u8; 14] = "write history\0"
+static mut b_shon: [u8; 15] = "sharing on/off\0"
+
+
+fn q(kind: u64, index: u64, field: u64) -> u64 {
+    let v: u64 = ulib.sys(ulib.SYS_NETMON, kind, index, field)
+    if ulib.bad(v) {
+        return 0
+    }
+    return v
+}
+
+fn byte_at(p: u64, i: u64) -> u64 {
+    return (*((p + i) as *mut u8)) as u64
+}
+
+fn put(dst: u64, at: u64, c: u64) -> u64 {
+    __mmio_write8((dst + at) as *mut u8, (c & 0xFF) as u8)
+    return at + 1
+}
+
+fn put_num(dst: u64, at: u64, v: u64) -> u64 {
+    if v >= 10 {
+        let hi: u64 = put_num(dst, at, v / 10)
+        return put(dst, hi, 48 + v % 10)
+    }
+    return put(dst, at, 48 + v)
+}
+
+fn put_str(dst: u64, at: u64, s: u64) -> u64 {
+    var i: u64 = 0
+    var k: u64 = at
+    while byte_at(s, i) != 0 {
+        k = put(dst, k, byte_at(s, i))
+        i = i + 1
+    }
+    return k
+}
+
+// Octets in the unit a person reads. The exact number is in
+// `/bin/netstat -p` and in `/var/net/usage`; a column is for comparing
+// at a glance.
+fn put_size(dst: u64, at: u64, v: u64) -> u64 {
+    var suf: [u8; 5] = "kMGT\0"
+    if v < 1024 {
+        return put_num(dst, at, v)
+    }
+    var s: u64 = 0
+    var x: u64 = v
+    while x >= 1024 * 1024 && s < 3 {
+        x = x / 1024
+        s = s + 1
+    }
+    var k: u64 = put_num(dst, at, x / 1024)
+    k = put(dst, k, 46)
+    k = put(dst, k, 48 + ((x % 1024) * 10) / 1024)
+    return put(dst, k, suf[s as usize] as u64)
+}
+
+fn put_ip(dst: u64, at: u64, a: u64) -> u64 {
+    var k: u64 = put_num(dst, at, (a >> 24) & 0xFF)
+    k = put(dst, put_num(dst, put(dst, k, 46), (a >> 16) & 0xFF), 46)
+    k = put_num(dst, k, (a >> 8) & 0xFF)
+    return put_num(dst, put(dst, k, 46), a & 0xFF)
+}
+
+// The name of a program slot, into a buffer.
+fn prog_name(i: u64, out: u64) -> u64 {
+    var k: u64 = 0
+    while k < 23 {
+        let c: u64 = q(ulib.NK_PNAME, i, k)
+        __mmio_write8((out + k) as *mut u8, (c & 0xFF) as u8)
+        if c == 0 {
+            k = 23
+        } else {
+            k = k + 1
+        }
+    }
+    __mmio_write8((out + 23) as *mut u8, 0 as u8)
+    return out
+}
+
+fn task_name(t: u64, out: u64) -> u64 {
+    var k: u64 = 0
+    while k < 23 {
+        let c: u64 = q(ulib.NK_NAME, t, k)
+        __mmio_write8((out + k) as *mut u8, (c & 0xFF) as u8)
+        if c == 0 {
+            k = 23
+        } else {
+            k = k + 1
+        }
+    }
+    __mmio_write8((out + 23) as *mut u8, 0 as u8)
+    return out
+}
+
+fn same_name(a: u64, b: u64) -> bool {
+    var i: u64 = 0
+    while i < 24 {
+        let x: u64 = byte_at(a, i)
+        if x != byte_at(b, i) {
+            return false
+        }
+        if x == 0 {
+            return true
+        }
+        i = i + 1
+    }
+    return true
+}
+
+// ------------------------------------------------------- the history
+//
+// `/var/net/usage`, read and summed for today and for this month. The
+// file is the same one `/bin/netstat -w` writes and `cat` shows; this
+// only adds up the rows that belong to the period being asked about.
+fn hist_load() {
+    var path: [u8; 15] = "/var/net/usage\0"
+    var today: [u8; 16] = [0 as u8; 16]
+    var thismo: [u8; 16] = [0 as u8; 16]
+    var nam: [u8; 24] = [0 as u8; 24]
+    var per: [u8; 16] = [0 as u8; 16]
+    var pn: [u8; 24] = [0 as u8; 24]
+    var i: u64 = 0
+    while i < MAXP {
+        day_v[i as usize] = 0
+        mon_v[i as usize] = 0
+        i = i + 1
+    }
+    period_now((&today[0]) as u64, true)
+    period_now((&thismo[0]) as u64, false)
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&path[0]) as u64, 0, 0)
+    if ulib.bad(fd) {
+        return
+    }
+    let got: u64 = ulib.sys(ulib.SYS_READ, fd, (&h_buf[0]) as u64, HIST - 1)
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    if ulib.bad(got) {
+        return
+    }
+    h_buf[got as usize] = 0 as u8
+    var at: u64 = 0
+    while at < got {
+        var e: u64 = at
+        while e < got && h_buf[e as usize] != 10 as u8 {
+            e = e + 1
+        }
+        h_buf[e as usize] = 0 as u8
+        if h_buf[at as usize] != 35 as u8 && e > at {
+            let line: u64 = (&h_buf[0]) as u64 + at
+            var p2: u64 = field(line, 0, (&per[0]) as u64, 16)
+            p2 = field(line, p2, (&nam[0]) as u64, 24)
+            var v: [u8; 24] = [0 as u8; 24]
+            p2 = field(line, p2, (&v[0]) as u64, 24)
+            let sent: u64 = ulib.to_num((&v[0]) as u64)
+            p2 = field(line, p2, (&v[0]) as u64, 24)
+            let recvd: u64 = ulib.to_num((&v[0]) as u64)
+            // WHAT IS SHOWN IS THE WIRE, not the payload: the wire is
+            // what a data plan is billed by and it is the bigger of the
+            // two, and a monitor that shows the smaller one flatters
+            // itself.
+            p2 = field(line, p2, (&v[0]) as u64, 24)
+            let wo: u64 = ulib.to_num((&v[0]) as u64)
+            p2 = field(line, p2, (&v[0]) as u64, 24)
+            let wi: u64 = ulib.to_num((&v[0]) as u64)
+            let total: u64 = wo + wi
+            var k: u64 = 0
+            while k < MAXP {
+                if q(ulib.NK_PROG, k, ulib.NP_USED) != 0 {
+                    prog_name(k, (&pn[0]) as u64)
+                    if same_name((&pn[0]) as u64, (&nam[0]) as u64) {
+                        if streq_s((&per[0]) as u64, (&today[0]) as u64) {
+                            day_v[k as usize] = day_v[k as usize] + total
+                        } else if streq_s((&per[0]) as u64,
+                            (&thismo[0]) as u64) {
+                            mon_v[k as usize] = mon_v[k as usize] + total
+                        }
+                    }
+                }
+                k = k + 1
+            }
+        }
+        at = e + 1
+    }
+}
+
+fn streq_s(a: u64, b: u64) -> bool {
+    var i: u64 = 0
+    while true {
+        let x: u64 = byte_at(a, i)
+        if x != byte_at(b, i) {
+            return false
+        }
+        if x == 0 {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn field(p: u64, at: u64, out: u64, max: u64) -> u64 {
+    var i: u64 = at
+    while byte_at(p, i) == 32 {
+        i = i + 1
+    }
+    var k: u64 = 0
+    while byte_at(p, i) != 0 && byte_at(p, i) != 32 && k < max - 1 {
+        __mmio_write8((out + k) as *mut u8, byte_at(p, i) as u8)
+        i = i + 1
+        k = k + 1
+    }
+    __mmio_write8((out + k) as *mut u8, 0 as u8)
+    return i
+}
+
+fn two(v: u64, out: u64, at: u64) -> u64 {
+    __mmio_write8((out + at) as *mut u8, (48 + (v / 10) % 10) as u8)
+    __mmio_write8((out + at + 1) as *mut u8, (48 + v % 10) as u8)
+    return at + 2
+}
+
+fn period_now(out: u64, day: bool) {
+    var at: u64 = put_num(out, 0,
+        ulib.sys(ulib.SYS_SYSINFO, ulib.I_YEAR, 0, 0))
+    at = two(ulib.sys(ulib.SYS_SYSINFO, ulib.I_MONTH, 0, 0), out,
+        put(out, at, 45))
+    if day {
+        at = two(ulib.sys(ulib.SYS_SYSINFO, ulib.I_DAY, 0, 0), out,
+            put(out, at, 45))
+    }
+    __mmio_write8((out + at) as *mut u8, 0 as u8)
+}
+
+// ------------------------------------------------------- the tables
+
+fn view_word(v: u64, dst: u64, at: u64) -> u64 {
+    var w: [u8; 36] = "real\0\0\0\0\0filtered\0faked\0\0\0\0none\0\0\0\0\0"
+    var x: u64 = v
+    if x > 3 {
+        x = 0
+    }
+    return put_str(dst, at, (&w[0]) as u64 + x * 9)
+}
+
+// One row per program: name, rate, today, month, view.
+fn build_programs(dt: u64) -> u64 {
+    var head: [u8; 34] = "Program\tNow/s\tToday\tMonth\tNetwork\0"
+    var nm: [u8; 24] = [0 as u8; 24]
+    var tn: [u8; 24] = [0 as u8; 24]
+    var at: u64 = put_str((&b_prog[0]) as u64, 0, (&head[0]) as u64)
+    at = put((&b_prog[0]) as u64, at, 10)
+    var total: u64 = 0
+    var i: u64 = 0
+    while i < MAXP {
+        if q(ulib.NK_PROG, i, ulib.NP_USED) != 0 {
+            let wire: u64 = q(ulib.NK_PROG, i, ulib.NT_TXWIRE)
+                + q(ulib.NK_PROG, i, ulib.NT_RXWIRE)
+            if wire != 0 {
+                var rate: u64 = 0
+                if wire > prev_p[i as usize] && dt > 0 {
+                    rate = (wire - prev_p[i as usize]) * 100 / dt
+                }
+                total = total + rate
+                prev_p[i as usize] = wire
+                prog_name(i, (&nm[0]) as u64)
+                at = put_str((&b_prog[0]) as u64, at, (&nm[0]) as u64)
+                at = put((&b_prog[0]) as u64, at, 9)
+                at = put_size((&b_prog[0]) as u64, at, rate)
+                at = put((&b_prog[0]) as u64, at, 9)
+                at = put_size((&b_prog[0]) as u64, at, day_v[i as usize])
+                at = put((&b_prog[0]) as u64, at, 9)
+                at = put_size((&b_prog[0]) as u64, at, mon_v[i as usize])
+                at = put((&b_prog[0]) as u64, at, 9)
+                // THE VIEW OF THE LIVING PROCESSES of this program. If
+                // there is none the column is empty rather than
+                // guessing at `real` -- a program that is not running
+                // has no view.
+                var shown: bool = false
+                var t: u64 = 0
+                while t < MAXT {
+                    if q(ulib.NK_TASK, t, ulib.NT_ALIVE) != 0 && !shown {
+                        task_name(t, (&tn[0]) as u64)
+                        if same_name((&tn[0]) as u64, (&nm[0]) as u64) {
+                            at = view_word(q(ulib.NK_TASK, t,
+                                ulib.NT_VIEW), (&b_prog[0]) as u64, at)
+                            shown = true
+                        }
+                    }
+                    t = t + 1
+                }
+                if !shown {
+                    at = put((&b_prog[0]) as u64, at, 45)
+                }
+                at = put((&b_prog[0]) as u64, at, 10)
+            }
+        }
+        i = i + 1
+    }
+    __mmio_write8(((&b_prog[0]) as u64 + at) as *mut u8, 0 as u8)
+    return total
+}
+
+// The n-th row of the programs table back to a program slot. The table
+// widget hands out a row number and the row numbers are not the slot
+// numbers -- programs that used nothing have no row.
+fn slot_of_row(row: u64) -> u64 {
+    var n: u64 = 0
+    var i: u64 = 0
+    while i < MAXP {
+        if q(ulib.NK_PROG, i, ulib.NP_USED) != 0 {
+            if q(ulib.NK_PROG, i, ulib.NT_TXWIRE)
+                + q(ulib.NK_PROG, i, ulib.NT_RXWIRE) != 0 {
+                if n == row {
+                    return i
+                }
+                n = n + 1
+            }
+        }
+        i = i + 1
+    }
+    return MAXP
+}
+
+fn build_connections() {
+    var head: [u8; 37] = "Proto\tLocal\tRemote\tState\tAge\tProgram\0"
+    var st: [u8; 132] = "CLOSED\0\0\0\0\0\0LISTEN\0\0\0\0\0\0SYN_SENT\0\0\0\0SYN_RCVD\0\0\0\0ESTABLISHED\0FIN_WAIT_1\0\0FIN_WAIT_2\0\0CLOSE_WAIT\0\0CLOSING\0\0\0\0\0LAST_ACK\0\0\0\0TIME_WAIT\0\0\0"
+    var tcp: [u8; 5] = "tcp\0\0"
+    var udp: [u8; 5] = "udp\0\0"
+    var icm: [u8; 5] = "icmp\0"
+    var dash: [u8; 2] = "-\0"
+    var nm: [u8; 24] = [0 as u8; 24]
+    let d: u64 = (&b_conn[0]) as u64
+    var at: u64 = put_str(d, 0, (&head[0]) as u64)
+    at = put(d, at, 10)
+    let me: u64 = ulib.sys(1300, 1, 0, 0)
+    var i: u64 = 0
+    while i < MAXS {
+        if q(ulib.NK_SOCK, i, ulib.NS_USE) != 0 {
+            let kind: u64 = q(ulib.NK_SOCK, i, ulib.NS_KIND)
+            if kind == 1 {
+                at = put_str(d, at, (&tcp[0]) as u64)
+            } else if kind == 2 {
+                at = put_str(d, at, (&udp[0]) as u64)
+            } else {
+                at = put_str(d, at, (&icm[0]) as u64)
+            }
+            at = put(d, at, 9)
+            var mine: u64 = me
+            if ulib.bad(mine) {
+                mine = 0
+            }
+            at = put(d, put_num(d, put(d, put_ip(d, at, mine), 58),
+                q(ulib.NK_SOCK, i, ulib.NS_LPORT)), 9)
+            let ra: u64 = q(ulib.NK_SOCK, i, ulib.NS_RADDR)
+            if ra == 0 {
+                at = put_str(d, at, (&dash[0]) as u64)
+            } else {
+                at = put_num(d, put(d, put_ip(d, at, ra), 58),
+                    q(ulib.NK_SOCK, i, ulib.NS_RPORT))
+            }
+            at = put(d, at, 9)
+            if kind == 1 {
+                var s2: u64 = q(ulib.NK_SOCK, i, ulib.NS_TCPSTATE)
+                if s2 > 10 {
+                    s2 = 0
+                }
+                at = put_str(d, at, (&st[0]) as u64 + s2 * 12)
+            } else {
+                at = put_str(d, at, (&dash[0]) as u64)
+            }
+            at = put(d, at, 9)
+            at = put_num(d, at, q(ulib.NK_SOCK, i, ulib.NS_AGE) / 100)
+            at = put(d, at, 9)
+            let ow: u64 = q(ulib.NK_SOCK, i, ulib.NS_OWNER)
+            if ow == 0 {
+                at = put_str(d, at, (&dash[0]) as u64)
+            } else {
+                task_name(ow - 1, (&nm[0]) as u64)
+                at = put_str(d, at, (&nm[0]) as u64)
+            }
+            at = put(d, at, 10)
+        }
+        i = i + 1
+    }
+    __mmio_write8((d + at) as *mut u8, 0 as u8)
+}
+
+// The devices on the shared side. Every number in this table falls out
+// of part one: the forwarder counts a client's octets in the same
+// breath as it moves them.
+fn build_clients() {
+    var head: [u8; 29] = "Device\tAddress\tSent\tReceived\0"
+    var none: [u8; 21] = "sharing is off\t-\t-\t-\0"
+    let d: u64 = (&b_cli[0]) as u64
+    var at: u64 = put_str(d, 0, (&head[0]) as u64)
+    at = put(d, at, 10)
+    let on: u64 = ulib.sys(ulib.SYS_SHARE, ulib.SH_ON, 0, 0)
+    if ulib.bad(on) || on == 0 {
+        at = put_str(d, at, (&none[0]) as u64)
+        at = put(d, at, 10)
+        __mmio_write8((d + at) as *mut u8, 0 as u8)
+        return
+    }
+    let n: u64 = ulib.sys(ulib.SYS_SHARE, ulib.SH_NCLIENT, 0, 0)
+    var i: u64 = 0
+    while i < n && i < 16 {
+        if ulib.sys(ulib.SYS_SHARE, ulib.SH_CLIENT, i, 0) != 0 {
+            let mac: u64 = ulib.sys(ulib.SYS_SHARE, ulib.SH_CMAC, i, 0)
+            // The hardware address, in the shape everybody reads it in.
+            var k: u64 = 0
+            while k < 6 {
+                if k > 0 {
+                    at = put(d, at, 58)
+                }
+                at = put_hex2(d, at, (mac >> (k * 8)) & 0xFF)
+                k = k + 1
+            }
+            at = put(d, at, 9)
+            at = put_ip(d, at, ulib.sys(ulib.SYS_SHARE, ulib.SH_CIP, i, 0))
+            at = put(d, at, 9)
+            at = put_size(d, at, ulib.sys(ulib.SYS_SHARE, ulib.SH_CIN, i, 0))
+            at = put(d, at, 9)
+            at = put_size(d, at, ulib.sys(ulib.SYS_SHARE, ulib.SH_COUT, i, 0))
+            at = put(d, at, 10)
+        }
+        i = i + 1
+    }
+    __mmio_write8((d + at) as *mut u8, 0 as u8)
+}
+
+fn put_hex2(d: u64, at: u64, v: u64) -> u64 {
+    var k: u64 = at
+    var i: u64 = 0
+    while i < 2 {
+        let x: u64 = (v >> ((1 - i) * 4)) & 0xF
+        if x < 10 {
+            k = put(d, k, 48 + x)
+        } else {
+            k = put(d, k, 87 + x)
+        }
+        i = i + 1
+    }
+    return k
+}
+
+// ---------------------------------------------------------- the graph
+
+fn build_graph(rate: u64) {
+    var ramp: [u8; 9] = " .:-=+*#\0"
+    var i: u64 = 0
+    while i + 1 < SPARK {
+        samples[i as usize] = samples[(i + 1) as usize]
+        i = i + 1
+    }
+    samples[(SPARK - 1) as usize] = rate
+    var top: u64 = 1
+    i = 0
+    while i < SPARK {
+        if samples[i as usize] > top {
+            top = samples[i as usize]
+        }
+        i = i + 1
+    }
+    let d: u64 = (&l_graph[0]) as u64
+    i = 0
+    while i < SPARK {
+        var lv: u64 = samples[i as usize] * 7 / top
+        if lv > 7 {
+            lv = 7
+        }
+        __mmio_write8((d + i) as *mut u8, ramp[lv as usize])
+        i = i + 1
+    }
+    __mmio_write8((d + SPARK) as *mut u8, 0 as u8)
+}
+
+fn build_rate(rate: u64) {
+    var pre: [u8; 12] = "total now: \0"
+    var suf: [u8; 12] = "/s   peak: \0"
+    var end: [u8; 4] = "/s\0\0"
+    let d: u64 = (&l_rate[0]) as u64
+    var at: u64 = put_str(d, 0, (&pre[0]) as u64)
+    at = put_size(d, at, rate)
+    at = put_str(d, at, (&suf[0]) as u64)
+    var top: u64 = 0
+    var i: u64 = 0
+    while i < SPARK {
+        if samples[i as usize] > top {
+            top = samples[i as usize]
+        }
+        i = i + 1
+    }
+    at = put_size(d, at, top)
+    at = put_str(d, at, (&end[0]) as u64)
+    __mmio_write8((d + at) as *mut u8, 0 as u8)
+}
+
+fn build_share_line() {
+    var off: [u8; 61] = "sharing is off -- no second network card, or not switched on\0"
+    var pre: [u8; 14] = "shared side: \0"
+    var mid: [u8; 12] = "   pool: \0\0\0"
+    var dsh: [u8; 2] = "-\0"
+    let d: u64 = (&l_share[0]) as u64
+    let on: u64 = ulib.sys(ulib.SYS_SHARE, ulib.SH_ON, 0, 0)
+    if ulib.bad(on) || on == 0 {
+        ulib.strcpy(d, (&off[0]) as u64)
+        return
+    }
+    var at: u64 = put_str(d, 0, (&pre[0]) as u64)
+    at = put_ip(d, at, ulib.sys(ulib.SYS_SHARE, ulib.SH_IP, 0, 0))
+    at = put_str(d, at, (&mid[0]) as u64)
+    at = put_ip(d, at, ulib.sys(ulib.SYS_SHARE, ulib.SH_P0, 0, 0))
+    at = put_str(d, at, (&dsh[0]) as u64)
+    at = put_ip(d, at, ulib.sys(ulib.SYS_SHARE, ulib.SH_P1, 0, 0))
+    __mmio_write8((d + at) as *mut u8, 0 as u8)
+}
+
+// ---------------------------------------------------------- the window
+
+fn u_start(args: u64) -> u64 {
+    var s_bad: [u8; 25] = "netmon: no window server\0"
+
+    if !wlib.begin(false, false) {
+        ulib.say((&s_bad[0]) as u64)
+        ulib.nl()
+        return 1
+    }
+    hist_load()
+    let dummy: u64 = build_programs(0)
+    build_connections()
+    build_clients()
+    build_graph(0)
+    build_rate(0)
+    build_share_line()
+
+    let bw: u64 = 620
+    let bh: u64 = 430
+    let w: u64 = wlib.window(110, 40, bw, bh, (&t_win[0]) as u64)
+    if w >= wlib.MAXWN {
+        ulib.say((&s_bad[0]) as u64)
+        ulib.nl()
+        return 1
+    }
+    wlib.box_v(w, 0, 0, bw, bh, 10, 6)
+    let tb: u64 = wlib.tabs((&t_tabs[0]) as u64)
+    let lr: u64 = wlib.label((&l_rate[0]) as u64)
+    let lg: u64 = wlib.label((&l_graph[0]) as u64)
+    wlib.size(0, 210)
+    let tp: u64 = wlib.table((&b_prog[0]) as u64, 8, 5,
+        (&c_prog[0]) as u64)
+    wlib.size(0, 210)
+    let tc: u64 = wlib.table((&b_conn[0]) as u64, 8, 6,
+        (&c_conn[0]) as u64)
+    let ls: u64 = wlib.label((&l_share[0]) as u64)
+    wlib.size(0, 180)
+    let tl: u64 = wlib.table((&b_cli[0]) as u64, 6, 4, (&c_cli[0]) as u64)
+    wlib.box_end()
+
+    wlib.box_h(w, 10, bh - 44, bw - 20, 30, 0, 6)
+    wlib.size(80, 26)
+    let k1: u64 = wlib.button((&b_real[0]) as u64)
+    wlib.size(90, 26)
+    let k2: u64 = wlib.button((&b_filt[0]) as u64)
+    wlib.size(80, 26)
+    let k3: u64 = wlib.button((&b_fake[0]) as u64)
+    wlib.size(80, 26)
+    let k4: u64 = wlib.button((&b_none[0]) as u64)
+    wlib.size(120, 26)
+    let k5: u64 = wlib.button((&b_roll[0]) as u64)
+    wlib.size(120, 26)
+    let k6: u64 = wlib.button((&b_shon[0]) as u64)
+    wlib.box_end()
+
+    var tab: u64 = 0
+    show_tab(tp, tc, ls, tl, tab)
+    wlib.draw_all()
+
+    var rounds: u64 = 0
+    var last: u64 = ulib.sys(ulib.SYS_SYSINFO, ulib.I_TICKS, 0, 0)
+    let limit: u64 = arg_rounds(args)
+    while wlib.alive() && rounds < limit {
+        rounds = rounds + 1
+        let id: u64 = wlib.step()
+        if id < wlib.MAXWD {
+            let kind: u64 = wlib.fired_kind()
+            if kind == wlib.K_TABS {
+                tab = wlib.fired_index()
+                show_tab(tp, tc, ls, tl, tab)
+                wlib.dirty_all(w)
+            } else if kind == wlib.K_BUTTON {
+                if id == k1 || id == k2 || id == k3 || id == k4 {
+                    var want: u64 = 0
+                    if id == k2 {
+                        want = 1
+                    } else if id == k3 {
+                        want = 2
+                    } else if id == k4 {
+                        want = 3
+                    }
+                    set_view_of_row(wlib.value(tp), want)
+                } else if id == k5 {
+                    roll_history()
+                    hist_load()
+                } else if id == k6 {
+                    let on: u64 = ulib.sys(ulib.SYS_SHARE, ulib.SH_ON, 0, 0)
+                    var v: u64 = 1
+                    if !ulib.bad(on) && on != 0 {
+                        v = 0
+                    }
+                    ulib.sys(ulib.SYS_SHARE, ulib.SH_SET, v, 0)
+                    build_share_line()
+                    build_clients()
+                    wlib.dirty_all(w)
+                }
+            }
+        }
+        // ONE REFRESH PER HALF SECOND. Fifty ticks, and the rate is
+        // computed out of the tick difference and not out of the round
+        // count -- a window that is being dragged gets fewer rounds and
+        // would otherwise report a rate that depends on the mouse.
+        let now: u64 = ulib.sys(ulib.SYS_SYSINFO, ulib.I_TICKS, 0, 0)
+        if now >= last + 50 {
+            let rate: u64 = build_programs(now - last)
+            last = now
+            build_connections()
+            build_clients()
+            build_graph(rate)
+            build_rate(rate)
+            wlib.set_text(tp, (&b_prog[0]) as u64)
+            wlib.set_text(tc, (&b_conn[0]) as u64)
+            wlib.set_text(tl, (&b_cli[0]) as u64)
+            wlib.set_text(lr, (&l_rate[0]) as u64)
+            wlib.set_text(lg, (&l_graph[0]) as u64)
+            wlib.dirty_all(w)
+        }
+    }
+    say_state(tp, tc, tl)
+    return 0
+}
+
+// `-n <rounds>` so that a test run ends by itself. Without it the
+// window lives until it is closed, which is what a person wants and no
+// measurement can wait for.
+fn arg_rounds(args: u64) -> u64 {
+    var o_n: [u8; 4] = "-n\0\0"
+    let argc: u64 = ulib.arg_count(args)
+    var i: u64 = 1
+    while i < argc {
+        if ulib.streq(ulib.arg_at(args, i), (&o_n[0]) as u64)
+            && i + 1 < argc {
+            return ulib.to_num(ulib.arg_at(args, i + 1))
+        }
+        i = i + 1
+    }
+    return 4000000
+}
+
+fn show_tab(tp: u64, tc: u64, ls: u64, tl: u64, tab: u64) {
+    wlib.show(tp, tab == 0)
+    wlib.show(tc, tab == 1)
+    wlib.show(ls, tab == 2)
+    wlib.show(tl, tab == 2)
+}
+
+// THE JOIN BETWEEN THE TWO ROUNDS. The row is a PROGRAM; the view of
+// round NETVIEW belongs to a PROCESS. So every living process of that
+// program gets it -- which is what a person means by "stop this program
+// using the network", and is why the button is here and not in `ps`.
+fn set_view_of_row(row: u64, want: u64) {
+    var nm: [u8; 24] = [0 as u8; 24]
+    var tn: [u8; 24] = [0 as u8; 24]
+    let slot: u64 = slot_of_row(row)
+    if slot >= MAXP {
+        return
+    }
+    prog_name(slot, (&nm[0]) as u64)
+    var t: u64 = 0
+    while t < MAXT {
+        if q(ulib.NK_TASK, t, ulib.NT_ALIVE) != 0 {
+            task_name(t, (&tn[0]) as u64)
+            if same_name((&tn[0]) as u64, (&nm[0]) as u64) {
+                let pid: u64 = q(ulib.NK_TASK, t, ulib.NT_PID)
+                let r: u64 = nv.view_set(pid, want)
+                say_set(pid, want, r)
+            }
+        }
+        t = t + 1
+    }
+}
+
+// Fold the counters into `/var/net/usage`. The same thing
+// `/bin/netstat -w` does, and it is the same system call underneath --
+// there is one place that decides what a day is.
+fn roll_history() {
+    var path: [u8; 13] = "/bin/netstat\0"
+    var opt: [u8; 4] = "-w\0\0"
+    var argv: [u64; 3] = [0 as u64; 3]
+    argv[0] = (&path[0]) as u64
+    argv[1] = (&opt[0]) as u64
+    argv[2] = 0
+    let pid: u64 = ulib.sys(ulib.SYS_EXEC, (&path[0]) as u64,
+        (&argv[0]) as u64, 2)
+    if !ulib.bad(pid) {
+        ulib.wait_code(pid)
+    }
+}
+
+// ------------------------------------------------------- the reports
+//
+// Every number this window puts on the screen is also said on the
+// serial line, for the same reason `wigdemo` does it: a test that
+// checks a pixel it chose itself checks nothing. `tools/netmon/run.sh`
+// reads these lines and holds them against what `/bin/netstat` printed
+// in the same boot.
+
+fn say_set(pid: u64, want: u64, r: u64) {
+    var a: [u8; 17] = "netmon: set pid=\0"
+    var b: [u8; 7] = " view=\0"
+    var c: [u8; 7] = " rc=\0\0\0"
+    ulib.say((&a[0]) as u64)
+    ulib.sayn(pid)
+    ulib.say((&b[0]) as u64)
+    ulib.sayn(want)
+    ulib.say((&c[0]) as u64)
+    ulib.sayn(r)
+    ulib.nl()
+}
+
+fn say_state(tp: u64, tc: u64, tl: u64) {
+    var a: [u8; 23] = "netmon: rows programs=\0"
+    var b: [u8; 14] = " connections=\0"
+    var c: [u8; 11] = " clients=\0\0"
+    ulib.say((&a[0]) as u64)
+    ulib.sayn(rows_of((&b_prog[0]) as u64))
+    ulib.say((&b[0]) as u64)
+    ulib.sayn(rows_of((&b_conn[0]) as u64))
+    ulib.say((&c[0]) as u64)
+    ulib.sayn(rows_of((&b_cli[0]) as u64))
+    ulib.nl()
+    var d: [u8; 14] = "netmon: rate \0"
+    ulib.say((&d[0]) as u64)
+    ulib.say((&l_rate[0]) as u64)
+    ulib.nl()
+    var e: [u8; 15] = "netmon: graph \0"
+    ulib.say((&e[0]) as u64)
+    ulib.say((&l_graph[0]) as u64)
+    ulib.nl()
+    var f: [u8; 15] = "netmon: share \0"
+    ulib.say((&f[0]) as u64)
+    ulib.say((&l_share[0]) as u64)
+    ulib.nl()
+    let _a: u64 = tp
+    let _b: u64 = tc
+    let _c: u64 = tl
+}
+
+// Rows of a table blob, not counting the header.
+fn rows_of(p: u64) -> u64 {
+    var n: u64 = 0
+    var i: u64 = 0
+    while byte_at(p, i) != 0 {
+        if byte_at(p, i) == 10 {
+            n = n + 1
+        }
+        i = i + 1
+    }
+    if n > 0 {
+        return n - 1
+    }
+    return 0
+}
