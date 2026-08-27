@@ -325,7 +325,22 @@ The backup carries **three rules and no fourth** (`docs/ORPHANS.md`):
 user data is ALWAYS kept, packages a source can deliver and `cache/` are
 NEVER kept, and a package **no source can deliver** -- built by hand,
 never published -- is kept ONLY THEN, because its hash in the PLAN names
-octets nobody else has. Measured: one such package costs **+29,128
+octets nobody else has.
+
+**Secrets are not user data** (`docs/BACKUP-SECRETS.md`). A backup stick
+is an object and objects get lost, so there are **three classes**:
+ordinary data travels; the **password vault, saved logins and VPN private
+keys travel only on request** and only sealed under a separate master
+password that is never in the backup; and the **device key, machine
+identity and session tokens never travel at all** -- they are re-created
+on the target, and a copy of the device key in a backup would defeat the
+crypto erase this same round built. Measured: with the vault carried
+along, the marker `MARK-VAULT-SECRET-BANK-PW` occurs **0 times** in the
+finished store, while ordinary data is still found **1** time in the same
+search -- and the whole backup encrypts too, at a cost of **0.39 %** on
+disk and **no loss of deduplication at all** (6 blocks seen, 2 stored,
+with and without). What is *not* hidden is stated and measured: the
+**paths** in a snapshot are still readable. Measured: one such package costs **+29,128
 octets, +67.6 %** on a realistic backup set, and a second machine holding
 *only* the backup store restores it byte for byte and **runs** it.
 
