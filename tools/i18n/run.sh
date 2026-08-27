@@ -393,10 +393,22 @@ echo "== 9. was vorher gruen war, ist es noch =="
 
 # GEGEN DIE GEMESSENE AUSGANGSLAGE UND NICHT GEGEN NULL.
 #
-# `tools/wm/run.sh` war schon VOR dieser Runde nicht vollstaendig gruen.
-# Gemessen auf d7bdcfc, dem Stand, auf dem diese Runde aufsetzt:
-# 99 Zusagen erfuellt, 4 gescheitert. Was scheitert, gehoert der Runde
-# DESKTOP und nicht dieser:
+# `tools/wm/run.sh` und `tools/k15/run.sh` waren schon VOR dieser Runde
+# nicht vollstaendig gruen. GEMESSEN auf d7bdcfc, dem Stand, auf dem
+# diese Runde aufsetzt -- in einem eigenen Arbeitsbaum, mit demselben
+# Uebersetzer, auf derselben Maschine:
+#
+#     tools/wm/run.sh    99 erfuellt, 4 gescheitert
+#     tools/k15/run.sh  249 erfuellt, 2 gescheitert
+#
+# Nach dieser Runde:
+#
+#     tools/wm/run.sh    99 erfuellt, 4 gescheitert -- DIESELBEN vier
+#     tools/k15/run.sh  250 erfuellt, 2 gescheitert -- DIESELBEN zwei,
+#                       und eine Zusage mehr (die neue Gegenprobe, dass
+#                       "Ausfuehren" nicht mehr im Quelltext steht)
+#
+# Was scheitert, gehoert der Runde DESKTOP und nicht dieser:
 #
 #   * "die Zusagen des Fensterservers ueber sich selbst: 20, erwartet 17"
 #     -- DESKTOP hat vier Selbsttests dazugebaut (jetzt 21) und den
@@ -409,7 +421,7 @@ echo "== 9. was vorher gruen war, ist es noch =="
 # und zwei Runden, die dieselbe Datei richten, richten sie zweimal
 # verschieden. Gemeldet ist es hier, damit niemand die 4 fuer neu haelt.
 BASIS_WM=${BASIS_WM:-4}
-BASIS_K15=${BASIS_K15:-0}
+BASIS_K15=${BASIS_K15:-2}
 
 for r in wm k15; do
     [ -f "tools/$r/run.sh" ] || continue
