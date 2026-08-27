@@ -21,18 +21,24 @@
 //   themetest time                  die Zeiten des Umschaltens
 //   themetest latch                 die Zusage "kein halbes Fenster"
 //   themetest clock                 die Automatik nach der Tageszeit
+//   themetest gui                   EIN FENSTER, und dann hell/dunkel
+//                                   umschalten und messen, was ein
+//                                   Bild kostet
 
 profile kernel
 
 import ulib
 import libc.io
 import wlibc
+import wlib
 
 export { u_start }
 
 const CONF: u64 = 0
 
 static mut buf: [u8; 512] = [0 as u8; 512]
+static mut save: [u8; 512] = [0 as u8; 512]
+static mut save_n: u64 = 0
 
 fn say(p: u64) {
     ulib.say(p)
@@ -463,6 +469,273 @@ fn srgb_test() {
     }
 }
 
+// ------------------------------------------------- DAS ECHTE BILD
+//
+// Alles oberhalb rechnet mit Zahlen. Hier steht ein FENSTER auf dem
+// Schirm -- Beschriftungen, Knoepfe, ein Textfeld, eine Liste, eine
+// Tabelle --, und dann wird hell/dunkel umgeschaltet, so oft, wie es
+// fuer einen Mittelwert reicht. Gemessen wird beides, was gefragt war:
+// die ZEIT eines Umschaltens und die FLAECHE, die dafuer neu gemalt
+// werden musste.
+//
+// Der Weg geht ueber die DATEI. `theme_set_mode` waere kuerzer und
+// wuerde die Haelfte der Strecke ueberspringen -- die Haelfte, auf der
+// im Betrieb die Zeit liegt.
+static mut g_tabs: [u8; 23] = "Erstes\nZweites\nDrittes\0"
+static mut g_lab: [u8; 29] = "Marken statt Farben, Runde 1\0"
+static mut g_btn: [u8; 12] = "Uebernehmen\0"
+static mut g_btn2: [u8; 10] = "Verwerfen\0"
+static mut g_ent: [u8; 31] = "ein Textfeld mit Einfuegemarke\0"
+static mut g_chk: [u8; 19] = "Ein Kontrollkasten\0"
+static mut g_list: [u8; 47] = "Slate Day\nWarm Paper\nSlate Night\nHigh Contrast\0"
+static mut g_tit: [u8; 15] = "Themenprobe\0   "
+static mut g_dtit: [u8; 13] = "Nachfrage\0   "
+static mut g_dtxt: [u8; 42] = "Dunkles Thema auch fuer neue Fenster?\0    "
+
+// DIE URSPRUENGLICHE EINSTELLUNG SICHERN UND ZURUECKLEGEN.
+//
+// Der Messlauf schreibt /etc/theme.conf zwanzig Mal um. Ohne das hier
+// zeigte das Bildschirmfoto danach, was der letzte Durchlauf zufaellig
+// eingestellt hat -- und die fuenf Abbilder dieser Runde, die sich in
+// genau drei Zeilen unterscheiden sollen, saehen alle gleich aus.
+fn conf_save() {
+    var p_conf: [u8; 16] = "/etc/theme.conf\0"
+    save_n = 0
+    let fd: u64 = io.open((&p_conf[0 as usize]) as u64, 0)
+    if ulib.bad(fd) {
+        return
+    }
+    let n: u64 = io.read(fd, (&save[0 as usize]) as u64, 511)
+    io.close(fd)
+    if !ulib.bad(n) {
+        save_n = n
+    }
+}
+
+fn conf_restore() -> bool {
+    var p_conf: [u8; 16] = "/etc/theme.conf\0"
+    if save_n == 0 {
+        return false
+    }
+    return write_file((&p_conf[0 as usize]) as u64,
+        (&save[0 as usize]) as u64, save_n)
+}
+
+fn gui_test(name: u64, messen: bool) {
+    var s_rd: [u8; 21] = "themetest: gui ready\0"
+    var s_sw: [u8; 9] = "G_SWITCH\0"
+    var s_av: [u8; 6] = "G_AVG\0"
+    var s_px: [u8; 5] = "G_PX\0"
+    var s_st: [u8; 8] = "G_STALE\0"
+    var s_no: [u8; 20] = "themetest: gui bad\0 "
+    conf_save()
+    if !wlib.begin(false, false) {
+        say((&s_no[0 as usize]) as u64)
+        nl()
+        return
+    }
+    let w: u64 = wlib.window(120, 70, 460, 360, (&g_tit[0 as usize]) as u64)
+    if w >= wlib.MAXWN {
+        say((&s_no[0 as usize]) as u64)
+        nl()
+        return
+    }
+    wlib.box_v(w, 0, 0, 460, 360, 10, 6)
+    let _t: u64 = wlib.tabs((&g_tabs[0 as usize]) as u64)
+    let _l: u64 = wlib.label((&g_lab[0 as usize]) as u64)
+    let _e: u64 = wlib.entry((&g_ent[0 as usize]) as u64, 30)
+    let _c: u64 = wlib.check((&g_chk[0 as usize]) as u64, true)
+    wlib.size(0, 96)
+    let _li: u64 = wlib.list((&g_list[0 as usize]) as u64, 4)
+    wlib.size(150, 26)
+    let _b: u64 = wlib.button((&g_btn[0 as usize]) as u64)
+    wlib.size(150, 26)
+    let _b2: u64 = wlib.button((&g_btn2[0 as usize]) as u64)
+    wlib.box_end()
+    wlib.draw_all()
+    say((&s_rd[0 as usize]) as u64)
+    nl()
+
+    // ZUR RUHE KOMMEN LASSEN. Auf diesem Bildschirm laufen ausser
+    // diesem Fenster der Schreibtisch, die Taskleiste und der Starter,
+    // und der Starter baut beim Aufwachen seinen Namensindex ueber das
+    // ganze Dateisystem. Wer mitten hinein misst, misst den Starter.
+    var warte: u64 = 0
+    while warte < 60 && messen {
+        let _s0: u64 = wlib.step()
+        ulib.sleep_ms(50)
+        warte = warte + 1
+    }
+    // WAS EIN GEWOEHNLICHES VOLLBILD DIESES FENSTERS KOSTET, ohne dass
+    // sich am Thema irgendetwas geaendert hat. Ohne diese Zahl sagt die
+    // Zeit eines Umschaltens nichts: sie koennte teuer sein, weil das
+    // Umschalten teuer ist, oder weil Malen teuer ist.
+    var s_ba: [u8; 7] = "G_BASE\0"
+    var bsum: u64 = 0
+    var bmin: u64 = 0xFFFFFFFFFFFFFFFF
+    var bk: u64 = 0
+    while bk < 8 && messen {
+        var bw: u64 = 0
+        while bw < wlib.MAXWN {
+            wlib.dirty_all(bw)
+            bw = bw + 1
+        }
+        let b0: u64 = now_ns()
+        let bp: u64 = wlib.paint_all()
+        let b1: u64 = now_ns()
+        let _bp: u64 = bp
+        bsum = bsum + (b1 - b0)
+        if b1 - b0 < bmin {
+            bmin = b1 - b0
+        }
+        bk = bk + 1
+    }
+    say((&s_ba[0 as usize]) as u64)
+    sp()
+    n(bsum / 8)
+    sp()
+    n(bmin)
+    nl()
+
+    let runs: u64 = 20
+    var ns: u64 = 0
+    var px: u64 = 0
+    var dmin: u64 = 0xFFFFFFFFFFFFFFFF
+    var pmin: u64 = 0xFFFFFFFFFFFFFFFF
+    var dsum: u64 = 0
+    var psum: u64 = 0
+    var got2: u64 = 0
+    var k: u64 = 0
+    while k < runs && messen {
+        let dark: bool = (k % 2) == 0
+        let w0: u64 = now_ns()
+        let geschrieben: bool = conf_write(name, dark, CONF)
+        let wns: u64 = now_ns() - w0
+        if !geschrieben {
+            k = runs
+        } else {
+            // DREI ZAHLEN UND NICHT EINE. Der erste Entwurf mass
+            // alles zusammen und meldete 212 Millisekunden -- eine
+            // Zahl, aus der niemand ablesen kann, was daran das
+            // Umschalten ist. Es sind drei verschiedene Dinge:
+            //
+            //   ERKENNEN  /etc/theme.conf lesen, vergleichen, und wenn
+            //             es sich geaendert hat, den ganzen Satz neu
+            //             aufloesen. Das zahlt JEDES Fenster.
+            //   MALEN     das Fenster noch einmal. Das zahlt jedes
+            //             Fenster fuer seine eigene Flaeche.
+            //   SCHREIBEN die Datei ueberhaupt aendern. Das zahlt
+            //             EINMAL das Programm, das den Knopf hat --
+            //             es gehoert nicht zum Umschalten und steht
+            //             hier nur, damit es nicht heimlich in einer
+            //             der anderen beiden Zahlen steckt.
+            let d0: u64 = now_ns()
+            let gewechselt: bool = wlib.theme_now()
+            let d1: u64 = now_ns()
+            var gemalt: u64 = 0
+            if gewechselt {
+                gemalt = wlib.paint_all()
+            }
+            let p1: u64 = now_ns()
+            if gewechselt {
+                ns = ns + (p1 - d0)
+                px = px + gemalt
+                got2 = got2 + 1
+                dsum = dsum + (d1 - d0)
+                psum = psum + (p1 - d1)
+                if d1 - d0 < dmin {
+                    dmin = d1 - d0
+                }
+                if p1 - d1 < pmin {
+                    pmin = p1 - d1
+                }
+                say((&s_sw[0 as usize]) as u64)
+                sp()
+                n(k)
+                sp()
+                n(wns)
+                sp()
+                n(d1 - d0)
+                sp()
+                n(p1 - d1)
+                sp()
+                n(gemalt)
+                sp()
+                hex6(wlibc.theme_live(wlibc.C_WINDOW_BG))
+                nl()
+            }
+            k = k + 1
+        }
+    }
+    let got: u64 = got2
+    say((&s_av[0 as usize]) as u64)
+    sp()
+    n(got)
+    sp()
+    if got > 0 {
+        n(dsum / got)
+    } else {
+        n(0)
+    }
+    sp()
+    n(dmin)
+    sp()
+    if got > 0 {
+        n(psum / got)
+    } else {
+        n(0)
+    }
+    sp()
+    n(pmin)
+    nl()
+    say((&s_px[0 as usize]) as u64)
+    sp()
+    if got > 0 {
+        n(px / got)
+    } else {
+        n(0)
+    }
+    sp()
+    n(wlibc.screen_w() * wlibc.screen_h())
+    nl()
+    say((&s_st[0 as usize]) as u64)
+    sp()
+    n(wlib.theme_stales())
+    sp()
+    n(wlib.theme_polls())
+    nl()
+    // ZURUECK AUF DIE EINSTELLUNG, MIT DER DIE MASCHINE GESTARTET IST.
+    var s_re: [u8; 9] = "G_RESET\0 "
+    say((&s_re[0 as usize]) as u64)
+    sp()
+    if conf_restore() {
+        n(1)
+    } else {
+        n(0)
+    }
+    sp()
+    let _rp: bool = wlib.theme_now()
+    let _rq: u64 = wlib.paint_all()
+    hex6(wlibc.theme_live(wlibc.C_WINDOW_BG))
+    nl()
+
+    // EIN DIALOG BLEIBT OFFEN. Das Bildschirmfoto soll die dritte
+    // Fenstersorte zeigen -- Hauptfenster, Dialog und die Taskleiste --,
+    // und ein Dialog ist die Sorte, bei der der Grund nicht der des
+    // Fensters ist (`overlay`) und der Rahmen des aktiven Fensters
+    // woanders sitzt.
+    let _dl: u64 = wlib.dlg_ask((&g_dtit[0 as usize]) as u64,
+        (&g_dtxt[0 as usize]) as u64)
+    wlib.draw_all()
+
+    // Und stehenbleiben, damit ein Bildschirmfoto etwas findet.
+    var runde: u64 = 0
+    while wlib.alive() && runde < 4000000 {
+        let _s: u64 = wlib.step()
+        runde = runde + 1
+    }
+}
+
 fn u_start(args: u64) -> u64 {
     var w_srgb: [u8; 5] = "srgb\0"
     var w_scheme: [u8; 7] = "scheme\0"
@@ -470,6 +743,9 @@ fn u_start(args: u64) -> u64 {
     var w_time: [u8; 5] = "time\0"
     var w_latch: [u8; 6] = "latch\0"
     var w_clock: [u8; 6] = "clock\0"
+    var w_gui: [u8; 4] = "gui\0"
+    var w_shot: [u8; 5] = "shot\0"
+    var w_day: [u8; 4] = "day\0"
     var s_go: [u8; 15] = "themetest: los\0"
     var s_end: [u8; 21] = "themetest: fertig r=\0"
     var s_mode: [u8; 7] = "MODE_\0 "
@@ -497,6 +773,16 @@ fn u_start(args: u64) -> u64 {
         latch_test()
     } else if ulib.streq(cmd, (&w_clock[0 as usize]) as u64) {
         clock_test()
+    } else if ulib.streq(cmd, (&w_gui[0 as usize]) as u64) {
+        var nm: u64 = (&w_day[0 as usize]) as u64
+        if argc > 2 {
+            nm = ulib.arg_at(args, 2)
+        }
+        gui_test(nm, true)
+    } else if ulib.streq(cmd, (&w_shot[0 as usize]) as u64) {
+        // NUR DAS BILD. Kein Umschalten, kein Schreiben an
+        // /etc/theme.conf -- was auf der Platte steht, bleibt stehen.
+        gui_test((&w_day[0 as usize]) as u64, false)
     } else if ulib.streq(cmd, (&w_scheme[0 as usize]) as u64) {
         // themetest scheme <name>: derselbe Satz zweimal, hell und
         // dunkel, ueber die DATEI -- also den Weg, den die
