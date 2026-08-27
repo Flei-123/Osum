@@ -177,6 +177,68 @@
 #      `nohid`, `nomsc`, `usbnoirq` (Vektor maskiert -- keine Taste
 #      kommt an), `usbpoll` (derselbe maskierte Vektor, aber der Kern
 #      sieht selbst nach), ein Lauf ohne Regler und einer ohne Geraete.
+#  25. EINE NETZSICHT JE PROZESS (tools/netview/run.sh, Runde NETVIEW):
+#      viele Programme verweigern den Dienst ohne Netz, obwohl sie offline
+#      liefen -- sie wollen nur nachladen oder nach Hause funken. Ein
+#      Prozess bekommt darum ein Feld im Aufgabensatz (`sched.T_NETV`) und
+#      damit eine EIGENE Sicht auf das Netz: `real` (der Draht, und der
+#      Standard), `none` (sofort -ENETUNREACH), `faked` (Adresse,
+#      Gateway, Namensdienst und Verbindungen, die GELINGEN und ins Leere
+#      fuehren -- ein Erreichbarkeitstest bekommt `204 No Content`, das
+#      Nachladen bleibt leer) und `filtered` (eine Liste von Zielen echt,
+#      alles andere wie `faked`). Weil dieser Kernel seinen EIGENEN
+#      TCP/IP-Stapel hat, ist das ein Feld und kein Subsystem --
+#      docs/NETVIEW.md haelt das gegen Androids VPN-Trick, Linux'
+#      Namensraeume und Windows. GEMESSEN: `faked` verbindet in 435 us
+#      (der echte Draht braucht 11 233 us) und schickt NULL Oktette
+#      hinaus -- gelesen am Oktettzaehler des KARTENTREIBERS, gegen einen
+#      Kontrolllauf desselben Abbilds in `real`, der 546 schickt. Zwei
+#      Prozesse GLEICHZEITIG in verschiedenen Sichten, und der
+#      Python-Server auf der Linux-Seite sieht genau EINEN von beiden.
+#      Grundsatz und Gegenprobe in einem: GETAEUSCHT WIRD DAS PROGRAMM,
+#      NIE DER MENSCH -- `ps` hat eine Spalte NET, die Einstellungen eine
+#      Seite, und der Nachtrag gibt dem Ganzen ZWEI ANZEIGEN: in der
+#      Ecke der Taskleiste ein Symbol fuer den Zustand der MASCHINE
+#      (kein Traeger / keine Adresse / kein Weg / verbunden, gemessen an
+#      der Karte und am ersten Sprung, nicht behauptet), und am
+#      Fensterknopf UND in der Titelleiste ein Merkmal fuer das
+#      PROGRAMM -- `real` bekommt keines. Sieben Zeichen im Format OSYM,
+#      gezeichnet in der GROSSE, in der sie haengen (16x16 und 12x12),
+#      mit ROLLEN statt Farbwerten, damit dieselbe Datei im hellen und
+#      im dunklen Schema stimmt. Gemessen: acht Kontraste ueber 4.5:1,
+#      neun Schattenrisse paarweise ueber ein Drittel verschieden (die
+#      Probe fuer Rot-Gruen-Blinde -- die Form traegt den Unterschied,
+#      nicht die Farbe), und auf echten Bildschirmfotos jeder Bildpunkt
+#      jedes Zeichens an der Stelle, die die Leiste selbst gemeldet hat.
+#      Die eigentliche Probe: VIER Programme gleichzeitig in VIER
+#      Sichten, vier verschiedene Merkmale an vier Knoepfen EINER Leiste,
+#      hell und dunkel -- und am Knopf des `real`-Programms ist
+#      nachgerechnet, dass dort NICHTS steht.
+#      ZWEITER NACHTRAG -- DER SYSTEMWEITE RUECKFALL: eine Voreinstellung
+#      mit drei Werten (`off`, `when-offline`, `always`) entscheidet, was
+#      ein Programm bekommt, ueber das SONST NICHTS gesagt wurde. Die
+#      Vorrangregel steht als Tabelle in der Doku und lautet in einer
+#      Zeile: EINE ANGABE AM PROGRAMM SCHLAEGT DIE VOREINSTELLUNG IMMER
+#      -- die Voreinstellung fuellt eine Luecke, sie ueberstimmt keine
+#      Antwort. Und sie ruehrt KEINEN LAUFENDEN PROZESS an: eine Sicht,
+#      die sich unter einem Programm wegdreht, tut es mitten in einer
+#      Verbindung. GEMESSEN, mit demselben Abbild, demselben Skript und
+#      EINEM Wort Unterschied auf der Kernel-Befehlszeile: auf einer
+#      Maschine ganz OHNE Netzkarte scheitert das Programm bei `off`
+#      (-ENODEV) und laeuft bei `when-offline` durch (204, leerer Rumpf)
+#      -- und es verlassen dabei NULL Oktette die Maschine. Bei `always`
+#      bleibt ein ausdruecklich auf `real` gesetztes Programm `real` und
+#      holt die echte Seite (200, 46 Oktette), ein auf `none` gesetztes
+#      bleibt ohne Netz. Eine Voreinstellung, die MITTEN IM LAUF
+#      umgestellt wird, laesst jeden laufenden Prozess auf seiner Sicht
+#      und faerbt erst das naechste gestartete Programm. Und die Ecke der
+#      Taskleiste unterscheidet "wirklich online" von "das System
+#      taeuscht gerade vor": ein ACHTES Zeichen, ein SCHIRM mit derselben
+#      Welle wie das Merkmal am Programm -- die Grammatik der Runde ist
+#      RING = EIN PROGRAMM, SCHIRM = DIE GANZE MASCHINE, und die
+#      Schattenrisse der beiden unterscheiden sich um 79 Prozent.
+#      Nachgemessen auf einem Bildschirmfoto einer Maschine, die ECHT
+#      online ist und trotzdem taeuscht, mit Gegenprobe ohne Zeichen.
 #
 #  15. EIN WIRT FUER FREMDE PROZESSOREN (tools/hv/run.sh, Runde K12):
 #      AMD-V, verschachtelte Seitentabellen, sechs Gaeste. Der Kernel
@@ -532,6 +594,9 @@ lauf "27. Marken statt Farben: hell, dunkel, automatisch, und der Kontrast nachg
 # muss hochkommen und die Oberflaeche ohne Symbole malen.
 lauf "25. das Symbolsystem: eine Schrift fuer die Oberflaeche, Bitmaps fuer die Anwendungen (tools/icons/run.sh, Runde ICONS)" \
      tools/icons/run.sh icons '^icons: |^  OK    (assets/osum-icons.ttf|lib/icons.fi|raw code points|counterproof|the kernel loaded|the kernel says|and Ring 3 sees|assertions|an icon in memory|screenshot)|^        (per mixed pixel|one icon cold|in memory:|both mix)'
+lauf "25. eine Netzsicht je Prozess: real, filtered, faked, none (tools/netview/run.sh, Runde NETVIEW)" \
+     tools/netview/run.sh netview '^NETVIEW: |^  OK    (OCTETS THAT LEFT|faked: (connect|reading|the WHOLE|the BODY|a name resolved|and the reachability)|none: (connect|and it said)|real: connect took|and the python server|(nocarrier|noip|noroute|online): the icon|(dark|light): (button|and the REAL)|kernel/netmark|8[a-f]:|faking:)'
+
 
 echo
 echo "=================================================================="

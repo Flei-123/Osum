@@ -66,6 +66,7 @@ import rand
 import tty
 
 import inet
+import netview
 import perm
 import power
 import pwr
@@ -493,7 +494,14 @@ const WL_LAYER: u64 = 40
 const WL_FLAGS: u64 = 48
 const WL_FOCUS: u64 = 56
 const WL_TITLE: u64 = 64
-const WL_BYTES: u64 = 96
+// RUNDE NETVIEW: DIE NETZSICHT DES PROZESSES, DEM DAS FENSTER GEHOERT.
+// Sie steht hier, weil die Taskleiste sie braucht und weil sie sie sonst
+// nur ueber einen zweiten Aufruf je Fenster bekaeme. Der Satz ist
+// dadurch 104 statt 96 Oktette gross; `kernel/user/wlibc.fi` traegt
+// dieselben zwei Zahlen, und `tools/desktop/run.sh` misst weiter
+// dieselben Rechtecke.
+const WL_NETV: u64 = 96
+const WL_BYTES: u64 = 104
 
 // ---------------------------------------------------- RUNDE K15
 //
@@ -607,6 +615,91 @@ const NG_MAC0: u64 = 4 // die ersten vier Oktette der Hardwareadresse
 const NG_MAC1: u64 = 5 // die letzten zwei
 const NG_IN: u64 = 6 // Rahmen herein
 const NG_OUT: u64 = 7 // Rahmen hinaus
+
+// ======================================= RUNDE NETVIEW, NACHTRAG
+//
+// DER ZUSTAND DER MASCHINE, in EINER Zahl, damit die Taskleiste ein
+// Symbol dafuer malen kann. Vier Stufen, und sie steigen: jede setzt
+// die davor voraus.
+//
+//   0 kein Traeger   keine Karte, oder nichts eingesteckt
+//   1 keine Adresse  der Draht ist da, eine IP nicht (DHCP laeuft noch)
+//   2 kein Weg       eine IP ist da, das Gateway hat nie geantwortet --
+//                    das ist Windows' "verbunden, kein Internet", eine
+//                    Sprungweite frueher und ohne eigenen Suchverkehr
+//   3 verbunden      IP da, und das Gateway hat auf ARP geantwortet
+//
+// KABEL ODER FUNK WIRD NICHT UNTERSCHIEDEN, und das ist keine
+// Nachlaessigkeit: es gibt in diesem Baum keine einzige Zeile 802.11.
+// Ein Funksymbol fuer etwas, das es nicht gibt, waere in einer Runde
+// ueber das Nichtluegen die falscheste aller Abkuerzungen. Kommt Funk,
+// kommt hier eine Zahl dazu.
+const NG_STATE: u64 = 8
+
+// ZWEITER NACHTRAG: die vier Stufen stehen jetzt in
+// `kernel/netview.fi`, weil sie dort auch gerechnet werden. Hier waeren
+// sie eine zweite Fassung derselben vier Zahlen.
+
+// ====================================================== RUNDE NETVIEW
+//
+// DIE NETZSICHT EINES PROZESSES. Drei Nummern aus demselben Block, den
+// Runde K8 fuer das Netz ausgewiesen hat.
+//
+//   NETVGET(pid, was)             -> Zahl        jeder darf fragen
+//   NETVSET(pid, sicht, flags)    -> 0           `netview.may_set`
+//   NETVALLOW(pid, adresse, pp)   -> 0           dito
+//
+// `pid` 0 heisst "ich selbst". `pp` ist (port << 16) | praefix.
+// FRAGEN DARF JEDER, und das ist keine Nachlaessigkeit: der Grundsatz
+// dieser Runde ist, dass GETAEUSCHT WIRD DAS PROGRAMM, NIE DER MENSCH
+// DAVOR -- eine Sicht, die der Benutzer nicht auslesen koennte, waere
+// eine Luege an den Benutzer.
+const SYS_OSUM_NETVGET: u64 = 1310
+const SYS_OSUM_NETVSET: u64 = 1311
+const SYS_OSUM_NETVALLOW: u64 = 1312
+
+// Was NETVGET beantwortet.
+const NV_MODE: u64 = 0 // 0 real, 1 filtered, 2 faked, 3 none
+const NV_ALLOWN: u64 = 1 // wie viele Eintraege die Liste hat
+const NV_ALLOW: u64 = 2 // 2..7: Eintrag 0..5, roh
+const NV_DROPPED: u64 = 8 // Oktette, die vorgetaeuschte Steckdosen
+                          // geschluckt haben, seit dem Start
+const NV_OPENED: u64 = 9 // vorgetaeuschte Verbindungen
+const NV_DENIED: u64 = 10 // Versuche mit -ENETUNREACH beantwortet
+const NV_REPLIES: u64 = 11 // gebaute Antworten (204, DNS, ICMP)
+const NV_PID: u64 = 12 // die pid, die NETVGET gerade gelesen hat
+// ZWEITER NACHTRAG: die systemweite Voreinstellung. Drei Auskuenfte und
+// nicht eine, weil `fbview` allein nicht sagt, WARUM es das sagt.
+const NV_FALLBACK: u64 = 13 // 0 off, 1 when-offline, 2 always
+const NV_FBVIEW: u64 = 14 // die Sicht, die ein Programm OHNE eigene
+                          // Einstellung JETZT bekaeme
+const NV_LINK: u64 = 15 // der Zustand der Maschine, ungefiltert
+
+// SETZEN DARF NUR EUID 0. Es ist die einzige Einstellung dieser Runde,
+// die ALLE Prozesse betrifft; ein Programm, das sie selbst umlegen
+// duerfte, koennte jedem anderen sein Netz nehmen.
+const SYS_OSUM_NETVFB: u64 = 1313
+
+// ============================== RUNDE NETVIEW, DRITTER NACHTRAG
+//
+// EIN TASTENKUERZEL, DAS KEIN FENSTER HAT. Der Fensterserver gibt eine
+// Taste dem Fenster MIT DEM EINGABEFOKUS (`wm.on_key`); die Taskleiste
+// ist absichtlich nie dieses Fenster, und ein Kuerzel, das nur wirkt,
+// wenn man vorher die Leiste anklickt, waere keines. Die Tastatur
+// SCHREIBT den Druck deshalb auf (`kbd.fi`), und wer will, liest ihn:
+//
+//   HOTKEY(0) -> Zaehler   um eins hoeher als beim letzten Druck
+//   HOTKEY(1) -> Zeichen   welcher Buchstabe es war
+//   HOTKEY(2) -> ns        die monotone Uhr IM AUGENBLICK DES DRUCKS
+//   HOTKEY(3) -> 1/0       wird die Taste gerade gehalten
+//
+// FRAGEN DARF JEDER. Es ist die Auskunft "es wurde Super+A gedrueckt",
+// und die hat jedes Programm, das den Fokus hat, ohnehin schon.
+const SYS_OSUM_HOTKEY: u64 = 1320
+const HK_SEQ_Q: u64 = 0
+const HK_KEY_Q: u64 = 1
+const HK_NS_Q: u64 = 2
+const HK_DOWN_Q: u64 = 3
 
 const SYS_OSUM_SETENV: u64 = 1400
 const SYS_OSUM_MOUNT: u64 = 1401
@@ -1489,12 +1582,19 @@ fn dispatch(number: u64, frame: u64, state: u64) -> u64 {
     }
     // RUNDE DESKTOP: das Netz jenseits der Sockets. Zwei Nummern aus
     // dem Block, den Runde K8 dafuer ausgewiesen und nie benutzt hat.
-    if number >= SYS_OSUM_NETGET && number <= SYS_OSUM_NETSET {
+    if number >= SYS_OSUM_NETGET && number <= SYS_OSUM_NETVFB {
         return net_call(state, me, number, a0, a1, a2)
     }
     // RUNDE TILING: der Fensterbaum, bedient aus Ring 3.
     if number >= SYS_OSUM_TILEGET && number <= SYS_OSUM_TILEBIND {
         return tile_call(state, me, number, a0, a1)
+    }
+    // RUNDE NETVIEW, dritter Nachtrag: das globale Tastenkuerzel. Eine
+    // eigene Zeile und nicht in `net_call` hineingeschmuggelt -- es ist
+    // eine Auskunft ueber die TASTATUR, und wer sie dort suchte, wo das
+    // Netz beantwortet wird, faende sie nie.
+    if number == SYS_OSUM_HOTKEY {
+        return do_hotkey(state, a0)
     }
     // ------------------------------------------------------ RUNDE K13
     //
@@ -4159,6 +4259,10 @@ fn do_fork(state: u64, me: u64, frame: u64) -> u64 {
     sched.tset(state, child, sched.T_BRK, brk_of(state, me))
     sched.tset(state, child, sched.T_MMAP, map_bottom(state, me))
     sched.tset(state, child, sched.T_BIG, sched.tget(state, me, sched.T_BIG))
+    // RUNDE NETVIEW: das Kind sieht das Netz seines Elternteils, samt
+    // dessen Liste erlaubter Ziele. Anders herum waere es ein Loch:
+    // `fork` waere dann der Weg aus jeder Sicht heraus.
+    netview.inherit(state, me, child)
     // RUNDE K16: das Kind erbt den Boden seines Stapels. Ohne diese
     // Zeile stuende dort null, und `proc.grow_stack` liesse den Stapel
     // eines `fork`-Kindes nicht wachsen -- ein Fehler, der erst beim
@@ -4371,6 +4475,7 @@ fn do_spawn(state: u64, me: u64, prog: u64, arg: u64) -> u64 {
     if i == 0 {
         return neg(errno.E_NOMEM)
     }
+    netview.inherit(state, me, i)
     return sched.tget(state, i, sched.T_PID)
 }
 
@@ -4419,6 +4524,11 @@ fn do_exec(state: u64, me: u64, path: u64, argv: u64, argc: u64) -> u64 {
         elf.say_reason(why)
         return neg(elf.errno_of(why))
     }
+    // RUNDE NETVIEW: `exec` ist hier kein `execve` -- es baut eine NEUE
+    // Aufgabe, und eine neue Aufgabe kommt genullt, also `real`. Ohne
+    // diese Zeile waere `exec` aus einem vorgetaeuschten Prozess heraus
+    // der Weg an der Sicht vorbei.
+    netview.inherit(state, me, t)
     return sched.tget(state, t, sched.T_PID)
 }
 
@@ -5542,6 +5652,9 @@ fn do_fopen(state: u64, me: u64, path: u64, argv: u64, argc: u64) -> u64 {
         return neg(elf.errno_of(why))
     }
     ftype.opened(state)
+    // RUNDE NETVIEW: auch der Weg ueber die Dateiart baut eine NEUE
+    // Aufgabe. Dieselbe Zeile wie in `do_exec` und aus demselben Grund.
+    netview.inherit(state, me, t)
     return sched.tget(state, t, sched.T_PID)
 }
 
@@ -5826,6 +5939,7 @@ fn sock_of(state: u64, me: u64, fd: u64) -> u64 {
 fn unref_of(state: u64, of: u64) {
     if of < file.MAX_OPEN && file.open_kind(state, of) == file.K_SOCK {
         if file.open_refs(state, of) <= 1 {
+            netview.release(state, file.open_ino(state, of))
             inet.sock_close(state, file.open_ino(state, of))
         }
     }
@@ -5846,6 +5960,7 @@ fn sock_close_all(state: u64, me: u64) {
         let of: u64 = of_of(state, me, fd)
         if of < file.MAX_OPEN && file.open_kind(state, of) == file.K_SOCK {
             if file.open_refs(state, of) <= 1 {
+                netview.release(state, file.open_ino(state, of))
                 inet.sock_close(state, file.open_ino(state, of))
             }
         }
@@ -5865,7 +5980,14 @@ fn sa_in(state: u64, me: u64, addr: u64, len: u64, ipp: *mut u64,
     if addr == 0 || len < SA_BYTES {
         return neg(errno.E_INVAL)
     }
-    let sa: u64 = inet.saddr(state)
+    // RUNDE NETVIEW: `inet.saddr` ist ein Rahmen, den der
+    // KARTENTREIBER anlegt -- ohne Karte ist er null. Ein Prozess mit
+    // vorgetaeuschtem Netz gibt trotzdem sockaddr_in herein, also gibt
+    // es einen Ausweichplatz in `kdata`, den es immer gibt.
+    var sa: u64 = inet.saddr(state)
+    if sa == 0 {
+        sa = netview.sa_scratch(state)
+    }
     if !copy_in(state, me, sa, addr, SA_BYTES) {
         return neg(errno.E_FAULT)
     }
@@ -5898,7 +6020,11 @@ fn sa_out(state: u64, me: u64, addr: u64, lenp: u64, a: u64,
             k = k + 1
         }
     }
-    let sa: u64 = inet.saddr(state) + 64
+    var sa: u64 = inet.saddr(state)
+    if sa == 0 {
+        sa = netview.sa_scratch(state)
+    }
+    sa = sa + 64
     var i: u64 = 0
     while i < SA_BYTES {
         kstate.set8(sa + i, 0 as u8)
@@ -5937,7 +6063,11 @@ fn sa_out(state: u64, me: u64, addr: u64, lenp: u64, a: u64,
 
 fn do_socket(state: u64, me: u64, domain: u64, kind: u64,
     protocol: u64) -> u64 {
-    if !inet.ready(state) {
+    // RUNDE NETVIEW: OHNE KARTE GIBT ES KEINE STECKDOSE -- ausser fuer
+    // einen Prozess, der ohnehin keine Karte sehen soll. Ein
+    // vorgetaeuschtes Netz muss gerade auf der Maschine funktionieren,
+    // die WIRKLICH keines hat; das ist der Fall, um den es geht.
+    if !inet.ready(state) && netview.view_of(state, me) == netview.V_REAL {
         return neg(errno.E_NODEV)
     }
     if domain != AF_INET {
@@ -5973,6 +6103,11 @@ fn do_socket(state: u64, me: u64, domain: u64, kind: u64,
     if si >= inet.SOCK_MAX {
         return neg(errno.E_NFILE)
     }
+    // RUNDE NETVIEW: der Platz kommt frisch, also kommt auch die
+    // Vortaeuschung frisch. Bedingungslos und nicht nur beim Schliessen
+    // -- ein vergessener Platz duerfte sonst eine ECHTE Steckdose eines
+    // ECHTEN Prozesses vorgetaeuscht erscheinen lassen.
+    netview.reset(state, si)
     if (flags & SOCK_NONBLOCK) != 0 {
         inet.sock_set_nonblock(state, si)
     }
@@ -5996,6 +6131,14 @@ fn do_bind(state: u64, me: u64, fd: u64, addr: u64, len: u64) -> u64 {
     if errno.is_error(r) {
         return r
     }
+    // RUNDE NETVIEW: eine Sicht, die nicht `real` ist, bindet NICHTS an
+    // den Stapel. Der Aufruf gelingt -- eine Anwendung, die auf einen
+    // Anschluss horcht, soll nicht abstuerzen --, aber der Anschluss
+    // existiert nur in ihrer eigenen Vorstellung: unter ihm liegt kein
+    // Draht, also kommt dort nie etwas an (`do_accept` weiter unten).
+    if netview.view_of(state, me) != netview.V_REAL {
+        return 0
+    }
     // An address that is neither 0.0.0.0 nor the one this machine has is
     // one nobody would ever answer for.
     if a != 0 && a != inet.ip(state) {
@@ -6009,6 +6152,9 @@ fn do_listen(state: u64, me: u64, fd: u64, backlog: u64) -> u64 {
     if si >= inet.SOCK_MAX {
         return neg(errno.E_BADF)
     }
+    if netview.view_of(state, me) != netview.V_REAL {
+        return 0
+    }
     return inet.sock_listen(state, si, backlog)
 }
 
@@ -6020,6 +6166,12 @@ fn do_accept(state: u64, me: u64, fd: u64, addr: u64, lenp: u64,
     let si: u64 = sock_of(state, me, fd)
     if si >= inet.SOCK_MAX {
         return neg(errno.E_BADF)
+    }
+    // RUNDE NETVIEW: unter diesem Anschluss liegt kein Draht. -EAGAIN
+    // SOFORT und nicht nach dreissig Sekunden Schlafen: die ganze Runde
+    // steht auf dem Satz, dass eine vorgetaeuschte Sicht nie haengt.
+    if netview.view_of(state, me) != netview.V_REAL {
+        return neg(errno.E_AGAIN)
     }
     let nb: bool = inet.sock_nonblock(state, si) || (flags & SOCK_NONBLOCK) != 0
     var waited: u64 = 0
@@ -6072,6 +6224,20 @@ fn do_connect(state: u64, me: u64, fd: u64, addr: u64, len: u64) -> u64 {
     if errno.is_error(r) {
         return r
     }
+    // ============================================== RUNDE NETVIEW: DIE TUER
+    //
+    // Hier faellt die Entscheidung, und sie faellt an EINER Stelle.
+    // `real` geht weiter wie seit Runde K8. `none` scheitert SOFORT und
+    // ehrlich. `faked` und ein nicht erlaubtes Ziel unter `filtered`
+    // GELINGEN -- in diesem Aufruf, ohne Draht, ohne Warten.
+    let d: u64 = netview.decide(state, me, a, port)
+    if d == netview.D_DENY {
+        return neg(errno.E_NETUNREACH)
+    }
+    if d == netview.D_FAKE {
+        return netview.open_fake(state, si, inet.sock_kind(state, si),
+            a, port)
+    }
     let c: u64 = inet.sock_connect(state, si, a, port)
     if errno.is_error(c) {
         return c
@@ -6114,10 +6280,6 @@ fn do_sendto(state: u64, me: u64, fd: u64, buf: u64, want: u64,
     if len > MAX_IO {
         len = MAX_IO
     }
-    let bounce: u64 = inet.bounce(state)
-    if !copy_in(state, me, bounce, buf, len) {
-        return neg(errno.E_FAULT)
-    }
     var a: u64 = 0
     var port: u64 = 0
     if addr != 0 {
@@ -6125,6 +6287,52 @@ fn do_sendto(state: u64, me: u64, fd: u64, buf: u64, want: u64,
         if errno.is_error(r) {
             return r
         }
+    }
+    // ====================================================== RUNDE NETVIEW
+    //
+    // Zwei Faelle, und beide gehen an `inet.fi` VORBEI -- was hier
+    // zurueckkehrt, hat den Stapel nie gesehen und kann darum keinen
+    // Rahmen erzeugt haben.
+    //
+    // 1. Die Steckdose ist schon vorgetaeuscht (`connect` hat sie so
+    //    angelegt). Dann zaehlt sie die Oktette und wirft sie weg.
+    // 2. Sie ist es noch nicht und der Aufruf traegt SELBST ein Ziel --
+    //    das ist ein Datagramm ohne `connect`, und ueber jedes einzelne
+    //    wird neu entschieden.
+    var fake: bool = netview.is_fake(state, si)
+    if !fake && addr != 0 {
+        let dc: u64 = netview.decide(state, me, a, port)
+        if dc == netview.D_DENY {
+            return neg(errno.E_NETUNREACH)
+        }
+        if dc == netview.D_FAKE {
+            netview.open_fake(state, si, inet.sock_kind(state, si), a, port)
+            fake = true
+        }
+    }
+    if fake {
+        // ES WERDEN NICHT ALLE OKTETTE HEREINKOPIERT, sondern hoechstens
+        // die ersten 256: mehr sieht diese Seite sich ohnehin nicht an
+        // (`netview.looks_http`, `build_dns`, `build_icmp`), und die
+        // uebrigen werden GEZAEHLT und weggeworfen. Das Ergebnis ist
+        // dasselbe, und der grosse Zwischenpuffer des Kartentreibers
+        // wird nicht gebraucht -- der auf einer Maschine ohne Karte
+        // nicht existiert.
+        var peek: u64 = len
+        if peek > netview.PEEK_MAX {
+            peek = netview.PEEK_MAX
+        }
+        if peek > 0 {
+            if !copy_in(state, me, netview.peek_buf(state), buf, peek) {
+                return neg(errno.E_FAULT)
+            }
+        }
+        return netview.sendto_fake(state, si, netview.peek_buf(state),
+            len, a, port)
+    }
+    let bounce: u64 = inet.bounce(state)
+    if !copy_in(state, me, bounce, buf, len) {
+        return neg(errno.E_FAULT)
     }
     return sock_io(state, si, bounce, len, a, port, true)
 }
@@ -6141,6 +6349,39 @@ fn do_recvfrom(state: u64, me: u64, fd: u64, buf: u64, want: u64,
     }
     if !proc.user_ok(state, me, buf, len) {
         return neg(errno.E_FAULT)
+    }
+    // ====================================================== RUNDE NETVIEW
+    //
+    // EINE Runde, kein Warten. Die Warteschleife weiter unten schlaeft
+    // bis zu NET_ROUNDS Ticks -- dreissig Sekunden --, wenn nichts da
+    // ist. Fuer eine vorgetaeuschte Sicht waere das genau das Haengen,
+    // das diese Runde vermeiden soll: was da ist, kommt sofort, und was
+    // nicht da ist, ist sofort das Ende des Stroms (TCP) oder sofort
+    // -EAGAIN (Datagramm).
+    if netview.is_fake(state, si) {
+        var fa: u64 = 0
+        var fp: u64 = 0
+        var fl: u64 = len
+        if fl > netview.PEEK_MAX {
+            fl = netview.PEEK_MAX
+        }
+        let got: u64 = netview.recvfrom_fake(state, si,
+            netview.peek_buf(state), fl, &fa, &fp)
+        if errno.is_error(got) {
+            return got
+        }
+        if got > 0 {
+            if !copy_out(state, me, buf, netview.peek_buf(state), got) {
+                return neg(errno.E_FAULT)
+            }
+        }
+        if addr != 0 {
+            let fw: u64 = sa_out(state, me, addr, lenp, fa, fp)
+            if errno.is_error(fw) {
+                return fw
+            }
+        }
+        return got
     }
     let bounce: u64 = inet.bounce(state)
     var a: u64 = 0
@@ -6237,6 +6478,12 @@ fn do_shutdown(state: u64, me: u64, fd: u64, how: u64) -> u64 {
     if si >= inet.SOCK_MAX {
         return neg(errno.E_BADF)
     }
+    // RUNDE NETVIEW: es gibt nichts abzuschalten, und das ist kein
+    // Fehler. -ENOTCONN hier waere die eine Stelle, an der ein sonst
+    // fehlerfreier Ablauf ploetzlich meldet, dass etwas nicht stimmt.
+    if netview.is_fake(state, si) {
+        return 0
+    }
     return inet.sock_shutdown(state, si, how)
 }
 
@@ -6249,6 +6496,18 @@ fn do_sockname(state: u64, me: u64, fd: u64, addr: u64, lenp: u64,
     var a: u64 = 0
     var port: u64 = 0
     var r: u64 = 0
+    // RUNDE NETVIEW: eine vorgetaeuschte Steckdose hat einen
+    // vorgetaeuschten Gegenueber und eine vorgetaeuschte eigene Adresse.
+    // Beide sind aus TEST-NET-2 und darum garantiert niemandes.
+    if netview.is_fake(state, si) {
+        if peer {
+            netview.peer_of(state, si, &a, &port)
+        } else {
+            a = netview.FAKE_IP
+            port = 0
+        }
+        return sa_out(state, me, addr, lenp, a, port)
+    }
     if peer {
         r = inet.sock_peer(state, si, &a, &port)
     } else {
@@ -6336,14 +6595,243 @@ fn kbd_call(state: u64, was: u64, wert: u64) -> u64 {
     return errno.neg(errno.E_INVAL)
 }
 
+// ======================================================= RUNDE NETVIEW
+//
+// Die Aufgabe hinter einer pid, oder `me`, wenn die pid 0 ist. Es gibt
+// dafuer `sched.find_pid`; die Null davor ist die Bequemlichkeit, die
+// jedes dieser drei Tore braucht ("meine eigene Sicht").
+fn task_of_pid(state: u64, me: u64, pid: u64) -> u64 {
+    if pid == 0 {
+        return me
+    }
+    return sched.find_pid(state, pid)
+}
+
+// LESEN DARF JEDER, UEBER JEDEN. Das ist eine Entscheidung und keine
+// Vergesslichkeit: der Grundsatz der Runde steht in docs/NETVIEW.md und
+// lautet, dass das PROGRAMM getaeuscht wird und nie der Mensch davor.
+// Eine Netzsicht, die der Benutzer nicht auslesen kann, waere genau die
+// Luege an den Benutzer, die dieses System nicht erzaehlen will -- und
+// die Taskleiste, die das Merkmal ans Fenster malt, laeuft nicht als
+// root.
+fn do_netvget(state: u64, me: u64, pid: u64, what: u64) -> u64 {
+    if what == NV_DROPPED {
+        return netview.dropped(state)
+    }
+    if what == NV_OPENED {
+        return netview.opened(state)
+    }
+    if what == NV_DENIED {
+        return netview.denials(state)
+    }
+    if what == NV_REPLIES {
+        return netview.replies(state)
+    }
+    // ZWEITER NACHTRAG. Drei Fragen ueber die MASCHINE, nicht ueber
+    // einen Prozess -- darum vor dem Nachschlagen der pid und darum
+    // ohne Maske je Sicht. Ein vorgetaeuschter Prozess erfaehrt hier,
+    // dass vorgetaeuscht wird; das ist kein neues Leck, denn `netview
+    // show` sagt ihm seine eigene Sicht seit dem Hauptauftrag. Getaeuscht
+    // wird das Programm an der STECKDOSE, nicht an der Auskunft.
+    if what == NV_FALLBACK {
+        return netview.fallback(state)
+    }
+    if what == NV_FBVIEW {
+        return netview.fallback_view(state)
+    }
+    if what == NV_LINK {
+        return netview.link_state(state)
+    }
+    let t: u64 = task_of_pid(state, me, pid)
+    if t == 0 || t >= kstate.MAX_TASKS {
+        return neg(errno.E_SRCH)
+    }
+    if sched.tget(state, t, sched.T_STATE) == sched.S_FREE {
+        return neg(errno.E_SRCH)
+    }
+    if what == NV_MODE {
+        return netview.view_of(state, t)
+    }
+    if what == NV_ALLOWN {
+        return netview.allow_count(state, t)
+    }
+    if what == NV_PID {
+        return sched.tget(state, t, sched.T_PID)
+    }
+    if what >= NV_ALLOW && what < NV_ALLOW + sched.NETOK_MAX {
+        return netview.allow_at(state, t, what - NV_ALLOW)
+    }
+    return neg(errno.E_INVAL)
+}
+
+// SCHREIBEN NICHT. `netview.may_set` traegt die ganze Regel, und sie
+// steht dort und nicht hier, damit es sie einmal gibt: enger machen darf
+// man sich selbst immer, alles andere braucht euid 0.
+//
+// `flags` Bit 0 leert dabei die Liste der erlaubten Ziele. Ohne das
+// koennte man eine Sicht auf `filtered` stellen und die Liste eines
+// frueheren Laufs erben.
+fn do_netvset(state: u64, me: u64, pid: u64, want: u64) -> u64 {
+    let t: u64 = task_of_pid(state, me, pid)
+    if t == 0 || t >= kstate.MAX_TASKS {
+        return neg(errno.E_SRCH)
+    }
+    if sched.tget(state, t, sched.T_STATE) == sched.S_FREE {
+        return neg(errno.E_SRCH)
+    }
+    let v: u64 = want & 0xFF
+    if !netview.may_set(state, me, t, v) {
+        return neg(errno.E_PERM)
+    }
+    if (want & 0x100) != 0 {
+        netview.allow_clear(state, t)
+    }
+    netview.set_view(state, t, v)
+    return 0
+}
+
+// Ein erlaubtes Ziel: Adresse, dazu (port << 16) | praefix. Beides null
+// leert die Liste. Dieselbe Rechtefrage wie oben, mit der Sicht, die
+// gerade gilt -- eine Liste zu VERLAENGERN macht eine `filtered` Sicht
+// weiter, und darum darf es nur, wer die Sicht auch setzen duerfte.
+fn do_netvallow(state: u64, me: u64, pid: u64, addr: u64,
+    pp: u64) -> u64 {
+    let t: u64 = task_of_pid(state, me, pid)
+    if t == 0 || t >= kstate.MAX_TASKS {
+        return neg(errno.E_SRCH)
+    }
+    if sched.tget(state, t, sched.T_STATE) == sched.S_FREE {
+        return neg(errno.E_SRCH)
+    }
+    if !netview.may_set(state, me, t, netview.view_of(state, t)) {
+        return neg(errno.E_PERM)
+    }
+    if addr == 0 && pp == 0 {
+        netview.allow_clear(state, t)
+        return 0
+    }
+    if !netview.allow_add(state, t, addr, (pp >> 16) & 0xFFFF,
+        pp & 0xFF) {
+        return neg(errno.E_NOSPC)
+    }
+    return 0
+}
+
+// ZWEITER NACHTRAG: DIE SYSTEMWEITE VOREINSTELLUNG SETZEN.
+//
+// Sie aendert KEINEN LAUFENDEN PROZESS, und das ist die Entscheidung
+// dieses Nachtrags: eine Sicht, die sich unter einem Programm wegdreht,
+// tut es mitten in einer Verbindung. Diese Funktion schreibt eine Zahl,
+// die erst der NAECHSTE Programmstart liest.
+fn do_netvfb(state: u64, me: u64, want: u64) -> u64 {
+    if sched.tget(state, me, sched.T_EUID) != 0 {
+        return neg(errno.E_PERM)
+    }
+    if want > netview.FB_LAST {
+        return neg(errno.E_INVAL)
+    }
+    netview.fallback_set(state, want)
+    return 0
+}
+
+// RUNDE NETVIEW, DRITTER NACHTRAG: was die Tastatur aufgeschrieben hat.
+// Vier Auskuenfte und kein Abholen: der Zaehler wird hier NICHT
+// zurueckgesetzt. Ein Leser vergleicht ihn mit der Zahl, die er zuletzt
+// gesehen hat -- damit kann kein zweiter Leser dem ersten den Druck
+// wegnehmen, und ein Leser, der zweimal fragt, handelt trotzdem einmal.
+fn do_hotkey(state: u64, what: u64) -> u64 {
+    if what == HK_SEQ_Q {
+        return kbd.hotkey_seq(state)
+    }
+    if what == HK_KEY_Q {
+        return kbd.hotkey_key(state)
+    }
+    if what == HK_NS_Q {
+        return kbd.hotkey_ns(state)
+    }
+    if what == HK_DOWN_Q {
+        return kbd.super_down(state)
+    }
+    return neg(errno.E_INVAL)
+}
+
 fn net_call(state: u64, me: u64, number: u64, a0: u64, a1: u64,
     a2: u64) -> u64 {
+    // ====================================================== RUNDE NETVIEW
+    if number == SYS_OSUM_NETVFB {
+        return do_netvfb(state, me, a0)
+    }
+    if number == SYS_OSUM_NETVGET {
+        return do_netvget(state, me, a0, a1)
+    }
+    if number == SYS_OSUM_NETVSET {
+        return do_netvset(state, me, a0, a1)
+    }
+    if number == SYS_OSUM_NETVALLOW {
+        return do_netvallow(state, me, a0, a1, a2)
+    }
     if number == SYS_OSUM_NETGET {
+        // RUNDE NETVIEW: WAS EIN PROZESS UEBER SEIN NETZ ERFAEHRT,
+        // HAENGT AN SEINER SICHT. Ein `faked` Prozess bekommt hier die
+        // erfundene Anschrift aus TEST-NET-2 -- sonst faende er ueber
+        // diesen Aufruf heraus, dass er getaeuscht wird, und die
+        // Vortaeuschung waere an ihrer eigenen Auskunftsstelle
+        // durchschaubar. Ein `none` Prozess bekommt, was eine Maschine
+        // mit gezogenem Kabel meldet: nichts.
+        let v: u64 = netview.view_of(state, me)
+        if v == netview.V_NONE {
+            if a0 == NG_READY {
+                return 0
+            }
+            // Gezogenes Kabel, und zwar auch fuer den, der nach dem
+            // Zustand fragt.
+            if a0 == NG_STATE {
+                return netview.NS_NOCARRIER
+            }
+            return errno.neg(errno.E_NODEV)
+        }
+        if v == netview.V_FAKED {
+            if a0 == NG_READY {
+                return 1
+            }
+            if a0 == NG_IP {
+                return netview.FAKE_IP
+            }
+            if a0 == NG_MASK {
+                return netview.FAKE_MASK
+            }
+            if a0 == NG_GW {
+                return netview.FAKE_GW
+            }
+            if a0 == NG_MAC0 {
+                return netview.FAKE_MAC0
+            }
+            if a0 == NG_MAC1 {
+                return netview.FAKE_MAC1
+            }
+            // Rahmenzaehler eines Netzes, ueber das nie ein Rahmen ging.
+            if a0 == NG_IN || a0 == NG_OUT {
+                return 0
+            }
+            // Und der Zustand: vollstaendig verbunden. Ein Programm, das
+            // hier die Wahrheit erfuehre, waere nicht getaeuscht.
+            if a0 == NG_STATE {
+                return netview.NS_ONLINE
+            }
+            return errno.neg(errno.E_INVAL)
+        }
         if a0 == NG_READY {
             if inet.ready(state) {
                 return 1
             }
             return 0
+        }
+        // Der Zustand wird AM DRAHT gemessen und nicht am Stapel. Die
+        // Rechnung steht seit dem zweiten Nachtrag in
+        // `netview.link_state`, weil sie inzwischen zwei Frager hat --
+        // diesen hier und `netview.fallback_view`.
+        if a0 == NG_STATE {
+            return netview.link_state(state)
         }
         if !inet.ready(state) {
             return errno.neg(errno.E_NODEV)
@@ -6380,8 +6868,32 @@ fn net_call(state: u64, me: u64, number: u64, a0: u64, a1: u64,
     if !inet.ready(state) {
         return errno.neg(errno.E_NODEV)
     }
+    // RUNDE NETVIEW, DRITTER NACHTRAG: DIE ADRESSE WIEDER HERGEBEN.
+    //
+    // Bis hierher war die Null verboten, und das war richtig, solange
+    // es nur "setz die Adresse" gab: 0.0.0.0 ist keine Adresse. Die
+    // Schnelleinstellungen brauchen aber die Gegenrichtung -- ein
+    // "Netz aus", das die Maschine wirklich adresslos macht, statt nur
+    // so zu tun. Genau EINE Kombination heisst das, und sie muss
+    // vollstaendig sein: Adresse, Maske und Gateway alle drei null.
+    // Eine Adresse ohne Maske bleibt ein Fehler, so wie vorher.
+    //
+    // WAS DANACH GILT, und es ist nicht behauptet, sondern faellt aus
+    // `netview.link_state` heraus: die Karte ist weiter da, der Traeger
+    // ist weiter da, `inet.ip` ist 0 -- also meldet die Maschine
+    // "Traeger da, keine Adresse", genau die zweite der vier Stufen,
+    // und die Ecke der Taskleiste malt das Zeichen dafuer. Es gibt
+    // keinen fuenften Zustand "abgeschaltet", weil es fuer den Benutzer
+    // keinen Unterschied macht, ob die Adresse nie da war oder gerade
+    // weggenommen wurde.
     if a0 == 0 {
-        return errno.neg(errno.E_INVAL)
+        if a1 != 0 || (a2 & 0xFFFFFFFF) != 0 {
+            return errno.neg(errno.E_INVAL)
+        }
+        if !inet.readdr(state, 0, 0, 0, 0, 0, 0) {
+            return errno.neg(errno.E_IO)
+        }
+        return 0
     }
     // Die Praefixlaenge aus der Maske. Eine Maske mit Loechern
     // (0xFF00FF00) ist keine Maske; sie wird hier NICHT stillschweigend
@@ -6477,6 +6989,11 @@ fn wm_list(state: u64, me: u64, platz: u64, aus: u64, max: u64) -> u64 {
         f = 1
     }
     kstate.set(puffer, WL_FOCUS, f)
+    // RUNDE NETVIEW: GETAEUSCHT WIRD DAS PROGRAMM, NIE DER MENSCH.
+    // Diese eine Zahl ist der ganze Unterschied zwischen einem System,
+    // das seinem Benutzer hilft, und einem, das ihn auch anluegt.
+    kstate.set(puffer, WL_NETV,
+        netview.view_of(state, wm.win_owner(state, platz)))
     let t: u64 = wm.win_title(state, platz)
     k = 0
     while k < 31 {
@@ -7356,6 +7873,7 @@ fn do_reboot(state: u64, me: u64, cmd: u64) -> u64 {
     // DER BERICHT ZUERST. Nach der naechsten Zeile gibt es die Maschine
     // nicht mehr; was hier nicht steht, steht nirgends.
     perm.report(state)
+    netview.report(state)
     serial.puts((&s_off[0]) as u64)
     serial.nl()
     if cmd == RB_POWEROFF {
