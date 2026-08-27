@@ -270,6 +270,28 @@
 #      Sprung ins Nichts, ein `#!` im Kreis und eine `.fi`, die nicht
 #      uebersetzt -- die darf NICHT als Erfolg gemeldet werden.
 #
+#  25. DIEBSTAHL (tools/tresor/run.sh, Runde TRESOR): was passiert, wenn
+#      die Maschine weg ist. Eine GERAETEIDENTITAET, die eine
+#      Neuinstallation ueberlebt (`kernel/hwid.fi`: SMBIOS ueber den
+#      Suchlauf im F-Segment, die Seriennummer des NVMe-Laufwerks aus
+#      IDENTIFY CONTROLLER, die MAC-Adresse) -- gemessen gegen eine
+#      ZWEITE, unabhaengige Umsetzung des SMBIOS-Lesers in Python, die
+#      denselben Speicherabzug entschluesselt. Eine SICHERUNG, die wie
+#      `opk` inhaltsadressiert ist (`kernel/user/bak.fi`): der zweite
+#      Lauf schreibt NULL Oktette, und Sichern-Loeschen-Wiederherstellen
+#      ergibt einen Baum, den der WIRT aus dem Plattenabbild
+#      zurueckliest und Oktett fuer Oktett vergleicht. Und die
+#      SCHLUESSELVERWALTUNG (`kernel/user/key.fi`), gegen Pythons
+#      `hashlib.pbkdf2_hmac`.
+#      WAS DIESE RUNDE AUSDRUECKLICH NICHT KANN, steht in docs/THEFT.md
+#      und ist genauso gemessen: dieselbe Kommandozeile mit `-smbios`
+#      macht aus der Seriennummer, was man will, und acht Oktette VORNE
+#      an einer Datei zerstoeren die Doppelerkennung vollstaendig.
+#      Gegenproben: ohne `nvme` keine Laufwerksnummer, ohne Karte keine
+#      MAC, ohne `hwidefi` kein EFI-Pfad, ein gekipptes Oktett in der
+#      Packdatei MUSS auffallen, und der Bereich auf der Seite von K18
+#      MUSS den Kartenpruefer ausloesen.
+#
 # Kein '|| true', kein Verschlucken von Beendigungscodes.
 set -uo pipefail
 
@@ -423,6 +445,8 @@ lauf "22. Widgets und der Dateimanager: eine Bibliothek in Ring 3 (tools/k15/run
      tools/k15/run.sh k15 '^K15: |^        -> |^  OK    (die Anordnung|ein Klick auf das Kaestchen|mit Bereichsverfolgung|und /daten/neu|der Verweis spart|getippt |OHNE (die Schluesselwoerter|das Journal|den Namensindex)|[0-9]\. (DER AUFBAU|DIE SUCHE|DIE GEGENPROBE|der Index)|und DIESELBEN NAMEN|nach dem (Anlegen|Umbenennen)|das Symbol des Dateimanagers)'
 lauf "24. Energie und Leistung: drei Profile, Ruhezustand, Waerme, Akku (tools/k18/run.sh, Runde K18)" \
      tools/k18/run.sh k18 '^K18: |^  OK    (dieselbe Stelle|IA32_PERF_CTL bekommt|Turbo ist bei|SpeedStep ist bei|jeder Durchlauf ging|schlafend |aber es wird kein|zwei Tabellen|GEGENPROBE|GEDROSSELT|im BILD|dasselbe Pruefbild|und einen Bildpunkt DANEBEN|keine AUFRUFNUMMER)'
+lauf "25. Diebstahl: Geraeteidentitaet, Sicherung, Schluesselverwaltung (tools/tresor/run.sh, Runde TRESOR)" \
+     tools/tresor/run.sh tresor '^TRESOR: |^  OK    (SMBIOS |SHA-256 |PBKDF2|DER ZWEITE LAUF|der wiederhergestellte Baum|ACHT OKTETTE|im beschaedigten|GEGENPROBE|eine (NEUE PLATTE|ANDERE Maschine)|der Fingerabdruck ist|die Seriennummer des Laufwerks|crypto erase|open mit dem richtigen|1000 Oktette|bei 0xF1031|und seine Pruefsumme)'
 
 echo
 echo "=================================================================="
