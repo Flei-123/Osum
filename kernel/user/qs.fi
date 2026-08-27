@@ -1,0 +1,776 @@
+// kernel/user/qs.fi -- round NETVIEW, third addendum: QUICK SETTINGS.
+//
+// The small panel that opens over the corner of the taskbar, the way
+// Win+A does on Windows. It exists because of ONE switch -- "fake a
+// network" -- and the rule that got it built is worth more than the
+// panel:
+//
+//   ONLY WHAT REALLY EXISTS AND WHAT IS REALLY SWITCHED OFTEN GOES IN
+//   HERE. Four honest tiles beat twelve of which half do nothing. A
+//   tile for something this system does not have is not a placeholder,
+//   it is a lie with rounded corners.
+//
+// SO HERE IS WHAT WAS LEFT OUT AND WHY -- MEASURED IN THIS TREE, not
+// assumed:
+//
+//   VOLUME.       There is no sound. `grep -ri audio kernel/*.fi`
+//                 finds `A_VOLUME` in the FAT driver and nothing else.
+//                 A slider would move a number that reaches no speaker.
+//   BRIGHTNESS.   Round DISPLAY has not delivered a gamma ramp on this
+//                 branch. What DOES exist is `pwr.rescale`, which
+//                 multiplies every pixel in the framebuffer in place
+//                 and says so in its own comment. That is fine for
+//                 `power hell 40` typed once; a slider is dragged
+//                 across fifty values, and every one of them throws
+//                 away low bits that the next one cannot get back. A
+//                 slider over a lossy operation is worse than no
+//                 slider.
+//   LIGHT/DARK.   The theme interface is not there yet. `/etc/theme`
+//                 exists and is one file of colour VALUES; the settings
+//                 read a list of named schemes out of `/etc/schemas`,
+//                 and NOTHING IN THIS TREE CREATES THAT DIRECTORY --
+//                 no image builder writes it, so on a running machine
+//                 it is empty. There is no mark anywhere saying which
+//                 scheme is the light one. Round THEME is building
+//                 exactly that; a tile here would have had to invent
+//                 their interface and then disagree with it.
+//   DO NOT DISTURB. There are no notifications. Nothing to silence.
+//
+// WHAT IS LEFT IS THREE, and all three are switches a person really
+// flips:
+//
+//   FAKE NETWORK   the reason this panel was asked for. off <-> always.
+//   NETWORK        the machine's address, away and back. This is NOT
+//                  the same switch: a faked program keeps believing in
+//                  its invented network when the real address is gone,
+//                  and a real one genuinely loses everything.
+//   HIDE THE BAR   `/etc/taskbar.conf`, `autohide`. It belongs to the
+//                  taskbar and so does this panel.
+//
+// ------------------------------------------------------------------
+// WHERE IT APPEARS. At the edge the bar is on, in the corner the icon
+// group is in -- and the rectangle it is allowed to use is the WORK
+// AREA (`wlibc.work_*`, the interface addendum TASKBAR built), never
+// the screen. A panel that assumed the screen would sit under the bar
+// on three of the four edges.
+//
+// WHOSE WINDOW IT IS. The taskbar's, created at start and kept HIDDEN.
+// Opening it is `WS_HIDDEN 0` plus a move plus a paint -- not a program
+// start. That is not a detail: `tools/netview/run.sh` measures the time
+// from the key press to the panel standing, and a fork+exec would put
+// that measurement in a different order of magnitude.
+//
+// HOW IT CLOSES. Three ways, and the panel has to survive all three:
+// Escape (it takes the focus when it opens, so the key arrives),
+// the hotkey again, and a press anywhere outside it -- which is polled
+// from the pointer, because a press outside a window raises no event
+// belonging to that window.
+
+profile kernel
+
+import ulib
+import wlibc
+import nv
+import libc.io
+import libc.kcall
+
+export {
+    init, anchor, step, toggle, is_open, hit, want_hide, took_hide,
+    W, H
+}
+
+// --------------------------------------------------------- the shape
+//
+// DRAWN AT THE SIZE IT HANGS AT, and every number below came off a
+// screenshot rather than out of somebody's head.
+
+// THESE NUMBERS WERE MEASURED, NOT CHOSEN. The first build had
+// TW = 120 and TH = 62, which looked right in the source and was wrong
+// on the screen -- `tools/netview/kachel.py` read the picture back and
+// found "Netz vortaeuschen" four pixels past the right edge of its own
+// tile and, on the third tile, the label and the word under it sharing
+// a row of pixels. Neither is visible in a source file; both are
+// obvious in a screenshot, which is why the checker exists and why it
+// runs on every one of the four edges.
+//
+//   TW  180  the widest label this panel has is "Netz vortaeuschen",
+//            and its width was found by BISECTION AGAINST THE RUNNING
+//            SYSTEM rather than by reading the font: at TW = 140 `fit`
+//            cut it to "Netz vortaeusc", at 160 to "Netz vortaeusche",
+//            at 180 it stands whole. So it is between 141 and 160
+//            pixels, and 160 of usable width is what a tile needs.
+//   TH   74  icon (16) + 4 + a line of text + 12 clear + a line of
+//            text + 10. The 12 is the gap the first version did not
+//            have.
+const PAD: u64 = 10
+const TW: u64 = 180 // one tile
+const TH: u64 = 74
+const GAP: u64 = 8
+const FH: u64 = 22 // the "all settings" row
+const W: u64 = PAD + TW + GAP + TW + PAD // 388
+const H: u64 = PAD + TH + GAP + TH + PAD + FH + PAD // 208
+const MARGIN: u64 = 4 // between the panel and the bar it sits beside
+const BAND: u64 = 64 // rows of the drawing surface used at a time
+const IC: u64 = 16 // the tile symbol, at its target size
+
+const N_TILE: u64 = 3
+
+// ---------------------------------------------------------- the state
+
+static mut w_h: u64 = 0
+static mut w_id: u64 = 0
+static mut open_: u64 = 0
+static mut px_: u64 = 0
+static mut py_: u64 = 0
+static mut asc: u64 = 0
+static mut a_edge: u64 = 0
+static mut a_x: u64 = 0
+static mut a_y: u64 = 0
+static mut a_w: u64 = 800
+static mut a_h: u64 = 600
+static mut hk_last: u64 = 0
+static mut t0: u64 = 0 // the press this opening answers, in ns
+static mut btn_last: u64 = 0
+static mut hide_want: u64 = 0 // 0 nothing, 1 turn on, 2 turn off
+static mut ah_on: u64 = 0
+static mut opens: u64 = 0
+static mut ev: [u8; 16] = [0 as u8; 16]
+
+// The tile symbols, read once at start. Same format as everything else
+// in this round -- OSYM with colour ROLES, so one file is right in a
+// light scheme and in a dark one.
+const ICON_MAX: u64 = 1100
+static mut ic_buf: [u8; 3300] = [0 as u8; 3300] // 3 pictures
+static mut ic_ok: u64 = 0
+
+static mut p_icons: [u8; 14] = "/etc/netview/\0"
+static mut n_ic: [u8; 33] = "tile-fake\0tile-net\0tile-hide\0\0\0\0\0"
+static mut p_settings: [u8; 19] = "/bin/einstellungen\0"
+
+// The words. German, like every other string the taskbar and the
+// settings put on the screen in this tree; round I18N is the one that
+// changes that, everywhere at once.
+static mut l_fake: [u8; 18] = "Netz vortaeuschen\0"
+static mut l_net: [u8; 5] = "Netz\0"
+static mut l_hide: [u8; 17] = "Leiste verbergen\0"
+static mut w_on: [u8; 4] = "an\0\0"
+static mut w_off: [u8; 4] = "aus\0"
+static mut l_all: [u8; 19] = "Alle Einstellungen\0"
+
+static mut s_open: [u8; 12] = "qs: open x=\0"
+static mut s_y: [u8; 4] = " y=\0"
+static mut s_w: [u8; 4] = " w=\0"
+static mut s_h: [u8; 4] = " h=\0"
+static mut s_ed: [u8; 7] = " edge=\0"
+static mut s_up: [u8; 6] = " up=\0\0"
+static mut s_us: [u8; 5] = " us=\0"
+static mut s_shut: [u8; 15] = "qs: closed by \0"
+static mut s_esc: [u8; 7] = "escape\0"
+static mut s_out: [u8; 8] = "outside\0"
+static mut s_key: [u8; 7] = "hotkey\0"
+static mut s_tile: [u8; 12] = "qs: tile n=\0"
+static mut s_to: [u8; 5] = " to=\0"
+static mut s_rc: [u8; 5] = " rc=\0"
+static mut s_ico: [u8; 15] = "qs: symbols n=\0"
+static mut s_spawn: [u8; 17] = "qs: settings pid\0"
+static mut s_txt: [u8; 11] = "qs: text x\0"
+static mut s_eq: [u8; 2] = "=\0"
+static mut s_ty: [u8; 4] = " y=\0"
+static mut s_tf: [u8; 5] = " fg=\0"
+static mut s_tb: [u8; 5] = " bg=\0"
+static mut s_tt: [u8; 3] = " [\0"
+static mut s_te: [u8; 3] = "]\0\0"
+static mut s_sym: [u8; 12] = "qs: sym n=\0\0"
+static mut s_sx: [u8; 4] = " x=\0"
+
+fn say(p: u64) {
+    ulib.say(p)
+}
+
+fn tlen(p: u64) -> u64 {
+    return ulib.length(p)
+}
+
+fn nth(p: u64, i: u64) -> u64 {
+    var at: u64 = 0
+    var k: u64 = 0
+    while k < i {
+        while __mmio_read8((p + at) as *mut u8) != 0 as u8 {
+            at = at + 1
+        }
+        at = at + 1
+        k = k + 1
+    }
+    return p + at
+}
+
+// CLOCK_MONOTONIC, the same clock `kbd.fi` stamped the press with and
+// the same one `nvcheck` measures the faked connection with. Not
+// `ticks` -- ticks are ten milliseconds in this kernel and the whole
+// question here is whether the panel is up in less than that.
+fn now_ns() -> u64 {
+    var ts: [u64; 2] = [0 as u64; 2]
+    let _r: u64 = kcall.sys2(kcall.SYS_CLOCK_GETTIME, 1,
+        (&ts[0 as usize]) as u64)
+    return (ts[0 as usize] *% 1000000000) +% ts[1 as usize]
+}
+
+// ------------------------------------------------------- the symbols
+
+fn icon_read(name: u64, dst: u64, max: u64) -> u64 {
+    var path: [u8; 48] = [0 as u8; 48]
+    let p: u64 = (&path[0 as usize]) as u64
+    var at: u64 = ulib.strcpy(p, (&p_icons[0 as usize]) as u64)
+    at = at + ulib.strcpy(p + at, name)
+    let fd: u64 = io.open(p, 0)
+    if ulib.bad(fd) {
+        return 0
+    }
+    let n: u64 = io.read(fd, dst, max)
+    io.close(fd)
+    if ulib.bad(n) {
+        return 0
+    }
+    return n
+}
+
+fn icons_load() {
+    ic_ok = 0
+    var i: u64 = 0
+    while i < N_TILE {
+        if icon_read(nth((&n_ic[0 as usize]) as u64, i),
+            (&ic_buf[0 as usize]) as u64 + i * ICON_MAX, ICON_MAX) > 12 {
+            ic_ok = ic_ok + 1
+        }
+        i = i + 1
+    }
+}
+
+// ONE DRAWING PER TILE, not one per tile and state. It was built the
+// other way first and measured: two sixteen-by-sixteen glyphs that
+// differ only on the inside come out about a quarter of their pixels
+// apart, under the third `tools/netview/icons.py` demands of any two
+// signs that mean different things -- and the tool was right, a quarter
+// is not something anybody sees at a glance.
+//
+// So the switch position is carried where a toggle actually carries it,
+// and only one of the three is colour: the WORD under the tile ("an" /
+// "aus"), the RELIEF of the frame (raised off, sunken on), and the
+// fill. See `assets/netview/tile-net.txt`, where the reasoning sits
+// next to the drawing.
+fn tile_icon(t: u64) -> u64 {
+    if ic_ok < N_TILE {
+        return 0
+    }
+    return (&ic_buf[0 as usize]) as u64 + t * ICON_MAX
+}
+
+// ---------------------------------------------------- what each tile is
+//
+// READ FRESH, NEVER REMEMBERED. Every one of these three is a question
+// somebody else can also answer -- `/bin/netview fallback` sets the
+// first, `dhcp` can change the second, `/bin/einstellungen` the third.
+// A panel with its own copy would show the copy.
+
+fn tile_on(t: u64) -> bool {
+    if t == 0 {
+        return nv.fallback_on()
+    }
+    if t == 1 {
+        return nv.net_ip() != 0 && !ulib.bad(nv.net_ip())
+    }
+    return ah_on != 0
+}
+
+fn tile_label(t: u64) -> u64 {
+    if t == 0 {
+        return (&l_fake[0 as usize]) as u64
+    }
+    if t == 1 {
+        return (&l_net[0 as usize]) as u64
+    }
+    return (&l_hide[0 as usize]) as u64
+}
+
+// The address the machine had before "network off" took it away, so
+// that "network on" can give the same one back. It is REMEMBERED HERE
+// and nowhere else, and it is deliberately not written to a file: a
+// remembered address that survives a reboot would be a second, stale
+// answer to a question DHCP already answers at every start.
+static mut old_ip: u64 = 0
+static mut old_mask: u64 = 0
+static mut old_gw: u64 = 0
+
+fn tile_click(t: u64) -> u64 {
+    if t == 0 {
+        return nv.fallback_switch(!nv.fallback_on())
+    }
+    if t == 1 {
+        if tile_on(1) {
+            old_ip = nv.net_ip()
+            old_mask = nv.net_mask()
+            old_gw = nv.net_gw()
+            return nv.net_off()
+        }
+        if old_ip == 0 {
+            return 0 - 1
+        }
+        return nv.net_on(old_ip, old_mask, old_gw)
+    }
+    // The taskbar owns `/etc/taskbar.conf` and writes it in exactly one
+    // place. This tile asks; `leiste.fi` does it and tells us what came
+    // of it (`took_hide`). Two writers of one file is how a file ends
+    // up disagreeing with itself.
+    if ah_on != 0 {
+        hide_want = 2
+    } else {
+        hide_want = 1
+    }
+    return 0
+}
+
+fn want_hide() -> u64 {
+    return hide_want
+}
+
+// The bar hands back what it actually did, and the tile shows THAT --
+// not what it asked for.
+fn took_hide(now: u64) {
+    hide_want = 0
+    ah_on = now
+}
+
+// --------------------------------------------------------- the window
+
+fn init(autohide: u64) -> bool {
+    ah_on = autohide
+    asc = wlibc.ascent_of(wlibc.F_UI, wlibc.PX_UI)
+    icons_load()
+    say((&s_ico[0 as usize]) as u64)
+    ulib.sayn(ic_ok)
+    ulib.nl()
+    let h: u64 = wlibc.sys5(wlibc.WM_CREATE, 0, (W << 16) | H,
+        (&l_all[0 as usize]) as u64, 0, 0)
+    if ulib.bad(h) || h == 0 {
+        return false
+    }
+    w_h = h
+    let _d: u64 = wlibc.win_state(h, wlibc.WS_DECO, 0)
+    let _l: u64 = wlibc.win_state(h, wlibc.WS_LAYER, wlibc.L_TOP)
+    let _v: u64 = wlibc.win_state(h, wlibc.WS_HIDDEN, 1)
+    w_id = wlibc.sys3w(wlibc.WM_INFO, h, wlibc.WI_ID, 0)
+    return true
+}
+
+// WHERE THE TASKBAR IS, out of the taskbar. The work area is what is
+// left of the screen after every reserved edge; the panel goes in the
+// corner of THAT, on the side the bar is on.
+fn anchor(edge: u64, wx: u64, wy: u64, ww: u64, wh: u64) {
+    a_edge = edge
+    a_x = wx
+    a_y = wy
+    a_w = ww
+    a_h = wh
+    place()
+}
+
+fn place() {
+    var x: u64 = 0
+    var y: u64 = 0
+    if a_w > W + 2 * MARGIN {
+        x = a_x + a_w - W - MARGIN
+    } else {
+        x = a_x
+    }
+    if a_h > H + 2 * MARGIN {
+        y = a_y + a_h - H - MARGIN
+    } else {
+        y = a_y
+    }
+    // TOP: the bar is above, so the panel hangs from the top of what is
+    // left. LEFT: the bar is beside it, so the panel starts at the left
+    // of what is left -- and stays at the BOTTOM, because that is where
+    // the icon group of a vertical bar is.
+    if a_edge == wlibc.WE_TOP {
+        y = a_y + MARGIN
+    }
+    if a_edge == wlibc.WE_LEFT {
+        x = a_x + MARGIN
+    }
+    px_ = x
+    py_ = y
+    if open_ != 0 {
+        let _m: u64 = wlibc.sys3w(wlibc.WM_MOVE, w_h, (px_ << 16) | py_, 0)
+    }
+}
+
+fn is_open() -> bool {
+    return open_ != 0
+}
+
+// Is this SCREEN point on the panel? The taskbar asks before it treats
+// a press as the beginning of a drag.
+fn hit(x: u64, y: u64) -> bool {
+    if open_ == 0 {
+        return false
+    }
+    return x >= px_ && x < px_ + W && y >= py_ && y < py_ + H
+}
+
+fn open_at(when: u64) {
+    if open_ != 0 {
+        return
+    }
+    t0 = when
+    place()
+    let _m: u64 = wlibc.sys3w(wlibc.WM_MOVE, w_h, (px_ << 16) | py_, 0)
+    let _v: u64 = wlibc.win_state(w_h, wlibc.WS_HIDDEN, 0)
+    open_ = 1
+    opens = opens + 1
+    // TWO STAMPS AND NOT ONE, because a single number does not say
+    // where the time went. The first is the moment the WINDOW STANDS
+    // (moved, unhidden) -- everything before it is the wait for the
+    // taskbar's poll to come round. The second is after the PAINT. The
+    // difference between them is drawing; the first one on its own is
+    // latency, and they are worth different things.
+    let t_up: u64 = now_ns()
+    // PAINTED, NOT REPORTED, AND THE STOPWATCH STOPS HERE. The first
+    // measurement said 365 771 microseconds and it was measuring the
+    // SERIAL LINE: `paint(true)` writes a dozen lines about what it
+    // drew, at 115 200 baud, inside the window being timed. Round
+    // TASKBAR made exactly this mistake with auto-hide and wrote it
+    // down; this is the same lesson, applied to the same file. What is
+    // timed is the work the person waits for -- move, show, draw. The
+    // report comes afterwards, outside the measurement.
+    paint(false)
+    let t_done: u64 = now_ns()
+    // AND THE FOCUS, so that Escape arrives. A panel that could only be
+    // closed with the pointer would be a panel the keyboard cannot get
+    // out of.
+    let _a: u64 = wlibc.win_act(w_id, wlibc.WA_RAISE)
+    // THE STOPWATCH STOPS HERE, after the window stands and is painted,
+    // and it started in the KEYBOARD INTERRUPT (`kbd.fi` wrote the
+    // clock into the latch). One clock, both ends, nothing in between
+    // estimated.
+    say((&s_open[0 as usize]) as u64)
+    ulib.sayn(px_)
+    say((&s_y[0 as usize]) as u64)
+    ulib.sayn(py_)
+    say((&s_w[0 as usize]) as u64)
+    ulib.sayn(W)
+    say((&s_h[0 as usize]) as u64)
+    ulib.sayn(H)
+    say((&s_ed[0 as usize]) as u64)
+    ulib.sayn(a_edge)
+    say((&s_up[0 as usize]) as u64)
+    var d1: u64 = 0
+    if t0 != 0 && t_up > t0 {
+        d1 = (t_up -% t0) / 1000
+    }
+    ulib.sayn(d1)
+    say((&s_us[0 as usize]) as u64)
+    var d: u64 = 0
+    if t0 != 0 && t_done > t0 {
+        d = (t_done -% t0) / 1000
+    }
+    ulib.sayn(d)
+    ulib.nl()
+    paint(true)
+}
+
+fn shut(why: u64) {
+    if open_ == 0 {
+        return
+    }
+    open_ = 0
+    t0 = 0
+    let _v: u64 = wlibc.win_state(w_h, wlibc.WS_HIDDEN, 1)
+    say((&s_shut[0 as usize]) as u64)
+    say(why)
+    ulib.nl()
+}
+
+fn toggle() {
+    if open_ != 0 {
+        shut((&s_key[0 as usize]) as u64)
+    } else {
+        open_at(now_ns())
+    }
+}
+
+// ----------------------------------------------------------- the poll
+//
+// Called once per turn of the taskbar's loop. Three jobs and none of
+// them costs anything while the panel is shut: the hotkey latch is one
+// system call, the event ring is one, and the pointer is only asked
+// while the panel is open.
+fn step() -> bool {
+    var changed: bool = false
+    let seq: u64 = nv.hotkey_seq()
+    if seq != hk_last {
+        let was: u64 = hk_last
+        hk_last = seq
+        // 97 is `a`. ONE hotkey, and it is spelled out rather than
+        // configurable: a key map is a round of its own and inventing
+        // half of one here would be the kind of half-thing this round
+        // keeps refusing.
+        if was != 0 || seq == 1 {
+            if nv.hotkey_key() == 97 {
+                if open_ != 0 {
+                    shut((&s_key[0 as usize]) as u64)
+                } else {
+                    open_at(nv.hotkey_ns())
+                }
+                changed = true
+            }
+        }
+    }
+    if open_ == 0 {
+        return changed
+    }
+    var n: u64 = 0
+    while n < 16 && wlibc.sys3w(wlibc.WM_EVENT, w_h,
+        (&ev[0 as usize]) as u64, 0) == 1 {
+        let b: u64 = (&ev[0 as usize]) as u64
+        let typ: u64 = __mmio_read64((b) as *mut u64)
+        let d: u64 = __mmio_read64((b + 8) as *mut u64)
+        if typ == wlibc.EV_KEY {
+            if d == 27 {
+                shut((&s_esc[0 as usize]) as u64)
+                return true
+            }
+        } else if typ == wlibc.EV_DOWN {
+            click((d >> 32) & 0xFFFF, (d >> 16) & 0xFFFF)
+            changed = true
+        } else if typ == wlibc.EV_CLOSE {
+            shut((&s_esc[0 as usize]) as u64)
+            return true
+        }
+        n = n + 1
+    }
+    if open_ == 0 {
+        return changed
+    }
+    // A PRESS BESIDE IT. The window server tells a window about the
+    // pointer only while the pointer is INSIDE it, so a press somewhere
+    // else raises no event of ours -- the same reason the drag of the
+    // bar polls. Only the EDGE of the press counts: holding the button
+    // down must not close the panel forty times.
+    let btn: u64 = wlibc.mouse_btn() & 1
+    if btn != 0 && btn_last == 0 {
+        let mx: u64 = wlibc.mouse_x()
+        let my: u64 = wlibc.mouse_y()
+        if !hit(mx, my) {
+            shut((&s_out[0 as usize]) as u64)
+            changed = true
+        }
+    }
+    btn_last = btn
+    return changed
+}
+
+// ---------------------------------------------------------- the clicks
+
+fn tile_rect_x(t: u64) -> u64 {
+    if (t % 2) == 0 {
+        return PAD
+    }
+    return PAD + TW + GAP
+}
+
+fn tile_rect_y(t: u64) -> u64 {
+    return PAD + (t / 2) * (TH + GAP)
+}
+
+fn click(x: u64, y: u64) {
+    var t: u64 = 0
+    while t < N_TILE {
+        let tx: u64 = tile_rect_x(t)
+        let ty: u64 = tile_rect_y(t)
+        if x >= tx && x < tx + TW && y >= ty && y < ty + TH {
+            let rc: u64 = tile_click(t)
+            say((&s_tile[0 as usize]) as u64)
+            ulib.sayn(t)
+            say((&s_to[0 as usize]) as u64)
+            if tile_on(t) {
+                ulib.sayn(1)
+            } else {
+                ulib.sayn(0)
+            }
+            say((&s_rc[0 as usize]) as u64)
+            ulib.sayn(rc)
+            ulib.nl()
+            paint(true)
+            return
+        }
+        t = t + 1
+    }
+    let fy: u64 = PAD + 2 * (TH + GAP) + PAD - GAP
+    if y >= fy && y < fy + FH {
+        let pid: u64 = ulib.sys(ulib.SYS_SPAWN,
+            (&p_settings[0 as usize]) as u64, 0, 0)
+        say((&s_spawn[0 as usize]) as u64)
+        say((&s_eq[0 as usize]) as u64)
+        ulib.sayn(pid)
+        ulib.nl()
+        shut((&s_out[0 as usize]) as u64)
+    }
+}
+
+// ---------------------------------------------------------- the drawing
+
+// Every string this panel puts on the screen is also written to the
+// serial line with the place and the colours it was drawn in, so that
+// `tools/netview/run.sh` can hold the report against the picture -- the
+// rule the taskbar has followed since round DESKTOP, and the reason a
+// program cannot report one thing and paint another here either.
+// The label, cut to `avail` pixels, one character at a time. It
+// returns a pointer into a scratch buffer, so exactly one label may be
+// in flight at a time -- which is true, because they are drawn one
+// after another.
+static mut cut: [u8; 64] = [0 as u8; 64]
+
+fn fit(p: u64, avail: u64) -> u64 {
+    var n: u64 = tlen(p)
+    if wlibc.text_w(wlibc.F_UI, wlibc.PX_UI, p, n) <= avail {
+        return p
+    }
+    let q: u64 = (&cut[0 as usize]) as u64
+    if n > 63 {
+        n = 63
+    }
+    var k: u64 = 0
+    while k < n {
+        __mmio_write8((q + k) as *mut u8, __mmio_read8((p + k) as *mut u8))
+        k = k + 1
+    }
+    __mmio_write8((q + n) as *mut u8, 0 as u8)
+    while n > 1 && wlibc.text_w(wlibc.F_UI, wlibc.PX_UI, q, n) > avail {
+        n = n - 1
+        __mmio_write8((q + n) as *mut u8, 0 as u8)
+    }
+    return q
+}
+
+fn say_text(x: u64, base: u64, fg: u64, bg: u64, txt: u64) {
+    say((&s_txt[0 as usize]) as u64)
+    say((&s_eq[0 as usize]) as u64)
+    ulib.sayn(x)
+    say((&s_ty[0 as usize]) as u64)
+    ulib.sayn(base)
+    say((&s_tf[0 as usize]) as u64)
+    ulib.sayn(fg)
+    say((&s_tb[0 as usize]) as u64)
+    ulib.sayn(bg)
+    say((&s_tt[0 as usize]) as u64)
+    say(txt)
+    say((&s_te[0 as usize]) as u64)
+    ulib.nl()
+}
+
+fn paint_band(y0: u64, hh: u64, report: bool) {
+    wlibc.set_band(y0)
+    wlibc.clip_set(0, y0, W, y0 + hh)
+    wlibc.rect(0, y0, W, hh, wlibc.theme(wlibc.T_PANEL))
+    // A LINE ROUND IT. Without it the panel and the bar are the same
+    // grey with no edge between them, and the person cannot see where
+    // one stops.
+    wlibc.frame(0, 0, W, H, wlibc.theme(wlibc.T_LINE))
+    var t: u64 = 0
+    while t < N_TILE {
+        let tx: u64 = tile_rect_x(t)
+        let ty: u64 = tile_rect_y(t)
+        if ty + TH > y0 && ty < y0 + hh {
+            // DRAWN IN EVERY BAND IT TOUCHES, REPORTED IN ONE. The
+            // drawing surface is 81 rows (`wlibc.SURF_ROWS`), so a
+            // 62-pixel tile straddles a band boundary and is painted
+            // twice -- reporting it twice would put two lines with two
+            // different truths about one tile on the serial line.
+            let mine: bool = report && ty >= y0 && ty < y0 + hh
+            let on: bool = tile_on(t)
+            var bg: u64 = wlibc.theme(wlibc.T_BTN)
+            var fg: u64 = wlibc.theme(wlibc.T_FG)
+            var dim: u64 = wlibc.theme(wlibc.T_DIM)
+            if on {
+                bg = wlibc.theme(wlibc.T_SEL)
+                fg = wlibc.theme(wlibc.T_SELFG)
+                dim = wlibc.theme(wlibc.T_SELFG)
+            }
+            wlibc.rect(tx, ty, TW, TH, bg)
+            wlibc.frame3(tx, ty, TW, TH, wlibc.theme(wlibc.T_BTNHI),
+                wlibc.theme(wlibc.T_LINE), on)
+            let ip: u64 = tile_icon(t)
+            if ip != 0 {
+                let _i: bool = wlibc.icon_draw(ip, tx + 10, ty + 10)
+                if mine {
+                    say((&s_sym[0 as usize]) as u64)
+                    ulib.sayn(t)
+                    say((&s_sx[0 as usize]) as u64)
+                    ulib.sayn(px_ + tx + 10)
+                    say((&s_y[0 as usize]) as u64)
+                    ulib.sayn(py_ + ty + 10)
+                    say((&s_to[0 as usize]) as u64)
+                    if on {
+                        ulib.sayn(1)
+                    } else {
+                        ulib.sayn(0)
+                    }
+                    ulib.nl()
+                }
+            }
+            // AND IT IS SHORTENED IF IT STILL DOES NOT FIT, and the
+            // SHORTENED one is what gets reported. A tile that reported
+            // the long label and painted a clipped one would pass a
+            // checker that compares the two -- which is exactly the
+            // trap round DESKTOP wrote down for the status fields.
+            let lab: u64 = fit(tile_label(t), TW - 20)
+            let lb: u64 = ty + 8 + IC + 4 + asc
+            let _e: u64 = wlibc.text_at(wlibc.F_UI, wlibc.PX_UI, tx + 10,
+                lb, lab, tlen(lab), fg)
+            var st: u64 = (&w_off[0 as usize]) as u64
+            if on {
+                st = (&w_on[0 as usize]) as u64
+            }
+            let sb: u64 = ty + TH - 10
+            let _f: u64 = wlibc.text_at(wlibc.F_UI, wlibc.PX_UI, tx + 10,
+                sb, st, tlen(st), dim)
+            if mine {
+                say_text(tx + 10, lb, fg, bg, lab)
+                say_text(tx + 10, sb, dim, bg, st)
+            }
+        }
+        t = t + 1
+    }
+    let fy: u64 = PAD + 2 * (TH + GAP) + PAD - GAP
+    if fy + FH > y0 && fy < y0 + hh {
+        wlibc.hline(PAD, fy - 4, W - 2 * PAD, wlibc.theme(wlibc.T_LINE))
+        let p: u64 = (&l_all[0 as usize]) as u64
+        let base: u64 = fy + (FH + asc) / 2 - 1
+        let _g: u64 = wlibc.text_at(wlibc.F_UI, wlibc.PX_UI, PAD + 10,
+            base, p, tlen(p), wlibc.theme(wlibc.T_FG))
+        if report && fy >= y0 && fy < y0 + hh {
+            say_text(PAD + 10, base, wlibc.theme(wlibc.T_FG),
+                wlibc.theme(wlibc.T_PANEL), p)
+        }
+    }
+    let _p: u64 = wlibc.push(w_h, 0, y0, W, hh)
+}
+
+fn paint(report: bool) {
+    if open_ == 0 {
+        return
+    }
+    var y: u64 = 0
+    var first: bool = true
+    let _q: bool = first
+    while y < H {
+        var hh: u64 = BAND
+        if y + hh > H {
+            hh = H - y
+        }
+        paint_band(y, hh, report)
+        first = false
+        y = y + hh
+    }
+    let _f: u64 = wlibc.sys3w(wlibc.WM_FLUSH, w_h, 0, 0)
+}
