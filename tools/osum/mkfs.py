@@ -472,9 +472,10 @@ def load(path):
     if len(raw) < BS:
         return None
     inodes = struct.unpack_from("<Q", raw, SB["INODES"])[0] or INODE_COUNT
+    version = struct.unpack_from("<Q", raw, SB["VERSION"])[0] or OFS_V2
     fs = Fs(max(len(raw) // BS, INODE_START
                 + (inodes + INODES_PER_BLOCK - 1) // INODES_PER_BLOCK + 8),
-            inodes)
+            version, inodes)
     fs.d[:len(raw)] = raw
     if fs.g64(SB["MAGIC"]) != MAGIC:
         return None
