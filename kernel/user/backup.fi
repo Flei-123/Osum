@@ -1,6 +1,6 @@
 // kernel/user/backup.fi -- round TRESOR: backup, content addressed.
 //
-//     backup save    <source> <store> <name>     write a snapshot
+//     backup save <set> <store> <name> [orphans [tree]]  write a snapshot
 //     backup list    <store>                     which snapshots are there
 //     backup restore <store> <name> <target>     the whole tree back
 //     backup get     <store> <name> <path> <to>  ONE file back
@@ -8,13 +8,18 @@
 //
 // ============================================================== THE NAME
 //
-// It is `bak` and not `sich`. Every other program in this /bin carries an
-// English or a traditional Unix name -- `cat`, `cp`, `find`, `sed`,
-// `tar`, `gzip`, `du`, `xargs` -- and the documentation of this system
-// was settled as English on 27.08.2026. `sich` would have been the single
-// German name in the whole directory, and a userland whose vocabulary is
-// half one language and half another makes every future name an argument.
-// `bak` is short, it is what the thing is, and it collides with nothing.
+// It is `backup`. Not `sich`, and not `bak` either -- the owner rejected
+// both on 27.08.2026 and settled the rule that stands above every name in
+// this system: EVERY command, subcommand, option, field and format name in
+// Osum/OrientOS is ENGLISH. No German stems, no German abbreviations, no
+// umlauts. The one exception is the proper noun `opk` and the `.opk`
+// suffix that belongs to it.
+//
+// `bak` was my own abbreviation of the rejected word, and it failed the
+// rule twice: it is a truncation, and a reader has to be told what it
+// stands for. `backup` is the English word for the thing, it collides
+// with nothing, and it needs no footnote. The format magic below reads
+// `backup1` for the same reason -- a magic string is a name too.
 //
 // ================================================== WHY CONTENT ADDRESSED
 //
@@ -58,7 +63,7 @@
 //
 // A text file, readable with `cat`, in the spirit of `opk`'s PLAN:
 //
-//     bak1 <chunk size>
+//     backup1 <chunk size>
 //     <path><TAB><mode><TAB><size><TAB><hash>,<hash>,...
 //
 // `<path>` is relative to the source root and starts with `/`. `<mode>`
@@ -67,6 +72,50 @@
 // chunks. Directories come BEFORE their contents, because `restore`
 // walks the file top to bottom and cannot create a file in a directory
 // that is not there yet.
+//
+// ============================================================== THE ORPHANS
+//
+// A backup here deliberately does NOT carry programs. A package is named
+// by the SHA-256 of its octets in the PLAN, and those octets can be
+// fetched again from a source, so copying them into every backup would be
+// copying something that is already safe somewhere else. That is the
+// whole reason the backup set is about one per cent of the disk.
+//
+// The argument holds exactly as long as a source really can deliver the
+// octets. For a package that was BUILT ON THIS MACHINE and never
+// published, nobody can: the hash in the PLAN names it precisely and
+// names nothing anybody can hand back. Such a package is ORPHANED, and it
+// is the one case where a backup has to carry the program itself, because
+// otherwise `opk rebuild` on a new machine stops at a hash it cannot
+// resolve and the program is gone for good.
+//
+// So `save` takes an optional fourth path: a list of the orphans, and
+// an optional fifth: the tree their store lives under, because <set> is
+// the backup set and the store is deliberately not inside it.
+//
+//   THE INTERFACE, which is a text file and nothing cleverer:
+//
+//     * one STORE ENTRY NAME per line, `\n` terminated -- that is, one
+//       directory name as it appears under `store/`. Today `opk` makes
+//       that the first 20 hex digits of the package's SHA-256; this
+//       program does not know or care, it only requires lower case hex,
+//       16 to 64 digits;
+//     * empty lines are skipped, nothing else is allowed on a line;
+//     * each name is walked at `<source>/store/<name>` and lands in the
+//       snapshot under `/store/<name>`, which is where a restore puts it
+//       back;
+//     * an empty file means nothing is orphaned, and is NOT an error --
+//       it is the normal case on a machine whose packages all come from a
+//       source;
+//     * a name whose store entry is missing IS an error, and a loud one:
+//       a backup that silently skipped the one thing it existed to carry
+//       would be worse than no backup.
+//
+// The producer of that list is `opk` in the OrientOS tree, which is the
+// only program that knows which sources are registered and what they
+// hold. This side does not guess and does not parse a PLAN: it is handed
+// a list of hashes. `tools/tresor/orphans.py` is a working producer for
+// the test, and docs/ORPHANS.md is the contract both sides point at.
 //
 // ================================================================ HONEST
 //
@@ -87,7 +136,7 @@
 //    userland has no allocator, so the bound is a fixed array and the
 //    program SAYS SO and fails rather than writing a store it cannot
 //    describe. With 4096 octet chunks that is 4 MiB of unique data.
-// H5 NO NETWORK BACKEND. `bak` writes to a path; whether that path is a
+// H5 NO NETWORK BACKEND. `backup` writes to a path; whether that path is a
 //    second disk or a FAT32 stick is the mount table's business and none
 //    of this program's. A network target needs a transport that can be
 //    trusted with the octets, and TLS is not finished in this tree
@@ -95,6 +144,13 @@
 //    exactly what makes adding one later a small job.
 // H6 NO OWNER, NO TIMESTAMPS. The mode is kept, uid/gid and times are
 //    not. `restore` makes files owned by whoever runs it.
+// H7 THE ORPHAN LIST IS TRUSTED. This program does not verify that a hash
+//    really is unreachable -- it cannot, it has no source list and no
+//    network. It stores what it is told to store. A wrong list costs
+//    space (a package that was reachable after all) or loses a program (a
+//    package left off the list), and both faults belong to the producer.
+//    What this side DOES check is the shape of every line and that the
+//    entry exists, so a typo cannot pass silently.
 
 profile kernel
 
@@ -104,6 +160,14 @@ import libc.errno
 import sha
 
 export { u_start }
+
+// `chmod`, syscall 90 (`kernel/user/chmod.fi`). Restoring the mode is not
+// decoration: an orphaned PROGRAM comes back from a backup, and a program
+// that comes back without its execute bit is a file, not a program. H6
+// said "the mode is kept" and until this addendum only half of that was
+// true -- it was written into the snapshot and then dropped on the way
+// back.
+const SYS_CHMOD: u64 = 90
 
 const CHUNK: u64 = 4096
 const MAX_CHUNKS: u64 = 1024
@@ -144,6 +208,9 @@ static mut n_new: u64 = 0
 static mut b_read: u64 = 0
 static mut b_written: u64 = 0
 static mut n_found: u64 = 0 // for `get`: did the wanted path turn up?
+static mut n_orphan: u64 = 0 // orphaned store entries carried along
+static mut b_orphan: u64 = 0 // octets written BECAUSE of them
+static mut opath: [u8; 256] = [0 as u8; 256] // "/store/<hash>"
 
 fn say_kv(label: u64, v: u64) {
     ulib.say(label)
@@ -159,25 +226,46 @@ fn u_start(args: u64) -> u64 {
     var c_rest: [u8; 8] = "restore\0"
     var c_get: [u8; 4] = "get\0"
     var c_ver: [u8; 7] = "verify\0"
-    var e_use: [u8; 60] = "backup: save|list|restore|get|verify -- see the head of bak.fi\0"
+    var e_use: [u8; 53] = "backup: save <set> <store> <name> [orphans [tree]] | "
+    var e_use2: [u8; 47] = "list | restore | get | verify -- see backup.fi "
 
     let argc: u64 = ulib.arg_count(args)
     if argc < 2 {
         ulib.esay_line((&e_use[0]) as u64, 0)
+        ulib.esay_line((&e_use2[0]) as u64, 0)
         return 1
     }
     let cmd: u64 = ulib.arg_at(args, 1)
     if ulib.streq(cmd, (&c_save[0]) as u64) {
         if argc < 5 {
             ulib.esay_line((&e_use[0]) as u64, 0)
+            ulib.esay_line((&e_use2[0]) as u64, 0)
             return 1
         }
+        // The orphan list is optional: without it this is the backup the
+        // round started with, and the default stays "programs are not
+        // backed up".
+        //
+        // The optional FIFTH path is the tree the store lives under. It
+        // exists because `<src>` is the BACKUP SET -- PLAN, config, state
+        // -- and the store is deliberately NOT inside it. Left out, it is
+        // `<src>`, which is the case where somebody hands over a whole
+        // tree and wants a few of its store entries carried along.
+        var orph: u64 = 0
+        var tree: u64 = ulib.arg_at(args, 2)
+        if argc >= 6 {
+            orph = ulib.arg_at(args, 5)
+        }
+        if argc >= 7 {
+            tree = ulib.arg_at(args, 6)
+        }
         return cmd_save(ulib.arg_at(args, 2), ulib.arg_at(args, 3),
-            ulib.arg_at(args, 4))
+            ulib.arg_at(args, 4), orph, tree)
     }
     if ulib.streq(cmd, (&c_list[0]) as u64) {
         if argc < 3 {
             ulib.esay_line((&e_use[0]) as u64, 0)
+            ulib.esay_line((&e_use2[0]) as u64, 0)
             return 1
         }
         return cmd_list(ulib.arg_at(args, 2))
@@ -185,6 +273,7 @@ fn u_start(args: u64) -> u64 {
     if ulib.streq(cmd, (&c_rest[0]) as u64) {
         if argc < 5 {
             ulib.esay_line((&e_use[0]) as u64, 0)
+            ulib.esay_line((&e_use2[0]) as u64, 0)
             return 1
         }
         return cmd_restore(ulib.arg_at(args, 2), ulib.arg_at(args, 3),
@@ -193,6 +282,7 @@ fn u_start(args: u64) -> u64 {
     if ulib.streq(cmd, (&c_get[0]) as u64) {
         if argc < 6 {
             ulib.esay_line((&e_use[0]) as u64, 0)
+            ulib.esay_line((&e_use2[0]) as u64, 0)
             return 1
         }
         return cmd_get(ulib.arg_at(args, 2), ulib.arg_at(args, 3),
@@ -201,11 +291,13 @@ fn u_start(args: u64) -> u64 {
     if ulib.streq(cmd, (&c_ver[0]) as u64) {
         if argc < 4 {
             ulib.esay_line((&e_use[0]) as u64, 0)
+            ulib.esay_line((&e_use2[0]) as u64, 0)
             return 1
         }
         return cmd_verify(ulib.arg_at(args, 2), ulib.arg_at(args, 3))
     }
     ulib.esay_line((&e_use[0]) as u64, 0)
+    ulib.esay_line((&e_use2[0]) as u64, 0)
     return 1
 }
 
@@ -429,12 +521,12 @@ fn put_num(p: u64, v: u64) -> u64 {
 
 // ------------------------------------------------------------------ save
 
-fn cmd_save(src: u64, store: u64, name: u64) -> u64 {
-    var e_src: [u8; 28] = "backup: cannot read source \0\0\0\0"
-    var e_store: [u8; 30] = "backup: cannot open the store \0\0\0"
-    var e_full: [u8; 44] = "backup: too many chunks -- raise MAX_CHUNKS\0\0\0\0"
-    var e_snap: [u8; 32] = "backup: cannot write snapshot \0\0\0\0\0"
-    var hdr: [u8; 11] = "bak1 4096\n\0"
+fn cmd_save(src: u64, store: u64, name: u64, orphans: u64, tree: u64) -> u64 {
+    var e_src: [u8; 31] = "backup: cannot read source \0\0\0\0"
+    var e_store: [u8; 33] = "backup: cannot open the store \0\0\0"
+    var e_full: [u8; 47] = "backup: too many chunks -- raise MAX_CHUNKS\0\0\0\0"
+    var e_snap: [u8; 35] = "backup: cannot write snapshot \0\0\0\0\0"
+    var hdr: [u8; 14] = "backup1 4096\n\0"
     var l_files: [u8; 9] = "files: \0\0"
     var l_dirs: [u8; 8] = "dirs: \0\0"
     var l_ch: [u8; 10] = "chunks: \0\0"
@@ -442,6 +534,8 @@ fn cmd_save(src: u64, store: u64, name: u64) -> u64 {
     var l_rd: [u8; 13] = "read bytes: \0"
     var l_wr: [u8; 16] = "written bytes: \0"
     var l_uni: [u8; 16] = "store chunks: \0\0"
+    var l_orph: [u8; 17] = "orphan entries: \0"
+    var l_ob: [u8; 15] = "orphan bytes: \0"
     var l_ms: [u8; 5] = "ms: \0"
 
     n_files = 0
@@ -450,6 +544,8 @@ fn cmd_save(src: u64, store: u64, name: u64) -> u64 {
     n_new = 0
     b_read = 0
     b_written = 0
+    n_orphan = 0
+    b_orphan = 0
     // The timer of this kernel runs at 100 Hz (`idt.pit_init(100)`), so a
     // tick is ten milliseconds. That is the WHOLE resolution available
     // here, and a run of a few hundred milliseconds is therefore measured
@@ -480,9 +576,18 @@ fn cmd_save(src: u64, store: u64, name: u64) -> u64 {
         ulib.esay_line((&e_snap[0]) as u64, name)
         return 1
     }
-    io.write_all(snap, (&hdr[0]) as u64, 10)
+    io.write_all(snap, (&hdr[0]) as u64, 13)
 
-    let rc: u64 = walk(src, store, pack, snap)
+    var rc: u64 = walk(src, 0, store, pack, snap)
+    // THE ONE EXCEPTION, and it runs into the SAME pack and the SAME
+    // snapshot: an orphan is not a second backup, it is part of this one,
+    // so it dedupes against everything already written and `restore`,
+    // `get` and `verify` need to know nothing about it.
+    if rc == 0 && orphans != 0 {
+        let before: u64 = b_written
+        rc = save_orphans(tree, orphans, store, pack, snap)
+        b_orphan = b_written - before
+    }
     io.close(pack)
     io.close(snap)
     if rc != 0 {
@@ -499,6 +604,10 @@ fn cmd_save(src: u64, store: u64, name: u64) -> u64 {
     say_kv((&l_rd[0]) as u64, b_read)
     say_kv((&l_wr[0]) as u64, b_written)
     say_kv((&l_uni[0]) as u64, ix_n)
+    // Always printed, so that "no orphans" is a MEASURED zero rather
+    // than a missing line the reader has to interpret.
+    say_kv((&l_orph[0]) as u64, n_orphan)
+    say_kv((&l_ob[0]) as u64, b_orphan)
     let t1: u64 = ulib.sys(ulib.SYS_SYSINFO, ulib.I_TICKS, 0, 0)
     say_kv((&l_ms[0]) as u64, (t1 - t0) * 10)
     return 0
@@ -517,22 +626,34 @@ fn make_full(src: u64) {
 // here has eight pages of stack, and a 512 octet directory buffer per
 // level would put a depth limit in a place where nobody would look for
 // it. MAX_DEPTH is the limit, it is stated, and it is checked.
-fn walk(src: u64, store: u64, pack: u64, snap: u64) -> u64 {
-    var e_deep: [u8; 38] = "backup: directory nesting is too deep\0\0\0\0"
-    var e_full: [u8; 44] = "backup: too many chunks -- raise MAX_CHUNKS\0\0\0\0"
+// `prefix` is 0 for the ordinary walk of the whole source, or a relative
+// path like "/store/<hash>" -- then the walk starts THERE and every path
+// in the snapshot carries that prefix. That is the entire mechanism by
+// which an orphaned store entry lands in the snapshot at the place a
+// restore has to put it back.
+fn walk(src: u64, prefix: u64, store: u64, pack: u64, snap: u64) -> u64 {
+    var e_deep: [u8; 41] = "backup: directory nesting is too deep\0\0\0\0"
+    var e_full: [u8; 47] = "backup: too many chunks -- raise MAX_CHUNKS\0\0\0\0"
     var dot: [u8; 2] = ".\0"
     var dotdot: [u8; 3] = "..\0"
 
-    relp[0] = 0 as u8
+    if prefix == 0 {
+        relp[0] = 0 as u8
+    } else {
+        ulib.strncpy((&relp[0]) as u64, prefix, PATH_MAX)
+    }
     var depth: u64 = 0
-    let fd0: u64 = io.dir_open(src)
+    make_full(src)
+    let fd0: u64 = io.dir_open((&full[0]) as u64)
     if errno.failed(fd0) {
         return 1
     }
     dfd[0] = fd0
     dlen[0] = 0
     dat[0] = 0
-    dcut[0] = 0
+    // Coming back up to the top must cut relp back to the PREFIX, not to
+    // nothing -- otherwise the second orphan would be written at "/".
+    dcut[0] = ulib.length((&relp[0]) as u64)
     // The root itself gets a line, so that a restore knows its mode.
     emit_dir(snap, 0)
 
@@ -593,6 +714,102 @@ fn walk(src: u64, store: u64, pack: u64, snap: u64) -> u64 {
         }
     }
     return 0
+}
+
+// ---------------------------------------------------------- the orphans
+
+// A line of the orphan list names ONE STORE ENTRY -- that is, one
+// directory under `<source>/store/`. It is deliberately treated as an
+// OPAQUE NAME and not decoded: `opk` shortens a SHA-256 to its first 20
+// hex digits for the directory name, and that shortening rule belongs to
+// `opk`. If this program recomputed it, a change over there would break a
+// backup over here, silently and much later.
+//
+// What is checked is the SHAPE, and that check is doing real work:
+//
+//   * lower case hex only. This is what stops `..` and `/` from ever
+//     reaching a path, so a hostile or broken list cannot walk out of the
+//     store and put arbitrary parts of the disk into the snapshot;
+//   * between 16 and 64 digits, so a shortening rule may change without
+//     this program caring, while a truly silly line is still refused;
+//   * upper case is refused on purpose -- it would give one entry two
+//     spellings, and an interface with two answers to one question.
+fn is_entry_name(p: u64) -> bool {
+    var i: u64 = 0
+    while *((p + i) as *mut u8) != 0 as u8 {
+        let c: u64 = (*((p + i) as *mut u8)) as u64
+        if c >= 65 && c <= 70 {
+            return false
+        }
+        if unhex(c) >= 16 {
+            return false
+        }
+        i = i + 1
+    }
+    return i >= 16 && i <= 64
+}
+
+// Walks `<src>/store/<entry>` for every name in the list, into the pack and
+// the snapshot that `save` already has open. Returns 0, or 1 with a
+// reason on the error channel.
+fn save_orphans(tree: u64, listfile: u64, store: u64, pack: u64, snap: u64) -> u64 {
+    var e_open: [u8; 37] = "backup: cannot read the orphan list \0"
+    var e_shape: [u8; 42] = "backup: not a lower case hex store name: \0"
+    var e_gone: [u8; 37] = "backup: orphan is not in the store: \0"
+    var st: [u8; 7] = "/store\0"
+    var sl: [u8; 2] = "/\0"
+
+    let fd: u64 = io.open(listfile, 0)
+    if errno.failed(fd) {
+        ulib.esay_line((&e_open[0]) as u64, listfile)
+        return 1
+    }
+    var rc: u64 = 0
+    var any: bool = false
+    ulib.rd_init((&rdctx2[0]) as u64)
+    var going: bool = true
+    while going && rc == 0 {
+        let m: u64 = ulib.rd_line(fd, (&rdctx2[0]) as u64, (&line[0]) as u64,
+            LINE_MAX)
+        if m == ulib.EOF {
+            going = false
+        } else if m == 0 {
+            // An empty line is nothing to do. An empty FILE is the normal
+            // case on a machine whose packages all come from a source.
+        } else if !is_entry_name((&line[0]) as u64) {
+            ulib.esay_line((&e_shape[0]) as u64, (&line[0]) as u64)
+            rc = 1
+        } else {
+            if !any {
+                // `/store` itself needs a line, or `restore` walks the
+                // snapshot top to bottom and finds no directory to put
+                // the first entry in.
+                ulib.strcpy((&relp[0]) as u64, (&st[0]) as u64)
+                make_full(tree)
+                emit_dir(snap, 0)
+                any = true
+            }
+            ulib.strcpy((&opath[0]) as u64, (&st[0]) as u64)
+            ulib.strcat((&opath[0]) as u64, (&sl[0]) as u64)
+            ulib.strcat((&opath[0]) as u64, (&line[0]) as u64)
+            ulib.strncpy((&relp[0]) as u64, (&opath[0]) as u64, PATH_MAX)
+            make_full(tree)
+            // LOUD, not quiet. The whole point of the list is that these
+            // octets exist nowhere else; skipping one with a warning
+            // would produce a backup that looks complete and is not.
+            if !ulib.is_dir((&full[0]) as u64) {
+                ulib.esay_line((&e_gone[0]) as u64, (&opath[0]) as u64)
+                rc = 1
+            } else {
+                rc = walk(tree, (&opath[0]) as u64, store, pack, snap)
+                if rc == 0 {
+                    n_orphan = n_orphan + 1
+                }
+            }
+        }
+    }
+    io.close(fd)
+    return rc
 }
 
 fn mode_of(path: u64) -> u64 {
@@ -743,7 +960,7 @@ fn emit_file(snap: u64, pack: u64) -> bool {
 // ------------------------------------------------------------------ list
 
 fn cmd_list(store: u64) -> u64 {
-    var e_no: [u8; 28] = "backup: no store at \0\0\0\0\0\0\0\0\0\0\0"
+    var e_no: [u8; 31] = "backup: no store at \0\0\0\0\0\0\0\0\0\0\0"
     var entry: [u8; 512] = [0 as u8; 512]
     let fd: u64 = io.dir_open(store)
     if errno.failed(fd) {
@@ -779,8 +996,8 @@ fn cmd_list(store: u64) -> u64 {
 // which is what `backup get` is.
 
 fn cmd_restore(store: u64, name: u64, target: u64, only: u64) -> u64 {
-    var e_snap: [u8; 30] = "backup: no such snapshot \0\0\0\0\0\0\0\0"
-    var e_pack: [u8; 25] = "backup: cannot read PACK\0\0\0\0"
+    var e_snap: [u8; 33] = "backup: no such snapshot \0\0\0\0\0\0\0\0"
+    var e_pack: [u8; 28] = "backup: cannot read PACK\0\0\0\0"
     var l_f: [u8; 19] = "restored files: \0\0\0"
     var l_d: [u8; 18] = "restored dirs: \0\0\0"
     var l_b: [u8; 19] = "restored bytes: \0\0\0"
@@ -817,7 +1034,7 @@ fn cmd_restore(store: u64, name: u64, target: u64, only: u64) -> u64 {
         if m == ulib.EOF {
             going = false
         } else if first {
-            first = false // the `bak1 4096` header
+            first = false // the `backup1 4096` header
         } else if m > 0 {
             if !one_line(m, pack, target, only) {
                 rc = 1
@@ -887,12 +1104,16 @@ fn one_line(m: u64, pack: u64, target: u64, only: u64) -> bool {
     }
     if isdir {
         io.make_dir((&out[0]) as u64)
+        // The permission bits only -- the type bits are what the inode is,
+        // not what it may do, and `chmod` refuses them.
+        ulib.sys(SYS_CHMOD, (&out[0]) as u64, mode & 4095, 0)
         n_dirs = n_dirs + 1
         return true
     }
     if !pour(at, m, pack, (&out[0]) as u64) {
         return false
     }
+    ulib.sys(SYS_CHMOD, (&out[0]) as u64, mode & 4095, 0)
     n_files = n_files + 1
     return true
 }
@@ -909,7 +1130,7 @@ fn oct_at(at: u64) -> u64 {
 
 // Writes the file named by the hash list from `at` to `m` into `dest`.
 fn pour(at: u64, m: u64, pack: u64, dest: u64) -> bool {
-    var e_miss: [u8; 34] = "backup: a chunk is not in the store\0\0"
+    var e_miss: [u8; 37] = "backup: a chunk is not in the store\0\0"
     var dig: [u8; 32] = [0 as u8; 32]
     let fd: u64 = io.create(dest)
     if errno.failed(fd) {
@@ -954,7 +1175,7 @@ fn pour(at: u64, m: u64, pack: u64, dest: u64) -> bool {
 }
 
 fn cmd_get(store: u64, name: u64, path: u64, dest: u64) -> u64 {
-    var e_no: [u8; 34] = "backup: no such path in the snapshot\0"
+    var e_no: [u8; 37] = "backup: no such path in the snapshot\0"
     let rc: u64 = cmd_restore(store, name, dest, path)
     if rc != 0 {
         ulib.esay_line((&e_no[0]) as u64, path)
@@ -970,7 +1191,7 @@ fn cmd_get(store: u64, name: u64, path: u64, dest: u64) -> u64 {
 // anything else being true.
 
 fn cmd_verify(store: u64, name: u64) -> u64 {
-    var e_snap: [u8; 30] = "backup: no such snapshot \0\0\0\0\0\0\0\0"
+    var e_snap: [u8; 33] = "backup: no such snapshot \0\0\0\0\0\0\0\0"
     var l_ok: [u8; 18] = "chunks checked: \0\0"
     var l_bad: [u8; 10] = "corrupt: \0"
     var l_miss: [u8; 10] = "missing: \0"

@@ -321,6 +321,14 @@ delete and restore give a tree that the HOST reads back out of the disk
 image and compares octet for octet (6 entries, 6 identical); and one
 flipped octet in the pack file is found by `backup verify`.
 
+The backup carries **three rules and no fourth** (`docs/ORPHANS.md`):
+user data is ALWAYS kept, packages a source can deliver and `cache/` are
+NEVER kept, and a package **no source can deliver** -- built by hand,
+never published -- is kept ONLY THEN, because its hash in the PLAN names
+octets nobody else has. Measured: one such package costs **+29,128
+octets, +67.6 %** on a realistic backup set, and a second machine holding
+*only* the backup store restores it byte for byte and **runs** it.
+
 And the **key management** that disk encryption would hang off
 (`/bin/key`): a random data key, wrapped by a passphrase-derived key
 (PBKDF2-HMAC-SHA256, measured against Python), authenticated before it is
