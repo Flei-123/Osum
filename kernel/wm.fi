@@ -62,6 +62,7 @@ import mem
 import fb
 import ttf
 import ps2m
+import tile
 
 export {
     init, ready, compose, damage, damage_all, dirty_x0, dirty_y0,
@@ -78,6 +79,9 @@ export {
     downs, moves_seen, hits_seen, win_keys,
     set_fonts, font_ui, font_mono, px_ui, px_mono,
     selftest, selftest_max,
+    tile_on, set_tile_on, tile_take, tile_release, tile_apply,
+    tile_node, tile_float, tile_snap, tile_action, hotkeys, hotkeys_seen,
+    on_screen_resize, win_hidden, tiled,
     MAX_WIN, K_RAW, K_TERM, TITLE_H, BORDER, GRIP,
     E_KEY, E_DOWN, E_UP, E_MOVE, E_CLOSE, E_FOCUS, E_RESIZE
 }
@@ -150,6 +154,20 @@ const S_HITS: u64 = 0x110 // die Farbe des Hintergrunds
 // zeichnete, zeichnete ihn in ihr eigenes Rechteck und damit unter alle
 // anderen. `kernel/wig.fi` setzt ihn auf Verlangen aus Ring 3.
 const S_SHAPE: u64 = 0x118
+// RUNDE TILING. Die Skalare des Kachelbetriebs. Sie liegen hinter
+// 0x118 und vor W_OFF (0x400) -- der Platz war seit Runde K10 frei.
+const S_TILE: u64 = 0x120 // 1 = neue Fenster gehen in den Baum
+const S_PVON: u64 = 0x128 // ein Vorschaurechteck liegt auf dem Schirm
+const S_PVX: u64 = 0x130
+const S_PVY: u64 = 0x138
+const S_PVW: u64 = 0x140
+const S_PVH: u64 = 0x148
+const S_DROPN: u64 = 0x150 // Zielknoten + 1 beim Ziehen
+const S_DROPS: u64 = 0x158 // Seite am Ziel (tile.D_*), 4 = als Reiter
+const S_DROPE: u64 = 0x160 // Bildschirmrand + 1 statt eines Zielfensters
+const S_DRAGT: u64 = 0x168 // das gezogene Fenster kam AUS dem Baum
+const S_HOTS: u64 = 0x170 // wie viele Tastenkuerzel ausgefuehrt wurden
+const S_ACTS: u64 = 0x178 // wie viele davon wirklich etwas getan haben
 
 // ein Fenster
 const W_USED: u64 = 0x00
@@ -181,6 +199,15 @@ const W_CELLH: u64 = 0xA8
 const W_KEYS: u64 = 0xB8
 const W_TTY: u64 = 0xB0 // Runde K10: das Terminal + 1, 0 = keines
 const W_TITLE: u64 = 0xC0 // 32 Oktette
+// RUNDE TILING. Vier Woerter, und sie sind die letzten vier freien in
+// einem Fenstersatz von 256 Oktetten (W_TITLE endet bei 0xE0).
+const W_NODE: u64 = 0xE0 // Knoten im Fensterbaum + 1, 0 = schwebend
+const W_HIDE: u64 = 0xE8 // 1 = liegt hinter einem Reiter, wird nicht gemalt
+// Wohin ein Fenster zurueckkehrt, wenn es den Baum verlaesst. Zwei
+// Woerter statt vier: x und y beziehungsweise Breite und Hoehe in je
+// zwei Vierteln. Ein Fenster ist hoechstens 2048 gross, das passt.
+const W_SAVXY: u64 = 0xF0
+const W_SAVWH: u64 = 0xF8
 
 // "kein Terminal". Absichtlich eine Zahl und kein Ruf nach `tty.fi`:
 // dieses Modul darf `tty` NICHT einbinden, weil `tty` es einbindet
@@ -384,7 +411,18 @@ fn init(state: u64, w: u64, h: u64, nodirty: bool, nofocus: bool) -> bool {
     ss(state, S_DESK, fb.rgb(state, 0x1E, 0x2A, 0x38))
     ss(state, S_FONT_UI, ttf.MAX_FONTS)
     ss(state, S_FONT_MONO, ttf.MAX_FONTS)
+    ss(state, S_TILE, 0)
+    ss(state, S_PVON, 0)
+    ss(state, S_DROPN, 0)
+    ss(state, S_DROPE, 0)
+    ss(state, S_DRAGT, 0)
+    ss(state, S_HOTS, 0)
+    ss(state, S_ACTS, 0)
     ss(state, S_READY, 1)
+    // RUNDE TILING: der Baum bekommt dieselbe Flaeche wie der Schirm.
+    // Er ist erst einmal LEER und schaltet nichts um -- ohne das Wort
+    // `tile` verhaelt sich der Fensterserver wie vorher.
+    tile.init(state, 0, 0, w, h)
     damage_all(state)
     return true
 }
@@ -512,6 +550,9 @@ fn create(state: u64, owner: u64, x: i64, y: i64, w: u64, h: u64,
             }
             set_focus(state, i)
             damage_win(state, i)
+            if gs(state, S_TILE) != 0 {
+                tile_take(state, i)
+            }
             return i
         }
         i = i + 1
@@ -540,6 +581,7 @@ fn destroy(state: u64, i: u64) -> bool {
     if !valid(state, i) {
         return false
     }
+    tile_release(state, i)
     damage_win(state, i)
     let z: u64 = wg(state, i, W_Z)
     wsv(state, i, W_USED, 0)
@@ -642,6 +684,13 @@ fn set_focus(state: u64, i: u64) {
     }
     ss(state, S_FOCUS, i + 1)
     ev_push(state, i, E_FOCUS, 0, 0, 1)
+    // RUNDE TILING: DER BAUM FUEHRT SEINEN EIGENEN FOKUS, und die beiden
+    // muessen derselbe sein. Ohne diese zwei Zeilen teilt ein neues
+    // Fenster nicht das ANGEKLICKTE, sondern das zuletzt angelegte -- ein
+    // Fehler, der aussieht wie ein kaputter Baum und keiner ist.
+    if wg(state, i, W_NODE) != 0 {
+        tile.set_focus(state, wg(state, i, W_NODE) - 1)
+    }
     damage_win(state, i)
 }
 
@@ -976,14 +1025,25 @@ fn compose(state: u64) -> u64 {
     }
     // 1. der Hintergrund
     fb.fill(state, x0, y0, x1 - x0, y1 - y0, gs(state, S_DESK))
+    // 1b. die Reiter- und Stapelzeilen des Baumes. Sie liegen UNTER den
+    //     Fenstern und ueberschneiden sie nicht -- der Baum hat ihre
+    //     Hoehe von der Flaeche der Kinder abgezogen.
+    if gs(state, S_TILE) != 0 {
+        paint_bars(state, x0, y0, x1, y1)
+    }
     // 2. die Fenster, von unten nach oben
     var z: u64 = 0
     while z < gs(state, S_COUNT) {
         let i: u64 = at_z(state, z)
-        if i < MAX_WIN {
+        if i < MAX_WIN && wg(state, i, W_HIDE) == 0 {
             paint_win(state, i, x0, y0, x1, y1)
         }
         z = z + 1
+    }
+    // 2b. das Vorschaurechteck beim Ziehen -- ueber den Fenstern, unter
+    //     dem Zeiger.
+    if gs(state, S_PVON) != 0 {
+        paint_preview(state, x0, y0, x1, y1)
     }
     // 3. der Zeiger, ganz oben
     if gs(state, S_CURON) != 0 {
@@ -1278,7 +1338,7 @@ fn hit(state: u64, x: i64, y: i64) -> u64 {
     while z > 0 {
         z = z - 1
         let i: u64 = at_z(state, z)
-        if i < MAX_WIN {
+        if i < MAX_WIN && wg(state, i, W_HIDE) == 0 {
             let rx: i64 = win_x(state, i) + outer_w(state, i) as i64
             let ry: i64 = win_y(state, i) + outer_h(state, i) as i64
             if x >= win_x(state, i) && y >= win_y(state, i) {
@@ -1323,9 +1383,11 @@ fn on_mouse(state: u64) {
         let i: u64 = gs(state, S_DRAG) - 1
         if (btn & ps2m.B_LEFT) == 0 {
             ss(state, S_DRAG, 0)
+            drag_end(state, i, x, y)
         } else {
             move_win(state, i, x - gs(state, S_DRAGX) as i64,
                 y - gs(state, S_DRAGY) as i64)
+            drag_hover(state, i, x, y)
             return
         }
     }
@@ -1334,6 +1396,10 @@ fn on_mouse(state: u64) {
         if (btn & ps2m.B_LEFT) == 0 {
             ss(state, S_SIZING, 0)
         } else {
+            if wg(state, i, W_NODE) != 0 {
+                tile_drag_resize(state, i, x, y)
+                return
+            }
             var nw: i64 = x - win_x(state, i) - BORDER as i64
             var nh: i64 = y - win_y(state, i) - TITLE_H as i64
             if nw < 32 {
@@ -1375,6 +1441,7 @@ fn on_mouse(state: u64) {
             }
             if lokal_y < 0 {
                 // die Titelleiste: ziehen
+                drag_begin(state, i)
                 ss(state, S_DRAG, i + 1)
                 ss(state, S_DRAGX, (x - win_x(state, i)) as u64)
                 ss(state, S_DRAGY, (y - win_y(state, i)) as u64)
@@ -1451,6 +1518,10 @@ fn poll(state: u64) -> bool {
     if !ready(state) {
         return false
     }
+    // RUNDE TILING: erst die Tastenkuerzel. Sie liegen im Ring, den
+    // `kbd.irq` fuellt, wenn Alt gehalten wird -- der Fensterserver
+    // HOLT sie ab, statt dass die Tastatur ihn kennt.
+    hotkeys(state)
     // DER RUECKFALL AUF ABFRAGE, und er steht hier mit Begruendung.
     //
     // Der Baustein meldet ueber IRQ 12, und das ist der Weg, den dieser
@@ -1879,4 +1950,806 @@ fn selftest(state: u64) -> u64 {
 
 fn selftest_max() -> u64 {
     return 17
+}
+
+// ===================================================== RUNDE TILING
+//
+// DER FENSTERBAUM AM FENSTERSERVER. Die Rechnung selbst steht in
+// `kernel/tile.fi` und weiss von Fenstern nichts; was hier steht, ist
+// die NAHT: welches Blatt gehoert zu welchem Fenster, wie kommt ein
+// Rechteck aus dem Baum in einen Fenstersatz, wer malt die Reiterzeilen,
+// und was passiert, wenn man ein Fenster mit der Maus irgendwohin zieht.
+//
+// BEIDE WELTEN NEBENEINANDER, und das ist Absicht: ein Fenster mit
+// W_NODE == 0 SCHWEBT wie vor dieser Runde, eines mit W_NODE != 0 haengt
+// im Baum. Ein Dialog will schweben, eine Textkonsole will kacheln.
+// `tile_float` schiebt ein Fenster von der einen Welt in die andere und
+// zurueck; die schwebende Lage wird dabei in W_SAVXY/W_SAVWH aufgehoben,
+// sonst steht der Dialog nach dem Zurueckholen in der Ecke.
+
+fn tile_on(state: u64) -> bool {
+    return gs(state, S_TILE) != 0
+}
+
+fn tiled(state: u64, i: u64) -> bool {
+    if !valid(state, i) {
+        return false
+    }
+    return wg(state, i, W_NODE) != 0
+}
+
+fn tile_node(state: u64, i: u64) -> u64 {
+    if !valid(state, i) {
+        return tile.NONE
+    }
+    let nd: u64 = wg(state, i, W_NODE)
+    if nd == 0 {
+        return tile.NONE
+    }
+    return nd - 1
+}
+
+fn win_hidden(state: u64, i: u64) -> bool {
+    if i >= MAX_WIN {
+        return false
+    }
+    return wg(state, i, W_HIDE) != 0
+}
+
+fn hotkeys_seen(state: u64) -> u64 {
+    return gs(state, S_HOTS)
+}
+
+// Der Bereich, den die letzte Baumoperation angefasst hat -- und NUR
+// der. Das ist die Zahl, die `notiledirty` kaputt macht.
+fn damage_tile(state: u64) {
+    let x: u64 = tile.last_x(state)
+    let y: u64 = tile.last_y(state)
+    let w: u64 = tile.last_w(state)
+    let h: u64 = tile.last_h(state)
+    if w == 0 || h == 0 {
+        return
+    }
+    damage(state, x as i64, y as i64, (x + w) as i64, (y + h) as i64)
+}
+
+fn set_tile_on(state: u64, on: bool) {
+    if !ready(state) {
+        return
+    }
+    if on {
+        ss(state, S_TILE, 1)
+        // Alles, was jetzt schon offen ist, kommt in den Baum.
+        var i: u64 = 0
+        while i < MAX_WIN {
+            if wg(state, i, W_USED) != 0 && wg(state, i, W_NODE) == 0 {
+                save_geom(state, i)
+                tile_take(state, i)
+            }
+            i = i + 1
+        }
+    } else {
+        ss(state, S_TILE, 0)
+        var k: u64 = 0
+        while k < MAX_WIN {
+            if wg(state, k, W_USED) != 0 && wg(state, k, W_NODE) != 0 {
+                tile_release(state, k)
+                restore_geom(state, k)
+            }
+            k = k + 1
+        }
+    }
+    damage_all(state)
+}
+
+fn save_geom(state: u64, i: u64) {
+    var x: u64 = wg(state, i, W_X) & 0xFFFFFFFF
+    var y: u64 = wg(state, i, W_Y) & 0xFFFFFFFF
+    wsv(state, i, W_SAVXY, (x << 32) | y)
+    wsv(state, i, W_SAVWH, (wg(state, i, W_W) << 32) | wg(state, i, W_H))
+}
+
+fn restore_geom(state: u64, i: u64) {
+    let wh: u64 = wg(state, i, W_SAVWH)
+    if wh == 0 {
+        return
+    }
+    let xy: u64 = wg(state, i, W_SAVXY)
+    wsv(state, i, W_X, xy >> 32)
+    wsv(state, i, W_Y, xy & 0xFFFFFFFF)
+    let w: u64 = wh >> 32
+    let h: u64 = wh & 0xFFFFFFFF
+    if w >= 32 && h >= 16 {
+        if reframe(state, i, w, h) {
+            wsv(state, i, W_W, w)
+            wsv(state, i, W_H, h)
+            if wg(state, i, W_KIND) == K_TERM {
+                term_setup(state, i)
+            } else {
+                fill(state, i, 0, 0, w, h, wg(state, i, W_BG))
+            }
+            ev_push(state, i, E_RESIZE, w, h, 0)
+        }
+    }
+    wsv(state, i, W_HIDE, 0)
+}
+
+// EIN GROESSERER PUFFER, WENN DER BAUM MEHR PLATZ GIBT. Runde K10 hat
+// den Puffer beim Anlegen geholt und `resize_win` verweigert seitdem
+// jedes Wachsen darueber hinaus -- mit Recht, denn sonst waere es ein
+// Schreibzugriff daneben. Beim Kacheln ist Wachsen aber der Normalfall:
+// wer von vier Fenstern zwei schliesst, verdoppelt die uebrigen. Also
+// wird hier ein neuer Lauf Rahmen geholt und der alte zurueckgegeben.
+fn reframe(state: u64, i: u64, w: u64, h: u64) -> bool {
+    let bytes: u64 = w * h * 4
+    if bytes <= wg(state, i, W_BUFBYTES) {
+        return true
+    }
+    let rahmen: u64 = (bytes + mem.FRAME_SIZE - 1) / mem.FRAME_SIZE
+    let neu: u64 = mem.frame_run(state, rahmen)
+    if neu == 0 {
+        return false
+    }
+    let alt: u64 = wg(state, i, W_BUF)
+    let altr: u64 = wg(state, i, W_BUFBYTES) / mem.FRAME_SIZE
+    wsv(state, i, W_BUF, neu)
+    wsv(state, i, W_BUFBYTES, rahmen * mem.FRAME_SIZE)
+    if alt != 0 {
+        mem.frame_free_run(state, alt, altr)
+    }
+    return true
+}
+
+// Ein Blatt des Baumes auf einen Fenstersatz. Der Baum fuehrt das
+// AEUSSERE Rechteck (mit Rahmen und Titelleiste) -- die Malflaeche ist
+// das, was davon uebrigbleibt.
+fn place_win(state: u64, i: u64, n: u64) {
+    let ow: u64 = tile.n_w(state, n)
+    let oh: u64 = tile.n_h(state, n)
+    var w: u64 = 32
+    if ow > BORDER * 2 + 32 {
+        w = ow - BORDER * 2
+    }
+    var h: u64 = 16
+    if oh > TITLE_H + BORDER + 16 {
+        h = oh - TITLE_H - BORDER
+    }
+    if w > 2048 {
+        w = 2048
+    }
+    if h > 2048 {
+        h = 2048
+    }
+    wsv(state, i, W_X, tile.n_x(state, n))
+    wsv(state, i, W_Y, tile.n_y(state, n))
+    if w == wg(state, i, W_W) && h == wg(state, i, W_H) {
+        return
+    }
+    if !reframe(state, i, w, h) {
+        return
+    }
+    wsv(state, i, W_W, w)
+    wsv(state, i, W_H, h)
+    if wg(state, i, W_KIND) == K_TERM {
+        term_setup(state, i)
+    } else {
+        fill(state, i, 0, 0, w, h, wg(state, i, W_BG))
+    }
+    ev_push(state, i, E_RESIZE, w, h, 0)
+}
+
+// Den ganzen Baum auf die Fenster uebertragen. Ohne `damage` -- der
+// Rufer beschmutzt EINMAL den Bereich, den der Baum als geaendert
+// meldet, und genau das ist der Unterschied, den diese Runde misst.
+fn tile_apply(state: u64) {
+    let r: u64 = tile.root(state)
+    if r == tile.NONE {
+        return
+    }
+    var n: u64 = r
+    var guard: u64 = 0
+    while n != tile.NONE && guard <= tile.MAX_NODES {
+        guard = guard + 1
+        if tile.n_kind(state, n) == tile.K_LEAF {
+            let cl: u64 = tile.n_client(state, n)
+            if cl != 0 && cl <= MAX_WIN {
+                let i: u64 = cl - 1
+                if wg(state, i, W_USED) != 0 {
+                    // AUCH VERDECKTE REITER BEKOMMEN IHR RECHTECK. Sie
+                    // werden nicht gemalt, aber sie muessen die richtige
+                    // Groesse haben, wenn man den Reiter wechselt --
+                    // sonst zuckt das Fenster beim Umschalten einmal
+                    // durch, weil erst dann neu gerechnet wird.
+                    place_win(state, i, n)
+                    if tile.visible(state, n) {
+                        wsv(state, i, W_HIDE, 0)
+                    } else {
+                        wsv(state, i, W_HIDE, 1)
+                    }
+                }
+            }
+        }
+        n = tile.dfs_next(state, n, r)
+    }
+}
+
+fn tile_take(state: u64, i: u64) -> bool {
+    if !valid(state, i) || wg(state, i, W_NODE) != 0 {
+        return false
+    }
+    let n: u64 = tile.insert(state, i + 1)
+    if n == tile.NONE {
+        return false // kein Platz im Baum -- das Fenster schwebt weiter
+    }
+    wsv(state, i, W_NODE, n + 1)
+    tile_apply(state)
+    damage_tile(state)
+    return true
+}
+
+fn tile_release(state: u64, i: u64) -> bool {
+    if i >= MAX_WIN {
+        return false
+    }
+    let nd: u64 = wg(state, i, W_NODE)
+    if nd == 0 {
+        return false
+    }
+    wsv(state, i, W_NODE, 0)
+    wsv(state, i, W_HIDE, 0)
+    tile.remove(state, nd - 1)
+    tile_apply(state)
+    damage_tile(state)
+    return true
+}
+
+fn tile_float(state: u64, i: u64) -> bool {
+    if !valid(state, i) {
+        return false
+    }
+    if wg(state, i, W_NODE) != 0 {
+        tile_release(state, i)
+        restore_geom(state, i)
+        raise_win(state, i)
+        damage_win(state, i)
+        return true
+    }
+    save_geom(state, i)
+    return tile_take(state, i)
+}
+
+fn tile_snap(state: u64, i: u64, where: u64) -> bool {
+    if !valid(state, i) {
+        return false
+    }
+    if wg(state, i, W_NODE) == 0 {
+        save_geom(state, i)
+        if !tile_take(state, i) {
+            return false
+        }
+    }
+    let nd: u64 = wg(state, i, W_NODE)
+    if nd == 0 {
+        return false
+    }
+    tile.snap(state, nd - 1, where)
+    tile_apply(state)
+    damage_tile(state)
+    return true
+}
+
+// EIN WECHSEL DER BILDSCHIRMAUFLOESUNG. Der Baum wird NEU AUSGEMESSEN
+// und nicht neu aufgebaut -- die Verhaeltnisse stehen als Anteile da und
+// nicht als Bildpunkte, also ueberlebt jede Aufteilung den Wechsel.
+fn on_screen_resize(state: u64, w: u64, h: u64) -> bool {
+    if !ready(state) || w == 0 || h == 0 {
+        return false
+    }
+    ss(state, S_SW, w)
+    ss(state, S_SH, h)
+    tile.set_area(state, 0, 0, w, h)
+    tile_apply(state)
+    damage_all(state)
+    return true
+}
+
+// ------------------------------------------------ die Reiterzeilen
+//
+// Sie werden vom SERVER gemalt, wie die Titelleiste -- eine Anwendung
+// darf nicht wissen, dass sie in einem Reiter liegt, und sie kann es
+// auch nicht malen: die Zeile liegt AUSSERHALB ihres Rechtecks. Der
+// Baum hat ihre Hoehe von der Flaeche der Kinder schon abgezogen, also
+// ueberschneidet sich hier nichts.
+fn paint_bar_of(state: u64, n: u64, cx0: u64, cy0: u64, cx1: u64, cy1: u64) {
+    let f: u64 = gs(state, S_FONT_UI)
+    let px: u64 = gs(state, S_PX_UI)
+    var idx: u64 = 0
+    var c: u64 = tile.n_first(state, n)
+    while c != tile.NONE && idx <= tile.MAX_NODES {
+        let tx: i64 = tile.tab_x(state, n, idx) as i64
+        let ty: i64 = tile.tab_y(state, n, idx) as i64
+        let tw: i64 = tile.tab_w(state, n, idx) as i64
+        let th: i64 = tile.tab_h(state, n, idx) as i64
+        let aktiv: bool = tile.n_active(state, n) == c
+        var grund: u64 = fb.rgb(state, 0x22, 0x2C, 0x38)
+        var schrift: u64 = fb.rgb(state, 0x90, 0x9C, 0xA8)
+        if aktiv {
+            grund = fb.rgb(state, 0x1C, 0x4E, 0x7E)
+            schrift = fb.rgb(state, 0xFF, 0xFF, 0xFF)
+        }
+        let ax0: i64 = imax(tx, cx0 as i64)
+        let ay0: i64 = imax(ty, cy0 as i64)
+        let ax1: i64 = imin(tx + tw, cx1 as i64)
+        let ay1: i64 = imin(ty + th, cy1 as i64)
+        if ax1 > ax0 && ay1 > ay0 {
+            fb.fill(state, ax0 as u64, ay0 as u64, (ax1 - ax0) as u64,
+                (ay1 - ay0) as u64, grund)
+            // eine Trennlinie am rechten beziehungsweise unteren Rand
+            let rand: u64 = fb.rgb(state, 0x10, 0x16, 0x1E)
+            if tw > 1 && tx + tw - 1 < cx1 as i64 && tx + tw - 1 >= cx0 as i64 {
+                fb.fill(state, (tx + tw - 1) as u64, ay0 as u64, 1,
+                    (ay1 - ay0) as u64, rand)
+            }
+            if th > 1 && ty + th - 1 < cy1 as i64 && ty + th - 1 >= cy0 as i64 {
+                fb.fill(state, ax0 as u64, (ty + th - 1) as u64,
+                    (ax1 - ax0) as u64, 1, rand)
+            }
+            if f < ttf.MAX_FONTS {
+                let l: u64 = tile.first_leaf(state, c)
+                if l != tile.NONE {
+                    let cl: u64 = tile.n_client(state, l)
+                    if cl != 0 && cl <= MAX_WIN {
+                        title_text(state, cl - 1, f, tx + 6,
+                            ty + 3 + ttf.ascent(state, f, px), schrift,
+                            ax0, ay0, ax1, ay1, tx + tw - 4)
+                    }
+                }
+            }
+        }
+        idx = idx + 1
+        c = tile.n_next(state, c)
+    }
+}
+
+fn paint_bars(state: u64, cx0: u64, cy0: u64, cx1: u64, cy1: u64) {
+    let r: u64 = tile.root(state)
+    if r == tile.NONE {
+        return
+    }
+    var n: u64 = r
+    var guard: u64 = 0
+    while n != tile.NONE && guard <= tile.MAX_NODES {
+        guard = guard + 1
+        if tile.n_kind(state, n) == tile.K_BOX {
+            if tile.n_layout(state, n) != tile.LAY_SPLIT {
+                paint_bar_of(state, n, cx0, cy0, cx1, cy1)
+            }
+        }
+        n = tile.dfs_next(state, n, r)
+    }
+}
+
+// ------------------------------------------- das Vorschaurechteck
+//
+// Beim Ziehen zeigt ein Rahmen, WO das Fenster landen wird -- nicht
+// wo der Zeiger ist. Ohne das ist ein Ablegen im Baum Raten: die
+// linke Haelfte eines Fensters und sein oberes Viertel sind zwei
+// verschiedene Ziele, und man sieht dem Zeiger nicht an, welches
+// gemeint ist.
+fn paint_preview(state: u64, cx0: u64, cy0: u64, cx1: u64, cy1: u64) {
+    let x: i64 = gs(state, S_PVX) as i64
+    let y: i64 = gs(state, S_PVY) as i64
+    let w: i64 = gs(state, S_PVW) as i64
+    let h: i64 = gs(state, S_PVH) as i64
+    if w <= 0 || h <= 0 {
+        return
+    }
+    let farbe: u64 = fb.rgb(state, 0x4C, 0x9A, 0xE8)
+    var k: i64 = 0
+    while k < 3 {
+        pv_line(state, x + k, y + k, w - 2 * k, 1, farbe, cx0, cy0, cx1, cy1)
+        pv_line(state, x + k, y + h - 1 - k, w - 2 * k, 1, farbe, cx0, cy0,
+            cx1, cy1)
+        pv_line(state, x + k, y + k, 1, h - 2 * k, farbe, cx0, cy0, cx1, cy1)
+        pv_line(state, x + w - 1 - k, y + k, 1, h - 2 * k, farbe, cx0, cy0,
+            cx1, cy1)
+        k = k + 1
+    }
+}
+
+fn pv_line(state: u64, x: i64, y: i64, w: i64, h: i64, farbe: u64,
+    cx0: u64, cy0: u64, cx1: u64, cy1: u64) {
+    let ax0: i64 = imax(x, cx0 as i64)
+    let ay0: i64 = imax(y, cy0 as i64)
+    let ax1: i64 = imin(x + w, cx1 as i64)
+    let ay1: i64 = imin(y + h, cy1 as i64)
+    if ax1 <= ax0 || ay1 <= ay0 {
+        return
+    }
+    fb.fill(state, ax0 as u64, ay0 as u64, (ax1 - ax0) as u64,
+        (ay1 - ay0) as u64, farbe)
+}
+
+fn preview_damage(state: u64) {
+    if gs(state, S_PVON) == 0 {
+        return
+    }
+    let x: i64 = gs(state, S_PVX) as i64
+    let y: i64 = gs(state, S_PVY) as i64
+    damage(state, x, y, x + gs(state, S_PVW) as i64,
+        y + gs(state, S_PVH) as i64)
+}
+
+fn set_preview(state: u64, x: u64, y: u64, w: u64, h: u64) {
+    ss(state, S_PVX, x)
+    ss(state, S_PVY, y)
+    ss(state, S_PVW, w)
+    ss(state, S_PVH, h)
+    ss(state, S_PVON, 1)
+}
+
+// Welches Blatt liegt an dieser Stelle? Der Baum weiss es genauer als
+// die Stapelreihenfolge -- er kennt auch die Stellen, an denen KEIN
+// Fenster liegt, weil dort eine Reiterzeile ist.
+fn leaf_at(state: u64, x: i64, y: i64) -> u64 {
+    let r: u64 = tile.root(state)
+    if r == tile.NONE {
+        return tile.NONE
+    }
+    var n: u64 = r
+    var guard: u64 = 0
+    while n != tile.NONE && guard <= tile.MAX_NODES {
+        guard = guard + 1
+        if tile.n_kind(state, n) == tile.K_LEAF && tile.visible(state, n) {
+            let nx: i64 = tile.n_x(state, n) as i64
+            let ny: i64 = tile.n_y(state, n) as i64
+            if x >= nx && y >= ny {
+                if x < nx + tile.n_w(state, n) as i64 {
+                    if y < ny + tile.n_h(state, n) as i64 {
+                        return n
+                    }
+                }
+            }
+        }
+        n = tile.dfs_next(state, n, r)
+    }
+    return tile.NONE
+}
+
+fn drag_begin(state: u64, i: u64) {
+    ss(state, S_DRAGT, 0)
+    ss(state, S_DROPN, 0)
+    ss(state, S_DROPE, 0)
+    if wg(state, i, W_NODE) == 0 {
+        return
+    }
+    // Wer gezogen wird, ist waehrenddessen NICHT im Baum -- sonst
+    // rechnet der Baum ihn bei jeder Zeigerbewegung neu an seinen alten
+    // Platz. So macht es i3 auch.
+    save_geom(state, i)
+    tile_release(state, i)
+    ss(state, S_DRAGT, 1)
+}
+
+fn drag_hover(state: u64, i: u64, x: i64, y: i64) {
+    if gs(state, S_TILE) == 0 {
+        return
+    }
+    preview_damage(state)
+    ss(state, S_PVON, 0)
+    ss(state, S_DROPN, 0)
+    ss(state, S_DROPE, 0)
+    let sw: i64 = gs(state, S_SW) as i64
+    let sh: i64 = gs(state, S_SH) as i64
+    let rand: i64 = 16
+    // 1. AM BILDSCHIRMRAND: die Windows-artige Schnellablage. Sie ist
+    //    ein Sonderfall des Baumes und kein zweites System.
+    if x < rand {
+        ss(state, S_DROPE, 1)
+        set_preview(state, 0, 0, (sw / 2) as u64, sh as u64)
+        preview_damage(state)
+        return
+    }
+    if x >= sw - rand {
+        ss(state, S_DROPE, 2)
+        set_preview(state, (sw - sw / 2) as u64, 0, (sw / 2) as u64,
+            sh as u64)
+        preview_damage(state)
+        return
+    }
+    if y < rand {
+        ss(state, S_DROPE, 3)
+        set_preview(state, 0, 0, sw as u64, (sh / 2) as u64)
+        preview_damage(state)
+        return
+    }
+    if y >= sh - rand {
+        ss(state, S_DROPE, 4)
+        set_preview(state, 0, (sh - sh / 2) as u64, sw as u64,
+            (sh / 2) as u64)
+        preview_damage(state)
+        return
+    }
+    // 2. AUF EINEM ANDEREN FENSTER: das Viertel, in dem der Zeiger
+    //    steht, sagt die Seite. Die Mitte heisst REITER.
+    let n: u64 = leaf_at(state, x, y)
+    if n == tile.NONE {
+        return
+    }
+    let nx: u64 = tile.n_x(state, n)
+    let ny: u64 = tile.n_y(state, n)
+    let w: u64 = tile.n_w(state, n)
+    let h: u64 = tile.n_h(state, n)
+    let fx: u64 = (x - nx as i64) as u64
+    let fy: u64 = (y - ny as i64) as u64
+    var seite: u64 = 4
+    if fx * 4 < w {
+        seite = tile.D_LEFT
+    } else {
+        if fx * 4 >= w * 3 {
+            seite = tile.D_RIGHT
+        } else {
+            if fy * 4 < h {
+                seite = tile.D_UP
+            } else {
+                if fy * 4 >= h * 3 {
+                    seite = tile.D_DOWN
+                }
+            }
+        }
+    }
+    ss(state, S_DROPN, n + 1)
+    ss(state, S_DROPS, seite)
+    if seite == tile.D_LEFT {
+        set_preview(state, nx, ny, w / 2, h)
+    }
+    if seite == tile.D_RIGHT {
+        set_preview(state, nx + w - w / 2, ny, w / 2, h)
+    }
+    if seite == tile.D_UP {
+        set_preview(state, nx, ny, w, h / 2)
+    }
+    if seite == tile.D_DOWN {
+        set_preview(state, nx, ny + h - h / 2, w, h / 2)
+    }
+    if seite == 4 {
+        set_preview(state, nx, ny, w, h)
+    }
+    preview_damage(state)
+}
+
+fn drag_end(state: u64, i: u64, x: i64, y: i64) {
+    preview_damage(state)
+    ss(state, S_PVON, 0)
+    if gs(state, S_TILE) == 0 {
+        ss(state, S_DRAGT, 0)
+        return
+    }
+    let e: u64 = gs(state, S_DROPE)
+    if e != 0 {
+        let n: u64 = tile.insert(state, i + 1)
+        if n != tile.NONE {
+            wsv(state, i, W_NODE, n + 1)
+            var wo: u64 = tile.SNAP_LEFT
+            if e == 2 {
+                wo = tile.SNAP_RIGHT
+            }
+            if e == 3 {
+                wo = tile.SNAP_TOP
+            }
+            if e == 4 {
+                wo = tile.SNAP_BOTTOM
+            }
+            tile.snap(state, n, wo)
+            tile_apply(state)
+            damage_all(state)
+        }
+        ss(state, S_DRAGT, 0)
+        ss(state, S_DROPE, 0)
+        return
+    }
+    let d: u64 = gs(state, S_DROPN)
+    if d != 0 {
+        let ziel: u64 = d - 1
+        let seite: u64 = gs(state, S_DROPS)
+        var n: u64 = tile.NONE
+        if seite == 4 {
+            n = tile.insert_at(state, ziel, tile.D_RIGHT, i + 1)
+            if n != tile.NONE {
+                tile.set_layout(state, n, tile.LAY_TABBED)
+            }
+        } else {
+            n = tile.insert_at(state, ziel, seite, i + 1)
+        }
+        if n != tile.NONE {
+            wsv(state, i, W_NODE, n + 1)
+            tile_apply(state)
+            damage_all(state)
+        }
+    } else {
+        if gs(state, S_DRAGT) != 0 {
+            tile_take(state, i)
+            damage_all(state)
+        }
+    }
+    ss(state, S_DRAGT, 0)
+    ss(state, S_DROPN, 0)
+}
+
+// Der Griff unten rechts an einem GEKACHELTEN Fenster verschiebt das
+// Verhaeltnis am inneren Knoten -- nicht die Groesse des Fensters. Alles
+// andere waere eine Luecke.
+fn tile_drag_resize(state: u64, i: u64, x: i64, y: i64) {
+    let nd: u64 = wg(state, i, W_NODE)
+    if nd == 0 {
+        return
+    }
+    let n: u64 = nd - 1
+    let p: u64 = tile.n_parent(state, n)
+    if p == tile.NONE || tile.n_layout(state, p) != tile.LAY_SPLIT {
+        return
+    }
+    var total: u64 = tile.n_h(state, p)
+    var will: i64 = y - tile.n_y(state, n) as i64
+    var ist: i64 = tile.n_h(state, n) as i64
+    if tile.n_dir(state, p) == tile.DIR_H {
+        total = tile.n_w(state, p)
+        will = x - tile.n_x(state, n) as i64
+        ist = tile.n_w(state, n) as i64
+    }
+    if total == 0 {
+        return
+    }
+    let dpx: i64 = will - ist
+    if dpx == 0 {
+        return
+    }
+    let d: i64 = dpx * tile.FRAC_ONE as i64 / total as i64
+    if d == 0 {
+        return
+    }
+    if tile.resize_at(state, n, d) {
+        tile_apply(state)
+        damage_tile(state)
+    }
+}
+
+// -------------------------------------------------- die Tastenkuerzel
+
+fn hot_take_raw(state: u64) -> u64 {
+    let kopf: u64 = kstate.get(state, kstate.K11_OFF + kstate.KB_HHEAD)
+    let schwanz: u64 = kstate.get(state, kstate.K11_OFF + kstate.KB_HTAIL)
+    if kopf == schwanz {
+        return 0
+    }
+    let p: u64 = state + kstate.K11_OFF + kstate.KB_HOT + (schwanz % 16) * 2
+    let c: u64 = kstate.get8(p)
+    let m: u64 = kstate.get8(p + 1)
+    kstate.set(state, kstate.K11_OFF + kstate.KB_HTAIL, schwanz + 1)
+    return (m << 8) | c
+}
+
+fn hotkeys(state: u64) -> u64 {
+    var n: u64 = 0
+    var weiter: bool = true
+    var guard: u64 = 0
+    while weiter && guard < 16 {
+        guard = guard + 1
+        let v: u64 = hot_take_raw(state)
+        if v == 0 {
+            weiter = false
+        } else {
+            n = n + 1
+            ss(state, S_HOTS, gs(state, S_HOTS) + 1)
+            let act: u64 = tile.bind_lookup(state, v & 0xFF, (v >> 8) & 0xFF)
+            if tile_action(state, act) {
+                ss(state, S_ACTS, gs(state, S_ACTS) + 1)
+            }
+        }
+    }
+    return n
+}
+
+// EINE HANDLUNG AUSFUEHREN. Welche Taste welche Handlung ausloest, steht
+// NICHT hier, sondern in der Tabelle, die aus
+// /users/<name>/config/tiling.conf gelesen wurde. Hier steht nur, was
+// eine Handlung TUT.
+fn tile_action(state: u64, act: u64) -> bool {
+    if act == tile.A_NONE || !ready(state) {
+        return false
+    }
+    if act == tile.A_TILE_TOGGLE {
+        set_tile_on(state, gs(state, S_TILE) == 0)
+        return true
+    }
+    let i: u64 = focus(state)
+    if i >= MAX_WIN {
+        return false
+    }
+    if act == tile.A_CLOSE {
+        ev_push(state, i, E_CLOSE, 0, 0, 0)
+        destroy(state, i)
+        return true
+    }
+    if act == tile.A_FLOAT {
+        return tile_float(state, i)
+    }
+    if act >= tile.A_SNAP_LEFT && act <= tile.A_SNAP_BR {
+        return tile_snap(state, i, act - tile.A_SNAP_LEFT)
+    }
+    let nd: u64 = wg(state, i, W_NODE)
+    if nd == 0 {
+        return false
+    }
+    let n: u64 = nd - 1
+    if act <= tile.A_FOCUS_DOWN {
+        let z: u64 = tile.dir_search(state, n, act - tile.A_FOCUS_LEFT)
+        if z == tile.NONE {
+            return false
+        }
+        tile.set_focus(state, z)
+        let cl: u64 = tile.n_client(state, z)
+        if cl != 0 && cl <= MAX_WIN {
+            raise_win(state, cl - 1)
+            set_focus(state, cl - 1)
+        }
+        tile_apply(state)
+        damage_tile(state)
+        return true
+    }
+    if act <= tile.A_MOVE_DOWN {
+        if tile.move_dir(state, n, act - tile.A_MOVE_LEFT) {
+            tile_apply(state)
+            damage_tile(state)
+            return true
+        }
+        return false
+    }
+    if act == tile.A_SPLIT_H {
+        tile.set_next_split(state, 1)
+        return true
+    }
+    if act == tile.A_SPLIT_V {
+        tile.set_next_split(state, 2)
+        return true
+    }
+    if act >= tile.A_LAYOUT_SPLIT && act <= tile.A_LAYOUT_STACKED {
+        if tile.set_layout(state, n, act - tile.A_LAYOUT_SPLIT) {
+            tile_apply(state)
+            damage_tile(state)
+            return true
+        }
+        return false
+    }
+    if act == tile.A_ROTATE {
+        tile.rotate(state, tile.root(state), 1)
+        tile_apply(state)
+        damage_tile(state)
+        return true
+    }
+    if act == tile.A_MIRROR {
+        tile.mirror(state, tile.root(state), 0)
+        tile_apply(state)
+        damage_tile(state)
+        return true
+    }
+    if act == tile.A_BALANCE {
+        tile.balance(state, tile.root(state))
+        tile_apply(state)
+        damage_tile(state)
+        return true
+    }
+    if act == tile.A_GROW || act == tile.A_SHRINK {
+        var d: i64 = tile.MIN_FRAC as i64
+        if act == tile.A_SHRINK {
+            d = 0 - d
+        }
+        if tile.resize_at(state, n, d) {
+            tile_apply(state)
+            damage_tile(state)
+            return true
+        }
+        return false
+    }
+    return false
 }
