@@ -147,8 +147,9 @@ the program's and once as "drawn while nothing ran".
 ## What was measured
 
 All numbers below come from `tools/powermon/run.sh` on **QEMU 7.2 without
-KVM (TCG), on an AMD EPYC**, on 27 August 2026. See the next section for
-what these numbers do and do not prove.
+KVM (TCG), on an AMD EPYC**, on 27 August 2026. The run ends
+**121 passed, 0 failed**. See the next section for what these numbers do
+and do not prove.
 
 ### The measured draw comes from the firmware
 
@@ -169,12 +170,18 @@ part, the interface is broken.
 
 ### The floor against no floor — the same workload, the same battery
 
+Same kernel, same `burn 6`, same 7700 mW battery table:
+
 | | with the floor | with `pmonnofloor` |
 |---|---|---|
-| floor measured | yes, over several idle windows | no (`baseok=0`, `base=0`) |
-| attributable | `rate − floor` | the **whole** measured rate |
-| booked to programs | little or nothing | everything above zero |
-| booked to *System* | nearly all of it | the remainder |
+| floor measured | yes, over **13** idle windows | no (`baseok=0`, `base=0`) |
+| attributable | 0 mW | **7700 mW** |
+| booked to programs | **0** mW-ticks | **492 800** mW-ticks |
+| booked to *System* | **1 617 000** mW-ticks | **1 124 200** mW-ticks |
+
+**The two displays differ by 7700 mW on the same machine.** Not one
+milliwatt of energy went missing between them — the same total is booked,
+under a different name. That is the mistake, as a number.
 
 On this host, where the table is static, the floor equals the total and
 **nothing at all can be attributed**. That is not a defect in the
@@ -185,26 +192,42 @@ showing an empty table with no explanation.
 ### The split follows the load and adds up
 
 `burn` (`kernel/user/burn.fi`) holds the processor and makes no system
-call inside its loop, so it is runnable on every timer tick. A run of
-`burn 8` on a `pmonnofloor` kernel:
+call inside its loop, so it is runnable on every timer tick. `burn 30`
+against the 7700 mW table, on a `pmonnofloor` kernel:
 
 ```
+Battery usage by program
+measured total, proportionally attributed
+
+  Power now        7700 mW
+  System floor       --
+   (no idle window yet -- all of it is booked to System)
+  Attributable     7700 mW
+  Charge             75 % of 4400 mWh
+  Health            100 % of 4400 mWh design
+  Runtime left       25 min
+  On mains           no
+  Temperature        30 C
+  Brightness        100 %
+
 PROGRAM             CPU   SHARE       mJ  RUNS
-system                105    96 %     1995     2
-burn                    7     6 %      133     1
-sh                      5     4 %       95     1
-powermon                2     2 %       38     2
+system                 59    69 %     4543     2
+burn                   24    29 %     1848     1
+sh                      2     2 %      154     1
 
   Sum of the shares: 100 %
 ```
 
-and the identity, checked from both sides in the same run:
+and the identity, checked from **both** sides of the system call in the
+run's own `burn 60` case:
 
 ```
-kernel   proce = 226100 mW-ticks
-ring 3   sum of the four program rows = 226100 mW-ticks
-kernel   sum of its own p-rows        = 226100 mW-ticks
+ring 3   3 rows, 893200 mW-ticks   kernel proce = 893200
+kernel   4 rows, 893200 mW-ticks   kernel proce = 893200
+ring 3   116 tick-units in the rows   kernel progticks = 116
 ```
+
+To the last milliwatt-tick, from both directions.
 
 The counter-check is that a run in which `burn` never started has no row
 for `burn`. A monitor that reports a program which did not run is as
@@ -241,7 +264,7 @@ Measured, not asserted, because this code runs inside a timer interrupt.
 | | cycles per sample |
 |---|---|
 | first draft, full ACPI table walk per sample | **12 800 000** |
-| after caching where `_BST` was found | **≈ 175 000 – 435 000** |
+| after caching where `_BST` was found | **584 263**, measured over 29 samples |
 
 The first draft re-searched every ACPI table octet by octet on every
 sample: ten times a second, that is more power than the monitor could
@@ -249,12 +272,17 @@ ever explain. The fix is in `kernel/batt.fi`: the *address* where `_BST`,
 `_PSR` and `_TMP` were found is remembered, and the next read goes
 straight there. The tables live in reserved memory and do not move.
 
-At ten samples a second and the slower figure, that is on the order of
-four parts per thousand of a 1 GHz processor — and TCG is the slowest
-case there is; on real silicon the same work is a fraction of it. The run
-also checks that `burn` computed **exactly the same result** in the
-counted and the uncounted run: if the accounting changed what the machine
-computed, it changed the machine.
+At ten samples a second that is **5842 parts per million — 0.58 percent —
+of a 1 GHz processor**, and TCG is the slowest case there is: it
+interprets every instruction, so the ACPI reads and the walk over
+thirty-two task slots cost tens of times what they cost on silicon. The
+figure is an upper bound and it is written down as a measurement rather
+than as a reassurance.
+
+The run also checks that `burn` computed **exactly the same result** in
+the counted and the uncounted run
+(`burn: sum=1679050356470528532 loops=60000000` in both): if the
+accounting changed what the machine computed, it changed the machine.
 
 `nopowermon` is the counter-check: same image, same workload, no
 accounting, `samples=0`, and `/bin/powermon` says the accounting is not
@@ -269,10 +297,12 @@ days:
 # osum powermon -- one line per day, newest last, at most 90.
 # mJ is milliwatt-ticks divided by the tick rate: millijoules
 # total = system + programs, and it is measured, not modelled
-day=20260827 totalmJ=5130 systemmJ=5130 basemW=1900 samples=27 health=88 prog=system:0 prog=sh:0
+day=20260827 totalmJ=18480 systemmJ=11165 basemW=0 samples=24 health=100 prog=system:4543 prog=burn:2464 prog=sh:231 prog=powermon:77
 ```
 
-About a hundred octets a day, so under ten kilobytes full. That matters
+Three writes in one run produced a file of **552 octets**, and the day
+mark moved exactly three times. About a hundred and forty octets a day,
+so under thirteen kilobytes full. That matters
 because OFS still has a **two-megabyte ceiling per volume** (round OFS3 is
 lifting it), and a monitor that fills the disk it is monitoring is a bad
 monitor. The day mark in the kernel is moved **only after** the file
@@ -370,6 +400,26 @@ work under TCG, which round K18 measured.
   ring 3 has no call in this branch that paints into a widget window, so
   the graph is a row of block characters scaled against the highest rate
   seen. It says what a plot would say and it looks like what it is.
+
+### The window
+
+`wigapp=/bin/powermon` starts this program in the window server of round
+K15. That mechanism is new in this round and it is not a fourth
+hard-wired name: round K15 knows `wigdemo`, `explorer` and `starter`, the
+next round to want a window would have needed a fifth, and the one after
+that a sixth. The path is read out of the command line — and **copied at
+boot**, because the command line of the boot loader lies above
+`kernel_end` and the frame allocator hands exactly those frames out. The
+first draft read it in `k15_start`, long after the first heap of the run
+was standing on those octets, and got the unchanged default back:
+`k15: start /bin/wigdemo`. Nothing crashed and nothing was right.
+
+Measured: `k15: start /bin/powermon`, `wm: windows=1`, and — the part
+that matters — **20 distinct colours** on a grid across the window
+rectangle in the screenshot. Not "the screen is not black": that is the
+area counting of round K7B, where 87 percent agreement turned out to be
+87 percent background. An empty rectangle has one colour; a panel with a
+frame, a heading and a table of text has twenty.
 * **ICONS / I18N / THEME.** Those three rounds are on their own branches
   and are not in `main` yet. The window takes its colours from whatever
   theme `wlib.begin` resolved, so it already follows the scheme the
