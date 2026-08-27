@@ -85,7 +85,16 @@ verbose: yes
 EOF
 
 # ---------------------------------------------------------- quelle.img
-SPEC=(build "$OUT/quelle.img" "$BLOCKS" "--inodes=$INODES" "--karten=$KARTEN" /bin/)
+# THE FILESYSTEM VERSION. Version 2 holds 8 + 64 + 4096 blocks in one
+# file -- 2,134,016 octets -- and the kernel outgrew that: with twenty
+# rounds in it, it is 2.8 megaoctets, so the image the installer writes
+# cannot even carry the kernel it boots. Version 3 (round OFS3) has the
+# triple indirect pointer and holds 136,351,744 octets in one file.
+# FSVER=2 keeps the old behaviour for whoever wants to measure it.
+FSVER=${FSVER:-3}
+V3=()
+[ "$FSVER" = 3 ] && V3=(--v3)
+SPEC=(build "$OUT/quelle.img" "$BLOCKS" "${V3[@]}" "--inodes=$INODES" "--karten=$KARTEN" /bin/)
 for p in $gebaut; do SPEC+=("/bin/$p=$OUT/bin/$p"); done
 SPEC+=(/boot/ "/boot/osum.mb=$OUT/k.mb" "/boot/BOOTX64.EFI=$LIMINE/BOOTX64.EFI" "/boot/limine.conf=$OUT/limine.conf" /efi/ /etc/ /dev/ /proc/ /mnt/ /store/ /apps/ /system/ /users/ /tmp/)
 # ---------------------------------------------------------- die Quellen
