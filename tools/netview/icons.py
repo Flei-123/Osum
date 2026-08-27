@@ -60,6 +60,17 @@ QUELLE = os.path.join(WURZEL, "..", "assets", "netview")
 # Sichten (`netview.V_*`, ohne `real`, das keines bekommt).
 ZUSTAENDE = ["state-nocarrier", "state-noip", "state-noroute", "state-online"]
 MERKMALE = ["mark-filtered", "mark-faked", "mark-none"]
+# ZWEITER NACHTRAG: das Zeichen fuer "die Maschine taeuscht gerade vor".
+# Eigene Gruppe, weil es weder ein Systemzustand noch ein Merkmal am
+# Programm ist -- es steht NEBEN dem Zustandssymbol in der Ecke.
+SYSTEM = ["sys-faking"]
+
+# UND ES MUSS SICH VON `mark-faked` UNTERSCHEIDEN. Die beiden koennen
+# gleichzeitig auf dem Schirm stehen und bedeuten Verschiedenes: das
+# eine sagt "dieses Programm", das andere "die ganze Maschine". Sie
+# tragen absichtlich dieselbe Welle; also muss der RAHMEN den
+# Unterschied tragen, und genau das wird hier nachgerechnet.
+KREUZ = [("sys-faking", "mark-faked")]
 
 # DIE ZWEI SCHEMEN, GEGEN DIE GERECHNET WIRD -- AUS DEN DATEIEN, mit
 # denen die gemessenen Laeufe wirklich booten
@@ -199,13 +210,29 @@ def pruefe_gestaltung(sagen=True):
                 sag("  %-15s vs %-15s %3d von %3d = %2d%%  %s"
                     % (gruppe[i].split("-", 1)[1], gruppe[j].split("-", 1)[1], d, u, pz,
                        "ok" if gut else "ZU AEHNLICH"))
+
+    sag("== UEBER die Gruppen hinweg: Zeichen, die nebeneinander stehen ==")
+    for a_n, b_n in KREUZ:
+        a, wa, ha = schattenriss(a_n)
+        b, wb, hb = schattenriss(b_n)
+        if (wa, ha) != (wb, hb):
+            sag("  %s und %s sind nicht gleich gross" % (a_n, b_n))
+            fehler += 1
+            continue
+        u = len(a | b)
+        d = len(a ^ b)
+        pz = 100 * d // u if u else 0
+        gut = pz >= MIN_UNTERSCHIED
+        fehler += 0 if gut else 1
+        sag("  %-15s vs %-15s %3d von %3d = %2d%%  %s"
+            % (a_n, b_n, d, u, pz, "ok" if gut else "ZU AEHNLICH"))
     return fehler
 
 
 def masse():
     """Groesse und Deckung je Zeichen -- die Zahlen fuer die Doku."""
     aus = []
-    for n in ZUSTAENDE + MERKMALE:
+    for n in ZUSTAENDE + MERKMALE + SYSTEM:
         riss, w, h = schattenriss(n)
         aus.append((n, w, h, len(riss), w * h))
     return aus
@@ -293,7 +320,7 @@ def kernquelle():
 def bauen(ziel):
     os.makedirs(ziel, exist_ok=True)
     n = 0
-    for name in ZUSTAENDE + MERKMALE:
+    for name in ZUSTAENDE + MERKMALE + SYSTEM:
         d = symmod.baue(zeichnung(name))
         with open(os.path.join(ziel, name), "wb") as f:
             f.write(d)
