@@ -313,7 +313,8 @@ stops at a hash it cannot resolve.
 
 **Three rules now, and no fourth** (`docs/ORPHANS.md`):
 
-1. ALWAYS -- `PLAN`, secrets, `config/`, `state/`.
+1. ALWAYS -- `PLAN`, `config/`, `state/`. (Geheimnisse standen hier
+   einmal mit drin; das ist seit dem dritten Nachtrag unten falsch.)
 2. NEVER -- store entries a source can deliver, `apps/`, `etc/`, `cache/`.
 3. ONLY IF ORPHANED -- a store entry no registered source can deliver.
 
@@ -440,6 +441,154 @@ Two useful things survive the attempt: the file manager now reports
 `explorer: menurect` and `explorer: dlgrect`, so a test can click a menu
 item or a dialog button without guessing. The missing one is where the
 rows of the tree list sit.
+
+## 5d. Dritter Nachtrag, 27.08.2026: was eine Sicherung mitnehmen darf
+
+Der Eigentuemer, zur gerade gebauten Sicherung:
+
+> Wenn ich ein Backup mache und woanders installiere, duerfen keine
+> Passwoerter oder das Konto mituebertragen werden -- wenn jemand das
+> Backup bekommt, ist dein ganzes Konto futsch.
+
+Er hat recht, und `docs/THEFT.md` Regel 1 sagte woertlich, dass "the
+secret store" IMMER mitkommt. Im Klartext. Auf einem Stick.
+
+**Die falsche Loesung waere "dann eben keine Geheimnisse sichern".** Eine
+Platte stirbt oefter als ein Stick gestohlen wird, und wer seinen
+Passworttresor absichtlich draussen liess und dann einen Plattenschaden
+hat, hat jedes Konto verloren -- genau das Ergebnis, um das es in dem
+Einwand geht, nur ueber einen anderen Weg. Ein seltener lauter Ausfall
+waere gegen einen haeufigen leisen getauscht.
+
+**Gebaut wurde stattdessen: drei Klassen und ZWEI getrennte Geheimnisse**
+(`docs/BACKUP-SECRETS.md`, `kernel/user/bsec.fi`).
+
+| Klasse | was | im Backup? |
+|---|---|---|
+| (a) gewoehnlich | Dokumente, `PLAN`, `config/`, `state/` | ja; verschluesselt, wenn ein Speicherpasswort gegeben wurde |
+| (b) geheim | Passworttresor, gespeicherte Anmeldungen, private VPN-Schluessel | **nur auf Verlangen**, und dann immer unter dem Hauptpasswort versiegelt |
+| (c) nie | Geraeteschluessel, Maschinenkennung, Sitzungsmerkmale, TPM-Schluessel | **nie**, unter keiner Option |
+
+Klasse (c) hat drei Gruende, jeder allein genuegt: ein TPM-Schluessel
+*kann* nicht mit, er verlaesst den Chip nie; ein Sitzungsmerkmal ist die
+Behauptung, dass GENAU DIESE Maschine angemeldet ist; und der
+Geraeteschluessel ist das, woran `docs/CRYPTO-ERASE.md` haengt -- eine
+Kopie davon im Backup macht das Loeschen wirkungslos. Das ist kein Leck,
+das ist ein **Widerspruch** zu einer Zusage aus derselben Runde.
+
+**Der Aufbau.** ChaCha20 (RFC 8439, neu in `kernel/user/chacha.fi`) plus
+HMAC-SHA256 ueber den Geheimtext, encrypt-then-MAC. Nicht das vorhandene
+AES: dessen eigener Kopf sagt "A4 NO GCM, NO AUTHENTICATION", und ein
+Backup ist der schlechteste Ort, um zu lernen, was ein Padding-Orakel ist.
+Schluessel aus PBKDF2-HMAC-SHA256; **Argon2id nicht**, und der Grund ist
+konkret und keine Ausrede: Argon2id ist speicherhart und braucht zig
+Mebioktett Kratzspeicher, und dieser Ring 3 hat **keinen
+Speicherverwalter** -- jeder Puffer darin ist ein festes statisches Feld.
+
+**Der eigentliche Entwurfsstreit war die Deduplizierung.** Naiv
+verschluesselt -- neuer Zufallszaehler je Block -- ergeben gleiche
+Klartexte verschiedene Geheimtexte, der Speicher erkennt keine
+Wiederholung mehr, und jede gemessene Zahl dieser Runde bricht zusammen.
+Die uebliche Antwort ist **konvergente Verschluesselung** (Name und
+Schluessel aus dem Klartext-Hash). Sie ist hier **verworfen**, wegen eines
+echten Angriffs: wer den Stick hat und eine Datei RAET, kann deren Namen
+ausrechnen und im INDEX nachsehen -- das Backup beantwortet dann die Frage
+"hat dieser Mensch GENAU DIESES Dokument", ohne Passwort.
+
+Gebaut ist **geschluesselt-konvergent**: `name = HMAC(CONV, Klartext)`,
+und `CONV` kommt aus dem Passwort. Gleiche Bloecke im selben Speicher
+bekommen weiter denselben Namen -- die Deduplizierung ist unangetastet --
+und ohne Passwort laesst sich der Name einer geratenen Datei nicht
+ausrechnen. **Der Preis, benannt statt verschwiegen:** zwischen Speichern
+mit verschiedenen Passwoertern dedupliziert nichts mehr. Fuer einen
+persoenlichen Stick kostet das nichts; fuer einen geteilten Sicherungsserver
+schon, und dort waere die Entscheidung neu zu treffen.
+
+**Gemessen** (`tools/tresor/run.sh` § 13):
+
+| Lauf | Optionen | geheime Dateien | ausgelassen (b) | ausgelassen (c) |
+|---|---|---:|---:|---:|
+| A | *(keine)* | **0** | 3 | 3 |
+| B | `-mmasterpw` | 3 | 0 | 3 |
+| C | `-pstorepw -mmasterpw` | 3 | 0 | 3 |
+
+Der WIRT liest danach jeden fertigen Speicher AUS DEM ABBILD und sucht die
+Marken darin, so wie ein Finder des Sticks es taete:
+
+| Marke | Klasse | in A | in B | in C |
+|---|---|---:|---:|---:|
+| `MARK-PLAN-ORDINARY-DATA` | (a) | **1** | **1** | **0** |
+| `MARK-VAULT-SECRET-BANK-PW` | (b) | 0 | **0** | 0 |
+| `MARK-DEVICEKEY-NEVER` | (c) | **0** | **0** | **0** |
+| `MARK-MACHINEID-NEVER` | (c) | **0** | **0** | **0** |
+| `MARK-SESSION-NEVER` | (c) | **0** | **0** | **0** |
+
+Die **1** in der ersten Zeile ist die Gegenprobe: eine Suche, die nie
+etwas findet, beweist nichts. Die **1 in Spalte B** ist der Beweis, dass
+die zwei Schichten wirklich getrennt sind -- `-m` hat den Tresor
+geschuetzt und die Dokumente in Ruhe gelassen. Und Klasse (c) ist in
+**jeder** Spalte null, auch dort, wo das Hauptpasswort auf der
+Befehlszeile stand.
+
+Der **Rohinhalt** des Tresorblocks wird aus PACK herausgeschnitten und
+gezeigt -- 4112 Oktette, die Marke kommt **0 mal** darin vor:
+
+```
+5b4b743378616a7065261f3c23ced95c45063f5913ee6024b2baebc548ac243b...
+```
+
+und derselbe Tresor im zweiten Speicher, anderes Hauptsalz, ergibt
+**andere** Oktette:
+
+```
+6a957e1d337642738230d85ed791200b94bbbfb642e72516d2183f3e821b5315...
+```
+
+Was die Verschluesselung kostet -- und was nicht:
+
+| | Bloecke | neu | gelesen | **geschrieben** | ms |
+|---|---:|---:|---:|---:|---:|
+| ohne | 6 | **2** | 24576 | **8192** | 260 / 300 |
+| mit | 6 | **2** | 24576 | **8224** | 280 / 320 |
+| ohne, zweiter Lauf | 6 | **0** | 24576 | 0 | |
+| mit, zweiter Lauf | 6 | **0** | 24576 | 0 | |
+
+(Zwei Laeufe derselben Abnahme auf demselben Wirt; der UNTERSCHIED ist
+beide Male 20 ms bei 10 ms Aufloesung. Darum haengt keine Zusage daran.)
+
+**Die Deduplizierungsrate ist unveraendert**, und der zweite Lauf des
+verschluesselten Speichers schreibt weiter **null** Oktette. Der Aufschlag
+auf dem Datentraeger ist **0,39 %** -- 16 Oktette Marke je Block, sonst
+nichts.
+
+**Die ehrliche Luecke, gemessen statt umschrieben:** der SCHNAPPSCHUSS ist
+nicht verschluesselt. Der Pfad `/secrets/vault.kdbx` steht auch im voll
+verschluesselten Speicher C im Klartext, und der Test sucht ihn und
+FINDET ihn. Ein gefundener Stick verraet also weiterhin, WAS man hat, nur
+nicht, was darin steht. Die Behebung hat eine feste Form -- `S-` als
+Strom versiegelter 4096-Oktett-Saetze durch dieselbe `seal`/`unseal` --
+und beruehrt jeden Leser in `bstore.fi`; darum steht sie hier als Grenze
+(`bsec.fi` B4) statt halb gebaut im Baum.
+
+**Zwei Fehler, die dieser Abschnitt gefunden hat:**
+
+* `-p pass -m pass` sind **neun** Argumente, und dieser Kern gibt einem
+  Programm hoechstens `proc.MAX_ARGS` = 8. Die Schale sagte "too many
+  arguments" und **liess den Befehl aus** -- die Sicherung lief nie, der
+  Speicher blieb leer, und der Test las leere Felder. Das Passwort haengt
+  jetzt am Buchstaben (`-pfoo`), und es gibt eine Zusage darauf, dass
+  keine Zeile das Limit sprengt.
+* `bsec.seal` haengt 16 Oktette an, und `bstore.fi` gab ihm einen Puffer
+  von genau 4096. Jeder volle Block schrieb ueber das Ende hinaus, in das
+  statische Feld dahinter. Der Puffer ist jetzt `CHUNK + TAGLEN`.
+
+**Kein Widerspruch zum Stick-Grundsatz.** Ein Geraet laesst sich weiterhin
+vollstaendig ohne Konto und ohne Netz aus einem Stick aufsetzen. Der
+Tresor darf mit, er ist nur immer versiegelt. Der Preis wird laut gesagt:
+**ein vergessenes Hauptpasswort heisst, der Tresor ist weg** -- das ist,
+was "nicht aus dem Backup ableitbar" bedeutet, und die Alternative waere
+eine Hintertuer mit freundlichem Namen.
+
 
 ## 6. What the next round would need
 
