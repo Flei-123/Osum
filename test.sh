@@ -168,6 +168,31 @@
 #      Sichten, vier verschiedene Merkmale an vier Knoepfen EINER Leiste,
 #      hell und dunkel -- und am Knopf des `real`-Programms ist
 #      nachgerechnet, dass dort NICHTS steht.
+#      ZWEITER NACHTRAG -- DER SYSTEMWEITE RUECKFALL: eine Voreinstellung
+#      mit drei Werten (`off`, `when-offline`, `always`) entscheidet, was
+#      ein Programm bekommt, ueber das SONST NICHTS gesagt wurde. Die
+#      Vorrangregel steht als Tabelle in der Doku und lautet in einer
+#      Zeile: EINE ANGABE AM PROGRAMM SCHLAEGT DIE VOREINSTELLUNG IMMER
+#      -- die Voreinstellung fuellt eine Luecke, sie ueberstimmt keine
+#      Antwort. Und sie ruehrt KEINEN LAUFENDEN PROZESS an: eine Sicht,
+#      die sich unter einem Programm wegdreht, tut es mitten in einer
+#      Verbindung. GEMESSEN, mit demselben Abbild, demselben Skript und
+#      EINEM Wort Unterschied auf der Kernel-Befehlszeile: auf einer
+#      Maschine ganz OHNE Netzkarte scheitert das Programm bei `off`
+#      (-ENODEV) und laeuft bei `when-offline` durch (204, leerer Rumpf)
+#      -- und es verlassen dabei NULL Oktette die Maschine. Bei `always`
+#      bleibt ein ausdruecklich auf `real` gesetztes Programm `real` und
+#      holt die echte Seite (200, 46 Oktette), ein auf `none` gesetztes
+#      bleibt ohne Netz. Eine Voreinstellung, die MITTEN IM LAUF
+#      umgestellt wird, laesst jeden laufenden Prozess auf seiner Sicht
+#      und faerbt erst das naechste gestartete Programm. Und die Ecke der
+#      Taskleiste unterscheidet "wirklich online" von "das System
+#      taeuscht gerade vor": ein ACHTES Zeichen, ein SCHIRM mit derselben
+#      Welle wie das Merkmal am Programm -- die Grammatik der Runde ist
+#      RING = EIN PROGRAMM, SCHIRM = DIE GANZE MASCHINE, und die
+#      Schattenrisse der beiden unterscheiden sich um 79 Prozent.
+#      Nachgemessen auf einem Bildschirmfoto einer Maschine, die ECHT
+#      online ist und trotzdem taeuscht, mit Gegenprobe ohne Zeichen.
 #
 #  15. EIN WIRT FUER FREMDE PROZESSOREN (tools/hv/run.sh, Runde K12):
 #      AMD-V, verschachtelte Seitentabellen, sechs Gaeste. Der Kernel
@@ -462,7 +487,7 @@ lauf "22. Widgets und der Dateimanager: eine Bibliothek in Ring 3 (tools/k15/run
 lauf "24. Energie und Leistung: drei Profile, Ruhezustand, Waerme, Akku (tools/k18/run.sh, Runde K18)" \
      tools/k18/run.sh k18 '^K18: |^  OK    (dieselbe Stelle|IA32_PERF_CTL bekommt|Turbo ist bei|SpeedStep ist bei|jeder Durchlauf ging|schlafend |aber es wird kein|zwei Tabellen|GEGENPROBE|GEDROSSELT|im BILD|dasselbe Pruefbild|und einen Bildpunkt DANEBEN|keine AUFRUFNUMMER)'
 lauf "25. eine Netzsicht je Prozess: real, filtered, faked, none (tools/netview/run.sh, Runde NETVIEW)" \
-     tools/netview/run.sh netview '^NETVIEW: |^  OK    (OCTETS THAT LEFT|faked: (connect|reading|the WHOLE|the BODY|a name resolved|and the reachability)|none: (connect|and it said)|real: connect took|and the python server|(nocarrier|noip|noroute|online): the icon|(dark|light): (button|and the REAL)|kernel/netmark)'
+     tools/netview/run.sh netview '^NETVIEW: |^  OK    (OCTETS THAT LEFT|faked: (connect|reading|the WHOLE|the BODY|a name resolved|and the reachability)|none: (connect|and it said)|real: connect took|and the python server|(nocarrier|noip|noroute|online): the icon|(dark|light): (button|and the REAL)|kernel/netmark|8[a-f]:|faking:)'
 
 
 echo
