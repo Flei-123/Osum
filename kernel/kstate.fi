@@ -63,7 +63,8 @@
 //   0x43000  die VFS-Schicht, FAT32, procfs (Runde K14)
 //   0x46000  die Naht zur Widget-Bibliothek, drei Seiten (Runde K15)
 //   0x49000  die Tabelle der Dateiarten (Runde K16)
-//   0x4C000  frei
+//   0x4C000  der Modusvektor (Runde K17, MODE_OFF)
+//   0x4D000  frei
 //   0x58000  die Energieschicht (Runde K18, `pwr.fi`)
 //   0x59000  Akku, Netzteil und Thermalzone (Runde K18, `batt.fi`)
 //   0x5A000  OFS in Fassung 3: die Pfadpuffer des Dateisystems,
@@ -133,15 +134,21 @@ export {
     STRESS_GOT, STRESS_HIGH, STRESS_BEFORE, STRESS_LOW,
     STRESS_BAD, STRESS_SEEN, STRESS_AFTER, PROBE_ADDR,
     WIG_OFF, WIG_MAX, FSG_OFF, JRNL_OFF, JRNL_MAX,
+    K17_OFF, K17_MAX, M_USB, M_NOUSB, M_USBPOLL, M_NOHID,
+    M_NOMSC, M_UNPLUG, M_NOUSBIRQ, M_USBSTICK, M_USBHOLD,
     M_WIG, M_WIGFILES, M_WIGNOHIT, M_WIGNOCLIP, M_WIGLONG,
     M_WIGSTART, M_WIGNOKEYS, M_WIGNOIDX, M_WIGSPEICHER,
     K18_OFF, K18_MAX, BATT_OFF, BATT_MAX,
     M_PWR, M_NOCSTATES, M_NOPWR, M_PWRHOT, M_NOBLANK,
     M_PWRDIM, M_PWRBLANK,
-    OFS3_OFF, OFS3_MAX, OFS3_MODE,
+    OFS3_OFF, OFS3_MAX,
     O_NOLINKS, O_OFS3, O_OFS3FMT, O_NOATIME,
     OP_NAME, OP_NAME2, OP_OLD, OP_NEW, OP_PATH, OP_WORK, OP_BUILD,
     OP_LINK, OP_TMP, OP_ENT,
+    MODE_OFF, MODE_MAX, MODE_WORDS, MODE_FREE,
+    M_NORING3, M_NOTIMER, M_R3FAULT, M_NOSCHED, M_NOPREEMPT,
+    M_NOPROC, M_NOFS, M_ATA, M_CAPS,
+    mode_on, mode_add, mode_word,
     get, set,
     add, get32, get16, get8, set8
 }
@@ -159,7 +166,25 @@ const BITMAP_FRAMES: u64 = 56 // how many frames it covers
 const MEM_TOP: u64 = 64 // highest usable octet + 1
 const MEM_USABLE: u64 = 72 // usable octets according to the memory map
 const FRAMES_FREE: u64 = 80 // free frames right now
-const MODE: u64 = 88 // what the command line asked for
+// RUNDE K17: DER MODUS IST KEIN WORT MEHR, SONDERN EIN VEKTOR.
+// Bis hierher stand der ganze Modus in DIESEM einen Wort (Versatz 88),
+// und achtzehn Runden haben sich daraus Bits genommen, bis vier uebrig
+// waren. Seit dieser Runde liegt der Modus in einer eigenen kdata-Seite
+// als Feld aus MODE_WORDS Woertern -- EIN WORT JE UNTERSYSTEM. Die
+// Tafel, wer welches Wort hat, steht weiter unten bei den Modusbits;
+// gelesen und geschrieben wird ausschliesslich ueber `mode_on` und
+// `mode_add`, und ein Modusname ist ab jetzt ein BITINDEX (Wort * 64 +
+// Bit), keine Maske mehr.
+//
+// MODE ist das erste Wort des Vektors und damit dasselbe Wort wie
+// vorher: `kstate.get(state, kstate.MODE)` liefert weiter die Bits
+// 0..63, und die Trap-Art aus der Befehlszeile steht weiter in den
+// untersten drei davon. Der Skalar 88 ist seit dieser Runde FREI.
+const MODE_OFF: u64 = 0x4C000 // die Seite des Modusvektors in kdata
+const MODE_MAX: u64 = 0x1000
+const MODE_WORDS: u64 = 16 // 16 * 64 = 1024 Bits, Platz bis 512 Woerter
+const MODE: u64 = MODE_OFF // Wort 0 -- der Kern
+const MODE_FREE: u64 = 88 // frei seit Runde K17 (war MODE)
 const VECTORS: u64 = 96 // address of the table out of isr.s
 const KEYLEN: u64 = 104 // octets in KEYBUF
 const IDTR: u64 = 112 // 10 octets: limit + base for `lidt`
@@ -336,7 +361,8 @@ const DISK2_DEV: u64 = 896
 //                 Installationsprogramm eine Partitionstafel schreiben
 //                 soll, ist das die falsche Zahl.
 //   ROOT_PART     der Eintrag der Partitionstafel, aus dem die Wurzel
-//                 kommt (16 = keine). Der Testlauf liest ihn zurueck.
+//                 kommt (16 = keine). Nur zum Berichten -- aber der
+//                 Testlauf liest ihn zurueck.
 const DISK_FIRST: u64 = 904
 const DISK1_BLOCKS: u64 = 912
 const ROOT_PART: u64 = 920
@@ -677,13 +703,13 @@ const U_LASTDENY: u64 = 0x58 // (ino << 8) | gewuenschte Rechte
 //              Superblock.
 //   `zombie`   ein Prozess, der ein Kind hinterlaesst und ohne `wait`
 //              endet. Damit ist zu messen, was init einsammelt.
-const M_K13: u64 = 2147483648 // 1 << 31
-const M_NOPERM: u64 = 4294967296 // 1 << 32
-const M_INITSH: u64 = 8589934592 // 1 << 33
-const M_NOSUID: u64 = 17179869184 // 1 << 34
-const M_NOACPI: u64 = 34359738368 // 1 << 35
-const M_FORCEV2: u64 = 68719476736 // 1 << 36
-const M_ZOMBIE: u64 = 137438953472 // 1 << 37
+const M_K13: u64 = 128 // Wort 2, Bit 0
+const M_NOPERM: u64 = 129 // Wort 2, Bit 1
+const M_INITSH: u64 = 130 // Wort 2, Bit 2
+const M_NOSUID: u64 = 131 // Wort 2, Bit 3
+const M_NOACPI: u64 = 320 // Wort 5, Bit 0
+const M_FORCEV2: u64 = 132 // Wort 2, Bit 4
+const M_ZOMBIE: u64 = 133 // Wort 2, Bit 5
 // ------------------------------------------- Runde K14: die VFS-Schicht
 //
 // DREI SEITEN, UND SIE STEHEN HIER, WEIL GENAU DAS DIE STELLE IST, AN
@@ -736,14 +762,14 @@ const PROCFS_MAX: u64 = 0x1000
 //               Laeufe, Oktett fuer Oktett, ist der Beweis, dass OFS
 //               ein NUTZER dieser Schicht ist und kein Sonderfall
 //               daneben.
-const M_VFS: u64 = 2147483648 // 1 << 31
-const M_NOVFS: u64 = 4294967296 // 1 << 32
-const M_NOPROCFS: u64 = 8589934592 // 1 << 33
-const M_NODEVFS: u64 = 17179869184 // 1 << 34
-const M_NOFAT: u64 = 34359738368 // 1 << 35
-const M_NOPART: u64 = 68719476736 // 1 << 36
-const M_FATRO: u64 = 137438953472 // 1 << 37
-const M_VFSALL: u64 = 274877906944 // 1 << 38
+const M_VFS: u64 = 192 // Wort 3, Bit 0
+const M_NOVFS: u64 = 193 // Wort 3, Bit 1
+const M_NOPROCFS: u64 = 194 // Wort 3, Bit 2
+const M_NODEVFS: u64 = 195 // Wort 3, Bit 3
+const M_NOFAT: u64 = 196 // Wort 3, Bit 4
+const M_NOPART: u64 = 197 // Wort 3, Bit 5
+const M_FATRO: u64 = 198 // Wort 3, Bit 6
+const M_VFSALL: u64 = 199 // Wort 3, Bit 7
 // --------------------------------------- Runde K16: die Dateiarten
 //
 // DREI SEITEN, 0x49000..0x4C000, UND SIE GEHOEREN DIESER RUNDE ALLEIN.
@@ -770,6 +796,21 @@ const M_VFSALL: u64 = 274877906944 // 1 << 38
 //              beim Ausleger eines Skripts stehen vorne zwei Woerter mehr.
 const K16_OFF: u64 = 0x49000
 const K16_MAX: u64 = 0x3000
+
+// RUNDE K17: DER USB-BAUM. Acht Seiten, 0x50000..0x58000, und der Vorrat
+// war VOR dem Bauen zugeteilt -- mehrere Runden arbeiten gleichzeitig an
+// diesem Baum, und genau daraus sind die vier Kollisionen entstanden, die
+// oben im Kopf dieser Datei stehen.
+//
+// Warum so viel: ein xHCI liest seine Befehle SELBST aus dem Speicher.
+// Ringe, Zusammenhangstafel, Eingabezusammenhang und Datenpuffer muessen
+// deshalb physisch zusammenhaengend und ausgerichtet liegen, und sie
+// muessen dort liegen bleiben. Die Untergliederung steht in
+// `kernel/xhci.fi` und `kernel/usb.fi`; sie liegt vollstaendig INNERHALB
+// dieses Bereichs und ist in `tools/kernel/karte.py` als solche
+// eingetragen.
+const K17_OFF: u64 = 0x50000
+const K17_MAX: u64 = 0x8000
 
 const FT_TAB: u64 = 0x0000 // FT_SLOTS * FT_SLOT = 4096
 const FT_SCALARS: u64 = 0x1000
@@ -954,11 +995,15 @@ const OP_ENT: u64 = 0x1800 // ein Verzeichniseintrag, 512
 // benutzt es als Merker fuer eine verschachtelte Sperre (`fs.NESTED`).
 // Ein Modusbit an derselben Stelle waere eine Falle fuer den naechsten
 // Leser.
-const OFS3_MODE: u64 = 0x1F00 // Versatz in OFS3_OFF
-const O_NOLINKS: u64 = 1 // `fs.path` folgt keinem symbolischen Verweis
-const O_OFS3: u64 = 2 // der Selbsttest dieser Runde in Ring 3
-const O_OFS3FMT: u64 = 4 // `fs.format` baut ein Abbild der Fassung 3
-const O_NOATIME: u64 = 8 // die Zugriffszeit wird nicht nachgefuehrt
+// RUNDE OFS3, jetzt in Wort 7 des Modusvektors statt in einem eigenen
+// Moduswort in `OFS3_OFF`. Der Grund fuer das eigene Wort war, dass die
+// 64 Bits des alten Modus voll waren; seit Runde K17 gibt es dafuer
+// einen Vektor, und zwei Modussysteme nebeneinander waeren genau die
+// Doppelbuchfuehrung, gegen die K17 angetreten ist.
+const O_NOLINKS: u64 = 449 // Wort 7, Bit 1 -- `fs.path` folgt keinem Verweis
+const O_OFS3: u64 = 450 // Wort 7, Bit 2 -- der Selbsttest in Ring 3
+const O_OFS3FMT: u64 = 451 // Wort 7, Bit 3 -- `format` baut Fassung 3
+const O_NOATIME: u64 = 452 // Wort 7, Bit 4 -- keine Zugriffszeit
 
 // DIE WOERTER DER RUNDE OFS3 AUF DER BEFEHLSZEILE. Drei davon sind
 // GEGENPROBEN -- ohne sie waere jede Zusage dieser Runde eine Behauptung
@@ -999,11 +1044,11 @@ const O_NOATIME: u64 = 8 // die Zugriffszeit wird nicht nachgefuehrt
 //                dafuer steht die echte SSDT mit einer hohen Temperatur
 //                bereit; das Wort ist nur zum Suchen von Fehlern da.
 //   `noblank`    der Bildschirm geht NICHT von selbst aus.
-const M_PWR: u64 = 140737488355328 // 1 << 47
-const M_NOCSTATES: u64 = 281474976710656 // 1 << 48
-const M_NOPWR: u64 = 562949953421312 // 1 << 49
-const M_PWRHOT: u64 = 1125899906842624 // 1 << 50
-const M_NOBLANK: u64 = 2251799813685248 // 1 << 51
+const M_PWR: u64 = 321 // Wort 5, Bit 1
+const M_NOCSTATES: u64 = 322 // Wort 5, Bit 2
+const M_NOPWR: u64 = 323 // Wort 5, Bit 3
+const M_PWRHOT: u64 = 324 // Wort 5, Bit 4
+const M_NOBLANK: u64 = 325 // Wort 5, Bit 5
 // `pwrdim` und `pwrblank` malen ein Pruefbild in den Rahmenpuffer und
 // regeln danach die Helligkeit herunter beziehungsweise schalten ab. Sie
 // sind fuer die Abnahme von 4.6 da: DASSELBE Bild, EIN Wort Unterschied,
@@ -1011,14 +1056,23 @@ const M_NOBLANK: u64 = 2251799813685248 // 1 << 51
 // halbierten Wert tragen. Nicht "das Bild ist dunkler geworden" -- das
 // waere wieder die Flaechenzaehlerei aus Runde K7B, die 87 Prozent
 // Hintergrund fuer Text gehalten hat.
-const M_PWRDIM: u64 = 4503599627370496 // 1 << 52
-const M_PWRBLANK: u64 = 9007199254740992 // 1 << 53
+const M_PWRDIM: u64 = 326 // Wort 5, Bit 6
+const M_PWRBLANK: u64 = 327 // Wort 5, Bit 7
+
+// WORT 7, DAS DATEISYSTEM OFS UND DER RAHMENALLOKATOR. Die Runden MEM
+// und OFS3 haben ihre Schalter angelegt, als der Modus noch EIN Wort
+// war -- MEM nahm 1 << 54, OFS3 machte sich in `OFS3_OFF` ein zweites
+// Moduswort auf, WEIL die 64 Bits nicht mehr reichten. Genau das ist
+// die Not, gegen die Runde K17 den Modusvektor gebaut hat, also stehen
+// beide jetzt darin, in einem eigenen Wort, und ein zweites Moduswort
+// gibt es nicht mehr.
+//
 // ROUND MEM: the word `memstress` on the command line. It runs the
 // frame stress test and the high probe and prints what they measured.
 // It is a WORD and not the default, because two hundred thousand
 // frames taken and given back is a second of boot that nobody needs
 // twice.
-const M_MEMSTRESS: u64 = 18014398509481984 // 1 << 54
+const M_MEMSTRESS: u64 = 448 // Wort 7, Bit 0
 
 // Runde K12 hat kdata von 0x40000 auf 0x50000 wachsen lassen, Runde K18
 // von 0x50000 auf 0x60000 -- ihr Vorrat (0x58000..0x60000) liegt hinter
@@ -1029,15 +1083,98 @@ const M_MEMSTRESS: u64 = 18014398509481984 // 1 << 54
 // liest beide und vergleicht sie.
 const KDATA_SIZE: u64 = 0x70000
 
+// ================================================== DER MODUSVEKTOR
+//
+// WARUM ES IHN GIBT. Der Modus war achtzehn Runden lang EIN u64, und
+// jede Runde nahm sich Bits daraus. Am 26.08.2026 lief die Rechnung auf:
+// 57 Namen auf 60 von 64 Bits, vier frei (38, 61, 62, 63) -- und Runde
+// K17 brauchte neun. Gleichzeitig lagen die Bits von K13, K14 und K16
+// UEBEREINANDER, weil drei Zweige unabhaengig bei 1 << 31 angefangen
+// hatten; die Gegenprobe `novfs` schaltete damit auch das
+// Stapelwachstum ab, und acht Zusagen von K14 fielen an einem Fehler,
+// der in keiner gemeinsamen Zeile stand. Das ist genau der Fehler, den
+// dieses Projekt bei `kdata` viermal und bei der Vektortafel einmal
+// gemacht hat -- eine Ebene hoeher.
+//
+// WARUM NICHT EINFACH BREITER. Ein zweites Wort haette dieselbe Rechnung
+// nur um achtzehn Runden verschoben und gegen das ZWEITE Problem gar
+// nichts getan: zwei Zweige, die unabhaengig "das naechste freie Bit"
+// nehmen, nehmen dasselbe. Beides verschwindet erst, wenn nicht mehr
+// EIN Vorrat verteilt wird, sondern JEDES UNTERSYSTEM SEINEN EIGENEN
+// hat -- dieselbe Regel, nach der `kdata` seit Runde K12 in Seiten
+// vergeben wird, und dieselbe, nach der `hw.fi`, `fb.fi`, `hv.fi`,
+// `guard.fi`, `smp.fi` und `bootmod.fi` seit jeher ein eigenes
+// Moduswort fuehren. Neu ist nur, dass der GEMEINSAME Modus es jetzt
+// auch tut.
+//
+// WIE ES AUSSIEHT. `MODE_OFF` ist eine Seite in `kdata` mit MODE_WORDS
+// Woertern. Ein Modusname ist ein BITINDEX ueber diesem Feld:
+//
+//     Index = Wort * 64 + Bit
+//
+// Gelesen wird mit `mode_on(state, M_X)`, gesetzt mit
+// `mode_add(state, M_X)`; eine Maske steht nirgends mehr im Quelltext.
+// Weil der Index das Wort ENTHAELT, prueft `tools/kernel/karte.py` den
+// neuen Raum mit derselben Regel wie den alten -- derselbe Name darf
+// mehrfach dastehen, zwei verschiedene Namen nicht auf demselben Index
+// -- und zusaetzlich, dass jeder Index unter MODE_WORDS * 64 bleibt.
+// Eine vergessene alte Maske (2147483648) faellt damit sofort auf.
+//
+// DIE TAFEL DER WOERTER. Ein Wort gehoert einem UNTERSYSTEM, nicht einer
+// Runde: wer eine bestehende Schicht erweitert, nimmt ein freies Bit in
+// deren Wort; wer eine neue Schicht aufmacht, nimmt ein neues Wort. Zwei
+// Runden, die gleichzeitig laufen, koennen sich damit nicht mehr in die
+// Quere kommen, solange sie verschiedene Woerter haben.
+//
+//   Wort  0    0.. 63  DER KERN -- Trap-Art (Bits 0..2 sind ein FELD,
+//                      kein Schalter: 1 #DE, 2 #PF, 3 #GP, 4 #DF) und
+//                      die Grundschalter aus `kmain.fi`. Bits 3..7 und
+//                      23..63 sind frei.
+//   Wort  1   64..127  DIE OBERFLAECHE -- Runde K10 (Maus, Fensterserver,
+//                      Schriften) und Runde K15 (Widgets, Dateimanager,
+//                      Starter, Speicherplatzanalyse). Frei ab Bit 17.
+//   Wort  2  128..191  BENUTZER UND RECHTE -- Runde K13. Frei ab Bit 6.
+//   Wort  3  192..255  DIE DATEISYSTEME -- Runde K14 (VFS, /proc, /dev,
+//                      FAT32, Partitionen). Frei ab Bit 8.
+//   Wort  4  256..319  SPEICHER UND PROZESSE -- Runde K16 (die grosse
+//                      Arena, das Stapelwachstum). Frei ab Bit 2.
+//   Wort  5  320..383  ENERGIE, ABSCHALTUNG UND ACPI -- `noacpi` aus
+//                      Runde K13 und die Energieschicht aus Runde K18.
+//                      Frei ab Bit 8.
+//   Wort  6  384..447  USB -- Runde K17 (xHCI, der USB-Kern, HID,
+//                      Massenspeicher).
+//   Wort  7  448..511  DAS DATEISYSTEM OFS UND DER RAHMENALLOKATOR --
+//                      Runde MEM (`memstress`) und Runde OFS3
+//                      (`nolinks`, `ofs3`, `ofs3fmt`, `noatime`).
+//                      Frei ab Bit 5.
+//   Wort  8..15        FREI. Wird auch das knapp, waechst MODE_WORDS;
+//                      die Seite fasst 512 Woerter.
+//
+// Die Namen selbst stehen bei ihrer Runde, dort wo auch steht, wofuer
+// sie da sind -- verstreut ueber diese Datei, aber alle IN DIESER DATEI.
+// `kmain.fi` fuehrt seit dieser Runde KEINE eigenen Modusnamen mehr;
+// genau diese zweite Liste war der Grund, warum ein zu enger `grep` die
+// Kollisionen nicht fand.
+
 // ------------------------------------------------------ the command line
 
-// The bits of MODE. Round 62 kept them in `kmain.fi` and other modules
-// wrote the number (`user.fi` still tests 2048 by hand); the three that
-// round K1 needs are read in three different files, so they live here.
-const M_NOKBD: u64 = 256 // no keyboard in this run
-const M_OSUM: u64 = 131072 // mount the drive and start /bin/sh from it
-const M_NOBSS: u64 = 262144 // counter-check: do NOT zero what the file
-// does not fill -- the poison pattern stays visible
+// WORT 0, DER KERN. Die Schalter, die es schon vor den benannten Runden
+// gab; sie standen bis Runde K17 in `kmain.fi` und stehen jetzt hier,
+// damit der Modusraum an EINER Stelle steht. Die Zahlen sind Bitindizes
+// in Wort 0 und damit dieselben Bitnummern wie vorher.
+const M_NOKBD: u64 = 8 // Wort 0, Bit 8 -- keine Tastatur in diesem Lauf
+const M_NORING3: u64 = 9 // Wort 0, Bit 9 -- kein Ausflug nach Ring 3
+const M_NOTIMER: u64 = 10 // Wort 0, Bit 10 -- kein Zeitgeber
+const M_R3FAULT: u64 = 11 // Wort 0, Bit 11 -- Ring 3 loest einen Fehler aus
+const M_NOSCHED: u64 = 12 // Wort 0, Bit 12 -- kein Scheduler
+const M_NOPREEMPT: u64 = 13 // Wort 0, Bit 13 -- keine Verdraengung
+const M_NOPROC: u64 = 14 // Wort 0, Bit 14 -- keine Prozesse
+const M_NOFS: u64 = 15 // Wort 0, Bit 15 -- kein Dateisystem
+const M_ATA: u64 = 16 // Wort 0, Bit 16 -- die echte Platte ueber ATA PIO
+const M_OSUM: u64 = 17 // Wort 0, Bit 17 -- Platte einhaengen, /bin/sh starten
+const M_NOBSS: u64 = 18 // Wort 0, Bit 18 -- GEGENPROBE: NICHT nullen, was
+// die Datei offen laesst -- das Giftmuster bleibt sichtbar
+const M_CAPS: u64 = 19 // Wort 0, Bit 19 -- die Capability-Schicht
 
 // ROUND K9. Two of the three are GEGENPROBEN and nothing else: without
 // them the round proves nothing.
@@ -1050,11 +1187,9 @@ const M_NOBSS: u64 = 262144 // counter-check: do NOT zero what the file
 //   `fixedrand` the generator hands out the same octet for ever. The
 //              statistical check has to FAIL -- a check that cannot fail
 //              measures nothing.
-const M_UNIX: u64 = 1048576
-const M_NOSIG: u64 = 2097152
-const M_FIXRAND: u64 = 4194304
-
-// RUNDE K10. Wieder sind die meisten davon GEGENPROBEN, und ohne sie
+const M_UNIX: u64 = 20 // Wort 0, Bit 20
+const M_NOSIG: u64 = 21 // Wort 0, Bit 21
+const M_FIXRAND: u64 = 22 // Wort 0, Bit 22
 // beweist die Runde nichts:
 //
 //   `wm`       Maus, Fensterserver und Schriften anschalten.
@@ -1070,55 +1205,49 @@ const M_FIXRAND: u64 = 4194304
 //              stehen.
 //   `wmhold`   am Ende stillhalten, damit ein Bildschirmfoto entsteht.
 //   `wmshell`  im Terminalfenster wirklich /bin/sh starten.
-const M_WM: u64 = 8388608
-const M_NODIRTY: u64 = 16777216
-const M_NOFOCUS: u64 = 33554432
-const M_NOMOUSE: u64 = 67108864
-const M_WMHOLD: u64 = 134217728
-const M_WMSHELL: u64 = 268435456
-// `nompoll` -- der Fensterserver sieht NICHT im Baustein nach, er wartet
+const M_WM: u64 = 64 // Wort 1, Bit 0
+const M_NODIRTY: u64 = 65 // Wort 1, Bit 1
+const M_NOFOCUS: u64 = 66 // Wort 1, Bit 2
+const M_NOMOUSE: u64 = 67 // Wort 1, Bit 3
+const M_WMHOLD: u64 = 68 // Wort 1, Bit 4
+const M_WMSHELL: u64 = 69 // Wort 1, Bit 5
 // nur auf IRQ 12. Die Gegenprobe zu dem Rueckfall, den QEMU noetig macht.
-const M_NOMPOLL: u64 = 536870912
-// `ttfdump` -- einige Glyphen als Text auf die serielle Leitung.
-const M_TTFDUMP: u64 = 1073741824
-
-// RUNDE K16. `nobigmem` -- die GROSSE Arena abschalten (`sys.big_map`).
+const M_NOMPOLL: u64 = 70 // Wort 1, Bit 6
+const M_TTFDUMP: u64 = 71 // Wort 1, Bit 7
 // Das ist die Gegenprobe zu ihr: mit dem Wort MUSS der Uebersetzer an
 // dem Punkt stehenbleiben, an dem er mehr Speicher haben will als die
 // alte Halde hergibt. Bleibt er es nicht, hat er die Arena nie gebraucht
 // und sie beweist nichts.
-const M_NOBIG: u64 = 2147483648
-
-// RUNDE K16. `nostackgrow` -- der Stapel waechst NICHT. Die Gegenprobe zu
+const M_NOBIG: u64 = 256 // Wort 4, Bit 0
 // `proc.grow_stack`: damit muss der Uebersetzer an derselben Stelle
 // sterben wie vor dieser Runde, und der Zaehler STACKGROW bleibt bei
 // null. Ein Stapel, der auch ohne die Eigenschaft reicht, beweist
 // nichts.
-const M_NOSTACK: u64 = 4294967296
-// RUNDE K15. `wig` startet die Anwendung mit der Widget-Bibliothek,
+const M_NOSTACK: u64 = 257 // Wort 4, Bit 1
 // `wigfiles` den Dateimanager. Die Gegenproben stehen daneben:
 // `wignohit` nimmt der Bibliothek die Trefferpruefung (ein Klick landet
 // bei keinem Widget), `wignoclip` die Zwischenablage. Beide werden der
 // Anwendung als ARGUMENT mitgegeben und nicht als Kernelmodus -- die
 // Eigenschaft, die abgeschaltet wird, liegt in Ring 3.
-const M_WIG: u64 = 549755813888 // 1 << 39
-const M_WIGFILES: u64 = 1099511627776 // 1 << 40
-const M_WIGNOHIT: u64 = 2199023255552 // 1 << 41
-const M_WIGNOCLIP: u64 = 4398046511104 // 1 << 42
-const M_WIGLONG: u64 = 8796093022208 // 1 << 43
-const M_WIGSTART: u64 = 17592186044416 // 1 << 44
-const M_WIGNOKEYS: u64 = 35184372088832 // 1 << 45
+const M_WIG: u64 = 72 // Wort 1, Bit 8
+const M_WIGFILES: u64 = 73 // Wort 1, Bit 9
+const M_WIGNOHIT: u64 = 74 // Wort 1, Bit 10
+const M_WIGNOCLIP: u64 = 75 // Wort 1, Bit 11
+const M_WIGLONG: u64 = 76 // Wort 1, Bit 12
+const M_WIGSTART: u64 = 77 // Wort 1, Bit 13
+const M_WIGNOKEYS: u64 = 78 // Wort 1, Bit 14
 // ZWEITER NACHTRAG: DIESELBE SUCHE OHNE DEN NAMENSINDEX. Dann findet
 // "blau" nichts -- kein Programm heisst so, und ohne Index gibt es keine
 // Dateitreffer. Das ist die Gegenprobe zu der Zusage, dass die Suche im
 // GANZEN Dateisystem sucht und nicht nur in einer Anwendungsliste.
-const M_WIGNOIDX: u64 = 70368744177664 // 1 << 46
-// RUNDE SPEICHER: `/bin/speicher`, die Speicherplatzanalyse.  Sie
-// sitzt auf derselben Widget-Bibliothek wie die Anwendungen der
-// Runde K15 und wird deshalb an derselben Stelle gestartet -- ein
-// Programm von der Platte, kein eingebauter Kernelteil.  Das Bit
-// ist 1 << 54; 47..53 gehoeren der Energieschicht der Runde K18.
-const M_WIGSPEICHER: u64 = 18014398509481984 // 1 << 54
+const M_WIGNOIDX: u64 = 79 // Wort 1, Bit 15
+// RUNDE SPEICHER: `/bin/speicher`, die Speicherplatzanalyse. Sie sitzt
+// auf derselben Widget-Bibliothek wie die Anwendungen der Runde K15
+// und gehoert deshalb in DEREN Wort. Sie hatte 1 << 54 gewaehlt -- und
+// Runde MEM hatte dieselbe Zahl gewaehlt. Zwei Schalter auf einem Bit:
+// `memstress` haette die Speicherplatzanalyse mitgestartet und
+// umgekehrt. Der Modusvektor der Runde K17 loest genau das auf.
+const M_WIGSPEICHER: u64 = 80 // Wort 1, Bit 16
 
 
 // --------------------------------------------------------- the accesses
@@ -1161,4 +1290,52 @@ fn get8(p: u64) -> u64 {
 
 fn set8(p: u64, v: u8) {
     __mmio_write8(p as *mut u8, v)
+}
+
+// ------------------------------------------------------------ RUNDE K17
+//
+// WORT 6 DES MODUSVEKTORS -- DIE ERSTE RUNDE, DIE EIN EIGENES WORT
+// BEKOMMT statt Bits aus einem gemeinsamen Vorrat. Genau daran ist der
+// erste Anlauf dieser Runde gescheitert: sie und Runde K18 hatten
+// unabhaengig voneinander dieselben sieben Bits genommen (1<<47 bis
+// 1<<53), und danach waren im ganzen u64 nur noch vier frei.
+//
+// `usb` schaltet den Baum dieser Runde an; alles andere sind
+// GEGENPROBEN, und ohne sie beweist die Runde nichts.
+const M_USB: u64 = 384 // Wort 6, Bit 0 -- den Regler aufsetzen
+const M_NOUSB: u64 = 385 // Wort 6, Bit 1 -- GEGENPROBE: gar kein USB
+const M_USBPOLL: u64 = 386 // Wort 6, Bit 2 -- GEGENPROBE: ohne Meldung
+const M_NOHID: u64 = 387 // Wort 6, Bit 3 -- GEGENPROBE: keine Eingabe
+const M_NOMSC: u64 = 388 // Wort 6, Bit 4 -- GEGENPROBE: kein Stick
+const M_UNPLUG: u64 = 389 // Wort 6, Bit 5 -- im Betrieb abziehen
+const M_NOUSBIRQ: u64 = 390 // Wort 6, Bit 6 -- Vektor bleibt maskiert
+const M_USBSTICK: u64 = 391 // Wort 6, Bit 7 -- den Stick einhaengen
+const M_USBHOLD: u64 = 392 // Wort 6, Bit 8 -- stillhalten und dienen
+
+// --------------------------------------------------------- der Modusvektor
+//
+// DIE EINZIGEN ZWEI ZUGRIFFE AUF DEN MODUS. Ein Modusname ist ein
+// Bitindex (Wort * 64 + Bit); welches Wort das ist, rechnet sich hier
+// aus dem Index aus, und deshalb muss keine aufrufende Stelle wissen,
+// in welchem Wort ihr Schalter liegt. Eine Maske steht nirgends mehr
+// im Quelltext -- genau daran sind K17 und K18 aneinandergeraten.
+//
+// `bit` MUSS kleiner als MODE_WORDS * 64 sein; `tools/kernel/karte.py`
+// rechnet das fuer jeden Namen im Baum nach, bevor etwas gebaut wird.
+fn mode_on(state: u64, bit: u64) -> bool {
+    let m: u64 = 1 << (bit % 64)
+    return (get(state, MODE_OFF + (bit / 64) * 8) & m) != 0
+}
+
+fn mode_add(state: u64, bit: u64) {
+    let off: u64 = MODE_OFF + (bit / 64) * 8
+    let m: u64 = 1 << (bit % 64)
+    set(state, off, get(state, off) | m)
+}
+
+// Ein ganzes Wort, fuer die Faelle, die den Modus als ZAHL brauchen --
+// die Trap-Art in `kmain.provoke` (Wort 0, Bits 0..2) und die Ausgabe
+// des Modus auf der seriellen Leitung.
+fn mode_word(state: u64, w: u64) -> u64 {
+    return get(state, MODE_OFF + w * 8)
 }
