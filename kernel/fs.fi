@@ -114,7 +114,15 @@ export {
     dirent_size, name_len, inode_bytes, bm_start, bm_blocks, itable,
     inode_ctime, inode_mtime, inode_atime, set_times, touch_atime,
     max_file, max_blocks, format_as, path_nofollow, symlink_path,
-    readlink_at, link_target_len, follows_links
+    readlink_at, link_target_len, follows_links,
+    // ---------------------------------------------------- RUNDE INSTALL
+    // Die Namen, unter denen Runde INSTALL dieselben Zahlen anspricht,
+    // und das eine, was OFS3 nicht hat: ein ZWEITER NAME auf dieselben
+    // Oktette (`link_path`) und die Groesse des DATEISYSTEMS, die
+    // kleiner sein darf als die des Geraets (`total_blocks`).
+    bitmap_blocks, bitmap_needed, total_blocks, SB_BITBLOCKS,
+    SB_BLOCKS, SB_MAGIC, SB_DATA, SB_ITABLE, SB_INODES, SB_VERSION,
+    link_path
 }
 
 const BS: u64 = 512 // one block
@@ -229,6 +237,12 @@ const G_NAMELEN: u64 = 64 // Oktette fuer den Namen darin
 // fertig. Hier steht, wo der letzte Fund lag; die Suche faengt dort an
 // und laeuft einmal rundherum.
 const G_HINT: u64 = 72
+// RUNDE INSTALL, in die Zaehlung von OFS3 eingehaengt: wie viele
+// Bloecke das DATEISYSTEM hat -- nicht das Geraet. Eine Partition darf
+// groesser sein als das Dateisystem darauf; ohne diese Zahl wuerde
+// `block_alloc` Bloecke hinter dem Ende der Karte vergeben. OFS3 hat
+// die Woerter 0 bis 72 belegt, dieses ist das naechste freie.
+const G_TOTAL: u64 = 80
 
 fn inode_count(state: u64) -> u64 {
     let n: u64 = kstate.get(state, kstate.FSG_OFF + G_INODES)
@@ -272,6 +286,37 @@ fn bm_blocks(state: u64) -> u64 {
         return 1
     }
     return v
+}
+
+// RUNDE INSTALL: derselbe Wert unter dem Namen, unter dem die Runde
+// INSTALL ihn ueberall anspricht. Zwei Runden haben dieselbe Zahl
+// gebraucht und ihr zwei Namen gegeben; hier steht sie EINMAL, und der
+// zweite Name ruft den ersten.
+fn bitmap_blocks(state: u64) -> u64 {
+    return bm_blocks(state)
+}
+
+// Wie viele Kartenbloecke `n` Bloecke brauchen. EIN Block fasst
+// BS * 8 = 4096 Bits.
+fn bitmap_needed(n: u64) -> u64 {
+    return (n + BITS_PER_BLOCK - 1) / BITS_PER_BLOCK
+}
+
+fn geom_total(state: u64, n: u64) {
+    kstate.set(state, kstate.FSG_OFF + G_TOTAL, n)
+}
+
+// Die Zahl der Bloecke, mit der dieses Dateisystem rechnet. Es ist die
+// KLEINERE von beiden: was der Superblock sagt und was das Geraet
+// hergibt. Eine 0 in der Geometrie heisst "das Geraet", und damit ist
+// jeder Lauf vor dieser Runde unveraendert.
+fn total_blocks(state: u64) -> u64 {
+    let dev: u64 = blk.blocks(state)
+    let n: u64 = kstate.get(state, kstate.FSG_OFF + G_TOTAL)
+    if n == 0 || n > dev {
+        return dev
+    }
+    return n
 }
 
 fn itable(state: u64) -> u64 {
@@ -408,6 +453,12 @@ const SB_BMBLOCKS: u64 = 72
 const SB_ISIZE: u64 = 80
 const SB_DIRENT: u64 = 88
 const SB_NAMELEN: u64 = 96
+// RUNDE INSTALL nennt dasselbe Wort SB_BITBLOCKS. Es ist DASSELBE Wort
+// -- beide Runden haben unabhaengig voneinander Versatz 72 fuer die
+// Zahl der Kartenbloecke gewaehlt, und die Abbilder beider Runden sind
+// damit dieselben. Der zweite Name bleibt, weil `install.fi` und
+// `opk.fi` ihn benutzen.
+const SB_BITBLOCKS: u64 = 72
 const OFS_V1: u64 = 1
 const OFS_V2: u64 = 2
 const OFS_V3: u64 = 3
@@ -878,7 +929,11 @@ fn bm_byte(b: u64) -> u64 {
 }
 
 fn block_alloc(state: u64) -> u64 {
-    let last: u64 = blk.blocks(state)
+    // RUNDE INSTALL: die Grenze ist das DATEISYSTEM und nicht das
+    // Geraet. Auf einer Partition, die groesser ist als das Dateisystem
+    // darauf, vergaebe `blk.blocks` Bloecke, ueber die die Karte kein
+    // Bit hat.
+    let last: u64 = total_blocks(state)
     var lim: u64 = max_blocks(state)
     if last < lim {
         lim = last
@@ -941,7 +996,7 @@ fn suche(state: u64, von: u64, bis: u64) -> u64 {
 }
 
 fn block_free(state: u64, b: u64) {
-    if b < data_start(state) || b >= blk.blocks(state) {
+    if b < data_start(state) || b >= total_blocks(state) {
         return
     }
     if b >= max_blocks(state) {
@@ -967,7 +1022,7 @@ fn block_free(state: u64, b: u64) {
 // die beiden Faelle, die auf einer echten Platte fast alles ausmachen,
 // und beide kosten hier eine Abfrage statt acht.
 fn free_blocks(state: u64) -> u64 {
-    let last: u64 = blk.blocks(state)
+    let last: u64 = total_blocks(state)
     var lim: u64 = max_blocks(state)
     if last < lim {
         lim = last
@@ -1973,6 +2028,25 @@ fn unlink_path(state: u64, p: u64) -> bool {
             return false
         }
     }
+    // RUNDE INSTALL: DER ZAEHLER DER NAMEN WIRD JETZT GELESEN.
+    //
+    // Bis hierher hat `unlink` die Inode IMMER freigegeben -- richtig,
+    // solange jede Datei genau einen Namen hatte. Seit `link_path` gibt
+    // es zweite Namen aus Ring 3 (das Produkt-Abbild hatte sie vorher
+    // schon, gebaut von mkfs.py auf dem Wirt), und dann waere das hier
+    // ein Datenverlust: `rm /apps/hallo.osp/start` haette die Oktette
+    // des Store-Eintrags mitgenommen, obwohl `/store/<hash>/start` noch
+    // darauf zeigt.
+    //
+    // Ein Verzeichnis hat weiter genau einen Namen (`link_path` sagt
+    // nein), also aendert sich fuer Verzeichnisse gar nichts.
+    let nl: u64 = inode_get(state, ino, I_NLINK)
+    if nl > 1 && inode_type(state, ino) == T_FILE {
+        inode_set(state, ino, I_NLINK, nl - 1)
+        dir_remove(state, dir, name)
+        leave(state, flags)
+        return true
+    }
     file_truncate(state, ino)
     inode_set(state, ino, I_TYPE, T_FREE)
     inode_set(state, ino, I_NLINK, 0)
@@ -2041,6 +2115,59 @@ fn rename_path(state: u64, from: u64, to: u64) -> u64 {
         dir_remove(state, ino, (&dotdot[0]) as u64)
         dir_add(state, ino, (&dotdot[0]) as u64, ndir)
     }
+    leave(state, flags)
+    return 0
+}
+
+// ============================================== RUNDE INSTALL: link
+//
+// EIN ZWEITER NAME FUER DIESELBEN OKTETTE. Das Format kann es seit
+// Runde 62 -- ein Verzeichniseintrag ist eine Inodenummer und ein Name,
+// und nichts hindert zwei Eintraege daran, dieselbe Zahl zu tragen.
+// `mkfs.py` nutzt es seit Runde K15 (`<neu>@<vorhanden>`), und das
+// Produkt-Abbild von OrientOS lebt davon: `/apps/explorer.osp/start`
+// und `/bin/explorer` sind ein Exemplar und zwei Namen.
+//
+// WAS FEHLTE, WAR DER WEG AUS RING 3. Ohne ihn kann ein `opk`, das AUF
+// dem System laeuft, die aktivierte Sicht `/apps` nicht bauen: es
+// muesste jede Datei des Store-Eintrags KOPIEREN, und dann waere ein
+// Paket zweimal auf der Platte und "gleicher Hash = dieselben Oktette"
+// nur noch die halbe Wahrheit.
+//
+// NUR DATEIEN. Ein zweiter Name auf ein VERZEICHNIS macht aus dem Baum
+// einen Graphen mit Zyklen -- jedes Unix seit 1979 verbietet es, und
+// dieses hier auch. Der Zaehler `I_NLINK` wird mitgefuehrt; `unlink`
+// nimmt ihn herunter und gibt die Bloecke erst frei, wenn er 1 war.
+//
+// DER NAMENSPUFFER kommt aus `kstate` und ist kein Feld auf dem Stapel:
+// in der Fassung 3 ist ein Name bis NAME_V3 Oktette lang, und ein
+// Puffer von 32 waere dort zu klein.
+fn link_path(state: u64, from: u64, to: u64) -> u64 {
+    let newname: u64 = state + kstate.OFS3_OFF + kstate.OP_NEW
+    let flags: u64 = enter(state)
+    let ino: u64 = path(state, from)
+    if ino == 0 {
+        leave(state, flags)
+        return 2 // ENOENT
+    }
+    if inode_type(state, ino) != T_FILE {
+        leave(state, flags)
+        return 1 // EPERM -- kein zweiter Name auf ein Verzeichnis
+    }
+    let ndir: u64 = parent_of(state, to, newname)
+    if ndir == 0 {
+        leave(state, flags)
+        return 2
+    }
+    if dir_find(state, ndir, newname) != 0 {
+        leave(state, flags)
+        return 17 // EEXIST
+    }
+    if !dir_add(state, ndir, newname, ino) {
+        leave(state, flags)
+        return 28 // ENOSPC
+    }
+    inode_set(state, ino, I_NLINK, inode_get(state, ino, I_NLINK) + 1)
     leave(state, flags)
     return 0
 }
@@ -2117,6 +2244,10 @@ fn format_as(state: u64, v: u64, inodes: u64) -> bool {
     }
     geom3(state, bms, bmb, itab, isz, ipb, dent, nlen)
     geom(state, inodes, ds)
+    // RUNDE INSTALL: was frisch formatiert wird, ist genau so gross wie
+    // das Geraet -- die Zahl steht trotzdem da, damit `total_blocks`
+    // nicht auf die Vorgabe zurueckfaellt.
+    geom_total(state, total)
     // The superblock.
     zero(buf_sb(state), BS)
     put64(buf_sb(state) + SB_MAGIC, MAGIC)
@@ -2317,9 +2448,17 @@ fn mount(state: u64) -> bool {
         return false
     }
     geom(state, ni, ds)
+    // RUNDE INSTALL: DIE GROESSE DES DATEISYSTEMS, aus dem Superblock.
+    // Sie ist hoechstens die des Geraets; eine 0 heisst "das Geraet".
+    var tot: u64 = get64(buf_sb(state) + SB_BLOCKS)
+    if tot == 0 || tot > blk.blocks(state) {
+        tot = blk.blocks(state)
+    }
+    geom_total(state, tot)
     let r: u64 = get64(buf_sb(state) + SB_ROOT)
     if inode_get(state, r, I_TYPE) != T_DIR {
         geom(state, INODE_COUNT, DATA_START)
+        geom_total(state, 0)
         geom3(state, BITMAP_BLOCK, 1, INODE_START, INODE_SIZE,
             INODES_PER_BLOCK, DIRENT, NAME_LEN)
         leave(state, flags)

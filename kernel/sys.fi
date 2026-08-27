@@ -80,6 +80,8 @@ import vfsops
 import devfs
 import part
 import blk
+// RUNDE INSTALL: `sync` schreibt auch die FSInfo-Seite von FAT32.
+import fat
 
 export {
     entry, neg, STAT_BYTES, DIRENT_HEAD,
@@ -101,6 +103,7 @@ export {
     SYS_VM_CREATE, SYS_VM_RUN, SYS_VM_STAT, SYS_VM_KILL, SYS_VM_VALUE,
     SYS_OSUM_SETENV, SYS_OSUM_MOUNT,
     SYS_MOUNT, SYS_UMOUNT2, SYS_RENAME, SYS_OSUM_MNTSTAT,
+    SYS_LINK, SYS_SYNC,
     SYS_OSUM_FTYPE, SYS_OSUM_FOPEN, SYS_OSUM_FLIST, SYS_OSUM_FREG,
     CAP_BASE, CAP_VERSION, CAP_READ, CAP_WRITE, CAP_CLOSE, CAP_DUP,
     CAP_INSPECT, CAP_TRANSFER, CAP_COUNT, CAP_MAXNR,
@@ -555,6 +558,22 @@ const UI_COUNT: u64 = 18
 //         Kernel. Damit kann ein Programm in Ring 3 die Tafel lesen,
 //         ohne dass /proc dafuer stehen muss -- und der Testlauf kann
 //         beide Wege gegeneinander halten.
+// ================================================== RUNDE INSTALL
+//
+// ZWEI AUFRUFE, BEIDE MIT LINUX' NUMMER -- die erste Regel dieser Karte
+// gilt weiter, und diese Runde braucht deshalb KEINEN eigenen
+// Hunderterblock. Das ist die ehrliche Antwort auf die Frage, wo der
+// naechste Block waere: unter 2000 ist keiner mehr frei, und beide
+// Aufrufe gibt es bei Linux seit 1991.
+//
+//   `link`  ein ZWEITER NAME fuer dieselben Oktette. Ohne ihn kann ein
+//           `opkg`, das AUF diesem System laeuft, `/apps` nicht bauen,
+//           ohne jedes Paket ein zweites Mal auf die Platte zu legen.
+//   `sync`  alles, was noch im Zwischenspeicher der Platte steht, auf
+//           den Traeger. Ohne ihn ist "geschrieben" eine Aussage ueber
+//           einen Zwischenspeicher, und ein Stromausfall haette recht.
+const SYS_LINK: u64 = 86
+const SYS_SYNC: u64 = 162
 const SYS_MOUNT: u64 = 165
 const SYS_UMOUNT2: u64 = 166
 const SYS_RENAME: u64 = 82
@@ -1011,6 +1030,13 @@ fn dispatch(number: u64, frame: u64, state: u64) -> u64 {
         return do_mount(state, a0)
     }
     // ---------------------------------------------------- RUNDE K14
+    // RUNDE INSTALL.
+    if number == SYS_LINK {
+        return do_link(state, me, a0, a1)
+    }
+    if number == SYS_SYNC {
+        return do_sync(state, me)
+    }
     if number == SYS_MOUNT {
         return do_vfs_mount(state, me, a0, a1, a2, a3)
     }
@@ -4219,6 +4245,78 @@ fn do_vfs_umount(state: u64, me: u64, target: u64) -> u64 {
 
 // `rename` -- Linux' 82. Die beiden Namen muessen auf DERSELBEN
 // Einhaengung liegen; sonst -EXDEV, und `mv` weiss, was das heisst.
+// ================================================== RUNDE INSTALL
+//
+// EIN ZWEITER NAME. Die Rechtefrage ist dieselbe wie bei `unlink`, nur
+// andersherum: ein Name ENTSTEHT in einem Verzeichnis, also wird nach
+// dem Schreibrecht an diesem Verzeichnis gefragt und nicht an der
+// Datei. Und wie bei jedem Unix seit 1979: nur Dateien, nie
+// Verzeichnisse -- `fs.link_path` sagt dazu selbst nein, hier steht es
+// noch einmal, damit der Fehlerwert der richtige ist.
+//
+// NUR AUF DER WURZEL. Ein zweiter Name ueber eine Einhaengegrenze
+// hinweg ist keine Verbindung, sondern eine Kopie mit einem falschen
+// Namen; Linux sagt dazu EXDEV, und dieser Kern auch. FAT32 kennt
+// ueberhaupt keine zweiten Namen.
+fn do_link(state: u64, me: u64, from: u64, to: u64) -> u64 {
+    let a: u64 = state + kstate.NAME_OFF
+    let b: u64 = state + kstate.NAME_OFF + 1024
+    let la: u64 = fetch_path(state, me, from, a, MAX_NAME)
+    if errno.is_error(la) {
+        return la
+    }
+    let lb: u64 = fetch_path(state, me, to, b, MAX_NAME)
+    if errno.is_error(lb) {
+        return lb
+    }
+    if vfs.ready(state) {
+        let ma: u64 = vfs.mount_for(state, a)
+        let mb: u64 = vfs.mount_for(state, b)
+        if ma != mb {
+            return neg(errno.E_XDEV)
+        }
+        if ma != 0 {
+            return neg(errno.E_PERM)
+        }
+    }
+    if kstate.get(state, kstate.FS_READY) == 0 {
+        return neg(errno.E_NOSYS)
+    }
+    if fs.path(state, b) != 0 {
+        return neg(errno.E_EXIST)
+    }
+    let dir: u64 = fs.parent_ino(state, b)
+    if dir == 0 {
+        return neg(errno.E_NOENT)
+    }
+    if !perm.may(state, me, dir, perm.R_WRITE | perm.R_EXEC) {
+        return neg(errno.E_ACCES)
+    }
+    let r: u64 = fs.link_path(state, a, b)
+    if r != 0 {
+        return neg(r)
+    }
+    return 0
+}
+
+// ALLES AUF DEN TRAEGER. Die Zusage ist genau die von ATA FLUSH CACHE:
+// der Befehl kommt zurueck, wenn nichts mehr aussteht. Fuer eine
+// RAM-Platte ist er die Wahrheit ohne Arbeit, fuer FAT32 wird zusaetzlich
+// die FSInfo-Seite geschrieben.
+fn do_sync(state: u64, me: u64) -> u64 {
+    var k: u64 = 0
+    while k < vfs.MAX_MNT {
+        if mnt.used(state, k) && mnt.fstype(state, k) == vfsops.FS_FAT {
+            fat.sync(state, k)
+        }
+        k = k + 1
+    }
+    if !blk.flush(state) {
+        return neg(errno.E_IO)
+    }
+    return 0
+}
+
 fn do_rename(state: u64, me: u64, from: u64, to: u64) -> u64 {
     let a: u64 = state + kstate.NAME_OFF
     let b: u64 = state + kstate.NAME_OFF + 1024

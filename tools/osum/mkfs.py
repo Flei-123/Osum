@@ -133,12 +133,17 @@ SB = dict(MAGIC=0, BSIZE=8, BLOCKS=16, INODES=24, BITMAP=32, ITABLE=40,
           DATA=48, ROOT=56, VERSION=64,
           # RUNDE OFS3: vier Felder, alle mit derselben Regel wie
           # VERSION -- eine Null heisst "wie vor dieser Runde".
-          BMBLOCKS=72, ISIZE=80, DIRENT=88, NAMELEN=96)
+          BMBLOCKS=72, ISIZE=80, DIRENT=88, NAMELEN=96,
+          # RUNDE INSTALL nennt Wort 72 BITBLOCKS. Es ist DASSELBE Wort;
+          # beide Runden haben unabhaengig voneinander denselben Versatz
+          # gewaehlt. Der zweite Name bleibt stehen, weil die Werkzeuge
+          # der Runde INSTALL ihn benutzen.
+          BITBLOCKS=72)
 
 
 class Fs:
     def __init__(self, blocks, version=OFS_V2, inodes=INODE_COUNT,
-                 zeit=0):
+                 zeit=0, karten=0):
         self.inodes = inodes
         self.version = version
         self.zeit = zeit
@@ -159,7 +164,25 @@ class Fs:
             self.ipb = INODES_PER_BLOCK
             self.dirent = DIRENT
             self.namelen = NAME_LEN
-            self.bmblocks = 1
+            # RUNDE INSTALL: AUCH IN DER FASSUNG 2 DARF DIE KARTE
+            # MEHRBLOCKIG SEIN. `fs.mount` liest Wort 72 des Superblocks
+            # OHNE auf die Fassungsnummer zu sehen -- die Zahl beschreibt
+            # eine Groesse und keine andere Bedeutung bestehender Felder.
+            # Bei bis zu 4096 Bloecken kommt 1 heraus, und ein Abbild
+            # ohne `--karten` ist damit Oktett fuer Oktett das von vorher.
+            self.bmblocks = max(1, (blocks + BITS_PER_BLOCK - 1)
+                                // BITS_PER_BLOCK)
+        # RUNDE INSTALL: VORRAT AN KARTENBLOECKEN. `--karten=n` legt
+        # MEHR Kartenbloecke an, als die Platte braucht; die Bits
+        # dahinter stehen auf BELEGT. Genau das braucht ein
+        # Installationsprogramm, das dasselbe Dateisystem spaeter auf
+        # einer groesseren Partition WACHSEN lassen will: es setzt die
+        # neue Blockzahl in den Superblock und macht die Bits frei.
+        # Ohne Vorrat muesste dabei die Inodetabelle wandern, und das
+        # ist kein Wachsen mehr, sondern ein Neubau.
+        if karten > self.bmblocks:
+            self.bmblocks = karten
+        self.karten = self.bmblocks
         self.bmstart = BITMAP_BLOCK
         self.itable = self.bmstart + self.bmblocks
         self.itab_blocks = (inodes + self.ipb - 1) // self.ipb
@@ -168,11 +191,6 @@ class Fs:
             raise SystemExit("mkfs: a disk of %d blocks is too small for %d "
                              "inodes (the table alone takes %d)"
                              % (blocks, inodes, self.itab_blocks))
-        if blocks > self.bmblocks * BITS_PER_BLOCK:
-            raise SystemExit("mkfs: die Karte hat %d Bloecke, also passen "
-                             "hoechstens %d Bloecke; %d verlangt"
-                             % (self.bmblocks,
-                                self.bmblocks * BITS_PER_BLOCK, blocks))
         self.blocks = blocks
         # RUNDE OFS3: NUR SO VIEL, WIE GEBRAUCHT WIRD. Am Anfang die
         # Verwaltung und ein paar Datenbloecke; `_deck` legt nach.
@@ -217,6 +235,9 @@ class Fs:
 
     def bit_set(self, b):
         self.d[self._bm_at(b)] |= 1 << (b % 8)
+
+    def bit_clear(self, b):
+        self.d[self._bm_at(b)] &= 0xFF ^ (1 << (b % 8))
 
     def bit_get(self, b):
         return (self.d[self._bm_at(b)] >> (b % 8)) & 1
@@ -651,6 +672,12 @@ class Fs:
             self.p64(SB["ISIZE"], self.isize)
             self.p64(SB["DIRENT"], self.dirent)
             self.p64(SB["NAMELEN"], self.namelen)
+        elif self.bmblocks > 1:
+            # RUNDE INSTALL: in der Fassung 2 steht NUR diese eine Zahl
+            # da, und auch sie nur, wenn sie etwas Neues sagt. Eine 0
+            # heisst 1 -- ein Abbild mit einem Kartenblock bleibt damit
+            # Oktett fuer Oktett dasselbe wie vor beiden Runden.
+            self.p64(SB["BMBLOCKS"], self.bmblocks)
         for b in range(self.data_start):
             self.bit_set(b)
         # WAS HINTER DER PLATTE LIEGT, GILT ALS BELEGT -- dieselbe Regel
@@ -704,8 +731,15 @@ def load(path):
         ipb = BS // isz
     bmb = struct.unpack_from("<Q", raw, SB["BMBLOCKS"])[0] or 1
     noetig = (1 + bmb + (inodes + ipb - 1) // ipb + 8)
-    fs = Fs(max(len(raw) // BS, noetig), version, inodes)
+    fs = Fs(max(len(raw) // BS, noetig), version, inodes, 0, bmb)
     fs.d[:len(raw)] = raw
+    # RUNDE INSTALL: auch eine Fassung 2 kann eine mehrblockige Karte
+    # haben, und dann wandert die Inodetabelle mit.
+    if version < OFS_V3 and bmb > 1:
+        fs.bmblocks = bmb
+        fs.karten = bmb
+        fs.itable = struct.unpack_from("<Q", raw, SB["ITABLE"])[0]
+        fs.data_start = struct.unpack_from("<Q", raw, SB["DATA"])[0]
     if version >= OFS_V3:
         fs.bmstart = struct.unpack_from("<Q", raw, SB["BITMAP"])[0] or 1
         fs.bmblocks = bmb
@@ -828,6 +862,7 @@ def main(argv):
     inodes = INODE_COUNT
     zeit = 0
     reserve = 0
+    karten = 0
     rest = []
     for spec in argv[4:]:
         if spec in ("--v1", "--v3"):
@@ -850,6 +885,11 @@ def main(argv):
         if spec.startswith("--reserve="):
             reserve = int(spec.split("=", 1)[1])
             continue
+        # RUNDE INSTALL: `--karten=<n>` -- der Vorrat an Kartenbloecken,
+        # siehe `Fs.__init__`.
+        if spec.startswith("--karten="):
+            karten = int(spec.split("=", 1)[1])
+            continue
         rest.append(spec)
     # RUNDE OFS3: DIE VORGABE BLEIBT FASSUNG 2. Das ist keine
     # Zaghaftigkeit -- Abschnitt 15d von `tools/k15/run.sh` baut dasselbe
@@ -862,7 +902,7 @@ def main(argv):
         v = OFS_V1
     if "--v3" in argv[4:]:
         v = OFS_V3
-    fs = Fs(blocks, v, inodes, zeit)
+    fs = Fs(blocks, v, inodes, zeit, karten)
     fs.format()
     if reserve:
         fs.reserve(reserve)

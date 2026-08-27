@@ -1,0 +1,1314 @@
+// kernel/user/opk.fi -- RUNDE INSTALL: DIE PAKETVERWALTUNG, AUF OSUM
+// SELBST.
+//
+// WAS PAKETE.MD OFFENGELASSEN HAT, und es stand dort woertlich:
+// „`opk` laeuft auf dem Wirt, nicht auf Osum. Es ist ein
+// Python-Programm; das gebootete System hat kein Python. Ein `/bin/opk`
+// in Firn waere die ehrliche Fortsetzung [...] es fehlt also nicht das
+// Werkzeug, sondern die Runde." Das ist diese Runde.
+//
+// KEIN ZWEITES FORMAT. Diese Datei liest und schreibt GENAU das, was
+// `pkg/opk.py` liest und schreibt -- derselbe Kopf, dieselben
+// Metadatenzeilen, dasselbe Archiv, derselbe Store, dieselben
+// PLAN-Dateien. Der Nachweis dafuer steht im Laeufer: ein Paket, das der
+// Wirt gebaut hat, wird HIER installiert, und danach vergleicht der Wirt
+// den Baum mit dem, den SEIN eigenes `opk.py` erzeugt haette.
+//
+// DER EINE UNTERSCHIED, und er ist keine Formatfrage: `/system/AKTUELL`
+// wird mit FESTER BREITE geschrieben (acht Ziffern und ein Zeilenende,
+// neun Oktette). Der Grund ist Punkt 3 dieser Runde --
+// „atomar heisst atomar":
+//
+//   Eine Datei, deren Laenge sich nicht aendert, wird von `write_at` in
+//   GENAU EINEN Datenblock geschrieben, und ein Sektor von 512 Oktetten
+//   erreicht die Platte ganz oder gar nicht. Waere die Datei mal ein
+//   und mal zwei Ziffern lang, muesste zusaetzlich die Groesse im Inode
+//   nachgezogen werden -- zwei Schreibvorgaenge, und dazwischen ein
+//   Zustand, in dem die Zahl schon steht und die Laenge noch nicht.
+//   `opk.py` schreibt seit dieser Runde ebenso; gelesen wird ohnehin
+//   ueber `to_num`, das fuehrende Nullen nicht stoeren.
+//
+// DARAUS FOLGT DER GANZE UMSCHALTPLAN, und er hat genau EINEN Punkt, an
+// dem es umschlaegt:
+//
+//   1. Der Store-Eintrag entsteht unter `/store/.teil` und wird mit
+//      EINEM `rename` sichtbar. Ein Absturz davor laesst einen Rest, den
+//      keine Generation nennt; ein Absturz danach einen fertigen
+//      Eintrag, den noch keine Generation nennt. Beides ist harmlos.
+//   2. Die neue Generation wird als Verzeichnis mit PLAN und GRUND
+//      geschrieben. Sie ist noch niemandes Wahrheit.
+//   3. `/system/AKTUELL` wird umgeschrieben. DAS ist der Umschlag.
+//   4. `/apps` wird neu gebaut. Das ist ABGELEITETER Zustand: er steht
+//      vollstaendig im PLAN der laufenden Generation, und `opk` baut
+//      ihn bei JEDEM Aufruf nach, wenn er nicht dazu passt. Ein Absturz
+//      in diesem Schritt kostet deshalb nichts als den naechsten Aufruf.
+//
+//   opk liste
+//   opk installieren <datei.opk>
+//   opk entfernen <name>
+//   opk aktualisieren <name> --quelle <verzeichnis>
+//   opk generationen
+//   opk zurueck <n>
+//   opk richten
+//   opk pruefen
+
+profile kernel
+
+import ulib
+import sha
+
+export { u_start }
+
+// ------------------------------------------------------------ die Texte
+
+static mut S_USE1: [u8; 10] = "opk liste\0"
+static mut S_USE2: [u8; 29] = "opk installieren <datei.opk>\0"
+static mut S_USE3: [u8; 21] = "opk entfernen <name>\0"
+static mut S_USE4: [u8; 41] = "opk aktualisieren <name> --quelle <verz>\0"
+static mut S_USE5: [u8; 17] = "opk generationen\0"
+static mut S_USE6: [u8; 16] = "opk zurueck <n>\0"
+static mut S_USE7: [u8; 26] = "opk richten | opk pruefen\0"
+
+static mut C_LISTE: [u8; 6] = "liste\0"
+static mut C_INST: [u8; 13] = "installieren\0"
+static mut C_ENTF: [u8; 10] = "entfernen\0"
+static mut C_AKTU: [u8; 14] = "aktualisieren\0"
+static mut C_GEN: [u8; 13] = "generationen\0"
+static mut C_ZUR: [u8; 8] = "zurueck\0"
+static mut C_RICHT: [u8; 8] = "richten\0"
+static mut C_PRUEF: [u8; 8] = "pruefen\0"
+static mut O_QUELLE: [u8; 9] = "--quelle\0"
+static mut O_GRUND: [u8; 8] = "--grund\0"
+
+static mut P_STORE: [u8; 7] = "/store\0"
+static mut P_TEIL: [u8; 13] = "/store/.teil\0"
+static mut P_APPS: [u8; 6] = "/apps\0"
+static mut P_SYS: [u8; 8] = "/system\0"
+static mut P_GENS: [u8; 20] = "/system/generations\0"
+static mut P_AKT: [u8; 16] = "/system/AKTUELL\0"
+static mut P_AKTN: [u8; 20] = "/system/AKTUELL.neu\0"
+static mut P_USERS: [u8; 7] = "/users\0"
+static mut P_ROOT: [u8; 12] = "/users/root\0"
+static mut N_PAKET: [u8; 6] = "PAKET\0"
+static mut N_PLAN: [u8; 5] = "PLAN\0"
+static mut N_GRUND: [u8; 6] = "GRUND\0"
+static mut N_INDEX: [u8; 6] = "INDEX\0"
+static mut N_PROG: [u8; 6] = ".prog\0"
+static mut T_CONF: [u8; 7] = "config\0"
+static mut T_STATE: [u8; 6] = "state\0"
+static mut T_CACHE: [u8; 6] = "cache\0"
+
+static mut M_NAME: [u8; 6] = "name=\0"
+static mut M_FASS: [u8; 9] = "fassung=\0"
+
+static mut E_ARG: [u8; 24] = "opk: fehlt ein Argument\0"
+static mut E_OPEN: [u8; 20] = "opk: nicht lesbar: \0"
+static mut E_GROSS: [u8; 41] = "opk: das Paket passt nicht in den Puffer\0"
+static mut E_KENN: [u8; 22] = "opk: keine OPKG-Datei\0"
+static mut E_LAENG: [u8; 34] = "opk: Laengen im Kopf passen nicht\0"
+static mut E_HASH: [u8; 23] = "opk: Pruefsumme falsch\0"
+static mut E_NONAME: [u8; 32] = "opk: das Paket hat keinen Namen\0"
+static mut E_KOLL: [u8; 45] = "opk: Kurzname belegt von einem anderen Paket\0"
+static mut E_STORE: [u8; 31] = "opk: Store-Eintrag fehlt fuer \0"
+static mut E_NOGEN: [u8; 34] = "opk: die Generation gibt es nicht\0"
+static mut E_KEIN: [u8; 25] = "opk: nicht installiert: \0"
+static mut E_INDEX: [u8; 33] = "opk: die Quelle hat keinen INDEX\0"
+static mut E_NIX: [u8; 38] = "opk: die Quelle kennt das Paket nicht\0"
+static mut E_HASHQ: [u8; 48] = "opk: das Paket passt nicht zum INDEX der Quelle\0"
+
+static mut S_GEN: [u8; 12] = "generation \0"
+static mut S_AKTIV: [u8; 10] = "  (aktiv)\0"
+static mut S_PFEIL: [u8; 5] = " -> \0"
+static mut S_TAB: [u8; 3] = "  \0"
+static mut S_INST: [u8; 18] = "opk: installiert \0"
+static mut S_ENTF: [u8; 15] = "opk: entfernt \0"
+static mut S_ZUR: [u8; 18] = "opk: zurueck auf \0"
+static mut S_RICHT: [u8; 18] = "opk: apps gebaut \0"
+static mut S_OK: [u8; 9] = "opk: ok \0"
+static mut S_LEER: [u8; 15] = "(keine Pakete)\0"
+static mut S_NEU: [u8; 4] = "neu\0"
+static mut E_ARCH: [u8; 43] = "opk: das Archiv liess sich nicht auspacken\0"
+static mut E_REN: [u8; 33] = "opk: das Umbenennen scheiterte: \0"
+static mut E_PLAN: [u8; 47] = "opk: der PLAN liess sich nicht lesen/schreiben\0"
+static mut E_AKT: [u8; 40] = "opk: AKTUELL liess sich nicht schreiben\0"
+static mut E_SCHRB: [u8; 40] = "opk: der Store-Eintrag entstand nicht: \0"
+static mut E_UMSCH: [u8; 35] = "opk: die Generation entstand nicht\0"
+
+// --------------------------------------------------------- die Puffer
+//
+// EIN PAKET WIRD GANZ GELESEN. Das ist die Grenze dieses Programms, und
+// sie steht hier als Zahl statt als Ueberraschung: was groesser ist,
+// wird abgelehnt und nicht halb installiert. Der Grund ist die
+// Pruefsumme -- sie geht ueber Metadaten UND Daten, und ein Paket, das
+// man in Stuecken schreibt und erst danach pruefen kann, waere ein
+// Paket, das man vor der Pruefung schon auf der Platte hat.
+const PKT_MAX: u64 = 393216
+static mut PKT: [u8; 393216] = [0 as u8; 393216]
+static mut PLAN: [u8; 8192] = [0 as u8; 8192]
+static mut PLAN2: [u8; 8192] = [0 as u8; 8192]
+static mut IDX: [u8; 8192] = [0 as u8; 8192]
+static mut PFAD: [u8; 256] = [0 as u8; 256]
+static mut PFAD2: [u8; 256] = [0 as u8; 256]
+static mut HASH: [u8; 32] = [0 as u8; 32]
+static mut HEX: [u8; 72] = [0 as u8; 72]
+static mut NAME: [u8; 64] = [0 as u8; 64]
+static mut ZEILE: [u8; 256] = [0 as u8; 256]
+
+const KOPF: u64 = 64
+const KURZ: u64 = 20
+
+// ------------------------------------------------------ Kleinigkeiten
+
+fn g8(p: u64) -> u64 {
+    return (*((p) as *mut u8)) as u64
+}
+
+fn p8(p: u64, v: u64) {
+    __mmio_write8((p) as *mut u8, v as u8)
+}
+
+fn g64(p: u64) -> u64 {
+    var v: u64 = 0
+    var i: u64 = 0
+    while i < 8 {
+        v = v | (g8(p + i) << (i * 8))
+        i = i + 1
+    }
+    return v
+}
+
+fn g16(p: u64) -> u64 {
+    return g8(p) | (g8(p + 1) << 8)
+}
+
+fn laenge(p: u64) -> u64 {
+    var n: u64 = 0
+    while g8(p + n) != 0 {
+        n = n + 1
+    }
+    return n
+}
+
+// Pfade bauen: `out = a + b`. Es gibt keinen zweiten Weg in dieser
+// Datei, einen Pfad zusammenzusetzen -- ein zweiter waere die Stelle,
+// an der der Schraegstrich einmal fehlt.
+fn pfad2(out: u64, a: u64, b: u64) {
+    ulib.strcpy(out, a)
+    ulib.strcat(out, b)
+}
+
+fn slash(out: u64) {
+    var s: [u8; 2] = "/\0"
+    ulib.strcat(out, (&s[0 as usize]) as u64)
+}
+
+fn zahl_an(out: u64, v: u64) {
+    var b: [u8; 24] = [0 as u8; 24]
+    ulib.digits(v, (&b[0 as usize]) as u64)
+    ulib.strcat(out, (&b[0 as usize]) as u64)
+}
+
+fn sagn(t: u64, v: u64) {
+    ulib.say(t)
+    ulib.sayu(v)
+    ulib.nl()
+}
+
+fn fehler(t: u64, was: u64) -> u64 {
+    ulib.eput(t)
+    if was != 0 {
+        ulib.eput(was)
+    }
+    var nl: [u8; 2] = "\n\0"
+    ulib.eput((&nl[0 as usize]) as u64)
+    return 1
+}
+
+// -------------------------------------------------------- Dateien
+
+fn datei_lesen(pfad: u64, puffer: u64, max: u64) -> u64 {
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, pfad, 0, 0)
+    if ulib.bad(fd) {
+        return 0xFFFFFFFFFFFFFFFF
+    }
+    var n: u64 = 0
+    var weiter: bool = true
+    while weiter {
+        let r: u64 = ulib.sys(ulib.SYS_READ, fd, puffer + n, max - n)
+        if ulib.bad(r) || r == 0 {
+            weiter = false
+        } else {
+            n = n + r
+            if n >= max {
+                weiter = false
+            }
+        }
+    }
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    return n
+}
+
+fn datei_schreiben(pfad: u64, puffer: u64, len: u64) -> bool {
+    ulib.sys(ulib.SYS_UNLINK, pfad, 0, 0)
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, pfad, ulib.O_MAKE, 0)
+    if ulib.bad(fd) {
+        return false
+    }
+    var n: u64 = 0
+    while n < len {
+        let w: u64 = ulib.sys(ulib.SYS_WRITE, fd, puffer + n, len - n)
+        if ulib.bad(w) || w == 0 {
+            ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+            return false
+        }
+        n = n + w
+    }
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    return true
+}
+
+// EINE DATEI MIT FESTER LAENGE UEBERSCHREIBEN, ohne sie vorher
+// wegzunehmen. Das ist der Kern der Atomarzusage: derselbe Inode,
+// dieselbe Groesse, EIN Datenblock. `O_MAKE` wuerde die Datei leeren
+// und damit erst die Groesse auf null setzen -- genau der Zustand, den
+// ein Stromausfall dann sichtbar liesse.
+fn fest_schreiben(pfad: u64, puffer: u64, len: u64) -> bool {
+    var fd: u64 = ulib.sys(ulib.SYS_OPEN, pfad, ulib.O_RDWR, 0)
+    if ulib.bad(fd) {
+        fd = ulib.sys(ulib.SYS_OPEN, pfad, ulib.O_MAKE, 0)
+        if ulib.bad(fd) {
+            return false
+        }
+    }
+    ulib.sys(ulib.SYS_SEEK, fd, 0, ulib.SEEK_SET)
+    var n: u64 = 0
+    while n < len {
+        let w: u64 = ulib.sys(ulib.SYS_WRITE, fd, puffer + n, len - n)
+        if ulib.bad(w) || w == 0 {
+            ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+            return false
+        }
+        n = n + w
+    }
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    return true
+}
+
+fn da(pfad: u64) -> bool {
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, pfad, 0, 0)
+    if ulib.bad(fd) {
+        return false
+    }
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    return true
+}
+
+fn mkdir(pfad: u64) {
+    ulib.sys(ulib.SYS_MKDIR, pfad, 0, 0)
+}
+
+// Einen Baum wegraeumen. Verzeichnisse gehen erst, wenn sie leer sind --
+// also erst die Kinder. Die Tiefe ist zwei (`daten/` und darunter), und
+// mehr laesst das Format nicht zu.
+fn weg(pfad: u64) {
+    var ents: [u8; 2048] = [0 as u8; 2048]
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, pfad, 0, 0)
+    if ulib.bad(fd) {
+        ulib.sys(ulib.SYS_UNLINK, pfad, 0, 0)
+        return
+    }
+    let n: u64 = ulib.sys(217, fd, (&ents[0 as usize]) as u64, 2048)
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    if !ulib.bad(n) && n > 0 {
+        var at: u64 = 0
+        while at + 19 < n {
+            let rl: u64 = g16((&ents[0 as usize]) as u64 + at + 16)
+            if rl == 0 {
+                at = n
+            } else {
+                let nm: u64 = (&ents[0 as usize]) as u64 + at + 19
+                var punkt: [u8; 2] = ".\0"
+                var punkt2: [u8; 3] = "..\0"
+                if !ulib.streq(nm, (&punkt[0 as usize]) as u64)
+                    && !ulib.streq(nm, (&punkt2[0 as usize]) as u64) {
+                    var kind: [u8; 256] = [0 as u8; 256]
+                    ulib.strcpy((&kind[0 as usize]) as u64, pfad)
+                    slash((&kind[0 as usize]) as u64)
+                    ulib.strcat((&kind[0 as usize]) as u64, nm)
+                    weg((&kind[0 as usize]) as u64)
+                }
+                at = at + rl
+            }
+        }
+    }
+    ulib.sys(ulib.SYS_UNLINK, pfad, 0, 0)
+}
+
+// ---------------------------------------------------- die Metadaten
+//
+// `schluessel=wert`, eine Zeile je Feld. Gelesen wird aus dem Puffer und
+// nicht aus einer Kopie: die Metadaten stehen im Paket, und das Paket
+// steht schon im Speicher.
+fn meta_wert(meta: u64, mlen: u64, schl: u64, out: u64, max: u64) -> bool {
+    let sl: u64 = laenge(schl)
+    var i: u64 = 0
+    while i < mlen {
+        // Zeilenanfang?
+        if i == 0 || g8(meta + i - 1) == 10 {
+            if i + sl <= mlen && ulib.strneq(meta + i, schl, sl) {
+                var k: u64 = 0
+                var j: u64 = i + sl
+                while j < mlen && g8(meta + j) != 10 && k + 1 < max {
+                    p8(out + k, g8(meta + j))
+                    k = k + 1
+                    j = j + 1
+                }
+                p8(out + k, 0)
+                return true
+            }
+        }
+        i = i + 1
+    }
+    return false
+}
+
+// --------------------------------------------------------- der PLAN
+//
+// Er IST der Zustand des Systems: Text, sortiert, `name<TAB>hash` je
+// Zeile. Diese Datei haelt ihn genauso -- als Text, und nicht als
+// Tabelle im Speicher, aus der man ihn wieder herstellen muesste.
+
+fn plan_zeilen(plan: u64) -> u64 {
+    var n: u64 = 0
+    var i: u64 = 0
+    while g8(plan + i) != 0 {
+        if g8(plan + i) == 10 {
+            n = n + 1
+        }
+        i = i + 1
+    }
+    return n
+}
+
+// Name und Hash der k-ten Zeile. `name` und `hash` duerfen 0 sein.
+fn plan_zeile(plan: u64, k: u64, name: u64, hash: u64) -> bool {
+    var zeile: u64 = 0
+    var i: u64 = 0
+    while zeile < k && g8(plan + i) != 0 {
+        if g8(plan + i) == 10 {
+            zeile = zeile + 1
+        }
+        i = i + 1
+    }
+    if g8(plan + i) == 0 {
+        return false
+    }
+    var j: u64 = 0
+    while g8(plan + i) != 9 && g8(plan + i) != 10 && g8(plan + i) != 0 {
+        if name != 0 {
+            p8(name + j, g8(plan + i))
+        }
+        j = j + 1
+        i = i + 1
+    }
+    if name != 0 {
+        p8(name + j, 0)
+    }
+    if g8(plan + i) != 9 {
+        return false
+    }
+    i = i + 1
+    j = 0
+    while g8(plan + i) != 10 && g8(plan + i) != 0 {
+        if hash != 0 {
+            p8(hash + j, g8(plan + i))
+        }
+        j = j + 1
+        i = i + 1
+    }
+    if hash != 0 {
+        p8(hash + j, 0)
+    }
+    return true
+}
+
+fn plan_hash(plan: u64, name: u64, out: u64) -> bool {
+    var nm: [u8; 64] = [0 as u8; 64]
+    let n: u64 = plan_zeilen(plan)
+    var k: u64 = 0
+    while k < n {
+        if plan_zeile(plan, k, (&nm[0 as usize]) as u64, out) {
+            if ulib.streq((&nm[0 as usize]) as u64, name) {
+                return true
+            }
+        }
+        k = k + 1
+    }
+    return false
+}
+
+// Eine Zeile in den PLAN legen, sortiert, und eine vorhandene mit
+// demselben Namen ERSETZEN. Das ist das ganze Nachziehen: eine neue
+// Fassung ist derselbe Name mit einem anderen Hash.
+fn plan_setzen(plan: u64, name: u64, hash: u64) {
+    var nm: [u8; 64] = [0 as u8; 64]
+    var hs: [u8; 72] = [0 as u8; 72]
+    let out: u64 = (&PLAN2[0 as usize]) as u64
+    p8(out, 0)
+    let n: u64 = plan_zeilen(plan)
+    var k: u64 = 0
+    var gesetzt: bool = false
+    while k < n {
+        if plan_zeile(plan, k, (&nm[0 as usize]) as u64,
+            (&hs[0 as usize]) as u64) {
+            let c: u64 = ulib.cmp((&nm[0 as usize]) as u64, name)
+            if c == 0 {
+                // derselbe Name: die alte Zeile faellt weg
+                k = k
+            } else {
+                if c > 0 && !gesetzt && hash != 0 {
+                    zeile_an(out, name, hash)
+                    gesetzt = true
+                }
+                zeile_an(out, (&nm[0 as usize]) as u64,
+                    (&hs[0 as usize]) as u64)
+            }
+        }
+        k = k + 1
+    }
+    if !gesetzt && hash != 0 {
+        zeile_an(out, name, hash)
+    }
+    ulib.strcpy(plan, out)
+}
+
+fn zeile_an(out: u64, name: u64, hash: u64) {
+    var tab: [u8; 2] = "\t\0"
+    var nl: [u8; 2] = "\n\0"
+    ulib.strcat(out, name)
+    ulib.strcat(out, (&tab[0 as usize]) as u64)
+    ulib.strcat(out, hash)
+    ulib.strcat(out, (&nl[0 as usize]) as u64)
+}
+
+// ----------------------------------------------------- Generationen
+
+fn gen_pfad(out: u64, n: u64, datei: u64) {
+    ulib.strcpy(out, (&P_GENS[0 as usize]) as u64)
+    slash(out)
+    zahl_an(out, n)
+    if datei != 0 {
+        slash(out)
+        ulib.strcat(out, datei)
+    }
+}
+
+fn aktuell() -> u64 {
+    var b: [u8; 32] = [0 as u8; 32]
+    let n: u64 = datei_lesen((&P_AKT[0 as usize]) as u64,
+        (&b[0 as usize]) as u64, 31)
+    if n == 0 || n == 0xFFFFFFFFFFFFFFFF {
+        return 0xFFFFFFFFFFFFFFFF
+    }
+    p8((&b[0 as usize]) as u64 + n, 0)
+    return ulib.to_num((&b[0 as usize]) as u64)
+}
+
+// ACHT ZIFFERN UND EIN ZEILENENDE. Siehe den Kopf dieser Datei: die
+// feste Breite ist der Grund, warum das Umschalten ein einziger
+// Sektorschreibvorgang ist.
+fn aktuell_setzen(n: u64) -> bool {
+    var b: [u8; 16] = [0 as u8; 16]
+    var v: u64 = n
+    var i: u64 = 8
+    while i > 0 {
+        i = i - 1
+        b[i as usize] = (48 + (v % 10)) as u8
+        v = v / 10
+    }
+    b[8 as usize] = 10 as u8
+    b[9 as usize] = 0 as u8
+    return fest_schreiben((&P_AKT[0 as usize]) as u64,
+        (&b[0 as usize]) as u64, 9)
+}
+
+fn gen_hoechste() -> u64 {
+    var ents: [u8; 4096] = [0 as u8; 4096]
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&P_GENS[0 as usize]) as u64, 0, 0)
+    if ulib.bad(fd) {
+        return 0xFFFFFFFFFFFFFFFF
+    }
+    let n: u64 = ulib.sys(217, fd, (&ents[0 as usize]) as u64, 4096)
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    if ulib.bad(n) || n == 0 {
+        return 0xFFFFFFFFFFFFFFFF
+    }
+    var hoch: u64 = 0xFFFFFFFFFFFFFFFF
+    var at: u64 = 0
+    while at + 19 < n {
+        let rl: u64 = g16((&ents[0 as usize]) as u64 + at + 16)
+        if rl == 0 {
+            at = n
+        } else {
+            let nm: u64 = (&ents[0 as usize]) as u64 + at + 19
+            if g8(nm) >= 48 && g8(nm) <= 57 {
+                let v: u64 = ulib.to_num(nm)
+                if hoch == 0xFFFFFFFFFFFFFFFF || v > hoch {
+                    hoch = v
+                }
+            }
+            at = at + rl
+        }
+    }
+    return hoch
+}
+
+fn plan_lesen(n: u64, out: u64) -> bool {
+    gen_pfad((&PFAD[0 as usize]) as u64, n, (&N_PLAN[0 as usize]) as u64)
+    let r: u64 = datei_lesen((&PFAD[0 as usize]) as u64, out, 8000)
+    if r == 0xFFFFFFFFFFFFFFFF {
+        p8(out, 0)
+        return false
+    }
+    p8(out + r, 0)
+    return true
+}
+
+fn plan_schreiben(n: u64, plan: u64, grund: u64) -> bool {
+    gen_pfad((&PFAD[0 as usize]) as u64, n, 0)
+    mkdir((&PFAD[0 as usize]) as u64)
+    gen_pfad((&PFAD[0 as usize]) as u64, n, (&N_PLAN[0 as usize]) as u64)
+    if !datei_schreiben((&PFAD[0 as usize]) as u64, plan, laenge(plan)) {
+        return false
+    }
+    gen_pfad((&PFAD[0 as usize]) as u64, n, (&N_GRUND[0 as usize]) as u64)
+    var z: [u8; 128] = [0 as u8; 128]
+    ulib.strncpy((&z[0 as usize]) as u64, grund, 120)
+    var nl: [u8; 2] = "\n\0"
+    ulib.strcat((&z[0 as usize]) as u64, (&nl[0 as usize]) as u64)
+    return datei_schreiben((&PFAD[0 as usize]) as u64,
+        (&z[0 as usize]) as u64, laenge((&z[0 as usize]) as u64))
+}
+
+// ------------------------------------------------------------- Store
+
+fn store_pfad(out: u64, hex: u64, datei: u64) {
+    ulib.strcpy(out, (&P_STORE[0 as usize]) as u64)
+    slash(out)
+    var k: [u8; 32] = [0 as u8; 32]
+    ulib.strncpy((&k[0 as usize]) as u64, hex, KURZ + 1)
+    ulib.strcat(out, (&k[0 as usize]) as u64)
+    if datei != 0 {
+        slash(out)
+        ulib.strcat(out, datei)
+    }
+}
+
+// Das Archiv auspacken. Ein Eintrag: Art, Modus, Namenslaenge, Name,
+// Inhaltslaenge, Inhalt -- sortiert ueber die OKTETTE des Namens, also
+// steht ein Verzeichnis immer vor dem, was darin liegt.
+fn archiv_aus(daten: u64, dlen: u64, ziel: u64) -> bool {
+    var i: u64 = 0
+    while i < dlen {
+        if i + 5 > dlen {
+            return false
+        }
+        let typ: u64 = g8(daten + i)
+        let modus: u64 = g16(daten + i + 1)
+        let nl: u64 = g16(daten + i + 3)
+        i = i + 5
+        if i + nl + 8 > dlen {
+            return false
+        }
+        var nm: [u8; 128] = [0 as u8; 128]
+        var k: u64 = 0
+        while k < nl && k < 127 {
+            nm[k as usize] = g8(daten + i + k) as u8
+            k = k + 1
+        }
+        nm[k as usize] = 0 as u8
+        i = i + nl
+        let il: u64 = g64(daten + i)
+        i = i + 8
+        if i + il > dlen {
+            return false
+        }
+        ulib.strcpy((&PFAD2[0 as usize]) as u64, ziel)
+        slash((&PFAD2[0 as usize]) as u64)
+        ulib.strcat((&PFAD2[0 as usize]) as u64, (&nm[0 as usize]) as u64)
+        if typ == 100 {
+            mkdir((&PFAD2[0 as usize]) as u64)
+        } else {
+            if !datei_schreiben((&PFAD2[0 as usize]) as u64, daten + i, il) {
+                return false
+            }
+            ulib.sys(90, (&PFAD2[0 as usize]) as u64, modus, 0)
+        }
+        i = i + il
+    }
+    return true
+}
+
+// ------------------------------------------------------- die Sicht
+//
+// `/apps` wird VOLLSTAENDIG neu gebaut und nie fortgeschrieben. Der
+// Grund steht in PAKETE.md: ein Zustand, den man nachzieht, haengt von
+// seiner Geschichte ab -- dann waere „Generation 7" nicht dasselbe wie
+// „Generation 7, auf dem anderen Weg erreicht".
+fn verweisen(quelle: u64, ziel: u64) -> u64 {
+    var ents: [u8; 2048] = [0 as u8; 2048]
+    var gemacht: u64 = 0
+    mkdir(ziel)
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, quelle, 0, 0)
+    if ulib.bad(fd) {
+        return 0
+    }
+    let n: u64 = ulib.sys(217, fd, (&ents[0 as usize]) as u64, 2048)
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    if ulib.bad(n) || n == 0 {
+        return 0
+    }
+    var at: u64 = 0
+    while at + 19 < n {
+        let rl: u64 = g16((&ents[0 as usize]) as u64 + at + 16)
+        if rl == 0 {
+            at = n
+        } else {
+            let nm: u64 = (&ents[0 as usize]) as u64 + at + 19
+            var punkt: [u8; 2] = ".\0"
+            var punkt2: [u8; 3] = "..\0"
+            if !ulib.streq(nm, (&punkt[0 as usize]) as u64)
+                && !ulib.streq(nm, (&punkt2[0 as usize]) as u64)
+                && !ulib.streq(nm, (&N_PAKET[0 as usize]) as u64) {
+                var q: [u8; 256] = [0 as u8; 256]
+                var z: [u8; 256] = [0 as u8; 256]
+                ulib.strcpy((&q[0 as usize]) as u64, quelle)
+                slash((&q[0 as usize]) as u64)
+                ulib.strcat((&q[0 as usize]) as u64, nm)
+                ulib.strcpy((&z[0 as usize]) as u64, ziel)
+                slash((&z[0 as usize]) as u64)
+                ulib.strcat((&z[0 as usize]) as u64, nm)
+                if ulib.is_dir((&q[0 as usize]) as u64) {
+                    gemacht = gemacht + verweisen((&q[0 as usize]) as u64,
+                        (&z[0 as usize]) as u64)
+                } else {
+                    // DER ZWEITE NAME. Kein Kopieren: die Oktette liegen
+                    // EINMAL da, und `link` (Aufruf 86) ist genau dafuer
+                    // in dieser Runde entstanden.
+                    let r: u64 = ulib.sys(ulib.SYS_LINK,
+                        (&q[0 as usize]) as u64, (&z[0 as usize]) as u64, 0)
+                    if !ulib.bad(r) {
+                        gemacht = gemacht + 1
+                    }
+                }
+            }
+            at = at + rl
+        }
+    }
+    return gemacht
+}
+
+fn apps_bauen(gen: u64) -> u64 {
+    var nm: [u8; 64] = [0 as u8; 64]
+    var hs: [u8; 72] = [0 as u8; 72]
+    let plan: u64 = (&PLAN[0 as usize]) as u64
+    if !plan_lesen(gen, plan) {
+        fehler((&E_PLAN[0 as usize]) as u64, 0)
+        return 0xFFFFFFFFFFFFFFFF
+    }
+    weg((&P_APPS[0 as usize]) as u64)
+    mkdir((&P_APPS[0 as usize]) as u64)
+    var verweise: u64 = 0
+    let n: u64 = plan_zeilen(plan)
+    var k: u64 = 0
+    while k < n {
+        if plan_zeile(plan, k, (&nm[0 as usize]) as u64,
+            (&hs[0 as usize]) as u64) {
+            store_pfad((&PFAD[0 as usize]) as u64, (&hs[0 as usize]) as u64, 0)
+            if !ulib.is_dir((&PFAD[0 as usize]) as u64) {
+                fehler((&E_STORE[0 as usize]) as u64, (&nm[0 as usize]) as u64)
+                return 0xFFFFFFFFFFFFFFFF
+            }
+            var z: [u8; 128] = [0 as u8; 128]
+            ulib.strcpy((&z[0 as usize]) as u64, (&P_APPS[0 as usize]) as u64)
+            slash((&z[0 as usize]) as u64)
+            ulib.strcat((&z[0 as usize]) as u64, (&nm[0 as usize]) as u64)
+            ulib.strcat((&z[0 as usize]) as u64, (&N_PROG[0 as usize]) as u64)
+            verweise = verweise + verweisen((&PFAD[0 as usize]) as u64,
+                (&z[0 as usize]) as u64)
+        }
+        k = k + 1
+    }
+    return verweise
+}
+
+// Die drei Toepfe. Sie gehoeren dem NUTZER und nicht dem Paket -- und
+// deshalb loescht `entfernen` sie und `zurueck` bringt sie nicht wieder
+// (PAKETE.md, Abschnitt 5).
+fn toepfe(name: u64, anlegen: bool) {
+    mkdir((&P_USERS[0 as usize]) as u64)
+    mkdir((&P_ROOT[0 as usize]) as u64)
+    var i: u64 = 0
+    while i < 3 {
+        var t: u64 = (&T_CONF[0 as usize]) as u64
+        if i == 1 {
+            t = (&T_STATE[0 as usize]) as u64
+        }
+        if i == 2 {
+            t = (&T_CACHE[0 as usize]) as u64
+        }
+        ulib.strcpy((&PFAD[0 as usize]) as u64, (&P_ROOT[0 as usize]) as u64)
+        slash((&PFAD[0 as usize]) as u64)
+        ulib.strcat((&PFAD[0 as usize]) as u64, t)
+        mkdir((&PFAD[0 as usize]) as u64)
+        slash((&PFAD[0 as usize]) as u64)
+        ulib.strcat((&PFAD[0 as usize]) as u64, name)
+        if anlegen {
+            mkdir((&PFAD[0 as usize]) as u64)
+        } else {
+            weg((&PFAD[0 as usize]) as u64)
+        }
+        i = i + 1
+    }
+}
+
+// ------------------------------------------- ein Paket in den Store
+//
+// Rueckgabe: 0 = Fehler, sonst die Laenge der Metadaten. Der Hexname
+// steht danach in HEX, der Name in NAME.
+fn paket_pruefen(len: u64) -> u64 {
+    let p: u64 = (&PKT[0 as usize]) as u64
+    if len < KOPF {
+        fehler((&E_KENN[0 as usize]) as u64, 0)
+        return 0
+    }
+    var kenn: [u8; 9] = "OPKG0001\0"
+    if !ulib.strneq(p, (&kenn[0 as usize]) as u64, 8) {
+        fehler((&E_KENN[0 as usize]) as u64, 0)
+        return 0
+    }
+    let ml: u64 = g64(p + 8)
+    let dl: u64 = g64(p + 16)
+    if KOPF + ml + dl != len {
+        fehler((&E_LAENG[0 as usize]) as u64, 0)
+        return 0
+    }
+    // DIE PRUEFUNG IST HIER UND NUR HIER, genau wie in `opk.py`: jeder
+    // Weg ins System geht durch diese Funktion.
+    sha.sha256(p + KOPF, ml + dl, (&HASH[0 as usize]) as u64)
+    var i: u64 = 0
+    while i < 32 {
+        if g8((&HASH[0 as usize]) as u64 + i) != g8(p + 24 + i) {
+            fehler((&E_HASH[0 as usize]) as u64, 0)
+            return 0
+        }
+        i = i + 1
+    }
+    sha.hex_out((&HASH[0 as usize]) as u64, 32, (&HEX[0 as usize]) as u64)
+    if !meta_wert(p + KOPF, ml, (&M_NAME[0 as usize]) as u64,
+        (&NAME[0 as usize]) as u64, 63) {
+        fehler((&E_NONAME[0 as usize]) as u64, 0)
+        return 0
+    }
+    return ml
+}
+
+fn store_schreiben(ml: u64, len: u64) -> bool {
+    let p: u64 = (&PKT[0 as usize]) as u64
+    let dl: u64 = len - KOPF - ml
+    store_pfad((&PFAD[0 as usize]) as u64, (&HEX[0 as usize]) as u64, 0)
+    if ulib.is_dir((&PFAD[0 as usize]) as u64) {
+        // Schon da. Gleicher Hash heisst gleicher Inhalt -- aber der
+        // KURZE Name sind nur achtzig Bit, und deshalb wird das PAKET
+        // des vorhandenen Eintrags gegen unseres gehalten.
+        store_pfad((&PFAD2[0 as usize]) as u64, (&HEX[0 as usize]) as u64,
+            (&N_PAKET[0 as usize]) as u64)
+        var alt: [u8; 4096] = [0 as u8; 4096]
+        let n: u64 = datei_lesen((&PFAD2[0 as usize]) as u64,
+            (&alt[0 as usize]) as u64, 4095)
+        if n != ml || !ulib.strneq((&alt[0 as usize]) as u64, p + KOPF, ml) {
+            fehler((&E_KOLL[0 as usize]) as u64, (&HEX[0 as usize]) as u64)
+            return false
+        }
+        return true
+    }
+    mkdir((&P_STORE[0 as usize]) as u64)
+    weg((&P_TEIL[0 as usize]) as u64)
+    mkdir((&P_TEIL[0 as usize]) as u64)
+    if !archiv_aus(p + KOPF + ml, dl, (&P_TEIL[0 as usize]) as u64) {
+        fehler((&E_ARCH[0 as usize]) as u64, 0)
+        return false
+    }
+    ulib.strcpy((&PFAD2[0 as usize]) as u64, (&P_TEIL[0 as usize]) as u64)
+    slash((&PFAD2[0 as usize]) as u64)
+    ulib.strcat((&PFAD2[0 as usize]) as u64, (&N_PAKET[0 as usize]) as u64)
+    if !datei_schreiben((&PFAD2[0 as usize]) as u64, p + KOPF, ml) {
+        fehler((&E_ARCH[0 as usize]) as u64, (&PFAD2[0 as usize]) as u64)
+        return false
+    }
+    ulib.sys(ulib.SYS_SYNC, 0, 0, 0)
+    // DER LETZTE SCHRITT IST EIN EINZIGES UMBENENNEN.
+    let r: u64 = ulib.sys(ulib.SYS_RENAME, (&P_TEIL[0 as usize]) as u64,
+        (&PFAD[0 as usize]) as u64, 0)
+    if ulib.bad(r) {
+        fehler((&E_REN[0 as usize]) as u64, (&PFAD[0 as usize]) as u64)
+        ulib.sayn(r)
+        ulib.nl()
+        return false
+    }
+    return true
+}
+
+// Eine neue Generation aus dem laufenden Plan, mit `name` gesetzt oder
+// entfernt, und der Umschlag darauf.
+fn umschalten(name: u64, hash: u64, grund: u64) -> u64 {
+    let plan: u64 = (&PLAN[0 as usize]) as u64
+    let jetzt: u64 = aktuell()
+    if jetzt == 0xFFFFFFFFFFFFFFFF {
+        p8(plan, 0)
+    } else {
+        plan_lesen(jetzt, plan)
+    }
+    plan_setzen(plan, name, hash)
+    var neu: u64 = 0
+    let hoch: u64 = gen_hoechste()
+    if hoch != 0xFFFFFFFFFFFFFFFF {
+        neu = hoch + 1
+    }
+    mkdir((&P_SYS[0 as usize]) as u64)
+    mkdir((&P_GENS[0 as usize]) as u64)
+    if !plan_schreiben(neu, plan, grund) {
+        fehler((&E_PLAN[0 as usize]) as u64, 0)
+        return 0xFFFFFFFFFFFFFFFF
+    }
+    ulib.sys(ulib.SYS_SYNC, 0, 0, 0)
+    // ------------------------------------------------ DER UMSCHLAG
+    if !aktuell_setzen(neu) {
+        fehler((&E_AKT[0 as usize]) as u64, 0)
+        return 0xFFFFFFFFFFFFFFFF
+    }
+    ulib.sys(ulib.SYS_SYNC, 0, 0, 0)
+    if apps_bauen(neu) == 0xFFFFFFFFFFFFFFFF {
+        return 0xFFFFFFFFFFFFFFFF
+    }
+    ulib.sys(ulib.SYS_SYNC, 0, 0, 0)
+    return neu
+}
+
+// ------------------------------------------------------- die Befehle
+
+fn cmd_liste() -> u64 {
+    var nm: [u8; 64] = [0 as u8; 64]
+    var hs: [u8; 72] = [0 as u8; 72]
+    let g: u64 = aktuell()
+    if g == 0xFFFFFFFFFFFFFFFF {
+        ulib.say((&S_LEER[0 as usize]) as u64)
+        ulib.nl()
+        return 0
+    }
+    let plan: u64 = (&PLAN[0 as usize]) as u64
+    plan_lesen(g, plan)
+    let n: u64 = plan_zeilen(plan)
+    sagn((&S_GEN[0 as usize]) as u64, g)
+    if n == 0 {
+        ulib.say((&S_LEER[0 as usize]) as u64)
+        ulib.nl()
+    }
+    var k: u64 = 0
+    while k < n {
+        if plan_zeile(plan, k, (&nm[0 as usize]) as u64,
+            (&hs[0 as usize]) as u64) {
+            ulib.say((&S_TAB[0 as usize]) as u64)
+            ulib.say((&nm[0 as usize]) as u64)
+            ulib.say((&S_PFEIL[0 as usize]) as u64)
+            var kz: [u8; 16] = [0 as u8; 16]
+            ulib.strncpy((&kz[0 as usize]) as u64, (&hs[0 as usize]) as u64, 13)
+            ulib.say((&kz[0 as usize]) as u64)
+            ulib.nl()
+        }
+        k = k + 1
+    }
+    return 0
+}
+
+fn cmd_generationen() -> u64 {
+    let jetzt: u64 = aktuell()
+    let hoch: u64 = gen_hoechste()
+    if hoch == 0xFFFFFFFFFFFFFFFF {
+        ulib.say((&S_LEER[0 as usize]) as u64)
+        ulib.nl()
+        return 0
+    }
+    var i: u64 = 0
+    while i <= hoch {
+        gen_pfad((&PFAD[0 as usize]) as u64, i, (&N_PLAN[0 as usize]) as u64)
+        if da((&PFAD[0 as usize]) as u64) {
+            ulib.say((&S_GEN[0 as usize]) as u64)
+            ulib.sayu(i)
+            gen_pfad((&PFAD[0 as usize]) as u64, i,
+                (&N_GRUND[0 as usize]) as u64)
+            var gr: [u8; 128] = [0 as u8; 128]
+            let n: u64 = datei_lesen((&PFAD[0 as usize]) as u64,
+                (&gr[0 as usize]) as u64, 120)
+            if n != 0xFFFFFFFFFFFFFFFF && n > 0 {
+                var k: u64 = n
+                if k > 0 && gr[(k - 1) as usize] == 10 as u8 {
+                    k = k - 1
+                }
+                gr[k as usize] = 0 as u8
+                ulib.say((&S_PFEIL[0 as usize]) as u64)
+                ulib.say((&gr[0 as usize]) as u64)
+            }
+            if i == jetzt {
+                ulib.say((&S_AKTIV[0 as usize]) as u64)
+            }
+            ulib.nl()
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+fn cmd_installieren(datei: u64, grund: u64) -> u64 {
+    let len: u64 = datei_lesen(datei, (&PKT[0 as usize]) as u64, PKT_MAX)
+    if len == 0xFFFFFFFFFFFFFFFF {
+        return fehler((&E_OPEN[0 as usize]) as u64, datei)
+    }
+    if len >= PKT_MAX {
+        return fehler((&E_GROSS[0 as usize]) as u64, 0)
+    }
+    let ml: u64 = paket_pruefen(len)
+    if ml == 0 {
+        return 1
+    }
+    if !store_schreiben(ml, len) {
+        return fehler((&E_SCHRB[0 as usize]) as u64, (&HEX[0 as usize]) as u64)
+    }
+    toepfe((&NAME[0 as usize]) as u64, true)
+    let g: u64 = umschalten((&NAME[0 as usize]) as u64,
+        (&HEX[0 as usize]) as u64, grund)
+    if g == 0xFFFFFFFFFFFFFFFF {
+        return fehler((&E_UMSCH[0 as usize]) as u64, 0)
+    }
+    ulib.say((&S_INST[0 as usize]) as u64)
+    ulib.say((&NAME[0 as usize]) as u64)
+    ulib.say((&S_PFEIL[0 as usize]) as u64)
+    ulib.sayu(g)
+    ulib.nl()
+    return 0
+}
+
+fn cmd_entfernen(name: u64, grund: u64) -> u64 {
+    var hs: [u8; 72] = [0 as u8; 72]
+    let jetzt: u64 = aktuell()
+    if jetzt == 0xFFFFFFFFFFFFFFFF {
+        return fehler((&E_KEIN[0 as usize]) as u64, name)
+    }
+    let plan: u64 = (&PLAN[0 as usize]) as u64
+    plan_lesen(jetzt, plan)
+    if !plan_hash(plan, name, (&hs[0 as usize]) as u64) {
+        return fehler((&E_KEIN[0 as usize]) as u64, name)
+    }
+    let g: u64 = umschalten(name, 0, grund)
+    if g == 0xFFFFFFFFFFFFFFFF {
+        return 1
+    }
+    toepfe(name, false)
+    ulib.say((&S_ENTF[0 as usize]) as u64)
+    ulib.say(name)
+    ulib.say((&S_PFEIL[0 as usize]) as u64)
+    ulib.sayu(g)
+    ulib.nl()
+    return 0
+}
+
+fn cmd_zurueck(n: u64) -> u64 {
+    gen_pfad((&PFAD[0 as usize]) as u64, n, (&N_PLAN[0 as usize]) as u64)
+    if !da((&PFAD[0 as usize]) as u64) {
+        return fehler((&E_NOGEN[0 as usize]) as u64, 0)
+    }
+    if !aktuell_setzen(n) {
+        return 1
+    }
+    ulib.sys(ulib.SYS_SYNC, 0, 0, 0)
+    if apps_bauen(n) == 0xFFFFFFFFFFFFFFFF {
+        return 1
+    }
+    ulib.sys(ulib.SYS_SYNC, 0, 0, 0)
+    ulib.say((&S_ZUR[0 as usize]) as u64)
+    ulib.sayu(n)
+    ulib.nl()
+    return 0
+}
+
+fn cmd_richten() -> u64 {
+    let g: u64 = aktuell()
+    if g == 0xFFFFFFFFFFFFFFFF {
+        return fehler((&E_NOGEN[0 as usize]) as u64, 0)
+    }
+    let v: u64 = apps_bauen(g)
+    if v == 0xFFFFFFFFFFFFFFFF {
+        return 1
+    }
+    ulib.sys(ulib.SYS_SYNC, 0, 0, 0)
+    ulib.say((&S_RICHT[0 as usize]) as u64)
+    ulib.sayu(v)
+    ulib.nl()
+    return 0
+}
+
+// `pruefen` beantwortet GENAU zwei Fragen, und benennt sie: hat jeder
+// Hash, den irgendeine Generation nennt, einen Store-Eintrag, und
+// stimmt `/apps` mit dem PLAN der laufenden Generation ueberein.
+//
+// WAS ES NICHT TUT: den vollen Inhaltshash eines Store-Eintrags
+// nachrechnen. Dafuer muesste dieses Programm das Archiv aus dem
+// Verzeichnisbaum wieder zusammenbauen -- deterministisch, in derselben
+// Reihenfolge wie `opk.py`. Das ist eine eigene Runde; `opk.py pruefen`
+// auf dem Wirt kann es, und der Laeufer benutzt genau das dafuer.
+fn cmd_pruefen() -> u64 {
+    var nm: [u8; 64] = [0 as u8; 64]
+    var hs: [u8; 72] = [0 as u8; 72]
+    let hoch: u64 = gen_hoechste()
+    if hoch == 0xFFFFFFFFFFFFFFFF {
+        return fehler((&E_NOGEN[0 as usize]) as u64, 0)
+    }
+    var fehlt: u64 = 0
+    var gesehen: u64 = 0
+    var i: u64 = 0
+    while i <= hoch {
+        let plan: u64 = (&PLAN[0 as usize]) as u64
+        if plan_lesen(i, plan) {
+            let n: u64 = plan_zeilen(plan)
+            var k: u64 = 0
+            while k < n {
+                if plan_zeile(plan, k, (&nm[0 as usize]) as u64,
+                    (&hs[0 as usize]) as u64) {
+                    gesehen = gesehen + 1
+                    store_pfad((&PFAD[0 as usize]) as u64,
+                        (&hs[0 as usize]) as u64, (&N_PAKET[0 as usize]) as u64)
+                    if !da((&PFAD[0 as usize]) as u64) {
+                        fehlt = fehlt + 1
+                        fehler((&E_STORE[0 as usize]) as u64,
+                            (&nm[0 as usize]) as u64)
+                    }
+                }
+                k = k + 1
+            }
+        }
+        i = i + 1
+    }
+    ulib.say((&S_OK[0 as usize]) as u64)
+    ulib.sayu(gesehen)
+    ulib.say((&S_PFEIL[0 as usize]) as u64)
+    ulib.sayu(fehlt)
+    ulib.nl()
+    if fehlt != 0 {
+        return 1
+    }
+    return 0
+}
+
+// ---------------------------------------------------- aktualisieren
+//
+// Die Quelle ist ein Verzeichnis mit den `.opkg`-Dateien, einem `INDEX`
+// (`name TAB fassung TAB hash TAB groesse TAB datei`) und `INDEX.sig`.
+//
+// WAS HIER GEPRUEFT WIRD: dass das Paket, das die Quelle liefert, GENAU
+// den Hash hat, den der INDEX ihm zuschreibt. Das ist ein echtes Glied
+// der Kette aus PAKETE.md, Abschnitt 4 -- es faengt ein ausgetauschtes
+// Paket.
+//
+// WAS HIER NICHT GEPRUEFT WIRD, und es steht auch in docs/ROUNDINSTALL.md:
+// die Ed25519-Signatur ueber den INDEX. Damit faengt dieses Programm
+// einen ausgetauschten INDEX NICHT. Ed25519 in Firn ist eine eigene
+// Runde; wer die Kette ganz will, prueft die Quelle heute auf dem Wirt
+// (`opk.py quelle`) und reicht sie geprueft herein.
+fn index_zeile(name: u64, hash: u64, datei: u64) -> bool {
+    let idx: u64 = (&IDX[0 as usize]) as u64
+    var i: u64 = 0
+    while g8(idx + i) != 0 {
+        // Zeilenanfang
+        var j: u64 = i
+        var feld: u64 = 0
+        var nm: [u8; 64] = [0 as u8; 64]
+        var k: u64 = 0
+        while g8(idx + j) != 10 && g8(idx + j) != 0 && k < 63
+            && g8(idx + j) != 9 {
+            nm[k as usize] = g8(idx + j) as u8
+            k = k + 1
+            j = j + 1
+        }
+        nm[k as usize] = 0 as u8
+        if ulib.streq((&nm[0 as usize]) as u64, name) && g8(idx + j) == 9 {
+            // Feld 2 (fassung) ueberspringen, Feld 3 ist der Hash.
+            j = j + 1
+            while g8(idx + j) != 9 && g8(idx + j) != 10 && g8(idx + j) != 0 {
+                j = j + 1
+            }
+            if g8(idx + j) != 9 {
+                return false
+            }
+            j = j + 1
+            k = 0
+            while g8(idx + j) != 9 && g8(idx + j) != 10 && g8(idx + j) != 0
+                && k < 71 {
+                p8(hash + k, g8(idx + j))
+                k = k + 1
+                j = j + 1
+            }
+            p8(hash + k, 0)
+            if g8(idx + j) != 9 {
+                return false
+            }
+            // Feld 4 (groesse) ueberspringen, Feld 5 ist der Dateiname.
+            j = j + 1
+            while g8(idx + j) != 9 && g8(idx + j) != 10 && g8(idx + j) != 0 {
+                j = j + 1
+            }
+            if g8(idx + j) != 9 {
+                return false
+            }
+            j = j + 1
+            k = 0
+            while g8(idx + j) != 10 && g8(idx + j) != 0 && k < 127 {
+                p8(datei + k, g8(idx + j))
+                k = k + 1
+                j = j + 1
+            }
+            p8(datei + k, 0)
+            return true
+        }
+        // zur naechsten Zeile
+        while g8(idx + i) != 10 && g8(idx + i) != 0 {
+            i = i + 1
+        }
+        if g8(idx + i) == 10 {
+            i = i + 1
+        }
+    }
+    return false
+}
+
+fn cmd_aktualisieren(name: u64, quelle: u64, grund: u64) -> u64 {
+    var hs: [u8; 72] = [0 as u8; 72]
+    var dt: [u8; 128] = [0 as u8; 128]
+    ulib.strcpy((&PFAD[0 as usize]) as u64, quelle)
+    slash((&PFAD[0 as usize]) as u64)
+    ulib.strcat((&PFAD[0 as usize]) as u64, (&N_INDEX[0 as usize]) as u64)
+    let n: u64 = datei_lesen((&PFAD[0 as usize]) as u64,
+        (&IDX[0 as usize]) as u64, 8000)
+    if n == 0xFFFFFFFFFFFFFFFF || n == 0 {
+        return fehler((&E_INDEX[0 as usize]) as u64, quelle)
+    }
+    p8((&IDX[0 as usize]) as u64 + n, 0)
+    if !index_zeile(name, (&hs[0 as usize]) as u64, (&dt[0 as usize]) as u64) {
+        return fehler((&E_NIX[0 as usize]) as u64, name)
+    }
+    ulib.strcpy((&PFAD[0 as usize]) as u64, quelle)
+    slash((&PFAD[0 as usize]) as u64)
+    ulib.strcat((&PFAD[0 as usize]) as u64, (&dt[0 as usize]) as u64)
+    let len: u64 = datei_lesen((&PFAD[0 as usize]) as u64,
+        (&PKT[0 as usize]) as u64, PKT_MAX)
+    if len == 0xFFFFFFFFFFFFFFFF {
+        return fehler((&E_OPEN[0 as usize]) as u64,
+            (&PFAD[0 as usize]) as u64)
+    }
+    let ml: u64 = paket_pruefen(len)
+    if ml == 0 {
+        return 1
+    }
+    // DAS GLIED DER KETTE: der Hash aus dem INDEX gegen den, der ueber
+    // die Oktette des Pakets gerechnet wurde.
+    if !ulib.streq((&HEX[0 as usize]) as u64, (&hs[0 as usize]) as u64) {
+        return fehler((&E_HASHQ[0 as usize]) as u64, name)
+    }
+    if !ulib.streq((&NAME[0 as usize]) as u64, name) {
+        return fehler((&E_NIX[0 as usize]) as u64, name)
+    }
+    if !store_schreiben(ml, len) {
+        return 1
+    }
+    toepfe((&NAME[0 as usize]) as u64, true)
+    let g: u64 = umschalten((&NAME[0 as usize]) as u64,
+        (&HEX[0 as usize]) as u64, grund)
+    if g == 0xFFFFFFFFFFFFFFFF {
+        return 1
+    }
+    ulib.say((&S_INST[0 as usize]) as u64)
+    ulib.say((&NAME[0 as usize]) as u64)
+    ulib.say((&S_PFEIL[0 as usize]) as u64)
+    ulib.sayu(g)
+    ulib.nl()
+    return 0
+}
+
+// ------------------------------------------------------------ das Ganze
+
+fn u_start(args: u64) -> u64 {
+    let argc: u64 = ulib.arg_count(args)
+    if argc < 2 {
+        ulib.say((&S_USE1[0 as usize]) as u64)
+        ulib.nl()
+        ulib.say((&S_USE2[0 as usize]) as u64)
+        ulib.nl()
+        ulib.say((&S_USE3[0 as usize]) as u64)
+        ulib.nl()
+        ulib.say((&S_USE4[0 as usize]) as u64)
+        ulib.nl()
+        ulib.say((&S_USE5[0 as usize]) as u64)
+        ulib.nl()
+        ulib.say((&S_USE6[0 as usize]) as u64)
+        ulib.nl()
+        ulib.say((&S_USE7[0 as usize]) as u64)
+        ulib.nl()
+        return 0
+    }
+    let cmd: u64 = ulib.arg_at(args, 1)
+    var quelle: u64 = 0
+    var grund: u64 = (&S_NEU[0 as usize]) as u64
+    var i: u64 = 2
+    while i < argc {
+        let a: u64 = ulib.arg_at(args, i)
+        if ulib.streq(a, (&O_QUELLE[0 as usize]) as u64) && i + 1 < argc {
+            i = i + 1
+            quelle = ulib.arg_at(args, i)
+        } else if ulib.streq(a, (&O_GRUND[0 as usize]) as u64) && i + 1 < argc {
+            i = i + 1
+            grund = ulib.arg_at(args, i)
+        }
+        i = i + 1
+    }
+    if ulib.streq(cmd, (&C_LISTE[0 as usize]) as u64) {
+        return cmd_liste()
+    }
+    if ulib.streq(cmd, (&C_GEN[0 as usize]) as u64) {
+        return cmd_generationen()
+    }
+    if ulib.streq(cmd, (&C_RICHT[0 as usize]) as u64) {
+        return cmd_richten()
+    }
+    if ulib.streq(cmd, (&C_PRUEF[0 as usize]) as u64) {
+        return cmd_pruefen()
+    }
+    if argc < 3 {
+        return fehler((&E_ARG[0 as usize]) as u64, 0)
+    }
+    let a2: u64 = ulib.arg_at(args, 2)
+    if ulib.streq(cmd, (&C_INST[0 as usize]) as u64) {
+        return cmd_installieren(a2, grund)
+    }
+    if ulib.streq(cmd, (&C_ENTF[0 as usize]) as u64) {
+        return cmd_entfernen(a2, grund)
+    }
+    if ulib.streq(cmd, (&C_ZUR[0 as usize]) as u64) {
+        return cmd_zurueck(ulib.to_num(a2))
+    }
+    if ulib.streq(cmd, (&C_AKTU[0 as usize]) as u64) {
+        if quelle == 0 {
+            return fehler((&E_ARG[0 as usize]) as u64, 0)
+        }
+        return cmd_aktualisieren(a2, quelle, grund)
+    }
+    return fehler((&E_ARG[0 as usize]) as u64, cmd)
+}
