@@ -53,7 +53,11 @@ export {
     rename_path,
     // RUNDE K15, zweiter Nachtrag: die Geometrie aus dem Superblock und
     // der Weg ueber Plaetze statt ueber "der wievielte".
-    inode_count, data_start, scan, geom, entry_slot, slot_count
+    inode_count, data_start, scan, geom, entry_slot, slot_count,
+    // ---- RUNDE INSTALL ----
+    bitmap_blocks, itable, bitmap_needed, total_blocks, SB_BITBLOCKS,
+    SB_BLOCKS, SB_MAGIC, SB_DATA, SB_ITABLE, SB_INODES, SB_VERSION,
+    link_path
 }
 
 const BS: u64 = 512 // one block
@@ -127,6 +131,29 @@ const T_DIR: u64 = 2
 // hier, damit niemand es fuer erledigt haelt.
 const G_INODES: u64 = 0
 const G_DATA: u64 = 8
+// ------------------------------------------------- RUNDE INSTALL
+//
+// DIE BLOCKKARTE IST NICHT MEHR EIN BLOCK. Der Kommentar drei Zeilen
+// weiter oben stand seit dem zweiten K15-Nachtrag da: "die Blockkarte
+// bleibt EIN Block, also 4096 Bloecke, also zwei Megaoktett je Abbild.
+// Wer mehr will, braucht eine mehrblockige Karte -- das ist eine andere
+// Runde, und es steht hier, damit niemand es fuer erledigt haelt."
+// Das ist diese Runde, und sie braucht es wirklich: das Abbild, das
+// ein Installationsprogramm auf eine Platte schreibt, traegt AUCH den
+// Kern (1,7 MiB) und den Bootlader, weil es sie sonst nicht auf die
+// EFI-Partition legen kann. Zwei Megaoktett reichen dafuer nicht.
+//
+// ZWEI WOERTER MEHR, UND KEINE KONSTANTE WENIGER. `G_BITMAP` ist die
+// Zahl der Kartenbloecke, `G_ITAB` der erste Block der Inodetabelle.
+// Beide stehen im Superblock; eine 0 in der Geometrie heisst "der alte
+// Wert" (1 und 2), und ein Abbild von vor dieser Runde verhaelt sich
+// deshalb Oktett fuer Oktett wie vorher.
+const G_BITMAP: u64 = 16
+const G_ITAB: u64 = 24
+// Wie viele Bloecke das DATEISYSTEM hat -- nicht das Geraet. Eine
+// Partition darf groesser sein als das Dateisystem darauf; ohne diese
+// Zahl wuerde `block_alloc` Bloecke hinter dem Ende der Karte vergeben.
+const G_TOTAL: u64 = 32
 
 fn inode_count(state: u64) -> u64 {
     let n: u64 = kstate.get(state, kstate.FSG_OFF + G_INODES)
@@ -144,9 +171,53 @@ fn data_start(state: u64) -> u64 {
     return d
 }
 
-fn geom(state: u64, inodes: u64, data: u64) {
+// Wie viele Bloecke die Blockkarte hat. Eine 0 heisst 1 -- so sagt
+// jedes Abbild von vor dieser Runde von selbst das Richtige.
+fn bitmap_blocks(state: u64) -> u64 {
+    let n: u64 = kstate.get(state, kstate.FSG_OFF + G_BITMAP)
+    if n == 0 {
+        return 1
+    }
+    return n
+}
+
+// Der erste Block der Inodetabelle. Eine 0 heisst INODE_START (2).
+fn itable(state: u64) -> u64 {
+    let n: u64 = kstate.get(state, kstate.FSG_OFF + G_ITAB)
+    if n == 0 {
+        return INODE_START
+    }
+    return n
+}
+
+// Wie viele Kartenbloecke `n` Bloecke brauchen. EIN Block fasst
+// BS * 8 = 4096 Bits.
+fn bitmap_needed(n: u64) -> u64 {
+    return (n + BS * 8 - 1) / (BS * 8)
+}
+
+fn geom(state: u64, inodes: u64, data: u64, bitm: u64, itab: u64) {
     kstate.set(state, kstate.FSG_OFF + G_INODES, inodes)
     kstate.set(state, kstate.FSG_OFF + G_DATA, data)
+    kstate.set(state, kstate.FSG_OFF + G_BITMAP, bitm)
+    kstate.set(state, kstate.FSG_OFF + G_ITAB, itab)
+}
+
+fn geom_total(state: u64, n: u64) {
+    kstate.set(state, kstate.FSG_OFF + G_TOTAL, n)
+}
+
+// Die Zahl der Bloecke, mit der dieses Dateisystem rechnet. Es ist die
+// KLEINERE von beiden: was der Superblock sagt und was das Geraet
+// hergibt. Eine 0 in der Geometrie heisst "das Geraet", und damit ist
+// jeder Lauf vor dieser Runde unveraendert.
+fn total_blocks(state: u64) -> u64 {
+    let dev: u64 = blk.blocks(state)
+    let n: u64 = kstate.get(state, kstate.FSG_OFF + G_TOTAL)
+    if n == 0 || n > dev {
+        return dev
+    }
+    return n
 }
 
 // The fields of an inode.
@@ -184,6 +255,12 @@ const SB_ROOT: u64 = 56
 // Richtige, ohne dass jemand es anfassen muesste. Das ist die ganze
 // Rueckwaertsvertraeglichkeit, und sie kostet ein Wort.
 const SB_VERSION: u64 = 64
+// RUNDE INSTALL. Das naechste freie Wort des Superblocks: wie viele
+// Bloecke die Blockkarte hat. Eine 0 heisst 1, also genau das, was
+// jedes Abbild vor dieser Runde ist -- die Fassungsnummer musste dafuer
+// NICHT hochgesetzt werden, und das ist der ganze Trick: das Feld
+// beschreibt eine Groesse, keine andere Bedeutung bestehender Felder.
+const SB_BITBLOCKS: u64 = 72
 const OFS_V1: u64 = 1
 const OFS_V2: u64 = 2
 
@@ -416,8 +493,8 @@ fn set_meta(state: u64, ino: u64, mode: u64, uid: u64, gid: u64) -> bool {
 
 // ---------------------------------------------------------- the inodes
 
-fn inode_block_of(ino: u64) -> u64 {
-    return INODE_START + (ino - 1) / INODES_PER_BLOCK
+fn inode_block_of(state: u64, ino: u64) -> u64 {
+    return itable(state) + (ino - 1) / INODES_PER_BLOCK
 }
 
 fn inode_off(ino: u64) -> u64 {
@@ -428,7 +505,7 @@ fn inode_get(state: u64, ino: u64, field: u64) -> u64 {
     if ino == 0 || ino > inode_count(state) {
         return 0
     }
-    if !blk.read(state, inode_block_of(ino), buf_in(state)) {
+    if !blk.read(state, inode_block_of(state, ino), buf_in(state)) {
         return 0
     }
     return get64(buf_in(state) + inode_off(ino) + field)
@@ -438,11 +515,11 @@ fn inode_set(state: u64, ino: u64, field: u64, v: u64) -> bool {
     if ino == 0 || ino > inode_count(state) {
         return false
     }
-    if !blk.read(state, inode_block_of(ino), buf_in(state)) {
+    if !blk.read(state, inode_block_of(state, ino), buf_in(state)) {
         return false
     }
     put64(buf_in(state) + inode_off(ino) + field, v)
-    return blk.write(state, inode_block_of(ino), buf_in(state))
+    return blk.write(state, inode_block_of(state, ino), buf_in(state))
 }
 
 fn inode_type(state: u64, ino: u64) -> u64 {
@@ -456,14 +533,14 @@ fn inode_size(state: u64, ino: u64) -> u64 {
 // A whole inode at once: cheaper than eighteen single writes, and it is
 // the only way a new inode gets a clean state.
 fn inode_init(state: u64, ino: u64, kind: u64) -> bool {
-    if !blk.read(state, inode_block_of(ino), buf_in(state)) {
+    if !blk.read(state, inode_block_of(state, ino), buf_in(state)) {
         return false
     }
     let at: u64 = buf_in(state) + inode_off(ino)
     zero(at, INODE_SIZE)
     put64(at + I_TYPE, kind)
     put64(at + I_NLINK, 1)
-    return blk.write(state, inode_block_of(ino), buf_in(state))
+    return blk.write(state, inode_block_of(state, ino), buf_in(state))
 }
 
 fn inode_alloc(state: u64, kind: u64) -> u64 {
@@ -489,7 +566,7 @@ fn used_inodes(state: u64) -> u64 {
     var n: u64 = 0
     var b: u64 = 0
     while b * INODES_PER_BLOCK < letzte {
-        if blk.read(state, INODE_START + b, buf_in(state)) {
+        if blk.read(state, itable(state) + b, buf_in(state)) {
             var k: u64 = 0
             while k < INODES_PER_BLOCK && b * INODES_PER_BLOCK + k < letzte {
                 if get64(buf_in(state) + k * INODE_SIZE + I_TYPE) != T_FREE {
@@ -505,17 +582,36 @@ fn used_inodes(state: u64) -> u64 {
 
 // ---------------------------------------------------------- the bitmap
 
+// RUNDE INSTALL: DIE KARTE HAT MEHRERE BLOECKE, UND DIE SCHLEIFE WEISS
+// DAS. Block `b` steht in Kartenblock BITMAP_BLOCK + b / (BS*8), an
+// Bitstelle b % (BS*8). Bei EINEM Kartenblock ist das wortgleich die
+// Rechnung von vorher -- b / 4096 ist dann immer 0.
+fn bm_block_of(b: u64) -> u64 {
+    return BITMAP_BLOCK + b / (BS * 8)
+}
+
+fn bm_bit_of(b: u64) -> u64 {
+    return b % (BS * 8)
+}
+
 fn block_alloc(state: u64) -> u64 {
-    if !blk.read(state, BITMAP_BLOCK, buf_bm(state)) {
-        return 0
-    }
     var b: u64 = data_start(state)
-    let last: u64 = blk.blocks(state)
-    while b < last && b < BS * 8 {
-        let p: u64 = buf_bm(state) + b / 8
-        if (kstate.get8(p) & (1 << (b % 8))) == 0 {
-            kstate.set8(p, (kstate.get8(p) | (1 << (b % 8))) as u8)
-            if !blk.write(state, BITMAP_BLOCK, buf_bm(state)) {
+    let last: u64 = total_blocks(state)
+    let karten: u64 = bitmap_blocks(state)
+    var karte: u64 = 0xFFFFFFFFFFFFFFFF // welcher Kartenblock im Puffer liegt
+    while b < last && b < karten * BS * 8 {
+        let kb: u64 = bm_block_of(b)
+        if kb != karte {
+            if !blk.read(state, kb, buf_bm(state)) {
+                return 0
+            }
+            karte = kb
+        }
+        let bit: u64 = bm_bit_of(b)
+        let p: u64 = buf_bm(state) + bit / 8
+        if (kstate.get8(p) & (1 << (bit % 8))) == 0 {
+            kstate.set8(p, (kstate.get8(p) | (1 << (bit % 8))) as u8)
+            if !blk.write(state, kb, buf_bm(state)) {
                 return 0
             }
             zero(buf_zz(state), BS)
@@ -528,26 +624,38 @@ fn block_alloc(state: u64) -> u64 {
 }
 
 fn block_free(state: u64, b: u64) {
-    if b < data_start(state) || b >= blk.blocks(state) {
+    if b < data_start(state) || b >= total_blocks(state) {
         return
     }
-    if !blk.read(state, BITMAP_BLOCK, buf_bm(state)) {
+    if b >= bitmap_blocks(state) * BS * 8 {
         return
     }
-    let p: u64 = buf_bm(state) + b / 8
-    kstate.set8(p, (kstate.get8(p) & (255 ^ (1 << (b % 8)))) as u8)
-    blk.write(state, BITMAP_BLOCK, buf_bm(state))
+    let kb: u64 = bm_block_of(b)
+    if !blk.read(state, kb, buf_bm(state)) {
+        return
+    }
+    let bit: u64 = bm_bit_of(b)
+    let p: u64 = buf_bm(state) + bit / 8
+    kstate.set8(p, (kstate.get8(p) & (255 ^ (1 << (bit % 8)))) as u8)
+    blk.write(state, kb, buf_bm(state))
 }
 
 fn free_blocks(state: u64) -> u64 {
-    if !blk.read(state, BITMAP_BLOCK, buf_bm(state)) {
-        return 0
-    }
     var b: u64 = 0
     var n: u64 = 0
-    let last: u64 = blk.blocks(state)
-    while b < last && b < BS * 8 {
-        if (kstate.get8(buf_bm(state) + b / 8) & (1 << (b % 8))) == 0 {
+    let last: u64 = total_blocks(state)
+    let karten: u64 = bitmap_blocks(state)
+    var karte: u64 = 0xFFFFFFFFFFFFFFFF
+    while b < last && b < karten * BS * 8 {
+        let kb: u64 = bm_block_of(b)
+        if kb != karte {
+            if !blk.read(state, kb, buf_bm(state)) {
+                return n
+            }
+            karte = kb
+        }
+        let bit: u64 = bm_bit_of(b)
+        if (kstate.get8(buf_bm(state) + bit / 8) & (1 << (bit % 8))) == 0 {
             n = n + 1
         }
         b = b + 1
@@ -1141,6 +1249,25 @@ fn unlink_path(state: u64, p: u64) -> bool {
             return false
         }
     }
+    // RUNDE INSTALL: DER ZAEHLER DER NAMEN WIRD JETZT GELESEN.
+    //
+    // Bis hierher hat `unlink` die Inode IMMER freigegeben -- richtig,
+    // solange jede Datei genau einen Namen hatte. Seit `link_path` gibt
+    // es zweite Namen aus Ring 3 (das Produkt-Abbild hatte sie vorher
+    // schon, gebaut von mkfs.py auf dem Wirt), und dann waere das hier
+    // ein Datenverlust: `rm /apps/hallo.prog/start` haette die Oktette
+    // des Store-Eintrags mitgenommen, obwohl `/store/<hash>/start` noch
+    // darauf zeigt.
+    //
+    // Ein Verzeichnis hat weiter genau einen Namen (`link_path` sagt
+    // nein), also aendert sich fuer Verzeichnisse gar nichts.
+    let nl: u64 = inode_get(state, ino, I_NLINK)
+    if nl > 1 && inode_type(state, ino) == T_FILE {
+        inode_set(state, ino, I_NLINK, nl - 1)
+        dir_remove(state, dir, (&name[0]) as u64)
+        leave(state, flags)
+        return true
+    }
     file_truncate(state, ino)
     inode_set(state, ino, I_TYPE, T_FREE)
     inode_set(state, ino, I_NLINK, 0)
@@ -1213,6 +1340,55 @@ fn rename_path(state: u64, from: u64, to: u64) -> u64 {
     return 0
 }
 
+// ============================================== RUNDE INSTALL: link
+//
+// EIN ZWEITER NAME FUER DIESELBEN OKTETTE. Das Format kann es seit
+// Runde 62 -- ein Verzeichniseintrag ist eine Inodenummer und ein Name,
+// und nichts hindert zwei Eintraege daran, dieselbe Zahl zu tragen.
+// `mkfs.py` nutzt es seit Runde K15 (`<neu>@<vorhanden>`), und das
+// Produkt-Abbild von OrientOS lebt davon: `/apps/explorer.prog/start`
+// und `/bin/explorer` sind ein Exemplar und zwei Namen.
+//
+// WAS FEHLTE, WAR DER WEG AUS RING 3. Ohne ihn kann ein `opkg`, das
+// AUF dem System laeuft, die aktivierte Sicht `/apps` nicht bauen: es
+// muesste jede Datei des Store-Eintrags KOPIEREN, und dann waere ein
+// Paket zweimal auf der Platte und "gleicher Hash = dieselben Oktette"
+// nur noch die halbe Wahrheit.
+//
+// NUR DATEIEN. Ein zweiter Name auf ein VERZEICHNIS macht aus dem Baum
+// einen Graphen mit Zyklen -- jedes Unix seit 1979 verbietet es, und
+// dieses hier auch. Der Zaehler `I_NLINK` wird mitgefuehrt; `unlink`
+// nimmt ihn herunter und gibt die Bloecke erst frei, wenn er 0 ist.
+fn link_path(state: u64, from: u64, to: u64) -> u64 {
+    var newname: [u8; 32] = [0 as u8; 32]
+    let flags: u64 = enter(state)
+    let ino: u64 = path(state, from)
+    if ino == 0 {
+        leave(state, flags)
+        return 2 // ENOENT
+    }
+    if inode_type(state, ino) != T_FILE {
+        leave(state, flags)
+        return 1 // EPERM -- kein zweiter Name auf ein Verzeichnis
+    }
+    let ndir: u64 = parent_of(state, to, (&newname[0]) as u64)
+    if ndir == 0 {
+        leave(state, flags)
+        return 2
+    }
+    if dir_find(state, ndir, (&newname[0]) as u64) != 0 {
+        leave(state, flags)
+        return 17 // EEXIST
+    }
+    if !dir_add(state, ndir, (&newname[0]) as u64, ino) {
+        leave(state, flags)
+        return 28 // ENOSPC
+    }
+    inode_set(state, ino, I_NLINK, inode_get(state, ino, I_NLINK) + 1)
+    leave(state, flags)
+    return 0
+}
+
 // ------------------------------------------------------ format and mount
 
 fn format(state: u64) -> bool {
@@ -1225,7 +1401,13 @@ fn format(state: u64) -> bool {
     // Zeigern in einem Abbild, das acht liest.
     kstate.set(state, kstate.K13_OFF + kstate.U_FSVER, OFS_V2)
     let total: u64 = blk.blocks(state)
-    if total < DATA_START + 8 {
+    // RUNDE INSTALL: DIE GEOMETRIE WIRD GERECHNET UND NICHT GESETZT.
+    // Bei bis zu 4096 Bloecken kommt genau das heraus, was seit Runde
+    // 62 dastand -- eine Karte, Tabelle ab 2, Daten ab 34.
+    let karten: u64 = bitmap_needed(total)
+    let itab: u64 = BITMAP_BLOCK + karten
+    let ds: u64 = itab + INODE_BLOCKS
+    if total < ds + 8 {
         leave(state, flags)
         return false
     }
@@ -1236,31 +1418,48 @@ fn format(state: u64) -> bool {
     put64(buf_sb(state) + SB_BLOCKS, total)
     put64(buf_sb(state) + SB_INODES, INODE_COUNT)
     put64(buf_sb(state) + SB_BITMAP, BITMAP_BLOCK)
-    put64(buf_sb(state) + SB_ITABLE, INODE_START)
-    put64(buf_sb(state) + SB_DATA, DATA_START)
+    put64(buf_sb(state) + SB_ITABLE, itab)
+    put64(buf_sb(state) + SB_DATA, ds)
     put64(buf_sb(state) + SB_ROOT, 1)
     put64(buf_sb(state) + SB_VERSION, OFS_V2)
+    // NUR WENN ES ETWAS NEUES SAGT. Eine 0 heisst 1, also genau das,
+    // was jedes Abbild vor dieser Runde ist -- und ein Abbild mit einem
+    // Kartenblock bleibt damit Oktett fuer Oktett dasselbe wie vorher.
+    if karten > 1 {
+        put64(buf_sb(state) + SB_BITBLOCKS, karten)
+    }
     if !blk.write(state, 0, buf_sb(state)) {
         leave(state, flags)
         return false
     }
-    // The bitmap: everything up to the data area is taken.
-    zero(buf_bm(state), BS)
-    var b: u64 = 0
-    while b < DATA_START {
-        let p: u64 = buf_bm(state) + b / 8
-        kstate.set8(p, (kstate.get8(p) | (1 << (b % 8))) as u8)
-        b = b + 1
+    // Die Blockkarte. ALLES bis zum Datenbereich ist belegt, und alles
+    // HINTER dem Ende der Platte ebenfalls -- ein Bit, das keinen Block
+    // beschreibt, darf nie frei aussehen.
+    var kb: u64 = 0
+    while kb < karten {
+        zero(buf_bm(state), BS)
+        var b: u64 = kb * BS * 8
+        let ende: u64 = b + BS * 8
+        while b < ende {
+            if b < ds || b >= total {
+                let bit: u64 = b - kb * BS * 8
+                let p: u64 = buf_bm(state) + bit / 8
+                kstate.set8(p, (kstate.get8(p) | (1 << (bit % 8))) as u8)
+            }
+            b = b + 1
+        }
+        blk.write(state, BITMAP_BLOCK + kb, buf_bm(state))
+        kb = kb + 1
     }
-    blk.write(state, BITMAP_BLOCK, buf_bm(state))
     // The inode table: empty.
     zero(buf_in(state), BS)
     var k: u64 = 0
     while k < INODE_BLOCKS {
-        blk.write(state, INODE_START + k, buf_in(state))
+        blk.write(state, itab + k, buf_in(state))
         k = k + 1
     }
-    geom(state, INODE_COUNT, DATA_START)
+    geom(state, INODE_COUNT, ds, karten, itab)
+    geom_total(state, total)
     kstate.set(state, kstate.FS_ROOT, 1)
     kstate.set(state, kstate.FS_READY, 1)
     // The root directory.
@@ -1329,16 +1528,40 @@ fn mount(state: u64) -> bool {
         ds = DATA_START
     }
     let itab: u64 = get64(buf_sb(state) + SB_ITABLE)
+    // RUNDE INSTALL: die Zahl der Kartenbloecke. 0 heisst 1 -- jedes
+    // Abbild von vor dieser Runde sagt damit von selbst das Richtige,
+    // und die Pruefung darunter ist dann wortgleich die alte.
+    var karten: u64 = get64(buf_sb(state) + SB_BITBLOCKS)
+    if karten == 0 {
+        karten = 1
+    }
+    var total: u64 = get64(buf_sb(state) + SB_BLOCKS)
+    if total == 0 || total > blk.blocks(state) {
+        total = blk.blocks(state)
+    }
     let noetig: u64 = (ni + INODES_PER_BLOCK - 1) / INODES_PER_BLOCK
-    if itab != INODE_START || ds < INODE_START + noetig
-        || ds >= blk.blocks(state) {
+    // Die Karte muss JEDEN Block beschreiben koennen, den der
+    // Superblock behauptet. Sonst gaebe es Bloecke, ueber die niemand
+    // Buch fuehrt -- und `block_alloc` wuerde sie zweimal vergeben.
+    if karten < bitmap_needed(total) {
         leave(state, flags)
         return false
     }
-    geom(state, ni, ds)
+    if get64(buf_sb(state) + SB_BITMAP) != BITMAP_BLOCK {
+        leave(state, flags)
+        return false
+    }
+    if itab != BITMAP_BLOCK + karten || ds < itab + noetig
+        || ds >= total {
+        leave(state, flags)
+        return false
+    }
+    geom(state, ni, ds, karten, itab)
+    geom_total(state, total)
     let r: u64 = get64(buf_sb(state) + SB_ROOT)
     if inode_get(state, r, I_TYPE) != T_DIR {
-        geom(state, INODE_COUNT, DATA_START)
+        geom(state, INODE_COUNT, DATA_START, 1, INODE_START)
+        geom_total(state, 0)
         leave(state, flags)
         return false
     }
@@ -1429,7 +1652,7 @@ fn scan(state: u64, cur: u64, out: u64, max: u64) -> u64 {
                                 // Felder: `inode_get` liest je Aufruf
                                 // einen Block, und Groesse und Art
                                 // stehen im selben.
-                                if blk.read(state, inode_block_of(child),
+                                if blk.read(state, inode_block_of(state, child),
                                     buf_in(state)) {
                                     let at2: u64 = buf_in(state)
                                         + inode_off(child)

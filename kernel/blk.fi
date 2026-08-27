@@ -37,7 +37,9 @@ export {
     ram_init, use_ata, use_nvme, read, write, blocks, present,
     BLOCK_SIZE, DEV_RAM, DEV_ATA, DEV_NVME, DEV_ATA1,
     // ---- Runde K14 ----
-    read_on, write_on, blocks_on, present_on, probe_ata1, dev_name
+    read_on, write_on, blocks_on, present_on, probe_ata1, dev_name,
+    // ---- RUNDE INSTALL ----
+    use_at, first, identify, probe_ata0, flush
 }
 
 const BLOCK_SIZE: u64 = 512
@@ -58,6 +60,7 @@ fn ram_init(state: u64, base: u64, blocks_n: u64) {
     kstate.set(state, kstate.DISK, base)
     kstate.set(state, kstate.DISK_BLOCKS, blocks_n)
     kstate.set(state, kstate.DISK_DEV, DEV_RAM)
+    kstate.set(state, kstate.DISK_FIRST, 0)
 }
 
 // From here on the same file system writes to a real disk. Nothing else
@@ -66,6 +69,35 @@ fn use_ata(state: u64, blocks_n: u64) {
     kstate.set(state, kstate.DISK, 0)
     kstate.set(state, kstate.DISK_BLOCKS, blocks_n)
     kstate.set(state, kstate.DISK_DEV, DEV_ATA)
+    kstate.set(state, kstate.DISK_FIRST, 0)
+}
+
+// ================================================== RUNDE INSTALL
+//
+// DIE WURZEL LIEGT AB HIER NICHT MEHR ZWINGEND BEI BLOCK 0.
+//
+// Das ist die EINZIGE Aenderung, die "Wurzeldateisystem auf einer
+// Partition" im Kern kostet -- und sie steht hier und nicht in `fs.fi`,
+// weil sie dorthin gehoert: `fs.fi` redet ueber BLOECKE eines Geraets
+// und darf nicht wissen, wo dieses Geraet anfaengt. Der Kommentar in
+// `ofs.fi` sagt seit Runde K14, dass dieser Tag kommt; er hat drei
+// Zeilen in `fs.fi` erwartet und braucht null.
+//
+// `first` ist der erste Block der Wurzel auf ihrem Geraet, `blocks_n`
+// ihre Laenge. `read`/`write` unten pruefen gegen die LAENGE und
+// addieren den VERSATZ -- ein Dateisystem, das ueber sein Ende hinaus
+// liest, liest damit nicht in die naechste Partition, sondern bekommt
+// ein Nein. Genau dieselbe Zusage, die `mnt.first`/`mnt.blocks` seit
+// K14 fuer FAT32 geben.
+fn use_at(state: u64, dev: u64, first_n: u64, blocks_n: u64) {
+    kstate.set(state, kstate.DISK, 0)
+    kstate.set(state, kstate.DISK_BLOCKS, blocks_n)
+    kstate.set(state, kstate.DISK_DEV, dev)
+    kstate.set(state, kstate.DISK_FIRST, first_n)
+}
+
+fn first(state: u64) -> u64 {
+    return kstate.get(state, kstate.DISK_FIRST)
 }
 
 // Round K2. The third device, and the interface does not widen by a
@@ -74,6 +106,7 @@ fn use_nvme(state: u64, blocks_n: u64) {
     kstate.set(state, kstate.DISK, 0)
     kstate.set(state, kstate.DISK_BLOCKS, blocks_n)
     kstate.set(state, kstate.DISK_DEV, DEV_NVME)
+    kstate.set(state, kstate.DISK_FIRST, 0)
 }
 
 fn blocks(state: u64) -> u64 {
@@ -106,6 +139,7 @@ const ATA_CTRL: u16 = 0x3F6
 const ATA_READ: u8 = 0x20
 const ATA_WRITE: u8 = 0x30
 const ATA_FLUSH: u8 = 0xE7
+const ATA_IDENT: u8 = 0xEC // RUNDE INSTALL: wie gross ist diese Platte
 
 const ST_BSY: u64 = 0x80
 const ST_DRQ: u64 = 0x08
@@ -156,13 +190,6 @@ fn ata_select_on(lba: u64, slave: bool) {
     serial.out8(ATA_LBA2, ((lba >> 16) & 0xFF) as u8)
 }
 
-fn ata_select(lba: u64) {
-    serial.out8(ATA_DRIVE, (0xE0 | ((lba >> 24) & 0x0F)) as u8)
-    serial.out8(ATA_COUNT, 1 as u8)
-    serial.out8(ATA_LBA0, (lba & 0xFF) as u8)
-    serial.out8(ATA_LBA1, ((lba >> 8) & 0xFF) as u8)
-    serial.out8(ATA_LBA2, ((lba >> 16) & 0xFF) as u8)
-}
 
 // Is there a drive at all? A bus without one reads 0xFF as status.
 fn present(state: u64) -> bool {
@@ -242,38 +269,49 @@ fn ata_write_on(lba: u64, src: u64, slave: bool) -> bool {
         out16(ATA_DATA, __mmio_read16((src + i * 2) as *mut u16) as u64)
         i = i + 1
     }
-    serial.out8(ATA_CMD, ATA_FLUSH)
+    // RUNDE INSTALL: ERST WARTEN, DANN SPUELEN -- UND DAS IST EIN
+    // FEHLER, DER AELTER IST ALS DIESE RUNDE.
+    //
+    // Hier stand bis heute `out8(ATA_CMD, ATA_FLUSH)` UNMITTELBAR hinter
+    // dem letzten Datenwort. Nach ATA/ATAPI-7 (Abschnitt 6.20) darf ein
+    // Befehl nur an ein Laufwerk gehen, das NICHT beschaeftigt ist: nach
+    // dem letzten Wort eines WRITE SECTORS setzt das Laufwerk BSY und
+    // schreibt. Ein FLUSH CACHE in diesem Fenster ist ein Befehl an ein
+    // besetztes Laufwerk -- die Beschreibung nennt das Ergebnis
+    // "unbestimmt", und QEMU macht daraus je nach Zeitpunkt einen
+    // abgebrochenen Befehl mit gesetztem ERR.
+    //
+    // AUFGEFALLEN IST ES ERST HIER, weil erst diese Runde tausende
+    // Sektoren HINTEREINANDER schreibt: bei einem Dateisystem auf einer
+    // RAM-Platte kommt der Pfad nie vor, und bei den Dutzend Sektoren
+    // der bisherigen Plattentests trifft man das Fenster nicht. Der
+    // Fehler sah aus wie ein Zufall -- derselbe Lauf brach einmal beim
+    // 1032. Sektor ab und einmal gar nicht.
+    // RUNDE INSTALL: KEIN FLUSH JE SEKTOR MEHR -- UND DAS BEHEBT EINEN
+    // FEHLER, DER AELTER IST ALS DIESE RUNDE.
+    //
+    // Hier stand `out8(ATA_CMD, ATA_FLUSH)` UNMITTELBAR hinter dem
+    // letzten Datenwort. Nach ATA/ATAPI-7 (6.20) darf ein Befehl nur an
+    // ein Laufwerk gehen, das nicht beschaeftigt ist; nach dem letzten
+    // Wort eines WRITE SECTORS setzt das Laufwerk BSY und schreibt. Ein
+    // FLUSH CACHE in diesem Fenster ist ein Befehl an ein besetztes
+    // Laufwerk. QEMU macht daraus je nach Zeitpunkt einen abgebrochenen
+    // Befehl mit gesetztem ERR -- und `blk.write` meldete dann einen
+    // Fehler fuer einen Sektor, der in Wirklichkeit auf der Platte
+    // stand.
+    //
+    // AUFGEFALLEN IST ES ERST HIER, weil erst diese Runde tausende
+    // Sektoren HINTEREINANDER schreibt. Bei einem Dutzend Sektoren
+    // trifft man das Fenster nicht; der Fehler sah aus wie ein Zufall.
+    //
+    // GESPUELT WIRD JETZT DORT, WO ES HINGEHOERT: `blk.flush` schickt
+    // FLUSH CACHE EINMAL, und `sync` (Aufruf 162) ruft es. Das ist die
+    // Trennung, die jedes Unix hat -- schreiben und dauerhaft machen
+    // sind zwei Dinge.
     return ata_wait(false)
 }
 
-fn ata_read(lba: u64, dst: u64) -> bool {
-    ata_select(lba)
-    serial.out8(ATA_CMD, ATA_READ)
-    if !ata_wait(true) {
-        return false
-    }
-    var i: u64 = 0
-    while i < BLOCK_SIZE / 2 {
-        __mmio_write16((dst + i * 2) as *mut u16, in16(ATA_DATA) as u16)
-        i = i + 1
-    }
-    return true
-}
 
-fn ata_write(lba: u64, src: u64) -> bool {
-    ata_select(lba)
-    serial.out8(ATA_CMD, ATA_WRITE)
-    if !ata_wait(true) {
-        return false
-    }
-    var i: u64 = 0
-    while i < BLOCK_SIZE / 2 {
-        out16(ATA_DATA, __mmio_read16((src + i * 2) as *mut u16) as u64)
-        i = i + 1
-    }
-    serial.out8(ATA_CMD, ATA_FLUSH)
-    return ata_wait(false)
-}
 
 // ------------------------------------------------- Runde K14: das Geraet
 //
@@ -322,7 +360,129 @@ fn blocks_on(state: u64, dev: u64) -> u64 {
     if dev == DEV_ATA1 {
         return kstate.get(state, kstate.DISK2_BLOCKS)
     }
+    // RUNDE INSTALL: DIE ERSTE PLATTE HAT IHRE EIGENE GROESSE, und bis
+    // hierher hat diese Funktion dafuer die Groesse der WURZEL
+    // zurueckgegeben. Solange die Wurzel die ganze Platte war, stimmte
+    // das. Fuer ein `/dev/hda`, auf das ein Installationsprogramm eine
+    // Partitionstafel schreibt, ist es die falsche Zahl -- und zwar in
+    // die gefaehrliche Richtung: `devfs` haette jeden Schreibversuch
+    // hinter dem Ende der Wurzel abgewiesen, und die Sicherungskopie
+    // des GPT-Kopfes liegt im LETZTEN Block der Platte.
+    //
+    // Die Zahl kommt aus IDENTIFY und nicht aus einer Annahme. Ist sie
+    // 0 (kein IDENTIFY gelaufen, keine Platte), bleibt es beim alten
+    // Wert -- jede Messung vor dieser Runde sieht damit, was sie sah.
+    if dev == DEV_ATA {
+        let n: u64 = kstate.get(state, kstate.DISK1_BLOCKS)
+        if n != 0 {
+            return n
+        }
+    }
     return kstate.get(state, kstate.DISK_BLOCKS)
+}
+
+// ATA IDENTIFY (0xEC) -- WIE VIELE SEKTOREN HAT DIESE PLATTE WIRKLICH.
+//
+// Runde K14 hat die Frage ausdruecklich offengelassen: "ATA PIO sagt von
+// sich aus nicht, wie gross ein Laufwerk ist, und ein IDENTIFY dafuer
+// waere ein zweites Protokoll fuer eine Zahl, die `tools/k14/run.sh`
+// ohnehin kennt". Fuer einen Testlauf stimmt das. Fuer ein Programm,
+// das eine Partitionstafel schreiben soll, nicht: es kann den Wirt
+// nicht fragen.
+//
+// Der Befehl gibt 256 Woerter zurueck, und ALLE 256 muessen gelesen
+// werden -- sonst bleibt das Laufwerk in DRQ stehen und der naechste
+// Lesevorgang bekommt den Rest dieser Antwort. Woerter 60/61 sind die
+// Sektorzahl in LBA28, 100..103 die in LBA48. Dieser Treiber adressiert
+// in LBA28 (`ata_select` legt die oberen vier Bits ins
+// Laufwerksregister), also wird oben gekappt: was er nicht adressieren
+// kann, meldet er auch nicht.
+fn identify(state: u64, slave: bool) -> u64 {
+    var sel: u64 = 0xA0
+    if slave {
+        sel = 0xB0
+    }
+    serial.out8(ATA_DRIVE, sel as u8)
+    serial.io_wait()
+    serial.io_wait()
+    serial.out8(ATA_COUNT, 0 as u8)
+    serial.out8(ATA_LBA0, 0 as u8)
+    serial.out8(ATA_LBA1, 0 as u8)
+    serial.out8(ATA_LBA2, 0 as u8)
+    serial.out8(ATA_CMD, ATA_IDENT)
+    serial.io_wait()
+    let st0: u64 = serial.in8(ATA_CMD) as u64
+    if st0 == 0 || st0 == 0xFF {
+        serial.out8(ATA_DRIVE, 0xE0 as u8)
+        return 0
+    }
+    if !ata_wait(true) {
+        serial.out8(ATA_DRIVE, 0xE0 as u8)
+        return 0
+    }
+    var lba28: u64 = 0
+    var lba48: u64 = 0
+    var i: u64 = 0
+    while i < 256 {
+        let v: u64 = in16(ATA_DATA)
+        if i == 60 {
+            lba28 = lba28 | v
+        }
+        if i == 61 {
+            lba28 = lba28 | (v << 16)
+        }
+        if i == 100 {
+            lba48 = lba48 | v
+        }
+        if i == 101 {
+            lba48 = lba48 | (v << 16)
+        }
+        if i == 102 {
+            lba48 = lba48 | (v << 32)
+        }
+        if i == 103 {
+            lba48 = lba48 | (v << 48)
+        }
+        i = i + 1
+    }
+    serial.out8(ATA_DRIVE, 0xE0 as u8)
+    var n: u64 = lba28
+    if lba48 != 0 {
+        n = lba48
+    }
+    if n > 0x0FFFFFFF {
+        n = 0x0FFFFFFF
+    }
+    return n
+}
+
+// Die erste Platte anmelden und ihre Groesse merken. Rueckgabe: die
+// Sektorzahl, 0 = keine Platte.
+fn probe_ata0(state: u64) -> u64 {
+    kstate.set(state, kstate.DISK1_BLOCKS, 0)
+    if !present(state) {
+        return 0
+    }
+    let n: u64 = identify(state, false)
+    kstate.set(state, kstate.DISK1_BLOCKS, n)
+    return n
+}
+
+// ALLES, WAS DIE PLATTE NOCH IM KOPF HAT, AUF DEN TRAEGER. Der Befehl
+// heisst FLUSH CACHE (0xE7) und ist bei ATA seit 1996 die einzige
+// Zusage, die es ueberhaupt gibt: er kommt erst zurueck, wenn nichts
+// mehr aussteht. Ohne ihn ist "geschrieben" eine Aussage ueber einen
+// Zwischenspeicher und nicht ueber die Platte -- und ein Stromausfall
+// haette recht.
+fn flush(state: u64) -> bool {
+    if kstate.get(state, kstate.DISK_DEV) != DEV_ATA {
+        return true
+    }
+    serial.out8(ATA_DRIVE, 0xE0 as u8)
+    serial.io_wait()
+    serial.out8(ATA_CMD, ATA_FLUSH)
+    serial.io_wait()
+    return ata_wait(false)
 }
 
 // Die zweite Platte anmelden. `n` ist ihre Groesse in Bloecken, wie sie
@@ -355,6 +515,28 @@ fn dev_name(dev: u64) -> u64 {
 // Laufwerk wieder am Anfang; eine einzelne langsame Antwort ist dann
 // kein Grund, die Platte fuer kaputt zu erklaeren. Ein DRITTER Versuch
 // waere Aberglaube -- was zweimal nicht antwortet, antwortet nicht.
+// RUNDE INSTALL: DASSELBE FUER DAS SCHREIBEN.
+//
+// `ata_read_twice` gibt es seit Runde K14 mit der Begruendung "eine
+// einzelne langsame Antwort ist kein Grund, die Platte fuer kaputt zu
+// erklaeren". Fuer das SCHREIBEN gab es das Gegenstueck nicht -- und
+// bis zu dieser Runde fiel das nicht auf, weil kein Lauf mehr als ein
+// paar Dutzend Sektoren geschrieben hat. Diese Runde schreibt
+// Zehntausende, und zweimal ist dabei genau EIN Sektor
+// fehlgeschlagen; sichtbar wurde das als "das Umbenennen scheiterte"
+// in der Paketverwaltung, also vier Schichten von seiner Ursache
+// entfernt.
+//
+// EIN zweiter Versuch, und nur einer -- dieselbe Regel wie beim Lesen:
+// was zweimal nicht antwortet, antwortet nicht.
+fn ata_write_twice(lba: u64, src: u64, slave: bool) -> bool {
+    if ata_write_on(lba, src, slave) {
+        return true
+    }
+    ata_recover(slave)
+    return ata_write_on(lba, src, slave)
+}
+
 fn ata_read_twice(lba: u64, dst: u64, slave: bool) -> bool {
     if ata_read_on(lba, dst, slave) {
         return true
@@ -388,10 +570,10 @@ fn write_on(state: u64, dev: u64, lba: u64, src: u64) -> bool {
         return false
     }
     if dev == DEV_ATA {
-        return ata_write_on(lba, src, false)
+        return ata_write_twice(lba, src, false)
     }
     if dev == DEV_ATA1 {
-        return ata_write_on(lba, src, true)
+        return ata_write_twice(lba, src, true)
     }
     if dev == DEV_NVME {
         return nvme.write_block(state, lba, src)
@@ -410,17 +592,43 @@ fn read(state: u64, lba: u64, dst: u64) -> bool {
     if lba >= blocks(state) {
         return false
     }
+    // RUNDE INSTALL: DIE EINE ZEILE. `lba` ist relativ zur Wurzel,
+    // `abs` absolut auf dem Geraet. Ohne einen Versatz sind beide
+    // gleich, und dann ist dieser Lauf Oktett fuer Oktett der von
+    // vorher.
+    let abs: u64 = lba + kstate.get(state, kstate.DISK_FIRST)
+    // RUNDE INSTALL: LESEN WIRD WIEDERHOLT, GENAU WIE SCHREIBEN.
+    //
+    // Hier stand `ata_read(abs, dst)` -- ein EINZIGER Versuch, ohne
+    // `ata_recover`. Gegenueber stand `write` mit `ata_write_twice`:
+    // zwei Versuche, dazwischen ein Ruecksetzen. Zwei Umsetzungen
+    // desselben Weges, und nur eine davon war repariert worden.
+    //
+    // WAS DAS KOSTETE, IST GEMESSEN: derselbe Platteninhalt -- `cmp`
+    // bestaetigt Oktett fuer Oktett --, einmal unmittelbar nach der
+    // Installation gestartet und einmal ueber eine Kopie. Direkt:
+    // `opk: das Umbenennen scheiterte`, danach `sh: cannot run opk
+    // -> -2`, das Dateisystem war fuer den Rest des Laufes hin. Ueber
+    // die Kopie: `opk: installiert hallo -> 0`, zehnmal von zehn. Der
+    // Unterschied war allein die Zugriffszeit des Wirtes.
+    //
+    // Ein Lesefehler ohne `ata_recover` laesst das Laufwerk in dem
+    // Zustand stehen, in dem es gestolpert ist -- deshalb war nicht
+    // ein Block verloren, sondern alle folgenden.
     if kstate.get(state, kstate.DISK_DEV) == DEV_ATA {
-        return ata_read(lba, dst)
+        return ata_read_twice(abs, dst, false)
+    }
+    if kstate.get(state, kstate.DISK_DEV) == DEV_ATA1 {
+        return ata_read_twice(abs, dst, true)
     }
     if kstate.get(state, kstate.DISK_DEV) == DEV_NVME {
-        return nvme.read_block(state, lba, dst)
+        return nvme.read_block(state, abs, dst)
     }
     let base: u64 = kstate.get(state, kstate.DISK)
     if base == 0 {
         return false
     }
-    copy(base + lba * BLOCK_SIZE, dst)
+    copy(base + abs * BLOCK_SIZE, dst)
     return true
 }
 
@@ -428,16 +636,20 @@ fn write(state: u64, lba: u64, src: u64) -> bool {
     if lba >= blocks(state) {
         return false
     }
+    let abs: u64 = lba + kstate.get(state, kstate.DISK_FIRST)
     if kstate.get(state, kstate.DISK_DEV) == DEV_ATA {
-        return ata_write(lba, src)
+        return ata_write_twice(abs, src, false)
+    }
+    if kstate.get(state, kstate.DISK_DEV) == DEV_ATA1 {
+        return ata_write_twice(abs, src, true)
     }
     if kstate.get(state, kstate.DISK_DEV) == DEV_NVME {
-        return nvme.write_block(state, lba, src)
+        return nvme.write_block(state, abs, src)
     }
     let base: u64 = kstate.get(state, kstate.DISK)
     if base == 0 {
         return false
     }
-    copy(src, base + lba * BLOCK_SIZE)
+    copy(src, base + abs * BLOCK_SIZE)
     return true
 }

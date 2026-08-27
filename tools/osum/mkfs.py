@@ -98,21 +98,41 @@ OFS_V1, OFS_V2 = 1, 2
 # for octet, and section 3 of tools/posix/run.sh checks that they do.
 I_DINDIRECT = 120
 SB = dict(MAGIC=0, BSIZE=8, BLOCKS=16, INODES=24, BITMAP=32, ITABLE=40,
-          DATA=48, ROOT=56, VERSION=64)
+          DATA=48, ROOT=56, VERSION=64, BITBLOCKS=72)
 
 
 class Fs:
-    def __init__(self, blocks, version=OFS_V2, inodes=INODE_COUNT):
+    def __init__(self, blocks, version=OFS_V2, inodes=INODE_COUNT,
+                 karten=0):
+        # RUNDE INSTALL: DIE BLOCKKARTE HAT MEHRERE BLOECKE.
+        #
+        # Bis hierher war sie EINER, und damit passten hoechstens
+        # BS * 8 = 4096 Bloecke = zwei Megaoktett in ein Abbild. Der
+        # Kommentar in `kernel/fs.fi` sagte, wer mehr will, braucht eine
+        # mehrblockige Karte. Das Abbild, das ein Installationsprogramm
+        # auf eine Platte schreibt, will mehr: es traegt AUCH den Kern
+        # (1,7 MiB), weil es ihn sonst nicht auf die EFI-Partition legen
+        # kann.
+        #
+        # `karten` ist die Zahl der Kartenbloecke, die RESERVIERT
+        # werden. Sie darf groesser sein als noetig -- dann beschreibt
+        # die Karte mehr Bloecke, als das Abbild hat, und alle Bits
+        # dahinter stehen auf BELEGT. Genau das braucht ein
+        # Installationsprogramm, das dasselbe Dateisystem spaeter auf
+        # einer groesseren Partition WACHSEN laesst: es setzt die neue
+        # Blockzahl in den Superblock und macht die Bits frei. Ohne
+        # Vorrat muesste dabei die Inodetabelle wandern, und das ist
+        # kein Wachsen mehr, sondern ein Neubau.
         self.inodes = inodes
+        noetig = (blocks + BS * 8 - 1) // (BS * 8)
+        self.karten = max(karten, noetig, 1)
         self.itab_blocks = (inodes + INODES_PER_BLOCK - 1) // INODES_PER_BLOCK
-        self.data_start = INODE_START + self.itab_blocks
+        self.itab = BITMAP_BLOCK + self.karten
+        self.data_start = self.itab + self.itab_blocks
         if blocks < self.data_start + 8:
             raise SystemExit("mkfs: a disk of %d blocks is too small for %d "
                              "inodes (the table alone takes %d)"
                              % (blocks, inodes, self.itab_blocks))
-        if blocks > BS * 8:
-            raise SystemExit("mkfs: the bitmap is one block, so at most %d "
-                             "blocks fit; %d asked" % (BS * 8, blocks))
         self.blocks = blocks
         self.d = bytearray(blocks * BS)
         self.root = 1
@@ -135,15 +155,21 @@ class Fs:
         struct.pack_into("<Q", self.d, at, v & 0xFFFFFFFFFFFFFFFF)
 
     # ------------------------------------------------------------ bitmap
+    def _bit_at(self, b):
+        return (BITMAP_BLOCK + b // (BS * 8)) * BS + (b % (BS * 8)) // 8
+
     def bit_set(self, b):
-        self.d[BITMAP_BLOCK * BS + b // 8] |= 1 << (b % 8)
+        self.d[self._bit_at(b)] |= 1 << (b % 8)
+
+    def bit_clear(self, b):
+        self.d[self._bit_at(b)] &= 0xFF ^ (1 << (b % 8))
 
     def bit_get(self, b):
-        return (self.d[BITMAP_BLOCK * BS + b // 8] >> (b % 8)) & 1
+        return (self.d[self._bit_at(b)] >> (b % 8)) & 1
 
     def block_alloc(self):
         b = self.data_start
-        while b < self.blocks and b < BS * 8:
+        while b < self.blocks and b < self.karten * BS * 8:
             if not self.bit_get(b):
                 self.bit_set(b)
                 return b
@@ -151,7 +177,7 @@ class Fs:
         raise SystemExit("mkfs: the disk is full")
 
     def free_blocks(self):
-        return sum(1 for b in range(min(self.blocks, BS * 8))
+        return sum(1 for b in range(min(self.blocks, self.karten * BS * 8))
                    if not self.bit_get(b))
 
     # ------------------------------------------------------------ inodes
@@ -159,7 +185,7 @@ class Fs:
         if ino < 1 or ino > self.inodes:
             raise SystemExit("mkfs: inode %d is outside the table (%d)"
                              % (ino, self.inodes))
-        return ((INODE_START + (ino - 1) // INODES_PER_BLOCK) * BS
+        return ((self.itab + (ino - 1) // INODES_PER_BLOCK) * BS
                 + ((ino - 1) % INODES_PER_BLOCK) * INODE_SIZE)
 
     def iget(self, ino, field):
@@ -432,11 +458,22 @@ class Fs:
         self.p64(SB["BLOCKS"], self.blocks)
         self.p64(SB["INODES"], self.inodes)
         self.p64(SB["BITMAP"], BITMAP_BLOCK)
-        self.p64(SB["ITABLE"], INODE_START)
+        self.p64(SB["ITABLE"], self.itab)
         self.p64(SB["DATA"], self.data_start)
         self.p64(SB["ROOT"], 1)
         self.p64(SB["VERSION"], self.version)
+        # NUR WENN ES ETWAS NEUES SAGT: eine 0 heisst 1. Ein Abbild
+        # mit EINEM Kartenblock ist damit Oktett fuer Oktett dasselbe
+        # wie vor dieser Runde, und `tools/install/run.sh` haelt es
+        # gegen den mkfs.py von `main`.
+        if self.karten > 1:
+            self.p64(SB["BITBLOCKS"], self.karten)
         for b in range(self.data_start):
+            self.bit_set(b)
+        # Was die Karte beschreibt, das Abbild aber nicht hat, ist
+        # BELEGT. Ein Bit, das keinen Block beschreibt, darf nie frei
+        # aussehen -- sonst gibt `block_alloc` es aus.
+        for b in range(self.blocks, self.karten * BS * 8):
             self.bit_set(b)
         self.root = 1
         ino = self.inode_alloc(T_DIR)
@@ -473,9 +510,10 @@ def load(path):
         return None
     inodes = struct.unpack_from("<Q", raw, SB["INODES"])[0] or INODE_COUNT
     version = struct.unpack_from("<Q", raw, SB["VERSION"])[0] or OFS_V2
-    fs = Fs(max(len(raw) // BS, INODE_START
+    karten = struct.unpack_from("<Q", raw, SB["BITBLOCKS"])[0] or 1
+    fs = Fs(max(len(raw) // BS, BITMAP_BLOCK + karten
                 + (inodes + INODES_PER_BLOCK - 1) // INODES_PER_BLOCK + 8),
-            version, inodes)
+            version, inodes, karten)
     fs.d[:len(raw)] = raw
     if fs.g64(SB["MAGIC"]) != MAGIC:
         return None
@@ -544,6 +582,7 @@ def main(argv):
 
     image, blocks = argv[2], int(argv[3])
     inodes = INODE_COUNT
+    karten = 0
     rest = []
     for spec in argv[4:]:
         if spec == "--v1":
@@ -551,8 +590,11 @@ def main(argv):
         if spec.startswith("--inodes="):
             inodes = int(spec.split("=", 1)[1])
             continue
+        if spec.startswith("--karten="):
+            karten = int(spec.split("=", 1)[1])
+            continue
         rest.append(spec)
-    fs = Fs(blocks, OFS_V1 if "--v1" in argv[4:] else OFS_V2, inodes)
+    fs = Fs(blocks, OFS_V1 if "--v1" in argv[4:] else OFS_V2, inodes, karten)
     fs.format()
     for spec in rest:
         # ZWEI BEDEUTUNGEN FUER EIN ZEICHEN, und sie sind zu
