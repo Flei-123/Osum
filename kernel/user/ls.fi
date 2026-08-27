@@ -16,9 +16,23 @@
 // slash, and that is the only interpretation the short form makes.
 //
 // `-l` is one system call more per entry: `stat` on the finished path
-// says how big the file is. The kernel has no owner, no rights and no
-// clock on a file, so there is nothing else a long form could show --
-// what is missing here is missing in the file system, not in `ls`.
+// says how big the file is.
+//
+// RUNDE OFS3: UND WIE ALT SIE IST. Hier stand: "The kernel has no owner,
+// no rights and no clock on a file, so there is nothing else a long form
+// could show -- what is missing here is missing in the file system, not
+// in `ls`." Runde K13 hat die Rechte gebracht, diese Runde die Uhr. `-l`
+// zeigt jetzt
+//
+//     <art><rechte>  <groesse>  <JJJJ-MM-TT hh:mm>  <name>
+//
+// und bei einem symbolischen Verweis dahinter `-> <ziel>`. Die Zeit wird
+// aus den Sekunden seit 1970 AUSGERECHNET (`tage_zu_datum` unten), nicht
+// vom Kernel geholt: `stat` liefert eine Zahl, und ein Datum daraus zu
+// machen ist Sache dessen, der es hinschreibt.
+//
+// AUF EINEM ABBILD OHNE ZEITEN steht dort `1970-01-01 00:00`, und das
+// ist die ehrliche Anzeige einer Null. Erfunden wird nichts.
 //
 // Round K1 returned the NUMBER OF ENTRIES as its exit code. Round K6 does
 // not: a userland in which `grep` says "found" with 0 and `ls` says
@@ -31,6 +45,83 @@ import libc.io
 import libc.errno
 
 export { u_start }
+
+// RUNDE OFS3: Sekunden seit 1970 -> Jahr, Monat, Tag, Stunde, Minute.
+// Die Umkehrung von `days_from_civil` aus `kernel/time.fi`, hier in Ring
+// 3 -- der Kernel gibt eine Zahl heraus und kein Datum, und das ist
+// richtig so.
+fn schalt(j: u64) -> bool {
+    if (j % 4) != 0 {
+        return false
+    }
+    if (j % 100) != 0 {
+        return true
+    }
+    return (j % 400) == 0
+}
+
+fn tage_im_monat(j: u64, m: u64) -> u64 {
+    if m == 2 {
+        if schalt(j) {
+            return 29
+        }
+        return 28
+    }
+    if m == 4 || m == 6 || m == 9 || m == 11 {
+        return 30
+    }
+    return 31
+}
+
+fn zwei(v: u64) {
+    var z: [u8; 2] = "0\0"
+    if v < 10 {
+        ulib.say((&z[0 as usize]) as u64)
+    }
+    ulib.sayu(v)
+}
+
+fn sag_zeit(secs: u64) {
+    var s_dash: [u8; 2] = "-\0"
+    var s_col: [u8; 2] = ":\0"
+    var s_sp: [u8; 2] = " \0"
+    var tage: u64 = secs / 86400
+    let rest: u64 = secs % 86400
+    var j: u64 = 1970
+    var going: bool = true
+    while going {
+        var im_jahr: u64 = 365
+        if schalt(j) {
+            im_jahr = 366
+        }
+        if tage >= im_jahr {
+            tage = tage - im_jahr
+            j = j + 1
+        } else {
+            going = false
+        }
+    }
+    var m: u64 = 1
+    going = true
+    while going {
+        let im_monat: u64 = tage_im_monat(j, m)
+        if tage >= im_monat && m < 12 {
+            tage = tage - im_monat
+            m = m + 1
+        } else {
+            going = false
+        }
+    }
+    ulib.sayu(j)
+    ulib.say((&s_dash[0 as usize]) as u64)
+    zwei(m)
+    ulib.say((&s_dash[0 as usize]) as u64)
+    zwei(tage + 1)
+    ulib.say((&s_sp[0 as usize]) as u64)
+    zwei(rest / 3600)
+    ulib.say((&s_col[0 as usize]) as u64)
+    zwei((rest % 3600) / 60)
+}
 
 fn u_start(args: u64) -> u64 {
     // No argument means THIS directory, not the root -- `cd /bin; ls`
@@ -137,15 +228,44 @@ fn one(p: u64, long: bool, full: u64, entry: u64, slash: u64, sp: u64,
                 let name: u64 = io.dir_name(rec)
                 let isdir: bool = io.dir_kind(rec) == io.DT_DIR
                 if long {
-                    if isdir {
+                    join(full, p, name)
+                    // RUNDE OFS3: EIN `lstat` UND NICHT EIN `stat`. Ein
+                    // Verweis muss als Verweis erscheinen -- `stat`
+                    // beantwortet die Frage nach seinem ZIEL, und `ls
+                    // -l` zeigte damit dessen Groesse und dessen Zeit.
+                    var st: [u8; 144] = [0 as u8; 144]
+                    var mtime: u64 = 0
+                    var sz: u64 = 0
+                    var istlink: bool = false
+                    if !errno.failed(io.lstat_into(full,
+                        (&st[0 as usize]) as u64)) {
+                        mtime = io.stat_mtime((&st[0 as usize]) as u64)
+                        sz = io.stat_size((&st[0 as usize]) as u64)
+                        istlink = io.is_link_mode(
+                            io.stat_mode_of((&st[0 as usize]) as u64))
+                    }
+                    if istlink {
+                        var l: [u8; 2] = "l\0"
+                        ulib.say((&l[0 as usize]) as u64)
+                    } else if isdir {
                         ulib.say(dir)
                     } else {
                         ulib.say(dash)
                     }
-                    join(full, p, name)
-                    ulib.pad(size_of(full), 9)
+                    ulib.pad(sz, 9)
+                    ulib.say(sp)
+                    sag_zeit(mtime)
                     ulib.say(sp)
                     ulib.say(name)
+                    if istlink {
+                        var pfeil: [u8; 5] = " -> \0"
+                        var ziel: [u8; 256] = [0 as u8; 256]
+                        if !errno.failed(io.readlink(full,
+                            (&ziel[0 as usize]) as u64, 255)) {
+                            ulib.say((&pfeil[0 as usize]) as u64)
+                            ulib.say((&ziel[0 as usize]) as u64)
+                        }
+                    }
                     ulib.nl()
                 } else {
                     ulib.say(name)

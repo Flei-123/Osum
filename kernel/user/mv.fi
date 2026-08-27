@@ -1,11 +1,24 @@
 // kernel/user/mv.fi -- round K6: a name that moves.
 //
-// THE HONEST PART: this kernel has no `rename`. A directory entry can be
-// made and taken away, but not moved, so `mv` is a copy and an unlink --
-// which means it costs the length of the file and needs the room for it
-// twice for a moment. A real `rename` is two lines in `fs.fi` and a
-// system call number; it did not fit into the rules of this round
-// (docs/ROUNDK6.md).
+// RUNDE OFS3: `mv` BENENNT UM. Hier stand seit Runde K6: "this kernel
+// has no `rename` ... so `mv` is a copy and an unlink -- which means it
+// costs the length of the file and needs the room for it twice for a
+// moment". Runde K14 hat `rename` in den Kernel gebaut (Aufruf 82,
+// `fs.rename_path`), aber dieses Programm nie umgestellt; es kopierte
+// weiter. Diese Runde stellt es um.
+//
+// DER UNTERSCHIED IST MESSBAR UND WIRD GEMESSEN: eine Datei von zwei
+// Megaoktett umzubenennen brauchte vorher zwei Megaoktett freien Platz
+// und schrieb sie ein zweites Mal auf die Platte. Jetzt aendert sich ein
+// Verzeichniseintrag, die Inode bleibt, wo sie ist, und KEIN Datenoktett
+// wird angefasst -- `tools/ofs3/run.sh` haelt die Inodenummer vorher und
+// nachher gegeneinander.
+//
+// DAS KOPIEREN BLEIBT ALS NOTWEG STEHEN, und es wird gebraucht: `rename`
+// arbeitet nur INNERHALB eines Dateisystems (POSIX sagt -EXDEV), und
+// `mv /a /mnt/b` ueber eine Einhaengegrenze hinweg ist genau der Fall.
+// Wer es umgekehrt macht -- kopieren und nur bei Bedarf umbenennen --,
+// hat einen `mv`, der bei jeder grossen Datei langsam ist.
 
 profile kernel
 
@@ -41,6 +54,17 @@ fn u_start(args: u64) -> u64 {
     if ulib.streq(src, dst) {
         return 0
     }
+    // RUNDE OFS3: ZUERST UMBENENNEN. Klappt es, ist das ganze Programm
+    // an dieser Stelle fertig -- ohne ein einziges gelesenes Oktett.
+    // Der Kernel gibt EEXIST, wenn das Ziel schon da ist (er
+    // ueberschreibt nicht still), also wird es vorher weggenommen --
+    // dasselbe, was der Kopierweg unten mit `unlink` auch tut.
+    ulib.sys(ulib.SYS_UNLINK, dst, 0, 0)
+    if !ulib.bad(ulib.sys(ulib.SYS_RENAME, src, dst, 0)) {
+        return 0
+    }
+    // Ging nicht -- ueber eine Einhaengegrenze hinweg zum Beispiel.
+    // Dann der Notweg: kopieren und loeschen.
     let in_fd: u64 = ulib.sys(ulib.SYS_OPEN, src, 0, 0)
     if ulib.bad(in_fd) {
         ulib.esay_line((&s_src[0 as usize]) as u64, src)

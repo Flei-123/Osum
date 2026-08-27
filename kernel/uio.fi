@@ -55,14 +55,21 @@ export {
 
 // ------------------------------------------------------------ the slot
 
-const SLOT: u64 = 128 // octets per task
+const SLOT: u64 = 512 // octets per task (Runde OFS3: war 128)
 const O_CWD: u64 = 0 // the working directory, zero terminated
-const CWD_MAX: u64 = 78 // what a path here may be, minus the zero
+// RUNDE OFS3: 78 waren es, und die Zahl kam aus SLOT = 128 Oktetten je
+// Aufgabe. Ein einziger Name darf jetzt 255 Zeichen haben -- ein
+// Arbeitsverzeichnis, das kuerzer ist als ein Name darin, waere eine
+// Falle. Der Platz je Aufgabe wird deshalb VERVIERFACHT (SLOT = 512), und
+// die Seite `UIO_OFF` traegt damit 32 * 512 = 16384 Oktette statt 4096:
+// vier Seiten statt einer.
+const CWD_MAX: u64 = 462 // what a path here may be, minus the zero
 
-// `fs.parent_of` carries a path in 96 octets. A path longer than this
-// would be cut there and would then name a file nobody asked for -- so it
-// is refused here instead.
-const PATH_MAX: u64 = 90
+// RUNDE OFS3: `fs.parent_of` traegt einen Pfad jetzt in 1024 Oktetten in
+// `kdata` statt in 96 auf dem Stapel (siehe dort). Diese Zahl war der
+// Grund, warum ein Pfad hier bei 90 Oktetten abgewiesen wurde; sie ist
+// weg, also steigt die Grenze mit.
+const PATH_MAX: u64 = 1000
 
 // The errors this file hands back. `errno.fi` has the one list; these are
 // the six numbers out of it that appear here.
@@ -207,7 +214,10 @@ fn chdir_to(state: u64, t: u64, buf: u64) -> u64 {
         return err(E_NOTDIR)
     }
     let c: u64 = cwd_addr(state, t)
-    var comp: [u8; 32] = [0 as u8; 32]
+    // RUNDE OFS3: 32 Oktette trugen einen Namen von 24; jetzt sind es
+    // 256. Der Puffer liegt weiter auf dem Stapel -- `chdir_to` ist
+    // nicht der Oeffnen-Pfad, es laeuft einmal je `cd`.
+    var comp: [u8; 264] = [0 as u8; 264]
     var at: u64 = 0
     var i: u64 = 0
     var going: bool = true
@@ -220,7 +230,7 @@ fn chdir_to(state: u64, t: u64, buf: u64) -> u64 {
         } else {
             var n: u64 = 0
             while kstate.get8(buf + i) != 0 && kstate.get8(buf + i) != 47 {
-                if n < 24 {
+                if n < 255 {
                     comp[n as usize] = kstate.get8(buf + i) as u8
                     n = n + 1
                 }
@@ -365,7 +375,14 @@ fn sysinfo(state: u64, what: u64) -> u64 {
         return fs.free_blocks(state)
     }
     if what == I_INODES {
-        return fs.INODE_COUNT
+        // RUNDE OFS3: AUS DEM SUPERBLOCK. `fs.INODE_COUNT` ist die
+        // VORGABE (128) und nicht die Wahrheit -- ein Abbild mit
+        // `--inodes=4096` meldete damit in `df` seit dem zweiten
+        // K15-Nachtrag die falsche Zahl.
+        if kstate.get(state, kstate.FS_READY) == 0 {
+            return fs.INODE_COUNT
+        }
+        return fs.inode_count(state)
     }
     if what == I_IUSED {
         if kstate.get(state, kstate.FS_READY) == 0 {
