@@ -15,10 +15,15 @@
 profile kernel
 
 import ulib
+import libc.io
 
 export { view_of, view_set, view_allow, view_name,
     fallback, fallback_set, fallback_view, link_state, fb_name,
-    fb_word }
+    fb_word,
+    // ---- third addendum ----
+    fallback_save, fallback_load, fallback_on, fallback_switch,
+    hotkey_seq, hotkey_key, hotkey_ns, super_down,
+    net_state, net_ip, net_mask, net_gw, net_off, net_on, CONF }
 
 // The view of a process, `pid` 0 meaning this one. READING IS ALLOWED
 // FOR ANYBODY ABOUT ANYBODY -- see `sys.do_netvget` for why that is a
@@ -128,6 +133,17 @@ fn fb_word(p: u64) -> u64 {
     var w0: [u8; 4] = "off\0"
     var w1: [u8; 13] = "when-offline\0"
     var w2: [u8; 7] = "always\0"
+    // THIRD ADDENDUM: `on` is a fourth spelling and not a fourth value.
+    // The switch a person touches has two positions, and the word for
+    // the other one has to be `on` -- "netview fallback always" reads
+    // like a setting, "netview fallback on" reads like a switch, and it
+    // is the switch that this addendum exists to make plain. It is
+    // accepted on the way IN only: `fb_name` still writes `always`, so
+    // `/etc/netview.conf` keeps one spelling per value.
+    var w3: [u8; 3] = "on\0"
+    if ulib.streq(p, (&w3[0]) as u64) {
+        return ulib.FB_ALWAYS
+    }
     if ulib.streq(p, (&w0[0]) as u64) {
         return ulib.FB_OFF
     }
@@ -138,4 +154,218 @@ fn fb_word(p: u64) -> u64 {
         return ulib.FB_ALWAYS
     }
     return 9
+}
+
+
+// ============================= THIRD ADDENDUM: THE SWITCH IS BINARY
+//
+// Justin's correction, and it is the important one of this addendum:
+// `when-offline` must never be a DEFAULT and must never engage BY
+// ITSELF. The default was already `off` and stays `off`. What changes
+// is the shape of the control the person touches:
+//
+//   THE SWITCH HAS TWO POSITIONS.  off <-> always.  On means "fake a
+//   network for programs nobody configured, network or not"; off means
+//   "do not fake anything". One question, one answer, and the answer
+//   does not depend on what the wire is doing at the moment.
+//
+//   `when-offline` SURVIVES as a third value, reachable only where a
+//   person deliberately picks it out of a list -- `/bin/netview
+//   fallback when-offline` and the drop-down in the settings. It is NOT
+//   on the tile in the quick settings and it is NOT what the switch
+//   toggles to.
+//
+// WHY IT WAS NOT DELETED. It is built, it is measured, and there is a
+// real case for it -- a laptop that is offline for an hour. What was
+// wrong was never the value; it was that a value whose meaning changes
+// with the state of the wire is the wrong thing to hand somebody as a
+// switch. So it keeps its place and loses the switch.
+
+fn fallback_on() -> bool {
+    return fallback() != ulib.FB_OFF
+}
+
+// The switch, as one call: on becomes `always`, off becomes `off`.
+// `when-offline` set from elsewhere reads as ON here (it does fake, at
+// least sometimes) and turning the switch off from there lands on
+// `off`, which is what "off" has to mean.
+fn fallback_switch(on: bool) -> u64 {
+    var want: u64 = ulib.FB_OFF
+    if on {
+        want = ulib.FB_ALWAYS
+    }
+    let r: u64 = fallback_set(want)
+    if ulib.bad(r) {
+        return r
+    }
+    if !fallback_save(want) {
+        return 0 - 1
+    }
+    return 0
+}
+
+// ------------------------------------------------ /etc/netview.conf
+//
+// ONE LINE, `fallback=<word>`, AND FROM THIS ADDENDUM ON ONE WRITER.
+// The second addendum wrote this line in `netview.fi` and again in
+// `einstellungen.fi` and admitted in `docs/NETVIEW.md` that the shape
+// of the line therefore stood in two files. The quick settings would
+// have made that three, so instead the reader and the writer moved
+// here, where the three of them already come for `fb_name` and
+// `fb_word`. The seam is closed rather than widened.
+//
+// The cost is honest and was measured, not guessed: `nv.fi` now pulls
+// `libc.io` into the two programs that imported it without one (`ps`
+// and `nvcheck`). `tools/userland/run.sh` measures the size of the
+// whole userland against the 2 MiB of the drive and the number is in
+// the round's report.
+
+static mut CONF: [u8; 20] = "/etc/netview.conf\0\0\0"
+static mut C_HEAD: [u8; 64] = "# osum, round NETVIEW: the systemwide network fallback.\n\0\0\0\0\0\0\0\0"
+static mut C_KEY: [u8; 10] = "fallback=\0"
+
+fn c_at(p: u64, i: u64) -> u64 {
+    return __mmio_read8((p + i) as *mut u8) as u64
+}
+
+fn fallback_save(f: u64) -> bool {
+    var out: [u8; 128] = [0 as u8; 128]
+    var word: [u8; 14] = [0 as u8; 14]
+    let o: u64 = (&out[0]) as u64
+    var at: u64 = ulib.strcpy(o, (&C_HEAD[0]) as u64)
+    at = at + ulib.strcpy(o + at, (&C_KEY[0]) as u64)
+    let _n: u64 = fb_name(f, (&word[0]) as u64)
+    at = at + ulib.strcpy(o + at, (&word[0]) as u64)
+    *((o + at) as *mut u8) = 10 as u8
+    at = at + 1
+    let fd: u64 = io.create((&CONF[0]) as u64)
+    if ulib.bad(fd) {
+        return false
+    }
+    let w: u64 = io.write_all(fd, o, at)
+    io.close(fd)
+    return !ulib.bad(w) && w >= at
+}
+
+// 9 for "no such file, or nothing usable in it" -- the same shape
+// `fb_word` uses, so that "no such thing" looks the same everywhere.
+// The caller then leaves the preference where it was, which on a
+// machine that never heard of this round is `off`.
+fn fallback_load() -> u64 {
+    var buf: [u8; 128] = [0 as u8; 128]
+    let fd: u64 = io.open((&CONF[0]) as u64, 0)
+    if ulib.bad(fd) {
+        return 9
+    }
+    let n: u64 = io.read(fd, (&buf[0]) as u64, 127)
+    io.close(fd)
+    if ulib.bad(n) || n == 0 {
+        return 9
+    }
+    let b: u64 = (&buf[0]) as u64
+    var at: u64 = 0
+    while at < n {
+        var e: u64 = at
+        while e < n && c_at(b, e) != 10 {
+            e = e + 1
+        }
+        if e > at && c_at(b, at) != 35 { // not a comment
+            var k: u64 = 0
+            var same: bool = true
+            while k < 9 {
+                if c_at(b, at + k) != c_at((&C_KEY[0]) as u64, k) {
+                    same = false
+                    k = 9
+                } else {
+                    k = k + 1
+                }
+            }
+            if same && at + 9 < e {
+                *((b + e) as *mut u8) = 0 as u8
+                return fb_word(b + at + 9)
+            }
+        }
+        at = e + 1
+    }
+    return 9
+}
+
+// ------------------------------------------------- the global hotkey
+//
+// The counter IS the protocol. A reader keeps the number it saw last
+// and acts when it changes; nothing is acknowledged, so nothing can
+// forget to acknowledge, and two readers do not take a press away from
+// each other. `hotkey_ns` is the monotone clock AT the press -- the
+// only way to time "key down to panel up" against ONE clock.
+
+fn hotkey_seq() -> u64 {
+    let v: u64 = ulib.sys(ulib.SYS_HOTKEY, ulib.HK_SEQ, 0, 0)
+    if ulib.bad(v) {
+        return 0
+    }
+    return v
+}
+
+fn hotkey_key() -> u64 {
+    let v: u64 = ulib.sys(ulib.SYS_HOTKEY, ulib.HK_KEY, 0, 0)
+    if ulib.bad(v) {
+        return 0
+    }
+    return v
+}
+
+fn hotkey_ns() -> u64 {
+    let v: u64 = ulib.sys(ulib.SYS_HOTKEY, ulib.HK_NS, 0, 0)
+    if ulib.bad(v) {
+        return 0
+    }
+    return v
+}
+
+fn super_down() -> u64 {
+    let v: u64 = ulib.sys(ulib.SYS_HOTKEY, ulib.HK_DOWN, 0, 0)
+    if ulib.bad(v) {
+        return 0
+    }
+    return v
+}
+
+// ------------------------------------------------- the network itself
+//
+// NOT THE VIEW OF IT. `net_off` takes the machine's address away, which
+// is a different thing from every view in this round: a faked program
+// still believes in its invented network afterwards, and a real one now
+// genuinely has none. The two tiles in the quick settings are next to
+// each other for exactly that reason -- they are not two words for the
+// same switch.
+
+fn net_state() -> u64 {
+    let v: u64 = ulib.sys(ulib.SYS_NETGET, ulib.NG_STATE, 0, 0)
+    if ulib.bad(v) {
+        return 0
+    }
+    return v
+}
+
+fn net_ip() -> u64 {
+    return ulib.sys(ulib.SYS_NETGET, ulib.NG_IP, 0, 0)
+}
+
+fn net_mask() -> u64 {
+    return ulib.sys(ulib.SYS_NETGET, ulib.NG_MASK, 0, 0)
+}
+
+fn net_gw() -> u64 {
+    return ulib.sys(ulib.SYS_NETGET, ulib.NG_GW, 0, 0)
+}
+
+// All three zero: the kernel reads that as "give the address back"
+// (`sys.net_call`). Anything else with a zero address stays the error
+// it always was.
+fn net_off() -> u64 {
+    return ulib.sys(ulib.SYS_NETSET, 0, 0, 0)
+}
+
+fn net_on(ip: u64, mask: u64, gw: u64) -> u64 {
+    return ulib.sys(ulib.SYS_NETSET, ip, mask, gw)
 }

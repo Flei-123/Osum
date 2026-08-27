@@ -80,9 +80,15 @@ fn u_start(args: u64) -> u64 {
     var s_list: [u8; 5] = "list\0"
     var s_fbw: [u8; 9] = "fallback\0"
     var s_boot: [u8; 5] = "boot\0"
+    var s_noff: [u8; 7] = "netoff\0"
+    var s_non: [u8; 6] = "neton\0"
+    var s_offd: [u8; 40] = "netview: the address is gone, link now \0"
+    var s_ond: [u8; 40] = "netview: the address is back, link now \0"
+    var s_nerr: [u8; 47] = "netview: that needs euid 0 and a working card\0\0"
+    var s_nuse: [u8; 46] = "usage: netview neton <a.b.c.d>/<n> [gateway]\0\0"
     var s_fbs: [u8; 22] = "netview: fallback \0\0\0\0"
     var s_fbv: [u8; 30] = "netview: a new program gets \0\0"
-    var s_badfb: [u8; 60] = "netview: fallback: off, when-offline or always\0\0\0\0\0\0\0\0\0\0\0\0\0\0"
+    var s_badfb: [u8; 60] = "netview: fallback: on, off, when-offline, always\0\0\0\0\0\0\0\0\0\0\0\0"
     var s_fbden: [u8; 50] = "netview: the fallback needs euid 0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"
     var s_nocon: [u8; 48] = "netview: no /etc/netview.conf -- leaving it off\0"
     var s_nowr: [u8; 66] = "netview: set for this run, but /etc/netview.conf is not writable\0\0"
@@ -187,14 +193,65 @@ fn u_start(args: u64) -> u64 {
         // AND SAY SO WHEN IT FAILS. An image with no `/etc` is exactly
         // the case the acceptance hit, and a tool that silently changes
         // only the half that does not last is the worst of both.
-        if !conf_write(f, (&fbname[0]) as u64) {
+        if !nv.fallback_save(f) {
             ulib.esay_line((&s_nowr[0]) as u64, 0)
             return 1
         }
         return 0
     }
+    // ===================== THIRD ADDENDUM: THE NETWORK, NOT THE VIEW
+    //
+    // The second tile of the quick settings, spelled out so that the
+    // acceptance can measure it without driving a mouse -- the same two
+    // calls the tile makes (`nv.net_off`, `nv.net_on`). It is NOT a
+    // view: a faked program keeps believing in its invented network
+    // after this, and a real one genuinely has none.
+    if ulib.streq(a1, (&s_noff[0]) as u64) {
+        if ulib.bad(nv.net_off()) {
+            ulib.esay_line((&s_nerr[0]) as u64, 0)
+            return 1
+        }
+        ulib.say((&s_offd[0]) as u64)
+        ulib.sayn(nv.link_state())
+        ulib.nl()
+        return 0
+    }
+    if ulib.streq(a1, (&s_non[0]) as u64) {
+        if argc < 3 {
+            ulib.esay_line((&s_nuse[0]) as u64, 0)
+            return 1
+        }
+        var ip: u64 = 0
+        var port: u64 = 0
+        var pref: u64 = 32
+        if !parse_target(ulib.arg_at(args, 2), &ip, &port, &pref) {
+            ulib.esay_line((&s_nuse[0]) as u64, 0)
+            return 1
+        }
+        var mask: u64 = 0xFFFFFFFF
+        if pref < 32 {
+            mask = (0xFFFFFFFF << (32 - pref)) & 0xFFFFFFFF
+        }
+        var gw: u64 = 0
+        if argc > 3 {
+            var gp: u64 = 0
+            var gx: u64 = 32
+            if !parse_target(ulib.arg_at(args, 3), &gw, &gp, &gx) {
+                ulib.esay_line((&s_nuse[0]) as u64, 0)
+                return 1
+            }
+        }
+        if ulib.bad(nv.net_on(ip, mask, gw)) {
+            ulib.esay_line((&s_nerr[0]) as u64, 0)
+            return 1
+        }
+        ulib.say((&s_ond[0]) as u64)
+        ulib.sayn(nv.link_state())
+        ulib.nl()
+        return 0
+    }
     if ulib.streq(a1, (&s_boot[0]) as u64) {
-        let f: u64 = conf_read()
+        let f: u64 = nv.fallback_load()
         if f > 2 {
             ulib.esay_line((&s_nocon[0]) as u64, 0)
             return 0
@@ -301,81 +358,14 @@ fn view_num(p: u64) -> u64 {
     return 9
 }
 
-// ============================ SECOND ADDENDUM: /etc/netview.conf
+// ==================== THE PREFERENCE FILE MOVED (third addendum)
 //
-// ONE LINE, `fallback=<word>`, and it exists because the kernel does
-// not read files while it boots. `netview fallback <word>` writes it,
-// `netview boot` reads it back out of `/etc/inittab`, and in between it
-// is a file the person can open in an editor -- which is the point of
-// putting a setting in a file rather than in a register.
-//
-// 9 means "no such file, or nothing usable in it". The caller then
-// leaves the preference where the command line put it, which for a
-// machine that never heard of this addendum is `off`.
-
-fn conf_read() -> u64 {
-    var path: [u8; 20] = "/etc/netview.conf\0\0\0"
-    var buf: [u8; 128] = [0 as u8; 128]
-    var key: [u8; 10] = "fallback=\0"
-    let fd: u64 = io.open((&path[0]) as u64, 0)
-    if ulib.bad(fd) {
-        return 9
-    }
-    let n: u64 = io.read(fd, (&buf[0]) as u64, 127)
-    io.close(fd)
-    if ulib.bad(n) || n == 0 {
-        return 9
-    }
-    let b: u64 = (&buf[0]) as u64
-    var at: u64 = 0
-    while at < n {
-        var e: u64 = at
-        while e < n && byte_at(b, e) != 10 {
-            e = e + 1
-        }
-        if e > at && byte_at(b, at) != 35 { // not a comment
-            var k: u64 = 0
-            var same: bool = true
-            while k < 9 {
-                if byte_at(b, at + k) != byte_at((&key[0]) as u64, k) {
-                    same = false
-                    k = 9
-                } else {
-                    k = k + 1
-                }
-            }
-            if same && at + 9 < e {
-                // Terminate the word in place -- the buffer is ours and
-                // the line has been read to its end already.
-                *((b + e) as *mut u8) = 0 as u8
-                return nv.fb_word(b + at + 9)
-            }
-        }
-        at = e + 1
-    }
-    return 9
-}
-
-fn conf_write(f: u64, scratch: u64) -> bool {
-    var path: [u8; 20] = "/etc/netview.conf\0\0\0"
-    var head: [u8; 64] = "# osum, round NETVIEW: the systemwide network fallback.\n\0\0\0\0\0\0\0\0"
-    var key: [u8; 10] = "fallback=\0"
-    var out: [u8; 128] = [0 as u8; 128]
-    let o: u64 = (&out[0]) as u64
-    var at: u64 = ulib.strcpy(o, (&head[0]) as u64)
-    at = at + ulib.strcpy(o + at, (&key[0]) as u64)
-    let _n: u64 = nv.fb_name(f, scratch)
-    at = at + ulib.strcpy(o + at, scratch)
-    *((o + at) as *mut u8) = 10 as u8
-    at = at + 1
-    let fd: u64 = io.create((&path[0]) as u64)
-    if ulib.bad(fd) {
-        return false
-    }
-    let w: u64 = io.write_all(fd, o, at)
-    io.close(fd)
-    return !ulib.bad(w) && w >= at
-}
+// `/etc/netview.conf` was read and written HERE, and the settings
+// application had a second copy of the same line -- `docs/NETVIEW.md`
+// named that as a seam of the second addendum. The quick settings would
+// have made it three copies, so the reader and the writer moved to
+// `nv.fi`, where `fb_name` and `fb_word` already live and where all
+// three callers already look. There is one shape of that line now.
 
 // `a.b.c.d`, then optionally `/prefix`, then optionally `:port`. Written
 // out rather than borrowed from `libc.net.parse_ip`, because that one
