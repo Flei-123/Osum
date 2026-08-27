@@ -58,11 +58,13 @@ import kstate
 import tty
 import wm
 import utf8
+import time
 
 export {
     irq, on_code, translate, shifted, take, waiting,
     hot_take, hot_waiting, MAX_KEYS, HOT_SLOTS,
-    code_of, layout, set_layout, switches, LAYOUTS, L_US, L_DE
+    code_of, layout, set_layout, switches, LAYOUTS, L_US, L_DE,
+    super_down, hotkey_seq, hotkey_key, hotkey_ns
 }
 
 // How many octets fit into the buffer in the data area.
@@ -167,6 +169,32 @@ fn on_code(state: u64, code: u64) {
         kstate.set(state, kstate.K11_OFF + kstate.KB_EXT, 0)
         return
     }
+    // ============================ ROUND NETVIEW, THIRD ADDENDUM
+    //
+    // THE SUPER KEY DID NOT ARRIVE HERE, and this is where it did not.
+    // It comes as 0xE0 0x5B (left) or 0xE0 0x5C (right); the prefix set
+    // KB_EXT, and the code after it fell through to `arrow`, which has
+    // no entry for 0x5B and returns 0 -- so the key was DROPPED without
+    // a trace. Measured before anything was written: not one line of
+    // this tree mentions 0x5B, and pressing the key produced nothing on
+    // the serial line.
+    //
+    // It is a MODIFIER and is handled exactly like Shift and Control:
+    // it produces no character, so it produces no `key: ` line, and the
+    // promise of round K11 -- exactly one such line per key -- holds
+    // unchanged. The release codes are 0x80 above the press codes and
+    // are caught HERE, before the `code >= 0x80` return further down,
+    // for the same reason 0x9D is caught here.
+    if code == 0x5B || code == 0x5C {
+        kstate.set(state, kstate.K11_OFF + kstate.KB_SUPER, 1)
+        kstate.set(state, kstate.K11_OFF + kstate.KB_EXT, 0)
+        return
+    }
+    if code == 0xDB || code == 0xDC {
+        kstate.set(state, kstate.K11_OFF + kstate.KB_SUPER, 0)
+        kstate.set(state, kstate.K11_OFF + kstate.KB_EXT, 0)
+        return
+    }
     kstate.set(state, kstate.K11_OFF + kstate.KB_EXT, 0)
     if code >= 0x80 {
         return
@@ -238,6 +266,29 @@ fn on_code(state: u64, code: u64) {
             c = low - 96
         }
     }
+    // ============================ ROUND NETVIEW, THIRD ADDENDUM
+    //
+    // SUPER PLUS A LETTER IS A HOTKEY AND NOT TEXT. It is LATCHED here
+    // and NOT delivered, and the "not delivered" is the important half:
+    // a Super+A that also typed an `a` into whatever window had the
+    // focus would put a stray letter in the person's document every
+    // time they opened the quick settings.
+    //
+    // WHY A LATCH AND NOT AN EVENT. A hotkey has no window -- that is
+    // what makes it global. The window server hands a key to the
+    // window WITH THE FOCUS (`wm.on_key`), and the taskbar is
+    // deliberately never that window. So the press is written down
+    // here, with a counter and a timestamp, and whoever cares reads it
+    // (SYS_OSUM_HOTKEY). The counter is the protocol: a reader that
+    // sees a number it has not seen acts once, and two readers do not
+    // take the press away from each other.
+    if kstate.get(state, kstate.K11_OFF + kstate.KB_SUPER) == 1 {
+        kstate.set(state, kstate.K11_OFF + kstate.HK_KEY, c)
+        kstate.set(state, kstate.K11_OFF + kstate.HK_NS, time.mono_ns(state))
+        kstate.add(state, kstate.K11_OFF + kstate.HK_SEQ, 1)
+        say_hotkey(c)
+        return
+    }
     emit(state, c)
 }
 
@@ -259,6 +310,35 @@ fn emit(state: u64, cp: u64) {
         i = i + 1
     }
     say_cp(cp, (&b[0]) as u64, n)
+}
+
+// Is the key held down right now? Asked by nothing in the kernel and by
+// `/bin/netview` through the system call -- it is here so that a person
+// who wonders whether their keyboard even has a working Super key can
+// find out without guessing.
+fn super_down(state: u64) -> u64 {
+    return kstate.get(state, kstate.K11_OFF + kstate.KB_SUPER)
+}
+
+fn hotkey_seq(state: u64) -> u64 {
+    return kstate.get(state, kstate.K11_OFF + kstate.HK_SEQ)
+}
+
+fn hotkey_key(state: u64) -> u64 {
+    return kstate.get(state, kstate.K11_OFF + kstate.HK_KEY)
+}
+
+fn hotkey_ns(state: u64) -> u64 {
+    return kstate.get(state, kstate.K11_OFF + kstate.HK_NS)
+}
+
+// Its own line and not a `key: ` line, because it is not a key that was
+// typed -- and because `tools/kernel/run.sh` counts `key: ` lines.
+fn say_hotkey(c: u64) {
+    var label: [u8; 12] = "hk: super+\0\0"
+    serial.puts((&label[0]) as u64)
+    serial.put(c as u8)
+    serial.put(10 as u8)
 }
 
 // Ein Oktett in den Ring von Runde K1 UND durch die Zeilendisziplin.
@@ -425,6 +505,24 @@ fn translate(code: u64) -> u8 {
     // stand still.
     if code == 15 {
         return 9 as u8
+    }
+    // ROUND NETVIEW, THIRD ADDENDUM: THE ESCAPE KEY. Scan code 1, and
+    // position 1 of the table below is a NUL -- so it, too, has never
+    // arrived in this system. Found the same way round K15 found the
+    // tab key: by needing it and measuring that nothing happened. The
+    // quick settings close on Escape, and a panel the keyboard cannot
+    // get out of is worse than none.
+    //
+    // WHAT THIS CHANGES FOR EVERYONE ELSE, said plainly rather than
+    // left to be discovered: a program that reads keys now sees a 27
+    // where it saw nothing before. `/bin/edit` reads arrow keys as
+    // `ESC [ x` and will take a lone Escape for the start of one,
+    // swallowing the next character -- which is what a real terminal
+    // does with a lone Escape too, and is why terminals have had a
+    // timeout for it since the seventies. This round is not the one
+    // that builds that timeout.
+    if code == 1 {
+        return 27 as u8
     }
     var table: [u8; 58] = "\0\01234567890-=\0\0qwertyuiop[]\n\0asdfghjkl;'`\0\\zxcvbnm,./\0*\0 "
     if code >= 58 {
