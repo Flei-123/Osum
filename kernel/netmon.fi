@@ -1,0 +1,964 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/netmon.fi -- round NETMON: WHO USED HOW MUCH.
+//
+// Osum could send and receive since round K8 and could tell a process
+// WHICH network it sees since round NETVIEW -- and it could not answer
+// the first question anybody asks about a network: which program is
+// using it, and how much. There was no `netstat`, no connection list and
+// no counter that belonged to anything smaller than the card. This file
+// is that counter.
+//
+// TWO NUMBERS PER DIRECTION, AND THE DIFFERENCE BETWEEN THEM IS THE
+// POINT. Every accounting of "data used" that reports one number is
+// hiding something:
+//
+//   PAYLOAD  the octets the PROGRAM handed to `send` or took out of
+//            `recv`. This is the number that matches the file it
+//            downloaded.
+//   WIRE     the octets that really crossed the card, Ethernet header,
+//            IP header, TCP header, acknowledgements, retransmissions
+//            and all. This is the number the person's data plan is
+//            billed by.
+//
+// For one large download the two are within a few percent of each other.
+// For a chat program that sends forty octets every second they differ by
+// a factor of three, because every one of those forty octets travels
+// with fifty-four octets of header and is answered by a bare
+// acknowledgement of the same size. A monitor that reports only the
+// payload tells that program's user that it used nothing.
+//
+// WHERE EACH ONE IS COUNTED, and the two places are not the same place:
+//
+//   PAYLOAD is counted in `inet.fi`, in `sock_send`, `sock_recv`,
+//   `sock_sendto` and `sock_recvfrom` -- the four functions through
+//   which every octet of every process passes, and the four that KNOW
+//   WHICH SOCKET they are working on. That is the seam where a
+//   connection is tied to a process, and it is the reason the counter
+//   sits there and not in `sys.fi` (which would also count the octets a
+//   FAKED socket swallowed, and those never touched a wire) and not in
+//   `stack.fi` (which is vendored library code and has never heard of a
+//   process).
+//
+//   WIRE is counted in `inet.pump`, per frame, in both directions. The
+//   pump is the only caller of `net_input` and `net_output`; a frame
+//   that is not seen there did not happen. The frame is classified by
+//   its LOCAL PORT -- source port on the way out, destination port on
+//   the way in -- and that port is looked up in the socket table below.
+//
+// WHY THE OWNER IS RECORDED AND NOT ASKED FOR. `inet.fi` keeps a table
+// of sixteen sockets and it has never known who opened them: a socket is
+// an entry in the open file table, and the open file table is shared by
+// `fork` and `dup2`. So the owner is written down ONCE, in `do_socket`
+// and in `do_accept`, when the task that asks for the slot is the task
+// that is running. Everything afterwards -- including a frame that
+// arrives while an entirely different process holds the processor --
+// reads that record instead of asking the scheduler, which would be
+// wrong most of the time and spectacularly wrong under load.
+//
+// THE COST, AND HOW IT IS KEPT SMALL. The payload path adds two
+// unsynchronised 64-bit additions per system call, which is not
+// measurable beside a `copy_in` of the same octets. The wire path is the
+// expensive one: it reads at most fourteen octets of header and walks a
+// table of sixteen entries per frame. It therefore does the cheap tests
+// first (is it IPv4 at all, is it TCP or UDP) and gives up early;
+// everything it cannot place goes into ONE system bucket rather than
+// being searched for harder. `nonetmon` on the command line switches the
+// whole thing off, and `tools/netmon/run.sh` measures the same transfer
+// twice to say what it costs in percent. A counter whose cost is a
+// guess is a counter in the wrong place.
+//
+// WHAT IS NOT RECORDED, and this is a decision and not a gap: WHERE a
+// program connected to is held for as long as the connection is open and
+// is thrown away when it closes. The remote address of a live connection
+// is in the table because `netstat` is meant to show it; it is never
+// summed, never dated and never written to the disk. The history on the
+// disk (`/var/net/usage`, written from ring 3) holds HOW MUCH per
+// program per day and nothing else. A file that remembered every address
+// every program ever reached would be a surveillance database on the
+// user's own disk, kept by the operating system, and no amount of "it
+// never leaves the machine" makes that a thing to build.
+
+profile kernel
+
+import kstate
+import sched
+import serial
+import net.wire
+import apic
+
+export {
+    init, parse, on, set_on, mode_word, set_mode_word,
+    M_NONE, M_SHARE, M_NOSHARE, M_NONAT, M_NODHCPD,
+    T_TXPAY, T_RXPAY, T_TXWIRE, T_RXWIRE, T_TXPKT, T_RXPKT, T_FIELDS,
+    tget, tadd, task_clear, task_pid, name_at, name_set, name_copy,
+    S_OWNER, S_PID, S_KIND, S_LPORT, S_RADDR, S_RPORT, S_T0,
+    S_TXPAY, S_RXPAY, S_TXWIRE, S_RXWIRE, S_USE, S_FIELDS,
+    sget, sset, sock_open, sock_gone, sock_alive, sock_owner,
+    NPROG, pget, prog_of, prog_name_at, prog_used,
+    pay_out, pay_in, frame_seen,
+    lookups, hits, misses, sys_octets, bench,
+    NSOCK, NAME_MAX, report,
+    K_TCP, K_UDP, K_ICMP
+}
+
+// ------------------------------------------------------------ the page
+//
+// TWO PAGES OF `kdata`, 0x5A000..0x5C000, out of the store round K18 left open
+// (0x5A000..0x60000, `kstate.fi`). It is entered in
+// `tools/kernel/karte.py` like every other area, and that checker is what
+// says it overlaps nothing.
+//
+//   0x0000..0x007F  the scalars of this round
+//   0x0080..0x0C7F  thirty-two task records of 96 octets
+//   0x0C80..0x127F  sixteen socket records of 96 octets
+//   0x1280..0x1B7F  twenty-four PROGRAM records of 96 octets
+//
+// THE SOCKET RECORD IS 96 AND NOT 64, and the sixteen octets that
+// mistake cost are worth a sentence. It was 64 while it had eight
+// fields; four more were added and the size was not. `sset(i, S_RXWIRE)`
+// then wrote 24 octets past the end of record i -- into the first three
+// fields of record i+1, one of which is the flag that says the record is
+// in use. The symptom was a `netstat` that listed a connection nobody
+// had opened, with no owner and no port, and it was found by looking at
+// that line rather than by any test. There is now a test: section 5 of
+// `tools/netmon/run.sh` counts the rows and fails if there is one for a
+// socket that was never opened.
+//
+// The socket table is SIXTEEN because `inet.SOCK_MAX` is sixteen. The
+// number is not repeated as a constant that could drift: `sock_open`
+// refuses an index it does not have room for, and `inet.fi` is the only
+// caller.
+//
+// WHY THERE IS A PROGRAM TABLE BESIDE THE TASK TABLE, and it is not
+// bookkeeping for its own sake. A task record dies with the task. The
+// question a person asks is not "what did process 14 use" -- process 14
+// is gone by the time they ask -- it is "what did WGET use today". So
+// every octet is added TWICE: once to the task, once to the program the
+// task is running. The second addition costs one more 64-bit add,
+// because the task record carries the INDEX of its program slot and
+// nothing has to be searched for.
+//
+// Twenty-four slots, and slot 0 is `-other-`: when they are full, what
+// arrives goes there rather than being lost or pushing somebody out. A
+// number in `-other-` is honest about not knowing; a table that
+// silently forgot the twenty-fifth program would not be.
+
+const SCAL: u64 = 0x0000
+const TASKS: u64 = 0x0080
+const TBYTES: u64 = 96
+const SOCKS: u64 = 0x0C80
+const SBYTES: u64 = 96 // TWELVE fields of eight octets, and not eleven
+const NSOCK: u64 = 16
+const PROGS: u64 = 0x1280
+const PBYTES: u64 = 96
+const NPROG: u64 = 24
+
+// The scalars.
+const NM_ON: u64 = 0x00 // 1 = count, 0 = the counter-check
+const NM_MODE: u64 = 0x08 // the words of the command line of this round
+const NM_LOOKUPS: u64 = 0x10 // frames offered to `frame_seen`
+const NM_HITS: u64 = 0x18 // frames placed on a process
+const NM_MISS: u64 = 0x20 // frames that went to the system bucket
+const NM_SYSTX: u64 = 0x28 // octets of those, outbound
+const NM_SYSRX: u64 = 0x30 // and inbound
+// THE ONE-ENTRY CACHE of the classifier, and it is here because of a
+// measurement. The first version walked all sixteen socket records for
+// every single frame; `tools/netmon/run.sh` section 4 put the cost of
+// that at tens of percent of the throughput, which is exactly the
+// "then the counter is in the wrong place" this round was told to watch
+// for. During a transfer every frame carries the SAME local port, so
+// one remembered answer turns sixteen records into one comparison.
+// The remembered slot is VERIFIED before it is used -- a socket can be
+// closed and its slot handed to somebody else between two frames, and a
+// cache that trusted itself would put one program's octets on another.
+const NM_CPORT: u64 = 0x38
+const NM_CKIND: u64 = 0x40
+const NM_CSLOT: u64 = 0x48
+const NM_CHITS: u64 = 0x50 // how often the cache answered
+const NM_CSCAN: u64 = 0x58 // and how often the table had to be walked
+
+// The fields of a task record. The first six are the counters and they
+// are read from ring 3 by number, so their order is part of the system
+// call and may not be shuffled.
+const T_TXPAY: u64 = 0
+const T_RXPAY: u64 = 1
+const T_TXWIRE: u64 = 2
+const T_RXWIRE: u64 = 3
+const T_TXPKT: u64 = 4
+const T_RXPKT: u64 = 5
+const T_FIELDS: u64 = 6
+
+// After the six counters: the pid the record belongs to, and the name of
+// the program. The pid is what makes a REUSED slot start at zero -- task
+// slot 7 may be `wget` this minute and `sh` the next, and adding the two
+// together would be a lie in the plainest possible form.
+const T_PIDOF: u64 = 48
+const T_PROG: u64 = 56 // program slot + 1, 0 = not known yet
+const T_NAME: u64 = 64 // 24 octets, zero-terminated
+const NAME_MAX: u64 = 24
+
+// A program record: the same six counters, a use flag and the name.
+const P_USE: u64 = 48
+const P_NAME: u64 = 56
+
+// The fields of a socket record, in words.
+const S_USE: u64 = 0 // 0 = free, 1 = in use
+const S_OWNER: u64 = 1 // task index + 1, 0 = nobody
+const S_PID: u64 = 2
+const S_KIND: u64 = 3 // K_TCP / K_UDP / K_ICMP
+const S_LPORT: u64 = 4
+const S_RADDR: u64 = 5
+const S_RPORT: u64 = 6
+const S_T0: u64 = 7 // tick at which the slot was taken
+
+// The counters of one socket live in the task record, not here -- except
+// these four, which `netstat` prints per connection.
+const S_TXPAY: u64 = 8
+const S_RXPAY: u64 = 9
+const S_TXWIRE: u64 = 10
+const S_RXWIRE: u64 = 11
+const S_FIELDS: u64 = 12
+
+// The three kinds, with the numbers of `inet.SK_*`. They are repeated
+// here rather than imported because `inet.fi` imports THIS file, and a
+// cycle would be worse than three constants.
+const K_TCP: u64 = 1
+const K_UDP: u64 = 2
+const K_ICMP: u64 = 3
+
+fn nm(off: u64) -> u64 {
+    return kstate.NETMON_OFF + off
+}
+
+fn tat(t: u64) -> u64 {
+    return nm(TASKS + t * TBYTES)
+}
+
+fn sat(i: u64) -> u64 {
+    return nm(SOCKS + i * SBYTES)
+}
+
+fn pat(i: u64) -> u64 {
+    return nm(PROGS + i * PBYTES)
+}
+
+// ------------------------------------------------- the command line
+//
+// A MODE WORD OF THIS ROUND'S OWN, and not two more bits of
+// `kstate.MODE`. That word has two bits left out of sixty-four, four
+// rounds are running beside this one, and a round that eats the last
+// bits so that the next has to widen the field is a round that made
+// somebody else's work harder for no reason. `K9_MODE`, `K14_MODE`,
+// `GUARD_MODE` and `SMP_MODE` did the same thing before this.
+
+const M_NONE: u64 = 1 // `nonetmon` -- count nothing
+const M_SHARE: u64 = 2 // `share` -- hand the connection on
+const M_NOSHARE: u64 = 4 // `noshare` -- the counter-check to it
+const M_NONAT: u64 = 8 // `nonat` -- forward WITHOUT rewriting
+const M_NODHCPD: u64 = 16 // `nodhcpd` -- share without handing out addresses
+const M_BENCH: u64 = 32 // `netmonbench` -- measure the classifier itself
+
+// The first occurrence of a word in the command line, or 0. The same
+// six lines `kmain.mode_of` uses; they are here because this file is
+// asked before `kmain` has anything to give it.
+fn find(hay: u64, needle: u64, n: u64) -> u64 {
+    var i: u64 = 0
+    while kstate.get8(hay + i) != 0 {
+        var k: u64 = 0
+        var hit: bool = true
+        while k < n {
+            if kstate.get8(hay + i + k) != kstate.get8(needle + k) {
+                hit = false
+                k = n
+            } else {
+                k = k + 1
+            }
+        }
+        if hit {
+            return hay + i
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+fn parse(state: u64, cmd: u64) {
+    var w_no: [u8; 9] = "nonetmon\0"
+    var w_sh: [u8; 6] = "share\0"
+    var w_nsh: [u8; 8] = "noshare\0"
+    var w_nn: [u8; 6] = "nonat\0"
+    var w_nd: [u8; 8] = "nodhcpd\0"
+    var w_bn: [u8; 12] = "netmonbench\0"
+    var m: u64 = 0
+    if find(cmd, (&w_no[0]) as u64, 8) != 0 {
+        m = m | M_NONE
+    }
+    // `noshare` FIRST -- the search for "share" would find it inside
+    // "noshare" and switch on the very thing the counter-check exists to
+    // switch off. Exactly the mistake round DESKTOP made with `nodhcp`
+    // and wrote down; it is written down twice now.
+    if find(cmd, (&w_nsh[0]) as u64, 7) != 0 {
+        m = m | M_NOSHARE
+    }
+    if find(cmd, (&w_sh[0]) as u64, 5) != 0 {
+        if (m & M_NOSHARE) == 0 {
+            m = m | M_SHARE
+        }
+    }
+    if find(cmd, (&w_nn[0]) as u64, 5) != 0 {
+        m = m | M_NONAT
+    }
+    if find(cmd, (&w_nd[0]) as u64, 7) != 0 {
+        m = m | M_NODHCPD
+    }
+    if find(cmd, (&w_bn[0]) as u64, 11) != 0 {
+        m = m | M_BENCH
+    }
+    init(state, m)
+}
+
+// ------------------------------------------------------------- the init
+
+// Everything at zero and the counting ON. `init` is called out of
+// `kmain` before the first process exists, so no record can be in use
+// while it runs.
+fn init(state: u64, mode: u64) {
+    var i: u64 = 0
+    while i < kstate.NETMON_MAX / 8 {
+        kstate.set(state, nm(i * 8), 0)
+        i = i + 1
+    }
+    kstate.set(state, nm(NM_MODE), mode)
+    // `nonetmon` is bit 0 of the mode word of this round. It is the
+    // counter-check: the same image, the same transfer, no counting.
+    if (mode & 1) != 0 {
+        kstate.set(state, nm(NM_ON), 0)
+    } else {
+        kstate.set(state, nm(NM_ON), 1)
+    }
+}
+
+fn on(state: u64) -> bool {
+    return kstate.get(state, nm(NM_ON)) != 0
+}
+
+fn set_on(state: u64, v: u64) {
+    kstate.set(state, nm(NM_ON), v)
+}
+
+fn mode_word(state: u64) -> u64 {
+    return kstate.get(state, nm(NM_MODE))
+}
+
+fn set_mode_word(state: u64, v: u64) {
+    kstate.set(state, nm(NM_MODE), v)
+}
+
+fn lookups(state: u64) -> u64 {
+    return kstate.get(state, nm(NM_LOOKUPS))
+}
+
+fn hits(state: u64) -> u64 {
+    return kstate.get(state, nm(NM_HITS))
+}
+
+fn misses(state: u64) -> u64 {
+    return kstate.get(state, nm(NM_MISS))
+}
+
+// `which` 0 = outbound, 1 = inbound.
+fn sys_octets(state: u64, which: u64) -> u64 {
+    if which == 0 {
+        return kstate.get(state, nm(NM_SYSTX))
+    }
+    return kstate.get(state, nm(NM_SYSRX))
+}
+
+// ------------------------------------------------------ the task record
+
+fn tget(state: u64, t: u64, field: u64) -> u64 {
+    if t >= kstate.MAX_TASKS || field >= T_FIELDS {
+        return 0
+    }
+    return kstate.get(state, tat(t) + field * 8)
+}
+
+// EVERY OCTET IS ADDED TWICE. Once where it can be seen live (the task)
+// and once where it survives the task (the program). The second add
+// needs no search: the slot number is in the task record.
+fn tadd(state: u64, t: u64, field: u64, n: u64) {
+    if t >= kstate.MAX_TASKS || field >= T_FIELDS {
+        return
+    }
+    kstate.add(state, tat(t) + field * 8, n)
+    let pr: u64 = kstate.get(state, tat(t) + T_PROG)
+    if pr != 0 && pr <= NPROG {
+        kstate.add(state, pat(pr - 1) + field * 8, n)
+    }
+}
+
+// ----------------------------------------------------- the programs
+
+fn pget(state: u64, i: u64, field: u64) -> u64 {
+    if i >= NPROG || field >= T_FIELDS {
+        return 0
+    }
+    return kstate.get(state, pat(i) + field * 8)
+}
+
+fn prog_used(state: u64, i: u64) -> u64 {
+    if i >= NPROG {
+        return 0
+    }
+    return kstate.get(state, pat(i) + P_USE)
+}
+
+fn prog_name_at(state: u64, i: u64, k: u64) -> u64 {
+    if i >= NPROG || k >= NAME_MAX {
+        return 0
+    }
+    return kstate.get8(state + pat(i) + P_NAME + k)
+}
+
+fn name_same(state: u64, at: u64, path: u64, start: u64) -> bool {
+    var k: u64 = 0
+    while k < NAME_MAX {
+        var c: u64 = kstate.get8(path + start + k)
+        if k == NAME_MAX - 1 {
+            c = 0
+        }
+        if kstate.get8(state + at + k) != c {
+            return false
+        }
+        if c == 0 {
+            return true
+        }
+        k = k + 1
+    }
+    return true
+}
+
+// The slot of a program name, made if it is not there yet. Slot 0 is
+// `-other-` and is never handed out by name; it is what a full table
+// falls back to.
+fn prog_slot(state: u64, path: u64, start: u64) -> u64 {
+    var i: u64 = 1
+    while i < NPROG {
+        if kstate.get(state, pat(i) + P_USE) == 0 {
+            // The first free one. Take it, and stop looking.
+            var k: u64 = 0
+            while k < NAME_MAX {
+                var c: u64 = kstate.get8(path + start + k)
+                if k == NAME_MAX - 1 {
+                    c = 0
+                }
+                kstate.set8(state + pat(i) + P_NAME + k, c as u8)
+                if c == 0 {
+                    k = NAME_MAX
+                } else {
+                    k = k + 1
+                }
+            }
+            kstate.set(state, pat(i) + P_USE, 1)
+            return i
+        }
+        if name_same(state, pat(i) + P_NAME, path, start) {
+            return i
+        }
+        i = i + 1
+    }
+    // FULL. Everything else is `-other-`, and slot 0 gets its name here
+    // rather than at boot so that a machine that never fills the table
+    // never shows a row nobody asked about.
+    if kstate.get(state, pat(0) + P_USE) == 0 {
+        var o: [u8; 8] = "-other-\0"
+        var k: u64 = 0
+        while k < 8 {
+            kstate.set8(state + pat(0) + P_NAME + k, o[k as usize])
+            k = k + 1
+        }
+        kstate.set(state, pat(0) + P_USE, 1)
+    }
+    return 0
+}
+
+fn task_pid(state: u64, t: u64) -> u64 {
+    if t >= kstate.MAX_TASKS {
+        return 0
+    }
+    return kstate.get(state, tat(t) + T_PIDOF)
+}
+
+// A SLOT THAT CHANGES HANDS STARTS AT ZERO. Called from `exec` and from
+// the creation of a task; the pid decides, not the slot.
+fn task_clear(state: u64, t: u64, pid: u64) {
+    if t >= kstate.MAX_TASKS {
+        return
+    }
+    var i: u64 = 0
+    while i < TBYTES / 8 {
+        kstate.set(state, tat(t) + i * 8, 0)
+        i = i + 1
+    }
+    kstate.set(state, tat(t) + T_PIDOF, pid)
+}
+
+fn name_at(state: u64, t: u64, i: u64) -> u64 {
+    if t >= kstate.MAX_TASKS || i >= NAME_MAX {
+        return 0
+    }
+    return kstate.get8(state + tat(t) + T_NAME + i)
+}
+
+// The name of the program, taken from the path `exec` was given: what
+// follows the last slash, at most twenty-three octets. `/bin/wget`
+// becomes `wget`, which is what a person recognises and what the
+// history file on the disk is keyed by.
+fn name_set(state: u64, t: u64, path: u64) {
+    if t >= kstate.MAX_TASKS {
+        return
+    }
+    var start: u64 = 0
+    // (the last slash is found first, below)
+    var i: u64 = 0
+    var going: bool = true
+    while going {
+        let c: u64 = kstate.get8(path + i)
+        if c == 0 {
+            going = false
+        } else {
+            if c == 47 {
+                start = i + 1
+            }
+            i = i + 1
+        }
+    }
+    var k: u64 = 0
+    while k < NAME_MAX {
+        var c: u64 = 0
+        if k < NAME_MAX - 1 {
+            c = kstate.get8(path + start + k)
+        }
+        kstate.set8(state + tat(t) + T_NAME + k, c as u8)
+        if c == 0 {
+            k = NAME_MAX
+        } else {
+            k = k + 1
+        }
+    }
+    kstate.set(state, tat(t) + T_PROG, prog_slot(state, path, start) + 1)
+}
+
+// The program slot of a task, or NPROG.
+fn prog_of(state: u64, t: u64) -> u64 {
+    if t >= kstate.MAX_TASKS {
+        return NPROG
+    }
+    let p: u64 = kstate.get(state, tat(t) + T_PROG)
+    if p == 0 || p > NPROG {
+        return NPROG
+    }
+    return p - 1
+}
+
+// The name of a task into a buffer in `kdata`. Returns its length.
+fn name_copy(state: u64, t: u64, out: u64) -> u64 {
+    var i: u64 = 0
+    var going: bool = true
+    while going {
+        let c: u64 = name_at(state, t, i)
+        kstate.set8(out + i, c as u8)
+        if c == 0 || i + 1 >= NAME_MAX {
+            going = false
+        } else {
+            i = i + 1
+        }
+    }
+    kstate.set8(out + i, 0 as u8)
+    return i
+}
+
+// ---------------------------------------------------- the socket record
+
+fn sget(state: u64, i: u64, field: u64) -> u64 {
+    if i >= NSOCK || field >= S_FIELDS {
+        return 0
+    }
+    return kstate.get(state, sat(i) + field * 8)
+}
+
+fn sset(state: u64, i: u64, field: u64, v: u64) {
+    if i >= NSOCK || field >= S_FIELDS {
+        return
+    }
+    kstate.set(state, sat(i) + field * 8, v)
+}
+
+fn sock_alive(state: u64, i: u64) -> bool {
+    return sget(state, i, S_USE) != 0
+}
+
+fn sock_owner(state: u64, i: u64) -> u64 {
+    let o: u64 = sget(state, i, S_OWNER)
+    if o == 0 {
+        return kstate.MAX_TASKS
+    }
+    return o - 1
+}
+
+// A NEW SOCKET GETS AN OWNER. The only place a socket and a process are
+// tied together, and it is called from `sys.do_socket` and
+// `sys.do_accept` -- the two moments at which the task asking for the
+// slot is the task running. It does NOT clear the record: the ports
+// were already written by `inet.sock_accept`, which knew them and had
+// the lock, and clearing here would throw them away. The clearing
+// happens in `inet.sock_new`, where the slot is taken.
+fn sock_open(state: u64, i: u64, t: u64, pid: u64, kind: u64) {
+    if i >= NSOCK {
+        return
+    }
+    sset(state, i, S_USE, 1)
+    sset(state, i, S_OWNER, t + 1)
+    sset(state, i, S_PID, pid)
+    sset(state, i, S_KIND, kind)
+    sset(state, i, S_T0, kstate.get(state, kstate.TICKS))
+}
+
+fn sock_gone(state: u64, i: u64) {
+    if i >= NSOCK {
+        return
+    }
+    var k: u64 = 0
+    while k < SBYTES / 8 {
+        kstate.set(state, sat(i) + k * 8, 0)
+        k = k + 1
+    }
+}
+
+// ------------------------------------------------------- the payload
+
+// Octets a process handed to the wire. `n` is what the stack really
+// took, not what was offered -- a short write is not usage.
+fn pay_out(state: u64, i: u64, n: u64) {
+    if !on(state) || n == 0 || i >= NSOCK {
+        return
+    }
+    kstate.add(state, sat(i) + S_TXPAY * 8, n)
+    let t: u64 = sock_owner(state, i)
+    if t < kstate.MAX_TASKS {
+        tadd(state, t, T_TXPAY, n)
+    }
+}
+
+fn pay_in(state: u64, i: u64, n: u64) {
+    if !on(state) || n == 0 || i >= NSOCK {
+        return
+    }
+    kstate.add(state, sat(i) + S_RXPAY * 8, n)
+    let t: u64 = sock_owner(state, i)
+    if t < kstate.MAX_TASKS {
+        tadd(state, t, T_RXPAY, n)
+    }
+}
+
+// ---------------------------------------------------------- the wire
+//
+// One frame, classified. `out` says which way it is going, which is
+// what decides whether the LOCAL port is the source or the destination.
+//
+// The order of the tests is the whole performance argument: an
+// Ethernet type that is not IPv4 is two octets of work, a protocol that
+// is neither TCP nor UDP is one more, and only what survives both is
+// searched for in the table. ARP, which is a third of the frames on a
+// quiet wire, leaves after the first test.
+
+fn local_port(f: u64, n: u64, out: bool, kindp: *mut u64) -> u64 {
+    *kindp = 0
+    if n < 14 + 20 {
+        return 0
+    }
+    if wire.eth_type(f as *mut u8) != wire.ETYPE_IP4 {
+        return 0
+    }
+    let d: u64 = f + 14
+    let ihl: u64 = wire.ip_ihl(d as *mut u8) as u64
+    if ihl < 20 || n < 14 + ihl + 4 {
+        return 0
+    }
+    let proto: u64 = wire.ip_proto(d as *mut u8) as u64
+    let h: u64 = d + ihl
+    if proto == wire.IP_TCP as u64 {
+        *kindp = K_TCP
+        if out {
+            return wire.tcp_sport(h as *mut u8) as u64
+        }
+        return wire.tcp_dport(h as *mut u8) as u64
+    }
+    if proto == wire.IP_UDP as u64 {
+        *kindp = K_UDP
+        if out {
+            return wire.udp_sport(h as *mut u8) as u64
+        }
+        return wire.udp_dport(h as *mut u8) as u64
+    }
+    if proto == wire.IP_ICMP as u64 {
+        *kindp = K_ICMP
+        return 0
+    }
+    return 0
+}
+
+// Which socket a port belongs to, or NSOCK. An ICMP frame has no port;
+// it is given to the one process holding a ping socket, and to the
+// system bucket if there is none or more than one -- an honest "cannot
+// tell" rather than a guess that looks like a fact.
+// Is the remembered slot still the right answer for this port? Three
+// loads, and they are the whole safety of the cache.
+fn cache_ok(state: u64, slot: u64, port: u64, kind: u64) -> bool {
+    if slot >= NSOCK {
+        return false
+    }
+    let a: u64 = sat(slot)
+    if kstate.get(state, a + S_USE * 8) == 0 {
+        return false
+    }
+    if kstate.get(state, a + S_KIND * 8) != kind {
+        return false
+    }
+    return kstate.get(state, a + S_LPORT * 8) == port
+}
+
+fn find_sock(state: u64, port: u64, kind: u64) -> u64 {
+    if kind != K_ICMP && port != 0 {
+        if kstate.get(state, nm(NM_CPORT)) == port
+            && kstate.get(state, nm(NM_CKIND)) == kind {
+            let sl: u64 = kstate.get(state, nm(NM_CSLOT))
+            if cache_ok(state, sl, port, kind) {
+                kstate.add(state, nm(NM_CHITS), 1)
+                return sl
+            }
+        }
+        kstate.add(state, nm(NM_CSCAN), 1)
+    }
+    if kind == K_ICMP {
+        var found: u64 = NSOCK
+        var i: u64 = 0
+        while i < NSOCK {
+            if sget(state, i, S_USE) != 0 && sget(state, i, S_KIND) == K_ICMP {
+                if found < NSOCK {
+                    return NSOCK
+                }
+                found = i
+            }
+            i = i + 1
+        }
+        return found
+    }
+    if port == 0 {
+        return NSOCK
+    }
+    var i: u64 = 0
+    while i < NSOCK {
+        let a: u64 = sat(i)
+        if kstate.get(state, a + S_USE * 8) != 0
+            && kstate.get(state, a + S_KIND * 8) == kind
+            && kstate.get(state, a + S_LPORT * 8) == port {
+            kstate.set(state, nm(NM_CPORT), port)
+            kstate.set(state, nm(NM_CKIND), kind)
+            kstate.set(state, nm(NM_CSLOT), i)
+            return i
+        }
+        i = i + 1
+    }
+    return NSOCK
+}
+
+fn frame_seen(state: u64, f: u64, n: u64, out: bool) {
+    if !on(state) || n == 0 {
+        return
+    }
+    kstate.add(state, nm(NM_LOOKUPS), 1)
+    var kind: u64 = 0
+    let port: u64 = local_port(f, n, out, &kind)
+    var si: u64 = NSOCK
+    if kind != 0 {
+        si = find_sock(state, port, kind)
+    }
+    if si >= NSOCK {
+        kstate.add(state, nm(NM_MISS), 1)
+        if out {
+            kstate.add(state, nm(NM_SYSTX), n)
+        } else {
+            kstate.add(state, nm(NM_SYSRX), n)
+        }
+        return
+    }
+    kstate.add(state, nm(NM_HITS), 1)
+    let t: u64 = sock_owner(state, si)
+    if out {
+        kstate.add(state, sat(si) + S_TXWIRE * 8, n)
+        if t < kstate.MAX_TASKS {
+            tadd(state, t, T_TXWIRE, n)
+            tadd(state, t, T_TXPKT, 1)
+        }
+    } else {
+        kstate.add(state, sat(si) + S_RXWIRE * 8, n)
+        if t < kstate.MAX_TASKS {
+            tadd(state, t, T_RXWIRE, n)
+            tadd(state, t, T_RXPKT, 1)
+        }
+    }
+}
+
+// -------------------------------------------- what it costs, exactly
+//
+// WHY THIS EXISTS AND A STOPWATCH DOES NOT DO. The obvious way to ask
+// what the counting costs is to move a megaoctet twice and compare the
+// two throughputs. That was tried first and it produced this, four
+// pairs of runs, alternating, same image, same wire:
+//
+//   with counting     2282  3179  3484  4005 KiB/s
+//   without counting  2695  5831  4363  2642 KiB/s
+//
+// The ranges overlap, one pair comes out the wrong way round, and the
+// machine the measurement ran on had a load average of twenty on twelve
+// cores because four other rounds were building at the same time. That
+// is not a measurement of the counter; it is a measurement of the
+// neighbours. Publishing the average of it would have been dishonest in
+// both directions.
+//
+// So the cost is measured where it can be measured: `frame_seen` is
+// called `n` times on a frame built here, between two reads of the
+// cycle counter, with nothing else running in the loop. What comes out
+// is cycles per frame, which is a property of the code and not of the
+// machine's mood. How much of the throughput that is follows by
+// arithmetic from the frame rate, and `tools/netmon/run.sh` does that
+// arithmetic in the open.
+//
+// The frame is a real one: Ethernet + IPv4 + TCP, port 7000 to port
+// 40000, 1514 octets. It is classified exactly as a frame off the wire
+// would be, cache and all.
+fn bench(state: u64, n: u64, matching: bool) -> u64 {
+    // A frame in `kdata`, at the end of this round's own area -- not on
+    // the stack, because 1514 octets of stack in a kernel with 32 KiB
+    // of it is how a round breaks a different round's measurement.
+    let f: u64 = state + nm(0x1C00)
+    var i: u64 = 0
+    while i < 1514 {
+        kstate.set8(f + i, 0 as u8)
+        i = i + 1
+    }
+    // Ethernet type IPv4.
+    kstate.set8(f + 12, 8 as u8)
+    kstate.set8(f + 13, 0 as u8)
+    // IPv4: version 4, header length 20, protocol TCP.
+    kstate.set8(f + 14, 0x45 as u8)
+    kstate.set8(f + 14 + 9, 6 as u8)
+    // TCP: source port 7000, destination 40000.
+    kstate.set8(f + 34, 27 as u8)
+    kstate.set8(f + 35, 88 as u8)
+    kstate.set8(f + 36, 156 as u8)
+    kstate.set8(f + 37, 64 as u8)
+    // THE TWO CASES ARE NOT THE SAME CASE. With a socket on port 7000
+    // the one-entry cache answers and the frame costs a handful of
+    // comparisons; without one the table is walked to the end and
+    // nothing is remembered, because there is nothing to remember. A
+    // machine doing one download is in the first case for every frame
+    // but the first. A machine with a frame arriving for a connection
+    // that has just closed is in the second. Both are printed.
+    var slot: u64 = NSOCK
+    if matching {
+        slot = 0
+        while slot < NSOCK && sget(state, slot, S_USE) != 0 {
+            slot = slot + 1
+        }
+        if slot < NSOCK {
+            sset(state, slot, S_USE, 1)
+            sset(state, slot, S_KIND, K_TCP)
+            sset(state, slot, S_LPORT, 7000)
+            sset(state, slot, S_OWNER, 0)
+        }
+    }
+    let t0: u64 = apic.tsc()
+    i = 0
+    while i < n {
+        frame_seen(state, f, 1514, true)
+        i = i + 1
+    }
+    let t1: u64 = apic.tsc()
+    if matching && slot < NSOCK {
+        sock_gone(state, slot)
+    }
+    return t1 - t0
+}
+
+// ---------------------------------------------------------- the report
+
+fn report(state: u64) {
+    var s_h: [u8; 8] = "netmon:\0"
+    var s_on: [u8; 5] = " on=\0"
+    var s_lk: [u8; 9] = " lookup=\0"
+    var s_hi: [u8; 6] = " hit=\0"
+    var s_ms: [u8; 7] = " miss=\0"
+    var s_st: [u8; 8] = " systx=\0"
+    var s_sr: [u8; 8] = " sysrx=\0"
+    var s_ch: [u8; 8] = " chit=\0\0"
+    var s_cs: [u8; 8] = " cscan=\0"
+    serial.puts((&s_h[0]) as u64)
+    serial.puts((&s_on[0]) as u64)
+    serial.dec(kstate.get(state, nm(NM_ON)))
+    serial.puts((&s_lk[0]) as u64)
+    serial.dec(lookups(state))
+    serial.puts((&s_hi[0]) as u64)
+    serial.dec(hits(state))
+    serial.puts((&s_ms[0]) as u64)
+    serial.dec(misses(state))
+    serial.puts((&s_st[0]) as u64)
+    serial.dec(sys_octets(state, 0))
+    serial.puts((&s_sr[0]) as u64)
+    serial.dec(sys_octets(state, 1))
+    serial.puts((&s_ch[0]) as u64)
+    serial.dec(kstate.get(state, nm(NM_CHITS)))
+    serial.puts((&s_cs[0]) as u64)
+    serial.dec(kstate.get(state, nm(NM_CSCAN)))
+    serial.nl()
+    if (mode_word(state) & M_BENCH) != 0 {
+        var s_b: [u8; 15] = "netmon: bench \0"
+        var s_o: [u8; 6] = " off=\0"
+        var s_h: [u8; 6] = " hit=\0"
+        var s_s: [u8; 7] = " scan=\0"
+        var s_k: [u8; 7] = " khz=\0\0"
+        var s_n: [u8; 8] = " turns=\0"
+        // A HUNDRED TIMES the cycles per frame, so that a hundredth of
+        // a cycle survives being an integer. 65 536 turns is long
+        // enough to swamp the two reads of the counter and short enough
+        // not to be interrupted more than a handful of times.
+        //
+        // `off` is the same loop with the counting switched off: the
+        // call, the one test at the top of `frame_seen`, and the
+        // return. It is the floor, and the two real numbers are only
+        // worth anything held against it.
+        let turns: u64 = 65536
+        let was: u64 = kstate.get(state, nm(NM_ON))
+        kstate.set(state, nm(NM_ON), 0)
+        let c_off: u64 = bench(state, turns, false)
+        kstate.set(state, nm(NM_ON), 1)
+        let c_hit: u64 = bench(state, turns, true)
+        let c_scan: u64 = bench(state, turns, false)
+        kstate.set(state, nm(NM_ON), was)
+        serial.puts((&s_b[0]) as u64)
+        serial.puts((&s_o[0]) as u64)
+        serial.dec(c_off * 100 / turns)
+        serial.puts((&s_h[0]) as u64)
+        serial.dec(c_hit * 100 / turns)
+        serial.puts((&s_s[0]) as u64)
+        serial.dec(c_scan * 100 / turns)
+        // Cycles per millisecond, measured in round K9. Without it the
+        // numbers above are cycles and nobody can turn them into time.
+        serial.puts((&s_k[0]) as u64)
+        serial.dec(kstate.get(state, kstate.TIME_KHZ))
+        serial.puts((&s_n[0]) as u64)
+        serial.dec(turns)
+        serial.nl()
+    }
+}

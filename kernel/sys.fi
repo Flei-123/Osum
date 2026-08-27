@@ -65,6 +65,7 @@ import tty
 
 import inet
 import netview
+import netmon
 import perm
 import power
 import pwr
@@ -585,6 +586,55 @@ const NV_OPENED: u64 = 9 // vorgetaeuschte Verbindungen
 const NV_DENIED: u64 = 10 // Versuche mit -ENETUNREACH beantwortet
 const NV_REPLIES: u64 = 11 // gebaute Antworten (204, DNS, ICMP)
 const NV_PID: u64 = 12 // die pid, die NETVGET gerade gelesen hat
+
+// ======================================================= ROUND NETMON
+//
+// WHO USED HOW MUCH. One number per call, the way `PSTAT` has answered
+// about the task table since round K6 -- no buffer, no pointer into the
+// kernel, nothing a program could be handed and misread.
+//
+//   NETMON(kind, index, field) -> number
+//
+//     kind 0  the scalars of the whole machine (index ignored)
+//     kind 1  a task: the six counters, its pid, whether it is alive
+//     kind 2  a socket: the live connection list `netstat` prints
+//     kind 3  one octet of the program name of a task
+//
+// READING IS ALLOWED FOR ANYBODY, exactly as with NETVGET and for the
+// same reason: a machine that will not tell the person which of their
+// own programs is using the line is not protecting anybody.
+const SYS_OSUM_NETMON: u64 = 1320
+
+// kind 0 -- the machine.
+const NM_ON: u64 = 0 // 1 = the counters are running
+const NM_LOOKUPS: u64 = 1 // frames classified
+const NM_HITS: u64 = 2 // frames placed on a process
+const NM_MISSES: u64 = 3 // frames that went to the system bucket
+const NM_SYSTX: u64 = 4 // octets of those, outbound
+const NM_SYSRX: u64 = 5 // and inbound
+const NM_TICKS: u64 = 6 // the tick counter, for rates
+const NM_HZ: u64 = 7 // ticks per second
+const NM_CARDTX: u64 = 8 // what the CARD counted, out
+const NM_CARDRX: u64 = 9 // and in
+const NM_NTASK: u64 = 10 // how many task slots there are
+const NM_NSOCK: u64 = 11 // and socket slots
+const NM_NPROG: u64 = 12 // and program slots
+
+// kind 1 -- a task. 0..5 are `netmon.T_*` in that order.
+const NT_PID: u64 = 6
+const NT_ALIVE: u64 = 7
+const NT_VIEW: u64 = 8 // the netview mode of round NETVIEW
+const NT_STATE: u64 = 9
+
+// kind 2 -- a socket. 0..11 are `netmon.S_*` in that order.
+const NS_TCPSTATE: u64 = 12
+const NS_AGE: u64 = 13 // ticks since the slot was taken
+
+// kind 4 -- a PROGRAM. 0..5 are the same six counters, summed over every
+// task that ever ran that program in this boot. This is the row the
+// person actually reads: `wget` used this much, whether or not the wget
+// that used it is still running.
+const NP_USED: u64 = 6
 
 const SYS_OSUM_SETENV: u64 = 1400
 const SYS_OSUM_MOUNT: u64 = 1401
@@ -1215,7 +1265,7 @@ fn dispatch(number: u64, frame: u64, state: u64) -> u64 {
     }
     // RUNDE DESKTOP: das Netz jenseits der Sockets. Zwei Nummern aus
     // dem Block, den Runde K8 dafuer ausgewiesen und nie benutzt hat.
-    if number >= SYS_OSUM_NETGET && number <= SYS_OSUM_NETVALLOW {
+    if number >= SYS_OSUM_NETGET && number <= SYS_OSUM_NETMON {
         return net_call(state, me, number, a0, a1, a2)
     }
     // ------------------------------------------------------ RUNDE K13
@@ -3710,6 +3760,12 @@ fn do_execve(state: u64, me: u64, frame: u64, path: u64, argv: u64) -> u64 {
     fset(frame, F_RDI, args)
     fset(frame, F_RFLAGS, 0x202)
     kstate.add(state, kstate.EXECVES, 1)
+    // ROUND NETMON: THE SLOT KEPT ITS PID AND CHANGED ITS PROGRAM.
+    // Everything the old image used belonged to the old image; carrying
+    // it over would tell the person that `sh` downloaded a hundred
+    // megabytes because it `exec`ed `wget`.
+    netmon.task_clear(state, me, sched.tget(state, me, sched.T_PID))
+    netmon.name_set(state, me, name)
     sched.irq_restore(flags)
     return 0
 }
@@ -3839,6 +3895,10 @@ fn do_exec(state: u64, me: u64, path: u64, argv: u64, argc: u64) -> u64 {
     // diese Zeile waere `exec` aus einem vorgetaeuschten Prozess heraus
     // der Weg an der Sicht vorbei.
     netview.inherit(state, me, t)
+    // ROUND NETMON: a new task, a fresh set of counters, and the name
+    // of the program they are counted under.
+    netmon.task_clear(state, t, sched.tget(state, t, sched.T_PID))
+    netmon.name_set(state, t, name)
     return sched.tget(state, t, sched.T_PID)
 }
 
@@ -5044,6 +5104,12 @@ fn do_socket(state: u64, me: u64, domain: u64, kind: u64,
     // -- ein vergessener Platz duerfte sonst eine ECHTE Steckdose eines
     // ECHTEN Prozesses vorgetaeuscht erscheinen lassen.
     netview.reset(state, si)
+    // ROUND NETMON: WHOSE SOCKET THIS IS. Written down here, in the one
+    // moment the asking task and the running task are the same task. A
+    // frame that arrives four milliseconds later arrives while somebody
+    // else holds the processor, and asking the scheduler THEN would put
+    // the octets on the wrong program.
+    netmon.sock_open(state, si, me, sched.tget(state, me, sched.T_PID), k)
     if (flags & SOCK_NONBLOCK) != 0 {
         inet.sock_set_nonblock(state, si)
     }
@@ -5136,6 +5202,11 @@ fn do_accept(state: u64, me: u64, fd: u64, addr: u64, lenp: u64,
         return neg(errno.E_NFILE)
     }
     file.fd_set(state, me, nfd, of)
+    // ROUND NETMON: the accepted connection belongs to whoever accepted
+    // it, not to whoever is listening -- with `fork` after `accept`
+    // those are two different processes.
+    netmon.sock_open(state, got, me, sched.tget(state, me, sched.T_PID),
+        netmon.K_TCP)
     var pip: u64 = 0
     var pport: u64 = 0
     inet.sock_peer(state, got, &pip, &pport)
@@ -5613,8 +5684,138 @@ fn do_netvallow(state: u64, me: u64, pid: u64, addr: u64,
     return 0
 }
 
+// ======================================================= ROUND NETMON
+//
+// One number out of the accounting. Everything it can answer is a
+// counter or a field of a record that already exists; this function
+// invents nothing and rounds nothing.
+fn do_netmon(state: u64, me: u64, kind: u64, index: u64,
+    field: u64) -> u64 {
+    if kind == 0 {
+        if field == NM_ON {
+            if netmon.on(state) {
+                return 1
+            }
+            return 0
+        }
+        if field == NM_LOOKUPS {
+            return netmon.lookups(state)
+        }
+        if field == NM_HITS {
+            return netmon.hits(state)
+        }
+        if field == NM_MISSES {
+            return netmon.misses(state)
+        }
+        if field == NM_SYSTX {
+            return netmon.sys_octets(state, 0)
+        }
+        if field == NM_SYSRX {
+            return netmon.sys_octets(state, 1)
+        }
+        if field == NM_TICKS {
+            return kstate.get(state, kstate.TICKS)
+        }
+        if field == NM_HZ {
+            return 100
+        }
+        if field == NM_CARDTX {
+            return inet.card_octets(state, 0)
+        }
+        if field == NM_CARDRX {
+            return inet.card_octets(state, 1)
+        }
+        if field == NM_NTASK {
+            return kstate.MAX_TASKS
+        }
+        if field == NM_NSOCK {
+            return netmon.NSOCK
+        }
+        if field == NM_NPROG {
+            return netmon.NPROG
+        }
+        return neg(errno.E_INVAL)
+    }
+    if kind == 1 {
+        if index >= kstate.MAX_TASKS {
+            return neg(errno.E_SRCH)
+        }
+        if field < netmon.T_FIELDS {
+            return netmon.tget(state, index, field)
+        }
+        if field == NT_PID {
+            return sched.tget(state, index, sched.T_PID)
+        }
+        if field == NT_ALIVE {
+            let st: u64 = sched.tget(state, index, sched.T_STATE)
+            if st == sched.S_FREE || st == sched.S_ZOMBIE {
+                return 0
+            }
+            return 1
+        }
+        if field == NT_VIEW {
+            return netview.view_of(state, index)
+        }
+        if field == NT_STATE {
+            return sched.tget(state, index, sched.T_STATE)
+        }
+        return neg(errno.E_INVAL)
+    }
+    if kind == 2 {
+        if index >= netmon.NSOCK {
+            return neg(errno.E_INVAL)
+        }
+        if field < netmon.S_FIELDS {
+            return netmon.sget(state, index, field)
+        }
+        if field == NS_TCPSTATE {
+            if netmon.sget(state, index, netmon.S_USE) == 0 {
+                return 0
+            }
+            return inet.sock_state(state, index)
+        }
+        if field == NS_AGE {
+            if netmon.sget(state, index, netmon.S_USE) == 0 {
+                return 0
+            }
+            return kstate.get(state, kstate.TICKS)
+                - netmon.sget(state, index, netmon.S_T0)
+        }
+        return neg(errno.E_INVAL)
+    }
+    if kind == 3 {
+        if index >= kstate.MAX_TASKS {
+            return neg(errno.E_SRCH)
+        }
+        return netmon.name_at(state, index, field)
+    }
+    if kind == 4 {
+        if index >= netmon.NPROG {
+            return neg(errno.E_INVAL)
+        }
+        if field < netmon.T_FIELDS {
+            return netmon.pget(state, index, field)
+        }
+        if field == NP_USED {
+            return netmon.prog_used(state, index)
+        }
+        return neg(errno.E_INVAL)
+    }
+    if kind == 5 {
+        if index >= netmon.NPROG {
+            return neg(errno.E_INVAL)
+        }
+        return netmon.prog_name_at(state, index, field)
+    }
+    return neg(errno.E_INVAL)
+}
+
 fn net_call(state: u64, me: u64, number: u64, a0: u64, a1: u64,
     a2: u64) -> u64 {
+    // ======================================================= ROUND NETMON
+    if number == SYS_OSUM_NETMON {
+        return do_netmon(state, me, a0, a1, a2)
+    }
     // ====================================================== RUNDE NETVIEW
     if number == SYS_OSUM_NETVGET {
         return do_netvget(state, me, a0, a1)

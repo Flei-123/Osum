@@ -1,0 +1,473 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/netstat.fi -- round NETMON: the connections, and who owns
+// them.
+//
+// The name and the shape are the ones every Unix has had for thirty
+// years, because a person who knows `netstat` should not have to learn
+// anything to use this one. What it prints is what `kernel/netmon.fi`
+// counted; it computes nothing and it caches nothing.
+//
+//   netstat            the live connections, one line each
+//   netstat -a         and the listening sockets with them
+//   netstat -p         PER PROGRAM: what each one has used since it
+//                      started, payload and wire, both directions
+//   netstat -s         the machine: the counters, and the card's own
+//                      numbers to hold them against
+//
+// WHY `-p` IS THE INTERESTING ONE. `netstat` on Linux prints
+// connections; the question people actually ask is which program is
+// using the line, and Linux answers it badly (a pid, if you are root).
+// Here the accounting is per process from the start, so `-p` is the
+// cheap call and the connection list is the expensive one.
+//
+// EVERY NUMBER COMES OUT OF ONE SYSTEM CALL, `SYS_NETMON(kind, index,
+// field)`. There is no buffer and no pointer into the kernel anywhere in
+// this file -- which is, as `ps` put it in round K6, why a `netstat`
+// that lies is a `netstat` the kernel lied to.
+
+profile kernel
+
+import ulib
+
+export { u_start }
+
+const MAXT: u64 = 32
+const MAXS: u64 = 16
+
+fn u_start(args: u64) -> u64 {
+    var f_all: bool = false
+    var f_prog: bool = false
+    var f_sum: bool = false
+    var f_task: bool = false
+    var w: [u8; 32] = [0 as u8; 32]
+
+    let n: u64 = ulib.arg_count(args)
+    var i: u64 = 1
+    while i < n {
+        let a: u64 = ulib.arg_at(args, i)
+        if ulib.length(a) > 1 && byte_at(a, 0) == 45 {
+            var k: u64 = 1
+            while k < ulib.length(a) {
+                let c: u64 = byte_at(a, k)
+                if c == 97 {
+                    f_all = true
+                }
+                if c == 112 {
+                    f_prog = true
+                }
+                if c == 115 {
+                    f_sum = true
+                }
+                if c == 116 {
+                    f_task = true
+                }
+                k = k + 1
+            }
+        }
+        i = i + 1
+    }
+
+    if f_sum {
+        summary()
+    }
+    if f_prog {
+        per_program()
+    }
+    if f_task {
+        per_task()
+    }
+    if !f_sum && !f_prog && !f_task {
+        connections(f_all)
+    }
+    return 0
+}
+
+// ------------------------------------------------------------ helpers
+
+fn byte_at(p: u64, i: u64) -> u64 {
+    return (*((p + i) as *mut u8)) as u64
+}
+
+// An IPv4 address in the shape everybody reads it in.
+fn say_ip(a: u64) {
+    var dot: [u8; 2] = ".\0"
+    ulib.sayn((a >> 24) & 0xFF)
+    ulib.say((&dot[0]) as u64)
+    ulib.sayn((a >> 16) & 0xFF)
+    ulib.say((&dot[0]) as u64)
+    ulib.sayn((a >> 8) & 0xFF)
+    ulib.say((&dot[0]) as u64)
+    ulib.sayn(a & 0xFF)
+}
+
+// `address:port`, left-aligned in `w` columns. The address is built into
+// a buffer first because the width has to be known before it is printed.
+fn say_endpoint(a: u64, p: u64, w: u64) {
+    var buf: [u8; 32] = [0 as u8; 32]
+    var at: u64 = 0
+    at = put_num((&buf[0]) as u64, at, (a >> 24) & 0xFF)
+    buf[at as usize] = 46 as u8
+    at = at + 1
+    at = put_num((&buf[0]) as u64, at, (a >> 16) & 0xFF)
+    buf[at as usize] = 46 as u8
+    at = at + 1
+    at = put_num((&buf[0]) as u64, at, (a >> 8) & 0xFF)
+    buf[at as usize] = 46 as u8
+    at = at + 1
+    at = put_num((&buf[0]) as u64, at, a & 0xFF)
+    buf[at as usize] = 58 as u8
+    at = at + 1
+    at = put_num((&buf[0]) as u64, at, p)
+    buf[at as usize] = 0 as u8
+    ulib.say((&buf[0]) as u64)
+    var k: u64 = at
+    while k < w {
+        say_sp()
+        k = k + 1
+    }
+}
+
+// A number into a buffer, decimal, returning where it ended. Recursive
+// because the digits come out backwards otherwise and a second buffer
+// to turn them round would cost more than the four frames this uses.
+fn put_num(buf: u64, at: u64, v: u64) -> u64 {
+    if v >= 10 {
+        let hi: u64 = put_num(buf, at, v / 10)
+        __mmio_write8((buf + hi) as *mut u8, (48 + v % 10) as u8)
+        return hi + 1
+    }
+    __mmio_write8((buf + at) as *mut u8, (48 + v) as u8)
+    return at + 1
+}
+
+fn say_sp() {
+    var s: [u8; 2] = " \0"
+    ulib.say((&s[0]) as u64)
+}
+
+// The name of the program a task is running, left-aligned.
+fn say_name(t: u64, w: u64) {
+    var buf: [u8; 25] = [0 as u8; 25]
+    var i: u64 = 0
+    var going: bool = true
+    while going {
+        let c: u64 = ulib.sys(ulib.SYS_NETMON, ulib.NK_NAME, t, i)
+        if ulib.bad(c) || c == 0 || i >= 24 {
+            going = false
+        } else {
+            buf[i as usize] = c as u8
+            i = i + 1
+        }
+    }
+    buf[i as usize] = 0 as u8
+    if i == 0 {
+        var q: [u8; 2] = "-\0"
+        ulib.say((&q[0]) as u64)
+        i = 1
+    } else {
+        ulib.say((&buf[0]) as u64)
+    }
+    while i < w {
+        say_sp()
+        i = i + 1
+    }
+}
+
+// The eleven TCP states of `net.tcp`, in the spelling every `netstat`
+// uses. A number nobody can look up is not a state.
+fn say_state(s: u64, w: u64) {
+    var names: [u8; 132] = "CLOSED\0\0\0\0\0\0LISTEN\0\0\0\0\0\0SYN_SENT\0\0\0\0SYN_RCVD\0\0\0\0ESTABLISHED\0FIN_WAIT_1\0\0FIN_WAIT_2\0\0CLOSE_WAIT\0\0CLOSING\0\0\0\0\0LAST_ACK\0\0\0\0TIME_WAIT\0\0\0"
+    var v: u64 = s
+    if v > 10 {
+        v = 0
+    }
+    let p: u64 = (&names[0]) as u64 + v * 12
+    ulib.say(p)
+    var k: u64 = ulib.length(p)
+    while k < w {
+        say_sp()
+        k = k + 1
+    }
+}
+
+// Octets, in the unit a person reads. `1 234 567` is a number nobody
+// compares at a glance; `1.2M` is. The exact octets are what `-p` and
+// the history file carry -- this is the column, not the truth.
+fn say_size(v: u64, w: u64) {
+    var suf: [u8; 5] = "kMGT\0"
+    var buf: [u8; 24] = [0 as u8; 24]
+    var at: u64 = 0
+    if v < 1024 {
+        at = put_num((&buf[0]) as u64, 0, v)
+    } else {
+        var s: u64 = 0
+        var x: u64 = v
+        while x >= 1024 * 1024 && s < 3 {
+            x = x / 1024
+            s = s + 1
+        }
+        // One decimal, computed in octets and not in floating point --
+        // there is no floating point in ring 3 here and there does not
+        // need to be.
+        let whole: u64 = x / 1024
+        let frac: u64 = ((x % 1024) * 10) / 1024
+        at = put_num((&buf[0]) as u64, 0, whole)
+        buf[at as usize] = 46 as u8
+        at = at + 1
+        buf[at as usize] = (48 + frac) as u8
+        at = at + 1
+        buf[at as usize] = suf[s as usize]
+        at = at + 1
+    }
+    buf[at as usize] = 0 as u8
+    var k: u64 = at
+    while k < w {
+        say_sp()
+        k = k + 1
+    }
+    ulib.say((&buf[0]) as u64)
+}
+
+fn q(kind: u64, index: u64, field: u64) -> u64 {
+    let v: u64 = ulib.sys(ulib.SYS_NETMON, kind, index, field)
+    if ulib.bad(v) {
+        return 0
+    }
+    return v
+}
+
+// ------------------------------------------------------ the connections
+
+fn connections(all: bool) {
+    var head: [u8; 73] = "Proto Local                Remote               State       Age  Program\0"
+    var p_tcp: [u8; 7] = "tcp   \0"
+    var p_udp: [u8; 7] = "udp   \0"
+    var p_icmp: [u8; 7] = "icmp  \0"
+    var s_none: [u8; 22] = "*                    \0"
+    ulib.say((&head[0]) as u64)
+    ulib.nl()
+    let ns: u64 = q(ulib.NK_MACHINE, 0, ulib.NM_NSOCK)
+    var i: u64 = 0
+    var shown: u64 = 0
+    while i < ns && i < MAXS {
+        if q(ulib.NK_SOCK, i, ulib.NS_USE) != 0 {
+            let kind: u64 = q(ulib.NK_SOCK, i, ulib.NS_KIND)
+            let st: u64 = q(ulib.NK_SOCK, i, ulib.NS_TCPSTATE)
+            // A socket that is bound and not connected is a LISTEN, and
+            // it is only shown with `-a` -- exactly the rule every
+            // `netstat` follows.
+            let listening: bool = kind == 1 && st == 1
+            if all || !listening {
+                if kind == 1 {
+                    ulib.say((&p_tcp[0]) as u64)
+                } else if kind == 2 {
+                    ulib.say((&p_udp[0]) as u64)
+                } else {
+                    ulib.say((&p_icmp[0]) as u64)
+                }
+                say_endpoint(local_ip(), q(ulib.NK_SOCK, i, ulib.NS_LPORT), 21)
+                let ra: u64 = q(ulib.NK_SOCK, i, ulib.NS_RADDR)
+                if ra == 0 {
+                    ulib.say((&s_none[0]) as u64)
+                } else {
+                    say_endpoint(ra, q(ulib.NK_SOCK, i, ulib.NS_RPORT), 21)
+                }
+                if kind == 1 {
+                    say_state(st, 12)
+                } else {
+                    var d: [u8; 13] = "-           \0"
+                    ulib.say((&d[0]) as u64)
+                }
+                // The age in seconds. The tick is a hundredth of a
+                // second (`kstate.TICKS`), and this is the only place in
+                // this program that divides.
+                ulib.pad(q(ulib.NK_SOCK, i, ulib.NS_AGE) / 100, 4)
+                say_sp()
+                let ow: u64 = q(ulib.NK_SOCK, i, ulib.NS_OWNER)
+                if ow == 0 {
+                    var dash: [u8; 2] = "-\0"
+                    ulib.say((&dash[0]) as u64)
+                } else {
+                    say_name(ow - 1, 0)
+                }
+                ulib.nl()
+                shown = shown + 1
+            }
+        }
+        i = i + 1
+    }
+    if shown == 0 {
+        var s_e: [u8; 26] = "no connection is open\0\0\0\0\0"
+        ulib.say((&s_e[0]) as u64)
+        ulib.nl()
+    }
+}
+
+// This machine's own address, out of the call round DESKTOP added.
+fn local_ip() -> u64 {
+    let v: u64 = ulib.sys(1300, 1, 0, 0)
+    if ulib.bad(v) {
+        return 0
+    }
+    return v
+}
+
+// ------------------------------------------------------- per program
+
+// The name of a PROGRAM slot, left-aligned.
+fn say_prog_name(i: u64, w: u64) {
+    var buf: [u8; 25] = [0 as u8; 25]
+    var k: u64 = 0
+    var going: bool = true
+    while going {
+        let c: u64 = ulib.sys(ulib.SYS_NETMON, ulib.NK_PNAME, i, k)
+        if ulib.bad(c) || c == 0 || k >= 24 {
+            going = false
+        } else {
+            buf[k as usize] = c as u8
+            k = k + 1
+        }
+    }
+    buf[k as usize] = 0 as u8
+    ulib.say((&buf[0]) as u64)
+    while k < w {
+        say_sp()
+        k = k + 1
+    }
+}
+
+// PER PROGRAM, summed over every process that ever ran it in this boot.
+// This is the row a person reads and the row `/var/net/usage` is keyed
+// by. A process that has already exited is IN here and gone from `-t`,
+// which is the whole reason the two tables are two tables.
+fn per_program() {
+    var head: [u8; 60] = "Program          Sent     Recvd    Wire-out Wire-in  Frames\0"
+    ulib.say((&head[0]) as u64)
+    ulib.nl()
+    let np: u64 = q(ulib.NK_MACHINE, 0, ulib.NM_NPROG)
+    var i: u64 = 0
+    var shown: u64 = 0
+    while i < np && i < 24 {
+        if q(ulib.NK_PROG, i, ulib.NP_USED) != 0 {
+            let tx: u64 = q(ulib.NK_PROG, i, ulib.NT_TXPAY)
+            let rx: u64 = q(ulib.NK_PROG, i, ulib.NT_RXPAY)
+            let tw: u64 = q(ulib.NK_PROG, i, ulib.NT_TXWIRE)
+            let rw: u64 = q(ulib.NK_PROG, i, ulib.NT_RXWIRE)
+            if tx != 0 || rx != 0 || tw != 0 || rw != 0 {
+                say_prog_name(i, 16)
+                say_size(tx, 9)
+                say_size(rx, 9)
+                say_size(tw, 9)
+                say_size(rw, 9)
+                ulib.pad(q(ulib.NK_PROG, i, ulib.NT_TXPKT)
+                    + q(ulib.NK_PROG, i, ulib.NT_RXPKT), 6)
+                ulib.nl()
+                shown = shown + 1
+            }
+        }
+        i = i + 1
+    }
+    if shown == 0 {
+        var s_e: [u8; 28] = "no program has used the net\0"
+        ulib.say((&s_e[0]) as u64)
+        ulib.nl()
+    }
+    // THE EXACT OCTETS, for whoever is checking the counter against a
+    // file of known size. The columns above are rounded on purpose --
+    // this line is not.
+    var s_raw: [u8; 44] = "exact octets: payload out <- in, wire ditto\0"
+    var s_arr: [u8; 5] = " <- \0"
+    var s_wire: [u8; 9] = "   wire:\0"
+    ulib.say((&s_raw[0]) as u64)
+    ulib.nl()
+    i = 0
+    while i < np && i < 24 {
+        if q(ulib.NK_PROG, i, ulib.NP_USED) != 0 {
+            let tx: u64 = q(ulib.NK_PROG, i, ulib.NT_TXPAY)
+            let rx: u64 = q(ulib.NK_PROG, i, ulib.NT_RXPAY)
+            let tw: u64 = q(ulib.NK_PROG, i, ulib.NT_TXWIRE)
+            let rw: u64 = q(ulib.NK_PROG, i, ulib.NT_RXWIRE)
+            if tx != 0 || rx != 0 {
+                say_prog_name(i, 16)
+                ulib.pad(tx, 10)
+                ulib.say((&s_arr[0]) as u64)
+                ulib.pad(rx, 10)
+                ulib.say((&s_wire[0]) as u64)
+                ulib.pad(tw, 10)
+                ulib.say((&s_arr[0]) as u64)
+                ulib.pad(rw, 10)
+                ulib.nl()
+            }
+        }
+        i = i + 1
+    }
+}
+
+fn per_task() {
+    var head: [u8; 64] = "  PID Program          Sent    Recvd   Wire-out Wire-in  Frames\0"
+    ulib.say((&head[0]) as u64)
+    ulib.nl()
+    let nt: u64 = q(ulib.NK_MACHINE, 0, ulib.NM_NTASK)
+    var i: u64 = 0
+    var shown: u64 = 0
+    while i < nt && i < MAXT {
+        let tx: u64 = q(ulib.NK_TASK, i, ulib.NT_TXPAY)
+        let rx: u64 = q(ulib.NK_TASK, i, ulib.NT_RXPAY)
+        let tw: u64 = q(ulib.NK_TASK, i, ulib.NT_TXWIRE)
+        let rw: u64 = q(ulib.NK_TASK, i, ulib.NT_RXWIRE)
+        // A PROCESS THAT USED NOTHING IS NOT A LINE. Thirty-two slots of
+        // zeroes would bury the two that matter.
+        if tx != 0 || rx != 0 || tw != 0 || rw != 0 {
+            ulib.pad(q(ulib.NK_TASK, i, ulib.NT_PID), 5)
+            say_sp()
+            say_name(i, 16)
+            say_size(tx, 8)
+            say_size(rx, 8)
+            say_size(tw, 9)
+            say_size(rw, 9)
+            ulib.pad(q(ulib.NK_TASK, i, ulib.NT_TXPKT)
+                + q(ulib.NK_TASK, i, ulib.NT_RXPKT), 6)
+            ulib.nl()
+            shown = shown + 1
+        }
+        i = i + 1
+    }
+    if shown == 0 {
+        var s_e: [u8; 30] = "no program has used the net\0\0\0"
+        ulib.say((&s_e[0]) as u64)
+        ulib.nl()
+    }
+}
+
+// --------------------------------------------------------- the machine
+
+fn summary() {
+    var s_on: [u8; 22] = "accounting        on\0\0"
+    var s_off: [u8; 22] = "accounting       off\0\0"
+    var s_lk: [u8; 22] = "frames classified   \0\0"
+    var s_hi: [u8; 22] = "  placed on a task  \0\0"
+    var s_ms: [u8; 22] = "  system (arp, icmp)\0\0"
+    var s_st: [u8; 22] = "system octets out   \0\0"
+    var s_sr: [u8; 22] = "system octets in    \0\0"
+    var s_ct: [u8; 22] = "card octets out     \0\0"
+    var s_cr: [u8; 22] = "card octets in      \0\0"
+    if q(ulib.NK_MACHINE, 0, ulib.NM_ON) != 0 {
+        ulib.say((&s_on[0]) as u64)
+    } else {
+        ulib.say((&s_off[0]) as u64)
+    }
+    ulib.nl()
+    line((&s_lk[0]) as u64, q(ulib.NK_MACHINE, 0, ulib.NM_LOOKUPS))
+    line((&s_hi[0]) as u64, q(ulib.NK_MACHINE, 0, ulib.NM_HITS))
+    line((&s_ms[0]) as u64, q(ulib.NK_MACHINE, 0, ulib.NM_MISSES))
+    line((&s_st[0]) as u64, q(ulib.NK_MACHINE, 0, ulib.NM_SYSTX))
+    line((&s_sr[0]) as u64, q(ulib.NK_MACHINE, 0, ulib.NM_SYSRX))
+    line((&s_ct[0]) as u64, q(ulib.NK_MACHINE, 0, ulib.NM_CARDTX))
+    line((&s_cr[0]) as u64, q(ulib.NK_MACHINE, 0, ulib.NM_CARDRX))
+}
+
+fn line(name: u64, v: u64) {
+    ulib.say(name)
+    ulib.pad(v, 12)
+    ulib.nl()
+}
