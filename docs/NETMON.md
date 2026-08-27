@@ -138,8 +138,12 @@ the share, computed from the same run:
 776 x 2201 ns = 1707 us of classifying in 439 ms
 ```
 
-**0.3 % of the time the transfer took.** The run fails if it is above
-5 %.
+**0.3 % of the time the transfer took.** A second full run of the same
+suite, on a machine that happened to be less busy (the megaoctet went
+through in 162 ms instead of 439), put it at **1.0 %** — the classifying
+takes the same 1 700 us either way, so a faster transfer is a larger
+share of a smaller number. Both are the same measurement and both are
+reported; the run fails if it is above 5 %.
 
 It is 0.3 % because of a **one-entry cache**. The first version walked
 all sixteen socket records for every frame; during a transfer every
@@ -428,14 +432,16 @@ in this file.
 ## WHAT IS NOT DONE, AND WHY
 
 **1. The window was not raised in a measured run.** `/bin/netmon`
-compiles, links and its whole data path runs — but started from
-`/bin/sh` it reports `netmon: no window server`, because
+compiles, links (234 128 octets) and its whole data path runs — but
+started from `/bin/sh` it reports `netmon: no window server`, because
 `wlibc.start()` cannot get its drawing surface on that path. This is
-**not this round's fault and the counter-check proves it**: `/bin/wigdemo`,
-the reference application of round K15 and the program the widget
-library is measured against, was put on the same disk and started from
-the same shell in the same boot, and said `wigdemo: keine Flaeche` —
-the identical failure. Applications of that library are started by the
+**not this round's fault and section 8 of the run proves it**:
+`/bin/wigdemo`, the reference application of round K15 and the program
+the widget library is measured against, is on the same disk and started
+from the same shell in the same boot, and says `wigdemo: keine Flaeche`
+— the identical failure. The section fails if `netmon` has no window
+while `wigdemo` does, which is the case in which it WOULD be this
+round's fault. Applications of that library are started by the
 kernel's `wig` stage, not by a shell. Wiring `/bin/netmon` into a
 desktop session is one commit and one measured run; it is not in this
 one, and no screenshot of it exists.
@@ -500,7 +506,7 @@ on a port a local program is listening on.
 | classifier, cache hit | 5 292 cycles/frame |
 | classifier, whole table walked | 8 587 cycles/frame |
 | what the counting adds per frame | 4 852 cycles = 2 201 ns |
-| **share of the transfer the counting costs** | **0.3 %** |
+| **share of the transfer the counting costs** | **0.3 % / 1.0 %** (two runs) |
 | frames answered out of the one-entry cache | 769 of 776 |
 | frames placed on a process, 64 KiB download | 54 of 61 (7 = ARP and late frames) |
 | history: second roll immediately after the first | 0 programs written |
@@ -510,7 +516,17 @@ on a port a local program is listening on.
 | files fetched through the NAT | 3 x 65 536 octets |
 | NAT records made / evicted / frames dropped | 4 / 0 / 0 |
 | frames forwarded out / in | 44 / 150 |
-| `tools/netmon/run.sh` | **70 passed, 0 failed** |
+| `tools/netmon/run.sh` | **75 passed, 0 failed** |
+
+## The suites that were already there
+
+Unchanged by this round, measured after it:
+
+| suite | before | after |
+|---|---|---|
+| `tools/net/run.sh` | 75 / 0 | **75 / 0** |
+| `tools/userland/run.sh` | 91 / 0 | **91 / 0** |
+| `tools/netview/run.sh` | 53 / 0 | **53 / 0** |
 
 ## Where it lives
 
