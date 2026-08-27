@@ -115,8 +115,8 @@ fi
 # schafft (`nic: pumps=`), und genau das ist der Preis des Hakens.
 AUS_R=(); AN_R=()
 for i in $(seq 1 $RUNDEN); do
-    lauf "$TMPD/mit.mb" ""        "$TMPD/cpu_aus$i.log" "nsvc=0 nwait=1500"
-    lauf "$TMPD/mit.mb" "$WGARGS" "$TMPD/cpu_an$i.log"  "nsvc=0 nwait=1500"
+    lauf "$TMPD/ohne.mb" "" "$TMPD/cpu_aus$i.log" "nsvc=0 nwait=1500"
+    lauf "$TMPD/mit.mb"  "" "$TMPD/cpu_an$i.log"  "nsvc=0 nwait=1500"
     a=$(get "$TMPD/cpu_aus$i.log" 'nic: pumps='); b=$(get "$TMPD/cpu_an$i.log" 'nic: pumps=')
     [ -n "$a" ] && AUS_R+=("$a"); [ -n "$b" ] && AN_R+=("$b")
 done
