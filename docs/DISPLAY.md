@@ -108,6 +108,32 @@ rolled back (section 5). A non-destructive probe cannot be complete; this
 one is honest about which of its three gates rejected each candidate, and
 that is the best that is available without flashing the screen 22 times.
 
+### Two things this got wrong first, because they are worth writing down
+
+**Probing changes the picture that is on the screen.** The probe writes
+different numbers into `XRES` and `YRES` twenty-two times. As long as
+`VBE_ENABLE` stays on, that is not a quiet register access: QEMU
+immediately recomputes the line length of the *live* scanout
+(`VBE_VIRT_WIDTH`) from `XRES`, and it stays recomputed. Writing `XRES`
+and `YRES` back afterwards is **not enough** -- the card kept scanning
+out with a different pitch than the kernel believed, and the screenshot
+showed a striped carpet instead of four colour fields, shifting by a
+fixed amount every few rows. The kernel thought it was correct: every
+number in its own state was right (`disp: geom 800x600 pitch=3200
+panel=800x600 ppitch=3200`). The fix is to restore the old mode through
+the *same* path `set_mode` uses -- off, numbers, on -- and then read the
+line length back and compare it with the one `fb.fi` keeps, remapping if
+they disagree. Only a screenshot found this; no assertion on the kernel's
+own numbers could have.
+
+**`disp` is a substring of `dispctl`.** `fb.fi` matches its command-line
+words as substrings, which was fine until this round added a counter-check
+that boots *without* the word `disp` and runs `script=dispctl raw`. The
+kernel found `disp` inside `dispctl`, probed the card, and the section
+that was supposed to prove that nothing happens without the word proved
+the opposite. `vmode.find_word` requires a whole word. A test that goes
+green for the wrong reason is worse than no test.
+
 ---
 
 ## 4. EDID -- and the part where DDC/I2C does *not* happen

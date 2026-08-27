@@ -235,6 +235,16 @@
 #      `nofocus` (die Taste kommt beim falschen Fenster an), `nomouse`,
 #      `nompoll` und der Lauf ganz ohne das Wort `wm`.
 #
+#  25. DER BILDSCHIRM, ZUM ZWEITEN MAL (tools/display/run.sh, Runde
+#      DISPLAY): Runde K7 hatte ZWEI Aufloesungen als vier Konstanten im
+#      Quelltext, umschaltbar nur beim Start. Diese Runde fragt die Karte
+#      -- Modusliste ueber Zuruecklesen der VBE-Register und
+#      VBE_VIDEO_MEMORY_64K, EDID aus dem Speicherbereich der Karte,
+#      Moduswechsel IM BETRIEB mit Rueckfall und einer Frist von 15
+#      Sekunden, dazu Gammarampe, Drehung und Skalierung beim
+#      Uebertragen. Gemessen wird mit Bildschirmfotos vorher und
+#      nachher; die Gegenprobe nimmt das Wort `disp` weg und erwartet
+#      nichts davon.
 #  24. ENERGIE UND LEISTUNG (tools/k18/run.sh, Runde K18): bis dahin
 #      konnte dieser Kernel ueber ACPI genau eine Sache -- abschalten.
 #      Zwischen "laeuft" und "aus" gab es nichts. Diese Runde baut die
@@ -423,6 +433,8 @@ lauf "22. Widgets und der Dateimanager: eine Bibliothek in Ring 3 (tools/k15/run
      tools/k15/run.sh k15 '^K15: |^        -> |^  OK    (die Anordnung|ein Klick auf das Kaestchen|mit Bereichsverfolgung|und /daten/neu|der Verweis spart|getippt |OHNE (die Schluesselwoerter|das Journal|den Namensindex)|[0-9]\. (DER AUFBAU|DIE SUCHE|DIE GEGENPROBE|der Index)|und DIESELBEN NAMEN|nach dem (Anlegen|Umbenennen)|das Symbol des Dateimanagers)'
 lauf "24. Energie und Leistung: drei Profile, Ruhezustand, Waerme, Akku (tools/k18/run.sh, Runde K18)" \
      tools/k18/run.sh k18 '^K18: |^  OK    (dieselbe Stelle|IA32_PERF_CTL bekommt|Turbo ist bei|SpeedStep ist bei|jeder Durchlauf ging|schlafend |aber es wird kein|zwei Tabellen|GEGENPROBE|GEDROSSELT|im BILD|dasselbe Pruefbild|und einen Bildpunkt DANEBEN|keine AUFRUFNUMMER)'
+lauf "25. Der Bildschirm, zum zweiten Mal: Modusliste, Wechsel im Betrieb, EDID, Gamma (tools/display/run.sh, Runde DISPLAY)" \
+     tools/display/run.sh display '^DISPLAY: |^  OK    (gefragt |die native |der rohe Block|er hat [0-9]+ Mikro|gemessen: |je Bildpunkt|NACHHER|VORHER|ZURUECK|Feld 1 ist rot|das Foto ist 800x600 -- der Bildmodus|und der Kernel hat von SELBST|die Aufrufnummern dieser Runde|ein Programm in Ring 3 hat)'
 
 echo
 echo "=================================================================="
