@@ -1,0 +1,1539 @@
+// kernel/vmode.fi -- Runde DISPLAY: die Modi, die die Karte wirklich kann.
+//
+// WAS VOR DIESER RUNDE DA STAND. `fb.fi` kannte GENAU ZWEI Aufloesungen,
+// 800x600 und 1024x768, als zwei Konstanten im Quelltext, umschaltbar
+// nur ueber ein Wort auf der Befehlszeile beim Start. Das war kein
+// Treiber, das war eine Vermutung mit zwei Werten -- und die Begruendung
+// dafuer stand ehrlich daneben: 800x600x4 passt in eine 2-MiB-Kachel,
+// 1024x768x4 braucht zwei, und mehr wollte Runde K7 nicht abbilden.
+//
+// DIESES MODUL FRAGT STATTDESSEN DIE KARTE. Der Bochs-VBE-Aufsatz (PCI
+// 1234:1111, Tore 0x1CE/0x1CF) hat dafuer zwei Dinge, die Runde K7 nicht
+// benutzt hat:
+//
+//   1. ZURUECKLESEN. Was man in XRES, YRES oder BPP schreibt, kann man
+//      wieder herauslesen. Nimmt die Karte einen Wert nicht an, bleibt
+//      der ALTE stehen -- und genau daran ist er zu erkennen, ohne den
+//      Modus wirklich zu setzen. Ob QEMU das tut, ist eine MESSUNG und
+//      keine Annahme; was dabei herauskam, steht in docs/DISPLAY.md und
+//      wird von `probe` in zwei getrennten Zaehlern gemeldet
+//      (`refused` und `toobig`), damit man sieht, welche der beiden
+//      Schranken wirklich gegriffen hat.
+//   2. VBE_VIDEO_MEMORY_64K (Index 0x0A). Die Karte sagt, wie viel
+//      Bildspeicher sie hat, in Einheiten von 64 KiB. Ein Modus, dessen
+//      Bild nicht hineinpasst, ist keiner -- egal, was die Register
+//      annehmen.
+//
+// UND EINE DRITTE SCHRANKE, DIE NICHT VON DER KARTE KOMMT, SONDERN VON
+// DIESEM KERNEL: der Rahmenpuffer wird ueber acht 2-MiB-Fensterplaetze
+// am oberen Ende des Kernel-Seitenverzeichnisses eingeblendet (`fb.fi`
+// und `apic.fi` teilen sie sich). 16 MiB ist damit die Obergrenze fuer
+// ein Bild, und sie sinkt, sobald `apic.map_device` sich Plaetze nimmt.
+// 1920x1080x4 sind 8 294 400 Oktette und brauchen fuenf Kacheln; das
+// geht. 3840x2160x4 sind 33 177 600 und brauchen siebzehn; das geht
+// NICHT, und ein Modus, den der Kernel nicht abbilden kann, wird nicht
+// angeboten. Diese Zahl ist gemessen und steht in docs/DISPLAY.md.
+//
+// WARUM DIESES MODUL SEINE EIGENEN TORBEFEHLE HAT. Dieselbe Antwort wie
+// in `fb.fi`: dort steht der Absatz ueber den Abhaengigkeitskreis.
+// `fb.fi` bindet nur `kstate` und `font` ein, damit `serial.put` es
+// spiegeln kann, ohne dass ein Kreis entsteht. Wuerde dieses Modul seine
+// VBE-Register aus `fb.fi` holen, muesste `fb.fi` sie exportieren, und
+// die Liste der Ausfuhren dieses ohnehin grossen Moduls waeche um zehn
+// Namen, die niemand sonst braucht. Also stehen die Register HIER noch
+// einmal -- und `tools/display/run.sh` rechnet die Zahlen in beiden
+// Dateien gegeneinander nach, so wie `tools/gfx/run.sh` es fuer die
+// vier Fensterzahlen tut. Eine benannte Doppelung mit einer Zusage
+// darauf ist etwas anderes als eine vergessene.
+
+profile kernel
+
+import kstate
+import fb
+import mem
+import arch.x86_64.apic
+import errno
+
+export {
+    probe, ready, count, mode_at, mode_w, mode_h, mode_bpp, find_mode,
+    cand_count, cand_w, cand_h, cand_why,
+    vram, depths, refused, toobig, probed, map_limit,
+    edid_ok, edid_why, edid_native_w, edid_native_h, edid_at, edid_bytes,
+    vendor_at, model_at,
+    set_mode, current, revert, confirm, pending, deadline, remaining,
+    poll, switches, fails, reverts, confirms, CONFIRM_MS,
+    lut_addr, set_picture, brightness, contrast, gamma, build_lut,
+    selftest, selftest_max,
+    parse, mode, want,
+    M_DISP, M_BIG, M_BACK, M_BAD, M_BENCH, M_ROT, M_CONFIRM, M_EDID,
+    MAX_MODES,
+    E_OK, E_NOCARD, E_NOMODE, E_NOMEM, E_SETFAIL, E_MAPFAIL, E_DEPTH
+}
+
+// ------------------------------------------------------------ Zahlen
+
+const MAX_MODES: u64 = 48
+const LIST_OFF: u64 = 0x200 // im DISP-Bereich, je Modus acht Oktette
+// Je Kandidat ein Oktett: WARUM er nicht in der Liste steht. Ohne das
+// waere "17 von 22" eine Zahl ohne Inhalt -- und die Doku muesste raten,
+// welche fuenf es getroffen hat.
+//   0 aufgenommen · 1 Register abgelehnt · 2 zu gross fuer den
+//   Bildspeicher · 3 dieser Kernel kann es nicht abbilden
+const WHY_OFF: u64 = 0x400
+const LUT_OFF: u64 = 0x000 // im DLUT-Bereich, 3 x 256 Oktette
+const EDID_OFF: u64 = 0x400 // im DLUT-Bereich, 128 Oktette
+
+// Fuenfzehn Sekunden, so wie Windows es macht, und aus demselben Grund:
+// ein Modus, den der Monitor nicht darstellen kann, ist ohne diese
+// Rueckkehr ein toter Rechner. Wer bestaetigt, behaelt ihn; wer nichts
+// tut -- weil er nichts SIEHT --, bekommt den alten zurueck.
+const CONFIRM_MS: u64 = 15000
+
+const S_READY: u64 = 0x000
+const S_COUNT: u64 = 0x008
+const S_VRAM: u64 = 0x010
+const S_BUS: u64 = 0x018
+const S_DEV: u64 = 0x020
+const S_FUN: u64 = 0x028
+const S_LFB: u64 = 0x030
+const S_MMIO: u64 = 0x038
+const S_EDID: u64 = 0x040 // 1 = ein gueltiger Block liegt vor
+const S_EDIDWHY: u64 = 0x048 // warum nicht, siehe `edid_why`
+const S_NATW: u64 = 0x050
+const S_NATH: u64 = 0x058
+const S_CUR: u64 = 0x060 // Nummer des laufenden Modus + 1, 0 = unbekannt
+const S_PEND: u64 = 0x068
+const S_DEADLINE: u64 = 0x070
+const S_OLDW: u64 = 0x078
+const S_OLDH: u64 = 0x080
+const S_SWITCHES: u64 = 0x088
+const S_FAILS: u64 = 0x090
+const S_REVERTS: u64 = 0x098
+const S_CONFIRMS: u64 = 0x0A0
+const S_DEPTHS: u64 = 0x0A8 // Bitmaske: 1<<4, 1<<8, 1<<15, 1<<16, 1<<24, 1<<32
+const S_REFUSED: u64 = 0x0B0 // Kandidaten, die die Register abgelehnt haben
+const S_TOOBIG: u64 = 0x0B8 // Kandidaten, die nicht in den Speicher passen
+const S_PROBED: u64 = 0x0C0 // wie viele ueberhaupt gefragt wurden
+const S_BRIGHT: u64 = 0x0C8 // 0..200, 100 = unberuehrt
+const S_CONTRAST: u64 = 0x0D0 // 0..200
+const S_GAMMA: u64 = 0x0D8 // 30..300, 100 = 1,00
+const S_MAPLIMIT: u64 = 0x0E0
+const S_UNMAPPABLE: u64 = 0x0E8
+const S_MODEBITS: u64 = 0x0F0
+
+// Die Rueckgaben von `set_mode`. Nicht `errno`-Nummern, weil sie eine
+// Ebene tiefer liegen: `sys.fi` uebersetzt sie fuer Ring 3.
+const E_OK: u64 = 0
+const E_NOCARD: u64 = 1
+const E_NOMODE: u64 = 2
+const E_NOMEM: u64 = 3
+const E_SETFAIL: u64 = 4
+const E_MAPFAIL: u64 = 5
+const E_DEPTH: u64 = 6
+
+// --------------------------------------------------------- Bochs-VBE
+//
+// MUSS mit `kernel/fb.fi` uebereinstimmen; tools/display/run.sh haelt
+// beide Listen gegeneinander.
+const VBE_INDEX: u16 = 0x01CE
+const VBE_DATA: u16 = 0x01CF
+const VBE_ID: u64 = 0
+const VBE_XRES: u64 = 1
+const VBE_YRES: u64 = 2
+const VBE_BPP: u64 = 3
+const VBE_ENABLE: u64 = 4
+const VBE_BANK: u64 = 5
+const VBE_VWIDTH: u64 = 6
+const VBE_VHEIGHT: u64 = 7
+const VBE_XOFF: u64 = 8
+const VBE_YOFF: u64 = 9
+const VBE_VRAM64K: u64 = 10 // Index 0x0A -- den kannte Runde K7 nicht
+const VBE_DISABLED: u64 = 0
+const VBE_ENABLED: u64 = 0x01
+const VBE_LFB: u64 = 0x40
+const VBE_ID_LO: u64 = 0xB0C0
+const VBE_ID_HI: u64 = 0xB0C5
+
+const PCI_ADDR: u16 = 0xCF8
+const PCI_DATA: u16 = 0xCFC
+const CFG_VENDOR: u64 = 0x00
+const CFG_COMMAND: u64 = 0x04
+const CFG_CLASS: u64 = 0x08
+const CFG_HEADER: u64 = 0x0C
+const CFG_BAR0: u64 = 0x10
+const CFG_BAR2: u64 = 0x18
+const CMD_MEM: u64 = 0x2
+const CLASS_VGA: u64 = 0x03
+
+fn out16(port: u16, v: u16) {
+    asm("out dx, ax", in("dx") port, in("ax") v)
+}
+
+fn in16(port: u16) -> u64 {
+    return asm("in ax, dx\nmovzx eax, ax", out("rax"), in("dx") port)
+}
+
+fn out32(port: u16, v: u32) {
+    asm("out dx, eax", in("dx") port, in("eax") v)
+}
+
+fn in32(port: u16) -> u64 {
+    return asm("in eax, dx", out("rax"), in("dx") port)
+}
+
+fn vbe_write(index: u64, value: u64) {
+    out16(VBE_INDEX, index as u16)
+    out16(VBE_DATA, value as u16)
+}
+
+fn vbe_read(index: u64) -> u64 {
+    out16(VBE_INDEX, index as u16)
+    return in16(VBE_DATA)
+}
+
+fn vbe_present() -> bool {
+    let id: u64 = vbe_read(VBE_ID)
+    return id >= VBE_ID_LO && id <= VBE_ID_HI
+}
+
+fn cfg_addr(bus: u64, dev: u64, fun: u64, off: u64) -> u32 {
+    return (0x80000000 | (bus << 16) | (dev << 11) | (fun << 8)
+        | (off & 0xFC)) as u32
+}
+
+fn cfg32(bus: u64, dev: u64, fun: u64, off: u64) -> u64 {
+    out32(PCI_ADDR, cfg_addr(bus, dev, fun, off))
+    return in32(PCI_DATA)
+}
+
+fn cfg32_write(bus: u64, dev: u64, fun: u64, off: u64, v: u64) {
+    out32(PCI_ADDR, cfg_addr(bus, dev, fun, off))
+    out32(PCI_DATA, v as u32)
+}
+
+// ------------------------------------------------------ die Kandidaten
+//
+// EINE LISTE VON KANDIDATEN IST KEINE LISTE VON MODI, und der Unterschied
+// ist der ganze Sinn dieses Moduls. Was hier steht, sind die
+// Aufloesungen, nach denen GEFRAGT wird -- die ueblichen aus VESA, DMT
+// und den Bildschirmen, die es gibt. Was am Ende in der Liste steht, ist
+// das, was die Karte davon ANGENOMMEN hat und was in ihren Bildspeicher
+// und in die acht Fensterplaetze dieses Kernels passt. Ohne die Frage
+// waere auch diese Tabelle nur eine laengere Fassung der zwei Konstanten
+// aus Runde K7.
+//
+// Gepackt als Breite << 16 | Hoehe. Eine Funktion und kein Feld, weil
+// dieser Uebersetzer im Kernelprofil keine vorbelegten Felder auf
+// Modulebene kennt.
+fn cand_count() -> u64 {
+    return 22
+}
+
+fn cand(i: u64) -> u64 {
+    if i == 0 {
+        return (320 << 16) | 200
+    }
+    if i == 1 {
+        return (640 << 16) | 400
+    }
+    if i == 2 {
+        return (640 << 16) | 480
+    }
+    if i == 3 {
+        return (800 << 16) | 600
+    }
+    if i == 4 {
+        return (1024 << 16) | 768
+    }
+    if i == 5 {
+        return (1152 << 16) | 864
+    }
+    if i == 6 {
+        return (1280 << 16) | 720
+    }
+    if i == 7 {
+        return (1280 << 16) | 800
+    }
+    if i == 8 {
+        return (1280 << 16) | 1024
+    }
+    if i == 9 {
+        return (1360 << 16) | 768
+    }
+    if i == 10 {
+        return (1366 << 16) | 768
+    }
+    if i == 11 {
+        return (1440 << 16) | 900
+    }
+    if i == 12 {
+        return (1600 << 16) | 900
+    }
+    if i == 13 {
+        return (1600 << 16) | 1200
+    }
+    if i == 14 {
+        return (1680 << 16) | 1050
+    }
+    if i == 15 {
+        return (1920 << 16) | 1080
+    }
+    if i == 16 {
+        return (1920 << 16) | 1200
+    }
+    if i == 17 {
+        return (2048 << 16) | 1152
+    }
+    if i == 18 {
+        return (2560 << 16) | 1080
+    }
+    if i == 19 {
+        return (2560 << 16) | 1440
+    }
+    if i == 20 {
+        return (2560 << 16) | 1600
+    }
+    return (3840 << 16) | 2160
+}
+
+// ------------------------------------------------------------- Zugriff
+
+fn g(state: u64, off: u64) -> u64 {
+    return kstate.get(state, kstate.DISP_OFF + off)
+}
+
+fn s(state: u64, off: u64, v: u64) {
+    kstate.set(state, kstate.DISP_OFF + off, v)
+}
+
+fn ready(state: u64) -> bool {
+    return g(state, S_READY) != 0
+}
+
+fn count(state: u64) -> u64 {
+    return g(state, S_COUNT)
+}
+
+fn mode_at(state: u64, i: u64) -> u64 {
+    if i >= g(state, S_COUNT) {
+        return 0
+    }
+    return kstate.get(state, kstate.DISP_OFF + LIST_OFF + i * 8)
+}
+
+fn mode_w(state: u64, i: u64) -> u64 {
+    return (mode_at(state, i) >> 32) & 0xFFFF
+}
+
+fn mode_h(state: u64, i: u64) -> u64 {
+    return (mode_at(state, i) >> 16) & 0xFFFF
+}
+
+fn mode_bpp(state: u64, i: u64) -> u64 {
+    return mode_at(state, i) & 0xFFFF
+}
+
+fn find_mode(state: u64, w: u64, h: u64, bpp: u64) -> u64 {
+    var i: u64 = 0
+    while i < g(state, S_COUNT) {
+        if mode_w(state, i) == w && mode_h(state, i) == h {
+            if mode_bpp(state, i) == bpp {
+                return i
+            }
+        }
+        i = i + 1
+    }
+    return MAX_MODES
+}
+
+fn cand_w(i: u64) -> u64 {
+    return (cand(i) >> 16) & 0xFFFF
+}
+
+fn cand_h(i: u64) -> u64 {
+    return cand(i) & 0xFFFF
+}
+
+fn cand_why(state: u64, i: u64) -> u64 {
+    if i >= cand_count() {
+        return 0
+    }
+    return kstate.get8(state + kstate.DISP_OFF + WHY_OFF + i)
+}
+
+fn vram(state: u64) -> u64 {
+    return g(state, S_VRAM)
+}
+
+fn depths(state: u64) -> u64 {
+    return g(state, S_DEPTHS)
+}
+
+fn refused(state: u64) -> u64 {
+    return g(state, S_REFUSED)
+}
+
+fn toobig(state: u64) -> u64 {
+    return g(state, S_TOOBIG)
+}
+
+fn probed(state: u64) -> u64 {
+    return g(state, S_PROBED)
+}
+
+fn map_limit(state: u64) -> u64 {
+    return g(state, S_MAPLIMIT)
+}
+
+fn current(state: u64) -> u64 {
+    let c: u64 = g(state, S_CUR)
+    if c == 0 {
+        return MAX_MODES
+    }
+    return c - 1
+}
+
+fn switches(state: u64) -> u64 {
+    return g(state, S_SWITCHES)
+}
+
+fn fails(state: u64) -> u64 {
+    return g(state, S_FAILS)
+}
+
+fn reverts(state: u64) -> u64 {
+    return g(state, S_REVERTS)
+}
+
+fn confirms(state: u64) -> u64 {
+    return g(state, S_CONFIRMS)
+}
+
+// ------------------------------------------------------------- Erkunden
+
+fn find_card(state: u64) -> bool {
+    var dev: u64 = 0
+    while dev < 32 {
+        var fun: u64 = 0
+        var last: u64 = 0
+        while fun <= last {
+            let id: u64 = cfg32(0, dev, fun, CFG_VENDOR)
+            if (id & 0xFFFF) != 0xFFFF {
+                if fun == 0 {
+                    if (cfg32(0, dev, 0, CFG_HEADER) & 0x00800000) != 0 {
+                        last = 7
+                    }
+                }
+                let cls: u64 = (cfg32(0, dev, fun, CFG_CLASS) >> 24) & 0xFF
+                if cls == CLASS_VGA {
+                    let cmd: u64 = cfg32(0, dev, fun, CFG_COMMAND)
+                    if (cmd & CMD_MEM) == 0 {
+                        cfg32_write(0, dev, fun, CFG_COMMAND, cmd | CMD_MEM)
+                    }
+                    let b0: u64 = cfg32(0, dev, fun, CFG_BAR0)
+                    let b2: u64 = cfg32(0, dev, fun, CFG_BAR2)
+                    if (b0 & 1) == 0 && (b0 & 0xFFFFFFF0) != 0 {
+                        s(state, S_BUS, 0)
+                        s(state, S_DEV, dev)
+                        s(state, S_FUN, fun)
+                        s(state, S_LFB, b0 & 0xFFFFFFF0)
+                        if (b2 & 1) == 0 {
+                            s(state, S_MMIO, b2 & 0xFFFFFFF0)
+                        } else {
+                            s(state, S_MMIO, 0)
+                        }
+                        return true
+                    }
+                }
+            }
+            fun = fun + 1
+        }
+        dev = dev + 1
+    }
+    return false
+}
+
+// Nimmt die Karte diese Zahl in dieses Register an? Geschrieben wird ein
+// bekannter Wert, dann der zu pruefende, dann zurueckgelesen. Steht der
+// bekannte Wert noch da, hat die Karte abgelehnt.
+//
+// DER MODUS WIRD DABEI NICHT GESETZT. Solange VBE_ENABLE null ist, sind
+// XRES, YRES und BPP nichts als drei Zahlen in drei Registern; erst das
+// Anschalten macht daraus ein Bild. Genau deshalb ist diese Erkundung
+// harmlos und laesst sich zweiundzwanzigmal hintereinander machen, ohne
+// dass der Bildschirm auch nur flackert.
+fn accepts(index: u64, anker: u64, wert: u64) -> bool {
+    vbe_write(index, anker)
+    if vbe_read(index) != anker {
+        return false
+    }
+    vbe_write(index, wert)
+    return vbe_read(index) == wert
+}
+
+// Die Farbtiefen, die die Karte annimmt, als Bitmaske ueber der Tiefe
+// selbst (Bit 4, 8, 15, 16, 24, 32).
+fn probe_depths() -> u64 {
+    var m: u64 = 0
+    if accepts(VBE_BPP, 32, 4) {
+        m = m | (1 << 4)
+    }
+    if accepts(VBE_BPP, 32, 8) {
+        m = m | (1 << 8)
+    }
+    if accepts(VBE_BPP, 32, 15) {
+        m = m | (1 << 15)
+    }
+    if accepts(VBE_BPP, 32, 16) {
+        m = m | (1 << 16)
+    }
+    if accepts(VBE_BPP, 32, 24) {
+        m = m | (1 << 24)
+    }
+    if accepts(VBE_BPP, 8, 32) {
+        m = m | (1 << 32)
+    }
+    return m
+}
+
+// Die Karte fragen, welche Modi es gibt, und die Liste bauen.
+// Gibt die Zahl der gefundenen Modi zurueck.
+fn probe(state: u64) -> u64 {
+    s(state, S_READY, 0)
+    s(state, S_COUNT, 0)
+    s(state, S_REFUSED, 0)
+    s(state, S_TOOBIG, 0)
+    s(state, S_UNMAPPABLE, 0)
+    s(state, S_PROBED, 0)
+    s(state, S_BRIGHT, 100)
+    s(state, S_CONTRAST, 100)
+    s(state, S_GAMMA, 100)
+    if !find_card(state) {
+        return 0
+    }
+    if !vbe_present() {
+        return 0
+    }
+
+    // WAS GERADE EINGESTELLT IST, WIRD GERETTET -- UND ZWAR MEHR, ALS
+    // DIE ERSTE FASSUNG DIESER RUNDE GERETTET HAT.
+    //
+    // Der Fehler, den das gekostet hat, ist der lehrreichste dieser
+    // Runde. Die Erkundung schreibt zweiundzwanzigmal andere Zahlen in
+    // XRES und YRES. Solange VBE_ENABLE dabei AN bleibt, ist das kein
+    // stiller Registerzugriff: QEMU rechnet aus XRES sofort die
+    // Zeilenlaenge des laufenden Bildes neu (VBE_VIRT_WIDTH), und die
+    // bleibt danach stehen. XRES und YRES zurueckzuschreiben genuegt
+    // NICHT -- die Karte gab weiter eine andere Zeilenlaenge aus, als
+    // der Kernel annahm, und das Bildschirmfoto zeigte statt vier
+    // Farbfeldern einen Streifenteppich, der sich alle paar Zeilen um
+    // ein Stueck verschob. Der Kernel hielt sich fuer richtig: seine
+    // Geometrie stimmte auf jede Zahl.
+    //
+    // Also wird der alte Modus danach ueber DENSELBEN Weg wieder
+    // eingestellt, den `set_mode` geht -- aus, Zahlen, an --, und die
+    // Zeilenlaenge wird ZURUECKGELESEN und mit der verglichen, die
+    // `fb.fi` fuehrt. Weichen sie ab, wird neu abgebildet.
+    let a_x: u64 = vbe_read(VBE_XRES)
+    let a_y: u64 = vbe_read(VBE_YRES)
+    let a_b: u64 = vbe_read(VBE_BPP)
+    let a_e: u64 = vbe_read(VBE_ENABLE)
+
+    let k64: u64 = vbe_read(VBE_VRAM64K)
+    var vm: u64 = k64 * 65536
+    s(state, S_VRAM, vm)
+    s(state, S_DEPTHS, probe_depths())
+
+    // DER EDID-BLOCK ZUERST, und das ist eine gemessene Reihenfolge und
+    // keine Vorliebe: `edid_probe` bildet den Speicherbereich der Karte
+    // ab und braucht dafuer einen Fensterplatz. Die erste Fassung dieser
+    // Runde rechnete die Schranke davor aus und nahm sich den Platz
+    // danach -- und meldete 2048x1152 als moeglich, wo `set_mode` dann
+    // mit E_MAPFAIL scheiterte. Eine Liste, die etwas anbietet, das
+    // nicht geht, ist schlimmer als eine kuerzere Liste.
+    edid_probe(state)
+
+    // Die dritte Schranke: was DIESER KERNEL abbilden kann. Nicht die
+    // Zahl der freien Plaetze, sondern der laengste ZUSAMMENHAENGENDE
+    // Bereich -- acht freie Plaetze, von denen einer in der Mitte fehlt,
+    // tragen keinen Puffer von 10 MiB. Davon abgezogen, was der lineare
+    // Puffer innerhalb seiner ersten Kachel schon wegnimmt.
+    let lauf: u64 = fb.longest_run(state)
+    let versatz: u64 = g(state, S_LFB) & (fb.huge_size() - 1)
+    var limit: u64 = 0
+    if lauf * fb.huge_size() > versatz {
+        limit = lauf * fb.huge_size() - versatz
+    }
+    s(state, S_MAPLIMIT, limit)
+
+    var n: u64 = 0
+    var i: u64 = 0
+    while i < cand_count() && n < MAX_MODES {
+        let c: u64 = cand(i)
+        let w: u64 = (c >> 16) & 0xFFFF
+        let h: u64 = c & 0xFFFF
+        s(state, S_PROBED, g(state, S_PROBED) + 1)
+        var ok: bool = true
+        // 1. Nimmt die Karte die beiden Zahlen ueberhaupt an?
+        if !accepts(VBE_XRES, 640, w) {
+            ok = false
+        }
+        if ok {
+            if !accepts(VBE_YRES, 480, h) {
+                ok = false
+            }
+        }
+        var grund: u64 = 0
+        if !ok {
+            s(state, S_REFUSED, g(state, S_REFUSED) + 1)
+            grund = 1
+        } else {
+            // 2. Passt das Bild in ihren Speicher?
+            let n_bytes: u64 = w * h * 4
+            if vm != 0 && n_bytes > vm {
+                s(state, S_TOOBIG, g(state, S_TOOBIG) + 1)
+                grund = 2
+                ok = false
+            }
+        }
+        if ok {
+            // 3. Kann dieser Kernel es abbilden?
+            if limit == 0 || w * h * 4 > limit {
+                s(state, S_UNMAPPABLE, g(state, S_UNMAPPABLE) + 1)
+                grund = 3
+                ok = false
+            }
+        }
+        if ok {
+            kstate.set(state, kstate.DISP_OFF + LIST_OFF + n * 8,
+                (w << 32) | (h << 16) | 32)
+            n = n + 1
+        }
+        kstate.set8(state + kstate.DISP_OFF + WHY_OFF + i, grund as u8)
+        i = i + 1
+    }
+    s(state, S_COUNT, n)
+
+    // Und alles wieder so hinstellen, wie es war -- siehe den langen
+    // Absatz oben. Vier Registerschreibvorgaenge genuegen dafuer nicht.
+    if (a_e & VBE_ENABLED) != 0 && a_x != 0 && a_y != 0 {
+        let neu_pt: u64 = vbe_set(a_x, a_y, a_b)
+        if neu_pt != 0 {
+            if neu_pt != fb.panel_pitch(state) || a_x != fb.panel_w(state)
+                || a_y != fb.panel_h(state) {
+                fb.remap(state, g(state, S_LFB), a_x, a_y, neu_pt,
+                    fb.uncached(state))
+            }
+        }
+        fb.dirty_all(state)
+        fb.flush(state)
+    } else {
+        vbe_write(VBE_XRES, a_x)
+        vbe_write(VBE_YRES, a_y)
+        vbe_write(VBE_BPP, a_b)
+        vbe_write(VBE_ENABLE, a_e)
+    }
+
+    // Welcher der gefundenen Modi laeuft gerade?
+    let cur: u64 = find_mode(state, fb.panel_w(state), fb.panel_h(state), 32)
+    if cur < MAX_MODES {
+        s(state, S_CUR, cur + 1)
+    } else {
+        s(state, S_CUR, 0)
+    }
+    s(state, S_READY, 1)
+    build_lut(state)
+    return n
+}
+
+// ---------------------------------------------------------------- EDID
+//
+// WAS HIER GEHT UND WAS NICHT, UND ZWAR OHNE BESCHOENIGUNG.
+//
+// Der ehrliche Weg zu den Angaben eines Monitors ist DDC/I2C: zwei
+// Leitungen im Stecker, an denen der Monitor einen kleinen Speicher
+// haengen hat, und der Rechner klappert ihn Bit fuer Bit ab. Welche
+// Register diese beiden Leitungen wackeln lassen, weiss nur der
+// GPU-Treiber -- bei Intel liegt es dokumentiert in den GMBUS-Registern,
+// bei NVIDIA und AMD steht es in keinem oeffentlichen Papier. EINEN
+// ALLGEMEINEN DDC-WEG GIBT ES NICHT, und dieses Modul tut auch nicht so.
+//
+// Was es STATTDESSEN tut: QEMU legt den EDID-Block, den es erzeugt,
+// als Speicherbereich an den Anfang des dritten Adressbereichs der Karte
+// (BAR2, `-device VGA,edid=on`, und `on` ist die Vorgabe). Das ist keine
+// DDC-Uebertragung, sondern ein fertiger Block im Geraetespeicher, und
+// genau so steht es hier: der Kernel LIEST einen EDID-Block, er
+// ERFRAGT ihn nicht ueber I2C. Auf einer Maschine ohne diesen Bereich
+// meldet `edid_why` das, und die Modusliste aus `probe` traegt den Rest
+// allein -- sie ist ohnehin die belastbarere der beiden Quellen, weil
+// sie sagt, was die KARTE kann, und nicht, was der MONITOR moechte.
+//
+// edid_why: 0 gelesen · 1 kein Speicherbereich · 2 nicht abbildbar
+//           3 falsche Kennung · 4 Pruefsumme falsch
+fn edid_probe(state: u64) {
+    s(state, S_EDID, 0)
+    s(state, S_NATW, 0)
+    s(state, S_NATH, 0)
+    let mmio: u64 = g(state, S_MMIO)
+    if mmio == 0 {
+        s(state, S_EDIDWHY, 1)
+        return
+    }
+    let v: u64 = apic.map_device(state, mmio)
+    if v == 0 {
+        s(state, S_EDIDWHY, 2)
+        return
+    }
+    let dst: u64 = state + kstate.DLUT_OFF + EDID_OFF
+    // Nach dem Lesen wird der Platz sofort wieder freigegeben; warum,
+    // steht bei `fb.unmap_slot`.
+    // Der EDID-Bereich ist Geraetespeicher, kein Arbeitsspeicher: er
+    // wird in Vierfachoktetten gelesen und danach in Oktette zerlegt.
+    var i: u64 = 0
+    while i < 128 {
+        let w32: u64 = __mmio_read32((v +% i) as *mut u32) as u64
+        kstate.set8(dst + i, (w32 & 0xFF) as u8)
+        kstate.set8(dst + i + 1, ((w32 >> 8) & 0xFF) as u8)
+        kstate.set8(dst + i + 2, ((w32 >> 16) & 0xFF) as u8)
+        kstate.set8(dst + i + 3, ((w32 >> 24) & 0xFF) as u8)
+        i = i + 4
+    }
+    // 00 FF FF FF FF FF FF 00 -- die Kennung jedes EDID-Blocks.
+    if kstate.get8(dst) != 0 || kstate.get8(dst + 7) != 0 {
+        s(state, S_EDIDWHY, 3)
+        fb.unmap_slot(state, v)
+        return
+    }
+    i = 1
+    while i < 7 {
+        if kstate.get8(dst + i) != 0xFF {
+            s(state, S_EDIDWHY, 3)
+            fb.unmap_slot(state, v)
+            return
+        }
+        i = i + 1
+    }
+    var sum: u64 = 0
+    i = 0
+    while i < 128 {
+        sum = (sum + kstate.get8(dst + i)) & 0xFF
+        i = i + 1
+    }
+    if sum != 0 {
+        s(state, S_EDIDWHY, 4)
+        fb.unmap_slot(state, v)
+        return
+    }
+    fb.unmap_slot(state, v)
+    s(state, S_EDIDWHY, 0)
+    s(state, S_EDID, 1)
+    // Der erste ausfuehrliche Zeitlagensatz ab Oktett 54 traegt die
+    // native Aufloesung: acht Bit in einem Oktett, die oberen vier in
+    // einem geteilten.
+    let hw: u64 = kstate.get8(dst + 56) | ((kstate.get8(dst + 58) >> 4) << 8)
+    let vh: u64 = kstate.get8(dst + 59) | ((kstate.get8(dst + 61) >> 4) << 8)
+    s(state, S_NATW, hw)
+    s(state, S_NATH, vh)
+}
+
+fn edid_ok(state: u64) -> bool {
+    return g(state, S_EDID) != 0
+}
+
+fn edid_why(state: u64) -> u64 {
+    return g(state, S_EDIDWHY)
+}
+
+fn edid_native_w(state: u64) -> u64 {
+    return g(state, S_NATW)
+}
+
+fn edid_native_h(state: u64) -> u64 {
+    return g(state, S_NATH)
+}
+
+fn edid_bytes() -> u64 {
+    return 128
+}
+
+fn edid_at(state: u64, i: u64) -> u64 {
+    if i >= 128 {
+        return 0
+    }
+    return kstate.get8(state + kstate.DLUT_OFF + EDID_OFF + i)
+}
+
+// Der Herstellername steht als drei Buchstaben zu je fuenf Bit in zwei
+// Oktetten, gross-erst. 1 = 'A'. Gibt das Zeichen `i` (0..2) zurueck.
+fn vendor_at(state: u64, i: u64) -> u64 {
+    if !edid_ok(state) || i >= 3 {
+        return 0
+    }
+    let dst: u64 = state + kstate.DLUT_OFF + EDID_OFF
+    let w: u64 = (kstate.get8(dst + 8) << 8) | kstate.get8(dst + 9)
+    let sh: u64 = 10 - i * 5
+    let c: u64 = (w >> sh) & 0x1F
+    if c == 0 || c > 26 {
+        return 63 // '?'
+    }
+    return 64 + c
+}
+
+// Der Modellname steht in einem der vier Saetze ab Oktett 54, erkennbar
+// an der Kennung 0x000000FC. Er ist bis zu dreizehn Zeichen lang und
+// endet mit 0x0A, wenn er kuerzer ist.
+fn model_at(state: u64, i: u64) -> u64 {
+    if !edid_ok(state) || i >= 13 {
+        return 0
+    }
+    let dst: u64 = state + kstate.DLUT_OFF + EDID_OFF
+    var d: u64 = 0
+    while d < 4 {
+        let p: u64 = dst + 54 + d * 18
+        if kstate.get8(p) == 0 && kstate.get8(p + 1) == 0 {
+            if kstate.get8(p + 3) == 0xFC {
+                let c: u64 = kstate.get8(p + 5 + i)
+                if c == 0x0A {
+                    return 0
+                }
+                return c
+            }
+        }
+        d = d + 1
+    }
+    return 0
+}
+
+// -------------------------------------------------------- Moduswechsel
+//
+// DER HARTE TEIL IST NICHT DAS SETZEN DER REGISTER. Der harte Teil ist
+// alles danach: der Rahmenpuffer wird groesser und braucht mehr
+// Fensterplaetze, der Zweitpuffer passt nicht mehr, und der
+// Fensterserver haelt seine Fenster an Stellen, die es nicht mehr gibt.
+//
+// DIE REIHENFOLGE IST DIE GANZE ZUSAGE. Sie ist so gewaehlt, dass JEDER
+// Fehlschlag auf einen Zustand faellt, den es SCHON GIBT -- nicht auf
+// einen, der erst wiederhergestellt werden muesste:
+//
+//   1. Pruefen, ohne irgendetwas anzufassen.
+//   2. Den neuen Zweitpuffer holen. Der alte bleibt liegen, bis der
+//      Wechsel steht -- ein freigegebener Puffer, in den der
+//      Fensterserver noch zeichnet, waere fremder Speicher.
+//   3. Den Modus setzen. Geht das schief, ist noch NICHTS abgebildet
+//      worden: alter Modus zurueck, neuer Puffer wieder her, fertig.
+//   4. Neu abbilden. Geht DAS schief, ist der alte Platz gerade frei
+//      geworden und der alte Modus passt garantiert wieder hinein.
+//   5. Erst jetzt den neuen Puffer einhaengen und den alten freigeben.
+//
+// Ein schwarzer Bildschirm bleibt an keiner dieser Stellen zurueck.
+fn set_mode(state: u64, w: u64, h: u64, bpp: u64) -> u64 {
+    if !ready(state) || !fb.ready(state) {
+        return E_NOCARD
+    }
+    // DIESER KERNEL ZEICHNET IN 32 BIT UND IN NICHTS ANDEREM. `fb.pixel`
+    // schreibt ein Vierfachoktett, `fb.hline` legt zwei Bildpunkte in
+    // ein Achtoktettwort, der Zweitpuffer rechnet mit Breite mal vier.
+    // Eine Karte, die 8 oder 16 Bit kann, ist kein Grund, hier eine Luege
+    // stehen zu lassen: die Tiefen werden GEMELDET (`depths`), und der
+    // Wechsel dorthin wird ABGELEHNT. Was fehlt, damit er ginge, steht
+    // in docs/DISPLAY.md.
+    if bpp != 32 {
+        s(state, S_FAILS, g(state, S_FAILS) + 1)
+        return E_DEPTH
+    }
+    let idx: u64 = find_mode(state, w, h, 32)
+    if idx >= MAX_MODES {
+        s(state, S_FAILS, g(state, S_FAILS) + 1)
+        return E_NOMODE
+    }
+    if w == fb.panel_w(state) && h == fb.panel_h(state) {
+        s(state, S_CUR, idx + 1)
+        return E_OK
+    }
+
+    let alt_w: u64 = fb.panel_w(state)
+    let alt_h: u64 = fb.panel_h(state)
+    let alt_pt: u64 = fb.panel_pitch(state)
+    let alt_p: u64 = fb.phys(state)
+    let alt_back: u64 = fb.back(state)
+    let alt_bytes: u64 = fb.back_bytes(state)
+    let alt_rot: u64 = fb.rotation(state)
+    let uc: bool = fb.uncached(state)
+
+    // 2. Der neue Zweitpuffer. Acht Rahmen mehr als gerechnet, aus
+    //    demselben Grund wie in `kmain.graphics`: eine Karte darf eine
+    //    laengere Zeile liefern als Breite mal vier.
+    let noetig: u64 = w * h * 4
+    var neu_back: u64 = alt_back
+    var neu_bytes: u64 = alt_bytes
+    var geholt: u64 = 0
+    var geholt_n: u64 = 0
+    if alt_back == 0 || alt_bytes < noetig {
+        let rahmen: u64 = (noetig + mem.FRAME_SIZE - 1) / mem.FRAME_SIZE + 8
+        geholt = mem.frame_run(state, rahmen)
+        if geholt == 0 {
+            s(state, S_FAILS, g(state, S_FAILS) + 1)
+            return E_NOMEM
+        }
+        geholt_n = rahmen
+        neu_back = geholt
+        neu_bytes = rahmen * mem.FRAME_SIZE
+    }
+
+    // Die Drehung faellt fuer den Wechsel weg und kommt danach wieder --
+    // sonst rechnete `relayout` mitten im Wechsel mit Massen, die zu
+    // keinem der beiden Modi gehoeren.
+    fb.set_rotation(state, 0)
+    fb.set_logical(state, 0, 0)
+
+    // 3. Den Modus setzen.
+    let pt: u64 = vbe_set(w, h, 32)
+    if pt == 0 {
+        vbe_set(alt_w, alt_h, 32)
+        if geholt != 0 {
+            mem.frame_free_run(state, geholt, geholt_n)
+        }
+        fb.set_rotation(state, alt_rot)
+        fb.dirty_all(state)
+        fb.flush(state)
+        s(state, S_FAILS, g(state, S_FAILS) + 1)
+        return E_SETFAIL
+    }
+
+    // 4. Neu abbilden. Die Adresse des linearen Puffers aendert sich
+    //    nicht -- sie steht in BAR0 und BAR0 ist ein Adressbereich, kein
+    //    Modus. Was sich aendert, ist, WIE VIELE Kacheln er beruehrt.
+    if !fb.remap(state, g(state, S_LFB), w, h, pt, uc) {
+        vbe_set(alt_w, alt_h, 32)
+        fb.remap(state, alt_p, alt_w, alt_h, alt_pt, uc)
+        if geholt != 0 {
+            mem.frame_free_run(state, geholt, geholt_n)
+        }
+        fb.set_rotation(state, alt_rot)
+        fb.dirty_all(state)
+        fb.flush(state)
+        s(state, S_FAILS, g(state, S_FAILS) + 1)
+        return E_MAPFAIL
+    }
+
+    // 5. Der Puffer, und erst danach der alte weg.
+    fb.set_backbuf(state, neu_back, neu_bytes)
+    if geholt != 0 && alt_back != 0 {
+        let alt_n: u64 = alt_bytes / mem.FRAME_SIZE
+        mem.frame_free_run(state, alt_back, alt_n)
+    }
+    fb.set_rotation(state, alt_rot)
+    fb.clear(state, 0)
+    fb.dirty_all(state)
+    fb.flush(state)
+    s(state, S_CUR, idx + 1)
+    s(state, S_SWITCHES, g(state, S_SWITCHES) + 1)
+
+    // Und die Frist. Wer nicht bestaetigt, bekommt den alten Modus
+    // zurueck -- weil er ihn wahrscheinlich gar nicht sieht.
+    s(state, S_OLDW, alt_w)
+    s(state, S_OLDH, alt_h)
+    s(state, S_PEND, 1)
+    s(state, S_DEADLINE, now_ms(state) + CONFIRM_MS)
+    return E_OK
+}
+
+// Denselben Weg wie oben, nur mit den Zahlen des ALTEN Modus, und ohne
+// eine neue Frist zu stellen.
+fn revert(state: u64) -> u64 {
+    if g(state, S_PEND) == 0 {
+        return E_NOMODE
+    }
+    let w: u64 = g(state, S_OLDW)
+    let h: u64 = g(state, S_OLDH)
+    s(state, S_PEND, 0)
+    let r: u64 = set_mode(state, w, h, 32)
+    s(state, S_PEND, 0)
+    s(state, S_REVERTS, g(state, S_REVERTS) + 1)
+    return r
+}
+
+fn confirm(state: u64) {
+    if g(state, S_PEND) != 0 {
+        s(state, S_PEND, 0)
+        s(state, S_CONFIRMS, g(state, S_CONFIRMS) + 1)
+    }
+}
+
+fn pending(state: u64) -> bool {
+    return g(state, S_PEND) != 0
+}
+
+fn deadline(state: u64) -> u64 {
+    return g(state, S_DEADLINE)
+}
+
+// Wie viele Millisekunden noch bleiben. Fuer die Anzeige "Zurueck in 15
+// Sekunden" -- und sie zaehlt wirklich herunter.
+fn remaining(state: u64) -> u64 {
+    if g(state, S_PEND) == 0 {
+        return 0
+    }
+    let jetzt: u64 = now_ms(state)
+    let bis: u64 = g(state, S_DEADLINE)
+    if jetzt >= bis {
+        return 0
+    }
+    return bis - jetzt
+}
+
+// DIESE FUNKTION GEHOERT NICHT IN DEN UNTERBRECHUNGSPFAD, und das ist
+// die Lehre aus Runde K18: dort hat das Umrechnen des Bildschirms im
+// Zeitgeber den Kernstapel bis auf 112 Oktette gefuellt. `poll` bildet
+// Seitentafeln um und schreibt ein ganzes Bild; sie wird aus dem
+// Systemaufruf gerufen, also in Aufgabenkontext, auf dem Stapel der
+// Aufgabe.
+fn poll(state: u64) -> bool {
+    if g(state, S_PEND) == 0 {
+        return false
+    }
+    if now_ms(state) < g(state, S_DEADLINE) {
+        return false
+    }
+    revert(state)
+    return true
+}
+
+fn now_ms(state: u64) -> u64 {
+    let hz: u64 = apic.tsc_hz(state)
+    if hz == 0 {
+        return 0
+    }
+    return apic.tsc() / (hz / 1000)
+}
+
+// Breite x Hoehe bei 32 Bit einstellen und die Zeilenlaenge
+// zurueckgeben (0 = ging nicht). Dieselbe Reihenfolge wie `fb.vbe_set`:
+// erst aus, dann die Zahlen, dann an -- und dann zurueckLESEN, was die
+// Karte wirklich genommen hat.
+fn vbe_set(w: u64, h: u64, bpp: u64) -> u64 {
+    vbe_write(VBE_ENABLE, VBE_DISABLED)
+    vbe_write(VBE_XRES, w)
+    vbe_write(VBE_YRES, h)
+    vbe_write(VBE_BPP, bpp)
+    vbe_write(VBE_BANK, 0)
+    vbe_write(VBE_XOFF, 0)
+    vbe_write(VBE_YOFF, 0)
+    vbe_write(VBE_ENABLE, VBE_ENABLED | VBE_LFB)
+    if vbe_read(VBE_XRES) != w || vbe_read(VBE_YRES) != h {
+        return 0
+    }
+    if vbe_read(VBE_BPP) != bpp {
+        return 0
+    }
+    if (vbe_read(VBE_ENABLE) & VBE_ENABLED) == 0 {
+        return 0
+    }
+    var vw: u64 = vbe_read(VBE_VWIDTH)
+    if vw < w {
+        vw = w
+    }
+    return vw * (bpp / 8)
+}
+
+// ---------------------------------------------- Helligkeit und Gamma
+//
+// DAS IST DER TEIL DES BEDIENFELDS EINER GRAFIKKARTE, DER OHNE
+// GRAFIKTREIBER WIRKLICH GEHT. Helligkeit, Kontrast und Gamma sind drei
+// Rechnungen auf EINEM Kanalwert, und drei Rechnungen auf einem Wert
+// zwischen 0 und 255 sind eine Tabelle mit 256 Eintraegen. Ob sie in der
+// Ausgabestufe der Karte steht (dann kostet sie nichts) oder in
+// `fb.present` (dann kostet sie, was in docs/DISPLAY.md steht), ist eine
+// Frage des Treibers, nicht der Rechnung. Der Bochs-Aufsatz hat keine
+// Farbtafel fuer 32-Bit-Modi -- also steht sie hier.
+//
+// Die Reihenfolge ist die uebliche und sie ist nicht beliebig:
+//   1. Kontrast um die Mitte 128 herum spreizen
+//   2. Helligkeit addieren
+//   3. Gamma anwenden
+// Wer Gamma vor den Kontrast setzt, bekommt bei kleinen Werten Stufen.
+fn set_picture(state: u64, bright: u64, contrast: u64, gam: u64) -> bool {
+    if bright > 200 || contrast > 200 {
+        return false
+    }
+    if gam < 30 || gam > 300 {
+        return false
+    }
+    s(state, S_BRIGHT, bright)
+    s(state, S_CONTRAST, contrast)
+    s(state, S_GAMMA, gam)
+    build_lut(state)
+    return true
+}
+
+fn brightness(state: u64) -> u64 {
+    return g(state, S_BRIGHT)
+}
+
+fn contrast(state: u64) -> u64 {
+    return g(state, S_CONTRAST)
+}
+
+fn gamma(state: u64) -> u64 {
+    return g(state, S_GAMMA)
+}
+
+fn lut_addr(state: u64) -> u64 {
+    return state + kstate.DLUT_OFF + LUT_OFF
+}
+
+// x hoch (100/gam), in ganzen Zahlen, ohne Fliesskomma -- der Kernel hat
+// keins und soll auch keins bekommen. Gerechnet wird ueber acht Schritte
+// eines Newton-Verfahrens auf y^gam = x, alles in Festkomma mit
+// 16 Nachkommabits. Der Fehler daraus ist kleiner als ein Schritt der
+// 256er-Skala; genau das prueft `selftest` nach.
+fn ipow_frac(x: u64, gam: u64) -> u64 {
+    // Sonderfaelle zuerst -- sie sind haeufig und sparen die Schleife.
+    if x == 0 {
+        return 0
+    }
+    if gam == 100 {
+        return x
+    }
+    if x >= 255 {
+        return 255
+    }
+    // Der Logarithmus waere der kurze Weg; ohne Fliesskomma ist die
+    // Suche der ehrlichere. y wird zwischen 0 und 255 eingeschachtelt,
+    // sechzehn Halbierungen genuegen fuer eine 256er-Skala.
+    var lo: u64 = 0
+    var hi: u64 = 255
+    var i: u64 = 0
+    while i < 16 {
+        let mid: u64 = (lo + hi + 1) / 2
+        // (mid/255)^(gam/100) * 255 <=> x/255
+        // also: mid^gam <=> x^gam ... in Festkomma ueber pow_q16
+        if pow_q16(mid, gam) <= pow_q16_of_x(x) {
+            lo = mid
+        } else {
+            hi = mid - 1
+        }
+        if lo >= hi {
+            i = 16
+        } else {
+            i = i + 1
+        }
+    }
+    return lo
+}
+
+// (v/255)^(gam/100) in Festkomma mit 16 Nachkommabits, ueber wiederholtes
+// Quadrieren und Wurzelziehen: gam/100 wird binaer zerlegt.
+fn pow_q16(v: u64, gam: u64) -> u64 {
+    var basis: u64 = (v << 16) / 255
+    if basis == 0 {
+        return 0
+    }
+    var e: u64 = gam
+    var erg: u64 = 65536
+    // Ganzzahliger Teil.
+    var ganz: u64 = e / 100
+    while ganz > 0 {
+        erg = (erg * basis) >> 16
+        ganz = ganz - 1
+    }
+    // Nachkommateil, ueber Wurzeln: 0,5 0,25 0,125 ...
+    var rest: u64 = e - (e / 100) * 100
+    var w: u64 = basis
+    var teil: u64 = 50
+    var k: u64 = 0
+    while k < 7 {
+        w = isqrt_q16(w)
+        if rest >= teil {
+            erg = (erg * w) >> 16
+            rest = rest - teil
+        }
+        teil = teil / 2
+        k = k + 1
+    }
+    return erg
+}
+
+fn pow_q16_of_x(x: u64) -> u64 {
+    return (x << 16) / 255
+}
+
+// Wurzel einer Festkommazahl mit 16 Nachkommabits.
+fn isqrt_q16(v: u64) -> u64 {
+    if v == 0 {
+        return 0
+    }
+    var r: u64 = v
+    var i: u64 = 0
+    while i < 24 {
+        let n: u64 = (r + (v << 16) / r) / 2
+        if n == r {
+            i = 24
+        } else {
+            r = n
+            i = i + 1
+        }
+    }
+    return r
+}
+
+fn clamp255(v: u64) -> u64 {
+    if v > 255 {
+        return 255
+    }
+    return v
+}
+
+// Die Tabelle bauen: 256 Eintraege, dreimal derselbe Wert, weil
+// Helligkeit, Kontrast und Gamma alle drei Kanaele gleich behandeln.
+// Drei getrennte Kanaele stehen trotzdem da -- eine Farbstichkorrektur
+// waere genau die Stelle, an der sie auseinanderlaufen, und dann muesste
+// nichts umgebaut werden.
+fn build_lut(state: u64) {
+    let tab: u64 = lut_addr(state)
+    let br: u64 = g(state, S_BRIGHT)
+    let ct: u64 = g(state, S_CONTRAST)
+    let gm: u64 = g(state, S_GAMMA)
+    var i: u64 = 0
+    while i < 256 {
+        // 1. Kontrast um 128 herum.
+        var v: u64 = 0
+        if i >= 128 {
+            v = 128 + (i - 128) * ct / 100
+        } else {
+            let d: u64 = (128 - i) * ct / 100
+            if d < 128 {
+                v = 128 - d
+            }
+        }
+        v = clamp255(v)
+        // 2. Helligkeit. 100 = unberuehrt, 0 = schwarz, 200 = doppelt.
+        v = clamp255(v * br / 100)
+        // 3. Gamma.
+        let e: u64 = clamp255(ipow_frac(v, gm))
+        kstate.set8(tab + i, e as u8)
+        kstate.set8(tab + 256 + i, e as u8)
+        kstate.set8(tab + 512 + i, e as u8)
+        i = i + 1
+    }
+}
+
+// ---------------------------------------------------------- die Zusagen
+
+fn selftest(state: u64) -> u64 {
+    if !ready(state) {
+        return 0
+    }
+    var n: u64 = 0
+    // 1. Es gibt ueberhaupt eine Liste, und sie ist kuerzer als die
+    //    Kandidatenliste -- sonst waere nichts geprueft worden.
+    if count(state) > 0 && count(state) <= cand_count() {
+        n = n + 1
+    }
+    // 2. Die Karte hat einen Bildspeicher gemeldet, und er ist gross
+    //    genug fuer den Modus, der gerade laeuft.
+    if vram(state) >= fb.panel_w(state) * fb.panel_h(state) * 4 {
+        n = n + 1
+    }
+    // 3. Jeder Modus in der Liste passt in den Bildspeicher UND in die
+    //    Fensterplaetze. Das ist die Zusage ueber die Liste selbst.
+    var i: u64 = 0
+    var gut: bool = true
+    while i < count(state) {
+        let w: u64 = mode_w(state, i)
+        let h: u64 = mode_h(state, i)
+        if w == 0 || h == 0 {
+            gut = false
+        }
+        if w * h * 4 > vram(state) {
+            gut = false
+        }
+        if w * h * 4 > map_limit(state) {
+            gut = false
+        }
+        i = i + 1
+    }
+    if gut {
+        n = n + 1
+    }
+    // 4. Die Liste ist aufsteigend -- und zwar LEXIKOGRAFISCH nach
+    //    Breite, dann Hoehe, nicht nach Flaeche. Das ist kein
+    //    Schoenheitsfehler, sondern eine gemessene Berichtigung: die
+    //    erste Fassung dieser Zusage rechnete mit der Flaeche und fiel
+    //    beim ersten Lauf um, weil 1280x1024 mehr Bildpunkte hat als
+    //    1360x768. Eine Auswahl aus einer sortierten Liste bleibt in
+    //    DEREN Ordnung sortiert, und deren Ordnung ist diese.
+    i = 1
+    gut = true
+    while i < count(state) {
+        let a: u64 = (mode_w(state, i - 1) << 16) | mode_h(state, i - 1)
+        let b: u64 = (mode_w(state, i) << 16) | mode_h(state, i)
+        if b <= a {
+            gut = false
+        }
+        i = i + 1
+    }
+    if gut {
+        n = n + 1
+    }
+    // 5. Der laufende Modus steht in der Liste.
+    if find_mode(state, fb.panel_w(state), fb.panel_h(state), 32) < MAX_MODES {
+        n = n + 1
+    }
+    // 6. Ein Modus, den niemand gefragt hat, wird nicht gefunden.
+    if find_mode(state, 777, 333, 32) >= MAX_MODES {
+        n = n + 1
+    }
+    // 7. Ein Wechsel dorthin wird abgelehnt, und der Bildschirm bleibt.
+    let vor_w: u64 = fb.panel_w(state)
+    if set_mode(state, 777, 333, 32) == E_NOMODE {
+        if fb.panel_w(state) == vor_w && fb.ready(state) {
+            n = n + 1
+        }
+    }
+    // 8. Eine Farbtiefe, die dieser Kernel nicht zeichnet, wird
+    //    abgelehnt -- und zwar mit ihrem eigenen Grund.
+    if set_mode(state, fb.panel_w(state), fb.panel_h(state), 16) == E_DEPTH {
+        n = n + 1
+    }
+    // 9. Die Karte kann 32 Bit -- sonst stuende dieser Kernel nicht auf
+    //    dem Bildschirm.
+    if (depths(state) & (1 << 32)) != 0 {
+        n = n + 1
+    }
+    // 10. Die Nachschlagetabelle in Grundstellung bildet jeden Wert auf
+    //     sich selbst ab -- ein Bildschirm, der nichts eingestellt hat,
+    //     darf nicht anders aussehen.
+    set_picture(state, 100, 100, 100)
+    let tab: u64 = lut_addr(state)
+    gut = true
+    i = 0
+    while i < 256 {
+        if kstate.get8(tab + i) != i {
+            gut = false
+        }
+        i = i + 1
+    }
+    if gut {
+        n = n + 1
+    }
+    // 11. Helligkeit null macht die ganze Tabelle schwarz.
+    set_picture(state, 0, 100, 100)
+    gut = true
+    i = 0
+    while i < 256 {
+        if kstate.get8(tab + i) != 0 {
+            gut = false
+        }
+        i = i + 1
+    }
+    if gut {
+        n = n + 1
+    }
+    // 12. Gamma 220 hebt die Mitte an, laesst 0 und 255 aber stehen --
+    //     das ist die Eigenschaft, an der eine Gammakurve zu erkennen
+    //     ist, und die eine reine Helligkeitsaenderung NICHT hat.
+    set_picture(state, 100, 100, 220)
+    if kstate.get8(tab) == 0 && kstate.get8(tab + 255) == 255 {
+        if kstate.get8(tab + 128) > 150 {
+            n = n + 1
+        }
+    }
+    // 13. ... und Gamma 45 senkt sie, mit denselben Endpunkten.
+    set_picture(state, 100, 100, 45)
+    if kstate.get8(tab) == 0 && kstate.get8(tab + 255) == 255 {
+        if kstate.get8(tab + 128) < 90 {
+            n = n + 1
+        }
+    }
+    // 14. Eine unmoegliche Einstellung wird abgelehnt, und die alte
+    //     bleibt stehen.
+    set_picture(state, 100, 100, 100)
+    if !set_picture(state, 300, 100, 100) && brightness(state) == 100 {
+        n = n + 1
+    }
+    // 15. Die Tabelle steigt monoton -- eine Kurve, die faellt, waere
+    //     ein Rechenfehler und auf dem Bild nicht zu sehen.
+    set_picture(state, 100, 130, 120)
+    gut = true
+    i = 1
+    while i < 256 {
+        if kstate.get8(tab + i) < kstate.get8(tab + i - 1) {
+            gut = false
+        }
+        i = i + 1
+    }
+    if gut {
+        n = n + 1
+    }
+    set_picture(state, 100, 100, 100)
+    return n
+}
+
+fn selftest_max() -> u64 {
+    return 15
+}
+
+// ---------------------------------------------- die Woerter dieser Runde
+//
+// Wie in `fb.fi` und `pwr.fi`: die Woerter stehen bei dem Modul, das
+// sie anschaltet, und die meisten davon sind GEGENPROBEN. Ohne `disp`
+// tut diese Runde gar nichts -- kein Erkunden, kein Wechsel, keine
+// Tabelle --, und die Runden K7 bis K18 messen Zeile fuer Zeile, was
+// sie vorher gemessen haben.
+//
+//   `disp`         die Karte erkunden, die Liste melden, die Zusagen
+//                  zaehlen.
+//   `dispbig`      im laufenden Betrieb auf 1024x768 wechseln. DAS ist
+//                  die Zusage der Runde: nicht ein anderer Startwert,
+//                  sondern ein Wechsel bei stehendem Kernel.
+//   `dispback`     ... und wieder zurueck auf 800x600. Zwei Wechsel in
+//                  einem Lauf, damit auch der Rueckweg gemessen ist.
+//   `dispbad`      einen Modus verlangen, den es nicht gibt. Danach
+//                  MUSS derselbe Bildschirm dastehen wie vorher --
+//                  die Gegenprobe gegen den schwarzen Schirm.
+//   `dispbench`    die Kosten der Nachschlagetabelle je Bild messen,
+//                  bei der groessten Aufloesung, die die Liste hergibt.
+//   `disprot`      um 90 Grad gedreht stehenbleiben, fuer das Foto.
+//   `dispconfirm`  wechseln, NICHT bestaetigen und die Frist ablaufen
+//                  lassen. Der alte Modus muss von selbst zurueckkommen.
+//   `dispedid`     den gelesenen EDID-Block roh ausgeben.
+const M_DISP: u64 = 1
+const M_BIG: u64 = 2
+const M_BACK: u64 = 4
+const M_BAD: u64 = 8
+const M_BENCH: u64 = 16
+const M_ROT: u64 = 32
+const M_CONFIRM: u64 = 64
+const M_EDID: u64 = 128
+
+// Eigene Fassung, aus demselben Grund wie die in `fb.fi`: dieses Modul
+// bindet `kmain.fi` nicht ein.
+// EIN GANZES WORT UND KEIN TEILSTUECK.
+//
+// `fb.fi` sucht seine Woerter als Teilzeichenkette, und das ging gut,
+// solange kein anderes Wort auf der Befehlszeile eines davon enthielt.
+// Diese Runde hat genau das gebrochen: die Gegenprobe startet
+// `script=dispctl raw` OHNE das Wort `disp` -- und `dispctl` ENTHAELT
+// `disp`. Der Kernel erkundete also brav die Karte, und die Gegenprobe,
+// die beweisen sollte, dass ohne das Wort nichts passiert, bewies das
+// Gegenteil von dem, was sie sollte. Ein Test, der aus dem falschen
+// Grund gruen wird, ist schlimmer als keiner.
+//
+// Also: der Treffer muss am Anfang oder hinter einem Leerzeichen
+// beginnen und vor einem Leerzeichen oder dem Ende aufhoeren.
+fn find_word(heu: u64, nadel: u64, n: u64) -> u64 {
+    if heu == 0 || n == 0 {
+        return 0
+    }
+    var i: u64 = 0
+    while true {
+        let c: u64 = kstate.get8(heu + i)
+        if c == 0 {
+            return 0
+        }
+        var passt: bool = true
+        if i > 0 {
+            let v: u64 = kstate.get8(heu + i - 1)
+            if v != 32 && v != 9 {
+                passt = false
+            }
+        }
+        if passt {
+            var k: u64 = 0
+            while k < n {
+                let a: u64 = kstate.get8(heu + i + k)
+                if a == 0 || a != kstate.get8(nadel + k) {
+                    passt = false
+                    k = n
+                } else {
+                    k = k + 1
+                }
+            }
+        }
+        if passt {
+            let e: u64 = kstate.get8(heu + i + n)
+            if e == 0 || e == 32 || e == 9 {
+                return heu + i
+            }
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+fn find(heu: u64, nadel: u64, n: u64) -> u64 {
+    if heu == 0 || n == 0 {
+        return 0
+    }
+    var i: u64 = 0
+    while true {
+        let c: u64 = kstate.get8(heu + i)
+        if c == 0 {
+            return 0
+        }
+        var k: u64 = 0
+        var gleich: bool = true
+        while k < n {
+            let a: u64 = kstate.get8(heu + i + k)
+            if a == 0 || a != kstate.get8(nadel + k) {
+                gleich = false
+                k = n
+            } else {
+                k = k + 1
+            }
+        }
+        if gleich {
+            return heu + i
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+fn parse(state: u64, cmd: u64) {
+    var w_disp: [u8; 5] = "disp\0"
+    var w_big: [u8; 8] = "dispbig\0"
+    var w_back: [u8; 9] = "dispback\0"
+    var w_bad: [u8; 8] = "dispbad\0"
+    var w_bench: [u8; 10] = "dispbench\0"
+    var w_rot: [u8; 8] = "disprot\0"
+    var w_conf: [u8; 12] = "dispconfirm\0"
+    var w_edid: [u8; 9] = "dispedid\0"
+    var m: u64 = 0
+    if cmd != 0 {
+        if find_word(cmd, (&w_disp[0]) as u64, 4) != 0 {
+            m = m | M_DISP
+        }
+        if find_word(cmd, (&w_big[0]) as u64, 7) != 0 {
+            m = m | M_BIG
+        }
+        if find_word(cmd, (&w_back[0]) as u64, 8) != 0 {
+            m = m | M_BACK
+        }
+        if find_word(cmd, (&w_bad[0]) as u64, 7) != 0 {
+            m = m | M_BAD
+        }
+        if find_word(cmd, (&w_bench[0]) as u64, 9) != 0 {
+            m = m | M_BENCH
+        }
+        if find_word(cmd, (&w_rot[0]) as u64, 7) != 0 {
+            m = m | M_ROT
+        }
+        if find_word(cmd, (&w_conf[0]) as u64, 11) != 0 {
+            m = m | M_CONFIRM
+        }
+        if find_word(cmd, (&w_edid[0]) as u64, 8) != 0 {
+            m = m | M_EDID
+        }
+    }
+    s(state, S_MODEBITS, m)
+}
+
+fn mode(state: u64) -> u64 {
+    return g(state, S_MODEBITS)
+}
+
+fn want(state: u64, bit: u64) -> bool {
+    return (g(state, S_MODEBITS) & bit) != 0
+}
