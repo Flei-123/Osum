@@ -2815,6 +2815,9 @@ fn mode_of(cmd: u64) -> u64 {
     // Einstellungen, der DHCP-Klient -- und die drei Gegenproben.
     var dkw: [u8; 5] = "desk\0"
     var dew: [u8; 6] = "einst\0"
+    // RUNDE I18N: die Gegenprobe fuer das Bildschirmfoto -- ohne den
+    // Starter, damit das gemessene Fenster nicht verdeckt ist.
+    var nstw: [u8; 8] = "nostart\0"
     var dnl: [u8; 8] = "nolayer\0"
     var dnm: [u8; 6] = "nomin\0"
     var ddh: [u8; 5] = "dhcp\0"
@@ -2824,6 +2827,9 @@ fn mode_of(cmd: u64) -> u64 {
     }
     if find(cmd, (&dew[0]) as u64, 5) != 0 {
         mode = mode | kstate.M_EINST
+    }
+    if find(cmd, (&nstw[0]) as u64, 7) != 0 {
+        mode = mode | kstate.M_NOSTART
     }
     if find(cmd, (&dnl[0]) as u64, 7) != 0 {
         mode = mode | kstate.M_NOLAYER
@@ -3200,6 +3206,11 @@ fn surface(state: u64) {
         sched.sleep_ticks(state, 12)
         wm.compose(state)
     } else if (kstate.get(state, kstate.MODE) & kstate.M_DESK) != 0 {
+        // RUNDE I18N: die Kostenmessung VOR den Programmen. Danach
+        // schreiben drei Prozesse auf dieselbe serielle Leitung, und
+        // eine Zahl, die zwischen zwei fremden Zeilen steht, liest kein
+        // Laeufer mehr.
+        i18n_bench(state, f_ui, PX_UI)
         t = desk_start(state)
     } else {
         t = k15_start(state)
@@ -3398,6 +3409,99 @@ fn desk_spawn(state: u64, pfad: u64, arg: u64, n: u64) -> u64 {
     return pid
 }
 
+
+// ============================================ RUNDE I18N: WAS ES KOSTET
+//
+// DIE FRAGE, DIE DIESE RUNDE SICH SELBST STELLEN MUSS: bremst die
+// UTF-8-Dekodierung das Zeichnen spuerbar? Bis heute lief die
+// Textschleife ueber OKTETTE und tat je Zeichen nichts als einen
+// Feldzugriff; jetzt laeuft sie ueber ZEICHEN und ruft je Zeichen
+// `utf8.next` auf -- ein paar Vergleiche und Schiebungen, aber eben
+// mehr als nichts.
+//
+// GEMESSEN UND NICHT BEHAUPTET, und zwar so, dass die Zahl etwas heisst:
+//
+//   * BEIDE Wege in EINEM Lauf, auf DERSELBEN Maschine, mit DEMSELBEN
+//     Zeitzaehler. Zwei QEMU-Starts waeren zwei Maschinen.
+//   * DERSELBE Text, und zwar reines ASCII -- dort liefern beide
+//     Fassungen dasselbe Ergebnis, und der Unterschied ist GENAU der
+//     Dekodierer und nichts sonst.
+//   * TAUSEND Zeilen je Fassung, weil eine einzelne Zeile unter der
+//     Aufloesung des Zaehlers liegt.
+//   * Und daneben die Kosten des wirklichen ZEICHNENS derselben Zeile,
+//     damit die erste Zahl einen Massstab hat. Eine Dekodierung, die
+//     zwei Prozent einer Rasterung kostet, ist keine Bremse.
+const I18N_ZEILEN: u64 = 1000
+
+fn i18n_bench(state: u64, f: u64, px: u64) {
+    var s_a: [u8; 21] = "i18n: draw ascii us=\0"
+    var s_u: [u8; 20] = "i18n: draw utf8 us=\0"
+    var s_g: [u8; 22] = "i18n: draw glyphs us=\0"
+    var s_r: [u8; 8] = " reps=\0\0"
+    var s_n: [u8; 8] = " chars=\0"
+    // Vierzig Zeichen -- die Laenge einer Beschriftung dieser
+    // Oberflaeche, gemessen an "Der Bildmodus wird beim Start gesetzt".
+    var zeile: [u8; 41] = "Der Bildmodus wird beim Start gesetzt; im"
+    if f >= ttf.MAX_FONTS || apic.tsc_hz(state) == 0 {
+        return
+    }
+    let p: u64 = (&zeile[0]) as u64
+    // Erst einmal warmlaufen -- der Glyphenspeicher soll bei BEIDEN
+    // Messungen voll sein, sonst misst die erste die Rasterung mit.
+    let _w0: i64 = ttf.text_width26(state, f, p, 40, px)
+    var t: u64 = apic.tsc()
+    var i: u64 = 0
+    var acc: i64 = 0
+    while i < I18N_ZEILEN {
+        acc = acc + ttf.text_width26_bytes(state, f, p, 40, px)
+        i = i + 1
+    }
+    let alt: u64 = us_of(state, apic.tsc() - t)
+    t = apic.tsc()
+    i = 0
+    while i < I18N_ZEILEN {
+        acc = acc + ttf.text_width26(state, f, p, 40, px)
+        i = i + 1
+    }
+    let neu: u64 = us_of(state, apic.tsc() - t)
+    // Und das wirkliche Zeichnen derselben Zeile, als Massstab: je
+    // Zeichen eine Glyphe aus dem Speicher holen ist das, was `wm.text`
+    // ausser der Schleife noch tut.
+    t = apic.tsc()
+    i = 0
+    while i < I18N_ZEILEN {
+        var k: u64 = 0
+        while k < 40 {
+            let _sl: u64 = ttf.glyph(state, f, kstate.get8(p + k), px)
+            k = k + 1
+        }
+        i = i + 1
+    }
+    let zeichnen: u64 = us_of(state, apic.tsc() - t)
+    serial.puts((&s_a[0]) as u64)
+    serial.dec(alt)
+    serial.puts((&s_r[0]) as u64)
+    serial.dec(I18N_ZEILEN)
+    serial.puts((&s_n[0]) as u64)
+    serial.dec(40)
+    serial.nl()
+    serial.puts((&s_u[0]) as u64)
+    serial.dec(neu)
+    serial.puts((&s_r[0]) as u64)
+    serial.dec(I18N_ZEILEN)
+    serial.puts((&s_n[0]) as u64)
+    serial.dec(40)
+    serial.nl()
+    serial.puts((&s_g[0]) as u64)
+    serial.dec(zeichnen)
+    serial.puts((&s_r[0]) as u64)
+    serial.dec(I18N_ZEILEN)
+    serial.nl()
+    if acc == 0 {
+        serial.nl()
+    }
+}
+
 // DER SCHREIBTISCH. Vier Programme von der Platte, in dieser
 // Reihenfolge, und die Reihenfolge ist keine Laune:
 //
@@ -3445,7 +3549,9 @@ fn desk_start(state: u64) -> u64 {
         sched.sleep_ticks(state, 1)
         runden = runden + 1
     }
-    pid = desk_spawn(state, (&p_star[0]) as u64, (&a_star[0]) as u64, 8)
+    if (kstate.get(state, kstate.MODE) & kstate.M_NOSTART) == 0 {
+        pid = desk_spawn(state, (&p_star[0]) as u64, (&a_star[0]) as u64, 8)
+    }
     if (kstate.get(state, kstate.MODE) & kstate.M_EINST) != 0 {
         pid = desk_spawn(state, (&p_eins[0]) as u64,
             (&a_eins[0]) as u64, 15)
