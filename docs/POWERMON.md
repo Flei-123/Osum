@@ -311,6 +311,71 @@ full, and the day it loses is the one somebody was about to look at.
 
 ---
 
+## The suites that were already there
+
+The full `./test.sh` was run on the base commit (`3389fbd`) and on this
+branch. It has to be said plainly that the machine was running **eight to
+twelve other acceptance suites at the same time** — a dozen rounds are on
+this tree at once — and several sections are load-sensitive: the base run
+itself reported `KERNEL 158/30`, `K13 87/12`, `K14 136/16` and
+`K16 58/6`, which is not what that commit does on a quiet machine.
+
+So every section that differed was **re-run on its own, on a quiet
+machine, on both commits**. Those are the numbers that count:
+
+| suite | base (quiet) | this branch (quiet) |
+|---|---|---|
+| POSIX | 134 / 0 | **134 / 0** |
+| PCI | 98 / 0 | **98 / 0** |
+| SMP | 58 / 1 (under load) | **59 / 0** |
+| CAPS | 67 / 0 | **67 / 0** |
+| GFX | 76 / 0 | **76 / 0** |
+| OSUM | 130 / 0 | **130 / 0** |
+| K18 | 170 / 0 | **170 / 0** |
+| K15 | 249 / 2 (under load) | **251 / 0** |
+| POWERMON | — | **121 / 0** |
+
+Everything else was identical in the two full runs: `FREESTANDING 41/0`,
+`USERLAND 91/0`, `BOOT 20/0`, `UNIX 107/0`, `NET 75/0`, `GUARD 55/0`,
+`K11 85/0`, `WM 103/0`, `HV 114/0`, `K13 87/12`, `K16 58/6` — the last
+two failing the same way on both commits.
+
+### The three regressions this round caused, and what found them
+
+Written down because in all three cases the check that caught it was
+worth more than the code it was checking.
+
+1. **`SYS_OSUM_PMON` stood in the kernel and not in the libc.**
+   `tools/posix/run.sh` holds every `const SYS_...` in `kernel/sys.fi`
+   against `lib/libc/kcall.fi` and counts the ones that differ. It found
+   one. Two tables that disagree are a program that asks for one call and
+   gets another. POSIX 133/1 → 134/0.
+
+2. **`/bin/powermon` asking for round K18's call number tripped K18's own
+   collision check.** That check asks whether ANOTHER round has handed
+   out a number in 1750..1799 for something else — not whether anybody
+   but K18 may use it. A second program asking for the state of the
+   battery is what a call number is *for*, so the file is now in the
+   allow-list, with the reasoning beside it. K18 169/1 → 170/0.
+
+3. **The round talked in runs that had not asked it to.** This is the
+   one worth reading. `kmain.power_stage` runs in *every* boot that does
+   not say `nopwr`, so `pmon.report` was printing twenty-four lines at
+   the end of every run. In a run with `gfx` the serial port is mirrored
+   to the screen, the transcript already fills it, and those lines
+   scrolled the shell's own output off the top.
+
+   What `tools/gfx/run.sh` reported was: whole-screen comparison against
+   the transcript **passed**, and the two checks that look for one named
+   line at a computed place **failed**. *The picture is right and the
+   picture is wrong.* That is what area counting looks like from the
+   inside, and it is exactly the failure round K7B built those two checks
+   to catch — there, 87 percent agreement was 87 percent black
+   background. The report now needs the word `pmonsay`. GFX 74/2 → 76/0,
+   OSUM 129/1 → 130/0.
+
+---
+
 ## What QEMU cannot prove — and what has never been tested at all
 
 This is the most important section in this document.
