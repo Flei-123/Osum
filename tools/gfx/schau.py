@@ -601,6 +601,106 @@ def _pruefe_glyphen(bild, schrift, stellen, grund_y, vg, hg, toleranz,
     return zeichen, tinte, falsch, leer, schlecht
 
 
+def cmd_tkette(a):
+    """tkette <ppm> <ttf> <px> <x> <grundlinie> <vg r g b> <hg r g b> <text>
+
+    WIE `ttext`, ABER MIT DER RICHTIGEN ERWARTUNG AN UEBERLAPPENDEN
+    UMRISSEN -- und das ist keine Aufweichung, sondern das Gegenteil.
+
+    `ttext` rechnet je Zeichen `mische(hintergrund, vordergrund, deckung)`
+    und setzt damit voraus, dass unter jedem Bildpunkt eines Buchstabens
+    der reine Hintergrund liegt.  Das stimmt fast immer und bei eng
+    unterschnittenen Paaren NICHT: die Umrisse von 'a' und 'r' in
+    "Start" ueberschneiden sich um einen Bildpunkt, und dort mischt
+    JEDER Rasterer -- Osum, FreeType, Cairo -- den zweiten Buchstaben
+    auf den bereits gemischten ersten.  Gemessen am 27.08.2026: 4 von
+    200 Tintenpunkten in "Start", und `ttext` nannte sie falsch, obwohl
+    das Bild richtig war.
+
+    Diese Fassung baut deshalb ERST die ganze Zeile so auf, wie sie
+    aufgebaut werden MUSS -- Buchstabe fuer Buchstabe auf das Ergebnis
+    des vorigen --, und vergleicht DANN je Zeichen.  Die Toleranz bleibt
+    null, die Zusage "jedes Zeichen hat Tinte" bleibt, und der Vergleich
+    wird strenger statt weicher: er prueft jetzt auch die Reihenfolge
+    des Mischens."""
+    raster = _raster_laden()
+    bild = Bild(a[0])
+    schrift = raster.Schrift(a[1], int(a[2]))
+    x, y = int(a[3]), int(a[4])
+    vg = (int(a[5]), int(a[6]), int(a[7]))
+    hg = (int(a[8]), int(a[9]), int(a[10]))
+    text = a[11]
+    tol = int(a[12]) if len(a) > 12 else 0
+    stellen = [(c, x + (dx >> 6), y) for (c, dx) in schrift.stellen(text)]
+
+    # 1. Die Zeile aufbauen, so wie sie gemalt wird: ein Woerterbuch
+    #    (x, y) -> Farbe, das mit dem Hintergrund anfaengt.
+    soll = {}
+    for (c, gx, gy) in stellen:
+        g = schrift.glyphe(c)
+        if g.w == 0 or g.h == 0:
+            continue
+        for r in range(g.h):
+            for k in range(g.w):
+                d = g.punkt(k, r)
+                if d == 0:
+                    continue
+                px = gx + g.links + k
+                py = gy - g.oben + r
+                soll[(px, py)] = mische(soll.get((px, py), hg), vg, d)
+
+    # 2. Je Zeichen vergleichen -- und je Zeichen die Tinte im Bild
+    #    zaehlen, genau wie `ttext`.
+    zeichen = 0
+    tinte = 0
+    falsch = 0
+    leer = []
+    schlecht = []
+    for (c, gx, gy) in stellen:
+        g = schrift.glyphe(c)
+        if g.w == 0 or g.h == 0:
+            continue
+        zeichen += 1
+        gesetzt = 0
+        schlimm = 0
+        ink = 0
+        for r in range(g.h):
+            for k in range(g.w):
+                if g.punkt(k, r) == 0:
+                    continue
+                px = gx + g.links + k
+                py = gy - g.oben + r
+                gesetzt += 1
+                ist = bild.punkt(px, py)
+                if ist is None:
+                    schlimm += 1
+                    continue
+                if ist != hg:
+                    ink += 1
+                w = soll[(px, py)]
+                if max(abs(ist[j] - w[j]) for j in range(3)) > tol:
+                    schlimm += 1
+        tinte += gesetzt
+        falsch += schlimm
+        if gesetzt > 0 and ink == 0:
+            leer.append(sichtbar(c))
+        if schlimm and len(schlecht) < 8:
+            schlecht.append("'%s' bei x=%d: %d von %d Tintenpunkten falsch"
+                            % (sichtbar(c), gx, schlimm, gesetzt))
+    print("%d Zeichen, %d Tintenpunkte geprueft, %d falsch"
+          % (zeichen, tinte, falsch), end="")
+    if leer:
+        print(" -- LEER: %s" % " ".join(leer))
+        return 1
+    if falsch:
+        print()
+        for z in schlecht:
+            print("    " + z)
+        return 1
+    print("")
+    return 0
+
+
 def cmd_ttext(a):
     """ttext <ppm> <ttf> <px> <x> <grundlinie> <vg r g b> <hg r g b> <text>
 
@@ -739,6 +839,7 @@ BEFEHLE = {
     "font": cmd_font,
     "lesen": cmd_lesen,
     "ttext": cmd_ttext,
+    "tkette": cmd_tkette,
     "tgrid": cmd_tgrid,
     "glatt": cmd_glatt,
     "rechteck": cmd_rechteck,

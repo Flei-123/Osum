@@ -1,0 +1,518 @@
+// kernel/user/dhcp.fi -- Runde DESKTOP: /bin/dhcp, DER DHCP-KLIENT.
+//
+// EHRLICHER AUSGANGSPUNKT, und er steht im Auftrag dieser Runde: Osum
+// hat seit Runde K3 einen TCP/IP-Stapel, seit Runde K8 eine Karte
+// darunter und `ping` und `wget` darueber -- aber die ADRESSE wurde in
+// `inet.init` festgenagelt, aus der Kernel-Befehlszeile. Es gab kein
+// DHCP. In jedem Netz, das man nicht selbst aufgesetzt hat, ist ein
+// Rechner ohne DHCP ein Rechner ohne Netz.
+//
+// WAS HIER LAEUFT, ist RFC 2131 in seiner kuerzesten ehrlichen Form:
+//
+//     DISCOVER  ->  (Rundruf an 255.255.255.255:67)
+//               <-  OFFER     (yiaddr, Maske, Gateway, Server)
+//     REQUEST   ->  (mit Option 50 und 54)
+//               <-  ACK
+//
+// Danach geht die Adresse ueber `osum_netset` (Runde DESKTOP,
+// kernel/sys.fi) in den Kernel und in `/etc/netz.conf` auf die Platte.
+//
+// WAS ER NICHT TUT, und das gehoert genannt: keine Erneuerung des
+// Vertrages (T1/T2), kein DECLINE nach einer ARP-Probe, kein RELEASE,
+// kein INFORM. Die Laufzeit wird gelesen und gemeldet, aber nicht
+// abgewartet -- ein Klient, der nach zwoelf Stunden erneuert, ist auf
+// einer Maschine, die zehn Sekunden lang gemessen wird, nicht pruefbar.
+// Das steht so im Logbuch unter "was nicht bewiesen ist".
+//
+// DER RUNDRUF, UND WAS AN IHM WIRKLICH GEHT -- die ehrlichste Stelle
+// dieser Datei.
+//
+// HEREIN: `ip_in` in `vendor/firn/lib/net/stack.fi` nimmt ein Paket an
+// 255.255.255.255 ausdruecklich an. Ein Angebot per Rundruf kommt also
+// wirklich bei uns an, und das Rundruf-Bit im Paket ist nicht Zierde.
+//
+// HINAUS: dort fehlt der Sonderfall. `net_output` sucht auch fuer
+// 255.255.255.255 den naechsten Sprung und fragt per ARP nach dessen
+// Hardwareadresse -- statt ff:ff:ff:ff:ff:ff zu nehmen. Antwortet
+// niemand, bleibt das Paket liegen. In einem Netz, in dem das Gateway
+// selbst der DHCP-Server ist (QEMUs Benutzernetz, jeder Heimrouter),
+// geht es trotzdem durch: die ARP-Antwort kommt vom Gateway, und der
+// Server hoert auf UDP 67, nicht auf eine Hardwareadresse.
+//
+// Dieser Klient sendet deshalb ABWECHSELND: geradzahlige Versuche als
+// Rundruf, ungeradzahlige als Einzelruf an das Gateway. Letzteres
+// sieht RFC 2131 fuer den Zustand RENEWING ohnehin vor. Was damit
+// NICHT bewiesen ist, steht im Logbuch: ein Rundruf in einem Netz, in
+// dem der DHCP-Server NICHT das Gateway ist. Dafuer braeuchte der
+// Stapel drei Zeilen mehr, und der Stapel ist festgenagelter Vorrat
+// (vendor/firn) -- er gehoert dieser Runde nicht.
+
+profile kernel
+
+import ulib
+import libc.net
+
+export { u_start }
+
+const SYS_NETGET: u64 = 1300
+const SYS_NETSET: u64 = 1301
+const NG_READY: u64 = 0
+const NG_IP: u64 = 1
+const NG_GW: u64 = 3
+const NG_MAC0: u64 = 4
+const NG_MAC1: u64 = 5
+
+const PORT_S: u64 = 67
+const PORT_C: u64 = 68
+const PAKET: u64 = 548 // 236 BOOTP + Optionen, unter der 576er Grenze
+
+// Die Stellen im BOOTP-Kopf (RFC 951, RFC 2131).
+const B_OP: u64 = 0
+const B_HTYPE: u64 = 1
+const B_HLEN: u64 = 2
+const B_XID: u64 = 4
+const B_FLAGS: u64 = 10
+const B_YIADDR: u64 = 16
+const B_CHADDR: u64 = 28
+const B_MAGIC: u64 = 236
+const B_OPT: u64 = 240
+
+static mut aus: [u8; 548] = [0 as u8; 548]
+static mut ein: [u8; 1024] = [0 as u8; 1024]
+static mut mac: [u8; 8] = [0 as u8; 8]
+static mut xid: u64 = 0
+static mut o_ip: u64 = 0
+static mut o_maske: u64 = 0
+static mut o_gw: u64 = 0
+static mut o_server: u64 = 0
+static mut o_lease: u64 = 0
+static mut conf: [u8; 128] = [0 as u8; 128]
+
+fn say(p: u64) {
+    ulib.say(p)
+}
+
+fn s8(at: u64, v: u64) {
+    __mmio_write8(((&aus[0 as usize]) as u64 + at) as *mut u8, (v & 255) as u8)
+}
+
+fn g8(p: u64, at: u64) -> u64 {
+    return __mmio_read8((p + at) as *mut u8) as u64
+}
+
+fn s32(at: u64, v: u64) {
+    s8(at, (v >> 24) & 255)
+    s8(at + 1, (v >> 16) & 255)
+    s8(at + 2, (v >> 8) & 255)
+    s8(at + 3, v & 255)
+}
+
+fn g32(p: u64, at: u64) -> u64 {
+    return (g8(p, at) << 24) | (g8(p, at + 1) << 16) | (g8(p, at + 2) << 8)
+        | g8(p, at + 3)
+}
+
+// EIN BOOTP-PAKET BAUEN. `art` ist 1 fuer DISCOVER und 3 fuer REQUEST;
+// bei REQUEST kommen die Optionen 50 (gewuenschte Adresse) und 54
+// (Server) dazu -- ohne sie beantwortet ein Server mit mehreren
+// Angeboten das falsche.
+fn bauen(art: u64) -> u64 {
+    var i: u64 = 0
+    while i < PAKET {
+        s8(i, 0)
+        i = i + 1
+    }
+    s8(B_OP, 1) // BOOTREQUEST
+    s8(B_HTYPE, 1) // Ethernet
+    s8(B_HLEN, 6)
+    s32(B_XID, xid)
+    // DAS RUNDRUF-BIT. Ohne es antwortet ein Server an die Adresse, die
+    // wir noch nicht haben -- und das Paket kommt nie an.
+    s8(B_FLAGS, 0x80)
+    s8(B_FLAGS + 1, 0)
+    i = 0
+    while i < 6 {
+        s8(B_CHADDR + i, mac[(i) as usize] as u64)
+        i = i + 1
+    }
+    // die Kennung 99.130.83.99
+    s8(B_MAGIC, 99)
+    s8(B_MAGIC + 1, 130)
+    s8(B_MAGIC + 2, 83)
+    s8(B_MAGIC + 3, 99)
+    var at: u64 = B_OPT
+    s8(at, 53) // Nachrichtenart
+    s8(at + 1, 1)
+    s8(at + 2, art)
+    at = at + 3
+    if art == 3 {
+        s8(at, 50) // gewuenschte Adresse
+        s8(at + 1, 4)
+        s8(at + 2, (o_ip >> 24) & 255)
+        s8(at + 3, (o_ip >> 16) & 255)
+        s8(at + 4, (o_ip >> 8) & 255)
+        s8(at + 5, o_ip & 255)
+        at = at + 6
+        s8(at, 54) // der Server, von dem das Angebot kam
+        s8(at + 1, 4)
+        s8(at + 2, (o_server >> 24) & 255)
+        s8(at + 3, (o_server >> 16) & 255)
+        s8(at + 4, (o_server >> 8) & 255)
+        s8(at + 5, o_server & 255)
+        at = at + 6
+    }
+    s8(at, 55) // was wir wissen wollen
+    s8(at + 1, 3)
+    s8(at + 2, 1) // Maske
+    s8(at + 3, 3) // Gateway
+    s8(at + 4, 6) // Namensdienst
+    at = at + 5
+    s8(at, 255) // Ende
+    at = at + 1
+    if at < 300 {
+        at = 300 // ein BOOTP-Paket ist mindestens 300 Oktette lang
+    }
+    return at
+}
+
+// DIE OPTIONEN EINER ANTWORT LESEN. Gibt die Nachrichtenart (Option 53)
+// zurueck, oder 0. Ein Paket mit falscher Kennung oder falscher
+// Vorgangsnummer wird verworfen und NICHT halb ausgewertet.
+fn lesen(p: u64, n: u64) -> u64 {
+    if n < B_OPT {
+        return 0
+    }
+    if g8(p, B_MAGIC) != 99 || g8(p, B_MAGIC + 1) != 130 {
+        return 0
+    }
+    if g8(p, B_MAGIC + 2) != 83 || g8(p, B_MAGIC + 3) != 99 {
+        return 0
+    }
+    if g32(p, B_XID) != xid {
+        return 0
+    }
+    if g8(p, B_OP) != 2 {
+        return 0
+    }
+    var art: u64 = 0
+    var at: u64 = B_OPT
+    var weiter: bool = true
+    while weiter && at < n {
+        let t: u64 = g8(p, at)
+        if t == 255 {
+            weiter = false
+        } else if t == 0 {
+            at = at + 1
+        } else {
+            if at + 1 >= n {
+                weiter = false
+            } else {
+                let l: u64 = g8(p, at + 1)
+                if at + 2 + l > n {
+                    weiter = false
+                } else {
+                    if t == 53 && l == 1 {
+                        art = g8(p, at + 2)
+                    } else if t == 1 && l == 4 {
+                        o_maske = g32(p, at + 2)
+                    } else if t == 3 && l >= 4 {
+                        o_gw = g32(p, at + 2)
+                    } else if t == 54 && l == 4 {
+                        o_server = g32(p, at + 2)
+                    } else if t == 51 && l == 4 {
+                        o_lease = g32(p, at + 2)
+                    }
+                    at = at + 2 + l
+                }
+            }
+        }
+    }
+    if art != 0 {
+        o_ip = g32(p, B_YIADDR)
+    }
+    return art
+}
+
+fn text_an(p: u64, at: u64, q: u64) -> u64 {
+    var k: u64 = 0
+    while __mmio_read8((q + k) as *mut u8) != 0 as u8 {
+        __mmio_write8((p + at + k) as *mut u8,
+            __mmio_read8((q + k) as *mut u8))
+        k = k + 1
+    }
+    __mmio_write8((p + at + k) as *mut u8, 0 as u8)
+    return at + k
+}
+
+fn zahl_an(p: u64, at: u64, v: u64) -> u64 {
+    if v == 0 {
+        __mmio_write8((p + at) as *mut u8, 48 as u8)
+        __mmio_write8((p + at + 1) as *mut u8, 0 as u8)
+        return at + 1
+    }
+    var st: u64 = 0
+    var t: u64 = v
+    while t > 0 {
+        st = st + 1
+        t = t / 10
+    }
+    var k: u64 = st
+    t = v
+    while k > 0 {
+        k = k - 1
+        __mmio_write8((p + at + k) as *mut u8, (48 + (t % 10)) as u8)
+        t = t / 10
+    }
+    __mmio_write8((p + at + st) as *mut u8, 0 as u8)
+    return at + st
+}
+
+fn ip_an(p: u64, at: u64, v: u64) -> u64 {
+    var pt: [u8; 2] = ".\0"
+    var a: u64 = zahl_an(p, at, (v >> 24) & 255)
+    a = text_an(p, a, (&pt[0 as usize]) as u64)
+    a = zahl_an(p, a, (v >> 16) & 255)
+    a = text_an(p, a, (&pt[0 as usize]) as u64)
+    a = zahl_an(p, a, (v >> 8) & 255)
+    a = text_an(p, a, (&pt[0 as usize]) as u64)
+    return zahl_an(p, a, v & 255)
+}
+
+fn sag_ip(marke: u64, v: u64) {
+    var b: [u8; 24] = [0 as u8; 24]
+    say(marke)
+    let _n: u64 = ip_an((&b[0 as usize]) as u64, 0, v)
+    say((&b[0 as usize]) as u64)
+}
+
+fn u_start(args: u64) -> u64 {
+    var s_no: [u8; 26] = "dhcp: kein Netz im Kernel\0"
+    var s_ns: [u8; 26] = "dhcp: kein Socket, errno \0"
+    var s_nb: [u8; 34] = "dhcp: bind 68 schlug fehl, errno \0"
+    var s_go: [u8; 20] = "dhcp: discover xid=\0"
+    var s_mac: [u8; 7] = "  mac=\0"
+    var s_of: [u8; 16] = "dhcp: offer ip=\0"
+    var s_mk: [u8; 9] = "  maske=\0"
+    var s_gw: [u8; 11] = "  gateway=\0"
+    var s_sv: [u8; 10] = "  server=\0"
+    var s_rq: [u8; 18] = "dhcp: request ip=\0"
+    var s_ak: [u8; 14] = "dhcp: ack ip=\0"
+    var s_ls: [u8; 9] = "  lease=\0"
+    var s_wg: [u8; 7] = "  weg=\0"
+    var s_se: [u8; 18] = "dhcp: gesetzt ip=\0"
+    var s_er: [u8; 33] = "dhcp: osum_netset abgelehnt, rc=\0"
+    var s_to: [u8; 26] = "dhcp: keine Antwort nach \0"
+    var s_ve: [u8; 11] = " Versuchen\0"
+    var s_cf: [u8; 43] = "dhcp: /etc/netz.conf geschrieben, Oktette \0"
+    var s_cn: [u8; 38] = "dhcp: /etc/netz.conf nicht schreibbar\0"
+    var k_kopf: [u8; 11] = "modus=dhcp\0"
+    var k_ip: [u8; 4] = "ip=\0"
+    var k_mk: [u8; 7] = "maske=\0"
+    var k_gw: [u8; 9] = "gateway=\0"
+    var k_sv: [u8; 8] = "server=\0"
+    var k_ls: [u8; 7] = "lease=\0"
+    var k_nl: [u8; 2] = "\n\0"
+    var p_conf: [u8; 15] = "/etc/netz.conf\0"
+    var s_ei: [u8; 7] = "einmal\0"
+
+    let argc: u64 = ulib.arg_count(args)
+    var versuche: u64 = 6
+    var a: u64 = 1
+    while a < argc {
+        if ulib.streq(ulib.arg_at(args, a), (&s_ei[0 as usize]) as u64) {
+            versuche = 1
+        }
+        a = a + 1
+    }
+    if ulib.sys(SYS_NETGET, NG_READY, 0, 0) != 1 {
+        say((&s_no[0 as usize]) as u64)
+        ulib.nl()
+        return 1
+    }
+    // Die Hardwareadresse aus dem Kernel. Sie MUSS in das Paket -- ein
+    // Server ordnet den Vertrag ihr zu und nicht dem Absender.
+    let m0: u64 = ulib.sys(SYS_NETGET, NG_MAC0, 0, 0)
+    let m1: u64 = ulib.sys(SYS_NETGET, NG_MAC1, 0, 0)
+    mac[(0) as usize] = ((m0 >> 24) & 255) as u8
+    mac[(1) as usize] = ((m0 >> 16) & 255) as u8
+    mac[(2) as usize] = ((m0 >> 8) & 255) as u8
+    mac[(3) as usize] = (m0 & 255) as u8
+    mac[(4) as usize] = ((m1 >> 8) & 255) as u8
+    mac[(5) as usize] = (m1 & 255) as u8
+    // Die Vorgangsnummer aus der Uhr. Zwei Klienten im selben Netz
+    // duerfen nicht dieselbe haben.
+    xid = (ulib.sys(ulib.SYS_SYSINFO, ulib.I_TICKS, 0, 0) *% 2654435761)
+        & 0xFFFFFFFF
+    if xid == 0 {
+        xid = 0x4F53554D
+    }
+    let fd: u64 = net.udp_socket()
+    if net.failed(fd) {
+        say((&s_ns[0 as usize]) as u64)
+        ulib.sayn(0 -% fd)
+        ulib.nl()
+        return 1
+    }
+    if net.failed(net.bind_port(fd, PORT_C)) {
+        say((&s_nb[0 as usize]) as u64)
+        ulib.nl()
+        net.close(fd)
+        return 1
+    }
+    say((&s_go[0 as usize]) as u64)
+    ulib.sayn(xid)
+    say((&s_mac[0 as usize]) as u64)
+    var k: u64 = 0
+    while k < 6 {
+        ulib.sayn(mac[(k) as usize] as u64)
+        k = k + 1
+    }
+    ulib.nl()
+
+    let rund: u64 = net.ip4(255, 255, 255, 255)
+    var tor: u64 = ulib.sys(SYS_NETGET, NG_GW, 0, 0)
+    if ulib.bad(tor) {
+        tor = 0
+    }
+    var art: u64 = 0
+    var von: u64 = 0
+    var runde: u64 = 0
+    var weg: u64 = 0 // 0 = Rundruf, 1 = Einzelruf ans Gateway
+    // 1. DISCOVER, so oft wie noetig -- die erste Nachricht an eine
+    //    Adresse, deren Hardwareadresse der Stapel nicht kennt, wird
+    //    gegen eine ARP-Frage getauscht. Das ist kein Fehler, das ist
+    //    ein Grund, es gleich noch einmal zu sagen.
+    while runde < versuche && art != 2 {
+        let n: u64 = bauen(1)
+        var ziel: u64 = rund
+        if (runde % 2) == 1 && tor != 0 {
+            ziel = tor
+        }
+        let _s: u64 = net.sendto_ip(fd, (&aus[0 as usize]) as u64, n, ziel,
+            PORT_S)
+        var warte: u64 = 0
+        while warte < 60 && art != 2 {
+            let g: u64 = net.recvfrom_ip(fd, (&ein[0 as usize]) as u64, 1024,
+                &von)
+            if !net.failed(g) && g > 0 {
+                let t: u64 = lesen((&ein[0 as usize]) as u64, g)
+                if t == 2 {
+                    art = 2
+                    weg = runde % 2
+                }
+            } else {
+                ulib.sleep_ms(50)
+            }
+            warte = warte + 1
+        }
+        runde = runde + 1
+    }
+    if art != 2 {
+        say((&s_to[0 as usize]) as u64)
+        ulib.sayn(runde)
+        say((&s_ve[0 as usize]) as u64)
+        ulib.nl()
+        net.close(fd)
+        return 1
+    }
+    sag_ip((&s_of[0 as usize]) as u64, o_ip)
+    sag_ip((&s_mk[0 as usize]) as u64, o_maske)
+    sag_ip((&s_gw[0 as usize]) as u64, o_gw)
+    sag_ip((&s_sv[0 as usize]) as u64, o_server)
+    ulib.nl()
+
+    // 2. REQUEST und ACK.
+    sag_ip((&s_rq[0 as usize]) as u64, o_ip)
+    ulib.nl()
+    art = 0
+    runde = 0
+    while runde < versuche && art != 5 {
+        let n2: u64 = bauen(3)
+        var ziel2: u64 = rund
+        if weg == 1 && tor != 0 {
+            ziel2 = tor
+        }
+        let _s2: u64 = net.sendto_ip(fd, (&aus[0 as usize]) as u64, n2, ziel2,
+            PORT_S)
+        var warte2: u64 = 0
+        while warte2 < 60 && art != 5 {
+            let g2: u64 = net.recvfrom_ip(fd, (&ein[0 as usize]) as u64,
+                1024, &von)
+            if !net.failed(g2) && g2 > 0 {
+                let t2: u64 = lesen((&ein[0 as usize]) as u64, g2)
+                if t2 == 5 {
+                    art = 5
+                } else if t2 == 6 {
+                    runde = versuche // NAK: nicht weiter fragen
+                }
+            } else {
+                ulib.sleep_ms(50)
+            }
+            warte2 = warte2 + 1
+        }
+        runde = runde + 1
+    }
+    // DEN SOCKET ZUERST SCHLIESSEN. `osum_netset` setzt den Stapel neu
+    // auf (kernel/inet.fi, `readdr`) und raeumt dabei die Sockettabelle
+    // -- ein Deskriptor, der danach noch offen waere, zeigte auf einen
+    // Platz, den es nicht mehr gibt.
+    net.close(fd)
+    if art != 5 {
+        say((&s_to[0 as usize]) as u64)
+        ulib.sayn(runde)
+        say((&s_ve[0 as usize]) as u64)
+        ulib.nl()
+        return 1
+    }
+    sag_ip((&s_ak[0 as usize]) as u64, o_ip)
+    say((&s_ls[0 as usize]) as u64)
+    ulib.sayn(o_lease)
+    say((&s_wg[0 as usize]) as u64)
+    ulib.sayn(weg)
+    ulib.nl()
+    if o_maske == 0 {
+        o_maske = net.ip4(255, 255, 255, 0)
+    }
+    let rc: u64 = ulib.sys(SYS_NETSET, o_ip, o_maske, o_gw)
+    if ulib.bad(rc) {
+        say((&s_er[0 as usize]) as u64)
+        ulib.sayn(0 -% rc)
+        ulib.nl()
+        return 1
+    }
+    sag_ip((&s_se[0 as usize]) as u64, ulib.sys(SYS_NETGET, NG_IP, 0, 0))
+    ulib.nl()
+
+    // 3. Und auf die Platte, damit der naechste Start es weiss.
+    let c: u64 = (&conf[0 as usize]) as u64
+    var at: u64 = text_an(c, 0, (&k_kopf[0 as usize]) as u64)
+    at = text_an(c, at, (&k_nl[0 as usize]) as u64)
+    at = text_an(c, at, (&k_ip[0 as usize]) as u64)
+    at = ip_an(c, at, o_ip)
+    at = text_an(c, at, (&k_nl[0 as usize]) as u64)
+    at = text_an(c, at, (&k_mk[0 as usize]) as u64)
+    at = ip_an(c, at, o_maske)
+    at = text_an(c, at, (&k_nl[0 as usize]) as u64)
+    at = text_an(c, at, (&k_gw[0 as usize]) as u64)
+    at = ip_an(c, at, o_gw)
+    at = text_an(c, at, (&k_nl[0 as usize]) as u64)
+    at = text_an(c, at, (&k_sv[0 as usize]) as u64)
+    at = ip_an(c, at, o_server)
+    at = text_an(c, at, (&k_nl[0 as usize]) as u64)
+    at = text_an(c, at, (&k_ls[0 as usize]) as u64)
+    at = zahl_an(c, at, o_lease)
+    at = text_an(c, at, (&k_nl[0 as usize]) as u64)
+    let fdc: u64 = ulib.sys(ulib.SYS_OPEN, (&p_conf[0 as usize]) as u64,
+        577, 0)
+    if ulib.bad(fdc) {
+        say((&s_cn[0 as usize]) as u64)
+        ulib.nl()
+        return 1
+    }
+    let gw2: u64 = ulib.sys(ulib.SYS_WRITE, fdc, c, at)
+    let _cl: u64 = ulib.sys(ulib.SYS_CLOSE, fdc, 0, 0)
+    say((&s_cf[0 as usize]) as u64)
+    ulib.sayn(gw2)
+    ulib.nl()
+    return 0
+}

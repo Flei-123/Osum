@@ -65,7 +65,7 @@ import net.tcp
 import net.stack
 
 export {
-    init, ready, pump, netd_body, wake, configure, us, set_task,
+    init, ready, pump, netd_body, wake, configure, readdr, us, set_task,
     ip, mask, gw, mac_at, stat, pumps, frames_in, frames_out,
     bounce, saddr,
     tcp_stat, task_slot, print_state,
@@ -338,6 +338,53 @@ fn init(state: u64, a: u64, b: u64, c: u64, d: u64, prefix: u64,
 fn configure(state: u64, a: u64, b: u64, c: u64, d: u64, prefix: u64,
     gateway: u64) -> bool {
     return init(state, a, b, c, d, prefix, gateway)
+}
+
+// RUNDE DESKTOP: DIE ADRESSE IM LAUFENDEN BETRIEB WECHSELN.
+//
+// `configure` ruft `init`, und `init` holt sich JEDES MAL neue Rahmen
+// aus dem Verwalter. Ein DHCP-Klient, der seine Adresse setzt, haette
+// den Stapelspeicher damit ein zweites Mal belegt und den ersten
+// verloren -- bei jeder Erneuerung des Vertrages noch einmal. Das ist
+// ein Leck, und es steht hier, weil es beim Bauen dieser Runde
+// wirklich passiert ist.
+//
+// Diese Funktion nimmt DIESELBEN Rahmen und setzt den Stapel darauf
+// neu auf. Was sie KOSTET, gehoert dazugesagt und steht auch im
+// Logbuch: `stack.net_init` setzt die Sockettabelle des Stapels
+// zurueck. Wer eine offene Verbindung hat, verliert sie. Deshalb holt
+// der DHCP-Klient seine Adresse, BEVOR irgendetwas anderes das Netz
+// benutzt, und schliesst seinen eigenen Socket vorher.
+fn readdr(state: u64, a: u64, b: u64, c: u64, d: u64, prefix: u64,
+    gateway: u64) -> bool {
+    if !ready(state) {
+        return false
+    }
+    var m: [u8; 6] = [0 as u8; 6]
+    var i: u64 = 0
+    while i < 6 {
+        m[i as usize] = virtio.mac_at(state, i) as u8
+        i = i + 1
+    }
+    let own: u32 = wire.ip4(a as u8, b as u8, c as u8, d as u8)
+    var netmask: u32 = 0
+    if prefix >= 32 {
+        netmask = 0xFFFFFFFF
+    } else if prefix > 0 {
+        netmask = ((0xFFFFFFFF << (32 - prefix)) & 0xFFFFFFFF) as u32
+    }
+    var seed: u64 = apic.tsc()
+    if seed == 0 {
+        seed = 20260827
+    }
+    let flags: u64 = hold(state)
+    stack.net_init(st(state), own, netmask, (gateway & 0xFFFFFFFF) as u32,
+        &m[0], seed)
+    kstate.set(state, sc(S_IP), own as u64)
+    kstate.set(state, sc(S_MASK), netmask as u64)
+    kstate.set(state, sc(S_GW), gateway)
+    drop_lock(state, flags)
+    return true
 }
 
 // ---------------------------------------------------------- the pump
