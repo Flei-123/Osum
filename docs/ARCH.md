@@ -219,6 +219,75 @@ every branch at once. They are machine layer and they belong behind the
 line; moving them is the first job of the next round, when fewer branches
 are open.
 
+### The x86-64 path did not move — the numbers
+
+The promise of step B is that nothing changes behaviour. That is not a
+promise you can inspect; it has to be run. So: `./test.sh` in a **pristine
+worktree of `main`** (`/root/osum-armbase`) and in the branch, at the same
+time, on the same machine, with the same environment.
+
+```
+BEFORE (main)          15 sections passed, 8 failed, 2145 proofs
+AFTER  (branch arm)    15 sections passed, 8 failed, 2145 proofs
+```
+
+and, runner for runner:
+
+| runner | before | after | | runner | before | after |
+|---|---|---|---|---|---|---|
+| FREESTANDING | 41/0 | 41/0 | | GFX | 76/0 | 76/0 |
+| CORE | 46/0 | 46/0 | | UNIX | 107/0 | 107/0 |
+| KERNEL | 151/23 | 151/23 | | NET | 74/1 | 74/1 |
+| OSUM | 129/1 | 129/1 | | GUARD | 55/0 | 55/0 |
+| PCI | 94/4 | 94/4 | | K11 | 85/0 | 85/0 |
+| POSIX | 134/0 | 134/0 | | WM | 103/0 | 103/0 |
+| SMP | 59/0 | 59/0 | | HV | 114/0 | 114/0 |
+| USERLAND | 91/0 | 91/0 | | K13 | 87/12 | 87/12 |
+| CAPS | 67/0 | 67/0 | | K14 | 144/8 | 144/8 |
+| BOOT | 20/0 | 20/0 | | K16 | 39/3 | 39/3 |
+| | | | | K15 | 250/1 | 250/1 |
+| | | | | K18 | 170/0 | 170/0 |
+
+`diff` on the two lists of tallies is empty. That is the whole claim of step
+B and it is the only form in which it can be made.
+
+**Two things about those numbers have to be said plainly.**
+
+*It is not 24 sections green, and it was not before this round either.*
+Three runners fail on untouched `main` with exactly the numbers they fail
+with here: `K13` 87/12 (`su`, `id` and the `noperm` counter-checks),
+`K14` 144/8 (the `novfs` counter-checks and the root disk comparison),
+`K16` 39/3 (`fas` cannot bind five programs, and the compiler source is not
+where the runner looks for it). Reproduced identically in both trees in
+every run of this round. They are inherited, not caused, and this round did
+not go looking for their cause.
+
+*The machine this was measured on was busy, and some runners feel it.* Five
+other acceptance runs of other branches were going at the same time. A
+second pair of runs, taken later with a different load, came out
+16/7 (2163 proofs) against 17/6 (2155) — and the differences were entirely
+in `PCI`, `SMP`, `NET`, `USERLAND` and `GFX`, in BOTH directions, with
+failures like "no such file: big.ppm" and "the shell never said it was
+ready". Those are runners that photograph the screen through the QEMU
+monitor or wait on a serial line with a time limit. Everything that does not
+depend on timing was identical in every run, in both trees:
+`FREESTANDING`, `CORE`, `KERNEL`, `OSUM`, `POSIX`, `CAPS`, `BOOT`, `UNIX`,
+`GUARD`, `K11`, `WM`, `HV`, `K13`, `K14`, `K16`, `K15`, `K18`.
+
+*And one finding that has nothing to do with ARM but cost an hour.* Running
+the suite with `TMPDIR` on a tmpfs (to get out of the way of a full disk)
+turns `tools/kernel/run.sh` from 176/0 into 151/23, in BOTH trees. With the
+ordinary `TMPDIR` it is 176/0 again, in both, in 87 seconds. Whatever that
+runner does with its temporary files, a memory-backed file system is not the
+same thing to it. Worth knowing before somebody debugs it as a regression.
+
+### The new section 25
+
+`./test.sh` grew one section: `tools/arm/run.sh`, **39 proofs, 0 failures**.
+It does not build Osum for AArch64 — see section 6 for why it cannot yet.
+
+---
+
 ---
 
 ## 4. What the AArch64 side does, measured
