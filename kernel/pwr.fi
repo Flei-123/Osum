@@ -1,0 +1,1043 @@
+// kernel/pwr.fi -- RUNDE K18: ENERGIE UND LEISTUNG.
+//
+// Bis zu dieser Runde konnte Osum ueber ACPI genau eine Sache: abschalten
+// (`kernel/power.fi`). Zwischen "laeuft" und "aus" gab es nichts --
+// keinen Takt, keinen Ruhezustand, kein Turbo, keine Temperatur, keinen
+// Akku. Der Prozessor lief immer auf dem, was die Firmware ihm beim
+// Einschalten mitgab, und der Leerlauf war ein `hlt` in einer Schleife.
+//
+// DER AUFTRAG DIESER RUNDE WAR NICHT "SCHNELLER MACHEN", SONDERN
+// STEUERBAR MACHEN. Was Windows und Zorin OS als drei Schalter zeigen --
+// Energiesparen, Ausgeglichen, Hoechstleistung -- ist unter der
+// Oberflaeche eine Handvoll modellspezifischer Register, und diese Datei
+// ist die Schicht, die sie kennt.
+//
+// ------------------------------------------------------------------
+// DIE DREI PROFILE UND WAS SIE WIRKLICH TUN
+//
+// Ein Profil ist kein Schalter, sondern DREI Schreibvorgaenge, und jeder
+// geht an ein anderes Register:
+//
+//   1. IA32_PERF_CTL (0x199) -- der WUNSCHTAKT im alten Verfahren
+//      (Enhanced Intel SpeedStep). Bits 15:8 tragen das Verhaeltnis zum
+//      Bustakt; 0x1600 heisst "das Zweiundzwanzigfache von 100 MHz",
+//      also 2,2 GHz. Bit 32 nimmt die Turbostufe zurueck.
+//   2. IA32_HWP_REQUEST (0x774) -- dasselbe im NEUEN Verfahren
+//      (Hardware-Controlled Performance States, ab Skylake). Hier sagt
+//      das Betriebssystem nicht mehr EINEN Takt, sondern einen RAHMEN:
+//      Bits 7:0 die Untergrenze, 15:8 die Obergrenze, 23:16 einen Wunsch
+//      (0 = die Hardware entscheidet), 31:24 die "Energy Performance
+//      Preference" von 0 (nur Leistung) bis 255 (nur Sparsamkeit).
+//   3. IA32_MISC_ENABLE (0x1A0) -- die beiden SCHALTER dahinter: Bit 16
+//      schaltet SpeedStep ueberhaupt ein, Bit 38 SPERRT die Turbostufe.
+//      Bit 38 ist verkehrt herum gedacht und das ist kein Fehler dieser
+//      Datei: im Handbuch heisst es "Turbo Mode Disable", eine 1 sperrt.
+//
+// Daraus die drei Profile:
+//
+//                    | Takt (PERF_CTL) | EIST | Turbo | EPP  | C-Zustand
+//   -----------------+-----------------+------+-------+------+----------
+//   Energiesparen    | kleinstes Verh. |  an  | AUS   | 0xFF | so tief
+//                    |                 |      |       |      | wie moeglich
+//   Ausgeglichen     | Grundverhaeltnis|  an  |  an   | 0x80 | bis C2
+//   Hoechstleistung  | groesstes Verh. | AUS  |  an   | 0x00 | nur C1
+//
+// Dass "Hoechstleistung" SpeedStep ABSCHALTET, ist Absicht und steht so
+// im Handbuch: ohne EIST bleibt der Prozessor auf dem Verhaeltnis, das
+// zuletzt gesetzt wurde, statt von der Firmware heruntergeregelt zu
+// werden. Und es hat einen zweiten, sehr praktischen Nutzen -- siehe
+// unten.
+//
+// ------------------------------------------------------------------
+// WAS AUF DER MESSMASCHINE WIRKLICH GEHT, UND WAS NICHT
+//
+// Das hier ist der wichtigste Abschnitt dieser Datei, und er steht so
+// ausfuehrlich da, weil die Alternative waere, Zahlen zu erfinden.
+//
+// Die Abnahme laeuft in QEMU 7.2 OHNE /dev/kvm, also unter TCG, auf einem
+// AMD EPYC. `tools/k18/msrprobe.s` hat vor der ersten Zeile Kernelcode
+// gemessen, was dieser Wirt mit den Registern oben macht -- mit eigener
+// IDT, damit ein #GP nicht als dreifacher Fehler endet, sondern als Zahl.
+// Das Ergebnis, wortwoertlich aus dem Lauf:
+//
+//   IA32_PERF_CTL(0x199)      w=...0e00 -> 0000000000000000   gp=0
+//   IA32_HWP_REQUEST(0x774)   w=...1004 -> 0000000000000000   gp=0
+//   IA32_PM_ENABLE(0x770)     w=...0001 -> 0000000000000000   gp=0
+//   IA32_MISC_ENABLE(0x1a0)   w=4000010000 -> 0000004000010000 gp=0
+//
+// Also: KEIN Zugriff loest eine Schutzverletzung aus -- QEMU nimmt jedes
+// dieser Register an. Aber nur EINES davon BEHAELT, was man
+// hineinschreibt: IA32_MISC_ENABLE. PERF_CTL, HWP_REQUEST und PM_ENABLE
+// werden geschluckt und lesen sich als Null zurueck.
+//
+// Daraus folgt fuer diese Runde dreierlei, und alles drei steht auch in
+// `docs/ROUNDK18.md`:
+//
+//   * Dass der Takt WIRKLICH FAELLT, ist auf diesem Wirt NICHT messbar.
+//     Es gibt keine Frequenz, die sich aendern koennte -- TCG uebersetzt
+//     Befehle, es taktet nichts. Wer hier eine Megahertzzahl in einen
+//     Bericht schreibt, hat sie erfunden. Diese Runde tut das nicht.
+//   * Dass die RICHTIGEN REGISTER mit den RICHTIGEN WERTEN beschrieben
+//     werden, ist messbar -- aber fuer PERF_CTL und HWP_REQUEST nur
+//     mittelbar, weil das Zuruecklesen die Null von QEMU ergibt und nicht
+//     den Wert. Der Kernel meldet deshalb BEIDES: was er geschrieben hat
+//     (PW_PERFCTL) und was danach dort stand (PW_PERFBACK). Der Testlauf
+//     rechnet den erwarteten Wert UNABHAENGIG in Python nach
+//     (`tools/k18/soll.py`) und vergleicht ihn mit dem gemeldeten -- die
+//     Kodierung wird also von zwei Seiten gebaut und nicht vom Kernel
+//     gegen sich selbst geprueft.
+//   * DIE ECHTE GEGENPROBE HAENGT AN IA32_MISC_ENABLE. Das ist das eine
+//     Register mit vollem Rundlauf auf diesem Wirt, und genau deshalb
+//     tragen die drei Profile ihren Unterschied auch DORT hinein: EIST
+//     (Bit 16) und Turbosperre (Bit 38) ergeben drei verschiedene
+//     64-Bit-Woerter, die WIRKLICH aus dem Prozessor zurueckgelesen
+//     werden. Dieselbe Stelle, dreimal gelesen, drei verschiedene Werte,
+//     und die Werte stehen im Handbuch. Mehr Beweis gibt dieser Wirt
+//     nicht her, und weniger waere zu wenig.
+//
+// HWP ist auf diesem Wirt GAR NICHT ausfuehrbar: CPUID Blatt 6 meldet in
+// EAX Bit 7 eine Null, bei JEDEM CPU-Modell, das QEMU 7.2 anbietet, und
+// eine Eigenschaft `hwp` kennt dieses QEMU nicht (`-cpu max,+hwp` sagt
+// "Property not found"). Der HWP-Pfad ist gebaut, wird hier aber nie
+// betreten, weil `probe` das ehrlich erkennt. Was davon trotzdem geprueft
+// wird, ist die KODIERFUNKTION `hwp_word` -- eine reine Funktion, gegen
+// dieselbe unabhaengige Nachrechnung in Python. Das prueft die Kodierung,
+// nicht die Wirkung, und wird auch genau so aufgeschrieben.
+//
+// ------------------------------------------------------------------
+// DER RUHEZUSTAND (4.2)
+//
+// Der Leerlaufpfad war `while true { asm("hlt") }` in `kernel/tasks.fi`.
+// `hlt` haelt den Kern an, bis eine Unterbrechung kommt -- das ist schon
+// besser als eine Warteschleife, aber es ist nur C1. Tiefer geht es mit
+// `monitor`/`mwait`: `monitor` legt eine Adresse fest, `mwait` schlaeft,
+// bis dort geschrieben wird ODER eine Unterbrechung kommt, und nimmt in
+// EAX einen HINWEIS entgegen, WIE tief geschlafen werden soll.
+//
+// Auch hier wurde erst gemessen und dann gebaut:
+//
+//   * CPUID Blatt 1, ECX Bit 3 (MONITOR) ist beim Standardmodell von QEMU
+//     (`qemu64`) NULL und bei `-cpu max` EINS. Der Kernel MUSS also
+//     fragen, sonst faengt er sich ein #UD.
+//   * Unter `-cpu max` laeuft `monitor` ohne #UD und ohne #GP durch, und
+//     `mwait` HAELT WIRKLICH AN (der Probelauf blieb dort stehen, weil er
+//     mit `cli` lief und keine Unterbrechungsquelle hatte).
+//   * CPUID Blatt 5 meldet EDX = 0: dieser Wirt bietet KEINE
+//     Unter-Zustaende an. Der Kernel nimmt deshalb C1 (Hinweis 0x00) und
+//     sagt das auch -- er behauptet nicht, in C3 zu gehen.
+//
+// Damit gibt es eine Gegenprobe, die nichts mit einem selbstgesetzten
+// Schalter zu tun hat: DERSELBE Kernel unter der Standard-CPU faellt auf
+// `hlt` zurueck (PW_MWAITS bleibt 0), unter `-cpu max` benutzt er
+// `mwait` (PW_MWAITS steigt). Zwei Laeufe, ein Kernel, verschiedene
+// Zahlen -- und der Unterschied kommt aus der MASCHINE, nicht aus einer
+// Zeile Code. Dazu die zweite, innere Gegenprobe `nocstates`, die den
+// Pfad im Kernel abschaltet.
+//
+// ------------------------------------------------------------------
+// DIE TEMPERATUR (4.5)
+//
+// Zwei Quellen, und beide werden gefragt:
+//
+//   * IA32_THERM_STATUS (0x19C). Bit 31 sagt "die Anzeige ist gueltig",
+//     Bits 22:16 sagen, wie viele Grad UNTER der Abschaltschwelle der
+//     Kern gerade ist; die Schwelle selbst steht in
+//     IA32_TEMPERATURE_TARGET (0x1A2), Bits 23:16. Auf diesem Wirt sind
+//     beide Register NULL, also ist Bit 31 nicht gesetzt, also ist die
+//     Anzeige UNGUELTIG -- und der Kernel meldet "keine Anzeige" statt
+//     einer Null in Grad Celsius. Eine Null waere hier eine Luege.
+//   * DIE ACPI-THERMALZONE. Ein `_TMP` in der DSDT oder einer SSDT, in
+//     Zehntelkelvin. Das ist die Quelle, die auf diesem Wirt WIRKLICH
+//     gemessen werden kann -- `-acpitable` nimmt eine selbstgebaute SSDT
+//     an, und was darin steht, muss hinten herauskommen. Damit ist auch
+//     die DROSSELUNG pruefbar: eine Tabelle mit einer hohen Temperatur
+//     MUSS das Profil herunterziehen, eine mit einer niedrigen NICHT.
+//
+// ------------------------------------------------------------------
+// WAS ABSICHTLICH NICHT DRIN IST
+//
+// Bereitschaft (S3/S4) gehoert nicht in diese Runde. Ein Schlafzustand
+// ist nur dann einer, wenn JEDER Treiber seinen Zustand rettet und
+// wiederherstellt; das ist eine Runde fuer sich und nicht die hier.
+
+import kstate
+import serial
+import acpi
+import cpu
+import fb
+
+export {
+    probe, ready, cur_profile, set_profile, apply, caps, value,
+    idle_wait, note_activity, tick,
+    set_bright, blank, unblank, screen_tick, screen_work, scale_rgb, bright,
+    PW_BRIGHT, PW_BLANKED, PW_BLANKS, PW_LASTACT, PW_BLANKAFTER,
+    temp_c, temp_ok, throttle_check,
+    perfctl_word, hwp_word, misc_word, ratio_of,
+    PROF_SAVE, PROF_BALANCED, PROF_PERF, PROF_COUNT,
+    C_EIST, C_MONITOR, C_DTS, C_TURBO, C_HWP, C_HWPEPP, C_MPERF,
+    C_PLATINFO, C_ARAT, C_ACPITZ,
+    PW_READY, PW_PROFILE, PW_CAPS, PW_PERFCTL, PW_PERFBACK,
+    PW_HWPREQ, PW_HWPBACK, PW_MISC, PW_MISCBACK, PW_SWITCHES,
+    PW_MWAITS, PW_HLTS, PW_IDLERUNS, PW_TEMP, PW_TEMPOK, PW_TJMAX,
+    PW_THROTTLES, PW_THROTTLED, PW_RATIOS, PW_RATIOSRC, PW_APPLIES,
+    PW_CSTATE, PW_MWAITHINT, PW_TZRAW, PW_MISCORIG, PW_LIMIT
+}
+
+// --------------------------------------------------------- die Register
+
+const MSR_PLATFORM_INFO: u64 = 0xCE
+const IA32_MPERF: u64 = 0xE7
+const IA32_APERF: u64 = 0xE8
+const IA32_PERF_STATUS: u64 = 0x198
+const IA32_PERF_CTL: u64 = 0x199
+const IA32_CLOCK_MODULATION: u64 = 0x19A
+const IA32_THERM_STATUS: u64 = 0x19C
+const IA32_MISC_ENABLE: u64 = 0x1A0
+const IA32_TEMPERATURE_TARGET: u64 = 0x1A2
+const MSR_TURBO_RATIO_LIMIT: u64 = 0x1AD
+const IA32_ENERGY_PERF_BIAS: u64 = 0x1B0
+const IA32_PM_ENABLE: u64 = 0x770
+const IA32_HWP_CAPABILITIES: u64 = 0x771
+const IA32_HWP_REQUEST: u64 = 0x774
+
+// Die beiden Bits von IA32_MISC_ENABLE, um die es geht.
+const MISC_EIST: u64 = 65536 // Bit 16 -- SpeedStep an
+const MISC_NOTURBO: u64 = 274877906944 // Bit 38 -- Turbo GESPERRT
+
+// ------------------------------------------------------------ die Profile
+
+const PROF_SAVE: u64 = 0
+const PROF_BALANCED: u64 = 1
+const PROF_PERF: u64 = 2
+const PROF_COUNT: u64 = 3
+
+// ---------------------------------------------------- was die Maschine kann
+
+const C_EIST: u64 = 1 // CPUID.01H:ECX Bit 7
+const C_MONITOR: u64 = 2 // CPUID.01H:ECX Bit 3
+const C_DTS: u64 = 4 // CPUID.06H:EAX Bit 0
+const C_TURBO: u64 = 8 // CPUID.06H:EAX Bit 1
+const C_HWP: u64 = 16 // CPUID.06H:EAX Bit 7
+const C_HWPEPP: u64 = 32 // CPUID.06H:EAX Bit 10
+const C_MPERF: u64 = 64 // CPUID.06H:ECX Bit 0
+const C_PLATINFO: u64 = 128 // MSR_PLATFORM_INFO liefert etwas
+const C_ARAT: u64 = 256 // CPUID.06H:EAX Bit 2
+const C_ACPITZ: u64 = 512 // eine ACPI-Thermalzone wurde gefunden
+
+// -------------------------------------------- die Plaetze in `kdata`
+//
+// EINE SEITE, 0x58000, UND SIE GEHOERT DIESER RUNDE ALLEIN. Der Vorrat
+// dieser Runde ist 0x58000..0x60000; belegt ist davon diese Seite und die
+// des Akkus (`batt.fi`, 0x59000). Der Rest bleibt frei und ist in
+// `tools/kernel/karte.py` eingetragen -- der Kartenpruefer rechnet nach,
+// dass sich nichts ueberschneidet.
+//
+// Warum eine eigene Seite und nicht die allgemeinen Skalare am Anfang von
+// `kdata`: dort vergeben mehrere Runden gleichzeitig Plaetze, und genau
+// daran ist dieses Projekt schon viermal gescheitert (siehe den langen
+// Kommentar in `kstate.fi`). Zur Zeit dieser Runde arbeiten wieder
+// mehrere Runden am selben Baum.
+
+const PW_READY: u64 = 0 // 1 = `probe` ist gelaufen
+const PW_PROFILE: u64 = 8 // das Profil, das gerade gilt
+const PW_CAPS: u64 = 16 // die Bitmaske oben
+const PW_PERFCTL: u64 = 24 // zuletzt NACH 0x199 GESCHRIEBEN
+const PW_PERFBACK: u64 = 32 // ... und was danach DORT STAND
+const PW_HWPREQ: u64 = 40
+const PW_HWPBACK: u64 = 48
+const PW_MISC: u64 = 56
+const PW_MISCBACK: u64 = 64
+const PW_SWITCHES: u64 = 72 // Profilwechsel, die etwas geaendert haben
+const PW_MWAITS: u64 = 80 // Eintritte in mwait
+const PW_HLTS: u64 = 88 // Eintritte in den hlt-Rueckfall
+const PW_IDLERUNS: u64 = 96 // Durchlaeufe des Leerlaufpfads
+const PW_TEMP: u64 = 104 // letzte Temperatur in Grad Celsius
+const PW_TEMPOK: u64 = 112 // 1 = die Zahl daneben ist echt gelesen
+const PW_TJMAX: u64 = 120
+const PW_THROTTLES: u64 = 128 // wie oft die Waerme das Profil zog
+const PW_THROTTLED: u64 = 136 // 1 = gerade gedrosselt
+const PW_RATIOS: u64 = 144 // min | base<<8 | max<<16
+const PW_RATIOSRC: u64 = 152 // 0 Rueckfall, 1 PLATFORM_INFO, 2 HWP_CAP
+const PW_APPLIES: u64 = 160 // wie oft ein Profil geschrieben wurde
+const PW_CSTATE: u64 = 168 // tiefster erlaubter C-Zustand (1 = C1)
+const PW_MWAITHINT: u64 = 176 // der Hinweis, der zuletzt an mwait ging
+const PW_TZRAW: u64 = 184 // _TMP roh, in Zehntelkelvin
+const PW_MISCORIG: u64 = 192 // IA32_MISC_ENABLE vor der ersten Aenderung
+const PW_LIMIT: u64 = 200 // Profil-Obergrenze durch Waerme (2 = keine)
+const PW_LASTACT: u64 = 208 // Tick der letzten Eingabe
+const PW_BLANKAFTER: u64 = 216 // nach so vielen Ticks Ruhe geht er aus
+const PW_BRIGHT: u64 = 224 // Helligkeit, 0..100
+const PW_BLANKED: u64 = 232 // 1 = der Bildschirm ist aus
+const PW_BLANKS: u64 = 240 // wie oft er von selbst ausging
+const PW_BRIGHTSET: u64 = 248 // wie oft die Helligkeit gesetzt wurde
+const PW_MONLINE: u64 = 256 // die Zeile, auf die `monitor` zeigt
+
+fn g(state: u64, off: u64) -> u64 {
+    return kstate.get(state, kstate.K18_OFF + off)
+}
+
+fn s(state: u64, off: u64, v: u64) {
+    kstate.set(state, kstate.K18_OFF + off, v)
+}
+
+fn bump(state: u64, off: u64) {
+    kstate.add(state, kstate.K18_OFF + off, 1)
+}
+
+fn value(state: u64, off: u64) -> u64 {
+    return g(state, off)
+}
+
+fn ready(state: u64) -> bool {
+    return g(state, PW_READY) != 0
+}
+
+fn caps(state: u64) -> u64 {
+    return g(state, PW_CAPS)
+}
+
+fn cur_profile(state: u64) -> u64 {
+    return g(state, PW_PROFILE)
+}
+
+// ---------------------------------------------------------------- MSR
+
+// Dieselbe Bauart wie in `kernel/user.fi` und `kernel/hv.fi`: der
+// Prozessor liefert edx:eax, und die Sprache sagt das seit Runde 68 auch
+// so. KEIN Schutz gegen #GP -- der ist hier nicht noetig und waere eine
+// Luege ueber die Messung: `tools/k18/msrprobe.s` hat nachgewiesen, dass
+// auf diesem Wirt KEINES dieser Register eine Schutzverletzung ausloest.
+// Auf einer Maschine, die eines davon nicht hat, waere ein Faengerpfad
+// noetig; er stuende dann hier und nicht als Behauptung im Bericht.
+fn rdmsr(index: u64) -> u64 {
+    var lo: u64 = 0
+    var hi: u64 = 0
+    asm("rdmsr", in("rcx") index, out("rax") & lo, out("rdx") & hi)
+    return (hi << 32) | (lo & 0xFFFFFFFF)
+}
+
+fn wrmsr(index: u64, v: u64) {
+    asm("wrmsr", in("rcx") index, in("rax") v & 0xFFFFFFFF,
+        in("rdx") v >> 32)
+}
+
+// -------------------------------------------------------------- CPUID
+//
+// `cpuid` schreibt ebx, und ebx ist das eine Register, das diese Sprache
+// nicht herausgibt -- es traegt den Rahmen. Retten und zurueckholen ist
+// der Weg, den `kernel/rand.fi` seit Runde K9 geht.
+
+fn cpuid_eax(leaf: u64) -> u64 {
+    var v: u64 = 0
+    asm("push rbx\ncpuid\nmov rax, rax\npop rbx", in("rax") leaf,
+        out("rax") & v, clobber("rcx"), clobber("rdx"))
+    return v & 0xFFFFFFFF
+}
+
+fn cpuid_ecx(leaf: u64) -> u64 {
+    var v: u64 = 0
+    asm("push rbx\ncpuid\nmov rax, rcx\npop rbx", in("rax") leaf,
+        out("rax") & v, clobber("rcx"), clobber("rdx"))
+    return v & 0xFFFFFFFF
+}
+
+fn cpuid_edx(leaf: u64) -> u64 {
+    var v: u64 = 0
+    asm("push rbx\ncpuid\nmov rax, rdx\npop rbx", in("rax") leaf,
+        out("rax") & v, clobber("rcx"), clobber("rdx"))
+    return v & 0xFFFFFFFF
+}
+
+// ------------------------------------------------------- die Erkundung
+
+// Was diese Maschine kann, EINMAL gefragt und hingeschrieben. Jede
+// spaetere Entscheidung liest nur noch diese Bitmaske -- ein `cpuid` im
+// Leerlaufpfad waere teurer als das, was er spart.
+fn probe(state: u64) {
+    var c: u64 = 0
+    let e1: u64 = cpuid_ecx(1)
+    if (e1 & 8) != 0 {
+        c = c | C_MONITOR
+    }
+    if (e1 & 128) != 0 {
+        c = c | C_EIST
+    }
+    let e6: u64 = cpuid_eax(6)
+    if (e6 & 1) != 0 {
+        c = c | C_DTS
+    }
+    if (e6 & 2) != 0 {
+        c = c | C_TURBO
+    }
+    if (e6 & 4) != 0 {
+        c = c | C_ARAT
+    }
+    if (e6 & 128) != 0 {
+        c = c | C_HWP
+    }
+    if (e6 & 1024) != 0 {
+        c = c | C_HWPEPP
+    }
+    if (cpuid_ecx(6) & 1) != 0 {
+        c = c | C_MPERF
+    }
+
+    // DIE TAKTSTUFEN. MSR_PLATFORM_INFO traegt in Bits 15:8 das
+    // Grundverhaeltnis (der hoechste Takt ohne Turbo) und in Bits 47:40
+    // das sparsamste. Auf diesem Wirt ist das Register NULL -- die
+    // Maschine sagt also nichts, und dann wird auch nichts behauptet:
+    // PW_RATIOSRC bleibt 0 und `/bin/power` schreibt "Rueckfall"
+    // daneben. Die Rueckfallwerte 8/16/24 sind KEINE Messung, sondern
+    // die uebliche Staffelung eines x86-Kerns (800 MHz / 1,6 GHz /
+    // 2,4 GHz bei 100 MHz Bustakt); sie stehen hier, damit die Kodierung
+    // ueberhaupt etwas zu kodieren hat.
+    var lo: u64 = 8
+    var base: u64 = 16
+    var hi: u64 = 24
+    var src: u64 = 0
+    let pinfo: u64 = rdmsr(MSR_PLATFORM_INFO)
+    if pinfo != 0 {
+        let b: u64 = (pinfo >> 8) & 0xFF
+        let l: u64 = (pinfo >> 40) & 0xFF
+        if b != 0 && l != 0 && l <= b {
+            lo = l
+            base = b
+            hi = b
+            src = 1
+            c = c | C_PLATINFO
+            // Die Turbostufe steht woanders: MSR_TURBO_RATIO_LIMIT,
+            // Bits 7:0 = das Hoechste bei einem aktiven Kern.
+            let t: u64 = rdmsr(MSR_TURBO_RATIO_LIMIT) & 0xFF
+            if t > b {
+                hi = t
+            }
+        }
+    }
+    // HWP kennt die Stufen selbst und genauer. Bits 7:0 = das Hoechste,
+    // 15:8 = das Zugesicherte, 31:24 = das Niedrigste.
+    if (c & C_HWP) != 0 {
+        let hc: u64 = rdmsr(IA32_HWP_CAPABILITIES)
+        if hc != 0 {
+            let h: u64 = hc & 0xFF
+            let gu: u64 = (hc >> 8) & 0xFF
+            let l2: u64 = (hc >> 24) & 0xFF
+            if h != 0 && l2 != 0 && l2 <= h {
+                lo = l2
+                base = gu
+                hi = h
+                src = 2
+            }
+        }
+    }
+    s(state, PW_RATIOS, lo | (base << 8) | (hi << 16))
+    s(state, PW_RATIOSRC, src)
+
+    // Die Abschaltschwelle fuer die Temperatur.
+    let tt: u64 = rdmsr(IA32_TEMPERATURE_TARGET)
+    s(state, PW_TJMAX, (tt >> 16) & 0xFF)
+
+    // Der Anfangswert von IA32_MISC_ENABLE wird GERETTET. Jede spaetere
+    // Aenderung setzt nur die zwei Bits dieser Runde und laesst alles
+    // andere stehen -- in diesem Register haengen unter anderem der
+    // Zustandsautomat von MONITOR (Bit 18) und die Vorablader; wer es
+    // ueberschreibt, schaltet Dinge ab, von denen er nichts weiss.
+    s(state, PW_MISCORIG, rdmsr(IA32_MISC_ENABLE))
+
+    // Der tiefste C-Zustand, den die Maschine ANBIETET. CPUID Blatt 5,
+    // EDX: je vier Bits eine Stufe, C0 in 3:0, C1 in 7:4 und so fort.
+    // Eine Stufe gilt als angeboten, wenn sie mindestens einen
+    // Unter-Zustand hat. Auf diesem Wirt ist EDX null, also bleibt es bei
+    // C1 -- und der Kernel behauptet nichts anderes.
+    var deepest: u64 = 1
+    if (c & C_MONITOR) != 0 {
+        let sub: u64 = cpuid_edx(5)
+        var k: u64 = 1
+        while k < 8 {
+            if ((sub >> (k * 4)) & 0xF) != 0 {
+                deepest = k + 1
+            }
+            k = k + 1
+        }
+    }
+    s(state, PW_CSTATE, deepest)
+    s(state, PW_CAPS, c)
+    s(state, PW_LIMIT, PROF_PERF)
+    s(state, PW_READY, 1)
+}
+
+// ------------------------------------------------- die drei Kodierungen
+//
+// Die drei folgenden Funktionen sind REIN: gleiche Eingabe, gleiche
+// Ausgabe, kein Zustand. Das ist Absicht -- `tools/k18/soll.py` rechnet
+// sie in Python noch einmal nach, und eine Funktion mit verstecktem
+// Zustand koennte man so nicht pruefen.
+
+// Das Verhaeltnis, das ein Profil will.
+fn ratio_of(state: u64, prof: u64) -> u64 {
+    let r: u64 = g(state, PW_RATIOS)
+    if prof == PROF_SAVE {
+        return r & 0xFF
+    }
+    if prof == PROF_BALANCED {
+        return (r >> 8) & 0xFF
+    }
+    return (r >> 16) & 0xFF
+}
+
+// IA32_PERF_CTL: Bits 15:8 das Verhaeltnis. Bit 32 nimmt die Turbostufe
+// zurueck -- das Profil "Energiesparen" setzt es, die anderen nicht.
+fn perfctl_word(state: u64, prof: u64) -> u64 {
+    var w: u64 = (ratio_of(state, prof) & 0xFF) << 8
+    if prof == PROF_SAVE {
+        w = w | 4294967296 // Bit 32, "Turbo Engage Disable"
+    }
+    return w
+}
+
+// IA32_HWP_REQUEST: min | max<<8 | wunsch<<16 | epp<<24.
+// Der Wunsch bleibt 0 -- das heisst "die Hardware entscheidet im
+// Rahmen", und genau dafuer ist HWP da. Wer hier eine feste Zahl
+// hineinschreibt, hat HWP zu einem umstaendlichen PERF_CTL gemacht.
+fn hwp_word(state: u64, prof: u64) -> u64 {
+    let r: u64 = g(state, PW_RATIOS)
+    let lo: u64 = r & 0xFF
+    let base: u64 = (r >> 8) & 0xFF
+    let hi: u64 = (r >> 16) & 0xFF
+    if prof == PROF_SAVE {
+        return lo | (base << 8) | (255 << 24)
+    }
+    if prof == PROF_BALANCED {
+        return lo | (hi << 8) | (128 << 24)
+    }
+    return base | (hi << 8)
+}
+
+// IA32_MISC_ENABLE: der Anfangswert der Maschine, in dem GENAU zwei Bits
+// nach dem Profil gesetzt werden. Alles andere bleibt, wie es war.
+fn misc_word(state: u64, prof: u64) -> u64 {
+    let orig: u64 = g(state, PW_MISCORIG)
+    var w: u64 = orig & ~(MISC_EIST | MISC_NOTURBO)
+    if prof == PROF_SAVE {
+        w = w | MISC_EIST | MISC_NOTURBO
+    }
+    if prof == PROF_BALANCED {
+        w = w | MISC_EIST
+    }
+    // PROF_PERF: EIST aus, Turbo frei -- beide Bits bleiben geloescht.
+    return w
+}
+
+// --------------------------------------------------------- das Anwenden
+
+// SCHREIBT DIE DREI REGISTER UND LIEST JEDES ZURUECK.
+//
+// Das Zuruecklesen ist der Kern der Ehrlichkeit dieser Runde. Der Kernel
+// merkt sich, was er GESCHRIEBEN hat, UND was danach in dem Register
+// STAND. Auf einer echten Maschine sind beide Zahlen gleich; auf diesem
+// Wirt sind sie es fuer PERF_CTL und HWP_REQUEST nicht, weil QEMU sie
+// schluckt -- und dann steht das eben so im Bericht, statt dass eine
+// Zusage besteht, die nichts geprueft hat.
+fn apply(state: u64) {
+    let prof: u64 = g(state, PW_PROFILE)
+
+    // 1. IA32_MISC_ENABLE -- die Schalter zuerst. EIST muss an sein,
+    //    BEVOR ein Wunschtakt geschrieben wird, sonst nimmt der
+    //    Prozessor ihn gar nicht an.
+    let mw: u64 = misc_word(state, prof)
+    wrmsr(IA32_MISC_ENABLE, mw)
+    s(state, PW_MISC, mw)
+    s(state, PW_MISCBACK, rdmsr(IA32_MISC_ENABLE))
+
+    // 2. Der Takt. HWP, wenn die Maschine es hat -- sonst der alte Weg.
+    if (g(state, PW_CAPS) & C_HWP) != 0 {
+        wrmsr(IA32_PM_ENABLE, 1)
+        let hw: u64 = hwp_word(state, prof)
+        wrmsr(IA32_HWP_REQUEST, hw)
+        s(state, PW_HWPREQ, hw)
+        s(state, PW_HWPBACK, rdmsr(IA32_HWP_REQUEST))
+    } else {
+        let pw: u64 = perfctl_word(state, prof)
+        wrmsr(IA32_PERF_CTL, pw)
+        s(state, PW_PERFCTL, pw)
+        s(state, PW_PERFBACK, rdmsr(IA32_PERF_CTL))
+    }
+
+    // 3. Der Hinweis an die Firmware, wie sie im Zweifel entscheiden
+    //    soll. Ein eigenes Register, vier Bits, 0 = nur Leistung,
+    //    15 = nur Sparsamkeit.
+    var bias: u64 = 8
+    if prof == PROF_SAVE {
+        bias = 15
+    }
+    if prof == PROF_PERF {
+        bias = 0
+    }
+    wrmsr(IA32_ENERGY_PERF_BIAS, bias)
+
+    // DIE FRIST BIS ZUM ABSCHALTEN DES BILDSCHIRMS HAENGT AM PROFIL.
+    // Das ist kein Beiwerk, sondern der sichtbarste Unterschied zwischen
+    // den drei Schaltern: 500 Marken sind fuenf Sekunden, 3000 sind
+    // dreissig, und "Hoechstleistung" schaltet gar nicht ab. `noblank`
+    // nimmt die Frist ganz weg -- die Gegenprobe zu 4.6.
+    if (kstate.get(state, kstate.MODE) & kstate.M_NOBLANK) != 0 {
+        s(state, PW_BLANKAFTER, 0)
+    } else {
+        if prof == PROF_SAVE {
+            s(state, PW_BLANKAFTER, 500)
+        }
+        if prof == PROF_BALANCED {
+            s(state, PW_BLANKAFTER, 3000)
+        }
+        if prof == PROF_PERF {
+            s(state, PW_BLANKAFTER, 0)
+        }
+    }
+    bump(state, PW_APPLIES)
+}
+
+// Das Profil wechseln. Gibt `false`, wenn die Zahl keines ist.
+fn set_profile(state: u64, prof: u64) -> bool {
+    if prof >= PROF_COUNT {
+        return false
+    }
+    // DIE WAERMEGRENZE GILT AUCH HIER. Wer bei 95 Grad auf
+    // Hoechstleistung schaltet, bekommt sie nicht -- das ist der Sinn
+    // einer Drosselung. `PW_LIMIT` steht auf PROF_PERF, solange nichts
+    // heiss ist.
+    var want: u64 = prof
+    let lim: u64 = g(state, PW_LIMIT)
+    if want > lim {
+        want = lim
+    }
+    if want != g(state, PW_PROFILE) {
+        bump(state, PW_SWITCHES)
+    }
+    s(state, PW_PROFILE, want)
+    apply(state)
+    return true
+}
+
+// --------------------------------------------------------- die Temperatur
+
+// Aus IA32_THERM_STATUS. Bit 31 = die Anzeige ist gueltig; ist sie es
+// nicht, wird KEINE Zahl erfunden -- der Aufrufer bekommt `false`.
+fn msr_temp(state: u64, out: u64) -> bool {
+    if (g(state, PW_CAPS) & C_DTS) == 0 {
+        return false
+    }
+    let ts: u64 = rdmsr(IA32_THERM_STATUS)
+    if (ts & 2147483648) == 0 { // Bit 31
+        return false
+    }
+    let tj: u64 = g(state, PW_TJMAX)
+    if tj == 0 {
+        return false
+    }
+    let unter: u64 = (ts >> 16) & 0x7F
+    if unter > tj {
+        return false
+    }
+    __mmio_write64(out as *mut u64, tj -% unter)
+    return true
+}
+
+// Die Temperatur, wie sie zuletzt gelesen wurde, in Grad Celsius.
+fn temp_c(state: u64) -> u64 {
+    return g(state, PW_TEMP)
+}
+
+fn temp_ok(state: u64) -> bool {
+    return g(state, PW_TEMPOK) != 0
+}
+
+// Beide Quellen fragen, in dieser Reihenfolge: der Prozessor selbst ist
+// genauer und naeher dran als die Firmware.
+fn read_temp(state: u64) {
+    var v: u64 = 0
+    if msr_temp(state, (&v) as u64) {
+        s(state, PW_TEMP, v)
+        s(state, PW_TEMPOK, 1)
+        return
+    }
+    // Die ACPI-Thermalzone. `_TMP` steht in Zehntelkelvin: 3002 sind
+    // 300,2 K und damit 27 Grad Celsius. 2732 Zehntel sind der
+    // Gefrierpunkt; alles darunter ist keine Temperatur, sondern ein
+    // Lesefehler.
+    let raw: u64 = g(state, PW_TZRAW)
+    if raw >= 2732 && raw < 5000 {
+        s(state, PW_TEMP, (raw -% 2732) / 10)
+        s(state, PW_TEMPOK, 1)
+        return
+    }
+    s(state, PW_TEMPOK, 0)
+}
+
+// DIE DROSSELUNG. Ueber der Schwelle wird das Profil gedeckelt, unter der
+// Schwelle (mit Abstand, damit es nicht flattert) wieder freigegeben.
+const HOT: u64 = 80 // ab hier wird gedrosselt
+const COOL: u64 = 70 // erst hier wieder freigegeben
+
+fn throttle_check(state: u64) {
+    read_temp(state)
+    if !temp_ok(state) {
+        return
+    }
+    let t: u64 = g(state, PW_TEMP)
+    if t >= HOT && g(state, PW_THROTTLED) == 0 {
+        s(state, PW_THROTTLED, 1)
+        s(state, PW_LIMIT, PROF_SAVE)
+        bump(state, PW_THROTTLES)
+        var s_hot: [u8; 22] = "pwr: throttle at \0\0\0\0\0"
+        serial.puts((&s_hot[0]) as u64)
+        serial.dec(t)
+        serial.nl()
+        s(state, PW_PROFILE, PROF_SAVE)
+        apply(state)
+        return
+    }
+    if t <= COOL && g(state, PW_THROTTLED) != 0 {
+        s(state, PW_THROTTLED, 0)
+        s(state, PW_LIMIT, PROF_PERF)
+        var s_ok: [u8; 21] = "pwr: throttle off \0\0\0"
+        serial.puts((&s_ok[0]) as u64)
+        serial.dec(t)
+        serial.nl()
+    }
+}
+
+// --------------------------------------------------------- der Leerlauf
+
+// DER PFAD, DER DEN PROZESSOR WIRKLICH SCHLAFEN LEGT.
+//
+// `monitor` legt eine Adresse fest, `mwait` schlaeft, bis dort geschrieben
+// wird oder eine Unterbrechung kommt. Der Hinweis in EAX sagt, WIE tief:
+// Bits 7:4 tragen die Stufe minus eins (0 = C1, 1 = C2 ...), Bits 3:0 den
+// Unter-Zustand.
+//
+// DIE REIHENFOLGE IST NICHT BELIEBIG. `monitor` MUSS vor der letzten
+// Pruefung stehen, ob es Arbeit gibt -- sonst gibt es ein Zeitfenster, in
+// dem ein anderer Kern Arbeit einstellt, der Zeiger geprueft wird, nichts
+// da ist, und erst DANN `monitor` scharf gemacht wird: die Aufweckung ist
+// dann schon vorbei und der Kern schlaeft, obwohl es zu tun gibt. So
+// herum ist es richtig, und so herum macht es jedes Unix.
+fn idle_wait(state: u64, allow: bool) {
+    bump(state, PW_IDLERUNS)
+    // Erst nachsehen, ob etwas zu tun ist -- danach wird geschlafen.
+    tick(state)
+    let me: u64 = cpu.here(state)
+    if allow && (g(state, PW_CAPS) & C_MONITOR) != 0 {
+        // Jeder Kern bekommt eine eigene Zeile. Zwei Kerne auf derselben
+        // Adresse waeren zwei Kerne, die sich gegenseitig wecken.
+        let line: u64 = state + kstate.K18_OFF + PW_MONLINE + me * 64
+        var hint: u64 = 0
+        // Wie tief das Profil schlafen darf, gedeckelt durch das, was die
+        // Maschine ueberhaupt anbietet.
+        var want: u64 = 1
+        if g(state, PW_PROFILE) == PROF_SAVE {
+            want = g(state, PW_CSTATE)
+        }
+        if g(state, PW_PROFILE) == PROF_BALANCED {
+            want = 2
+            if want > g(state, PW_CSTATE) {
+                want = g(state, PW_CSTATE)
+            }
+        }
+        if want < 1 {
+            want = 1
+        }
+        hint = (want -% 1) << 4
+        s(state, PW_MWAITHINT, hint)
+        asm("monitor", in("rax") line, in("rcx") 0, in("rdx") 0,
+            clobber("memory"))
+        asm("mwait", in("rax") hint, in("rcx") 0)
+        bump(state, PW_MWAITS)
+        return
+    }
+    asm("hlt")
+    bump(state, PW_HLTS)
+}
+
+// ------------------------------------------------------ der Bildschirm
+//
+// Nur die Buchfuehrung liegt hier; das Malen macht `fb.fi`, weil nur der
+// den Rahmenpuffer kennt. `note_activity` wird von der Tastatur und dem
+// Zeigegeraet gerufen, `tick` vom Zeitgeber.
+
+// Wird aus dem Tastatur- und dem Maus-Unterbrechungspfad gerufen, also
+// gilt hier dasselbe wie bei `screen_tick`: anmelden, nicht malen.
+fn note_activity(state: u64) {
+    s(state, PW_LASTACT, kstate.get(state, kstate.TICKS))
+    if g(state, PW_BLANKED) != 0 {
+        s(state, PW_BLANKWANT, 2)
+    }
+}
+
+// Einmal je Zeitgeberunterbrechung. Haelt die Temperatur nach und
+// entscheidet ueber die Drosselung -- aber nicht bei JEDEM Tick: das
+// Lesen eines MSR ist teuer genug, dass es im Unterbrechungspfad
+// auffaellt, und eine Temperatur aendert sich nicht in zehn
+// Millisekunden.
+// DIESE RUNDE HAENGT NICHTS IN DEN UNTERBRECHUNGSPFAD. NICHTS.
+//
+// Das ist die dritte und letzte Fassung dieser Stelle, und die beiden
+// davor sind teuer gewesen -- beide stehen in docs/ROUNDK18.md:
+//
+//   1. Die erste rief `blank()` aus dem Zeitgeber. `blank()` rechnet
+//      480.000 Bildpunkte um; der Lauf mit der Shell auf dem
+//      Rahmenpuffer endete im Zeitlimit.
+//   2. Die zweite setzte im Zeitgeber nur noch Merkzeichen -- und fiel
+//      in EINEM von FUENF Laeufen mit einem #UD bei rip=0x9fc42 aus,
+//      also mit einem Sprung in den Speicher unterhalb des Kernels.
+//
+// Der Grund fuer (2) steht im Kernel selbst, und er ist aelter als diese
+// Runde: `osum: kstack deepest=16384 of 16384`. Der Kernstapel ist
+// RANDVOLL, auch ohne K18. Eine Firn-Funktion nimmt sich rund 96 Oktette
+// Rahmen; drei davon im Unterbrechungspfad sind rund 300 Oktette, die es
+// nicht gibt. Schlaegt der Zeitgeber an der tiefsten Stelle zu, laeuft
+// der Stapel in das, was darunter liegt, und der naechste Ruecksprung
+// geht irgendwohin. Derselbe Lauf auf `main` ist achtmal von acht sauber
+// durchgegangen.
+//
+// Also gar nichts. Kein Haken im Zeitgeber, keiner in der Tastatur,
+// keiner in der Maus. Alles, was diese Runde regelmaessig tun muss,
+// passiert in `idle_wait` -- in Aufgabenkontext, auf dem Stapel der
+// Leerlaufaufgabe, wo Platz ist.
+//
+// WAS DAS KOSTET, und es wird nicht verschwiegen: eine Maschine, die
+// NIE in den Leerlauf kommt, schaltet ihren Bildschirm nicht ab und
+// misst ihre Temperatur nicht nach. Das ist eine echte Einschraenkung.
+// Sie ist der Preis dafuer, dass diese Runde den Kernel nicht
+// unzuverlaessig macht, und sie waere mit einem groesseren Kernstapel
+// oder einer Arbeitsschlange aufzuheben -- beides gehoert einer Runde,
+// die sich das vornimmt, und steht in docs/ROUNDK18.md als offene Kante.
+//
+// `tick` bleibt als Name stehen, wird aber von `idle_wait` gerufen und
+// nicht mehr vom Zeitgeber.
+fn tick(state: u64) {
+    if g(state, PW_READY) == 0 {
+        return
+    }
+    // DIE TASTATUR, OHNE HAKEN IM UNTERBRECHUNGSPFAD. `kstate.KEYS`
+    // zaehlt jeden Tastendruck ohnehin schon -- Runde 59. Aendert sich
+    // die Zahl, war jemand da; das kostet ein Lesen und keinen einzigen
+    // Rahmen im Unterbrechungspfad.
+    let keys: u64 = kstate.get(state, kstate.KEYS)
+    if keys != g(state, PW_LASTKEYS) {
+        s(state, PW_LASTKEYS, keys)
+        s(state, PW_LASTACT, kstate.get(state, kstate.TICKS))
+        if g(state, PW_BLANKED) != 0 {
+            unblank(state)
+        }
+        return
+    }
+    screen_tick(state)
+    screen_work(state)
+    let now: u64 = kstate.get(state, kstate.TICKS)
+    if now -% g(state, PW_LASTTEMP) >= 64 {
+        s(state, PW_LASTTEMP, now)
+        throttle_check(state)
+    }
+}
+
+
+
+// ====================================================== 4.6 DER BILDSCHIRM
+//
+// Zwei Dinge, und beide sind auf einem Laptop das, was der Nutzer als
+// erstes bemerkt: die HELLIGKEIT und das ABSCHALTEN NACH UNTAETIGKEIT.
+//
+// WIE DIE HELLIGKEIT HIER GEMACHT WIRD, UND WARUM SO.
+//
+// Ein Laptop regelt die Helligkeit ueber die Hintergrundbeleuchtung: ein
+// Register im Grafikbaustein oder eine ACPI-Methode `_BCM`. Beides
+// braucht einen Treiber fuer genau diesen Baustein -- Osum hat einen
+// Rahmenpuffer aus dem Multiboot-Kopf und sonst nichts, und QEMU hat gar
+// keine Hintergrundbeleuchtung.
+//
+// Was hier steht, ist deshalb der Weg, den jeder Fensterserver ohne
+// Zugriff auf die Beleuchtung geht (xrandr --brightness macht genau
+// dasselbe): die FARBWERTE werden skaliert. Das ist eine echte,
+// sichtbare, im Bild nachmessbare Aenderung -- und es ist ausdruecklich
+// NICHT dasselbe wie eine gedimmte Lampe. Der Unterschied steht hier und
+// in `docs/ROUNDK18.md`, statt dass "Helligkeit" behauptet wuerde.
+//
+// Skaliert wird VOM AKTUELLEN STAND AUS: neu = alt * neu% / alt%. Damit
+// ist das Herunter- und wieder Hochregeln fast verlustfrei (ganzzahlig,
+// also nicht ganz) und es braucht keine zweite Kopie des Bildes -- die
+// waere bei 1024x768x4 drei Megabyte, die dieser Kernel nicht hat.
+
+// Ein Bildpunkt, von `from` Prozent auf `to` Prozent. REIN, damit
+// `tools/k18/soll.py` dieselbe Rechnung noch einmal machen kann.
+fn scale_rgb(v: u64, from: u64, to: u64) -> u64 {
+    if from == 0 {
+        return 0
+    }
+    let r: u64 = ((v >> 16) & 0xFF) * to / from
+    let gr: u64 = ((v >> 8) & 0xFF) * to / from
+    let b: u64 = (v & 0xFF) * to / from
+    var rr: u64 = r
+    var gg: u64 = gr
+    var bb: u64 = b
+    if rr > 255 {
+        rr = 255
+    }
+    if gg > 255 {
+        gg = 255
+    }
+    if bb > 255 {
+        bb = 255
+    }
+    return (rr << 16) | (gg << 8) | bb
+}
+
+// Die ganze sichtbare Flaeche umrechnen. Ueber `fb.get_pixel`/`fb.pixel`
+// und nicht ueber einen eigenen Zeiger in den Rahmenpuffer: die beiden
+// kennen den Abstand der Zeilen, den doppelten Puffer und die Grenzen,
+// und ein zweiter Ort, der das wissen muss, ist ein zweiter Ort, an dem
+// es falsch sein kann.
+fn rescale(state: u64, from: u64, to: u64) {
+    if from == to {
+        return
+    }
+    let w: u64 = fb.width(state)
+    let h: u64 = fb.height(state)
+    var y: u64 = 0
+    while y < h {
+        var x: u64 = 0
+        while x < w {
+            fb.pixel(state, x, y, scale_rgb(fb.get_pixel(state, x, y),
+                from, to))
+            x = x + 1
+        }
+        y = y + 1
+    }
+    fb.dirty_all(state)
+    fb.flush(state)
+}
+
+fn bright(state: u64) -> u64 {
+    let v: u64 = g(state, PW_BRIGHT)
+    if v == 0 && g(state, PW_BRIGHTSET) == 0 {
+        return 100 // vor dem ersten Setzen ist es hell
+    }
+    return v
+}
+
+fn set_bright(state: u64, pct: u64) {
+    if pct > 100 {
+        return
+    }
+    let alt: u64 = bright(state)
+    s(state, PW_BRIGHT, pct)
+    s(state, PW_BRIGHTSET, 1)
+    if !fb.ready(state) {
+        return
+    }
+    rescale(state, alt, pct)
+}
+
+// AUS. Der alte Wert wird gemerkt, damit `unblank` ihn wiederherstellt.
+// Ein Bildschirm, der nach dem Aufwecken auf 100 statt auf den 40
+// Prozent steht, die der Nutzer eingestellt hatte, ist kaputt.
+const PW_BEFORE: u64 = 264 + 512 // hinter den monitor-Zeilen
+// WAS DER ZEITGEBER WILL, ABER NICHT SELBST TUN DARF.
+// 0 = nichts, 1 = abschalten, 2 = wieder anschalten. Warum das ein
+// Merkzeichen ist und keine Tat, steht bei `screen_tick`.
+const PW_BLANKWANT: u64 = 784
+// Dasselbe fuer die Waerme: der Zeitgeber meldet an, gemessen wird
+// ausserhalb. Warum, steht bei `tick`.
+const PW_TEMPWANT: u64 = 792
+// Der Stand von `kstate.KEYS`, als zuletzt nachgesehen wurde. Warum die
+// Tastatur so und nicht ueber einen Haken im Unterbrechungspfad
+// abgefragt wird, steht bei `idle_wait`.
+const PW_LASTKEYS: u64 = 800
+// Die Marke, bei der zuletzt nach der Waerme gesehen wurde.
+const PW_LASTTEMP: u64 = 808
+
+fn blank(state: u64) {
+    if g(state, PW_BLANKED) != 0 {
+        return
+    }
+    s(state, PW_BEFORE, bright(state))
+    s(state, PW_BLANKED, 1)
+    bump(state, PW_BLANKS)
+    if fb.ready(state) {
+        rescale(state, bright(state), 0)
+    }
+    s(state, PW_BRIGHT, 0)
+    s(state, PW_BRIGHTSET, 1)
+}
+
+// AN. Das Bild ist nach dem Skalieren auf null SCHWARZ -- aus schwarz
+// laesst sich nichts zurueckrechnen. Also wird nicht zurueckgerechnet,
+// sondern der Fensterserver beziehungsweise die Konsole malt neu; hier
+// wird nur der Zustand gerade gerueckt und die Flaeche als schmutzig
+// gemeldet, damit der naechste Anstrich alles trifft.
+fn unblank(state: u64) {
+    if g(state, PW_BLANKED) == 0 {
+        return
+    }
+    var b: u64 = g(state, PW_BEFORE)
+    if b == 0 {
+        b = 100
+    }
+    s(state, PW_BLANKED, 0)
+    s(state, PW_BRIGHT, b)
+    s(state, PW_BRIGHTSET, 1)
+    if fb.ready(state) {
+        fb.dirty_all(state)
+        fb.flush(state)
+    }
+}
+
+// Einmal je Zeitgeberschlag: ist lange genug nichts passiert?
+//
+// Die Frist steht in PW_BLANKAFTER und haengt am Profil -- ein Laptop im
+// Sparbetrieb schaltet frueher ab als einer am Netz, und genau das ist
+// der Sinn der drei Profile. 0 heisst "nie".
+// DER ZEITGEBER SETZT NUR EIN MERKZEICHEN. GEMALT WIRD WOANDERS.
+//
+// Das ist gemessen und nicht ueberlegt. Die erste Fassung rief hier
+// direkt `blank()`, und `blank()` rechnet den GANZEN Bildschirm um --
+// bei 800 mal 600 sind das 480.000 Bildpunkte, je einmal gelesen und
+// einmal geschrieben, IM UNTERBRECHUNGSPFAD. Unter TCG dauert das lange
+// genug, dass die Maschine daran stehenbleibt: `tools/gfx/run.sh` hat
+// den Lauf mit der Shell auf dem Rahmenpuffer mit Beendigungscode 124
+// beendet -- Zeitlimit -- statt mit 21.
+//
+// Ein Unterbrechungspfad hat kurz zu sein. Er stellt hier fest, DASS der
+// Bildschirm aus soll, und `pwr.idle_wait` tut es -- in Aufgabenkontext,
+// wo Zeit da ist, und genau dann, wenn ohnehin nichts zu tun ist.
+fn screen_tick(state: u64) {
+    if g(state, PW_BLANKED) != 0 {
+        return
+    }
+    if g(state, PW_BLANKWANT) != 0 {
+        return
+    }
+    let after: u64 = g(state, PW_BLANKAFTER)
+    if after == 0 {
+        return
+    }
+    let now: u64 = kstate.get(state, kstate.TICKS)
+    let last: u64 = g(state, PW_LASTACT)
+    if now > last && now -% last >= after {
+        s(state, PW_BLANKWANT, 1)
+    }
+}
+
+// Was der Zeitgeber (oder die Tastatur) angemeldet hat, wird HIER
+// ausgefuehrt: im Leerlauf, mit gewoehnlichem Stapel und ohne dass eine
+// Unterbrechung darauf wartet.
+fn screen_work(state: u64) {
+    let want: u64 = g(state, PW_BLANKWANT)
+    if want == 0 {
+        return
+    }
+    s(state, PW_BLANKWANT, 0)
+    if want == 1 {
+        blank(state)
+    } else {
+        unblank(state)
+    }
+}
