@@ -618,16 +618,43 @@ another fails here.
 | one boot, FOUR programs in FOUR views | `filtered` 54 of 54, `faked` 49 of 49, `none` 52 of 52 -- and the `real` button checked for **absence**: 49 of 49 pixels differ from a mark |
 | the same again in the light scheme | identical, out of the same seven files |
 | the bar found its pictures | `taskbar: icons=4 marks=3` |
+| the whole run | **86 passed, 0 failed** |
+| round DESKTOP's own run against the changed taskbar | 0 failed (the one flake it does have is older than this branch) |
 
 The screenshots are in `docs/shots/netview/`: `state-*.png` (the four
 corner states), `four-views-dark.png` and `four-views-light.png` (four
 programs, four marks, one bar), and `icons-sheet.png` (all seven signs
 1:1 and magnified, in both schemes).
 
-The offset between the two was itself a fault this measurement found:
-the bar reports coordinates inside its own window and the picture is the
-whole screen. The first run measured the icon against the wrong 62
-pixels and said so.
+**Three faults this measurement found, and they are the reason it
+exists.**
+
+1. *The offset.* The bar reports coordinates inside its own window and
+   the picture is the whole screen. The first run measured the icon
+   against the wrong 62 pixels. Worse, the second version read the
+   offset out of a serial line that a **second program had written into
+   the middle of**, got nothing, quietly used zero, and reported `falsch
+   54 von 54` about an icon that was perfect. The runner now matches
+   that line end to end and says so when there is none, instead of
+   assuming a zero.
+2. *The icon had no room.* It was drawn in front of the address and the
+   status field kept the width it had, so the address ran out of its own
+   rectangle into the battery beside it. `tools/desktop/run.sh` -- round
+   DESKTOP's own acceptance run, not this one -- said the rectangles
+   were wrong after a restart, and it was right. The icon takes its room
+   off the text's share now.
+3. *The extra reporting was noise.* Three ring 3 programs share one
+   serial line. Printing `netv=0` for every window of every repaint made
+   two of them write into each other's words often enough to break a
+   claim in another suite. The bar reports the netview fields only when
+   there is something to report, and the machine state only when it
+   changes.
+
+One failure in `tools/desktop/run.sh` is **not** this round's:
+`settings: rect name=edge is missing` is the same serial splicing, and
+it was reproduced on the unchanged `taskbar-edge` commit this branch
+starts from -- one failure there, the same one. It is written down here
+rather than left for somebody else to find.
 
 ### 11.6 What the addendum does not do
 
