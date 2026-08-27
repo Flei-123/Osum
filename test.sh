@@ -92,6 +92,28 @@
 #      bricht jede Messung zusammen, `nicnobm` nimmt das Busmaster-Bit,
 #      `nicnoirq` maskiert den Vektor, `nicintx` nimmt den Stift statt
 #      MSI-X.
+#  25. MARKEN STATT FARBEN (tests/theme/run.sh, Runde THEME): bis
+#      dahin waren die Farben der Oberflaeche eine LISTE -- achtzehn
+#      Werte mit Namen in /etc/theme, die jedes Widget sich abholte.
+#      Das traegt genau so lange, bis dieselbe Oberflaeche hell UND
+#      dunkel aussehen soll; dann sind es achtzehn Werte mal zwei mal
+#      jedes Schema, von Hand im Gleichschritt gehalten. Diese Runde
+#      baut statt dessen die drei Ebenen, die Entwurfssysteme benutzen:
+#      ROHE RAMPEN (dreizehn neutrale Stufen und vier erzeugte
+#      Farbtonrampen zu neun) -> DREIUNDZWANZIG ROLLEN (surface,
+#      text-primary, border-focus, accent-hover, danger ...) ->
+#      EINUNDVIERZIG KOMPONENTENMARKEN (Fensterrahmen, Titelleiste,
+#      Knopf, Eingabefeld, Liste, Taskleiste). Hell und dunkel sind
+#      damit ZWEI BELEGUNGEN DERSELBEN NAMEN und nicht zwei Saetze
+#      Code; im ganzen Zeichencode steht kein Farbwert mehr, und ein
+#      Pruefer zaehlt das nach (21 vorher, 0 nachher). Die Akzentfarbe
+#      ist frei waehlbar, ihre Zustaende werden BERECHNET, und jede
+#      Text-auf-Flaeche-Paarung wird nach WCAG 2.1 nachgerechnet --
+#      relative Luminanz in GANZEN Zahlen, ohne Fliesskomma, gegen
+#      `tools/theme/model.py` und gegen die Formel selbst geprueft.
+#      Waehlt jemand eine Farbe, die 4,5:1 bricht, verschiebt das
+#      System sie auf der erzeugten Rampe und SAGT ES.
+#
 #  21. WIDGETS UND EIN DATEIMANAGER (tools/k15/run.sh, Runde K15):
 #      zwischen dem Rechteck, das Runde K10 einer Anwendung gab, und
 #      einer Anwendung fehlte alles. Diese Runde baut es -- als
@@ -423,6 +445,8 @@ lauf "22. Widgets und der Dateimanager: eine Bibliothek in Ring 3 (tools/k15/run
      tools/k15/run.sh k15 '^K15: |^        -> |^  OK    (die Anordnung|ein Klick auf das Kaestchen|mit Bereichsverfolgung|und /daten/neu|der Verweis spart|getippt |OHNE (die Schluesselwoerter|das Journal|den Namensindex)|[0-9]\. (DER AUFBAU|DIE SUCHE|DIE GEGENPROBE|der Index)|und DIESELBEN NAMEN|nach dem (Anlegen|Umbenennen)|das Symbol des Dateimanagers)'
 lauf "24. Energie und Leistung: drei Profile, Ruhezustand, Waerme, Akku (tools/k18/run.sh, Runde K18)" \
      tools/k18/run.sh k18 '^K18: |^  OK    (dieselbe Stelle|IA32_PERF_CTL bekommt|Turbo ist bei|SpeedStep ist bei|jeder Durchlauf ging|schlafend |aber es wird kein|zwei Tabellen|GEGENPROBE|GEDROSSELT|im BILD|dasselbe Pruefbild|und einen Bildpunkt DANEBEN|keine AUFRUFNUMMER)'
+lauf "25. Marken statt Farben: hell, dunkel, automatisch, und der Kontrast nachgerechnet (tests/theme/run.sh, Runde THEME)" \
+     tests/theme/run.sh theme '^THEME: |^  OK    (rohe Farbwerte|derselbe Pruefer|alle 256|groesster Abstand|[a-z]+/(light|dark): (41|23|21|jede)|#[0-9a-f]+ hell|die Farbe bleibt|GEGENPROBE|aufloesen |nachsehen |vollstaendig |erkennen, |neu malen, |das Umschalten|[a-z]+: die (haeufigste|aufgeloeste)|ohne /etc/theme.conf|und die eingebaute|aus der kaputten|und 4 werden|was die Datei)'
 
 echo
 echo "=================================================================="
