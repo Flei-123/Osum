@@ -45,7 +45,7 @@ import libc.io
 import libc.mem
 
 export {
-    start, ready, screen_w, screen_h, mouse_x, mouse_y,
+    start, ready, screen_w, screen_h, mouse_x, mouse_y, mouse_btn,
     surf_w, surf_rows, band_y, set_band, surface,
     clip_set, clip_x0, clip_y0, clip_x1, clip_y1,
     px, hline, vline, rect, frame, frame3, blend,
@@ -61,9 +61,14 @@ export {
     WIG_BLIT, WIG_GLYPH, WIG_KERN, WIG_CLIPSET, WIG_CLIPGET,
     WIG_SCREEN, WIG_CURSOR,
     WM_CREATE, WM_FILL, WM_TEXT, WM_EVENT, WM_INFO, WM_FLUSH, WM_MOVE,
-    WM_CLOSE, WI_W, WI_H, WI_X, WI_Y, WI_ID, WI_EVENTS, WI_FOCUS,
+    WM_CLOSE, WM_SIZE, WI_W, WI_H, WI_X, WI_Y, WI_ID, WI_EVENTS,
+    WI_FOCUS, win_size,
     WM_STATE, WM_LIST, WM_ACT, WI_LAYER, WI_HIDDEN,
     WS_LAYER, WS_HIDDEN, WS_DECO, WA_RAISE, WA_HIDE, WA_TOGGLE,
+    WM_STRUT, WS_MAXIMIZED, WI_WORKX, WI_WORKY, WI_WORKW, WI_WORKH,
+    WI_MAXIMIZED, WE_BOTTOM, WE_TOP, WE_LEFT, WE_RIGHT,
+    win_strut, win_max, work_x, work_y, work_w, work_h, edge_name,
+    edge_by_name,
     WL_ID, WL_X, WL_Y, WL_W, WL_H, WL_LAYER, WL_FLAGS, WL_FOCUS,
     WL_TITLE, WL_BYTES, L_DESK, L_NORMAL, L_TOP, F_HIDDEN, F_NODECO,
     win_state, win_list, win_act,
@@ -93,6 +98,8 @@ const WM_CLOSE: u64 = 2107
 const WM_STATE: u64 = 2109
 const WM_LIST: u64 = 2110
 const WM_ACT: u64 = 2111
+const WM_STRUT: u64 = 2112
+const WM_SIZE: u64 = 2113
 
 const WI_W: u64 = 0
 const WI_H: u64 = 1
@@ -103,6 +110,18 @@ const WI_EVENTS: u64 = 5
 const WI_FOCUS: u64 = 8
 const WI_LAYER: u64 = 9
 const WI_HIDDEN: u64 = 10
+const WI_WORKX: u64 = 11
+const WI_WORKY: u64 = 12
+const WI_WORKW: u64 = 13
+const WI_WORKH: u64 = 14
+const WI_MAXIMIZED: u64 = 15
+
+// ADDENDUM TASKBAR: the four screen edges, same numbers as in the
+// kernel. `WE_` and not `E_`, because `E_` already means an event here.
+const WE_BOTTOM: u64 = 0
+const WE_TOP: u64 = 1
+const WE_LEFT: u64 = 2
+const WE_RIGHT: u64 = 3
 
 // RUNDE DESKTOP: die Ebenen, die Merkmale, die Felder eines Satzes aus
 // der Fenstertafel und was WM_STATE und WM_ACT tun. Alles doppelt
@@ -111,6 +130,7 @@ const WI_HIDDEN: u64 = 10
 const WS_LAYER: u64 = 0
 const WS_HIDDEN: u64 = 1
 const WS_DECO: u64 = 2
+const WS_MAXIMIZED: u64 = 3
 
 const WA_RAISE: u64 = 0
 const WA_HIDE: u64 = 1
@@ -249,6 +269,15 @@ fn mouse_x() -> u64 {
 
 fn mouse_y() -> u64 {
     return sys3w(WIG_SCREEN, 3, 0, 0)
+}
+
+// ADDENDUM TASKBAR: WHICH BUTTONS ARE DOWN RIGHT NOW. Bit 0 is left.
+// A window only gets EV_DOWN and EV_UP for the pointer INSIDE it; the
+// taskbar has to follow a drag that leaves it, all the way to the other
+// side of the screen, and this is the only way to see the button let
+// go out there.
+fn mouse_btn() -> u64 {
+    return sys3w(WIG_SCREEN, 4, 0, 0)
 }
 
 // Der Streifen faengt bei dieser Fensterzeile an. Alles, was danach
@@ -947,4 +976,91 @@ fn theme_set(i: u64, v: u64) {
     if i < T_COUNT {
         th[(i) as usize] = v
     }
+}
+
+// ================== ADDENDUM TASKBAR: THE WORK AREA, SEEN FROM RING 3
+//
+// Six one-line calls. They exist so that no application has to know
+// that a taskbar is 28 pixels high or which edge it is on -- it asks
+// for the free rectangle and gets it. That is the whole point of a
+// strut: the reservation is declared once and read everywhere.
+
+// Reserve `size` pixels of screen edge `edge` for this window. Only a
+// window on layer 0 or 2 may; everyone else gets a negative result.
+// `size == 0` gives the edge back.
+fn win_strut(h: u64, edge: u64, size: u64) -> u64 {
+    return sys3w(WM_STRUT, h, edge, size)
+}
+
+// Change the size of this window. It cannot grow past the buffer it was
+// created with; the server says so instead of pretending.
+fn win_size(h: u64, w: u64, hh: u64) -> u64 {
+    return sys3w(WM_SIZE, h, (w << 16) | hh, 0)
+}
+
+// Fill the work area -- and keep filling it when it changes.
+fn win_max(h: u64, on: bool) -> u64 {
+    var v: u64 = 0
+    if on {
+        v = 1
+    }
+    return sys3w(WM_STATE, h, WS_MAXIMIZED, v)
+}
+
+fn work_x(h: u64) -> u64 {
+    return sys3w(WM_INFO, h, WI_WORKX, 0)
+}
+
+fn work_y(h: u64) -> u64 {
+    return sys3w(WM_INFO, h, WI_WORKY, 0)
+}
+
+fn work_w(h: u64) -> u64 {
+    return sys3w(WM_INFO, h, WI_WORKW, 0)
+}
+
+fn work_h(h: u64) -> u64 {
+    return sys3w(WM_INFO, h, WI_WORKH, 0)
+}
+
+// THE NAME OF AN EDGE, and its opposite. /etc/taskbar.conf holds words
+// and not numbers, because a configuration file that says `edge=2` is a
+// file nobody can read without the source. The two directions of the
+// translation stand next to each other here, in ONE place -- the
+// taskbar reads and the settings application writes, and they must not
+// disagree.
+static mut e_names: [u8; 23] = "bottom\0top\0left\0right\0\0"
+
+fn edge_name(e: u64) -> u64 {
+    let b: u64 = (&e_names[0 as usize]) as u64
+    var i: u64 = 0
+    var k: u64 = 0
+    while k < e && i < 24 {
+        if __mmio_read8((b + i) as *mut u8) == 0 as u8 {
+            k = k + 1
+        }
+        i = i + 1
+    }
+    return b + i
+}
+
+fn edge_by_name(p: u64) -> u64 {
+    var e: u64 = 0
+    while e < 4 {
+        let q: u64 = edge_name(e)
+        var i: u64 = 0
+        var gleich: bool = true
+        while __mmio_read8((q + i) as *mut u8) != 0 as u8 {
+            if __mmio_read8((p + i) as *mut u8)
+                != __mmio_read8((q + i) as *mut u8) {
+                gleich = false
+            }
+            i = i + 1
+        }
+        if gleich && __mmio_read8((p + i) as *mut u8) == 0 as u8 {
+            return e
+        }
+        e = e + 1
+    }
+    return 4 // no such edge -- the caller keeps what it had
 }
