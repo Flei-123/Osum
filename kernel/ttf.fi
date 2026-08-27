@@ -16,7 +16,7 @@
 //   hhea  Aufsteiger, Absteiger, Zeilenzwischenraum, Zahl der Laufweiten
 //   maxp  wie viele Glyphen die Datei traegt
 //   hmtx  Laufweite je Glyphe
-//   cmap  Zeichen -> Glyphennummer, Format 4 (das der Windows-Tabelle)
+//   cmap  Zeichen -> Glyphennummer, Format 4 UND Format 12 (Runde I18N)
 //   loca  Glyphennummer -> Versatz in `glyf`
 //   glyf  die Umrisse: Punkte, gerade Stuecke und QUADRATISCHE Bezier
 //   kern  Unterschneidung, Format 0 -- die Paare, bei denen zwei
@@ -58,10 +58,12 @@
 profile kernel
 
 import kstate
+import utf8
 
 export {
     init, ready, load_font, fonts, glyphs, arena, arena_bytes, used_bytes,
     upm, ascent, descent, line_height, glyph_of, advance26, kern26,
+    has_cmap12,
     glyph, g_w, g_h, g_left, g_top, g_adv, g_pixel, g_data,
     text_width26, hits, misses, rastered, cache_slots, cache_used,
     selftest, selftest_max,
@@ -106,6 +108,13 @@ const F_LOCA: u64 = 0x58
 const F_HMTX: u64 = 0x60
 const F_KERN: u64 = 0x68 // Adresse des ersten Paares, 0 = keine
 const F_KPAIRS: u64 = 0x70
+// RUNDE I18N: die zweite cmap-Untertabelle. Format 4 endet bei
+// U+FFFF; alles darueber -- und das ist mehr als eine Randnotiz,
+// dort liegen die Schriftzeichen, die eine Oberflaeche als Bild
+// benutzt -- steht in Format 12. Eine Schrift kann beide tragen,
+// keines von beiden ist Pflicht, und eine Datei ohne BEIDE wird
+// abgelehnt.
+const F_CMAP12: u64 = 0x78 // Adresse der Format-12-Untertabelle
 
 // ------------------------------------------------- der Arbeitsbereich
 //
@@ -368,7 +377,12 @@ fn load_font(state: u64, p: u64, len: u64) -> u64 {
     fs(state, n, F_LOCA, loca)
     fs(state, n, F_HMTX, hmtx)
     fs(state, n, F_CMAP, cmap4_of(cmap))
-    if fg(state, n, F_CMAP) == 0 {
+    fs(state, n, F_CMAP12, cmap12_of(cmap))
+    // RUNDE I18N: EINE von beiden reicht. Vorher war Format 4 Pflicht,
+    // und eine reine Format-12-Schrift -- die gibt es, jede Schrift mit
+    // Schriftzeichen jenseits von U+FFFF ist eine -- wurde abgelehnt,
+    // obwohl der Rasterer sie haette lesen koennen.
+    if fg(state, n, F_CMAP) == 0 && fg(state, n, F_CMAP12) == 0 {
         return MAX_FONTS
     }
     kern0_of(state, n, kern)
@@ -397,6 +411,49 @@ fn cmap4_of(c: u64) -> u64 {
                 beste = sub
             }
             if pid == 0 {
+                beste = sub
+            }
+        }
+        i = i + 1
+    }
+    return beste
+}
+
+// RUNDE I18N: dieselbe Suche fuer FORMAT 12. Bevorzugt (3,10) --
+// Windows, Unicode voll -- und nimmt sonst die erste im Format 12.
+//
+// WARUM ES DIESE TABELLE UEBERHAUPT BRAUCHT. Format 4 bildet
+// SECHZEHN-Bit-Zahlen ab; sein ganzer Aufbau (Endpunkte, Anfaenge,
+// Delta, Bereichsversatz -- alles `u16`) kann nichts anderes. Unicode
+// reicht bis U+10FFFF. Alles ab U+10000 -- die Schriftzeichen einer
+// Oberflaeche, historische Schriften, die Erweiterungen der
+// chinesischen Zeichen -- ist ueber Format 4 UNERREICHBAR, und zwar
+// nicht aus Bequemlichkeit, sondern weil die Zahl nicht hineinpasst.
+//
+// Format 12 ist dagegen einfach: eine Zahl `nGroups`, danach je Gruppe
+// drei 32-Bit-Zahlen (erstes Zeichen, letztes Zeichen, erste
+// Glyphennummer), und die Gruppen sind nach dem ersten Zeichen
+// SORTIERT. Deshalb sucht `glyph12` binaer und nicht linear: eine
+// vollstaendige Schrift hat Tausende Gruppen.
+fn cmap12_of(c: u64) -> u64 {
+    if c == 0 {
+        return 0
+    }
+    let n: u64 = rd16(c + 2)
+    var beste: u64 = 0
+    var i: u64 = 0
+    while i < n {
+        let pid: u64 = rd16(c + 4 + i * 8)
+        let eid: u64 = rd16(c + 6 + i * 8)
+        let sub: u64 = c + rd32(c + 8 + i * 8)
+        if rd16(sub) == 12 {
+            if beste == 0 {
+                beste = sub
+            }
+            if pid == 3 && eid == 10 {
+                beste = sub
+            }
+            if pid == 0 && eid == 4 {
                 beste = sub
             }
         }
@@ -442,6 +499,17 @@ fn glyphs(state: u64, f: u64) -> u64 {
     return fg(state, f, F_NGLYPH)
 }
 
+// RUNDE I18N: traegt die Schrift eine Format-12-Tabelle? Der Testlaeufer
+// will das WISSEN und nicht vermuten -- die beiden geschnittenen
+// Schriften dieses Baums haben keine, und das soll als Zahl dastehen und
+// nicht als Annahme.
+fn has_cmap12(state: u64, f: u64) -> bool {
+    if f >= gs(state, S_FONTS) {
+        return false
+    }
+    return fg(state, f, F_CMAP12) != 0
+}
+
 fn upm(state: u64, f: u64) -> u64 {
     if f >= gs(state, S_FONTS) {
         return 0
@@ -482,15 +550,69 @@ fn line_height(state: u64, f: u64, px: u64) -> u64 {
     return h as u64
 }
 
-// Zeichen -> Glyphennummer, aus der Format-4-Tabelle. Die Suche laeuft
-// linear ueber die Segmente: ein Zeichensatz mit fuenfundneunzig Zeichen
-// hat drei davon, und eine binaere Suche waere hier mehr Code als
-// Ersparnis.
+// CODEPUNKT -> GLYPHENNUMMER.
+//
+// RUNDE I18N HAT DIESE FUNKTION NICHT UMBENANNT, ABER IHRE BEDEUTUNG
+// GEAENDERT, und der Unterschied ist der ganze Punkt dieser Runde: `c`
+// war bis hierher ein OKTETT, weil jeder Aufrufer eine Zeichenkette
+// oktettweise durchlief und es keine Zeichen ueber 0x7E gab. `c` ist
+// jetzt ein CODEPUNKT. Wer hier ein Oktett aus der Mitte einer
+// Mehr-Oktett-Folge hineingibt, bekommt eine falsche Glyphe -- und
+// genau deshalb decodieren `text_width26` und `wm.text` jetzt vorher.
+//
+// Format 12 hat Vorrang, wenn die Schrift es hat: es ist eine
+// Obermenge von Format 4 und reicht ueber U+FFFF hinaus. Findet es
+// nichts, wird trotzdem noch Format 4 gefragt -- es gibt Schriften,
+// deren beide Tabellen nicht deckungsgleich sind.
 fn glyph_of(state: u64, f: u64, c: u64) -> u64 {
     if f >= gs(state, S_FONTS) {
         return 0
     }
-    let t: u64 = fg(state, f, F_CMAP)
+    if fg(state, f, F_CMAP12) != 0 {
+        let g: u64 = glyph12(fg(state, f, F_CMAP12), c)
+        if g != 0 {
+            return g
+        }
+    }
+    if fg(state, f, F_CMAP) == 0 {
+        return 0
+    }
+    return glyph4(fg(state, f, F_CMAP), c)
+}
+
+// Format 12: binaere Suche ueber die sortierten Gruppen.
+fn glyph12(t: u64, c: u64) -> u64 {
+    let n: u64 = rd32(t + 12)
+    if n == 0 {
+        return 0
+    }
+    var lo: u64 = 0
+    var hi: u64 = n
+    while lo < hi {
+        let m: u64 = (lo + hi) / 2
+        let g: u64 = t + 16 + m * 12
+        let a: u64 = rd32(g)
+        let e: u64 = rd32(g + 4)
+        if c < a {
+            hi = m
+        } else if c > e {
+            lo = m + 1
+        } else {
+            return rd32(g + 8) + (c - a)
+        }
+    }
+    return 0
+}
+
+// Format 4, aus der Format-4-Tabelle. Die Suche laeuft linear ueber die
+// Segmente: die geschnittenen Schriften dieses Baums haben SIEBEN davon
+// (gemessen nach Runde I18N, vorher drei), und eine binaere Suche waere
+// hier mehr Code als Ersparnis. Zeichen ueber 0xFFFF kann diese Tabelle
+// grundsaetzlich nicht -- deshalb die Abfrage ganz oben.
+fn glyph4(t: u64, c: u64) -> u64 {
+    if c > 0xFFFF {
+        return 0
+    }
     let segx2: u64 = rd16(t + 6)
     let enden: u64 = t + 14
     let anfaenge: u64 = enden + segx2 + 2
@@ -566,19 +688,30 @@ fn kern26(state: u64, f: u64, g1: u64, g2: u64, px: u64) -> i64 {
 }
 
 // Die Breite einer Zeile in 26.6, mit Unterschneidung. `p` zeigt auf
-// `n` Oktette.
+// `n` OKTETTE -- und `n` ist weiterhin eine Zahl von Oktetten, nicht von
+// Zeichen; das ist die Laenge, die ein Aufrufer hat.
+//
+// RUNDE I18N: die Schleife laeuft ueber ZEICHEN. Vorher zaehlte sie ein
+// Oktett je Durchlauf und addierte fuer 0xC3 0xB6 zwei Laufweiten von
+// zwei Glyphen, die es nicht gibt -- die gemessene Breite war zu gross,
+// und jeder mittig gesetzte Knopftext stand daneben.
 fn text_width26(state: u64, f: u64, p: u64, n: u64, px: u64) -> i64 {
     var x: i64 = 0
     var vorher: u64 = 0
     var i: u64 = 0
     while i < n {
-        let gid: u64 = glyph_of(state, f, kstate.get8(p + i))
+        let v: u64 = utf8.next(p, n, i)
+        let l: u64 = utf8.len_of(v)
+        if l == 0 {
+            return x
+        }
+        let gid: u64 = glyph_of(state, f, utf8.cp_of(v))
         if vorher != 0 {
             x = x + kern26(state, f, vorher, gid, px)
         }
         x = x + advance26(state, f, gid, px)
         vorher = gid
-        i = i + 1
+        i = i + l
     }
     return x
 }
