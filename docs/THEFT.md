@@ -138,8 +138,14 @@ Losing the machine is only survivable if the backup is both *complete* and
 and no fourth (`docs/ORPHANS.md`, and `docs/BACKUP.md` on the OrientOS
 side):
 
-1. **ALWAYS** -- `PLAN`, the secret store, `config/`, `state/`. The work
-   and the credentials. Nothing else can produce them.
+1. **ALWAYS** -- `PLAN`, `config/`, `state/`. The work. Nothing else can
+   produce it. **CORRECTED 27.08.2026:** this rule used to name "the
+   secret store" here as well, in the clear, on a stick. That was wrong
+   and the owner said so. Secrets are now a class of their own: they
+   travel only on request and only sealed under a separate master
+   password, and a third class -- device key, machine identity, session
+   tokens -- never travels at all. See `docs/BACKUP-SECRETS.md`, measured
+   in section 13 of the runner.
 2. **NEVER** -- store entries a source can deliver, `apps/`, `etc/`,
    `cache/`. Every one of these is an output: derived from the PLAN, or
    derived from use. PLAN2 measured this at about **99 % of the disk**.

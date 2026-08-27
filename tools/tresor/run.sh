@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-2.0-only
 # tools/tresor/run.sh -- RUNDE TRESOR: Geraeteidentitaet, Sicherung,
 # Schluesselverwaltung. Und das, was NICHT geht.
 #
@@ -92,7 +93,7 @@ if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
     exit 0
 fi
 
-PROGS="sh ls cat echo hello hwid shat backup key"
+PROGS="sh ls cat echo hello hwid shat backup key bsect"
 
 # ============================================================ 1. bauen
 
@@ -1046,6 +1047,376 @@ grep -qE '/st4/S-' "$TMPD/mess.ls" \
 grep -qE '/st4/T-' "$TMPD/mess.ls" \
     && bad "die halbfertige T-Datei ist liegengeblieben" \
     || ok "GEGENPROBE im Abbild: die halbfertige T-Datei ist weggeraeumt"
+
+# ================ 13. Geheimnisse: drei Klassen, zwei getrennte Passwoerter
+
+echo "== 13a. ChaCha20 und die Ableitung gegen RFC 8439 und hashlib =="
+
+python3 tools/tresor/vectors.py > "$TMPD/vec.txt" 2>&1 \
+    && ok "der Wirt rechnet die Vektoren nach (cryptography + hashlib)" \
+    || { bad "vectors.py laeuft nicht"; sed 's/^/        /' "$TMPD/vec.txt" | head -6; }
+
+cat > "$TMPD/t_sec1.sh" <<'EOS'
+bsect
+EOS
+python3 tools/osum/mkfs.py build "$TMPD/dsec1.img" $BLOCKS /bin/ /t/ /proc/ /dev/ \
+    /bin/sh="$TMPD/bin/sh.elf" /bin/echo="$TMPD/bin/echo.elf" \
+    /bin/bsect="$TMPD/bin/bsect.elf" /t/s.sh="$TMPD/t_sec1.sh" \
+    > "$TMPD/mkfs-sec1.txt" 2>&1 \
+    && ok "mkfs.py baut das Abbild fuer die Vektoren" \
+    || { bad "mkfs.py fehlgeschlagen"; sed 's/^/        /' "$TMPD/mkfs-sec1.txt" | head -6; }
+
+rc=$(lauf sec1 "$TMPD/dsec1.img" "osum vfs nokbd script=sh /t/s.sh;exit")
+is "der Vektorlauf endet ordentlich" "$rc" "21"
+V="$TMPD/sec1.txt"
+hv() { grep -a "^$1: " "$V" | sed "s/^$1: //" | tr -d '\r'; }
+wv() { grep -a "^$1: " "$TMPD/vec.txt" | sed "s/^$1: //"; }
+
+is "cc1: ChaCha20-Block = RFC 8439 2.3.2" "$(hv cc1)" "$(wv cc1)"
+is "cc2: die Verschluesselung von RFC 8439 2.4.2" "$(hv cc2)" "$(wv cc2)"
+is "und cc2 ist DER TEXT AUS DEM RFC selbst" "$(hv cc2)" "$(wv rfc242)"
+is "cc3: 4096 Oktette -- der Zaehler laeuft 64 mal weiter" "$(hv cc3)" "$(wv cc3)"
+is "hm1: HMAC-SHA256 ueber 4096 Oktette (key.fi kann das nicht)" "$(hv hm1)" "$(wv hm1)"
+is "pb1: PBKDF2-HMAC-SHA256, 2048 Runden, gegen hashlib" "$(hv pb1)" "$(wv pb1)"
+is "cls: die Einstufung von neun Pfaden" "$(hv cls)" "dddssdnnn"
+
+SL=$(grep -a '^sl1: ' "$V" | sed 's/^sl1: //' | tr -d '\r')
+is "sl1: der BLOCKNAME ist HMAC(CONV, Klartext)" "$(echo "$SL" | sed -n 1p)" "$(wv sl1name)"
+is "sl1: die ersten 32 Oktette Geheimtext" "$(echo "$SL" | sed -n 2p)" "$(wv sl1ct)"
+is "sl1: die Marke (encrypt-then-MAC)" "$(echo "$SL" | sed -n 3p)" "$(wv sl1tag)"
+is "sl2: entsiegeln gibt den Klartext zurueck" "$(hv sl2)" "yes"
+is "sl3: EIN gekipptes Oktett und das Entsiegeln VERWEIGERT" "$(hv sl3)" "yes"
+is "sl4: derselbe Klartext -> DERSELBE Name (Dedup ueberlebt)" "$(hv sl4)" "yes"
+is "sl5: anderes Passwort -> ANDERER Name (der Bestaetigungsangriff faellt aus)" \
+   "$(hv sl5)" "yes"
+is "sl5 gegengerechnet auf dem Wirt" "$(wv sl5name)" "$(wv sl5name)"
+
+# ---------------------------------------------------------------------------
+
+echo "== 13b. drei Klassen in einer echten Sicherung =="
+
+# Der Sicherungssatz. Jede Datei traegt eine EINDEUTIGE Marke, damit der
+# Wirt sie im fertigen Speicher suchen kann -- und ihr Fehlen etwas heisst.
+python3 - "$TMPD" <<'PY2'
+import os, sys
+t = sys.argv[1] + "/set"
+for d in ("config", "config/vpn", "config/vpn/keys", "state", "state/session",
+          "secrets", "etc", "device"):
+    os.makedirs(t + "/" + d, exist_ok=True)
+st = 0x51DE7A1B4C9E2F03
+def nxt():
+    global st
+    st ^= (st << 13) & 0xFFFFFFFFFFFFFFFF
+    st ^= st >> 7
+    st ^= (st << 17) & 0xFFFFFFFFFFFFFFFF
+    return st & 0xFF
+def blob(mark, n):
+    return mark + bytes(nxt() for _ in range(n - len(mark)))
+# (a) GEWOEHNLICH
+open(t + "/PLAN", "wb").write(blob(b"MARK-PLAN-ORDINARY-DATA ", 8192))
+open(t + "/config/theme", "wb").write(b"MARK-THEME-ORDINARY\n")
+open(t + "/state/last", "wb").write(b"MARK-STATE-ORDINARY\n")
+open(t + "/etc/passwd", "wb").write(b"MARK-PASSWD-ORDINARY\n")
+# (b) GEHEIM
+open(t + "/secrets/vault.kdbx", "wb").write(blob(b"MARK-VAULT-SECRET-BANK-PW ", 8192))
+open(t + "/config/vpn/keys/home.key", "wb").write(b"MARK-VPNKEY-SECRET\n")
+open(t + "/etc/shadow", "wb").write(b"MARK-SHADOW-SECRET\n")
+# (c) DARF NIE MIT
+open(t + "/device/key", "wb").write(b"MARK-DEVICEKEY-NEVER\n")
+open(t + "/etc/machine-id", "wb").write(b"MARK-MACHINEID-NEVER\n")
+open(t + "/state/session/token", "wb").write(b"MARK-SESSION-NEVER\n")
+PY2
+
+cat > "$TMPD/t_sec2.sh" <<'EOS'
+echo ==A==
+backup save /set /sA a1
+echo ==B==
+backup save /set /sB b1 -mmasterpw
+echo ==BRESTNOM==
+backup restore /sB b1 /outX
+echo ==BREST==
+backup restore /sB b1 /outB -mmasterpw
+echo ==C==
+backup save /set /sC c1 -pstorepw -mmasterpw
+echo ==CVERIFY==
+backup verify /sC c1 -pstorepw -mmasterpw
+echo ==CVERIFYNOP==
+backup verify /sC c1
+echo ==CWRONGP==
+backup restore /sC c1 /outZ -pnonsense -mmasterpw
+echo ==CWRONGM==
+backup restore /sC c1 /outZ -pstorepw -mnonsense
+echo ==CREST==
+backup restore /sC c1 /outC -pstorepw -mmasterpw
+echo ==DEDUPA==
+backup save /dup /sD d1
+echo ==DEDUPB==
+backup save /dup /sE e1 -pstorepw
+echo ==DEDUPA2==
+backup save /dup /sD d2
+echo ==DEDUPB2==
+backup save /dup /sE e2 -pstorepw
+echo ==END==
+EOS
+
+python3 - "$TMPD" <<'PY2'
+import os, sys
+t = sys.argv[1]
+st = 0x139408DCBBF7A44
+def nxt():
+    global st
+    st ^= (st << 13) & 0xFFFFFFFFFFFFFFFF
+    st ^= st >> 7
+    st ^= (st << 17) & 0xFFFFFFFFFFFFFFFF
+    return st & 0xFF
+gleich = bytes(nxt() for _ in range(8192))   # genau zwei Bloecke
+for d in ("x", "y", "z"):
+    os.makedirs(t + "/dup/" + d, exist_ok=True)
+    open(t + "/dup/%s/gleich.bin" % d, "wb").write(gleich)
+PY2
+
+python3 tools/osum/mkfs.py build "$TMPD/dsec2.img" $BLOCKS \
+    /bin/ /t/ /proc/ /dev/ \
+    /set/ /set/config/ /set/config/vpn/ /set/config/vpn/keys/ \
+    /set/state/ /set/state/session/ /set/secrets/ /set/etc/ /set/device/ \
+    /dup/ /dup/x/ /dup/y/ /dup/z/ \
+    /sA/ /sB/ /sC/ /sD/ /sE/ /outB/ /outC/ /outX/ /outZ/ \
+    /bin/sh="$TMPD/bin/sh.elf" /bin/cat="$TMPD/bin/cat.elf" \
+    /bin/echo="$TMPD/bin/echo.elf" /bin/backup="$TMPD/bin/backup.elf" \
+    /set/PLAN="$TMPD/set/PLAN" \
+    /set/config/theme="$TMPD/set/config/theme" \
+    /set/config/vpn/keys/home.key="$TMPD/set/config/vpn/keys/home.key" \
+    /set/state/last="$TMPD/set/state/last" \
+    /set/state/session/token="$TMPD/set/state/session/token" \
+    /set/secrets/vault.kdbx="$TMPD/set/secrets/vault.kdbx" \
+    /set/etc/passwd="$TMPD/set/etc/passwd" \
+    /set/etc/shadow="$TMPD/set/etc/shadow" \
+    /set/etc/machine-id="$TMPD/set/etc/machine-id" \
+    /set/device/key="$TMPD/set/device/key" \
+    /dup/x/gleich.bin="$TMPD/dup/x/gleich.bin" \
+    /dup/y/gleich.bin="$TMPD/dup/y/gleich.bin" \
+    /dup/z/gleich.bin="$TMPD/dup/z/gleich.bin" \
+    /t/s.sh="$TMPD/t_sec2.sh" > "$TMPD/mkfs-sec2.txt" 2>&1 \
+    && ok "mkfs.py baut den Sicherungssatz mit allen drei Klassen" \
+    || { bad "mkfs.py fehlgeschlagen"; sed 's/^/        /' "$TMPD/mkfs-sec2.txt" | head -8; }
+
+rc=$(lauf sec2 "$TMPD/dsec2.img" "osum vfs nokbd script=sh /t/s.sh;exit")
+is "der Geheimnislauf endet ordentlich" "$rc" "21"
+S2="$TMPD/sec2.txt"
+# GEGENPROBE, und sie hat einen echten Fehler gefunden: dieser Kern gibt
+# einem Programm hoechstens acht Argumente (`proc.MAX_ARGS`). `-p pass -m
+# pass` sind neun, die Schale sagt "too many arguments" und LAESST DEN
+# BEFEHL AUS -- die Sicherung lief nie und der Test las nur leere Felder.
+# Darum haengt das Passwort jetzt am Buchstaben, und darum steht diese
+# Zusage hier.
+is "GEGENPROBE: keine Zeile sprengt das Argumentlimit der Schale" \
+   "$(grep -ac 'too many arguments' "$S2" || true)" "0"
+sfeld() { sed -n "/^==$1==/,/^==/p" "$S2" | grep -a "^$2: " | tail -1 | sed "s/^$2: //" | tr -d '\r'; }
+sab() { sed -n "/^==$1==/,/^==/p" "$S2"; }
+
+# ---- STANDARDLAUF: OHNE ausdrueckliche Wahl kommt KEIN Geheimnis mit ----
+is "A (Standard): KEINE geheime Datei gesichert" "$(sfeld A 'secret files')" "0"
+is "A (Standard): drei geheime Orte AUSGELASSEN" "$(sfeld A 'secret left out')" "3"
+is "A (Standard): drei Orte der Klasse (c) ausgelassen" "$(sfeld A 'never out')" "3"
+
+# ---- MIT -m: die Geheimnisse kommen mit, versiegelt --------------------
+is "B (-m): drei geheime Dateien mitgenommen" "$(sfeld B 'secret files')" "3"
+is "B (-m): keine mehr ausgelassen" "$(sfeld B 'secret left out')" "0"
+is "B (-m): Klasse (c) bleibt trotzdem drausssen" "$(sfeld B 'never out')" "3"
+
+# ---- DER EIGENTLICHE NACHWEIS: der WIRT durchsucht die fertigen Speicher
+python3 - "$TMPD/live-sec2.img" "$TMPD" > "$TMPD/grep.txt" 2>&1 <<'PY2'
+import subprocess, sys
+img = sys.argv[1]
+def files():
+    r = subprocess.run(["python3", "tools/osum/mkfs.py", "list", img],
+                       capture_output=True, text=True)
+    return [l.split()[0] for l in r.stdout.splitlines() if l.strip()]
+def cat(p):
+    r = subprocess.run(["python3", "tools/osum/mkfs.py", "cat", img, p],
+                       capture_output=True)
+    return r.stdout if r.returncode == 0 else b""
+def store_blob(prefix):
+    """Alles, was im Speicher <prefix> liegt, zu einem Klumpen -- so wie
+    ein Finder den Stick lesen wuerde."""
+    out = b""
+    for f in files():
+        if f.startswith(prefix):
+            out += cat(f)
+    return out
+marks = {
+    "PLAN": b"MARK-PLAN-ORDINARY-DATA",
+    "VAULT": b"MARK-VAULT-SECRET-BANK-PW",
+    "VPNKEY": b"MARK-VPNKEY-SECRET",
+    "SHADOW": b"MARK-SHADOW-SECRET",
+    "DEVICEKEY": b"MARK-DEVICEKEY-NEVER",
+    "MACHINEID": b"MARK-MACHINEID-NEVER",
+    "SESSION": b"MARK-SESSION-NEVER",
+}
+for st in ("/sA/", "/sB/", "/sC/"):
+    blob = store_blob(st)
+    print("store %s size=%d" % (st, len(blob)))
+    for k, v in marks.items():
+        print("  %s %s %d" % (st, k, blob.count(v)))
+# DER ROHINHALT DES TRESORS, genau an seiner Stelle. Der Schnappschuss
+# nennt die Bloecke einer Datei, INDEX sagt wo sie in PACK liegen -- also
+# genau das, was ein Finder des Sticks tun wuerde. Herausgeschnitten wird
+# der ERSTE Block von /secrets/vault.kdbx.
+def block_of(store, snap, path):
+    txt = cat(store + snap).decode("latin-1")
+    line = [l for l in txt.split("\n") if l.startswith(path + "\t")]
+    if not line:
+        return None
+    name = line[0].split("\t")[-1].split(",")[0]
+    for il in cat(store + "INDEX").decode("latin-1").split("\n"):
+        f = il.split("\t")
+        if len(f) == 3 and f[0] == name:
+            off, ln = int(f[1]), int(f[2])
+            return name, cat(store + "PACK")[off:off + ln]
+    return None
+for st, sn in (("/sB/", "S-b1"), ("/sC/", "S-c1")):
+    r = block_of(st, sn, "/secrets/vault.kdbx")
+    if r is None:
+        print("vaultblock %s MISSING" % st)
+    else:
+        name, oct_ = r
+        print("vaultblock %s name=%s len=%d mark=%d" % (
+            st, name[:16], len(oct_), oct_.count(b"MARK-VAULT-SECRET-BANK-PW")))
+        print("vaulthex %s %s" % (st, oct_[:48].hex()))
+# UND das Gegenstueck: der Pfad steht im Klartext im Schnappschuss (B4).
+sc = store_blob("/sC/")
+print("pathleak %d" % sc.count(b"/secrets/vault.kdbx"))
+PY2
+sed 's/^/        /' "$TMPD/grep.txt" | head -34
+
+g() { grep -a "^  $1 $2 " "$TMPD/grep.txt" | awk '{print $3}'; }
+
+# Die Gegenprobe ZUERST: die Suche muss ueberhaupt etwas finden koennen.
+is "GEGENPROBE: gewoehnliche Daten stehen in A im KLARTEXT im Speicher" \
+   "$(g /sA/ PLAN)" "1"
+is "A: der Tresor ist NICHT im Speicher -- gar nicht" "$(g /sA/ VAULT)" "0"
+is "A: der VPN-Schluessel ist nicht drin" "$(g /sA/ VPNKEY)" "0"
+is "A: die Passwort-Hashes sind nicht drin" "$(g /sA/ SHADOW)" "0"
+
+is "KLASSE (c): der Geraeteschluessel kommt in A nicht vor" "$(g /sA/ DEVICEKEY)" "0"
+is "KLASSE (c): die Maschinenkennung kommt in A nicht vor" "$(g /sA/ MACHINEID)" "0"
+is "KLASSE (c): das Sitzungsmerkmal kommt in A nicht vor" "$(g /sA/ SESSION)" "0"
+
+is "B: der Tresor IST mitgekommen -- aber NICHT lesbar" "$(g /sB/ VAULT)" "0"
+is "B: auch der VPN-Schluessel ist unlesbar" "$(g /sB/ VPNKEY)" "0"
+is "B: auch die Passwort-Hashes sind unlesbar" "$(g /sB/ SHADOW)" "0"
+is "KLASSE (c): der Geraeteschluessel kommt auch in B nicht vor" "$(g /sB/ DEVICEKEY)" "0"
+is "KLASSE (c): die Maschinenkennung kommt auch in B nicht vor" "$(g /sB/ MACHINEID)" "0"
+is "KLASSE (c): das Sitzungsmerkmal kommt auch in B nicht vor" "$(g /sB/ SESSION)" "0"
+is "B ohne -p: gewoehnliche Daten sind WEITERHIN im Klartext (zwei getrennte Schichten)" \
+   "$(g /sB/ PLAN)" "1"
+
+is "C (-p -m): auch die gewoehnlichen Daten sind nicht mehr lesbar" "$(g /sC/ PLAN)" "0"
+is "C: der Tresor natuerlich auch nicht" "$(g /sC/ VAULT)" "0"
+is "C: der Geraeteschluessel ist gar nicht erst drin" "$(g /sC/ DEVICEKEY)" "0"
+
+# DER ROHINHALT, den ein Finder des Sticks vor sich haette.
+vb() { grep -a "^vaultblock $1 " "$TMPD/grep.txt" | sed 's/.*mark=//'; }
+vl() { grep -a "^vaultblock $1 " "$TMPD/grep.txt" | sed 's/.*len=\([0-9]*\).*/\1/'; }
+is "der Tresorblock in B ist 4112 Oktette gross -- 4096 + 16 Oktette Marke" \
+   "$(vl /sB/)" "4112"
+is "und die Marke MARK-VAULT-SECRET-BANK-PW steht NICHT darin" "$(vb /sB/)" "0"
+is "in C ebenso" "$(vb /sC/)" "0"
+ok "ROHINHALT des Tresorblocks in B, erste 48 Oktette:"
+echo "        $(grep -a '^vaulthex /sB/' "$TMPD/grep.txt" | awk '{print $3}')"
+ok "derselbe Tresor in C, anderes Hauptsalz, also ANDERE Oktette:"
+echo "        $(grep -a '^vaulthex /sC/' "$TMPD/grep.txt" | awk '{print $3}')"
+is "GEGENPROBE: derselbe Klartext, zwei Speicher, ZWEI verschiedene Geheimtexte" \
+   "$([ "$(grep -a '^vaulthex /sB/' "$TMPD/grep.txt" | awk '{print $3}')" = \
+       "$(grep -a '^vaulthex /sC/' "$TMPD/grep.txt" | awk '{print $3}')" ] \
+       && echo gleich || echo verschieden)" "verschieden"
+
+# DIE GEMESSENE LUECKE, und sie steht in bsec.fi B4 als Grenze.
+is "EHRLICH: der PFAD /secrets/vault.kdbx steht auch in C im KLARTEXT" \
+   "$(grep -a '^pathleak' "$TMPD/grep.txt" | awk '{print $2}')" "1"
+
+# ---- WIEDERHERSTELLEN OHNE HAUPTPASSWORT: klare Meldung, kein Schweigen --
+sab BRESTNOM | grep -qa 'carries secrets' \
+    && ok "ohne -m sagt das Wiederherstellen KLAR, dass Geheimnisse drin sind" \
+    || bad "ohne -m wird still weitergemacht"
+sab BRESTNOM | grep -qa 'restored files' \
+    && bad "ohne -m meldet der Lauf trotzdem einen Erfolg" \
+    || ok "und meldet KEINEN Erfolg -- kein stilles Ueberspringen"
+sab BREST | grep -qa 'restored files' \
+    && ok "mit -m kommt der Baum zurueck" \
+    || bad "mit -m kommt der Baum NICHT zurueck"
+
+sab CWRONGP | grep -qa 'wrong store password' \
+    && ok "ein falsches Speicherpasswort wird benannt" \
+    || bad "ein falsches Speicherpasswort wird nicht benannt"
+sab CWRONGM | grep -qa 'wrong master password' \
+    && ok "ein falsches Hauptpasswort wird benannt" \
+    || bad "ein falsches Hauptpasswort wird nicht benannt"
+sab CVERIFYNOP | grep -qa 'this store is encrypted' \
+    && ok "verify ohne Passwort sagt, dass der Speicher verschluesselt ist" \
+    || bad "verify ohne Passwort meldet den verschluesselten Speicher nicht"
+is "verify mit beiden Passwoertern: nichts kaputt" "$(sfeld CVERIFY corrupt)" "0"
+is "verify mit beiden Passwoertern: nichts ungeprueft" "$(sfeld CVERIFY unchecked)" "0"
+
+# ---- OKTETT FUER OKTETT aus dem Abbild ---------------------------------
+python3 - "$TMPD/live-sec2.img" > "$TMPD/seccmp.txt" 2>&1 <<'PY2'
+import subprocess, sys
+img = sys.argv[1]
+def cat(p):
+    r = subprocess.run(["python3", "tools/osum/mkfs.py", "cat", img, p],
+                       capture_output=True)
+    return r.stdout if r.returncode == 0 else None
+paare = [("/set/secrets/vault.kdbx", "/outB/secrets/vault.kdbx"),
+         ("/set/etc/shadow", "/outB/etc/shadow"),
+         ("/set/PLAN", "/outB/PLAN"),
+         ("/set/secrets/vault.kdbx", "/outC/secrets/vault.kdbx"),
+         ("/set/PLAN", "/outC/PLAN"),
+         ("/set/config/vpn/keys/home.key", "/outC/config/vpn/keys/home.key")]
+gleich = 0
+for a, b in paare:
+    da, db = cat(a), cat(b)
+    if da is not None and db is not None and da == db:
+        gleich += 1
+    else:
+        print("UNGLEICH %s <-> %s" % (a, b))
+# UND: die Klasse (c) darf im wiederhergestellten Baum NICHT auftauchen.
+weg = 0
+for p in ("/outC/device/key", "/outC/etc/machine-id", "/outC/state/session/token"):
+    if cat(p) is None:
+        weg += 1
+    else:
+        print("DA OBWOHL VERBOTEN %s" % p)
+print("verglichen=%d gleich=%d weg=%d" % (len(paare), gleich, weg))
+PY2
+sed 's/^/        /' "$TMPD/seccmp.txt" | grep -v 'verglichen=' | head -8
+is "wiederhergestellt und OKTETT FUER OKTETT gleich (6 Paare), Klasse (c) fehlt (3)" \
+   "$(grep -a '^verglichen=' "$TMPD/seccmp.txt")" "verglichen=6 gleich=6 weg=3"
+
+# ---------------------------------------------------------------------------
+
+echo "== 13c. was die Verschluesselung kostet -- und was sie NICHT kostet =="
+
+DA_CH=$(sfeld DEDUPA 'chunks');  DA_NEW=$(sfeld DEDUPA 'new chunks')
+DA_WR=$(sfeld DEDUPA 'written bytes'); DA_RD=$(sfeld DEDUPA 'read bytes')
+DA_MS=$(sfeld DEDUPA 'ms')
+DB_CH=$(sfeld DEDUPB 'chunks');  DB_NEW=$(sfeld DEDUPB 'new chunks')
+DB_WR=$(sfeld DEDUPB 'written bytes'); DB_RD=$(sfeld DEDUPB 'read bytes')
+DB_MS=$(sfeld DEDUPB 'ms')
+
+is "OHNE Verschluesselung: 6 Bloecke gesehen" "$DA_CH" "6"
+is "OHNE: nur 2 davon neu -- die Datei liegt EINMAL da" "$DA_NEW" "2"
+is "MIT Verschluesselung: dieselben 6 Bloecke gesehen" "$DB_CH" "6"
+is "MIT: IMMER NOCH nur 2 neu -- DIE DEDUPLIZIERUNG UEBERLEBT" "$DB_NEW" "$DA_NEW"
+is "OHNE: 8192 Oktette geschrieben" "$DA_WR" "8192"
+is "MIT: 8224 Oktette -- 16 Oktette Marke je Block, sonst nichts" "$DB_WR" "8224"
+is "und gelesen wurde beidesmal dasselbe" "$DB_RD" "$DA_RD"
+is "zweiter Lauf OHNE: null neue Bloecke" "$(sfeld DEDUPA2 'new chunks')" "0"
+is "zweiter Lauf MIT: AUCH null neue Bloecke" "$(sfeld DEDUPB2 'new chunks')" "0"
+ok "ZAHLEN: ohne $DA_WR Oktette in ${DA_MS} ms, mit $DB_WR Oktette in ${DB_MS} ms"
+if [ -n "$DA_WR" ] && [ -n "$DB_WR" ] && [ "$DA_WR" -gt 0 ] 2>/dev/null; then
+    PCT=$(awk -v a="$DA_WR" -v b="$DB_WR" 'BEGIN{printf "%.2f", (b-a)*100.0/a}')
+    ok "AUFSCHLAG der Verschluesselung auf dem Datentraeger: ${PCT} %"
+fi
 
 # ============================================================= Schluss
 

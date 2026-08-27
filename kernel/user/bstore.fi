@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 // kernel/user/bstore.fi -- round TRESOR: THE BACKUP STORE, as a module.
 //
 // This is the whole of the backup: the block store, the snapshots, the
@@ -129,9 +130,12 @@ import ulib
 import libc.io
 import libc.errno
 import sha
+import bsec
 
 export {
     save, list, restore, get, verify,
+    unlock, relock, secrets_of, never_of, left_of, unchecked_of,
+    store_locked, master_needed,
     is_store, snaps_open, snaps_next,
     entries_open, entries_next, snap_head,
     files_of, dirs_of, chunks_of, newchunks_of, read_of, written_of,
@@ -171,7 +175,10 @@ static mut dcut: [u64; 8] = [0 as u64; 8]
 static mut relp: [u8; 256] = [0 as u8; 256] // the path inside the tree
 static mut full: [u8; 256] = [0 as u8; 256] // source root + relp
 static mut spath: [u8; 256] = [0 as u8; 256] // a path in the store
-static mut chunk: [u8; 4096] = [0 as u8; 4096]
+// CHUNK **plus the seal's tag**. `bsec.seal` encrypts in place and
+// appends 16 octets, so a buffer of exactly CHUNK would be overrun by
+// every full block -- silently, into whatever static follows it.
+static mut chunk: [u8; 4112] = [0 as u8; 4112]
 static mut line: [u8; 1024] = [0 as u8; 1024]
 static mut rdctx: [u8; 528] = [0 as u8; 528]
 static mut rdctx2: [u8; 528] = [0 as u8; 528]
@@ -192,6 +199,38 @@ static mut v_bad: u64 = 0
 static mut v_missing: u64 = 0
 static mut cancelled: bool = false
 static mut saw_end: bool = false
+
+// ------------------------------------------------- the three classes
+//
+// Which key set the octets of a class travel under, and what is left
+// behind. See `kernel/user/bsec.fi` for why there are three classes and
+// two independent secrets; this file only obeys.
+static mut set_plain: u64 = 2 // bsec.SET_NONE until a store password opens it
+static mut want_secrets: bool = false
+static mut n_never: u64 = 0 // class (c): left out, always
+static mut n_left: u64 = 0 // class (b): left out because no master password
+static mut n_sec: u64 = 0 // class (b): carried, sealed under the master key
+static mut v_unchecked: u64 = 0 // blocks `verify` could not open
+static mut snap_v2: bool = false // does the snapshot being read carry a class
+static mut need_master: bool = false // a snapshot wanted the master key
+static mut hdr_store: bool = false // the store header names a store salt
+static mut hdr_master: bool = false
+static mut hdr_dirty: bool = false
+static mut st_salt: [u8; 16] = [0 as u8; 16]
+static mut ms_salt: [u8; 16] = [0 as u8; 16]
+static mut hchk: [u8; 32] = [0 as u8; 32]
+static mut st_chk: [u8; 32] = [0 as u8; 32]
+static mut ms_chk: [u8; 32] = [0 as u8; 32]
+static mut hline: [u8; 256] = [0 as u8; 256]
+static mut hctx: [u8; 528] = [0 as u8; 528]
+
+// Which key set a class of data travels under.
+fn set_for(cls: u64) -> u64 {
+    if cls == bsec.CLASS_SECRET {
+        return bsec.SET_MASTER
+    }
+    return set_plain
+}
 
 fn say_kv(label: u64, v: u64) {
     ulib.say(label)
@@ -486,7 +525,7 @@ fn walk(src: u64, prefix: u64, store: u64, pack: u64, snap: u64,
     // nothing -- otherwise the second orphan would be written at "/".
     dcut[0] = ulib.length((&relp[0]) as u64)
     // The root itself gets a line, so that a restore knows its mode.
-    emit_dir(snap, 0)
+    emit_dir(snap, 0, bsec.CLASS_PLAIN)
 
     var going: bool = true
     while going {
@@ -519,8 +558,23 @@ fn walk(src: u64, prefix: u64, store: u64, pack: u64, snap: u64,
         ulib.strcat((&relp[0]) as u64, (&sl[0]) as u64)
         ulib.strcat((&relp[0]) as u64, nm)
         make_full(src)
+        // THE CLASSIFICATION HAPPENS HERE, once per name, before anything
+        // is read or written. A class (c) directory is not descended into
+        // at all: not one octet of it can reach the snapshot, which is
+        // stronger than filtering the files inside it one by one.
+        let cls: u64 = bsec.class_of((&relp[0]) as u64)
+        if cls == bsec.CLASS_NEVER {
+            n_never = n_never + 1
+            relp[keep as usize] = 0 as u8
+            continue
+        }
+        if cls == bsec.CLASS_SECRET && !want_secrets {
+            n_left = n_left + 1
+            relp[keep as usize] = 0 as u8
+            continue
+        }
         if kind == io.DT_DIR {
-            emit_dir(snap, keep)
+            emit_dir(snap, keep, cls)
             if depth + 1 >= MAX_DEPTH {
                 ulib.esay_line((&e_deep[0]) as u64, (&relp[0]) as u64)
                 relp[keep as usize] = 0 as u8
@@ -537,7 +591,7 @@ fn walk(src: u64, prefix: u64, store: u64, pack: u64, snap: u64,
             dlen[depth as usize] = 0
             dat[depth as usize] = 0
         } else {
-            if !emit_file(snap, pack, tick) {
+            if !emit_file(snap, pack, tick, cls) {
                 ulib.esay_line((&e_full[0]) as u64, (&relp[0]) as u64)
                 return 1
             }
@@ -641,7 +695,7 @@ fn save_orphans(tree: u64, listfile: u64, store: u64, pack: u64, snap: u64,
                 // the first entry in.
                 ulib.strcpy((&relp[0]) as u64, (&st[0]) as u64)
                 make_full(tree)
-                emit_dir(snap, 0)
+                emit_dir(snap, 0, bsec.CLASS_PLAIN)
                 any = true
             }
             ulib.strcpy((&opath[0]) as u64, (&st[0]) as u64)
@@ -678,7 +732,7 @@ fn mode_of(path: u64) -> u64 {
 // `<path><TAB><mode><TAB>0<TAB>-\n`, and for the root `/`.
 
 // `<path><TAB><mode><TAB>0<TAB>-\n`, and for the root `/`.
-fn emit_dir(snap: u64, keep: u64) {
+fn emit_dir(snap: u64, keep: u64, cls: u64) {
     var out: [u8; 512] = [0 as u8; 512]
     var root: [u8; 2] = "/\0"
     var p: u64 = (&relp[0]) as u64
@@ -690,6 +744,13 @@ fn emit_dir(snap: u64, keep: u64) {
     out[k as usize] = 9 as u8
     k = k + 1
     k = k + put_oct((&out[0]) as u64 + k, mode_of((&full[0]) as u64))
+    out[k as usize] = 9 as u8
+    k = k + 1
+    // THE CLASS, one letter, in the snapshot itself -- so that a restore
+    // does not have to re-derive the policy and cannot disagree with the
+    // save that wrote the line.
+    out[k as usize] = bsec.class_char(cls) as u8
+    k = k + 1
     out[k as usize] = 9 as u8
     k = k + 1
     out[k as usize] = 48 as u8
@@ -740,7 +801,7 @@ fn put_oct(p: u64, v: u64) -> u64 {
 
 // One file: read it in chunks, hash each, store the ones that are new,
 // and write the line.
-fn emit_file(snap: u64, pack: u64, tick: fn(u64) -> u64) -> bool {
+fn emit_file(snap: u64, pack: u64, tick: fn(u64) -> u64, cls: u64) -> bool {
     var out: [u8; 512] = [0 as u8; 512]
     var dig: [u8; 32] = [0 as u8; 32]
     var hex: [u8; 65] = [0 as u8; 65]
@@ -749,11 +810,19 @@ fn emit_file(snap: u64, pack: u64, tick: fn(u64) -> u64) -> bool {
     if errno.failed(fd) {
         return true // a file that vanished under us is not a reason to stop
     }
+    let kset: u64 = set_for(cls)
+    if cls == bsec.CLASS_SECRET {
+        n_sec = n_sec + 1
+    }
     var k: u64 = 0
     k = k + copy_in((&out[0]) as u64 + k, (&relp[0]) as u64)
     out[k as usize] = 9 as u8
     k = k + 1
     k = k + put_oct((&out[0]) as u64 + k, mode_of((&full[0]) as u64))
+    out[k as usize] = 9 as u8
+    k = k + 1
+    out[k as usize] = bsec.class_char(cls) as u8
+    k = k + 1
     out[k as usize] = 9 as u8
     k = k + 1
     let sz: u64 = io.size_of((&full[0]) as u64)
@@ -772,19 +841,30 @@ fn emit_file(snap: u64, pack: u64, tick: fn(u64) -> u64) -> bool {
         } else {
             b_read = b_read + n
             n_chunks = n_chunks + 1
-            sha.hash((&chunk[0]) as u64, n, (&dig[0]) as u64)
+            // THE NAME IS KEYED when a key set is open: HMAC(CONV, block)
+            // instead of SHA-256(block). Identical blocks still get
+            // identical names, so DEDUPLICATION IS UNTOUCHED -- and
+            // nobody without the password can compute the name of a file
+            // they guess. `bsec.fi` argues this at length; the one line
+            // of it that matters is here.
+            bsec.block_name(kset, (&chunk[0]) as u64, n, (&dig[0]) as u64)
             var at: u64 = ix_find((&dig[0]) as u64)
             if at >= MAX_CHUNKS {
                 // NEW. The octets go into PACK first, the index entry only
                 // after they are there.
-                if errno.failed(io.write_all(pack, (&chunk[0]) as u64, n)) {
+                let stored: u64 = bsec.seal(kset, (&chunk[0]) as u64, n,
+                    (&dig[0]) as u64)
+                if stored == 0 {
+                    ok = false
+                } else if errno.failed(io.write_all(pack, (&chunk[0]) as u64,
+                        stored)) {
                     ok = false
                 } else {
-                    if !ix_add((&dig[0]) as u64, pack_end, n) {
+                    if !ix_add((&dig[0]) as u64, pack_end, stored) {
                         ok = false
                     } else {
-                        pack_end = pack_end + n
-                        b_written = b_written + n
+                        pack_end = pack_end + stored
+                        b_written = b_written + stored
                         n_new = n_new + 1
                     }
                 }
@@ -859,11 +939,30 @@ fn one_line(m: u64, pack: u64, target: u64, only: u64) -> bool {
         at = at + 1
     }
     at = at + 1
+    // THE CLASS FIELD, present from `backup2` on. A `backup1` snapshot has
+    // no such field and everything in it is ordinary data -- which is
+    // true, because when it was written there was no other kind.
+    var cls: u64 = bsec.CLASS_PLAIN
+    if snap_v2 {
+        cls = bsec.class_of_char(line[at as usize] as u64)
+        while at < m && line[at as usize] != 9 as u8 {
+            at = at + 1
+        }
+        at = at + 1
+    }
     while at < m && line[at as usize] != 9 as u8 {
         at = at + 1
     }
     at = at + 1 // now at the hash list
 
+    let kset: u64 = set_for(cls)
+    // NO SILENT SKIPPING. A snapshot that carries secrets and a restore
+    // without the master password is a REFUSAL with a sentence, not a
+    // tree that quietly comes back short.
+    if cls == bsec.CLASS_SECRET && !bsec.ready(bsec.SET_MASTER) {
+        need_master = true
+        return false
+    }
     let isdir: bool = (mode & 61440) == 16384
     if only != 0 {
         // `backup get`: only this one path, and it must be a file.
@@ -874,7 +973,7 @@ fn one_line(m: u64, pack: u64, target: u64, only: u64) -> bool {
             return false
         }
         n_found = n_found + 1
-        return pour(at, m, pack, target)
+        return pour(at, m, pack, target, kset)
     }
     // target + path, except for the root line, whose path is "/"
     ulib.strncpy((&out[0]) as u64, target, 255)
@@ -889,7 +988,7 @@ fn one_line(m: u64, pack: u64, target: u64, only: u64) -> bool {
         n_dirs = n_dirs + 1
         return true
     }
-    if !pour(at, m, pack, (&out[0]) as u64) {
+    if !pour(at, m, pack, (&out[0]) as u64, kset) {
         return false
     }
     ulib.sys(SYS_CHMOD, (&out[0]) as u64, mode & 4095, 0)
@@ -910,8 +1009,9 @@ fn oct_at(at: u64) -> u64 {
 // Writes the file named by the hash list from `at` to `m` into `dest`.
 
 // Writes the file named by the hash list from `at` to `m` into `dest`.
-fn pour(at: u64, m: u64, pack: u64, dest: u64) -> bool {
+fn pour(at: u64, m: u64, pack: u64, dest: u64, kset: u64) -> bool {
     var e_miss: [u8; 37] = "backup: a chunk is not in the store\0\0"
+    var e_tag: [u8; 53] = "backup: a block does not match its seal -- tampered?\0"
     var dig: [u8; 32] = [0 as u8; 32]
     let fd: u64 = io.create(dest)
     if errno.failed(fd) {
@@ -941,8 +1041,19 @@ fn pour(at: u64, m: u64, pack: u64, dest: u64) -> bool {
                 if n != ix_len[s as usize] {
                     ok = false
                 } else {
-                    io.write_all(fd, (&chunk[0]) as u64, n)
-                    b_written = b_written + n
+                    // THE TAG IS CHECKED BEFORE ONE OCTET IS WRITTEN. A
+                    // restore puts files on a running system; handing it
+                    // octets that nothing vouched for is how a backup
+                    // becomes an attack.
+                    let pl: u64 = bsec.unseal(kset, (&chunk[0]) as u64, n,
+                        (&dig[0]) as u64)
+                    if pl == 0 && n > 0 {
+                        ulib.esay_line((&e_tag[0]) as u64, 0)
+                        ok = false
+                    } else {
+                        io.write_all(fd, (&chunk[0]) as u64, pl)
+                        b_written = b_written + pl
+                    }
                 }
             }
             i = i + 64
@@ -1066,6 +1177,240 @@ fn publish(store: u64, name: u64) -> bool {
     return true
 }
 
+// ==================================================== THE STORE HEADER
+//
+// `<store>/HEADER`, plain text, and there is nothing secret in it:
+//
+//     bstore1 <iterations>
+//     store  <salt, 32 hex> <check, 64 hex>
+//     master <salt, 32 hex> <check, 64 hex>
+//
+// A line is present only if that layer has ever been used. The SALT is
+// public by design -- its job is to make two stores with the same
+// password have different keys, not to be hidden. The CHECK is
+// HMAC(MK, "osum backup v1 check"), and it exists so that a WRONG
+// PASSWORD IS REFUSED IN THE FIRST SECOND with a sentence, instead of
+// the run going on to decrypt rubbish and write it over somebody's tree.
+// It is a derivative of the master key and reveals nothing about it that
+// a brute force did not already have.
+
+fn hdr_path(store: u64) -> u64 {
+    var n: [u8; 7] = "HEADER\0"
+    return store_path(store, (&n[0]) as u64)
+}
+
+fn word_is(at: u64, w: u64) -> bool {
+    var i: u64 = 0
+    while *((w + i) as *mut u8) != 0 as u8 {
+        if hline[(at + i) as usize] != *((w + i) as *mut u8) {
+            return false
+        }
+        i = i + 1
+    }
+    return hline[(at + i) as usize] == 32 as u8
+}
+
+fn hdr_load(store: u64) -> bool {
+    var w_store: [u8; 6] = "store\0"
+    var w_master: [u8; 7] = "master\0"
+    hdr_store = false
+    hdr_master = false
+    let fd: u64 = io.open(hdr_path(store), 0)
+    if errno.failed(fd) {
+        return false
+    }
+    ulib.rd_init((&hctx[0]) as u64)
+    var going: bool = true
+    while going {
+        let m: u64 = ulib.rd_line(fd, (&hctx[0]) as u64, (&hline[0]) as u64, 256)
+        if m == ulib.EOF {
+            going = false
+        } else if word_is(0, (&w_store[0]) as u64) {
+            if bsec.from_hex((&hline[0]) as u64 + 6, bsec.SALTLEN,
+                    (&st_salt[0]) as u64)
+                && bsec.from_hex((&hline[0]) as u64 + 6 + bsec.SALTLEN * 2 + 1,
+                    32, (&st_chk[0]) as u64) {
+                hdr_store = true
+            }
+        } else if word_is(0, (&w_master[0]) as u64) {
+            if bsec.from_hex((&hline[0]) as u64 + 7, bsec.SALTLEN,
+                    (&ms_salt[0]) as u64)
+                && bsec.from_hex((&hline[0]) as u64 + 7 + bsec.SALTLEN * 2 + 1,
+                    32, (&ms_chk[0]) as u64) {
+                hdr_master = true
+            }
+        }
+    }
+    io.close(fd)
+    return true
+}
+
+fn hdr_one(fd: u64, word: u64, salt: u64, chk: u64) {
+    var out: [u8; 256] = [0 as u8; 256]
+    var hx: [u8; 80] = [0 as u8; 80]
+    var k: u64 = 0
+    k = k + copy_in((&out[0]) as u64 + k, word)
+    out[k as usize] = 32 as u8
+    k = k + 1
+    bsec.to_hex(salt, bsec.SALTLEN, (&hx[0]) as u64)
+    k = k + copy_in((&out[0]) as u64 + k, (&hx[0]) as u64)
+    out[k as usize] = 32 as u8
+    k = k + 1
+    bsec.to_hex(chk, 32, (&hx[0]) as u64)
+    k = k + copy_in((&out[0]) as u64 + k, (&hx[0]) as u64)
+    out[k as usize] = 10 as u8
+    k = k + 1
+    io.write_all(fd, (&out[0]) as u64, k)
+}
+
+fn hdr_save(store: u64) -> bool {
+    var top: [u8; 14] = "bstore1 2048\n\0"
+    var w_store: [u8; 6] = "store\0"
+    var w_master: [u8; 7] = "master\0"
+    let fd: u64 = io.create(hdr_path(store))
+    if errno.failed(fd) {
+        return false
+    }
+    io.write_all(fd, (&top[0]) as u64, 13)
+    if hdr_store {
+        hdr_one(fd, (&w_store[0]) as u64, (&st_salt[0]) as u64,
+            (&st_chk[0]) as u64)
+    }
+    if hdr_master {
+        hdr_one(fd, (&w_master[0]) as u64, (&ms_salt[0]) as u64,
+            (&ms_chk[0]) as u64)
+    }
+    io.close(fd)
+    return true
+}
+
+fn chk_same(a: u64, b: u64) -> bool {
+    var i: u64 = 0
+    while i < 32 {
+        if *((a + i) as *mut u8) != *((b + i) as *mut u8) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+// Opens whichever key sets the caller has passwords for, and refuses
+// loudly rather than guessing. `making` is true for `save`, which is the
+// only operation allowed to CREATE a layer; a read never invents a salt.
+//
+//   0  fine
+//   1  the store layer could not be opened
+//   2  the master layer could not be opened
+fn unlock(store: u64, spass: u64, mpass: u64, making: bool) -> u64 {
+    var e_enc: [u8; 62] = "backup: this store is encrypted -- give the store password\0\0\0\0"
+    var e_wp: [u8; 29] = "backup: wrong store password\0"
+    var e_wm: [u8; 30] = "backup: wrong master password\0"
+    var e_rnd: [u8; 41] = "backup: no random source for the salt\0\0\0\0"
+    var e_late: [u8; 64] = "backup: this store was started unencrypted -- make a new store\0\0"
+
+    bsec.forget(bsec.SET_STORE)
+    bsec.forget(bsec.SET_MASTER)
+    set_plain = bsec.SET_NONE
+    want_secrets = false
+    need_master = false
+    hdr_dirty = false
+    hdr_load(store)
+
+    if hdr_store {
+        if spass == 0 {
+            ulib.esay_line((&e_enc[0]) as u64, 0)
+            return 1
+        }
+        bsec.set_up(bsec.SET_STORE, spass, ulib.length(spass),
+            (&st_salt[0]) as u64)
+        bsec.check_of(bsec.SET_STORE, (&hchk[0]) as u64)
+        if !chk_same((&hchk[0]) as u64, (&st_chk[0]) as u64) {
+            bsec.forget(bsec.SET_STORE)
+            ulib.esay_line((&e_wp[0]) as u64, 0)
+            return 1
+        }
+        set_plain = bsec.SET_STORE
+    } else if spass != 0 && making {
+        // AN UNENCRYPTED STORE CANNOT BE ENCRYPTED LATER. Half its blocks
+        // would be plaintext and the header would claim otherwise, which
+        // is worse than either honest state.
+        if is_store(store) {
+            ulib.esay_line((&e_late[0]) as u64, 0)
+            return 1
+        }
+        if !bsec.salt_new((&st_salt[0]) as u64) {
+            ulib.esay_line((&e_rnd[0]) as u64, 0)
+            return 1
+        }
+        bsec.set_up(bsec.SET_STORE, spass, ulib.length(spass),
+            (&st_salt[0]) as u64)
+        bsec.check_of(bsec.SET_STORE, (&st_chk[0]) as u64)
+        hdr_store = true
+        hdr_dirty = true
+        set_plain = bsec.SET_STORE
+    }
+
+    if mpass != 0 {
+        if hdr_master {
+            bsec.set_up(bsec.SET_MASTER, mpass, ulib.length(mpass),
+                (&ms_salt[0]) as u64)
+            bsec.check_of(bsec.SET_MASTER, (&hchk[0]) as u64)
+            if !chk_same((&hchk[0]) as u64, (&ms_chk[0]) as u64) {
+                bsec.forget(bsec.SET_MASTER)
+                ulib.esay_line((&e_wm[0]) as u64, 0)
+                return 2
+            }
+        } else if making {
+            if !bsec.salt_new((&ms_salt[0]) as u64) {
+                ulib.esay_line((&e_rnd[0]) as u64, 0)
+                return 2
+            }
+            bsec.set_up(bsec.SET_MASTER, mpass, ulib.length(mpass),
+                (&ms_salt[0]) as u64)
+            bsec.check_of(bsec.SET_MASTER, (&ms_chk[0]) as u64)
+            hdr_master = true
+            hdr_dirty = true
+        }
+    }
+    // CARRYING SECRETS IS A DELIBERATE ACT. There is no default, no
+    // "remember my choice", and no way to get there without the master
+    // password in hand: `want_secrets` is true only because a master key
+    // is open, and a master key is open only because somebody typed it.
+    want_secrets = bsec.ready(bsec.SET_MASTER)
+    return 0
+}
+
+// The safety net for a caller that never called `unlock` -- the file
+// manager is one, and it always backs up with the safe default. If the
+// store turns out to be encrypted, nothing is written in the clear into
+// it; the run stops and says why.
+fn guard(store: u64) -> bool {
+    var e_enc: [u8; 62] = "backup: this store is encrypted -- give the store password\0\0\0\0"
+    if set_plain != bsec.SET_NONE {
+        return true
+    }
+    if bsec.ready(bsec.SET_MASTER) {
+        return true
+    }
+    hdr_load(store)
+    if hdr_store {
+        ulib.esay_line((&e_enc[0]) as u64, 0)
+        return false
+    }
+    return true
+}
+
+fn relock() {
+    bsec.forget(bsec.SET_STORE)
+    bsec.forget(bsec.SET_MASTER)
+    set_plain = bsec.SET_NONE
+    want_secrets = false
+}
+
+fn store_locked() -> bool { return hdr_store }
+fn master_needed() -> bool { return need_master }
+
 fn save(src: u64, store: u64, name: u64, orphans: u64, tree: u64,
         tick: fn(u64) -> u64) -> u64 {
     var e_src: [u8; 31] = "backup: cannot read source \0\0\0\0"
@@ -1073,7 +1418,9 @@ fn save(src: u64, store: u64, name: u64, orphans: u64, tree: u64,
     var e_full: [u8; 47] = "backup: too many chunks -- raise MAX_CHUNKS\0\0\0\0"
     var e_snap: [u8; 35] = "backup: cannot write snapshot \0\0\0\0\0"
     var e_part: [u8; 48] = "backup: the snapshot could not be completed -- \0"
-    var hdr: [u8; 13] = "backup1 4096\0"
+    var hdr: [u8; 13] = "backup2 4096\0"
+    var c_plain: [u8; 14] = "cipher plain\n\0"
+    var c_enc: [u8; 28] = "cipher chacha20-hmacsha256\n\0"
     var l_files: [u8; 9] = "files: \0\0"
     var l_dirs: [u8; 8] = "dirs: \0\0"
     var l_ch: [u8; 10] = "chunks: \0\0"
@@ -1084,6 +1431,10 @@ fn save(src: u64, store: u64, name: u64, orphans: u64, tree: u64,
     var l_orph: [u8; 17] = "orphan entries: \0"
     var l_ob: [u8; 15] = "orphan bytes: \0"
     var l_ms: [u8; 5] = "ms: \0"
+    var l_sec: [u8; 15] = "secret files: \0"
+    var l_lft: [u8; 18] = "secret left out: \0"
+    var l_nev: [u8; 12] = "never out: \0"
+    var e_hdr: [u8; 41] = "backup: cannot write the store header\0\0\0\0"
 
     n_files = 0
     n_dirs = 0
@@ -1093,6 +1444,9 @@ fn save(src: u64, store: u64, name: u64, orphans: u64, tree: u64,
     b_written = 0
     n_orphan = 0
     b_orphan = 0
+    n_never = 0
+    n_left = 0
+    n_sec = 0
     // The timer of this kernel runs at 100 Hz (`idt.pit_init(100)`), so a
     // tick is ten milliseconds. That is the WHOLE resolution available
     // here, and a run of a few hundred milliseconds is therefore measured
@@ -1101,6 +1455,9 @@ fn save(src: u64, store: u64, name: u64, orphans: u64, tree: u64,
 
     if !ulib.is_dir(src) {
         ulib.esay_line((&e_src[0]) as u64, src)
+        return 1
+    }
+    if !guard(store) {
         return 1
     }
     // The store must exist as a directory; making it is `mkdir`'s job and
@@ -1129,6 +1486,13 @@ fn save(src: u64, store: u64, name: u64, orphans: u64, tree: u64,
     }
     io.write_all(snap, (&hdr[0]) as u64, 12)
     write_stamp(snap)
+    // WHAT THE OCTETS ARE UNDER, in the snapshot itself. A reader must not
+    // have to guess, and a person with `cat` should be able to see it.
+    if set_plain == bsec.SET_NONE {
+        io.write_all(snap, (&c_plain[0]) as u64, 13)
+    } else {
+        io.write_all(snap, (&c_enc[0]) as u64, 27)
+    }
 
     var rc: u64 = walk(src, 0, store, pack, snap, tick)
     // THE ONE EXCEPTION, and it runs into the SAME pack and the SAME
@@ -1161,6 +1525,15 @@ fn save(src: u64, store: u64, name: u64, orphans: u64, tree: u64,
         ulib.esay_line((&e_store[0]) as u64, store)
         return 1
     }
+    // The header goes down BEFORE the snapshot is published, so a store
+    // can never hold an `S-` whose salt is not written yet.
+    if hdr_dirty {
+        if !hdr_save(store) {
+            ulib.esay_line((&e_hdr[0]) as u64, 0)
+            return 1
+        }
+        hdr_dirty = false
+    }
     // LAST OF ALL: the snapshot gets its real name.
     if !publish(store, name) {
         ulib.esay_line((&e_snap[0]) as u64, name)
@@ -1177,6 +1550,11 @@ fn save(src: u64, store: u64, name: u64, orphans: u64, tree: u64,
     // than a missing line the reader has to interpret.
     say_kv((&l_orph[0]) as u64, n_orphan)
     say_kv((&l_ob[0]) as u64, b_orphan)
+    // ALWAYS PRINTED, all three, so that "no secrets travelled" is a
+    // measured zero and not a missing line somebody has to interpret.
+    say_kv((&l_sec[0]) as u64, n_sec)
+    say_kv((&l_lft[0]) as u64, n_left)
+    say_kv((&l_nev[0]) as u64, n_never)
     let t1: u64 = ulib.sys(ulib.SYS_SYSINFO, ulib.I_TICKS, 0, 0)
     say_kv((&l_ms[0]) as u64, (t1 - t0) * 10)
     return 0
@@ -1235,7 +1613,11 @@ fn restore(store: u64, name: u64, target: u64, only: u64) -> u64 {
     var l_f: [u8; 19] = "restored files: \0\0\0"
     var l_d: [u8; 18] = "restored dirs: \0\0\0"
     var l_b: [u8; 19] = "restored bytes: \0\0\0"
+    var e_mst: [u8; 64] = "backup: this snapshot carries secrets -- the master password is\0"
 
+    if !guard(store) {
+        return 1
+    }
     if !ix_load(store) {
         return 1
     }
@@ -1269,7 +1651,10 @@ fn restore(store: u64, name: u64, target: u64, only: u64) -> u64 {
         if m == ulib.EOF {
             going = false
         } else if first {
-            first = false // the `backup1 4096` header
+            first = false
+            // `backup1` has four fields per entry, `backup2` five. The
+            // version word is the only thing that says which.
+            snap_v2 = m > 6 && line[6] == 50 as u8
         } else if m > 0 {
             if !one_line(m, pack, target, only) {
                 rc = 1
@@ -1279,6 +1664,15 @@ fn restore(store: u64, name: u64, target: u64, only: u64) -> u64 {
     }
     io.close(pack)
     io.close(snap)
+    // THE MASTER PASSWORD WAS MISSING AND SECRETS WERE IN THE SNAPSHOT.
+    // The run stops and says so. The alternative -- restoring everything
+    // else and reporting success -- would hand somebody a machine that
+    // looks whole and has no credentials, and they would find out at the
+    // worst possible moment.
+    if need_master {
+        ulib.esay_line((&e_mst[0]) as u64, name)
+        rc = 1
+    }
     // AN INCOMPLETE SNAPSHOT IS NOT RESTORED. Without its `end` line the
     // file is whatever a run that died left behind, and handing back part
     // of a tree while reporting success is exactly the lie this whole
@@ -1332,9 +1726,13 @@ fn verify(store: u64, name: u64) -> u64 {
     var l_ok: [u8; 18] = "chunks checked: \0\0"
     var l_bad: [u8; 10] = "corrupt: \0"
     var l_miss: [u8; 10] = "missing: \0"
+    var l_unch: [u8; 12] = "unchecked: \0"
     var dig: [u8; 32] = [0 as u8; 32]
     var got: [u8; 32] = [0 as u8; 32]
 
+    if !guard(store) {
+        return 1
+    }
     if !ix_load(store) {
         return 1
     }
@@ -1351,8 +1749,11 @@ fn verify(store: u64, name: u64) -> u64 {
     v_checked = 0
     v_bad = 0
     v_missing = 0
+    v_unchecked = 0
     saw_end = false
+    need_master = false
     ulib.rd_init((&rdctx[0]) as u64)
+    var firstv: bool = true
     var going: bool = true
     while going {
         let m: u64 = ulib.rd_line(snap, (&rdctx[0]) as u64, (&line[0]) as u64,
@@ -1360,12 +1761,25 @@ fn verify(store: u64, name: u64) -> u64 {
         if m == ulib.EOF {
             going = false
         } else {
-            // Find the fourth field.
+            if firstv {
+                firstv = false
+                snap_v2 = m > 6 && line[6] == 50 as u8
+            }
+            // The hash list is the last field: the fourth in `backup1`,
+            // the fifth in `backup2` where the class sits in between.
+            var want: u64 = 3
+            if snap_v2 {
+                want = 4
+            }
             var at: u64 = 0
             var tabs: u64 = 0
-            while at < m && tabs < 3 {
+            var cls: u64 = bsec.CLASS_PLAIN
+            while at < m && tabs < want {
                 if line[at as usize] == 9 as u8 {
                     tabs = tabs + 1
+                    if snap_v2 && tabs == 2 && at + 1 < m {
+                        cls = bsec.class_of_char(line[(at + 1) as usize] as u64)
+                    }
                 }
                 at = at + 1
             }
@@ -1373,7 +1787,8 @@ fn verify(store: u64, name: u64) -> u64 {
                     && line[2] == 100 as u8 && line[3] == 9 as u8 {
                 saw_end = true
             }
-            if tabs == 3 {
+            let kset: u64 = set_for(cls)
+            if tabs == want {
                 while at + 63 < m {
                     if line[at as usize] == 45 as u8 {
                         at = m
@@ -1394,12 +1809,29 @@ fn verify(store: u64, name: u64) -> u64 {
                                 ix_len[s as usize])
                             if n != ix_len[s as usize] {
                                 v_missing = v_missing + 1
+                            } else if kset != bsec.SET_NONE
+                                    && !bsec.ready(kset) {
+                                // NO KEY, NO CLAIM. Counting a block we
+                                // cannot open as "checked" would turn
+                                // `corrupt: 0` into a lie.
+                                v_unchecked = v_unchecked + 1
+                                need_master = true
                             } else {
-                                sha.hash((&chunk[0]) as u64, n, (&got[0]) as u64)
-                                if !sha.equal((&got[0]) as u64, (&dig[0]) as u64) {
+                                let pl: u64 = bsec.unseal(kset,
+                                    (&chunk[0]) as u64, n, (&dig[0]) as u64)
+                                if pl == 0 && n > 0 {
+                                    // The tag did not match: either the
+                                    // octets moved or somebody edited them.
                                     v_bad = v_bad + 1
+                                } else {
+                                    bsec.block_name(kset, (&chunk[0]) as u64,
+                                        pl, (&got[0]) as u64)
+                                    if !sha.equal((&got[0]) as u64,
+                                            (&dig[0]) as u64) {
+                                        v_bad = v_bad + 1
+                                    }
+                                    v_checked = v_checked + 1
                                 }
-                                v_checked = v_checked + 1
                             }
                         }
                         at = at + 64
@@ -1419,7 +1851,8 @@ fn verify(store: u64, name: u64) -> u64 {
     say_kv((&l_ok[0]) as u64, v_checked)
     say_kv((&l_bad[0]) as u64, v_bad)
     say_kv((&l_miss[0]) as u64, v_missing)
-    if v_bad > 0 || v_missing > 0 || !saw_end {
+    say_kv((&l_unch[0]) as u64, v_unchecked)
+    if v_bad > 0 || v_missing > 0 || v_unchecked > 0 || !saw_end {
         return 2
     }
     return 0
@@ -1562,11 +1995,17 @@ fn snap_head(store: u64, name: u64, date_out: u64, info: u64) -> bool {
 // folder. `ctx` is RD_CTX octets the caller owns; `info` is two u64,
 // mode and size.
 fn entries_open(store: u64, name: u64, ctx: u64) -> u64 {
+    var buf: [u8; 64] = [0 as u8; 64]
     let fd: u64 = io.open(snap_name(store, name), 0)
     if errno.failed(fd) {
         return fd
     }
     ulib.rd_init(ctx)
+    // The header line is read HERE and not skipped later, because it is
+    // the only place the field count of the following lines is written
+    // down. `entries_next` would otherwise read the class as the size.
+    let m: u64 = ulib.rd_line(fd, ctx, (&buf[0]) as u64, 64)
+    snap_v2 = m != ulib.EOF && m > 6 && buf[6] == 50 as u8
     return fd
 }
 
@@ -1594,6 +2033,12 @@ fn entries_next(fd: u64, ctx: u64, pout: u64, info: u64) -> bool {
                 at = at + 1
             }
             at = at + 1
+            if snap_v2 {
+                while at < m && buf[at as usize] != 9 as u8 {
+                    at = at + 1
+                }
+                at = at + 1
+            }
             var sz: u64 = 0
             while at < m && buf[at as usize] != 9 as u8 {
                 sz = sz * 10 + ((buf[at as usize] as u64) - 48)
@@ -1622,3 +2067,7 @@ fn found_of() -> u64 { return n_found }
 fn checked_of() -> u64 { return v_checked }
 fn corrupt_of() -> u64 { return v_bad }
 fn missing_of() -> u64 { return v_missing }
+fn secrets_of() -> u64 { return n_sec }
+fn never_of() -> u64 { return n_never }
+fn left_of() -> u64 { return n_left }
+fn unchecked_of() -> u64 { return v_unchecked }

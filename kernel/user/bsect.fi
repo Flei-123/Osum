@@ -1,0 +1,255 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/bsect.fi -- round TRESOR: the measurement of `chacha.fi`
+// and `bsec.fi`.
+//
+// A cipher that is only READ is not checked, and a cipher that is wrong
+// is worse than no cipher: it produces octets that look random, restore
+// without complaint on the machine that wrote them, and protect nothing.
+// So everything below is PRINTED and `tools/tresor/run.sh` recomputes it
+// on the host with an implementation this tree did not write:
+//
+//   cc1  the ChaCha20 keystream block of RFC 8439 section 2.3.2
+//   cc2  the encryption of RFC 8439 section 2.4.2
+//   cc3  a 4096 octet buffer -- the size a backup block actually is, so
+//        the counter really advances 64 times
+//   hm1  HMAC-SHA256 over 4096 octets. `key.fi` cannot do this: its HMAC
+//        copies the message into a 128 octet array. This one streams.
+//   pb1  PBKDF2-HMAC-SHA256, 2048 iterations, against `hashlib`
+//   cls  the class of nine paths -- the security decision, printed
+//   sl1  seal: the block name, the ciphertext and the tag
+//   sl2  unseal gives back exactly the plaintext
+//   sl3  ONE octet flipped in the ciphertext and unseal REFUSES
+//   sl4  the same plaintext sealed twice gives the SAME name -- which is
+//        deduplication surviving encryption, as one line
+//   sl5  a different password gives a DIFFERENT name for the same
+//        plaintext -- which is the confirmation attack failing
+
+profile kernel
+
+import ulib
+import sha
+import chacha
+import bsec
+
+export { u_start }
+
+static mut big: [u8; 4200] = [0 as u8; 4200]
+static mut cmp: [u8; 4200] = [0 as u8; 4200]
+static mut hexb: [u8; 8500] = [0 as u8; 8500]
+
+fn show(label: u64, p: u64, n: u64) {
+    bsec.to_hex(p, n, (&hexb[0]) as u64)
+    ulib.say(label)
+    ulib.say((&hexb[0]) as u64)
+    ulib.nl()
+}
+
+fn fill(p: u64, n: u64, seed: u64) {
+    var s: u64 = seed
+    var i: u64 = 0
+    while i < n {
+        s = (s * 1103515245 + 12345) & 0xFFFFFFFF
+        __mmio_write8((p + i) as *mut u8, ((s >> 16) & 255) as u8)
+        i = i + 1
+    }
+}
+
+fn u_start(args: u64) -> u64 {
+    var key: [u8; 32] = [0 as u8; 32]
+    var non: [u8; 12] = [0 as u8; 12]
+    var out: [u8; 64] = [0 as u8; 64]
+    var dig: [u8; 32] = [0 as u8; 32]
+    var salt: [u8; 16] = [0 as u8; 16]
+
+    var l_cc1: [u8; 7] = "cc1: \0\0"
+    var l_cc2: [u8; 7] = "cc2: \0\0"
+    var l_cc3: [u8; 7] = "cc3: \0\0"
+    var l_hm1: [u8; 7] = "hm1: \0\0"
+    var l_pb1: [u8; 7] = "pb1: \0\0"
+    var l_cls: [u8; 7] = "cls: \0\0"
+    var l_sl1: [u8; 7] = "sl1: \0\0"
+    var l_sl2: [u8; 7] = "sl2: \0\0"
+    var l_sl3: [u8; 7] = "sl3: \0\0"
+    var l_sl4: [u8; 7] = "sl4: \0\0"
+    var l_sl5: [u8; 7] = "sl5: \0\0"
+    var s_yes: [u8; 4] = "yes\0"
+    var s_no: [u8; 3] = "no\0"
+
+    // ---- cc1: RFC 8439 section 2.3.2. key = 00..1f, counter = 1,
+    // nonce = 00 00 00 09 00 00 00 4a 00 00 00 00
+    var i: u64 = 0
+    while i < 32 {
+        key[i as usize] = i as u8
+        i = i + 1
+    }
+    i = 0
+    while i < 12 {
+        non[i as usize] = 0 as u8
+        i = i + 1
+    }
+    non[3] = 9 as u8
+    non[7] = 0x4A as u8
+    chacha.block((&key[0]) as u64, (&non[0]) as u64, 1, (&out[0]) as u64)
+    show((&l_cc1[0]) as u64, (&out[0]) as u64, 64)
+
+    // ---- cc2: RFC 8439 section 2.4.2. Same key, counter = 1,
+    // nonce = 00 00 00 00 00 00 00 4a 00 00 00 00, and the 114 octet
+    // plaintext "Ladies and Gentlemen of the class of '99: ...".
+    var pt: [u8; 115] = "Ladies and Gentlemen of the class of '99: If I could offer you only one tip for the future, sunscreen would be it.\0"
+    i = 0
+    while i < 12 {
+        non[i as usize] = 0 as u8
+        i = i + 1
+    }
+    non[7] = 0x4A as u8
+    i = 0
+    while i < 114 {
+        big[i as usize] = pt[i as usize]
+        i = i + 1
+    }
+    chacha.xor((&key[0]) as u64, (&non[0]) as u64, 1, (&big[0]) as u64, 114)
+    show((&l_cc2[0]) as u64, (&big[0]) as u64, 114)
+
+    // ---- cc3: a whole backup block, so the counter advances 64 times.
+    // The keystream is XORed onto a KNOWN buffer, so the host can undo it.
+    fill((&big[0]) as u64, 4096, 12345)
+    i = 0
+    while i < 4096 {
+        cmp[i as usize] = big[i as usize]
+        i = i + 1
+    }
+    chacha.xor((&key[0]) as u64, (&non[0]) as u64, 0, (&big[0]) as u64, 4096)
+    // Only the hash of the result is printed -- 8192 hex digits down a
+    // serial line would be the slowest part of this round.
+    sha.hash((&big[0]) as u64, 4096, (&dig[0]) as u64)
+    show((&l_cc3[0]) as u64, (&dig[0]) as u64, 32)
+
+    // ---- hm1: HMAC-SHA256 over those same 4096 known octets.
+    bsec.hmac((&key[0]) as u64, 32, (&cmp[0]) as u64, 4096, (&dig[0]) as u64)
+    show((&l_hm1[0]) as u64, (&dig[0]) as u64, 32)
+
+    // ---- pb1: PBKDF2-HMAC-SHA256, salt = 00..0f, 2048 iterations.
+    i = 0
+    while i < 16 {
+        salt[i as usize] = i as u8
+        i = i + 1
+    }
+    var pw1: [u8; 15] = "correct horse\0\0"
+    bsec.pbkdf2((&pw1[0]) as u64, 13, (&salt[0]) as u64, 16, bsec.ITERS,
+        (&dig[0]) as u64)
+    show((&l_pb1[0]) as u64, (&dig[0]) as u64, 32)
+
+    // ---- cls: the classification, as nine letters in a fixed order.
+    var paths: [u8; 9] = [0 as u8; 9]
+    var p1: [u8; 12] = "/PLAN/main\0\0"
+    var p2: [u8; 15] = "/config/theme\0\0"
+    var p3: [u8; 13] = "/state/last\0\0"
+    var p4: [u8; 22] = "/secrets/vault.kdbx\0\0\0"
+    var p5: [u8; 12] = "/etc/shadow\0"
+    var p6: [u8; 12] = "/etc/passwd\0"
+    var p7: [u8; 16] = "/etc/machine-id\0"
+    var p8: [u8; 12] = "/device/key\0"
+    var p9: [u8; 22] = "/state/session/token\0\0"
+    paths[0] = bsec.class_char(bsec.class_of((&p1[0]) as u64)) as u8
+    paths[1] = bsec.class_char(bsec.class_of((&p2[0]) as u64)) as u8
+    paths[2] = bsec.class_char(bsec.class_of((&p3[0]) as u64)) as u8
+    paths[3] = bsec.class_char(bsec.class_of((&p4[0]) as u64)) as u8
+    paths[4] = bsec.class_char(bsec.class_of((&p5[0]) as u64)) as u8
+    paths[5] = bsec.class_char(bsec.class_of((&p6[0]) as u64)) as u8
+    paths[6] = bsec.class_char(bsec.class_of((&p7[0]) as u64)) as u8
+    paths[7] = bsec.class_char(bsec.class_of((&p8[0]) as u64)) as u8
+    paths[8] = bsec.class_char(bsec.class_of((&p9[0]) as u64)) as u8
+    ulib.say((&l_cls[0]) as u64)
+    i = 0
+    while i < 9 {
+        var one: [u8; 2] = [0 as u8; 2]
+        one[0] = paths[i as usize]
+        one[1] = 0 as u8
+        ulib.say((&one[0]) as u64)
+        i = i + 1
+    }
+    ulib.nl()
+
+    // ---- sl1..sl5: the block layer.
+    var name: [u8; 32] = [0 as u8; 32]
+    var name2: [u8; 32] = [0 as u8; 32]
+    if !bsec.set_up(bsec.SET_STORE, (&pw1[0]) as u64, 13, (&salt[0]) as u64) {
+        return 1
+    }
+    fill((&big[0]) as u64, 4096, 777)
+    i = 0
+    while i < 4096 {
+        cmp[i as usize] = big[i as usize]
+        i = i + 1
+    }
+    bsec.block_name(bsec.SET_STORE, (&big[0]) as u64, 4096, (&name[0]) as u64)
+    let sl: u64 = bsec.seal(bsec.SET_STORE, (&big[0]) as u64, 4096,
+        (&name[0]) as u64)
+    // name, then the first 32 octets of ciphertext, then the tag: enough
+    // for the host to recompute all three and short enough to print.
+    show((&l_sl1[0]) as u64, (&name[0]) as u64, 32)
+    show((&l_sl1[0]) as u64, (&big[0]) as u64, 32)
+    show((&l_sl1[0]) as u64, (&big[0]) as u64 + 4096, bsec.TAGLEN)
+
+    let pl: u64 = bsec.unseal(bsec.SET_STORE, (&big[0]) as u64, sl,
+        (&name[0]) as u64)
+    var same: bool = pl == 4096
+    i = 0
+    while i < 4096 && same {
+        if big[i as usize] != cmp[i as usize] {
+            same = false
+        }
+        i = i + 1
+    }
+    ulib.say((&l_sl2[0]) as u64)
+    if same {
+        ulib.say((&s_yes[0]) as u64)
+    } else {
+        ulib.say((&s_no[0]) as u64)
+    }
+    ulib.nl()
+
+    // ---- sl3: one flipped octet must be caught.
+    let sl2: u64 = bsec.seal(bsec.SET_STORE, (&big[0]) as u64, 4096,
+        (&name[0]) as u64)
+    big[100] = (big[100] as u64 ^ 1) as u8
+    let bad: u64 = bsec.unseal(bsec.SET_STORE, (&big[0]) as u64, sl2,
+        (&name[0]) as u64)
+    ulib.say((&l_sl3[0]) as u64)
+    if bad == 0 {
+        ulib.say((&s_yes[0]) as u64)
+    } else {
+        ulib.say((&s_no[0]) as u64)
+    }
+    ulib.nl()
+
+    // ---- sl4: the same plaintext, named again -- the SAME name, which
+    // is deduplication surviving encryption.
+    i = 0
+    while i < 4096 {
+        big[i as usize] = cmp[i as usize]
+        i = i + 1
+    }
+    bsec.block_name(bsec.SET_STORE, (&big[0]) as u64, 4096, (&name2[0]) as u64)
+    ulib.say((&l_sl4[0]) as u64)
+    if sha.equal((&name[0]) as u64, (&name2[0]) as u64) {
+        ulib.say((&s_yes[0]) as u64)
+    } else {
+        ulib.say((&s_no[0]) as u64)
+    }
+    ulib.nl()
+
+    // ---- sl5: ANOTHER password, same plaintext -- a DIFFERENT name.
+    // This is the confirmation-of-a-file attack failing.
+    var pw2: [u8; 15] = "battery staple\0"
+    bsec.set_up(bsec.SET_STORE, (&pw2[0]) as u64, 14, (&salt[0]) as u64)
+    bsec.block_name(bsec.SET_STORE, (&big[0]) as u64, 4096, (&name2[0]) as u64)
+    ulib.say((&l_sl5[0]) as u64)
+    if sha.equal((&name[0]) as u64, (&name2[0]) as u64) {
+        ulib.say((&s_no[0]) as u64)
+    } else {
+        ulib.say((&s_yes[0]) as u64)
+    }
+    ulib.nl()
+    return 0
+}
