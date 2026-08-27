@@ -177,6 +177,17 @@
 #      `nohid`, `nomsc`, `usbnoirq` (Vektor maskiert -- keine Taste
 #      kommt an), `usbpoll` (derselbe maskierte Vektor, aber der Kern
 #      sieht selbst nach), ein Lauf ohne Regler und einer ohne Geraete.
+#  26. WER WIEVIEL VERBRAUCHT (tools/netmon/run.sh, Runde NETMON): die
+#      Zaehlung je Prozess und je Programm (Nutzdaten UND Draht, und der
+#      Unterschied zwischen beiden), die Verbindungsliste `/bin/netstat`,
+#      der Verlauf in `/var/net/usage` -- und der zweite Teil: eine
+#      ZWEITE Netzkarte, Weiterleitung, NAT und ein DHCP-SERVER, gemessen
+#      an einer ZWEITEN Osum-Maschine, die ihre Adresse und ihren Weg
+#      hinaus von der ersten bekommt. Kein WLAN-Hotspot: dieses System
+#      hat keine Zeile 802.11, und docs/NETMON.md sagt warum.
+#      Gegenproben: `nonetmon` (nichts wird gezaehlt), `noshare` (die
+#      zweite Karte bleibt liegen), und der Kostenmesser `netmonbench`,
+#      der sagt, was die Zaehlung wirklich kostet -- 0,3 % des Laufs.
 #  25. EINE NETZSICHT JE PROZESS (tools/netview/run.sh, Runde NETVIEW):
 #      viele Programme verweigern den Dienst ohne Netz, obwohl sie offline
 #      liefen -- sie wollen nur nachladen oder nach Hause funken. Ein
@@ -596,6 +607,10 @@ lauf "25. das Symbolsystem: eine Schrift fuer die Oberflaeche, Bitmaps fuer die 
      tools/icons/run.sh icons '^icons: |^  OK    (assets/osum-icons.ttf|lib/icons.fi|raw code points|counterproof|the kernel loaded|the kernel says|and Ring 3 sees|assertions|an icon in memory|screenshot)|^        (per mixed pixel|one icon cold|in memory:|both mix)'
 lauf "25. eine Netzsicht je Prozess: real, filtered, faked, none (tools/netview/run.sh, Runde NETVIEW)" \
      tools/netview/run.sh netview '^NETVIEW: |^  OK    (OCTETS THAT LEFT|faked: (connect|reading|the WHOLE|the BODY|a name resolved|and the reachability)|none: (connect|and it said)|real: connect took|and the python server|(nocarrier|noip|noroute|online): the icon|(dark|light): (button|and the REAL)|kernel/netmark|8[a-f]:|faking:)'
+
+# =====================================================================
+lauf "26. wer wieviel verbraucht, und die Verbindung weiterreichen (tools/netmon/run.sh, Runde NETMON)" \
+     tools/netmon/run.sh netmon '^NETMON: |^  OK    (what the KERNEL counted|the counting is|one frame, cache hit|wget/ping ratio|and the SECOND roll|addresses in the history|the client got an OFFER|echo replies from|files fetched over HTTP|NAT records made)'
 
 
 echo
