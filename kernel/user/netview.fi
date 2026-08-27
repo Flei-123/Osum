@@ -27,11 +27,34 @@
 // process's list, tightens this process to `filtered`, and the command
 // gets both. Adding an entry LATER, from the command itself, would be
 // loosening -- and the kernel refuses it.
+//
+// ================================ SECOND ADDENDUM: THE FALLBACK
+//
+//     netview fallback                     what the preference is
+//     netview fallback off|when-offline|always
+//     netview boot                         apply /etc/netview.conf
+//     netview default <command> [args...]  start it the way the
+//                                          launcher would
+//
+// `default` IS A FIFTH WORD WHERE A VIEW GOES, and it is not a fifth
+// view: it means "work out what a program that nobody configured would
+// get right now, and use that". It is the same question
+// `appdir.view_for` asks for every program started from the desktop,
+// asked out loud from a shell -- which is why the acceptance can
+// measure the preference with the same command line twice and one
+// kernel setting different.
+//
+// `netview fallback <word>` writes BOTH: the running number, through
+// the system call, and `/etc/netview.conf`, so that it survives a
+// reboot. `netview boot` is the other half of that and belongs in
+// `/etc/inittab` as a `once` line -- the kernel does not read files at
+// boot and this addendum is not the round to teach it to.
 
 profile kernel
 
 import ulib
 import nv
+import libc.io
 
 export { u_start }
 
@@ -41,7 +64,9 @@ fn u_start(args: u64) -> u64 {
     var s_use1: [u8; 64] = "usage: netview [-a a.b.c.d[/n][:port]]... <view> <command> ...\0\0"
     var s_use2: [u8; 48] = "       netview [list | stats | show [pid] ]\0\0\0\0\0"
     var s_use3: [u8; 40] = "       netview set <pid> <view>\0\0\0\0\0\0\0\0\0"
-    var s_views: [u8; 45] = "       view: real filtered faked none\0\0\0\0\0\0\0\0"
+    var s_views: [u8; 54] = "       view: real filtered faked none default\0\0\0\0\0\0\0\0\0"
+    var s_use4: [u8; 52] = "       netview fallback [off|when-offline|always]\0\0\0"
+    var s_use5: [u8; 54] = "       netview boot          (from /etc/netview.conf)\0"
     var s_head: [u8; 34] = "  PID KIND   VIEW      ALLOW\0\0\0\0\0\0"
     var s_badview: [u8; 26] = "netview: no such view: \0\0\0"
     var s_badpid: [u8; 25] = "netview: no such pid: \0\0\0"
@@ -53,6 +78,15 @@ fn u_start(args: u64) -> u64 {
     var s_deny: [u8; 21] = "netview: denied \0\0\0\0\0"
     var s_rep: [u8; 22] = "netview: replies \0\0\0\0\0"
     var s_list: [u8; 5] = "list\0"
+    var s_fbw: [u8; 9] = "fallback\0"
+    var s_boot: [u8; 5] = "boot\0"
+    var s_fbs: [u8; 22] = "netview: fallback \0\0\0\0"
+    var s_fbv: [u8; 30] = "netview: a new program gets \0\0"
+    var s_badfb: [u8; 60] = "netview: fallback: off, when-offline or always\0\0\0\0\0\0\0\0\0\0\0\0\0\0"
+    var s_fbden: [u8; 50] = "netview: the fallback needs euid 0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"
+    var s_nocon: [u8; 48] = "netview: no /etc/netview.conf -- leaving it off\0"
+    var s_nowr: [u8; 66] = "netview: set for this run, but /etc/netview.conf is not writable\0\0"
+    var fbname: [u8; 14] = [0 as u8; 14]
     var s_stats: [u8; 6] = "stats\0"
     var s_show: [u8; 5] = "show\0"
     var s_set: [u8; 4] = "set\0"
@@ -118,6 +152,64 @@ fn u_start(args: u64) -> u64 {
         return 0
     }
 
+    // ================================ SECOND ADDENDUM: the preference
+    if ulib.streq(a1, (&s_fbw[0]) as u64) {
+        if argc < 3 {
+            let _n: u64 = nv.fb_name(nv.fallback(), (&fbname[0]) as u64)
+            ulib.say((&s_fbs[0]) as u64)
+            ulib.say((&fbname[0]) as u64)
+            ulib.nl()
+            let _m: u64 = nv.view_name(nv.fallback_view(),
+                (&name[0]) as u64)
+            ulib.say((&s_fbv[0]) as u64)
+            ulib.say((&name[0]) as u64)
+            ulib.nl()
+            return 0
+        }
+        let f: u64 = nv.fb_word(ulib.arg_at(args, 2))
+        if f > 2 {
+            ulib.esay_line((&s_badfb[0]) as u64, 0)
+            return 1
+        }
+        if ulib.bad(nv.fallback_set(f)) {
+            ulib.esay_line((&s_fbden[0]) as u64, 0)
+            return 1
+        }
+        let _n2: u64 = nv.fb_name(f, (&fbname[0]) as u64)
+        ulib.say((&s_fbs[0]) as u64)
+        ulib.say((&fbname[0]) as u64)
+        ulib.nl()
+        // AND WRITE IT DOWN. The system call changed the running
+        // number; without this line the next boot would forget it, and
+        // a preference that forgets itself is worse than none -- the
+        // person would set it, see it work, and find it gone.
+        //
+        // AND SAY SO WHEN IT FAILS. An image with no `/etc` is exactly
+        // the case the acceptance hit, and a tool that silently changes
+        // only the half that does not last is the worst of both.
+        if !conf_write(f, (&fbname[0]) as u64) {
+            ulib.esay_line((&s_nowr[0]) as u64, 0)
+            return 1
+        }
+        return 0
+    }
+    if ulib.streq(a1, (&s_boot[0]) as u64) {
+        let f: u64 = conf_read()
+        if f > 2 {
+            ulib.esay_line((&s_nocon[0]) as u64, 0)
+            return 0
+        }
+        if ulib.bad(nv.fallback_set(f)) {
+            ulib.esay_line((&s_fbden[0]) as u64, 0)
+            return 1
+        }
+        let _n: u64 = nv.fb_name(f, (&fbname[0]) as u64)
+        ulib.say((&s_fbs[0]) as u64)
+        ulib.say((&fbname[0]) as u64)
+        ulib.nl()
+        return 0
+    }
+
     // ---- the running form: [-a target]... <view> <command> [args]
     var i: u64 = 1
     var allows: u64 = 0
@@ -147,7 +239,15 @@ fn u_start(args: u64) -> u64 {
         ulib.esay_line((&s_views[0]) as u64, 0)
         return 1
     }
-    let want: u64 = view_num(ulib.arg_at(args, i))
+    var want: u64 = view_num(ulib.arg_at(args, i))
+    // SECOND ADDENDUM. `default` is not a fifth view -- it is the
+    // QUESTION the launcher asks for every program nobody configured,
+    // asked out loud. It is resolved HERE, once, before the command
+    // starts: resolving it later would mean a program whose view
+    // depends on when it got round to opening a socket.
+    if want == 4 {
+        want = nv.fallback_view()
+    }
     if want > 3 {
         ulib.esay_line((&s_badview[0]) as u64, ulib.arg_at(args, i))
         ulib.esay_line((&s_views[0]) as u64, 0)
@@ -194,7 +294,87 @@ fn view_num(p: u64) -> u64 {
     if ulib.streq(p, (&w3[0]) as u64) {
         return ulib.V_NONE
     }
+    var w4: [u8; 8] = "default\0"
+    if ulib.streq(p, (&w4[0]) as u64) {
+        return 4
+    }
     return 9
+}
+
+// ============================ SECOND ADDENDUM: /etc/netview.conf
+//
+// ONE LINE, `fallback=<word>`, and it exists because the kernel does
+// not read files while it boots. `netview fallback <word>` writes it,
+// `netview boot` reads it back out of `/etc/inittab`, and in between it
+// is a file the person can open in an editor -- which is the point of
+// putting a setting in a file rather than in a register.
+//
+// 9 means "no such file, or nothing usable in it". The caller then
+// leaves the preference where the command line put it, which for a
+// machine that never heard of this addendum is `off`.
+
+fn conf_read() -> u64 {
+    var path: [u8; 20] = "/etc/netview.conf\0\0\0"
+    var buf: [u8; 128] = [0 as u8; 128]
+    var key: [u8; 10] = "fallback=\0"
+    let fd: u64 = io.open((&path[0]) as u64, 0)
+    if ulib.bad(fd) {
+        return 9
+    }
+    let n: u64 = io.read(fd, (&buf[0]) as u64, 127)
+    io.close(fd)
+    if ulib.bad(n) || n == 0 {
+        return 9
+    }
+    let b: u64 = (&buf[0]) as u64
+    var at: u64 = 0
+    while at < n {
+        var e: u64 = at
+        while e < n && byte_at(b, e) != 10 {
+            e = e + 1
+        }
+        if e > at && byte_at(b, at) != 35 { // not a comment
+            var k: u64 = 0
+            var same: bool = true
+            while k < 9 {
+                if byte_at(b, at + k) != byte_at((&key[0]) as u64, k) {
+                    same = false
+                    k = 9
+                } else {
+                    k = k + 1
+                }
+            }
+            if same && at + 9 < e {
+                // Terminate the word in place -- the buffer is ours and
+                // the line has been read to its end already.
+                *((b + e) as *mut u8) = 0 as u8
+                return nv.fb_word(b + at + 9)
+            }
+        }
+        at = e + 1
+    }
+    return 9
+}
+
+fn conf_write(f: u64, scratch: u64) -> bool {
+    var path: [u8; 20] = "/etc/netview.conf\0\0\0"
+    var head: [u8; 64] = "# osum, round NETVIEW: the systemwide network fallback.\n\0\0\0\0\0\0\0\0"
+    var key: [u8; 10] = "fallback=\0"
+    var out: [u8; 128] = [0 as u8; 128]
+    let o: u64 = (&out[0]) as u64
+    var at: u64 = ulib.strcpy(o, (&head[0]) as u64)
+    at = at + ulib.strcpy(o + at, (&key[0]) as u64)
+    let _n: u64 = nv.fb_name(f, scratch)
+    at = at + ulib.strcpy(o + at, scratch)
+    *((o + at) as *mut u8) = 10 as u8
+    at = at + 1
+    let fd: u64 = io.create((&path[0]) as u64)
+    if ulib.bad(fd) {
+        return false
+    }
+    let w: u64 = io.write_all(fd, o, at)
+    io.close(fd)
+    return !ulib.bad(w) && w >= at
 }
 
 // `a.b.c.d`, then optionally `/prefix`, then optionally `:port`. Written
@@ -284,6 +464,21 @@ fn byte_at(p: u64, i: u64) -> u64 {
 fn list_all(head: u64, sp: u64, kuser: u64, kkern: u64, name: u64,
     only: u64) -> u64 {
     var s_dash: [u8; 2] = "-\0"
+    // SECOND ADDENDUM: the preference, above the list, because it is
+    // what the missing rows would say. Somebody reading `netview` and
+    // seeing nothing but `real` has to be able to tell "nobody
+    // configured anything" from "and the next program will be faked".
+    var s_fb: [u8; 14] = "  fallback: \0\0"
+    var s_ar: [u8; 6] = " -> \0\0"
+    var fbw: [u8; 14] = [0 as u8; 14]
+    var fvw: [u8; 10] = [0 as u8; 10]
+    let _f: u64 = nv.fb_name(nv.fallback(), (&fbw[0]) as u64)
+    let _g: u64 = nv.view_name(nv.fallback_view(), (&fvw[0]) as u64)
+    ulib.say((&s_fb[0]) as u64)
+    ulib.say((&fbw[0]) as u64)
+    ulib.say((&s_ar[0]) as u64)
+    ulib.say((&fvw[0]) as u64)
+    ulib.nl()
     ulib.say(head)
     ulib.nl()
     var i: u64 = 0
