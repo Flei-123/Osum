@@ -36,6 +36,7 @@ FC1=${FIRNC1:-vendor/firn/bin/firnc1}
 LDSCRIPT=kernel/kernel.ld
 ULD=kernel/user/user.ld
 PROGS="sh ls cat echo ping wget netstat sleep"
+# `/var/net/` has to exist on the image: the history file lives there.
 BLOCKS=4096
 
 NS=nmon-$$
@@ -155,6 +156,7 @@ gcc -O2 -o "$TMPD/bruecke" tools/net/bruecke.c 2>"$TMPD/gcc.err" \
 
 SPEC="/bin/"
 for p in $PROGS; do SPEC="$SPEC /bin/$p=$TMPD/${p}0.elf"; done
+SPEC="$SPEC /var/ /var/net/"
 python3 tools/osum/mkfs.py build "$TMPD/disk.img" $BLOCKS $SPEC \
     > "$TMPD/mkfs.txt" 2>&1 \
     && ok "mkfs.py: an image with /bin/netstat on it" \
@@ -465,6 +467,54 @@ grep -qaE '^tcp .*8000 .*wget' "$R" \
     && ok "and the PROGRAM the connection belongs to" \
     || { bad "the program column does not say wget"
          grep -aE '^tcp ' "$R" | head -4 | sed 's/^/        /'; }
+
+# =====================================================================
+echo "== 6. the history: a text file, and no double counting =="
+# =====================================================================
+# `netstat -w` folds what the kernel has counted since the last roll
+# into a line per day and a line per month. Running it TWICE has to add
+# nothing the second time -- that is the whole point of the watermark,
+# and it is the mistake every naive version of this makes.
+wire_up; bridge_up; srv_up
+cp "$TMPD/disk.img" "$TMPD/live4.img"
+qemu_bg "$TMPD/k0.mb" \
+    "osum $BASE $NETARGS nsvc=0 nwait=0 script=ping -c 2 $HOST_IP;wget -q http://$HOST_IP:8000/x;netstat -w;netstat -w;netstat -H;cat /var/net/usage;exit" \
+    "$TMPD/c4.txt" -drive "file=$TMPD/live4.img,format=raw,if=ide,index=0"
+qemu_wait
+srv_down; bridge_down; wire_down
+R="$TMPD/c4.txt"
+n=$(grep -acE '^netstat: programs written [1-9]' "$R")
+num "the first roll wrote programs to the file" "$n" ge 1
+n=$(grep -acE '^netstat: programs written 0$' "$R")
+num "and the SECOND roll wrote nothing -- no double counting" "$n" ge 1
+has "$R" "# osum network usage -- period program sent recvd wire-out wire-in" \
+    "the file has a header a person can read"
+grep -qaE '^2[0-9]{3}-[0-9]{2}-[0-9]{2} wget [0-9]+ [0-9]+ [0-9]+ [0-9]+$' "$R" \
+    && ok "a DAY line for wget, in plain text, six fields" \
+    || { bad "no day line for wget in /var/net/usage"
+         grep -a -A 8 'osum network usage' "$R" | head -10 | sed 's/^/        /'; }
+grep -qaE '^2[0-9]{3}-[0-9]{2} wget [0-9]+ [0-9]+ [0-9]+ [0-9]+$' "$R" \
+    && ok "and a MONTH line beside it -- that is the '4 GB this month' answer" \
+    || bad "no month line for wget"
+grep -qaE '^2[0-9]{3}-[0-9]{2} ping ' "$R" \
+    && ok "ping has its own rows and is not folded into anything" \
+    || bad "no rows for ping"
+# The day line and the month line have to agree on the first day of a
+# month, which is the only day they can be compared on -- so compare
+# what is comparable: the two have the same octets in this one boot.
+D=$(grep -aoE '^2[0-9]{3}-[0-9]{2}-[0-9]{2} wget [0-9]+ [0-9]+' "$R" | tail -1 | awk '{print $4}')
+M=$(grep -aoE '^2[0-9]{3}-[0-9]{2} wget [0-9]+ [0-9]+' "$R" | tail -1 | awk '{print $4}')
+[ -n "${D:-}" ] && [ "${D:-}" = "${M:-}" ] \
+    && ok "day and month agree in a boot that spans one day: $D octets" \
+    || bad "day $D and month $M disagree"
+# THE DATA PROTECTION RULE, tested and not only written down.
+n=$(grep -acE '^2[0-9]{3}-[0-9]{2}.*10\.9\.0\.1' "$R")
+num "addresses in the history file (there must be NONE)" "$n" eq 0
+n=$(grep -acE '^2[0-9]{3}-[0-9]{2}.*:8000' "$R")
+num "ports in the history file (there must be NONE)" "$n" eq 0
+note "the file records HOW MUCH per program and never WHERE. The live list"
+note "in section 5 shows destinations because a person asking now has a right"
+note "to know; nothing writes them down."
 
 echo
 echo "NETMON: $pass passed, $fail failed"
