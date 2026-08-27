@@ -453,6 +453,14 @@ python3 tools/k15/baum.py "$TMPD/baum" > "$TMPD/baum.log" 2>&1 \
 printf '# taskbar.conf\nedge=bottom\nheight=28\nwidth=104\nautohide=0\nontop=1\n' \
     > "$TMPD/taskbar.conf"
 
+# THIRD ADDENDUM: the same file with another edge in it. The panel has
+# to appear beside the bar on all four edges, and the only way to
+# measure that is to boot the bar on all four.
+set_edge() { # edge
+    printf '# taskbar.conf\nedge=%s\nheight=28\nwidth=104\nautohide=0\nontop=1\n' \
+        "$1" > "$TMPD/taskbar.conf"
+}
+
 mk_gimage() { # image theme-file
     local img=$1 th=$2
     local ARGS=(build "$img" 4096 /lib/
@@ -463,7 +471,8 @@ mk_gimage() { # image theme-file
     ARGS+=(/etc/ "/etc/theme=$th" "/etc/taskbar.conf=$TMPD/taskbar.conf")
     ARGS+=(/etc/netview/)
     for q in state-nocarrier state-noip state-noroute state-online \
-             mark-filtered mark-faked mark-none sys-faking; do
+             mark-filtered mark-faked mark-none sys-faking \
+             tile-fake tile-net tile-hide; do
         ARGS+=("/etc/netview/$q=$TMPD/icons/$q")
     done
     while read -r z; do ARGS+=("$z"); done < <(python3 tools/k15/buendel.py assets/apps "$TMPD/buendel")
@@ -473,7 +482,7 @@ mk_gimage() { # image theme-file
 
 # gshot <name> <theme> <extra-cmdline> [wire]
 gshot() {
-    local name=$1 th=$2 extra=$3 wire=${4:-}
+    local name=$1 th=$2 extra=$3 wire=${4:-} drive=${5:-}
     local sock="$TMPD/gm-$name.sock" out="$TMPD/$name.txt" ppm="$TMPD/$name.ppm"
     rm -f "$out" "$ppm" "$sock"
     mk_gimage "$TMPD/gd-$name.img" "$th" || { bad "mkfs for $name failed"; return 1; }
@@ -503,6 +512,15 @@ gshot() {
     # means, and why the state is not simply "an address is configured".
     if [ "$wire" = "ping" ]; then
         ip netns exec "$NS" ping -c 4 -i 0.3 -W 2 "$OSUM_IP" >/dev/null 2>&1
+        sleep 2
+    fi
+    # THIRD ADDENDUM: drive the machine before the picture is taken.
+    # `sendkey meta_l-a` is a REAL key through the PS/2 controller, and
+    # so it is the only way to find out whether the Super key arrives at
+    # `kbd.fi` -- which, before this addendum, it did not.
+    if [ -n "$drive" ] && [ -s "$drive" ]; then
+        python3 tools/wm/monitor.py "$sock" "$drive" 0.12 \
+            > "$TMPD/$name.mon" 2>&1
         sleep 2
     fi
     python3 tools/gfx/schuss.py "$sock" "$ppm" 30 > "$TMPD/$name.shot" 2>&1
@@ -899,6 +917,272 @@ hasnot "$TMPD/fb-wo.txt" "*** EXCEPTION" "8: no exception in the offline run"
 hasnot "$TMPD/fb-alw.txt" "*** EXCEPTION" "8: no exception in the 'always' run"
 
 echo
+
+
+# =====================================================================
+echo "== 9. THIRD ADDENDUM: the switch, and the quick settings =="
+# =====================================================================
+# WHAT HAS TO BE PROVED HERE, and none of it by assertion:
+#
+#   1. THE SUPER KEY ARRIVES. It did not before this addendum -- 0xE0
+#      0x5B fell through `arrow()` and was dropped without a trace. The
+#      proof is a REAL key through the PS/2 controller (`sendkey
+#      meta_l-a` on the QEMU monitor), and the counter-proof is that the
+#      `a` does NOT also land in the focused window as text.
+#   2. THE PANEL STANDS AT ALL FOUR EDGES, beside the bar and not under
+#      it, laid out against the WORK AREA and not against the screen.
+#   3. HOW LONG IT TAKES, in microseconds, from the key press to the
+#      panel painted -- on ONE clock, stamped in the keyboard interrupt
+#      and read after the paint.
+#   4. THE TILE REALLY SWITCHES. Not "the click was received": the
+#      machine is genuinely online, the tile is pressed, and the
+#      SYS-FAKING SIGN APPEARS IN THE CORNER, read back out of the
+#      picture at the coordinates the bar itself reported. And the marks
+#      on the running windows must NOT move, because a running process
+#      keeps its view.
+#   5. THE DEFAULT IS `off` AND `when-offline` IS NEVER REACHED BY
+#      ITSELF -- Justin's correction, measured instead of promised.
+
+qsk() { grep -aoE "^qs: open x=[0-9]+ y=[0-9]+ w=[0-9]+ h=[0-9]+ edge=[0-9]+ up=[0-9]+ us=[0-9]+" "$1" | tail -1; }
+qsf() { qsk "$1" | grep -oE "$2=[0-9]+" | cut -d= -f2; }
+symln() { grep -aoE "^qs: sym n=$2 x=[0-9]+ y=[0-9]+ to=[0-9]+" "$1" | tail -1; }
+
+echo "   9a. does the Super key arrive at all -- it did not before"
+printf 'warte 6\nsendkey a\nwarte 2\nsendkey meta_l-a\nwarte 3\nsendkey esc\nwarte 2\nsendkey meta_l-a\nwarte 3\n' > "$TMPD/dr-key"
+if gshot "qs-key" "assets/netview/theme-dark" \
+    "netvdemo nic nip=$OSUM_IP/24 ngw=$HOST_IP" "" "$TMPD/dr-key"; then
+    L="$TMPD/qs-key.txt"
+    has "$L" "hk: super+a" "9a: the kernel saw Super+A and wrote it down"
+    has "$L" "qs: open" "9a: and the quick settings opened"
+    # THE COUNTER-PROOF, and it is the half that matters. A plain `a` is
+    # still a plain `a`; Super+A is NOT also a plain `a`. If the two got
+    # mixed up, every opening of this panel would leave a stray letter
+    # in whatever window had the focus.
+    n_key=$(grep -ac '^key: a$' "$L")
+    n_hk=$(grep -ac '^hk: super+a$' "$L")
+    num "9a: plain 'a' still reaches the keyboard as a character" "$n_key" eq 1
+    num "9a: Super+A produced exactly one hotkey" "$n_hk" eq 1
+    num "9a: and Super+A typed NO letter (still exactly one 'key: a')" "$n_key" eq 1
+    # AND IT CLOSES. Escape, which only works because the panel takes
+    # the focus when it opens -- a panel the keyboard cannot get out of
+    # would be worse than none.
+    has "$L" "qs: closed by escape" "9a: Escape closes it again"
+    num "9a: and it opened twice in one boot" "$(grep -ac '^qs: open ' "$L")" eq 2
+else
+    bad "9a: no screenshot of the hotkey run"
+fi
+
+echo "   9b. the panel at all four edges, laid out against the WORK AREA"
+printf 'warte 5\nsendkey meta_l-a\nwarte 3\n' > "$TMPD/dr-open"
+for ed in bottom top left right; do
+    case $ed in bottom) EN=0 ;; top) EN=1 ;; left) EN=2 ;; right) EN=3 ;; esac
+    set_edge "$ed"
+    wire_up; bridge_up
+    if gshot "qs-$ed" "assets/netview/theme-dark" \
+        "netvdemo nic nip=$OSUM_IP/24 ngw=$HOST_IP" "ping" "$TMPD/dr-open"; then
+        L="$TMPD/qs-$ed.txt"; P="$TMPD/qs-$ed.ppm"
+        png "$P" "qs-$ed"
+        if [ -z "$(qsk "$L")" ]; then
+            bad "$ed: the panel never reported that it opened"
+        else
+            num "$ed: the panel reports the edge it was anchored to" \
+                "$(qsf "$L" edge)" eq "$EN"
+            qx=$(qsf "$L" x); qy=$(qsf "$L" y)
+            qw=$(qsf "$L" w); qh=$(qsf "$L" h)
+            # IT MUST NOT LIE UNDER THE BAR. The work area the server
+            # reports is what is left of the screen after the strut; the
+            # panel has to be inside it on every edge, and that is the
+            # arithmetic a panel which assumed the screen would get
+            # wrong on three edges out of four.
+            wl=$(grep -aoE '^taskbar: work +x=[0-9]+ y=[0-9]+ w=[0-9]+ h=[0-9]+' "$L" | tail -1)
+            wx=$(echo "$wl" | grep -oE ' x=[0-9]+' | tr -d ' x=')
+            wy=$(echo "$wl" | grep -oE ' y=[0-9]+' | tr -d ' y=')
+            ww=$(echo "$wl" | grep -oE ' w=[0-9]+' | tr -d ' w=')
+            wh=$(echo "$wl" | grep -oE ' h=[0-9]+' | tr -d ' h=')
+            if [ -n "$wx" ] && [ -n "$qx" ]; then
+                if [ "$qx" -ge "$wx" ] && [ "$qy" -ge "$wy" ] \
+                   && [ $((qx + qw)) -le $((wx + ww)) ] \
+                   && [ $((qy + qh)) -le $((wy + wh)) ]; then
+                    ok "$ed: the panel is inside the work area ($qx,$qy ${qw}x$qh in $wx,$wy ${ww}x$wh)"
+                else
+                    bad "$ed: the panel at $qx,$qy ${qw}x$qh is NOT inside the work area $wx,$wy ${ww}x$wh"
+                fi
+            else
+                bad "$ed: no work area reported"
+            fi
+            # AND THE LAYOUT, read back out of the picture. This is
+            # the check that found the two defects the first build of
+            # this panel really had -- a label four pixels past its own
+            # tile, and two text rows touching. Neither is visible in a
+            # source file.
+            r=$(python3 tools/netview/kachel.py "$P" "$qx" "$qy" "$qw" "$qh" \
+                10 180 74 8 3 2>&1 | tail -1)
+            case "$r" in ok*) ok "$ed: the tiles hold their labels -- $r" ;;
+                         *)   bad "$ed: tile layout: $r" ;; esac
+            # AND THE SYMBOLS at the places the panel said it drew them,
+            # pixel for pixel. A panel that reported one position and
+            # painted another fails here -- the lesson of round K7B,
+            # applied to a fifth thing.
+            for t in 0 1 2; do
+                sl=$(symln "$L" "$t")
+                if [ -z "$sl" ]; then bad "$ed: tile $t reported no symbol"; continue; fi
+                sx=$(echo "$sl" | grep -oE ' x=[0-9]+' | tr -d ' x=')
+                sy=$(echo "$sl" | grep -oE ' y=[0-9]+' | tr -d ' y=')
+                case $t in 0) dr=tile-fake ;; 1) dr=tile-net ;; 2) dr=tile-hide ;; esac
+                r=$(python3 tools/netview/schau.py "$P" "$sx" "$sy" \
+                    "assets/netview/$dr.txt" assets/netview/theme-dark 2>&1)
+                case "$r" in ok*) ok "$ed: $dr stands at $sx,$sy -- $r" ;;
+                             *)   bad "$ed: $dr at $sx,$sy: $r" ;; esac
+            done
+        fi
+    else
+        bad "$ed: no screenshot of the panel"
+    fi
+    bridge_down; wire_down
+done
+set_edge bottom
+
+echo "   9c. THE NUMBER: from the key press to the panel standing"
+# ONE CLOCK, BOTH ENDS. `kbd.fi` stamps CLOCK_MONOTONIC in the keyboard
+# interrupt itself; `qs.fi` reads the same clock after the window stands
+# and is painted, and prints the difference. Nothing in between is
+# estimated, and there is no second clock to disagree with the first.
+US=$(qsf "$TMPD/qs-bottom.txt" us)
+UP=$(qsf "$TMPD/qs-bottom.txt" up)
+if [ -n "$US" ] && [ "$US" -gt 0 ]; then
+    ok "9c: key press to WINDOW STANDING: $UP us (waiting for the poll)"
+    ok "9c: key press to PANEL PAINTED:   $US us"
+    ok "9c: of which the drawing itself:  $((US - UP)) us"
+    num "9c: and the whole of it is under a fifth of a second" "$US" lt 200000
+else
+    bad "9c: no time was measured (us=${US:-nothing})"
+fi
+
+echo "   9d. THE TILE REALLY SWITCHES -- online, and faking after one click"
+# THE MACHINE IS GENUINELY ONLINE HERE, which is the case the sign
+# exists for and the one that is hardest to fake past: the corner must
+# be empty where the sign goes before the click and carry it after --
+# and the marks on the running windows must not have moved, because a
+# preference does not touch a running process.
+wire_up; bridge_up
+QX=$(qsf "$TMPD/qs-bottom.txt" x); QY=$(qsf "$TMPD/qs-bottom.txt" y)
+if [ -z "$QX" ]; then QX=0; QY=0; fi
+TX=$((QX + 60)); TY=$((QY + 41))
+{
+    echo "warte 5"
+    echo "sendkey meta_l-a"
+    echo "warte 2"
+    # Into the corner first and then in steps under 128, for the reason
+    # `tools/wm/monitor.py` writes down: a PS/2 packet carries nine bits
+    # per axis, and a lost one moves the endpoint somewhere else.
+    for _i in 1 2 3 4 5 6 7 8; do echo "mouse_move -120 -120"; done
+    x=0; y=0
+    while [ $x -lt $TX ] || [ $y -lt $TY ]; do
+        dx=$(( TX - x )); [ $dx -gt 100 ] && dx=100; [ $dx -lt 0 ] && dx=0
+        dy=$(( TY - y )); [ $dy -gt 100 ] && dy=100; [ $dy -lt 0 ] && dy=0
+        echo "mouse_move $dx $dy"
+        x=$((x + dx)); y=$((y + dy))
+    done
+    echo "warte 1"
+    echo "mouse_button 1"
+    echo "warte 1"
+    echo "mouse_button 0"
+    echo "warte 4"
+} > "$TMPD/dr-click"
+if gshot "qs-click" "assets/netview/theme-dark" \
+    "netvdemo nic nip=$OSUM_IP/24 ngw=$HOST_IP" "ping" "$TMPD/dr-click"; then
+    L="$TMPD/qs-click.txt"; P="$TMPD/qs-click.ppm"
+    png "$P" "qs-switch"
+    num "9d: the machine really is online" "$(st_of "$L")" eq 3
+    has "$L" "qs: tile n=0 to=1" "9d: the tile went from off to on"
+    # AND THE REST OF THE SYSTEM SAW IT. The corner sign is drawn by the
+    # taskbar out of a KERNEL answer and not out of anything the panel
+    # told it -- so this measures the whole path at once: click, system
+    # call, kernel state, taskbar poll, pixels.
+    GX=$(gx_of "$L"); GY=$(gy_of "$L")
+    fl=$(grep -aoE '^taskbar: faking fb=[0-9]+ x=[0-9]+ y=[0-9]+' "$L" | tail -1)
+    if [ -n "$fl" ] && [ -n "$GX" ]; then
+        fb=$(echo "$fl" | grep -oE 'fb=[0-9]+' | cut -d= -f2)
+        fx=$(echo "$fl" | grep -oE ' x=[0-9]+' | tr -d ' x=')
+        fy=$(echo "$fl" | grep -oE ' y=[0-9]+' | tr -d ' y=')
+        num "9d: the taskbar now says the system is faking" "${fb:-0}" eq 2
+        r=$(python3 tools/netview/schau.py "$P" "$((fx + GX))" "$((fy + GY))" \
+            assets/netview/sys-faking.txt assets/netview/theme-dark 2>&1)
+        case "$r" in ok*) ok "9d: and the sign is IN THE PICTURE at $((fx+GX)),$((fy+GY)) -- $r" ;;
+                     *)   bad "9d: the sign is not in the picture: $r" ;; esac
+    else
+        bad "9d: the bar never reported the faking sign"
+    fi
+    # THE COUNTER-CHECK, out of the same picture: the windows that were
+    # already running kept their views. `netvdemo` starts one of each,
+    # and one click on a preference may not have moved a single one.
+    seen_1=0; seen_2=0; seen_3=0
+    for b in 0 1 2 3 4 5 6 7 8 9; do
+        line=$(grep -aE "^taskbar: btn i=$b " "$L" | tail -1)
+        [ -z "$line" ] && continue
+        v=$(echo "$line" | grep -oE 'netv=[0-9]+' | cut -d= -f2)
+        case "${v:-0}" in
+            1) seen_1=$((seen_1+1)) ;;
+            2) seen_2=$((seen_2+1)) ;;
+            3) seen_3=$((seen_3+1)) ;;
+        esac
+    done
+    num "9d: the running filtered window kept its view" "$seen_1" eq 1
+    num "9d: the running faked window kept its view" "$seen_2" eq 1
+    num "9d: the running none window kept its view" "$seen_3" eq 1
+else
+    bad "9d: no screenshot of the click"
+fi
+bridge_down; wire_down
+
+echo "   9e. THE CORRECTION: off is the default and stays it"
+# A machine told NOTHING, anywhere: no `nvfall=` on the command line and
+# no `/etc/netview.conf` in the image. This is the number Justin's
+# correction is about, and it comes off a boot rather than out of a
+# comment.
+run_script "/bin/netview fallback;/bin/netview default /bin/nvcheck plain $HOST_IP $HTTP_PORT;exit" \
+    "$TMPD/fb-plain.txt" "" nonic
+D="$TMPD/fb-plain.txt"
+num "9e: a machine told nothing has the preference off" "$(kv "$D" fallb)" eq 0
+num "9e: so a new program gets the REAL view, not a faked one" "$(kv "$D" fbview)" eq 0
+num "9e: and the program did get it" "$(nvc "$D" plain view)" eq 0
+has "$D" "netview: fallback off" "9e: and it says so in words"
+
+echo "   9f. the switch has two positions, and neither of them is when-offline"
+wire_up; bridge_up; server_up
+run_script "/bin/netview fallback on;/bin/cat /etc/netview.conf;/bin/netview default /bin/nvcheck sw1 $HOST_IP $HTTP_PORT;/bin/netview fallback off;/bin/netview default /bin/nvcheck sw2 $HOST_IP $HTTP_PORT;exit" \
+    "$TMPD/fb-sw.txt"
+server_down; bridge_down; wire_down
+E="$TMPD/fb-sw.txt"
+has "$E" "netview: fallback always" "9f: 'on' is a spelling of 'always', not a fourth value"
+has "$E" "fallback=always" "9f: and the file keeps ONE spelling per value"
+hasnot "$E" "when-offline" "9f: the switch never lands on when-offline by itself"
+num "9f: with the switch ON a new program is faked" "$(nvc "$E" sw1 view)" eq 2
+num "9f: and it reads the invented 204"             "$(nvc "$E" sw1 status)" eq 204
+num "9f: with the switch OFF it is real again"      "$(nvc "$E" sw2 view)" eq 0
+num "9f: and really reached the python server"      "$(nvc "$E" sw2 status)" eq 200
+
+echo "   9g. the network tile: the address really goes and really comes back"
+# NOT THE VIEW OF THE NETWORK -- THE NETWORK. `netview <view>` cannot do
+# this and is not supposed to; this is the second tile, and what it does
+# is take the machine's address off it. Measured through exactly the two
+# calls the tile makes (`nv.net_off`, `nv.net_on`).
+wire_up; bridge_up; server_up
+run_script "/bin/nvcheck pre $HOST_IP $HTTP_PORT;/bin/netview netoff;/bin/nvcheck gone $HOST_IP $HTTP_PORT;/bin/netview neton $OSUM_IP/24 $HOST_IP;/bin/nvcheck back $HOST_IP $HTTP_PORT;exit" \
+    "$TMPD/net-off.txt"
+server_down; bridge_down; wire_down
+G="$TMPD/net-off.txt"
+num "9g: before -- the real page arrives" "$(nvc "$G" pre status)" eq 200
+c=$(nvc "$G" gone conn)
+if [ -n "$c" ] && [ "$c" != 0 ]; then
+    ok "9g: with the address gone, connect FAILS: $c"
+else
+    bad "9g: connect returned ${c:-nothing} with no address -- it had to fail"
+fi
+num "9g: and nothing was loaded"                 "$(nvc "$G" gone body)" eq 0
+num "9g: afterwards the same page arrives again" "$(nvc "$G" back status)" eq 200
+num "9g: with the same 46 octets"                "$(nvc "$G" back body)" eq 46
+
 echo "NETVIEW: $pass passed, $fail failed"
 [ "$fail" -eq 0 ] || exit 1
 exit 0
