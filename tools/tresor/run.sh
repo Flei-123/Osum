@@ -41,7 +41,7 @@
 #      Fingerabdruck (eine Neuinstallation aendert ihn nicht), ein anderer
 #      Rechner einen ANDEREN.
 #
-#   7. DIE SICHERUNG. `bak save` zweimal hintereinander: der zweite Lauf
+#   7. DIE SICHERUNG. `backup save` zweimal hintereinander: der zweite Lauf
 #      schreibt NULL Oktette. Sichern, loeschen, wiederherstellen ergibt
 #      einen Baum, den der WIRT aus dem Plattenabbild zurueckliest und
 #      Oktett fuer Oktett vergleicht -- nicht aus einem Mitschnitt der
@@ -52,7 +52,7 @@
 #      neu. Feste Blockgroesse kann das nicht, und die Zahlen stehen in
 #      docs/THEFT.md statt einer Ausrede.
 #
-#   9. `bak verify` FINDET SCHADEN. Der WIRT kippt EIN Oktett in der
+#   9. `backup verify` FINDET SCHADEN. Der WIRT kippt EIN Oktett in der
 #      Packdatei IM ABBILD (`tools/tresor/kaputt.py`) -- von aussen, so
 #      wie echter Schaden entsteht -- und derselbe Lauf prueft den
 #      beschaedigten UND einen heilen Speicher.
@@ -410,26 +410,26 @@ PY
 
 cat > "$TMPD/t_bak.sh" <<'EOS'
 echo ==RUN1==
-bak save /d /store s1
+backup save /d /store s1
 echo ==RUN2==
-bak save /d /store s2
+backup save /d /store s2
 echo ==VERIFY==
-bak verify /store s1
+backup verify /store s1
 echo ==RESTORE==
-bak restore /store s1 /out
+backup restore /store s1 /out
 echo ==GET==
-bak get /store s1 /rand.bin /got.bin
+backup get /store s1 /rand.bin /got.bin
 echo ==GETBAD==
-bak get /store s1 /nosuch /nope.bin
+backup get /store s1 /nosuch /nope.bin
 echo ==LIST==
-bak list /store
+backup list /store
 echo ==END==
 EOS
 python3 tools/osum/mkfs.py build "$TMPD/dbak.img" $BLOCKS \
     /bin/ /t/ /d/ /d/sub/ /d/sub/deep/ /store/ /out/ /proc/ /dev/ \
     /bin/sh="$TMPD/bin/sh.elf" /bin/cat="$TMPD/bin/cat.elf" \
     /bin/echo="$TMPD/bin/echo.elf" /bin/ls="$TMPD/bin/ls.elf" \
-    /bin/bak="$TMPD/bin/bak.elf" \
+    /bin/backup="$TMPD/bin/bak.elf" \
     /d/a.txt="$TMPD/baum/a.txt" /d/rand.bin="$TMPD/baum/rand.bin" /d/empty.txt= \
     /d/sub/copy.txt="$TMPD/baum/sub/copy.txt" \
     /d/sub/deep/small.txt="$TMPD/baum/sub/deep/small.txt" \
@@ -468,11 +468,11 @@ is "und nichts Fehlendes" "$(feld VERIFY missing)" "0"
 is "wiederhergestellt: 3 Verzeichnisse" "$(feld RESTORE 'restored dirs')" "3"
 is "wiederhergestellt: 5 Dateien" "$(feld RESTORE 'restored files')" "5"
 is "wiederhergestellt: 25491 Oktette" "$(feld RESTORE 'restored bytes')" "25491"
-abschnitt LIST | grep -qa '^s1$' && ok "bak list nennt s1" || bad "bak list nennt s1 nicht"
-abschnitt LIST | grep -qa '^s2$' && ok "bak list nennt s2" || bad "bak list nennt s2 nicht"
+abschnitt LIST | grep -qa '^s1$' && ok "backup list nennt s1" || bad "backup list nennt s1 nicht"
+abschnitt LIST | grep -qa '^s2$' && ok "backup list nennt s2" || bad "backup list nennt s2 nicht"
 abschnitt GETBAD | grep -qa 'no such path' \
-    && ok "bak get auf einen Pfad, den es nicht gibt, ist ein FEHLER" \
-    || bad "bak get auf einen unbekannten Pfad meldet keinen Fehler"
+    && ok "backup get auf einen Pfad, den es nicht gibt, ist ein FEHLER" \
+    || bad "backup get auf einen unbekannten Pfad meldet keinen Fehler"
 
 # DER EIGENTLICHE NACHWEIS: der Wirt liest den wiederhergestellten Baum
 # AUS DEM ABBILD und haelt ihn gegen das Original.
@@ -524,19 +524,19 @@ PY
 
 cat > "$TMPD/t_shift.sh" <<'EOS'
 echo ==A1==
-bak save /one /sa b1
+backup save /one /sa b1
 echo ==A2==
-bak save /oneapp /sa b2
+backup save /oneapp /sa b2
 echo ==B1==
-bak save /one /sb b1
+backup save /one /sb b1
 echo ==B2==
-bak save /onepre /sb b2
+backup save /onepre /sb b2
 echo ==END==
 EOS
 python3 tools/osum/mkfs.py build "$TMPD/dshift.img" $BLOCKS \
     /bin/ /t/ /one/ /oneapp/ /onepre/ /sa/ /sb/ /proc/ /dev/ \
     /bin/sh="$TMPD/bin/sh.elf" /bin/cat="$TMPD/bin/cat.elf" \
-    /bin/echo="$TMPD/bin/echo.elf" /bin/bak="$TMPD/bin/bak.elf" \
+    /bin/echo="$TMPD/bin/echo.elf" /bin/backup="$TMPD/bin/bak.elf" \
     /one/a.bin="$TMPD/base.bin" /oneapp/a.bin="$TMPD/app.bin" \
     /onepre/a.bin="$TMPD/pre.bin" /t/shift.sh="$TMPD/t_shift.sh" \
     > /dev/null 2>&1 && ok "mkfs.py baut die drei Fassungen derselben Datei" \
@@ -565,9 +565,9 @@ is "genau EIN Oktett im Abbild ist anders" "$n" "1"
 
 cat > "$TMPD/t_ver.sh" <<'EOS'
 echo ==BAD==
-bak verify /sa b1
+backup verify /sa b1
 echo ==GOOD==
-bak verify /sb b1
+backup verify /sb b1
 echo ==END==
 EOS
 python3 - "$TMPD" <<'PY'

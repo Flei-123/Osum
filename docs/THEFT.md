@@ -245,8 +245,8 @@ that is a byte-for-byte copy of another.
 
 | run | chunks seen | new chunks | octets read | octets written |
 |---|---:|---:|---:|---:|
-| first `bak save` | 9 | 5 | 25,491 | 11,155 |
-| second `bak save`, nothing changed | 9 | **0** | 25,491 | **0** |
+| first `backup save` | 9 | 5 | 25,491 | 11,155 |
+| second `backup save`, nothing changed | 9 | **0** | 25,491 | **0** |
 
 The second run reads the whole tree again and writes **nothing**. It does
 not consult a timestamp or a change journal; it asks "do I already have
@@ -261,9 +261,9 @@ with other work.
 log -- the host reads the restored tree back **out of the disk image**
 (`mkfs.py cat`) and compares it with the originals: **6 entries compared,
 6 identical, 0 different** (5 whole-tree files plus one single-file
-`bak get`). Restore reported 3 directories, 5 files, 25,491 octets.
+`backup get`). Restore reported 3 directories, 5 files, 25,491 octets.
 
-`bak verify` re-reads every chunk out of the pack and hashes it again.
+`backup verify` re-reads every chunk out of the pack and hashes it again.
 Counter-check: the host flips **one octet** inside the pack file *in the
 disk image*, from outside the kernel (`tools/tresor/kaputt.py`; `cmp`
 confirms exactly 1 octet differs). The same run then checks the damaged
