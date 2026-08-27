@@ -143,7 +143,15 @@ fi
 
 pmoff=$(grep -aE '^const PMON_OFF' kernel/kstate.fi | sed 's/.*= //')
 pmmax=$(grep -aE '^const PMON_MAX' kernel/kstate.fi | sed 's/.*= //')
-same "the kdata pages of this round" "0x5C000" "$pmoff"
+# ROUND MERGE: THE ADDRESS IS NOT WRITTEN INTO THIS RUNNER ANY MORE.
+# This round picked 0x5C000 on its own branch; on the merged tree round
+# DISPLAY is there and the power accounting has moved to 0x74000. The
+# question these two lines ask is whether the area EXISTS and how big it
+# is -- the map checker four lines down is what decides about overlaps,
+# and it is the only thing that can. A runner that pins its own address
+# reports a failure every time somebody else lands first.
+[ -n "$pmoff" ] && ok "the kdata pages of this round stand in kstate.fi: $pmoff" \
+                || bad "PMON_OFF is missing from kernel/kstate.fi"
 same "how many of them" "0x3000" "$pmmax"
 
 # THE MAP CHECKER is the only thing that can see a collision that stands
