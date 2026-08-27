@@ -46,6 +46,7 @@
 
 import serial
 import kstate
+import arch.arch
 
 export {
     cas, fetch_add, fetch_sub, load, store, pause, barrier,
@@ -74,24 +75,44 @@ fn fetch_sub(p: u64, delta: u64) -> u64 {
     return __atomic_add(p as *mut u64, 0 -% delta)
 }
 
-// See the head of the file: aligned, single, unmovable.
+// ROUND OSUM-ARM2: THE SENTENCE AT THE HEAD OF THIS FILE COMES DUE.
+//
+// It said, in 2025, that `__mmio_read64`/`__mmio_write64` are a correct
+// atomic load and store "on this architecture", and that "on a machine with
+// a weaker memory model it would not be, and then this file is the one
+// place that has to change". This is that change, and the sentence was
+// half right: the ACCESS is single-copy atomic on AArch64 too, the ORDER is
+// not. A plain store releasing a lock may become visible BEFORE the data it
+// was protecting; a plain load taking one may be overtaken by the reads
+// that follow.
+//
+// So both go across the boundary now. On x86-64 `arch.atomic_load` and
+// `arch.atomic_store` are the same two MMIO forms that stood here, octet
+// for octet; on AArch64 they are `ldar` and `stlr`. `tools/arch/order.sh`
+// reads both out of the emitted assembler of both machines rather than
+// taking this comment's word for it.
 fn load(p: u64) -> u64 {
-    return __mmio_read64(p as *mut u64)
+    return arch.atomic_load(p)
 }
 
 fn store(p: u64, v: u64) {
-    __mmio_write64(p as *mut u64, v)
+    arch.atomic_store(p, v)
 }
 
+// `pause` on x86, `yield` on AArch64. NOT the same instruction with two
+// names: the second one is a hint to a multithreaded core, the first is
+// also a pipeline hint on leaving a spin loop. Both say "this loop is a
+// spin loop", which is all the caller means.
 fn pause() {
-    asm("pause")
+    arch.pause()
 }
 
 // A full fence. Needed in exactly one place -- between "I am online" and
 // the first read of shared state on a processor that has just come up --
-// and named here so that the place is findable.
+// and named here so that the place is findable. `mfence` there, `dmb sy`
+// here.
 fn barrier() {
-    asm("mfence")
+    arch.barrier()
 }
 
 // ------------------------------------------------------------ the locks
@@ -247,7 +268,7 @@ fn stuck(state: u64, id: u64) {
     }
     serial.nl()
     while true {
-        asm("cli")
-        asm("hlt")
+        arch.irq_off()
+        arch.idle()
     }
 }
