@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""tools/gfx/schau.py -- ein Bildschirmfoto MASCHINELL pruefen.
+"""tools/gfx/checkshot.py -- ein Bildschirmfoto MASCHINELL pruefen.
 
 Ein Test, der nur sagt "der Kernel ist nicht abgestuerzt", beweist ueber
 einen Bildschirm gar nichts.  Deshalb macht `tools/gfx/run.sh` echte

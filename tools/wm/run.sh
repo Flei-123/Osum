@@ -17,7 +17,7 @@
 # werden ueber den QEMU-Monitor echte Mausbewegungen, echte Klicks und
 # echte Tastendruecke in die laufende Maschine eingespeist
 # (`tools/wm/monitor.py`), und danach wird ein Bildschirmfoto gemacht und
-# MASCHINELL nachgerechnet (`tools/gfx/schau.py`).
+# MASCHINELL nachgerechnet (`tools/gfx/checkshot.py`).
 #
 # Und fuer den Text gilt die Lehre aus Runde K7B, die dieser Runde
 # ausdruecklich mitgegeben wurde: dort schien Text zu 87 Prozent zu
@@ -34,7 +34,7 @@
 #   2. DIE SPEICHERKARTE VON kdata. Drei neue Bereiche (MOUSE, WM, TTF)
 #      in den beiden Luecken, die Runde K7B als frei ausgewiesen hat --
 #      und der Kollisionspruefer rechnet nach.
-#   3. DIE SCHRIFTEN. `tools/ttf/schnitt.py` schneidet sie aus DejaVu
+#   3. DIE SCHRIFTEN. `tools/ttf/subset.py` schneidet sie aus DejaVu
 #      zusammen; das Ergebnis liegt in `assets/` und wird hier
 #      REPRODUZIERT und Oktett fuer Oktett verglichen.
 #   4. DER RASTERER. Der Kernel gibt acht Glyphen als Text und als
@@ -84,18 +84,18 @@ hasnot() { grep -qaF "$2" "$1" && bad "$3 -- '$2' sollte nicht da sein" || ok "$
 
 schau() { local name=$1; shift
     local aus rc
-    aus=$(python3 tools/gfx/schau.py "$@" 2>&1); rc=$?
+    aus=$(python3 tools/gfx/checkshot.py "$@" 2>&1); rc=$?
     if [ "$rc" -eq 0 ]; then ok "$name ($aus)"; else bad "$name -- $aus"; fi
 }
 schau_nicht() { local name=$1; shift
     local aus rc
-    aus=$(python3 tools/gfx/schau.py "$@" 2>&1); rc=$?
+    aus=$(python3 tools/gfx/checkshot.py "$@" 2>&1); rc=$?
     if [ "$rc" -ne 0 ]; then ok "$name ($aus)"; else bad "$name -- ging durch: $aus"; fi
 }
 zahl() { grep -aoE "$2" "$1" | head -1 | grep -oE '[0-9]+' | tail -1; }
 zahl2() { grep -aoE "$2" "$1" | tail -1 | grep -oE '[0-9]+' | tail -1; }
 
-bash vendor/firn/hole-firnc.sh >/dev/null || { echo "vendor/firn/hole-firnc.sh fehlgeschlagen"; exit 1; }
+bash vendor/firn/fetch-firnc.sh >/dev/null || { echo "vendor/firn/fetch-firnc.sh fehlgeschlagen"; exit 1; }
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
     echo "WM: skipped, qemu-system-x86_64 ist nicht da"
     exit 0
@@ -144,7 +144,7 @@ foto() { # abbild kommandozeile ausgabe ppm [monitorbefehle]
     if [ -n "$mon" ]; then
         python3 tools/wm/monitor.py "$sock" "$mon" > "$TMPD/mon.txt" 2>&1
     fi
-    python3 tools/gfx/schuss.py "$sock" "$ppm" 25 > "$TMPD/schuss.txt" 2>&1
+    python3 tools/gfx/screenshot.py "$sock" "$ppm" 25 > "$TMPD/schuss.txt" 2>&1
     wait "$pid"
     RC=$?
     rm -f "$sock"
@@ -168,11 +168,11 @@ echo "== 2. die Speicherkarte von kdata: drei neue Bereiche =="
 # hatte, und beide Zweige waren fuer sich gruen.  Seit K7B rechnet ein
 # Programm die Karte nach; diese Runde traegt drei Bereiche ein und
 # haelt sich daran.
-kart=$(python3 tools/kernel/karte.py kernel 2>&1)
+kart=$(python3 tools/kernel/memmap.py kernel 2>&1)
 if [ $? -eq 0 ]; then ok "die Speicherkarte von kdata: $kart"
 else bad "die Speicherkarte von kdata kollidiert"; echo "$kart" | sed 's/^/        /'; fi
 for b in MOUSE WM TTF; do
-    if python3 tools/kernel/karte.py kernel -v 2>/dev/null | grep -q " $b  *kstate.fi:"; then
+    if python3 tools/kernel/memmap.py kernel -v 2>/dev/null | grep -q " $b  *kstate.fi:"; then
         ok "der Bereich $b steht in der Karte"
     else
         bad "der Bereich $b steht NICHT in der Karte"
@@ -182,7 +182,7 @@ done
 # Rahmenpuffers, MUSS er anschlagen.
 GG="$TMPD/kernel-gg"; mkdir -p "$GG"; cp kernel/*.fi "$GG/"
 sed -i 's/^const WM_OFF: u64 = 0x1E000/const WM_OFF: u64 = 0x3C000/' "$GG/kstate.fi"
-gg=$(python3 tools/kernel/karte.py "$GG" 2>&1)
+gg=$(python3 tools/kernel/memmap.py "$GG" 2>&1)
 if [ $? -ne 0 ] && printf '%s' "$gg" | grep -q 'KOLLISION'; then
     ok "mit WM_OFF auf 0x3C000 findet der Pruefer die Kollision mit FB"
 else
@@ -195,15 +195,15 @@ fi
 # Reglers gingen an den Maustreiber.  `nvme: irqs=0` statt `irqs=5`, in
 # JEDEM Lauf, auch ohne das Wort `wm`.  Gefunden hat es Abschnitt 6 von
 # `./test.sh`.  Ab jetzt findet es ein Programm.
-vt=$(python3 tools/kernel/karte.py kernel -v 2>/dev/null | grep -A9 'die Vektortabelle' | tail -8 | tr -s ' ' | sed 's/^ //' | tr '\n' ' ')
-if python3 tools/kernel/karte.py kernel >/dev/null 2>&1; then
+vt=$(python3 tools/kernel/memmap.py kernel -v 2>/dev/null | grep -A9 'die Vektortabelle' | tail -8 | tr -s ' ' | sed 's/^ //' | tr '\n' ' ')
+if python3 tools/kernel/memmap.py kernel >/dev/null 2>&1; then
     ok "die Vektortabelle ist ueberschneidungsfrei ($vt)"
 else
     bad "die Vektortabelle kollidiert"
 fi
 GV="$TMPD/kernel-gv"; mkdir -p "$GV"; cp kernel/*.fi "$GV/"
 sed -i 's/^const VEC_MOUSE: u64 = 46/const VEC_MOUSE: u64 = 44/' "$GV/trap.fi"
-gv=$(python3 tools/kernel/karte.py "$GV" 2>&1)
+gv=$(python3 tools/kernel/memmap.py "$GV" 2>&1)
 if [ $? -ne 0 ] && printf '%s' "$gv" | grep -q 'Vektor 44 haben zwei Namen'; then
     ok "mit VEC_MOUSE zurueck auf 44 findet der Pruefer die Kollision mit VEC_NVME"
 else
@@ -217,8 +217,8 @@ for f in mono sans; do
         || bad "assets/osum-$f.ttf fehlt"
 done
 if [ -f "$DEJAVU/DejaVuSansMono.ttf" ]; then
-    python3 tools/ttf/schnitt.py "$DEJAVU/DejaVuSansMono.ttf" "$TMPD/mono.ttf" >/dev/null 2>&1
-    python3 tools/ttf/schnitt.py "$DEJAVU/DejaVuSans.ttf" "$TMPD/sans.ttf" >/dev/null 2>&1
+    python3 tools/ttf/subset.py "$DEJAVU/DejaVuSansMono.ttf" "$TMPD/mono.ttf" >/dev/null 2>&1
+    python3 tools/ttf/subset.py "$DEJAVU/DejaVuSans.ttf" "$TMPD/sans.ttf" >/dev/null 2>&1
     cmp -s "$TMPD/mono.ttf" assets/osum-mono.ttf \
         && ok "osum-mono.ttf entsteht Oktett fuer Oktett neu aus DejaVu Sans Mono" \
         || bad "osum-mono.ttf laesst sich nicht reproduzieren"
@@ -574,7 +574,7 @@ if grep -qa 'hallo-fenster' "$TMPD/sh.txt"; then
     # keiner aufgeht, faellt sie.
     gefunden=""
     for z in 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19; do
-        if aus=$(python3 tools/gfx/schau.py tgrid "$TMPD/sh.ppm" \
+        if aus=$(python3 tools/gfx/checkshot.py tgrid "$TMPD/sh.ppm" \
             assets/osum-mono.ttf 16 26 62 10 19 "$z" 0 \
             224 230 236 16 20 26 "hallo-fenster" 2>&1); then
             gefunden="$z"; break

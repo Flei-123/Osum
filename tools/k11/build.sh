@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# tools/k11/bauen.sh -- ein einzelnes Programm dieser Runde uebersetzen
+# tools/k11/build.sh -- ein einzelnes Programm dieser Runde uebersetzen
 # und binden. Nur zum Iterieren waehrend der Arbeit; die Abnahme baut in
 # tools/k11/run.sh alles noch einmal aus BEIDEN Uebersetzern.
 #
-#   bash tools/k11/bauen.sh edit find sed ...
+#   bash tools/k11/build.sh edit find sed ...
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 export FIRNLIB="$(pwd)/lib"

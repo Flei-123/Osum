@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""tools/k15/zaehl.py -- Bildpunkte einer Farbe in einem Rechteck zaehlen.
+"""tools/k15/count.py -- Bildpunkte einer Farbe in einem Rechteck zaehlen.
 
-    zaehl.py <ppm> <x> <y> <w> <h> <r> <g> <b>
+    count.py <ppm> <x> <y> <w> <h> <r> <g> <b>
 
-`schau.py flaeche` verlangt, dass ALLE Bildpunkte des Rechtecks die
+`checkshot.py flaeche` verlangt, dass ALLE Bildpunkte des Rechtecks die
 Farbe haben; hier geht es um das Gegenteil: WIE VIELE sind es?  Das ist
 die Form, in der sich ein Haken in einem Kaestchen messen laesst -- er
 ist kein volles Rechteck, er ist ein Strich, und die Zusage lautet

@@ -37,8 +37,8 @@ while [[ $# -gt 0 ]]; do
 done
 
 export FIRNLIB="$ROOT/lib"
-bash vendor/firn/hole-firnc.sh >/dev/null || {
-    echo "vendor/firn/hole-firnc.sh fehlgeschlagen" >&2; exit 1; }
+bash vendor/firn/fetch-firnc.sh >/dev/null || {
+    echo "vendor/firn/fetch-firnc.sh fehlgeschlagen" >&2; exit 1; }
 
 if [[ $STUFE == 0 ]]; then
     FIRNC="$ROOT/vendor/firn/bin/firnc"

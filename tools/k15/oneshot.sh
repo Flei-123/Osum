@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# tools/k15/lauf.sh -- EINEN Lauf machen, ein Foto holen, zum Iterieren.
+# tools/k15/oneshot.sh -- EINEN Lauf machen, ein Foto holen, zum Iterieren.
 #
-#   bash tools/k15/lauf.sh <name> "<kommandozeile>" [monitordatei]
+#   bash tools/k15/oneshot.sh <name> "<kommandozeile>" [monitordatei]
 #
 # Legt unter $OUT ab: <name>.txt (die serielle Leitung) und <name>.ppm.
 set -uo pipefail
@@ -30,7 +30,7 @@ done
 if [ -n "$MON" ]; then
     python3 tools/wm/monitor.py "$sock" "$MON" > "$OUT/$NAME.monlog" 2>&1
 fi
-python3 tools/gfx/schuss.py "$sock" "$OUT/$NAME.ppm" 25 > "$OUT/$NAME.shot" 2>&1
+python3 tools/gfx/screenshot.py "$sock" "$OUT/$NAME.ppm" 25 > "$OUT/$NAME.shot" 2>&1
 wait "$pid"
 rc=$?
 rm -f "$sock"

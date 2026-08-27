@@ -148,7 +148,7 @@ KS=$(grep -oE 'KDATA_SIZE: u64 = 0x[0-9A-Fa-f]+' kernel/kstate.fi | grep -oE '0x
 [ "$KB" = "$KS" ] && ok "kdata ist in boot.s und kstate.fi dieselbe Zahl ($KB)" \
     || bad "kdata: boot.s sagt $KB, kstate.fi sagt $KS"
 
-python3 tools/kernel/karte.py kernel > "$TMPD/karte.txt" 2>&1 \
+python3 tools/kernel/memmap.py kernel > "$TMPD/karte.txt" 2>&1 \
     && ok "die Karte von kdata ist ueberschneidungsfrei ($(tail -1 "$TMPD/karte.txt"))" \
     || { bad "die Karte von kdata kollidiert"; sed 's/^/        /' "$TMPD/karte.txt" | head -6; }
 

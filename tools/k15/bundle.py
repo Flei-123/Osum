@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""tools/k15/buendel.py -- aus `assets/apps/*.prog` die Angaben fuer mkfs.
+"""tools/k15/bundle.py -- aus `assets/apps/*.prog` die Angaben fuer mkfs.
 
 Runde K15, zweiter Nachtrag. Ein Programm ist ein VERZEICHNIS:
 
@@ -8,11 +8,11 @@ Runde K15, zweiter Nachtrag. Ein Programm ist ein VERZEICHNIS:
                         Fassung
         start           die ausfuehrbare Datei
         symbol          das Bild (OSYM)
-        daten/          alles Weitere
+        data/          alles Weitere
 
 Im Quellbaum liegt davon alles ausser `start` und `symbol`: `start` ist
 das Ergebnis des Uebersetzers, `symbol` das der Zeichnung
-(`symbol.txt` -> `tools/k15/symbol.py`). Dieses Werkzeug baut beides in
+(`symbol.txt` -> `tools/k15/icon.py`). Dieses Werkzeug baut beides in
 ein Arbeitsverzeichnis und schreibt die Zeilen, die `mkfs.py` als
 Angaben nimmt -- eine je Zeile, damit keine Befehlszeile daran
 zerbricht.
@@ -24,7 +24,7 @@ das Programm -- `/bin/explorer` ist 205 KiB, und ein Abbild hat zwei
 Megaoktett.
 
 Verwendung:
-    buendel.py <assets/apps> <arbeitsverzeichnis> [<zusatz.prog>=...]
+    bundle.py <assets/apps> <arbeitsverzeichnis> [<zusatz.prog>=...]
 """
 
 import os
@@ -58,16 +58,16 @@ def main(argv):
         zeilen.append(ziel + "/")
         zeilen.append("%s/INFO=%s" % (ziel, os.path.join(pfad, "INFO")))
         sym = os.path.join(arbeit, name + ".symbol")
-        r = subprocess.run([sys.executable, os.path.join(HIER, "symbol.py"),
+        r = subprocess.run([sys.executable, os.path.join(HIER, "icon.py"),
                             os.path.join(pfad, "symbol.txt"), sym],
                            capture_output=True, text=True)
         if r.returncode != 0:
             print(r.stdout + r.stderr, file=sys.stderr)
             return 1
         zeilen.append("%s/symbol=%s" % (ziel, sym))
-        zeilen.append("%s/daten/" % ziel)
-        zeilen.append("%s/daten/LIESMICH=%s"
-                      % (ziel, os.path.join(pfad, "daten", "LIESMICH")))
+        zeilen.append("%s/data/" % ziel)
+        zeilen.append("%s/data/README=%s"
+                      % (ziel, os.path.join(pfad, "data", "README")))
         # DER VERWEIS ZULETZT: `mkfs.py` loest den vorhandenen Pfad auf,
         # und der muss dafuer schon im Abbild stehen. Die Reihenfolge
         # dieser Zeilen ist die Reihenfolge, in der gebaut wird.

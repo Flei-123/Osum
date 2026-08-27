@@ -22,7 +22,7 @@
 #      waeren "3 MiB Abbildfenster", "6 MiB Arena" und "504 KiB Stapel"
 #      geraten. Gegenprobe: mit weniger geht es nachweislich nicht.
 #
-#   3. DIE SPEICHERKARTE. `tools/kernel/karte.py` rechnet nach, dass
+#   3. DIE SPEICHERKARTE. `tools/kernel/memmap.py` rechnet nach, dass
 #      sich der Bereich dieser Runde (0x49000..0x4C000) mit keinem
 #      anderen ueberschneidet. Gegenprobe: mit der Adresse von Runde K15
 #      MUSS der Pruefer anschlagen.
@@ -75,7 +75,7 @@ hat() { grep -qaF "$2" "$1" && ok "$3" || bad "$3 -- '$2' fehlt"; }
 hatnicht() { grep -qaF "$2" "$1" && bad "$3 -- '$2' sollte nicht dastehen" || ok "$3"; }
 wert() { grep -a -m1 -oE "$2" "$1" 2>/dev/null | head -1; }
 
-bash vendor/firn/hole-firnc.sh >/dev/null || { echo "hole-firnc.sh fehlgeschlagen"; exit 1; }
+bash vendor/firn/fetch-firnc.sh >/dev/null || { echo "fetch-firnc.sh fehlgeschlagen"; exit 1; }
 [ -x "$FIRNC" ] || { echo "firnc0 fehlt"; exit 1; }
 [ -x "$FC1" ]   || { echo "firnc1 fehlt"; exit 1; }
 
@@ -228,14 +228,14 @@ gleich "GEGENPROBE: mit acht KiB weniger Stapel geht es nicht" \
 
 # ===================================================================
 echo "== 3. die Speicherkarte: der Bereich dieser Runde ueberschneidet keinen =="
-if python3 tools/kernel/karte.py kernel > "$TMPD/karte.txt" 2>&1; then
+if python3 tools/kernel/memmap.py kernel > "$TMPD/karte.txt" 2>&1; then
     ok "$(tail -1 "$TMPD/karte.txt")"
 else
     bad "die Speicherkarte hat Kollisionen"; sed 's/^/        /' "$TMPD/karte.txt" | head -5
 fi
-grep -q 'K16_OFF' tools/kernel/karte.py \
-    && ok "der Bereich K16 steht in tools/kernel/karte.py und wird mitgerechnet" \
-    || bad "K16 fehlt in tools/kernel/karte.py"
+grep -q 'K16_OFF' tools/kernel/memmap.py \
+    && ok "der Bereich K16 steht in tools/kernel/memmap.py und wird mitgerechnet" \
+    || bad "K16 fehlt in tools/kernel/memmap.py"
 mkdir -p "$TMPD/kern"
 cp kernel/*.fi "$TMPD/kern/"
 # Die Gegenprobe legt K16 auf die Seite des Schriftlesers aus Runde K10
@@ -244,7 +244,7 @@ cp kernel/*.fi "$TMPD/kern/"
 # 0x46000: der Bereich von Runde K15 steht noch in ihrem eigenen Zweig
 # und waere hier eine leere Seite.)
 sed -i 's/^const K16_OFF: u64 = 0x49000$/const K16_OFF: u64 = 0x3F000/' "$TMPD/kern/kstate.fi"
-if python3 tools/kernel/karte.py "$TMPD/kern" > "$TMPD/karte2.txt" 2>&1; then
+if python3 tools/kernel/memmap.py "$TMPD/kern" > "$TMPD/karte2.txt" 2>&1; then
     bad "GEGENPROBE: auf 0x3F000 (Runde K10, der Schriftleser) haette der Pruefer anschlagen muessen"
 else
     ok "GEGENPROBE: auf einer schon belegten Seite schlaegt der Kartenpruefer an ($(grep -c KOLLISION "$TMPD/karte2.txt") Kollisionen)"

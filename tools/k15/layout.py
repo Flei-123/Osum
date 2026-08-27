@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""tools/k15/anordnung.py -- die ANORDNUNG nachrechnen, aus dem Mitschnitt.
+"""tools/k15/layout.py -- die ANORDNUNG nachrechnen, aus dem Mitschnitt.
 
-    anordnung.py <mitschnitt> <marke> <fensterbreite> <fensterhoehe>
+    layout.py <mitschnitt> <marke> <fensterbreite> <fensterhoehe>
 
 Die Anwendung meldet vor dem ersten Malen jedes Rechteck, das die
 Anordnung ausgerechnet hat:

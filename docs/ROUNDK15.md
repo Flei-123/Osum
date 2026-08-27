@@ -119,7 +119,7 @@ Runde zugeteilt wurde, und kein Bit daneben:
 +0x2000  der Umschlagpuffer -- EINE Bildpunktzeile oder EINE Glyphe
 ```
 
-`tools/kernel/karte.py` führt den Bereich jetzt als 44. Eintrag und
+`tools/kernel/memmap.py` führt den Bereich jetzt als 44. Eintrag und
 rechnet ihn gegen alle anderen. Die Gegenprobe zum Prüfer steht im
 Läufer: legt man `WIG_OFF` auf `0x1E000`, **muss** er die Kollision mit
 dem Fensterserver finden.
@@ -160,7 +160,7 @@ Hier wird deshalb **je Zeichen** gerechnet, nicht je Fläche: die
 gesetzten Bildpunkte der Vorlage aus `tools/ttf/raster.py` gegen die
 Mischfarbe im Bild, und ein Zeichen mit Umriss, das im Bild **keine
 Tinte** hat, lässt die Zusage fallen. Das ist derselbe Prüfer, den Runde
-K10 gebaut hat (`tools/gfx/schau.py ttext`).
+K10 gebaut hat (`tools/gfx/checkshot.py ttext`).
 
 **Das Neue dieser Runde ist, woher die Stelle kommt.** Ein Testläufer,
 der ausrechnet, wo ein Knopftext stehen müsste, baut die Anordnung nach
@@ -178,7 +178,7 @@ gemalt wird (`wig.text_x`, `wig.text_base`, `wig.cell_base` …) — jede
 Rechnung steht genau einmal.
 
 Und weil ein Foto nicht sieht, ob zwei Knöpfe *übereinander* liegen,
-prüft `tools/k15/anordnung.py` die gemeldeten Rechtecke **gegeneinander**:
+prüft `tools/k15/layout.py` die gemeldeten Rechtecke **gegeneinander**:
 alle im Fenster, keine zwei überschneiden sich, jedes hat Fläche, die
 senkrechte Reihenfolge ist die Anlegereihenfolge. Auch dazu gibt es die
 Gegenprobe zum Prüfer selbst: ein Rechteck, das aus dem Fenster ragt,
@@ -302,7 +302,7 @@ Löschen und Neuer Ordner, und ein Programm starten.
    Worten.
 
 **Gemessen wird gegen die Platte, nicht gegen das Bild.**
-`tools/k15/baum.py` legt den Verzeichnisbaum an *und* schreibt auf, was
+`tools/k15/tree.py` legt den Verzeichnisbaum an *und* schreibt auf, was
 darin steht und in welcher Reihenfolge ein Dateimanager es zeigen muss.
 Der Läufer hält jede Tabellenzeile Zeichen für Zeichen dagegen. Und was
 der Dateimanager **ändert**, wird nicht im Bild geglaubt: nach „Neuer
@@ -488,7 +488,7 @@ kopieren, entfernen heißt löschen. Die Endung ist **`.prog`** und nicht
     INFO            name, info, keys, fassung
     start           die ausfuehrbare Datei
     symbol          das Bild (Format OSYM)
-    daten/          alles Weitere
+    data/           alles Weitere
 ```
 
 `INFO` ist `schlüssel=wert`, eine Zeile je Feld — der Gedanke von
@@ -530,11 +530,11 @@ Weg.
 
 **Die Quelle ist Text** (`assets/apps/*.prog/symbol.txt`: eine Palette,
 dann sechzehn Zeilen zu sechzehn Zeichen) — ein Oktettklumpen im Baum
-wäre in keinem Unterschied lesbar. `tools/k15/symbol.py` macht daraus die
+wäre in keinem Unterschied lesbar. `tools/k15/icon.py` macht daraus die
 Datei und liest sie unabhängig zurück.
 
 **Gemessen wird Bildpunkt gegen Bildpunkt**, nicht als Fläche: das ist
-die Lehre aus Runde K7B, angewandt auf ein Bild. `tools/k15/symbolbild.py`
+die Lehre aus Runde K7B, angewandt auf ein Bild. `tools/k15/iconpixels.py`
 vergleicht die gezeichneten 14 × 14 mit der zurückgelesenen Datei und
 zählt **nur die deckenden** Bildpunkte — über die durchsichtigen sagt ein
 Symbol nichts aus.
@@ -636,7 +636,7 @@ wievielte" — was jetzt drinsteht, ist also auch das richtige.
 #### Die Zahlen
 
 Ein Abbild mit **4000 leeren Dateien** in einem Baum aus siebzehn Ordnern
-(`tools/k15/gross.py`, `--inodes=4096`, Datenbereich ab Block 1026), im
+(`tools/k15/bigfs.py`, `--inodes=4096`, Datenbereich ab Block 1026), im
 selben Prozess gemessen: erst der Index, dann derselbe Suchbegriff als
 rekursiver Baumdurchlauf.
 
@@ -735,7 +735,7 @@ Getippt wird über den QEMU-Monitor, gemessen wird der Schirm:
 
 | Lauf | getippt | Programme | Dateien |
 |---|---|---:|---:|
-| Regellauf | `blau` | **0** | **1** — `/daten/bilder/blau.ppm` |
+| Regellauf | `blau` | **0** | **1** — `/data/bilder/blau.ppm` |
 | **`wignoidx`** (ohne Namensindex) | `blau` | 0 | **0** |
 | Regellauf | `folder` | **1** — Datei-Explorer | 0 |
 | Regellauf | `quaste` | 0 | 0 |
@@ -829,7 +829,7 @@ Verzeichnis auf der Platte liegt.
 
 Im Bild sah man Namen, und sie waren sogar richtig — nur an der falschen
 Stelle. Gefunden hat es nicht das Auge, sondern der Vergleich mit
-`tools/k15/baum.py`, das die Reihenfolge kennt: die Zeilen 0 bis 3
+`tools/k15/tree.py`, das die Reihenfolge kennt: die Zeilen 0 bis 3
 stimmten, 4 bis 6 nicht, und die Namen dort waren gegeneinander
 vertauscht.
 
@@ -880,7 +880,7 @@ Null zurück, statt in die nächste Seite zu schreiben.
   `selfg` endet auf `fg`. Vier Zusagen fielen um, mit einer Meldung, die
   nach einem Zeichenfehler aussah: 195 von 195 Tintenpunkten falsch, weil
   gegen Weiß statt gegen die Textfarbe gerechnet wurde. Ersetzt durch
-  `tools/k15/wert.py`, das auf Wortgrenzen achtet.
+  `tools/k15/value.py`, das auf Wortgrenzen achtet.
 * `monitor.py "$sock" "$MON" > "$OUT/$NAME.mon"` — Eingabe- und
   Ausgabedatei waren dieselbe. Die Umlenkung schnitt die Befehlsdatei ab,
   bevor sie gelesen wurde: `0 Befehle`, keine Maus, keine Fehlermeldung.
@@ -889,7 +889,7 @@ Null zurück, statt in die nächste Seite zu schreiben.
   sich eine Kernelzeile mitten in eine Anwendungszeile:
   `widgetdemo: state ... sel=wm: go`. Ein `sed 's/.*e2=\[//'` darauf liefert
   Unsinn, und zwei Zusagen fielen aus einem Grund, der mit der Sache
-  nichts zu tun hat. `tools/k15/felder.py` sucht seither das
+  nichts zu tun hat. `tools/k15/fields.py` sucht seither das
   **vollständige** Muster — `e1=[…] e2=[…]` mit beiden schließenden
   Klammern — und nimmt die letzte Zeile, die es enthält. Fehlt eine
   solche Zeile ganz, ist *das* der Befund und nicht ein leerer Text.

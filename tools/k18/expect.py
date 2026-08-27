@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""tools/k18/soll.py -- DIE ZWEITE FASSUNG DER RECHNUNG.
+"""tools/k18/expect.py -- DIE ZWEITE FASSUNG DER RECHNUNG.
 
 Runde K18 kodiert vier Dinge nach dem Handbuch: das Wort fuer
 IA32_PERF_CTL, das Wort fuer IA32_HWP_REQUEST, das Wort fuer
@@ -14,7 +14,7 @@ wahrscheinlich richtig; wenn nicht, ist eine der beiden falsch, und das
 ist genau die Auskunft, die ein Test geben soll.
 
 Das ist dieselbe Bauart wie `tools/ttf/raster.py` in Runde K10 (eine
-zweite Rasterung desselben Umrisses) und `tools/k15/anordnung.py` in
+zweite Rasterung desselben Umrisses) und `tools/k15/layout.py` in
 Runde K15 (die Anordnung gegen sich selbst gerechnet).
 
 DIE QUELLEN, Absatz fuer Absatz -- Intel SDM Band 4 (Model-Specific
@@ -35,11 +35,11 @@ Registers) und Band 3, Kapitel 14/15:
       Bit  38     Turbo Mode Disable (verkehrt herum: 1 SPERRT)
 
 VERWENDUNG
-    soll.py perfctl <ratios> <profil>
-    soll.py hwp     <ratios> <profil>
-    soll.py misc    <orig>   <profil>
-    soll.py skala   <rgb> <von> <nach>
-    soll.py akku    <rest> <voll> <rate> <zustand>
+    expect.py perfctl <ratios> <profil>
+    expect.py hwp     <ratios> <profil>
+    expect.py misc    <orig>   <profil>
+    expect.py skala   <rgb> <von> <nach>
+    expect.py akku    <rest> <voll> <rate> <zustand>
 
 <ratios> ist das Wort, das der Kernel als `ratios` meldet:
 min | basis<<8 | max<<16.  Alle Zahlen duerfen dezimal oder mit 0x

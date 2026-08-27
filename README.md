@@ -55,7 +55,7 @@ The size, counted:
 Most recently added: round K10 has TWO parts that ran in parallel.
 The user interface -- `kernel/wm.fi` (the window server), `kernel/ttf.fi`
 (TrueType reader and rasteriser) and `kernel/ps2m.fi` (the pointing
-device), plus on the host `tools/ttf/schnitt.py`, `tools/ttf/raster.py`
+device), plus on the host `tools/ttf/subset.py`, `tools/ttf/raster.py`
 (the SECOND version of the rasteriser, the one the first is measured
 against) and `tools/wm/` (`docs/ROUNDK10W.md`). And the protection bits
 -- `kernel/guard.fi` (SMEP and SMAP in CR4 together with the `stac`
@@ -72,7 +72,7 @@ network round K8: `kernel/virtio.fi`, `kernel/inet.fi`,
 The **TCP/IP stack** (2,646 lines) is not part of this count — it is not
 written here. It comes in as a dependency from the Firn commit that
 `vendor/firn/COMMIT` pins for the compiler anyway;
-`vendor/net/HERKUNFT.md` says how, and section 1 of `./test.sh` checks
+`vendor/net/PROVENANCE.md` says how, and section 1 of `./test.sh` checks
 the three blob hashes.
 
 Osum is **not a toy bootloader and not a finished system.** What it can
@@ -171,7 +171,7 @@ And **real fonts** (`kernel/ttf.fi`): a TrueType reader (`head`, `hhea`,
 `maxp`, `hmtx`, `cmap` format 4, `loca`, `glyf`, `kern`) and a rasteriser
 with **antialiasing**, entirely in Firn and entirely in fixed point — no
 FreeType, no floating point number. The fonts sit on the disk as
-subsetted TrueType files (`assets/`, `tools/ttf/schnitt.py`). On top of
+subsetted TrueType files (`assets/`, `tools/ttf/subset.py`). On top of
 that a **terminal window** in which `/bin/sh` runs off the disk, and a
 second window that a program in **ring 3** creates, paints and answers
 clicks and keystrokes in.
@@ -374,13 +374,13 @@ git clone <this repo> osum
 cd osum
 
 # once: build the pinned Firn compiler
-FIRN_REPO=/path/to/firn ./vendor/firn/hole-firnc.sh
+FIRN_REPO=/path/to/firn ./vendor/firn/fetch-firnc.sh
 
 # the whole acceptance suite (nineteen sections, 1638 checks, QEMU per case)
 ./test.sh
 ```
 
-`./test.sh` calls `hole-firnc.sh` itself when the compiler is missing. If
+`./test.sh` calls `fetch-firnc.sh` itself when the compiler is missing. If
 the Firn repository sits as a sibling directory (`../firn`), the script
 finds it without `FIRN_REPO`.
 
@@ -446,7 +446,7 @@ Osum is written in Firn, but the Firn compiler does **not** belong in
 this repository. It is **pinned**:
 
 * `vendor/firn/COMMIT` contains exactly **one** Firn commit.
-* `vendor/firn/hole-firnc.sh` fetches that state (`git archive`, without
+* `vendor/firn/fetch-firnc.sh` fetches that state (`git archive`, without
   creating anything in the Firn repository) and builds
   `vendor/firn/bin/firnc` (firnc0, in Rust), `vendor/firn/bin/firnc1`
   (the compiler in Firn, compiled by firnc0) and `vendor/firn/lib/` (the
@@ -529,7 +529,7 @@ after the fact.
 | `docs/ROUNDK14.md` | **VFS and foreign file systems**: the table of nine operations, /proc, /dev, FAT32 against `mkfs.vfat`/`mcopy`/`fsck.fat`, MBR and GPT |
 | `docs/ROUNDK16.md` | **the compiler runs on the system itself**: `firnc` and an assembler in Firn on Osum, the result character-identical with the one from the host — plus the table "file kind → what opens it" in the kernel and `#!` in `execve` |
 
-`ENTFERNEN-AUS-FIRN.md` describes what has to be deleted in the Firn
+`REMOVE-FROM-FIRN.md` describes what has to be deleted in the Firn
 repository so that nothing lies there twice. **That has not been carried
 out.**
 
