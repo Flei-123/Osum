@@ -23,7 +23,12 @@ OUT=${1:-/tmp/theme}
 CC=${2:-vendor/firn/bin/firnc}
 mkdir -p "$OUT"
 
-PROGS="themetest explorer starter suchen leiste schreibtisch einstellungen sh echo ls cat edit wigdemo"
+# Die Programme, die dieser Lauf braucht -- und nicht mehr. Ein
+# OFS-Abbild fasst 4096 Bloecke zu 512 Oktetten, also zwei Megaoktett
+# (`tools/osum/mkfs.py`), und /bin/themetest bindet seit dem Zusatz
+# `gui` die ganze Widget-Bibliothek ein. `wigdemo`, `edit` und `suchen`
+# haben in dieser Runde nichts zu tun und passten sonst nicht mit drauf.
+PROGS="themetest explorer starter leiste schreibtisch einstellungen sh echo ls cat"
 
 bash tools/build-kernel.sh "$OUT/k.mb" > "$OUT/k.log" 2>&1 || {
     echo "== der Kern laesst sich nicht bauen"; tail -20 "$OUT/k.log"; exit 1; }
@@ -49,6 +54,13 @@ for p in $PROGS; do
     printf '   %-14s %7d Oktette\n' "$p" "$(stat -c%s "$OUT/$p.elf")"
 done
 [ "$rc" = 0 ] || exit 1
+
+# Die Liste der Programme HIER hinlegen und nicht in image.sh raten:
+# `ls *.elf` findet auch die Reste eines frueheren Laufs, und das
+# Abbild ist mit zwei Megaoktett so knapp, dass drei alte Programme es
+# ueberlaufen lassen -- was mkfs.py dann als "the disk is full"
+# meldet, ohne zu sagen, wessen Platte.
+printf '%s\n' "$PROGS" > "$OUT/progs.txt"
 
 python3 tools/k15/baum.py "$OUT/baum" > /dev/null || exit 1
 
@@ -84,8 +96,15 @@ ARGS+=(/etc/schemas/)
 for s in assets/schemes/*.scheme; do
     ARGS+=("/etc/schemas/$(basename "$s" .scheme)=$s@0644")
 done
+# DIE ANWENDUNGSBUENDEL, aber nur die, deren Programm auf diesem
+# Abbild wirklich liegt. `editor.prog` zeigt auf /bin/edit und
+# `widgets.prog` auf /bin/wigdemo, und beide sind hier nicht dabei --
+# mkfs.py bricht sonst mit "gibt es nicht" ab, und zwar zu Recht.
+rm -rf "$OUT/apps"
+cp -a assets/apps "$OUT/apps"
+rm -rf "$OUT/apps/editor.prog" "$OUT/apps/widgets.prog"
 while read -r zeile; do ARGS+=("$zeile"); done \
-    < <(python3 tools/k15/buendel.py assets/apps "$OUT/buendel")
+    < <(python3 tools/k15/buendel.py "$OUT/apps" "$OUT/buendel")
 while read -r pfad; do ARGS+=("$pfad"); done < "$OUT/baum/liste"
 python3 tools/osum/mkfs.py "${ARGS[@]}" > "$OUT/mkfs.log" 2>&1 || {
     echo "== mkfs.py fehlgeschlagen"; tail -20 "$OUT/mkfs.log"; exit 1; }
