@@ -132,6 +132,15 @@ BEREICHE = [
     # gescheitert.  Der Rest der Bibliothek liegt in Ring 3 und kommt in
     # `kdata` gar nicht vor.
     ("WIG",        "kstate.fi", "WIG_OFF",        "WIG_MAX"),
+    # RUNDE K18: die Energieschicht.  Ihr Vorrat ist 0x58000..0x60000 --
+    # er liegt HINTER der alten Grenze KDATA_SIZE (0x50000), und deshalb
+    # hat diese Runde `kdata` von 0x50000 auf 0x60000 wachsen lassen
+    # (kstate.fi UND kernel/boot.s, beide Zahlen muessen gleich sein).
+    # Belegt sind zwei Seiten: die Skalare der Energieschicht und das,
+    # was aus den ACPI-Tabellen ueber Akku, Netzteil und Thermalzone
+    # gelesen wurde.  Der Rest des Vorrats bleibt frei.
+    ("K18",        "kstate.fi", "K18_OFF",        "K18_MAX"),
+    ("K18BATT",    "kstate.fi", "BATT_OFF",       "BATT_MAX"),
     # RUNDE K15, ZWEITER NACHTRAG.  Die erste Seite dieses Vorrats wird
     # geteilt: `wig.fi` braucht davon 0x40 Oktette, der Rest gehoert der
     # Geometrie des Dateisystems (FSG, zwei Woerter aus dem Superblock)

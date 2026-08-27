@@ -235,6 +235,21 @@
 #      `nofocus` (die Taste kommt beim falschen Fenster an), `nomouse`,
 #      `nompoll` und der Lauf ganz ohne das Wort `wm`.
 #
+#  24. ENERGIE UND LEISTUNG (tools/k18/run.sh, Runde K18): bis dahin
+#      konnte dieser Kernel ueber ACPI genau eine Sache -- abschalten.
+#      Zwischen "laeuft" und "aus" gab es nichts. Diese Runde baut die
+#      drei Profile Energiesparen/Ausgeglichen/Hoechstleistung auf
+#      IA32_PERF_CTL beziehungsweise HWP, den Ruhezustand ueber
+#      monitor/mwait statt einer Warteschleife, die Turbosperre ueber
+#      IA32_MISC_ENABLE Bit 38, Temperatur samt Drosselung, Akku und
+#      Netzteil aus den ACPI-Tabellen und /bin/power auf der Konsole.
+#      WAS DIESER WIRT NICHT HERGIBT, steht ausdruecklich im Laeufer:
+#      unter TCG faellt kein Takt, weil nichts taktet. Gemessen wird,
+#      dass die richtigen Register die richtigen Werte bekommen -- und
+#      fuer IA32_MISC_ENABLE, dem einzigen mit vollem Rundlauf auf
+#      diesem Wirt, wird der Wert WIRKLICH aus dem Prozessor
+#      zurueckgelesen: dieselbe Stelle, dreimal, drei verschiedene Werte.
+#
 #  22. DER UEBERSETZER LAEUFT AUF DEM SYSTEM SELBST (tools/k16/run.sh,
 #      Runde K16). `firnc` -- der in Firn geschriebene Uebersetzer --
 #      liest auf OSUM eine `.fi` von der Platte, uebersetzt sie und
@@ -406,6 +421,8 @@ lauf "21. der Uebersetzer laeuft auf dem System selbst, und eine Datei weiss, wo
      tools/k16/run.sh k16 '^K16: |^  OK    (ZEICHENGLEICH|DAS AUF OSUM|DER DOPPELKLICK|DER AUSLEGER|DER INHALT GEHT VOR|fas uebersetzt|16 von 16)'
 lauf "22. Widgets und der Dateimanager: eine Bibliothek in Ring 3 (tools/k15/run.sh, Runde K15)" \
      tools/k15/run.sh k15 '^K15: |^        -> |^  OK    (die Anordnung|ein Klick auf das Kaestchen|mit Bereichsverfolgung|und /daten/neu|der Verweis spart|getippt |OHNE (die Schluesselwoerter|das Journal|den Namensindex)|[0-9]\. (DER AUFBAU|DIE SUCHE|DIE GEGENPROBE|der Index)|und DIESELBEN NAMEN|nach dem (Anlegen|Umbenennen)|das Symbol des Dateimanagers)'
+lauf "24. Energie und Leistung: drei Profile, Ruhezustand, Waerme, Akku (tools/k18/run.sh, Runde K18)" \
+     tools/k18/run.sh k18 '^K18: |^  OK    (dieselbe Stelle|IA32_PERF_CTL bekommt|Turbo ist bei|SpeedStep ist bei|jeder Durchlauf ging|schlafend |aber es wird kein|zwei Tabellen|GEGENPROBE|GEDROSSELT|im BILD|dasselbe Pruefbild|und einen Bildpunkt DANEBEN|keine AUFRUFNUMMER)'
 
 echo
 echo "=================================================================="

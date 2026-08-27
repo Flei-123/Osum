@@ -1,0 +1,581 @@
+// kernel/user/power.fi -- RUNDE K18: /bin/power, das Bedienprogramm.
+//
+// Was Windows als drei Schieberegler zeigt und Zorin OS als drei
+// Schaltflaechen, ist hier ein Wort auf der Kommandozeile:
+//
+//     power                  zeigt alles
+//     power sparen           schaltet auf Energiesparen
+//     power mitte            schaltet auf Ausgeglichen
+//     power leistung         schaltet auf Hoechstleistung
+//     power akku             nur der Akku
+//     power waerme           nur Temperatur und Drosselung
+//     power hell 40          Helligkeit auf 40 Prozent
+//     power aus              Bildschirm aus
+//     power roh              jede Zahl einzeln, fuer den Testlauf
+//
+// GRAFISCH IST DAS AUSDRUECKLICH NICHT. Die Widget-Bibliothek aus Runde
+// K15 liegt daneben und koennte das -- aber an diesem Baum arbeiten
+// mehrere Runden gleichzeitig, und ein zweites Fenster im selben
+// Fensterserver waere genau die Art Kollision, die dieses Projekt schon
+// viermal geteilt hat. Konsole.
+//
+// KEINE ZAHL IN DIESEM PROGRAMM IST VON DIESEM PROGRAMM. Jede einzelne
+// kommt ueber `osum_pwrget` aus dem Kernel; was der Kernel nicht wirklich
+// gelesen hat, meldet er als Fehler, und dann steht hier ein Strich und
+// keine Null. Das ist der Unterschied, um den es in dieser Runde geht:
+// eine Null in Grad Celsius sieht aus wie eine Messung.
+
+profile kernel
+
+import ulib
+
+export { u_start }
+
+// Die Aufrufe dieser Runde (kernel/sys.fi, Vorrat 1750..1799).
+const SYS_PWRGET: u64 = 1750
+const SYS_PWRSET: u64 = 1751
+const SYS_PWRSTR: u64 = 1752
+
+// Die Felder. Dieselben Nummern wie in `kernel/sys.fi`.
+const PG_READY: u64 = 0
+const PG_PROFILE: u64 = 1
+const PG_CAPS: u64 = 2
+const PG_RATIOS: u64 = 3
+const PG_RATIOSRC: u64 = 4
+const PG_PERFCTL: u64 = 5
+const PG_PERFBACK: u64 = 6
+const PG_HWPREQ: u64 = 7
+const PG_HWPBACK: u64 = 8
+const PG_MISC: u64 = 9
+const PG_MISCBACK: u64 = 10
+const PG_MISCORIG: u64 = 11
+const PG_CSTATE: u64 = 12
+const PG_MWAITS: u64 = 13
+const PG_HLTS: u64 = 14
+const PG_IDLERUNS: u64 = 15
+const PG_TEMP: u64 = 16
+const PG_TEMPOK: u64 = 17
+const PG_TJMAX: u64 = 18
+const PG_THROTTLES: u64 = 19
+const PG_THROTTLED: u64 = 20
+const PG_APPLIES: u64 = 21
+const PG_SWITCHES: u64 = 22
+const PG_MWAITHINT: u64 = 23
+const PG_BATPRESENT: u64 = 24
+const PG_BATPERCENT: u64 = 25
+const PG_BATMINUTES: u64 = 26
+const PG_BATSTATE: u64 = 27
+const PG_BATRATE: u64 = 28
+const PG_BATREMAIN: u64 = 29
+const PG_BATFULL: u64 = 30
+const PG_BATDESIGN: u64 = 31
+const PG_BATVOLT: u64 = 32
+const PG_ACOK: u64 = 33
+const PG_AC: u64 = 34
+const PG_BATWHY: u64 = 35
+const PG_TABLES: u64 = 36
+const PG_TZRAW: u64 = 37
+const PG_BRIGHT: u64 = 38
+const PG_BLANKED: u64 = 39
+const PG_BLANKS: u64 = 40
+const PG_BATWARN: u64 = 41
+const PG_BATLOW: u64 = 42
+const PG_BATUNIT: u64 = 43
+const PG_LIMIT: u64 = 44
+
+const PS_PROFILE: u64 = 0
+const PS_BRIGHT: u64 = 1
+const PS_BLANK: u64 = 2
+
+const C_EIST: u64 = 1
+const C_MONITOR: u64 = 2
+const C_DTS: u64 = 4
+const C_TURBO: u64 = 8
+const C_HWP: u64 = 16
+const C_MPERF: u64 = 64
+const C_PLATINFO: u64 = 128
+const C_ARAT: u64 = 256
+const C_ACPITZ: u64 = 512
+
+fn get(field: u64) -> u64 {
+    return ulib.sys(SYS_PWRGET, field, 0, 0)
+}
+
+// Ein Wert, der auch ein Fehler sein kann. Negative Antworten sind
+// Fehlercodes (der Kernel baut sie mit `0 -% e`), und die werden hier
+// NICHT als riesige Zahl gedruckt, sondern als das, was sie sind.
+fn is_err(v: u64) -> bool {
+    return (v >> 63) != 0
+}
+
+// ------------------------------------------------------------ Ausgabe
+
+fn zahl(name: u64, v: u64) {
+    var s_e: [u8; 3] = "=\0\0"
+    ulib.say(name)
+    ulib.say((&s_e[0 as usize]) as u64)
+    if is_err(v) {
+        ulib.sayn(v)
+    } else {
+        ulib.sayu(v)
+    }
+    ulib.nl()
+}
+
+// Ein Strich statt einer Zahl. Steht ueberall dort, wo der Kernel sagt,
+// dass er nichts gelesen hat.
+fn strich() {
+    var s: [u8; 3] = "--\0"
+    ulib.say((&s[0 as usize]) as u64)
+}
+
+fn prof_name(p: u64) {
+    var a: [u8; 14] = "Energiesparen\0"
+    var b: [u8; 13] = "Ausgeglichen\0"
+    var c: [u8; 16] = "Hoechstleistung\0"
+    var u: [u8; 10] = "unbekannt\0"
+    if p == 0 {
+        ulib.say((&a[0 as usize]) as u64)
+        return
+    }
+    if p == 1 {
+        ulib.say((&b[0 as usize]) as u64)
+        return
+    }
+    if p == 2 {
+        ulib.say((&c[0 as usize]) as u64)
+        return
+    }
+    ulib.say((&u[0 as usize]) as u64)
+}
+
+// Ein Balken aus zwanzig Zeichen. Das ist der einzige Schmuck in diesem
+// Programm und er hat einen Zweck: ein Ladestand ist eine Groesse, die
+// man sehen und nicht lesen will.
+fn balken(pct: u64) {
+    var auf: [u8; 2] = "[\0"
+    var zu: [u8; 2] = "]\0"
+    var voll: [u8; 2] = "#\0"
+    var leer: [u8; 2] = ".\0"
+    let n: u64 = pct * 20 / 100
+    ulib.say((&auf[0 as usize]) as u64)
+    var i: u64 = 0
+    while i < 20 {
+        if i < n {
+            ulib.say((&voll[0 as usize]) as u64)
+        } else {
+            ulib.say((&leer[0 as usize]) as u64)
+        }
+        i = i + 1
+    }
+    ulib.say((&zu[0 as usize]) as u64)
+}
+
+// ------------------------------------------------------------ Abschnitte
+
+fn zeig_profil() {
+    var s_p: [u8; 10] = "Profil:  \0"
+    var s_t: [u8; 12] = "Taktstufen\0\0"
+    var s_min: [u8; 9] = ":  min  \0"
+    var s_bas: [u8; 9] = "  Basis \0"
+    var s_max: [u8; 7] = "  max \0"
+    var s_rf: [u8; 32] = "  (Rueckfall, die Maschine \0\0\0\0\0"
+    var s_rf2: [u8; 13] = "sagt nichts)\0"
+    var s_pi: [u8; 26] = "  (MSR_PLATFORM_INFO)\0\0\0\0\0"
+    var s_hc: [u8; 30] = "  (IA32_HWP_CAPABILITIES)\0\0\0\0\0"
+    var s_gd: [u8; 12] = "  gedimmt: \0"
+    var s_lim: [u8; 34] = "  GEDROSSELT: hoechstens \0\0\0\0\0\0\0\0\0"
+
+    ulib.say((&s_p[0 as usize]) as u64)
+    let p: u64 = get(PG_PROFILE)
+    prof_name(p)
+    if get(PG_THROTTLED) != 0 {
+        ulib.say((&s_lim[0 as usize]) as u64)
+        prof_name(get(PG_LIMIT))
+    }
+    ulib.nl()
+
+    let r: u64 = get(PG_RATIOS)
+    ulib.say((&s_t[0 as usize]) as u64)
+    ulib.say((&s_min[0 as usize]) as u64)
+    ulib.sayu(r & 0xFF)
+    ulib.say((&s_bas[0 as usize]) as u64)
+    ulib.sayu((r >> 8) & 0xFF)
+    ulib.say((&s_max[0 as usize]) as u64)
+    ulib.sayu((r >> 16) & 0xFF)
+    let src: u64 = get(PG_RATIOSRC)
+    if src == 0 {
+        ulib.say((&s_rf[0 as usize]) as u64)
+        ulib.say((&s_rf2[0 as usize]) as u64)
+    }
+    if src == 1 {
+        ulib.say((&s_pi[0 as usize]) as u64)
+    }
+    if src == 2 {
+        ulib.say((&s_hc[0 as usize]) as u64)
+    }
+    ulib.nl()
+}
+
+fn zeig_akku() {
+    var s_a: [u8; 10] = "Akku:    \0"
+    var s_kein: [u8; 30] = "keiner gefunden (Grund \0\0\0\0\0\0\0"
+    var s_zu: [u8; 3] = ")\0\0"
+    var s_pz: [u8; 3] = "% \0"
+    var s_rest: [u8; 10] = "  Rest: \0\0"
+    var s_min: [u8; 5] = " min\0"
+    var s_bis: [u8; 13] = "  bis voll: \0"
+    var s_l: [u8; 10] = "  laedt\0\0\0"
+    var s_e: [u8; 12] = "  entlaedt\0\0"
+    var s_net: [u8; 10] = "Netz:    \0"
+    var s_an: [u8; 12] = "angesteckt\0\0"
+    var s_ab: [u8; 15] = "Akkubetrieb\0\0\0\0"
+    var s_unb: [u8; 25] = "kein Netzteilgeraet\0\0\0\0\0\0"
+    var s_kap: [u8; 12] = "Kapazitaet\0\0"
+    var s_von: [u8; 6] = " von \0"
+    var s_mwh: [u8; 6] = " mWh\0\0"
+    var s_dp: [u8; 3] = ": \0"
+    var s_mod: [u8; 10] = "Modell:  \0"
+    var s_sp: [u8; 2] = " \0"
+
+    ulib.say((&s_a[0 as usize]) as u64)
+    if get(PG_BATPRESENT) == 0 {
+        ulib.say((&s_kein[0 as usize]) as u64)
+        ulib.sayu(get(PG_BATWHY))
+        ulib.say((&s_zu[0 as usize]) as u64)
+        ulib.nl()
+    } else {
+        let pct: u64 = get(PG_BATPERCENT)
+        balken(pct)
+        ulib.say((&s_sp[0 as usize]) as u64)
+        ulib.sayu(pct)
+        ulib.say((&s_pz[0 as usize]) as u64)
+        let st: u64 = get(PG_BATSTATE)
+        if (st & 2) != 0 {
+            ulib.say((&s_l[0 as usize]) as u64)
+        } else {
+            ulib.say((&s_e[0 as usize]) as u64)
+        }
+        let m: u64 = get(PG_BATMINUTES)
+        if (st & 2) != 0 {
+            ulib.say((&s_bis[0 as usize]) as u64)
+        } else {
+            ulib.say((&s_rest[0 as usize]) as u64)
+        }
+        if m == 0 {
+            strich()
+        } else {
+            ulib.sayu(m)
+            ulib.say((&s_min[0 as usize]) as u64)
+        }
+        ulib.nl()
+
+        ulib.say((&s_kap[0 as usize]) as u64)
+        ulib.say((&s_dp[0 as usize]) as u64)
+        ulib.sayu(get(PG_BATREMAIN))
+        ulib.say((&s_von[0 as usize]) as u64)
+        ulib.sayu(get(PG_BATFULL))
+        ulib.say((&s_mwh[0 as usize]) as u64)
+        ulib.nl()
+
+        // Die Zeichenketten aus `_BIF`.
+        var buf: [u8; 64] = [0 as u8; 64]
+        let n: u64 = ulib.sys(SYS_PWRSTR, 0, (&buf[0 as usize]) as u64, 64)
+        if !is_err(n) {
+            ulib.say((&s_mod[0 as usize]) as u64)
+            ulib.say((&buf[0 as usize]) as u64)
+            let n2: u64 = ulib.sys(SYS_PWRSTR, 2,
+                (&buf[0 as usize]) as u64, 64)
+            if !is_err(n2) {
+                ulib.say((&s_sp[0 as usize]) as u64)
+                ulib.say((&buf[0 as usize]) as u64)
+            }
+            ulib.nl()
+        }
+    }
+
+    ulib.say((&s_net[0 as usize]) as u64)
+    if get(PG_ACOK) == 0 {
+        ulib.say((&s_unb[0 as usize]) as u64)
+    } else {
+        if get(PG_AC) != 0 {
+            ulib.say((&s_an[0 as usize]) as u64)
+        } else {
+            ulib.say((&s_ab[0 as usize]) as u64)
+        }
+    }
+    ulib.nl()
+}
+
+fn zeig_waerme() {
+    var s_t: [u8; 10] = "Waerme:  \0"
+    var s_gr: [u8; 6] = " Grad\0"
+    var s_no: [u8; 46] = "keine Anzeige (kein DTS, keine Thermalzone)\0\0\0"
+    var s_tj: [u8; 13] = "  Schwelle: \0"
+    var s_dr: [u8; 16] = "  gedrosselt: \0\0"
+    var s_mal: [u8; 5] = " mal\0"
+    if get(PG_TEMPOK) == 0 {
+        ulib.say((&s_t[0 as usize]) as u64)
+        ulib.say((&s_no[0 as usize]) as u64)
+        ulib.nl()
+        return
+    }
+    ulib.say((&s_t[0 as usize]) as u64)
+    ulib.sayu(get(PG_TEMP))
+    ulib.say((&s_gr[0 as usize]) as u64)
+    let tj: u64 = get(PG_TJMAX)
+    if tj != 0 {
+        ulib.say((&s_tj[0 as usize]) as u64)
+        ulib.sayu(tj)
+        ulib.say((&s_gr[0 as usize]) as u64)
+    }
+    ulib.say((&s_dr[0 as usize]) as u64)
+    ulib.sayu(get(PG_THROTTLES))
+    ulib.say((&s_mal[0 as usize]) as u64)
+    ulib.nl()
+}
+
+fn zeig_ruhe() {
+    var s_r: [u8; 10] = "Ruhe:    \0"
+    var s_c: [u8; 3] = "C\0\0"
+    var s_mw: [u8; 12] = "  mwait: \0\0\0"
+    var s_hl: [u8; 11] = "  hlt: \0\0\0\0"
+    var s_von: [u8; 6] = " von \0"
+    var s_kein: [u8; 34] = "kein MONITOR/MWAIT, nur hlt\0\0\0\0\0\0\0"
+    let caps: u64 = get(PG_CAPS)
+    ulib.say((&s_r[0 as usize]) as u64)
+    if (caps & C_MONITOR) == 0 {
+        ulib.say((&s_kein[0 as usize]) as u64)
+    } else {
+        ulib.say((&s_c[0 as usize]) as u64)
+        ulib.sayu(get(PG_CSTATE))
+    }
+    ulib.say((&s_mw[0 as usize]) as u64)
+    ulib.sayu(get(PG_MWAITS))
+    ulib.say((&s_hl[0 as usize]) as u64)
+    ulib.sayu(get(PG_HLTS))
+    ulib.say((&s_von[0 as usize]) as u64)
+    ulib.sayu(get(PG_IDLERUNS))
+    ulib.nl()
+}
+
+fn zeig_maschine() {
+    var s_m: [u8; 10] = "Kann:    \0"
+    var s_eist: [u8; 7] = "EIST \0\0"
+    var s_mon: [u8; 9] = "MWAIT \0\0\0"
+    var s_dts: [u8; 6] = "DTS \0\0"
+    var s_tur: [u8; 7] = "Turbo \0"
+    var s_hwp: [u8; 6] = "HWP \0\0"
+    var s_pi: [u8; 15] = "PLATFORM_INFO \0"
+    var s_tz: [u8; 12] = "Thermalzone\0"
+    var s_ni: [u8; 8] = "nichts\0\0"
+    let c: u64 = get(PG_CAPS)
+    ulib.say((&s_m[0 as usize]) as u64)
+    if c == 0 {
+        ulib.say((&s_ni[0 as usize]) as u64)
+    }
+    if (c & C_EIST) != 0 {
+        ulib.say((&s_eist[0 as usize]) as u64)
+    }
+    if (c & C_MONITOR) != 0 {
+        ulib.say((&s_mon[0 as usize]) as u64)
+    }
+    if (c & C_DTS) != 0 {
+        ulib.say((&s_dts[0 as usize]) as u64)
+    }
+    if (c & C_TURBO) != 0 {
+        ulib.say((&s_tur[0 as usize]) as u64)
+    }
+    if (c & C_HWP) != 0 {
+        ulib.say((&s_hwp[0 as usize]) as u64)
+    }
+    if (c & C_PLATINFO) != 0 {
+        ulib.say((&s_pi[0 as usize]) as u64)
+    }
+    if (c & C_ACPITZ) != 0 {
+        ulib.say((&s_tz[0 as usize]) as u64)
+    }
+    ulib.nl()
+}
+
+// DIE ROHEN ZAHLEN, eine je Zeile, in der Form `power: NAME=WERT`. Das
+// ist die Form, die `tools/k18/run.sh` liest -- und sie ist absichtlich
+// dieselbe Zahl, die der Kernel oben meldet: dass beide Wege
+// uebereinstimmen, ist eine der Zusagen dieser Runde.
+fn roh() {
+    var n_prof: [u8; 14] = "power: profil\0"
+    var n_caps: [u8; 12] = "power: caps\0"
+    var n_rat: [u8; 14] = "power: ratios\0"
+    var n_src: [u8; 16] = "power: ratiosrc\0"
+    var n_pc: [u8; 15] = "power: perfctl\0"
+    var n_pb: [u8; 16] = "power: perfback\0"
+    var n_mi: [u8; 12] = "power: misc\0"
+    var n_mb: [u8; 16] = "power: miscback\0"
+    var n_hw: [u8; 14] = "power: hwpreq\0"
+    var n_cs: [u8; 14] = "power: cstate\0"
+    var n_bp: [u8; 18] = "power: batpresent\0"
+    var n_pz: [u8; 15] = "power: percent\0"
+    var n_mn: [u8; 15] = "power: minutes\0"
+    var n_bs: [u8; 16] = "power: batstate\0"
+    var n_br: [u8; 15] = "power: batrate\0"
+    var n_bre: [u8; 17] = "power: batremain\0"
+    var n_bf: [u8; 15] = "power: batfull\0"
+    var n_bd: [u8; 17] = "power: batdesign\0"
+    var n_bv: [u8; 15] = "power: batvolt\0"
+    var n_ao: [u8; 12] = "power: acok\0"
+    var n_ac: [u8; 10] = "power: ac\0"
+    var n_bw: [u8; 15] = "power: batwhy\0\0"
+    var n_tp: [u8; 12] = "power: temp\0"
+    var n_to: [u8; 14] = "power: tempok\0"
+    var n_tz: [u8; 13] = "power: tzraw\0"
+    var n_th: [u8; 17] = "power: throttles\0"
+    var n_td: [u8; 17] = "power: throttled\0"
+    var n_mw: [u8; 14] = "power: mwaits\0"
+    var n_hl: [u8; 12] = "power: hlts\0"
+    var n_ir: [u8; 16] = "power: idleruns\0"
+    var n_ta: [u8; 14] = "power: tables\0"
+    var n_bh: [u8; 14] = "power: bright\0"
+    zahl((&n_prof[0 as usize]) as u64, get(PG_PROFILE))
+    zahl((&n_caps[0 as usize]) as u64, get(PG_CAPS))
+    zahl((&n_rat[0 as usize]) as u64, get(PG_RATIOS))
+    zahl((&n_src[0 as usize]) as u64, get(PG_RATIOSRC))
+    zahl((&n_pc[0 as usize]) as u64, get(PG_PERFCTL))
+    zahl((&n_pb[0 as usize]) as u64, get(PG_PERFBACK))
+    zahl((&n_mi[0 as usize]) as u64, get(PG_MISC))
+    zahl((&n_mb[0 as usize]) as u64, get(PG_MISCBACK))
+    zahl((&n_hw[0 as usize]) as u64, get(PG_HWPREQ))
+    zahl((&n_cs[0 as usize]) as u64, get(PG_CSTATE))
+    zahl((&n_bp[0 as usize]) as u64, get(PG_BATPRESENT))
+    zahl((&n_pz[0 as usize]) as u64, get(PG_BATPERCENT))
+    zahl((&n_mn[0 as usize]) as u64, get(PG_BATMINUTES))
+    zahl((&n_bs[0 as usize]) as u64, get(PG_BATSTATE))
+    zahl((&n_br[0 as usize]) as u64, get(PG_BATRATE))
+    zahl((&n_bre[0 as usize]) as u64, get(PG_BATREMAIN))
+    zahl((&n_bf[0 as usize]) as u64, get(PG_BATFULL))
+    zahl((&n_bd[0 as usize]) as u64, get(PG_BATDESIGN))
+    zahl((&n_bv[0 as usize]) as u64, get(PG_BATVOLT))
+    zahl((&n_ao[0 as usize]) as u64, get(PG_ACOK))
+    zahl((&n_ac[0 as usize]) as u64, get(PG_AC))
+    zahl((&n_bw[0 as usize]) as u64, get(PG_BATWHY))
+    zahl((&n_tp[0 as usize]) as u64, get(PG_TEMP))
+    zahl((&n_to[0 as usize]) as u64, get(PG_TEMPOK))
+    zahl((&n_tz[0 as usize]) as u64, get(PG_TZRAW))
+    zahl((&n_th[0 as usize]) as u64, get(PG_THROTTLES))
+    zahl((&n_td[0 as usize]) as u64, get(PG_THROTTLED))
+    zahl((&n_mw[0 as usize]) as u64, get(PG_MWAITS))
+    zahl((&n_hl[0 as usize]) as u64, get(PG_HLTS))
+    zahl((&n_ir[0 as usize]) as u64, get(PG_IDLERUNS))
+    zahl((&n_ta[0 as usize]) as u64, get(PG_TABLES))
+    zahl((&n_bh[0 as usize]) as u64, get(PG_BRIGHT))
+}
+
+// ------------------------------------------------------------- Eingang
+
+fn u_start(args: u64) -> u64 {
+    var s_kein: [u8; 44] = "power: die Energieschicht laeuft nicht\0\0\0\0\0\0"
+    var s_hilfe: [u8; 64] = "power: sparen | mitte | leistung | akku | waerme | hell N | aus\0"
+    var s_ok: [u8; 20] = "power: jetzt auf \0\0\0"
+    var s_nein: [u8; 40] = "power: abgelehnt (nur der Verwalter)\0\0\0\0"
+    var s_hell: [u8; 25] = "power: Helligkeit auf \0\0\0"
+    var s_pz: [u8; 3] = "%\0\0"
+    var s_aus: [u8; 25] = "power: Bildschirm aus\0\0\0\0"
+    var w_sp: [u8; 7] = "sparen\0"
+    var w_mi: [u8; 6] = "mitte\0"
+    var w_le: [u8; 9] = "leistung\0"
+    var w_ak: [u8; 5] = "akku\0"
+    var w_wa: [u8; 7] = "waerme\0"
+    var w_ro: [u8; 4] = "roh\0"
+    var w_he: [u8; 5] = "hell\0"
+    var w_au: [u8; 4] = "aus\0"
+    var w_hi: [u8; 6] = "hilfe\0"
+
+    // OHNE SCHICHT KEINE ZAHLEN. `osum_pwrget(PG_READY)` ist der einzige
+    // Aufruf, der auch dann antwortet, wenn nichts erkundet wurde.
+    if get(PG_READY) != 1 {
+        ulib.say((&s_kein[0 as usize]) as u64)
+        ulib.nl()
+        return 1
+    }
+
+    let n: u64 = ulib.arg_count(args)
+    if n < 2 {
+        zeig_profil()
+        zeig_akku()
+        zeig_waerme()
+        zeig_ruhe()
+        zeig_maschine()
+        return 0
+    }
+
+    let a1: u64 = ulib.arg_at(args, 1)
+    var neu: u64 = 3
+    if ulib.streq(a1, (&w_sp[0 as usize]) as u64) {
+        neu = 0
+    }
+    if ulib.streq(a1, (&w_mi[0 as usize]) as u64) {
+        neu = 1
+    }
+    if ulib.streq(a1, (&w_le[0 as usize]) as u64) {
+        neu = 2
+    }
+    if neu < 3 {
+        let rc: u64 = ulib.sys(SYS_PWRSET, PS_PROFILE, neu, 0)
+        if is_err(rc) {
+            ulib.say((&s_nein[0 as usize]) as u64)
+            ulib.nl()
+            return 1
+        }
+        // NICHT das gemeldet, was verlangt wurde, sondern das, was der
+        // Kernel danach WIRKLICH stehen hat. Bei Ueberhitzung sind das
+        // zwei verschiedene Dinge, und die Wahrheit ist die zweite.
+        ulib.say((&s_ok[0 as usize]) as u64)
+        prof_name(get(PG_PROFILE))
+        ulib.nl()
+        return 0
+    }
+    if ulib.streq(a1, (&w_ak[0 as usize]) as u64) {
+        zeig_akku()
+        return 0
+    }
+    if ulib.streq(a1, (&w_wa[0 as usize]) as u64) {
+        zeig_waerme()
+        return 0
+    }
+    if ulib.streq(a1, (&w_ro[0 as usize]) as u64) {
+        roh()
+        return 0
+    }
+    if ulib.streq(a1, (&w_au[0 as usize]) as u64) {
+        let rc2: u64 = ulib.sys(SYS_PWRSET, PS_BLANK, 1, 0)
+        if is_err(rc2) {
+            ulib.say((&s_nein[0 as usize]) as u64)
+            ulib.nl()
+            return 1
+        }
+        ulib.say((&s_aus[0 as usize]) as u64)
+        ulib.nl()
+        return 0
+    }
+    if ulib.streq(a1, (&w_he[0 as usize]) as u64) {
+        if n < 3 {
+            ulib.say((&s_hilfe[0 as usize]) as u64)
+            ulib.nl()
+            return 1
+        }
+        let v: u64 = ulib.to_num(ulib.arg_at(args, 2))
+        let rc3: u64 = ulib.sys(SYS_PWRSET, PS_BRIGHT, v, 0)
+        if is_err(rc3) {
+            ulib.say((&s_nein[0 as usize]) as u64)
+            ulib.nl()
+            return 1
+        }
+        ulib.say((&s_hell[0 as usize]) as u64)
+        ulib.sayu(get(PG_BRIGHT))
+        ulib.say((&s_pz[0 as usize]) as u64)
+        ulib.nl()
+        return 0
+    }
+    ulib.say((&s_hilfe[0 as usize]) as u64)
+    ulib.nl()
+    return 1
+}
