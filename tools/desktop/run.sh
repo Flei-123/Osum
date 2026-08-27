@@ -458,8 +458,12 @@ conf bottom 28 104 0 1 > "$TMPD/conf-set"
 run set-probe "$TMPD/conf-set" "einst" "$TMPD/mon-probe" || true
 P="$TMPD/set-probe.txt"
 rect() { # name field -> value
-    grep -a "settings: rect name=$1 " "$P" | tail -1 \
-        | grep -oE " $2=[0-9]+" | tail -1 | grep -oE '[0-9]+'
+    # THE WHOLE RECORD OR NOTHING -- see tools/look/run.sh for the same
+    # guard. Two records merged onto one line by the shared serial port
+    # would otherwise hand back the x of one and the y of the next.
+    grep -a 'settings: rect name=' "$P" \
+        | grep -oE "name=$1 x=[0-9]+ y=[0-9]+ w=[0-9]+ h=[0-9]+" \
+        | tail -1 | grep -oE " $2=[0-9]+" | grep -oE '[0-9]+'
 }
 WX=$(rect win x);  WY=$(rect win y)
 EX=$(rect edge x); EY=$(rect edge y); EW=$(rect edge w); EH=$(rect edge h)

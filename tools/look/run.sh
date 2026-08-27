@@ -196,8 +196,15 @@ done
 for v in "classic 0" "modern 2"; do
     set -- $v
     S="$TMPD/D-$1-night/serial.txt"
-    r() { grep -a "settings: rect name=$1 " "$S" | tail -1 \
-          | grep -oE " $2=[0-9]+" | tail -1 | grep -oE '[0-9]+'; }
+    # THE WHOLE RECORD OR NOTHING. One write is one write only as long
+    # as the device takes it in one go; `io.write_all` loops, and two
+    # records can still end up on one line. Matching the full shape
+    # `name=<n> x= y= w= h=` throws the halves away instead of reading
+    # the x of one record and the y of the next -- which is how this
+    # asked for a corner at x=1312 on an 800-pixel screen.
+    r() { grep -a 'settings: rect name=' "$S" \
+          | grep -oE "name=$1 x=[0-9]+ y=[0-9]+ w=[0-9]+ h=[0-9]+" \
+          | tail -1 | grep -oE " $2=[0-9]+" | grep -oE '[0-9]+'; }
     wx=$(r win x); wy=$(r win y); ex=$(r edge x); ey=$(r edge y)
     if [ -z "$wx" ] || [ -z "$ex" ]; then
         bad "$1: the settings did not report their geometry"
