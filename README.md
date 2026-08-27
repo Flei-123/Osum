@@ -1,23 +1,21 @@
 # Osum
 
-Ein Betriebssystemkern fuer x86-64, geschrieben in **Firn**. Er bootet
-ueber Multiboot, verwaltet Speicher und Adressraeume, plant Prozesse,
-liest seine eigene Hardware ueber PCI, spricht NVMe ueber DMA, laeuft auf
-mehreren Prozessoren, bietet eine POSIX-Schicht mit den Systemaufruf-
-nummern von Linux x86-64, startet ein Userland aus eigenstaendigen
-ELF-Dateien von der Platte — eine Shell und dreiundzwanzig Werkzeuge —
-und **zeigt das alles in Fenstern**: mit Maus, Fensterserver und
-TrueType-Schriften mit Kantenglaettung.
+An operating system kernel for x86-64, written in **Firn**. It boots via
+Multiboot, manages memory and address spaces, schedules processes, reads
+its own hardware over PCI, speaks NVMe over DMA, runs on multiple
+processors, offers a POSIX layer with the system call numbers of Linux
+x86-64, starts a userland of standalone ELF files off the disk — a shell
+and twenty-three tools — and **shows all of it in windows**: with a
+mouse, a window server and TrueType fonts with antialiasing.
 
-mehreren Prozessoren, **spricht TCP/IP ueber eine virtio-net-Karte**,
-bietet eine POSIX-Schicht mit den Systemaufrufnummern von Linux x86-64
-und startet ein Userland aus eigenstaendigen ELF-Dateien von der Platte —
-eine Shell und fuenfundzwanzig Werkzeuge. Seit Runde K11 kann man darauf
-**arbeiten**: es gibt einen bildschirmorientierten Editor, zwanzig
-weitere Werkzeuge (`find`, `sed`, `diff`, `patch`, `tar`, `gzip`, …) und
-eine Shell mit `if`, `for`, `while`, `case` und Funktionen.
+multiple processors, **speaks TCP/IP through a virtio-net card**, offers
+a POSIX layer with the system call numbers of Linux x86-64 and starts a
+userland of standalone ELF files off the disk — a shell and twenty-five
+tools. Since round K11 you can **work** on it: there is a full-screen
+editor, twenty more tools (`find`, `sed`, `diff`, `patch`, `tar`, `gzip`,
+…) and a shell with `if`, `for`, `while`, `case` and functions.
 
-    osum$ edit /notizen.txt          # ^O sichert, ^X geht, ^W sucht
+    osum$ edit /notizen.txt          # ^O saves, ^X leaves, ^W searches
     osum$ find / -name *.txt -type f
     /d/three.txt
     /notizen.txt
@@ -44,389 +42,378 @@ eine Shell mit `if`, `for`, `while`, `case` und Funktionen.
     a page from the linux kernel side, 46 octets.
     wget: status 200
 
-Der Umfang, gezaehlt:
+The size, counted:
 
-| Teil | Zeilen |
+| part | lines |
 |---|---:|
-| `kernel/*.fi` — der Kern | 30 383 |
-| `kernel/user/*.fi` — Shell, Werkzeuge, ulib | 5 114 |
-| `kernel/*.s`, `kernel/user/crt.s` — Assembler | 1 336 |
-| `lib/libc/*.fi` — die libc aus Runde K4 | 1 598 |
-| `tools/` — die Testlaeufer | 9 650 |
+| `kernel/*.fi` — the kernel | 30,383 |
+| `kernel/user/*.fi` — shell, tools, ulib | 5,114 |
+| `kernel/*.s`, `kernel/user/crt.s` — assembly | 1,336 |
+| `lib/libc/*.fi` — the libc from round K4 | 1,598 |
+| `tools/` — the test runners | 9,650 |
 
-Zuletzt dazugekommen: Runde K10 hat ZWEI Teile, die parallel liefen.
-Die Oberflaeche -- `kernel/wm.fi` (der Fensterserver), `kernel/ttf.fi`
-(TrueType-Leser und Rasterer) und `kernel/ps2m.fi` (das Zeigegeraet),
-dazu auf dem Wirt `tools/ttf/schnitt.py`, `tools/ttf/raster.py` (die
-ZWEITE Fassung des Rasterers, gegen die die erste gemessen wird) und
-`tools/wm/` (`docs/ROUNDK10W.md`). Und die Schutzbits --
-`kernel/guard.fi` (SMEP und SMAP in CR4 samt dem `stac`-Fenster) und
-`kernel/bootmod.fi` (ein Boot-Modul als Wurzelplatte, mit CRC32 davor);
-beides aus OrientOS' Rust-Kernel portiert und dort die letzten zwei
-offenen Punkte des Kernelwechsels (`docs/ROUNDK10.md`). Runde K11 hat
-den Editor und die zwanzig Werkzeuge dazugelegt (`docs/ROUNDK11.md`).
+Most recently added: round K10 has TWO parts that ran in parallel.
+The user interface -- `kernel/wm.fi` (the window server), `kernel/ttf.fi`
+(TrueType reader and rasteriser) and `kernel/ps2m.fi` (the pointing
+device), plus on the host `tools/ttf/schnitt.py`, `tools/ttf/raster.py`
+(the SECOND version of the rasteriser, the one the first is measured
+against) and `tools/wm/` (`docs/ROUNDK10W.md`). And the protection bits
+-- `kernel/guard.fi` (SMEP and SMAP in CR4 together with the `stac`
+window) and `kernel/bootmod.fi` (a boot module as the root disk, with a
+CRC32 in front of it); both ported from OrientOS' Rust kernel and the
+last two open items of the kernel switch there (`docs/ROUNDK10.md`).
+Round K11 added the editor and the twenty tools (`docs/ROUNDK11.md`).
 
-Dazu aus der Capability-Runde: `kernel/cap.fi` (die Handle-Tabelle) und
-die Testlaeufer `tools/caps/` und `tools/boot/`. Aus der Netzrunde K8:
-`kernel/virtio.fi`, `kernel/inet.fi`, `kernel/netsvc.fi`,
-`lib/libc/net.fi` und `tools/net/`.
+On top of that, from the capability round: `kernel/cap.fi` (the handle
+table) and the test runners `tools/caps/` and `tools/boot/`. From the
+network round K8: `kernel/virtio.fi`, `kernel/inet.fi`,
+`kernel/netsvc.fi`, `lib/libc/net.fi` and `tools/net/`.
 
-Der **TCP/IP-Stack** (2 646 Zeilen) steht in dieser Rechnung nicht — er
-wird nicht hier geschrieben. Er kommt als Abhaengigkeit aus dem
-Firn-Commit, den `vendor/firn/COMMIT` ohnehin schon fuer den Uebersetzer
-festnagelt; `vendor/net/HERKUNFT.md` sagt, wie, und Abschnitt 1 von
-`./test.sh` prueft die drei Blob-Hashes.
+The **TCP/IP stack** (2,646 lines) is not part of this count — it is not
+written here. It comes in as a dependency from the Firn commit that
+`vendor/firn/COMMIT` pins for the compiler anyway;
+`vendor/net/HERKUNFT.md` says how, and section 1 of `./test.sh` checks
+the three blob hashes.
 
-Osum ist **kein Spielzeug-Bootloader und kein fertiges System.** Was er
-kann, steht unten; was er nicht kann, steht ebenfalls unten, und das ist
-die laengere Liste.
+Osum is **not a toy bootloader and not a finished system.** What it can
+do is below; what it cannot do is below as well, and that is the longer
+list.
 
 ---
 
-## Was er kann
+## What it can do
 
-**Start und Kern, BIOS und UEFI.** Multiboot ueber `boot.s`. Der Kopf
-verlangt seit der Capability-Runde einen **linearen Rahmenpuffer**
-(Flag-Bit 2): ohne dieses Bit besteht ein Multiboot-Lader auf einem
-Textmodus, den es unter UEFI nicht gibt, und bricht ab — mit ihm bootet
-dasselbe Abbild ueber SeaBIOS **und** ueber OVMF. Das ISO dazu baut
-OrientOS. Weiter: eigene GDT/IDT, alle
-Ausnahmen mit Fehlercode und Registersatz gemeldet (`#DE`, `#PF`, `#GP`,
-`#DF`), PIC und PIT mit hochlaufendem Tickzaehler, serielle Konsole,
-Tastatur ueber IRQ1.
+**Boot and kernel, BIOS and UEFI.** Multiboot through `boot.s`. Since the
+capability round the header demands a **linear framebuffer** (flag bit
+2): without that bit a Multiboot loader insists on a text mode that does
+not exist under UEFI and aborts — with it, the same image boots through
+SeaBIOS **and** through OVMF. The ISO for that is built by OrientOS.
+Further: its own GDT/IDT, every exception reported with error code and
+register set (`#DE`, `#PF`, `#GP`, `#DF`), PIC and PIT with a rising tick
+counter, serial console, keyboard through IRQ1.
 
-**Speicher.** Speicherkarte aus dem Multiboot-Header, Rahmenallokator,
-Halde, Seitentabellen. Jeder Prozess bekommt einen **eigenen Adressraum**;
-ein Prozess, der Kernelspeicher anfasst, stirbt, und der Kernel lebt
-weiter.
+**Memory.** Memory map from the Multiboot header, frame allocator, heap,
+page tables. Every process gets its **own address space**; a process that
+touches kernel memory dies, and the kernel lives on.
 
-**Prozesse.** Ablaufplaner mit Praeemption ueber den Zeitgeber,
-Kontextwechsel in `switch.s`, Ring 3 ueber `syscall`/`sysret`,
-`fork`, `execve`, `wait4`, Roehren, `dup2`.
+**Processes.** Scheduler with preemption through the timer, context
+switch in `switch.s`, ring 3 through `syscall`/`sysret`, `fork`,
+`execve`, `wait4`, pipes, `dup2`.
 
-**Dateisystem.** OFS — ein eigenes Dateisystem mit Inodes, direkten und
-indirekten Bloecken, Verzeichnissen, `getdents64`. Es liegt auf einer
-RAM-Platte, auf einer ATA-Platte oder auf NVMe. `tools/osum/mkfs.py`
-baut Abbilder davon ausserhalb des Kernels.
+**File system.** OFS — a file system of its own with inodes, direct and
+indirect blocks, directories, `getdents64`. It sits on a RAM disk, on an
+ATA disk or on NVMe. `tools/osum/mkfs.py` builds images of it outside the
+kernel.
 
-**Mehrere Dateisysteme nebeneinander (Runde K14).** Ein Dateisystem
-meldet sich mit einer **Tafel von neun Verrichtungen** an
-(`kernel/vfsops.fi`) — echte Funktionszeiger, nachgezaehlt in der
-uebersetzten Objektdatei. `kernel/vfs.fi` loest Pfade ueber
-Einhaengegrenzen hinweg auf (laengster passender Einhaengepfad, an einer
-NAMENSGRENZE: `/mnttest` ist nicht `/mnt`), haengt mit einem Ziel ein
-(`mount`, Linux' Nummer 165) und haengt wieder aus (`umount2`, 166) —
-mit Pruefung auf offene Deskriptoren, also `-EBUSY` statt Datenverlust.
-OFS ist der **erste Nutzer** dieser Schicht (`kernel/ofs.fi`), kein
-Sonderfall daneben: mit dem Wort `vfsall` geht auch die Wurzel durch
-dieselbe Tafel, und dieselbe Arbeit ergibt Oktett fuer Oktett dieselbe
-Ausgabe. Darauf:
+**Several file systems side by side (round K14).** A file system registers
+itself with a **table of nine operations** (`kernel/vfsops.fi`) — real
+function pointers, counted in the compiled object file. `kernel/vfs.fi`
+resolves paths across mount boundaries (longest matching mount path, at a
+NAME BOUNDARY: `/mnttest` is not `/mnt`), mounts with a target (`mount`,
+Linux' number 165) and unmounts again (`umount2`, 166) — with a check for
+open descriptors, so `-EBUSY` instead of data loss. OFS is the **first
+user** of this layer (`kernel/ofs.fi`), not a special case beside it: with
+the word `vfsall` the root goes through the same table too, and the same
+work produces byte for byte the same output. On top of it:
 
-* **`/proc`** (`kernel/procfs.fi`) — ein Dateisystem, dessen Dateien beim
-  LESEN entstehen: `meminfo`, `cpuinfo`, `uptime`, `mounts`, `stat`,
-  `version`, und je Prozess `status`, `stat`, `cmdline`, `maps`, `fd/`.
-  `cmdline` liest den Adressraum des fremden Prozesses ueber
-  `proc.translate`; `maps` laeuft seine SEITENTABELLE ab — ein Prozess,
-  der sich eine Seite per `mmap` nimmt, hat danach eine andere Datei.
+* **`/proc`** (`kernel/procfs.fi`) — a file system whose files come into
+  being when they are READ: `meminfo`, `cpuinfo`, `uptime`, `mounts`,
+  `stat`, `version`, and per process `status`, `stat`, `cmdline`, `maps`,
+  `fd/`. `cmdline` reads the address space of the other process through
+  `proc.translate`; `maps` walks its PAGE TABLE — a process that takes a
+  page for itself with `mmap` has a different file afterwards.
 * **`/dev`** (`kernel/devfs.fi`) — `null`, `zero`, `random`, `urandom`,
-  `tty`, `console`, `fb` und die Blockgeraete `hda`, `hdb`, `ram0`,
-  `nvme0`. `lseek(SEEK_END)` auf `/dev/hdb` sagt, wie gross die Platte
-  ist; `ls -l` unterscheidet Zeichen- und Blockgeraet.
-* **FAT32, lesend und schreibend** (`kernel/fat.fi`) — mit langen Namen
-  (VFAT), Unterverzeichnissen und Ketten ueber beliebig viele Verbaende.
-  Gemessen gegen die ECHTEN Werkzeuge: das Abbild kommt von
-  `mkfs.vfat`, die Dateien von `mcopy`, und `fsck.fat` faellt das Urteil
-  ueber das, was Osum geschrieben hat (Rueckgabe 0, keine Anmerkung).
-* **MBR und GPT** (`kernel/part.fi`) — beide Tafeln, bei GPT werden
-  BEIDE CRC32-Pruefsummen gerechnet. Ein umgedrehtes Bit im Kopf, und
-  die Platte wird nicht mehr gelesen.
+  `tty`, `console`, `fb` and the block devices `hda`, `hdb`, `ram0`,
+  `nvme0`. `lseek(SEEK_END)` on `/dev/hdb` says how large the disk is;
+  `ls -l` tells a character device from a block device.
+* **FAT32, reading and writing** (`kernel/fat.fi`) — with long names
+  (VFAT), subdirectories and chains across any number of clusters.
+  Measured against the REAL tools: the image comes from `mkfs.vfat`, the
+  files from `mcopy`, and `fsck.fat` passes judgement on what Osum has
+  written (return value 0, no complaint).
+* **MBR and GPT** (`kernel/part.fi`) — both tables, and for GPT BOTH
+  CRC32 checksums are computed. One flipped bit in the header and the
+  disk is no longer read.
 
-**ELF-Lader.** `/bin/sh` ist eine Datei. Der Kernel liest sie von der
-Platte, legt ihre Segmente mit den Rechten, die sie verlangt, in einen
-frischen Adressraum und startet sie. Alle Werkzeuge sind eigenstaendige
-ELF64-Dateien ohne libc-Anbindung an den Kernel.
+**ELF loader.** `/bin/sh` is a file. The kernel reads it off the disk,
+puts its segments into a fresh address space with the rights they ask
+for, and starts it. All tools are standalone ELF64 files without a libc
+binding to the kernel.
 
-**Hardware.** PCI-Durchmusterung ueber den Konfigurationsraum, lokaler
-APIC und I/O-APIC, NVMe ueber DMA mit eigener Warteschlange.
+**Hardware.** PCI enumeration through the configuration space, local APIC
+and I/O APIC, NVMe over DMA with a queue of its own.
 
-**Bildschirm.** Ein linearer Rahmenpuffer, entgegengenommen vom Lader
-(Multiboot, Flag-Bit 12) oder von der Karte selbst eingestellt
-(Bochs-VBE ueber PCI — QEMUs `-kernel` hat keinen Videoteil). Darauf eine
-Textkonsole von 100 x 37 Zeichen mit eigenem 8x16-Zeichensatz, Rollen,
-Farben und Textmarke, dazu Bildpunkt, Linie, Rechteck, Bildbereich und
-ein Zweitpuffer mit bereichsweiser Uebertragung. **Die serielle Konsole
-bleibt parallel bestehen** — `serial.put` spiegelt jedes Oktett, also
-zeigen beide dasselbe, von den Bootmeldungen bis zur Shell. Und
-**/dev/fb**: ein Programm in Ring 3 oeffnet es, schreibt hinein, liest
-zurueck und bildet es sich mit `mmap` als 2-MiB-Kachel in den eigenen
-Adressraum ab — mit den ueblichen Rechtepruefungen. Alles davon haengt an
-dem Wort `gfx` auf der Kommandozeile; ohne es aendert sich am Kernel
-nichts. Gemessen an Bildschirmfotos (`docs/ROUNDK7.md`).
+**Screen.** A linear framebuffer, taken from the loader (Multiboot, flag
+bit 12) or set up by the card itself (Bochs VBE over PCI — QEMU's
+`-kernel` has no video part). On top of it a text console of 100 x 37
+characters with its own 8x16 font, scrolling, colours and a cursor, plus
+pixel, line, rectangle, image area and a back buffer with region-wise
+transfer. **The serial console keeps running in parallel** —
+`serial.put` mirrors every byte, so both show the same thing, from the
+boot messages to the shell. And **/dev/fb**: a program in ring 3 opens
+it, writes into it, reads back, and maps it into its own address space
+with `mmap` as a 2 MiB tile — with the usual permission checks. All of
+this hangs on the word `gfx` on the command line; without it nothing
+about the kernel changes. Measured against screenshots
+(`docs/ROUNDK7.md`).
 
-**Oberflaeche (Runde K10).** Ein **Zeigegeraet** am zweiten Anschluss
-des Tastaturbausteins (IRQ 12, `kernel/ps2m.fi`): Drei- und
-Vier-Oktett-Pakete, Rad, Anschlag an den Bildraendern, ein gezeichneter
-Zeiger. Ein **Fensterserver** (`kernel/wm.fi`): Fenster anlegen,
-verschieben, Groesse aendern, schliessen; Stapelreihenfolge;
-Eingabefokus; Ereignisse an das richtige Fenster; und
-**Bereichsverfolgung**, damit nur das Neue gemalt wird — gemessen 6801 us
-fuer den ganzen Schirm gegen 198 us fuer eine Zeigerbewegung, also
-Faktor 34. Anwendungen reden ueber **Handles** aus `kernel/cap.fi` mit
-ihm (neun Aufrufe ab 2100), nicht ueber einen zweiten Weg.
+**User interface (round K10).** A **pointing device** on the second port
+of the keyboard controller (IRQ 12, `kernel/ps2m.fi`): three- and
+four-byte packets, wheel, clamping at the screen edges, a drawn pointer.
+A **window server** (`kernel/wm.fi`): create, move, resize and close
+windows; stacking order; input focus; events to the right window; and
+**damage tracking**, so that only what is new gets painted — measured
+6801 us for the whole screen against 198 us for a pointer movement, a
+factor of 34. Applications talk to it through **handles** from
+`kernel/cap.fi` (nine calls from 2100 on), not through a second path.
 
-Und **echte Schriften** (`kernel/ttf.fi`): ein TrueType-Leser (`head`,
-`hhea`, `maxp`, `hmtx`, `cmap` Format 4, `loca`, `glyf`, `kern`) und ein
-Rasterer mit **Kantenglaettung**, ganz in Firn und ganz in Festkomma —
-kein FreeType, keine Gleitkommazahl. Die Schriften liegen als
-zusammengeschnittene TrueType-Dateien auf der Platte (`assets/`,
-`tools/ttf/schnitt.py`). Darauf ein **Terminalfenster**, in dem
-`/bin/sh` von der Platte laeuft, und ein zweites Fenster, das ein
-Programm in **Ring 3** anlegt, bemalt und auf Klicks und Tasten
-antwortet.
+And **real fonts** (`kernel/ttf.fi`): a TrueType reader (`head`, `hhea`,
+`maxp`, `hmtx`, `cmap` format 4, `loca`, `glyf`, `kern`) and a rasteriser
+with **antialiasing**, entirely in Firn and entirely in fixed point — no
+FreeType, no floating point number. The fonts sit on the disk as
+subsetted TrueType files (`assets/`, `tools/ttf/schnitt.py`). On top of
+that a **terminal window** in which `/bin/sh` runs off the disk, and a
+second window that a program in **ring 3** creates, paints and answers
+clicks and keystrokes in.
 
-Gemessen an Bildschirmfotos, in die ueber den QEMU-Monitor **echte
-Mausbewegungen, Klicks und Tastendruecke** eingespeist wurden — und der
-Text darin nicht gegen eine Flaeche, sondern **je Zeichen** gegen eine
-zweite, unabhaengige Rasterung desselben Umrisses
+Measured against screenshots into which **real mouse movements, clicks
+and key presses** were fed through the QEMU monitor — and the text in
+them not against a surface but **per character** against a second,
+independent rasterisation of the same outline
 (`tools/ttf/raster.py`). `docs/ROUNDK10.md`.
 
-**NVMe-Durchsatz, gemessen.** In QEMU/TCG bei 2,19 GHz, 128 KiB am
-Stueck (`tools/pci/run.sh` reproduziert es):
+**NVMe throughput, measured.** In QEMU/TCG at 2.19 GHz, 128 KiB in one
+go (`tools/pci/run.sh` reproduces it):
 
-| Weg | KiB/s | Worte durch die CPU |
+| path | KiB/s | words through the CPU |
 |---|---:|---:|
-| ATA PIO, 1 Block je Befehl | 4 541 | 65 536 |
-| NVMe DMA, 1 Block je Befehl | 6 485 | **0** |
-| NVMe DMA, 16 Bloecke je Befehl | 97 663 | **0** |
+| ATA PIO, 1 block per command | 4,541 | 65,536 |
+| NVMe DMA, 1 block per command | 6,485 | **0** |
+| NVMe DMA, 16 blocks per command | 97,663 | **0** |
 
-Das sind die Zahlen aus `docs/OSUM-K2.md`. Der Wert des schnellen Weges
-haengt am Wirt: derselbe Test lieferte auf diesem Server unter Last
-109 208 KiB/s, auf einer freien Maschine wurden 140 799 KiB/s gemessen.
-Strukturell ist nur die letzte Spalte: der DMA-Weg schiebt **kein**
-Datenwort durch die CPU, und das aendert sich mit keinem Wirt.
+Those are the figures from `docs/OSUM-K2.md`. The value of the fast path
+depends on the host: the same test delivered 109,208 KiB/s on this server
+under load, and 140,799 KiB/s were measured on an idle machine. Only the
+last column is structural: the DMA path pushes **no** data word through
+the CPU, and no host changes that.
 
-**Mehrere Prozessoren.** Die Anwendungsprozessoren werden aus der
-ACPI-MADT gelesen und mit INIT/SIPI gestartet; jeder bekommt Stapel,
-Deskriptortabelle und lokalen APIC. Laufliste, Rahmenallokator und
-Dateisystem stehen unter einer Sperre. Gemessen: dieselbe Arbeit auf
-einem Kern gegen vier Kerne, **Beschleunigung 3,54**, mit den Gegenproben
-`nosmp`, `nolock` und `thread=single`.
+**Multiple processors.** The application processors are read from the
+ACPI MADT and started with INIT/SIPI; each gets a stack, a descriptor
+table and a local APIC. Run queue, frame allocator and file system are
+under one lock. Measured: the same work on one core against four cores,
+**speedup 3.54**, with the counter-checks `nosmp`, `nolock` and
+`thread=single`.
 
-**POSIX-Schicht.** Sechsundzwanzig Systemaufrufe mit den **Nummern von
-Linux x86-64** — `read`, `write`, `open`, `close`, `stat`, `fstat`,
-`lseek`, `mmap`, `brk`, `pipe`, `dup2`, `fork`, `execve`, `wait4`,
-`getdents64` und die uebrigen — und darauf eine libc in Firn
-(`lib/libc/`). Die Fehlerfaelle sind mitgemessen: vierzehn Arten, falsch
-zu liegen, vierzehn negative Rueckgaben, ein lebender Kernel danach.
+**POSIX layer.** Twenty-six system calls with the **numbers of Linux
+x86-64** — `read`, `write`, `open`, `close`, `stat`, `fstat`, `lseek`,
+`mmap`, `brk`, `pipe`, `dup2`, `fork`, `execve`, `wait4`, `getdents64`
+and the rest — and on top of them a libc in Firn (`lib/libc/`). The
+failure cases are measured along with them: fourteen ways to be wrong,
+fourteen negative return values, a living kernel afterwards.
 
-**Handles statt Umgebungsautoritaet.** Neben der POSIX-Schicht steht eine
-zweite ABI, portiert aus OrientOS (`libs/osum-abi-native/`, Rust →
-`kernel/cap.fi`, Firn): eine **Handle-Tabelle je Prozess**, in der ein
-Handle aus Platz, Generation und einem prozesseigenen Wuerfelwert besteht,
-mit zehn Rechtebits und acht Objektarten. Drei Saetze, und jeder ist aus
-Ring 3 gemessen (`tools/caps/run.sh`, achtzehn Zusagen):
+**Handles instead of ambient authority.** Next to the POSIX layer stands
+a second ABI, ported from OrientOS (`libs/osum-abi-native/`, Rust →
+`kernel/cap.fi`, Firn): a **handle table per process** in which a handle
+consists of a slot, a generation and a per-process random value, with ten
+rights bits and eight object kinds. Three statements, and every one of
+them is measured from ring 3 (`tools/caps/run.sh`, eighteen checks):
 
-* **Eine frische Tabelle ist leer.** Es wird nichts geerbt — auch nicht
-  von einem Vorgaenger auf demselben Platz der Aufgabentabelle.
-* **Ein geschlossenes Handle trifft nie wieder etwas**, auch nicht nach
-  Wiederverwendung des Platzes (Generation).
-* **Rechte koennen nur kleiner werden.** Eine Kopie mit weniger Rechten
-  kann sich das Verlorene nicht zurueckholen.
+* **A fresh table is empty.** Nothing is inherited — not even from a
+  predecessor in the same slot of the task table.
+* **A closed handle never hits anything again**, not even after the slot
+  has been reused (generation).
+* **Rights can only get smaller.** A copy with fewer rights cannot fetch
+  back what it lost.
 
-Der Unterschied zu POSIX in einer Zeile: ein gueltiges Handle ohne das
-noetige Recht ist `RightsDenied`, ein gefaelschtes ist `BadHandle` —
-POSIX hat fuer beides nur `-EBADF`. Die Aufrufnummern liegen ab 2000; was
-es noch **nicht** gibt (Kanaele, Ports, Namensraeume, Spawn mit
-Handle-Liste, Speicherobjekte), antwortet `NotSupported` und steht in
-OrientOS' `KERNELWECHSEL.md` als offener Punkt.
+The difference from POSIX in one line: a valid handle without the
+required right is `RightsDenied`, a forged one is `BadHandle` — POSIX has
+only `-EBADF` for both. The call numbers start at 2000; what does **not**
+exist yet (channels, ports, namespaces, spawn with a handle list, memory
+objects) answers `NotSupported` and is an open item in OrientOS'
+`KERNELWECHSEL.md`.
 
-**Netz.** Ein **virtio-net-Treiber** in Firn (`kernel/virtio.fi`), modern
-nach virtio 1.0: die vier Bereiche aus der Faehigkeitsliste des Geraets,
-Merkmalsaushandlung mit `FEATURES_OK`, zwei virtqueues zu 64
-Deskriptoren, MSI-X oder der Unterbrechungsstift. Darauf der
-**TCP/IP-Stack aus Runde K3** — als Abhaengigkeit, nicht als Kopie — und
-darueber **Steckdosen fuer Ring 3** mit den Nummern von Linux x86-64
-(`socket` 41, `connect` 42, `accept` 43, `sendto` 44, `recvfrom` 45,
-`shutdown` 48, `bind` 49, `listen` 50, `getsockname` 51, `getpeername`
-52). Eine Steckdose ist ein Eintrag der offenen Dateien aus Runde K4, also
-funktionieren `read`, `write`, `close`, `dup2` und `fork` darauf, ohne
-dass eines davon weiss, was eine Steckdose ist.
+**Network.** A **virtio-net driver** in Firn (`kernel/virtio.fi`), modern
+by virtio 1.0: the four regions from the device's capability list,
+feature negotiation with `FEATURES_OK`, two virtqueues of 64 descriptors,
+MSI-X or the interrupt pin. On top of it the **TCP/IP stack from round
+K3** — as a dependency, not as a copy — and above that **sockets for ring
+3** with the numbers of Linux x86-64 (`socket` 41, `connect` 42, `accept`
+43, `sendto` 44, `recvfrom` 45, `shutdown` 48, `bind` 49, `listen` 50,
+`getsockname` 51, `getpeername` 52). A socket is an entry in the open
+file table from round K4, so `read`, `write`, `close`, `dup2` and `fork`
+work on it without any of them knowing what a socket is.
 
-**Gemessen gegen den echten Linux-Kernel** (`tools/net/run.sh`, 75
-Zusagen, `veth` + `AF_PACKET` in einem eigenen Netz-Namensraum, QEMU ohne
-KVM):
+**Measured against the real Linux kernel** (`tools/net/run.sh`, 75
+checks, `veth` + `AF_PACKET` in a network namespace of its own, QEMU
+without KVM):
 
-| was | Ergebnis |
+| what | result |
 |---|---|
-| `ping -c 10` vom Linux-Kern | **10 von 10**, 3,3 ms im Mittel |
-| `nc` schiebt 1 MiB hinein | **1 048 576 Oktette**, 732 Rahmen, **6 027 KiB/s**, 0 Neusendungen |
-| `nc` durch das Echo | **262 144 Oktette hin und zurueck, md5 gleich** |
-| `curl http://10.9.0.2:8080/` | Statuszeile, Kopf und Rumpf von curl selbst akzeptiert |
-| Osum verbindet sich **aktiv** | 262 144 hin, 262 144 zurueck, **0 falsche Oktette** |
-| `tc netem loss 20 %` hinein | alles in Reihenfolge, 132 Segmente neu zusammengesetzt |
-| `tc netem loss 10 %` hinaus | 0 falsch, **4 Verluste erholt: 1 ueber den Zeitgeber, 3 ueber drei doppelte Quittungen** |
+| `ping -c 10` from the Linux kernel | **10 of 10**, 3.3 ms on average |
+| `nc` pushes 1 MiB in | **1,048,576 bytes**, 732 frames, **6,027 KiB/s**, 0 retransmissions |
+| `nc` through the echo | **262,144 bytes there and back, md5 identical** |
+| `curl http://10.9.0.2:8080/` | status line, header and body accepted by curl itself |
+| Osum connects **actively** | 262,144 out, 262,144 back, **0 wrong bytes** |
+| `tc netem loss 20 %` inbound | everything in order, 132 segments reassembled |
+| `tc netem loss 10 %` outbound | 0 wrong, **4 losses recovered: 1 through the timer, 3 through three duplicate acks** |
 
-Gegenprobe: dasselbe Kernelabbild ohne das Wort `nic` verliert jedes
-Paket, `nicnobm` (kein Busmaster) ebenso, und mit `nicnoirq` kommen alle
-262 144 Oktette an waehrend der Unterbrechungszaehler auf 0 stehen bleibt.
-Die Zahlen und die offenen Punkte stehen in `docs/ROUNDK8.md`.
+Counter-check: the same kernel image without the word `nic` loses every
+packet, `nicnobm` (no bus master) likewise, and with `nicnoirq` all
+262,144 bytes arrive while the interrupt counter stays at 0. The figures
+and the open items are in `docs/ROUNDK8.md`.
 
-**Der Kernel schuetzt sich vor dem Userland (Runde K10).** SMEP und SMAP
-stehen in CR4, sobald CPUID sie meldet — auf JEDEM Kern, denn CR4 ist pro
-Prozessor. Ring 0 fuehrt damit keinen Nutzercode mehr aus, und
-Nutzerdaten fasst er nur noch im `stac`-Fenster an, das an genau vier
-Stellen steht (`sys.peek`, `sys.poke`, `sys.copy_in`, `sys.copy_out`)
-plus am Signalrahmen. Gemessen wird nicht die Behauptung, sondern das
-Register: `guard: cr4=0x300020  smep=1  smap=1`. Gegenproben: `smapraw`
-und `smepraw` muessen mit den Bits einen #PF geben (Fehlercode 0x1 und
-0x11) und ohne sie durchlaufen.
+**The kernel protects itself from the userland (round K10).** SMEP and
+SMAP stand in CR4 as soon as CPUID reports them — on EVERY core, because
+CR4 is per processor. Ring 0 no longer executes user code with them, and
+it touches user data only in the `stac` window, which stands in exactly
+four places (`sys.peek`, `sys.poke`, `sys.copy_in`, `sys.copy_out`) plus
+at the signal frame. What is measured is not the claim but the register:
+`guard: cr4=0x300020  smep=1  smap=1`. Counter-checks: `smapraw` and
+`smepraw` have to produce a #PF with the bits set (error code 0x1 and
+0x11) and to run through without them.
 
-**Ein Boot-Modul kann die Wurzelplatte sein (Runde K10).** Was ein Lader
-neben den Kern legt (Multiboot, Flag-Bit 3), wird mit CRC32 geprueft und
-dann als Blockgeraet gemountet — `fs.fi` merkt davon nichts, es sind
-dieselben 512 Oktette je Block. Damit traegt ein ISO nicht nur einen
-Kern, sondern ein Userland. Ein falsches `modcrc=` laesst das Modul
-liegen, und `mem.scan` nimmt seinen Bereich aus dem Rahmenverwalter --
-nachgewiesen dadurch, dass die Summe am ENDE des Laufs dieselbe ist.
+**A boot module can be the root disk (round K10).** What a loader places
+next to the kernel (Multiboot, flag bit 3) is checked with CRC32 and then
+mounted as a block device — `fs.fi` notices nothing of it, they are the
+same 512 bytes per block. That way an ISO carries not just a kernel but a
+userland. A wrong `modcrc=` leaves the module alone, and `mem.scan` takes
+its region out of the frame allocator -- proved by the sum at the END of
+the run being the same one.
 
-**Benutzer, Rechte und ein erster Prozess (Runde K13).** Jeder Prozess
-traegt eine echte, eine wirksame und eine gesicherte Benutzer- und
-Gruppenkennung; sie werden ueber `fork` und `execve` vererbt und ueber
-`setuid`/`setgid`/`setresuid` mit den Regeln von POSIX gewechselt --
-Aufrufnummern wie bei Linux. Dateien tragen Rechtebits und einen
-Eigentuemer IM INODE; das Format hat dafuer eine Fassungsnummer im
-Superblock bekommen und alte Abbilder bleiben lesbar. Die Pruefung steht
-an EINER Stelle (`kernel/perm.fi`) und wird aus fuenf Toren gerufen:
-`open`, `mkdir`, `unlink`, `chdir`, `execve`. Dazu `chmod`, `chown`,
-`id`, `whoami`, `su`, `passwd` und `login` -- Passwoerter als
-PBKDF2-HMAC-SHA256 mit Salz, gegen Pythons `hashlib` gemessen. Und
-`/sbin/init` als **Prozess 1**: eine Dienstetafel (`/etc/inittab`),
-Neustart abgestuerzter Dienste, Einsammeln von Waisen, `svc` zum
-Starten/Stoppen/Abfragen und ein Herunterfahren ueber echtes ACPI -- an
-QEMUs Beendigungscode zu erkennen (0 statt 21). Ein Notweg ueber die
-Kommandozeile (`initsh`) startet die Shell wie vorher.
+**Users, permissions and a first process (round K13).** Every process
+carries a real, an effective and a saved user and group id; they are
+inherited through `fork` and `execve` and changed through
+`setuid`/`setgid`/`setresuid` with the rules of POSIX -- call numbers as
+on Linux. Files carry permission bits and an owner IN THE INODE; the
+format got a version number in the superblock for this and old images
+stay readable. The check stands in ONE place (`kernel/perm.fi`) and is
+called from five gates: `open`, `mkdir`, `unlink`, `chdir`, `execve`.
+Plus `chmod`, `chown`, `id`, `whoami`, `su`, `passwd` and `login` --
+passwords as PBKDF2-HMAC-SHA256 with salt, measured against Python's
+`hashlib`. And `/sbin/init` as **process 1**: a service table
+(`/etc/inittab`), restart of crashed services, reaping of orphans, `svc`
+for starting/stopping/querying, and a shutdown through real ACPI -- to be
+recognised by QEMU's exit code (0 instead of 21). An escape hatch on the
+command line (`initsh`) starts the shell as before.
 
-**Userland.** `/bin/sh` mit Roehren, Umlenkung (`>`, `<`), `;`,
-Zeileneditor, `cd`, `exit` — und fuenfundzwanzig Werkzeuge: `cat`, `cp`,
-`date`, `df`, `echo`, `false`, `grep`, `head`, `kill`, `ls`, `mkdir`,
-`mv`, `ping`, `ps`, `rm`, `rmdir`, `sleep`, `sort`, `tail`, `touch`,
-`true`, `uname`, `uniq`, `wc`, `wget`.
-
----
-
-## Was ihm fehlt
-
-* **Kein Fenstersystem.** Es gibt einen Rahmenpuffer, eine Textkonsole
-  und `/dev/fb` (Runde K7) — aber nur EINE Flaeche. Konsole und Programm
-  uebermalen sich, wenn sie dieselben Bildzeilen nehmen. Es gibt auch
-  kein `ioctl`: ein Programm erfaehrt die Groesse des Bildes ueber
-  `lseek(SEEK_END)` und die Breite gar nicht.
-* **Der Fensterserver laeuft IM KERN.** Runde K10 hat Fenster, Maus,
-  Stapelreihenfolge, Eingabefokus und echte Schriften — aber der Server
-  sitzt in Ring 0, weil dieser Kernel keinen Speicher zwischen zwei
-  Prozessen teilen kann (`mmap` kennt anonyme Seiten und den
-  Rahmenpuffer, sonst nichts). Der Schutz zwischen den ANWENDUNGEN
-  steht; der zwischen Server und Anwendung nicht.
-* **Kein `ioctl` fuer die Flaeche.** Ein Programm erfaehrt die Groesse
-  seines Fensters ueber `wm_info`, die des Bildschirms ueber
-  `lseek(SEEK_END)` auf `/dev/fb` — aendern kann es die Aufloesung
-  nicht.
-* **Kein Hinting, keine Unterpixel-Positionierung, keine Drehung.** Der
-  Rasterer setzt Glyphen auf ganze Bildpunkte und setzt zusammengesetzte
-  Glyphen mit ihrer Verschiebung ein, nicht mit ihrer Matrix.
-* **Kein Netz.** Kein Treiber fuer eine Netzkarte. Ein TCP/IP-Stack in
-  Firn existiert (Runde K3, `docs/OSUM-K3.md`), er liegt aber im
-  Firn-Repository unter `lib/net/` und ist nie an diesen Kernel
-  angeschlossen worden — er wurde gegen den Linux-Kernel ueber ein
-  `veth`-Paar gemessen, nicht gegen eine Karte.
-
-* **Keine Grafik.** Kein Framebuffer, kein VGA-Textmodus als Konsole, kein
-  Fenstersystem. Die Konsole ist die serielle Schnittstelle.
-* **Keine Namensaufloesung.** Kein Resolver, kein `/etc/hosts`: eine
-  Adresse sind vier Zahlen. `/bin/wget` weist eine URL mit einem Namen
-  darin ab, statt etwas Falsches zu antworten.
-* **Nur eine Warteschlangenpaarung im Netz**, keine Auslagerung von
-  Pruefsummen an die Karte, kein IPv6, keine Neuzusammensetzung von
-  IP-Fragmenten, kein Fensterskalieren, kein SACK.
-* **Kein USB.** Weder Host-Controller noch Tastatur ueber USB. Die
-  Tastatur ist der PS/2-Controller.
-* **Kein SATA/AHCI**, kein Partitionstabellen-Leser, kein Journal im
-  Dateisystem, keine dynamische Bindung, keine gemeinsam genutzten
-  Bibliotheken.
-* **Rechte, aber keine vollstaendigen.** Seit Runde K13 gibt es
-  Benutzer, Rechtebits und Eigentuemer -- aber das Betretungsrecht wird
-  nur am LETZTEN Verzeichnis eines Pfades geprueft, nicht an jedem
-  Glied; es gibt keine Nebengruppen und kein `/etc/group`; das
-  Sticky-Bit wird gespeichert und nicht beachtet; und die 2048 Runden
-  PBKDF2 sind fuer heutige Verhaeltnisse zu wenig (die Rundenzahl steht
-  im Eintrag und laesst sich erhoehen). `docs/ROUNDK13.md`, Abschnitt 7,
-  zaehlt die Luecken einzeln auf.
-* **Nur x86-64, und ohne Architekturgrenze.** Firn kann auch aarch64, der
-  Kernel nicht — und es gibt in diesem Baum keine Schicht, hinter der die
-  x86-Einzelheiten steckten. OrientOS hatte dafuer `kcore/arch_iface.rs`
-  (Traits plus ein Testschritt, der x86-Begriffe ausserhalb von `arch/`
-  verbietet); das ist NICHT portiert, weil es eine Umbauarbeit an jedem
-  Modul waere und keine Portierung. Die Vorlage steht in OrientOS unter
-  `vorlage/arch_iface.rs`.
-* **Kanaele, Ports, Namensraeume.** Die nativen Aufrufe dafuer gibt es in
-  `sys.fi`, und sie antworten `NotSupported` (−9): der Aufruf EXISTIERT in
-  dieser ABI, dieser Kernel bietet ihn nur nicht an. Portiert ist das
-  Handle-Modell darunter (`cap.fi`), nicht die Objekte, die daran haengen.
-* **Getestet wird in QEMU**, nicht auf echter Hardware.
+**Userland.** `/bin/sh` with pipes, redirection (`>`, `<`), `;`, line
+editor, `cd`, `exit` — and twenty-five tools: `cat`, `cp`, `date`, `df`,
+`echo`, `false`, `grep`, `head`, `kill`, `ls`, `mkdir`, `mv`, `ping`,
+`ps`, `rm`, `rmdir`, `sleep`, `sort`, `tail`, `touch`, `true`, `uname`,
+`uniq`, `wc`, `wget`.
 
 ---
 
-## Bauen und starten
+## What it lacks
 
-Vorausgesetzt: `bash`, `git`, `rustc`/`cargo` (fuer den festgenagelten
-Uebersetzer), `binutils` (`as`, `ld`, `objcopy`, `nm`, `objdump`),
-`python3`, `qemu-system-x86_64`.
+* **No window system.** There is a framebuffer, a text console and
+  `/dev/fb` (round K7) — but only ONE surface. Console and program paint
+  over each other when they take the same scan lines. There is no
+  `ioctl` either: a program learns the size of the image through
+  `lseek(SEEK_END)` and the width not at all.
+* **The window server runs IN THE KERNEL.** Round K10 has windows, a
+  mouse, stacking order, input focus and real fonts — but the server sits
+  in ring 0, because this kernel cannot share memory between two
+  processes (`mmap` knows anonymous pages and the framebuffer, nothing
+  else). The protection between the APPLICATIONS is there; the one
+  between server and application is not.
+* **No `ioctl` for the surface.** A program learns the size of its window
+  through `wm_info` and that of the screen through `lseek(SEEK_END)` on
+  `/dev/fb` — change the resolution it cannot.
+* **No hinting, no subpixel positioning, no rotation.** The rasteriser
+  places glyphs on whole pixels and inserts composite glyphs with their
+  offset, not with their matrix.
+* **No network.** No driver for a network card. A TCP/IP stack in Firn
+  exists (round K3, `docs/OSUM-K3.md`), but it lies in the Firn
+  repository under `lib/net/` and has never been connected to this
+  kernel — it was measured against the Linux kernel through a `veth`
+  pair, not against a card.
+
+* **No graphics.** No framebuffer, no VGA text mode as a console, no
+  window system. The console is the serial port.
+* **No name resolution.** No resolver, no `/etc/hosts`: an address is
+  four numbers. `/bin/wget` rejects a URL with a name in it instead of
+  answering something wrong.
+* **Only one queue pair in the network**, no offloading of checksums to
+  the card, no IPv6, no reassembly of IP fragments, no window scaling, no
+  SACK.
+* **No USB.** Neither host controller nor keyboard over USB. The keyboard
+  is the PS/2 controller.
+* **No SATA/AHCI**, no partition table reader, no journal in the file
+  system, no dynamic linking, no shared libraries.
+* **Permissions, but not complete ones.** Since round K13 there are
+  users, permission bits and owners -- but the traverse permission is
+  only checked on the LAST directory of a path, not on every element;
+  there are no supplementary groups and no `/etc/group`; the sticky bit
+  is stored and not honoured; and the 2048 rounds of PBKDF2 are too few
+  by today's standards (the round count is stored in the entry and can be
+  raised). `docs/ROUNDK13.md`, section 7, lists the gaps one by one.
+* **Only x86-64, and without an architecture boundary.** Firn can do
+  aarch64 as well, the kernel cannot — and there is no layer in this tree
+  behind which the x86 details are hidden. OrientOS had
+  `kcore/arch_iface.rs` for that (traits plus a test step that forbids
+  x86 terms outside of `arch/`); that is NOT ported, because it would be
+  a rebuild of every module and not a port. The template is in OrientOS
+  under `vorlage/arch_iface.rs`.
+* **Channels, ports, namespaces.** The native calls for them exist in
+  `sys.fi`, and they answer `NotSupported` (−9): the call EXISTS in this
+  ABI, this kernel just does not offer it. What is ported is the handle
+  model underneath (`cap.fi`), not the objects that hang off it.
+* **Testing happens in QEMU**, not on real hardware.
+
+---
+
+## Building and running
+
+Required: `bash`, `git`, `rustc`/`cargo` (for the pinned compiler),
+`binutils` (`as`, `ld`, `objcopy`, `nm`, `objdump`), `python3`,
+`qemu-system-x86_64`.
 
 ```sh
-git clone <dieses repo> osum
+git clone <this repo> osum
 cd osum
 
-# einmalig: den festgenagelten Firn-Uebersetzer bauen
-FIRN_REPO=/pfad/zu/firn ./vendor/firn/hole-firnc.sh
+# once: build the pinned Firn compiler
+FIRN_REPO=/path/to/firn ./vendor/firn/hole-firnc.sh
 
-# die ganze Abnahme (neunzehn Abschnitte, 1638 Zusagen, QEMU pro Fall)
+# the whole acceptance suite (nineteen sections, 1638 checks, QEMU per case)
 ./test.sh
 ```
 
-`./test.sh` ruft `hole-firnc.sh` selbst auf, wenn der Uebersetzer fehlt.
-Liegt das Firn-Repository als Geschwisterverzeichnis (`../firn`), findet
-das Skript es ohne `FIRN_REPO`.
+`./test.sh` calls `hole-firnc.sh` itself when the compiler is missing. If
+the Firn repository sits as a sibling directory (`../firn`), the script
+finds it without `FIRN_REPO`.
 
-Einzelne Abschnitte laufen auch fuer sich:
+Individual sections also run on their own:
 
 ```sh
-bash tools/kernel/run.sh      # der Kern (Runden 59/62)
-bash tools/osum/run.sh        # ELF-Lader, /bin/sh von der Platte (K1)
+bash tools/kernel/run.sh      # the kernel (rounds 59/62)
+bash tools/osum/run.sh        # ELF loader, /bin/sh off the disk (K1)
 bash tools/pci/run.sh         # PCI, APIC, NVMe (K2)
-bash tools/posix/run.sh       # POSIX-Schicht und libc (K4)
-bash tools/smp/run.sh         # vier Prozessoren (K5)
-bash tools/userland/run.sh    # Shell und Werkzeuge (K6)
-bash tools/gfx/run.sh         # der Bildschirm (K7)
-bash tools/unix/run.sh        # Signale, Terminal, Uhr, Zufall (K9)
-bash tools/net/run.sh         # virtio-net und der TCP/IP-Stack (K8)
-bash tools/guard/run.sh       # SMEP/SMAP und das Boot-Modul (K10)
-bash tools/wm/run.sh          # Maus, Fenster, TrueType (K10)
-bash tools/hv/run.sh          # der Hypervisor: AMD-V, NPT, Gaeste (K12)
+bash tools/posix/run.sh       # POSIX layer and libc (K4)
+bash tools/smp/run.sh         # four processors (K5)
+bash tools/userland/run.sh    # shell and tools (K6)
+bash tools/gfx/run.sh         # the screen (K7)
+bash tools/unix/run.sh        # signals, terminal, clock, randomness (K9)
+bash tools/net/run.sh         # virtio-net and the TCP/IP stack (K8)
+bash tools/guard/run.sh       # SMEP/SMAP and the boot module (K10)
+bash tools/wm/run.sh          # mouse, windows, TrueType (K10)
+bash tools/hv/run.sh          # the hypervisor: AMD-V, NPT, guests (K12)
 bash tools/k14/run.sh         # VFS, /proc, /dev, FAT32, MBR/GPT (K14)
-bash tools/k16/run.sh         # der Uebersetzer auf Osum selbst (K16)
+bash tools/k16/run.sh         # the compiler on Osum itself (K16)
 ```
 
-Den Kernel mit Bildschirm starten und selbst hinsehen — `-vga std` ist
-die Karte, die `kernel/fb.fi` bedient:
+Start the kernel with a screen and look for yourself — `-vga std` is the
+card that `kernel/fb.fi` drives:
 
 ```sh
 qemu-system-x86_64 -kernel /tmp/k.mb -m 256 -append "osum gfx" \
    -serial stdio -vga std
 ```
 
-Und mit **Fenstern**, Maus und echten Schriften (Runde K10). Die
-Schriften liegen auf der Platte, also braucht es ein Abbild mit
-`/lib/mono.ttf` und `/lib/sans.ttf` darauf:
+And with **windows**, a mouse and real fonts (round K10). The fonts sit
+on the disk, so it takes an image with `/lib/mono.ttf` and
+`/lib/sans.ttf` on it:
 
 ```sh
 python3 tools/osum/mkfs.py build /tmp/d.img 4096 /lib/ \
@@ -435,8 +422,8 @@ qemu-system-x86_64 -kernel /tmp/k.mb -m 256 -append "gfx wm wmhold" \
    -serial stdio -vga std -drive file=/tmp/d.img,format=raw,if=ide,index=0
 ```
 
-Ein Abbild von Hand bauen und starten (was `tools/userland/run.sh`
-ausfuehrlicher tut):
+Build an image by hand and start it (what `tools/userland/run.sh` does in
+more detail):
 
 ```sh
 export FIRNLIB=$PWD/lib
@@ -453,99 +440,99 @@ qemu-system-x86_64 -kernel /tmp/k.mb -m 128 -append "osum" \
 
 ---
 
-## Der Uebersetzer ist eine Abhaengigkeit, kein Inhalt
+## The compiler is a dependency, not content
 
-Osum wird in Firn geschrieben, aber der Firn-Uebersetzer gehoert **nicht**
-in dieses Repository. Er wird **festgenagelt**:
+Osum is written in Firn, but the Firn compiler does **not** belong in
+this repository. It is **pinned**:
 
-* `vendor/firn/COMMIT` enthaelt genau **einen** Firn-Commit.
-* `vendor/firn/hole-firnc.sh` holt diesen Stand (`git archive`, ohne im
-  Firn-Repository irgendetwas anzulegen) und baut daraus
+* `vendor/firn/COMMIT` contains exactly **one** Firn commit.
+* `vendor/firn/hole-firnc.sh` fetches that state (`git archive`, without
+  creating anything in the Firn repository) and builds
   `vendor/firn/bin/firnc` (firnc0, in Rust), `vendor/firn/bin/firnc1`
-  (der Uebersetzer in Firn, von firnc0 uebersetzt) und
-  `vendor/firn/lib/` (die Firn-Bibliothek desselben Commits).
-* Eingecheckt ist nur der Hash und das Skript, nie die Binaerdatei.
+  (the compiler in Firn, compiled by firnc0) and `vendor/firn/lib/` (the
+  Firn library of the same commit).
+* Only the hash and the script are checked in, never the binary.
 
-**Warum.** Firn wird gerade aktiv weiterentwickelt. Wuerde Osum immer
-gegen den neuesten Stand gebaut, waere bei jedem Fehler unklar, ob er aus
-dem Kernel oder aus dem Uebersetzer kommt. Nachgezogen wird der Hash
-deshalb **erst, wenn `./test.sh` gruen ist** — nicht vorher.
+**Why.** Firn is under active development. If Osum were always built
+against the newest state, then with every bug it would be unclear whether
+it comes from the kernel or from the compiler. The hash is therefore
+moved forward **only when `./test.sh` is green** — not before.
 
-**Was aus der Firn-Bibliothek hereinkommt.** Nur `std`, und nur an einer
-Stelle: `kernel/kcore.fi` schreibt `import std.core` — die Haelfte der
-Bibliothek, die weder Allokator noch Systemaufruf braucht (Runde 73,
-`docs/ROUND73.md`). Alles andere im Kernel steht in diesem Repository.
-Der Weg dorthin ist der Suchpfad, den beide Uebersetzer zuletzt gehen,
-`<Verzeichnis der Uebersetzerdatei>/../lib` — deshalb liegen
-`vendor/firn/bin/` und `vendor/firn/lib/` nebeneinander. `$FIRNLIB` zeigt
-auf `lib/` dieses Repositoriums und ist damit fuer die eigene libc frei
-(`import libc.io`).
+**What comes in from the Firn library.** Only `std`, and only in one
+place: `kernel/kcore.fi` writes `import std.core` — the half of the
+library that needs neither an allocator nor a system call (round 73,
+`docs/ROUND73.md`). Everything else in the kernel is in this repository.
+The way there is the search path that both compilers walk last,
+`<directory of the compiler binary>/../lib` — which is why
+`vendor/firn/bin/` and `vendor/firn/lib/` sit next to each other.
+`$FIRNLIB` points at `lib/` of this repository and is thereby free for
+its own libc (`import libc.io`).
 
-Beide Uebersetzerstufen werden gemessen: jeder Testlaeufer baut den
-Kernel mit firnc0 **und** mit firnc1 und vergleicht die Ausgaben.
-
----
-
-## Verhaeltnis zu Firn und zu OrientOS
-
-**Firn** ist die Sprache und ihr Uebersetzer
-(`../firn`). Osum ist aus dem Firn-Repository herausgeloest worden — die
-Commit-Geschichte in diesem Repository ist die echte, sie beginnt lange
-vor der Ausgliederung. Der Kernel lag dort als `demos/kernel/`, die libc
-als `lib/osum/`. Was im Firn-Repository geblieben ist: der Uebersetzer,
-die Standardbibliothek, die Browser-Bausteine (`lib/html`, `lib/css`,
-`lib/js`, `lib/dom`) und der TCP/IP-Stack aus Runde K3.
-
-**OrientOS** ist das Betriebssystem *um* einen Kernel herum — eigenes
-Repository, eigene Abnahme. Es hat einen Kern gleichen Namens, der aber
-zu ueber 17 000 Zeilen aus Rust besteht und gerade erst nach Firn
-migriert wird. **Der Kernel in diesem Repository ist der weiter
-entwickelte.** Die Aufteilung, die Justin festgelegt hat:
-
-* **Osum** = der Kernel. Dieses Repository.
-* **OrientOS** = das System drumherum.
-
-Dass beide bisher „osum" hiessen, ist historisch und wird dort
-aufgeloest, nicht hier.
+Both compiler stages are measured: every test runner builds the kernel
+with firnc0 **and** with firnc1 and compares the outputs.
 
 ---
 
-## Doku
+## Relationship to Firn and to OrientOS
 
-Die Rundenberichte in `docs/` sind unveraendert aus dem Firn-Repository
-uebernommen und nennen deshalb noch die alten Pfade (`demos/kernel/`,
-`lib/osum/`). Sie sind Protokoll, kein Handbuch, und werden nicht
-nachtraeglich umgeschrieben.
+**Firn** is the language and its compiler (`../firn`). Osum was split out
+of the Firn repository — the commit history in this repository is the
+real one, it begins long before the split. The kernel lived there as
+`demos/kernel/`, the libc as `lib/osum/`. What stayed in the Firn
+repository: the compiler, the standard library, the browser building
+blocks (`lib/html`, `lib/css`, `lib/js`, `lib/dom`) and the TCP/IP stack
+from round K3.
 
-| Datei | Runde |
+**OrientOS** is the operating system *around* a kernel — its own
+repository, its own acceptance suite. It has a kernel of the same name,
+but that one consists of more than 17,000 lines of Rust and is only now
+being migrated to Firn. **The kernel in this repository is the more
+developed one.** The split Justin decided on:
+
+* **Osum** = the kernel. This repository.
+* **OrientOS** = the system around it.
+
+That both were called "osum" until now is historical and is being
+resolved there, not here.
+
+---
+
+## Documentation
+
+The round reports in `docs/` were taken over from the Firn repository
+unchanged and therefore still name the old paths (`demos/kernel/`,
+`lib/osum/`). They are a record, not a manual, and are not rewritten
+after the fact.
+
+| file | round |
 |---|---|
-| `docs/ROUND52.md` | `profile kernel` — freistehend uebersetzen |
-| `docs/ROUND59.md` | der Kern: IDT, Ausnahmen, Zeitgeber, Speicher, Ring 3 |
-| `docs/ROUND62.md` | Aufgaben, Adressraeume, Systemaufrufe, Dateisystem |
-| `docs/ROUND73.md` | `std.core` — die Bibliothek ohne Allokator |
-| `docs/OSUM-K1.md` | der ELF-Lader, `exec`, `/bin/sh` von der Platte |
-| `docs/OSUM-K2.md` | PCI, APIC, NVMe ueber DMA |
-| `docs/OSUM-K3.md` | der TCP/IP-Stack (Code im Firn-Repository) |
-| `docs/ROUNDK4.md` | die POSIX-Schicht und die libc |
-| `docs/ROUNDK5.md` | vier Prozessoren und die Sperre |
-| `docs/ROUNDK6.md` | das Userland: Shell und Werkzeuge |
-| `docs/ROUNDK7.md` | der Bildschirm: Rahmenpuffer, Textkonsole, /dev/fb |
-| `docs/ROUNDK7B.md` | warum nach dem Verschmelzen die Buchstaben vom Schirm verschwanden — und die Karte von `kdata` |
-| `docs/ROUNDK8.md` | das Netz: virtio-net, der Stack aus K3, Steckdosen |
-| `docs/ROUNDK9.md` | Signale, Terminals, Uhr und Zufall |
-| `docs/ROUNDK10.md` | SMEP/SMAP und das Boot-Modul — die letzten zwei Punkte des Kernelwechsels |
-| `docs/ROUNDK11.md` | **man kann darauf arbeiten**: der Editor, zwanzig Werkzeuge, die Shell als Sprache |
-| `docs/ROUNDK10W.md` | die Oberflaeche: Maus, Fensterserver, TrueType mit Kantenglaettung |
-| `docs/ROUNDK12.md` | ein Wirt fuer fremde Prozessoren: AMD-V, verschachtelte Seitentabellen, Gaeste, Gastmaschinen aus Ring 3 |
-| `docs/ROUNDK15.md` | **Widgets, der Dateimanager und die Suche**: die Bibliothek in Ring 3, `/bin/explorer`, Programme als Bündel unter `/apps/*.prog/`, ein Namensindex über das ganze Dateisystem nach dem Vorbild von „Everything" — zehn Aufrufe im Kernel |
-| `docs/ROUNDK13.md` | **Benutzer, Rechte und `init`**: uid/gid, chmod/chown, /etc/passwd und /etc/shadow, Anmeldung, der erste Prozess |
-| `docs/ROUNDK14.md` | **VFS und fremde Dateisysteme**: die Tafel der neun Verrichtungen, /proc, /dev, FAT32 gegen `mkfs.vfat`/`mcopy`/`fsck.fat`, MBR und GPT |
-| `docs/ROUNDK16.md` | **der Uebersetzer laeuft auf dem System selbst**: `firnc` und ein Assembler in Firn auf Osum, das Ergebnis zeichengleich mit dem vom Wirt — dazu die Tabelle "Dateiart → womit oeffnen" im Kern und `#!` in `execve` |
+| `docs/ROUND52.md` | `profile kernel` — compiling freestanding |
+| `docs/ROUND59.md` | the kernel: IDT, exceptions, timer, memory, ring 3 |
+| `docs/ROUND62.md` | tasks, address spaces, system calls, file system |
+| `docs/ROUND73.md` | `std.core` — the library without an allocator |
+| `docs/OSUM-K1.md` | the ELF loader, `exec`, `/bin/sh` off the disk |
+| `docs/OSUM-K2.md` | PCI, APIC, NVMe over DMA |
+| `docs/OSUM-K3.md` | the TCP/IP stack (code in the Firn repository) |
+| `docs/ROUNDK4.md` | the POSIX layer and the libc |
+| `docs/ROUNDK5.md` | four processors and the lock |
+| `docs/ROUNDK6.md` | the userland: shell and tools |
+| `docs/ROUNDK7.md` | the screen: framebuffer, text console, /dev/fb |
+| `docs/ROUNDK7B.md` | why the letters vanished from the screen after the merge — and the map of `kdata` |
+| `docs/ROUNDK8.md` | the network: virtio-net, the stack from K3, sockets |
+| `docs/ROUNDK9.md` | signals, terminals, clock and randomness |
+| `docs/ROUNDK10.md` | SMEP/SMAP and the boot module — the last two items of the kernel switch |
+| `docs/ROUNDK11.md` | **you can work on it**: the editor, twenty tools, the shell as a language |
+| `docs/ROUNDK10W.md` | the user interface: mouse, window server, TrueType with antialiasing |
+| `docs/ROUNDK12.md` | a host for foreign processors: AMD-V, nested page tables, guests, guest machines from ring 3 |
+| `docs/ROUNDK15.md` | **widgets, the file manager and search**: the library in ring 3, `/bin/explorer`, programs as bundles under `/apps/*.prog/`, a name index across the whole file system modelled on "Everything" — ten calls in the kernel |
+| `docs/ROUNDK13.md` | **users, permissions and `init`**: uid/gid, chmod/chown, /etc/passwd and /etc/shadow, login, the first process |
+| `docs/ROUNDK14.md` | **VFS and foreign file systems**: the table of nine operations, /proc, /dev, FAT32 against `mkfs.vfat`/`mcopy`/`fsck.fat`, MBR and GPT |
+| `docs/ROUNDK16.md` | **the compiler runs on the system itself**: `firnc` and an assembler in Firn on Osum, the result character-identical with the one from the host — plus the table "file kind → what opens it" in the kernel and `#!` in `execve` |
 
-`ENTFERNEN-AUS-FIRN.md` beschreibt, was im Firn-Repository geloescht
-werden muss, damit dort nichts doppelt liegt. **Ausgefuehrt ist das
-nicht.**
+`ENTFERNEN-AUS-FIRN.md` describes what has to be deleted in the Firn
+repository so that nothing lies there twice. **That has not been carried
+out.**
 
-## Lizenz
+## License
 
-MIT, siehe `LICENSE`.
+MIT, see `LICENSE`.
