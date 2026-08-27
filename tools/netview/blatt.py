@@ -59,7 +59,7 @@ def main(argv):
     except ImportError:
         print("blatt: Pillow ist nicht da")
         return 1
-    namen = iconmod.ZUSTAENDE + iconmod.MERKMALE
+    namen = iconmod.ZUSTAENDE + iconmod.MERKMALE + iconmod.SYSTEM
     bloecke = []
     for schema in ("dark", "light"):
         farben = iconmod.SCHEMEN[schema]
