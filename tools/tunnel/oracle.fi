@@ -1,0 +1,404 @@
+// tools/tunnel/oracle.fi -- the primitives of round TUNNEL, on the HOST.
+//
+// WHY A HOSTED PROGRAM AND NOT A KERNEL RUN. The four primitives in
+// `lib/crypto/` have to be measured against the official test vectors of
+// their RFCs, and there are hundreds of them. Booting a kernel in QEMU
+// per vector would take hours and would measure QEMU. This program links
+// THE SAME FILES the kernel links, runs on Linux, reads one command per
+// line and answers one hexadecimal line -- so `tools/tunnel/vectors.py`
+// can drive as many vectors as it likes and compare against Python's own
+// `hashlib`, `cryptography` and the literal values out of the RFC text.
+//
+// It is a MEASURING INSTRUMENT, not part of the system. The same files
+// are compiled into the kernel by `tools/build-kernel.sh`; that they
+// compile in BOTH profiles is itself one of the things being checked.
+//
+// The protocol is deliberately dull:
+//
+//     blake2s <outlen> <keyhex|-> <msghex|->
+//     hmacb2s <keyhex> <msghex>
+//     chacha20 <keyhex> <noncehex> <counter> <datahex>
+//     poly1305 <keyhex> <msghex>
+//     seal <keyhex> <noncehex> <aadhex> <plainhex>
+//     open <keyhex> <noncehex> <aadhex> <cipherhex>
+//     xseal <keyhex> <nonce24hex> <aadhex> <plainhex>
+//     xopen <keyhex> <nonce24hex> <aadhex> <cipherhex>
+//     x25519 <scalarhex> <pointhex>
+//     x25519base <scalarhex>
+//     x25519iter <count> <starthex>
+//
+// Each answers with one line of lower case hexadecimal, or `FAIL` when a
+// tag does not verify or an input is refused. `-` is the empty string.
+import std.rt
+import std.io
+import crypto.blake2s
+import crypto.chacha
+import crypto.x25519
+
+const CAP: usize = 66000
+
+static mut a0: [u8; 66000] = [0; 66000]
+static mut a1: [u8; 66000] = [0; 66000]
+static mut a2: [u8; 66000] = [0; 66000]
+static mut a3: [u8; 66000] = [0; 66000]
+static mut outb: [u8; 66000] = [0; 66000]
+static mut hexb: [u8; 132100] = [0; 132100]
+
+fn hexval(c: u64) -> i64 {
+    if c >= 48 && c <= 57 {
+        return (c - 48) as i64
+    }
+    if c >= 97 && c <= 102 {
+        return (c - 87) as i64
+    }
+    if c >= 65 && c <= 70 {
+        return (c - 55) as i64
+    }
+    return -1
+}
+
+// One whitespace separated field of `line`, decoded from hex into `dst`.
+// Returns the number of octets, or -1 if the field is not hex.
+fn field_hex(line: u64, len: usize, at: *mut usize, dst: u64) -> i64 {
+    var i: usize = *at
+    while i < len && rt.ld8(line, i) == 32 as u8 {
+        i = i + 1
+    }
+    var start: usize = i
+    while i < len && rt.ld8(line, i) != 32 as u8 {
+        i = i + 1
+    }
+    *at = i
+    let n: usize = i - start
+    if n == 0 {
+        return -1
+    }
+    if n == 1 && rt.ld8(line, start) == 45 as u8 {
+        return 0 // `-` is the empty string
+    }
+    if n % 2 != 0 {
+        return -1
+    }
+    var o: usize = 0
+    while o < n / 2 {
+        let hi: i64 = hexval(rt.ld8(line, start + o * 2) as u64)
+        let lo: i64 = hexval(rt.ld8(line, start + o * 2 + 1) as u64)
+        if hi < 0 || lo < 0 {
+            return -1
+        }
+        rt.st8(dst, o, ((hi * 16 + lo) & 255) as u8)
+        o = o + 1
+    }
+    return (n / 2) as i64
+}
+
+// One whitespace separated field of `line`, read as a decimal number.
+fn field_num(line: u64, len: usize, at: *mut usize) -> i64 {
+    var i: usize = *at
+    while i < len && rt.ld8(line, i) == 32 as u8 {
+        i = i + 1
+    }
+    var start: usize = i
+    while i < len && rt.ld8(line, i) != 32 as u8 {
+        i = i + 1
+    }
+    *at = i
+    if i == start {
+        return -1
+    }
+    var v: i64 = 0
+    var o: usize = start
+    while o < i {
+        let c: u64 = rt.ld8(line, o) as u64
+        if c < 48 || c > 57 {
+            return -1
+        }
+        v = v * 10 + (c - 48) as i64
+        o = o + 1
+    }
+    return v
+}
+
+fn word_is(line: u64, len: usize, at: *mut usize, w: u64) -> bool {
+    var i: usize = *at
+    while i < len && rt.ld8(line, i) == 32 as u8 {
+        i = i + 1
+    }
+    var start: usize = i
+    while i < len && rt.ld8(line, i) != 32 as u8 {
+        i = i + 1
+    }
+    let n: usize = i - start
+    if rt.c_length(w) != n {
+        return false
+    }
+    var o: usize = 0
+    while o < n {
+        if rt.ld8(line, start + o) != rt.ld8(w, o) {
+            return false
+        }
+        o = o + 1
+    }
+    *at = i
+    return true
+}
+
+fn emit(p: u64, n: usize) {
+    let h: u64 = (&hexb[0]) as u64
+    var i: usize = 0
+    let d: [u8; 16] = [48, 49, 50, 51, 52, 53, 54, 55,
+        56, 57, 97, 98, 99, 100, 101, 102]
+    while i < n {
+        let v: u64 = rt.ld8(p, i) as u64
+        rt.st8(h, i * 2, d[(v >> 4) as usize])
+        rt.st8(h, i * 2 + 1, d[(v & 15) as usize])
+        i = i + 1
+    }
+    if n == 0 {
+        rt.st8(h, 0, 45 as u8)
+        io.print_line_bytes(h, 1)
+        return
+    }
+    io.print_line_bytes(h, n * 2)
+}
+
+fn fail() {
+    var m: [u8; 4] = [70, 65, 73, 76]
+    io.print_line_bytes((&m[0]) as u64, 4)
+}
+
+fn run_line(line: u64, len: usize) {
+    var at: usize = 0
+    let p0: u64 = (&a0[0]) as u64
+    let p1: u64 = (&a1[0]) as u64
+    let p2: u64 = (&a2[0]) as u64
+    let p3: u64 = (&a3[0]) as u64
+    let po: u64 = (&outb[0]) as u64
+
+    var w: [u8; 16] = [0; 16]
+    // ---------------------------------------------------------- blake2s
+    var n0: [u8; 8] = [98, 108, 97, 107, 101, 50, 115, 0] // "blake2s"
+    if word_is(line, len, &at, (&n0[0]) as u64) {
+        let ol: i64 = field_num(line, len, &at)
+        let kl: i64 = field_hex(line, len, &at, p0)
+        let ml: i64 = field_hex(line, len, &at, p1)
+        if ol < 1 || kl < 0 || ml < 0 {
+            fail()
+            return
+        }
+        if !blake2s.blake2s_keyed(p0, kl as usize, p1, ml as usize,
+            po, ol as usize) {
+            fail()
+            return
+        }
+        emit(po, ol as usize)
+        return
+    }
+    // ---------------------------------------------------------- hmacb2s
+    var n1: [u8; 8] = [104, 109, 97, 99, 98, 50, 115, 0] // "hmacb2s"
+    if word_is(line, len, &at, (&n1[0]) as u64) {
+        let kl: i64 = field_hex(line, len, &at, p0)
+        let ml: i64 = field_hex(line, len, &at, p1)
+        if kl < 0 || ml < 0 {
+            fail()
+            return
+        }
+        if !blake2s.hmac_blake2s(p0, kl as usize, p1, ml as usize, po) {
+            fail()
+            return
+        }
+        emit(po, 32)
+        return
+    }
+    // --------------------------------------------------------- chacha20
+    var n2: [u8; 9] = [99, 104, 97, 99, 104, 97, 50, 48, 0] // "chacha20"
+    if word_is(line, len, &at, (&n2[0]) as u64) {
+        let kl: i64 = field_hex(line, len, &at, p0)
+        let nl: i64 = field_hex(line, len, &at, p1)
+        let ctr: i64 = field_num(line, len, &at)
+        let dl: i64 = field_hex(line, len, &at, p2)
+        if kl != 32 || nl != 12 || ctr < 0 || dl < 0 {
+            fail()
+            return
+        }
+        chacha.chacha20(p0, p1, ctr as u32, p2, dl as usize, po)
+        emit(po, dl as usize)
+        return
+    }
+    // --------------------------------------------------------- poly1305
+    var n3: [u8; 9] = [112, 111, 108, 121, 49, 51, 48, 53, 0] // "poly1305"
+    if word_is(line, len, &at, (&n3[0]) as u64) {
+        let kl: i64 = field_hex(line, len, &at, p0)
+        let ml: i64 = field_hex(line, len, &at, p1)
+        if kl != 32 || ml < 0 {
+            fail()
+            return
+        }
+        chacha.poly1305(p0, p1, ml as usize, po)
+        emit(po, 16)
+        return
+    }
+    // ------------------------------------------------------------- seal
+    var n4: [u8; 5] = [115, 101, 97, 108, 0] // "seal"
+    if word_is(line, len, &at, (&n4[0]) as u64) {
+        let kl: i64 = field_hex(line, len, &at, p0)
+        let nl: i64 = field_hex(line, len, &at, p1)
+        let al: i64 = field_hex(line, len, &at, p2)
+        let pl: i64 = field_hex(line, len, &at, p3)
+        if kl != 32 || nl != 12 || al < 0 || pl < 0 {
+            fail()
+            return
+        }
+        chacha.aead_seal(p0, p1, p2, al as usize, p3, pl as usize, po)
+        emit(po, (pl as usize) + 16)
+        return
+    }
+    // ------------------------------------------------------------- open
+    var n5: [u8; 5] = [111, 112, 101, 110, 0] // "open"
+    if word_is(line, len, &at, (&n5[0]) as u64) {
+        let kl: i64 = field_hex(line, len, &at, p0)
+        let nl: i64 = field_hex(line, len, &at, p1)
+        let al: i64 = field_hex(line, len, &at, p2)
+        let cl: i64 = field_hex(line, len, &at, p3)
+        if kl != 32 || nl != 12 || al < 0 || cl < 16 {
+            fail()
+            return
+        }
+        if !chacha.aead_open(p0, p1, p2, al as usize, p3, cl as usize, po) {
+            fail()
+            return
+        }
+        emit(po, (cl as usize) - 16)
+        return
+    }
+    // ------------------------------------------------------------ xseal
+    var n6: [u8; 6] = [120, 115, 101, 97, 108, 0] // "xseal"
+    if word_is(line, len, &at, (&n6[0]) as u64) {
+        let kl: i64 = field_hex(line, len, &at, p0)
+        let nl: i64 = field_hex(line, len, &at, p1)
+        let al: i64 = field_hex(line, len, &at, p2)
+        let pl: i64 = field_hex(line, len, &at, p3)
+        if kl != 32 || nl != 24 || al < 0 || pl < 0 {
+            fail()
+            return
+        }
+        chacha.xaead_seal(p0, p1, p2, al as usize, p3, pl as usize, po)
+        emit(po, (pl as usize) + 16)
+        return
+    }
+    // ------------------------------------------------------------ xopen
+    var n7: [u8; 6] = [120, 111, 112, 101, 110, 0] // "xopen"
+    if word_is(line, len, &at, (&n7[0]) as u64) {
+        let kl: i64 = field_hex(line, len, &at, p0)
+        let nl: i64 = field_hex(line, len, &at, p1)
+        let al: i64 = field_hex(line, len, &at, p2)
+        let cl: i64 = field_hex(line, len, &at, p3)
+        if kl != 32 || nl != 24 || al < 0 || cl < 16 {
+            fail()
+            return
+        }
+        if !chacha.xaead_open(p0, p1, p2, al as usize, p3, cl as usize, po) {
+            fail()
+            return
+        }
+        emit(po, (cl as usize) - 16)
+        return
+    }
+    // ------------------------------------------------------- x25519iter
+    var n8: [u8; 11] = [120, 50, 53, 53, 49, 57, 105, 116, 101, 114, 0]
+    if word_is(line, len, &at, (&n8[0]) as u64) {
+        let cnt: i64 = field_num(line, len, &at)
+        let sl: i64 = field_hex(line, len, &at, p0)
+        if cnt < 1 || sl != 32 {
+            fail()
+            return
+        }
+        // The iterated test of RFC 7748 5.2: k and u start equal, then
+        // k' = X25519(k, u), u' = k. One thousand and one million rounds
+        // are the two published checkpoints.
+        var k: [u8; 32] = [0; 32]
+        var u: [u8; 32] = [0; 32]
+        var t: [u8; 32] = [0; 32]
+        var i: usize = 0
+        while i < 32 {
+            k[i] = rt.ld8(p0, i)
+            u[i] = rt.ld8(p0, i)
+            i = i + 1
+        }
+        var r: i64 = 0
+        while r < cnt {
+            if !x25519.x25519((&k[0]) as u64, (&u[0]) as u64,
+                (&t[0]) as u64) {
+                fail()
+                return
+            }
+            i = 0
+            while i < 32 {
+                u[i] = k[i]
+                k[i] = t[i]
+                i = i + 1
+            }
+            r = r + 1
+        }
+        emit((&k[0]) as u64, 32)
+        return
+    }
+    // ------------------------------------------------------- x25519base
+    var n9: [u8; 11] = [120, 50, 53, 53, 49, 57, 98, 97, 115, 101, 0]
+    if word_is(line, len, &at, (&n9[0]) as u64) {
+        let sl: i64 = field_hex(line, len, &at, p0)
+        if sl != 32 {
+            fail()
+            return
+        }
+        if !x25519.x25519_base(p0, po) {
+            fail()
+            return
+        }
+        emit(po, 32)
+        return
+    }
+    // ----------------------------------------------------------- x25519
+    var na: [u8; 7] = [120, 50, 53, 53, 49, 57, 0]
+    if word_is(line, len, &at, (&na[0]) as u64) {
+        let sl: i64 = field_hex(line, len, &at, p0)
+        let ul: i64 = field_hex(line, len, &at, p1)
+        if sl != 32 || ul != 32 {
+            fail()
+            return
+        }
+        if !x25519.x25519(p0, p1, po) {
+            fail()
+            return
+        }
+        emit(po, 32)
+        return
+    }
+    fail()
+}
+
+fn main() -> i32 {
+    var inp: rt.Buf = rt.buf_new()
+    if !rt.read_stdin(&inp) {
+        return 1
+    }
+    let p: u64 = rt.buf_ptr(&inp)
+    let n: usize = rt.buf_len(&inp)
+    var at: usize = 0
+    while at < n {
+        var e: usize = at
+        while e < n && rt.ld8(p, e) != 10 as u8 {
+            e = e + 1
+        }
+        var len: usize = e - at
+        while len > 0 && rt.ld8(p, at + len - 1) == 13 as u8 {
+            len = len - 1
+        }
+        if len > 0 {
+            run_line(p + at as u64, len)
+        }
+        at = e + 1
+    }
+    rt.buf_free(&inp)
+    return 0
+}

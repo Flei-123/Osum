@@ -1,0 +1,705 @@
+// tools/tunnel/peer.fi -- `lib/wg/proto.fi` on the HOST, against real wg.
+//
+// THE ONLY MEASUREMENT THAT COUNTS. A protocol implementation that has
+// only ever talked to itself proves nothing: two ends written from the
+// same misunderstanding agree perfectly. So the file the kernel compiles
+// is also driven, unchanged, against the WireGuard implementation in the
+// LINUX KERNEL -- `wg` on a veth pair in a network namespace, set up by
+// `tools/tunnel/run.sh`.
+//
+// The division of labour is deliberate. THIS program is the protocol and
+// nothing else; the UDP socket, the namespace and the timing belong to
+// `tools/tunnel/run.sh` and its Python. One command per line in, one line
+// of hexadecimal out:
+//
+//     init <priv64hex>                     -> our public key
+//     peer <pub64hex> [<psk64hex>]         -> peer index
+//     allow <pi> <ip> <prefix>             -> ok
+//     endpoint <pi> <ip> <port>            -> ok
+//     keepalive <pi> <seconds>             -> ok
+//     awg <jc> <jmin> <jmax> <s1> <s2> <h1> <h2> <h3> <h4>  -> ok|no
+//     handshake <pi> <rnd64hex> <unixs> <nanos> <now>       -> packet
+//     recv <packethex> <now> <rnd64hex>    -> what it was, and any reply
+//     send <pi> <plainhex> <now>           -> packet
+//     route <ip>                           -> peer index or -1
+//     srcok <pi> <ip>                      -> 1|0
+//     established <pi> <now>               -> 1|0
+//     stat <which>                         -> a number
+//     rx <pi> / tx <pi>                    -> a number
+//
+// `recv` answers with one of
+//
+//     init <pi> <responsehex>     an initiation arrived and was answered
+//     resp <pi>                   our initiation was answered; keys are up
+//     data <pi> <plainhex>        a transport packet, decrypted
+//     keepalive <pi>              a transport packet with no payload
+//     cookie <pi>                 a cookie reply, stored
+//     none                        nothing usable
+import std.rt
+import std.io
+import wg.proto
+import crypto.chacha
+
+const CAP: usize = 20000
+
+static mut dev: [u8; 13000] = [0; 13000]
+static mut dev2: [u8; 13000] = [0; 13000]
+static mut which: usize = 0
+static mut a0: [u8; 20000] = [0; 20000]
+static mut a1: [u8; 20000] = [0; 20000]
+static mut outb: [u8; 20000] = [0; 20000]
+static mut hexb: [u8; 44000] = [0; 44000]
+
+fn hexval(c: u64) -> i64 {
+    if c >= 48 && c <= 57 {
+        return (c - 48) as i64
+    }
+    if c >= 97 && c <= 102 {
+        return (c - 87) as i64
+    }
+    if c >= 65 && c <= 70 {
+        return (c - 55) as i64
+    }
+    return -1
+}
+
+fn field_hex(line: u64, len: usize, at: *mut usize, dst: u64) -> i64 {
+    var i: usize = *at
+    while i < len && rt.ld8(line, i) == 32 as u8 {
+        i = i + 1
+    }
+    var start: usize = i
+    while i < len && rt.ld8(line, i) != 32 as u8 {
+        i = i + 1
+    }
+    *at = i
+    let n: usize = i - start
+    if n == 0 {
+        return -1
+    }
+    if n == 1 && rt.ld8(line, start) == 45 as u8 {
+        return 0
+    }
+    if n % 2 != 0 {
+        return -1
+    }
+    var o: usize = 0
+    while o < n / 2 {
+        let hi: i64 = hexval(rt.ld8(line, start + o * 2) as u64)
+        let lo: i64 = hexval(rt.ld8(line, start + o * 2 + 1) as u64)
+        if hi < 0 || lo < 0 {
+            return -1
+        }
+        rt.st8(dst, o, ((hi * 16 + lo) & 255) as u8)
+        o = o + 1
+    }
+    return (n / 2) as i64
+}
+
+fn field_num(line: u64, len: usize, at: *mut usize) -> i64 {
+    var i: usize = *at
+    while i < len && rt.ld8(line, i) == 32 as u8 {
+        i = i + 1
+    }
+    var start: usize = i
+    while i < len && rt.ld8(line, i) != 32 as u8 {
+        i = i + 1
+    }
+    *at = i
+    if i == start {
+        return -1
+    }
+    var v: i64 = 0
+    var o: usize = start
+    while o < i {
+        let c: u64 = rt.ld8(line, o) as u64
+        if c < 48 || c > 57 {
+            return -1
+        }
+        v = v * 10 + (c - 48) as i64
+        o = o + 1
+    }
+    return v
+}
+
+fn word_is(line: u64, len: usize, at: *mut usize, w: u64) -> bool {
+    var i: usize = *at
+    while i < len && rt.ld8(line, i) == 32 as u8 {
+        i = i + 1
+    }
+    var start: usize = i
+    while i < len && rt.ld8(line, i) != 32 as u8 {
+        i = i + 1
+    }
+    let n: usize = i - start
+    if rt.c_length(w) != n {
+        return false
+    }
+    var o: usize = 0
+    while o < n {
+        if rt.ld8(line, start + o) != rt.ld8(w, o) {
+            return false
+        }
+        o = o + 1
+    }
+    *at = i
+    return true
+}
+
+// Writes hex of `p[0..n]` into `hexb` at `at`, returns the new position.
+fn hexinto(at: usize, p: u64, n: usize) -> usize {
+    let d: [u8; 16] = [48, 49, 50, 51, 52, 53, 54, 55,
+        56, 57, 97, 98, 99, 100, 101, 102]
+    let hp: u64 = (&hexb[0]) as u64
+    if n == 0 {
+        rt.st8(hp, at, 45 as u8)
+        return at + 1
+    }
+    var i: usize = 0
+    while i < n {
+        let v: u64 = rt.ld8(p, i) as u64
+        rt.st8(hp, at + i * 2, d[(v >> 4) as usize])
+        rt.st8(hp, at + i * 2 + 1, d[(v & 15) as usize])
+        i = i + 1
+    }
+    return at + n * 2
+}
+
+fn numinto(at: usize, v: i64) -> usize {
+    let hp: u64 = (&hexb[0]) as u64
+    var d: [u8; 24] = [0; 24]
+    var n: usize = 0
+    var neg: bool = false
+    var x: u64 = 0
+    if v < 0 {
+        neg = true
+        x = (0 - v) as u64
+    } else {
+        x = v as u64
+    }
+    if x == 0 {
+        d[0] = 48
+        n = 1
+    }
+    while x > 0 {
+        d[n] = (48 + (x % 10)) as u8
+        x = x / 10
+        n = n + 1
+    }
+    var w: usize = at
+    if neg {
+        rt.st8(hp, w, 45 as u8)
+        w = w + 1
+    }
+    var i: usize = 0
+    while i < n {
+        rt.st8(hp, w, d[n - 1 - i])
+        w = w + 1
+        i = i + 1
+    }
+    return w
+}
+
+fn textinto(at: usize, t: u64) -> usize {
+    let hp: u64 = (&hexb[0]) as u64
+    let n: usize = rt.c_length(t)
+    var i: usize = 0
+    while i < n {
+        rt.st8(hp, at + i, rt.ld8(t, i))
+        i = i + 1
+    }
+    return at + n
+}
+
+fn spaceat(at: usize) -> usize {
+    rt.st8((&hexb[0]) as u64, at, 32 as u8)
+    return at + 1
+}
+
+fn emit(n: usize) {
+    io.print_line_bytes((&hexb[0]) as u64, n)
+}
+
+fn say_num(v: i64) {
+    emit(numinto(0, v))
+}
+
+fn say_hex(p: u64, n: usize) {
+    emit(hexinto(0, p, n))
+}
+
+fn say_word(t: u64) {
+    emit(textinto(0, t))
+}
+
+fn run_line(line: u64, len: usize) {
+    var at: usize = 0
+    var d: u64 = (&dev[0]) as u64
+    if which != 0 {
+        d = (&dev2[0]) as u64
+    }
+    let p0: u64 = (&a0[0]) as u64
+    let p1: u64 = (&a1[0]) as u64
+    let po: u64 = (&outb[0]) as u64
+    var ok: [u8; 3] = [111, 107, 0]
+    var no: [u8; 3] = [110, 111, 0]
+
+    var wsel: [u8; 4] = [117, 115, 101, 0] // use
+    if word_is(line, len, &at, (&wsel[0]) as u64) {
+        let i: i64 = field_num(line, len, &at)
+        if i < 0 || i > 1 {
+            say_word((&no[0]) as u64)
+            return
+        }
+        which = i as usize
+        say_word((&ok[0]) as u64)
+        return
+    }
+    var wck: [u8; 7] = [99, 111, 111, 107, 105, 101, 0] // cookie
+    if word_is(line, len, &at, (&wck[0]) as u64) {
+        // Build a cookie reply for the last message this peer sent us --
+        // the path a responder under load takes instead of doing a
+        // Curve25519 operation for an address it cannot vouch for.
+        let pi: i64 = field_num(line, len, &at)
+        let ip: i64 = field_num(line, len, &at)
+        let pt: i64 = field_num(line, len, &at)
+        let m1: i64 = field_hex(line, len, &at, p1)
+        let rn: i64 = field_hex(line, len, &at, p0)
+        let ridx: i64 = field_num(line, len, &at)
+        let now: i64 = field_num(line, len, &at)
+        if pi < 0 || m1 != 16 || rn < 64 || ridx < 0 || now < 0 {
+            say_word((&no[0]) as u64)
+            return
+        }
+        let n: u64 = proto.make_cookie_reply(d, ridx as u64, ip as u64,
+            pt as u64, p1, p0, now as u64, po)
+        say_hex(po, n as usize)
+        return
+    }
+    var w: [u8; 5] = [105, 110, 105, 116, 0] // init
+    if word_is(line, len, &at, (&w[0]) as u64) {
+        let n: i64 = field_hex(line, len, &at, p0)
+        if n != 32 {
+            say_word((&no[0]) as u64)
+            return
+        }
+        proto.dev_init(d)
+        if !proto.dev_set_private(d, p0) {
+            say_word((&no[0]) as u64)
+            return
+        }
+        proto.dev_set_up(d, true)
+        say_hex(proto.dev_public(d), 32)
+        return
+    }
+    var w2: [u8; 5] = [112, 101, 101, 114, 0] // peer
+    if word_is(line, len, &at, (&w2[0]) as u64) {
+        let n: i64 = field_hex(line, len, &at, p0)
+        if n != 32 {
+            say_num(-1)
+            return
+        }
+        let pi: i64 = proto.peer_add(d, p0)
+        if pi >= 0 {
+            let k: i64 = field_hex(line, len, &at, p1)
+            if k == 32 {
+                proto.peer_set_psk(d, pi as u64, p1)
+            }
+        }
+        say_num(pi)
+        return
+    }
+    var w3: [u8; 6] = [97, 108, 108, 111, 119, 0] // allow
+    if word_is(line, len, &at, (&w3[0]) as u64) {
+        let pi: i64 = field_num(line, len, &at)
+        let ip: i64 = field_num(line, len, &at)
+        let pr: i64 = field_num(line, len, &at)
+        if pi < 0 || ip < 0 || pr < 0
+            || !proto.peer_allow(d, pi as u64, ip as u64, pr as u64) {
+            say_word((&no[0]) as u64)
+            return
+        }
+        say_word((&ok[0]) as u64)
+        return
+    }
+    var w4: [u8; 9] = [101, 110, 100, 112, 111, 105, 110, 116, 0]
+    if word_is(line, len, &at, (&w4[0]) as u64) {
+        let pi: i64 = field_num(line, len, &at)
+        let ip: i64 = field_num(line, len, &at)
+        let pt: i64 = field_num(line, len, &at)
+        if pi < 0 || ip < 0 || pt < 0 {
+            say_word((&no[0]) as u64)
+            return
+        }
+        proto.peer_set_endpoint(d, pi as u64, ip as u64, pt as u64)
+        say_word((&ok[0]) as u64)
+        return
+    }
+    var w5: [u8; 10] = [107, 101, 101, 112, 97, 108, 105, 118, 101, 0]
+    if word_is(line, len, &at, (&w5[0]) as u64) {
+        let pi: i64 = field_num(line, len, &at)
+        let s: i64 = field_num(line, len, &at)
+        if pi < 0 || s < 0 {
+            say_word((&no[0]) as u64)
+            return
+        }
+        proto.peer_set_keepalive(d, pi as u64, s as u64)
+        say_word((&ok[0]) as u64)
+        return
+    }
+    var w6: [u8; 4] = [97, 119, 103, 0] // awg
+    if word_is(line, len, &at, (&w6[0]) as u64) {
+        var v: [i64; 9] = [0; 9]
+        var i: usize = 0
+        while i < 9 {
+            v[i] = field_num(line, len, &at)
+            if v[i] < 0 {
+                say_word((&no[0]) as u64)
+                return
+            }
+            i = i + 1
+        }
+        if !proto.awg_set(d, v[0] as u64, v[1] as u64, v[2] as u64,
+            v[3] as u64, v[4] as u64, v[5] as u64, v[6] as u64,
+            v[7] as u64, v[8] as u64) {
+            say_word((&no[0]) as u64)
+            return
+        }
+        say_word((&ok[0]) as u64)
+        return
+    }
+    var w7: [u8; 10] = [104, 97, 110, 100, 115, 104, 97, 107, 101, 0]
+    if word_is(line, len, &at, (&w7[0]) as u64) {
+        let pi: i64 = field_num(line, len, &at)
+        let rn: i64 = field_hex(line, len, &at, p0)
+        let us: i64 = field_num(line, len, &at)
+        let ns: i64 = field_num(line, len, &at)
+        let now: i64 = field_num(line, len, &at)
+        if pi < 0 || rn < 64 || us < 0 || ns < 0 || now < 0 {
+            say_word((&no[0]) as u64)
+            return
+        }
+        let n: u64 = proto.make_initiation(d, pi as u64, po, p0,
+            us as u64, ns as u64, now as u64)
+        if n == 0 {
+            say_word((&no[0]) as u64)
+            return
+        }
+        say_hex(po, n as usize)
+        return
+    }
+    var w8: [u8; 5] = [115, 101, 110, 100, 0] // send
+    if word_is(line, len, &at, (&w8[0]) as u64) {
+        let pi: i64 = field_num(line, len, &at)
+        let pl: i64 = field_hex(line, len, &at, p0)
+        let now: i64 = field_num(line, len, &at)
+        if pi < 0 || pl < 0 || now < 0 {
+            say_word((&no[0]) as u64)
+            return
+        }
+        let n: u64 = proto.encap(d, pi as u64, p0, pl as u64, po,
+            CAP as u64, now as u64)
+        if n == 0 {
+            say_word((&no[0]) as u64)
+            return
+        }
+        say_hex(po, n as usize)
+        return
+    }
+    var w9: [u8; 5] = [114, 101, 99, 118, 0] // recv
+    if word_is(line, len, &at, (&w9[0]) as u64) {
+        let pl: i64 = field_hex(line, len, &at, p0)
+        let now: i64 = field_num(line, len, &at)
+        let rn: i64 = field_hex(line, len, &at, p1)
+        if pl < 4 || now < 0 {
+            say_word_none()
+            return
+        }
+        var off: u64 = 0
+        let kind: u64 = proto.message_kind(d, p0, pl as u64, &off)
+        if kind == proto.KIND_INIT {
+            let pi: i64 = proto.consume_initiation(d, p0, pl as u64, off,
+                now as u64)
+            if pi < 0 {
+                say_word_none()
+                return
+            }
+            if rn < 64 {
+                say_word_none()
+                return
+            }
+            let n: u64 = proto.make_response(d, pi as u64, po, p1,
+                now as u64)
+            if n == 0 {
+                say_word_none()
+                return
+            }
+            var t: [u8; 5] = [105, 110, 105, 116, 0]
+            var a: usize = textinto(0, (&t[0]) as u64)
+            a = spaceat(a)
+            a = numinto(a, pi)
+            a = spaceat(a)
+            a = hexinto(a, po, n as usize)
+            emit(a)
+            return
+        }
+        if kind == proto.KIND_RESP {
+            let pi: i64 = proto.consume_response(d, p0, pl as u64, off,
+                now as u64)
+            if pi < 0 {
+                say_word_none()
+                return
+            }
+            var t: [u8; 5] = [114, 101, 115, 112, 0]
+            var a: usize = textinto(0, (&t[0]) as u64)
+            a = spaceat(a)
+            a = numinto(a, pi)
+            emit(a)
+            return
+        }
+        if kind == proto.KIND_COOKIE {
+            let pi: i64 = proto.consume_cookie(d, p0, pl as u64,
+                now as u64)
+            if pi < 0 {
+                say_word_none()
+                return
+            }
+            var t: [u8; 7] = [99, 111, 111, 107, 105, 101, 0]
+            var a: usize = textinto(0, (&t[0]) as u64)
+            a = spaceat(a)
+            a = numinto(a, pi)
+            emit(a)
+            return
+        }
+        if kind == proto.KIND_DATA {
+            var pi: u64 = 0
+            let r: i64 = proto.decap(d, p0, pl as u64, po, now as u64, &pi)
+            if r < 0 {
+                say_word_none()
+                return
+            }
+            if r == 0 {
+                var t: [u8; 10] = [107, 101, 101, 112, 97, 108, 105, 118,
+                    101, 0]
+                var a: usize = textinto(0, (&t[0]) as u64)
+                a = spaceat(a)
+                a = numinto(a, pi as i64)
+                emit(a)
+                return
+            }
+            var t: [u8; 5] = [100, 97, 116, 97, 0]
+            var a: usize = textinto(0, (&t[0]) as u64)
+            a = spaceat(a)
+            a = numinto(a, pi as i64)
+            a = spaceat(a)
+            a = hexinto(a, po, r as usize)
+            emit(a)
+            return
+        }
+        say_word_none()
+        return
+    }
+    var wa: [u8; 6] = [114, 111, 117, 116, 101, 0] // route
+    if word_is(line, len, &at, (&wa[0]) as u64) {
+        let ip: i64 = field_num(line, len, &at)
+        if ip < 0 {
+            say_num(-1)
+            return
+        }
+        say_num(proto.route(d, ip as u64))
+        return
+    }
+    var wb: [u8; 6] = [115, 114, 99, 111, 107, 0] // srcok
+    if word_is(line, len, &at, (&wb[0]) as u64) {
+        let pi: i64 = field_num(line, len, &at)
+        let ip: i64 = field_num(line, len, &at)
+        if pi < 0 || ip < 0 {
+            say_num(0)
+            return
+        }
+        if proto.source_ok(d, pi as u64, ip as u64) {
+            say_num(1)
+        } else {
+            say_num(0)
+        }
+        return
+    }
+    var wc: [u8; 12] = [101, 115, 116, 97, 98, 108, 105, 115, 104, 101,
+        100, 0]
+    if word_is(line, len, &at, (&wc[0]) as u64) {
+        let pi: i64 = field_num(line, len, &at)
+        let now: i64 = field_num(line, len, &at)
+        if pi < 0 || now < 0 {
+            say_num(0)
+            return
+        }
+        if proto.peer_established(d, pi as u64, now as u64) {
+            say_num(1)
+        } else {
+            say_num(0)
+        }
+        return
+    }
+    var wd: [u8; 5] = [115, 116, 97, 116, 0] // stat
+    if word_is(line, len, &at, (&wd[0]) as u64) {
+        let i: i64 = field_num(line, len, &at)
+        if i < 0 {
+            say_num(0)
+            return
+        }
+        say_num(proto.dev_stat(d, i as u64) as i64)
+        return
+    }
+    var wg: [u8; 10] = [98, 101, 110, 99, 104, 97, 101, 100, 0, 0] // benchaed
+    if word_is(line, len, &at, (&wg[0]) as u64) {
+        let nb: i64 = field_num(line, len, &at)
+        let ct: i64 = field_num(line, len, &at)
+        if nb < 1 || ct < 1 {
+            say_num(-1)
+            return
+        }
+        bench_aead(nb as u64, ct as u64)
+        return
+    }
+    var we: [u8; 3] = [114, 120, 0] // rx
+    if word_is(line, len, &at, (&we[0]) as u64) {
+        let i: i64 = field_num(line, len, &at)
+        say_num(proto.peer_rx(d, i as u64) as i64)
+        return
+    }
+    var wf: [u8; 3] = [116, 120, 0] // tx
+    if word_is(line, len, &at, (&wf[0]) as u64) {
+        let i: i64 = field_num(line, len, &at)
+        say_num(proto.peer_tx(d, i as u64) as i64)
+        return
+    }
+    say_word((&no[0]) as u64)
+}
+
+// The inner loop of a tunnel, timed. `encap` and `decap` are a header,
+// a table lookup and one AEAD call; the AEAD is where the time goes, so
+// that is what is measured -- over the payload size a real tunnel
+// carries. This is a number about THIS CODE on THIS machine, with no
+// socket, no pipe and no Python in it.
+fn now_ns() -> u64 {
+    var ts: [u64; 2] = [0; 2]
+    syscall(228, 1, (&ts[0]) as i64, 0, 0, 0, 0)
+    return ts[0] * 1000000000 + ts[1]
+}
+
+fn bench_aead(nbytes: u64, count: u64) {
+    var key: [u8; 32] = [0; 32]
+    var nonce: [u8; 12] = [0; 12]
+    var i: u64 = 0
+    while i < 32 {
+        key[i as usize] = (i * 7 + 3) as u8
+        i = i + 1
+    }
+    let src: u64 = (&a0[0]) as u64
+    let dst: u64 = (&outb[0]) as u64
+    i = 0
+    while i < nbytes {
+        rt.st8(src, i as usize, ((i * 11 + 5) & 255) as u8)
+        i = i + 1
+    }
+    let np: u64 = (&nonce[0]) as u64
+    let t0: u64 = now_ns()
+    i = 0
+    while i < count {
+        proto_le64(np, 4, i)
+        chacha.aead_seal((&key[0]) as u64, np, 0, 0, src,
+            nbytes as usize, dst)
+        i = i + 1
+    }
+    let t1: u64 = now_ns()
+    var opened: u64 = 0
+    i = 0
+    while i < count {
+        proto_le64(np, 4, count - 1)
+        if chacha.aead_open((&key[0]) as u64, np, 0, 0, dst,
+            (nbytes + 16) as usize, src) {
+            opened = opened + 1
+        }
+        i = i + 1
+    }
+    let t2: u64 = now_ns()
+    var a: usize = numinto(0, (t1 - t0) as i64)
+    a = spaceat(a)
+    a = numinto(a, (t2 - t1) as i64)
+    a = spaceat(a)
+    a = numinto(a, opened as i64)
+    emit(a)
+}
+
+fn proto_le64(p: u64, off: u64, v: u64) {
+    var i: u64 = 0
+    while i < 8 {
+        rt.st8(p, (off + i) as usize, ((v >> (i * 8)) & 255) as u8)
+        i = i + 1
+    }
+}
+
+fn say_word_none() {
+    var t: [u8; 5] = [110, 111, 110, 101, 0]
+    say_word((&t[0]) as u64)
+}
+
+// A buffered line reader over `read`. One octet per system call would
+// make the harness, not the protocol, the thing being measured.
+static mut inbuf: [u8; 65536] = [0; 65536]
+static mut linebuf: [u8; 44000] = [0; 44000]
+static mut in_len: usize = 0
+static mut in_pos: usize = 0
+static mut in_eof: usize = 0
+
+fn refill() -> bool {
+    if in_eof != 0 {
+        return false
+    }
+    let got: i64 = syscall(0, 0, (&inbuf[0]) as i64, 65536, 0, 0, 0)
+    if got <= 0 {
+        in_eof = 1
+        return false
+    }
+    in_len = got as usize
+    in_pos = 0
+    return true
+}
+
+fn next_line(n: *mut usize) -> bool {
+    var w: usize = 0
+    var any: bool = false
+    var going: bool = true
+    while going {
+        if in_pos >= in_len {
+            if !refill() {
+                going = false
+            }
+        }
+        if going {
+            let c: u8 = inbuf[in_pos]
+            in_pos = in_pos + 1
+            any = true
+            if c == 10 as u8 {
+                going = false
+            } else if c != 13 as u8 {
+                if w < 44000 {
+                    linebuf[w] = c
+                    w = w + 1
+                }
+            }
+        }
+    }
+    *n = w
+    return any
+}
+
+fn main() -> i32 {
+    var n: usize = 0
+    while next_line(&n) {
+        if n > 0 {
+            run_line((&linebuf[0]) as u64, n)
+        }
+    }
+    return 0
+}

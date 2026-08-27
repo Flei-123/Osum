@@ -1,0 +1,1202 @@
+// kernel/wg.fi -- the tunnel as a network interface, round TUNNEL.
+//
+// `lib/wg/proto.fi` is the WireGuard protocol and knows nothing about
+// Osum. THIS file is the other half: it owns the memory the protocol
+// lives in, it owns the packets, and it is the one place in the system
+// that decides whether a frame goes out in the clear, goes out encrypted,
+// or does not go out at all.
+//
+// ===================================================== WHY IT IS IN RING 0
+//
+// The round's rule was that the GUI belongs in `kernel/user/` and the
+// protocol and crypto belong "where they belong". Three reasons put this
+// half in the kernel:
+//
+//   1. THE PRIVATE KEY. If a ring 3 process held it, every process with
+//      the same uid could read it out of `/proc` or out of a core file.
+//      In here it is in kernel memory, which SMEP and SMAP (round K10)
+//      already keep ring 3 out of.
+//   2. THE KILL SWITCH IS ONLY REAL AT THE BOTTOM. A kill switch a
+//      program can route around is a decoration. The only point where
+//      NOTHING can get past it is between `stack.net_output` and
+//      `virtio.tx_frame`, and that point is in `kernel/inet.fi`. See
+//      `tx_hook` below.
+//   3. TRANSPARENCY. A tunnel is worth having because programs do not
+//      have to know about it. `wget` and `ping` and a browser go through
+//      it without a line of change, and that can only be arranged
+//      underneath them.
+//
+// ==================================================== HOW IT SITS IN pump
+//
+// `kernel/inet.fi` has exactly one loop that touches the wire, and this
+// file adds exactly two calls to it -- one on each side:
+//
+//   INBOUND, before `stack.net_input`:
+//       `rx_hook` looks at the frame. If it is a UDP datagram addressed
+//       to the tunnel's port, it is OURS: the payload is a WireGuard
+//       message. A transport packet is decrypted, the inner IP packet
+//       gets a synthetic Ethernet header and goes into `net_input` as if
+//       it had arrived from the wire -- which, from the stack's point of
+//       view, is exactly what happened. A handshake message is answered
+//       here and never reaches the stack at all. The hook returns true
+//       and `pump` skips the frame.
+//
+//   OUTBOUND, after `stack.net_output` and before `virtio.tx_frame`:
+//       `tx_hook` looks at the frame the stack wants to send.
+//         * Not IPv4, or addressed to the peer's own endpoint -> let it
+//           go. The tunnel's own datagrams must not be tunnelled.
+//         * Destination inside a peer's AllowedIPs -> strip the Ethernet
+//           header, encrypt the IP packet, hand the result to
+//           `stack.udp_send` for the endpoint. The original frame is
+//           DROPPED; the encrypted datagram comes out of a later turn of
+//           the same loop.
+//         * Otherwise -> the kill switch decides (below).
+//
+// ======================================================== THE KILL SWITCH
+//
+// This is the feature VPN implementations usually get wrong, and the
+// failure is silent: the tunnel drops, the operating system falls back to
+// the ordinary route, and traffic that was supposed to be inside the
+// tunnel goes out in the clear -- with the real address on it -- until
+// somebody notices.
+//
+// Here it is one branch in `tx_hook` and it is placed BELOW everything
+// else in the system. When the switch is armed and the tunnel is not
+// carrying, a frame is only allowed out if it is one of:
+//
+//   * the tunnel's own traffic to the peer's endpoint (without it the
+//     tunnel could never come back up),
+//   * ARP (without it the endpoint cannot be reached either),
+//   * DHCP, when it is allowed explicitly -- off by default, because a
+//     DHCP exchange carries the machine's host name.
+//
+// Everything else is counted and thrown away. `tools/tunnel/run.sh`
+// proves it by breaking the tunnel and then counting the octets that
+// reach `virtio.tx_frame`. The target is zero and the counter that says
+// so is `virtio.tx_octets`, which is measured on the DEVICE side of this
+// file -- not on a counter this file keeps about itself.
+//
+// ================================================================ HONEST
+//
+// K1 ONE INTERFACE. There is one tunnel, not a list of them. Several
+//    PROFILES exist and are switched between (see `kernel/user/wg.fi`),
+//    but only one is up at a time. Two tunnels at once would need a
+//    routing table this kernel does not have.
+// K2 THE MTU IS NOT NEGOTIATED. A packet that does not fit after
+//    encapsulation is dropped and counted, not fragmented. `stack.fi`'s
+//    UDP_MAX is 1472 octets, so the largest inner packet is 1440 and the
+//    default tunnel MTU of 1420 stays under it.
+// K3 THERE IS NO ICMP "fragmentation needed" ANSWER. A program that
+//    sends a large packet with DF set into the tunnel gets silence
+//    rather than the right refusal.
+// K4 THE HANDSHAKE RUNS IN `netd`, on the network task's turn. A
+//    Curve25519 operation takes long enough to be visible; this kernel
+//    has no way to move it off that task.
+// K5 SEE `lib/wg/proto.fi`, NOTE P1. The cryptography here has not been
+//    audited.
+profile kernel
+
+import kstate
+import mem
+import serial
+import errno
+import arch.x86_64.apic
+import virtio
+import rand
+import time
+import net.wire
+import net.stack
+import wg.proto
+
+export {
+    init, ready, up, set_up, arm_kill, kill_armed, killed_octets,
+    rx_hook, tx_hook, tick, dev, stat, peers, port,
+    set_private, public_key, add_peer, allow, endpoint, psk, keepalive,
+    set_addr, awg, clear, configure,
+    handshakes, established, last_error,
+    stage
+}
+
+// The K2 scalar page: `kernel/inet.fi` reaches to 0xB00, so this round
+// takes 0xC00 and stays well below the 0x2000 the page has.
+const S_DEV: u64 = 0xC00 // address of the device region
+const S_KILL: u64 = 0xC08 // 1 = the kill switch is armed
+const S_KILLED: u64 = 0xC10 // octets it has refused
+const S_SCRATCH: u64 = 0xC18 // one page for building packets
+const S_INJECT: u64 = 0xC20 // one page for the frame handed to net_input
+const S_PORT: u64 = 0xC28 // the local UDP port of the tunnel
+const S_UP: u64 = 0xC30
+const S_ERR: u64 = 0xC38
+const S_ALLOW_DHCP: u64 = 0xC40
+const S_TICKS: u64 = 0xC48
+const S_ENCAP: u64 = 0xC50
+const S_DECAP: u64 = 0xC58
+
+const DEFAULT_PORT: u64 = 51820
+
+// The largest inner packet that still fits: `stack.fi` refuses a UDP
+// payload above 1472, and a transport packet costs 16 octets of header
+// plus 16 of tag plus up to 15 of padding.
+const INNER_MAX: u64 = 1424
+
+// Every scalar of this file lives in the same page as round K8's, so it
+// goes through `at()` exactly the way `inet.sc()` does. The literal
+// 0x12000 is `pci.K2_SCALARS`; it is written out rather than imported
+// because of the note below.
+fn at(off: u64) -> u64 {
+    return 0x12000 + off
+}
+
+// THE ONE PIECE OF ROUND K8 THIS FILE COPIES, AND WHY.
+//
+// `kernel/inet.fi` calls into this file, so this file may not import
+// `kernel/inet.fi` -- a cycle in the import graph. Two things are
+// therefore reached by their address in the shared scalar page instead
+// of by a function call: the stack pointer (S_STACK, 0x300) and the
+// clock divisor (S_TSCDIV, 0x388). Both are single words that round K8
+// writes once at `inet.init` and never changes. That is a coupling and
+// it is written down here so that whoever moves those offsets knows to
+// look in this file too; the alternative was to move the hooks into
+// `inet.fi` itself, which would have put the tunnel inside the file
+// fourteen other rounds are working in.
+const INET_STACK: u64 = 0x300
+const INET_TSCDIV: u64 = 0x388
+
+fn now_us(state: u64) -> u64 {
+    let div: u64 = kstate.get(state, at(INET_TSCDIV))
+    if div == 0 {
+        return kstate.get(state, kstate.TICKS) * 10000
+    }
+    return apic.tsc() / div
+}
+
+fn dev(state: u64) -> u64 {
+    return kstate.get(state, at(S_DEV))
+}
+
+fn ready(state: u64) -> bool {
+    return dev(state) != 0
+}
+
+fn up(state: u64) -> bool {
+    return kstate.get(state, at(S_UP)) != 0
+}
+
+fn port(state: u64) -> u64 {
+    return kstate.get(state, at(S_PORT))
+}
+
+fn kill_armed(state: u64) -> bool {
+    return kstate.get(state, at(S_KILL)) != 0
+}
+
+fn killed_octets(state: u64) -> u64 {
+    return kstate.get(state, at(S_KILLED))
+}
+
+fn last_error(state: u64) -> u64 {
+    return kstate.get(state, at(S_ERR))
+}
+
+fn stat(state: u64, which: u64) -> u64 {
+    if !ready(state) {
+        return 0
+    }
+    if which == 100 {
+        return kstate.get(state, at(S_ENCAP))
+    }
+    if which == 101 {
+        return kstate.get(state, at(S_DECAP))
+    }
+    if which == 102 {
+        return kstate.get(state, at(S_KILLED))
+    }
+    if which == 103 {
+        return kstate.get(state, at(S_TICKS))
+    }
+    return proto.dev_stat(dev(state), which)
+}
+
+fn peers(state: u64) -> u64 {
+    if !ready(state) {
+        return 0
+    }
+    return proto.dev_peers(dev(state))
+}
+
+fn handshakes(state: u64) -> u64 {
+    if !ready(state) {
+        return 0
+    }
+    return proto.dev_stat(dev(state), proto.ST_HS_OK)
+}
+
+fn established(state: u64, i: u64) -> bool {
+    if !ready(state) {
+        return false
+    }
+    return proto.peer_established(dev(state), i, now_us(state))
+}
+
+// ---------------------------------------------------------------- setup
+
+// The region is four frames plus two scratch pages. It is allocated once
+// and never freed: a kernel that hands its tunnel's key material back to
+// the frame allocator would be handing it to the next process that asks
+// for memory.
+fn init(state: u64) -> bool {
+    if ready(state) {
+        return true
+    }
+    let need: u64 = (proto.dev_bytes() + mem.FRAME_SIZE - 1)
+        / mem.FRAME_SIZE
+    let base: u64 = mem.frame_run(state, need + 2)
+    if base == 0 {
+        kstate.set(state, at(S_ERR), 1)
+        return false
+    }
+    var z: u64 = 0
+    while z < (need + 2) * mem.FRAME_SIZE {
+        __mmio_write64((base + z) as *mut u64, 0)
+        z = z + 8
+    }
+    kstate.set(state, at(S_DEV), base)
+    kstate.set(state, at(S_SCRATCH), base + need * mem.FRAME_SIZE)
+    kstate.set(state, at(S_INJECT), base + (need + 1) * mem.FRAME_SIZE)
+    kstate.set(state, at(S_PORT), DEFAULT_PORT)
+    proto.dev_init(base)
+    return true
+}
+
+fn clear(state: u64) {
+    if !ready(state) {
+        return
+    }
+    proto.dev_init(dev(state))
+    kstate.set(state, at(S_UP), 0)
+    kstate.set(state, at(S_PORT), DEFAULT_PORT)
+}
+
+fn set_up(state: u64, v: u64) -> bool {
+    if !ready(state) {
+        return false
+    }
+    if v != 0 {
+        proto.dev_set_up(dev(state), true)
+        kstate.set(state, at(S_UP), 1)
+    } else {
+        proto.dev_set_up(dev(state), false)
+        kstate.set(state, at(S_UP), 0)
+    }
+    return true
+}
+
+fn arm_kill(state: u64, v: u64) {
+    if v != 0 {
+        kstate.set(state, at(S_KILL), 1)
+    } else {
+        kstate.set(state, at(S_KILL), 0)
+    }
+}
+
+fn set_private(state: u64, src: u64) -> bool {
+    if !ready(state) {
+        return false
+    }
+    return proto.dev_set_private(dev(state), src)
+}
+
+fn public_key(state: u64, dst: u64) -> bool {
+    if !ready(state) {
+        return false
+    }
+    var i: u64 = 0
+    while i < 32 {
+        kstate.set8(dst + i, (*((proto.dev_public(dev(state)) + i)
+            as *mut u8)))
+        i = i + 1
+    }
+    return true
+}
+
+fn add_peer(state: u64, pub32: u64) -> i64 {
+    if !ready(state) {
+        return -1
+    }
+    return proto.peer_add(dev(state), pub32)
+}
+
+fn allow(state: u64, i: u64, ip: u64, prefix: u64) -> bool {
+    if !ready(state) {
+        return false
+    }
+    return proto.peer_allow(dev(state), i, ip, prefix)
+}
+
+fn endpoint(state: u64, i: u64, ip: u64, p: u64) -> bool {
+    if !ready(state) {
+        return false
+    }
+    proto.peer_set_endpoint(dev(state), i, ip, p)
+    return true
+}
+
+fn psk(state: u64, i: u64, src: u64) -> bool {
+    if !ready(state) {
+        return false
+    }
+    proto.peer_set_psk(dev(state), i, src)
+    return true
+}
+
+fn keepalive(state: u64, i: u64, s: u64) -> bool {
+    if !ready(state) {
+        return false
+    }
+    proto.peer_set_keepalive(dev(state), i, s)
+    return true
+}
+
+fn set_addr(state: u64, ip: u64, prefix: u64, mtu: u64) -> bool {
+    if !ready(state) {
+        return false
+    }
+    proto.dev_set_addr(dev(state), ip, prefix, mtu)
+    return true
+}
+
+fn awg(state: u64, jc: u64, jmin: u64, jmax: u64, s1: u64, s2: u64,
+    h1: u64, h2: u64, h3: u64, h4: u64) -> bool {
+    if !ready(state) {
+        return false
+    }
+    return proto.awg_set(dev(state), jc, jmin, jmax, s1, s2, h1, h2, h3, h4)
+}
+
+// ------------------------------------------------------------ the frame
+
+fn fb(p: u64, off: u64) -> u64 {
+    return (*((p + off) as *mut u8)) as u64
+}
+
+fn fs(p: u64, off: u64, v: u64) {
+    *((p + off) as *mut u8) = (v & 255) as u8
+}
+
+fn be16(p: u64, off: u64) -> u64 {
+    return (fb(p, off) << 8) | fb(p, off + 1)
+}
+
+fn be32(p: u64, off: u64) -> u64 {
+    return (fb(p, off) << 24) | (fb(p, off + 1) << 16)
+        | (fb(p, off + 2) << 8) | fb(p, off + 3)
+}
+
+const ETH_HDR: u64 = 14
+const ETYPE_IP4: u64 = 2048
+const ETYPE_ARP: u64 = 2054
+const IP_UDP: u64 = 17
+
+// Is this an IPv4 frame, and where does the IP header start?
+fn is_ip4(p: u64, n: u64) -> bool {
+    if n < ETH_HDR + 20 {
+        return false
+    }
+    if be16(p, 12) != ETYPE_IP4 {
+        return false
+    }
+    return (fb(p, ETH_HDR) >> 4) == 4
+}
+
+fn ip_src(p: u64) -> u64 {
+    return be32(p, ETH_HDR + 12)
+}
+
+fn ip_dst(p: u64) -> u64 {
+    return be32(p, ETH_HDR + 16)
+}
+
+fn ip_total(p: u64) -> u64 {
+    return be16(p, ETH_HDR + 2)
+}
+
+fn ip_proto(p: u64) -> u64 {
+    return fb(p, ETH_HDR + 9)
+}
+
+fn ip_hlen(p: u64) -> u64 {
+    return (fb(p, ETH_HDR) & 15) * 4
+}
+
+// ============================== THE TUNNEL ADDRESS AND THE ONE STACK ====
+//
+// A WireGuard interface has an address of its own -- 10.91.0.1 here --
+// and it is a DIFFERENT address from the one on the wire. Every system
+// with a tunnel has two addresses; this one has a problem, and it is
+// worth stating exactly.
+//
+// Osum's TCP/IP stack is `vendor/firn/lib/net/stack.fi`, pinned at
+// `vendor/firn/COMMIT` (round K3 of the Firn repository). `net_init`
+// takes ONE address and `net_input` discards every IP packet that is not
+// addressed to it. There is no second address, no interface list and no
+// routing table, and this round may not change that file: it is
+// vendored, its blobs are checked in section 1 of ./test.sh, and moving
+// the pin would swap the compiler out from under every other round.
+//
+// So the tunnel address is MAPPED ONE TO ONE onto the stack's address,
+// at the only two points where a packet crosses the tunnel's edge:
+//
+//   inbound   a packet whose inner destination is the tunnel address has
+//             that field rewritten to the stack's address before it is
+//             handed in. To the stack it is an ordinary packet.
+//   outbound  a packet about to be encapsulated has its source rewritten
+//             from the stack's address to the tunnel address, so the peer
+//             sees it come from the address its AllowedIPs names.
+//
+// This is address translation and it has the honest limits of address
+// translation: exactly one address is mapped, and nothing that carries an
+// address inside its payload survives it. What it buys is that TCP, UDP
+// and ICMP all work through the tunnel with a stack that knows one
+// address -- which is more than an ICMP-only special case would buy, and
+// it is the whole reason the checksum arithmetic below exists.
+//
+// THE CHECKSUMS. Changing four octets of the IP header invalidates the
+// header checksum and, because the addresses are in the pseudo-header,
+// the TCP and UDP checksums as well. The IP header checksum is short
+// enough to recompute outright. The transport checksum is adjusted
+// INCREMENTALLY by RFC 1624's method -- the payload is not touched and
+// summing it again would cost about what the encryption costs.
+
+fn ones_add(a: u64, b: u64) -> u64 {
+    var s: u64 = a + b
+    while s > 65535 {
+        s = (s & 65535) + (s >> 16)
+    }
+    return s
+}
+
+// RFC 1624 eqn. 3: HC' = ~(~HC + ~m + m'), one 16 bit word at a time.
+fn csum_adjust(old_c: u64, old_w: u64, new_w: u64) -> u64 {
+    let s: u64 = ones_add(ones_add((~old_c) & 65535, (~old_w) & 65535),
+        new_w & 65535)
+    return (~s) & 65535
+}
+
+fn ip_header_csum(p: u64, hl: u64) -> u64 {
+    var s: u64 = 0
+    var i: u64 = 0
+    while i < hl {
+        // Octets 10 and 11 ARE the checksum field and are summed as
+        // zero -- which is what lets the receiver verify with the same
+        // loop and expect all ones.
+        if i != 10 {
+            s = ones_add(s, (fb(p, i) << 8) | fb(p, i + 1))
+        }
+        i = i + 2
+    }
+    return (~s) & 65535
+}
+
+// Rewrite the address at `off` (12 = source, 16 = destination) of a bare
+// IP packet at `p`, and repair every checksum that covered it.
+fn rewrite_addr(p: u64, off: u64, newip: u64) {
+    let hl: u64 = (fb(p, 0) & 15) * 4
+    if hl < 20 {
+        return
+    }
+    let old_hi: u64 = (fb(p, off) << 8) | fb(p, off + 1)
+    let old_lo: u64 = (fb(p, off + 2) << 8) | fb(p, off + 3)
+    let new_hi: u64 = (newip >> 16) & 65535
+    let new_lo: u64 = newip & 65535
+    fs(p, off, new_hi >> 8)
+    fs(p, off + 1, new_hi & 255)
+    fs(p, off + 2, new_lo >> 8)
+    fs(p, off + 3, new_lo & 255)
+    let c: u64 = ip_header_csum(p, hl)
+    fs(p, 10, c >> 8)
+    fs(p, 11, c & 255)
+    let pr: u64 = fb(p, 9)
+    var coff: u64 = 0
+    if pr == 6 {
+        coff = hl + 16
+    } else if pr == 17 {
+        coff = hl + 6
+    } else {
+        return
+    }
+    let cur: u64 = (fb(p, coff) << 8) | fb(p, coff + 1)
+    // A UDP checksum of zero means "not computed" and must stay zero.
+    if pr == 17 && cur == 0 {
+        return
+    }
+    var nc: u64 = csum_adjust(cur, old_hi, new_hi)
+    nc = csum_adjust(nc, old_lo, new_lo)
+    if pr == 17 && nc == 0 {
+        nc = 65535
+    }
+    fs(p, coff, nc >> 8)
+    fs(p, coff + 1, nc & 255)
+}
+
+// `inet.fi`'s S_IP, read by address for the reason in the note above
+// `now_us`.
+fn stack_ip(state: u64) -> u64 {
+    return kstate.get(state, at(0x310))
+}
+
+// ------------------------------------------------------------ the inbound
+
+// Called out of `inet.pump` for every frame that arrives, BEFORE the
+// stack sees it. Returns true when the frame was the tunnel's and the
+// stack must not be shown it.
+fn rx_hook(state: u64, frame: u64, n: u64) -> bool {
+    if !ready(state) || !up(state) {
+        return false
+    }
+    if !is_ip4(frame, n) {
+        return false
+    }
+    if ip_proto(frame) != IP_UDP {
+        return false
+    }
+    let hl: u64 = ip_hlen(frame)
+    if hl < 20 || n < ETH_HDR + hl + 8 {
+        return false
+    }
+    let udp: u64 = frame + ETH_HDR + hl
+    let dport: u64 = be16(udp, 2)
+    if dport != port(state) {
+        return false
+    }
+    let ulen: u64 = be16(udp, 4)
+    if ulen < 8 || ETH_HDR + hl + ulen > n {
+        return false
+    }
+    let body: u64 = udp + 8
+    let blen: u64 = ulen - 8
+    let d: u64 = dev(state)
+    let now: u64 = now_us(state)
+    let scratch: u64 = kstate.get(state, at(S_SCRATCH))
+
+    var off: u64 = 0
+    let kind: u64 = proto.message_kind(d, body, blen, &off)
+
+    if kind == proto.KIND_DATA {
+        var pi: u64 = 0
+        let got: i64 = proto.decap(d, body, blen, scratch, now, &pi)
+        if got < 0 {
+            return true // it was addressed to us and it was rubbish
+        }
+        kstate.add(state, at(S_DECAP), 1)
+        if got == 0 {
+            return true // a keepalive carries nothing
+        }
+        // THE INBOUND HALF OF CRYPTOKEY ROUTING. The source address of
+        // the packet INSIDE the tunnel has to be one this peer is allowed
+        // to use. Without this check any peer could claim any address.
+        if (fb(scratch, 0) >> 4) != 4 {
+            return true
+        }
+        let src: u64 = (fb(scratch, 12) << 24) | (fb(scratch, 13) << 16)
+            | (fb(scratch, 14) << 8) | fb(scratch, 15)
+        if !proto.source_ok(d, pi, src) {
+            return true
+        }
+        // The plaintext is padded to a multiple of 16; the real length is
+        // the total length field of the inner IP header.
+        var real: u64 = (fb(scratch, 2) << 8) | fb(scratch, 3)
+        if real < 20 || real > got as u64 {
+            return true
+        }
+        // The tunnel's own address becomes the stack's, so that the one
+        // address the stack has is the one it sees.
+        let dstin: u64 = (fb(scratch, 16) << 24) | (fb(scratch, 17) << 16)
+            | (fb(scratch, 18) << 8) | fb(scratch, 19)
+        let tun: u64 = proto.dev_addr(d)
+        if tun != 0 && dstin == tun {
+            rewrite_addr(scratch, 16, stack_ip(state))
+        }
+        // Give it an Ethernet header so the stack can read it the same
+        // way it reads everything else, and hand it in.
+        let inj: u64 = kstate.get(state, at(S_INJECT))
+        var i: u64 = 0
+        while i < 6 {
+            fs(inj, i, virtio.mac_at(state, i))
+            fs(inj, 6 + i, fb(frame, 6 + i))
+            i = i + 1
+        }
+        fs(inj, 12, ETYPE_IP4 >> 8)
+        fs(inj, 13, ETYPE_IP4 & 255)
+        i = 0
+        while i < real {
+            fs(inj, ETH_HDR + i, fb(scratch, i))
+            i = i + 1
+        }
+        stack.net_input(inet_stack(state), inj as *mut u8,
+            (ETH_HDR + real) as usize, now)
+        return true
+    }
+
+    if kind == proto.KIND_INIT {
+        let pi: i64 = proto.consume_initiation(d, body, blen, off, now)
+        if pi < 0 {
+            return true
+        }
+        // Roaming: the endpoint of an AUTHENTICATED message is where the
+        // peer is now.
+        proto.peer_set_endpoint(d, pi as u64, ip_src(frame), be16(udp, 0))
+        var rnd: [u8; 64] = [0 as u8; 64]
+        rand.bytes(state, (&rnd[0]) as u64, 64)
+        let rl: u64 = proto.make_response(d, pi as u64, scratch,
+            (&rnd[0]) as u64, now)
+        if rl > 0 {
+            send_udp(state, ip_src(frame), be16(udp, 0), scratch, rl)
+        }
+        return true
+    }
+    if kind == proto.KIND_RESP {
+        let pi: i64 = proto.consume_response(d, body, blen, off, now)
+        if pi >= 0 {
+            proto.peer_set_endpoint(d, pi as u64, ip_src(frame),
+                be16(udp, 0))
+            // A key confirmation, so the other end may start sending.
+            send_keepalive(state, pi as u64, now)
+        }
+        return true
+    }
+    if kind == proto.KIND_COOKIE {
+        proto.consume_cookie(d, body, blen, now)
+        return true
+    }
+    // A datagram on our port that is not WireGuard. It was addressed to
+    // the tunnel, so the stack has no business with it either.
+    return true
+}
+
+fn inet_stack(state: u64) -> *mut stack.Stack {
+    return kstate.get(state, at(INET_STACK)) as *mut stack.Stack
+}
+
+// One UDP datagram out through round K8's stack. `pump` holds the network
+// lock while this runs, which is exactly the condition `stack.fi` asks
+// for; the datagram is queued and leaves on a later turn of the same
+// loop.
+fn send_udp(state: u64, dip: u64, dport: u64, body: u64, n: u64) -> bool {
+    return stack.udp_send(inet_stack(state), (port(state) & 0xFFFF) as u16,
+        (dip & 0xFFFFFFFF) as u32, (dport & 0xFFFF) as u16,
+        body as *mut u8, n as usize, now_us(state))
+}
+
+fn send_keepalive(state: u64, pi: u64, now: u64) {
+    let d: u64 = dev(state)
+    let scratch: u64 = kstate.get(state, at(S_SCRATCH))
+    let n: u64 = proto.encap(d, pi, 0, 0, scratch, 2048, now)
+    if n > 0 {
+        send_udp(state, proto.peer_endpoint_ip(d, pi),
+            proto.peer_endpoint_port(d, pi), scratch, n)
+    }
+}
+
+// ----------------------------------------------------------- the outbound
+
+const TX_PASS: u64 = 0
+const TX_DROP: u64 = 1
+
+// Called out of `inet.pump` for every frame the stack wants to send,
+// BEFORE it reaches the card. `TX_DROP` means the frame does not go.
+//
+// THIS IS THE WHOLE OF THE KILL SWITCH and the whole of outbound routing.
+// Nothing in the system can send a frame without passing through here,
+// because `inet.pump` is the only caller of `virtio.tx_frame`.
+fn tx_hook(state: u64, frame: u64, n: u64) -> u64 {
+    if !ready(state) {
+        return TX_PASS
+    }
+    let armed: bool = kill_armed(state)
+    if !up(state) && !armed {
+        return TX_PASS
+    }
+    // ARP is always allowed: without it the endpoint cannot be resolved
+    // and the tunnel could never be established again.
+    if n >= ETH_HDR + 2 && be16(frame, 12) == ETYPE_ARP {
+        return TX_PASS
+    }
+    if !is_ip4(frame, n) {
+        if armed && !carrying(state) {
+            return refuse(state, n)
+        }
+        return TX_PASS
+    }
+    let d: u64 = dev(state)
+    let dst: u64 = ip_dst(frame)
+
+    // The tunnel's OWN datagrams. They are UDP from our port to a peer's
+    // endpoint and they must never be tunnelled -- that is the loop every
+    // first implementation writes.
+    if is_own_traffic(state, frame, n) {
+        return TX_PASS
+    }
+
+    if up(state) {
+        let pi: i64 = proto.route(d, dst)
+        if pi >= 0 {
+            return encapsulate(state, pi as u64, frame, n)
+        }
+    }
+    // Not for the tunnel. With the switch armed and nothing carrying,
+    // nothing leaves.
+    if armed && !carrying(state) {
+        // DHCP may be allowed explicitly: without an address there is no
+        // route to the endpoint either. It is off by default because a
+        // DHCP request carries the host name in the clear.
+        if kstate.get(state, at(S_ALLOW_DHCP)) != 0 && is_dhcp(frame, n) {
+            return TX_PASS
+        }
+        return refuse(state, n)
+    }
+    if armed && up(state) {
+        // The tunnel is carrying, but this destination is outside every
+        // AllowedIPs. With the switch armed that is a leak, not a
+        // shortcut.
+        return refuse(state, n)
+    }
+    return TX_PASS
+}
+
+fn refuse(state: u64, n: u64) -> u64 {
+    kstate.add(state, at(S_KILLED), n)
+    return TX_DROP
+}
+
+// Is at least one peer carrying traffic right now?
+fn carrying(state: u64) -> bool {
+    if !up(state) {
+        return false
+    }
+    let d: u64 = dev(state)
+    let now: u64 = now_us(state)
+    var i: u64 = 0
+    while i < proto.PEER_MAX {
+        if proto.peer_used(d, i) && proto.peer_established(d, i, now) {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn is_own_traffic(state: u64, frame: u64, n: u64) -> bool {
+    if ip_proto(frame) != IP_UDP {
+        return false
+    }
+    let hl: u64 = ip_hlen(frame)
+    if n < ETH_HDR + hl + 8 {
+        return false
+    }
+    let udp: u64 = frame + ETH_HDR + hl
+    if be16(udp, 0) != port(state) {
+        return false
+    }
+    let d: u64 = dev(state)
+    let dst: u64 = ip_dst(frame)
+    let dp: u64 = be16(udp, 2)
+    var i: u64 = 0
+    while i < proto.PEER_MAX {
+        if proto.peer_used(d, i) && proto.peer_endpoint_ip(d, i) == dst
+            && proto.peer_endpoint_port(d, i) == dp {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn is_dhcp(frame: u64, n: u64) -> bool {
+    if ip_proto(frame) != IP_UDP {
+        return false
+    }
+    let hl: u64 = ip_hlen(frame)
+    if n < ETH_HDR + hl + 8 {
+        return false
+    }
+    let udp: u64 = frame + ETH_HDR + hl
+    return be16(udp, 2) == 67 || be16(udp, 2) == 68
+}
+
+// Strip the Ethernet header, encrypt what is left, and queue the result
+// for the peer's endpoint. The original frame is always dropped: either
+// it went as ciphertext or it does not go.
+fn encapsulate(state: u64, pi: u64, frame: u64, n: u64) -> u64 {
+    let d: u64 = dev(state)
+    let now: u64 = now_us(state)
+    var inner: u64 = ip_total(frame)
+    if inner == 0 || ETH_HDR + inner > n {
+        inner = n - ETH_HDR
+    }
+    if inner > INNER_MAX {
+        // No fragmentation and no ICMP answer -- note K2 and K3.
+        return refuse(state, n)
+    }
+    if !proto.peer_established(d, pi, now) {
+        // No key yet. The packet is lost, which is what any interface
+        // does while it is coming up -- but with the switch armed it is
+        // counted as refused rather than quietly dropped.
+        if kill_armed(state) {
+            return refuse(state, n)
+        }
+        return TX_DROP
+    }
+    // The source becomes the tunnel address, the one the peer has in its
+    // AllowedIPs. The packet is copied out of the stack's output slot
+    // first: rewriting it in place would change what the stack believes
+    // it sent.
+    let inj: u64 = kstate.get(state, at(S_INJECT))
+    var ci: u64 = 0
+    while ci < inner {
+        fs(inj, ci, fb(frame, ETH_HDR + ci))
+        ci = ci + 1
+    }
+    let tun: u64 = proto.dev_addr(d)
+    if tun != 0 {
+        let srcin: u64 = (fb(inj, 12) << 24) | (fb(inj, 13) << 16)
+            | (fb(inj, 14) << 8) | fb(inj, 15)
+        if srcin == stack_ip(state) {
+            rewrite_addr(inj, 12, tun)
+        }
+    }
+    let scratch: u64 = kstate.get(state, at(S_SCRATCH))
+    let out: u64 = proto.encap(d, pi, inj, inner, scratch, 2048, now)
+    if out == 0 {
+        return refuse(state, n)
+    }
+    if !send_udp(state, proto.peer_endpoint_ip(d, pi),
+        proto.peer_endpoint_port(d, pi), scratch, out) {
+        return TX_DROP
+    }
+    kstate.add(state, at(S_ENCAP), 1)
+    return TX_DROP
+}
+
+// ------------------------------------------------------------- the timers
+
+// Called once per turn of `netd`. It starts handshakes that are due and
+// sends the keepalives a peer asked for. Everything expensive is here and
+// not in the packet path.
+fn tick(state: u64) {
+    if !ready(state) || !up(state) {
+        return
+    }
+    kstate.add(state, at(S_TICKS), 1)
+    let d: u64 = dev(state)
+    let now: u64 = now_us(state)
+    let scratch: u64 = kstate.get(state, at(S_SCRATCH))
+    var i: u64 = 0
+    while i < proto.PEER_MAX {
+        if proto.peer_used(d, i) {
+            if proto.needs_handshake(d, i, now, true) {
+                var rnd: [u8; 64] = [0 as u8; 64]
+                rand.bytes(state, (&rnd[0]) as u64, 64)
+                // AmneziaWG: the junk datagrams go before the handshake,
+                // not after it.
+                let jc: u64 = proto.awg_jc(d)
+                var j: u64 = 0
+                while j < jc {
+                    var jr: [u8; 8] = [0 as u8; 8]
+                    rand.bytes(state, (&jr[0]) as u64, 8)
+                    var jl: u64 = proto.awg_junk_len(d, (&jr[0]) as u64)
+                    if jl > 1200 {
+                        jl = 1200
+                    }
+                    if jl > 0 {
+                        rand.bytes(state, scratch, jl)
+                        send_udp(state, proto.peer_endpoint_ip(d, i),
+                            proto.peer_endpoint_port(d, i), scratch, jl)
+                        proto.dev_stat(d, proto.ST_JUNK)
+                    }
+                    j = j + 1
+                }
+                let secs: u64 = time.now_sec(state)
+                let n: u64 = proto.make_initiation(d, i, scratch,
+                    (&rnd[0]) as u64, secs, (now % 1000000) * 1000, now)
+                if n > 0 {
+                    send_udp(state, proto.peer_endpoint_ip(d, i),
+                        proto.peer_endpoint_port(d, i), scratch, n)
+                }
+            } else if proto.needs_keepalive(d, i, now) {
+                send_keepalive(state, i, now)
+            }
+        }
+        i = i + 1
+    }
+}
+
+// -------------------------------------------------- the command line
+//
+// A test runner has to be able to bring the tunnel up before there is a
+// disk, a shell or a settings page, the same way `nsvc=` brings a service
+// up in round K8. These words do that and nothing else -- the ordinary
+// way to configure a tunnel is a profile in /etc/wg (`kernel/user/wg.fi`).
+//
+//   wgpriv=<64 hex>      our private key
+//   wgpeer=<64 hex>      the peer's public key
+//   wgpsk=<64 hex>       an optional preshared key
+//   wgep=a.b.c.d:port    the peer's endpoint
+//   wgallow=a.b.c.d/pfx  one AllowedIPs entry (may be repeated once)
+//   wgaddr=a.b.c.d/pfx   our address inside the tunnel
+//   wgport=<n>           our local UDP port
+//   wgkeep=<seconds>     PersistentKeepalive for the peer
+//   wgkill               arm the kill switch
+//   wgawg=jc,jmin,jmax,s1,s2,h1,h2,h3,h4   the AmneziaWG parameters
+//   wgup                 bring it up
+
+fn cfind(cmd: u64, word: u64, n: u64) -> u64 {
+    if cmd == 0 {
+        return 0
+    }
+    var i: u64 = 0
+    while (*((cmd + i) as *mut u8)) != 0 as u8 {
+        var k: u64 = 0
+        var same: bool = true
+        while k < n && same {
+            if (*((cmd + i + k) as *mut u8)) != (*((word + k) as *mut u8)) {
+                same = false
+            }
+            k = k + 1
+        }
+        if same {
+            return cmd + i
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+fn hexdig(c: u64) -> i64 {
+    if c >= 48 && c <= 57 {
+        return (c - 48) as i64
+    }
+    if c >= 97 && c <= 102 {
+        return (c - 87) as i64
+    }
+    if c >= 65 && c <= 70 {
+        return (c - 55) as i64
+    }
+    return -1
+}
+
+// 32 octets out of 64 hexadecimal characters. Anything shorter or with a
+// character that is not hexadecimal is refused: a half read key would
+// produce a tunnel that never completes a handshake and no reason why.
+fn hex32(p: u64, dst: u64) -> bool {
+    var i: u64 = 0
+    while i < 32 {
+        let hi: i64 = hexdig((*((p + i * 2) as *mut u8)) as u64)
+        let lo: i64 = hexdig((*((p + i * 2 + 1) as *mut u8)) as u64)
+        if hi < 0 || lo < 0 {
+            return false
+        }
+        *((dst + i) as *mut u8) = ((hi * 16 + lo) & 255) as u8
+        i = i + 1
+    }
+    return true
+}
+
+fn cdec(p: u64, endp: *mut u64) -> u64 {
+    var v: u64 = 0
+    var i: u64 = 0
+    while true {
+        let c: u64 = (*((p + i) as *mut u8)) as u64
+        if c < 48 || c > 57 {
+            *endp = p + i
+            return v
+        }
+        v = v * 10 + (c - 48)
+        i = i + 1
+    }
+    return v
+}
+
+// a.b.c.d, and where it ended.
+fn cip(p: u64, endp: *mut u64) -> u64 {
+    var e: u64 = 0
+    var v: u64 = 0
+    var k: u64 = 0
+    var at: u64 = p
+    while k < 4 {
+        let part: u64 = cdec(at, &e)
+        v = (v << 8) | (part & 255)
+        at = e
+        if k < 3 {
+            at = at + 1 // the dot
+        }
+        k = k + 1
+    }
+    *endp = at
+    return v
+}
+
+fn word_at(state: u64, cmd: u64, w: u64, n: u64) -> u64 {
+    return cfind(cmd, w, n)
+}
+
+fn configure(state: u64, cmd: u64) {
+    if cmd == 0 {
+        return
+    }
+    var w_priv: [u8; 8] = "wgpriv=\0"
+    var w_peer: [u8; 8] = "wgpeer=\0"
+    var w_psk: [u8; 7] = "wgpsk=\0"
+    var w_ep: [u8; 6] = "wgep=\0"
+    var w_allow: [u8; 9] = "wgallow=\0"
+    var w_addr: [u8; 8] = "wgaddr=\0"
+    var w_port: [u8; 8] = "wgport=\0"
+    var w_kill: [u8; 7] = "wgkill\0"
+    var w_up: [u8; 5] = "wgup\0"
+    var w_awg: [u8; 7] = "wgawg=\0"
+    var w_keep: [u8; 8] = "wgkeep=\0"
+
+    var key: [u8; 32] = [0 as u8; 32]
+    var e: u64 = 0
+
+    let a: u64 = word_at(state, cmd, (&w_priv[0]) as u64, 7)
+    if a == 0 {
+        return // no tunnel was asked for
+    }
+    if !init(state) {
+        return
+    }
+    if !hex32(a + 7, (&key[0]) as u64) || !set_private(state,
+        (&key[0]) as u64) {
+        kstate.set(state, at(S_ERR), 2)
+        return
+    }
+    let pt: u64 = word_at(state, cmd, (&w_port[0]) as u64, 7)
+    if pt != 0 {
+        kstate.set(state, at(S_PORT), cdec(pt + 7, &e))
+    }
+    let ad: u64 = word_at(state, cmd, (&w_addr[0]) as u64, 7)
+    if ad != 0 {
+        let ip: u64 = cip(ad + 7, &e)
+        var pfx: u64 = 32
+        if (*((e) as *mut u8)) == 47 as u8 {
+            pfx = cdec(e + 1, &e)
+        }
+        set_addr(state, ip, pfx, 0)
+    }
+    let pe: u64 = word_at(state, cmd, (&w_peer[0]) as u64, 7)
+    if pe != 0 && hex32(pe + 7, (&key[0]) as u64) {
+        let pi: i64 = add_peer(state, (&key[0]) as u64)
+        if pi >= 0 {
+            let ps: u64 = word_at(state, cmd, (&w_psk[0]) as u64, 6)
+            if ps != 0 && hex32(ps + 6, (&key[0]) as u64) {
+                psk(state, pi as u64, (&key[0]) as u64)
+            }
+            let ep: u64 = word_at(state, cmd, (&w_ep[0]) as u64, 5)
+            if ep != 0 {
+                let ip: u64 = cip(ep + 5, &e)
+                var prt: u64 = DEFAULT_PORT
+                if (*((e) as *mut u8)) == 58 as u8 {
+                    prt = cdec(e + 1, &e)
+                }
+                endpoint(state, pi as u64, ip, prt)
+            }
+            let kp2: u64 = word_at(state, cmd, (&w_keep[0]) as u64, 7)
+            if kp2 != 0 {
+                keepalive(state, pi as u64, cdec(kp2 + 7, &e))
+            }
+            let al: u64 = word_at(state, cmd, (&w_allow[0]) as u64, 8)
+            if al != 0 {
+                let ip: u64 = cip(al + 8, &e)
+                var pfx: u64 = 32
+                if (*((e) as *mut u8)) == 47 as u8 {
+                    pfx = cdec(e + 1, &e)
+                }
+                allow(state, pi as u64, ip, pfx)
+            }
+        }
+    }
+    let aw: u64 = word_at(state, cmd, (&w_awg[0]) as u64, 6)
+    if aw != 0 {
+        var v: [u64; 9] = [0 as u64; 9]
+        var at2: u64 = aw + 6
+        var i: u64 = 0
+        while i < 9 {
+            v[i as usize] = cdec(at2, &e)
+            at2 = e + 1
+            i = i + 1
+        }
+        awg(state, v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7], v[8])
+    }
+    if word_at(state, cmd, (&w_kill[0]) as u64, 6) != 0 {
+        arm_kill(state, 1)
+    }
+    if word_at(state, cmd, (&w_up[0]) as u64, 4) != 0 {
+        set_up(state, 1)
+    }
+}
+
+// ---------------------------------------------------------------- the say
+
+// One line on the serial port at boot, in the shape round K8 uses -- key
+// and value, so a test runner reads numbers and not prose.
+fn stage(state: u64, cmd: u64) {
+    var s_off: [u8; 12] = "wg: absent\0\0"
+    var s_up: [u8; 5] = "wg: \0"
+    var s_p: [u8; 8] = "port=\0\0\0"
+    var s_k: [u8; 7] = " kill=\0"
+    var s_n: [u8; 8] = " peers=\0"
+    var s_pub: [u8; 7] = " pub=\0\0"
+    var s_upv: [u8; 5] = " up=\0"
+    configure(state, cmd)
+    if !ready(state) {
+        say((&s_off[0]) as u64)
+        serial.nl()
+        return
+    }
+    say((&s_up[0]) as u64)
+    say((&s_p[0]) as u64)
+    serial.dec(port(state))
+    say((&s_k[0]) as u64)
+    if kill_armed(state) {
+        serial.dec(1)
+    } else {
+        serial.dec(0)
+    }
+    say((&s_n[0]) as u64)
+    serial.dec(peers(state))
+    say((&s_upv[0]) as u64)
+    serial.dec(hw_yes(up(state)))
+    say((&s_pub[0]) as u64)
+    var i: u64 = 0
+    while i < 32 {
+        hex2((*((proto.dev_public(dev(state)) + i) as *mut u8)) as u64)
+        i = i + 1
+    }
+    serial.nl()
+}
+
+// Two lower case hexadecimal digits, no `0x`. `serial.hex` prints the
+// prefix and trims leading zeroes, which is right for an address and
+// wrong for a key: a test runner reads this line and compares it octet
+// for octet with what `wg pubkey` says.
+fn hex2(v: u64) {
+    let d: [u8; 16] = [48, 49, 50, 51, 52, 53, 54, 55,
+        56, 57, 97, 98, 99, 100, 101, 102]
+    serial.put(d[((v >> 4) & 15) as usize])
+    serial.put(d[(v & 15) as usize])
+}
+
+fn hw_yes(b: bool) -> u64 {
+    if b {
+        return 1
+    }
+    return 0
+}
+
+fn say(p: u64) {
+    var i: u64 = 0
+    while (*((p + i) as *mut u8)) != 0 as u8 {
+        serial.put(*((p + i) as *mut u8))
+        i = i + 1
+    }
+}

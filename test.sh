@@ -268,6 +268,45 @@
 #      `nosvm` schaltet alles ab, `-cpu qemu64` bietet keine NPT an.
 #
 #
+#  26./27. DER TUNNEL ALS PAKET (Nachtrag): nichts davon ist
+#      vorinstalliert. Zwei Pakete -- `vpn` (WireGuard, AmneziaWG) und
+#      `proxy` (SOCKS5, HTTP CONNECT, Tor-Anbindung) --, die sich KEINE
+#      EINZIGE ZEILE Code teilen: lib/socks/socks5.fi hat gar keine
+#      import-Zeile, weil SOCKS5 nichts verschluesselt. kosten.sh misst,
+#      was der Kernteil kostet, wenn keiner laeuft: 0 Seiten
+#      Arbeitsspeicher, nichts messbares an Rechenzeit, und 203 424
+#      Oktette Abbild, die `build-kernel.sh --ohne-tunnel` ganz
+#      wegnimmt. pakete.sh baut beide Pakete, installiert sie, BENUTZT
+#      sie, entfernt sie und vergleicht 33 Eintraege nach Pfad, Art,
+#      Groesse und SHA-256 -- kein Unterschied, und ein drittes Paket
+#      bleibt dabei Oktett fuer Oktett unberuehrt. Die Gegenprobe zeigt
+#      ausserdem, dass `opk entfernen` OHNE --behalte-daten die privaten
+#      Schluessel mitloescht; docs/TUNNEL-PAKETE.md sagt, warum das fuer
+#      ein Paket mit Schluesseln falsch herum ist.
+#
+#  25. DER TUNNEL (tools/tunnel/run.sh, Runde TUNNEL): ein VPN. Fuenf
+#      Stufen, und jede misst gegen etwas, das dieses Repo nicht
+#      geschrieben hat. Die vier Bausteine, die WireGuard NENNT --
+#      BLAKE2s, ChaCha20, Poly1305, Curve25519 -- gegen 1522
+#      Testvektoren aus RFC 7693, 8439, 7748 und draft-xchacha, dazu
+#      gegen libb2, OpenSSL und libsodium. Das PROTOKOLL (Noise IK,
+#      Schluesselwechsel, Cookie-Antwort, Wiederholungsfenster,
+#      Cryptokey Routing) gegen die WireGuard-Umsetzung IM
+#      LINUX-KERN ueber ein veth-Paar -- Linux' eigenes `ping` geht
+#      hindurch. Die AmneziaWG-Verschleierung: ein unveraendertes
+#      Linux-WireGuard IGNORIERT die verschleierten Pakete, und
+#      dasselbe Programm mit denselben Schluesseln bekommt ohne die
+#      Parameter eine Antwort. SOCKS5 und HTTP CONNECT gegen einen
+#      echten Proxy und den ECHTEN TOR-DIENST -- eine Seite wurde
+#      wirklich ueber das Tor-Netz geholt. Und der Kernel selbst:
+#      X25519 in Ring 0 stimmt mit libsodium ueberein, der Osum-Kern
+#      schliesst einen Handschlag mit dem Linux-Kern ab, und der
+#      NOTAUS laesst 0 IP-Oktette hinaus -- gezaehlt mit tcpdump
+#      AUSSERHALB des Kerns, gegen 44 in der Gegenprobe ohne ihn.
+#      Was NICHT geht, steht in docs/TUNNEL.md und wird dort nicht
+#      wegerklaert: Nutzdaten fliessen im Kern noch nicht durch den
+#      Tunnel, und die Krypto ist NICHT auditiert.
+#
 #  15. Die zwei Schutzbits und das Boot-Modul (tools/guard/run.sh, Runde
 #      K10): die letzten zwei Faehigkeiten aus OrientOS' Rust-Kernel, die
 #      dieser hier noch nicht hatte. SMEP und SMAP in CR4
@@ -612,6 +651,14 @@ lauf "25. eine Netzsicht je Prozess: real, filtered, faked, none (tools/netview/
 lauf "26. wer wieviel verbraucht, und die Verbindung weiterreichen (tools/netmon/run.sh, Runde NETMON)" \
      tools/netmon/run.sh netmon '^NETMON: |^  OK    (what the KERNEL counted|the counting is|one frame, cache hit|wget/ping ratio|and the SECOND roll|addresses in the history|the client got an OFFER|echo replies from|files fetched over HTTP|NAT records made)'
 
+
+lauf "25. der Tunnel: WireGuard, AmneziaWG, SOCKS5 und Tor (tools/tunnel/run.sh, Runde TUNNEL)" \
+     tools/tunnel/run.sh tunnel '^  OK    ([0-9]+ vectors|all [0-9]+|X25519 in the kernel|the Linux kernel completed|Linux pinged|KILL SWITCH|counter-check)|^     .*(all passed|ok   [0-9]+ of|rtt )'
+
+lauf "26. der Tunnel als PAKET: was er kostet, wenn keiner laeuft (tools/tunnel/kosten.sh, Nachtrag TUNNEL)" \
+     tools/tunnel/kosten.sh tunnelkosten '^  OK    (der Tunnel kostet|ein EINGERICHTETER|der Haken)'
+lauf "27. installieren, benutzen, entfernen -- und nichts bleibt (tools/tunnel/pakete.sh, Nachtrag TUNNEL)" \
+     tools/tunnel/pakete.sh tunnelpakete '^  OK    (SPURLOS|zweimal gebaut|GEGENPROBE|das Paket .bleibt.|mit --behalte-daten)'
 
 echo
 echo "=================================================================="
