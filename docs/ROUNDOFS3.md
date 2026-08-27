@@ -327,17 +327,29 @@ Der Stand der alten Abnahmen, jede Zahl aus einem Lauf:
 
 | Abnahme | `main` (3389fbd) | Zweig `ofs3` |
 |---|---|---|
-| `tools/k13/run.sh` | 12 Fehler | **3** (alle drei auch auf `main`) |
-| `tools/k14/run.sh` | 8 Fehler | **7** (Teilmenge von `main`) |
-| `tools/k15/run.sh` | 0 Fehler | **0** |
+| `tools/k13/run.sh` | 12 Fehler | **3** (dieselben drei auch auf `main`) |
+| `tools/k14/run.sh` | 8 Fehler | **8** (dieselben acht) |
+| `tools/k15/run.sh` | 0 Fehler | **0** (825 s Laufzeit) |
 | `tools/k16/run.sh` | 6 Fehler | **4** (Teilmenge von `main`) |
 | `tools/k18/run.sh` | 0 Fehler | **0** (170 Zusagen) |
 | `tools/kernel/run.sh` | — | **0** (176 Zusagen) |
 | `tools/osum/run.sh` | — | **0** (130 Zusagen) |
+| `tools/posix/run.sh` | — | **0** |
+| `tools/wm/run.sh` | — | **0** |
 | `tools/ofs3/run.sh` | — | **0** (75 Zusagen) |
+| `tools/mem/run.sh` | — | **0** (50 Zusagen) |
 
 **Keine einzige Zusage ist durch diese Runde rot geworden.** Was rot
 bleibt, war es vorher schon.
+
+**EINE MESSFALLE, DIE HIER STEHEN MUSS:** diese Zahlen gelten nur, wenn
+die Abnahmen EINZELN laufen. Sechs Laeufer gleichzeitig auf zwoelf
+Kernen unter QEMU/TCG erzeugt Fehlalarme in Serie -- `tools/ofs3/run.sh`
+hat parallel 29 Fehler gemeldet und allein null, `tools/k14/run.sh`
+schwankte zwischen 7 und 17. Die Ursache ist Zeit und nicht Code: die
+Laeufer haben Zeitlimits, und ein Gastsystem, das sich seine Sekunde
+teilen muss, schaltet sich anders ab. Wer diese Runde nachmisst, faehrt
+die Laeufer nacheinander.
 
 ---
 
