@@ -1,0 +1,341 @@
+// kernel/user/i18nt.fi -- Runde I18N: DIE ZUSAGEN DIESER RUNDE, GEMESSEN.
+//
+// Ein Programm in Ring 3, wie `k13t.fi`, `k14.fi` und `k16.fi`. Es
+// meldet je Zusage eine Zeile auf die serielle Leitung:
+//
+//     i18n: ok   <name>
+//     i18n: bad  <name> got=<zahl> want=<zahl>
+//
+// und am Ende `i18n: pass=<n> fail=<m>`. `tools/i18n/run.sh` liest das.
+//
+// WARUM DIE PRUEFUNG IN RING 3 STEHT UND NICHT AUF DEM WIRT: der
+// Dekodierer (`lib/utf8.fi`) und der Katalog (`kernel/user/msg.fi`)
+// laufen auf DIESER Maschine, mit DIESEM Uebersetzer, auf DIESEN
+// Dateien von DIESER Platte. Ein Python-Programm auf dem Wirt, das
+// dieselbe Tabelle noch einmal durchgeht, misst den Wirt.
+//
+// Was hier NICHT geprueft wird und anderswo gemessen ist:
+//   * Die Abdeckung der Schriften -- `tools/i18n/coverage.py`, auf dem
+//     Wirt, weil dort die TTF-Datei liegt.
+//   * Wie das Ergebnis AUSSIEHT -- Bildschirmfotos in
+//     `tools/i18n/run.sh`, gerechnet gegen `tools/ttf/raster.py`.
+//   * Die Kosten der Textausgabe -- ebenfalls dort, weil dafuer der
+//     Fensterserver laufen muss.
+
+profile kernel
+
+import ulib
+import libc.io
+import utf8
+import msg
+
+export { u_start }
+
+static mut pass: u64 = 0
+static mut fail: u64 = 0
+
+fn say(p: u64) {
+    ulib.say(p)
+}
+
+fn ok(name: u64) {
+    var a: [u8; 12] = "i18n: ok   \0"
+    pass = pass + 1
+    say((&a[0 as usize]) as u64)
+    say(name)
+    ulib.nl()
+}
+
+fn bad(name: u64, got: u64, want: u64) {
+    var a: [u8; 12] = "i18n: bad  \0"
+    var g: [u8; 7] = "  got=\0"
+    var w: [u8; 7] = " want=\0"
+    fail = fail + 1
+    say((&a[0 as usize]) as u64)
+    say(name)
+    say((&g[0 as usize]) as u64)
+    ulib.sayn(got)
+    say((&w[0 as usize]) as u64)
+    ulib.sayn(want)
+    ulib.nl()
+}
+
+fn is(name: u64, got: u64, want: u64) {
+    if got == want {
+        ok(name)
+    } else {
+        bad(name, got, want)
+    }
+}
+
+fn yes(name: u64, b: bool) {
+    if b {
+        ok(name)
+    } else {
+        bad(name, 0, 1)
+    }
+}
+
+// ------------------------------------------------ 1. DER DEKODIERER
+
+// Ein Stueck Text dekodieren und den ERSTEN Codepunkt melden.
+fn cp1(p: u64, n: u64) -> u64 {
+    return utf8.cp_of(utf8.next(p, n, 0))
+}
+
+fn len1(p: u64, n: u64) -> u64 {
+    return utf8.len_of(utf8.next(p, n, 0))
+}
+
+fn teil_utf8() {
+    var n_ascii: [u8; 20] = "utf8 ascii\0\0\0\0\0\0\0\0\0\0"
+    var n_two: [u8; 20] = "utf8 two octets\0\0\0\0\0"
+    var n_three: [u8; 20] = "utf8 three octets\0\0\0"
+    var n_four: [u8; 20] = "utf8 four octets\0\0\0\0"
+    var n_over: [u8; 20] = "utf8 overlong\0\0\0\0\0\0\0"
+    var n_over4: [u8; 20] = "utf8 overlong four\0\0"
+    var n_surr: [u8; 20] = "utf8 surrogate\0\0\0\0\0\0"
+    var n_high: [u8; 20] = "utf8 beyond max\0\0\0\0\0"
+    var n_cont: [u8; 20] = "utf8 lone cont\0\0\0\0\0\0"
+    var n_cut: [u8; 20] = "utf8 truncated\0\0\0\0\0\0"
+    var n_cutl: [u8; 24] = "utf8 truncated length\0\0\0"
+    var n_cnt: [u8; 20] = "utf8 chars\0\0\0\0\0\0\0\0\0\0"
+    var n_at: [u8; 24] = "utf8 byte of char\0\0\0\0\0\0\0"
+    var n_enc: [u8; 20] = "utf8 encode 2\0\0\0\0\0\0\0"
+    var n_enc3: [u8; 20] = "utf8 encode 3\0\0\0\0\0\0\0"
+    var n_enc4: [u8; 20] = "utf8 encode 4\0\0\0\0\0\0\0"
+    var n_rt: [u8; 24] = "utf8 round trip\0\0\0\0\0\0\0\0\0"
+    var n_val: [u8; 20] = "utf8 valid\0\0\0\0\0\0\0\0\0\0"
+    var n_inval: [u8; 20] = "utf8 invalid\0\0\0\0\0\0\0\0"
+
+    // ein Oktett: 'A'
+    var a: [u8; 4] = b"A\x00\x00\x00"
+    is((&n_ascii[0 as usize]) as u64, cp1((&a[0 as usize]) as u64, 1), 65)
+
+    // zwei Oktette: U+00FC, das u mit zwei Punkten -- das Zeichen, um
+    // das es in dieser Runde geht.
+    var b2: [u8; 4] = b"\xC3\xBC\x00\x00"
+    is((&n_two[0 as usize]) as u64, cp1((&b2[0 as usize]) as u64, 2), 252)
+
+    // drei Oktette: U+20AC, das Eurozeichen
+    var b3: [u8; 4] = b"\xE2\x82\xAC\x00"
+    is((&n_three[0 as usize]) as u64, cp1((&b3[0 as usize]) as u64, 3), 8364)
+
+    // vier Oktette: U+1F600
+    var b4: [u8; 5] = b"\xF0\x9F\x98\x80\x00"
+    is((&n_four[0 as usize]) as u64, cp1((&b4[0 as usize]) as u64, 4), 128512)
+
+    // UEBERLANG: 0xC0 0x80 waere U+0000 -- CVE-2000-0884. Muss U+FFFD
+    // sein UND genau EIN Oktett verbrauchen.
+    var ov: [u8; 4] = b"\xC0\x80\x00\x00"
+    is((&n_over[0 as usize]) as u64, cp1((&ov[0 as usize]) as u64, 2),
+        utf8.REPLACEMENT)
+
+    // UEBERLANG in vier Oktetten: 0xF0 0x80 ... -- das zweite Oktett
+    // muss bei 0xF0 mindestens 0x90 sein.
+    var ov4: [u8; 5] = b"\xF0\x80\x80\x80\x00"
+    is((&n_over4[0 as usize]) as u64, cp1((&ov4[0 as usize]) as u64, 4),
+        utf8.REPLACEMENT)
+
+    // EIN SURROGAT: U+D800 waere 0xED 0xA0 0x80. Kein Zeichen.
+    var su: [u8; 4] = b"\xED\xA0\x80\x00"
+    is((&n_surr[0 as usize]) as u64, cp1((&su[0 as usize]) as u64, 3),
+        utf8.REPLACEMENT)
+
+    // UEBER U+10FFFF: 0xF5 ist gar kein Anfangsoktett.
+    var hi: [u8; 5] = b"\xF5\x80\x80\x80\x00"
+    is((&n_high[0 as usize]) as u64, cp1((&hi[0 as usize]) as u64, 4),
+        utf8.REPLACEMENT)
+
+    // EIN FORTSETZUNGSOKTETT OHNE ANFANG.
+    var co: [u8; 4] = b"\x80\x00\x00\x00"
+    is((&n_cont[0 as usize]) as u64, cp1((&co[0 as usize]) as u64, 1),
+        utf8.REPLACEMENT)
+
+    // ABGESCHNITTEN: die ersten ZWEI Oktette einer Drei-Oktett-Folge.
+    // Ergibt EIN Ersatzzeichen der Laenge ZWEI -- die groesste
+    // wohlgeformte Teilfolge (Unicode D93b). Verbrauchte die Prueflogik
+    // nur ein Oktett, kaemen ZWEI Ersatzzeichen heraus.
+    var cu: [u8; 4] = b"\xE2\x82\x00\x00"
+    is((&n_cut[0 as usize]) as u64, cp1((&cu[0 as usize]) as u64, 2),
+        utf8.REPLACEMENT)
+    is((&n_cutl[0 as usize]) as u64, len1((&cu[0 as usize]) as u64, 2), 2)
+
+    // ZAEHLEN: "füße" -- vier Zeichen, sieben Oktette.
+    var w: [u8; 12] = b"f\xC3\xBC\xC3\x9F\xC3\x9F\x65\x00\x00\x00\x00"
+    is((&n_cnt[0 as usize]) as u64,
+        utf8.chars((&w[0 as usize]) as u64, 8), 5)
+    // Zeichen 2 beginnt bei Oktett 3 (f=0, ue=1..2, ss=3..4).
+    is((&n_at[0 as usize]) as u64,
+        utf8.byte_of_char((&w[0 as usize]) as u64, 8, 2), 3)
+
+    // KODIEREN, und zwar genau die Laengen, die die Norm verlangt.
+    var out: [u8; 8] = [0 as u8; 8]
+    is((&n_enc[0 as usize]) as u64,
+        utf8.encode(252, (&out[0 as usize]) as u64), 2)
+    is((&n_enc3[0 as usize]) as u64,
+        utf8.encode(8364, (&out[0 as usize]) as u64), 3)
+    is((&n_enc4[0 as usize]) as u64,
+        utf8.encode(128512, (&out[0 as usize]) as u64), 4)
+    // HIN UND ZURUECK: kodieren, dekodieren, dasselbe Zeichen.
+    let n4: u64 = utf8.encode(128512, (&out[0 as usize]) as u64)
+    is((&n_rt[0 as usize]) as u64,
+        cp1((&out[0 as usize]) as u64, n4), 128512)
+
+    yes((&n_val[0 as usize]) as u64,
+        utf8.valid((&w[0 as usize]) as u64, 8))
+    yes((&n_inval[0 as usize]) as u64,
+        !utf8.valid((&ov[0 as usize]) as u64, 2))
+}
+
+// -------------------------------------------------- 2. DER KATALOG
+
+fn teil_katalog() {
+    var n_init: [u8; 24] = "msg keys loaded\0\0\0\0\0\0\0\0\0"
+    var n_en: [u8; 24] = "msg english apply\0\0\0\0\0\0\0"
+    var n_de: [u8; 24] = "msg german apply\0\0\0\0\0\0\0\0"
+    var n_um: [u8; 24] = "msg german umlaut\0\0\0\0\0\0\0"
+    var n_st: [u8; 24] = "msg stable pointer\0\0\0\0\0\0"
+    var n_mi: [u8; 24] = "msg missing key\0\0\0\0\0\0\0\0\0"
+    var n_fb: [u8; 24] = "msg fallback english\0\0\0\0"
+    var n_lang: [u8; 24] = "msg lang code\0\0\0\0\0\0\0\0\0\0\0"
+    var n_esc: [u8; 24] = "msg escape newline\0\0\0\0\0\0"
+    var n_tab: [u8; 24] = "msg escape tab\0\0\0\0\0\0\0\0\0\0"
+    var n_path: [u8; 24] = "msg path untranslated\0\0\0"
+
+    var k_apply: [u8; 15] = "settings.apply\0"
+    var k_menu: [u8; 14] = "explorer.menu\0"
+    var k_cols: [u8; 17] = "explorer.columns\0"
+    var k_scheme: [u8; 22] = "settings.scheme.label\0"
+    var k_none: [u8; 24] = "settings.does.not.exist\0"
+    var c_en: [u8; 3] = "en\0"
+    var c_de: [u8; 3] = "de\0"
+
+    let n: u64 = msg.init()
+    yes((&n_init[0 as usize]) as u64, n >= 70)
+
+    // Erst auf Englisch. "Apply" -- 'A' ist 65.
+    let _e: bool = msg.set_lang((&c_en[0 as usize]) as u64)
+    let pa: u64 = msg.get((&k_apply[0 as usize]) as u64)
+    is((&n_en[0 as usize]) as u64,
+        (__mmio_read8((pa) as *mut u8)) as u64, 65)
+
+    // Dann auf Deutsch. "Übernehmen" faengt mit U+00DC an, und das sind
+    // in UTF-8 die Oktette 0xC3 0x9C. GENAU DAS ist die Gegenprobe fuer
+    // die ganze Runde: waere die Datei in Latin-1 oder waere der
+    // Dekodierer falsch, stuende hier etwas anderes.
+    let _d: bool = msg.set_lang((&c_de[0 as usize]) as u64)
+    let pd: u64 = msg.get((&k_apply[0 as usize]) as u64)
+    is((&n_de[0 as usize]) as u64,
+        (__mmio_read8((pd) as *mut u8)) as u64, 195)
+    is((&n_um[0 as usize]) as u64,
+        (__mmio_read8((pd + 1) as *mut u8)) as u64, 156)
+
+    // DER ZEIGER IST DERSELBE. Darauf steht und faellt der
+    // Sprachwechsel zur Laufzeit: die Widget-Bibliothek behaelt ihn.
+    yes((&n_st[0 as usize]) as u64, pa == pd)
+
+    // Ein Schluessel, den es nicht gibt, kommt ALS SICH SELBST zurueck
+    // -- nie als leerer Text.
+    let pm: u64 = msg.get((&k_none[0 as usize]) as u64)
+    yes((&n_mi[0 as usize]) as u64, pm == (&k_none[0 as usize]) as u64)
+
+    // DER RUECKFALL. `settings.does.not.exist` steht in keiner Datei;
+    // ein Schluessel, der in `en` steht und in `de` fehlt, muss den
+    // englischen Text behalten. Gemessen an der Zahl: die deutsche
+    // Datei hat weniger Eintraege als die englische, und trotzdem ist
+    // kein Platz leer.
+    let pc: u64 = msg.get((&k_cols[0 as usize]) as u64)
+    yes((&n_fb[0 as usize]) as u64,
+        (__mmio_read8((pc) as *mut u8)) as u64 != 0)
+
+    // Der Sprachcode, den der Katalog fuehrt.
+    is((&n_lang[0 as usize]) as u64,
+        (__mmio_read8((msg.lang()) as *mut u8)) as u64, 100)
+
+    // DIE FLUCHTFOLGEN. "Datei\nAnsicht" -- an Platz 5 muss ein echtes
+    // Zeilenende stehen, nicht ein Rueckstrich.
+    let pmn: u64 = msg.get((&k_menu[0 as usize]) as u64)
+    is((&n_esc[0 as usize]) as u64,
+        (__mmio_read8((pmn + 5) as *mut u8)) as u64, 10)
+    // "Name\tGröße\t..." -- an Platz 4 ein Tabulator.
+    is((&n_tab[0 as usize]) as u64,
+        (__mmio_read8((pc + 4) as *mut u8)) as u64, 9)
+
+    // DIE REGEL DIESER RUNDE, ALS MESSUNG. Der deutsche Text von
+    // `settings.scheme.label` ist "Farbschema (aus /etc/schemas):" --
+    // der PFAD darin ist unveraendert englisch. Geprueft wird, dass
+    // "/etc/" darin vorkommt.
+    let ps: u64 = msg.get((&k_scheme[0 as usize]) as u64)
+    yes((&n_path[0 as usize]) as u64, hat_etc(ps))
+}
+
+// Kommt "/etc/" in dieser Zeichenkette vor?
+fn hat_etc(p: u64) -> bool {
+    var i: u64 = 0
+    while i < 90 {
+        let c: u64 = (__mmio_read8((p + i) as *mut u8)) as u64
+        if c == 0 {
+            return false
+        }
+        if c == 47 {
+            if (__mmio_read8((p + i + 1) as *mut u8)) as u64 == 101 {
+                if (__mmio_read8((p + i + 2) as *mut u8)) as u64 == 116 {
+                    if (__mmio_read8((p + i + 3) as *mut u8)) as u64 == 99 {
+                        return true
+                    }
+                }
+            }
+        }
+        i = i + 1
+    }
+    return false
+}
+
+// ------------------------------------------------- 3. DIE TASTATUR
+
+const SYS_KBD: u64 = 1780
+const KB_GET: u64 = 0
+const KB_SET: u64 = 1
+const KB_COUNT: u64 = 2
+const KB_SWITCH: u64 = 3
+
+fn teil_kbd() {
+    var n_cnt: [u8; 24] = "kbd layouts\0\0\0\0\0\0\0\0\0\0\0\0\0"
+    var n_set: [u8; 24] = "kbd set de\0\0\0\0\0\0\0\0\0\0\0\0\0\0"
+    var n_get: [u8; 24] = "kbd get de\0\0\0\0\0\0\0\0\0\0\0\0\0\0"
+    var n_bad: [u8; 24] = "kbd reject unknown\0\0\0\0\0\0"
+    var n_sw: [u8; 24] = "kbd switch counted\0\0\0\0\0\0"
+    var n_back: [u8; 24] = "kbd back to us\0\0\0\0\0\0\0\0\0\0"
+
+    is((&n_cnt[0 as usize]) as u64, ulib.sys(SYS_KBD, KB_COUNT, 0, 0), 2)
+    let vor: u64 = ulib.sys(SYS_KBD, KB_SWITCH, 0, 0)
+    is((&n_set[0 as usize]) as u64, ulib.sys(SYS_KBD, KB_SET, 1, 0), 0)
+    is((&n_get[0 as usize]) as u64, ulib.sys(SYS_KBD, KB_GET, 0, 0), 1)
+    // GEGENPROBE: eine Belegung, die es nicht gibt, MUSS abgelehnt
+    // werden. Ein stilles Runden auf 0 waere schlimmer als ein Fehler
+    // -- das Fenster meldete Erfolg und die Tastatur bliebe, wie sie war.
+    yes((&n_bad[0 as usize]) as u64,
+        ulib.bad(ulib.sys(SYS_KBD, KB_SET, 7, 0)))
+    yes((&n_sw[0 as usize]) as u64,
+        ulib.sys(SYS_KBD, KB_SWITCH, 0, 0) == vor + 1)
+    is((&n_back[0 as usize]) as u64, ulib.sys(SYS_KBD, KB_SET, 0, 0), 0)
+}
+
+fn u_start(args: u64) -> u64 {
+    var s_end: [u8; 13] = "i18n: pass=\0\0"
+    var s_f: [u8; 8] = " fail=\0\0"
+    let _a: u64 = args
+    teil_utf8()
+    teil_katalog()
+    teil_kbd()
+    say((&s_end[0 as usize]) as u64)
+    ulib.sayn(pass)
+    say((&s_f[0 as usize]) as u64)
+    ulib.sayn(fail)
+    ulib.nl()
+    if fail > 0 {
+        return 1
+    }
+    return 0
+}

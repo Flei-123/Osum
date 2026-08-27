@@ -212,6 +212,18 @@ ARGS=(build "$TMPD/disk.img" 4096 /lib/
 for p in $PROGS; do ARGS+=("/bin/$p=$TMPD/${p}0.elf"); done
 ARGS+=("/bin/files@/bin/explorer")
 ARGS+=(/etc/ "/etc/theme=$TMPD/baum/theme")
+# RUNDE I18N: DIE SPRACHDATEIEN GEHOEREN AUF DAS ABBILD.
+# Der Dateimanager und der Starter holen ihre Beschriftungen seit
+# Runde I18N aus /usr/share/locale/<code>/messages. Ohne die Dateien
+# zeigt jedes Bedienelement seinen SCHLUESSEL an -- was der Rueckfall so
+# vorsieht und richtig ist, aber eben nicht das, was dieser Laeufer
+# bildpunktgenau nachrechnet. Ohne eine Wahl unter /users/ ist die
+# Sprache ENGLISCH, die Quellsprache.
+ARGS+=(/usr/ /usr/share/ /usr/share/locale/ /usr/share/locale/en/
+       "/usr/share/locale/en/messages=locale/en/messages"
+       /usr/share/locale/de/
+       "/usr/share/locale/de/messages=locale/de/messages")
+
 # DIE BUENDEL: /apps/<name>.prog/{INFO,start,symbol,daten/}
 while read -r zeile; do ARGS+=("$zeile"); done < <(python3 tools/k15/buendel.py assets/apps "$TMPD/buendel")
 while read -r z; do ARGS+=("$z"); done < "$TMPD/baum/liste"
@@ -699,9 +711,14 @@ SP=($(grep -a '^explorer: spalten' "$TMPD/files.txt" | tail -1 | sed 's/^explore
 schau "die Kopfzeile: die erste Spalte heisst 'Name'" \
     ttext "$TMPD/files.ppm" "$SANS" 15 $((FCX + TX)) $((FCY + TKOPF)) \
     $TFG $(rgb 3293262) "Name"
-schau "und die zweite 'Groesse'" \
+# RUNDE I18N: SIE HEISST JETZT "Size" UND NICHT MEHR "Groesse".
+# Die Kopfzeile kommt aus dem Textkatalog, und die Quellsprache ist
+# Englisch -- auf diesem Abbild liegt keine Wahl unter /users/. Auf
+# Deutsch stuende dort "Größe", mit einem echten Umlaut; genau das misst
+# tools/i18n/run.sh.
+schau "und die zweite 'Size'" \
     ttext "$TMPD/files.ppm" "$SANS" 15 $((FCX + ${SP[1]})) $((FCY + TKOPF)) \
-    $TFG $(rgb 3293262) "Groesse"
+    $TFG $(rgb 3293262) "Size"
 # JEDE ZEILE, JE ZEICHEN, GEGEN DAS, WAS baum.py ANGELEGT HAT -- und in
 # derselben Reihenfolge: Verzeichnisse zuerst, dann nach Namen.
 zeile=0
@@ -919,6 +936,11 @@ ARGS2=(build "$TMPD/disk2.img" 4096 /lib/
 for p in $PROGS; do ARGS2+=("/bin/$p=$TMPD/${p}0.elf"); done
 ARGS2+=("/bin/files@/bin/explorer")
 ARGS2+=(/etc/ "/etc/theme=$TMPD/theme2")
+ARGS2+=(/usr/ /usr/share/ /usr/share/locale/ /usr/share/locale/en/
+       "/usr/share/locale/en/messages=locale/en/messages"
+       /usr/share/locale/de/
+       "/usr/share/locale/de/messages=locale/de/messages")
+
 while read -r zeile; do ARGS2+=("$zeile"); done < <(python3 tools/k15/buendel.py assets/apps "$TMPD/buendel")
 while read -r z; do ARGS2+=("$z"); done < "$TMPD/baum/liste"
 python3 tools/osum/mkfs.py "${ARGS2[@]}" > "$TMPD/mkfs2.txt" 2>&1
@@ -973,10 +995,21 @@ if [ $? -eq 0 ]; then ok "und der des Starters auch nicht"
 else bad "der Name des Starters steht im Code: $aus"; fi
 # Und die Gegenprobe zum Pruefer selbst: eine Zeichenkette, die WIRKLICH
 # im Code steht, MUSS er finden -- sonst prueft er nichts.
-if python3 tools/k15/keinname.py kernel/user/starter.fi "Ausfuehren" >/dev/null 2>&1; then
+# RUNDE I18N: "Ausfuehren" STEHT NICHT MEHR IM CODE -- das ist der Sinn
+# dieser Runde, und tools/i18n/scan.py misst genau das. Die Gegenprobe
+# fuer den Namenspruefer braucht also eine Zeichenkette, die WIRKLICH
+# noch dasteht: der Schluessel selbst.
+if python3 tools/k15/keinname.py kernel/user/starter.fi "starter.run" >/dev/null 2>&1; then
     bad "der Pruefer findet eine Zeichenkette nicht, die im Code steht"
 else
     ok "eine Zeichenkette, die wirklich im Code steht, findet er (die Gegenprobe)"
+fi
+# UND DIE ALTE STEHT NICHT MEHR DA. Das ist die Zusage der Runde I18N,
+# hier an derselben Datei gemessen wie oben.
+if python3 tools/k15/keinname.py kernel/user/starter.fi "Ausfuehren" >/dev/null 2>&1; then
+    ok "RUNDE I18N: 'Ausfuehren' steht nicht mehr im Quelltext des Starters"
+else
+    bad "'Ausfuehren' steht immer noch fest im Quelltext"
 fi
 grep -q '^name=Datei-Explorer' assets/apps/explorer.prog/INFO \
     && ok "sondern in assets/apps/explorer.prog/INFO" \
