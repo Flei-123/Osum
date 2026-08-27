@@ -250,7 +250,12 @@ else
 fi
 # Gegenprobe zum Kartenpruefer: legt man WIG auf die Seiten des
 # Fensterservers, MUSS er anschlagen.
-GG="$TMPD/kernel-gg"; mkdir -p "$GG"; cp kernel/*.fi "$GG/"
+# RUNDE ARM: die Kopie braucht `kernel/arch/x86_64/` mit -- `hv.fi` liegt
+# seit dem Trennschnitt dort, und ohne sie stirbt der Kartenpruefer an
+# einem KeyError statt die Kollision zu melden, die hier gemessen wird.
+GG="$TMPD/kernel-gg"; mkdir -p "$GG/arch/x86_64"
+cp kernel/*.fi "$GG/"
+cp kernel/arch/x86_64/*.fi "$GG/arch/x86_64/"
 sed -i 's/^const WIG_OFF: u64 = 0x46000/const WIG_OFF: u64 = 0x1E000/' "$GG/kstate.fi"
 gg=$(python3 tools/kernel/karte.py "$GG" 2>&1)
 if [ $? -ne 0 ] && printf '%s' "$gg" | grep -q 'KOLLISION'; then

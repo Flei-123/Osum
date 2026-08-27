@@ -244,8 +244,12 @@ fi
 grep -q 'K16_OFF' tools/kernel/karte.py \
     && ok "der Bereich K16 steht in tools/kernel/karte.py und wird mitgerechnet" \
     || bad "K16 fehlt in tools/kernel/karte.py"
-mkdir -p "$TMPD/kern"
+# RUNDE ARM: die Kopie braucht `kernel/arch/x86_64/` mit -- `hv.fi` liegt
+# seit dem Trennschnitt dort, und ohne sie stirbt der Kartenpruefer an
+# einem KeyError statt die Kollision zu melden, die hier gemessen wird.
+mkdir -p "$TMPD/kern/arch/x86_64"
 cp kernel/*.fi "$TMPD/kern/"
+cp kernel/arch/x86_64/*.fi "$TMPD/kern/arch/x86_64/"
 # Die Gegenprobe legt K16 auf die Seite des Schriftlesers aus Runde K10
 # (TTF_OFF = 0x3F000). Sie ist BELEGT, also MUSS der Pruefer anschlagen
 # -- ein Pruefer, der nie anschlaegt, rechnet nichts nach. (Nicht auf

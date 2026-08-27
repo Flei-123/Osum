@@ -110,7 +110,7 @@ QUIET="nokbd nosched noproc nofs noring3"
 
 echo "== 1. build: the kernel, and a userland that is NOT in it =="
 for f in boot isr switch smp hv; do
-    as --64 -o "$TMPD/$f.o" "kernel/$f.s" 2>"$TMPD/as.err" \
+    as --64 -o "$TMPD/$f.o" "kernel/arch/x86_64/$f.s" 2>"$TMPD/as.err" \
         || { bad "$f.s does not assemble"; sed 's/^/        /' "$TMPD/as.err" | head -5; }
 done
 as --64 -o "$TMPD/crt.o" kernel/user/crt.s 2>"$TMPD/ascrt.err" \
