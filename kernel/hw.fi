@@ -44,7 +44,7 @@ export {
     M_NOPCI, M_NOAPIC, M_NVME, M_BENCH,
     M_NIC, M_NICINTX, M_NICNOIRQ, M_NICNOBM,
     net_ip, net_prefix, net_gw, net_svc, net_port, net_bytes, net_wait,
-    on, yes
+    on, yes, cmd_copy
 }
 
 // The words of the command line this round understands. They are read
@@ -117,7 +117,48 @@ fn on(state: u64, bit: u64) -> bool {
 // turned into a number.
 fn parse(state: u64, cmd: u64) {
     kstate.set(state, pci.K2_SCALARS + S_MODE, mode_of(cmd))
+    save_cmd(state, cmd)
     net_parse(state, cmd)
+}
+
+// ROUND TUNNEL: A COPY OF THE COMMAND LINE THAT SURVIVES THE HEAP.
+//
+// The note at `parse` above says the command line stops existing the
+// moment the frame allocator hands out the memory it sits on. Round K8
+// solved that by reading everything it needed HERE, into scalars. That
+// works while the values are numbers.
+//
+// Round TUNNEL needs 64 character keys and several of them, which are
+// not numbers and do not belong in a scalar each. So the command line
+// itself is copied, once, at the only moment it is still readable, into
+// the same page every other early value lives in. `cmd_copy` hands the
+// copy out; `kernel/wg.fi` reads its own words out of it long after the
+// original has become a heap block header.
+//
+// 0xE00..0x1200 of the K2 scalar page: round K2 reaches to 0xB00 and
+// round TUNNEL's own scalars sit at 0xC00, so this is the next free
+// strip and it ends well below the 0x2000 the page has.
+const S_CMD: u64 = 0xE00
+const CMD_MAX: u64 = 1023
+
+fn save_cmd(state: u64, cmd: u64) {
+    kstate.set8(pci.K2_SCALARS + S_CMD, 0 as u8)
+    if cmd == 0 {
+        return
+    }
+    var i: u64 = 0
+    while i < CMD_MAX && kstate.get8(cmd + i) != 0 {
+        kstate.set8(pci.K2_SCALARS + S_CMD + i, kstate.get8(cmd + i) as u8)
+        i = i + 1
+    }
+    kstate.set8(pci.K2_SCALARS + S_CMD + i, 0 as u8)
+}
+
+fn cmd_copy(state: u64) -> u64 {
+    if kstate.get8(pci.K2_SCALARS + S_CMD) == 0 {
+        return 0
+    }
+    return pci.K2_SCALARS + S_CMD
 }
 
 // ---------------------------------------------- the K8 command line
