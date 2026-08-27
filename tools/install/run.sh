@@ -228,10 +228,21 @@ else bad "der Bootlader weicht ab"; fi
 
 # Das Wurzeldateisystem AUF DER PARTITION, gelesen von mkfs.py -- der
 # zweiten Umsetzung des Formats, die den Kern nie gesehen hat.
+# WIEVIELE BLOECKE, steht im Superblock und nicht in diesem Skript. Es
+# stand hier einmal 4096 -- so gross war das Wurzeldateisystem, als
+# diese Runde geschrieben wurde. Seit die Wurzel in der FASSUNG 3
+# gebaut wird (der Kern passt in Fassung 2 nicht mehr in eine Datei),
+# ist sie groesser, und ein fester Auszug von zwei Megaoktetten schnitt
+# die Inodetabelle ab: `mkfs.py list` fand dann kein einziges Programm.
 python3 - "$OUT/ziel.img" 72048 "$OUT/wurzel.img" <<'EOF'
-import sys
+import struct, sys
 f = open(sys.argv[1], "rb"); f.seek(int(sys.argv[2]) * 512)
-open(sys.argv[3], "wb").write(f.read(4096 * 512))
+sb = f.read(512)
+blocks = struct.unpack_from("<Q", sb, 16)[0]
+if blocks < 64 or blocks > 4000000:
+    blocks = 4096
+f.seek(int(sys.argv[2]) * 512)
+open(sys.argv[3], "wb").write(f.read(blocks * 512))
 EOF
 python3 tools/osum/mkfs.py list "$OUT/wurzel.img" > "$OUT/wurzel.txt" 2>&1
 head -1 "$OUT/wurzel.txt" | sed 's/^/        /'
@@ -313,9 +324,14 @@ rc=$(lauf wieder platte "cat /etc/beweis.txt;exit" 600)
 hat "$OUT/wieder.txt" "diese-zeile-ueberlebt" "und nach einem NEUSTART immer noch"
 # Und der Wirt sieht sie auch -- ohne Osum.
 python3 - "$OUT/ziel.img" 72048 "$OUT/wurzel2.img" <<'EOF'
-import sys
+import struct, sys
 f = open(sys.argv[1], "rb"); f.seek(int(sys.argv[2]) * 512)
-open(sys.argv[3], "wb").write(f.read(8192 * 512))
+sb = f.read(512)
+blocks = struct.unpack_from("<Q", sb, 16)[0]
+if blocks < 64 or blocks > 4000000:
+    blocks = 8192
+f.seek(int(sys.argv[2]) * 512)
+open(sys.argv[3], "wb").write(f.read(blocks * 512))
 EOF
 python3 tools/osum/mkfs.py cat "$OUT/wurzel2.img" /etc/beweis.txt > "$OUT/beweis.txt" 2>&1
 hat "$OUT/beweis.txt" "diese-zeile-ueberlebt" "und der WIRT liest sie aus der Abbilddatei"
