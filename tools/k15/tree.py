@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-only
 """tools/k15/tree.py -- der Verzeichnisbaum, den der Dateimanager zeigt.
 
 Er wird HIER gebaut und nicht von Hand in `run.sh` aufgezaehlt, aus

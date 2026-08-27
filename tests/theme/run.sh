@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-2.0-only
 # tests/theme/run.sh -- DIE ABNAHME DER RUNDE THEME.
 #
 # Zehn Abschnitte. Der rote Faden ist derselbe wie in den Runden davor:

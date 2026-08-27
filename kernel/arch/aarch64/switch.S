@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /* kernel/arch/aarch64/switch.S -- the counterpart to kernel/arch/x86_64/switch.s.
  *
  * A context switch is the same idea on both machines and a different list

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-only
 """tools/k15/iconpixels.py -- steht das Symbol aus dem Buendel wirklich
 auf dem Schirm? Bildpunkt fuer Bildpunkt.
 

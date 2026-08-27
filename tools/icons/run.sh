@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-2.0-only
 # tools/icons/run.sh -- ROUND ICONS: the acceptance run.
 #
 # Six parts, and the fourth is the one the round stands or falls on.

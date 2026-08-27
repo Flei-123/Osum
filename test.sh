@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-2.0-only
 # ./test.sh -- die Abnahme von Osum.
 #
 # Fuenfzehn Abschnitte, in der Reihenfolge, in der der Kernel entstanden ist.

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-2.0-only
 # tools/arm/run.sh -- THE ABNAHME OF THE AArch64 SIDE.
 #
 # Round ARM built this side out of assembly, because the pinned compiler

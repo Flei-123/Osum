@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-2.0-only
 # tools/i18n/run.sh -- DIE ABNAHME DER RUNDE I18N.
 #
 # Was diese Runde behauptet und was hier gemessen wird:

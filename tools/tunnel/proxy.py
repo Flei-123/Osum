@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-only
 """tools/tunnel/proxy.py -- SOCKS5 and HTTP CONNECT against real servers.
 
 Three counterparts, none of them written by this repository:

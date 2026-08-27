@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-only
 """tools/speicher/strlit.py -- die Zeichenkettenliterale einer Firn-Datei
 auf ihre angegebene Laenge bringen.
 

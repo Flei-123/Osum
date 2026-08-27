@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-only
 """tools/kernel/memmap.py -- DIE SPEICHERKARTE VON `kdata` MECHANISCH PRUEFEN.
 
 Der Kernel hat EINEN zusammenhaengenden Datenbereich (`kernel/arch/x86_64/boot.s`,

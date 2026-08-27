@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-2.0-only
 # tools/ofs3/run.sh -- RUNDE OFS3: DER DECKEL, DEN NIEMAND AUFGESCHRIEBEN HAT.
 #
 # Was diese Runde behebt, stand seit Runde 62 im Quelltext und in keiner

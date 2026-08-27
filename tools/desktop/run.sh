@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-2.0-only
 # tools/desktop/run.sh -- THE PROOF THAT THE TASKBAR HAS A POSITION.
 #
 # Round DESKTOP gave this system a taskbar. It sat at the bottom edge

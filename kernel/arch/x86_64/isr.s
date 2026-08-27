@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /* kernel/isr.s -- round 59: the interrupt entry points.
  *
  * The second and last non-Firn file of the kernel. `#[interrupt]` in Firn

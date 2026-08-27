@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-only
 """tools/ttf/subset.py -- eine TrueType-Datei auf das Noetige zusammenschneiden.
 
 Runde K10 liest im Kernel echte TrueType-Umrisse (`kernel/ttf.fi`).  Eine

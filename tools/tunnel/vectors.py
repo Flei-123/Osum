@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-only
 """tools/tunnel/vectors.py -- the four primitives against their RFCs.
 
 WHY THIS FILE IS THE FIRST THING ROUND TUNNEL BUILT. A VPN is a pile of

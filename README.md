@@ -635,6 +635,25 @@ after the fact.
 repository so that nothing lies there twice. **That has not been carried
 out.**
 
-## License
+## Licence
 
-MIT, see `LICENSE`.
+**Two licences, and the dividing line is Ring 0 against Ring 3.**
+
+* **MIT** for the RING 3 LIBRARIES -- `lib/libc/`, `kernel/user/crt.s`,
+  `kernel/user/user.ld` and the eight libraries `ulib.fi`, `tools.fi`,
+  `wlib.fi`, `wlibc.fi`, `appdir.fi`, `nidx.fi`, `pw.fi`, `flate.fi`. That
+  is everything a program links against. **You may therefore write a
+  program for Osum and ship it under any licence you like, including a
+  closed one.** Full text: `LICENSE.MIT`.
+* **GPL-2.0-only** for the kernel and for the seventy Ring 3 programs, the
+  tools and the tests. Full text: `LICENSE`.
+
+**Version 2 ONLY, never "or later".** GPLv3 section 6 would force a device
+maker to hand out the signing keys of a consumer device, which makes
+binding firmware to its machine as a theft deterrent legally impossible.
+Linux and Android are GPLv2-only for the same reason.
+
+Until 27 August 2026 the whole repository was MIT; that file is kept as
+`LICENSE.MIT.old`. Every source file carries an `SPDX-License-Identifier:`
+line. Reasoning and the file-by-file boundary: `LICENSING.md`.
+Third-party material: `THIRD_PARTY.md`.

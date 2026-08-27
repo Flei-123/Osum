@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-only
 """tools/arm/dtb.py -- read the device tree QEMU writes for `-M virt`.
 
 Every address in `kernel/arch/aarch64/virt.inc` came out of this, and not

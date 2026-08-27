@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-only
 """tools/k15/layout.py -- die ANORDNUNG nachrechnen, aus dem Mitschnitt.
 
     layout.py <mitschnitt> <marke> <fensterbreite> <fensterhoehe>

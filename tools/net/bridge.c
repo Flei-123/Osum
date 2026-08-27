@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /* tools/net/bridge.c -- round K8: the wire between QEMU and Linux.
  *
  * WHY THIS FILE EXISTS AT ALL, and it is worth writing down because it

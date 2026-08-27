@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /* kernel/hv.s -- Runde K12: der Weltwechsel und die Gaeste.
  *
  * Die fuenfte Assemblerdatei dieses Kernels, und sie ist aus demselben

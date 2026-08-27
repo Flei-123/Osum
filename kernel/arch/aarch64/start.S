@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /* kernel/arch/aarch64/start.S -- the counterpart to kernel/arch/x86_64/start.s.
  *
  * The x86 file has to climb: a Multiboot loader hands the machine over in

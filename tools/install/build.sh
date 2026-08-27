@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-2.0-only
 # tools/install/build.sh -- Kern, Programme und die beiden Platten dieser
 # Runde, zum Iterieren waehrend der Arbeit.
 #

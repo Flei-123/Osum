@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-2.0-only
 # tools/tunnel/kosten.sh -- WAS DER TUNNEL KOSTET, WENN KEINER LAEUFT.
 #
 # Justins Vorgabe zum Nachtrag: der Kernelteil „darf ohne das Paket

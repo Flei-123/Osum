@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-only
 """tools/k18/expect.py -- DIE ZWEITE FASSUNG DER RECHNUNG.
 
 Runde K18 kodiert vier Dinge nach dem Handbuch: das Wort fuer

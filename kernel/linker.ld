@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /* beispiele/kernel/linker.ld — Runde 52.
  *
  * Bindet `start.s` (Multiboot-Kopf, Langer Modus) und die freistehende

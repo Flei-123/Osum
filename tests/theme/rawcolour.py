@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-only
 """tests/theme/rawcolour.py -- COUNT THE COLOURS THAT ARE STILL WRITTEN
 INTO CODE THAT PAINTS THE INTERFACE.
 

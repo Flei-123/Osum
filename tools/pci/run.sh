@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-2.0-only
 # tools/pci/run.sh -- THE PROOF THAT THE KERNEL READS ITS MACHINE.
 #
 # Round 62 proved that the kernel is an operating system. Everything it

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-2.0-only
 # tools/k17/run.sh -- DER BEWEIS, DASS OSUM USB KANN.
 #
 # Bis zu dieser Runde hatte Osum zwei Eingabegeraete, und beide haengen am

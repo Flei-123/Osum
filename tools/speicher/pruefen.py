@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-only
 """tools/speicher/pruefen.py -- die DRITTE Zahl.
 
 Runde SPEICHER. Im Gast stehen zwei Zahlen gegeneinander: die des Index

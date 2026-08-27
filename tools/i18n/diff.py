@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-only
 # tools/i18n/diff.py -- WIE VERSCHIEDEN SIND ZWEI BILDSCHIRMFOTOS?
 #
 #   python3 tools/i18n/diff.py <a.ppm> <b.ppm> [x y w h]

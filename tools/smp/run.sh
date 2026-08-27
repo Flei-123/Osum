@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-2.0-only
 # tools/smp/run.sh -- ROUND K5: THE PROOF THAT FOUR CORES ARE FOUR CORES.
 #
 # Everything up to round K2 ran on one processor of a machine that has

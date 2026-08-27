@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-only
 """tools/icons/sheet.py -- the overview picture, rendered at the sizes
 the icons are actually used at.
 

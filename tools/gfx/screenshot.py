@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-only
 """tools/gfx/screenshot.py -- EIN Bildschirmfoto ueber den QEMU-Monitor.
 
     screenshot.py <monitor-socket> <ziel.ppm> [wartesekunden]

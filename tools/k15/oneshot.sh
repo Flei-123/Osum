@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-2.0-only
 # tools/k15/oneshot.sh -- EINEN Lauf machen, ein Foto holen, zum Iterieren.
 #
 #   bash tools/k15/oneshot.sh <name> "<kommandozeile>" [monitordatei]

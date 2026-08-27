@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-2.0-only
 # tools/speicher/build.sh -- Kernel, Programme und die ZWEI Plattenabbilder
 # der Runde SPEICHER, zum Iterieren waehrend der Arbeit. Die Abnahme baut
 # in tools/speicher/run.sh alles noch einmal und misst.

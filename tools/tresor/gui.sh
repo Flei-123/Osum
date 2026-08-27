@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-2.0-only
 # tools/tresor/gui.sh -- RUNDE TRESOR, ZWEITER NACHTRAG: DER KNOPF.
 #
 # `tools/tresor/run.sh` misst das Sichern ueber die Kommandozeile. Das

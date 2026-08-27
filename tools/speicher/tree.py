@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-only
 """tools/speicher/tree.py -- ein Dateisystem mit vielen Dateien UND mit
 Inhalt, und daneben die Wahrheit darueber, in Zahlen.
 

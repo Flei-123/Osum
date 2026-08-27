@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-only
 """tools/k15/icon.py -- aus einer Zeichnung ein BILD.
 
 Runde K15, zweiter Nachtrag. Ein Programm ist ein Buendel

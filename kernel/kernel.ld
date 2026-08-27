@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /* kernel/kernel.ld -- round 59: the layout of the small kernel.
  *
  * Binds `boot.s` (multiboot header, long mode), `isr.s` (interrupt entry

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-2.0-only
 # tools/i18n/build.sh -- Kern, Programme und ein Plattenabbild fuer Runde
 # I18N, zum Iterieren waehrend der Arbeit. Die Abnahme in
 # tools/i18n/run.sh baut damit und misst darauf.
