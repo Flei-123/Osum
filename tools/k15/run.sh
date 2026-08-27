@@ -557,6 +557,19 @@ num "und ist so hoch, wie drei Punkte brauchen" "$MNH" eq $((3 * MZH + 4))
 # erraten kann. Er bekommt sie gesagt und rechnet den Text darin je
 # Zeichen nach -- auf dem Grund, den das Farbschema fuer Menues fuehrt.
 MENUBG=$(python3 -c "print(0x2a3542)")
+# DIE SCHRIFTFARBE STEHT SEIT RUNDE THEME NICHT MEHR ALS ZAHL IN DIESEM
+# SKRIPT. Sie war 15265524 (#E8EEF4) -- der Wert, den `theme_defaults`
+# in Runde K15 fuer `fg` eingebaut hatte. Runde THEME loest die Farben
+# aus Marken auf; ohne /etc/theme.conf gilt die eingebaute Rampe, und
+# `text-primary` daraus ist, womit die Bibliothek Text setzt. Der Wert
+# kommt jetzt aus demselben Modell, das auch Osum benutzt
+# (`tools/theme/model.py`), statt aus einer Zahl, die beim naechsten
+# Schema still falsch wird -- bei Toleranz 96 fiel genau EIN
+# Tintenpunkt von 345 durch, und ein Test, der an einer Zahl von
+# vorgestern haengt, prueft ab da das Falsche.
+UIFG=$(python3 tools/theme/model.py semantic assets/schemes/day.scheme dark \
+    | awk '$2 == "text-primary" {print $3}')
+UIFG=$((16#$UIFG))
 i=0
 for punkt in Oeffnen Umbenennen Entfernen; do
     # TOLERANZ 96, UND HIER STEHT DIE GEMESSENE ZAHL DAZU. Wo sich zwei
@@ -571,7 +584,7 @@ for punkt in Oeffnen Umbenennen Entfernen; do
     # auch bei Toleranz 128 durch (146 falsch, zwei Zeichen ohne Tinte).
     schau "Menuepunkt $i steht bildpunktgenau im Menuefenster: '$punkt'" \
         ttext "$TMPD/pop.ppm" "$SANS" 15 $((MNX + BORDER + 8)) \
-        $((MNY + TITLE + 15 + i * MZH)) $(rgb 15265524) $(rgb "$MENUBG") "$punkt" 96
+        $((MNY + TITLE + 15 + i * MZH)) $(rgb "$UIFG") $(rgb "$MENUBG") "$punkt" 96
     i=$((i + 1))
 done
 schau "der Rahmen des Menuefensters liegt bildpunktgenau" \
@@ -579,10 +592,10 @@ schau "der Rahmen des Menuefensters liegt bildpunktgenau" \
     $((MNH + TITLE + BORDER)) 76 154 232
 schau_nicht "ohne rechte Taste gibt es das Menue NICHT" \
     ttext "$TMPD/ruhe.ppm" "$SANS" 15 $((MNX + BORDER + 8)) \
-    $((MNY + TITLE + 15)) $(rgb 15265524) $(rgb "$MENUBG") "Oeffnen" 96
+    $((MNY + TITLE + 15)) $(rgb "$UIFG") $(rgb "$MENUBG") "Oeffnen" 96
 schau_nicht "und ein anderes Wort steht auch bei Toleranz 64 nicht dort" \
     ttext "$TMPD/pop.ppm" "$SANS" 15 $((MNX + BORDER + 8)) \
-    $((MNY + TITLE + 15)) $(rgb 15265524) $(rgb "$MENUBG") "Schuetzen" 128
+    $((MNY + TITLE + 15)) $(rgb "$UIFG") $(rgb "$MENUBG") "Schuetzen" 128
 # Und ein Klick darauf waehlt.
 M="$TMPD/popw.mon"; : > "$M"
 zeiger "$M" "$POPX" "$POPY"
@@ -603,7 +616,7 @@ mn=$(feld "$TMPD/popw.txt" "wigdemo: state" menues)
 num "und das Menue hat genau EINMAL gefeuert" "$mn" ge 1
 schau_nicht "danach ist das Menuefenster wieder weg" \
     ttext "$TMPD/popw.ppm" "$SANS" 15 $((MNX + BORDER + 8)) \
-    $((MNY + TITLE + 15)) $(rgb 15265524) $(rgb "$MENUBG") "Oeffnen" 96
+    $((MNY + TITLE + 15)) $(rgb "$UIFG") $(rgb "$MENUBG") "Oeffnen" 96
 
 # Der Dialog: der Knopf "Loeschen" macht ihn auf.
 DEL=$(mitte 9)
@@ -917,7 +930,7 @@ schau_nicht "und die vorige hat er dann NICHT mehr" \
 schau "und der Text darauf ist gegen den neuen Grund gemischt" \
     ttext "$TMPD/theme2.ppm" "$SANS" 15 $((CX + $(feld "$TMPD/ruhe.txt" "wigdemo: text knopf" x))) \
     $((CY + $(feld "$TMPD/ruhe.txt" "wigdemo: text knopf" base))) \
-    $(rgb 15265524) 128 64 32 "Knopf"
+    $(rgb "$UIFG") 128 64 32 "Knopf"
 
 echo "== 13. das Zeigerbild -- die einzige Stelle, an der Ring 3 dem Server etwas ueber den Zeiger sagt =="
 M="$TMPD/beam.mon"; : > "$M"
