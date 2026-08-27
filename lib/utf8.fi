@@ -1,0 +1,329 @@
+// lib/utf8.fi -- round I18N: OCTETS BECOME CHARACTERS.
+//
+// Everything this system did with text so far worked on OCTETS. The
+// console font has 95 entries indexed by an octet, `wm.text` walks a
+// string one octet at a time, `wlibc.text_w` measures one octet at a
+// time, and the keyboard delivers one octet per key. As long as the
+// only characters that exist are the 95 printable ones of ASCII, an
+// octet and a character are the same thing, and nobody notices the
+// difference.
+//
+// They stop being the same thing the moment a surface has to say
+// "Aufloesung" with an o that carries two dots. In UTF-8 that o is TWO
+// octets (0xC3 0xB6). An octet-wise reader draws two wrong glyphs for
+// it, an octet-wise width measurement adds up two wrong advances, and
+// an octet-wise line break can cut BETWEEN the two -- which produces
+// half a character, and half a character is not a character at all.
+//
+// So this module is the one place that turns a sequence of octets into
+// a code point, and it is deliberately the FIRST thing round I18N
+// builds: the message catalog, the translations and the keyboard all
+// stand on it.
+//
+// WHAT IS DECODED, and it is the real rule and not a comfortable
+// approximation of it:
+//
+//   0xxxxxxx                                  1 octet   U+0000..U+007F
+//   110xxxxx 10xxxxxx                         2 octets  U+0080..U+07FF
+//   1110xxxx 10xxxxxx 10xxxxxx                3 octets  U+0800..U+FFFF
+//   11110xxx 10xxxxxx 10xxxxxx 10xxxxxx       4 octets  U+10000..U+10FFFF
+//
+// and four kinds of sequence that LOOK like the above and are still
+// wrong. Each of them is rejected HERE, so that no caller has to know
+// about it:
+//
+//   * AN OVERLONG FORM. 0xC0 0x80 would decode to U+0000 with the
+//     arithmetic above. It is forbidden, because it lets the same
+//     character be written in two ways -- and every check that compares
+//     strings octet-wise (a path, a password, a file name) can then be
+//     walked around. This is not theory: it is CVE-2000-0884, and it
+//     is why the lead octets 0xC0 and 0xC1 do not exist at all.
+//   * A SURROGATE, U+D800..U+DFFF. Those are not characters; they are
+//     the two halves of a UTF-16 pair and have no business in UTF-8.
+//   * ANYTHING ABOVE U+10FFFF. Unicode ends there, and so do the four
+//     octet forms: the lead octets 0xF5..0xFF do not exist.
+//   * A CONTINUATION OCTET (10xxxxxx) WHERE A LEAD OCTET BELONGS, or a
+//     lead octet whose continuations are missing or truncated at the
+//     end of the buffer.
+//
+// WHAT HAPPENS TO A WRONG SEQUENCE: it becomes U+FFFD, the replacement
+// character, and the reader moves on. It does NOT panic and it does NOT
+// stop. A kernel that falls over because a file on a disk has a bad
+// octet in it is a kernel that can be killed with a text editor. And
+// U+FFFD is now really IN the font (see the commit that widened
+// assets/osum-*.ttf), so a bad octet has a PICTURE -- a black diamond
+// with a question mark. An error one can see is worth ten one cannot.
+//
+// HOW MUCH IS CONSUMED ON AN ERROR. Not one octet, and not the whole
+// rest: the MAXIMAL SUBPART of a well-formed sequence, which is what
+// the Unicode standard recommends (D93b) and what every browser does.
+// The practical difference: the truncated three-octet sequence
+// 0xE2 0x82 at the end of a buffer produces ONE replacement character,
+// not two. Consuming exactly one octet would also terminate -- it just
+// prints a different number of diamonds, and then the count in a test
+// depends on where the buffer happens to end.
+//
+// THE RETURN VALUE IS PACKED, and that needs a word. Stage 0 of Firn
+// has no tuples and no out-parameters; a decoder that returns only the
+// code point forces the caller to decode a second time to learn the
+// length. So `next` returns
+//
+//     (code point << 3) | length
+//
+// -- 21 bits of code point, 3 bits of length (1..4), and `cp_of` and
+// `len_of` take it apart. Zero is never a valid answer: `len_of` of a
+// real result is at least 1, so 0 means "there is nothing at this
+// position".
+//
+// NO STATE, NO ALLOCATION, NO IMPORTS -- and that is why this file does
+// NOT live under kernel/ and not under lib/libc/ either.
+//
+// It has to be compiled into the KERNEL (kernel/wm.fi draws the window
+// titles, kernel/ttf.fi measures them) AND into RING 3
+// (kernel/user/wlibc.fi draws everything else). Both sides have to agree
+// on where a character begins, or a window title and the button inside
+// that window disagree about the same string. Two copies of a decoder
+// are two decoders, and the day they disagree is the day text looks
+// different depending on who drew it.
+//
+// lib/ is the one directory both sides already search: the kernel build
+// (tools/build-kernel.sh) and every Ring 3 program set FIRNLIB to it.
+// lib/libc/ would be the wrong place -- a kernel has no libc, and
+// nothing under kernel/ imports one.
+
+profile kernel
+
+export {
+    next, cp_of, len_of, seq_len, encode, chars, byte_of_char,
+    valid, REPLACEMENT, MAX_CP
+}
+
+const REPLACEMENT: u64 = 0xFFFD
+const MAX_CP: u64 = 0x10FFFF
+
+// ------------------------------------------------------------ reading
+
+fn rd(p: u64, i: u64) -> u64 {
+    return (__mmio_read8((p +% i) as *mut u8)) as u64
+}
+
+// Is this a continuation octet, 10xxxxxx?
+fn cont(b: u64) -> bool {
+    return (b & 0xC0) == 0x80
+}
+
+// A packed answer.
+fn pack(cp: u64, n: u64) -> u64 {
+    return (cp << 3) | n
+}
+
+fn cp_of(v: u64) -> u64 {
+    return v >> 3
+}
+
+fn len_of(v: u64) -> u64 {
+    return v & 7
+}
+
+// THE DECODER. `p` points at `n` octets, `i` is the position to read
+// from. Returns the packed (code point, length), or 0 when `i` is at or
+// past the end.
+//
+// The second octet is the only one whose allowed range depends on the
+// first, and that is where the overlong forms and the surrogates are
+// caught -- BEFORE any arithmetic, not by checking the result
+// afterwards. Checking afterwards works too, but then the length is
+// already wrong for the maximal-subpart rule.
+fn next(p: u64, n: u64, i: u64) -> u64 {
+    if i >= n {
+        return 0
+    }
+    let b0: u64 = rd(p, i)
+
+    // one octet
+    if b0 < 0x80 {
+        return pack(b0, 1)
+    }
+    // a continuation octet where a lead octet belongs, or a lead octet
+    // that does not exist (0xC0, 0xC1, 0xF5..0xFF)
+    if b0 < 0xC2 || b0 > 0xF4 {
+        return pack(REPLACEMENT, 1)
+    }
+
+    // two octets: U+0080..U+07FF
+    if b0 < 0xE0 {
+        if i + 1 >= n {
+            return pack(REPLACEMENT, 1)
+        }
+        let b1: u64 = rd(p, i + 1)
+        if !cont(b1) {
+            return pack(REPLACEMENT, 1)
+        }
+        return pack(((b0 & 0x1F) << 6) | (b1 & 0x3F), 2)
+    }
+
+    // three octets: U+0800..U+FFFF, without the surrogates
+    if b0 < 0xF0 {
+        if i + 1 >= n {
+            return pack(REPLACEMENT, 1)
+        }
+        let b1: u64 = rd(p, i + 1)
+        // 0xE0: the second octet must be >= 0xA0, else the form is
+        // overlong. 0xED: it must be <= 0x9F, else the result is a
+        // surrogate.
+        var lo: u64 = 0x80
+        var hi: u64 = 0xBF
+        if b0 == 0xE0 {
+            lo = 0xA0
+        }
+        if b0 == 0xED {
+            hi = 0x9F
+        }
+        if b1 < lo || b1 > hi {
+            return pack(REPLACEMENT, 1)
+        }
+        if i + 2 >= n {
+            return pack(REPLACEMENT, 2)
+        }
+        let b2: u64 = rd(p, i + 2)
+        if !cont(b2) {
+            return pack(REPLACEMENT, 2)
+        }
+        return pack(((b0 & 0x0F) << 12) | ((b1 & 0x3F) << 6) | (b2 & 0x3F),
+            3)
+    }
+
+    // four octets: U+10000..U+10FFFF
+    if i + 1 >= n {
+        return pack(REPLACEMENT, 1)
+    }
+    let c1: u64 = rd(p, i + 1)
+    // 0xF0: second octet >= 0x90 (else overlong).
+    // 0xF4: second octet <= 0x8F (else above U+10FFFF).
+    var l4: u64 = 0x80
+    var h4: u64 = 0xBF
+    if b0 == 0xF0 {
+        l4 = 0x90
+    }
+    if b0 == 0xF4 {
+        h4 = 0x8F
+    }
+    if c1 < l4 || c1 > h4 {
+        return pack(REPLACEMENT, 1)
+    }
+    if i + 2 >= n {
+        return pack(REPLACEMENT, 2)
+    }
+    let c2: u64 = rd(p, i + 2)
+    if !cont(c2) {
+        return pack(REPLACEMENT, 2)
+    }
+    if i + 3 >= n {
+        return pack(REPLACEMENT, 3)
+    }
+    let c3: u64 = rd(p, i + 3)
+    if !cont(c3) {
+        return pack(REPLACEMENT, 3)
+    }
+    return pack(((b0 & 0x07) << 18) | ((c1 & 0x3F) << 12)
+        | ((c2 & 0x3F) << 6) | (c3 & 0x3F), 4)
+}
+
+// How many octets the character at `i` occupies. The same walk as
+// `next`, for callers that only move a cursor.
+fn seq_len(p: u64, n: u64, i: u64) -> u64 {
+    return len_of(next(p, n, i))
+}
+
+// How many CHARACTERS are in `n` octets. This is the number a line
+// break, a cursor and a text field want -- not `n`.
+fn chars(p: u64, n: u64) -> u64 {
+    var i: u64 = 0
+    var c: u64 = 0
+    while i < n {
+        let v: u64 = next(p, n, i)
+        let l: u64 = len_of(v)
+        if l == 0 {
+            return c
+        }
+        i = i + l
+        c = c + 1
+    }
+    return c
+}
+
+// The octet offset at which character number `k` begins, or `n` when
+// there are fewer than `k` characters. The inverse of `chars`, and what
+// a text field needs to place an insertion mark.
+fn byte_of_char(p: u64, n: u64, k: u64) -> u64 {
+    var i: u64 = 0
+    var c: u64 = 0
+    while i < n {
+        if c == k {
+            return i
+        }
+        let l: u64 = seq_len(p, n, i)
+        if l == 0 {
+            return n
+        }
+        i = i + l
+        c = c + 1
+    }
+    return n
+}
+
+// Is the whole buffer well-formed UTF-8? Used by the test and by the
+// catalog reader, which would rather report a bad file than draw a row
+// of diamonds.
+fn valid(p: u64, n: u64) -> bool {
+    var i: u64 = 0
+    while i < n {
+        let v: u64 = next(p, n, i)
+        let l: u64 = len_of(v)
+        if l == 0 {
+            return false
+        }
+        if cp_of(v) == REPLACEMENT && rd(p, i) != 0xEF {
+            return false
+        }
+        i = i + l
+    }
+    return true
+}
+
+// THE OTHER DIRECTION: a code point into octets. The keyboard needs it
+// -- a key with two dots on it has to arrive in the input ring as the
+// two octets a text field expects, not as a single octet nobody can
+// interpret. Writes at most 4 octets to `out` and returns how many.
+// A code point that is not one (too large, or a surrogate) becomes
+// U+FFFD instead of being dropped, for the same reason as above.
+fn encode(cp: u64, out: u64) -> u64 {
+    var c: u64 = cp
+    if c > MAX_CP {
+        c = REPLACEMENT
+    }
+    if c >= 0xD800 && c <= 0xDFFF {
+        c = REPLACEMENT
+    }
+    if c < 0x80 {
+        __mmio_write8((out +% 0) as *mut u8, c as u8)
+        return 1
+    }
+    if c < 0x800 {
+        __mmio_write8((out +% 0) as *mut u8, (0xC0 | (c >> 6)) as u8)
+        __mmio_write8((out +% 1) as *mut u8, (0x80 | (c & 0x3F)) as u8)
+        return 2
+    }
+    if c < 0x10000 {
+        __mmio_write8((out +% 0) as *mut u8, (0xE0 | (c >> 12)) as u8)
+        __mmio_write8((out +% 1) as *mut u8,
+            (0x80 | ((c >> 6) & 0x3F)) as u8)
+        __mmio_write8((out +% 2) as *mut u8, (0x80 | (c & 0x3F)) as u8)
+        return 3
+    }
+    __mmio_write8((out +% 0) as *mut u8, (0xF0 | (c >> 18)) as u8)
+    __mmio_write8((out +% 1) as *mut u8, (0x80 | ((c >> 12) & 0x3F)) as u8)
+    __mmio_write8((out +% 2) as *mut u8, (0x80 | ((c >> 6) & 0x3F)) as u8)
+    __mmio_write8((out +% 3) as *mut u8, (0x80 | (c & 0x3F)) as u8)
+    return 4
+}
