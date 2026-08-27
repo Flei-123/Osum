@@ -30,7 +30,7 @@ WHAT IT DOES, in order:
 
 REPRODUCIBLE AND WITHOUT A FOREIGN LIBRARY, the same rule as
 `tools/ttf/subset.py` and `tools/osum/mkfs.py`: plain `struct`, no
-fontTools, no FreeType.  The table writer is imported from `schnitt.py`
+fontTools, no FreeType.  The table writer is imported from `subset.py`
 rather than written a second time -- one arrangement of a TrueType file
 in this tree, not two.
 
@@ -48,7 +48,9 @@ HIER = os.path.dirname(os.path.abspath(__file__))
 WURZEL = os.path.dirname(os.path.dirname(HIER))
 sys.path.insert(0, os.path.join(WURZEL, "tools", "ttf"))
 
-import schnitt  # noqa: E402  -- the path has to be set first
+# MERGE FIX: round RENAME renamed tools/ttf/schnitt.py to subset.py;
+# this import was written on the branch that never saw the rename.
+import subset as schnitt  # noqa: E402  -- the path has to be set first
 
 
 VORGABE_MAP = os.path.join(WURZEL, "assets", "icons", "icons.map")
@@ -175,7 +177,7 @@ def bauen(map_pfad, src_pfad, info_pfad, out_pfad, ids_pfad, list_pfad,
     behalten.sort()
     karte = {alt: neu for neu, alt in enumerate(behalten)}
 
-    # 3. glyf and loca -- the same arrangement as schnitt.py.
+    # 3. glyf and loca -- the same arrangement as subset.py.
     glyf = bytearray()
     versatz = []
     for alt in behalten:
