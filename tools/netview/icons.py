@@ -64,6 +64,13 @@ MERKMALE = ["mark-filtered", "mark-faked", "mark-none"]
 # Eigene Gruppe, weil es weder ein Systemzustand noch ein Merkmal am
 # Programm ist -- es steht NEBEN dem Zustandssymbol in der Ecke.
 SYSTEM = ["sys-faking"]
+# DRITTER NACHTRAG: die Kacheln der Schnelleinstellungen. EINE Zeichnung
+# je Kachel und nicht eine je Kachel und Zustand -- die Begruendung steht
+# in `assets/netview/tile-net.txt` und wurde hier GEMESSEN, bevor sie
+# aufgeschrieben wurde: zwei 16x16-Zeichen, die sich nur innen
+# unterscheiden, kommen auf etwa ein Viertel verschiedene Bildpunkte und
+# fallen an genau der Schwelle durch, die diese Datei setzt.
+KACHELN = ["tile-fake", "tile-net", "tile-hide"]
 
 # UND ES MUSS SICH VON `mark-faked` UNTERSCHEIDEN. Die beiden koennen
 # gleichzeitig auf dem Schirm stehen und bedeuten Verschiedenes: das
@@ -71,6 +78,16 @@ SYSTEM = ["sys-faking"]
 # tragen absichtlich dieselbe Welle; also muss der RAHMEN den
 # Unterschied tragen, und genau das wird hier nachgerechnet.
 KREUZ = [("sys-faking", "mark-faked")]
+
+# DRITTER NACHTRAG: die Kacheln stehen im Panel UEBER der Ecke -- die
+# Zustandssymbole und die Kacheln sind gleichzeitig auf dem Schirm und
+# gleich gross. `tile-fake` und `tile-hide` sind beide Schirme, und
+# `tile-fake` sagt dasselbe wie `sys-faking`, DARF also aehnlich sein;
+# gegen die Zustandssymbole muss es sich trotzdem halten.
+KREUZ_KACHEL = [("tile-fake", "state-online"),
+                ("tile-fake", "state-nocarrier"),
+                ("tile-hide", "state-online"),
+                ("tile-net", "state-online")]
 
 # DIE ZWEI SCHEMEN, GEGEN DIE GERECHNET WIRD -- AUS DEN DATEIEN, mit
 # denen die gemessenen Laeufe wirklich booten
@@ -191,7 +208,8 @@ def pruefe_gestaltung(sagen=True):
             sag("  %-5s %-7s %5.2f:1  %s"
                 % (sn, rolle, k, "ok" if gut else "ZU WENIG"))
 
-    for titel, gruppe in (("Systemzustand", ZUSTAENDE), ("Merkmal", MERKMALE)):
+    for titel, gruppe in (("Systemzustand", ZUSTAENDE), ("Merkmal", MERKMALE),
+                          ("Kachel", KACHELN)):
         sag("== %s: FORM VOR FARBE -- Schattenrisse gegeneinander ==" % titel)
         risse = {n: schattenriss(n) for n in gruppe}
         for i in range(len(gruppe)):
@@ -212,7 +230,7 @@ def pruefe_gestaltung(sagen=True):
                        "ok" if gut else "ZU AEHNLICH"))
 
     sag("== UEBER die Gruppen hinweg: Zeichen, die nebeneinander stehen ==")
-    for a_n, b_n in KREUZ:
+    for a_n, b_n in KREUZ + KREUZ_KACHEL:
         a, wa, ha = schattenriss(a_n)
         b, wb, hb = schattenriss(b_n)
         if (wa, ha) != (wb, hb):
@@ -232,7 +250,7 @@ def pruefe_gestaltung(sagen=True):
 def masse():
     """Groesse und Deckung je Zeichen -- die Zahlen fuer die Doku."""
     aus = []
-    for n in ZUSTAENDE + MERKMALE + SYSTEM:
+    for n in ZUSTAENDE + MERKMALE + SYSTEM + KACHELN:
         riss, w, h = schattenriss(n)
         aus.append((n, w, h, len(riss), w * h))
     return aus
@@ -320,7 +338,7 @@ def kernquelle():
 def bauen(ziel):
     os.makedirs(ziel, exist_ok=True)
     n = 0
-    for name in ZUSTAENDE + MERKMALE + SYSTEM:
+    for name in ZUSTAENDE + MERKMALE + SYSTEM + KACHELN:
         d = symmod.baue(zeichnung(name))
         with open(os.path.join(ziel, name), "wb") as f:
             f.write(d)
