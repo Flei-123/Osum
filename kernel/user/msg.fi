@@ -1,0 +1,652 @@
+// kernel/user/msg.fi -- Runde I18N: DER TEXTKATALOG.
+//
+// Bis zu dieser Runde stand jeder Satz, den dieses System auf den
+// Bildschirm schreibt, als festes Literal im Quelltext -- auf DEUTSCH,
+// und wegen des ASCII-Zeichensatzes mit "ue" statt "ü". Ein Programm
+// konnte gar nicht anders: es gab keine Stelle, an der ein Text
+// nachgeschlagen werden konnte.
+//
+// Diese Datei ist diese Stelle.
+//
+// ================================================ DIE REGEL DIESER RUNDE
+//
+// UEBERSETZT WIRD AUSSCHLIESSLICH DER ANZEIGETEXT. Pfade, Ordnernamen,
+// Dateinamen, Konfigurationsschluessel und Befehlsnamen bleiben IMMER
+// englisch und werden NIEMALS uebersetzt. Das steht ausfuehrlich in
+// docs/I18N.md, Abschnitt 1, und diese Datei haelt sich in ihrem
+// eigenen Aufbau daran: der Schluessel ist englisch, der Dateiname ist
+// englisch, das Verzeichnis ist englisch -- uebersetzt ist nur, was
+// hinter dem Gleichheitszeichen steht.
+//
+// ================================================ WIE DER KATALOG LIEGT
+//
+//   /usr/share/locale/en/messages     die QUELLSPRACHE
+//   /usr/share/locale/de/messages     die erste Uebersetzung
+//
+// Einfacher Text, mit `cat` lesbar, eine Zeile je Eintrag:
+//
+//     settings.apply = Übernehmen
+//
+// Kommentare beginnen mit `#`, leere Zeilen werden uebergangen. Im Text
+// bedeuten `\n` ein Zeilenende, `\t` einen Tabulator und `\\` einen
+// Rueckstrich -- ein Menue ist eine Zeile je Eintrag und ein
+// Tabellenkopf eine Spalte je Tabulator, so erwartet es die
+// Widget-Bibliothek.
+//
+// ============================== WARUM DIE PLAETZE FEST SIND UND NICHT
+//                                             ZEIGER IN EINEN PUFFER
+//
+// DAS IST DIE WICHTIGSTE ENTSCHEIDUNG DIESER DATEI, und sie kommt aus
+// einer Eigenschaft der Widget-Bibliothek: `wlib.set_text` BEHAELT den
+// Zeiger auf den Text eines Bedienelements -- es kopiert ihn nicht. Das
+// steht so auch im Kopf von `kernel/user/einstellungen.fi`, und
+// sechzehn Uebersetzungsfehler haben es dort einmal erzwungen.
+//
+// Ein Katalog, der die Datei in einen Puffer liest und Zeiger
+// hineingibt, waere damit beim ersten Sprachwechsel kaputt: der Puffer
+// wird neu gefuellt, die Texte stehen an anderen Stellen, und jedes
+// Bedienelement zeigt auf die Mitte eines fremden Satzes. Man koennte
+// verlangen, dass jedes Programm nach einem Wechsel JEDEN Text neu
+// setzt -- und der Tag, an dem einer vergessen wird, ist der Tag, an
+// dem ein Knopf Unsinn anzeigt.
+//
+// Also: EIN FESTER PLATZ JE SCHLUESSEL. `get` gibt immer dieselbe
+// Adresse zurueck, die Sprache wechselt nur den INHALT dieses Platzes.
+// Ein Programm muss nach `set_lang` nichts weiter tun als neu zeichnen.
+// Das kostet SLOTS * VALW Oktette im unbelegten Datenbereich -- gemessen
+// 15360 -- und dafuer kann ein Sprachwechsel keinen Zeiger verderben.
+//
+// ==================================== ENGLISCH DEFINIERT DIE SCHLUESSEL
+//
+// `init` liest ZUERST die englische Datei; sie legt fest, welche
+// Schluessel es gibt. Jede Uebersetzung wird darueber gelegt: was sie
+// hat, ersetzt den englischen Text, was sie nicht hat, BLEIBT ENGLISCH.
+// Ein Schluessel, den nur die Uebersetzung kennt, wird uebergangen und
+// gezaehlt (`unknown`) -- er kann nichts bedeuten, es gibt keinen
+// englischen Text, fuer den er einspringen koennte.
+//
+// UND EIN FEHLENDER SCHLUESSEL ERGIBT NIE EINEN LEEREN KNOPF. Kennt der
+// Katalog einen Schluessel ueberhaupt nicht, gibt `get` den SCHLUESSEL
+// SELBST zurueck. Auf dem Knopf steht dann `settings.apply` -- haesslich,
+// und genau deshalb richtig: ein leerer Knopf sieht aus wie ein
+// Gestaltungsfehler, ein Schluessel sieht aus wie das, was er ist.
+
+profile kernel
+
+import ulib
+import libc.io
+import utf8
+
+export {
+    init, set_lang, save_lang, lang, get, changed,
+    keys_total, translated, unknown, truncated, user_path,
+    LANG_MAX, SLOTS, VALW, KEYW
+}
+
+// Wie viele Schluessel der Katalog fasst. 76 sind es nach dieser Runde;
+// die Reserve ist da, damit die naechste Runde nicht sofort hier
+// nachziehen muss. Laeuft er ueber, wird das GEMELDET und nicht still
+// abgeschnitten.
+const SLOTS: u64 = 160
+const KEYW: u64 = 40 // Oktette je Schluessel, laengster gemessen: 31
+const VALW: u64 = 96 // Oktette je Text, laengster gemessen: 54
+const LANG_MAX: u64 = 8 // "en", "de" -- ISO 639, zwei bis drei Oktette
+const FILE_MAX: u64 = 8192 // groesste Katalogdatei, gemessen: 4967
+
+static mut kbuf: [u8; 6400] = [0 as u8; 6400] // SLOTS * KEYW
+static mut vbuf: [u8; 15360] = [0 as u8; 15360] // SLOTS * VALW
+static mut khash: [u64; 160] = [0 as u64; 160]
+static mut nkeys: u64 = 0
+
+static mut fbuf: [u8; 8192] = [0 as u8; 8192]
+static mut cur: [u8; 8] = [0 as u8; 8]
+static mut n_trans: u64 = 0 // wie viele Texte die Uebersetzung ersetzt hat
+static mut n_unknown: u64 = 0 // Schluessel, die es auf Englisch nicht gibt
+static mut n_trunc: u64 = 0 // Texte, die nicht in VALW passten
+static mut bereit: bool = false
+
+// ------------------------------------------------------- die Plaetze
+
+fn kat(i: u64) -> u64 {
+    return (&kbuf[0 as usize]) as u64 +% i *% KEYW
+}
+
+fn vat(i: u64) -> u64 {
+    return (&vbuf[0 as usize]) as u64 +% i *% VALW
+}
+
+fn rd(p: u64, i: u64) -> u64 {
+    return (__mmio_read8((p +% i) as *mut u8)) as u64
+}
+
+fn wr(p: u64, i: u64, v: u64) {
+    __mmio_write8((p +% i) as *mut u8, v as u8)
+}
+
+fn slen(p: u64) -> u64 {
+    var n: u64 = 0
+    while rd(p, n) != 0 {
+        n = n + 1
+    }
+    return n
+}
+
+// FNV-1a ueber `n` Oktette. Der Vergleich zweier Zahlen ist billiger als
+// der zweier Zeichenketten, und `get` wird bei jedem Neuzeichnen
+// dutzendfach aufgerufen.
+fn hash_of(p: u64, n: u64) -> u64 {
+    var h: u64 = 14695981039346656037
+    var i: u64 = 0
+    while i < n {
+        h = (h ^ rd(p, i)) *% 1099511628211
+        i = i + 1
+    }
+    return h
+}
+
+fn same(a: u64, b: u64, n: u64) -> bool {
+    var i: u64 = 0
+    while i < n {
+        if rd(a, i) != rd(b, i) {
+            return false
+        }
+        i = i + 1
+    }
+    return rd(b, n) == 0
+}
+
+// Der Platz eines Schluessels, oder SLOTS.
+fn find(key: u64, n: u64) -> u64 {
+    let h: u64 = hash_of(key, n)
+    var i: u64 = 0
+    while i < nkeys {
+        if khash[(i) as usize] == h {
+            if same(key, kat(i), n) {
+                return i
+            }
+        }
+        i = i + 1
+    }
+    return SLOTS
+}
+
+// ------------------------------------------------------ Nachschlagen
+
+// DER EINE AUFRUF, DEN JEDES PROGRAMM BENUTZT. `key` zeigt auf eine
+// nullterminierte englische Zeichenkette; heraus kommt ein Zeiger auf
+// den Text in der eingestellten Sprache -- oder auf den Schluessel
+// selbst, wenn es ihn nicht gibt.
+fn get(key: u64) -> u64 {
+    let i: u64 = find(key, slen(key))
+    if i >= SLOTS {
+        return key
+    }
+    return vat(i)
+}
+
+fn keys_total() -> u64 {
+    return nkeys
+}
+
+fn translated() -> u64 {
+    return n_trans
+}
+
+fn unknown() -> u64 {
+    return n_unknown
+}
+
+fn truncated() -> u64 {
+    return n_trunc
+}
+
+fn lang() -> u64 {
+    return (&cur[0 as usize]) as u64
+}
+
+// ---------------------------------------------------------- das Lesen
+
+// Eine Datei ganz in `fbuf`. Gibt die Zahl der Oktette zurueck, 0 wenn
+// es sie nicht gibt.
+fn slurp(pfad: u64) -> u64 {
+    let fd: u64 = io.open(pfad, 0)
+    if ulib.bad(fd) {
+        return 0
+    }
+    var n: u64 = 0
+    while n < FILE_MAX {
+        let got: u64 = io.read(fd, (&fbuf[0 as usize]) as u64 +% n,
+            FILE_MAX - n)
+        if ulib.bad(got) || got == 0 {
+            io.close(fd)
+            return n
+        }
+        n = n + got
+    }
+    io.close(fd)
+    return n
+}
+
+// Den Pfad `/usr/share/locale/<code>/messages` bauen. Der Pfad ist
+// ENGLISCH und bleibt es in jeder Sprache -- das ist die Regel dieser
+// Runde, und `<code>` ist ein ISO-639-Code und kein Sprachname.
+fn cat_path(code: u64, out: u64) {
+    var a: [u8; 20] = "/usr/share/locale/\0\0"
+    var b: [u8; 12] = "/messages\0\0\0"
+    var at: u64 = 0
+    var i: u64 = 0
+    while rd((&a[0 as usize]) as u64, i) != 0 {
+        wr(out, at, rd((&a[0 as usize]) as u64, i))
+        at = at + 1
+        i = i + 1
+    }
+    i = 0
+    while rd(code, i) != 0 && i < LANG_MAX {
+        wr(out, at, rd(code, i))
+        at = at + 1
+        i = i + 1
+    }
+    i = 0
+    while rd((&b[0 as usize]) as u64, i) != 0 {
+        wr(out, at, rd((&b[0 as usize]) as u64, i))
+        at = at + 1
+        i = i + 1
+    }
+    wr(out, at, 0)
+}
+
+// EINEN TEXT IN SEINEN PLATZ, mit aufgeloesten Fluchtfolgen.
+//
+// Die Quelle liegt zwischen `von` und `bis` in `fbuf`. Laenger als
+// VALW-1 wird abgeschnitten -- UND ZWAR AN EINER ZEICHENGRENZE, sonst
+// stuende am Ende eines gekuerzten Textes die halbe Kodierung eines
+// Umlauts und das Zeichnen setzte ein Ersatzzeichen hin.
+fn put_value(slot: u64, von: u64, bis: u64) {
+    let z: u64 = vat(slot)
+    var at: u64 = 0
+    var i: u64 = von
+    while i < bis && at + 1 < VALW {
+        var c: u64 = rd((&fbuf[0 as usize]) as u64, i)
+        if c == 92 && i + 1 < bis {
+            // ein Rueckstrich: die drei Folgen, die dieser Katalog kennt
+            let d: u64 = rd((&fbuf[0 as usize]) as u64, i + 1)
+            if d == 110 {
+                c = 10
+                i = i + 1
+            } else if d == 116 {
+                c = 9
+                i = i + 1
+            } else if d == 92 {
+                c = 92
+                i = i + 1
+            }
+        }
+        wr(z, at, c)
+        at = at + 1
+        i = i + 1
+    }
+    if i < bis {
+        n_trunc = n_trunc + 1
+        // auf die letzte vollstaendige Zeichengrenze zurueck
+        while at > 0 && (rd(z, at - 1) & 0xC0) == 0x80 {
+            at = at - 1
+        }
+        if at > 0 {
+            at = at - 1
+        }
+    }
+    wr(z, at, 0)
+}
+
+// EINEN KATALOG EINLESEN.
+//
+// `define` = true: unbekannte Schluessel werden ANGELEGT. Das tut genau
+// ein Aufruf, der auf die englische Datei. Fuer jede Uebersetzung ist
+// es false -- sie darf ersetzen, aber nichts erfinden.
+fn parse(n: u64, define: bool) -> u64 {
+    let b: u64 = (&fbuf[0 as usize]) as u64
+    var gesetzt: u64 = 0
+    var i: u64 = 0
+    while i < n {
+        // die Zeile abgrenzen
+        var e: u64 = i
+        while e < n && rd(b, e) != 10 {
+            e = e + 1
+        }
+        // Kommentar oder leer?
+        if e > i && rd(b, i) != 35 {
+            // das Gleichheitszeichen suchen
+            var g: u64 = i
+            while g < e && rd(b, g) != 61 {
+                g = g + 1
+            }
+            if g < e {
+                // Schluessel: von `i` bis `g`, ohne Leerzeichen am Rand
+                var ka: u64 = i
+                var kz: u64 = g
+                while ka < kz && rd(b, ka) == 32 {
+                    ka = ka + 1
+                }
+                while kz > ka && rd(b, kz - 1) == 32 {
+                    kz = kz - 1
+                }
+                // Text: von `g+1` bis `e`. VORNE wird GENAU EIN
+                // Leerzeichen geschluckt und hinten KEINES -- ein Text
+                // wie "Adresse: " endet mit Absicht auf einem
+                // Leerzeichen, weil eine Zahl dahinter kommt.
+                var va: u64 = g + 1
+                if va < e && rd(b, va) == 32 {
+                    va = va + 1
+                }
+                if kz > ka && kz - ka < KEYW {
+                    let slot: u64 = find(b + ka, kz - ka)
+                    if slot < SLOTS {
+                        put_value(slot, va, e)
+                        gesetzt = gesetzt + 1
+                    } else if define {
+                        if nkeys < SLOTS {
+                            let neu: u64 = nkeys
+                            var k: u64 = 0
+                            while k < kz - ka {
+                                wr(kat(neu), k, rd(b, ka + k))
+                                k = k + 1
+                            }
+                            wr(kat(neu), kz - ka, 0)
+                            khash[(neu) as usize] = hash_of(b + ka, kz - ka)
+                            nkeys = nkeys + 1
+                            put_value(neu, va, e)
+                            gesetzt = gesetzt + 1
+                        }
+                    } else {
+                        n_unknown = n_unknown + 1
+                    }
+                }
+            }
+        }
+        i = e + 1
+    }
+    return gesetzt
+}
+
+// ------------------------------------------------- die Sprache lesen
+
+// `/users/<name>/config/locale` -- der Pfad, an dem DIE WAHL DES
+// BENUTZERS steht.
+//
+// DIE SPRACHE GEHOERT DEM BENUTZER UND NICHT DER MASCHINE. Zwei
+// Personen an einem Rechner duerfen verschiedene Sprachen haben; ein
+// Farbschema unter /etc/ ist eine Eigenschaft des Systems, eine Sprache
+// ist es nicht. Deshalb steht sie nicht unter /etc/.
+//
+// Der Name kommt aus /etc/passwd ueber die eigene Benutzerkennung. Das
+// steht HIER und nicht ueber `pw.fi`: jenes Modul traegt SHA-256,
+// HMAC und PBKDF2 mit sich, und ein Schreibtischhintergrund braucht
+// keine Kennwortableitung, um seine Sprache zu erfahren.
+fn user_path(out: u64) -> bool {
+    var a: [u8; 8] = "/users/\0"
+    var b: [u8; 16] = "/config/locale\0\0"
+    var name: [u8; 40] = [0 as u8; 40]
+    if !name_of_uid(ulib.sys(102, 0, 0, 0), (&name[0 as usize]) as u64, 40) {
+        return false
+    }
+    var at: u64 = 0
+    var i: u64 = 0
+    while rd((&a[0 as usize]) as u64, i) != 0 {
+        wr(out, at, rd((&a[0 as usize]) as u64, i))
+        at = at + 1
+        i = i + 1
+    }
+    i = 0
+    while rd((&name[0 as usize]) as u64, i) != 0 {
+        wr(out, at, rd((&name[0 as usize]) as u64, i))
+        at = at + 1
+        i = i + 1
+    }
+    i = 0
+    while rd((&b[0 as usize]) as u64, i) != 0 {
+        wr(out, at, rd((&b[0 as usize]) as u64, i))
+        at = at + 1
+        i = i + 1
+    }
+    wr(out, at, 0)
+    return true
+}
+
+// Der Benutzername zu einer Kennung, aus /etc/passwd. Ein eigener,
+// kleiner Leser -- Feld 0 ist der Name, Feld 2 die Kennung.
+fn name_of_uid(uid: u64, out: u64, max: u64) -> bool {
+    var pfad: [u8; 12] = "/etc/passwd\0"
+    var zeile: [u8; 128] = [0 as u8; 128]
+    let fd: u64 = io.open((&pfad[0 as usize]) as u64, 0)
+    if ulib.bad(fd) {
+        return false
+    }
+    var buf: [u8; 1024] = [0 as u8; 1024]
+    let n: u64 = io.read(fd, (&buf[0 as usize]) as u64, 1023)
+    io.close(fd)
+    if ulib.bad(n) || n == 0 {
+        return false
+    }
+    let b: u64 = (&buf[0 as usize]) as u64
+    var i: u64 = 0
+    while i < n {
+        var e: u64 = i
+        while e < n && rd(b, e) != 10 {
+            e = e + 1
+        }
+        // Feld 0 abschreiben, Feld 2 als Zahl lesen
+        var k: u64 = i
+        var an: u64 = 0
+        while k < e && rd(b, k) != 58 && an + 1 < max {
+            wr((&zeile[0 as usize]) as u64, an, rd(b, k))
+            an = an + 1
+            k = k + 1
+        }
+        wr((&zeile[0 as usize]) as u64, an, 0)
+        // bis zum dritten Feld
+        var felder: u64 = 0
+        var q: u64 = i
+        while q < e && felder < 2 {
+            if rd(b, q) == 58 {
+                felder = felder + 1
+            }
+            q = q + 1
+        }
+        var v: u64 = 0
+        var stellen: u64 = 0
+        while q < e && rd(b, q) >= 48 && rd(b, q) <= 57 {
+            v = v * 10 + (rd(b, q) - 48)
+            stellen = stellen + 1
+            q = q + 1
+        }
+        if stellen > 0 && v == uid && an > 0 {
+            var z: u64 = 0
+            while z <= an {
+                wr(out, z, rd((&zeile[0 as usize]) as u64, z))
+                z = z + 1
+            }
+            return true
+        }
+        i = e + 1
+    }
+    return false
+}
+
+// Den eingestellten Sprachcode lesen. Ohne Datei: "en".
+fn read_user_lang(out: u64) -> bool {
+    var pfad: [u8; 96] = [0 as u8; 96]
+    if !user_path((&pfad[0 as usize]) as u64) {
+        return false
+    }
+    let fd: u64 = io.open((&pfad[0 as usize]) as u64, 0)
+    if ulib.bad(fd) {
+        return false
+    }
+    var roh: [u8; 16] = [0 as u8; 16]
+    let n: u64 = io.read(fd, (&roh[0 as usize]) as u64, 15)
+    io.close(fd)
+    if ulib.bad(n) || n == 0 {
+        return false
+    }
+    var at: u64 = 0
+    while at < n && at + 1 < LANG_MAX {
+        let c: u64 = rd((&roh[0 as usize]) as u64, at)
+        // Ein Sprachcode ist ein Kleinbuchstabe. Alles andere -- ein
+        // Zeilenende, ein Leerzeichen, ein Wagenruecklauf -- beendet ihn.
+        if c < 97 || c > 122 {
+            wr(out, at, 0)
+            return at > 0
+        }
+        wr(out, at, c)
+        at = at + 1
+    }
+    wr(out, at, 0)
+    return at > 0
+}
+
+// Die Wahl SCHREIBEN. Legt /users/<name>/ und /users/<name>/config/ an,
+// falls sie fehlen -- ein Benutzer, dessen Verzeichnis es noch nicht
+// gibt, soll seine Sprache trotzdem behalten koennen.
+fn save_lang(code: u64) -> bool {
+    var pfad: [u8; 96] = [0 as u8; 96]
+    if !user_path((&pfad[0 as usize]) as u64) {
+        return false
+    }
+    let p: u64 = (&pfad[0 as usize]) as u64
+    // die drei Verzeichnisse ueber dem Dateinamen, von oben nach unten:
+    // /users, /users/<name>, /users/<name>/config. Was schon da ist,
+    // lehnt `make_dir` ab, und das ist hier kein Fehler.
+    make_upto(p, 3)
+    make_upto(p, 2)
+    make_upto(p, 1)
+    let fd: u64 = io.open(p, ulib.O_MAKE)
+    if ulib.bad(fd) {
+        return false
+    }
+    var zeile: [u8; 16] = [0 as u8; 16]
+    var n: u64 = 0
+    while rd(code, n) != 0 && n + 1 < LANG_MAX {
+        wr((&zeile[0 as usize]) as u64, n, rd(code, n))
+        n = n + 1
+    }
+    wr((&zeile[0 as usize]) as u64, n, 10)
+    n = n + 1
+    let w: u64 = io.write(fd, (&zeile[0 as usize]) as u64, n)
+    io.close(fd)
+    return !ulib.bad(w)
+}
+
+// Das Verzeichnis anlegen, das `tiefe` Schraegstriche vor dem Ende
+// liegt. `/users/x/config/locale` mit tiefe 1 ist `/users/x/config`,
+// mit tiefe 2 ist es `/users/x`.
+fn make_upto(p: u64, tiefe: u64) {
+    let n: u64 = slen(p)
+    var i: u64 = n
+    var gesehen: u64 = 0
+    while i > 0 {
+        i = i - 1
+        if rd(p, i) == 47 {
+            gesehen = gesehen + 1
+            if gesehen == tiefe {
+                let alt: u64 = rd(p, i)
+                wr(p, i, 0)
+                io.make_dir(p)
+                wr(p, i, alt)
+                return
+            }
+        }
+    }
+}
+
+// ------------------------------------------------------------ starten
+
+// EINE SPRACHE ANWENDEN. Englisch ist immer schon geladen; hier wird
+// nur die Uebersetzung darueber gelegt.
+fn set_lang(code: u64) -> bool {
+    if !bereit {
+        return false
+    }
+    n_trans = 0
+    n_unknown = 0
+    // Erst wieder Englisch in alle Plaetze -- sonst behielte ein
+    // Schluessel, den die vorige Sprache uebersetzt hatte und die neue
+    // nicht kennt, den Text der VORIGEN Sprache.
+    var en: [u8; 4] = "en\0\0"
+    var pfad: [u8; 64] = [0 as u8; 64]
+    cat_path((&en[0 as usize]) as u64, (&pfad[0 as usize]) as u64)
+    let ne: u64 = slurp((&pfad[0 as usize]) as u64)
+    if ne > 0 {
+        parse(ne, false)
+    }
+    var i: u64 = 0
+    while i + 1 < LANG_MAX {
+        wr((&cur[0 as usize]) as u64, i, rd(code, i))
+        if rd(code, i) == 0 {
+            i = LANG_MAX
+        } else {
+            i = i + 1
+        }
+    }
+    wr((&cur[0 as usize]) as u64, LANG_MAX - 1, 0)
+    // "en" ist die Quellsprache -- es gibt nichts darueberzulegen.
+    if rd(code, 0) == 101 && rd(code, 1) == 110 && rd(code, 2) == 0 {
+        return true
+    }
+    cat_path(code, (&pfad[0 as usize]) as u64)
+    let n: u64 = slurp((&pfad[0 as usize]) as u64)
+    if n == 0 {
+        return false
+    }
+    n_trans = parse(n, false)
+    return true
+}
+
+// DEN KATALOG STARTEN. Liest Englisch (das legt die Schluessel fest) und
+// stellt danach die Sprache ein, die der Benutzer gewaehlt hat. Gibt
+// zurueck, wie viele Schluessel es gibt -- 0 heisst: die Dateien fehlen
+// auf diesem Abbild, und jedes `get` gibt ab jetzt den Schluessel selbst
+// zurueck. Das ist haesslich und es laeuft; ein Programm, das ohne
+// Katalog gar nicht startet, waere schlechter.
+fn init() -> u64 {
+    nkeys = 0
+    n_trans = 0
+    n_unknown = 0
+    n_trunc = 0
+    var en: [u8; 4] = "en\0\0"
+    var pfad: [u8; 64] = [0 as u8; 64]
+    cat_path((&en[0 as usize]) as u64, (&pfad[0 as usize]) as u64)
+    let n: u64 = slurp((&pfad[0 as usize]) as u64)
+    if n == 0 {
+        return 0
+    }
+    parse(n, true)
+    bereit = true
+    wr((&cur[0 as usize]) as u64, 0, 101)
+    wr((&cur[0 as usize]) as u64, 1, 110)
+    wr((&cur[0 as usize]) as u64, 2, 0)
+    var gewaehlt: [u8; 8] = [0 as u8; 8]
+    if read_user_lang((&gewaehlt[0 as usize]) as u64) {
+        set_lang((&gewaehlt[0 as usize]) as u64)
+    }
+    return nkeys
+}
+
+// HAT SICH DIE SPRACHE GEAENDERT? Genau die Frage, die eine Taskleiste
+// stellt, die schon `/etc/theme` nachliest -- und genau dieselbe
+// Bauart: eine billige Abfrage im Ruhelauf, ein Neuzeichnen nur bei
+// echter Aenderung. Gibt true zurueck, wenn wirklich gewechselt wurde;
+// die Zeiger aus `get` bleiben dabei gueltig, nur ihr Inhalt ist neu.
+fn changed() -> bool {
+    if !bereit {
+        return false
+    }
+    var neu: [u8; 8] = [0 as u8; 8]
+    if !read_user_lang((&neu[0 as usize]) as u64) {
+        return false
+    }
+    if same((&neu[0 as usize]) as u64, (&cur[0 as usize]) as u64,
+        slen((&neu[0 as usize]) as u64)) {
+        return false
+    }
+    return set_lang((&neu[0 as usize]) as u64)
+}

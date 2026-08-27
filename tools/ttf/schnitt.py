@@ -25,12 +25,81 @@ sofort auf -- ein Umriss an der falschen Stelle ist im Bild zu sehen.
 
 Verwendung:
     schnitt.py <vorlage.ttf> <ziel.ttf> [erstes] [letztes]
+    schnitt.py <vorlage.ttf> <ziel.ttf> --set <name>
+    schnitt.py <vorlage.ttf> <ziel.ttf> --ranges 20-7E,A0-FF,...
 
-Vorgabe fuer den Bereich ist 0x20..0x7E, also derselbe wie beim
-8x16-Zeichensatz aus Runde K7 (`kernel/font.fi`).
+RUNDE I18N HAT DIE VORGABE GEAENDERT, und das ist die Voraussetzung fuer
+alles andere in dieser Runde.  Bis hierher war der Ausschnitt 0x20..0x7E
+-- derselbe wie beim 8x16-Zeichensatz aus Runde K7
+(`kernel/font.fi`) -- also reines ASCII.  Genau deshalb stand im ganzen
+Projekt "ue" statt "u" mit zwei Punkten: die Schrift KONNTE das Zeichen
+nicht, und niemand hatte es nachgemessen.
+
+Die Vorgabe ist jetzt der Satz `latin` (siehe SAETZE unten): ASCII, die
+Latin-1-Ergaenzung (u/o/a mit zwei Punkten, scharfes s, Akzente),
+Latin Extended-A (Polnisch, Tschechisch, Ungarisch, Tuerkisch), die
+Anfuehrungs- und Gedankenstriche aus der allgemeinen Interpunktion, das
+Eurozeichen -- und U+FFFD, das Ersatzzeichen, das der UTF-8-Dekodierer
+fuer eine ungueltige Oktettfolge einsetzt.  Ohne U+FFFD in der Schrift
+malt der Dekodierer bei einer kaputten Datei NICHTS, und "nichts" ist
+kein Fehlerbild.
 """
 import struct
 import sys
+
+
+# ------------------------------------------------------------ SAETZE
+#
+# Ein Satz ist eine Liste von Bereichen (erstes, letztes) EINSCHLIESSLICH.
+# Was in der Vorlage nicht vorkommt, wird still uebergangen -- eine
+# Schrift ohne Kyrillisch soll hier nicht abbrechen, sondern weniger
+# Zeichen tragen und das melden.
+SAETZE = {
+    # Reines ASCII -- der Stand vor Runde I18N, zum Nachrechnen der
+    # alten Zahlen aus docs/ROUNDK10W.md.
+    "ascii": [(0x20, 0x7E)],
+    # Was eine Oberflaeche in einer WESTEUROPAEISCHEN Sprache braucht.
+    "latin": [
+        (0x20, 0x7E),      # Basic Latin
+        (0xA0, 0xFF),      # Latin-1 Supplement
+        (0x100, 0x17F),    # Latin Extended-A
+        (0x2010, 0x201F),  # Striche und Anfuehrungszeichen
+        (0x2026, 0x2026),  # Auslassungspunkte
+        (0x20AC, 0x20AC),  # Eurozeichen
+        (0xFFFD, 0xFFFD),  # ERSATZZEICHEN -- das Fehlerbild des Dekodierers
+    ],
+    # Dasselbe plus Griechisch und Kyrillisch.  Nicht die Vorgabe: er
+    # kostet gemessen mehr Oktette, und in dieser Runde gibt es keine
+    # griechische oder russische Uebersetzung, die ihn braucht.
+    "europe": [
+        (0x20, 0x7E), (0xA0, 0xFF), (0x100, 0x17F),
+        (0x370, 0x3FF), (0x400, 0x4FF),
+        (0x2010, 0x201F), (0x2026, 0x2026), (0x20AC, 0x20AC),
+        (0xFFFD, 0xFFFD),
+    ],
+    # NUR zum MESSEN, wie teuer Ostasiatisch waere -- siehe
+    # docs/I18N.md, Abschnitt "Was diese Runde NICHT kann".  Kein
+    # Abbild traegt das.
+    "cjk": [(0x20, 0x7E), (0x3000, 0x303F), (0x3040, 0x30FF),
+            (0x4E00, 0x9FFF), (0xFFFD, 0xFFFD)],
+}
+VORGABE = "latin"
+
+
+def bereiche_lesen(text):
+    """"20-7E,A0-FF" -> [(0x20, 0x7E), (0xA0, 0xFF)].  Auch "FFFD" allein."""
+    aus = []
+    for stueck in text.split(","):
+        stueck = stueck.strip()
+        if not stueck:
+            continue
+        if "-" in stueck:
+            a, b = stueck.split("-", 1)
+            aus.append((int(a, 16), int(b, 16)))
+        else:
+            v = int(stueck, 16)
+            aus.append((v, v))
+    return aus
 
 
 def u16(d, o):
@@ -298,22 +367,38 @@ def main(argv):
         print(__doc__)
         return 2
     quelle, ziel = argv[1], argv[2]
-    erst = int(argv[3], 0) if len(argv) > 3 else 0x20
-    letzt = int(argv[4], 0) if len(argv) > 4 else 0x7E
+    rest = argv[3:]
+    if rest and rest[0] == "--set":
+        if rest[1] not in SAETZE:
+            raise SystemExit("schnitt: unbekannter Satz '%s' (bekannt: %s)"
+                             % (rest[1], ", ".join(sorted(SAETZE))))
+        bereiche = SAETZE[rest[1]]
+    elif rest and rest[0] == "--ranges":
+        bereiche = bereiche_lesen(rest[1])
+    elif rest:
+        # Die alte Form mit zwei Zahlen bleibt gueltig.
+        erst = int(rest[0], 0)
+        letzt = int(rest[1], 0) if len(rest) > 1 else 0x7E
+        bereiche = [(erst, letzt)]
+    else:
+        bereiche = SAETZE[VORGABE]
 
     v = Vorlage(quelle)
     voll = v.cmap()
 
     # 1. Welche Glyphen bleiben -- samt Bestandteilen zusammengesetzter.
+    #    Die Reihenfolge ist die der BEREICHE und darin aufsteigend, damit
+    #    zweimaliges Schneiden dieselbe Datei ergibt.
     behalten = [0]
     zeichen = {}
-    for c in range(erst, letzt + 1):
-        g = voll.get(c)
-        if g is None:
-            continue
-        zeichen[c] = g
-        if g not in behalten:
-            behalten.append(g)
+    for erst, letzt in bereiche:
+        for c in range(erst, letzt + 1):
+            g = voll.get(c)
+            if g is None:
+                continue
+            zeichen[c] = g
+            if g not in behalten:
+                behalten.append(g)
     offen = list(behalten)
     while offen:
         g = offen.pop()
