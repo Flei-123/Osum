@@ -63,6 +63,7 @@ import pci
 import net.wire
 import net.tcp
 import net.stack
+import wg
 
 export {
     init, ready, pump, netd_body, wake, configure, readdr, us, set_task,
@@ -413,7 +414,15 @@ fn pump(state: u64) -> u64 {
         } else {
             learn(state, frame, len)
             icmp_catch(state, frame, len)
-            stack.net_input(s, frame as *mut u8, len as usize, now)
+            // ROUND TUNNEL. The tunnel gets the frame before the stack
+            // does. If it says it was its own -- a WireGuard message on
+            // its port -- the stack must not also see it; what came out
+            // of it, if anything, has already been handed in as a frame
+            // of its own. `kernel/wg.fi` says why this is here and not
+            // in a socket.
+            if !wg.rx_hook(state, frame, len) {
+                stack.net_input(s, frame as *mut u8, len as usize, now)
+            }
             virtio.rx_recycle(state, slot)
             kstate.add(state, sc(S_IN), 1)
             work = work + 1
@@ -434,13 +443,26 @@ fn pump(state: u64) -> u64 {
             if len == 0 {
                 n = PUMP_BATCH
             } else {
-                virtio.tx_frame(state, out, len as u64)
-                kstate.add(state, sc(S_OUT), 1)
+                // ROUND TUNNEL, AND THIS IS THE KILL SWITCH. Every frame
+                // this system sends passes through this one line, because
+                // this is the only call to `virtio.tx_frame` there is. A
+                // frame the tunnel takes over (it will send the encrypted
+                // form itself) or refuses (the switch is armed and the
+                // tunnel is not carrying) never reaches the card.
+                if wg.tx_hook(state, out, len as u64) == 0 {
+                    virtio.tx_frame(state, out, len as u64)
+                    kstate.add(state, sc(S_OUT), 1)
+                }
                 work = work + 1
                 n = n + 1
             }
         }
     }
+    // The handshakes and keepalives that are due, on the network task's
+    // turn and inside the same lock -- a Curve25519 operation has no
+    // business in an interrupt handler.
+    wg.tick(state)
+
     kstate.add(state, sc(S_PUMPS), 1)
     drop_lock(state, flags)
     return work
