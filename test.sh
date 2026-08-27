@@ -148,6 +148,22 @@
 #      `nosvm` schaltet alles ab, `-cpu qemu64` bietet keine NPT an.
 #
 #
+#  26./27. DER TUNNEL ALS PAKET (Nachtrag): nichts davon ist
+#      vorinstalliert. Zwei Pakete -- `vpn` (WireGuard, AmneziaWG) und
+#      `proxy` (SOCKS5, HTTP CONNECT, Tor-Anbindung) --, die sich KEINE
+#      EINZIGE ZEILE Code teilen: lib/socks/socks5.fi hat gar keine
+#      import-Zeile, weil SOCKS5 nichts verschluesselt. kosten.sh misst,
+#      was der Kernteil kostet, wenn keiner laeuft: 0 Seiten
+#      Arbeitsspeicher, nichts messbares an Rechenzeit, und 203 424
+#      Oktette Abbild, die `build-kernel.sh --ohne-tunnel` ganz
+#      wegnimmt. pakete.sh baut beide Pakete, installiert sie, BENUTZT
+#      sie, entfernt sie und vergleicht 33 Eintraege nach Pfad, Art,
+#      Groesse und SHA-256 -- kein Unterschied, und ein drittes Paket
+#      bleibt dabei Oktett fuer Oktett unberuehrt. Die Gegenprobe zeigt
+#      ausserdem, dass `opk entfernen` OHNE --behalte-daten die privaten
+#      Schluessel mitloescht; docs/TUNNEL-PAKETE.md sagt, warum das fuer
+#      ein Paket mit Schluesseln falsch herum ist.
+#
 #  25. DER TUNNEL (tools/tunnel/run.sh, Runde TUNNEL): ein VPN. Fuenf
 #      Stufen, und jede misst gegen etwas, das dieses Repo nicht
 #      geschrieben hat. Die vier Bausteine, die WireGuard NENNT --
@@ -449,6 +465,11 @@ lauf "24. Energie und Leistung: drei Profile, Ruhezustand, Waerme, Akku (tools/k
 
 lauf "25. der Tunnel: WireGuard, AmneziaWG, SOCKS5 und Tor (tools/tunnel/run.sh, Runde TUNNEL)" \
      tools/tunnel/run.sh tunnel '^  OK    ([0-9]+ vectors|all [0-9]+|X25519 in the kernel|the Linux kernel completed|Linux pinged|KILL SWITCH|counter-check)|^     .*(all passed|ok   [0-9]+ of|rtt )'
+
+lauf "26. der Tunnel als PAKET: was er kostet, wenn keiner laeuft (tools/tunnel/kosten.sh, Nachtrag TUNNEL)" \
+     tools/tunnel/kosten.sh tunnelkosten '^  OK    (der Tunnel kostet|ein EINGERICHTETER|der Haken)'
+lauf "27. installieren, benutzen, entfernen -- und nichts bleibt (tools/tunnel/pakete.sh, Nachtrag TUNNEL)" \
+     tools/tunnel/pakete.sh tunnelpakete '^  OK    (SPURLOS|zweimal gebaut|GEGENPROBE|das Paket .bleibt.|mit --behalte-daten)'
 
 echo
 echo "=================================================================="

@@ -1,0 +1,132 @@
+// kernel/user/proxy.fi -- /apps/proxy.prog/start, DIE BEDIENSEITE DES
+// PROXYS.
+//
+// Das ist der Inhalt des Pakets `proxy`, und es ist ABSICHTLICH ein
+// zweites Paket und nicht Teil von `vpn`. Der Schnitt ist in
+// docs/TUNNEL-PAKETE.md begruendet; die kuerzeste Fassung: die beiden
+// teilen KEINE EINZIGE ZEILE Code. `lib/wg/proto.fi` holt BLAKE2s,
+// ChaCha20 und X25519 aus `lib/crypto/`; `lib/socks/socks5.fi` hat
+// ueberhaupt keine `import`-Zeile, weil SOCKS5 nichts verschluesselt --
+// es ist Rahmenwerk um eine Verbindung, die ein anderer absichert.
+// Zwei Dinge, die sich nichts teilen und die man einzeln will, sind
+// zwei Pakete.
+//
+// WAS DIESES PROGRAMM TUT: es schreibt und liest /etc/proxy.conf, die
+// systemweite Angabe, ueber welchen Proxy Verbindungen laufen sollen.
+//
+// WAS ES BEWUSST NICHT TUT: Namen aufloesen. Ein SOCKS5-Ziel wird als
+// NAME weitergereicht (ATYP 3), nicht als Adresse. Wer den Namen vorher
+// selbst aufloest, schickt die DNS-Frage im Klartext an seinen
+// Aufloeser vorbei am Proxy -- und die Verbindung danach ist perfekt
+// verschluesselt und vollkommen sinnlos. curl nennt den Unterschied
+// `socks5h://` gegen `socks5://`. Osum hat gar keinen Aufloeser, also
+// kann hier nichts lecken; das ist Glueck und keine Leistung, und es
+// steht hier, damit es niemand spaeter aus Versehen wegbaut.
+//
+// UND ZU TOR: die Zeile darf `tor` heissen, aber sie verspricht nichts.
+// Das Paket bindet einen Tor-Klienten AN, es ist keiner. Osum kann
+// keinen Tor-Dienst betreiben -- Tor ist ein grosses C-Programm mit
+// Ereignisschleife, OpenSSL und einem Verzeichnis voll Zustand, und
+// dafuer gibt es keine Portierung. Der Schalter nuetzt, wenn im Netz
+// ein Tor laeuft (auf dem Router, auf einem anderen Rechner, auf einem
+// Telefon), und sonst nicht. Genau das steht auch in der
+// Einstellungsseite -- ein Knopf, der „anonym" verspricht und es nicht
+// halten kann, waere schlimmer als kein Knopf.
+//
+//   proxy                     zeigt die Einstellung
+//   proxy socks5 <ip> <port>  setzt sie
+//   proxy http <ip> <port>    setzt sie
+//   proxy aus                 loescht sie
+
+profile kernel
+
+import ulib
+
+export { u_start }
+
+const O_MAKE_W: u64 = 577 // O_WRONLY|O_CREAT|O_TRUNC, wie in ulib
+static mut PFAD: [u8; 16] = "/etc/proxy.conf\0"
+
+fn schreiben(text: u64, n: u64) -> bool {
+    let fd: i64 = ulib.sys(ulib.SYS_OPEN, (&PFAD[0]) as u64,
+        O_MAKE_W, 420) as i64
+    if fd < 0 {
+        return false
+    }
+    let w: i64 = ulib.sys(ulib.SYS_WRITE, fd as u64, text, n) as i64
+    ulib.sys(ulib.SYS_CLOSE, fd as u64, 0, 0)
+    return w == n as i64
+}
+
+fn zeigen() {
+    var buf: [u8; 128] = [0 as u8; 128]
+    var s_kein: [u8; 50] = "proxy: keiner eingestellt (/etc/proxy.conf fehlt)\0"
+    var s_ist: [u8; 8] = "proxy: \0"
+    let fd: i64 = ulib.sys(ulib.SYS_OPEN, (&PFAD[0]) as u64, 0, 0) as i64
+    if fd < 0 {
+        ulib.say((&s_kein[0]) as u64)
+        ulib.nl()
+        return
+    }
+    let n: i64 = ulib.sys(ulib.SYS_READ, fd as u64,
+        (&buf[0]) as u64, 127) as i64
+    ulib.sys(ulib.SYS_CLOSE, fd as u64, 0, 0)
+    if n <= 0 {
+        ulib.say((&s_kein[0]) as u64)
+        ulib.nl()
+        return
+    }
+    __mmio_write8(((&buf[0]) as u64 + n as u64) as *mut u8, 0 as u8)
+    ulib.say((&s_ist[0]) as u64)
+    ulib.say((&buf[0]) as u64)
+}
+
+fn u_start(args: u64) -> u64 {
+    var s_use1: [u8; 44] = "proxy [socks5|http <ip> <port>] | proxy aus\0"
+    var s_ok: [u8; 15] = "proxy: gesetzt\0"
+    var s_no: [u8; 28] = "proxy: schreiben ging nicht\0"
+    var s_weg: [u8; 17] = "proxy: geloescht\0"
+    var c_aus: [u8; 4] = "aus\0"
+    var c_s5: [u8; 7] = "socks5\0"
+    var c_ht: [u8; 5] = "http\0"
+
+    let n: u64 = ulib.arg_count(args)
+    if n < 2 {
+        zeigen()
+        return 0
+    }
+    let a1: u64 = ulib.arg_at(args, 1)
+    if ulib.streq(a1, (&c_aus[0]) as u64) {
+        ulib.sys(ulib.SYS_UNLINK, (&PFAD[0]) as u64, 0, 0)
+        ulib.say((&s_weg[0]) as u64)
+        ulib.nl()
+        return 0
+    }
+    if n < 4 || (!ulib.streq(a1, (&c_s5[0]) as u64)
+        && !ulib.streq(a1, (&c_ht[0]) as u64)) {
+        ulib.say((&s_use1[0]) as u64)
+        ulib.nl()
+        return 0
+    }
+    // art<TAB>ip<TAB>port, eine Zeile -- dieselbe Form wie die
+    // PLAN-Dateien der Paketverwaltung: Text, den `cat` zeigt.
+    var zeile: [u8; 96] = [0 as u8; 96]
+    let base: u64 = (&zeile[0]) as u64
+    var k: u64 = ulib.strcpy(base, a1)
+    __mmio_write8((base + k) as *mut u8, 9 as u8)
+    k = k + 1
+    k = k + ulib.strcpy(base + k, ulib.arg_at(args, 2))
+    __mmio_write8((base + k) as *mut u8, 9 as u8)
+    k = k + 1
+    k = k + ulib.strcpy(base + k, ulib.arg_at(args, 3))
+    __mmio_write8((base + k) as *mut u8, 10 as u8)
+    k = k + 1
+    if schreiben(base, k) {
+        ulib.say((&s_ok[0]) as u64)
+        ulib.nl()
+    } else {
+        ulib.say((&s_no[0]) as u64)
+        ulib.nl()
+    }
+    return 0
+}
