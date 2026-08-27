@@ -131,6 +131,28 @@
 #      dann weiss der Index von keiner), `nodirty`, `nofocus`, `nomouse`
 #      und der Lauf ganz ohne `wig`.
 #
+#  25. EINE NETZSICHT JE PROZESS (tools/netview/run.sh, Runde NETVIEW):
+#      viele Programme verweigern den Dienst ohne Netz, obwohl sie offline
+#      liefen -- sie wollen nur nachladen oder nach Hause funken. Ein
+#      Prozess bekommt darum ein Feld im Aufgabensatz (`sched.T_NETV`) und
+#      damit eine EIGENE Sicht auf das Netz: `real` (der Draht, und der
+#      Standard), `none` (sofort -ENETUNREACH), `faked` (Adresse,
+#      Gateway, Namensdienst und Verbindungen, die GELINGEN und ins Leere
+#      fuehren -- ein Erreichbarkeitstest bekommt `204 No Content`, das
+#      Nachladen bleibt leer) und `filtered` (eine Liste von Zielen echt,
+#      alles andere wie `faked`). Weil dieser Kernel seinen EIGENEN
+#      TCP/IP-Stapel hat, ist das ein Feld und kein Subsystem --
+#      docs/NETVIEW.md haelt das gegen Androids VPN-Trick, Linux'
+#      Namensraeume und Windows. GEMESSEN: `faked` verbindet in 435 us
+#      (der echte Draht braucht 11 233 us) und schickt NULL Oktette
+#      hinaus -- gelesen am Oktettzaehler des KARTENTREIBERS, gegen einen
+#      Kontrolllauf desselben Abbilds in `real`, der 546 schickt. Zwei
+#      Prozesse GLEICHZEITIG in verschiedenen Sichten, und der
+#      Python-Server auf der Linux-Seite sieht genau EINEN von beiden.
+#      Grundsatz und Gegenprobe in einem: GETAEUSCHT WIRD DAS PROGRAMM,
+#      NIE DER MENSCH -- `ps` hat eine Spalte NET, die Taskleiste ein
+#      Merkmal am Fenster, die Einstellungen eine Seite.
+#
 #  15. EIN WIRT FUER FREMDE PROZESSOREN (tools/hv/run.sh, Runde K12):
 #      AMD-V, verschachtelte Seitentabellen, sechs Gaeste. Der Kernel
 #      legt eine Gastmaschine an, tritt ein, wertet den Austrittsgrund
@@ -423,6 +445,9 @@ lauf "22. Widgets und der Dateimanager: eine Bibliothek in Ring 3 (tools/k15/run
      tools/k15/run.sh k15 '^K15: |^        -> |^  OK    (die Anordnung|ein Klick auf das Kaestchen|mit Bereichsverfolgung|und /daten/neu|der Verweis spart|getippt |OHNE (die Schluesselwoerter|das Journal|den Namensindex)|[0-9]\. (DER AUFBAU|DIE SUCHE|DIE GEGENPROBE|der Index)|und DIESELBEN NAMEN|nach dem (Anlegen|Umbenennen)|das Symbol des Dateimanagers)'
 lauf "24. Energie und Leistung: drei Profile, Ruhezustand, Waerme, Akku (tools/k18/run.sh, Runde K18)" \
      tools/k18/run.sh k18 '^K18: |^  OK    (dieselbe Stelle|IA32_PERF_CTL bekommt|Turbo ist bei|SpeedStep ist bei|jeder Durchlauf ging|schlafend |aber es wird kein|zwei Tabellen|GEGENPROBE|GEDROSSELT|im BILD|dasselbe Pruefbild|und einen Bildpunkt DANEBEN|keine AUFRUFNUMMER)'
+lauf "25. eine Netzsicht je Prozess: real, filtered, faked, none (tools/netview/run.sh, Runde NETVIEW)" \
+     tools/netview/run.sh netview '^NETVIEW: |^  OK    (OCTETS THAT LEFT|faked: (connect|reading|the WHOLE|the BODY|a name resolved|and the reachability)|none: (connect|and it said)|real: connect took|and the python server)'
+
 
 echo
 echo "=================================================================="
