@@ -143,11 +143,17 @@ BEREICHE = [
     ("K18BATT",    "kstate.fi", "BATT_OFF",       "BATT_MAX"),
     # RUNDE K15, ZWEITER NACHTRAG.  Die erste Seite dieses Vorrats wird
     # geteilt: `wig.fi` braucht davon 0x40 Oktette, der Rest gehoert der
-    # Geometrie des Dateisystems (FSG, zwei Woerter aus dem Superblock)
-    # und dem Aenderungsjournal (JRNL).  Beide liegen INNERHALB von
-    # WIG_OFF und sind deshalb hier keine eigenen Bereiche -- sie stehen
-    # unten bei den Unterversaetzen.  Was hier zaehlt, ist: derselbe
-    # Vorrat, keine neue Seite.
+    # Geometrie des Dateisystems (FSG, zwei Woerter aus dem Superblock).
+    # FSG liegt INNERHALB von WIG_OFF und ist deshalb hier kein eigener
+    # Bereich -- es steht unten bei den Unterversaetzen.  Was hier zaehlt,
+    # ist: derselbe Vorrat, keine neue Seite.
+    # RUNDE SPEICHER: das Aenderungsjournal ist aus dieser geteilten Seite
+    # AUSGEZOGEN und hat jetzt zwei eigene (0x5E000..0x60000).  Es traegt
+    # seit dieser Runde auch die Groessenaenderungen, und 56 Saetze waren
+    # dafuer zu wenig -- die Begruendung steht bei JRNL_OFF in kstate.fi.
+    # Damit ist es ein Bereich in `kdata` wie jeder andere und steht
+    # NICHT mehr unten in KEINE_KDATA.
+    ("JRNL",       "kstate.fi", "JRNL_OFF",       "JRNL_MAX"),
 ]
 
 # `_OFF`-Konstanten, die KEINE Bereiche in `kdata` sind -- Offsets
@@ -174,7 +180,6 @@ KEINE_KDATA = {
     ("wig.fi", "CLIP_OFF"),     # Versatz IN WIG_OFF (Runde K15)
     ("wig.fi", "STAGE_OFF"),    # dito
     ("kstate.fi", "FSG_OFF"),   # Versatz IN WIG_OFF (K15, zweiter Nachtrag)
-    ("kstate.fi", "JRNL_OFF"),  # dito -- das Aenderungsjournal
     ("nidx.fi", "H_BASE"),      # Versatz IM Journal, nicht kdata
     ("hv.fi", "CNT_OFF"),       # Versaetze INNERHALB von HV_OFF (Runde K12)
     ("hv.fi", "VAL_OFF"),
