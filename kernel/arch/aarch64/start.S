@@ -211,5 +211,7 @@ stack_top:
  */
     .balign 64
     .globl kstate_a64
+    .globl kdata
+kdata:
 kstate_a64:
     .space  256

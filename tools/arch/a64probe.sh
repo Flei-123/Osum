@@ -42,27 +42,29 @@
 # construction; that is what the directory means since step B. Counting them
 # would be like measuring how portable a port is.
 #
-# WHICH COMPILER. Not the pinned one. `vendor/firn/COMMIT` names a Firn from
-# before the freestanding AArch64 target existed, and it answers
-# `--target=aarch64-linux` with "does not support the kernel profile yet
-# (round 80)". The compiler used here has to be given:
+# WHICH COMPILER. The PINNED one, since round OSUM-ARM2 moved
+# `vendor/firn/COMMIT` to the Firn commit that finished the freestanding
+# AArch64 target. When round ARM first ran this script the pinned compiler
+# answered `--target=aarch64-linux` with "does not support the kernel profile
+# yet (round 80)" and the measurement had to borrow a work-in-progress binary
+# from the other repository, with all the caveats that deserved. It does not
+# any more: this is a number about the compiler this repository builds
+# against, and `./test.sh` section 1 proves that compiler comes from one
+# commit.
+#
+# It can still be overridden, for measuring against a compiler that is not
+# pinned yet:
 #
 #   FIRNC_A64=/path/to/firnc ./tools/arch/a64probe.sh
-#
-# and the number it produces is a number about THAT compiler on THAT day.
-# It is not a promise about the pinned build and this script does not
-# pretend otherwise -- it prints which binary it used and what that binary
-# says its version is.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
 
-FIRNC=${FIRNC_A64:-}
-if [[ -z $FIRNC || ! -x $FIRNC ]]; then
-    echo "set FIRNC_A64 to a firnc that knows --target=aarch64-none" >&2
-    echo "(the pinned one in vendor/firn/bin does not; see the header)" >&2
-    exit 2
+FIRNC=${FIRNC_A64:-$ROOT/vendor/firn/bin/firnc}
+if [[ ! -x $FIRNC ]]; then
+    bash vendor/firn/hole-firnc.sh >/dev/null 2>&1
 fi
+[[ -x $FIRNC ]] || { echo "the compiler is missing: $FIRNC" >&2; exit 2; }
 
 export FIRNLIB="$ROOT/lib"
 TMP=$(mktemp -d)
