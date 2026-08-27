@@ -1,0 +1,1244 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/share.fi -- round NETMON, part two: HANDING THE CONNECTION ON.
+//
+// WHAT JUSTIN ASKED FOR AND WHAT IS HERE, said plainly before anything
+// else, because the difference matters and hiding it would be a lie.
+//
+// Windows has a thing called "Mobiler Hotspot". It turns the machine's
+// WIFI ADAPTER into an access point: other devices see a network name,
+// join it with a password, and reach the internet through this machine.
+// That needs 802.11 -- the whole of it, association, authentication,
+// four-way handshake, WPA2 -- AND a wifi driver whose firmware can run
+// in access-point mode. Osum has NOT ONE LINE of 802.11. There is no
+// wifi driver, no wifi stack, no 802.11 frame format anywhere in this
+// repository; the only network card this kernel has ever spoken to is
+// virtio-net over PCI. A WLAN hotspot is therefore NOT POSSIBLE HERE,
+// and announcing one would be announcing something that cannot work.
+//
+// WHAT IS POSSIBLE, and it is the same thing for the person using it as
+// soon as there are two network interfaces: TAKE THE CONNECTION ON ONE
+// AND HAND IT ON THROUGH THE OTHER. Windows calls that "Internet
+// Connection Sharing" and it is a different feature from the hotspot
+// with the same purpose. It is three things and this file is those
+// three things:
+//
+//   FORWARDING   a frame that arrives on the shared side and is not for
+//                this machine goes out of the uplink instead of being
+//                dropped.
+//   NAT          the addresses on the shared side are private and the
+//                world cannot route back to them, so every connection
+//                leaves wearing THIS machine's address and a port that
+//                belongs to it, and a table remembers which port
+//                belonged to whom so that the answer finds its way home.
+//   DHCP SERVER  a device that has just been plugged in has no address.
+//                It asks, and something has to answer -- otherwise the
+//                shared network is a cable with nothing at either end.
+//
+// AND THE DHCP SERVER IS NOT THE DHCP CLIENT. `kernel/user/dhcp.fi`
+// exists since round DESKTOP and it ASKS for an address. This asks
+// nobody and ANSWERS. They share a packet format and nothing else -- no
+// code, no state, not even a direction. Two rounds have now confused
+// them in conversation, so it is written down here.
+//
+// THE DNS FORWARDER, honestly. Clients are handed the uplink's gateway
+// as their name server, and their queries to it are carried by the NAT
+// above like any other datagram to port 53. That is forwarding by
+// routing and not a resolver of our own -- this system has no resolver
+// (`kernel/user/wget.fi` says so too) -- and it means a client whose
+// gateway does not answer DNS gets no names. It is the honest half of
+// the feature and the other half is a round of its own.
+//
+// WHERE THE FRAMES ARE MOVED. The outward direction has a turn of its
+// own in the network task (`share.pump`, called from `inet.netd_body`
+// beside `inet.pump`). The inward direction CANNOT have one: frames
+// from the uplink go into the TCP/IP stack, and a frame belonging to a
+// client is not the stack's business. So `inet.pump` asks `inbound`
+// once per frame, before `net_input`, and a frame that was forwarded
+// never reaches the stack at all. That is one function call per frame
+// on a path that already has one (`netmon.frame_seen`), and section 7
+// of `tools/netmon/run.sh` measures what it costs.
+
+profile kernel
+
+import kstate
+import serial
+import atomic
+import cpu
+import sched
+import pci
+import virtio
+import inet
+import netmon
+import net.wire
+
+export {
+    init, stage, on, set_on, pump, inbound, report,
+    uplink, shared, my_ip, mask, pool_first, pool_last, lease,
+    set_pool, set_my_ip,
+    clients, client_at, C_USE, C_MAC, C_IP, C_FIRST, C_IN, C_OUT, C_PKTS,
+    nat_live, nat_at, N_LAST, N_PROTO, N_IIP, N_IPORT, N_OPORT, N_RIP,
+    N_RPORT, N_PKTS, NAT_MAX, CLIENT_MAX,
+    stat, S_OUTF, S_INF, S_NEW, S_REUSE, S_EVICT, S_OFFERS, S_ACKS,
+    S_ARPS, S_DROPS, S_NOROOM
+}
+
+// -------------------------------------------------------- the place
+//
+// THREE PAGES, 0x5D000..0x60000, the last three of `kdata`. Round K18
+// left 0x58000..0x60000 open; rounds K18 and NETMON have taken the
+// first five pages of it and this takes the rest. There is no room
+// after this one: `KDATA_SIZE` is 0x60000 and it is written twice, here
+// in `kstate.fi` and in `kernel/boot.s`. The next round that needs a
+// page has to raise both, and `tools/hv/run.sh` compares them.
+//
+//   0x0000..0x00FF  the scalars
+//   0x0100..0x10FF  sixty-four NAT records of 64 octets
+//   0x1100..0x14FF  sixteen client records of 64 octets
+//   0x1500..0x1CFF  the frame being rewritten
+//   0x1D00..0x24FF  the frame being built (DHCP, ARP)
+
+const SCAL: u64 = 0x0000
+const NAT: u64 = 0x0100
+const NAT_BYTES: u64 = 64
+const NAT_MAX: u64 = 64
+const CLI: u64 = 0x1100
+const CLI_BYTES: u64 = 64
+const CLIENT_MAX: u64 = 16
+const WORK: u64 = 0x1500
+const BUILD: u64 = 0x1D00
+const FRAME_CAP: u64 = 2048
+
+// The scalars.
+const S_ON: u64 = 0x00
+const S_UP: u64 = 0x08 // which card is the uplink
+const S_SH: u64 = 0x10 // and which one is shared
+const S_IP: u64 = 0x18 // this machine's address on the shared side
+const S_MASK: u64 = 0x20
+const S_P0: u64 = 0x28 // the first address handed out
+const S_P1: u64 = 0x30 // and the last
+const S_LEASE: u64 = 0x38 // seconds
+const S_NEXTP: u64 = 0x40 // the next outer port to try
+const S_ID: u64 = 0x48 // the IP identification field, counting up
+
+// The counters. `stat()` answers by these numbers and `/bin/netshare`
+// prints them.
+const S_OUTF: u64 = 0x50 // frames forwarded outwards
+const S_INF: u64 = 0x58 // and inwards
+const S_NEW: u64 = 0x60 // NAT records made
+const S_REUSE: u64 = 0x68 // NAT records found again
+const S_EVICT: u64 = 0x70 // NAT records thrown out because the table was full
+const S_OFFERS: u64 = 0x78 // DHCP offers sent
+const S_ACKS: u64 = 0x80 // and acknowledgements
+const S_ARPS: u64 = 0x88 // ARP requests answered on the shared side
+const S_DROPS: u64 = 0x90 // frames the forwarder would not carry
+const S_NOROOM: u64 = 0x98 // frames dropped because the card was full
+const S_TURNS: u64 = 0xA0 // turns of the outward pump
+const S_GWSEEN: u64 = 0xA8 // 1 = the uplink gateway's address is known
+
+// A NAT record.
+const N_LAST: u64 = 0 // tick + 1 when it was last used, 0 = free
+const N_PROTO: u64 = 1
+const N_IIP: u64 = 2 // the client
+const N_IPORT: u64 = 3
+const N_OPORT: u64 = 4 // what it wears on the outside
+const N_RIP: u64 = 5 // and who it is talking to
+const N_RPORT: u64 = 6
+const N_PKTS: u64 = 7
+
+// A client record.
+const C_USE: u64 = 0 // tick + 1 when it was last seen, 0 = free
+const C_MAC: u64 = 1 // six octets in one word, low first
+const C_IP: u64 = 2
+const C_FIRST: u64 = 3 // tick at which it first appeared
+const C_IN: u64 = 4 // octets it sent
+const C_OUT: u64 = 5 // and octets it received
+const C_PKTS: u64 = 6
+
+// The ports this machine lends out. Deliberately above everything the
+// rest of the kernel uses: `inet.sock_sendto` takes 40000..44095 for an
+// unbound datagram socket and the TCP stack picks its own below that. A
+// range that overlapped would mean a client's answer arriving on a port
+// a local program is listening on, and that is a bug that only shows up
+// under load.
+const PORT_LOW: u64 = 50000
+const PORT_HIGH: u64 = 59999
+
+// How many turns of the outward pump before it lets go. The same
+// argument as `inet.PUMP_BATCH`: the lock is held with interrupts off.
+const BATCH: u64 = 16
+
+// The defaults. 192.168.42.0/24 -- a private range (RFC 1918) that is
+// deliberately NOT 192.168.0.0/24 or 192.168.1.0/24, because those two
+// are what almost every home router already uses and a shared network
+// that collides with the uplink's own network cannot be routed out of.
+const DEF_IP: u64 = 0xC0A82A01 // 192.168.42.1
+const DEF_MASK: u64 = 0xFFFFFF00
+const DEF_P0: u64 = 0xC0A82A64 // .100
+const DEF_P1: u64 = 0xC0A82A96 // .150
+const DEF_LEASE: u64 = 3600
+
+fn sh(off: u64) -> u64 {
+    return kstate.SHARE_OFF + off
+}
+
+fn nat_at(state: u64, i: u64, field: u64) -> u64 {
+    if i >= NAT_MAX || field >= 8 {
+        return 0
+    }
+    return kstate.get(state, sh(NAT + i * NAT_BYTES + field * 8))
+}
+
+fn nat_set(state: u64, i: u64, field: u64, v: u64) {
+    if i >= NAT_MAX || field >= 8 {
+        return
+    }
+    kstate.set(state, sh(NAT + i * NAT_BYTES + field * 8), v)
+}
+
+fn client_at(state: u64, i: u64, field: u64) -> u64 {
+    if i >= CLIENT_MAX || field >= 8 {
+        return 0
+    }
+    return kstate.get(state, sh(CLI + i * CLI_BYTES + field * 8))
+}
+
+fn client_set(state: u64, i: u64, field: u64, v: u64) {
+    if i >= CLIENT_MAX || field >= 8 {
+        return
+    }
+    kstate.set(state, sh(CLI + i * CLI_BYTES + field * 8), v)
+}
+
+fn stat(state: u64, which: u64) -> u64 {
+    return kstate.get(state, sh(which))
+}
+
+fn on(state: u64) -> bool {
+    return kstate.get(state, sh(S_ON)) != 0
+}
+
+fn set_on(state: u64, v: u64) {
+    kstate.set(state, sh(S_ON), v)
+}
+
+fn uplink(state: u64) -> u64 {
+    return kstate.get(state, sh(S_UP))
+}
+
+fn shared(state: u64) -> u64 {
+    return kstate.get(state, sh(S_SH))
+}
+
+fn my_ip(state: u64) -> u64 {
+    return kstate.get(state, sh(S_IP))
+}
+
+fn mask(state: u64) -> u64 {
+    return kstate.get(state, sh(S_MASK))
+}
+
+fn pool_first(state: u64) -> u64 {
+    return kstate.get(state, sh(S_P0))
+}
+
+fn pool_last(state: u64) -> u64 {
+    return kstate.get(state, sh(S_P1))
+}
+
+fn lease(state: u64) -> u64 {
+    return kstate.get(state, sh(S_LEASE))
+}
+
+fn set_my_ip(state: u64, ip: u64, m: u64) {
+    kstate.set(state, sh(S_IP), ip)
+    kstate.set(state, sh(S_MASK), m)
+}
+
+fn set_pool(state: u64, a: u64, b: u64) {
+    kstate.set(state, sh(S_P0), a)
+    kstate.set(state, sh(S_P1), b)
+}
+
+// How many clients are known right now.
+fn clients(state: u64) -> u64 {
+    var n: u64 = 0
+    var i: u64 = 0
+    while i < CLIENT_MAX {
+        if client_at(state, i, C_USE) != 0 {
+            n = n + 1
+        }
+        i = i + 1
+    }
+    return n
+}
+
+fn nat_live(state: u64) -> u64 {
+    var n: u64 = 0
+    var i: u64 = 0
+    while i < NAT_MAX {
+        if nat_at(state, i, N_LAST) != 0 {
+            n = n + 1
+        }
+        i = i + 1
+    }
+    return n
+}
+
+// ------------------------------------------------------------ the init
+
+fn init(state: u64) {
+    var i: u64 = 0
+    while i < kstate.SHARE_MAX / 8 {
+        kstate.set(state, sh(i * 8), 0)
+        i = i + 1
+    }
+    kstate.set(state, sh(S_UP), 0)
+    kstate.set(state, sh(S_SH), 1)
+    kstate.set(state, sh(S_IP), DEF_IP)
+    kstate.set(state, sh(S_MASK), DEF_MASK)
+    kstate.set(state, sh(S_P0), DEF_P0)
+    kstate.set(state, sh(S_P1), DEF_P1)
+    kstate.set(state, sh(S_LEASE), DEF_LEASE)
+    kstate.set(state, sh(S_NEXTP), PORT_LOW)
+}
+
+// The second card, brought up. Called out of `netsvc.stage` after the
+// first one, and only when the command line said `share` -- a machine
+// with one card must behave exactly as it did before this round, and
+// `noshare` is the counter-check that says so.
+fn stage(state: u64) -> bool {
+    var s_no: [u8; 33] = "share: no second card on the bus\0"
+    var s_up: [u8; 13] = "share: card=\0"
+    var s_ip: [u8; 6] = "  ip=\0"
+    var s_dot: [u8; 2] = ".\0"
+    var s_pool: [u8; 8] = "  pool=\0"
+    var s_dash: [u8; 2] = "-\0"
+    let c: u64 = shared(state)
+    if !virtio.init_on(state, c, true, true) {
+        serial.puts((&s_no[0]) as u64)
+        serial.nl()
+        return false
+    }
+    if !virtio.ready_on(state, c) {
+        serial.puts((&s_no[0]) as u64)
+        serial.nl()
+        return false
+    }
+    set_on(state, 1)
+    serial.puts((&s_up[0]) as u64)
+    serial.dec(c)
+    serial.puts((&s_ip[0]) as u64)
+    say_ip(state, my_ip(state))
+    serial.puts((&s_pool[0]) as u64)
+    say_ip(state, pool_first(state))
+    serial.puts((&s_dash[0]) as u64)
+    say_ip(state, pool_last(state))
+    serial.nl()
+    return true
+}
+
+fn say_ip(state: u64, a: u64) {
+    var s_dot: [u8; 2] = ".\0"
+    serial.dec((a >> 24) & 0xFF)
+    serial.puts((&s_dot[0]) as u64)
+    serial.dec((a >> 16) & 0xFF)
+    serial.puts((&s_dot[0]) as u64)
+    serial.dec((a >> 8) & 0xFF)
+    serial.puts((&s_dot[0]) as u64)
+    serial.dec(a & 0xFF)
+}
+
+// ------------------------------------------------------- the clients
+
+// The record of a hardware address, made if it is new. A client is
+// known by its MAC and not by its address: the address is what THIS
+// machine gave it, and it has to be findable before it has one.
+fn client_of(state: u64, mac: u64) -> u64 {
+    var i: u64 = 0
+    while i < CLIENT_MAX {
+        if client_at(state, i, C_USE) != 0 && client_at(state, i, C_MAC) == mac {
+            client_set(state, i, C_USE, kstate.get(state, kstate.TICKS) + 1)
+            return i
+        }
+        i = i + 1
+    }
+    i = 0
+    while i < CLIENT_MAX {
+        if client_at(state, i, C_USE) == 0 {
+            var f: u64 = 0
+            while f < 8 {
+                client_set(state, i, f, 0)
+                f = f + 1
+            }
+            client_set(state, i, C_USE, kstate.get(state, kstate.TICKS) + 1)
+            client_set(state, i, C_MAC, mac)
+            client_set(state, i, C_FIRST, kstate.get(state, kstate.TICKS))
+            return i
+        }
+        i = i + 1
+    }
+    return CLIENT_MAX
+}
+
+fn client_by_ip(state: u64, ip: u64) -> u64 {
+    var i: u64 = 0
+    while i < CLIENT_MAX {
+        if client_at(state, i, C_USE) != 0 && client_at(state, i, C_IP) == ip {
+            return i
+        }
+        i = i + 1
+    }
+    return CLIENT_MAX
+}
+
+// The address this client is to have. The same MAC gets the same
+// address for as long as its record lives -- a device that reconnects
+// and gets a different address every time is a device whose connections
+// all break.
+fn address_for(state: u64, ci: u64) -> u64 {
+    if ci >= CLIENT_MAX {
+        return 0
+    }
+    let had: u64 = client_at(state, ci, C_IP)
+    if had != 0 {
+        return had
+    }
+    var a: u64 = pool_first(state)
+    while a <= pool_last(state) {
+        if client_by_ip(state, a) >= CLIENT_MAX {
+            client_set(state, ci, C_IP, a)
+            return a
+        }
+        a = a + 1
+    }
+    return 0
+}
+
+// The six octets of a hardware address at `off` in a frame, as one word.
+fn mac_word(f: u64, off: u64) -> u64 {
+    var m: u64 = 0
+    var i: u64 = 0
+    while i < 6 {
+        m = m | (__mmio_read8((f + off + i) as *mut u8) as u64 << (i * 8))
+        i = i + 1
+    }
+    return m
+}
+
+fn mac_out(m: u64, p: u64) {
+    var i: u64 = 0
+    while i < 6 {
+        __mmio_write8((p + i) as *mut u8, ((m >> (i * 8)) & 0xFF) as u8)
+        i = i + 1
+    }
+}
+
+fn card_mac(state: u64, c: u64, p: u64) {
+    var i: u64 = 0
+    while i < 6 {
+        __mmio_write8((p + i) as *mut u8, virtio.mac_at_on(state, c, i) as u8)
+        i = i + 1
+    }
+}
+
+// ----------------------------------------------------------- the NAT
+
+// The record for a connection going out, made if it is new. The key is
+// all five: two machines can talk to the same server from the same port
+// number and they are not the same connection.
+fn nat_find(state: u64, proto: u64, iip: u64, iport: u64, rip: u64,
+    rport: u64) -> u64 {
+    var i: u64 = 0
+    while i < NAT_MAX {
+        if nat_at(state, i, N_LAST) != 0
+            && nat_at(state, i, N_PROTO) == proto
+            && nat_at(state, i, N_IIP) == iip
+            && nat_at(state, i, N_IPORT) == iport
+            && nat_at(state, i, N_RIP) == rip
+            && nat_at(state, i, N_RPORT) == rport {
+            nat_set(state, i, N_LAST, kstate.get(state, kstate.TICKS) + 1)
+            kstate.add(state, sh(S_REUSE), 1)
+            return i
+        }
+        i = i + 1
+    }
+    return NAT_MAX
+}
+
+// Is this outer port already lent out?
+fn port_taken(state: u64, proto: u64, port: u64) -> bool {
+    var i: u64 = 0
+    while i < NAT_MAX {
+        if nat_at(state, i, N_LAST) != 0 && nat_at(state, i, N_PROTO) == proto
+            && nat_at(state, i, N_OPORT) == port {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn nat_make(state: u64, proto: u64, iip: u64, iport: u64, rip: u64,
+    rport: u64) -> u64 {
+    var slot: u64 = NAT_MAX
+    var i: u64 = 0
+    while i < NAT_MAX {
+        if nat_at(state, i, N_LAST) == 0 {
+            slot = i
+            i = NAT_MAX
+        } else {
+            i = i + 1
+        }
+    }
+    if slot >= NAT_MAX {
+        // FULL. The oldest goes, and it is counted -- a table that
+        // silently throws away the connection you are using is a table
+        // whose size nobody ever finds out is too small.
+        var oldest: u64 = 0
+        var best: u64 = nat_at(state, 0, N_LAST)
+        i = 1
+        while i < NAT_MAX {
+            let t: u64 = nat_at(state, i, N_LAST)
+            if t < best {
+                best = t
+                oldest = i
+            }
+            i = i + 1
+        }
+        slot = oldest
+        kstate.add(state, sh(S_EVICT), 1)
+    }
+    var port: u64 = kstate.get(state, sh(S_NEXTP))
+    var tries: u64 = 0
+    while port_taken(state, proto, port) && tries < NAT_MAX + 2 {
+        port = port + 1
+        if port > PORT_HIGH {
+            port = PORT_LOW
+        }
+        tries = tries + 1
+    }
+    var next: u64 = port + 1
+    if next > PORT_HIGH {
+        next = PORT_LOW
+    }
+    kstate.set(state, sh(S_NEXTP), next)
+    nat_set(state, slot, N_LAST, kstate.get(state, kstate.TICKS) + 1)
+    nat_set(state, slot, N_PROTO, proto)
+    nat_set(state, slot, N_IIP, iip)
+    nat_set(state, slot, N_IPORT, iport)
+    nat_set(state, slot, N_OPORT, port)
+    nat_set(state, slot, N_RIP, rip)
+    nat_set(state, slot, N_RPORT, rport)
+    nat_set(state, slot, N_PKTS, 0)
+    kstate.add(state, sh(S_NEW), 1)
+    return slot
+}
+
+// The record an answer belongs to, or NAT_MAX. The remote end has to
+// match as well as the port: a datagram from a machine nobody talked to,
+// aimed at a port this machine lent out, is not an answer.
+fn nat_reverse(state: u64, proto: u64, oport: u64, rip: u64,
+    rport: u64) -> u64 {
+    var i: u64 = 0
+    while i < NAT_MAX {
+        if nat_at(state, i, N_LAST) != 0 && nat_at(state, i, N_PROTO) == proto
+            && nat_at(state, i, N_OPORT) == oport
+            && nat_at(state, i, N_RIP) == rip
+            && nat_at(state, i, N_RPORT) == rport {
+            nat_set(state, i, N_LAST, kstate.get(state, kstate.TICKS) + 1)
+            return i
+        }
+        i = i + 1
+    }
+    return NAT_MAX
+}
+
+// ------------------------------------------------- rewriting a packet
+//
+// The port lives at offset 0 (source) and 2 (destination) of BOTH the
+// TCP and the UDP header, which is the one thing those two protocols
+// agree on. For ICMP there is no port; the IDENTIFIER of an echo, at
+// offset 4, does the same job and is used as one. That is what every
+// NAT does and it is why a `ping` through a router works at all.
+
+fn l4_ports(proto: u64, h: u64, sp: *mut u64, dp: *mut u64) -> bool {
+    if proto == wire.IP_TCP as u64 || proto == wire.IP_UDP as u64 {
+        *sp = wire.be16(h as *mut u8, 0 as usize) as u64
+        *dp = wire.be16(h as *mut u8, 2 as usize) as u64
+        return true
+    }
+    if proto == wire.IP_ICMP as u64 {
+        let id: u64 = wire.be16(h as *mut u8, 4 as usize) as u64
+        *sp = id
+        *dp = id
+        return true
+    }
+    return false
+}
+
+// The checksum of the protocol part, computed from scratch. Not the
+// incremental update of RFC 1624: that is four lines shorter and it is
+// wrong the moment anything else in the packet has been touched, and a
+// checksum that is wrong only sometimes is the worst kind of bug to
+// find. `n` is the length of the protocol part.
+fn l4_fix(proto: u64, h: u64, n: u64, src: u64, dst: u64) {
+    if proto == wire.IP_ICMP as u64 {
+        wire.put16(h as *mut u8, 2 as usize, 0 as u16)
+        wire.put16(h as *mut u8, 2 as usize,
+            wire.checksum(h as *mut u8, n as usize))
+        return
+    }
+    var off: u64 = 16 // TCP
+    if proto == wire.IP_UDP as u64 {
+        off = 6
+    } else if proto != wire.IP_TCP as u64 {
+        return
+    }
+    wire.put16(h as *mut u8, off as usize, 0 as u16)
+    var acc: u64 = wire.pseudo_sum((src & 0xFFFFFFFF) as u32,
+        (dst & 0xFFFFFFFF) as u32, (proto & 0xFF) as u8, n as usize)
+    acc = acc + wire.sum16(h as *mut u8, n as usize)
+    var c: u16 = wire.fold(acc)
+    if proto == wire.IP_UDP as u64 && c == 0 as u16 {
+        // RFC 768: a computed zero is sent as all ones, because a zero
+        // in that field means "not computed".
+        c = 0xFFFF as u16
+    }
+    wire.put16(h as *mut u8, off as usize, c)
+}
+
+fn ip_fix(d: u64) {
+    wire.put16(d as *mut u8, 10 as usize, 0 as u16)
+    wire.put16(d as *mut u8, 10 as usize,
+        wire.checksum(d as *mut u8, 20 as usize))
+}
+
+fn copy_frame(src: u64, dst: u64, n: u64) {
+    var i: u64 = 0
+    while i < n {
+        __mmio_write8((dst + i) as *mut u8,
+            __mmio_read8((src + i) as *mut u8))
+        i = i + 1
+    }
+}
+
+// ------------------------------------------------- outward: the pump
+//
+// One turn: everything the shared card has, looked at once and either
+// answered here (ARP, DHCP), forwarded through the uplink (everything
+// with somewhere else to go) or dropped and counted.
+
+fn pump(state: u64) -> u64 {
+    if !on(state) {
+        return 0
+    }
+    let c: u64 = shared(state)
+    if !virtio.ready_on(state, c) {
+        return 0
+    }
+    kstate.add(state, sh(S_TURNS), 1)
+    // THE GATEWAY'S HARDWARE ADDRESS, ASKED FOR BEFORE IT IS NEEDED.
+    // Without this the FIRST packet of the first client is always
+    // dropped: `forward_out` finds no ARP entry, sends the question and
+    // has nowhere to put the packet while it waits. A `ping -c 3` then
+    // loses its first echo, and the measured run of part two showed
+    // `out=0 drops=1` for exactly that reason. Asking here costs one
+    // comparison per turn and one ARP request per boot.
+    let gw: u64 = inet.gw(state)
+    if gw != 0 && kstate.get(state, sh(S_GWSEEN)) == 0 {
+        if inet.hw_for(state, gw) != 0 {
+            kstate.set(state, sh(S_GWSEEN), 1)
+        }
+    }
+    var work: u64 = 0
+    var frame: u64 = 0
+    var slot: u64 = 0
+    var n: u64 = 0
+    while n < BATCH {
+        let len: u64 = virtio.rx_take_on(state, c, &frame, &slot)
+        if len == 0 {
+            n = BATCH
+        } else {
+            outward(state, frame, len)
+            virtio.rx_recycle_on(state, c, slot)
+            work = work + 1
+            n = n + 1
+        }
+    }
+    return work
+}
+
+fn outward(state: u64, f: u64, len: u64) {
+    if len < 14 {
+        kstate.add(state, sh(S_DROPS), 1)
+        return
+    }
+    let et: u64 = wire.eth_type(f as *mut u8) as u64
+    if et == wire.ETYPE_ARP as u64 {
+        arp_answer(state, f, len)
+        return
+    }
+    if et != wire.ETYPE_IP4 as u64 || len < 14 + 20 {
+        kstate.add(state, sh(S_DROPS), 1)
+        return
+    }
+    let d: u64 = f + 14
+    let ihl: u64 = wire.ip_ihl(d as *mut u8) as u64
+    if ihl < 20 || len < 14 + ihl {
+        kstate.add(state, sh(S_DROPS), 1)
+        return
+    }
+    let src: u64 = wire.ip_src(d as *mut u8) as u64
+    let dst: u64 = wire.ip_dst(d as *mut u8) as u64
+    let proto: u64 = wire.ip_proto(d as *mut u8) as u64
+    let smac: u64 = mac_word(f, 6)
+    let ci: u64 = client_of(state, smac)
+    if ci < CLIENT_MAX {
+        client_set(state, ci, C_IN, client_at(state, ci, C_IN) + len)
+        client_set(state, ci, C_PKTS, client_at(state, ci, C_PKTS) + 1)
+        // ONLY AN ADDRESS OUT OF OUR OWN RANGE. A client that has not
+        // asked yet is still carrying whatever it was booted with, and
+        // the first measured run of part two handed that address
+        // straight back to it: the DHCP server offered 169.254.1.9,
+        // which is what the client already had and cannot route with.
+        // The rule is one line and it is this one.
+        if src != 0 && client_at(state, ci, C_IP) == 0
+            && (src & mask(state)) == (my_ip(state) & mask(state)) {
+            client_set(state, ci, C_IP, src)
+        }
+    }
+    // A datagram to port 67 is a client asking for an address, whatever
+    // it is addressed to -- it has none yet, so it cannot address it
+    // properly.
+    if proto == wire.IP_UDP as u64 && len >= 14 + ihl + 8 {
+        let h: u64 = d + ihl
+        if wire.udp_dport(h as *mut u8) as u64 == 67 {
+            dhcp(state, f, len, d, ihl, h, smac, ci)
+            return
+        }
+    }
+    if dst == my_ip(state) {
+        // For this machine, on the shared side. Only ICMP echo is
+        // answered, because a client that cannot ping its gateway
+        // believes the network is broken.
+        if proto == wire.IP_ICMP as u64 {
+            icmp_echo(state, f, len, d, ihl)
+            return
+        }
+        kstate.add(state, sh(S_DROPS), 1)
+        return
+    }
+    if (dst & 0xFF) == 0xFF || dst == 0xFFFFFFFF {
+        // A broadcast has nowhere to be forwarded to.
+        kstate.add(state, sh(S_DROPS), 1)
+        return
+    }
+    forward_out(state, f, len, d, ihl, src, dst, proto)
+}
+
+// The rewrite that makes a private address routable.
+fn forward_out(state: u64, f: u64, len: u64, d: u64, ihl: u64, src: u64,
+    dst: u64, proto: u64) {
+    var sp: u64 = 0
+    var dp: u64 = 0
+    let h: u64 = d + ihl
+    if !l4_ports(proto, h, &sp, &dp) {
+        kstate.add(state, sh(S_DROPS), 1)
+        return
+    }
+    // ICMP HAS NO REMOTE PORT. `l4_ports` gives back the identifier for
+    // both halves because that is the field being substituted, and if
+    // that identifier were also stored as the REMOTE port the answer
+    // would never be found again: on the way back the identifier is the
+    // one WE put in, not the one the client chose. The first measured
+    // run of part two showed exactly that -- a `ping` through the NAT
+    // that went out and never came back. Zero, and the reverse lookup
+    // uses zero as well.
+    var rport: u64 = dp
+    if proto == wire.IP_ICMP as u64 {
+        rport = 0
+    }
+    var e: u64 = nat_find(state, proto, src, sp, dst, rport)
+    if e >= NAT_MAX {
+        e = nat_make(state, proto, src, sp, dst, rport)
+    }
+    if e >= NAT_MAX {
+        kstate.add(state, sh(S_DROPS), 1)
+        return
+    }
+    nat_set(state, e, N_PKTS, nat_at(state, e, N_PKTS) + 1)
+    let up: u64 = uplink(state)
+    let gw: u64 = inet.gw(state)
+    let hw: u64 = inet.hw_for(state, gw)
+    if hw == 0 {
+        // The gateway's hardware address is not known yet and the
+        // question has just gone out. The frame is dropped; TCP will
+        // send it again, and a `ping` loses one. Buffering it would mean
+        // a queue, and a queue is a round of its own.
+        kstate.add(state, sh(S_DROPS), 1)
+        return
+    }
+    var n: u64 = len
+    if n > FRAME_CAP {
+        n = FRAME_CAP
+    }
+    let w: u64 = state + sh(WORK)
+    copy_frame(f, w, n)
+    let wd: u64 = w + 14
+    let wh: u64 = wd + ihl
+    // The addresses.
+    card_mac(state, up, w + 6)
+    mac_out(hw, w)
+    wire.put32(wd as *mut u8, 12 as usize,
+        (inet.ip(state) & 0xFFFFFFFF) as u32)
+    let oport: u64 = nat_at(state, e, N_OPORT)
+    if proto == wire.IP_ICMP as u64 {
+        wire.put16(wh as *mut u8, 4 as usize, (oport & 0xFFFF) as u16)
+    } else {
+        wire.put16(wh as *mut u8, 0 as usize, (oport & 0xFFFF) as u16)
+    }
+    let total: u64 = wire.ip_total(wd as *mut u8) as u64
+    if total < ihl || total > n - 14 {
+        kstate.add(state, sh(S_DROPS), 1)
+        return
+    }
+    ip_fix(wd)
+    l4_fix(proto, wh, total - ihl, inet.ip(state), dst)
+    if !virtio.tx_frame_on(state, up, w, n) {
+        kstate.add(state, sh(S_NOROOM), 1)
+        return
+    }
+    kstate.add(state, sh(S_OUTF), 1)
+}
+
+// ------------------------------------------------- inward: the answer
+//
+// Called by `inet.pump` for every frame off the uplink, BEFORE the
+// stack sees it. `true` means "this was a client's and it has been
+// dealt with"; the stack never learns it existed.
+fn inbound(state: u64, f: u64, len: u64) -> bool {
+    if !on(state) || len < 14 + 20 {
+        return false
+    }
+    if wire.eth_type(f as *mut u8) != wire.ETYPE_IP4 {
+        return false
+    }
+    let d: u64 = f + 14
+    let ihl: u64 = wire.ip_ihl(d as *mut u8) as u64
+    if ihl < 20 || len < 14 + ihl + 8 {
+        return false
+    }
+    if wire.ip_dst(d as *mut u8) as u64 != inet.ip(state) {
+        return false
+    }
+    let proto: u64 = wire.ip_proto(d as *mut u8) as u64
+    let rip: u64 = wire.ip_src(d as *mut u8) as u64
+    let h: u64 = d + ihl
+    var sp: u64 = 0
+    var dp: u64 = 0
+    if !l4_ports(proto, h, &sp, &dp) {
+        return false
+    }
+    // An ICMP ECHO REPLY carries the identifier we substituted; a
+    // REQUEST from outside is not an answer to anything and is left to
+    // the stack.
+    if proto == wire.IP_ICMP as u64
+        && wire.icmp_type(h as *mut u8) != wire.ICMP_ECHO_REPLY {
+        return false
+    }
+    var rport: u64 = sp
+    if proto == wire.IP_ICMP as u64 {
+        rport = 0
+    }
+    let e: u64 = nat_reverse(state, proto, dp, rip, rport)
+    if e >= NAT_MAX {
+        return false
+    }
+    let iip: u64 = nat_at(state, e, N_IIP)
+    let ci: u64 = client_by_ip(state, iip)
+    if ci >= CLIENT_MAX {
+        return false
+    }
+    let c: u64 = shared(state)
+    var n: u64 = len
+    if n > FRAME_CAP {
+        n = FRAME_CAP
+    }
+    let w: u64 = state + sh(WORK)
+    copy_frame(f, w, n)
+    let wd: u64 = w + 14
+    let wh: u64 = wd + ihl
+    card_mac(state, c, w + 6)
+    mac_out(client_at(state, ci, C_MAC), w)
+    wire.put32(wd as *mut u8, 16 as usize, (iip & 0xFFFFFFFF) as u32)
+    let iport: u64 = nat_at(state, e, N_IPORT)
+    if proto == wire.IP_ICMP as u64 {
+        wire.put16(wh as *mut u8, 4 as usize, (iport & 0xFFFF) as u16)
+    } else {
+        wire.put16(wh as *mut u8, 2 as usize, (iport & 0xFFFF) as u16)
+    }
+    let total: u64 = wire.ip_total(wd as *mut u8) as u64
+    if total < ihl || total > n - 14 {
+        return false
+    }
+    ip_fix(wd)
+    l4_fix(proto, wh, total - ihl, rip, iip)
+    nat_set(state, e, N_PKTS, nat_at(state, e, N_PKTS) + 1)
+    client_set(state, ci, C_OUT, client_at(state, ci, C_OUT) + n)
+    if !virtio.tx_frame_on(state, c, w, n) {
+        kstate.add(state, sh(S_NOROOM), 1)
+        return true
+    }
+    kstate.add(state, sh(S_INF), 1)
+    return true
+}
+
+// ------------------------------------------------------------- ARP
+//
+// A client looking for the gateway. Answered here and not by the stack:
+// the stack has one address and it is the UPLINK's, and answering with
+// it would send the client's frames to the wrong side of the machine.
+
+fn arp_answer(state: u64, f: u64, len: u64) {
+    if len < 14 + 28 {
+        return
+    }
+    let a: u64 = f + 14
+    if !wire.arp_ok(a as *mut u8, (len - 14) as usize) {
+        return
+    }
+    let smac: u64 = mac_word(f, 6)
+    let ci: u64 = client_of(state, smac)
+    let tpa: u64 = wire.arp_tpa(a as *mut u8) as u64
+    let spa: u64 = wire.arp_spa(a as *mut u8) as u64
+    // The sender's address, but only if it is one of OURS to give out.
+    // A client still carrying the address it was booted with must not
+    // be written down under it -- that address belongs to another
+    // network and the DHCP server is about to replace it.
+    if ci < CLIENT_MAX && spa != 0
+        && (spa & mask(state)) == (my_ip(state) & mask(state)) {
+        client_set(state, ci, C_IP, spa)
+    }
+    if wire.arp_op(a as *mut u8) != wire.ARP_REQUEST {
+        return
+    }
+    // AND THE ODD ONE: 255.255.255.255. It should never be asked for --
+    // the answer is ff:ff:ff:ff:ff:ff and every client knows it. Osum's
+    // OWN client asks anyway, and it says why in `kernel/user/dhcp.fi`:
+    // the vendored stack looks up a next hop for the broadcast address
+    // like any other and sends nothing until somebody answers. Round
+    // DESKTOP wrote that down as a limit it could not fix, because the
+    // stack is pinned vendor code and not this repository's to change.
+    //
+    // It can be fixed from THIS side, and it is fixed here: the gateway
+    // answers for the broadcast address with its own hardware address.
+    // The client then sends its DISCOVER to us as a unicast, which the
+    // DHCP server below accepts (it looks at the PORT and not at the
+    // address, exactly as RFC 2131 requires -- a client that has no
+    // address cannot address anything properly). Without these four
+    // lines an Osum machine cannot get an address from an Osum machine,
+    // which would make the whole of part two untestable with the only
+    // second machine this repository has.
+    // PROXY ARP, and it is not a trick -- it is what a gateway that
+    // routes EVERYTHING is. Three cases are answered:
+    //
+    //   our own address on the shared side. Obvious.
+    //   255.255.255.255. See the paragraph above.
+    //   any address OUTSIDE the shared subnet. That is the interesting
+    //   one, and it is what makes this work with a client that has not
+    //   got an address yet. Osum's own DHCP client asks for the
+    //   hardware address of ITS OWN configured gateway before it can
+    //   send anything at all -- the vendored stack resolves a next hop
+    //   even for a broadcast -- and that gateway is whatever the
+    //   machine was booted with: 169.254.1.1 in the measured run. Since
+    //   everything off this subnet really does go through this machine,
+    //   answering with our own address is the truth.
+    //
+    // NOT answered: an address INSIDE the shared subnet that is not
+    // ours. That is one client asking about another, they are on the
+    // same wire, and putting ourselves in the middle of that would be
+    // a lie and a bottleneck.
+    let m: u64 = mask(state)
+    let outside: bool = (tpa & m) != (my_ip(state) & m)
+    if tpa != my_ip(state) && tpa != 0xFFFFFFFF && !outside {
+        return
+    }
+    let c: u64 = shared(state)
+    let b: u64 = state + sh(BUILD)
+    var me: [u8; 6] = [0 as u8; 6]
+    var him: [u8; 6] = [0 as u8; 6]
+    card_mac(state, c, (&me[0]) as u64)
+    mac_out(smac, (&him[0]) as u64)
+    wire.eth_build(b as *mut u8, &him[0], &me[0], wire.ETYPE_ARP)
+    wire.arp_build((b + 14) as *mut u8, wire.ARP_REPLY, &me[0],
+        (tpa & 0xFFFFFFFF) as u32, &him[0],
+        wire.arp_spa(a as *mut u8))
+    if virtio.tx_frame_on(state, c, b, 14 + 28) {
+        kstate.add(state, sh(S_ARPS), 1)
+    }
+}
+
+// A client pinging its gateway. The reply is the request with the type
+// changed and the addresses swapped -- which is what every stack does,
+// and what `lib/net/stack.fi` does for the uplink.
+fn icmp_echo(state: u64, f: u64, len: u64, d: u64, ihl: u64) {
+    let h: u64 = d + ihl
+    if wire.icmp_type(h as *mut u8) != wire.ICMP_ECHO {
+        kstate.add(state, sh(S_DROPS), 1)
+        return
+    }
+    let c: u64 = shared(state)
+    var n: u64 = len
+    if n > FRAME_CAP {
+        n = FRAME_CAP
+    }
+    let w: u64 = state + sh(WORK)
+    copy_frame(f, w, n)
+    let wd: u64 = w + 14
+    let wh: u64 = wd + ihl
+    let smac: u64 = mac_word(f, 6)
+    card_mac(state, c, w + 6)
+    mac_out(smac, w)
+    let src: u64 = wire.ip_src(wd as *mut u8) as u64
+    wire.put32(wd as *mut u8, 12 as usize, (my_ip(state) & 0xFFFFFFFF) as u32)
+    wire.put32(wd as *mut u8, 16 as usize, (src & 0xFFFFFFFF) as u32)
+    __mmio_write8(wh as *mut u8, wire.ICMP_ECHO_REPLY)
+    let total: u64 = wire.ip_total(wd as *mut u8) as u64
+    if total < ihl || total > n - 14 {
+        return
+    }
+    ip_fix(wd)
+    l4_fix(wire.IP_ICMP as u64, wh, total - ihl, my_ip(state), src)
+    virtio.tx_frame_on(state, c, w, n)
+}
+
+// ------------------------------------------------- the DHCP SERVER
+//
+// The other end of `kernel/user/dhcp.fi`, and the confusion between the
+// two is why this comment exists. That file ASKS for an address and
+// runs in ring 3. This ANSWERS and runs in the kernel, because the
+// frames it answers arrive on a card no process can see.
+//
+// RFC 2131, the four messages, of which two are ours:
+//
+//   DISCOVER (1) from the client  ->  OFFER (2) from here
+//   REQUEST  (3) from the client  ->  ACK   (5) from here
+//
+// The reply is a BROADCAST on the shared side. A unicast would be
+// correct too and would need an ARP entry for an address the client
+// does not have yet -- which is exactly the chicken-and-egg the
+// broadcast flag in the request exists to avoid. Broadcasting always
+// works and costs one frame.
+
+const BOOTREQUEST: u64 = 1
+const BOOTREPLY: u64 = 2
+const MAGIC: u64 = 0x63825363
+const DHCP_MIN: u64 = 240
+
+fn opt_at(p: u64, n: u64, want: u64, lenp: *mut u64) -> u64 {
+    *lenp = 0
+    var i: u64 = DHCP_MIN
+    while i + 1 < n {
+        let code: u64 = __mmio_read8((p + i) as *mut u8) as u64
+        if code == 255 {
+            return 0
+        }
+        if code == 0 {
+            i = i + 1
+        } else {
+            let l: u64 = __mmio_read8((p + i + 1) as *mut u8) as u64
+            if i + 2 + l > n {
+                return 0
+            }
+            if code == want {
+                *lenp = l
+                return p + i + 2
+            }
+            i = i + 2 + l
+        }
+    }
+    return 0
+}
+
+fn put_opt(b: u64, at: u64, code: u64, len: u64, v: u64) -> u64 {
+    __mmio_write8((b + at) as *mut u8, (code & 0xFF) as u8)
+    __mmio_write8((b + at + 1) as *mut u8, (len & 0xFF) as u8)
+    var i: u64 = 0
+    while i < len {
+        __mmio_write8((b + at + 2 + i) as *mut u8,
+            ((v >> ((len - 1 - i) * 8)) & 0xFF) as u8)
+        i = i + 1
+    }
+    return at + 2 + len
+}
+
+fn dhcp(state: u64, f: u64, len: u64, d: u64, ihl: u64, h: u64, smac: u64,
+    ci: u64) {
+    let p: u64 = h + 8 // the BOOTP message
+    let n: u64 = len - (p - f)
+    if n < DHCP_MIN + 4 {
+        kstate.add(state, sh(S_DROPS), 1)
+        return
+    }
+    if __mmio_read8(p as *mut u8) as u64 != BOOTREQUEST {
+        return
+    }
+    if wire.be32(p as *mut u8, 236 as usize) as u64 != MAGIC {
+        return
+    }
+    var ol: u64 = 0
+    let t: u64 = opt_at(p, n, 53, &ol)
+    if t == 0 || ol == 0 {
+        return
+    }
+    let kind: u64 = __mmio_read8(t as *mut u8) as u64
+    var reply: u64 = 0
+    if kind == 1 {
+        reply = 2 // OFFER
+    } else if kind == 3 {
+        reply = 5 // ACK
+    } else {
+        // RELEASE, DECLINE, INFORM: understood well enough to be
+        // ignored on purpose rather than answered wrongly.
+        return
+    }
+    if ci >= CLIENT_MAX {
+        kstate.add(state, sh(S_DROPS), 1)
+        return
+    }
+    let give: u64 = address_for(state, ci)
+    if give == 0 {
+        kstate.add(state, sh(S_DROPS), 1)
+        return
+    }
+    let c: u64 = shared(state)
+    let b: u64 = state + sh(BUILD)
+    var i: u64 = 0
+    while i < 600 {
+        __mmio_write8((b + i) as *mut u8, 0 as u8)
+        i = i + 1
+    }
+    let bp: u64 = b + 14 + 20 + 8
+    __mmio_write8(bp as *mut u8, BOOTREPLY as u8)
+    __mmio_write8((bp + 1) as *mut u8, 1 as u8) // ethernet
+    __mmio_write8((bp + 2) as *mut u8, 6 as u8) // six octets of it
+    // The transaction number, the seconds and the flags come straight
+    // back out of the request: they are the client's and not ours.
+    wire.put32(bp as *mut u8, 4 as usize,
+        wire.be32(p as *mut u8, 4 as usize))
+    wire.put16(bp as *mut u8, 10 as usize,
+        wire.be16(p as *mut u8, 10 as usize))
+    wire.put32(bp as *mut u8, 16 as usize, (give & 0xFFFFFFFF) as u32) // yiaddr
+    wire.put32(bp as *mut u8, 20 as usize,
+        (my_ip(state) & 0xFFFFFFFF) as u32) // siaddr
+    mac_out(smac, bp + 28)
+    wire.put32(bp as *mut u8, 236 as usize, MAGIC as u32)
+    var at: u64 = DHCP_MIN
+    at = put_opt(bp, at, 53, 1, reply)
+    at = put_opt(bp, at, 54, 4, my_ip(state)) // who is answering
+    at = put_opt(bp, at, 51, 4, lease(state))
+    at = put_opt(bp, at, 1, 4, mask(state))
+    at = put_opt(bp, at, 3, 4, my_ip(state)) // the way out
+    // THE NAME SERVER, and it is the uplink's gateway. This machine has
+    // no resolver of its own; what it can do is carry the client's
+    // questions to whatever answers ours. Said in `docs/NETMON.md` as
+    // well, because a client that gets a name server that cannot answer
+    // is a client that thinks the network is broken.
+    at = put_opt(bp, at, 6, 4, inet.gw(state))
+    __mmio_write8((bp + at) as *mut u8, 255 as u8)
+    at = at + 1
+    if at < 300 {
+        at = 300 // the shortest BOOTP message anything accepts
+    }
+    var me: [u8; 6] = [0 as u8; 6]
+    var bc: [u8; 6] = [0 as u8; 6]
+    card_mac(state, c, (&me[0]) as u64)
+    wire.mac_broadcast(&bc[0])
+    wire.eth_build(b as *mut u8, &bc[0], &me[0], wire.ETYPE_IP4)
+    wire.udp_build((b + 14 + 20) as *mut u8, 67 as u16, 68 as u16,
+        at as usize, (my_ip(state) & 0xFFFFFFFF) as u32, 0xFFFFFFFF as u32)
+    let id: u64 = kstate.add(state, sh(S_ID), 1)
+    wire.ip_build((b + 14) as *mut u8, (id & 0xFFFF) as u16, wire.IP_UDP,
+        (my_ip(state) & 0xFFFFFFFF) as u32, 0xFFFFFFFF as u32,
+        (8 + at) as usize)
+    if virtio.tx_frame_on(state, c, b, 14 + 20 + 8 + at) {
+        if reply == 2 {
+            kstate.add(state, sh(S_OFFERS), 1)
+        } else {
+            kstate.add(state, sh(S_ACKS), 1)
+        }
+    }
+}
+
+// ---------------------------------------------------------- the report
+
+fn report(state: u64) {
+    var s_h: [u8; 7] = "share:\0"
+    var s_on: [u8; 5] = " on=\0"
+    var s_c: [u8; 10] = " clients=\0"
+    var s_n: [u8; 6] = " nat=\0"
+    var s_o: [u8; 6] = " out=\0"
+    var s_i: [u8; 5] = " in=\0"
+    var s_of: [u8; 9] = " offers=\0"
+    var s_ak: [u8; 7] = " acks=\0"
+    var s_ar: [u8; 7] = " arps=\0"
+    var s_d: [u8; 8] = " drops=\0"
+    var s_ev: [u8; 9] = " evict=\0\0"
+    var s_nw: [u8; 7] = " made=\0"
+    serial.puts((&s_h[0]) as u64)
+    serial.puts((&s_on[0]) as u64)
+    if on(state) {
+        serial.dec(1)
+    } else {
+        serial.dec(0)
+    }
+    serial.puts((&s_c[0]) as u64)
+    serial.dec(clients(state))
+    serial.puts((&s_n[0]) as u64)
+    serial.dec(nat_live(state))
+    serial.puts((&s_nw[0]) as u64)
+    serial.dec(stat(state, S_NEW))
+    serial.puts((&s_ev[0]) as u64)
+    serial.dec(stat(state, S_EVICT))
+    serial.puts((&s_o[0]) as u64)
+    serial.dec(stat(state, S_OUTF))
+    serial.puts((&s_i[0]) as u64)
+    serial.dec(stat(state, S_INF))
+    serial.puts((&s_of[0]) as u64)
+    serial.dec(stat(state, S_OFFERS))
+    serial.puts((&s_ak[0]) as u64)
+    serial.dec(stat(state, S_ACKS))
+    serial.puts((&s_ar[0]) as u64)
+    serial.dec(stat(state, S_ARPS))
+    serial.puts((&s_d[0]) as u64)
+    serial.dec(stat(state, S_DROPS))
+    serial.nl()
+    // The card's own numbers beside them: without these, "nothing
+    // happened" cannot be told apart from "nothing arrived", and those
+    // are two entirely different faults.
+    var s_c2: [u8; 12] = "share: rxf=\0"
+    var s_t2: [u8; 7] = " txf=\0\0"
+    var s_ro: [u8; 6] = " rxo=\0"
+    var s_to: [u8; 6] = " txo=\0"
+    var s_ir: [u8; 7] = " irqs=\0"
+    let c: u64 = shared(state)
+    serial.puts((&s_c2[0]) as u64)
+    serial.dec(virtio.rx_frames_on(state, c))
+    serial.puts((&s_t2[0]) as u64)
+    serial.dec(virtio.tx_frames_on(state, c))
+    serial.puts((&s_ro[0]) as u64)
+    serial.dec(virtio.rx_octets_on(state, c))
+    serial.puts((&s_to[0]) as u64)
+    serial.dec(virtio.tx_octets_on(state, c))
+    var s_tn: [u8; 8] = " turns=\0"
+    var s_mc: [u8; 6] = " mac=\0"
+    serial.puts((&s_tn[0]) as u64)
+    serial.dec(stat(state, S_TURNS))
+    serial.puts((&s_mc[0]) as u64)
+    var q: u64 = 0
+    while q < 6 {
+        serial.dec(virtio.mac_at_on(state, c, q))
+        q = q + 1
+    }
+    serial.nl()
+}
