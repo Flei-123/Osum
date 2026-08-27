@@ -71,6 +71,7 @@ ORIENTOS=${ORIENTOS:-$ROOT/../orientos}
 
 TMPD=$(mktemp -d)
 trap 'rm -rf "$TMPD"' EXIT
+[ -n "${KEEP_TMPD:-}" ] && trap - EXIT && echo "TMPD=$TMPD"
 
 pass=0
 fail=0
@@ -427,7 +428,18 @@ if [ "$gebaut" = 1 ]; then
         || { bad "mkfs.py fehlgeschlagen"; sed 's/^/        /' "$TMPD/mkfs.txt" | head -5; }
     # `script=` MUSS am Ende stehen: `console_load` nimmt alles dahinter
     # bis zum Zeilenende als Eingabe fuer die Shell.
-    foto "$K0" "osum gfx nocursor fbhold nokbd nosched noproc nofs noring3 script=echo OSUM SHELL ON SCREEN;ls /bin;echo DONE" \
+    #
+    # RUNDE MERGE: DIE REIHENFOLGE IM SKRIPT IST KEINE LAUNE. Der Schirm
+    # ist 800x600 bei 8x16, also 37 Zeilen, und der Mitschnitt zwischen
+    # "console mirrored" und "fb: hold" ist auf 96 Zeilen gewachsen --
+    # die Runden NETVIEW, NETMON und TRESOR melden zusammen fuenfzehn
+    # Zeilen Bilanz, NACHDEM sich die Shell beendet hat. Damit war
+    # `echo OSUM SHELL ON SCREEN` als erste Zeile des Skripts oben aus
+    # dem Bild geschoben, waehrend `DONE` als letzte noch darin stand --
+    # genau so sah der Fehlschlag auch aus. Der Satz steht jetzt hinter
+    # `ls /bin`. Gemessen wird unveraendert, dass die Zeile durch K9s
+    # Zeilendisziplin bis auf den Bildpunkt kommt.
+    foto "$K0" "osum gfx nocursor fbhold nokbd nosched noproc nofs noring3 script=ls /bin;echo OSUM SHELL ON SCREEN;echo DONE" \
         "$TMPD/sh.txt" "$TMPD/sh.ppm" \
         -drive "file=$TMPD/disk.img,format=raw,if=ide,index=0"
     num "der Kern beendet sich sauber" "$RC" eq 21
