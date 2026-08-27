@@ -34,6 +34,15 @@ BASIS="osum vfs nokbd nosched noproc nofs noring3"
 # waehrend dieser Runde einmal passiert und hat eine Stunde gekostet.
 while pgrep -f "file=$OUT/ziel.img" > /dev/null; do sleep 1; done
 
+# A SECOND MEDIUM, if the caller asked for one. `ZWEITE_PLATTE` is the
+# path of a raw image; it becomes the ATA slave, which the kernel calls
+# /dev/hdb. This is how a run can back up onto something that is not the
+# disk it is running from -- a backup on the same disk is not a backup.
+ZWEITE=()
+if [ -n "${ZWEITE_PLATTE:-}" ]; then
+    ZWEITE=(-drive "file=$ZWEITE_PLATTE,format=raw,if=ide,index=1")
+fi
+
 rm -f "$OUT/$NAME.txt"
 : > "$OUT/$NAME.txt"
 
@@ -60,6 +69,7 @@ elif [ "$WIE" = iso ]; then
         -kernel "$OUT/k.mb" -initrd "$OUT/quelle.img" -append "$ZEILE" \
         -serial "file:$OUT/$NAME.txt" -display none -no-reboot \
         -drive "file=$OUT/ziel.img,format=raw,if=ide,index=0" \
+        "${ZWEITE[@]}" \
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 > /dev/null 2>&1
     rc=$?
 else
@@ -103,6 +113,7 @@ else
           -drive "if=pflash,format=raw,unit=0,readonly=on,file=$OVMF"
           -serial "file:$OUT/$NAME.txt"
           -drive "file=$OUT/ziel.img,format=raw,if=ide,index=0"
+          "${ZWEITE[@]}"
           -device isa-debug-exit,iobase=0xf4,iosize=0x04)
     [ -f "$VARS" ] && ARGS+=(-drive "if=pflash,format=raw,unit=1,file=$VARS")
     timeout "$LIMIT" qemu-system-x86_64 "${ARGS[@]}" > /dev/null 2>&1
