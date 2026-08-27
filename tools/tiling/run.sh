@@ -159,8 +159,22 @@ else
 fi
 # Und die Gegenprobe zum Pruefer: legt man den Baum auf die Seiten der
 # Energieschicht, MUSS er anschlagen.  Genau so ist Runde K7 gescheitert.
-GG="$TMPD/kernel-gg"; mkdir -p "$GG"; cp kernel/*.fi "$GG/"
-sed -i 's/^const TILE_OFF: u64 = 0x4C000/const TILE_OFF: u64 = 0x58000/' "$GG/kstate.fi"
+# RUNDE MERGE, ZWEI SACHEN AN DIESER GEGENPROBE:
+#   * Die Kopie braucht `kernel/arch/x86_64/` mit. Seit Runde ARM liegt
+#     `hv.fi` dort, und ohne sie stirbt der Kartenpruefer an einem
+#     KeyError, statt die Kollision zu melden, die hier gemessen wird --
+#     der Lauf meldete dann "findet die neue Kollision NICHT", und der
+#     Pruefer hatte recht.
+#   * Die Adresse steht nicht mehr fest im `sed`. TILE_OFF war 0x4C000
+#     und ist auf dem zusammengefuehrten Baum 0x68000, also traf das
+#     Muster nichts, die Kopie blieb unveraendert und war -- richtigerweise
+#     -- kollisionsfrei. Gesucht wird jetzt der Name und nicht der Wert.
+GG="$TMPD/kernel-gg"; mkdir -p "$GG/arch/x86_64"
+cp kernel/*.fi "$GG/"
+cp kernel/arch/x86_64/*.fi "$GG/arch/x86_64/"
+sed -i -E 's/^const TILE_OFF: u64 = 0x[0-9A-Fa-f]+/const TILE_OFF: u64 = 0x58000/' "$GG/kstate.fi"
+grep -q '^const TILE_OFF: u64 = 0x58000' "$GG/kstate.fi" \
+    || bad "die Gegenprobe konnte TILE_OFF gar nicht verschieben"
 gg=$(python3 tools/kernel/memmap.py "$GG" 2>&1)
 if [ $? -ne 0 ] && printf '%s' "$gg" | grep -q 'KOLLISION'; then
     ok "mit TILE_OFF auf 0x58000 findet der Pruefer die Kollision mit K18"
@@ -355,7 +369,16 @@ fi
 echo "== 10. die Gegenprobe zur ganzen Runde: ohne 'tile' wie vorher =="
 lauf "$K0" "gfx wm wmhold $GRUND" "$TMPD/o.txt" "$DISK"
 ws=$(zahl "$TMPD/o.txt" 'wm: .*selftest [0-9]+')
-num "die Zusagen des Fensterservers ueber sich selbst, unveraendert" "$ws" eq 17
+# RUNDE MERGE: die Zahl stand hier als 17 im Quelltext des Laeufers. Der
+# Fensterserver hat seitdem zugelegt -- die Runden DESKTOP, TASKBAR,
+# DISPLAY und THEME haben eigene Zusagen dazugelegt, `selftest_max()`
+# sagt jetzt 30 -- und ein Laeufer, der die alte Zahl festhaelt, meldet
+# ab dann jede Runde einen Fehler, den es nicht gibt. Die Frage dieser
+# Zeile ist "aendert `tile` etwas am Fensterserver", also wird gegen das
+# gemessen, was der Fensterserver ueber sich SELBST sagt.
+wsoll=$(grep -aoE 'return [0-9]+' <<< "$(sed -n '/fn selftest_max/,/^}/p' kernel/wm.fi)" \
+    | head -1 | grep -oE '[0-9]+')
+num "die Zusagen des Fensterservers ueber sich selbst, unveraendert" "$ws" eq "${wsoll:-17}"
 has "$TMPD/o.txt" "wm: 800x600" "der Server kennt die Flaeche wie vorher"
 has "$TMPD/o.txt" "wm: term win=0" "das Terminalfenster entsteht wie vorher"
 hasnot "$TMPD/o.txt" "tile: win=" "und KEIN Fenster geht in den Baum"
