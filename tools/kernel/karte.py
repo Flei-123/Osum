@@ -139,6 +139,13 @@ BEREICHE = [
     # Belegt sind zwei Seiten: die Skalare der Energieschicht und das,
     # was aus den ACPI-Tabellen ueber Akku, Netzteil und Thermalzone
     # gelesen wurde.  Der Rest des Vorrats bleibt frei.
+    # RUNDE K17: DIE SEITE DES MODUSVEKTORS (0x4C000..0x4D000).  Bis zu
+    # dieser Runde stand der ganze Modus in EINEM Skalar (Versatz 88);
+    # er ist voll gelaufen, und seitdem liegt er als Feld aus
+    # MODE_WORDS Woertern hier.  Er steht in dieser Karte, weil er eine
+    # Seite `kdata` belegt wie jeder andere Bereich auch -- und weil die
+    # naechste Runde sonst genau diese Seite naehme.
+    ("MODE",       "kstate.fi", "MODE_OFF",       "MODE_MAX"),
     ("K18",        "kstate.fi", "K18_OFF",        "K18_MAX"),
     ("K18BATT",    "kstate.fi", "BATT_OFF",       "BATT_MAX"),
     # RUNDE K15, ZWEITER NACHTRAG.  Die erste Seite dieses Vorrats wird
@@ -322,6 +329,94 @@ def main():
     # Firn keine Konstante eines anderen Moduls in einen `const`
     # einsetzt), ZWEI VERSCHIEDENE Namen duerfen nicht auf derselben
     # Zahl liegen.
+    # ------------------------------------------- der Modusvektor
+    #
+    # RUNDE K17 HAT DENSELBEN FEHLER EINE DRITTE EBENE HOEHER GEFUNDEN,
+    # UND DIESMAL ZWEIMAL.
+    #
+    # (a) DIE KOLLISION.  `kstate.MODE` war EIN Wort, in dem jede Runde
+    #     ihre Schalter als Bit ablegte -- und die Runden K13, K14 und
+    #     K16 haben alle drei bei 1 << 31 angefangen.  Folge: `novfs`
+    #     schaltete auch die Rechtepruefung ab (M_NOPERM) und das
+    #     Stapelwachstum (M_NOSTACK), und die Gegenprobe `novfs` von
+    #     Runde K14 starb daran, dass der Uebersetzer in Ring 3 keine
+    #     Stapelseite mehr bekam.  Beide Zweige waren FUER SICH gruen;
+    #     die Kollision stand in keiner gemeinsamen Zeile.  Genau wie bei
+    #     `kdata` und bei der Vektortafel.
+    #
+    # (b) DAS ENDE DES VORRATS.  Nach dem Auseinanderziehen waren von 64
+    #     Bits 60 belegt und vier frei (38, 61, 62, 63); Runde K17
+    #     brauchte neun.  Ein zweites Wort haette die Rechnung nur
+    #     verschoben und gegen (a) nichts getan.
+    #
+    # SEIT RUNDE K17 IST DER MODUS EIN VEKTOR: eine Seite `kdata` mit
+    # MODE_WORDS Woertern, EIN WORT JE UNTERSYSTEM, und ein Modusname
+    # ist ein BITINDEX darueber:
+    #
+    #     Index = Wort * 64 + Bit
+    #
+    # Weil der Index das Wort enthaelt, prueft diese Karte den neuen Raum
+    # mit DERSELBEN Regel wie den alten -- derselbe Name darf mehrfach
+    # dastehen, ZWEI VERSCHIEDENE Namen duerfen nicht auf demselben Wert
+    # liegen -- und zusaetzlich mit zwei neuen:
+    #
+    #   * jeder Index bleibt unter MODE_WORDS * 64.  Eine vergessene alte
+    #     Maske (2147483648) faellt damit sofort auf, statt still in ein
+    #     Wort zu greifen, das es nicht gibt.
+    #   * die Seite des Vektors steht oben in BEREICHE, damit die
+    #     naechste Runde sie nicht als frei nimmt.
+    #
+    # NUR `kstate.fi` UND `kmain.fi`.  Seit Runde K17 stehen alle Namen
+    # des gemeinsamen Modus in `kstate.fi`; `kmain.fi` wird trotzdem
+    # weiter gelesen, damit eine dort neu angelegte zweite Liste sofort
+    # auffaellt -- genau diese zweite Liste war der Grund, warum ein zu
+    # enger `grep` die Kollisionen nicht fand.  Andere Module (`hw.fi`,
+    # `fb.fi`, `hv.fi`, `guard.fi`, `smp.fi`, `bootmod.fi`) fuehren ein
+    # EIGENES Wort mit eigenen Bits; dort faengt jede Runde zu Recht
+    # wieder bei 1 an.
+    mode_words = wert(dateien["kstate.fi"], "MODE_WORDS")
+    modi = {}
+    for datei in ("kstate.fi", "kmain.fi"):
+        pfad = os.path.join(kdir, datei)
+        if not os.path.exists(pfad):
+            continue
+        for k, roh in konstanten(pfad).items():
+            if not k.startswith("M_") or k == "M_MODE":
+                continue
+            try:
+                v = int(roh.split("//")[0].strip(), 0)
+            except ValueError:
+                continue
+            modi.setdefault(v, {}).setdefault(k, []).append(datei)
+    for v in sorted(modi):
+        if len(modi[v]) > 1:
+            wer = ", ".join("%s (%s)" % (k, "+".join(dd))
+                            for k, dd in sorted(modi[v].items()))
+            fehler.append("KOLLISION: den Modusindex %d haben zwei Namen: %s"
+                          % (v, wer))
+        if v >= mode_words * 64:
+            wer = ", ".join(sorted(modi[v]))
+            fehler.append(
+                "%s: Modusindex %d liegt hinter dem Vektor (MODE_WORDS * 64 "
+                "= %d) -- eine alte Maske?" % (wer, v, mode_words * 64))
+    if laut:
+        print("  ---- der Modusvektor, %d Woerter zu 64 Bits ----" % mode_words)
+        for w in range(mode_words):
+            drin = sorted((v % 64, n)
+                          for v in modi if v // 64 == w
+                          for n in modi[v])
+            if not drin:
+                continue
+            print("  Wort %-2d  %2d von 64 belegt, hoechstes Bit %d"
+                  % (w, len(set(b for b, _ in drin)),
+                     max(b for b, _ in drin)))
+            for b, n in drin:
+                print("     %3d = %d*64+%-2d  %s" % (w * 64 + b, w, b, n))
+        leer = [w for w in range(mode_words)
+                if not any(v // 64 == w for v in modi)]
+        print("  freie Woerter: %s"
+              % (", ".join(str(w) for w in leer) or "keins"))
+
     vektoren = {}
     for pfad in sorted(glob.glob(os.path.join(kdir, "*.fi"))):
         datei = os.path.basename(pfad)
@@ -348,8 +443,10 @@ def main():
 
     for f in fehler:
         print("  " + f)
-    print("%d Bereiche in 0x%X Oktetten kdata, %d Vektoren, %d Kollisionen"
-          % (len(stuecke), kdata, len(vektoren), len(fehler)))
+    print("%d Bereiche in 0x%X Oktetten kdata, %d Vektoren, "
+          "%d Modusnamen in %d Woertern, %d Kollisionen"
+          % (len(stuecke), kdata, len(vektoren),
+             sum(len(x) for x in modi.values()), mode_words, len(fehler)))
     return 1 if fehler else 0
 
 
