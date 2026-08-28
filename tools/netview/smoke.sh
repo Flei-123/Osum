@@ -11,7 +11,7 @@ TMPD=${SMOKED:-$(mktemp -d)}
 mkdir -p "$TMPD"
 echo "workdir $TMPD"
 
-GPROGS="schreibtisch leiste einstellungen launcher explorer widgetdemo locate netview edit sh echo ls cat ps"
+GPROGS="desktop taskbar settings launcher explorer widgetdemo locate netview edit sh echo ls cat ps"
 MONO=assets/osum-mono.ttf
 SANS=assets/osum-sans.ttf
 GBASE="gfx wm wig desk wmhold wiglong nokbd nosched noproc nofs"
@@ -35,7 +35,23 @@ python3 tools/k15/tree.py "$TMPD/baum" > /dev/null 2>&1 || exit 1
 printf '# taskbar.conf\nedge=%s\nheight=28\nwidth=104\nautohide=0\nontop=1\n' \
     "${EDGE:-bottom}" > "$TMPD/taskbar.conf"
 
-ARGS=(build "$TMPD/d.img" 4096 /lib/
+# 16384 BLOCKS AND NOT 4096. mkfs' block is 512 octets, so this is
+# 8 MiB and used to be 2. Round LOOK made the three programs of the
+# desktop considerably bigger -- the shape tokens and the rounded,
+# antialiased drawing in settings, the icon glyphs and the second
+# status field in the taskbar, and a message catalogue that went
+# from 72 keys to 154:
+#
+#     settings  384200 -> 565248     taskbar  278032 -> 371248
+#     desktop   181568 -> 249368     (+342 KiB together)
+#
+# and the image stopped fitting. The failure is loud but it is loud
+# in the WRONG PLACE: `mkfs: the disk is full`, then twenty-nine
+# assertions about drag, autohide and the settings page fail because
+# there was no image to boot. tools/look/shot.sh and
+# tools/netview/run.sh were already on 8192 for the same set of
+# programs, which is why they did not notice.
+ARGS=(build "$TMPD/d.img" 16384 /lib/
     "/lib/mono.ttf=$MONO" "/lib/sans.ttf=$SANS" /bin/)
 for q in $GPROGS; do ARGS+=("/bin/$q=$TMPD/g$q.elf"); done
 ARGS+=("/bin/files@/bin/explorer")
