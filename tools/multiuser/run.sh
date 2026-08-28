@@ -541,11 +541,29 @@ w3=$(grep -aoE 'login: warte [0-9]+ ms' "$B" | sed -n 3p | grep -oE '[0-9]+')
 is "nach dem ersten Fehlversuch wartet login" "${w1:-fehlt}" "1000"
 is "nach dem zweiten doppelt so lang" "${w2:-fehlt}" "2000"
 is "nach dem dritten wieder doppelt" "${w3:-fehlt}" "4000"
+# ---- UND ER HAT WIRKLICH GESCHLAFEN. Die Zahl oben koennte `login`
+#      hinschreiben, ohne zu warten. Diese hier kommt aus
+#      CLOCK_MONOTONIC IN DER MASCHINE und misst NUR den Schlaf --
+#      nicht die Passwortpruefung daneben, die auf einer ausgelasteten
+#      Maschine ein Vielfaches davon kostet und jede Wandzeitmessung
+#      unbrauchbar machen wuerde.
+g1=$(grep -aoE 'login: gewartet [0-9]+ ms' "$B" | sed -n 1p | grep -oE '[0-9]+')
+g3=$(grep -aoE 'login: gewartet [0-9]+ ms' "$B" | sed -n 3p | grep -oE '[0-9]+')
+if [ -n "${g1:-}" ] && [ "${g1:-0}" -ge 900 ]; then
+    ok "und die Uhr DER MASCHINE bestaetigt es: gefordert 1000 ms, wirklich gewartet ${g1} ms"
+else
+    bad "login sagt 1000 ms und hat ${g1:-0} ms gewartet -- da hat niemand geschlafen"
+fi
+if [ -n "${g3:-}" ] && [ "${g3:-0}" -ge 3600 ]; then
+    ok "beim dritten Mal: gefordert 4000 ms, wirklich gewartet ${g3} ms"
+else
+    bad "beim dritten Mal gefordert 4000 ms, gewartet ${g3:-0} ms"
+fi
 d=$(( BADDAUER - OKDAUER ))
 if [ "$d" -ge 6000 ]; then
-    ok "und die Uhr des WIRTS sieht es: ${BADDAUER} ms gegen ${OKDAUER} ms, also ${d} ms mehr"
+    ok "und der ganze Lauf dauert entsprechend laenger: ${BADDAUER} ms gegen ${OKDAUER} ms"
 else
-    bad "drei Fehlversuche dauerten nur ${d} ms laenger (${BADDAUER} gegen ${OKDAUER}) -- da hat niemand gewartet"
+    bad "drei Fehlversuche dauerten nur ${d} ms laenger (${BADDAUER} gegen ${OKDAUER})"
 fi
 
 run_case loginfast "$TMPD/df.img" \
@@ -557,12 +575,14 @@ f1=$(grep -aoE 'login: warte [0-9]+ ms' "$S" | sed -n 1p | grep -oE '[0-9]+')
 f3=$(grep -aoE 'login: warte [0-9]+ ms' "$S" | sed -n 3p | grep -oE '[0-9]+')
 is "mit verzoegerung_ms=200 in /etc/login.conf wartet login 200 ms" "${f1:-fehlt}" "200"
 is "und beim dritten Mal 800 -- dieselbe Verdopplung, andere Basis" "${f3:-fehlt}" "800"
-d=$(( BADDAUER - FASTDAUER ))
-if [ "$d" -ge 4000 ]; then
-    ok "und der Lauf ist dadurch ${d} ms kuerzer -- die Datei WIRD gelesen"
+h1=$(grep -aoE 'login: gewartet [0-9]+ ms' "$S" | sed -n 1p | grep -oE '[0-9]+')
+if [ -n "${h1:-}" ] && [ "${h1:-0}" -ge 180 ] && [ "${h1:-0}" -lt 900 ]; then
+    ok "und die Uhr der Maschine sieht ${h1} ms statt 1000 -- die Datei WIRD gelesen"
 else
-    bad "der schnelle Lauf war nur ${d} ms kuerzer (${FASTDAUER} gegen ${BADDAUER})"
+    bad "mit verzoegerung_ms=200 wurden ${h1:-0} ms gewartet"
 fi
+d=$(( BADDAUER - FASTDAUER ))
+hin "der ganze Lauf: ${FASTDAUER} ms gegen ${BADDAUER} ms, also ${d} ms kuerzer"
 
 echo "== 11. passwd: ueber eine Zwischendatei, /etc/shadow bleibt 0o600 root =="
 run_case pw "$TMPD/d0.img" "osum $BASIS script=sh /t/passwd.sh"
