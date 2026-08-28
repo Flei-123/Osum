@@ -12,7 +12,11 @@
 //     dispctl              alles anzeigen
 //     dispctl raw          jede Zahl einzeln, fuer den Testlauf
 //     dispctl modes        nur die Modusliste
-//     dispctl set W H      auf W x H wechseln
+//     dispctl set W H      auf W x H aus der Liste wechseln
+//     dispctl eigen W H [T]  eine EIGENE Aufloesung einstellen
+//     dispctl pruefen W H [T] nur pruefen, ohne umzuschalten
+//     dispctl speichern    den laufenden Modus auf die Platte
+//     dispctl testc        die Zusagen der Runde CUSTOMRES
 //     dispctl rot GRAD     0, 90, 180 oder 270
 //     dispctl gamma N      30..300 (100 = 1,00)
 //     dispctl hell N       0..200
@@ -69,6 +73,21 @@ const DG_REFUSED: u64 = 28
 const DG_TOOBIG: u64 = 29
 const DG_PITCH: u64 = 30
 const DG_BPP: u64 = 31
+// RUNDE CUSTOMRES
+const DG_CUSTWHY: u64 = 33
+const DG_CUSTNUM: u64 = 34
+const DG_CUSTOMS: u64 = 35
+const DG_MINW: u64 = 36
+const DG_MINH: u64 = 37
+const DG_MAXW: u64 = 38
+const DG_MAXH: u64 = 39
+const DG_SAVEOK: u64 = 40
+const DG_SAVEW: u64 = 41
+const DG_SAVEH: u64 = 42
+const DG_SAVEB: u64 = 43
+const DG_SAVETRY: u64 = 44
+const DG_SAVEWHY: u64 = 45
+const DG_SAVEAPP: u64 = 46
 const DG_MODE: u64 = 1000
 
 const DS_MODE: u64 = 0
@@ -80,6 +99,22 @@ const DS_GAMMA: u64 = 5
 const DS_SAT: u64 = 6
 const DS_CONFIRM: u64 = 7
 const DS_REVERT: u64 = 8
+const DS_CUSTOM: u64 = 11
+const DS_CHECK: u64 = 12
+const DS_SAVE: u64 = 13
+
+// Die Gruende, die der Kernel fuer eine abgelehnte eigene Aufloesung
+// nennt (`vmode.CW_*`). Sie stehen hier ein zweites Mal, weil dieses
+// Programm in Ring 3 laeuft und den Kernel nicht einbindet -- dieselbe
+// benannte Doppelung wie bei den Aufrufnummern, und
+// tools/customres/run.sh rechnet beide Listen gegeneinander.
+const CW_OK: u64 = 0
+const CW_REGS: u64 = 1
+const CW_VRAM: u64 = 2
+const CW_LIMIT: u64 = 3
+const CW_DEPTH: u64 = 4
+const CW_UNSINN: u64 = 5
+const CW_NOCARD: u64 = 6
 
 fn dget(f: u64) -> u64 {
     return ulib.sys(SYS_DISPGET, f, 0, 0)
@@ -130,6 +165,106 @@ fn zahl_lesen(p: u64) -> u64 {
         }
     }
     return v
+}
+
+// ================================================= RUNDE CUSTOMRES
+//
+// DER SATZ, DER DASTEHEN MUSS. "Geht nicht" ist keine Meldung: der
+// Benutzer hat eine Zahl eingegeben und will wissen, WELCHE der drei
+// Schranken sie gerissen hat UND MIT WELCHER ZAHL. Jede dieser Zeilen
+// nennt beides, und beide Zahlen kommen aus dem Kernel -- keine davon
+// ist von diesem Programm.
+fn grund_zeigen(w: u64, h: u64) {
+    var t_p: [u8; 23] = "dispctl: abgelehnt -- \0"
+    var t_regs: [u8; 45] = "die Karte nimmt diese Zahl nicht an. Sie hat\0"
+    var t_regs2: [u8; 18] = " daraus gemacht: \0"
+    var t_acht: [u8; 47] = "  (Hinweis: die Breite ist kein Vielfaches von\0"
+    var t_acht2: [u8; 4] = " 8)\0"
+    var t_vram: [u8; 44] = "passt nicht in den Bildspeicher der Karte: \0"
+    var t_lim: [u8; 47] = "dieser Kernel kann es nicht einblenden. Noetig\0"
+    var t_oct: [u8; 11] = " Oktette, \0"
+    var t_da: [u8; 12] = " vorhanden.\0"
+    var t_geht: [u8; 8] = " gehen.\0"
+    var t_kach: [u8; 42] = "  (acht 2-MiB-Fensterplaetze, geteilt mit\0"
+    var t_kach2: [u8; 14] = " apic.fi)\0\0\0\0\0"
+    var t_dep: [u8; 46] = "diese Farbtiefe zeichnet dieser Kernel nicht:\0"
+    var t_dep2: [u8; 20] = " Bit (nur 32 gehen)\0"
+    var t_uns: [u8; 32] = "die Zahl liegt ausserhalb von: \0"
+    var t_bis: [u8; 5] = " .. \0"
+    var t_no: [u8; 35] = "es gibt keinen Modustreiber (disp)\0"
+    var t_ok: [u8; 24] = "dispctl: angenommen -- \0"
+    var t_kom: [u8; 3] = ", \0"
+    var t_x: [u8; 4] = " x \0"
+    var t_okt: [u8; 22] = " Oktette Bildspeicher\0"
+
+    let why: u64 = dget(DG_CUSTWHY)
+    let num: u64 = dget(DG_CUSTNUM)
+    if ulib.bad(why) {
+        return
+    }
+    if why == CW_OK {
+        ulib.say((&t_ok[0 as usize]) as u64)
+        ulib.sayn(w)
+        ulib.say((&t_x[0 as usize]) as u64)
+        ulib.sayn(h)
+        ulib.say((&t_kom[0 as usize]) as u64)
+        ulib.sayn(num)
+        ulib.say((&t_okt[0 as usize]) as u64)
+        ulib.nl()
+        return
+    }
+    ulib.say((&t_p[0 as usize]) as u64)
+    if why == CW_REGS {
+        ulib.say((&t_regs[0 as usize]) as u64)
+        ulib.say((&t_regs2[0 as usize]) as u64)
+        ulib.sayn(num)
+        ulib.nl()
+        // Der Hinweis ist GEMESSEN und keine Vermutung: QEMU rundet
+        // VBE-Breiten auf ein Vielfaches von acht ab. 1366 wird zu 1360,
+        // 1360 bleibt 1360. Genau das steht in der Zahl oben.
+        if (w & 7) != 0 {
+            ulib.say((&t_acht[0 as usize]) as u64)
+            ulib.say((&t_acht2[0 as usize]) as u64)
+            ulib.nl()
+        }
+        return
+    }
+    if why == CW_VRAM {
+        ulib.say((&t_vram[0 as usize]) as u64)
+        ulib.sayn(num)
+        ulib.say((&t_oct[0 as usize]) as u64)
+        ulib.sayn(dget(DG_VRAM))
+        ulib.say((&t_da[0 as usize]) as u64)
+        ulib.nl()
+        return
+    }
+    if why == CW_LIMIT {
+        ulib.say((&t_lim[0 as usize]) as u64)
+        ulib.sayn(num)
+        ulib.say((&t_oct[0 as usize]) as u64)
+        ulib.sayn(dget(DG_MAPLIMIT))
+        ulib.say((&t_geht[0 as usize]) as u64)
+        ulib.nl()
+        ulib.say((&t_kach[0 as usize]) as u64)
+        ulib.say((&t_kach2[0 as usize]) as u64)
+        ulib.nl()
+        return
+    }
+    if why == CW_DEPTH {
+        ulib.say((&t_dep[0 as usize]) as u64)
+        ulib.sayn(num)
+        ulib.say((&t_dep2[0 as usize]) as u64)
+        ulib.nl()
+        return
+    }
+    if why == CW_UNSINN {
+        ulib.say((&t_uns[0 as usize]) as u64)
+        ulib.sayn(num)
+        ulib.nl()
+        return
+    }
+    ulib.say((&t_no[0 as usize]) as u64)
+    ulib.nl()
 }
 
 fn modi_zeigen() {
@@ -223,6 +358,35 @@ fn alles() {
     zeile((&n_pb[0 as usize]) as u64, DG_PROBED)
     zeile((&n_rf[0 as usize]) as u64, DG_REFUSED)
     zeile((&n_tb[0 as usize]) as u64, DG_TOOBIG)
+    // RUNDE CUSTOMRES
+    var n_cw: [u8; 8] = "custwhy\0"
+    var n_cn: [u8; 8] = "custnum\0"
+    var n_cs: [u8; 8] = "customs\0"
+    var n_mnw: [u8; 5] = "minw\0"
+    var n_mnh: [u8; 5] = "minh\0"
+    var n_mxw: [u8; 5] = "maxw\0"
+    var n_mxh: [u8; 5] = "maxh\0"
+    var n_sok: [u8; 7] = "saveok\0"
+    var n_sw2: [u8; 6] = "savew\0"
+    var n_sh2: [u8; 6] = "saveh\0"
+    var n_sb2: [u8; 6] = "saveb\0"
+    var n_st2: [u8; 8] = "savetry\0"
+    var n_sy2: [u8; 8] = "savewhy\0"
+    var n_sa2: [u8; 8] = "saveapp\0"
+    zeile((&n_cw[0 as usize]) as u64, DG_CUSTWHY)
+    zeile((&n_cn[0 as usize]) as u64, DG_CUSTNUM)
+    zeile((&n_cs[0 as usize]) as u64, DG_CUSTOMS)
+    zeile((&n_mnw[0 as usize]) as u64, DG_MINW)
+    zeile((&n_mnh[0 as usize]) as u64, DG_MINH)
+    zeile((&n_mxw[0 as usize]) as u64, DG_MAXW)
+    zeile((&n_mxh[0 as usize]) as u64, DG_MAXH)
+    zeile((&n_sok[0 as usize]) as u64, DG_SAVEOK)
+    zeile((&n_sw2[0 as usize]) as u64, DG_SAVEW)
+    zeile((&n_sh2[0 as usize]) as u64, DG_SAVEH)
+    zeile((&n_sb2[0 as usize]) as u64, DG_SAVEB)
+    zeile((&n_st2[0 as usize]) as u64, DG_SAVETRY)
+    zeile((&n_sy2[0 as usize]) as u64, DG_SAVEWHY)
+    zeile((&n_sa2[0 as usize]) as u64, DG_SAVEAPP)
     modi_zeigen()
     let e: u64 = dget(DG_EDIDOK)
     if e == 1 {
@@ -351,6 +515,88 @@ fn test() -> u64 {
     return n
 }
 
+// DIE ZUSAGEN DER RUNDE CUSTOMRES, AUS RING 3. Wie oben: was hier
+// gruen wird, ist nicht der Kernel, der sich selbst prueft, sondern ein
+// Programm ohne Rechte, das ueber die Aufrufschwelle geht.
+fn testc() -> u64 {
+    var t_t: [u8; 16] = "dispctl: testc \0"
+    var t_o: [u8; 4] = " / \0"
+    var n: u64 = 0
+    let ganz: u64 = 10
+
+    let pw: u64 = dget(DG_PANELW)
+    let ph: u64 = dget(DG_PANELH)
+    let lim: u64 = dget(DG_MAPLIMIT)
+
+    // 1. Die Grenzen der freien Eingabe kommen aus dem Kernel und sind
+    //    keine Zahl in diesem Programm.
+    if dget(DG_MINW) > 0 && dget(DG_MAXW) > dget(DG_MINW) {
+        n = n + 1
+    }
+    // 2. Eine Breite unterhalb der Grenze wird abgelehnt, der Grund ist
+    //    "Unsinn", und die genannte Zahl ist die eingegebene.
+    let _a: u64 = dset(DS_CHECK, (8 << 32) | (600 << 16) | 32)
+    if dget(DG_CUSTWHY) == CW_UNSINN && dget(DG_CUSTNUM) == 8 {
+        n = n + 1
+    }
+    // 3. Eine Farbtiefe, die dieser Kernel nicht zeichnet: eigener Grund,
+    //    eigene Zahl.
+    let _b: u64 = dset(DS_CHECK, (800 << 32) | (600 << 16) | 16)
+    if dget(DG_CUSTWHY) == CW_DEPTH && dget(DG_CUSTNUM) == 16 {
+        n = n + 1
+    }
+    // 4. Etwas, das dieser Kernel nicht einblenden kann: Grund 3, und
+    //    die Zahl ist GENAU die Zahl der noetigen Oktette.
+    let _c: u64 = dset(DS_CHECK, (2560 << 32) | (1440 << 16) | 32)
+    if dget(DG_CUSTWHY) == CW_LIMIT {
+        if dget(DG_CUSTNUM) == 2560 * 1440 * 4 {
+            if dget(DG_CUSTNUM) > lim {
+                n = n + 1
+            }
+        }
+    }
+    // 5. UND DER BILDSCHIRM IST NACH DREI PRUEFUNGEN DERSELBE. Eine
+    //    Pruefung, die den Bildschirm anfasst, waere in einem Bedienfeld
+    //    unbrauchbar -- dort wird bei jedem Tastendruck geprueft.
+    if dget(DG_PANELW) == pw && dget(DG_PANELH) == ph {
+        n = n + 1
+    }
+    // 6. Eine eigene Aufloesung, die durchgeht, meldet Grund 0 und als
+    //    Zahl die noetigen Oktette.
+    let _d: u64 = dset(DS_CHECK, (1400 << 32) | (1050 << 16) | 32)
+    if dget(DG_CUSTWHY) == CW_OK && dget(DG_CUSTNUM) == 1400 * 1050 * 4 {
+        n = n + 1
+    }
+    // 7. ... und pruefen ist NICHT einstellen.
+    if dget(DG_PANELW) == pw && dget(DG_PANELH) == ph {
+        n = n + 1
+    }
+    // 8. Und jetzt wirklich einstellen: die Tafel steht danach auf den
+    //    eingegebenen Zahlen.
+    let e: u64 = dset(DS_CUSTOM, (1400 << 32) | (1050 << 16) | 32)
+    if !ulib.bad(e) && dget(DG_PANELW) == 1400 && dget(DG_PANELH) == 1050 {
+        n = n + 1
+    }
+    // 9. Direkt danach laeuft eine Frist -- auch fuer eine eigene
+    //    Aufloesung. Das ist die Zusage, ohne die der Rest gefaehrlich
+    //    waere.
+    if dget(DG_PENDING) == 1 && dget(DG_REMAIN) > 1000 {
+        n = n + 1
+    }
+    // 10. Zurueck, und die alte Tafel steht wieder da.
+    let _f: u64 = dset(DS_REVERT, 0)
+    if dget(DG_PANELW) == pw && dget(DG_PANELH) == ph {
+        n = n + 1
+    }
+
+    ulib.say((&t_t[0 as usize]) as u64)
+    ulib.sayn(n)
+    ulib.say((&t_o[0 as usize]) as u64)
+    ulib.sayn(ganz)
+    ulib.nl()
+    return n
+}
+
 fn u_start(args: u64) -> u64 {
     var w_raw: [u8; 4] = "raw\0"
     var w_modes: [u8; 6] = "modes\0"
@@ -364,6 +610,10 @@ fn u_start(args: u64) -> u64 {
     var w_beh: [u8; 10] = "behalten\0\0"
     var w_zur: [u8; 8] = "zurueck\0"
     var w_test: [u8; 5] = "test\0"
+    var w_testc: [u8; 6] = "testc\0"
+    var w_eig: [u8; 6] = "eigen\0"
+    var w_pruef: [u8; 8] = "pruefen\0"
+    var w_sp: [u8; 11] = "speichern\0\0"
     var m_no: [u8; 40] = "dispctl: der Bildschirm ist nicht da\0\0\0\0"
     var m_perm: [u8; 43] = "dispctl: abgelehnt -- nicht die Wurzel?\0\0\0\0"
     var m_ok: [u8; 17] = "dispctl: gesetzt\0"
@@ -398,6 +648,19 @@ fn u_start(args: u64) -> u64 {
         }
         return 1
     }
+    if ulib.streq(a1, (&w_testc[0 as usize]) as u64) {
+        let n: u64 = testc()
+        if n == 10 {
+            return 0
+        }
+        return 1
+    }
+    if ulib.streq(a1, (&w_sp[0 as usize]) as u64) {
+        let r: u64 = dset(DS_SAVE, 0)
+        zahl_zeile((&n_rc[0 as usize]) as u64, r)
+        alles()
+        return 0
+    }
     if ulib.streq(a1, (&w_beh[0 as usize]) as u64) {
         let r: u64 = dset(DS_CONFIRM, 0)
         zahl_zeile((&n_rc[0 as usize]) as u64, r)
@@ -416,6 +679,36 @@ fn u_start(args: u64) -> u64 {
     let a2: u64 = ulib.arg_at(args, 2)
     var feld: u64 = 99
     var wert: u64 = zahl_lesen(a2)
+    // RUNDE CUSTOMRES: `eigen` und `pruefen` nehmen DREI Zahlen, und die
+    // dritte darf fehlen -- dann ist sie 32, die einzige, die dieser
+    // Kernel zeichnet.
+    if ulib.streq(a1, (&w_eig[0 as usize]) as u64)
+        || ulib.streq(a1, (&w_pruef[0 as usize]) as u64) {
+        if argc < 4 {
+            var m_arg: [u8; 34] = "dispctl: eigen BREITE HOEHE [BIT]\0"
+            ulib.say((&m_arg[0 as usize]) as u64)
+            ulib.nl()
+            return 1
+        }
+        let cw: u64 = zahl_lesen(a2)
+        let ch: u64 = zahl_lesen(ulib.arg_at(args, 3))
+        var cb: u64 = 32
+        if argc > 4 {
+            cb = zahl_lesen(ulib.arg_at(args, 4))
+        }
+        var f2: u64 = DS_CUSTOM
+        if ulib.streq(a1, (&w_pruef[0 as usize]) as u64) {
+            f2 = DS_CHECK
+        }
+        let r2: u64 = dset(f2, (cw << 32) | (ch << 16) | cb)
+        grund_zeigen(cw, ch)
+        zahl_zeile((&n_rc[0 as usize]) as u64, r2)
+        alles()
+        if ulib.bad(r2) {
+            return 1
+        }
+        return 0
+    }
     if ulib.streq(a1, (&w_set[0 as usize]) as u64) {
         if argc < 4 {
             return 1
