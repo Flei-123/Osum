@@ -5398,15 +5398,65 @@ fn do_rename(state: u64, me: u64, from: u64, to: u64) -> u64 {
     if errno.is_error(lb) {
         return lb
     }
-    if !vfs.ready(state) {
+    // ==================================== RUNDE MULTIUSER: DAS TOR
+    //
+    // `rename` hatte KEINE Rechtepruefung. Weder auf den Weg noch auf
+    // die beiden Verzeichnisse -- ein gewoehnlicher Benutzer konnte
+    // eine Datei aus einem fremden Verzeichnis herausbenennen, solange
+    // er ihren Namen kannte. Umbenennen heisst: einen Namen aus dem
+    // einen Verzeichnis nehmen und in das andere legen, und das
+    // braucht in BEIDEN Schreib- und Betretungsrecht -- an der Datei
+    // selbst nichts, denn ihr Inhalt wird nicht angefasst. Genau so
+    // steht es in POSIX, und genau so steht es jetzt hier.
+    if !perm.walk(state, me, a) {
+        return neg(errno.E_ACCES)
+    }
+    if !perm.walk(state, me, b) {
+        return neg(errno.E_ACCES)
+    }
+    if vfs.ready(state) {
+        let ma: u64 = vfs.mount_for(state, a)
+        let mb: u64 = vfs.mount_for(state, b)
+        if ma >= vfs.MAX_MNT || mb >= vfs.MAX_MNT {
+            return neg(errno.E_NOENT)
+        }
+        if ma != 0 || mb != 0 || vfs.all_mode(state) {
+            let rv: u64 = vfs.v_rename(state, ma, a, mb, b)
+            if rv != 0 {
+                return neg(rv)
+            }
+            return 0
+        }
+    }
+    // ==================================== RUNDE MULTIUSER: DIE WURZEL
+    //
+    // HIER STAND -ENOSYS, WENN DIE VFS-SCHICHT NICHT LAEUFT. Das war
+    // seit Runde OFS3 eine Luecke mit Folgen: `passwd` will
+    // /etc/shadow ueber eine Zwischendatei schreiben und danach
+    // umbenennen -- die einzige Art, die Datei nicht halb
+    // zurueckzulassen, wenn mitten im Schreiben der Strom ausfaellt --
+    // und ohne `vfs` auf der Kommandozeile ging genau das nicht.
+    //
+    // Der Weg ist derselbe, den `do_open` fuer die Wurzel nimmt:
+    // `fs.` unmittelbar. `vfs.v_rename` auf der Wurzel landet ohnehin
+    // in derselben Funktion (`ofs.o_rename` -> `fs.rename_path`), also
+    // ist das keine zweite Wahrheit, sondern derselbe Aufruf ohne den
+    // Umweg ueber eine Tafel, die es gerade nicht gibt.
+    if kstate.get(state, kstate.FS_READY) == 0 {
         return neg(errno.E_NOSYS)
     }
-    let ma: u64 = vfs.mount_for(state, a)
-    let mb: u64 = vfs.mount_for(state, b)
-    if ma >= vfs.MAX_MNT || mb >= vfs.MAX_MNT {
+    let odir: u64 = fs.parent_ino(state, a)
+    let ndir: u64 = fs.parent_ino(state, b)
+    if odir == 0 || ndir == 0 {
         return neg(errno.E_NOENT)
     }
-    let r: u64 = vfs.v_rename(state, ma, a, mb, b)
+    if !perm.may(state, me, odir, perm.R_WRITE | perm.R_EXEC) {
+        return neg(errno.E_ACCES)
+    }
+    if !perm.may(state, me, ndir, perm.R_WRITE | perm.R_EXEC) {
+        return neg(errno.E_ACCES)
+    }
+    let r: u64 = fs.rename_path(state, a, b)
     if r != 0 {
         return neg(r)
     }
