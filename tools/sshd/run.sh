@@ -311,7 +311,12 @@ FP1=$(grep -a -m1 'sshd: host key SHA256:' "$F" | sed 's/.*SHA256://')
 # ZWEITE MEINUNG NUMMER EINS: `ssh-keyscan` holt den Schluessel ueber das
 # Protokoll, `ssh-keygen -lf` rechnet den Fingerabdruck. Beide Programme
 # gehoeren OpenSSH und nicht diesem Repo.
-ssh-keyscan -T 60 -p "$FWPORT" 127.0.0.1 > "$TMPD/scan.txt" 2>"$TMPD/scan.err"
+# `-t ed25519`: ohne die Angabe fragt ssh-keyscan NACHEINANDER nach
+# rsa, ecdsa und ed25519 -- drei Verbindungen, von denen dieser Server
+# zwei richtigerweise beim Schluesselaustausch abweist, weil er nur
+# ssh-ed25519 hat. Das ist kein Fehler, kostet aber drei Zeitlimits.
+ssh-keyscan -t ed25519 -T 45 -p "$FWPORT" 127.0.0.1 \
+    > "$TMPD/scan.txt" 2>"$TMPD/scan.err"
 if [ -s "$TMPD/scan.txt" ]; then
     ok "ssh-keyscan holt den Wirtsschluessel ueber das Protokoll"
     FP2=$(ssh-keygen -lf "$TMPD/scan.txt" 2>/dev/null | awk '{print $2}' \
