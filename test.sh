@@ -748,6 +748,18 @@ lauf "29. auf zwei Dinge gleichzeitig warten: poll (tools/poll/run.sh, Runde POL
 
 lauf "28. derselbe Kernel auf der ECHTEN CPU: /dev/kvm statt Emulation (tools/kvm/run.sh, Runde KVMFIX)" tools/kvm/run.sh kvm '^KVM: |^  OK    (der Kernel ist gebaut|1\.|3\.|4\.)|^  --    (CPU|3\.|4\.)|^KVM: uebersprungen'
 
+# ABSCHNITT 30 -- RUNDE SSHD. Der Fernzugang. Gemessen wird NICHT gegen
+# einen selbstgeschriebenen Klienten -- zwei Enden, die dasselbe
+# Missverstaendnis teilen, sind sich perfekt einig --, sondern gegen
+# `ssh`, `ssh-keyscan` und `ssh-keygen` aus OpenSSH, durch QEMUs
+# Anschlussweiterleitung, mit `-accel kvm`. Anmeldung mit Schluessel
+# UND mit Passwort, ein Befehl aus der Ferne mit verglichener Ausgabe,
+# der Beendigungscode, eine Datei mit SHA-256 auf beiden Seiten, eine
+# Shell an einem Pseudoterminal, zwei Verbindungen gleichzeitig -- und
+# zu jedem davon die Gegenprobe, die es erst zu einer Aussage macht.
+lauf "30. der Fernzugang: SSH-2 gegen den echten OpenSSH-Klienten (tools/sshd/run.sh, Runde SSHD)" \
+     tools/sshd/run.sh sshd '^SSHD: |^  OK    (tools/sshd/oracle|[0-9]+ Vergleiche|der Dienst lauscht|es gab noch keinen|sshd nennt|ssh-keyscan|ssh-keygen|und der Schluesseltyp|ssh mit (Schluessel|Passwort)|die Ausgabe|\.\.\.Zeile|und der Server hat es|der Klient sagt|strict kex|auch root|ssh gibt den|der SHA-256|die Shell|es war wirklich|die Sitzung am|die Zeilenenden|und die Rohr-Sitzung|die (erste|zweite) Sitzung|und beide haben|ein (FREMDER|falsches|unbekannter|Klient)|und der Befehl ist nicht|ein Name, den|.svc shutdown.|kein einziger|derselbe (Fingerabdruck|Schluessel)|und hat KEINEN|das Passwort geht|die Uebertragung|Zahl der Starts|angenommene Verbindungen|die groesste Zahl)|^        (SHA-256:|HMAC|mpint|Base64|Ableitung|chacha20|Gegenprobe|Auffuellung|Klartext|name-list|eine LEERE|[0-9]+ Oktette in|[0-9]+ ms fuer|langsamster|sshd running|/sbin/sshd:)'
+
 echo
 echo "=================================================================="
 if [ "$FAIL" -eq 0 ]; then
