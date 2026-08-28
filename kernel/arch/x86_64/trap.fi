@@ -40,6 +40,7 @@ import rand
 import time
 import signal
 import proc
+import msr
 
 export { entry }
 
@@ -90,6 +91,13 @@ const VEC_NET: u64 = 45
 // ist.
 const VEC_XHCI: u64 = 43
 const VEC_SPURIOUS: u64 = 47
+// RUNDE KVMFIX: die Nummer der allgemeinen Schutzverletzung. Sie steht
+// als eigener Name da, weil `tools/kvm/run.sh` genau diese Zeile
+// verbiegt, um den Faengerpfad fuer die Gegenprobe ABZUSCHALTEN -- eine
+// Zusage ohne eine Fassung, in der sie zusammenbricht, ist keine.
+// Der Name faengt nicht mit VEC_ an: VEC_* sind in diesem Kernel die
+// Nummern der GERAETE, und `tools/kernel/memmap.py` zaehlt sie.
+const GP_VECTOR: u64 = 13
 
 fn word(frame: u64, off: u64) -> u64 {
     return __mmio_read64((frame + off) as *mut u64)
@@ -101,6 +109,29 @@ fn entry(frame: u64, state: u64) {
     kstate.add(state, kstate.TRAPS, 1)
     kstate.set(state, kstate.LAST_TRAP, vector)
     if vector < 32 {
+        // RUNDE KVMFIX: DER FAENGERPFAD FUER rdmsr/wrmsr, UND ER STEHT
+        // GANZ OBEN.
+        //
+        // Ein `rdmsr` auf ein Register, das diese CPU nicht hat, ist ein
+        // #GP -- unter TCG nie, auf echter Hardware taeglich. Der Kernel
+        // soll daran nicht sterben, aber er soll auch nicht blind
+        // weiterlaufen: NUR eine Fehleradresse, die in der Tabelle aus
+        // `isr.s` steht, wird umgelenkt, und NUR aus Ring 0. Alles
+        // andere faellt weiter durch bis `report` und haelt die Maschine
+        // an, so wie seit Runde 59.
+        //
+        // Die Ring-0-Bedingung ist keine Zierde: stuende sie nicht da,
+        // koennte ein Prozess mit passend gesetztem rip in einen
+        // Kernelfaenger springen. Dass die Adressen des Kerns und die
+        // eines Programms in diesem System weit auseinanderliegen, ist
+        // eine Beobachtung und keine Zusage.
+        if vector == GP_VECTOR && (word(frame, F_CS) & 3) == 0 {
+            let fix: u64 = msr.catch_rip(state, word(frame, F_RIP))
+            if fix != 0 {
+                __mmio_write64((frame + F_RIP) as *mut u64, fix)
+                return
+            }
+        }
         // RUNDE K16: DER STAPEL WAECHST, BEVOR JEMAND STIRBT.
         //
         // Ein Seitenfehler unterhalb des Stapels ist in jedem Unix keine
