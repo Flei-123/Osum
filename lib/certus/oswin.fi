@@ -1,0 +1,345 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// lib/certus/oswin.fi -- EIN FENSTER, INDEM MAN MIT OSUMS FENSTERSERVER
+// REDET. Runde CERTUS.
+//
+// Certus hat seit Runde B5 ein Fenster, und dieses Fenster ist ein
+// X11-Fenster: `lib/browser/x11.fi` spricht das X-Protokoll ueber eine
+// Unix-Steckdose, ohne Xlib, ohne xcb, ohne C-Bibliothek. Auf Osum gibt
+// es kein X. Es gibt etwas Kleineres und etwas Naeheres: den
+// Fensterserver im Kernel (`kernel/wm.fi`) und die Naht zu Ring 3
+// (`kernel/wig.fi`), zusammen siebzehn Systemaufrufe.
+//
+// Diese Datei ist das Gegenstueck zu x11.fi fuer Osum, und sie hat mit
+// Absicht DIESELBE FORM: `oswin_open`, `oswin_create_window`,
+// `oswin_put_image`, `oswin_next_event`, `oswin_flush`, `oswin_close`.
+// Damit unterscheiden sich `lib/browser/window_main.fi` (X11) und
+// `lib/certus/certus_main.fi` (Osum) an genau den Stellen, an denen sie
+// sich unterscheiden MUESSEN, und nirgends sonst.
+//
+// ============================================================ DIE NAHT
+//
+// Was der Kernel anbietet (kernel/sys.fi, Vorraete 1800 und 2100):
+//
+//   WM_CREATE  2100  (xy, wh, titel, art)          -> Handle
+//   WM_EVENT   2103  (h, aus)                      -> 1 geholt, 0 keins
+//   WM_INFO    2104  (h, was)                      -> Zahl
+//   WM_FLUSH   2105  (h)                           -> 0
+//   WM_CLOSE   2107  (h)                           -> 0
+//   WM_STATE   2109  (h, was, wert)                -> 0
+//   WIG_BLIT   1800  (h, xy, wh, quelle, zeilen)   -> Bildpunkte
+//   WIG_SCREEN 1805  (was)                         -> Zahl
+//
+// `xy` und `wh` sind je zwei 16-Bit-Zahlen in einem Wort, weil ein
+// Firn-`fn` hoechstens sechs Argumente hat und die Nummer eines davon
+// ist. Das ist Osums Abmachung und nicht meine.
+//
+// ==================================================== DREI EHRLICHE GRENZEN
+//
+// G1 DER SCHIEBEPUFFER IST EINE SEITE. `kernel/wig.fi` kopiert Zeile fuer
+//    Zeile durch einen Umschlagpuffer von 4096 Oktetten, also hoechstens
+//    1024 Bildpunkte je Zeile (`MAX_ROW`). Ein Fenster darf breiter sein,
+//    ein einzelnes Blit nicht. `oswin_put_image` zerlegt deshalb selbst.
+//
+// G2 ES GIBT KEINEN DESKRIPTOR, AUF DEN MAN WARTEN KOENNTE. `WM_EVENT`
+//    ist ein ABHOLEN und kein Warten: es gibt sofort 0 zurueck, wenn
+//    nichts da ist. Eine Anwendung, die auf ein Ereignis wartet, muss
+//    also fragen, schlafen, fragen -- und genau das tut
+//    `oswin_wait_event` mit zehn Millisekunden Korn (`nanosleep`, die
+//    Aufloesung des Zeitgebers). Das ist der Punkt, an dem `poll` (Runde
+//    POLL, Nummer 7) einer Anwendung wirklich helfen wuerde, und es ist
+//    der Grund, warum diese Runde den Zweig `poll` hereingeholt hat: es
+//    fehlt nicht `poll`, es fehlt EIN DESKRIPTOR AM FENSTER. Beides
+//    steht in docs/CERTUS-STATUS.md.
+//
+// G3 EIN FENSTER IST HOECHSTENS 800 x 600 (`wm.MAX_W`, `wm.MAX_H`), und
+//    der Puffer wird beim Anlegen genommen und nie wieder vergroessert.
+//    Wer breiter malen will, malt daneben.
+//
+// DAS BILDPUNKTFORMAT ist 0x00RRGGBB in einem 32-Bit-Wort -- im Speicher
+// also B, G, R, 0. Das ist dasselbe wie X11s BGRX auf einer Tiefe von 24
+// Bit in 32, weshalb `to_bgrx` aus window_main.fi unveraendert passt.
+import std.rt
+
+export {
+    OsWin, oswin_new, oswin_open, oswin_close, oswin_ok,
+    oswin_create_window, oswin_put_image, oswin_flush,
+    oswin_fill, oswin_text,
+    oswin_next_event, oswin_wait_event, oswin_pending,
+    oswin_width, oswin_height, oswin_screen_w, oswin_screen_h,
+    oswin_sleep_ms,
+    EV_NONE, EV_KEY, EV_DOWN, EV_UP, EV_MOVE, EV_CLOSE, EV_FOCUS,
+    EV_RESIZE,
+}
+
+// Die Nummern des Fensterservers (kernel/sys.fi).
+const WM_CREATE: i64 = 2100
+const WM_FILL: i64 = 2101
+const WM_TEXT: i64 = 2102
+const WM_EVENT: i64 = 2103
+const WM_INFO: i64 = 2104
+const WM_FLUSH: i64 = 2105
+const WM_CLOSE: i64 = 2107
+const WIG_BLIT: i64 = 1800
+const WIG_SCREEN: i64 = 1805
+const SYS_NANOSLEEP: i64 = 35
+
+// WM_INFO-Felder.
+const WI_W: i64 = 0
+const WI_H: i64 = 1
+// WIG_SCREEN-Felder.
+const WS_W: i64 = 0
+const WS_H: i64 = 1
+
+// Die Ereignisarten des Servers (kernel/wm.fi, E_*). Sie heissen hier
+// EV_*, damit der Aufrufer dieselben Namen sieht wie bei x11.fi.
+const EV_NONE: u32 = 0
+const EV_KEY: u32 = 1
+const EV_DOWN: u32 = 2
+const EV_UP: u32 = 3
+const EV_MOVE: u32 = 4
+const EV_CLOSE: u32 = 5
+const EV_FOCUS: u32 = 6
+const EV_RESIZE: u32 = 7
+
+// G1: der Umschlagpuffer des Kernels ist eine Seite.
+const MAX_ROW: usize = 1024
+
+struct OsWin {
+    h: u64, // das Handle des Fensters, 0 = keins
+    w: usize,
+    hh: usize,
+    open: bool,
+    // das zuletzt geholte Ereignis, in derselben Form wie bei x11.fi
+    ev_kind: u32,
+    ev_a: u32, // Taste / Knopf
+    ev_x: u32,
+    ev_y: u32,
+    ev_state: u32,
+    blits: u64, // wie oft wirklich geschoben wurde -- fuer die Messung
+    pixels: u64,
+}
+
+fn oswin_new() -> OsWin {
+    return OsWin { h: 0, w: 0, hh: 0, open: false, ev_kind: 0, ev_a: 0,
+        ev_x: 0, ev_y: 0, ev_state: 0, blits: 0, pixels: 0 }
+}
+
+fn oswin_ok(x: *mut OsWin) -> bool {
+    return (*x).open
+}
+
+fn oswin_width(x: *mut OsWin) -> usize {
+    return (*x).w
+}
+
+fn oswin_height(x: *mut OsWin) -> usize {
+    return (*x).hh
+}
+
+// Ein negativer Rueckgabewert ist ein Fehler; die ABI von Osum ist die von
+// Linux (`kernel/sys.fi`), und die nativen Aufrufe geben ihre Fehler
+// ebenfalls negativ zurueck (`kernel/cap.fi`).
+fn bad(v: i64) -> bool {
+    return v < 0
+}
+
+// `oswin_open` gibt es, damit die Form die von x11.fi ist. Hier ist
+// nichts zu oeffnen: der Server ist der Kernel. Was geprueft wird, ist,
+// ob es ueberhaupt eine Oberflaeche gibt -- ein Kern ohne Fensterserver
+// gibt -ENODEV, und dann soll der Browser das sagen und nicht ein
+// schwarzes Fenster malen.
+fn oswin_open(x: *mut OsWin) -> bool {
+    let w: i64 = syscall(WIG_SCREEN, WS_W, 0, 0, 0, 0, 0)
+    let h: i64 = syscall(WIG_SCREEN, WS_H, 0, 0, 0, 0, 0)
+    if bad(w) || bad(h) || w == 0 || h == 0 {
+        return false
+    }
+    (*x).open = true
+    return true
+}
+
+fn oswin_screen_w() -> usize {
+    let w: i64 = syscall(WIG_SCREEN, WS_W, 0, 0, 0, 0, 0)
+    if bad(w) {
+        return 0
+    }
+    return w as usize
+}
+
+fn oswin_screen_h() -> usize {
+    let h: i64 = syscall(WIG_SCREEN, WS_H, 0, 0, 0, 0, 0)
+    if bad(h) {
+        return 0
+    }
+    return h as usize
+}
+
+// `titel` ist ein nullterminierter Text; der Server KOPIERT ihn (31
+// Oktette plus Null) und folgt keinem fremden Zeiger.
+fn oswin_create_window(x: *mut OsWin, px: usize, py: usize, w: usize,
+    h: usize, titel: u64) -> bool {
+    let xy: i64 = (((px & 0xFFFF) << 16) | (py & 0xFFFF)) as i64
+    let wh: i64 = (((w & 0xFFFF) << 16) | (h & 0xFFFF)) as i64
+    let r: i64 = syscall(WM_CREATE, xy, wh, titel as i64, 0, 0, 0)
+    if bad(r) || r == 0 {
+        return false
+    }
+    (*x).h = r as u64
+    // Die WIRKLICHE Groesse kommt vom Server zurueck und nicht aus dem
+    // Wunsch: er begrenzt auf `wm.MAX_W`/`wm.MAX_H`, und ein Browser, der
+    // 1024 malt, wo 800 stehen, malt 224 Spalten ins Nichts.
+    let gw: i64 = syscall(WM_INFO, r, WI_W, 0, 0, 0, 0)
+    let gh: i64 = syscall(WM_INFO, r, WI_H, 0, 0, 0, 0)
+    if bad(gw) || bad(gh) {
+        return false
+    }
+    (*x).w = gw as usize
+    (*x).hh = gh as usize
+    return true
+}
+
+// EIN RECHTECK AUS DEM SPEICHER DER ANWENDUNG INS FENSTER.
+//
+// `src` zeigt auf `stride`-breite Zeilen zu je vier Oktetten. G1 zerlegt
+// eine zu breite Zeile in Stuecke von hoechstens MAX_ROW Bildpunkten --
+// und weil `WIG_BLIT` `stride` in BILDPUNKTEN nimmt, kostet das Zerlegen
+// nichts ausser einem verschobenen Anfangszeiger.
+fn oswin_put_image(x: *mut OsWin, src: u64, w: usize, h: usize,
+    dx: usize, dy: usize, stride: usize) -> bool {
+    if !(*x).open || (*x).h == 0 || w == 0 || h == 0 {
+        return false
+    }
+    var done: usize = 0
+    var ok: bool = true
+    while done < w {
+        var part: usize = w - done
+        if part > MAX_ROW {
+            part = MAX_ROW
+        }
+        let xy: i64 = ((((dx + done) & 0xFFFF) << 16) | (dy & 0xFFFF)) as i64
+        let wh: i64 = (((part & 0xFFFF) << 16) | (h & 0xFFFF)) as i64
+        let p: u64 = src + (done as u64) * 4
+        let r: i64 = syscall(WIG_BLIT, (*x).h as i64, xy, wh, p as i64,
+            stride as i64, 0)
+        if bad(r) || r == 0 {
+            ok = false
+        } else {
+            (*x).blits = (*x).blits + 1
+            (*x).pixels = (*x).pixels + (r as u64)
+        }
+        done = done + part
+    }
+    return ok
+}
+
+// EIN RECHTECK IN EINER FARBE, vom Server gemalt (WM_FILL). Die Farbe
+// ist 0xRRGGBB.
+fn oswin_fill(x: *mut OsWin, px: usize, py: usize, w: usize, h: usize,
+    farbe: u64) -> bool {
+    if !(*x).open || (*x).h == 0 {
+        return false
+    }
+    let xy: i64 = (((px & 0xFFFF) << 16) | (py & 0xFFFF)) as i64
+    let wh: i64 = (((w & 0xFFFF) << 16) | (h & 0xFFFF)) as i64
+    let r: i64 = syscall(WM_FILL, (*x).h as i64, xy, wh, farbe as i64, 0, 0)
+    return !bad(r)
+}
+
+// TEXT, VOM SERVER GESETZT (WM_TEXT). Der Kernel haelt die
+// Oberflaechenschrift und rastert sie; damit kostet eine Beschriftung in
+// der Bedienleiste den Browser keinen einzigen Glyphen aus seinem
+// eigenen Rasterer. `py` ist die GRUNDLINIE, nicht die Oberkante.
+fn oswin_text(x: *mut OsWin, px: usize, py: usize, p: u64, n: usize,
+    farbe: u64) -> bool {
+    if !(*x).open || (*x).h == 0 || n == 0 {
+        return false
+    }
+    let xy: i64 = (((px & 0xFFFF) << 16) | (py & 0xFFFF)) as i64
+    let r: i64 = syscall(WM_TEXT, (*x).h as i64, xy, p as i64, n as i64,
+        farbe as i64, 0)
+    return !bad(r)
+}
+
+fn oswin_flush(x: *mut OsWin) -> bool {
+    if !(*x).open || (*x).h == 0 {
+        return false
+    }
+    let r: i64 = syscall(WM_FLUSH, (*x).h as i64, 0, 0, 0, 0, 0)
+    return !bad(r)
+}
+
+fn oswin_pending(x: *mut OsWin) -> usize {
+    if !(*x).open || (*x).h == 0 {
+        return 0
+    }
+    let r: i64 = syscall(WM_INFO, (*x).h as i64, 5, 0, 0, 0, 0) // WI_EVENTS
+    if bad(r) {
+        return 0
+    }
+    return r as usize
+}
+
+// EIN Ereignis abholen, ohne zu warten. `EV_NONE`, wenn keines da ist.
+//
+// Der Server legt sechzehn Oktette hin: das erste Wort ist die Art, das
+// zweite traegt drei 16-Bit-Zahlen -- a in Bit 32..47, b in 16..31,
+// c in 0..15 (`kernel/wm.fi`, `ev_push`).
+fn oswin_next_event(x: *mut OsWin) -> u32 {
+    (*x).ev_kind = EV_NONE
+    if !(*x).open || (*x).h == 0 {
+        return EV_NONE
+    }
+    var buf: [u64; 2] = [0; 2]
+    let r: i64 = syscall(WM_EVENT, (*x).h as i64, (&buf[0]) as i64, 0, 0,
+        0, 0)
+    if bad(r) || r == 0 {
+        return EV_NONE
+    }
+    let typ: u32 = (buf[0] & 0xFFFF) as u32
+    let d: u64 = buf[1]
+    (*x).ev_kind = typ
+    (*x).ev_x = ((d >> 32) & 0xFFFF) as u32
+    (*x).ev_y = ((d >> 16) & 0xFFFF) as u32
+    (*x).ev_state = (d & 0xFFFF) as u32
+    // Bei einer Taste steht das Zeichen in `a`; bei einem Knopf die
+    // Knopfnummer in `c`. Beides landet in `ev_a`, so wie bei x11.fi.
+    if typ == EV_KEY {
+        (*x).ev_a = ((d >> 32) & 0xFFFF) as u32
+    } else {
+        (*x).ev_a = (d & 0xFFFF) as u32
+    }
+    return typ
+}
+
+fn oswin_sleep_ms(ms: u64) {
+    var ts: [i64; 2] = [0; 2]
+    ts[0] = (ms / 1000) as i64
+    ts[1] = ((ms % 1000) * 1000000) as i64
+    syscall(SYS_NANOSLEEP, (&ts[0]) as i64, 0, 0, 0, 0, 0)
+}
+
+// G2: fragen, schlafen, fragen. `max_ms` begrenzt das Warten, damit ein
+// Messlauf nicht haengt; 0 heisst "so lange es dauert".
+fn oswin_wait_event(x: *mut OsWin, max_ms: u64) -> u32 {
+    var waited: u64 = 0
+    while true {
+        let e: u32 = oswin_next_event(x)
+        if e != EV_NONE {
+            return e
+        }
+        if max_ms != 0 && waited >= max_ms {
+            return EV_NONE
+        }
+        oswin_sleep_ms(10)
+        waited = waited + 10
+    }
+    return EV_NONE
+}
+
+fn oswin_close(x: *mut OsWin) {
+    if (*x).h != 0 {
+        syscall(WM_CLOSE, (*x).h as i64, 0, 0, 0, 0, 0)
+        (*x).h = 0
+    }
+    (*x).open = false
+}
