@@ -446,7 +446,7 @@ num "GEGENPROBE: eine .fi, die NICHT uebersetzt, endet mit 70 statt mit 0" "${K:
 # und DAS ist es, was ein Mensch nach einem Doppelklick zu sehen bekommt.
 # Die Grenze steht so in docs/ROUNDK16.md: WELCHER ART der Fehler ist,
 # steht da -- WO er steht, nicht.
-hat "$TMPD/open.txt" "firun: der Uebersetzer lehnt ab, Code 1" \
+hat "$TMPD/open.txt" "firun: der Übersetzer lehnt ab, Code 1" \
     "GEGENPROBE: und der Nutzer LIEST, warum -- der Grund steht auf dem Schirm"
 hat "$TMPD/open.txt" "im Quelltext steht ein Fehler" \
     "GEGENPROBE: und zwar als Satz und nicht als nackte Zahl"

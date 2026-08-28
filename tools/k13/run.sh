@@ -436,7 +436,7 @@ echo "== 8. passwd schreibt wirklich in /etc/shadow =="
 rc=$(run_case pw "$TMPD/k0.img" "$TMPD/d0.img" \
     "osum nokbd nosched noproc nofs noring3 script=sh /t/passwd.sh")
 F="$TMPD/pw.txt"
-has "$F" "passwd: gesetzt fuer justin" "passwd meldet Erfolg"
+has "$F" "passwd: gesetzt für justin" "passwd meldet Erfolg"
 python3 tools/osum/mkfs.py cat "$TMPD/live-pw.img" /etc/shadow > "$TMPD/shadow.neu" 2>&1
 python3 - "$TMPD/shadow.neu" <<'PY' > "$TMPD/pwcheck.txt" 2>&1
 import binascii, hashlib, sys
