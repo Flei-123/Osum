@@ -442,28 +442,46 @@ fn main(start: u64) -> i32 {
     var trust: [u8; 20] = "/etc/ssl/certs.pem\0\0"
     let roots: usize = http.client_load_trust(&c, (&trust[0]) as u64)
 
+    // DAS FENSTER IST FREIWILLIG, und das ist keine Bequemlichkeit.
+    //
+    // Ein Kern ohne Fensterserver (die Abnahme faehrt ihn oft so: kein
+    // `gfx`, kein `wm`, kein `wig`) gibt auf WIG_SCREEN -ENODEV. Die
+    // erste Fassung dieser Datei gab dann 95 zurueck und hoerte auf --
+    // und damit war die Seite, die sie schon geladen und gemalt hatte,
+    // weg. Das ist genau die falsche Reihenfolge: das ERGEBNIS ist die
+    // Leinwand, das Fenster ist eine Art, sie anzusehen.
+    //
+    // Also: erst laden, bauen, malen und das Bild herausschreiben, dann
+    // ein Fenster, WENN es eines gibt. Ein Lauf ohne Oberflaeche ist
+    // damit eine vollwertige Messung und kein Fehlschlag.
     var xw: oswin.OsWin = oswin.oswin_new()
-    if !oswin.oswin_open(&xw) {
-        return 95
-    }
+    let have_win: bool = oswin.oswin_open(&xw)
     var title: [u8; 7] = "Certus\0"
     // Die Fenstergroesse: so gross wie der Arbeitsbereich es zulaesst,
     // aber nie groesser als das, was der Server traegt (er begrenzt
     // selbst, und `oswin_create_window` liest die WIRKLICHE Groesse
     // zurueck).
-    var vw: usize = oswin.oswin_screen_w()
-    var vh: usize = oswin.oswin_screen_h()
+    var vw: usize = 0
+    var vh: usize = 0
+    if have_win {
+        vw = oswin.oswin_screen_w()
+        vh = oswin.oswin_screen_h()
+    }
     if vw == 0 || vw > 800 {
         vw = 800
     }
     if vh == 0 || vh > 560 {
         vh = 560
     }
-    if !oswin.oswin_create_window(&xw, 0, 0, vw, vh, (&title[0]) as u64) {
-        return 96
+    var win_ok: bool = false
+    if have_win {
+        win_ok = oswin.oswin_create_window(&xw, 0, 0, vw, vh,
+            (&title[0]) as u64)
     }
-    vw = oswin.oswin_width(&xw)
-    vh = oswin.oswin_height(&xw)
+    if win_ok {
+        vw = oswin.oswin_width(&xw)
+        vh = oswin.oswin_height(&xw)
+    }
 
     let fsp: *mut metrics.FontSet =
     mem.heap_alloc(FONTSET_BYTES) as *mut metrics.FontSet
@@ -529,10 +547,28 @@ fn main(start: u64) -> i32 {
     say_kv((&kn6[0]) as u64, 2, vw as u64)
     var kn7: [u8; 3] = "vh\0"
     say_kv((&kn7[0]) as u64, 2, vh as u64)
+    var kn10: [u8; 4] = "win\0"
+    say_kv((&kn10[0]) as u64, 3, bool_num(win_ok))
     var nl: [u8; 2] = "\n\0"
     mem.write_all(1, &nl[0], 1)
 
-    var running: bool = true
+    if rt.arg_count(start) > 2 {
+        var shot0: mem.Buf = mem.buf_new()
+        mem.buf_init(&shot0)
+        png.write_ppm(painter.painter_canvas(&p), &shot0)
+        let okw0: bool = rt.write_file(rt.arg_ptr(start, 2),
+            mem.buf_ptr(&shot0) as u64, mem.buf_len(&shot0))
+        var kp0: [u8; 4] = "ppm\0"
+        say_kv((&kp0[0]) as u64, 3, mem.buf_len(&shot0) as u64)
+        var kp1: [u8; 6] = "ppmok\0"
+        say_kv((&kp1[0]) as u64, 5, bool_num(okw0))
+        var nl3: [u8; 2] = "\n\0"
+        mem.write_all(1, &nl3[0], 1)
+        mem.buf_free(&shot0)
+    }
+    // OHNE FENSTER IST HIER SCHLUSS, und das ist das Ergebnis und kein
+    // Abbruch: die Leinwand steht in der Datei.
+    var running: bool = win_ok
     while running {
         to_bgrx(painter.painter_canvas(&p), &bgrx, scroll, vh - CHROME_H)
         let oki: bool = oswin.oswin_put_image(&xw,
@@ -594,18 +630,21 @@ fn main(start: u64) -> i32 {
             scroll = m as usize
         }
     }
-    if rt.arg_count(start) > 2 {
+    // NACH der Schleife noch einmal: was gescrollt wurde, steht sonst
+    // nicht im Bild.
+    if win_ok && rt.arg_count(start) > 2 {
         var shot: mem.Buf = mem.buf_new()
         mem.buf_init(&shot)
         png.write_ppm(painter.painter_canvas(&p), &shot)
         let okw: bool = rt.write_file(rt.arg_ptr(start, 2),
             mem.buf_ptr(&shot) as u64, mem.buf_len(&shot))
         var kn8: [u8; 4] = "ppm\0"
-    say_kv((&kn8[0]) as u64, 3, mem.buf_len(&shot) as u64)
+        say_kv((&kn8[0]) as u64, 3, mem.buf_len(&shot) as u64)
         var kn9: [u8; 6] = "ppmok\0"
-    say_kv((&kn9[0]) as u64, 5, bool_num(okw))
+        say_kv((&kn9[0]) as u64, 5, bool_num(okw))
         var nl2: [u8; 2] = "\n\0"
         mem.write_all(1, &nl2[0], 1)
+        mem.buf_free(&shot)
     }
     oswin.oswin_close(&xw)
     http.client_free(&c)
