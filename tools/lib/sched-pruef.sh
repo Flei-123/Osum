@@ -154,6 +154,16 @@ else:
 PYEOF
 [ $? -eq 0 ] || FEHLER=$((FEHLER+1))
 
+# 6. die Wartezeit an der Netzsperre wird als solche AUSGEWIESEN und
+#    zaehlt nicht als Laufzeit des Abschnitts. s3 und s4 schlafen je 2 s
+#    und muessen nacheinander -- einer von beiden wartet also gut 2 s.
+if printf '%s\n' "$B" | grep -q 'Warten auf die Netzsperre'; then
+    melde ok "die Wartezeit an der Netzsperre steht getrennt in der Zeile"
+    printf '%s\n' "$B" | grep 'Warten auf die Netzsperre' | sed 's/^/        /'
+else
+    melde no "die Wartezeit an der Netzsperre wird NICHT ausgewiesen"
+fi
+
 # 5. der durchgefallene faellt in beiden durch
 for x in "$A" "$B"; do
     printf '%s\n' "$x" | grep -q 'FEHLER  tools/s5/run.sh' || FEHLER=$((FEHLER+1))
