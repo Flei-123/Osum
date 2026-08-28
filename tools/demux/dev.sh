@@ -12,7 +12,7 @@ cd "$(dirname "$0")/../.."
 
 CMD=${1:?Befehl fehlt}
 shift
-PROGS="sh demuxt $*"
+PROGS="sh demuxt play $*"
 MEDIA=${OSUM_MEDIA:-/tmp/demux-media}
 W=${OSUM_DEVWORK:-/tmp/demux-work}
 mkdir -p "$W"
