@@ -287,12 +287,31 @@ fn read_payload(st: u64, buf: u64, max: u64) -> u64 {
     if want > max {
         want = max
     }
+    // IN STUECKEN LESEN, BIS ALLES DA IST. `read` DARF weniger liefern
+    // als verlangt -- der Kern gibt hoechstens `sys.MAX_IO` auf einmal
+    // her und hoert ausserdem an Blockgrenzen des Dateisystems auf. Die
+    // erste Fassung nahm das eine Ergebnis und ueberSPRANG den Rest als
+    // "nicht gelesen": aus einem Block von 3840 Oktetten wurden dann
+    // 3584, und die Tonspur war ab da um 256 Oktette verschoben.
+    // GEMESSEN: der Bitvergleich schlug mit maxdiff 1727 fehl -- genau
+    // der Abstand zweier benachbarter Werte eines 660-Hz-Sinus bei
+    // dieser Aussteuerung, also eine Verschiebung um einen Rahmen. Und
+    // er schlug nur auf EINER Platte fehl: auf einer anderen lagen die
+    // Blockgrenzen anders. Ein Fehler, der von der Belegung der Platte
+    // abhaengt, ist der unangenehmste, den es gibt.
     var got: u64 = 0
-    if want > 0 {
-        got = ulib.sys(ulib.SYS_READ, getw(st, S_FD), buf, want)
-        if ulib.bad(got) {
+    var going: bool = true
+    while got < want && going {
+        let n: u64 = ulib.sys(ulib.SYS_READ, getw(st, S_FD), buf + got,
+            want -% got)
+        if ulib.bad(n) {
             setw(st, S_WHY, W_IO)
             return 0
+        }
+        if n == 0 {
+            going = false
+        } else {
+            got = got + n
         }
     }
     if got < len {
