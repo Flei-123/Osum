@@ -1,0 +1,173 @@
+# Runde VIEWER — das Rundenprotokoll
+
+Zweig `viewer`, von `mergeline` (6b602af). Auftrag: **Bildbetrachter**
+(Roadmap E6) mit eigenem JPEG- und PNG-Dekodierer, und der
+JPEG-Dekodierer ist zugleich **Schritt F5** der Medien-Roadmap.
+
+---
+
+## 1. Was gebaut wurde, und in welcher Reihenfolge
+
+Die Reihenfolge kommt aus dem Auftrag und aus dem Verhältnis von Aufwand
+zu Nutzen — und der erste Schritt war **nachsehen statt schreiben**:
+
+1. **`vendor/firn/lib/std/deflate.fi` und `kernel/user/flate.fi` waren
+   schon da.** Runde K11 hat DEFLATE nach RFC 1951 in Firn gebaut, mit
+   CRC-32 daneben. PNG braucht genau das. Das hat diese Runde etwa eine
+   Woche gespart, und es ist der Grund, warum PNG hier vor JPEG fertig
+   war.
+2. **PNG** (`imgpng.fi`): Blöcke, die fünf Zeilenfilter, Bittiefen
+   1/2/4/8/16, alle fünf Farbarten, `tRNS`, Adam7 — und der Schreiber
+   dazu.
+3. **Baseline-JPEG** (`imgjpeg.fi`): der teuerste Teil, siehe unten.
+4. **BMP** (in `img.fi`): 250 Zeilen, ein halber Tag, deckt jedes
+   Testbild und jedes Windows-Überbleibsel ab.
+5. **GIF** (`imggif.fi`) inklusive Animation: LZW ist die einzige echte
+   Hürde und sie ist klein.
+6. **Die Anwendung** (`viewer.fi`) und ihr Bündel.
+
+**Nicht gebaut, wie im Auftrag festgelegt:** WebP, HEIC, SVG. Was sie
+kosten würden, steht mit Zahlen in `docs/IMAGES.md`, Abschnitt 3.
+
+---
+
+## 2. Die Entscheidung, die die Runde trägt: Zeilen statt Bilder
+
+Die Schnittstelle ist ein **Ziehmodell**:
+
+```
+    img.begin(oktette, laenge, scale)   Kopf lesen, Puffer anlegen
+    img.next_row(ziel)                  EINE Zeile RGBA, dann die nächste
+```
+
+Der JPEG-Dekodierer hält dafür **drei MCU-Zeilen je Komponente** in
+einem Ringpuffer (vorige, laufende, nächste — die dritte, weil der
+Dreiecksfilter für die letzte Zeile eines Bandes schon die erste des
+nächsten braucht). Damit hängt sein Arbeitsspeicher an der **Breite**
+und nicht an der Fläche:
+
+| Bild | Bildpunkte | Arbeitsspeicher |
+|---|---|---|
+| 4000 × 3000 | 12 Millionen | 1 023 072 Oktette |
+| 8000 × 6250 | 50 Millionen | 2 047 376 Oktette |
+
+Vierfache Fläche, doppelter Speicher. **Genau diese Bauart braucht die
+Medienrunde wieder**: MJPEG ist eine Folge von JPEG-Bildern, und ein
+Abspieler, der je Bild 48 Megaoktett anfordert und wieder freigibt, ist
+kein Abspieler. Was F6 aus diesem Modul noch braucht, ist der Aufruf
+`imgjpeg.begin` je Bild und sonst nichts.
+
+---
+
+## 3. Warum es bitgenau ist
+
+Ein eigener Dekodierer, der um dreißig Stufen danebenliegt, sieht auf
+einem Foto völlig in Ordnung aus. Deshalb ist der Vergleichsmaßstab
+**Pillow** (libjpeg-turbo 3.1.4, zlib-ng, giflib): dieselben Dateien
+werden auf dem Wirt dekodiert, die rohen RGBA-Oktette kommen auf
+dasselbe Plattenabbild, und `/bin/imgtest` vergleicht sie **im laufenden
+System** Bildpunkt für Bildpunkt.
+
+Damit dieser Vergleich den Dekodierer misst und nicht die Rundung,
+rechnet der Dekodierer **absichtlich wie libjpeg**: `jpeg_idct_islow`
+(Ganzzahl, 13 Bit, zwei Durchgänge), der Dreiecksfilter
+`h2v1`/`h2v2_fancy_upsample` mit den Rundungssummanden 1, 2, 7 und 8,
+und die Festkommatabellen für Y′CbCr → RGB mit libjpegs Konstanten
+1,40200 / 1,77200 / 0,34414 / 0,71414.
+
+Dass Ganzzahl hier kein Kompromiss ist, sondern der einzige Weg, steht
+in `kernel/user/fas.fi`: der eigene Assembler kennt die SSE-Befehle
+nicht, und der Kernel sichert die SSE-Register beim Aufgabenwechsel
+nicht. Ring 3 rechnet auf Osum ganzzahlig — und das ist zufällig genau
+das, was den Vergleich mit libjpeg erst möglich macht.
+
+---
+
+## 4. Drei Fehler, die nur die Messung gefunden hat
+
+**a) Versatz gegen Adresse.** Der JPEG-Marker-Leser rechnete `body` als
+Versatz in die Datei und las ihn als Adresse (`ld8(24)`). Ergebnis: ein
+Seitenfehler bei jedem Bild. Dieselbe Verwechslung steckte danach noch
+zweimal im Baum — in `imgpng` (der Blockdurchlauf), in `imggif` (die
+Blocklängen) und ein drittes Mal in `img.bmp_begin`, wo eine Adresse
+gegen eine **Länge** verglichen wurde und die Palette deshalb schwarz
+blieb. Alle drei fielen sofort auf, weil der Vergleich gegen Pillow
+Zahlen liefert und nicht Eindrücke: `maxabw=255`.
+
+**b) Ein Fehler im festgenagelten Übersetzer.** Der Dreiecksfilter
+rechnete falsch, und der Fehler lag nicht im Filter. `firnc`
+(a751b3db) legt drei über die Schleifenkante rotierende Veränderliche
+(`links = mitte; mitte = rechts; rechts = neu`) auf **zwei**
+Stapelplätze und verliert dabei eine Kopie — das *lost-copy problem*
+beim Verlassen der SSA-Form. Im Assembler ist es sichtbar, im Messwert
+war es ein Farbfehler von bis zu **163 Stufen** bei 4:2:0. Umgangen
+(jede Summe frisch aus dem Speicher), aufgeschrieben in
+`docs/IMAGES.md` Abschnitt 7 — und die Abnahme **misst den Fehler
+weiter** (Abschnitt 9): wird Firn repariert, sagt sie es.
+
+**c) Eine Sortierung ohne Vorzeichen.** `ulib.cmp` gibt 0, 1 oder 2
+zurück, kein Vorzeichen; `> 0` war deshalb bei jedem Unterschied wahr
+und der Ordner stand rückwärts. Gefunden, weil die Abnahme prüft,
+welches Bild als erstes im Fenster steht.
+
+---
+
+## 5. Der Kernel hat zwei Zahlen bekommen
+
+`kernel/proc.fi`: `PRIV_SLOTS` 6 → 40 und `BIG_TOP` `0x40C00000` →
+`0x45000000`. Die private Arena eines Prozesses wächst damit von 6 auf
+**74 MiB**.
+
+Der Grund ist nicht das Bild — das läuft zeilenweise. Der Grund sind die
+zwei Dinge, die **nicht** zeilenweise gehen: eine Datei muss ganz im
+Speicher liegen, bevor der erste Marker gelesen wird, und ein PNG
+braucht seinen ausgepackten Rohstrom am Stück, weil `flate.inflate`
+nicht fortsetzbar ist. Mit 6 MiB war schon ein Handyfoto nicht zu
+öffnen.
+
+Die Kacheln entstehen weiterhin erst, wenn jemand sie anfasst
+(`proc.pt_for`), und werden mit dem Prozess freigegeben
+(`proc.free_space`). Ein Programm, das die Arena nie betritt, belegt
+keinen Rahmen mehr als vorher — deshalb ändert die Umstellung an keiner
+bestehenden Rahmenzählung etwas.
+
+---
+
+## 6. Die Anwendung
+
+`/bin/viewer`, im Bündel `/apps/viewer.osp` mit dem Anzeigenamen
+**„Bilder"** (der Name steht in den Daten und nicht im Code —
+`docs/NAMING.md`).
+
+Blättern im Ordner (sortiert, mit Rundlauf), Zoom in Stufen mit
+„Einpassen" und „100 %", Drehen links und rechts, **EXIF-Ausrichtung
+beim Laden** (sonst steht jedes zweite Handyfoto quer), ein
+Miniaturenstreifen aus dem Ordner (JPEG im Achtel dekodiert, also rund
+ein Sechzigstel der Arbeit), Diaschau alle drei Sekunden, Zuschneiden
+auf den sichtbaren Ausschnitt, Größe ändern über ein Eingabefeld,
+Sichern als PNG — und eine Statuszeile mit Name, Format, Maßen,
+Bittiefe, Dateigröße und, wenn es so ist, dem Wort
+`UNVOLLSTAENDIG` oder `VORSCHAU (zu gross)`.
+
+**Die Grenze steht in der Oberfläche und nicht im Kleingedruckten:** ein
+Bild über 8 Megabildpunkten wird angezeigt (die Vorschau entsteht
+zeilenweise), aber nicht bearbeitet.
+
+---
+
+## 7. Was diese Runde nicht kann
+
+* **Progressives JPEG.** Benannt (`PROGRESSIV`), nicht falsch gezeigt.
+  +600–900 Zeilen, und es bräuchte den Vollbild-Koeffizientenpuffer,
+  den dieser Dekodierer absichtlich nicht hat.
+* **JPEG schreiben.** Der Betrachter sichert als PNG. Ein
+  Baseline-Encoder sind geschätzt 450–600 Zeilen; er ist der erste Punkt
+  für die nächste Runde.
+* **WebP, HEIC, SVG, TIFF, AVIF.** Erkannt und beim Namen abgelehnt.
+* **Zwischenablage, Ziehen und Ablegen, Papierkorb.** Sie hängen an A3
+  (Systembus) und D1/D2 und gehören nicht in diese Runde.
+* **Mausauswahl zum Zuschneiden.** Der Fensterserver liefert einer
+  Anwendung Ereignisse nur über die Widget-Bibliothek; ein freies
+  Aufziehen im Bild bräuchte einen Weg dafür. Statt dessen schneidet
+  „Zuschneiden" auf den **sichtbaren Ausschnitt** — was man sieht,
+  bekommt man.

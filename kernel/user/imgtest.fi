@@ -101,6 +101,37 @@ fn slurp(path: u64) -> bool {
     return got > 0
 }
 
+// ============================== DIE PROBE AUF DEN UEBERSETZER
+//
+// Drei Werte, die ueber die Schleifenkante rotieren -- genau das
+// Muster, an dem der Dreiecksfilter dieser Runde falsch gerechnet hat
+// (docs/IMAGES.md, Abschnitt 7). Richtig ist 21324354:
+//
+//   Durchgang 0: mitte=2 links=1 -> 21, dann links=2 mitte=3 rechts=4
+//   Durchgang 1: mitte=3 links=2 -> 32, dann links=3 mitte=4 rechts=5
+//   Durchgang 2: mitte=4 links=3 -> 43
+//   Durchgang 3: mitte=5 links=4 -> 54
+//
+// Kommt etwas anderes heraus, legt der Uebersetzer `mitte` und `rechts`
+// auf denselben Platz. Diese Funktion steht hier, damit die Abnahme es
+// MISST statt es zu behaupten -- und damit sie es merkt, wenn Firn
+// repariert ist.
+fn rotationsprobe() -> u64 {
+    var links: u64 = 1
+    var mitte: u64 = 2
+    var rechts: u64 = 3
+    var s: u64 = 0
+    var i: u64 = 0
+    while i < 4 {
+        s = s * 100 + mitte * 10 + links
+        links = mitte
+        mitte = rechts
+        rechts = rechts + 1
+        i = i + 1
+    }
+    return s
+}
+
 fn now() -> u64 {
     return ulib.sys(ulib.SYS_SYSINFO, ulib.I_UPTIME, 0, 0)
 }
@@ -139,9 +170,20 @@ fn u_start(args: u64) -> u64 {
     var o_r: [u8; 3] = "-r\0"
     var o_c: [u8; 3] = "-c\0"
     var o_s: [u8; 3] = "-s\0"
+    var o_j: [u8; 3] = "-j\0"
+    var o_q: [u8; 3] = "-q\0"
+    var o_rot: [u8; 5] = "-rot\0"
     var rt: [u8; 24] = [0 as u8; 24]
 
+    var k_rot: [u8; 13] = "IMGROT wert=\0"
     let argc: u64 = ulib.arg_count(args)
+    if argc == 2 && ulib.streq(ulib.arg_at(args, 1),
+        (&o_rot[0 as usize]) as u64) {
+        say((&k_rot[0 as usize]) as u64)
+        ulib.sayu(rotationsprobe())
+        ulib.nl()
+        return 0
+    }
     if argc < 2 {
         ulib.esay_line((&s_use[0 as usize]) as u64, 0)
         return 1
@@ -151,6 +193,8 @@ fn u_start(args: u64) -> u64 {
     var scale: u64 = 1
     var wdh: u64 = 1
     var pngout: u64 = 0
+    var jpgout: u64 = 0
+    var qual: u64 = 85
     var rotq: u64 = 0
     var cx: u64 = 0
     var cy: u64 = 0
@@ -179,6 +223,12 @@ fn u_start(args: u64) -> u64 {
             cy = ulib.to_num(after(s, 1))
             cw = ulib.to_num(after(s, 2))
             chh = ulib.to_num(after(s, 3))
+        } else if ulib.streq(a, (&o_j[0 as usize]) as u64) && i + 1 < argc {
+            i = i + 1
+            jpgout = ulib.arg_at(args, i)
+        } else if ulib.streq(a, (&o_q[0 as usize]) as u64) && i + 1 < argc {
+            i = i + 1
+            qual = ulib.to_num(ulib.arg_at(args, i))
         } else if ulib.streq(a, (&o_s[0 as usize]) as u64) && i + 1 < argc {
             i = i + 1
             let s: u64 = ulib.arg_at(args, i)
@@ -266,7 +316,13 @@ fn u_start(args: u64) -> u64 {
     }
     // ------------------------------------------- Lauf 3: PNG schreiben
     if pngout != 0 {
-        schreiben(pngout, filesz, scale, rotq, cx, cy, cw, chh, sw, sh)
+        schreiben(pngout, filesz, scale, rotq, cx, cy, cw, chh, sw, sh, 0,
+            0)
+    }
+    // ------------------------------------------ Lauf 4: JPEG schreiben
+    if jpgout != 0 {
+        schreiben(jpgout, filesz, scale, rotq, cx, cy, cw, chh, sw, sh, 1,
+            qual)
     }
     return 0
 }
@@ -416,7 +472,8 @@ fn vergleich(refp: u64, w: u64, h: u64, filesz: u64, scale: u64) {
 // Das ist der Weg, den auch die Anwendung geht -- und weil er hier
 // gemessen wird, ist er dort nicht behauptet.
 fn schreiben(out: u64, filesz: u64, scale: u64, rotq: u64, cx: u64,
-    cy: u64, cw: u64, chh: u64, sw: u64, sh: u64) {
+    cy: u64, cw: u64, chh: u64, sw: u64, sh: u64, alsjpeg: u64,
+    qual: u64) {
     var k_hdr: [u8; 10] = "IMGSAVE \0\0"
     var k_n: [u8; 7] = "bytes=\0"
     var k_w: [u8; 8] = "breite=\0"
@@ -482,7 +539,12 @@ fn schreiben(out: u64, filesz: u64, scale: u64, rotq: u64, cx: u64,
         ulib.esay_line((&s_big[0 as usize]) as u64, 0)
         return
     }
-    let n: u64 = img.save_png(cur, w, h, true, file, cap)
+    var n: u64 = 0
+    if alsjpeg != 0 {
+        n = img.save_jpeg(cur, w, h, qual, file, cap)
+    } else {
+        n = img.save_png(cur, w, h, true, file, cap)
+    }
     if n == 0 {
         ulib.esay_line((&s_w[0 as usize]) as u64, 0)
         return

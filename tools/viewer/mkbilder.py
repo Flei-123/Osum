@@ -25,8 +25,11 @@ hergibt -- und sagt, wie viele es waren.
 
 import os
 import struct
+import warnings
 import sys
 import zlib
+
+warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 from PIL import Image, ImageDraw
 
@@ -145,8 +148,24 @@ def main():
     dazu("pgrau8.png", im)
     im.convert("1").save(p("pgrau1.png"))
     dazu("pgrau1.png", im)
-    im.convert("L").resize((32, 24)).convert("I;16").save(p("pgrau16.png"))
-    dazu("pgrau16.png", im)
+    # 16 BIT: die Vorlage kann hier NICHT `convert("RGBA")` sein.
+    # Pillow reicht den 16-Bit-Wert unveraendert durch (Modus I;16), ein
+    # Bilddekodierer fuer einen Bildschirm mit acht Bit je Kanal nimmt
+    # das OBERE Oktett -- das ist, was libpng mit `png_set_strip_16`
+    # tut, und was jeder Betrachter zeigt. Also stehen im Bild Werte
+    # ueber den ganzen 16-Bit-Bereich (v * 257), und die Vorlage ist das
+    # obere Oktett davon: gemessen wird der Dekodierer und nicht die
+    # Frage, was Pillow aus I;16 macht.
+    g = im.convert("L").resize((32, 24))
+    tief = Image.new("I;16", g.size)
+    tief.putdata([v * 257 for v in g.getdata()])
+    tief.save(p("pgrau16.png"))
+    gelesen16 = Image.open(p("pgrau16.png"))
+    gelesen16.load()
+    hoch = Image.new("L", gelesen16.size)
+    hoch.putdata([min(255, v >> 8) for v in gelesen16.getdata()])
+    schreib_ref(p("pgrau16.png.rgba"), hoch)
+    liste.append(("pgrau16.png", gelesen16.width, gelesen16.height, 0))
     im.save(p("pilace.png"), interlace=True)
     dazu("pilace.png", im)
     # gross: 2000x1500 = 3 Megabildpunkte, RGB
