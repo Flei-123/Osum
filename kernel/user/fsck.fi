@@ -136,6 +136,11 @@ static mut fd: u64 = 0;
 static mut fehler: u64 = 0;
 static mut behoben: u64 = 0;
 static mut reparieren: bool = false;
+// Ob der zuletzt gelesene Verzeichniseintrag `.` oder `..` hiess. Die
+// beiden sind die EINZIGEN Namen, unter denen ein Verzeichnis
+// zurueckzeigen darf; jeder andere Name auf ein schon besuchtes
+// Verzeichnis ist ein KREIS.
+static mut punkt: bool = false;
 
 fn sag(name: u64, wert: u64) {
     var s_kopf: [u8; 7] = "fsck: \0";
@@ -230,6 +235,7 @@ fn u_start(args: u64) -> u64 {
     var n_badtype: [u8; 9] = "badtype\0\0";
     var n_dirs: [u8; 6] = "dirs\0\0";
     var n_totlinks: [u8; 10] = "totlinks\0\0";
+    var n_kreise: [u8; 8] = "kreise\0\0";
     var n_zugross: [u8; 9] = "zugross\0\0";
     var n_fehler: [u8; 8] = "fehler\0\0";
     var n_behoben: [u8; 9] = "behoben\0\0";
@@ -527,6 +533,7 @@ fn u_start(args: u64) -> u64 {
     // besuchter Inode. Ein Verzeichnis, das sich selbst enthaelt, wird
     // damit EINMAL betreten -- der zweite Versuch prallt an der Marke ab.
     var totlinks: u64 = 0;
+    var kreise: u64 = 0;
     var sp: u64 = 0;
     let wurzel: u64 = g64((&sb[0 as usize]) as u64 + SB_ROOT);
     if wurzel != 0 && wurzel <= ni {
@@ -549,12 +556,22 @@ fn u_start(args: u64) -> u64 {
                     if art_von(kind, itab, ipb, isize) == 0 {
                         totlinks = totlinks + 1;
                     } else {
-                        if art_von(kind, itab, ipb, isize) == T_DIR
-                            && vis_get(kind) == 0 {
-                            vis_set(kind);
-                            if sp < STAPEL_MAX {
-                                stapel[(sp) as usize] = kind;
-                                sp = sp + 1;
+                        if art_von(kind, itab, ipb, isize) == T_DIR {
+                            if vis_get(kind) == 0 {
+                                vis_set(kind);
+                                if sp < STAPEL_MAX {
+                                    stapel[(sp) as usize] = kind;
+                                    sp = sp + 1;
+                                }
+                            } else {
+                                // SCHON BESUCHT. Unter `.` oder `..`
+                                // ist das die Regel; unter jedem
+                                // anderen Namen ist es ein KREIS, und
+                                // der laesst ein Verzeichnis nie
+                                // wieder loeschen.
+                                if !punkt {
+                                    kreise = kreise + 1;
+                                }
                             }
                         }
                     }
@@ -564,7 +581,8 @@ fn u_start(args: u64) -> u64 {
         }
     }
     sag((&n_totlinks[0 as usize]) as u64, totlinks);
-    fehler = fehler + totlinks;
+    sag((&n_kreise[0 as usize]) as u64, kreise);
+    fehler = fehler + totlinks + kreise;
 
     sag((&n_fehler[0 as usize]) as u64, fehler);
     sag((&n_behoben[0 as usize]) as u64, behoben);
@@ -691,6 +709,21 @@ fn eintrag(ino: u64, e: u64, itab: u64, ipb: u64, isize: u64, dirent: u64,
     }
     if !lies(b, (&ent[0 as usize]) as u64) {
         return 0;
+    }
+    punkt = false;
+    if inb + 11 <= BS {
+        let c0: u64 = __mmio_read8(((&ent[0 as usize]) as u64 + inb + 8)
+            as *mut u8) as u64;
+        let c1: u64 = __mmio_read8(((&ent[0 as usize]) as u64 + inb + 9)
+            as *mut u8) as u64;
+        let c2: u64 = __mmio_read8(((&ent[0 as usize]) as u64 + inb + 10)
+            as *mut u8) as u64;
+        if c0 == 46 && c1 == 0 {
+            punkt = true;
+        }
+        if c0 == 46 && c1 == 46 && c2 == 0 {
+            punkt = true;
+        }
     }
     return g64((&ent[0 as usize]) as u64 + inb);
 }
