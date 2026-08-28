@@ -635,6 +635,15 @@ fn bnum(b: bool) -> u64 {
     return 0
 }
 
+// RUNDE SNIP: die Zeile, an der ein Messlauf erkennt, dass der
+// Fahrschein NICHT von einer Taste kam. Sie steht laut im Protokoll,
+// damit niemand die beiden Wege verwechselt.
+fn say_snipkey() {
+    var s: [u8; 49] = "snip: MESSHILFE snipkey -- Fahrschein OHNE Taste\0"
+    serial.puts((&s[0]) as u64)
+    serial.nl()
+}
+
 // ================================================== RUNDE SNIP
 fn snap_stage(state: u64) {
     var s_snap: [u8; 7] = "snap: \0"
@@ -3956,6 +3965,39 @@ fn mode_of(state: u64, cmd: u64) {
     if find(cmd, (&dnv[0]) as u64, 8) != 0 {
         kstate.mode_add(state, kstate.M_NETVDEMO)
     }
+    // ======================================== RUNDE SNIP
+    //
+    // DIE LAENGSTEN WOERTER ZUERST. `snip` steckt in `snipnofilt`, und
+    // `snap` in `snapfrei` und `snapnomark` -- die Suche ist eine
+    // Teilzeichenkettensuche. Bei `dhcp`/`nodhcp` war genau das schon
+    // einmal ein Fehler, und der Kommentar dazu steht dreissig Zeilen
+    // weiter oben. Also erst die langen, und `snip` prueft am Ende
+    // nichts mehr kaputt: es DARF in `snipnofilt` gefunden werden, denn
+    // ohne den Dienst waere `snipnofilt` sinnlos.
+    var wsnipk: [u8; 8] = "snipkey\0"
+    if find(cmd, (&wsnipk[0]) as u64, 7) != 0 {
+        kstate.mode_add(state, kstate.M_SNIPKEY)
+    }
+    var wsnip: [u8; 5] = "snip\0"
+    var wnosnap: [u8; 7] = "nosnap\0"
+    var wsfrei: [u8; 9] = "snapfrei\0"
+    var wsnomk: [u8; 11] = "snapnomark\0"
+    var wsnofl: [u8; 11] = "snipnofilt\0"
+    if find(cmd, (&wsnofl[0]) as u64, 10) != 0 {
+        kstate.mode_add(state, kstate.M_SNIPNOFILT)
+    }
+    if find(cmd, (&wsnomk[0]) as u64, 10) != 0 {
+        kstate.mode_add(state, kstate.M_SNAPNOMARK)
+    }
+    if find(cmd, (&wsfrei[0]) as u64, 8) != 0 {
+        kstate.mode_add(state, kstate.M_SNAPFREI)
+    }
+    if find(cmd, (&wnosnap[0]) as u64, 6) != 0 {
+        kstate.mode_add(state, kstate.M_NOSNAP)
+    }
+    if find(cmd, (&wsnip[0]) as u64, 4) != 0 {
+        kstate.mode_add(state, kstate.M_SNIP)
+    }
     if find(cmd, (&dnl[0]) as u64, 7) != 0 {
         kstate.mode_add(state, kstate.M_NOLAYER)
     }
@@ -4551,10 +4593,22 @@ fn surface(state: u64) {
     // measured against a work area that is still the whole screen, and
     // the measurement would pass for the wrong reason.
     var maxed: bool = false
+    // RUNDE SNIP: der Messhilfsschalter. Siehe kstate.M_SNIPKEY -- er
+    // tut EINMAL das, was die Taste tut, weil die Tastatur in dieser
+    // Phase nachweislich nichts mehr zustellt. Eine Sekunde nach Beginn
+    // der Haltephase, damit die Anwendung ihr Fenster stehen hat.
+    var geschickt: bool = false
     if hz != 0 {
         let ab: u64 = apic.tsc()
         let bis: u64 = ab + hz * sek
         while apic.tsc() < bis {
+            if !geschickt && kstate.mode_on(state, kstate.M_SNIPKEY) {
+                if apic.tsc() > ab + hz {
+                    geschickt = true
+                    say_snipkey()
+                    snap.ticket(state, time.mono_ns(state))
+                }
+            }
             if !maxed && kstate.mode_on(state, kstate.M_WMAX) {
                 if apic.tsc() > ab + hz {
                     maxed = true
@@ -4931,6 +4985,25 @@ fn desk_start(state: u64) -> u64 {
     if kstate.mode_on(state, kstate.M_DHCP) {
         let _d: u64 = desk_spawn(state, (&p_dhcp[0]) as u64,
             (&a_dhcp[0]) as u64, 5)
+    }
+    // ============================================= RUNDE SNIP
+    //
+    // DER BILDSCHIRMFOTO-DIENST. Er muss LAUFEN, bevor der Mensch
+    // UMSCHALT+SUPER+S drueckt -- der Kern bindet den Fahrschein beim
+    // Ausstellen an den eingetragenen Dienst, und wer sich erst danach
+    // eintraegt, kommt zu spaet. Genau deshalb steht er hier bei den
+    // Programmen des Schreibtischs und nicht in einem Menue.
+    if kstate.mode_on(state, kstate.M_SNIP) {
+        var p_snip: [u8; 10] = "/bin/snip\0"
+        var a_snip: [u8; 6] = "snip\0\0"
+        var a_snipf: [u8; 12] = "snip\0nofilt\0"
+        if kstate.mode_on(state, kstate.M_SNIPNOFILT) {
+            let _s: u64 = desk_spawn_n(state, (&p_snip[0]) as u64,
+                (&a_snipf[0]) as u64, 12, 2)
+        } else {
+            let _s: u64 = desk_spawn(state, (&p_snip[0]) as u64,
+                (&a_snip[0]) as u64, 5)
+        }
     }
     // ==================================== RUNDE NETVIEW, NACHTRAG
     //
