@@ -1,0 +1,979 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/mkv.fi -- Runde DEMUX: Matroska/WebM lesen (EBML).
+//
+// EBML ist XML mit Zahlen statt Namen. Jedes Element ist eine KENNUNG
+// (1-4 Oktette) und eine LAENGE (1-8 Oktette), beide in derselben
+// selbstbeschreibenden Form: das erste gesetzte Bit von links sagt, wie
+// viele Oktette folgen. Der Unterschied zwischen beiden ist eine
+// Kleinigkeit mit grosser Wirkung -- bei der KENNUNG bleibt das Markenbit
+// stehen (die Kennung IST die ganze Oktettfolge, so steht sie in der
+// Spezifikation), bei der LAENGE wird es abgezogen. Wer das verwechselt,
+// liest jede Datei falsch und merkt es erst beim dritten Element.
+//
+// Der Baum, den dieses Modul wirklich braucht:
+//
+//   EBML          DocType -- "matroska" oder "webm"
+//   Segment
+//     Info        TimestampScale (ns je Einheit), Duration (ein FLIESSKOMMA)
+//     Tracks
+//       TrackEntry  Nummer, Art, CodecID, Video{Breite,Hoehe},
+//                   Audio{Abtastrate,Kanaele}, Sprache
+//     Cluster
+//       Timestamp   der Anker
+//       SimpleBlock Spur, Zeitversatz, Fahnen, dann die Rahmen
+//
+// DIE VIER VERSCHACHTELUNGEN (lacing) sind kein Luxus: MP3 in Matroska
+// kommt regelmaessig gebuendelt, und ein Leser, der nur den einfachen
+// Fall kennt, bekommt statt vier Rahmen einen Klumpen, den kein
+// Dekodierer versteht. Alle vier stehen hier: keine, Xiph, fest, EBML.
+//
+// FLIESSKOMMA IN RING 3 GIBT ES NICHT. Duration und SamplingFrequency
+// sind IEEE 754. Sie werden hier aus Vorzeichen, Exponent und Mantisse
+// mit GANZEN Zahlen zusammengerechnet -- dieselbe Entscheidung wie in
+// `kernel/user/netstat.fi`, aus demselben Grund.
+
+profile kernel
+
+import ulib
+import media
+
+export {
+    mkv_probe, mkv_open, mkv_scan, mkv_truncated, mkv_doctype_ok,
+    mkv_nsub, mkv_sub_off, mkv_sub_len, mkv_sub_ms, mkv_sub_dur,
+    mkv_sub_track, mkv_timescale
+}
+
+const MAXTRK: u64 = 16
+const MAXSUB: u64 = 2048
+
+// ---------------------------------------------------------- die Kennungen
+
+const E_EBML: u64 = 0x1A45DFA3
+const E_DOCTYPE: u64 = 0x4282
+const E_SEGMENT: u64 = 0x18538067
+const E_INFO: u64 = 0x1549A966
+const E_TSCALE: u64 = 0x2AD7B1
+const E_DURATION: u64 = 0x4489
+const E_TRACKS: u64 = 0x1654AE6B
+const E_ENTRY: u64 = 0xAE
+const E_TNUM: u64 = 0xD7
+const E_TTYPE: u64 = 0x83
+const E_CODEC: u64 = 0x86
+const E_DEFDUR: u64 = 0x23E383
+const E_LANG: u64 = 0x22B59C
+const E_VIDEO: u64 = 0xE0
+const E_PW: u64 = 0xB0
+const E_PH: u64 = 0xBA
+const E_AUDIO: u64 = 0xE1
+const E_SFREQ: u64 = 0xB5
+const E_OFREQ: u64 = 0x78B5
+const E_CHAN: u64 = 0x9F
+const E_BITS: u64 = 0x6264
+const E_CLUSTER: u64 = 0x1F43B675
+const E_CTS: u64 = 0xE7
+const E_SBLOCK: u64 = 0xA3
+const E_BGROUP: u64 = 0xA0
+const E_BLOCK: u64 = 0xA1
+const E_BDUR: u64 = 0x9B
+
+// ------------------------------------------------------------ die Zahlen
+//
+// Rueckgabe ueber Statische: `v_len` ist, wie viele Oktette gelesen
+// wurden, `v_unk` steht bei einer Laenge, die "unbekannt" bedeutet
+// (alle Nutzbits auf 1) -- die gibt es wirklich, bei Segment und Cluster
+// in gestroemten Dateien.
+
+static mut v_len: u64 = 0
+static mut v_unk: u64 = 0
+
+// Wie viele Oktette hat ein vint, dessen erstes Oktett `c` ist?
+// 0 heisst: das ist keins (fuehrendes Oktett 0x00).
+fn vlen_of(c: u64) -> u64 {
+    if c >= 0x80 { return 1 }
+    if c >= 0x40 { return 2 }
+    if c >= 0x20 { return 3 }
+    if c >= 0x10 { return 4 }
+    if c >= 0x08 { return 5 }
+    if c >= 0x04 { return 6 }
+    if c >= 0x02 { return 7 }
+    if c >= 0x01 { return 8 }
+    return 0
+}
+
+// Die KENNUNG: mit Markenbit, so wie sie in der Spezifikation steht.
+fn read_id(off: u64) -> u64 {
+    let c: u64 = media.src_byte(off)
+    let n: u64 = vlen_of(c)
+    v_len = n
+    if n == 0 || n > 4 {
+        v_len = 0
+        return 0
+    }
+    var v: u64 = c
+    var i: u64 = 1
+    while i < n {
+        v = (v << 8) | media.src_byte(off + i)
+        i = i + 1
+    }
+    return v
+}
+
+// Die LAENGE: ohne Markenbit.
+fn read_size(off: u64) -> u64 {
+    let c: u64 = media.src_byte(off)
+    let n: u64 = vlen_of(c)
+    v_len = n
+    v_unk = 0
+    if n == 0 {
+        v_len = 0
+        return 0
+    }
+    var v: u64 = c - (1 << (8 - n))
+    var all: bool = v == ((1 << (8 - n)) - 1)
+    var i: u64 = 1
+    while i < n {
+        let b: u64 = media.src_byte(off + i)
+        if b != 0xFF {
+            all = false
+        }
+        v = (v << 8) | b
+        i = i + 1
+    }
+    if all && n > 1 {
+        v_unk = 1
+    }
+    if n == 1 && c == 0xFF {
+        v_unk = 1
+    }
+    return v
+}
+
+// Eine vorzeichenlose Ganzzahl von `n` Oktetten, grossendig.
+fn uint_at(off: u64, n: u64) -> u64 {
+    var v: u64 = 0
+    var i: u64 = 0
+    while i < n && i < 8 {
+        v = (v << 8) | media.src_byte(off + i)
+        i = i + 1
+    }
+    return v
+}
+
+// IEEE 754 mit ganzen Zahlen, in Tausendsteln.
+//
+//   Wert = (Mantisse | verstecktes Bit) * 2^(Exponent - Verschiebung)
+//
+// Fuer die Verschiebung nach rechts wird die Mantisse ERST verkleinert
+// und DANN mit 1000 malgenommen, sobald der Schub gross ist -- sonst
+// laeuft `m * 1000` bei 2^53 ueber, und dieser Uebersetzer PRUEFT das
+// (SPEC 13: geprueft in dev-fast), also waere es kein falsches Ergebnis,
+// sondern ein Abbruch.
+fn f_milli(off: u64, n: u64) -> u64 {
+    var m: u64 = 0
+    var e: u64 = 0
+    var sh: i64 = 0
+    if n == 4 {
+        let bits: u64 = media.be32(off)
+        if (bits >> 31) != 0 { return 0 }
+        e = (bits >> 23) & 0xFF
+        m = bits & 0x7FFFFF
+        if e == 0 { return 0 }
+        m = m | (1 << 23)
+        sh = (e as i64) - 150
+    } else if n == 8 {
+        let bits: u64 = media.be64(off)
+        if (bits >> 63) != 0 { return 0 }
+        e = (bits >> 52) & 0x7FF
+        m = bits & 0xFFFFFFFFFFFFF
+        if e == 0 { return 0 }
+        m = m | (1 << 52)
+        sh = (e as i64) - 1075
+    } else {
+        return 0
+    }
+    if sh >= 0 {
+        if sh > 20 {
+            return 0xFFFFFFFFFFFF
+        }
+        let s: u64 = sh as u64
+        if m > (0xFFFFFFFFFFFFFF >> s) {
+            return 0xFFFFFFFFFFFF
+        }
+        return (m << s) * 1000
+    }
+    let k: u64 = (0 - sh) as u64
+    if k > 80 {
+        return 0
+    }
+    if k <= 10 {
+        return (m * 1000) >> k
+    }
+    return ((m >> (k - 10)) * 1000) >> 10
+}
+
+fn f_int(off: u64, n: u64) -> u64 {
+    return (f_milli(off, n) + 500) / 1000
+}
+
+// -------------------------------------------------------------- Zustand
+
+static mut tscale: u64 = 1000000 // Nanosekunden je Zeiteinheit
+static mut seg_dur_ms: u64 = 0
+static mut trunc: u64 = 0
+static mut dt_ok: u64 = 0
+static mut want: u64 = 0 // Spur, deren Rahmen in den Index sollen
+static mut cnum: [u64; 16] = [0 as u64; 16] // Spurnummer je Tafelplatz
+static mut cdef: [u64; 16] = [0 as u64; 16] // DefaultDuration in ns
+
+// Untertitel bekommen eine eigene, kleine Liste: sie sind kurz, und der
+// Abspieler braucht sie GLEICHZEITIG mit dem Ton -- eine gemeinsame
+// Liste koennte immer nur eins von beidem halten.
+static mut sb_off: [u64; 2048] = [0 as u64; 2048]
+static mut sb_len: [u32; 2048] = [0 as u32; 2048]
+static mut sb_ms: [u32; 2048] = [0 as u32; 2048]
+static mut sb_dur: [u32; 2048] = [0 as u32; 2048]
+static mut sb_n: u64 = 0
+static mut sub_trk: u64 = 16
+
+static mut cid: [u8; 40] = [0 as u8; 40]
+
+fn mkv_probe() -> bool {
+    if media.src_size() < 4 {
+        return false
+    }
+    return media.be32(0) == E_EBML
+}
+
+fn mkv_truncated() -> bool {
+    return trunc == 1 || media.src_eof()
+}
+
+fn mkv_doctype_ok() -> bool {
+    return dt_ok == 1
+}
+
+fn mkv_timescale() -> u64 {
+    return tscale
+}
+
+fn mkv_nsub() -> u64 {
+    return sb_n
+}
+
+fn mkv_sub_track() -> u64 {
+    return sub_trk
+}
+
+fn mkv_sub_off(i: u64) -> u64 {
+    if i >= sb_n { return 0 }
+    return sb_off[(i) as usize]
+}
+
+fn mkv_sub_len(i: u64) -> u64 {
+    if i >= sb_n { return 0 }
+    return (sb_len[(i) as usize]) as u64
+}
+
+fn mkv_sub_ms(i: u64) -> u64 {
+    if i >= sb_n { return 0 }
+    return (sb_ms[(i) as usize]) as u64
+}
+
+fn mkv_sub_dur(i: u64) -> u64 {
+    if i >= sb_n { return 0 }
+    return (sb_dur[(i) as usize]) as u64
+}
+
+// ------------------------------------------------------------ die Codecs
+
+fn pre(s: u64) -> bool {
+    return ulib.strneq((&cid[0 as usize]) as u64, s, ulib.length(s))
+}
+
+fn codec_from_id(kind: u64) -> u64 {
+    var v_avc: [u8; 16] = "V_MPEG4/ISO/AVC\0"
+    var v_hev: [u8; 17] = "V_MPEGH/ISO/HEVC\0"
+    var v_av1: [u8; 6] = "V_AV1\0"
+    var v_vp9: [u8; 6] = "V_VP9\0"
+    var v_vp8: [u8; 6] = "V_VP8\0"
+    var v_asp: [u8; 16] = "V_MPEG4/ISO/ASP\0"
+    var v_mjp: [u8; 9] = "V_MJPEG\0\0"
+    var v_the: [u8; 9] = "V_THEORA\0"
+    var a_aac: [u8; 6] = "A_AAC\0"
+    var a_l3: [u8; 11] = "A_MPEG/L3\0\0"
+    var a_l2: [u8; 11] = "A_MPEG/L2\0\0"
+    var a_l1: [u8; 11] = "A_MPEG/L1\0\0"
+    var a_ac3: [u8; 6] = "A_AC3\0"
+    var a_ea3: [u8; 7] = "A_EAC3\0"
+    var a_pcm: [u8; 6] = "A_PCM\0"
+    var a_fla: [u8; 7] = "A_FLAC\0"
+    var a_opu: [u8; 7] = "A_OPUS\0"
+    var a_vor: [u8; 9] = "A_VORBIS\0"
+    var a_ala: [u8; 7] = "A_ALAC\0"
+    var s_utf: [u8; 12] = "S_TEXT/UTF8\0"
+    var s_ass: [u8; 11] = "S_TEXT/ASS\0"
+    var s_ssa: [u8; 11] = "S_TEXT/SSA\0"
+    var s_vob: [u8; 9] = "S_VOBSUB\0"
+
+    if pre((&v_avc[0 as usize]) as u64) { return media.C_H264 }
+    if pre((&v_hev[0 as usize]) as u64) { return media.C_HEVC }
+    if pre((&v_av1[0 as usize]) as u64) { return media.C_AV1 }
+    if pre((&v_vp9[0 as usize]) as u64) { return media.C_VP9 }
+    if pre((&v_vp8[0 as usize]) as u64) { return media.C_VP8 }
+    if pre((&v_asp[0 as usize]) as u64) { return media.C_MPEG4V }
+    if pre((&v_mjp[0 as usize]) as u64) { return media.C_MJPEG }
+    if pre((&v_the[0 as usize]) as u64) { return media.C_THEORA }
+    if pre((&a_aac[0 as usize]) as u64) { return media.C_AAC }
+    if pre((&a_l3[0 as usize]) as u64) { return media.C_MP3 }
+    if pre((&a_l2[0 as usize]) as u64) { return media.C_MP2 }
+    if pre((&a_l1[0 as usize]) as u64) { return media.C_MP1 }
+    if pre((&a_ac3[0 as usize]) as u64) { return media.C_AC3 }
+    if pre((&a_ea3[0 as usize]) as u64) { return media.C_EAC3 }
+    if pre((&a_pcm[0 as usize]) as u64) { return media.C_PCM }
+    if pre((&a_fla[0 as usize]) as u64) { return media.C_FLAC }
+    if pre((&a_opu[0 as usize]) as u64) { return media.C_OPUS }
+    if pre((&a_vor[0 as usize]) as u64) { return media.C_VORBIS }
+    if pre((&a_ala[0 as usize]) as u64) { return media.C_ALAC }
+    if pre((&s_utf[0 as usize]) as u64) { return media.C_SRT }
+    if pre((&s_ass[0 as usize]) as u64) { return media.C_ASS }
+    if pre((&s_ssa[0 as usize]) as u64) { return media.C_ASS }
+    if pre((&s_vob[0 as usize]) as u64) { return media.C_VOBSUB }
+    if kind == media.K_VIDEO { return media.C_VIDEO_OTHER }
+    if kind == media.K_AUDIO { return media.C_AUDIO_OTHER }
+    if kind == media.K_SUB { return media.C_SUB_OTHER }
+    return media.C_NONE
+}
+
+// ------------------------------------------------------------ die Spuren
+
+fn read_entry(off: u64, end: u64) {
+    var num: u64 = 0
+    var typ: u64 = 0
+    var w: u64 = 0
+    var h: u64 = 0
+    var rate: u64 = 0
+    var ch: u64 = 1
+    var bits: u64 = 0
+    var lang: u64 = 0
+    var defd: u64 = 0
+    var i: u64 = 0
+    while i < 40 {
+        cid[(i) as usize] = 0
+        i = i + 1
+    }
+    var p: u64 = off
+    var guard: u64 = 0
+    while p < end && guard < 256 {
+        guard = guard + 1
+        let id: u64 = read_id(p)
+        if v_len == 0 {
+            p = end
+        } else {
+            let idl: u64 = v_len
+            let sz: u64 = read_size(p + idl)
+            if v_len == 0 {
+                p = end
+            } else {
+                let body: u64 = p + idl + v_len
+                if body + sz > end {
+                    trunc = 1
+                    p = end
+                } else {
+                    if id == E_TNUM {
+                        num = uint_at(body, sz)
+                    } else if id == E_TTYPE {
+                        typ = uint_at(body, sz)
+                    } else if id == E_DEFDUR {
+                        defd = uint_at(body, sz)
+                    } else if id == E_LANG {
+                        lang = uint_at(body, 3)
+                    } else if id == E_CODEC {
+                        var k: u64 = 0
+                        while k < sz && k < 39 {
+                            cid[(k) as usize] = media.src_byte(body + k) as u8
+                            k = k + 1
+                        }
+                    } else if id == E_VIDEO {
+                        var q: u64 = body
+                        let qe: u64 = body + sz
+                        var g2: u64 = 0
+                        while q < qe && g2 < 64 {
+                            g2 = g2 + 1
+                            let id2: u64 = read_id(q)
+                            if v_len == 0 { q = qe } else {
+                                let l2: u64 = v_len
+                                let s2: u64 = read_size(q + l2)
+                                if v_len == 0 { q = qe } else {
+                                    let b2: u64 = q + l2 + v_len
+                                    if id2 == E_PW { w = uint_at(b2, s2) }
+                                    if id2 == E_PH { h = uint_at(b2, s2) }
+                                    q = b2 + s2
+                                }
+                            }
+                        }
+                    } else if id == E_AUDIO {
+                        var q: u64 = body
+                        let qe: u64 = body + sz
+                        var g3: u64 = 0
+                        while q < qe && g3 < 64 {
+                            g3 = g3 + 1
+                            let id3: u64 = read_id(q)
+                            if v_len == 0 { q = qe } else {
+                                let l3: u64 = v_len
+                                let s3: u64 = read_size(q + l3)
+                                if v_len == 0 { q = qe } else {
+                                    let b3: u64 = q + l3 + v_len
+                                    if id3 == E_SFREQ { rate = f_int(b3, s3) }
+                                    if id3 == E_OFREQ && rate == 0 {
+                                        rate = f_int(b3, s3)
+                                    }
+                                    if id3 == E_CHAN { ch = uint_at(b3, s3) }
+                                    if id3 == E_BITS { bits = uint_at(b3, s3) }
+                                    q = b3 + s3
+                                }
+                            }
+                        }
+                    }
+                    p = body + sz
+                }
+            }
+        }
+    }
+    var kind: u64 = media.K_NONE
+    if typ == 1 { kind = media.K_VIDEO }
+    if typ == 2 { kind = media.K_AUDIO }
+    if typ == 17 { kind = media.K_SUB }
+    if kind == media.K_NONE {
+        return
+    }
+    let t: u64 = media.trk_add(kind, codec_from_id(kind), num)
+    if t >= MAXTRK {
+        return
+    }
+    cnum[(t) as usize] = num
+    cdef[(t) as usize] = defd
+    media.trk_set(t, media.T_W, w)
+    media.trk_set(t, media.T_H, h)
+    media.trk_set(t, media.T_RATE, rate)
+    media.trk_set(t, media.T_CH, ch)
+    media.trk_set(t, media.T_BITS, bits)
+    media.trk_set(t, media.T_LANG, lang)
+    media.trk_set(t, media.T_SCALE, 1000)
+    media.trk_set(t, media.T_DUR_MS, seg_dur_ms)
+    if kind == media.K_SUB && sub_trk >= MAXTRK {
+        sub_trk = t
+    }
+}
+
+// ------------------------------------------------------------- die Bloecke
+
+static mut cl_ts: u64 = 0 // Zeitanker des laufenden Klumpens
+static mut blk_dur: u64 = 0 // Dauer aus BlockGroup, 0 = keine
+
+// Die Rahmen eines (Simple)Block. `off`..`end` ist sein Inhalt.
+fn read_block(off: u64, end: u64) {
+    let tn: u64 = read_size(off) // die Spurnummer ist ein vint OHNE Marke
+    if v_len == 0 || off + v_len + 3 > end {
+        trunc = 1
+        return
+    }
+    var p: u64 = off + v_len
+    // Der Zeitversatz ist eine VORZEICHENBEHAFTETE 16-Bit-Zahl.
+    let raw: u64 = media.be16(p)
+    var rel: i64 = raw as i64
+    if raw >= 32768 {
+        rel = (raw as i64) - 65536
+    }
+    let flags: u64 = media.src_byte(p + 2)
+    p = p + 3
+    // Welcher Tafelplatz gehoert zu dieser Spurnummer?
+    var t: u64 = MAXTRK
+    var i: u64 = 0
+    while i < media.trk_count() {
+        if cnum[(i) as usize] == tn {
+            t = i
+            i = media.trk_count()
+        } else {
+            i = i + 1
+        }
+    }
+    if t >= MAXTRK {
+        return
+    }
+    var abs: i64 = (cl_ts as i64) + rel
+    if abs < 0 {
+        abs = 0
+    }
+    // Zeiteinheiten -> Millisekunden. tscale ist in Nanosekunden.
+    let ms: u64 = ((abs as u64) * tscale) / 1000000
+
+    let lac: u64 = (flags >> 1) & 3
+    var nfr: u64 = 1
+    var sizes_ok: bool = true
+    if lac != 0 {
+        if p >= end {
+            trunc = 1
+            return
+        }
+        nfr = media.src_byte(p) + 1
+        p = p + 1
+        if nfr > 64 {
+            return
+        }
+    }
+    // Die Groessen der Rahmen. Der letzte bekommt immer den Rest.
+    var fs: [u64; 64] = [0 as u64; 64]
+    if lac == 0 {
+        if end < p {
+            return
+        }
+        fs[0 as usize] = end - p
+    } else if lac == 2 {
+        // fest: alle gleich gross
+        if end < p {
+            return
+        }
+        let rest: u64 = end - p
+        if nfr == 0 || rest % nfr != 0 {
+            sizes_ok = false
+        } else {
+            var k: u64 = 0
+            while k < nfr {
+                fs[(k) as usize] = rest / nfr
+                k = k + 1
+            }
+        }
+    } else if lac == 1 {
+        // Xiph: Ketten von 255ern, ein Wert unter 255 schliesst ab.
+        var k: u64 = 0
+        var sum: u64 = 0
+        while k + 1 < nfr && sizes_ok {
+            var v: u64 = 0
+            var going: bool = true
+            while going {
+                if p >= end {
+                    sizes_ok = false
+                    going = false
+                } else {
+                    let c: u64 = media.src_byte(p)
+                    p = p + 1
+                    v = v + c
+                    if c < 255 {
+                        going = false
+                    }
+                }
+            }
+            fs[(k) as usize] = v
+            sum = sum + v
+            k = k + 1
+        }
+        if sizes_ok {
+            if end < p || end - p < sum {
+                sizes_ok = false
+            } else {
+                fs[(nfr - 1) as usize] = (end - p) - sum
+            }
+        }
+    } else {
+        // EBML: der erste als vint, danach VORZEICHENBEHAFTETE Abstaende.
+        var k: u64 = 0
+        var sum: u64 = 0
+        var cur: i64 = 0
+        while k + 1 < nfr && sizes_ok {
+            if p >= end {
+                sizes_ok = false
+            } else if k == 0 {
+                let v: u64 = read_size(p)
+                if v_len == 0 {
+                    sizes_ok = false
+                } else {
+                    p = p + v_len
+                    cur = v as i64
+                    fs[0 as usize] = v
+                    sum = sum + v
+                    k = k + 1
+                }
+            } else {
+                let v: u64 = read_size(p)
+                if v_len == 0 {
+                    sizes_ok = false
+                } else {
+                    let n: u64 = v_len
+                    p = p + n
+                    // Der Nullpunkt ist 2^(7n-1) - 1.
+                    let half: u64 = (1 << (7 * n - 1)) - 1
+                    let d: i64 = (v as i64) - (half as i64)
+                    cur = cur + d
+                    if cur <= 0 {
+                        sizes_ok = false
+                    } else {
+                        fs[(k) as usize] = cur as u64
+                        sum = sum + (cur as u64)
+                        k = k + 1
+                    }
+                }
+            }
+        }
+        if sizes_ok {
+            if end < p || end - p < sum {
+                sizes_ok = false
+            } else {
+                fs[(nfr - 1) as usize] = (end - p) - sum
+            }
+        }
+    }
+    if !sizes_ok {
+        trunc = 1
+        return
+    }
+    // Und jetzt eintragen.
+    var k: u64 = 0
+    var q: u64 = p
+    var bytes: u64 = media.trk_get(t, media.T_BYTES)
+    var nsamp: u64 = media.trk_get(t, media.T_NSAMP)
+    while k < nfr {
+        let sz: u64 = fs[(k) as usize]
+        if q + sz > end {
+            trunc = 1
+            k = nfr
+        } else {
+            bytes = bytes + sz
+            nsamp = nsamp + 1
+            var fms: u64 = ms
+            if cdef[(t) as usize] > 0 {
+                fms = ms + (k * cdef[(t) as usize]) / 1000000
+            }
+            if t == want {
+                media.idx_add(q, sz, fms)
+            }
+            if t == sub_trk && sb_n < MAXSUB {
+                sb_off[(sb_n) as usize] = q
+                sb_len[(sb_n) as usize] = sz as u32
+                sb_ms[(sb_n) as usize] = fms as u32
+                var d: u64 = blk_dur
+                if d == 0 {
+                    d = 2000
+                }
+                sb_dur[(sb_n) as usize] = d as u32
+                sb_n = sb_n + 1
+            }
+            q = q + sz
+            k = k + 1
+        }
+    }
+    media.trk_set(t, media.T_BYTES, bytes)
+    media.trk_set(t, media.T_NSAMP, nsamp)
+}
+
+// Ein Klumpen. Er darf eine UNBEKANNTE Laenge haben; dann endet er, wo
+// das naechste Element auf Segmentebene beginnt.
+fn read_cluster(off: u64, end: u64) {
+    cl_ts = 0
+    var p: u64 = off
+    var guard: u64 = 0
+    while p < end && guard < 200000 {
+        guard = guard + 1
+        let id: u64 = read_id(p)
+        if v_len == 0 {
+            p = end
+        } else {
+            let idl: u64 = v_len
+            let sz: u64 = read_size(p + idl)
+            if v_len == 0 {
+                p = end
+            } else {
+                let body: u64 = p + idl + v_len
+                if v_unk == 1 || body + sz > end {
+                    trunc = 1
+                    p = end
+                } else {
+                    if id == E_CTS {
+                        cl_ts = uint_at(body, sz)
+                    } else if id == E_SBLOCK {
+                        blk_dur = 0
+                        read_block(body, body + sz)
+                    } else if id == E_BGROUP {
+                        // Erst die Dauer suchen, dann den Block lesen --
+                        // ein Untertitel ohne Dauer stuende ewig.
+                        blk_dur = 0
+                        var q: u64 = body
+                        let qe: u64 = body + sz
+                        var bp: u64 = 0
+                        var be: u64 = 0
+                        var g2: u64 = 0
+                        while q < qe && g2 < 64 {
+                            g2 = g2 + 1
+                            let id2: u64 = read_id(q)
+                            if v_len == 0 { q = qe } else {
+                                let l2: u64 = v_len
+                                let s2: u64 = read_size(q + l2)
+                                if v_len == 0 { q = qe } else {
+                                    let b2: u64 = q + l2 + v_len
+                                    if id2 == E_BDUR {
+                                        blk_dur = (uint_at(b2, s2) * tscale)
+                                            / 1000000
+                                    }
+                                    if id2 == E_BLOCK {
+                                        bp = b2
+                                        be = b2 + s2
+                                    }
+                                    q = b2 + s2
+                                }
+                            }
+                        }
+                        if bp > 0 {
+                            read_block(bp, be)
+                        }
+                    }
+                    p = body + sz
+                }
+            }
+        }
+    }
+}
+
+// ------------------------------------------------------------- oeffnen
+
+// Kopf und Spuren. Die Klumpen bleiben liegen -- die kostet erst
+// `mkv_scan`, und wer nur `-i` will, zahlt sie nicht.
+static mut seg_off: u64 = 0
+static mut seg_end: u64 = 0
+
+fn mkv_open() -> bool {
+    trunc = 0
+    dt_ok = 0
+    tscale = 1000000
+    seg_dur_ms = 0
+    sb_n = 0
+    sub_trk = MAXTRK
+    seg_off = 0
+    seg_end = 0
+    media.trk_reset()
+    media.idx_reset()
+    var i: u64 = 0
+    while i < MAXTRK {
+        cnum[(i) as usize] = 0
+        cdef[(i) as usize] = 0
+        i = i + 1
+    }
+    let fend: u64 = media.src_size()
+    if fend < 8 {
+        return false
+    }
+    // Ebene 0: EBML-Kopf, dann Segment.
+    var p: u64 = 0
+    var guard: u64 = 0
+    while p < fend && guard < 64 && seg_off == 0 {
+        guard = guard + 1
+        let id: u64 = read_id(p)
+        if v_len == 0 {
+            p = fend
+        } else {
+            let idl: u64 = v_len
+            var sz: u64 = read_size(p + idl)
+            if v_len == 0 {
+                p = fend
+            } else {
+                let body: u64 = p + idl + v_len
+                if v_unk == 1 || body + sz > fend {
+                    sz = fend - body
+                    if id == E_SEGMENT {
+                        trunc = 1
+                    }
+                }
+                if id == E_EBML {
+                    read_ebml_head(body, body + sz)
+                } else if id == E_SEGMENT {
+                    seg_off = body
+                    seg_end = body + sz
+                }
+                p = body + sz
+            }
+        }
+    }
+    if seg_off == 0 {
+        return false
+    }
+    // Ebene 1: alles ausser den Klumpen.
+    p = seg_off
+    guard = 0
+    while p < seg_end && guard < 4096 {
+        guard = guard + 1
+        let id: u64 = read_id(p)
+        if v_len == 0 {
+            p = seg_end
+        } else {
+            let idl: u64 = v_len
+            var sz: u64 = read_size(p + idl)
+            if v_len == 0 {
+                p = seg_end
+            } else {
+                let body: u64 = p + idl + v_len
+                if v_unk == 1 || body + sz > seg_end {
+                    trunc = 1
+                    sz = seg_end - body
+                }
+                if id == E_INFO {
+                    read_info(body, body + sz)
+                } else if id == E_TRACKS {
+                    read_tracks(body, body + sz)
+                }
+                p = body + sz
+            }
+        }
+    }
+    // Die Dauer kennt das Segment, nicht die Spur.
+    var t: u64 = 0
+    while t < media.trk_count() {
+        if media.trk_get(t, media.T_DUR_MS) == 0 {
+            media.trk_set(t, media.T_DUR_MS, seg_dur_ms)
+        }
+        t = t + 1
+    }
+    return media.trk_count() > 0
+}
+
+fn read_ebml_head(off: u64, end: u64) {
+    var d_mat: [u8; 9] = "matroska\0"
+    var d_web: [u8; 5] = "webm\0"
+    var p: u64 = off
+    var guard: u64 = 0
+    while p < end && guard < 64 {
+        guard = guard + 1
+        let id: u64 = read_id(p)
+        if v_len == 0 {
+            p = end
+        } else {
+            let idl: u64 = v_len
+            let sz: u64 = read_size(p + idl)
+            if v_len == 0 {
+                p = end
+            } else {
+                let body: u64 = p + idl + v_len
+                if id == E_DOCTYPE {
+                    var buf: [u8; 16] = [0 as u8; 16]
+                    var k: u64 = 0
+                    while k < sz && k < 15 {
+                        buf[(k) as usize] = media.src_byte(body + k) as u8
+                        k = k + 1
+                    }
+                    if ulib.streq((&buf[0 as usize]) as u64,
+                                  (&d_mat[0 as usize]) as u64)
+                        || ulib.streq((&buf[0 as usize]) as u64,
+                                      (&d_web[0 as usize]) as u64) {
+                        dt_ok = 1
+                    }
+                }
+                p = body + sz
+            }
+        }
+    }
+}
+
+fn read_info(off: u64, end: u64) {
+    var dur_milli: u64 = 0
+    var p: u64 = off
+    var guard: u64 = 0
+    while p < end && guard < 128 {
+        guard = guard + 1
+        let id: u64 = read_id(p)
+        if v_len == 0 {
+            p = end
+        } else {
+            let idl: u64 = v_len
+            let sz: u64 = read_size(p + idl)
+            if v_len == 0 {
+                p = end
+            } else {
+                let body: u64 = p + idl + v_len
+                if id == E_TSCALE {
+                    let v: u64 = uint_at(body, sz)
+                    if v > 0 {
+                        tscale = v
+                    }
+                } else if id == E_DURATION {
+                    dur_milli = f_milli(body, sz)
+                }
+                p = body + sz
+            }
+        }
+    }
+    // Duration steht in ZEITEINHEITEN, nicht in Sekunden.
+    if dur_milli > 0 {
+        seg_dur_ms = (dur_milli * tscale) / 1000000000
+    }
+}
+
+fn read_tracks(off: u64, end: u64) {
+    var p: u64 = off
+    var guard: u64 = 0
+    while p < end && guard < 128 {
+        guard = guard + 1
+        let id: u64 = read_id(p)
+        if v_len == 0 {
+            p = end
+        } else {
+            let idl: u64 = v_len
+            let sz: u64 = read_size(p + idl)
+            if v_len == 0 {
+                p = end
+            } else {
+                let body: u64 = p + idl + v_len
+                if body + sz > end {
+                    trunc = 1
+                    p = end
+                } else {
+                    if id == E_ENTRY {
+                        read_entry(body, body + sz)
+                    }
+                    p = body + sz
+                }
+            }
+        }
+    }
+}
+
+// Ein Durchgang durch alle Klumpen. Er fuellt die Beispielliste fuer
+// `t` (MAXTRK = keine), zaehlt die Oktette JEDER Spur und sammelt die
+// Untertitel ein.
+fn mkv_scan(t: u64) -> bool {
+    want = t
+    sb_n = 0
+    media.idx_reset()
+    var i: u64 = 0
+    while i < media.trk_count() {
+        media.trk_set(i, media.T_BYTES, 0)
+        media.trk_set(i, media.T_NSAMP, 0)
+        i = i + 1
+    }
+    if seg_off == 0 {
+        return false
+    }
+    var p: u64 = seg_off
+    var guard: u64 = 0
+    while p < seg_end && guard < 200000 {
+        guard = guard + 1
+        let id: u64 = read_id(p)
+        if v_len == 0 {
+            p = seg_end
+        } else {
+            let idl: u64 = v_len
+            var sz: u64 = read_size(p + idl)
+            let unk: u64 = v_unk
+            if v_len == 0 {
+                p = seg_end
+            } else {
+                let body: u64 = p + idl + v_len
+                if unk == 1 || body + sz > seg_end {
+                    trunc = 1
+                    sz = seg_end - body
+                }
+                if id == E_CLUSTER {
+                    read_cluster(body, body + sz)
+                }
+                p = body + sz
+            }
+        }
+    }
+    return media.idx_count() > 0 || t >= MAXTRK
+}

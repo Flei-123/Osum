@@ -1,0 +1,378 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/demuxt.fi -- Runde DEMUX: der Messkopf.
+//
+// Dieses Programm ist NICHT die Anwendung -- die ist `/bin/play`. Dies
+// hier druckt, was die Leser gefunden haben, in einer Form, die ein
+// Skript auf dem Wirt gegen `ffprobe` halten kann. Eine Zeile je
+// Tatsache, Schluessel=Wert, nichts Huebsches.
+//
+//   demuxt <datei> ...            was steht drin
+//   demuxt -d <ziel> <datei>      den Ton dekodieren, roh nach <ziel>
+//   demuxt -n <mal> -d ...        <mal> Durchlaeufe, fuer die Zeitmessung
+//
+// Der Sinn von `-d`: der BEWEIS fuer einen Tondekodierer ist ein
+// Vergleich, kein Gefuehl. Osum schreibt seine Abtastwerte auf die
+// Platte, der Wirt holt sie mit tools/demux/holen.py heraus und stellt
+// sie neben das, was ffmpeg aus derselben Datei macht.
+
+profile kernel
+
+import ulib
+import media
+import mp4
+import mkv
+import mp3
+
+export { u_start }
+
+static mut txt: [u8; 512] = [0 as u8; 512]
+
+// Der Kernel nimmt hoechstens `sys.MAX_IO` = 4096 Oktette je Aufruf.
+// Ein Rahmen sind 4608 -- wer das uebersieht, verliert je Rahmen 512
+// Oktette und wundert sich ueber ein Ergebnis, das fast stimmt.
+fn put_all(fd: u64, p: u64, n: u64) -> bool {
+    var at: u64 = 0
+    while at < n {
+        var k: u64 = n - at
+        if k > 4096 {
+            k = 4096
+        }
+        let w: u64 = ulib.sys(ulib.SYS_WRITE, fd, p + at, k)
+        if ulib.bad(w) || w == 0 {
+            return false
+        }
+        at = at + w
+    }
+    return true
+}
+
+fn kv(name: u64, v: u64) {
+    ulib.say(name)
+    ulib.sayn(v)
+}
+
+// ---------------------------------------------------------- was drin ist
+
+fn info(p: u64) {
+    var s_fmt: [u8; 5] = "fmt \0"
+    var s_none: [u8; 5] = "none\0"
+    var s_mp4: [u8; 4] = "mp4\0"
+    var s_mkv: [u8; 4] = "mkv\0"
+    var s_mp3: [u8; 4] = "mp3\0"
+    var s_flag: [u8; 12] = "flag trunc=\0"
+    var s_frag: [u8; 7] = " frag=\0"
+    var s_dt: [u8; 10] = " doctype=\0"
+    var s_trk: [u8; 5] = "trk \0"
+    var s_kind: [u8; 7] = " kind=\0"
+    var s_cod: [u8; 8] = " codec=\0"
+    var s_w: [u8; 4] = " w=\0"
+    var s_h: [u8; 4] = " h=\0"
+    var s_rate: [u8; 7] = " rate=\0"
+    var s_ch: [u8; 5] = " ch=\0"
+    var s_dur: [u8; 6] = " dur=\0"
+    var s_by: [u8; 8] = " bytes=\0"
+    var s_ns: [u8; 8] = " nsamp=\0"
+    var s_dec: [u8; 6] = " dec=\0"
+    var s_nm: [u8; 7] = " name=\0"
+    var s_idx: [u8; 7] = "idx n=\0"
+    var s_o0: [u8; 7] = " off0=\0"
+    var s_l0: [u8; 7] = " len0=\0"
+    var s_m0: [u8; 6] = " ms0=\0"
+    var s_mn: [u8; 6] = " msN=\0"
+    var s_ib: [u8; 8] = " bytes=\0"
+    var s_full: [u8; 7] = " full=\0"
+    var s_sub: [u8; 7] = "sub n=\0"
+    var s_sl: [u8; 9] = "subline \0"
+    var s_ms: [u8; 5] = " ms=\0"
+    var s_du: [u8; 6] = " dur=\0"
+    var s_tx: [u8; 7] = " text=\0"
+
+    let fmt: u64 = probe()
+    var trunc: u64 = 0
+    var frag: u64 = 0
+    var dt: u64 = 0
+    if fmt == 1 {
+        if mp4.mp4_truncated() { trunc = 1 }
+        if mp4.mp4_fragmented() { frag = 1 }
+    } else if fmt == 2 {
+        if mkv.mkv_doctype_ok() { dt = 1 }
+        if mkv.mkv_truncated() { trunc = 1 }
+    } else if fmt == 3 {
+        if mp3.mp3_truncated() { trunc = 1 }
+    }
+    ulib.say((&s_fmt[0 as usize]) as u64)
+    if fmt == 1 { ulib.say((&s_mp4[0 as usize]) as u64) }
+    else if fmt == 2 { ulib.say((&s_mkv[0 as usize]) as u64) }
+    else if fmt == 3 { ulib.say((&s_mp3[0 as usize]) as u64) }
+    else { ulib.say((&s_none[0 as usize]) as u64) }
+    ulib.nl()
+    kv((&s_flag[0 as usize]) as u64, trunc)
+    kv((&s_frag[0 as usize]) as u64, frag)
+    kv((&s_dt[0 as usize]) as u64, dt)
+    ulib.nl()
+
+    let at: u64 = media.trk_first(media.K_AUDIO)
+    if fmt == 2 {
+        mkv.mkv_scan(at)
+    } else if fmt == 1 && at < 16 {
+        mp4.mp4_index(at)
+    }
+
+    var i: u64 = 0
+    while i < media.trk_count() {
+        ulib.say((&s_trk[0 as usize]) as u64)
+        ulib.sayn(i)
+        kv((&s_kind[0 as usize]) as u64, media.trk_get(i, media.T_KIND))
+        kv((&s_cod[0 as usize]) as u64, media.trk_get(i, media.T_CODEC))
+        kv((&s_w[0 as usize]) as u64, media.trk_get(i, media.T_W))
+        kv((&s_h[0 as usize]) as u64, media.trk_get(i, media.T_H))
+        kv((&s_rate[0 as usize]) as u64, media.trk_get(i, media.T_RATE))
+        kv((&s_ch[0 as usize]) as u64, media.trk_get(i, media.T_CH))
+        kv((&s_dur[0 as usize]) as u64, media.trk_get(i, media.T_DUR_MS))
+        kv((&s_by[0 as usize]) as u64, media.trk_get(i, media.T_BYTES))
+        kv((&s_ns[0 as usize]) as u64, media.trk_get(i, media.T_NSAMP))
+        var d: u64 = 0
+        if media.can_decode(media.trk_get(i, media.T_CODEC)) {
+            d = 1
+        }
+        kv((&s_dec[0 as usize]) as u64, d)
+        ulib.say((&s_nm[0 as usize]) as u64)
+        ulib.say(media.codec_name(media.trk_get(i, media.T_CODEC)))
+        ulib.nl()
+        i = i + 1
+    }
+
+    let n: u64 = media.idx_count()
+    kv((&s_idx[0 as usize]) as u64, n)
+    kv((&s_o0[0 as usize]) as u64, media.idx_off(0))
+    kv((&s_l0[0 as usize]) as u64, media.idx_size(0))
+    kv((&s_m0[0 as usize]) as u64, media.idx_time(0))
+    var last: u64 = 0
+    if n > 0 {
+        last = media.idx_time(n - 1)
+    }
+    kv((&s_mn[0 as usize]) as u64, last)
+    var tot: u64 = 0
+    var k: u64 = 0
+    while k < n {
+        tot = tot + media.idx_size(k)
+        k = k + 1
+    }
+    kv((&s_ib[0 as usize]) as u64, tot)
+    var fu: u64 = 0
+    if media.idx_full() { fu = 1 }
+    kv((&s_full[0 as usize]) as u64, fu)
+    ulib.nl()
+
+    if fmt == 2 {
+        let ns: u64 = mkv.mkv_nsub()
+        kv((&s_sub[0 as usize]) as u64, ns)
+        ulib.nl()
+        var j: u64 = 0
+        while j < ns && j < 8 {
+            ulib.say((&s_sl[0 as usize]) as u64)
+            ulib.sayn(j)
+            kv((&s_ms[0 as usize]) as u64, mkv.mkv_sub_ms(j))
+            kv((&s_du[0 as usize]) as u64, mkv.mkv_sub_dur(j))
+            ulib.say((&s_tx[0 as usize]) as u64)
+            var L: u64 = mkv.mkv_sub_len(j)
+            if L > 200 { L = 200 }
+            media.src_bytes(mkv.mkv_sub_off(j), (&txt[0 as usize]) as u64, L)
+            var q: u64 = 0
+            while q < L {
+                if txt[(q) as usize] == 10 as u8 {
+                    txt[(q) as usize] = 32 as u8
+                }
+                q = q + 1
+            }
+            txt[(L) as usize] = 0 as u8
+            ulib.say((&txt[0 as usize]) as u64)
+            ulib.nl()
+            j = j + 1
+        }
+    }
+}
+
+// Welches Format? Die Reihenfolge ist Absicht: MP4 und MKV haben eine
+// Kennung am Anfang, MP3 hat nur ein Bitmuster, das ueberall vorkommen
+// kann -- also wird es zuletzt gefragt.
+fn probe() -> u64 {
+    media.trk_reset()
+    media.idx_reset()
+    if mp4.mp4_probe() {
+        if mp4.mp4_open() {
+            return 1
+        }
+        return 0
+    }
+    if mkv.mkv_probe() {
+        if mkv.mkv_open() {
+            return 2
+        }
+        return 0
+    }
+    if mp3.mp3_probe() {
+        if mp3.mp3_open() {
+            return 3
+        }
+        return 0
+    }
+    return 0
+}
+
+// ------------------------------------------------------- den Ton holen
+
+fn decode(outp: u64, inp: u64, mal: u64) -> u64 {
+    var s_pcm: [u8; 9] = "pcm frm=\0"
+    var s_sm: [u8; 6] = " smp=\0"
+    var s_ch: [u8; 5] = " ch=\0"
+    var s_rt: [u8; 7] = " rate=\0"
+    var s_er: [u8; 7] = " errs=\0"
+    var s_cl: [u8; 9] = " clamps=\0"
+    var s_sk: [u8; 10] = " skipped=\0"
+    var s_tk: [u8; 8] = " ticks=\0"
+    var s_ml: [u8; 6] = " mal=\0"
+    var s_dm: [u8; 8] = " durms=\0"
+    var s_now: [u8; 12] = "nodecoder\0\0\0"
+
+    let fmt: u64 = probe()
+    let at: u64 = media.trk_first(media.K_AUDIO)
+    if at >= 16 {
+        ulib.say((&s_now[0 as usize]) as u64)
+        ulib.nl()
+        return 1
+    }
+    if !media.can_decode(media.trk_get(at, media.T_CODEC)) {
+        ulib.say((&s_now[0 as usize]) as u64)
+        ulib.nl()
+        return 1
+    }
+    if fmt == 2 {
+        mkv.mkv_scan(at)
+    } else if fmt == 1 {
+        mp4.mp4_index(at)
+    }
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, outp, ulib.O_MAKE, 0)
+    if ulib.bad(fd) {
+        return 1
+    }
+    let t0: u64 = ulib.sys(ulib.SYS_SYSINFO, ulib.I_TICKS, 0, 0)
+    var frames: u64 = 0
+    var smp: u64 = 0
+    var run: u64 = 0
+    while run < mal {
+        mp3.mp3_reset()
+        if fmt == 3 {
+            mp3.mp3_seek_ms(0)
+            mp3.mp3_reset()
+            var going: bool = true
+            while going {
+                let n: u64 = mp3.mp3_next()
+                if n > 0 {
+                    if run == 0 {
+                        put_all(fd, mp3.mp3_pcm(), n * 2 * mp3.mp3_channels())
+                        smp = smp + n
+                    }
+                    frames = frames + 1
+                }
+                if mp3.mp3_at_end() {
+                    going = false
+                }
+            }
+        } else {
+            let cnt: u64 = media.idx_count()
+            var i: u64 = 0
+            while i < cnt {
+                var L: u64 = media.idx_size(i)
+                if L > mp3.MAXIN {
+                    L = mp3.MAXIN
+                }
+                media.src_bytes(media.idx_off(i), mp3.mp3_inbuf(), L)
+                let n: u64 = mp3.mp3_decode(L)
+                if n > 0 {
+                    if run == 0 {
+                        put_all(fd, mp3.mp3_pcm(), n * 2 * mp3.mp3_channels())
+                        smp = smp + n
+                    }
+                    frames = frames + 1
+                }
+                i = i + 1
+            }
+        }
+        run = run + 1
+    }
+    let t1: u64 = ulib.sys(ulib.SYS_SYSINFO, ulib.I_TICKS, 0, 0)
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    ulib.say((&s_pcm[0 as usize]) as u64)
+    ulib.sayn(frames)
+    kv((&s_sm[0 as usize]) as u64, smp)
+    kv((&s_ch[0 as usize]) as u64, mp3.mp3_channels())
+    kv((&s_rt[0 as usize]) as u64, mp3.mp3_rate())
+    kv((&s_er[0 as usize]) as u64, mp3.mp3_errors())
+    kv((&s_cl[0 as usize]) as u64, mp3.mp3_clamps())
+    kv((&s_sk[0 as usize]) as u64, mp3.mp3_skipped())
+    kv((&s_tk[0 as usize]) as u64, t1 - t0)
+    kv((&s_ml[0 as usize]) as u64, mal)
+    kv((&s_dm[0 as usize]) as u64, media.trk_get(at, media.T_DUR_MS))
+    ulib.nl()
+    return 0
+}
+
+// ------------------------------------------------------------- der Start
+
+fn u_start(args: u64) -> u64 {
+    var s_file: [u8; 6] = "file \0"
+    var s_done: [u8; 5] = "done\0"
+    var s_open: [u8; 11] = "openfailed\0"
+    var o_d: [u8; 3] = "-d\0"
+    var o_n: [u8; 3] = "-n\0"
+
+    let argc: u64 = ulib.arg_count(args)
+    var mal: u64 = 1
+    var a: u64 = 1
+    var code: u64 = 0
+    while a < argc {
+        let p: u64 = ulib.arg_at(args, a)
+        if ulib.streq(p, (&o_n[0 as usize]) as u64) && a + 1 < argc {
+            mal = ulib.to_num(ulib.arg_at(args, a + 1))
+            if mal == 0 {
+                mal = 1
+            }
+            a = a + 2
+        } else if ulib.streq(p, (&o_d[0 as usize]) as u64) && a + 2 < argc {
+            let outp: u64 = ulib.arg_at(args, a + 1)
+            let inp: u64 = ulib.arg_at(args, a + 2)
+            ulib.say((&s_file[0 as usize]) as u64)
+            ulib.say(inp)
+            ulib.nl()
+            if !media.src_open(inp) {
+                ulib.say((&s_open[0 as usize]) as u64)
+                ulib.nl()
+                code = 1
+            } else {
+                if decode(outp, inp, mal) != 0 {
+                    code = 1
+                }
+                media.src_close()
+            }
+            ulib.say((&s_done[0 as usize]) as u64)
+            ulib.nl()
+            a = a + 3
+        } else {
+            ulib.say((&s_file[0 as usize]) as u64)
+            ulib.say(p)
+            ulib.nl()
+            if !media.src_open(p) {
+                ulib.say((&s_open[0 as usize]) as u64)
+                ulib.nl()
+            } else {
+                info(p)
+                media.src_close()
+            }
+            ulib.say((&s_done[0 as usize]) as u64)
+            ulib.nl()
+            a = a + 1
+        }
+    }
+    return code
+}
