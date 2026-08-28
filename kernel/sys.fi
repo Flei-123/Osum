@@ -491,7 +491,15 @@ const WM_DECO: u64 = 2114 // (steckplatz, 0xRRGGBB) -> 0
 // Duerfte es jede Anwendung, koennte jede Anwendung jedem fremden
 // Fenster den Schatten wegnehmen.
 const WM_FORM: u64 = 2115 // (steckplatz, wert) -> 0
-const WM_MAXNR: u64 = 2115
+// RUNDE PAINT: WELCHEM BUENDEL DIESES FENSTER GEHOERT.
+//
+// (handle, zeiger auf den namen, laenge) -> 0. Das Programm sagt es
+// SELBST, einmal beim Oeffnen -- die Begruendung steht bei `wm.W_APP`.
+// Kein Sonderrecht noetig: ein Fenster benennt sich selbst, so wie es
+// sich selbst betitelt. Es kann damit LUEGEN, und das ist genau so
+// wahr fuer WM_TITLE -- wer ein Fenster hat, bestimmt, wie es heisst.
+const WM_APP: u64 = 2116 // (handle, name, laenge) -> 0
+const WM_MAXNR: u64 = 2116
 
 // Was WM_FORM setzt. DIESELBEN VIER NUMMERN WIE `wm.FM_*`; sie stehen
 // hier ein zweites Mal, weil ein Aufrufer sie ohne den Fensterserver
@@ -533,7 +541,13 @@ const WL_TITLE: u64 = 64
 // dieselben zwei Zahlen, und `tools/desktop/run.sh` misst weiter
 // dieselben Rechtecke.
 const WL_NETV: u64 = 96
-const WL_BYTES: u64 = 104
+// RUNDE PAINT: DER BUENDELNAME. Aus demselben Grund hier wie WL_NETV --
+// die Taskleiste braucht ihn je Knopf und bekaeme ihn sonst nur ueber
+// einen zweiten Aufruf je Fenster. Der Satz waechst damit von 104 auf
+// 128 Oktette; die Zahl steht an ZWEI Stellen (hier und in
+// kernel/user/wlibc.fi), und tools/paint/run.sh haelt sie gegeneinander.
+const WL_APP: u64 = 104 // wm.APP_LEN Oktette
+const WL_BYTES: u64 = 128
 
 // ---------------------------------------------------- RUNDE K15
 //
@@ -7781,6 +7795,15 @@ fn wm_list(state: u64, me: u64, platz: u64, aus: u64, max: u64) -> u64 {
         kstate.set8(puffer + WL_TITLE + k, kstate.get8(t + k) as u8)
         k = k + 1
     }
+    // RUNDE PAINT: und der Buendelname daneben. Er ist leer, solange
+    // das Programm nichts gesagt hat -- die Taskleiste faellt dann auf
+    // reinen Text zurueck.
+    let ap: u64 = wm.win_app(state, platz)
+    k = 0
+    while k < wm.APP_LEN - 1 {
+        kstate.set8(puffer + WL_APP + k, kstate.get8(ap + k) as u8)
+        k = k + 1
+    }
     if !copy_out(state, me, aus, puffer, WL_BYTES) {
         return cap.err(cap.E_INVALID)
     }
@@ -8110,6 +8133,36 @@ fn wm_call(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64,
             return cap.err(cap.E_INVALID)
         }
         wm.compose(state)
+        return 0
+    }
+    // RUNDE PAINT: WELCHEM BUENDEL DIESES FENSTER GEHOERT.
+    //
+    // Es steht HIER, hinter der Handle-Suche, und nicht bei WM_DECO und
+    // WM_FORM: die beiden reden ueber FREMDE Fenster und brauchen
+    // deshalb das Taskleisten-Recht. Dieser Aufruf benennt das EIGENE
+    // Fenster, genau wie WM_SIZE seine eigene Groesse setzt -- also
+    // reicht das Handle mit R_MANAGE, und eine gewoehnliche Anwendung
+    // darf es.
+    if number == WM_APP {
+        if !cap.rights_contains(rights, cap.R_MANAGE) {
+            return cap.err(cap.E_RIGHTS)
+        }
+        if a2 == 0 || a2 > wm.APP_LEN {
+            return cap.err(cap.E_INVALID)
+        }
+        let puffer: u64 = state + kstate.BLOCK_OFF + 3760
+        var k: u64 = 0
+        while k < wm.APP_LEN {
+            kstate.set8(puffer + k, 0 as u8)
+            k = k + 1
+        }
+        if !copy_in(state, me, puffer, a1, a2) {
+            return cap.err(cap.E_INVALID)
+        }
+        kstate.set8(puffer + wm.APP_LEN - 1, 0 as u8)
+        if !wm.set_app(state, i, puffer) {
+            return cap.err(cap.E_INVALID)
+        }
         return 0
     }
     if number == WM_STRUT {
