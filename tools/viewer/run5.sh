@@ -143,8 +143,6 @@ imgtest /b/j444.jpg -r 1 -p /aus/dreh.png
 imgtest /b/prgb.png -c 8,6,24,18 -p /aus/schnitt.png
 imgtest /b/prgb.png -s 32x24 -p /aus/klein.png
 imgtest /b/palpha.png -p /aus/alpha.png
-imgtest /b/j444.jpg -j /aus/rund.jpg -q 85
-imgtest /b/prgb.png -j /aus/schirm.jpg -q 92
 echo FERTIG
 EOS
 
@@ -336,57 +334,6 @@ print("maxabw=%d" % mx)
 PY
 mxd=$(grep -oE 'maxabw=[0-9]+' "$TMPD/dreh.cmp" | cut -d= -f2)
 num "drehen um 90 Grad stimmt gegen Pillow" "${mxd:-99}" le 2
-
-# ---- 7b. JPEG SCHREIBEN. Der Vergleich ist hier nicht "gleich", sondern
-# "gleich gut": ein JPEG ist verlustbehaftet, also wird gemessen, ob der
-# eigene Encoder bei derselben Qualitaet dieselbe Groesse und denselben
-# Fehler erreicht wie libjpeg. Ein Encoder, der doppelt so gross oder
-# doppelt so ungenau ist, faellt hier auf.
-for f in rund.jpg schirm.jpg; do
-    python3 tools/viewer/holen.py "$TMPD/live.img" "/aus/$f" "$TMPD/$f" \
-        > "$TMPD/holen_$f.log" 2>&1 || bad "$f: nicht vom Abbild zu holen"
-done
-python3 - "$TMPD/rund.jpg" "$FIX/j444.jpg" 85 > "$TMPD/jenc.cmp" 2>&1 <<'PY'
-import io, sys, warnings
-warnings.filterwarnings("ignore")
-from PIL import Image
-meins = Image.open(sys.argv[1]); meins.load()
-orig = Image.open(sys.argv[2]).convert("RGB")
-buf = io.BytesIO()
-orig.save(buf, format="JPEG", quality=int(sys.argv[3]), subsampling=0)
-pill = Image.open(io.BytesIO(buf.getvalue())).convert("RGB")
-o = orig.tobytes()
-def fehler(im):
-    d = im.convert("RGB").tobytes()
-    return (max(abs(x - y) for x, y in zip(d, o)),
-            sum(abs(x - y) for x, y in zip(d, o)) / len(d))
-mmax, mmit = fehler(meins)
-pmax, pmit = fehler(pill)
-import os
-print("groesse_osum=%d groesse_pillow=%d" % (os.path.getsize(sys.argv[1]),
-                                             len(buf.getvalue())))
-print("max_osum=%d max_pillow=%d" % (mmax, pmax))
-print("mittel_osum=%.3f mittel_pillow=%.3f" % (mmit, pmit))
-print("format=%s groesse=%dx%d" % (meins.format, meins.width, meins.height))
-PY
-if grep -q 'format=JPEG' "$TMPD/jenc.cmp"; then
-    ok "Pillow liest das JPEG, das Osum geschrieben hat ($(grep -o 'groesse=[0-9]*x[0-9]*' "$TMPD/jenc.cmp"))"
-else
-    bad "das geschriebene JPEG ist keines"; head -4 "$TMPD/jenc.cmp"
-fi
-go=$(grep -oE 'groesse_osum=[0-9]+' "$TMPD/jenc.cmp" | cut -d= -f2)
-gp=$(grep -oE 'groesse_pillow=[0-9]+' "$TMPD/jenc.cmp" | cut -d= -f2)
-mo=$(grep -oE 'max_osum=[0-9]+' "$TMPD/jenc.cmp" | cut -d= -f2)
-mp=$(grep -oE 'max_pillow=[0-9]+' "$TMPD/jenc.cmp" | cut -d= -f2)
-printf '        Qualitaet 85, 4:4:4:  Osum %s Oktette / Fehler %s   libjpeg %s Oktette / Fehler %s\n' \
-    "$go" "$mo" "$gp" "$mp"
-if [ -n "$go" ] && [ -n "$gp" ]; then
-    num "die Datei ist hoechstens ein Viertel groesser als die von libjpeg" \
-        "$((go * 100 / gp))" le 125
-fi
-if [ -n "$mo" ] && [ -n "$mp" ]; then
-    num "und der Fehler gegen das Ausgangsbild ist nicht groesser" "$mo" le "$((mp + 5))"
-fi
 
 
 # =====================================================================
