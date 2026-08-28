@@ -155,13 +155,30 @@ fn in_group(state: u64, t: u64, group: u64, gid: u64) -> bool {
 }
 
 fn may_attr(state: u64, t: u64, mode: u64, owner: u64, group: u64,
-    want: u64, id: u64, gid: u64) -> bool {
+    want: u64, id: u64, gid: u64, ist_dir: bool) -> bool {
     kstate.add(state, kstate.K13_OFF + kstate.U_CHECKS, 1)
     var okay: bool = true
     if id == 0 {
         // Regel 1: root liest und schreibt alles. Ausfuehren nur, wenn
         // die Datei ueberhaupt ausfuehrbar gemeint ist.
-        if (want & R_EXEC) != 0 {
+        //
+        // RUNDE MULTIUSER: UND DAS GILT NICHT FUER VERZEICHNISSE. Das
+        // x-Bit heisst bei einer Datei "starten" und bei einem
+        // Verzeichnis "betreten" -- zwei verschiedene Dinge mit
+        // demselben Bit. Linux macht denselben Unterschied
+        // (CAP_DAC_OVERRIDE gibt root das Betreten IMMER, das Starten
+        // nur, wenn irgendein x-Bit gesetzt ist), und der Grund ist
+        // praktisch: ein Verzeichnis mit 0o700, das jemand anderem
+        // gehoert, muss der Systemverwalter durchqueren koennen, sonst
+        // kann er ein Heimverzeichnis nicht einmal sichern.
+        //
+        // GEMESSEN, NICHT UEBERLEGT: ohne diese Unterscheidung fiel
+        // tools/k14/run.sh Abschnitt 9. Ueber die Ops-Tafel angelegte
+        // Verzeichnisse bekamen den Modus 0 (siehe `sys.vfs_on_create`),
+        // und root kam danach nicht mehr hinein -- "sh: cannot open
+        // /neu/a.txt", waehrend derselbe Lauf auf dem geraden Weg
+        // durchlief.
+        if (want & R_EXEC) != 0 && !ist_dir {
             if (mode & 73) == 0 { // 0o111
                 okay = false
             }
@@ -202,7 +219,9 @@ fn may_ids(state: u64, t: u64, ino: u64, want: u64, id: u64,
     let mode: u64 = fs.inode_mode(state, ino)
     let owner: u64 = fs.inode_uid(state, ino)
     let group: u64 = fs.inode_gid(state, ino)
-    let okay: bool = may_attr(state, t, mode, owner, group, want, id, gid)
+    let ist_dir: bool = fs.inode_type(state, ino) == fs.T_DIR
+    let okay: bool = may_attr(state, t, mode, owner, group, want, id, gid,
+        ist_dir)
     if okay {
         return true
     }
