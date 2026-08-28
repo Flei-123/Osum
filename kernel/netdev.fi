@@ -1,0 +1,591 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/netdev.fi -- round HWNET: WHICH card, decided by the bus.
+//
+// Until this round the kernel had one network driver and every caller
+// knew its name. `kernel/inet.fi` calls `virtio.tx_frame` in twenty
+// places, `netsvc.fi` in sixteen, `share.fi` in sixteen, `wg.fi` in six,
+// `netview.fi` in three and `trap.fi` in two. That is not a driver
+// interface, it is a driver ADDRESS -- and it is why a second card type
+// could not be added without touching sixty-three call sites.
+//
+// This file is that interface, and it is deliberately the SAME SHAPE the
+// callers already use: every function `virtio.fi` exported is here, with
+// the same name and the same arguments, so the change at the call sites
+// is one word. What is new is what happens underneath: a card number no
+// longer means "the n-th virtio device", it means "the n-th network card
+// this kernel has a driver for", and which driver that is comes out of
+// the PCI vendor and device number.
+//
+// THE TABLE, and why a table and not an `if`:
+//
+//   1AF4:1000/1041  virtio-net      kernel/virtio.fi   (round K8)
+//   8086:100E ...   Intel 8254x     kernel/e1000.fi    (this round)
+//
+// Everything else on class 02:00 is REFUSED WITH ITS NUMBER printed, so
+// that a machine which does not work says which chip it has instead of
+// saying nothing. That sentence is the whole point of the round: Justin
+// puts OrientOS on a real board, and the serial line has to say either
+// "e1000 at 00:03.0" or "no driver for 10EC:8168" -- never just silence.
+//
+// WHAT IS NOT HERE. No hot plug, no more than two cards, no per-card
+// interrupt sharing (each card gets a vector of its own, 45 and 46, as
+// round NETMON decided), and no ordering promise beyond bus order.
+
+import kstate
+import serial
+import pci
+import virtio
+import e1000
+
+export {
+    probe, kind_on, print_kind, MAX_CARDS,
+    KIND_NONE, KIND_VIRTIO, KIND_E1000,
+    unsupported_count, unsupported_vendor, unsupported_device,
+    init, present, ready, up, mac_at, bdf, idx,
+    rx_take, rx_recycle, tx_frame, tx_room, poll,
+    irq, irqs, rx_frames, tx_frames, tx_drops, rx_octets, tx_octets,
+    features, queue_size, msix, notified, link_up, shut_down,
+    init_on, present_on, ready_on, up_on, mac_at_on, bdf_on, idx_on,
+    rx_take_on, rx_recycle_on, tx_frame_on, tx_room_on, poll_on, irq_on,
+    rx_frames_on, tx_frames_on, rx_octets_on, tx_octets_on,
+    tx_drops_on, link_up_on, shut_down_on, irqs_on, queue_size_on,
+    msix_on, notified_on, features_on, VEC_NET, print_cards
+}
+
+// ------------------------------------------------------ the data area
+//
+// `kstate.NETDEV_OFF` (0x7A000), the first page of what `kstate.fi` still
+// lists as free. NOT `pci.K2_SCALARS`: that page pair is cut up by nine
+// rounds and round NETVIEW spent a day on two of them landing on the
+// same eight octets. Entered in `tools/kernel/memmap.py`.
+//
+// 0x000 upwards: this file, 0x40 per card.
+// 0x400 upwards: `e1000.fi`, 0x200 per unit.
+const MAX_CARDS: u64 = 2
+const CARD_SPAN: u64 = 0x40
+
+const S_KIND: u64 = 0x00 // which driver, or KIND_NONE
+const S_UNIT: u64 = 0x08 // the card number INSIDE that driver
+const S_PCI: u64 = 0x10 // its place in the device table of pci.fi
+const S_PROBED: u64 = 0x18
+
+// The refused cards, so that the machine can say what it has. One
+// vendor/device pair, 0x300 upwards.
+const S_UNSUP_N: u64 = 0x300
+const S_UNSUP: u64 = 0x308 // n * 16: vendor, device
+const MAX_UNSUP: u64 = 8
+
+const KIND_NONE: u64 = 0
+const KIND_VIRTIO: u64 = 1
+const KIND_E1000: u64 = 2
+
+// Card 0 keeps vector 45 and card 1 takes 46 -- unchanged from round
+// NETMON, because `isr.s` has those two stubs and no others.
+const VEC_NET: u64 = 45
+
+const VENDOR_VIRTIO: u64 = 0x1AF4
+const CLASS_NET: u64 = 0x02
+const SUB_ETHERNET: u64 = 0x00
+
+fn sc(c: u64, off: u64) -> u64 {
+    return kstate.NETDEV_OFF + c * CARD_SPAN + off
+}
+
+fn kind_on(state: u64, c: u64) -> u64 {
+    if c >= MAX_CARDS {
+        return KIND_NONE
+    }
+    if kstate.get(state, kstate.NETDEV_OFF + S_PROBED) == 0 {
+        probe(state)
+    }
+    return kstate.get(state, sc(c, S_KIND))
+}
+
+fn unit_of(state: u64, c: u64) -> u64 {
+    return kstate.get(state, sc(c, S_UNIT))
+}
+
+// The name of a driver, ON THE SERIAL LINE. Not a pointer that comes
+// back: a local array dies with its frame, and this compiler says so
+// (`the address of the local escapes through the return value`). So the
+// only caller that needs the text is the one that prints it.
+fn print_kind(k: u64) {
+    var s_virtio: [u8; 11] = "virtio-net\0"
+    var s_e1000: [u8; 6] = "e1000\0"
+    var s_none: [u8; 5] = "none\0"
+    if k == KIND_VIRTIO {
+        serial.puts((&s_virtio[0]) as u64)
+        return
+    }
+    if k == KIND_E1000 {
+        serial.puts((&s_e1000[0]) as u64)
+        return
+    }
+    serial.puts((&s_none[0]) as u64)
+}
+
+// -------------------------------------------------------------- probe
+//
+// Walks the device table `pci.scan` built and decides, for every device
+// on class 02:00, which driver is going to own it. Runs once; the answer
+// does not change while the machine is on, because this kernel has no
+// hot plug.
+//
+// THE ORDER IS BUS ORDER, which is the order QEMU was given its
+// `-device` arguments in and the order a mainboard numbers its slots.
+// That is what makes "card 1" mean the same card on every boot -- round
+// NETMON's `share=1` depends on it.
+fn probe(state: u64) {
+    kstate.set(state, kstate.NETDEV_OFF + S_PROBED, 1)
+    kstate.set(state, kstate.NETDEV_OFF + S_UNSUP_N, 0)
+    var c: u64 = 0
+    while c < MAX_CARDS {
+        kstate.set(state, sc(c, S_KIND), KIND_NONE)
+        kstate.set(state, sc(c, S_UNIT), 0)
+        kstate.set(state, sc(c, S_PCI), pci.MAX_DEV)
+        c = c + 1
+    }
+    let n: u64 = pci.count(state)
+    var i: u64 = 0
+    var cards: u64 = 0
+    var virtio_units: u64 = 0
+    var e1000_units: u64 = 0
+    while i < n {
+        if pci.get(state, i, pci.E_CLASS) == CLASS_NET {
+            if pci.get(state, i, pci.E_SUBCLASS) == SUB_ETHERNET {
+                let ven: u64 = pci.get(state, i, pci.E_VENDOR)
+                let dev: u64 = pci.get(state, i, pci.E_DEVICE)
+                var k: u64 = KIND_NONE
+                var unit: u64 = 0
+                if ven == VENDOR_VIRTIO {
+                    if dev == 0x1000 || dev == 0x1041 {
+                        k = KIND_VIRTIO
+                        unit = virtio_units
+                    }
+                }
+                if ven == e1000.VENDOR_INTEL {
+                    if e1000.supports(dev) {
+                        k = KIND_E1000
+                        unit = e1000_units
+                    }
+                }
+                if k == KIND_NONE {
+                    note_unsupported(state, ven, dev)
+                } else {
+                    if cards < MAX_CARDS {
+                        // A driver has only so many units of its own.
+                        var room: bool = true
+                        if k == KIND_VIRTIO && unit >= virtio.MAX_CARDS {
+                            room = false
+                        }
+                        if k == KIND_E1000 && unit >= e1000.MAX_UNITS {
+                            room = false
+                        }
+                        if room {
+                            kstate.set(state, sc(cards, S_KIND), k)
+                            kstate.set(state, sc(cards, S_UNIT), unit)
+                            kstate.set(state, sc(cards, S_PCI), i)
+                            cards = cards + 1
+                            if k == KIND_VIRTIO {
+                                virtio_units = virtio_units + 1
+                            } else {
+                                e1000_units = e1000_units + 1
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        i = i + 1
+    }
+}
+
+fn note_unsupported(state: u64, ven: u64, dev: u64) {
+    let n: u64 = kstate.get(state, kstate.NETDEV_OFF + S_UNSUP_N)
+    if n >= MAX_UNSUP {
+        return
+    }
+    kstate.set(state, kstate.NETDEV_OFF + S_UNSUP + n * 16, ven)
+    kstate.set(state, kstate.NETDEV_OFF + S_UNSUP + n * 16 + 8, dev)
+    kstate.set(state, kstate.NETDEV_OFF + S_UNSUP_N, n + 1)
+}
+
+fn unsupported_count(state: u64) -> u64 {
+    if kstate.get(state, kstate.NETDEV_OFF + S_PROBED) == 0 {
+        probe(state)
+    }
+    return kstate.get(state, kstate.NETDEV_OFF + S_UNSUP_N)
+}
+
+fn unsupported_vendor(state: u64, i: u64) -> u64 {
+    return kstate.get(state, kstate.NETDEV_OFF + S_UNSUP + i * 16)
+}
+
+fn unsupported_device(state: u64, i: u64) -> u64 {
+    return kstate.get(state, kstate.NETDEV_OFF + S_UNSUP + i * 16 + 8)
+}
+
+// WHAT THE MACHINE SAYS ABOUT ITS OWN NETWORK. One line per card that
+// has a driver, one line per card that does not -- WITH ITS NUMBERS, so
+// that a board which does not work names the chip instead of going
+// quiet. This is what will be read off a serial cable on real hardware.
+fn print_cards(state: u64) {
+    var s_have: [u8; 12] = "netdev: c\0\0\0"
+    var s_eq: [u8; 2] = "=\0"
+    var s_at: [u8; 6] = " bdf=\0"
+    var s_no: [u8; 22] = "netdev: no driver for\0"
+    var s_col: [u8; 2] = ":\0"
+    var s_sp: [u8; 2] = " \0"
+    if kstate.get(state, kstate.NETDEV_OFF + S_PROBED) == 0 {
+        probe(state)
+    }
+    var c: u64 = 0
+    while c < MAX_CARDS {
+        let k: u64 = kstate.get(state, sc(c, S_KIND))
+        if k != KIND_NONE {
+            serial.puts((&s_have[0]) as u64)
+            serial.dec(c)
+            serial.puts((&s_eq[0]) as u64)
+            print_kind(k)
+            serial.puts((&s_at[0]) as u64)
+            serial.hex(bdf_on(state, c))
+            serial.nl()
+        }
+        c = c + 1
+    }
+    let m: u64 = kstate.get(state, kstate.NETDEV_OFF + S_UNSUP_N)
+    var j: u64 = 0
+    while j < m {
+        serial.puts((&s_no[0]) as u64)
+        serial.puts((&s_sp[0]) as u64)
+        serial.hex(unsupported_vendor(state, j))
+        serial.puts((&s_col[0]) as u64)
+        serial.hex(unsupported_device(state, j))
+        serial.nl()
+        j = j + 1
+    }
+}
+
+// ==================================================== THE DISPATCH
+//
+// Below this line every function is the same three lines: ask which
+// driver owns the card, call it with ITS unit number. Nothing else may
+// live here -- a dispatch layer that starts having opinions is a third
+// driver.
+
+fn init_on(state: u64, c: u64, use_msix: bool, armed: bool) -> bool {
+    let k: u64 = kind_on(state, c)
+    if k == KIND_VIRTIO {
+        return virtio.init_on(state, unit_of(state, c), use_msix, armed)
+    }
+    if k == KIND_E1000 {
+        return e1000.init_on(state, unit_of(state, c), use_msix, armed)
+    }
+    return false
+}
+
+fn present_on(state: u64, c: u64) -> bool {
+    let k: u64 = kind_on(state, c)
+    if k == KIND_VIRTIO {
+        return virtio.present_on(state, unit_of(state, c))
+    }
+    if k == KIND_E1000 {
+        return e1000.present_on(state, unit_of(state, c))
+    }
+    return false
+}
+
+fn ready_on(state: u64, c: u64) -> bool {
+    let k: u64 = kind_on(state, c)
+    if k == KIND_VIRTIO {
+        return virtio.ready_on(state, unit_of(state, c))
+    }
+    if k == KIND_E1000 {
+        return e1000.ready_on(state, unit_of(state, c))
+    }
+    return false
+}
+
+fn up_on(state: u64, c: u64) -> bool {
+    let k: u64 = kind_on(state, c)
+    if k == KIND_VIRTIO {
+        return virtio.up_on(state, unit_of(state, c))
+    }
+    if k == KIND_E1000 {
+        return e1000.up_on(state, unit_of(state, c))
+    }
+    return false
+}
+
+fn bdf_on(state: u64, c: u64) -> u64 {
+    let k: u64 = kind_on(state, c)
+    if k == KIND_VIRTIO {
+        return virtio.bdf_on(state, unit_of(state, c))
+    }
+    if k == KIND_E1000 {
+        return e1000.bdf_on(state, unit_of(state, c))
+    }
+    return 0
+}
+
+fn idx_on(state: u64, c: u64) -> u64 {
+    let k: u64 = kind_on(state, c)
+    if k == KIND_VIRTIO {
+        return virtio.idx_on(state, unit_of(state, c))
+    }
+    if k == KIND_E1000 {
+        return e1000.idx_on(state, unit_of(state, c))
+    }
+    return pci.MAX_DEV
+}
+
+fn irqs_on(state: u64, c: u64) -> u64 {
+    let k: u64 = kind_on(state, c)
+    if k == KIND_VIRTIO {
+        return virtio.irqs_on(state, unit_of(state, c))
+    }
+    if k == KIND_E1000 {
+        return e1000.irqs_on(state, unit_of(state, c))
+    }
+    return 0
+}
+
+fn rx_frames_on(state: u64, c: u64) -> u64 {
+    let k: u64 = kind_on(state, c)
+    if k == KIND_VIRTIO {
+        return virtio.rx_frames_on(state, unit_of(state, c))
+    }
+    if k == KIND_E1000 {
+        return e1000.rx_frames_on(state, unit_of(state, c))
+    }
+    return 0
+}
+
+fn tx_frames_on(state: u64, c: u64) -> u64 {
+    let k: u64 = kind_on(state, c)
+    if k == KIND_VIRTIO {
+        return virtio.tx_frames_on(state, unit_of(state, c))
+    }
+    if k == KIND_E1000 {
+        return e1000.tx_frames_on(state, unit_of(state, c))
+    }
+    return 0
+}
+
+fn tx_drops_on(state: u64, c: u64) -> u64 {
+    let k: u64 = kind_on(state, c)
+    if k == KIND_VIRTIO {
+        return virtio.tx_drops_on(state, unit_of(state, c))
+    }
+    if k == KIND_E1000 {
+        return e1000.tx_drops_on(state, unit_of(state, c))
+    }
+    return 0
+}
+
+fn rx_octets_on(state: u64, c: u64) -> u64 {
+    let k: u64 = kind_on(state, c)
+    if k == KIND_VIRTIO {
+        return virtio.rx_octets_on(state, unit_of(state, c))
+    }
+    if k == KIND_E1000 {
+        return e1000.rx_octets_on(state, unit_of(state, c))
+    }
+    return 0
+}
+
+fn tx_octets_on(state: u64, c: u64) -> u64 {
+    let k: u64 = kind_on(state, c)
+    if k == KIND_VIRTIO {
+        return virtio.tx_octets_on(state, unit_of(state, c))
+    }
+    if k == KIND_E1000 {
+        return e1000.tx_octets_on(state, unit_of(state, c))
+    }
+    return 0
+}
+
+fn features_on(state: u64, c: u64) -> u64 {
+    let k: u64 = kind_on(state, c)
+    if k == KIND_VIRTIO {
+        return virtio.features_on(state, unit_of(state, c))
+    }
+    if k == KIND_E1000 {
+        return e1000.features_on(state, unit_of(state, c))
+    }
+    return 0
+}
+
+fn queue_size_on(state: u64, c: u64) -> u64 {
+    let k: u64 = kind_on(state, c)
+    if k == KIND_VIRTIO {
+        return virtio.queue_size_on(state, unit_of(state, c))
+    }
+    if k == KIND_E1000 {
+        return e1000.queue_size_on(state, unit_of(state, c))
+    }
+    return 0
+}
+
+fn msix_on(state: u64, c: u64) -> bool {
+    let k: u64 = kind_on(state, c)
+    if k == KIND_VIRTIO {
+        return virtio.msix_on(state, unit_of(state, c))
+    }
+    if k == KIND_E1000 {
+        return e1000.msix_on(state, unit_of(state, c))
+    }
+    return false
+}
+
+fn notified_on(state: u64, c: u64) -> u64 {
+    let k: u64 = kind_on(state, c)
+    if k == KIND_VIRTIO {
+        return virtio.notified_on(state, unit_of(state, c))
+    }
+    if k == KIND_E1000 {
+        return e1000.notified_on(state, unit_of(state, c))
+    }
+    return 0
+}
+
+fn link_up_on(state: u64, c: u64) -> bool {
+    let k: u64 = kind_on(state, c)
+    if k == KIND_VIRTIO {
+        return virtio.link_up_on(state, unit_of(state, c))
+    }
+    if k == KIND_E1000 {
+        return e1000.link_up_on(state, unit_of(state, c))
+    }
+    return false
+}
+
+fn mac_at_on(state: u64, c: u64, i: u64) -> u64 {
+    let k: u64 = kind_on(state, c)
+    if k == KIND_VIRTIO {
+        return virtio.mac_at_on(state, unit_of(state, c), i)
+    }
+    if k == KIND_E1000 {
+        return e1000.mac_at_on(state, unit_of(state, c), i)
+    }
+    return 0
+}
+
+fn rx_take_on(state: u64, c: u64, frame: *mut u64, slot: *mut u64) -> u64 {
+    let k: u64 = kind_on(state, c)
+    if k == KIND_VIRTIO {
+        return virtio.rx_take_on(state, unit_of(state, c), frame, slot)
+    }
+    if k == KIND_E1000 {
+        return e1000.rx_take_on(state, unit_of(state, c), frame, slot)
+    }
+    return 0
+}
+
+fn rx_recycle_on(state: u64, c: u64, id: u64) {
+    let k: u64 = kind_on(state, c)
+    if k == KIND_VIRTIO {
+        virtio.rx_recycle_on(state, unit_of(state, c), id)
+        return
+    }
+    if k == KIND_E1000 {
+        e1000.rx_recycle_on(state, unit_of(state, c), id)
+    }
+}
+
+fn tx_room_on(state: u64, c: u64) -> u64 {
+    let k: u64 = kind_on(state, c)
+    if k == KIND_VIRTIO {
+        return virtio.tx_room_on(state, unit_of(state, c))
+    }
+    if k == KIND_E1000 {
+        return e1000.tx_room_on(state, unit_of(state, c))
+    }
+    return 0
+}
+
+fn tx_frame_on(state: u64, c: u64, src: u64, n: u64) -> bool {
+    let k: u64 = kind_on(state, c)
+    if k == KIND_VIRTIO {
+        return virtio.tx_frame_on(state, unit_of(state, c), src, n)
+    }
+    if k == KIND_E1000 {
+        return e1000.tx_frame_on(state, unit_of(state, c), src, n)
+    }
+    return false
+}
+
+fn poll_on(state: u64, c: u64) -> bool {
+    let k: u64 = kind_on(state, c)
+    if k == KIND_VIRTIO {
+        return virtio.poll_on(state, unit_of(state, c))
+    }
+    if k == KIND_E1000 {
+        return e1000.poll_on(state, unit_of(state, c))
+    }
+    return false
+}
+
+fn irq_on(state: u64, c: u64) {
+    let k: u64 = kind_on(state, c)
+    if k == KIND_VIRTIO {
+        virtio.irq_on(state, unit_of(state, c))
+        return
+    }
+    if k == KIND_E1000 {
+        e1000.irq_on(state, unit_of(state, c))
+    }
+}
+
+fn shut_down_on(state: u64, c: u64) {
+    let k: u64 = kind_on(state, c)
+    if k == KIND_VIRTIO {
+        virtio.shut_down_on(state, unit_of(state, c))
+        return
+    }
+    if k == KIND_E1000 {
+        e1000.shut_down_on(state, unit_of(state, c))
+    }
+}
+
+// ==================================================== ONE CARD, OR TWO
+//
+// The same eleven lines `virtio.fi` ends with, and for the same reason:
+// most machines have one card, and forty call sites should not have to
+// say so.
+
+fn init(state: u64, use_msix: bool, armed: bool) -> bool {
+    return init_on(state, 0, use_msix, armed)
+}
+
+fn present(state: u64) -> bool { return present_on(state, 0) }
+fn ready(state: u64) -> bool { return ready_on(state, 0) }
+fn up(state: u64) -> bool { return up_on(state, 0) }
+fn bdf(state: u64) -> u64 { return bdf_on(state, 0) }
+fn idx(state: u64) -> u64 { return idx_on(state, 0) }
+fn irqs(state: u64) -> u64 { return irqs_on(state, 0) }
+fn rx_frames(state: u64) -> u64 { return rx_frames_on(state, 0) }
+fn tx_frames(state: u64) -> u64 { return tx_frames_on(state, 0) }
+fn tx_drops(state: u64) -> u64 { return tx_drops_on(state, 0) }
+fn rx_octets(state: u64) -> u64 { return rx_octets_on(state, 0) }
+fn tx_octets(state: u64) -> u64 { return tx_octets_on(state, 0) }
+fn features(state: u64) -> u64 { return features_on(state, 0) }
+fn queue_size(state: u64) -> u64 { return queue_size_on(state, 0) }
+fn msix(state: u64) -> bool { return msix_on(state, 0) }
+fn notified(state: u64) -> u64 { return notified_on(state, 0) }
+fn link_up(state: u64) -> bool { return link_up_on(state, 0) }
+fn shut_down(state: u64) { shut_down_on(state, 0) }
+fn poll(state: u64) -> bool { return poll_on(state, 0) }
+fn irq(state: u64) { irq_on(state, 0) }
+fn tx_room(state: u64) -> u64 { return tx_room_on(state, 0) }
+
+fn tx_frame(state: u64, src: u64, n: u64) -> bool {
+    return tx_frame_on(state, 0, src, n)
+}
+fn mac_at(state: u64, i: u64) -> u64 { return mac_at_on(state, 0, i) }
+
+fn rx_take(state: u64, frame: *mut u64, slot: *mut u64) -> u64 {
+    return rx_take_on(state, 0, frame, slot)
+}
+
+fn rx_recycle(state: u64, id: u64) { rx_recycle_on(state, 0, id) }
