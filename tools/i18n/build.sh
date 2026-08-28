@@ -82,7 +82,13 @@ EOF
 printf 'en\n' > "$OUT/locale-en"
 printf 'de\n' > "$OUT/locale-de"
 
-ARGS=(build "$OUT/disk.img" 4096 /lib/
+# RUNDE USBIMG, NEBENBEFUND UND EINZEILER: 4096 Bloecke (2 MiB) reichen
+# nicht mehr. Gemessen am 28.08.2026 auf DIESEM Zweig UND auf seinem
+# Vorgaenger `mergeline` (3e92c27, in einem eigenen Arbeitsbaum
+# nachgestellt) -- beide brechen mit "mkfs: the disk is full" ab, seit
+# `/bin/explorer` bei 485 392 Oktetten steht. Der Fehler ist also aelter
+# als diese Runde und gehoert trotzdem behoben, wo er auffaellt.
+ARGS=(build "$OUT/disk.img" 12288 /lib/
       "/lib/mono.ttf=assets/osum-mono.ttf" "/lib/sans.ttf=assets/osum-sans.ttf"
       /bin/)
 for p in $PROGS; do ARGS+=("/bin/$p=$OUT/$p.elf"); done
