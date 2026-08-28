@@ -1,0 +1,413 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/pollt.fi -- RUNDE POLL: das Programm, das `poll` misst.
+//
+// Wie `/bin/posix` aus Runde K4 existiert dieses Programm nicht, um
+// etwas zu TUN, sondern um gemessen zu werden. Es druckt Zeilen der Form
+//
+//     pollt: <name> = <zahl>
+//
+// und `tools/poll/run.sh` liest sie zurueck. Jede Zusage von `poll` hat
+// hier eine Zahl, und jede Zahl hat dort eine Erwartung.
+//
+// WAS GEMESSEN WIRD, und warum jedes davon eine eigene Zeile ist:
+//
+//   1. ZWEI ROHRE, EINES BESCHRIEBEN. `poll` muss GENAU EINES melden.
+//      Ein `poll`, das beide meldet, hat nicht nachgesehen, sondern
+//      geraten -- und das ist der haeufigste Fehler in einer ersten
+//      Fassung.
+//   2. DAS GESCHLOSSENE GEGENENDE ist POLLHUP, und wenn noch Oktette im
+//      Rohr liegen, ist es POLLHUP UND POLLIN. Ein Helfer, der das
+//      verwechselt, verliert die letzte Antwort seines Kindes.
+//   3. DIE SCHREIBSEITE ist POLLOUT, solange Platz ist, und POLLERR,
+//      sobald niemand mehr liest.
+//   4. EIN DESKRIPTOR, DER NICHT OFFEN IST, ist POLLNVAL -- und zwar,
+//      OHNE dass danach gefragt wurde. Dasselbe gilt fuer POLLERR und
+//      POLLHUP; so steht es in POSIX.
+//   5. EINE GEWOEHNLICHE DATEI IST IMMER BEREIT.
+//   6. DIE FEHLER: zu viele Deskriptoren, ein Zeiger, der nicht dem
+//      Aufrufer gehoert.
+//   7. DER ZEITABLAUF MISST WIRKLICH DIE ZEIT. Gemessen mit
+//      CLOCK_MONOTONIC, nicht mit dem Tickzaehler, den `poll` selbst
+//      benutzt -- sonst misst die Uhr sich selbst.
+//   8. UND DAS EIGENTLICHE: EIN PROZESS, DER WARTET, RECHNET NICHT. Das
+//      Kind schlaeft, schreibt dann in das Rohr, und der Elternteil
+//      steht die ganze Zeit in einem `poll` OHNE Frist. Gezaehlt wird
+//      der Systemaufrufzaehler des ganzen Systems ueber diese Wartezeit
+//      -- gegen dieselbe Wartezeit als Warteschleife mit 10 ms Schlaf.
+//      Das ist der Unterschied zwischen einem Aufruf und hundertzwanzig.
+//   9. DIE BAUFORM DER SPAETEREN BRUECKE: eine Steckdose und das Rohr
+//      eines Kindprozesses in EINEM `poll`.
+//
+// Der Beendigungscode ist die Zahl der gedruckten Zeilen.
+
+profile kernel
+
+import ulib
+import libc.kcall
+import libc.errno
+import libc.io
+import libc.net
+import libc.stdio
+import libc.text
+import libc.proc
+
+export { u_start }
+
+static mut lines: u64 = 0
+
+const CLOCK_MONOTONIC: u64 = 1
+
+fn tell(name: u64, v: u64) {
+    var head: [u8; 8] = "pollt: \0"
+    var mid: [u8; 4] = " = \0"
+    stdio.say((&head[0]) as u64)
+    stdio.say(name)
+    stdio.say((&mid[0]) as u64)
+    stdio.say_num(v)
+    stdio.nl()
+    lines = lines + 1
+}
+
+fn mono_ms() -> u64 {
+    var ts: [u64; 2] = [0 as u64; 2]
+    kcall.sys2(kcall.SYS_CLOCK_GETTIME, CLOCK_MONOTONIC, (&ts[0]) as u64)
+    return (ts[0] *% 1000) +% (ts[1] / 1000000)
+}
+
+fn calls() -> u64 {
+    return ulib.sys(ulib.SYS_SYSINFO, ulib.I_SYSCALLS, 0, 0)
+}
+
+fn u_start(args: u64) -> u64 {
+    two_pipes()
+    hangup()
+    writable()
+    bad_descriptor()
+    plain_file()
+    the_errors()
+    the_timeout()
+    the_block()
+    the_bridge_shape()
+    var done: [u8; 8] = "lines\0\0\0"
+    tell((&done[0]) as u64, lines + 1)
+    stdio.flush()
+    return lines
+}
+
+// ============================================== 1. zwei Rohre, ein Ereignis
+
+fn two_pipes() {
+    var a: [u64; 1] = [0 as u64; 1]
+    var b: [u64; 1] = [0 as u64; 1]
+    var fds: [u8; 16] = [0 as u8; 16]
+    var one: [u8; 2] = "x\0"
+    var n_ret: [u8; 8] = "two_ret\0"
+    var n_r0: [u8; 8] = "two_re0\0"
+    var n_r1: [u8; 8] = "two_re1\0"
+    var n_fd: [u8; 8] = "two_fd0\0"
+
+    io.pipe((&a[0]) as u64)
+    io.pipe((&b[0]) as u64)
+    let ar: u64 = (a[0]) & 0xFFFFFFFF
+    let aw: u64 = (a[0]) >> 32
+    let br: u64 = (b[0]) & 0xFFFFFFFF
+    let bw: u64 = (b[0]) >> 32
+
+    io.write_all(aw, (&one[0]) as u64, 1)
+
+    io.poll_set((&fds[0]) as u64, 0, ar, io.POLLIN)
+    io.poll_set((&fds[0]) as u64, 1, br, io.POLLIN)
+    tell((&n_ret[0]) as u64, io.poll((&fds[0]) as u64, 2, 1000))
+    tell((&n_r0[0]) as u64, io.poll_revents((&fds[0]) as u64, 0))
+    tell((&n_r1[0]) as u64, io.poll_revents((&fds[0]) as u64, 1))
+    // Der Deskriptor im Eintrag darf sich nicht bewegt haben -- `poll`
+    // schreibt NUR `revents`.
+    tell((&n_fd[0]) as u64, io.poll_fd((&fds[0]) as u64, 0))
+
+    io.close(ar)
+    io.close(aw)
+    io.close(br)
+    io.close(bw)
+}
+
+// ================================================ 2. das Gegenende ist weg
+
+fn hangup() {
+    var a: [u64; 1] = [0 as u64; 1]
+    var fds: [u8; 8] = [0 as u8; 8]
+    var three: [u8; 4] = "abc\0"
+    var n_hup: [u8; 8] = "hup_re\0\0"
+    var n_ret: [u8; 8] = "hup_ret\0"
+    var n_both: [u8; 12] = "hup_data_re\0"
+    var n_after: [u8; 10] = "hup_read\0\0"
+
+    // (a) Leeres Rohr, Schreiber weg: NUR POLLHUP.
+    io.pipe((&a[0]) as u64)
+    var rd: u64 = (a[0]) & 0xFFFFFFFF
+    var wr: u64 = (a[0]) >> 32
+    io.close(wr)
+    // Es wird NUR nach POLLIN gefragt -- POLLHUP kommt trotzdem.
+    io.poll_set((&fds[0]) as u64, 0, rd, io.POLLIN)
+    tell((&n_ret[0]) as u64, io.poll((&fds[0]) as u64, 1, 0))
+    tell((&n_hup[0]) as u64, io.poll_revents((&fds[0]) as u64, 0))
+    io.close(rd)
+
+    // (b) Oktette IM Rohr und der Schreiber weg: POLLIN UND POLLHUP.
+    //     Das ist der Fall, in dem ein Helfer die letzte Antwort seines
+    //     Kindes verliert, wenn er nur auf POLLHUP sieht.
+    io.pipe((&a[0]) as u64)
+    rd = (a[0]) & 0xFFFFFFFF
+    wr = (a[0]) >> 32
+    io.write_all(wr, (&three[0]) as u64, 3)
+    io.close(wr)
+    io.poll_set((&fds[0]) as u64, 0, rd, io.POLLIN)
+    io.poll((&fds[0]) as u64, 1, 0)
+    tell((&n_both[0]) as u64, io.poll_revents((&fds[0]) as u64, 0))
+    var buf: [u8; 8] = [0 as u8; 8]
+    tell((&n_after[0]) as u64, io.read(rd, (&buf[0]) as u64, 8))
+    io.close(rd)
+}
+
+// ================================================== 3. die Schreibseite
+
+fn writable() {
+    var a: [u64; 1] = [0 as u64; 1]
+    var fds: [u8; 8] = [0 as u8; 8]
+    var n_out: [u8; 8] = "out_re\0\0"
+    var n_err: [u8; 12] = "out_gone_re\0"
+    var n_neg: [u8; 12] = "neg_fd_ret\0\0"
+    var n_negre: [u8; 10] = "neg_fd_re\0"
+
+    io.pipe((&a[0]) as u64)
+    let rd: u64 = (a[0]) & 0xFFFFFFFF
+    let wr: u64 = (a[0]) >> 32
+    io.poll_set((&fds[0]) as u64, 0, wr, io.POLLOUT)
+    io.poll((&fds[0]) as u64, 1, 0)
+    tell((&n_out[0]) as u64, io.poll_revents((&fds[0]) as u64, 0))
+
+    // Ein NEGATIVER Deskriptor wird uebergangen: `revents` = 0 und er
+    // zaehlt nicht mit. So schaltet ein Programm einen Eintrag ab, ohne
+    // seine Liste umzubauen.
+    io.poll_set((&fds[0]) as u64, 0, 0xFFFFFFFF, io.POLLIN | io.POLLOUT)
+    tell((&n_neg[0]) as u64, io.poll((&fds[0]) as u64, 1, 0))
+    tell((&n_negre[0]) as u64, io.poll_revents((&fds[0]) as u64, 0))
+
+    // Niemand liest mehr: POLLERR, ungefragt.
+    io.close(rd)
+    io.poll_set((&fds[0]) as u64, 0, wr, io.POLLOUT)
+    io.poll((&fds[0]) as u64, 1, 0)
+    tell((&n_err[0]) as u64, io.poll_revents((&fds[0]) as u64, 0))
+    io.close(wr)
+}
+
+// ============================================= 4. kein offener Deskriptor
+
+fn bad_descriptor() {
+    var fds: [u8; 8] = [0 as u8; 8]
+    var n_ret: [u8; 10] = "nval_ret\0\0"
+    var n_re: [u8; 8] = "nval_re\0"
+    io.poll_set((&fds[0]) as u64, 0, 77, io.POLLIN)
+    tell((&n_ret[0]) as u64, io.poll((&fds[0]) as u64, 1, 0))
+    tell((&n_re[0]) as u64, io.poll_revents((&fds[0]) as u64, 0))
+}
+
+// ============================================ 5. eine gewoehnliche Datei
+
+fn plain_file() {
+    var path: [u8; 11] = "/pollt.txt\0"
+    var text_out: [u8; 6] = "hallo\0"
+    var fds: [u8; 8] = [0 as u8; 8]
+    var n_re: [u8; 9] = "file_re\0\0"
+
+    let fd: u64 = io.create((&path[0]) as u64)
+    io.write_all(fd, (&text_out[0]) as u64, 5)
+    io.poll_set((&fds[0]) as u64, 0, fd, io.POLLIN | io.POLLOUT)
+    io.poll((&fds[0]) as u64, 1, 0)
+    tell((&n_re[0]) as u64, io.poll_revents((&fds[0]) as u64, 0))
+    io.close(fd)
+}
+
+// ==================================================== 6. die Fehlerwege
+
+fn the_errors() {
+    var fds: [u8; 8] = [0 as u8; 8]
+    var n_many: [u8; 10] = "err_nfds\0\0"
+    var n_null: [u8; 10] = "err_null\0\0"
+    var n_kern: [u8; 10] = "err_kern\0\0"
+    // Zu viele Deskriptoren.
+    tell((&n_many[0]) as u64,
+        ulib.sys(kcall.SYS_POLL, (&fds[0]) as u64, 99, 0))
+    // Ein Nullzeiger mit nfds > 0.
+    tell((&n_null[0]) as u64, ulib.sys(kcall.SYS_POLL, 0, 1, 0))
+    // Ein Zeiger in den Kern.
+    tell((&n_kern[0]) as u64, ulib.sys(kcall.SYS_POLL, 4096, 1, 0))
+}
+
+// ================================================== 7. der Zeitablauf
+
+fn the_timeout() {
+    var a: [u64; 1] = [0 as u64; 1]
+    var fds: [u8; 8] = [0 as u8; 8]
+    var n_ret: [u8; 9] = "tmo_ret\0\0"
+    var n_ms: [u8; 8] = "tmo_ms\0\0"
+    var n_zero: [u8; 10] = "tmo0_ms\0\0\0"
+    var n_zret: [u8; 10] = "tmo0_ret\0\0"
+    var n_none: [u8; 12] = "tmo_nofd_ms\0"
+
+    io.pipe((&a[0]) as u64)
+    let rd: u64 = (a[0]) & 0xFFFFFFFF
+    let wr: u64 = (a[0]) >> 32
+
+    io.poll_set((&fds[0]) as u64, 0, rd, io.POLLIN)
+    let t0: u64 = mono_ms()
+    let r: u64 = io.poll((&fds[0]) as u64, 1, 300)
+    let t1: u64 = mono_ms()
+    tell((&n_ret[0]) as u64, r)
+    tell((&n_ms[0]) as u64, t1 -% t0)
+
+    // Zeitablauf 0 heisst: NACHSEHEN UND SOFORT ZURUECK. Das ist der
+    // Weg, auf dem ein Programm einen Deskriptor abfragt, ohne zu warten.
+    io.poll_set((&fds[0]) as u64, 0, rd, io.POLLIN)
+    let z0: u64 = mono_ms()
+    let zr: u64 = io.poll((&fds[0]) as u64, 1, 0)
+    let z1: u64 = mono_ms()
+    tell((&n_zret[0]) as u64, zr)
+    tell((&n_zero[0]) as u64, z1 -% z0)
+
+    // GAR KEIN Deskriptor und eine Frist: das ist ein `sleep`, und POSIX
+    // erlaubt es ausdruecklich.
+    let s0: u64 = mono_ms()
+    io.poll(0, 0, 200)
+    let s1: u64 = mono_ms()
+    tell((&n_none[0]) as u64, s1 -% s0)
+
+    io.close(rd)
+    io.close(wr)
+}
+
+// ======================================== 8. wer wartet, rechnet nicht
+
+fn the_block() {
+    var a: [u64; 1] = [0 as u64; 1]
+    var fds: [u8; 8] = [0 as u8; 8]
+    var word: [u8; 6] = "spaet\0"
+    var buf: [u8; 16] = [0 as u8; 16]
+    var n_ret: [u8; 9] = "blk_ret\0\0"
+    var n_ms: [u8; 8] = "blk_ms\0\0"
+    var n_calls: [u8; 11] = "blk_calls\0\0"
+    var n_busy: [u8; 12] = "busy_calls\0\0"
+    var n_busyms: [u8; 10] = "busy_ms\0\0\0"
+    var n_got: [u8; 9] = "blk_got\0\0"
+
+    io.pipe((&a[0]) as u64)
+    let rd: u64 = (a[0]) & 0xFFFFFFFF
+    let wr: u64 = (a[0]) >> 32
+
+    let who: u64 = proc.split()
+    if who == 0 {
+        io.close(rd)
+        ulib.sleep_ms(1200)
+        io.write_all(wr, (&word[0]) as u64, 5)
+        io.close(wr)
+        proc.leave(7)
+    }
+    io.close(wr)
+
+    // OHNE FRIST. Geweckt wird dieser Prozess von `sched.poll_kick` aus
+    // `pipe_write`, und von nichts anderem.
+    io.poll_set((&fds[0]) as u64, 0, rd, io.POLLIN)
+    let c0: u64 = calls()
+    let t0: u64 = mono_ms()
+    let r: u64 = io.poll((&fds[0]) as u64, 1, io.POLL_FOREVER)
+    let t1: u64 = mono_ms()
+    let c1: u64 = calls()
+    tell((&n_ret[0]) as u64, r)
+    tell((&n_ms[0]) as u64, t1 -% t0)
+    // Der Zaehler ist der des GANZEN Systems, nicht der dieses
+    // Prozesses. Was ueber diese 1,2 Sekunden hineinfaellt, sind die
+    // paar Aufrufe des Kindes (schlafen, schreiben, schliessen, enden)
+    // -- und der eine `poll` hier. Die Gegenprobe darunter macht
+    // dieselbe Wartezeit als Warteschleife.
+    tell((&n_calls[0]) as u64, c1 -% c0)
+    tell((&n_got[0]) as u64, io.read(rd, (&buf[0]) as u64, 16))
+    io.close(rd)
+    proc.wait_code(who)
+
+    // DIE GEGENPROBE. Dieselben 1,2 Sekunden, wie es ohne `poll` gehen
+    // muesste: aufwachen, nachsehen, weiterschlafen.
+    let b0: u64 = calls()
+    let m0: u64 = mono_ms()
+    var i: u64 = 0
+    while i < 120 {
+        ulib.sleep_ms(10)
+        i = i + 1
+    }
+    let m1: u64 = mono_ms()
+    let b1: u64 = calls()
+    tell((&n_busyms[0]) as u64, m1 -% m0)
+    tell((&n_busy[0]) as u64, b1 -% b0)
+}
+
+// ============================ 9. die Bauform der spaeteren Bruecke
+
+// EINE STECKDOSE UND DAS ROHR EINES KINDES IN EINEM `poll`. Das ist die
+// Gestalt, die `jarvisd` haben wird, und hier ohne Draht: die Steckdose
+// ist echt (ein Deskriptor mit `file.K_SOCK` dahinter), sie ist nur mit
+// niemandem verbunden und darum still. Was gemessen wird, ist, dass
+// `poll` sie ohne Umstaende ansieht, den Kindkanal daneben bedient und
+// beim Verschwinden des Kindes POLLHUP meldet.
+//
+// Der Lauf MIT Draht steht in Abschnitt 4 von `tools/poll/run.sh` und
+// benutzt `/bin/jarvisd`.
+fn the_bridge_shape() {
+    var a: [u64; 1] = [0 as u64; 1]
+    var fds: [u8; 16] = [0 as u8; 16]
+    var word: [u8; 5] = "ping\0"
+    var buf: [u8; 16] = [0 as u8; 16]
+    var n_sock: [u8; 10] = "mix_sock\0\0"
+    var n_ret: [u8; 9] = "mix_ret\0\0"
+    var n_child: [u8; 11] = "mix_child\0\0"
+    var n_snet: [u8; 10] = "mix_net\0\0\0"
+    var n_hup: [u8; 9] = "mix_hup\0\0"
+
+    let s: u64 = net.tcp_socket()
+    var sok: u64 = 0
+    if !net.failed(s) {
+        sok = 1
+    }
+    tell((&n_sock[0]) as u64, sok)
+
+    io.pipe((&a[0]) as u64)
+    let rd: u64 = (a[0]) & 0xFFFFFFFF
+    let wr: u64 = (a[0]) >> 32
+
+    let who: u64 = proc.split()
+    if who == 0 {
+        io.close(rd)
+        ulib.sleep_ms(200)
+        io.write_all(wr, (&word[0]) as u64, 4)
+        io.close(wr)
+        proc.leave(3)
+    }
+    io.close(wr)
+
+    // DIE SCHLEIFE, DIE SPAETER DIE BRUECKE IST.
+    io.poll_set((&fds[0]) as u64, 0, s, io.POLLIN)
+    io.poll_set((&fds[0]) as u64, 1, rd, io.POLLIN)
+    let r: u64 = io.poll((&fds[0]) as u64, 2, 3000)
+    tell((&n_ret[0]) as u64, r)
+    tell((&n_snet[0]) as u64, io.poll_revents((&fds[0]) as u64, 0))
+    tell((&n_child[0]) as u64, io.poll_revents((&fds[0]) as u64, 1))
+    io.read(rd, (&buf[0]) as u64, 16)
+
+    // Das Kind ist fertig: die Kindseite meldet POLLHUP, die Netzseite
+    // weiter nichts.
+    proc.wait_code(who)
+    io.poll_set((&fds[0]) as u64, 0, s, io.POLLIN)
+    io.poll_set((&fds[0]) as u64, 1, rd, io.POLLIN)
+    io.poll((&fds[0]) as u64, 2, 1000)
+    tell((&n_hup[0]) as u64, io.poll_revents((&fds[0]) as u64, 1))
+
+    io.close(rd)
+    net.close(s)
+}
