@@ -42,6 +42,36 @@ editor, twenty more tools (`find`, `sed`, `diff`, `patch`, `tar`, `gzip`,
     a page from the linux kernel side, 46 octets.
     wget: status 200
 
+Round **SSHD** made it a machine you can reach: an **SSH-2 server**, and
+the proof is that the real OpenSSH client logs into it.
+
+    host$ ssh justin@10.0.2.15 'echo hallo; id'
+    hallo
+    uid=1000(justin) gid=1000 euid=1000(justin) egid=1000
+    host$ ssh-keyscan -t ed25519 -p 22 10.0.2.15 | ssh-keygen -lf -
+    256 SHA256:jNGPV15RqWIM8dMfgm58e4bIk1DEQ/s9d7iKZV9JtW0 (ED25519)
+
+`curve25519-sha256` (RFC 8731), an `ssh-ed25519` host key (RFC 8709),
+`chacha20-poly1305@openssh.com` both ways and
+`kex-strict-s-v00@openssh.com` against Terrapin. Login **by key** out of
+`~/.ssh/authorized_keys` in the ordinary format and **by password**
+against `/etc/shadow` (round K13) — a session is a `shell` or a single
+`exec`, on a pipe or on a real pseudo terminal, and it runs as the user
+who logged in, not as root. It is a service in `/etc/inittab`, one
+process per connection, and `poll` from round POLL is what lets one
+session wait on the network and on the shell's pipe at the same time.
+
+Measured against nothing of its own: 1,895 primitive comparisons against
+Python's `hashlib`, `hmac`, `base64` and `cryptography` (50 of them
+counter-checks that must fail), then 67 assertions against `ssh`,
+`ssh-keyscan` and `ssh-keygen` from OpenSSH 9.2 through QEMU under
+`-accel kvm` — key login, password login, a remote command with its
+output compared, the exit status, a file with the same SHA-256 on both
+sides, two connections at once, and for every one of them the
+counter-check that has to be refused. `docs/ROUNDSSHD.md` and
+`STATUS-SSHD.md`, and the second one says in plain words what it does
+**not** protect against.
+
 The size, counted:
 
 | part | lines |
