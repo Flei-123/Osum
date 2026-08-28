@@ -35,6 +35,10 @@ mode=light
 lang=de
 extra=""
 keep=no
+# EIN LAUF OHNE OBERFLAECHE. `script=<befehl>` startet dieselbe Platte im
+# Wortmodus `osum` und laesst die Shell den Befehl ausfuehren -- so wird
+# die Rangfolge auf der Standardausgabe gemessen und nicht an einem Bild.
+script=""
 progs="desktop taskbar settings launcher explorer widgetdemo locate sucht sh echo ls cat edit"
 for a in "$@"; do
     case "$a" in
@@ -45,6 +49,7 @@ for a in "$@"; do
         lang=*) lang=${a#*=} ;;
         extra=*) extra=${a#*=} ;;
         keep=*) keep=${a#*=} ;;
+        script=*) script=${a#*=} ;;
         progs=*) progs=${a#*=} ;;
         *) echo "unbekannte Option: $a" >&2; exit 2 ;;
     esac
@@ -166,6 +171,17 @@ python3 tools/osum/mkfs.py "${ARGS[@]}" > "$OUT/mkfs.log" 2>&1 \
 echo "platte $(stat -c%s "$OUT/disk.img") Oktette"
 
 # ------------------------------------------------------------ der Lauf
+if [ -n "$script" ]; then
+    timeout 300 qemu-system-x86_64 -kernel "$BUILDD/k0.mb" -m 256 \
+        -append "osum nokbd nosched noproc nofs noring3 script=$script;exit" \
+        -serial "file:$OUT/serial.txt" -display none -no-reboot \
+        -drive "file=$OUT/disk.img,format=raw,if=ide,index=0" \
+        -device isa-debug-exit,iobase=0xf4,iosize=0x04 > "$OUT/qemu.log" 2>&1
+    echo "qemu beendet mit $?"
+    [ "$keep" = yes ] || rm -f "$OUT/disk.img"
+    grep -aE '^(sucht|sucher|locate)' "$OUT/serial.txt" 2>/dev/null | head -60
+    exit 0
+fi
 SOCK="$OUT/mon.sock"; rm -f "$SOCK" "$OUT/serial.txt" "$OUT/bild.ppm"
 QEMU=(qemu-system-x86_64 -kernel "$BUILDD/k0.mb" -m 512
     -append "gfx wm wig wigicons desk wmhold wiglong nokbd nosched noproc nofs $extra"
