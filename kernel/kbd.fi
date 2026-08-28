@@ -126,6 +126,20 @@ fn on_code(state: u64, code: u64) {
         return
     }
     let ext: u64 = kstate.get(state, kstate.K11_OFF + kstate.KB_EXT)
+    // ===================================== RUNDE SUPERSEARCH: WAR ES ALLEIN?
+    //
+    // DIESE DREI ZEILEN STEHEN GANZ OBEN, und die Stelle ist der ganze
+    // Punkt. Weiter unten kehren die Modifikatoren einzeln zurueck
+    // (0x2A Umschalt, 0x1D Steuerung, 0x38 Alt) -- stuende die Frage
+    // erst danach, waere Super+Umschalt ein Tippen auf Super, weil die
+    // Umschalttaste vorher `return` gesagt hat. Gezaehlt wird JEDER
+    // Druck (code < 0x80) ausser dem auf Super selbst; ein LOSLASSEN
+    // zaehlt nicht, sonst machte "Umschalt halten, Super tippen,
+    // Umschalt loslassen" aus dem Tippen nachtraeglich ein Nicht-Tippen.
+    if code < 0x80 && code != 0x5B && code != 0x5C
+        && kstate.get(state, kstate.K11_OFF + kstate.KB_SUPER) == 1 {
+        kstate.set(state, kstate.K11_OFF + kstate.KB_SUPER_USED, 1)
+    }
     // Umschalt und Steuerung: beide Seiten, Druecken und Loslassen. Sie
     // erzeugen kein Zeichen, also auch keine Meldung.
     if code == 0x2A || code == 0x36 {
@@ -188,11 +202,38 @@ fn on_code(state: u64, code: u64) {
     // for the same reason 0x9D is caught here.
     if code == 0x5B || code == 0x5C {
         kstate.set(state, kstate.K11_OFF + kstate.KB_SUPER, 1)
+        // RUNDE SUPERSEARCH: die Zaehlung faengt hier an. Eine Tastatur
+        // WIEDERHOLT eine gehaltene Taste (Typematik), es kommen also
+        // mehrere 0x5B hintereinander -- jedes davon setzt das Bit
+        // zurueck, und das ist richtig: solange nur Super wiederholt
+        // wird, ist noch immer keine andere Taste gedrueckt worden.
+        kstate.set(state, kstate.K11_OFF + kstate.KB_SUPER_USED, 0)
         kstate.set(state, kstate.K11_OFF + kstate.KB_EXT, 0)
         return
     }
     if code == 0xDB || code == 0xDC {
+        // ============================== RUNDE SUPERSEARCH: DAS TIPPEN
+        //
+        // War zwischen Druecken und Loslassen keine andere Taste, dann
+        // war es ein Tippen auf Super allein -- und das ist ein Kuerzel
+        // wie jedes andere: derselbe Zaehler, dieselbe Uhr, derselbe
+        // Riegel. Nur das Zeichen ist keines (kstate.HK_TAP liegt
+        // ueber Unicode), damit ein Leser die beiden Faelle nicht
+        // verwechseln KANN.
+        //
+        // Der Riegel und nicht ein Ereignis, aus dem Grund, den die
+        // Runde NETVIEW zwanzig Zeilen weiter unten aufgeschrieben hat:
+        // "A hotkey has no window -- that is what makes it global."
+        // Diese Runde baut darauf auf und aendert daran nichts.
+        if kstate.get(state, kstate.K11_OFF + kstate.KB_SUPER) == 1
+            && kstate.get(state, kstate.K11_OFF + kstate.KB_SUPER_USED) == 0 {
+            kstate.set(state, kstate.K11_OFF + kstate.HK_KEY, kstate.HK_TAP)
+            kstate.set(state, kstate.K11_OFF + kstate.HK_NS, time.mono_ns(state))
+            kstate.add(state, kstate.K11_OFF + kstate.HK_SEQ, 1)
+            say_tap()
+        }
         kstate.set(state, kstate.K11_OFF + kstate.KB_SUPER, 0)
+        kstate.set(state, kstate.K11_OFF + kstate.KB_SUPER_USED, 0)
         kstate.set(state, kstate.K11_OFF + kstate.KB_EXT, 0)
         return
     }
@@ -339,6 +380,17 @@ fn say_hotkey(c: u64) {
     var label: [u8; 12] = "hk: super+\0\0"
     serial.puts((&label[0]) as u64)
     serial.put(c as u8)
+    serial.put(10 as u8)
+}
+
+// RUNDE SUPERSEARCH. Eine EIGENE Zeile und kein "hk: super+" mit einem
+// leeren Zeichen dahinter: `tools/netview/run.sh` zaehlt Zeilen mit
+// `grep -ac '^hk: super+a$'`, und ein Kuerzel dieser Runde darf diese
+// Zahl nicht bewegen. "hk: super" ist ein Praefix von "hk: super+a" und
+// keine Uebereinstimmung -- das Muster ist an beiden Enden verankert.
+fn say_tap() {
+    var label: [u8; 12] = "hk: super\0\0\0"
+    serial.puts((&label[0]) as u64)
     serial.put(10 as u8)
 }
 
