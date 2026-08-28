@@ -76,8 +76,22 @@ class Bild:
         self.jblocks = g(mkfs.SB["JBLOCKS"])
         self.ipb = BS // self.isize
         self.directs = 11 if self.version < 2 else 8
+        # ------------------------------------------------ DIE DECKELUNG
+        #
+        # Sie steht hier und nicht erst in der Pruefung, und sie ist der
+        # Grund, warum dieses Programm auf einem mutwillig zerstoerten
+        # Abbild FERTIG WIRD. Ein Superblock ist die Behauptung eines
+        # fremden Programms; wer sie glaubt, laeuft bei "2^40 Inodes"
+        # eine Billion Mal durch eine Tabelle, die es nicht gibt. Genau
+        # das ist dem ersten Entwurf dieser Datei passiert, gemessen an
+        # tools/fsrobust/kaputt.py, Fall `inodes`.
         if self.blocks > self.geraet:
             self.blocks = self.geraet
+        if not (0 < self.itable < self.data <= self.blocks):
+            self.data = min(max(self.itable + 1, 2), self.blocks)
+        passt = max(1, (self.data - self.itable)) * self.ipb
+        if self.inodes > passt:
+            self.inodes = passt
 
     def blk(self, n):
         self.f.seek(n * BS)
@@ -121,6 +135,13 @@ class Bild:
                 return
             aus.append(p)
             if p < self.data or p >= self.blocks:
+                return
+            if aus.count(p) > 1:
+                # SCHON EINMAL DA. Ein Zeigerblock, der auf sich selbst
+                # zeigt, wird EINMAL gezaehlt und nicht betreten --
+                # dieselbe Regel wie in `kernel/user/fsck.fi`, sonst
+                # sagen die beiden Umsetzungen ueber dasselbe kaputte
+                # Abbild verschiedene Zahlen.
                 return
             b = self.blk(p)
             for i in range(PER_BLOCK):
@@ -216,7 +237,7 @@ class Bild:
 def struktur(bild):
     """Die Strukturpruefung. Rueckgabe: (befunde, zahlen)."""
     z = dict(dateien=0, dirs=0, bloecke=0, ausser=0, doppelt=0, badtype=0,
-             verloren=0, fehlend=0, totlinks=0)
+             verloren=0, fehlend=0, totlinks=0, kreise=0)
     befunde = []
     if not bild.magic:
         return ["keine OSUM-OFS-Kennung"], z
@@ -258,15 +279,17 @@ def struktur(bild):
     besucht.add(bild.root)
     while stapel:
         d = stapel.pop()
-        for kind, _ in bild.eintraege(d):
+        for kind, name in bild.eintraege(d):
             if kind > bild.inodes or bild.ig(kind, mkfs.I_TYPE) == 0:
                 z["totlinks"] += 1
-            elif (bild.ig(kind, mkfs.I_TYPE) == mkfs.T_DIR
-                  and kind not in besucht):
-                besucht.add(kind)
-                stapel.append(kind)
+            elif bild.ig(kind, mkfs.I_TYPE) == mkfs.T_DIR:
+                if kind not in besucht:
+                    besucht.add(kind)
+                    stapel.append(kind)
+                elif name not in (".", ".."):
+                    z["kreise"] += 1
     for k in ("ausser", "doppelt", "badtype", "verloren", "fehlend",
-              "totlinks"):
+              "totlinks", "kreise"):
         if z[k]:
             befunde.append("%s=%d" % (k, z[k]))
     return befunde, z
