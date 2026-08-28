@@ -99,6 +99,7 @@ export {
     PROT_EXEC, MAP_PRIVATE, MAP_ANONYMOUS, BRK_BASE, MMAP_TOP,
     SYS_READ, SYS_WRITE, SYS_OPEN, SYS_CLOSE, SYS_STAT, SYS_FSTAT,
     SYS_LSEEK, SYS_MMAP, SYS_MUNMAP, SYS_BRK, SYS_PIPE, SYS_YIELD,
+    SYS_POLL, POLLIN, POLLPRI, POLLOUT, POLLERR, POLLHUP, POLLNVAL,
     SYS_DUP, SYS_DUP2, SYS_NANOSLEEP, SYS_GETPID, SYS_FORK, SYS_EXECVE,
     SYS_EXIT, SYS_WAIT4, SYS_GETCWD, SYS_MKDIR, SYS_UNLINK, SYS_GETPPID,
     SYS_GETDENTS64, SYS_EXIT_GROUP, SYS_OSUM_SPAWN, SYS_OSUM_EXEC,
@@ -207,6 +208,37 @@ const SYS_FSTAT: u64 = 5
 //                              ihn brauchen, sobald es Zeiten aus dem
 //                              Archiv zurueckspielt.
 const SYS_LSTAT: u64 = 6
+// ========================================================= RUNDE POLL
+//
+// EINE NUMMER, UND SIE IST DIE VON LINUX: 7. Regel 1 der Karte oben --
+// was Linux hat, hat Linux' Nummer. Sie war frei; geprueft gegen die
+// ganze Tafel dieser Datei UND gegen die von `lib/libc/kcall.fi`, und
+// `tools/poll/run.sh`, Abschnitt 1, prueft es bei jedem Lauf noch
+// einmal nach -- eine Nummer, die zwei Dinge bedeutet, ist ein
+// Programm, das nach `poll` fragt und `lstat` bekommt. (Die 1320, die
+// in einer frueheren Runde zweimal vergeben war, liegt weit weg von
+// hier: sie gehoert SYS_OSUM_NETMON.)
+//
+//     poll(fds, nfds, timeout_ms)
+//
+// `fds` zeigt auf nfds mal `struct pollfd` -- acht Oktette, wie unter
+// Linux: fd (i32) bei 0, events (i16) bei 4, revents (i16) bei 6.
+// timeout unter null heisst: warte, bis wirklich etwas geschieht.
+// Zurueck kommt die ZAHL der Deskriptoren mit einem Ereignis, 0 beim
+// Zeitablauf, oder ein negativer Fehler.
+const SYS_POLL: u64 = 7
+// Die Bits von <poll.h>, und es sind die von Linux.
+const POLLIN: u64 = 1
+const POLLPRI: u64 = 2
+const POLLOUT: u64 = 4
+const POLLERR: u64 = 8
+const POLLHUP: u64 = 16
+const POLLNVAL: u64 = 32
+// Wie viele Deskriptoren ein Aufruf ansehen darf. Ein Prozess hat
+// hoechstens `file.MAX_FD` offene Dateien; mehr als das Doppelte davon
+// zu erlauben waere eine Schleife, die ein Programm dem Kern schenken
+// kann. Darueber: -EINVAL, wie Linux es bei mehr als RLIMIT_NOFILE tut.
+const POLL_MAX: u64 = 32
 const SYS_SYMLINK: u64 = 88
 const SYS_READLINK: u64 = 89
 const SYS_UTIMENSAT: u64 = 280
@@ -1744,6 +1776,10 @@ fn dispatch(number: u64, frame: u64, state: u64) -> u64 {
     if number == SYS_PIPE {
         return do_pipe(state, me, a0)
     }
+    // RUNDE POLL: auf mehrere Deskriptoren gleichzeitig warten.
+    if number == SYS_POLL {
+        return do_poll(state, me, a0, a1, a2)
+    }
     if number == SYS_BRK {
         return do_brk(state, me, a0)
     }
@@ -2666,6 +2702,14 @@ fn pipe_read(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
             }
         }
     }
+    // RUNDE POLL: was gelesen wurde, ist PLATZ -- ein Schreiber, der in
+    // `poll` auf POLLOUT wartet, wird davon wach. Einmal je Aufruf und
+    // nicht je Oktett: ein Wecker kostet einen Durchlauf ueber die
+    // Aufgabentafel, und 4096 davon je `read` waeren genau die
+    // Warteschleife, die diese Runde abschaffen soll.
+    if n != 0 {
+        sched.poll_kick(state)
+    }
     return n
 }
 
@@ -2702,6 +2746,12 @@ fn pipe_write(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
                 }
             }
         }
+    }
+    // RUNDE POLL: JETZT ist der Leser lesbar. Ohne diese Zeile wartet
+    // ein `poll` auf der anderen Seite bis zu seinem Zeitablauf, obwohl
+    // die Oktette schon im Rohr liegen.
+    if n != 0 {
+        sched.poll_kick(state)
     }
     if n == 0 {
         if len != 0 {
@@ -2762,6 +2812,245 @@ fn put32(state: u64, me: u64, addr: u64, v: u64) -> bool {
         i = i + 1
     }
     return true
+}
+
+// ============================================== RUNDE POLL: DAS WARTEN
+//
+// WARUM DIESER AUFRUF DER WICHTIGSTE FEHLENDE WAR. Bis zu dieser Runde
+// konnte ein Prozess dieses Systems auf GENAU EINE Sache warten: den
+// Deskriptor, aus dem er gerade liest. Jeder Helfer, der ein Netz UND
+// ein Kind bedient, muss auf ZWEI warten -- und ohne `poll` bleibt nur
+// der Wechsel zwischen zwei nicht blockierenden Lesevorgaengen mit
+// einem Schlaf dazwischen. Das ist eine Warteschleife: sie kostet
+// Rechenzeit, wenn nichts los ist, und sie kostet Verzoegerung, wenn
+// etwas los ist. Jede Shell braucht denselben Aufruf.
+//
+// WIE HIER GEWARTET WIRD, und das ist der Unterschied zu allem anderen
+// in dieser Datei: `pipe_read`, `tty_read` und `sock_io` schlafen je
+// eine Zeitscheibe und sehen wieder nach (`sched.sleep_ticks(state, 1)`)
+// -- hundertmal je Sekunde, ob etwas da ist oder nicht. `poll` tut das
+// NICHT. Es legt sich in den Zustand S_POLL und wird von der Stelle
+// geweckt, an der die Daten ankommen (`sched.poll_kick`, gerufen aus
+// `pipe_write`, aus dem Schliessen eines Rohres, aus `inet.pump` und aus
+// der Zeilendisziplin). Ohne Ereignis und ohne Zeitablauf laeuft dabei
+// KEINE Anweisung dieses Prozesses.
+//
+// UND DIE WETTLAUFSITUATION, an der die erste Fassung jedes `poll`
+// scheitert -- zwischen `nichts ist bereit` und `ich schlafe` trifft
+// das Ereignis ein und der Wecker geht an niemanden --, ist mit der
+// Weckfolge geloest: der Stand VOR der Pruefung wird gemerkt, und
+// `sched.poll_sleep` legt sich nur schlafen, wenn er sich nicht bewegt
+// hat. Die drei Funktionen und die Begruendung stehen in
+// `kernel/sched.fi`.
+
+// Vier Oktette aus Ring 3, wie `put32` sie schreibt.
+fn get32(state: u64, me: u64, addr: u64) -> u64 {
+    var v: u64 = 0
+    var i: u64 = 0
+    while i < 4 {
+        v = v | (peek(state, me, addr + i) << (i * 8))
+        i = i + 1
+    }
+    return v
+}
+
+fn get16(state: u64, me: u64, addr: u64) -> u64 {
+    return peek(state, me, addr) | (peek(state, me, addr + 1) << 8)
+}
+
+fn put16(state: u64, me: u64, addr: u64, v: u64) -> bool {
+    if !poke(state, me, addr, v & 255) {
+        return false
+    }
+    return poke(state, me, addr + 1, (v >> 8) & 255)
+}
+
+// Was auf DIESER Steckdose gerade moeglich ist.
+fn poll_sock(state: u64, of: u64) -> u64 {
+    let si: u64 = file.open_ino(state, of)
+    if si >= inet.SOCK_MAX {
+        return POLLNVAL
+    }
+    var r: u64 = 0
+    if inet.sock_error(state, si) != 0 {
+        r = r | POLLERR
+    }
+    // Ein LAUSCHER ist lesbar, wenn `accept` etwas herausgeben wuerde --
+    // und `inet.sock_acceptable` stellt das fest, ohne die Verbindung
+    // dabei anzunehmen. Ein Lauscher hat sonst nichts zu melden.
+    if inet.sock_acceptable(state, si) != 0 {
+        return r | POLLIN
+    }
+    if inet.sock_readable(state, si) != 0 {
+        r = r | POLLIN
+    }
+    if inet.sock_writable(state, si) != 0 {
+        r = r | POLLOUT
+    }
+    if inet.sock_hup(state, si) != 0 {
+        r = r | POLLHUP
+    }
+    return r
+}
+
+// Was auf DIESEM Deskriptor gerade moeglich ist -- unabhaengig davon,
+// wonach gefragt wurde. Das Abgleichen mit `events` macht der Aufrufer.
+fn poll_ready(state: u64, me: u64, fd: u64) -> u64 {
+    let of: u64 = of_of(state, me, fd)
+    if of >= file.MAX_OPEN {
+        return POLLNVAL
+    }
+    let kind: u64 = file.open_kind(state, of)
+    var r: u64 = 0
+    // DIE LESESEITE EINES ROHRES. Oktette darin sind POLLIN. Kein
+    // Schreiber mehr ist POLLHUP -- und POLLIN steht daneben und nicht
+    // statt dessen, solange noch etwas im Rohr liegt: was geschrieben
+    // wurde, bevor das Gegenende ging, darf gelesen werden.
+    if kind == file.K_PIPER {
+        let p: u64 = file.open_ino(state, of)
+        if file.pipe_bytes(state, p) != 0 {
+            r = r | POLLIN
+        }
+        if file.pipe_writers(state, p) == 0 {
+            r = r | POLLHUP
+        }
+        return r
+    }
+    // DIE SCHREIBSEITE. Platz ist POLLOUT; kein Leser mehr ist POLLERR
+    // -- ein `write` darauf gaebe -EPIPE, und das ist ein Fehler und
+    // kein Dateiende.
+    if kind == file.K_PIPEW {
+        let p: u64 = file.open_ino(state, of)
+        if file.pipe_readers(state, p) == 0 {
+            return POLLERR
+        }
+        if file.pipe_room(state, p) != 0 {
+            r = r | POLLOUT
+        }
+        return r
+    }
+    if kind == file.K_SOCK {
+        return poll_sock(state, of)
+    }
+    // TERMINAL UND KONSOLE. Lesbar, sobald die Zeilendisziplin ein
+    // fertiges Oktett hat; auf der Steuerseite eines Pseudoterminals
+    // ist es der rohe Ausgabering der Nutzerseite. Schreibbar immer:
+    // ein Terminal nimmt jederzeit Oktette an.
+    if kind == file.K_TTY || kind == file.K_CONIN {
+        var t: u64 = file.open_ino(state, of)
+        if kind == file.K_CONIN {
+            t = tty_of(state, me)
+        }
+        if !tty.valid(state, t) {
+            return POLLNVAL
+        }
+        if tty.kind_of(state, t) == tty.K_PTY_MASTER {
+            if tty.out_waiting(state, tty.peer_of(state, t)) != 0 {
+                r = r | POLLIN
+            }
+        } else {
+            if tty.waiting(state, t) != 0 {
+                r = r | POLLIN
+            }
+        }
+        return r | POLLOUT
+    }
+    if kind == file.K_CONOUT || kind == file.K_FB {
+        return POLLOUT
+    }
+    if kind == file.K_FREE {
+        return POLLNVAL
+    }
+    // EINE GEWOEHNLICHE DATEI IST IMMER BEREIT. Das ist keine Bequem-
+    // lichkeit, sondern was POSIX verlangt: eine Datei laesst sich
+    // jederzeit lesen und schreiben, notfalls bis zum Dateiende -- ein
+    // `poll`, das darauf wartete, wartete fuer immer.
+    return POLLIN | POLLOUT
+}
+
+// EIN Durchgang ueber die Liste. Schreibt `revents` zurueck und gibt die
+// Zahl der Eintraege mit einem Ereignis. `bad` wird gesetzt, wenn der
+// Speicher des Aufrufers nicht mitspielt.
+fn poll_scan(state: u64, me: u64, fds: u64, nfds: u64, bad: *mut u64) -> u64 {
+    var ready: u64 = 0
+    var i: u64 = 0
+    while i < nfds {
+        let a: u64 = fds + i * 8
+        let raw: u64 = get32(state, me, a)
+        let ev: u64 = get16(state, me, a + 4)
+        var re: u64 = 0
+        // Ein negativer Deskriptor wird UEBERGANGEN und seine revents
+        // auf null gesetzt. Das ist die Stelle, an der ein Programm
+        // einen Eintrag abschaltet, ohne die Liste umzubauen.
+        if (raw & 0x80000000) == 0 {
+            re = poll_ready(state, me, raw)
+            // POLLERR, POLLHUP und POLLNVAL kommen IMMER, auch wenn
+            // niemand nach ihnen gefragt hat -- so steht es in POSIX,
+            // und ein Programm, das nur POLLIN anfordert, muss von
+            // einem geschlossenen Gegenende trotzdem erfahren.
+            re = re & (ev | POLLERR | POLLHUP | POLLNVAL)
+        }
+        if !put16(state, me, a + 6, re) {
+            *bad = 1
+            return ready
+        }
+        if re != 0 {
+            ready = ready + 1
+        }
+        i = i + 1
+    }
+    return ready
+}
+
+fn do_poll(state: u64, me: u64, fds: u64, nfds: u64, tmo: u64) -> u64 {
+    if nfds > POLL_MAX {
+        return neg(errno.E_INVAL)
+    }
+    if nfds != 0 && !proc.user_ok(state, me, fds, nfds * 8) {
+        return neg(errno.E_FAULT)
+    }
+    // `timeout` ist ein `int`. Ein negativer -- vorzeichenerweitert oder
+    // nicht -- heisst OHNE FRIST. Alles ab 0x80000000 als `ohne Frist`
+    // zu lesen kostet nichts: 2^31 Millisekunden sind 24 Tage.
+    let forever: bool = tmo >= 0x80000000
+    // Der Zeitgeber laeuft mit 100 Hz, eine Marke ist 10 ms. AUFGERUNDET,
+    // damit ein `poll` NIE FRUEHER zurueckkommt als verlangt -- das ist
+    // die Richtung, die POSIX vorschreibt, und die einzige, die ein
+    // Programm nicht selbst nachbessern kann.
+    var ticks: u64 = 0
+    if !forever {
+        ticks = (tmo + 9) / 10
+    }
+    let deadline: u64 = kstate.get(state, kstate.TICKS) + ticks
+    var bad: u64 = 0
+    var going: bool = true
+    while going {
+        // ZUERST die Weckfolge merken, DANN nachsehen. Andersherum
+        // liefe das Ereignis, das waehrend des Nachsehens eintrifft,
+        // in den Schlaf hinein und waere verloren.
+        let seen: u64 = sched.poll_seq(state)
+        let ready: u64 = poll_scan(state, me, fds, nfds, &bad)
+        if bad != 0 {
+            return neg(errno.E_FAULT)
+        }
+        if ready != 0 {
+            return ready
+        }
+        // Ein Signal beendet das Warten mit -EINTR, wie jeder andere
+        // blockierende Aufruf dieses Kerns seit Runde K9.
+        if signal.interrupted(state, me) {
+            return neg(errno.E_INTR)
+        }
+        if !forever && kstate.get(state, kstate.TICKS) >= deadline {
+            return 0
+        }
+        var wake: u64 = deadline
+        if forever {
+            wake = sched.POLL_FOREVER
+        }
+        sched.poll_sleep(state, seen, wake)
+    }
+    return 0
 }
 
 // ------------------------------------------------------------ the files

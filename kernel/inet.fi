@@ -80,6 +80,7 @@ export {
     sock_send, sock_recv, sock_sendto, sock_recvfrom,
     sock_close, sock_shutdown, sock_state, sock_peer, sock_local,
     sock_readable, sock_writable, sock_error,
+    sock_acceptable, sock_hup,
     sock_nonblock, sock_set_nonblock,
     SK_FREE, SK_TCP, SK_UDP, SK_ICMP, SOCK_MAX,
     SF_LISTEN, SF_NONBLOCK, SF_CONNECTED
@@ -545,6 +546,16 @@ fn pump(state: u64) -> u64 {
 
     kstate.add(state, sc(S_PUMPS), 1)
     drop_lock(state, flags)
+    // RUNDE POLL: NACH dem Loslassen der Netzsperre. Was gerade
+    // hereinkam, kann eine Steckdose lesbar gemacht haben -- und wer
+    // darauf in `poll` wartet, soll jetzt aufwachen und nicht erst,
+    // wenn sein Zeitablauf kommt. `sched.poll_kick` nimmt selbst keine
+    // Sperre; trotzdem steht der Aufruf ausserhalb, weil die
+    // Reihenfolge Netzsperre -> Laufsperre in diesem Kernel nirgends
+    // vorkommt und hier nicht anfangen soll.
+    if work != 0 {
+        sched.poll_kick(state)
+    }
     return work
 }
 
@@ -1085,6 +1096,68 @@ fn sock_writable(state: u64, i: u64) -> u64 {
     let n: usize = stack.net_writable(st(state), h as i32)
     drop_lock(state, flags)
     return n as u64
+}
+
+// RUNDE POLL: KANN `accept` JETZT? -- OHNE ETWAS ANZUNEHMEN.
+//
+// `sock_accept` oben ist ZERSTOEREND: es setzt `accepted = 1` und gibt
+// die Verbindung heraus. In `poll` waere das falsch -- ein `poll`, das
+// meldet, entnimmt nichts, und ein Programm, das nach dem `poll` kein
+// `accept` macht, haette die Verbindung sonst in einem Nirgendwo.
+//
+// Also derselbe Durchlauf wie in `tcp_accept`, nur LESEND. Die Felder
+// `listener`, `accepted`, `used` und `state` von `tcp.Tcb` sind aus
+// `net/tcp.fi` ausgefuehrt (`export { Tcp, Tcb, ... }`); an der
+// mitgelieferten Bibliothek aendert diese Runde KEINE Zeile.
+fn sock_acceptable(state: u64, i: u64) -> u64 {
+    if sock_kind(state, i) != SK_TCP {
+        return 0
+    }
+    let l: u64 = sock_handle(state, i)
+    if l == NOHANDLE || (sock_flags(state, i) & SF_LISTEN) == 0 {
+        return 0
+    }
+    let flags: u64 = hold(state)
+    let t: *mut tcp.Tcp = stack.net_tcp(st(state))
+    var n: u64 = 0
+    var k: usize = 0
+    while k < tcp.MAXCONN {
+        let c: *mut tcp.Tcb = &(*t).c[k]
+        if (*c).used == 1 && ((*c).listener as u64) == l && (*c).accepted == 0 {
+            if (*c).state == tcp.S_ESTABLISHED || (*c).state == tcp.S_CLOSE_WAIT {
+                n = n + 1
+            }
+        }
+        k = k + 1
+    }
+    drop_lock(state, flags)
+    return n
+}
+
+// RUNDE POLL: IST DAS GEGENENDE WEG? Das ist POLLHUP auf einer
+// Steckdose. CLOSE_WAIT ist der Zustand nach einem empfangenen FIN --
+// der Gegenueber schreibt nichts mehr, was noch im Puffer liegt darf
+// aber weiterhin gelesen werden (deshalb steht POLLIN daneben und nicht
+// statt dessen). CLOSED nach einem `connect`/`listen` bedeutet, dass die
+// Verbindung abgeraeumt ist.
+fn sock_hup(state: u64, i: u64) -> u64 {
+    if sock_kind(state, i) != SK_TCP {
+        return 0
+    }
+    let h: u64 = sock_handle(state, i)
+    if h == NOHANDLE {
+        return 0
+    }
+    if (sock_flags(state, i) & SF_LISTEN) != 0 {
+        return 0
+    }
+    let s: u64 = sock_state(state, i)
+    if s == tcp.S_CLOSE_WAIT as u64 || s == tcp.S_LAST_ACK as u64
+        || s == tcp.S_CLOSING as u64 || s == tcp.S_TIME_WAIT as u64
+        || s == tcp.S_CLOSED as u64 {
+        return 1
+    }
+    return 0
 }
 
 // `src` and `dst` are addresses in the KERNEL's data area -- `sys.fi`
