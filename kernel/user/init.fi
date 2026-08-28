@@ -16,14 +16,27 @@
 //      wird ABGESCHALTET (`failed`) und nicht mehr angefasst, bis ein
 //      Mensch `svc start` sagt.
 //
-//      Warum eine halbe Sekunde und nicht zwei: die Grenze trennt
-//      "gestorben, bevor er ueberhaupt lief" von "hat gearbeitet und ist
-//      dann gegangen". Ein Dienst, der seine Konfiguration nicht lesen
-//      kann, ist nach ein paar Millisekunden weg; einer, der ein
-//      Zeitlimit abwartet, lebt Sekunden. Der Dienst `blink` aus dem
-//      Testlauf von K13 schlaeft eine Sekunde und ist damit
-//      ausdruecklich KEIN Rueckfall -- die Zusagen jener Runde messen
-//      weiter, was sie gemessen haben.
+//      WAS ALS RUECKFALL ZAEHLT, hat ZWEI Bedingungen, und beide muessen
+//      erfuellt sein:
+//
+//        (a) der Dienst endet mit einem Code != 0. Wer sich mit 0
+//            verabschiedet, hat getan, wozu er da war -- das ist kein
+//            Absturz, egal wie oft es geschieht. Der Dienst `blink` aus
+//            dem Testlauf von K13 schlaeft eine Sekunde und endet mit 0;
+//            er kann deshalb NIE abgeschaltet werden, und die Zusagen
+//            jener Runde messen weiter, was sie gemessen haben.
+//        (b) er hat es nicht bis GESUND_MS geschafft. Ein Dienst, der
+//            fuenf Minuten gearbeitet hat und dann abstuerzt, gehoert
+//            neu gestartet und nicht abgeschaltet -- er hat bewiesen,
+//            dass er laufen kann.
+//
+//      DIE ERSTE BEDINGUNG WURDE NACHGETRAGEN, UND ZWAR GEMESSEN. Der
+//      erste Entwurf hatte nur die zweite, mit einer halben Sekunde als
+//      Grenze. Im Testlauf blieb der Zaehler bei null: `/bin/false`
+//      lebte 1,5 Sekunden, weil `fork` + `execve` + der ELF-Lader von
+//      einer IDE-Platte auf dieser Maschine so lange brauchen. Eine
+//      Grenze, die unter der Anlaufzeit eines Prozesses liegt, misst die
+//      Platte und nicht den Dienst.
 //
 //   2. WOHIN SCHREIBT EIN DIENST? Auf einem Server gibt es keine
 //      Konsole, die jemand liest. Jede Zeile in `/etc/inittab` kann
@@ -159,12 +172,27 @@ const Z_ALLE: u64 = 3
 // DIE ZWEI ZAHLEN, UM DIE ES IN DIESER RUNDE GEHT.
 //
 // GESUND_MS: wer laenger lebt, hat gearbeitet und faengt bei null an.
+//            ZWEI SEKUNDEN, und die Zahl ist gemessen: ein Programm
+//            dieses Userlands ist rund 30 KiB gross, und `fork` +
+//            `execve` + ELF-Lader von einer IDE-Platte kosten hier
+//            mehrere hundert Millisekunden. Was darunter liegt, misst
+//            die Platte.
 // MAX_FAIL:  soviele Rueckfaelle hintereinander, dann ist Schluss.
-const GESUND_MS: u64 = 500
+const GESUND_MS: u64 = 2000
 const MAX_FAIL: u64 = 5
 
 // Wieviel Zeit zwischen zwei Neustartversuchen. Fuenf je Sekunde, wie in
 // K13 -- die Drosselung bleibt, die Grenze kommt dazu.
+//
+// SIE IST SEIT DIESER RUNDE EIN ZEITPUNKT UND KEIN SCHLAF. K13 rief
+// `sleep_ms(200)` mitten in der Schleife, und das hielt den GANZEN
+// Prozess 1 an: bei zwei Diensten, die gleichzeitig neu starten wollen,
+// wartete jeder auf den anderen, und beide liefen im Gleichtakt. Im
+// Testlauf war das messbar -- `/bin/false` und `/bin/sleep 1` kamen auf
+// exakt dieselbe Zahl Starts, obwohl das eine sofort endet und das
+// andere eine Sekunde laeuft. Seit dieser Runde merkt sich jeder Dienst
+// seinen fruehesten naechsten Start (`s_next`), und die Schleife
+// blockiert nicht mehr.
 const RESPAWN_MS: u64 = 200
 
 const MAX_FS: u64 = 4
@@ -180,6 +208,7 @@ static mut s_state: [u64; 16] = [0 as u64; 16]
 static mut s_want: [u64; 16] = [0 as u64; 16] // 1 = soll laufen
 static mut s_fail: [u64; 16] = [0 as u64; 16] // Rueckfaelle hintereinander
 static mut s_t0: [u64; 16] = [0 as u64; 16] // wann gestartet, in ms
+static mut s_next: [u64; 16] = [0 as u64; 16] // fruehester naechster Start
 static mut s_ziel: [u64; 16] = [0 as u64; 16]
 static mut s_netz: [u64; 16] = [0 as u64; 16]
 static mut nsvc: u64 = 0
@@ -376,6 +405,7 @@ fn read_tab() -> u64 {
                     s_starts[nsvc as usize] = 0
                     s_fail[nsvc as usize] = 0
                     s_t0[nsvc as usize] = 0
+                    s_next[nsvc as usize] = 0
                     s_state[nsvc as usize] = S_STOP
                     s_want[nsvc as usize] = 0
                     // WER NICHT ZUM ZIEL GEHOERT, LAEUFT NICHT. Das ist
@@ -817,7 +847,8 @@ fn shutdown() {
 // das ist die Aufgabe, wegen der es einen Prozess 1 gibt.
 fn harvest() -> u64 {
     var s_kill: [u8; 20] = "init: abgeschaltet \0"
-    var s_why: [u8; 24] = " nach 5 Fehlstarts\0\0\0\0\0\0"
+    var s_why: [u8; 23] = " nach 5 Fehlstarts, \0\0\0"
+    var s_st: [u8; 9] = " Starts\0\0"
     var nlc: [u8; 2] = "\n\0"
     var st: [u64; 1] = [0 as u64; 1]
     var got: u64 = 0
@@ -836,15 +867,21 @@ fn harvest() -> u64 {
                 if s_pid[i as usize] == who {
                     mine = true
                     s_pid[i as usize] = 0
-                    // WIE LANGE HAT ER GELEBT? Das ist die Frage, an der
-                    // sich "abgestuerzt" von "fertig" unterscheidet.
+                    // ZWEI FRAGEN, UND BEIDE MUESSEN "ja" SAGEN, damit
+                    // ein Rueckfall gezaehlt wird: WIE ist er gegangen,
+                    // und WIE LANGE hat er gelebt.
+                    let code: u64 = (st[0] >> 8) & 255
                     let lebte: u64 = now_ms() -% s_t0[i as usize]
                     if s_act[i as usize] == A_CTRL {
                         going = 0
                     }
+                    // Der fruehestmoegliche naechste Start. Kein Schlaf
+                    // -- die Schleife soll weiterlaufen und die anderen
+                    // Dienste bedienen.
+                    s_next[i as usize] = now_ms() + RESPAWN_MS
                     if s_act[i as usize] == A_RESPAWN
                         && s_want[i as usize] == 1 && going == 1 {
-                        if lebte < GESUND_MS {
+                        if code != 0 && lebte < GESUND_MS {
                             s_fail[i as usize] = s_fail[i as usize] + 1
                         } else {
                             s_fail[i as usize] = 0
@@ -858,6 +895,10 @@ fn harvest() -> u64 {
                             ulib.eput((&s_kill[0]) as u64)
                             ulib.eput(nm(i))
                             ulib.eput((&s_why[0]) as u64)
+                            var num: [u8; 24] = [0 as u8; 24]
+                            ulib.digits(s_starts[i as usize], (&num[0]) as u64)
+                            ulib.eput((&num[0]) as u64)
+                            ulib.eput((&s_st[0]) as u64)
                             ulib.eput((&nlc[0]) as u64)
                         } else {
                             s_state[i as usize] = S_STOP
@@ -953,13 +994,14 @@ fn u_start(args: u64) -> u64 {
         // auf `failed` und `s_want` ist null, also kommt er hier nicht
         // mehr vorbei.
         i = 0
+        let jetzt: u64 = now_ms()
         while i < nsvc {
             if s_want[i as usize] == 1 && s_state[i as usize] != S_RUN
-                && s_act[i as usize] == A_RESPAWN && going == 1 {
+                && s_act[i as usize] == A_RESPAWN && going == 1
+                && jetzt >= s_next[i as usize] {
                 if s_netz[i as usize] == 1 && !net_up() {
                     s_state[i as usize] = S_WAIT
                 } else {
-                    ulib.sleep_ms(RESPAWN_MS)
                     start(i)
                     write_state()
                 }
