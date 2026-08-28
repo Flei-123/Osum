@@ -1,0 +1,1370 @@
+// SPDX-License-Identifier: MIT
+// kernel/user/imgjpeg.fi -- Runde VIEWER: BASELINE-JPEG (ITU-T T.81),
+// in Firn, Ring 3, ohne fremde Bibliothek.
+//
+// ================================================== WARUM EIGENES MODUL
+//
+// Dieses Modul ist NICHT Teil des Bildbetrachters, und das ist die
+// wichtigste Entscheidung der Runde. Ein MJPEG-Film ist eine Folge von
+// JPEG-Bildern -- Schritt F5 und F6 der Medien-Fahrplans sind derselbe
+// Dekodierer, einmal fuer ein Foto und einmal fuenfundzwanzigmal je
+// Sekunde. Deshalb gilt hier: OKTETTE HINEIN, BILDPUNKTE HERAUS. Keine
+// Datei wird geoeffnet, kein Fenster angefasst, kein Speicher beim
+// Kernel geholt (der kommt aus `imgmem`, und den fuellt der Aufrufer).
+//
+// ============================================ ZEILENWEISE, NICHT AM STUECK
+//
+// Ein Prozess hat auf Osum einen begrenzten privaten Bereich. Ein Bild
+// mit 12 Megabildpunkten waere als RGBA 48 Megaoktett -- und ein Foto
+// mit 50 Megabildpunkten 200. Also haelt dieser Dekodierer NIE das
+// ganze Bild:
+//
+//   `begin`     liest die Kopfdaten, legt die Arbeitspuffer an und sagt,
+//               wie gross das Bild ist.
+//   `next_row`  liefert GENAU EINE Zeile, RGBA, und rueckt vor.
+//
+// Was dabei im Speicher liegt, haengt nur von der BREITE ab, nicht von
+// der Hoehe: drei MCU-Zeilen je Komponente in einem Ringpuffer. Bei
+// 4000 Bildpunkten Breite sind das rund 290 Kilooktett, bei einer
+// Bildhoehe von 3000 genauso wie bei 30000. Deshalb bringt ein Panorama
+// dieses System nicht um.
+//
+// WARUM DREI UND NICHT EINE: die Farbkanaele liegen bei 4:2:0 in halber
+// Aufloesung, und die Hochrechnung ist ein DREIECKSFILTER -- der
+// Bildpunkt braucht die Farbzeile darueber ODER darunter. Die letzte
+// Zeile einer MCU-Zeile braucht also die erste der NAECHSTEN. Der Ring
+// haelt deshalb die vorige, die laufende und die naechste MCU-Zeile;
+// ausgegeben wird immer die mittlere.
+//
+// ==================================== GEMESSEN WIRD GEGEN LIBJPEG, NICHT
+//                                      GEGEN DEN AUGENSCHEIN
+//
+// Ein Dekodierer, der "gut aussieht", ist nicht geprueft. Verglichen
+// wird Bildpunkt fuer Bildpunkt mit Pillow (also libjpeg-turbo), und
+// damit dieser Vergleich den Dekodierer misst und nicht die Rundung,
+// steht hier ABSICHTLICH dasselbe Rechenverfahren wie in libjpeg:
+//
+//   * die inverse DCT ist `jpeg_idct_islow` -- Ganzzahl, 13 Bit
+//     Konstanten, zwei Durchgaenge. NICHT die naheliegende
+//     Gleitkomma-Fassung: dieses System rechnet in Ring 3 grundsaetzlich
+//     ganzzahlig (der Kernel sichert die SSE-Register beim Wechsel
+//     nicht, und `kernel/user/fas.fi` sagt, dass der Assembler die
+//     Befehle gar nicht kennt). Ganzzahl ist hier also kein Kompromiss,
+//     sondern der einzige Weg -- und zufaellig auch der genauere, weil
+//     libjpeg dasselbe tut.
+//   * die Hochrechnung der Farbkanaele ist libjpegs Dreiecksfilter
+//     (`h2v1_fancy_upsample`, `h2v2_fancy_upsample`), mit denselben
+//     Rundungssummanden 1, 2, 7 und 8.
+//   * Y'CbCr -> RGB benutzt libjpegs Festkommatabellen mit 16 Bit und
+//     dessen Konstanten 1,40200 / 1,77200 / 0,34414 / 0,71414. Wer hier
+//     die "richtigeren" Werte 0,344136 und 0,714136 nimmt, weicht von
+//     der Vorlage ab und misst danach seinen eigenen Geschmack.
+//
+// ============================ WAS DIESER DEKODIERER NICHT KANN, MIT NAMEN
+//
+//   J1 KEIN PROGRESSIVES JPEG (SOF2). Das ist ein zweiter, groesserer
+//      Entropie-Dekodierer mit Spektralauswahl und Naeherung ueber
+//      mehrere Durchgaenge, und er braucht den Koeffizientenpuffer des
+//      GANZEN Bildes -- also genau das, was dieses Modul absichtlich
+//      nicht hat. `reason` sagt `R_PROGRESSIVE`, und die Anwendung
+//      SCHREIBT das hin, statt ein kaputtes Bild zu zeigen.
+//   J2 KEINE ARITHMETISCHE KODIERUNG (SOF9/SOF10).
+//   J3 KEINE 12 BIT, kein verlustfreies und kein hierarchisches JPEG.
+//   J4 KEIN CMYK / ADOBE (vier Komponenten) -- `R_COMPONENTS`.
+//   J5 NUR EIN DURCHGANG, in dem alle Komponenten stehen. Ein
+//      sequentielles Bild mit getrennten Durchgaengen je Komponente
+//      kommt als `R_PROGRESSIVE` zurueck, weil es denselben Umbau
+//      braeuchte.
+//
+// EXIF wird gelesen, aber nur die AUSRICHTUNG (Tag 0x0112). Sie wird
+// hier NICHT angewandt: das Drehen ist eine Sache der Anzeige, und wer
+// die Zeilen weiterreicht, will sie in der Reihenfolge der Datei.
+
+profile kernel
+
+import imgmem
+
+export {
+    begin, next_row, width, height, full_width, full_height,
+    orientation, reason, partial, restarts, mcu_rows, comps, samp,
+    scale_of, need_bytes,
+    R_OK, R_NOT_JPEG, R_PROGRESSIVE, R_ARITHMETIC, R_PRECISION,
+    R_COMPONENTS, R_TRUNCATED, R_HUFFMAN, R_MEMORY, R_SAMPLING, R_HUGE
+}
+
+const R_OK: u64 = 0
+const R_NOT_JPEG: u64 = 1
+const R_PROGRESSIVE: u64 = 2
+const R_ARITHMETIC: u64 = 3
+const R_PRECISION: u64 = 4
+const R_COMPONENTS: u64 = 5
+const R_TRUNCATED: u64 = 6
+const R_HUFFMAN: u64 = 7
+const R_MEMORY: u64 = 8
+const R_SAMPLING: u64 = 9
+const R_HUGE: u64 = 10
+
+// Die Obergrenzen. Sie stehen hier als Zahlen und nicht als Gefuehl:
+// mehr als 65535 kann ein JPEG gar nicht sein (zwei Oktette je Mass),
+// und alles darueber ist eine kaputte Datei.
+const MAXDIM: u64 = 65500
+const MAXPIX: u64 = 100000000 // 100 Megabildpunkte
+
+// ------------------------------------------------------------- Zustand
+
+static mut src: u64 = 0
+static mut srcn: u64 = 0
+static mut at: u64 = 0
+
+// Der Bitleser. `bb` haelt `bn` gueltige Bits GANZ UNTEN.
+static mut bb: u64 = 0
+static mut bn: u64 = 0
+static mut marker: u64 = 0 // 1 = im Datenstrom steht ein Marker
+static mut fedzero: u64 = 0 // wie viele Oktette schon erfunden wurden
+
+static mut jw: u64 = 0
+static mut jh: u64 = 0
+static mut jnc: u64 = 0
+static mut jhmax: u64 = 1
+static mut jvmax: u64 = 1
+static mut jmcux: u64 = 0
+static mut jmcuy: u64 = 0
+static mut jrestart: u64 = 0
+static mut jori: u64 = 1
+static mut jreason: u64 = R_OK
+static mut jpartial: u64 = 0
+static mut jrests: u64 = 0
+static mut jbs: u64 = 8 // Blockgroesse in Ausgabepunkten: 8 oder 1
+static mut jscale: u64 = 1
+
+static mut ow: u64 = 0 // Ausgabebreite (nach Verkleinerung)
+static mut oh: u64 = 0
+
+static mut c_h: [u64; 4] = [0 as u64; 4]
+static mut c_v: [u64; 4] = [0 as u64; 4]
+static mut c_id: [u64; 4] = [0 as u64; 4]
+static mut c_tq: [u64; 4] = [0 as u64; 4]
+static mut c_td: [u64; 4] = [0 as u64; 4]
+static mut c_ta: [u64; 4] = [0 as u64; 4]
+static mut c_pred: [i64; 4] = [0 as i64; 4]
+static mut c_pw: [u64; 4] = [0 as u64; 4] // Zeilenlaenge im Ring
+static mut c_dw: [u64; 4] = [0 as u64; 4] // echte Abtastbreite
+static mut c_dh: [u64; 4] = [0 as u64; 4] // echte Abtasthoehe
+static mut c_bh: [u64; 4] = [0 as u64; 4] // Zeilen je MCU-Zeile
+static mut c_ring: [u64; 4] = [0 as u64; 4]
+static mut c_rows: [u64; 4] = [0 as u64; 4] // Zeilen im Ring (3 * bh)
+
+static mut qt: [u64; 256] = [0 as u64; 256]
+static mut qt_have: [u64; 4] = [0 as u64; 4]
+
+// Acht Huffman-Tabellen: 0..3 sind DC, 4..7 sind AC.
+static mut h_min: [i64; 136] = [0 as i64; 136] // 8 * 17
+static mut h_max: [i64; 136] = [0 as i64; 136]
+static mut h_val: [i64; 136] = [0 as i64; 136]
+static mut h_sym: [u8; 2048] = [0 as u8; 2048] // 8 * 256
+static mut h_look: [u16; 4096] = [0 as u16; 4096] // 8 * 512, 9 Bit
+static mut h_have: [u64; 8] = [0 as u64; 8]
+
+// Farbtabellen nach libjpeg (`build_ycc_rgb_table`).
+static mut t_crr: [i64; 256] = [0 as i64; 256]
+static mut t_cbb: [i64; 256] = [0 as i64; 256]
+static mut t_crg: [i64; 256] = [0 as i64; 256]
+static mut t_cbg: [i64; 256] = [0 as i64; 256]
+
+static mut zz: [u8; 64] = [0 as u8; 64]
+
+// Arbeitsspeicher
+static mut cbline: u64 = 0 // hochgerechnete Farbzeile Cb
+static mut crline: u64 = 0
+static mut yline: u64 = 0
+static mut coef: [i64; 64] = [0 as i64; 64]
+static mut wsp: [i64; 64] = [0 as i64; 64]
+
+static mut cur_y: u64 = 0
+static mut bands: u64 = 0 // wie viele MCU-Zeilen schon dekodiert sind
+static mut mcu_at: u64 = 0 // naechste MCU im Durchgang
+static mut since_rst: u64 = 0
+static mut scan_ok: u64 = 0
+
+fn reason() -> u64 {
+    return jreason
+}
+
+fn partial() -> u64 {
+    return jpartial
+}
+
+fn width() -> u64 {
+    return ow
+}
+
+fn height() -> u64 {
+    return oh
+}
+
+fn full_width() -> u64 {
+    return jw
+}
+
+fn full_height() -> u64 {
+    return jh
+}
+
+fn orientation() -> u64 {
+    return jori
+}
+
+fn restarts() -> u64 {
+    return jrests
+}
+
+fn mcu_rows() -> u64 {
+    return jmcuy
+}
+
+fn comps() -> u64 {
+    return jnc
+}
+
+fn scale_of() -> u64 {
+    return jscale
+}
+
+// Die Abtastung als eine Zahl, damit ein Testlauf sie ausgeben kann:
+// h*16+v der zweiten Komponente, 0 bei Graustufen.
+fn samp() -> u64 {
+    if jnc < 2 {
+        return 0
+    }
+    return c_h[(0) as usize] * 16 + c_v[(0) as usize]
+}
+
+// ---------------------------------------------------------- Der Bitleser
+
+fn ld8(p: u64) -> u64 {
+    return (*((p) as *mut u8)) as u64
+}
+
+fn be16(p: u64) -> u64 {
+    return (ld8(p) << 8) | ld8(p + 1)
+}
+
+// Bis mindestens 25 Bit im Puffer stehen. Mehr als 16 braucht kein
+// Huffman-Code, und die Zusatzbits eines Koeffizienten sind hoechstens
+// 16 -- 25 deckt beides mit einem Nachfuellen ab.
+fn refill() {
+    while bn <= 48 {
+        var b: u64 = 0
+        if marker != 0 {
+            fedzero = fedzero + 1
+        } else if at >= srcn {
+            marker = 1
+            fedzero = fedzero + 1
+        } else {
+            b = ld8(src + at)
+            at = at + 1
+            if b == 255 {
+                var nx: u64 = 217 // ohne Nachfolger: wie EOI
+                if at < srcn {
+                    nx = ld8(src + at)
+                }
+                if nx == 0 {
+                    at = at + 1 // gestopftes 0xFF
+                } else if nx == 255 {
+                    // Fuellbits vor einem Marker: das naechste Oktett
+                    // entscheidet, also einfach dieses ueberspringen.
+                    at = at - 1
+                    marker = 1
+                    b = 0
+                    fedzero = fedzero + 1
+                } else {
+                    at = at - 1
+                    marker = 1
+                    b = 0
+                    fedzero = fedzero + 1
+                }
+            }
+        }
+        bb = (bb << 8) | b
+        bn = bn + 8
+    }
+}
+
+fn peek(k: u64) -> u64 {
+    return (bb >> (bn - k)) & ((1 << k) - 1)
+}
+
+fn skip(k: u64) {
+    bn = bn - k
+}
+
+fn getbits(k: u64) -> i64 {
+    if k == 0 {
+        return 0
+    }
+    refill()
+    let v: u64 = peek(k)
+    skip(k)
+    return v as i64
+}
+
+// T.81 F.2.2.1: eine Zahl aus `s` Bits, deren oberstes Bit 0 ist, ist
+// negativ.
+fn extend(v: i64, s: u64) -> i64 {
+    if s == 0 {
+        return 0
+    }
+    let half: i64 = (1 << (s - 1)) as i64
+    if v < half {
+        return v - ((1 << s) as i64) + 1
+    }
+    return v
+}
+
+// ---------------------------------------------------- Die Huffman-Baeume
+
+fn build_huff(t: u64, counts: u64, values: u64, nvals: u64) {
+    var code: i64 = 0
+    var k: u64 = 0
+    var l: u64 = 1
+    while l <= 16 {
+        let n: u64 = ld8(counts + l - 1)
+        if n == 0 {
+            h_max[((t * 17 + l)) as usize] = 0 - 1
+        } else {
+            h_val[((t * 17 + l)) as usize] = k as i64
+            h_min[((t * 17 + l)) as usize] = code
+            code = code + (n as i64)
+            k = k + n
+            h_max[((t * 17 + l)) as usize] = code - 1
+        }
+        code = code * 2
+        l = l + 1
+    }
+    var i: u64 = 0
+    while i < nvals && i < 256 {
+        h_sym[((t * 256 + i)) as usize] = ld8(values + i) as u8
+        i = i + 1
+    }
+    // DIE SCHNELLE TABELLE. Neun Bit sind der Kompromiss von libjpeg
+    // und von stb_image: fast jeder Code eines echten Bildes ist kuerzer,
+    // und 512 Eintraege je Tabelle sind ein Kilooktett.
+    var j: u64 = 0
+    while j < 512 {
+        h_look[((t * 512 + j)) as usize] = 0 as u16
+        j = j + 1
+    }
+    code = 0
+    k = 0
+    l = 1
+    while l <= 16 {
+        let n: u64 = ld8(counts + l - 1)
+        if l <= 9 && n > 0 {
+            var q: u64 = 0
+            while q < n {
+                let c: u64 = (code as u64) + q
+                let base: u64 = c << (9 - l)
+                let span: u64 = 1 << (9 - l)
+                var e: u64 = 0
+                while e < span {
+                    h_look[((t * 512 + base + e)) as usize] =
+                        ((l << 8) | (h_sym[((t * 256 + k + q)) as usize]
+                            as u64)) as u16
+                    e = e + 1
+                }
+                q = q + 1
+            }
+        }
+        code = code + (n as i64)
+        k = k + n
+        code = code * 2
+        l = l + 1
+    }
+    h_have[(t) as usize] = 1
+}
+
+fn huff_decode(t: u64) -> i64 {
+    refill()
+    let look: u64 = peek(9)
+    let e: u64 = h_look[((t * 512 + look)) as usize] as u64
+    if e != 0 {
+        skip(e >> 8)
+        return (e & 255) as i64
+    }
+    // Der langsame Weg: Bit fuer Bit ab Laenge 1, so wie T.81 Anhang F
+    // es beschreibt. Er wird nur fuer Codes ab zehn Bit betreten.
+    var code: i64 = 0
+    var l: u64 = 1
+    while l <= 16 {
+        code = code * 2 + getbits(1)
+        let mx: i64 = h_max[((t * 17 + l)) as usize]
+        if mx >= 0 && code <= mx {
+            let idx: i64 = h_val[((t * 17 + l)) as usize] + code
+                - h_min[((t * 17 + l)) as usize]
+            if idx < 0 || idx > 255 {
+                return 0 - 1
+            }
+            return h_sym[((t * 256 + (idx as u64))) as usize] as i64
+        }
+        l = l + 1
+    }
+    return 0 - 1
+}
+
+// ------------------------------------------------------------- Die IDCT
+//
+// `jpeg_idct_islow` aus libjpeg, Zeile fuer Zeile nachgerechnet:
+// 13 Bit Konstanten, zwei Durchgaenge, dazwischen zwei Bit mehr
+// Genauigkeit (PASS1_BITS).
+
+const CB: u64 = 13 // CONST_BITS
+const PB: u64 = 2 // PASS1_BITS
+const F_0_298: i64 = 2446
+const F_0_390: i64 = 3196
+const F_0_541: i64 = 4433
+const F_0_765: i64 = 6270
+const F_0_899: i64 = 7373
+const F_1_175: i64 = 9633
+const F_1_501: i64 = 12299
+const F_1_847: i64 = 15137
+const F_1_961: i64 = 16069
+const F_2_053: i64 = 16819
+const F_2_562: i64 = 20995
+const F_3_072: i64 = 25172
+
+fn descale(x: i64, n: u64) -> i64 {
+    return (x + ((1 << (n - 1)) as i64)) >> n
+}
+
+fn clamp8(v: i64) -> u64 {
+    if v < 0 {
+        return 0
+    }
+    if v > 255 {
+        return 255
+    }
+    return v as u64
+}
+
+// ------------------------------------------------------ Ein MCU-Zeile
+//
+// Die Zeile `m` der MCUs wird in den Ring geschrieben. Sie besteht aus
+// `jmcux` MCUs, jede aus h*v Bloecken je Komponente.
+
+fn ring_row(ci: u64, row: u64) -> u64 {
+    let rows: u64 = c_rows[(ci) as usize]
+    return c_ring[(ci) as usize] + (row % rows) * c_pw[(ci) as usize]
+}
+
+fn decode_band(m: u64) -> bool {
+    var mx: u64 = 0
+    while mx < jmcux {
+        if jrestart > 0 && since_rst == jrestart {
+            if !resync() {
+                return false
+            }
+        }
+        var ci: u64 = 0
+        while ci < jnc {
+            let ch: u64 = c_h[(ci) as usize]
+            let cv: u64 = c_v[(ci) as usize]
+            var by: u64 = 0
+            while by < cv {
+                var bx: u64 = 0
+                while bx < ch {
+                    if !decode_block(ci, m, mx, bx, by) {
+                        return false
+                    }
+                    bx = bx + 1
+                }
+                by = by + 1
+            }
+            ci = ci + 1
+        }
+        since_rst = since_rst + 1
+        mx = mx + 1
+    }
+    return true
+}
+
+// Auf den naechsten RSTn-Marker aufsetzen. Genau dafuer gibt es sie:
+// ein kaputtes Stueck vergiftet den Rest des Bildes nicht.
+fn resync() -> bool {
+    bn = 0
+    bb = 0
+    var found: bool = false
+    while at + 1 < srcn {
+        if ld8(src + at) == 255 {
+            let m2: u64 = ld8(src + at + 1)
+            if m2 >= 208 && m2 <= 215 {
+                at = at + 2
+                found = true
+                break
+            }
+            if m2 == 217 {
+                break // EOI
+            }
+        }
+        at = at + 1
+    }
+    if found {
+        marker = 0
+        fedzero = 0
+        jrests = jrests + 1
+    } else {
+        marker = 1
+    }
+    var ci: u64 = 0
+    while ci < jnc {
+        c_pred[(ci) as usize] = 0
+        ci = ci + 1
+    }
+    since_rst = 0
+    return true
+}
+
+fn decode_block(ci: u64, m: u64, mx: u64, bx: u64, by: u64) -> bool {
+    var k: u64 = 0
+    while k < 64 {
+        coef[(k) as usize] = 0
+        k = k + 1
+    }
+    let td: u64 = c_td[(ci) as usize]
+    let sdc: i64 = huff_decode(td)
+    if sdc < 0 || sdc > 15 {
+        jreason = R_HUFFMAN
+        return false
+    }
+    var diff: i64 = 0
+    if sdc > 0 {
+        diff = extend(getbits(sdc as u64), sdc as u64)
+    }
+    c_pred[(ci) as usize] = c_pred[(ci) as usize] + diff
+    let q: u64 = c_tq[(ci) as usize] * 64
+    let qdc: i64 = qt[(q) as usize] as i64
+    coef[(0) as usize] = c_pred[(ci) as usize] * qdc
+    let ta: u64 = 4 + c_ta[(ci) as usize]
+    var kk: u64 = 1
+    while kk < 64 {
+        let rs: i64 = huff_decode(ta)
+        if rs < 0 {
+            jreason = R_HUFFMAN
+            return false
+        }
+        let run: u64 = (rs as u64) >> 4
+        let size: u64 = (rs as u64) & 15
+        if size == 0 {
+            if run != 15 {
+                kk = 64
+            } else {
+                kk = kk + 16
+            }
+        } else {
+            kk = kk + run
+            if kk > 63 {
+                kk = 64
+            } else {
+                let v: i64 = extend(getbits(size), size)
+                let pos: u64 = zz[(kk) as usize] as u64
+                let qv: i64 = qt[((q + kk)) as usize] as i64
+                coef[(pos) as usize] = v * qv
+                kk = kk + 1
+            }
+        }
+    }
+    // Der Block landet im Ring. Bei 1/8 ist er EIN Bildpunkt: der
+    // Gleichanteil, so wie `jpeg_idct_1x1` ihn rechnet.
+    let pw: u64 = c_pw[(ci) as usize]
+    let rowbase: u64 = (m * c_v[(ci) as usize] + by) * jbs
+    let colbase: u64 = (mx * c_h[(ci) as usize] + bx) * jbs
+    if jbs == 1 {
+        let v: u64 = clamp8(descale(coef[(0) as usize], 3) + 128)
+        __mmio_write8((ring_row(ci, rowbase) + colbase) as *mut u8,
+            v as u8)
+        return true
+    }
+    // Wieviel davon liegt noch im Bild? Die Raender einer MCU duerfen
+    // ueber den Rand hinausragen; was darueber liegt, wird nicht
+    // geschrieben, damit der Ring keine fremden Zeilen beruehrt.
+    var maxx: u64 = 8
+    var maxy: u64 = 8
+    // Die Zeilen des Rings sind pw breit; die Bloecke passen immer, weil
+    // pw ein Vielfaches von 8 ist.
+    let dst: u64 = ring_row(ci, rowbase) + colbase
+    // Innerhalb eines Rings sind die acht Zeilen NICHT zusammenhaengend
+    // -- sie koennen am Ende umbrechen. Deshalb Zeile fuer Zeile.
+    var r: u64 = 0
+    while r < maxy {
+        let line: u64 = ring_row(ci, rowbase + r) + colbase
+        idct_line(line, r, maxx)
+        r = r + 1
+    }
+    return true
+}
+
+// Der zweite Durchgang der IDCT braucht den ersten. Damit die Zeilen
+// einzeln in den Ring geschrieben werden koennen (er bricht um), wird
+// der erste Durchgang einmal je Block gerechnet und dann Zeile fuer
+// Zeile ausgegeben.
+fn idct_line(line: u64, r: u64, maxx: u64) {
+    if r == 0 {
+        idct_pass1()
+    }
+    idct_pass2(line, r, maxx)
+}
+
+fn idct_pass1() {
+    var c: u64 = 0
+    while c < 8 {
+        let i1: i64 = coef[((c + 8)) as usize]
+        let i2: i64 = coef[((c + 16)) as usize]
+        let i3: i64 = coef[((c + 24)) as usize]
+        let i4: i64 = coef[((c + 32)) as usize]
+        let i5: i64 = coef[((c + 40)) as usize]
+        let i6: i64 = coef[((c + 48)) as usize]
+        let i7: i64 = coef[((c + 56)) as usize]
+        if i1 == 0 && i2 == 0 && i3 == 0 && i4 == 0 && i5 == 0
+        && i6 == 0 && i7 == 0 {
+            let dc: i64 = coef[(c) as usize] << PB
+            var r: u64 = 0
+            while r < 8 {
+                wsp[((r * 8 + c)) as usize] = dc
+                r = r + 1
+            }
+        } else {
+            let i0: i64 = coef[(c) as usize]
+            let z1: i64 = (i2 + i6) * F_0_541
+            let tmp2: i64 = z1 + i6 * (0 - F_1_847)
+            let tmp3: i64 = z1 + i2 * F_0_765
+            let tmp0: i64 = (i0 + i4) << CB
+            let tmp1: i64 = (i0 - i4) << CB
+            let t10: i64 = tmp0 + tmp3
+            let t13: i64 = tmp0 - tmp3
+            let t11: i64 = tmp1 + tmp2
+            let t12: i64 = tmp1 - tmp2
+            var o0: i64 = i7
+            var o1: i64 = i5
+            var o2: i64 = i3
+            var o3: i64 = i1
+            var za: i64 = o0 + o3
+            var zb: i64 = o1 + o2
+            var zc: i64 = o0 + o2
+            var zd: i64 = o1 + o3
+            let ze: i64 = (zc + zd) * F_1_175
+            o0 = o0 * F_0_298
+            o1 = o1 * F_2_053
+            o2 = o2 * F_3_072
+            o3 = o3 * F_1_501
+            za = za * (0 - F_0_899)
+            zb = zb * (0 - F_2_562)
+            zc = zc * (0 - F_1_961) + ze
+            zd = zd * (0 - F_0_390) + ze
+            o0 = o0 + za + zc
+            o1 = o1 + zb + zd
+            o2 = o2 + zb + zc
+            o3 = o3 + za + zd
+            wsp[(c) as usize] = descale(t10 + o3, CB - PB)
+            wsp[((56 + c)) as usize] = descale(t10 - o3, CB - PB)
+            wsp[((8 + c)) as usize] = descale(t11 + o2, CB - PB)
+            wsp[((48 + c)) as usize] = descale(t11 - o2, CB - PB)
+            wsp[((16 + c)) as usize] = descale(t12 + o1, CB - PB)
+            wsp[((40 + c)) as usize] = descale(t12 - o1, CB - PB)
+            wsp[((24 + c)) as usize] = descale(t13 + o0, CB - PB)
+            wsp[((32 + c)) as usize] = descale(t13 - o0, CB - PB)
+        }
+        c = c + 1
+    }
+}
+
+fn idct_pass2(line: u64, r: u64, maxx: u64) {
+    let b: u64 = r * 8
+    let w0: i64 = wsp[(b) as usize]
+    let w1: i64 = wsp[((b + 1)) as usize]
+    let w2: i64 = wsp[((b + 2)) as usize]
+    let w3: i64 = wsp[((b + 3)) as usize]
+    let w4: i64 = wsp[((b + 4)) as usize]
+    let w5: i64 = wsp[((b + 5)) as usize]
+    let w6: i64 = wsp[((b + 6)) as usize]
+    let w7: i64 = wsp[((b + 7)) as usize]
+    if w1 == 0 && w2 == 0 && w3 == 0 && w4 == 0 && w5 == 0
+    && w6 == 0 && w7 == 0 {
+        let v: u64 = clamp8(descale(w0, PB + 3) + 128)
+        var x: u64 = 0
+        while x < maxx {
+            __mmio_write8((line + x) as *mut u8, v as u8)
+            x = x + 1
+        }
+        return
+    }
+    let z1: i64 = (w2 + w6) * F_0_541
+    let tmp2: i64 = z1 + w6 * (0 - F_1_847)
+    let tmp3: i64 = z1 + w2 * F_0_765
+    let tmp0: i64 = (w0 + w4) << CB
+    let tmp1: i64 = (w0 - w4) << CB
+    let t10: i64 = tmp0 + tmp3
+    let t13: i64 = tmp0 - tmp3
+    let t11: i64 = tmp1 + tmp2
+    let t12: i64 = tmp1 - tmp2
+    var o0: i64 = w7
+    var o1: i64 = w5
+    var o2: i64 = w3
+    var o3: i64 = w1
+    var za: i64 = o0 + o3
+    var zb: i64 = o1 + o2
+    var zc: i64 = o0 + o2
+    var zd: i64 = o1 + o3
+    let ze: i64 = (zc + zd) * F_1_175
+    o0 = o0 * F_0_298
+    o1 = o1 * F_2_053
+    o2 = o2 * F_3_072
+    o3 = o3 * F_1_501
+    za = za * (0 - F_0_899)
+    zb = zb * (0 - F_2_562)
+    zc = zc * (0 - F_1_961) + ze
+    zd = zd * (0 - F_0_390) + ze
+    o0 = o0 + za + zc
+    o1 = o1 + zb + zd
+    o2 = o2 + zb + zc
+    o3 = o3 + za + zd
+    let sh: u64 = CB + PB + 3
+    __mmio_write8((line) as *mut u8,
+        clamp8(descale(t10 + o3, sh) + 128) as u8)
+    __mmio_write8((line + 1) as *mut u8,
+        clamp8(descale(t11 + o2, sh) + 128) as u8)
+    __mmio_write8((line + 2) as *mut u8,
+        clamp8(descale(t12 + o1, sh) + 128) as u8)
+    __mmio_write8((line + 3) as *mut u8,
+        clamp8(descale(t13 + o0, sh) + 128) as u8)
+    __mmio_write8((line + 4) as *mut u8,
+        clamp8(descale(t13 - o0, sh) + 128) as u8)
+    __mmio_write8((line + 5) as *mut u8,
+        clamp8(descale(t12 - o1, sh) + 128) as u8)
+    __mmio_write8((line + 6) as *mut u8,
+        clamp8(descale(t11 - o2, sh) + 128) as u8)
+    __mmio_write8((line + 7) as *mut u8,
+        clamp8(descale(t10 - o3, sh) + 128) as u8)
+}
+
+// -------------------------------------------------------- Hochrechnung
+//
+// Genau libjpegs `h2v1_fancy_upsample` und `h2v2_fancy_upsample`. Die
+// Zeile wird EINMAL je Bildzeile gebaut, danach ist der Farbwert eines
+// Bildpunktes ein Feldzugriff.
+
+fn samp_at(ci: u64, row: u64, x: u64) -> u64 {
+    var xx: u64 = x
+    let dw: u64 = c_dw[(ci) as usize]
+    if xx >= dw {
+        xx = dw - 1
+    }
+    var rr: u64 = row
+    let dh: u64 = c_dh[(ci) as usize]
+    if rr >= dh {
+        rr = dh - 1
+    }
+    return ld8(ring_row(ci, rr) + xx)
+}
+
+fn upline(ci: u64, y: u64, dst: u64) {
+    let sx: u64 = jhmax / c_h[(ci) as usize]
+    let sy: u64 = jvmax / c_v[(ci) as usize]
+    let dw: u64 = c_dw[(ci) as usize]
+    if sx == 1 && sy == 1 {
+        var r: u64 = y
+        let dh: u64 = c_dh[(ci) as usize]
+        if r >= dh {
+            r = dh - 1
+        }
+        let sp: u64 = ring_row(ci, r)
+        var x: u64 = 0
+        while x < ow {
+            var xx: u64 = x
+            if xx >= dw {
+                xx = dw - 1
+            }
+            __mmio_write8((dst + x) as *mut u8, ld8(sp + xx) as u8)
+            x = x + 1
+        }
+        return
+    }
+    if sx == 2 && sy == 1 {
+        // (3*nah + fern + 1 bzw. 2) / 4
+        var x: u64 = 0
+        while x < ow {
+            let c: u64 = x / 2
+            let near: u64 = samp_at(ci, y, c)
+            var far: u64 = near
+            var v: u64 = 0
+            if (x & 1) == 0 {
+                if c > 0 {
+                    far = samp_at(ci, y, c - 1)
+                }
+                v = (3 * near + far + 2) / 4
+            } else {
+                if c + 1 < dw {
+                    far = samp_at(ci, y, c + 1)
+                }
+                v = (3 * near + far + 1) / 4
+            }
+            __mmio_write8((dst + x) as *mut u8, v as u8)
+            x = x + 1
+        }
+        return
+    }
+    if sx == 2 && sy == 2 {
+        let cy: u64 = y / 2
+        var oy: u64 = cy
+        if (y & 1) == 0 {
+            if cy > 0 {
+                oy = cy - 1
+            }
+        } else {
+            oy = cy + 1
+        }
+        var x: u64 = 0
+        while x < ow {
+            let cx: u64 = x / 2
+            var lastx: u64 = cx
+            var nextx: u64 = cx
+            if cx > 0 {
+                lastx = cx - 1
+            }
+            if cx + 1 < dw {
+                nextx = cx + 1
+            }
+            let this_s: u64 = 3 * samp_at(ci, cy, cx) + samp_at(ci, oy, cx)
+            var v: u64 = 0
+            if (x & 1) == 0 {
+                let ol: u64 = samp_at(ci, oy, lastx)
+                let other: u64 = 3 * samp_at(ci, cy, lastx) + ol
+                v = (this_s * 3 + other + 8) / 16
+            } else {
+                let on: u64 = samp_at(ci, oy, nextx)
+                let other: u64 = 3 * samp_at(ci, cy, nextx) + on
+                v = (this_s * 3 + other + 7) / 16
+            }
+            __mmio_write8((dst + x) as *mut u8, v as u8)
+            x = x + 1
+        }
+        return
+    }
+    // Jedes andere Verhaeltnis: Wiederholung, und das steht so auch in
+    // der Doku. Es kommt bei echten Dateien praktisch nicht vor.
+    var x: u64 = 0
+    while x < ow {
+        __mmio_write8((dst + x) as *mut u8,
+            samp_at(ci, y / sy, x / sx) as u8)
+        x = x + 1
+    }
+}
+
+// --------------------------------------------------------- Die Farbe
+
+fn build_color() {
+    var i: u64 = 0
+    while i < 256 {
+        let x: i64 = (i as i64) - 128
+        t_crr[(i) as usize] = (91881 * x + 32768) >> 16
+        t_cbb[(i) as usize] = (116130 * x + 32768) >> 16
+        t_crg[(i) as usize] = (0 - 46802) * x
+        t_cbg[(i) as usize] = (0 - 22554) * x + 32768
+        i = i + 1
+    }
+}
+
+// ------------------------------------------------------------- Die Kopfdaten
+
+fn zigzag_init() {
+    var z: [u8; 64] = [
+        0, 1, 8, 16, 9, 2, 3, 10, 17, 24, 32, 25, 18, 11, 4, 5,
+        12, 19, 26, 33, 40, 48, 41, 34, 27, 20, 13, 6, 7, 14, 21, 28,
+        35, 42, 49, 56, 57, 50, 43, 36, 29, 22, 15, 23, 30, 37, 44, 51,
+        58, 59, 52, 45, 38, 31, 39, 46, 53, 60, 61, 54, 47, 55, 62, 63
+    ]
+    var i: u64 = 0
+    while i < 64 {
+        zz[(i) as usize] = z[(i) as usize]
+        i = i + 1
+    }
+}
+
+// EXIF: nur die Ausrichtung. Der Rest der Datei interessiert diesen
+// Dekodierer nicht, und was er nicht liest, kann er nicht falsch lesen.
+fn read_exif(body: u64, blen: u64) {
+    if blen < 14 {
+        return
+    }
+    if ld8(body) != 69 || ld8(body + 1) != 120 || ld8(body + 2) != 105
+    || ld8(body + 3) != 102 || ld8(body + 4) != 0 {
+        return
+    }
+    let tiff: u64 = body + 6
+    var big: bool = true
+    let b0: u64 = ld8(tiff)
+    if b0 == 73 {
+        big = false
+    } else if b0 != 77 {
+        return
+    }
+    let off: u64 = rd32(tiff + 4, big)
+    if off + 2 > blen {
+        return
+    }
+    let ifd: u64 = tiff + off
+    let n: u64 = rd16(ifd, big)
+    var i: u64 = 0
+    while i < n && i < 200 {
+        let e: u64 = ifd + 2 + i * 12
+        if e + 12 > body + blen {
+            return
+        }
+        if rd16(e, big) == 274 {
+            let v: u64 = rd16(e + 8, big)
+            if v >= 1 && v <= 8 {
+                jori = v
+            }
+            return
+        }
+        i = i + 1
+    }
+}
+
+fn rd16(p: u64, big: bool) -> u64 {
+    if big {
+        return (ld8(p) << 8) | ld8(p + 1)
+    }
+    return (ld8(p + 1) << 8) | ld8(p)
+}
+
+fn rd32(p: u64, big: bool) -> u64 {
+    if big {
+        return (ld8(p) << 24) | (ld8(p + 1) << 16) | (ld8(p + 2) << 8)
+            | ld8(p + 3)
+    }
+    return (ld8(p + 3) << 24) | (ld8(p + 2) << 16) | (ld8(p + 1) << 8)
+        | ld8(p)
+}
+
+// Wieviel Speicher `begin` brauchen wird -- damit die Anwendung es
+// SAGEN kann, statt es zu versuchen und zu scheitern.
+fn need_bytes(w: u64, hmax_h: u64, nc: u64) -> u64 {
+    // grob: drei MCU-Zeilen je Komponente plus drei Zeilenpuffer
+    return (w + 16) * 16 * 3 * nc + (w + 16) * 3
+}
+
+// ------------------------------------------------------------- begin
+//
+// `scale` ist 1 (volle Groesse) oder 8 (ein Achtel je Kante, nur der
+// Gleichanteil -- das ist die Miniaturansicht, und sie kostet ein
+// Sechzigstel der Arbeit).
+
+fn begin(p: u64, n: u64, scale: u64) -> bool {
+    src = p
+    srcn = n
+    jreason = R_NOT_JPEG
+    jpartial = 0
+    jrests = 0
+    jori = 1
+    jw = 0
+    jh = 0
+    jnc = 0
+    jhmax = 1
+    jvmax = 1
+    cur_y = 0
+    bands = 0
+    mcu_at = 0
+    since_rst = 0
+    scan_ok = 0
+    marker = 0
+    fedzero = 0
+    bb = 0
+    bn = 0
+    jscale = 1
+    jbs = 8
+    if scale == 8 {
+        jscale = 8
+        jbs = 1
+    }
+    if n < 4 {
+        return false
+    }
+    if ld8(p) != 255 || ld8(p + 1) != 216 {
+        return false
+    }
+    zigzag_init()
+    build_color()
+    var i: u64 = 0
+    while i < 8 {
+        h_have[(i) as usize] = 0
+        i = i + 1
+    }
+    i = 0
+    while i < 4 {
+        qt_have[(i) as usize] = 0
+        i = i + 1
+    }
+    var have_frame: bool = false
+    at = 2
+    while at + 3 < n {
+        if ld8(src + at) != 255 {
+            at = at + 1
+            continue
+        }
+        var m: u64 = ld8(src + at + 1)
+        while m == 255 && at + 2 < n {
+            at = at + 1
+            m = ld8(src + at + 1)
+        }
+        at = at + 2
+        if m == 216 || m == 1 {
+            continue
+        }
+        if m >= 208 && m <= 215 {
+            continue
+        }
+        if m == 217 {
+            break
+        }
+        if at + 1 >= n {
+            break
+        }
+        let seglen: u64 = be16(src + at)
+        if seglen < 2 || at + seglen > n {
+            jreason = R_TRUNCATED
+            return false
+        }
+        let bodyoff: u64 = at + 2
+        let body: u64 = src + bodyoff
+        let blen: u64 = seglen - 2
+        if m == 219 {
+            if !read_dqt(body, blen) {
+                return false
+            }
+        } else if m == 196 {
+            if !read_dht(body, blen) {
+                return false
+            }
+        } else if m == 221 {
+            if blen >= 2 {
+                jrestart = be16(src + body)
+            }
+        } else if m == 225 {
+            read_exif(body, blen)
+        } else if m == 194 || m == 198 || m == 202 || m == 206
+        || m == 210 || m == 214 {
+            jreason = R_PROGRESSIVE
+            return false
+        } else if m == 201 || m == 203 || m == 205 || m == 207
+        || m == 211 || m == 213 || m == 215 {
+            jreason = R_ARITHMETIC
+            return false
+        } else if m == 192 || m == 193 {
+            if !read_sof(body, blen) {
+                return false
+            }
+            have_frame = true
+        } else if m == 218 {
+            if !have_frame {
+                jreason = R_TRUNCATED
+                return false
+            }
+            if !read_sos(body, blen) {
+                return false
+            }
+            at = bodyoff + blen
+            bb = 0
+            bn = 0
+            marker = 0
+            fedzero = 0
+            jreason = R_OK
+            scan_ok = 1
+            return true
+        }
+        at = at + seglen
+    }
+    if !have_frame {
+        jreason = R_TRUNCATED
+    } else {
+        jreason = R_TRUNCATED
+    }
+    return false
+}
+
+fn read_dqt(body: u64, blen: u64) -> bool {
+    var q: u64 = body
+    while q < body + blen {
+        let pq: u64 = ld8(q) >> 4
+        let tq: u64 = ld8(q) & 15
+        q = q + 1
+        if tq > 3 {
+            jreason = R_TRUNCATED
+            return false
+        }
+        var need: u64 = 64
+        if pq != 0 {
+            need = 128
+        }
+        if q + need > body + blen {
+            jreason = R_TRUNCATED
+            return false
+        }
+        var k: u64 = 0
+        while k < 64 {
+            if pq == 0 {
+                qt[((tq * 64 + k)) as usize] = ld8(q + k)
+            } else {
+                qt[((tq * 64 + k)) as usize] = be16(q + k * 2)
+            }
+            k = k + 1
+        }
+        q = q + need
+        qt_have[(tq) as usize] = 1
+    }
+    return true
+}
+
+fn read_dht(body: u64, blen: u64) -> bool {
+    var q: u64 = body
+    while q + 17 <= body + blen {
+        let tc: u64 = ld8(q) >> 4
+        let th: u64 = ld8(q) & 15
+        q = q + 1
+        var total: u64 = 0
+        var k: u64 = 0
+        while k < 16 {
+            total = total + ld8(q + k)
+            k = k + 1
+        }
+        if th > 3 || tc > 1 || q + 16 + total > body + blen {
+            jreason = R_TRUNCATED
+            return false
+        }
+        var t: u64 = th
+        if tc != 0 {
+            t = 4 + th
+        }
+        build_huff(t, q, q + 16, total)
+        q = q + 16 + total
+    }
+    return true
+}
+
+fn read_sof(body: u64, blen: u64) -> bool {
+    if blen < 6 {
+        jreason = R_TRUNCATED
+        return false
+    }
+    if ld8(body) != 8 {
+        jreason = R_PRECISION
+        return false
+    }
+    jh = be16(body + 1)
+    jw = be16(body + 3)
+    jnc = ld8(body + 5)
+    if jnc != 1 && jnc != 3 {
+        jreason = R_COMPONENTS
+        return false
+    }
+    if jw == 0 || jh == 0 || jw > MAXDIM || jh > MAXDIM {
+        jreason = R_TRUNCATED
+        return false
+    }
+    if jw * jh > MAXPIX {
+        jreason = R_HUGE
+        return false
+    }
+    if blen < 6 + jnc * 3 {
+        jreason = R_TRUNCATED
+        return false
+    }
+    var ci: u64 = 0
+    while ci < jnc {
+        let o: u64 = body + 6 + ci * 3
+        c_id[(ci) as usize] = ld8(o)
+        c_h[(ci) as usize] = ld8(o + 1) >> 4
+        c_v[(ci) as usize] = ld8(o + 1) & 15
+        c_tq[(ci) as usize] = ld8(o + 2)
+        if c_h[(ci) as usize] == 0 || c_v[(ci) as usize] == 0
+        || c_h[(ci) as usize] > 4 || c_v[(ci) as usize] > 4
+        || c_tq[(ci) as usize] > 3 {
+            jreason = R_SAMPLING
+            return false
+        }
+        if c_h[(ci) as usize] > jhmax {
+            jhmax = c_h[(ci) as usize]
+        }
+        if c_v[(ci) as usize] > jvmax {
+            jvmax = c_v[(ci) as usize]
+        }
+        ci = ci + 1
+    }
+    jmcux = (jw + jhmax * 8 - 1) / (jhmax * 8)
+    jmcuy = (jh + jvmax * 8 - 1) / (jvmax * 8)
+    ow = (jw + jscale - 1) / jscale
+    oh = (jh + jscale - 1) / jscale
+    if ow == 0 {
+        ow = 1
+    }
+    if oh == 0 {
+        oh = 1
+    }
+    // Die Puffer. AB HIER wird Speicher genommen, und wenn er nicht
+    // reicht, ist das eine Meldung und kein Absturz.
+    ci = 0
+    while ci < jnc {
+        c_pw[(ci) as usize] = jmcux * c_h[(ci) as usize] * jbs
+        c_bh[(ci) as usize] = c_v[(ci) as usize] * jbs
+        c_rows[(ci) as usize] = 3 * c_bh[(ci) as usize]
+        c_dw[(ci) as usize] = (ow * c_h[(ci) as usize] + jhmax - 1) / jhmax
+        c_dh[(ci) as usize] = (oh * c_v[(ci) as usize] + jvmax - 1) / jvmax
+        if c_dw[(ci) as usize] == 0 {
+            c_dw[(ci) as usize] = 1
+        }
+        if c_dh[(ci) as usize] == 0 {
+            c_dh[(ci) as usize] = 1
+        }
+        let bytes: u64 = c_pw[(ci) as usize] * c_rows[(ci) as usize]
+        let r: u64 = imgmem.take(bytes)
+        if r == 0 {
+            jreason = R_MEMORY
+            return false
+        }
+        imgmem.zero(r, bytes)
+        c_ring[(ci) as usize] = r
+        c_pred[(ci) as usize] = 0
+        ci = ci + 1
+    }
+    yline = imgmem.take(ow + 16)
+    cbline = imgmem.take(ow + 16)
+    crline = imgmem.take(ow + 16)
+    if yline == 0 || cbline == 0 || crline == 0 {
+        jreason = R_MEMORY
+        return false
+    }
+    return true
+}
+
+fn read_sos(body: u64, blen: u64) -> bool {
+    if blen < 1 {
+        jreason = R_TRUNCATED
+        return false
+    }
+    let ns: u64 = ld8(body)
+    if ns != jnc {
+        // Ein Durchgang, in dem nicht alle Komponenten stehen: das ist
+        // entweder progressiv oder sequentiell-getrennt, und beides
+        // braucht denselben zweiten Dekodierer.
+        jreason = R_PROGRESSIVE
+        return false
+    }
+    if blen < 1 + ns * 2 + 3 {
+        jreason = R_TRUNCATED
+        return false
+    }
+    var found: u64 = 0
+    var s: u64 = 0
+    while s < ns {
+        let cs: u64 = ld8(body + 1 + s * 2)
+        let tt: u64 = ld8(body + 2 + s * 2)
+        var ci: u64 = 0
+        while ci < jnc {
+            if c_id[(ci) as usize] == cs {
+                c_td[(ci) as usize] = tt >> 4
+                c_ta[(ci) as usize] = tt & 15
+                found = found + 1
+            }
+            ci = ci + 1
+        }
+        s = s + 1
+    }
+    if found != jnc {
+        jreason = R_TRUNCATED
+        return false
+    }
+    // Ss, Se, Ah/Al -- bei Baseline 0, 63, 0. Ein Bild mit anderen
+    // Werten ist progressiv, auch wenn der Marker es nicht sagte.
+    let ss: u64 = ld8(body + 1 + ns * 2)
+    let se: u64 = ld8(body + 2 + ns * 2)
+    if ss != 0 || se != 63 {
+        jreason = R_PROGRESSIVE
+        return false
+    }
+    var ci2: u64 = 0
+    while ci2 < jnc {
+        if h_have[(c_td[(ci2) as usize]) as usize] == 0
+        || h_have[((4 + c_ta[(ci2) as usize])) as usize] == 0
+        || qt_have[(c_tq[(ci2) as usize]) as usize] == 0 {
+            jreason = R_HUFFMAN
+            return false
+        }
+        ci2 = ci2 + 1
+    }
+    return true
+}
+
+// -------------------------------------------------------- next_row
+//
+// Eine Zeile RGBA. `false` heisst: das Bild ist zu Ende ODER es ging
+// etwas schief -- `reason` sagt was, `partial` sagt, ob das, was bisher
+// kam, brauchbar ist.
+
+fn next_row(dst: u64) -> bool {
+    if scan_ok == 0 {
+        return false
+    }
+    if cur_y >= oh {
+        return false
+    }
+    let y: u64 = cur_y
+    let bandh: u64 = jvmax * jbs
+    let m: u64 = y / bandh
+    // Die naechste MCU-Zeile muss schon da sein, sonst fehlt der
+    // Hochrechnung die Zeile darunter.
+    while bands <= m + 1 && bands < jmcuy && jpartial == 0 {
+        if !decode_band(bands) {
+            // Was bis hier steht, bleibt stehen: ein halbes Foto ist
+            // besser als ein Fehlerkasten, und die Anwendung sagt dazu,
+            // dass es halb ist.
+            jpartial = 1
+        } else {
+            bands = bands + 1
+        }
+        if fedzero > 64 && bands < jmcuy {
+            jpartial = 1
+            jreason = R_TRUNCATED
+        }
+    }
+    if jnc == 1 {
+        upline(0, y, yline)
+        var x: u64 = 0
+        while x < ow {
+            let v: u64 = ld8(yline + x)
+            __mmio_write8((dst + x * 4) as *mut u8, v as u8)
+            __mmio_write8((dst + x * 4 + 1) as *mut u8, v as u8)
+            __mmio_write8((dst + x * 4 + 2) as *mut u8, v as u8)
+            __mmio_write8((dst + x * 4 + 3) as *mut u8, 255 as u8)
+            x = x + 1
+        }
+    } else {
+        upline(0, y, yline)
+        upline(1, y, cbline)
+        upline(2, y, crline)
+        var x: u64 = 0
+        while x < ow {
+            let yy: i64 = ld8(yline + x) as i64
+            let cb: u64 = ld8(cbline + x)
+            let cr: u64 = ld8(crline + x)
+            let r: u64 = clamp8(yy + t_crr[(cr) as usize])
+            let gs: i64 = t_cbg[(cb) as usize] + t_crg[(cr) as usize]
+            let g: u64 = clamp8(yy + (gs >> 16))
+            let b: u64 = clamp8(yy + t_cbb[(cb) as usize])
+            __mmio_write8((dst + x * 4) as *mut u8, r as u8)
+            __mmio_write8((dst + x * 4 + 1) as *mut u8, g as u8)
+            __mmio_write8((dst + x * 4 + 2) as *mut u8, b as u8)
+            __mmio_write8((dst + x * 4 + 3) as *mut u8, 255 as u8)
+            x = x + 1
+        }
+    }
+    cur_y = cur_y + 1
+    return true
+}

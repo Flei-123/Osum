@@ -1,0 +1,150 @@
+// SPDX-License-Identifier: MIT
+// kernel/user/imgmem.fi -- Runde VIEWER: DER SPEICHER, DEN EIN
+// BILDDEKODIERER BEKOMMT, UND KEIN OKTETT MEHR.
+//
+// WARUM EIGENE VERWALTUNG UND NICHT `libc.mem`. Der `mmap` dieses
+// Kernels ist ein STOSSZEIGER: er waechst nach unten, und `munmap` gibt
+// die Seiten zurueck, den Zeiger aber nicht (`kernel/sys.fi`,
+// `do_unmap`, dort als Luecke aufgeschrieben). Ein Bildbetrachter, der
+// je Bild ein paar Megaoktett abbildet und wieder freigibt, waere nach
+// einer Handvoll Bilder am Boden der Arena angekommen -- und eine
+// Diaschau ueber hundert Fotos ist genau das, was diese Runde bauen
+// soll.
+//
+// Also bildet der AUFRUFER EINMAL einen Block ab und uebergibt ihn.
+// Dieses Modul teilt darin auf, und `reset` gibt alles auf einmal
+// zurueck. Kein Freigeben einzelner Stuecke, keine Verschmelzung, keine
+// Fragmentierung: ein Dekodierlauf nimmt sich, was er braucht, und beim
+// naechsten Bild faengt der Zeiger wieder bei null an.
+//
+// DAS IST ZUGLEICH DIE SPEICHERGRENZE, und sie ist die Antwort auf die
+// Frage, was bei einem Bild mit 50 Megabildpunkten passiert: `take`
+// gibt 0 zurueck, der Dekodierer meldet `E_MEMORY` mit der Zahl, die
+// gefehlt hat, und die Anwendung schreibt sie hin. Kein Absturz, keine
+// halbe Anzeige, kein stiller Fehlschlag -- ein Satz mit zwei Zahlen
+// darin.
+//
+// AUSRICHTUNG: jedes Stueck faengt an einer durch 16 teilbaren Adresse
+// an. Der Dekodierer liest Zeilen mit 64-Bit-Zugriffen, und eine
+// ungerade Adresse waere hier kein Fehler, sondern nur langsamer -- der
+// Preis dafuer sind hoechstens 15 Oktette je Stueck.
+
+profile kernel
+
+export {
+    set, take, reset, used, size, left, ready,
+    zero, copy, put8, get8, put16, get16, put32, get32
+}
+
+static mut a_base: u64 = 0
+static mut a_size: u64 = 0
+static mut a_at: u64 = 0
+static mut a_peak: u64 = 0
+
+// Der Block, in dem alles liegt. Der Aufrufer besorgt ihn (ein `mmap`,
+// ein statisches Feld, was auch immer) und behaelt ihn.
+fn set(base: u64, len: u64) {
+    a_base = base
+    a_size = len
+    a_at = 0
+    a_peak = 0
+}
+
+fn ready() -> bool {
+    return a_base != 0 && a_size > 0
+}
+
+// Ein Stueck. 0 heisst "passt nicht mehr" -- und das ist der einzige
+// Weg, auf dem dieses Modul nein sagt.
+fn take(n: u64) -> u64 {
+    if a_base == 0 {
+        return 0
+    }
+    let want: u64 = (n + 15) & 0xFFFFFFFFFFFFFFF0
+    if want < n {
+        return 0 // uebergelaufen
+    }
+    if a_at + want > a_size {
+        return 0
+    }
+    let p: u64 = a_base + a_at
+    a_at = a_at + want
+    if a_at > a_peak {
+        a_peak = a_at
+    }
+    return p
+}
+
+fn reset() {
+    a_at = 0
+}
+
+fn used() -> u64 {
+    return a_at
+}
+
+fn size() -> u64 {
+    return a_size
+}
+
+fn left() -> u64 {
+    if a_at > a_size {
+        return 0
+    }
+    return a_size - a_at
+}
+
+// ----------------------------------------------------------- Zugriffe
+//
+// Sie stehen hier und nicht in jedem Dekodierer noch einmal. `put8` und
+// `get8` sind die beiden meistgerufenen Zeilen dieser Runde.
+
+fn put8(p: u64, v: u64) {
+    __mmio_write8((p) as *mut u8, (v & 255) as u8)
+}
+
+fn get8(p: u64) -> u64 {
+    return (*((p) as *mut u8)) as u64
+}
+
+fn put16(p: u64, v: u64) {
+    __mmio_write16((p) as *mut u16, (v & 0xFFFF) as u16)
+}
+
+fn get16(p: u64) -> u64 {
+    return (*((p) as *mut u16)) as u64
+}
+
+fn put32(p: u64, v: u64) {
+    __mmio_write32((p) as *mut u32, (v & 0xFFFFFFFF) as u32)
+}
+
+fn get32(p: u64) -> u64 {
+    return (*((p) as *mut u32)) as u64
+}
+
+fn zero(p: u64, n: u64) {
+    var i: u64 = 0
+    while i + 8 <= n {
+        __mmio_write64((p + i) as *mut u64, 0 as u64)
+        i = i + 8
+    }
+    while i < n {
+        __mmio_write8((p + i) as *mut u8, 0 as u8)
+        i = i + 1
+    }
+}
+
+fn copy(dst: u64, src: u64, n: u64) {
+    var i: u64 = 0
+    while i + 8 <= n {
+        __mmio_write64((dst + i) as *mut u64,
+            *((src + i) as *mut u64))
+        i = i + 8
+    }
+    while i < n {
+        __mmio_write8((dst + i) as *mut u8,
+            *((src + i) as *mut u8))
+        i = i + 1
+    }
+}

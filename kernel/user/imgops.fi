@@ -1,0 +1,281 @@
+// SPDX-License-Identifier: MIT
+// kernel/user/imgops.fi -- Runde VIEWER: was man mit einem Bild MACHT.
+//
+// Verkleinern, drehen, spiegeln, zuschneiden. Vier Sachen, und die
+// erste ist die wichtigste: OHNE SIE GEHT KEIN GROSSES BILD.
+//
+// DER VERKLEINERER ARBEITET ZEILENWEISE UND NIE AM STUECK. Er bekommt
+// die Zeilen so, wie der Dekodierer sie liefert, und schreibt in einen
+// Zielpuffer in ANZEIGEGROESSE. Damit haengt der Speicherbedarf eines
+// 50-Megabildpunkt-Panoramas an der Groesse des FENSTERS und nicht an
+// der des Bildes -- das ist der ganze Trick, mit dem dieser Betrachter
+// nicht am Speicher stirbt.
+//
+// WELCHE MITTELUNG UND WARUM: beim VERKLEINERN eine Kastenmittelung
+// (jeder Zielpunkt ist der Mittelwert aller Quellpunkte, die auf ihn
+// fallen). Nearest waere billiger und sieht bei Fotos schlimm aus --
+// aus einem Ziegeldach wird ein Moiré-Muster. Beim VERGROESSERN dagegen
+// Wiederholung: bei einem Bildschirmfoto oder einem Symbol will man die
+// harte Kante sehen und keine Weichzeichnung.
+
+profile kernel
+
+import imgmem
+
+export {
+    scale_begin, scale_row, scale_done,
+    rotate, flipx, flipy, crop, orient_to_rot, orient_flips
+}
+
+static mut s_sw: u64 = 0
+static mut s_sh: u64 = 0
+static mut s_dw: u64 = 0
+static mut s_dh: u64 = 0
+static mut s_dst: u64 = 0
+static mut s_acc: u64 = 0 // 4 * u32 je Zielpunkt (r,g,b,a)
+static mut s_cnt: u64 = 0 // Zaehler je Zielpunkt-SPALTE
+static mut s_y: u64 = 0 // naechste Quellzeile
+static mut s_down: u64 = 0 // 1 = verkleinern
+static mut s_rowsin: u64 = 0 // wie viele Quellzeilen in der Zielzeile
+static mut s_dy: u64 = 0 // laufende Zielzeile
+
+fn ld8(p: u64) -> u64 {
+    return (*((p) as *mut u8)) as u64
+}
+
+// Der Zielpuffer ist dw*dh*4 Oktette und gehoert dem Aufrufer.
+fn scale_begin(sw: u64, sh: u64, dw: u64, dh: u64, dst: u64) -> bool {
+    s_sw = sw
+    s_sh = sh
+    s_dw = dw
+    s_dh = dh
+    s_dst = dst
+    s_y = 0
+    s_dy = 0
+    s_rowsin = 0
+    s_down = 0
+    if sw == 0 || sh == 0 || dw == 0 || dh == 0 {
+        return false
+    }
+    if dw <= sw && dh <= sh {
+        s_down = 1
+        s_acc = imgmem.take(dw * 16)
+        s_cnt = imgmem.take(dw * 8)
+        if s_acc == 0 || s_cnt == 0 {
+            return false
+        }
+        imgmem.zero(s_acc, dw * 16)
+        imgmem.zero(s_cnt, dw * 8)
+    }
+    return true
+}
+
+// Eine Quellzeile (sw * 4 Oktette RGBA) hineingeben.
+fn scale_row(src: u64) {
+    if s_y >= s_sh {
+        return
+    }
+    if s_down == 0 {
+        // Vergroessern oder gemischt: Wiederholung. Jede Zielzeile
+        // holt sich ihre Quellzeile.
+        while s_dy < s_dh && (s_dy * s_sh) / s_dh == s_y {
+            var x: u64 = 0
+            while x < s_dw {
+                var sx: u64 = (x * s_sw) / s_dw
+                if sx >= s_sw {
+                    sx = s_sw - 1
+                }
+                __mmio_write32((s_dst + (s_dy * s_dw + x) * 4)
+                    as *mut u32,
+                    (*((src + sx * 4) as *mut u32)) as u32)
+                x = x + 1
+            }
+            s_dy = s_dy + 1
+        }
+        s_y = s_y + 1
+        return
+    }
+    // Verkleinern: aufsummieren.
+    var x: u64 = 0
+    while x < s_sw {
+        var dx: u64 = (x * s_dw) / s_sw
+        if dx >= s_dw {
+            dx = s_dw - 1
+        }
+        let a: u64 = s_acc + dx * 16
+        __mmio_write32((a) as *mut u32,
+            ((*((a) as *mut u32)) as u64 + ld8(src + x * 4)) as u32)
+        __mmio_write32((a + 4) as *mut u32,
+            ((*((a + 4) as *mut u32)) as u64 + ld8(src + x * 4 + 1))
+                as u32)
+        __mmio_write32((a + 8) as *mut u32,
+            ((*((a + 8) as *mut u32)) as u64 + ld8(src + x * 4 + 2))
+                as u32)
+        __mmio_write32((a + 12) as *mut u32,
+            ((*((a + 12) as *mut u32)) as u64 + ld8(src + x * 4 + 3))
+                as u32)
+        let c: u64 = s_cnt + dx * 8
+        __mmio_write64((c) as *mut u64,
+            (*((c) as *mut u64)) + 1)
+        x = x + 1
+    }
+    s_rowsin = s_rowsin + 1
+    s_y = s_y + 1
+    // Ist die Zielzeile voll? Die naechste Quellzeile gehoert schon zur
+    // naechsten.
+    var fertig: bool = false
+    if s_y >= s_sh {
+        fertig = true
+    } else if (s_y * s_dh) / s_sh != s_dy {
+        fertig = true
+    }
+    if fertig && s_dy < s_dh {
+        flush_row()
+    }
+}
+
+fn flush_row() {
+    var x: u64 = 0
+    while x < s_dw {
+        let a: u64 = s_acc + x * 16
+        var n: u64 = *((s_cnt + x * 8) as *mut u64)
+        if n == 0 {
+            n = 1
+        }
+        let r: u64 = ((*((a) as *mut u32)) as u64) / n
+        let g: u64 = ((*((a + 4) as *mut u32)) as u64) / n
+        let b: u64 = ((*((a + 8) as *mut u32)) as u64) / n
+        let al: u64 = ((*((a + 12) as *mut u32)) as u64) / n
+        let o: u64 = s_dst + (s_dy * s_dw + x) * 4
+        __mmio_write8((o) as *mut u8, (r & 255) as u8)
+        __mmio_write8((o + 1) as *mut u8, (g & 255) as u8)
+        __mmio_write8((o + 2) as *mut u8, (b & 255) as u8)
+        __mmio_write8((o + 3) as *mut u8, (al & 255) as u8)
+        x = x + 1
+    }
+    imgmem.zero(s_acc, s_dw * 16)
+    imgmem.zero(s_cnt, s_dw * 8)
+    s_rowsin = 0
+    s_dy = s_dy + 1
+}
+
+// Falls das Bild frueher zu Ende war als angekuendigt: was noch im
+// Sammler steht, kommt heraus, und der Rest wird schwarz.
+fn scale_done() {
+    if s_down != 0 && s_rowsin > 0 && s_dy < s_dh {
+        flush_row()
+    }
+    while s_dy < s_dh {
+        imgmem.zero(s_dst + s_dy * s_dw * 4, s_dw * 4)
+        s_dy = s_dy + 1
+    }
+}
+
+// ------------------------------------------------------------- Drehen
+//
+// `q` ist 1, 2 oder 3 Vierteldrehungen im Uhrzeigersinn. Quelle und
+// Ziel sind zwei verschiedene Puffer -- an Ort und Stelle zu drehen
+// waere bei 90 Grad ein Zyklentanz, und der Speicher dafuer ist da.
+
+fn rotate(src: u64, w: u64, h: u64, dst: u64, q: u64) {
+    if q == 2 {
+        var y: u64 = 0
+        while y < h {
+            var x: u64 = 0
+            while x < w {
+                __mmio_write32((dst + ((h - 1 - y) * w + (w - 1 - x)) * 4)
+                    as *mut u32,
+                    (*((src + (y * w + x) * 4) as *mut u32)) as u32)
+                x = x + 1
+            }
+            y = y + 1
+        }
+        return
+    }
+    var y: u64 = 0
+    while y < h {
+        var x: u64 = 0
+        while x < w {
+            let v: u32 = (*((src + (y * w + x) * 4) as *mut u32)) as u32
+            var dx: u64 = 0
+            var dy: u64 = 0
+            if q == 1 {
+                dx = h - 1 - y
+                dy = x
+            } else {
+                dx = y
+                dy = w - 1 - x
+            }
+            __mmio_write32((dst + (dy * h + dx) * 4) as *mut u32, v)
+            x = x + 1
+        }
+        y = y + 1
+    }
+}
+
+fn flipx(src: u64, w: u64, h: u64, dst: u64) {
+    var y: u64 = 0
+    while y < h {
+        var x: u64 = 0
+        while x < w {
+            __mmio_write32((dst + (y * w + (w - 1 - x)) * 4) as *mut u32,
+                (*((src + (y * w + x) * 4) as *mut u32)) as u32)
+            x = x + 1
+        }
+        y = y + 1
+    }
+}
+
+fn flipy(src: u64, w: u64, h: u64, dst: u64) {
+    var y: u64 = 0
+    while y < h {
+        imgmem.copy(dst + (h - 1 - y) * w * 4, src + y * w * 4, w * 4)
+        y = y + 1
+    }
+}
+
+fn crop(src: u64, w: u64, h: u64, x0: u64, y0: u64, cw: u64, ch: u64,
+    dst: u64) -> bool {
+    if x0 + cw > w || y0 + ch > h || cw == 0 || ch == 0 {
+        return false
+    }
+    var y: u64 = 0
+    while y < ch {
+        imgmem.copy(dst + y * cw * 4, src + ((y0 + y) * w + x0) * 4,
+            cw * 4)
+        y = y + 1
+    }
+    return true
+}
+
+// ------------------------------------------------------------- EXIF
+//
+// Die acht Werte des Tags 0x0112, uebersetzt in "so viele
+// Vierteldrehungen" und "vorher spiegeln". Ohne das steht jedes zweite
+// Handyfoto quer -- und zwar genau die, die im Hochformat aufgenommen
+// wurden.
+//
+//   1 normal          2 waagerecht gespiegelt
+//   3 180 Grad        4 senkrecht gespiegelt
+//   5 gespiegelt+90   6 90 Grad im Uhrzeigersinn
+//   7 gespiegelt+270  8 270 Grad im Uhrzeigersinn
+
+fn orient_to_rot(o: u64) -> u64 {
+    if o == 3 || o == 4 {
+        return 2
+    }
+    if o == 5 || o == 6 {
+        return 1
+    }
+    if o == 7 || o == 8 {
+        return 3
+    }
+    return 0
+}
+
+fn orient_flips(o: u64) -> u64 {
+    if o == 2 || o == 4 || o == 5 || o == 7 {
+        return 1
+    }
+    return 0
+}

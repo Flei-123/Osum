@@ -1,0 +1,957 @@
+// SPDX-License-Identifier: MIT
+// kernel/user/imgpng.fi -- Runde VIEWER: PNG lesen und schreiben.
+//
+// PNG IST DAS FORMAT, IN DEM EIN BILDSCHIRMFOTO, EIN SYMBOL UND EIN
+// LOGO ANKOMMEN -- verlustfrei, mit Alpha, und deshalb auch das Format,
+// in dem dieser Betrachter speichert.
+//
+// DREI TEILE, UND ZWEI DAVON GAB ES SCHON:
+//
+//   1. DEFLATE. `kernel/user/flate.fi` (Runde K11) packt und packt aus,
+//      in Firn, ohne zlib. Diese Runde hat es NICHT noch einmal
+//      geschrieben -- sie hat nachgesehen, ob es da ist, und es
+//      benutzt. Das ist der Grund, warum PNG hier zwei Tage und nicht
+//      zwei Wochen gekostet hat.
+//   2. CRC-32. Kommt aus demselben Modul.
+//   3. Was hier dazukommt: die Bloecke (IHDR, PLTE, tRNS, IDAT, IEND),
+//      die ZEILENFILTER und ihre Umkehrung, die Farbarten und die
+//      Bittiefen.
+//
+// DER ZEILENFILTER IST DER TEIL, DEN MAN VERGISST. Jeder Zeile geht ein
+// Oktett voraus, das sagt, wie sie aus der Zeile darueber und dem
+// Bildpunkt links vorhergesagt wurde. Wer es ueberliest, bekommt
+// Rauschen; wer beim Schreiben immer 0 hinschreibt, bekommt eine Datei,
+// die dreimal zu gross ist. Hier sind alle fuenf drin, in beide
+// Richtungen, und der Schreiber waehlt je Zeile nach der
+// Standardheuristik der Spezifikation (kleinste Summe der Betraege).
+//
+// ============================================ DIE EINE EHRLICHE GRENZE
+//
+// Anders als der JPEG-Dekodierer arbeitet dieser NICHT streng
+// zeilenweise: `flate.inflate` packt einen Strom AM STUECK aus, und
+// dieser Kernel hat kein fortsetzbares Inflate. Also braucht ein PNG
+// waehrend des Dekodierens Platz fuer den ausgepackten Rohstrom --
+// (Breite * Kanaele + 1) * Hoehe Oktette. Das ist die Grenze, sie steht
+// in docs/IMAGES.md, und `begin` sagt `R_MEMORY` mit der fehlenden Zahl,
+// statt es zu versuchen und den Prozess umzubringen.
+//
+// Verschraenkte Bilder (Adam7) brauchen zusaetzlich das fertige Bild im
+// Speicher, weil die sieben Durchgaenge die Zeilen nicht der Reihe nach
+// liefern. Auch das ist eine Zahl und keine Ausrede.
+
+profile kernel
+
+import imgmem
+import flate
+
+export {
+    begin, next_row, width, height, reason, partial, has_alpha,
+    bitdepth, colortype, interlaced, probe, raw_bytes,
+    write_png, png_need,
+    P_OK, P_NOT_PNG, P_TRUNCATED, P_MEMORY, P_FORMAT, P_HUGE, P_STREAM
+}
+
+const P_OK: u64 = 0
+const P_NOT_PNG: u64 = 1
+const P_TRUNCATED: u64 = 2
+const P_MEMORY: u64 = 3
+const P_FORMAT: u64 = 4
+const P_HUGE: u64 = 5
+const P_STREAM: u64 = 6
+
+const MAXDIM: u64 = 65535
+const MAXPIX: u64 = 100000000
+
+static mut src: u64 = 0
+static mut srcn: u64 = 0
+static mut pw: u64 = 0
+static mut ph: u64 = 0
+static mut pdepth: u64 = 8
+static mut pct: u64 = 0
+static mut pil: u64 = 0
+static mut pchan: u64 = 1
+static mut pbpp: u64 = 1 // Oktette je Bildpunkt fuer den Filter
+static mut pstride: u64 = 0
+static mut preason: u64 = P_OK
+static mut ppartial: u64 = 0
+static mut palpha: u64 = 0
+static mut praw: u64 = 0 // ausgepackter Rohstrom
+static mut prawn: u64 = 0
+static mut pgot: u64 = 0 // wie viele Oktette wirklich ankamen
+static mut pprev: u64 = 0 // vorige entfilterte Zeile
+static mut pcur: u64 = 0
+static mut prow: u64 = 0 // naechste Zeile
+static mut ppal: u64 = 0 // 256 * 4 (RGBA)
+static mut phavepal: u64 = 0
+static mut ptrns_g: u64 = 0xFFFF
+static mut ptrns_r: u64 = 0xFFFF
+static mut ptrns_gg: u64 = 0xFFFF
+static mut ptrns_b: u64 = 0xFFFF
+static mut pfull: u64 = 0 // bei Adam7: das ganze Bild
+
+fn ld8(p: u64) -> u64 {
+    return (*((p) as *mut u8)) as u64
+}
+
+fn be32(p: u64) -> u64 {
+    return (ld8(p) << 24) | (ld8(p + 1) << 16) | (ld8(p + 2) << 8)
+        | ld8(p + 3)
+}
+
+fn width() -> u64 {
+    return pw
+}
+
+fn height() -> u64 {
+    return ph
+}
+
+fn reason() -> u64 {
+    return preason
+}
+
+fn partial() -> u64 {
+    return ppartial
+}
+
+fn has_alpha() -> u64 {
+    return palpha
+}
+
+fn bitdepth() -> u64 {
+    return pdepth
+}
+
+fn colortype() -> u64 {
+    return pct
+}
+
+fn interlaced() -> u64 {
+    return pil
+}
+
+fn raw_bytes() -> u64 {
+    return prawn
+}
+
+// Die Kopfdaten allein, ohne etwas anzufassen. Damit kann eine
+// Anwendung entscheiden, ob sie das Bild ueberhaupt versuchen will.
+fn probe(p: u64, n: u64, out: u64) -> bool {
+    if n < 33 {
+        return false
+    }
+    if ld8(p) != 137 || ld8(p + 1) != 80 || ld8(p + 2) != 78
+    || ld8(p + 3) != 71 {
+        return false
+    }
+    if ld8(p + 12) != 73 || ld8(p + 13) != 72 || ld8(p + 14) != 68
+    || ld8(p + 15) != 82 {
+        return false
+    }
+    __mmio_write64((out) as *mut u64, be32(p + 16))
+    __mmio_write64((out + 8) as *mut u64, be32(p + 20))
+    return true
+}
+
+fn chan_of(ct: u64) -> u64 {
+    if ct == 0 {
+        return 1
+    }
+    if ct == 2 {
+        return 3
+    }
+    if ct == 3 {
+        return 1
+    }
+    if ct == 4 {
+        return 2
+    }
+    if ct == 6 {
+        return 4
+    }
+    return 0
+}
+
+// Wieviel Speicher dieses Bild brauchen wird. Vor dem ersten Oktett.
+fn png_need(w: u64, h: u64, ct: u64, depth: u64, il: u64) -> u64 {
+    let ch: u64 = chan_of(ct)
+    let stride: u64 = (w * ch * depth + 7) / 8
+    var n: u64 = (stride + 1) * h + 2 * (stride + 8)
+    if il != 0 {
+        n = n + w * h * 4
+    }
+    return n
+}
+
+// ------------------------------------------------------------ Lesen
+
+fn begin(p: u64, n: u64) -> bool {
+    src = p
+    srcn = n
+    preason = P_NOT_PNG
+    ppartial = 0
+    palpha = 0
+    phavepal = 0
+    ptrns_g = 0xFFFF
+    ptrns_r = 0xFFFF
+    ptrns_gg = 0xFFFF
+    ptrns_b = 0xFFFF
+    prow = 0
+    pfull = 0
+    if n < 45 {
+        return false
+    }
+    if ld8(p) != 137 || ld8(p + 1) != 80 || ld8(p + 2) != 78
+    || ld8(p + 3) != 71 || ld8(p + 4) != 13 || ld8(p + 5) != 10
+    || ld8(p + 6) != 26 || ld8(p + 7) != 10 {
+        return false
+    }
+    // ------------------------------------------------- die Bloecke zaehlen
+    var at: u64 = 8
+    var idat_total: u64 = 0
+    var have_ihdr: bool = false
+    while at + 8 <= n {
+        let len: u64 = be32(at)
+        let typ: u64 = be32(at + 4)
+        if len > n {
+            preason = P_TRUNCATED
+            return false
+        }
+        if at + 12 + len > n {
+            // Der letzte Block ist abgeschnitten. Was davor steht,
+            // bleibt gueltig -- IDAT wird mitgenommen, soweit es da ist.
+            if typ == 0x49444154 {
+                idat_total = idat_total + (n - (at + 8))
+                ppartial = 1
+            }
+            break
+        }
+        if typ == 0x49484452 {
+            if len < 13 {
+                preason = P_TRUNCATED
+                return false
+            }
+            pw = be32(at + 8)
+            ph = be32(at + 12)
+            pdepth = ld8(at + 16)
+            pct = ld8(at + 17)
+            pil = ld8(at + 20)
+            if ld8(at + 18) != 0 || ld8(at + 19) != 0 {
+                preason = P_FORMAT
+                return false
+            }
+            have_ihdr = true
+        } else if typ == 0x49444154 {
+            idat_total = idat_total + len
+        } else if typ == 0x49454E44 {
+            at = at + 12 + len
+            break
+        }
+        at = at + 12 + len
+    }
+    if !have_ihdr {
+        preason = P_TRUNCATED
+        return false
+    }
+    if pw == 0 || ph == 0 || pw > MAXDIM || ph > MAXDIM {
+        preason = P_FORMAT
+        return false
+    }
+    if pw * ph > MAXPIX {
+        preason = P_HUGE
+        return false
+    }
+    pchan = chan_of(pct)
+    if pchan == 0 {
+        preason = P_FORMAT
+        return false
+    }
+    if pdepth != 1 && pdepth != 2 && pdepth != 4 && pdepth != 8
+    && pdepth != 16 {
+        preason = P_FORMAT
+        return false
+    }
+    if pct == 3 && pdepth == 16 {
+        preason = P_FORMAT
+        return false
+    }
+    if (pct == 2 || pct == 4 || pct == 6) && pdepth != 8 && pdepth != 16 {
+        preason = P_FORMAT
+        return false
+    }
+    if pil > 1 {
+        preason = P_FORMAT
+        return false
+    }
+    if pct == 4 || pct == 6 {
+        palpha = 1
+    }
+    pbpp = (pchan * pdepth + 7) / 8
+    if pbpp == 0 {
+        pbpp = 1
+    }
+    pstride = (pw * pchan * pdepth + 7) / 8
+    if idat_total == 0 {
+        preason = P_TRUNCATED
+        return false
+    }
+    // ------------------------------------------------------ Speicher
+    prawn = (pstride + 1) * ph
+    if pil != 0 {
+        prawn = adam7_raw()
+    }
+    let idat: u64 = imgmem.take(idat_total)
+    if idat == 0 {
+        preason = P_MEMORY
+        return false
+    }
+    praw = imgmem.take(prawn + 8)
+    if praw == 0 {
+        preason = P_MEMORY
+        return false
+    }
+    pprev = imgmem.take(pstride + 8)
+    pcur = imgmem.take(pstride + 8)
+    ppal = imgmem.take(1024)
+    if pprev == 0 || pcur == 0 || ppal == 0 {
+        preason = P_MEMORY
+        return false
+    }
+    imgmem.zero(pprev, pstride + 8)
+    imgmem.zero(ppal, 1024)
+    var i: u64 = 0
+    while i < 256 {
+        __mmio_write8((ppal + i * 4 + 3) as *mut u8, 255 as u8)
+        i = i + 1
+    }
+    // ------------------------------------------- die Bloecke einsammeln
+    at = 8
+    var got: u64 = 0
+    while at + 8 <= n {
+        let len: u64 = be32(at)
+        let typ: u64 = be32(at + 4)
+        var have: u64 = len
+        if at + 12 + len > n {
+            if at + 8 >= n {
+                break
+            }
+            have = n - (at + 8)
+        }
+        if typ == 0x504C5445 {
+            var k: u64 = 0
+            while k * 3 + 2 < have && k < 256 {
+                __mmio_write8((ppal + k * 4) as *mut u8,
+                    ld8(at + 8 + k * 3) as u8)
+                __mmio_write8((ppal + k * 4 + 1) as *mut u8,
+                    ld8(at + 8 + k * 3 + 1) as u8)
+                __mmio_write8((ppal + k * 4 + 2) as *mut u8,
+                    ld8(at + 8 + k * 3 + 2) as u8)
+                k = k + 1
+            }
+            phavepal = 1
+        } else if typ == 0x74524E53 {
+            if pct == 3 {
+                var k: u64 = 0
+                while k < have && k < 256 {
+                    __mmio_write8((ppal + k * 4 + 3) as *mut u8,
+                        ld8(at + 8 + k) as u8)
+                    k = k + 1
+                }
+                palpha = 1
+            } else if pct == 0 && have >= 2 {
+                ptrns_g = (ld8(at + 8) << 8) | ld8(at + 9)
+                palpha = 1
+            } else if pct == 2 && have >= 6 {
+                ptrns_r = (ld8(at + 8) << 8) | ld8(at + 9)
+                ptrns_gg = (ld8(at + 10) << 8) | ld8(at + 11)
+                ptrns_b = (ld8(at + 12) << 8) | ld8(at + 13)
+                palpha = 1
+            }
+        } else if typ == 0x49444154 {
+            imgmem.copy(idat + got, at + 8, have)
+            got = got + have
+        }
+        if at + 12 + len > n {
+            break
+        }
+        at = at + 12 + len
+    }
+    if pct == 3 && phavepal == 0 {
+        preason = P_FORMAT
+        return false
+    }
+    // ---------------------------------------------------- auspacken
+    //
+    // Der zlib-Rahmen: zwei Oktette Kopf, dann deflate, dann Adler-32.
+    if got < 3 {
+        preason = P_TRUNCATED
+        return false
+    }
+    let cmf: u64 = ld8(idat)
+    if (cmf & 15) != 8 {
+        preason = P_FORMAT
+        return false
+    }
+    let flg: u64 = ld8(idat + 1)
+    if (flg & 32) != 0 {
+        // FDICT: ein Vorgabewoerterbuch. Kommt in PNG nicht vor und
+        // wird hier nicht erfunden.
+        preason = P_FORMAT
+        return false
+    }
+    var used: [u64; 1] = [0 as u64; 1]
+    let r: u64 = flate.inflate(idat + 2, got - 2, praw, prawn,
+        (&used[0 as usize]) as u64)
+    pgot = used[(0) as usize]
+    if r != flate.E_OK {
+        // Abgeschnitten oder kaputt: was ausgepackt ist, wird gezeigt.
+        // Der Betrachter schreibt "unvollstaendig" darueber.
+        ppartial = 1
+        if pgot < pstride + 1 {
+            preason = P_TRUNCATED
+            return false
+        }
+    }
+    if pil != 0 {
+        if !adam7_expand() {
+            return false
+        }
+    }
+    preason = P_OK
+    return true
+}
+
+// -------------------------------------------------------- Entfiltern
+
+fn paeth(a: u64, b: u64, c: u64) -> u64 {
+    let p: i64 = (a as i64) + (b as i64) - (c as i64)
+    var pa: i64 = p - (a as i64)
+    var pb: i64 = p - (b as i64)
+    var pc: i64 = p - (c as i64)
+    if pa < 0 {
+        pa = 0 - pa
+    }
+    if pb < 0 {
+        pb = 0 - pb
+    }
+    if pc < 0 {
+        pc = 0 - pc
+    }
+    if pa <= pb && pa <= pc {
+        return a
+    }
+    if pb <= pc {
+        return b
+    }
+    return c
+}
+
+// Eine Rohzeile entfiltern: `rawline` zeigt auf das Filteroktett.
+fn unfilter(rawline: u64, out: u64, prev: u64, stride: u64, bpp: u64)
+-> bool {
+    let f: u64 = ld8(rawline)
+    let d: u64 = rawline + 1
+    if f > 4 {
+        return false
+    }
+    var i: u64 = 0
+    while i < stride {
+        let x: u64 = ld8(d + i)
+        var a: u64 = 0
+        var b: u64 = 0
+        var c: u64 = 0
+        if i >= bpp {
+            a = ld8(out + i - bpp)
+            c = ld8(prev + i - bpp)
+        }
+        b = ld8(prev + i)
+        var v: u64 = x
+        if f == 1 {
+            v = x + a
+        } else if f == 2 {
+            v = x + b
+        } else if f == 3 {
+            v = x + (a + b) / 2
+        } else if f == 4 {
+            v = x + paeth(a, b, c)
+        }
+        __mmio_write8((out + i) as *mut u8, (v & 255) as u8)
+        i = i + 1
+    }
+    return true
+}
+
+// Aus einer entfilterten Zeile RGBA machen.
+fn expand(line: u64, dst: u64, w: u64) {
+    var x: u64 = 0
+    while x < w {
+        var r: u64 = 0
+        var g: u64 = 0
+        var b: u64 = 0
+        var a: u64 = 255
+        if pct == 3 {
+            let idx: u64 = bits_at(line, x, pdepth)
+            r = ld8(ppal + idx * 4)
+            g = ld8(ppal + idx * 4 + 1)
+            b = ld8(ppal + idx * 4 + 2)
+            a = ld8(ppal + idx * 4 + 3)
+        } else if pct == 0 {
+            var v: u64 = 0
+            if pdepth == 16 {
+                v = ld8(line + x * 2)
+                if ((ld8(line + x * 2) << 8) | ld8(line + x * 2 + 1))
+                    == ptrns_g {
+                    a = 0
+                }
+            } else if pdepth == 8 {
+                v = ld8(line + x)
+                if v == ptrns_g {
+                    a = 0
+                }
+            } else {
+                let raw: u64 = bits_at(line, x, pdepth)
+                if raw == ptrns_g {
+                    a = 0
+                }
+                v = scale_bits(raw, pdepth)
+            }
+            r = v
+            g = v
+            b = v
+        } else if pct == 2 {
+            if pdepth == 16 {
+                r = ld8(line + x * 6)
+                g = ld8(line + x * 6 + 2)
+                b = ld8(line + x * 6 + 4)
+                let r16: u64 = (ld8(line + x * 6) << 8)
+                    | ld8(line + x * 6 + 1)
+                let g16: u64 = (ld8(line + x * 6 + 2) << 8)
+                    | ld8(line + x * 6 + 3)
+                let b16: u64 = (ld8(line + x * 6 + 4) << 8)
+                    | ld8(line + x * 6 + 5)
+                if r16 == ptrns_r && g16 == ptrns_gg && b16 == ptrns_b {
+                    a = 0
+                }
+            } else {
+                r = ld8(line + x * 3)
+                g = ld8(line + x * 3 + 1)
+                b = ld8(line + x * 3 + 2)
+                if r == ptrns_r && g == ptrns_gg && b == ptrns_b {
+                    a = 0
+                }
+            }
+        } else if pct == 4 {
+            if pdepth == 16 {
+                r = ld8(line + x * 4)
+                a = ld8(line + x * 4 + 2)
+            } else {
+                r = ld8(line + x * 2)
+                a = ld8(line + x * 2 + 1)
+            }
+            g = r
+            b = r
+        } else {
+            if pdepth == 16 {
+                r = ld8(line + x * 8)
+                g = ld8(line + x * 8 + 2)
+                b = ld8(line + x * 8 + 4)
+                a = ld8(line + x * 8 + 6)
+            } else {
+                r = ld8(line + x * 4)
+                g = ld8(line + x * 4 + 1)
+                b = ld8(line + x * 4 + 2)
+                a = ld8(line + x * 4 + 3)
+            }
+        }
+        __mmio_write8((dst + x * 4) as *mut u8, r as u8)
+        __mmio_write8((dst + x * 4 + 1) as *mut u8, g as u8)
+        __mmio_write8((dst + x * 4 + 2) as *mut u8, b as u8)
+        __mmio_write8((dst + x * 4 + 3) as *mut u8, a as u8)
+        x = x + 1
+    }
+}
+
+// Der `i`-te Wert einer Zeile mit `d` Bit je Wert.
+fn bits_at(line: u64, i: u64, d: u64) -> u64 {
+    if d == 8 {
+        return ld8(line + i)
+    }
+    if d == 16 {
+        return ld8(line + i * 2)
+    }
+    let per: u64 = 8 / d
+    let by: u64 = ld8(line + i / per)
+    let shift: u64 = 8 - d - (i % per) * d
+    return (by >> shift) & ((1 << d) - 1)
+}
+
+// Ein Graustufenwert mit weniger als acht Bit auf acht Bit bringen --
+// durch WIEDERHOLUNG, so wie die Spezifikation es sagt: aus 1 wird 255
+// und nicht 128.
+fn scale_bits(v: u64, d: u64) -> u64 {
+    if d == 1 {
+        return v * 255
+    }
+    if d == 2 {
+        return v * 85
+    }
+    if d == 4 {
+        return v * 17
+    }
+    return v
+}
+
+fn next_row(dst: u64) -> bool {
+    if prow >= ph {
+        return false
+    }
+    if pil != 0 {
+        imgmem.copy(dst, pfull + prow * pw * 4, pw * 4)
+        prow = prow + 1
+        return true
+    }
+    let off: u64 = prow * (pstride + 1)
+    if off + pstride + 1 > pgot {
+        // Der Strom ist hier zu Ende. Der Rest bleibt leer, und
+        // `partial` sagt es.
+        ppartial = 1
+        imgmem.zero(dst, pw * 4)
+        prow = prow + 1
+        return true
+    }
+    if !unfilter(praw + off, pcur, pprev, pstride, pbpp) {
+        ppartial = 1
+        imgmem.zero(dst, pw * 4)
+        prow = prow + 1
+        return true
+    }
+    expand(pcur, dst, pw)
+    let t: u64 = pprev
+    pprev = pcur
+    pcur = t
+    prow = prow + 1
+    return true
+}
+
+// ---------------------------------------------------------- Adam7
+//
+// Sieben Durchgaenge ueber dasselbe Bild, jeder mit eigenem Raster und
+// eigenen Filterzeilen. Der Grund, warum das hier ein eigener Weg ist:
+// die Zeilen kommen NICHT der Reihe nach, also gibt es sie erst, wenn
+// alle sieben durch sind.
+
+fn a7_xo(p: u64) -> u64 {
+    var v: [u64; 7] = [0 as u64, 4, 0, 2, 0, 1, 0]
+    return v[(p) as usize]
+}
+
+fn a7_yo(p: u64) -> u64 {
+    var v: [u64; 7] = [0 as u64, 0, 4, 0, 2, 0, 1]
+    return v[(p) as usize]
+}
+
+fn a7_xs(p: u64) -> u64 {
+    var v: [u64; 7] = [8 as u64, 8, 4, 4, 2, 2, 1]
+    return v[(p) as usize]
+}
+
+fn a7_ys(p: u64) -> u64 {
+    var v: [u64; 7] = [8 as u64, 8, 8, 4, 4, 2, 2]
+    return v[(p) as usize]
+}
+
+fn a7_w(p: u64) -> u64 {
+    let xo: u64 = a7_xo(p)
+    let xs: u64 = a7_xs(p)
+    if pw <= xo {
+        return 0
+    }
+    return (pw - xo + xs - 1) / xs
+}
+
+fn a7_h(p: u64) -> u64 {
+    let yo: u64 = a7_yo(p)
+    let ys: u64 = a7_ys(p)
+    if ph <= yo {
+        return 0
+    }
+    return (ph - yo + ys - 1) / ys
+}
+
+fn adam7_raw() -> u64 {
+    var total: u64 = 0
+    var p: u64 = 0
+    while p < 7 {
+        let w: u64 = a7_w(p)
+        let h: u64 = a7_h(p)
+        if w > 0 && h > 0 {
+            let st: u64 = (w * pchan * pdepth + 7) / 8
+            total = total + (st + 1) * h
+        }
+        p = p + 1
+    }
+    return total
+}
+
+fn adam7_expand() -> bool {
+    pfull = imgmem.take(pw * ph * 4)
+    if pfull == 0 {
+        preason = P_MEMORY
+        return false
+    }
+    imgmem.zero(pfull, pw * ph * 4)
+    let line: u64 = imgmem.take(pw * 4 + 8)
+    if line == 0 {
+        preason = P_MEMORY
+        return false
+    }
+    var at: u64 = 0
+    var p: u64 = 0
+    while p < 7 {
+        let w: u64 = a7_w(p)
+        let h: u64 = a7_h(p)
+        if w > 0 && h > 0 {
+            let st: u64 = (w * pchan * pdepth + 7) / 8
+            imgmem.zero(pprev, st + 8)
+            var y: u64 = 0
+            while y < h {
+                if at + st + 1 > pgot {
+                    ppartial = 1
+                    return true
+                }
+                if !unfilter(praw + at, pcur, pprev, st, pbpp) {
+                    ppartial = 1
+                    return true
+                }
+                expand(pcur, line, w)
+                let dy: u64 = a7_yo(p) + y * a7_ys(p)
+                var x: u64 = 0
+                while x < w {
+                    let dx: u64 = a7_xo(p) + x * a7_xs(p)
+                    if dx < pw && dy < ph {
+                        imgmem.copy(pfull + (dy * pw + dx) * 4,
+                            line + x * 4, 4)
+                    }
+                    x = x + 1
+                }
+                let t: u64 = pprev
+                pprev = pcur
+                pcur = t
+                at = at + st + 1
+                y = y + 1
+            }
+        }
+        p = p + 1
+    }
+    return true
+}
+
+// ============================================================ Schreiben
+//
+// Acht Bit, RGB oder RGBA, nicht verschraenkt. Mehr braucht ein
+// Betrachter, der ein bearbeitetes Bild sichert, nicht -- und weniger
+// waere gelogen, weil ein PNG ohne Alpha aus einem Bild mit Alpha ein
+// anderes Bild ist.
+//
+// `pix` sind w*h*4 Oktette RGBA. `alpha` = false schreibt RGB.
+
+static mut adler_a: u64 = 1
+static mut adler_b: u64 = 0
+
+fn adler_reset() {
+    adler_a = 1
+    adler_b = 0
+}
+
+fn adler_add(p: u64, n: u64) {
+    var i: u64 = 0
+    while i < n {
+        adler_a = (adler_a + ld8(p + i)) % 65521
+        adler_b = (adler_b + adler_a) % 65521
+        i = i + 1
+    }
+}
+
+fn put32(p: u64, v: u64) {
+    __mmio_write8((p) as *mut u8, ((v >> 24) & 255) as u8)
+    __mmio_write8((p + 1) as *mut u8, ((v >> 16) & 255) as u8)
+    __mmio_write8((p + 2) as *mut u8, ((v >> 8) & 255) as u8)
+    __mmio_write8((p + 3) as *mut u8, (v & 255) as u8)
+}
+
+fn chunk(out: u64, at: u64, typ: u64, data: u64, len: u64) -> u64 {
+    put32(out + at, len)
+    put32(out + at + 4, typ)
+    if len > 0 {
+        imgmem.copy(out + at + 8, data, len)
+    }
+    let crc: u64 = flate.crc32(out + at + 4, len + 4)
+    put32(out + at + 8 + len, crc)
+    return at + 12 + len
+}
+
+// Der Filter je Zeile, nach der Heuristik der Spezifikation: die Zeile
+// wird mit allen fuenf gefiltert, und genommen wird die mit der
+// kleinsten Summe der Betraege. Das ist, was libpng tut.
+fn filter_row(cur: u64, prev: u64, out: u64, stride: u64, bpp: u64)
+-> u64 {
+    var best: u64 = 0
+    var bestsum: u64 = 0xFFFFFFFFFFFFFFFF
+    var f: u64 = 0
+    while f < 5 {
+        var sum: u64 = 0
+        var i: u64 = 0
+        while i < stride {
+            let x: u64 = ld8(cur + i)
+            var a: u64 = 0
+            var c: u64 = 0
+            if i >= bpp {
+                a = ld8(cur + i - bpp)
+                c = ld8(prev + i - bpp)
+            }
+            let b: u64 = ld8(prev + i)
+            var v: u64 = x
+            if f == 1 {
+                v = (x + 256 - a) & 255
+            } else if f == 2 {
+                v = (x + 256 - b) & 255
+            } else if f == 3 {
+                v = (x + 256 - (a + b) / 2) & 255
+            } else if f == 4 {
+                v = (x + 256 - paeth(a, b, c)) & 255
+            }
+            var s: u64 = v
+            if s > 127 {
+                s = 256 - s
+            }
+            sum = sum + s
+            i = i + 1
+        }
+        if sum < bestsum {
+            bestsum = sum
+            best = f
+        }
+        f = f + 1
+    }
+    // Noch einmal, aber diesmal geschrieben.
+    __mmio_write8((out) as *mut u8, best as u8)
+    var i: u64 = 0
+    while i < stride {
+        let x: u64 = ld8(cur + i)
+        var a: u64 = 0
+        var c: u64 = 0
+        if i >= bpp {
+            a = ld8(cur + i - bpp)
+            c = ld8(prev + i - bpp)
+        }
+        let b: u64 = ld8(prev + i)
+        var v: u64 = x
+        if best == 1 {
+            v = (x + 256 - a) & 255
+        } else if best == 2 {
+            v = (x + 256 - b) & 255
+        } else if best == 3 {
+            v = (x + 256 - (a + b) / 2) & 255
+        } else if best == 4 {
+            v = (x + 256 - paeth(a, b, c)) & 255
+        }
+        __mmio_write8((out + 1 + i) as *mut u8, (v & 255) as u8)
+        i = i + 1
+    }
+    return best
+}
+
+// Gibt die Laenge der Datei zurueck, 0 bei zu wenig Platz.
+fn write_png(pix: u64, w: u64, h: u64, alpha: bool, out: u64,
+    cap: u64) -> u64 {
+    let ch: u64 = if_ch(alpha)
+    let stride: u64 = w * ch
+    let rawn: u64 = (stride + 1) * h
+    let raw: u64 = imgmem.take(rawn)
+    let prevl: u64 = imgmem.take(stride + 8)
+    let curl: u64 = imgmem.take(stride + 8)
+    if raw == 0 || prevl == 0 || curl == 0 {
+        return 0
+    }
+    imgmem.zero(prevl, stride + 8)
+    var y: u64 = 0
+    while y < h {
+        var x: u64 = 0
+        while x < w {
+            __mmio_write8((curl + x * ch) as *mut u8,
+                ld8(pix + (y * w + x) * 4) as u8)
+            __mmio_write8((curl + x * ch + 1) as *mut u8,
+                ld8(pix + (y * w + x) * 4 + 1) as u8)
+            __mmio_write8((curl + x * ch + 2) as *mut u8,
+                ld8(pix + (y * w + x) * 4 + 2) as u8)
+            if ch == 4 {
+                __mmio_write8((curl + x * ch + 3) as *mut u8,
+                    ld8(pix + (y * w + x) * 4 + 3) as u8)
+            }
+            x = x + 1
+        }
+        let f: u64 = filter_row(curl, prevl, raw + y * (stride + 1),
+            stride, ch)
+        imgmem.copy(prevl, curl, stride)
+        y = y + 1
+    }
+    // Der zlib-Rahmen um deflate.
+    let zcap: u64 = rawn + rawn / 8 + 4096
+    let zbuf: u64 = imgmem.take(zcap)
+    if zbuf == 0 {
+        return 0
+    }
+    var used: [u64; 1] = [0 as u64; 1]
+    var r: u64 = flate.deflate(raw, rawn, zbuf + 2, zcap - 8,
+        (&used[0 as usize]) as u64)
+    if r != flate.E_OK {
+        r = flate.store(raw, rawn, zbuf + 2, zcap - 8,
+            (&used[0 as usize]) as u64)
+        if r != flate.E_OK {
+            return 0
+        }
+    }
+    let zn: u64 = used[(0) as usize]
+    __mmio_write8((zbuf) as *mut u8, 120 as u8) // CMF: deflate, 32 KiB
+    __mmio_write8((zbuf + 1) as *mut u8, 1 as u8) // FLG
+    adler_reset()
+    adler_add(raw, rawn)
+    put32(zbuf + 2 + zn, (adler_b << 16) | adler_a)
+    let zlen: u64 = zn + 6
+    // ------------------------------------------------------ die Datei
+    if cap < 8 + 25 + 12 + zlen + 12 {
+        return 0
+    }
+    __mmio_write8((out) as *mut u8, 137 as u8)
+    __mmio_write8((out + 1) as *mut u8, 80 as u8)
+    __mmio_write8((out + 2) as *mut u8, 78 as u8)
+    __mmio_write8((out + 3) as *mut u8, 71 as u8)
+    __mmio_write8((out + 4) as *mut u8, 13 as u8)
+    __mmio_write8((out + 5) as *mut u8, 10 as u8)
+    __mmio_write8((out + 6) as *mut u8, 26 as u8)
+    __mmio_write8((out + 7) as *mut u8, 10 as u8)
+    var hdr: [u8; 16] = [0 as u8; 16]
+    let hp: u64 = (&hdr[0 as usize]) as u64
+    put32(hp, w)
+    put32(hp + 4, h)
+    __mmio_write8((hp + 8) as *mut u8, 8 as u8)
+    var ct: u64 = 2
+    if ch == 4 {
+        ct = 6
+    }
+    __mmio_write8((hp + 9) as *mut u8, ct as u8)
+    __mmio_write8((hp + 10) as *mut u8, 0 as u8)
+    __mmio_write8((hp + 11) as *mut u8, 0 as u8)
+    __mmio_write8((hp + 12) as *mut u8, 0 as u8)
+    var at: u64 = chunk(out, 8, 0x49484452, hp, 13)
+    at = chunk(out, at, 0x49444154, zbuf, zlen)
+    at = chunk(out, at, 0x49454E44, 0, 0)
+    return at
+}
+
+fn if_ch(alpha: bool) -> u64 {
+    if alpha {
+        return 4
+    }
+    return 3
+}
