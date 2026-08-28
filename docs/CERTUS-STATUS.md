@@ -485,3 +485,39 @@ Abhängigkeitsbaum hat — also **der ganze Browser**, weil
 Das ist in dieser Runde behoben (`cp -a` plus das Auflösen des einen
 Verweises, der aus `lib` herauszeigt); die Bilder unter
 `docs/shots/certus/` sind mit der reparierten Fassung entstanden.
+
+---
+
+## 9. Die Abnahme dieser Runde
+
+`bash tools/certus/run.sh`, gefahren am 28.08.2026 auf einem Wirt mit
+Lastmittel 16 (auf dieser Maschine laufen parallel fremde Abnahmen):
+
+```
+CERTUS: 35 bestanden, 0 gefallen
+```
+
+Die vier Abschnitte:
+
+1. **Bauen** — `/bin/certus` ist eine eigenständige ELF64-Datei mit drei
+   getrennten Segmenten, kein Segment zugleich schreib- und ausführbar,
+   kein einziger undefinierter Name, 94 `syscall`-Befehle, und sie endet
+   unterhalb von `proc.IMAGE_END`.
+2. **Der Adressraum** — die drei Zahlen im Kern, und die Gegenprobe, daß
+   die private Gegend `0x50000000` nicht erreicht.
+3. **Eine echte Seite** — drei Läufe (eine eigene Seite, `example.com`,
+   und die **Gegenprobe mit einer leeren Seite**, die 0 Tinte und 0
+   dunkle Punkte geben MUSS und gibt).
+4. **Das Fenster** — `screendump` von der Grafikkarte, Tinte, dunkle
+   Punkte, Bänder, die **exakten Farbflächen** der Seite (24 000 und
+   8 000) und die Zahl der Bildpunkte, die `WIG_BLIT` wirklich
+   geschoben hat (424 000).
+
+Die Bilder liegen unter `docs/shots/certus/`:
+
+| Datei | was darauf ist |
+|---|---|
+| `erste-seite.png` | die allererste Seite, die Certus auf Osum gemalt hat |
+| `seite.png` | die Leinwand aus dem Abnahmelauf (800 × 530) |
+| `example.png` | `example.com`, aus dem Gast |
+| `fenster.png` | der ganze Bildschirm des Gastes, mit dem Fenster darin |
