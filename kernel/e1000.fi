@@ -106,6 +106,8 @@ const S_TXDROP: u64 = 0x68
 const S_LINK: u64 = 0x70
 const S_DEVID: u64 = 0x78
 const S_MACOK: u64 = 0x80
+const S_LASTICR: u64 = 0x88
+const S_CAUSES: u64 = 0x90
 
 fn sc(u: u64, off: u64) -> u64 {
     return kstate.NETDEV_OFF + UNIT_BASE + u * UNIT_SPAN + off
@@ -122,6 +124,11 @@ const R_CTRL: u64 = 0x0000
 const R_STATUS: u64 = 0x0008
 const R_EERD: u64 = 0x0014
 const R_ICR: u64 = 0x00C0
+const R_ITR: u64 = 0x00C4
+const R_RDTR: u64 = 0x2820
+const R_RADV: u64 = 0x282C
+const R_TIDV: u64 = 0x3820
+const R_TADV: u64 = 0x382C
 const R_IMS: u64 = 0x00D0
 const R_IMC: u64 = 0x00D8
 const R_RCTL: u64 = 0x0100
@@ -171,6 +178,8 @@ const EERD_DONE: u64 = 16 // 1 << 4 on the 82540 and later
 // Interrupt causes this driver asks for: a frame arrived (RXT0), the
 // receive ring is running low (RXDMT0), the receive ring overflowed
 // (RXO), and the link changed (LSC).
+const IM_TXDW: u64 = 1
+const IM_TXQE: u64 = 2
 const IM_LSC: u64 = 4
 const IM_RXDMT0: u64 = 16
 const IM_RXO: u64 = 64
@@ -582,13 +591,37 @@ fn init_on(state: u64, u: u64, use_msix: bool, armed: bool) -> bool {
     // failing to come up at all.
     intx_arm(state, u, i, armed)
     if armed {
-        setreg(state, u, R_IMS, IM_RXT0 | IM_RXDMT0 | IM_RXO | IM_LSC)
+        // EVERY delay register to zero, and the send side in the mask
+        // too. Both because of a MEASUREMENT: with only the receive
+        // causes armed, QEMU raised 16 interrupts for 185 frames and a
+        // ping answered after up to 984 ms -- the network task went to
+        // sleep and nothing woke it until the next frame happened to
+        // come with an interrupt. The transmit completion is the second
+        // thing that always happens when this machine is talking, so it
+        // is what wakes the task.
+        setreg(state, u, R_ITR, 0)
+        setreg(state, u, R_RDTR, 0)
+        setreg(state, u, R_RADV, 0)
+        setreg(state, u, R_TIDV, 0)
+        setreg(state, u, R_TADV, 0)
+        setreg(state, u, R_IMS, IM_RXT0 | IM_RXDMT0 | IM_RXO | IM_LSC
+            | IM_TXDW | IM_TXQE)
     } else {
         setreg(state, u, R_IMC, 0xFFFFFFFF)
     }
     let icr: u64 = reg(state, u, R_ICR)
 
     kstate.set(state, sc(u, S_READY), 1)
+    // THE TAIL, WRITTEN ONCE MORE, and the reason is a measurement.
+    // A frame that reaches the card before the ring exists is not
+    // thrown away by QEMU -- it is put aside and retried ONE SECOND
+    // later (`flush_queue_timer` in hw/net/e1000.c). Everything behind
+    // it waits with it, so a machine that was pinged while it was still
+    // booting answered the first ten requests at once, 935 ms late,
+    // and everything after them in a millisecond. Writing the tail is
+    // what makes QEMU look at that queue again; it costs one register
+    // write and it takes the second away.
+    setreg(state, u, R_RDT, RING_SLOTS - 1)
     read_link(state, u)
     return true
 }
@@ -754,6 +787,8 @@ fn irq_on(state: u64, u: u64) {
     }
     kstate.add(state, sc(u, S_IRQS), 1)
     let cause: u64 = reg(state, u, R_ICR)
+    kstate.set(state, sc(u, S_LASTICR), cause)
+    kstate.add(state, sc(u, S_CAUSES), 1)
     if (cause & IM_LSC) != 0 {
         read_link(state, u)
     }
