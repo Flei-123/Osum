@@ -53,6 +53,7 @@ export {
     T_SGID, T_UMASK, K_BOOT, K_IDLE, K_WORKER, K_USER,
     K_GRIND, KSTACK_FRAMES, K_NETD, T_BIG,
     T_NETV, T_NETOK, NETOK_MAX,
+    S_POLL, T_POLLSEQ, poll_seq, poll_kick, poll_sleep, POLL_FOREVER,
 }
 
 // ------------------------------------------------------ the task record
@@ -211,6 +212,18 @@ const T_NETV: u64 = 448
 const T_NETOK: u64 = 456
 const NETOK_MAX: u64 = 6
 
+// ------------------------------------------- RUNDE POLL: DAS WARTEN
+//
+// Der Stand der Weckfolge (`kstate.POLLSEQ`), den dieser Prozess
+// gesehen hat, BEVOR er seine Deskriptoren durchgesehen hat. Er steht
+// im Datensatz und nicht auf dem Stapel, weil `poll_sleep` ihn unter
+// der Sperre noch einmal vergleichen muss und der Stapel dieser
+// Aufgabe dabei bereits verlassen sein kann.
+//
+// 504 war das letzte freie Wort des 512 Oktette grossen Datensatzes;
+// die Zeile darueber sagte seit Runde NETVIEW, dass es frei ist.
+const T_POLLSEQ: u64 = 504
+
 // The three descriptor slots of round 62. Nothing writes them any more;
 // they stay named so that a reader of a task dump knows what the hole in
 // the middle of the record was.
@@ -237,6 +250,16 @@ const S_NEW: u64 = 6
 // faellt damit von selbst aus der Laufliste, ohne dass der Kern der
 // Auswahl eine Zeile mehr braucht.
 const S_STOP: u64 = 7
+// RUNDE POLL. WARTET AUF EINEN DESKRIPTOR. Kein S_SLEEP, weil ein
+// Schlaefer NUR von der Zeit geweckt wird -- diese Aufgabe soll von
+// einem EREIGNIS geweckt werden (`poll_kick`) und von der Zeit nur
+// dann, wenn der Zeitablauf des Aufrufs erreicht ist. Und kein S_WAIT,
+// weil `wake_pid` mit einer 0 als Kennung alles weckt, was auf
+// irgendein Kind wartet -- ein `poll` waere darunter gewesen.
+const S_POLL: u64 = 8
+// Ein Zeitpunkt, den der Zeitgeber nie erreicht: das ist `timeout < 0`,
+// also "warte, bis wirklich etwas geschieht".
+const POLL_FOREVER: u64 = 0xFFFFFFFFFFFFFFFF
 
 const K_BOOT: u64 = 0
 const K_IDLE: u64 = 1
@@ -992,7 +1015,13 @@ fn on_tick(state: u64) {
     let n: u64 = kstate.get(state, kstate.TASKS)
     var i: u64 = 0
     while i < n {
-        if tget(state, i, T_STATE) == S_SLEEP && tget(state, i, T_WAKE) <= now {
+        // RUNDE POLL: S_POLL faellt hier mit hinein. Ein `poll` mit
+        // Zeitablauf traegt seine Frist in dasselbe Feld ein wie ein
+        // Schlaefer, und damit misst der Zeitgeber sie ohne eine Zeile
+        // mehr. Ein `poll` OHNE Zeitablauf traegt POLL_FOREVER ein und
+        // kommt hier nie vorbei.
+        let ts: u64 = tget(state, i, T_STATE)
+        if (ts == S_SLEEP || ts == S_POLL) && tget(state, i, T_WAKE) <= now {
             tset(state, i, T_STATE, S_READY)
         }
         i = i + 1
@@ -1043,6 +1072,73 @@ fn wake_pid(state: u64, pid: u64) {
         }
         i = i + 1
     }
+}
+
+// ------------------------------------------------- RUNDE POLL: WECKEN
+//
+// DREI FUNKTIONEN, UND ZUSAMMEN SIND SIE DIE ANTWORT AUF DIE
+// WETTLAUFSITUATION, an der jede erste Fassung von `poll` scheitert:
+//
+//     Prozess A                        Prozess B
+//     ---------                        ---------
+//     sieht nach: nichts ist bereit
+//                                      schreibt in das Rohr
+//                                      weckt alles, was wartet (nichts)
+//     legt sich schlafen                <- schlaeft bis zum Zeitablauf
+//
+// Die Zeile dazwischen ist der Fehler, und ein Schloss um beide Haelften
+// waere die falsche Antwort: `poll` sieht Rohre, Steckdosen und
+// Terminals an, und jede dieser Schichten hat eine Sperre von sich aus.
+// Also eine ZAEHLERFOLGE: A merkt sich `poll_seq` VOR seiner Pruefung,
+// B erhoeht sie VOR seinem Wecken -- und `poll_sleep` legt A nur dann
+// schlafen, wenn die Zahl unveraendert ist. Im Ablauf oben hat B sie
+// erhoeht, A schlaeft nicht ein und sieht sofort noch einmal nach.
+//
+// `poll_kick` nimmt die Laufsperre NICHT. Das ist dieselbe Entscheidung,
+// die `wake_pid` acht Zeilen tiefer trifft und aus demselben Grund: die
+// Funktion wird aus dem Netzstapel (mit der Netzsperre in der Hand) und
+// aus der Zeilendisziplin (aus einer Unterbrechung heraus) gerufen. Eine
+// zweite Sperre in dieser Reihenfolge waere eine Verklemmung. Was sie
+// tut, ist ein einzelner Schreibzugriff je Aufgabe -- S_POLL nach
+// S_READY -- und derselbe Schreibzugriff, den `wake_pid` macht.
+fn poll_seq(state: u64) -> u64 {
+    return kstate.get(state, kstate.POLLSEQ)
+}
+
+// Irgendwo kann etwas bereit geworden sein. ZUERST die Folge erhoehen,
+// DANN wecken -- in der anderen Reihenfolge gaebe es ein Fenster, in dem
+// ein Prueferblick die alte Zahl liest und trotzdem nichts sieht.
+fn poll_kick(state: u64) {
+    kstate.add(state, kstate.POLLSEQ, 1)
+    let n: u64 = kstate.get(state, kstate.TASKS)
+    var i: u64 = 0
+    while i < n {
+        if tget(state, i, T_STATE) == S_POLL {
+            tset(state, i, T_STATE, S_READY)
+        }
+        i = i + 1
+    }
+}
+
+// Schlafen legen -- aber nur, wenn sich die Weckfolge seit `seen` nicht
+// bewegt hat. Der Vergleich und das Setzen von S_POLL geschehen unter
+// DERSELBEN Laufsperre, unter der `schedule_locked` die Aufgabe abgibt;
+// zwischen beiden kann kein Wecker verlorengehen, denn ein Wecker, der
+// vorher kam, hat die Zahl bereits veraendert.
+fn poll_sleep(state: u64, seen: u64, deadline: u64) {
+    let flags: u64 = irq_save()
+    atomic.lock_take(state, atomic.L_SCHED, cpu.here(state))
+    if kstate.get(state, kstate.POLLSEQ) != seen {
+        atomic.lock_give(state, atomic.L_SCHED)
+        irq_restore(flags)
+        return
+    }
+    let cur: u64 = current(state)
+    tset(state, cur, T_POLLSEQ, seen)
+    tset(state, cur, T_WAKE, deadline)
+    tset(state, cur, T_STATE, S_POLL)
+    schedule_locked(state)
+    irq_restore(flags)
 }
 
 fn find_pid(state: u64, pid: u64) -> u64 {
