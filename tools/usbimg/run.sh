@@ -131,6 +131,11 @@ fi
 # ------------------------------------------------------------- Laeufe
 
 lauf() { # name zusatzargumente...
+    #
+    # DER DIAGNOSE-EINTRAG HAELT AN (`hwdiagstop`), also endet der Lauf
+    # nicht von selbst. Auf das Zeitlimit zu warten waere bei sechs
+    # Laeufen eine Viertelstunde Leerlauf; also wird auf die letzte Zeile
+    # des Berichts gewartet und dann abgeschaltet.
     local name=$1; shift
     local out="$TMPD/$name.txt"
     cp -f "$IMG" "$TMPD/$name.img"
@@ -139,7 +144,39 @@ lauf() { # name zusatzargumente...
         -drive "file=$TMPD/$name.img,format=raw,if=none,id=stick" \
         "$@" \
         -serial "file:$out" -display none -no-reboot \
-        > "$TMPD/$name.qemu" 2>&1
+        > "$TMPD/$name.qemu" 2>&1 &
+    local pid=$!
+    local i=0
+    while [ $i -lt 1000 ]; do
+        grep -qa 'ENDE DER DIAGNOSE' "$out" 2>/dev/null && break
+        kill -0 "$pid" 2>/dev/null || break
+        sleep 0.2; i=$((i + 1))
+    done
+    sleep 0.5
+    kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
+    return 0
+}
+
+# Dasselbe ohne das Abbild: der Kern und sein Modul kommen direkt von
+# QEMU. Damit lassen sich Maschinen bauen, die es als STARTBARES Abbild
+# nicht gibt -- eine ohne jedes Standardgeraet zum Beispiel.
+lauf_direkt() { # name kommandozeile zusatzargumente...
+    local name=$1 cmd=$2; shift 2
+    local out="$TMPD/$name.txt"
+    rm -f "$out"
+    timeout 200 qemu-system-x86_64 "${KVM[@]}" -m 512 -nodefaults -device VGA \
+        -kernel "$IMGDIR/osum.mb" -append "$cmd" -net none "$@" \
+        -serial "file:$out" -display none -no-reboot \
+        > "$TMPD/$name.qemu" 2>&1 &
+    local pid=$!
+    local i=0
+    while [ $i -lt 1000 ]; do
+        grep -qa 'ENDE DER DIAGNOSE' "$out" 2>/dev/null && break
+        kill -0 "$pid" 2>/dev/null || break
+        sleep 0.2; i=$((i + 1))
+    done
+    sleep 0.5
+    kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
     return 0
 }
 
@@ -250,15 +287,38 @@ else
 fi
 
 echo "== 7. keine Platte, keine Karte -- und trotzdem ein Bericht =="
-lauf leer
+#
+# PUNKT 5 DER RUNDE: findet der Kern nichts, darf er nicht still haengen,
+# sondern muss es BENENNEN und weiterlaufen.
+#
+# UND HIER STEHT EINE EHRLICHE EINSCHRAENKUNG. Eine x86-Maschine OHNE
+# Plattencontroller laesst sich mit QEMU nicht bauen: der PIIX3 der
+# `pc`-Maschine und der ICH9-AHCI der `q35`-Maschine gehoeren zum
+# Chipsatz und sind auch mit `-nodefaults` da (nachgemessen: `pc` meldet
+# `disk IDE 8086:7010`, `q35` meldet `disk AHCI 8086:2922`). `isapc` hat
+# gar keinen PCI-Bus, startet diesen Kern aber nicht.
+#
+# Also wird die Lage auf dem einzigen Weg hergestellt, auf dem sie
+# herstellbar ist: mit `nopci`, dem Gegenprobenwort, das `kernel/hw.fi`
+# seit Runde K2 dafuer hat. Der Bus wird dann gar nicht erst gelesen,
+# die Geraetetabelle bleibt leer, und genau das ist die Lage, in der ein
+# echter Rechner mit einem Controller, den dieser Kern nicht findet,
+# ebenfalls landet.
+lauf_direkt leer "hwdiag hwdiagstop gfx nopci nokbd nosched noproc nofs noring3"
+if grep -qa 'hwdiag: pci=KEIN GERAET' "$TMPD/leer.txt"; then
+    ok "ohne Bus sagt der Bericht das, statt still zu haengen"
+else
+    bad "ohne Bus fehlt die Meldung"
+    grep -a 'hwdiag: pci' "$TMPD/leer.txt" | sed 's/^/       /' | head -3
+fi
 if grep -qa 'hwdiag: disk=KEINER' "$TMPD/leer.txt"; then
-    ok "ohne Plattencontroller sagt der Bericht das, statt still zu haengen"
+    ok "und ohne Plattencontroller ebenso"
 else
     bad "ohne Plattencontroller fehlt die Meldung"
     grep -a 'hwdiag: disk' "$TMPD/leer.txt" | sed 's/^/       /'
 fi
 if grep -qa 'hwdiag: net=KEINE KARTE' "$TMPD/leer.txt"; then
-    ok "und ohne Netzkarte ebenso"
+    ok "und ohne Netzkarte auch"
 else
     bad "ohne Netzkarte fehlt die Meldung"
     grep -a 'hwdiag: net' "$TMPD/leer.txt" | sed 's/^/       /'
@@ -267,6 +327,23 @@ if grep -qa 'ANGEHALTEN' "$TMPD/leer.txt"; then
     ok "und der Bericht ist trotzdem vollstaendig"
 else
     bad "der Bericht bricht ab, wenn nichts gefunden wird"
+fi
+# GEGENPROBE ZUR GEGENPROBE: dieselbe Maschine MIT Bus meldet sehr wohl
+# etwas. Ohne diese Zeile waere oben nur bewiesen, dass der Bericht
+# immer dasselbe sagt.
+lauf_direkt mitbus "hwdiag hwdiagstop gfx nokbd nosched noproc nofs noring3"
+if grep -qa 'hwdiag: disk IDE' "$TMPD/mitbus.txt"; then
+    ok "GEGENPROBE: dieselbe Maschine MIT Bus meldet ihren IDE-Controller"
+else
+    bad "GEGENPROBE: die Maschine mit Bus meldet keinen Controller"
+    grep -a 'hwdiag: disk' "$TMPD/mitbus.txt" | sed 's/^/       /'
+fi
+# UND OHNE NETZKARTE, ABER MIT BUS -- die Lage eines Rechners, dessen
+# Netzteil auf dem Mainboard sitzt und den dieser Kern nicht kennt.
+if grep -qa 'hwdiag: net=KEINE KARTE' "$TMPD/mitbus.txt"; then
+    ok "und ohne Netzkarte (aber mit Bus) sagt sie auch das"
+else
+    bad "die Maschine ohne Netzkarte meldet das nicht"
 fi
 
 echo "== 8. der Schreibtisch, auf deutsch, mit Umlauten im BILD =="
