@@ -43,6 +43,7 @@
 # Verwendung:  bash tools/display/run.sh
 set -uo pipefail
 cd "$(dirname "$0")/../.."
+. tools/lib/qemu.sh          # $QEMU_X86, $OSUM_QEMU_ACCEL
 ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
 FIRNC=${FIRNC:-vendor/firn/bin/firnc}
@@ -222,7 +223,7 @@ GRUND="nokbd nosched noproc nofs noring3"
 lauf() { # name kommandozeile [zeitlimit]
     local name=$1 zeile=$2 t=${3:-180}
     rm -f "$TMPD/$name.txt"
-    timeout "$t" qemu-system-x86_64 -kernel "$TMPD/k0.mb" -m 256 -append "$zeile" \
+    timeout "$t" $QEMU_X86 -kernel "$TMPD/k0.mb" -m 256 -append "$zeile" \
         -serial "file:$TMPD/$name.txt" -display none -no-reboot -vga std \
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 > /dev/null 2>&1
     echo $?
@@ -234,7 +235,7 @@ foto() { # name kommandozeile
     local name=$1 zeile=$2
     local sock="$TMPD/mon-$name.sock" aus="$TMPD/$name.txt" ppm="$TMPD/$name.ppm"
     rm -f "$aus" "$ppm" "$sock"
-    timeout 200 qemu-system-x86_64 -kernel "$TMPD/k0.mb" -m 256 -append "$zeile" \
+    timeout 200 $QEMU_X86 -kernel "$TMPD/k0.mb" -m 256 -append "$zeile" \
         -serial "file:$aus" -display none -no-reboot -vga std \
         -monitor "unix:$sock,server,nowait" \
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 > /dev/null 2>&1 &
@@ -254,7 +255,7 @@ lauf_platte() { # name kommandozeile
     local name=$1 zeile=$2
     rm -f "$TMPD/$name.txt"
     cp -f "$TMPD/root.img" "$TMPD/live-$name.img"
-    timeout 200 qemu-system-x86_64 -kernel "$TMPD/k0.mb" -m 256 -append "$zeile" \
+    timeout 200 $QEMU_X86 -kernel "$TMPD/k0.mb" -m 256 -append "$zeile" \
         -serial "file:$TMPD/$name.txt" -display none -no-reboot -vga std \
         -drive "file=$TMPD/live-$name.img,format=raw,if=ide,index=0" \
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 > /dev/null 2>&1

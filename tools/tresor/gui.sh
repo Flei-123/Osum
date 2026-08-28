@@ -53,6 +53,7 @@
 # Verwendung:  bash tools/tresor/gui.sh
 set -uo pipefail
 cd "$(dirname "$0")/../.."
+. tools/lib/qemu.sh          # $QEMU_X86, $OSUM_QEMU_ACCEL
 ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
 TMPD=${TMPD:-$(mktemp -d)}
@@ -107,7 +108,7 @@ foto() { # name kommandozeile [monitordatei] [abbild]
     local sock="$TMPD/mon-$name.sock" aus="$TMPD/$name.txt"
     rm -f "$aus" "$sock"
     cp -f "$quelle" "$TMPD/live-$name.img"
-    timeout 240 qemu-system-x86_64 -kernel "$TMPD/k0.mb" -m 256 \
+    timeout 240 $QEMU_X86 -kernel "$TMPD/k0.mb" -m 256 \
         -append "$zeile" -serial "file:$aus" -display none -no-reboot \
         -vga std -monitor "unix:$sock,server,nowait" \
         -drive "file=$TMPD/live-$name.img,format=raw,if=ide,index=0" \

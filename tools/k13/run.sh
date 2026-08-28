@@ -39,6 +39,7 @@
 # Verwendung:  bash tools/k13/run.sh
 set -uo pipefail
 cd "$(dirname "$0")/../.."
+. tools/lib/qemu.sh          # $QEMU_X86, $OSUM_QEMU_ACCEL
 
 export FIRNLIB="$(pwd)/lib"
 FIRNC=${FIRNC:-vendor/firn/bin/firnc}
@@ -238,7 +239,7 @@ is "und auch /etc/shadow traegt dort keine (alles 0o755, alles root)" \
 run_case() { # name kernel abbild anhang [zeitlimit]
     local name=$1 kern=$2 img=$3 app=$4 limit=${5:-240}
     cp "$img" "$TMPD/live-$name.img"
-    timeout "$limit" qemu-system-x86_64 -kernel "$kern" -m 128 \
+    timeout "$limit" $QEMU_X86 -kernel "$kern" -m 128 \
         -append "$app" -serial "file:$TMPD/$name.txt" -display none -no-reboot \
         -drive "file=$TMPD/live-$name.img,format=raw,if=ide,index=0" \
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1
@@ -246,7 +247,7 @@ run_case() { # name kernel abbild anhang [zeitlimit]
 }
 
 echo "== 3. Kennungen in Ring 3, ohne Platte (kernel/uprog.fi) =="
-rc=$(timeout 90 qemu-system-x86_64 -kernel "$TMPD/k0.img" -m 128 \
+rc=$(timeout 90 $QEMU_X86 -kernel "$TMPD/k0.img" -m 128 \
     -append "k13run zombie nokbd nosched noproc nofs noring3" \
     -serial "file:$TMPD/ids.txt" -display none -no-reboot \
     -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1; echo $?)

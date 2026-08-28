@@ -56,6 +56,7 @@
 # Usage:  bash tools/powermon/run.sh
 set -uo pipefail
 cd "$(dirname "$0")/../.."
+. tools/lib/qemu.sh          # $QEMU_X86, $OSUM_QEMU_ACCEL
 ROOT=$(pwd)
 
 export FIRNLIB="$ROOT/lib"
@@ -256,7 +257,7 @@ run() { # name commandline [ssdt] [timeout]
           -device isa-debug-exit,iobase=0xf4,iosize=0x04)
     [ -n "$ssdt" ] && args+=(-acpitable
         "sig=SSDT,rev=2,oem_id=OSUM,oem_table_id=PMON,data=$TMPD/$ssdt.aml")
-    timeout "$t" qemu-system-x86_64 "${args[@]}" > /dev/null 2>&1
+    timeout "$t" $QEMU_X86 "${args[@]}" > /dev/null 2>&1
     echo $?
 }
 
@@ -583,7 +584,7 @@ python3 tools/osum/mkfs.py "${GARGS[@]}" > "$TMPD/gui.log" 2>&1 \
 WSOCK="$TMPD/win.sock"; WOUT="$TMPD/win.txt"; WPPM="$TMPD/win.ppm"
 rm -f "$WSOCK" "$WOUT" "$WPPM"
 cp -f "$TMPD/gui.img" "$TMPD/live-win.img"
-timeout 240 qemu-system-x86_64 -kernel "$TMPD/k0.mb" -m 256 \
+timeout 240 $QEMU_X86 -kernel "$TMPD/k0.mb" -m 256 \
     -append "gfx wm wig wmhold wiglong pmonsay pmonnofloor wigapp=/bin/powermon nokbd nosched noproc nofs" \
     -serial "file:$WOUT" -display none -no-reboot -vga std \
     -monitor "unix:$WSOCK,server,nowait" \

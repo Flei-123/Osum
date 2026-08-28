@@ -56,6 +56,7 @@
 # Aufruf:  bash tools/k14/run.sh
 set -uo pipefail
 cd "$(dirname "$0")/../.."
+. tools/lib/qemu.sh          # $QEMU_X86, $OSUM_QEMU_ACCEL
 ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
 FIRNC=${FIRNC:-vendor/firn/bin/firnc}
@@ -310,7 +311,7 @@ lauf() { # name kernel wurzel zweite kommandozeile [zeitlimit]
         cp "$second" "$TMPD/live2-$name.img"
         drives+=(-drive "file=$TMPD/live2-$name.img,format=raw,if=ide,index=1")
     fi
-    timeout "$t" qemu-system-x86_64 -kernel "$img" -m 256 -append "$app" \
+    timeout "$t" $QEMU_X86 -kernel "$img" -m 256 -append "$app" \
         -serial "file:$TMPD/$name.txt" -display none -no-reboot \
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
         "${drives[@]}" > /dev/null 2>&1
