@@ -171,6 +171,40 @@ weniger rote Abschnitte als der, von dem er kommt.**
 
 ---
 
+## Ein Unfall, der benannt gehoert: `4d8730c` auf diesem Zweig
+
+Auf `certus` liegt ein Commit, der **nicht zu dieser Runde gehoert**:
+
+    4d8730c MEDIA1 1/n: der AC97-Treiber, die Tonschicht und der erste
+            hoerbare Sinus
+
+Wie er hierher kam: dieses Arbeitsverzeichnis (`/root/mg-osum`) wird von
+mehreren Runden GLEICHZEITIG benutzt, und ein `git add -A` der Runde
+MEDIA1 hat den ausgecheckten Zweig getroffen — also diesen. Dabei hat
+derselbe Commit die zu dem Zeitpunkt noch nicht eingecheckten Aenderungen
+DIESER Runde an `kernel/proc.fi` und `kernel/sys.fi` (die grosse Arena)
+mit eingesammelt. Beides steht seitdem in einem Commit.
+
+Was daraus folgt, und zwar genau das und nichts anderes:
+
+* **Der Baum ist richtig.** Alles, was oben gemessen ist, ist auf diesem
+  Baum gemessen — mit dem Tontreiber darin. Er beruehrt weder
+  `procfs.fi` noch `switch.s`, `boot.s`, `smp.s` noch irgendetwas unter
+  `lib/certus`.
+* **Die Runde MEDIA1 verliert nichts.** `kernel/ac97.fi` und
+  `kernel/audio.fi` liegen inhaltsgleich (841 bzw. 771 Zeilen) auch auf
+  dem Zweig `media1`, unter eigenen Commits.
+* **Wer `certus` mergt, bekommt den Tontreiber ein zweites Mal.** Der
+  richtige Weg ist, `media1` zuerst zu mergen; dann ist der Inhalt
+  bereits da und der Merge von `certus` bringt nur noch, was er soll.
+
+Die Historie wird hier ABSICHTLICH nicht umgeschrieben: jede Zahl in
+diesem Dokument und in `docs/CERTUS-STATUS.md` ist auf genau diesem Baum
+entstanden, und ein Rebase, der den Baum aendert, machte aus gemessenen
+Zahlen behauptete.
+
+---
+
 ## Was offen ist
 
 Die vollständige Liste mit Aufwandsschätzung steht in
