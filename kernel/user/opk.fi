@@ -44,6 +44,10 @@
 //      ihn bei JEDEM Aufruf nach, wenn er nicht dazu passt. Ein Absturz
 //      in diesem Schritt kostet deshalb nichts als den naechsten Aufruf.
 //
+// RUNDE UPDATE: JEDE INSTALLATION IST JETZT SIGNIERT. Siehe den
+// Abschnitt „DIE SIGNATUR" weiter unten. Ohne `/system/schluessel.pub`
+// und ohne gueltige Ed25519-Signatur wird NICHTS installiert.
+//
 //   opk liste
 //   opk installieren <datei.opk>
 //   opk entfernen <name>
@@ -57,6 +61,7 @@ profile kernel
 
 import ulib
 import sha
+import crypto.ed25519
 
 export { u_start }
 
@@ -88,6 +93,9 @@ static mut P_SYS: [u8; 8] = "/system\0"
 static mut P_GENS: [u8; 20] = "/system/generations\0"
 static mut P_AKT: [u8; 16] = "/system/AKTUELL\0"
 static mut P_AKTN: [u8; 20] = "/system/AKTUELL.neu\0"
+static mut P_KEY: [u8; 23] = "/system/schluessel.pub\0"
+static mut N_SIG: [u8; 5] = ".sig\0"
+static mut N_ISIG: [u8; 10] = "INDEX.sig\0"
 static mut P_USERS: [u8; 7] = "/users\0"
 static mut P_ROOT: [u8; 12] = "/users/root\0"
 static mut N_PAKET: [u8; 6] = "PAKET\0"
@@ -115,6 +123,14 @@ static mut E_NOGEN: [u8; 34] = "opk: die Generation gibt es nicht\0"
 static mut E_KEIN: [u8; 25] = "opk: nicht installiert: \0"
 static mut E_INDEX: [u8; 33] = "opk: die Quelle hat keinen INDEX\0"
 static mut E_NIX: [u8; 38] = "opk: die Quelle kennt das Paket nicht\0"
+static mut E_NOKEY: [u8; 62] = "opk: kein vertrauter Schluessel: /system/schluessel.pub fehlt\0"
+static mut E_KEYLEN: [u8; 53] = "opk: /system/schluessel.pub ist nicht 32 Oktett lang\0"
+static mut E_NOSIG: [u8; 48] = "opk: KEINE SIGNATUR -- abgelehnt, Datei fehlt: \0"
+static mut E_SIGLEN: [u8; 45] = "opk: die Signatur ist nicht 64 Oktett lang: \0"
+static mut E_SIG: [u8; 51] = "opk: SIGNATUR FALSCH -- das Paket wird ABGELEHNT: \0"
+static mut E_ISIG: [u8; 53] = "opk: SIGNATUR DES INDEX FALSCH -- Quelle ABGELEHNT: \0"
+static mut E_CTX: [u8; 39] = "opk: Ed25519 liess sich nicht aufbauen\0"
+static mut S_SIGOK: [u8; 24] = "opk: Signatur geprueft \0"
 static mut E_HASHQ: [u8; 48] = "opk: das Paket passt nicht zum INDEX der Quelle\0"
 
 static mut S_GEN: [u8; 12] = "generation \0"
@@ -154,6 +170,9 @@ static mut HASH: [u8; 32] = [0 as u8; 32]
 static mut HEX: [u8; 72] = [0 as u8; 72]
 static mut NAME: [u8; 64] = [0 as u8; 64]
 static mut ZEILE: [u8; 256] = [0 as u8; 256]
+static mut SIG: [u8; 64] = [0 as u8; 64]
+static mut KEY: [u8; 32] = [0 as u8; 32]
+static mut SIGP: [u8; 320] = [0 as u8; 320]
 
 const KOPF: u64 = 64
 const KURZ: u64 = 20
@@ -773,6 +792,101 @@ fn toepfe(name: u64, anlegen: bool) {
     }
 }
 
+// ------------------------------------------------- DIE SIGNATUR
+//
+// RUNDE UPDATE, UND ES IST DER PUNKT DIESER RUNDE. Bis hierher hat
+// dieses Programm eine Pruefsumme gerechnet: sie faengt eine kaputte
+// Uebertragung und sonst nichts. Wer die Oktette AENDERN kann, aendert
+// die Pruefsumme mit -- sie steht im selben Kopf. Ein Update-Weg, der
+// nur eine Pruefsumme kennt, gehoert jedem, der die Verbindung umleitet.
+//
+// DESHALB: JEDES PAKET WIRD SIGNIERT INSTALLIERT ODER GAR NICHT.
+//
+//   * Der vertraute Schluessel liegt in `/system/schluessel.pub`, 32
+//     rohe Oktette, ein oeffentlicher Ed25519-Schluessel. FEHLT ER,
+//     WIRD NICHTS INSTALLIERT. Es gibt keinen Schalter, der das
+//     abschaltet -- eine Ausnahme, die man in einem Notfall setzt, ist
+//     die Ausnahme, die ein Angreifer benutzt.
+//   * Neben `x.opk` liegt `x.opk.sig`, 64 rohe Oktette: die
+//     Ed25519-Signatur ueber ALLE Oktette des Pakets, Kopf eingeschlossen.
+//     Nicht ueber die Pruefsumme im Kopf -- dann waere der Kopf selbst
+//     ungedeckt und Laengenfelder liessen sich austauschen.
+//   * Bei `aktualisieren` wird ZUSAETZLICH `INDEX.sig` gegen denselben
+//     Schluessel geprueft, bevor eine Zeile des INDEX geglaubt wird.
+//     Damit haengt die ganze Kette an EINEM Schluessel: INDEX ->
+//     Streuwert -> Paketoktette, und jedes Glied wird gerechnet.
+//
+// Die Rechnung selbst steht in `lib/crypto/ed25519.fi` und ist gegen die
+// 1024 offiziellen Vektoren von RFC 8032 und gegen libsodium gemessen
+// (`tools/update/vectors.py`).
+
+// Den vertrauten Schluessel holen. `false` heisst: es wird nichts
+// installiert, und der Grund steht auf der Fehlerausgabe.
+fn schluessel_holen() -> bool {
+    let n: u64 = datei_lesen((&P_KEY[0 as usize]) as u64,
+        (&KEY[0 as usize]) as u64, 32)
+    if n == 0xFFFFFFFFFFFFFFFF || n == 0 {
+        fehler((&E_NOKEY[0 as usize]) as u64, 0)
+        return false
+    }
+    if n != 32 {
+        fehler((&E_KEYLEN[0 as usize]) as u64, 0)
+        return false
+    }
+    return true
+}
+
+// Eine Signaturdatei lesen. `pfad` ist die Datei, `endung` das, was
+// daran gehaengt wird (".sig") -- oder 0, wenn `pfad` schon die
+// Signaturdatei IST.
+fn signatur_holen(pfad: u64, endung: u64) -> bool {
+    ulib.strcpy((&SIGP[0 as usize]) as u64, pfad)
+    if endung != 0 {
+        ulib.strcat((&SIGP[0 as usize]) as u64, endung)
+    }
+    let n: u64 = datei_lesen((&SIGP[0 as usize]) as u64,
+        (&SIG[0 as usize]) as u64, 64)
+    if n == 0xFFFFFFFFFFFFFFFF || n == 0 {
+        fehler((&E_NOSIG[0 as usize]) as u64, (&SIGP[0 as usize]) as u64)
+        return false
+    }
+    if n != 64 {
+        fehler((&E_SIGLEN[0 as usize]) as u64, (&SIGP[0 as usize]) as u64)
+        return false
+    }
+    return true
+}
+
+// Die Rechnung. `msg`/`len` sind die Oktette, ueber die signiert wurde.
+fn signatur_gilt(msg: u64, len: u64) -> bool {
+    var c: ed25519.Ctx = ed25519.ctx_new()
+    if !ed25519.ctx_init(&c) {
+        fehler((&E_CTX[0 as usize]) as u64, 0)
+        return false
+    }
+    return ed25519.ed25519_verify(&c, (&KEY[0 as usize]) as u64, msg,
+        len as usize, (&SIG[0 as usize]) as u64)
+}
+
+// Der ganze Weg fuer eine Paketdatei: Schluessel, Signaturdatei,
+// Rechnung. Ein `false` heisst IMMER: nicht installieren.
+fn paket_signatur(pfad: u64, len: u64) -> bool {
+    if !schluessel_holen() {
+        return false
+    }
+    if !signatur_holen(pfad, (&N_SIG[0 as usize]) as u64) {
+        return false
+    }
+    if !signatur_gilt((&PKT[0 as usize]) as u64, len) {
+        fehler((&E_SIG[0 as usize]) as u64, pfad)
+        return false
+    }
+    ulib.say((&S_SIGOK[0 as usize]) as u64)
+    ulib.say(pfad)
+    ulib.nl()
+    return true
+}
+
 // ------------------------------------------- ein Paket in den Store
 //
 // Rueckgabe: 0 = Fehler, sonst die Laenge der Metadaten. Der Hexname
@@ -977,6 +1091,11 @@ fn cmd_installieren(datei: u64, grund: u64) -> u64 {
     }
     if len >= PKT_MAX {
         return fehler((&E_GROSS[0 as usize]) as u64, 0)
+    }
+    // DIE SIGNATUR ZUERST, vor der Pruefsumme und weit vor dem ersten
+    // Schreibzugriff: was hier durchfaellt, hat das System nie beruehrt.
+    if !paket_signatur(datei, len) {
+        return 1
     }
     let ml: u64 = paket_pruefen(len)
     if ml == 0 {
@@ -1203,6 +1322,25 @@ fn cmd_aktualisieren(name: u64, quelle: u64, grund: u64) -> u64 {
         return fehler((&E_INDEX[0 as usize]) as u64, quelle)
     }
     p8((&IDX[0 as usize]) as u64 + n, 0)
+    // DIE SIGNATUR UEBER DEN INDEX. Ohne sie ist der INDEX nur eine
+    // Textdatei, die jeder schreiben kann, der die Quelle stellt -- und
+    // der Streuwertvergleich weiter unten prueft dann ein Paket gegen
+    // einen Streuwert, den derselbe Angreifer eingetragen hat.
+    if !schluessel_holen() {
+        return 1
+    }
+    ulib.strcpy((&PFAD2[0 as usize]) as u64, quelle)
+    slash((&PFAD2[0 as usize]) as u64)
+    ulib.strcat((&PFAD2[0 as usize]) as u64, (&N_ISIG[0 as usize]) as u64)
+    if !signatur_holen((&PFAD2[0 as usize]) as u64, 0) {
+        return 1
+    }
+    if !signatur_gilt((&IDX[0 as usize]) as u64, n) {
+        return fehler((&E_ISIG[0 as usize]) as u64, quelle)
+    }
+    ulib.say((&S_SIGOK[0 as usize]) as u64)
+    ulib.say((&PFAD2[0 as usize]) as u64)
+    ulib.nl()
     if !index_zeile(name, (&hs[0 as usize]) as u64, (&dt[0 as usize]) as u64) {
         return fehler((&E_NIX[0 as usize]) as u64, name)
     }
@@ -1214,6 +1352,9 @@ fn cmd_aktualisieren(name: u64, quelle: u64, grund: u64) -> u64 {
     if len == 0xFFFFFFFFFFFFFFFF {
         return fehler((&E_OPEN[0 as usize]) as u64,
             (&PFAD[0 as usize]) as u64)
+    }
+    if !paket_signatur((&PFAD[0 as usize]) as u64, len) {
+        return 1
     }
     let ml: u64 = paket_pruefen(len)
     if ml == 0 {
