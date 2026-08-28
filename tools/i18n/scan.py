@@ -60,6 +60,20 @@ WOERTER = [
     "Quelldatei", "gefunden", "geschrieben", "gesetzt fuer",
     "gestartet", "gespeichert", "uebernommen", "kopiert",
     "Eingaben", "Zeichen", "Wurzel",
+    # RUNDE LOOK, DRITTER NACHTRAG: DIESELBEN WOERTER MIT ECHTEN
+    # ZEICHEN. Die Liste darueber ist reines ASCII, und das war
+    # richtig, solange der Baum reines ASCII war. Als der Nachtrag
+    # "Loeschen" zu "Löschen" machte, fiel die Zahl dieses Programms
+    # von 17 auf 10 -- nicht, weil zehn Zeichenketten in den Katalog
+    # gewandert waeren, sondern weil der Sucher sie nicht mehr FAND.
+    # Ein Pruefer, der durch eine Rechtschreibkorrektur gruener wird,
+    # misst nicht mehr, was er zu messen vorgibt. Beide Schreibweisen
+    # stehen deshalb hier, und die alten bleiben: sie sollen weiter
+    # auffallen, wenn jemand sie neu hinschreibt.
+    "Übernehmen", "Auflösung", "Ausführen", "Löschen", "Öffnen",
+    "Nach Größe", "Wirklich löschen", "Größe", "Größte", "Stück",
+    "gesetzt für", "Menü", "vortäuschen", "Fläche", "Schlüssel",
+    "Zurück", "Nächstes", "Vorwärts", "Ausgewählt", "lädt",
 ]
 # Ein Wort mit einer Ersatzschreibung darin. Nur in den Dateien der
 # OBERFLAECHE angewandt -- im uebrigen Baum stehen englische Woerter wie
@@ -87,12 +101,27 @@ OBERFLAECHE = [
 # Wo AUSSERDEM gesucht wird -- zum BERICHTEN, nicht zum Scheitern.
 #
 # EHRLICH GEZAEHLT UND NICHT VERSTECKT. Unter kernel/user/ liegen
-# ausserdem `power.fi`, `widgetdemo.fi`, `fas.fi` und `firun.fi`. Das sind
-# BEFEHLSZEILENPROGRAMME (und eine Widget-Vorfuehrung aus Runde K15);
-# ihr Text geht nach stdout, nicht durch den Fensterserver, und diese
-# Runde hat sie nicht angefasst. Sie werden trotzdem gezaehlt und
-# gemeldet, damit die Zahl "0" nicht dadurch entsteht, dass man
-# wegsieht.
+# ausserdem `power.fi`, `widgetdemo.fi`, `fas.fi` und `firun.fi`. Sie
+# werden gezaehlt und gemeldet, damit die Zahl "0" nicht dadurch
+# entsteht, dass man wegsieht.
+#
+# RUNDE LOOK, DRITTER NACHTRAG -- DIESE BESCHREIBUNG WAR FALSCH. Hier
+# stand, das seien "BEFEHLSZEILENPROGRAMME, ihr Text geht nach stdout,
+# nicht durch den Fensterserver". Fuer die Haelfte stimmt das nicht:
+# `qs.fi` sind die Schnelleinstellungen (ein Fenster mit Kacheln),
+# `widgetdemo.fi` ist die Anwendung "Widgets" aus dem Starter,
+# `speicher.fi` zeichnet zwei Tabellen und einen Dialog, `themetest.fi`
+# ist das Messfenster der Runde THEME. Das sind Oberflaechenprogramme,
+# und ihr Text landet sehr wohl auf dem Bildschirm.
+#
+# Der Satz war bequem: solange diese Dateien "Befehlszeile" heissen,
+# darf die Zeile darueber "gefunden: 0" sagen und trotzdem stimmen. So
+# ist "Netz vortaeuschen" auf einer Kachel stehen geblieben, "Loeschen"
+# auf einem Knopf und "Groesse" in einer Tabellenkopfzeile -- alle drei
+# in dieser Liste, alle drei mit dem Vermerk, sie stuenden gar nicht auf
+# dem Schirm. Die Umschrift ist inzwischen weg (Nachtrag 3); die
+# ZUORDNUNG zum Katalog fehlt weiter, und das ist es, was diese Liste
+# eigentlich meldet. Sie heisst jetzt, was sie ist.
 QUELLEN = ["kernel"]
 AUSNAHMEN = ["kernel/user/i18nt.fi"]
 
@@ -225,7 +254,7 @@ def main():
     for pfad, nr, wort, text in surface:
         print("%s:%d: '%s' in \"%s\"" % (pfad, nr, wort, text[:70]))
     print("gefunden: %d" % len(surface))
-    print("ausserhalb dieser Runde (Befehlszeilenprogramme, nicht"
+    print("nicht im Katalog, aber gezaehlt (eigene Fenster und"
           " uebersetzt): %d" % len(rest))
     for pfad, nr, wort, text in rest:
         print("    %s:%d: '%s'" % (pfad, nr, wort))
