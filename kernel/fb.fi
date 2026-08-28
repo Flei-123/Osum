@@ -85,7 +85,10 @@ export {
     set_lut, lut, set_saturation, saturation, set_rotation, rotation,
     set_logical, logical_ok, set_scale, scale, transformed, present,
     presents, get_panel, SCALE_FULL, SCALE_ASPECT, SCALE_NONE, LUT_BYTES,
-    selftest2, selftest2_max
+    selftest2, selftest2_max,
+    // RUNDE PAINT -- die Mischung.
+    blend, pixel_a, hline_a, fill_a, blends, blend_reads, blend_skips,
+    blend_reset, selftest3, selftest3_max
 }
 
 // ------------------------------------------------- der Datenbereich
@@ -173,6 +176,18 @@ const S_BACKBYTES: u64 = 0x740
 const S_SAT: u64 = 0x748 // Farbsaettigung in Hundertsteln, 100 = unberuehrt
 const S_LOGW: u64 = 0x750 // gewuenschte Bildbreite, 0 = so gross wie die Tafel
 const S_LOGH: u64 = 0x758
+
+// ================================================= RUNDE PAINT
+//
+// DREI ZAEHLER, DAMIT DIE MISCHUNG EINEN PREIS HAT UND KEINE MEINUNG.
+// `blends` zaehlt jeden Bildpunkt, der wirklich gemischt wurde,
+// `blend_reads` die Ruecklesevorgaenge aus dem Ziel (das ist der teure
+// Teil, nicht die Arithmetik) und `blend_skips` die Bildpunkte, die
+// wegen a==0 oder a==255 GAR NICHT gemischt wurden -- die beiden
+// Abkuerzungen sind der Grund, warum ein Fensterschatten bezahlbar ist.
+const S_BLENDS: u64 = 0x760
+const S_BLENDR: u64 = 0x768
+const S_BLENDS0: u64 = 0x770
 
 // Die drei Arten, ein Bild auf eine Tafel anderer Groesse zu bringen.
 // Dieselben drei, die ein Monitor in seiner eigenen Elektronik hat und
@@ -856,6 +871,183 @@ fn get_pixel(state: u64, x: u64, y: u64) -> u64 {
     }
     return __mmio_read32((kstate.get(state, FB_OFF + S_DRAW)
         +% spot(state, x, y)) as *mut u32) as u64
+}
+
+// =====================================================================
+// RUNDE PAINT: SRC-OVER. DIE EINE RECHNUNG, DIE DIESEM ZEICHNER FEHLTE.
+// =====================================================================
+//
+// Bis zu dieser Runde konnte `fb.fi` einen Bildpunkt SETZEN und einen
+// Bildpunkt LESEN, und das war alles. Jeder Bildpunkt war entweder
+// Vordergrund oder Hintergrund. Alles, was eine Oberflaeche modern
+// aussehen laesst -- weiche Kanten, milde Trennlinien, Schatten,
+// Durchscheinen --, ist eine MISCHUNG zweier Farben, und eine Mischung
+// gab es in DIESER Datei nicht. (In `kernel/wm.fi` und in
+// `kernel/user/wlibc.fi` gab es sie schon; siehe docs/ROUNDPAINT.md
+// Abschnitt 1 -- das ist der Unterschied zwischen "es gibt keine
+// Mischung" und "die unterste Schicht kann keine".)
+//
+// DIE FORMEL UND IHRE RUNDUNG, GEMESSEN STATT BEHAUPTET.
+//
+// src-over mit vorbelegter Deckung a (0..255):
+//
+//     out = (src * a + dst * (255 - a)) / 255
+//
+// Die drei Fassungen, die dieses Projekt bisher hatte, teilen durch 255
+// und SCHNEIDEN AB. Gegen die exakte Rechnung (kaufmaennisch gerundet)
+// nachgemessen ueber ALLE 256*256*256 = 16 777 216 Tripel (a, src, dst)
+// -- `tools/paint/blendcheck.py`:
+//
+//     abschneiden          groesster Fehler 1, Mittel 0.4867,
+//                          8 164 890 von 16 777 216 Tripeln falsch
+//                          -- 48.67 Prozent
+//     (num + 127) / 255    groesster Fehler 0 -- exakt, alle 16.7 Mio
+//     (t + (t>>8)) >> 8    groesster Fehler 0 -- exakt, alle 16.7 Mio,
+//     mit t = num + 128    UND OHNE DIVISION
+//
+// Diese Datei nimmt die dritte: sie ist auf JEDEM Tripel gleich der
+// exakten Rechnung und braucht drei Additionen und zwei Schiebungen
+// statt einer Division. Eine Division ist auf x86-64 zwischen zwanzig
+// und vierzig Takten und nicht durchgepipelinet; drei Farbkanaele je
+// Bildpunkt waeren drei davon.
+//
+// `+%`, `*%` und `-%` stehen hier, weil eine Farbe ein BITMUSTER ist
+// und keine Zahl -- dieselbe Regel wie ueberall sonst in dieser Datei.
+// Ueberlaufen kann nichts (255*255 + 255*255 + 128 = 130 178 passt in
+// achtzehn Bit); `+%` sagt trotzdem, dass hier gerechnet und nicht
+// gezaehlt wird.
+fn mix8(dst: u64, src: u64, a: u64, ia: u64) -> u64 {
+    let t: u64 = src *% a +% dst *% ia +% 128
+    return (t +% (t >> 8)) >> 8
+}
+
+// Zwei Farben im Format des Rahmenpuffers (0x00RRGGBB, wie `rgb` es
+// liefert) mit der Deckung a. a == 0 gibt den Grund unveraendert
+// zurueck, a == 255 die neue Farbe -- beide OHNE zu rechnen, und beides
+// ist gezaehlt (`blend_skips`).
+fn blend(state: u64, dst: u64, src: u64, a: u64) -> u64 {
+    if a == 0 {
+        kstate.set(state, FB_OFF + S_BLENDS0,
+            kstate.get(state, FB_OFF + S_BLENDS0) +% 1)
+        return dst
+    }
+    if a >= 255 {
+        kstate.set(state, FB_OFF + S_BLENDS0,
+            kstate.get(state, FB_OFF + S_BLENDS0) +% 1)
+        return src
+    }
+    let ia: u64 = 255 - a
+    let r: u64 = mix8((dst >> 16) & 0xFF, (src >> 16) & 0xFF, a, ia)
+    let g: u64 = mix8((dst >> 8) & 0xFF, (src >> 8) & 0xFF, a, ia)
+    let b: u64 = mix8(dst & 0xFF, src & 0xFF, a, ia)
+    kstate.set(state, FB_OFF + S_BLENDS,
+        kstate.get(state, FB_OFF + S_BLENDS) +% 1)
+    return (r << 16) | (g << 8) | b
+}
+
+// EIN gemischter Bildpunkt: lesen, mischen, schreiben.
+//
+// DAS LESEN IST DER PREIS, NICHT DIE ARITHMETIK. Steht der Zweitpuffer
+// im Arbeitsspeicher, ist es ein gewoehnlicher Ladebefehl; steht er
+// NICHT (`nodbl`), ist es ein Lesezugriff ueber PCI in den Speicher der
+// Grafikkarte, und der kostet ein Vielfaches eines Schreibzugriffs.
+// Deshalb zaehlt `blend_reads` die Ruecklesevorgaenge getrennt.
+fn pixel_a(state: u64, x: u64, y: u64, color: u64, a: u64) {
+    if a == 0 {
+        kstate.set(state, FB_OFF + S_BLENDS0,
+            kstate.get(state, FB_OFF + S_BLENDS0) +% 1)
+        return
+    }
+    if x >= kstate.get(state, FB_OFF + S_WIDTH) {
+        return
+    }
+    if y >= kstate.get(state, FB_OFF + S_HEIGHT) {
+        return
+    }
+    if a >= 255 {
+        kstate.set(state, FB_OFF + S_BLENDS0,
+            kstate.get(state, FB_OFF + S_BLENDS0) +% 1)
+        __mmio_write32((kstate.get(state, FB_OFF + S_DRAW)
+            +% spot(state, x, y)) as *mut u32, color as u32)
+        dirty(state, y, y + 1)
+        return
+    }
+    let p: u64 = kstate.get(state, FB_OFF + S_DRAW) +% spot(state, x, y)
+    let alt: u64 = __mmio_read32(p as *mut u32) as u64
+    kstate.set(state, FB_OFF + S_BLENDR,
+        kstate.get(state, FB_OFF + S_BLENDR) +% 1)
+    __mmio_write32(p as *mut u32, blend(state, alt, color, a) as u32)
+    dirty(state, y, y + 1)
+}
+
+// EINE GEMISCHTE BILDZEILE. Kein `rep stosq`: jeder Bildpunkt haengt von
+// dem ab, was schon da steht. Der Adressvorschub ist aber eine Addition
+// statt einer Multiplikation je Punkt, und die Grenzen werden EINMAL
+// geprueft statt je Punkt -- das ist der ganze Unterschied zwischen
+// dieser Schleife und n Aufrufen von `pixel_a`, und er ist gemessen
+// (docs/ROUNDPAINT.md, Abschnitt 2).
+fn hline_a(state: u64, x: u64, y: u64, n: u64, color: u64, a: u64) {
+    if a == 0 || n == 0 {
+        return
+    }
+    let w: u64 = kstate.get(state, FB_OFF + S_WIDTH)
+    if y >= kstate.get(state, FB_OFF + S_HEIGHT) || x >= w {
+        return
+    }
+    var len: u64 = n
+    if x + len > w {
+        len = w - x
+    }
+    if a >= 255 {
+        hline(state, x, y, len, color)
+        return
+    }
+    let ia: u64 = 255 - a
+    let sr: u64 = (color >> 16) & 0xFF
+    let sg: u64 = (color >> 8) & 0xFF
+    let sb: u64 = color & 0xFF
+    var p: u64 = kstate.get(state, FB_OFF + S_DRAW) +% spot(state, x, y)
+    var k: u64 = 0
+    while k < len {
+        let alt: u64 = __mmio_read32(p as *mut u32) as u64
+        let r: u64 = mix8((alt >> 16) & 0xFF, sr, a, ia)
+        let g: u64 = mix8((alt >> 8) & 0xFF, sg, a, ia)
+        let b: u64 = mix8(alt & 0xFF, sb, a, ia)
+        __mmio_write32(p as *mut u32, ((r << 16) | (g << 8) | b) as u32)
+        p = p +% 4
+        k = k + 1
+    }
+    kstate.set(state, FB_OFF + S_BLENDS,
+        kstate.get(state, FB_OFF + S_BLENDS) +% len)
+    kstate.set(state, FB_OFF + S_BLENDR,
+        kstate.get(state, FB_OFF + S_BLENDR) +% len)
+    dirty(state, y, y + 1)
+}
+
+fn fill_a(state: u64, x: u64, y: u64, w: u64, h: u64, color: u64, a: u64) {
+    var row: u64 = 0
+    while row < h {
+        hline_a(state, x, y + row, w, color, a)
+        row = row + 1
+    }
+}
+
+fn blends(state: u64) -> u64 {
+    return kstate.get(state, FB_OFF + S_BLENDS)
+}
+
+fn blend_reads(state: u64) -> u64 {
+    return kstate.get(state, FB_OFF + S_BLENDR)
+}
+
+fn blend_skips(state: u64) -> u64 {
+    return kstate.get(state, FB_OFF + S_BLENDS0)
+}
+
+fn blend_reset(state: u64) {
+    kstate.set(state, FB_OFF + S_BLENDS, 0)
+    kstate.set(state, FB_OFF + S_BLENDR, 0)
+    kstate.set(state, FB_OFF + S_BLENDS0, 0)
 }
 
 // Eine Bildzeile in einem Rutsch. Der innere Kern jedes Rechtecks und
@@ -2486,6 +2678,132 @@ fn selftest2(state: u64) -> u64 {
 
 fn selftest2_max() -> u64 {
     return 11
+}
+
+// =====================================================================
+// RUNDE PAINT: VIERZEHN ZUSAGEN UEBER DIE MISCHUNG, IM KERN GEPRUEFT.
+// =====================================================================
+//
+// Der Grund, warum das hier steht und nicht nur in einem Python-Skript
+// draussen: `tools/paint/blendcheck.py` prueft die FORMEL auf dem Wirt,
+// mit Pythons Zahlen. Diese Zusagen pruefen die FASSUNG IM KERN, mit
+// Firns Zahlen, auf demselben Rahmenpuffer, in den auch gemalt wird.
+// Runde K7B hat teuer gelernt, dass die zweite Frage nicht aus der
+// ersten folgt.
+fn selftest3(state: u64) -> u64 {
+    if !ready(state) {
+        return 0
+    }
+    var n: u64 = 0
+    let weiss: u64 = rgb(state, 0xFF, 0xFF, 0xFF)
+    let schwarz: u64 = rgb(state, 0, 0, 0)
+    let rot: u64 = rgb(state, 0xFF, 0, 0)
+
+    // 1. a = 0 laesst den Grund UNBERUEHRT -- Bitmuster fuer Bitmuster.
+    if blend(state, weiss, schwarz, 0) == weiss {
+        n = n + 1
+    }
+    // 2. a = 255 ist die neue Farbe, ohne Rundungsrest.
+    if blend(state, weiss, schwarz, 255) == schwarz {
+        n = n + 1
+    }
+    // 3. Die Haelfte von Schwarz und Weiss: 128 * 255 + 128 = 32768,
+    //    (32768 + 128) >> 8 = 128. NICHT 127 -- genau das ist der
+    //    Unterschied zur alten, abschneidenden Fassung.
+    if blend(state, weiss, schwarz, 128) == rgb(state, 127, 127, 127) {
+        n = n + 1
+    }
+    // 4. Und die Gegenprobe zur Gegenrichtung: derselbe Wert.
+    if blend(state, schwarz, weiss, 127) == rgb(state, 127, 127, 127) {
+        n = n + 1
+    }
+    // 5. Die drei Kanaele bleiben getrennt: Rot ueber Schwarz zur
+    //    Haelfte gibt genau Rot/2 und in Gruen und Blau nichts.
+    let h: u64 = blend(state, schwarz, rot, 128)
+    if h == rgb(state, 128, 0, 0) {
+        n = n + 1
+    }
+    // 6. Kein Kanal laeuft in den naechsten ueber (der Fehler, den eine
+    //    Mischung ohne Maske macht): Blau voll ueber Rot voll, halb.
+    let blau: u64 = rgb(state, 0, 0, 0xFF)
+    let m: u64 = blend(state, rot, blau, 128)
+    if m == rgb(state, 128, 0, 128) {
+        n = n + 1
+    }
+    // 7. Der Zaehler zaehlt: drei echte Mischungen mehr als vorher.
+    let v: u64 = blends(state)
+    blend(state, rot, blau, 10)
+    blend(state, rot, blau, 20)
+    blend(state, rot, blau, 30)
+    if blends(state) == v + 3 {
+        n = n + 1
+    }
+    // 8. ... und die beiden Abkuerzungen zaehlen NICHT als Mischung.
+    let v2: u64 = blends(state)
+    let s2: u64 = blend_skips(state)
+    blend(state, rot, blau, 0)
+    blend(state, rot, blau, 255)
+    if blends(state) == v2 && blend_skips(state) == s2 + 2 {
+        n = n + 1
+    }
+    // 9. `pixel_a` mit a = 255 schreibt wie `pixel`.
+    pixel(state, 0, 0, weiss)
+    pixel_a(state, 1, 0, weiss, 255)
+    if get_pixel(state, 1, 0) == weiss {
+        n = n + 1
+    }
+    // 10. `pixel_a` mit a = 0 laesst den Bildpunkt in Ruhe.
+    pixel(state, 2, 0, rot)
+    pixel_a(state, 2, 0, weiss, 0)
+    if get_pixel(state, 2, 0) == rot {
+        n = n + 1
+    }
+    // 11. DIE EIGENTLICHE ZUSAGE: der Bildpunkt wird gegen DAS
+    //     GEMISCHT, WAS SCHON DA STEHT, und nicht ersetzt.
+    pixel(state, 3, 0, schwarz)
+    pixel_a(state, 3, 0, weiss, 128)
+    if get_pixel(state, 3, 0) == rgb(state, 128, 128, 128) {
+        n = n + 1
+    }
+    // 12. Zweimal dieselbe halbe Deckung uebereinander ist NICHT
+    //     dasselbe wie einmal -- die Rechnung ist nicht idempotent,
+    //     und wer das verwechselt, malt Schatten doppelt.
+    pixel_a(state, 3, 0, weiss, 128)
+    if get_pixel(state, 3, 0) == rgb(state, 192, 192, 192) {
+        n = n + 1
+    }
+    // 13. `hline_a` liefert Bildpunkt fuer Bildpunkt dasselbe wie
+    //     `pixel_a` -- die schnelle Zeile und der einzelne Punkt duerfen
+    //     sich nicht unterscheiden.
+    fill(state, 0, 1, 8, 1, schwarz)
+    hline_a(state, 0, 1, 8, weiss, 77)
+    pixel(state, 0, 2, schwarz)
+    pixel_a(state, 0, 2, weiss, 77)
+    var gleich: bool = true
+    var k: u64 = 0
+    while k < 8 {
+        if get_pixel(state, k, 1) != get_pixel(state, 0, 2) {
+            gleich = false
+        }
+        k = k + 1
+    }
+    if gleich {
+        n = n + 1
+    }
+    // 14. `fill_a` ist `hline_a` je Zeile -- und beschmutzt den Bereich,
+    //     sonst waere das Gemalte nach dem naechsten `flush` weg.
+    fill(state, 0, 3, 4, 2, schwarz)
+    let d0: u64 = kstate.get(state, FB_OFF + S_DIRTY_LO)
+    fill_a(state, 0, 3, 4, 2, weiss, 77)
+    if get_pixel(state, 3, 4) == get_pixel(state, 0, 2)
+        && kstate.get(state, FB_OFF + S_DIRTY_LO) <= d0 {
+        n = n + 1
+    }
+    return n
+}
+
+fn selftest3_max() -> u64 {
+    return 14
 }
 
 // Liest einen Bildpunkt DER TAFEL. `get_pixel` liest aus dem Ziel des
