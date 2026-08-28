@@ -27,6 +27,7 @@
 # HAS to be equal -- the symbol table and the freestanding property.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
+. tools/lib/qemu.sh          # $QEMU_X86, $OSUM_QEMU_ACCEL
 
 export FIRNLIB="$(pwd)/lib"
 FIRNC=${FIRNC:-vendor/firn/bin/firnc}
@@ -122,7 +123,7 @@ if command -v qemu-system-x86_64 >/dev/null 2>&1; then
         # QEMU's multiboot loader only takes ELF32; all addresses lie below
         # 4 GiB, so a rewrite of the header is enough.
         objcopy -O elf32-i386 "$TMPD/k$s.elf" "$TMPD/k$s.mb" 2>/dev/null
-        timeout 20 qemu-system-x86_64 -kernel "$TMPD/k$s.mb" -serial stdio \
+        timeout 20 $QEMU_X86 -kernel "$TMPD/k$s.mb" -serial stdio \
             -display none -no-reboot > "$TMPD/q$s.txt" 2>&1
         if grep -q "FIRN: profile kernel ist" "$TMPD/q$s.txt" \
            && grep -q "freestanding." "$TMPD/q$s.txt"; then

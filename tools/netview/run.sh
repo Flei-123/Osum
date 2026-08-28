@@ -35,6 +35,7 @@
 # Usage:  bash tools/netview/run.sh
 set -uo pipefail
 cd "$(dirname "$0")/../.."
+. tools/lib/qemu.sh          # $QEMU_X86, $OSUM_QEMU_ACCEL
 ROOT=$(pwd)
 
 export FIRNLIB="$ROOT/lib"
@@ -236,7 +237,7 @@ run_script() {
     fi
     cp "$TMPD/disk.img" "$TMPD/live.img"
     rm -f "$out"
-    timeout 240 qemu-system-x86_64 -kernel "$TMPD/k0.mb" -m 256 \
+    timeout 240 $QEMU_X86 -kernel "$TMPD/k0.mb" -m 256 \
         -append "$BASE $net $extra script=$script" \
         -serial "file:$out" -display none -no-reboot \
         "${NET[@]}" \
@@ -510,7 +511,7 @@ gshot() {
     # enough either: the run that drives a mouse spends sixteen seconds
     # on the script alone, and a boot to `wm: hold` under a competing
     # suite has been seen at three hundred and eighty.
-    timeout 600 qemu-system-x86_64 -kernel "$TMPD/k0.mb" -m 256 \
+    timeout 600 $QEMU_X86 -kernel "$TMPD/k0.mb" -m 256 \
         -append "$GBASE $extra" -serial "file:$out" -display none -no-reboot \
         -vga std -monitor "unix:$sock,server,nowait" \
         -drive "file=$TMPD/gl-$name.img,format=raw,if=ide,index=0" \
@@ -922,7 +923,7 @@ run_script "/bin/netview fallback always;/bin/cat /etc/netview.conf;exit" \
 # The SECOND boot deliberately reuses the image the first one wrote to.
 cp "$TMPD/live.img" "$TMPD/persist.img"
 rm -f "$TMPD/fb-r.txt"
-timeout 240 qemu-system-x86_64 -kernel "$TMPD/k0.mb" -m 256 \
+timeout 240 $QEMU_X86 -kernel "$TMPD/k0.mb" -m 256 \
     -append "$BASE $NETARGS script=/bin/netview boot;/bin/netview fallback;exit" \
     -serial "file:$TMPD/fb-r.txt" -display none -no-reboot \
     -netdev "socket,id=n0,udp=127.0.0.1:$BPORT,localaddr=127.0.0.1:$QPORT" \

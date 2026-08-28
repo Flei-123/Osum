@@ -49,6 +49,7 @@
 # Verwendung:  bash tools/k16/run.sh
 set -uo pipefail
 cd "$(dirname "$0")/../.."
+. tools/lib/qemu.sh          # $QEMU_X86, $OSUM_QEMU_ACCEL
 ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
 
@@ -344,7 +345,7 @@ printf 'fn main(start: u64) -> i32 {\n    return 1\n}\n' > "$TMPD/q/andere.fi"
 lauf() { # abbild anhang ausgabe [zeitlimit]
     local img=$1 anh=$2 out=$3 tl=${4:-900}
     cp "$img" "$TMPD/live.img"
-    timeout "$tl" qemu-system-x86_64 -kernel "$TMPD/k.mb" -m 512 \
+    timeout "$tl" $QEMU_X86 -kernel "$TMPD/k.mb" -m 512 \
         -append "$anh" -serial "file:$out" -display none -no-reboot \
         -drive "file=$TMPD/live.img,format=raw,if=ide,index=0" \
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1

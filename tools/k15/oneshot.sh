@@ -7,6 +7,7 @@
 # Legt unter $OUT ab: <name>.txt (die serielle Leitung) und <name>.ppm.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
+. tools/lib/qemu.sh          # $QEMU_X86, $OSUM_QEMU_ACCEL
 OUT=${OUT:-/tmp/k15}
 NAME=${1:-w}
 ZEILE=${2:-"gfx wm wig wmhold wiglong nokbd nosched noproc nofs"}
@@ -15,7 +16,7 @@ MARKE=${MARKE:-"^wm: hold"}
 sock="$OUT/mon-$NAME.sock"
 rm -f "$sock" "$OUT/$NAME.txt" "$OUT/$NAME.ppm"
 cp -f "$OUT/disk.img" "$OUT/live-$NAME.img"
-timeout 240 qemu-system-x86_64 -kernel "$OUT/k.mb" -m 256 -append "$ZEILE" \
+timeout 240 $QEMU_X86 -kernel "$OUT/k.mb" -m 256 -append "$ZEILE" \
     -serial "file:$OUT/$NAME.txt" -display none -no-reboot -vga std \
     -monitor "unix:$sock,server,nowait" \
     -drive "file=$OUT/live-$NAME.img,format=raw,if=ide,index=0" \
