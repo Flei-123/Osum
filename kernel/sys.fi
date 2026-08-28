@@ -39,6 +39,7 @@
 
 import serial
 import gfx
+import sercon
 import kstate
 import mem
 import sched
@@ -2385,6 +2386,22 @@ fn tty_read(state: u64, me: u64, t: u64, buf: u64, len: u64) -> u64 {
         // EINGABE, und null ist genau das -- kein Fehler.
         return 0
     }
+    // RUNDE SERVERBUILD: WIE LANGE EINE KONSOLE WARTET, HAENGT DARAN,
+    // OB EIN MENSCH DARAN SITZT.
+    //
+    // Die vier Sekunden oben sind richtig fuer einen Testlauf: der
+    // Kernel muss sich selbst beenden koennen, und eine Messung, die
+    // in einem Zeitlimit endet, misst nichts. Sie sind falsch fuer
+    // einen Server, an dem jemand nachdenkt, bevor er tippt -- dort
+    // waere die Shell nach vier Sekunden Stille am Ende der Eingabe
+    // und faende sich in einem `exit` wieder.
+    //
+    // Mit `console=ttyS0` wartet die Konsole deshalb WIRKLICH: bis ein
+    // Oktett kommt oder ein Signal den Leser unterbricht. Ohne das
+    // Wort bleibt jede bestehende Messung auf den Tick genau, wie sie
+    // war -- das ist der Grund, warum hier eine Bedingung steht und
+    // nicht eine neue Zahl.
+    let endlos: bool = sercon.active(state) && t == tty.console()
     var idle: u64 = 0
     while idle < KEY_IDLE {
         // ROUND K9: ein wartender Leser ist unterbrechbar. Das ist die
@@ -2394,11 +2411,17 @@ fn tty_read(state: u64, me: u64, t: u64, buf: u64, len: u64) -> u64 {
         if signal.interrupted(state, me) {
             return neg(errno.E_INTR)
         }
+        // RUNDE SERVERBUILD: selbst nachsehen. Ohne `console=` tut das
+        // nichts; mit `noserirq` ist es der einzige Weg, auf dem noch
+        // etwas hereinkommt, und genau das misst die Gegenprobe.
+        sercon.poll(state)
         if tty.waiting(state, t) != 0 {
             return tty_drain(state, me, t, buf, len)
         }
         sched.sleep_ticks(state, 1)
-        idle = idle + 1
+        if !endlos {
+            idle = idle + 1
+        }
     }
     return 0
 }
