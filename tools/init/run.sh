@@ -116,6 +116,15 @@ sp() {
         | $which -1 | awk -v c="$col" '{print $c}'
 }
 
+# Der GROESSTE Wert einer Spalte ueber ALLE Ausgaben im Mitschnitt. Fuer
+# eine Zahl, die nur wachsen kann (die Starts), ist das die ehrliche
+# Frage -- `tail` traefe die Zeile, die `svc stop` gerade ausgegeben hat.
+spmax() {
+    local f=$1 name=$2 col=$3
+    grep -aoE "^$name (running|stopped|done|waiting|failed) [0-9]+ [0-9]+ [0-9]+ [0-9]+ [a-z,]+" "$f" \
+        | awk -v c="$col" '{print $c}' | sort -n | tail -1
+}
+
 bash vendor/firn/fetch-firnc.sh >/dev/null || { echo "vendor/firn/fetch-firnc.sh fehlgeschlagen"; exit 1; }
 [ -x "$FIRNC" ] || { echo "firnc0 fehlt: $FIRNC"; exit 1; }
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
@@ -205,6 +214,8 @@ printf 'grafik\n'  > "$TMPD/ziel-g"
 
 cat > "$TMPD/dienste.sh" <<'SCRIPT'
 echo ==BEGIN==
+svc status
+echo --SPAETER--
 sleep 5
 svc status
 echo --TAFEL--
@@ -286,7 +297,7 @@ hasnot "$F" "init: ich bin nicht der Prozess 1" "init IST der Prozess 1"
 
 echo "-- 3a. respawn: der Dienst, der wiederkommt"
 first=$(sp "$F" blink 4 head)
-later=$(sp "$F" blink 4 tail)
+later=$(spmax "$F" blink 4)
 if [ -n "${later:-}" ] && [ "$later" -gt "${first:-0}" ]; then
     ok "ein Dienst mit respawn wird neu gestartet: $first -> $later Starts"
 else bad "der Dienst wurde nicht neu gestartet (${first:-?} -> ${later:-?})"; fi
@@ -453,7 +464,10 @@ rc=$(run_case initsh "$TMPD/d0.img" "osum initsh $BASE script=id" 300 -no-reboot
 I="$TMPD/initsh.txt"
 is "DER NOTWEG: mit initsh endet der Lauf wie vor dieser Runde" "$rc" "21"
 hasnot "$I" "osum: pid1 init" "und zwar mit /bin/sh statt init"
-has "$I" "uid=0(root)" "das System ist damit vollstaendig benutzbar"
+# OHNE /etc/passwd KENNT `id` KEINEN NAMEN -- das Abbild dieser Runde
+# hat keine, und `uid=0(root)` waere hier eine Erfindung. Gemessen wird
+# die Zeile, die dieses Abbild wirklich liefert.
+has "$I" "uid=0 gid=0 euid=0 egid=0" "das System ist damit vollstaendig benutzbar"
 
 # ------------------------------------------------------ 7. firnc1
 
