@@ -144,7 +144,7 @@ for roh in open("assets/icons/icons.map", encoding="ascii"):
     if "=" in z:
         karte[z.split("=")[0].strip()] = True
 tips = {}
-for roh in open("locale/en/icons", encoding="ascii"):
+for roh in open("locale/en/icons", encoding="utf-8"):
     z = roh.split("#", 1)[0].strip()
     if "=" in z:
         k = z.split("=")[0].strip()
@@ -153,7 +153,7 @@ for roh in open("locale/en/icons", encoding="ascii"):
 fehlt = sorted(k for k in karte if k not in tips)
 zuviel = sorted(k for k in tips if k not in karte)
 de = {}
-for roh in open("locale/de/icons", encoding="ascii"):
+for roh in open("locale/de/icons", encoding="utf-8"):
     z = roh.split("#", 1)[0].strip()
     if "=" in z:
         k = z.split("=")[0].strip()

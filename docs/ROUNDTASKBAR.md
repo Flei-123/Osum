@@ -4,7 +4,7 @@ Branch `taskbar-edge`, on top of round DESKTOP. 27 August 2026.
 
 Justin asked whether the taskbar can be dragged to another screen edge,
 the way Windows 10 could and Windows 11 no longer can. It could not.
-`kernel/user/leiste.fi` had no position at all: the bar was at the bottom
+`kernel/user/taskbar.fi` (then `leiste.fi`) had no position at all: the bar was at the bottom
 because `py = sh - PH` stood in the source, and there was nothing to
 change. This addendum gives it one, in the two ways one expects — by
 dragging it, and by setting it — and gives the window server the concept
@@ -18,7 +18,7 @@ that makes either of them useful: a **work area**.
 |---|---|
 | Edges | `bottom`, `top`, `left`, `right`. Left and right are a **vertical bar** with a different layout, not a rotated rectangle. |
 | Set by dragging | press on an empty part of the bar, pull towards an edge, let go. A preview **rectangle** follows the pointer. |
-| Set in the settings | `/bin/einstellungen`, page *Darstellung*: edge, thickness, auto-hide, always-on-top. |
+| Set in the settings | `/bin/settings`, page *Darstellung*: edge, thickness, auto-hide, always-on-top. |
 | One place for the state | `/etc/taskbar.conf`. Both writers write it, the bar reads it — at start and twice a second afterwards, so a change in the settings arrives without a restart. |
 | Thickness | two keys, `height` for a horizontal bar and `width` for a vertical one, because they are two different numbers. |
 | Auto-hide | the bar slides out to a two-pixel sliver and comes back when the pointer touches the edge. |
@@ -28,7 +28,7 @@ that makes either of them useful: a **work area**.
 `/etc/taskbar.conf`:
 
 ```
-# taskbar.conf -- written by /bin/leiste and /bin/einstellungen
+# taskbar.conf -- written by /bin/taskbar and /bin/settings
 edge=left
 height=28
 width=104
@@ -246,7 +246,7 @@ moved out.
 
 ### 4.7 The settings write the same file
 
-Three real clicks in `/bin/einstellungen`: open the drop-down, take the
+Three real clicks in `/bin/settings`: open the drop-down, take the
 row `right`, press *Uebernehmen*.
 
 | | |
@@ -276,15 +276,15 @@ the round shipped anyway. Measured, not guessed:
 | round DESKTOP (d7bdcfc) | 100 passed, **3 failed** — the three titles |
 | this branch | 103 passed, 0 failed — the one-line fix |
 
-**2. `kernel/user/leiste.fi` had never been compiled.** Round DESKTOP
+**2. `kernel/user/taskbar.fi` (then `leiste.fi`) had never been compiled.** Round DESKTOP
 wrote 695 lines of taskbar and no runner to build them; the file did not
 parse (`*%` at the start of a continuation line). Neither did
-`einstellungen.fi` build against the library after this addendum touched
+`settings.fi` build against the library after this addendum touched
 it. Both are in the build list of `tools/desktop/run.sh` now, out of
 **both** compilers, and the kernel image is checked for their symbols to
 show they live in ring 3.
 
-**3. The choice widgets in `/bin/einstellungen` never opened.** `wlib`
+**3. The choice widgets in `/bin/settings` never opened.** `wlib`
 fires `K_CHOICE` with index `0x1000` and leaves it to the application to
 open the menu; the application did not. Resolution, time zone and DHCP
 were pictures of drop-downs. They work now — the same handler serves the
@@ -348,7 +348,8 @@ The counter-tests on the command line are unchanged and still reachable:
 - **The user interface is half German.** The tab is still called
   *Darstellung* and the buttons still say *Uebernehmen*; everything this
   addendum added is English. The parallel round RENAME owns that
-  translation, and the same round renames `leiste.fi` to `taskbar.fi`,
-  which is why this file still carries its old name.
+  translation. The file itself was renamed to `taskbar.fi` by round
+  LOOK's addendum; round RENAME had left it alone because four rounds
+  were editing it at the same time.
 - **The clock is not a clock.** It is the hardware clock plus an offset
   from `/etc/time.conf`. This kernel can read the RTC and not set it.
