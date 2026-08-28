@@ -695,6 +695,9 @@ lauf "27. Marken statt Farben: hell, dunkel, automatisch, und der Kontrast nachg
 # muss hochkommen und die Oberflaeche ohne Symbole malen.
 lauf "25. das Symbolsystem: eine Schrift fuer die Oberflaeche, Bitmaps fuer die Anwendungen (tools/icons/run.sh, Runde ICONS)" \
      tools/icons/run.sh icons '^icons: |^  OK    (assets/osum-icons.ttf|lib/icons.fi|raw code points|counterproof|the kernel loaded|the kernel says|and Ring 3 sees|assertions|an icon in memory|screenshot)|^        (per mixed pixel|one icon cold|in memory:|both mix)'
+lauf "26. die Mischung, die Kante, der Schatten und das Symbol -- jedes mit seinem Preis (tools/paint/run.sh, Runde PAINT)" \
+     tools/paint/run.sh paint '^PAINT: |^  OK    (abschneiden|\(num|Kern und Wirt|a=0 laesst|alle 5 Fundstellen|[0-9]+x[0-9]+: |dieselbe Rechnung nativ|fb.selftest3|und der Zaehler|jedes Zeichen|jede Kante|mittlere Abweichung|keine zwei Skalare|Aufrufnummer|und 2116|kernel/.* numeriert|der Satz von WM_LIST|und der Buendelname|shape=|GEGENPROBE classic|[0-9]+ Symbole|die Taskleiste hat)|^  OK    die Ecke traegt'
+
 lauf "25. eine Netzsicht je Prozess: real, filtered, faked, none (tools/netview/run.sh, Runde NETVIEW)" \
      tools/netview/run.sh netview '^NETVIEW: |^  OK    (OCTETS THAT LEFT|faked: (connect|reading|the WHOLE|the BODY|a name resolved|and the reachability)|none: (connect|and it said)|real: connect took|and the python server|(nocarrier|noip|noroute|online): the icon|(dark|light): (button|and the REAL)|kernel/netmark|8[a-f]:|faking:)'
 
