@@ -574,3 +574,20 @@ One page, as asked. No code.
 | `tools/paint/scalars.py` | two rounds on one address, mechanically |
 | `tools/paint/shadow.py` | shadow ramp, corner steps and symbol ink, read out of a screenshot |
 | `tools/paint/run.sh` | section 26 of the acceptance |
+
+---
+
+## 11. THE PICTURES
+
+`docs/shots/paint/`, all four 800×600, `scheme=day mode=light`, same
+disk image, same programs:
+
+| file | what it is |
+|---|---|
+| `1-vorher-modern.png` | branch `look`, `shape=modern`. The search dialog fills the whole screen — that is the address collision of section 3, not a design. Square frame, no shadow, text-only taskbar buttons. |
+| `2-nur-adressen-umgelegt.png` | `look` plus **only** the thirteen relocated constants. The dialog is back at 190,110 440×300. Still square, still no shadow, still text-only. 387 093 of 480 000 pixels differ from picture 1. |
+| `3-nachher-modern.png` | branch `paint`. Rounded frame (18 blended corner pixels), six-pixel shadow, program symbols in the buttons (172 and 185 ink pixels). |
+| `4-nachher-classic.png` | branch `paint`, `shape=classic`. Square corner (0 blended corner pixels), no shadow — the promise that the old appearance is untouched. |
+
+Picture 2 exists so that the two changes are not confused with each
+other. Most of what "looks different" between 1 and 3 is picture 2.
