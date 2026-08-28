@@ -33,6 +33,7 @@
 import serial
 import kstate
 import nvme
+import ahci
 import arch.arch
 import usb
 
@@ -45,7 +46,9 @@ export {
     // ---- Runde OFS3 ----
     capacity,
     // ---- RUNDE INSTALL ----
-    use_at, first, identify, probe_ata0, flush
+    use_at, first, identify, probe_ata0, flush,
+    // ---- RUNDE AHCI ----
+    use_ahci, DEV_AHCI
 }
 
 const BLOCK_SIZE: u64 = 512
@@ -69,6 +72,19 @@ const DEV_ATA1: u64 = 3
 // Art: der Stick wird eingehaengt, beschrieben, und danach liest der
 // WIRT das Abbild mit `mtools` und vergleicht Oktett fuer Oktett.
 const DEV_USB: u64 = 4
+
+// RUNDE AHCI: DER FUENFTE, und der erste, den ein GEWOEHNLICHER PC hat.
+//
+// DEV_RAM ist Speicher, DEV_ATA/DEV_ATA1 sind die Ports von 1986,
+// DEV_NVME ist die Platte von 2015 und DEV_USB ein Stick. Was in dieser
+// Liste fehlte, ist der haeufigste Fall ueberhaupt: eine SATA-SSD an
+// einem Controller im nativen AHCI-Modus (`kernel/ahci.fi`).
+//
+// Und zum VIERTEN Mal aendert sich an dieser Schnittstelle nichts --
+// kein Argument mehr, keine zweite Leseroutine, keine Zeile in `fs.fi`
+// oder `fat.fi`. Derselbe Satz stand bei DEV_NVME (K2), DEV_ATA1 (K14)
+// und DEV_USB (K17); dass er zum vierten Mal stimmt, ist der Punkt.
+const DEV_AHCI: u64 = 5
 
 // ------------------------------------------------------------- the RAM
 
@@ -122,6 +138,15 @@ fn use_nvme(state: u64, blocks_n: u64) {
     kstate.set(state, kstate.DISK, 0)
     kstate.set(state, kstate.DISK_BLOCKS, blocks_n)
     kstate.set(state, kstate.DISK_DEV, DEV_NVME)
+    kstate.set(state, kstate.DISK_FIRST, 0)
+}
+
+// RUNDE AHCI. Der fuenfte, und die Schnittstelle wird um kein Argument
+// breiter.
+fn use_ahci(state: u64, blocks_n: u64) {
+    kstate.set(state, kstate.DISK, 0)
+    kstate.set(state, kstate.DISK_BLOCKS, blocks_n)
+    kstate.set(state, kstate.DISK_DEV, DEV_AHCI)
     kstate.set(state, kstate.DISK_FIRST, 0)
 }
 
@@ -399,6 +424,9 @@ fn present_on(state: u64, dev: u64) -> bool {
     if dev == DEV_USB {
         return usb.msc_ready(state)
     }
+    if dev == DEV_AHCI {
+        return ahci.blocks(state) != 0
+    }
     return true
 }
 
@@ -464,6 +492,9 @@ fn blocks_on(state: u64, dev: u64) -> u64 {
     }
     if dev == DEV_USB {
         return usb.msc_blocks(state)
+    }
+    if dev == DEV_AHCI {
+        return ahci.blocks(state)
     }
     return kstate.get(state, kstate.DISK_BLOCKS)
 }
@@ -669,6 +700,9 @@ fn read_on(state: u64, dev: u64, lba: u64, dst: u64) -> bool {
     if dev == DEV_USB {
         return usb.msc_read(state, lba, dst)
     }
+    if dev == DEV_AHCI {
+        return ahci.read_block(state, lba, dst)
+    }
     let base: u64 = kstate.get(state, kstate.DISK)
     if base == 0 {
         return false
@@ -692,6 +726,9 @@ fn write_on(state: u64, dev: u64, lba: u64, src: u64) -> bool {
     }
     if dev == DEV_USB {
         return usb.msc_write(state, lba, src)
+    }
+    if dev == DEV_AHCI {
+        return ahci.write_block(state, lba, src)
     }
     let base: u64 = kstate.get(state, kstate.DISK)
     if base == 0 {
@@ -739,6 +776,9 @@ fn read(state: u64, lba: u64, dst: u64) -> bool {
     if kstate.get(state, kstate.DISK_DEV) == DEV_NVME {
         return nvme.read_block(state, abs, dst)
     }
+    if kstate.get(state, kstate.DISK_DEV) == DEV_AHCI {
+        return ahci.read_block(state, abs, dst)
+    }
     let base: u64 = kstate.get(state, kstate.DISK)
     if base == 0 {
         return false
@@ -760,6 +800,9 @@ fn write(state: u64, lba: u64, src: u64) -> bool {
     }
     if kstate.get(state, kstate.DISK_DEV) == DEV_NVME {
         return nvme.write_block(state, abs, src)
+    }
+    if kstate.get(state, kstate.DISK_DEV) == DEV_AHCI {
+        return ahci.write_block(state, abs, src)
     }
     let base: u64 = kstate.get(state, kstate.DISK)
     if base == 0 {
