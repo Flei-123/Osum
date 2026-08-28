@@ -184,9 +184,14 @@ Wirt: AMD EPYC 7571, 12 Kerne, QEMU 7.2.22 (Debian).
 
 | Umgebung | Runden/s | 8192 Runden |
 |---|---:|---:|
-| Osum, `-accel kvm -cpu host`, ruhige Maschine | **31.437** | **0,26 s** |
-| Osum, TCG (Softwareemulation) | **4.430** | **1,85 s** |
+| Osum, `-accel kvm -cpu host` | **30.494** | **0,269 s** |
+| Osum, TCG (Softwareemulation) | **4.168** | **1,965 s** |
 | derselbe Wirt, OpenSSL hinter Pythons `hashlib` | **1.768.429** | 0,0046 s |
+
+Abschlussmessung vom 28.08.2026, 13:24 Uhr, `load average` 16,45 —
+kleinste von drei Messungen. Dieselbe Zahl war zu Beginn der Runde bei
+geringerer Last 31.437 Runden/s; der Unterschied zwischen den beiden ist
+kleiner als der Abstand zu allem, was hier entschieden wird.
 
 (Die Zahlen im Abnahmelauf liegen niedriger, weil auf derselben Maschine
 gleichzeitig weitere Runden liefen — `load average` 17. Der Läufer prüft
@@ -195,7 +200,7 @@ und auf das **Verhältnis** 2048 : 8192, das 1 : 4 sein muss.)
 
 ### Was daraus folgt
 
-1. **8192 Runden = 0,26 s** auf echter Hardware. Das ist das
+1. **8192 Runden = 0,269 s** auf echter Hardware. Das ist das
    Zeitbudget, das man einer Anmeldung zumuten kann, und es ist das,
    worauf die übliche Empfehlung („wähle den Kostenfaktor so, dass eine
    Prüfung eine viertel Sekunde dauert") hinausläuft.
