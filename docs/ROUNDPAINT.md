@@ -572,17 +572,50 @@ for exactly this).
 
 ```
 baseline (e0a9fec)   31 sections passed, 5 FAILED, 3188 assertions
-after                32 sections passed, 5 FAILED, 3185 assertions
+after    (04fcd5b)   31 sections passed, 6 FAILED, 3197 assertions
 ```
 
-The five red sections are the **same five** before and after — `k14`,
-`k16`, `icons`, `netview`, `tunnel/pakete` — and they were red on the
-branch this round started from. One section more passes because this
-round added one (`paint`, 36 of 36).
+Five sections were red **before** this round started and are red after
+it: `k14`, `k16`, `icons`, `netview`, `tunnel/pakete`. This round adds
+one green section (`paint`, 36 of 36). The extra red one in the "after"
+column is `theme` — and it is a flake; see below.
 
-### The one thing that went newly red, and what it taught
+`compare.py` reports two sections as newly red:
 
-`compare.py` found exactly one: `NETVIEW 147/23 -> 144/25`.
+```
+25  ... NETVIEW 147/23 ...   |  ... NETVIEW 145/24 ...   <== NEWLY RED
+27  THEME   91/0             |  THEME   90/4             <== NEWLY RED
+```
+
+Both were re-run in isolation, on **both** branches, on the same
+machine. Both are timing flakes of the full run, not damage:
+
+| section | baseline, isolated | paint, isolated | verdict |
+|---|---|---|---|
+| `netview` | 147 passed / 23 failed | **148 passed / 22 failed** | one *better* than the baseline |
+| `theme` | 91 / 0 | **91 / 0** | identical |
+
+The `netview` failure lists were diffed line by line (numbers masked):
+the `paint` list is the baseline list **minus one entry**
+(`9d: the running filtered window kept its view`). Not a single failure
+in it is new.
+
+`theme` fails in the full run at exactly the place its own source
+comment warns about. `tests/theme/run.sh` reads `G_AVG` off the serial
+line, on which five processes write at once since rounds DESKTOP and
+TASKBAR; the script already takes the last *fully formed* line. Under
+the load of a complete `./test.sh` no fully formed line arrived at all,
+so `gsw`/`gdet`/`gpnt` came up empty and four assertions fell over. The
+same test alone: `THEME: 91 bestanden, 0 durchgefallen`. The same test
+in the earlier full run of this branch (`AFTER3`): `91 / 0`. The
+flakiness is real and pre-existing; this round did not cause it and did
+not fix it. It is written down here rather than hidden, and it is the
+one thing a later round should fix — the measurement lines of
+`themetest` need a channel that is not shared.
+
+### The one thing that really went red, and what it taught
+
+An earlier full run of this branch found a genuine regression:
 
 ```
 FAIL  dark:  button 1, mark-filtered: falsch 54 von 54
@@ -597,15 +630,8 @@ of one calculation in two places, and the runner looks for the mark
 where the report claims it is.
 
 Fixed by deleting the copy: the position is computed in exactly one
-place — the one that paints — and the report reads it back. After that,
-a dedicated re-run:
-
-```
-NETVIEW  147 passed / 23 failed   (baseline)
-NETVIEW  148 passed / 22 failed   (paint)
-```
-
-One better than the baseline, and no `mark-filtered` failure left.
+place — the one that paints — and the report reads it back. The
+isolated re-run above (148 / 22) is the proof.
 
 **No test was weakened.** Two assertions were brought back into contact
 with reality instead of being switched off:
