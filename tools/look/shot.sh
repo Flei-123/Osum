@@ -110,9 +110,24 @@ if [ ! -s "$BUILDD/crt.o" ] || [ -n "${LOOKREBUILD:-}" ]; then
     as --64 -o "$BUILDD/crt.o" kernel/user/crt.s 2>"$BUILDD/as.err" \
         || { echo "FAILED: crt.s"; cat "$BUILDD/as.err"; exit 1; }
 fi
+# A PROGRAM IS NOT ONLY ITS OWN FILE.
+#
+# This compared $p.elf against kernel/user/$p.fi and nothing else. But
+# every one of these programs does `import wlib`, and wlib.fi is where
+# the widgets live -- so a change to a list, a button or a trace never
+# reached the image, and the ONLY symptom was that the new line was
+# missing from the serial log. That is the same silent staleness the
+# second addendum found in the kernel step ("only rebuilt when it was
+# MISSING"), one directory further down.
+#
+# The newest file in kernel/user decides for all of them. Recompiling
+# thirteen small programs costs a few seconds; a measurement taken
+# against yesterday's binary costs a round.
+USERNEW=$(ls -t kernel/user/*.fi 2>/dev/null | head -1)
 for p in $progs; do
     if [ -s "$BUILDD/$p.elf" ] && [ -z "${LOOKREBUILD:-}" ] \
-       && [ "$BUILDD/$p.elf" -nt "kernel/user/$p.fi" ]; then
+       && [ "$BUILDD/$p.elf" -nt "kernel/user/$p.fi" ] \
+       && [ -n "$USERNEW" ] && [ "$BUILDD/$p.elf" -nt "$USERNEW" ]; then
         continue
     fi
     vendor/firn/bin/firnc "kernel/user/$p.fi" -o "$BUILDD/$p.o" \
