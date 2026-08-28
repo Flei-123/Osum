@@ -1,0 +1,261 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/fsrv.fi -- RUNDE FSROBUST: WAS NACH DEM STROMAUSFALL
+// DASTEHT.
+//
+// Es laeuft im ZWEITEN Start auf derselben Platte, nachdem `fsrw` mitten
+// im Schreiben abgeschossen wurde. Beim Einhaengen hat der Kern das
+// Journal nachgetragen; dieses Programm prueft, was dabei herauskam --
+// und zwar durch dieselben Systemaufrufe wie jedes andere Programm, weil
+// ein Kern, der sich selbst prueft, nichts beweist.
+//
+// DIE ZUSAGEN, GEGEN DIE GEMESSEN WIRD:
+//
+//   1. /d/roll TRAEGT GENAU EINE GENERATION. Die ersten acht Oktette
+//      sagen welche; die restlichen 4088 muessen dazu passen. Eine
+//      Datei, die vorne neu und hinten alt ist, ist der Schaden, den
+//      ein Journal ohne Datensicherung hinterlaesst -- hier faellt er
+//      auf.
+//   2. JEDE DATEI BIS /d/count IST VOLLSTAENDIG. Der Zaehler wird als
+//      LETZTES geschrieben; was unter ihm liegt, war fertig, bevor er
+//      entstand.
+//   3. DIE DATEI DANACH IST ENTWEDER NICHT DA, LEER ODER GANZ. `create`
+//      und `write` sind zwei Systemaufrufe; eine Datei mit null
+//      Oktetten ist deshalb ein erlaubter Zwischenzustand. Eine mit
+//      HALBEM Inhalt ist es nicht.
+//   4. WEITER OBEN LIEGT NICHTS. Eine Datei zwei Runden hinter dem
+//      Zaehler kann es nicht geben.
+//
+// Jede Zeile: `fsrv: <name> = <zahl>`. Die letzte ist `schaeden`, und
+// sie ist die Zahl, um die es in dieser Runde geht.
+
+profile kernel
+
+import ulib
+import libc.io
+import libc.errno
+
+export { u_start }
+
+const ROLL: u64 = 4096
+
+static mut buf: [u8; 4096] = [0 as u8; 4096];
+static mut zahl: [u8; 32] = [0 as u8; 32];
+static mut pfad: [u8; 32] = [0 as u8; 32];
+static mut ents: [u8; 4096] = [0 as u8; 4096];
+
+fn muster(g: u64, k: u64) -> u64 {
+    // `*%` und `+%`: die Rechnung LAEUFT UEBER, und das ist der Sinn --
+    // sie soll aus benachbarten Stellen weit auseinanderliegende Werte
+    // machen. Firn haelt einen ueberlaufenden `*` fuer einen Fehler und
+    // hat damit ueberall sonst recht.
+    return ((g *% 2654435761) +% (k *% 40503)) % 251;
+}
+
+fn sag(name: u64, wert: u64) {
+    var s_kopf: [u8; 7] = "fsrv: \0";
+    var s_gl: [u8; 4] = " = \0";
+    ulib.say((&s_kopf[0 as usize]) as u64);
+    ulib.say(name);
+    ulib.say((&s_gl[0 as usize]) as u64);
+    ulib.sayu(wert);
+    ulib.nl();
+}
+
+fn setze_zahl(v: u64) -> u64 {
+    if v == 0 {
+        zahl[(0) as usize] = 48 as u8;
+        zahl[(1) as usize] = 0 as u8;
+        return 1;
+    }
+    var stellen: u64 = 0;
+    var y: u64 = v;
+    while y > 0 {
+        stellen = stellen + 1;
+        y = y / 10;
+    }
+    let n: u64 = stellen;
+    var x: u64 = v;
+    while stellen > 0 {
+        zahl[(stellen - 1) as usize] = (48 + (x % 10)) as u8;
+        x = x / 10;
+        stellen = stellen - 1;
+    }
+    zahl[(n) as usize] = 0 as u8;
+    return n;
+}
+
+fn baue_pfad(g: u64) {
+    var p_f: [u8; 4] = "/d/\0";
+    ulib.strcpy((&pfad[0 as usize]) as u64, (&p_f[0 as usize]) as u64);
+    setze_zahl(g);
+    ulib.strcat((&pfad[0 as usize]) as u64, (&zahl[0 as usize]) as u64);
+}
+
+// 0 = gibt es nicht, 1 = da und leer, 2 = da und vollstaendig,
+// 3 = da und KAPUTT (falsche Laenge oder falsche Oktette)
+fn pruefe_datei(g: u64) -> u64 {
+    baue_pfad(g);
+    let fd: u64 = io.open((&pfad[0 as usize]) as u64, 0);
+    if errno.failed(fd) {
+        return 0;
+    }
+    let soll: u64 = 1024 + (g * 617) % 3072;
+    let n: u64 = io.read_full(fd, (&buf[0 as usize]) as u64, 4096);
+    io.close(fd);
+    if errno.failed(n) {
+        return 3;
+    }
+    if n == 0 {
+        return 1;
+    }
+    if n != soll {
+        return 3;
+    }
+    var i: u64 = 0;
+    while i < n {
+        if (buf[(i) as usize] as u64) != muster(g + 1000000, i) {
+            return 3;
+        }
+        i = i + 1;
+    }
+    return 2;
+}
+
+fn u_start(args: u64) -> u64 {
+    var n_count: [u8; 7] = "count\0\0";
+    var n_rollgen: [u8; 9] = "rollgen\0\0";
+    var n_rolllen: [u8; 9] = "rolllen\0\0";
+    var n_rollok: [u8; 8] = "rollok\0\0";
+    var n_ganz: [u8; 6] = "ganz\0\0";
+    var n_next: [u8; 6] = "next\0\0";
+    var n_next2: [u8; 7] = "next2\0\0";
+    var n_dents: [u8; 7] = "dents\0\0";
+    var n_schaeden: [u8; 10] = "schaeden\0\0";
+    var p_roll: [u8; 8] = "/d/roll\0";
+    var p_count: [u8; 9] = "/d/count\0";
+    var p_d: [u8; 3] = "/d\0";
+
+    var schaeden: u64 = 0;
+
+    // ------------------------------------------------------- der Zaehler
+    var c: u64 = 0;
+    let cf: u64 = io.open((&p_count[0 as usize]) as u64, 0);
+    if !errno.failed(cf) {
+        let n: u64 = io.read(cf, (&buf[0 as usize]) as u64, 31);
+        io.close(cf);
+        if !errno.failed(n) {
+            var i: u64 = 0;
+            while i < n {
+                let ch: u64 = buf[(i) as usize] as u64;
+                if ch >= 48 && ch <= 57 {
+                    c = c * 10 + (ch - 48);
+                } else {
+                    i = n;
+                }
+                i = i + 1;
+            }
+        }
+    }
+    sag((&n_count[0 as usize]) as u64, c);
+
+    // ----------------------------------------------------- die Rolldatei
+    var rollgen: u64 = 0;
+    var rolllen: u64 = 0;
+    var rollok: u64 = 0;
+    let rf: u64 = io.open((&p_roll[0 as usize]) as u64, 0);
+    if errno.failed(rf) {
+        // Nur erlaubt, solange noch keine Runde fertig wurde.
+        if c == 0 {
+            rollok = 1;
+        }
+    } else {
+        let n: u64 = io.read_full(rf, (&buf[0 as usize]) as u64, ROLL);
+        io.close(rf);
+        if !errno.failed(n) {
+            rolllen = n;
+        }
+        if rolllen == 0 && c == 0 {
+            rollok = 1;
+        }
+        if rolllen == ROLL {
+            var g: u64 = 0;
+            var i: u64 = 0;
+            while i < 8 {
+                g = g | ((buf[(i) as usize] as u64) << (i * 8));
+                i = i + 1;
+            }
+            rollgen = g;
+            var gut: bool = true;
+            i = 8;
+            while i < ROLL {
+                if (buf[(i) as usize] as u64) != muster(g, i) {
+                    gut = false;
+                    i = ROLL;
+                }
+                i = i + 1;
+            }
+            if gut && g >= c && g != 0 {
+                rollok = 1;
+            }
+        }
+    }
+    sag((&n_rollgen[0 as usize]) as u64, rollgen);
+    sag((&n_rolllen[0 as usize]) as u64, rolllen);
+    sag((&n_rollok[0 as usize]) as u64, rollok);
+    if rollok == 0 {
+        schaeden = schaeden + 1;
+    }
+
+    // --------------------------------------- jede Datei bis zum Zaehler
+    var ganz: u64 = 0;
+    var g2: u64 = 1;
+    while g2 <= c {
+        let z: u64 = pruefe_datei(g2);
+        if z == 2 {
+            ganz = ganz + 1;
+        } else {
+            schaeden = schaeden + 1;
+        }
+        g2 = g2 + 1;
+    }
+    sag((&n_ganz[0 as usize]) as u64, ganz);
+
+    // ------------------------------------------------ die Datei danach
+    let z1: u64 = pruefe_datei(c + 1);
+    sag((&n_next[0 as usize]) as u64, z1);
+    if z1 == 3 {
+        schaeden = schaeden + 1;
+    }
+    // und die uebernaechste: die darf es nicht geben
+    let z2: u64 = pruefe_datei(c + 2);
+    sag((&n_next2[0 as usize]) as u64, z2);
+    if z2 != 0 {
+        schaeden = schaeden + 1;
+    }
+
+    // ------------------------------------ das Verzeichnis laesst sich lesen
+    var dents: u64 = 0;
+    let dd: u64 = io.dir_open((&p_d[0 as usize]) as u64);
+    if errno.failed(dd) {
+        schaeden = schaeden + 1;
+    } else {
+        var going: bool = true;
+        while going {
+            let n: u64 = io.dir_read(dd, (&ents[0 as usize]) as u64, 4096);
+            if n == 0 || errno.failed(n) {
+                going = false;
+            } else {
+                var at: u64 = 0;
+                while at < n {
+                    dents = dents + 1;
+                    at = at + io.dir_reclen((&ents[0 as usize]) as u64 + at);
+                }
+            }
+        }
+        io.close(dd);
+    }
+    sag((&n_dents[0 as usize]) as u64, dents);
+
+    sag((&n_schaeden[0 as usize]) as u64, schaeden);
+    return 0;
+}
