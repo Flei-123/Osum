@@ -1,0 +1,274 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/srt.fi -- Runde DEMUX: Untertitel aus einer .srt-Datei.
+//
+// SubRip ist das einzige Untertitelformat, das man ehrlich in hundert
+// Zeilen lesen kann, und genau deshalb steht es hier: ein Block ist eine
+// Nummer, eine Zeitzeile und ein oder mehrere Textzeilen, getrennt durch
+// eine Leerzeile.
+//
+//     1
+//     00:00:00,200 --> 00:00:01,200
+//     Erster Untertitel
+//
+// WAS ABSICHTLICH NICHT GELESEN WIRD: ASS/SSA hat Stile, Ebenen,
+// Positionen und eine eigene Auszeichnungssprache -- das ist ein
+// Textsatzsystem und kein Untertitelformat. Der Leser ERKENNT es (in
+// Matroska als `S_TEXT/ASS`) und sagt, dass er es nicht anzeigt.
+//
+// Die Zeit wird in MILLISEKUNDEN gerechnet, wie ueberall in dieser
+// Runde. Ein Komma und ein Punkt gelten beide als Trenner, weil beide
+// in freier Wildbahn vorkommen.
+
+profile kernel
+
+import ulib
+
+export {
+    srt_load, srt_count, srt_start, srt_stop, srt_text, srt_at,
+    srt_truncated, SRT_NONE
+}
+
+const MAXENT: u64 = 1024
+const MAXTXT: u64 = 65536
+const SRT_NONE: u64 = 1024
+
+static mut buf: [u8; 65536] = [0 as u8; 65536]
+static mut blen: u64 = 0
+static mut e_from: [u32; 1024] = [0 as u32; 1024]
+static mut e_to: [u32; 1024] = [0 as u32; 1024]
+static mut e_off: [u32; 1024] = [0 as u32; 1024]
+static mut e_len: [u32; 1024] = [0 as u32; 1024]
+static mut n: u64 = 0
+static mut trunc: u64 = 0
+
+fn srt_count() -> u64 {
+    return n
+}
+
+fn srt_truncated() -> bool {
+    return trunc == 1
+}
+
+fn srt_start(i: u64) -> u64 {
+    if i >= n { return 0 }
+    return (e_from[(i) as usize]) as u64
+}
+
+fn srt_stop(i: u64) -> u64 {
+    if i >= n { return 0 }
+    return (e_to[(i) as usize]) as u64
+}
+
+// Zeiger auf den Text. Er ist im Puffer mit einer Null abgeschlossen --
+// das darf er, weil der Leser die Zeilenenden ohnehin ueberschreibt.
+fn srt_text(i: u64) -> u64 {
+    if i >= n { return 0 }
+    return (&buf[0 as usize]) as u64 + ((e_off[(i) as usize]) as u64)
+}
+
+// Welcher Untertitel gilt zur Zeit `ms`? SRT_NONE = keiner.
+fn srt_at(ms: u64) -> u64 {
+    var i: u64 = 0
+    while i < n {
+        if ms >= ((e_from[(i) as usize]) as u64)
+            && ms < ((e_to[(i) as usize]) as u64) {
+            return i
+        }
+        i = i + 1
+    }
+    return SRT_NONE
+}
+
+fn digit(c: u64) -> bool {
+    return c >= 48 && c <= 57
+}
+
+// "00:00:01,200" ab `at`. Rueckgabe: Millisekunden. `ok` sagt, ob es
+// wirklich eine Zeitangabe war.
+static mut t_ok: u64 = 0
+
+fn time_at(at: u64) -> u64 {
+    t_ok = 0
+    if at + 12 > blen {
+        return 0
+    }
+    var i: u64 = at
+    var h: u64 = 0
+    var cnt: u64 = 0
+    while i < blen && digit((buf[(i) as usize]) as u64) && cnt < 3 {
+        h = h * 10 + (((buf[(i) as usize]) as u64) - 48)
+        i = i + 1
+        cnt = cnt + 1
+    }
+    if i >= blen || (buf[(i) as usize]) as u64 != 58 {
+        return 0
+    }
+    i = i + 1
+    var m: u64 = 0
+    cnt = 0
+    while i < blen && digit((buf[(i) as usize]) as u64) && cnt < 2 {
+        m = m * 10 + (((buf[(i) as usize]) as u64) - 48)
+        i = i + 1
+        cnt = cnt + 1
+    }
+    if i >= blen || (buf[(i) as usize]) as u64 != 58 {
+        return 0
+    }
+    i = i + 1
+    var s: u64 = 0
+    cnt = 0
+    while i < blen && digit((buf[(i) as usize]) as u64) && cnt < 2 {
+        s = s * 10 + (((buf[(i) as usize]) as u64) - 48)
+        i = i + 1
+        cnt = cnt + 1
+    }
+    var ms: u64 = 0
+    if i < blen {
+        let c: u64 = (buf[(i) as usize]) as u64
+        if c == 44 || c == 46 {
+            i = i + 1
+            cnt = 0
+            while i < blen && digit((buf[(i) as usize]) as u64) && cnt < 3 {
+                ms = ms * 10 + (((buf[(i) as usize]) as u64) - 48)
+                i = i + 1
+                cnt = cnt + 1
+            }
+            while cnt < 3 {
+                ms = ms * 10
+                cnt = cnt + 1
+            }
+        }
+    }
+    t_ok = 1
+    return ((h * 60 + m) * 60 + s) * 1000 + ms
+}
+
+// Die Datei einlesen und in Bloecke zerlegen.
+fn srt_load(path: u64) -> bool {
+    n = 0
+    blen = 0
+    trunc = 0
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, path, 0, 0)
+    if ulib.bad(fd) {
+        return false
+    }
+    var going: bool = true
+    while going {
+        let want: u64 = 4096
+        if blen + want > MAXTXT {
+            trunc = 1
+            going = false
+        } else {
+            let got: u64 = ulib.sys(ulib.SYS_READ, fd,
+                (&buf[(blen) as usize]) as u64, want)
+            if ulib.bad(got) || got == 0 {
+                going = false
+            } else {
+                blen = blen + got
+            }
+        }
+    }
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    if blen == 0 {
+        return false
+    }
+    // Ein BOM am Anfang ist kein Text.
+    var p: u64 = 0
+    if blen >= 3 && (buf[0 as usize]) as u64 == 0xEF
+        && (buf[1 as usize]) as u64 == 0xBB
+        && (buf[2 as usize]) as u64 == 0xBF {
+        p = 3
+    }
+    // Der Leser sucht die ZEITZEILE. Alles davor (Nummer) und danach
+    // (Text bis zur Leerzeile) ergibt sich daraus -- das ist zaeher als
+    // "erst die Nummer lesen", weil eine fehlende Nummer nichts kaputt
+    // macht.
+    while p < blen && n < MAXENT {
+        // Zeilenanfang suchen, der eine Zeit ist.
+        let a: u64 = time_at(p)
+        if t_ok == 1 {
+            // "-->" suchen
+            var q: u64 = p
+            var found: u64 = 0
+            while q + 3 <= blen && q < p + 40 {
+                if (buf[(q) as usize]) as u64 == 45
+                    && (buf[(q + 1) as usize]) as u64 == 45
+                    && (buf[(q + 2) as usize]) as u64 == 62 {
+                    found = q + 3
+                    q = blen
+                } else {
+                    q = q + 1
+                }
+            }
+            if found > 0 {
+                while found < blen && (buf[(found) as usize]) as u64 == 32 {
+                    found = found + 1
+                }
+                let b: u64 = time_at(found)
+                if t_ok == 1 {
+                    // Bis zum Zeilenende, dann faengt der Text an.
+                    var t: u64 = found
+                    while t < blen && (buf[(t) as usize]) as u64 != 10 {
+                        t = t + 1
+                    }
+                    t = t + 1
+                    // Text bis zur Leerzeile.
+                    var e: u64 = t
+                    var stop: bool = false
+                    while e < blen && !stop {
+                        if (buf[(e) as usize]) as u64 == 10 {
+                            var k: u64 = e + 1
+                            if k < blen && (buf[(k) as usize]) as u64 == 13 {
+                                k = k + 1
+                            }
+                            if k >= blen || (buf[(k) as usize]) as u64 == 10 {
+                                stop = true
+                            } else {
+                                e = e + 1
+                            }
+                        } else {
+                            e = e + 1
+                        }
+                    }
+                    var tl: u64 = 0
+                    if e > t {
+                        tl = e - t
+                    }
+                    // Zeilenumbrueche im Text werden zu Leerzeichen, und
+                    // das Ende bekommt eine Null. Der Puffer gehoert uns.
+                    var k: u64 = 0
+                    while k < tl {
+                        let c: u64 = (buf[(t + k) as usize]) as u64
+                        if c == 10 || c == 13 {
+                            buf[(t + k) as usize] = 32 as u8
+                        }
+                        k = k + 1
+                    }
+                    if t + tl < blen {
+                        buf[(t + tl) as usize] = 0 as u8
+                    }
+                    e_from[(n) as usize] = a as u32
+                    e_to[(n) as usize] = b as u32
+                    e_off[(n) as usize] = t as u32
+                    e_len[(n) as usize] = tl as u32
+                    n = n + 1
+                    p = e + 1
+                } else {
+                    p = p + 1
+                }
+            } else {
+                p = p + 1
+            }
+        } else {
+            // Zur naechsten Zeile.
+            while p < blen && (buf[(p) as usize]) as u64 != 10 {
+                p = p + 1
+            }
+            p = p + 1
+        }
+    }
+    if n >= MAXENT {
+        trunc = 1
+    }
+    return n > 0
+}

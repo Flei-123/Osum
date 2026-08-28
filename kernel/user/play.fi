@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // kernel/user/play.fi -- RUNDE MEDIA1: /bin/play, der Abspieler.
+// RUNDE DEMUX: dazu MP3, MP4 und Matroska -- und die ehrliche Auskunft
+// ueber alles, was dieses System NICHT dekodieren kann.
 //
 //     play datei.wav              spielt sie
 //     play -v 40 datei.wav        mit 40 Prozent Lautstaerke
@@ -41,6 +43,11 @@ profile kernel
 
 import ulib
 import omc
+import media
+import mp4
+import mkv
+import mp3
+import srt
 
 export { u_start }
 
@@ -113,8 +120,8 @@ fn four(p: u64, i: u64, a: u64, c: u64, d: u64, e: u64) -> bool {
 }
 
 fn num(name: u64, v: u64) {
-    var s_p: [u8; 7] = "play: \0"
-    var s_e: [u8; 2] = "=\0"
+    var s_p: [u8; _] = "play: \0"
+    var s_e: [u8; _] = "=\0"
     ulib.say((&s_p[0 as usize]) as u64)
     ulib.say(name)
     ulib.say((&s_e[0 as usize]) as u64)
@@ -122,78 +129,14 @@ fn num(name: u64, v: u64) {
     ulib.nl()
 }
 
-fn u_start(args: u64) -> u64 {
-    var s_use: [u8; 39] = "play: play [-v N] [-q] [-i] datei.wav\0\0"
-    var s_nodev: [u8; 34] = "play: kein Tongeraet (why steht)\0\0"
-    var s_open: [u8; 25] = "play: kann nicht oeffnen\0"
-    var s_notwav: [u8; 28] = "play: das ist kein RIFF/WAV\0"
-    var s_nofmt: [u8; 33] = "play: kein fmt- oder data-Stueck\0"
-    var s_pcm: [u8; 41] = "play: nur unkomprimiertes PCM, 8/16 Bit\0\0"
-    var s_busy: [u8; 33] = "play: Tongeraet ist schon belegt\0"
-
-    let argc: u64 = ulib.arg_count(args)
-    var vol: u64 = 101 // 101 = nicht gesetzt
-    var quiet: bool = false
-    var only_info: bool = false
-    var path: u64 = 0
-    var beep: bool = false
-    var k: u64 = 1
-    var bad_args: bool = false
-    while k < argc {
-        let a: u64 = ulib.arg_at(args, k)
-        var s_v: [u8; 3] = "-v\0"
-        var s_q: [u8; 3] = "-q\0"
-        var s_i: [u8; 3] = "-i\0"
-        var s_b: [u8; 3] = "-b\0"
-        if ulib.streq(a, (&s_v[0 as usize]) as u64) {
-            if k + 1 >= argc {
-                bad_args = true
-                k = argc
-            } else {
-                vol = ulib.to_num(ulib.arg_at(args, k + 1))
-                k = k + 2
-            }
-        } else {
-            if ulib.streq(a, (&s_q[0 as usize]) as u64) {
-                quiet = true
-                k = k + 1
-            } else {
-                if ulib.streq(a, (&s_i[0 as usize]) as u64) {
-                    only_info = true
-                    k = k + 1
-                } else {
-                    if ulib.streq(a, (&s_b[0 as usize]) as u64) {
-                        beep = true
-                        k = k + 1
-                    } else {
-                        path = a
-                        k = k + 1
-                    }
-                }
-            }
-        }
-    }
-    if bad_args {
-        ulib.esay_line((&s_use[0 as usize]) as u64, 0)
-        return 2
-    }
-    if get(A_READY) != 1 {
-        ulib.esay_line((&s_nodev[0 as usize]) as u64, 0)
-        var n_why: [u8; 4] = "why\0"
-        num((&n_why[0 as usize]) as u64, get(A_WHY))
-        return 1
-    }
-    if vol < 101 {
-        set(AS_VOLUME, vol)
-    }
-    if beep {
-        set(AS_BEEP, 0)
-        return 0
-    }
-    if path == 0 {
-        ulib.esay_line((&s_use[0 as usize]) as u64, 0)
-        return 2
-    }
+// EINE Datei. Was fuer ein Format es ist, entscheiden die ersten
+// Oktette und nicht der Name.
+fn play_file(path: u64, quiet: bool, only_info: bool) -> u64 {
+    var s_open: [u8; _] = "play: kann nicht oeffnen\0"
+    var s_notwav: [u8; _] = "play: das ist kein RIFF/WAV\0"
+    var s_nofmt: [u8; _] = "play: kein fmt- oder data-Stueck\0"
+    var s_pcm: [u8; _] = "play: nur unkomprimiertes PCM, 8/16 Bit\0\0"
+    var s_busy: [u8; _] = "play: Tongeraet ist schon belegt\0"
 
     let fd: u64 = ulib.sys(ulib.SYS_OPEN, path, 0, 0)
     if ulib.bad(fd) {
@@ -216,6 +159,36 @@ fn u_start(args: u64) -> u64 {
     ulib.sys(ulib.SYS_SEEK, fd, 0, 0)
     if four(pk, 0, 79, 77, 67, 49) {
         return play_omc(fd, path, quiet, only_info)
+    }
+    // RUNDE DEMUX: MP4 ("....ftyp"), Matroska (0x1A45DFA3) und MP3
+    // (Rahmenkennung oder ID3). Der WAV-Weg darunter bleibt, wie er war.
+    if b(pk, 0) == 0x1A && b(pk, 1) == 0x45 && b(pk, 2) == 0xDF
+        && b(pk, 3) == 0xA3 {
+        ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+        return play_media(path, quiet, only_info)
+    }
+    if b(pk, 0) == 73 && b(pk, 1) == 68 && b(pk, 2) == 51 {
+        ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+        return play_media(path, quiet, only_info)
+    }
+    if b(pk, 0) == 0xFF && (b(pk, 1) & 0xE0) == 0xE0 {
+        ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+        return play_media(path, quiet, only_info)
+    }
+    if !four(pk, 0, 82, 73, 70, 70) {
+        // Kein RIFF: dann ist es vielleicht ein MP4 -- dort steht die
+        // Kennung erst bei Versatz 4.
+        var pk2: [u8; 8] = [0 as u8; 8]
+        let p2: u64 = (&pk2[0 as usize]) as u64
+        ulib.sys(ulib.SYS_SEEK, fd, 0, 0)
+        if ulib.sys(ulib.SYS_READ, fd, p2, 8) == 8 {
+            if b(p2, 4) == 102 && b(p2, 5) == 116 && b(p2, 6) == 121
+                && b(p2, 7) == 112 {
+                ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+                return play_media(path, quiet, only_info)
+            }
+        }
+        ulib.sys(ulib.SYS_SEEK, fd, 0, 0)
     }
 
     // ---------------------------------------------------- der Dateikopf
@@ -300,10 +273,10 @@ fn u_start(args: u64) -> u64 {
         return 1
     }
 
-    var n_rate: [u8; 8] = "srcrate\0"
-    var n_ch: [u8; 7] = "srcch\0\0"
-    var n_bits: [u8; 8] = "srcbits\0"
-    var n_sf: [u8; 10] = "srcframes\0"
+    var n_rate: [u8; _] = "srcrate\0"
+    var n_ch: [u8; _] = "srcch\0\0"
+    var n_bits: [u8; _] = "srcbits\0"
+    var n_sf: [u8; _] = "srcframes\0"
     if !quiet {
         num((&n_rate[0 as usize]) as u64, srate)
         num((&n_ch[0 as usize]) as u64, chans)
@@ -463,12 +436,12 @@ fn u_start(args: u64) -> u64 {
     set(AS_OPEN, 0)
 
     if !quiet {
-        var n_of: [u8; 7] = "frames\0"
-        var n_pl: [u8; 7] = "played\0"
-        var n_un: [u8; 10] = "underruns\0"
-        var n_bs: [u8; 10] = "backsteps\0"
-        var n_vo: [u8; 7] = "volume\0"
-        var n_la: [u8; 10] = "latencyus\0"
+        var n_of: [u8; _] = "frames\0"
+        var n_pl: [u8; _] = "played\0"
+        var n_un: [u8; _] = "underruns\0"
+        var n_bs: [u8; _] = "backsteps\0"
+        var n_vo: [u8; _] = "volume\0"
+        var n_la: [u8; _] = "latencyus\0"
         num((&n_of[0 as usize]) as u64, out_frames)
         num((&n_pl[0 as usize]) as u64, get(A_PLAYED))
         num((&n_un[0 as usize]) as u64, get(A_UNDERRUNS))
@@ -524,17 +497,17 @@ fn push(p: u64, frames: u64) -> bool {
 // gezogen werden, aber eine halb umgerechnete Tonspur, die man nicht
 // hoert, ist schlimmer als eine Fehlermeldung.
 fn play_omc(fd: u64, path: u64, quiet: bool, only_info: bool) -> u64 {
-    var s_bad: [u8; 30] = "play: kaputter OMC-Kopf, why\0\0"
-    var s_notrk: [u8; 30] = "play: keine Tonspur in dieser\0"
-    var s_fmt: [u8; 44] = "play: .omc-Ton muss 48000/2/16 PCM sein\0\0\0\0\0"
-    var s_busy: [u8; 33] = "play: Tongeraet ist schon belegt\0"
+    var s_bad: [u8; _] = "play: kaputter OMC-Kopf, why\0\0"
+    var s_notrk: [u8; _] = "play: keine Tonspur in dieser\0"
+    var s_fmt: [u8; _] = "play: .omc-Ton muss 48000/2/16 PCM sein\0\0\0\0\0"
+    var s_busy: [u8; _] = "play: Tongeraet ist schon belegt\0"
     var st: [u8; 240] = [0 as u8; 240]
     var buf: [u8; 4096] = [0 as u8; 4096]
     let sp: u64 = (&st[0 as usize]) as u64
     let bp: u64 = (&buf[0 as usize]) as u64
     if !omc.open(sp, fd) {
         ulib.esay_line((&s_bad[0 as usize]) as u64, path)
-        var n_w: [u8; 4] = "why\0"
+        var n_w: [u8; _] = "why\0"
         num((&n_w[0 as usize]) as u64, omc.why(sp))
         ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
         return 1
@@ -545,16 +518,16 @@ fn play_omc(fd: u64, path: u64, quiet: bool, only_info: bool) -> u64 {
         ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
         return 1
     }
-    var n_tr: [u8; 7] = "tracks\0"
-    var n_du: [u8; 11] = "durationus\0"
-    var n_ra: [u8; 8] = "srcrate\0"
-    var n_ch: [u8; 6] = "srcch\0"
-    var n_bi: [u8; 8] = "srcbits\0"
-    var n_vb: [u8; 12] = "videoblocks\0"
-    var n_ab: [u8; 12] = "audioblocks\0"
-    var n_vw: [u8; 7] = "vwidth\0"
-    var n_vh: [u8; 8] = "vheight\0"
-    var n_vf: [u8; 9] = "vfps1000\0"
+    var n_tr: [u8; _] = "tracks\0"
+    var n_du: [u8; _] = "durationus\0"
+    var n_ra: [u8; _] = "srcrate\0"
+    var n_ch: [u8; _] = "srcch\0"
+    var n_bi: [u8; _] = "srcbits\0"
+    var n_vb: [u8; _] = "videoblocks\0"
+    var n_ab: [u8; _] = "audioblocks\0"
+    var n_vw: [u8; _] = "vwidth\0"
+    var n_vh: [u8; _] = "vheight\0"
+    var n_vf: [u8; _] = "vfps1000\0"
     if !quiet {
         num((&n_tr[0 as usize]) as u64, omc.tracks(sp))
         num((&n_du[0 as usize]) as u64, omc.duration_us(sp))
@@ -641,10 +614,10 @@ fn play_omc(fd: u64, path: u64, quiet: bool, only_info: bool) -> u64 {
     set(AS_STOP, 0)
     set(AS_OPEN, 0)
     if !quiet {
-        var n_of: [u8; 7] = "frames\0"
-        var n_pl: [u8; 7] = "played\0"
-        var n_un: [u8; 10] = "underruns\0"
-        var n_lp: [u8; 8] = "lastpts\0"
+        var n_of: [u8; _] = "frames\0"
+        var n_pl: [u8; _] = "played\0"
+        var n_un: [u8; _] = "underruns\0"
+        var n_lp: [u8; _] = "lastpts\0"
         num((&n_ab[0 as usize]) as u64, ablocks)
         num((&n_vb[0 as usize]) as u64, vblocks)
         num((&n_of[0 as usize]) as u64, frames)
@@ -656,4 +629,712 @@ fn play_omc(fd: u64, path: u64, quiet: bool, only_info: bool) -> u64 {
         return 1
     }
     return 0
+}
+
+// ==================================================== RUNDE DEMUX
+//
+// MP3, MP4 und Matroska. Drei Dinge macht dieser Teil, und das dritte
+// ist das wichtigste:
+//
+//   1. Er LIEST den Behaelter (kernel/user/mp4.fi, mkv.fi) und zeigt,
+//      was darin steht -- Spur fuer Spur, mit Codec, Aufloesung, Dauer
+//      und der GERECHNETEN Datenrate.
+//   2. Er DEKODIERT den Ton, wenn es MP3 ist (kernel/user/mp3.fi), und
+//      rechnet ihn auf die 48 kHz der Tonschicht um.
+//   3. Er SAGT, was er nicht kann. Eine Datei mit H.264 wird geoeffnet,
+//      der Codec beim Namen genannt, die Aufloesung, die Dauer und die
+//      Datenrate genannt -- und dann wird angeboten, den Ton allein zu
+//      spielen. Kein leeres Fenster, kein Einfrieren, keine Behauptung,
+//      es laege am Rechner. Der Aufwand fuer H.264 steht mit Zahlen in
+//      /root/osum-roadmap/ROADMAP.md, Block F.
+
+// Die Tastenkennungen des PS/2-Satzes 1. `SYS_HOTKEY` liefert sie OHNE
+// zu blockieren -- das ist der einzige Weg: ein `read` auf das Terminal
+// wartet bis zu vier Sekunden (kernel/sys.fi, KEY_IDLE), und wer das im
+// Abspieler tut, hat vier Sekunden Stille.
+const K_SPACE: u64 = 0x39
+const K_Q: u64 = 0x10
+const K_N: u64 = 0x31
+const K_PLUS: u64 = 0x0D
+const K_MINUS: u64 = 0x0C
+const K_LEFT: u64 = 0x4B
+const K_RIGHT: u64 = 0x4D
+
+static mut hk_seen: u64 = 0
+
+// 0 = nichts gedrueckt.
+fn key_poll() -> u64 {
+    let seq: u64 = ulib.sys(ulib.SYS_HOTKEY, ulib.HK_SEQ, 0, 0)
+    if ulib.bad(seq) || seq == hk_seen {
+        return 0
+    }
+    hk_seen = seq
+    let k: u64 = ulib.sys(ulib.SYS_HOTKEY, ulib.HK_KEY, 0, 0)
+    if ulib.bad(k) {
+        return 0
+    }
+    return k
+}
+
+fn key_reset() {
+    let seq: u64 = ulib.sys(ulib.SYS_HOTKEY, ulib.HK_SEQ, 0, 0)
+    if !ulib.bad(seq) {
+        hk_seen = seq
+    }
+}
+
+// ------------------------------------------------------ die Umrechnung
+//
+// Der Dekodierer liefert, was in der Datei steht (32000, 44100 oder
+// 48000 Hz, ein oder zwei Kanaele). Die Tonschicht nimmt genau 48000/2/16.
+// Also dasselbe lineare Verfahren wie im WAV-Weg, mit einem Uebertrag
+// zwischen den Bloecken -- ohne den knackt es an jeder Blockgrenze.
+
+static mut rs_frac: u64 = 0
+static mut rs_cl: u64 = 32768
+static mut rs_cr: u64 = 32768
+static mut rs_have: u64 = 0
+static mut rs_out: [u8; 4096] = [0 as u8; 4096]
+
+fn rs_reset() {
+    rs_frac = 0
+    rs_cl = 32768
+    rs_cr = 32768
+    rs_have = 0
+}
+
+// Ein Quellrahmen als zwei VERSCHOBENE 16-Bit-Werte (Wert + 32768).
+static mut fr_l: u64 = 0
+static mut fr_r: u64 = 0
+
+fn src_frame(src: u64, nfr: u64, ch: u64, i: u64) {
+    if i == 0 {
+        fr_l = rs_cl
+        fr_r = rs_cr
+        return
+    }
+    var k: u64 = i - 1
+    if k >= nfr {
+        k = nfr - 1
+    }
+    let a: u64 = le16(src, k * 2 * ch) ^ 0x8000
+    fr_l = a
+    if ch == 2 {
+        fr_r = le16(src, k * 2 * ch + 2) ^ 0x8000
+    } else {
+        fr_r = a
+    }
+}
+
+// `src` zeigt auf `nfr` Rahmen im Format des Dekodierers. Rueckgabe:
+// false, wenn der Schreibweg abgebrochen ist.
+fn feed(src: u64, nfr: u64, ch: u64, step: u64) -> bool {
+    if nfr == 0 {
+        return true
+    }
+    if rs_have == 0 {
+        src_frame(src, nfr, ch, 1)
+        rs_cl = fr_l
+        rs_cr = fr_r
+        rs_have = 1
+    }
+    let op: u64 = (&rs_out[0 as usize]) as u64
+    var p: u64 = rs_frac
+    let limit: u64 = nfr * 65536
+    var m: u64 = 0
+    while p < limit {
+        let idx: u64 = p >> 16
+        let f: u64 = p & 0xFFFF
+        src_frame(src, nfr, ch, idx)
+        let a0: u64 = fr_l
+        let a1: u64 = fr_r
+        src_frame(src, nfr, ch, idx + 1)
+        let b0: u64 = fr_l
+        let b1: u64 = fr_r
+        let vl: u64 = (a0 * (65536 - f) + b0 * f) >> 16
+        let vr: u64 = (a1 * (65536 - f) + b1 * f) >> 16
+        put16(op, m * 4, vl ^ 0x8000)
+        put16(op, m * 4 + 2, vr ^ 0x8000)
+        m = m + 1
+        p = p + step
+        if m >= OUT_FRAMES {
+            if !push(op, m) {
+                return false
+            }
+            m = 0
+        }
+    }
+    if m > 0 {
+        if !push(op, m) {
+            return false
+        }
+    }
+    rs_frac = p - limit
+    src_frame(src, nfr, ch, nfr)
+    rs_cl = fr_l
+    rs_cr = fr_r
+    return true
+}
+
+// -------------------------------------------------------- die Auskunft
+
+static mut opt_track: u64 = 99
+static mut opt_start: u64 = 0
+static mut opt_sub: u64 = 0
+static mut opt_keys: u64 = 1
+static mut last_sub: u64 = 9999
+static mut fmt_now: u64 = 0
+
+fn probe_media() -> u64 {
+    media.trk_reset()
+    media.idx_reset()
+    if mp4.mp4_probe() {
+        if mp4.mp4_open() {
+            return 1
+        }
+        return 0
+    }
+    if mkv.mkv_probe() {
+        if mkv.mkv_open() {
+            return 2
+        }
+        return 0
+    }
+    if mp3.mp3_probe() {
+        if mp3.mp3_open() {
+            return 3
+        }
+        return 0
+    }
+    return 0
+}
+
+// Die ehrliche Meldung. Sie nennt den Codec, die Aufloesung, die Dauer
+// und die Datenrate -- und den Grund.
+fn say_video_no(v: u64) {
+    var s1: [u8; _] = "play: Bildspur nicht dekodierbar\0"
+    var s2: [u8; _] = "play:   \0"
+    var sp: [u8; _] = "  \0"
+    var sx: [u8; _] = "x\0"
+    var s4: [u8; _] = " kbit/s\0"
+    var s5: [u8; _] = "play: dieser Codec ist nicht selbst geschrieben -- 15000 bis\0"
+    var s6: [u8; _] = "play: 150000 Zeilen Dekodierer, siehe ROADMAP.md Block F.\0"
+    ulib.say((&s1[0 as usize]) as u64)
+    ulib.nl()
+    ulib.say((&s2[0 as usize]) as u64)
+    ulib.say(media.codec_name(media.trk_get(v, media.T_CODEC)))
+    ulib.say((&sp[0 as usize]) as u64)
+    ulib.sayn(media.trk_get(v, media.T_W))
+    ulib.say((&sx[0 as usize]) as u64)
+    ulib.sayn(media.trk_get(v, media.T_H))
+    ulib.say((&sp[0 as usize]) as u64)
+    media.say_ms(media.trk_get(v, media.T_DUR_MS))
+    ulib.say((&sp[0 as usize]) as u64)
+    ulib.sayn(media.trk_bitrate(v))
+    ulib.say((&s4[0 as usize]) as u64)
+    ulib.nl()
+    ulib.say((&s5[0 as usize]) as u64)
+    ulib.nl()
+    ulib.say((&s6[0 as usize]) as u64)
+    ulib.nl()
+}
+
+// Der Index-Eintrag, der bei `ms` oder danach anfaengt.
+fn idx_seek(ms: u64) -> u64 {
+    let n: u64 = media.idx_count()
+    var i: u64 = 0
+    while i < n {
+        if media.idx_time(i) >= ms {
+            return i
+        }
+        i = i + 1
+    }
+    return n
+}
+
+fn show_sub(ms: u64) {
+    var s_u: [u8; _] = "play: [\0"
+    var s_e: [u8; _] = "]\0"
+    var idx: u64 = srt.SRT_NONE
+    if srt.srt_count() > 0 {
+        idx = srt.srt_at(ms)
+        if idx != last_sub {
+            last_sub = idx
+            if idx != srt.SRT_NONE {
+                ulib.say((&s_u[0 as usize]) as u64)
+                ulib.say(srt.srt_text(idx))
+                ulib.say((&s_e[0 as usize]) as u64)
+                ulib.nl()
+            }
+        }
+        return
+    }
+    if fmt_now != 2 {
+        return
+    }
+    let ns: u64 = mkv.mkv_nsub()
+    var i: u64 = 0
+    var hit: u64 = 9999
+    while i < ns {
+        if ms >= mkv.mkv_sub_ms(i) && ms < mkv.mkv_sub_ms(i) + mkv.mkv_sub_dur(i) {
+            hit = i
+            i = ns
+        } else {
+            i = i + 1
+        }
+    }
+    if hit != last_sub {
+        last_sub = hit
+        if hit != 9999 {
+            var t: [u8; 256] = [0 as u8; 256]
+            var L: u64 = mkv.mkv_sub_len(hit)
+            if L > 250 {
+                L = 250
+            }
+            media.src_bytes(mkv.mkv_sub_off(hit), (&t[0 as usize]) as u64, L)
+            var k: u64 = 0
+            while k < L {
+                if t[(k) as usize] == 10 as u8 || t[(k) as usize] == 13 as u8 {
+                    t[(k) as usize] = 32 as u8
+                }
+                k = k + 1
+            }
+            t[(L) as usize] = 0 as u8
+            ulib.say((&s_u[0 as usize]) as u64)
+            ulib.say((&t[0 as usize]) as u64)
+            ulib.say((&s_e[0 as usize]) as u64)
+            ulib.nl()
+        }
+    }
+}
+
+fn play_media(path: u64, quiet: bool, only_info: bool) -> u64 {
+    var s_noopen: [u8; _] = "play: kann nicht oeffnen\0"
+    var s_nofmt: [u8; _] = "play: kein Behaelter, den ich kenne\0\0\0\0\0"
+    var s_trk: [u8; _] = "play: spuren=\0"
+    var s_noaud: [u8; _] = "play: keine Tonspur darin\0\0"
+    var s_audno: [u8; _] = "play: Tonspur nicht dekodierbar, Codec: \0\0"
+    var s_only: [u8; _] = "play: spiele nur den Ton dieser Datei\0\0\0"
+    var s_nodev: [u8; _] = "play: kein Tongeraet -- nur Auskunft, why=\0\0\0"
+    var s_busy: [u8; _] = "play: Tongeraet ist schon belegt\0"
+    var s_trunc: [u8; _] = "play: die Datei ist abgeschnitten (Rest 0)\0\0"
+    var s_frag: [u8; _] = "play: fragmentiertes MP4 (moof) -- nicht drin\0\0"
+    var s_full: [u8; _] = "play: mehr Beispiele als Platz -- nur die ersten\0"
+    var s_pause: [u8; _] = "play: pause\0\0"
+    var s_go: [u8; _] = "play: weiter\0"
+    var s_pos: [u8; _] = "play: pos \0"
+    var s_vol: [u8; _] = "play: volume=\0"
+
+    if !media.src_open(path) {
+        ulib.esay_line((&s_noopen[0 as usize]) as u64, path)
+        return 1
+    }
+    fmt_now = probe_media()
+    if fmt_now == 0 {
+        ulib.esay_line((&s_nofmt[0 as usize]) as u64, path)
+        media.src_close()
+        return 1
+    }
+    // Welche Tonspur?
+    var at: u64 = 16
+    var i: u64 = 0
+    while i < media.trk_count() {
+        if media.trk_get(i, media.T_KIND) == media.K_AUDIO {
+            if opt_track < 16 {
+                if i == opt_track {
+                    at = i
+                }
+            } else if at >= 16 {
+                at = i
+            } else if !media.can_decode(media.trk_get(at, media.T_CODEC))
+                && media.can_decode(media.trk_get(i, media.T_CODEC)) {
+                at = i
+            }
+        }
+        i = i + 1
+    }
+    if fmt_now == 2 {
+        mkv.mkv_scan(at)
+    } else if fmt_now == 1 && at < 16 {
+        mp4.mp4_index(at)
+    }
+    if !quiet {
+        ulib.say((&s_trk[0 as usize]) as u64)
+        ulib.sayn(media.trk_count())
+        ulib.nl()
+        i = 0
+        while i < media.trk_count() {
+            media.say_codec_line(i)
+            i = i + 1
+        }
+    }
+    var trunc: bool = false
+    if fmt_now == 1 {
+        if mp4.mp4_truncated() { trunc = true }
+        if mp4.mp4_fragmented() {
+            ulib.say((&s_frag[0 as usize]) as u64)
+            ulib.nl()
+        }
+    } else if fmt_now == 2 {
+        if mkv.mkv_truncated() { trunc = true }
+    } else if mp3.mp3_truncated() {
+        trunc = true
+    }
+    if trunc {
+        ulib.say((&s_trunc[0 as usize]) as u64)
+        ulib.nl()
+    }
+    if media.idx_full() {
+        ulib.say((&s_full[0 as usize]) as u64)
+        ulib.nl()
+    }
+    // Die ehrliche Meldung zur Bildspur.
+    let v: u64 = media.trk_first(media.K_VIDEO)
+    if v < 16 && !media.can_decode(media.trk_get(v, media.T_CODEC)) {
+        say_video_no(v)
+        if at < 16 && media.can_decode(media.trk_get(at, media.T_CODEC)) {
+            ulib.say((&s_only[0 as usize]) as u64)
+            ulib.nl()
+        }
+    }
+    if at >= 16 {
+        ulib.say((&s_noaud[0 as usize]) as u64)
+        ulib.nl()
+        media.src_close()
+        return 3
+    }
+    if !media.can_decode(media.trk_get(at, media.T_CODEC)) {
+        ulib.say((&s_audno[0 as usize]) as u64)
+        ulib.say(media.codec_name(media.trk_get(at, media.T_CODEC)))
+        ulib.nl()
+        media.src_close()
+        return 3
+    }
+    // Untertitel aus einer Datei haben Vorrang vor denen im Behaelter.
+    last_sub = 9999
+    if opt_sub != 0 {
+        srt.srt_load(opt_sub)
+    }
+    if only_info {
+        media.src_close()
+        return 0
+    }
+    if get(A_READY) != 1 {
+        ulib.say((&s_nodev[0 as usize]) as u64)
+        ulib.sayn(get(A_WHY))
+        ulib.nl()
+        media.src_close()
+        return 4
+    }
+    if ulib.bad(set(AS_OPEN, 1)) {
+        ulib.esay_line((&s_busy[0 as usize]) as u64, 0)
+        media.src_close()
+        return 1
+    }
+    let rate: u64 = media.trk_get(at, media.T_RATE)
+    var step: u64 = 65536
+    if rate > 0 {
+        step = rate * 65536 / OUT_RATE
+    }
+    rs_reset()
+    mp3.mp3_reset()
+    key_reset()
+    var pos: u64 = 0 // Millisekunden
+    var ip: u64 = 0
+    if fmt_now == 3 {
+        if opt_start > 0 {
+            mp3.mp3_seek_ms(opt_start)
+            pos = opt_start
+        }
+    } else {
+        ip = idx_seek(opt_start)
+        pos = opt_start
+    }
+    var frames: u64 = 0
+    var running: bool = true
+    var fail: bool = false
+    var nexts: u64 = 0
+    while running {
+        // 1. Tasten.
+        if opt_keys == 1 {
+            var k: u64 = key_poll()
+            while k != 0 {
+                if k == K_SPACE {
+                    ulib.say((&s_pause[0 as usize]) as u64)
+                    ulib.nl()
+                    set(AS_STOP, 0)
+                    var held: bool = true
+                    while held {
+                        ulib.sleep_ms(20)
+                        let k2: u64 = key_poll()
+                        if k2 == K_SPACE {
+                            held = false
+                        } else if k2 == K_Q {
+                            held = false
+                            running = false
+                        }
+                    }
+                    ulib.say((&s_go[0 as usize]) as u64)
+                    ulib.nl()
+                } else if k == K_Q {
+                    running = false
+                } else if k == K_N {
+                    running = false
+                    nexts = 1
+                } else if k == K_PLUS {
+                    var vv: u64 = get(A_VOLUME) + 10
+                    if vv > 100 { vv = 100 }
+                    set(AS_VOLUME, vv)
+                    ulib.say((&s_vol[0 as usize]) as u64)
+                    ulib.sayn(vv)
+                    ulib.nl()
+                } else if k == K_MINUS {
+                    var vv: u64 = get(A_VOLUME)
+                    if vv >= 10 { vv = vv - 10 } else { vv = 0 }
+                    set(AS_VOLUME, vv)
+                    ulib.say((&s_vol[0 as usize]) as u64)
+                    ulib.sayn(vv)
+                    ulib.nl()
+                } else if k == K_RIGHT || k == K_LEFT {
+                    var t: u64 = pos
+                    if k == K_RIGHT {
+                        t = t + 5000
+                    } else if t > 5000 {
+                        t = t - 5000
+                    } else {
+                        t = 0
+                    }
+                    set(AS_STOP, 0)
+                    rs_reset()
+                    mp3.mp3_reset()
+                    if fmt_now == 3 {
+                        mp3.mp3_seek_ms(t)
+                        pos = mp3.mp3_pos_ms()
+                    } else {
+                        ip = idx_seek(t)
+                        pos = t
+                    }
+                    ulib.say((&s_pos[0 as usize]) as u64)
+                    media.say_ms(pos)
+                    ulib.nl()
+                }
+                k = key_poll()
+            }
+        }
+        if !running {
+            // nichts mehr
+        } else if fmt_now == 3 {
+            let n: u64 = mp3.mp3_next()
+            if n > 0 {
+                if !feed(mp3.mp3_pcm(), n, mp3.mp3_channels(), step) {
+                    fail = true
+                    running = false
+                }
+                frames = frames + 1
+                pos = mp3.mp3_pos_ms()
+                show_sub(pos)
+            }
+            if mp3.mp3_at_end() {
+                running = false
+            }
+        } else {
+            if ip >= media.idx_count() {
+                running = false
+            } else {
+                var L: u64 = media.idx_size(ip)
+                if L > mp3.MAXIN {
+                    L = mp3.MAXIN
+                }
+                media.src_bytes(media.idx_off(ip), mp3.mp3_inbuf(), L)
+                let n: u64 = mp3.mp3_decode(L)
+                pos = media.idx_time(ip)
+                if n > 0 {
+                    if !feed(mp3.mp3_pcm(), n, mp3.mp3_channels(), step) {
+                        fail = true
+                        running = false
+                    }
+                    frames = frames + 1
+                }
+                show_sub(pos)
+                ip = ip + 1
+            }
+        }
+    }
+    set(AS_DRAIN, 0)
+    var spins: u64 = 0
+    var waiting: bool = true
+    while waiting {
+        if get(A_REMAIN) == 0 {
+            waiting = false
+        } else {
+            ulib.sleep_ms(5)
+            spins = spins + 1
+            if spins > 2000 {
+                waiting = false
+            }
+        }
+    }
+    set(AS_STOP, 0)
+    set(AS_OPEN, 0)
+    media.src_close()
+    if !quiet {
+        var n_fr: [u8; _] = "frames\0"
+        var n_pl: [u8; _] = "played\0"
+        var n_un: [u8; _] = "underruns\0"
+        var n_er: [u8; _] = "mp3err\0"
+        var n_sk: [u8; _] = "mp3skip\0"
+        var n_cl: [u8; _] = "mp3clamp\0"
+        var n_vo: [u8; _] = "volume\0"
+        num((&n_fr[0 as usize]) as u64, frames)
+        num((&n_pl[0 as usize]) as u64, get(A_PLAYED))
+        num((&n_un[0 as usize]) as u64, get(A_UNDERRUNS))
+        num((&n_er[0 as usize]) as u64, mp3.mp3_errors())
+        num((&n_sk[0 as usize]) as u64, mp3.mp3_skipped())
+        num((&n_cl[0 as usize]) as u64, mp3.mp3_clamps())
+        num((&n_vo[0 as usize]) as u64, get(A_VOLUME))
+    }
+    if fail {
+        return 1
+    }
+    if nexts == 1 {
+        return 0
+    }
+    return 0
+}
+
+// ============================================================ der Start
+//
+// Eine WIEDERGABELISTE ist einfach mehr als eine Datei auf der
+// Befehlszeile. Sie wird der Reihe nach gespielt; `n` springt zur
+// naechsten, `q` beendet alles.
+
+fn u_start(args: u64) -> u64 {
+    var s_use1: [u8; _] = "play: play [-v N] [-q] [-i] [-t N] [-s SEK] [-u datei.srt] [-b]\0\0"
+    var s_use2: [u8; _] = "play:      [-K] datei ...   (Leertaste Pause, n weiter, q Ende)\0"
+    var s_nodev: [u8; _] = "play: kein Tongeraet (why steht)\0\0"
+
+    let argc: u64 = ulib.arg_count(args)
+    var vol: u64 = 101
+    var quiet: bool = false
+    var only_info: bool = false
+    var beep: bool = false
+    var bad_args: bool = false
+    var list: [u64; 32] = [0 as u64; 32]
+    var nlist: u64 = 0
+    opt_track = 99
+    opt_start = 0
+    opt_sub = 0
+    opt_keys = 1
+    var k: u64 = 1
+    while k < argc {
+        let a: u64 = ulib.arg_at(args, k)
+        var s_v: [u8; _] = "-v\0"
+        var s_q: [u8; _] = "-q\0"
+        var s_i: [u8; _] = "-i\0"
+        var s_b: [u8; _] = "-b\0"
+        var s_t: [u8; _] = "-t\0"
+        var s_s: [u8; _] = "-s\0"
+        var s_u: [u8; _] = "-u\0"
+        var s_K: [u8; _] = "-K\0"
+        if ulib.streq(a, (&s_v[0 as usize]) as u64) {
+            if k + 1 >= argc {
+                bad_args = true
+                k = argc
+            } else {
+                vol = ulib.to_num(ulib.arg_at(args, k + 1))
+                k = k + 2
+            }
+        } else if ulib.streq(a, (&s_t[0 as usize]) as u64) {
+            if k + 1 >= argc {
+                bad_args = true
+                k = argc
+            } else {
+                opt_track = ulib.to_num(ulib.arg_at(args, k + 1))
+                k = k + 2
+            }
+        } else if ulib.streq(a, (&s_s[0 as usize]) as u64) {
+            if k + 1 >= argc {
+                bad_args = true
+                k = argc
+            } else {
+                opt_start = ulib.to_num(ulib.arg_at(args, k + 1)) * 1000
+                k = k + 2
+            }
+        } else if ulib.streq(a, (&s_u[0 as usize]) as u64) {
+            if k + 1 >= argc {
+                bad_args = true
+                k = argc
+            } else {
+                opt_sub = ulib.arg_at(args, k + 1)
+                k = k + 2
+            }
+        } else if ulib.streq(a, (&s_K[0 as usize]) as u64) {
+            opt_keys = 0
+            k = k + 1
+        } else if ulib.streq(a, (&s_q[0 as usize]) as u64) {
+            quiet = true
+            k = k + 1
+        } else if ulib.streq(a, (&s_i[0 as usize]) as u64) {
+            only_info = true
+            k = k + 1
+        } else if ulib.streq(a, (&s_b[0 as usize]) as u64) {
+            beep = true
+            k = k + 1
+        } else {
+            if nlist < 32 {
+                list[(nlist) as usize] = a
+                nlist = nlist + 1
+            }
+            k = k + 1
+        }
+    }
+    if bad_args {
+        ulib.esay_line((&s_use1[0 as usize]) as u64, 0)
+        ulib.esay_line((&s_use2[0 as usize]) as u64, 0)
+        return 2
+    }
+    // Ohne Tongeraet darf `-i` weiterhin Auskunft geben: das ist genau
+    // der Fall, in dem ein Nutzer wissen will, WARUM nichts kommt.
+    if get(A_READY) != 1 && !only_info {
+        ulib.esay_line((&s_nodev[0 as usize]) as u64, 0)
+        var n_why: [u8; _] = "why\0"
+        num((&n_why[0 as usize]) as u64, get(A_WHY))
+        if nlist == 0 {
+            return 1
+        }
+    }
+    if vol < 101 {
+        set(AS_VOLUME, vol)
+    }
+    if beep {
+        set(AS_BEEP, 0)
+        return 0
+    }
+    if nlist == 0 {
+        ulib.esay_line((&s_use1[0 as usize]) as u64, 0)
+        ulib.esay_line((&s_use2[0 as usize]) as u64, 0)
+        return 2
+    }
+    var code: u64 = 0
+    var i: u64 = 0
+    while i < nlist {
+        var s_now: [u8; _] = "play: [\0"
+        var s_of: [u8; _] = "/\0\0\0"
+        var s_cl: [u8; _] = "] \0"
+        if nlist > 1 && !quiet {
+            ulib.say((&s_now[0 as usize]) as u64)
+            ulib.sayn(i + 1)
+            ulib.say((&s_of[0 as usize]) as u64)
+            ulib.sayn(nlist)
+            ulib.say((&s_cl[0 as usize]) as u64)
+            ulib.say(list[(i) as usize])
+            ulib.nl()
+        }
+        let r: u64 = play_file(list[(i) as usize], quiet, only_info)
+        if r != 0 {
+            code = r
+        }
+        i = i + 1
+    }
+    return code
 }
