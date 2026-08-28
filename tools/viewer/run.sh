@@ -479,7 +479,29 @@ zeiger() { # datei x y
 }
 klick() { # datei x y
     zeiger "$1" "$2" "$3"
-    printf 'warte 0.3\nmouse_button 1\nwarte 0.2\nmouse_button 0\nwarte 1.2\n' >> "$1"
+    printf 'warte 0.3\nmouse_button 1\nmouse_button 0\nwarte 1.2\n' >> "$1"
+}
+# Den Fokus auf das n-te Bedienelement setzen und es druecken. DAS ist
+# der Weg, den die Widget-Bibliothek fuer die Tastatur vorsieht
+# (`on_key`: Eingabetaste auf einem Knopf ruft dieselbe `fire`-Stelle
+# wie ein Klick), und er ist wiederholbar.
+fokus() { # datei anzahl-tabs
+    local f=$1 n=$2 i
+    printf 'warte 0.5\n' >> "$f"
+    i=0
+    while [ "$i" -lt "$n" ]; do printf 'sendkey tab\nwarte 0.15\n' >> "$f"; i=$((i+1)); done
+}
+# DIE LEERTASTE UND NICHT DIE EINGABETASTE. `wlib.on_key` loest einen
+# Knopf bei `KEY_ENTER` (13) ODER bei 32 aus -- und die Eingabetaste
+# kommt auf diesem System als 10 an (Zeilenvorschub), nicht als 13. Mit
+# `ret` passiert also nichts; gemessen in Abschnitt 8 dieser Runde und
+# aufgeschrieben in docs/ROUNDVIEWER.md. Die Leertaste geht.
+druecken() { # datei [wiederholungen]
+    local f=$1 n=${2:-1} i=0
+    while [ "$i" -lt "$n" ]; do printf 'sendkey spc\nwarte 1.0\n' >> "$f"; i=$((i+1)); done
+}
+taste() { # datei taste
+    printf 'sendkey %s\nwarte 1.0\n' "$2" >> "$1"
 }
 vfeld() { grep -a "^viewer: an=" "$1" | tail -1 | grep -oE "$2=[0-9]+" | head -1 | cut -d= -f2; }
 # Die Mitte eines Bedienelements IN BILDSCHIRMKOORDINATEN. Die
@@ -537,9 +559,8 @@ printf '        die Knoepfe liegen bei: > (%s,%s)  100%% (%s,%s)  Rechts (%s,%s)
 
 # ---- 8b. blaettern: aus PNG wird JPEG wird PNG wird GIF ...
 M="$TMPD/weiter.mon"; : > "$M"
-klick "$M" "$XN" "$YN"
-klick "$M" "$XN" "$YN"
-klick "$M" "$XN" "$YN"
+fokus "$M" 1
+druecken "$M" 3
 foto weiter "$M"
 n1=$(vfeld_n "$TMPD/weiter.txt" fmt 2)
 n2=$(vfeld_n "$TMPD/weiter.txt" fmt 3)
@@ -554,7 +575,8 @@ num "und der Zaehler steht auf dem vierten Bild" "${bi:-0}" eq 3
 
 # ---- 8c. Zoom: einpassen und 100 %.
 M="$TMPD/zoom.mon"; : > "$M"
-klick "$M" "$X100" "$Y100"
+fokus "$M" 5
+druecken "$M" 1
 foto zoom100 "$M"
 zf=$(vfeld "$TMPD/zoom100.txt" fit)
 zz=$(vfeld "$TMPD/zoom100.txt" zoom)
@@ -563,7 +585,8 @@ num "und der Zoom steht auf hundert" "${zz:-0}" eq 100
 
 # ---- 8d. drehen: aus 64x48 wird 48x64.
 M="$TMPD/dreh.mon"; : > "$M"
-klick "$M" "$XR" "$YR"
+fokus "$M" 7
+druecken "$M" 1
 foto dreh "$M"
 db=$(vfeld "$TMPD/dreh.txt" br); dh=$(vfeld "$TMPD/dreh.txt" ho)
 num "nach einer Vierteldrehung ist die Breite die alte Hoehe" "${db:-0}" eq 48
@@ -571,7 +594,8 @@ num "und die Hoehe die alte Breite" "${dh:-0}" eq 64
 
 # ---- 8e. EXIF: das Bild mit Lage 6 kommt gedreht heraus.
 M="$TMPD/exif.mon"; : > "$M"
-for k in 1 2 3 4 5; do klick "$M" "$XN" "$YN"; done
+fokus "$M" 1
+druecken "$M" 5
 foto exif "$M"
 eo=$(vfeld "$TMPD/exif.txt" ori)
 eb=$(vfeld "$TMPD/exif.txt" br); eh=$(vfeld "$TMPD/exif.txt" ho)
@@ -581,7 +605,8 @@ num "und aus 24 hoch wird 40" "${eh:-0}" eq 40
 
 # ---- 8f. das grosse Bild: 12 MP im Fenster, ohne dass etwas stirbt.
 M="$TMPD/gross.mon"; : > "$M"
-for k in 1 2 3 4 5 6; do klick "$M" "$XN" "$YN"; done
+fokus "$M" 1
+druecken "$M" 6
 foto gross "$M"
 gb=$(vfeld "$TMPD/gross.txt" br); gh=$(vfeld "$TMPD/gross.txt" ho)
 gv=$(vfeld "$TMPD/gross.txt" voll)
@@ -594,8 +619,9 @@ schau "und die Zeichenflaeche zeigt es" \
 
 # ---- 8g. Diaschau und Sichern.
 M="$TMPD/dia.mon"; : > "$M"
-klick "$M" "$XD" "$YD"
-printf 'warte 4.0\n' >> "$M"
+fokus "$M" 8
+druecken "$M" 1
+printf 'warte 5.0\n' >> "$M"
 foto dia "$M"
 dz=$(vfeld "$TMPD/dia.txt" dia)
 num "die Diaschau laeuft" "${dz:-0}" eq 1
@@ -604,9 +630,12 @@ if [ "${db2:-0}" != "0" ]; then ok "und sie ist von selbst weitergegangen (Bild 
 else bad "die Diaschau ist nicht weitergegangen"; fi
 
 M="$TMPD/save.mon"; : > "$M"
-klick "$M" "$XC" "$YC"
-klick "$M" "$XS" "$YS"
-klick "$M" "$XJ" "$YJ"
+fokus "$M" 9
+druecken "$M" 1
+fokus "$M" 1
+druecken "$M" 1
+fokus "$M" 1
+druecken "$M" 1
 foto save "$M"
 has "$TMPD/save.txt" "viewer: gesichert " "die Anwendung schreibt eine PNG-Datei"
 has "$TMPD/save.txt" "viewer: gesichertj" "und eine JPEG-Datei"
@@ -626,8 +655,24 @@ else
     bad "die geschriebene Datei ist nicht auf dem Abbild"; head -2 "$TMPD/holen2.log"
 fi
 
+# ---- 8g2. DIE TASTATUR DER ANWENDUNG SELBST: n = naechstes Bild,
+# 1 = hundert Prozent, r = rechts drehen. Das ist der Weg, den ein
+# Mensch nimmt, und er geht an der Widget-Bibliothek vorbei.
+M="$TMPD/tasten.mon"; : > "$M"
+printf 'warte 0.5\n' >> "$M"
+taste "$M" "n"
+taste "$M" "1"
+taste "$M" "r"
+foto tasten "$M"
+tb=$(vfeld "$TMPD/tasten.txt" bild)
+tf=$(vfeld "$TMPD/tasten.txt" fit)
+tw=$(vfeld "$TMPD/tasten.txt" br)
+num "die Taste n blaettert weiter" "${tb:-0}" eq 1
+num "die Taste 1 schaltet auf hundert Prozent" "${tf:-9}" eq 0
+num "die Taste r dreht: aus 64 breit wird 48" "${tw:-0}" eq 48
+
 # ---- 8h. die Bildschirmfotos in den Baum, als PNG.
-for f in start weiter zoom100 dreh exif gross dia save; do
+for f in start weiter zoom100 dreh exif gross dia save tasten; do
     [ -f "$TMPD/$f.ppm" ] || continue
     python3 tools/gfx/ppm2png.py "$TMPD/$f.ppm" "docs/shots/viewer/$f.png" \
         > /dev/null 2>&1 && ok "docs/shots/viewer/$f.png" \

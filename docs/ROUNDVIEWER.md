@@ -110,6 +110,26 @@ zurück, kein Vorzeichen; `> 0` war deshalb bei jedem Unterschied wahr
 und der Ordner stand rückwärts. Gefunden, weil die Abnahme prüft,
 welches Bild als erstes im Fenster steht.
 
+**d) Die Eingabetaste kommt als 10 an, `wlib` prüft auf 13.** Ein Knopf
+im Fokus soll sich mit der Eingabetaste drücken lassen — `wlib.on_key`
+tut das bei `KEY_ENTER` (13) oder bei 32. Die PS/2-Tastatur dieses
+Systems liefert die Eingabetaste aber als **10** (Zeilenvorschub), und
+damit passiert nichts. Gemessen an der Anwendung selbst: sie meldet
+`viewer: taste k=10 fokus=1`, und der Knopf bleibt still. Die
+**Leertaste (32) geht**, und deshalb bedient die Abnahme die Oberfläche
+mit Tabulator und Leertaste. Repariert gehört das in `kernel/kbd.fi`
+oder in `wlib.decode` — nicht in dieser Runde, weil es jede
+wlib-Anwendung betrifft und nicht nur den Betrachter.
+
+Und ein zweiter, kleinerer Fund derselben Sorte: ein **Mausklick über
+den QEMU-Monitor setzt den Fokus** (das Bild zeigt den Fokusrahmen an
+der neuen Stelle) und zeichnet den Knopf gedrückt und wieder normal,
+**löst ihn aber nicht aus**. `wlib.on_up` verlangt dafür
+`hit_at(w, x, y) == i` mit den Koordinaten des Loslassen-Ereignisses;
+dass die nicht passen, ist die wahrscheinlichste Erklärung, aber sie ist
+in dieser Runde nicht bewiesen und steht deshalb hier als offene Frage
+und nicht als Befund.
+
 ---
 
 ## 5. Der Kernel hat zwei Zahlen bekommen
