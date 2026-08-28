@@ -53,6 +53,9 @@ export {
     T_SGID, T_UMASK, K_BOOT, K_IDLE, K_WORKER, K_USER,
     K_GRIND, KSTACK_FRAMES, K_NETD, T_BIG,
     T_NETV, T_NETOK, NETOK_MAX,
+    // ---- RUNDE MULTIUSER ----
+    T_NGROUPS, groups_count, groups_at, groups_has, groups_set,
+    groups_clear, groups_inherit, GROUPS_MAX,
 }
 
 // ------------------------------------------------------ the task record
@@ -211,6 +214,22 @@ const T_NETV: u64 = 448
 const T_NETOK: u64 = 456
 const NETOK_MAX: u64 = 6
 
+// ------------------------------------- RUNDE MULTIUSER: DIE ZUSATZGRUPPEN
+//
+// DAS LETZTE FREIE WORT DES SATZES, und das ist keine Redensart: der
+// Satz ist 512 Oktette gross, K13 hat bis 440 belegt, K16 nahm 448,
+// NETVIEW 448..503. 504 ist das einzige, was uebrig ist -- und
+// sechzehn Zusatzgruppen brauchen sechzehn Woerter.
+//
+// Also steht hier die ANZAHL und in `kstate.MU_OFF + MU_GRP` die Liste.
+// Die Anzahl ist null, wenn `create` den Satz nullt, und null heisst
+// "keine Zusatzgruppen": jeder Prozess, den es vor dieser Runde gab,
+// verhaelt sich genau wie vorher. Die Begruendung fuer die getrennte
+// Tabelle und die zwei Stellen, die sie anfassen, stehen bei `MU_OFF`
+// in `kstate.fi`.
+const T_NGROUPS: u64 = 504
+const GROUPS_MAX: u64 = 16
+
 // The three descriptor slots of round 62. Nothing writes them any more;
 // they stay named so that a reader of a task dump knows what the hole in
 // the middle of the record was.
@@ -363,6 +382,91 @@ fn tget(state: u64, i: u64, field: u64) -> u64 {
 
 fn tset(state: u64, i: u64, field: u64, v: u64) {
     __mmio_write64((task_at(state, i) + field) as *mut u64, v)
+}
+
+// ----------------------------- RUNDE MULTIUSER: die Zusatzgruppen
+//
+// Vier Zeilen Adressrechnung und drei Fragen darauf. Die Liste liegt
+// nicht im Aufgabensatz (dort ist EIN Wort frei), sondern in einer
+// eigenen Seite; `groups_at` ist der einzige Weg dorthin, und
+// `groups_set`, `groups_clear` und `groups_inherit` sind die einzigen
+// drei, die schreiben.
+fn groups_slot(state: u64, i: u64, k: u64) -> u64 {
+    return state + kstate.MU_OFF + kstate.MU_GRP
+        + (i * kstate.MU_GRPMAX + k) * 8
+}
+
+fn groups_count(state: u64, i: u64) -> u64 {
+    let n: u64 = tget(state, i, T_NGROUPS)
+    if n > GROUPS_MAX {
+        return GROUPS_MAX
+    }
+    return n
+}
+
+fn groups_at(state: u64, i: u64, k: u64) -> u64 {
+    if k >= GROUPS_MAX {
+        return 0
+    }
+    return __mmio_read64(groups_slot(state, i, k) as *mut u64)
+}
+
+// Ist `gid` eine der Zusatzgruppen dieses Prozesses? Die Frage, wegen
+// der es die Liste gibt.
+fn groups_has(state: u64, i: u64, gid: u64) -> bool {
+    let n: u64 = groups_count(state, i)
+    var k: u64 = 0
+    while k < n {
+        if groups_at(state, i, k) == gid {
+            return true
+        }
+        k = k + 1
+    }
+    return false
+}
+
+fn groups_clear(state: u64, i: u64) {
+    tset(state, i, T_NGROUPS, 0)
+    var k: u64 = 0
+    while k < GROUPS_MAX {
+        __mmio_write64(groups_slot(state, i, k) as *mut u64, 0)
+        k = k + 1
+    }
+}
+
+// `src` zeigt auf `n` Woerter IM KERNEL. Wer aus Ring 3 kommt, hat sie
+// vorher dorthin kopiert -- diese Funktion sieht keine Nutzeradresse an.
+fn groups_set(state: u64, i: u64, src: u64, n: u64) -> bool {
+    if n > GROUPS_MAX {
+        return false
+    }
+    groups_clear(state, i)
+    var k: u64 = 0
+    while k < n {
+        __mmio_write64(groups_slot(state, i, k) as *mut u64,
+            __mmio_read64((src + k * 8) as *mut u64))
+        k = k + 1
+    }
+    tset(state, i, T_NGROUPS, n)
+    return true
+}
+
+// Vom Elternteil auf das Kind. Steht neben den sieben Zeilen, die K13
+// fuer die Kennungen geschrieben hat, und wird an derselben Stelle
+// gerufen -- sonst waere die Liste des Kindes das, was zufaellig im
+// wiederverwendeten Platz stand.
+fn groups_inherit(state: u64, kind: u64, eltern: u64) {
+    let n: u64 = groups_count(state, eltern)
+    var k: u64 = 0
+    while k < GROUPS_MAX {
+        var v: u64 = 0
+        if k < n {
+            v = groups_at(state, eltern, k)
+        }
+        __mmio_write64(groups_slot(state, kind, k) as *mut u64, v)
+        k = k + 1
+    }
+    tset(state, kind, T_NGROUPS, n)
 }
 
 // ROUND K5. This used to be one word for the whole machine
@@ -682,6 +786,8 @@ fn create(state: u64, kind: u64, prio: u64, arg: u64, entry: u64) -> u64 {
     tset(state, slot, T_SUID, tget(state, par, T_SUID))
     tset(state, slot, T_SGID, tget(state, par, T_SGID))
     tset(state, slot, T_UMASK, tget(state, par, T_UMASK))
+    // RUNDE MULTIUSER: und die Zusatzgruppen dazu, aus demselben Grund.
+    groups_inherit(state, slot, par)
     tset(state, slot, T_CR3, kstate.get(state, kstate.KPML4))
     tset(state, slot, T_CWD, kstate.get(state, kstate.FS_ROOT))
     tset(state, slot, T_RSP, frame_build(state, ktop, real_entry, state,
