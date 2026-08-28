@@ -102,6 +102,20 @@ const DG_SAT: u64 = 19
 const DG_PENDING: u64 = 20
 const DG_REMAIN: u64 = 21
 const DG_BPP: u64 = 31
+// RUNDE CUSTOMRES: der Grund und die Zahl, mit denen der Kernel eine
+// eigene Aufloesung abweist -- und was auf der Platte steht.
+const DG_MAPLIMIT: u64 = 4
+const DG_CUSTWHY: u64 = 33
+const DG_CUSTNUM: u64 = 34
+const DG_MINW: u64 = 36
+const DG_MINH: u64 = 37
+const DG_MAXW: u64 = 38
+const DG_MAXH: u64 = 39
+const DG_SAVEOK: u64 = 40
+const DG_SAVEW: u64 = 41
+const DG_SAVEH: u64 = 42
+const DG_SAVETRY: u64 = 44
+const DG_SAVEAPP: u64 = 46
 const DG_MODE: u64 = 1000
 
 const DS_MODE: u64 = 0
@@ -113,6 +127,8 @@ const DS_GAMMA: u64 = 5
 const DS_SAT: u64 = 6
 const DS_CONFIRM: u64 = 7
 const DS_REVERT: u64 = 8
+const DS_CUSTOM: u64 = 11
+const DS_CHECK: u64 = 12
 
 const R_DARST: u64 = 0
 const R_SCHIRM: u64 = 1
@@ -166,6 +182,30 @@ static mut d_tiefe: [u8; 128] = [0 as u8; 128]
 static mut d_frist: [u8; 96] = [0 as u8; 96]
 static mut d_n: u64 = 0
 
+// ================================================== RUNDE CUSTOMRES
+//
+// DREI EINGABEFELDER STATT EINER AUSWAHL. Die Auswahl bleibt -- sie ist
+// der bequeme Weg und zeigt, was die Karte von sich aus hergibt. Was
+// fehlte, war der andere Weg: eine Zahl, die in keiner Liste steht.
+//
+// UND EINE ZEILE, DIE DEN GRUND NENNT. Das ist der eigentliche Punkt
+// dieser Seite. Ein Bedienfeld, das "Modus abgelehnt" schreibt, hat dem
+// Benutzer nichts gesagt: er weiss nicht, ob seine Karte zu klein ist,
+// ob die Zahl krumm ist oder ob dieser Kernel an seine eigene Grenze
+// stoesst -- und je nachdem muss er etwas voellig anderes tun. Also
+// steht hier, WELCHE der drei Schranken gegriffen hat UND MIT WELCHER
+// ZAHL, und beide Zahlen kommen aus dem Kernel.
+static mut e_cw: [u8; 16] = [0 as u8; 16]
+static mut e_ch: [u8; 16] = [0 as u8; 16]
+static mut e_ct: [u8; 16] = [0 as u8; 16]
+static mut d_grund: [u8; 160] = [0 as u8; 160]
+static mut d_save: [u8; 128] = [0 as u8; 128]
+static mut l_eig1: [u8; 41] = "Eigene Aufloesung -- Breite, Hoehe, Bit:\0"
+static mut l_eig2: [u8; 49] = "Wird gegen drei Schranken geprueft; was abweist,\0"
+static mut l_eig3: [u8; 29] = "steht unten mit seiner Zahl.\0"
+static mut b_eig: [u8; 14] = "Eigene setzen\0"
+static mut b_pruef: [u8; 12] = "Nur pruefen\0"
+
 // DIE ZEICHENKETTEN DER OBERFLAECHE STEHEN HIER UND NICHT IM RAHMEN
 // VON `u_start`. Die Widget-Bibliothek BEHAELT den Zeiger auf den Text
 // eines Widgets -- sie kopiert ihn nicht --, und firnc rechnet das nach:
@@ -210,7 +250,11 @@ static mut c_hell: [u8; 28] = "40%\n70%\n100%\n130%\n160%\n200%\0"
 static mut l_gam: [u8; 24] = "Gamma / Farbsaettigung:\0"
 static mut c_gam: [u8; 30] = "0,45\n0,70\n1,00\n1,40\n1,80\n2,20\0"
 static mut c_sat: [u8; 29] = "0% (grau)\n50%\n100%\n150%\n200%\0"
-static mut b_halt: [u8; 9] = "Behalten\0"
+// RUNDE CUSTOMRES: der Knopf heisst, was er tut. Er beantwortet die
+// Frist UND schreibt den Modus auf die Platte -- ein bestaetigter
+// Modus, der beim naechsten Start weg waere, waere eine Bestaetigung
+// ohne Wirkung.
+static mut b_halt: [u8; 30] = "Behalten (auch nach Neustart)\0"
 static mut b_zur: [u8; 9] = "Zurueck\0\0"
 // RUNDE THEME: die Marken der Themenseite. Ihre drei anderen
 // Zeichenketten (`l_aufl`, `l_ehr1`, `l_ehr2`) sind hier NICHT
@@ -1014,6 +1058,150 @@ fn frist_lesen() -> bool {
     return true
 }
 
+// ================================================== RUNDE CUSTOMRES
+//
+// DEN GRUND IN EINEN SATZ. Jede Zahl darin kommt aus dem Kernel
+// (DG_CUSTWHY, DG_CUSTNUM, DG_VRAM, DG_MAPLIMIT); dieses Programm
+// rechnet keine davon nach. Eine Oberflaeche, die eine eigene Zahl
+// hinschreibt, ist eine zweite Wahrheit.
+fn grund_lesen(w: u64, h: u64) {
+    var t_ok: [u8; 30] = "Angenommen. Oktette im Bild: \0"
+    var t_regs: [u8; 47] = "Die Karte nimmt die Breite nicht. Sie machte: \0"
+    var t_acht: [u8; 39] = " -- keine Vielfachen von 8 gehen hier.\0"
+    var t_vram: [u8; 43] = "Zu gross fuer den Bildspeicher der Karte: \0"
+    var t_lim: [u8; 44] = "Dieser Kernel blendet es nicht ein. Noetig \0"
+    var t_von: [u8; 6] = " von \0"
+    var t_kach: [u8; 30] = " (acht 2-MiB-Fensterplaetze).\0"
+    var t_dep: [u8; 29] = "Farbtiefe nicht gezeichnet: \0"
+    var t_bit: [u8; 14] = " Bit, nur 32.\0"
+    var t_uns: [u8; 26] = "Ausserhalb des Bereichs: \0"
+    var t_bis: [u8; 5] = " .. \0"
+    var t_no: [u8; 41] = "Kein Modustreiber -- ohne `disp` nichts.\0"
+    var t_leer: [u8; 2] = " \0"
+
+    let why: u64 = dget(DG_CUSTWHY)
+    let num: u64 = dget(DG_CUSTNUM)
+    if ulib.bad(why) {
+        let _z: u64 = text_an((&d_grund[0 as usize]) as u64, 0,
+            (&t_no[0 as usize]) as u64)
+        return
+    }
+    var a: u64 = 0
+    if why == 0 {
+        a = text_an((&d_grund[0 as usize]) as u64, 0,
+            (&t_ok[0 as usize]) as u64)
+        let _b: u64 = zahl_an((&d_grund[0 as usize]) as u64, a, num)
+        return
+    }
+    if why == 1 {
+        a = text_an((&d_grund[0 as usize]) as u64, 0,
+            (&t_regs[0 as usize]) as u64)
+        a = zahl_an((&d_grund[0 as usize]) as u64, a, num)
+        if (w & 7) != 0 {
+            a = text_an((&d_grund[0 as usize]) as u64, a,
+                (&t_acht[0 as usize]) as u64)
+        }
+        return
+    }
+    if why == 2 {
+        a = text_an((&d_grund[0 as usize]) as u64, 0,
+            (&t_vram[0 as usize]) as u64)
+        a = zahl_an((&d_grund[0 as usize]) as u64, a, num)
+        a = text_an((&d_grund[0 as usize]) as u64, a,
+            (&t_von[0 as usize]) as u64)
+        let _c: u64 = zahl_an((&d_grund[0 as usize]) as u64, a,
+            dget(DG_VRAM))
+        return
+    }
+    if why == 3 {
+        a = text_an((&d_grund[0 as usize]) as u64, 0,
+            (&t_lim[0 as usize]) as u64)
+        a = zahl_an((&d_grund[0 as usize]) as u64, a, num)
+        a = text_an((&d_grund[0 as usize]) as u64, a,
+            (&t_von[0 as usize]) as u64)
+        a = zahl_an((&d_grund[0 as usize]) as u64, a, dget(DG_MAPLIMIT))
+        let _d: u64 = text_an((&d_grund[0 as usize]) as u64, a,
+            (&t_kach[0 as usize]) as u64)
+        return
+    }
+    if why == 4 {
+        a = text_an((&d_grund[0 as usize]) as u64, 0,
+            (&t_dep[0 as usize]) as u64)
+        a = zahl_an((&d_grund[0 as usize]) as u64, a, num)
+        let _e: u64 = text_an((&d_grund[0 as usize]) as u64, a,
+            (&t_bit[0 as usize]) as u64)
+        return
+    }
+    if why == 5 {
+        a = text_an((&d_grund[0 as usize]) as u64, 0,
+            (&t_uns[0 as usize]) as u64)
+        a = zahl_an((&d_grund[0 as usize]) as u64, a, num)
+        a = text_an((&d_grund[0 as usize]) as u64, a,
+            (&t_leer[0 as usize]) as u64)
+        a = zahl_an((&d_grund[0 as usize]) as u64, a, dget(DG_MINW))
+        a = text_an((&d_grund[0 as usize]) as u64, a,
+            (&t_bis[0 as usize]) as u64)
+        let _f: u64 = zahl_an((&d_grund[0 as usize]) as u64, a,
+            dget(DG_MAXW))
+        return
+    }
+    let _g: u64 = text_an((&d_grund[0 as usize]) as u64, 0,
+        (&t_no[0 as usize]) as u64)
+}
+
+// WAS AUF DER PLATTE STEHT, UND WIEVIELE STARTVERSUCHE ER NOCH HAT. Das
+// ist die Zeile, ohne die der Zaehler ein Geheimnis waere: wer den
+// Rechner dreimal ohne "Behalten" startet, bekommt seinen Modus nicht
+// mehr -- und darf das vorher wissen.
+fn save_lesen() {
+    var t_k: [u8; 39] = "Gespeichert: nichts (Startmodus gilt).\0"
+    var t_g: [u8; 14] = "Gespeichert: \0"
+    var t_x: [u8; 4] = " x \0"
+    var t_v: [u8; 16] = ", Startversuch \0"
+    var t_von: [u8; 6] = " von \0"
+    var t_an: [u8; 29] = ", in diesem Start angewandt.\0"
+    var t_aus: [u8; 35] = ", in diesem Start NICHT angewandt.\0"
+    if dget(DG_SAVEOK) != 1 {
+        let _z: u64 = text_an((&d_save[0 as usize]) as u64, 0,
+            (&t_k[0 as usize]) as u64)
+        return
+    }
+    var a: u64 = text_an((&d_save[0 as usize]) as u64, 0,
+        (&t_g[0 as usize]) as u64)
+    a = zahl_an((&d_save[0 as usize]) as u64, a, dget(DG_SAVEW))
+    a = text_an((&d_save[0 as usize]) as u64, a, (&t_x[0 as usize]) as u64)
+    a = zahl_an((&d_save[0 as usize]) as u64, a, dget(DG_SAVEH))
+    a = text_an((&d_save[0 as usize]) as u64, a, (&t_v[0 as usize]) as u64)
+    a = zahl_an((&d_save[0 as usize]) as u64, a, dget(DG_SAVETRY))
+    a = text_an((&d_save[0 as usize]) as u64, a, (&t_von[0 as usize]) as u64)
+    a = zahl_an((&d_save[0 as usize]) as u64, a, 3)
+    if dget(DG_SAVEAPP) == 1 {
+        let _b: u64 = text_an((&d_save[0 as usize]) as u64, a,
+            (&t_an[0 as usize]) as u64)
+    } else {
+        let _c: u64 = text_an((&d_save[0 as usize]) as u64, a,
+            (&t_aus[0 as usize]) as u64)
+    }
+}
+
+// Eine Zahl aus einem Eingabefeld. Leere Eingabe ist 0 -- und 0 faellt
+// in `check_custom` durch die Unsinnschranke, mit ihrer eigenen Zahl.
+fn feld_zahl(p: u64) -> u64 {
+    var v: u64 = 0
+    var i: u64 = 0
+    var fertig: bool = false
+    while i < 12 && !fertig {
+        let c: u64 = __mmio_read8((p + i) as *mut u8) as u64
+        if c < 48 || c > 57 {
+            fertig = true
+        } else {
+            v = v * 10 + (c - 48)
+            i = i + 1
+        }
+    }
+    return v
+}
+
 fn stand_lesen() {
     var t_akt: [u8; 13] = "Aufloesung: \0"
     var t_mal: [u8; 4] = " x \0"
@@ -1318,6 +1506,23 @@ fn u_start(args: u64) -> u64 {
     let cq: u64 = merke(wlib.choice((&c_sat[0 as usize]) as u64, 2),
         R_SCHIRM)
     let _st2: u64 = merke(wlib.label((&d_tiefe[0 as usize]) as u64), R_SCHIRM)
+    // ---- RUNDE CUSTOMRES: die freie Eingabe
+    let _c1: u64 = merke(wlib.label((&l_eig1[0 as usize]) as u64), R_SCHIRM)
+    wlib.size(70, 24)
+    let ecw: u64 = merke(wlib.entry((&e_cw[0 as usize]) as u64, 8), R_SCHIRM)
+    wlib.size(70, 24)
+    let ech: u64 = merke(wlib.entry((&e_ch[0 as usize]) as u64, 8), R_SCHIRM)
+    wlib.size(50, 24)
+    let ect: u64 = merke(wlib.entry((&e_ct[0 as usize]) as u64, 4), R_SCHIRM)
+    wlib.size(150, 26)
+    let bce: u64 = merke(wlib.button((&b_eig[0 as usize]) as u64), R_SCHIRM)
+    wlib.size(150, 26)
+    let bcp: u64 = merke(wlib.button((&b_pruef[0 as usize]) as u64),
+        R_SCHIRM)
+    let _cg: u64 = merke(wlib.label((&d_grund[0 as usize]) as u64), R_SCHIRM)
+    let _cs2: u64 = merke(wlib.label((&d_save[0 as usize]) as u64), R_SCHIRM)
+    let _c2: u64 = merke(wlib.label((&l_eig2[0 as usize]) as u64), R_SCHIRM)
+    let _c3: u64 = merke(wlib.label((&l_eig3[0 as usize]) as u64), R_SCHIRM)
     let _s3: u64 = merke(wlib.label((&l_ehr1[0 as usize]) as u64), R_SCHIRM)
     let _s4: u64 = merke(wlib.label((&l_ehr2[0 as usize]) as u64), R_SCHIRM)
     wlib.size(140, 26)
@@ -1393,6 +1598,16 @@ fn u_start(args: u64) -> u64 {
     // nicht die Mitte. Ein Bedienfeld, das beim Oeffnen luegt, ist
     // schlimmer als eins ohne Anzeige.
     if dget(DG_READY) == 1 {
+        // RUNDE CUSTOMRES: die drei Eingabefelder zeigen, WAS GERADE
+        // LAEUFT. Ein Feld, das leer aufgeht, laedt dazu ein, eine Zahl
+        // zu raten; eines, in dem die laufende steht, zeigt zugleich das
+        // Format.
+        let _f1: u64 = zahl_an((&e_cw[0 as usize]) as u64, 0,
+            dget(DG_PANELW))
+        let _f2: u64 = zahl_an((&e_ch[0 as usize]) as u64, 0,
+            dget(DG_PANELH))
+        let _f3: u64 = zahl_an((&e_ct[0 as usize]) as u64, 0, dget(DG_BPP))
+        save_lesen()
         wlib.set_value(cs, dget(DG_CUR))
         wlib.set_value(ck, dget(DG_SCALE))
         wlib.set_value(cd, dget(DG_ROT) / 90)
@@ -1618,10 +1833,49 @@ fn u_start(args: u64) -> u64 {
                     wlib.set_text(_sf, (&d_frist[0 as usize]) as u64)
                     wlib.neu_setzen()
                     melde_stand()
+                } else if id == bce || id == bcp {
+                    // ================== RUNDE CUSTOMRES
+                    //
+                    // DIE FREIE EINGABE. Zwei Knoepfe, ein Weg: `Nur
+                    // pruefen` geht bis vor den Wechsel und fasst den
+                    // Bildschirm nicht an, `Eigene setzen` geht durch.
+                    // Beide bekommen DENSELBEN Grund und DIESELBE Zahl
+                    // aus dem Kernel zurueck.
+                    let cw: u64 = feld_zahl(wlib.text_of(ecw))
+                    let ch2: u64 = feld_zahl(wlib.text_of(ech))
+                    var cb: u64 = feld_zahl(wlib.text_of(ect))
+                    if cb == 0 {
+                        cb = 32
+                    }
+                    var fld: u64 = DS_CUSTOM
+                    if id == bcp {
+                        fld = DS_CHECK
+                    }
+                    let _cr: u64 = dset(fld, (cw << 32) | (ch2 << 16) | cb)
+                    grund_lesen(cw, ch2)
+                    wlib.set_text(_cg, (&d_grund[0 as usize]) as u64)
+                    stand_lesen()
+                    modi_lesen()
+                    save_lesen()
+                    wlib.set_text(_cs2, (&d_save[0 as usize]) as u64)
+                    wlib.set_text(_sk, (&d_karte[0 as usize]) as u64)
+                    let _cf2: bool = frist_lesen()
+                    wlib.set_text(_sf, (&d_frist[0 as usize]) as u64)
+                    wlib.set_text(cs, (&d_modi[0 as usize]) as u64)
+                    wlib.set_value(cs, dget(DG_CUR))
+                    wlib.neu_setzen()
+                    melde_stand()
                 } else if id == b2a {
+                    // RUNDE CUSTOMRES: derselbe Knopf, eine Wirkung mehr
+                    // -- der Kernel schreibt den Modus jetzt auch auf die
+                    // Platte (kernel/dispsave.fi). Die Zeile darunter
+                    // sagt danach, was dort steht und wieviele
+                    // Startversuche er noch hat.
                     let _k1: u64 = dset(DS_CONFIRM, 0)
                     let _k2: bool = frist_lesen()
                     wlib.set_text(_sf, (&d_frist[0 as usize]) as u64)
+                    save_lesen()
+                    wlib.set_text(_cs2, (&d_save[0 as usize]) as u64)
                     let _k3: u64 = text_an((&l_stat[0 as usize]) as u64, 0,
                         (&m_behalt[0 as usize]) as u64)
                     wlib.set_text(st, (&l_stat[0 as usize]) as u64)
