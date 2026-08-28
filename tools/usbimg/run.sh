@@ -1,0 +1,357 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-2.0-only
+# tools/usbimg/run.sh -- DIE ABNAHME DER RUNDE USBIMG.
+#
+#   bash tools/usbimg/run.sh [arbeitsverzeichnis]
+#
+# ==================================================================
+# WAS HIER GEMESSEN WIRD, UND WARUM ES UNTER KVM GEMESSEN WIRD
+# ==================================================================
+#
+# Die Runde KVMFIX hat vorgefuehrt, was TCG verschweigt: zwei Fehler, die
+# auf jeder AMD-CPU toedlich sind, standen 25 Runden lang unter einer
+# Nachbildung, die sie stillschweigend zurechtbog. Ein Abbild, das auf
+# einem ECHTEN Rechner starten soll, wird deshalb hier auf der ECHTEN CPU
+# gestartet: `-accel kvm -cpu host`. Was darunter kracht, kracht auch auf
+# Justins Blech.
+#
+# DIE VIER LAEUFE:
+#
+#   1. BIOS. Der Startweg ueber `limine bios-install` und den MBR-Bereich.
+#   2. UEFI. Dieselbe Datei, dieselbe `limine.conf`, aber die Firmware
+#      (OVMF) startet /EFI/BOOT/BOOTX64.EFI. Das ist der Lauf, der ohne
+#      Bit 2 im Multiboot-Kopf mit "Cannot use text mode with UEFI"
+#      abbraeche.
+#   3. AHCI STATT IDE. Damit die Diagnose etwas ANDERES melden muss.
+#      Meldete sie in beiden Laeufen dasselbe, waere sie kein Messgeraet,
+#      sondern eine Konstante.
+#   4. e1000 STATT virtio-net. Dieselbe Gegenprobe fuer den Netzteil:
+#      `netdev` muss die andere Karte nennen -- oder, wenn es sie nicht
+#      bedienen kann, "no driver for" mit Hersteller und Geraet.
+#
+# UND EIN BILD. Der Schreibtisch-Eintrag der `limine.conf` wird gefahren
+# und fotografiert, und in dem Foto muessen DEUTSCHE Texte MIT UMLAUTEN
+# stehen. Das ist die eigentliche Gegenprobe zum Fehler der letzten
+# Runde: Sprachdateien im Abbild, die die Oberflaeche dann doch nicht
+# benutzt, waeren derselbe Fehler mit einer neuen Ausrede.
+set -uo pipefail
+cd "$(dirname "$0")/../.."
+ROOT=$(pwd)
+
+TMPD=${1:-$(mktemp -d)}
+mkdir -p "$TMPD"
+IMGDIR="$TMPD/bau"
+IMG="$IMGDIR/osum-usb.img"
+
+pass=0
+fail=0
+ok() { pass=$((pass + 1)); printf '  \033[32mok\033[0m   %s\n' "$*"; }
+bad() { fail=$((fail + 1)); printf '  \033[31mNEIN\033[0m %s\n' "$*"; }
+is() { # was ist soll
+    if [ "$2" = "$3" ]; then ok "$1: $2"; else bad "$1: $2 (erwartet $3)"; fi
+}
+
+OVMF_CODE=""
+for c in /usr/share/OVMF/OVMF_CODE_4M.fd /usr/share/OVMF/OVMF_CODE.fd \
+         /usr/share/ovmf/OVMF.fd; do
+    [ -f "$c" ] && { OVMF_CODE=$c; break; }
+done
+OVMF_VARS=""
+for v in /usr/share/OVMF/OVMF_VARS_4M.fd /usr/share/OVMF/OVMF_VARS.fd; do
+    [ -f "$v" ] && { OVMF_VARS=$v; break; }
+done
+KVM=()
+[ -w /dev/kvm ] && KVM=(-accel kvm -cpu host)
+
+echo "== 1. das Abbild bauen =="
+if bash tools/usbimg/build.sh "$IMGDIR" > "$TMPD/build.txt" 2>&1; then
+    ok "tools/usbimg/build.sh laeuft durch"
+    sed 's/^/       /' "$TMPD/build.txt"
+else
+    bad "das Abbild laesst sich nicht bauen"
+    sed 's/^/       /' "$TMPD/build.txt" | tail -20
+    echo "USBIMG: $pass bestanden, $fail gescheitert"
+    exit 1
+fi
+
+echo "== 2. was in der Datei wirklich steht =="
+if sgdisk --print "$IMG" > "$TMPD/gpt.txt" 2>&1; then
+    grep -q 'EF00' "$TMPD/gpt.txt" && ok "GPT: Partition 1 ist eine EFI-Partition (EF00)" \
+        || bad "keine EFI-Partition in der Tafel"
+    n=$(grep -cE '^ +[0-9]+ ' "$TMPD/gpt.txt")
+    is "Partitionen in der Tafel" "$n" "2"
+else
+    bad "sgdisk kann die Tafel nicht lesen"
+fi
+# Der BIOS-Teil: Limine traegt seinen Namen in den MBR-Bereich ein.
+if dd if="$IMG" bs=512 count=4 status=none | grep -qa 'LIMINE'; then
+    ok "der BIOS-Startteil von Limine steht im MBR-Bereich"
+else
+    bad "im MBR-Bereich steht kein Limine"
+fi
+for f in ::/EFI/BOOT/BOOTX64.EFI ::/limine.conf ::/osum.mb ::/root.img \
+         ::/limine-bios.sys; do
+    if mdir -i "$IMGDIR/esp.img" "$f" >/dev/null 2>&1; then
+        ok "auf der EFI-Partition liegt $f"
+    else
+        bad "auf der EFI-Partition fehlt $f"
+    fi
+done
+
+echo "== 3. echte Umlaute in locale/de/messages =="
+# Der Fehler, der zurueckkommen soll, wenn ihn jemand rueckgaengig macht:
+# in der Datei stand durchgehend ASCII-Umschrift, obwohl ihr eigener
+# Kommentar echte Umlaute behauptete.
+u=$(grep -cP '[äöüßÄÖÜ]' locale/de/messages)
+if [ "${u:-0}" -gt 0 ]; then
+    ok "locale/de/messages: $u Zeilen mit echten UTF-8-Umlauten"
+else
+    bad "locale/de/messages enthaelt keinen einzigen echten Umlaut"
+fi
+# UND KEINE UMSCHRIFT MEHR IM ANGEZEIGTEN TEXT. Geprueft wird nur RECHTS
+# vom Gleichheitszeichen: die Schluessel links sind englisch und bleiben
+# es, und ein Kommentar darf schreiben, was er will.
+umschrift=$(awk -F' = ' '/^[a-z][a-z0-9._]* = /{print $2}' locale/de/messages \
+    | grep -ocP '\b(aendern|Groesse|groesse|fuer|schliessen|Uebernehmen|Aufloesung|laesst|liess|Oeffnen|Loeschen)\b' || true)
+is "ASCII-Umschriften im angezeigten deutschen Text" "${umschrift:-0}" "0"
+# Und die Oktettrechnung: ein 'ü' sind ZWEI Oktette.
+zeichen=$(python3 -c '
+import sys
+d = open("locale/de/messages", encoding="utf-8").read()
+u = sum(d.count(c) for c in "äöüßÄÖÜ")
+print("%d %d %d" % (u, len(d), len(d.encode("utf-8"))))
+')
+set -- $zeichen
+if [ "$3" -eq $(( $2 + $1 )) ]; then
+    ok "Oktettrechnung stimmt: $1 Umlaute, $2 Zeichen, $3 Oktette ($2 + $1)"
+else
+    bad "Oktettrechnung: $2 Zeichen, $3 Oktette, $1 Umlaute -- geht nicht auf"
+fi
+
+# ------------------------------------------------------------- Laeufe
+
+lauf() { # name zusatzargumente...
+    local name=$1; shift
+    local out="$TMPD/$name.txt"
+    cp -f "$IMG" "$TMPD/$name.img"
+    rm -f "$out"
+    timeout 200 qemu-system-x86_64 "${KVM[@]}" -m 2048 \
+        -drive "file=$TMPD/$name.img,format=raw,if=none,id=stick" \
+        "$@" \
+        -serial "file:$out" -display none -no-reboot \
+        > "$TMPD/$name.qemu" 2>&1
+    return 0
+}
+
+warte_auf() { # datei muster sekunden
+    local i=0
+    while [ $i -lt $(( ${3:-60} * 5 )) ]; do
+        grep -qa "$2" "$1" 2>/dev/null && return 0
+        sleep 0.2; i=$((i + 1))
+    done
+    return 1
+}
+
+echo "== 4. BIOS: dieselbe Datei, der Weg ueber den MBR =="
+lauf bios -device ide-hd,drive=stick
+if grep -qa 'firn kernel' "$TMPD/bios.txt"; then
+    ok "der Kern startet unter BIOS von dem Abbild"
+else
+    bad "unter BIOS startet der Kern nicht"
+    tail -20 "$TMPD/bios.txt" | sed 's/^/       /'
+fi
+for m in 'hwdiag: firmware=' 'hwdiag: cpu vendor=' 'hwdiag: pci devices=' \
+         'hwdiag: fb '; do
+    grep -qa "$m" "$TMPD/bios.txt" && ok "BIOS: der Bericht enthaelt '$m'" \
+        || bad "BIOS: '$m' fehlt im Bericht"
+done
+fw=$(grep -aoE 'firmware=(BIOS|UEFI)' "$TMPD/bios.txt" | head -1 | sed 's/.*=//')
+is "BIOS-Lauf: erkannte Firmware" "${fw:-?}" "BIOS"
+# ANGEHALTEN heisst ANGEHALTEN: nach dem Bericht darf nichts mehr kommen.
+if grep -qa 'ANGEHALTEN' "$TMPD/bios.txt"; then
+    ok "der Diagnose-Eintrag haelt an, statt abzuschalten"
+else
+    bad "der Diagnose-Eintrag haelt nicht an"
+fi
+if grep -qa 'kernel: done' "$TMPD/bios.txt"; then
+    bad "GEGENPROBE: der Lauf lief trotz hwdiagstop bis zum Ende durch"
+else
+    ok "GEGENPROBE: nach dem Anhalten kommt kein 'kernel: done' mehr"
+fi
+
+echo "== 5. UEFI: dieselbe Datei, der Weg ueber BOOTX64.EFI =="
+if [ -n "$OVMF_CODE" ]; then
+    cp -f "$OVMF_VARS" "$TMPD/vars.fd" 2>/dev/null
+    lauf uefi -device ide-hd,drive=stick \
+        -drive "if=pflash,format=raw,unit=0,readonly=on,file=$OVMF_CODE" \
+        -drive "if=pflash,format=raw,unit=1,file=$TMPD/vars.fd"
+    if grep -qa 'firn kernel' "$TMPD/uefi.txt"; then
+        ok "derselbe Kern startet unter UEFI (OVMF)"
+    else
+        bad "unter UEFI startet der Kern nicht"
+        tail -25 "$TMPD/uefi.txt" | sed 's/^/       /'
+    fi
+    grep -qa 'Cannot use text mode with UEFI' "$TMPD/uefi.txt" \
+        && bad "der Lader verlangt einen Textmodus -- Bit 2 im Multiboot-Kopf fehlt" \
+        || ok "kein 'Cannot use text mode with UEFI' -- der Rahmenpuffer kommt von der Firmware"
+    fwu=$(grep -aoE 'firmware=(BIOS|UEFI)' "$TMPD/uefi.txt" | head -1 | sed 's/.*=//')
+    is "UEFI-Lauf: erkannte Firmware" "${fwu:-?}" "UEFI"
+    src=$(grep -aoE 'hwdiag: fb [0-9]+x[0-9]+' "$TMPD/uefi.txt" | head -1)
+    [ -n "$src" ] && ok "UEFI: die Firmware hat einen Rahmenpuffer gesetzt ($src)" \
+        || bad "UEFI: kein Rahmenpuffer im Bericht"
+else
+    bad "OVMF liegt nicht auf diesem Rechner -- der UEFI-Lauf faellt aus"
+fi
+
+echo "== 6. Gegenprobe: anderer Plattencontroller, andere Netzkarte =="
+lauf ahci -device ahci,id=ahci0 -device ide-hd,bus=ahci0.0,drive=stick \
+     -device e1000,netdev=n0 -netdev user,id=n0
+if grep -qa 'hwdiag: disk AHCI' "$TMPD/ahci.txt"; then
+    ok "mit -device ahci meldet die Diagnose AHCI"
+else
+    bad "mit -device ahci meldet die Diagnose kein AHCI"
+    grep -a 'hwdiag: disk' "$TMPD/ahci.txt" | sed 's/^/       /'
+fi
+if grep -qa 'hwdiag: disk IDE' "$TMPD/bios.txt"; then
+    ok "GEGENPROBE: derselbe Bericht meldete mit -device ide-hd noch IDE"
+else
+    bad "GEGENPROBE: der IDE-Lauf meldete kein IDE -- die Zeile ist eine Konstante"
+fi
+if grep -qa 'netdev: c0=e1000' "$TMPD/ahci.txt"; then
+    ok "netdev waehlt fuer die Intel-Karte den e1000-Treiber"
+else
+    bad "netdev nennt den Treiber der Intel-Karte nicht"
+    grep -a 'netdev:' "$TMPD/ahci.txt" | sed 's/^/       /'
+fi
+
+lauf virtio -device ide-hd,drive=stick \
+     -device virtio-net-pci,netdev=n0 -netdev user,id=n0
+if grep -qa 'netdev: c0=virtio-net' "$TMPD/virtio.txt"; then
+    ok "und fuer die virtio-Karte den virtio-Treiber -- zwei Karten, zwei Antworten"
+else
+    bad "netdev nennt fuer virtio nicht virtio-net"
+    grep -a 'netdev:' "$TMPD/virtio.txt" | sed 's/^/       /'
+fi
+# UND EINE KARTE, DIE DIESER KERN NICHT KANN. Ohne diesen Lauf waere die
+# Zeile "no driver for" nie gemessen worden -- und genau sie ist die
+# Zeile, an der Justin ablesen soll, welchen Treiber er braucht.
+lauf fremd -device ide-hd,drive=stick \
+     -device rtl8139,netdev=n0 -netdev user,id=n0
+if grep -qa 'netdev: no driver for' "$TMPD/fremd.txt"; then
+    ok "eine fremde Karte (rtl8139) wird als 'no driver for' gemeldet: $(grep -ao 'no driver for.*' "$TMPD/fremd.txt" | head -1)"
+else
+    bad "eine fremde Karte wird nicht als 'no driver for' gemeldet"
+fi
+# UND DER KERN LAEUFT TROTZDEM WEITER. Punkt 5 der Runde.
+if grep -qa 'ANGEHALTEN' "$TMPD/fremd.txt"; then
+    ok "und der Kern laeuft nach der unbekannten Karte bis zum Ende des Berichts"
+else
+    bad "der Kern kommt nach der unbekannten Karte nicht mehr bis zum Ende"
+fi
+
+echo "== 7. keine Platte, keine Karte -- und trotzdem ein Bericht =="
+lauf leer
+if grep -qa 'hwdiag: disk=KEINER' "$TMPD/leer.txt"; then
+    ok "ohne Plattencontroller sagt der Bericht das, statt still zu haengen"
+else
+    bad "ohne Plattencontroller fehlt die Meldung"
+    grep -a 'hwdiag: disk' "$TMPD/leer.txt" | sed 's/^/       /'
+fi
+if grep -qa 'hwdiag: net=KEINE KARTE' "$TMPD/leer.txt"; then
+    ok "und ohne Netzkarte ebenso"
+else
+    bad "ohne Netzkarte fehlt die Meldung"
+    grep -a 'hwdiag: net' "$TMPD/leer.txt" | sed 's/^/       /'
+fi
+if grep -qa 'ANGEHALTEN' "$TMPD/leer.txt"; then
+    ok "und der Bericht ist trotzdem vollstaendig"
+else
+    bad "der Bericht bricht ab, wenn nichts gefunden wird"
+fi
+
+echo "== 8. der Schreibtisch, auf deutsch, mit Umlauten im BILD =="
+#
+# WAS HIER GEMESSEN WIRD UND WAS NICHT.
+#
+# NICHT gemessen wird, ob der Rasterer Umlaute kann -- das hat Runde
+# I18N bildpunktgenau erledigt. Gemessen wird, ob DIESES ABBILD seine
+# Sprachdateien mitbringt UND BENUTZT. Der Unterschied ist genau der
+# Fehler der letzten Runde: die Oberflaeche fiel auf englische
+# Ersatztexte zurueck, weil /usr/share/locale/de/messages nicht im
+# Abbild lag.
+#
+# Der Weg: Kern und Wurzelmodul wie auf dem Stick, dann von aussen
+# Super+A -- das oeffnet den Starter. Auf ihm steht "Ausfuehren", und
+# zwar mit ue-Ligatur: `Ausführen`. Dieses eine Wort traegt beide
+# Zusagen auf einmal, die deutsche Sprache und den echten Umlaut.
+#
+# `tools/usbimg/suchtext.py` sucht die Zeile im GANZEN Bild -- gerastert
+# mit `tools/ttf/raster.py`, der zweiten Fassung des Rasterers. Es wird
+# also nicht gegen sich selbst geprueft.
+DESKARGS="modfs osum gfx wm wig desk wmhold wiglong nokbd nosched noproc nofs"
+rm -f "$TMPD/desk.txt" "$TMPD/desk.ppm" "$TMPD/desk.sock"
+printf 'warte 5\nsendkey a\nwarte 2\nsendkey meta_l-a\nwarte 3\n' > "$TMPD/drive"
+timeout 240 qemu-system-x86_64 "${KVM[@]}" -m 512 \
+    -kernel "$IMGDIR/osum.mb" -initrd "$IMGDIR/root.img" \
+    -append "$DESKARGS" \
+    -serial "file:$TMPD/desk.txt" -display none -no-reboot -vga std \
+    -monitor "unix:$TMPD/desk.sock,server,nowait" \
+    > "$TMPD/desk.qemu" 2>&1 &
+qpid=$!
+warte_auf "$TMPD/desk.txt" '^wm: hold' 120
+python3 tools/wm/monitor.py "$TMPD/desk.sock" "$TMPD/drive" 0.12 \
+    > "$TMPD/mon.log" 2>&1
+sleep 2
+python3 tools/gfx/screenshot.py "$TMPD/desk.sock" "$TMPD/desk.ppm" 30 \
+    > "$TMPD/shot.txt" 2>&1
+kill "$qpid" 2>/dev/null; wait "$qpid" 2>/dev/null
+
+if grep -qa 'osum: from module' "$TMPD/desk.txt"; then
+    ok "die Wurzel kommt aus dem Boot-Modul -- kein Plattentreiber noetig"
+else
+    bad "die Wurzel kommt nicht aus dem Modul"
+    grep -a 'osum:' "$TMPD/desk.txt" | sed 's/^/       /' | head -5
+fi
+if grep -qa 'glyphs=' "$TMPD/desk.txt"; then
+    ok "die Schriften kommen aus dem Abbild: $(grep -aoE 'glyphs=[0-9]+' "$TMPD/desk.txt" | head -1)"
+else
+    bad "keine Schrift geladen"
+fi
+# DER MITSCHNITT SAGT ES SCHON: der Starter meldet seinen eigenen Namen,
+# und der kommt aus dem Katalog.
+if grep -qa 'launcher: name \[Suchen\]' "$TMPD/desk.txt"; then
+    ok "der Starter nennt sich 'Suchen' -- deutsch, aus /usr/share/locale/de"
+else
+    bad "der Starter ist nicht deutsch: $(grep -a 'launcher: name' "$TMPD/desk.txt" | tail -1)"
+fi
+
+if [ -s "$TMPD/desk.ppm" ]; then
+    ok "ein Bildschirmfoto ist entstanden ($(stat -c%s "$TMPD/desk.ppm") Oktette)"
+    finde() { # was text [--nicht]
+        local was=$1 text=$2; shift 2
+        local aus rc
+        aus=$(python3 tools/usbimg/suchtext.py "$TMPD/desk.ppm" \
+              assets/osum-sans.ttf 15 "$text" "$@" 2>&1)
+        rc=$?
+        if [ $rc = 0 ]; then ok "$was: $aus"; else bad "$was: $aus"; fi
+    }
+    finde "DER UMLAUT STEHT IM BILD" "Ausführen"
+    finde "GEGENPROBE: die ASCII-Ersatzschreibung steht NICHT da" \
+          "Ausfuehren" --nicht
+    finde "GEGENPROBE: und der englische Text auch nicht" "Run" --nicht
+    finde "der deutsche Aufforderungstext des Starters" "Programm suchen:"
+    finde "und die Taskleiste ist ebenfalls deutsch" "kein Netz"
+    python3 -c "
+from PIL import Image
+Image.open('$TMPD/desk.ppm').save('$TMPD/desk.png')
+" 2>/dev/null && ok "und liegt als $TMPD/desk.png"
+else
+    bad "kein Bildschirmfoto"
+    tail -10 "$TMPD/shot.txt" | sed 's/^/       /'
+fi
+
+echo
+echo "USBIMG: $pass bestanden, $fail gescheitert"
+echo "        Abbild:     $IMG"
+echo "        Foto:       $TMPD/desk.png"
+[ "$fail" = 0 ]
