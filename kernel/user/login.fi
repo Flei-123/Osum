@@ -62,6 +62,8 @@ export { u_start }
 const SYS_SETUID: u64 = 105
 const SYS_SETGID: u64 = 106
 const SYS_EXECVE: u64 = 59
+const SYS_CLOCK_GETTIME: u64 = 228
+const CLOCK_MONOTONIC: u64 = 1
 
 fn read_name(out: u64, max: u64) -> u64 {
     var c: [u8; 1] = [0 as u8; 1]
@@ -92,6 +94,17 @@ fn read_name(out: u64, max: u64) -> u64 {
 // eine Anmeldung, die nie wiederkommt, ist ein kaputtes Terminal und
 // keine Sicherheitsmassnahme. Wer wirklich raet, hat bei einer Minute
 // je Versuch laengst aufgegeben.
+// Die Uhr der Maschine in Millisekunden -- CLOCK_MONOTONIC, also der
+// Zyklenzaehler und nicht der Zeitgeberinterrupt.
+fn jetzt_ms() -> u64 {
+    var ts: [u64; 2] = [0 as u64; 2]
+    if ulib.bad(ulib.sys(SYS_CLOCK_GETTIME, CLOCK_MONOTONIC,
+        (&ts[0]) as u64, 0)) {
+        return 0
+    }
+    return ts[0 as usize] * 1000 + ts[1 as usize] / 1000000
+}
+
 fn wartezeit(basis: u64, n: u64) -> u64 {
     var ms: u64 = basis
     var k: u64 = 1
@@ -114,6 +127,7 @@ fn u_start(args: u64) -> u64 {
     var e_bad: [u8; 20] = "Anmeldung falsch\n\0\0\0"
     var s_wait: [u8; 20] = "login: warte \0\0\0\0\0\0\0"
     var s_ms: [u8; 5] = " ms\n\0"
+    var s_echt: [u8; 20] = "login: gewartet \0\0\0\0"
     var s_ok: [u8; 12] = "willkommen \0"
     var d_sh: [u8; 8] = "/bin/sh\0"
     var nlc: [u8; 2] = "\n\0"
@@ -211,7 +225,29 @@ fn u_start(args: u64) -> u64 {
             ulib.digits(ms, (&num[0]) as u64)
             ulib.eput((&num[0]) as u64)
             ulib.eput((&s_ms[0]) as u64)
+            // UND DANN WIRD NACHGEMESSEN, MIT DER UHR DER MASCHINE
+            // SELBST. Die Zahl oben koennte jemand hinschreiben, ohne zu
+            // schlafen -- `login: gewartet N ms` kommt aus
+            // CLOCK_MONOTONIC und ist der Beweis, dass wirklich Zeit
+            // vergangen ist.
+            //
+            // WARUM NICHT DIE UHR DES WIRTS: die misst den ganzen Lauf,
+            // und darin steckt auch die Passwortpruefung. Auf einer
+            // ausgelasteten Maschine ist der Unterschied zwischen zwei
+            // Laeufen dann groesser als die Verzoegerung, und man weiss
+            // nicht mehr, welcher Teil wovon kam. Diese Zahl hier kennt
+            // nur den Schlaf.
+            let vorher: u64 = jetzt_ms()
             ulib.sleep_ms(ms)
+            let nachher: u64 = jetzt_ms()
+            var echt: u64 = 0
+            if nachher > vorher {
+                echt = nachher - vorher
+            }
+            ulib.eput((&s_echt[0]) as u64)
+            ulib.digits(echt, (&num[0]) as u64)
+            ulib.eput((&num[0]) as u64)
+            ulib.eput((&s_ms[0]) as u64)
         }
         ulib.eput((&e_bad[0]) as u64)
         tries = tries + 1
