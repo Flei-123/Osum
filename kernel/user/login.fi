@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-// kernel/user/login.fi -- Runde K13: die Anmeldung.
+// kernel/user/login.fi -- die Anmeldung.
 //
 // Das Programm, das es ohne `init` nicht geben koennte -- es braucht
 // einen Ort, an dem es laeuft, und dieser Ort ist der Prozess 1. `init`
@@ -9,15 +9,47 @@
 //     login              fragt nach Namen und Passwort
 //     login NAME         fragt nur nach dem Passwort
 //
-// DREI VERSUCHE, DANN ENDET ES mit dem Code 1. `init` startet es dann
-// neu (`respawn` in /etc/inittab) -- das ist die Art, wie ein Unix eine
-// Anmeldemaske hinstellt, ohne dass irgendwo eine Schleife steht, die
-// niemand beenden kann.
+// ================================================ RUNDE MULTIUSER
 //
-// WAS ES NICHT TUT: es zaehlt Fehlversuche nicht ueber seine eigene
-// Lebensdauer hinaus und wartet nach einem Fehlversuch nicht. Beides
-// gehoert zu einer ernsthaften Anmeldung dazu und steht als Grenze in
-// docs/ROUNDK13.md.
+// DREI DINGE SIND ANDERS, und das erste ist das, was K13 als Grenze
+// hingeschrieben und nicht gebaut hat:
+//
+//     "WAS ES NICHT TUT: es zaehlt Fehlversuche nicht ueber seine
+//      eigene Lebensdauer hinaus und wartet nach einem Fehlversuch
+//      nicht. Beides gehoert zu einer ernsthaften Anmeldung dazu."
+//
+// 1. DIE VERZOEGERUNG, und sie VERDOPPELT SICH. Nach dem ersten
+//    Fehlversuch eine Sekunde, nach dem zweiten zwei, nach dem dritten
+//    vier. Warum das der richtige Mechanismus ist und nicht bloss ein
+//    aergerlicher: die Kosten des Ratens steigen mit der Zahl der
+//    Versuche, die des ehrlichen Vertippens nicht -- wer sich einmal
+//    vertippt, wartet eine Sekunde und ist fertig.
+//
+//    DIE ZAHL, GEGEN DIE SIE ANTRITT, steht in `kernel/user/pw.fi`
+//    ausgerechnet: bei 8192 Runden schafft ein Angreifer mit einer
+//    optimierten Umsetzung rund 216 Rateversuche je Sekunde und Kern,
+//    WENN er /etc/shadow hat. An DIESER Anmeldung schafft er mit der
+//    Verdopplung nach zehn Versuchen einen alle siebzehn Minuten. Der
+//    Kostenfaktor und die Verzoegerung sind zwei verschiedene
+//    Abwehrmassnahmen gegen zwei verschiedene Angriffe, und keine
+//    ersetzt die andere.
+//
+// 2. DER ZAEHLER LAEUFT UEBER DIE GANZE LEBENSDAUER. Er stand vorher
+//    in der Schleife und wurde mit jedem neuen Namen zurueckgesetzt --
+//    wer nach zwei Fehlversuchen einen anderen Namen eintippte, fing
+//    von vorn an. Jetzt zaehlt `fehler` alles, was schiefging, und die
+//    Wartezeit richtet sich danach.
+//
+// 3. DIE ZUSATZGRUPPEN. `pw.initgroups` traegt alles ein, in dem
+//    dieser Name in /etc/group als Mitglied steht -- und zwar VOR
+//    `setgid`/`setuid`, weil `setgroups` root vorbehalten ist und
+//    dieser Prozess danach keiner mehr ist.
+//
+// WAS AUS /etc/login.conf KOMMT, wenn die Datei da ist:
+//     verzoegerung_ms   die erste Wartezeit (Vorgabe 1000)
+//     max_versuche      wie oft (Vorgabe 3)
+// Ohne die Datei gelten die Vorgaben -- ein System ohne sie muss sich
+// anmelden lassen.
 
 profile kernel
 
@@ -54,16 +86,51 @@ fn read_name(out: u64, max: u64) -> u64 {
     return n
 }
 
+// Die Wartezeit nach dem `n`-ten Fehlversuch: `basis` mal zwei hoch
+// (n-1), gedeckelt bei einer Minute. Der Deckel ist kein Zugestaendnis
+// -- ohne ihn wuerde der zwanzigste Fehlversuch acht Tage warten, und
+// eine Anmeldung, die nie wiederkommt, ist ein kaputtes Terminal und
+// keine Sicherheitsmassnahme. Wer wirklich raet, hat bei einer Minute
+// je Versuch laengst aufgegeben.
+fn wartezeit(basis: u64, n: u64) -> u64 {
+    var ms: u64 = basis
+    var k: u64 = 1
+    while k < n {
+        ms = ms * 2
+        if ms > 60000 {
+            return 60000
+        }
+        k = k + 1
+    }
+    if ms > 60000 {
+        return 60000
+    }
+    return ms
+}
+
 fn u_start(args: u64) -> u64 {
     var s_hi: [u8; 15] = "\nosum login: \0\0"
     var q_pw: [u8; 12] = "Passwort: \0\0"
     var e_bad: [u8; 20] = "Anmeldung falsch\n\0\0\0"
+    var s_wait: [u8; 20] = "login: warte \0\0\0\0\0\0\0"
+    var s_ms: [u8; 5] = " ms\n\0"
     var s_ok: [u8; 12] = "willkommen \0"
     var d_sh: [u8; 8] = "/bin/sh\0"
     var nlc: [u8; 2] = "\n\0"
+    var k_del: [u8; 17] = "verzoegerung_ms\0\0"
+    var k_max: [u8; 14] = "max_versuche\0\0"
 
+    let basis: u64 = pw.conf_num((&k_del[0]) as u64, pw.VERZOEGERUNG_MS)
+    var hoechst: u64 = pw.conf_num((&k_max[0]) as u64, 3)
+    if hoechst == 0 || hoechst > 100 {
+        hoechst = 3
+    }
+
+    // DER ZAEHLER STEHT VOR DER SCHLEIFE. Genau das ist der Unterschied
+    // zu vorher: er ueberlebt den Namenswechsel.
+    var fehler: u64 = 0
     var tries: u64 = 0
-    while tries < 3 {
+    while tries < hoechst {
         var name: [u8; 64] = [0 as u8; 64]
         if ulib.arg_count(args) > 1 && tries == 0 {
             ulib.strncpy((&name[0]) as u64, ulib.arg_at(args, 1), 64)
@@ -87,16 +154,25 @@ fn u_start(args: u64) -> u64 {
             // DER UNBEKANNTE NAME WIRD TROTZDEM GEPRUEFT -- gegen einen
             // Eintrag, der nie stimmt. Sonst waere an der Antwortzeit zu
             // sehen, welche Namen es gibt: ein unbekannter Name kaeme
-            // sofort zurueck, ein bekannter erst nach 2048 Runden.
-            var dummy: [u8; 94] = "$osum1$2048$0000000000000000$0000000000000000000000000000000000000000000000000000000000000000\0"
+            // sofort zurueck, ein bekannter erst nach der vollen
+            // Rundenzahl.
+            //
+            // RUNDE MULTIUSER: die Rundenzahl im Scheineintrag ist
+            // dieselbe, die diese Runde als Kostenfaktor gewaehlt hat
+            // (`pw.KOSTEN`, 8192) -- stuende dort weiter 2048, waere
+            // ein unbekannter Name viermal schneller abgewiesen als ein
+            // bekannter, und die ganze Vorsichtsmassnahme waere ihr
+            // eigenes Leck.
+            var dummy: [u8; 94] = "$osum1$8192$0000000000000000$0000000000000000000000000000000000000000000000000000000000000000\0"
             pw.check_hash((&dummy[0]) as u64, (&given[0]) as u64)
         }
         if okay {
+            // ERST DIE ZUSATZGRUPPEN, dann die Gruppe, dann der
+            // Benutzer. Die Reihenfolge ist nicht beliebig: `setgroups`
+            // und `setgid` sind root vorbehalten, und nach `setuid` ist
+            // dieser Prozess keiner mehr.
+            pw.initgroups((&name[0]) as u64)
             let gid: u64 = pw.gid_of_name((&name[0]) as u64)
-            // Erst die Gruppe, dann der Benutzer -- danach ist dieser
-            // Prozess kein root mehr und kann es nicht rueckgaengig
-            // machen. Genau das ist der Sinn: was von hier an laeuft,
-            // gehoert dem Menschen und nicht dem System.
             ulib.sys(SYS_SETGID, gid, 0, 0)
             if ulib.bad(ulib.sys(SYS_SETUID, uid, 0, 0)) {
                 return 1
@@ -116,6 +192,26 @@ fn u_start(args: u64) -> u64 {
             argv[1] = 0
             ulib.sys(SYS_EXECVE, (&path[0]) as u64, (&argv[0]) as u64, 0)
             return 127
+        }
+        fehler = fehler + 1
+        // DIE VERZOEGERUNG KOMMT VOR DER MELDUNG. Der Grund ist derselbe
+        // wie beim Scheineintrag oben: was zuerst kommt, ist an der Zeit
+        // zu sehen. Stuende die Meldung davor, wuesste ein Angreifer
+        // sofort, dass es nicht gestimmt hat, und koennte die Verbindung
+        // abbrechen, statt zu warten -- die Verzoegerung kostete ihn
+        // dann nichts.
+        let ms: u64 = wartezeit(basis, fehler)
+        if ms > 0 {
+            // Die Wartezeit steht auf der Fehlerausgabe, weil ein
+            // Terminal, das drei Sekunden lang nichts tut, sonst wie ein
+            // haengendes aussieht -- und weil der Testlaeufer die Zahl
+            // gegen die gemessene Zeit halten kann.
+            ulib.eput((&s_wait[0]) as u64)
+            var num: [u8; 24] = [0 as u8; 24]
+            ulib.digits(ms, (&num[0]) as u64)
+            ulib.eput((&num[0]) as u64)
+            ulib.eput((&s_ms[0]) as u64)
+            ulib.sleep_ms(ms)
         }
         ulib.eput((&e_bad[0]) as u64)
         tries = tries + 1

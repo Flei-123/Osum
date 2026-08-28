@@ -64,11 +64,86 @@ export {
     make_hash, check_hash, ITERS, DK_LEN,
     load_passwd, field, line_at, lines_of, name_of_uid, uid_of_name,
     gid_of_name, shell_of_name, home_of_name, shadow_of, PW_MAX,
-    read_all, write_all, read_pass, set_shadow
+    read_all, write_all, read_pass, set_shadow,
+    // ------------------------------------------- RUNDE MULTIUSER
+    groups_of_name, group_name_of, gid_of_group, initgroups, conf_num,
+    KOSTEN, VERZOEGERUNG_MS, MAX_ITERS
 }
 
 const DK_LEN: u64 = 32
-const ITERS: u64 = 2048
+
+// ================== RUNDE MULTIUSER: DER KOSTENFAKTOR, GEMESSEN
+//
+// HIER STAND 2048, und im Kopf dieser Datei stand seit K13, dass das zu
+// wenig ist. Diese Runde ersetzt die Zahl nicht durch eine schoenere,
+// sondern durch eine GEMESSENE -- und die Messung steht in
+// docs/ROUNDMULTIUSER.md und laeuft in `tools/multiuser/run.sh` bei
+// jeder Abnahme mit (`mut kdf`).
+//
+// WAS GEMESSEN WURDE, auf einem AMD EPYC 7571, QEMU 7.2.22:
+//
+//     Osum, PBKDF2-HMAC-SHA256, dieselbe Funktion wie unten
+//       unter -accel kvm -cpu host    31.400 .. 34.000 Runden/s
+//       unter TCG (Softwareemulation)  4.400 ..  4.700 Runden/s
+//     derselbe Wirt, OpenSSL hinter Pythons hashlib
+//                                  1.768.429 Runden/s
+//
+// DREI ZAHLEN FOLGEN DARAUS, und die dritte ist die unangenehme:
+//
+//   1. Bei 8192 Runden dauert EINE PRUEFUNG auf echter Hardware
+//      260 ms. Das ist das Zeitbudget, das man einer Anmeldung
+//      zumuten kann, ohne dass sie sich kaputt anfuehlt -- und es ist
+//      das, worauf die uebliche Empfehlung ("waehle den Kostenfaktor
+//      so, dass eine Pruefung 0,25 s dauert") hinauslaeuft.
+//   2. 2048 Runden dauerten 60 ms. Der Faktor ist also 4.
+//   3. EIN ANGREIFER RECHNET NICHT MIT DIESEM CODE. OpenSSL ist auf
+//      demselben Rechner 56 mal schneller als dieses SHA-256 in Firn
+//      (kein SIMD, 32-Bit-Woerter in u64 mit Maske). Bei 8192 Runden
+//      schafft ein Kern also rund 216 Rateversuche je Sekunde, 32
+//      Kerne rund 6.900. Das ist der ehrliche Wert dieser Zahl, und er
+//      ist der Grund, warum diese Runde ZUSAETZLICH die Verzoegerung
+//      nach einem Fehlversuch einbaut: gegen ein gestohlenes
+//      /etc/shadow hilft der Kostenfaktor, gegen Durchprobieren an der
+//      Anmeldung hilft er kaum.
+//
+// WARUM NICHT 600.000, wie es fuer PBKDF2-HMAC-SHA256 empfohlen wird:
+// das waeren hier 19 SEKUNDEN je Anmeldung. Die Empfehlung ist fuer
+// eine Umsetzung geschrieben, die eine halbe Million Runden in einer
+// drittel Sekunde schafft; diese hier schafft 31.400 in einer Sekunde.
+// Eine Zahl abzuschreiben, ohne die Maschine darunter zu messen, waere
+// Sicherheitstheater.
+//
+// WARUM NICHT Argon2id, was der Auftrag bevorzugt haette: es braucht
+// SPEICHER, und ein Programm dieses Userlands hat keinen Allokator
+// (weder `malloc` noch `brk` in `ulib`). Ein festes Feld waere machbar,
+// aber Argon2id braucht darunter BLAKE2b, und BLAKE2b ist eine zweite
+// Hashfunktion, die geschrieben UND gegen RFC-Vektoren gemessen werden
+// muesste. Was daran fehlt, steht als Luecke in
+// docs/ROUNDMULTIUSER.md -- ausgeschrieben und nicht verschwiegen.
+// DIE FORM DES EINTRAGS IST DARAUF VORBEREITET: `$osum1$` ist eine
+// Kennung des VERFAHRENS, und ein `$osum2$` daneben aendert an keinem
+// bestehenden Eintrag etwas.
+const ITERS: u64 = 8192
+
+// Die Obergrenze, die `check_hash` einem Eintrag zugesteht. Sie stand
+// auf 100.000 -- also UNTER dem, was heute empfohlen wird, und damit
+// haette ein Administrator den Kostenfaktor gar nicht hoch genug
+// stellen koennen. Sie ist eine Notbremse gegen einen VERDORBENEN
+// Eintrag (ein `$osum1$99999999999$...` in einer kaputten Datei wuerde
+// die Anmeldung fuer immer haengen lassen), nicht eine Vorgabe. Zehn
+// Millionen Runden sind hier fuenf Minuten; das faellt auf, ohne dass
+// jemand mit einer Zahl ausgesperrt wird, die er absichtlich gewaehlt
+// hat.
+const MAX_ITERS: u64 = 10000000
+
+// Die zwei Werte aus /etc/login.conf, wenn es die Datei nicht gibt.
+// `kosten` ist die Rundenzahl fuer NEUE Passwoerter -- ein
+// BESTEHENDER Eintrag traegt seine eigene bei sich und bleibt
+// gueltig. `verzoegerung` ist, was `login` nach dem ERSTEN Fehlversuch
+// wartet; danach verdoppelt es sich.
+const KOSTEN: u64 = 8192
+const VERZOEGERUNG_MS: u64 = 1000
+
 const PW_MAX: u64 = 4096
 
 // ---------------------------------------------------------- SHA-256
@@ -405,7 +480,17 @@ fn make_hash(pw: u64, out: u64) -> bool {
     if ulib.bad(got) || got != 8 {
         return false
     }
-    if !pbkdf2(pw, ulib.length(pw), (&salt[0]) as u64, 8, ITERS,
+    // RUNDE MULTIUSER: die Rundenzahl kommt aus /etc/login.conf, wenn
+    // dort eine steht, sonst ist es ITERS. Ein Administrator soll den
+    // Kostenfaktor heraufsetzen koennen, ohne den Kernel neu zu bauen
+    // -- und der Eintrag traegt die gewaehlte Zahl bei sich, also
+    // bleibt jedes bestehende Passwort gueltig.
+    var runden: [u8; 12] = "kdf_runden\0\0"
+    var it: u64 = conf_num((&runden[0]) as u64, KOSTEN)
+    if it == 0 || it > MAX_ITERS {
+        it = KOSTEN
+    }
+    if !pbkdf2(pw, ulib.length(pw), (&salt[0]) as u64, 8, it,
         (&dk[0]) as u64) {
         return false
     }
@@ -413,7 +498,7 @@ fn make_hash(pw: u64, out: u64) -> bool {
     hex_out((&dk[0]) as u64, 32, (&dhex[0]) as u64)
     var at: u64 = ulib.strcpy(out, (&head[0]) as u64)
     var num: [u8; 24] = [0 as u8; 24]
-    ulib.digits(ITERS, (&num[0]) as u64)
+    ulib.digits(it, (&num[0]) as u64)
     at = at + ulib.strcpy(out + at, (&num[0]) as u64)
     at = at + ulib.strcpy(out + at, (&dollar[0]) as u64)
     at = at + ulib.strcpy(out + at, (&shex[0]) as u64)
@@ -477,7 +562,7 @@ fn check_hash(rec: u64, pw: u64) -> bool {
         wlen = wlen + 1
         at = at + 2
     }
-    if wlen != 32 || iters == 0 || iters > 100000 {
+    if wlen != 32 || iters == 0 || iters > MAX_ITERS {
         return false
     }
     var dk: [u8; 32] = [0 as u8; 32]
@@ -787,11 +872,27 @@ fn read_pass(prompt: u64, out: u64, max: u64) -> u64 {
 }
 
 // Den Eintrag eines Benutzers in /etc/shadow ersetzen oder anhaengen.
-// Die ganze Datei wird gelesen, umgebaut und in einem Stueck
-// zurueckgeschrieben -- ohne Zwischendatei, weil dieses Dateisystem kein
-// `rename` hat. Das ist eine ehrliche Grenze: faellt der Strom mitten im
-// Schreiben aus, ist /etc/shadow halb. Ein `rename` waere die Loesung
-// und ist eine eigene Runde.
+//
+// RUNDE MULTIUSER: UEBER EINE ZWISCHENDATEI UND `rename`. Hier stand
+// bis zu dieser Runde die ehrliche Grenze "ohne Zwischendatei, weil
+// dieses Dateisystem kein `rename` hat" -- und sie stimmt seit Runde
+// OFS3 nicht mehr: `SYS_RENAME` (82) steht in der Aufruftabelle, und
+// `fs.rename_path` haengt einen Namen innerhalb desselben
+// Dateisystems um.
+//
+// Warum das mehr ist als Ordnungsliebe: `write_all` oeffnet die Datei
+// mit O_TRUNC. Zwischen dem Abschneiden und dem letzten geschriebenen
+// Oktett ist /etc/shadow LEER oder HALB -- und wer in genau diesem
+// Augenblick den Strom verliert, hat ein System, an dem sich niemand
+// mehr anmelden kann. Mit der Zwischendatei ist der gefaehrliche
+// Zeitraum EIN Verzeichniseintrag lang: entweder steht der alte Name
+// auf der alten Inode oder auf der neuen, ein Drittes gibt es nicht.
+//
+// Die Zwischendatei entsteht MIT DEN RECHTEN, die sie am Ende haben
+// soll (0o600, root), und nicht mit denen, die die Maske gerade
+// hergibt -- sonst waere /etc/shadow fuer die Dauer eines `passwd`
+// lesbar. `chmod` unmittelbar nach dem Anlegen, vor dem ersten
+// geschriebenen Oktett.
 fn set_shadow(name: u64, rec: u64) -> bool {
     var path: [u8; 12] = "/etc/shadow\0"
     var out: [u8; 4096] = [0 as u8; 4096]
@@ -835,5 +936,308 @@ fn set_shadow(name: u64, rec: u64) -> bool {
         at = at + ulib.strcpy((&out[at as usize]) as u64, (&tail[0]) as u64)
         at = at + ulib.strcpy((&out[at as usize]) as u64, (&nlc[0]) as u64)
     }
-    return write_all((&path[0]) as u64, (&out[0]) as u64, at)
+    // ============================ DIE VIER SCHRITTE, UND WARUM VIER
+    //
+    // GEMESSEN, NICHT ANGENOMMEN: `rename` dieses Kernels UEBERSCHREIBT
+    // NICHT. Runde K14 hat das ausdruecklich so entschieden und in
+    // `fs.rename_path` hingeschrieben ("dieser Kernel ueberschreibt
+    // nicht still"), und `tools/k14/run.sh` misst es. Der erste Versuch
+    // dieser Runde war das naive `schreib .neu, rename ueber shadow` --
+    // er kam mit -EEXIST (-17) zurueck, und das steht hier, weil es der
+    // Grund fuer die vier Schritte ist:
+    //
+    //   1. /etc/shadow.neu schreiben, mit 0o600 VOR dem ersten Oktett
+    //   2. /etc/shadow  ->  /etc/shadow.alt     (umbenennen, nicht loeschen)
+    //   3. /etc/shadow.neu  ->  /etc/shadow
+    //   4. /etc/shadow.alt loeschen
+    //
+    // WAS DAS WERT IST: zu KEINEM Zeitpunkt sind die alten Oktette weg.
+    // Faellt der Strom aus, findet man vor:
+    //   nach 1: shadow (alt, ganz) + shadow.neu       -> nichts verloren
+    //   nach 2: shadow.alt (alt, ganz) + shadow.neu   -> beides da
+    //   nach 3: shadow (neu, ganz) + shadow.alt       -> beides da
+    // Die alte Fassung ohne Zwischendatei hatte dagegen ein Fenster von
+    // der Laenge eines ganzen Schreibvorgangs, in dem /etc/shadow LEER
+    // war -- O_TRUNC schneidet ab, bevor das erste Oktett kommt. Ein
+    // System, das in diesem Fenster abstuerzt, laesst niemanden mehr
+    // herein.
+    //
+    // WAS BLEIBT: zwischen 2 und 3 gibt es kurz KEIN /etc/shadow. Das
+    // ist zwei Verzeichnisoperationen lang und ohne Ein-/Ausgabe
+    // dazwischen -- aber es ist nicht null, und ein `rename`, das nach
+    // POSIX ersetzt, waere die richtige Antwort darauf. Das steht als
+    // Luecke in docs/ROUNDMULTIUSER.md und nicht als erledigt.
+    var tmp: [u8; 16] = "/etc/shadow.neu\0"
+    var vor: [u8; 16] = "/etc/shadow.alt\0"
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&tmp[0]) as u64, 577, 0)
+    if ulib.bad(fd) {
+        return false
+    }
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    // ================== RECHTE UND EIGENTUEMER, BEVOR ETWAS DRINSTEHT
+    //
+    // GEMESSEN UND NICHT ANGENOMMEN: die frische Datei bekommt
+    // Eigentuemer und Gruppe aus den WIRKSAMEN Kennungen dessen, der
+    // sie anlegt (`perm.on_create`). Bei `passwd` ist die wirksame
+    // BENUTZERkennung 0 -- das setuid-Bit -- die wirksame GRUPPE aber
+    // die des Menschen davor. Der erste Lauf dieser Runde hat genau
+    // das produziert: `/etc/shadow 600 0 1000`, also root:justin. Mit
+    // 0o600 ist das nicht ausnutzbar, aber es ist falsch, und beim
+    // naechsten `chmod 0640` waere es eine offene Tuer.
+    //
+    // Also werden Rechte UND Eigentuemer der alten Datei uebernommen,
+    // bevor das erste Oktett geschrieben wird. Findet sich keine alte
+    // Datei, gilt 0o600 root:root -- das, was /etc/shadow haben muss.
+    var st: [u8; 144] = [0 as u8; 144]
+    var mode: u64 = 384 // 0o600
+    var ouid: u64 = 0
+    var ogid: u64 = 0
+    if !ulib.bad(ulib.sys(4, (&path[0]) as u64, (&st[0]) as u64, 0)) {
+        mode = ((*((&st[24]) as *mut u32)) as u64) & 4095
+        ouid = (*((&st[28]) as *mut u32)) as u64
+        ogid = (*((&st[32]) as *mut u32)) as u64
+    }
+    ulib.sys(90, (&tmp[0]) as u64, mode, 0)
+    ulib.sys(92, (&tmp[0]) as u64, ouid, ogid)
+    if !write_all((&tmp[0]) as u64, (&out[0]) as u64, at) {
+        ulib.sys(ulib.SYS_UNLINK, (&tmp[0]) as u64, 0, 0)
+        return false
+    }
+    // Ein Rest aus einem abgebrochenen Lauf steht im Weg -- weg damit,
+    // BEVOR etwas Wertvolles darauf zeigt.
+    ulib.sys(ulib.SYS_UNLINK, (&vor[0]) as u64, 0, 0)
+    let hatte: bool = !ulib.bad(ulib.sys(ulib.SYS_RENAME,
+        (&path[0]) as u64, (&vor[0]) as u64, 0))
+    if ulib.bad(ulib.sys(ulib.SYS_RENAME, (&tmp[0]) as u64,
+        (&path[0]) as u64, 0)) {
+        // Schritt 3 ging schief. Dann zurueck -- lieber das alte
+        // Passwort als gar keines.
+        if hatte {
+            ulib.sys(ulib.SYS_RENAME, (&vor[0]) as u64, (&path[0]) as u64, 0)
+        }
+        ulib.sys(ulib.SYS_UNLINK, (&tmp[0]) as u64, 0, 0)
+        return false
+    }
+    ulib.sys(ulib.SYS_UNLINK, (&vor[0]) as u64, 0, 0)
+    return true
+}
+
+// =================================== RUNDE MULTIUSER: /etc/group
+//
+// DIE DRITTE DATEI, und sie hat bis zu dieser Runde gefehlt. Die Form
+// ist die gewohnte:
+//
+//     name:x:gid:mitglied,mitglied,mitglied
+//
+// Das `x` in der zweiten Spalte ist dasselbe wie in /etc/passwd -- ein
+// Gruppenpasswort gibt es hier nicht, und es gibt auch keinen Grund,
+// eines zu erfinden: `newgrp` ist der einzige Befehl, der je eines
+// gebraucht hat, und den gibt es nicht.
+//
+// WOZU ZUSATZGRUPPEN GUT SIND, in einem Satz: sie sind die Art, auf
+// die zwei Menschen an einer Datei arbeiten, ohne dass einer von
+// beiden root sein muss. Ohne sie hat ein Benutzer GENAU EINE Gruppe,
+// und "gemeinsam" heisst dann entweder "0o666" oder "gar nicht".
+//
+// DIE DATEI DARF JEDER LESEN (0o644), so wie /etc/passwd -- in ihr
+// steht kein Geheimnis, nur wer mit wem.
+
+static mut grbuf: [u8; 4096] = [0 as u8; 4096]
+
+fn load_group() -> u64 {
+    var p: [u8; 11] = "/etc/group\0"
+    return read_all((&p[0]) as u64, (&grbuf[0]) as u64, 4096)
+}
+
+// Steht `name` in der Mitgliederliste `list` (durch Komma getrennt)?
+// Kein `strtok`: die Liste wird an Ort und Stelle abgelaufen, weil sie
+// dem Aufrufer gehoert.
+fn in_members(list: u64, name: u64) -> bool {
+    let nl: u64 = ulib.length(name)
+    var at: u64 = 0
+    var going: bool = true
+    while going {
+        if *((list + at) as *mut u8) == 0 as u8 {
+            going = false
+        } else {
+            var e: u64 = at
+            while *((list + e) as *mut u8) != 0 as u8
+                && *((list + e) as *mut u8) != 44 as u8 {
+                e = e + 1
+            }
+            if e - at == nl {
+                if ulib.strneq(list + at, name, nl) {
+                    return true
+                }
+            }
+            if *((list + e) as *mut u8) == 0 as u8 {
+                going = false
+            } else {
+                at = e + 1
+            }
+        }
+    }
+    return false
+}
+
+// Die Gruppenkennungen, in denen `name` Mitglied ist -- OHNE die
+// Hauptgruppe aus /etc/passwd, die steht dort und wird von `setgid`
+// gesetzt. Rueckgabe: wie viele in `out` stehen.
+fn groups_of_name(name: u64, out: u64, max: u64) -> u64 {
+    if load_group() == ulib.EOF {
+        return 0
+    }
+    var line: [u8; 256] = [0 as u8; 256]
+    var f: [u8; 192] = [0 as u8; 192]
+    var n: u64 = 0
+    var i: u64 = 0
+    let cnt: u64 = lines_of((&grbuf[0]) as u64)
+    while i < cnt {
+        if line_at((&grbuf[0]) as u64, i, (&line[0]) as u64, 256)
+            != ulib.EOF {
+            if field((&line[0]) as u64, 3, (&f[0]) as u64, 192) {
+                if in_members((&f[0]) as u64, name) {
+                    var g: [u8; 32] = [0 as u8; 32]
+                    if field((&line[0]) as u64, 2, (&g[0]) as u64, 32) {
+                        if n < max {
+                            __mmio_write64((out + n * 8) as *mut u64,
+                                ulib.to_num((&g[0]) as u64))
+                            n = n + 1
+                        }
+                    }
+                }
+            }
+        }
+        i = i + 1
+    }
+    return n
+}
+
+// Der Name zu einer Gruppenkennung. Findet sich keiner, wird KEINER
+// erfunden -- dann steht die Zahl allein da, wie bei jedem Unix.
+fn group_name_of(gid: u64, out: u64, max: u64) -> bool {
+    if load_group() == ulib.EOF {
+        return false
+    }
+    var line: [u8; 256] = [0 as u8; 256]
+    var f: [u8; 64] = [0 as u8; 64]
+    var i: u64 = 0
+    let cnt: u64 = lines_of((&grbuf[0]) as u64)
+    while i < cnt {
+        if line_at((&grbuf[0]) as u64, i, (&line[0]) as u64, 256)
+            != ulib.EOF {
+            if field((&line[0]) as u64, 2, (&f[0]) as u64, 64) {
+                if ulib.to_num((&f[0]) as u64) == gid {
+                    return field((&line[0]) as u64, 0, out, max)
+                }
+            }
+        }
+        i = i + 1
+    }
+    return false
+}
+
+// Die Kennung zu einem GRUPPENNAMEN. Sie kommt aus /etc/group und
+// nicht aus /etc/passwd -- das ist der Unterschied, an dem `chown
+// justin:projekt` in dieser Runde zuerst gescheitert ist: `projekt` ist
+// eine Gruppe und kein Benutzer, und `pw.gid_of_name` sucht in
+// /etc/passwd nach einem BENUTZER dieses Namens. Die Datei zu
+// verwechseln ist ein Fehler, den man erst sieht, wenn eine Gruppe
+// einmal NICHT gleichzeitig ein Benutzername ist.
+fn gid_of_group(name: u64) -> u64 {
+    if load_group() == ulib.EOF {
+        return ulib.EOF
+    }
+    var line: [u8; 256] = [0 as u8; 256]
+    var f: [u8; 64] = [0 as u8; 64]
+    var i: u64 = 0
+    let cnt: u64 = lines_of((&grbuf[0]) as u64)
+    while i < cnt {
+        if line_at((&grbuf[0]) as u64, i, (&line[0]) as u64, 256)
+            != ulib.EOF {
+            if field((&line[0]) as u64, 0, (&f[0]) as u64, 64) {
+                if ulib.streq((&f[0]) as u64, name) {
+                    var g: [u8; 32] = [0 as u8; 32]
+                    if field((&line[0]) as u64, 2, (&g[0]) as u64, 32) {
+                        return ulib.to_num((&g[0]) as u64)
+                    }
+                }
+            }
+        }
+        i = i + 1
+    }
+    return ulib.EOF
+}
+
+// DIE ZUSATZGRUPPEN SETZEN, wie `initgroups` es auf jedem Unix tut:
+// alles aus /etc/group, in dem dieser Name als Mitglied steht. Sie
+// MUSS gerufen werden, solange der Prozess noch root ist -- `setgroups`
+// ist root vorbehalten, und danach ist es zu spaet. `login` und `su`
+// tun es deshalb VOR `setgid` und `setuid`.
+fn initgroups(name: u64) -> u64 {
+    var g: [u64; 16] = [0 as u64; 16]
+    let n: u64 = groups_of_name(name, (&g[0]) as u64, 16)
+    // Auch die LEERE Liste wird gesetzt: sonst behielte ein Prozess
+    // die Zusatzgruppen dessen, der ihn gestartet hat. Genau das ist
+    // der Fehler, den `su` ohne diesen Aufruf machen wuerde.
+    return ulib.sys(116, n, (&g[0]) as u64, 0)
+}
+
+// ============================ RUNDE MULTIUSER: /etc/login.conf
+//
+// EINE ZAHL AUS EINER DATEI, in der einfachsten Form, die noch ein
+// Format ist:
+//
+//     # Zeilen mit # sind Kommentar
+//     kdf_runden = 8192
+//     verzoegerung_ms = 1000
+//     max_versuche = 3
+//
+// WARUM ES DIE DATEI GIBT: der Kostenfaktor unten ist gemessen -- auf
+// DIESER Maschine. Auf einer anderen ist er falsch. Ein Wert, den man
+// nur durch Neuuebersetzen aendern kann, wird nie geaendert.
+//
+// GIBT ES DIE DATEI NICHT, gilt der Vorgabewert, und das ist kein
+// Fehler: ein System ohne /etc/login.conf muss sich anmelden lassen.
+fn conf_num(key: u64, vorgabe: u64) -> u64 {
+    var p: [u8; 17] = "/etc/login.conf\0\0"
+    var buf: [u8; 1024] = [0 as u8; 1024]
+    if read_all((&p[0]) as u64, (&buf[0]) as u64, 1024) == ulib.EOF {
+        return vorgabe
+    }
+    let kl: u64 = ulib.length(key)
+    var line: [u8; 128] = [0 as u8; 128]
+    var i: u64 = 0
+    let cnt: u64 = lines_of((&buf[0]) as u64)
+    while i < cnt {
+        if line_at((&buf[0]) as u64, i, (&line[0]) as u64, 128)
+            != ulib.EOF {
+            var at: u64 = 0
+            while line[at as usize] == 32 as u8 || line[at as usize] == 9 as u8 {
+                at = at + 1
+            }
+            if line[at as usize] != 35 as u8 { // '#'
+                if ulib.strneq((&line[at as usize]) as u64, key, kl) {
+                    var k: u64 = at + kl
+                    while line[k as usize] == 32 as u8
+                        || line[k as usize] == 9 as u8 {
+                        k = k + 1
+                    }
+                    if line[k as usize] == 61 as u8 { // '='
+                        k = k + 1
+                        while line[k as usize] == 32 as u8
+                            || line[k as usize] == 9 as u8 {
+                            k = k + 1
+                        }
+                        let v: u64 = ulib.to_num((&line[k as usize]) as u64)
+                        if v != ulib.EOF {
+                            return v
+                        }
+                    }
+                }
+            }
+        }
+        i = i + 1
+    }
+    return vorgabe
 }
