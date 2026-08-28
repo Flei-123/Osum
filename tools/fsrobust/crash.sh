@@ -87,6 +87,8 @@ RC2=$?
 val() { tr -d '\000' < "$S2" 2>/dev/null | grep -a "^$1: $2 = " | head -1 | sed 's/.* = //'; }
 
 COUNT=$(val fsrv count)
+ROK=$(val fsrv rollok)
+ROK2=$(val fsrv rollok2)
 SCH=$(val fsrv schaeden)
 FSCK=$(val fsck fehler)
 JOFF=$(val fsck joffen)
@@ -97,7 +99,7 @@ WI=$(python3 tools/fsrobust/pruef.py inhalt "$LIVE" 2>&1 | grep -c BEFUND)
 WIRT=$(( WS + WI ))
 
 echo "lauf=$NR ms=$MS los=$LOS count=${COUNT:-?} schaeden=${SCH:-?}" \
-     "fsck=${FSCK:-?} joffen=${JOFF:-?} wirt=$WIRT rc2=$RC2"
+     "rollok=${ROK:-?},${ROK2:-?} fsck=${FSCK:-?} joffen=${JOFF:-?} wirt=$WIRT rc2=$RC2"
 if [ "$WIRT" != 0 ]; then
     python3 tools/fsrobust/pruef.py struktur "$LIVE" 2>&1 | sed 's/^/    /'
     python3 tools/fsrobust/pruef.py inhalt "$LIVE" 2>&1 | sed 's/^/    /'
