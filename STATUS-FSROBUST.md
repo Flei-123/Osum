@@ -70,7 +70,25 @@ könnte.
 
 ## 3. Der Beweis
 
-ERGEBNIS-STATUS
+| | mit Journal | mit `nojournal` (Gegenprobe) |
+|---|---:|---:|
+| Abschüsse mit SIGKILL | **60** | 60 |
+| **Läufe mit Schaden** | **0** | 4 |
+| Läufe, die danach nicht mehr hochkamen | 0 | 0 |
+| Läufe, in denen das Journal wirklich nachgetragen hat | **11** | — |
+
+Dazu ein zweiter Lauf derselben Anordnung: 60 mit Journal, **0** Läufe
+mit Schaden; 60 mit `nojournal`, 7 Läufe mit Schaden.
+
+**Zusammen 120 Abschüsse mit Journal, 0 beschädigte Fälle — gegen
+11 von 120 ohne.**
+
+Geprüft wird jeder Lauf dreimal und von drei verschiedenen Stellen:
+`fsrv` in Ring 3 (durch dieselben Systemaufrufe wie jedes andere
+Programm), `/bin/fsck` roh über `/dev/hda`, und `tools/fsrobust/pruef.py`
+auf dem Wirt aus dem Abbild. Die Langfassung mit der Aufteilung der
+Schäden steht in `docs/OFS-JOURNAL.md` § 5.
+
 
 ---
 
@@ -86,7 +104,29 @@ ist: verlorene Blöcke freigeben, benutzte in der Karte nachtragen.
 dreizehn Abbilder, die mit Absicht kaputt sind; auf jedem einzelnen
 schaltet der Kern selbst ab (exit 21) und `fsck` meldet eine Zahl:
 
-FSCK-TABELLE
+| Abbild | was zerstört wurde | `fsck` sagt | fertig? |
+|---|---|---|:--:|
+| `kennung` | Superblock ohne OSUM-OFS-Kennung | `magic=0`, 1 Fehler | ja |
+| `muell` | die ersten 64 Blöcke Zufallsoktette | `magic=0`, 1 Fehler | ja |
+| `inodes` | Superblock behauptet 2^40 Inodes | `geom=0`, gedeckelt auf das, was passt | ja |
+| `bloecke` | Superblock behauptet 2^50 Blöcke | `geom=0`, gedeckelt auf das Gerät | ja |
+| `bereiche` | Datenbereich VOR der Inodetabelle | `geom=0`, 1.788 Fehler | ja |
+| `zeigerkreis` | ein indirekter Zeiger zeigt auf sich selbst | `doppelt=1`, `totlinks=126` | ja |
+| `verzkreis` | zwei Verzeichnisse enthalten einander | `kreise=1` | ja |
+| `selbstverz` | ein Verzeichnis enthält sich selbst | `kreise=1` | ja |
+| `doppelt` | zwei Inodes teilen einen Datenblock | `doppelt=1` | ja |
+| `wildzeiger` | Blockzeiger hinter das Ende der Platte | `ausser=1` | ja |
+| `totlink` | Verzeichniseintrag auf eine freie Inode | `totlinks=1` | ja |
+| `leerkarte` | die Blockkarte genullt | `fehlend=1013` | ja |
+| `jmuell` | Bestätigung mit richtiger Kennung, falscher Summe | `joffen=1`, sonst nichts | ja |
+
+**Dreizehn von dreizehn: `fsck` wird fertig** (6 bis 20 Sekunden je
+Abbild, der Kern schaltet selbst ab, exit 21). Keines hängt.
+
+Und `-r` behebt, was eindeutig ist: auf `leerkarte` trägt es die 1.013
+benutzten Blöcke wieder in die Karte ein, danach meldet ein zweiter Lauf
+0 Fehler.
+
 
 ---
 
