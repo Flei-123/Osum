@@ -70,6 +70,14 @@
 #
 #  12. OHNE /etc/inittab SAGT init DAS UND STIRBT NICHT STILL.
 #
+#  13. DER KERNFEHLER, DEN DIESE RUNDE GEFUNDEN HAT. `wait4` fragte
+#      `find_child` nach dem ERSTEN Kind des Rufers, ohne nach dessen
+#      Zustand zu fragen -- lebte es noch, meldete WNOHANG eine 0, und
+#      der Zombie DAHINTER wurde nie abgeholt. Fuer eine Shell mit einem
+#      Kind unsichtbar, fuer den Prozess 1 toedlich. `waitfirst` auf der
+#      Kommandozeile stellt den alten Weg wieder her, und dann bleibt
+#      derselbe Dienst nach zwei Starts fuer immer stehen.
+#
 # Alle Laeufe gehen ueber `-accel kvm`, wenn /dev/kvm benutzbar ist
 # (rund viereinhalbmal schneller als TCG, gemessen in Runde KVMFIX),
 # sonst ueber TCG -- und der Laeufer sagt, was er genommen hat.
@@ -348,6 +356,24 @@ is "DIE WAISE FAELLT AN DEN PROZESS 1 und wird eingesammelt" \
    "$(val "$F" 'init: orphans=[0-9]+')" "1"
 is "und am Ende steht keine Leiche mehr" "$(val "$F" 'zombies=[0-9]+')" "0"
 has "$F" "power: acpi pm1a=" "die Abschaltung liest FADT und _S5_ aus der ACPI-Tafel"
+
+echo "-- 3j. DER KERNFEHLER, DEN DIESE RUNDE GEFUNDEN HAT"
+# `wait4` fragte `find_child` nach dem ERSTEN Kind des Rufers, ohne nach
+# seinem Zustand zu fragen. Lebte das noch, antwortete WNOHANG mit 0 --
+# und der ZOMBIE DAHINTER wurde nie abgeholt. Fuer eine Shell mit einem
+# Kind faellt das nie auf; fuer den Prozess 1, der immer mehrere hat,
+# steht danach jeder Dienst fuer immer auf `running`, obwohl er tot ist.
+# `waitfirst` stellt den alten Weg wieder her -- und dann bricht die
+# Messung zusammen.
+sn=$(sp "$F" sauber 4 head)
+rc=$(run_case waitfirst "$TMPD/d0.img" "osum waitfirst $BASE script=sh /t/kurz.sh" 300 -no-reboot)
+WF="$TMPD/waitfirst.txt"
+wn=$(sp "$WF" sauber 4 head)
+if [ -n "${wn:-}" ] && [ "$wn" -le 2 ]; then
+    ok "GEGENPROBE waitfirst: derselbe Dienst bleibt bei $wn Starts stehen (ohne den Fehler: $sn)"
+else bad "GEGENPROBE waitfirst traegt nicht: $wn Starts statt hoechstens zwei"; fi
+is "und er steht dabei als 'running' da, obwohl er tot ist" \
+   "$(sp "$WF" sauber 2 head)" "running"
 
 echo "== 4. DIE GEGENPROBE ZUM ZIEL: derselbe Baum mit /etc/ziel=grafik =="
 rc=$(run_case grafik "$TMPD/dg.img" "osum $BASE script=sh /t/kurz.sh" 300 -no-reboot)
