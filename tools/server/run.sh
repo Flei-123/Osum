@@ -136,6 +136,26 @@ echo "        Stellen ausserhalb von kernel/gfx.fi: $N"
 num "kein Modul ausser der Naht greift noch auf die Grafik zu" "$N" eq 0
 python3 tools/server/count.py kernel --je-datei | sed 's/^/        /'
 
+# UND DIE ZWEITE HAELFTE DERSELBEN FRAGE: war der Umzug ein Umzug?
+# `kgui.fi` und `sysgui.fi` behaupten, dieselben Funktionen zu
+# enthalten, die vorher in `kmain.fi` und `sys.fi` standen -- Zeile fuer
+# Zeile. Das laesst sich nachrechnen, also wird es nachgerechnet: die
+# alten Fassungen kommen aus git, die Rumpfe werden zeichenweise
+# verglichen, und erlaubt ist genau die eine Abweichung, die der Umzug
+# erzwingt (`neg` -> `sys.neg`, `bnum` -> `kutil.bnum`).
+BASIS=${SERVERBUILD_BASIS:-4f844b5}
+if git rev-parse --verify -q "$BASIS" >/dev/null 2>&1; then
+    if python3 tools/server/moved.py "$BASIS" > "$TMPD/moved.txt" 2>&1; then
+        sed 's/^/      /' "$TMPD/moved.txt"
+        ok "der Umzug nach kgui.fi/sysgui.fi/kutil.fi ist ZEICHENGLEICH mit $BASIS"
+    else
+        sed 's/^/      /' "$TMPD/moved.txt"
+        bad "der Umzug hat den Code veraendert -- siehe oben"
+    fi
+else
+    echo "        ($BASIS ist hier nicht da -- der Vergleich entfaellt)"
+fi
+
 echo "== 3. das Serverabbild bootet bis zur Shell auf der Leitung =="
 
 bash tools/server/build.sh "$TMPD/s" > "$TMPD/build.txt" 2>&1 \
