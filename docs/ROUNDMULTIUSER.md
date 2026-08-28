@@ -346,6 +346,54 @@ es auch dort über `fs.rename_path`, denselben Aufruf, den
 
 ---
 
+## 7b. Zwei Fehler, die erst auffielen, als jemand fragte
+
+Beide fand `tools/k14/run.sh` Abschnitt 9, und beide sind **älter als
+diese Runde**. Der Abschnitt lässt dieselbe Arbeit zweimal laufen — auf
+dem geraden Weg von Runde 62 und mit `vfsall` durch die Ops-Tafel — und
+vergleicht Ausgabe **und Platte** Oktett für Oktett.
+
+### (a) Der Weg über die Ops-Tafel setzte keine Rechte
+
+`do_open` und `do_mkdir` rufen auf dem geraden Weg `perm.on_create`, seit
+K13. Im `vfs`-Zweig rief niemand etwas. Eine Inode kommt **genullt** aus
+`fs.inode_alloc` — also bekam jede mit `vfsall` angelegte Datei den Modus
+`0` und den Eigentümer `0`.
+
+**Gegenprobe, dass es nicht diese Runde war:** derselbe Abschnitt auf dem
+Basiszweig (`/root/mgline`, ohne eine Zeile dieser Runde):
+
+    K14: 151 passed, 1 failed
+      FAIL  und die Wurzelplatte danach, Oktett fuer Oktett
+
+Die Zusage war **schon rot**, und niemand hatte hingesehen. Vor dieser
+Runde hinderte ein Modus von 0 auch niemanden — weil niemand ihn ansah.
+`sys.vfs_on_create` schließt das, für OFS; FAT32 hat keine Rechte,
+`/proc` und `/dev` legen nichts an.
+
+### (b) root darf ein Verzeichnis immer betreten
+
+K13 hat richtig geschrieben, dass root eine Datei ohne x-Bit nicht
+*starten* darf. Aber dasselbe Bit heißt bei einem **Verzeichnis**
+*betreten*, und das ist etwas anderes. Linux macht denselben Unterschied:
+`CAP_DAC_OVERRIDE` gibt Ausführungsrecht auf ein Verzeichnis immer, auf
+eine Datei nur, wenn irgendein x-Bit gesetzt ist.
+
+Mit Fehler (a) zusammen war die Folge sichtbar, sobald `perm.walk`
+existierte:
+
+    osum$ mkdir /neu
+    osum$ echo eins > /neu/a.txt
+    sh: cannot open /neu/a.txt
+
+— root kam in ein Verzeichnis nicht hinein, das er selbst angelegt hatte.
+`perm.may_attr` bekommt dafür ein Argument `ist_dir`.
+
+Nach beiden Korrekturen: **Ausgabe gleich, Platte gleich** (`cmp` ohne
+Ausgabe).
+
+---
+
 ## 8. Die Aufrufnummern (Auflage 5 des Auftrags)
 
 `tools/kernel/syscalls.py` ist neu. Es liest `kernel/sys.fi` **und**
@@ -418,7 +466,11 @@ Ehrlich und einzeln, so wie K13 es vorgemacht hat:
     Aufgabensatz ist voll (ein Wort frei). Zwei Stellen fassen sie an,
     beide in `sched.fi` — aber es *sind* zwei Stellen, und K13 hat
     aufgeschrieben, warum das eine Gefahr ist.
-11. **`perm.walk` benutzt keinen eigenen Puffer**, sondern schreibt
+11. **Neu angelegte Dateien über die Ops-Tafel bekommen nur bei OFS
+    Rechte.** Auf einem beschreibbaren FAT32 gibt es keine, und das ist
+    die Wahrheit über FAT32 — aber `vfs_on_create` sagt es still, statt
+    es zu melden.
+12. **`perm.walk` benutzt keinen eigenen Puffer**, sondern schreibt
     vorübergehend eine Null in den Pfadpuffer des Aufrufers. Das ist der
     Puffer in `kdata`, der je Systemaufruf gilt; auf mehreren
     Prozessoren gleichzeitig wäre das dieselbe Frage, die `fs.fi` mit
