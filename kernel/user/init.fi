@@ -1,17 +1,65 @@
 // SPDX-License-Identifier: GPL-2.0-only
-// kernel/user/init.fi -- Runde K13: DER ERSTE PROZESS.
+// kernel/user/init.fi -- DER ERSTE PROZESS.
 //
-// Bis zu dieser Runde startete der Kern die Shell und wartete auf sie.
-// Das ist kein System, das ist ein Programmstarter: es gibt keinen Ort,
-// an dem `login` laufen koennte, niemanden, der Waisen einsammelt, und
-// niemanden, der beim Abschalten aufraeumt. Von hier an startet der Kern
-// `/sbin/init`, und alles andere ist ein Kind davon.
+// Runde K13 hat ihn gebaut: Dienste starten, Waisen einsammeln,
+// abgestuerzte neu starten, ueber ACPI abschalten. Runde INIT macht ihn
+// SERVERTAUGLICH, und der Unterschied ist genau der zwischen einem
+// Rechner, vor dem jemand sitzt, und einem, der ein Jahr lang allein in
+// einem Schrank steht:
 //
-// VIER AUFGABEN, UND NUR DIESE VIER:
+//   1. EIN KAPUTTER DIENST DARF DIE MASCHINE NICHT KOCHEN. K13 hat
+//      Neustarts auf fuenf je Sekunde gedeckelt -- das ist eine
+//      Drosselung, keine Grenze. Ein Dienst, der beim Start sofort
+//      stirbt, lief damit fuer immer weiter: fuenfmal je Sekunde, bis
+//      jemand kommt. Seit dieser Runde gibt es einen RUECKFALL-ZAEHLER:
+//      wer FUENFMAL HINTEREINANDER binnen einer halben Sekunde stirbt,
+//      wird ABGESCHALTET (`failed`) und nicht mehr angefasst, bis ein
+//      Mensch `svc start` sagt.
 //
-//   1. DIENSTE STARTEN. `/etc/inittab`, eine Zeile je Dienst:
+//      Warum eine halbe Sekunde und nicht zwei: die Grenze trennt
+//      "gestorben, bevor er ueberhaupt lief" von "hat gearbeitet und ist
+//      dann gegangen". Ein Dienst, der seine Konfiguration nicht lesen
+//      kann, ist nach ein paar Millisekunden weg; einer, der ein
+//      Zeitlimit abwartet, lebt Sekunden. Der Dienst `blink` aus dem
+//      Testlauf von K13 schlaeft eine Sekunde und ist damit
+//      ausdruecklich KEIN Rueckfall -- die Zusagen jener Runde messen
+//      weiter, was sie gemessen haben.
 //
-//          name:art:befehl arg arg
+//   2. WOHIN SCHREIBT EIN DIENST? Auf einem Server gibt es keine
+//      Konsole, die jemand liest. Jede Zeile in `/etc/inittab` kann
+//      `log=/var/log/name.log` tragen; das Kind bekommt die Datei vor
+//      `execve` auf 1 und 2 gelegt, ANHAENGEND geoeffnet -- ein Neustart
+//      soll das bisherige Protokoll nicht wegwerfen.
+//
+//   3. WAS BRAUCHT DAS NETZ? Ein Webserver, der vor dem Netz startet,
+//      bindet auf nichts. Die Option `netz` haelt einen Dienst im
+//      Zustand `waiting`, bis der Stapel wirklich eine Adresse hat
+//      (SYS_NETGET, NG_READY und NG_IP) -- und startet ihn dann.
+//
+//   4. KONSOLE ODER GRAFIK. `/etc/ziel` enthaelt EIN Wort. Fehlt die
+//      Datei, ist das Ziel `konsole` -- ein Serverbau ohne Bildschirm
+//      startet damit von selbst nichts Grafisches, und das ist die
+//      richtige Voreinstellung: wer eine Oberflaeche will, sagt es.
+//
+//   5. WAS AUSSER DER WURZEL NOCH EINGEHAENGT GEHOERT, steht in
+//      `/etc/fstab`. Die WURZEL selbst haengt der Kern ein, bevor es
+//      diesen Prozess gibt -- er muss, sonst koennte er ihn nicht laden.
+//      Init prueft sie nach (SYS_MOUNT mit op 0) und haengt sie ein,
+//      wenn sie fehlt; alles andere haengt init ein und beim
+//      Herunterfahren wieder aus.
+//
+// DIE VIER AUFGABEN VON K13 GELTEN WEITER:
+//
+//   1. DIENSTE STARTEN. `/etc/inittab`, eine Zeile je Dienst. ZWEI
+//      Schreibweisen, und beide werden gelesen:
+//
+//          name:art:befehl                          (K13, unveraendert)
+//          name:ziele:art:befehl:optionen           (diese Runde)
+//
+//      Welche es ist, entscheidet das ZWEITE Feld: steht dort eines der
+//      Woerter `once`, `respawn`, `ctrl`, `off`, ist es die kurze Form.
+//      Sonst ist es die Zielliste. Das ist eindeutig -- ein Ziel heisst
+//      `konsole`, `grafik`, beides mit Komma, oder `*`.
 //
 //      art ist `once` (einmal starten), `respawn` (nach dem Ende wieder
 //      starten), `ctrl` (wie once, aber sein Ende beendet das System)
@@ -20,26 +68,22 @@
 //      `ctrl` gibt es in keinem echten Unix, und der Grund steht hier:
 //      dieses System wird GEMESSEN. Ein Lauf, der nie endet, ist ein
 //      Lauf ohne Ergebnis. `ctrl` ist die eine Zeile, die sagt "wenn
-//      DIESES Programm fertig ist, ist der Lauf fertig" -- bei einem
-//      Menschen davor waere es die Shell, im Pruefstand ist es das
-//      Skript.
+//      DIESES Programm fertig ist, ist der Lauf fertig".
+//
+//      optionen sind durch Komma getrennt: `netz`, `log=/pfad`.
 //
 //   2. WAISEN EINSAMMELN. Stirbt ein Prozess, der noch Kinder hat, so
 //      fallen die Kinder an den Prozess 1 (`sched.reparent` im Kern).
 //      Wer sie nicht abholt, hat Leichen in der Aufgabentafel, bis der
-//      Rechner neu startet -- und die Tafel hat 32 Plaetze. Das ist die
-//      GEGENPROBE dieser Runde: derselbe Lauf ohne init laesst die Zahl
-//      messbar steigen.
+//      Rechner neu startet -- und die Tafel hat 32 Plaetze. Auf einem
+//      Server ist das kein Schoenheitsfehler, sondern das Ende: nach
+//      genug Wochen ist die Tafel voll und nichts startet mehr.
 //
-//   3. ABGESTUERZTE DIENSTE NEU STARTEN, aber nicht schneller als
-//      fuenfmal je Sekunde -- ein Dienst, der beim Start sofort stirbt,
-//      wuerde die Maschine sonst mit Neustarts fuellen und nichts
-//      anderes mehr laufen lassen.
+//   3. ABGESTUERZTE DIENSTE NEU STARTEN, gedrosselt und begrenzt (1).
 //
 //   4. HERUNTERFAHREN. SIGTERM an alle bekannten Dienste, warten,
-//      SIGKILL an die, die noch stehen, und dann ACPI (`reboot`). Nicht
-//      einfach abschalten: ein Dienst, der Daten in einem Puffer haelt,
-//      soll die Gelegenheit haben, sie wegzuschreiben.
+//      SIGKILL an die, die noch stehen, dann `sync`, dann die
+//      Dateisysteme aushaengen, und erst dann ACPI.
 //
 // DIE VERSTAENDIGUNG MIT `svc` LAEUFT UEBER ZWEI DATEIEN und nicht ueber
 // Signale, und das ist eine bewusste Entscheidung: ein Signal traegt
@@ -47,10 +91,14 @@
 // kein `mkfifo`. Also:
 //
 //     /run/svc.cmd     was getan werden soll ("start name", "stop name",
-//                      "restart name", "shutdown"). `init` liest die
-//                      Datei, fuehrt sie aus und leert sie.
-//     /run/svc.state   was ist: eine Zeile je Dienst, "name zustand pid
-//                      neustarts". `svc status` liest nur diese Datei.
+//                      "restart name", "shutdown", "reboot"). `init`
+//                      liest die Datei, fuehrt sie aus und leert sie.
+//     /run/svc.state   was ist: eine Zeile je Dienst,
+//                      "name zustand pid neustarts fehler seit ziele".
+//                      Die ERSTEN VIER Spalten sind die von K13 und in
+//                      derselben Reihenfolge -- `tools/k13/run.sh` liest
+//                      sie, und eine Runde, die etwas hinzufuegt, darf
+//                      keine bestehende Zusage kosten.
 //
 // Das ist langsamer als ein Signal (init sieht es beim naechsten
 // Durchgang, also binnen 50 ms) und dafuer nachvollziehbar: was `svc`
@@ -75,38 +123,129 @@ const WNOHANG: u64 = 1
 const SIGTERM: u64 = 15
 const SIGKILL: u64 = 9
 const RB_POWEROFF: u64 = 0x4321FEDC
+const RB_RESTART: u64 = 0x01234567
 
-const MAX_SVC: u64 = 8
+// O_WRONLY | O_CREAT | O_APPEND. Dieselbe Zahl wie `tools.opena`, und
+// ANHAENGEND ist der Punkt: ein Dienst mit `respawn` schreibt sein
+// Protokoll ueber viele Leben hinweg in dieselbe Datei.
+const O_LOG: u64 = 1089
+
+// SECHZEHN statt acht. Ein Server hat mehr als acht Dienste, sobald
+// Netz, Protokoll, Zeit und eine Anwendung dabei sind, und der Platz
+// kostet 16 * (32 + 128 + 64) Oktette -- 3,5 KiB im .bss eines
+// Programms, dessen Bild ohnehin ueber 4 KiB gross ist.
+const MAX_SVC: u64 = 16
+const NAME_W: u64 = 32
+const CMD_W: u64 = 128
+const LOG_W: u64 = 64
+
 const A_OFF: u64 = 0
 const A_ONCE: u64 = 1
 const A_RESPAWN: u64 = 2
 const A_CTRL: u64 = 3
 
-// Zustand: 0 = gestoppt, 1 = laeuft, 2 = fertig
-const S_STOP: u64 = 0
-const S_RUN: u64 = 1
-const S_DONE: u64 = 2
+// Zustand. Die ersten drei sind die von K13 und heissen genauso.
+const S_STOP: u64 = 0 // stopped
+const S_RUN: u64 = 1 // running
+const S_DONE: u64 = 2 // done
+const S_WAIT: u64 = 3 // waiting -- wartet auf das Netz
+const S_FAIL: u64 = 4 // failed  -- abgeschaltet nach zu vielen Rueckfaellen
 
-static mut s_name: [u8; 256] = [0 as u8; 256] // 8 * 32
-static mut s_cmd: [u8; 1024] = [0 as u8; 1024] // 8 * 128
-static mut s_act: [u64; 8] = [0 as u64; 8]
-static mut s_pid: [u64; 8] = [0 as u64; 8]
-static mut s_starts: [u64; 8] = [0 as u64; 8]
-static mut s_state: [u64; 8] = [0 as u64; 8]
-static mut s_want: [u64; 8] = [0 as u64; 8] // 1 = soll laufen
+// Ziele als Bits, damit ein Dienst zu mehreren gehoeren kann.
+const Z_KONSOLE: u64 = 1
+const Z_GRAFIK: u64 = 2
+const Z_ALLE: u64 = 3
+
+// DIE ZWEI ZAHLEN, UM DIE ES IN DIESER RUNDE GEHT.
+//
+// GESUND_MS: wer laenger lebt, hat gearbeitet und faengt bei null an.
+// MAX_FAIL:  soviele Rueckfaelle hintereinander, dann ist Schluss.
+const GESUND_MS: u64 = 500
+const MAX_FAIL: u64 = 5
+
+// Wieviel Zeit zwischen zwei Neustartversuchen. Fuenf je Sekunde, wie in
+// K13 -- die Drosselung bleibt, die Grenze kommt dazu.
+const RESPAWN_MS: u64 = 200
+
+const MAX_FS: u64 = 4
+const FS_W: u64 = 64
+
+static mut s_name: [u8; 512] = [0 as u8; 512] // 16 * 32
+static mut s_cmd: [u8; 2048] = [0 as u8; 2048] // 16 * 128
+static mut s_log: [u8; 1024] = [0 as u8; 1024] // 16 * 64
+static mut s_act: [u64; 16] = [0 as u64; 16]
+static mut s_pid: [u64; 16] = [0 as u64; 16]
+static mut s_starts: [u64; 16] = [0 as u64; 16]
+static mut s_state: [u64; 16] = [0 as u64; 16]
+static mut s_want: [u64; 16] = [0 as u64; 16] // 1 = soll laufen
+static mut s_fail: [u64; 16] = [0 as u64; 16] // Rueckfaelle hintereinander
+static mut s_t0: [u64; 16] = [0 as u64; 16] // wann gestartet, in ms
+static mut s_ziel: [u64; 16] = [0 as u64; 16]
+static mut s_netz: [u64; 16] = [0 as u64; 16]
 static mut nsvc: u64 = 0
 static mut orphans: u64 = 0
 static mut reaped: u64 = 0
 static mut going: u64 = 1
-static mut tab: [u8; 2048] = [0 as u8; 2048]
+static mut wie: u64 = 0 // 0 = ausschalten, 1 = neu starten
+static mut ziel: u64 = Z_KONSOLE
+static mut tab: [u8; 4096] = [0 as u8; 4096]
 static mut argbuf: [u8; 256] = [0 as u8; 256]
+static mut f_tgt: [u8; 256] = [0 as u8; 256] // 4 * 64
+static mut nfs: u64 = 0
 
 fn nm(i: u64) -> u64 {
-    return (&s_name[(i * 32) as usize]) as u64
+    return (&s_name[(i * NAME_W) as usize]) as u64
 }
 
 fn cm(i: u64) -> u64 {
-    return (&s_cmd[(i * 128) as usize]) as u64
+    return (&s_cmd[(i * CMD_W) as usize]) as u64
+}
+
+fn lg(i: u64) -> u64 {
+    return (&s_log[(i * LOG_W) as usize]) as u64
+}
+
+fn ft(i: u64) -> u64 {
+    return (&f_tgt[(i * FS_W) as usize]) as u64
+}
+
+// Die Uhr dieses Programms: Millisekunden seit dem Start der Maschine.
+// SYS_SYSINFO/I_UPTIME rechnet Ticks * 10, und der Zeitgeber laeuft mit
+// 100 Hz -- die Aufloesung ist also 10 ms, und mehr braucht hier
+// niemand.
+fn now_ms() -> u64 {
+    return ulib.sys(ulib.SYS_SYSINFO, ulib.I_UPTIME, 0, 0)
+}
+
+// Das `k`-te durch Komma getrennte Stueck von `p`. Dieselbe Bauart wie
+// `pw.field`, nur mit dem Komma statt dem Doppelpunkt -- die Felder
+// einer inittab-Zeile trennt der Doppelpunkt, die Liste IN einem Feld
+// das Komma.
+fn piece(p: u64, k: u64, out: u64, max: u64) -> bool {
+    var at: u64 = 0
+    var f: u64 = 0
+    while f < k {
+        while *((p + at) as *mut u8) != 44 as u8 {
+            if *((p + at) as *mut u8) == 0 as u8 {
+                __mmio_write8((out) as *mut u8, 0 as u8)
+                return false
+            }
+            at = at + 1
+        }
+        at = at + 1
+        f = f + 1
+    }
+    var n: u64 = 0
+    while *((p + at) as *mut u8) != 0 as u8
+        && *((p + at) as *mut u8) != 44 as u8 {
+        if n + 1 < max {
+            __mmio_write8((out + n) as *mut u8, *((p + at) as *mut u8))
+            n = n + 1
+        }
+        at = at + 1
+    }
+    __mmio_write8((out + n) as *mut u8, 0 as u8)
+    return true
 }
 
 // ------------------------------------------------------- /etc/inittab
@@ -127,11 +266,77 @@ fn action_of(p: u64) -> u64 {
     return A_OFF
 }
 
+// Ist dieses Wort eine ART? Daran haengt, ob eine Zeile die kurze Form
+// von K13 hat oder die lange dieser Runde.
+fn is_action(p: u64) -> bool {
+    var w_off: [u8; 4] = "off\0"
+    if ulib.streq(p, (&w_off[0]) as u64) {
+        return true
+    }
+    return action_of(p) != A_OFF
+}
+
+fn ziel_of(p: u64) -> u64 {
+    var w_kon: [u8; 8] = "konsole\0"
+    var w_gra: [u8; 7] = "grafik\0"
+    var w_all: [u8; 2] = "*\0"
+    var one: [u8; 32] = [0 as u8; 32]
+    var m: u64 = 0
+    var k: u64 = 0
+    while k < 4 {
+        if !piece(p, k, (&one[0]) as u64, 32) {
+            k = 4
+        } else {
+            if ulib.streq((&one[0]) as u64, (&w_all[0]) as u64) {
+                m = m | Z_ALLE
+            }
+            if ulib.streq((&one[0]) as u64, (&w_kon[0]) as u64) {
+                m = m | Z_KONSOLE
+            }
+            if ulib.streq((&one[0]) as u64, (&w_gra[0]) as u64) {
+                m = m | Z_GRAFIK
+            }
+            k = k + 1
+        }
+    }
+    if m == 0 {
+        // Eine Zielangabe, die niemand versteht, heisst NICHT "ueberall".
+        // Sie heisst "nirgends", und das ist die sichere Seite: ein
+        // Tippfehler in `/etc/inittab` startet auf einem Server nichts
+        // Unerwartetes.
+        return 0
+    }
+    return m
+}
+
+// `netz` und `log=/pfad`, durch Komma getrennt.
+fn opts_of(p: u64, i: u64) {
+    var w_netz: [u8; 5] = "netz\0"
+    var w_log: [u8; 5] = "log=\0"
+    var one: [u8; 96] = [0 as u8; 96]
+    var k: u64 = 0
+    while k < 4 {
+        if !piece(p, k, (&one[0]) as u64, 96) {
+            k = 4
+        } else {
+            if ulib.streq((&one[0]) as u64, (&w_netz[0]) as u64) {
+                s_netz[i as usize] = 1
+            }
+            if ulib.strneq((&one[0]) as u64, (&w_log[0]) as u64, 4) {
+                ulib.strncpy(lg(i), (&one[4 as usize]) as u64, LOG_W - 1)
+            }
+            k = k + 1
+        }
+    }
+}
+
 fn read_tab() -> u64 {
     var path: [u8; 13] = "/etc/inittab\0"
     var line: [u8; 256] = [0 as u8; 256]
-    var f: [u8; 128] = [0 as u8; 128]
-    let n: u64 = pw.read_all((&path[0]) as u64, (&tab[0]) as u64, 2048)
+    var f1: [u8; 128] = [0 as u8; 128]
+    var f2: [u8; 128] = [0 as u8; 128]
+    var f4: [u8; 128] = [0 as u8; 128]
+    let n: u64 = pw.read_all((&path[0]) as u64, (&tab[0]) as u64, 4096)
     if n == ulib.EOF {
         return 0
     }
@@ -143,18 +348,41 @@ fn read_tab() -> u64 {
             != ulib.EOF {
             // Kommentare und leere Zeilen.
             if line[0 as usize] != 0 as u8 && line[0 as usize] != 35 as u8 {
-                pw.field((&line[0]) as u64, 0, nm(nsvc), 32)
-                pw.field((&line[0]) as u64, 1, (&f[0]) as u64, 128)
-                let act: u64 = action_of((&f[0]) as u64)
-                pw.field((&line[0]) as u64, 2, cm(nsvc), 128)
+                pw.field((&line[0]) as u64, 0, nm(nsvc), NAME_W)
+                pw.field((&line[0]) as u64, 1, (&f1[0]) as u64, 128)
+                __mmio_write8((lg(nsvc)) as *mut u8, 0 as u8)
+                s_netz[nsvc as usize] = 0
+                var act: u64 = A_OFF
+                var zm: u64 = Z_ALLE
+                if is_action((&f1[0]) as u64) {
+                    // K13: name:art:befehl -- gilt fuer JEDES Ziel.
+                    act = action_of((&f1[0]) as u64)
+                    pw.field((&line[0]) as u64, 2, cm(nsvc), CMD_W)
+                } else {
+                    // Diese Runde: name:ziele:art:befehl:optionen
+                    zm = ziel_of((&f1[0]) as u64)
+                    pw.field((&line[0]) as u64, 2, (&f2[0]) as u64, 128)
+                    act = action_of((&f2[0]) as u64)
+                    pw.field((&line[0]) as u64, 3, cm(nsvc), CMD_W)
+                    if pw.field((&line[0]) as u64, 4, (&f4[0]) as u64, 128) {
+                        opts_of((&f4[0]) as u64, nsvc)
+                    }
+                }
                 if *((nm(nsvc)) as *mut u8) != 0 as u8
                     && *((cm(nsvc)) as *mut u8) != 0 as u8 {
                     s_act[nsvc as usize] = act
+                    s_ziel[nsvc as usize] = zm
                     s_pid[nsvc as usize] = 0
                     s_starts[nsvc as usize] = 0
+                    s_fail[nsvc as usize] = 0
+                    s_t0[nsvc as usize] = 0
                     s_state[nsvc as usize] = S_STOP
                     s_want[nsvc as usize] = 0
-                    if act != A_OFF {
+                    // WER NICHT ZUM ZIEL GEHOERT, LAEUFT NICHT. Das ist
+                    // die ganze Runlevel-Logik dieses Systems, und mehr
+                    // braucht sie nicht: ein Serverbau setzt `konsole`,
+                    // und jede Zeile mit `grafik` bleibt stehen.
+                    if act != A_OFF && (zm & ziel) != 0 {
                         s_want[nsvc as usize] = 1
                     }
                     nsvc = nsvc + 1
@@ -164,6 +392,142 @@ fn read_tab() -> u64 {
         i = i + 1
     }
     return nsvc
+}
+
+// ----------------------------------------------------------- das Ziel
+
+fn read_ziel() {
+    var path: [u8; 10] = "/etc/ziel\0"
+    var buf: [u8; 64] = [0 as u8; 64]
+    var w: [u8; 32] = [0 as u8; 32]
+    let n: u64 = pw.read_all((&path[0]) as u64, (&buf[0]) as u64, 64)
+    if n == ulib.EOF || n == 0 {
+        // KEINE DATEI HEISST KONSOLE. Ein Server ohne Bildschirm soll
+        // nicht deshalb einen Fensterserver starten, weil jemand
+        // vergessen hat, es zu verbieten.
+        ziel = Z_KONSOLE
+        return
+    }
+    var k: u64 = 0
+    while k < 64 {
+        if buf[k as usize] == 10 as u8 || buf[k as usize] == 13 as u8 {
+            buf[k as usize] = 0 as u8
+        }
+        k = k + 1
+    }
+    ulib.word((&buf[0]) as u64, 0, (&w[0]) as u64, 32)
+    let m: u64 = ziel_of((&w[0]) as u64)
+    if m == 0 {
+        ziel = Z_KONSOLE
+        return
+    }
+    ziel = m
+}
+
+fn say_ziel() {
+    var s: [u8; 13] = "init: ziel=\0\0"
+    var w_kon: [u8; 9] = "konsole\n\0"
+    var w_gra: [u8; 8] = "grafik\n\0"
+    var w_bei: [u8; 16] = "konsole,grafik\n\0"
+    ulib.eput((&s[0]) as u64)
+    if ziel == Z_ALLE {
+        ulib.eput((&w_bei[0]) as u64)
+        return
+    }
+    if ziel == Z_GRAFIK {
+        ulib.eput((&w_gra[0]) as u64)
+        return
+    }
+    ulib.eput((&w_kon[0]) as u64)
+}
+
+// --------------------------------------------------- die Dateisysteme
+
+// DIE WURZEL. Der Kern haengt sie ein, BEVOR es diesen Prozess gibt --
+// er muss, sonst koennte er `/bin/init` nicht laden. Hier wird sie
+// nachgeprueft und, wenn sie fehlt, eingehaengt: ein init, das aus einem
+// Boot-Modul kommt und die Platte erst danach findet, hat sonst keine
+// Stelle, an der es sie einhaengen koennte.
+fn mount_root() -> u64 {
+    if ulib.sys(ulib.SYS_MOUNT, 0, 0, 0) == 1 {
+        return 1
+    }
+    let r: u64 = ulib.sys(ulib.SYS_MOUNT, 1, 0, 0)
+    if ulib.bad(r) {
+        return 0
+    }
+    if ulib.sys(ulib.SYS_MOUNT, 0, 0, 0) == 1 {
+        return 1
+    }
+    return 0
+}
+
+// `/etc/fstab`: quelle ziel art [ro], durch Leerzeichen getrennt. Fehlt
+// die Datei, ist nichts zu tun -- das ist der Normalfall auf einem
+// Rechner mit einer Platte.
+fn read_fstab() -> u64 {
+    var path: [u8; 12] = "/etc/fstab\0\0"
+    var buf: [u8; 1024] = [0 as u8; 1024]
+    var line: [u8; 256] = [0 as u8; 256]
+    var q: [u8; 64] = [0 as u8; 64]
+    var t: [u8; 64] = [0 as u8; 64]
+    var a: [u8; 32] = [0 as u8; 32]
+    var o: [u8; 16] = [0 as u8; 16]
+    var w_ro: [u8; 3] = "ro\0"
+    let n: u64 = pw.read_all((&path[0]) as u64, (&buf[0]) as u64, 1024)
+    if n == ulib.EOF || n == 0 {
+        return 0
+    }
+    let cnt: u64 = pw.lines_of((&buf[0]) as u64)
+    var i: u64 = 0
+    nfs = 0
+    while i < cnt && nfs < MAX_FS {
+        if pw.line_at((&buf[0]) as u64, i, (&line[0]) as u64, 256)
+            != ulib.EOF {
+            if line[0 as usize] != 0 as u8 && line[0 as usize] != 35 as u8 {
+                var p: u64 = ulib.word((&line[0]) as u64, 0, (&q[0]) as u64, 64)
+                p = ulib.word((&line[0]) as u64, p, (&t[0]) as u64, 64)
+                p = ulib.word((&line[0]) as u64, p, (&a[0]) as u64, 32)
+                ulib.word((&line[0]) as u64, p, (&o[0]) as u64, 16)
+                if q[0 as usize] != 0 as u8 && t[0 as usize] != 0 as u8
+                    && a[0 as usize] != 0 as u8 {
+                    var fl: u64 = 0
+                    if ulib.streq((&o[0]) as u64, (&w_ro[0]) as u64) {
+                        fl = ulib.MNT_RDONLY
+                    }
+                    let r: u64 = ulib.sys4(ulib.SYS_VMOUNT, (&q[0]) as u64,
+                        (&t[0]) as u64, (&a[0]) as u64, fl)
+                    if !ulib.bad(r) {
+                        ulib.strncpy(ft(nfs), (&t[0]) as u64, FS_W - 1)
+                        nfs = nfs + 1
+                    }
+                }
+            }
+        }
+        i = i + 1
+    }
+    return nfs
+}
+
+// Umgekehrte Reihenfolge: was zuletzt kam, geht zuerst.
+fn umount_all() {
+    var i: u64 = nfs
+    while i > 0 {
+        i = i - 1
+        ulib.sys(ulib.SYS_UMOUNT2, ft(i), 0, 0)
+    }
+}
+
+// ---------------------------------------------------------------- Netz
+
+// Der Stapel laeuft UND hat eine Adresse. Nur das erste zu fragen waere
+// zu wenig: ein Treiber, der oben ist, aber noch kein DHCP hatte, hat
+// nichts, worauf ein Server binden koennte.
+fn net_up() -> bool {
+    if ulib.sys(ulib.SYS_NETGET, ulib.NG_READY, 0, 0) != 1 {
+        return false
+    }
+    return ulib.sys(ulib.SYS_NETGET, ulib.NG_IP, 0, 0) != 0
 }
 
 // ---------------------------------------------------------- starten
@@ -176,6 +540,19 @@ fn start(i: u64) {
     var argv: [u64; 5] = [0 as u64; 5]
     let kid: u64 = ulib.sys(SYS_FORK, 0, 0, 0)
     if kid == 0 {
+        // DAS PROTOKOLL, UND ZWAR VOR `execve`. Nach dem Aufruf gibt es
+        // dieses Programm nicht mehr; die Deskriptoren aber ueberleben
+        // ihn, und genau darum geht es.
+        if *((lg(i)) as *mut u8) != 0 as u8 {
+            let fd: u64 = ulib.sys(ulib.SYS_OPEN, lg(i), O_LOG, 0)
+            if !ulib.bad(fd) {
+                ulib.sys(ulib.SYS_DUP2, fd, 1, 0)
+                ulib.sys(ulib.SYS_DUP2, fd, 2, 0)
+                if fd > 2 {
+                    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+                }
+            }
+        }
         var at: u64 = 0
         var k: u64 = 0
         var pos: u64 = 0
@@ -203,6 +580,7 @@ fn start(i: u64) {
     }
     s_pid[i as usize] = kid
     s_state[i as usize] = S_RUN
+    s_t0[i as usize] = now_ms()
     s_starts[i as usize] = s_starts[i as usize] + 1
 }
 
@@ -210,12 +588,18 @@ fn start(i: u64) {
 
 fn write_state() {
     var path: [u8; 15] = "/run/svc.state\0"
-    var out: [u8; 1024] = [0 as u8; 1024]
+    var out: [u8; 2048] = [0 as u8; 2048]
     var sp: [u8; 2] = " \0"
     var nlc: [u8; 2] = "\n\0"
     var w_run: [u8; 8] = "running\0"
     var w_stop: [u8; 8] = "stopped\0"
     var w_done: [u8; 5] = "done\0"
+    var w_wait: [u8; 8] = "waiting\0"
+    var w_fail: [u8; 7] = "failed\0"
+    var w_kon: [u8; 8] = "konsole\0"
+    var w_gra: [u8; 7] = "grafik\0"
+    var w_bei: [u8; 15] = "konsole,grafik\0"
+    var w_nie: [u8; 5] = "kein\0"
     var num: [u8; 24] = [0 as u8; 24]
     var at: u64 = 0
     var i: u64 = 0
@@ -229,6 +613,12 @@ fn write_state() {
         if s_state[i as usize] == S_DONE {
             w = (&w_done[0]) as u64
         }
+        if s_state[i as usize] == S_WAIT {
+            w = (&w_wait[0]) as u64
+        }
+        if s_state[i as usize] == S_FAIL {
+            w = (&w_fail[0]) as u64
+        }
         at = at + ulib.strcpy((&out[at as usize]) as u64, w)
         at = at + ulib.strcpy((&out[at as usize]) as u64, (&sp[0]) as u64)
         ulib.digits(s_pid[i as usize], (&num[0]) as u64)
@@ -236,6 +626,29 @@ fn write_state() {
         at = at + ulib.strcpy((&out[at as usize]) as u64, (&sp[0]) as u64)
         ulib.digits(s_starts[i as usize], (&num[0]) as u64)
         at = at + ulib.strcpy((&out[at as usize]) as u64, (&num[0]) as u64)
+        // ---- ab hier die Spalten dieser Runde ----
+        at = at + ulib.strcpy((&out[at as usize]) as u64, (&sp[0]) as u64)
+        ulib.digits(s_fail[i as usize], (&num[0]) as u64)
+        at = at + ulib.strcpy((&out[at as usize]) as u64, (&num[0]) as u64)
+        at = at + ulib.strcpy((&out[at as usize]) as u64, (&sp[0]) as u64)
+        var seit: u64 = 0
+        if s_state[i as usize] == S_RUN {
+            seit = s_t0[i as usize]
+        }
+        ulib.digits(seit, (&num[0]) as u64)
+        at = at + ulib.strcpy((&out[at as usize]) as u64, (&num[0]) as u64)
+        at = at + ulib.strcpy((&out[at as usize]) as u64, (&sp[0]) as u64)
+        var z: u64 = (&w_nie[0]) as u64
+        if s_ziel[i as usize] == Z_ALLE {
+            z = (&w_bei[0]) as u64
+        }
+        if s_ziel[i as usize] == Z_KONSOLE {
+            z = (&w_kon[0]) as u64
+        }
+        if s_ziel[i as usize] == Z_GRAFIK {
+            z = (&w_gra[0]) as u64
+        }
+        at = at + ulib.strcpy((&out[at as usize]) as u64, z)
         at = at + ulib.strcpy((&out[at as usize]) as u64, (&nlc[0]) as u64)
         i = i + 1
     }
@@ -270,6 +683,7 @@ fn read_cmd() {
     var w_stop: [u8; 5] = "stop\0"
     var w_rest: [u8; 8] = "restart\0"
     var w_down: [u8; 9] = "shutdown\0"
+    var w_boot: [u8; 7] = "reboot\0"
     let n: u64 = pw.read_all((&path[0]) as u64, (&buf[0]) as u64, 256)
     if n == ulib.EOF || n == 0 {
         return
@@ -292,6 +706,12 @@ fn read_cmd() {
     }
     if ulib.streq((&verb[0]) as u64, (&w_down[0]) as u64) {
         going = 0
+        wie = 0
+        return
+    }
+    if ulib.streq((&verb[0]) as u64, (&w_boot[0]) as u64) {
+        going = 0
+        wie = 1
         return
     }
     let i: u64 = find_svc((&who[0]) as u64)
@@ -299,7 +719,11 @@ fn read_cmd() {
         return
     }
     if ulib.streq((&verb[0]) as u64, (&w_start[0]) as u64) {
+        // EIN MENSCH HEBT DIE ABSCHALTUNG AUF. Der Rueckfall-Zaehler
+        // geht auf null -- wer von Hand startet, hat nachgesehen, und
+        // die fuenf Versuche fangen von vorne an.
         s_want[i as usize] = 1
+        s_fail[i as usize] = 0
         if s_state[i as usize] != S_RUN {
             start(i)
         }
@@ -310,6 +734,7 @@ fn read_cmd() {
     }
     if ulib.streq((&verb[0]) as u64, (&w_rest[0]) as u64) {
         s_want[i as usize] = 1
+        s_fail[i as usize] = 0
         stop_one(i, SIGTERM)
     }
     write_state()
@@ -319,11 +744,17 @@ fn read_cmd() {
 
 fn shutdown() {
     var s_down: [u8; 21] = "init: herunterfahren\0"
+    var s_boot: [u8; 18] = "init: neustart\0\0\0\0"
     var s_orph: [u8; 16] = "init: orphans=\0\0"
     var s_reap: [u8; 16] = "init: reaped=\0\0\0"
+    var s_um: [u8; 16] = "init: umounts=\0\0"
     var num: [u8; 24] = [0 as u8; 24]
-    ulib.eput((&s_down[0]) as u64)
     var nlc: [u8; 2] = "\n\0"
+    if wie == 1 {
+        ulib.eput((&s_boot[0]) as u64)
+    } else {
+        ulib.eput((&s_down[0]) as u64)
+    }
     ulib.eput((&nlc[0]) as u64)
     var i: u64 = 0
     while i < nsvc {
@@ -358,9 +789,26 @@ fn shutdown() {
     ulib.digits(reaped, (&num[0]) as u64)
     ulib.eput((&num[0]) as u64)
     ulib.eput((&nlc[0]) as u64)
+    // ERST DIE PUFFER, DANN DIE EINHAENGUNGEN, DANN DER STROM. Diese
+    // Reihenfolge ist der ganze Unterschied zwischen "heruntergefahren"
+    // und "ausgesteckt": `sync` schreibt, was noch im Speicher steht,
+    // und `umount` macht aus einem Dateisystem, das gerade beschrieben
+    // wurde, eines, das beim naechsten Start nicht geprueft werden muss.
+    ulib.sys(ulib.SYS_SYNC, 0, 0, 0)
+    umount_all()
+    ulib.eput((&s_um[0]) as u64)
+    ulib.digits(nfs, (&num[0]) as u64)
+    ulib.eput((&num[0]) as u64)
+    ulib.eput((&nlc[0]) as u64)
+    ulib.sys(ulib.SYS_SYNC, 0, 0, 0)
+    ulib.sys(ulib.SYS_MOUNT, 2, 0, 0)
     // Und jetzt wirklich aus. Kommt der Aufruf zurueck, hat er nicht
     // gegriffen -- dann bleibt nur, stehenzubleiben.
-    ulib.sys(SYS_REBOOT, RB_POWEROFF, 0, 0)
+    if wie == 1 {
+        ulib.sys(SYS_REBOOT, RB_RESTART, 0, 0)
+    } else {
+        ulib.sys(SYS_REBOOT, RB_POWEROFF, 0, 0)
+    }
     var e_off: [u8; 26] = "init: ACPI hat nicht aus\n\0"
     ulib.eput((&e_off[0]) as u64)
 }
@@ -368,6 +816,9 @@ fn shutdown() {
 // Jedes Kind abholen, das fertig ist -- eigene Dienste UND Waisen. Genau
 // das ist die Aufgabe, wegen der es einen Prozess 1 gibt.
 fn harvest() -> u64 {
+    var s_kill: [u8; 20] = "init: abgeschaltet \0"
+    var s_why: [u8; 24] = " nach 5 Fehlstarts\0\0\0\0\0\0"
+    var nlc: [u8; 2] = "\n\0"
     var st: [u64; 1] = [0 as u64; 1]
     var got: u64 = 0
     var going2: bool = true
@@ -385,18 +836,34 @@ fn harvest() -> u64 {
                 if s_pid[i as usize] == who {
                     mine = true
                     s_pid[i as usize] = 0
+                    // WIE LANGE HAT ER GELEBT? Das ist die Frage, an der
+                    // sich "abgestuerzt" von "fertig" unterscheidet.
+                    let lebte: u64 = now_ms() -% s_t0[i as usize]
                     if s_act[i as usize] == A_CTRL {
                         going = 0
                     }
                     if s_act[i as usize] == A_RESPAWN
                         && s_want[i as usize] == 1 && going == 1 {
-                        s_state[i as usize] = S_STOP
-                    } else {
-                        s_state[i as usize] = S_DONE
-                        if s_want[i as usize] == 1
-                            && s_act[i as usize] == A_RESPAWN {
+                        if lebte < GESUND_MS {
+                            s_fail[i as usize] = s_fail[i as usize] + 1
+                        } else {
+                            s_fail[i as usize] = 0
+                        }
+                        if s_fail[i as usize] >= MAX_FAIL {
+                            // DER RUECKFALL-ZAEHLER GREIFT. Ab hier ist
+                            // dieser Dienst aus, und die Maschine hat
+                            // wieder Zeit fuer alles andere.
+                            s_state[i as usize] = S_FAIL
+                            s_want[i as usize] = 0
+                            ulib.eput((&s_kill[0]) as u64)
+                            ulib.eput(nm(i))
+                            ulib.eput((&s_why[0]) as u64)
+                            ulib.eput((&nlc[0]) as u64)
+                        } else {
                             s_state[i as usize] = S_STOP
                         }
+                    } else {
+                        s_state[i as usize] = S_DONE
                     }
                 }
                 i = i + 1
@@ -418,6 +885,8 @@ fn u_start(args: u64) -> u64 {
     var e_pid: [u8; 34] = "init: ich bin nicht der Prozess 1\0"
     var e_tab: [u8; 31] = "init: /etc/inittab fehlt\0\0\0\0\0\0\0"
     var s_up: [u8; 20] = "init: dienste=\0\0\0\0\0\0"
+    var s_root: [u8; 16] = "init: wurzel=\0\0\0"
+    var s_mnt: [u8; 16] = "init: mounts=\0\0\0"
     var num: [u8; 24] = [0 as u8; 24]
     var nlc: [u8; 2] = "\n\0"
 
@@ -428,6 +897,23 @@ fn u_start(args: u64) -> u64 {
         ulib.esay_line((&e_pid[0]) as u64, 0)
         return 1
     }
+    // DIE WURZEL, DIE ZIELE, DIE UEBRIGEN DATEISYSTEME -- in dieser
+    // Reihenfolge, denn `/etc/ziel` und `/etc/inittab` liegen auf der
+    // Wurzel, und ein Dienst kann auf einem Dateisystem aus `/etc/fstab`
+    // liegen.
+    let wurzel: u64 = mount_root()
+    ulib.eput((&s_root[0]) as u64)
+    ulib.digits(wurzel, (&num[0]) as u64)
+    ulib.eput((&num[0]) as u64)
+    ulib.eput((&nlc[0]) as u64)
+    read_ziel()
+    say_ziel()
+    let m: u64 = read_fstab()
+    ulib.eput((&s_mnt[0]) as u64)
+    ulib.digits(m, (&num[0]) as u64)
+    ulib.eput((&num[0]) as u64)
+    ulib.eput((&nlc[0]) as u64)
+
     if read_tab() == 0 {
         ulib.esay_line((&e_tab[0]) as u64, 0)
         return 1
@@ -440,7 +926,11 @@ fn u_start(args: u64) -> u64 {
     var i: u64 = 0
     while i < nsvc {
         if s_want[i as usize] == 1 {
-            start(i)
+            if s_netz[i as usize] == 1 && !net_up() {
+                s_state[i as usize] = S_WAIT
+            } else {
+                start(i)
+            }
         }
         i = i + 1
     }
@@ -458,12 +948,26 @@ fn u_start(args: u64) -> u64 {
         read_cmd()
         // Was wieder laufen soll und nicht laeuft, wird neu gestartet --
         // hoechstens fuenfmal je Sekunde, damit ein Dienst, der sofort
-        // stirbt, die Maschine nicht auffrisst.
+        // stirbt, die Maschine nicht auffrisst. Und hoechstens fuenfmal
+        // ueberhaupt, wenn er jedes Mal sofort stirbt: danach steht er
+        // auf `failed` und `s_want` ist null, also kommt er hier nicht
+        // mehr vorbei.
         i = 0
         while i < nsvc {
             if s_want[i as usize] == 1 && s_state[i as usize] != S_RUN
                 && s_act[i as usize] == A_RESPAWN && going == 1 {
-                ulib.sleep_ms(200)
+                if s_netz[i as usize] == 1 && !net_up() {
+                    s_state[i as usize] = S_WAIT
+                } else {
+                    ulib.sleep_ms(RESPAWN_MS)
+                    start(i)
+                    write_state()
+                }
+            }
+            // Ein `once`-Dienst, der auf das Netz gewartet hat, bekommt
+            // seinen einen Start, sobald es da ist.
+            if s_want[i as usize] == 1 && s_state[i as usize] == S_WAIT
+                && s_act[i as usize] == A_ONCE && going == 1 && net_up() {
                 start(i)
                 write_state()
             }
