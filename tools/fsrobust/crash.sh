@@ -92,6 +92,9 @@ ROK2=$(val fsrv rollok2)
 SCH=$(val fsrv schaeden)
 FSCK=$(val fsck fehler)
 JOFF=$(val fsck joffen)
+# WURDE UEBERHAUPT NACHGETRAGEN? Ohne diese Zahl waere "0 Schaeden" auch
+# dann gruen, wenn das Journal in keinem Lauf gebraucht worden waere.
+NACH=$(tr -d '\000' < "$S2" 2>/dev/null | grep -oa 'ofsj: nachgetragen=[0-9]*' | head -1 | sed 's/.*=//')
 
 # ------------------------------------------------- 3. der Wirt sieht nach
 WS=$(python3 tools/fsrobust/pruef.py struktur "$LIVE" 2>&1 | grep -c BEFUND)
@@ -99,7 +102,7 @@ WI=$(python3 tools/fsrobust/pruef.py inhalt "$LIVE" 2>&1 | grep -c BEFUND)
 WIRT=$(( WS + WI ))
 
 echo "lauf=$NR ms=$MS los=$LOS count=${COUNT:-?} schaeden=${SCH:-?}" \
-     "rollok=${ROK:-?},${ROK2:-?} fsck=${FSCK:-?} joffen=${JOFF:-?} wirt=$WIRT rc2=$RC2"
+     "rollok=${ROK:-?},${ROK2:-?} nachgetragen=${NACH:-0} fsck=${FSCK:-?} joffen=${JOFF:-?} wirt=$WIRT rc2=$RC2"
 if [ "$WIRT" != 0 ]; then
     python3 tools/fsrobust/pruef.py struktur "$LIVE" 2>&1 | sed 's/^/    /'
     python3 tools/fsrobust/pruef.py inhalt "$LIVE" 2>&1 | sed 's/^/    /'

@@ -196,13 +196,123 @@ Wort `nojournal` -- derselbe Kern, dieselbe Platte, ein Wort Unterschied
 
 ## 5. Der Beweis: SIGKILL mitten im Schreiben
 
-ERGEBNIS-STROMAUSFALL
+### Wie gemessen wurde
+
+| | |
+|---|---|
+| Abbild | 32 MiB (65.536 Bloecke), Fassung 3, 512 Inodes, Journal ab Block 273 |
+| Platte an QEMU | `cache=directsync` -- O_DIRECT\|O_DSYNC, kein Seitenpuffer des Wirts |
+| Abschuss | `kill -9` auf QEMU, nachdem `fsrw` gemeldet hat, dass es schreibt |
+| Wartezeit | vom WIRT gewuerfelt, 1831 bis 5598 ms |
+| danach | derselbe Kern auf denselben Oktetten: `fsrv` (Ring 3), `fsck /dev/hda`, dann liest der WIRT das Abbild (`pruef.py`) |
+
+**`cache=directsync` ist der wichtigste Schalter des ganzen Tests.** Ohne
+ihn landen die Schreibvorgaenge des Gastes im Seitenpuffer des Wirts, und
+der ueberlebt ein SIGKILL an QEMU muehelos -- der Test waere dann ein
+Test darueber, dass Linux keinen Speicher verliert.
+
+### Das Ergebnis: 60 Laeufe, 0 beschaedigte Faelle
+
+| | |
+|---|---:|
+| Laeufe | **60** |
+| Laeufe, die danach nicht mehr hochkamen | **0** |
+| **beschaedigte Faelle, in Ring 3 gemessen (`fsrv`)** | **0** |
+| **beschaedigte Faelle, von `/bin/fsck` gefunden** | **0** |
+| **beschaedigte Faelle, vom WIRT gefunden (`pruef.py`)** | **0** |
+| fertige Schreibrunden vor dem Abschuss | 0 bis 11, Median 6, zusammen 349 |
+
+### Und der Beweis, dass dabei ueberhaupt etwas zu tun war
+
+Eine Null ist auch dann eine Null, wenn nichts passiert ist. `fs.mount`
+meldet deshalb seit dieser Runde jedes Nachtragen auf der seriellen
+Leitung, und `crash.sh` zaehlt die Zeile mit:
+
+| | |
+|---|---:|
+| **Laeufe, in denen das Journal WIRKLICH nachgetragen hat** | **11 von 60** |
+| dabei nachgetragene Bloecke je Lauf | 2, 5, 5, 6, 8, 8, 9, 9, 9, 9, 9 |
+| zusammen | 79 Bloecke |
+
+In diesen 11 Laeufen traf der Abschuss also genau das Fenster zwischen
+Bestaetigung und Nachtragen -- den Fall, fuer den das ganze Verfahren
+gebaut ist. In den uebrigen traf er das Fenster davor, und dort war
+nichts zu tun, weil auf der Platte noch der alte Zustand stand.
+
+### Die Gegenprobe: dieselben Abschuesse mit `nojournal`
+
+Derselbe Kern, dieselbe Platte, EIN Wort Unterschied auf der
+Befehlszeile. Wenn hier keine Schaeden auftraeten, haette die Null oben
+nichts zu sagen.
+
+| | |
+|---|---:|
+| Laeufe | **60** |
+| **Laeufe mit Schaden** | **4** (7 %) |
+
+Die Schaeden verteilen sich auf genau die zwei Klassen, gegen die das
+Journal gebaut ist (ueber beide Gegenproben-Laeufe zusammengezaehlt,
+120 Laeufe):
+
+| Schaden | Faelle | was es ist |
+|---|---:|---|
+| `/d/roll: Oktett N gehoert nicht zu Generation G` | 7 | eine Datei, die VORNE NEU und HINTEN ALT ist -- das halb geschriebene Ueberschreiben an derselben Stelle |
+| `verloren=1` | 4 | ein Block, der in der Karte belegt ist und zu keiner Datei gehoert -- eine Zuteilung, deren zweite Haelfte nicht mehr kam |
+
+### Ein zweiter Lauf, davor
+
+Dieselbe Anordnung, ohne den Zaehler fuer das Nachtragen: **60 Laeufe mit
+Journal, 0 Laeufe mit Schaden**; 60 Laeufe mit `nojournal`, **7 Laeufe
+mit Schaden**.
+
+**Zusammen also 120 Abschuesse mit Journal und 0 beschaedigte Faelle --
+gegen 11 von 120 ohne.**
+
 
 ---
 
 ## 6. Was es kostet
 
-KOSTEN-JOURNAL
+### Wie viele Schreibvorgaenge -- ausgerechnet, nicht geschaetzt
+
+Fuer eine Umschreibung mit `n` verschiedenen Bloecken:
+
+| | Schreibvorgaenge |
+|---|---|
+| ohne Journal | `n` |
+| mit Journal | `2n + ceil(n/64) + 3` (Nutzlast, Zieltafel, Kopf, Bestaetigung, Nachtragen, Loeschen) |
+| dazu | vier `FLUSH CACHE` je Umschreibung |
+
+| Fall | ohne | mit | Faktor |
+|---|---:|---:|---:|
+| ein Inode anfassen (`chmod`), n=1 | 1 | 6 | **6,0** |
+| ein `write` von 4.096 Oktetten, n=9 | 9 | 22 | **2,4** |
+| eine volle Umschreibung, n=512 | 512 | 1.035 | **2,0** |
+
+Der feste Aufwand von fuenf Bloecken je Umschreibung faellt bei kleinen
+Aenderungen ins Gewicht und bei grossen nicht. Das ist der Preis dafuer,
+dass eine Aenderung ueberhaupt einen Zeitpunkt hat, an dem sie gilt.
+
+### Und auf der Uhr
+
+Fuenfzehn Schreibrunden von `fsrw`, sieben Messungen je Betriebsart,
+dazwischen abwechselnd, damit ein Trend der Maschine beide gleich
+trifft. Abgezogen ist der Leerlauf (booten und eine Runde: Median
+5.445 ms aus vier Messungen).
+
+| | Median gesamt | abzueglich Leerlauf | je Runde |
+|---|---:|---:|---:|
+| mit Journal | 9.495 ms | 4.050 ms | 270 ms |
+| ohne Journal | 8.425 ms | 2.980 ms | 199 ms |
+| | | **Faktor 1,36** | |
+
+**Diese Zahl ist schwach bestimmt, und das gehoert dazu.** Die Maschine
+war waehrend der Messung geteilt (Lastmittel 13 bis 30, mehrere andere
+QEMU-Laeufe daneben); die Einzelwerte streuten von 8.777 bis 14.400 ms
+mit Journal und von 7.516 bis 13.203 ms ohne. Die Streuung ueberlappt.
+Verlaesslich ist die Tabelle darueber -- sie zaehlt Schreibvorgaenge und
+nicht Sekunden.
+
 
 ---
 
