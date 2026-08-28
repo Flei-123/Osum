@@ -19,10 +19,25 @@ gespielt werden, wenn MP3 oder AAC darin steckt.
 | `kernel/user/mp3tab.fi` | 1343 | **erzeugt** von `tools/demux/mktab.py` — Huffman-Bäume, Fenster, Kosinustafeln, x^(4/3), Syntheseflanke |
 | `kernel/user/srt.fi` | 274 | SubRip-Untertitel |
 | `kernel/user/demuxt.fi` | 378 | der Messkopf (nicht die Anwendung) |
-| `kernel/user/play.fi` | +620 | die Erweiterung von MEDIA1s Abspieler |
-| `tools/demux/*` | 1100 | Erzeuger, Testdateien, Abnahme, Vergleich mit ffmpeg |
+| `kernel/user/play.fi` | 746 → 1340 (**+594**) | die Erweiterung von MEDIA1s Abspieler |
+| `tools/demux/*` | 1242 | Erzeuger, Testdateien, Abnahme, Vergleich mit ffmpeg |
 
-Zusammen rund **5300 Zeilen Firn** plus **1100 Zeilen Werkzeug auf dem Wirt**.
+Zusammen **5967 Zeilen Firn** in neuen Dateien, **+594 Zeilen** in
+`play.fi` und **1242 Zeilen** Werkzeug auf dem Wirt.
+
+### Die Abnahme
+
+```
+bash tools/demux/run.sh
+...
+DEMUX: 141 bestanden, 0 gescheitert
+```
+
+Neun Abschnitte: Bau (samt der Probe, dass die eingecheckte Zahlentafel
+genau das ist, was der Erzeuger liefert), 60 Zusagen der Behälterleser
+gegen `ffprobe`, zehn kaputte Dateien, die ehrliche Meldung, sechs
+Vergleiche gegen ffmpeg, die Rechenlast, der Weg über den AC97 mit
+Mitschnitt und die Bedienung.
 
 ---
 
@@ -147,8 +162,11 @@ Abtastwert dasselbe (mittlerer Fehler 0,19 vorher wie nachher):
 | + U-Vektor nicht mehr gebaut, sondern in derselben Schleife gefenstert | **18,6 %** |
 
 Das ist ein Faktor **4,5** ohne eine einzige geänderte Zahl im Ergebnis.
-Gemessen auf dem Bauserver unter `-accel kvm`, bei einer Wirtslast von
-7 auf 12 Kernen; die Zahl ist also eher zu hoch als zu niedrig. Die
+Gemessen auf dem Bauserver unter `-accel kvm`. Die Zahl hängt an der
+Wirtslast, und das steht im Protokoll: **18,6 %** bei Last 7 auf 12
+Kernen, **28 %** bei Last 8–13. Beides ist eher zu hoch als zu niedrig,
+weil der Zähler des Gastes Wanduhrzeit misst und der Wirt in dieser
+Runde ständig fünf bis fünfzehn fremde Abnahmen trug. Die
 Recherche setzt für einen optimierten MP3-Dekodierer 1–3 % an — der
 Unterschied ist der Übersetzer: `firnc0` ist der Bootstrap-Übersetzer
 ohne Optimierung, und jede Rechnung trägt eine Überlaufprüfung (SPEC 13,
@@ -242,6 +260,49 @@ Die Tasten kommen über `SYS_HOTKEY` und nicht über `read`: ein `read`
 auf das Terminal blockiert in diesem Kernel bis zu vier Sekunden
 (`kernel/sys.fi`, `KEY_IDLE`), und ein Abspieler, der das tut, hat vier
 Sekunden Stille.
+
+---
+
+## 7b. Der ganze Weg, gemessen
+
+`play -q -K /m/ton1.mp3` auf einer Maschine mit `-device AC97` und
+`-audiodev wav`: QEMU schreibt mit, was der Treiber wirklich ausgibt.
+
+```
+einsatz mitschnitt=1206 quelle=2  rahmen=194337 rate=48000
+ton   440 Hz: mitschnitt= 4271.75 quelle= 4499.69 verhaeltnis=0.949
+ton  1567 Hz: mitschnitt= 1418.92 quelle= 1499.94 verhaeltnis=0.946
+ton  3000 Hz: mitschnitt=    0.02 quelle=    0.00 anteil=0.000005
+```
+
+Die beiden Töne des linken Kanals kommen mit **0,949** und **0,946**
+ihres Pegels an — die fehlenden fünf Prozent sind der lineare
+Umrechner von 44,1 auf 48 kHz, der Dämpfung hat und in `play.fi` als
+solcher benannt ist. Die Gegenprobe: 3000 Hz kommt im linken Kanal des
+Testsignals nicht vor und liegt im Mitschnitt bei **0,0005 %** des
+440-Hz-Pegels.
+
+Die Bedienung im selben Lauf:
+
+```
+play: [1/2] /m/ton1.mp3      frames=155  played=194432  underruns=0  volume=40
+play: [2/2] /m/ton2.mp3      frames=85   played=97920   underruns=0
+play -s 2 /m/ton1.mp3        frames=77   mp3skip=1
+play -t 1 -u unter.srt film.mkv
+play: [Erster Untertitel]
+play: [Zweiter Untertitel, mit Komma]
+play: [Dritter]
+```
+
+`frames=155` gegen `frames=77` ist das Spulen, gemessen und nicht
+behauptet. `mp3skip=1` nach dem Sprung ist ehrlich: der erste Rahmen
+hinter einer Sprungstelle hat sein Bitreservoir nicht und wird
+übersprungen statt falsch ausgegeben.
+
+**Die Gegenprobe zum Tongerät:** die Abschnitte 1 bis 7 der Abnahme
+laufen ohne das Wort `audio` auf der Kernel-Befehlszeile. Dort gibt es
+kein Tongerät — und `/bin/play` sagt genau das und gibt trotzdem
+Auskunft, statt abzustürzen oder stumm zu bleiben.
 
 ---
 
