@@ -68,9 +68,47 @@ weil sie mehr über die Runde sagen als das, was auf Anhieb ging:
 
 ---
 
+## Zwischenstand 3 — was die bestehenden Tests gefunden haben
+
+Die Runde wurde gegen `tools/k15/run.sh`, `tests/theme/run.sh`,
+`tools/desktop/run.sh` und `tools/i18n/run.sh` gefahren. **Drei echte
+Regressionen**, alle behoben:
+
+1. **`tests/theme/rawcolour.py`: `raw 1`.** Der Rahmen der Lupentafel
+   stand als `0xFF0000` im Zeichencode. Seit Runde THEME steht dort keine
+   rohe Farbe mehr; die Lupe nimmt jetzt die Farbe der aktiven
+   Titelleiste aus dem Schema, der Kernel *meldet* sie, und
+   `tools/a11y/lupe.py` bekommt sie als Argument statt sie zu kennen.
+2. **`tools/k15/run.sh`: „der Fokusring liegt bildpunktgenau um die
+   Reiter — 964 von 964 Kantenpunkten falsch."** Er lag um die
+   Menüleiste: die ist seit dieser Runde fokussierbar und nahm damit den
+   Anfangsfokus. *Erreichbar* muss sie sein — ohne das kommt niemand ohne
+   Maus an ein Menü —, aber den **Anfangsfokus** bekommt sie nicht;
+   getippt wird in das erste Feld. Ein bestehender Test, der eine
+   Verhaltensänderung findet, hat seine Arbeit getan.
+3. **Der Platzbedarf.** `wlib` wuchs um vier Wörter je Bedienelement und
+   4 KiB Satzpuffer, und *jedes* grafische Programm bindet sie ein.
+   Mindestbreite und -höhe liegen jetzt in einem Wort, „geheim" ist eine
+   Flagge in `D_FLAGS`, der Satzpuffer trägt 16 statt 64 Sätze.
+
+**Nicht von dieser Runde**, auf `mergeline` (`/root/mgline`)
+gegengemessen und dort genauso rot:
+
+| Abschnitt | Meldung | mergeline |
+|---|---|---|
+| `tools/desktop/run.sh` | `WM_MAXNR does not match the calls` (der Läufer erwartet 2113, im Quelltext steht 2114) | fällt genauso |
+| `tools/desktop/run.sh`, `tools/i18n/run.sh` | `mkfs: the disk is full` | fällt genauso |
+| `tools/i18n/run.sh` | fest eingebaute deutsche Texte: 59 | **59 auch dort** |
+
+Nach den Korrekturen: **`tools/k15/run.sh` 0 Fehler**,
+**`tests/theme/run.sh` 0 Fehler**.
+
+---
+
 ## Die Zahlen der Abnahme
 
-`bash tools/a11y/run.sh`, QEMU mit `-accel kvm`.
+`bash tools/a11y/run.sh`, QEMU mit `-accel kvm`:
+**106 Zusagen, 0 Fehler.**
 
 ### Der Baum
 
@@ -115,6 +153,7 @@ an der Stelle, die der Baum nennt (Fensterecke + Rahmen 2 + Titelleiste
 |---|---:|
 | fokussierbare Bedienelemente | 11 |
 | durch Tabulator **erreichte** (verschiedene) | **11** |
+| dieselbe Zahl, gezählt **im Baum** (`state & 2`) | **11** |
 | Fokuswechsel bei 14 Tabulatoren | 14 |
 | Menüleiste per Tabulator erreichbar | ja (war vorher **nein**) |
 | Umschalt-Tab geht rückwärts | ja (gab es vorher **nicht**) |
@@ -140,8 +179,9 @@ wörtlich nach).
 | Tafel | 200 × 150 bei (600, 0) |
 | Vergrößerung | 2× |
 | Ausschnitt bei Zeiger (399, 299) | ab (349, 262) |
-| gemalte Bilder im Lauf | 63 |
+| gemalte Bilder im Lauf | 59 |
 | **Bildpunkte der Tafel, die der Quelle entsprechen** | **29 304 von 29 304** |
+| Rahmen | die Farbe der aktiven Titelleiste aus dem Schema (28, 78, 126) |
 | ohne `a11ymag` gemalt | 0 |
 
 ### Der Kontrast
@@ -177,6 +217,20 @@ Punkt, was der Baum ihr schon liefert und was noch fehlt; die zwei
 großen Lücken sind **Text mit Struktur** (Einfügemarke, Auswahl,
 Zeichenoffsets) und **Handeln über den Baum** (mit einer eigenen
 Sicherheitsentscheidung).
+
+## Die Umgebung der Messung
+
+Der Wirt trug während der Abnahme **fünf bis sieben fremde Testläufe**
+(Lastmittel 19,6 auf 12 Kernen, bis zu 26 gleichzeitige QEMU-Instanzen).
+`tools/a11y/run.sh` ist darunter **stabil grün** durchgelaufen — dreimal.
+
+`tools/k15/run.sh` fiel unter dieser Last zweimal an Stellen um, die
+nichts mit dieser Runde zu tun haben: einmal an einem Bildschirmfoto, das
+gar nicht erst entstand (`No such file or directory: beam.ppm`), und
+einmal an einem Doppelklick im Dateimanager, der im selben Baum in einem
+ruhigeren Lauf **grün** war. Das ist derselbe Befund, der für
+`tools/caps/run.sh` schon auf `mergeline` aktenkundig ist: unter Last
+flattern die Abschnitte, die von aussen bedient werden.
 
 ## Auflagen der Runde
 
