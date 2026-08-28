@@ -577,3 +577,219 @@ machine made several of them fail with `exit code 0, expected 21` and
 `'fb: hold' is missing` -- the sixty-second wait for the hold marker
 simply ran out. Run them one at a time; the failures were the harness
 starving, not the kernel.
+
+---
+
+# ADDENDUM, ROUND CUSTOMRES -- custom resolutions, and where the
+# 16 MiB wall really is
+
+*Everything below was measured on the branch `customres`, with
+`bash tools/customres/run.sh`, QEMU 7.2.22 and `-accel kvm`. The full
+report of that round is in `docs/CUSTOMRES.md`; what is repeated here is
+the part that belongs to this file: section 5's deadline, and the
+question section 9 left open -- can the eight window slots be widened?*
+
+## A1. What changed in section 5 (the confirmation deadline)
+
+The deadline of round DISPLAY was armed correctly and it reverted
+correctly. It just did not **run**.
+
+`vmode.poll` was called from exactly one place, `do_dispset` -- so the
+fifteen seconds only elapsed while some program was touching the screen.
+That is the wrong way round: the person this net exists for is sitting
+in front of a black screen and is therefore touching nothing. Measured
+on this branch before the fix: switch from a program, then `sleep 22`,
+and the mode was still the new one after 22 seconds. `reverts=0`.
+
+`kernel/tasks.fi` now calls `vmode.poll` in the idle task, on every wake
+from `hlt`/`mwait`. Same measurement after the fix: `panelw=800`,
+`reverts=1`, `confirms=0`, and the only thing that ran in between was
+`/bin/sleep`, which makes no display call at all.
+
+It is **not** in the interrupt path, and for the reason round K18 wrote
+down: `poll` rewrites page tables and paints a whole screen, and doing
+that in the timer filled the kernel stack to within 112 octets. The idle
+task is task context with its own stack, and the timer wakes it a hundred
+times a second.
+
+The first comparison in `poll` is one word of `kdata` against zero. An
+idle loop with no deadline open costs exactly that.
+
+## A2. `revert` could not always get back, and now it can
+
+`revert` went through `set_mode`, and `set_mode` starts with `find_mode`.
+So the way back was only open if the **old** mode was in the list. With
+custom resolutions that is no longer a safe assumption, and the failure
+would have landed exactly where the net is supposed to catch: E_NOMODE,
+and the user sitting in front of the mode they could not see.
+
+`set_mode` is now split. `switch_to` does the switch and asks no list;
+`set_mode` is `find_mode` plus `switch_to`; `revert` is `switch_to` with
+the old numbers and no new deadline. The old mode does not need a list
+entry to prove it works -- it was on the screen a moment ago, and that is
+the better evidence.
+
+## A3. The answer to section 9's open question: can the eight slots grow?
+
+**Not in this round, and the reason is not effort -- it is that the
+window's size is a property of the *process* address space.**
+
+First the measurement that makes the question worth asking at all. With
+the default 16 MiB of video memory, QEMU refuses 3840x2160 in the
+registers (`reason=1`). With `-device VGA,vgamem_mb=64` it **accepts**
+it, and the only thing left standing in the way is this kernel:
+
+```
+vgamem_mb=16   disp: out   3840x2160  reason=1   (the card refused)
+vgamem_mb=64   disp: out   3840x2160  reason=3   (this kernel cannot map it)
+```
+
+So the payoff is real: 4K is reachable on the QEMU side. Now the cost.
+
+### Where the sixteen megaoctets come from
+
+```
+disp: kacheln alle=8  frei=5  belegt=3  fb=2  laufmax=6
+```
+
+Eight entries at the top of **one** page directory, 504..511, aliasing
+0x3F000000..0x3FFFFFFF. Two of them are held permanently by
+`apic.map_device` -- the local APIC at 0xFEE00000 and the I/O APIC at
+0xFEC00000, four kilooctets of registers each, two megaoctets of window
+each -- and they sit at the bottom, so the longest run a framebuffer can
+get is six tiles: **12 582 912 octets, which is the `maplimit` in every
+measurement in this file.**
+
+### Why a second page directory is not a small change
+
+`kernel/arch/x86_64/boot.s` builds exactly three tables: PML4[0] ->
+PDPT[0] -> one PD of 512 huge pages. One gibioctet. The window lives in
+the top eight entries of that one PD.
+
+The reason that works at all is `kernel/proc.fi`, and it is the crux:
+
+```
+PML4 (private) [0]   -> PDPT (private)
+PDPT (private) [0]   -> the kernel PD out of boot.s   (SHARED)
+               [1]   -> PD (private), that is 0x40000000
+```
+
+Every process **shares that one page directory**, which is why the kernel
+can reach the framebuffer while running on any task's `cr3`. A window
+somewhere else would live in a different PD, hanging off a different PDPT
+entry -- and a process's PDPT is its own. Entry 1 is already taken by the
+process image, stack and heap. Entry 2 and up would have to be copied
+into every process's PDPT at creation, and they collide with
+`mem.idmap_grow`, which fills PDPT[1], PDPT[2]... with the identity map
+of RAM on any machine with more than one gibioctet.
+
+So widening the window means touching, at a minimum:
+
+| file | what |
+| --- | --- |
+| `kernel/arch/x86_64/boot.s` | a fourth table, or one allocated at runtime |
+| `kernel/proc.fi` | the shared entry (or entries) copied into every process PDPT |
+| `kernel/mem.fi` | `idmap_grow` must not hand out the entries the window uses, and the frame allocator must not hand out the physical range the window aliases -- which, note, it does **not** do today either (read from the source, not measured) |
+| `kernel/arch/x86_64/apic.fi` | `WIN_SLOTS`/`WIN_FIRST`/`WIN_VIRT` and the occupancy list, which is eight words at a fixed `kdata` offset and would need a page |
+| `kernel/fb.fi` | the same four constants, kept in step by hand, plus `map_run`/`unmap`/`longest_run` |
+
+Five files, a new `kdata` area, and a change to the layout of every
+process's address space -- for a resolution that no monitor on this
+project's desk is plugged into. **That is a round of its own, and it
+should be done when there is a reason to display 4K, not because the
+number is round.**
+
+### The cheap half, for whoever picks this up
+
+Moving the two APIC slots **out of** the shared eight would give the
+framebuffer all eight tiles -- 16 777 216 octets, enough for 2560x1440
+(14 745 600) but still not for 3840x2160 (33 177 600). It costs two more
+page-directory entries (504 -> 502) and it steals them from the identity
+map of physical 0x3EC00000..0x3EFFFFFF, i.e. RAM at 1004..1008 MiB. That
+is the same debt the window already carries for 0x3F000000..0x3FFFFFFF,
+sixteen megaoctets of it, and it is not paid today: `mem.reserve` marks
+the kernel image, the multiboot info, the modules and the map's own
+reserved entries, and nothing else. **Widening the window without paying
+that debt first would turn a latent aliasing hazard into a bigger one.**
+
+## A4. Real hardware: which of this works on Justin's PC, and which does not
+
+The short answer: **the picture works, the mode switching does not** --
+and that is not a limitation this round introduced, it is where the whole
+of round DISPLAY stands.
+
+`kernel/fb.fi` has two sources for a framebuffer:
+
+* `SRC_MB` -- the loader handed one over (Multiboot flag bit 12). On real
+  hardware this is the only one that happens: Limine sets a mode through
+  the firmware (UEFI GOP or VBE under BIOS) and passes address, width,
+  height and pitch. `boot.s` asks for it with `MB_FLAGS = 0x7` and
+  `mode_type = 0`, and `tools/boot/run.sh` explains why: without bit 2 a
+  multiboot loader under UEFI aborts with *"Cannot use text mode with
+  UEFI"*.
+* `SRC_VBE` -- the Bochs adapter, ports `0x1CE`/`0x1CF`. This is the one
+  every measurement in this file was made on, because QEMU's `-kernel`
+  loader does not fill in the multiboot framebuffer fields.
+
+**Everything round DISPLAY and round CUSTOMRES can do needs the second
+one.** `vmode.probe` gives up unless `vbe_present()` answers with
+0xB0C0..0xB0C5 on those two I/O ports, and no Intel, AMD or NVIDIA
+display engine does. Measured, on two devices that are graphics cards but
+not *that* graphics card:
+
+```
+-vga cirrus                       fb: kein Rahmenpuffer
+-vga none -device bochs-display   pci: 00:03.0 1234:1111 class=03:80:00
+                                       display bar0=0xfd000000/0x1000000
+                                  fb: kein Rahmenpuffer
+```
+
+The second one is worth reading twice: it is the *same* PCI device ID
+with the *same* 16 MiB aperture, and the kernel finds it on the bus --
+it just has no ISA port pair to write into, because `bochs-display` is
+the MMIO-only variant. No screen at all.
+
+On real hardware there **is** a screen, because the loader hands one
+over. What there is not, is a way to change it. So on Justin's PC:
+
+| what | works on real hardware? |
+| --- | --- |
+| a picture at all | **yes**, at whatever the firmware/Limine picked |
+| the mode list, EDID, `disp:` numbers | **no** -- `vmode.ready` stays 0 |
+| custom resolutions (this round) | **no** |
+| the fifteen-second deadline | **no** -- there is nothing to switch |
+| `/system/BILDMODUS` and its counter | **no** -- nothing reads it into effect |
+| brightness/contrast/gamma/saturation/rotation/scaling | **no, and this one is an accident** -- see below |
+
+The last row is the one finding of this section that is worth acting on.
+Those six do their work in `fb.present`, on the CPU, in software; they
+need no card, no registers and no VBE. They are nevertheless unreachable
+on real hardware, because `sys.do_dispget`/`do_dispset` open with
+`if !vmode.ready(state) { return -ENODEV }` -- and `vmode.ready` means
+"the Bochs adapter answered".
+
+**This round did not change it**, deliberately: section 11 of
+`tools/display/run.sh` asserts that without the word `disp` *every* one of
+those calls answers `-ENODEV` and not a zero that looks like a
+measurement, and that assertion is a good one. Splitting the gate --
+`fb.ready` for the six software fields, `vmode.ready` for everything that
+talks to the card -- is a small change with a test to rewrite, and it
+belongs to whoever next boots this on metal. It is written down here so
+that it is a decision and not an oversight.
+
+### What would make custom resolutions work on metal
+
+Two honest paths, in order of how realistic they are:
+
+1. **Ask the loader.** Limine takes a `RESOLUTION=` key in its config.
+   `/system/BILDMODUS` already holds the numbers a user confirmed; a
+   small program could write them into the loader's config, and the mode
+   would be there at the next boot. No GPU driver, no register. What it
+   loses is everything this round is actually about: no runtime switch,
+   and therefore no fifteen-second net -- the failure mode would be a
+   dark boot, and the only thing standing between the user and a
+   reinstall would be the boot counter of section A5 in
+   `docs/CUSTOMRES.md`. It would have to be relied on, not just present.
+2. **A display driver for one specific GPU family.** Intel is the only
+   one with public documentation. This is section 8.3 of this file and
+   nothing about it has changed.
