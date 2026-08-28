@@ -47,6 +47,7 @@
 # Verwendung:  bash tools/k15/run.sh
 set -uo pipefail
 cd "$(dirname "$0")/../.."
+. tools/lib/qemu.sh          # $QEMU_X86, $OSUM_QEMU_ACCEL
 ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
 TMPD=$(mktemp -d)
@@ -112,7 +113,7 @@ foto() { # name kommandozeile [monitordatei] [marke]
     local aus="$TMPD/$name.txt" ppm="$TMPD/$name.ppm"
     rm -f "$aus" "$ppm" "$sock"
     cp -f "$TMPD/disk.img" "$TMPD/live-$name.img"
-    timeout 240 qemu-system-x86_64 -kernel "$TMPD/k0.mb" -m 256 \
+    timeout 240 $QEMU_X86 -kernel "$TMPD/k0.mb" -m 256 \
         -append "$zeile" -serial "file:$aus" -display none -no-reboot \
         -vga std -monitor "unix:$sock,server,nowait" \
         -drive "file=$TMPD/live-$name.img,format=raw,if=ide,index=0" \
@@ -1254,7 +1255,7 @@ num "so viele Namen traegt das Abbild insgesamt" "$GN" ge 4000
 gross() { # name skript
     local name=$1 zeile=$2
     cp -f "$TMPD/gross.img" "$TMPD/g-$name.img"
-    timeout 600 qemu-system-x86_64 -kernel "$TMPD/k0.mb" -m 256 \
+    timeout 600 $QEMU_X86 -kernel "$TMPD/k0.mb" -m 256 \
         -append "osum nokbd nosched noproc nofs noring3 script=$zeile;exit" \
         -serial "file:$TMPD/$name.txt" -display none -no-reboot \
         -drive "file=$TMPD/g-$name.img,format=raw,if=ide,index=0" \

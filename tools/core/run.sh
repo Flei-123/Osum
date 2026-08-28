@@ -35,6 +35,7 @@
 # CORE_SLACK (pages the soak run may drift, default 64 = 256 KiB).
 set -uo pipefail
 cd "$(dirname "$0")/../.."
+. tools/lib/qemu.sh          # $QEMU_X86, $OSUM_QEMU_ACCEL
 ROOT=$(pwd)
 
 export FIRNLIB="$ROOT/lib"
@@ -125,7 +126,7 @@ else
             continue
         fi
         objcopy -O elf32-i386 "$TMPD/k$s.elf" "$TMPD/k$s.mb" 2>/dev/null
-        timeout 30 qemu-system-x86_64 -kernel "$TMPD/k$s.mb" -serial stdio \
+        timeout 30 $QEMU_X86 -kernel "$TMPD/k$s.mb" -serial stdio \
             -display none -no-reboot > "$TMPD/q$s.txt" 2>&1
         for want in \
             'FIRN kernel + std.core' \
