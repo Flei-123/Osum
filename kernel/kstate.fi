@@ -89,7 +89,13 @@
 //            Seiten
 //   0x77000  die vorgetaeuschten Steckdosen (Runde NETVIEW,
 //            `netview.fi`), drei Seiten
-//   0x7A000  frei, bis KDATA_SIZE (0x80000)
+//   0x7A000  der Fahrschein fuers Bildschirmfoto (Runde SNIP,
+//            `snap.fi`), eine Seite -- Skalare und die eingefrorenen
+//            Fensterrechtecke. DAS STANDBILD SELBST LIEGT NICHT HIER:
+//            800x600x4 sind 1,9 MiB und passten in keinen Vorrat
+//            dieser Karte; es bekommt einen eigenen Lauf Rahmen aus
+//            `mem.frame_run`, wie der Zweitpuffer des Rahmenpuffers.
+//   0x7B000  frei, bis KDATA_SIZE (0x80000)
 //
 // RUNDE K12 HAT DIESEN BEREICH WACHSEN LASSEN, von 0x40000 auf 0x50000.
 // Der Grund steht hier, damit ihn niemand suchen muss: mit dem
@@ -160,6 +166,7 @@ export {
     M_TILE, M_TILEFUZZ, M_TILESHOT, M_TILETABS, M_TILEROT, M_NOTILEDIRTY,
     NETMON_OFF, NETMON_MAX, SHARE_OFF, SHARE_MAX,
     HWID_OFF, HWID_MAX, M_HWID, M_HWIDEFI,
+    SNAP_OFF, SNAP_MAX, M_SNIP, M_NOSNAP, M_SNAPFREI, M_SNAPNOMARK,
     PMON_OFF, PMON_MAX, NETVIEW_OFF, NETVIEW_MAX,
     M_PWR, M_NOCSTATES, M_NOPWR, M_PWRHOT, M_NOBLANK,
     M_PWRDIM, M_PWRBLANK,
@@ -171,6 +178,7 @@ export {
     M_DESK, M_EINST, M_NOLAYER, M_NOMIN, M_DHCP, M_NODHCP, M_NOSTART,
     M_NETVDEMO, KB_ALTGR, KB_LAYOUT, KB_SWITCH,
     KB_SUPER, HK_SEQ, HK_KEY, HK_NS,
+    HK_MOD, HK_M_SHIFT, HK_M_CTRL, HK_M_ALT, KB_SNIPS,
     M_WMAX, M_NOSTRUT, M_THEMEGUI, M_THEMESHOT,
     MODE_OFF, MODE_MAX, MODE_WORDS, MODE_FREE,
     M_NORING3, M_NOTIMER, M_R3FAULT, M_NOSCHED, M_NOPREEMPT,
@@ -684,14 +692,70 @@ const KB_SUPER: u64 = 0x90
 const HK_SEQ: u64 = 0x98
 const HK_KEY: u64 = 0xA0
 const HK_NS: u64 = 0xA8
+// RUNDE SNIP: WELCHE ZUSATZTASTEN BEIM KUERZEL GEHALTEN WURDEN.
+//
+// Bis hierher trug der Riegel nur das ZEICHEN, und damit liessen sich
+// Super+s und Umschalt+Super+S nur an der Gross-/Kleinschreibung
+// unterscheiden. Das ist eine Unterscheidung ueber eine
+// Zeichentabelle, und sie geht schief, sobald eine Belegung dazukommt,
+// die das `s` woanders hat. Der Riegel sagt es jetzt selbst.
+//
+// 0xB8 UND NICHT 0xB0: 0xB0 nimmt die parallel laufende Runde
+// SUPERSEARCH fuer `KB_SUPER_USED`. Die beiden Runden haben sich das
+// ausdruecklich geteilt -- 0xC0 ist der Kuerzelring der Runde TILING,
+// dazwischen liegen genau zwei Woerter, und jede Runde hat eines.
+const HK_MOD: u64 = 0xB8
+// RUNDE SNIP: wie oft UMSCHALT+SUPER+S gedrueckt wurde. Eine eigene
+// Zahl neben `snap.tickets`, weil der Unterschied zwischen beiden die
+// Zusage traegt: gedrueckt wird immer, ein Fahrschein entsteht nur mit
+// eingetragenem Dienst.
+const KB_SNIPS: u64 = 0x120
+const HK_M_SHIFT: u64 = 1
+const HK_M_CTRL: u64 = 2
+const HK_M_ALT: u64 = 4
 
 // Der Terminalautomat der Bildschirmkonsole.
+//
+// ====================================================== RUNDE SNIP
+// AN_PAR LAG AUF DER TASTATUR, und das ist gemessen und nicht vermutet.
+//
+// `AN_PAR` sind ACHT Woerter, es stand auf 0x80, also reichte es bis
+// einschliesslich 0xB8. Auf diesen Adressen liegen seit den Runden
+// I18N und NETVIEW:
+//
+//     0x80  KB_LAYOUT   welche Tastaturbelegung gilt
+//     0x88  KB_SWITCH   wie oft umgeschaltet wurde
+//     0x90  KB_SUPER    die Super-Taste wird gehalten
+//     0x98  HK_SEQ      der Zaehler des Tastenkuerzels
+//     0xA0  HK_KEY      welcher Buchstabe es war
+//     0xA8  HK_NS       wann
+//
+// Was das anrichtet, ist Wort fuer Wort ausrechenbar: `ESC [ 1 ; 31 m`
+// -- eine ganz gewoehnliche Farbfolge -- schreibt 1 nach AN_PAR[0] und
+// 31 nach AN_PAR[1], also 1 nach KB_LAYOUT und 31 nach KB_SWITCH. Die
+// BELEGUNG DER TASTATUR SPRINGT AUF DEUTSCH, weil ein Programm etwas
+// rot ausgibt. Eine Folge mit drei Zahlen (`ESC [ 38 ; 5 ; 208 m`, die
+// 256-Farben-Form) trifft zusaetzlich KB_SUPER und laesst die
+// Super-Taste als gehalten erscheinen; die vierte und fuenfte Zahl
+// treffen den Kuerzelriegel selbst.
+//
+// GEFUNDEN HAT ES DIESE RUNDE, weil sie fuer `HK_MOD` ein freies Wort
+// suchte und dabei 0xB8 als AN_PAR[7] wiedererkannte -- derselbe
+// Hergang wie in Runde PAINT, die `S_TILE` und `S_DECO` auf 0x180 fand.
+// Ein Textverschmelzer kann so etwas nicht sehen: die Runden teilen
+// keine ZEILE, nur eine ADRESSE.
+//
+// DER BLOCK ZIEHT DESHALB AUF 0xE0..0x120, hinter den Kuerzelring der
+// Runde TILING (KB_HOT, 0xC0..0xE0) und weit vor den Umgebungsblock
+// (ENV_BUF, ab 0x200). `tools/snip/k11.py` rechnet von jetzt an ALLE
+// Woerter dieses Blocks paarweise gegeneinander, damit die naechste
+// Runde nicht wieder danebengreift.
 const AN_STATE: u64 = 0x20 // 0 = Text, 1 = nach ESC, 2 = in ESC[
 const AN_NPAR: u64 = 0x28
 const AN_PRIV: u64 = 0x30 // das '?' in ESC[?25l
 const AN_SEQS: u64 = 0x38 // wie viele Folgen ausgefuehrt wurden
 const AN_REV: u64 = 0x40 // 1 = umgekehrte Darstellung
-const AN_PAR: u64 = 0x80 // acht Zahlen zu acht Oktetten
+const AN_PAR: u64 = 0xE0 // acht Zahlen zu acht Oktetten
 const AN_MAXPAR: u64 = 8
 
 // DIE UMGEBUNG (Runde K11). Runde K6 hat `export` geschrieben und in die
@@ -1320,6 +1384,17 @@ const PMON_MAX: u64 = 0x3000
 const NETVIEW_OFF: u64 = 0x77000
 const NETVIEW_MAX: u64 = 0x3000
 
+// RUNDE SNIP. Eine Seite, und mehr wird es nicht: hier stehen die
+// Skalare des Fahrscheins und sechzehn eingefrorene Fensterrechtecke zu
+// je acht Woertern (0x100 .. 0x600). Das STANDBILD -- der einzige
+// wirklich grosse Posten dieser Runde -- liegt ausserhalb, in einem
+// eigenen Lauf zusammenhaengender Rahmen, den `kmain` sich holt und
+// `snap.init` uebernimmt. Ein Bildpuffer in dieser Karte waere
+// 1,9 MiB fuer eine Aufloesung und 3,1 MiB fuer die naechste; die Karte
+// haette bei jedem Moduswechsel wachsen muessen.
+const SNAP_OFF: u64 = 0x7A000
+const SNAP_MAX: u64 = 0x1000
+
 // RUNDE K18. Die Woerter dieser Runde auf der Befehlszeile. Wie in jeder
 // Runde davor sind die meisten davon GEGENPROBEN, und ohne sie beweist
 // die Runde nichts:
@@ -1451,6 +1526,31 @@ const M_THEMESHOT: u64 = 94 // Wort 1, Bit 30
 // Netz noch Dateisystem.
 const M_HWID: u64 = 576 // Wort 9, Bit 0
 const M_HWIDEFI: u64 = 577 // Wort 9, Bit 1
+
+// RUNDE SNIP. Wort 10 -- ein eigenes, weil das Bildschirmfoto weder
+// Oberflaeche noch Netz noch Dateisystem ist, sondern die Frage, WER
+// den Bildschirm lesen darf.
+//
+//   `snip`        die Runde melden und ihren Selbsttest fahren.
+//   `nosnap`      GEGENPROBE: KEIN Standbildpuffer. `snap.init` bleibt
+//                 unbereit, `ticket` stellt nichts aus, und die
+//                 Anwendung muss das sauber sagen statt zu warten.
+//   `snapfrei`    GEGENPROBE, und die wichtigste dieser Runde: die
+//                 Fahrscheinpruefung AUS. Jedes Programm darf dann das
+//                 Standbild lesen. Sie steht hier, damit `tools/snip/run.sh`
+//                 BELEGEN kann, dass die Pruefung im Regelbetrieb etwas
+//                 tut -- eine Zusage, deren Gegenprobe ebenfalls
+//                 durchgeht, ist keine Messung. Aus Ring 3 ist das Wort
+//                 nicht erreichbar, und kein ausgeliefertes Abbild
+//                 traegt es.
+//   `snapnomark`  GEGENPROBE: kein Aufnahmezeichen waehrend der
+//                 verzoegerten Aufnahme. Dann muss im Bild an der
+//                 Stelle des Zeichens dasselbe stehen wie ohne
+//                 Fahrschein.
+const M_SNIP: u64 = 640 // Wort 10, Bit 0
+const M_NOSNAP: u64 = 641 // Wort 10, Bit 1
+const M_SNAPFREI: u64 = 642 // Wort 10, Bit 2
+const M_SNAPNOMARK: u64 = 643 // Wort 10, Bit 3
 
 // Runde K12 hat kdata von 0x40000 auf 0x50000 wachsen lassen, Runde K18
 // von 0x50000 auf 0x60000 -- ihr Vorrat (0x58000..0x60000) liegt hinter

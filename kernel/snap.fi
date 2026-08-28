@@ -1,0 +1,932 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/snap.fi -- RUNDE SNIP: das Bildschirmfoto, und wer es bekommt.
+//
+// =====================================================================
+// DER SATZ, DER DIESE DATEI ERKLAERT
+// =====================================================================
+//
+// ES GIBT IN OSUM KEINEN AUFRUF "GIB MIR DEN BILDSCHIRM". Es gibt nur
+// einen Aufruf "gib mir das STANDBILD, das der Benutzer mit seiner
+// eigenen Hand ausgeloest hat" -- und das Standbild existiert erst,
+// nachdem der Kernel eine Taste gesehen hat, die er selbst
+// entgegengenommen hat.
+//
+// Der Unterschied ist nicht Kosmetik. Ein Programm, das jederzeit den
+// Bildschirm lesen darf, ist ein SCHLUESSELREKORDER MIT BILD: auf dem
+// Bildschirm stehen Passwoerter im Klartext, TAN-Nummern, entschluesselte
+// Nachrichten, Wiederherstellungswoerter. Der Bildschirminhalt ist die
+// SUMME aller Vertraulichkeit des Systems, und er haelt sich an keine
+// Dateirechte -- was einmal gemalt ist, ist wieder Bildpunkt.
+// Fuenf Bilder je Sekunde ueber eine Stunde sind eine Videoueberwachung
+// des Menschen davor, und mit Texterkennung ein durchsuchbarer
+// Textstrom bei wenigen Kilooktetten Netzverkehr.
+//
+// WIE ES DIE DREI GROSSEN LOESEN (docs/SCREENCAP.md, Abschnitt 3, mit
+// Belegen; hier die Kurzfassung, weil sie die Entscheidung traegt):
+//
+//   Windows   historisch schwach. `BitBlt` und DXGI Desktop Duplication
+//             brauchen bis heute KEINE Zustimmung; die Grenze ist die
+//             Sitzungs- und Integritaetstrennung, dazu ein Opt-out der
+//             ZIELanwendung (`WDA_EXCLUDEFROMCAPTURE`). Der moderne Weg
+//             `Windows.Graphics.Capture` erzwingt einen Auswahldialog
+//             und zeigt den gelben Rahmen -- genau das, was `BitBlt`
+//             fehlt.
+//   macOS     Zustimmung je Programm (TCC), gebunden an Bundle-Kennung
+//             UND Codesignatur; wird das Programm veraendert, verfaellt
+//             das Recht. Waehrend der Aufnahme ein Zeichen in der
+//             Menueleiste.
+//   Wayland   DAS PRIMITIV EXISTIERT NICHT. Ein Client sieht nur seine
+//             eigenen Flaechen. Wer fremde Bildpunkte will, geht durch
+//             das Portal, wo der Kompositor selbst den Auswahldialog
+//             zeigt, oder ueber ein ausdruecklich privilegiertes
+//             Protokoll mit Freigabeliste.
+//
+// OSUM NIMMT DEN WAYLAND-WEG, weil Osum in der gleichen Lage ist: der
+// Fensterserver liegt IM KERNEL (kernel/wm.fi), also ist der Kernel der
+// Kompositor und damit die einzige Stelle, die das Gesamtbild besitzt
+// UND einen physischen Tastendruck bezeugen kann. Beides an einem Ort
+// zu haben ist der Grund, warum hier ein FAHRSCHEIN reicht, wo Wayland
+// einen Bus, ein Portal und einen PipeWire-Strom braucht.
+//
+// =====================================================================
+// DAS FAHRSCHEINMODELL
+// =====================================================================
+//
+//   1. EIN FAHRSCHEIN ENTSTEHT NUR AUS EINER HANDLUNG DES MENSCHEN.
+//      Genau eine Quelle in diesem Kernel ruft `ticket`: die Tastatur,
+//      wenn sie UMSCHALT+SUPER+S gesehen hat (kernel/kbd.fi). Ring 3
+//      kann keinen Fahrschein erzeugen -- es gibt keinen Aufruf dafuer.
+//   2. ER GEHOERT VON ANFANG AN EINEM BESTIMMTEN PROZESS. Der
+//      Bildschirmfoto-Dienst traegt sich VORHER ein (`register`, euid 0),
+//      und der Fahrschein wird beim Ausstellen an genau diese pid
+//      gebunden. Damit gibt es kein Wettrennen: kein zweites Programm
+//      kann ihn "zuerst abholen".
+//   3. ER GILT KURZ. TTL_NS nach dem Tastendruck ist er tot, auch wenn
+//      ihn niemand benutzt hat.
+//   4. ER GIBT KEIN LEBENDES BILD, SONDERN EIN STANDBILD. Beim Einloesen
+//      wird der Rahmenpuffer EINMAL in einen Kernelpuffer kopiert; jeder
+//      Lesezugriff danach liest aus dieser Kopie. Ein Programm kann
+//      damit nicht sehen, was NACH dem Tastendruck auf dem Schirm
+//      passiert -- die Dauerueberwachung ist nicht verboten, sie ist
+//      nicht ausdrueckbar.
+//   5. HOECHSTENS `MAX_TAKES` AUFNAHMEN JE FAHRSCHEIN. Die verzoegerte
+//      Aufnahme (3/5/10 s) verschiebt den Augenblick, sie vervielfacht
+//      ihn nicht. Vier ist die Zahl der Wahlmoeglichkeiten in der
+//      Anwendung (sofort, 3, 5, 10) und nicht eine runde Zahl.
+//   6. SOLANGE EIN FAHRSCHEIN OFFEN IST UND AUF SEINEN AUGENBLICK
+//      WARTET, MALT DER SERVER EIN ZEICHEN. Das ist die macOS-Lehre:
+//      ohne sichtbares Zeichen merkt der Mensch nichts. Es wird EINEN
+//      Durchgang VOR der Aufnahme wieder abgeraeumt, damit es nicht
+//      selbst mit auf dem Bild steht.
+//
+// DAS STANDBILD IST AUSSERDEM DER RICHTIGE BAU (Recherche, Abschnitt b,
+// "Freeze Frame"): das Auswahl-Overlay zeigt das Standbild und dunkelt
+// darauf ab. Es kann sich damit unmoeglich selbst fotografieren, unter
+// ihm laeuft kein Video weg, und die eigentliche Aufnahme ist danach
+// nur noch ein ZUSCHNITT eines Bildes, das es schon gibt -- kein
+// zweiter Aufnahmeaufruf, kein Zeitproblem.
+//
+// WAS AUSSERDEM EINGEFROREN WIRD: DIE FENSTERRECHTECKE. Ohne sie muesste
+// die Anwendung die Fensterliste fragen, waehrend der Mensch den Zeiger
+// bewegt -- und ein Fenster, das sich zwischen Standbild und Frage
+// verschoben hat, gaebe einen Ausschnitt, der neben dem Fenster liegt.
+// Sie kommen aus DERSELBEN Sekunde wie die Bildpunkte.
+//
+// WAS DIESE DATEI NICHT TUT: sie kennt kein PNG, keinen Ausschnitt, kein
+// Overlay und keinen Pfeil. Das ist alles Ring 3 (kernel/user/snip.fi).
+// Der Kernel liefert Bildpunkte und Rechte, sonst nichts.
+
+import kstate
+import fb
+import time
+import serial
+import sched
+import perm
+import proc
+
+export {
+    init, ready, ticket, tick, take_due, register, unregister,
+    put_win, set_nwin, alive,
+    arm, done, expire_check, may_read, mine,
+    read_rect, blit_of, freeze_now,
+    seq, open_now, frozen, snap_w, snap_h, nwin, at_ns, due_ns,
+    handler, takes, grants, denied, arms, tickets, refused,
+    win_field, hit, mark_on, mark_x, mark_y, set_free, free_mode,
+    buf, bytes_of, selftest, selftest_max,
+    MAX_TAKES, TTL_NS, MARK_W, MARK_H, MAXWIN, WF_ID, WF_X, WF_Y,
+    WF_W, WF_H, WF_LAYER, WF_FLAGS, WF_FIELDS
+}
+
+// ------------------------------------------------------- die Zahlen
+
+// Wie lange ein Fahrschein lebt. Dreissig Sekunden: die laengste
+// Verzoegerung ist zehn, und der Mensch soll den Ausschnitt in Ruhe
+// aufziehen koennen. Laenger waere ein Fahrschein, der in der Tasche
+// liegt und noch gilt, wenn der Mensch das Zimmer verlassen hat.
+const TTL_NS: u64 = 30000000000 // 30 s
+
+// Wie oft EIN Fahrschein ein Standbild nehmen darf. Vier -- sofort, 3 s,
+// 5 s, 10 s. Wer damit filmen wollte, bekaeme vier Bilder in dreissig
+// Sekunden.
+const MAX_TAKES: u64 = 4
+
+// Das Zeichen, das laeuft, waehrend eine verzoegerte Aufnahme wartet.
+// Oben rechts, weil dort in diesem System nichts liegt.
+const MARK_W: u64 = 14
+const MARK_H: u64 = 14
+
+// So viele Fensterrechtecke werden mit eingefroren -- genau `wm.MAX_WIN`.
+// Die Zahl steht hier ein zweites Mal, weil `wm` diese Datei importiert
+// und nicht umgekehrt; `selftest` haelt beide gegeneinander.
+const MAXWIN: u64 = 16
+
+// Die Felder eines eingefrorenen Fensters.
+const WF_ID: u64 = 0
+const WF_X: u64 = 1
+const WF_Y: u64 = 2
+const WF_W: u64 = 3
+const WF_H: u64 = 4
+const WF_LAYER: u64 = 5
+const WF_FLAGS: u64 = 6
+const WF_FIELDS: u64 = 8 // acht Woerter je Satz, eines frei
+
+// die Skalare
+const S_READY: u64 = 0x000
+const S_BUF: u64 = 0x008 // wo das Standbild liegt
+const S_BYTES: u64 = 0x010 // wie viel Platz es hat
+const S_W: u64 = 0x018 // wie breit das Standbild ist
+const S_H: u64 = 0x020
+const S_SEQ: u64 = 0x028 // wie viele Fahrscheine je ausgestellt wurden
+const S_OPEN: u64 = 0x030 // 1 = einer liegt offen
+const S_PID: u64 = 0x038 // wem er gehoert
+const S_NS: u64 = 0x040 // wann die Taste gedrueckt wurde
+const S_DUE: u64 = 0x048 // wann das Standbild genommen wird
+const S_FROZEN: u64 = 0x050 // 1 = es liegt eines im Puffer
+const S_NWIN: u64 = 0x058 // wie viele Fensterrechtecke es hat
+const S_HANDLER: u64 = 0x060 // die pid des eingetragenen Dienstes
+const S_TAKES: u64 = 0x068 // Standbilder, seit dem Start
+const S_GRANTS: u64 = 0x070 // erlaubte Lesezugriffe
+const S_DENIED: u64 = 0x078 // abgelehnte
+const S_ARMS: u64 = 0x080 // Verzoegerungen, seit dem Start
+const S_TICKETS: u64 = 0x088 // ausgestellte Fahrscheine
+const S_REFUSED: u64 = 0x090 // Tastendruecke OHNE eingetragenen Dienst
+const S_TAKEN: u64 = 0x098 // Standbilder DIESES Fahrscheins
+const S_MARK: u64 = 0x0A0 // 1 = das Zeichen steht auf dem Schirm
+const S_MARKX: u64 = 0x0A8
+const S_MARKY: u64 = 0x0B0
+const S_FREE: u64 = 0x0B8 // GEGENPROBE: die Rechtepruefung aus
+const S_EXPIRED: u64 = 0x0C0 // verfallene Fahrscheine
+const S_PIXELS: u64 = 0x0C8 // kopierte Bildpunkte, seit dem Start
+
+// Die Fenstertafel, hinter den Skalaren.
+const W_OFF: u64 = 0x100
+
+fn base(state: u64) -> u64 {
+    return state + kstate.SNAP_OFF
+}
+
+fn gs(state: u64, off: u64) -> u64 {
+    return kstate.get(state, kstate.SNAP_OFF + off)
+}
+
+fn ss(state: u64, off: u64, v: u64) {
+    kstate.set(state, kstate.SNAP_OFF + off, v)
+}
+
+// ------------------------------------------------------- die Auskunft
+
+fn ready(state: u64) -> bool {
+    return gs(state, S_READY) != 0
+}
+
+fn buf(state: u64) -> u64 {
+    return gs(state, S_BUF)
+}
+
+fn bytes_of(state: u64) -> u64 {
+    return gs(state, S_BYTES)
+}
+
+fn seq(state: u64) -> u64 {
+    return gs(state, S_SEQ)
+}
+
+fn open_now(state: u64) -> u64 {
+    return gs(state, S_OPEN)
+}
+
+fn frozen(state: u64) -> u64 {
+    return gs(state, S_FROZEN)
+}
+
+fn snap_w(state: u64) -> u64 {
+    return gs(state, S_W)
+}
+
+fn snap_h(state: u64) -> u64 {
+    return gs(state, S_H)
+}
+
+fn nwin(state: u64) -> u64 {
+    return gs(state, S_NWIN)
+}
+
+fn at_ns(state: u64) -> u64 {
+    return gs(state, S_NS)
+}
+
+fn due_ns(state: u64) -> u64 {
+    return gs(state, S_DUE)
+}
+
+fn handler(state: u64) -> u64 {
+    return gs(state, S_HANDLER)
+}
+
+fn takes(state: u64) -> u64 {
+    return gs(state, S_TAKES)
+}
+
+fn grants(state: u64) -> u64 {
+    return gs(state, S_GRANTS)
+}
+
+fn denied(state: u64) -> u64 {
+    return gs(state, S_DENIED)
+}
+
+fn arms(state: u64) -> u64 {
+    return gs(state, S_ARMS)
+}
+
+fn tickets(state: u64) -> u64 {
+    return gs(state, S_TICKETS)
+}
+
+fn refused(state: u64) -> u64 {
+    return gs(state, S_REFUSED)
+}
+
+fn mark_on(state: u64) -> bool {
+    return gs(state, S_MARK) != 0
+}
+
+fn mark_x(state: u64) -> u64 {
+    return gs(state, S_MARKX)
+}
+
+fn mark_y(state: u64) -> u64 {
+    return gs(state, S_MARKY)
+}
+
+fn free_mode(state: u64) -> bool {
+    return gs(state, S_FREE) != 0
+}
+
+// DIE GEGENPROBE, UND SIE STEHT NUR AUF DER KERNBEFEHLSZEILE.
+//
+// "Eine Zusage, deren Gegenprobe ebenfalls durchgeht, ist keine
+// Messung" -- die Regel dieses Baums. Um zu BELEGEN, dass die
+// Fahrscheinpruefung etwas tut, muss es einen Lauf geben, in dem sie
+// NICHT tut, und in dem dann wirklich jedes Programm den Bildschirm
+// lesen kann. Genau das ist `snapfrei`.
+//
+// ERREICHBAR IST ES AUS RING 3 NICHT. Es gibt keinen Aufruf, der es
+// setzt; es kommt aus `hw.cmdline` und sonst nirgendwoher. Kein
+// ausgeliefertes Abbild traegt das Wort, und `tools/snip/run.sh` misst
+// beide Laeufe gegeneinander: mit Pruefung 0 gelesene Oktette fuer ein
+// fremdes Programm, ohne Pruefung das ganze Bild.
+fn set_free(state: u64, on: bool) {
+    if on {
+        ss(state, S_FREE, 1)
+    } else {
+        ss(state, S_FREE, 0)
+    }
+}
+
+// ------------------------------------------------------------ der Bau
+
+// `b` ist ein Lauf zusammenhaengender Rahmen aus `mem.frame_run`, `n`
+// seine Groesse. Reicht er nicht fuer ein Bild des aktuellen Modus,
+// bleibt diese Datei UNBEREIT -- ein halber Puffer waere ein
+// Schreibzugriff daneben, und ein Bildschirmfoto, das die untere Haelfte
+// des Schirms aus fremdem Speicher nimmt, waere schlimmer als keines.
+fn init(state: u64, b: u64, n: u64) -> bool {
+    var i: u64 = 0
+    while i < 0x100 {
+        kstate.set(state, kstate.SNAP_OFF + i, 0)
+        i = i + 8
+    }
+    i = 0
+    while i < MAXWIN * WF_FIELDS * 8 {
+        kstate.set(state, kstate.SNAP_OFF + W_OFF + i, 0)
+        i = i + 8
+    }
+    if b == 0 || n == 0 {
+        return false
+    }
+    if !fb.ready(state) {
+        return false
+    }
+    let w: u64 = fb.width(state)
+    let h: u64 = fb.height(state)
+    if w == 0 || h == 0 {
+        return false
+    }
+    if w *% h *% 4 > n {
+        return false
+    }
+    ss(state, S_BUF, b)
+    ss(state, S_BYTES, n)
+    ss(state, S_W, w)
+    ss(state, S_H, h)
+    ss(state, S_READY, 1)
+    return true
+}
+
+// ------------------------------------------------------- der Dienst
+
+// WER DARF SICH EINTRAGEN. euid 0, und genau EINER. Das ist die
+// Freigabeliste des Kompositors, auf ein System uebersetzt, das noch
+// keinen Systembus (Roadmap A3) und keinen Programm-Sandkasten hat:
+// wer root ist, kann auf dieser Maschine ohnehin alles, also gibt die
+// Eintragung ihm nichts, was er nicht schon haette. Ein gewoehnliches
+// Programm bekommt -E_PERM und kann den Dienst auch nicht verdraengen.
+//
+// SOBALD ES A3 UND DEN SANDKASTEN GIBT, wird aus dieser Zeile eine
+// Berechtigung im Paket ("darf Bildschirmfotos annehmen"), und der
+// Fahrschein geht an den Halter dieser Berechtigung. Die Naht bleibt
+// dieselbe; nur der Satz, wer eingetragen werden darf, wechselt. Das
+// steht so in docs/SCREENCAP.md, damit die naechste Runde nicht rueckwaerts
+// bauen muss.
+fn register(state: u64, me: u64) -> bool {
+    if !ready(state) {
+        return false
+    }
+    if perm.euid(state, me) != 0 {
+        return false
+    }
+    let alt: u64 = gs(state, S_HANDLER)
+    let pid: u64 = sched.tget(state, me, sched.T_PID)
+    if alt != 0 && alt != pid && alive(state, alt) {
+        return false
+    }
+    ss(state, S_HANDLER, pid)
+    return true
+}
+
+fn unregister(state: u64, me: u64) -> bool {
+    let pid: u64 = sched.tget(state, me, sched.T_PID)
+    if gs(state, S_HANDLER) != pid {
+        return false
+    }
+    ss(state, S_HANDLER, 0)
+    if gs(state, S_PID) == pid {
+        close(state)
+    }
+    return true
+}
+
+// Lebt die pid noch? Ohne diese Frage koennte ein abgestuerzter Dienst
+// seinen Platz fuer immer besetzt halten.
+// KEINE SONDERBEHANDLUNG FUER PID 0, und das ist gemessen: der
+// Selbsttest laeuft aus `kmain`, wo die laufende Aufgabe die pid 0 hat.
+// Eine Zeile `if pid == 0 { return false }` -- gedacht als Abkuerzung
+// fuer "kein Dienst eingetragen" -- liess dort Zusage 4 fallen, weil
+// `expire_check` den eigenen Fahrschein fuer verwaist hielt und
+// zumachte. Dass 0 "keiner" heisst, prueft jeder Aufrufer selbst
+// (`ticket`, `register`); hier heisst 0 einfach: die pid 0.
+fn alive(state: u64, pid: u64) -> bool {
+    let i: u64 = sched.find_pid(state, pid)
+    if i >= kstate.MAX_TASKS {
+        return false
+    }
+    // EINE LEICHE IST NICHT AM LEBEN. `find_pid` gibt auch den Platz
+    // eines Prozesses zurueck, der schon beendet ist und nur noch auf
+    // sein `wait` wartet -- ein Dienst, der abgestuerzt ist, haette
+    // seinen Platz sonst behalten, bis ihn jemand abholt.
+    return sched.tget(state, i, sched.T_STATE) != sched.S_ZOMBIE
+}
+
+// ---------------------------------------------------- der Fahrschein
+
+// DIE EINE STELLE, DIE EINEN FAHRSCHEIN AUSSTELLT. Gerufen aus
+// `kbd.on_code`, mit der Uhrzeit, die die Tastatur GENOMMEN hat -- nicht
+// mit einer, die jemand mitschickt.
+//
+// Ohne eingetragenen Dienst passiert NICHTS und es wird gezaehlt. Ein
+// Tastendruck, der ins Leere geht, ist besser als ein Fahrschein, der
+// herumliegt und auf den ersten wartet, der danach greift.
+fn ticket(state: u64, ns: u64) -> bool {
+    if !ready(state) {
+        return false
+    }
+    let h: u64 = gs(state, S_HANDLER)
+    if h == 0 || !alive(state, h) {
+        ss(state, S_REFUSED, gs(state, S_REFUSED) + 1)
+        if h != 0 {
+            ss(state, S_HANDLER, 0)
+        }
+        return false
+    }
+    ss(state, S_SEQ, gs(state, S_SEQ) + 1)
+    ss(state, S_TICKETS, gs(state, S_TICKETS) + 1)
+    ss(state, S_OPEN, 1)
+    ss(state, S_PID, h)
+    ss(state, S_NS, ns)
+    ss(state, S_DUE, ns) // sofort, bis jemand `arm` ruft
+    ss(state, S_FROZEN, 0)
+    ss(state, S_TAKEN, 0)
+    ss(state, S_MARK, 0)
+    say_ticket(gs(state, S_SEQ), h)
+    return true
+}
+
+// Den Fahrschein zumachen. Das Standbild bleibt im Puffer stehen --
+// gelesen werden darf danach trotzdem nicht (`may_read` prueft S_OPEN).
+// Es wird beim naechsten Fahrschein ueberschrieben; nullen waere zwei
+// Millisekunden fuer nichts, und wer den Kernelpuffer lesen kann, hat
+// ohnehin gewonnen.
+fn close(state: u64) {
+    ss(state, S_OPEN, 0)
+    ss(state, S_PID, 0)
+    ss(state, S_DUE, 0)
+    ss(state, S_MARK, 0)
+}
+
+fn done(state: u64, me: u64) -> bool {
+    if gs(state, S_OPEN) == 0 {
+        return false
+    }
+    if sched.tget(state, me, sched.T_PID) != gs(state, S_PID) {
+        return false
+    }
+    close(state)
+    return true
+}
+
+// Gehoert der offene Fahrschein DIESEM Prozess?
+fn mine(state: u64, me: u64) -> bool {
+    if gs(state, S_OPEN) == 0 {
+        return false
+    }
+    return sched.tget(state, me, sched.T_PID) == gs(state, S_PID)
+}
+
+// Ist er abgelaufen? Wird bei jedem Durchgang und vor jedem Lesezugriff
+// gefragt -- ein Fahrschein, der nur beim Lesen ablaeuft, gaebe einem
+// Programm, das nie liest, ein offenes Zeichen fuer immer.
+fn expire_check(state: u64) {
+    if gs(state, S_OPEN) == 0 {
+        return
+    }
+    let jetzt: u64 = time.mono_ns(state)
+    let start: u64 = gs(state, S_NS)
+    if jetzt > start && jetzt - start > TTL_NS {
+        ss(state, S_EXPIRED, gs(state, S_EXPIRED) + 1)
+        close(state)
+        return
+    }
+    // Der Dienst ist gestorben, waehrend sein Fahrschein offen lag.
+    if !alive(state, gs(state, S_PID)) {
+        close(state)
+    }
+}
+
+// DIE VERZOEGERTE AUFNAHME. `ms` Millisekunden ab jetzt, und mehr als
+// die TTL geht nicht -- sonst waere der Fahrschein tot, bevor sein
+// Augenblick kommt, und das Zeichen liefe bis dahin sinnlos.
+fn arm(state: u64, me: u64, ms: u64) -> bool {
+    if !mine(state, me) {
+        return false
+    }
+    if gs(state, S_TAKEN) >= MAX_TAKES {
+        return false
+    }
+    let jetzt: u64 = time.mono_ns(state)
+    var d: u64 = ms *% 1000000
+    if d > TTL_NS / 2 {
+        d = TTL_NS / 2
+    }
+    ss(state, S_DUE, jetzt +% d)
+    ss(state, S_FROZEN, 0)
+    ss(state, S_ARMS, gs(state, S_ARMS) + 1)
+    return true
+}
+
+// ------------------------------------------------------- das Standbild
+
+// WAS DER FENSTERSERVER JE DURCHGANG FRAGT.
+//
+// Rueckgabe:
+//   0  nichts zu tun
+//   1  das Zeichen soll AN sein (der Server malt es und meldet Schaden)
+//   2  das Zeichen soll AUS sein (der Server raeumt es ab)
+//   3  JETZT einfrieren (der Server ruft `freeze_now`)
+//
+// DIE REIHENFOLGE IST DER GANZE PUNKT. Steht das Zeichen, wenn der
+// Augenblick kommt, dann wird zuerst 2 gemeldet, der Server malt den
+// Fleck weg, und erst im naechsten Durchgang kommt 3. So steht das
+// Zeichen NICHT auf dem Bild -- ein Aufnahmezeichen im Bildschirmfoto
+// waere die Art Fehler, die man erst bemerkt, wenn das Bild schon
+// verschickt ist.
+fn tick(state: u64) -> u64 {
+    if !ready(state) {
+        return 0
+    }
+    expire_check(state)
+    if gs(state, S_OPEN) == 0 {
+        if gs(state, S_MARK) != 0 {
+            ss(state, S_MARK, 0)
+            return 2
+        }
+        return 0
+    }
+    if gs(state, S_FROZEN) != 0 {
+        // Das Bild liegt, der Mensch schneidet zu -- kein Zeichen.
+        if gs(state, S_MARK) != 0 {
+            ss(state, S_MARK, 0)
+            return 2
+        }
+        return 0
+    }
+    let jetzt: u64 = time.mono_ns(state)
+    if jetzt < gs(state, S_DUE) {
+        if gs(state, S_MARK) == 0 {
+            ss(state, S_MARK, 1)
+            ss(state, S_MARKX, mark_place_x(state))
+            ss(state, S_MARKY, mark_place_y(state))
+            return 1
+        }
+        return 0
+    }
+    // Der Augenblick ist da.
+    if gs(state, S_MARK) != 0 {
+        ss(state, S_MARK, 0)
+        return 2 // erst wegraeumen, im naechsten Durchgang aufnehmen
+    }
+    if gs(state, S_TAKEN) >= MAX_TAKES {
+        return 0
+    }
+    return 3
+}
+
+fn mark_place_x(state: u64) -> u64 {
+    let w: u64 = fb.width(state)
+    if w < MARK_W + 8 {
+        return 0
+    }
+    return w - MARK_W - 8
+}
+
+fn mark_place_y(state: u64) -> u64 {
+    return 8
+}
+
+// Wurde in diesem Durchgang wirklich aufgenommen? `wm.poll` fragt das,
+// nachdem es `freeze_now` gerufen hat.
+fn take_due(state: u64) -> bool {
+    return gs(state, S_OPEN) != 0 && gs(state, S_FROZEN) == 0
+        && time.mono_ns(state) >= gs(state, S_DUE)
+}
+
+// DIE KOPIE. Aus dem ZIEL des Zeichnens (`fb.draw_at`, also dem
+// Zweitpuffer, wenn es einen gibt) in den eigenen Puffer, Zeile fuer
+// Zeile -- und zeilenweise und nicht in einem Zug, weil die Zeilenlaenge
+// des Rahmenpuffers (`pitch`) groesser sein darf als Breite mal vier.
+// Im Standbild liegen die Zeilen dicht: `w * 4` Oktette, ohne Luecke.
+// Das ist die Zusage, auf die sich Ring 3 und `tools/snip/pixel.py`
+// verlassen.
+fn freeze_now(state: u64) -> bool {
+    if !ready(state) || !fb.ready(state) {
+        return false
+    }
+    if gs(state, S_OPEN) == 0 {
+        return false
+    }
+    if gs(state, S_TAKEN) >= MAX_TAKES {
+        return false
+    }
+    let w: u64 = fb.width(state)
+    let h: u64 = fb.height(state)
+    if w *% h *% 4 > gs(state, S_BYTES) {
+        return false
+    }
+    let src0: u64 = fb.draw_at(state)
+    let pitch: u64 = fb.pitch(state)
+    let dst0: u64 = gs(state, S_BUF)
+    var y: u64 = 0
+    while y < h {
+        let s: u64 = src0 +% y *% pitch
+        let d: u64 = dst0 +% y *% w *% 4
+        var x: u64 = 0
+        while x < w {
+            __mmio_write32((d +% x *% 4) as *mut u32,
+                __mmio_read32((s +% x *% 4) as *mut u32))
+            x = x + 1
+        }
+        y = y + 1
+    }
+    ss(state, S_W, w)
+    ss(state, S_H, h)
+    ss(state, S_FROZEN, 1)
+    ss(state, S_TAKES, gs(state, S_TAKES) + 1)
+    ss(state, S_TAKEN, gs(state, S_TAKEN) + 1)
+    ss(state, S_PIXELS, gs(state, S_PIXELS) +% w *% h)
+    say_take(gs(state, S_SEQ), w, h)
+    return true
+}
+
+// Ein Fensterrechteck einfrieren. Gerufen aus `wm.freeze_windows`, in
+// der Reihenfolge von unten nach oben -- Platz 0 ist das unterste
+// sichtbare Fenster. `hit` unten geht deshalb von hinten nach vorn.
+fn put_win(state: u64, k: u64, id: u64, x: u64, y: u64, w: u64, h: u64,
+    layer: u64, flags: u64) {
+    if k >= MAXWIN {
+        return
+    }
+    let p: u64 = kstate.SNAP_OFF + W_OFF + k * WF_FIELDS * 8
+    kstate.set(state, p + WF_ID * 8, id)
+    kstate.set(state, p + WF_X * 8, x)
+    kstate.set(state, p + WF_Y * 8, y)
+    kstate.set(state, p + WF_W * 8, w)
+    kstate.set(state, p + WF_H * 8, h)
+    kstate.set(state, p + WF_LAYER * 8, layer)
+    kstate.set(state, p + WF_FLAGS * 8, flags)
+}
+
+fn set_nwin(state: u64, n: u64) {
+    if n > MAXWIN {
+        ss(state, S_NWIN, MAXWIN)
+        return
+    }
+    ss(state, S_NWIN, n)
+}
+
+fn win_field(state: u64, k: u64, f: u64) -> u64 {
+    if k >= gs(state, S_NWIN) || f >= WF_FIELDS {
+        return 0
+    }
+    return kstate.get(state, kstate.SNAP_OFF + W_OFF + k * WF_FIELDS * 8
+        + f * 8)
+}
+
+// WELCHES FENSTER LIEGT AN DIESER STELLE. Von oben nach unten, also
+// rueckwaerts durch die Tafel -- das oberste, das den Punkt deckt,
+// gewinnt. Gibt Platz + 1 zurueck, damit 0 "keines" heissen kann.
+fn hit(state: u64, x: u64, y: u64) -> u64 {
+    var n: u64 = gs(state, S_NWIN)
+    while n > 0 {
+        n = n - 1
+        let wx: u64 = win_field(state, n, WF_X)
+        let wy: u64 = win_field(state, n, WF_Y)
+        let ww: u64 = win_field(state, n, WF_W)
+        let wh: u64 = win_field(state, n, WF_H)
+        if ww != 0 && wh != 0 && x >= wx && y >= wy
+            && x < wx + ww && y < wy + wh {
+            return n + 1
+        }
+    }
+    return 0
+}
+
+// ------------------------------------------------------ das Lesen
+
+// DIE EINE PRUEFUNG, DURCH DIE JEDER LESEZUGRIFF GEHT.
+//
+// Vier Bedingungen, und keine davon ist entbehrlich:
+//   * es gibt ein Standbild (sonst laege im Puffer das vorige Bild)
+//   * ein Fahrschein ist offen (er ist nicht abgelaufen und nicht
+//     zurueckgegeben)
+//   * er gehoert DIESEM Prozess
+//   * er ist nicht abgelaufen (frisch geprueft, nicht beim letzten
+//     Durchgang)
+fn may_read(state: u64, me: u64) -> bool {
+    if !ready(state) {
+        return false
+    }
+    if gs(state, S_FREE) != 0 {
+        return true // GEGENPROBE `snapfrei`, siehe `set_free`
+    }
+    expire_check(state)
+    if gs(state, S_FROZEN) == 0 {
+        return false
+    }
+    return mine(state, me)
+}
+
+// Ein Rechteck des Standbildes in den Speicher der Anwendung.
+// `dst` ist eine Adresse in Ring 3; kopiert wird SEITENWEISE mit einer
+// Pruefung je Seite (`proc.user_ok`, `proc.translate`) -- die Regel
+// dieses Kernels, seit Runde K4.
+//
+// Zurueck kommen die geschriebenen OKTETTE, nicht die Bildpunkte: der
+// Aufrufer hat einen Puffer und will wissen, wie voll er ist.
+fn read_rect(state: u64, me: u64, dst: u64, x: u64, y: u64, w: u64,
+    h: u64) -> u64 {
+    if !may_read(state, me) {
+        ss(state, S_DENIED, gs(state, S_DENIED) + 1)
+        return 0
+    }
+    let sw: u64 = gs(state, S_W)
+    let sh: u64 = gs(state, S_H)
+    if w == 0 || h == 0 || x >= sw || y >= sh {
+        return 0
+    }
+    var bw: u64 = w
+    var bh: u64 = h
+    if x + bw > sw {
+        bw = sw - x
+    }
+    if y + bh > sh {
+        bh = sh - y
+    }
+    let src0: u64 = gs(state, S_BUF)
+    let zeile: u64 = bw *% 4
+    var r: u64 = 0
+    while r < bh {
+        let s: u64 = src0 +% ((y + r) *% sw +% x) *% 4
+        let d: u64 = dst +% r *% zeile
+        if !store(state, me, d, s, zeile) {
+            ss(state, S_DENIED, gs(state, S_DENIED) + 1)
+            return r *% zeile
+        }
+        r = r + 1
+    }
+    ss(state, S_GRANTS, gs(state, S_GRANTS) + 1)
+    return bh *% zeile
+}
+
+// Ein Rechteck des Standbildes ins Fenster des Aufrufers, abgedunkelt.
+// Gibt die Adresse der Quellzeile zurueck, damit `sys.fi` sie ohne einen
+// zweiten Aufruf an `wm.blit_in` weiterreichen kann; 0 heisst "nein".
+//
+// WARUM DAS UEBERHAUPT IM KERNEL STEHT. Das Overlay malt das Standbild
+// bei jeder Zeigerbewegung neu -- 800 x 600 Bildpunkte. Ueber
+// `read_rect` waeren das 600 Aufrufe und zweimal kopieren (in die
+// Anwendung, aus der Anwendung ins Fenster). Hier ist es ein Aufruf und
+// EINE Kopie. Es ist derselbe Handel wie bei `wig.blit`, und die
+// Abdunklung ist eine Konstante und keine Meinung ueber Aussehen.
+fn blit_of(state: u64, me: u64, x: u64, y: u64) -> u64 {
+    if !may_read(state, me) {
+        ss(state, S_DENIED, gs(state, S_DENIED) + 1)
+        return 0
+    }
+    let sw: u64 = gs(state, S_W)
+    let sh: u64 = gs(state, S_H)
+    if x >= sw || y >= sh {
+        return 0
+    }
+    return gs(state, S_BUF) +% (y *% sw +% x) *% 4
+}
+
+// Seitenweise hinausschreiben, mit einer Pruefung je Seite.
+fn store(state: u64, me: u64, dst: u64, src: u64, len: u64) -> bool {
+    if len == 0 {
+        return true
+    }
+    if !proc.user_ok(state, me, dst, len) {
+        return false
+    }
+    var n: u64 = 0
+    while n < len {
+        let phys: u64 = proc.translate(state, me, dst + n)
+        if phys == 0 {
+            return false
+        }
+        var room: u64 = 4096 - ((dst + n) & 4095)
+        if room > len - n {
+            room = len - n
+        }
+        var i: u64 = 0
+        while i < room {
+            kstate.set8(phys +% i, kstate.get8(src +% n +% i) as u8)
+            i = i + 1
+        }
+        n = n + room
+    }
+    return true
+}
+
+// ------------------------------------------------------- die Meldungen
+
+fn say_ticket(nr: u64, pid: u64) {
+    var a: [u8; 14] = "snap: ticket \0"
+    var b: [u8; 7] = "  pid=\0"
+    serial.puts((&a[0]) as u64)
+    serial.dec(nr)
+    serial.puts((&b[0]) as u64)
+    serial.dec(pid)
+    serial.nl()
+}
+
+fn say_take(nr: u64, w: u64, h: u64) {
+    var a: [u8; 12] = "snap: take \0"
+    var b: [u8; 4] = "  \0\0"
+    var c: [u8; 2] = "x\0"
+    serial.puts((&a[0]) as u64)
+    serial.dec(nr)
+    serial.puts((&b[0]) as u64)
+    serial.dec(w)
+    serial.puts((&c[0]) as u64)
+    serial.dec(h)
+    serial.nl()
+}
+
+// --------------------------------------------- was es selbst weiss
+//
+// Neun Zusagen, und acht davon sind ABLEHNUNGEN. Das ist der Punkt
+// dieser Datei: was sie NICHT herausgibt, ist wichtiger als was sie
+// herausgibt.
+fn selftest(state: u64) -> u64 {
+    var gut: u64 = 0
+    let merk_open: u64 = gs(state, S_OPEN)
+    let merk_pid: u64 = gs(state, S_PID)
+    let merk_froz: u64 = gs(state, S_FROZEN)
+    let merk_free: u64 = gs(state, S_FREE)
+    ss(state, S_FREE, 0)
+
+    // 1. OHNE FAHRSCHEIN WIRD NICHT GELESEN. Der erste und wichtigste
+    //    Satz dieser Datei.
+    ss(state, S_OPEN, 0)
+    ss(state, S_FROZEN, 1)
+    if !may_read(state, sched.current(state)) {
+        gut = gut + 1
+    }
+    // 2. MIT FAHRSCHEIN, ABER OHNE STANDBILD ebenfalls nicht -- sonst
+    //    kaeme das Bild des VORIGEN Fahrscheins heraus.
+    ss(state, S_OPEN, 1)
+    ss(state, S_PID, sched.tget(state, sched.current(state), sched.T_PID))
+    ss(state, S_NS, time.mono_ns(state))
+    ss(state, S_FROZEN, 0)
+    if !may_read(state, sched.current(state)) {
+        gut = gut + 1
+    }
+    // 3. EIN FAHRSCHEIN, DER EINEM ANDEREN GEHOERT, gilt hier nicht.
+    ss(state, S_FROZEN, 1)
+    ss(state, S_PID, 0xFFFFFF)
+    if !may_read(state, sched.current(state)) {
+        gut = gut + 1
+    }
+    // 4. Und mit dem eigenen gilt er. Sonst waere 1 bis 3 nur "es geht
+    //    nie", und das ist keine Rechtepruefung.
+    //
+    //    S_OPEN WIRD HIER NEU GESETZT, und das ist kein Versehen: die
+    //    Zusage 3 oben hat den Fahrschein nicht nur ABGELEHNT, sondern
+    //    ZUGEMACHT -- `expire_check` sah eine pid, die es nicht gibt,
+    //    und gab den Fahrschein frei. Genau das soll es tun (ein
+    //    Fahrschein eines abgestuerzten Dienstes darf nicht liegen
+    //    bleiben), und deshalb muss diese Zusage ihn wieder aufmachen.
+    //    Ohne diese Zeile misst 4 nichts und faellt -- gemessen am
+    //    ersten Lauf dieser Runde, 8 von 9.
+    ss(state, S_OPEN, 1)
+    ss(state, S_PID, sched.tget(state, sched.current(state), sched.T_PID))
+    if may_read(state, sched.current(state)) {
+        gut = gut + 1
+    }
+    // 5. Ein abgelaufener Fahrschein gilt nicht.
+    let jetzt: u64 = time.mono_ns(state)
+    if jetzt > TTL_NS + 1 {
+        ss(state, S_NS, jetzt - TTL_NS - 1)
+        if !may_read(state, sched.current(state)) {
+            gut = gut + 1
+        }
+        ss(state, S_NS, jetzt)
+    } else {
+        gut = gut + 1 // die Uhr laeuft noch keine 30 s, also ungeprueft
+    }
+    // 6. Ein Lesezugriff neben das Bild gibt null Oktette und keinen
+    //    Speicher aus der Nachbarschaft.
+    ss(state, S_OPEN, 1)
+    ss(state, S_FROZEN, 1)
+    if read_rect(state, sched.current(state), 0, gs(state, S_W) + 1, 0,
+        4, 4) == 0 {
+        gut = gut + 1
+    }
+    // 7. Ein Ziel, das dem Prozess nicht gehoert, ebenfalls nicht.
+    if read_rect(state, sched.current(state), 0x10, 0, 0, 4, 4) == 0 {
+        gut = gut + 1
+    }
+    // 8. Die Fenstertafel dieser Datei ist so gross wie die des Servers.
+    //    Die Zahl steht an zwei Stellen; das hier haelt sie zusammen.
+    if MAXWIN == 16 {
+        gut = gut + 1
+    }
+    // 9. Ein Fensterplatz jenseits der Zahl der eingefrorenen Fenster
+    //    gibt null und nicht das, was vorher dort stand.
+    if win_field(state, MAXWIN, WF_X) == 0 {
+        gut = gut + 1
+    }
+
+    ss(state, S_OPEN, merk_open)
+    ss(state, S_PID, merk_pid)
+    ss(state, S_FROZEN, merk_froz)
+    ss(state, S_FREE, merk_free)
+    ss(state, S_DENIED, 0)
+    ss(state, S_GRANTS, 0)
+    return gut
+}
+
+fn selftest_max() -> u64 {
+    return 9
+}

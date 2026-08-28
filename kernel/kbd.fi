@@ -60,12 +60,18 @@ import tty
 import wm
 import utf8
 import time
+// RUNDE SNIP: die Tastatur ist die EINZIGE Stelle in diesem Kernel, die
+// einen Fahrschein fuer ein Bildschirmfoto ausstellt. Deshalb steht der
+// Import hier und nirgends sonst -- wer `snap.ticket` sucht, findet
+// genau einen Aufrufer.
+import snap
 
 export {
     irq, on_code, translate, shifted, take, waiting,
     hot_take, hot_waiting, MAX_KEYS, HOT_SLOTS,
     code_of, layout, set_layout, switches, LAYOUTS, L_US, L_DE,
-    super_down, hotkey_seq, hotkey_key, hotkey_ns
+    super_down, hotkey_seq, hotkey_key, hotkey_ns,
+    hotkey_mod, snips
 }
 
 // How many octets fit into the buffer in the data area.
@@ -284,6 +290,50 @@ fn on_code(state: u64, code: u64) {
     // sees a number it has not seen acts once, and two readers do not
     // take the press away from each other.
     if kstate.get(state, kstate.K11_OFF + kstate.KB_SUPER) == 1 {
+        // ================================ RUNDE SNIP: UMSCHALT+SUPER+S
+        //
+        // DAS KUERZEL, DAS WINDOWS-NUTZER ERWARTEN, und die einzige
+        // Stelle im ganzen Kernel, die einen Fahrschein fuers
+        // Bildschirmfoto ausstellt. Es gibt keinen Systemaufruf dafuer:
+        // ein Programm KANN sich keinen ausstellen, es kann nur einen
+        // einloesen, den ein Mensch mit seiner Hand erzeugt hat.
+        //
+        // DER ABTASTCODE UND NICHT DAS ZEICHEN. 0x1F ist auf der
+        // amerikanischen wie auf der deutschen Belegung das `s` -- die
+        // Taste liegt physisch an derselben Stelle. Ueber das Zeichen
+        // zu gehen hiesse, das Kuerzel an eine Zeichentabelle zu
+        // haengen; genau aus diesem Grund prueft die Runde I18N
+        // zwanzig Zeilen weiter oben fuer Strg+Alt+L ebenfalls den
+        // Abtastcode und nicht den Buchstaben.
+        //
+        // KOLLIDIERT NICHT MIT DER RUNDE SUPERSEARCH, und das ist
+        // nachgesehen und nicht vermutet: jene Runde macht SUPER
+        // ALLEIN zum Kuerzel und setzt dafuer ganz oben in dieser
+        // Funktion `KB_SUPER_USED`, sobald waehrend gehaltener
+        // Super-Taste IRGENDEINE andere Taste gedrueckt wird
+        // (`code < 0x80 && code != 0x5B && code != 0x5C`). Umschalt
+        // (0x2A/0x36) und S (0x1F) sind beides solche Tasten -- egal in
+        // welcher Reihenfolge sie kommen, das Bit steht, und das
+        // Loslassen von Super loest die Suche NICHT aus. Dieser Zweig
+        // hier laeuft ausserdem weit UNTER jener Abfrage; er kann sie
+        // nicht ueberspringen. `tools/snip/run.sh`, Abschnitt 6, misst
+        // beide Runden zusammen in EINEM Kern.
+        if code == 0x1F
+            && kstate.get(state, kstate.K11_OFF + kstate.KB_SHIFT) == 1 {
+            kstate.add(state, kstate.K11_OFF + kstate.KB_SNIPS, 1)
+            snap.ticket(state, time.mono_ns(state))
+        }
+        var mods: u64 = 0
+        if kstate.get(state, kstate.K11_OFF + kstate.KB_SHIFT) == 1 {
+            mods = mods | kstate.HK_M_SHIFT
+        }
+        if kstate.get(state, kstate.K11_OFF + kstate.KB_CTRL) == 1 {
+            mods = mods | kstate.HK_M_CTRL
+        }
+        if kstate.get(state, kstate.K11_OFF + kstate.KB_ALT) == 1 {
+            mods = mods | kstate.HK_M_ALT
+        }
+        kstate.set(state, kstate.K11_OFF + kstate.HK_MOD, mods)
         kstate.set(state, kstate.K11_OFF + kstate.HK_KEY, c)
         kstate.set(state, kstate.K11_OFF + kstate.HK_NS, time.mono_ns(state))
         kstate.add(state, kstate.K11_OFF + kstate.HK_SEQ, 1)
@@ -331,6 +381,19 @@ fn hotkey_key(state: u64) -> u64 {
 
 fn hotkey_ns(state: u64) -> u64 {
     return kstate.get(state, kstate.K11_OFF + kstate.HK_NS)
+}
+
+// RUNDE SNIP: welche Zusatztasten beim letzten Kuerzel gehalten wurden.
+fn hotkey_mod(state: u64) -> u64 {
+    return kstate.get(state, kstate.K11_OFF + kstate.HK_MOD)
+}
+
+// Wie oft UMSCHALT+SUPER+S gedrueckt wurde. Nicht dasselbe wie
+// `snap.tickets`: gedrueckt wird auch, wenn kein Dienst eingetragen ist,
+// und dann entsteht kein Fahrschein. Der Unterschied zwischen den
+// beiden Zahlen IST die Zusage "ohne Dienst kein Fahrschein".
+fn snips(state: u64) -> u64 {
+    return kstate.get(state, kstate.K11_OFF + kstate.KB_SNIPS)
 }
 
 // Its own line and not a `key: ` line, because it is not a key that was
