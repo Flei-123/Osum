@@ -149,6 +149,50 @@ python3 tools/i18n/quota.py > "$TMPD/quota.txt" 2>&1 \
     || { bad "die Abdeckung laesst sich nicht rechnen"; cat "$TMPD/quota.txt"; }
 sed 's/^/        /' "$TMPD/quota.txt" | tail -n +2
 
+# ---- ECHTE ZEICHEN, KEINE UMSCHRIFT (Nachtrag 3 der Runde LOOK)
+#
+# Bis I18N konnte das System kein "ue" zeichnen, also stand ueberall die
+# Umschrift. Seither kann es das -- und damit ist die Umschrift ein
+# Fehler, den nur niemand sieht, weil die Zeile lesbar bleibt. Genau so
+# hat "Text schreiben und aendern" ein halbes Jahr im Starter gestanden,
+# waehrend zwei Zeilen weiter schon "Ausführen" richtig erschien.
+python3 tools/i18n/translit.py --zaehle > "$TMPD/translit.txt" 2>&1
+TRC=$?
+sed 's/^/        /' "$TMPD/translit.txt"
+if [ "$TRC" = 0 ]; then
+    ok "keine Umschrift in locale/de und in den Buendel-Beschriftungen"
+elif [ "$TRC" = 2 ]; then
+    bad "ein Text passt nicht mehr in seinen Puffer (siehe ZU ENG)"
+else
+    bad "Umschrift gefunden, wo ein Umlaut hingehoert"
+fi
+TU=$(grep -oE 'umlaute=[0-9]+' "$TMPD/translit.txt" | tail -1 | cut -d= -f2)
+if [ "${TU:-0}" -ge 50 ]; then
+    ok "echte Umlautzeichen in den deutschen Texten: $TU"
+else
+    bad "nur $TU echte Umlautzeichen -- das ist zu wenig fuer Deutsch"
+fi
+
+# Und die Gegenprobe: eine Pruefung, die immer gruen ist, prueft nichts.
+# Dieselbe Pruefung auf einen Baum, in dem die Umschrift zurueck ist.
+rm -rf "$TMPD/tw"
+mkdir -p "$TMPD/tw/locale/de" "$TMPD/tw/kernel/user" "$TMPD/tw/assets/apps/x.osp"
+cp kernel/user/msg.fi kernel/user/appdir.fi "$TMPD/tw/kernel/user/"
+sed 's/Übernehmen/Uebernehmen/' locale/de/messages > "$TMPD/tw/locale/de/messages"
+printf 'name=Editor\ninfo=Text schreiben und aendern\n' \
+    > "$TMPD/tw/assets/apps/x.osp/INFO"
+if OSUM_ROOT="$TMPD/tw" python3 tools/i18n/translit.py \
+        > "$TMPD/translit-neg.txt" 2>&1; then
+    bad "die Umschrift-Pruefung bleibt gruen, wenn die Umschrift zurueckkommt"
+else
+    NF=$(grep -oE 'umschrift=[0-9]+' "$TMPD/translit-neg.txt" | cut -d= -f2)
+    if [ "${NF:-0}" -ge 2 ]; then
+        ok "Gegenprobe: zurueckgeschriebene Umschrift wird rot ($NF Funde)"
+    else
+        bad "Gegenprobe: nur $NF Funde, erwartet mindestens 2"
+    fi
+fi
+
 # ================================================== 4. bauen und messen
 
 echo "== 4. bauen: Kern, sechs Programme, zwei Abbilder =="
