@@ -84,10 +84,22 @@ SANS=assets/osum-sans.ttf
 ICONF=assets/osum-icons.ttf
 
 # The build tree is shared between runs so that thirteen programs are
-# not recompiled for every variant.  It is keyed on nothing but the
-# repository, because the programs do not depend on any option above;
+# not recompiled for every variant.  The options above do not change it;
 # every option above is a FILE on the disk.
-BUILDD=${LOOKBUILD:-/root/lookrun/build}
+#
+# ROUND PAINT: AND IT IS KEYED ON THE WORKING TREE, which it was not.
+# The path was the literal `/root/lookrun/build`, so two worktrees of
+# this repository -- the one under test and the one it is measured
+# against -- shared one cache and one kernel.  The measurement that
+# found it: a screenshot taken from the OLD branch showed the NEW
+# branch's window shadow, and the two pictures were identical in the
+# band where the shadow lives, 0 differing pixels out of 3720.  A
+# baseline that is the thing it is supposed to be compared with is
+# worse than no baseline.
+#
+# Keyed on the absolute path of the tree, outside the repository so
+# that no build output can land in a commit.
+BUILDD=${LOOKBUILD:-/tmp/osum-lookbuild-$(pwd | md5sum | cut -c1-12)}
 mkdir -p "$BUILDD" "$OUT"
 
 # ---------------------------------------------------------- 1. kernel
