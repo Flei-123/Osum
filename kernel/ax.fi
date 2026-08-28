@@ -1,0 +1,746 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/ax.fi -- RUNDE A11Y: DER BEDIENELEMENT-BAUM IM PROTOKOLL.
+//
+// WARUM JETZT UND NICHT SPAETER. Ein Barrierefreiheitsbaum, der
+// nachtraeglich kommt, muss in JEDES Programm einzeln eingebaut werden --
+// das ist die Geschichte von X11 (AT-SPI kam sechzehn Jahre nach dem
+// Protokoll) und von Windows vor UI Automation. Hier liegt der
+// Fensterserver im Kernel (`kernel/wm.fi`) und ALLE Programme benutzen
+// dieselbe Widget-Schicht (`kernel/user/wlib.fi` ueber der Naht
+// `kernel/wig.fi`). Der Baum muss deshalb GENAU EINMAL entstehen, in der
+// Widget-Schicht, und jedes Programm, das ein gewoehnliches
+// Bedienelement benutzt, ist damit ohne eine einzige Zeile eigener
+// Arbeit zugaenglich. Das ist die ganze Entscheidung dieser Runde.
+//
+// WAS HIER IM KERNEL STEHT UND WAS NICHT:
+//
+//   HIER    die ABLAGE des Baumes (er ueberlebt den Prozess nicht, aber
+//           er ist von aussen lesbar, und das geht nur ueber den Kernel),
+//           die ZUGRIFFSREGEL (ein Baum enthaelt alles, was auf dem
+//           Schirm steht -- er darf nicht fuer jeden offen sein), der
+//           EREIGNISRING (Fokuswechsel, Wertaenderung, Umbau) und die
+//           systemweiten EINSTELLUNGEN (Skalierung, hoher Kontrast,
+//           Lupe, Einrasten).
+//   NICHT   was ein Knopf ist, wie er aussieht, wie eine Beschriftung
+//           zustande kommt. Das weiss die Widget-Schicht in Ring 3, und
+//           sie schickt das Ergebnis herueber.
+//
+// DIE SICHERHEITSENTSCHEIDUNG, im Klartext und ohne Beschoenigung:
+//
+//   1. DER BAUM IST NICHT OEFFENTLICH. Er traegt jede Beschriftung, jeden
+//      Listeneintrag, jeden Feldinhalt -- also alles, was auf dem Schirm
+//      steht. Wer ihn lesen darf, kann mitlesen, was der Benutzer tut.
+//      `ax_read` und `ax_event` verlangen deshalb ein Recht, das NUR die
+//      Kennung 0 vergeben kann (`ax_perm`), und das je Aufgabe gilt.
+//      Ohne dieses Recht kommt -EPERM zurueck, und der Versuch wird
+//      gezaehlt (`AI_DENIED`).
+//   2. EIN PASSWORTFELD GIBT SEINEN INHALT NIE HERAUS. Es meldet seine
+//      ROLLE (damit ein Bildschirmleser "Passwortfeld" sagen kann), seine
+//      Lage, seine Groesse und seine Beschriftung -- und sonst nichts.
+//      Der Wert wird beim EINTRAGEN auf null gezwungen, nicht erst beim
+//      Lesen; ein Inhalt, der nie in der Ablage steht, kann auch nicht
+//      durch einen Fehler im Leseweg herausfallen. Die Widget-Schicht
+//      schickt ihn ohnehin nicht -- das sind ZWEI Sperren, und beide
+//      werden gemessen (`AI_SECRETS`, `AI_LEAKS`).
+//   3. WER SCHREIBT, SCHREIBT NUR FUER SICH. `ax_push` traegt die Aufgabe
+//      des Aufrufers in jeden Knoten ein. Ein Prozess kann damit keine
+//      Knoten unter fremdem Namen ablegen.
+//
+// WAS DER BAUM FUER EINE SPRACHAUSGABE SCHON LIEFERT UND WAS FEHLT:
+// docs/A11Y.md, Abschnitt 6. Die Sprachausgabe selbst ist NICHT diese
+// Runde.
+//
+// SPEICHER: `kstate.AX_OFF`, 0x7A000..0x80000, sechs Seiten -- der
+// letzte freie Block in `kdata`:
+//
+//   +0x0000  die Skalare und die Rechtetafel
+//   +0x0200  der Ereignisring, 64 Eintraege zu 16 Oktetten
+//   +0x0600  die Knoten, MAX_NODES zu NODE_BYTES
+
+profile kernel
+
+import kstate
+
+export {
+    init, ready, clear_task,
+    push_begin, push_node, push_end,
+    node_count, node_word, node_name_at, node_role, node_flags,
+    node_win, node_parent, node_task, node_x, node_y, node_w, node_h,
+    node_value, node_addr,
+    ev_pop, ev_waiting,
+    allowed, allow, deny, granted,
+    info, set_cfg, scale, high, mag, sticky,
+    count_denied, count_read,
+    selftest, selftest_max,
+    NODE_BYTES, NAME_OFF, NAME_MAX, MAX_NODES, EV_BYTES,
+    R_NONE, R_WINDOW, R_LABEL, R_BUTTON, R_CHECK, R_ENTRY, R_PASSWORD,
+    R_LIST, R_TABLE, R_TAB, R_MENUBAR, R_CHOICE, R_SEPARATOR,
+    R_SCROLLBAR, R_MENU, R_DIALOG, R_ROLES,
+    S_ENABLED, S_FOCUSABLE, S_FOCUSED, S_SELECTED, S_HIDDEN, S_CHECKED,
+    S_PROTECTED,
+    AE_FOCUS, AE_VALUE, AE_TREE,
+    AI_COUNT, AI_GEN, AI_PUSHES, AI_READS, AI_DENIED, AI_SECRETS,
+    AI_LEAKS, AI_SCALE, AI_HIGH, AI_MAG, AI_STICKY, AI_EVENTS,
+    AI_EVDROP, AI_ON, AI_FIELDS,
+    C_SCALE, C_HIGH, C_MAG, C_STICKY, C_ON, C_FIELDS
+}
+
+// ------------------------------------------------------- die Zahlen
+
+// EIN KNOTEN, vierundsechzig Oktette. Drei Woerter Kopf und vierzig
+// Oktette Name. Die Packung steht hier UND in `kernel/user/wlib.fi`
+// (dort als `AX_*`), und `tools/a11y/felder.py` haelt beide gegeneinander
+// -- eine Packung, die an zwei Stellen steht, laeuft sonst auseinander.
+//
+//   +0   Rolle | Zustand << 8 | Fenster << 16 | Eltern << 24 | Aufgabe << 32
+//   +8   x | y << 16 | Breite << 32 | Hoehe << 48
+//   +16  der Wert
+//   +24  der zugaengliche Name, vierzig Oktette, nullterminiert
+const NODE_BYTES: u64 = 64
+const NAME_OFF: u64 = 24
+const NAME_MAX: u64 = 40
+const MAX_NODES: u64 = 256
+
+const NODES_OFF: u64 = 0x600
+
+// Der Ereignisring
+const EV_OFF: u64 = 0x200
+const EV_BYTES: u64 = 16
+const EV_SLOTS: u64 = 64
+
+// DIE ROLLEN. Sie sind das, was ein Bildschirmleser vorliest -- "Knopf
+// Speichern", "Kontrollkaestchen Haken, nicht angehakt". Sechzehn
+// Stueck, und keine davon ist ein Malbefehl: eine Rolle sagt, WAS ein
+// Ding ist, nicht wie es aussieht.
+const R_NONE: u64 = 0
+const R_WINDOW: u64 = 1 // Fenster
+const R_LABEL: u64 = 2 // Beschriftung
+const R_BUTTON: u64 = 3 // Knopf
+const R_CHECK: u64 = 4 // Kontrollkaestchen
+const R_ENTRY: u64 = 5 // Textfeld
+const R_PASSWORD: u64 = 6 // Passwortfeld -- gibt seinen Inhalt NIE heraus
+const R_LIST: u64 = 7 // Liste
+const R_TABLE: u64 = 8 // Tabelle
+const R_TAB: u64 = 9 // Reiter
+const R_MENUBAR: u64 = 10 // Menueleiste
+const R_CHOICE: u64 = 11 // Auswahlfeld
+const R_SEPARATOR: u64 = 12 // Trenner
+const R_SCROLLBAR: u64 = 13 // Bildlaufleiste
+const R_MENU: u64 = 14 // Menue
+const R_DIALOG: u64 = 15 // Dialog
+const R_ROLES: u64 = 16
+
+// DER ZUSTAND. Ein Bit je Aussage, damit ein Leser sie einzeln
+// vorlesen kann.
+const S_ENABLED: u64 = 1
+const S_FOCUSABLE: u64 = 2
+const S_FOCUSED: u64 = 4
+const S_SELECTED: u64 = 8
+const S_HIDDEN: u64 = 16
+const S_CHECKED: u64 = 32
+const S_PROTECTED: u64 = 64 // der Wert wird zurueckgehalten
+
+// Die Ereignisarten
+const AE_FOCUS: u64 = 1
+const AE_VALUE: u64 = 2
+const AE_TREE: u64 = 3
+
+// Die Skalare
+const A_READY: u64 = 0x000
+const A_COUNT: u64 = 0x008
+const A_GEN: u64 = 0x010
+const A_PUSHES: u64 = 0x018
+const A_READS: u64 = 0x020
+const A_DENIED: u64 = 0x028
+const A_SECRETS: u64 = 0x030
+const A_LEAKS: u64 = 0x038
+const A_EVHEAD: u64 = 0x040
+const A_EVTAIL: u64 = 0x048
+const A_EVENTS: u64 = 0x050
+const A_EVDROP: u64 = 0x058
+const A_SCALE: u64 = 0x060
+const A_HIGH: u64 = 0x068
+const A_MAG: u64 = 0x070
+const A_STICKY: u64 = 0x078
+const A_ON: u64 = 0x080
+const A_FILL: u64 = 0x088 // wie weit `push_node` schon geschrieben hat
+const A_PTASK: u64 = 0x090 // welche Aufgabe gerade eintraegt
+const A_PBASE: u64 = 0x098 // ab welchem Knoten ihre alten standen
+const A_PCOUNT: u64 = 0x0A0 // wie viele es waren
+
+// Die Rechtetafel: ein Wort je Aufgabe.
+const A_PERM: u64 = 0x100
+
+// Die Felder von `ax_info`
+const AI_COUNT: u64 = 0
+const AI_GEN: u64 = 1
+const AI_PUSHES: u64 = 2
+const AI_READS: u64 = 3
+const AI_DENIED: u64 = 4
+const AI_SECRETS: u64 = 5
+const AI_LEAKS: u64 = 6
+const AI_SCALE: u64 = 7
+const AI_HIGH: u64 = 8
+const AI_MAG: u64 = 9
+const AI_STICKY: u64 = 10
+const AI_EVENTS: u64 = 11
+const AI_EVDROP: u64 = 12
+const AI_ON: u64 = 13
+const AI_FIELDS: u64 = 14
+
+// Die Felder von `ax_set`
+const C_SCALE: u64 = 0
+const C_HIGH: u64 = 1
+const C_MAG: u64 = 2
+const C_STICKY: u64 = 3
+const C_ON: u64 = 4
+const C_FIELDS: u64 = 5
+
+fn base(state: u64) -> u64 {
+    return state + kstate.AX_OFF
+}
+
+fn gs(state: u64, off: u64) -> u64 {
+    return kstate.get(state, kstate.AX_OFF + off)
+}
+
+fn ss(state: u64, off: u64, v: u64) {
+    kstate.set(state, kstate.AX_OFF + off, v)
+}
+
+fn ready(state: u64) -> bool {
+    return gs(state, A_READY) != 0
+}
+
+// Die Grundeinstellung: die Schicht ist DA, aber sie traegt nichts ein,
+// solange sie nicht eingeschaltet ist. Ein Baum kostet je Umbau einen
+// Systemaufruf mit ein paar Kilooktett; ein System ohne Bildschirmleser
+// soll ihn nicht bezahlen. `a11y` auf der Kommandozeile schaltet ein,
+// `ax_set(C_ON, 1)` ebenfalls.
+fn init(state: u64, an: bool) -> bool {
+    var i: u64 = 0
+    while i < kstate.AX_MAX {
+        kstate.set8(base(state) + i, 0 as u8)
+        i = i + 1
+    }
+    ss(state, A_SCALE, 100)
+    if an {
+        ss(state, A_ON, 1)
+    }
+    ss(state, A_READY, 1)
+    return true
+}
+
+// ------------------------------------------------------ die Knoten
+
+fn node_addr(state: u64, n: u64) -> u64 {
+    return base(state) + NODES_OFF + n * NODE_BYTES
+}
+
+fn node_word(state: u64, n: u64, w: u64) -> u64 {
+    if n >= MAX_NODES || w >= 3 {
+        return 0
+    }
+    return kstate.get(state, kstate.AX_OFF + NODES_OFF + n * NODE_BYTES
+        + w * 8)
+}
+
+fn nw_set(state: u64, n: u64, w: u64, v: u64) {
+    kstate.set(state, kstate.AX_OFF + NODES_OFF + n * NODE_BYTES + w * 8, v)
+}
+
+fn node_count(state: u64) -> u64 {
+    return gs(state, A_COUNT)
+}
+
+fn node_role(state: u64, n: u64) -> u64 {
+    return node_word(state, n, 0) & 0xFF
+}
+
+fn node_flags(state: u64, n: u64) -> u64 {
+    return (node_word(state, n, 0) >> 8) & 0xFF
+}
+
+fn node_win(state: u64, n: u64) -> u64 {
+    return (node_word(state, n, 0) >> 16) & 0xFF
+}
+
+fn node_parent(state: u64, n: u64) -> u64 {
+    return (node_word(state, n, 0) >> 24) & 0xFF
+}
+
+fn node_task(state: u64, n: u64) -> u64 {
+    return (node_word(state, n, 0) >> 32) & 0xFF
+}
+
+fn node_x(state: u64, n: u64) -> u64 {
+    return node_word(state, n, 1) & 0xFFFF
+}
+
+fn node_y(state: u64, n: u64) -> u64 {
+    return (node_word(state, n, 1) >> 16) & 0xFFFF
+}
+
+fn node_w(state: u64, n: u64) -> u64 {
+    return (node_word(state, n, 1) >> 32) & 0xFFFF
+}
+
+fn node_h(state: u64, n: u64) -> u64 {
+    return (node_word(state, n, 1) >> 48) & 0xFFFF
+}
+
+fn node_value(state: u64, n: u64) -> u64 {
+    return node_word(state, n, 2)
+}
+
+fn node_name_at(state: u64, n: u64, k: u64) -> u64 {
+    if n >= MAX_NODES || k >= NAME_MAX {
+        return 0
+    }
+    return kstate.get8(node_addr(state, n) + NAME_OFF + k)
+}
+
+// ----------------------------------------------------- das Eintragen
+//
+// DREI SCHRITTE, UND SIE SIND DREI, WEIL DER BAUM EINES FENSTERS AM
+// STUECK GILT. Ein Prozess raeumt seine alten Knoten weg (`push_begin`),
+// traegt die neuen ein (`push_node` je Knoten) und schliesst ab
+// (`push_end`, das die Ereignisse aus dem Unterschied bildet). Zwischen
+// `begin` und `end` steht in der Ablage ein halber Baum -- deshalb
+// zaehlt `A_COUNT` erst in `push_end` hoch, und ein Leser sieht immer
+// einen VOLLSTAENDIGEN Stand.
+
+// Die Knoten einer Aufgabe herausnehmen und den Rest nach vorn ziehen.
+fn drop_task(state: u64, task: u64) -> u64 {
+    let n: u64 = gs(state, A_COUNT)
+    var lese: u64 = 0
+    var schreibe: u64 = 0
+    var raus: u64 = 0
+    while lese < n {
+        if node_task(state, lese) == task {
+            raus = raus + 1
+        } else {
+            if schreibe != lese {
+                var k: u64 = 0
+                while k < NODE_BYTES {
+                    kstate.set8(node_addr(state, schreibe) + k,
+                        kstate.get8(node_addr(state, lese) + k) as u8)
+                    k = k + 1
+                }
+            }
+            schreibe = schreibe + 1
+        }
+        lese = lese + 1
+    }
+    ss(state, A_COUNT, schreibe)
+    return raus
+}
+
+// Eine Aufgabe ist gegangen. `sched` ruft das beim Aufraeumen -- ein
+// Baum eines Prozesses, den es nicht mehr gibt, waere eine Auskunft
+// ueber ein Fenster, das nicht mehr auf dem Schirm steht.
+fn clear_task(state: u64, task: u64) {
+    if !ready(state) {
+        return
+    }
+    if drop_task(state, task) != 0 {
+        ss(state, A_GEN, gs(state, A_GEN) + 1)
+        ev_push(state, AE_TREE, 0, 0, gs(state, A_COUNT))
+    }
+    if task < kstate.MAX_TASKS {
+        ss(state, A_PERM + task * 8, 0)
+    }
+}
+
+// DIE ALTEN KNOTEN BLEIBEN NOCH STEHEN, bis `push_end` sie wegnimmt --
+// nur so lassen sich Fokus und Werte vergleichen und daraus Ereignisse
+// bilden. Sie stehen ab `A_PBASE`, `A_PCOUNT` Stueck; die neuen wachsen
+// ab `A_FILL` dahinter.
+fn push_begin(state: u64, task: u64) -> bool {
+    if !ready(state) || gs(state, A_ON) == 0 {
+        return false
+    }
+    // Erst die alten dieser Aufgabe nach HINTEN sortieren waere teuer;
+    // sie liegen ohnehin am Stueck, weil `push_end` immer alles einer
+    // Aufgabe zusammen ablegt. Also nur Anfang und Zahl merken.
+    let n: u64 = gs(state, A_COUNT)
+    var erste: u64 = n
+    var wie_viele: u64 = 0
+    var i: u64 = 0
+    while i < n {
+        if node_task(state, i) == task {
+            if wie_viele == 0 {
+                erste = i
+            }
+            wie_viele = wie_viele + 1
+        }
+        i = i + 1
+    }
+    ss(state, A_PTASK, task)
+    ss(state, A_PBASE, erste)
+    ss(state, A_PCOUNT, wie_viele)
+    ss(state, A_FILL, n)
+    return true
+}
+
+// Einen Knoten anhaengen. `w0`, `w1`, `w2` und der Name kommen aus
+// Ring 3 und werden HIER geprueft -- die Widget-Schicht ist
+// vertrauenswuerdiger Code im selben Prozess, aber sie ist Ring 3, und
+// ein Kernel, der Ring 3 glaubt, ist keiner.
+//
+// `namep` zeigt auf NAME_MAX Oktette IM KERNEL (`sys.fi` hat sie schon
+// hereingeholt).
+fn push_node(state: u64, task: u64, w0: u64, w1: u64, w2: u64,
+    namep: u64) -> u64 {
+    if !ready(state) || gs(state, A_ON) == 0 {
+        return 0
+    }
+    let n: u64 = gs(state, A_FILL)
+    if n >= MAX_NODES {
+        return 0
+    }
+    var rolle: u64 = w0 & 0xFF
+    if rolle >= R_ROLES {
+        rolle = R_NONE
+    }
+    var zustand: u64 = (w0 >> 8) & 0xFF
+    let fenster: u64 = (w0 >> 16) & 0xFF
+    let eltern: u64 = (w0 >> 24) & 0xFF
+    var wert: u64 = w2
+    // ------------------------------------------------------------
+    // DIE ERSTE DER ZWEI SPERREN VOR DEM PASSWORTFELD.
+    //
+    // Sie steht HIER, beim Eintragen, und nicht beim Lesen. Der
+    // Unterschied ist der ganze Punkt: ein Wert, der nie in der Ablage
+    // ankommt, kann auch dann nicht herausfallen, wenn der Leseweg
+    // spaeter einen Fehler bekommt. Die zweite Sperre steht in
+    // `kernel/user/wlib.fi` -- dort wird der Inhalt eines
+    // Passwortfeldes gar nicht erst abgeschickt.
+    //
+    // `A_LEAKS` zaehlt, wie oft ueberhaupt jemand mit einem Wert
+    // ankam. Die Zahl MUSS null bleiben; steht dort etwas anderes, hat
+    // die Widget-Schicht etwas geschickt, was sie nicht schicken darf,
+    // und der Testlauf faellt darueber.
+    if rolle == R_PASSWORD {
+        zustand = zustand | S_PROTECTED
+        if wert != 0 {
+            ss(state, A_LEAKS, gs(state, A_LEAKS) + 1)
+        }
+        wert = 0
+        ss(state, A_SECRETS, gs(state, A_SECRETS) + 1)
+    }
+    nw_set(state, n, 0, rolle | (zustand << 8) | (fenster << 16)
+        | (eltern << 24) | ((task & 0xFF) << 32))
+    nw_set(state, n, 1, w1)
+    nw_set(state, n, 2, wert)
+    var k: u64 = 0
+    while k < NAME_MAX {
+        var c: u64 = kstate.get8(namep + k)
+        if k + 1 == NAME_MAX {
+            c = 0
+        }
+        kstate.set8(node_addr(state, n) + NAME_OFF + k, c as u8)
+        k = k + 1
+    }
+    ss(state, A_FILL, n + 1)
+    return 1
+}
+
+// Der Vergleich mit dem alten Stand und dann das Wegnehmen der alten
+// Knoten. Die Ereignisse entstehen HIER und nicht in Ring 3 -- sie
+// sollen sagen, was in der ABLAGE steht, und nicht, was ein Programm
+// behauptet.
+fn push_end(state: u64, task: u64) -> u64 {
+    if !ready(state) || gs(state, A_ON) == 0 {
+        return 0
+    }
+    let alt0: u64 = gs(state, A_PBASE)
+    let altn: u64 = gs(state, A_PCOUNT)
+    let neu0: u64 = gs(state, A_COUNT)
+    let neun: u64 = gs(state, A_FILL) - neu0
+    // 1. Fokus- und Wertaenderungen, Knoten fuer Knoten.
+    var i: u64 = 0
+    while i < neun && i < altn {
+        let a: u64 = alt0 + i
+        let b: u64 = neu0 + i
+        let af: u64 = node_flags(state, a)
+        let bf: u64 = node_flags(state, b)
+        if (af & S_FOCUSED) == 0 && (bf & S_FOCUSED) != 0 {
+            ev_push(state, AE_FOCUS, node_win(state, b), i,
+                node_role(state, b))
+        }
+        if node_value(state, a) != node_value(state, b) {
+            ev_push(state, AE_VALUE, node_win(state, b), i,
+                node_value(state, b))
+        }
+        i = i + 1
+    }
+    // 2. Der Umbau: andere Zahl von Knoten heisst neues oder
+    //    geschlossenes Fenster, neuer Dialog, neues Menue.
+    if neun != altn {
+        ev_push(state, AE_TREE, 0, neun, gs(state, A_GEN) + 1)
+    }
+    // 3. Die alten hinaus, die neuen zusammenschieben.
+    var lese: u64 = 0
+    var schreibe: u64 = 0
+    let ganz: u64 = gs(state, A_FILL)
+    while lese < ganz {
+        var behalten: bool = true
+        if lese < neu0 && node_task(state, lese) == task {
+            behalten = false
+        }
+        if behalten {
+            if schreibe != lese {
+                var k: u64 = 0
+                while k < NODE_BYTES {
+                    kstate.set8(node_addr(state, schreibe) + k,
+                        kstate.get8(node_addr(state, lese) + k) as u8)
+                    k = k + 1
+                }
+            }
+            schreibe = schreibe + 1
+        }
+        lese = lese + 1
+    }
+    ss(state, A_COUNT, schreibe)
+    ss(state, A_FILL, schreibe)
+    ss(state, A_GEN, gs(state, A_GEN) + 1)
+    ss(state, A_PUSHES, gs(state, A_PUSHES) + 1)
+    return neun
+}
+
+// ------------------------------------------------------ die Ereignisse
+
+fn ev_addr(state: u64, k: u64) -> u64 {
+    return base(state) + EV_OFF + (k % EV_SLOTS) * EV_BYTES
+}
+
+fn ev_push(state: u64, typ: u64, win: u64, node: u64, wert: u64) {
+    let kopf: u64 = gs(state, A_EVHEAD)
+    let schwanz: u64 = gs(state, A_EVTAIL)
+    if kopf - schwanz >= EV_SLOTS {
+        // Voll. Der aelteste faellt, und das wird GEZAEHLT -- ein
+        // stiller Verlust waere ein Bildschirmleser, der eine
+        // Fokusaenderung nie erfaehrt und niemandem sagt, warum.
+        ss(state, A_EVTAIL, schwanz + 1)
+        ss(state, A_EVDROP, gs(state, A_EVDROP) + 1)
+    }
+    __mmio_write64((ev_addr(state, kopf)) as *mut u64,
+        typ | (win << 32) | (node << 48))
+    __mmio_write64((ev_addr(state, kopf) + 8) as *mut u64, wert)
+    ss(state, A_EVHEAD, kopf + 1)
+    ss(state, A_EVENTS, gs(state, A_EVENTS) + 1)
+}
+
+fn ev_waiting(state: u64) -> u64 {
+    return gs(state, A_EVHEAD) - gs(state, A_EVTAIL)
+}
+
+// Einen Eintrag herausnehmen. Er wird nach `dst` (im Kernel) gelegt,
+// zwei Woerter. Rueckgabe 1, wenn einer da war.
+fn ev_pop(state: u64, dst: u64) -> u64 {
+    let schwanz: u64 = gs(state, A_EVTAIL)
+    if gs(state, A_EVHEAD) == schwanz {
+        return 0
+    }
+    __mmio_write64((dst) as *mut u64,
+        __mmio_read64((ev_addr(state, schwanz)) as *mut u64))
+    __mmio_write64((dst + 8) as *mut u64,
+        __mmio_read64((ev_addr(state, schwanz) + 8) as *mut u64))
+    ss(state, A_EVTAIL, schwanz + 1)
+    return 1
+}
+
+// ---------------------------------------------------------- das Recht
+
+fn allowed(state: u64, task: u64) -> bool {
+    if task >= kstate.MAX_TASKS {
+        return false
+    }
+    return gs(state, A_PERM + task * 8) != 0
+}
+
+fn allow(state: u64, task: u64) {
+    if task >= kstate.MAX_TASKS {
+        return
+    }
+    ss(state, A_PERM + task * 8, 1)
+}
+
+fn deny(state: u64, task: u64) {
+    if task >= kstate.MAX_TASKS {
+        return
+    }
+    ss(state, A_PERM + task * 8, 0)
+}
+
+fn granted(state: u64) -> u64 {
+    var n: u64 = 0
+    var i: u64 = 0
+    while i < kstate.MAX_TASKS {
+        if gs(state, A_PERM + i * 8) != 0 {
+            n = n + 1
+        }
+        i = i + 1
+    }
+    return n
+}
+
+fn count_denied(state: u64) {
+    ss(state, A_DENIED, gs(state, A_DENIED) + 1)
+}
+
+// ---------------------------------------------------- die Einstellungen
+
+fn scale(state: u64) -> u64 {
+    let s: u64 = gs(state, A_SCALE)
+    if s < 100 {
+        return 100
+    }
+    return s
+}
+
+fn high(state: u64) -> bool {
+    return gs(state, A_HIGH) != 0
+}
+
+fn mag(state: u64) -> bool {
+    return gs(state, A_MAG) != 0
+}
+
+fn sticky(state: u64) -> bool {
+    return gs(state, A_STICKY) != 0
+}
+
+fn info(state: u64, feld: u64) -> u64 {
+    if feld == AI_COUNT {
+        return gs(state, A_COUNT)
+    }
+    if feld == AI_GEN {
+        return gs(state, A_GEN)
+    }
+    if feld == AI_PUSHES {
+        return gs(state, A_PUSHES)
+    }
+    if feld == AI_READS {
+        return gs(state, A_READS)
+    }
+    if feld == AI_DENIED {
+        return gs(state, A_DENIED)
+    }
+    if feld == AI_SECRETS {
+        return gs(state, A_SECRETS)
+    }
+    if feld == AI_LEAKS {
+        return gs(state, A_LEAKS)
+    }
+    if feld == AI_SCALE {
+        return scale(state)
+    }
+    if feld == AI_HIGH {
+        return gs(state, A_HIGH)
+    }
+    if feld == AI_MAG {
+        return gs(state, A_MAG)
+    }
+    if feld == AI_STICKY {
+        return gs(state, A_STICKY)
+    }
+    if feld == AI_EVENTS {
+        return gs(state, A_EVENTS)
+    }
+    if feld == AI_EVDROP {
+        return gs(state, A_EVDROP)
+    }
+    if feld == AI_ON {
+        return gs(state, A_ON)
+    }
+    return 0
+}
+
+fn count_read(state: u64) {
+    ss(state, A_READS, gs(state, A_READS) + 1)
+}
+
+fn set_cfg(state: u64, feld: u64, wert: u64) -> bool {
+    if feld == C_SCALE {
+        // Unter 100 wird nichts kleiner: eine Oberflaeche, die man
+        // schrumpfen kann, ist keine Barrierefreiheit, und die
+        // Anordnung dieser Bibliothek rechnet in ganzen Bildpunkten.
+        // Ueber 300 waere ein Knopf breiter als der Schirm.
+        if wert < 100 || wert > 300 {
+            return false
+        }
+        ss(state, A_SCALE, wert)
+        return true
+    }
+    if feld == C_HIGH {
+        ss(state, A_HIGH, wert & 1)
+        return true
+    }
+    if feld == C_MAG {
+        ss(state, A_MAG, wert & 1)
+        return true
+    }
+    if feld == C_STICKY {
+        ss(state, A_STICKY, wert & 1)
+        return true
+    }
+    if feld == C_ON {
+        ss(state, A_ON, wert & 1)
+        return true
+    }
+    return false
+}
+
+// ------------------------------------------------- was es selbst weiss
+//
+// Neun Zusagen. Sie pruefen die Rechnungen, die sonst niemand sieht --
+// die Packung des Knotens, die Grenzen der Ablage und die Sperre vor
+// dem Passwortfeld.
+fn selftest(state: u64) -> u64 {
+    var gut: u64 = 0
+    // 1. Die Knoten passen in den Vorrat, mit dem Ereignisring davor.
+    if NODES_OFF + MAX_NODES * NODE_BYTES <= kstate.AX_MAX {
+        gut = gut + 1
+    }
+    // 2. Der Name passt in den Knoten.
+    if NAME_OFF + NAME_MAX <= NODE_BYTES {
+        gut = gut + 1
+    }
+    // 3. Der Ereignisring liegt vor den Knoten und ueberschneidet sie
+    //    nicht.
+    if EV_OFF + EV_SLOTS * EV_BYTES <= NODES_OFF {
+        gut = gut + 1
+    }
+    // 4. Die Rechtetafel liegt in den Skalaren und reicht fuer alle
+    //    Aufgaben.
+    if A_PERM + kstate.MAX_TASKS * 8 <= EV_OFF {
+        gut = gut + 1
+    }
+    // 5. Ein Knoten, den es nicht gibt, gibt keine Auskunft.
+    if node_word(state, MAX_NODES, 0) == 0 {
+        gut = gut + 1
+    }
+    // 6. Eine Aufgabe, die es nicht gibt, hat kein Recht.
+    if !allowed(state, kstate.MAX_TASKS) {
+        gut = gut + 1
+    }
+    // 7. Die Skalierung faellt nie unter 100.
+    if scale(state) >= 100 {
+        gut = gut + 1
+    }
+    // 8. Eine Skalierung, die es nicht geben darf, wird abgelehnt.
+    if !set_cfg(state, C_SCALE, 50) && !set_cfg(state, C_SCALE, 400) {
+        gut = gut + 1
+    }
+    // 9. Und die sechs Seiten liegen dort, wo die Karte sie fuehrt.
+    if kstate.AX_MAX == 0x6000 {
+        gut = gut + 1
+    }
+    return gut
+}
+
+fn selftest_max() -> u64 {
+    return 9
+}

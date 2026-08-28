@@ -71,6 +71,7 @@ import utf8
 import ps2m
 import arch.arch
 import tile
+import ax
 
 export {
     init, ready, compose, damage, damage_all, dirty_x0, dirty_y0,
@@ -93,6 +94,8 @@ export {
     bind_tty, key_tty, tty_of, NO_TTY,
     poll, composites, blits, pixels, last_us, cursor_on, set_cursor,
     shape, set_shape,
+    mag_x, mag_y, mag_w, mag_h, mag_src, mag_factor, mag_frames,
+    MAG_W, MAG_H, MAG_F,
     downs, moves_seen, hits_seen, win_keys,
     set_fonts, font_ui, font_mono, px_ui, px_mono,
     selftest, selftest_max,
@@ -222,6 +225,8 @@ const S_FONT_MONO: u64 = 0x0C0
 const S_PX_UI: u64 = 0x0C8
 const S_PX_MONO: u64 = 0x0D0
 const S_LASTUS: u64 = 0x0D8
+// RUNDE A11Y: wie oft die Lupentafel gemalt wurde.
+const S_MAGN: u64 = 0x3F8
 const S_KEYS: u64 = 0x0E0
 const S_EVDROP: u64 = 0x0E8
 const S_CURSAVE: u64 = 0x0F0 // Rahmen fuer den Zeigergrund
@@ -1877,6 +1882,16 @@ fn compose(state: u64) -> u64 {
     if gs(state, S_DON) == 0 {
         return 0
     }
+    // RUNDE A11Y: MIT DER LUPE GEHOERT IHRE TAFEL IMMER ZUM SCHMUTZIGEN
+    // BEREICH. Der Ausschnitt haengt am Zeiger, und der Zeiger bewegt
+    // sich ueber Stellen, die mit der Tafel nichts zu tun haben -- ohne
+    // diese zwei Zeilen wuerde die Tafel gemalt und dann nicht
+    // uebertragen, weil `fb.dirty` nur die Zeilen des gemeldeten
+    // Bereichs kennt. Im Bild sah man eine Lupe, die stehenblieb.
+    if ax.mag(state) {
+        damage(state, mag_x(state) as i64, mag_y(state) as i64,
+            (mag_x(state) + MAG_W) as i64, (mag_y(state) + MAG_H) as i64)
+    }
     let x0: u64 = gs(state, S_DX0)
     let y0: u64 = gs(state, S_DY0)
     let x1: u64 = gs(state, S_DX1)
@@ -1918,6 +1933,20 @@ fn compose(state: u64) -> u64 {
     // 3. der Zeiger, ganz oben
     if gs(state, S_CURON) != 0 {
         paint_cursor(state, x0, y0, x1, y1)
+    }
+    // 4. RUNDE A11Y: DIE BILDSCHIRMLUPE, GANZ ZUOBERST.
+    //
+    // Sie kommt NACH dem Zeiger, damit der Zeiger im vergroesserten
+    // Ausschnitt mit drin ist -- eine Lupe, in der man den Zeiger nicht
+    // sieht, hilft beim Zielen nicht.
+    //
+    // Sie liest aus DEMSELBEN Puffer, in den eben gemalt wurde
+    // (`fb.get_pixel` liest aus dem Zeichenziel). Der Ausschnitt um den
+    // Zeiger ist deshalb der fertig zusammengesetzte Bildinhalt und
+    // nicht ein Fensterpuffer -- eine Lupe ueber einem einzelnen
+    // Fenster waere keine.
+    if ax.mag(state) {
+        paint_mag(state)
     }
     fb.dirty(state, y0, y1)
     fb.flush(state)
@@ -2214,6 +2243,144 @@ fn fb_glyph(state: u64, slot: u64, x: i64, y: i64, color: u64,
         }
         r = r + 1
     }
+}
+
+// ==================================================================
+// RUNDE A11Y -- DIE BILDSCHIRMLUPE
+//
+// EIN AUSSCHNITT UM DEN ZEIGER, VERGROESSERT IN EINE FESTE TAFEL. Nicht
+// der ganze Schirm vergroessert: das waere die andere Bauart (macOS'
+// Zoom), sie verlangt eine zweite Zusammensetzung des GANZEN Bildes je
+// Bewegung, und sie nimmt dem Benutzer den Ueberblick. Eine Tafel
+// zeigt beides gleichzeitig -- die Umgebung in Originalgroesse und die
+// Stelle unter dem Zeiger gross.
+//
+// DIE TAFEL LIEGT OBEN RECHTS und weicht nach oben LINKS aus, sobald
+// der Zeiger ihr zu nahe kommt. Ohne dieses Ausweichen laege der
+// Ausschnitt in der Tafel selbst: die Lupe zeigte sich selbst, immer
+// kleiner, und das Bild waere eine Spirale statt einer Vergroesserung.
+// Die Regel ist ABSICHTLICH hart und nicht weich -- ein Testlaeufer
+// muss ausrechnen koennen, wo die Tafel steht.
+const MAG_W: u64 = 200 // die Tafel
+const MAG_H: u64 = 150
+const MAG_F: u64 = 2 // die Vergroesserung
+const MAG_PAD: u64 = 8 // wie nahe der Zeiger kommen darf
+
+fn mag_factor() -> u64 {
+    return MAG_F
+}
+
+fn mag_w() -> u64 {
+    return MAG_W
+}
+
+fn mag_h() -> u64 {
+    return MAG_H
+}
+
+fn mag_frames(state: u64) -> u64 {
+    return gs(state, S_MAGN)
+}
+
+// Wo die Tafel steht. Rechts oben, ausser der Zeiger ist dort.
+fn mag_x(state: u64) -> u64 {
+    let sw: u64 = fb.width(state)
+    if sw <= MAG_W {
+        return 0
+    }
+    let cx: u64 = gs(state, S_CURX)
+    let cy: u64 = gs(state, S_CURY)
+    if cx + MAG_PAD >= sw - MAG_W && cy <= MAG_H + MAG_PAD {
+        return 0
+    }
+    return sw - MAG_W
+}
+
+fn mag_y(state: u64) -> u64 {
+    return 0
+}
+
+// Die linke obere Ecke des AUSSCHNITTS, den die Tafel zeigt. Sie steht
+// hier als Funktion und nicht als Rechnung im Malen, weil der
+// Testlaeufer genau diese Zahl braucht, um im Bildschirmfoto Quelle und
+// Ziel gegeneinander zu halten. Was zwei Stellen ausrechnen, laeuft
+// auseinander; was eine ausrechnet, nicht.
+//
+// `k` ist 0 fuer x und 1 fuer y.
+fn mag_src(state: u64, k: u64) -> u64 {
+    let sw: u64 = fb.width(state)
+    let sh: u64 = fb.height(state)
+    let qw: u64 = MAG_W / MAG_F
+    let qh: u64 = MAG_H / MAG_F
+    if k == 0 {
+        let cx: u64 = gs(state, S_CURX)
+        if cx < qw / 2 {
+            return 0
+        }
+        if cx + qw / 2 >= sw {
+            if sw <= qw {
+                return 0
+            }
+            return sw - qw
+        }
+        return cx - qw / 2
+    }
+    let cy: u64 = gs(state, S_CURY)
+    if cy < qh / 2 {
+        return 0
+    }
+    if cy + qh / 2 >= sh {
+        if sh <= qh {
+            return 0
+        }
+        return sh - qh
+    }
+    return cy - qh / 2
+}
+
+fn paint_mag(state: u64) {
+    let sw: u64 = fb.width(state)
+    let sh: u64 = fb.height(state)
+    if sw < MAG_W || sh < MAG_H {
+        return
+    }
+    let px: u64 = mag_x(state)
+    let py: u64 = mag_y(state)
+    let sx: u64 = mag_src(state, 0)
+    let sy: u64 = mag_src(state, 1)
+    // ERST LESEN, DANN SCHREIBEN, ZEILE FUER ZEILE. Quelle und Ziel
+    // liegen im selben Puffer; wer Bildpunkt fuer Bildpunkt liest und
+    // schreibt und dabei ueber die Tafel laeuft, liest zurueck, was er
+    // eben geschrieben hat. Die Ausweichregel oben verhindert die
+    // Ueberschneidung -- diese Reihenfolge macht sie unnoetig zu
+    // beweisen.
+    var r: u64 = 0
+    while r < MAG_H {
+        var c: u64 = 0
+        while c < MAG_W {
+            let v: u64 = fb.get_pixel(state, sx + c / MAG_F,
+                sy + r / MAG_F)
+            fb.pixel(state, px + c, py + r, v)
+            c = c + 1
+        }
+        r = r + 1
+    }
+    // Ein Rahmen, damit die Tafel als Tafel erkennbar ist -- und damit
+    // ein Bildschirmfoto sie FINDEN kann, ohne den Inhalt zu kennen.
+    let rand: u64 = rgb24(state, 0xFF0000)
+    var k: u64 = 0
+    while k < MAG_W {
+        fb.pixel(state, px + k, py, rand)
+        fb.pixel(state, px + k, py + MAG_H - 1, rand)
+        k = k + 1
+    }
+    k = 0
+    while k < MAG_H {
+        fb.pixel(state, px, py + k, rand)
+        fb.pixel(state, px + MAG_W - 1, py + k, rand)
+        k = k + 1
+    }
+    ss(state, S_MAGN, gs(state, S_MAGN) + 1)
 }
 
 fn paint_cursor(state: u64, cx0: u64, cy0: u64, cx1: u64, cy1: u64) {
