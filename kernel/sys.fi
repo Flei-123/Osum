@@ -54,6 +54,7 @@ import arch.x86_64.hv
 import arch.x86_64.guard
 import wm
 import wig
+import ax
 import tile
 import nidx
 import ps2m
@@ -117,6 +118,8 @@ export {
     SYS_OSUM_TILEGET, SYS_OSUM_TILEDO, SYS_OSUM_TILECONF,
     SYS_OSUM_TILEBIND,
     SYS_OSUM_PMON,
+    AX_BASE, AX_PUSH, AX_READ, AX_EVENT, AX_PERM, AX_INFO, AX_SET,
+    AX_MAXNR, AP_MINE, AP_GRANT, AP_REVOKE, AP_COUNT,
     CAP_BASE, CAP_VERSION, CAP_READ, CAP_WRITE, CAP_CLOSE, CAP_DUP,
     CAP_INSPECT, CAP_TRANSFER, CAP_COUNT, CAP_MAXNR,
     SYS_SOCKET, SYS_CONNECT, SYS_ACCEPT, SYS_SENDTO, SYS_RECVFROM,
@@ -532,6 +535,47 @@ const WIG_SCAN: u64 = 1807 // (zeiger auf lauf, ziel, saetze) -> saetze
 const WIG_JRNL: u64 = 1808 // (ab nummer, ziel, saetze) -> saetze
 const WIG_IDXINFO: u64 = 1809 // (was) -> Zahl
 const WIG_MAXNR: u64 = 1809
+
+// ====================================================== RUNDE A11Y
+//
+// SECHS NUMMERN, 1960 BIS 1965, FUER DEN BEDIENELEMENT-BAUM. Sie liegen
+// bei den POSIX-Nummern und nicht in der nativen ABI ab 2100, aus
+// demselben Grund wie die WIG-Nummern: sie verteilen keine Autoritaet.
+// Das RECHT, den Baum zu lesen, ist kein Handle, sondern eine
+// ausdrueckliche Freigabe je Aufgabe (AX_PERM) -- ein Handle waere hier
+// die falsche Form, weil der Leser das Fenster gar nicht kennt, das er
+// liest, und weil die Freigabe wieder ENTZOGEN werden koennen muss,
+// ohne dass ein Prozess sein Handle zurueckgeben will.
+//
+// WER DARF WAS -- die Sicherheitsentscheidung dieser Runde in sechs
+// Zeilen:
+//
+//   AX_PUSH   jeder Prozess, aber NUR fuer sich selbst. Die Aufgabe
+//             wird vom Kernel eingetragen, nicht vom Aufrufer genannt.
+//   AX_READ   nur mit Freigabe. Der Baum traegt jede Beschriftung und
+//             jeden Listeneintrag, die auf dem Schirm stehen.
+//   AX_EVENT  ebenso -- ein Fokuswechsel verraet, wohin getippt wird.
+//   AX_PERM   Vergeben und Entziehen nur mit der Kennung 0. Ein
+//             Prozess darf sich SELBST fragen, ob er darf (AP_MINE);
+//             das ist keine Auskunft ueber andere.
+//   AX_INFO   offen. Zahlen ueber den Baum, kein Inhalt aus ihm.
+//   AX_SET    nur mit der Kennung 0: Skalierung und Kontrast gelten
+//             systemweit, und ein beliebiges Programm darf nicht die
+//             Oberflaeche aller anderen umstellen.
+const AX_BASE: u64 = 1960
+const AX_PUSH: u64 = 1960 // (zeiger, anzahl, 0) -> eingetragene Knoten
+const AX_READ: u64 = 1961 // (nr, ziel, len) -> Oktette oder -E
+const AX_EVENT: u64 = 1962 // (ziel, len) -> 16 oder 0 oder -E
+const AX_PERM: u64 = 1963 // (was, aufgabe) -> 0/1 oder -E
+const AX_INFO: u64 = 1964 // (feld) -> Zahl
+const AX_SET: u64 = 1965 // (feld, wert) -> 0 oder -E
+const AX_MAXNR: u64 = 1965
+
+// Was AX_PERM tut
+const AP_MINE: u64 = 0 // darf ICH? -- jeder darf fragen
+const AP_GRANT: u64 = 1 // Aufgabe freigeben -- nur Kennung 0
+const AP_REVOKE: u64 = 2 // Freigabe entziehen -- nur Kennung 0
+const AP_COUNT: u64 = 3 // wie viele Aufgaben freigegeben sind
 
 // Was WIG_IDXINFO beantwortet.
 const WX_INODES: u64 = 0 // wie viele Inodes die Tabelle hat
@@ -1951,6 +1995,12 @@ fn dispatch(number: u64, frame: u64, state: u64) -> u64 {
     if number >= WIG_BASE && number <= WIG_MAXNR {
         return wig_call(state, me, number, a0, a1, a2, a3, a4)
     }
+    // RUNDE A11Y: der Bedienelement-Baum. Eigene Funktion, aus demselben
+    // Grund wie `wig_call`: der Rahmen von `dispatch` ist ohnehin der
+    // groesste dieses Kernels.
+    if number >= AX_BASE && number <= AX_MAXNR {
+        return ax_call(state, me, number, a0, a1, a2)
+    }
     // RUNDE K18: die Energieschicht.
     if number >= SYS_OSUM_PWRGET && number <= SYS_OSUM_PWRSTR {
         return pwr_call(state, me, number, a0, a1, a2)
@@ -2018,6 +2068,12 @@ fn dispatch(number: u64, frame: u64, state: u64) -> u64 {
     // RUNDE K15: die Naht zur Widget-Bibliothek.
     if number >= WIG_BASE && number <= WIG_MAXNR {
         return wig_call(state, me, number, a0, a1, a2, a3, a4)
+    }
+    // RUNDE A11Y: der Bedienelement-Baum. Eigene Funktion, aus demselben
+    // Grund wie `wig_call`: der Rahmen von `dispatch` ist ohnehin der
+    // groesste dieses Kernels.
+    if number >= AX_BASE && number <= AX_MAXNR {
+        return ax_call(state, me, number, a0, a1, a2)
     }
     if is_k13(number) {
         return k13_call(state, me, number, a0, a1, a2, a3)
@@ -8810,6 +8866,168 @@ fn do_jrnl(state: u64, me: u64, from: u64, dst: u64, max: u64) -> u64 {
 // genau das, was eine Zwischenablage ist. Wer das nicht will, braucht
 // einen Zwischenablagedienst mit eigenen Handles -- das ist eine Runde
 // fuer sich und steht so in docs/ROUNDK15.md.
+// ====================================================== RUNDE A11Y
+//
+// DIE SECHS AUFRUFE DES BEDIENELEMENT-BAUMES. Jeder pruefpflichtige
+// Schritt steht hier und nicht in `ax.fi`: dort liegt der Zustand,
+// hier liegt die Grenze zwischen den Ringen.
+fn ax_call(state: u64, me: u64, number: u64, a0: u64, a1: u64,
+    a2: u64) -> u64 {
+    if !ax.ready(state) {
+        return neg(errno.E_NODEV)
+    }
+    if number == AX_INFO {
+        return ax.info(state, a0)
+    }
+    if number == AX_PUSH {
+        return do_axpush(state, me, a0, a1)
+    }
+    if number == AX_READ {
+        return do_axread(state, me, a0, a1, a2)
+    }
+    if number == AX_EVENT {
+        return do_axevent(state, me, a0, a1)
+    }
+    if number == AX_PERM {
+        return do_axperm(state, me, a0, a1)
+    }
+    if number == AX_SET {
+        // SYSTEMWEIT HEISST: NICHT JEDER. Die Skalierung, der Kontrast,
+        // die Lupe und die Einrastfunktion gelten fuer ALLE Fenster.
+        // Ein beliebiges Programm, das sie umstellen darf, kann die
+        // Oberflaeche jedes anderen unbrauchbar machen.
+        if perm.euid(state, me) != 0 {
+            return neg(errno.E_PERM)
+        }
+        if !ax.set_cfg(state, a0, a1) {
+            return neg(errno.E_INVAL)
+        }
+        return 0
+    }
+    return neg(errno.E_NOSYS)
+}
+
+// EIN KNOTEN AUS RING 3. Er kommt als NODE_BYTES Oktette in genau der
+// Packung, in der er in der Ablage steht -- ein Satz je Aufruf waere
+// sechs Register und eine zweite Packung, die auseinanderlaufen kann.
+//
+// `anzahl` Saetze am Stueck, und der ganze Block wird EINMAL
+// hereingeholt. Der Zwischenspeicher ist `kstate.BLOCK_OFF` (4096
+// Oktette), also gehen 64 Knoten je Aufruf; wer mehr hat, ruft
+// mehrmals -- der erste Aufruf mit `a1 != 0` faengt an, der Abschluss
+// kommt mit `anzahl == 0`.
+fn do_axpush(state: u64, me: u64, ptr: u64, anzahl: u64) -> u64 {
+    let block: u64 = state + kstate.BLOCK_OFF
+    let max: u64 = kstate.BLOCK_MAX / ax.NODE_BYTES
+    if anzahl == 0 {
+        // Der Abschluss. Er bildet die Ereignisse aus dem Unterschied
+        // und schaltet den neuen Stand scharf.
+        return ax.push_end(state, me)
+    }
+    if anzahl > max {
+        return neg(errno.E_INVAL)
+    }
+    if ptr == 0 {
+        // Der Anfang: alte Knoten dieser Aufgabe merken, Zaehler auf
+        // null. `anzahl` ist hier nur "nicht null".
+        if !ax.push_begin(state, me) {
+            return neg(errno.E_NODEV)
+        }
+        return 0
+    }
+    if !copy_in(state, me, block, ptr, anzahl * ax.NODE_BYTES) {
+        return neg(errno.E_FAULT)
+    }
+    var n: u64 = 0
+    var gut: u64 = 0
+    while n < anzahl {
+        let s: u64 = block + n * ax.NODE_BYTES
+        gut = gut + ax.push_node(state, me,
+            __mmio_read64((s) as *mut u64),
+            __mmio_read64((s + 8) as *mut u64),
+            __mmio_read64((s + 16) as *mut u64),
+            s + ax.NAME_OFF)
+        n = n + 1
+    }
+    return gut
+}
+
+// DER LESEWEG, UND HIER STEHT DIE SPERRE.
+//
+// Ohne Freigabe: -EPERM, und der Versuch wird gezaehlt. Das ist kein
+// Schoenheitsfehler des Entwurfs, sondern seine Mitte: der Baum eines
+// Fensters ist ALLES, was darin steht.
+fn do_axread(state: u64, me: u64, nr: u64, ziel: u64, len: u64) -> u64 {
+    if !ax.allowed(state, me) {
+        ax.count_denied(state)
+        return neg(errno.E_PERM)
+    }
+    if nr >= ax.node_count(state) {
+        return neg(errno.E_INVAL)
+    }
+    if len < ax.NODE_BYTES {
+        return neg(errno.E_INVAL)
+    }
+    if !copy_out(state, me, ziel, ax.node_addr(state, nr),
+        ax.NODE_BYTES) {
+        return neg(errno.E_FAULT)
+    }
+    ax.count_read(state)
+    return ax.NODE_BYTES
+}
+
+fn do_axevent(state: u64, me: u64, ziel: u64, len: u64) -> u64 {
+    if !ax.allowed(state, me) {
+        ax.count_denied(state)
+        return neg(errno.E_PERM)
+    }
+    if len < ax.EV_BYTES {
+        return neg(errno.E_INVAL)
+    }
+    let block: u64 = state + kstate.BLOCK_OFF
+    if ax.ev_pop(state, block) == 0 {
+        return 0
+    }
+    if !copy_out(state, me, ziel, block, ax.EV_BYTES) {
+        return neg(errno.E_FAULT)
+    }
+    return ax.EV_BYTES
+}
+
+// DAS RECHT VERGEBEN. Nur die Kennung 0, und die Entscheidung steht in
+// docs/A11Y.md: ein Bildschirmleser ist ein Programm, das ALLES
+// mitliest: jede Beschriftung, jeden Listeneintrag, jeden Feldinhalt
+// ausser dem eines Passwortfeldes. Wer das darf, muss es ausdruecklich
+// bekommen haben. Ein Paket, das den Baum braucht, traegt das im
+// INFO-Satz als Recht `a11y` ein; die Freigabe erteilt der, der das
+// Paket einrichtet -- und das ist die Kennung 0.
+fn do_axperm(state: u64, me: u64, was: u64, task: u64) -> u64 {
+    if was == AP_MINE {
+        if ax.allowed(state, me) {
+            return 1
+        }
+        return 0
+    }
+    if was == AP_COUNT {
+        return ax.granted(state)
+    }
+    if perm.euid(state, me) != 0 {
+        return neg(errno.E_PERM)
+    }
+    if task >= kstate.MAX_TASKS {
+        return neg(errno.E_INVAL)
+    }
+    if was == AP_GRANT {
+        ax.allow(state, task)
+        return 1
+    }
+    if was == AP_REVOKE {
+        ax.deny(state, task)
+        return 0
+    }
+    return neg(errno.E_INVAL)
+}
+
 fn wig_call(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64,
     a3: u64, a4: u64) -> u64 {
     // DIE DREI DES ZWEITEN NACHTRAGS STEHEN VOR DER PRUEFUNG AUF EINE

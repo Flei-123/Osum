@@ -60,6 +60,7 @@ import ps2m
 import wm
 import tile
 import wig
+import ax
 import nidx
 import arch.x86_64.apic
 import arch.x86_64.hv
@@ -217,6 +218,19 @@ fn kernel_main(mbi: u64, vectors: u64, state: u64, kernel_end: u64,
     // two bits left and four rounds are running beside this one.
     netmon.parse(state, cmd)
     pmon.parse(state, cmd)
+    // RUNDE A11Y: DER BEDIENELEMENT-BAUM STEHT VOR ALLEM ANDEREN.
+    //
+    // Er kommt hier und nicht bei `wig.init`, und der Grund ist die
+    // Entscheidung dieser Runde: die Barrierefreiheit ist keine
+    // Eigenschaft der Oberflaeche, die man dazuschaltet, sondern eine
+    // Schicht, die es GIBT. Die Einstellungen (Skalierung, Kontrast,
+    // Einrasten) werden von Programmen gelesen, die gar kein Fenster
+    // haben, und `ax_info` muss auch dann antworten, wenn dieser Lauf
+    // ohne Bildschirm faehrt. `a11ynotree` schaltet den BAUM ab -- die
+    // Gegenprobe --, die Schicht bleibt.
+    ax.init(state, kstate.mode_on(state, kstate.M_A11Y)
+        && !kstate.mode_on(state, kstate.M_A11YNOTREE))
+    a11y_stage(state, cmd)
 
     // ROUND K9. Die Uhr wird gelesen, BEVOR irgendetwas anderes Zeit
     // braucht: TIME_BOOT und TIME_TSC0 muessen aus demselben Augenblick
@@ -3714,6 +3728,47 @@ fn mode_of(state: u64, cmd: u64) {
     if find(cmd, (&wsp[0]) as u64, 11) != 0 {
         kstate.mode_add(state, kstate.M_WIGSPEICHER)
     }
+    // RUNDE A11Y. Acht Woerter und eine Zahl. `a11ynotree` ist die
+    // Gegenprobe zum Baum, `a11ygrant` die zur Sicherheitsentscheidung:
+    // ohne dieses Wort bekommt der Leser -EPERM, und jede Zusage ueber
+    // den Baum muss damit einbrechen.
+    //
+    // DIE REIHENFOLGE IST WICHTIG: `a11y` steckt als Anfang in jedem der
+    // anderen Woerter. Wer `a11ymag` schreibt, hat damit auch `a11y`
+    // gesagt -- und das ist gewollt: eine Lupe ohne die Schicht
+    // darunter waere ein Schalter, der nichts tut.
+    var ay0: [u8; 5] = "a11y\0"
+    var ay1: [u8; 11] = "a11ynotree\0"
+    var ay2: [u8; 8] = "a11ymag\0"
+    var ay3: [u8; 11] = "a11ysticky\0"
+    var ay4: [u8; 9] = "a11yhigh\0"
+    var ay5: [u8; 9] = "a11yread\0"
+    var ay6: [u8; 10] = "a11ygrant\0"
+    var ay7: [u8; 9] = "a11ykeys\0"
+    if find(cmd, (&ay0[0]) as u64, 4) != 0 {
+        kstate.mode_add(state, kstate.M_A11Y)
+    }
+    if find(cmd, (&ay1[0]) as u64, 10) != 0 {
+        kstate.mode_add(state, kstate.M_A11YNOTREE)
+    }
+    if find(cmd, (&ay2[0]) as u64, 7) != 0 {
+        kstate.mode_add(state, kstate.M_A11YMAG)
+    }
+    if find(cmd, (&ay3[0]) as u64, 10) != 0 {
+        kstate.mode_add(state, kstate.M_A11YSTICKY)
+    }
+    if find(cmd, (&ay4[0]) as u64, 8) != 0 {
+        kstate.mode_add(state, kstate.M_A11YHIGH)
+    }
+    if find(cmd, (&ay5[0]) as u64, 8) != 0 {
+        kstate.mode_add(state, kstate.M_A11YREAD)
+    }
+    if find(cmd, (&ay6[0]) as u64, 9) != 0 {
+        kstate.mode_add(state, kstate.M_A11YGRANT)
+    }
+    if find(cmd, (&ay7[0]) as u64, 8) != 0 {
+        kstate.mode_add(state, kstate.M_A11YKEYS)
+    }
     // RUNDE DESKTOP: der Schreibtisch, die Taskleiste, die
     // Einstellungen, der DHCP-Klient -- und die drei Gegenproben.
     var dkw: [u8; 5] = "desk\0"
@@ -3910,6 +3965,161 @@ fn mode_of(state: u64, cmd: u64) {
 }
 
 // Address of the first occurrence, or 0. The command line is a C string.
+// ==================================================================
+// RUNDE A11Y -- DIE EINSTELLUNGEN AUS DER BEFEHLSZEILE
+//
+// `a11yscale=150` ist eine ZAHL und kein Schalter, also kann sie nicht
+// in den Modusvektor. Sie wird hier gelesen, genau wie `pmon` seinen
+// `wigapp=`-Pfad liest, und in `ax.fi` abgelegt -- von dort holt sie
+// sich jedes Programm ueber `ax_info(AI_SCALE)`, ohne die Befehlszeile
+// je gesehen zu haben. Genau das macht sie SYSTEMWEIT.
+fn a11y_stage(state: u64, cmd: u64) {
+    var w: [u8; 11] = "a11yscale=\0"
+    if kstate.mode_on(state, kstate.M_A11YMAG) {
+        let _m: bool = ax.set_cfg(state, ax.C_MAG, 1)
+    }
+    if kstate.mode_on(state, kstate.M_A11YSTICKY) {
+        let _s: bool = ax.set_cfg(state, ax.C_STICKY, 1)
+    }
+    if kstate.mode_on(state, kstate.M_A11YHIGH) {
+        let _h: bool = ax.set_cfg(state, ax.C_HIGH, 1)
+    }
+    if cmd == 0 {
+        return
+    }
+    let at: u64 = find(cmd, (&w[0]) as u64, 10)
+    if at == 0 {
+        return
+    }
+    var n: u64 = 0
+    var k: u64 = 0
+    while k < 4 {
+        let c: u64 = kstate.get8(at + 10 + k)
+        if c < 48 || c > 57 {
+            k = 4
+        } else {
+            n = n * 10 + (c - 48)
+            k = k + 1
+        }
+    }
+    if !ax.set_cfg(state, ax.C_SCALE, n) {
+        var s_bad: [u8; 26] = "ax: skalierung abgelehnt \0"
+        serial.puts((&s_bad[0]) as u64)
+        serial.dec(n)
+        serial.nl()
+    }
+}
+
+// Was die Schicht in diesem Lauf wirklich getan hat. Die Zahlen sind
+// die Gegenprobe zu jeder Aussage ueber den Baum: `nodes` ist, wie
+// viele Bedienelemente darin stehen, `denied` wie oft jemand ohne
+// Freigabe lesen wollte, `leaks` wie oft ein Passwortfeld einen Wert
+// mitgeschickt hat -- und die letzte Zahl MUSS null sein.
+fn say_ax(state: u64) {
+    var s_a: [u8; 11] = "ax: nodes=\0"
+    var s_b: [u8; 7] = "  gen=\0"
+    var s_c: [u8; 10] = "  pushes=\0"
+    var s_d: [u8; 9] = "  reads=\0"
+    var s_e: [u8; 10] = "  denied=\0"
+    var s_f: [u8; 11] = "  secrets=\0"
+    var s_g: [u8; 9] = "  leaks=\0"
+    var s_h: [u8; 9] = "  scale=\0"
+    var s_i: [u8; 8] = "  high=\0"
+    var s_j: [u8; 7] = "  mag=\0"
+    var s_k: [u8; 10] = "  sticky=\0"
+    var s_l: [u8; 10] = "  events=\0"
+    var s_m: [u8; 8] = "  drop=\0"
+    var s_n: [u8; 6] = "  on=\0"
+    serial.puts((&s_a[0]) as u64)
+    serial.dec(ax.info(state, ax.AI_COUNT))
+    serial.puts((&s_b[0]) as u64)
+    serial.dec(ax.info(state, ax.AI_GEN))
+    serial.puts((&s_c[0]) as u64)
+    serial.dec(ax.info(state, ax.AI_PUSHES))
+    serial.puts((&s_d[0]) as u64)
+    serial.dec(ax.info(state, ax.AI_READS))
+    serial.puts((&s_e[0]) as u64)
+    serial.dec(ax.info(state, ax.AI_DENIED))
+    serial.puts((&s_f[0]) as u64)
+    serial.dec(ax.info(state, ax.AI_SECRETS))
+    serial.puts((&s_g[0]) as u64)
+    serial.dec(ax.info(state, ax.AI_LEAKS))
+    serial.puts((&s_h[0]) as u64)
+    serial.dec(ax.info(state, ax.AI_SCALE))
+    serial.puts((&s_i[0]) as u64)
+    serial.dec(ax.info(state, ax.AI_HIGH))
+    serial.puts((&s_j[0]) as u64)
+    serial.dec(ax.info(state, ax.AI_MAG))
+    serial.puts((&s_k[0]) as u64)
+    serial.dec(ax.info(state, ax.AI_STICKY))
+    serial.puts((&s_l[0]) as u64)
+    serial.dec(ax.info(state, ax.AI_EVENTS))
+    serial.puts((&s_m[0]) as u64)
+    serial.dec(ax.info(state, ax.AI_EVDROP))
+    serial.puts((&s_n[0]) as u64)
+    serial.dec(ax.info(state, ax.AI_ON))
+    serial.nl()
+    var s_t: [u8; 15] = "ax: selftest \0\0"
+    var s_of2: [u8; 5] = " / \0\0"
+    serial.puts((&s_t[0]) as u64)
+    serial.dec(ax.selftest(state))
+    serial.puts((&s_of2[0]) as u64)
+    serial.dec(ax.selftest_max())
+    serial.nl()
+    // DEN GANZEN BAUM AUF DIE SERIELLE LEITUNG. Nicht aus Bequemlichkeit
+    // -- das ist die einzige Stelle, an der ein Testlaeufer sehen kann,
+    // was WIRKLICH in der Ablage steht, statt zu glauben, was ein
+    // Programm in Ring 3 darueber sagt. Der Inhalt eines Passwortfeldes
+    // steht deshalb auch hier nicht: er ist nie eingetragen worden.
+    var i: u64 = 0
+    while i < ax.node_count(state) {
+        var s_n2: [u8; 10] = "ax: node \0"
+        var s_r: [u8; 6] = "role=\0"
+        var s_fl: [u8; 9] = "  state=\0"
+        var s_w: [u8; 7] = "  win=\0"
+        var s_p: [u8; 10] = "  parent=\0"
+        var s_x: [u8; 5] = "  x=\0"
+        var s_y: [u8; 5] = "  y=\0"
+        var s_ww: [u8; 5] = "  w=\0"
+        var s_hh: [u8; 5] = "  h=\0"
+        var s_v: [u8; 9] = "  value=\0"
+        var s_na: [u8; 8] = "  name=\0"
+        serial.puts((&s_n2[0]) as u64)
+        serial.dec(i)
+        serial.puts((&s_r[0]) as u64)
+        serial.dec(ax.node_role(state, i))
+        serial.puts((&s_fl[0]) as u64)
+        serial.dec(ax.node_flags(state, i))
+        serial.puts((&s_w[0]) as u64)
+        serial.dec(ax.node_win(state, i))
+        serial.puts((&s_p[0]) as u64)
+        serial.dec(ax.node_parent(state, i))
+        serial.puts((&s_x[0]) as u64)
+        serial.dec(ax.node_x(state, i))
+        serial.puts((&s_y[0]) as u64)
+        serial.dec(ax.node_y(state, i))
+        serial.puts((&s_ww[0]) as u64)
+        serial.dec(ax.node_w(state, i))
+        serial.puts((&s_hh[0]) as u64)
+        serial.dec(ax.node_h(state, i))
+        serial.puts((&s_v[0]) as u64)
+        serial.dec(ax.node_value(state, i))
+        serial.puts((&s_na[0]) as u64)
+        var k2: u64 = 0
+        while k2 < ax.NAME_MAX {
+            let c: u64 = ax.node_name_at(state, i, k2)
+            if c == 0 {
+                k2 = ax.NAME_MAX
+            } else {
+                serial.put(c as u8)
+                k2 = k2 + 1
+            }
+        }
+        serial.nl()
+        i = i + 1
+    }
+}
+
 fn find(hay: u64, needle: u64, n: u64) -> u64 {
     var i: u64 = 0
     while kstate.get8(hay + i) != 0 {
@@ -4232,6 +4442,16 @@ fn surface(state: u64) {
     } else {
         t = k15_start(state)
     }
+    // RUNDE A11Y: DER LESER. Ein Programm in Ring 3, das den Baum
+    // abfragt -- der Anfang eines Bildschirmlesers ohne die
+    // Sprachausgabe. Er wird NUR mit `a11yread` gestartet, und er
+    // bekommt das Recht NUR mit `a11ygrant`. Ohne das zweite Wort
+    // laeuft er und bekommt -EPERM, und genau das ist die Gegenprobe
+    // zur Sicherheitsentscheidung dieser Runde.
+    if kstate.mode_on(state, kstate.M_A11YREAD) {
+        let leser: u64 = a11y_reader(state)
+        let _l: u64 = leser
+    }
 
     // Die Shell im Terminalfenster -- auf ausdrueckliches Wort, weil sie
     // eine Platte braucht.
@@ -4345,6 +4565,7 @@ fn surface(state: u64) {
     serial.nl()
     say_wm_input(state)
     say_wig(state)
+    say_ax(state)
     say_wins(state)
     let _unused: u64 = t
 }
@@ -4788,6 +5009,48 @@ fn netv_demo(state: u64) {
 // (ein Klick landet dann bei keinem Widget), `noclip` die
 // Zwischenablage. Beides liegt in Ring 3, also wird es in Ring 3
 // abgeschaltet.
+// RUNDE A11Y: DEN LESER STARTEN UND IHM -- ODER EBEN NICHT -- DAS RECHT
+// GEBEN.
+//
+// Das Recht wird HIER vergeben und nicht im Programm selbst, und das
+// ist die ganze Sicherheitsentscheidung in einer Zeile: ein Prozess
+// kann sich das Leserecht nicht nehmen, es muss ihm gegeben werden.
+// Wer es gibt, ist hier der Kernel beim Einrichten -- auf einem
+// laufenden System ist es die Kennung 0 ueber `ax_perm(AP_GRANT)`.
+fn a11y_reader(state: u64) -> u64 {
+    var p_les: [u8; 13] = "/bin/axlesen\0"
+    var a_les: [u8; 8] = "axlesen\0"
+    let abuf: u64 = state + kstate.EARG_OFF
+    var k: u64 = 0
+    while k < 8 {
+        kstate.set8(abuf + k, a_les[k as usize])
+        k = k + 1
+    }
+    let pid: u64 = elf.spawn(state, (&p_les[0]) as u64, abuf, 1, 2)
+    var s_l: [u8; 15] = "ax: leser pid=\0"
+    serial.puts((&s_l[0]) as u64)
+    serial.dec(pid)
+    var s_g: [u8; 10] = "  grant=\0\0"
+    serial.puts((&s_g[0]) as u64)
+    if kstate.mode_on(state, kstate.M_A11YGRANT) {
+        // `elf.spawn` gibt die pid; das Recht haengt an der AUFGABE.
+        var i: u64 = 0
+        while i < kstate.MAX_TASKS {
+            if sched.tget(state, i, sched.T_PID) == pid {
+                ax.allow(state, i)
+                i = kstate.MAX_TASKS
+            } else {
+                i = i + 1
+            }
+        }
+        serial.dec(1)
+    } else {
+        serial.dec(0)
+    }
+    serial.nl()
+    return pid
+}
+
 fn k15_start(state: u64) -> u64 {
     var p_files: [u8; 14] = "/bin/explorer\0"
     var p_demo: [u8; 16] = "/bin/widgetdemo\0"

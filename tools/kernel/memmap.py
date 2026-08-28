@@ -196,6 +196,8 @@ BEREICHE = [
     # warum das aufgefallen ist.
     ("NETMON",     "kstate.fi", "NETMON_OFF",     "NETMON_MAX"),
     ("SHARE",      "kstate.fi", "SHARE_OFF",      "SHARE_MAX"),
+    # RUNDE A11Y: der Bedienelement-Baum, sechs Seiten (0x7A000..0x80000).
+    ("AX",         "kstate.fi", "AX_OFF",         "AX_MAX"),
     # RUNDE TRESOR: die Geraeteidentitaet, zwei Seiten (0x5A000..0x5C000).
     # Die erste traegt die Merkmale, die zweite ist das DMA-Ziel des
     # `identify controller` von NVMe -- und deshalb MUSS sie eine eigene,

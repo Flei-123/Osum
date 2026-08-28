@@ -56,6 +56,7 @@
 
 import serial
 import kstate
+import ax
 import tty
 import wm
 import utf8
@@ -63,6 +64,7 @@ import time
 
 export {
     irq, on_code, translate, shifted, take, waiting,
+    latched, sticks, sticky_on,
     hot_take, hot_waiting, MAX_KEYS, HOT_SLOTS,
     code_of, layout, set_layout, switches, LAYOUTS, L_US, L_DE,
     super_down, hotkey_seq, hotkey_key, hotkey_ns
@@ -120,7 +122,89 @@ fn irq(state: u64) {
 // `-device usb-kbd` und einmal mit PS/2, und die Ausgaben werden
 // Oktett fuer Oktett verglichen. Waeren es zwei Wege, gingen sie
 // irgendwann auseinander -- und der Vergleich saehe es.
+// ==================================================================
+// RUNDE A11Y -- DIE EINRASTFUNKTION
+//
+// WAS SIE LOEST. Wer Umschalt und eine Taste nicht gleichzeitig
+// druecken kann, kommt an diesem Rechner nicht an einen grossen
+// Buchstaben, nicht an STRG-C und -- seit dieser Runde -- nicht an
+// Umschalt-Tab, also nicht rueckwaerts durch die Bedienelemente. Die
+// Antwort ist alt und billig: ein Modifikator, der ALLEIN gedrueckt
+// und wieder losgelassen wird, RASTET EIN und gilt fuer genau die
+// naechste Taste.
+//
+// WARUM "ALLEIN". Ohne diese Bedingung wuerde jedes gewoehnliche
+// Umschalt-A einen zweiten, ungewollten Grossbuchstaben nach sich
+// ziehen: die Umschalttaste wird ja auch dabei losgelassen. `KB_SEEN`
+// merkt sich, ob zwischen Druecken und Loslassen eine andere Taste
+// kam.
+//
+// WO SIE SITZT. Hier, in der Tastatur, und NICHT in der
+// Widget-Schicht. Sie muss in der Shell genauso wirken wie in einem
+// Fenster, und sie muss wirken, bevor irgendein Programm laeuft.
+fn latched(state: u64) -> u64 {
+    return kstate.get(state, kstate.K11_OFF + kstate.KB_LATCH)
+}
+
+fn sticks(state: u64) -> u64 {
+    return kstate.get(state, kstate.K11_OFF + kstate.KB_STICKS)
+}
+
+fn sticky_on(state: u64) -> bool {
+    return ax.sticky(state)
+}
+
+// Ein Modifikator ist gedrueckt worden: von hier an zaehlt, ob eine
+// andere Taste dazwischenkommt.
+fn mod_down(state: u64) {
+    kstate.set(state, kstate.K11_OFF + kstate.KB_SEEN, 0)
+}
+
+// Ein Modifikator ist losgelassen worden. Rueckgabe: soll er GEHALTEN
+// werden (weil er eingerastet ist)?
+fn mod_up(state: u64, bit: u64) -> bool {
+    if !ax.sticky(state) {
+        return false
+    }
+    if kstate.get(state, kstate.K11_OFF + kstate.KB_SEEN) != 0 {
+        return false
+    }
+    kstate.set(state, kstate.K11_OFF + kstate.KB_LATCH,
+        latched(state) | bit)
+    kstate.set(state, kstate.K11_OFF + kstate.KB_STICKS,
+        sticks(state) + 1)
+    return true
+}
+
+// Die eingerasteten Modifikatoren fallen -- nach GENAU EINER Taste.
+fn unlatch(state: u64) {
+    let l: u64 = latched(state)
+    if (l & 1) != 0 {
+        kstate.set(state, kstate.K11_OFF + kstate.KB_SHIFT, 0)
+    }
+    if (l & 2) != 0 {
+        kstate.set(state, kstate.K11_OFF + kstate.KB_CTRL, 0)
+    }
+    if (l & 4) != 0 {
+        kstate.set(state, kstate.K11_OFF + kstate.KB_ALT, 0)
+    }
+    kstate.set(state, kstate.K11_OFF + kstate.KB_LATCH, 0)
+    kstate.set(state, kstate.K11_OFF + kstate.KB_SEEN, 0)
+}
+
+// DIE HUELLE. `on_code_inner` hat ein Dutzend Ruecksprungstellen; die
+// eingerasteten Modifikatoren muessen nach JEDER davon fallen, wenn
+// eine echte Taste durch war. Eine Huelle ist die einzige Fassung, die
+// keine davon vergessen kann.
 fn on_code(state: u64, code: u64) {
+    on_code_inner(state, code)
+    if latched(state) != 0
+        && kstate.get(state, kstate.K11_OFF + kstate.KB_SEEN) != 0 {
+        unlatch(state)
+    }
+}
+
+fn on_code_inner(state: u64, code: u64) {
     if code == 0xE0 {
         kstate.set(state, kstate.K11_OFF + kstate.KB_EXT, 1)
         return
@@ -130,19 +214,25 @@ fn on_code(state: u64, code: u64) {
     // erzeugen kein Zeichen, also auch keine Meldung.
     if code == 0x2A || code == 0x36 {
         kstate.set(state, kstate.K11_OFF + kstate.KB_SHIFT, 1)
+        mod_down(state)
         return
     }
     if code == 0xAA || code == 0xB6 {
-        kstate.set(state, kstate.K11_OFF + kstate.KB_SHIFT, 0)
+        if !mod_up(state, 1) {
+            kstate.set(state, kstate.K11_OFF + kstate.KB_SHIFT, 0)
+        }
         return
     }
     if code == 0x1D {
         kstate.set(state, kstate.K11_OFF + kstate.KB_CTRL, 1)
         kstate.set(state, kstate.K11_OFF + kstate.KB_EXT, 0)
+        mod_down(state)
         return
     }
     if code == 0x9D {
-        kstate.set(state, kstate.K11_OFF + kstate.KB_CTRL, 0)
+        if !mod_up(state, 2) {
+            kstate.set(state, kstate.K11_OFF + kstate.KB_CTRL, 0)
+        }
         kstate.set(state, kstate.K11_OFF + kstate.KB_EXT, 0)
         return
     }
@@ -157,6 +247,7 @@ fn on_code(state: u64, code: u64) {
             kstate.set(state, kstate.K11_OFF + kstate.KB_ALTGR, 1)
         } else {
             kstate.set(state, kstate.K11_OFF + kstate.KB_ALT, 1)
+            mod_down(state)
         }
         kstate.set(state, kstate.K11_OFF + kstate.KB_EXT, 0)
         return
@@ -165,7 +256,9 @@ fn on_code(state: u64, code: u64) {
         if ext == 1 {
             kstate.set(state, kstate.K11_OFF + kstate.KB_ALTGR, 0)
         } else {
-            kstate.set(state, kstate.K11_OFF + kstate.KB_ALT, 0)
+            if !mod_up(state, 4) {
+                kstate.set(state, kstate.K11_OFF + kstate.KB_ALT, 0)
+            }
         }
         kstate.set(state, kstate.K11_OFF + kstate.KB_EXT, 0)
         return
@@ -198,6 +291,33 @@ fn on_code(state: u64, code: u64) {
     }
     kstate.set(state, kstate.K11_OFF + kstate.KB_EXT, 0)
     if code >= 0x80 {
+        return
+    }
+    // RUNDE A11Y: EINE ECHTE TASTE IST DURCH. Von hier an rastet ein
+    // Modifikator, der noch gehalten wird, beim Loslassen NICHT mehr
+    // ein -- und ein bereits eingerasteter faellt, sobald diese Taste
+    // fertig ist (`on_code`, die Huelle).
+    kstate.set(state, kstate.K11_OFF + kstate.KB_SEEN, 1)
+    // RUNDE A11Y: UMSCHALT-TAB IST EINE EIGENE TASTE UND KEIN TABULATOR.
+    //
+    // Bis hierher gab `code_of` fuer 0x0F mit und ohne Umschalt
+    // DASSELBE Zeichen (9). Damit war "rueckwaerts durch die
+    // Bedienelemente" nicht bedienbar -- man kam nur vorwaerts im
+    // Kreis, und in einem Dialog mit zwoelf Feldern ist das der
+    // Unterschied zwischen bedienbar und zumutbar.
+    //
+    // Geschickt wird `ESC [ Z`, was ein VT100-Terminal fuer diese Taste
+    // schickt (CSI Z, "cursor backward tabulation"). Also KEINE eigene
+    // Erfindung: `kernel/user/wlib.fi` liest ohnehin schon
+    // Fluchtfolgen, und ein Terminalprogramm, das CSI Z kennt, sieht
+    // hier genau das, was es erwartet.
+    if code == 0x0F
+        && kstate.get(state, kstate.K11_OFF + kstate.KB_SHIFT) == 1 {
+        deliver(state, 27)
+        deliver(state, 91)
+        deliver(state, 90)
+        kstate.add(state, kstate.K11_OFF + kstate.KB_SEQS, 1)
+        say_seq(90)
         return
     }
     // RUNDE I18N: STRG+ALT+L SCHALTET DIE BELEGUNG UM. Der Abtastcode
