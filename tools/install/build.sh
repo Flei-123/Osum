@@ -106,6 +106,9 @@ SPEC+=(/boot/ "/boot/osum.mb=$OUT/k.mb" "/boot/BOOTX64.EFI=$LIMINE/BOOTX64.EFI" 
 # gemessen wird, ist die Paketverwaltung und nicht das Netz.
 bash tools/install/pakete.sh "$OUT" || exit 1
 SPEC+=(/quelle1/ /quelle2/)
+# RUNDE UPDATE: der vertraute Schluessel gehoert auf das Geraet, sonst
+# installiert `/bin/opk` nichts mehr.
+SPEC+=("/system/schluessel.pub=$OUT/schluessel.pub")
 for q in 1 2; do
     for f in "$OUT/quelle$q"/*; do
         SPEC+=("/quelle$q/$(basename "$f")=$f")

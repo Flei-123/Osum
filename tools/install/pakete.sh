@@ -47,5 +47,19 @@ for q in quelle1 quelle2; do
     python3 "$OPK" quelle "$OUT/$q" --schluessel "$OUT/geheim.key" \
         > "$OUT/$q.log" 2>&1 || { cat "$OUT/$q.log"; exit 1; }
 done
-echo "   pakete    $(ls "$OUT"/pak/*.opkg | wc -l), zwei signierte Quellen"
+
+# ---------------------------------------------------------- RUNDE UPDATE
+#
+# JEDES PAKET BEKOMMT SEINE EIGENE SIGNATUR, und der oeffentliche
+# Schluessel wird zu der Datei, die `/bin/opk` auf dem Geraet erwartet.
+# Ohne beides installiert `opk` seit Runde UPDATE gar nichts mehr -- und
+# das ist der Punkt: der Nachweis ist nicht, dass eine Signatur ANLIEGT,
+# sondern dass ohne sie NICHTS passiert.
+for q in quelle1 quelle2; do
+    python3 tools/update/signpak.py "$OUT/geheim.key" "$OUT/$q"/*.opk \
+        || exit 1
+done
+cp "$OUT/oeffentlich.key" "$OUT/schluessel.pub"
+echo "   schluessel $OUT/schluessel.pub ($(stat -c%s "$OUT/schluessel.pub") Oktette)"
+echo "   pakete    $(ls "$OUT"/pak/*.opk | wc -l), zwei signierte Quellen"
 exit 0
