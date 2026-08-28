@@ -332,6 +332,51 @@ the icon format have no foreign specification behind them at all.
 
 ---
 
+## 6b. Round DEMUX -- the MP3 number tables (`kernel/user/mp3tab.fi`)
+
+**What was taken, and what was not.** The MP3 decoder
+(`kernel/user/mp3.fi`) is written from scratch. What could not be
+written from scratch are three sets of NUMBERS that ISO/IEC 11172-3
+prints as tables rather than as formulas:
+
+* the Huffman tables (ISO table B.7),
+* the polyphase synthesis window `D[512]` (ISO table B.3),
+* the scalefactor band boundaries (ISO table B.8).
+
+**Where the machine readable copy came from.** `pdmp3` by Krister
+Lagerstroem, https://github.com/technosaurus/PDMP3, **Public Domain**
+(the file states no other terms; it is the well known public-domain
+Layer III decoder). The copy used is pinned by hash in
+`tools/demux/mktab.py`:
+`3fa7df3b90d47696e656cb0d277296f19048832432c4b2a0584b64c71bfc1ff7`.
+
+**What was done with it.** Nothing was copied. `tools/demux/mktab.py`
+WALKS the foreign Huffman trees, recovers the list of (code, length, x,
+y) triples -- which is the ISO table and nothing else -- and builds a
+tree in this repository's own format from it. For every one of the 17
+distinct tables the generator checks the **Kraft inequality**; all 17
+sum to exactly 1, which is the proof that the extraction is complete
+and correct. The generator also **corrects an error in the source**:
+pdmp3 points table 33 at offset 2261, in the middle of table 24's tree;
+the correct offset is 2773.
+
+Everything else in `mp3tab.fi` -- the four IMDCT windows, both cosine
+tables, the synthesis matrix, x^(4/3), 2^(k/4), the alias coefficients,
+the intensity ratios -- is **computed from the formulas** in the
+standard by the same generator and taken from nowhere.
+
+**Licence consequence:** none. Public-domain numbers that are in a
+published international standard, re-derived and re-encoded, place no
+obligation on this repository. The file itself carries
+`SPDX-License-Identifier: GPL-2.0-only` like every other Ring 3 program.
+
+**Not vendored:** `pdmp3.c` is not in the tree. The generator needs it
+only when the tables are regenerated, and `tools/demux/run.sh` checks
+that the checked-in `mp3tab.fi` is byte-for-byte what the generator
+produces.
+
+---
+
 ## 7. This repository's own licence
 
 **`LICENSE`, MIT, "Copyright (c) 2026 Justin (Flei123)".** Present, and
