@@ -1,0 +1,1635 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/sucher.fi -- RUNDE SUPERSEARCH: DAS SUCHFELD AUF DIE TASTE.
+//
+// Man tippt auf die Windows-Taste, und mitten auf dem Schirm steht ein
+// Feld mit dem Balken darin. Man tippt weiter, und darunter stehen die
+// Treffer. Pfeil, Eingabetaste, fertig. Fluchttaste, und es ist weg.
+//
+// ------------------------------------------------------------------
+// WORAUF DIESE RUNDE AUFBAUT, statt daneben.
+//
+// `kernel/kbd.fi` hatte die Super-Taste schon, samt einem RIEGEL statt
+// eines Ereignisses, und die Begruendung steht woertlich dort: "A hotkey
+// has no window -- that is what makes it global." Das ist richtig und
+// bleibt. Diese Runde fuegt EINEN Fall hinzu -- die Taste ALLEIN,
+// gedrueckt und losgelassen, ohne dass dazwischen etwas anderes kam --
+// und benutzt denselben Zaehler, dieselbe Uhr, denselben Riegel.
+//
+// `kernel/user/qs.fi` (Runde NETVIEW) ist die Bauform: ein Fenster, das
+// der Taskleiste gehoert, beim Start angelegt und VERSTECKT gehalten.
+// Aufmachen ist `WS_HIDDEN 0` plus Verschieben plus Malen -- kein
+// Programmstart. Das ist kein Detail: gemessen wird die Zeit vom
+// Tastendruck bis zum stehenden Fenster, und ein fork+exec haette diese
+// Zahl in eine andere Groessenordnung gehoben. Deshalb steht dieses
+// Fenster HIER und nicht als eigenes Programm neben `/bin/launcher`.
+//
+// `/bin/launcher` bleibt, was es ist: dasselbe Verzeichnis, derselbe
+// Namensindex, aber ein Fenster mit Titelleiste, das man aus der Leiste
+// startet und stehen laesst. Das hier ist die Frage, die man stellt und
+// wieder wegtut.
+//
+// ------------------------------------------------------------------
+// DIE RANGFOLGE IST DER EIGENTLICHE WERT EINER SUCHE.
+//
+// Eine Suche, die alles findet, ist keine. Was diese hier tut, in genau
+// dieser Ordnung, und beides zusammen ist EINE Zahl (`rk * 4 + quelle`):
+//
+//   WIE GUT der Name passt -- und das schlaegt alles andere:
+//     0  GENAU. Der gefaltete Name IST die gefaltete Eingabe.
+//     1  AM WORTANFANG. Am Anfang des Namens oder hinter einem
+//        Trennzeichen (Leerraum, Strich, Unterstrich, Punkt, Schraeg-
+//        strich, Komma).
+//     2  MITTENDRIN.
+//     3  GAR NICHT IM NAMEN, aber in der Beschreibung oder in den
+//        Schluesselwoertern eines Buendels. "folder" findet den
+//        Datei-Explorer so, und nur so.
+//
+//   WOHER der Treffer kommt, bei gleichem Rang:
+//     0  ein installiertes Programm (aus den .osp-Buendeln)
+//     1  eine Datei im Heimatverzeichnis (aus dem Namensindex)
+//     2  eine Seite der Einstellungen
+//
+// Ein genau passender Dateiname schlaegt also ein Programm, auf das der
+// Begriff nur mittendrin passt -- "ein exakter Name schlaegt alles" --,
+// und bei gleichem Rang stehen die Programme vorn.
+//
+// ------------------------------------------------------------------
+// UMLAUTE. EIN UMLAUT SIND ZWEI OKTETTE, UND DAS IST DER GANZE FEHLER,
+// DEN MAN HIER MACHEN KANN.
+//
+// Die Suche in `appdir.fi` und `nidx.fi` faltet mit einer Funktion, die
+// 65..90 um 32 erhoeht und sonst nichts. Das ist ASCII, und in UTF-8 ist
+// ein "O mit zwei Punkten" 0xC3 0x96, ein "o mit zwei Punkten" 0xC3 0xB6
+// -- das zweite Oktett liegt weit oberhalb von 90, also gelten die
+// beiden dort als verschiedene Zeichen. "GROESSE" mit Umlaut findet man
+// damit nicht, wenn man es klein tippt.
+//
+// `fold` hier faltet deshalb BEIDES:
+//   * 'A'..'Z'                    -> +32, wie bisher
+//   * 0xC3 0x80..0x9E (ohne 0x97) -> 0xC3 (b + 0x20)
+//
+// Der zweite Fall ist genau der lateinische Zusatzblock: 0xC3 0x80..0x9E
+// sind U+00C0..U+00DE (die grossen mit Zeichen), 0xC3 0xA0..0xBE sind
+// U+00E0..U+00FE (die kleinen), und der Abstand ist ueberall 0x20. 0x97
+// ist das Malzeichen und kein Buchstabe -- es faellt heraus, sonst
+// wuerde daraus das Geteiltzeichen.
+//
+// Und die Suche nach "gro" findet "Groesse" mit Umlaut ohnehin, weil
+// "gro" drei ASCII-Oktette sind und das gefaltete Wort mit genau diesen
+// drei anfaengt. Beides wird gemessen, nicht behauptet.
+//
+// ------------------------------------------------------------------
+// OHNE MAUS. Alles hier geht ueber die Tastatur, und das ist keine
+// Zugabe: das Fenster wird von einer TASTE aufgemacht, und wer eine
+// Maus haette, haette auch die Leiste anklicken koennen. Die Maus darf
+// mit, sie muss aber nichts.
+
+profile kernel
+
+import ulib
+import libc.io
+import wlibc
+import nv
+import appdir
+import nidx
+import msg
+
+export {
+    init, step, toggle, is_open, hit, win_id, anchor, index_bauen, W, H,
+    opens, treffer, gewaehlt, index_n, index_us, such_us
+}
+
+// ------------------------------------------------------------ die Form
+//
+// DIE ZAHLEN STEHEN HIER UND WERDEN GEMELDET, damit ein Pruefer draussen
+// dieselbe Rechnung machen kann wie der Zeichner drinnen. Das ist die
+// Regel, an der die Runde NETVIEW zwei echte Fehler gefunden hat -- eine
+// Beschriftung vier Bildpunkte neben ihrer Kachel, zwei Textzeilen auf
+// derselben Bildzeile. Im Quelltext sieht man beides nicht.
+const PAD: u64 = 16
+const EH: u64 = 36 // das Eingabefeld
+const GAP: u64 = 12
+const ROWH: u64 = 36 // eine Zeile der Trefferliste
+const ROWS: u64 = 8
+const IC: u64 = 16 // das Programmsymbol, in seiner Zielgroesse
+const W: u64 = 560
+const H: u64 = PAD + EH + GAP + ROWS * ROWH + PAD // 368
+const LY: u64 = PAD + EH + GAP // wo die Liste anfaengt: 64
+const BAND: u64 = 64 // Zeilen der Malflaeche auf einmal
+
+const MAXH: u64 = 40 // so viele Treffer werden ueberhaupt gesammelt
+const QMAX: u64 = 48 // Oktette im Suchfeld
+const FMAX: u64 = 160 // Platz fuer einen gefalteten Namen
+const NMAX: u64 = 26 // ein Name aus dem Index, plus Null
+
+const S_APP: u64 = 0
+const S_FILE: u64 = 1
+const S_SET: u64 = 2
+
+const RK_EXACT: u64 = 0
+const RK_START: u64 = 1
+const RK_MID: u64 = 2
+const RK_OTHER: u64 = 3
+const RK_NONE: u64 = 9
+
+const NICHTS: u64 = 0xFFFFFFFF
+
+// WIE VIELE DATEINAMEN AUS DEM INDEX ANGESEHEN WERDEN. Der Index kann
+// Tausende liefern; gezeigt werden acht. Gesammelt werden trotzdem alle,
+// die durch den Heimatfilter kommen, bis MAXH voll ist -- die Ordnung
+// entscheidet danach, welche acht das sind, und nicht die Reihenfolge im
+// Index.
+const SETMAX: u64 = 8
+
+// ----------------------------------------------------------- der Stand
+
+static mut w_h: u64 = 0
+static mut w_id: u64 = 0
+static mut open_: u64 = 0
+static mut px_: u64 = 0
+static mut py_: u64 = 0
+static mut asc: u64 = 0
+static mut a_x: u64 = 0
+static mut a_y: u64 = 0
+static mut a_w: u64 = 800
+static mut a_h: u64 = 600
+static mut hk_last: u64 = 0
+static mut t0: u64 = 0
+static mut btn_last: u64 = 0
+static mut opens_: u64 = 0
+static mut ev: [u8; 16] = [0 as u8; 16]
+static mut esc_wait: u64 = 0 // 0 nichts, 1 ESC gesehen, 2 ESC [ gesehen
+
+static mut q: [u8; 48] = [0 as u8; 48]
+static mut qn: u64 = 0
+static mut qf: [u8; 48] = [0 as u8; 48]
+static mut qfn: u64 = 0
+
+static mut h_src: [u8; 40] = [0 as u8; 40]
+static mut h_ix: [u64; 40] = [0 as u64; 40]
+static mut h_key: [u64; 40] = [0 as u64; 40]
+static mut nh: u64 = 0
+static mut n_app: u64 = 0
+static mut n_file: u64 = 0
+static mut n_set: u64 = 0
+static mut sel: u64 = 0
+static mut top_: u64 = 0
+
+static mut idx_n: u64 = 0
+static mut idx_us: u64 = 0
+static mut find_us: u64 = 0
+static mut baum_us: u64 = 0
+static mut baum_n: u64 = 0
+
+static mut hf: [u8; 160] = [0 as u8; 160]
+static mut nbuf: [u8; 26] = [0 as u8; 26]
+static mut pfad: [u8; 256] = [0 as u8; 256]
+static mut cut: [u8; 96] = [0 as u8; 96]
+
+// DER HEIMATFILTER. `unter[i]` ist 1, wenn der Eintrag i im
+// Heimatverzeichnis liegt (oder darunter), 0 sonst, 2 = noch nicht
+// entschieden. Er wird EINMAL nach jedem Aufbau des Index gerechnet und
+// nicht bei jedem Tastendruck -- das ist derselbe Gedanke wie der Index
+// selbst, eine Ebene hoeher.
+static mut unter: [u8; 4200] = [0 as u8; 4200]
+static mut heim: [u8; 96] = [0 as u8; 96]
+static mut heim_ino: u64 = 0
+static mut heim_n: u64 = 0
+static mut idx_ok: u64 = 0
+
+// DIE SEITEN DER EINSTELLUNGEN. Sie stehen NICHT hier im Quelltext: der
+// Katalog hat sie schon (`settings.tabs`, eine Zeile je Reiter), und das
+// Programm, das sie zeigt, liest denselben Schluessel. Zwei Listen
+// derselben Reiter waeren zwei Wahrheiten -- und eine davon waere in der
+// falschen Sprache.
+static mut setn: u64 = 0
+static mut setp: [u64; 8] = [0 as u64; 8]
+static mut setbuf: [u8; 256] = [0 as u8; 256]
+
+// WIE OFT EIN PROGRAMM GESTARTET WURDE, und wann zuletzt. Ohne Eingabe
+// stehen die haeufigsten oben; bei gleicher Zahl das zuletzt benutzte.
+// Beides zusammen, weil eine Liste nur nach "zuletzt" bei jedem Start
+// durcheinandergeraet und eine nur nach "am haeufigsten" nach einer
+// Woche eingefroren ist.
+static mut zahl: [u64; 16] = [0 as u64; 16]
+static mut zletzt: [u64; 16] = [0 as u64; 16]
+static mut zseq: u64 = 0
+static mut zbuf: [u8; 512] = [0 as u8; 512]
+
+// die Zeichenketten dieser Datei
+static mut s_ini: [u8; 14] = "sucher: init \0"
+static mut s_w: [u8; 4] = " w=\0"
+static mut s_h: [u8; 4] = " h=\0"
+static mut s_id: [u8; 6] = " id=\0\0"
+static mut s_x: [u8; 4] = " x=\0"
+static mut s_ix2: [u8; 6] = " ix=\0\0"
+static mut s_y: [u8; 4] = " y=\0"
+static mut s_ix: [u8; 18] = "sucher: index n=\0\0"
+static mut s_us: [u8; 6] = " us=\0\0"
+static mut s_hm: [u8; 8] = " heim=[\0"
+static mut s_zu: [u8; 2] = "]\0"
+static mut s_in: [u8; 6] = " ino=\0"
+static mut s_un: [u8; 8] = " unter=\0"
+static mut s_bw: [u8; 18] = "sucher: baum us=\0\0"
+static mut s_bn: [u8; 10] = " treffer=\0"
+static mut s_op: [u8; 14] = "sucher: open\0\0"
+static mut s_up: [u8; 6] = " up=\0\0"
+static mut s_cl: [u8; 20] = "sucher: closed by \0\0"
+static mut s_key: [u8; 4] = "key\0"
+static mut s_esc: [u8; 8] = "escape\0\0"
+static mut s_out: [u8; 8] = "outside\0"
+static mut s_run: [u8; 6] = "start\0"
+static mut s_qu: [u8; 16] = "sucher: query [\0"
+static mut s_qn: [u8; 6] = "] n=\0\0"
+static mut s_qc: [u8; 10] = " zeichen=\0"
+static mut s_tr: [u8; 10] = " treffer=\0"
+static mut s_ap: [u8; 8] = " apps=\0\0"
+static mut s_da: [u8; 10] = " dateien=\0"
+static mut s_ei: [u8; 8] = " einst=\0"
+static mut s_ze: [u8; 18] = "sucher: zeile n=\0\0"
+static mut s_sq: [u8; 6] = " src=\0"
+static mut s_rk: [u8; 6] = " rk=\0\0"
+static mut s_bs: [u8; 8] = " base=\0\0"
+static mut s_iy: [u8; 6] = " iy=\0\0"
+static mut s_se: [u8; 6] = " sel=\0"
+static mut s_tx: [u8; 8] = " txt=[\0\0"
+static mut s_sb: [u8; 8] = "] sub=[\0"
+static mut s_go: [u8; 16] = "sucher: start [\0"
+static mut s_pi: [u8; 8] = "] pid=\0\0"
+static mut s_df: [u8; 16] = "sucher: datei [\0"
+static mut s_st: [u8; 16] = "sucher: seite [\0"
+static mut s_nr: [u8; 6] = "] nr=\0"
+static mut s_zh: [u8; 18] = "sucher: zaehler [\0"
+static mut s_zn: [u8; 6] = "] n=\0\0"
+static mut s_fo: [u8; 18] = "sucher: falten [\0\0" 
+static mut s_fa: [u8; 8] = "] -> [\0\0"
+static mut p_set: [u8; 14] = "/bin/settings\0"
+static mut p_zahl: [u8; 20] = "/etc/sucher.starts\0\0"
+static mut p_wurzel: [u8; 2] = "/\0"
+static mut p_users: [u8; 8] = "/users/\0"
+static mut p_passwd: [u8; 12] = "/etc/passwd\0"
+static mut k_ph: [u8; 20] = "sucher.placeholder\0\0"
+static mut k_none: [u8; 12] = "sucher.none\0"
+static mut k_set: [u8; 16] = "sucher.settings\0"
+static mut k_recent: [u8; 14] = "sucher.recent\0"
+static mut t_title: [u8; 8] = "Suchen\0\0"
+static mut nummer: [u8; 4] = [0 as u8; 4]
+
+fn say(p: u64) {
+    let _s: u64 = ulib.say(p)
+}
+
+fn kv(name: u64, v: u64) {
+    say(name)
+    ulib.sayn(v)
+}
+
+fn tlen(p: u64) -> u64 {
+    return ulib.length(p)
+}
+
+fn rd(p: u64, i: u64) -> u64 {
+    return __mmio_read8((p + i) as *mut u8) as u64
+}
+
+fn wr(p: u64, i: u64, v: u64) {
+    __mmio_write8((p + i) as *mut u8, v as u8)
+}
+
+fn now_ns() -> u64 {
+    return nidx.mono_us() *% 1000
+}
+
+fn now_us() -> u64 {
+    return nidx.mono_us()
+}
+
+// ================================================ DIE FALTUNG
+//
+// Gross wird klein, und zwar AUCH bei den Buchstaben mit Zeichen darauf.
+// Siehe den Kopf dieser Datei; hier steht nur noch die Rechnung.
+fn fold(src: u64, n: u64, dst: u64, max: u64) -> u64 {
+    var i: u64 = 0
+    var o: u64 = 0
+    while i < n && o + 2 < max {
+        let c: u64 = rd(src, i)
+        if c == 0 {
+            i = n
+        } else if c >= 65 && c <= 90 {
+            wr(dst, o, c + 32)
+            o = o + 1
+            i = i + 1
+        } else if c == 0xC3 && i + 1 < n {
+            let d: u64 = rd(src, i + 1)
+            var e: u64 = d
+            if d >= 0x80 && d <= 0x9E && d != 0x97 {
+                e = d + 0x20
+            }
+            wr(dst, o, 0xC3)
+            wr(dst, o + 1, e)
+            o = o + 2
+            i = i + 2
+        } else {
+            wr(dst, o, c)
+            o = o + 1
+            i = i + 1
+        }
+    }
+    wr(dst, o, 0)
+    return o
+}
+
+// Ist das Oktett davor ein Trennzeichen? Dann faengt hier ein Wort an.
+// Ein Fortsetzungsoktett (>= 0x80) ist KEINES -- mitten in einem Umlaut
+// faengt kein Wort an.
+fn ist_trenner(c: u64) -> bool {
+    return c == 32 || c == 9 || c == 45 || c == 95 || c == 46 || c == 47
+        || c == 44 || c == 58 || c == 40 || c == 91
+}
+
+// Wo steht `nadel` in `heu`? NICHTS, wenn nirgends. Beide sind schon
+// gefaltet -- die Faltung passiert einmal je Zeichenkette und nicht
+// einmal je Vergleich.
+fn stelle(heu: u64, hn: u64, nadel: u64, nn2: u64) -> u64 {
+    if nn2 == 0 {
+        return 0
+    }
+    if nn2 > hn {
+        return NICHTS
+    }
+    var i: u64 = 0
+    while i + nn2 <= hn {
+        var k: u64 = 0
+        var gleich: bool = true
+        while k < nn2 {
+            if rd(heu, i + k) != rd(nadel, k) {
+                gleich = false
+                k = nn2
+            } else {
+                k = k + 1
+            }
+        }
+        if gleich {
+            return i
+        }
+        i = i + 1
+    }
+    return NICHTS
+}
+
+// DER RANG EINES NAMENS. Die eine Funktion, in der die Ordnung dieser
+// Runde steht.
+fn rang(p: u64, n: u64) -> u64 {
+    let hp: u64 = (&hf[0 as usize]) as u64
+    let hn: u64 = fold(p, n, hp, FMAX)
+    if qfn == 0 {
+        return RK_START
+    }
+    let qp: u64 = (&qf[0 as usize]) as u64
+    if hn == qfn {
+        if stelle(hp, hn, qp, qfn) == 0 {
+            return RK_EXACT
+        }
+    }
+    let at: u64 = stelle(hp, hn, qp, qfn)
+    if at == NICHTS {
+        return RK_NONE
+    }
+    if at == 0 {
+        return RK_START
+    }
+    if ist_trenner(rd(hp, at - 1)) {
+        return RK_START
+    }
+    return RK_MID
+}
+
+// Steht die Eingabe irgendwo in dieser Zeichenkette? Fuer Beschreibung
+// und Schluesselwoerter, wo der Rang nicht zaehlt -- nur ob ueberhaupt.
+fn drin(p: u64) -> bool {
+    if qfn == 0 {
+        return true
+    }
+    let hp: u64 = (&hf[0 as usize]) as u64
+    let hn: u64 = fold(p, tlen(p), hp, FMAX)
+    return stelle(hp, hn, (&qf[0 as usize]) as u64, qfn) != NICHTS
+}
+
+// Ein Name aus dem Index ist 24 Oktette und muss keine Null am Ende
+// haben. Hier bekommt er eine.
+fn name24(i: u64) -> u64 {
+    let q2: u64 = nidx.name_at(i)
+    let d: u64 = (&nbuf[0 as usize]) as u64
+    var k: u64 = 0
+    while k < nidx.NAMEN {
+        let c: u64 = rd(q2, k)
+        wr(d, k, c)
+        if c == 0 {
+            k = nidx.NAMEN
+        } else {
+            k = k + 1
+        }
+    }
+    wr(d, nidx.NAMEN, 0)
+    return d
+}
+
+// ============================================= DAS HEIMATVERZEICHNIS
+//
+// WELCHES ES IST. `/etc/passwd`, das Feld hinter der fuenften Doppelpunkt-
+// Trennung, fuer die eigene Kennung. Gibt es keine Zeile dafuer oder kein
+// solches Verzeichnis, wird die WURZEL genommen -- und das wird GEMELDET.
+// Ein Filter, der still auf alles zurueckfaellt, ist ein Filter, von dem
+// niemand weiss, dass er nicht greift.
+fn heim_finden() {
+    let uid: u64 = ulib.sys(107, 0, 0, 0)
+    let hp: u64 = (&heim[0 as usize]) as u64
+    wr(hp, 0, 0)
+    let fd: u64 = io.open((&p_passwd[0 as usize]) as u64, 0)
+    if !ulib.bad(fd) {
+        let b: u64 = (&zbuf[0 as usize]) as u64
+        let n: u64 = io.read(fd, b, 500)
+        let _c: u64 = io.close(fd)
+        if !ulib.bad(n) && n != 0 {
+            var i: u64 = 0
+            while i < n {
+                // eine Zeile: name:x:uid:gid:info:heim:shell
+                var e: u64 = i
+                while e < n && rd(b, e) != 10 {
+                    e = e + 1
+                }
+                var feld: u64 = 0
+                var fs: u64 = i
+                var k: u64 = i
+                var u2: u64 = 0
+                var ziffern: u64 = 0
+                while k <= e {
+                    if k == e || rd(b, k) == 58 {
+                        if feld == 2 {
+                            u2 = 0
+                            ziffern = 0
+                            var z: u64 = fs
+                            while z < k {
+                                let c2: u64 = rd(b, z)
+                                if c2 >= 48 && c2 <= 57 {
+                                    u2 = u2 * 10 + (c2 - 48)
+                                    ziffern = ziffern + 1
+                                }
+                                z = z + 1
+                            }
+                        }
+                        if feld == 5 && ziffern != 0 && u2 == uid {
+                            var o: u64 = 0
+                            var z2: u64 = fs
+                            while z2 < k && o < 90 {
+                                wr(hp, o, rd(b, z2))
+                                o = o + 1
+                                z2 = z2 + 1
+                            }
+                            wr(hp, o, 0)
+                        }
+                        feld = feld + 1
+                        fs = k + 1
+                    }
+                    k = k + 1
+                }
+                i = e + 1
+            }
+        }
+    }
+    if rd(hp, 0) == 0 {
+        ulib.strncpy(hp, (&p_wurzel[0 as usize]) as u64, 90)
+    }
+    heim_n = tlen(hp)
+    heim_ino = nidx.ino_of_path(hp)
+}
+
+// WAS UNTER DEM HEIMATVERZEICHNIS LIEGT, einmal ausgerechnet.
+//
+// Die Kette nach oben, mit Merkzettel: `unter[i]` ist 2, solange die
+// Frage offen ist. Ein Eintrag, dessen Elternteil schon beantwortet ist,
+// kostet einen Schritt; der Rest kostet die Tiefe. Eine Wache gegen
+// einen Baum, dessen Eltern im Kreis zeigen -- ein Index, der haengt,
+// ist schlimmer als einer, der irrt.
+fn heim_markieren() -> u64 {
+    let n: u64 = nidx.count()
+    var i: u64 = 0
+    while i < n {
+        unter[(i) as usize] = 2 as u8
+        i = i + 1
+    }
+    // Die Wurzel als Heimat heisst: alles zaehlt.
+    if heim_ino == 0 || heim_n <= 1 {
+        i = 0
+        while i < n {
+            unter[(i) as usize] = 1 as u8
+            i = i + 1
+        }
+        return n
+    }
+    var ja: u64 = 0
+    i = 0
+    while i < n {
+        if unter[(i) as usize] == 2 as u8 {
+            // die Kette hinauf sammeln
+            var kette: [u64; 20] = [0 as u64; 20]
+            var tief: u64 = 0
+            var wo: u64 = i
+            var ergebnis: u64 = 0
+            var weiter: bool = true
+            while weiter && tief < 20 {
+                if nidx.ino_at(wo) == heim_ino {
+                    ergebnis = 1
+                    weiter = false
+                } else if unter[(wo) as usize] != 2 as u8 {
+                    ergebnis = unter[(wo) as usize] as u64
+                    weiter = false
+                } else {
+                    kette[(tief) as usize] = wo
+                    tief = tief + 1
+                    let el: u64 = nidx.parent_at(wo)
+                    if el == 0 {
+                        weiter = false
+                    } else {
+                        let s2: u64 = nidx.slot_of_ino(el)
+                        if s2 >= n {
+                            weiter = false
+                        } else {
+                            wo = s2
+                        }
+                    }
+                }
+            }
+            var t2: u64 = 0
+            while t2 < tief {
+                unter[(kette[(t2) as usize]) as usize] = ergebnis as u8
+                t2 = t2 + 1
+            }
+        }
+        if unter[(i) as usize] == 1 as u8 {
+            ja = ja + 1
+        }
+        i = i + 1
+    }
+    return ja
+}
+
+// ============================================== DIE EINSTELLUNGSSEITEN
+//
+// Aus dem Katalog, nicht aus dem Quelltext. `settings.tabs` ist eine
+// Zeile je Reiter, und dasselbe liest das Programm, das sie zeigt.
+fn seiten_lesen() {
+    var k_tabs: [u8; 14] = "settings.tabs\0"
+    let p: u64 = msg.get((&k_tabs[0 as usize]) as u64)
+    let d: u64 = (&setbuf[0 as usize]) as u64
+    setn = 0
+    var o: u64 = 0
+    var i: u64 = 0
+    var anfang: u64 = 0
+    let n: u64 = tlen(p)
+    while i <= n && setn < SETMAX {
+        if i == n || rd(p, i) == 10 {
+            if i > anfang {
+                setp[(setn) as usize] = d + o
+                var z: u64 = anfang
+                while z < i && o < 250 {
+                    wr(d, o, rd(p, z))
+                    o = o + 1
+                    z = z + 1
+                }
+                wr(d, o, 0)
+                o = o + 1
+                setn = setn + 1
+            }
+            anfang = i + 1
+        }
+        i = i + 1
+    }
+}
+
+fn seite_name(i: u64) -> u64 {
+    if i >= setn {
+        return (&t_title[0 as usize]) as u64
+    }
+    return setp[(i) as usize]
+}
+
+// ================================================ WAS ZULETZT LIEF
+//
+// Eine Datei, drei Felder je Zeile: wie oft, wann zuletzt, welcher
+// Befehl. Sie liegt in /etc und nicht im Benutzerverzeichnis, weil
+// dieser Zweig noch keine Benutzerverzeichnisse anlegt; sobald die Runde
+// MULTIUSER drin ist, ist das eine Zeile (`heim` steht schon da).
+// Solange steht es hier, damit es niemand fuer mehr haelt, als es ist.
+fn zahlen_lesen() {
+    var i: u64 = 0
+    while i < 16 {
+        zahl[(i) as usize] = 0
+        zletzt[(i) as usize] = 0
+        i = i + 1
+    }
+    zseq = 0
+    let fd: u64 = io.open((&p_zahl[0 as usize]) as u64, 0)
+    if ulib.bad(fd) {
+        return
+    }
+    let b: u64 = (&zbuf[0 as usize]) as u64
+    let n: u64 = io.read(fd, b, 500)
+    let _c: u64 = io.close(fd)
+    if ulib.bad(n) || n == 0 {
+        return
+    }
+    var at: u64 = 0
+    while at < n {
+        var e: u64 = at
+        while e < n && rd(b, e) != 10 {
+            e = e + 1
+        }
+        // <zahl> <seq> <befehl>
+        var k: u64 = at
+        var wieoft: u64 = 0
+        while k < e && rd(b, k) >= 48 && rd(b, k) <= 57 {
+            wieoft = wieoft * 10 + (rd(b, k) - 48)
+            k = k + 1
+        }
+        while k < e && rd(b, k) == 32 {
+            k = k + 1
+        }
+        var wann: u64 = 0
+        while k < e && rd(b, k) >= 48 && rd(b, k) <= 57 {
+            wann = wann * 10 + (rd(b, k) - 48)
+            k = k + 1
+        }
+        while k < e && rd(b, k) == 32 {
+            k = k + 1
+        }
+        if k < e {
+            // den Befehl in `nbuf` ausleihen und gegen das Verzeichnis
+            // halten
+            let d: u64 = (&hf[0 as usize]) as u64
+            var o: u64 = 0
+            while k < e && o < 150 {
+                wr(d, o, rd(b, k))
+                o = o + 1
+                k = k + 1
+            }
+            wr(d, o, 0)
+            var a2: u64 = 0
+            while a2 < appdir.count() {
+                if ulib.streq(appdir.exec_of(a2), d) {
+                    zahl[(a2) as usize] = wieoft
+                    zletzt[(a2) as usize] = wann
+                    if wann > zseq {
+                        zseq = wann
+                    }
+                    a2 = appdir.count()
+                } else {
+                    a2 = a2 + 1
+                }
+            }
+        }
+        at = e + 1
+    }
+}
+
+fn zahlen_schreiben() {
+    let fd: u64 = io.create((&p_zahl[0 as usize]) as u64)
+    if ulib.bad(fd) {
+        return
+    }
+    var i: u64 = 0
+    while i < appdir.count() && i < 16 {
+        if zahl[(i) as usize] != 0 {
+            let b: u64 = (&zbuf[0 as usize]) as u64
+            var o: u64 = 0
+            o = o + zahl_in(b + o, zahl[(i) as usize])
+            wr(b, o, 32)
+            o = o + 1
+            o = o + zahl_in(b + o, zletzt[(i) as usize])
+            wr(b, o, 32)
+            o = o + 1
+            let ex: u64 = appdir.exec_of(i)
+            var k: u64 = 0
+            while rd(ex, k) != 0 && o < 400 {
+                wr(b, o, rd(ex, k))
+                o = o + 1
+                k = k + 1
+            }
+            wr(b, o, 10)
+            o = o + 1
+            let _w: u64 = io.write_all(fd, b, o)
+        }
+        i = i + 1
+    }
+    let _c: u64 = io.close(fd)
+}
+
+// Eine Zahl als Text, ohne Bibliothek -- `ulib.sayn` schreibt auf die
+// serielle Leitung und nicht in einen Puffer.
+fn zahl_in(p: u64, v: u64) -> u64 {
+    if v == 0 {
+        wr(p, 0, 48)
+        return 1
+    }
+    var ziffern: [u8; 24] = [0 as u8; 24]
+    var n: u64 = 0
+    var x: u64 = v
+    while x != 0 && n < 24 {
+        ziffern[(n) as usize] = (48 + x % 10) as u8
+        x = x / 10
+        n = n + 1
+    }
+    var k: u64 = 0
+    while k < n {
+        wr(p, k, ziffern[((n - 1 - k)) as usize] as u64)
+        k = k + 1
+    }
+    return n
+}
+
+// ==================================================== DIE SUCHE SELBST
+
+fn nimm(src: u64, ix: u64, rk: u64) {
+    if nh >= MAXH {
+        return
+    }
+    h_src[(nh) as usize] = src as u8
+    h_ix[(nh) as usize] = ix
+    h_key[(nh) as usize] = rk * 4 + src
+    nh = nh + 1
+}
+
+// EINFUEGESORTIERUNG, und sie ist STABIL. Das ist keine Nebensache: bei
+// gleichem Schluessel bleibt die Reihenfolge, in der gesammelt wurde --
+// Programme in Verzeichnisordnung, Dateien in Indexordnung. Ein
+// instabiles Verfahren wuerde dieselbe Suche zweimal verschieden
+// beantworten, und niemand koennte sagen, warum.
+fn sortieren() {
+    var i: u64 = 1
+    while i < nh {
+        let ks: u64 = h_key[(i) as usize]
+        let qs: u64 = h_src[(i) as usize] as u64
+        let is2: u64 = h_ix[(i) as usize]
+        var k: u64 = i
+        while k > 0 && h_key[((k - 1)) as usize] > ks {
+            h_key[(k) as usize] = h_key[((k - 1)) as usize]
+            h_src[(k) as usize] = h_src[((k - 1)) as usize]
+            h_ix[(k) as usize] = h_ix[((k - 1)) as usize]
+            k = k - 1
+        }
+        h_key[(k) as usize] = ks
+        h_src[(k) as usize] = qs as u8
+        h_ix[(k) as usize] = is2
+        i = i + 1
+    }
+}
+
+// OHNE EINGABE: die haeufigsten Programme, bei Gleichstand das zuletzt
+// benutzte. Der Schluessel wird so gedreht, dass die STEIGENDE Sortierung
+// oben von selbst richtig steht.
+fn zuletzt_sammeln() {
+    var i: u64 = 0
+    while i < appdir.count() && nh < MAXH {
+        var k: u64 = 0
+        if i < 16 {
+            let c: u64 = zahl[(i) as usize]
+            var cc: u64 = c
+            if cc > 4000 {
+                cc = 4000
+            }
+            var ll: u64 = zletzt[(i) as usize]
+            if ll > 4000 {
+                ll = 4000
+            }
+            k = (4000 - cc) * 8192 + (4000 - ll)
+        } else {
+            k = 4000 * 8192 + 4000
+        }
+        h_src[(nh) as usize] = S_APP as u8
+        h_ix[(nh) as usize] = i
+        h_key[(nh) as usize] = k
+        nh = nh + 1
+        n_app = n_app + 1
+        i = i + 1
+    }
+}
+
+fn suchen() {
+    let t_a: u64 = now_us()
+    nh = 0
+    n_app = 0
+    n_file = 0
+    n_set = 0
+    qfn = fold((&q[0 as usize]) as u64, qn, (&qf[0 as usize]) as u64, QMAX)
+    if qfn == 0 {
+        zuletzt_sammeln()
+        sortieren()
+        find_us = now_us() -% t_a
+        return
+    }
+    // 1. die Programme
+    var i: u64 = 0
+    while i < appdir.count() && nh < MAXH {
+        var rk: u64 = rang(appdir.name_of(i), tlen(appdir.name_of(i)))
+        if rk == RK_NONE {
+            if drin(appdir.info_of(i)) || drin(appdir.keys_of(i)) {
+                rk = RK_OTHER
+            }
+        }
+        if rk != RK_NONE {
+            nimm(S_APP, i, rk)
+            n_app = n_app + 1
+        }
+        i = i + 1
+    }
+    // 2. die Dateien im Heimatverzeichnis
+    if idx_ok != 0 {
+        var k: u64 = 0
+        let n: u64 = nidx.count()
+        while k < n && nh < MAXH {
+            if unter[(k) as usize] == 1 as u8 && !nidx.is_dir_at(k) {
+                let p: u64 = name24(k)
+                let rk2: u64 = rang(p, tlen(p))
+                if rk2 != RK_NONE && rk2 != RK_OTHER {
+                    nimm(S_FILE, k, rk2)
+                    n_file = n_file + 1
+                }
+            }
+            k = k + 1
+        }
+    }
+    // 3. die Einstellungsseiten
+    var s2: u64 = 0
+    while s2 < setn && nh < MAXH {
+        let p2: u64 = seite_name(s2)
+        let rk3: u64 = rang(p2, tlen(p2))
+        if rk3 != RK_NONE && rk3 != RK_OTHER {
+            nimm(S_SET, s2, rk3)
+            n_set = n_set + 1
+        }
+        s2 = s2 + 1
+    }
+    sortieren()
+    find_us = now_us() -% t_a
+}
+
+// ---------------------------------------------- was in einer Zeile steht
+
+fn zeile_titel(i: u64) -> u64 {
+    let s2: u64 = h_src[(i) as usize] as u64
+    if s2 == S_APP {
+        return appdir.name_of(h_ix[(i) as usize])
+    }
+    if s2 == S_FILE {
+        return name24(h_ix[(i) as usize])
+    }
+    return seite_name(h_ix[(i) as usize])
+}
+
+fn zeile_unter(i: u64) -> u64 {
+    let s2: u64 = h_src[(i) as usize] as u64
+    if s2 == S_APP {
+        return appdir.info_of(h_ix[(i) as usize])
+    }
+    if s2 == S_FILE {
+        let _p: u64 = nidx.path_of(h_ix[(i) as usize],
+            (&pfad[0 as usize]) as u64, 250)
+        return (&pfad[0 as usize]) as u64
+    }
+    return msg.get((&k_set[0 as usize]) as u64)
+}
+
+// ABGESCHNITTEN WIRD EINMAL, UND GEMELDET WIRD DAS ABGESCHNITTENE.
+// Ein Fenster, das die lange Beschriftung meldet und die kurze malt,
+// besteht jeden Vergleich zwischen Meldung und Bild -- und beweist
+// nichts. Das ist die Lehre der Runde DESKTOP, hier zum wiederholten
+// Mal angewandt.
+fn kurz(p: u64, breite: u64) -> u64 {
+    let n: u64 = wlibc.fit(wlibc.F_UI, wlibc.PX_UI, p, tlen(p), breite)
+    let d: u64 = (&cut[0 as usize]) as u64
+    var k: u64 = 0
+    while k < n && k < 90 {
+        wr(d, k, rd(p, k))
+        k = k + 1
+    }
+    wr(d, k, 0)
+    return d
+}
+
+fn row_y(r: u64) -> u64 {
+    return LY + r * ROWH
+}
+
+// ------------------------------------------------------------- malen
+
+fn zeile_malen(r: u64, y0: u64, hh: u64, report: bool) {
+    let i: u64 = top_ + r
+    if i >= nh {
+        return
+    }
+    let ry: u64 = row_y(r)
+    if ry + ROWH <= y0 || ry >= y0 + hh {
+        return
+    }
+    let mine: bool = report && ry >= y0 && ry < y0 + hh
+    var fg: u64 = wlibc.theme(wlibc.C_MENU_TEXT)
+    var dim: u64 = wlibc.theme(wlibc.C_TEXT_MUTED)
+    var bg: u64 = wlibc.theme(wlibc.C_MENU_BG)
+    let ist_sel: bool = i == sel
+    if ist_sel {
+        bg = wlibc.theme(wlibc.C_SELECT_BG)
+        fg = wlibc.theme(wlibc.C_SELECT_TEXT)
+        dim = wlibc.theme(wlibc.C_SELECT_TEXT)
+        wlibc.rrect(PAD - 6, ry + 1, W - 2 * (PAD - 6), ROWH - 2,
+            wlibc.metric(wlibc.M_RADIUS_BUTTON), bg)
+    }
+    let ix: u64 = PAD + 2
+    let iy: u64 = ry + (ROWH - IC) / 2
+    let s2: u64 = h_src[(i) as usize] as u64
+    if s2 == S_APP {
+        let sy: u64 = appdir.symbol_load(h_ix[(i) as usize])
+        if wlibc.icon_ok(sy) {
+            let _d: bool = wlibc.icon_draw(sy, ix, iy)
+        } else {
+            kachel(ix, iy, sy, appdir.name_of(h_ix[(i) as usize]))
+        }
+    } else if s2 == S_FILE {
+        kachel(ix, iy, wlibc.theme(wlibc.C_TEXT_MUTED), name24(h_ix[(i) as usize]))
+    } else {
+        kachel(ix, iy, wlibc.theme(wlibc.C_ACCENT), seite_name(h_ix[(i) as usize]))
+    }
+    let tx: u64 = ix + IC + 12
+    let breit: u64 = W - tx - PAD - 4
+    let tb: u64 = ry + 6 + asc
+    let ub: u64 = ry + ROWH - 7
+    let t1: u64 = kurz(zeile_titel(i), breit)
+    let _e1: u64 = wlibc.text_at(wlibc.F_UI, wlibc.PX_UI, tx, tb, t1,
+        tlen(t1), fg)
+    var titel_kopie: [u8; 96] = [0 as u8; 96]
+    let tk: u64 = (&titel_kopie[0 as usize]) as u64
+    let _cp: u64 = ulib.strncpy(tk, t1, 94)
+    let t2: u64 = kurz(zeile_unter(i), breit)
+    let _e2: u64 = wlibc.text_at(wlibc.F_UI, wlibc.PX_UI, tx, ub, t2,
+        tlen(t2), dim)
+    if mine {
+        say((&s_ze[0 as usize]) as u64)
+        ulib.sayn(i)
+        kv((&s_sq[0 as usize]) as u64, s2)
+        kv((&s_rk[0 as usize]) as u64, h_key[(i) as usize] / 4)
+        kv((&s_x[0 as usize]) as u64, px_ + tx)
+        kv((&s_bs[0 as usize]) as u64, py_ + tb)
+        kv((&s_ix2[0 as usize]) as u64, px_ + ix)
+        kv((&s_iy[0 as usize]) as u64, py_ + iy)
+        if ist_sel {
+            kv((&s_se[0 as usize]) as u64, 1)
+        } else {
+            kv((&s_se[0 as usize]) as u64, 0)
+        }
+        say((&s_tx[0 as usize]) as u64)
+        say(tk)
+        say((&s_sb[0 as usize]) as u64)
+        say(t2)
+        say((&s_zu[0 as usize]) as u64)
+        ulib.nl()
+    }
+}
+
+// EIN PLAETTCHEN MIT DEM ERSTEN BUCHSTABEN, wenn ein Buendel kein Bild
+// mitbringt. Dasselbe, was die Widget-Bibliothek in einer Liste tut --
+// hier noch einmal, weil dieses Fenster keine Widgets benutzt (es hat
+// keine, es hat eine Zeichnung).
+fn kachel(x: u64, y: u64, farbe: u64, name: u64) {
+    wlibc.rrect(x, y, IC, IC, wlibc.metric(wlibc.M_RADIUS_INPUT) / 2,
+        farbe)
+    if name == 0 {
+        return
+    }
+    let c: u64 = rd(name, 0)
+    if c == 0 {
+        return
+    }
+    var eins: [u8; 5] = [0 as u8; 5]
+    let p: u64 = (&eins[0 as usize]) as u64
+    var n: u64 = 1
+    if c >= 0xC0 {
+        n = 2
+    }
+    var k: u64 = 0
+    while k < n {
+        wr(p, k, rd(name, k))
+        k = k + 1
+    }
+    wr(p, n, 0)
+    let bw: u64 = wlibc.text_w(wlibc.F_UI, wlibc.PX_UI, p, n)
+    var lx: u64 = x
+    if IC > bw {
+        lx = x + (IC - bw) / 2
+    }
+    let _t: u64 = wlibc.text_at(wlibc.F_UI, wlibc.PX_UI, lx,
+        y + (IC + asc) / 2 - 1, p, n, wlibc.theme(wlibc.C_ON_ACCENT))
+}
+
+fn band_malen(y0: u64, hh: u64, report: bool) {
+    wlibc.set_band(y0)
+    wlibc.clip_set(0, y0, W, y0 + hh)
+    wlibc.rect(0, y0, W, hh, wlibc.theme(wlibc.C_MENU_BG))
+    // EIN RAHMEN UM DAS GANZE, mit demselben Radius, den der
+    // Fensterserver aussen malt. Ohne ihn stehen Pop-up und Schreibtisch
+    // in einem dunklen Schema ohne Kante nebeneinander.
+    wlibc.rring(0, 0, W, H, wlibc.metric(wlibc.M_RADIUS_PANEL),
+        wlibc.metric(wlibc.M_BORDER), wlibc.theme(wlibc.C_BORDER))
+    // das Eingabefeld
+    if PAD + EH > y0 && PAD < y0 + hh {
+        let ew: u64 = W - 2 * PAD
+        wlibc.rrect(PAD, PAD, ew, EH, wlibc.metric(wlibc.M_RADIUS_INPUT),
+            wlibc.theme(wlibc.C_INPUT_BG))
+        wlibc.rring(PAD, PAD, ew, EH, wlibc.metric(wlibc.M_RADIUS_INPUT),
+            wlibc.metric(wlibc.M_FOCUS), wlibc.theme(wlibc.C_FOCUS_RING))
+        let bx: u64 = PAD + 12
+        let bb: u64 = PAD + (EH + asc) / 2 - 1
+        if qn == 0 {
+            let ph: u64 = msg.get((&k_ph[0 as usize]) as u64)
+            let _p: u64 = wlibc.text_at(wlibc.F_UI, wlibc.PX_UI, bx, bb,
+                ph, tlen(ph), wlibc.theme(wlibc.C_TEXT_MUTED))
+        } else {
+            let _p2: u64 = wlibc.text_at(wlibc.F_UI, wlibc.PX_UI, bx, bb,
+                (&q[0 as usize]) as u64, qn,
+                wlibc.theme(wlibc.C_INPUT_TEXT))
+        }
+        // DER BALKEN. Er steht hinter dem Getippten und ist zwei
+        // Bildpunkte breit -- das ist die Zahl, die `M_FOCUS` fuer den
+        // Satz `modern` hat, und aus demselben Grund: er ist das
+        // einzige hier, worauf sich jemand ohne Maus verlaesst.
+        let cw: u64 = wlibc.text_w(wlibc.F_UI, wlibc.PX_UI,
+            (&q[0 as usize]) as u64, qn)
+        wlibc.rect(bx + cw + 1, PAD + 8, 2, EH - 16,
+            wlibc.theme(wlibc.C_ACCENT))
+    }
+    var r: u64 = 0
+    while r < ROWS {
+        zeile_malen(r, y0, hh, report)
+        r = r + 1
+    }
+    // NICHTS GEFUNDEN -- und das steht da, statt dass die Liste leer
+    // bleibt. Eine leere Flaeche sagt nicht, ob gesucht wurde.
+    if nh == 0 {
+        let ry: u64 = row_y(0)
+        if ry + ROWH > y0 && ry < y0 + hh {
+            let p3: u64 = msg.get((&k_none[0 as usize]) as u64)
+            let _n: u64 = wlibc.text_at(wlibc.F_UI, wlibc.PX_UI,
+                PAD + 2, ry + 6 + asc, p3, tlen(p3),
+                wlibc.theme(wlibc.C_TEXT_MUTED))
+        }
+    }
+    let _p: u64 = wlibc.push(w_h, 0, y0, W, hh)
+}
+
+fn malen(report: bool) {
+    if open_ == 0 {
+        return
+    }
+    var y: u64 = 0
+    while y < H {
+        var hh: u64 = BAND
+        if y + hh > H {
+            hh = H - y
+        }
+        band_malen(y, hh, report)
+        y = y + hh
+    }
+    let _f: u64 = wlibc.sys3w(wlibc.WM_FLUSH, w_h, 0, 0)
+}
+
+// -------------------------------------------------------- das Fenster
+
+fn init() -> bool {
+    asc = wlibc.ascent_of(wlibc.F_UI, wlibc.PX_UI)
+    let h: u64 = wlibc.sys5(wlibc.WM_CREATE, 0, (W << 16) | H,
+        (&t_title[0 as usize]) as u64, 0, 0)
+    if ulib.bad(h) || h == 0 {
+        return false
+    }
+    w_h = h
+    // OHNE SCHMUCK, ABER SCHWEBEND. Die beiden sind seit dieser Runde
+    // zweierlei (`wm.F_FLOAT`): keine Titelleiste, aber der Schatten und
+    // der Eckenradius aus den Form-Token. Ein Suchfeld mit Titelleiste
+    // waere eine Anwendung; dies ist eine Frage.
+    let _d: u64 = wlibc.win_state(h, wlibc.WS_DECO, 0)
+    let _fl: u64 = wlibc.win_state(h, wlibc.WS_FLOAT, 1)
+    // L_NORMAL UND NICHT L_TOP, aus dem Grund, den `qs.fi` gemessen hat:
+    // der Fensterserver gibt die Tastatur NUR einem Fenster auf der
+    // normalen Ebene. Ein Suchfeld, in das man nicht tippen kann, waere
+    // kein Suchfeld -- und das hier lebt vom Tippen.
+    let _l: u64 = wlibc.win_state(h, wlibc.WS_LAYER, wlibc.L_NORMAL)
+    let _v: u64 = wlibc.win_state(h, wlibc.WS_HIDDEN, 1)
+    w_id = wlibc.sys3w(wlibc.WM_INFO, h, wlibc.WI_ID, 0)
+    say((&s_ini[0 as usize]) as u64)
+    kv((&s_w[0 as usize]) as u64, W)
+    kv((&s_h[0 as usize]) as u64, H)
+    kv((&s_id[0 as usize]) as u64, w_id)
+    ulib.nl()
+    seiten_lesen()
+    return true
+}
+
+// DER INDEX. Er wird EINMAL gebaut, wenn die Leiste steht, und danach
+// nur noch nachgezogen. Warum nicht beim ersten Oeffnen: dann waere das
+// erste Oeffnen genau um die Bauzeit langsamer, und das erste Oeffnen
+// ist das, an das sich ein Mensch erinnert.
+//
+// UND DIE GEGENPROBE STEHT DANEBEN: derselbe Suchbegriff einmal ueber
+// den Index und einmal ueber den Baumdurchlauf, beide Zeiten gemeldet.
+// Ohne diese zweite Zahl waere "ein Index ist schneller" eine
+// Behauptung.
+fn index_bauen(gegenprobe: u64) {
+    let t_a: u64 = now_us()
+    idx_n = nidx.build()
+    idx_us = now_us() -% t_a
+    heim_finden()
+    let u2: u64 = heim_markieren()
+    idx_ok = 1
+    say((&s_ix[0 as usize]) as u64)
+    ulib.sayn(idx_n)
+    kv((&s_us[0 as usize]) as u64, idx_us)
+    say((&s_hm[0 as usize]) as u64)
+    say((&heim[0 as usize]) as u64)
+    say((&s_zu[0 as usize]) as u64)
+    kv((&s_in[0 as usize]) as u64, heim_ino)
+    kv((&s_un[0 as usize]) as u64, u2)
+    ulib.nl()
+    if gegenprobe != 0 {
+        var wort: [u8; 4] = "e\0\0\0"
+        var tw2: [u8; 6144] = [0 as u8; 6144]
+        let t_b: u64 = now_us()
+        baum_n = nidx.walk_find((&wort[0 as usize]) as u64,
+            (&tw2[0 as usize]) as u64, 256)
+        baum_us = now_us() -% t_b
+        say((&s_bw[0 as usize]) as u64)
+        ulib.sayn(baum_us)
+        kv((&s_bn[0 as usize]) as u64, baum_n)
+        ulib.nl()
+    }
+    zahlen_lesen()
+}
+
+fn win_id() -> u64 {
+    return w_id
+}
+
+fn is_open() -> bool {
+    return open_ != 0
+}
+
+fn opens() -> u64 {
+    return opens_
+}
+
+fn treffer() -> u64 {
+    return nh
+}
+
+fn gewaehlt() -> u64 {
+    return sel
+}
+
+fn index_n() -> u64 {
+    return idx_n
+}
+
+fn index_us() -> u64 {
+    return idx_us
+}
+
+fn such_us() -> u64 {
+    return find_us
+}
+
+// WO DIE ARBEITSFLAECHE IST. Die Leiste sagt es, wie sie es `qs` sagt --
+// das Pop-up steht in der MITTE davon und nicht in der Mitte des
+// Schirms: ein Fenster, das den Schirm fuer die Flaeche haelt, sitzt bei
+// einer Leiste am oberen Rand um deren halbe Hoehe zu tief.
+fn anchor(wx: u64, wy: u64, ww: u64, wh: u64) {
+    a_x = wx
+    a_y = wy
+    a_w = ww
+    a_h = wh
+    place()
+}
+
+fn place() {
+    var x: u64 = a_x
+    var y: u64 = a_y
+    if a_w > W {
+        x = a_x + (a_w - W) / 2
+    }
+    if a_h > H {
+        y = a_y + (a_h - H) / 2
+    }
+    px_ = x
+    py_ = y
+    if open_ != 0 {
+        let _m: u64 = wlibc.sys3w(wlibc.WM_MOVE, w_h, (px_ << 16) | py_, 0)
+    }
+}
+
+fn hit(x: u64, y: u64) -> bool {
+    if open_ == 0 {
+        return false
+    }
+    return x >= px_ && x < px_ + W && y >= py_ && y < py_ + H
+}
+
+fn melde_suche() {
+    say((&s_qu[0 as usize]) as u64)
+    say((&q[0 as usize]) as u64)
+    kv((&s_qn[0 as usize]) as u64, qn)
+    kv((&s_qc[0 as usize]) as u64, wlibc.chars((&q[0 as usize]) as u64, qn))
+    kv((&s_tr[0 as usize]) as u64, nh)
+    kv((&s_ap[0 as usize]) as u64, n_app)
+    kv((&s_da[0 as usize]) as u64, n_file)
+    kv((&s_ei[0 as usize]) as u64, n_set)
+    kv((&s_us[0 as usize]) as u64, find_us)
+    ulib.nl()
+}
+
+fn open_at(when: u64) {
+    if open_ != 0 {
+        return
+    }
+    t0 = when
+    qn = 0
+    wr((&q[0 as usize]) as u64, 0, 0)
+    sel = 0
+    top_ = 0
+    esc_wait = 0
+    // NACHZIEHEN, NICHT NEU BAUEN. Was sich seit dem letzten Mal am
+    // Dateibaum geaendert hat, steht im Journal des Kerns; hat der Ring
+    // etwas verworfen, sagt `lost_seen` das, und DANN wird neu gebaut.
+    if idx_ok != 0 {
+        let gezogen: u64 = nidx.poll()
+        if nidx.lost_seen() != 0 {
+            idx_n = nidx.build()
+            let _u: u64 = heim_markieren()
+        } else if gezogen != 0 {
+            let _u2: u64 = heim_markieren()
+        }
+    }
+    suchen()
+    place()
+    let _m: u64 = wlibc.sys3w(wlibc.WM_MOVE, w_h, (px_ << 16) | py_, 0)
+    let _v: u64 = wlibc.win_state(w_h, wlibc.WS_HIDDEN, 0)
+    open_ = 1
+    opens_ = opens_ + 1
+    let t_up: u64 = now_ns()
+    // GEMALT, NICHT GEMELDET, UND DIE UHR HAELT HIER AN. Dieselbe Falle
+    // wie in `qs.fi`: `malen(true)` schreibt ein Dutzend Zeilen mit
+    // 115200 Baud, und stuende das INNERHALB der Messung, maesse die
+    // Zahl die serielle Leitung. Gemessen wird, worauf ein Mensch
+    // wartet: verschieben, zeigen, zeichnen.
+    malen(false)
+    let t_done: u64 = now_ns()
+    let _a: u64 = wlibc.win_act(w_id, wlibc.WA_RAISE)
+    say((&s_op[0 as usize]) as u64)
+    kv((&s_x[0 as usize]) as u64, px_)
+    kv((&s_y[0 as usize]) as u64, py_)
+    kv((&s_w[0 as usize]) as u64, W)
+    kv((&s_h[0 as usize]) as u64, H)
+    var d1: u64 = 0
+    if t0 != 0 && t_up > t0 {
+        d1 = (t_up -% t0) / 1000
+    }
+    kv((&s_up[0 as usize]) as u64, d1)
+    var d: u64 = 0
+    if t0 != 0 && t_done > t0 {
+        d = (t_done -% t0) / 1000
+    }
+    kv((&s_us[0 as usize]) as u64, d)
+    ulib.nl()
+    melde_suche()
+    malen(true)
+}
+
+fn shut(why: u64) {
+    if open_ == 0 {
+        return
+    }
+    open_ = 0
+    t0 = 0
+    esc_wait = 0
+    let _v: u64 = wlibc.win_state(w_h, wlibc.WS_HIDDEN, 1)
+    say((&s_cl[0 as usize]) as u64)
+    say(why)
+    ulib.nl()
+}
+
+fn toggle() {
+    if open_ != 0 {
+        shut((&s_key[0 as usize]) as u64)
+    } else {
+        open_at(now_ns())
+    }
+}
+
+// ------------------------------------------------------- die Tastatur
+
+fn sicht_richten() {
+    if sel >= nh {
+        if nh == 0 {
+            sel = 0
+        } else {
+            sel = nh - 1
+        }
+    }
+    if sel < top_ {
+        top_ = sel
+    }
+    if sel >= top_ + ROWS {
+        top_ = sel + 1 - ROWS
+    }
+}
+
+fn hoch() {
+    if nh == 0 {
+        return
+    }
+    if sel == 0 {
+        sel = nh - 1
+    } else {
+        sel = sel - 1
+    }
+    sicht_richten()
+}
+
+fn runter() {
+    if nh == 0 {
+        return
+    }
+    sel = sel + 1
+    if sel >= nh {
+        sel = 0
+    }
+    sicht_richten()
+}
+
+// EIN OKTETT ANHAENGEN. Der Kern schickt UTF-8, ein Umlaut kommt also in
+// ZWEI Ereignissen -- beide werden angehaengt, und `text_at` setzt sie
+// beim Malen wieder zusammen. Gesucht wird auf den gefalteten Oktetten,
+// und die Faltung kennt die zwei Oktette.
+fn tippen(c: u64) {
+    if qn + 1 >= QMAX {
+        return
+    }
+    wr((&q[0 as usize]) as u64, qn, c)
+    qn = qn + 1
+    wr((&q[0 as usize]) as u64, qn, 0)
+    sel = 0
+    top_ = 0
+    suchen()
+    sicht_richten()
+}
+
+// EIN ZEICHEN ZURUECK UND NICHT EIN OKTETT. Ein halber Umlaut im
+// Suchfeld waere ein Zeichen, das es nicht gibt -- und die Faltung
+// bekaeme ein Oktett 0xC3 ohne das zweite.
+fn loeschen() {
+    if qn == 0 {
+        return
+    }
+    var k: u64 = qn - 1
+    while k > 0 && (rd((&q[0 as usize]) as u64, k) & 0xC0) == 0x80 {
+        k = k - 1
+    }
+    qn = k
+    wr((&q[0 as usize]) as u64, qn, 0)
+    sel = 0
+    top_ = 0
+    suchen()
+    sicht_richten()
+}
+
+fn starten() {
+    if sel >= nh {
+        return
+    }
+    let s2: u64 = h_src[(sel) as usize] as u64
+    let ix: u64 = h_ix[(sel) as usize]
+    if s2 == S_FILE {
+        // EINE DATEI IST KEIN PROGRAMM. Was ein Doppelklick auf sie tun
+        // soll, entscheidet nicht dieses Fenster -- es sagt, welche es
+        // ist. Genau dieselbe Grenze zieht `/bin/launcher`.
+        let _p: u64 = nidx.path_of(ix, (&pfad[0 as usize]) as u64, 250)
+        say((&s_df[0 as usize]) as u64)
+        say((&pfad[0 as usize]) as u64)
+        say((&s_zu[0 as usize]) as u64)
+        ulib.nl()
+        shut((&s_run[0 as usize]) as u64)
+        return
+    }
+    if s2 == S_SET {
+        // DIE SEITE ALS ARGUMENT. `/bin/settings 6` macht die
+        // Sprachseite auf -- ein Treffer "Sprache", der die
+        // Einstellungen auf der Darstellungsseite oeffnet, waere ein
+        // halber Treffer.
+        var argv: [u64; 3] = [0 as u64; 3]
+        let np: u64 = (&nummer[0 as usize]) as u64
+        let nl: u64 = zahl_in(np, ix)
+        wr(np, nl, 0)
+        argv[(0) as usize] = (&p_set[0 as usize]) as u64
+        argv[(1) as usize] = np
+        let pid: u64 = ulib.sys(ulib.SYS_EXEC, (&p_set[0 as usize]) as u64,
+            (&argv[0 as usize]) as u64, 2)
+        say((&s_st[0 as usize]) as u64)
+        say(seite_name(ix))
+        kv((&s_nr[0 as usize]) as u64, ix)
+        kv((&s_pi[0 as usize]) as u64, pid)
+        ulib.nl()
+        shut((&s_run[0 as usize]) as u64)
+        return
+    }
+    var arg: [u8; 160] = [0 as u8; 160]
+    let _cp: u64 = ulib.strncpy((&arg[0 as usize]) as u64,
+        appdir.exec_of(ix), 150)
+    let pid: u64 = ulib.sys(ulib.SYS_SPAWN, (&arg[0 as usize]) as u64, 0, 0)
+    if ix < 16 {
+        zahl[(ix) as usize] = zahl[(ix) as usize] + 1
+        zseq = zseq + 1
+        zletzt[(ix) as usize] = zseq
+        zahlen_schreiben()
+        say((&s_zh[0 as usize]) as u64)
+        say(appdir.name_of(ix))
+        kv((&s_zn[0 as usize]) as u64, zahl[(ix) as usize])
+        ulib.nl()
+    }
+    say((&s_go[0 as usize]) as u64)
+    say((&arg[0 as usize]) as u64)
+    kv((&s_pi[0 as usize]) as u64, pid)
+    ulib.nl()
+    shut((&s_run[0 as usize]) as u64)
+}
+
+// EINE TASTE. Die Fluchtfolgen der Pfeiltasten sind der Grund, warum
+// das ein kleiner Automat ist und keine Kette von Vergleichen:
+//
+//   * die Pfeiltaste NACH OBEN ist das Oktett 14, seit Runde K6, und
+//     daran haengt Abschnitt 11 von tools/userland/run.sh.
+//   * alle anderen Pfeiltasten kommen als ESC [ <Buchstabe>, also in
+//     DREI Ereignissen.
+//   * die Fluchttaste ist ebenfalls 27.
+//
+// Die letzten beiden lassen sich beim ersten Oktett nicht auseinander-
+// halten. Also wird gewartet: kommt als naechstes eine eckige Klammer,
+// war es eine Folge; kommt in demselben Abholen nichts mehr, war es die
+// Fluchttaste. Das kostet im schlimmsten Fall EINEN Durchlauf der
+// Leiste (25 ms) -- und es kostet ihn nur der, der die Fluchttaste als
+// letzte Taste vor einer Pause drueckt.
+fn taste(c: u64) -> bool {
+    if esc_wait == 1 {
+        if c == 91 {
+            esc_wait = 2
+            return false
+        }
+        esc_wait = 0
+        shut((&s_esc[0 as usize]) as u64)
+        return true
+    }
+    if esc_wait == 2 {
+        esc_wait = 0
+        if c == 66 {
+            runter()
+            return true
+        }
+        if c == 65 {
+            hoch()
+            return true
+        }
+        // Alles andere in einer Folge (links, rechts, Anfang, Ende,
+        // Seite) waehlt nicht aus und tippt auch nicht.
+        return true
+    }
+    if c == 27 {
+        esc_wait = 1
+        return false
+    }
+    if c == 10 || c == 13 {
+        starten()
+        return true
+    }
+    if c == 8 || c == 127 {
+        loeschen()
+        return true
+    }
+    if c == 14 {
+        hoch()
+        return true
+    }
+    if c == 9 {
+        runter()
+        return true
+    }
+    if c >= 32 && c != 127 {
+        tippen(c)
+        return true
+    }
+    return false
+}
+
+// ----------------------------------------------------------- der Blick
+//
+// Einmal je Durchlauf der Leiste. Solange das Fenster zu ist, kostet es
+// EINEN Systemaufruf: den Blick auf den Riegel.
+fn step() -> bool {
+    var changed: bool = false
+    let seq: u64 = nv.hotkey_seq()
+    if seq != hk_last {
+        let was: u64 = hk_last
+        hk_last = seq
+        if was != 0 || seq == 1 {
+            // NUR DAS TIPPEN AUF DIE TASTE SELBST. `nv.HK_TAP` liegt
+            // ueber Unicode; ein Buchstabe kann diese Zahl nicht sein,
+            // und Super+A geht weiter an die Schnelleinstellungen.
+            if nv.hotkey_key() == nv.HK_TAP {
+                if open_ != 0 {
+                    shut((&s_key[0 as usize]) as u64)
+                } else {
+                    open_at(nv.hotkey_ns())
+                }
+                changed = true
+            }
+        }
+    }
+    if open_ == 0 {
+        return changed
+    }
+    var n: u64 = 0
+    var etwas: bool = false
+    while n < 32 && wlibc.sys3w(wlibc.WM_EVENT, w_h,
+        (&ev[0 as usize]) as u64, 0) == 1 {
+        let b: u64 = (&ev[0 as usize]) as u64
+        let typ: u64 = __mmio_read64((b) as *mut u64)
+        let d: u64 = __mmio_read64((b + 8) as *mut u64)
+        if typ == wlibc.EV_KEY {
+            // DAS ZEICHEN STEHT IN DEN BITS 32..47 UND NICHT BEI 0.
+            // Ein Ereigniswort traegt drei Zahlen; `qs.fi` hat zwei
+            // Laeufe gebraucht, um das herauszufinden, und es steht
+            // dort aufgeschrieben. Hier steht es zum zweiten Mal, weil
+            // die naechste Runde sonst dieselben zwei Laeufe braucht.
+            if taste((d >> 32) & 0xFFFF) {
+                etwas = true
+            }
+        } else if typ == wlibc.EV_DOWN {
+            klick((d >> 32) & 0xFFFF, (d >> 16) & 0xFFFF)
+            etwas = true
+        } else if typ == wlibc.EV_CLOSE {
+            shut((&s_esc[0 as usize]) as u64)
+            return true
+        }
+        n = n + 1
+    }
+    // DIE FLUCHTTASTE, EINEN DURCHLAUF SPAETER. Kam nach der 27 nichts
+    // mehr, war es keine Folge.
+    if esc_wait == 1 && n == 0 && open_ != 0 {
+        esc_wait = 0
+        shut((&s_esc[0 as usize]) as u64)
+        return true
+    }
+    if open_ == 0 {
+        return changed || etwas
+    }
+    if etwas {
+        melde_suche()
+        malen(true)
+        changed = true
+    }
+    // EIN DRUCK DANEBEN. Der Fensterserver erzaehlt einem Fenster vom
+    // Zeiger nur, solange der Zeiger DRIN ist -- ein Druck woanders
+    // erzeugt also kein Ereignis von uns. Nur die FLANKE zaehlt.
+    let btn: u64 = wlibc.mouse_btn() & 1
+    if btn != 0 && btn_last == 0 {
+        if !hit(wlibc.mouse_x(), wlibc.mouse_y()) {
+            shut((&s_out[0 as usize]) as u64)
+            changed = true
+        }
+    }
+    btn_last = btn
+    return changed
+}
+
+// EIN KLICK IN DIE LISTE. Die Maus darf mit; sie muss nicht.
+fn klick(sx: u64, sy: u64) {
+    if sy < py_ + LY {
+        return
+    }
+    let r: u64 = (sy - py_ - LY) / ROWH
+    if r >= ROWS {
+        return
+    }
+    if top_ + r >= nh {
+        return
+    }
+    if sel == top_ + r {
+        starten()
+        return
+    }
+    sel = top_ + r
+    sicht_richten()
+}

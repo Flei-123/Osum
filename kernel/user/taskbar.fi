@@ -76,6 +76,7 @@ import wlibc
 import icons
 import msg
 import qs
+import sucher
 
 export { u_start }
 
@@ -863,6 +864,12 @@ fn apply() {
     // bar reserved its edge -- and not the screen, so the panel appears
     // beside the bar on all four edges instead of under it on three.
     qs.anchor(cf_edge, wlibc.work_x(w_h), wlibc.work_y(w_h),
+        wlibc.work_w(w_h), wlibc.work_h(w_h))
+    // RUNDE SUPERSEARCH: dasselbe Rechteck fuer das Suchfeld, und aus
+    // demselben Grund. Es steht in der MITTE davon; bei einer Leiste am
+    // oberen Rand ist die Mitte des Schirms um deren halbe Hoehe zu
+    // tief.
+    sucher.anchor(wlibc.work_x(w_h), wlibc.work_y(w_h),
         wlibc.work_w(w_h), wlibc.work_h(w_h))
 }
 
@@ -1656,7 +1663,8 @@ fn list_read() -> bool {
                 // button in this bar -- but a panel that belongs to
                 // this bar must not stand beside the programs.
                 let own: u64 = __mmio_read64((b + wlibc.WL_ID) as *mut u64)
-                if layer == wlibc.L_NORMAL && own != qs.win_id() {
+                if layer == wlibc.L_NORMAL && own != qs.win_id()
+                    && own != sucher.win_id() {
                     let id: u64 = own
                     let fl: u64 = __mmio_read64((b + wlibc.WL_FLAGS) as *mut u64)
                     let fo: u64 = __mmio_read64((b + wlibc.WL_FOCUS) as *mut u64)
@@ -2615,6 +2623,7 @@ static mut z_task: [u8; 7] = "window\0"
 static mut z_none: [u8; 5] = "none\0"
 static mut z_qs: [u8; 6] = "quick\0"
 static mut s_noqs: [u8; 28] = "taskbar: no quick settings\0\0"
+static mut s_nosu: [u8; 26] = "taskbar: kein Suchfeld\0\0\0\0"
 
 fn click(x: u64, y: u64) {
     clicks = clicks + 1
@@ -2704,14 +2713,21 @@ static mut s_wt: [u8; 9] = " writes=\0"
 static mut s_title: [u8; 8] = "Taskbar\0"
 static mut s_theme: [u8; 11] = "/etc/theme\0"
 static mut a_once: [u8; 5] = "once\0"
+// RUNDE SUPERSEARCH: die Gegenprobe zum Index (ein ganzer
+// Baumdurchlauf) beim Start mitlaufen lassen.
+static mut a_baum: [u8; 8] = "mitbaum\0"
 
 fn u_start(args: u64) -> u64 {
     var once: bool = false
+    var mitbaum: u64 = 0
     let argc: u64 = ulib.arg_count(args)
     var a: u64 = 1
     while a < argc {
         if ulib.streq(ulib.arg_at(args, a), (&a_once[0 as usize]) as u64) {
             once = true
+        } else if ulib.streq(ulib.arg_at(args, a),
+            (&a_baum[0 as usize]) as u64) {
+            mitbaum = 1
         }
         a = a + 1
     }
@@ -2793,6 +2809,16 @@ fn u_start(args: u64) -> u64 {
         say((&s_noqs[0 as usize]) as u64)
         ulib.nl()
     }
+    // RUNDE SUPERSEARCH: das dritte Fenster dieses Prozesses. Auch es
+    // wird beim Start angelegt und versteckt gehalten -- aus genau dem
+    // Grund, den der Nachtrag darueber aufgeschrieben hat: gemessen
+    // wird die Zeit vom Tastendruck bis zum stehenden Fenster, und ein
+    // fork+exec haette diese Zahl in eine andere Groessenordnung
+    // gehoben.
+    if !sucher.init() {
+        say((&s_nosu[0 as usize]) as u64)
+        ulib.nl()
+    }
     apply()
     layout()
     paint(true)
@@ -2813,6 +2839,20 @@ fn u_start(args: u64) -> u64 {
     say((&s_fm[0 as usize]) as u64)
     ulib.sayn(wlibc.form_push())
     ulib.nl()
+    // ============================== RUNDE SUPERSEARCH: DER NAMENSINDEX
+    //
+    // HIER UND NICHT BEIM ERSTEN OEFFNEN. Der Aufbau kostet Zeit (die
+    // Zahl steht auf der seriellen Leitung); staende er im ersten
+    // Oeffnen, waere genau das Oeffnen langsam, an das sich ein Mensch
+    // erinnert. Er steht auch nicht VOR dem ersten Malen der Leiste:
+    // eine Leiste, die erst nach dem Dateibaum erscheint, laesst den
+    // Schirm laenger leer, als er sein muss.
+    //
+    // `mitbaum` laesst die Gegenprobe mitlaufen -- denselben Begriff
+    // einmal ueber den Index und einmal ueber den Baumdurchlauf. Sie
+    // ist nicht immer an, weil sie den Start um die Dauer eines ganzen
+    // Baumdurchlaufs verlaengert.
+    sucher.index_bauen(mitbaum)
     if once {
         return 0
     }
@@ -2842,6 +2882,7 @@ fn u_start(args: u64) -> u64 {
         // of `/etc/taskbar.conf` inside one process would be two
         // answers to one question.
         let _qsc: bool = qs.step()
+        let _suc: bool = sucher.step()
         let hw: u64 = qs.want_hide()
         if hw != 0 {
             if hw == 1 {
@@ -2959,6 +3000,10 @@ fn u_start(args: u64) -> u64 {
         // before anything looks at the latch. A second look here costs
         // one system call and takes the repaint out of the wait.
         let _qs2: bool = qs.step()
+        // UND DAS SUCHFELD EBENFALLS ZWEIMAL. Derselbe Grund wie eine
+        // Zeile darueber: eine Taste, die frueh in einem Durchlauf
+        // faellt, wartet sonst das ganze Neumalen der Leiste ab.
+        let _su2: bool = sucher.step()
         ulib.sleep_ms(25)
     }
     return 0
