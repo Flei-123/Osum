@@ -27,7 +27,8 @@ The format, from `kernel/fs.fi`:
 
 Usage:
     mkfs.py build <image> <blocks> [--v1] [--v3] [--inodes=<n>]
-                                   [--time=<t>] [--reserve=<n>] [<spec> ...]
+                                   [--time=<t>] [--reserve=<n>] [--journal]
+                                   [<spec> ...]
     mkfs.py where <image> <path>
     mkfs.py times <image> <path>
 
@@ -139,12 +140,20 @@ SB = dict(MAGIC=0, BSIZE=8, BLOCKS=16, INODES=24, BITMAP=32, ITABLE=40,
           # beide Runden haben unabhaengig voneinander denselben Versatz
           # gewaehlt. Der zweite Name bleibt stehen, weil die Werkzeuge
           # der Runde INSTALL ihn benutzen.
-          BITBLOCKS=72)
+          BITBLOCKS=72,
+          # RUNDE FSROBUST: wo das Journal liegt und wie viele
+          # Bloecke es hat. Eine Null heisst "kein Journal", und
+          # damit sagt jede Platte von vor dieser Runde von
+          # selbst das Richtige.
+          JSTART=104, JBLOCKS=112)
+# `kernel/ofsj.fi::BLOCKS_NEEDED` -- 1 Kopf + 8 Zieltafel + 512
+# Nutzlast + 1 Bestaetigung. Die ZWEITE Umsetzung derselben Zahl.
+J_BLOCKS = 522
 
 
 class Fs:
     def __init__(self, blocks, version=OFS_V2, inodes=INODE_COUNT,
-                 zeit=0, karten=0):
+                 zeit=0, karten=0, journal=0):
         self.inodes = inodes
         self.version = version
         self.zeit = zeit
@@ -187,7 +196,14 @@ class Fs:
         self.bmstart = BITMAP_BLOCK
         self.itable = self.bmstart + self.bmblocks
         self.itab_blocks = (inodes + self.ipb - 1) // self.ipb
-        self.data_start = self.itable + self.itab_blocks
+        # RUNDE FSROBUST: DER JOURNALBEREICH LIEGT ZWISCHEN INODETABELLE
+        # UND DATEN -- dieselbe Rechnung wie in `fs.format_as`. Er ist
+        # damit von selbst belegt: die Karte traegt alles vor
+        # `data_start` als besetzt ein. Ohne `--journal` ist er null,
+        # und dann ist das Abbild Oktett fuer Oktett das von vorher.
+        self.journal = J_BLOCKS if journal else 0
+        self.jstart = self.itable + self.itab_blocks if self.journal else 0
+        self.data_start = self.itable + self.itab_blocks + self.journal
         if blocks < self.data_start + 8:
             raise SystemExit("mkfs: a disk of %d blocks is too small for %d "
                              "inodes (the table alone takes %d)"
@@ -673,6 +689,11 @@ class Fs:
             self.p64(SB["ISIZE"], self.isize)
             self.p64(SB["DIRENT"], self.dirent)
             self.p64(SB["NAMELEN"], self.namelen)
+        if self.journal:
+            self.p64(SB["JSTART"], self.jstart)
+            self.p64(SB["JBLOCKS"], self.journal)
+        if self.version >= OFS_V3:
+            pass
         elif self.bmblocks > 1:
             # RUNDE INSTALL: in der Fassung 2 steht NUR diese eine Zahl
             # da, und auch sie nur, wenn sie etwas Neues sagt. Eine 0
@@ -864,6 +885,7 @@ def main(argv):
     zeit = 0
     reserve = 0
     karten = 0
+    journal = 0
     rest = []
     for spec in argv[4:]:
         if spec in ("--v1", "--v3"):
@@ -891,6 +913,9 @@ def main(argv):
         if spec.startswith("--karten="):
             karten = int(spec.split("=", 1)[1])
             continue
+        if spec == "--journal":
+            journal = 1
+            continue
         rest.append(spec)
     # RUNDE OFS3: DIE VORGABE BLEIBT FASSUNG 2. Das ist keine
     # Zaghaftigkeit -- Abschnitt 15d von `tools/k15/run.sh` baut dasselbe
@@ -903,7 +928,7 @@ def main(argv):
         v = OFS_V1
     if "--v3" in argv[4:]:
         v = OFS_V3
-    fs = Fs(blocks, v, inodes, zeit, karten)
+    fs = Fs(blocks, v, inodes, zeit, karten, journal)
     fs.format()
     if reserve:
         fs.reserve(reserve)
@@ -957,10 +982,11 @@ def main(argv):
         # Nullen und belegt keinen Block auf dem Wirt.
         f.truncate(fs.blocks * BS)
     print("mkfs: %s  blocks=%d free=%d inodes=%d/%d data=%d version=%d "
-          "bmblocks=%d isize=%d dirent=%d namelen=%d maxfile=%d"
+          "bmblocks=%d isize=%d dirent=%d namelen=%d maxfile=%d "
+          "jstart=%d jblocks=%d"
           % (image, blocks, fs.free_blocks(), fs.used_inodes(), fs.inodes,
              fs.data_start, fs.version, fs.bmblocks, fs.isize, fs.dirent,
-             fs.namelen, fs.max_file()))
+             fs.namelen, fs.max_file(), fs.jstart, fs.journal))
     return 0
 
 

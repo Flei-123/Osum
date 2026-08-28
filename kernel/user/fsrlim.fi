@@ -1,0 +1,285 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/fsrlim.fi -- RUNDE FSROBUST, Abschnitt 1: DIE GRENZEN VON
+// OFS, GEMESSEN STATT GESCHAETZT.
+//
+// docs/BACKUP-UI.md nennt fuer OFS eine Decke von 2 MiB je Datentraeger.
+// Diese Zahl ist seit Runde OFS3 falsch, aber "sie ist jetzt groesser"
+// ist keine Zahl. Also wird hier gemessen, und zwar IN RING 3, durch
+// dieselben Systemaufrufe, die jedes andere Programm benutzt.
+//
+//   fsrlim datei    DIE GROESSTE DATEI, per BINAERER SUCHE ueber die
+//                   Blocknummer: an Stelle i*512 ein Oktett schreiben
+//                   und sehen, ob es hineingeht. Die groesste Stelle,
+//                   an der das gelingt, plus einen Block, ist die
+//                   Antwort -- und einen Block weiter MUSS es scheitern,
+//                   sonst hat die Suche nichts gemessen. Ein
+//                   Zeigerbaum, dem eine Stufe fehlt, faellt hier auf;
+//                   eine Rechnung aus den Konstanten faende genau
+//                   diesen Fehler NICHT.
+//   fsrlim viele    WIE VIELE DATEIEN IN EIN VERZEICHNIS GEHEN. Anlegen,
+//                   bis es nicht mehr geht, mit Zwischenzeiten bei 250,
+//                   500, 1000 und 2000 -- die Zeiten sind selbst eine
+//                   Messung, denn `dir_find` und `dir_add` gehen das
+//                   Verzeichnis LINEAR durch, und damit waechst der
+//                   Preis quadratisch. Die Fehlernummer am Ende sagt,
+//                   WELCHE Decke zuschlug.
+//   fsrlim gross    DASS EIN VERZEICHNIS WIRKLICH EINE DATEI IST. Ein
+//                   auf dem WIRT gebautes Verzeichnis mit ueber
+//                   zwoelftausend Eintraegen -- groesser als die
+//                   doppelt indirekte Stufe traegt -- wird durchgezaehlt
+//                   und sein LETZTER Name geoeffnet.
+//   fsrlim weit     EIN BLOCK JENSEITS DER ALTEN DECKE. Auf einer
+//                   Platte, deren vordere Bloecke der Wirt als belegt
+//                   eingetragen hat, wird eine Datei angelegt; ihre
+//                   Blocknummer liest der Wirt danach aus dem Abbild.
+//
+// Jede Zeile hat die Form `fsrlim: <name> = <zahl>`.
+
+profile kernel
+
+import ulib
+import libc.io
+import libc.errno
+
+export { u_start }
+
+static mut buf: [u8; 512] = [0 as u8; 512];
+static mut ents: [u8; 4096] = [0 as u8; 4096];
+static mut letzter: [u8; 300] = [0 as u8; 300];
+static mut pfad: [u8; 64] = [0 as u8; 64];
+
+fn sag(name: u64, wert: u64) {
+    var s_kopf: [u8; 9] = "fsrlim: \0";
+    var s_gl: [u8; 4] = " = \0";
+    ulib.say((&s_kopf[0 as usize]) as u64);
+    ulib.say(name);
+    ulib.say((&s_gl[0 as usize]) as u64);
+    ulib.sayu(wert);
+    ulib.nl();
+}
+
+// EIN Oktett an Stelle `pos`. Rueckgabe: 1, wenn es wirklich
+// hineingegangen ist. `io.write` gibt zurueck, was WIRKLICH geschrieben
+// wurde -- eine 0 heisst, dass `file_block` keinen Block mehr hergab.
+fn schreib_bei(fd: u64, pos: u64) -> u64 {
+    if errno.failed(io.seek(fd, pos, 0)) {
+        return 0;
+    }
+    buf[(0) as usize] = 88 as u8;
+    let n: u64 = io.write(fd, (&buf[0 as usize]) as u64, 1);
+    if errno.failed(n) {
+        return 0;
+    }
+    if n != 1 {
+        return 0;
+    }
+    return 1;
+}
+
+fn geometrie() {
+    var n_bs: [u8; 4] = "bs\0\0";
+    var n_blocks: [u8; 8] = "blocks\0\0";
+    var n_bfree: [u8; 7] = "bfree\0\0";
+    var n_inodes: [u8; 8] = "inodes\0\0";
+    var n_iused: [u8; 7] = "iused\0\0";
+    sag((&n_bs[0 as usize]) as u64,
+        ulib.sys(ulib.SYS_SYSINFO, ulib.I_BSIZE, 0, 0));
+    sag((&n_blocks[0 as usize]) as u64,
+        ulib.sys(ulib.SYS_SYSINFO, ulib.I_BLOCKS, 0, 0));
+    sag((&n_bfree[0 as usize]) as u64,
+        ulib.sys(ulib.SYS_SYSINFO, ulib.I_BFREE, 0, 0));
+    sag((&n_inodes[0 as usize]) as u64,
+        ulib.sys(ulib.SYS_SYSINFO, ulib.I_INODES, 0, 0));
+    sag((&n_iused[0 as usize]) as u64,
+        ulib.sys(ulib.SYS_SYSINFO, ulib.I_IUSED, 0, 0));
+}
+
+fn tut_datei() {
+    var n_maxidx: [u8; 8] = "maxidx\0\0";
+    var n_maxfile: [u8; 9] = "maxfile\0\0";
+    var n_ueber: [u8; 7] = "ueber\0\0";
+    var maxidx: u64 = 0;
+    var ueber: u64 = 0;
+    var p_g: [u8; 12] = "/tmp/lim.d\0\0";
+    let fd: u64 = io.create((&p_g[0 as usize]) as u64);
+    if !errno.failed(fd) {
+        var lo: u64 = 0;
+        var hi: u64 = 1048576;
+        if schreib_bei(fd, 0) != 1 {
+            hi = 0;
+        }
+        while lo + 1 < hi {
+            let mid: u64 = lo + (hi - lo) / 2;
+            if schreib_bei(fd, mid * 512) == 1 {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        maxidx = lo;
+        ueber = schreib_bei(fd, (lo + 1) * 512);
+        io.close(fd);
+    }
+    sag((&n_maxidx[0 as usize]) as u64, maxidx);
+    sag((&n_maxfile[0 as usize]) as u64, (maxidx + 1) * 512);
+    sag((&n_ueber[0 as usize]) as u64, ueber);
+    io.unlink((&p_g[0 as usize]) as u64);
+}
+
+fn zeit_ms() -> u64 {
+    return ulib.sys(ulib.SYS_SYSINFO, ulib.I_TICKS, 0, 0);
+}
+
+fn tut_viele() {
+    var n_files: [u8; 7] = "files\0\0";
+    var n_ferr: [u8; 6] = "ferr\0\0";
+    var n_t250: [u8; 6] = "t250\0\0";
+    var n_t500: [u8; 6] = "t500\0\0";
+    var n_t1000: [u8; 7] = "t1000\0\0";
+    var n_t2000: [u8; 7] = "t2000\0\0";
+    var p_d: [u8; 6] = "/viel\0";
+    io.make_dir((&p_d[0 as usize]) as u64);
+    let t0: u64 = zeit_ms();
+    var t250: u64 = 0;
+    var t500: u64 = 0;
+    var t1000: u64 = 0;
+    var t2000: u64 = 0;
+    var gemacht: u64 = 0;
+    var ferr: u64 = 0;
+    var k: u64 = 0;
+    var weiter: bool = true;
+    while weiter && k < 40000 {
+        var p_f: [u8; 14] = "/viel/f00000\0\0";
+        p_f[(7) as usize] = (48 + (k / 10000) % 10) as u8;
+        p_f[(8) as usize] = (48 + (k / 1000) % 10) as u8;
+        p_f[(9) as usize] = (48 + (k / 100) % 10) as u8;
+        p_f[(10) as usize] = (48 + (k / 10) % 10) as u8;
+        p_f[(11) as usize] = (48 + k % 10) as u8;
+        let f: u64 = io.create((&p_f[0 as usize]) as u64);
+        if errno.failed(f) {
+            ferr = errno.negated(f);
+            weiter = false;
+        } else {
+            io.close(f);
+            gemacht = gemacht + 1;
+            if gemacht == 250 {
+                t250 = zeit_ms() - t0;
+            }
+            if gemacht == 500 {
+                t500 = zeit_ms() - t0;
+            }
+            if gemacht == 1000 {
+                t1000 = zeit_ms() - t0;
+            }
+            if gemacht == 2000 {
+                t2000 = zeit_ms() - t0;
+                weiter = false;
+            }
+        }
+        k = k + 1;
+    }
+    sag((&n_files[0 as usize]) as u64, gemacht);
+    sag((&n_ferr[0 as usize]) as u64, ferr);
+    sag((&n_t250[0 as usize]) as u64, t250);
+    sag((&n_t500[0 as usize]) as u64, t500);
+    sag((&n_t1000[0 as usize]) as u64, t1000);
+    sag((&n_t2000[0 as usize]) as u64, t2000);
+}
+
+fn tut_gross() {
+    var n_dents: [u8; 7] = "dents\0\0";
+    var n_dlast: [u8; 7] = "dlast\0\0";
+    var dents: u64 = 0;
+    var dlast: u64 = 0;
+    var p_gr: [u8; 7] = "/gross\0";
+    let dd: u64 = io.dir_open((&p_gr[0 as usize]) as u64);
+    if !errno.failed(dd) {
+        var going: bool = true;
+        while going {
+            let n: u64 = io.dir_read(dd, (&ents[0 as usize]) as u64, 4096);
+            if n == 0 || errno.failed(n) {
+                going = false;
+            } else {
+                var at: u64 = 0;
+                while at < n {
+                    let rec: u64 = (&ents[0 as usize]) as u64 + at;
+                    ulib.strcpy((&letzter[0 as usize]) as u64,
+                        io.dir_name(rec));
+                    dents = dents + 1;
+                    at = at + io.dir_reclen(rec);
+                }
+            }
+        }
+        io.close(dd);
+        // Der LETZTE Name, der herauskam, muss sich auch oeffnen
+        // lassen. Ein Verzeichnis, das Namen ausgibt, zu denen es keine
+        // Datei gibt, waere schlimmer als eines, das gar nichts ausgibt.
+        ulib.strcpy((&pfad[0 as usize]) as u64, (&p_gr[0 as usize]) as u64);
+        var s_slash: [u8; 2] = "/\0";
+        ulib.strcat((&pfad[0 as usize]) as u64, (&s_slash[0 as usize]) as u64);
+        ulib.strcat((&pfad[0 as usize]) as u64, (&letzter[0 as usize]) as u64);
+        let lf: u64 = io.open((&pfad[0 as usize]) as u64, 0);
+        if !errno.failed(lf) {
+            dlast = 1;
+            io.close(lf);
+        }
+    }
+    sag((&n_dents[0 as usize]) as u64, dents);
+    sag((&n_dlast[0 as usize]) as u64, dlast);
+}
+
+// EIN BLOCK WEIT HINTEN. Der Wirt hat die vorderen Bloecke der Platte
+// belegt; was hier angelegt wird, muss also dort landen, wo es in
+// Fassung 2 gar kein Bit gaebe. Die Blocknummer selbst liest der Wirt
+// hinterher aus dem Abbild -- dieses Programm schreibt nur ein Muster
+// hinein, das man wiedererkennt.
+fn tut_weit() {
+    var n_weit: [u8; 6] = "weit\0\0";
+    var n_wgr: [u8; 6] = "wgr\0\0\0";
+    var p_w: [u8; 11] = "/tmp/weit\0\0";
+    var ok: u64 = 0;
+    let fd: u64 = io.create((&p_w[0 as usize]) as u64);
+    if !errno.failed(fd) {
+        var i: u64 = 0;
+        while i < 512 {
+            buf[(i) as usize] = (65 + (i % 26)) as u8;
+            i = i + 1;
+        }
+        if io.write(fd, (&buf[0 as usize]) as u64, 512) == 512 {
+            ok = 1;
+        }
+        io.close(fd);
+    }
+    sag((&n_weit[0 as usize]) as u64, ok);
+    sag((&n_wgr[0 as usize]) as u64,
+        io.size_of((&p_w[0 as usize]) as u64));
+}
+
+fn u_start(args: u64) -> u64 {
+    var n_ende: [u8; 6] = "ende\0\0";
+    var w_datei: [u8; 6] = "datei\0";
+    var w_viele: [u8; 6] = "viele\0";
+    var w_gross: [u8; 6] = "gross\0";
+    var w_weit: [u8; 5] = "weit\0";
+    geometrie();
+    let argc: u64 = ulib.arg_count(args);
+    var i: u64 = 1;
+    while i < argc {
+        let a: u64 = ulib.arg_at(args, i);
+        if ulib.streq(a, (&w_datei[0 as usize]) as u64) {
+            tut_datei();
+        }
+        if ulib.streq(a, (&w_viele[0 as usize]) as u64) {
+            tut_viele();
+        }
+        if ulib.streq(a, (&w_gross[0 as usize]) as u64) {
+            tut_gross();
+        }
+        if ulib.streq(a, (&w_weit[0 as usize]) as u64) {
+            tut_weit();
+        }
+        i = i + 1;
+    }
+    sag((&n_ende[0 as usize]) as u64, 1);
+    return 0;
+}

@@ -1,0 +1,606 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/ofsj.fi -- RUNDE FSROBUST: DAS JOURNAL VON OFS.
+//
+// ==================================================================
+// WARUM EIN JOURNAL UND NICHT COPY-ON-WRITE
+// ==================================================================
+//
+// Der Auftrag dieser Runde laesst die Wahl zwischen beidem. Sie faellt
+// auf das Journal, und zwar aus drei Gruenden, die alle in `fs.fi`
+// stehen und nicht in einer Vorliebe:
+//
+//   1. IN OFS *IST* DIE INODENUMMER DIE STELLE AUF DER PLATTE.
+//      `inode_block_of` rechnet `itable + ino / ipb`, und `ofs.fi`
+//      gibt der VFS-Schicht die Inodenummer als KNOTEN heraus. Copy-on-
+//      Write heisst, dass ein geaenderter Inode woanders landet -- also
+//      entweder eine Umleitungstafel (eine zweite Datenstruktur, die
+//      selbst atomar geschrieben werden muesste) oder eine neue
+//      Inodenummer bei jedem Schreiben. Das zweite bricht `stat`, den
+//      Namensindex aus Runde K15, den harten Verweis und die Zusage
+//      "umbenannt und nicht kopiert" aus Runde OFS3, die die
+//      Inodenummer vor und nach `rename` vergleicht. Das erste ist ein
+//      halbes Dateisystem mehr.
+//   2. COW BRAUCHT MEHR ALS EIN BIT JE BLOCK. Solange die alte und die
+//      neue Wurzel gleichzeitig gelten, gehoert ein Block beiden. Die
+//      Karte von OFS hat EIN Bit je Block; sie muesste ein Zaehler
+//      werden, und damit aendert sich das Format fuer JEDE bestehende
+//      Platte. Das Journal aendert am Format nichts als zwei Woerter im
+//      Superblock, die vorher null waren -- und eine Null heisst dort
+//      seit Runde K13 "wie vorher".
+//   3. DER AUFTRAG BESCHREIBT DAS JOURNAL WOERTLICH: "erst Absicht
+//      protokollieren, dann ausfuehren, dann Eintrag loeschen". Genau
+//      diese drei Schritte stehen unten als `commit`, `checkpoint` und
+//      `clear`.
+//
+// WAS COW BESSER KOENNTE, und das gehoert dazu: es schreibt jeden Block
+// EINMAL, das Journal schreibt ihn ZWEIMAL. Der Preis ist gemessen und
+// steht in docs/OFS-JOURNAL.md.
+//
+// ==================================================================
+// DAS VERFAHREN
+// ==================================================================
+//
+// Ein Redo-Journal mit sofortigem Nachtragen (ext3 nennt es
+// "data=journal"). Eine Umschreibung laeuft so:
+//
+//   1. ABSICHT.   Jeder Block, den das Dateisystem schreiben will,
+//                 geht ZUERST in den Journalbereich, an einen Platz.
+//                 Der Platz merkt sich, WOHIN der Block spaeter
+//                 gehoert.
+//   2. BESTAETIGEN. Kopfblock und Zieltafel werden geschrieben, dann
+//                 -- als LETZTES und in EINEM Sektor -- der
+//                 Bestaetigungsblock mit Folgenummer und Pruefsumme.
+//                 Dieser eine Sektor ist der Kippschalter: davor gilt
+//                 der alte Zustand, danach der neue.
+//   3. NACHTRAGEN. Jeder Platz wird an sein Ziel geschrieben. Das ist
+//                 die eigentliche Aenderung der Platte.
+//   4. LOESCHEN.  Der Bestaetigungsblock wird genullt. Jetzt gibt es
+//                 nichts mehr nachzutragen.
+//
+// UND DAS IST DIE GANZE FALLUNTERSCHEIDUNG NACH EINEM STROMAUSFALL:
+//
+//   Strom weg in 1 oder 2 -> keine gueltige Bestaetigung -> es wird
+//     NICHTS nachgetragen. Auf der Platte steht der alte Zustand, und
+//     der war in sich stimmig, weil Schritt 3 noch nicht begonnen hat.
+//   Strom weg in 3 -> gueltige Bestaetigung -> ALLES wird nachgetragen,
+//     auch das, was schon dastand. Das Nachtragen ist wiederholbar:
+//     denselben Block noch einmal mit demselben Inhalt zu ueberschreiben
+//     aendert nichts.
+//   Strom weg in 4 -> wie in 3: es wird noch einmal nachgetragen, und
+//     danach geloescht.
+//
+// DIE PRUEFSUMME IST NICHT SCHMUCK. Ein Bestaetigungssektor, der halb
+// geschrieben wurde, koennte die Kennung schon tragen und die Zahlen
+// noch nicht. Ohne Pruefsumme wuerde ein solcher Rest als gueltig
+// gelesen und Muell nachgetragen. Mit ihr faellt er durch, und es gilt
+// der alte Zustand -- der richtige.
+//
+// WAS DAS NICHT KANN, und es steht auch in docs/OFS-JOURNAL.md:
+// es rettet nichts vor einer Platte, die MELDET, geschrieben zu haben,
+// ohne es getan zu haben, und es rettet nichts vor einem Sektor, den
+// die Platte selbst zerlegt zurueckgibt (ausser dem
+// Bestaetigungssektor, den die Pruefsumme deckt).
+
+profile kernel
+
+import kstate
+import blk
+
+export {
+    setup, disable, enabled, begin, commit, abort, write, read,
+    replay, needed, room, slots, zaehler, chunk, clear,
+    J_TX, J_REPLAY, J_RBLOCKS, J_CHUNKS, J_WRITES, J_HITS,
+    HEAD_MAGIC, COMMIT_MAGIC, MAX_SLOTS, BLOCKS_NEEDED
+}
+
+const BS: u64 = 512
+
+// "OFSJHEAD" und "OFSJCOMM", kleinendig als Zahl -- ein Name, der
+// nirgends hinzeigt.
+const HEAD_MAGIC: u64 = 0x444145484A53464F
+const COMMIT_MAGIC: u64 = 0x4D4D4F434A53464F
+
+// Wie viele Bloecke EINE Umschreibung hoechstens traegt. 512 Bloecke
+// sind 256 KiB Nutzlast; eine Zieltafel von 512 Zahlen sind acht
+// Bloecke. Die Zahl ist eine Wahl und keine Naturkonstante: sie legt
+// fest, wie gross ein `write` hoechstens sein darf, um GANZ oder GAR
+// NICHT zu geschehen. Was groesser ist, wird in Stuecke zerlegt, und
+// jedes Stueck ist fuer sich unteilbar.
+const MAX_SLOTS: u64 = 512
+const TGT_BLOCKS: u64 = 8 // 512 Ziele * 8 Oktette / 512
+const BLOCKS_NEEDED: u64 = 522 // 1 Kopf + 8 Ziele + 512 Nutzlast + 1 Bestaetigung
+
+// Die Zahlen im Kopf- und im Bestaetigungsblock.
+const H_MAGIC: u64 = 0
+const H_SEQ: u64 = 8
+const H_COUNT: u64 = 16
+const H_SUM: u64 = 24
+
+// Die Skalare in kdata.
+const J_ON: u64 = 0
+const J_START: u64 = 8
+const J_BLOCKS: u64 = 16
+const J_DEPTH: u64 = 24
+const J_COUNT: u64 = 32
+const J_SEQ: u64 = 40
+const J_FULL: u64 = 48
+const J_OFFBIT: u64 = 56
+// Die Zaehler. Sie stehen hier und nicht in `fs.fi`, weil sie die
+// Vorgaenge DIESER Schicht zaehlen; `tools/fsrobust/run.sh` liest sie.
+const J_TX: u64 = 64
+const J_REPLAY: u64 = 72
+const J_RBLOCKS: u64 = 80
+const J_CHUNKS: u64 = 88
+const J_WRITES: u64 = 96
+const J_HITS: u64 = 104
+
+const TGT_OFF: u64 = 0x1000 // 512 Ziele zu acht Oktetten
+const HSH_OFF: u64 = 0x2000 // 512 Streuwerte zu acht Oktetten
+
+fn g(state: u64, off: u64) -> u64 {
+    return kstate.get(state, kstate.JR_OFF + off)
+}
+
+fn s(state: u64, off: u64, v: u64) {
+    kstate.set(state, kstate.JR_OFF + off, v)
+}
+
+fn zaehler(state: u64, welcher: u64) -> u64 {
+    return g(state, welcher)
+}
+
+fn get64(p: u64) -> u64 {
+    return __mmio_read64(p as *mut u64)
+}
+
+fn put64(p: u64, v: u64) {
+    __mmio_write64(p as *mut u64, v)
+}
+
+fn tgt(state: u64, i: u64) -> u64 {
+    return kstate.get(state, kstate.JR_OFF + TGT_OFF + i * 8)
+}
+
+fn tgt_set(state: u64, i: u64, v: u64) {
+    kstate.set(state, kstate.JR_OFF + TGT_OFF + i * 8, v)
+}
+
+fn hsh(state: u64, i: u64) -> u64 {
+    return kstate.get(state, kstate.JR_OFF + HSH_OFF + i * 8)
+}
+
+fn hsh_set(state: u64, i: u64, v: u64) {
+    kstate.set(state, kstate.JR_OFF + HSH_OFF + i * 8, v)
+}
+
+// ------------------------------------------------------- die Pruefsumme
+//
+// FNV-1a ueber 64-Bit-Woerter. Sie ist keine kryptographische Summe und
+// soll keine sein: sie soll einen HALB geschriebenen Sektor von einem
+// ganzen unterscheiden, und dafuer reicht sie. Wer einen Angreifer
+// abwehren will, der die Platte gezielt aendert, braucht die Signatur
+// aus Runde UPDATE und nicht dies hier.
+const FNV_OFF: u64 = 0xCBF29CE484222325
+const FNV_PRIME: u64 = 0x100000001B3
+
+fn mix(h: u64, v: u64) -> u64 {
+    return (h ^ v) * FNV_PRIME
+}
+
+fn block_hash(p: u64) -> u64 {
+    var h: u64 = FNV_OFF
+    var i: u64 = 0
+    while i < BS / 8 {
+        h = mix(h, get64(p + i * 8))
+        i = i + 1
+    }
+    return h
+}
+
+// ------------------------------------------------------ die Plattenlage
+fn head_blk(state: u64) -> u64 {
+    return g(state, J_START)
+}
+
+fn tgt_blk(state: u64, k: u64) -> u64 {
+    return g(state, J_START) + 1 + k
+}
+
+fn pay_blk(state: u64, i: u64) -> u64 {
+    return g(state, J_START) + 1 + TGT_BLOCKS + i
+}
+
+fn commit_blk(state: u64) -> u64 {
+    return g(state, J_START) + 1 + TGT_BLOCKS + MAX_SLOTS
+}
+
+// Ein Arbeitsblock. Er liegt in kdata und nicht auf dem Kernstapel: ein
+// Kernstapel hat 8 KiB, und `fs.fi` haelt schon sieben Bloecke.
+fn scratch(state: u64) -> u64 {
+    return state + kstate.JR_OFF + 0x800
+}
+
+fn scratch2(state: u64) -> u64 {
+    return state + kstate.JR_OFF + 0xA00
+}
+
+fn zero(p: u64, n: u64) {
+    var i: u64 = 0
+    while i < n {
+        kstate.set8(p + i, 0 as u8)
+        i = i + 1
+    }
+}
+
+fn copy(from: u64, to: u64, n: u64) {
+    var i: u64 = 0
+    while i < n {
+        kstate.set8(to + i, kstate.get8(from + i) as u8)
+        i = i + 1
+    }
+}
+
+fn needed() -> u64 {
+    return BLOCKS_NEEDED
+}
+
+fn enabled(state: u64) -> bool {
+    return g(state, J_ON) == 1
+}
+
+fn slots(state: u64) -> u64 {
+    return g(state, J_COUNT)
+}
+
+fn room(state: u64) -> u64 {
+    let n: u64 = g(state, J_COUNT)
+    if n >= MAX_SLOTS {
+        return 0
+    }
+    return MAX_SLOTS - n
+}
+
+fn disable(state: u64) {
+    s(state, J_ON, 0)
+    s(state, J_DEPTH, 0)
+    s(state, J_COUNT, 0)
+    s(state, J_FULL, 0)
+}
+
+// Das Journal dieses Datentraegers anmelden. `jstart` und `jblocks`
+// kommen aus dem Superblock; eine Null in einem der beiden heisst "kein
+// Journal", und damit verhaelt sich jede Platte von vor dieser Runde
+// Oktett fuer Oktett wie vorher.
+fn setup(state: u64, jstart: u64, jblocks: u64) -> bool {
+    s(state, J_DEPTH, 0)
+    s(state, J_COUNT, 0)
+    s(state, J_FULL, 0)
+    s(state, J_ON, 0)
+    if jstart == 0 || jblocks < BLOCKS_NEEDED {
+        return false
+    }
+    if kstate.mode_on(state, kstate.O_NOJRNL) {
+        s(state, J_START, jstart)
+        s(state, J_BLOCKS, jblocks)
+        return false
+    }
+    s(state, J_START, jstart)
+    s(state, J_BLOCKS, jblocks)
+    s(state, J_ON, 1)
+    return true
+}
+
+// ------------------------------------------------------ die Umschreibung
+
+fn begin(state: u64) {
+    if !enabled(state) {
+        return
+    }
+    let d: u64 = g(state, J_DEPTH)
+    if d == 0 {
+        s(state, J_COUNT, 0)
+        s(state, J_FULL, 0)
+    }
+    s(state, J_DEPTH, d + 1)
+}
+
+// Der Platz, an dem `lba` in dieser Umschreibung liegt. 0xFFFF... heisst
+// "noch keiner". Die Suche ist geradeaus und ueber hoechstens 512
+// Eintraege -- im Speicher, ohne Plattenzugriff. Ein Blockindex waere
+// schneller und waere eine zweite Datenstruktur, die stimmen muss;
+// gemessen kostet die Suche nichts, was neben einem PIO-Sektor
+// auffiele.
+const KEIN: u64 = 0xFFFFFFFFFFFFFFFF
+
+fn find(state: u64, lba: u64) -> u64 {
+    let n: u64 = g(state, J_COUNT)
+    var i: u64 = 0
+    while i < n {
+        if tgt(state, i) == lba {
+            return i
+        }
+        i = i + 1
+    }
+    return KEIN
+}
+
+// EIN BLOCK IN DIE ABSICHT. Rueckgabe false heisst: kein Platz mehr --
+// der Aufrufer muss die Umschreibung schliessen und eine neue anfangen
+// (das tut `fs.write_at`) oder aufgeben.
+fn write(state: u64, lba: u64, src: u64) -> bool {
+    if !enabled(state) || g(state, J_DEPTH) == 0 {
+        return blk.write(state, lba, src)
+    }
+    s(state, J_WRITES, g(state, J_WRITES) + 1)
+    var i: u64 = find(state, lba)
+    if i == KEIN {
+        let n: u64 = g(state, J_COUNT)
+        if n >= MAX_SLOTS {
+            s(state, J_FULL, 1)
+            return false
+        }
+        i = n
+        tgt_set(state, i, lba)
+        s(state, J_COUNT, n + 1)
+    } else {
+        s(state, J_HITS, g(state, J_HITS) + 1)
+    }
+    if !blk.write(state, pay_blk(state, i), src) {
+        s(state, J_FULL, 1)
+        return false
+    }
+    hsh_set(state, i, block_hash(src))
+    return true
+}
+
+// EIN BLOCK ZURUECK. Steht er in der laufenden Umschreibung, kommt er
+// AUS DEM JOURNAL -- sonst saehe `block_alloc` sein eigenes Bit nicht
+// und gaebe denselben Block zweimal her.
+fn read(state: u64, lba: u64, dst: u64) -> bool {
+    if enabled(state) && g(state, J_DEPTH) != 0 {
+        let i: u64 = find(state, lba)
+        if i != KEIN {
+            return blk.read(state, pay_blk(state, i), dst)
+        }
+    }
+    return blk.read(state, lba, dst)
+}
+
+fn abort(state: u64) {
+    let d: u64 = g(state, J_DEPTH)
+    if d > 0 {
+        s(state, J_DEPTH, d - 1)
+    }
+    if g(state, J_DEPTH) == 0 {
+        s(state, J_COUNT, 0)
+        s(state, J_FULL, 0)
+    }
+}
+
+// BESTAETIGEN, NACHTRAGEN, LOESCHEN. Rueckgabe: false, wenn etwas an
+// der Platte gescheitert ist.
+fn commit(state: u64) -> bool {
+    if !enabled(state) {
+        return true
+    }
+    let d: u64 = g(state, J_DEPTH)
+    if d > 1 {
+        s(state, J_DEPTH, d - 1)
+        return true // eingeschachtelt: der aeussere schliesst ab
+    }
+    s(state, J_DEPTH, 0)
+    let n: u64 = g(state, J_COUNT)
+    if n == 0 {
+        return true
+    }
+    // Eine Umschreibung, in der ein Schreibversuch ins Leere ging, wird
+    // NICHT bestaetigt. Auf der Platte bleibt der alte Zustand.
+    if g(state, J_FULL) == 1 {
+        s(state, J_COUNT, 0)
+        s(state, J_FULL, 0)
+        return false
+    }
+    let seq: u64 = g(state, J_SEQ) + 1
+    s(state, J_SEQ, seq)
+
+    // 1. Die Zieltafel. Acht Bloecke zu 64 Zahlen; nur die, in denen
+    //    etwas steht, werden geschrieben.
+    var k: u64 = 0
+    while k * 64 < n {
+        zero(scratch(state), BS)
+        var j: u64 = 0
+        while j < 64 && k * 64 + j < n {
+            put64(scratch(state) + j * 8, tgt(state, k * 64 + j))
+            j = j + 1
+        }
+        if !blk.write(state, tgt_blk(state, k), scratch(state)) {
+            return false
+        }
+        k = k + 1
+    }
+    // 2. Der Kopf.
+    zero(scratch(state), BS)
+    put64(scratch(state) + H_MAGIC, HEAD_MAGIC)
+    put64(scratch(state) + H_SEQ, seq)
+    put64(scratch(state) + H_COUNT, n)
+    if !blk.write(state, head_blk(state), scratch(state)) {
+        return false
+    }
+    // 3. Alles auf die Platte, BEVOR die Bestaetigung hingeht. Ohne
+    //    dieses Spuelen duerfte eine Platte mit eigenem Schreibpuffer
+    //    die Bestaetigung VOR der Nutzlast ablegen -- und genau dann
+    //    traegt die Wiederherstellung Muell nach. Auf einem Laufwerk
+    //    ohne Puffer kostet es nichts.
+    blk.flush(state)
+    // 4. Die Bestaetigung: EIN Sektor, und mit ihm kippt der Zustand.
+    var sum: u64 = FNV_OFF
+    sum = mix(sum, seq)
+    sum = mix(sum, n)
+    var i: u64 = 0
+    while i < n {
+        sum = mix(sum, tgt(state, i))
+        sum = mix(sum, hsh(state, i))
+        i = i + 1
+    }
+    zero(scratch(state), BS)
+    put64(scratch(state) + H_MAGIC, COMMIT_MAGIC)
+    put64(scratch(state) + H_SEQ, seq)
+    put64(scratch(state) + H_COUNT, n)
+    put64(scratch(state) + H_SUM, sum)
+    if !blk.write(state, commit_blk(state), scratch(state)) {
+        return false
+    }
+    blk.flush(state)
+    s(state, J_TX, g(state, J_TX) + 1)
+
+    // 5. Nachtragen: jeder Platz an sein Ziel.
+    i = 0
+    while i < n {
+        if !blk.read(state, pay_blk(state, i), scratch2(state)) {
+            return false
+        }
+        if !blk.write(state, tgt(state, i), scratch2(state)) {
+            return false
+        }
+        i = i + 1
+    }
+    blk.flush(state)
+    // 6. Loeschen. Ab hier gibt es nichts mehr nachzutragen.
+    zero(scratch(state), BS)
+    blk.write(state, commit_blk(state), scratch(state))
+    blk.flush(state)
+    s(state, J_COUNT, 0)
+    s(state, J_FULL, 0)
+    return true
+}
+
+// EINE OFFENE UMSCHREIBUNG SCHLIESSEN UND EINE NEUE ANFANGEN. Das ist
+// der Weg, auf dem `fs.write_at` eine Datei schreibt, die groesser ist
+// als das Journal: jedes Stueck fuer sich unteilbar.
+fn chunk(state: u64) -> bool {
+    if !enabled(state) {
+        return true
+    }
+    if g(state, J_DEPTH) != 1 {
+        return true // eingeschachtelt: hier darf nicht bestaetigt werden
+    }
+    s(state, J_CHUNKS, g(state, J_CHUNKS) + 1)
+    let ok: bool = commit(state)
+    begin(state)
+    return ok
+}
+
+// ------------------------------------------------------ die Wiederherstellung
+//
+// SIE LAEUFT BEIM EINHAENGEN UND SONST NIE. `fs.mount` ruft sie, bevor
+// es dem Superblock irgendetwas glaubt -- und sie schreibt mit
+// `blk.write` und nicht ueber diese Schicht, weil es hier nichts mehr
+// zu protokollieren gibt.
+fn replay(state: u64, jstart: u64, jblocks: u64) -> u64 {
+    if jstart == 0 || jblocks < BLOCKS_NEEDED {
+        return 0
+    }
+    s(state, J_START, jstart)
+    s(state, J_BLOCKS, jblocks)
+    if !blk.read(state, commit_blk(state), scratch(state)) {
+        return 0
+    }
+    if get64(scratch(state) + H_MAGIC) != COMMIT_MAGIC {
+        return 0
+    }
+    let seq: u64 = get64(scratch(state) + H_SEQ)
+    let n: u64 = get64(scratch(state) + H_COUNT)
+    let sum: u64 = get64(scratch(state) + H_SUM)
+    if n == 0 || n > MAX_SLOTS {
+        loeschen(state)
+        return 0
+    }
+    // Der Kopf muss dasselbe sagen wie die Bestaetigung.
+    if !blk.read(state, head_blk(state), scratch(state)) {
+        return 0
+    }
+    if get64(scratch(state) + H_MAGIC) != HEAD_MAGIC {
+        loeschen(state)
+        return 0
+    }
+    if get64(scratch(state) + H_SEQ) != seq {
+        loeschen(state)
+        return 0
+    }
+    if get64(scratch(state) + H_COUNT) != n {
+        loeschen(state)
+        return 0
+    }
+    // Die Zieltafel einlesen.
+    var k: u64 = 0
+    while k * 64 < n {
+        if !blk.read(state, tgt_blk(state, k), scratch(state)) {
+            return 0
+        }
+        var j: u64 = 0
+        while j < 64 && k * 64 + j < n {
+            tgt_set(state, k * 64 + j, get64(scratch(state) + j * 8))
+            j = j + 1
+        }
+        k = k + 1
+    }
+    // Die Pruefsumme ueber Folgenummer, Anzahl, Ziele und den WIRKLICHEN
+    // Inhalt der Nutzlastbloecke. Erst wenn sie stimmt, wird etwas
+    // angefasst.
+    var pruef: u64 = FNV_OFF
+    pruef = mix(pruef, seq)
+    pruef = mix(pruef, n)
+    var i: u64 = 0
+    while i < n {
+        if !blk.read(state, pay_blk(state, i), scratch2(state)) {
+            return 0
+        }
+        pruef = mix(pruef, tgt(state, i))
+        pruef = mix(pruef, block_hash(scratch2(state)))
+        i = i + 1
+    }
+    if pruef != sum {
+        // Eine halb geschriebene Bestaetigung. Es gilt der ALTE Zustand,
+        // und der steht unangetastet auf der Platte -- das Nachtragen
+        // hat ja noch nicht angefangen.
+        loeschen(state)
+        return 0
+    }
+    // Jetzt nachtragen. Wiederholbar: wer das schon einmal getan hat,
+    // schreibt dieselben Oktette noch einmal.
+    i = 0
+    while i < n {
+        if !blk.read(state, pay_blk(state, i), scratch2(state)) {
+            return 0
+        }
+        if !blk.write(state, tgt(state, i), scratch2(state)) {
+            return 0
+        }
+        i = i + 1
+    }
+    blk.flush(state)
+    loeschen(state)
+    s(state, J_REPLAY, g(state, J_REPLAY) + 1)
+    s(state, J_RBLOCKS, n)
+    s(state, J_SEQ, seq)
+    return n
+}
+
+// Den Bestaetigungsblock EINES BESTIMMTEN Journals nullen. `format_as`
+// ruft das fuer die frische Platte -- eine alte Bestaetigung auf einer
+// wiederverwendeten Platte wuerde sonst Bloecke eines Dateisystems
+// nachtragen, das es nicht mehr gibt.
+fn clear(state: u64, jstart: u64, jblocks: u64) {
+    if jstart == 0 || jblocks < BLOCKS_NEEDED {
+        return
+    }
+    s(state, J_START, jstart)
+    s(state, J_BLOCKS, jblocks)
+    loeschen(state)
+}
+
+fn loeschen(state: u64) {
+    zero(scratch(state), BS)
+    blk.write(state, commit_blk(state), scratch(state))
+    blk.flush(state)
+}

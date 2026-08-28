@@ -163,6 +163,9 @@ BEREICHE = [
     # RUNDE POWERMON: die Akkuanalyse je Programm (0x5C000..0x5E000).
     ("PMON",       "kstate.fi", "PMON_OFF",       "PMON_MAX"),
     ("NETVIEW",    "kstate.fi", "NETVIEW_OFF",    "NETVIEW_MAX"),
+    # RUNDE FSROBUST: der Zustand des OFS-Journals (kernel/ofsj.fi).
+    # Drei Seiten aus dem letzten freien Stueck, 0x7A000..0x80000.
+    ("JR",         "kstate.fi", "JR_OFF",         "JR_MAX"),
     ("K18BATT",    "kstate.fi", "BATT_OFF",       "BATT_MAX"),
     # RUNDE DISPLAY: der Modustreiber.  Zwei Seiten aus demselben Vorrat
     # (0x5A000 und 0x5B000) -- die Modusliste samt Skalaren und die
