@@ -1,0 +1,305 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/omc.fi -- RUNDE MEDIA1: der Leser des eigenen
+// Behaelterformats. Die Beschreibung des Formats steht in
+// docs/CONTAINER.md; hier steht der Leser, und er ist absichtlich klein.
+//
+// WARUM EIN EIGENES FORMAT UND NICHT MP4 ODER MKV. Die Recherche hat
+// die Zeilen gezaehlt (/root/osum-research-raw.md, Teilaufgabe 2a):
+//
+//     eigenes Format   150-300 Zeilen
+//     WAV (nur Ton)    200-400
+//     Ogg              600-1000
+//     Matroska/WebM   1500-3000
+//     MP4/ISOBMFF     2000-4000   (der `stbl`-Baum ist der teure Teil)
+//     MPEG-TS         1000-2000
+//
+// Ein Fremdbehaelter kostet also das Fuenf- bis Zwanzigfache und
+// liefert genau EINE Sache, die dieses Projekt braucht: Zeitstempel.
+// Die gibt es hier in acht Oktetten je Block. Das Umwandeln auf dem PC
+// macht `tools/media/omcpack.py` mit ffmpeg -- der Aufwand liegt dort,
+// wo ffmpeg schon steht, und nicht in einem Betriebssystem, das ihn
+// nicht tragen kann.
+//
+// WAS DIESER LESER KANN und was nicht, damit es niemand vermutet:
+//   * Kopf und Spurbeschreibungen lesen, Bloecke der Reihe nach holen.
+//   * Er liest VORWAERTS. Springen (`seek`) braucht die Sprungtafel,
+//     die das Format vorsieht und die diese Runde NICHT schreibt --
+//     steht in der Restliste von STATUS-MEDIA1.md.
+//   * Er dekodiert nichts. Ein PCM-Block ist fertige Ware, ein
+//     MJPEG-Block wartet auf die Runde VIEWER.
+//
+// KEIN ZUSTAND IN MODULEN. Dieses System hat keine globalen
+// Veraenderlichen in Ring 3; der Aufrufer haelt einen Satz von
+// ST_OCTETS Oktetten und reicht ihn bei jedem Aufruf herein. Das ist
+// dieselbe Bauart, die der Kernel mit `state` benutzt.
+
+profile kernel
+
+import ulib
+
+export {
+    open, next_block, skip_payload, read_payload,
+    tracks, duration_us, blocks_total, ok, why,
+    track_kind, track_codec, track_rate, track_a, track_b, track_max,
+    find_track,
+    blk_track, blk_flags, blk_len, blk_pts,
+    ST_OCTETS, HDR_OCTETS, TRK_OCTETS, BLK_OCTETS, MAX_TRACKS,
+    K_AUDIO, K_VIDEO, C_PCM_S16LE, C_MJPEG, C_FLAC,
+    W_OK, W_SHORT, W_MAGIC, W_VERSION, W_TRACKS, W_IO
+}
+
+// ------------------------------------------------------- die Groessen
+const HDR_OCTETS: u64 = 32
+const TRK_OCTETS: u64 = 32
+const BLK_OCTETS: u64 = 16
+const MAX_TRACKS: u64 = 4
+// Der Satz des Aufrufers: Kopf, vier Spuren, ein Blockkopf, und vier
+// Woerter Buchfuehrung.
+const ST_OCTETS: u64 = 32 + 4 * 32 + 16 + 32
+
+const S_HDR: u64 = 0
+const S_TRK: u64 = 32
+const S_BLK: u64 = 160
+const S_FD: u64 = 176
+const S_WHY: u64 = 184
+const S_NTRK: u64 = 192
+const S_HAVE: u64 = 200 // 1 = ein Blockkopf steht bereit
+
+// Arten und Kodierungen. Die Zahlen sind Teil des Formats und stehen
+// genauso in docs/CONTAINER.md und in tools/media/omcpack.py.
+const K_AUDIO: u64 = 1
+const K_VIDEO: u64 = 2
+const C_PCM_S16LE: u64 = 1
+const C_MJPEG: u64 = 2
+const C_FLAC: u64 = 3
+
+const W_OK: u64 = 0
+const W_SHORT: u64 = 1 // Datei zu kurz fuer den Kopf
+const W_MAGIC: u64 = 2 // die vier Kennoktette stimmen nicht
+const W_VERSION: u64 = 3 // Kopflaenge unbekannt
+const W_TRACKS: u64 = 4 // zu viele Spuren
+const W_IO: u64 = 5 // Lesefehler mittendrin
+
+fn b(p: u64, i: u64) -> u64 {
+    return (*((p + i) as *mut u8)) as u64
+}
+
+fn le16(p: u64, i: u64) -> u64 {
+    return b(p, i) | (b(p, i + 1) << 8)
+}
+
+fn le32(p: u64, i: u64) -> u64 {
+    return b(p, i) | (b(p, i + 1) << 8) | (b(p, i + 2) << 16)
+        | (b(p, i + 3) << 24)
+}
+
+fn le64(p: u64, i: u64) -> u64 {
+    return le32(p, i) | (le32(p, i + 4) << 32)
+}
+
+fn setw(st: u64, off: u64, v: u64) {
+    var i: u64 = 0
+    while i < 8 {
+        __mmio_write8((st + off + i) as *mut u8, ((v >> (i * 8)) & 0xFF) as u8)
+        i = i + 1
+    }
+}
+
+fn getw(st: u64, off: u64) -> u64 {
+    return le64(st, off)
+}
+
+fn ok(st: u64) -> bool {
+    return getw(st, S_WHY) == W_OK
+}
+
+fn why(st: u64) -> u64 {
+    return getw(st, S_WHY)
+}
+
+fn tracks(st: u64) -> u64 {
+    return getw(st, S_NTRK)
+}
+
+fn duration_us(st: u64) -> u64 {
+    return le64(st + S_HDR, 8)
+}
+
+fn blocks_total(st: u64) -> u64 {
+    return le32(st + S_HDR, 20)
+}
+
+// -------------------------------------------------- die Spurbeschreibung
+fn trk(st: u64, i: u64) -> u64 {
+    return st + S_TRK + (i % MAX_TRACKS) * TRK_OCTETS
+}
+
+fn track_kind(st: u64, i: u64) -> u64 {
+    return b(trk(st, i), 1)
+}
+
+fn track_codec(st: u64, i: u64) -> u64 {
+    return le16(trk(st, i), 2)
+}
+
+// Bei Ton die Abtastrate, bei Bild die Bilder je Sekunde mal tausend.
+fn track_rate(st: u64, i: u64) -> u64 {
+    return le32(trk(st, i), 4)
+}
+
+// Bei Ton die Zahl der Kanaele, bei Bild die Breite.
+fn track_a(st: u64, i: u64) -> u64 {
+    return le16(trk(st, i), 8)
+}
+
+// Bei Ton die Bit je Wert, bei Bild die Hoehe.
+fn track_b(st: u64, i: u64) -> u64 {
+    return le16(trk(st, i), 10)
+}
+
+fn track_max(st: u64, i: u64) -> u64 {
+    return le32(trk(st, i), 12)
+}
+
+// Die erste Spur einer Art, oder MAX_TRACKS. Ein Abspieler, der die
+// Tonspur sucht, fragt nicht nach der Nummer -- die Nummer ist Sache
+// des Umwandlers.
+fn find_track(st: u64, kind: u64) -> u64 {
+    let n: u64 = tracks(st)
+    var i: u64 = 0
+    while i < n {
+        if track_kind(st, i) == kind {
+            return i
+        }
+        i = i + 1
+    }
+    return MAX_TRACKS
+}
+
+// ------------------------------------------------------------ der Kopf
+//
+// Der Aufrufer hat die Datei schon geoeffnet und den Lesezeiger auf
+// null. Danach steht er hinter den Spurbeschreibungen, also am ersten
+// Block.
+fn open(st: u64, fd: u64) -> bool {
+    var i: u64 = 0
+    while i < ST_OCTETS {
+        __mmio_write8((st + i) as *mut u8, 0 as u8)
+        i = i + 1
+    }
+    setw(st, S_FD, fd)
+    setw(st, S_WHY, W_OK)
+    if ulib.sys(ulib.SYS_READ, fd, st + S_HDR, HDR_OCTETS) != HDR_OCTETS {
+        setw(st, S_WHY, W_SHORT)
+        return false
+    }
+    let h: u64 = st + S_HDR
+    // "OMC1"
+    if b(h, 0) != 79 || b(h, 1) != 77 || b(h, 2) != 67 || b(h, 3) != 49 {
+        setw(st, S_WHY, W_MAGIC)
+        return false
+    }
+    if le16(h, 4) != HDR_OCTETS {
+        setw(st, S_WHY, W_VERSION)
+        return false
+    }
+    let n: u64 = le16(h, 6)
+    if n == 0 || n > MAX_TRACKS {
+        setw(st, S_WHY, W_TRACKS)
+        return false
+    }
+    setw(st, S_NTRK, n)
+    var k: u64 = 0
+    while k < n {
+        if ulib.sys(ulib.SYS_READ, fd, trk(st, k), TRK_OCTETS)
+            != TRK_OCTETS {
+            setw(st, S_WHY, W_SHORT)
+            return false
+        }
+        k = k + 1
+    }
+    return true
+}
+
+// ---------------------------------------------------------- die Bloecke
+fn blk(st: u64) -> u64 {
+    return st + S_BLK
+}
+
+fn blk_track(st: u64) -> u64 {
+    return b(blk(st), 0)
+}
+
+fn blk_flags(st: u64) -> u64 {
+    return b(blk(st), 1)
+}
+
+fn blk_len(st: u64) -> u64 {
+    return le32(blk(st), 4)
+}
+
+fn blk_pts(st: u64) -> u64 {
+    return le64(blk(st), 8)
+}
+
+// Den naechsten Blockkopf holen. `false` heisst Dateiende ODER Fehler;
+// `why` sagt, welches von beiden. Die Nutzlast steht danach im Strom
+// und muss mit `read_payload` oder `skip_payload` weggeraeumt werden,
+// bevor der naechste Kopf kommt -- sonst liest der naechste Aufruf
+// mitten in die Nutzlast hinein.
+fn next_block(st: u64) -> bool {
+    let fd: u64 = getw(st, S_FD)
+    let n: u64 = ulib.sys(ulib.SYS_READ, fd, blk(st), BLK_OCTETS)
+    if n == 0 {
+        setw(st, S_HAVE, 0)
+        return false // sauberes Ende
+    }
+    if ulib.bad(n) || n != BLK_OCTETS {
+        setw(st, S_WHY, W_IO)
+        setw(st, S_HAVE, 0)
+        return false
+    }
+    setw(st, S_HAVE, 1)
+    return true
+}
+
+fn skip_payload(st: u64) -> bool {
+    let len: u64 = blk_len(st)
+    if len == 0 {
+        return true
+    }
+    let r: u64 = ulib.sys(ulib.SYS_SEEK, getw(st, S_FD), len, 1)
+    if ulib.bad(r) {
+        setw(st, S_WHY, W_IO)
+        return false
+    }
+    return true
+}
+
+// Bis zu `max` Oktette der Nutzlast lesen; der Rest wird uebersprungen.
+// Gibt zurueck, wie viele wirklich im Puffer stehen. So kann ein
+// Abspieler mit einem Puffer von vier Kiloktetten auch ein Bild von
+// vierzig lesen -- er bekommt die ersten vier und weiss aus `blk_len`,
+// dass es mehr waren.
+fn read_payload(st: u64, buf: u64, max: u64) -> u64 {
+    let len: u64 = blk_len(st)
+    var want: u64 = len
+    if want > max {
+        want = max
+    }
+    var got: u64 = 0
+    if want > 0 {
+        got = ulib.sys(ulib.SYS_READ, getw(st, S_FD), buf, want)
+        if ulib.bad(got) {
+            setw(st, S_WHY, W_IO)
+            return 0
+        }
+    }
+    if got < len {
+        let rest: u64 = len - got
+        if ulib.bad(ulib.sys(ulib.SYS_SEEK, getw(st, S_FD), rest, 1)) {
+            setw(st, S_WHY, W_IO)
+        }
+    }
+    return got
+}
