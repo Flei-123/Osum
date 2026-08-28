@@ -328,6 +328,8 @@ static mut f_lines: [u64; 3] = [0 as u64; 3]
 static mut f_txt: [u8; 192] = [0 as u8; 192] // 3 fields x 2 lines x 32
 static mut f_full: [u8; 96] = [0 as u8; 96] // 3 fields x 32, unshortened
 static mut kx: [u64; 10] = [0 as u64; 10]
+// RUNDE PAINT: der Buendelname je Knopf, 24 Oktette, aus WL_APP.
+static mut kapp: [u8; 240] = [0 as u8; 240]
 static mut ky: [u64; 10] = [0 as u64; 10]
 static mut kw: [u64; 10] = [0 as u64; 10]
 static mut kh: [u64; 10] = [0 as u64; 10]
@@ -1680,6 +1682,17 @@ fn list_read() -> bool {
                         k = k + 1
                     }
                     ktit[((n * 40 + 31)) as usize] = 0 as u8
+                    // RUNDE PAINT: und daneben, welchem BUENDEL das
+                    // Fenster gehoert. Der Server liefert es in WL_APP;
+                    // es ist leer, solange das Programm nichts gesagt
+                    // hat, und dann bleibt der Knopf reiner Text.
+                    k = 0
+                    while k < 23 {
+                        kapp[((n * 24 + k)) as usize] =
+                            __mmio_read8((b + wlibc.WL_APP + k) as *mut u8)
+                        k = k + 1
+                    }
+                    kapp[((n * 24 + 23)) as usize] = 0 as u8
                     let mix: u64 = id *% 131 +% (fl & 1) *% 7 +% fo +% nv *% 17
                     sum = (sum ^ mix) *% 1099511628211
                     n = n + 1
@@ -1709,7 +1722,152 @@ static mut s_tb: [u8; 7] = " base=\0"
 static mut s_tf: [u8; 5] = " fg=\0"
 static mut s_tg: [u8; 5] = " bg=\0"
 static mut s_tt: [u8; 4] = " t=\0"
+// ===================================== RUNDE PAINT: DIE PROGRAMMSYMBOLE
+//
+// "warum sind start, terminal und suchen keine icons?"
+//
+// Die Symbole gibt es seit Runde K15: `/apps/<name>.osp/symbol`, Format
+// OSYM, gezeichnet in der Groesse, in der sie haengen. Was fehlte, war
+// die Verbindung Fenster -> Buendel. Ein Fenster hatte einen TITEL, und
+// ein Titel ist uebersetzt, aenderbar und nicht eindeutig ("Terminal --
+// sh"). Seit dieser Runde sagt das Programm SELBST, welchem Buendel es
+// gehoert (WM_APP), und der Fensterserver liefert den Namen in WL_APP
+// mit -- also steht hier nur noch das Nachschlagen.
+//
+// EIN KLEINER ZWISCHENSPEICHER UND KEIN `appdir`. `appdir.load` liest
+// das ganze Verzeichnis samt Schluesselwoertern und haelt 16576 Oktette
+// Symbolspeicher; ein Prozess hat 832 KiB fuer alles, und die
+// Taskleiste laeuft, solange die Maschine laeuft. Sie braucht ausserdem
+// nur die Buendel, die gerade ein Fenster haben -- hoechstens so viele
+// wie Knoepfe. Also: SYM_N Plaetze zu je einem Symbol, geschluesselt am
+// Namen, gelesen EINMAL je Name und danach nie wieder.
+const SYM_N: u64 = 6
+const SYM_BYTES: u64 = 1036 // 12 + 16 * 16 * 4, wie appdir.SYMBYTES
+static mut sym_name: [u8; 144] = [0 as u8; 144] // SYM_N * 24
+static mut sym_data: [u8; 6216] = [0 as u8; 6216] // SYM_N * SYM_BYTES
+static mut sym_ok: [u64; 6] = [0 as u64; 6] // 0 unbenutzt, 1 da, 2 keins
+static mut sym_used: u64 = 0
+static mut sym_hits: u64 = 0
+static mut sym_reads: u64 = 0
+
+fn sym_eq(a: u64, b: u64) -> bool {
+    var k: u64 = 0
+    while k < 24 {
+        let x: u64 = kstate8(a + k)
+        if x != kstate8(b + k) {
+            return false
+        }
+        if x == 0 {
+            return true
+        }
+        k = k + 1
+    }
+    return true
+}
+
+fn kstate8(p: u64) -> u64 {
+    return (*((p) as *mut u8)) as u64
+}
+
+// `/apps/<name>.osp/symbol` -> Zeiger auf das OSYM, oder 0.
+//
+// KEIN Symbol ist kein Fehler: ein Buendel darf keines haben, ein
+// Fenster darf zu keinem Buendel gehoeren, und dann faellt der Knopf auf
+// reinen Text zurueck -- dieselbe Regel wie bei Netz und Akku. Deshalb
+// merkt sich der Speicher auch das NEIN (`sym_ok = 2`): sonst wuerde
+// jeder Neuaufbau der Leiste dieselbe fehlende Datei wieder oeffnen.
+fn sym_of(app: u64) -> u64 {
+    if app == 0 || kstate8(app) == 0 {
+        return 0
+    }
+    var i: u64 = 0
+    while i < sym_used {
+        if sym_eq((&sym_name[0 as usize]) as u64 + i * 24, app) {
+            sym_hits = sym_hits + 1
+            if sym_ok[(i) as usize] == 1 {
+                return (&sym_data[0 as usize]) as u64 + i * SYM_BYTES
+            }
+            return 0
+        }
+        i = i + 1
+    }
+    if sym_used >= SYM_N {
+        return 0
+    }
+    let platz: u64 = sym_used
+    sym_used = sym_used + 1
+    var k: u64 = 0
+    while k < 24 {
+        sym_name[((platz * 24 + k)) as usize] = *((app + k) as *mut u8)
+        k = k + 1
+    }
+    sym_ok[(platz) as usize] = 2
+    var pfad: [u8; 64] = [0 as u8; 64]
+    var vor: [u8; 7] = "/apps/\0"
+    var nach: [u8; 12] = ".osp/symbol\0"
+    var n: u64 = 0
+    k = 0
+    while k < 6 {
+        pfad[(n) as usize] = vor[(k) as usize]
+        n = n + 1
+        k = k + 1
+    }
+    k = 0
+    while k < 23 && kstate8(app + k) != 0 {
+        pfad[(n) as usize] = *((app + k) as *mut u8)
+        n = n + 1
+        k = k + 1
+    }
+    k = 0
+    while k < 11 {
+        pfad[(n) as usize] = nach[(k) as usize]
+        n = n + 1
+        k = k + 1
+    }
+    pfad[(n) as usize] = 0 as u8
+    let fd: u64 = io.open((&pfad[0 as usize]) as u64, 0)
+    if ulib.bad(fd) {
+        return 0
+    }
+    sym_reads = sym_reads + 1
+    let ziel: u64 = (&sym_data[0 as usize]) as u64 + platz * SYM_BYTES
+    let got: u64 = io.read(fd, ziel, SYM_BYTES)
+    io.close(fd)
+    if ulib.bad(got) || got < 12 {
+        return 0
+    }
+    if !wlibc.icon_ok(ziel) {
+        return 0
+    }
+    sym_ok[(platz) as usize] = 1
+    return ziel
+}
+
 static mut s_bt: [u8; 17] = "taskbar: btn i=\0\0"
+static mut s_sy: [u8; 18] = "taskbar: sym btn=\0"
+static mut s_syn: [u8; 7] = " app=\0\0"
+static mut s_syw: [u8; 5] = " w=\0\0"
+static mut s_syi: [u8; 7] = " ink=\0\0"
+
+// Die Zahl der Bildpunkte des Symbols, die WIRKLICH Farbe tragen --
+// Deckung ungleich null. Ein leeres OSYM hat dieselbe Breite und
+// dieselbe Hoehe wie ein volles.
+fn sym_ink(p: u64) -> u64 {
+    let w: u64 = wlibc.icon_w(p)
+    let h: u64 = wlibc.icon_h(p)
+    if w == 0 || h == 0 {
+        return 0
+    }
+    var n: u64 = 0
+    var i: u64 = 0
+    while i < w * h {
+        if (*((p + 12 + i * 4 + 3) as *mut u8)) != 0 as u8 {
+            n = n + 1
+        }
+        i = i + 1
+    }
+    return n
+}
 static mut s_bi: [u8; 5] = " id=\0"
 static mut s_bv: [u8; 9] = " hidden=\0"
 static mut s_bf: [u8; 8] = " focus=\0"
@@ -1753,9 +1911,21 @@ fn say_text(mark: u64, x: u64, base: u64, fg: u64, bg: u64, txt: u64) {
 // picture, per character.
 fn button(x: u64, y: u64, w: u64, h: u64, txt: u64, on: bool,
     dim: bool) -> u64 {
-    return button_mark(x, y, w, h, txt, on, dim, 0)
+    return button_sym(x, y, w, h, txt, on, dim, 0, 0)
 }
 
+// RUNDE PAINT: DASSELBE MIT EINEM PROGRAMMSYMBOL GANZ LINKS.
+//
+// Die Reihenfolge im Knopf ist SYMBOL, MERKMAL, BESCHRIFTUNG, und sie
+// ist so und nicht anders, weil die beiden Bilder verschiedene Fragen
+// beantworten: das Symbol sagt WELCHES PROGRAMM, das Merkmal aus Runde
+// NETVIEW sagt WELCHE NETZSICHT. Beide links, beide immer an derselben
+// Stelle -- ein Bild, das mit der Laenge des Titels wandert, muss
+// gesucht werden, und dann ist es keine Hilfe mehr.
+//
+// `sym == 0` ist der Normalfall und kostet nichts: dann ist das hier
+// Aufruf fuer Aufruf der alte Knopf, und der Laeufer, der die Lage der
+// Beschriftung nachrechnet, findet dieselbe Zahl.
 // THE SAME BUTTON WITH A MARK IN FRONT OF THE LABEL. `mark` is a
 // picture or 0; 0 is the normal case and costs nothing, which is the
 // point -- `real` gets no mark, so most buttons go through here
@@ -1763,6 +1933,11 @@ fn button(x: u64, y: u64, w: u64, h: u64, txt: u64, on: bool,
 // measures the same number for them.
 fn button_mark(x: u64, y: u64, w: u64, h: u64, txt: u64, on: bool,
     dim: bool, mark: u64) -> u64 {
+    return button_sym(x, y, w, h, txt, on, dim, mark, 0)
+}
+
+fn button_sym(x: u64, y: u64, w: u64, h: u64, txt: u64, on: bool,
+    dim: bool, mark: u64, sym: u64) -> u64 {
     // RUNDE THEME: die Marke des Schemas und nicht die alte T_BTN.
     var bg: u64 = wlibc.theme(wlibc.C_BUTTON_FACE)
     if on {
@@ -1780,8 +1955,11 @@ fn button_mark(x: u64, y: u64, w: u64, h: u64, txt: u64, on: bool,
         fg = wlibc.theme(wlibc.T_DIM)
     }
     var room: u64 = 0
+    if sym != 0 {
+        room = room + GL_W + 3
+    }
     if mark != 0 {
-        room = MK_W + 3
+        room = room + MK_W + 3
     }
     let n: u64 = tlen(txt)
     var tw: u64 = wlibc.text_w(wlibc.F_UI, wlibc.PX_UI, txt, n)
@@ -1794,12 +1972,18 @@ fn button_mark(x: u64, y: u64, w: u64, h: u64, txt: u64, on: bool,
     }
     let tx: u64 = x + room + (w - room - tw) / 2
     let base: u64 = y + (h + asc) / 2 - 1
+    var mx: u64 = x + 3
+    if sym != 0 {
+        // Das Symbol des Programms, ganz links, senkrecht mittig.
+        let _s: bool = wlibc.icon_draw(sym, mx, y + (h - GL_W) / 2)
+        mx = mx + GL_W + 3
+    }
     if mark != 0 {
         // FLUSH LEFT AND VERTICALLY CENTRED. Left, because a mark that
         // moves with the length of the title is a mark the eye has to
         // look for; the whole value of it is that it is always in the
         // same place.
-        let _m: bool = wlibc.icon_draw(mark, x + 3, y + (h - MK_W) / 2)
+        let _m: bool = wlibc.icon_draw(mark, mx, y + (h - MK_W) / 2)
     }
     let _e: u64 = wlibc.text_at(wlibc.F_UI, wlibc.PX_UI, tx, base, txt, n,
         fg)
@@ -1861,17 +2045,40 @@ fn paint_band(y0: u64, hh: u64, report: bool) {
         let _p0: u64 = wlibc.push(w_h, 0, y0, win_w, hh)
         return
     }
-    let rs: u64 = button(st_x, st_y, st_w, st_h,
+    // RUNDE PAINT: DER STARTKNOPF BEKOMMT AUCH EINES, und zwar das des
+    // Starters -- er OEFFNET den Starter, also ist es sein Bild und
+    // kein neu erfundenes. Gibt es das Buendel nicht, bleibt der Knopf
+    // reiner Text.
+    var st_app: [u8; 9] = "launcher\0"
+    let ssym: u64 = sym_of((&st_app[0 as usize]) as u64)
+    let rs: u64 = button_sym(st_x, st_y, st_w, st_h,
         txt((&k_start[0 as usize]) as u64,
-            (&s_st[0 as usize]) as u64), false, false)
+            (&s_st[0 as usize]) as u64), false, false, 0, ssym)
     var i: u64 = 0
     while i < nk {
         if kw[(i) as usize] != 0 {
             let lab: u64 = (&klab[0 as usize]) as u64 + i * 40
             let mk: u64 = mark_icon(knv[(i) as usize])
-            let rc: u64 = button_mark(kx[(i) as usize], ky[(i) as usize],
+            let sy: u64 = sym_of((&kapp[0 as usize]) as u64 + i * 24)
+            let rc: u64 = button_sym(kx[(i) as usize], ky[(i) as usize],
                 kw[(i) as usize], kh[(i) as usize], lab,
-                kfok[(i) as usize] != 0, kver[(i) as usize] != 0, mk)
+                kfok[(i) as usize] != 0, kver[(i) as usize] != 0, mk, sy)
+            if report && sy != 0 {
+                // WIE VIEL TINTE DAS SYMBOL WIRKLICH HAT. Ohne diese
+                // Zahl ist "das Symbol ist im Knopf" eine Behauptung
+                // ueber etwas, das auch ein leeres Rechteck sein
+                // koennte -- genau der Fehler, den Runde K7B teuer
+                // bezahlt hat.
+                say((&s_sy[0 as usize]) as u64)
+                ulib.sayn(i)
+                say((&s_syn[0 as usize]) as u64)
+                say((&kapp[0 as usize]) as u64 + i * 24)
+                say((&s_syw[0 as usize]) as u64)
+                ulib.sayn(wlibc.icon_w(sy))
+                say((&s_syi[0 as usize]) as u64)
+                ulib.sayn(sym_ink(sy))
+                ulib.nl()
+            }
             if report {
                 var bg: u64 = wlibc.theme(wlibc.C_BUTTON_FACE)
                 var fg: u64 = wlibc.theme(wlibc.T_FG)

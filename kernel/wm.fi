@@ -85,6 +85,7 @@ export {
     work_h, recalc_work, maximize, is_max, struts, workcalcs,
     set_nostrut, nostrut,
     set_deco_colour, deco_rgb, deco_writes, DECO_SLOTS,
+    set_app, win_app, APP_LEN,
     // RUNDE PAINT -- die Form des Fensters und ihr Preis.
     set_form, form, form_writes, shadow_px, aa_px, paint_reset,
     FORM_SLOTS, FM_RADIUS, FM_SHADOW, FM_SHADOW_R, FM_SHADOW_C,
@@ -488,6 +489,39 @@ const W_NODE: u64 = 0x100 // Knoten im Fensterbaum + 1, 0 = schwebend
 // zwei Vierteln. Ein Fenster ist hoechstens 2048 gross, das passt.
 const W_SAVXY: u64 = 0x108
 const W_SAVWH: u64 = 0x110
+// ==================================================== RUNDE PAINT
+//
+// WELCHEM PROGRAMM DIESES FENSTER GEHOERT -- als BUENDELNAME, nicht als
+// Titel.
+//
+// DIE FRAGE, DIE DAHINTER STEHT: "warum sind Start, Terminal und Suchen
+// in der Taskleiste keine Symbole?" Die Symbole EXISTIEREN seit Runde
+// K15 (`/apps/<name>.osp/symbol`, Format OSYM). Was fehlte, war die
+// Verbindung: ein Fenster hatte einen TITEL und sonst nichts, und ein
+// Titel ist uebersetzt, vom Programm frei waehlbar und aendert sich
+// waehrend des Laufs ("Terminal -- sh").
+//
+// ZWEI WEGE WAREN MOEGLICH, und die Wahl ist begruendet:
+//
+//   1. DER SERVER LEITET ES AUS DEM PROGRAMMPFAD AB. Klingt billiger,
+//      ist es nicht. Der Pfad steht nirgends im Aufgabensatz; `procfs`
+//      liest argv[0] durch die Seitentabelle des FREMDEN Prozesses
+//      (`make_cmdline`), also einmal je Fenster und Neuzeichnen. Und er
+//      antwortet falsch, wo es darauf ankommt: `/bin/files` und
+//      `/bin/explorer` sind DIESELBE Inode (Runde K15), ein Programm
+//      kann per Shell-Skript gestartet sein, und `sh` in einem
+//      Terminalfenster ist nicht das Programm, das das Fenster besitzt.
+//   2. DAS PROGRAMM SAGT ES SELBST, einmal, beim Oeffnen. Das ist, was
+//      X11 `WM_CLASS` nennt und Windows `AppUserModelID`, und aus
+//      demselben Grund: nur die Anwendung weiss, als was sie auftreten
+//      will.
+//
+// Also (2). Vierundzwanzig Oktette im Fenstersatz, gesetzt ueber
+// WM_APP, ausgeliefert in WM_LIST. Wer nichts sagt, bekommt einen
+// leeren Namen und die Taskleiste faellt auf reinen Text zurueck --
+// dieselbe Regel wie bei Netz und Akku.
+const W_APP: u64 = 0x118 // APP_LEN Oktette
+const APP_LEN: u64 = 24
 
 // "kein Terminal". Absichtlich eine Zahl und kein Ruf nach `tty.fi`:
 // dieses Modul darf `tty` NICHT einbinden, weil `tty` es einbindet
@@ -1392,6 +1426,11 @@ fn create(state: u64, owner: u64, x: i64, y: i64, w: u64, h: u64,
             wsv(state, i, W_FLAGS, 0)
             wsv(state, i, W_STRUT, 0)
             wsv(state, i, W_SAVE, 0)
+            // RUNDE PAINT: ein wiederverwendeter Platz erbt sonst den
+            // Buendelnamen des VORIGEN Fensters -- und damit sein
+            // Symbol. Genau die Sorte Fehler, die man erst sieht, wenn
+            // das sechzehnte Fenster aufgeht.
+            let _cl: bool = set_app(state, i, 0)
             wsv(state, i, W_Z, gs(state, S_COUNT))
             ss(state, S_COUNT, gs(state, S_COUNT) + 1)
             // RUNDE DESKTOP: ein neues Fenster kommt an die Oberkante
@@ -1415,6 +1454,37 @@ fn create(state: u64, owner: u64, x: i64, y: i64, w: u64, h: u64,
         i = i + 1
     }
     return MAX_WIN
+}
+
+// RUNDE PAINT: der Buendelname des Fensters. Wie `set_title`
+// abgeschnitten statt abgelehnt -- ein zu langer Name ist kein Grund,
+// ein Fenster zu verweigern -- und immer nullterminiert.
+fn set_app(state: u64, i: u64, p: u64) -> bool {
+    if !valid(state, i) {
+        return false
+    }
+    var k: u64 = 0
+    while k < APP_LEN - 1 {
+        var c: u64 = 0
+        if p != 0 {
+            c = kstate.get8(p + k)
+        }
+        kstate.set8(state + wat(i) + W_APP + k, c as u8)
+        if c == 0 {
+            k = APP_LEN - 1
+        } else {
+            k = k + 1
+        }
+    }
+    kstate.set8(state + wat(i) + W_APP + APP_LEN - 1, 0 as u8)
+    return true
+}
+
+fn win_app(state: u64, i: u64) -> u64 {
+    if i >= MAX_WIN {
+        return 0
+    }
+    return state + wat(i) + W_APP
 }
 
 fn set_title(state: u64, i: u64, p: u64) {
