@@ -156,6 +156,92 @@ fn reason(out: *mut rt.Buf, r: u32) {
     io.print("fetch: verify REFUSED critical_extension\n")
 }
 
+
+// ------------------------------------------------------ chunked bodies
+//
+// HTTP/1.1 answers of unknown length arrive in pieces, each with its
+// length in hexadecimal in front of it and a zero-length piece at the
+// end (RFC 9112, 7.1). Cloudflare answers example.com that way, and a
+// client that does not undo it reports twelve octets more than the page
+// has and a digest that matches nothing. MEASURED: 571 octets against
+// curl's 559, and the two digests differed until this function existed.
+fn is_hex(c: u8) -> bool {
+    if c >= 48 as u8 && c <= 57 as u8 { return true }
+    if c >= 97 as u8 && c <= 102 as u8 { return true }
+    if c >= 65 as u8 && c <= 70 as u8 { return true }
+    return false
+}
+
+fn hex_val(c: u8) -> u64 {
+    if c >= 48 as u8 && c <= 57 as u8 { return (c - 48 as u8) as u64 }
+    if c >= 97 as u8 && c <= 102 as u8 { return (c - 87 as u8) as u64 }
+    return (c - 55 as u8) as u64
+}
+
+// Case-insensitive search for a word in `p[0..n)`.
+fn contains_word(p: u64, n: usize, w: u64, wn: usize) -> bool {
+    if wn == 0 || n < wn {
+        return false
+    }
+    var i: usize = 0
+    while i + wn <= n {
+        var k: usize = 0
+        var same: bool = true
+        while k < wn {
+            var a: u8 = rt.ld8(p, i + k)
+            var b: u8 = rt.ld8(w, k)
+            if a >= 65 as u8 && a <= 90 as u8 { a = a + 32 as u8 }
+            if b >= 65 as u8 && b <= 90 as u8 { b = b + 32 as u8 }
+            if a != b {
+                same = false
+                k = wn
+            } else {
+                k = k + 1
+            }
+        }
+        if same {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn dechunk(src: u64, n: usize, out: *mut rt.Buf) -> bool {
+    var i: usize = 0
+    while i < n {
+        var len: u64 = 0
+        var digits: usize = 0
+        while i < n && is_hex(rt.ld8(src, i)) {
+            len = len * 16 + hex_val(rt.ld8(src, i))
+            digits = digits + 1
+            i = i + 1
+        }
+        if digits == 0 {
+            return false
+        }
+        // the rest of the line (a chunk extension is allowed and ignored)
+        while i < n && rt.ld8(src, i) != 10 as u8 {
+            i = i + 1
+        }
+        i = i + 1
+        if len == 0 {
+            return true
+        }
+        if i + len as usize > n {
+            return false
+        }
+        rt.buf_push_bytes(out, src + i as u64, len as usize)
+        i = i + len as usize
+        // the CRLF after the piece
+        while i < n && rt.ld8(src, i) != 10 as u8 {
+            i = i + 1
+        }
+        i = i + 1
+    }
+    return false
+}
+
 // ------------------------------------------------------------ the URL
 
 fn parse_u32(p: u64, from: usize, to: usize) -> u32 {
@@ -360,6 +446,47 @@ fn main(start: u64) -> i32 {
     var dg: [u8; 32] = [0; 32]
     sha256.sha256(body.ptr, body.len, (&dg[0]) as u64)
     hex_line(&out, "fetch: sha256 ", (&dg[0]) as u64, 32)
+    // THE BODY ON ITS OWN, because that is the part that can be held
+    // against another program. The whole response carries a `Date`
+    // header, so its digest differs from `curl`'s by construction; the
+    // octets after the empty line do not. This is the number that says
+    // "the same page came out of both".
+    var hend: usize = 0
+    var found: bool = false
+    while hend + 3 < body.len {
+        if rt.ld8(body.ptr, hend) == 13 as u8
+            && rt.ld8(body.ptr, hend + 1) == 10 as u8
+            && rt.ld8(body.ptr, hend + 2) == 13 as u8
+            && rt.ld8(body.ptr, hend + 3) == 10 as u8 {
+            found = true
+            break
+        }
+        hend = hend + 1
+    }
+    if found {
+        let boff: usize = hend + 4
+        let blen: usize = body.len - boff
+        var w_chunked: [u8; 8] = "chunked\0"
+        var plain_body: bool = true
+        var dec: rt.Buf = rt.buf_new()
+        if contains_word(body.ptr, hend, (&w_chunked[0]) as u64, 7) {
+            if dechunk(body.ptr + boff as u64, blen, &dec) {
+                plain_body = false
+                num_line(&out, "fetch: chunked ", 1)
+                num_line(&out, "fetch: body ", dec.len as u64)
+                var cd: [u8; 32] = [0; 32]
+                sha256.sha256(dec.ptr, dec.len, (&cd[0]) as u64)
+                hex_line(&out, "fetch: bodysha ", (&cd[0]) as u64, 32)
+            }
+        }
+        if plain_body {
+            num_line(&out, "fetch: body ", blen as u64)
+            var bd: [u8; 32] = [0; 32]
+            sha256.sha256(body.ptr + boff as u64, blen, (&bd[0]) as u64)
+            hex_line(&out, "fetch: bodysha ", (&bd[0]) as u64, 32)
+        }
+        rt.buf_free(&dec)
+    }
     var e: usize = 0
     while e < body.len && rt.ld8(body.ptr, e) != 13 as u8
         && rt.ld8(body.ptr, e) != 10 as u8 {
@@ -501,7 +628,13 @@ fn request(req: *mut rt.Buf, name: u64, namelen: usize, path: u64,
     rt.buf_push_bytes(req, (&h[0]) as u64, 17)
     rt.buf_push_bytes(req, name, namelen)
     var tail: [u8; 46] = "\r\nConnection: close\r\nUser-Agent: osum-fetch\r\n\0"
-    rt.buf_push_bytes(req, (&tail[0]) as u64, 44)
+    // 45 AND NOT 44. It was 44 for one run, which cut the last newline
+    // off the User-Agent line: `openssl s_server -www` answered anyway,
+    // the real web did not -- example.com waited for a header block that
+    // never ended and the body came back as zero octets. A length
+    // literal that is one short is invisible in every test that talks to
+    // something forgiving.
+    rt.buf_push_bytes(req, (&tail[0]) as u64, 45)
     var crlf: [u8; 3] = "\r\n\0"
     rt.buf_push_bytes(req, (&crlf[0]) as u64, 2)
 }
