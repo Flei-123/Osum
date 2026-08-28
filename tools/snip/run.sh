@@ -284,14 +284,20 @@ fahre() { # name  extra-cmdline  mausskript  [warte-auf]  [taste-am-start]
 # Stelle. Von da an ist der Ort eine Rechnung und keine Hoffnung
 # (tools/wm/monitor.py sagt dasselbe ausfuehrlicher).
 zeiger() { # x y  -> Zeilen fuer das Monitorskript
-    local x=$1 y=$2
-    echo "mouse_move -900 -900"
-    echo "mouse_move -900 -900"
-    echo "warte 0.2"
+    local x=$1 y=$2 i
+    # ZEHN KLEINE SCHRITTE IN DIE ECKE UND NICHT ZWEI GROSSE. Ein
+    # PS/2-Paket traegt neun Bit je Achse; QEMU zerlegt `mouse_move -900`
+    # in vier Pakete, und geht dabei eines verloren, faehlt der Weg.
+    # Gemessen: mit zwei Schritten zu -900 stand der Zeiger danach bei
+    # x=372 statt bei 0, und der Klick traf den fuenften Knopf statt des
+    # ersten (`snip: knopf 5` statt `knopf 1`). Mit zehn Schritten zu
+    # -100 kommt er an -- jeder passt in EIN Paket.
+    for i in 1 2 3 4 5 6 7 8 9 10; do echo "mouse_move -100 -100"; done
+    echo "warte 0.3"
     while [ "$x" -gt 100 ]; do echo "mouse_move 100 0"; x=$((x - 100)); done
     while [ "$y" -gt 100 ]; do echo "mouse_move 0 100"; y=$((y - 100)); done
     echo "mouse_move $x $y"
-    echo "warte 0.2"
+    echo "warte 0.3"
 }
 # Ein Knopf der Leiste: Platz i, Mitte des Knopfes, Mitte der Leiste.
 knopf() { echo "$((4 + $1 * 76 + 36))"; }
