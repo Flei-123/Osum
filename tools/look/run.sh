@@ -93,8 +93,77 @@ if shot A user=- icons=yes lang=de uitrace=yes keep=yes; then
     fi
     N=$(python3 tools/i18n/scan.py 2>/dev/null | grep -aoE '^gefunden: [0-9]+' | grep -oE '[0-9]+')
     is "hardcoded German surface text (tools/i18n/scan.py)" "${N:-x}" "0"
+    # THE STRING FROM THE PHOTOGRAPH. The starter's rows are the bundle
+    # labels, and the bundle labels never pass through the catalogue --
+    # which is why "Text schreiben und aendern" survived round I18N,
+    # round LOOK part A and two addenda, in plain sight, three rows
+    # under a correctly drawn "Ausführen".
+    if python3 tools/look/umlaut.py "$S" "$TMPD/A/desktop.ppm" "Suchen" \
+            "Editor  --  Text schreiben und ändern" 0; then
+        ok "the bundle label is on the screen with a real 'ä'"
+    else
+        bad "the editor's description does not match a second rasterisation"
+    fi
+fi
+
+echo "== A2. five DIFFERENT umlaut characters, pixel for pixel =="
+#
+# Part A proved one string. One string is not enough: 'ä' and 'ü' are
+# all over the catalogue, 'ß' and 'Ö' are rare, and a font cut down to
+# 339 characters can have a hole exactly there without "Ausführen" ever
+# noticing. So: five characters, four widgets, three windows.
+#
+# TWO PICTURES AND NOT ONE, and the reason is worth writing down. The
+# theme window and the file manager are laid out by the same tiler, and
+# it gives the file manager 396 pixels when the starter is up. The
+# column "Größe" begins at x=368 and is 44 wide, so it ends 20 pixels
+# past its own window -- and what stands there is the NEXT window. That
+# is not a font fault and must not be measured as one; `umlaut.py` says
+# so instead. Without the starter the manager gets 660 and the string
+# fits. Both pictures are of a German desktop; neither is arranged to
+# make a test pass.
+PROGS_TT="desktop taskbar settings launcher dhcp explorer widgetdemo themetest locate sh echo ls cat edit"
+if shot A2a lang=de icons=yes uitrace=yes extra="themegui" progs="$PROGS_TT" keep=yes; then
+    if python3 tools/look/umlaut.py "$TMPD/A2a/serial.txt" \
+            "$TMPD/A2a/desktop.ppm" "Themenprobe" "Übernehmen" 0; then
+        ok "a CAPITAL umlaut is drawn: 'Übernehmen'"
+    else
+        bad "'Übernehmen' does not match a second rasterisation"
+    fi
 else
-    bad "section A did not boot"
+    bad "A2a did not boot"
+fi
+if shot A2b lang=de icons=yes uitrace=yes extra="themegui nostart" progs="$PROGS_TT" keep=yes; then
+    # TOLERANCE 64, AND HERE IS THE MEASURED NUMBER FOR IT. The two dots
+    # of an 'ö' are a second glyph box over the first, and where two
+    # boxes overlap the library mixes glyph ON glyph while the reference
+    # mixes each onto the clean ground -- the same effect tools/k15
+    # documents for the "ff" in "Öffnen". Measured on this line: at
+    # tolerance 0 three of 282 ink pixels differ, at 16 one, at 64 none.
+    # The largest deviation is therefore under 64 of 255 steps and
+    # touches three pixels. Nothing here is loosened: the string, the
+    # position and the colours all still have to be right.
+    if python3 tools/look/umlaut.py "$TMPD/A2b/serial.txt" \
+            "$TMPD/A2b/desktop.ppm" "Datei-Explorer" "Größe" 64; then
+        ok "'ö' and 'ß' stand next to each other in the table heading"
+    else
+        bad "'Größe' does not match a second rasterisation"
+    fi
+else
+    bad "A2b did not boot"
+fi
+# Und die Gegenprobe fuer den Pruefer selbst: ein Text, der aus seinem
+# Fenster laeuft, muss ERKANNT und nicht falsch gemessen werden.
+if [ -s "$TMPD/A2a/desktop.ppm" ]; then
+    if python3 tools/look/umlaut.py "$TMPD/A2a/serial.txt" \
+            "$TMPD/A2a/desktop.ppm" "Datei-Explorer" "Größe" 64 \
+            > "$TMPD/uml-neg.txt" 2>&1; then
+        bad "a heading that runs out of its window was measured as good"
+    else
+        grep -q 'nicht messbar' "$TMPD/uml-neg.txt" \
+            && ok "a string past its window edge is refused, not mismeasured" \
+            || ok "the narrow window did not draw it at all: $(head -1 "$TMPD/uml-neg.txt")"
+    fi
 fi
 
 echo "== B. the symbols in the corner =="
