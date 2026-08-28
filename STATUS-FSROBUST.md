@@ -170,7 +170,48 @@ hat.
 
 ---
 
-## 7. Kein bestehender Test wurde entschärft
+## 7. Die Abnahme, und was sie sagt
+
+`tools/fsrobust/run.sh` (Abschnitt 29 in `test.sh`), Probelauf mit
+`FSR_LAEUFE=4`:
+
+    FSROBUST: 30 bestanden, 0 gescheitert
+
+Und die bestehenden Abschnitte, die am Dateisystem hängen — **auf diesem
+Zweig gelaufen, nach allen Änderungen an `fs.fi`**:
+
+| Abschnitt | Ergebnis |
+|---|---|
+| `tools/kernel/run.sh` (Runden 59–62, das Dateisystem selbst) | **176 bestanden, 0 gescheitert** |
+| `tools/ofs3/run.sh` (Runde OFS3, das Format der Fassung 3) | **75 bestanden, 0 gescheitert** |
+| `tools/k14/run.sh` (VFS, /proc, /dev, FAT32, Partitionen) | 151 bestanden, **1 gescheitert** |
+
+### Der eine Fehler in K14 ist älter als diese Runde
+
+`  FAIL  und die Wurzelplatte danach, Oktett fuer Oktett` — K14 verlangt,
+dass dieselbe Arbeit auf dem geraden Weg und über die Ops-Tafel
+(`vfsall`) Platten hinterlässt, die Oktett für Oktett gleich sind.
+
+**Nachgemessen auf `mergeline`, dem Zweig, von dem diese Runde
+abzweigt** (Worktree `/root/mgline`, dieselbe Prüfung von Hand
+nachgebaut):
+
+| | fsrobust | mergeline |
+|---|---|---|
+| unterschiedliche Oktette | 6 | 6 |
+| betroffene Blöcke | 4, 5 | 4, 5 |
+| Stelle im Inode | Versatz 88 (`I_MODE`) | Versatz 88 (`I_MODE`) |
+| Werte | 0o777 gegen 0 | 0o777 gegen 0 |
+
+**Byte für Byte derselbe Unterschied.** Der gerade Weg schreibt 0o777 in
+die Rechtebits einer neu angelegten Datei, der Weg über die Ops-Tafel
+eine Null. Das ist ein Fehler der VFS-Schicht aus Runde K14 und nicht
+dieser Runde; er wurde hier gemessen, benannt und **nicht angefasst** —
+er gehört der Runde, die die Rechte über die Tafel führt (`multiuser`).
+
+---
+
+## 8. Kein bestehender Test wurde entschärft
 
 `tools/fsrobust/run.sh` ist **neu** und Abschnitt 29 in `test.sh`.
 Angefasst wurden ausserdem `tools/osum/mkfs.py` (`--journal`, ein neues

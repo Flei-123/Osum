@@ -173,7 +173,22 @@ zwei Funktionen:
 Beides zusammen macht "N Dateien anlegen" zu einem Vorgang, der mit N
 quadratisch waechst. Gemessen (`fsrlim viele`, Abbild mit 4.096 Inodes):
 
-MESSWERTE-VIELE
+| Dateien | Wanduhr | abzueglich Leerlauf | je Datei | Faktor gegenueber der Haelfte |
+|---:|---:|---:|---:|---:|
+| 125 | 24,6 s | **21,0 s** | 168 ms | -- |
+| 250 | 81,6 s | **78,0 s** | 312 ms | **3,7x** |
+| 500 | 345,1 s | **340,9 s** | 682 ms | **4,4x** |
+
+Doppelt so viele Dateien kosten fast VIERMAL so viel Zeit. Das ist die
+Signatur von N-Quadrat, und sie ist gemessen und nicht abgeleitet: der
+Leerlauf (booten und beenden, 3,5 bis 4,2 s) ist abgezogen, alle drei
+Laeufe liefen nacheinander auf derselben Maschine.
+
+Damit ist die praktische Decke keine Zahl, sondern eine Geduldsfrage:
+zweitausend Dateien in EINEM Verzeichnis anzulegen dauert in dieser
+Umgebung ueber eine Stunde, waehrend dasselbe Verzeichnis mit
+zwoelftausend Eintraegen (auf dem Wirt gebaut) in 36 Sekunden vollstaendig
+GELESEN wird. Lesen ist linear, Anlegen ist es nicht.
 
 Das ist keine Grenze des FORMATS, sondern eine des Zuteilers und der
 Suche. Ein Namensindex fuer Verzeichnisse (`kernel/nidx.fi` gibt es
