@@ -36,7 +36,7 @@ mkdir -p "$OUT"
 # (`tools/osum/mkfs.py`), und /bin/themetest bindet seit dem Zusatz
 # `gui` die ganze Widget-Bibliothek ein. `widgetdemo`, `edit` und `suchen`
 # haben in dieser Runde nichts zu tun und passten sonst nicht mit drauf.
-PROGS="themetest explorer launcher leiste schreibtisch einstellungen sh echo ls cat"
+PROGS="themetest explorer launcher taskbar desktop settings sh echo ls cat"
 
 bash tools/build-kernel.sh "$OUT/k.mb" > "$OUT/k.log" 2>&1 || {
     echo "== der Kern laesst sich nicht bauen"; tail -20 "$OUT/k.log"; exit 1; }
@@ -93,7 +93,9 @@ cat > "$OUT/time.conf" <<'EOF'
 offset=120
 EOF
 
-ARGS=(build "$OUT/disk.img" 8192 /lib/
+# 8192 blocks (4 MiB) held these programs with 4 per cent to spare
+# after round LOOK. That is not spare room, that is a countdown.
+ARGS=(build "$OUT/disk.img" 16384 /lib/
       "/lib/mono.ttf=assets/osum-mono.ttf" "/lib/sans.ttf=assets/osum-sans.ttf"
       /bin/)
 for p in $PROGS; do ARGS+=("/bin/$p=$OUT/$p.elf"); done

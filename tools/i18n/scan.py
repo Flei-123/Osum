@@ -32,7 +32,7 @@
 # WAS AUSDRUECKLICH ERLAUBT BLEIBT und deshalb nicht anschlaegt:
 #
 #   * Mitschnitte fuer Testlaeufer: alles, was mit "<programm>: "
-#     anfaengt ("leiste: knopf i=", "einstellungen: keine Flaeche").
+#     anfaengt ("taskbar: knopf i=", "settings: keine Flaeche").
 #     Sie gehen auf die SERIELLE LEITUNG und nie auf den Bildschirm, ein
 #     Testlaeufer greppt danach, und ein uebersetzter Mitschnitt machte
 #     jeden Testlaeufer sprachabhaengig.
@@ -73,9 +73,9 @@ ERSATZ_OK = {"guest", "queue", "value", "values", "true", "blue",
 # die fuenf Programme mit einem Fenster, die Widget-Bibliothek darunter
 # und der Fensterserver, der die Titelleiste malt. HIER ist das Ziel 0.
 OBERFLAECHE = [
-    "kernel/user/einstellungen.fi",
-    "kernel/user/leiste.fi",
-    "kernel/user/schreibtisch.fi",
+    "kernel/user/settings.fi",
+    "kernel/user/taskbar.fi",
+    "kernel/user/desktop.fi",
     "kernel/user/explorer.fi",
     "kernel/user/launcher.fi",
     "kernel/user/wlib.fi",
@@ -134,7 +134,7 @@ def erlaubt(text):
         return True
     if t.startswith("/"):
         return True
-    # "leiste: ...", "einstellungen: ...", "i18n: ..." -- ein Mitschnitt.
+    # "taskbar: ...", "settings: ...", "i18n: ..." -- ein Mitschnitt.
     if re.match(r"^[a-z0-9]+: ", t):
         return True
     # "modus=", "offset=", " x=", " fg=" -- ein Schluessel oder ein Feld.
@@ -143,12 +143,44 @@ def erlaubt(text):
     return False
 
 
+# JEDER NAME IN OBERFLAECHE MUSS EINE DATEI SEIN.
+#
+# Der strenge Teil dieses Pruefers arbeitet ueber eine
+# MITGLIEDSCHAFTSPRUEFUNG gegen einen Baumdurchlauf: was in OBERFLAECHE
+# steht, wird streng geprueft, alles andere nur berichtet. Ein Name in
+# dieser Liste, den es nicht gibt, passt deshalb auf NICHTS -- die
+# Datei, die er meinte, laeuft still durch den milden Zweig, und der
+# Pruefer meldet weiter "gefunden: 0". Genau so ueberlebt eine
+# Umbenennung einen Pruefer, ohne ihn kaputt zu machen: sie macht ihn
+# blind. Deshalb ist ein toter Eintrag hier ein Abbruch.
+def liste_pruefen(wurzel):
+    # NUR AUF DEM AKTUELLEN BAUM. Die Gegenprobe in tools/i18n/run.sh
+    # baut absichtlich ein Verzeichnis mit EINER Datei darin und laesst
+    # den Pruefer darauf los; dort fehlen die anderen acht mit Recht.
+    # Diese Liste beschreibt DIESEN Baum und keinen anderen.
+    if len(sys.argv) > 1:
+        return
+    fehlt = [r for r in OBERFLAECHE
+             if not os.path.isfile(os.path.join(wurzel, r))]
+    if fehlt:
+        for r in fehlt:
+            print("scan: AUFGEFUEHRT, ABER NICHT DA: %s" % r)
+        raise SystemExit(2)
+
+
 def pruefe(pfad, streng):
     treffer = []
     try:
         roh = open(pfad, "rb").read().decode("utf-8", "replace")
     except OSError:
-        return treffer
+        # EINE DATEI, DIE ES NICHT GIBT, IST EIN FEHLER UND KEIN NULL.
+        # Vorher kam hier eine leere Trefferliste zurueck, und eine
+        # leere Trefferliste heisst in diesem Pruefer "sauber". Eine
+        # Umbenennung, die diese Liste nicht mitnimmt, macht den
+        # strengen Teil des Pruefers damit still zu einer Zusicherung
+        # ueber nichts.
+        print("scan: AUFGEFUEHRT, ABER NICHT DA: %s" % pfad)
+        raise SystemExit(2)
     for nr, zeile in enumerate(roh.split("\n"), 1):
         for lit in literale(zeile):
             if erlaubt(lit):
@@ -171,6 +203,7 @@ def pruefe(pfad, streng):
 
 def main():
     wurzel = sys.argv[1] if len(sys.argv) > 1 else "."
+    liste_pruefen(wurzel)
     surface = []
     rest = []
     for basis in QUELLEN:
