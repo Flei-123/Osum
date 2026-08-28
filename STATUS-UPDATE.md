@@ -4,8 +4,9 @@ Zweig `update`, abgezweigt von `mergeline`. **Nicht nach `main` gemerged.**
 Gemessen mit `bash tools/update/run.sh` (QEMU mit `-accel kvm` über
 `tools/install/oneshot.sh`) und `python3 tools/update/vectors.py`.
 
-Diese Datei wird nach jedem Schritt fortgeschrieben. Die Endzahlen und die
-ehrliche Fehlliste stehen in `docs/UPDATE.md`.
+**ENDSTAND: 49 Zusagen grün, 0 rot** (Volllauf) und **4725 Prüfungen grün,
+0 rot** in der Rechnung. Die ausführliche Fassung mit der ehrlichen
+Fehlliste steht in `docs/UPDATE.md`.
 
 ---
 
@@ -13,16 +14,16 @@ ehrliche Fehlliste stehen in `docs/UPDATE.md`.
 
 | Datei | Zeilen | Was |
 |---|---:|---|
-| `lib/crypto/sha512.fi` | 279 | SHA-512 (FIPS 180-4), strömend, profilfrei |
-| `lib/crypto/ed25519.fi` | 700 | Ed25519 (RFC 8032), signieren und prüfen |
+| `lib/crypto/sha512.fi` | 281 | SHA-512 (FIPS 180-4), strömend, profilfrei |
+| `lib/crypto/ed25519.fi` | 809 | Ed25519 (RFC 8032), signieren und prüfen |
 | `kernel/ab.fi` | 237 | der Erprobungszähler (A/B-Boot) im Kern |
 | `kernel/user/opk.fi` | +172 | Signaturpflicht, `/system/ERPROBUNG`, `opk erprobung` |
-| `kernel/user/hallo3.fi` | 19 | das Paket, das sich sauber installiert und **nicht startet** |
-| `tools/update/oracle.fi` | 176 | das Messgerät auf dem Wirt (dieselben `lib/crypto/`-Dateien wie der Kern) |
-| `tools/update/vectors.py` | 300 | SHA-512 und Ed25519 gegen FIPS/RFC/`sign.input`/libsodium |
-| `tools/update/signpak.py` | 84 | Pakete auf dem Wirt signieren, mit Gegenprüfung durch libsodium |
-| `tools/update/pakete.sh` | 110 | die kaputten Pakete und Quellen der Gegenproben |
-| `tools/update/run.sh` | 230 | der Läufer, fünf Abschnitte |
+| `kernel/user/hallo3.fi` | 18 | das Paket, das sich sauber installiert und **nicht startet** |
+| `tools/update/oracle.fi` | 174 | das Messgerät auf dem Wirt (dieselben `lib/crypto/`-Dateien wie der Kern) |
+| `tools/update/vectors.py` | 325 | SHA-512 und Ed25519 gegen FIPS/RFC/`sign.input`/libsodium |
+| `tools/update/signpak.py` | 83 | Pakete auf dem Wirt signieren, mit Gegenprüfung durch libsodium |
+| `tools/update/pakete.sh` | 99 | die kaputten Pakete und Quellen der Gegenproben |
+| `tools/update/run.sh` | 239 | der Läufer, fünf Abschnitte |
 | `tools/update/sign.input.gz` | — | die 1024 offiziellen Ed25519-Vektoren, im Repo statt aus dem Netz |
 
 ---
