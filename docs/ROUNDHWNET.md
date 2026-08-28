@@ -32,9 +32,10 @@ fehlt, steht vollständig in `docs/REALHW.md`, Klasse für Klasse.
 
 ### `kernel/netdev.fi` -- welcher Treiber, entschieden vom Bus (595 Zeilen)
 
-Vorher rief `kernel/inet.fi` den Treiber **beim Namen**: `virtio.tx_frame`,
-zwanzigmal. Insgesamt 67 solche Zeilen in sieben Dateien. Das ist keine
-Treiberschnittstelle, das ist eine Treiberadresse.
+Vorher rief `kernel/inet.fi` den Treiber **beim Namen**: `virtio.tx_frame`
+und zwanzig weitere. Gezählt über den ganzen Kern: **56 Zeilen in sieben
+Dateien** mussten umgestellt werden. Das ist keine Treiberschnittstelle,
+das ist eine Treiberadresse.
 
 `netdev.fi` hat dieselbe Form, die die Aufrufer schon benutzten -- jede
 Funktion von `virtio.fi` mit demselben Namen und denselben Argumenten --
