@@ -396,6 +396,93 @@ user_iret:
     addq $16, %rsp                  /* vector number and error code */
     iretq
 
+/* --------------------------------- rdmsr/wrmsr MIT FAENGERPFAD ---
+ * RUNDE KVMFIX. Warum es diese beiden Funktionen gibt und warum sie in
+ * Assembler stehen muessen, steht in `kernel/msr.fi`. Hier steht nur,
+ * was der Assembler dazu beitraegt: eine ADRESSE, die auf den einen
+ * Befehl genau zeigt, der fehlschlagen darf.
+ *
+ *   msr_read_safe (rdi = Index, rsi = Zeiger auf u64)  -> rax 0 = gut,
+ *   msr_write_safe(rdi = Index, rsi = Wert)               rax 1 = #GP
+ *
+ * DIE ABMACHUNG, UND SIE IST STRENGER ALS SYSTEM V: ausser rax und den
+ * Flaggen aendert sich KEIN Register. Der Aufrufer ist ein `asm("call
+ * rax", ...)` aus Firn heraus, und was so ein Block dem Uebersetzer
+ * ueber zerstoerte Register sagen kann, ist genau das, was in den
+ * `clobber`-Klauseln steht. Also zerstoert diese Funktion nichts, was
+ * dort nicht steht: rcx und rdx werden gerettet, die Flaggen mit
+ * `pushfq`/`popfq` -- ein `shl`/`or` mitten in einem fremden
+ * Flaggenzustand waere sonst ein Fehler, den niemand mehr findet.
+ *
+ * WICHTIG FUER DEN FAENGERPFAD: der Faenger wird mit demselben rsp
+ * betreten, den der Befehl hatte, der fehlgeschlagen ist -- ein #GP ist
+ * ein FAULT, der Prozessor legt seinen Rahmen auf den Kernelstapel und
+ * nicht auf diesen. Deshalb muss der Faenger dieselben drei Woerter
+ * abraeumen wie der gute Ausgang, und deshalb stehen die Pops in beiden
+ * Zweigen. Eine einzige vergessene Zeile hier waere ein Stapel, der um
+ * acht Oktette verrutscht ist, und der Fehler zeigte sich erst drei
+ * Funktionen spaeter.
+ */
+    .globl msr_read_safe
+msr_read_safe:
+    pushfq
+    pushq %rcx
+    pushq %rdx
+    movq %rdi, %rcx
+    movl $0, %eax
+    movl $0, %edx
+.Lmsr_rd_insn:
+    rdmsr                           /* <- darf fehlschlagen */
+    shlq $32, %rdx
+    orq %rdx, %rax
+    movq %rax, (%rsi)
+    movl $0, %eax
+    popq %rdx
+    popq %rcx
+    popfq
+    ret
+.Lmsr_rd_fix:
+    movq $0, (%rsi)                 /* keine Messung, also eine Null */
+    movl $1, %eax
+    popq %rdx
+    popq %rcx
+    popfq
+    ret
+
+    .globl msr_write_safe
+msr_write_safe:
+    pushfq
+    pushq %rcx
+    pushq %rdx
+    movq %rdi, %rcx
+    movq %rsi, %rax                 /* wrmsr nimmt nur eax */
+    movq %rsi, %rdx
+    shrq $32, %rdx
+.Lmsr_wr_insn:
+    wrmsr                           /* <- darf fehlschlagen */
+    movl $0, %eax
+    popq %rdx
+    popq %rcx
+    popfq
+    ret
+.Lmsr_wr_fix:
+    movl $1, %eax
+    popq %rdx
+    popq %rcx
+    popfq
+    ret
+
+    .section .rodata
+    .align 8
+/* Die Faengertabelle: Paare (Adresse des Befehls, Adresse des Faengers),
+ * abgeschlossen durch ein Nullpaar. `kernel/msr.fi::catch_rip` sucht
+ * darin, `trap.fi` benutzt das Ergebnis. */
+    .globl msr_fixups
+msr_fixups:
+    .quad .Lmsr_rd_insn, .Lmsr_rd_fix
+    .quad .Lmsr_wr_insn, .Lmsr_wr_fix
+    .quad 0, 0
+
     .section .rodata
     .align 8
     .globl vectors
@@ -436,6 +523,11 @@ vectors:
     /* Runde K12: der Hypervisor. EIN Eintrag, wie bei smp_vectors --
      * der Weltwechsel und die Gaeste stehen in kernel/hv.s. */
     .quad hv_vectors                /* 69: kernel/hv.s */
+    /* Runde KVMFIX: der MSR-Zugriff, der ein #GP ueberlebt. 70 ist die
+     * Faengertabelle, 71 und 72 die beiden Zugriffe (kernel/msr.fi). */
+    .quad msr_fixups                /* 70: kernel/msr.fi */
+    .quad msr_read_safe             /* 71 */
+    .quad msr_write_safe            /* 72 */
 
     .section .bss, "aw", @nobits
     .align 8

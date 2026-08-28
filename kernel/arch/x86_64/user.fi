@@ -97,11 +97,39 @@ fn cpu_has_nx() -> bool {
 }
 
 // STAR[47:32] is what `syscall` loads (kernel code 0x08, stack 0x10),
-// STAR[63:48] what `sysret` loads (0x18 + 8 = user data, 0x18 + 16 =
+// STAR[63:48] what `sysret` loads (base + 8 = user data, base + 16 =
 // user code). That the base is the unused 32-bit user segment is not a
 // mistake but the architecture -- see the GDT in boot.s.
+//
+// RUNDE KVMFIX: UND ZWAR 0x1B UND NICHT 0x18, ALSO MIT RPL 3 DARIN.
+//
+// Hier stand 25 Runden lang 0x18, und unter QEMU/TCG war das nie ein
+// Problem. Auf einer echten AMD-CPU ist es toedlich, und der Grund ist
+// ein Unterschied zwischen den Herstellern, den kein Handbuch fett
+// druckt:
+//
+//   INTEL setzt beim `sysret` die untersten zwei Bits von CS UND SS
+//   selbst auf 3 (SDM, SYSRET: "SS.Selector <- (STAR[63:48]+8) OR 3").
+//   AMD setzt sie nur in CS. SS bekommt STAR[63:48]+8, so wie es
+//   dasteht -- aus 0x18 wird also SS = 0x20, ein Selektor mit RPL 0.
+//
+// Ring 3 laeuft damit noch: der Prozessor ist in CPL 3, und ein
+// Datensegment mit DPL 3 darf er lesen und schreiben. Es faellt erst
+// beim NAECHSTEN `iretq` zurueck nach Ring 3 auf -- der prueft
+// SS.RPL == CS.RPL, findet 0 gegen 3 und wirft #GP mit dem Selektor als
+// Fehlercode. Gemessen, derselbe Kernel, dieselbe Befehlszeile:
+//
+//   -accel tcg -> r3trap cs=0x2b  ss=0x23  -> 166 Zeilen, "kernel: done"
+//   -accel kvm -> r3trap cs=0x2b  ss=0x20  -> *** EXCEPTION 13 #GP
+//                                             err=0x20  rip=<das iretq>
+//
+// Mit 0x1B ist SS = 0x23 und CS = 0x2B, auf BEIDEN Herstellern und auch
+// unter TCG -- Linux schreibt aus demselben Grund `__USER32_CS` (also
+// den Selektor MIT RPL 3) in dieses Feld. Die Gegenprobe steht in
+// `tools/kvm/run.sh` Abschnitt 4: mit 0x18 muss der Kernel unter KVM
+// sterben und unter TCG durchlaufen.
 fn setup(state: u64) {
-    wrmsr(MSR_STAR, (0x18 << 48) | (0x08 << 32))
+    wrmsr(MSR_STAR, (0x1B << 48) | (0x08 << 32))
     wrmsr(MSR_LSTAR, vector(state, V_SYSCALL))
     wrmsr(MSR_SFMASK, 0x200) // IF off during the system call
     // Bit 0 (SCE) switches `syscall` on. Bit 11 (NXE) makes bit 63 of a
