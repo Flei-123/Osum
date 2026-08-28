@@ -1,0 +1,2022 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/sshd.fi -- RUNDE SSHD: DER FERNZUGANG.
+//
+//     sshd [-p anschluss] [-k verzeichnis] [-t ms] [-1] [-v]
+//
+//     -p   der Anschluss, voreingestellt 22
+//     -k   wo der Wirtsschluessel liegt, voreingestellt /etc/ssh
+//     -t   Gesamtlaufzeit in Millisekunden. Danach endet der Dienst von
+//          selbst. Das ist NICHT fuer den Betrieb, sondern fuer den
+//          Pruefstand: ein Lauf, der nie endet, ist ein Lauf ohne
+//          Ergebnis.
+//     -1   nach der ERSTEN beendeten Verbindung aufhoeren
+//     -v   jede Stufe des Handschlags auf die Konsole
+//
+// ================================================== WAS HIER GEBAUT WIRD
+//
+// SSH-2 serverseitig, so weit ein Fernzugang es braucht:
+//
+//   * Versionsaustausch (RFC 4253 Abschnitt 4.2)
+//   * Schluesselaustausch `curve25519-sha256` (RFC 8731) mit einem
+//     Wirtsschluessel `ssh-ed25519` (RFC 8709)
+//   * `chacha20-poly1305@openssh.com` in beide Richtungen
+//   * Benutzeranmeldung mit `publickey` UND mit `password` (RFC 4252)
+//   * ein Kanal `session` mit `shell` und mit `exec` (RFC 4254),
+//     wahlweise an einem Pseudoterminal
+//
+// EIN PROZESS JE VERBINDUNG. Der Lauscher nimmt an und spaltet sich; das
+// Kind fuehrt den ganzen Handschlag und die Sitzung. Das ist die Bauform
+// von OpenSSH und sie hat hier denselben Grund: der Krypto-Zustand einer
+// Verbindung ist dann einfach der Zustand DIESES Prozesses, und ein
+// Absturz in einer Sitzung nimmt die anderen nicht mit.
+//
+// UND TROTZDEM BRAUCHT ES `poll` (Runde POLL), an zwei Stellen, und
+// beide sind echt:
+//
+//   1. Im Lauscher, damit er zwischen zwei Verbindungen die Leichen
+//      seiner Kinder einsammeln kann, ohne im `accept` festzuhaengen.
+//   2. IN DER SITZUNG, und das ist die wichtige. Ein Sitzungskanal muss
+//      GLEICHZEITIG auf zwei Dinge warten: auf Oktette aus dem Netz (der
+//      Mensch tippt) und auf Oktette aus dem Rohr der Shell (das
+//      Programm redet). Ohne `poll` kann man nur auf eines von beiden
+//      warten -- ein `ssh host` haenge dann, bis der Mensch etwas tippt,
+//      und die Ausgabe eines laufenden Programms kaeme erst danach. Das
+//      ist genau der Fall, den `kernel/user/jarvisd.fi` in der Runde
+//      POLL vorgemessen hat.
+//
+// ============================================ DIE ANBINDUNG AN DIE NUTZER
+//
+// Es gibt in diesem Repo KEINEN Zweig `multiuser`. Was es gibt, ist
+// Runde K13, und die ist seit Langem in `main`: echte uid/gid je
+// Prozess, `/etc/passwd`, `/etc/shadow` mit PBKDF2-HMAC-SHA256,
+// `setuid`/`setgid` und `kernel/perm.fi` als EINZIGE Stelle, an der ein
+// Recht geprueft wird. Dieser Server bindet daran an und hat KEINE
+// eigene Benutzertafel und KEINE Uebergangsloesung:
+//
+//   * der Name kommt aus `/etc/passwd` (`pw.uid_of_name`),
+//   * das Passwort wird gegen `/etc/shadow` geprueft (`pw.check_hash`,
+//     dieselbe Funktion, die `login` und `su` benutzen),
+//   * die Schluessel stehen in `~/.ssh/authorized_keys`, wobei `~` das
+//     Heimatverzeichnis aus Feld 6 von `/etc/passwd` ist,
+//   * vor `execve` werden `setgid` und dann `setuid` gerufen. Danach ist
+//     die Sitzung kein root mehr und kann es nicht rueckgaengig machen.
+//
+// ======================================================== EHRLICHE GRENZEN
+//
+// Die vollstaendige Liste steht in STATUS-SSHD.md. Die drei wichtigsten:
+//
+//   G1 KEINE NEUAUSHANDLUNG. Ein KEXINIT mitten in der Sitzung wird
+//      abgelehnt statt beantwortet. OpenSSH handelt nach einer Stunde
+//      oder einem Gigaoktett neu aus; wer so lange verbunden bleibt,
+//      bekommt hier einen Abbruch und keine stillschweigende
+//      Weiterbenutzung desselben Schluessels.
+//   G2 DER PRIVATE WIRTSSCHLUESSEL LIEGT ROH auf der Platte
+//      (32 Oktette Saat, 0600, root). Das ist NICHT OpenSSHs
+//      `openssh-key-v1`-Format und es ist nicht mit einem Kennwort
+//      gesichert. Wer die Platte hat, hat den Wirtsschluessel.
+//   G3 KEINE PROTOKOLLIERUNG ins Dateisystem, kein `fail2ban`, keine
+//      Wartezeit nach einem Fehlversuch. Nach sechs Fehlversuchen wird
+//      die Verbindung getrennt, und das ist alles.
+
+profile kernel
+
+import ulib
+import libc.kcall
+import libc.errno
+import libc.io
+import libc.net
+import libc.proc
+import crypto.sha256
+import crypto.x25519
+import crypto.ed25519
+import ssh.wire
+import ssh.pack
+import ssh.kex
+import pw
+
+export { u_start }
+
+// ------------------------------------------------- die Nachrichtennummern
+const M_DISCONNECT: u64 = 1
+const M_IGNORE: u64 = 2
+const M_UNIMPLEMENTED: u64 = 3
+const M_DEBUG: u64 = 4
+const M_SERVICE_REQUEST: u64 = 5
+const M_SERVICE_ACCEPT: u64 = 6
+const M_EXT_INFO: u64 = 7
+const M_KEXINIT: u64 = 20
+const M_NEWKEYS: u64 = 21
+const M_KEX_ECDH_INIT: u64 = 30
+const M_KEX_ECDH_REPLY: u64 = 31
+const M_UA_REQUEST: u64 = 50
+const M_UA_FAILURE: u64 = 51
+const M_UA_SUCCESS: u64 = 52
+const M_UA_PK_OK: u64 = 60
+const M_GLOBAL_REQUEST: u64 = 80
+const M_REQUEST_FAILURE: u64 = 82
+const M_CH_OPEN: u64 = 90
+const M_CH_CONFIRM: u64 = 91
+const M_CH_OPEN_FAIL: u64 = 92
+const M_CH_WINDOW: u64 = 93
+const M_CH_DATA: u64 = 94
+const M_CH_EXTENDED: u64 = 95
+const M_CH_EOF: u64 = 96
+const M_CH_CLOSE: u64 = 97
+const M_CH_REQUEST: u64 = 98
+const M_CH_SUCCESS: u64 = 99
+const M_CH_FAILURE: u64 = 100
+
+// ---------------------------------------------------------- die Groessen
+const RXCAP: usize = 42000
+const TXCAP: usize = 42000
+const PKTCAP: usize = 36000
+const PAYCAP: usize = 36000
+const CHUNK: usize = 8192
+const MAX_TRIES: u64 = 6
+// Wie lange auf das naechste Oktett des Handschlags gewartet wird.
+const HS_MS: u64 = 20000
+// Unser Empfangsfenster. Wird nachgefuellt, sobald die Haelfte weg ist.
+const WINDOW: u64 = 1048576
+const MAXPKT: u64 = 32768
+
+// Die Rueckgaben von `take_packet`.
+const NEED_MORE: u64 = 0xFFFFFFFFFFFFFFFF
+const BROKEN: u64 = 0xFFFFFFFFFFFFFFFE
+
+const SYS_SETUID: u64 = 105
+const SYS_SETGID: u64 = 106
+const SYS_EXECVE: u64 = 59
+const SYS_GETRANDOM: u64 = 318
+const SYS_OSUM_PTY: u64 = 1100
+const SYS_CHMOD: u64 = 90
+const SYS_CHDIR: u64 = 80
+const SYS_WAIT4: u64 = 61
+const WNOHANG: u64 = 1
+const SYS_RT_SIGPROCMASK: u64 = 14
+const SIG_BLOCK: u64 = 0
+const SIGCHLD_BIT: u64 = 65536   // 1 << (17 - 1)
+const SYS_CLOCK_GETTIME: u64 = 228
+const CLOCK_MONOTONIC: u64 = 1
+
+// ---------------------------------------------------------- die Texte
+static mut T_VERSION: [u8; 24] = "SSH-2.0-OsumSSH_1.0\r\n\0\0\0"
+static mut T_BANNER: [u8; 20] = "SSH-2.0-OsumSSH_1.0\0"
+static mut T_KEXALGS: [u8; 76] =
+    "curve25519-sha256,curve25519-sha256@libssh.org,kex-strict-s-v00@openssh.com\0"
+static mut T_KEXSTRICT: [u8; 29] = "kex-strict-c-v00@openssh.com\0"
+static mut T_CURVE: [u8; 18] = "curve25519-sha256\0"
+static mut T_CURVE2: [u8; 29] = "curve25519-sha256@libssh.org\0"
+static mut T_HOSTALG: [u8; 12] = "ssh-ed25519\0"
+static mut T_CIPHER: [u8; 30] = "chacha20-poly1305@openssh.com\0"
+static mut T_MACS: [u8; 14] = "hmac-sha2-256\0"
+static mut T_NONE: [u8; 5] = "none\0"
+static mut T_EMPTY: [u8; 1] = "\0"
+static mut T_USERAUTH: [u8; 13] = "ssh-userauth\0"
+static mut T_CONNECTION: [u8; 15] = "ssh-connection\0"
+static mut T_PUBKEY: [u8; 10] = "publickey\0"
+static mut T_PASSWORD: [u8; 9] = "password\0"
+static mut T_METHODS: [u8; 19] = "publickey,password\0"
+static mut T_SESSION: [u8; 8] = "session\0"
+static mut T_SHELL: [u8; 6] = "shell\0"
+static mut T_EXEC: [u8; 5] = "exec\0"
+static mut T_PTYREQ: [u8; 8] = "pty-req\0"
+static mut T_ENV: [u8; 4] = "env\0"
+static mut T_WINCH: [u8; 14] = "window-change\0"
+static mut T_EXITSTATUS: [u8; 12] = "exit-status\0"
+static mut T_SH: [u8; 8] = "/bin/sh\0"
+static mut T_SLASH: [u8; 2] = "/\0"
+static mut T_SSHDIR: [u8; 6] = "/.ssh\0"
+static mut T_AKPATH: [u8; 22] = "/.ssh/authorized_keys\0"
+static mut T_ETCSSH: [u8; 9] = "/etc/ssh\0"
+static mut T_SEEDNAME: [u8; 28] = "/ssh_host_ed25519_key.seed\0\0"
+static mut T_PUBNAME: [u8; 27] = "/ssh_host_ed25519_key.pub\0\0"
+static mut T_RUNDIR: [u8; 5] = "/run\0"
+static mut T_CMDPRE: [u8; 11] = "/run/sshd-\0"
+static mut T_CMDSUF: [u8; 4] = ".sh\0"
+
+static mut L_LISTEN: [u8; 20] = "sshd: listening on \0"
+static mut L_FP: [u8; 26] = "sshd: host key SHA256:\0\0\0\0"
+static mut L_ALGS: [u8; 62] =
+    "sshd: curve25519-sha256 + ssh-ed25519 + chacha20-poly1305\0\0\0\0\0"
+static mut L_ACCEPT: [u8; 20] = "sshd: accepted from\0"
+static mut L_KEXOK: [u8; 20] = "sshd: kex complete\n\0"
+static mut L_STRICT: [u8; 26] = "sshd: strict kex agreed\n\0\0"
+static mut L_AUTHOK: [u8; 16] = "sshd: auth ok: \0"
+static mut L_AUTHBAD: [u8; 20] = "sshd: auth refused \0"
+static mut L_PKOK: [u8; 26] = "sshd: publickey accepted\n\0"
+static mut L_PWOK: [u8; 25] = "sshd: password accepted\n\0"
+static mut L_EXEC: [u8; 15] = "sshd: exec -- \0"
+static mut L_SHELL: [u8; 21] = "sshd: shell started\n\0"
+static mut L_DONE: [u8; 21] = "sshd: session done, \0"
+static mut L_GEN: [u8; 34] = "sshd: generating a host key ...\n\0\0"
+static mut L_NOKEY: [u8; 34] = "sshd: cannot write the host key\n\0\0"
+static mut L_STAGE: [u8; 14] = "sshd: stage \0\0"
+static mut L_CONNS: [u8; 20] = "sshd: connections =\0"
+static mut L_SPACE: [u8; 2] = " \0"
+static mut L_POLLS: [u8; 15] = "sshd: polls = \0"
+static mut L_TIMES: [u8; 16] = "sshd: ms vkx a \0"
+static mut L_NL: [u8; 2] = "\n\0"
+
+// ------------------------------------------------------------ die Puffer
+static mut rxraw: [u8; 42000] = [0 as u8; 42000]
+static mut rxlen: u64 = 0
+static mut pktbuf: [u8; 36000] = [0 as u8; 36000]
+static mut txbuf: [u8; 42000] = [0 as u8; 42000]
+static mut outpay: [u8; 36000] = [0 as u8; 36000]
+static mut icbuf: [u8; 4096] = [0 as u8; 4096]
+static mut iclen: u64 = 0
+static mut isbuf: [u8; 1024] = [0 as u8; 1024]
+static mut islen: u64 = 0
+static mut vcbuf: [u8; 256] = [0 as u8; 256]
+static mut vclen: u64 = 0
+static mut ksblob: [u8; 128] = [0 as u8; 128]
+static mut kslen: u64 = 0
+static mut hostseed: [u8; 32] = [0 as u8; 32]
+static mut hostpub: [u8; 32] = [0 as u8; 32]
+static mut akbuf: [u8; 16384] = [0 as u8; 16384]
+static mut keybuf: [u8; 512] = [0 as u8; 512]
+static mut chanbuf: [u8; 8192] = [0 as u8; 8192]
+static mut namebuf: [u8; 128] = [0 as u8; 128]
+static mut pathbuf: [u8; 256] = [0 as u8; 256]
+static mut homebuf: [u8; 128] = [0 as u8; 128]
+static mut shadowbuf: [u8; 256] = [0 as u8; 256]
+static mut passbuf: [u8; 256] = [0 as u8; 256]
+static mut cmdbuf: [u8; 2048] = [0 as u8; 2048]
+static mut fdsbuf: [u8; 32] = [0 as u8; 32]
+static mut fds2buf: [u8; 32] = [0 as u8; 32]
+static mut hbuf: [u8; 64] = [0 as u8; 64]
+static mut kmat: [u8; 128] = [0 as u8; 128]
+
+static mut cin: pack.Cipher = pack.Cipher { on: false, k1: [0 as u8; 32],
+    k2: [0 as u8; 32], seq: 0 }
+static mut cout: pack.Cipher = pack.Cipher { on: false, k1: [0 as u8; 32],
+    k2: [0 as u8; 32], seq: 0 }
+
+static mut verbose: u64 = 0
+static mut strict_kex: u64 = 0
+static mut keydir: u64 = 0
+
+// ======================================================= kleine Helfer
+
+fn ld8(p: u64, i: u64) -> u64 {
+    return (*((p + i) as *mut u8)) as u64
+}
+
+fn st8(p: u64, i: u64, v: u64) {
+    __mmio_write8((p + i) as *mut u8, (v & 255) as u8)
+}
+
+fn say(z: u64) {
+    io.write_all(1, z, wire.text_len(z) as u64)
+}
+
+fn saybytes(p: u64, n: u64) {
+    io.write_all(1, p, n)
+}
+
+fn saynum(v: u64) {
+    var d: [u8; 24] = [0 as u8; 24]
+    var n: u64 = 0
+    var x: u64 = v
+    if x == 0 {
+        d[0 as usize] = 48 as u8
+        n = 1
+    } else {
+        while x > 0 {
+            d[(n) as usize] = (48 + (x % 10)) as u8
+            x = x / 10
+            n = n + 1
+        }
+    }
+    var out: [u8; 24] = [0 as u8; 24]
+    var i: u64 = 0
+    while i < n {
+        out[(i) as usize] = d[((n - 1 - i)) as usize]
+        i = i + 1
+    }
+    io.write_all(1, (&out[0 as usize]) as u64, n)
+}
+
+fn nl() {
+    say((&L_NL[0 as usize]) as u64)
+}
+
+fn vsay(z: u64) {
+    if verbose != 0 {
+        say(z)
+    }
+}
+
+// `n` Oktette aus dem Zufallszahlengeber des Kerns.
+fn rnd(p: u64, n: u64) -> bool {
+    let r: u64 = ulib.sys(SYS_GETRANDOM, p, n, 0)
+    return !ulib.bad(r) && r == n
+}
+
+fn num_text(v: u64, out: u64) -> u64 {
+    var d: [u8; 24] = [0 as u8; 24]
+    var n: u64 = 0
+    var x: u64 = v
+    if x == 0 {
+        d[0 as usize] = 48 as u8
+        n = 1
+    } else {
+        while x > 0 {
+            d[(n) as usize] = (48 + (x % 10)) as u8
+            x = x / 10
+            n = n + 1
+        }
+    }
+    var i: u64 = 0
+    while i < n {
+        st8(out, i, d[((n - 1 - i)) as usize] as u64)
+        i = i + 1
+    }
+    st8(out, n, 0)
+    return n
+}
+
+fn read_file(path: u64, buf: u64, max: u64) -> u64 {
+    let fd: u64 = io.open(path, kcall.O_RDONLY)
+    if errno.failed(fd) {
+        return ulib.EOF
+    }
+    let n: u64 = io.read_full(fd, buf, max)
+    io.close(fd)
+    if errno.failed(n) {
+        return ulib.EOF
+    }
+    return n
+}
+
+fn write_file(path: u64, buf: u64, n: u64) -> bool {
+    let fd: u64 = io.create(path)
+    if errno.failed(fd) {
+        return false
+    }
+    let w: u64 = io.write_all(fd, buf, n)
+    io.close(fd)
+    return !errno.failed(w) && w == n
+}
+
+// =============================================== DER WIRTSSCHLUESSEL
+//
+// Ed25519, 32 Oktette Saat. Beim ERSTEN Start erzeugt, danach gelesen --
+// so wie es jeder sshd tut, denn ein Wirtsschluessel, der sich bei jedem
+// Neustart aendert, macht jede gespeicherte `known_hosts`-Zeile wertlos
+// und jede Warnung vor einem Zwischenmann bedeutungslos.
+
+fn key_path(suffix: u64, out: u64) {
+    ulib.strcpy(out, keydir)
+    ulib.strcat(out, suffix)
+}
+
+// Der Schluessel-Blob, wie SSH ihn ueberall benutzt:
+//     string "ssh-ed25519" || string <32 Oktette>
+fn build_blob(pubk: u64) {
+    var b: wire.Buf = wire.buf_write((&ksblob[0 as usize]) as u64, 128)
+    wire.wtext(&b, (&T_HOSTALG[0 as usize]) as u64)
+    wire.wstring(&b, pubk, 32)
+    kslen = b.len as u64
+}
+
+// OpenSSHs Fingerabdruck: SHA256 ueber den Blob, in Base64 OHNE
+// Auffuellung. `ssh-keygen -lf` schreibt genau das, und der Testlaeufer
+// haelt beides gegeneinander.
+fn fingerprint(out: u64) -> u64 {
+    var dig: [u8; 32] = [0 as u8; 32]
+    sha256.hash((&ksblob[0 as usize]) as u64, kslen as usize,
+        (&dig[0 as usize]) as u64)
+    let n: usize = wire.b64_encode((&dig[0 as usize]) as u64, 32, out, false)
+    st8(out, n as u64, 0)
+    return n as u64
+}
+
+fn host_key_ready(c: *mut ed25519.Ctx) -> bool {
+    var path: [u8; 256] = [0 as u8; 256]
+    key_path((&T_SEEDNAME[0 as usize]) as u64, (&path[0 as usize]) as u64)
+    let n: u64 = read_file((&path[0 as usize]) as u64,
+        (&hostseed[0 as usize]) as u64, 32)
+    if n != 32 {
+        say((&L_GEN[0 as usize]) as u64)
+        io.make_dir(keydir)
+        if !rnd((&hostseed[0 as usize]) as u64, 32) {
+            return false
+        }
+        if !write_file((&path[0 as usize]) as u64,
+            (&hostseed[0 as usize]) as u64, 32) {
+            say((&L_NOKEY[0 as usize]) as u64)
+            return false
+        }
+        // 0600. Ein privater Schluessel, den jeder lesen darf, ist kein
+        // privater Schluessel.
+        ulib.sys(SYS_CHMOD, (&path[0 as usize]) as u64, 384, 0)
+    }
+    if !ed25519.ed25519_public(c, (&hostseed[0 as usize]) as u64,
+        (&hostpub[0 as usize]) as u64) {
+        return false
+    }
+    build_blob((&hostpub[0 as usize]) as u64)
+    // Die oeffentliche Haelfte im Standardformat daneben, damit ein
+    // Mensch sie in seine `known_hosts` kopieren kann.
+    var pubpath: [u8; 256] = [0 as u8; 256]
+    key_path((&T_PUBNAME[0 as usize]) as u64, (&pubpath[0 as usize]) as u64)
+    var line: [u8; 256] = [0 as u8; 256]
+    ulib.strcpy((&line[0 as usize]) as u64, (&T_HOSTALG[0 as usize]) as u64)
+    var at: u64 = wire.text_len((&line[0 as usize]) as u64) as u64
+    st8((&line[0 as usize]) as u64, at, 32)
+    at = at + 1
+    let e: usize = wire.b64_encode((&ksblob[0 as usize]) as u64,
+        kslen as usize, ((&line[0 as usize]) as u64) + at, true)
+    at = at + (e as u64)
+    st8((&line[0 as usize]) as u64, at, 10)
+    at = at + 1
+    write_file((&pubpath[0 as usize]) as u64, (&line[0 as usize]) as u64, at)
+    return true
+}
+
+// ================================================= DIE PAKETSCHICHT
+//
+// `rxraw` ist der rohe Strom vom Anschluss. `take_packet` nimmt vorne
+// ein vollstaendiges Paket heraus, sobald eines dasteht -- ein
+// Netzstrom kennt keine Paketgrenzen, und ein Server, der annimmt, dass
+// ein `recv` genau ein Paket bringt, ist ein Server, der unter Last
+// falsch liest.
+
+fn rx_consume(n: u64) {
+    if n >= rxlen {
+        rxlen = 0
+        return
+    }
+    let p: u64 = (&rxraw[0 as usize]) as u64
+    wire.copy_bytes(p, p + n, (rxlen - n) as usize)
+    rxlen = rxlen - n
+}
+
+// EIN `poll`, DAS EIN SIGNAL AUSHAELT.
+//
+// Der Kern dieses Systems bricht JEDEN blockierenden Aufruf mit -EINTR
+// ab, sobald irgendein unmaskiertes Signal ansteht -- auch eines, dessen
+// Standardverhalten „uebergehen" ist (`signal.deliverable` sieht das
+// Verhalten nicht an, nur die Bits). SIGCHLD ist genau so eines, und ein
+// Server, der Kinder hat, bekommt es bei JEDEM Sitzungsende.
+//
+// GEMESSEN, nicht vermutet: der erste Lauf dieser Runde hat genau daran
+// den Lauscher verloren -- die Sitzung lief sauber durch, danach kam
+// SIGCHLD, `poll` gab -EINTR, und der Lauscher hielt das fuer einen
+// Fehler und ging. `init` startete ihn neu, und im Protokoll stand
+// zweimal „listening".
+//
+// Zwei Massnahmen, und beide gehoeren dazu: SIGCHLD wird maskiert
+// (`block_sigchld`), UND -EINTR wird hier wie „nichts passiert"
+// behandelt statt wie ein Fehler. Das erste verhindert den Fall, das
+// zweite ueberlebt ihn, falls doch ein anderes Signal kommt.
+fn poll_wait(f: u64, n: u64, ms: u64) -> u64 {
+    var tries: u64 = 0
+    while tries < 8 {
+        let r: u64 = io.poll(f, n, ms)
+        if !errno.failed(r) {
+            return r
+        }
+        if errno.errno() != errno.E_INTR {
+            return r
+        }
+        tries = tries + 1
+    }
+    return 0
+}
+
+fn block_sigchld() {
+    var set: [u64; 1] = [0 as u64; 1]
+    set[0 as usize] = SIGCHLD_BIT
+    kcall.sys3(SYS_RT_SIGPROCMASK, SIG_BLOCK, (&set[0 as usize]) as u64, 0)
+}
+
+fn mono_ms() -> u64 {
+    var ts: [u64; 2] = [0 as u64; 2]
+    kcall.sys2(SYS_CLOCK_GETTIME, CLOCK_MONOTONIC, (&ts[0 as usize]) as u64)
+    return (ts[0 as usize] *% 1000) +% (ts[1 as usize] / 1000000)
+}
+
+fn wait_readable(fd: u64, ms: u64) -> bool {
+    let f: u64 = (&fdsbuf[0 as usize]) as u64
+    io.poll_set(f, 0, fd, io.POLLIN)
+    let r: u64 = poll_wait(f, 1, ms)
+    if errno.failed(r) || r == 0 {
+        return false
+    }
+    return true
+}
+
+// Ein einziges `recv`. `false` heisst Ende oder Fehler.
+fn rx_pump(fd: u64) -> bool {
+    if rxlen >= (RXCAP as u64) {
+        return false
+    }
+    let n: u64 = net.recv_some(fd, ((&rxraw[0 as usize]) as u64) + rxlen,
+        (RXCAP as u64) - rxlen)
+    if errno.failed(n) {
+        // Ein Signal ist kein Verbindungsende.
+        return errno.errno() == errno.E_INTR
+    }
+    if n == 0 {
+        return false
+    }
+    rxlen = rxlen + n
+    return true
+}
+
+// Ein Paket aus `rxraw`, wenn eines vollstaendig dasteht. Die Nutzlast
+// landet in `pktbuf`.
+fn take_packet() -> u64 {
+    if rxlen < 4 {
+        return NEED_MORE
+    }
+    let raw: u64 = (&rxraw[0 as usize]) as u64
+    let packlen: u64 = pack.pack_len(&cin, raw)
+    if packlen < 5 || packlen > (pack.MAXPACK as u64) {
+        return BROKEN
+    }
+    var total: u64 = 4 + packlen
+    if pack.cipher_on(&cin) {
+        total = total + (pack.TAG as u64)
+    }
+    if total > (RXCAP as u64) {
+        return BROKEN
+    }
+    if rxlen < total {
+        return NEED_MORE
+    }
+    var plen: usize = 0
+    if !pack.pack_in(&cin, raw, packlen as usize,
+        (&pktbuf[0 as usize]) as u64, PKTCAP, &plen) {
+        return BROKEN
+    }
+    rx_consume(total)
+    return plen as u64
+}
+
+// Blockierend, mit Frist. BROKEN heisst: die Verbindung ist hin.
+fn read_packet(fd: u64, ms: u64) -> u64 {
+    var going: bool = true
+    while going {
+        let r: u64 = take_packet()
+        if r != NEED_MORE {
+            return r
+        }
+        if !wait_readable(fd, ms) {
+            return BROKEN
+        }
+        if !rx_pump(fd) {
+            return BROKEN
+        }
+    }
+    return BROKEN
+}
+
+fn send_payload(fd: u64, p: u64, n: u64) -> bool {
+    var r: [u8; 24] = [0 as u8; 24]
+    if !rnd((&r[0 as usize]) as u64, 24) {
+        return false
+    }
+    let w: usize = pack.pack_out(&cout, p, n as usize,
+        (&r[0 as usize]) as u64, (&txbuf[0 as usize]) as u64, TXCAP)
+    if w == 0 {
+        return false
+    }
+    let s: u64 = net.send_all(fd, (&txbuf[0 as usize]) as u64, w as u64)
+    return !errno.failed(s) && s == (w as u64)
+}
+
+fn send_buf(fd: u64, b: *mut wire.Buf) -> bool {
+    if (*b).bad {
+        return false
+    }
+    return send_payload(fd, (*b).p, (*b).len as u64)
+}
+
+fn send_disconnect(fd: u64, reason: u64, text: u64) {
+    var b: wire.Buf = wire.buf_write((&outpay[0 as usize]) as u64, PAYCAP)
+    wire.w8(&b, M_DISCONNECT)
+    wire.w32(&b, reason)
+    wire.wtext(&b, text)
+    wire.wtext(&b, (&T_EMPTY[0 as usize]) as u64)
+    send_buf(fd, &b)
+}
+
+fn send_one(fd: u64, code: u64) -> bool {
+    var b: wire.Buf = wire.buf_write((&outpay[0 as usize]) as u64, PAYCAP)
+    wire.w8(&b, code)
+    return send_buf(fd, &b)
+}
+
+fn send_chan(fd: u64, code: u64, chan: u64) -> bool {
+    var b: wire.Buf = wire.buf_write((&outpay[0 as usize]) as u64, PAYCAP)
+    wire.w8(&b, code)
+    wire.w32(&b, chan)
+    return send_buf(fd, &b)
+}
+
+// ================================================ DER VERSIONSAUSTAUSCH
+//
+// RFC 4253 Abschnitt 4.2. Beide Seiten schicken eine Zeile
+// `SSH-2.0-<was auch immer>`, mit CR LF am Ende. Der Klient DARF vorher
+// beliebig viele andere Zeilen schicken (eine Begruessung); die werden
+// uebergangen. In den Austauschhash geht die Zeile OHNE CR und LF.
+
+fn version_exchange(fd: u64) -> bool {
+    let v: u64 = (&T_VERSION[0 as usize]) as u64
+    if errno.failed(net.send_all(fd, v, wire.text_len(v) as u64)) {
+        return false
+    }
+    var tries: u64 = 0
+    var going: bool = true
+    while going && tries < 64 {
+        // Eine ganze Zeile suchen
+        var i: u64 = 0
+        var end: u64 = ulib.EOF
+        while i < rxlen && end == ulib.EOF {
+            if ld8((&rxraw[0 as usize]) as u64, i) == 10 {
+                end = i
+            }
+            i = i + 1
+        }
+        if end == ulib.EOF {
+            if rxlen > 1024 {
+                return false
+            }
+            if !wait_readable(fd, HS_MS) {
+                return false
+            }
+            if !rx_pump(fd) {
+                return false
+            }
+            tries = tries + 1
+        } else {
+            var n: u64 = end
+            if n > 0 && ld8((&rxraw[0 as usize]) as u64, n - 1) == 13 {
+                n = n - 1
+            }
+            // Faengt sie mit "SSH-" an?
+            if n >= 4 && ld8((&rxraw[0 as usize]) as u64, 0) == 83
+                && ld8((&rxraw[0 as usize]) as u64, 1) == 83
+                && ld8((&rxraw[0 as usize]) as u64, 2) == 72
+                && ld8((&rxraw[0 as usize]) as u64, 3) == 45 {
+                if n > 255 {
+                    return false
+                }
+                wire.copy_bytes((&vcbuf[0 as usize]) as u64,
+                    (&rxraw[0 as usize]) as u64, n as usize)
+                vclen = n
+                rx_consume(end + 1)
+                going = false
+            } else {
+                rx_consume(end + 1)
+            }
+        }
+    }
+    return vclen > 0
+}
+
+// ==================================================== DER SCHLUESSELAUSTAUSCH
+
+// Unser KEXINIT, und es wird ALS PAKETNUTZLAST aufgehoben -- genau die
+// Oktette gehen spaeter in den Austauschhash. Ein Server, der die Liste
+// zweimal baut (einmal zum Senden, einmal zum Hashen), hat eine Stelle,
+// an der beide auseinanderlaufen koennen.
+fn build_kexinit() -> bool {
+    var b: wire.Buf = wire.buf_write((&isbuf[0 as usize]) as u64, 1024)
+    wire.w8(&b, M_KEXINIT)
+    var cookie: [u8; 16] = [0 as u8; 16]
+    if !rnd((&cookie[0 as usize]) as u64, 16) {
+        return false
+    }
+    wire.wbytes(&b, (&cookie[0 as usize]) as u64, 16)
+    wire.wname(&b, (&T_KEXALGS[0 as usize]) as u64)
+    wire.wname(&b, (&T_HOSTALG[0 as usize]) as u64)
+    wire.wname(&b, (&T_CIPHER[0 as usize]) as u64)
+    wire.wname(&b, (&T_CIPHER[0 as usize]) as u64)
+    wire.wname(&b, (&T_MACS[0 as usize]) as u64)
+    wire.wname(&b, (&T_MACS[0 as usize]) as u64)
+    wire.wname(&b, (&T_NONE[0 as usize]) as u64)
+    wire.wname(&b, (&T_NONE[0 as usize]) as u64)
+    wire.wname(&b, (&T_EMPTY[0 as usize]) as u64)
+    wire.wname(&b, (&T_EMPTY[0 as usize]) as u64)
+    wire.wbool(&b, false)
+    wire.w32(&b, 0)
+    islen = b.len as u64
+    return !b.bad
+}
+
+// Das KEXINIT des Klienten pruefen: bietet er, was wir koennen?
+fn check_kexinit() -> bool {
+    var b: wire.Buf = wire.buf_read((&icbuf[0 as usize]) as u64,
+        iclen as usize)
+    wire.rskip(&b, 1)   // die Nachrichtennummer
+    wire.rskip(&b, 16)  // das Cookie
+    var n: usize = 0
+    let kexp: u64 = wire.rstring(&b, &n)
+    var okkex: bool = false
+    if wire.list_has(kexp, n, (&T_CURVE[0 as usize]) as u64) {
+        okkex = true
+    }
+    if wire.list_has(kexp, n, (&T_CURVE2[0 as usize]) as u64) {
+        okkex = true
+    }
+    // RUNDE SSHD: Terrapin. Nur wenn der Klient es anbietet.
+    if wire.list_has(kexp, n, (&T_KEXSTRICT[0 as usize]) as u64) {
+        strict_kex = 1
+    }
+    let hostp: u64 = wire.rstring(&b, &n)
+    let okhost: bool = wire.list_has(hostp, n,
+        (&T_HOSTALG[0 as usize]) as u64)
+    let e1: u64 = wire.rstring(&b, &n)
+    let ok1: bool = wire.list_has(e1, n, (&T_CIPHER[0 as usize]) as u64)
+    let e2: u64 = wire.rstring(&b, &n)
+    let ok2: bool = wire.list_has(e2, n, (&T_CIPHER[0 as usize]) as u64)
+    if b.bad {
+        return false
+    }
+    return okkex && okhost && ok1 && ok2
+}
+
+// Ein `string` in den laufenden Hash: erst die Laenge, dann die Oktette.
+fn hstr(s: *mut sha256.Sha256, p: u64, n: u64) {
+    var l: [u8; 4] = [0 as u8; 4]
+    wire.put_be32((&l[0 as usize]) as u64, 0, n)
+    sha256.update(s, (&l[0 as usize]) as u64, 4)
+    sha256.update(s, p, n as usize)
+}
+
+fn do_kex(fd: u64, c: *mut ed25519.Ctx, kx: *mut kex.Kex) -> bool {
+    // 1. unser KEXINIT hinaus
+    if !build_kexinit() {
+        return false
+    }
+    if !send_payload(fd, (&isbuf[0 as usize]) as u64, islen) {
+        return false
+    }
+    // 2. das KEXINIT des Klienten
+    var going: bool = true
+    while going {
+        let n: u64 = read_packet(fd, HS_MS)
+        if n == BROKEN || n == 0 {
+            return false
+        }
+        let code: u64 = ld8((&pktbuf[0 as usize]) as u64, 0)
+        if code == M_KEXINIT {
+            if n > 4096 {
+                return false
+            }
+            wire.copy_bytes((&icbuf[0 as usize]) as u64,
+                (&pktbuf[0 as usize]) as u64, n as usize)
+            iclen = n
+            going = false
+        } else if code == M_IGNORE || code == M_DEBUG {
+            // erlaubt, wird uebergangen
+            going = true
+        } else {
+            return false
+        }
+    }
+    if !check_kexinit() {
+        send_disconnect(fd, 3, (&T_KEXALGS[0 as usize]) as u64)
+        return false
+    }
+    if strict_kex != 0 {
+        vsay((&L_STRICT[0 as usize]) as u64)
+    }
+    // 3. ECDH_INIT: Q_C
+    let n2: u64 = read_packet(fd, HS_MS)
+    if n2 == BROKEN || n2 == 0 {
+        return false
+    }
+    if ld8((&pktbuf[0 as usize]) as u64, 0) != M_KEX_ECDH_INIT {
+        return false
+    }
+    var rb: wire.Buf = wire.buf_read((&pktbuf[0 as usize]) as u64,
+        n2 as usize)
+    wire.rskip(&rb, 1)
+    var qcn: usize = 0
+    let qc: u64 = wire.rstring(&rb, &qcn)
+    if rb.bad || qcn != 32 {
+        return false
+    }
+    var qcb: [u8; 32] = [0 as u8; 32]
+    wire.copy_bytes((&qcb[0 as usize]) as u64, qc, 32)
+
+    // 4. unser fluechtiges Paar und das Geheimnis
+    var epriv: [u8; 32] = [0 as u8; 32]
+    var qs: [u8; 32] = [0 as u8; 32]
+    var secret: [u8; 32] = [0 as u8; 32]
+    if !rnd((&epriv[0 as usize]) as u64, 32) {
+        return false
+    }
+    if !x25519.x25519_base((&epriv[0 as usize]) as u64,
+        (&qs[0 as usize]) as u64) {
+        return false
+    }
+    if !x25519.x25519((&epriv[0 as usize]) as u64,
+        (&qcb[0 as usize]) as u64, (&secret[0 as usize]) as u64) {
+        return false
+    }
+    // Ein Punkt kleiner Ordnung ergibt ein Geheimnis aus lauter Nullen.
+    // Das ist die Stelle, an der ein Angreifer den Schluessel VORGEBEN
+    // koennte -- RFC 8731 Abschnitt 3 verlangt ausdruecklich den Abbruch.
+    var allzero: bool = true
+    var z: u64 = 0
+    while z < 32 {
+        if secret[(z) as usize] != 0 as u8 {
+            allzero = false
+        }
+        z = z + 1
+    }
+    if allzero {
+        send_disconnect(fd, 3, (&T_CURVE[0 as usize]) as u64)
+        return false
+    }
+    kex.kex_set_secret(kx, (&secret[0 as usize]) as u64)
+
+    // 5. der Austauschhash
+    //    H = HASH(V_C || V_S || I_C || I_S || K_S || Q_C || Q_S || K)
+    var hs: sha256.Sha256 = sha256.sha256_new()
+    sha256.begin(&hs)
+    hstr(&hs, (&vcbuf[0 as usize]) as u64, vclen)
+    hstr(&hs, (&T_BANNER[0 as usize]) as u64,
+        wire.text_len((&T_BANNER[0 as usize]) as u64) as u64)
+    hstr(&hs, (&icbuf[0 as usize]) as u64, iclen)
+    hstr(&hs, (&isbuf[0 as usize]) as u64, islen)
+    hstr(&hs, (&ksblob[0 as usize]) as u64, kslen)
+    hstr(&hs, (&qcb[0 as usize]) as u64, 32)
+    hstr(&hs, (&qs[0 as usize]) as u64, 32)
+    sha256.update(&hs, kex.kex_k(kx), kex.kex_klen(kx))
+    var h: [u8; 32] = [0 as u8; 32]
+    sha256.finish(&hs, (&h[0 as usize]) as u64)
+    kex.kex_set_hash(kx, (&h[0 as usize]) as u64, true)
+
+    // 6. H unterschreiben
+    var sig: [u8; 64] = [0 as u8; 64]
+    if !ed25519.ed25519_sign(c, (&hostseed[0 as usize]) as u64,
+        (&h[0 as usize]) as u64, 32, (&sig[0 as usize]) as u64) {
+        return false
+    }
+    var sigblob: [u8; 128] = [0 as u8; 128]
+    var sb: wire.Buf = wire.buf_write((&sigblob[0 as usize]) as u64, 128)
+    wire.wtext(&sb, (&T_HOSTALG[0 as usize]) as u64)
+    wire.wstring(&sb, (&sig[0 as usize]) as u64, 64)
+
+    // 7. ECDH_REPLY
+    var ob: wire.Buf = wire.buf_write((&outpay[0 as usize]) as u64, PAYCAP)
+    wire.w8(&ob, M_KEX_ECDH_REPLY)
+    wire.wstring(&ob, (&ksblob[0 as usize]) as u64, kslen as usize)
+    wire.wstring(&ob, (&qs[0 as usize]) as u64, 32)
+    wire.wstring(&ob, (&sigblob[0 as usize]) as u64, sb.len)
+    if !send_buf(fd, &ob) {
+        return false
+    }
+
+    // 8. NEWKEYS hinaus -- ab dem naechsten Paket verschluesselt
+    if !send_one(fd, M_NEWKEYS) {
+        return false
+    }
+    kex.derive(kx, kex.ENC_SC, (&kmat[0 as usize]) as u64, pack.KEYMAT)
+    pack.cipher_set(&cout, (&kmat[0 as usize]) as u64)
+    if strict_kex != 0 {
+        pack.cipher_reseq(&cout)
+    }
+
+    // 9. NEWKEYS herein
+    let n3: u64 = read_packet(fd, HS_MS)
+    if n3 == BROKEN || n3 == 0 {
+        return false
+    }
+    if ld8((&pktbuf[0 as usize]) as u64, 0) != M_NEWKEYS {
+        return false
+    }
+    kex.derive(kx, kex.ENC_CS, (&kmat[0 as usize]) as u64, pack.KEYMAT)
+    pack.cipher_set(&cin, (&kmat[0 as usize]) as u64)
+    if strict_kex != 0 {
+        pack.cipher_reseq(&cin)
+    }
+    vsay((&L_KEXOK[0 as usize]) as u64)
+    return true
+}
+
+// ==================================================== DIE ANMELDUNG
+
+// `~/.ssh/authorized_keys` des Benutzers, im Standardformat:
+//
+//     ssh-ed25519 AAAAC3Nza... kommentar
+//
+// Es wird NUR nach einem Blob gesucht, der Oktett fuer Oktett derselbe
+// ist. Optionen vor dem Typ (`command="..."`, `no-pty`, ...) werden
+// NICHT verstanden -- eine Zeile, die nicht mit `ssh-ed25519` anfaengt,
+// wird uebergangen statt halb ausgewertet. Das ist die sichere Richtung:
+// eine Option, die man nicht versteht, aber ignoriert, waere ein Loch.
+fn authorized(user: u64, blob: u64, bloblen: u64) -> bool {
+    if !pw.home_of_name(user, (&homebuf[0 as usize]) as u64, 128) {
+        return false
+    }
+    var path: [u8; 256] = [0 as u8; 256]
+    let pp: u64 = (&path[0 as usize]) as u64
+    ulib.strcpy(pp, (&homebuf[0 as usize]) as u64)
+    var hl: u64 = wire.text_len(pp) as u64
+    // "/" als Heimat ergaebe "//.ssh/..." -- ein Schraegstrich weniger.
+    if hl > 0 && ld8(pp, hl - 1) == 47 {
+        st8(pp, hl - 1, 0)
+    }
+    ulib.strcat(pp, (&T_AKPATH[0 as usize]) as u64)
+    let n: u64 = read_file(pp, (&akbuf[0 as usize]) as u64, 16383)
+    if n == ulib.EOF || n == 0 {
+        return false
+    }
+    st8((&akbuf[0 as usize]) as u64, n, 0)
+    let ak: u64 = (&akbuf[0 as usize]) as u64
+    var at: u64 = 0
+    var found: bool = false
+    while at < n && !found {
+        // eine Zeile
+        var e: u64 = at
+        while e < n && ld8(ak, e) != 10 {
+            e = e + 1
+        }
+        // Weissraum vorne weg
+        var s: u64 = at
+        while s < e && (ld8(ak, s) == 32 || ld8(ak, s) == 9) {
+            s = s + 1
+        }
+        // Faengt sie mit "ssh-ed25519 " an?
+        let alg: u64 = (&T_HOSTALG[0 as usize]) as u64
+        let alen: u64 = wire.text_len(alg) as u64
+        if e > s + alen && wire.equal_bytes(ak + s, alg, alen as usize)
+            && ld8(ak, s + alen) == 32 {
+            var b: u64 = s + alen + 1
+            while b < e && ld8(ak, b) == 32 {
+                b = b + 1
+            }
+            var be: u64 = b
+            while be < e && ld8(ak, be) != 32 && ld8(ak, be) != 13 {
+                be = be + 1
+            }
+            let got: u64 = wire.b64_decode(ak + b, (be - b) as usize,
+                (&keybuf[0 as usize]) as u64, 512)
+            if got != (0 -% 1) && got == bloblen {
+                if wire.equal_bytes((&keybuf[0 as usize]) as u64, blob,
+                    bloblen as usize) {
+                    found = true
+                }
+            }
+        }
+        at = e + 1
+    }
+    return found
+}
+
+// Die Daten, ueber die eine Anmeldesignatur geht (RFC 4252 Abschnitt 7):
+//
+//     string  session identifier
+//     byte    SSH_MSG_USERAUTH_REQUEST
+//     string  user name
+//     string  service name
+//     string  "publickey"
+//     boolean TRUE
+//     string  public key algorithm name
+//     string  public key blob
+//
+// DIE SITZUNGSKENNUNG IST DAS, WORAUF ES ANKOMMT. Ohne sie waere eine
+// einmal abgehoerte Signatur auf jeder anderen Verbindung zu demselben
+// Server wiederverwendbar.
+fn sigdata(b: *mut wire.Buf, sid: u64, user: u64, ulen: u64,
+    blob: u64, bloblen: u64) {
+    wire.wstring(b, sid, 32)
+    wire.w8(b, M_UA_REQUEST)
+    wire.wstring(b, user, ulen as usize)
+    wire.wtext(b, (&T_CONNECTION[0 as usize]) as u64)
+    wire.wtext(b, (&T_PUBKEY[0 as usize]) as u64)
+    wire.wbool(b, true)
+    wire.wtext(b, (&T_HOSTALG[0 as usize]) as u64)
+    wire.wstring(b, blob, bloblen as usize)
+}
+
+fn send_ua_failure(fd: u64) -> bool {
+    var b: wire.Buf = wire.buf_write((&outpay[0 as usize]) as u64, PAYCAP)
+    wire.w8(&b, M_UA_FAILURE)
+    wire.wtext(&b, (&T_METHODS[0 as usize]) as u64)
+    wire.wbool(&b, false)
+    return send_buf(fd, &b)
+}
+
+// Der ganze Anmeldeabschnitt. `true` heisst: angemeldet, und der Name
+// steht in `namebuf`.
+fn do_auth(fd: u64, c: *mut ed25519.Ctx, kx: *mut kex.Kex) -> bool {
+    var tries: u64 = 0
+    var going: bool = true
+    var authed: bool = false
+    while going {
+        let n: u64 = read_packet(fd, HS_MS)
+        if n == BROKEN || n == 0 {
+            return false
+        }
+        let code: u64 = ld8((&pktbuf[0 as usize]) as u64, 0)
+        if code == M_IGNORE || code == M_DEBUG {
+            going = true
+        } else if code == M_DISCONNECT {
+            return false
+        } else if code == M_SERVICE_REQUEST {
+            var b: wire.Buf = wire.buf_read((&pktbuf[0 as usize]) as u64,
+                n as usize)
+            wire.rskip(&b, 1)
+            var sn: usize = 0
+            let sp: u64 = wire.rstring(&b, &sn)
+            if b.bad || !wire.same_text(sp, sn,
+                (&T_USERAUTH[0 as usize]) as u64) {
+                send_disconnect(fd, 7, (&T_USERAUTH[0 as usize]) as u64)
+                return false
+            }
+            var ob: wire.Buf = wire.buf_write((&outpay[0 as usize]) as u64,
+                PAYCAP)
+            wire.w8(&ob, M_SERVICE_ACCEPT)
+            wire.wtext(&ob, (&T_USERAUTH[0 as usize]) as u64)
+            if !send_buf(fd, &ob) {
+                return false
+            }
+        } else if code == M_UA_REQUEST {
+            if tries >= MAX_TRIES {
+                send_disconnect(fd, 14, (&T_METHODS[0 as usize]) as u64)
+                return false
+            }
+            tries = tries + 1
+            var b: wire.Buf = wire.buf_read((&pktbuf[0 as usize]) as u64,
+                n as usize)
+            wire.rskip(&b, 1)
+            var un: usize = 0
+            let up: u64 = wire.rstring(&b, &un)
+            var svn: usize = 0
+            let svp: u64 = wire.rstring(&b, &svn)
+            var mn: usize = 0
+            let mp: u64 = wire.rstring(&b, &mn)
+            if b.bad || un == 0 || un > 100 {
+                send_ua_failure(fd)
+                going = true
+            } else if !wire.same_text(svp, svn,
+                (&T_CONNECTION[0 as usize]) as u64) {
+                send_ua_failure(fd)
+                going = true
+            } else {
+                // Der Name, nullterminiert, fuer `pw`
+                wire.copy_bytes((&namebuf[0 as usize]) as u64, up, un)
+                st8((&namebuf[0 as usize]) as u64, un as u64, 0)
+                let uid: u64 = pw.uid_of_name((&namebuf[0 as usize]) as u64)
+                if wire.same_text(mp, mn, (&T_PUBKEY[0 as usize]) as u64) {
+                    let sigflag: bool = wire.rbool(&b)
+                    var an: usize = 0
+                    let ap: u64 = wire.rstring(&b, &an)
+                    var kn: usize = 0
+                    let kp: u64 = wire.rstring(&b, &kn)
+                    if b.bad || !wire.same_text(ap, an,
+                        (&T_HOSTALG[0 as usize]) as u64) || kn > 200 {
+                        send_ua_failure(fd)
+                        going = true
+                    } else {
+                        // Den Blob wegkopieren -- `outpay` und `pktbuf`
+                        // sind verschiedene Puffer, aber die Signaturdaten
+                        // werden aus beiden gebaut.
+                        var kb: [u8; 256] = [0 as u8; 256]
+                        wire.copy_bytes((&kb[0 as usize]) as u64, kp, kn)
+                        let known: bool = uid != ulib.EOF
+                            && authorized((&namebuf[0 as usize]) as u64,
+                                (&kb[0 as usize]) as u64, kn as u64)
+                        if !known {
+                            send_ua_failure(fd)
+                            going = true
+                        } else if !sigflag {
+                            // Der Klient fragt nur AN, ob dieser
+                            // Schluessel etwas taugt -- er will nicht
+                            // umsonst unterschreiben.
+                            var pb: wire.Buf = wire.buf_write(
+                                (&outpay[0 as usize]) as u64, PAYCAP)
+                            wire.w8(&pb, M_UA_PK_OK)
+                            wire.wtext(&pb, (&T_HOSTALG[0 as usize]) as u64)
+                            wire.wstring(&pb, (&kb[0 as usize]) as u64, kn)
+                            if !send_buf(fd, &pb) {
+                                return false
+                            }
+                            going = true
+                        } else {
+                            var gn: usize = 0
+                            let gp: u64 = wire.rstring(&b, &gn)
+                            // die Signatur selbst ist wieder ein Blob:
+                            // string "ssh-ed25519" || string <64>
+                            var sb: wire.Buf = wire.buf_read(gp, gn)
+                            var san: usize = 0
+                            let sap: u64 = wire.rstring(&sb, &san)
+                            var srn: usize = 0
+                            let srp: u64 = wire.rstring(&sb, &srn)
+                            var sigcopy: [u8; 64] = [0 as u8; 64]
+                            var ok: bool = false
+                            if !b.bad && !sb.bad && srn == 64
+                                && wire.same_text(sap, san,
+                                    (&T_HOSTALG[0 as usize]) as u64) {
+                                wire.copy_bytes((&sigcopy[0 as usize]) as u64,
+                                    srp, 64)
+                                var db: wire.Buf = wire.buf_write(
+                                    (&outpay[0 as usize]) as u64, PAYCAP)
+                                sigdata(&db, kex.kex_sid(kx),
+                                    (&namebuf[0 as usize]) as u64, un as u64,
+                                    (&kb[0 as usize]) as u64, kn as u64)
+                                // Der oeffentliche Schluessel steckt im
+                                // Blob: 4 + 11 Oktette Name, 4 Oktette
+                                // Laenge, dann 32 Oktette.
+                                var pubb: wire.Buf = wire.buf_read(
+                                    (&kb[0 as usize]) as u64, kn)
+                                var xn: usize = 0
+                                wire.rstring(&pubb, &xn)
+                                var yn: usize = 0
+                                let yp: u64 = wire.rstring(&pubb, &yn)
+                                if !pubb.bad && yn == 32 && !db.bad {
+                                    ok = ed25519.ed25519_verify(c, yp,
+                                        db.p, db.len,
+                                        (&sigcopy[0 as usize]) as u64)
+                                }
+                            }
+                            if ok {
+                                vsay((&L_PKOK[0 as usize]) as u64)
+                                if !send_one(fd, M_UA_SUCCESS) {
+                                    return false
+                                }
+                                authed = true
+                                going = false
+                            } else {
+                                send_ua_failure(fd)
+                                going = true
+                            }
+                        }
+                    }
+                } else if wire.same_text(mp, mn,
+                    (&T_PASSWORD[0 as usize]) as u64) {
+                    let changing: bool = wire.rbool(&b)
+                    var pn: usize = 0
+                    let pp2: u64 = wire.rstring(&b, &pn)
+                    var ok: bool = false
+                    if !b.bad && !changing && pn < 200 {
+                        wire.copy_bytes((&passbuf[0 as usize]) as u64,
+                            pp2, pn)
+                        st8((&passbuf[0 as usize]) as u64, pn as u64, 0)
+                        if uid != ulib.EOF {
+                            if pw.shadow_of((&namebuf[0 as usize]) as u64,
+                                (&shadowbuf[0 as usize]) as u64, 256) {
+                                ok = pw.check_hash(
+                                    (&shadowbuf[0 as usize]) as u64,
+                                    (&passbuf[0 as usize]) as u64)
+                            }
+                        } else {
+                            // Ein unbekannter Name wird TROTZDEM
+                            // gerechnet, gegen einen Eintrag, der nie
+                            // stimmt -- sonst waere an der Antwortzeit
+                            // abzulesen, welche Namen es gibt. Dieselbe
+                            // Vorsicht wie in `login` (Runde K13).
+                            var dummy: [u8; 94] = "$osum1$2048$0000000000000000$0000000000000000000000000000000000000000000000000000000000000000\0"
+                            pw.check_hash((&dummy[0 as usize]) as u64,
+                                (&passbuf[0 as usize]) as u64)
+                        }
+                    }
+                    if ok {
+                        vsay((&L_PWOK[0 as usize]) as u64)
+                        if !send_one(fd, M_UA_SUCCESS) {
+                            return false
+                        }
+                        authed = true
+                        going = false
+                    } else {
+                        send_ua_failure(fd)
+                        going = true
+                    }
+                } else {
+                    // "none" und alles andere: die Liste der Verfahren
+                    send_ua_failure(fd)
+                    going = true
+                }
+            }
+        } else {
+            // Vor der Anmeldung gibt es sonst nichts zu tun.
+            var ub: wire.Buf = wire.buf_write((&outpay[0 as usize]) as u64,
+                PAYCAP)
+            wire.w8(&ub, M_UNIMPLEMENTED)
+            wire.w32(&ub, pack.cipher_seq(&cin) -% 1)
+            if !send_buf(fd, &ub) {
+                return false
+            }
+        }
+    }
+    if authed {
+        say((&L_AUTHOK[0 as usize]) as u64)
+        say((&namebuf[0 as usize]) as u64)
+        nl()
+    }
+    return authed
+}
+
+// ==================================================== DIE SITZUNG
+
+static mut ch_peer: u64 = 0        // die Kanalnummer des Klienten
+static mut ch_open: u64 = 0
+static mut peer_win: u64 = 0
+static mut peer_max: u64 = 32768
+static mut my_win: u64 = 0
+static mut kid: u64 = 0
+static mut kid_in: u64 = 0         // wir schreiben hinein (Shell-Eingabe)
+static mut kid_out: u64 = 0        // wir lesen heraus (Shell-Ausgabe)
+static mut kid_pty: u64 = 0
+static mut kid_done: u64 = 0
+static mut kid_gone: u64 = 0
+static mut kid_code: u64 = 0
+static mut want_pty: u64 = 0
+static mut cmdpath: [u8; 64] = [0 as u8; 64]
+static mut have_cmdfile: u64 = 0
+
+// Die Shell starten. `cmd` ist 0 fuer eine interaktive Shell, sonst ein
+// nullterminierter Befehl.
+//
+// EIN BEFEHL WIRD ALS SKRIPT UEBERGEBEN, und das gehoert offen gesagt:
+// `/bin/sh` dieses Systems kennt kein `-c`. Ein Befehl wird deshalb nach
+// `/run/sshd-<pid>.sh` geschrieben und als Skript gestartet. Damit
+// funktionieren Rohre, Umlenkungen und `if` genauso wie in einer
+// Sitzung -- und die Datei wird am Ende der Sitzung wieder geloescht.
+fn start_shell(user: u64, cmd: u64) -> bool {
+    let uid: u64 = pw.uid_of_name(user)
+    let gid: u64 = pw.gid_of_name(user)
+    if uid == ulib.EOF {
+        return false
+    }
+    var shell: [u8; 96] = [0 as u8; 96]
+    if !pw.shell_of_name(user, (&shell[0 as usize]) as u64, 96) {
+        ulib.strcpy((&shell[0 as usize]) as u64, (&T_SH[0 as usize]) as u64)
+    }
+    if ld8((&shell[0 as usize]) as u64, 0) == 0 {
+        ulib.strcpy((&shell[0 as usize]) as u64, (&T_SH[0 as usize]) as u64)
+    }
+    if !pw.home_of_name(user, (&homebuf[0 as usize]) as u64, 128) {
+        ulib.strcpy((&homebuf[0 as usize]) as u64,
+            (&T_SLASH[0 as usize]) as u64)
+    }
+
+    // Den Befehl als Skript ablegen -- VOR dem Spalten, damit ein Fehler
+    // hier noch berichtet werden kann.
+    if cmd != 0 {
+        io.make_dir((&T_RUNDIR[0 as usize]) as u64)
+        let cp: u64 = (&cmdpath[0 as usize]) as u64
+        ulib.strcpy(cp, (&T_CMDPRE[0 as usize]) as u64)
+        var t: [u8; 24] = [0 as u8; 24]
+        num_text(proc.pid(), (&t[0 as usize]) as u64)
+        ulib.strcat(cp, (&t[0 as usize]) as u64)
+        ulib.strcat(cp, (&T_CMDSUF[0 as usize]) as u64)
+        var body: [u8; 2100] = [0 as u8; 2100]
+        ulib.strcpy((&body[0 as usize]) as u64, cmd)
+        var bl: u64 = wire.text_len((&body[0 as usize]) as u64) as u64
+        st8((&body[0 as usize]) as u64, bl, 10)
+        bl = bl + 1
+        if !write_file(cp, (&body[0 as usize]) as u64, bl) {
+            return false
+        }
+        // Lesbar auch fuer den Benutzer, der gleich die Shell wird.
+        ulib.sys(SYS_CHMOD, cp, 420, 0)
+        have_cmdfile = 1
+    }
+
+    var slave: u64 = 0
+    var inr: u64 = 0
+    var inw: u64 = 0
+    var outr: u64 = 0
+    var outw: u64 = 0
+    if want_pty != 0 {
+        var f: [u64; 1] = [0 as u64; 1]
+        let r: u64 = kcall.sys1(SYS_OSUM_PTY, (&f[0 as usize]) as u64)
+        if errno.is_error(r) {
+            want_pty = 0
+        } else {
+            kid_in = f[0 as usize] & 0xFFFFFFFF
+            kid_out = kid_in
+            slave = (f[0 as usize] >> 32) & 0xFFFFFFFF
+            kid_pty = 1
+        }
+    }
+    if want_pty == 0 {
+        var pfd: [u64; 1] = [0 as u64; 1]
+        if errno.failed(io.pipe((&pfd[0 as usize]) as u64)) {
+            return false
+        }
+        inr = pfd[0 as usize] & 0xFFFFFFFF
+        inw = (pfd[0 as usize] >> 32) & 0xFFFFFFFF
+        var qfd: [u64; 1] = [0 as u64; 1]
+        if errno.failed(io.pipe((&qfd[0 as usize]) as u64)) {
+            return false
+        }
+        outr = qfd[0 as usize] & 0xFFFFFFFF
+        outw = (qfd[0 as usize] >> 32) & 0xFFFFFFFF
+        kid_in = inw
+        kid_out = outr
+        kid_pty = 0
+    }
+
+    let who: u64 = proc.split()
+    if errno.failed(who) {
+        return false
+    }
+    if who == 0 {
+        // ---- das Kind: es WIRD die Shell des Menschen ----
+        if kid_pty != 0 {
+            io.dup2(slave, 0)
+            io.dup2(slave, 1)
+            io.dup2(slave, 2)
+            io.close(slave)
+            io.close(kid_in)
+        } else {
+            io.dup2(inr, 0)
+            io.dup2(outw, 1)
+            io.dup2(outw, 2)
+            io.close(inr)
+            io.close(inw)
+            io.close(outr)
+            io.close(outw)
+        }
+        ulib.sys(SYS_CHDIR, (&homebuf[0 as usize]) as u64, 0, 0)
+        // Erst die Gruppe, dann der Benutzer. Danach ist diese Sitzung
+        // kein root mehr und kann es nicht rueckgaengig machen.
+        ulib.sys(SYS_SETGID, gid, 0, 0)
+        if ulib.bad(ulib.sys(SYS_SETUID, uid, 0, 0)) {
+            proc.leave(126)
+        }
+        var argv: [u64; 3] = [0 as u64; 3]
+        argv[0 as usize] = (&shell[0 as usize]) as u64
+        if cmd != 0 {
+            argv[1 as usize] = (&cmdpath[0 as usize]) as u64
+            argv[2 as usize] = 0
+        } else {
+            argv[1 as usize] = 0
+        }
+        ulib.sys(SYS_EXECVE, (&shell[0 as usize]) as u64,
+            (&argv[0 as usize]) as u64, 0)
+        proc.leave(127)
+    }
+    // ---- der Elternteil ----
+    kid = who
+    if kid_pty != 0 {
+        io.close(slave)
+    } else {
+        io.close(inr)
+        io.close(outw)
+    }
+    return true
+}
+
+// SO VIEL WIE MOEGLICH IN EIN PAKET. Ein Rohr dieses Kerns fasst 512
+// Oktette (`kernel/file.fi`, PIPE_CAP), ein `read` liefert also nie mehr
+// als das. Ein SSH-Paket je 512 Oktetten waere fuer eine Datei von einem
+// Megaoktett viertausend Pakete, viertausend Poly1305-Rechnungen und
+// viertausend Fahrten durch den Netzstapel. Also wird gesammelt, solange
+// ohne Warten weiteres da ist -- `poll` mit Frist 0 ist die Frage
+// „wuerde das naechste `read` blockieren?".
+fn fill_from_child(want: u64) -> u64 {
+    let f2: u64 = (&fds2buf[0 as usize]) as u64
+    var have: u64 = 0
+    var going: bool = true
+    while going {
+        let n: u64 = io.read(kid_out, ((&chanbuf[0 as usize]) as u64) + have,
+            want - have)
+        if errno.failed(n) {
+            if errno.errno() != errno.E_INTR {
+                kid_done = 1
+            }
+            going = false
+        } else if n == 0 {
+            kid_done = 1
+            going = false
+        } else {
+            have = have + n
+            if have >= want {
+                going = false
+            } else {
+                io.poll_set(f2, 0, kid_out, io.POLLIN)
+                let r: u64 = io.poll(f2, 1, 0)
+                if errno.failed(r) || r == 0
+                    || !io.poll_ready(f2, 0, io.POLLIN) {
+                    going = false
+                }
+            }
+        }
+    }
+    return have
+}
+
+// Was nach dem Ende der Shell noch im Rohr liegt, gehoert dem Klienten.
+// Ohne diese Schleife fehlt die letzte Zeile jedes Befehls, dessen
+// Ausgabe genau dann ankam, als das Kind starb.
+fn drain_child(fd: u64) {
+    if kid_out == 0 {
+        return
+    }
+    let f2: u64 = (&fds2buf[0 as usize]) as u64
+    var rounds: u64 = 0
+    var going: bool = true
+    while going && rounds < 512 {
+        rounds = rounds + 1
+        io.poll_set(f2, 0, kid_out, io.POLLIN)
+        let r: u64 = io.poll(f2, 1, 0)
+        if errno.failed(r) || r == 0 || !io.poll_ready(f2, 0, io.POLLIN) {
+            going = false
+        } else {
+            var want: u64 = CHUNK as u64
+            if want > peer_max {
+                want = peer_max
+            }
+            if want > peer_win {
+                want = peer_win
+            }
+            if want == 0 {
+                going = false
+            } else {
+                let got: u64 = fill_from_child(want)
+                if got == 0 {
+                    going = false
+                } else if !send_data(fd, (&chanbuf[0 as usize]) as u64,
+                    got) {
+                    going = false
+                }
+            }
+        }
+    }
+}
+
+fn send_data(fd: u64, p: u64, n: u64) -> bool {
+    var b: wire.Buf = wire.buf_write((&outpay[0 as usize]) as u64, PAYCAP)
+    wire.w8(&b, M_CH_DATA)
+    wire.w32(&b, ch_peer)
+    wire.wstring(&b, p, n as usize)
+    if !send_buf(fd, &b) {
+        return false
+    }
+    if peer_win >= n {
+        peer_win = peer_win - n
+    } else {
+        peer_win = 0
+    }
+    return true
+}
+
+fn send_exit(fd: u64, code: u64) -> bool {
+    var b: wire.Buf = wire.buf_write((&outpay[0 as usize]) as u64, PAYCAP)
+    wire.w8(&b, M_CH_REQUEST)
+    wire.w32(&b, ch_peer)
+    wire.wtext(&b, (&T_EXITSTATUS[0 as usize]) as u64)
+    wire.wbool(&b, false)
+    wire.w32(&b, code)
+    return send_buf(fd, &b)
+}
+
+fn window_topup(fd: u64) -> bool {
+    if my_win > WINDOW / 2 {
+        return true
+    }
+    let add: u64 = WINDOW - my_win
+    var b: wire.Buf = wire.buf_write((&outpay[0 as usize]) as u64, PAYCAP)
+    wire.w8(&b, M_CH_WINDOW)
+    wire.w32(&b, ch_peer)
+    wire.w32(&b, add)
+    if !send_buf(fd, &b) {
+        return false
+    }
+    my_win = WINDOW
+    return true
+}
+
+// EIN Paket der Sitzungsphase bearbeiten. `false` beendet die Sitzung.
+fn handle_packet(fd: u64, user: u64, n: u64) -> bool {
+    let code: u64 = ld8((&pktbuf[0 as usize]) as u64, 0)
+    var b: wire.Buf = wire.buf_read((&pktbuf[0 as usize]) as u64, n as usize)
+    wire.rskip(&b, 1)
+    if code == M_DISCONNECT {
+        return false
+    }
+    if code == M_IGNORE || code == M_DEBUG || code == M_UNIMPLEMENTED {
+        return true
+    }
+    if code == M_KEXINIT {
+        // G1: keine Neuaushandlung. Sagen statt schweigen.
+        send_disconnect(fd, 2, (&T_KEXALGS[0 as usize]) as u64)
+        return false
+    }
+    if code == M_GLOBAL_REQUEST {
+        var gn: usize = 0
+        wire.rstring(&b, &gn)
+        let want: bool = wire.rbool(&b)
+        if want {
+            return send_one(fd, M_REQUEST_FAILURE)
+        }
+        return true
+    }
+    if code == M_CH_OPEN {
+        var tn: usize = 0
+        let tp: u64 = wire.rstring(&b, &tn)
+        let sender: u64 = wire.r32(&b)
+        let win: u64 = wire.r32(&b)
+        let mx: u64 = wire.r32(&b)
+        if b.bad || ch_open != 0
+            || !wire.same_text(tp, tn, (&T_SESSION[0 as usize]) as u64) {
+            var fb: wire.Buf = wire.buf_write((&outpay[0 as usize]) as u64,
+                PAYCAP)
+            wire.w8(&fb, M_CH_OPEN_FAIL)
+            wire.w32(&fb, sender)
+            wire.w32(&fb, 3)
+            wire.wtext(&fb, (&T_SESSION[0 as usize]) as u64)
+            wire.wtext(&fb, (&T_EMPTY[0 as usize]) as u64)
+            return send_buf(fd, &fb)
+        }
+        ch_peer = sender
+        ch_open = 1
+        peer_win = win
+        peer_max = mx
+        if peer_max > MAXPKT {
+            peer_max = MAXPKT
+        }
+        my_win = WINDOW
+        var ob: wire.Buf = wire.buf_write((&outpay[0 as usize]) as u64,
+            PAYCAP)
+        wire.w8(&ob, M_CH_CONFIRM)
+        wire.w32(&ob, ch_peer)
+        wire.w32(&ob, 0)
+        wire.w32(&ob, WINDOW)
+        wire.w32(&ob, MAXPKT)
+        return send_buf(fd, &ob)
+    }
+    if code == M_CH_WINDOW {
+        wire.r32(&b)
+        let add: u64 = wire.r32(&b)
+        peer_win = peer_win + add
+        return true
+    }
+    if code == M_CH_DATA {
+        wire.r32(&b)
+        var dn: usize = 0
+        let dp: u64 = wire.rstring(&b, &dn)
+        if b.bad {
+            return false
+        }
+        if my_win >= (dn as u64) {
+            my_win = my_win - (dn as u64)
+        } else {
+            my_win = 0
+        }
+        if kid != 0 && kid_in != 0 {
+            io.write_all(kid_in, dp, dn as u64)
+        }
+        return window_topup(fd)
+    }
+    if code == M_CH_EOF {
+        // Das Ende der Eingabe. Bei einem Rohr heisst das: schliessen,
+        // damit die Shell ihr Dateiende sieht. An einem Pseudoterminal
+        // waere das Schliessen der Steuerseite das Ende der GANZEN
+        // Sitzung -- dort wird deshalb nur nichts mehr geschickt.
+        if kid_pty == 0 && kid_in != 0 {
+            io.close(kid_in)
+            kid_in = 0
+        }
+        return true
+    }
+    if code == M_CH_CLOSE {
+        send_chan(fd, M_CH_CLOSE, ch_peer)
+        return false
+    }
+    if code == M_CH_REQUEST {
+        wire.r32(&b)
+        var rn: usize = 0
+        let rp: u64 = wire.rstring(&b, &rn)
+        let want: bool = wire.rbool(&b)
+        if b.bad {
+            return false
+        }
+        if wire.same_text(rp, rn, (&T_PTYREQ[0 as usize]) as u64) {
+            want_pty = 1
+            if want {
+                return send_chan(fd, M_CH_SUCCESS, ch_peer)
+            }
+            return true
+        }
+        if wire.same_text(rp, rn, (&T_ENV[0 as usize]) as u64) {
+            // Osum hat keine Umgebung je Prozess, die `execve` traegt.
+            // Ein `false` waere die ehrlichere Antwort, aber OpenSSH
+            // schickt `env` ohne Antwortwunsch -- also nichts tun.
+            if want {
+                return send_chan(fd, M_CH_FAILURE, ch_peer)
+            }
+            return true
+        }
+        if wire.same_text(rp, rn, (&T_WINCH[0 as usize]) as u64) {
+            if want {
+                return send_chan(fd, M_CH_SUCCESS, ch_peer)
+            }
+            return true
+        }
+        if wire.same_text(rp, rn, (&T_SHELL[0 as usize]) as u64) {
+            if kid != 0 {
+                if want {
+                    return send_chan(fd, M_CH_FAILURE, ch_peer)
+                }
+                return true
+            }
+            if !start_shell(user, 0) {
+                if want {
+                    send_chan(fd, M_CH_FAILURE, ch_peer)
+                }
+                return false
+            }
+            say((&L_SHELL[0 as usize]) as u64)
+            if want {
+                return send_chan(fd, M_CH_SUCCESS, ch_peer)
+            }
+            return true
+        }
+        if wire.same_text(rp, rn, (&T_EXEC[0 as usize]) as u64) {
+            var cn: usize = 0
+            let cp: u64 = wire.rstring(&b, &cn)
+            if b.bad || cn > 2000 || kid != 0 {
+                if want {
+                    return send_chan(fd, M_CH_FAILURE, ch_peer)
+                }
+                return true
+            }
+            wire.copy_bytes((&cmdbuf[0 as usize]) as u64, cp, cn)
+            st8((&cmdbuf[0 as usize]) as u64, cn as u64, 0)
+            say((&L_EXEC[0 as usize]) as u64)
+            say((&cmdbuf[0 as usize]) as u64)
+            nl()
+            if !start_shell(user, (&cmdbuf[0 as usize]) as u64) {
+                if want {
+                    send_chan(fd, M_CH_FAILURE, ch_peer)
+                }
+                return false
+            }
+            if want {
+                return send_chan(fd, M_CH_SUCCESS, ch_peer)
+            }
+            return true
+        }
+        if want {
+            return send_chan(fd, M_CH_FAILURE, ch_peer)
+        }
+        return true
+    }
+    // Alles andere: die ehrliche Antwort von RFC 4253 Abschnitt 11.4.
+    var ub: wire.Buf = wire.buf_write((&outpay[0 as usize]) as u64, PAYCAP)
+    wire.w8(&ub, M_UNIMPLEMENTED)
+    wire.w32(&ub, pack.cipher_seq(&cin) -% 1)
+    return send_buf(fd, &ub)
+}
+
+// DIE SCHLEIFE DIESER RUNDE. Ein `poll` ueber den Anschluss UND das Rohr
+// der Shell. Ohne sie kann der Server nur auf eines von beiden warten.
+fn session_loop(fd: u64, user: u64) -> u64 {
+    let f: u64 = (&fdsbuf[0 as usize]) as u64
+    var going: bool = true
+    var polls: u64 = 0
+    var idle: u64 = 0
+    while going {
+        // Was noch im Puffer liegt, zuerst -- `poll` weckt nicht fuer
+        // Oktette, die schon da sind.
+        var more: bool = true
+        while more {
+            let r: u64 = take_packet()
+            if r == NEED_MORE {
+                more = false
+            } else if r == BROKEN || r == 0 {
+                return kid_code
+            } else {
+                if !handle_packet(fd, user, r) {
+                    going = false
+                    more = false
+                }
+            }
+        }
+        if !going {
+            more = false
+        } else {
+            io.poll_set(f, 0, fd, io.POLLIN)
+            var nfds: u64 = 1
+            if kid != 0 && kid_out != 0 && peer_win > 0 {
+                io.poll_set(f, 1, kid_out, io.POLLIN)
+                nfds = 2
+            } else {
+                io.poll_set(f, 1, 0 -% 1, io.POLLIN)
+                nfds = 2
+            }
+            let r: u64 = poll_wait(f, nfds, 1000)
+            polls = polls + 1
+            if errno.failed(r) {
+                going = false
+            } else if r == 0 {
+                idle = idle + 1
+                if idle > 600 {
+                    going = false
+                }
+            } else {
+                idle = 0
+                if io.poll_ready(f, 0, io.POLLIN) {
+                    if !rx_pump(fd) {
+                        going = false
+                    }
+                }
+                if going && io.poll_ready(f, 0,
+                    io.POLLHUP | io.POLLERR) {
+                    going = false
+                }
+                if going && kid != 0 && kid_out != 0 {
+                    if io.poll_ready(f, 1, io.POLLIN) {
+                        var want: u64 = CHUNK as u64
+                        if want > peer_max {
+                            want = peer_max
+                        }
+                        if want > peer_win {
+                            want = peer_win
+                        }
+                        if want > 0 {
+                            let got: u64 = fill_from_child(want)
+                            if got > 0 {
+                                if !send_data(fd,
+                                    (&chanbuf[0 as usize]) as u64, got) {
+                                    going = false
+                                }
+                            }
+                        }
+                    } else if io.poll_ready(f, 1,
+                        io.POLLHUP | io.POLLERR) {
+                        kid_done = 1
+                    }
+                }
+            }
+        }
+        // IST DIE SHELL FERTIG? Zwei Wege, und beide werden gebraucht:
+        //
+        //   * ein ROHR meldet das Ende von selbst -- alle Schreiber weg,
+        //     `read` gibt 0.
+        //   * ein PSEUDOTERMINAL tut das NICHT. Die Steuerseite bleibt
+        //     offen, solange DIESER Prozess sie haelt, und der weiss von
+        //     sich aus nichts vom Tod des Kindes. Gemessen: eine Sitzung
+        //     mit `ssh -tt` lief nach „sh: bye" weiter, bis der Klient
+        //     aufgab. Also wird bei JEDEM Durchlauf ohne Warten
+        //     nachgesehen, ob das Kind noch lebt.
+        if kid != 0 && kid_gone == 0 && kid_done == 0 {
+            var st: [u64; 1] = [0 as u64; 1]
+            let w: u64 = kcall.sys4(SYS_WAIT4, kid,
+                (&st[0 as usize]) as u64, WNOHANG, 0)
+            if !errno.is_error(w) && w != 0 {
+                kid_code = (st[0 as usize] >> 8) & 255
+                kid_gone = 1
+            }
+        }
+        if kid != 0 && (kid_done != 0 || kid_gone != 0) {
+            // GENAU EIN `wait4`. Der erste Entwurf hatte hier zwei, und
+            // der zweite lief ins Leere -- das Kind war schon
+            // eingesammelt, `status` blieb null, und JEDER Befehl meldete
+            // den Beendigungscode 0. Ein Fehlschlag, der wie ein Erfolg
+            // aussieht, ist der schlimmste.
+            if kid_gone == 0 {
+                var status: [u64; 1] = [0 as u64; 1]
+                let w: u64 = proc.wait_for(kid, (&status[0 as usize]) as u64)
+                if !errno.failed(w) {
+                    kid_code = proc.exit_code_of(status[0 as usize])
+                }
+                kid_gone = 1
+            }
+            drain_child(fd)
+            kid = 0
+            if kid_out != 0 {
+                io.close(kid_out)
+                if kid_pty != 0 {
+                    // Steuer- und Nutzerseite sind derselbe Deskriptor.
+                    kid_in = 0
+                }
+                kid_out = 0
+            }
+            if kid_in != 0 && kid_pty == 0 {
+                io.close(kid_in)
+                kid_in = 0
+            }
+            send_exit(fd, kid_code)
+            send_chan(fd, M_CH_EOF, ch_peer)
+            send_chan(fd, M_CH_CLOSE, ch_peer)
+            // Dem Klienten Zeit lassen, sein CLOSE zu schicken.
+            if wait_readable(fd, 2000) {
+                rx_pump(fd)
+            }
+            going = false
+        }
+    }
+    say((&L_POLLS[0 as usize]) as u64)
+    saynum(polls)
+    nl()
+    return kid_code
+}
+
+// ================================================== EINE VERBINDUNG
+
+fn serve(fd: u64) -> u64 {
+    rxlen = 0
+    iclen = 0
+    islen = 0
+    vclen = 0
+    strict_kex = 0
+    ch_open = 0
+    kid = 0
+    kid_in = 0
+    kid_out = 0
+    kid_pty = 0
+    kid_done = 0
+    kid_gone = 0
+    kid_code = 0
+    want_pty = 0
+    have_cmdfile = 0
+    var c: ed25519.Ctx = ed25519.ctx_new()
+    if !ed25519.ctx_init(&c) {
+        return 1
+    }
+    // Der Wirtsschluessel steht schon: dieser Prozess ist das Kind des
+    // Lauschers und hat `hostseed`, `hostpub` und `ksblob` geerbt. Nur
+    // wenn `serve` einmal ohne diesen Weg gerufen wird, wird gelesen.
+    if kslen == 0 {
+        if !host_key_ready(&c) {
+            return 1
+        }
+    }
+    var kx: kex.Kex = kex.kex_new()
+    let t0: u64 = mono_ms()
+    if !version_exchange(fd) {
+        return 2
+    }
+    let t1: u64 = mono_ms()
+    if !do_kex(fd, &c, &kx) {
+        return 3
+    }
+    let t2: u64 = mono_ms()
+    if !do_auth(fd, &c, &kx) {
+        send_disconnect(fd, 14, (&T_METHODS[0 as usize]) as u64)
+        return 4
+    }
+    let t3: u64 = mono_ms()
+    // ECHTE ZAHLEN STATT EINES GEFUEHLS. Der Testlaeufer liest diese
+    // drei Werte zurueck und schreibt sie in das Rundenprotokoll.
+    say((&L_TIMES[0 as usize]) as u64)
+    saynum(t1 -% t0)
+    say((&L_SPACE[0 as usize]) as u64)
+    saynum(t2 -% t1)
+    say((&L_SPACE[0 as usize]) as u64)
+    saynum(t3 -% t2)
+    nl()
+    let rc: u64 = session_loop(fd, (&namebuf[0 as usize]) as u64)
+    if have_cmdfile != 0 {
+        io.unlink((&cmdpath[0 as usize]) as u64)
+    }
+    net.shutdown(fd, net.SHUT_RDWR)
+    return rc
+}
+
+// ================================================== DER LAUSCHER
+
+fn reap() {
+    var going: bool = true
+    while going {
+        let r: u64 = kcall.sys4(SYS_WAIT4, 0 -% 1, 0, WNOHANG, 0)
+        if errno.is_error(r) || r == 0 {
+            going = false
+        }
+    }
+}
+
+fn u_start(args: u64) -> u64 {
+    var port: u64 = 22
+    var life: u64 = 0
+    var once: u64 = 0
+    keydir = (&T_ETCSSH[0 as usize]) as u64
+    var o_p: [u8; 3] = "-p\0"
+    var o_k: [u8; 3] = "-k\0"
+    var o_t: [u8; 3] = "-t\0"
+    var o_v: [u8; 3] = "-v\0"
+    var o_1: [u8; 3] = "-1\0"
+    let ac: u64 = ulib.arg_count(args)
+    var i: u64 = 1
+    while i < ac {
+        let a: u64 = ulib.arg_at(args, i)
+        if ulib.streq(a, (&o_p[0 as usize]) as u64) && i + 1 < ac {
+            port = ulib.to_num(ulib.arg_at(args, i + 1))
+            i = i + 1
+        } else if ulib.streq(a, (&o_k[0 as usize]) as u64) && i + 1 < ac {
+            keydir = ulib.arg_at(args, i + 1)
+            i = i + 1
+        } else if ulib.streq(a, (&o_t[0 as usize]) as u64) && i + 1 < ac {
+            life = ulib.to_num(ulib.arg_at(args, i + 1))
+            i = i + 1
+        } else if ulib.streq(a, (&o_v[0 as usize]) as u64) {
+            verbose = 1
+        } else if ulib.streq(a, (&o_1[0 as usize]) as u64) {
+            once = 1
+        }
+        i = i + 1
+    }
+
+    // SIGCHLD MASKIEREN, BEVOR ES EIN KIND GIBT. Siehe `poll_wait`.
+    block_sigchld()
+
+    // Der Wirtsschluessel, EINMAL, vor allem anderen -- damit der
+    // Fingerabdruck auf der Konsole steht, bevor sich jemand verbindet.
+    var c: ed25519.Ctx = ed25519.ctx_new()
+    if !ed25519.ctx_init(&c) {
+        return 1
+    }
+    if !host_key_ready(&c) {
+        return 1
+    }
+    var fp: [u8; 64] = [0 as u8; 64]
+    fingerprint((&fp[0 as usize]) as u64)
+    say((&L_FP[0 as usize]) as u64)
+    say((&fp[0 as usize]) as u64)
+    nl()
+    say((&L_ALGS[0 as usize]) as u64)
+    nl()
+
+    let s: u64 = net.tcp_socket()
+    if net.failed(s) {
+        return 1
+    }
+    if net.failed(net.bind_port(s, port)) {
+        return 1
+    }
+    if net.failed(net.listen(s, 8)) {
+        return 1
+    }
+    // DIESE ZEILE IST DAS ZEICHEN FUER DEN PRUEFSTAND, und sie steht
+    // NACH `listen`. Ein Test, der sich frueher verbindet, misst das
+    // Zeitverhalten von QEMU und nicht das dieses Servers.
+    say((&L_LISTEN[0 as usize]) as u64)
+    saynum(port)
+    nl()
+
+    let f: u64 = (&fdsbuf[0 as usize]) as u64
+    var left: u64 = life
+    var conns: u64 = 0
+    var going: bool = true
+    while going {
+        io.poll_set(f, 0, s, io.POLLIN)
+        let r: u64 = poll_wait(f, 1, 500)
+        reap()
+        if errno.failed(r) {
+            going = false
+        } else if r == 0 {
+            if life != 0 {
+                if left <= 500 {
+                    going = false
+                } else {
+                    left = left - 500
+                }
+            }
+        } else if io.poll_ready(f, 0, io.POLLIN) {
+            var sa: [u8; 16] = [0 as u8; 16]
+            let cfd: u64 = net.accept_from(s, (&sa[0 as usize]) as u64)
+            if !net.failed(cfd) {
+                conns = conns + 1
+                say((&L_ACCEPT[0 as usize]) as u64)
+                say((&L_SPACE[0 as usize]) as u64)
+                var ipt: [u8; 24] = [0 as u8; 24]
+                let il: u64 = net.ip_text(
+                    net.sa_ip((&sa[0 as usize]) as u64),
+                    (&ipt[0 as usize]) as u64)
+                saybytes((&ipt[0 as usize]) as u64, il)
+                nl()
+                let who: u64 = proc.split()
+                if errno.failed(who) {
+                    net.close(cfd)
+                } else if who == 0 {
+                    net.close(s)
+                    let rc: u64 = serve(cfd)
+                    net.close(cfd)
+                    say((&L_DONE[0 as usize]) as u64)
+                    saynum(rc)
+                    nl()
+                    proc.leave(rc)
+                } else {
+                    net.close(cfd)
+                    if once != 0 {
+                        // Auf genau dieses Kind warten, damit der Lauf
+                        // erst endet, wenn die Sitzung fertig ist.
+                        proc.wait_code(who)
+                        going = false
+                    }
+                }
+            }
+        }
+    }
+    net.close(s)
+    reap()
+    say((&L_CONNS[0 as usize]) as u64)
+    say((&L_SPACE[0 as usize]) as u64)
+    saynum(conns)
+    nl()
+    return 0
+}
