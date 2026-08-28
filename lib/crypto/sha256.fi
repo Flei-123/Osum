@@ -1,0 +1,285 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// lib/crypto/sha256.fi -- SHA-256 (FIPS 180-4), Runde SSHD.
+//
+// WARUM ES DIESE DATEI GIBT, obwohl SHA-256 in diesem Baum schon ZWEIMAL
+// steht. Beide vorhandenen Fassungen sind Ring-3-PROGRAMMBIBLIOTHEKEN
+// mit `profile kernel` und `import ulib`:
+//
+//   * `kernel/user/pw.fi` -- rechnet richtig, aber `if len > 256 {
+//     return false }`. Fuer ein Passwort genug, fuer einen
+//     Schluesselaustausch nicht.
+//   * `kernel/user/sha.fi` -- stroemend, aber der Zustand ist eine
+//     MODULVARIABLE. Ein einziger Hash zur Zeit. Der Austauschhash H
+//     eines SSH-Handschlags wird ueber neun Felder gefuellt, waehrend
+//     nebenher der Fingerabdruck des Wirtsschluessels und die sechs
+//     Schluesselableitungen K1/K2 gerechnet werden -- das sind mehrere
+//     Rechnungen, die einander ueberlappen.
+//
+// Diese Datei ist die dritte und die einzige, die unter `lib/crypto`
+// liegt: KEINE `profile`-Zeile, KEIN `import`, kein Allokator, kein
+// Systemaufruf, Zustand beim AUFRUFER. Damit gilt fuer sie dieselbe
+// Regel wie fuer `blake2s.fi` und `sha512.fi` -- sie laesst sich in den
+// Kern, in ein Ring-3-Programm und in einen Testlaeufer auf dem Wirt
+// binden, ohne dass eine Zeile sich aendert.
+//
+// DIE ZWEI ALTEN BLEIBEN STEHEN. Sie werden von `pw`, `opk`, `backup`,
+// `bstore` und `hwid` benutzt und sind gegen Pythons `hashlib` gemessen;
+// sie hier zu loeschen waere ein Umbau von fuenf Programmen in einer
+// Runde, die SSH baut. Was dieser Baum jetzt hat, ist eine SHA-256, die
+// man ueberall hinbinden kann -- die Zusammenlegung ist eine eigene
+// Aufgabe und steht so in STATUS-SSHD.md.
+//
+// ============================================================ DIE RECHNUNG
+//
+// SHA-256 ist ein 32-Bit-Verfahren, Firns `u64` ist 64 Bit. JEDE
+// Rechnung endet deshalb auf `& M32`, und jede Addition benutzt Firns
+// AUSDRUECKLICHEN Ueberlaufoperator `+%`. Ein einzelnes fehlendes `& M32`
+// erzeugt einen Hash, der stabil ist, zufaellig aussieht und mit nichts
+// auf der Welt uebereinstimmt -- deshalb wird diese Datei nicht
+// geglaubt, sondern GEMESSEN: `tools/sshd/vectors.py` schickt dieselben
+// Eingaben durch Pythons `hashlib` und vergleicht Ziffer fuer Ziffer.
+//
+// ==================================================================== EHRLICH
+//
+// S1 NICHT KONSTANTZEITIG IN DER LAENGE. Die Zahl der Runden ist die
+//    Zahl der Bloecke, also die Nachrichtenlaenge -- in jeder Benutzung
+//    hier oeffentlich. Innerhalb einer Runde gibt es keinen Sprung und
+//    keine Adresse, die vom INHALT abhaengt.
+// S2 KEIN SHA-224. Dieselbe Kompressionsfunktion mit anderen
+//    Anfangswerten und abgeschnittener Ausgabe. Niemand hier braucht
+//    sie, und ein ungemessener Pfad ist eine Last.
+
+export { Sha256, sha256_new, begin, update, finish, hash,
+    hmac, DIGEST, BLOCK }
+
+const DIGEST: usize = 32
+const BLOCK: usize = 64
+const M32: u64 = 4294967295
+
+struct Sha256 {
+    h: [u64; 8],
+    buf: [u8; 64],
+    have: usize, // Oktette, die in `buf` liegen
+    nlo: u64,    // Oktette insgesamt, untere 64 Bit
+    nhi: u64,    // Oktette insgesamt, obere 64 Bit
+}
+
+fn ld8(p: u64, i: usize) -> u8 {
+    return *((p + i as u64) as *mut u8)
+}
+
+fn st8(p: u64, i: usize, v: u8) {
+    *((p + i as u64) as *mut u8) = v
+}
+
+// Rechtsrotation im 32-Bit-Wort. Der Schiebebetrag nach links muss
+// maskiert werden, sonst stehen oberhalb von Bit 31 Reste.
+fn rotr(x: u64, n: u64) -> u64 {
+    return ((x >> n) | (x << (32 - n))) & M32
+}
+
+fn sha256_new() -> Sha256 {
+    return Sha256 { h: [0 as u64; 8], buf: [0 as u8; 64], have: 0,
+        nlo: 0, nhi: 0 }
+}
+
+// FIPS 180-4 5.3.3: die ersten 32 Bit der Nachkommastellen der
+// Quadratwurzeln der ersten acht Primzahlen.
+fn begin(s: *mut Sha256) {
+    (*s).h[0] = 0x6A09E667
+    (*s).h[1] = 0xBB67AE85
+    (*s).h[2] = 0x3C6EF372
+    (*s).h[3] = 0xA54FF53A
+    (*s).h[4] = 0x510E527F
+    (*s).h[5] = 0x9B05688C
+    (*s).h[6] = 0x1F83D9AB
+    (*s).h[7] = 0x5BE0CD19
+    (*s).have = 0
+    (*s).nlo = 0
+    (*s).nhi = 0
+}
+
+// FIPS 180-4 4.2.2: die ersten 32 Bit der Nachkommastellen der
+// Kubikwurzeln der ersten vierundsechzig Primzahlen.
+fn kconst(i: usize) -> u64 {
+    let k: [u64; 64] = [
+    0x428A2F98, 0x71374491, 0xB5C0FBCF, 0xE9B5DBA5,
+    0x3956C25B, 0x59F111F1, 0x923F82A4, 0xAB1C5ED5,
+    0xD807AA98, 0x12835B01, 0x243185BE, 0x550C7DC3,
+    0x72BE5D74, 0x80DEB1FE, 0x9BDC06A7, 0xC19BF174,
+    0xE49B69C1, 0xEFBE4786, 0x0FC19DC6, 0x240CA1CC,
+    0x2DE92C6F, 0x4A7484AA, 0x5CB0A9DC, 0x76F988DA,
+    0x983E5152, 0xA831C66D, 0xB00327C8, 0xBF597FC7,
+    0xC6E00BF3, 0xD5A79147, 0x06CA6351, 0x14292967,
+    0x27B70A85, 0x2E1B2138, 0x4D2C6DFC, 0x53380D13,
+    0x650A7354, 0x766A0ABB, 0x81C2C92E, 0x92722C85,
+    0xA2BFE8A1, 0xA81A664B, 0xC24B8B70, 0xC76C51A3,
+    0xD192E819, 0xD6990624, 0xF40E3585, 0x106AA070,
+    0x19A4C116, 0x1E376C08, 0x2748774C, 0x34B0BCB5,
+    0x391C0CB3, 0x4ED8AA4A, 0x5B9CCA4F, 0x682E6FF3,
+    0x748F82EE, 0x78A5636F, 0x84C87814, 0x8CC70208,
+    0x90BEFFFA, 0xA4506CEB, 0xBEF9A3F7, 0xC67178F2,
+    ]
+    return k[i]
+}
+
+// Ein Block von 64 Oktetten, FIPS 180-4 6.2.2.
+fn compress(s: *mut Sha256, p: u64) {
+    var w: [u64; 64] = [0 as u64; 64]
+    var i: usize = 0
+    while i < 16 {
+        var v: u64 = 0
+        var j: usize = 0
+        while j < 4 {
+            v = ((v << 8) | (ld8(p, i * 4 + j) as u64)) & M32
+            j = j + 1
+        }
+        w[i] = v
+        i = i + 1
+    }
+    i = 16
+    while i < 64 {
+        let a: u64 = w[i - 15]
+        let b: u64 = w[i - 2]
+        let s0: u64 = rotr(a, 7) ^ rotr(a, 18) ^ (a >> 3)
+        let s1: u64 = rotr(b, 17) ^ rotr(b, 19) ^ (b >> 10)
+        w[i] = (w[i - 16] +% s0 +% w[i - 7] +% s1) & M32
+        i = i + 1
+    }
+
+    var a: u64 = (*s).h[0]
+    var b: u64 = (*s).h[1]
+    var c: u64 = (*s).h[2]
+    var d: u64 = (*s).h[3]
+    var e: u64 = (*s).h[4]
+    var f: u64 = (*s).h[5]
+    var g: u64 = (*s).h[6]
+    var hh: u64 = (*s).h[7]
+
+    i = 0
+    while i < 64 {
+        let S1: u64 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25)
+        let ch: u64 = (e & f) ^ ((~e) & g & M32)
+        let t1: u64 = (hh +% S1 +% ch +% kconst(i) +% w[i]) & M32
+        let S0: u64 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22)
+        let maj: u64 = (a & b) ^ (a & c) ^ (b & c)
+        let t2: u64 = (S0 +% maj) & M32
+        hh = g
+        g = f
+        f = e
+        e = (d +% t1) & M32
+        d = c
+        c = b
+        b = a
+        a = (t1 +% t2) & M32
+        i = i + 1
+    }
+
+    (*s).h[0] = ((*s).h[0] +% a) & M32
+    (*s).h[1] = ((*s).h[1] +% b) & M32
+    (*s).h[2] = ((*s).h[2] +% c) & M32
+    (*s).h[3] = ((*s).h[3] +% d) & M32
+    (*s).h[4] = ((*s).h[4] +% e) & M32
+    (*s).h[5] = ((*s).h[5] +% f) & M32
+    (*s).h[6] = ((*s).h[6] +% g) & M32
+    (*s).h[7] = ((*s).h[7] +% hh) & M32
+}
+
+// So oft der Aufrufer mag.
+fn update(s: *mut Sha256, p: u64, n: usize) {
+    var i: usize = 0
+    while i < n {
+        (*s).buf[(*s).have] = ld8(p, i)
+        (*s).have = (*s).have + 1
+        if (*s).have == BLOCK {
+            compress(s, (&(*s).buf[0]) as u64)
+            (*s).have = 0
+        }
+        i = i + 1
+    }
+    let old: u64 = (*s).nlo
+    (*s).nlo = old +% (n as u64)
+    if (*s).nlo < old {
+        (*s).nhi = (*s).nhi +% 1
+    }
+}
+
+// FIPS 180-4 5.1.1: ein Einsbit, dann Nullen, dann die Laenge in BIT als
+// 64-Bit-Zahl mit dem hoechstwertigen Oktett zuerst, so dass die Summe
+// ein Vielfaches von 64 Oktetten ist.
+fn finish(s: *mut Sha256, out: u64) {
+    let lo: u64 = ((*s).nlo << 3)
+    var pad: [u8; 1] = [128 as u8]
+    update(s, (&pad[0]) as u64, 1)
+    var zero: [u8; 1] = [0 as u8]
+    while (*s).have != 56 {
+        update(s, (&zero[0]) as u64, 1)
+    }
+    var len: [u8; 8] = [0 as u8; 8]
+    var i: usize = 0
+    while i < 8 {
+        len[i] = ((lo >> ((7 - i) as u64 * 8)) & 255) as u8
+        i = i + 1
+    }
+    update(s, (&len[0]) as u64, 8)
+    i = 0
+    while i < 8 {
+        var j: usize = 0
+        while j < 4 {
+            st8(out, i * 4 + j, (((*s).h[i] >> ((3 - j) as u64 * 8))
+                & 255) as u8)
+            j = j + 1
+        }
+        i = i + 1
+    }
+}
+
+// Die drei Aufrufe darueber hinter einem Namen.
+fn hash(p: u64, n: usize, out: u64) {
+    var s: Sha256 = sha256_new()
+    begin(&s)
+    update(&s, p, n)
+    finish(&s, out)
+}
+
+// HMAC-SHA-256 (RFC 2104). Steht hier und nicht bei den Aufrufern, weil
+// die Konstruktion genau EINE Stelle hat, an der man sie falsch machen
+// kann -- ein Schluessel, der laenger ist als der Block, wird ERST
+// gehasht und DANN aufgefuellt -- und diese Stelle soll einmal
+// dastehen. Gemessen gegen Pythons `hmac`.
+fn hmac(key: u64, klen: usize, msg: u64, mlen: usize, out: u64) {
+    var k: [u8; 64] = [0 as u8; 64]
+    if klen > BLOCK {
+        var t: [u8; 32] = [0 as u8; 32]
+        hash(key, klen, (&t[0]) as u64)
+        var i: usize = 0
+        while i < DIGEST {
+            k[i] = t[i]
+            i = i + 1
+        }
+    } else {
+        var i: usize = 0
+        while i < klen {
+            k[i] = ld8(key, i)
+            i = i + 1
+        }
+    }
+    var ipad: [u8; 64] = [0 as u8; 64]
+    var opad: [u8; 64] = [0 as u8; 64]
+    var i: usize = 0
+    while i < BLOCK {
+        ipad[i] = (k[i] ^ (54 as u8))
+        opad[i] = (k[i] ^ (92 as u8))
+        i = i + 1
+    }
+    var inner: [u8; 32] = [0 as u8; 32]
+    var s: Sha256 = sha256_new()
+    begin(&s)
+    update(&s, (&ipad[0]) as u64, BLOCK)
+    update(&s, msg, mlen)
+    finish(&s, (&inner[0]) as u64)
+    begin(&s)
+    update(&s, (&opad[0]) as u64, BLOCK)
+    update(&s, (&inner[0]) as u64, DIGEST)
+    finish(&s, out)
+}

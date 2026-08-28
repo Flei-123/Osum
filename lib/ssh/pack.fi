@@ -1,0 +1,286 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// lib/ssh/pack.fi -- die Paketschicht von SSH-2 (RFC 4253 Abschnitt 6)
+// und `chacha20-poly1305@openssh.com`, Runde SSHD.
+//
+// ==================================================== DAS BINAERE PAKET
+//
+//     uint32    packet_length      (padding_length + payload + padding)
+//     byte      padding_length     mindestens 4
+//     byte[n1]  payload
+//     byte[n2]  random padding
+//     byte[m]   mac                (bei einem AEAD: das Sicherungsmerkmal)
+//
+// DIE AUFFUELLUNG IST DIE STELLE, AN DER ZWEI FASSUNGEN GELTEN, und wer
+// das uebersieht, bekommt vom OpenSSH-Klienten „padding error" und sonst
+// nichts:
+//
+//   * OHNE Verschluesselung (vor NEWKEYS) muss die GANZE Laenge --
+//     packet_length UND padding_length UND payload UND padding, also
+//     4 + 1 + n1 + n2 -- ein Vielfaches von 8 sein. So steht es in
+//     RFC 4253, und so prueft es OpenSSH in `ssh_packet_read_poll2`
+//     mit `need = 4 + packlen - block_size`.
+//   * MIT `chacha20-poly1305@openssh.com` ist das Laengenfeld GETRENNT
+//     verschluesselt und zaehlt NICHT mit: `packet_length` selbst --
+//     also 1 + n1 + n2 -- muss ein Vielfaches von 8 sein. OpenSSH
+//     prueft `need = packlen` gegen `need % block_size`.
+//
+// Beide Fassungen stehen unten in `pad_count`, und `tools/sshd/run.sh`
+// misst sie gegen den ECHTEN Klienten -- das ist der einzige Beweis, der
+// zaehlt.
+//
+// ============================== chacha20-poly1305@openssh.com ==========
+//
+// Aus OpenSSHs `PROTOCOL.chacha20poly1305`. Es ist NICHT das AEAD aus
+// RFC 8439: es gibt keine zusaetzlichen Daten, keine Auffuellung auf 16
+// und keinen Laengenblock am Ende. Poly1305 laeuft ueber das GANZE
+// Paket, so wie es auf dem Draht steht.
+//
+//   * 512 Bit Schluesselmaterial. Die ERSTEN 256 Bit sind K_2 (die
+//     Nutzlast), die ZWEITEN 256 Bit sind K_1 (nur das Laengenfeld).
+//     Diese Reihenfolge ist die haeufigste Verwechslung.
+//   * Der Nonce ist die PAKETNUMMER als uint64 in SSH-Schreibweise,
+//     also acht Oktette, hoechstwertiges zuerst.
+//   * Das Laengenfeld: ChaCha20 mit K_1, Blockzaehler 0.
+//   * Der Poly1305-Schluessel: die ersten 32 Oktette des Stroms von K_2
+//     mit Blockzaehler 0.
+//   * Die Nutzlast: ChaCha20 mit K_2 ab Blockzaehler 1.
+//   * Das Merkmal: Poly1305 ueber `4 + packet_length` Oktette, also
+//     ueber das verschluesselte Laengenfeld MIT.
+//
+// DIE UMRECHNUNG AUF DAS CHACHA20 DIESES BAUMS. OpenSSH benutzt djbs
+// urspruengliche Aufteilung (64 Bit Zaehler, 64 Bit Nonce),
+// `lib/crypto/chacha.fi` die von RFC 8439 (32 Bit Zaehler, 96 Bit
+// Nonce). Es ist derselbe Zustandsvektor, nur anders benannt:
+//
+//     s[12] = Zaehler (RFC)      = Zaehler, untere 32 Bit (djb)
+//     s[13] = Nonce  0..4 (RFC)  = Zaehler, obere 32 Bit  (djb) = 0
+//     s[14] = Nonce  4..8 (RFC)  = IV 0..4 (djb)
+//     s[15] = Nonce 8..12 (RFC)  = IV 4..8 (djb)
+//
+// Also: RFC-Nonce = vier Nulloktette, dann die acht Oktette der
+// Paketnummer. Der Zaehler bleibt 0 oder 1. `nonce_of` ist diese eine
+// Zeile, und `tools/sshd/vectors.py` haelt sie gegen eine
+// Python-Umsetzung derselben Bauart.
+//
+// ================================================================ EHRLICH
+//
+// P1 KEIN aes256-gcm. Der Auftrag laesst die Wahl zwischen den beiden;
+//    ChaCha20-Poly1305 ist gewaehlt, weil beide Bausteine in
+//    `lib/crypto/chacha.fi` schon gemessen daliegen und AES-GCM erst
+//    geschrieben werden muesste. Der OpenSSH-Klient kann beides.
+// P2 KEINE KOMPRESSION. `none` in beide Richtungen. Der Klient akzeptiert
+//    das; `zlib@openssh.com` waere ein zweiter Deflate-Strom, den
+//    niemand hier braucht.
+// P3 NICHT KONSTANTZEITIG in jedem Pfad. Der Vergleich des
+//    Sicherungsmerkmals ist es (`tag_equal` aus `lib/crypto/chacha.fi`),
+//    die Feldarithmetik von Poly1305 und ChaCha20 hat keinen Sprung, der
+//    vom Inhalt abhaengt -- aber das ist keine Pruefung durch Dritte.
+//    Siehe STATUS-SSHD.md.
+
+import crypto.chacha
+import ssh.wire
+
+export {
+    Cipher, cipher_new, cipher_set, cipher_on, cipher_seq, cipher_reseq,
+    pad_count, pack_out, pack_len, pack_in, pack_frame_size,
+    KEYMAT, TAG, MAXPACK
+}
+
+// 64 Oktette Schluesselmaterial je Richtung.
+const KEYMAT: usize = 64
+const TAG: usize = 16
+const BLOCKSZ: usize = 8
+const MINPAD: usize = 4
+// RFC 4253 verlangt, dass ein Server mindestens 32768 Oktette Nutzlast
+// annimmt. Mehr als das ist ein Klient, der etwas anderes vorhat.
+const MAXPACK: usize = 35000
+
+struct Cipher {
+    on: bool,
+    k1: [u8; 32],   // nur das Laengenfeld
+    k2: [u8; 32],   // die Nutzlast und Poly1305
+    seq: u64,
+}
+
+fn ld8(p: u64, i: usize) -> u8 {
+    return *((p + i as u64) as *mut u8)
+}
+
+fn st8(p: u64, i: usize, v: u8) {
+    *((p + i as u64) as *mut u8) = v
+}
+
+fn cipher_new() -> Cipher {
+    return Cipher { on: false, k1: [0 as u8; 32], k2: [0 as u8; 32],
+        seq: 0 }
+}
+
+fn cipher_on(c: *mut Cipher) -> bool {
+    return (*c).on
+}
+
+fn cipher_seq(c: *mut Cipher) -> u64 {
+    return (*c).seq
+}
+
+// RUNDE SSHD, „strict kex": nach NEWKEYS faengt die Paketnummer wieder
+// bei null an. Das ist die Gegenmassnahme gegen Terrapin
+// (CVE-2023-48795) und wird NUR eingeschaltet, wenn der Klient
+// `kex-strict-c-v00@openssh.com` angeboten hat.
+fn cipher_reseq(c: *mut Cipher) {
+    (*c).seq = 0
+}
+
+// 512 Bit: die ersten 256 sind K_2, die zweiten 256 sind K_1.
+fn cipher_set(c: *mut Cipher, key: u64) {
+    var i: usize = 0
+    while i < 32 {
+        (*c).k2[i] = ld8(key, i)
+        (*c).k1[i] = ld8(key, 32 + i)
+        i = i + 1
+    }
+    (*c).on = true
+}
+
+// Vier Nulloktette, dann die Paketnummer, hoechstwertiges Oktett zuerst.
+fn nonce_of(seq: u64, out: u64) {
+    var i: usize = 0
+    while i < 4 {
+        st8(out, i, 0 as u8)
+        i = i + 1
+    }
+    wire.put_be64(out, 4, seq)
+}
+
+// Wie viele Oktette Auffuellung dieses Paket braucht. Siehe den
+// Abschnitt „DIE AUFFUELLUNG" oben -- die beiden Faelle sind
+// verschieden, und das ist kein Versehen.
+fn pad_count(on: bool, plen: usize) -> usize {
+    var base: usize = 0
+    if on {
+        base = 1 + plen
+    } else {
+        base = 4 + 1 + plen
+    }
+    var pad: usize = BLOCKSZ - (base % BLOCKSZ)
+    if pad < MINPAD {
+        pad = pad + BLOCKSZ
+    }
+    return pad
+}
+
+// Wie viele Oktette ein Paket mit dieser Nutzlast auf dem Draht belegt.
+fn pack_frame_size(on: bool, plen: usize) -> usize {
+    let pad: usize = pad_count(on, plen)
+    var total: usize = 4 + 1 + plen + pad
+    if on {
+        total = total + TAG
+    }
+    return total
+}
+
+// EIN PAKET HINAUS. `rnd` zeigt auf mindestens 16 Oktette Zufall fuer
+// die Auffuellung. Rueckgabe: die Laenge auf dem Draht, oder 0, wenn
+// `out` zu klein ist.
+fn pack_out(c: *mut Cipher, payload: u64, plen: usize, rnd: u64,
+    out: u64, outcap: usize) -> usize {
+    let pad: usize = pad_count((*c).on, plen)
+    let packlen: usize = 1 + plen + pad
+    var total: usize = 4 + packlen
+    if (*c).on {
+        total = total + TAG
+    }
+    if total > outcap {
+        return 0
+    }
+    wire.put_be32(out, 0, packlen as u64)
+    st8(out, 4, pad as u8)
+    wire.copy_bytes(out + 5, payload, plen)
+    wire.copy_bytes(out + (5 + plen) as u64, rnd, pad)
+    if (*c).on {
+        var nonce: [u8; 12] = [0 as u8; 12]
+        nonce_of((*c).seq, (&nonce[0]) as u64)
+        // das Laengenfeld, mit K_1
+        chacha.chacha20((&(*c).k1[0]) as u64, (&nonce[0]) as u64,
+            0 as u32, out, 4, out)
+        // der Poly1305-Schluessel: die ersten 32 Oktette des Stroms von
+        // K_2 mit Blockzaehler 0
+        var blk: [u8; 64] = [0 as u8; 64]
+        chacha.chacha20_block((&(*c).k2[0]) as u64, (&nonce[0]) as u64,
+            0 as u32, (&blk[0]) as u64)
+        // die Nutzlast, ab Blockzaehler 1
+        chacha.chacha20((&(*c).k2[0]) as u64, (&nonce[0]) as u64,
+            1 as u32, out + 4, packlen, out + 4)
+        // das Merkmal ueber das GANZE Paket, das Laengenfeld mit
+        chacha.poly1305((&blk[0]) as u64, out, 4 + packlen,
+            out + (4 + packlen) as u64)
+    }
+    (*c).seq = (*c).seq +% 1
+    return total
+}
+
+// DIE LAENGE EINES ANKOMMENDEN PAKETS, aus den ersten vier Oktetten.
+// Bewegt die Paketnummer NICHT -- sie wird erst in `pack_in` gezaehlt,
+// und bis dahin kann derselbe Kopf mehrmals angesehen werden, waehrend
+// der Rest noch unterwegs ist.
+fn pack_len(c: *mut Cipher, hdr: u64) -> u64 {
+    if !(*c).on {
+        return wire.be32_at(hdr, 0)
+    }
+    var nonce: [u8; 12] = [0 as u8; 12]
+    nonce_of((*c).seq, (&nonce[0]) as u64)
+    var plain: [u8; 4] = [0 as u8; 4]
+    chacha.chacha20((&(*c).k1[0]) as u64, (&nonce[0]) as u64, 0 as u32,
+        hdr, 4, (&plain[0]) as u64)
+    return wire.be32_at((&plain[0]) as u64, 0)
+}
+
+// EIN PAKET HEREIN. `raw` zeigt auf das vollstaendige Paket auf dem
+// Draht (4 + packlen [+ 16]); es wird AN ORT UND STELLE entschluesselt.
+// `out` bekommt die Nutzlast, `*plenp` ihre Laenge.
+//
+// `false` heisst: das Sicherungsmerkmal stimmt nicht oder die
+// Auffuellung ist unmoeglich. Dann ist NICHTS von dem, was in `out`
+// steht, benutzbar -- deshalb wird erst geprueft und dann
+// entschluesselt.
+fn pack_in(c: *mut Cipher, raw: u64, packlen: usize, out: u64,
+    outcap: usize, plenp: *mut usize) -> bool {
+    *plenp = 0
+    if packlen < 1 + MINPAD || packlen > MAXPACK {
+        return false
+    }
+    if (*c).on {
+        var nonce: [u8; 12] = [0 as u8; 12]
+        nonce_of((*c).seq, (&nonce[0]) as u64)
+        var blk: [u8; 64] = [0 as u8; 64]
+        chacha.chacha20_block((&(*c).k2[0]) as u64, (&nonce[0]) as u64,
+            0 as u32, (&blk[0]) as u64)
+        var want: [u8; 16] = [0 as u8; 16]
+        chacha.poly1305((&blk[0]) as u64, raw, 4 + packlen,
+            (&want[0]) as u64)
+        if !chacha.tag_equal((&want[0]) as u64,
+            raw + (4 + packlen) as u64, TAG) {
+            return false
+        }
+        chacha.chacha20((&(*c).k2[0]) as u64, (&nonce[0]) as u64,
+            1 as u32, raw + 4, packlen, raw + 4)
+    } else {
+        // Ohne Verschluesselung: die GANZE Laenge muss durch 8 teilbar
+        // sein. Ein Klient, der das nicht einhaelt, redet kein SSH.
+        if (4 + packlen) % BLOCKSZ != 0 {
+            return false
+        }
+    }
+    let pad: usize = ld8(raw, 4) as usize
+    if pad < MINPAD || 1 + pad > packlen {
+        return false
+    }
+    let plen: usize = packlen - 1 - pad
+    if plen > outcap {
+        return false
+    }
+    wire.copy_bytes(out, raw + 5, plen)
+    *plenp = plen
+    (*c).seq = (*c).seq +% 1
+    return true
+}
