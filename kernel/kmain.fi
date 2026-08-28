@@ -608,6 +608,7 @@ fn graphics(state: u64, mbi: u64) {
     serial.nl()
 
     gfx_bench(state, back)
+    paint_bench(state)
 
     // RUNDE DISPLAY: die Karte fragen, was sie kann. Hier und nicht
     // frueher, weil `probe` die Fensterplaetze zaehlt, die `fb.init`
@@ -1198,6 +1199,150 @@ fn gfx_bench(state: u64, back: u64) {
 //
 // Ohne Zeichenmarke, weil die je Zeichen zweimal ein Rechteck malt und
 // die Messung damit ueber ihren eigenen Cursor stolpern wuerde.
+// =====================================================================
+// RUNDE PAINT: WAS DIE MISCHUNG KOSTET -- IN TAKTEN, NICHT IN MEINUNG.
+// =====================================================================
+//
+// Eine neue Faehigkeit ohne ihren Preis ist eine halbe Antwort. Diese
+// Messung stellt zwei Wege nebeneinander, die BILDPUNKTGENAU dieselbe
+// Flaeche fuellen, auf DERSELBEN Maschine, in EINEM Lauf, mit DEMSELBEN
+// Zaehler:
+//
+//   1. `fb.fill`   -- undurchsichtig, ueber `rep stosq`, acht Oktette
+//                     je Schritt, KEIN Lesezugriff
+//   2. `fb.fill_a` -- gemischt, Bildpunkt fuer Bildpunkt: lesen,
+//                     drei Kanaele rechnen, schreiben
+//
+// Der Unterschied ist der ganze Preis der Mischung, und er hat drei
+// Anteile: der Lesezugriff (den `fill` gar nicht macht), die
+// Kanalarithmetik, und der Verlust von `rep stosq`. Welcher davon
+// ueberwiegt, sieht man daran, dass die Zahl mit UND ohne Zweitpuffer
+// gemessen wird -- ohne ihn geht das Lesen ueber PCI in den Speicher der
+// Karte.
+//
+// AUSGEWIESEN WIRD IN TAKTEN JE BILDPUNKT, weil das die einzige Zahl
+// ist, die zwischen 800x600 und 1024x768 vergleichbar bleibt; die Kosten
+// eines vollen Bildaufbaus stehen daneben, damit niemand multiplizieren
+// muss. `qemu-system-x86_64` ohne KVM emuliert, die absoluten Zahlen
+// gehoeren also dieser Maschine -- das VERHAELTNIS der beiden Wege
+// gehoert der Rechnung.
+const PAINT_RUNDEN: u64 = 4
+
+fn paint_bench(state: u64) {
+    var s_h: [u8; 22] = "        paintbench: \0\0"
+    var s_x: [u8; 2] = "x\0"
+    var s_fi: [u8; 9] = "  fill=\0\0"
+    var s_fa: [u8; 11] = "  fill_a=\0\0"
+    var s_cy: [u8; 5] = " cyc\0"
+    var s_pp: [u8; 12] = "  je-px=\0\0\0\0"
+    var s_pa: [u8; 8] = " / \0\0\0\0\0"
+    var s_ra: [u8; 12] = "  faktor=\0\0\0"
+    var s_pm: [u8; 8] = "/1000\0\0\0"
+    var s_bl: [u8; 11] = "  blends=\0\0"
+    var s_rd: [u8; 10] = "  reads=\0\0"
+    var s_sk: [u8; 10] = "  skips=\0\0"
+    var s_db: [u8; 10] = "  dbl=\0\0\0\0"
+
+    if apic.tsc_hz(state) == 0 {
+        return
+    }
+    let w: u64 = fb.width(state)
+    let h: u64 = fb.height(state)
+    if w == 0 || h == 0 {
+        return
+    }
+    let farbe: u64 = fb.rgb(state, 0x20, 0x30, 0x40)
+    let ueber: u64 = fb.rgb(state, 0xFF, 0xFF, 0xFF)
+
+    // 1. undurchsichtig
+    var t: u64 = apic.tsc()
+    var i: u64 = 0
+    while i < PAINT_RUNDEN {
+        fb.fill(state, 0, 0, w, h, farbe)
+        i = i + 1
+    }
+    let c_fill: u64 = (apic.tsc() -% t) / PAINT_RUNDEN
+
+    // 2. gemischt, mit einer Deckung, die BEIDE Abkuerzungen verfehlt
+    //    (a == 128 ist weder 0 noch 255) -- sonst misst man den
+    //    schnellen Zweig und nennt ihn Mischung.
+    fb.blend_reset(state)
+    t = apic.tsc()
+    i = 0
+    while i < PAINT_RUNDEN {
+        fb.fill_a(state, 0, 0, w, h, ueber, 128)
+        i = i + 1
+    }
+    let c_fa: u64 = (apic.tsc() -% t) / PAINT_RUNDEN
+
+    let px: u64 = w * h
+    serial.puts((&s_h[0]) as u64)
+    serial.dec(w)
+    serial.puts((&s_x[0]) as u64)
+    serial.dec(h)
+    serial.puts((&s_fi[0]) as u64)
+    serial.dec(c_fill)
+    serial.puts((&s_cy[0]) as u64)
+    serial.puts((&s_fa[0]) as u64)
+    serial.dec(c_fa)
+    serial.puts((&s_cy[0]) as u64)
+    // Takte je Bildpunkt in TAUSENDSTELN, weil beide Wege unter zehn
+    // Takten liegen koennen und eine ganze Zahl dort nichts mehr sagt.
+    serial.puts((&s_pp[0]) as u64)
+    serial.dec(c_fill * 1000 / px)
+    serial.puts((&s_pa[0]) as u64)
+    serial.dec(c_fa * 1000 / px)
+    serial.puts((&s_pm[0]) as u64)
+    serial.puts((&s_ra[0]) as u64)
+    if c_fill != 0 {
+        serial.dec(c_fa * 1000 / c_fill)
+    } else {
+        serial.dec(0)
+    }
+    serial.puts((&s_pm[0]) as u64)
+    serial.puts((&s_bl[0]) as u64)
+    serial.dec(fb.blends(state))
+    serial.puts((&s_rd[0]) as u64)
+    serial.dec(fb.blend_reads(state))
+    serial.puts((&s_sk[0]) as u64)
+    serial.dec(fb.blend_skips(state))
+    serial.puts((&s_db[0]) as u64)
+    if fb.double_buffered(state) {
+        serial.dec(1)
+    } else {
+        serial.dec(0)
+    }
+    serial.nl()
+
+    // DIE ZUSAGEN AUS DEM KERN SELBST, gleich hinter der Messung: die
+    // Zahl der gemischten Bildpunkte MUSS die Zahl der Bildpunkte der
+    // Flaeche mal der Rundenzahl sein. Waere sie kleiner, haette die
+    // Mischung Zeilen uebersprungen und die Messung waere zu gut.
+    var s_st: [u8; 24] = "        paint: selftest\0"
+    var s_of: [u8; 5] = " of \0"
+    var s_ok: [u8; 12] = "  gezaehlt=\0"
+    var s_no: [u8; 6] = "  ok\0\0"
+    var s_bad: [u8; 9] = "  FALSCH\0"
+    // ERST die Zahl ablesen, DANN die Zusagen laufen lassen: `selftest3`
+    // mischt selbst und wuerde den Zaehler, ueber den es urteilt,
+    // waehrend des Urteils weiterdrehen. Die erste Fassung tat genau das
+    // und meldete FALSCH bei vierzehn von vierzehn gehaltenen Zusagen.
+    let gemischt: u64 = fb.blends(state)
+    serial.puts((&s_st[0]) as u64)
+    serial.puts((&s_ok[0]) as u64)
+    serial.dec(fb.selftest3(state))
+    serial.puts((&s_of[0]) as u64)
+    serial.dec(fb.selftest3_max())
+    if gemischt == px * PAINT_RUNDEN {
+        serial.puts((&s_no[0]) as u64)
+    } else {
+        serial.puts((&s_bad[0]) as u64)
+    }
+    serial.nl()
+    fb.blend_reset(state)
+    fb.clear(state, 0)
+}
+
 fn bench_zeile(state: u64) -> u64 {
     let marke: bool = fb.cursor_on(state)
     fb.set_cursor(state, false)
