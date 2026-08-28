@@ -45,6 +45,11 @@ cd "$(dirname "$0")/../.."
 . tools/lib/qemu.sh
 
 FIRNC=${FIRNC:-vendor/firn/bin/firnc}
+# `import libc.io` findet ueber $FIRNLIB nach <repo>/lib; `import std.rt`
+# findet der Uebersetzer selbst neben seiner Binaerdatei
+# (vendor/firn/lib). Beide Wege gelten gleichzeitig, und certus braucht
+# beide.
+export FIRNLIB="$(pwd)/lib"
 SANS=assets/osum-sans.ttf
 MONO=assets/osum-mono.ttf
 SHOTS=${CERTUS_SHOTS:-docs/shots/certus}
@@ -74,7 +79,7 @@ bash tools/build-kernel.sh "$TMPD/k0.mb" > "$TMPD/kbuild.log" 2>&1 \
     && ok "der Kern ist gebaut ($(stat -c%s "$TMPD/k0.mb") Oktette)" \
     || { bad "der Kern baut nicht"; sed 's/^/        /' "$TMPD/kbuild.log" | head -10; exit 1; }
 
-PROGS="sh desktop taskbar launcher explorer dhcp echo ls cat"
+PROGS="sh desktop taskbar launcher explorer dhcp echo ls cat edit widgetdemo"
 as --64 -o "$TMPD/crt.o" kernel/user/crt.s 2>/dev/null \
     || bad "crt.s laesst sich nicht assemblieren"
 for p in $PROGS; do
@@ -84,7 +89,7 @@ for p in $PROGS; do
         && strip --strip-all "$TMPD/$p.elf" \
         || bad "$p baut nicht"
 done
-ok "die $(echo $PROGS | wc -w) Programme des Userlands sind gebaut"
+ok "$(ls "$TMPD"/*.elf 2>/dev/null | wc -l) Programme des Userlands sind gebaut"
 
 # CERTUS SELBST. Kein `profile kernel`, kein crt.o: der Browser ist ein
 # gewoehnliches Firn-Programm mit Sammler, und `firnc -c` legt seinen
@@ -93,7 +98,7 @@ ok "die $(echo $PROGS | wc -w) Programme des Userlands sind gebaut"
 # hier NUR das Bindeskript benutzt und keine zweite Einsprungdatei; zwei
 # `_start` waeren ein Binderfehler und keine Wahl.
 CBUILD_OK=0
-if FIRNLIB="$(pwd)/lib" "$FIRNC" -c -o "$TMPD/certus.o" \
+if "$FIRNC" -c -o "$TMPD/certus.o" \
         lib/certus/certus_main.fi > "$TMPD/ecertus" 2>&1; then
     if ld -T kernel/user/user.ld -o "$TMPD/certus.elf" "$TMPD/certus.o" \
             2> "$TMPD/ldcertus.err"; then
@@ -122,7 +127,14 @@ if [ "$CBUILD_OK" = 1 ]; then
     # W^X: kein Segment darf zugleich schreibbar UND ausfuehrbar sein.
     wx=$(readelf -lW "$TMPD/certus.elf" | awk '/^  LOAD/ {print $8 $9 $10}' | grep -c 'WE\|RWE')
     num "certus: Segmente, die zugleich schreib- und ausfuehrbar sind" "$wx" eq 0
-    ende=$(readelf -lW "$TMPD/certus.elf" | awk '/^  LOAD/ {print strtonum($3) + strtonum($6)}' | sort -n | tail -1)
+    ende=$(readelf -lW "$TMPD/certus.elf" | python3 -c '
+import sys
+h = 0
+for z in sys.stdin:
+    t = z.split()
+    if len(t) > 6 and t[0] == "LOAD":
+        h = max(h, int(t[2], 16) + int(t[5], 16))
+print(h)')
     num "certus endet unterhalb von proc.IMAGE_END (0x40400000)" "$ende" lt $((0x40400000))
     n=$(objdump -d "$TMPD/certus.elf" | grep -cE '^\s+[0-9a-f]+:.*\bsyscall\b')
     num "certus: syscall-Befehle (die einzige Tuer aus Ring 3)" "$n" ge 10
@@ -148,6 +160,16 @@ span = int(re.search(r"^const USER_SPAN: u64 = (0x[0-9A-Fa-f]+)", s, re.M).group
 base = int(re.search(r"^const USER_DATA: u64 = (0x[0-9A-Fa-f]+)", s, re.M).group(1), 16)
 sys.exit(0 if base + span * slots <= 0x50000000 else 1)
 PY
+
+grep -q 'w_self' kernel/procfs.fi \
+    && ok "kernel/procfs.fi kennt /proc/self (der Sammler fragt danach)" \
+    || bad "/proc/self fehlt"
+grep -q 'OSFXSR' kernel/arch/x86_64/boot.s \
+    && ok "kernel/arch/x86_64/boot.s schaltet SSE ein (CR4.OSFXSR)" \
+    || bad "SSE wird nicht eingeschaltet"
+grep -q 'fxsave' kernel/arch/x86_64/switch.s \
+    && ok "kernel/arch/x86_64/switch.s rettet die xmm-Register beim Umschalten" \
+    || bad "die xmm-Register werden beim Umschalten nicht gerettet"
 
 echo
 echo "== 3. eine echte Seite, aus dem Netz, ins PPM =="
@@ -186,14 +208,20 @@ mk_image() { # ziel
     local ARGS=(build "$img" 32768 /lib/
         "/lib/mono.ttf=$MONO" "/lib/sans.ttf=$SANS" /bin/)
     local q
-    for q in $PROGS; do ARGS+=("/bin/$q=$TMPD/$q.elf"); done
+    for q in $PROGS; do
+        [ -f "$TMPD/$q.elf" ] && ARGS+=("/bin/$q=$TMPD/$q.elf")
+    done
     [ "$CBUILD_OK" = 1 ] && ARGS+=("/bin/certus=$TMPD/certus.elf")
     ARGS+=("/bin/files@/bin/explorer")
     ARGS+=(/etc/ "/etc/theme=$TMPD/baum/theme" "/etc/taskbar.conf=$TMPD/taskbar.conf")
-    ARGS+=(/w/)
+    ARGS+=(/w/ /proc/ /dev/ /mnt/)
     while read -r z; do ARGS+=("$z"); done < <(python3 tools/k15/bundle.py "$TMPD/apps" "$TMPD/buendel")
     while read -r z; do ARGS+=("$z"); done < "$TMPD/baum/liste"
-    python3 tools/osum/mkfs.py "${ARGS[@]}" > "$TMPD/mkfs.txt" 2>&1
+    python3 tools/osum/mkfs.py "${ARGS[@]}" > "$TMPD/mkfs.txt" 2>&1 || {
+        sed 's/^/        /' "$TMPD/mkfs.txt" | head -6
+        return 1
+    }
+    return 0
 }
 
 # DAS BUENDEL. `/apps/certus.osp/` ist das, was den Browser zu einer
@@ -213,7 +241,7 @@ run_text() { # url ppm-name ausgabe
     mk_image "$TMPD/d-$name.img" || { bad "mkfs fuer $name"; return 1; }
     cp -f "$TMPD/d-$name.img" "$TMPD/l-$name.img"
     timeout 300 $QEMU_X86 -kernel "$TMPD/k0.mb" -m 512 \
-        -append "osum nokbd nosched noproc nofs nic nip=$OSUM_IP/24 ngw=$OSUM_GW script=certus $url /w/$name.ppm 1;exit" \
+        -append "osum vfs nokbd nosched noproc nofs noring3 nic nip=$OSUM_IP/24 ngw=$OSUM_GW script=certus $url /w/$name.ppm 1;exit" \
         -serial "file:$out" -display none -no-reboot \
         -drive "file=$TMPD/l-$name.img,format=raw,if=ide,index=0" \
         -netdev "user,id=n0" \
@@ -297,7 +325,7 @@ if [ "$CBUILD_OK" = 1 ]; then
     rm -f "$sock" "$out" "$ppm"
     mk_image "$TMPD/d-win.img" && cp -f "$TMPD/d-win.img" "$TMPD/l-win.img"
     timeout 420 $QEMU_X86 -kernel "$TMPD/k0.mb" -m 512 \
-        -append "osum gfx wm wig desk wmhold wiglong nokbd nosched noproc nofs nic nip=$OSUM_IP/24 ngw=$OSUM_GW script=certus http://$OSUM_GW:$PORT/index.html /w/win.ppm 4" \
+        -append "osum vfs gfx wm wig desk wmhold wiglong nokbd nosched noproc nofs noring3 nic nip=$OSUM_IP/24 ngw=$OSUM_GW script=certus http://$OSUM_GW:$PORT/index.html /w/win.ppm 6" \
         -serial "file:$out" -display none -no-reboot \
         -vga std -monitor "unix:$sock,server,nowait" \
         -drive "file=$TMPD/l-win.img,format=raw,if=ide,index=0" \
