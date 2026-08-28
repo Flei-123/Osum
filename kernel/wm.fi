@@ -61,6 +61,12 @@ profile kernel
 import kstate
 import mem
 import fb
+// RUNDE SNIP: der Fahrschein fuers Bildschirmfoto. Der Fensterserver
+// treibt ihn (er ist der einzige, der bei jedem Durchgang laeuft und
+// weiss, wann das Bild fertig zusammengesetzt ist) und friert die
+// Fensterrechtecke mit ein. `snap.fi` kennt `wm` NICHT -- die Richtung
+// geht nur hier hindurch, sonst haetten die beiden einen Ring.
+import snap
 // RUNDE NETVIEW, NACHTRAG: die einzigen zwei Zeilen, die diese Runde
 // in den Fensterserver legt. `netview` sagt, welche Netzsicht der
 // Besitzer eines Fensters hat, `netmark` traegt das Zeichen dafuer.
@@ -101,6 +107,7 @@ export {
     downs, moves_seen, hits_seen, win_keys,
     set_fonts, font_ui, font_mono, px_ui, px_mono,
     selftest, selftest_max,
+    snap_step, snap_marks,
     tile_on, set_tile_on, tile_take, tile_release, tile_apply,
     tile_node, tile_float, tile_snap, tile_action, hotkeys, hotkeys_seen,
     on_screen_resize, win_tabbed, tiled,
@@ -328,6 +335,11 @@ const S_DROPS: u64 = 0x238 // Seite am Ziel (tile.D_*), 4 = als Reiter
 const S_DROPE: u64 = 0x240 // Bildschirmrand + 1 statt eines Zielfensters
 const S_DRAGT: u64 = 0x248 // das gezogene Fenster kam AUS dem Baum
 const S_HOTS: u64 = 0x250 // wie viele Tastenkuerzel ausgefuehrt wurden
+// RUNDE SNIP: wie oft das Aufnahmezeichen an- oder ausgegangen ist.
+// 0x2C0 -- hinter dem Block der Runde PAINT (0x280..0x2B0), mit einem
+// Wort Luft dazwischen, so wie es der Kommentar dreissig Zeilen weiter
+// oben verlangt. Der naechsten Runde bleibt 0x300.
+const S_SNAPMARKS: u64 = 0x2C0
 const S_ACTS: u64 = 0x258 // wie viele davon wirklich etwas getan haben
 
 // ---------------------------------------------------- RUNDE THEME
@@ -2446,6 +2458,17 @@ fn compose(state: u64) -> u64 {
     if gs(state, S_PVON) != 0 {
         paint_preview(state, x0, y0, x1, y1)
     }
+    // 2c. RUNDE SNIP: das Aufnahmezeichen. Ueber den Fenstern, unter
+    //     dem Zeiger -- es soll auffallen und den Zeiger nicht
+    //     verdecken. Es steht nur, solange eine VERZOEGERTE Aufnahme
+    //     laeuft: dann wartet der Mensch, es gibt kein Overlay, und
+    //     ohne Zeichen merkt er nicht, dass gleich fotografiert wird.
+    //     Das ist die Lehre aus macOS' Menueleisten-Anzeige. Beim
+    //     Ausschnitt liegt statt dessen das Overlay auf dem Schirm --
+    //     ein deutlicheres Zeichen gibt es nicht.
+    if snap.mark_on(state) && !kstate.mode_on(state, kstate.M_SNAPNOMARK) {
+        paint_snapmark(state, x0, y0, x1, y1)
+    }
     // 3. der Zeiger, ganz oben
     if gs(state, S_CURON) != 0 {
         paint_cursor(state, x0, y0, x1, y1)
@@ -2787,6 +2810,125 @@ fn paint_cursor(state: u64, cx0: u64, cy0: u64, cx1: u64, cy1: u64) {
     }
 }
 
+// ===================================================== RUNDE SNIP
+//
+// DREI FUNKTIONEN, UND ALLE DREI STEHEN HIER UND NICHT IN `snap.fi`:
+// sie brauchen den Rahmenpuffer und die Fenstertafel, und `snap.fi`
+// soll den Fensterserver NICHT kennen (sonst haetten die beiden Dateien
+// einen Ring, und ein Ring zwischen Kernmodulen ist der Anfang jeder
+// Bauzeitueberraschung).
+
+const SNAP_MARK_C: u64 = 0xD03030 // ein sattes Rot, wie eine Aufnahmelampe
+
+// Das Zeichen: ein gefuelltes Quadrat mit hellem Rand, damit es auf
+// dunklem UND hellem Grund zu sehen ist. Kein Symbol aus der
+// Symbolschrift -- die ist nicht auf jedem Abbild da (`icons.ttf` ist
+// ausdruecklich weglassbar), und ein Aufnahmezeichen, das je nach
+// Abbild fehlt, waere kein Zeichen.
+fn paint_snapmark(state: u64, cx0: u64, cy0: u64, cx1: u64, cy1: u64) {
+    let mx: u64 = snap.mark_x(state)
+    let my: u64 = snap.mark_y(state)
+    let rot: u64 = rgb24(state, SNAP_MARK_C)
+    let hell: u64 = rgb24(state, 0xFFFFFF)
+    var r: u64 = 0
+    while r < snap.MARK_H {
+        let py: u64 = my + r
+        if py >= cy0 && py < cy1 {
+            var c: u64 = 0
+            while c < snap.MARK_W {
+                let px: u64 = mx + c
+                if px >= cx0 && px < cx1 {
+                    var farbe: u64 = rot
+                    if r == 0 || c == 0 || r + 1 == snap.MARK_H
+                        || c + 1 == snap.MARK_W {
+                        farbe = hell
+                    }
+                    fb.pixel(state, px, py, farbe)
+                }
+                c = c + 1
+            }
+        }
+        r = r + 1
+    }
+}
+
+// Die Fensterrechtecke in denselben Augenblick einfrieren wie die
+// Bildpunkte. Von UNTEN nach OBEN, damit `snap.hit` rueckwaerts laufen
+// und "das oberste, das den Punkt deckt" beantworten kann.
+//
+// DAS AEUSSERE RECHTECK und nicht das innere: wer ein Fenster
+// fotografiert, will die Titelleiste dabeihaben. Minimierte Fenster und
+// solche hinter einem Reiter kommen nicht in die Tafel -- sie sind auf
+// dem Bild nicht zu sehen, und ein Ausschnitt auf ein unsichtbares
+// Fenster gaebe ein Bild von dem, was DARUEBER liegt.
+fn freeze_windows(state: u64) {
+    var k: u64 = 0
+    var z: u64 = 0
+    while z < gs(state, S_COUNT) {
+        let i: u64 = at_z(state, z)
+        if i < MAX_WIN && (wg(state, i, W_FLAGS) & (F_HIDDEN | F_TABBED)) == 0 {
+            var x: i64 = win_x(state, i)
+            var y: i64 = win_y(state, i)
+            if deko(state, i) {
+                x = x - BORDER as i64
+                y = y - TITLE_H as i64
+            }
+            if x < 0 {
+                x = 0
+            }
+            if y < 0 {
+                y = 0
+            }
+            snap.put_win(state, k, win_id(state, i), x as u64, y as u64,
+                outer_w(state, i), outer_h(state, i),
+                wg(state, i, W_LAYER), wg(state, i, W_FLAGS))
+            k = k + 1
+        }
+        z = z + 1
+    }
+    snap.set_nwin(state, k)
+}
+
+// WAS DER DURCHGANG MIT DEM FAHRSCHEIN MACHT. Gerufen aus `poll`, also
+// sechzig Mal in der Sekunde -- und in den allermeisten Durchgaengen
+// gibt `snap.tick` null zurueck und es passiert nichts.
+//
+// DIE REIHENFOLGE BEI 2 UND 3 IST DER GANZE PUNKT. Steht das Zeichen,
+// wenn der Augenblick der Aufnahme kommt, meldet `tick` erst 2: das
+// Zeichen geht aus, die Stelle wird schmutzig, `compose` malt sie neu.
+// Erst im NAECHSTEN Durchgang kommt 3 und es wird fotografiert. Ohne
+// diesen einen Umweg staende die Aufnahmelampe auf dem Bild, und das
+// merkt man erst, wenn das Bild schon verschickt ist.
+fn snap_step(state: u64) {
+    if !snap.ready(state) {
+        return
+    }
+    let was: u64 = snap.tick(state)
+    if was == 0 {
+        return
+    }
+    if was == 3 {
+        freeze_windows(state)
+        snap.freeze_now(state)
+        return
+    }
+    // 1 = das Zeichen soll an sein, 2 = aus. Beide Male ist dieselbe
+    // Stelle schmutzig, und `compose` entscheidet an `snap.mark_on`,
+    // was dort hinkommt.
+    ss(state, S_SNAPMARKS, gs(state, S_SNAPMARKS) + 1)
+    let mx: i64 = snap.mark_x(state) as i64
+    let my: i64 = snap.mark_y(state) as i64
+    damage(state, mx, my, mx + snap.MARK_W as i64, my + snap.MARK_H as i64)
+    compose(state)
+}
+
+// Wie oft das Zeichen an- oder ausgegangen ist. Ohne diese Zahl waere
+// "das Zeichen stand und wurde vor der Aufnahme abgeraeumt" eine
+// Behauptung ueber zwei Bilder, die niemand nebeneinander sieht.
+fn snap_marks(state: u64) -> u64 {
+    return gs(state, S_SNAPMARKS)
+}
+
 // ------------------------------------------------------- die Ereignisse
 
 fn ev_at(state: u64, i: u64, k: u64) -> u64 {
@@ -3046,6 +3188,12 @@ fn poll(state: u64) -> bool {
     // `kbd.irq` fuellt, wenn Alt gehalten wird -- der Fensterserver
     // HOLT sie ab, statt dass die Tastatur ihn kennt.
     hotkeys(state)
+    // RUNDE SNIP: der Fahrschein. Er steht VOR dem Zeigegeraet, weil
+    // eine verzoegerte Aufnahme auf die Uhr hoert und nicht auf die
+    // Maus -- laege er dahinter, kaeme er in einem Durchgang ohne
+    // Mausbewegung nie dran (die Funktion kehrt unten mit `false`
+    // zurueck, sobald sich der Zeiger nicht geruehrt hat).
+    snap_step(state)
     // DER RUECKFALL AUF ABFRAGE, und er steht hier mit Begruendung.
     //
     // Der Baustein meldet ueber IRQ 12, und das ist der Weg, den dieser
