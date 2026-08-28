@@ -115,6 +115,26 @@
 #      Waehlt jemand eine Farbe, die 4,5:1 bricht, verschiebt das
 #      System sie auf der erzeugten Rampe und SAGT ES.
 #
+#  28. BARRIEREFREIHEIT (tools/a11y/run.sh, Runde A11Y): der
+#      BEDIENELEMENT-BAUM steht seit dieser Runde IM PROTOKOLL und nicht
+#      in einer Absichtserklaerung. Jedes Fenster liefert einen Baum
+#      seiner Bedienelemente -- Rolle, zugaenglicher Name, Wert, Zustand,
+#      Lage, Groesse, Eltern-Kind-Beziehung --, und er entsteht
+#      AUTOMATISCH in der Widget-Schicht: ein Programm, das einen
+#      gewoehnlichen Knopf hinstellt, ist damit zugaenglich, ohne eine
+#      Zeile eigener Arbeit. Der Baum ist NICHT fuer jeden offen (er
+#      traegt alles, was auf dem Schirm steht); Lesen verlangt eine
+#      Freigabe je Aufgabe, vergeben nur von der Kennung 0, und ein
+#      PASSWORTFELD gibt seinen Inhalt nie heraus -- der Wert wird beim
+#      EINTRAGEN auf null gezwungen, nicht erst beim Lesen. Dazu, sofort
+#      benutzbar: vollstaendige Tastaturbedienung (Umschalt-Tab gab es
+#      nicht, die Menueleiste war per Tastatur unerreichbar),
+#      systemweite Skalierung auf 125 und 150 Prozent ohne abgeschnittene
+#      Beschriftung (je Element GEMESSEN), Bildschirmlupe (bildpunktgenau
+#      gegen die Quelle gerechnet), hoher Kontrast (21:1 nach WCAG) und
+#      die Einrastfunktion. Die Sprachausgabe ist NICHT diese Runde;
+#      docs/A11Y.md sagt, was der Baum ihr schon liefert und was fehlt.
+#
 #  21. WIDGETS UND EIN DATEIMANAGER (tools/k15/run.sh, Runde K15):
 #      zwischen dem Rechteck, das Runde K10 einer Anwendung gab, und
 #      einer Anwendung fehlte alles. Diese Runde baut es -- als
@@ -899,6 +919,21 @@ lauf "27. Marken statt Farben: hell, dunkel, automatisch, und der Kontrast nachg
 # muss hochkommen und die Oberflaeche ohne Symbole malen.
 lauf "25. das Symbolsystem: eine Schrift fuer die Oberflaeche, Bitmaps fuer die Anwendungen (tools/icons/run.sh, Runde ICONS)" \
      tools/icons/run.sh icons '^icons: |^  OK    (assets/osum-icons.ttf|lib/icons.fi|raw code points|counterproof|the kernel loaded|the kernel says|and Ring 3 sees|assertions|an icon in memory|screenshot)|^        (per mixed pixel|one icon cold|in memory:|both mix)'
+# ABSCHNITT A11Y -- DER BEDIENELEMENT-BAUM IM PROTOKOLL.
+#
+# Er steht hier und nicht in einer spaeteren Runde, und das ist die
+# Entscheidung: nachtraeglich muss jedes einzelne Programm noch einmal
+# angefasst werden (X11 brauchte sechzehn Jahre bis AT-SPI, Windows zwei
+# Schichten uebereinander), jetzt kostet es EINE Stelle -- der
+# Fensterserver liegt im Kernel und alle Programme benutzen dieselbe
+# Widget-Schicht. Gemessen wird die ABLAGE IM KERNEL und nicht das, was
+# eine Anwendung ueber sich selbst sagt; das Passwortfeld wird von beiden
+# Seiten geprueft; das Leserecht hat eine Gegenprobe; die Tastatur wird
+# durchgetabbt und GEZAEHLT; und bei 150 Prozent wird je Bedienelement
+# nachgerechnet, dass die Beschriftung in ihren Platz passt.
+lauf "28. Barrierefreiheit: der Bedienelement-Baum, das Leserecht, Tastatur, Skalierung, Lupe, Kontrast, Einrasten (tools/a11y/run.sh, Runde A11Y)" \
+     tools/a11y/run.sh a11y '^A11Y: |^  OK    (der zugaengliche Name|kein Knoten der Ablage|der Leser bekommt|und KEIN Wert|GEGENPROBE|erreichte Bedienelemente|Umschalt-Tab|KEINE Beschriftung|und im BILD|die Tafel zeigt|Schrift auf Flaeche|nach .Umschalt. allein|widgetdemo: |die Packung eines Knotens|das Geheimnis kommt|und liest alle)'
+
 lauf "25. eine Netzsicht je Prozess: real, filtered, faked, none (tools/netview/run.sh, Runde NETVIEW)" \
      tools/netview/run.sh netview '^NETVIEW: |^  OK    (OCTETS THAT LEFT|faked: (connect|reading|the WHOLE|the BODY|a name resolved|and the reachability)|none: (connect|and it said)|real: connect took|and the python server|(nocarrier|noip|noroute|online): the icon|(dark|light): (button|and the REAL)|kernel/netmark|8[a-f]:|faking:)'
 

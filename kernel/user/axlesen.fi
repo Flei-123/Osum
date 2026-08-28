@@ -1,0 +1,255 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/axlesen.fi -- RUNDE A11Y: DER LESER.
+//
+// Das ist der Anfang eines Bildschirmlesers, und es ist ausdruecklich
+// nur der Anfang: er liest den Bedienelement-Baum und schreibt ihn auf
+// die serielle Leitung. Was fehlt, ist die SPRACHAUSGABE -- und die ist
+// ein eigenes grosses Projekt (Stimmerzeugung, Aussprachewoerterbuch,
+// Tonausgabe), nicht der Rest dieser Runde. Was der Baum ihr schon
+// liefert und was noch fehlt, steht in docs/A11Y.md, Abschnitt 6.
+//
+// WOFUER ER IN DIESER RUNDE WIRKLICH DA IST: er ist die GEGENPROBE zur
+// Sicherheitsentscheidung. Derselbe Prozess, zweimal gestartet --
+// einmal mit Freigabe, einmal ohne. Mit Freigabe liest er den Baum.
+// Ohne bekommt er -EPERM, und zwar bei JEDEM Knoten und bei jedem
+// Ereignis. Waere das nicht so, waere der Satz "der Baum ist nicht fuer
+// jedes Programm offen" eine Behauptung.
+//
+// UND ER PRUEFT DAS PASSWORTFELD, von der anderen Seite: er geht jeden
+// Knoten durch und meldet, was er sieht. Der Testlaeufer sucht in
+// seiner Ausgabe nach dem Geheimnis. Findet er es, faellt der Lauf.
+
+profile kernel
+
+import ulib
+import wlibc
+
+export { u_start }
+
+static mut knoten: [u8; 64] = [0 as u8; 64]
+static mut ereignis: [u8; 16] = [0 as u8; 16]
+
+fn say(p: u64) {
+    ulib.say(p)
+}
+
+fn kv(name: u64, v: u64) {
+    var sp: [u8; 2] = " \0"
+    say(name)
+    ulib.sayn(v)
+    say((&sp[0 as usize]) as u64)
+}
+
+// DIE ROLLENNAMEN LIEGEN ALS MODUL-STATICS UND NICHT ALS LOKALE
+// FELDER: Firn verbietet zu Recht, die Adresse eines lokalen Feldes
+// zurueckzugeben (SPEC: 'the address of the local escapes through the
+// return value'). Ein Bildschirmleser, der den Namen einer Rolle aus
+// einem abgeraeumten Rahmen liest, liest Muell -- und zwar erst dann,
+// wenn ihn jemand wirklich braucht.
+static mut rn0: [u8; 5] = "kein\0"
+static mut rn1: [u8; 8] = "Fenster\0"
+static mut rn2: [u8; 13] = "Beschriftung\0"
+static mut rn3: [u8; 6] = "Knopf\0"
+static mut rn4: [u8; 18] = "Kontrollkaestchen\0"
+static mut rn5: [u8; 9] = "Textfeld\0"
+static mut rn6: [u8; 13] = "Passwortfeld\0"
+static mut rn7: [u8; 6] = "Liste\0"
+static mut rn8: [u8; 8] = "Tabelle\0"
+static mut rn9: [u8; 7] = "Reiter\0"
+static mut rn10: [u8; 12] = "Menueleiste\0"
+static mut rn11: [u8; 12] = "Auswahlfeld\0"
+static mut rn12: [u8; 8] = "Trenner\0"
+static mut rn13: [u8; 15] = "Bildlaufleiste\0"
+static mut rn14: [u8; 6] = "Menue\0"
+static mut rn15: [u8; 7] = "Dialog\0"
+
+fn rollenname(r: u64) -> u64 {
+    if r == 1 {
+        return (&rn1[0 as usize]) as u64
+    }
+    if r == 2 {
+        return (&rn2[0 as usize]) as u64
+    }
+    if r == 3 {
+        return (&rn3[0 as usize]) as u64
+    }
+    if r == 4 {
+        return (&rn4[0 as usize]) as u64
+    }
+    if r == 5 {
+        return (&rn5[0 as usize]) as u64
+    }
+    if r == 6 {
+        return (&rn6[0 as usize]) as u64
+    }
+    if r == 7 {
+        return (&rn7[0 as usize]) as u64
+    }
+    if r == 8 {
+        return (&rn8[0 as usize]) as u64
+    }
+    if r == 9 {
+        return (&rn9[0 as usize]) as u64
+    }
+    if r == 10 {
+        return (&rn10[0 as usize]) as u64
+    }
+    if r == 11 {
+        return (&rn11[0 as usize]) as u64
+    }
+    if r == 12 {
+        return (&rn12[0 as usize]) as u64
+    }
+    if r == 13 {
+        return (&rn13[0 as usize]) as u64
+    }
+    if r == 14 {
+        return (&rn14[0 as usize]) as u64
+    }
+    if r == 15 {
+        return (&rn15[0 as usize]) as u64
+    }
+    return (&rn0[0 as usize]) as u64
+}
+
+fn w_at(k: u64) -> u64 {
+    return __mmio_read64(((&knoten[0 as usize]) as u64 + k * 8)
+        as *mut u64)
+}
+
+// Einen Knoten so ausgeben, wie ein Bildschirmleser ihn VORLESEN wuerde:
+// Rolle, Name, Zustand, Wert. Dazu die Zahlen, an denen ein Testlaeufer
+// nachrechnen kann.
+fn say_node(n: u64) {
+    var a: [u8; 15] = "axlesen: node \0"
+    var sn: [u8; 4] = "nr=\0"
+    var sr: [u8; 6] = "role=\0"
+    var sf: [u8; 8] = " state=\0"
+    var sw: [u8; 6] = " win=\0"
+    var sp: [u8; 9] = " parent=\0"
+    var sx: [u8; 4] = " x=\0"
+    var sy: [u8; 4] = " y=\0"
+    var sww: [u8; 4] = " w=\0"
+    var shh: [u8; 4] = " h=\0"
+    var sv: [u8; 8] = " value=\0"
+    var st: [u8; 8] = " rolle=\0"
+    var sm: [u8; 7] = " name=\0"
+    let w0: u64 = w_at(0)
+    let w1: u64 = w_at(1)
+    let w2: u64 = w_at(2)
+    say((&a[0 as usize]) as u64)
+    kv((&sn[0 as usize]) as u64, n)
+    kv((&sr[0 as usize]) as u64, w0 & 0xFF)
+    kv((&sf[0 as usize]) as u64, (w0 >> 8) & 0xFF)
+    kv((&sw[0 as usize]) as u64, (w0 >> 16) & 0xFF)
+    kv((&sp[0 as usize]) as u64, (w0 >> 24) & 0xFF)
+    kv((&sx[0 as usize]) as u64, w1 & 0xFFFF)
+    kv((&sy[0 as usize]) as u64, (w1 >> 16) & 0xFFFF)
+    kv((&sww[0 as usize]) as u64, (w1 >> 32) & 0xFFFF)
+    kv((&shh[0 as usize]) as u64, (w1 >> 48) & 0xFFFF)
+    kv((&sv[0 as usize]) as u64, w2)
+    say((&st[0 as usize]) as u64)
+    say(rollenname(w0 & 0xFF))
+    say((&sm[0 as usize]) as u64)
+    say((&knoten[0 as usize]) as u64 + wlibc.AX_NAME_OFF)
+    ulib.nl()
+}
+
+fn u_start(args: u64) -> u64 {
+    var s_start: [u8; 18] = "axlesen: start \0\0\0"
+    var s_may: [u8; 6] = "may=\0\0"
+    var s_cnt: [u8; 8] = " count=\0"
+    var s_deny: [u8; 22] = "axlesen: DENIED rc=\0\0\0"
+    var s_done: [u8; 22] = "axlesen: gelesen n=\0\0\0"
+    var s_ev: [u8; 17] = "axlesen: ev typ=\0"
+    var s_evw: [u8; 6] = " win=\0"
+    var s_evn: [u8; 7] = " node=\0"
+    var s_evv: [u8; 8] = " value=\0"
+    var s_end: [u8; 17] = "axlesen: fertig\0\0"
+    let _a: u64 = args
+
+    var darf: u64 = 0
+    if wlibc.ax_may() {
+        darf = 1
+    }
+    say((&s_start[0 as usize]) as u64)
+    kv((&s_may[0 as usize]) as u64, darf)
+    say((&s_cnt[0 as usize]) as u64)
+    ulib.sayn(wlibc.ax_info(wlibc.AI_COUNT))
+    ulib.nl()
+
+    // Warten, bis die Anwendung ihren Baum eingetragen hat -- sie liest
+    // dazu die Platte. Ohne dieses Warten misst der Leser einen leeren
+    // Baum und meldet stolz, dass nichts geheim herausgekommen ist.
+    var warte: u64 = 0
+    while warte < 400 && wlibc.ax_info(wlibc.AI_COUNT) < 4 {
+        ulib.sleep_ms(10)
+        warte = warte + 1
+    }
+
+    var gelesen: u64 = 0
+    var abgelehnt: u64 = 0
+    let ganz: u64 = wlibc.ax_info(wlibc.AI_COUNT)
+    var i: u64 = 0
+    while i < ganz {
+        let rc: u64 = wlibc.ax_read(i, (&knoten[0 as usize]) as u64)
+        if ulib.bad(rc) {
+            if abgelehnt == 0 {
+                say((&s_deny[0 as usize]) as u64)
+                // Der Fehlerwert, als positive Zahl. 1 ist EPERM.
+                ulib.sayn(0 -% rc)
+                ulib.nl()
+            }
+            abgelehnt = abgelehnt + 1
+        } else {
+            gelesen = gelesen + 1
+            say_node(i)
+        }
+        i = i + 1
+    }
+    say((&s_done[0 as usize]) as u64)
+    ulib.sayn(gelesen)
+    var s_ab: [u8; 12] = "  denied=\0\0\0"
+    say((&s_ab[0 as usize]) as u64)
+    ulib.sayn(abgelehnt)
+    ulib.nl()
+
+    // Und die Ereignisse: ein Bildschirmleser lebt davon, dass ihm der
+    // Fokuswechsel GESAGT wird, statt dass er den Baum abfragt, bis
+    // sich etwas geaendert hat.
+    var runden: u64 = 0
+    var evs: u64 = 0
+    while runden < 3000 {
+        let rc: u64 = wlibc.ax_event((&ereignis[0 as usize]) as u64)
+        if ulib.bad(rc) {
+            runden = 3000
+        } else if rc == 0 {
+            ulib.sleep_ms(10)
+            runden = runden + 1
+        } else {
+            let e0: u64 = __mmio_read64(((&ereignis[0 as usize]) as u64)
+                as *mut u64)
+            let e1: u64 = __mmio_read64(((&ereignis[0 as usize]) as u64 + 8)
+                as *mut u64)
+            say((&s_ev[0 as usize]) as u64)
+            ulib.sayn(e0 & 0xFFFFFFFF)
+            say((&s_evw[0 as usize]) as u64)
+            ulib.sayn((e0 >> 32) & 0xFFFF)
+            say((&s_evn[0 as usize]) as u64)
+            ulib.sayn((e0 >> 48) & 0xFFFF)
+            say((&s_evv[0 as usize]) as u64)
+            ulib.sayn(e1)
+            ulib.nl()
+            evs = evs + 1
+            if evs > 60 {
+                runden = 3000
+            }
+        }
+    }
+    say((&s_end[0 as usize]) as u64)
+    var s_evc: [u8; 12] = "  events=\0\0\0"
+    say((&s_evc[0 as usize]) as u64)
+    ulib.sayn(evs)
+    ulib.nl()
+    return 0
+}

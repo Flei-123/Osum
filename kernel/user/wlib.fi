@@ -64,6 +64,9 @@ export {
     box_v, box_h, box_grid, box_end, size, gap_after,
     label, button, check, entry, list, table, tabs, menubar, choice,
     sep, scrollarea,
+    entry_secret, set_secret, ax_name, ax_flush, ax_nodes, ax_pushes,
+    min_w, min_h, tab_count, visits, visit_at, focusables,
+    KEY_BACKTAB,
     value, set_value, text_of, set_text, set_rows, set_cols, enable,
     show, shown, neu_setzen,
     list_icons, row_icons, icon_id, ICON_TAG,
@@ -133,7 +136,30 @@ const D_CT: u64 = 15 // der Kasten
 // column widths for a table), and a third meaning in the same slot is
 // how a widget ends up drawing a column width as a picture.
 const D_ICONS: u64 = 16
-const D_FIELDS: u64 = 17
+// RUNDE A11Y: VIER FELDER MEHR, UND JEDES LOEST EINEN EIGENEN FEHLER.
+//
+//   D_MINW/D_MINH  die NATUERLICHE Mindestgroesse -- so breit und hoch,
+//                  wie der eigene Text in der AKTUELLEN Schriftgroesse
+//                  wirklich ist. Ohne sie ist Skalieren ein Gluecksspiel:
+//                  die Schrift waechst um 50 Prozent, der Kasten um die
+//                  Zahl, die ein Programm vor drei Runden hingeschrieben
+//                  hat, und die Beschriftung steht ueber der Kante. Die
+//                  Anordnung nimmt seit dieser Runde IMMER das Groessere
+//                  von beidem.
+//   D_AXN          ein ausdruecklicher zugaenglicher Name. Nur noetig,
+//                  wo der sichtbare Text NICHT der Name ist -- also beim
+//                  Passwortfeld, dessen sichtbarer "Text" sein Inhalt
+//                  ist und niemanden etwas angeht.
+//   D_AXF          die Merkmale fuer den Baum, heute genau eines:
+//                  AXF_SECRET.
+const D_MINW: u64 = 17
+const D_MINH: u64 = 18
+const D_AXN: u64 = 19
+const D_AXF: u64 = 20
+const D_FIELDS: u64 = 21
+
+// Ein Textfeld, dessen Inhalt niemanden etwas angeht.
+const AXF_SECRET: u64 = 1
 
 const F_FOCUSABLE: u64 = 1
 const F_PRESSED: u64 = 2
@@ -150,6 +176,10 @@ const N_VAL: u64 = 4
 const N_DATA: u64 = 5
 const N_CNT: u64 = 6
 const N_NDIRT: u64 = 7 // wie viele Rechtecke gerade schmutzig sind
+// RUNDE A11Y: der Titel. Er ist der zugaengliche NAME des
+// Fensterknotens -- ein Fenster ohne Namen ist fuer einen
+// Bildschirmleser ein Fenster ohne Auskunft darueber, wo man ist.
+const N_TITLE: u64 = 8
 const N_OWNER: u64 = 11
 const N_X: u64 = 12
 const N_Y: u64 = 13
@@ -184,10 +214,15 @@ const KEY_END: u64 = 0x106
 const KEY_PGUP: u64 = 0x107
 const KEY_PGDN: u64 = 0x108
 const KEY_DEL: u64 = 0x109
+// RUNDE A11Y: UMSCHALT-TAB. Sie kommt als `ESC [ Z` von der Tastatur
+// (`kernel/kbd.fi`), also als das, was ein VT100 fuer diese Taste
+// schickt. Vorher gab es sie NICHT: mit und ohne Umschalt kam eine 9,
+// und "rueckwaerts durch die Bedienelemente" war nicht bedienbar.
+const KEY_BACKTAB: u64 = 0x10A
 
 // ------------------------------------------------------- der Zustand
 
-static mut wd: [u64; 1632] = [0 as u64; 1632] // MAXWD * D_FIELDS
+static mut wd: [u64; 2016] = [0 as u64; 2016] // MAXWD * D_FIELDS
 static mut wn: [u64; 56] = [0 as u64; 56] // MAXWN * N_FIELDS
 static mut ct: [u64; 312] = [0 as u64; 312] // MAXCT * C_FIELDS
 static mut nwd: u64 = 0
@@ -200,6 +235,23 @@ static mut want_h: u64 = 0
 static mut want_gap: u64 = 0
 
 static mut s_focus: u64 = 0 // Widgetnummer + 1
+// RUNDE A11Y: der Baum ist veraltet und muss neu herueber.
+static mut s_axdirty: u64 = 1
+// RUNDE A11Y: DIE SPUR DES FOKUS.
+//
+// Sie ist gebaut fuer den ehrlichen Test "jedes Bedienelement ist per
+// Tastatur erreichbar": durchtabben und zaehlen. Ein Programm, das den
+// Fokus nur ABFRAGT, sieht ihn nicht -- `step()` verarbeitet bis zu 64
+// Ereignisse am Stueck, und wenn drei Tabulatoren zwischen zwei
+// Abfragen kommen, sieht der Fragende nur den letzten. GEMESSEN: von
+// vierzehn Tabulatoren tauchten elf Stellen auf, und drei fehlten --
+// nicht weil sie unerreichbar waren, sondern weil niemand hinsah. Eine
+// Spur, die bei JEDEM Fokuswechsel schreibt, hat dieses Loch nicht.
+static mut s_visit: [u64; 64] = [0 as u64; 64]
+static mut s_nvisit: u64 = 0
+static mut s_axnodes: u64 = 0
+static mut s_axpushes: u64 = 0
+static mut axbuf: [u8; 4096] = [0 as u8; 4096]
 static mut s_nohit: u64 = 0
 static mut s_alive: u64 = 1
 static mut s_fired: u64 = 0
@@ -379,9 +431,38 @@ fn win_layer(w: u64) -> u64 {
     return wlibc.sys3w(wlibc.WM_INFO, ng(w, N_H), wlibc.WI_LAYER, 0)
 }
 
-fn new_win(x: u64, y: u64, w: u64, h: u64, titel: u64, kind: u64) -> u64 {
+fn new_win(x: u64, y: u64, w0: u64, h0: u64, titel: u64,
+    kind: u64) -> u64 {
     if nwn >= MAXWN {
         return MAXWN
+    }
+    // RUNDE A11Y: EIN FENSTER WAECHST MIT. Ein Dialog, der bei 150
+    // Prozent dieselben 300 Bildpunkte breit bleibt, hat zwei Knoepfe,
+    // die nebeneinander nicht mehr hineinpassen -- und der zweite
+    // steht dann halb draussen. Ein MENUE waechst besonders, weil seine
+    // Breite ohnehin aus dem laengsten Eintrag gerechnet wird; dort
+    // skaliert bereits `text_w`, also skaliert `new_win` nur, was ihm
+    // gegeben wurde.
+    var w: u64 = wlibc.sc(w0)
+    var h: u64 = wlibc.sc(h0)
+    // UND ES BLEIBT AUF DEM SCHIRM. Bei 150 Prozent ist ein Fenster von
+    // 480 x 420 Entwurfseinheiten 720 x 630 gross -- auf einem Schirm
+    // von 800 x 600 haengt der untere Rand heraus, und die Knoepfe
+    // darin sind unerreichbar. Das ist derselbe Fehler wie eine
+    // abgeschnittene Beschriftung, nur eine Ebene hoeher.
+    let rand: u64 = 2 * 2 // der Fensterrahmen links und rechts
+    let oben: u64 = 22 + 2 // Titelleiste und unterer Rahmen
+    if w + rand > wlibc.screen_w() {
+        w = sub(wlibc.screen_w(), rand)
+    }
+    if y + h + oben > wlibc.screen_h() {
+        h = sub(sub(wlibc.screen_h(), oben), y)
+    }
+    if kind != NK_MAIN {
+        // Menue und Dialog rechnen ihre Groesse SELBST aus der bereits
+        // skalierten Schrift. Ein zweites Skalieren waere doppelt.
+        w = w0
+        h = h0
     }
     let hh: u64 = wlibc.sys5(wlibc.WM_CREATE, (x << 16) | y, (w << 16) | h,
         titel, 0, 0)
@@ -400,6 +481,7 @@ fn new_win(x: u64, y: u64, w: u64, h: u64, titel: u64, kind: u64) -> u64 {
     ns(i, N_OWNER, 0)
     ns(i, N_X, x)
     ns(i, N_Y, y)
+    ns(i, N_TITLE, titel)
     wncur = i
     dirty_all(i)
     return i
@@ -656,11 +738,18 @@ fn box_grid(w: u64, x: u64, y: u64, bw: u64, bh: u64, pad: u64, gp: u64,
     return new_box(w, 3, x, y, bw, bh, pad, gp, cols)
 }
 
-fn new_box(w: u64, kind: u64, x: u64, y: u64, bw: u64, bh: u64, pad: u64,
-    gp: u64, cols: u64) -> u64 {
+fn new_box(w: u64, kind: u64, x0: u64, y0: u64, bw0: u64, bh0: u64,
+    pad0: u64, gp0: u64, cols: u64) -> u64 {
     if nct >= MAXCT {
         return MAXCT
     }
+    // RUNDE A11Y: auch der Kasten rechnet in Entwurfseinheiten.
+    let x: u64 = wlibc.sc(x0)
+    let y: u64 = wlibc.sc(y0)
+    let bw: u64 = wlibc.sc(bw0)
+    let bh: u64 = wlibc.sc(bh0)
+    let pad: u64 = wlibc.sc(pad0)
+    let gp: u64 = wlibc.sc(gp0)
     let c: u64 = nct
     nct = nct + 1
     cs(c, C_KIND, kind)
@@ -692,9 +781,17 @@ fn box_end() {
 // Die Wunschgroesse des NAECHSTEN Widgets. Danach ist sie wieder
 // vergessen -- eine Wunschgroesse, die haengenbleibt, ist die Sorte
 // Zustand, die man erst bemerkt, wenn drei Knoepfe zu hoch sind.
+// RUNDE A11Y: DIE ZAHLEN EINES PROGRAMMS SIND ENTWURFSEINHEITEN.
+//
+// Ein Programm sagt `size(94, 28)` und meint "so gross, wie es bei 100
+// Prozent aussehen soll". Was daraus auf dem Schirm wird, entscheidet
+// die systemweite Skalierung -- hier, an EINER Stelle, und nicht in
+// jedem Programm noch einmal. Das ist der Unterschied zwischen einer
+// Oberflaeche, die skaliert, und einer, in der zwanzig Programme es
+// zwanzigmal halb richtig machen.
 fn size(w: u64, h: u64) {
-    want_w = w
-    want_h = h
+    want_w = wlibc.sc(w)
+    want_h = wlibc.sc(h)
 }
 
 fn gap_after(n: u64) {
@@ -708,10 +805,30 @@ fn place(i: u64) {
     }
     let innen: u64 = sub(cg(c, C_W), 2 * cg(c, C_PAD))
     let kind: u64 = cg(c, C_KIND)
+    // RUNDE A11Y: DIE WUNSCHGROESSE IST EINE UNTERGRENZE UND KEINE
+    // OBERGRENZE.
+    //
+    // Bis hierher bekam ein Knopf genau die Breite, die das Programm
+    // ihm gab. Bei 150 Prozent ist die Schrift 22 statt 15 Bildpunkte
+    // hoch und "Abbrechen" 40 Prozent breiter -- der Knopf blieb, was
+    // er war, und die Beschriftung stand ueber der Kante. Genau das ist
+    // der haeufigste Fehler beim Skalieren, und er ist der Grund, warum
+    // diese Zeile hier steht und nicht in einer Fussnote.
+    //
+    // `D_MINW`/`D_MINH` sind AUS DER SCHRIFT gerechnet, in der jetzt
+    // gemalt wird. Bei 100 Prozent sind sie kleiner als jede
+    // Wunschgroesse, die ein bestehendes Programm angibt -- kein
+    // bestehender Testlauf sieht einen Unterschied.
     var pw: u64 = g(i, D_PW)
     var ph: u64 = g(i, D_PH)
     if ph == 0 {
-        ph = 24
+        ph = wlibc.sc(24)
+    }
+    if pw != 0 && pw < g(i, D_MINW) {
+        pw = g(i, D_MINW)
+    }
+    if ph < g(i, D_MINH) {
+        ph = g(i, D_MINH)
     }
     if kind == 1 {
         s(i, D_X, cg(c, C_CX))
@@ -719,6 +836,9 @@ fn place(i: u64) {
         var bw: u64 = innen
         if pw != 0 && pw < innen {
             bw = pw
+        }
+        if bw < g(i, D_MINW) {
+            bw = g(i, D_MINW)
         }
         s(i, D_W, bw)
         s(i, D_H, ph)
@@ -729,6 +849,9 @@ fn place(i: u64) {
         var bw2: u64 = pw
         if bw2 == 0 || bw2 > rest {
             bw2 = rest
+        }
+        if bw2 < g(i, D_MINW) {
+            bw2 = g(i, D_MINW)
         }
         s(i, D_X, cg(c, C_CX))
         s(i, D_Y, cg(c, C_CY))
@@ -748,6 +871,9 @@ fn place(i: u64) {
             if zw > cg(c, C_GAP) {
                 zw = zw - cg(c, C_GAP)
             }
+        }
+        if zw < g(i, D_MINW) {
+            zw = g(i, D_MINW)
         }
         s(i, D_X, cg(c, C_CX))
         s(i, D_Y, cg(c, C_CY))
@@ -779,6 +905,7 @@ fn place(i: u64) {
 // Alle Kaesten von vorn setzen. Wird nach einer Groessenaenderung
 // gerufen und nach jeder Aenderung, die Platz kostet.
 fn relayout() {
+    s_axdirty = 1
     var c: u64 = 0
     while c < nct {
         // Kaesten, die die volle Fensterbreite wollten, wachsen mit.
@@ -806,6 +933,7 @@ fn add(kind: u64, txt: u64, pw: u64, ph: u64, fokus: bool) -> u64 {
     }
     let i: u64 = nwd
     nwd = nwd + 1
+    s_axdirty = 1
     s(i, D_KIND, kind)
     s(i, D_TEXT, txt)
     s(i, D_WIN, wncur)
@@ -825,6 +953,7 @@ fn add(kind: u64, txt: u64, pw: u64, ph: u64, fokus: bool) -> u64 {
         fl = F_FOCUSABLE
     }
     s(i, D_FLAGS, fl)
+    calc_min(i)
     place(i)
     if s_focus == 0 && fokus {
         s_focus = i + 1
@@ -833,16 +962,17 @@ fn add(kind: u64, txt: u64, pw: u64, ph: u64, fokus: bool) -> u64 {
 }
 
 fn label(txt: u64) -> u64 {
-    return add(K_LABEL, txt, 0, wlibc.text_h(wlibc.PX_UI), false)
+    return add(K_LABEL, txt, 0, wlibc.text_h(wlibc.px_ui()), false)
 }
 
 fn button(txt: u64) -> u64 {
-    let w: u64 = wlibc.text_w(wlibc.F_UI, wlibc.PX_UI, txt, tlen(txt)) + 24
-    return add(K_BUTTON, txt, w, 26, true)
+    let w: u64 = wlibc.text_w(wlibc.F_UI, wlibc.px_ui(), txt, tlen(txt))
+        + wlibc.sc(24)
+    return add(K_BUTTON, txt, w, wlibc.sc(26), true)
 }
 
 fn check(txt: u64, on: bool) -> u64 {
-    let i: u64 = add(K_CHECK, txt, 0, 22, true)
+    let i: u64 = add(K_CHECK, txt, 0, wlibc.sc(22), true)
     if on {
         s(i, D_VAL, 1)
     }
@@ -852,15 +982,59 @@ fn check(txt: u64, on: bool) -> u64 {
 // Ein Textfeld arbeitet auf dem Puffer DES AUFRUFERS. Die Bibliothek
 // legt keinen an: wer den Text hinterher braucht, hat ihn dann schon.
 fn entry(buf: u64, max: u64) -> u64 {
-    let i: u64 = add(K_ENTRY, buf, 0, 24, true)
+    let i: u64 = add(K_ENTRY, buf, 0, wlibc.sc(24), true)
     s(i, D_D, max)
     s(i, D_B, tlen(buf))
     s(i, D_C, tlen(buf))
     return i
 }
 
+// ================================================== RUNDE A11Y
+//
+// EIN TEXTFELD, DESSEN INHALT NIEMANDEN ETWAS ANGEHT.
+//
+// Es ist ein gewoehnliches Textfeld mit EINEM Unterschied, und der
+// Unterschied ist die zweite der zwei Sperren dieser Runde: sein Inhalt
+// geht NICHT in den Bedienelement-Baum. Nicht als Wert, nicht als Name,
+// nicht als Laenge. Was in den Baum geht, ist die ROLLE
+// (`AR_PASSWORD`), damit ein Bildschirmleser "Passwortfeld" sagen kann,
+// die Lage, die Groesse, der Zustand -- und der Name, den das Programm
+// ausdruecklich mit `ax_name` gesetzt hat.
+//
+// Die erste Sperre steht im Kernel (`kernel/ax.fi`, `push_node`): dort
+// wird der Wert eines Knotens mit dieser Rolle auf null gezwungen, auch
+// wenn doch einer ankommt, und der Versuch wird gezaehlt. Zwei Sperren,
+// weil eine Sperre, an der alles haengt, keine ist.
+fn entry_secret(buf: u64, max: u64) -> u64 {
+    let i: u64 = entry(buf, max)
+    s(i, D_AXF, g(i, D_AXF) | AXF_SECRET)
+    return i
+}
+
+fn set_secret(i: u64, on: bool) {
+    if i >= nwd {
+        return
+    }
+    if on {
+        s(i, D_AXF, g(i, D_AXF) | AXF_SECRET)
+    } else {
+        s(i, D_AXF, g(i, D_AXF) & ~AXF_SECRET)
+    }
+    s_axdirty = 1
+}
+
+// Der zugaengliche Name, wenn der sichtbare Text keiner ist.
+fn ax_name(i: u64, p: u64) {
+    if i >= nwd {
+        return
+    }
+    s(i, D_AXN, p)
+    s_axdirty = 1
+}
+
 fn list(blob: u64, rows: u64) -> u64 {
-    let i: u64 = add(K_LIST, blob, 0, rows * (wlibc.PX_UI + 5) + 4, true)
+    let i: u64 = add(K_LIST, blob, 0, rows * zeilen_hoehe() + wlibc.sc(4),
+        true)
     s(i, D_VAL, 0)
     s(i, D_A, 0)
     count_rows(i)
@@ -872,7 +1046,8 @@ fn list(blob: u64, rows: u64) -> u64 {
 // Rueckrufe -- die Sprache hat keine Funktionszeiger, und ein
 // Zeilenpuffer ist das, was ein Dateimanager ohnehin baut.
 fn table(blob: u64, rows: u64, cols: u64, breiten: u64) -> u64 {
-    let i: u64 = add(K_TABLE, blob, 0, rows * (wlibc.PX_UI + 5) + 24, true)
+    let i: u64 = add(K_TABLE, blob, 0, rows * zeilen_hoehe() + wlibc.sc(24),
+        true)
     s(i, D_C, cols)
     s(i, D_D, breiten)
     s(i, D_VAL, 0)
@@ -882,31 +1057,157 @@ fn table(blob: u64, rows: u64, cols: u64, breiten: u64) -> u64 {
 }
 
 fn tabs(txt: u64) -> u64 {
-    return add(K_TABS, txt, 0, 26, true)
+    return add(K_TABS, txt, 0, wlibc.sc(26), true)
 }
 
+// RUNDE A11Y: DIE MENUELEISTE BEKOMMT DEN FOKUS.
+//
+// Sie war das einzige Bedienelement dieser Bibliothek, das per Maus
+// bedienbar war und per Tastatur NICHT -- `add(..., false)`. Wer keine
+// Maus benutzen kann, kam damit an kein einziges Menue dieses Systems.
+// Das ist keine Feinheit, das ist der Unterschied zwischen bedienbar
+// und nicht bedienbar.
 fn menubar(txt: u64) -> u64 {
-    return add(K_MENUBAR, txt, 0, 22, false)
+    return add(K_MENUBAR, txt, 0, wlibc.sc(22), true)
 }
 
 fn choice(txt: u64, sel: u64) -> u64 {
-    let i: u64 = add(K_CHOICE, txt, 0, 24, true)
+    let i: u64 = add(K_CHOICE, txt, 0, wlibc.sc(24), true)
     s(i, D_VAL, sel)
     return i
 }
 
 fn sep() -> u64 {
-    return add(K_SEP, 0, 0, 5, false)
+    return add(K_SEP, 0, 0, wlibc.sc(5), false)
 }
 
 fn scrollarea(rows: u64, sicht: u64) -> u64 {
-    let i: u64 = add(K_SCROLL, 0, 14, 0, false)
+    let i: u64 = add(K_SCROLL, 0, wlibc.sc(14), 0, false)
     s(i, D_A, rows)
     s(i, D_B, sicht)
     return i
 }
 
 // ------------------------------------------------------- der Zustand
+
+// ================================================== RUNDE A11Y
+//
+// DIE NATUERLICHE MINDESTGROESSE, AUS DER SCHRIFT GERECHNET.
+//
+// Sie ist der Kern der Zusage "bei 150 Prozent ist keine Beschriftung
+// abgeschnitten". Sie wird bei jedem Anlegen und bei jedem `set_text`
+// neu gerechnet, in der Schriftgroesse, die JETZT gilt -- und die
+// Anordnung nimmt sie als Untergrenze (`place`).
+//
+// Warum je Art eine eigene Rechnung: der Platz um den Text herum ist je
+// Art ein anderer. Ein Kaestchen hat sein Quadrat davor, ein Auswahlfeld
+// sein Dreieck dahinter, ein Reiter seine Zwischenraeume. Eine
+// gemeinsame Zahl waere fuer die Haelfte zu klein und fuer die andere
+// Haelfte zu gross.
+fn zeilen_breite(p: u64) -> u64 {
+    var breit: u64 = 0
+    var k: u64 = 0
+    while k < 32 {
+        let q: u64 = row_at(p, k)
+        if q == 0 {
+            k = 32
+        } else {
+            let w: u64 = wlibc.text_w(wlibc.F_UI, wlibc.px_ui(), q,
+                row_len(q))
+            if w > breit {
+                breit = w
+            }
+            k = k + 1
+        }
+    }
+    return breit
+}
+
+fn calc_min(i: u64) {
+    let k: u64 = g(i, D_KIND)
+    let p: u64 = g(i, D_TEXT)
+    let th: u64 = wlibc.text_h(wlibc.px_ui())
+    var mw: u64 = 0
+    var mh: u64 = 0
+    if k == K_LABEL {
+        mw = wlibc.text_w(wlibc.F_UI, wlibc.px_ui(), p, tlen(p))
+        mh = th
+    } else if k == K_BUTTON {
+        mw = wlibc.text_w(wlibc.F_UI, wlibc.px_ui(), p, tlen(p))
+            + wlibc.sc(16)
+        mh = th + wlibc.sc(6)
+    } else if k == K_CHECK {
+        mw = wlibc.sc(14) + wlibc.sc(6)
+            + wlibc.text_w(wlibc.F_UI, wlibc.px_ui(), p, tlen(p))
+        mh = th + wlibc.sc(4)
+    } else if k == K_ENTRY {
+        mw = wlibc.sc(60)
+        mh = th + wlibc.sc(6)
+    } else if k == K_LIST {
+        mw = wlibc.sc(60)
+        mh = zeilen_hoehe() + wlibc.sc(4)
+    } else if k == K_TABLE {
+        mw = wlibc.sc(60)
+        mh = 2 * zeilen_hoehe() + wlibc.sc(8)
+    } else if k == K_TABS {
+        // ALLE Reiter nebeneinander -- ein Reiter, der aus dem Kasten
+        // faellt, ist unerreichbar, und die Pfeiltasten helfen nur dem,
+        // der ihn schon sieht.
+        var t: u64 = 0
+        while t < 8 {
+            let b: u64 = tab_breite(i, t)
+            if b == 0 {
+                t = 8
+            } else {
+                mw = mw + b
+                t = t + 1
+            }
+        }
+        mh = th + wlibc.sc(8)
+    } else if k == K_MENUBAR {
+        var m: u64 = 0
+        while m < 8 {
+            let q: u64 = row_at(p, m)
+            if q == 0 {
+                m = 8
+            } else {
+                mw = mw + wlibc.text_w(wlibc.F_UI, wlibc.px_ui(), q,
+                    row_len(q)) + wlibc.sc(16)
+                m = m + 1
+            }
+        }
+        mh = th + wlibc.sc(4)
+    } else if k == K_CHOICE {
+        mw = zeilen_breite(p) + wlibc.sc(28)
+        mh = th + wlibc.sc(6)
+    } else if k == K_SCROLL {
+        mw = wlibc.sc(14)
+        mh = 0
+    }
+    s(i, D_MINW, mw)
+    s(i, D_MINH, mh)
+}
+
+fn min_w(i: u64) -> u64 {
+    return g(i, D_MINW)
+}
+
+fn min_h(i: u64) -> u64 {
+    return g(i, D_MINH)
+}
+
+// Wie viele Reiter es gibt -- der Testlaeufer zaehlt damit nach, dass
+// er wirklich jeden erreicht hat.
+fn tab_count(i: u64) -> u64 {
+    var t: u64 = 0
+    while t < 8 {
+        if tab_breite(i, t) == 0 {
+            return t
+        }
+        t = t + 1
+    }
+    return 8
+}
 
 fn value(i: u64) -> u64 {
     return g(i, D_VAL)
@@ -917,6 +1218,7 @@ fn set_value(i: u64, v: u64) {
         return
     }
     s(i, D_VAL, v)
+    s_axdirty = 1
     dirty_wd(i)
 }
 
@@ -926,6 +1228,8 @@ fn text_of(i: u64) -> u64 {
 
 fn set_text(i: u64, p: u64) {
     s(i, D_TEXT, p)
+    calc_min(i)
+    s_axdirty = 1
     if g(i, D_KIND) == K_LIST || g(i, D_KIND) == K_TABLE {
         count_rows(i)
         if g(i, D_VAL) >= g(i, D_A) {
@@ -950,6 +1254,7 @@ fn set_cols(i: u64, n: u64, breiten: u64) {
 }
 
 fn enable(i: u64, on: bool) {
+    s_axdirty = 1
     if on {
         s(i, D_FLAGS, g(i, D_FLAGS) & ~F_OFF)
     } else {
@@ -971,6 +1276,7 @@ fn show(i: u64, on: bool) {
     if i >= nwd {
         return
     }
+    s_axdirty = 1
     if on {
         s(i, D_FLAGS, g(i, D_FLAGS) & ~F_HIDE)
     } else {
@@ -1009,7 +1315,39 @@ fn set_focus(i: u64) {
         dirty_wd(s_focus - 1)
     }
     s_focus = i + 1
+    s_axdirty = 1
+    if s_nvisit < 64 {
+        s_visit[(s_nvisit) as usize] = i
+        s_nvisit = s_nvisit + 1
+    }
     dirty_wd(i)
+}
+
+// Wie viele Fokuswechsel es gab und wohin sie gingen.
+fn visits() -> u64 {
+    return s_nvisit
+}
+
+fn visit_at(k: u64) -> u64 {
+    if k >= s_nvisit || k >= 64 {
+        return MAXWD
+    }
+    return s_visit[(k) as usize]
+}
+
+// Wie viele Bedienelemente ueberhaupt fokussierbar sind -- die Zahl,
+// gegen die der Testlaeufer die Spur haelt.
+fn focusables() -> u64 {
+    var n: u64 = 0
+    var i: u64 = 0
+    while i < nwd {
+        if (g(i, D_FLAGS) & (F_HIDE | F_OFF)) == 0
+            && (g(i, D_FLAGS) & F_FOCUSABLE) != 0 {
+            n = n + 1
+        }
+        i = i + 1
+    }
+    return n
 }
 
 fn fired_kind() -> u64 {
@@ -1116,7 +1454,7 @@ fn col_len(q: u64, rest: u64) -> u64 {
 }
 
 fn zeilen_hoehe() -> u64 {
-    return wlibc.PX_UI + 5
+    return wlibc.px_ui() + wlibc.sc(5)
 }
 
 // ==================================================================
@@ -1202,22 +1540,22 @@ fn paint_button(i: u64) {
     if (g(i, D_FLAGS) & F_OFF) != 0 {
         farbe = wlibc.theme(wlibc.T_DIM)
     }
-    let grund: u64 = y + (bh + wlibc.ascent_of(wlibc.F_UI, wlibc.PX_UI)) / 2
-    put_text(wlibc.F_UI, wlibc.PX_UI, x, grund, bw, g(i, D_TEXT),
+    let grund: u64 = y + (bh + wlibc.ascent_of(wlibc.F_UI, wlibc.px_ui())) / 2
+    put_text(wlibc.F_UI, wlibc.px_ui(), x, grund, bw, g(i, D_TEXT),
         tlen(g(i, D_TEXT)), farbe, 1)
     focus_ring(i)
 }
 
 fn paint_label(i: u64) {
-    let grund: u64 = g(i, D_Y) + wlibc.ascent_of(wlibc.F_UI, wlibc.PX_UI)
-    put_text(wlibc.F_UI, wlibc.PX_UI, g(i, D_X), grund, g(i, D_W),
+    let grund: u64 = g(i, D_Y) + wlibc.ascent_of(wlibc.F_UI, wlibc.px_ui())
+    put_text(wlibc.F_UI, wlibc.px_ui(), g(i, D_X), grund, g(i, D_W),
         g(i, D_TEXT), tlen(g(i, D_TEXT)), wlibc.theme(wlibc.T_FG), 0)
 }
 
 fn paint_check(i: u64) {
     let x: u64 = g(i, D_X)
     let y: u64 = g(i, D_Y)
-    let k: u64 = 14
+    let k: u64 = wlibc.sc(14)
     let oy: u64 = y + sub(g(i, D_H), k) / 2
     wlibc.rect(x, oy, k, k, wlibc.theme(wlibc.T_ENTRY))
     wlibc.frame(x, oy, k, k, wlibc.theme(wlibc.T_LINE))
@@ -1239,8 +1577,9 @@ fn paint_check(i: u64) {
         }
     }
     let grund: u64 = y + (g(i, D_H)
-        + wlibc.ascent_of(wlibc.F_UI, wlibc.PX_UI)) / 2
-    put_text(wlibc.F_UI, wlibc.PX_UI, x + k + 6, grund, g(i, D_W),
+        + wlibc.ascent_of(wlibc.F_UI, wlibc.px_ui())) / 2
+    put_text(wlibc.F_UI, wlibc.px_ui(), x + k + wlibc.sc(6), grund,
+        sub(g(i, D_W), k + wlibc.sc(6)),
         g(i, D_TEXT), tlen(g(i, D_TEXT)), wlibc.theme(wlibc.T_FG), 0)
     focus_ring(i)
 }
@@ -1254,8 +1593,8 @@ fn paint_check(i: u64) {
 // zwei Textlaeufe statt einem, damit die Farbe wirklich wechselt und
 // nicht nur der Hintergrund.
 fn entry_x(i: u64, at: u64) -> u64 {
-    return g(i, D_X) + 5 + wlibc.text_w(wlibc.F_UI, wlibc.PX_UI,
-        g(i, D_TEXT), at)
+    return g(i, D_X) + wlibc.sc(5) + wlibc.text_w(wlibc.F_UI,
+        wlibc.px_ui(), g(i, D_TEXT), at)
 }
 
 fn paint_entry(i: u64) {
@@ -1267,7 +1606,7 @@ fn paint_entry(i: u64) {
     wlibc.frame(x, y, bw, bh, wlibc.theme(wlibc.T_LINE))
     let p: u64 = g(i, D_TEXT)
     let n: u64 = tlen(p)
-    let grund: u64 = y + (bh + wlibc.ascent_of(wlibc.F_UI, wlibc.PX_UI)) / 2
+    let grund: u64 = y + (bh + wlibc.ascent_of(wlibc.F_UI, wlibc.px_ui())) / 2
     var a: u64 = g(i, D_B)
     var b: u64 = g(i, D_C)
     if a > b {
@@ -1289,14 +1628,14 @@ fn paint_entry(i: u64) {
     }
     // vor der Auswahl, die Auswahl, danach -- drei Laeufe, damit die
     // ausgewaehlten Zeichen ihre eigene Farbe bekommen.
-    var cx: u64 = wlibc.text_at(wlibc.F_UI, wlibc.PX_UI, x + 5, grund, p, a,
-        wlibc.theme(wlibc.T_FG))
+    var cx: u64 = wlibc.text_at(wlibc.F_UI, wlibc.px_ui(),
+        x + wlibc.sc(5), grund, p, a, wlibc.theme(wlibc.T_FG))
     if b > a {
-        cx = wlibc.text_at(wlibc.F_UI, wlibc.PX_UI, entry_x(i, a), grund,
+        cx = wlibc.text_at(wlibc.F_UI, wlibc.px_ui(), entry_x(i, a), grund,
             p + a, b - a, wlibc.theme(wlibc.T_SELFG))
     }
     if n > b {
-        wlibc.text_at(wlibc.F_UI, wlibc.PX_UI, entry_x(i, b), grund, p + b,
+        wlibc.text_at(wlibc.F_UI, wlibc.px_ui(), entry_x(i, b), grund, p + b,
             n - b, wlibc.theme(wlibc.T_FG))
     }
     // Die Einfuegemarke -- nur, wenn das Feld den Fokus hat. Ein Feld,
@@ -1529,7 +1868,7 @@ fn paint_list(i: u64) {
                     // Buchstaben, im Pruefer 49 von 67 Tintenpunkten
                     // falsch, weil dort nicht mehr die Farbe des
                     // Plaettchens hinter ihm stand.
-                    let bw2: u64 = wlibc.text_w(wlibc.F_UI, wlibc.PX_UI,
+                    let bw2: u64 = wlibc.text_w(wlibc.F_UI, wlibc.px_ui(),
                         q, 1)
                     // WEISS WAR FALSCH, UND ZWAR MESSBAR: die Farbe
                     // des Plaettchens kommt aus der Anwendung, und auf
@@ -1538,14 +1877,14 @@ fn paint_list(i: u64) {
                     // Kontrast beider Kandidaten aus und nimmt den
                     // besseren -- dieselbe Rechnung, mit der die
                     // Akzentfarbe ihre Schriftfarbe bekommt.
-                    wlibc.text_at(wlibc.F_UI, wlibc.PX_UI,
+                    wlibc.text_at(wlibc.F_UI, wlibc.px_ui(),
                         x + 5 + sub(14, bw2) / 2, ry + 3 + 12, q, 1,
                         wlibc.theme_on(f))
                 }
                 }
             }
-            wlibc.text_at(wlibc.F_UI, wlibc.PX_UI, x + 6 + ein,
-                ry + wlibc.ascent_of(wlibc.F_UI, wlibc.PX_UI) + 1, q, ln,
+            wlibc.text_at(wlibc.F_UI, wlibc.px_ui(), x + 6 + ein,
+                ry + wlibc.ascent_of(wlibc.F_UI, wlibc.px_ui()) + 1, q, ln,
                 farbe)
         }
         r = r + 1
@@ -1592,8 +1931,8 @@ fn paint_table(i: u64) {
             if c == 0 {
                 hx = cx + table_ein(i)
             }
-            wlibc.text_at(wlibc.F_UI, wlibc.PX_UI, hx,
-                y + 3 + wlibc.ascent_of(wlibc.F_UI, wlibc.PX_UI), q, ln,
+            wlibc.text_at(wlibc.F_UI, wlibc.px_ui(), hx,
+                y + 3 + wlibc.ascent_of(wlibc.F_UI, wlibc.px_ui()), q, ln,
                 wlibc.theme(wlibc.T_FG))
         }
         cx = cx + spalte_breit(i, c)
@@ -1640,7 +1979,7 @@ fn paint_table(i: u64) {
                     // zerteilt, sobald die Spalte mitten in einem
                     // Umlaut endete.
                     let platz: u64 = sub(spalte_breit(i, c), 6)
-                    cl = wlibc.fit(wlibc.F_UI, wlibc.PX_UI, cq, cl, platz)
+                    cl = wlibc.fit(wlibc.F_UI, wlibc.px_ui(), cq, cl, platz)
                     var f2: u64 = farbe
                     if c > 0 && z != g(i, D_VAL) {
                         f2 = wlibc.theme(wlibc.T_DIM)
@@ -1649,8 +1988,8 @@ fn paint_table(i: u64) {
                     if c == 0 {
                         txx = tx + einr
                     }
-                    wlibc.text_at(wlibc.F_UI, wlibc.PX_UI, txx,
-                        ry + wlibc.ascent_of(wlibc.F_UI, wlibc.PX_UI) + 1,
+                    wlibc.text_at(wlibc.F_UI, wlibc.px_ui(), txx,
+                        ry + wlibc.ascent_of(wlibc.F_UI, wlibc.px_ui()) + 1,
                         cq, cl, f2)
                 }
                 tx = tx + spalte_breit(i, c)
@@ -1670,7 +2009,8 @@ fn tab_breite(i: u64, k: u64) -> u64 {
     if q == 0 {
         return 0
     }
-    return wlibc.text_w(wlibc.F_UI, wlibc.PX_UI, q, row_len(q)) + 20
+    return wlibc.text_w(wlibc.F_UI, wlibc.px_ui(), q, row_len(q))
+        + wlibc.sc(20)
 }
 
 // RUNDE I18N: WO EIN REITER LIEGT.
@@ -1725,8 +2065,8 @@ fn paint_tabs(i: u64) {
             } else {
                 wlibc.hline(tx, y + bh - 1, tw, wlibc.theme(wlibc.T_LINE))
             }
-            put_text(wlibc.F_UI, wlibc.PX_UI, tx,
-                y + (bh + wlibc.ascent_of(wlibc.F_UI, wlibc.PX_UI)) / 2, tw,
+            put_text(wlibc.F_UI, wlibc.px_ui(), tx,
+                y + (bh + wlibc.ascent_of(wlibc.F_UI, wlibc.px_ui())) / 2, tw,
                 q, row_len(q), farbe, 1)
             tx = tx + tw
             k = k + 1
@@ -1741,20 +2081,20 @@ fn paint_menubar(i: u64) {
     let x: u64 = g(i, D_X)
     let y: u64 = g(i, D_Y)
     wlibc.rect(x, y, g(i, D_W), g(i, D_H), wlibc.theme(wlibc.T_PANEL))
-    var tx: u64 = x + 4
+    var tx: u64 = x + wlibc.sc(4)
     var k: u64 = 0
     while k < 8 {
         let q: u64 = row_at(g(i, D_TEXT), k)
         if q == 0 {
             k = 8
         } else {
-            let tw: u64 = wlibc.text_w(wlibc.F_UI, wlibc.PX_UI, q,
-                row_len(q)) + 16
+            let tw: u64 = wlibc.text_w(wlibc.F_UI, wlibc.px_ui(), q,
+                row_len(q)) + wlibc.sc(16)
             if k + 1 == g(i, D_VAL) {
                 wlibc.rect(tx, y, tw, g(i, D_H), wlibc.theme(wlibc.T_SEL))
             }
-            put_text(wlibc.F_UI, wlibc.PX_UI, tx,
-                y + (g(i, D_H) + wlibc.ascent_of(wlibc.F_UI, wlibc.PX_UI))
+            put_text(wlibc.F_UI, wlibc.px_ui(), tx,
+                y + (g(i, D_H) + wlibc.ascent_of(wlibc.F_UI, wlibc.px_ui()))
                 / 2, tw, q, row_len(q), wlibc.theme(wlibc.T_FG), 1)
             tx = tx + tw
             k = k + 1
@@ -1772,8 +2112,9 @@ fn paint_choice(i: u64) {
         wlibc.theme(wlibc.T_LINE), false)
     let q: u64 = row_at(g(i, D_TEXT), g(i, D_VAL))
     if q != 0 {
-        put_text(wlibc.F_UI, wlibc.PX_UI, x + 6,
-            y + (bh + wlibc.ascent_of(wlibc.F_UI, wlibc.PX_UI)) / 2, bw, q,
+        put_text(wlibc.F_UI, wlibc.px_ui(), x + wlibc.sc(6),
+            y + (bh + wlibc.ascent_of(wlibc.F_UI, wlibc.px_ui())) / 2,
+            sub(bw, wlibc.sc(28)), q,
             row_len(q), wlibc.theme(wlibc.T_FG), 0)
     }
     // Das Dreieck rechts -- sechs Zeilen, von aussen nach innen.
@@ -1840,8 +2181,8 @@ fn paint_menu(w: u64) {
                     wlibc.theme(wlibc.T_SEL))
                 farbe = wlibc.theme(wlibc.T_SELFG)
             }
-            wlibc.text_at(wlibc.F_UI, wlibc.PX_UI, 8,
-                ry + wlibc.ascent_of(wlibc.F_UI, wlibc.PX_UI) + 1, q,
+            wlibc.text_at(wlibc.F_UI, wlibc.px_ui(), 8,
+                ry + wlibc.ascent_of(wlibc.F_UI, wlibc.px_ui()) + 1, q,
                 row_len(q), farbe)
         }
         k = k + 1
@@ -2137,15 +2478,15 @@ fn on_down(w: u64, x: u64, y: u64, btn: u64) {
         return
     }
     if k == K_MENUBAR {
-        var tx: u64 = g(i, D_X) + 4
+        var tx: u64 = g(i, D_X) + wlibc.sc(4)
         var t: u64 = 0
         while t < 8 {
             let q: u64 = row_at(g(i, D_TEXT), t)
             if q == 0 {
                 t = 8
             } else {
-                let tw: u64 = wlibc.text_w(wlibc.F_UI, wlibc.PX_UI, q,
-                    row_len(q)) + 16
+                let tw: u64 = wlibc.text_w(wlibc.F_UI, wlibc.px_ui(), q,
+                    row_len(q)) + wlibc.sc(16)
                 if x >= tx && x < tx + tw {
                     s(i, D_VAL, t + 1)
                     dirty_wd(i)
@@ -2296,6 +2637,9 @@ fn decode(c: u64) -> u64 {
         }
         if c == 68 {
             return KEY_LEFT
+        }
+        if c == 90 {
+            return KEY_BACKTAB
         }
         if c == 72 {
             return KEY_HOME
@@ -2551,6 +2895,14 @@ fn on_key(w: u64, c: u64) {
         next_focus(w, false)
         return
     }
+    // RUNDE A11Y: UMSCHALT-TAB GEHT RUECKWAERTS. Die Schleife
+    // rueckwaerts gab es schon (`next_focus(w, true)`) -- sie war nur
+    // von keiner Taste aus erreichbar, weil die Tastatur Umschalt-Tab
+    // nicht von Tab unterschied.
+    if k == KEY_BACKTAB {
+        next_focus(w, true)
+        return
+    }
     let i: u64 = focus_id()
     if i >= MAXWD || g(i, D_WIN) != w {
         return
@@ -2625,9 +2977,75 @@ fn on_key(w: u64, c: u64) {
     if kind == K_CHOICE {
         if k == KEY_ENTER || k == 32 {
             fire(i, K_CHOICE, 0x1000, w)
+            return
+        }
+        // RUNDE A11Y: die Pfeiltasten waehlen, ohne aufzuklappen. Ein
+        // Auswahlfeld, das man nur ueber ein Menue bedienen kann, ist
+        // fuer den, der die Maus nicht benutzt, zwei Schritte zu weit.
+        if k == KEY_DOWN && row_at(g(i, D_TEXT), g(i, D_VAL) + 1) != 0 {
+            s(i, D_VAL, g(i, D_VAL) + 1)
+            dirty_wd(i)
+            s_axdirty = 1
+            fire(i, K_CHOICE, g(i, D_VAL), w)
+        } else if k == KEY_UP && g(i, D_VAL) > 0 {
+            s(i, D_VAL, g(i, D_VAL) - 1)
+            dirty_wd(i)
+            s_axdirty = 1
+            fire(i, K_CHOICE, g(i, D_VAL), w)
         }
         return
     }
+    // RUNDE A11Y: DIE MENUELEISTE PER TASTATUR.
+    //
+    // Enter, Leertaste oder Pfeil nach unten klappt das Menue auf, das
+    // gerade gewaehlt ist; die Pfeiltasten links und rechts gehen
+    // durch die Eintraege. Vorher gab es keinen einzigen Weg dorthin,
+    // der ohne Maus auskam.
+    if kind == K_MENUBAR {
+        let anz: u64 = menu_count(i)
+        if anz == 0 {
+            return
+        }
+        var v: u64 = g(i, D_VAL)
+        if v == 0 {
+            v = 1
+        }
+        if k == KEY_RIGHT && v < anz {
+            s(i, D_VAL, v + 1)
+            dirty_wd(i)
+            s_axdirty = 1
+        } else if k == KEY_LEFT && v > 1 {
+            s(i, D_VAL, v - 1)
+            dirty_wd(i)
+            s_axdirty = 1
+        } else if k == KEY_ENTER || k == 32 || k == KEY_DOWN {
+            s(i, D_VAL, v)
+            dirty_wd(i)
+            fire(i, K_MENUBAR, 0x1000 + (v - 1), w)
+        } else if k == KEY_ESC {
+            s(i, D_VAL, 0)
+            dirty_wd(i)
+        }
+        return
+    }
+    // RUNDE A11Y: ESC BRICHT AB -- IN JEDEM FENSTER, NICHT NUR IM
+    // MENUE. In einem Dialog ist das die Absage.
+    if k == KEY_ESC && w == dl_win {
+        dl_state = 3
+        return
+    }
+}
+
+// Wie viele Eintraege eine Menueleiste hat.
+fn menu_count(i: u64) -> u64 {
+    var t: u64 = 0
+    while t < 8 {
+        if row_at(g(i, D_TEXT), t) == 0 {
+            return t
+        }
+        t = t + 1
+    }
+    return 8
 }
 
 // ==================================================================
@@ -2644,6 +3062,12 @@ fn on_key(w: u64, c: u64) {
 // Fenstertyp OHNE Zierrat waere die Antwort darauf; er steht in
 // docs/ROUNDK15.md unter dem, was offen bleibt.
 
+// RUNDE A11Y: DER TITEL LIEGT ALS MODUL-STATIC UND NICHT ALS LOKALES
+// FELD. Seit der Fensterknoten des Baumes den Titelzeiger BEHAELT,
+// waere ein lokales Feld ein Zeiger in einen Rahmen, den es beim
+// Lesen nicht mehr gibt -- Firn faengt das ab ("the address of the
+// local escapes"), und es hat recht damit.
+static mut mn_titel: [u8; 6] = "Menue\0"
 static mut mn_win: u64 = 0xFFFFFFFFFFFFFFFF
 static mut mn_res: u64 = 0xFFFFFFFFFFFFFFFF
 
@@ -2651,14 +3075,13 @@ fn menu_open(owner: u64, sx: u64, sy: u64, items: u64, n: u64) -> u64 {
     if mn_win != 0xFFFFFFFFFFFFFFFF {
         return MAXWN
     }
-    var titel: [u8; 6] = "Menue\0"
     let zh: u64 = zeilen_hoehe() + 2
     var bw: u64 = 60
     var k: u64 = 0
     while k < n {
         let q: u64 = row_at(items, k)
         if q != 0 {
-            let tw: u64 = wlibc.text_w(wlibc.F_UI, wlibc.PX_UI, q,
+            let tw: u64 = wlibc.text_w(wlibc.F_UI, wlibc.px_ui(), q,
                 row_len(q)) + 24
             if tw > bw {
                 bw = tw
@@ -2677,7 +3100,7 @@ fn menu_open(owner: u64, sx: u64, sy: u64, items: u64, n: u64) -> u64 {
     if x + bw + 4 > wlibc.screen_w() {
         x = sub(wlibc.screen_w(), bw + 4)
     }
-    let w: u64 = new_win(x, y, bw, bh, (&titel[0 as usize]) as u64,
+    let w: u64 = new_win(x, y, bw, bh, (&mn_titel[0 as usize]) as u64,
         NK_MENU)
     if w >= MAXWN {
         return MAXWN
@@ -2770,7 +3193,7 @@ fn dlg_new(titel: u64, frage: u64, anfang: u64, mit_feld: bool) -> u64 {
         ulib.strncpy((&dlgbuf[0 as usize]) as u64, anfang, 158)
     }
     box_v(w, 0, 0, bw, bh, 12, 10)
-    size(0, wlibc.text_h(wlibc.PX_UI))
+    size(0, wlibc.text_h(wlibc.px_ui()))
     dl_lbl = label(frage)
     dl_ent = MAXWD
     if mit_feld {
@@ -2929,11 +3352,264 @@ fn paint_all() -> u64 {
     return gemalt
 }
 
+// ==================================================================
+// RUNDE A11Y -- DER BEDIENELEMENT-BAUM, UND ER ENTSTEHT VON SELBST
+//
+// DAS IST DIE ENTSCHEIDUNG DIESER RUNDE, in einer Funktion.
+//
+// Ein Programm, das diese Bibliothek benutzt, tut fuer seine
+// Zugaenglichkeit NICHTS. Es stellt einen Knopf hin; die Bibliothek
+// weiss, dass ein Knopf ein Knopf ist, wie er heisst, wo er liegt, wie
+// gross er ist, ob er den Fokus hat und ob er abgeschaltet ist -- und
+// schickt das herueber. Es gibt keine zweite Beschreibung, die ein
+// Programmierer pflegen muesste und die nach drei Runden nicht mehr
+// stimmt.
+//
+// GENAU DAS GEHT NUR JETZT. Nachtraeglich haette jedes der
+// fuenfundzwanzig Programme dieses Systems seine eigene Beschreibung
+// bekommen muessen, und jedes neue wieder. So kostet es EINE Stelle.
+//
+// WAS EIN KNOTEN TRAEGT: Rolle, zugaenglicher Name, Wert, Zustand
+// (aktiv, fokussierbar, fokussiert, ausgewaehlt, verborgen, angehakt,
+// geschuetzt), Lage, Groesse und der Elternknoten. Die Lage ist
+// FENSTERBEZOGEN; der Elternknoten ist das Fenster, und dessen Knoten
+// traegt die Bildschirmkoordinaten. Wer daraus die Stelle auf dem
+// Schirm braucht, addiert -- und der Testlaeufer tut genau das und
+// haelt das Ergebnis gegen ein Bildschirmfoto.
+//
+// DER INHALT EINES PASSWORTFELDES IST NICHT DABEI. Er wird hier gar
+// nicht erst abgeschickt (zweite Sperre; die erste steht im Kernel).
+
+fn ax_rolle(k: u64) -> u64 {
+    if k == K_LABEL {
+        return wlibc.AR_LABEL
+    }
+    if k == K_BUTTON {
+        return wlibc.AR_BUTTON
+    }
+    if k == K_CHECK {
+        return wlibc.AR_CHECK
+    }
+    if k == K_ENTRY {
+        return wlibc.AR_ENTRY
+    }
+    if k == K_LIST {
+        return wlibc.AR_LIST
+    }
+    if k == K_TABLE {
+        return wlibc.AR_TABLE
+    }
+    if k == K_TABS {
+        return wlibc.AR_TAB
+    }
+    if k == K_MENUBAR {
+        return wlibc.AR_MENUBAR
+    }
+    if k == K_CHOICE {
+        return wlibc.AR_CHOICE
+    }
+    if k == K_SEP {
+        return wlibc.AR_SEPARATOR
+    }
+    if k == K_SCROLL {
+        return wlibc.AR_SCROLLBAR
+    }
+    return wlibc.AR_NONE
+}
+
+fn ax_win_rolle(w: u64) -> u64 {
+    if ng(w, N_KIND) == NK_MENU {
+        return wlibc.AR_MENU
+    }
+    if ng(w, N_KIND) == NK_DLG {
+        return wlibc.AR_DIALOG
+    }
+    return wlibc.AR_WINDOW
+}
+
+// Der Zustand eines Widgets als Bitmuster.
+fn ax_zustand(i: u64) -> u64 {
+    var z: u64 = 0
+    let f: u64 = g(i, D_FLAGS)
+    if (f & F_OFF) == 0 {
+        z = z | wlibc.AS_ENABLED
+    }
+    if (f & F_FOCUSABLE) != 0 {
+        z = z | wlibc.AS_FOCUSABLE
+    }
+    if (f & F_HIDE) != 0 {
+        z = z | wlibc.AS_HIDDEN
+    }
+    if s_focus == i + 1 {
+        z = z | wlibc.AS_FOCUSED
+    }
+    let k: u64 = g(i, D_KIND)
+    if k == K_CHECK && g(i, D_VAL) != 0 {
+        z = z | wlibc.AS_CHECKED
+    }
+    if (k == K_LIST || k == K_TABLE || k == K_TABS) && g(i, D_VAL) != 0 {
+        z = z | wlibc.AS_SELECTED
+    }
+    if (g(i, D_AXF) & AXF_SECRET) != 0 {
+        z = z | wlibc.AS_PROTECTED
+    }
+    return z
+}
+
+// Ein Oktett in den Satzpuffer.
+fn ab(off: u64, v: u64) {
+    axbuf[(off) as usize] = v as u8
+}
+
+fn aw(off: u64, v: u64) {
+    __mmio_write64(((&axbuf[0 as usize]) as u64 + off) as *mut u64, v)
+}
+
+// Der zugaengliche NAME. Die Reihenfolge ist die Entscheidung:
+//
+//   1. Was das Programm ausdruecklich gesetzt hat (`ax_name`).
+//   2. Bei einem geschuetzten Feld: NICHTS WEITER. Der Inhalt bleibt
+//      hier, und zwar bevor er abgeschickt wird.
+//   3. Sonst der sichtbare Text -- bei einer Liste oder Tabelle die
+//      AUSGEWAEHLTE Zeile, denn die ist es, die ein Leser vorliest.
+fn ax_namensquelle(i: u64) -> u64 {
+    if g(i, D_AXN) != 0 {
+        return g(i, D_AXN)
+    }
+    if (g(i, D_AXF) & AXF_SECRET) != 0 {
+        return 0
+    }
+    let k: u64 = g(i, D_KIND)
+    if k == K_LIST {
+        return row_at(g(i, D_TEXT), g(i, D_VAL))
+    }
+    if k == K_TABLE {
+        return row_at(g(i, D_TEXT), g(i, D_VAL) + 1)
+    }
+    if k == K_TABS || k == K_CHOICE {
+        return row_at(g(i, D_TEXT), g(i, D_VAL))
+    }
+    return g(i, D_TEXT)
+}
+
+// Den Namen in den Satz schreiben -- hoechstens AX_NAME_MAX-1 Oktette,
+// und ein Umbruch beendet ihn (eine Liste liefert ihre Zeile mit dem
+// Rest dahinter).
+fn ax_name_kopieren(off: u64, p: u64) {
+    var k: u64 = 0
+    if p != 0 {
+        while k + 1 < wlibc.AX_NAME_MAX {
+            let c: u64 = (*((p + k) as *mut u8)) as u64
+            if c == 0 || c == 10 || c == 9 {
+                k = wlibc.AX_NAME_MAX
+            } else {
+                ab(off + k, c)
+                k = k + 1
+            }
+        }
+    }
+    var z: u64 = k
+    if z >= wlibc.AX_NAME_MAX {
+        z = wlibc.AX_NAME_MAX - 1
+    }
+    while z < wlibc.AX_NAME_MAX {
+        ab(off + z, 0)
+        z = z + 1
+    }
+}
+
+fn ax_satz(n: u64, rolle: u64, zustand: u64, fenster: u64, eltern: u64,
+    x: u64, y: u64, w: u64, h: u64, wert: u64, name: u64) {
+    let off: u64 = n * wlibc.AX_NODE
+    aw(off, rolle | (zustand << 8) | (fenster << 16) | (eltern << 24))
+    aw(off + 8, (x & 0xFFFF) | ((y & 0xFFFF) << 16)
+        | ((w & 0xFFFF) << 32) | ((h & 0xFFFF) << 48))
+    aw(off + 16, wert)
+    ax_name_kopieren(off + wlibc.AX_NAME_OFF, name)
+}
+
+fn ax_nodes() -> u64 {
+    return s_axnodes
+}
+
+fn ax_pushes() -> u64 {
+    return s_axpushes
+}
+
+// Den ganzen Baum herueberschieben. Bis zu 64 Saetze je Aufruf -- so
+// viele passen in den Zwischenspeicher des Kernels.
+fn ax_flush() -> u64 {
+    if s_axdirty == 0 {
+        return s_axnodes
+    }
+    s_axdirty = 0
+    if !wlibc.a11y_on() {
+        return 0
+    }
+    let _b: u64 = wlibc.ax_begin()
+    var n: u64 = 0
+    var ganz: u64 = 0
+    var w: u64 = 0
+    while w < nwn {
+        if ng(w, N_H) != 0 {
+            // Der Fensterknoten. Seine Lage ist die auf dem BILDSCHIRM.
+            ax_satz(n, ax_win_rolle(w), wlibc.AS_ENABLED, w, 0xFF,
+                ng(w, N_X), ng(w, N_Y), ng(w, N_W), ng(w, N_HH), w,
+                ng(w, N_TITLE))
+            let vater: u64 = ganz
+            n = n + 1
+            ganz = ganz + 1
+            if n == 64 {
+                let _s: u64 = wlibc.ax_send((&axbuf[0 as usize]) as u64, n)
+                n = 0
+            }
+            var i: u64 = 0
+            while i < nwd {
+                if g(i, D_WIN) == w && (g(i, D_FLAGS) & F_HIDE) == 0 {
+                    ax_satz(n, ax_rolle(g(i, D_KIND)), ax_zustand(i), w,
+                        vater, g(i, D_X), g(i, D_Y), g(i, D_W), g(i, D_H),
+                        g(i, D_VAL), ax_namensquelle(i))
+                    // DIE ZWEITE SPERRE, UND SIE STEHT HIER: ein
+                    // geschuetztes Feld bekommt die Rolle
+                    // "Passwortfeld" und den Wert NULL. Sein Inhalt
+                    // verlaesst diesen Prozess nicht.
+                    if (g(i, D_AXF) & AXF_SECRET) != 0 {
+                        let off: u64 = n * wlibc.AX_NODE
+                        aw(off, wlibc.AR_PASSWORD | (ax_zustand(i) << 8)
+                            | (w << 16) | (vater << 24))
+                        aw(off + 16, 0)
+                    }
+                    n = n + 1
+                    ganz = ganz + 1
+                    if n == 64 {
+                        let _s2: u64 = wlibc.ax_send(
+                            (&axbuf[0 as usize]) as u64, n)
+                        n = 0
+                    }
+                }
+                i = i + 1
+            }
+        }
+        w = w + 1
+    }
+    if n != 0 {
+        let _s3: u64 = wlibc.ax_send((&axbuf[0 as usize]) as u64, n)
+    }
+    let _e: u64 = wlibc.ax_end()
+    s_axnodes = ganz
+    s_axpushes = s_axpushes + 1
+    return ganz
+}
+
 fn step() -> u64 {
     s_fired = 0
     s_fkind = 0
     s_findex = 0
     s_ticks = s_ticks + 1
+    // RUNDE A11Y: der Baum wird nachgezogen, BEVOR die Ereignisse
+    // dieses Durchlaufs kommen -- so sieht ein Leser den Stand, den
+    // der Benutzer gerade sieht, und nicht den davor.
+    let _ax: u64 = ax_flush()
     var etwas: bool = false
     var w: u64 = 0
     while w < nwn {
@@ -3061,7 +3737,7 @@ fn row_h() -> u64 {
 fn text_x(i: u64) -> u64 {
     let k: u64 = g(i, D_KIND)
     if k == K_BUTTON {
-        let tw: u64 = wlibc.text_w(wlibc.F_UI, wlibc.PX_UI, g(i, D_TEXT),
+        let tw: u64 = wlibc.text_w(wlibc.F_UI, wlibc.px_ui(), g(i, D_TEXT),
             tlen(g(i, D_TEXT)))
         return g(i, D_X) + sub(g(i, D_W), tw) / 2
     }
@@ -3076,7 +3752,7 @@ fn text_x(i: u64) -> u64 {
 
 fn text_base(i: u64) -> u64 {
     let k: u64 = g(i, D_KIND)
-    let asc: u64 = wlibc.ascent_of(wlibc.F_UI, wlibc.PX_UI)
+    let asc: u64 = wlibc.ascent_of(wlibc.F_UI, wlibc.px_ui())
     if k == K_LABEL {
         return g(i, D_Y) + asc
     }
@@ -3121,7 +3797,7 @@ fn text_bg(i: u64) -> u64 {
 fn row_base(i: u64, r: u64) -> u64 {
     let zh: u64 = zeilen_hoehe()
     return g(i, D_Y) + 2 + r * zh
-        + wlibc.ascent_of(wlibc.F_UI, wlibc.PX_UI) + 1
+        + wlibc.ascent_of(wlibc.F_UI, wlibc.px_ui()) + 1
 }
 
 fn row_x(i: u64) -> u64 {
@@ -3140,7 +3816,7 @@ fn icon_y(i: u64, r: u64) -> u64 {
 // Wo der Buchstabe auf dem Plaettchen anfaengt und auf welcher
 // Grundlinie er sitzt -- fuer die Messung, genau die Ausdruecke von oben.
 fn icon_letter_x(i: u64, p: u64) -> u64 {
-    return g(i, D_X) + 5 + sub(14, wlibc.text_w(wlibc.F_UI, wlibc.PX_UI,
+    return g(i, D_X) + 5 + sub(14, wlibc.text_w(wlibc.F_UI, wlibc.px_ui(),
         p, 1)) / 2
 }
 
@@ -3161,12 +3837,12 @@ fn head_h(i: u64) -> u64 {
 }
 
 fn head_base(i: u64) -> u64 {
-    return g(i, D_Y) + 3 + wlibc.ascent_of(wlibc.F_UI, wlibc.PX_UI)
+    return g(i, D_Y) + 3 + wlibc.ascent_of(wlibc.F_UI, wlibc.px_ui())
 }
 
 fn cell_base(i: u64, r: u64) -> u64 {
     return g(i, D_Y) + head_h(i) + 1 + r * zeilen_hoehe()
-        + wlibc.ascent_of(wlibc.F_UI, wlibc.PX_UI) + 1
+        + wlibc.ascent_of(wlibc.F_UI, wlibc.px_ui()) + 1
 }
 
 fn cell_x(i: u64, c: u64) -> u64 {
