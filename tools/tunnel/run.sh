@@ -29,6 +29,7 @@
 # loudly.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
+. tools/lib/qemu.sh          # $QEMU_X86, $OSUM_QEMU_ACCEL
 ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
 FIRNC=${FIRNC:-vendor/firn/bin/firnc}
@@ -225,7 +226,7 @@ EOF
 }
 
 run_osum() { # append, seconds, logfile
-    timeout "$2" qemu-system-x86_64 -kernel "$TMPD/osum.mb" -m 512 \
+    timeout "$2" $QEMU_X86 -kernel "$TMPD/osum.mb" -m 512 \
         -append "$1" -nographic -no-reboot \
         -netdev "socket,id=n0,udp=127.0.0.1:$BPORT,localaddr=127.0.0.1:$QPORT" \
         -device "virtio-net-pci,netdev=n0,mac=52:54:00:aa:bb:cd" \

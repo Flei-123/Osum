@@ -67,6 +67,7 @@
 # Verwendung:  bash tools/tresor/run.sh
 set -uo pipefail
 cd "$(dirname "$0")/../.."
+. tools/lib/qemu.sh          # $QEMU_X86, $OSUM_QEMU_ACCEL
 ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
 
@@ -141,7 +142,7 @@ lauf() {
     local name=$1 img=$2 app=$3
     shift 3
     cp "$img" "$TMPD/live-$name.img"
-    timeout 240 qemu-system-x86_64 -kernel "$TMPD/k0.img" -m 256 \
+    timeout 240 $QEMU_X86 -kernel "$TMPD/k0.img" -m 256 \
         -append "$app" -serial "file:$TMPD/$name.txt" -display none \
         -no-reboot -drive "file=$TMPD/live-$name.img,format=raw,if=ide,index=0" \
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
@@ -152,7 +153,7 @@ lauf() {
 kernlauf() {
     local name=$1 app=$2
     shift 2
-    timeout 240 qemu-system-x86_64 -kernel "$TMPD/k0.img" -m 256 \
+    timeout 240 $QEMU_X86 -kernel "$TMPD/k0.img" -m 256 \
         -append "$app" -serial "file:$TMPD/$name.txt" -display none -no-reboot \
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 "$@" > /dev/null 2>&1
     echo $?

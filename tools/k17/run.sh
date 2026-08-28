@@ -59,6 +59,7 @@
 # Aufruf:  bash tools/k17/run.sh
 set -uo pipefail
 cd "$(dirname "$0")/../.."
+. tools/lib/qemu.sh          # $QEMU_X86, $OSUM_QEMU_ACCEL
 ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
 FIRNC=${FIRNC:-vendor/firn/bin/firnc}
@@ -355,7 +356,7 @@ lauf() { # name kernel kommandozeile [qemu-argumente...]
     shift 3
     cp "$TMPD/root.img" "$TMPD/live-$name.img"
     cp "$TMPD/stick.img" "$TMPD/live2-$name.img"
-    timeout 240 qemu-system-x86_64 -kernel "$img" -m 256 -append "$app" \
+    timeout 240 $QEMU_X86 -kernel "$img" -m 256 -append "$app" \
         -serial "file:$TMPD/$name.txt" -display none -no-reboot -vga std \
         -drive "file=$TMPD/live-$name.img,format=raw,if=ide,index=0" \
         "$@" -device isa-debug-exit,iobase=0xf4,iosize=0x04 > /dev/null 2>&1
@@ -366,7 +367,7 @@ lauf_stick() { # name kernel kommandozeile [weitere qemu-argumente...]
     shift 3
     cp "$TMPD/root.img" "$TMPD/live-$name.img"
     cp "$TMPD/stick.img" "$TMPD/live2-$name.img"
-    timeout 240 qemu-system-x86_64 -kernel "$img" -m 256 -append "$app" \
+    timeout 240 $QEMU_X86 -kernel "$img" -m 256 -append "$app" \
         -serial "file:$TMPD/$name.txt" -display none -no-reboot -vga std \
         -drive "file=$TMPD/live-$name.img,format=raw,if=ide,index=0" \
         "$@" -drive "id=stk,file=$TMPD/live2-$name.img,format=raw,if=none" \
@@ -382,7 +383,7 @@ mauslauf() { # name kernel kommandozeile marke monitordatei [qemu-args...]
     local sock="$TMPD/mon-$name.sock"
     rm -f "$sock" "$TMPD/$name.txt" "$TMPD/$name.rc"
     cp "$TMPD/root.img" "$TMPD/live-$name.img"
-    ( timeout 240 qemu-system-x86_64 -kernel "$img" -m 256 -append "$app" \
+    ( timeout 240 $QEMU_X86 -kernel "$img" -m 256 -append "$app" \
         -serial "file:$TMPD/$name.txt" -display none -no-reboot -vga std \
         -drive "file=$TMPD/live-$name.img,format=raw,if=ide,index=0" \
         -monitor "unix:$sock,server,nowait" \
@@ -415,7 +416,7 @@ tastenlauf() { # name kernel kommandozeile marke -- tasten... -- qemu-args...
     local sock="$TMPD/mon-$name.sock"
     rm -f "$sock" "$TMPD/$name.txt" "$TMPD/$name.rc"
     cp "$TMPD/root.img" "$TMPD/live-$name.img"
-    ( timeout 240 qemu-system-x86_64 -kernel "$img" -m 256 -append "$app" \
+    ( timeout 240 $QEMU_X86 -kernel "$img" -m 256 -append "$app" \
         -serial "file:$TMPD/$name.txt" -display none -no-reboot -vga std \
         -drive "file=$TMPD/live-$name.img,format=raw,if=ide,index=0" \
         -monitor "unix:$sock,server,nowait" \
