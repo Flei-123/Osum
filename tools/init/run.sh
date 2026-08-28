@@ -423,8 +423,15 @@ if [ -n "${wn:-}" ] && [ "$wn" -le 2 ]; then
 else bad "GEGENPROBE waitfirst traegt nicht: ${wn:-?} Starts gegen $zn"; fi
 is "und er meldet sich weiter als 'running', obwohl er tot ist" \
    "$(sp "$WF" sauber 2 tail)" "running"
-hasnot "$WF" "init: herunterfahren" \
-    "und die ctrl-Zeile beendet die Maschine nicht mehr -- init erfaehrt ihr Ende nie"
+# DIE ZAHL, DIE DEN FEHLER AM DIREKTESTEN BENENNT: wieviele Kinder init
+# im ganzen Lauf eingesammelt hat. Mit dem alten `wait4` sind es die
+# ein, zwei, die der SIGKILL beim Herunterfahren noch freilegt -- waehrend
+# des Betriebs kein einziges.
+wr=$(val "$WF" 'init: reaped=[0-9]+')
+zr=$(val "$Z" 'init: reaped=[0-9]+')
+if [ -n "${wr:-}" ] && [ -n "${zr:-}" ] && [ "$wr" -le 2 ] && [ "$zr" -gt "$wr" ]; then
+    ok "und init hat im GANZEN Lauf nur $wr Kinder eingesammelt -- behoben waren es $zr"
+else bad "die Zahl der eingesammelten Kinder trennt die beiden Laeufe nicht (${wr:-?} gegen ${zr:-?})"; fi
 
 echo "== 4. DIE GEGENPROBE ZUM ZIEL: derselbe Baum mit /etc/ziel=grafik =="
 rc=$(run_case grafik "$TMPD/dg.img" "osum $BASE script=sh /t/kurz.sh" 300 -no-reboot)
