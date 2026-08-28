@@ -478,6 +478,17 @@ hat "$A" "12582912" "und die Zahl, die ginge"
 hat "$A" "2-MiB-Fensterplaetze" "und wovon die Schranke kommt"
 hat "$A" "die Karte nimmt diese Zahl nicht an" "die zweite Schranke nennt sich anders"
 hat "$A" "Vielfaches von" "und gibt den Hinweis, der wirklich weiterhilft"
+# UND DIE DRITTE: eine Zahl, die kein Bildschirm ist. Sie nennt nicht nur
+# die falsche Zahl, sondern den Bereich -- sonst weiss der Benutzer zwar,
+# welche seiner beiden Zahlen es zerreisst, aber nicht, wohin damit.
+cp -f "$TMPD/root.img" "$TMPD/r5.img"
+rc=$(lauf_platte unsinn \
+    "osum gfx disp nokbd nosched noproc script=dispctl eigen 4 4" "$TMPD/r5.img")
+num "der Lauf endet sauber" "$rc" eq 21
+U="$TMPD/unsinn.txt"
+hat "$U" "die Zahl liegt ausserhalb" "die dritte Schranke nennt sich wieder anders"
+hat "$U" "Breite 320 .. 8192" "und sie sagt, wohin die Zahl gehoert"
+hat "$U" "Hoehe 200 .. 8192" "fuer beide Richtungen"
 
 # ============================================== 8. die Gegenprobe
 
