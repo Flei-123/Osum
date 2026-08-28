@@ -94,12 +94,13 @@ vorhanden.
 
 | Umgebung | Runden/s | 8192 Runden |
 |---|---:|---:|
-| Osum, `-accel kvm -cpu host`, **ruhige** Maschine | 31 437 | **0,26 s** |
-| Osum, TCG, ruhige Maschine | 4 430 | 1,85 s |
+| Osum, `-accel kvm -cpu host`, `load` 16 (Abschlussmessung) | 30 494 | **0,269 s** |
+| Osum, TCG, `load` 16 | 4 168 | 1,965 s |
+| Osum, KVM, zu Beginn der Runde | 31 437 | 0,26 s |
 | Osum, KVM, **während vier andere Runden liefen** (`load` 17) | 6 150 | 1,33 s |
 | derselbe Wirt, OpenSSL hinter Pythons `hashlib` | 1 768 429 | 0,0046 s |
 
-Aus Zeile 1 folgt der Kostenfaktor **8192**: 0,26 s je Anmeldung ist das
+Aus Zeile 1 folgt der Kostenfaktor **8192**: 0,27 s je Anmeldung ist das
 Budget, auf das die übliche Empfehlung hinausläuft. Aus Zeile 4 folgt die
 unangenehme Zahl: OpenSSL ist **56×** schneller als dieses SHA-256 in
 Firn, ein Angreifer schafft also rund **216 Rateversuche je Sekunde und
@@ -114,7 +115,7 @@ Last gemessen: 3,04 : 1 bis 4,03 : 1).
 | Lauf | KVM | TCG | Faktor |
 |---|---:|---:|---:|
 | Kernel starten und abschalten (`script=id`) | 788 ms | 2013 ms | 2,6× |
-| 8192 PBKDF2-Runden, ruhige Maschine | 0,26 s | 1,85 s | **7,1×** |
+| 8192 PBKDF2-Runden, `load` 16 | 0,269 s | 1,965 s | **7,3×** |
 | 8192 PBKDF2-Runden, `load` 17 | 1,33 s | 2,68 s | 2,0× |
 
 Der Auftrag nennt 4,6×. Auf reiner Rechenlast und ohne Konkurrenz ist es
