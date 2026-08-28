@@ -245,6 +245,19 @@ const PAGE: u64 = 4096
 // Sekunde und damit weit mehr, als eine SATA-Platte je braucht.
 const SPIN_LIMIT: u64 = 1000000
 const RESET_LIMIT: u64 = 2000000
+// WIE LANGE EIN LEERER PORT KOSTEN DARF. DET == 0 in PxSSTS heisst
+// "ueberhaupt kein Geraet erkannt" -- nicht "noch nicht ausgehandelt",
+// das waere 1. Ein Port, der nach dieser kurzen Spanne immer noch
+// nichts gesehen hat, hat nichts angesteckt, und weiter zu warten
+// kostet nur Zeit.
+//
+// DIE ZAHL IST GEMESSEN UND NICHT GERATEN: die Gegenprobe "Controller
+// ohne Platte" hat mit der vollen Schranke fuer alle sechs Ports des
+// q35-Controllers ueber zwei Minuten gebraucht -- unter KVM ist jeder
+// dieser Registerzugriffe ein VM-Austritt. Ein Rechner, der beim
+// Starten eine Minute auf leere SATA-Anschluesse wartet, sieht fuer den
+// Benutzer aus wie einer, der haengt.
+const PROBE_LIMIT: u64 = 100000
 
 const MODE_NONE: u64 = 0
 const MODE_AHCI: u64 = 1
@@ -655,11 +668,20 @@ fn link_up(state: u64, p: u64) -> bool {
     var linked: bool = false
     while spin < RESET_LIMIT {
         let ssts: u64 = prd(state, p, P_SSTS)
-        if (ssts & 0xF) == DET_PRESENT && ((ssts >> 8) & 0xF) == IPM_ACTIVE {
+        let det: u64 = ssts & 0xF
+        if det == DET_PRESENT && ((ssts >> 8) & 0xF) == IPM_ACTIVE {
             linked = true
             spin = RESET_LIMIT
         } else {
-            spin = spin + 1
+            // Der Schnellausstieg fuer den leeren Anschluss: DET steht
+            // immer noch auf 0, es ist also nicht einmal etwas erkannt
+            // worden. Ein Port, an dem ausgehandelt WIRD, meldet
+            // laengst 1 und laeuft die volle Schranke weiter.
+            if det == 0 && spin > PROBE_LIMIT {
+                spin = RESET_LIMIT
+            } else {
+                spin = spin + 1
+            }
         }
     }
     if !linked {
