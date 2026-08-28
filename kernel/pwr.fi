@@ -164,6 +164,7 @@
 import kstate
 import serial
 import acpi
+import msr
 import cpu
 import fb
 
@@ -303,23 +304,43 @@ fn cur_profile(state: u64) -> u64 {
 
 // ---------------------------------------------------------------- MSR
 
-// Dieselbe Bauart wie in `kernel/user.fi` und `kernel/hv.fi`: der
-// Prozessor liefert edx:eax, und die Sprache sagt das seit Runde 68 auch
-// so. KEIN Schutz gegen #GP -- der ist hier nicht noetig und waere eine
-// Luege ueber die Messung: `tools/k18/msrprobe.s` hat nachgewiesen, dass
-// auf diesem Wirt KEINES dieser Register eine Schutzverletzung ausloest.
-// Auf einer Maschine, die eines davon nicht hat, waere ein Faengerpfad
-// noetig; er stuende dann hier und nicht als Behauptung im Bericht.
-fn rdmsr(index: u64) -> u64 {
-    var lo: u64 = 0
-    var hi: u64 = 0
-    asm("rdmsr", in("rcx") index, out("rax") & lo, out("rdx") & hi)
-    return (hi << 32) | (lo & 0xFFFFFFFF)
+// RUNDE KVMFIX -- UND HIER STAND DREI RUNDEN LANG EIN FALSCHER SATZ.
+//
+// Er lautete: "KEIN Schutz gegen #GP -- der ist hier nicht noetig und
+// waere eine Luege ueber die Messung: `tools/k18/msrprobe.s` hat
+// nachgewiesen, dass auf diesem Wirt KEINES dieser Register eine
+// Schutzverletzung ausloest." Der Nachweis stimmte. Der Schluss daraus
+// war falsch, weil "dieser Wirt" QEMU/TCG war -- Software, die jeden
+// `rdmsr` annimmt. Auf derselben Maschine MIT /dev/kvm laeuft derselbe
+// Code auf einem AMD EPYC, und IA32_TEMPERATURE_TARGET (0x1A2) ist ein
+// Intel-Register:
+//
+//   -accel tcg -> rc=21, "kernel: done"
+//   -accel kvm -> rc=63, *** EXCEPTION 13 #GP  rip=0x131ef5  rcx=0x1a2
+//
+// Der Faengerpfad steht jetzt in `kernel/msr.fi` und `isr.s`. Von hier
+// aus aendert sich fast nichts: ein Register, das die Maschine nicht
+// hat, liest sich als Null -- genau das, was QEMU vorher getan hat, und
+// genau das, was der Rest dieser Datei ohnehin als "die Maschine sagt
+// dazu nichts" behandelt (`PW_RATIOSRC` bleibt 0, `/bin/power` schreibt
+// "Rueckfall"). Der Unterschied ist, dass der Kernel es jetzt WEISS: was
+// zurueckgewiesen wurde, zaehlt `PW_MSRGP`, und `probe` sagt die Zahl,
+// wenn sie nicht null ist. Eine Null aus einem Register und eine Null,
+// weil es das Register nicht gibt, sind zwei verschiedene Dinge, und ein
+// Bericht, der sie nicht unterscheidet, ist ungenau.
+fn rdmsr(state: u64, index: u64) -> u64 {
+    var v: u64 = 0
+    if !msr.rd(state, index, (&v) as u64) {
+        bump(state, PW_MSRGP)
+        return 0
+    }
+    return v
 }
 
-fn wrmsr(index: u64, v: u64) {
-    asm("wrmsr", in("rcx") index, in("rax") v & 0xFFFFFFFF,
-        in("rdx") v >> 32)
+fn wrmsr(state: u64, index: u64, v: u64) {
+    if !msr.wr(state, index, v) {
+        bump(state, PW_MSRGP)
+    }
 }
 
 // -------------------------------------------------------------- CPUID
@@ -396,7 +417,7 @@ fn probe(state: u64) {
     var base: u64 = 16
     var hi: u64 = 24
     var src: u64 = 0
-    let pinfo: u64 = rdmsr(MSR_PLATFORM_INFO)
+    let pinfo: u64 = rdmsr(state, MSR_PLATFORM_INFO)
     if pinfo != 0 {
         let b: u64 = (pinfo >> 8) & 0xFF
         let l: u64 = (pinfo >> 40) & 0xFF
@@ -408,7 +429,7 @@ fn probe(state: u64) {
             c = c | C_PLATINFO
             // Die Turbostufe steht woanders: MSR_TURBO_RATIO_LIMIT,
             // Bits 7:0 = das Hoechste bei einem aktiven Kern.
-            let t: u64 = rdmsr(MSR_TURBO_RATIO_LIMIT) & 0xFF
+            let t: u64 = rdmsr(state, MSR_TURBO_RATIO_LIMIT) & 0xFF
             if t > b {
                 hi = t
             }
@@ -417,7 +438,7 @@ fn probe(state: u64) {
     // HWP kennt die Stufen selbst und genauer. Bits 7:0 = das Hoechste,
     // 15:8 = das Zugesicherte, 31:24 = das Niedrigste.
     if (c & C_HWP) != 0 {
-        let hc: u64 = rdmsr(IA32_HWP_CAPABILITIES)
+        let hc: u64 = rdmsr(state, IA32_HWP_CAPABILITIES)
         if hc != 0 {
             let h: u64 = hc & 0xFF
             let gu: u64 = (hc >> 8) & 0xFF
@@ -434,7 +455,7 @@ fn probe(state: u64) {
     s(state, PW_RATIOSRC, src)
 
     // Die Abschaltschwelle fuer die Temperatur.
-    let tt: u64 = rdmsr(IA32_TEMPERATURE_TARGET)
+    let tt: u64 = rdmsr(state, IA32_TEMPERATURE_TARGET)
     s(state, PW_TJMAX, (tt >> 16) & 0xFF)
 
     // Der Anfangswert von IA32_MISC_ENABLE wird GERETTET. Jede spaetere
@@ -442,7 +463,7 @@ fn probe(state: u64) {
     // andere stehen -- in diesem Register haengen unter anderem der
     // Zustandsautomat von MONITOR (Bit 18) und die Vorablader; wer es
     // ueberschreibt, schaltet Dinge ab, von denen er nichts weiss.
-    s(state, PW_MISCORIG, rdmsr(IA32_MISC_ENABLE))
+    s(state, PW_MISCORIG, rdmsr(state, IA32_MISC_ENABLE))
 
     // Der tiefste C-Zustand, den die Maschine ANBIETET. CPUID Blatt 5,
     // EDX: je vier Bits eine Stufe, C0 in 3:0, C1 in 7:4 und so fort.
@@ -464,6 +485,19 @@ fn probe(state: u64) {
     s(state, PW_CAPS, c)
     s(state, PW_LIMIT, PROF_PERF)
     s(state, PW_READY, 1)
+
+    // RUNDE KVMFIX. Diese Zeile erscheint NUR, wenn wirklich ein
+    // Register zurueckgewiesen wurde. Unter TCG wird keines
+    // zurueckgewiesen, also aendert sich an der Ausgabe der Runden K18
+    // und POWERMON kein Oktett -- ihre Messungen vergleichen weiter
+    // dasselbe. Auf echter Hardware steht hier, wie viele der
+    // Energieregister diese Maschine nicht hat.
+    if g(state, PW_MSRGP) != 0 {
+        var s_gp: [u8; 13] = "pwr: msr-gp=\0"
+        serial.puts((&s_gp[0]) as u64)
+        serial.dec(g(state, PW_MSRGP))
+        serial.nl()
+    }
 }
 
 // ------------------------------------------------- die drei Kodierungen
@@ -545,22 +579,22 @@ fn apply(state: u64) {
     //    BEVOR ein Wunschtakt geschrieben wird, sonst nimmt der
     //    Prozessor ihn gar nicht an.
     let mw: u64 = misc_word(state, prof)
-    wrmsr(IA32_MISC_ENABLE, mw)
+    wrmsr(state, IA32_MISC_ENABLE, mw)
     s(state, PW_MISC, mw)
-    s(state, PW_MISCBACK, rdmsr(IA32_MISC_ENABLE))
+    s(state, PW_MISCBACK, rdmsr(state, IA32_MISC_ENABLE))
 
     // 2. Der Takt. HWP, wenn die Maschine es hat -- sonst der alte Weg.
     if (g(state, PW_CAPS) & C_HWP) != 0 {
-        wrmsr(IA32_PM_ENABLE, 1)
+        wrmsr(state, IA32_PM_ENABLE, 1)
         let hw: u64 = hwp_word(state, prof)
-        wrmsr(IA32_HWP_REQUEST, hw)
+        wrmsr(state, IA32_HWP_REQUEST, hw)
         s(state, PW_HWPREQ, hw)
-        s(state, PW_HWPBACK, rdmsr(IA32_HWP_REQUEST))
+        s(state, PW_HWPBACK, rdmsr(state, IA32_HWP_REQUEST))
     } else {
         let pw: u64 = perfctl_word(state, prof)
-        wrmsr(IA32_PERF_CTL, pw)
+        wrmsr(state, IA32_PERF_CTL, pw)
         s(state, PW_PERFCTL, pw)
-        s(state, PW_PERFBACK, rdmsr(IA32_PERF_CTL))
+        s(state, PW_PERFBACK, rdmsr(state, IA32_PERF_CTL))
     }
 
     // 3. Der Hinweis an die Firmware, wie sie im Zweifel entscheiden
@@ -573,7 +607,7 @@ fn apply(state: u64) {
     if prof == PROF_PERF {
         bias = 0
     }
-    wrmsr(IA32_ENERGY_PERF_BIAS, bias)
+    wrmsr(state, IA32_ENERGY_PERF_BIAS, bias)
 
     // DIE FRIST BIS ZUM ABSCHALTEN DES BILDSCHIRMS HAENGT AM PROFIL.
     // Das ist kein Beiwerk, sondern der sichtbarste Unterschied zwischen
@@ -626,7 +660,7 @@ fn msr_temp(state: u64, out: u64) -> bool {
     if (g(state, PW_CAPS) & C_DTS) == 0 {
         return false
     }
-    let ts: u64 = rdmsr(IA32_THERM_STATUS)
+    let ts: u64 = rdmsr(state, IA32_THERM_STATUS)
     if (ts & 2147483648) == 0 { // Bit 31
         return false
     }
@@ -954,6 +988,10 @@ const PW_TEMPWANT: u64 = 792
 const PW_LASTKEYS: u64 = 800
 // Die Marke, bei der zuletzt nach der Waerme gesehen wurde.
 const PW_LASTTEMP: u64 = 808
+// RUNDE KVMFIX: wie oft ein MSR-Zugriff dieser Datei mit einem #GP
+// zurueckgewiesen wurde. Auf diesem Wirt unter TCG: 0. Unter KVM auf
+// einem AMD EPYC: groesser als 0 -- und genau deshalb gibt es die Zahl.
+const PW_MSRGP: u64 = 816
 
 fn blank(state: u64) {
     if g(state, PW_BLANKED) != 0 {
