@@ -112,13 +112,31 @@ FAS="$TMPD/fas"
 # auf `main` (3389fbd) mit denselben fuenf Namen und derselben Zahl
 # ("70, erwartet eq 75"), mit einem eigenen Arbeitsbaum nachgemessen.
 # Repariert ist er, indem die Ausnahmeliste sagt, was wahr ist.
+#
+# RUNDE DEMUX: DIE LISTE WIRD NICHT MEHR GEPFLEGT, SIE WIRD GELESEN.
+# Der Absatz darueber sagt, dass die Ausnahmeliste "stehengeblieben" war
+# -- und sie war es schon wieder: `bsec`, `bstore`, `chacha`, `msg`,
+# `nv`, `qs` und `sha` sind ebenfalls Bibliotheken ohne `u_start` und
+# standen nicht darin (nachgemessen: fas bricht bei jeder mit "diesen
+# Namen gibt es nicht: _F1.u_start" ab). Eine Liste, die bei jeder Runde
+# nachgezogen werden muss, wird bei jeder zweiten Runde vergessen.
+#
+# Woran man eine Bibliothek erkennt, steht in der Datei selbst: sie hat
+# kein `fn u_start`. Genau das wird jetzt gefragt. Damit deckt dieser
+# Abschnitt MEHR ab als vorher (die sieben oben waren gar nicht
+# geprueft, sie waren rot), und er kann nicht mehr veralten.
 mkdir -p "$TMPD/s"
 PROGS=""
+LIBS=""
 for f in kernel/user/*.fi; do
     n=$(basename "$f" .fi)
-    case "$n" in appdir|flate|nidx|pw|tools|ulib|wlib|wlibc) continue;; esac
-    PROGS="$PROGS $n"
+    if grep -q '^fn u_start' "$f"; then
+        PROGS="$PROGS $n"
+    else
+        LIBS="$LIBS $n"
+    fi
 done
+echo "  Bibliotheken ohne u_start (kein Programm, also nicht gebunden):$LIBS"
 gebaut=0; nichtgebaut=""
 for p in $PROGS; do
     if "$FC1" "kernel/user/$p.fi" > "$TMPD/s/$p.s" 2>"$TMPD/s/$p.err"; then
