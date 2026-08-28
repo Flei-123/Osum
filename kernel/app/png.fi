@@ -1,0 +1,226 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/app/png.fi -- Runde FEEDBACK: aus Bildpunkten wird eine Datei,
+// die jeder oeffnen kann.
+//
+// WAS SCHON DA WAR UND DESHALB NICHT NOCH EINMAL GESCHRIEBEN WIRD. Der
+// Auftrag sagt: erst nachsehen, ob im Firn-Baum schon ein Packer liegt.
+// Es liegt einer, und zwar der ganze:
+//
+//   vendor/firn/lib/std/deflate.fi   DEFLATE (RFC 1951) in beide
+//                                    Richtungen, feste UND eigene
+//                                    Huffman-Baeume, dazu der
+//                                    zlib-Rahmen (RFC 1950) mit
+//                                    Adler-32 und die CRC-32 aus
+//                                    RFC 1952. Alles in Firn, ohne
+//                                    zlib, ohne `extern fn`.
+//   vendor/firn/lib/paint/png.fi     ein vollstaendiger PNG-Schreiber.
+//
+// WARUM DIESE DATEI TROTZDEM EXISTIERT. `paint.png.write_png` schreibt
+// aus einer `canvas.Canvas`: vier Oktette je Bildpunkt, VORMULTIPLIZIERT,
+// Farbart 6 (RGBA). Ein Bildschirmfoto hat keine Durchsichtigkeit, und
+// der Weg dahin waere: 800 x 600 x 4 Oktette Leinwand anlegen, die drei
+// Oktette der Karte hineinschreiben, dort ein Alpha danebenlegen, das
+// immer 255 ist, und `write_png` legt sich dann NOCH EINMAL
+// (Zeilenbreite + 1) x Hoehe Oktette daneben. Das sind vier Megaoktett
+// fuer ein Bild, das in eineinhalb passt -- und ein Prozess hat auf
+// dieser Maschine sechs Megaoktett zwischen `proc.BIG_FLOOR` und
+// `proc.BIG_TOP`.
+//
+// Also: derselbe Packer, dieselbe CRC, dieselbe Filterwahl -- aber
+// FARBART 2 (RGB, drei Oktette) und EIN Puffer. Was hier neu ist, sind
+// die Bloecke und der Kopf; gepackt wird mit `std.deflate`.
+//
+// DER FILTER ist der Teil von PNG, den man nicht weglassen darf. Vor
+// jeder Bildzeile steht ein Oktett, das sagt, wie sie aus der Zeile
+// darueber und dem Bildpunkt links vorhergesagt wurde. Wer immer 0
+// schreibt, bekommt eine Datei, die drei Mal so gross ist wie noetig --
+// bei einer Oberflaeche mit grossen einfarbigen Flaechen sogar mehr.
+// Gewaehlt wird je Zeile nach der Faustregel der Spezifikation selbst
+// (12.8): die Summe der Betraege, kleinste gewinnt.
+
+profile app
+
+import std.rt
+import std.deflate
+
+export { write_png_rgb, filter_row, stride_of, raw_bytes }
+
+// Oktette je Bildzeile OHNE das Filteroktett.
+fn stride_of(w: usize) -> usize {
+    return w * 3
+}
+
+// Was der Rohstrom vor dem Packen wiegt: je Zeile ein Filteroktett und
+// die Zeile selbst.
+fn raw_bytes(w: usize, h: usize) -> usize {
+    return (stride_of(w) + 1) * h
+}
+
+fn be32(out: *mut rt.Buf, v: u32) {
+    rt.buf_push(out, ((v >> 24) & 255 as u32) as u8)
+    rt.buf_push(out, ((v >> 16) & 255 as u32) as u8)
+    rt.buf_push(out, ((v >> 8) & 255 as u32) as u8)
+    rt.buf_push(out, (v & 255 as u32) as u8)
+}
+
+// EIN PNG-BLOCK: Laenge, Kennung, Inhalt, Pruefsumme -- und die
+// Pruefsumme geht ueber Kennung UND Inhalt, nicht ueber die Laenge.
+// Das ist die Stelle, an der handgeschriebene Schreiber falsch liegen,
+// und ein Leser merkt es sofort.
+fn chunk(out: *mut rt.Buf, tag: u64, payload: u64, n: usize) {
+    be32(out, n as u32)
+    let start: usize = (*out).len
+    rt.buf_push_bytes(out, tag, 4)
+    if n != 0 {
+        rt.buf_push_bytes(out, payload, n)
+    }
+    // ERST JETZT den Zeiger holen: `buf_push_bytes` darf den Puffer
+    // verschoben haben, und ein Zeiger von vorher zeigte dann auf
+    // Speicher, der nicht mehr uns gehoert.
+    let base: u64 = (*out).ptr + start as u64
+    be32(out, deflate.crc32(base, 4 + n))
+}
+
+fn put_be32(p: u64, off: usize, v: u32) {
+    rt.st8(p, off, ((v >> 24) & 255 as u32) as u8)
+    rt.st8(p, off + 1, ((v >> 16) & 255 as u32) as u8)
+    rt.st8(p, off + 2, ((v >> 8) & 255 as u32) as u8)
+    rt.st8(p, off + 3, (v & 255 as u32) as u8)
+}
+
+// Paeth (PNG 6.6): von den drei Nachbarn der, der der Summe am
+// naechsten liegt.
+fn paeth(a: i32, b: i32, c: i32) -> i32 {
+    let pp: i32 = a + b - c
+    var pa: i32 = pp - a
+    if pa < 0 {
+        pa = 0 - pa
+    }
+    var pb: i32 = pp - b
+    if pb < 0 {
+        pb = 0 - pb
+    }
+    var pc: i32 = pp - c
+    if pc < 0 {
+        pc = 0 - pc
+    }
+    if pa <= pb && pa <= pc {
+        return a
+    }
+    if pb <= pc {
+        return b
+    }
+    return c
+}
+
+// Ein Oktett der Zeile, durch den Filter `f`. `cur` ist die Zeile,
+// `prev` die darueber (beim ersten Mal lauter Nullen), `i` der Versatz
+// im Oktettstrom und `bpp` der Abstand zum Bildpunkt LINKS -- bei
+// Farbart 2 sind das drei Oktette.
+fn filt(f: u32, cur: u64, prev: u64, i: usize, bpp: usize) -> u8 {
+    let x: u32 = rt.ld8(cur, i) as u32
+    var a: u32 = 0
+    if i >= bpp {
+        a = rt.ld8(cur, i - bpp) as u32
+    }
+    let b: u32 = rt.ld8(prev, i) as u32
+    var c: u32 = 0
+    if i >= bpp {
+        c = rt.ld8(prev, i - bpp) as u32
+    }
+    if f == 0 as u32 {
+        return x as u8
+    }
+    // `-%` UND NICHT `-`. Ein Filter rechnet MODULO 256 (PNG 6.2): der
+    // Wert ist die Differenz zweier Oktette, und die darf unter null
+    // laufen -- sie ist eine Umdeutung und keine Zahl. Mit dem
+    // geprueften `-` haelt der erste schwarze Bildpunkt neben einem
+    // weissen den Prozess an, und genau das ist beim ersten Lauf dieser
+    // Runde passiert: `panic: integer overflow in 'u32 - u32'
+    // (a=0 b=200)`.
+    if f == 1 as u32 {
+        return ((x -% a) & 255 as u32) as u8
+    }
+    if f == 2 as u32 {
+        return ((x -% b) & 255 as u32) as u8
+    }
+    if f == 3 as u32 {
+        return ((x -% ((a + b) / 2 as u32)) & 255 as u32) as u8
+    }
+    let p: i32 = paeth(a as i32, b as i32, c as i32)
+    return ((x -% (p as u32)) & 255 as u32) as u8
+}
+
+// EINE ZEILE FILTERN UND ABLEGEN.
+//
+// `dst` zeigt auf das Filteroktett; dahinter kommen `stride` gefilterte
+// Oktette. Gibt zurueck, welcher Filter gewonnen hat -- damit ein Test
+// nachsehen kann, dass wirklich gewaehlt wird und nicht immer 0
+// herauskommt.
+fn filter_row(cur: u64, prev: u64, stride: usize, dst: u64) -> u32 {
+    var bestf: u32 = 0
+    var bestsum: u64 = 0
+    var f: u32 = 0
+    while f < 5 as u32 {
+        var sum: u64 = 0
+        var i: usize = 0
+        while i < stride {
+            var d: i32 = filt(f, cur, prev, i, 3) as i32
+            if d > 127 {
+                d = 256 - d
+            }
+            sum = sum + (d as u64)
+            i = i + 1
+        }
+        if f == 0 as u32 || sum < bestsum {
+            bestsum = sum
+            bestf = f
+        }
+        f = f + 1 as u32
+    }
+    rt.st8(dst, 0, bestf as u8)
+    var i2: usize = 0
+    while i2 < stride {
+        rt.st8(dst, 1 + i2, filt(bestf, cur, prev, i2, 3))
+        i2 = i2 + 1
+    }
+    return bestf
+}
+
+// DIE DATEI.
+//
+// `raw` ist der fertige Rohstrom: je Bildzeile ein Filteroktett und
+// `w * 3` gefilterte Oktette, `h` Mal. Genau das, was `filter_row` oben
+// erzeugt hat.
+fn write_png_rgb(w: usize, h: usize, raw: u64, out: *mut rt.Buf) -> bool {
+    if w == 0 || h == 0 {
+        return false
+    }
+    var z: rt.Buf = rt.buf_new()
+    let zn: usize = deflate.zlib_compress(raw, raw_bytes(w, h), 6, &z)
+        catch 0
+    if zn == 0 {
+        rt.buf_free(&z)
+        return false
+    }
+    var sig: [u8; 8] = [137 as u8, 80 as u8, 78 as u8, 71 as u8,
+        13 as u8, 10 as u8, 26 as u8, 10 as u8]
+    rt.buf_push_bytes(out, (&sig[0]) as u64, 8)
+
+    var ihdr: [u8; 13] = [0 as u8; 13]
+    put_be32((&ihdr[0]) as u64, 0, w as u32)
+    put_be32((&ihdr[0]) as u64, 4, h as u32)
+    ihdr[8] = 8 as u8 // acht Bit je Anteil
+    ihdr[9] = 2 as u8 // Farbart 2: RGB, ohne Durchsichtigkeit
+    ihdr[10] = 0 as u8 // Verfahren 0, das einzige, das es gibt
+    ihdr[11] = 0 as u8 // Filterart 0, die einzige, die es gibt
+    ihdr[12] = 0 as u8 // nicht verschraenkt
+    var t1: [u8; 5] = "IHDR\0"
+    chunk(out, (&t1[0]) as u64, (&ihdr[0]) as u64, 13)
+    var t2: [u8; 5] = "IDAT\0"
+    chunk(out, (&t2[0]) as u64, (*(&z)).ptr, (*(&z)).len)
+    var t3: [u8; 5] = "IEND\0"
+    chunk(out, (&t3[0]) as u64, 0, 0)
+    rt.buf_free(&z)
+    return true
+}
