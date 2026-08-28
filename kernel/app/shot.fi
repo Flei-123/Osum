@@ -1,0 +1,196 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/app/shot.fi -- Runde FEEDBACK: /bin/shot, das Bildschirmfoto
+// als Datei.
+//
+//     shot [-k] [-q] <datei.png>
+//
+//     -k   den Schein NICHT selbst ausstellen, sondern den nehmen, den
+//          die Bildschirmfoto-Taste (Super+P) gerade hergibt. Das ist
+//          der Weg, den ein Programm OHNE Wurzelrechte gehen muss.
+//     -q   nur die Zahlen, kein Geplauder.
+//     -n   GAR NICHTS auf die Standardausgabe. Fehler bleiben Fehler
+//          und werden gesagt; im Erfolgsfall schweigt das Programm.
+//          Das braucht die Abnahme: mit `gfx` spiegelt der Kern jedes
+//          Oktett der seriellen Leitung auf den Bildschirm, und ein
+//          Programm, das nach dem Fotografieren etwas ausgibt,
+//          veraendert genau das Bild, gegen das es geprueft wird.
+//
+// WARUM DIESES PROGRAMM `--profile=app` IST UND NICHT `profile kernel`
+// wie `ls` und `cat`. Zwei Gruende, und beide sind Speicher:
+//
+//   1. DER PACKER. `std.deflate` (RFC 1951, feste und eigene
+//      Huffman-Baeume) braucht einen Haufen: Streuwerttabelle, Kette,
+//      Symbolpuffer. Ein Programm mit `profile kernel` hat keinen
+//      Allokator.
+//   2. DAS BILD. 800 x 600 x 3 sind 1 440 000 Oktette, und mit dem
+//      Filteroktett je Zeile 1 440 600. Zwischen `proc.IMAGE_BASE` und
+//      `proc.IMAGE_END` liegt EIN Megaoktett; zwischen
+//      `proc.BIG_FLOOR` und `proc.BIG_TOP` liegen SECHS, und dorthin
+//      greift `mmap`. `/bin/fetch` geht seit Runde HWNET denselben Weg.
+//
+// WIE DAS BILD HEREINKOMMT: EINE ZEILE JE AUFRUF. `SH_GRAB` gibt ganze
+// Bildzeilen und merkt sich im Schein, welche als naechstes dran ist.
+// Eine Zeile sind 2400 Oktette; sie geht direkt an die Stelle im
+// Rohstrom, an die sie gehoert -- kein Zwischenpuffer, kein Umkopieren.
+// Gefiltert wird sofort danach, gegen die Zeile darueber.
+//
+// WAS DIESES PROGRAMM NICHT TUT: es fragt niemanden. Das Fragen ist die
+// Aufgabe dessen, der den Schein ausstellt -- `kernel/shot.fi` sagt
+// oben, warum. Mit `-k` fragt der Mensch selbst, indem er die Taste
+// drueckt.
+
+profile app
+
+import std.rt
+import std.io
+import png
+
+const SYS_SHOT: i64 = 1840
+
+const SH_INFO: i64 = 0
+const SH_ARM: i64 = 1
+const SH_GRAB: i64 = 2
+const SH_KEY: i64 = 3
+const SH_DROP: i64 = 4
+
+const SI_READY: i64 = 0
+const SI_WIDTH: i64 = 1
+const SI_HEIGHT: i64 = 2
+const SI_ROWBYTES: i64 = 3
+const SI_BYTES: i64 = 4
+const SI_SHOTS: i64 = 6
+const SI_DENIED: i64 = 10
+
+fn shot(what: i64, a1: i64, a2: i64) -> i64 {
+    return syscall(SYS_SHOT, what, a1, a2, 0, 0, 0)
+}
+
+fn num_line(key: str, v: u64) {
+    io.print(key)
+    var b: rt.Buf = rt.buf_new()
+    rt.buf_push_dec_u64(&b, v)
+    rt.buf_push(&b, 10 as u8)
+    rt.write_everything(1, b.ptr, b.len)
+    rt.buf_free(&b)
+}
+
+fn main(start: u64) -> i32 {
+    var out: u64 = 0
+    var bykey: bool = false
+    var quiet: bool = false
+    var still: bool = false
+    let argc: usize = rt.arg_count(start)
+    var i: usize = 1
+    while i < argc {
+        let a: u64 = rt.arg_ptr(start, i)
+        let n: usize = rt.c_length(a)
+        if n == 2 && rt.ld8(a, 0) == 45 as u8 {
+            let c: u8 = rt.ld8(a, 1)
+            if c == 107 as u8 {
+                bykey = true
+            } else if c == 113 as u8 {
+                quiet = true
+            } else if c == 110 as u8 {
+                still = true
+                quiet = true
+            }
+        } else {
+            out = a
+        }
+        i = i + 1
+    }
+    if out == 0 {
+        io.print("usage: shot [-k] [-q] [-n] <datei.png>\n")
+        return 2
+    }
+    if shot(SH_INFO, SI_READY, 0) != 1 {
+        io.print("shot: kein Rahmenpuffer -- es gibt nichts zu fotografieren\n")
+        return 1
+    }
+    let w: usize = shot(SH_INFO, SI_WIDTH, 0) as usize
+    let h: usize = shot(SH_INFO, SI_HEIGHT, 0) as usize
+    let stride: usize = png.stride_of(w)
+    if shot(SH_INFO, SI_ROWBYTES, 0) as usize != stride {
+        io.print("shot: der Kern und dieses Programm sind sich ueber die Zeilenlaenge nicht einig\n")
+        return 1
+    }
+
+    // ---- der Schein
+    var got: i64 = 0
+    if bykey {
+        got = shot(SH_KEY, 0, 0)
+        if got < 0 {
+            io.print("shot: kein Schein -- Super+P wurde nicht (oder nicht gerade eben, oder nicht in diesem Fenster) gedrueckt\n")
+            return 1
+        }
+    } else {
+        got = shot(SH_ARM, 0, 0)
+        if got < 0 {
+            io.print("shot: abgelehnt -- einen Schein stellt die Taskleiste oder die Wurzel aus (siehe kernel/shot.fi)\n")
+            return 1
+        }
+    }
+
+    // ---- der Rohstrom. Eine Zeile je Aufruf, gleich an ihren Platz.
+    let raw_n: usize = png.raw_bytes(w, h)
+    let raw: u64 = rt.heap_alloc(raw_n)
+    if raw == 0 {
+        io.print("shot: kein Speicher fuer das Bild\n")
+        shot(SH_DROP, 0, 0)
+        return 1
+    }
+    let cur: u64 = rt.heap_alloc(stride)
+    let prev: u64 = rt.heap_alloc(stride)
+    if cur == 0 || prev == 0 {
+        io.print("shot: kein Speicher fuer die Zeilen\n")
+        shot(SH_DROP, 0, 0)
+        return 1
+    }
+    rt.mem_set(prev, 0 as u8, stride)
+
+    var y: usize = 0
+    var rows: u64 = 0
+    while y < h {
+        let n: i64 = shot(SH_GRAB, cur as i64, stride as i64)
+        if n != stride as i64 {
+            io.print("shot: das Band kam nicht vollstaendig\n")
+            num_line("shot: zeile ", y as u64)
+            num_line("shot: antwort ", n as u64)
+            shot(SH_DROP, 0, 0)
+            return 1
+        }
+        rows = rows + 1
+        png.filter_row(cur, prev, stride,
+            raw + ((stride + 1) * y) as u64)
+        rt.mem_copy(prev, cur, stride)
+        y = y + 1
+    }
+
+    // ---- die Datei
+    var file: rt.Buf = rt.buf_new()
+    if !png.write_png_rgb(w, h, raw, &file) {
+        io.print("shot: der Packer sagt nein\n")
+        return 1
+    }
+    if !rt.write_file(out, file.ptr, file.len) {
+        io.print("shot: die Datei konnte nicht geschrieben werden\n")
+        return 1
+    }
+    if !still {
+        num_line("shot: breite ", w as u64)
+        num_line("shot: hoehe ", h as u64)
+        num_line("shot: zeilen ", rows)
+        num_line("shot: roh ", raw_n as u64)
+        num_line("shot: oktette ", file.len as u64)
+        if !quiet {
+            num_line("shot: bilder ", shot(SH_INFO, SI_SHOTS, 0) as u64)
+            num_line("shot: abgelehnt ", shot(SH_INFO, SI_DENIED, 0) as u64)
+        }
+        io.print("shot: geschrieben\n")
+    }
+    rt.buf_free(&file)
+    rt.heap_free(raw, raw_n)
+    rt.heap_free(cur, stride)
+    rt.heap_free(prev, stride)
+    return 0
+}

@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // kernel/app/fetch.fi -- round HWNET: a page over HTTPS, from ring 3.
 //
-//     fetch [-n name] [-r roots] [-o file] [-q] [-k] <url>
+//     fetch [-n name] [-r roots] [-o file] [-q] [-k]
+//           [-p body] [-c type] <url>
 //
 //     url    http://<ipv4>[:port]/path   or   https://<ipv4>[:port]/path
 //     -n     the name the CERTIFICATE has to carry, and the SNI that is
@@ -13,6 +14,12 @@
 //     -r     the trust store, default /etc/ssl/roots.pem
 //     -o     write the body to a file instead of to the output
 //     -q     only the report lines, no body on the output
+//     -p     POST. Der Rumpf steht in der genannten DATEI und geht
+//            unveraendert hinaus; `Content-Length` rechnet dieses
+//            Programm aus. Runde FEEDBACK braucht das: eine Meldung aus
+//            Osum ist ein POST, und ein Bildschirmfoto darin ist ein
+//            Megaoktett -- das passt in keine Befehlszeile.
+//     -c     der `Content-Type` des Rumpfes, Vorgabe application/json.
 //     -k     NO CERTIFICATE CHECK. Prints a warning line and is refused
 //            unless it is spelled out. It exists so that the difference
 //            between "checked" and "not checked" is measurable, not so
@@ -326,6 +333,10 @@ fn main(start: u64) -> i32 {
     var insecure: bool = false
     var url: u64 = 0
     var urllen: usize = 0
+    // RUNDE FEEDBACK: der Rumpf einer POST-Anfrage, aus einer Datei.
+    var postfile: u64 = 0
+    var ctype: u64 = 0
+    var ctlen: usize = 0
 
     let argc: usize = rt.arg_count(start)
     var i: usize = 1
@@ -350,6 +361,17 @@ fn main(start: u64) -> i32 {
                 if i < argc {
                     outfile = rt.arg_ptr(start, i)
                 }
+            } else if c == 112 as u8 { // -p
+                i = i + 1
+                if i < argc {
+                    postfile = rt.arg_ptr(start, i)
+                }
+            } else if c == 99 as u8 { // -c
+                i = i + 1
+                if i < argc {
+                    ctype = rt.arg_ptr(start, i)
+                    ctlen = rt.c_length(ctype)
+                }
             } else if c == 113 as u8 { // -q
                 quiet = true
             } else if c == 107 as u8 { // -k
@@ -362,7 +384,7 @@ fn main(start: u64) -> i32 {
         i = i + 1
     }
     if url == 0 {
-        io.print("usage: fetch [-n name] [-r roots] [-o file] [-q] [-k] <url>\n")
+        io.print("usage: fetch [-n name] [-r roots] [-o file] [-q] [-k] [-p body] [-c type] <url>\n")
         return 2
     }
 
@@ -418,6 +440,25 @@ fn main(start: u64) -> i32 {
         pathlen = 1
     }
 
+    // ------------------------------------- RUNDE FEEDBACK: der Rumpf
+    //
+    // Er wird GELESEN, BEVOR die Verbindung steht. Eine Datei, die nicht
+    // da ist, soll kein halb aufgebauter TLS-Kanal sein, den jemand
+    // hinterher aufraeumen muss.
+    var pbody: rt.Buf = rt.buf_new()
+    var post: bool = false
+    if postfile != 0 {
+        if !rt.read_file(postfile, &pbody) {
+            io.print("fetch: the body file could not be read\n")
+            return 2
+        }
+        post = true
+        num_line(&out, "fetch: postbytes ", pbody.len as u64)
+    }
+    var req: rt.Buf = rt.buf_new()
+    request(&req, name, namelen, path, pathlen, post, pbody.ptr, pbody.len,
+        ctype, ctlen)
+
     // ------------------------------------------------------ the socket
     var bad: bool = false
     var c: net.Conn = net.connect_tcp(addr, port as u16)
@@ -431,12 +472,14 @@ fn main(start: u64) -> i32 {
     var body: rt.Buf = rt.buf_new()
     var status: i32 = 0
     if secure {
-        status = over_tls(&c, &out, &body, name, namelen, path, pathlen,
+        status = over_tls(&c, &out, &body, &req, name, namelen,
             roots, insecure)
     } else {
-        status = plain(&c, &out, &body, name, namelen, path, pathlen)
+        status = plain(&c, &out, &body, &req)
     }
     net.close(&c)
+    rt.buf_free(&req)
+    rt.buf_free(&pbody)
     if status != 0 {
         return status
     }
@@ -517,7 +560,7 @@ fn main(start: u64) -> i32 {
 // --------------------------------------------------------- over TLS
 
 fn over_tls(c: *mut net.Conn, out: *mut rt.Buf, body: *mut rt.Buf,
-    name: u64, namelen: usize, path: u64, pathlen: usize, roots: u64,
+    req: *mut rt.Buf, name: u64, namelen: usize, roots: u64,
     insecure: bool) -> i32 {
     var storebuf: rt.Buf = rt.buf_new()
     var store: x509.Store = x509.store_new()
@@ -561,12 +604,9 @@ fn over_tls(c: *mut net.Conn, out: *mut rt.Buf, body: *mut rt.Buf,
     num_line(out, "fetch: certs ", tls.tls_peer_cert_count(&t) as u64)
     num_line(out, "fetch: depth ", tls.tls_chain_depth(&t) as u64)
 
-    var req: rt.Buf = rt.buf_new()
-    request(&req, name, namelen, path, pathlen)
     var werr: bool = false
-    let okw: bool = tls.tls_write(&t, req.ptr, req.len)
+    let okw: bool = tls.tls_write(&t, (*req).ptr, (*req).len)
     catch | e | tls.tls_fail_into(out, e, &werr)
-    rt.buf_free(&req)
     if werr {
         io.print("fetch: the request could not be sent\n")
         return 1
@@ -596,12 +636,9 @@ fn over_tls(c: *mut net.Conn, out: *mut rt.Buf, body: *mut rt.Buf,
 // makes the round's measurement honest: the same octets, once in the
 // clear and once through the record layer.
 fn plain(c: *mut net.Conn, out: *mut rt.Buf, body: *mut rt.Buf,
-    name: u64, namelen: usize, path: u64, pathlen: usize) -> i32 {
-    var req: rt.Buf = rt.buf_new()
-    request(&req, name, namelen, path, pathlen)
+    req: *mut rt.Buf) -> i32 {
     var werr: bool = false
-    let w: usize = net.write_all(c, req.ptr, req.len) catch fail_len(&werr)
-    rt.buf_free(&req)
+    let w: usize = net.write_all(c, (*req).ptr, (*req).len) catch fail_len(&werr)
     if werr {
         io.print("fetch: the request could not be sent\n")
         return 1
@@ -620,9 +657,15 @@ fn plain(c: *mut net.Conn, out: *mut rt.Buf, body: *mut rt.Buf,
 }
 
 fn request(req: *mut rt.Buf, name: u64, namelen: usize, path: u64,
-    pathlen: usize) {
+    pathlen: usize, post: bool, pbody: u64, pn: usize, ctype: u64,
+    ctlen: usize) {
     var g: [u8; 5] = "GET \0"
-    rt.buf_push_bytes(req, (&g[0]) as u64, 4)
+    var pw: [u8; 6] = "POST \0"
+    if post {
+        rt.buf_push_bytes(req, (&pw[0]) as u64, 5)
+    } else {
+        rt.buf_push_bytes(req, (&g[0]) as u64, 4)
+    }
     rt.buf_push_bytes(req, path, pathlen)
     var h: [u8; 18] = " HTTP/1.1\r\nHost: \0"
     rt.buf_push_bytes(req, (&h[0]) as u64, 17)
@@ -636,7 +679,32 @@ fn request(req: *mut rt.Buf, name: u64, namelen: usize, path: u64,
     // something forgiving.
     rt.buf_push_bytes(req, (&tail[0]) as u64, 45)
     var crlf: [u8; 3] = "\r\n\0"
+    // RUNDE FEEDBACK: DIE ZWEI ZEILEN, DIE EINEN POST AUSMACHEN.
+    //
+    // `Content-Length` wird GERECHNET und nicht uebergeben. Eine Zahl,
+    // die der Aufrufer nennt, ist die Zahl, die er sich verrechnet hat --
+    // und ein Server, der auf Oktette wartet, die nie kommen, haengt bis
+    // zum Zeitlimit. Die Laenge steht genau einmal im Programm, und zwar
+    // dort, wo der Rumpf liegt.
+    if post {
+        var ct: [u8; 16] = "Content-Type: \0\0"
+        rt.buf_push_bytes(req, (&ct[0]) as u64, 14)
+        if ctype != 0 && ctlen != 0 {
+            rt.buf_push_bytes(req, ctype, ctlen)
+        } else {
+            var dflt: [u8; 17] = "application/json\0"
+            rt.buf_push_bytes(req, (&dflt[0]) as u64, 16)
+        }
+        rt.buf_push_bytes(req, (&crlf[0]) as u64, 2)
+        var cl: [u8; 17] = "Content-Length: \0"
+        rt.buf_push_bytes(req, (&cl[0]) as u64, 16)
+        rt.buf_push_dec_u64(req, pn as u64)
+        rt.buf_push_bytes(req, (&crlf[0]) as u64, 2)
+    }
     rt.buf_push_bytes(req, (&crlf[0]) as u64, 2)
+    if post && pn != 0 {
+        rt.buf_push_bytes(req, pbody, pn)
+    }
 }
 
 fn fail_conn(bad: *mut bool) -> net.Conn {
