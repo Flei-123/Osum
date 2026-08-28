@@ -118,6 +118,8 @@ BEREICHE = [
     # Speicher der Gaeste) kommt aus dem Rahmenverwalter.  Eingetragen
     # ist er hier, damit der Kollisionspruefer ihn trotzdem sieht.
     ("HV",         "hv.fi",     "HV_OFF",         "HV_MAX"),
+    # RUNDE FEEDBACK: der Schein fuer das Bildschirmfoto (0x7B000).
+    ("SHOT",       "kstate.fi", "SHOT_OFF",       "SHOT_MAX"),
     # RUNDE K13: die Zaehler der Benutzer- und Rechteschicht. Zwei
     # Seiten, 0x41000 und 0x42000 -- die ersten hinter dem Bereich des
     # Hypervisors, so wie kstate.fi es fuer die naechste Runde
