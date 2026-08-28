@@ -55,7 +55,21 @@ def read_ppm(path):
         i = j
     i += 1
     w, h, _ = parts
-    return w, h, b[i:i + w * h * 3]
+    px = b[i:i + w * h * 3]
+    # EIN ABGESCHNITTENES BILD IST KEIN BILD, und es soll auch nicht so
+    # tun. QEMU schreibt `screendump` nicht atomar, und ein Lauf, den die
+    # Last des Wirts abgewuergt hat, hinterlaesst eine halbe Datei. Die
+    # fehlenden Zeilen werden hier NICHT mit Weiss aufgefuellt -- das
+    # waere eine erfundene Messung. Statt dessen wird die Hoehe auf das
+    # verkleinert, was wirklich da ist, und der Aufrufer sieht an der
+    # kleineren Zahl, dass etwas fehlte.
+    voll = len(px) // (w * 3)
+    if voll < h:
+        h = voll
+        px = px[:w * h * 3]
+    if h == 0:
+        return None
+    return w, h, px
 
 
 def write_png(path, w, h, px):
