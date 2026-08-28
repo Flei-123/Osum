@@ -173,8 +173,42 @@ jetzt gibt es die Zahl dazu.
 
 ## 6. Die Abnahme
 
-Der Vergleich Grundlinie/danach steht in Abschnitt 7 dieser Datei und in
-`/root/mergerun/HWNET-STATUS.md`. Zwei Abschnitte sind neu:
+Zwei volle Läufe von `./test.sh`, jeder in einem eigenen Arbeitsbaum:
 
-    28. dieselbe Abnahme auf zwei Chips (tools/hwnet/run.sh)
-    29. HTTPS aus Ring 3, und die Verweigerungen (tools/hwnet/tls.sh)
+    Grundlinie  /root/hwnetrun/base  (e9fcc1c)  -> BASE.log
+                31 Abschnitte bestanden, 5 fehlgeschlagen, 3246 Zusagen
+                rot: k14 (151/1), k16 (58/6), arm (47/1), icons,
+                     tunnel/pakete
+    Danach      /root/hwnetrun/osum  (hwnet)    -> AFTER.log
+                33 Abschnitte bestanden, 5 fehlgeschlagen, 3273 Zusagen
+                rot: k11, k14 (151/1), k16 (58/6), icons, tunnel/pakete
+
+`python3 tools/look/compare.py BASE.log AFTER.log`: **26 Abschnitte in
+beiden Protokollen, 1 neu rot.**
+
+| Abschnitt | Grundlinie | danach |
+|---|---|---|
+| NET (virtio über die neue Schicht) | 75/0 | **75/0** |
+| NETVIEW | 195/0 | **195/0** |
+| NETMON (zwei Karten, `share`) | 76/0 | **76/0** |
+| TUNNEL, TRESOR, K15, K17, K18, WM, HV … | unverändert | unverändert |
+| K14 | 151/1 | 151/1 (dieselbe alte Zusage) |
+| K16 | 58/6 | 58/6 (dieselben sechs) |
+| ARM | 47/**1** | 48/**0** (besser) |
+| K11 | 85/0 | 33/48 **neu rot** |
+| HWNET (neu) | -- | 54/0 |
+| HWNETTLS (neu) | -- | 24/0 |
+
+**Das eine neu rote K11, nachgemessen.** Der Lauf `AFTER.log` lief
+absichtlich GLEICHZEITIG mit der Grundlinie -- zwei volle Abnahmen auf
+zwölf Kernen. K11 fiel mit `firnc1: der Kern laesst sich nicht bauen`
+durch, und alle 48 Fehler hängen an dieser einen Zeile. **Derselbe
+Abschnitt allein nachgelaufen, auf der stillen Maschine: `K11: 85
+passed, 0 failed`** (`/root/hwnetrun/K11-alone.log`) -- also genau die
+Zahl der Grundlinie. Dass firnc1 mit diesem Kern umgehen kann, steht
+außerdem im selben Protokoll: Abschnitt 28 baut ihn ausdrücklich in
+beiden Übersetzerstufen und meldet `firnc1: the same, out of the
+compiler written in Firn`. Es ist Last, kein Schaden -- gemessen und
+nicht behauptet.
+
+**Kein Abschnitt ist durch diese Runde schlechter geworden.**
