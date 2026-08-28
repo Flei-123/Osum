@@ -94,6 +94,12 @@ import blk
 import atomic
 import cpu
 import nidx
+// RUNDE FSROBUST: das Journal. Jeder Schreibzugriff dieser Datei geht
+// jetzt durch `ofsj.write` und jeder Lesezugriff durch `ofsj.read` --
+// die einzigen Ausnahmen sind `format_as` (es baut die Platte erst, es
+// gibt noch nichts zu schuetzen) und der erste Superblockzugriff von
+// `mount` (er kommt VOR der Wiederherstellung).
+import ofsj
 // RUNDE OFS3: die Uhr. Ohne sie waeren die drei Zeitstempel im Inode
 // drei Nullen, und das waere derselbe Zustand wie vorher, nur mit mehr
 // Platz dafuer.
@@ -123,7 +129,9 @@ export {
     // kleiner sein darf als die des Geraets (`total_blocks`).
     bitmap_blocks, bitmap_needed, total_blocks, SB_BITBLOCKS,
     SB_BLOCKS, SB_MAGIC, SB_DATA, SB_ITABLE, SB_INODES, SB_VERSION,
-    link_path
+    link_path,
+    // ---------------------------------------------------- RUNDE FSROBUST
+    SB_JSTART, SB_JBLOCKS, journal_start, journal_blocks, journal_on
 }
 
 const BS: u64 = 512 // one block
@@ -244,6 +252,10 @@ const G_HINT: u64 = 72
 // `block_alloc` Bloecke hinter dem Ende der Karte vergeben. OFS3 hat
 // die Woerter 0 bis 72 belegt, dieses ist das naechste freie.
 const G_TOTAL: u64 = 80
+// RUNDE FSROBUST: wo das Journal liegt. Zwei weitere Woerter im selben
+// Bereich (`kstate.FSG_OFF`, 128 Oktette, davon jetzt 96 belegt).
+const G_JSTART: u64 = 88
+const G_JBLOCKS: u64 = 96
 
 fn inode_count(state: u64) -> u64 {
     let n: u64 = kstate.get(state, kstate.FSG_OFF + G_INODES)
@@ -301,6 +313,13 @@ fn bitmap_blocks(state: u64) -> u64 {
 // BS * 8 = 4096 Bits.
 fn bitmap_needed(n: u64) -> u64 {
     return (n + BITS_PER_BLOCK - 1) / BITS_PER_BLOCK
+}
+
+// RUNDE FSROBUST: wo das Journal dieser Platte liegt. `mount` und
+// `format_as` sind die einzigen zwei Stellen, die es schreiben.
+fn geom_j(state: u64, js: u64, jb: u64) {
+    kstate.set(state, kstate.FSG_OFF + G_JSTART, js)
+    kstate.set(state, kstate.FSG_OFF + G_JBLOCKS, jb)
 }
 
 fn geom_total(state: u64, n: u64) {
@@ -459,6 +478,17 @@ const SB_NAMELEN: u64 = 96
 // damit dieselben. Der zweite Name bleibt, weil `install.fi` und
 // `opk.fi` ihn benutzen.
 const SB_BITBLOCKS: u64 = 72
+// ------------------------------------------------------ RUNDE FSROBUST
+//
+// ZWEI WOERTER, UND SIE FOLGEN DERSELBEN REGEL WIE ALLE DAVOR: eine
+// Null heisst "wie vor dieser Runde", also KEIN Journal. Jede Platte,
+// die vor heute gebaut wurde, sagt damit von selbst das Richtige, ohne
+// dass jemand sie anfasst -- und ein Kern von gestern liest eine Platte
+// MIT Journal, ohne davon zu wissen: er sieht nur einen Datenbereich,
+// der etwas spaeter anfaengt. Das ist der ganze Preis der
+// Rueckwaertsvertraeglichkeit an dieser Stelle.
+const SB_JSTART: u64 = 104
+const SB_JBLOCKS: u64 = 112
 const OFS_V1: u64 = 1
 const OFS_V2: u64 = 2
 const OFS_V3: u64 = 3
@@ -496,17 +526,38 @@ const OFS_V3: u64 = 3
 // looks at bit 9.
 const NESTED: u64 = 0x8000000000000000
 
+// RUNDE FSROBUST: HIER FAENGT EINE UMSCHREIBUNG AN UND HOERT AUF.
+//
+// Das ist die eine Stelle, an der das Journal in dieses Dateisystem
+// eingehaengt wird, und sie ist mit Absicht diese: `enter` und `leave`
+// umschliessen SEIT RUNDE 62 genau die Abschnitte, in denen `fs.fi`
+// die Platte anfasst -- `create_path`, `unlink_path`, `rename_path`,
+// `write_at`, `file_truncate`, `set_meta` und ihre Verwandten gehen
+// alle hier durch, und keiner geht daran vorbei. Eine Liste von
+// Aufrufstellen waere eine Liste, die jemand vergessen kann; ein Paar,
+// das ohnehin jede kritische Stelle klammert, ist keine.
+//
+// EINE LESENDE VERRICHTUNG KOSTET NICHTS: sie schreibt keinen Block,
+// also hat die Umschreibung null Plaetze, und `commit` kehrt sofort um.
+//
+// EINGESCHACHTELT WIRD NICHT BESTAETIGT. `create_path` ruft `write_at`,
+// und beide gehen hier durch; bestaetigt wird erst, wenn der aeusserste
+// wieder herauskommt. Genau dadurch ist "eine Datei anlegen" EINE
+// unteilbare Umschreibung und nicht drei.
 fn enter(state: u64) -> u64 {
     let flags: u64 = sched.irq_save()
     let me: u64 = cpu.here(state)
     if atomic.lock_owner(state, atomic.L_FS) == me + 1 {
+        ofsj.begin(state)
         return flags | NESTED
     }
     atomic.lock_take(state, atomic.L_FS, me)
+    ofsj.begin(state)
     return flags
 }
 
 fn leave(state: u64, flags: u64) {
+    ofsj.commit(state)
     if (flags & NESTED) == 0 {
         atomic.lock_give(state, atomic.L_FS)
     }
@@ -656,7 +707,7 @@ fn set_times(state: u64, ino: u64, c: u64, m: u64, a: u64) -> bool {
         return false
     }
     let flags: u64 = enter(state)
-    if !blk.read(state, inode_block_of(state, ino), buf_in(state)) {
+    if !ofsj.read(state, inode_block_of(state, ino), buf_in(state)) {
         leave(state, flags)
         return false
     }
@@ -670,7 +721,7 @@ fn set_times(state: u64, ino: u64, c: u64, m: u64, a: u64) -> bool {
     if a != 0 {
         put64(at + I_ATIME, a)
     }
-    let r: bool = blk.write(state, inode_block_of(state, ino), buf_in(state))
+    let r: bool = ofsj.write(state, inode_block_of(state, ino), buf_in(state))
     leave(state, flags)
     return r
 }
@@ -818,7 +869,7 @@ fn inode_get(state: u64, ino: u64, field: u64) -> u64 {
     if ino == 0 || ino > inode_count(state) {
         return 0
     }
-    if !blk.read(state, inode_block_of(state, ino), buf_in(state)) {
+    if !ofsj.read(state, inode_block_of(state, ino), buf_in(state)) {
         return 0
     }
     return get64(buf_in(state) + inode_off(state, ino) + field)
@@ -828,11 +879,11 @@ fn inode_set(state: u64, ino: u64, field: u64, v: u64) -> bool {
     if ino == 0 || ino > inode_count(state) {
         return false
     }
-    if !blk.read(state, inode_block_of(state, ino), buf_in(state)) {
+    if !ofsj.read(state, inode_block_of(state, ino), buf_in(state)) {
         return false
     }
     put64(buf_in(state) + inode_off(state, ino) + field, v)
-    return blk.write(state, inode_block_of(state, ino), buf_in(state))
+    return ofsj.write(state, inode_block_of(state, ino), buf_in(state))
 }
 
 fn inode_type(state: u64, ino: u64) -> u64 {
@@ -846,7 +897,7 @@ fn inode_size(state: u64, ino: u64) -> u64 {
 // A whole inode at once: cheaper than eighteen single writes, and it is
 // the only way a new inode gets a clean state.
 fn inode_init(state: u64, ino: u64, kind: u64) -> bool {
-    if !blk.read(state, inode_block_of(state, ino), buf_in(state)) {
+    if !ofsj.read(state, inode_block_of(state, ino), buf_in(state)) {
         return false
     }
     let at: u64 = buf_in(state) + inode_off(state, ino)
@@ -864,7 +915,7 @@ fn inode_init(state: u64, ino: u64, kind: u64) -> bool {
         put64(at + I_MTIME, nun)
         put64(at + I_ATIME, nun)
     }
-    return blk.write(state, inode_block_of(state, ino), buf_in(state))
+    return ofsj.write(state, inode_block_of(state, ino), buf_in(state))
 }
 
 fn inode_alloc(state: u64, kind: u64) -> u64 {
@@ -892,7 +943,7 @@ fn used_inodes(state: u64) -> u64 {
     let ipb: u64 = inodes_per_block(state)
     let isz: u64 = inode_bytes(state)
     while b * ipb < letzte {
-        if blk.read(state, itable(state) + b, buf_in(state)) {
+        if ofsj.read(state, itable(state) + b, buf_in(state)) {
             var k: u64 = 0
             while k < ipb && b * ipb + k < letzte {
                 if get64(buf_in(state) + k * isz + I_TYPE) != T_FREE {
@@ -964,7 +1015,7 @@ fn suche(state: u64, von: u64, bis: u64) -> u64 {
     var b: u64 = von
     while b < bis {
         let kb: u64 = bm_block_of(state, b)
-        if !blk.read(state, kb, buf_bm(state)) {
+        if !ofsj.read(state, kb, buf_bm(state)) {
             return 0
         }
         var ende: u64 = (b / BITS_PER_BLOCK + 1) * BITS_PER_BLOCK
@@ -982,12 +1033,12 @@ fn suche(state: u64, von: u64, bis: u64) -> u64 {
             }
         }
         if fund != 0 {
-            if !blk.write(state, kb, buf_bm(state)) {
+            if !ofsj.write(state, kb, buf_bm(state)) {
                 return 0
             }
             kstate.set(state, kstate.FSG_OFF + G_HINT, fund)
             zero(buf_zz(state), BS)
-            blk.write(state, fund, buf_zz(state))
+            ofsj.write(state, fund, buf_zz(state))
             return fund
         }
     }
@@ -1002,12 +1053,12 @@ fn block_free(state: u64, b: u64) {
         return
     }
     let kb: u64 = bm_block_of(state, b)
-    if !blk.read(state, kb, buf_bm(state)) {
+    if !ofsj.read(state, kb, buf_bm(state)) {
         return
     }
     let p: u64 = buf_bm(state) + bm_byte(b)
     kstate.set8(p, (kstate.get8(p) & (255 ^ (1 << (b % 8)))) as u8)
-    blk.write(state, kb, buf_bm(state))
+    ofsj.write(state, kb, buf_bm(state))
     // Der naechste Fund darf hier anfangen: ein gerade freigegebener
     // Block ist der beste Kandidat, den es gibt.
     if b < kstate.get(state, kstate.FSG_OFF + G_HINT) {
@@ -1030,7 +1081,7 @@ fn free_blocks(state: u64) -> u64 {
     var b: u64 = 0
     while b < lim {
         let kb: u64 = bm_block_of(state, b)
-        if !blk.read(state, kb, buf_bm(state)) {
+        if !ofsj.read(state, kb, buf_bm(state)) {
             return n
         }
         var ende: u64 = (b / BITS_PER_BLOCK + 1) * BITS_PER_BLOCK
@@ -1115,7 +1166,7 @@ fn single_block(state: u64, ino: u64, k: u64, grow: bool) -> u64 {
         }
         inode_set(state, ino, I_INDIRECT, ib)
     }
-    if !blk.read(state, ib, buf_ib(state)) {
+    if !ofsj.read(state, ib, buf_ib(state)) {
         return 0
     }
     let b: u64 = get64(buf_ib(state) + k * 8)
@@ -1126,11 +1177,11 @@ fn single_block(state: u64, ino: u64, k: u64, grow: bool) -> u64 {
     if fresh == 0 {
         return 0
     }
-    if !blk.read(state, ib, buf_ib(state)) {
+    if !ofsj.read(state, ib, buf_ib(state)) {
         return 0
     }
     put64(buf_ib(state) + k * 8, fresh)
-    blk.write(state, ib, buf_ib(state))
+    ofsj.write(state, ib, buf_ib(state))
     return fresh
 }
 
@@ -1152,7 +1203,7 @@ fn double_block(state: u64, ino: u64, d: u64, grow: bool) -> u64 {
         }
         inode_set(state, ino, I_DINDIRECT, l1)
     }
-    if !blk.read(state, l1, buf_ib(state)) {
+    if !ofsj.read(state, l1, buf_ib(state)) {
         return 0
     }
     let slot: u64 = d / PER_BLOCK
@@ -1165,13 +1216,13 @@ fn double_block(state: u64, ino: u64, d: u64, grow: bool) -> u64 {
         if l2 == 0 {
             return 0
         }
-        if !blk.read(state, l1, buf_ib(state)) {
+        if !ofsj.read(state, l1, buf_ib(state)) {
             return 0
         }
         put64(buf_ib(state) + slot * 8, l2)
-        blk.write(state, l1, buf_ib(state))
+        ofsj.write(state, l1, buf_ib(state))
     }
-    if !blk.read(state, l2, buf_i2(state)) {
+    if !ofsj.read(state, l2, buf_i2(state)) {
         return 0
     }
     let at: u64 = d % PER_BLOCK
@@ -1183,11 +1234,11 @@ fn double_block(state: u64, ino: u64, d: u64, grow: bool) -> u64 {
     if fresh == 0 {
         return 0
     }
-    if !blk.read(state, l2, buf_i2(state)) {
+    if !ofsj.read(state, l2, buf_i2(state)) {
         return 0
     }
     put64(buf_i2(state) + at * 8, fresh)
-    blk.write(state, l2, buf_i2(state))
+    ofsj.write(state, l2, buf_i2(state))
     return fresh
 }
 
@@ -1242,7 +1293,7 @@ fn triple_block(state: u64, ino: u64, t: u64, grow: bool) -> u64 {
 // veraendert zurueck. Runde K4 hat diesen Fehler schon einmal gemacht
 // und ihn oben aufgeschrieben.
 fn stufe(state: u64, block: u64, k: u64, grow: bool) -> u64 {
-    if !blk.read(state, block, buf_ib(state)) {
+    if !ofsj.read(state, block, buf_ib(state)) {
         return 0
     }
     let b: u64 = get64(buf_ib(state) + k * 8)
@@ -1253,11 +1304,11 @@ fn stufe(state: u64, block: u64, k: u64, grow: bool) -> u64 {
     if fresh == 0 {
         return 0
     }
-    if !blk.read(state, block, buf_ib(state)) {
+    if !ofsj.read(state, block, buf_ib(state)) {
         return 0
     }
     put64(buf_ib(state) + k * 8, fresh)
-    if !blk.write(state, block, buf_ib(state)) {
+    if !ofsj.write(state, block, buf_ib(state)) {
         return 0
     }
     return fresh
@@ -1284,7 +1335,7 @@ fn file_truncate(state: u64, ino: u64) {
     // ROUND K4: and the two levels under the double indirect pointer.
     let l1: u64 = inode_get(state, ino, I_DINDIRECT)
     if l1 != 0 {
-        if blk.read(state, l1, buf_ib(state)) {
+        if ofsj.read(state, l1, buf_ib(state)) {
             var k: u64 = 0
             while k < PER_BLOCK {
                 let l2: u64 = get64(buf_ib(state) + k * 8)
@@ -1292,7 +1343,7 @@ fn file_truncate(state: u64, ino: u64) {
                     free_pointers(state, l2)
                     block_free(state, l2)
                     // `free_pointers` read over the buffer this loop walks.
-                    if !blk.read(state, l1, buf_ib(state)) {
+                    if !ofsj.read(state, l1, buf_ib(state)) {
                         k = PER_BLOCK
                     }
                 }
@@ -1313,14 +1364,14 @@ fn file_truncate(state: u64, ino: u64) {
         if t1 != 0 {
             var k1: u64 = 0
             while k1 < PER_BLOCK {
-                if !blk.read(state, t1, buf_ib(state)) {
+                if !ofsj.read(state, t1, buf_ib(state)) {
                     k1 = PER_BLOCK
                 } else {
                     let t2: u64 = get64(buf_ib(state) + k1 * 8)
                     if t2 != 0 {
                         var k2: u64 = 0
                         while k2 < PER_BLOCK {
-                            if !blk.read(state, t2, buf_i2(state)) {
+                            if !ofsj.read(state, t2, buf_i2(state)) {
                                 k2 = PER_BLOCK
                             } else {
                                 let t3: u64 = get64(buf_i2(state) + k2 * 8)
@@ -1351,7 +1402,7 @@ fn file_truncate(state: u64, ino: u64) {
 // der Aufrufer die zweite Stufe behalten kann, waehrend die dritte
 // abgeraeumt wird.
 fn frei_dt(state: u64, block: u64) {
-    if !blk.read(state, block, buf_dt(state)) {
+    if !ofsj.read(state, block, buf_dt(state)) {
         return
     }
     var k: u64 = 0
@@ -1367,7 +1418,7 @@ fn frei_dt(state: u64, block: u64) {
 // Every block a pointer block points at, back to the bitmap. Reads through
 // `buf_i2`, so that a caller walking `buf_ib` keeps what it is holding.
 fn free_pointers(state: u64, block: u64) {
-    if !blk.read(state, block, buf_i2(state)) {
+    if !ofsj.read(state, block, buf_i2(state)) {
         return
     }
     var k: u64 = 0
@@ -1408,7 +1459,7 @@ fn read_at(state: u64, ino: u64, off: u64, dst: u64, len: u64) -> u64 {
         if b == 0 {
             zero(dst + n, chunk) // a hole reads as zeros
         } else {
-            if !blk.read(state, b, buf_dt(state)) {
+            if !ofsj.read(state, b, buf_dt(state)) {
                 leave(state, flags)
                 return n
             }
@@ -1454,7 +1505,7 @@ fn size_write(state: u64, ino: u64, neu: u64, nur_groesser: bool) -> bool {
     if ino == 0 || ino > inode_count(state) {
         return false
     }
-    if !blk.read(state, inode_block_of(state, ino), buf_in(state)) {
+    if !ofsj.read(state, inode_block_of(state, ino), buf_in(state)) {
         return false
     }
     let at: u64 = buf_in(state) + inode_off(state, ino)
@@ -1467,7 +1518,7 @@ fn size_write(state: u64, ino: u64, neu: u64, nur_groesser: bool) -> bool {
     }
     let kind: u64 = get64(at + I_TYPE)
     put64(at + I_SIZE, neu)
-    if !blk.write(state, inode_block_of(state, ino), buf_in(state)) {
+    if !ofsj.write(state, inode_block_of(state, ino), buf_in(state)) {
         return false
     }
     if kind == T_FILE {
@@ -1490,16 +1541,45 @@ fn write_at(state: u64, ino: u64, off: u64, src: u64, len: u64) -> u64 {
         if chunk > len - n {
             chunk = len - n
         }
+        // ------------------------------------------- RUNDE FSROBUST
+        //
+        // EIN SCHREIBEN, DAS GROESSER IST ALS DAS JOURNAL, WIRD ZERLEGT.
+        // Das Journal traegt 512 Bloecke; ein `write` von einem
+        // Megaoktett sind 2048. Es gibt drei Moeglichkeiten, damit
+        // umzugehen, und zwei davon sind falsch: das Journal so gross
+        // machen wie die groesste denkbare Schreiboperation (es gibt
+        // keine groesste), oder die Umschreibung ueberlaufen lassen
+        // (dann ist gar nichts mehr unteilbar). Die dritte ist diese:
+        // die Folge in Stuecke schneiden, von denen JEDES fuer sich
+        // ganz oder gar nicht geschieht.
+        //
+        // DIE GROESSE WIRD VOR DEM SCHNITT MITGESCHRIEBEN. Ohne das
+        // haette eine Datei nach einem Stromausfall mitten in einem
+        // grossen `write` zwar die richtigen Oktette, aber die alte
+        // Laenge -- der Rest waere unerreichbar und trotzdem belegt.
+        // So endet sie auf einer Blockgrenze, und was dasteht, ist
+        // wirklich da.
+        //
+        // Die acht Plaetze Vorrat sind fuer den Inode, den Kartenblock
+        // und die bis zu drei Zeigerbloecke, die EIN weiterer Block
+        // kosten kann.
+        if ofsj.enabled(state) && ofsj.room(state) < 8 {
+            if n > 0 {
+                size_write(state, ino, off + n, true)
+                touch_mtime(state, ino)
+            }
+            ofsj.chunk(state)
+        }
         let b: u64 = file_block(state, ino, pos / BS, true)
         if b == 0 {
             stop = true
         } else {
-            if !blk.read(state, b, buf_dt(state)) {
+            if !ofsj.read(state, b, buf_dt(state)) {
                 leave(state, flags)
                 return n
             }
             copy(src + n, buf_dt(state) + inb, chunk)
-            if !blk.write(state, b, buf_dt(state)) {
+            if !ofsj.write(state, b, buf_dt(state)) {
                 leave(state, flags)
                 return n
             }
@@ -1653,7 +1733,7 @@ fn dir_add(state: u64, dir: u64, name: u64, ino: u64) -> bool {
     if !punktname(name) {
         var kind: u64 = 0
         var sz: u64 = 0
-        if blk.read(state, inode_block_of(state, ino), buf_in(state)) {
+        if ofsj.read(state, inode_block_of(state, ino), buf_in(state)) {
             let at: u64 = buf_in(state) + inode_off(state, ino)
             kind = get64(at + I_TYPE)
             sz = get64(at + I_SIZE)
@@ -1700,7 +1780,7 @@ fn dir_remove(state: u64, dir: u64, name: u64) -> u64 {
             if !punktname(name) {
                 var kind: u64 = 0
                 var sz: u64 = 0
-                if blk.read(state, inode_block_of(state, ino), buf_in(state)) {
+                if ofsj.read(state, inode_block_of(state, ino), buf_in(state)) {
                     let at: u64 = buf_in(state) + inode_off(state, ino)
                     kind = get64(at + I_TYPE)
                     sz = get64(at + I_SIZE)
@@ -2286,6 +2366,12 @@ fn format(state: u64) -> bool {
 }
 
 fn format_as(state: u64, v: u64, inodes: u64) -> bool {
+    // RUNDE FSROBUST: WAEHREND DES FORMATIERENS GIBT ES KEIN JOURNAL.
+    // Es gaebe auch nichts zu schuetzen -- die Platte hat noch keinen
+    // Zustand, den man verlieren koennte. Was ein halb geschriebenes
+    // Format schuetzt, ist etwas anderes und steht weiter unten: der
+    // Superblock geht als LETZTES hin.
+    ofsj.disable(state)
     let flags: u64 = enter(state)
     // RUNDE K13: DIE FASSUNG STEHT VOR DEM ERSTEN BLOCK, den dieses
     // Format schreibt. `dir_init` weiter unten geht durch `write_at` und
@@ -2322,13 +2408,25 @@ fn format_as(state: u64, v: u64, inodes: u64) -> bool {
     let bms: u64 = BITMAP_BLOCK
     let itab: u64 = bms + bmb
     let itb: u64 = (inodes + ipb - 1) / ipb
-    let ds: u64 = itab + itb
+    // RUNDE FSROBUST: DER JOURNALBEREICH LIEGT ZWISCHEN INODETABELLE UND
+    // DATEN, und er ist damit von selbst belegt -- die Karte traegt
+    // alles vor `ds` als besetzt ein, das tut sie seit Runde 62. Es
+    // braucht keine Sonderbehandlung im Zuteiler und keine im `df`.
+    // Ohne das Wort `jrnlfmt` ist `jb` null, und dann ist dieses Format
+    // Oktett fuer Oktett das von gestern.
+    var jb: u64 = 0
+    if v >= OFS_V3 && kstate.mode_on(state, kstate.O_JRNLFMT) {
+        jb = ofsj.BLOCKS_NEEDED
+    }
+    let js: u64 = itab + itb
+    let ds: u64 = js + jb
     if total < ds + 8 {
         leave(state, flags)
         return false
     }
     geom3(state, bms, bmb, itab, isz, ipb, dent, nlen)
     geom(state, inodes, ds)
+    geom_j(state, js, jb)
     // RUNDE INSTALL: was frisch formatiert wird, ist genau so gross wie
     // das Geraet -- die Zahl steht trotzdem da, damit `total_blocks`
     // nicht auf die Vorgabe zurueckfaellt.
@@ -2354,10 +2452,18 @@ fn format_as(state: u64, v: u64, inodes: u64) -> bool {
         put64(buf_sb(state) + SB_DIRENT, dent)
         put64(buf_sb(state) + SB_NAMELEN, nlen)
     }
-    if !blk.write(state, 0, buf_sb(state)) {
-        leave(state, flags)
-        return false
+    if jb != 0 {
+        put64(buf_sb(state) + SB_JSTART, js)
+        put64(buf_sb(state) + SB_JBLOCKS, jb)
     }
+    // DER SUPERBLOCK GEHT NICHT HIER HIN, SONDERN GANZ ANS ENDE, und das
+    // ist die zweite Haelfte der Ausfallsicherheit dieser Runde. Ein
+    // Formatieren, dem der Strom ausgeht, hinterliess bis heute einen
+    // Superblock mit gueltiger Kennung ueber einer Karte und einer
+    // Inodetabelle, die es noch gar nicht gab -- `mount` glaubte ihm und
+    // las Muell als Inodes. Steht die Kennung ZULETZT da, ist ein
+    // abgebrochenes Format schlicht "keine Platte dieser Art", und das
+    // ist die Wahrheit ueber sie.
     // The bitmap: everything up to the data area is taken. Sie ist jetzt
     // mehrblockig, also wird sie blockweise geschrieben -- der erste
     // Block traegt die Bits der Verwaltung, alle weiteren sind leer.
@@ -2416,15 +2522,52 @@ fn format_as(state: u64, v: u64, inodes: u64) -> bool {
     // root ueberhaupt etwas -- ein System, in dem sich niemand anmelden
     // kann, weil /etc nicht zu betreten ist.
     set_meta(state, 1, 493, 0, 0)
+    // RUNDE FSROBUST: der Bestaetigungsblock des frischen Journals wird
+    // genullt. Ohne das koennte auf einer wiederverwendeten Platte eine
+    // ALTE Bestaetigung stehenbleiben und nach dem naechsten Einhaengen
+    // Bloecke nachtragen, die zu einem Dateisystem gehoerten, das es
+    // nicht mehr gibt.
+    if jb != 0 {
+        ofsj.clear(state, js, jb)
+    }
+    // Und JETZT der Superblock. Alles, worauf er zeigt, steht schon da.
+    if !blk.write(state, 0, buf_sb(state)) {
+        kstate.set(state, kstate.FS_READY, 0)
+        leave(state, flags)
+        return false
+    }
+    blk.flush(state)
     leave(state, flags)
+    if jb != 0 {
+        ofsj.setup(state, js, jb)
+    }
     return true
+}
+
+// RUNDE FSROBUST: wo das Journal dieser Platte liegt und ob es an ist.
+// `procfs` und `/bin/fsck` fragen danach.
+fn journal_start(state: u64) -> u64 {
+    return kstate.get(state, kstate.FSG_OFF + G_JSTART)
+}
+
+fn journal_blocks(state: u64) -> u64 {
+    return kstate.get(state, kstate.FSG_OFF + G_JBLOCKS)
+}
+
+fn journal_on(state: u64) -> bool {
+    return ofsj.enabled(state)
 }
 
 // Whatever does not carry the magic number is not a file system of this
 // kind. `mount` says so instead of interpreting foreign octets as inodes.
 fn mount(state: u64) -> bool {
+    // RUNDE FSROBUST: SOLANGE NICHT NACHGETRAGEN IST, GIBT ES KEIN
+    // JOURNAL. `ofsj.replay` schreibt mit `blk.write` und nicht ueber
+    // die Journalschicht -- es gaebe auch nichts zu protokollieren.
+    ofsj.disable(state)
     let flags: u64 = enter(state)
     kstate.set(state, kstate.FS_READY, 0)
+    geom_j(state, 0, 0)
     if !blk.read(state, 0, buf_sb(state)) {
         leave(state, flags)
         return false
@@ -2432,6 +2575,33 @@ fn mount(state: u64) -> bool {
     if get64(buf_sb(state) + SB_MAGIC) != MAGIC {
         leave(state, flags)
         return false
+    }
+    // ------------------------------------------------ RUNDE FSROBUST
+    //
+    // DAS NACHTRAGEN STEHT VOR JEDER ANDEREN PRUEFUNG, und die
+    // Reihenfolge ist keine Geschmacksfrage: was im Journal steht, kann
+    // die Karte, die Inodetabelle ODER den Superblock selbst betreffen.
+    // Wer zuerst die Geometrie liest und dann nachtraegt, rechnet mit
+    // Zahlen von vor dem Stromausfall.
+    //
+    // Die Kennung ist schon geprueft -- ohne sie waeren `SB_JSTART` und
+    // `SB_JBLOCKS` zwei beliebige Zahlen einer fremden Platte, und
+    // danach zu schreiben waere schlimmer als gar nichts zu tun.
+    let js0: u64 = get64(buf_sb(state) + SB_JSTART)
+    let jb0: u64 = get64(buf_sb(state) + SB_JBLOCKS)
+    if js0 != 0 && jb0 >= ofsj.BLOCKS_NEEDED
+        && js0 + jb0 <= blk.blocks(state) {
+        if ofsj.replay(state, js0, jb0) != 0 {
+            // Der Superblock kann selbst nachgetragen worden sein.
+            if !blk.read(state, 0, buf_sb(state)) {
+                leave(state, flags)
+                return false
+            }
+            if get64(buf_sb(state) + SB_MAGIC) != MAGIC {
+                leave(state, flags)
+                return false
+            }
+        }
     }
     if get64(buf_sb(state) + SB_BSIZE) != BS {
         leave(state, flags)
@@ -2552,6 +2722,23 @@ fn mount(state: u64) -> bool {
     kstate.set(state, kstate.FS_ROOT, r)
     kstate.set(state, kstate.FS_READY, 1)
     leave(state, flags)
+    // RUNDE FSROBUST: JETZT erst wird das Journal scharf. Vorher waere
+    // jede Verrichtung von `mount` selbst in eine Umschreibung geraten,
+    // die niemand bestaetigt.
+    //
+    // DIE PRUEFUNG IST DIESELBE WIE OBEN, und sie steht zweimal da,
+    // weil sie zweimal etwas anderes verhindert: oben, dass eine
+    // fremde Zahl zum Schreiben fuehrt; hier, dass ein Journal
+    // angemeldet wird, das ausserhalb der Platte oder INNERHALB des
+    // Datenbereichs liegt. Das zweite waere das schlimmere: das Journal
+    // wuerde Bloecke ueberschreiben, die zu Dateien gehoeren.
+    let js: u64 = get64(buf_sb(state) + SB_JSTART)
+    let jb: u64 = get64(buf_sb(state) + SB_JBLOCKS)
+    if js != 0 && jb >= ofsj.BLOCKS_NEEDED && js >= itab + noetig
+        && js + jb <= ds && js + jb <= blk.blocks(state) {
+        geom_j(state, js, jb)
+        ofsj.setup(state, js, jb)
+    }
     return true
 }
 
@@ -2661,7 +2848,7 @@ fn scan(state: u64, cur: u64, out: u64, max: u64) -> u64 {
                                 // Felder: `inode_get` liest je Aufruf
                                 // einen Block, und Groesse und Art
                                 // stehen im selben.
-                                if blk.read(state,
+                                if ofsj.read(state,
                                     inode_block_of(state, child),
                                     buf_in(state)) {
                                     let at2: u64 = buf_in(state)
