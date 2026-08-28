@@ -392,16 +392,19 @@ sn=$(spmax "$F" sauber 4)
 rc=$(run_case waitfirst "$TMPD/d0.img" "osum waitfirst $BASE script=sh /t/kurz.sh" 150 -no-reboot)
 WF="$TMPD/waitfirst.txt"
 wn=$(spmax "$WF" sauber 4)
-# DIE DEUTLICHSTE ZUSAGE ZUERST: mit dem alten `wait4` erfaehrt init NIE,
-# dass die `ctrl`-Zeile geendet hat. Die Shell schreibt `sh: bye`, und
-# danach passiert nichts mehr -- die Maschine kommt nicht herunter, und
-# der Lauf endet ueber das Zeitlimit (124) statt ueber ACPI (0).
-has "$WF" "sh: bye" "GEGENPROBE waitfirst: die ctrl-Zeile endet wie immer"
-hasnot "$WF" "init: herunterfahren" "aber init erfaehrt es nie -- der Zombie wird nicht abgeholt"
-is "und die Maschine kommt nicht herunter (Zeitlimit statt ACPI)" "$rc" "124"
-if [ -n "${wn:-}" ] && [ -n "${sn:-}" ] && [ "$wn" -lt "$sn" ]; then
-    ok "auch das Einsammeln bleibt liegen: $wn Starts statt $sn im behobenen Lauf"
-else bad "GEGENPROBE waitfirst traegt nicht: $wn Starts gegen $sn"; fi
+# WAS MIT DEM ALTEN `wait4` GESCHIEHT, GEMESSEN: die Shell startet noch
+# (`==BEGIN==` steht da), aber sie kommt nicht bis zu ihrer zweiten
+# Zeile. init holt keinen einzigen Zombie ab, die Dienste mit `respawn`
+# stehen fuer immer auf `running`, und die Maschine ist nach ein paar
+# Sekunden nicht mehr zu gebrauchen. Sie endet dann auch nicht ueber die
+# `ctrl`-Zeile, sondern erst, wenn init nach hundert Sekunden Leerlauf
+# von selbst abschaltet.
+has "$WF" "==BEGIN==" "GEGENPROBE waitfirst: die Shell startet noch"
+hasnot "$WF" "==END==" "aber sie kommt nicht bis zum Ende ihres Skripts"
+hasnot "$WF" "sauber " "und es gibt nicht EINE Ausgabe von svc status im ganzen Lauf"
+if [ -n "${sn:-}" ] && [ "$sn" -gt 5 ]; then
+    ok "im behobenen Lauf dagegen: $sn Starts desselben Dienstes, alle eingesammelt"
+else bad "der Vergleichswert aus dem behobenen Lauf fehlt (${sn:-?})"; fi
 
 echo "== 4. DIE GEGENPROBE ZUM ZIEL: derselbe Baum mit /etc/ziel=grafik =="
 rc=$(run_case grafik "$TMPD/dg.img" "osum $BASE script=sh /t/kurz.sh" 300 -no-reboot)
