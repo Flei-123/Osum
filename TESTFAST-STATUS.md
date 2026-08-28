@@ -159,3 +159,71 @@ an -- faellt ein Abschnitt daran, wird er notiert und auf TCG gehalten.
 * Kein Test entschaerft, keiner uebersprungen.
 * Nur `tools/`, `tests/` und `test.sh` angefasst -- **kein `kernel/`**.
 * Nichts nach `main` gemerged, `mergeline` unberuehrt.
+
+---
+
+## ZWISCHENSTAND (Laeufe A und B unterwegs)
+
+### Was sich schon klar zeigt
+
+**1. KVM hilft bei diesem Kernelstand fast nirgends -- nicht weil es
+langsam waere, sondern weil der Kernel darunter stehenbleibt.**
+
+Von den ersten 15 Abschnitten unter KVM sind **11 rot**, und sie fallen
+ALLE mit demselben Muster:
+
+```
+kernel     firnc0: QEMU exit code 63, expected 21
+osum       QEMU exit code 63, expected 21
+pci        plain machine: exit code 63, expected 21
+posix      QEMU exit code 63, expected 21
+userland   t1: QEMU exit code 63, expected 21
+caps       firnc0: Beendigungscode 63, erwartet 21
+boot       firnc0: -kernel endet mit 63, erwartet 21
+gfx        der Kern beendet sich sauber: 63, erwartet eq 21
+unix       QEMU-Beendigungscode 63, erwartet 21
+```
+
+63 heisst laut Kopf von `test.sh`: *der Kernel ist an einer Ausnahme
+stehengeblieben*. Es ist **ein** Fehler und nicht neun -- die Ausgabe
+bricht jeweils genau dort ab, wo Ring 3 anfaengt (`ring3: syscall ...`
+fehlt in allen). Das passt auf den Selektorfehler im `sysret`-Rueckweg,
+den die Runde `kvmfix` behebt. Diese Runde fasst `kernel/` nicht an.
+
+**2. Die Zeiten der roten Abschnitte sind als Messwert wertlos.**
+Ein Lauf, der nach zwei Sekunden an einer Ausnahme stirbt, ist "schnell";
+ein Test, der auf eine Zeile wartet, die nie kommt, laeuft in sein
+`timeout` von 180 s. Beides steht in der Tabelle, beides misst nicht die
+Geschwindigkeit von KVM. `osum` ist unter KVM sogar **langsamer**
+(90,8 s gegen 71,4 s) -- die Zeitgrenzen laufen voll.
+
+**3. Wo KVM nichts bringt, obwohl alles gruen ist.**
+
+| Abschnitt | TCG | KVM |
+|---|---:|---:|
+| `freestanding` | 40,5 s | 40,5 s |
+| `core` | 62,6 s | 62,5 s |
+| `boot` | 43,0 s | 42,5 s |
+
+Auf die Millisekunde gleich. Diese Abschnitte verbringen ihre Zeit im
+**Firn-Uebersetzer auf dem Wirt**, nicht in QEMU. Die 4,6x aus der
+Vorprobe gelten fuer einen Kernelboot, nicht fuer einen Abschnitt.
+Deshalb wird hier abschnittsweise gemessen und nicht hochgerechnet.
+
+**Folgerung, die sich abzeichnet:** der grosse Hebel dieser Runde ist die
+**Parallelisierung**, nicht KVM. Parallelisierung verkuerzt auch die
+Uebersetzerzeit, KVM nicht.
+
+### Noch offen
+
+* Laeufe A (tcg/seriell) und B (kvm/seriell) laufen noch.
+* Lauf C (kvm/parallel) danach, mit gefuellter Ausnahmeliste.
+* **Gefunden und noch zu beheben:** bei `OSUM_JOBS=1` erscheint die
+  Abschnitts-Ueberschrift jetzt NACH dem Lauf statt davor -- beim alten
+  Code sah man beim Zusehen, wo man gerade ist. Wird nachgezogen,
+  sobald die Messlaeufe test.sh freigeben.
+* **Gefunden und schon geschrieben, noch nicht eingebaut:**
+  `tools/lib/work-patch.py` -- zwei Abnahmen aus demselben Arbeitsbaum
+  ueberschreiben sich gegenseitig `.test-work/<name>.log`. Deshalb laeuft
+  Lauf A in einem zweiten Arbeitsbaum (`/root/tf-osum-a`). Mit
+  `$OSUM_WORK` geht es kuenftig auch ohne.
