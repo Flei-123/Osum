@@ -263,6 +263,58 @@ Beleg fuer den Zustand vorher und wird nicht geloescht.
 
 ---
 
+## LAUF C (nachher: KVM, parallel) -- LAEUFT, mit einer Einschraenkung
+
+Gestartet 12:07 mit `OSUM_JOBS=6`, accel automatisch (= kvm).
+
+**Die Lage auf dem Wirt hat sich waehrenddessen dramatisch verschlechtert.**
+Beim Start liefen drei fremde Vollabnahmen, inzwischen sind es fuenf
+(`kvmfix-base`, `kvmfix-osum`, `mgline` und weitere). Die Last stieg von
+6,7 auf **31** -- auf zwoelf Kernen. Mitgeschrieben in `.mess/last-C.txt`.
+
+**Was das fuer die Zahlen bedeutet, unumwunden:**
+
+* Die **Einzelzeiten dieses Laufs sind unbrauchbar**. `k15` steht mit
+  2222 s da (unter TCG allein: 843 s), `theme` mit 1877 s (vorher 211 s).
+  Das misst die fremden Runden, nicht diesen Zweig.
+* Die **Ergebnisse** sind teilweise ebenfalls Lastartefakte. Zwei rote
+  Abschnitte beweisen es unmittelbar:
+  * `smp` ist **TCG-fest** und kann von KVM gar nicht betroffen sein --
+    er faellt mit `single-threaded emulation stays near 1.0: 1773,
+    expected lt 1300`. Das ist eine Zeitmessung unter Last 15+.
+  * `arm` laeuft auf `qemu-system-aarch64`, also ebenfalls ohne KVM,
+    und ist trotzdem rot.
+* Ein Abschnitt zeigt aber genau den Fall, den der Auftrag erwartet hat:
+  `kernel` faellt mit `context switches: 16, expected ge 20` und
+  `a turn lasts 133/100 ticks, expected around 200`. **Kein Absturz mehr**
+  (kein `exit 63`), sondern ein Test, der gegen die deterministischen
+  Ticks von TCG geeicht ist und unter echter Hardware-Zeit anders misst.
+
+**Trotzdem ein klares Bild -- das Kippen ist echt:** vor `kvmfix` waren
+unter KVM **20 von 30** Abschnitten rot, und zwar alle mit `exit 63`.
+Jetzt sind es bei 28 ausgegebenen Abschnitten **10**, davon drei bekannte
+Vorschaeden (`k14`, `k16`, `icons`) und zwei nachweisbare Lastartefakte
+(`smp`, `arm`). Bleiben fuenf (`kernel`, `pci`, `k13`, `k18`, `k17`), die
+einzeln und bei ruhigem Wirt nachzumessen sind.
+
+Und die Gegenrichtung: `net` lief unter KVM in **162,7 s** gegen 318,8 s
+unter TCG -- **und war gruen**, waehrend derselbe Abschnitt vor `kvmfix`
+unter KVM den Netzstack gar nicht hochbekam.
+
+### Die systemweite Netzsperre hat einen Preis
+
+Der Lauf stand ab 12:51 fuer ueber zehn Minuten bei 28 von 36, ohne dass
+sich etwas bewegte. Grund: die vier Netz-Abschnitte teilen sich die
+Sperre `/tmp/osum-netz.lock` -- und die gilt **wirtsweit**, also auch
+gegenueber den fuenf fremden Abnahmen. Bei sechs gleichzeitigen Abnahmen
+wartet jeder auf jeden.
+
+Das ist der Preis der Korrektheit und er ist bewusst bezahlt: ohne die
+Sperre gaebe es `RTNETLINK answers: File exists` und falsche rote
+Abschnitte. Wer den Wirt allein hat, merkt davon nichts.
+
+---
+
 ## Offen
 
 * **Die beiden Endlaeufe auf dem gefixten Kernel:** vorher (TCG, seriell)
