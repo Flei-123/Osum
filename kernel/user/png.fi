@@ -1,0 +1,407 @@
+// SPDX-License-Identifier: MIT
+// kernel/user/png.fi -- RUNDE SNIP: ein PNG schreiben, ohne das Bild zu
+// besitzen.
+//
+// =====================================================================
+// DIE EINE BEDINGUNG, DIE DIESE DATEI FORMT
+// =====================================================================
+//
+// EIN PROGRAMM AUF DIESER MASCHINE HAT 1 MiB. `proc.IMAGE_BASE` ist
+// 0x40100000, `proc.IMAGE_END` 0x40200000, und dazwischen liegt ALLES:
+// Code, Konstanten, Daten, unbelegte Daten, die Streuwerttabellen des
+// Packers. Ein Bildschirmfoto von 800x600 sind 1 920 000 Oktette -- das
+// Bild passt nicht hinein, nicht einmal allein.
+//
+// ALSO BESITZT DIESER KODIERER DAS BILD NIE. Er bekommt eine Funktion
+// gereicht, die ihm EINE ZEILE holt (aus dem Standbild des Kerns,
+// `SN_READ`), filtert sie, schiebt sie durch den Packer und schreibt
+// das Ergebnis in die Datei. Zu jedem Zeitpunkt liegen zwei Zeilen und
+// ein Ausgabeband im Speicher: 800 * 4 + 800 * 3 + 1 + 8192 sind
+// knapp 14 KiB.
+//
+// =====================================================================
+// WAS ES SCHREIBT
+// =====================================================================
+//
+//   Signatur  89 50 4E 47 0D 0A 1A 0A
+//   IHDR      Breite, Hoehe, Bittiefe 8, Farbart 2 (RGB), 0/0/0
+//   IDAT      zlib-Rahmen (0x78 0x01), deflate mit FESTEN Huffman-
+//             Baeumen ueber `flate.band`, Adler-32 dahinter
+//   IEND
+//
+// FARBART 2 UND NICHT 6. Der Rahmenpuffer dieses Systems ist
+// 0x00RRGGBB -- das obere Oktett ist nicht Deckung, sondern nichts. Es
+// mitzuschreiben waere ein Alphakanal, der ueberall 0 ist, und ein
+// Betrachter, der ihn ernst nimmt, zeigte ein vollstaendig
+// durchsichtiges Bild. Nebenher spart es ein Viertel der Rohdaten; die
+// Recherche nennt genau das als die billigste Optimierung fuer
+// Bildschirmfotos.
+//
+// FILTER: ADAPTIV, NACH DER STANDARDHEURISTIK. Je Zeile werden die fuenf
+// Filter (None, Sub, Up, Average, Paeth) gerechnet und der genommen, bei
+// dem die Summe der Betraege der gefilterten Oktette am kleinsten ist --
+// die Regel aus der PNG-Spezifikation, und laut Recherche bei
+// Bildschirmfotos oft mehr wert als die Feinabstimmung des Packers.
+// Gemessen in tools/snip/run.sh, Abschnitt 3: mit Filtern gegen ohne.
+//
+// KEIN ECHTER DEFLATE ZWEITER STUFE (eigene Huffman-Baeume). Der Packer
+// dieses Baums (`kernel/user/flate.fi`, Runde K11) kann feste Baeume,
+// und die liefern laut Recherche 60 bis 75 Prozent dessen, was zlib auf
+// Stufe 6 schafft. Was hier stattdessen investiert ist, sind die
+// adaptiven Filter -- die Stelle mit dem besten Verhaeltnis.
+//
+// DIE ACROPALYPSE-FALLE (CVE-2023-21036) IST HIER GESCHLOSSEN, und zwar
+// an der einzigen Stelle, an der man sie schliessen kann: `oeffne` legt
+// die Datei mit O_TRUNC an. Wer ein zugeschnittenes Bild ueber ein
+// groesseres schreibt, ohne zu kuerzen, laesst hinter dem IEND die
+// Reste des Originals stehen -- und die sind rekonstruierbar. Genau das
+// ist Google und Microsoft 2023 passiert.
+
+profile kernel
+
+import ulib
+import flate
+
+export {
+    schreibe, MAXW, fehler, F_OK, F_OPEN, F_WRITE, F_ROOM, F_WIDE,
+    filter_wahl, gefiltert, filter_gewaehlt
+}
+
+// Die breiteste Zeile, die dieser Kodierer nimmt. 1024 ist die Grenze
+// von `wig.MAX_ROW`, also das, was auch der Fensterserver in einem Zug
+// befoerdert; der Bildschirm dieser Runde ist 800 breit.
+const MAXW: u64 = 1024
+
+const F_OK: u64 = 0
+const F_OPEN: u64 = 1 // die Datei liess sich nicht anlegen
+const F_WRITE: u64 = 2 // das Schreiben ging schief
+const F_ROOM: u64 = 3 // das Band ist zu klein geworden
+const F_WIDE: u64 = 4 // breiter als MAXW
+
+// Das Ausgabeband. Achttausend Oktette: gross genug, dass eine
+// gepackte Zeile fast immer in einem Stueck hinausgeht, klein genug,
+// dass zwei davon plus die Zeilen unter zwanzig Kilooktetten bleiben.
+const BAND: u64 = 8192
+
+static mut zeile: [u8; 4096] = [0 as u8; 4096] // MAXW * 4, roh
+static mut vorher: [u8; 3072] = [0 as u8; 3072] // MAXW * 3, die Zeile davor
+static mut jetzt: [u8; 3072] = [0 as u8; 3072] // MAXW * 3, diese Zeile
+static mut gef: [u8; 3073] = [0 as u8; 3073] // 1 + MAXW * 3, gefiltert
+static mut prob: [u8; 3072] = [0 as u8; 3072] // Arbeitsfeld der Filterwahl
+static mut band: [u8; 8192] = [0 as u8; 8192]
+static mut kopf: [u8; 64] = [0 as u8; 64]
+
+static mut fehl: u64 = 0
+static mut fd: u64 = 0
+static mut gew: [u64; 5] = [0 as u64; 5] // wie oft welcher Filter gewann
+static mut wahl_an: u64 = 1 // GEGENPROBE: 0 = immer Filter 0
+
+fn fehler() -> u64 {
+    return fehl
+}
+
+// GEGENPROBE. Mit 0 nimmt jede Zeile den Filter None. Das Bild ist
+// dasselbe, die Datei ist groesser -- und der Unterschied IST die
+// Zusage "die adaptiven Filter tun etwas".
+fn filter_wahl(an: u64) {
+    wahl_an = an
+}
+
+fn filter_gewaehlt(i: u64) -> u64 {
+    if i >= 5 {
+        return 0
+    }
+    return gew[(i) as usize]
+}
+
+fn gefiltert() -> u64 {
+    return gew[0] + gew[1] + gew[2] + gew[3] + gew[4]
+}
+
+// ------------------------------------------------------- die Bausteine
+
+fn be32(p: u64, v: u64) {
+    *((p) as *mut u8) = ((v >> 24) & 255) as u8
+    *((p + 1) as *mut u8) = ((v >> 16) & 255) as u8
+    *((p + 2) as *mut u8) = ((v >> 8) & 255) as u8
+    *((p + 3) as *mut u8) = (v & 255) as u8
+}
+
+fn hinaus(p: u64, n: u64) {
+    if fehl != F_OK {
+        return
+    }
+    if n == 0 {
+        return
+    }
+    if ulib.sys(ulib.SYS_WRITE, fd, p, n) != n {
+        fehl = F_WRITE
+    }
+}
+
+// Ein Chunk: Laenge, Typ, Daten, CRC ueber Typ UND Daten. Der Typ steht
+// mit im Puffer, damit die Pruefsumme in EINEM Aufruf entsteht -- zwei
+// Aufrufe brauchten einen laufenden CRC-Zustand, den `flate.crc32`
+// nicht hat.
+fn chunk(typ: u64, daten: u64, n: u64) {
+    var l: [u8; 4] = [0 as u8; 4]
+    var c: [u8; 4] = [0 as u8; 4]
+    be32((&l[0 as usize]) as u64, n)
+    hinaus((&l[0 as usize]) as u64, 4)
+    // Typ und Daten liegen hier schon hintereinander im Aufrufpuffer.
+    hinaus(typ, 4 + n)
+    // `flate.crc32` liefert den Wert schon FERTIG -- mit 0xFFFFFFFF
+    // vor- und nachverknuepft, wie RFC 1952 ihn verlangt. PNG (RFC
+    // 2083, Abschnitt 15.2) will genau denselben Wert; hier wird
+    // deshalb NICHT noch einmal gedreht. Ein `^ 0xFFFFFFFF` an dieser
+    // Stelle -- der naheliegende Griff, wenn man die Funktion fuer
+    // einen rohen Zustand haelt -- ergibt ein PNG, dessen Pruefsummen
+    // ALLE falsch sind, und das merkt man erst an einem fremden Leser.
+    be32((&c[0 as usize]) as u64, flate.crc32(typ, 4 + n))
+    hinaus((&c[0 as usize]) as u64, 4)
+}
+
+// ------------------------------------------------------- die Filter
+
+fn paeth(a: u64, b: u64, c: u64) -> u64 {
+    // p = a + b - c, dann der naechste der drei. Alles in u64 und mit
+    // Vergleichen statt Betraegen, weil `-` in dieser Sprache bei einem
+    // negativen Ergebnis panickt.
+    var pa: u64 = 0
+    var pb: u64 = 0
+    var pc: u64 = 0
+    // pa = |p - a| = |b - c|
+    if b >= c {
+        pa = b - c
+    } else {
+        pa = c - b
+    }
+    // pb = |p - b| = |a - c|
+    if a >= c {
+        pb = a - c
+    } else {
+        pb = c - a
+    }
+    // pc = |p - c| = |a + b - 2c|
+    let ab: u64 = a + b
+    let cc: u64 = c + c
+    if ab >= cc {
+        pc = ab - cc
+    } else {
+        pc = cc - ab
+    }
+    if pa <= pb && pa <= pc {
+        return a
+    }
+    if pb <= pc {
+        return b
+    }
+    return c
+}
+
+// Ein Oktett filtern. `i` ist die Stelle in der Zeile, `bpp` 3.
+fn fil(art: u64, i: u64, bpp: u64) -> u64 {
+    let x: u64 = (jetzt[(i) as usize]) as u64
+    var a: u64 = 0
+    var b: u64 = 0
+    var c: u64 = 0
+    if i >= bpp {
+        a = (jetzt[((i - bpp)) as usize]) as u64
+        c = (vorher[((i - bpp)) as usize]) as u64
+    }
+    b = (vorher[(i) as usize]) as u64
+    if art == 0 {
+        return x
+    }
+    if art == 1 {
+        return (x -% a) & 255
+    }
+    if art == 2 {
+        return (x -% b) & 255
+    }
+    if art == 3 {
+        return (x -% ((a + b) / 2)) & 255
+    }
+    return (x -% paeth(a, b, c)) & 255
+}
+
+// Die Standardheuristik: die Summe der Betraege der gefilterten Oktette,
+// als VORZEICHENBEHAFTET gelesen -- also 256 - v fuer alles ueber 127.
+// Wer die Oktette als vorzeichenlos summiert, waehlt fast immer Filter 0
+// und hat die Heuristik nicht gebaut, sondern nur ihren Namen benutzt.
+fn last(art: u64, n: u64, bpp: u64) -> u64 {
+    var summe: u64 = 0
+    var i: u64 = 0
+    while i < n {
+        let v: u64 = fil(art, i, bpp)
+        if v < 128 {
+            summe = summe + v
+        } else {
+            summe = summe + (256 - v)
+        }
+        i = i + 1
+    }
+    return summe
+}
+
+// ------------------------------------------------------- das Schreiben
+
+// `hol` ist eine Funktion, die Zeile `y` als 0x00RRGGBB nach `ziel`
+// legt und die Zahl der Oktette zurueckgibt. So bleibt dieser Kodierer
+// unabhaengig davon, WOHER die Bildpunkte kommen -- aus dem Standbild
+// des Kerns, aus einem Fenster, aus einer Datei.
+fn schreibe(pfad: u64, w: u64, h: u64, hol: fn(u64, u64) -> u64) -> u64 {
+    var sig: [u8; 8] = [0 as u8; 8]
+    var ihdr: [u8; 30] = [0 as u8; 30]
+    var iend: [u8; 8] = [0 as u8; 8]
+    fehl = F_OK
+    var i: u64 = 0
+    while i < 5 {
+        gew[(i) as usize] = 0
+        i = i + 1
+    }
+    if w == 0 || h == 0 || w > MAXW {
+        fehl = F_WIDE
+        return fehl
+    }
+    // O_TRUNC. Die Acropalypse-Falle, und sie steht in EINER Zahl.
+    fd = ulib.sys(ulib.SYS_OPEN, pfad, ulib.O_MAKE, 0x1B4)
+    if fd >= 0x8000000000000000 {
+        fehl = F_OPEN
+        return fehl
+    }
+
+    sig[0] = 0x89 as u8
+    sig[1] = 0x50 as u8
+    sig[2] = 0x4E as u8
+    sig[3] = 0x47 as u8
+    sig[4] = 0x0D as u8
+    sig[5] = 0x0A as u8
+    sig[6] = 0x1A as u8
+    sig[7] = 0x0A as u8
+    hinaus((&sig[0 as usize]) as u64, 8)
+
+    // IHDR: der Typ steht vorn im Puffer, dann die dreizehn Oktette.
+    ihdr[0] = 73 as u8 // I
+    ihdr[1] = 72 as u8 // H
+    ihdr[2] = 68 as u8 // D
+    ihdr[3] = 82 as u8 // R
+    be32((&ihdr[4 as usize]) as u64, w)
+    be32((&ihdr[8 as usize]) as u64, h)
+    ihdr[12] = 8 as u8 // acht Bit je Kanal
+    ihdr[13] = 2 as u8 // Farbart 2: RGB ohne Deckung
+    ihdr[14] = 0 as u8 // Kompression: deflate
+    ihdr[15] = 0 as u8 // Filter: die fuenf von PNG
+    ihdr[16] = 0 as u8 // kein Zeilensprung
+    chunk((&ihdr[0 as usize]) as u64, 0, 13)
+
+    idat(w, h, hol)
+
+    iend[0] = 73 as u8 // I
+    iend[1] = 69 as u8 // E
+    iend[2] = 78 as u8 // N
+    iend[3] = 68 as u8 // D
+    chunk((&iend[0 as usize]) as u64, 0, 0)
+
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    return fehl
+}
+
+// Der IDAT-Strom. Er wird in STUECKEN geschrieben, und jedes Stueck ist
+// ein eigener IDAT-Chunk -- PNG erlaubt beliebig viele, und der
+// deflate-Strom laeuft ueber sie hinweg. Genau das macht es moeglich,
+// ein Bild zu schreiben, das nicht in den Speicher passt.
+fn idat(w: u64, h: u64, hol: fn(u64, u64) -> u64) {
+    var zlib: [u8; 2] = [0 as u8; 2]
+    var ad: [u8; 4] = [0 as u8; 4]
+    let n: u64 = w * 3
+    var adler: u64 = 1
+    // Der zlib-Rahmen: 0x78 = deflate mit 32-KiB-Fenster, 0x01 = keine
+    // Voreinstellung, niedrigste Stufe. 0x7801 ist durch 31 teilbar,
+    // und genau das prueft jeder zlib-Leser als erstes.
+    zlib[0] = 0x78 as u8
+    zlib[1] = 0x01 as u8
+    idat_stueck((&zlib[0 as usize]) as u64, 2)
+
+    var y: u64 = 0
+    while y < h && fehl == F_OK {
+        if hol((&zeile[0 as usize]) as u64, y) == 0 {
+            fehl = F_WRITE
+            return
+        }
+        // 0x00RRGGBB -> R, G, B. Der Rahmenpuffer legt ein Bildpunkt
+        // als vier Oktette klein-zuerst ab, also B, G, R, 0.
+        var x: u64 = 0
+        while x < w {
+            jetzt[((x * 3)) as usize] = zeile[((x * 4 + 2)) as usize]
+            jetzt[((x * 3 + 1)) as usize] = zeile[((x * 4 + 1)) as usize]
+            jetzt[((x * 3 + 2)) as usize] = zeile[((x * 4)) as usize]
+            x = x + 1
+        }
+        // Die Filterwahl.
+        var art: u64 = 0
+        if wahl_an != 0 {
+            var beste: u64 = last(0, n, 3)
+            var k: u64 = 1
+            while k < 5 {
+                let s: u64 = last(k, n, 3)
+                if s < beste {
+                    beste = s
+                    art = k
+                }
+                k = k + 1
+            }
+        }
+        gew[(art) as usize] = gew[(art) as usize] + 1
+        gef[0] = art as u8
+        var i: u64 = 0
+        while i < n {
+            gef[((i + 1)) as usize] = fil(art, i, 3) as u8
+            i = i + 1
+        }
+        adler = flate.adler32(adler, (&gef[0 as usize]) as u64, n + 1)
+        // Das Band. Jede Zeile ist ein deflate-Block -- kurz, aber die
+        // Bits laufen ueber die Grenze, es ist EIN Strom.
+        flate.band_begin((&band[0 as usize]) as u64, BAND)
+        if flate.band((&gef[0 as usize]) as u64, n + 1, 0) != flate.E_OK {
+            fehl = F_ROOM
+            return
+        }
+        flate.band_end(1)
+        idat_stueck((&band[0 as usize]) as u64, flate.band_len())
+        // Diese Zeile ist die naechste "Zeile davor".
+        i = 0
+        while i < n {
+            vorher[(i) as usize] = jetzt[(i) as usize]
+            i = i + 1
+        }
+        y = y + 1
+    }
+    be32((&ad[0 as usize]) as u64, adler)
+    idat_stueck((&ad[0 as usize]) as u64, 4)
+}
+
+// Ein IDAT-Chunk. Der Typ muss VOR den Daten im selben Puffer stehen
+// (die Pruefsumme laeuft ueber beides), also wird umkopiert -- vier
+// Oktette je Chunk, und dafuer eine Pruefsumme in einem Zug.
+static mut ip: [u8; 8200] = [0 as u8; 8200]
+
+fn idat_stueck(p: u64, n: u64) {
+    if fehl != F_OK || n == 0 {
+        return
+    }
+    if n > 8192 {
+        fehl = F_ROOM
+        return
+    }
+    ip[0] = 73 as u8 // I
+    ip[1] = 68 as u8 // D
+    ip[2] = 65 as u8 // A
+    ip[3] = 84 as u8 // T
+    var i: u64 = 0
+    while i < n {
+        ip[((i + 4)) as usize] = *((p + i) as *mut u8)
+        i = i + 1
+    }
+    chunk((&ip[0 as usize]) as u64, 0, n)
+}
