@@ -550,7 +550,7 @@ is "nach dem dritten wieder doppelt" "${w3:-fehlt}" "4000"
 g1=$(grep -aoE 'login: gewartet [0-9]+ ms' "$B" | sed -n 1p | grep -oE '[0-9]+')
 g3=$(grep -aoE 'login: gewartet [0-9]+ ms' "$B" | sed -n 3p | grep -oE '[0-9]+')
 if [ -n "${g1:-}" ] && [ "${g1:-0}" -ge 900 ]; then
-    ok "und die Uhr DER MASCHINE bestaetigt es: gefordert 1000 ms, wirklich gewartet ${g1} ms"
+    ok "und die Uhr DER MASCHINE bestaetigt es: gefordert 1000 ms, wirklich gewartet ${g1} ms (untere Schranke -- unter KVM zaehlt sie auch die Zeit mit, in der die vCPU nicht lief)"
 else
     bad "login sagt 1000 ms und hat ${g1:-0} ms gewartet -- da hat niemand geschlafen"
 fi
@@ -575,11 +575,23 @@ f1=$(grep -aoE 'login: warte [0-9]+ ms' "$S" | sed -n 1p | grep -oE '[0-9]+')
 f3=$(grep -aoE 'login: warte [0-9]+ ms' "$S" | sed -n 3p | grep -oE '[0-9]+')
 is "mit verzoegerung_ms=200 in /etc/login.conf wartet login 200 ms" "${f1:-fehlt}" "200"
 is "und beim dritten Mal 800 -- dieselbe Verdopplung, andere Basis" "${f3:-fehlt}" "800"
+# NUR EINE UNTERE SCHRANKE, und der Grund ist gemessen: die Zusage
+# "und die Uhr der Maschine sieht 200 ms statt 1000" ist auf einem
+# GETEILTEN Wirt nicht haltbar. CLOCK_MONOTONIC im Gast zaehlt unter KVM
+# auch die Zeit mit, in der die virtuelle CPU gar nicht lief -- bei
+# `load average` 26 wurden aus 200 angeforderten Millisekunden 3028
+# gemessene. Die Zahl nach OBEN zu pruefen hiesse, die Auslastung des
+# Wirts zu messen und sie `login` anzulasten.
+#
+# Dass /etc/login.conf wirklich gelesen wird, steht deshalb an den zwei
+# Zusagen darueber: `login` nennt 200 und 800 statt 1000 und 4000, und
+# das sind exakte Zahlen aus der Datei. Diese hier sagt nur: es wurde
+# ueberhaupt gewartet.
 h1=$(grep -aoE 'login: gewartet [0-9]+ ms' "$S" | sed -n 1p | grep -oE '[0-9]+')
-if [ -n "${h1:-}" ] && [ "${h1:-0}" -ge 180 ] && [ "${h1:-0}" -lt 900 ]; then
-    ok "und die Uhr der Maschine sieht ${h1} ms statt 1000 -- die Datei WIRD gelesen"
+if [ -n "${h1:-}" ] && [ "${h1:-0}" -ge 180 ]; then
+    ok "und die Uhr der Maschine bestaetigt: gefordert 200 ms, wirklich gewartet ${h1} ms"
 else
-    bad "mit verzoegerung_ms=200 wurden ${h1:-0} ms gewartet"
+    bad "mit verzoegerung_ms=200 wurden nur ${h1:-0} ms gewartet"
 fi
 d=$(( BADDAUER - FASTDAUER ))
 hin "der ganze Lauf: ${FASTDAUER} ms gegen ${BADDAUER} ms, also ${d} ms kuerzer"
