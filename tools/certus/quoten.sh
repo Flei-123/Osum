@@ -39,7 +39,7 @@ mkdir -p "$W"
 export FIRNLIB="$FIRN/lib"
 
 echo "== 1. die drei Treiber uebersetzen =="
-"$FIRNC" -o "$W/b1parse" "$FIRN/lib/browser/parse_main.fi" 2>"$W/b1.log" \
+"$FIRNC" -o "$W/b1parse" "$FIRN/lib/browser/b1_main.fi" 2>"$W/b1.log" \
     && echo "   b1parse  ok" || { echo "   b1parse  FEHLER"; tail -3 "$W/b1.log"; }
 "$FIRNC" -o "$W/b2" "$FIRN/lib/layout/b2_main.fi" 2>"$W/b2.log" \
     && echo "   b2       ok" || { echo "   b2       FEHLER"; tail -3 "$W/b2.log"; }

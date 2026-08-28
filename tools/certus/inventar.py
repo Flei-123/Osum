@@ -69,19 +69,21 @@ def main():
         n[2:].lower().replace("_", "-")
         for n in const_names(casc, "P_")
         if n not in ("P_COUNT", "P_NONE")]
-    out["css_anzeigearten"] = len(const_names(casc, "DI_"))
-    out["css_anzeigearten_namen"] = [n[3:].lower()
-                                     for n in const_names(casc, "DI_")]
+    disp = [n for n in const_names(casc, "D_") if n != "D_COUNT"]
+    out["css_anzeigearten"] = len(disp)
+    out["css_anzeigearten_namen"] = [n[2:].lower().replace("_", "-")
+                                     for n in disp]
 
     s = rd(os.path.join(lib, "css/sel.fi"))
-    out["css_selektorformen"] = len(const_names(s, "SC_"))
-    out["css_selektorformen_namen"] = [n[3:].lower()
-                                       for n in const_names(s, "SC_")]
-    out["css_pseudoklassen"] = len(const_names(s, "PC_"))
+    sim = const_names(s, "SIM_")
+    out["css_selektorformen"] = len(sim)
+    out["css_selektorformen_namen"] = [n[4:].lower() for n in sim]
+    out["css_verknuepfer"] = len([n for n in const_names(s, "CB_")
+                                  if n != "CB_NONE"])
+    out["css_attributoperatoren"] = len(const_names(s, "OP_"))
 
     cv = rd(os.path.join(lib, "css/cv.fi"))
-    out["css_werttypen"] = len(const_names(cv, "V_"))
-    out["css_einheiten"] = len(const_names(cv, "U_"))
+    out["css_knotenarten"] = len(const_names(cv, "CV_"))
 
     b1 = rd(os.path.join(lib, "js/builtin.fi"))
     b2 = rd(os.path.join(lib, "js/builtin2.fi"))
