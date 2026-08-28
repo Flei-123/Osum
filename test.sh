@@ -716,6 +716,19 @@ lauf "25. Akkuanalyse je Programm: die gemessene Gesamtleistung, anteilig zugeor
      tools/powermon/run.sh powermon '^POWERMON: |^        |^  OK    (another table|GEGENPROBE|the two displays|the same energy|the sum of the program|and the kernel.s own rows|the shares add up|the ageing|runtime left|one sample costs|counted and uncounted|at 10 samples|the file stays|AND THE SENTENCE|ON THIS HOST|wigapp= really|the window server counts|distinct colours)'
 lauf "28. derselbe Kernel auf der ECHTEN CPU: /dev/kvm statt Emulation (tools/kvm/run.sh, Runde KVMFIX)" tools/kvm/run.sh kvm '^KVM: |^  OK    (der Kernel ist gebaut|1\.|3\.|4\.)|^  --    (CPU|3\.|4\.)|^KVM: uebersprungen'
 
+# ABSCHNITT 29 -- RUNDE FSROBUST. Der einzige Abschnitt dieser Abnahme,
+# der den Rechner MIT ABSICHT umbringt: QEMU wird mit SIGKILL
+# abgeschossen, mitten in einem Schreibvorgang, zu einem zufaelligen
+# Zeitpunkt, und danach muss dasselbe Dateisystem wieder hochkommen --
+# lesbar, ohne halb geschriebene Datei, mit stimmiger Verwaltung.
+#
+# Er braucht laenger als die meisten anderen, und das liegt in der Natur
+# der Sache: JEDER Lauf ist zweimal booten. Die Zahl der Laeufe steht in
+# FSR_LAEUFE (Vorgabe 10); die Zahl in docs/OFS-JOURNAL.md kommt aus
+# einem Lauf mit 60.
+lauf "29. der Stromausfall: das Journal von OFS, /bin/fsck und die Grenzen (tools/fsrobust/run.sh, Runde FSROBUST)" \
+     tools/fsrobust/run.sh fsrobust '^FSROBUST: |^  OK    (BESCHAEDIGTE FAELLE|ohne Journal treten|groesste Datei|EIN Block weiter|kaputte Abbilder|Laeufe, die danach|die Bestaetigung ist|fsck -r hat|nach der Reparatur|alle Eintraege|und der LETZTE Name|zweimal gebaut|eine Platte OHNE Journal|der Journalbereich liegt)'
+
 echo
 echo "=================================================================="
 if [ "$FAIL" -eq 0 ]; then
