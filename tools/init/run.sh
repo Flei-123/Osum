@@ -219,6 +219,16 @@ spaet:*:once:/bin/echo netz-ist-da:netz
 alt:respawn:/bin/sleep 60
 sh:*:ctrl:/bin/sh
 TAB
+# EINE ZWEITE, MINIMALE TAFEL -- NUR FUER DIE GEGENPROBE ZUM KERNFEHLER.
+# Genau zwei Zeilen, und die Reihenfolge ist der Punkt: `sh` wird zuerst
+# gestartet und steht damit in der Aufgabentafel VOR `sauber`. Mit dem
+# alten `wait4` (das nach dem ERSTEN Kind fragt) trifft die Suche immer
+# das lebende `sh` -- und der Zombie von `sauber` wird NIE abgeholt. So
+# haengt die Gegenprobe nicht davon ab, wer gerade wo in der Tafel liegt.
+cat > "$TMPD/inittab2" <<'TAB2'
+sh:*:ctrl:/bin/sh
+sauber:*:respawn:/bin/true
+TAB2
 printf 'konsole\n' > "$TMPD/ziel"
 printf 'grafik\n'  > "$TMPD/ziel-g"
 
@@ -273,6 +283,11 @@ python3 tools/osum/mkfs.py build "$TMPD/dn.img" $BLOCKS $DIRS $SPEC $DATA \
     >/dev/null 2>&1 \
     && ok "und ein drittes GANZ OHNE /etc/inittab" \
     || bad "mkfs.py fehlgeschlagen (ohne inittab)"
+python3 tools/osum/mkfs.py build "$TMPD/d2.img" $BLOCKS $DIRS $SPEC $DATA \
+    "/etc/inittab=$TMPD/inittab2@644:0:0" "/etc/ziel=$TMPD/ziel@644:0:0" \
+    >/dev/null 2>&1 \
+    && ok "und ein viertes mit genau ZWEI Zeilen -- fuer die Gegenprobe zum Kernfehler" \
+    || bad "mkfs.py fehlgeschlagen (zwei Zeilen)"
 
 m=$(python3 tools/osum/mkfs.py meta "$TMPD/d0.img" /bin/init)
 is "die Rechte von /bin/init im Abbild" "$m" "/bin/init 755 0 0"
@@ -388,23 +403,28 @@ echo "-- 3j. DER KERNFEHLER, DEN DIESE RUNDE GEFUNDEN HAT"
 # steht danach jeder Dienst fuer immer auf `running`, obwohl er tot ist.
 # `waitfirst` stellt den alten Weg wieder her -- und dann bricht die
 # Messung zusammen.
-sn=$(spmax "$F" sauber 4)
-rc=$(run_case waitfirst "$TMPD/d0.img" "osum waitfirst $BASE script=sh /t/kurz.sh" 150 -no-reboot)
+# Zwei Laeufe mit demselben Abbild (zwei Zeilen in der inittab), einmal
+# behoben und einmal mit `waitfirst`. Der Unterschied ist nicht graduell:
+# der eine sammelt jedes Kind ein, der andere kein einziges.
+rc=$(run_case zweizeilen "$TMPD/d2.img" "osum $BASE script=sh /t/kurz.sh" 200 -no-reboot)
+Z="$TMPD/zweizeilen.txt"
+zn=$(spmax "$Z" sauber 4)
+is "behoben: die Maschine kommt sauber herunter" "$rc" "0"
+if [ -n "${zn:-}" ] && [ "$zn" -gt 5 ]; then
+    ok "behoben: der Dienst wurde $zn mal gestartet und jedes Mal eingesammelt"
+else bad "behoben: nur ${zn:-?} Starts -- die Messung taugt so nicht"; fi
+is "und am Ende steht keine Leiche" "$(val "$Z" 'zombies=[0-9]+')" "0"
+
+rc=$(run_case waitfirst "$TMPD/d2.img" "osum waitfirst $BASE script=sh /t/kurz.sh" 200 -no-reboot)
 WF="$TMPD/waitfirst.txt"
 wn=$(spmax "$WF" sauber 4)
-# WAS MIT DEM ALTEN `wait4` GESCHIEHT, GEMESSEN: die Shell startet noch
-# (`==BEGIN==` steht da), aber sie kommt nicht bis zu ihrer zweiten
-# Zeile. init holt keinen einzigen Zombie ab, die Dienste mit `respawn`
-# stehen fuer immer auf `running`, und die Maschine ist nach ein paar
-# Sekunden nicht mehr zu gebrauchen. Sie endet dann auch nicht ueber die
-# `ctrl`-Zeile, sondern erst, wenn init nach hundert Sekunden Leerlauf
-# von selbst abschaltet.
-has "$WF" "==BEGIN==" "GEGENPROBE waitfirst: die Shell startet noch"
-hasnot "$WF" "==END==" "aber sie kommt nicht bis zum Ende ihres Skripts"
-hasnot "$WF" "sauber " "und es gibt nicht EINE Ausgabe von svc status im ganzen Lauf"
-if [ -n "${sn:-}" ] && [ "$sn" -gt 5 ]; then
-    ok "im behobenen Lauf dagegen: $sn Starts desselben Dienstes, alle eingesammelt"
-else bad "der Vergleichswert aus dem behobenen Lauf fehlt (${sn:-?})"; fi
+if [ -n "${wn:-}" ] && [ "$wn" -le 2 ]; then
+    ok "GEGENPROBE waitfirst: derselbe Dienst bleibt bei $wn Starts stehen (behoben: $zn)"
+else bad "GEGENPROBE waitfirst traegt nicht: ${wn:-?} Starts gegen $zn"; fi
+is "und er meldet sich weiter als 'running', obwohl er tot ist" \
+   "$(sp "$WF" sauber 2 tail)" "running"
+hasnot "$WF" "init: herunterfahren" \
+    "und die ctrl-Zeile beendet die Maschine nicht mehr -- init erfaehrt ihr Ende nie"
 
 echo "== 4. DIE GEGENPROBE ZUM ZIEL: derselbe Baum mit /etc/ziel=grafik =="
 rc=$(run_case grafik "$TMPD/dg.img" "osum $BASE script=sh /t/kurz.sh" 300 -no-reboot)
