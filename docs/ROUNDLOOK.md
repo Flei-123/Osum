@@ -959,7 +959,7 @@ half a year, and it is now closed.
 
 ### The proof
 
-Five different characters, four widgets, three windows:
+Six different characters, five widgets, four windows:
 
 | char | string | widget | ink pixels | wrong | tolerance |
 |---|---|---|---|---|---|
@@ -967,6 +967,7 @@ Five different characters, four widgets, three windows:
 | `ä` | `Editor  --  Text schreiben und ändern` | list row | 1340 | **0** | 0 |
 | `Ü` | `Übernehmen` | button | 526 | **0** | 0 |
 | `ö` `ß` | `Größe` | table heading | 282 | **0** | 64 |
+| `Ö` | `Öffnen` | menu item (tools/k15) | 300 | **0** | 96 |
 
 The second row is the string from the photograph.
 
@@ -1021,6 +1022,64 @@ nothing:
 * the tree as it stands → `umschrift=0 eng=0 umlaute=96`, rc=0
 * transliteration written back in two places → 3 findings, rc=1
 * 28 correctly spelled German words with ss/ae/oe/ue → 0 flagged
+
+### The acceptance run
+
+Under the load of the full suite: **28 sections passed, 8 failed, 3044
+assertions**. The baseline on `mergeline` has 5 red (k14, k16, icons,
+netview, tunnel/pakete). 26 sections appear in both logs, **5 newly
+red** — and every one of them was re-run on its own, because a number
+taken under load is not a number:
+
+| section | in the suite | alone | baseline |
+|---|---|---|---|
+| K13 | 86/8 | **99/0** | 99/0 |
+| K14 | 12/2 | **151/1** | 151/1 |
+| K16 | 57/7 | **58/6** | 58/6 |
+| K15 | 250/2 | **252/0** | 252/0 |
+| NET | 74/1 | **75/0** | 75/0 |
+
+K14 running 12 assertions where the baseline runs 151 is the giveaway:
+that is not a failure, it is an abort.
+
+**K15 was the one real defect, and it was mine.** I had pulled two
+occurrences of `"Oeffnen" 96` across to `"Öffnen"` and missed the *loop*
+that rasterises the same three menu items one by one — plus the
+starter's second row, in two places. The second of those is the one that
+matters:
+
+```
+schau_nicht "und in Zeile 1 steht nichts mehr" ... "... und aendern"
+```
+
+A **negative** assertion. With the old wording it would have been green
+for ever after — it looks for something that no longer exists and is
+guaranteed not to find it. It would have gone on printing OK and checked
+nothing. Exactly the fault the rename addendum found in the symbol
+`leiste__paint`, one level down. Both spellings moved; the tolerance,
+the rasterisation and the position did not.
+
+**NET section 9** (`tc netem`, one frame in five thrown away) is a TCP
+throughput test through 20 % packet loss, and it is load-sensitive.
+Measured five times on the same machine:
+
+| tree | load | result |
+|---|---|---|
+| `look`, inside the full suite | high | 74/1 |
+| `look`, alone right after it | 4.3 | 73/2 |
+| `mergeline`, worktree | 3.5 | 75/0 |
+| `look` at `e0a9fec` (before this addendum) | 3.5 | 75/0 |
+| `look`, quiet machine | 3.5 | **75/0** |
+
+The middle two rows are the ones that matter: I did not assume it was
+load, I checked out the baseline and the pre-addendum commit into
+worktrees and ran the same script against them. On a quiet machine all
+three trees give the same 75/0. This addendum touches 21 files and not
+one of them is in the network, K13, K14 or K16 path.
+
+**NETVIEW is better than the baseline**, not worse: 46/117 → 148/22.
+
+`tools/look/run.sh`: **38 passed, 0 failed** (33/0 before this addendum).
 
 ### Found on the way, not fixed
 
