@@ -840,7 +840,7 @@ The kernel does not read files while it boots and this addendum is not
 the round to teach it to, so persistence is a program that runs early
 rather than a line in `kmain`. The **seam** that costs something: the
 shape of that one line is written out in two places, `kernel/user/netview.fi`
-and `kernel/user/einstellungen.fi`, because the settings application does
+and `kernel/user/settings.fi`, because the settings application does
 not fetch a second program to save a setting. It is named here rather
 than hidden.
 
@@ -976,7 +976,7 @@ What is left is three, and all three are switches a person really flips:
 | **Netz** | the machine's address, away and back. **This is not the same switch**: a faked program keeps believing in its invented network after the address is gone, and a real one genuinely loses everything. They sit next to each other because they are two different things, not two words for one. |
 | **Leiste verbergen** | `/etc/taskbar.conf`, `autohide`. It belongs to the taskbar, and so does this panel. |
 
-and a row that opens `/bin/einstellungen`, where the things that are
+and a row that opens `/bin/settings`, where the things that are
 *not* flipped often live.
 
 ### 14.3 Where it appears
@@ -1130,7 +1130,7 @@ it, and **neither was what it looked like**:
    DESKTOP's rule and a good one -- a taskbar that swallowed the
    keyboard would make every key after a click on it useless. But this
    panel is not a taskbar. It lives on the normal layer now and is
-   raised when it opens. The price is one line in `leiste.list_read`: a
+   raised when it opens. The price is one line in `taskbar.list_read`: a
    normal-layer window gets a button in the bar, and a panel that
    belongs to the bar must not stand beside the programs.
 4. **The key is at bits 32..47 of the event word, not at 0.**
@@ -1144,7 +1144,7 @@ it, and **neither was what it looked like**:
 ### 14.7 A seam closed rather than widened
 
 Section 13.6 admitted a seam: the shape of the line `fallback=<word>`
-stood in `netview.fi` **and** in `einstellungen.fi`. The quick settings
+stood in `netview.fi` **and** in `settings.fi`. The quick settings
 would have made that three. So the reader and the writer moved into
 `nv.fi`, where `fb_name` and `fb_word` already live and where all three
 callers already come. There is one shape of that line now.
@@ -1299,8 +1299,8 @@ the drive -- 101 072 to spare, with `libc.io` now pulled into `ps` and
 | `kernel/user/netview.fi` | `/bin/netview` |
 | `kernel/user/nvcheck.fi` | `/bin/nvcheck`, the program that is measured |
 | `kernel/user/ps.fi` | the NET column |
-| `kernel/user/leiste.fi` | the mark in the taskbar |
-| `kernel/user/einstellungen.fi` | the page "Netzzugriff" |
+| `kernel/user/taskbar.fi` | the mark in the taskbar |
+| `kernel/user/settings.fi` | the page "Netzzugriff" |
 | `kernel/user/explorer.fi` | the context menu entry |
 | `kernel/user/launcher.fi` | starting a bundle with its view |
 | `kernel/user/appdir.fi` | `net=` in INFO, `/users/<name>/config/netview`, and the order between them |
