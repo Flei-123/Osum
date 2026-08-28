@@ -1,0 +1,639 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// lib/certus/certus_main.fi -- CERTUS ALS ANWENDUNG VON OSUM. Runde CERTUS.
+//
+// Certus ist Justins Browser, und er ist NICHT in dieser Runde
+// entstanden: die Runden B1 bis B6 im Firn-Baum haben ihn gebaut --
+// Baumbau, Kaskade, Layout, Malen, JavaScript, TLS, Bilder und ein
+// Fenster. Was er bis heute NICHT hatte, ist ein Betriebssystem, in dem
+// er laeuft: sein Fenster war ein X11-Fenster, und Osum hat kein X.
+//
+// Diese Datei ist die Anwendung. Sie ist ABSICHTLICH die Zwillings-
+// schwester von `lib/browser/window_main.fi` aus Runde B5: der ganze
+// Kopfteil -- `render_page`, `fetch`, `to_bgrx`, `ua_sheet` -- ist Zeile
+// fuer Zeile derselbe. Was sich unterscheidet, ist `main`, und was sich
+// darin unterscheidet, sind drei Dinge:
+//
+//   1. DAS FENSTER kommt von `lib/certus/oswin.fi` (Osums Fensterserver)
+//      statt von `lib/browser/x11.fi` (das X-Protokoll).
+//   2. DIE SCHRIFT liegt unter `/lib/sans.ttf`, wo Osums Abbild sie
+//      hinlegt, und nicht unter /usr/share/fonts.
+//   3. DIE BEDIENLEISTE ist eine Zeile Text und keine drei Knoepfe: der
+//      Server setzt Text selbst (WM_TEXT), und ein Adressfeld, in das man
+//      tippt, ist die naechste Runde und nicht diese.
+//
+// WARUM NICHT EINE DATEI MIT EINER WEICHE. Weil `window_main.fi` im
+// Firn-Baum liegt und dieses Repo ihn festgenagelt einbindet
+// (vendor/firn/COMMIT). Eine Weiche darin waere eine Aenderung an einem
+// fremden, festgenagelten Baum -- und der naechste Nachzug haette sie
+// weggeraeumt. Der Preis ist die Verdoppelung des Kopfteils, und er ist
+// hier benannt statt versteckt: bewegt sich B5, muss diese Datei
+// nachgezogen werden.
+//
+//     certus <adresse> [<bild.ppm>] [<ereignisse>]
+//
+// `<bild.ppm>` schreibt die Leinwand, wie sie steht, in eine Datei --
+// das ist nicht Fehlersuche, das ist die MESSUNG: `tools/certus/run.sh`
+// zaehlt darin die Tintenpunkte und die Textbaender. `<ereignisse>` ist,
+// wie viele Ereignisse behandelt werden, bevor das Programm zurueckkehrt
+// (0 = fuer immer); mit 1 malt es einmal und geht.
+import std.rt
+import html.mem
+import browser.node
+import browser.names
+import browser.driver
+import css.tok
+import css.cv
+import css.sel
+import css.cascade
+import layout.box
+import layout.build
+import layout.flow
+import layout.stack
+import font.metrics
+import paint.canvas
+import paint.display
+import paint.painter
+import paint.png
+import paint.jpeg
+import browser.images
+
+import net.http
+import net.url
+import net.httpstate
+import tls.x509
+import certus.oswin
+
+const CHROME_H: usize = 30
+const MAX_PAGE_H: usize = 20000
+const IMGSTORE_BYTES: usize = 65536
+const FONTSET_BYTES: usize = 4096
+
+#[no_gc]
+fn micros() -> u64 {
+    var ts: [i64; 2] = [0; 2]
+    syscall(228, 1, (&ts[0]) as i64, 0, 0, 0, 0)
+    return (ts[0] as u64) * 1000000 + (ts[1] as u64) / 1000
+}
+
+#[no_gc]
+fn lit(out: *mut mem.Buf, p: u64, n: usize) {
+    var i: usize = 0
+    while i < n {
+        mem.buf_push(out, *((p + i as u64) as *mut u8))
+        i = i + 1
+    }
+}
+
+#[no_gc]
+fn decode_bytes(p: u64, n: usize, out: *mut mem.CpBuf) {
+    mem.cp_clear(out)
+    var i: usize = 0
+    while i < n {
+        let c0: u32 = (*((p + i as u64) as *mut u8)) as u32
+        if c0 < 0x80 as u32 {
+            mem.cp_push(out, c0)
+            i = i + 1
+        } else if c0 >= 0xF0 as u32 {
+            mem.cp_push(out, ((c0 & 0x07 as u32) << 18) |
+                ((byte_at(p, n, i + 1) & 0x3F as u32) << 12) |
+                ((byte_at(p, n, i + 2) & 0x3F as u32) << 6) |
+                (byte_at(p, n, i + 3) & 0x3F as u32))
+            i = i + 4
+        } else if c0 >= 0xE0 as u32 {
+            mem.cp_push(out, ((c0 & 0x0F as u32) << 12) |
+                ((byte_at(p, n, i + 1) & 0x3F as u32) << 6) |
+                (byte_at(p, n, i + 2) & 0x3F as u32))
+            i = i + 3
+        } else {
+            mem.cp_push(out, ((c0 & 0x1F as u32) << 6) |
+                (byte_at(p, n, i + 1) & 0x3F as u32))
+            i = i + 2
+        }
+    }
+}
+
+#[no_gc]
+fn byte_at(base: u64, total: usize, k: usize) -> u32 {
+    if k >= total {
+        return 0 as u32
+    }
+    return (*((base + k as u64) as *mut u8)) as u32
+}
+
+fn parse_sheet(text: *mut mem.CpBuf, t: *mut tok.Tokens) -> AllocError!Gc[Cv] {
+    tok.tokenize(t, text)
+    var p: cv.Parser = cv.parser_new(t)
+    return try cv.parse_stylesheet(&p)
+}
+
+fn chain_last(r: Gc[Rule]) -> Gc[Rule] {
+    var x: Gc[Rule] = r
+    while x != gc_null[Rule]() && x.next != gc_null[Rule]() {
+        x = x.next
+    }
+    return x
+}
+
+fn add_sheet(head: Gc[Rule], sheet: Gc[Cv], origin: u32, order: *mut u32,
+    nm: *mut names.Names, tmp: *mut mem.CpBuf) -> AllocError!Gc[Rule] {
+    var next_order: u32 = *order
+    let part = try cascade.collect_rules(sheet, origin, next_order, nm, tmp,
+        &next_order)
+    *order = next_order
+    if part == gc_null[Rule]() {
+        return head
+    }
+    if head == gc_null[Rule]() {
+        return part
+    }
+    let last: Gc[Rule] = chain_last(head)
+    last.next = part
+    return head
+}
+
+fn next_in_order(k: Gc[Node], root: Gc[Node]) -> Gc[Node] {
+    if k.first_child != gc_null[Node]() {
+        return k.first_child
+    }
+    var c: Gc[Node] = k
+    while c != gc_null[Node]() && c != root {
+        if c.next != gc_null[Node]() {
+            return c.next
+        }
+        c = c.parent
+    }
+    return gc_null[Node]()
+}
+
+fn elem_text(k: Gc[Node], out: *mut mem.CpBuf) {
+    mem.cp_clear(out)
+    var c: Gc[Node] = k.first_child
+    while c != gc_null[Node]() {
+        if c.kind == node.K_TEXT {
+            let t: Gc[Text] = c as Gc[Text]
+            node.chain_after_cpbuf(t.data, out)
+        }
+        c = c.next
+    }
+}
+
+fn chain_to_cpbuf(k: Gc[Chain], out: *mut mem.CpBuf) {
+    mem.cp_clear(out)
+    if k == gc_null[Chain]() {
+        return
+    }
+    node.chain_after_cpbuf(k, out)
+}
+
+// Everything of B1..B5 in one call: markup in, a canvas out. `p` is the
+// painter the caller owns -- it holds the pixels and must outlive this.
+fn render_page(html_p: u64, html_n: usize, ua_p: u64, ua_n: usize,
+    au_p: u64, au_n: usize, font_p: u64, font_n: usize,
+    sp: *mut images.ImgStore, fsp: *mut metrics.FontSet,
+    vw: f64, vh: f64, p: *mut painter.Painter,
+    doc_h: *mut f64) -> bool {
+    // ---- the font. On the HEAP and not on the stack: its address is
+    // stamped into every box of the tree, and the escape check of round 79
+    // is right to refuse a frame pointer for that even when the frame in
+    // question is `main`.
+    *fsp = metrics.fontset_new()
+    var fm: u64 = 0
+    if font_n > 0 {
+        if metrics.fontset_load(fsp, font_p as *mut u8, font_n) {
+            fm = fsp as u64
+        }
+    }
+
+    var run: driver.Run = driver.run_new()
+    if !driver.run_init(&run) {
+        return false
+    }
+    var t: tok.Tokens = tok.tokens_new()
+    tok.tokens_init(&t)
+    var text: mem.CpBuf = mem.cp_new()
+    var tmp: mem.CpBuf = mem.cp_new()
+    let nm: *mut names.Names = driver.run_names(&run)
+    var cx: sel.Ctx = sel.ctx_new(nm)
+    sel.ctx_init(&cx)
+    var w: cascade.Winner = cascade.winner_new()
+    var style_word: [u8; 5] = "style"
+    let n_style: u32 = names.names_of_bytes(nm, &style_word[0], 5)
+
+    // ---- 1. HTML -> DOM
+    driver.run_text_out_bytes(&run,
+        html_p as *mut u8, html_n)
+    let rc: u32 = driver.run_document_build(&run)
+    let doc: Gc[Node] = driver.run_document(&run)
+
+    // ---- 2. the stylesheets: the UA sheet, the author sheet, every <style>
+    var rules: Gc[Rule] = gc_null[Rule]()
+    var order: u32 = 0
+    decode_bytes(ua_p, ua_n, &text)
+    let ua = parse_sheet(&text, &t) catch gc_null[Cv]()
+    rules = add_sheet(rules, ua, cascade.ORIGIN_UA, &order, nm, &tmp)
+    catch gc_null[Rule]()
+    decode_bytes(au_p, au_n, &text)
+    let author = parse_sheet(&text, &t) catch gc_null[Cv]()
+    rules = add_sheet(rules, author, cascade.ORIGIN_AUTHOR, &order, nm, &tmp)
+    catch gc_null[Rule]()
+    var sk: Gc[Node] = doc
+    while sk != gc_null[Node]() {
+        if sk.kind == node.K_ELEM && node.elem_name(sk) == n_style {
+            elem_text(sk, &text)
+            let inner = parse_sheet(&text, &t) catch gc_null[Cv]()
+            rules = add_sheet(rules, inner, cascade.ORIGIN_AUTHOR, &order,
+                nm, &tmp) catch gc_null[Rule]()
+        }
+        sk = next_in_order(sk, doc)
+    }
+
+    // ---- 3. the cascade per elem
+    var styles: Gc[GcMap] = gcmap_new(true, true) catch gc_null[GcMap]()
+    let root_style = cascade.style_root() catch gc_null[Style]()
+    sel.ctx_set_hover(&cx, gc_null[Node]())
+    var k: Gc[Node] = doc
+    while k != gc_null[Node]() {
+        if k.kind == node.K_ELEM {
+            var parent_style: Gc[Style] = root_style
+            let parent: Gc[Node] = k.parent
+            if parent != gc_null[Node]() && parent.kind == node.K_ELEM {
+                let found: Gc[Style] = gcmap_get_value[Style](styles,
+                    parent as u64)
+                if found != gc_null[Style]() {
+                    parent_style = found
+                }
+            }
+            var inline_decls: Gc[GcVec] = gc_null[GcVec]()
+            let e: Gc[Elem] = node.node_as_elem(k)
+            let av: Gc[Chain] = node.attr_value(e, n_style, 0)
+            if av != gc_null[Chain]() && node.chain_len(av) > 0 {
+                chain_to_cpbuf(av, &tmp)
+                tok.tokenize(&t, &tmp)
+                var ip: cv.Parser = cv.parser_new(&t)
+                let values = cv.parse_component_value_list(&ip)
+                catch gc_null[Cv]()
+                if values != gc_null[Cv]() {
+                    inline_decls = cascade.parse_inline_declarations(values)
+                    catch gc_null[GcVec]()
+                }
+            }
+            let s = cascade.cascade_elem_inline(rules, k, parent_style,
+                &cx, &w, inline_decls) catch gc_null[Style]()
+            if s != gc_null[Style]() {
+                let ok: bool = gcmap_set_value[Style](styles, k as u64, s)
+                catch false
+            }
+        }
+        k = next_in_order(k, doc)
+    }
+
+    // ---- 4./5. the box tree and its geometry
+    let root: Gc[Box] = build.build_document(doc, styles, root_style, nm)
+    catch gc_null[Box]()
+    var nattached: usize = 0
+    if root != gc_null[Box]() {
+        // ---- 4b. the pictures, BEFORE the geometry: an `<img>` whose
+        // size is not known lays out as an empty box and the page jumps
+        // when it arrives. See lib/browser/images.fi.
+        images.attach_images(root, sp, nm, &nattached)
+        box.box_stamp_font(root, fm)
+        box.box_stamp_alpha(root, 1.0)
+        let okl: bool = flow.layout_document(root, vw, vh) catch false
+        box.box_stamp_clip(root, 0.0 - 1.0e9, 0.0 - 1.0e9, 1.0e9, 1.0e9)
+        images.collect_pending(root, sp, nm, 1.0e9)
+    }
+
+    // ---- 6. the display list
+    let dl: Gc[DisplayList] = display.build_display_list(root, vw, vh,
+        0xFFFFFFFF) catch gc_null[DisplayList]()
+
+    // ---- 7. the picture
+    painter.painter_set_font(p, fm)
+    canvas.canvas_clear(painter.painter_canvas(p), 0xFFFFFFFF)
+    var ncmd: u64 = 0
+    if dl != gc_null[DisplayList]() {
+        ncmd = painter.painter_run(p, dl)
+    }
+
+    *doc_h = vh
+    if root != gc_null[Box]() {
+        if root.h > vh {
+            *doc_h = root.h
+        }
+    }
+    return true
+}
+
+// ------------------------------------------------------------- The chrome
+
+fn to_bgrx(cv: *mut canvas.Canvas, out: *mut mem.Buf, y0: usize,
+    rows: usize) {
+    let w: usize = canvas.canvas_width(cv)
+    let h: usize = canvas.canvas_height(cv)
+    mem.buf_clear(out)
+    var y: usize = 0
+    while y < rows {
+        var xx: usize = 0
+        while xx < w {
+            var v: u32 = 0xFFFFFFFF
+            if y0 + y < h {
+                v = canvas.canvas_get(cv, xx, y0 + y)
+            }
+            mem.buf_push(out, (v & 255 as u32) as u8)
+            mem.buf_push(out, ((v >> 8) & 255 as u32) as u8)
+            mem.buf_push(out, ((v >> 16) & 255 as u32) as u8)
+            mem.buf_push(out, 0 as u8)
+            xx = xx + 1
+        }
+        y = y + 1
+    }
+}
+
+fn arg_len(p: u64) -> usize {
+    return rt.c_length(p)
+}
+
+fn fetch(c: *mut http.Client, addr: *mut mem.Buf, body: *mut mem.Buf,
+    status: *mut mem.Buf) -> bool {
+    var r: http.Response = http.resp_new()
+    http.resp_init(&r)
+    var failed: bool = false
+    let ok: bool = http.http_get(c, mem.buf_ptr(addr) as u64,
+        mem.buf_len(addr), &r) catch | e | http_note(&failed)
+    mem.buf_clear(status)
+    if failed || !ok {
+        var m: [u8; 7] = "no page"
+        lit(status, (&m[0]) as u64, 7)
+        http.resp_free(&r)
+        return false
+    }
+    mem.buf_clear(body)
+    var i: usize = 0
+    while i < http.resp_body_len(&r) {
+        mem.buf_push(body, rt.ld8(http.resp_body_ptr(&r), i))
+        i = i + 1
+    }
+    var st: [u8; 7] = "status "
+    lit(status, (&st[0]) as u64, 7)
+    mem.buf_push_dec(status, http.resp_status(&r) as u64)
+    http.resp_free(&r)
+    return true
+}
+
+fn http_note(failed: *mut bool) -> bool {
+    *failed = true
+    return false
+}
+
+fn ua_sheet(out: *mut mem.Buf) {
+    var s: [u8; 494] = "html,body,div,p,h1,h2,h3,h4,h5,h6,ul,ol,li,table,tr,td,th,form,section,article,header,footer,nav,aside,main,figure,blockquote,pre,hr{display:block} head,script,style,title,meta,link{display:none} img{display:inline-block} b,strong{font-weight:bold} i,em{font-style:italic} body{margin:8px} p{margin:14px 0} h1{font-size:32px;margin:21px 0;font-weight:bold} h2{font-size:24px;margin:19px 0;font-weight:bold} h3{font-size:18px;margin:18px 0;font-weight:bold} a{color:#0000ee} li{margin-left:30px}"
+    lit(out, (&s[0]) as u64, 494)
+}
+
+
+fn arg_num(start: u64, i: usize) -> i64 {
+    if rt.arg_count(start) <= i {
+        return 0
+    }
+    let p: u64 = rt.arg_ptr(start, i)
+    var v: i64 = 0
+    var k: usize = 0
+    while k < rt.c_length(p) {
+        v = v * 10 + ((rt.ld8(p, k) - 48 as u8) as i64)
+        k = k + 1
+    }
+    return v
+}
+
+// Die Bedienleiste: eine Zeile Text auf einem Streifen. Der Server setzt
+// den Text selbst (WM_TEXT) -- damit steht die Adresse da, ohne dass der
+// Browser dafuer seinen eigenen Rasterer anwerfen muss.
+fn draw_chrome(x: *mut oswin.OsWin, addr: *mut mem.Buf,
+    status: *mut mem.Buf) {
+    let w: usize = oswin.oswin_width(x)
+    oswin.oswin_fill(x, 0, 0, w, CHROME_H, 14211288)
+    oswin.oswin_text(x, 8, 20, mem.buf_ptr(addr) as u64,
+        mem.buf_len(addr), 0)
+    if mem.buf_len(status) > 0 && w > 200 {
+        oswin.oswin_text(x, w - 150, 20, mem.buf_ptr(status) as u64,
+            mem.buf_len(status), 8388608)
+    }
+}
+
+fn main(start: u64) -> i32 {
+    if !gc_init() {
+        return 90
+    }
+    if rt.arg_count(start) < 2 {
+        return 2
+    }
+    var addr: mem.Buf = mem.buf_new()
+    mem.buf_init(&addr)
+    let ap: u64 = rt.arg_ptr(start, 1)
+    lit(&addr, ap, arg_len(ap))
+    var events_left: i64 = arg_num(start, 3)
+
+    var c: http.Client = http.client_new()
+    if !http.client_init(&c) {
+        return 91
+    }
+    // DER WURZELSPEICHER. Ohne ihn gibt es kein `https://` -- und dann
+    // sagt der Browser das, statt eine Seite ohne Pruefung zu holen.
+    var trust: [u8; 20] = "/etc/ssl/certs.pem\0\0"
+    let roots: usize = http.client_load_trust(&c, (&trust[0]) as u64)
+
+    var xw: oswin.OsWin = oswin.oswin_new()
+    if !oswin.oswin_open(&xw) {
+        return 95
+    }
+    var title: [u8; 7] = "Certus\0"
+    // Die Fenstergroesse: so gross wie der Arbeitsbereich es zulaesst,
+    // aber nie groesser als das, was der Server traegt (er begrenzt
+    // selbst, und `oswin_create_window` liest die WIRKLICHE Groesse
+    // zurueck).
+    var vw: usize = oswin.oswin_screen_w()
+    var vh: usize = oswin.oswin_screen_h()
+    if vw == 0 || vw > 800 {
+        vw = 800
+    }
+    if vh == 0 || vh > 560 {
+        vh = 560
+    }
+    if !oswin.oswin_create_window(&xw, 0, 0, vw, vh, (&title[0]) as u64) {
+        return 96
+    }
+    vw = oswin.oswin_width(&xw)
+    vh = oswin.oswin_height(&xw)
+
+    let fsp: *mut metrics.FontSet =
+    mem.heap_alloc(FONTSET_BYTES) as *mut metrics.FontSet
+    if fsp as usize == 0 {
+        return 93
+    }
+    let sp: *mut images.ImgStore =
+    mem.heap_alloc(IMGSTORE_BYTES) as *mut images.ImgStore
+    if sp as usize == 0 {
+        return 94
+    }
+    *sp = images.img_store_new()
+    var p: painter.Painter = painter.painter_new()
+    if !painter.painter_init(&p, vw, vh - CHROME_H) {
+        return 92
+    }
+    // DIE SCHRIFT. Osums Abbild legt sie nach /lib/sans.ttf
+    // (tools/desktop/run.sh, tools/k15/run.sh). Ohne sie kommt eine
+    // Seite mit Rechtecken statt Buchstaben heraus -- genau der Fehler,
+    // den `tools/tlsb5/ui_check.py` in Runde B5 gefunden hat, weil es
+    // die dunklen Bildpunkte gezaehlt hat.
+    var f1: [u8; 15] = "/lib/sans.ttf\0\0"
+    var fbuf: rt.Buf = rt.buf_new()
+    let have_font: bool = rt.read_file((&f1[0]) as u64, &fbuf)
+    var body: mem.Buf = mem.buf_new()
+    mem.buf_init(&body)
+    var ua: mem.Buf = mem.buf_new()
+    mem.buf_init(&ua)
+    ua_sheet(&ua)
+    var status: mem.Buf = mem.buf_new()
+    mem.buf_init(&status)
+    var bgrx: mem.Buf = mem.buf_new()
+    mem.buf_init(&bgrx)
+
+    var doc_h: f64 = 0.0
+    var scroll: usize = 0
+    var empty: [u8; 1] = [0; 1]
+
+    let got: bool = fetch(&c, &addr, &body, &status)
+    let okr: bool = render_page(mem.buf_ptr(&body) as u64,
+        mem.buf_len(&body), mem.buf_ptr(&ua) as u64, mem.buf_len(&ua),
+        (&empty[0]) as u64, 0, fbuf.ptr, fbuf.len, sp, fsp, vw as f64,
+        (vh - CHROME_H) as f64, &p, &doc_h)
+
+    // DIE MELDUNG AN DIE MESSUNG, auf Deskriptor 1. Sie steht VOR der
+    // ersten Zeichnung, damit ein Lauf, der am Fenster scheitert, die
+    // Zahlen der Seite trotzdem hergibt.
+    var m1: [u8; 8] = "CERTUS \0"
+    mem.write_all(1, &m1[0], 7)
+    var kn0: [u8; 6] = "roots\0"
+    say_kv((&kn0[0]) as u64, 5, roots as u64)
+    var kn1: [u8; 5] = "body\0"
+    say_kv((&kn1[0]) as u64, 4, mem.buf_len(&body) as u64)
+    var kn2: [u8; 5] = "font\0"
+    say_kv((&kn2[0]) as u64, 4, fbuf.len as u64)
+    var kn3: [u8; 7] = "render\0"
+    say_kv((&kn3[0]) as u64, 6, bool_num(okr))
+    var kn4: [u8; 4] = "got\0"
+    say_kv((&kn4[0]) as u64, 3, bool_num(got))
+    var kn5: [u8; 8] = "dochigh\0"
+    say_kv((&kn5[0]) as u64, 7, doc_h as u64)
+    var kn6: [u8; 3] = "vw\0"
+    say_kv((&kn6[0]) as u64, 2, vw as u64)
+    var kn7: [u8; 3] = "vh\0"
+    say_kv((&kn7[0]) as u64, 2, vh as u64)
+    var nl: [u8; 2] = "\n\0"
+    mem.write_all(1, &nl[0], 1)
+
+    var running: bool = true
+    while running {
+        to_bgrx(painter.painter_canvas(&p), &bgrx, scroll, vh - CHROME_H)
+        let oki: bool = oswin.oswin_put_image(&xw,
+            mem.buf_ptr(&bgrx) as u64, vw, vh - CHROME_H, 0, CHROME_H, vw)
+        draw_chrome(&xw, &addr, &status)
+        let okf2: bool = oswin.oswin_flush(&xw)
+        if events_left > 0 {
+            events_left = events_left - 1
+            if events_left == 0 {
+                running = false
+                break
+            }
+        }
+        // G2 aus oswin.fi: es gibt keinen Deskriptor am Fenster, also
+        // wird gefragt und geschlafen. Eine Viertelsekunde Warten je
+        // Durchlauf reicht fuer eine Tastatur und kostet nichts.
+        let ev: u32 = oswin.oswin_wait_event(&xw, 250)
+        if ev == oswin.EV_CLOSE {
+            running = false
+        } else if ev == oswin.EV_KEY {
+            let code: u32 = xw.ev_a
+            if code == 113 as u32 {
+                running = false
+            } else if code == 2 as u32 {
+                scroll = scroll + 60
+            } else if code == 1 as u32 {
+                if scroll > 60 {
+                    scroll = scroll - 60
+                } else {
+                    scroll = 0
+                }
+            } else if code == 6 as u32 {
+                scroll = scroll + 400
+            } else if code == 5 as u32 {
+                if scroll > 400 {
+                    scroll = scroll - 400
+                } else {
+                    scroll = 0
+                }
+            } else if code == 32 as u32 {
+                scroll = scroll + 300
+            }
+        } else if ev == oswin.EV_DOWN {
+            if xw.ev_state == 4 as u32 {
+                if scroll > 60 {
+                    scroll = scroll - 60
+                } else {
+                    scroll = 0
+                }
+            } else if xw.ev_state == 8 as u32 {
+                scroll = scroll + 60
+            }
+        }
+        if (scroll as f64) + ((vh - CHROME_H) as f64) > doc_h {
+            var m: f64 = doc_h - ((vh - CHROME_H) as f64)
+            if m < 0.0 {
+                m = 0.0
+            }
+            scroll = m as usize
+        }
+    }
+    if rt.arg_count(start) > 2 {
+        var shot: mem.Buf = mem.buf_new()
+        mem.buf_init(&shot)
+        png.write_ppm(painter.painter_canvas(&p), &shot)
+        let okw: bool = rt.write_file(rt.arg_ptr(start, 2),
+            mem.buf_ptr(&shot) as u64, mem.buf_len(&shot))
+        var kn8: [u8; 4] = "ppm\0"
+    say_kv((&kn8[0]) as u64, 3, mem.buf_len(&shot) as u64)
+        var kn9: [u8; 6] = "ppmok\0"
+    say_kv((&kn9[0]) as u64, 5, bool_num(okw))
+        var nl2: [u8; 2] = "\n\0"
+        mem.write_all(1, &nl2[0], 1)
+    }
+    oswin.oswin_close(&xw)
+    http.client_free(&c)
+    return 0
+}
+
+fn bool_num(b: bool) -> u64 {
+    if b {
+        return 1
+    }
+    return 0
+}
+
+// `name=zahl `, auf Deskriptor 1 -- die Form, die `tools/certus/run.sh`
+// aus der seriellen Ausgabe herausliest. `name` ist ein Zeiger auf
+// Oktette samt Laenge und kein `str`, weil ein `str` in Firn eine
+// Laufzeitdarstellung hat und diese Datei ohne sie auskommt.
+fn say_kv(name: u64, nlen: usize, v: u64) {
+    var b: mem.Buf = mem.buf_new()
+    mem.buf_init(&b)
+    var i: usize = 0
+    while i < nlen {
+        mem.buf_push(&b, rt.ld8(name, i))
+        i = i + 1
+    }
+    mem.buf_push(&b, 61 as u8)
+    mem.buf_push_dec(&b, v)
+    mem.buf_push(&b, 32 as u8)
+    mem.write_all(1, mem.buf_ptr(&b), mem.buf_len(&b))
+    mem.buf_free(&b)
+}
