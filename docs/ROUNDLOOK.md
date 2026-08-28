@@ -822,6 +822,218 @@ which is in the tree. **The branch can be deleted.**
 
 ---
 
+## 6c. THE THIRD ADDENDUM: THE TRANSLITERATION
+
+### The report, and what measuring it actually said
+
+> "`git show look:locale/de/messages | grep -cP '[äöüß]'` gives **0**. In
+> the whole German language file there is not one real umlaut."
+
+The file has **58** of them: `ü` 20, `ä` 17, `ö` 9, `ß` 7, `Ö` 3, `Ü` 2,
+spread over 50 of its 188 lines. `cat -A` on line 28 prints
+`settings.apply = M-CM-^\bernehmen` — octets `C3 9C`, a capital U with
+diaeresis. Run against that file, `grep -cP '[äöüß]'` returns **50** in
+`LC_ALL=C`, in `C.UTF-8`, in `de_DE.UTF-8` and in `en_US.UTF-8`. There
+is no locale in which it returns 0.
+
+It returns 0 in exactly one case: when the umlauts **in the pattern**
+are lost on the way to grep. Then the bracket expression is `[]`, grep
+stops with `grep: missing terminating ] for character class`, exit code
+2 and no output — and no output reads exactly like a zero. The
+instrument was broken, not the file. This is worth writing down because
+the same trap is one keystroke away from anyone checking this again: a
+tool that reports UTF-8 through a channel that is not UTF-8 safe will
+say "there are no umlauts" about a file full of umlauts.
+
+### And the report was right anyway — about a different file
+
+The text on the photograph does not come from the catalogue.
+
+| where | what it said | what it says now |
+|---|---|---|
+| `assets/apps/editor.osp/INFO` | `info=Text schreiben und aendern` | `… und ändern` |
+| `locale/de/icons`, 11 values | `Vorgetaeuschte`, `laedt`, `Schliessen`, `Groesse`, `zuruecksetzen`, `Naechstes`, `Zurueck`, `Vorwaerts`, `geoeffnet`, `Loeschen`, `Ausgewaehlt`, `Menue` | all with real characters |
+| `qs.fi`, `widgetdemo.fi`, `speicher.fi`, `themetest.fi` | 12 drawn literals | all with real characters |
+| `wlib.fi` | `"Menue"`, the menu window's title | catalogue key + English fallback |
+
+**The starter's rows are bundle labels, and a bundle label never passes
+through the catalogue.** `appdir.fi` reads `name=` and `info=` straight
+out of `INFO`; `msg.fi` never sees them. So round I18N could convert 73
+literals into catalogue keys, part A of this round could prove a German
+string renders pixel-for-pixel, and "Text schreiben und aendern" sat
+three rows under a correctly drawn "Ausführen" the whole time. Two of
+the three strings named in the report — "Dateien und Ordner ansehen" and
+"Eingabeaufforderung" — are correct German that happens to contain no
+umlaut. Exactly one string on that screen was wrong.
+
+**Honest about `locale/de/icons`:** no `.fi` in this tree opens it.
+`msg.fi` only ever reads `/usr/share/locale/<code>/messages`. Those
+eleven values were never on a screen. They are fixed because the rule
+covers language files, not because a pixel changed.
+
+### The lengths
+
+`ae` is two octets. `ä` is two octets. **Every one of these replacements
+is octet-neutral** — `aendern` → `ändern` stays at 31 octets and drops
+from 31 to 30 *characters*. All twelve source literals were checked
+individually against their declared `[u8; N]` and none moved; the script
+that applied them aborts if one would.
+
+That settles the general question the report raised:
+
+* a buffer measured in **octets** never has to grow;
+* a field width meant in **characters** but measured in octets becomes
+  too **large**, never too small — untidy, never broken;
+* the one real danger is **cutting** by octets, where a slice through a
+  two-octet sequence yields a broken character. In this tree only
+  `ulib.strncpy(…, 62)` cuts a window title, and the longest program
+  name is 14 octets.
+
+`VALW = 96` still holds (longest German value 75), `KEYW = 40` (longest
+key 31), catalogue 155 keys against `SLOTS = 224`.
+
+**`keys=` was deliberately not converted but extended** — `menue,menü`.
+It is a search index, not screen text, and `appdir.lower()` folds only
+A–Z, so replacing it would have cost the reader who types "menue" his
+hit.
+
+### Two things that were only found because something else broke
+
+**`tools/icons/run.sh` opened both `locale/*/icons` with
+`encoding="ascii"`.** An umlaut there would not have turned the ICONS
+section red — it would have aborted it with `UnicodeDecodeError`. A
+checker that cannot read the file it checks reports nothing, and nothing
+is not a pass. Now `utf-8`; `assets/icons/icons.map` stays ASCII,
+because names live there.
+
+**`tools/i18n/scan.py` said `gefunden: 0`, and that was true — for the
+eight files in its list.** Everything else went into a bucket labelled
+"command-line programs, their text goes to stdout, not through the
+window server". For half of them that is false: `qs.fi` is the quick
+settings panel, `widgetdemo.fi` is the "Widgets" application in the
+starter, `speicher.fi` draws two tables and a dialog, `themetest.fi` is
+round THEME's measuring window. Twelve visible strings sat in that list
+with a note saying they were not on the screen. The label was
+comfortable: as long as those files are called "command line", the line
+above may say 0 and still be true.
+
+**And then I made that scanner worse.** After the twelve replacements it
+fell from 17 findings to 10 — which looks like progress and is the
+opposite: its word list is pure ASCII (`Loeschen`, `Groesse`,
+`Uebernehmen`), so it no longer *found* the correctly spelled words. A
+checker that gets greener from a spelling correction has stopped
+measuring what it claims to measure. Both spellings are in the list now,
+the old ones deliberately kept, and the honest count is **18**.
+
+The eighteenth line is one nobody had ever seen: `wlib.fi:3044`,
+`"Menue"` — the **title of the menu window**, which carries a 22-pixel
+title bar and is therefore drawn. Hardcoded German inside the widget
+library since K15, invisible to the scanner because "Menue" was not in
+its word list. `wlib` cannot read the catalogue: it is linked into all
+thirteen programs, and `import msg` would put a message catalogue into
+`sh` and `ls` too, on a disk that ran out of room in this very round. So
+the library carries the untranslated English — exactly what `msg.fi`
+does for a missing key — and a program that has a catalogue passes the
+translation down with `wlib.set_menu_title()`.
+
+### Two defects in this round's own tooling
+
+**`tools/look/shot.sh` compared each program only against its own
+`.fi`.** Every one of them does `import wlib`. So a change to the widget
+library never reached the image, and the only symptom was that a newly
+added trace line was missing from the serial log — which looks exactly
+like a trace line that does not work. I spent a round looking in the
+wrong place. Same class as the second addendum's finding one level up
+("only rebuilt the kernel when it was MISSING"). The newest file in
+`kernel/user` now decides for all of them.
+
+**`paint_list` and `paint_table` reported nothing.** Every other drawing
+routine in `wlib` calls `say_painted` — button, label, choice. The list
+and the table heading did not, and those two carry precisely the strings
+this addendum is about: the starter's rows are the bundle labels, and
+the file manager's heading is `Name / Größe / Zeit / Rechte`, the only
+string in the interface where an `oe` and an `ss` stand side by side. A
+widget that reports nothing cannot be photographed, and what cannot be
+photographed nobody checks. That is the mechanism by which this survived
+half a year, and it is now closed.
+
+### The proof
+
+Five different characters, four widgets, three windows:
+
+| char | string | widget | ink pixels | wrong | tolerance |
+|---|---|---|---|---|---|
+| `ü` | `Ausführen` | button | 438 | **0** | 0 |
+| `ä` | `Editor  --  Text schreiben und ändern` | list row | 1340 | **0** | 0 |
+| `Ü` | `Übernehmen` | button | 526 | **0** | 0 |
+| `ö` `ß` | `Größe` | table heading | 282 | **0** | 64 |
+
+The second row is the string from the photograph.
+
+**Tolerance 64, and the measured ladder for it:** 0 → 3 wrong, 16 → 1,
+32 → 1, 64 → 0, 96 → 0. The two dots of an `ö` are a second glyph box
+over the first, and where two boxes overlap the library mixes glyph onto
+glyph while the reference rasteriser mixes each onto clean ground — the
+same effect `tools/k15/run.sh` documents with 96 for the "ff" in
+"Öffnen". The largest deviation is under 64 of 255 steps and touches
+three pixels. Nothing is loosened: string, position and both colours
+still have to be right, and the other three rows stand at tolerance 0.
+
+**`tools/look/umlaut.py`** does the arithmetic that is easy to get wrong
+by hand. A reported text position is *window*-relative; the picture is
+not. It takes the frame (2) and title bar (22) from `wm: win … x= y=`
+instead of guessing them, and anchors on the *expected* wording, because
+five processes share one serial line and reading a line to its end fails
+in most runs.
+
+It also draws a line. On the first attempt it reported 110 wrong pixels
+for `Größe` and I looked for the fault in the font for an hour. The
+fault was in the layout: with the starter on screen the tiler gives the
+file manager 396 pixels, the column `Größe` starts at x=368 and is 44
+wide — it ends 20 pixels past its own window edge, and what stands there
+in the picture is the *next window*. That is not a font fault and must
+not be measured as one. `umlaut.py` recomputes the width with the same
+rasteriser and says "not measurable" instead of producing a number that
+looks like a font fault. Checking whether the *start* is inside the
+window is not enough; it is the *end* that runs out. Section A2's fourth
+assertion is the counter-check on the checker: the heading in the narrow
+window **must** be refused.
+
+### The rule, so it does not come back
+
+`docs/I18N.md` §1.1: in `locale/<language>/*` and in `name=` / `info=`
+of the bundles, the real character stands — never the transliteration. A
+comment may *quote* it, in quotation marks, as an example.
+
+`tools/i18n/translit.py` enforces it, in `tools/i18n/run.sh` and
+`tools/look/run.sh`. It searches **100 word stems** that exist in German
+only as transliteration, and names the replacement for each. Deliberately
+**not** a pattern over the letter pairs: "ss" and "eu" occur in Prozess,
+Adresse, Klasse, Messung, muss, dass, Feuer, Steuerung — a pattern would
+have flagged every second line and been switched off within a week. It
+also reads `VALW`, `KEYW`, `FILE_MAX` and `appdir`'s read length **out
+of the source** rather than from a copy, because a copied number is the
+one that does not move next time.
+
+Three counter-checks, because a check that is always green checks
+nothing:
+
+* the tree as it stands → `umschrift=0 eng=0 umlaute=96`, rc=0
+* transliteration written back in two places → 3 findings, rc=1
+* 28 correctly spelled German words with ss/ae/oe/ue → 0 flagged
+
+### Found on the way, not fixed
+
+`appdir.eine_datei` reads **1023 octets** of an `INFO` file.
+`assets/apps/explorer.osp/INFO` is **1020** long and its `fassung=`
+field ends at 1019. **Three octets of headroom.** One more comment line
+in that file and a field disappears silently — no error, no warning, the
+program simply has no version. `translit.py` reports it from now on.
+Fixing it means either a larger buffer on that stack frame or a shorter
+comment, and neither belongs in an addendum about spelling.
+
+---
+
 ## 7. HOW TO RUN IT
 
 ```
