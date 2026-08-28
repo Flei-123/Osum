@@ -17,15 +17,59 @@
 // Konsole und Bildschirm dasselbe, ohne dass eine der rund tausend
 // Aufrufstellen von `serial.puts` sich aendert.
 import gfx
+import kstate
 import arch.arch
 
 export {
     out8, in8, io_wait,
-    init, put, puts, text, nl, hex, hex_digits, hex_width, dec, pad_dec
+    init, put, puts, text, nl, hex, hex_digits, hex_width, dec, pad_dec,
+    COM1, COM2, port, set_port, rx_ready, rx_take, rx_on, rx_off,
+    overrun, drain_fifo
 }
 
 // 0x3F8 = COM1 on every PC that has ever existed
 const COM1: u16 = 0x3F8
+// RUNDE SERVERBUILD: die zweite Leitung. `console=ttyS1` nimmt sie.
+const COM2: u16 = 0x2F8
+
+// Die Register, relativ zum Torwert. Sie standen bis zu dieser Runde
+// als nackte Zahlen in `init` -- mit einem Empfangsweg daneben ist das
+// eine Zahl zu viel, um sie zweimal zu raten.
+const R_DATA: u16 = 0 // lesen: RBR, schreiben: THR
+const R_IER: u16 = 1 // welche Unterbrechungen der Baustein schickt
+const R_FCR: u16 = 2 // schreiben: die FIFOs
+const R_LCR: u16 = 3 // Wortlaenge, Stoppbits, DLAB
+const R_MCR: u16 = 4 // DTR, RTS, OUT1, OUT2
+const R_LSR: u16 = 5 // was anliegt
+const LSR_RX: u8 = 0x01 // ein Oktett liegt bereit
+const LSR_OVERRUN: u8 = 0x02 // eines ist verlorengegangen
+const LSR_TX: u8 = 0x20 // der Sender ist leer
+const IER_RX: u8 = 0x01 // "sag Bescheid, wenn etwas ankommt"
+
+// ------------------------------------------------------- der Torwert
+//
+// WARUM DAS EINE FUNKTION IST UND KEINE KONSTANTE. Bis zu dieser Runde
+// stand COM1 fest in jeder der sieben Zeilen, die ein Tor anfassen.
+// `console=ttyS1` verlangt, dass Ausgabe UND Eingabe auf dieselbe
+// andere Leitung gehen -- und wenn nur eine Haelfte umzieht, redet der
+// Kernel in ein Kabel und hoert am anderen.
+//
+// Der Wert liegt in `kdata` und nicht in einer Modulvariablen, weil
+// `put` kein `state` bekommt und keines bekommen soll (derselbe Grund,
+// aus dem `ansi.echo` sich `kdata` selbst holt). Vor `sercon.parse`
+// steht dort eine Null, und eine Null heisst COM1 -- damit ist die
+// allererste Bootmeldung genau die, die sie seit Runde 59 ist.
+fn port() -> u16 {
+    let p: u64 = kstate.get(arch.kdata_base(), kstate.SER_PORT)
+    if p == 0 {
+        return COM1
+    }
+    return p as u16
+}
+
+fn set_port(state: u64, p: u64) {
+    kstate.set(state, kstate.SER_PORT, p)
+}
 
 // ------------------------------------------------------------ port I/O
 
@@ -60,23 +104,74 @@ fn io_wait() {
 // ------------------------------------------------------------- output
 
 fn init() {
-    out8(COM1 + 1 as u16, 0x00 as u8) // no interrupts
-    out8(COM1 + 3 as u16, 0x80 as u8) // unlock the divisor
-    out8(COM1 + 0 as u16, 0x03 as u8) // 38400 baud, low byte
-    out8(COM1 + 1 as u16, 0x00 as u8) // high byte
-    out8(COM1 + 3 as u16, 0x03 as u8) // 8 bits, no parity, 1 stop bit
-    out8(COM1 + 2 as u16, 0xC7 as u8) // FIFO on, cleared, 14 bytes
-    out8(COM1 + 4 as u16, 0x0B as u8) // DTR, RTS, OUT2
+    let b: u16 = port()
+    out8(b + R_IER, 0x00 as u8) // no interrupts
+    out8(b + R_LCR, 0x80 as u8) // unlock the divisor
+    out8(b + R_DATA, 0x03 as u8) // 38400 baud, low byte
+    out8(b + R_IER, 0x00 as u8) // high byte
+    out8(b + R_LCR, 0x03 as u8) // 8 bits, no parity, 1 stop bit
+    out8(b + R_FCR, 0xC7 as u8) // FIFO on, cleared, 14 bytes
+    // RUNDE SERVERBUILD: OUT2 war schon da und ist der Grund, warum der
+    // Empfangsweg dieser Runde ueberhaupt geht -- ohne dieses Bit haelt
+    // der 8250 seine Unterbrechungsleitung am PC still.
+    out8(b + R_MCR, 0x0B as u8) // DTR, RTS, OUT2
 }
 
 fn ready() -> bool {
-    return (in8(COM1 + 5 as u16) & 0x20 as u8) != 0 as u8
+    return (in8(port() + R_LSR) & LSR_TX) != 0 as u8
+}
+
+// ------------------------------------------------------- der Rueckweg
+//
+// SIEBEN ZEILEN, UND SIE SIND DER UNTERSCHIED ZWISCHEN EINEM
+// NOTAUSGANG UND EINER KONSOLE. Der Sendeweg steht seit Runde 59; der
+// Empfangsweg fehlte, und deshalb war jede Messung dieses Projektes
+// bisher entweder ein Skript auf der Befehlszeile oder ein
+// Tastendruck, den der Testlaeufer in den QEMU-Monitor schob.
+
+fn rx_ready() -> bool {
+    return (in8(port() + R_LSR) & LSR_RX) != 0 as u8
+}
+
+// Ein Oktett, oder 256, wenn keines da ist. 256 und nicht 0: die Null
+// ist ein gueltiges Oktett (STRG-Leertaste schickt sie).
+fn rx_take() -> u64 {
+    if !rx_ready() {
+        return 256
+    }
+    return in8(port() + R_DATA) as u64
+}
+
+// Ob der Baustein ein Oktett verloren hat, weil niemand es abgeholt
+// hat. Das Lesen von LSR loescht die Meldung, also wird sie hier
+// gezaehlt und nicht spaeter noch einmal gesucht.
+fn overrun() -> bool {
+    return (in8(port() + R_LSR) & LSR_OVERRUN) != 0 as u8
+}
+
+// Alles wegwerfen, was der Baustein noch haelt. Beim Einschalten der
+// Konsole: was VOR dem Start in die Leitung getippt wurde, gehoert
+// nicht in die erste Zeile der Shell.
+fn drain_fifo() {
+    var n: u64 = 0
+    while rx_ready() && n < 64 {
+        in8(port() + R_DATA)
+        n = n + 1
+    }
+}
+
+fn rx_on() {
+    out8(port() + R_IER, IER_RX)
+}
+
+fn rx_off() {
+    out8(port() + R_IER, 0x00 as u8)
 }
 
 fn put(c: u8) {
     while !ready() {
     }
-    out8(COM1, c)
+    out8(port(), c)
     // Der Bildschirm. RUNDE K11 HAT HIER EIN MODUL DAZWISCHENGESETZT:
     // `ansi.echo` ist `fb.echo` plus dem Fluchtfolgenautomaten (VT100),
     // ohne den ein bildschirmorientiertes Programm auf dem Schirm nur
