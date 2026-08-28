@@ -120,9 +120,13 @@ export {
     win_strut, win_max, work_x, work_y, work_w, work_h, edge_name,
     edge_by_name,
     WL_ID, WL_X, WL_Y, WL_W, WL_H, WL_LAYER, WL_FLAGS, WL_FOCUS,
-    WL_TITLE, WL_NETV, WL_BYTES, L_DESK, L_NORMAL, L_TOP,
+    WL_TITLE, WL_NETV, WL_APP, WL_BYTES, APP_LEN, win_app,
+    L_DESK, L_NORMAL, L_TOP,
     F_HIDDEN, F_NODECO,
     win_state, win_list, win_act, deco_push, DECO_SLOTS,
+    // ROUND PAINT: the FORM of a window, next to its colour.
+    form_push, form_one, FORM_SLOTS,
+    WF_RADIUS, WF_SHADOW, WF_SHADOW_R, WF_SHADOW_C,
     EV_KEY, EV_DOWN, EV_UP, EV_MOVE, EV_CLOSE, EV_FOCUS, EV_RESIZE,
     sys5, sys3w
 }
@@ -152,6 +156,16 @@ const WM_ACT: u64 = 2111
 const WM_STRUT: u64 = 2112
 const WM_SIZE: u64 = 2113
 const WM_DECO: u64 = 2114
+// ROUND PAINT.  The same number as `sys.WM_FORM`, and the same four
+// slot numbers as `wm.FM_*`.  Written down a third time here because a
+// library in ring 3 may not import the kernel; tools/paint/run.sh holds
+// the three lists against each other.
+const WM_FORM: u64 = 2115
+const FORM_SLOTS: u64 = 4
+const WF_RADIUS: u64 = 0
+const WF_SHADOW: u64 = 1
+const WF_SHADOW_R: u64 = 2
+const WF_SHADOW_C: u64 = 3
 
 const WI_W: u64 = 0
 const WI_H: u64 = 1
@@ -199,7 +213,13 @@ const WL_FOCUS: u64 = 56
 const WL_TITLE: u64 = 64
 // ROUND NETVIEW: the network view of the process the window belongs to.
 const WL_NETV: u64 = 96
-const WL_BYTES: u64 = 104
+// ROUND PAINT: the bundle name, and the record grew from 104 to 128.
+// The same two numbers as in kernel/sys.fi; tools/paint/run.sh holds
+// them against each other.
+const WL_APP: u64 = 104
+const WL_BYTES: u64 = 128
+const APP_LEN: u64 = 24
+const WM_APP: u64 = 2116
 
 const L_DESK: u64 = 0
 const L_NORMAL: u64 = 1
@@ -430,10 +450,28 @@ fn blend(alt: u64, neu: u64, a: u64) -> u64 {
         return neu
     }
     let ia: u64 = 255 - a
-    let r: u64 = (((alt >> 16) & 0xFF) * ia + ((neu >> 16) & 0xFF) * a) / 255
-    let g: u64 = (((alt >> 8) & 0xFF) * ia + ((neu >> 8) & 0xFF) * a) / 255
-    let b: u64 = ((alt & 0xFF) * ia + (neu & 0xFF) * a) / 255
+    // ROUND PAINT: the same arithmetic as `fb.blend`, and it is a
+    // DIFFERENT ANSWER from the one that stood here.  This line divided
+    // by 255 and truncated; measured over all 16 777 216 triples
+    // (a, src, dst) against the exact, half-up rounded value, that is
+    // off by one on 8 164 890 of them -- 48.67 per cent.
+    // `(num + 127) / 255` is exact on every one of the 16.7 million,
+    // and measured (see the header of `fb.mix8`) it is also the FASTER
+    // of the two exact forms on this machine -- the division-free
+    // variant lost by a fifth.
+    // tools/paint/blendcheck.py is the measurement, and it checks all
+    // FOUR places this line lives in (kernel/fb.fi, kernel/wm.fi,
+    // kernel/user/wlibc.fi, tools/gfx/checkshot.py) against each other.
+    let r: u64 = mix8((alt >> 16) & 0xFF, (neu >> 16) & 0xFF, a, ia)
+    let g: u64 = mix8((alt >> 8) & 0xFF, (neu >> 8) & 0xFF, a, ia)
+    let b: u64 = mix8(alt & 0xFF, neu & 0xFF, a, ia)
     return (r << 16) | (g << 8) | b
+}
+
+// One channel.  See the header of `fb.mix8` for why it is written this
+// way and what it was measured against.
+fn mix8(dst: u64, src: u64, a: u64, ia: u64) -> u64 {
+    return (src *% a +% dst *% ia +% 127) / 255
 }
 
 fn rect(x: u64, y: u64, w: u64, h: u64, color: u64) {
@@ -3177,6 +3215,23 @@ fn win_list(platz: u64, aus: u64) -> u64 {
     return sys3w(WM_LIST, platz, aus, WL_BYTES)
 }
 
+// ROUND PAINT: SAY WHICH BUNDLE THIS WINDOW BELONGS TO.
+//
+// One call, once, at start-up.  What it buys is the taskbar button's
+// icon: the symbols have existed since round K15 in
+// `/apps/<name>.osp/symbol`, and what was missing was the sentence
+// "this window is that program".  A title could not say it -- it is
+// translated, it changes while the program runs ("Terminal -- sh"), and
+// two programs may share one.
+//
+// Whoever does not call this gets an empty name and a button with text
+// only.  That is the same fallback the network and the battery use, and
+// it is the reason this can be added without touching a single program
+// that does not want it.
+fn win_app(h: u64, name: u64) -> u64 {
+    return sys3w(WM_APP, h, name, ulib.length(name) + 1)
+}
+
 // Ein FREMDES Fenster hervorholen oder wegtun. Erstes Argument ist
 // seine Nummer aus WL_ID und kein Handle -- fuer fremde Fenster gibt
 // es keines.
@@ -3207,6 +3262,45 @@ fn deco_one(slot: u64, colour: u64) -> u64 {
         return 0
     }
     return 1
+}
+
+// =============== ROUND PAINT: THE FORM OF THE WINDOW, TO THE SERVER
+//
+// Round LOOK built the form tokens and wrote down, honestly, that the
+// window frame did not get them: "`radius_window` and the window shadow
+// are read out of the shape file, carried through the resolver and NOT
+// DRAWN.  Those pixels belong to the kernel's compositor, not to the
+// widget library, and reaching them means widening a protocol."
+//
+// This is the other end of that widened protocol.  It carries FOUR
+// RESOLVED NUMBERS and no notion of a shape: the server never learns
+// that there is a file called `modern.shape`, it learns that the corner
+// is eight pixels.  Which is the same division of labour as `deco_push`
+// -- the policy stays in ring 3, the server gets the result.
+//
+// `classic` sends radius 0, shadow 0, reach 0.  The server's rounding
+// routine is call-for-call the old square fill at radius 0 and its
+// shadow routine returns on the first line at strength 0, so classic
+// costs exactly nothing and draws exactly what it drew before.
+fn form_one(slot: u64, wert: u64) -> u64 {
+    if ulib.bad(sys3w(WM_FORM, slot, wert, 0)) {
+        return 0
+    }
+    return 1
+}
+
+fn form_push() -> u64 {
+    var n: u64 = 0
+    n = n + form_one(WF_RADIUS, met[(M_RADIUS_WINDOW) as usize])
+    n = n + form_one(WF_SHADOW, met[(M_SHADOW) as usize])
+    n = n + form_one(WF_SHADOW_R, met[(M_SHADOW_R) as usize])
+    // THE SHADOW HAS A ROLE AND NOT A COLOUR.  `shadow` is one of the
+    // component tokens (C_SHADOW) and it is a different colour in the
+    // light and the dark scheme -- a black shadow under a dark window
+    // is invisible, and that is exactly the case a hard-coded 0x000000
+    // gets wrong.
+    n = n + form_one(WF_SHADOW_C, theme_live(C_SHADOW))
+    return n
 }
 
 fn deco_push() -> u64 {
