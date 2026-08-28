@@ -44,6 +44,7 @@
 # Verwendung:  bash tests/theme/run.sh
 set -uo pipefail
 cd "$(dirname "$0")/../.."
+. tools/lib/qemu.sh          # $QEMU_X86, $OSUM_QEMU_ACCEL
 ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
 TMPD=$(mktemp -d)
@@ -83,7 +84,7 @@ fi
 lauf() { # name kommandozeile [zeitlimit]
     local name=$1 zeile=$2 tl=${3:-300}
     cp -f "$TMPD/disk.img" "$TMPD/live-$name.img"
-    timeout "$tl" qemu-system-x86_64 -kernel "$TMPD/k.mb" -m 256 \
+    timeout "$tl" $QEMU_X86 -kernel "$TMPD/k.mb" -m 256 \
         -append "$zeile" -serial "file:$TMPD/$name.txt" -display none \
         -no-reboot -vga std \
         -drive "file=$TMPD/live-$name.img,format=raw,if=ide,index=0" \
@@ -96,7 +97,7 @@ foto() { # name abbild kommandozeile
     local sock="$TMPD/s-$name.sock"
     rm -f "$sock" "$TMPD/$name.ppm" "$TMPD/$name.txt"
     cp -f "$img" "$TMPD/l-$name.img"
-    timeout 400 qemu-system-x86_64 -kernel "$TMPD/k.mb" -m 256 \
+    timeout 400 $QEMU_X86 -kernel "$TMPD/k.mb" -m 256 \
         -append "$zeile" -serial "file:$TMPD/$name.txt" -display none \
         -no-reboot -vga std -monitor "unix:$sock,server,nowait" \
         -drive "file=$TMPD/l-$name.img,format=raw,if=ide,index=0" \
@@ -454,7 +455,7 @@ python3 tools/osum/mkfs.py build "$TMPD/leer.img" 4096 /lib/ \
     "/bin/echo=$TMPD/echo.elf" "/bin/ls=$TMPD/ls.elf" \
     > "$TMPD/mkfs-leer.log" 2>&1 || bad "das leere Abbild liess sich nicht bauen"
 cp -f "$TMPD/leer.img" "$TMPD/live-leer.img"
-timeout 200 qemu-system-x86_64 -kernel "$TMPD/k.mb" -m 256 \
+timeout 200 $QEMU_X86 -kernel "$TMPD/k.mb" -m 256 \
     -append "osum nokbd nosched noproc nofs script=themetest" \
     -serial "file:$TMPD/leer.txt" -display none -no-reboot -vga std \
     -drive "file=$TMPD/live-leer.img,format=raw,if=ide,index=0" \
@@ -490,7 +491,7 @@ ARGS=(build "$TMPD/kaputt.img" 4096 /lib/
 python3 tools/osum/mkfs.py "${ARGS[@]}" > "$TMPD/mkfs-kaputt.log" 2>&1 \
     || bad "das kaputte Abbild liess sich nicht bauen"
 cp -f "$TMPD/kaputt.img" "$TMPD/live-kaputt.img"
-timeout 200 qemu-system-x86_64 -kernel "$TMPD/k.mb" -m 256 \
+timeout 200 $QEMU_X86 -kernel "$TMPD/k.mb" -m 256 \
     -append "osum nokbd nosched noproc nofs script=themetest" \
     -serial "file:$TMPD/kaputt.txt" -display none -no-reboot -vga std \
     -drive "file=$TMPD/live-kaputt.img,format=raw,if=ide,index=0" \

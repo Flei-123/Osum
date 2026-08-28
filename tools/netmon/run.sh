@@ -29,6 +29,7 @@
 # Usage:  bash tools/netmon/run.sh
 set -uo pipefail
 cd "$(dirname "$0")/../.."
+. tools/lib/qemu.sh          # $QEMU_X86, $OSUM_QEMU_ACCEL
 ROOT=$(pwd)
 
 export FIRNLIB="$ROOT/lib"
@@ -187,7 +188,7 @@ qemu_bg() {
     local image=$1 append=$2 out=$3
     shift 3
     rm -f "$out"
-    ( timeout 180 qemu-system-x86_64 -kernel "$image" -m 256 -append "$append" \
+    ( timeout 180 $QEMU_X86 -kernel "$image" -m 256 -append "$append" \
         -serial "file:$out" -display none -no-reboot "$@" \
         -netdev "socket,id=n0,udp=127.0.0.1:$BPORT,localaddr=127.0.0.1:$QPORT" \
         -device "virtio-net-pci,netdev=n0,mac=52:54:00:aa:bb:cc" \
@@ -543,7 +544,7 @@ cp "$TMPD/disk.img" "$TMPD/cli.img"
 rm -f "$TMPD/A.txt" "$TMPD/B.txt"
 # A: the router. TWO cards -- card 0 is the uplink, card 1 the shared
 # side, in the order the PCI scan finds them.
-( timeout 260 qemu-system-x86_64 -kernel "$TMPD/k0.mb" -m 256 \
+( timeout 260 $QEMU_X86 -kernel "$TMPD/k0.mb" -m 256 \
   -append "osum $BASE $NETARGS nsvc=0 nwait=0 share script=sleep 120;netstat -s;exit" \
   -serial "file:$TMPD/A.txt" -display none -no-reboot \
   -drive "file=$TMPD/rtr.img,format=raw,if=ide,index=0" \
@@ -560,7 +561,7 @@ done
 sleep 1
 # B: the client. One card, on A's shared side, and an address it cannot
 # use.
-( timeout 220 qemu-system-x86_64 -kernel "$TMPD/k0.mb" -m 256 \
+( timeout 220 $QEMU_X86 -kernel "$TMPD/k0.mb" -m 256 \
   -append "osum $BASE nic nip=169.254.1.9/16 ngw=169.254.1.1 nsvc=0 nwait=0 script=dhcp;ping -c 2 192.168.42.1;ping -c 2 $HOST_IP;wget -q http://$HOST_IP:8000/x;wget -q http://$HOST_IP:8000/x;wget -q http://$HOST_IP:8000/x;netstat -p;exit" \
   -serial "file:$TMPD/B.txt" -display none -no-reboot \
   -drive "file=$TMPD/cli.img,format=raw,if=ide,index=0" \
