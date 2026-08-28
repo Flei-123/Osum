@@ -290,6 +290,42 @@ hat sie ein drittes Mal bestätigt.
 
 ---
 
+## 9. Was von woanders rot ist — und nachweislich nicht von hier kommt
+
+`tools/i18n/run.sh` ist rot: **30 erfüllt, 13 gescheitert.** Das gehört
+in diesen Bericht, auch wenn es nicht diese Runde ist — und dass es
+nicht diese Runde ist, wurde **gemessen** und nicht behauptet.
+
+Nachgestellt in einem eigenen Arbeitsbaum auf `mergeline` (Commit
+`3e92c27`, dem Stand *vor* dieser Runde) und dort derselbe Läufer:
+**ebenfalls 30 erfüllt, 13 gescheitert, dieselben dreizehn Zeilen.**
+
+```
+FAIL  der Knopf heisst auf Englisch: '', erwartet 'Apply'
+FAIL  und auf Deutsch: '', erwartet 'Übernehmen'
+FAIL  das Statusfeld auf Englisch: '', erwartet 'ready'
+FAIL  die Taskleiste meldet ihr Netzfeld -- 'leiste: text netz' fehlt
+...
+```
+
+Das Programm `einstellungen` meldet die Lage seiner Bedienfelder nicht
+mehr auf der seriellen Leitung, und die Taskleiste ihr Netzfeld auch
+nicht — beides Meldungen, an denen der i18n-Läufer seine
+bildpunktgenauen Zusagen festmacht. **Eine eigene Runde**, hier nur
+festgehalten.
+
+Ein Nebenbefund ist dabei behoben worden, weil er im Weg stand: das
+Abbild in `tools/i18n/build.sh` war mit 4096 Blöcken (2 MiB) zu klein
+geworden, seit `/bin/explorer` bei 485 392 Oktetten steht — `mkfs: the
+disk is full`, auf **beiden** Zweigen. Jetzt 12288 Blöcke.
+
+Grün geblieben und nachgeprüft: **`tools/kvm/run.sh` 35 erfüllt, 0
+gescheitert** — die Runde, die dem Kernel am nächsten steht, und
+diejenige, deren Gegenstand (SMAP, `sysret`, MSR) diese Runde angefasst
+hat. Ebenso `tools/wm/run.sh`: 103 erfüllt, 0 gescheitert.
+
+---
+
 ## Dateien dieser Runde
 
 ```
