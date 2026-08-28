@@ -4838,11 +4838,47 @@ fn do_wait4(state: u64, me: u64, pid: u64, status: u64, options: u64) -> u64 {
     }
     var rounds: u64 = 0
     while rounds < 100000 {
-        let child: u64 = find_child(state, me, want)
-        if child >= kstate.MAX_TASKS {
-            return neg(errno.E_CHILD)
+        // ================================= RUNDE INIT: DER FEHLER VON K13
+        //
+        // HIER STAND `find_child`, UND DAS WAR EIN FEHLER, DER EIN
+        // INIT-SYSTEM UNBRAUCHBAR MACHT. `find_child` gibt den ERSTEN
+        // Prozess der Aufgabentafel zurueck, dessen Elternteil der Rufer
+        // ist -- ohne nach seinem Zustand zu fragen. Lebt der noch, so
+        // antwortete `wait4` mit WNOHANG hier eine 0 ("nichts Neues"),
+        // und der ZOMBIE DAHINTER wurde nie abgeholt.
+        //
+        // Fuer eine Shell faellt das nie auf: sie wartet auf EIN Kind und
+        // hat meist kein zweites. Fuer den Prozess 1 ist es toedlich --
+        // er hat immer mehrere Kinder, und das langlebigste (die Konsole)
+        // steht in der Tafel meist VOR den kurzlebigen Diensten. GEMESSEN
+        // in dieser Runde: ein Dienst mit `respawn` blieb nach seinem
+        // ZWEITEN Start fuer immer als Zombie stehen, `svc status` zeigte
+        // ihn weiter als `running`, und die Aufgabentafel lief voll.
+        //
+        // Die Behebung ist, wonach man fragt: ZUERST nach einem Zombie,
+        // und erst wenn es keinen gibt, danach, ob es ueberhaupt ein Kind
+        // gibt (das unterscheidet "warte" von -ECHILD). Bei genau einem
+        // Kind ist das Verhalten Zeile fuer Zeile das alte.
+        //
+        // GEGENPROBE: `waitfirst` auf der Kommandozeile stellt den alten
+        // Weg wieder her. Damit MUSS derselbe Lauf den Zombie
+        // stehenlassen.
+        var child: u64 = kstate.MAX_TASKS
+        if kstate.mode_on(state, kstate.M_WAITOLD) {
+            child = find_child(state, me, want)
+            if child >= kstate.MAX_TASKS {
+                return neg(errno.E_CHILD)
+            }
+        } else {
+            child = find_zombie_child(state, me, want)
+            if child >= kstate.MAX_TASKS {
+                if find_child(state, me, want) >= kstate.MAX_TASKS {
+                    return neg(errno.E_CHILD)
+                }
+            }
         }
-        if sched.tget(state, child, sched.T_STATE) == sched.S_ZOMBIE {
+        if child < kstate.MAX_TASKS
+            && sched.tget(state, child, sched.T_STATE) == sched.S_ZOMBIE {
             let code: u64 = sched.tget(state, child, sched.T_EXIT)
             let who: u64 = sched.tget(state, child, sched.T_PID)
             file.close_all(state, child)
@@ -4863,6 +4899,26 @@ fn do_wait4(state: u64, me: u64, pid: u64, status: u64, options: u64) -> u64 {
         rounds = rounds + 1
     }
     return neg(errno.E_CHILD)
+}
+
+// RUNDE INIT: der Platz eines Kindes, das FERTIG IST, oder MAX_TASKS.
+// Das ist die Frage, die `wait4` wirklich stellt -- "ist eines meiner
+// Kinder gestorben" und nicht "habe ich Kinder". Siehe den langen
+// Kommentar in `do_wait4`.
+fn find_zombie_child(state: u64, me: u64, pid: u64) -> u64 {
+    let n: u64 = kstate.get(state, kstate.TASKS)
+    var i: u64 = 0
+    while i < n {
+        if sched.tget(state, i, sched.T_STATE) == sched.S_ZOMBIE {
+            if sched.tget(state, i, sched.T_PARENT) == me {
+                if pid == 0 || sched.tget(state, i, sched.T_PID) == pid {
+                    return i
+                }
+            }
+        }
+        i = i + 1
+    }
+    return kstate.MAX_TASKS
 }
 
 // The index of a child, or MAX_TASKS. `pid` 0 means: any of them.
