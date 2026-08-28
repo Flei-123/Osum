@@ -610,7 +610,7 @@ schau "der Rahmen des Menuefensters liegt bildpunktgenau" \
     $((MNH + TITLE + BORDER)) 76 154 232
 schau_nicht "ohne rechte Taste gibt es das Menue NICHT" \
     ttext "$TMPD/ruhe.ppm" "$SANS" 15 $((MNX + BORDER + 8)) \
-    $((MNY + TITLE + 15)) $(rgb "$UIFG") $(rgb "$MENUBG") "Oeffnen" 96
+    $((MNY + TITLE + 15)) $(rgb "$UIFG") $(rgb "$MENUBG") "Öffnen" 96
 schau_nicht "und ein anderes Wort steht auch bei Toleranz 64 nicht dort" \
     ttext "$TMPD/pop.ppm" "$SANS" 15 $((MNX + BORDER + 8)) \
     $((MNY + TITLE + 15)) $(rgb "$UIFG") $(rgb "$MENUBG") "Schuetzen" 128
@@ -634,7 +634,7 @@ mn=$(feld "$TMPD/popw.txt" "widgetdemo: state" menues)
 num "und das Menue hat genau EINMAL gefeuert" "$mn" ge 1
 schau_nicht "danach ist das Menuefenster wieder weg" \
     ttext "$TMPD/popw.ppm" "$SANS" 15 $((MNX + BORDER + 8)) \
-    $((MNY + TITLE + 15)) $(rgb "$UIFG") $(rgb "$MENUBG") "Oeffnen" 96
+    $((MNY + TITLE + 15)) $(rgb "$UIFG") $(rgb "$MENUBG") "Öffnen" 96
 
 # Der Dialog: der Knopf "Loeschen" macht ihn auf.
 DEL=$(mitte 9)
