@@ -4,6 +4,7 @@
 # Not the acceptance: the fast loop while the panel is being built.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
+. tools/lib/qemu.sh          # $QEMU_X86, $OSUM_QEMU_ACCEL
 ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
 FIRNC=${FIRNC:-vendor/firn/bin/firnc}
@@ -55,7 +56,7 @@ printf 'warte 5\nsendkey a\nwarte 2\nsendkey meta_l-a\nwarte 3\n' > "$TMPD/drive
 [ -n "${DRIVE:-}" ] && cp "$DRIVE" "$TMPD/drive"
 
 rm -f "$TMPD/out.txt" "$TMPD/s.ppm" "$TMPD/mon.sock"
-timeout 200 qemu-system-x86_64 -kernel "$TMPD/k0.mb" -m 256 \
+timeout 200 $QEMU_X86 -kernel "$TMPD/k0.mb" -m 256 \
     -append "$GBASE netvdemo" -serial "file:$TMPD/out.txt" -display none -no-reboot \
     -vga std -monitor "unix:$TMPD/mon.sock,server,nowait" \
     -drive "file=$TMPD/l.img,format=raw,if=ide,index=0" \

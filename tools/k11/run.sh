@@ -38,6 +38,7 @@
 # Verwendung:  bash tools/k11/run.sh
 set -uo pipefail
 cd "$(dirname "$0")/../.."
+. tools/lib/qemu.sh          # $QEMU_X86, $OSUM_QEMU_ACCEL
 ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
 FIRNC=${FIRNC:-vendor/firn/bin/firnc}
@@ -375,7 +376,7 @@ lauf() { # abbild name kommandozeile [weitere qemu-argumente]
     shift
     local name=$1 zeile=$2
     shift 2
-    timeout 180 qemu-system-x86_64 -kernel "$TMPD/k0.mb" -m 256 \
+    timeout 180 $QEMU_X86 -kernel "$TMPD/k0.mb" -m 256 \
         -append "$zeile" -serial "file:$TMPD/$name.txt" -display none \
         -no-reboot -drive "file=$TMPD/live-$name.img,format=raw,if=ide,index=0" \
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 "$@" >/dev/null 2>&1
@@ -708,7 +709,7 @@ tipp_lauf() { # name abbild kommandozeile muster tasten...
     local sock="$TMPD/mon-$name.sock"
     rm -f "$sock" "$TMPD/$name.txt" "$TMPD/$name.rc"
     cp "$abbild" "$TMPD/live-$name.img"
-    ( timeout 180 qemu-system-x86_64 -kernel "$TMPD/k0.mb" -m 256 \
+    ( timeout 180 $QEMU_X86 -kernel "$TMPD/k0.mb" -m 256 \
         -append "$zeile" -serial "file:$TMPD/$name.txt" -display none \
         -no-reboot -vga std \
         -drive "file=$TMPD/live-$name.img,format=raw,if=ide,index=0" \

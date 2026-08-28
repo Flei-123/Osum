@@ -42,6 +42,7 @@
 # (21 = the kernel ended it, 63 = it stopped at an exception).
 set -uo pipefail
 cd "$(dirname "$0")/../.."
+. tools/lib/qemu.sh          # $QEMU_X86, $OSUM_QEMU_ACCEL
 
 export FIRNLIB="$(pwd)/lib"
 FIRNC=${FIRNC:-vendor/firn/bin/firnc}
@@ -160,7 +161,7 @@ num "k0.o: MSR accesses (the APIC base register)" "$n" ge 2
 run_kernel() {
     local image=$1 append=$2 out=$3
     shift 3
-    timeout 300 qemu-system-x86_64 -kernel "$image" -m 128 -append "$append" \
+    timeout 300 $QEMU_X86 -kernel "$image" -m 128 -append "$append" \
         -serial "file:$out" -display none -no-reboot "$@" \
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1
     return $?
@@ -314,7 +315,7 @@ echo "== 7. the keyboard through the I/O APIC, and without an entry =="
 # out: the PIC is mute, the line goes nowhere, and nothing may arrive.
 keyboard_run() { # $1 = command line, $2 = output file
     rm -f "$TMPD/mon.sock" "$2" "$TMPD/kbd.rc"
-    ( timeout 120 qemu-system-x86_64 -kernel "$TMPD/k0.mb" -m 128 \
+    ( timeout 120 $QEMU_X86 -kernel "$TMPD/k0.mb" -m 128 \
         -append "$1" -serial "file:$2" -display none -no-reboot \
         -monitor "unix:$TMPD/mon.sock,server,nowait" \
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1

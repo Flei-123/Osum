@@ -62,6 +62,7 @@
 # Verwendung:  bash tools/gfx/run.sh
 set -uo pipefail
 cd "$(dirname "$0")/../.."
+. tools/lib/qemu.sh          # $QEMU_X86, $OSUM_QEMU_ACCEL
 ROOT=$(pwd)
 
 export FIRNLIB="$ROOT/lib"
@@ -123,7 +124,7 @@ fi
 lauf() { # abbild kommandozeile ausgabe [weitere qemu-argumente]
     local abbild=$1 zeile=$2 aus=$3
     shift 3
-    timeout 120 qemu-system-x86_64 -kernel "$abbild" -m 256 -append "$zeile" \
+    timeout 120 $QEMU_X86 -kernel "$abbild" -m 256 -append "$zeile" \
         -serial "file:$aus" -display none -no-reboot -vga std \
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 "$@" >/dev/null 2>&1
     return $?
@@ -138,7 +139,7 @@ foto() { # abbild kommandozeile ausgabe ppm [weitere qemu-argumente]
     shift 4
     local sock="$TMPD/mon-$$.sock"
     rm -f "$aus" "$ppm" "$sock"
-    timeout 120 qemu-system-x86_64 -kernel "$abbild" -m 256 -append "$zeile" \
+    timeout 120 $QEMU_X86 -kernel "$abbild" -m 256 -append "$zeile" \
         -serial "file:$aus" -display none -no-reboot -vga std \
         -monitor "unix:$sock,server,nowait" \
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 "$@" >/dev/null 2>&1 &

@@ -18,6 +18,7 @@
 # Beendigungscode in <name>.rc.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
+. tools/lib/qemu.sh          # $QEMU_X86, $OSUM_QEMU_ACCEL
 OUT=${OUT:-/tmp/install}
 NAME=${1:-w}
 WIE=${2:-iso}
@@ -56,7 +57,7 @@ if [ "$WIE" = roh ]; then
     # nicht mehr den Kern, sondern die Firmware.
     ZEILE="$BASIS"
     [ -n "$SKRIPT" ] && ZEILE="$ZEILE script=$SKRIPT"
-    timeout "$LIMIT" qemu-system-x86_64 -machine pc -cpu max -m "$MEM" \
+    timeout "$LIMIT" $QEMU_X86 -machine pc -cpu max -m "$MEM" \
         -kernel "$OUT/k.mb" -append "$ZEILE" \
         -serial "file:$OUT/$NAME.txt" -display none -no-reboot \
         -drive "file=$OUT/ziel.img,format=raw,if=ide,index=0" \
@@ -65,7 +66,7 @@ if [ "$WIE" = roh ]; then
 elif [ "$WIE" = iso ]; then
     ZEILE="$BASIS modfs modcrc=$CRC"
     [ -n "$SKRIPT" ] && ZEILE="$ZEILE script=$SKRIPT"
-    timeout "$LIMIT" qemu-system-x86_64 -machine pc -cpu max -m "$MEM" \
+    timeout "$LIMIT" $QEMU_X86 -machine pc -cpu max -m "$MEM" \
         -kernel "$OUT/k.mb" -initrd "$OUT/quelle.img" -append "$ZEILE" \
         -serial "file:$OUT/$NAME.txt" -display none -no-reboot \
         -drive "file=$OUT/ziel.img,format=raw,if=ide,index=0" \
@@ -116,7 +117,7 @@ else
           "${ZWEITE[@]}"
           -device isa-debug-exit,iobase=0xf4,iosize=0x04)
     [ -f "$VARS" ] && ARGS+=(-drive "if=pflash,format=raw,unit=1,file=$VARS")
-    timeout "$LIMIT" qemu-system-x86_64 "${ARGS[@]}" > /dev/null 2>&1
+    timeout "$LIMIT" $QEMU_X86 "${ARGS[@]}" > /dev/null 2>&1
     rc=$?
 fi
 echo "$rc" > "$OUT/$NAME.rc"

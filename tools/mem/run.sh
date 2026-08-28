@@ -44,6 +44,7 @@
 # Usage:  bash tools/mem/run.sh
 set -uo pipefail
 cd "$(dirname "$0")/../.."
+. tools/lib/qemu.sh          # $QEMU_X86, $OSUM_QEMU_ACCEL
 
 export FIRNLIB="$(pwd)/lib"
 TMPD=$(mktemp -d)
@@ -75,7 +76,7 @@ bash tools/build-kernel.sh "$TMPD/k.mb" > "$TMPD/build.txt" 2>&1 \
 
 run() { # size extra-words -> writes $TMPD/<size>.txt, returns the qemu exit code
     local size=$1 extra=${2:-}
-    timeout 600 qemu-system-x86_64 -kernel "$TMPD/k.mb" -m "$size" \
+    timeout 600 $QEMU_X86 -kernel "$TMPD/k.mb" -m "$size" \
         -append "$extra nokbd nosched noproc nofs noring3" \
         -serial "file:$TMPD/$size.txt" -display none -no-reboot \
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1

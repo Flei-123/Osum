@@ -46,6 +46,7 @@
 #              every octet in order anyway
 set -uo pipefail
 cd "$(dirname "$0")/../.."
+. tools/lib/qemu.sh          # $QEMU_X86, $OSUM_QEMU_ACCEL
 ROOT=$(pwd)
 
 export FIRNLIB="$ROOT/lib"
@@ -276,7 +277,7 @@ qemu_bg() {
     local image=$1 append=$2 out=$3
     shift 3
     rm -f "$out"
-    ( timeout 180 qemu-system-x86_64 -kernel "$image" -m 256 -append "$append" \
+    ( timeout 180 $QEMU_X86 -kernel "$image" -m 256 -append "$append" \
         -serial "file:$out" -display none -no-reboot "$@" \
         -netdev "socket,id=n0,udp=127.0.0.1:$BPORT,localaddr=127.0.0.1:$QPORT" \
         -device "virtio-net-pci,netdev=n0,mac=52:54:00:aa:bb:cc" \

@@ -39,6 +39,7 @@
 # Verwendung:  bash tools/caps/run.sh
 set -uo pipefail
 cd "$(dirname "$0")/../.."
+. tools/lib/qemu.sh          # $QEMU_X86, $OSUM_QEMU_ACCEL
 
 TMPD=$(mktemp -d)
 trap 'rm -rf "$TMPD"' EXIT
@@ -57,7 +58,7 @@ if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
 fi
 
 run_kernel() { # abbild anhang ausgabe
-    timeout 90 qemu-system-x86_64 -kernel "$1" -m 128 -append "$2" \
+    timeout 90 $QEMU_X86 -kernel "$1" -m 128 -append "$2" \
         -serial "file:$3" -display none -no-reboot \
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1
     return $?
