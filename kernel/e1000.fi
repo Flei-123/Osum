@@ -1,0 +1,801 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/e1000.fi -- round HWNET: a network card that exists as a CHIP.
+//
+// Round K8 wrote `virtio.fi` and said, in its own header, why it chose
+// virtio over e1000: virtio is one ring shape for every device, e1000 is
+// a transcript of a data sheet. That was the right choice for learning
+// what a driver is. It is the wrong choice for a machine you can touch:
+// virtio-net exists only under a hypervisor. On a real board there is an
+// Intel or a Realtek chip on the bus and nothing else, so a kernel with
+// only virtio has NO NETWORK on real hardware -- and without a network
+// there is no update and no helper.
+//
+// So this file is the other half: the 8254x/82574 family of Intel
+// gigabit controllers, the one wired Ethernet chip that is both
+// documented in public (Intel 8254x Software Developer's Manual,
+// document 317453) and present in QEMU (`-device e1000`, an 82540EM),
+// which is what makes it measurable HERE and not only on a board.
+//
+// WHAT IT IS, in the same five steps as the virtio driver:
+//
+//   1. FIND IT. Vendor 0x8086, class 02:00, and a device number out of
+//      the table in `netdev.fi`. NOT "the first Intel device": a chipset
+//      is full of them.
+//   2. ONE REGION. Everything is BAR0, memory mapped, 128 KiB. There is
+//      no capability walk and no feature negotiation -- a real chip has
+//      neither. What replaces them is a RESET and a wait, because the
+//      chip comes out of the firmware in whatever state the firmware
+//      left it.
+//   3. THE ADDRESS. Two ways, in this order: the receive address
+//      registers RAL/RAH, which the hardware fills out of its own
+//      non-volatile memory at power-up (and which QEMU fills at reset),
+//      and, if the valid bit there is not set, three EEPROM reads
+//      through EERD. If both fail the driver REFUSES to come up rather
+//      than invent an address.
+//   4. TWO RINGS. A receive ring and a send ring, 32 descriptors each,
+//      16 octets per descriptor, in one contiguous run of frames. Unlike
+//      virtio, where the driver hands buffers over one at a time, the
+//      ring here is a CIRCLE with a head the CHIP moves and a tail the
+//      DRIVER moves; "the ring is full" is a comparison of two register
+//      values and not a count.
+//   5. THE INTERRUPT. The 82540EM has no MSI-X, so this driver takes the
+//      interrupt PIN through the I/O APIC, exactly like `nicintx` does
+//      for virtio. Reading ICR is what acknowledges it.
+//
+// WHAT THIS DRIVER DOES NOT DO, said plainly: no checksum offload (the
+// stack computes every checksum itself, as it does for virtio), no
+// segmentation offload, no jumbo frames (2048-octet buffers, LPE off),
+// no multicast beyond broadcast (the multicast table is cleared, BAM is
+// on), no VLAN, no MSI or MSI-X, no interrupt moderation, no statistics
+// registers beyond the ones counted here in software, and no PHY
+// programming at all -- SLU/ASDE let the chip negotiate the link by
+// itself, which is what every 8254x does on its own anyway.
+//
+// WHAT IS NOT MEASURED HERE, and it matters for the round's own claim:
+// the only e1000 this repository has ever talked to is QEMU's 82540EM.
+// The register layout below is the one the 8254x manual describes and
+// the one the 82574L (0x10D3, QEMU's `e1000e`) still answers, but NO
+// PHYSICAL CARD HAS BEEN TESTED. Anything said about a chip on a real
+// board is a statement about a data sheet and is marked as such in
+// docs/REALHW.md.
+
+import kstate
+import mem
+import pci
+import arch.x86_64.apic
+import arch.arch
+
+export {
+    MAX_UNITS, VENDOR_INTEL,
+    init_on, present_on, ready_on, up_on, mac_at_on, bdf_on, idx_on,
+    rx_take_on, rx_recycle_on, tx_frame_on, tx_room_on, poll_on, irq_on,
+    rx_frames_on, tx_frames_on, rx_octets_on, tx_octets_on,
+    tx_drops_on, link_up_on, shut_down_on, irqs_on, queue_size_on,
+    msix_on, notified_on, features_on, supports, RING_SLOTS, BUFSZ
+}
+
+// ------------------------------------------------------ the data area
+//
+// This driver does NOT live in `pci.K2_SCALARS`. That page pair is cut
+// up by nine rounds already and round NETVIEW spent a day on two of them
+// landing on the same eight octets. Round HWNET takes a page of its own
+// out of the region `kstate.fi` still lists as free (0x7A000) and enters
+// it in `tools/kernel/memmap.py`, which is what that tool is for.
+//
+// `kstate.NETDEV_OFF + 0x000`  netdev.fi, the dispatch layer
+// `kstate.NETDEV_OFF + 0x400`  unit 0 of this driver
+// `kstate.NETDEV_OFF + 0x600`  unit 1
+const UNIT_BASE: u64 = 0x400
+const UNIT_SPAN: u64 = 0x200
+const MAX_UNITS: u64 = 2
+
+const S_MMIO: u64 = 0x00 // where BAR0 is reachable in the first GiB
+const S_BDF: u64 = 0x08
+const S_IDX: u64 = 0x10 // its place in the device table of pci.fi
+const S_READY: u64 = 0x18
+const S_MAC: u64 = 0x20 // six octets in one word, low first
+const S_RING: u64 = 0x28 // the run of frames both rings live in
+const S_RX_CUR: u64 = 0x30 // the descriptor this driver looks at next
+const S_TX_CUR: u64 = 0x38 // where the next frame is written
+const S_IRQS: u64 = 0x40
+const S_RXP: u64 = 0x48
+const S_TXP: u64 = 0x50
+const S_RXB: u64 = 0x58
+const S_TXB: u64 = 0x60
+const S_TXDROP: u64 = 0x68
+const S_LINK: u64 = 0x70
+const S_DEVID: u64 = 0x78
+const S_MACOK: u64 = 0x80
+
+fn sc(u: u64, off: u64) -> u64 {
+    return kstate.NETDEV_OFF + UNIT_BASE + u * UNIT_SPAN + off
+}
+
+// ------------------------------------------------------- the constants
+
+const VENDOR_INTEL: u64 = 0x8086
+const CLASS_NET: u64 = 0x02
+const SUB_ETHERNET: u64 = 0x00
+
+// The registers this driver touches, by their names in the 8254x manual.
+const R_CTRL: u64 = 0x0000
+const R_STATUS: u64 = 0x0008
+const R_EERD: u64 = 0x0014
+const R_ICR: u64 = 0x00C0
+const R_IMS: u64 = 0x00D0
+const R_IMC: u64 = 0x00D8
+const R_RCTL: u64 = 0x0100
+const R_TCTL: u64 = 0x0400
+const R_TIPG: u64 = 0x0410
+const R_RDBAL: u64 = 0x2800
+const R_RDBAH: u64 = 0x2804
+const R_RDLEN: u64 = 0x2808
+const R_RDH: u64 = 0x2810
+const R_RDT: u64 = 0x2818
+const R_TDBAL: u64 = 0x3800
+const R_TDBAH: u64 = 0x3804
+const R_TDLEN: u64 = 0x3808
+const R_TDH: u64 = 0x3810
+const R_TDT: u64 = 0x3818
+const R_MTA: u64 = 0x5200 // 128 registers of the multicast table
+const R_RAL: u64 = 0x5400
+const R_RAH: u64 = 0x5404
+
+const CTRL_SLU: u64 = 64 // 1 << 6, set link up
+const CTRL_ASDE: u64 = 32 // 1 << 5, auto speed detection
+const CTRL_LRST: u64 = 8 // 1 << 3, link reset -- has to be OFF
+const CTRL_ILOS: u64 = 128 // 1 << 7, invert loss of signal -- OFF
+const CTRL_RST: u64 = 67108864 // 1 << 26
+const CTRL_VME: u64 = 1073741824 // 1 << 30, VLAN mode -- OFF
+
+const STATUS_LU: u64 = 2 // 1 << 1, the link is up
+
+const RCTL_EN: u64 = 2 // 1 << 1
+const RCTL_UPE: u64 = 8 // 1 << 3, every unicast address
+const RCTL_MPE: u64 = 16 // 1 << 4, every multicast address
+const RCTL_BAM: u64 = 32768 // 1 << 15, broadcast
+const RCTL_SECRC: u64 = 67108864 // 1 << 26, strip the CRC
+
+const TCTL_EN: u64 = 2 // 1 << 1
+const TCTL_PSP: u64 = 8 // 1 << 3, pad short packets
+
+// The inter-packet gap the manual gives for copper: IPGT 10, IPGR1 8,
+// IPGR2 6 -- 0x0060200A. A zero here is a chip that sends nothing.
+const TIPG_DEFAULT: u64 = 6299658
+
+const RAH_AV: u64 = 2147483648 // 1 << 31, this address is valid
+
+const EERD_START: u64 = 1
+const EERD_DONE: u64 = 16 // 1 << 4 on the 82540 and later
+
+// Interrupt causes this driver asks for: a frame arrived (RXT0), the
+// receive ring is running low (RXDMT0), the receive ring overflowed
+// (RXO), and the link changed (LSC).
+const IM_LSC: u64 = 4
+const IM_RXDMT0: u64 = 16
+const IM_RXO: u64 = 64
+const IM_RXT0: u64 = 128
+
+// A receive descriptor: address (8), length (2), checksum (2), status
+// (1), errors (1), special (2).
+const RD_STATUS: u64 = 12
+const RD_ERRORS: u64 = 13
+const RDS_DD: u64 = 1 // the chip is done with this one
+const RDS_EOP: u64 = 2 // and the frame ends here
+
+// A send descriptor: address (8), length (2), checksum offset (1),
+// command (1), status (1), checksum start (1), special (2).
+const TD_CMD: u64 = 11
+const TD_STATUS: u64 = 12
+const TDC_EOP: u64 = 1
+const TDC_IFCS: u64 = 2 // the chip appends the frame check sequence
+const TDC_RS: u64 = 8 // report the status back
+
+// THE RINGS. 32 descriptors each. The manual wants the descriptor area
+// to be 16-octet aligned and its length a multiple of 128; 32 * 16 = 512
+// is both, and a page for each ring is simpler to reason about than a
+// packing that has to be recomputed. 2048-octet buffers, which is what
+// RCTL says (BSIZE 00 with BSEX 0), and every Ethernet frame fits.
+const RING_SLOTS: u64 = 32
+const BUFSZ: u64 = 2048
+
+const RXD_OFF: u64 = 0x00000 // 512 octets
+const TXD_OFF: u64 = 0x01000 // 512
+const RXB_OFF: u64 = 0x02000 // 32 * 2048 = 0x10000
+const TXB_OFF: u64 = 0x12000 // 0x10000
+const RING_BYTES: u64 = 0x22000 // 139 264 octets = 34 frames
+
+// The same rule as in `nvme.fi` and `virtio.fi`: a chip that never
+// answers must not be able to stop the kernel.
+const SPIN_LIMIT: u64 = 2000000
+
+// ---------------------------------------------------- WHICH CHIPS
+//
+// The device numbers this driver ATTACHES to. Every one of them answers
+// the 8254x register layout above. The list is short on purpose: a
+// driver that attaches to a number it has never seen and then reads
+// zeroes forever is worse than one that says "unknown".
+//
+//   0x100E  82540EM      -- QEMU's `-device e1000`. THE ONE THAT IS
+//                           ACTUALLY MEASURED HERE.
+//   0x100F  82545EM      -- QEMU's `-device e1000-82545em`
+//   0x1015  82540EM LOM  -- the same silicon on a mainboard
+//   0x1026  82545GM
+//   0x1028  82546GB
+//   0x10D3  82574L       -- QEMU's `-device e1000e`. Reached through the
+//                           LEGACY descriptor path, which the 82574
+//                           still answers; its MSI-X and its advanced
+//                           descriptors are NOT used.
+//
+// WHAT IS DELIBERATELY NOT IN THE LIST, and why -- this is the part that
+// matters for "install OrientOS on a real laptop":
+//
+//   I217/I218/I219 (0x153A, 0x155A, 0x15B7, 0x15B8, 0x15BB, 0x0D4E ...)
+//     The PCH LAN parts. Same MAC register block, but the PHY hangs off
+//     the management engine and needs a handshake (the ULP/K1 workaround
+//     dance in Linux's e1000e) before the link comes up. Attaching this
+//     driver to one of them would produce a card that answers registers
+//     and never receives a frame. Recognised by name in `netdev.fi`,
+//     refused with a reason.
+//   I210/I211/I225/I226 (0x1533, 0x1539, 0x15F2, 0x125B ...)
+//     igb/igc silicon: a different descriptor format (advanced only) and
+//     a different queue setup. A different driver, not a table entry.
+fn supports(devid: u64) -> bool {
+    if devid == 0x100E { return true }
+    if devid == 0x100F { return true }
+    if devid == 0x1015 { return true }
+    if devid == 0x1026 { return true }
+    if devid == 0x1028 { return true }
+    if devid == 0x10D3 { return true }
+    return false
+}
+
+// -------------------------------------------------------- small helpers
+
+fn mmio(state: u64, u: u64) -> u64 {
+    return kstate.get(state, sc(u, S_MMIO))
+}
+
+fn present_on(state: u64, u: u64) -> bool {
+    return mmio(state, u) != 0
+}
+
+fn ready_on(state: u64, u: u64) -> bool {
+    return kstate.get(state, sc(u, S_READY)) != 0
+}
+
+fn up_on(state: u64, u: u64) -> bool {
+    return ready_on(state, u)
+}
+
+fn bdf_on(state: u64, u: u64) -> u64 {
+    return kstate.get(state, sc(u, S_BDF))
+}
+
+fn idx_on(state: u64, u: u64) -> u64 {
+    return kstate.get(state, sc(u, S_IDX))
+}
+
+fn irqs_on(state: u64, u: u64) -> u64 {
+    return kstate.get(state, sc(u, S_IRQS))
+}
+
+fn rx_frames_on(state: u64, u: u64) -> u64 {
+    return kstate.get(state, sc(u, S_RXP))
+}
+
+fn tx_frames_on(state: u64, u: u64) -> u64 {
+    return kstate.get(state, sc(u, S_TXP))
+}
+
+fn tx_drops_on(state: u64, u: u64) -> u64 {
+    return kstate.get(state, sc(u, S_TXDROP))
+}
+
+fn rx_octets_on(state: u64, u: u64) -> u64 {
+    return kstate.get(state, sc(u, S_RXB))
+}
+
+fn tx_octets_on(state: u64, u: u64) -> u64 {
+    return kstate.get(state, sc(u, S_TXB))
+}
+
+// What `netsvc.fi` prints as "features" for virtio is a negotiated
+// bitmap. This chip negotiates nothing; the number that says what it IS
+// is its device number, so that is what comes back here.
+fn features_on(state: u64, u: u64) -> u64 {
+    return kstate.get(state, sc(u, S_DEVID))
+}
+
+fn queue_size_on(state: u64, u: u64) -> u64 {
+    if !ready_on(state, u) {
+        return 0
+    }
+    return RING_SLOTS
+}
+
+// No MSI-X on this family, and the driver does not pretend otherwise.
+fn msix_on(state: u64, u: u64) -> bool {
+    return false
+}
+
+// There is no doorbell to ring: the tail register IS the doorbell, and
+// every send writes it. So this counts the same thing virtio counts --
+// how often the chip was told the ring moved.
+fn notified_on(state: u64, u: u64) -> u64 {
+    return kstate.get(state, sc(u, S_TXP)) + kstate.get(state, sc(u, S_RXP))
+}
+
+fn link_up_on(state: u64, u: u64) -> bool {
+    return kstate.get(state, sc(u, S_LINK)) != 0
+}
+
+fn mac_at_on(state: u64, u: u64, i: u64) -> u64 {
+    if i >= 6 {
+        return 0
+    }
+    return (kstate.get(state, sc(u, S_MAC)) >> (i * 8)) & 0xFF
+}
+
+// ---------------------------------------------------- register access
+
+fn rd32(b: u64, off: u64) -> u64 {
+    return __mmio_read32((b + off) as *mut u32) as u64
+}
+
+fn wr32(b: u64, off: u64, v: u64) {
+    __mmio_write32((b + off) as *mut u32, (v & 0xFFFFFFFF) as u32)
+}
+
+fn reg(state: u64, u: u64, off: u64) -> u64 {
+    return rd32(mmio(state, u), off)
+}
+
+fn setreg(state: u64, u: u64, off: u64, v: u64) {
+    wr32(mmio(state, u), off, v)
+}
+
+fn ring(state: u64, u: u64) -> u64 {
+    return kstate.get(state, sc(u, S_RING))
+}
+
+// The descriptors are ordinary memory that the CHIP reads and writes.
+// Every access goes through the volatile intrinsics for the same reason
+// it does in virtio.fi: the compiler must not move or merge them.
+fn dsc_addr(t: u64, i: u64, v: u64) {
+    __mmio_write64((t + i * 16) as *mut u64, v)
+}
+
+fn dsc_len(t: u64, i: u64, v: u64) {
+    __mmio_write16((t + i * 16 + 8) as *mut u16, (v & 0xFFFF) as u16)
+}
+
+fn dsc_get_len(t: u64, i: u64) -> u64 {
+    return __mmio_read16((t + i * 16 + 8) as *mut u16) as u64
+}
+
+fn dsc_u8(t: u64, i: u64, off: u64) -> u64 {
+    return __mmio_read8((t + i * 16 + off) as *mut u8) as u64
+}
+
+fn dsc_set_u8(t: u64, i: u64, off: u64, v: u64) {
+    __mmio_write8((t + i * 16 + off) as *mut u8, (v & 0xFF) as u8)
+}
+
+// --------------------------------------------------------- finding it
+
+// THE u-TH SUPPORTED INTEL CARD ON THE BUS, in bus order -- the same
+// rule `virtio.find` uses, for the same reason: two units must not take
+// the same registers.
+fn find(state: u64, u: u64) -> u64 {
+    let n: u64 = pci.count(state)
+    var i: u64 = 0
+    var seen: u64 = 0
+    while i < n {
+        if pci.get(state, i, pci.E_VENDOR) == VENDOR_INTEL {
+            if pci.get(state, i, pci.E_CLASS) == CLASS_NET {
+                if pci.get(state, i, pci.E_SUBCLASS) == SUB_ETHERNET {
+                    if supports(pci.get(state, i, pci.E_DEVICE)) {
+                        if seen == u {
+                            return i
+                        }
+                        seen = seen + 1
+                    }
+                }
+            }
+        }
+        i = i + 1
+    }
+    return pci.MAX_DEV
+}
+
+// ------------------------------------------------------------ the reset
+//
+// The chip comes out of the firmware in an unknown state -- on a real
+// board the BIOS may have used it for PXE. A software reset puts every
+// register back to its default, and the manual says to wait for the bit
+// to clear and then to mask the interrupts AGAIN, because the reset
+// unmasks them.
+fn chip_reset(state: u64, u: u64) -> bool {
+    setreg(state, u, R_IMC, 0xFFFFFFFF)
+    let ctrl: u64 = reg(state, u, R_CTRL)
+    setreg(state, u, R_CTRL, ctrl | CTRL_RST)
+    var spin: u64 = 0
+    while spin < SPIN_LIMIT {
+        if (reg(state, u, R_CTRL) & CTRL_RST) == 0 {
+            setreg(state, u, R_IMC, 0xFFFFFFFF)
+            let icr: u64 = reg(state, u, R_ICR)
+            return true
+        }
+        arch.pause()
+        spin = spin + 1
+    }
+    return false
+}
+
+// ------------------------------------------------------------ the address
+
+// One 16-bit word out of the chip's own non-volatile memory.
+fn eeprom(state: u64, u: u64, word: u64) -> u64 {
+    setreg(state, u, R_EERD, (word << 8) | EERD_START)
+    var spin: u64 = 0
+    while spin < SPIN_LIMIT {
+        let v: u64 = reg(state, u, R_EERD)
+        if (v & EERD_DONE) != 0 {
+            return (v >> 16) & 0xFFFF
+        }
+        arch.pause()
+        spin = spin + 1
+    }
+    return 0xFFFFFFFF
+}
+
+// THE ADDRESS, and the two places it can come from. RAL/RAH first: the
+// hardware fills them itself at power-up, and a valid bit says whether
+// it did. Only if that bit is missing does the driver go to the EEPROM.
+// If neither works it refuses -- an invented address on a wire somebody
+// else is listening on is a fault that looks like packet loss.
+fn read_mac(state: u64, u: u64) -> bool {
+    let rah: u64 = reg(state, u, R_RAH)
+    if (rah & RAH_AV) != 0 {
+        let ral: u64 = reg(state, u, R_RAL)
+        let v: u64 = (ral & 0xFFFFFFFF) | ((rah & 0xFFFF) << 32)
+        if v != 0 {
+            kstate.set(state, sc(u, S_MAC), v)
+            kstate.set(state, sc(u, S_MACOK), 1)
+            return true
+        }
+    }
+    let w0: u64 = eeprom(state, u, 0)
+    let w1: u64 = eeprom(state, u, 1)
+    let w2: u64 = eeprom(state, u, 2)
+    if w0 > 0xFFFF || w1 > 0xFFFF || w2 > 0xFFFF {
+        return false
+    }
+    // The EEPROM stores the address in three words, low octet first.
+    let v: u64 = (w0 & 0xFF) | ((w0 >> 8) << 8) | ((w1 & 0xFF) << 16)
+        | ((w1 >> 8) << 24) | ((w2 & 0xFF) << 32) | ((w2 >> 8) << 40)
+    if v == 0 {
+        return false
+    }
+    kstate.set(state, sc(u, S_MAC), v)
+    kstate.set(state, sc(u, S_MACOK), 2)
+    // And write it back into RAL/RAH, because that is the register the
+    // receive filter actually uses.
+    setreg(state, u, R_RAL, v & 0xFFFFFFFF)
+    setreg(state, u, R_RAH, ((v >> 32) & 0xFFFF) | RAH_AV)
+    return true
+}
+
+fn read_link(state: u64, u: u64) {
+    var v: u64 = 0
+    if (reg(state, u, R_STATUS) & STATUS_LU) != 0 {
+        v = 1
+    }
+    kstate.set(state, sc(u, S_LINK), v)
+}
+
+// ------------------------------------------------------------- the init
+
+fn init_on(state: u64, u: u64, use_msix: bool, armed: bool) -> bool {
+    if u >= MAX_UNITS {
+        return false
+    }
+    kstate.set(state, sc(u, S_READY), 0)
+    let i: u64 = find(state, u)
+    if i >= pci.MAX_DEV {
+        return false
+    }
+    let d: u64 = pci.get(state, i, pci.E_BDF)
+    kstate.set(state, sc(u, S_IDX), i)
+    kstate.set(state, sc(u, S_BDF), d)
+    kstate.set(state, sc(u, S_DEVID), pci.get(state, i, pci.E_DEVICE))
+
+    // BAR0, and it has to be MEMORY. An 8254x also offers an I/O BAR;
+    // this driver does not use it, and a card whose BAR0 is I/O is not
+    // one of these.
+    let phys: u64 = pci.bar(state, i, 0)
+    if phys == 0 || pci.bar_is_io(state, i, 0) {
+        return false
+    }
+    let base: u64 = apic.map_device(state, phys)
+    if base == 0 {
+        return false
+    }
+    kstate.set(state, sc(u, S_MMIO), base)
+
+    // Without this bit the chip may answer registers but may not fetch a
+    // descriptor -- the same counter-check `nicnobm` makes for virtio.
+    pci.enable_master(d)
+
+    if !chip_reset(state, u) {
+        kstate.set(state, sc(u, S_MMIO), 0)
+        return false
+    }
+
+    // The link: let the chip negotiate it. LRST and ILOS have to be off,
+    // and VLAN mode too -- a tagged frame the stack does not expect is a
+    // frame with four octets of rubbish in the middle.
+    var ctrl: u64 = reg(state, u, R_CTRL)
+    ctrl = ctrl | CTRL_SLU | CTRL_ASDE
+    ctrl = ctrl & 0xFFFFFFFF
+    if (ctrl & CTRL_LRST) != 0 { ctrl = ctrl - CTRL_LRST }
+    if (ctrl & CTRL_ILOS) != 0 { ctrl = ctrl - CTRL_ILOS }
+    if (ctrl & CTRL_VME) != 0 { ctrl = ctrl - CTRL_VME }
+    setreg(state, u, R_CTRL, ctrl)
+
+    if !read_mac(state, u) {
+        kstate.set(state, sc(u, S_MMIO), 0)
+        return false
+    }
+
+    // The multicast table comes out of reset with whatever was in it.
+    // 128 registers of zero means: no multicast group is accepted, which
+    // is the truth for this stack.
+    var m: u64 = 0
+    while m < 128 {
+        setreg(state, u, R_MTA + m * 4, 0)
+        m = m + 1
+    }
+
+    // The memory for both rings and all their buffers, in ONE run of
+    // frames: a descriptor carries a PHYSICAL address and the heap gives
+    // no promise about contiguity.
+    let r: u64 = mem.frame_run(state, RING_BYTES / mem.FRAME_SIZE)
+    if r == 0 {
+        kstate.set(state, sc(u, S_MMIO), 0)
+        return false
+    }
+    var z: u64 = 0
+    while z < RING_BYTES {
+        __mmio_write64((r + z) as *mut u64, 0)
+        z = z + 8
+    }
+    kstate.set(state, sc(u, S_RING), r)
+
+    rx_setup(state, u)
+    tx_setup(state, u)
+
+    // THE INTERRUPT IS ARMED BEFORE THE RINGS ARE ENABLED, the same
+    // order virtio uses. `use_msix` is accepted and ignored: this family
+    // has no MSI-X, and saying so through `msix_on` is better than
+    // failing to come up at all.
+    intx_arm(state, u, i, armed)
+    if armed {
+        setreg(state, u, R_IMS, IM_RXT0 | IM_RXDMT0 | IM_RXO | IM_LSC)
+    } else {
+        setreg(state, u, R_IMC, 0xFFFFFFFF)
+    }
+    let icr: u64 = reg(state, u, R_ICR)
+
+    kstate.set(state, sc(u, S_READY), 1)
+    read_link(state, u)
+    return true
+}
+
+// ------------------------------------------------------ the receive ring
+
+fn rx_setup(state: u64, u: u64) {
+    let r: u64 = ring(state, u)
+    let t: u64 = r + RXD_OFF
+    var i: u64 = 0
+    while i < RING_SLOTS {
+        dsc_addr(t, i, r + RXB_OFF + i * BUFSZ)
+        dsc_set_u8(t, i, RD_STATUS, 0)
+        i = i + 1
+    }
+    setreg(state, u, R_RDBAL, t & 0xFFFFFFFF)
+    setreg(state, u, R_RDBAH, t >> 32)
+    setreg(state, u, R_RDLEN, RING_SLOTS * 16)
+    setreg(state, u, R_RDH, 0)
+    // The tail is the LAST descriptor the chip may write into. One short
+    // of the head on purpose: head == tail means empty, and a ring that
+    // cannot tell full from empty loses a frame every wrap.
+    setreg(state, u, R_RDT, RING_SLOTS - 1)
+    kstate.set(state, sc(u, S_RX_CUR), 0)
+    setreg(state, u, R_RCTL, RCTL_EN | RCTL_BAM | RCTL_SECRC)
+}
+
+// One frame, or 0 -- the same shape `virtio.rx_take_on` has, so that
+// `inet.pump` does not know which chip it is talking to. `slot` comes
+// back so the caller can hand the buffer over again once it has copied
+// the octets out.
+fn rx_take_on(state: u64, u: u64, frame: *mut u64, slot: *mut u64) -> u64 {
+    if !ready_on(state, u) {
+        return 0
+    }
+    let r: u64 = ring(state, u)
+    let t: u64 = r + RXD_OFF
+    let cur: u64 = kstate.get(state, sc(u, S_RX_CUR))
+    let st: u64 = dsc_u8(t, cur, RD_STATUS)
+    if (st & RDS_DD) == 0 {
+        return 0
+    }
+    // The chip wrote the octets before it set DD; this side has to READ
+    // them in that order.
+    arch.barrier_read()
+    let len: u64 = dsc_get_len(t, cur)
+    let err: u64 = dsc_u8(t, cur, RD_ERRORS)
+    kstate.set(state, sc(u, S_RX_CUR), (cur + 1) % RING_SLOTS)
+    if (st & RDS_EOP) == 0 || err != 0 || len == 0 || len > BUFSZ {
+        // Nothing usable -- but the descriptor still has to go back,
+        // otherwise the ring runs dry one buffer at a time.
+        rx_recycle_on(state, u, cur)
+        return 0
+    }
+    *frame = r + RXB_OFF + cur * BUFSZ
+    *slot = cur
+    kstate.add(state, sc(u, S_RXP), 1)
+    kstate.add(state, sc(u, S_RXB), len)
+    return len
+}
+
+// The buffer is free again: clear the status the chip set and move the
+// tail onto it. THAT write is the doorbell.
+fn rx_recycle_on(state: u64, u: u64, id: u64) {
+    if id >= RING_SLOTS {
+        return
+    }
+    let t: u64 = ring(state, u) + RXD_OFF
+    dsc_set_u8(t, id, RD_STATUS, 0)
+    dsc_set_u8(t, id, RD_ERRORS, 0)
+    setreg(state, u, R_RDT, id)
+}
+
+// -------------------------------------------------------- the send ring
+
+fn tx_setup(state: u64, u: u64) {
+    let r: u64 = ring(state, u)
+    let t: u64 = r + TXD_OFF
+    var i: u64 = 0
+    while i < RING_SLOTS {
+        dsc_addr(t, i, r + TXB_OFF + i * BUFSZ)
+        dsc_len(t, i, 0)
+        dsc_set_u8(t, i, TD_CMD, 0)
+        dsc_set_u8(t, i, TD_STATUS, 0)
+        i = i + 1
+    }
+    setreg(state, u, R_TDBAL, t & 0xFFFFFFFF)
+    setreg(state, u, R_TDBAH, t >> 32)
+    setreg(state, u, R_TDLEN, RING_SLOTS * 16)
+    setreg(state, u, R_TDH, 0)
+    setreg(state, u, R_TDT, 0)
+    kstate.set(state, sc(u, S_TX_CUR), 0)
+    setreg(state, u, R_TIPG, TIPG_DEFAULT)
+    // CT (collision threshold) 15 and COLD (collision distance) 64, the
+    // values the manual gives for full duplex.
+    setreg(state, u, R_TCTL, TCTL_EN | TCTL_PSP | (15 << 4) | (64 << 12))
+}
+
+// How many descriptors are free. In flight is tail minus head, modulo
+// the ring -- both are read from the chip's own registers, so a
+// descriptor the chip has finished is free again without an interrupt.
+fn tx_room_on(state: u64, u: u64) -> u64 {
+    if !ready_on(state, u) {
+        return 0
+    }
+    let head: u64 = reg(state, u, R_TDH) % RING_SLOTS
+    let tail: u64 = kstate.get(state, sc(u, S_TX_CUR)) % RING_SLOTS
+    var inflight: u64 = 0
+    if tail >= head {
+        inflight = tail - head
+    } else {
+        inflight = RING_SLOTS - head + tail
+    }
+    if inflight + 1 >= RING_SLOTS {
+        return 0
+    }
+    return RING_SLOTS - 1 - inflight
+}
+
+// One frame out. `false` means the ring was full -- the caller decides
+// whether to drop it or try again, exactly as with virtio.
+fn tx_frame_on(state: u64, u: u64, src: u64, n: u64) -> bool {
+    if !ready_on(state, u) || n == 0 || n > BUFSZ {
+        return false
+    }
+    if tx_room_on(state, u) == 0 {
+        kstate.add(state, sc(u, S_TXDROP), 1)
+        return false
+    }
+    let r: u64 = ring(state, u)
+    let t: u64 = r + TXD_OFF
+    let id: u64 = kstate.get(state, sc(u, S_TX_CUR)) % RING_SLOTS
+    let buf: u64 = r + TXB_OFF + id * BUFSZ
+    var k: u64 = 0
+    while k < n {
+        __mmio_write8((buf + k) as *mut u8, __mmio_read8((src + k) as *mut u8))
+        k = k + 1
+    }
+    dsc_addr(t, id, buf)
+    dsc_len(t, id, n)
+    dsc_set_u8(t, id, TD_STATUS, 0)
+    // The descriptor is complete BEFORE the tail moves. On x86 stores
+    // keep their order; the volatile intrinsics are what keep the
+    // compiler from changing it.
+    dsc_set_u8(t, id, TD_CMD, TDC_EOP | TDC_IFCS | TDC_RS)
+    let next: u64 = (id + 1) % RING_SLOTS
+    kstate.set(state, sc(u, S_TX_CUR), next)
+    setreg(state, u, R_TDT, next)
+    kstate.add(state, sc(u, S_TXP), 1)
+    kstate.add(state, sc(u, S_TXB), n)
+    return true
+}
+
+// ------------------------------------------------------- the interrupt
+
+// Reading ICR is what ACKNOWLEDGES the interrupt on this family -- the
+// register clears on read. Nothing else happens here, for the reason
+// `virtio.irq_on` gives: the frames are taken out of the ring by
+// `inet.pump`, in a task of its own.
+fn irq_on(state: u64, u: u64) {
+    if !present_on(state, u) {
+        return
+    }
+    kstate.add(state, sc(u, S_IRQS), 1)
+    let cause: u64 = reg(state, u, R_ICR)
+    if (cause & IM_LSC) != 0 {
+        read_link(state, u)
+    }
+}
+
+// Is there anything to take? One read of ordinary memory.
+fn poll_on(state: u64, u: u64) -> bool {
+    if !ready_on(state, u) {
+        return false
+    }
+    let t: u64 = ring(state, u) + RXD_OFF
+    let cur: u64 = kstate.get(state, sc(u, S_RX_CUR))
+    return (dsc_u8(t, cur, RD_STATUS) & RDS_DD) != 0
+}
+
+// ---------------------------------------------------- arming the vector
+
+// The interrupt PIN through the I/O APIC. PCI lines are level triggered
+// and active low -- the same six lines `virtio.intx_arm` has, and for
+// the same reason they cannot simply be shared: the vector is per card.
+fn intx_arm(state: u64, u: u64, i: u64, armed: bool) {
+    let d: u64 = pci.get(state, i, pci.E_BDF)
+    pci.cfg_write16(d, 0x04, pci.cfg_read16(d, 0x04) & 0xFBFF)
+    let gsi: u64 = pci.get(state, i, pci.E_IRQLINE)
+    if gsi == 0 || gsi > 23 {
+        return
+    }
+    apic.route(state, gsi, 45 + u, apic.id(state), true, true)
+    if !armed {
+        apic.mask_gsi(state, gsi)
+    }
+}
+
+// The counter-check needs a way to take the card away from a kernel that
+// is otherwise identical.
+fn shut_down_on(state: u64, u: u64) {
+    if !present_on(state, u) {
+        return
+    }
+    setreg(state, u, R_IMC, 0xFFFFFFFF)
+    setreg(state, u, R_RCTL, 0)
+    setreg(state, u, R_TCTL, 0)
+    kstate.set(state, sc(u, S_READY), 0)
+    pci.disable_master(bdf_on(state, u))
+}
