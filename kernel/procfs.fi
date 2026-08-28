@@ -1093,11 +1093,46 @@ fn p_lookup(state: u64, m: u64, path: u64) -> u64 {
         }
         return node(K_GLOBAL, 0, g)
     }
-    let pid: u64 = to_num((&seg[0]) as u64)
-    if pid == 0xFFFFFFFF {
-        return 0
+    // ===================================== RUNDE CERTUS: `/proc/self`
+    //
+    // WARUM DIESER NAME FEHLTE UND WARUM ER DIE RUNDE AUFGEHALTEN HAT.
+    //
+    // Certus (der Browser) startete auf Osum, wurde geladen, kam in Ring
+    // 3 an -- und gab sofort 90 zurueck. 90 ist in
+    // `lib/certus/certus_main.fi` die Zeile `if !gc_init() { return 90 }`.
+    //
+    // Der Sammler von Firn scannt den Stapel KONSERVATIV (SPEC 3.5.3):
+    // er liest jedes Wort zwischen dem aktuellen Stapelzeiger und dem
+    // BODEN des Stapels und behandelt alles, was wie ein Zeiger
+    // aussieht, als eine Wurzel. Dafuer muss er wissen, wo der Boden
+    // liegt -- und er kann es nicht selbst wissen, weil das
+    // Betriebssystem den Stapel angelegt hat. Also fragt er danach, so
+    // wie jede Laufzeit auf jedem Unix danach fragt:
+    // `/proc/self/maps`, und wenn das nichts hergibt,
+    // `/proc/self/stat` (`vendor/firn/lib/gc/gc.fi`,
+    // `__gc_stack_bottom_maps` und `__gc_stack_bottom`).
+    //
+    // Dieses Dateisystem hatte `/proc/<pid>/maps` und
+    // `/proc/<pid>/stat` seit Runde K11 -- aber `self` nicht, und ein
+    // Prozess kennt seine eigene Nummer erst, wenn er `getpid` gerufen
+    // hat. Ein Programm mit Sammler konnte hier also nicht starten, und
+    // die Fehlermeldung dafuer war eine Zahl.
+    //
+    // `self` ist der laufende Prozess, und nichts weiter: dieselben
+    // Dateien, dieselben Rechte, ein Name mehr. `sched.current` ist der
+    // Platz, dem der Kern gerade gehoert -- und weil ein Systemaufruf
+    // im Zusammenhang des Rufenden laeuft, ist das der Rufende.
+    var w_self: [u8; 5] = "self\0"
+    var slot: u64 = kstate.MAX_TASKS
+    if streq((&seg[0]) as u64, (&w_self[0]) as u64) {
+        slot = sched.current(state)
+    } else {
+        let pid: u64 = to_num((&seg[0]) as u64)
+        if pid == 0xFFFFFFFF {
+            return 0
+        }
+        slot = slot_of_pid(state, pid)
     }
-    let slot: u64 = slot_of_pid(state, pid)
     if slot >= kstate.MAX_TASKS {
         return 0
     }
