@@ -96,6 +96,8 @@ import msg
 
 export {
     init, step, toggle, is_open, hit, win_id, anchor, index_bauen, W, H,
+    probe, falten, RK_EXACT, RK_START, RK_MID, RK_OTHER, RK_NONE,
+    S_APP, S_FILE, S_SET,
     opens, treffer, gewaehlt, index_n, index_us, such_us
 }
 
@@ -168,6 +170,11 @@ static mut qfn: u64 = 0
 static mut h_src: [u8; 40] = [0 as u8; 40]
 static mut h_ix: [u64; 40] = [0 as u64; 40]
 static mut h_key: [u64; 40] = [0 as u64; 40]
+// DER RANG GETRENNT VOM SORTIERSCHLUESSEL. Ohne Eingabe ist der
+// Schluessel die Haeufigkeit und keine Rangzahl; `h_key / 4` als Rang
+// zu melden ergab im ersten Lauf `rk=8193000`, und eine Zahl, die
+// niemand lesen kann, ist keine Messung.
+static mut h_rk: [u8; 40] = [0 as u8; 40]
 static mut nh: u64 = 0
 static mut n_app: u64 = 0
 static mut n_file: u64 = 0
@@ -217,7 +224,7 @@ static mut zseq: u64 = 0
 static mut zbuf: [u8; 512] = [0 as u8; 512]
 
 // die Zeichenketten dieser Datei
-static mut s_ini: [u8; 14] = "sucher: init \0"
+static mut s_ini: [u8; 14] = "sucher: init\0\0"
 static mut s_w: [u8; 4] = " w=\0"
 static mut s_h: [u8; 4] = " h=\0"
 static mut s_id: [u8; 6] = " id=\0\0"
@@ -263,6 +270,8 @@ static mut s_zh: [u8; 18] = "sucher: zaehler [\0"
 static mut s_zn: [u8; 6] = "] n=\0\0"
 static mut s_fo: [u8; 18] = "sucher: falten [\0\0" 
 static mut s_fa: [u8; 8] = "] -> [\0\0"
+static mut p_apps: [u8; 6] = "/apps\0"
+static mut s_ad: [u8; 16] = "sucher: apps n=\0"
 static mut p_set: [u8; 14] = "/bin/settings\0"
 static mut p_zahl: [u8; 20] = "/etc/sucher.starts\0\0"
 static mut p_wurzel: [u8; 2] = "/\0"
@@ -311,7 +320,7 @@ fn now_us() -> u64 {
 fn fold(src: u64, n: u64, dst: u64, max: u64) -> u64 {
     var i: u64 = 0
     var o: u64 = 0
-    while i < n && o + 2 < max {
+    while i < n && o + 3 < max {
         let c: u64 = rd(src, i)
         if c == 0 {
             i = n
@@ -320,14 +329,7 @@ fn fold(src: u64, n: u64, dst: u64, max: u64) -> u64 {
             o = o + 1
             i = i + 1
         } else if c == 0xC3 && i + 1 < n {
-            let d: u64 = rd(src, i + 1)
-            var e: u64 = d
-            if d >= 0x80 && d <= 0x9E && d != 0x97 {
-                e = d + 0x20
-            }
-            wr(dst, o, 0xC3)
-            wr(dst, o + 1, e)
-            o = o + 2
+            o = o + latin1(rd(src, i + 1), dst + o)
             i = i + 2
         } else {
             wr(dst, o, c)
@@ -337,6 +339,107 @@ fn fold(src: u64, n: u64, dst: u64, max: u64) -> u64 {
     }
     wr(dst, o, 0)
     return o
+}
+
+// EIN BUCHSTABE MIT ZEICHEN WIRD ZU DEM BUCHSTABEN DARUNTER, und die
+// deutschen werden zu ZWEIEN. Hier ist die Tafel, und hier ist die
+// Begruendung fuer jede der drei Zeilen, die man anders haette machen
+// koennen:
+//
+//   ae, oe, ue, ss STATT a, o, u, s. Das ist die deutsche Umschrift
+//   (DIN 5007-2, dieselbe, die im Reisepass steht), und sie ist die
+//   einzige, die BEIDE Richtungen kann: wer "Groesse" tippt, findet
+//   "Groesse" mit Umlaut, und wer "gro" tippt, findet es auch -- denn
+//   das gefaltete Wort faengt mit g-r-o an. Mit "o" allein waere die
+//   erste Haelfte weg.
+//
+//   ALLE ANDEREN werden EIN Buchstabe: e mit Akzent -> e, n mit Tilde
+//   -> n, c mit Haken -> c. Die deutsche Verdopplung ist eine deutsche
+//   Regel und keine allgemeine; sie auf ein franzoesisches e zu legen,
+//   waere aus "Cafe" ein "Cafee" und damit ein Wort, das niemand tippt.
+//
+//   0xC3 0x9F IST NICHT DAS GROSSE VON 0xC3 0xBF. In diesem Block ist
+//   das kleine ueberall 0x20 ueber dem grossen -- ausser hier: 0x9F ist
+//   das scharfe s (U+00DF), 0xBF ist das y mit zwei Punkten (U+00FF).
+//   Wer die Regel blind anwendet, faltet das scharfe s auf ein y. Das
+//   ist genau der Fehler, den diese Zeile verhindert, und er waere in
+//   keinem Bild zu sehen gewesen.
+//
+// WAS DIESE TAFEL NICHT KANN: alles jenseits von U+00FF -- das
+// tschechische c mit Haken, das polnische l mit Strich, das
+// tuerkische i ohne Punkt. Die kommen als 0xC4/0xC5 und gehen
+// UNVERAENDERT durch; sie finden sich selbst und sonst nichts. Eine
+// halbe Tabelle waere schlimmer als eine, deren Grenze aufgeschrieben
+// ist.
+fn latin1(b: u64, dst: u64) -> u64 {
+    // das scharfe s, vor der Regel
+    if b == 0x9F {
+        wr(dst, 0, 115)
+        wr(dst, 1, 115)
+        return 2
+    }
+    // Mal- und Geteiltzeichen sind keine Buchstaben.
+    if b == 0x97 || b == 0xB7 {
+        wr(dst, 0, 0xC3)
+        wr(dst, 1, b)
+        return 2
+    }
+    var k: u64 = b
+    if k >= 0x80 && k < 0xA0 {
+        k = k + 0x20
+    }
+    if k < 0xA0 || k > 0xBF {
+        wr(dst, 0, 0xC3)
+        wr(dst, 1, b)
+        return 2
+    }
+    // die vier deutschen: ae, oe, ue -- und ein zweites ae fuer die
+    // Ligatur, die im selben Block liegt
+    if k == 0xA4 || k == 0xA6 {
+        wr(dst, 0, 97)
+        wr(dst, 1, 101)
+        return 2
+    }
+    if k == 0xB6 {
+        wr(dst, 0, 111)
+        wr(dst, 1, 101)
+        return 2
+    }
+    if k == 0xBC {
+        wr(dst, 0, 117)
+        wr(dst, 1, 101)
+        return 2
+    }
+    // das Dorn, zwei Buchstaben in jeder Umschrift
+    if k == 0xBE {
+        wr(dst, 0, 116)
+        wr(dst, 1, 104)
+        return 2
+    }
+    var g: u64 = 0
+    if k <= 0xA5 {
+        g = 97 // a
+    } else if k == 0xA7 {
+        g = 99 // c
+    } else if k <= 0xAB {
+        g = 101 // e
+    } else if k <= 0xAF {
+        g = 105 // i
+    } else if k == 0xB0 {
+        g = 100 // d
+    } else if k == 0xB1 {
+        g = 110 // n
+    } else if k <= 0xB5 {
+        g = 111 // o
+    } else if k == 0xB8 {
+        g = 111 // o mit Strich
+    } else if k <= 0xBB {
+        g = 117 // u
+    } else {
+        g = 121 // y
+    }
+    wr(dst, 0, g)
+    return 1
 }
 
 // Ist das Oktett davor ein Trennzeichen? Dann faengt hier ein Wort an.
@@ -402,6 +505,35 @@ fn rang(p: u64, n: u64) -> u64 {
         return RK_START
     }
     return RK_MID
+}
+
+// ================================================== FUER DEN LAEUFER
+//
+// DIESELBE RECHNUNG, VON AUSSEN AUFRUFBAR. Die Ordnung dieser Runde ist
+// ihr eigentlicher Wert, und eine Ordnung, die man nur an einem
+// Bildschirmfoto ablesen kann, ist schlecht gemessen: ein Foto sagt,
+// WAS oben steht, aber nicht, WARUM. `/bin/sucht` ruft diese beiden
+// und schreibt die Zahlen auf die Standardausgabe -- derselbe Gedanke
+// wie `/bin/locate` fuer den Namensindex.
+//
+// Es sind KEINE zweiten Fassungen der Rechnung. Es sind Zeiger auf die
+// erste; genau deshalb misst der Laeufer, was das Fenster tut.
+fn probe(query: u64, name: u64) -> u64 {
+    let qp: u64 = (&q[0 as usize]) as u64
+    qn = 0
+    var k: u64 = 0
+    while rd(query, k) != 0 && qn + 1 < QMAX {
+        wr(qp, qn, rd(query, k))
+        qn = qn + 1
+        k = k + 1
+    }
+    wr(qp, qn, 0)
+    qfn = fold(qp, qn, (&qf[0 as usize]) as u64, QMAX)
+    return rang(name, tlen(name))
+}
+
+fn falten(src: u64, dst: u64, max: u64) -> u64 {
+    return fold(src, tlen(src), dst, max)
 }
 
 // Steht die Eingabe irgendwo in dieser Zeichenkette? Fuer Beschreibung
@@ -755,6 +887,7 @@ fn nimm(src: u64, ix: u64, rk: u64) {
     }
     h_src[(nh) as usize] = src as u8
     h_ix[(nh) as usize] = ix
+    h_rk[(nh) as usize] = rk as u8
     h_key[(nh) as usize] = rk * 4 + src
     nh = nh + 1
 }
@@ -769,16 +902,19 @@ fn sortieren() {
     while i < nh {
         let ks: u64 = h_key[(i) as usize]
         let qs: u64 = h_src[(i) as usize] as u64
+        let rs: u64 = h_rk[(i) as usize] as u64
         let is2: u64 = h_ix[(i) as usize]
         var k: u64 = i
         while k > 0 && h_key[((k - 1)) as usize] > ks {
             h_key[(k) as usize] = h_key[((k - 1)) as usize]
             h_src[(k) as usize] = h_src[((k - 1)) as usize]
+            h_rk[(k) as usize] = h_rk[((k - 1)) as usize]
             h_ix[(k) as usize] = h_ix[((k - 1)) as usize]
             k = k - 1
         }
         h_key[(k) as usize] = ks
         h_src[(k) as usize] = qs as u8
+        h_rk[(k) as usize] = rs as u8
         h_ix[(k) as usize] = is2
         i = i + 1
     }
@@ -807,6 +943,7 @@ fn zuletzt_sammeln() {
         }
         h_src[(nh) as usize] = S_APP as u8
         h_ix[(nh) as usize] = i
+        h_rk[(nh) as usize] = RK_START as u8
         h_key[(nh) as usize] = k
         nh = nh + 1
         n_app = n_app + 1
@@ -975,7 +1112,7 @@ fn zeile_malen(r: u64, y0: u64, hh: u64, report: bool) {
         say((&s_ze[0 as usize]) as u64)
         ulib.sayn(i)
         kv((&s_sq[0 as usize]) as u64, s2)
-        kv((&s_rk[0 as usize]) as u64, h_key[(i) as usize] / 4)
+        kv((&s_rk[0 as usize]) as u64, h_rk[(i) as usize] as u64)
         kv((&s_x[0 as usize]) as u64, px_ + tx)
         kv((&s_bs[0 as usize]) as u64, py_ + tb)
         kv((&s_ix2[0 as usize]) as u64, px_ + ix)
@@ -1142,6 +1279,14 @@ fn init() -> bool {
 // Ohne diese zweite Zahl waere "ein Index ist schneller" eine
 // Behauptung.
 fn index_bauen(gegenprobe: u64) {
+    // ERST DAS ANWENDUNGSVERZEICHNIS. Es ist die erste Quelle der
+    // Rangfolge, und ohne es faende dieses Fenster kein einziges
+    // Programm -- gemessen im ersten Lauf: `apps=0`, und das Feld war
+    // vollkommen still dabei. Deshalb wird die Zahl gemeldet.
+    let na: u64 = appdir.load((&p_apps[0 as usize]) as u64, false)
+    say((&s_ad[0 as usize]) as u64)
+    ulib.sayn(na)
+    ulib.nl()
     let t_a: u64 = now_us()
     idx_n = nidx.build()
     idx_us = now_us() -% t_a
