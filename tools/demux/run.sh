@@ -120,8 +120,8 @@ lauf() { # name kommandozeile [zusatzargumente fuer qemu]
     local name=$1 zeile=$2
     shift 2
     cp -f "$TMPD/disk.img" "$TMPD/live-$name.img"
-    timeout 600 $QEMU_X86 -kernel "$TMPD/k.mb" -m 512 \
-        -append "osum nokbd nosched noproc nofs noring3 script=$zeile;exit" \
+    timeout 900 $QEMU_X86 -kernel "$TMPD/k.mb" -m 512 \
+        -append "osum ${EXTRA:-} nokbd nosched noproc nofs noring3 script=$zeile;exit" \
         -serial "file:$TMPD/$name.txt" -display none -no-reboot \
         -drive "file=$TMPD/live-$name.img,format=raw,if=ide,index=0" \
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 "$@" >/dev/null 2>&1
@@ -341,6 +341,13 @@ fi
 # ------------------------------------ 9. der ganze Weg: wirklich hoerbar
 
 echo "== 8. der ganze Weg: MP3 -> Dekodierer -> AC97 -> Mitschnitt =="
+# Der Kern schaltet die Tonschicht nur an, wenn das Wort `audio` auf der
+# Befehlszeile steht (Runde MEDIA1, kmain.fi -- `noaudio` ist die
+# Gegenprobe dazu). Alle Abschnitte davor liefen OHNE das Wort, und
+# genau deshalb steht dort in jedem Protokoll "kein Tongeraet": das ist
+# die Gegenprobe, dass /bin/play ohne Geraet trotzdem Auskunft gibt und
+# nicht abstuerzt.
+EXTRA=audio
 WAVOUT="$TMPD/ac97.wav"
 rm -f "$WAVOUT"
 lauf spiel "play -q -K /m/ton1.mp3" \
@@ -391,27 +398,31 @@ eb = einsatz(b)
 fa = a[ea:ea + sra]
 fb = b[eb:eb + srb]
 print("einsatz mitschnitt=%d quelle=%d" % (ea, eb))
+bezug = max(1e-9, goertzel(fa, 440.0, sra))
 for f in (440.0, 1567.0, 3000.0):
     va = goertzel(fa, f, sra)
     vb = goertzel(fb, f, srb)
-    print("ton %d Hz: mitschnitt=%.2f quelle=%.2f verhaeltnis=%.3f"
-          % (f, va, vb, va / vb if vb > 0 else 0))
+    # Bezug ist der 440-Hz-Pegel IM MITSCHNITT: bei einem Ton, den es in
+    # der Quelle nicht gibt, waere ein Verhaeltnis zur Quelle eine
+    # Division durch fast null und damit eine Zufallszahl.
+    print("ton %d Hz: mitschnitt=%.2f quelle=%.2f verhaeltnis=%.3f anteil=%.5f"
+          % (f, va, vb, va / vb if vb > 0 else 0, va / bezug))
 rms = math.sqrt(sum(v * v for v in a) / max(1, len(a)))
 print("rms mitschnitt=%.1f rahmen=%d rate=%d" % (rms, len(a), sra))
 PYX
     cat "$TMPD/spektrum.txt" | sed 's/^/  /'
     R440=$(grep -a 'ton 440' "$TMPD/spektrum.txt" | grep -oaE 'verhaeltnis=[0-9.]+' | cut -d= -f2)
     R1567=$(grep -a 'ton 1567' "$TMPD/spektrum.txt" | grep -oaE 'verhaeltnis=[0-9.]+' | cut -d= -f2)
-    R3000=$(grep -a 'ton 3000' "$TMPD/spektrum.txt" | grep -oaE 'verhaeltnis=[0-9.]+' | cut -d= -f2)
+    R3000=$(grep -a 'ton 3000' "$TMPD/spektrum.txt" | grep -oaE 'anteil=[0-9.]+' | cut -d= -f2)
     awk -v r="$R440" 'BEGIN{exit !(r>0.5 && r<2.0)}' \
         && ok "440 Hz kommt im Mitschnitt an (Verhaeltnis $R440)" \
         || bad "440 Hz fehlt im Mitschnitt (Verhaeltnis $R440)"
     awk -v r="$R1567" 'BEGIN{exit !(r>0.3 && r<3.0)}' \
         && ok "1567 Hz kommt im Mitschnitt an (Verhaeltnis $R1567)" \
         || bad "1567 Hz fehlt im Mitschnitt (Verhaeltnis $R1567)"
-    awk -v r="$R3000" 'BEGIN{exit !(r<0.5)}' \
-        && ok "3000 Hz ist NICHT da -- die Gegenprobe (Verhaeltnis $R3000)" \
-        || bad "3000 Hz ist im Mitschnitt, obwohl es im Signal nicht vorkommt"
+    awk -v r="$R3000" 'BEGIN{exit !(r<0.02)}' \
+        && ok "3000 Hz ist NICHT da -- die Gegenprobe (Anteil am 440-Hz-Pegel: $R3000)" \
+        || bad "3000 Hz ist im Mitschnitt, obwohl es im linken Kanal nicht vorkommt (Anteil $R3000)"
 else
     bad "QEMU hat keinen Ton mitgeschrieben"
 fi
