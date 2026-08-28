@@ -52,6 +52,32 @@ The size, counted:
 | `lib/libc/*.fi` — the libc from round K4 | 1,598 |
 | `tools/` — the test runners | 9,650 |
 
+Round **DEMUX** made MP4 and Matroska files **open** instead of failing.
+The video inside them is H.264, and this system does not decode H.264 --
+so it says so, by name, with the resolution, the duration and the
+*computed* bit rate, and offers to play the sound alone. What it does
+decode is **MP3**: a complete MPEG-1 Layer III decoder in fixed point
+(no floating point exists in ring 3 here), with the bit reservoir, short
+blocks, mixed blocks, MS and intensity stereo, the alias reduction, all
+four IMDCT windows and the polyphase synthesis.
+
+    play: spuren=3
+      0  Video  H.264 / AVC  320x240  3.0 s  725 kbit/s  NICHT dekodierbar
+      1  Ton    MP3  44100 Hz  2 Ka  3.0 s  117 kbit/s  spielbar
+      2  Text   SRT  3.0 s  spielbar
+    play: spiele nur den Ton dieser Datei
+
+The proof is a **comparison, not an opinion**: the same file is decoded
+by Osum and by ffmpeg, and the samples are put side by side --
+**mean error 0.19 and largest error 3** out of a range of +-32767, an
+error RMS of 0.44 (ISO/IEC 11172-4 asks for less than 1), and a spectrum
+that differs by at most 0.06 dB. That measurement found a real bug: a
+short block has THIRTEEN bands but only TWELVE transmitted scale
+factors, and band 12 was neither reordered nor requantised. It showed up
+only in the four frames that carry the deliberately placed clicks in the
+test signal -- which is why the test signal has clicks.
+`kernel/user/{media,mp4,mkv,mp3,srt}.fi`, `tools/demux/`, `STATUS-DEMUX.md`.
+
 Round **TILING** turned the floating windows into a **window tree**, the
 way i3, sway and bspwm keep one: leaves are windows, inner nodes are
 splits with a *ratio* (not with pixels), a container can be `split`,
