@@ -133,7 +133,14 @@ if shot A2a lang=de icons=yes uitrace=yes extra="themegui" progs="$PROGS_TT" kee
 else
     bad "A2a did not boot"
 fi
-if shot A2b lang=de icons=yes uitrace=yes extra="themegui nostart" progs="$PROGS_TT" keep=yes; then
+# A2b HAT ABSICHTLICH KEIN themetest UND KEINEN STARTER, und der Grund
+# ist gemessen: sobald DREI Anwendungsfenster offen sind, kachelt der
+# Fenstermanager der Runde TILING sie, und der Dateimanager bekommt 396
+# Bildpunkte statt der 664, die er anfordert. Seine Spalte "Größe"
+# faengt bei x=368 an und ist 44 breit -- sie passt dann nicht mehr ins
+# eigene Fenster. Mit zwei Fenstern bleibt die Anordnung frei, das
+# Fenster ist 660 breit, und die Zeichenkette steht ganz darin.
+if shot A2b lang=de icons=yes uitrace=yes extra="themegui nostart" keep=yes; then
     # TOLERANCE 64, AND HERE IS THE MEASURED NUMBER FOR IT. The two dots
     # of an 'ö' are a second glyph box over the first, and where two
     # boxes overlap the library mixes glyph ON glyph while the reference
