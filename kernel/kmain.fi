@@ -85,6 +85,9 @@ import ftype
 // RUNDE K17: der USB-Baum -- Regler, Kern, Klassen.
 import xhci
 import usb
+import arch.arch
+import ac97
+import audio
 
 // Indices in the table out of isr.s.
 const V_DF_STACK: u64 = 52
@@ -401,6 +404,14 @@ fn kernel_main(mbi: u64, vectors: u64, state: u64, kernel_end: u64,
     //     Blockgeraet sein. Ohne das Wort `usb` ist das hier EINE
     //     gedruckte Zeile und sonst nichts.
     usb_stage(state)
+
+    // 7e-quater. RUNDE MEDIA1: DER TON. Hier und nicht frueher, weil er
+    //     den Bus braucht (`hw.stage`, Runde K2) und den Rahmenverwalter
+    //     (der Ringpuffer sind 16 KiB aus `mem.frame_run`) -- und nicht
+    //     spaeter, weil `osum(state)` gleich darunter die Shell startet
+    //     und /bin/play ein aufgesetztes Geraet vorfinden soll. Ohne
+    //     das Wort `audio` ist das hier EINE gedruckte Zeile.
+    audio_stage(state)
 
     // 7e-ter. RUNDE TRESOR: DIE GERAETEIDENTITAET (`kernel/hwid.fi`).
     //     Hier und nicht frueher, weil die MAC-Adresse erst existiert,
@@ -3907,6 +3918,51 @@ fn mode_of(state: u64, cmd: u64) {
     if find(cmd, (&w_hold[0]) as u64, 7) != 0 {
         kstate.mode_add(state, kstate.M_USBHOLD)
     }
+    // RUNDE MEDIA1. `audio` schaltet den Ton an; die uebrigen acht sind
+    // GEGENPROBEN und Schalter fuer die Abnahme. Dieselbe Bauart wie
+    // Runde K17: `noaudio` loescht kein Bit, es setzt ein zweites, und
+    // `audio_stage` sieht beide an -- ein Schalter, den sein eigenes
+    // Argument aufhebt, ist keiner.
+    var w_aud: [u8; 6] = "audio\0"
+    var w_noaud: [u8; 8] = "noaudio\0"
+    var w_sine: [u8; 8] = "audsine\0"
+    var w_asay: [u8; 7] = "audsay\0"
+    var w_nomix: [u8; 9] = "audnomix\0"
+    var w_starve: [u8; 11] = "audstarve\0\0"
+    var w_abeep: [u8; 8] = "audbeep\0"
+    var w_nosnd: [u8; 9] = "nosounds\0"
+    var w_ahalf: [u8; 8] = "audhalf\0"
+    var w_along: [u8; 8] = "audlong\0"
+    if find(cmd, (&w_aud[0]) as u64, 5) != 0 {
+        kstate.mode_add(state, kstate.M_AUDIO)
+    }
+    if find(cmd, (&w_noaud[0]) as u64, 7) != 0 {
+        kstate.mode_add(state, kstate.M_NOAUDIO)
+    }
+    if find(cmd, (&w_sine[0]) as u64, 7) != 0 {
+        kstate.mode_add(state, kstate.M_AUDSINE)
+    }
+    if find(cmd, (&w_asay[0]) as u64, 6) != 0 {
+        kstate.mode_add(state, kstate.M_AUDSAY)
+    }
+    if find(cmd, (&w_nomix[0]) as u64, 8) != 0 {
+        kstate.mode_add(state, kstate.M_AUDNOMIX)
+    }
+    if find(cmd, (&w_starve[0]) as u64, 9) != 0 {
+        kstate.mode_add(state, kstate.M_AUDSTARVE)
+    }
+    if find(cmd, (&w_abeep[0]) as u64, 7) != 0 {
+        kstate.mode_add(state, kstate.M_AUDBEEP)
+    }
+    if find(cmd, (&w_nosnd[0]) as u64, 8) != 0 {
+        kstate.mode_add(state, kstate.M_NOSOUNDS)
+    }
+    if find(cmd, (&w_ahalf[0]) as u64, 7) != 0 {
+        kstate.mode_add(state, kstate.M_AUDHALF)
+    }
+    if find(cmd, (&w_along[0]) as u64, 7) != 0 {
+        kstate.mode_add(state, kstate.M_AUDLONG)
+    }
 }
 
 // Address of the first occurrence, or 0. The command line is a C string.
@@ -5654,4 +5710,355 @@ fn tile_dirty(state: u64) -> u64 {
     wm.damage_all(state)
     wm.compose(state)
     return (zu << 32) | (auf & 0xFFFFFFFF)
+}
+
+// ==================================================================
+// RUNDE MEDIA1 -- DER TON
+//
+// Was hier steht, ist die REIHENFOLGE und die MESSUNG; der Chip steht
+// in `kernel/ac97.fi`, die Schicht darueber in `kernel/audio.fi`.
+//
+// WARUM DER KERNEL UEBERHAUPT SELBST EINEN TON SPIELT, wo es doch
+// /bin/play gibt: weil ein Testlauf, der durch die Shell, das
+// Dateisystem und einen ELF-Lader hindurch messen muss, bei jedem
+// Fehler drei Verdaechtige hat. Ein Sinus, der hier entsteht und in
+// derselben Runde in einer Datei auf dem Wirt landet, hat einen.
+// /bin/play wird DANACH gemessen, gegen dieselbe Datei.
+//
+// DIE ZAHLEN, die dieser Abschnitt herausgibt, und was sie belegen:
+//   dt_ns / dframes    die Tonuhr gegen den Zyklenzaehler, in ppm
+//   dt_ticks           dieselbe Strecke am ZEITGEBER gemessen -- die
+//                      dritte, unabhaengige Uhr. Sie entscheidet, wer
+//                      recht hat, wenn die ersten beiden auseinander
+//                      laufen
+//   underruns          ob der Ringpuffer leergelaufen ist
+//   backsteps          ob die Position je klammern musste
+//   written / played   ob am Ende alles wirklich gespielt wurde
+// ==================================================================
+
+const AUD_HZ: u64 = 440
+const AUD_MS: u64 = 1000
+const AUD_MS_LONG: u64 = 5000
+const AUD_AMP: u64 = 24000 // etwa -2,7 dBFS; Platz nach oben bleibt
+// Die Nachfrist am Ende. Der Regler hat alles gelesen, was im Ring
+// stand -- das heisst noch nicht, dass QEMU es auch in die Datei
+// geschrieben hat: zwischen dem DMA und der Datei liegen der Mischer
+// und ein Puffer, und der Zeitgeber der Tonschicht schlaegt alle 10 ms.
+// GEMESSEN: ohne diese Nachfrist fehlten 167 Rahmen (3,5 ms) am Ende
+// der Datei.
+const AUD_GRACE_NS: u64 = 150000000
+
+fn aud_num(name: u64, v: u64) {
+    var s_p: [u8; 6] = "aud: \0"
+    var s_e: [u8; 2] = "=\0"
+    serial.puts((&s_p[0]) as u64)
+    serial.puts(name)
+    serial.puts((&s_e[0]) as u64)
+    serial.dec(v)
+    serial.nl()
+}
+
+fn audio_stage(state: u64) {
+    var s_off: [u8; 21] = "aud: aus (kein Wort)\0"
+    var s_no: [u8; 22] = "aud: kein Geraet, why\0"
+    if !kstate.mode_on(state, kstate.M_AUDIO)
+        || kstate.mode_on(state, kstate.M_NOAUDIO) {
+        serial.puts((&s_off[0]) as u64)
+        serial.nl()
+        return
+    }
+    audio.init(state)
+    if !audio.ready(state) {
+        serial.puts((&s_no[0]) as u64)
+        serial.dec(audio.why(state))
+        serial.nl()
+        return
+    }
+    if kstate.mode_on(state, kstate.M_NOSOUNDS) {
+        audio.set_sounds(state, false)
+    }
+    // GEGENPROBE, halbe Lautstaerke. QEMU rechnet die sechs Bit des
+    // Master-Registers linear um: 63 * (100-50) / 100 = 31 Schritte
+    // Daempfung, und daraus wird der Faktor (255 - 255*31/63)/255 =
+    // 0,5098. Genau diesen Faktor haelt der Wirt gegen die Datei.
+    if kstate.mode_on(state, kstate.M_AUDHALF) {
+        audio.set_volume(state, 50)
+    }
+    // GEGENPROBE, stummer Mischer. Der DMA laeuft und liefert Oktette;
+    // der Mischer laesst nichts durch. Die Datei auf dem Wirt muss also
+    // GENAUSO LANG und GANZ STILL sein -- eine kuerzere Datei hiesse,
+    // dass der Ton am Mischer vorbei nie entstanden ist.
+    if kstate.mode_on(state, kstate.M_AUDNOMIX) {
+        audio.set_muted(state, true)
+    }
+    if kstate.mode_on(state, kstate.M_AUDSINE) {
+        audio_sine(state)
+    }
+    if kstate.mode_on(state, kstate.M_AUDSTARVE) {
+        audio_starve(state)
+    }
+    if kstate.mode_on(state, kstate.M_AUDBEEP) {
+        audio_beep(state)
+    }
+    if kstate.mode_on(state, kstate.M_AUDSAY) {
+        audio_say(state)
+    }
+}
+
+// Warten, bis der Ring leer gespielt ist, danach die Nachfrist
+// abwarten. Das Warten ist BEGRENZT: ein Geraet, das nicht faehrt, darf
+// den Kernel nicht anhalten, sonst haengt die Gegenprobe statt zu
+// fallen.
+fn audio_drain(state: u64) {
+    let deadline: u64 = time.mono_ns(state) +% 10000000000
+    var done: bool = false
+    while !done {
+        audio.samples_played(state)
+        if audio.remaining(state) == 0 {
+            done = true
+        }
+        if time.mono_ns(state) > deadline {
+            done = true
+        }
+        arch.pause()
+    }
+    let grace: u64 = time.mono_ns(state) +% AUD_GRACE_NS
+    var waiting: bool = true
+    while waiting {
+        arch.pause()
+        if time.mono_ns(state) > grace {
+            waiting = false
+        }
+    }
+}
+
+// Die Messstrecke. Der Sinus wird in Stuecken geschrieben, so wie ein
+// Abspieler es taete, und BEI JEDEM STUECK wird die Uhr abgelesen --
+// nicht erst am Ende. Der Grund steht in einer Zahl: schreibt man erst
+// alles und misst dann beim Leerlaufen, ist die Messstrecke so lang wie
+// der Ring, also 85 ms. Ueber 85 ms sind ein paar Mikrosekunden
+// Ablesefehler schon zweistellige ppm; ueber die ganze Sekunde nicht.
+//
+// Jedes Paar wird als (t vorher, Position, t danach) genommen und die
+// Zeit gemittelt; die beiden Portlesungen dazwischen kosten unter KVM
+// ein bis zwei Mikrosekunden, und die gingen sonst als Rauschen in eine
+// Zahl ein, die in ppm gemessen wird.
+//
+// Der erste Messpunkt liegt einen ganzen Ring hinter dem Start: davor
+// faehrt der Regler erst an, und ein Anfahrvorgang in der Messstrecke
+// waere ein Fehler, den man der Uhr anlastet.
+fn audio_sine(state: u64) {
+    audio.open(state)
+    // `audlong` macht aus einer Sekunde fuenf. Der Grund ist eine
+    // Messgrenze und keine Bequemlichkeit: die dritte Uhr ist der
+    // Zeitgeber mit 100 Hz, und ueber eine Sekunde ist EINE Marke
+    // Unsicherheit schon ein Prozent. Ueber fuenf Sekunden ist sie ein
+    // Fuenftel Prozent, und erst damit laesst sich entscheiden, ob der
+    // Ton oder der Zyklenzaehler danebenliegt.
+    var ms: u64 = AUD_MS
+    if kstate.mode_on(state, kstate.M_AUDLONG) {
+        ms = AUD_MS_LONG
+    }
+    let want: u64 = audio.rate(state) * ms / 1000
+    var written: u64 = 0
+    var t0: u64 = 0
+    var p0: u64 = 0
+    var k0: u64 = 0
+    var t1: u64 = 0
+    var p1: u64 = 0
+    var k1: u64 = 0
+    var back: u64 = 0
+    var last: u64 = 0
+    var polls: u64 = 0
+    let deadline: u64 = time.mono_ns(state) +% 10000000000
+    var give_up: bool = false
+    var filling: bool = true
+    while filling {
+        var got: u64 = 0
+        if written < want {
+            got = audio.tone_push(state, AUD_HZ, AUD_AMP, want -% written)
+            written = written + got
+        }
+        if written >= want {
+            audio.pad_and_submit(state)
+        }
+        let ta: u64 = time.mono_ns(state)
+        let p: u64 = audio.samples_played(state)
+        let tb: u64 = time.mono_ns(state)
+        let t: u64 = ta + (tb -% ta) / 2
+        polls = polls + 1
+        if p < last {
+            back = back + 1
+        }
+        last = p
+        if p0 == 0 && p >= audio.ring_frames(state) {
+            p0 = p
+            t0 = t
+            k0 = kstate.get(state, kstate.TICKS)
+        }
+        if p0 != 0 && p > p0 {
+            p1 = p
+            t1 = t
+            k1 = kstate.get(state, kstate.TICKS)
+        }
+        if written >= want && audio.remaining(state) == 0 {
+            filling = false
+        }
+        if got == 0 {
+            arch.pause()
+            if time.mono_ns(state) > deadline {
+                filling = false
+                give_up = true
+            }
+        }
+    }
+    let grace: u64 = time.mono_ns(state) +% AUD_GRACE_NS
+    var waiting: bool = true
+    while waiting {
+        arch.pause()
+        if time.mono_ns(state) > grace {
+            waiting = false
+        }
+    }
+    audio.stop(state)
+    audio.close(state)
+    var s_dt: [u8; 6] = "dt_ns\0"
+    var s_df: [u8; 8] = "dframes\0"
+    var s_dk: [u8; 9] = "dt_ticks\0"
+    var s_khz: [u8; 8] = "tsc_khz\0"
+    var s_bk: [u8; 10] = "backsteps\0"
+    var s_pl: [u8; 6] = "polls\0"
+    var s_hz: [u8; 6] = "sinhz\0"
+    var s_ms: [u8; 6] = "sinms\0"
+    var s_amp: [u8; 7] = "sinamp\0"
+    var s_ask: [u8; 7] = "sinask\0"
+    var s_gu: [u8; 7] = "giveup\0"
+    var dt: u64 = 0
+    var df: u64 = 0
+    var dk: u64 = 0
+    if t1 > t0 && p1 > p0 {
+        dt = t1 -% t0
+        df = p1 -% p0
+    }
+    if k1 > k0 {
+        dk = k1 -% k0
+    }
+    aud_num((&s_dt[0]) as u64, dt)
+    aud_num((&s_df[0]) as u64, df)
+    // DIE DRITTE UHR. Der Zeitgeber schlaegt hundertmal in der Sekunde
+    // und wird von QEMU gegen die Wirtsuhr getaktet -- er ist damit von
+    // dem Zyklenzaehler UNABHAENGIG, den `time.calibrate` gegen ihn
+    // eicht. Weichen Ton und Zyklenzaehler voneinander ab, sagt genau
+    // diese Zahl, welcher der beiden recht hat.
+    aud_num((&s_dk[0]) as u64, dk)
+    aud_num((&s_khz[0]) as u64, time.khz(state))
+    aud_num((&s_bk[0]) as u64, back + audio.backsteps(state))
+    aud_num((&s_pl[0]) as u64, polls)
+    aud_num((&s_hz[0]) as u64, AUD_HZ)
+    aud_num((&s_ms[0]) as u64, ms)
+    aud_num((&s_amp[0]) as u64, AUD_AMP)
+    aud_num((&s_ask[0]) as u64, written)
+    var gu: u64 = 0
+    if give_up {
+        gu = 1
+    }
+    aud_num((&s_gu[0]) as u64, gu)
+}
+
+// GEGENPROBE: den Ring absichtlich leerlaufen lassen. Erst ein kurzer
+// Ton, kuerzer als der Ring, dann drei Zehntelsekunden nichts, dann
+// wieder Ton. Der Zaehler `underruns` MUSS danach groesser als null
+// sein -- ist er es nicht, zaehlt der Treiber Aussetzer nicht, und dann
+// ist die Null im Regellauf nichts wert.
+fn audio_starve(state: u64) {
+    audio.open(state)
+    audio.tone(state, AUD_HZ, 60, AUD_AMP)
+    audio.pad_and_submit(state)
+    let until: u64 = time.mono_ns(state) +% 300000000
+    var wait: bool = true
+    while wait {
+        audio.samples_played(state)
+        arch.pause()
+        if time.mono_ns(state) > until {
+            wait = false
+        }
+    }
+    audio.tone(state, AUD_HZ, 60, AUD_AMP)
+    audio.pad_and_submit(state)
+    audio_drain(state)
+    audio.stop(state)
+    audio.close(state)
+}
+
+fn audio_beep(state: u64) {
+    audio.error_beep(state)
+    audio_drain(state)
+    audio.stop(state)
+}
+
+fn audio_say(state: u64) {
+    var n_ready: [u8; 6] = "ready\0"
+    var n_back: [u8; 8] = "backend\0"
+    var n_rate: [u8; 5] = "rate\0"
+    var n_ch: [u8; 9] = "channels\0"
+    var n_bits: [u8; 5] = "bits\0"
+    var n_ent: [u8; 8] = "entries\0"
+    var n_ef: [u8; 12] = "entryframes\0"
+    var n_rf: [u8; 11] = "ringframes\0"
+    var n_lat: [u8; 10] = "latencyus\0"
+    var n_eus: [u8; 8] = "entryus\0"
+    var n_vol: [u8; 7] = "volume\0"
+    var n_mr: [u8; 10] = "masterreg\0"
+    var n_pr: [u8; 7] = "pcmreg\0"
+    var n_mu: [u8; 6] = "muted\0"
+    var n_wr: [u8; 8] = "written\0"
+    var n_pd: [u8; 7] = "played\0"
+    var n_un: [u8; 10] = "underruns\0"
+    var n_sb: [u8; 8] = "submits\0"
+    var n_st: [u8; 7] = "starts\0"
+    var n_dch: [u8; 4] = "dch\0"
+    var n_cd: [u8; 6] = "codec\0"
+    var n_bp: [u8; 6] = "beeps\0"
+    var n_sn: [u8; 7] = "sounds\0"
+    var n_why: [u8; 4] = "why\0"
+    var n_oc: [u8; 7] = "octets\0"
+    var n_wc: [u8; 7] = "writes\0"
+    aud_num((&n_ready[0]) as u64, 1)
+    aud_num((&n_back[0]) as u64, audio.backend(state))
+    aud_num((&n_rate[0]) as u64, audio.rate(state))
+    aud_num((&n_ch[0]) as u64, audio.channels(state))
+    aud_num((&n_bits[0]) as u64, audio.bits(state))
+    aud_num((&n_ent[0]) as u64, ac97.entries(state))
+    aud_num((&n_ef[0]) as u64, ac97.entry_frames(state))
+    aud_num((&n_rf[0]) as u64, audio.ring_frames(state))
+    aud_num((&n_lat[0]) as u64, audio.latency_us(state))
+    aud_num((&n_eus[0]) as u64, audio.entry_us(state))
+    aud_num((&n_vol[0]) as u64, audio.volume(state))
+    aud_num((&n_mr[0]) as u64, ac97.master_reg(state))
+    aud_num((&n_pr[0]) as u64, ac97.pcm_reg(state))
+    var mu: u64 = 0
+    if audio.muted(state) {
+        mu = 1
+    }
+    aud_num((&n_mu[0]) as u64, mu)
+    aud_num((&n_wr[0]) as u64, audio.frames_written(state))
+    aud_num((&n_pd[0]) as u64, audio.samples_played(state))
+    aud_num((&n_un[0]) as u64, audio.underruns(state))
+    aud_num((&n_sb[0]) as u64, ac97.submits(state))
+    aud_num((&n_st[0]) as u64, ac97.starts(state))
+    aud_num((&n_dch[0]) as u64, ac97.dch_seen(state))
+    var cd: u64 = 0
+    if ac97.codec_ready(state) {
+        cd = 1
+    }
+    aud_num((&n_cd[0]) as u64, cd)
+    aud_num((&n_bp[0]) as u64, audio.beeps(state))
+    var sn: u64 = 0
+    if audio.sounds_on(state) {
+        sn = 1
+    }
+    aud_num((&n_sn[0]) as u64, sn)
+    aud_num((&n_why[0]) as u64, audio.why(state))
+    aud_num((&n_oc[0]) as u64, audio.octets_written(state))
+    aud_num((&n_wc[0]) as u64, audio.writes(state))
 }

@@ -1,0 +1,491 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/play.fi -- RUNDE MEDIA1: /bin/play, der Abspieler.
+//
+//     play datei.wav              spielt sie
+//     play -v 40 datei.wav        mit 40 Prozent Lautstaerke
+//     play -q datei.wav           ohne Bericht
+//     play -i datei.wav           nur den Kopf lesen und berichten
+//     play -b                     der Systemklang, einmal
+//
+// WAS ER LIEST: RIFF/WAVE mit unkomprimiertem PCM, 8 oder 16 Bit, ein
+// oder zwei Kanaele, jede Abtastrate. Das ist genau das, was die
+// Recherche als "Stufe 1" nennt (200-400 Zeilen, unter 0,1 % Rechenlast)
+// -- und ausdruecklich NICHT MP3, Vorbis, Opus oder FLAC. FLAC ist der
+// naechste sinnvolle Schritt (1500-3000 Zeilen, verlustfrei und damit
+// bitgenau pruefbar); Opus waeren zwei Codecs in einem und ist fuer
+// dieses Projekt unrealistisch. Das steht in docs/AUDIO.md mit Zahlen.
+//
+// DREI UMRECHNUNGEN macht dieses Programm, weil die Tonschicht genau
+// EIN Format annimmt (48 kHz, 16 Bit, zwei Kanaele) und ein Kernel, der
+// jedes Format annimmt, den Umrechner im Kernel haette:
+//
+//   1. 8 Bit -> 16 Bit. WAV mit acht Bit ist VORZEICHENLOS mit 128 als
+//      Null; wer das uebersieht, bekommt ein Rechtecksignal mit voller
+//      Aussteuerung. (v - 128) * 256.
+//   2. Mono -> Stereo. Derselbe Wert auf beide Kanaele.
+//   3. Abtastrate -> 48 kHz, LINEAR interpoliert, in Festkomma Q16.
+//      Nicht "naechster Nachbar": bei 44,1 kHz auf 48 kHz wiederholt
+//      der naechste Nachbar jeden elften Wert, und das ist ein
+//      Seitenband, das man hoert. Linear ist ein Tiefpass erster
+//      Ordnung -- nicht schoen, aber ehrlich und in zwanzig Zeilen.
+//      Was es NICHT ist: ein Umrechner mit Fenster (Sinc), der die
+//      Spiegelfrequenzen wirklich wegnimmt. Steht in der Restliste.
+//
+// DER SCHREIBWEG BLOCKIERT NICHT. `osum_audwrite` nimmt so viel, wie in
+// den Ring passt, und sagt wie viel -- der Rest ist Sache dieses
+// Programms. Das ist Absicht und in `kernel/sys.fi` begruendet: ein
+// Abspieler, der spaeter auch Bilder dekodiert, darf nicht im Ton
+// haengen.
+
+profile kernel
+
+import ulib
+
+export { u_start }
+
+// Die Aufrufe dieser Runde (kernel/sys.fi, Vorrat 1840..1849).
+const SYS_AUDGET: u64 = 1840
+const SYS_AUDSET: u64 = 1841
+const SYS_AUDWRITE: u64 = 1842
+
+// Die Felder von `osum_audget`. Dieselben Nummern wie in
+// `kernel/audio.fi`.
+const A_READY: u64 = 0
+const A_RATE: u64 = 1
+const A_CHANNELS: u64 = 2
+const A_BITS: u64 = 3
+const A_VOLUME: u64 = 4
+const A_PLAYED: u64 = 5
+const A_WRITTEN: u64 = 6
+const A_UNDERRUNS: u64 = 7
+const A_LATENCY: u64 = 8
+const A_RINGFRAMES: u64 = 10
+const A_OPEN: u64 = 14
+const A_BACKEND: u64 = 15
+const A_WHY: u64 = 16
+const A_REMAIN: u64 = 25
+const A_BACKSTEPS: u64 = 29
+
+// Die Felder von `osum_audset`.
+const AS_VOLUME: u64 = 0
+const AS_OPEN: u64 = 1
+const AS_MUTE: u64 = 2
+const AS_DRAIN: u64 = 3
+const AS_STOP: u64 = 4
+const AS_SOUNDS: u64 = 5
+const AS_BEEP: u64 = 6
+
+const OUT_RATE: u64 = 48000
+const OUT_FRAMES: u64 = 1024 // ein Ausgabeblock
+const RAW_OCTETS: u64 = 4096 // ein Leseblock
+const MAX_SRC: u64 = 1024 // Quellrahmen je Leseblock, hoechstens
+
+fn get(field: u64) -> u64 {
+    return ulib.sys(SYS_AUDGET, field, 0, 0)
+}
+
+fn set(field: u64, value: u64) -> u64 {
+    return ulib.sys(SYS_AUDSET, field, value, 0)
+}
+
+fn b(p: u64, i: u64) -> u64 {
+    return (*((p + i) as *mut u8)) as u64
+}
+
+fn le16(p: u64, i: u64) -> u64 {
+    return b(p, i) | (b(p, i + 1) << 8)
+}
+
+fn le32(p: u64, i: u64) -> u64 {
+    return b(p, i) | (b(p, i + 1) << 8) | (b(p, i + 2) << 16)
+        | (b(p, i + 3) << 24)
+}
+
+fn put16(p: u64, i: u64, v: u64) {
+    __mmio_write8((p + i) as *mut u8, (v & 0xFF) as u8)
+    __mmio_write8((p + i + 1) as *mut u8, ((v >> 8) & 0xFF) as u8)
+}
+
+fn four(p: u64, i: u64, a: u64, c: u64, d: u64, e: u64) -> bool {
+    return b(p, i) == a && b(p, i + 1) == c && b(p, i + 2) == d
+        && b(p, i + 3) == e
+}
+
+fn num(name: u64, v: u64) {
+    var s_p: [u8; 7] = "play: \0"
+    var s_e: [u8; 2] = "=\0"
+    ulib.say((&s_p[0 as usize]) as u64)
+    ulib.say(name)
+    ulib.say((&s_e[0 as usize]) as u64)
+    ulib.sayn(v)
+    ulib.nl()
+}
+
+fn u_start(args: u64) -> u64 {
+    var s_use: [u8; 39] = "play: play [-v N] [-q] [-i] datei.wav\0\0"
+    var s_nodev: [u8; 34] = "play: kein Tongeraet (why steht)\0\0"
+    var s_open: [u8; 25] = "play: kann nicht oeffnen\0"
+    var s_notwav: [u8; 28] = "play: das ist kein RIFF/WAV\0"
+    var s_nofmt: [u8; 33] = "play: kein fmt- oder data-Stueck\0"
+    var s_pcm: [u8; 41] = "play: nur unkomprimiertes PCM, 8/16 Bit\0\0"
+    var s_busy: [u8; 33] = "play: Tongeraet ist schon belegt\0"
+
+    let argc: u64 = ulib.arg_count(args)
+    var vol: u64 = 101 // 101 = nicht gesetzt
+    var quiet: bool = false
+    var only_info: bool = false
+    var path: u64 = 0
+    var beep: bool = false
+    var k: u64 = 1
+    var bad_args: bool = false
+    while k < argc {
+        let a: u64 = ulib.arg_at(args, k)
+        var s_v: [u8; 3] = "-v\0"
+        var s_q: [u8; 3] = "-q\0"
+        var s_i: [u8; 3] = "-i\0"
+        var s_b: [u8; 3] = "-b\0"
+        if ulib.streq(a, (&s_v[0 as usize]) as u64) {
+            if k + 1 >= argc {
+                bad_args = true
+                k = argc
+            } else {
+                vol = ulib.to_num(ulib.arg_at(args, k + 1))
+                k = k + 2
+            }
+        } else {
+            if ulib.streq(a, (&s_q[0 as usize]) as u64) {
+                quiet = true
+                k = k + 1
+            } else {
+                if ulib.streq(a, (&s_i[0 as usize]) as u64) {
+                    only_info = true
+                    k = k + 1
+                } else {
+                    if ulib.streq(a, (&s_b[0 as usize]) as u64) {
+                        beep = true
+                        k = k + 1
+                    } else {
+                        path = a
+                        k = k + 1
+                    }
+                }
+            }
+        }
+    }
+    if bad_args {
+        ulib.esay_line((&s_use[0 as usize]) as u64, 0)
+        return 2
+    }
+    if get(A_READY) != 1 {
+        ulib.esay_line((&s_nodev[0 as usize]) as u64, 0)
+        var n_why: [u8; 4] = "why\0"
+        num((&n_why[0 as usize]) as u64, get(A_WHY))
+        return 1
+    }
+    if vol < 101 {
+        set(AS_VOLUME, vol)
+    }
+    if beep {
+        set(AS_BEEP, 0)
+        return 0
+    }
+    if path == 0 {
+        ulib.esay_line((&s_use[0 as usize]) as u64, 0)
+        return 2
+    }
+
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, path, 0, 0)
+    if ulib.bad(fd) {
+        ulib.esay_line((&s_open[0 as usize]) as u64, path)
+        return 1
+    }
+
+    // ---------------------------------------------------- der Dateikopf
+    var hdr: [u8; 64] = [0 as u8; 64]
+    let h: u64 = (&hdr[0 as usize]) as u64
+    if ulib.sys(ulib.SYS_READ, fd, h, 12) != 12 {
+        ulib.esay_line((&s_notwav[0 as usize]) as u64, path)
+        ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+        return 1
+    }
+    // "RIFF" .... "WAVE"
+    if !four(h, 0, 82, 73, 70, 70) || !four(h, 8, 87, 65, 86, 69) {
+        ulib.esay_line((&s_notwav[0 as usize]) as u64, path)
+        ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+        return 1
+    }
+    var fmt_ok: bool = false
+    var data_len: u64 = 0
+    var fmt_tag: u64 = 0
+    var chans: u64 = 0
+    var srate: u64 = 0
+    var sbits: u64 = 0
+    var block: u64 = 0
+    var pos: u64 = 12
+    var walking: bool = true
+    while walking {
+        if ulib.sys(ulib.SYS_READ, fd, h, 8) != 8 {
+            walking = false
+        } else {
+            let clen: u64 = le32(h, 4)
+            if four(h, 0, 102, 109, 116, 32) {
+                // "fmt " -- 16 Oktette sind das Pflichtstueck; laengere
+                // Stuecke (WAVE_FORMAT_EXTENSIBLE) haben dieselben 16
+                // vorne, der Rest wird uebersprungen.
+                var want: u64 = clen
+                if want > 16 {
+                    want = 16
+                }
+                if ulib.sys(ulib.SYS_READ, fd, h, want) != want {
+                    walking = false
+                } else {
+                    fmt_tag = le16(h, 0)
+                    chans = le16(h, 2)
+                    srate = le32(h, 4)
+                    block = le16(h, 12)
+                    sbits = le16(h, 14)
+                    fmt_ok = true
+                    if clen > want {
+                        ulib.sys(ulib.SYS_SEEK, fd, clen - want, 1)
+                    }
+                    pos = pos + 8 + clen
+                }
+            } else {
+                if four(h, 0, 100, 97, 116, 97) {
+                    // "data" -- ab hier stehen die Oktette.
+                    data_len = clen
+                    walking = false
+                } else {
+                    // Alles andere ueberspringen. Ein Stueck ungerader
+                    // Laenge hat ein Fuelloktett dahinter; wer das
+                    // vergisst, liest den naechsten Kopf um eins
+                    // verschoben und findet nie ein `data`.
+                    var skip: u64 = clen
+                    if (clen & 1) != 0 {
+                        skip = skip + 1
+                    }
+                    ulib.sys(ulib.SYS_SEEK, fd, skip, 1)
+                    pos = pos + 8 + skip
+                }
+            }
+        }
+    }
+    if !fmt_ok || data_len == 0 {
+        ulib.esay_line((&s_nofmt[0 as usize]) as u64, path)
+        ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+        return 1
+    }
+    if fmt_tag != 1 || (sbits != 8 && sbits != 16) || chans == 0
+        || chans > 2 || srate == 0 || block == 0 {
+        ulib.esay_line((&s_pcm[0 as usize]) as u64, path)
+        ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+        return 1
+    }
+
+    var n_rate: [u8; 8] = "srcrate\0"
+    var n_ch: [u8; 7] = "srcch\0\0"
+    var n_bits: [u8; 8] = "srcbits\0"
+    var n_sf: [u8; 10] = "srcframes\0"
+    if !quiet {
+        num((&n_rate[0 as usize]) as u64, srate)
+        num((&n_ch[0 as usize]) as u64, chans)
+        num((&n_bits[0 as usize]) as u64, sbits)
+        num((&n_sf[0 as usize]) as u64, data_len / block)
+    }
+    if only_info {
+        ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+        return 0
+    }
+
+    if ulib.bad(set(AS_OPEN, 1)) {
+        ulib.esay_line((&s_busy[0 as usize]) as u64, 0)
+        ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+        return 1
+    }
+
+    // ------------------------------------------------------ das Spielen
+    //
+    // sbuf traegt die Quellrahmen als ZWEI VERSCHOBENE 16-Bit-Werte je
+    // Rahmen (Wert + 32768, also 0..65535). Verschoben, weil dann die
+    // Interpolation ohne Vorzeichenrechnung auskommt -- und weil ein
+    // Betriebssystem ohne Fliesskomma jede Vorzeichenfrage einmal zu oft
+    // falsch beantwortet.
+    //
+    // Platz 0 ist der LETZTE Rahmen des vorigen Blocks. Ohne ihn haette
+    // jeder Blockuebergang einen Sprung, und ein Sprung alle 1024 Rahmen
+    // ist ein Brummen bei 47 Hz.
+    var raw: [u8; 4096] = [0 as u8; 4096]
+    var sbuf: [u8; 4100] = [0 as u8; 4100]
+    var obuf: [u8; 4096] = [0 as u8; 4096]
+    let rp: u64 = (&raw[0 as usize]) as u64
+    let sp: u64 = (&sbuf[0 as usize]) as u64
+    let op: u64 = (&obuf[0 as usize]) as u64
+
+    let step: u64 = srate * 65536 / OUT_RATE
+    var frac: u64 = 0
+    var have_carry: bool = false
+    var left: u64 = data_len
+    var out_frames: u64 = 0
+    var running: bool = true
+    var fail: bool = false
+    while running {
+        var want: u64 = MAX_SRC * block
+        if want > RAW_OCTETS {
+            want = RAW_OCTETS
+        }
+        if want > left {
+            want = left
+        }
+        if want == 0 {
+            running = false
+        } else {
+            let got: u64 = ulib.sys(ulib.SYS_READ, fd, rp, want)
+            if ulib.bad(got) || got == 0 {
+                running = false
+            } else {
+                left = left - got
+                let nsrc: u64 = got / block
+                if nsrc == 0 {
+                    running = false
+                } else {
+                    // Quellrahmen nach sbuf, ab Platz 1.
+                    var i: u64 = 0
+                    while i < nsrc {
+                        var l: u64 = 0
+                        var r: u64 = 0
+                        if sbits == 16 {
+                            l = le16(rp, i * block) ^ 0x8000
+                            if chans == 2 {
+                                r = le16(rp, i * block + 2) ^ 0x8000
+                            } else {
+                                r = l
+                            }
+                        } else {
+                            // Acht Bit sind VORZEICHENLOS mit 128 als
+                            // Null. Nach oben verschoben ist das genau
+                            // v * 256.
+                            l = b(rp, i * block) * 256
+                            if chans == 2 {
+                                r = b(rp, i * block + 1) * 256
+                            } else {
+                                r = l
+                            }
+                        }
+                        put16(sp, (i + 1) * 4, l)
+                        put16(sp, (i + 1) * 4 + 2, r)
+                        i = i + 1
+                    }
+                    if !have_carry {
+                        // Der erste Block hat keinen Vorgaenger; dann ist
+                        // der Vorgaenger der erste Rahmen selbst.
+                        put16(sp, 0, le16(sp, 4))
+                        put16(sp, 2, le16(sp, 6))
+                        have_carry = true
+                    }
+                    // Jetzt umrechnen. `frac` ist die Bruchposition
+                    // zwischen Platz 0 und Platz 1.
+                    var p: u64 = frac
+                    let limit: u64 = nsrc * 65536
+                    var more: bool = true
+                    while more {
+                        var m: u64 = 0
+                        while m < OUT_FRAMES && p < limit {
+                            let idx: u64 = p >> 16
+                            let f: u64 = p & 0xFFFF
+                            let a0: u64 = le16(sp, idx * 4)
+                            let a1: u64 = le16(sp, idx * 4 + 2)
+                            let b0: u64 = le16(sp, (idx + 1) * 4)
+                            let b1: u64 = le16(sp, (idx + 1) * 4 + 2)
+                            let vl: u64 = (a0 * (65536 - f) + b0 * f) >> 16
+                            let vr: u64 = (a1 * (65536 - f) + b1 * f) >> 16
+                            put16(op, m * 4, vl ^ 0x8000)
+                            put16(op, m * 4 + 2, vr ^ 0x8000)
+                            m = m + 1
+                            p = p + step
+                        }
+                        if m > 0 {
+                            if !push(op, m) {
+                                fail = true
+                                more = false
+                                running = false
+                            }
+                            out_frames = out_frames + m
+                        }
+                        if p >= limit {
+                            more = false
+                        }
+                    }
+                    frac = p - limit
+                    // Der letzte Rahmen des Blocks wird der Vorgaenger
+                    // des naechsten.
+                    put16(sp, 0, le16(sp, nsrc * 4))
+                    put16(sp, 2, le16(sp, nsrc * 4 + 2))
+                }
+            }
+        }
+    }
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    set(AS_DRAIN, 0)
+    // Warten, bis wirklich alles gespielt ist. BEGRENZT: eine Datei von
+    // n Rahmen darf hoechstens n/48000 Sekunden plus fuenf dauern.
+    var spins: u64 = 0
+    var waiting: bool = true
+    while waiting {
+        if get(A_REMAIN) == 0 {
+            waiting = false
+        } else {
+            ulib.sleep_ms(5)
+            spins = spins + 1
+            if spins > 2000 {
+                waiting = false
+            }
+        }
+    }
+    set(AS_STOP, 0)
+    set(AS_OPEN, 0)
+
+    if !quiet {
+        var n_of: [u8; 7] = "frames\0"
+        var n_pl: [u8; 7] = "played\0"
+        var n_un: [u8; 10] = "underruns\0"
+        var n_bs: [u8; 10] = "backsteps\0"
+        var n_vo: [u8; 7] = "volume\0"
+        var n_la: [u8; 10] = "latencyus\0"
+        num((&n_of[0 as usize]) as u64, out_frames)
+        num((&n_pl[0 as usize]) as u64, get(A_PLAYED))
+        num((&n_un[0 as usize]) as u64, get(A_UNDERRUNS))
+        num((&n_bs[0 as usize]) as u64, get(A_BACKSTEPS))
+        num((&n_vo[0 as usize]) as u64, get(A_VOLUME))
+        num((&n_la[0 as usize]) as u64, get(A_LATENCY))
+    }
+    if fail {
+        return 1
+    }
+    return 0
+}
+
+// So lange nachlegen, bis alles im Ring ist. `osum_audwrite` nimmt, was
+// hineinpasst, und gibt die Zahl zurueck; null heisst voll, und dann
+// wird geschlafen statt gedreht -- eine Schleife ohne Schlaf frisst den
+// Prozessor, den gleich der Dekodierer braucht.
+fn push(p: u64, frames: u64) -> bool {
+    var done: u64 = 0
+    var spins: u64 = 0
+    while done < frames {
+        let n: u64 = ulib.sys(SYS_AUDWRITE, p + done * 4, frames - done, 0)
+        if ulib.bad(n) {
+            return false
+        }
+        if n == 0 {
+            ulib.sleep_ms(5)
+            spins = spins + 1
+            if spins > 2000 {
+                return false
+            }
+        } else {
+            done = done + n
+            spins = 0
+        }
+    }
+    return true
+}
