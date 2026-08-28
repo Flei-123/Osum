@@ -143,6 +143,8 @@ imgtest /b/j444.jpg -r 1 -p /aus/dreh.png
 imgtest /b/prgb.png -c 8,6,24,18 -p /aus/schnitt.png
 imgtest /b/prgb.png -s 32x24 -p /aus/klein.png
 imgtest /b/palpha.png -p /aus/alpha.png
+imgtest /b/j444.jpg -j /aus/rund.jpg -q 85
+imgtest /b/prgb.png -j /aus/schirm.jpg -q 92
 echo FERTIG
 EOS
 
@@ -335,6 +337,57 @@ PY
 mxd=$(grep -oE 'maxabw=[0-9]+' "$TMPD/dreh.cmp" | cut -d= -f2)
 num "drehen um 90 Grad stimmt gegen Pillow" "${mxd:-99}" le 2
 
+# ---- 7b. JPEG SCHREIBEN. Der Vergleich ist hier nicht "gleich", sondern
+# "gleich gut": ein JPEG ist verlustbehaftet, also wird gemessen, ob der
+# eigene Encoder bei derselben Qualitaet dieselbe Groesse und denselben
+# Fehler erreicht wie libjpeg. Ein Encoder, der doppelt so gross oder
+# doppelt so ungenau ist, faellt hier auf.
+for f in rund.jpg schirm.jpg; do
+    python3 tools/viewer/holen.py "$TMPD/live.img" "/aus/$f" "$TMPD/$f" \
+        > "$TMPD/holen_$f.log" 2>&1 || bad "$f: nicht vom Abbild zu holen"
+done
+python3 - "$TMPD/rund.jpg" "$FIX/j444.jpg" 85 > "$TMPD/jenc.cmp" 2>&1 <<'PY'
+import io, sys, warnings
+warnings.filterwarnings("ignore")
+from PIL import Image
+meins = Image.open(sys.argv[1]); meins.load()
+orig = Image.open(sys.argv[2]).convert("RGB")
+buf = io.BytesIO()
+orig.save(buf, format="JPEG", quality=int(sys.argv[3]), subsampling=0)
+pill = Image.open(io.BytesIO(buf.getvalue())).convert("RGB")
+o = orig.tobytes()
+def fehler(im):
+    d = im.convert("RGB").tobytes()
+    return (max(abs(x - y) for x, y in zip(d, o)),
+            sum(abs(x - y) for x, y in zip(d, o)) / len(d))
+mmax, mmit = fehler(meins)
+pmax, pmit = fehler(pill)
+import os
+print("groesse_osum=%d groesse_pillow=%d" % (os.path.getsize(sys.argv[1]),
+                                             len(buf.getvalue())))
+print("max_osum=%d max_pillow=%d" % (mmax, pmax))
+print("mittel_osum=%.3f mittel_pillow=%.3f" % (mmit, pmit))
+print("format=%s groesse=%dx%d" % (meins.format, meins.width, meins.height))
+PY
+if grep -q 'format=JPEG' "$TMPD/jenc.cmp"; then
+    ok "Pillow liest das JPEG, das Osum geschrieben hat ($(grep -o 'groesse=[0-9]*x[0-9]*' "$TMPD/jenc.cmp"))"
+else
+    bad "das geschriebene JPEG ist keines"; head -4 "$TMPD/jenc.cmp"
+fi
+go=$(grep -oE 'groesse_osum=[0-9]+' "$TMPD/jenc.cmp" | cut -d= -f2)
+gp=$(grep -oE 'groesse_pillow=[0-9]+' "$TMPD/jenc.cmp" | cut -d= -f2)
+mo=$(grep -oE 'max_osum=[0-9]+' "$TMPD/jenc.cmp" | cut -d= -f2)
+mp=$(grep -oE 'max_pillow=[0-9]+' "$TMPD/jenc.cmp" | cut -d= -f2)
+printf '        Qualitaet 85, 4:4:4:  Osum %s Oktette / Fehler %s   libjpeg %s Oktette / Fehler %s\n' \
+    "$go" "$mo" "$gp" "$mp"
+if [ -n "$go" ] && [ -n "$gp" ]; then
+    num "die Datei ist hoechstens ein Viertel groesser als die von libjpeg" \
+        "$((go * 100 / gp))" le 125
+fi
+if [ -n "$mo" ] && [ -n "$mp" ]; then
+    num "und der Fehler gegen das Ausgangsbild ist nicht groesser" "$mo" le "$((mp + 5))"
+fi
+
 
 # =====================================================================
 # 8. DIE ANWENDUNG, AUF DEM BILDSCHIRM
@@ -428,8 +481,25 @@ klick() { # datei x y
     zeiger "$1" "$2" "$3"
     printf 'warte 0.3\nmouse_button 1\nwarte 0.2\nmouse_button 0\nwarte 1.2\n' >> "$1"
 }
-vfeld() { grep -a "^viewer: " "$1" | tail -1 | grep -oE "$2=[0-9]+" | head -1 | cut -d= -f2; }
-vfeld_n() { grep -a "^viewer: " "$1" | sed -n "$3p" | grep -oE "$2=[0-9]+" | head -1 | cut -d= -f2; }
+vfeld() { grep -a "^viewer: an=" "$1" | tail -1 | grep -oE "$2=[0-9]+" | head -1 | cut -d= -f2; }
+# Die Mitte eines Bedienelements IN BILDSCHIRMKOORDINATEN. Die
+# Anwendung meldet ihr Fenster und jedes Rechteck; hier kommen nur der
+# Rahmen (2) und die Titelleiste (22) dazu. Nichts davon wird geraten.
+knopfx() { # datei id
+    local wx rx rw
+    wx=$(grep -a '^viewer: fenster' "$1" | head -1 | grep -oE '[0-9]+' | sed -n 1p)
+    rx=$(grep -a "^viewer: rect  id=$2 " "$1" | head -1 | grep -oE 'x=[0-9]+' | cut -d= -f2)
+    rw=$(grep -a "^viewer: rect  id=$2 " "$1" | head -1 | grep -oE 'w=[0-9]+' | cut -d= -f2)
+    echo $(( ${wx:-20} + 2 + ${rx:-0} + ${rw:-0} / 2 ))
+}
+knopfy() { # datei id
+    local wy ry rh
+    wy=$(grep -a '^viewer: fenster' "$1" | head -1 | grep -oE '[0-9]+' | sed -n 2p)
+    ry=$(grep -a "^viewer: rect  id=$2 " "$1" | head -1 | grep -oE 'y=[0-9]+' | cut -d= -f2)
+    rh=$(grep -a "^viewer: rect  id=$2 " "$1" | head -1 | grep -oE 'h=[0-9]+' | cut -d= -f2)
+    echo $(( ${wy:-20} + 22 + ${ry:-0} + ${rh:-0} / 2 ))
+}
+vfeld_n() { grep -a "^viewer: an=" "$1" | sed -n "$3p" | grep -oE "$2=[0-9]+" | head -1 | cut -d= -f2; }
 
 mkdir -p docs/shots/viewer
 
@@ -452,11 +522,24 @@ schau "die Zeichenflaeche traegt Bildpunkte" \
 schau "der Miniaturenstreifen traegt Bildpunkte" \
     nichtleer "$TMPD/start.ppm" 40 490 600 50 500
 
+# Die Knopfmitten, aus der Meldung der Anwendung. Die Nummern sind die
+# Reihenfolge, in der die Knoepfe angelegt wurden.
+S0="$TMPD/start.txt"
+XN=$(knopfx "$S0" 1); YN=$(knopfy "$S0" 1)   # >
+X100=$(knopfx "$S0" 5); Y100=$(knopfy "$S0" 5)
+XR=$(knopfx "$S0" 7); YR=$(knopfy "$S0" 7)   # Rechts
+XD=$(knopfx "$S0" 8); YD=$(knopfy "$S0" 8)   # Diaschau
+XC=$(knopfx "$S0" 9); YC=$(knopfy "$S0" 9)   # Zuschneiden
+XS=$(knopfx "$S0" 10); YS=$(knopfy "$S0" 10) # Als PNG
+XJ=$(knopfx "$S0" 11); YJ=$(knopfy "$S0" 11) # Als JPEG
+printf '        die Knoepfe liegen bei: > (%s,%s)  100%% (%s,%s)  Rechts (%s,%s)\n' \
+    "$XN" "$YN" "$X100" "$Y100" "$XR" "$YR"
+
 # ---- 8b. blaettern: aus PNG wird JPEG wird PNG wird GIF ...
 M="$TMPD/weiter.mon"; : > "$M"
-klick "$M" 74 66     # der Knopf ">"
-klick "$M" 74 66
-klick "$M" 74 66
+klick "$M" "$XN" "$YN"
+klick "$M" "$XN" "$YN"
+klick "$M" "$XN" "$YN"
 foto weiter "$M"
 n1=$(vfeld_n "$TMPD/weiter.txt" fmt 2)
 n2=$(vfeld_n "$TMPD/weiter.txt" fmt 3)
@@ -471,7 +554,7 @@ num "und der Zaehler steht auf dem vierten Bild" "${bi:-0}" eq 3
 
 # ---- 8c. Zoom: einpassen und 100 %.
 M="$TMPD/zoom.mon"; : > "$M"
-klick "$M" 348 66    # "100 %"
+klick "$M" "$X100" "$Y100"
 foto zoom100 "$M"
 zf=$(vfeld "$TMPD/zoom100.txt" fit)
 zz=$(vfeld "$TMPD/zoom100.txt" zoom)
@@ -480,7 +563,7 @@ num "und der Zoom steht auf hundert" "${zz:-0}" eq 100
 
 # ---- 8d. drehen: aus 64x48 wird 48x64.
 M="$TMPD/dreh.mon"; : > "$M"
-klick "$M" 456 66    # "Rechts"
+klick "$M" "$XR" "$YR"
 foto dreh "$M"
 db=$(vfeld "$TMPD/dreh.txt" br); dh=$(vfeld "$TMPD/dreh.txt" ho)
 num "nach einer Vierteldrehung ist die Breite die alte Hoehe" "${db:-0}" eq 48
@@ -488,7 +571,7 @@ num "und die Hoehe die alte Breite" "${dh:-0}" eq 64
 
 # ---- 8e. EXIF: das Bild mit Lage 6 kommt gedreht heraus.
 M="$TMPD/exif.mon"; : > "$M"
-for k in 1 2 3 4 5; do klick "$M" 74 66; done
+for k in 1 2 3 4 5; do klick "$M" "$XN" "$YN"; done
 foto exif "$M"
 eo=$(vfeld "$TMPD/exif.txt" ori)
 eb=$(vfeld "$TMPD/exif.txt" br); eh=$(vfeld "$TMPD/exif.txt" ho)
@@ -498,7 +581,7 @@ num "und aus 24 hoch wird 40" "${eh:-0}" eq 40
 
 # ---- 8f. das grosse Bild: 12 MP im Fenster, ohne dass etwas stirbt.
 M="$TMPD/gross.mon"; : > "$M"
-for k in 1 2 3 4 5 6; do klick "$M" 74 66; done
+for k in 1 2 3 4 5 6; do klick "$M" "$XN" "$YN"; done
 foto gross "$M"
 gb=$(vfeld "$TMPD/gross.txt" br); gh=$(vfeld "$TMPD/gross.txt" ho)
 gv=$(vfeld "$TMPD/gross.txt" voll)
@@ -511,7 +594,7 @@ schau "und die Zeichenflaeche zeigt es" \
 
 # ---- 8g. Diaschau und Sichern.
 M="$TMPD/dia.mon"; : > "$M"
-klick "$M" 560 66    # "Diaschau"
+klick "$M" "$XD" "$YD"
 printf 'warte 4.0\n' >> "$M"
 foto dia "$M"
 dz=$(vfeld "$TMPD/dia.txt" dia)
@@ -521,10 +604,12 @@ if [ "${db2:-0}" != "0" ]; then ok "und sie ist von selbst weitergegangen (Bild 
 else bad "die Diaschau ist nicht weitergegangen"; fi
 
 M="$TMPD/save.mon"; : > "$M"
-klick "$M" 60 542    # "Zuschneiden"
-klick "$M" 152 542   # "Als PNG"
+klick "$M" "$XC" "$YC"
+klick "$M" "$XS" "$YS"
+klick "$M" "$XJ" "$YJ"
 foto save "$M"
-has "$TMPD/save.txt" "viewer: gesichert" "die Anwendung schreibt eine PNG-Datei"
+has "$TMPD/save.txt" "viewer: gesichert " "die Anwendung schreibt eine PNG-Datei"
+has "$TMPD/save.txt" "viewer: gesichertj" "und eine JPEG-Datei"
 sn=$(grep -a 'viewer: gesichert' "$TMPD/save.txt" | tail -1 | grep -oE '[0-9]+' | tail -1)
 num "und die Datei ist nicht leer" "${sn:-0}" gt 100
 if python3 tools/viewer/holen.py "$TMPD/live-save.img" \
@@ -560,7 +645,7 @@ done
 # merkt, wenn Firn repariert ist.
 echo "== 9. die Probe auf den Uebersetzer =="
 rotw=$(grep -a '^IMGROT wert=' "$LOG" | head -1 | cut -d= -f2)
-if [ "$rotw" = "21324354" ]; then
+if [ "$rotw" = "132172216260" ]; then
     ok "drei rotierende Veraenderliche stimmen jetzt ($rotw) -- der Umweg in imgjpeg.h2v2 kann zurueckgebaut werden"
 elif [ -n "$rotw" ]; then
     ok "der Uebersetzerfehler ist noch da: $rotw statt 21324354 (docs/IMAGES.md, Abschnitt 7)"
