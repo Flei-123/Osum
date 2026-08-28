@@ -1,0 +1,524 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/imgtest.fi -- Runde VIEWER: DER BEWEIS, DASS DIE
+// DEKODIERER STIMMEN.
+//
+// Ein Dekodierer, der "gut aussieht", ist nicht geprueft. Dieses
+// Programm vergleicht das, was `img` liefert, BILDPUNKT FUER BILDPUNKT
+// mit einer Datei, die Pillow auf dem Wirt aus demselben Bild gemacht
+// hat (RGBA, roh, ohne Kopf). Es gibt aus:
+//
+//   den groessten Betrag der Abweichung je Kanal,
+//   die Summe aller Abweichungen und daraus den Mittelwert in
+//   Tausendstel,
+//   wie viele Bildpunkte ueberhaupt abweichen,
+//   und die Zeit fuer einen Dekodierlauf in Millisekunden.
+//
+// WARUM DER VERGLEICH IM SYSTEM STATTFINDET UND NICHT AUF DEM WIRT: ein
+// 12-Megabildpunkt-Bild sind 48 Megaoktett RGBA. Die ueber eine serielle
+// Leitung zu schicken, dauert laenger als der ganze Rest der Abnahme.
+// Also kommt die VORLAGE herein (sie liegt auf demselben Abbild) und
+// heraus kommen sechs Zahlen.
+//
+//   imgtest <bild> [<referenz.rgba>] [-8] [-n <wdh>] [-p <ziel.png>]
+//           [-r <q>] [-c x,y,w,h] [-s <breite>x<hoehe>]
+//
+//   -8   im Achtel dekodieren (Miniaturansicht, nur JPEG)
+//   -n   den Dekodierlauf so oft wiederholen und die Zeit mitteln
+//   -p   das Ergebnis als PNG schreiben (prueft den Schreiber)
+//   -r   vor dem Schreiben um q Vierteldrehungen drehen
+//   -c   vor dem Schreiben zuschneiden
+//   -s   vor dem Schreiben auf diese Groesse bringen
+
+profile kernel
+
+import ulib
+import libc.mem
+import img
+import imgops
+import imgmem
+
+export { u_start }
+
+// Die Arena. 56 MiB von den 74, die ein Prozess seit dieser Runde haben
+// kann -- der Rest bleibt fuer die Halde des Programms.
+const ARENA: u64 = 56 * 1024 * 1024
+const MAXFILE: u64 = 32 * 1024 * 1024
+
+static mut fbuf: u64 = 0
+static mut fn_: u64 = 0
+static mut rowbuf: u64 = 0
+static mut refbuf: u64 = 0
+static mut full: u64 = 0
+
+fn say(p: u64) {
+    ulib.say(p)
+}
+
+fn kv(name: u64, v: u64) {
+    say(name)
+    ulib.sayu(v)
+    var sp: [u8; 2] = " \0"
+    say((&sp[0 as usize]) as u64)
+}
+
+// Die ganze Datei in die Arena. Grosse Dateien werden abgelehnt, und
+// zwar mit der Zahl, statt dass der Prozess stirbt.
+fn slurp(path: u64) -> bool {
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, path, 0, 0)
+    if ulib.bad(fd) {
+        return false
+    }
+    let sz: u64 = ulib.size_of(path)
+    if sz == 0 || sz > MAXFILE {
+        ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+        return false
+    }
+    fbuf = imgmem.take(sz + 16)
+    if fbuf == 0 {
+        ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+        return false
+    }
+    var got: u64 = 0
+    var going: bool = true
+    while going {
+        var want: u64 = sz - got
+        if want > 4096 {
+            want = 4096
+        }
+        if want == 0 {
+            going = false
+        } else {
+            let n: u64 = ulib.sys(ulib.SYS_READ, fd, fbuf + got, want)
+            if ulib.bad(n) || n == 0 {
+                going = false
+            } else {
+                got = got + n
+            }
+        }
+    }
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    fn_ = got
+    return got > 0
+}
+
+fn now() -> u64 {
+    return ulib.sys(ulib.SYS_SYSINFO, ulib.I_UPTIME, 0, 0)
+}
+
+fn u_start(args: u64) -> u64 {
+    var s_use: [u8; 40] = "imgtest <bild> [<ref.rgba>] [-8|-n|-p]\0\0"
+    var s_open: [u8; 24] = "imgtest: nicht lesbar \0\0"
+    var s_dec: [u8; 30] = "imgtest: dekodieren geht nicht"
+    var s_mem: [u8; 30] = "imgtest: keine Arena\0\0\0\0\0\0\0\0\0\0"
+    var k_hdr: [u8; 6] = "IMG \0\0"
+    var k_fmt: [u8; 8] = "format=\0"
+    var k_w: [u8; 8] = "breite=\0"
+    var k_h: [u8; 7] = "hoehe=\0"
+    var k_or: [u8; 13] = "ausrichtung=\0"
+    var k_fr: [u8; 12] = "teilbilder=\0"
+    var k_gr: [u8; 7] = "grund=\0"
+    var k_pt: [u8; 11] = "teilweise=\0"
+    var k_bits: [u8; 6] = "bits=\0"
+    var k_ms: [u8; 4] = "ms=\0"
+    var k_ar: [u8; 7] = "arena=\0"
+    var k_sz: [u8; 7] = "datei=\0"
+    var k_mr: [u8; 6] = "maxr=\0"
+    var k_mg: [u8; 6] = "maxg=\0"
+    var k_mb: [u8; 6] = "maxb=\0"
+    var k_ma: [u8; 6] = "maxa=\0"
+    var k_sum: [u8; 7] = "summe=\0"
+    var k_np: [u8; 8] = "punkte=\0"
+    var k_bad: [u8; 8] = "anders=\0"
+    var k_mil: [u8; 12] = "mittel1000=\0"
+    var k_rows: [u8; 7] = "zeile=\0"
+    var k_png: [u8; 9] = "pngbyte=\0"
+    var k_txt: [u8; 6] = "text=\0"
+    var o_8: [u8; 3] = "-8\0"
+    var o_n: [u8; 3] = "-n\0"
+    var o_p: [u8; 3] = "-p\0"
+    var o_r: [u8; 3] = "-r\0"
+    var o_c: [u8; 3] = "-c\0"
+    var o_s: [u8; 3] = "-s\0"
+    var rt: [u8; 24] = [0 as u8; 24]
+
+    let argc: u64 = ulib.arg_count(args)
+    if argc < 2 {
+        ulib.esay_line((&s_use[0 as usize]) as u64, 0)
+        return 1
+    }
+    var path: u64 = 0
+    var refp: u64 = 0
+    var scale: u64 = 1
+    var wdh: u64 = 1
+    var pngout: u64 = 0
+    var rotq: u64 = 0
+    var cx: u64 = 0
+    var cy: u64 = 0
+    var cw: u64 = 0
+    var chh: u64 = 0
+    var sw: u64 = 0
+    var sh: u64 = 0
+    var i: u64 = 1
+    while i < argc {
+        let a: u64 = ulib.arg_at(args, i)
+        if ulib.streq(a, (&o_8[0 as usize]) as u64) {
+            scale = 8
+        } else if ulib.streq(a, (&o_n[0 as usize]) as u64) && i + 1 < argc {
+            i = i + 1
+            wdh = ulib.to_num(ulib.arg_at(args, i))
+        } else if ulib.streq(a, (&o_p[0 as usize]) as u64) && i + 1 < argc {
+            i = i + 1
+            pngout = ulib.arg_at(args, i)
+        } else if ulib.streq(a, (&o_r[0 as usize]) as u64) && i + 1 < argc {
+            i = i + 1
+            rotq = ulib.to_num(ulib.arg_at(args, i))
+        } else if ulib.streq(a, (&o_c[0 as usize]) as u64) && i + 1 < argc {
+            i = i + 1
+            let s: u64 = ulib.arg_at(args, i)
+            cx = ulib.to_num(s)
+            cy = ulib.to_num(after(s, 1))
+            cw = ulib.to_num(after(s, 2))
+            chh = ulib.to_num(after(s, 3))
+        } else if ulib.streq(a, (&o_s[0 as usize]) as u64) && i + 1 < argc {
+            i = i + 1
+            let s: u64 = ulib.arg_at(args, i)
+            sw = ulib.to_num(s)
+            sh = ulib.to_num(afterx(s))
+        } else if path == 0 {
+            path = a
+        } else if refp == 0 {
+            refp = a
+        }
+        i = i + 1
+    }
+    if wdh == 0 {
+        wdh = 1
+    }
+    var dbg1: [u8; 8] = "D1 ok\n\0\0"
+    var dbg2: [u8; 8] = "D2 ok\n\0\0"
+    var dbg3: [u8; 8] = "D3 ok\n\0\0"
+    var dbg4: [u8; 8] = "D4 ok\n\0\0"
+    say((&dbg1[0 as usize]) as u64)
+    // ----------------------------------------------------- die Arena
+    let base: u64 = mem.map_pages(ARENA)
+    if ulib.bad(base) || base == 0 {
+        ulib.esay_line((&s_mem[0 as usize]) as u64, 0)
+        return 1
+    }
+    say((&dbg2[0 as usize]) as u64)
+    ulib.sayu(base)
+    ulib.nl()
+    img.arena(base, ARENA)
+    if !slurp(path) {
+        ulib.esay_line((&s_open[0 as usize]) as u64, path)
+        return 1
+    }
+    say((&dbg3[0 as usize]) as u64)
+    ulib.sayu(fn_)
+    ulib.nl()
+    let filesz: u64 = fn_
+    // ------------------------------------------------- Lauf 1: Zeit
+    var ms: u64 = 0
+    var w: u64 = 0
+    var h: u64 = 0
+    var rr: u64 = 0
+    let t0: u64 = now()
+    var runde: u64 = 0
+    while runde < wdh {
+        // Die Arena wird zurueckgesetzt, die Datei bleibt: sie liegt
+        // ganz unten und wird von `slurp` nicht noch einmal gelesen.
+        imgmem.reset()
+        let keep: u64 = imgmem.take(filesz + 16)
+        say((&dbg4[0 as usize]) as u64)
+        if !img.begin(fbuf, filesz, scale) {
+            rr = img.reason()
+            runde = wdh
+        } else {
+            w = img.width()
+            h = img.height()
+            if rowbuf == 0 || runde == 0 {
+                rowbuf = imgmem.take(w * 4 + 64)
+            }
+            if rowbuf == 0 {
+                rr = img.I_MEMORY
+                runde = wdh
+            } else {
+                var zeilen: u64 = 0
+                while img.next_row(rowbuf) {
+                    zeilen = zeilen + 1
+                }
+                runde = runde + 1
+            }
+        }
+    }
+    let t1: u64 = now()
+    ms = (t1 - t0) / wdh
+    say((&k_hdr[0 as usize]) as u64)
+    kv((&k_sz[0 as usize]) as u64, filesz)
+    kv((&k_fmt[0 as usize]) as u64, img.format())
+    kv((&k_w[0 as usize]) as u64, w)
+    kv((&k_h[0 as usize]) as u64, h)
+    kv((&k_or[0 as usize]) as u64, img.orientation())
+    kv((&k_fr[0 as usize]) as u64, img.frames())
+    kv((&k_bits[0 as usize]) as u64, img.source_bits())
+    kv((&k_gr[0 as usize]) as u64, img.reason())
+    kv((&k_pt[0 as usize]) as u64, img.partial())
+    kv((&k_ms[0 as usize]) as u64, ms)
+    kv((&k_ar[0 as usize]) as u64, img.arena_used())
+    img.reason_text(img.reason(), (&rt[0 as usize]) as u64)
+    say((&k_txt[0 as usize]) as u64)
+    say((&rt[0 as usize]) as u64)
+    ulib.nl()
+    if w == 0 || h == 0 {
+        return 2
+    }
+    // -------------------------------------------- Lauf 2: der Vergleich
+    if refp != 0 {
+        vergleich(refp, w, h, filesz, scale)
+    }
+    // ------------------------------------------- Lauf 3: PNG schreiben
+    if pngout != 0 {
+        schreiben(pngout, filesz, scale, rotq, cx, cy, cw, chh, sw, sh)
+    }
+    return 0
+}
+
+// Das i-te Komma-Feld einer Zeichenkette.
+fn after(s: u64, k: u64) -> u64 {
+    var p: u64 = s
+    var seen: u64 = 0
+    while *((p) as *mut u8) != 0 as u8 {
+        if *((p) as *mut u8) == 44 as u8 {
+            seen = seen + 1
+            if seen == k {
+                return p + 1
+            }
+        }
+        p = p + 1
+    }
+    return p
+}
+
+fn afterx(s: u64) -> u64 {
+    var p: u64 = s
+    while *((p) as *mut u8) != 0 as u8 {
+        if *((p) as *mut u8) == 120 as u8 {
+            return p + 1
+        }
+        p = p + 1
+    }
+    return p
+}
+
+fn vergleich(refp: u64, w: u64, h: u64, filesz: u64, scale: u64) {
+    var k_hdr: [u8; 10] = "IMGDIFF \0\0"
+    var k_mr: [u8; 6] = "maxr=\0"
+    var k_mg: [u8; 6] = "maxg=\0"
+    var k_mb: [u8; 6] = "maxb=\0"
+    var k_ma: [u8; 6] = "maxa=\0"
+    var k_sum: [u8; 7] = "summe=\0"
+    var k_np: [u8; 8] = "punkte=\0"
+    var k_bad: [u8; 8] = "anders=\0"
+    var k_mil: [u8; 12] = "mittel1000=\0"
+    var k_z: [u8; 8] = "zeilen=\0"
+    var s_ref: [u8; 26] = "imgtest: referenz fehlt \0\0"
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, refp, 0, 0)
+    if ulib.bad(fd) {
+        ulib.esay_line((&s_ref[0 as usize]) as u64, refp)
+        return
+    }
+    imgmem.reset()
+    let keep: u64 = imgmem.take(filesz + 16)
+    if !img.begin(fbuf, filesz, scale) {
+        ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+        return
+    }
+    let rb: u64 = imgmem.take(w * 4 + 64)
+    let rf: u64 = imgmem.take(w * 4 + 64)
+    if rb == 0 || rf == 0 {
+        ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+        return
+    }
+    var maxr: u64 = 0
+    var maxg: u64 = 0
+    var maxb: u64 = 0
+    var maxa: u64 = 0
+    var summe: u64 = 0
+    var anders: u64 = 0
+    var zeilen: u64 = 0
+    while img.next_row(rb) && zeilen < h {
+        // Die Vorlagezeile lesen: 4096 Oktette je Aufruf.
+        var got: u64 = 0
+        var ok: bool = true
+        while got < w * 4 && ok {
+            var want: u64 = w * 4 - got
+            if want > 4096 {
+                want = 4096
+            }
+            let n: u64 = ulib.sys(ulib.SYS_READ, fd, rf + got, want)
+            if ulib.bad(n) || n == 0 {
+                ok = false
+            } else {
+                got = got + n
+            }
+        }
+        if !ok {
+            zeilen = h
+        } else {
+            var x: u64 = 0
+            while x < w {
+                var kanal: u64 = 0
+                var anders_hier: u64 = 0
+                while kanal < 4 {
+                    let a: u64 = (*((rb + x * 4 + kanal) as *mut u8))
+                        as u64
+                    let b: u64 = (*((rf + x * 4 + kanal) as *mut u8))
+                        as u64
+                    var d: u64 = 0
+                    if a > b {
+                        d = a - b
+                    } else {
+                        d = b - a
+                    }
+                    if d > 0 {
+                        anders_hier = 1
+                    }
+                    summe = summe + d
+                    if kanal == 0 && d > maxr {
+                        maxr = d
+                    }
+                    if kanal == 1 && d > maxg {
+                        maxg = d
+                    }
+                    if kanal == 2 && d > maxb {
+                        maxb = d
+                    }
+                    if kanal == 3 && d > maxa {
+                        maxa = d
+                    }
+                    kanal = kanal + 1
+                }
+                anders = anders + anders_hier
+                x = x + 1
+            }
+            zeilen = zeilen + 1
+        }
+    }
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    say((&k_hdr[0 as usize]) as u64)
+    kv((&k_mr[0 as usize]) as u64, maxr)
+    kv((&k_mg[0 as usize]) as u64, maxg)
+    kv((&k_mb[0 as usize]) as u64, maxb)
+    kv((&k_ma[0 as usize]) as u64, maxa)
+    kv((&k_sum[0 as usize]) as u64, summe)
+    kv((&k_np[0 as usize]) as u64, w * zeilen)
+    kv((&k_bad[0 as usize]) as u64, anders)
+    var mil: u64 = 0
+    if w * zeilen > 0 {
+        mil = (summe * 1000) / (w * zeilen * 4)
+    }
+    kv((&k_mil[0 as usize]) as u64, mil)
+    kv((&k_z[0 as usize]) as u64, zeilen)
+    ulib.nl()
+}
+
+// Das Bild vollstaendig aufbauen, bearbeiten und als PNG schreiben.
+// Das ist der Weg, den auch die Anwendung geht -- und weil er hier
+// gemessen wird, ist er dort nicht behauptet.
+fn schreiben(out: u64, filesz: u64, scale: u64, rotq: u64, cx: u64,
+    cy: u64, cw: u64, chh: u64, sw: u64, sh: u64) {
+    var k_hdr: [u8; 10] = "IMGSAVE \0\0"
+    var k_n: [u8; 7] = "bytes=\0"
+    var k_w: [u8; 8] = "breite=\0"
+    var k_h: [u8; 7] = "hoehe=\0"
+    var s_big: [u8; 34] = "imgtest: bild passt nicht in RAM\0\0"
+    var s_w: [u8; 30] = "imgtest: schreiben geht nicht\0"
+    imgmem.reset()
+    let keep: u64 = imgmem.take(filesz + 16)
+    if !img.begin(fbuf, filesz, scale) {
+        return
+    }
+    var w: u64 = img.width()
+    var h: u64 = img.height()
+    let px: u64 = imgmem.take(w * h * 4)
+    let rb: u64 = imgmem.take(w * 4 + 64)
+    if px == 0 || rb == 0 {
+        ulib.esay_line((&s_big[0 as usize]) as u64, 0)
+        return
+    }
+    var y: u64 = 0
+    while y < h && img.next_row(rb) {
+        imgmem.copy(px + y * w * 4, rb, w * 4)
+        y = y + 1
+    }
+    var cur: u64 = px
+    if cw > 0 && chh > 0 {
+        let dst: u64 = imgmem.take(cw * chh * 4)
+        if dst != 0 && imgops.crop(cur, w, h, cx, cy, cw, chh, dst) {
+            cur = dst
+            w = cw
+            h = chh
+        }
+    }
+    if rotq > 0 && rotq < 4 {
+        let dst: u64 = imgmem.take(w * h * 4)
+        if dst != 0 {
+            imgops.rotate(cur, w, h, dst, rotq)
+            cur = dst
+            if rotq != 2 {
+                let t: u64 = w
+                w = h
+                h = t
+            }
+        }
+    }
+    if sw > 0 && sh > 0 {
+        let dst: u64 = imgmem.take(sw * sh * 4)
+        if dst != 0 && imgops.scale_begin(w, h, sw, sh, dst) {
+            var r: u64 = 0
+            while r < h {
+                imgops.scale_row(cur + r * w * 4)
+                r = r + 1
+            }
+            imgops.scale_done()
+            cur = dst
+            w = sw
+            h = sh
+        }
+    }
+    let cap: u64 = w * h * 4 + 65536
+    let file: u64 = imgmem.take(cap)
+    if file == 0 {
+        ulib.esay_line((&s_big[0 as usize]) as u64, 0)
+        return
+    }
+    let n: u64 = img.save_png(cur, w, h, true, file, cap)
+    if n == 0 {
+        ulib.esay_line((&s_w[0 as usize]) as u64, 0)
+        return
+    }
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, out, ulib.O_MAKE, 0)
+    if ulib.bad(fd) {
+        ulib.esay_line((&s_w[0 as usize]) as u64, out)
+        return
+    }
+    var wr: u64 = 0
+    while wr < n {
+        var want: u64 = n - wr
+        if want > 4096 {
+            want = 4096
+        }
+        let r: u64 = ulib.sys(ulib.SYS_WRITE, fd, file + wr, want)
+        if ulib.bad(r) || r == 0 {
+            wr = n
+        } else {
+            wr = wr + r
+        }
+    }
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    say((&k_hdr[0 as usize]) as u64)
+    kv((&k_n[0 as usize]) as u64, n)
+    kv((&k_w[0 as usize]) as u64, w)
+    kv((&k_h[0 as usize]) as u64, h)
+    ulib.nl()
+}
