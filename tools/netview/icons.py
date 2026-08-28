@@ -5,7 +5,7 @@
 Der Nachtrag der Runde verlangt zwei Anzeigen, und sie werden an ZWEI
 Stellen gemalt, die nichts miteinander zu tun haben:
 
-  * die Taskleiste (`kernel/user/leiste.fi`) -- Ring 3, malt eine
+  * die Taskleiste (`kernel/user/taskbar.fi`) -- Ring 3, malt eine
     OSYM-Datei von der Platte,
   * die Titelleiste (`kernel/wm.fi`) -- der KERN, der keine Datei von der
     Platte liest, waehrend er ein Fenster zeichnet.
