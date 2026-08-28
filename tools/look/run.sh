@@ -273,6 +273,22 @@ if shot E-vert align=center edge=left lang=de keep=yes; then
     ge "a vertical bar centres in the HEIGHT: the start button's y" "${Y:-0}" 100
 fi
 
+# ---- A, part three: real characters, not transliteration.
+#
+# Part A of this round proved that a German string RENDERS (438 ink
+# pixels on "Ausführen", 0 wrong). It did not check that the German
+# strings ARE German. They were not: the editor bundle said "Text
+# schreiben und aendern", and a bundle label never goes through the
+# catalogue, so no catalogue test could have seen it.
+python3 tools/i18n/translit.py --zaehle > "$TMPD/translit.txt" 2>&1
+TRC=$?
+sed 's/^/        /' "$TMPD/translit.txt"
+if [ "$TRC" = 0 ]; then
+    ok "no transliteration left in locale/de or in the bundle labels"
+else
+    bad "transliteration where an umlaut belongs (rc=$TRC)"
+fi
+
 echo ""
 echo "LOOK: $P passed, $F failed"
 [ "$F" = 0 ]
