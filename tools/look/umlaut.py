@@ -39,7 +39,16 @@ WIN = re.compile(
 
 
 def fenster(roh, titel):
-    """Die zuletzt gemeldete AEUSSERE Lage des Fensters mit diesem Titel."""
+    """Die AEUSSERE Lage des Fensters mit diesem Titel.
+
+    HIER wird NICHT am Foto abgeschnitten, und das ist kein Versehen:
+    der Fensterserver schreibt seine Tafel (`wm: win nr=...`) ERST NACH
+    `wm: hold`, also nach der Aufnahme. Sie beschreibt trotzdem genau
+    den Augenblick der Aufnahme -- danach bewegt in diesem Aufbau
+    niemand mehr ein Fenster, denn `wmhold` ist das Ende der
+    Ereignisschleife. Schneidet man hier mit ab, findet man gar kein
+    Fenster mehr.
+    """
     treffer = None
     for m in WIN.finditer(roh):
         if m.group(7).decode("utf-8", "replace") == titel:
@@ -53,14 +62,36 @@ def fenster(roh, titel):
             treffer.group(2) == b"1")
 
 
+def bis_zum_foto(roh):
+    """Der Mitschnitt BIS ZU DEM AUGENBLICK, in dem das Bild entstand.
+
+    tools/look/shot.sh wartet auf `wm: hold` und macht dann den
+    Bildschirmabzug. Was danach auf den Draht geht, steht NICHT auf dem
+    Bild -- und es ist nicht wenig: `themetest` schaltet unter `themegui`
+    weiter zwischen hell und dunkel um und malt sich dabei immer wieder
+    neu. Von 58 gemeldeten "Übernehmen" dieses Laufs liegen 30 hinter dem
+    Foto, und die letzte davon ist dunkel (fg=16317180 bg=1976635),
+    waehrend das Bild die helle zeigt (fg=988970 bg=16777215).
+
+    Nimmt man einfach die LETZTE Meldung, vergleicht man ein helles Bild
+    gegen dunkle Erwartungsfarben und bekommt "526 von 526 Tintenpunkten
+    falsch" -- eine Zahl, die wie ein kaputter Zeichensatz aussieht und
+    keiner ist. Eine Messung muss den Zustand zum Zeitpunkt der Aufnahme
+    benutzen, nicht den letzten, den es je gab.
+    """
+    i = roh.find(b"wm: hold")
+    return roh if i < 0 else roh[:i]
+
+
 def gemalt(roh, text):
-    """Die zuletzt gemeldete Lage dieses Textes, fensterbezogen.
+    """Die zuletzt VOR dem Foto gemeldete Lage dieses Textes.
 
     Auf den seriellen Draht schreiben fuenf Prozesse gleichzeitig, also
     wird NICHT bis zum Zeilenende gelesen, sondern der ERWARTETE Text
     als Anker benutzt -- genauso, wie Teil A es tut. Eine Zeile, die ein
     anderes Programm zerschnitten hat, traegt ihren Anfang trotzdem.
     """
+    roh = bis_zum_foto(roh)
     pat = (rb"kind=(\d+) x=(\d+) base=(\d+) fg=(\d+) bg=(\d+) t="
            + re.escape(text.encode("utf-8")))
     treffer = list(re.finditer(pat, roh))
