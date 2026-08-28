@@ -338,6 +338,14 @@ sp=$(python3 tools/a11y/spur.py "$T" 2>&1)
 erreicht=$(echo "$sp" | grep -oE 'erreicht=[0-9]+' | sed 's/.*=//')
 fokus=$(echo "$sp" | grep -oE 'fokus=[0-9]+' | sed 's/.*=//')
 gleich "erreichte Bedienelemente == fokussierbare Bedienelemente" "$fokus" "$erreicht"
+# UND DIESELBE ZAHL AUS DEM BAUM. Der Auftrag dieser Runde verlangt genau
+# das: erreichte Elemente gegen Elemente IM BAUM. Die Zahl oben kommt aus
+# der Bibliothek, diese aus der Ablage im Kernel -- zwei Wege, dieselbe
+# Zahl, und erst dann ist es eine Messung und keine Selbstauskunft.
+baum_fokus=$(grep -aoE 'ax: node [0-9]+  role=[0-9]+  state=[0-9]+' "$T" \
+    | grep -oE 'state=[0-9]+$' | sed 's/state=//' \
+    | python3 -c "import sys;print(sum(1 for l in sys.stdin if int(l)&2))")
+gleich "und dieselbe Zahl steht als fokussierbar IM BAUM" "$erreicht" "$baum_fokus"
 num "und es sind mehr als acht" "$erreicht" ge 9
 # DIE MENUELEISTE. Sie war das einzige Bedienelement dieser Bibliothek,
 # das per Maus ging und per Tastatur nicht.
