@@ -1,0 +1,189 @@
+// SPDX-License-Identifier: MIT
+// kernel/user/grp.fi -- Runde MULTIUSER: /etc/group und die Zusatzgruppen.
+//
+// WARUM DAS EIN EIGENES MODUL IST UND NICHT DREI FUNKTIONEN IN `pw.fi`,
+// und der Grund ist gemessen und nicht theoretisch:
+//
+//     Firn bindet ein MODUL und nicht eine Funktion. Wer `pw` einbindet,
+//     bekommt alles, was darin steht -- auch das, was er nie ruft. Als
+//     der /etc/group-Teil noch in `pw.fi` stand, wuchsen damit AUCH
+//     `whoami` und `k13t`, die von Gruppen nichts wissen wollen: um je
+//     rund 45 Kilooktette, mit dem zweiten Uebersetzer.
+//
+//     Das ist nicht bloss unschoen. Das Abbild von `tools/k13/run.sh`
+//     Abschnitt 9 hat 4096 Bloecke -- die Blockkarte von OFS Fassung 2
+//     ist EIN Block, also 512 * 8 Bits --, und es passte danach nicht
+//     mehr hinein: "mkfs: the disk is full", 34 Bloecke zu wenig. Ein
+//     bestehender Abschnitt fiel an einer Zeile, die mit ihm nichts zu
+//     tun hatte.
+//
+// Also: was mit /etc/group zu tun hat, steht hier, und `pw.fi` bleibt,
+// was es war. `whoami` und `k13t` binden `pw` ein und nicht `grp`;
+// `id`, `chown`, `su` und `login` binden beides.
+//
+// DIE FORM DER DATEI ist die gewohnte:
+//
+//     name:x:gid:mitglied,mitglied,mitglied
+//
+// Das `x` in der zweiten Spalte ist dasselbe wie in /etc/passwd -- ein
+// Gruppenpasswort gibt es hier nicht, und es gibt auch keinen Grund,
+// eines zu erfinden: `newgrp` ist der einzige Befehl, der je eines
+// gebraucht hat, und den gibt es nicht.
+//
+// WOZU ZUSATZGRUPPEN GUT SIND, in einem Satz: sie sind die Art, auf die
+// zwei Menschen an einer Datei arbeiten, ohne dass einer von beiden root
+// sein muss. Ohne sie hat ein Benutzer GENAU EINE Gruppe, und
+// "gemeinsam" heisst dann entweder 0o666 oder gar nicht.
+//
+// DIE DATEI DARF JEDER LESEN (0o644), so wie /etc/passwd -- in ihr steht
+// kein Geheimnis, nur wer mit wem.
+
+profile kernel
+
+import ulib
+import pw
+
+export { groups_of_name, group_name_of, gid_of_group, initgroups }
+
+static mut grbuf: [u8; 4096] = [0 as u8; 4096]
+
+fn load_group() -> u64 {
+    var p: [u8; 11] = "/etc/group\0"
+    return pw.read_all((&p[0]) as u64, (&grbuf[0]) as u64, 4096)
+}
+
+
+// Steht `name` in der Mitgliederliste `list` (durch Komma getrennt)?
+// Kein `strtok`: die Liste wird an Ort und Stelle abgelaufen, weil sie
+// dem Aufrufer gehoert.
+fn in_members(list: u64, name: u64) -> bool {
+    let nl: u64 = ulib.length(name)
+    var at: u64 = 0
+    var going: bool = true
+    while going {
+        if *((list + at) as *mut u8) == 0 as u8 {
+            going = false
+        } else {
+            var e: u64 = at
+            while *((list + e) as *mut u8) != 0 as u8
+                && *((list + e) as *mut u8) != 44 as u8 {
+                e = e + 1
+            }
+            if e - at == nl {
+                if ulib.strneq(list + at, name, nl) {
+                    return true
+                }
+            }
+            if *((list + e) as *mut u8) == 0 as u8 {
+                going = false
+            } else {
+                at = e + 1
+            }
+        }
+    }
+    return false
+}
+
+// Die Gruppenkennungen, in denen `name` Mitglied ist -- OHNE die
+// Hauptgruppe aus /etc/passwd, die steht dort und wird von `setgid`
+// gesetzt. Rueckgabe: wie viele in `out` stehen.
+fn groups_of_name(name: u64, out: u64, max: u64) -> u64 {
+    if load_group() == ulib.EOF {
+        return 0
+    }
+    var line: [u8; 256] = [0 as u8; 256]
+    var f: [u8; 192] = [0 as u8; 192]
+    var n: u64 = 0
+    var i: u64 = 0
+    let cnt: u64 = pw.lines_of((&grbuf[0]) as u64)
+    while i < cnt {
+        if pw.line_at((&grbuf[0]) as u64, i, (&line[0]) as u64, 256)
+            != ulib.EOF {
+            if pw.field((&line[0]) as u64, 3, (&f[0]) as u64, 192) {
+                if in_members((&f[0]) as u64, name) {
+                    var g: [u8; 32] = [0 as u8; 32]
+                    if pw.field((&line[0]) as u64, 2, (&g[0]) as u64, 32) {
+                        if n < max {
+                            __mmio_write64((out + n * 8) as *mut u64,
+                                ulib.to_num((&g[0]) as u64))
+                            n = n + 1
+                        }
+                    }
+                }
+            }
+        }
+        i = i + 1
+    }
+    return n
+}
+
+// Der Name zu einer Gruppenkennung. Findet sich keiner, wird KEINER
+// erfunden -- dann steht die Zahl allein da, wie bei jedem Unix.
+fn group_name_of(gid: u64, out: u64, max: u64) -> bool {
+    if load_group() == ulib.EOF {
+        return false
+    }
+    var line: [u8; 256] = [0 as u8; 256]
+    var f: [u8; 64] = [0 as u8; 64]
+    var i: u64 = 0
+    let cnt: u64 = pw.lines_of((&grbuf[0]) as u64)
+    while i < cnt {
+        if pw.line_at((&grbuf[0]) as u64, i, (&line[0]) as u64, 256)
+            != ulib.EOF {
+            if pw.field((&line[0]) as u64, 2, (&f[0]) as u64, 64) {
+                if ulib.to_num((&f[0]) as u64) == gid {
+                    return pw.field((&line[0]) as u64, 0, out, max)
+                }
+            }
+        }
+        i = i + 1
+    }
+    return false
+}
+
+// Die Kennung zu einem GRUPPENNAMEN. Sie kommt aus /etc/group und
+// nicht aus /etc/passwd -- das ist der Unterschied, an dem `chown
+// justin:projekt` in dieser Runde zuerst gescheitert ist: `projekt` ist
+// eine Gruppe und kein Benutzer, und `pw.gid_of_name` sucht in
+// /etc/passwd nach einem BENUTZER dieses Namens. Die Datei zu
+// verwechseln ist ein Fehler, den man erst sieht, wenn eine Gruppe
+// einmal NICHT gleichzeitig ein Benutzername ist.
+fn gid_of_group(name: u64) -> u64 {
+    if load_group() == ulib.EOF {
+        return ulib.EOF
+    }
+    var line: [u8; 256] = [0 as u8; 256]
+    var f: [u8; 64] = [0 as u8; 64]
+    var i: u64 = 0
+    let cnt: u64 = pw.lines_of((&grbuf[0]) as u64)
+    while i < cnt {
+        if pw.line_at((&grbuf[0]) as u64, i, (&line[0]) as u64, 256)
+            != ulib.EOF {
+            if pw.field((&line[0]) as u64, 0, (&f[0]) as u64, 64) {
+                if ulib.streq((&f[0]) as u64, name) {
+                    var g: [u8; 32] = [0 as u8; 32]
+                    if pw.field((&line[0]) as u64, 2, (&g[0]) as u64, 32) {
+                        return ulib.to_num((&g[0]) as u64)
+                    }
+                }
+            }
+        }
+        i = i + 1
+    }
+    return ulib.EOF
+}
+
+// DIE ZUSATZGRUPPEN SETZEN, wie `initgroups` es auf jedem Unix tut:
+// alles aus /etc/group, in dem dieser Name als Mitglied steht. Sie
+// MUSS gerufen werden, solange der Prozess noch root ist -- `setgroups`
+// ist root vorbehalten, und danach ist es zu spaet. `login` und `su`
+// tun es deshalb VOR `setgid` und `setuid`.
+fn initgroups(name: u64) -> u64 {
+    var g: [u64; 16] = [0 as u64; 16]
+    let n: u64 = groups_of_name(name, (&g[0]) as u64, 16)
+    // Auch die LEERE Liste wird gesetzt: sonst behielte ein Prozess
+    // die Zusatzgruppen dessen, der ihn gestartet hat. Genau das ist
+    // der Fehler, den `su` ohne diesen Aufruf machen wuerde.
+    return ulib.sys(116, n, (&g[0]) as u64, 0)
+}
+
