@@ -1,0 +1,786 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/mp4.fi -- Runde DEMUX: MP4/ISOBMFF lesen.
+//
+// Ein MP4 ist ein Baum aus KAESTEN (boxes, ISO/IEC 14496-12). Jeder Kasten
+// ist vier Oktette Laenge, vier Oktette Name und dann sein Inhalt; ein
+// Kasten, der andere enthaelt, hat sie einfach hintereinander darin
+// liegen. Das Lesen selbst ist darum leicht -- die Arbeit steckt in EINER
+// Stelle, und die heisst `stbl`:
+//
+//   stsd   welcher Codec, und mit welchen Parametern
+//   stts   wie lange jedes Beispiel dauert (lauflaengenkodiert)
+//   stsc   wie viele Beispiele in einem Klumpen liegen (lauflaengenkodiert)
+//   stsz   wie gross jedes Beispiel ist (oder EINE Groesse fuer alle)
+//   stco   wo jeder Klumpen in der Datei liegt (co64: 64 Bit)
+//
+// Aus diesen fuenf Tabellen wird die Liste gerechnet, die ein Abspieler
+// wirklich braucht: je Beispiel eine Position, eine Laenge und ein
+// Zeitstempel. Keine der fuenf enthaelt diese Liste; jede enthaelt eine
+// Achtel davon. Genau das ist der Grund, aus dem die Recherche MP4 mit
+// 2000-4000 Zeilen ansetzt, waehrend ein eigenes Format 200 kostet.
+//
+// WAS DIESER LESER ABSICHTLICH NICHT TUT: fragmentiertes MP4 (`moof`)
+// ist ein zweites Format im selben Behaelter -- er erkennt es und SAGT
+// es, statt einen halben Baum zu bauen. Und er dekodiert kein Bild: was
+// in `avc1` steckt, ist H.264, und das bleibt es auch, wenn man es
+// aufmerksam anschaut.
+//
+// ROBUSTHEIT IST HIER KEINE ZUGABE. Jede Laenge in dieser Datei kommt
+// aus der Datei selbst, also aus einer Quelle, die luegen kann. Deshalb:
+// keine Laenge wird geglaubt, ohne sie gegen das Dateiende zu halten;
+// ein Kasten kleiner als sein Kopf beendet die Schleife; die Tiefe der
+// Rekursion ist begrenzt; und jeder Griff hinter das Ende faellt auf
+// `media.src_byte` zurueck, das 0 liefert und es sich merkt.
+
+profile kernel
+
+import ulib
+import media
+
+export {
+    mp4_probe, mp4_open, mp4_fragmented, mp4_truncated,
+    mp4_index, mp4_nsamp, mp4_maxsamp,
+    mp4_overflow, mp4_esds_obj
+}
+
+// ------------------------------------------------------------ die Namen
+
+const B_FTYP: u64 = 0x66747970
+const B_MOOV: u64 = 0x6D6F6F76
+const B_MVHD: u64 = 0x6D766864
+const B_TRAK: u64 = 0x7472616B
+const B_TKHD: u64 = 0x746B6864
+const B_MDIA: u64 = 0x6D646961
+const B_MDHD: u64 = 0x6D646864
+const B_HDLR: u64 = 0x68646C72
+const B_MINF: u64 = 0x6D696E66
+const B_STBL: u64 = 0x7374626C
+const B_STSD: u64 = 0x73747364
+const B_STTS: u64 = 0x73747473
+const B_STSC: u64 = 0x73747363
+const B_STSZ: u64 = 0x7374737A
+const B_STZ2: u64 = 0x73747A32
+const B_STCO: u64 = 0x7374636F
+const B_CO64: u64 = 0x636F3634
+const B_MDAT: u64 = 0x6D646174
+const B_MOOF: u64 = 0x6D6F6F66
+const B_FREE: u64 = 0x66726565
+const B_SKIP: u64 = 0x736B6970
+const B_WAVE: u64 = 0x77617665
+const B_ESDS: u64 = 0x65736473
+const B_VIDE: u64 = 0x76696465
+const B_SOUN: u64 = 0x736F756E
+const B_SBTL: u64 = 0x7362746C
+const B_TEXT: u64 = 0x74657874
+const B_SUBP: u64 = 0x73756270
+const B_AVC1: u64 = 0x61766331
+const B_AVC3: u64 = 0x61766333
+const B_HEV1: u64 = 0x68657631
+const B_HVC1: u64 = 0x68766331
+const B_AV01: u64 = 0x61763031
+const B_VP09: u64 = 0x76703039
+const B_VP08: u64 = 0x76703038
+const B_MP4V: u64 = 0x6D703476
+const B_MP4A: u64 = 0x6D703461
+const B_DMP3: u64 = 0x2E6D7033
+const B_AC_3: u64 = 0x61632D33
+const B_EC_3: u64 = 0x65632D33
+const B_ALAC: u64 = 0x616C6163
+const B_FLAC: u64 = 0x664C6143
+const B_OPUS: u64 = 0x4F707573
+const B_LPCM: u64 = 0x6C70636D
+const B_SOWT: u64 = 0x736F7774
+const B_TWOS: u64 = 0x74776F73
+const B_TX3G: u64 = 0x74783367
+const B_MJPA: u64 = 0x6D6A7061
+const B_JPEG: u64 = 0x6A706567
+
+const MAXTRK: u64 = 16
+const MAXSAMP: u64 = 32768
+const MAXDEPTH: u64 = 12
+
+// ------------------------------------------------- was je Spur gemerkt wird
+//
+// Nicht die Tabellen selbst, nur wo sie liegen. Eine Spur, die niemand
+// abspielt, kostet damit nichts ausser diesen zehn Zahlen.
+
+static mut p_stts: [u64; 16] = [0 as u64; 16]
+static mut n_stts: [u64; 16] = [0 as u64; 16]
+static mut p_stsc: [u64; 16] = [0 as u64; 16]
+static mut n_stsc: [u64; 16] = [0 as u64; 16]
+static mut p_stsz: [u64; 16] = [0 as u64; 16]
+static mut n_stsz: [u64; 16] = [0 as u64; 16]
+static mut c_stsz: [u64; 16] = [0 as u64; 16] // eine Groesse fuer alle, 0 = Tabelle
+static mut p_stco: [u64; 16] = [0 as u64; 16]
+static mut n_stco: [u64; 16] = [0 as u64; 16]
+static mut w_stco: [u64; 16] = [0 as u64; 16] // 4 oder 8 Oktette je Eintrag
+static mut esds_obj: [u64; 16] = [0 as u64; 16]
+
+// Die gerechnete Liste liegt in `media` -- EINE fuer beide Behaelter.
+static mut s_n: u64 = 0
+static mut s_over: u64 = 0 // mehr Beispiele als Platz -- ehrlich melden
+
+static mut frag: u64 = 0
+static mut trunc: u64 = 0
+static mut cur_trk: u64 = 0 // Spur, die gerade gebaut wird
+
+// ---------------------------------------------------- ein Kasten am Stueck
+//
+// Rueckgabe ueber drei Statische, weil eine Funktion in dieser Sprache
+// einen Wert zurueckgibt und nicht drei.
+
+static mut b_size: u64 = 0 // Gesamtlaenge einschliesslich Kopf
+static mut b_type: u64 = 0
+static mut b_body: u64 = 0 // Position des Inhalts
+
+// Liest den Kasten bei `off`, dessen Vater bei `end` aufhoert.
+// false: hier ist kein gueltiger Kasten mehr.
+fn box_read(off: u64, end: u64) -> bool {
+    if off + 8 > end {
+        return false
+    }
+    var sz: u64 = media.be32(off)
+    let ty: u64 = media.be32(off + 4)
+    var hdr: u64 = 8
+    if sz == 1 {
+        if off + 16 > end {
+            return false
+        }
+        sz = media.be64(off + 8)
+        hdr = 16
+    } else if sz == 0 {
+        // "bis zum Ende" -- erlaubt, und der haeufigste Fall bei mdat.
+        sz = end - off
+    }
+    if sz < hdr {
+        return false
+    }
+    if off + sz > end {
+        // Die Datei behauptet einen Kasten, der laenger ist als der
+        // Platz. Das ist genau der Fall `luege.mp4` und der Fall
+        // `kurz.mp4`. Beides ist derselbe Fund: abgeschnitten.
+        trunc = 1
+        sz = end - off
+        if sz < hdr {
+            return false
+        }
+    }
+    b_size = sz
+    b_type = ty
+    b_body = off + hdr
+    return true
+}
+
+// --------------------------------------------------------------- Probe
+
+// Sieht das nach ISOBMFF aus? Der erste Kasten muss einen der Namen
+// tragen, die am Dateianfang stehen duerfen.
+fn mp4_probe() -> bool {
+    let n: u64 = media.src_size()
+    if n < 8 {
+        return false
+    }
+    let sz: u64 = media.be32(0)
+    let ty: u64 = media.be32(4)
+    if sz < 8 && sz != 1 {
+        return false
+    }
+    if ty == B_FTYP || ty == B_MOOV || ty == B_MDAT || ty == B_FREE
+        || ty == B_SKIP || ty == 0x73747970 || ty == 0x77696465 {
+        return true
+    }
+    return false
+}
+
+fn mp4_fragmented() -> bool {
+    return frag == 1
+}
+
+fn mp4_truncated() -> bool {
+    return trunc == 1 || media.src_eof()
+}
+
+fn mp4_maxsamp() -> u64 {
+    return MAXSAMP
+}
+
+fn mp4_overflow() -> bool {
+    return s_over == 1
+}
+
+fn mp4_esds_obj(t: u64) -> u64 {
+    if t >= MAXTRK {
+        return 0
+    }
+    return esds_obj[(t) as usize]
+}
+
+// ------------------------------------------------------------ der Baum
+
+static mut mv_scale: u64 = 0
+static mut mv_dur: u64 = 0
+
+// Ein Vierbuchstabenname zu einer Codec-Nummer. Was hier nicht steht,
+// wird nach der ART benannt ("Video, fremd") und nicht erfunden.
+fn codec_of(ty: u64, kind: u64) -> u64 {
+    if ty == B_AVC1 || ty == B_AVC3 { return media.C_H264 }
+    if ty == B_HEV1 || ty == B_HVC1 { return media.C_HEVC }
+    if ty == B_AV01 { return media.C_AV1 }
+    if ty == B_VP09 { return media.C_VP9 }
+    if ty == B_VP08 { return media.C_VP8 }
+    if ty == B_MP4V { return media.C_MPEG4V }
+    if ty == B_MJPA || ty == B_JPEG { return media.C_MJPEG }
+    if ty == B_DMP3 { return media.C_MP3 }
+    if ty == B_AC_3 { return media.C_AC3 }
+    if ty == B_EC_3 { return media.C_EAC3 }
+    if ty == B_ALAC { return media.C_ALAC }
+    if ty == B_FLAC { return media.C_FLAC }
+    if ty == B_OPUS { return media.C_OPUS }
+    if ty == B_LPCM || ty == B_SOWT || ty == B_TWOS { return media.C_PCM }
+    if ty == B_TX3G || ty == B_TEXT { return media.C_SRT }
+    if kind == media.K_VIDEO { return media.C_VIDEO_OTHER }
+    if kind == media.K_AUDIO { return media.C_AUDIO_OTHER }
+    if kind == media.K_SUB { return media.C_SUB_OTHER }
+    return media.C_NONE
+}
+
+// Der Beschreiber in `esds` (ISO 14496-1). Er ist eine Kette aus Marken
+// mit einer Laenge in Siebenbitgruppen, und alles, was hier daraus
+// gebraucht wird, ist EIN Oktett: die objectTypeIndication.
+//
+//   0x40  MPEG-4 Audio  -> die Unterart steht im AudioSpecificConfig
+//   0x66/0x67/0x68      -> MPEG-2 AAC (Main/LC/SSR)
+//   0x69  MPEG-2 Layer III, 0x6B MPEG-1 Layer III -> MP3
+fn esds_object(off: u64, end: u64) -> u64 {
+    // version(1) + flags(3), dann die Marken
+    var p: u64 = off + 4
+    var guard: u64 = 0
+    while p < end && guard < 64 {
+        guard = guard + 1
+        let tag: u64 = media.src_byte(p)
+        p = p + 1
+        var len: u64 = 0
+        var k: u64 = 0
+        var going: bool = true
+        while going && k < 4 && p < end {
+            let c: u64 = media.src_byte(p)
+            p = p + 1
+            len = (len << 7) | (c & 0x7F)
+            if (c & 0x80) == 0 {
+                going = false
+            }
+            k = k + 1
+        }
+        if tag == 0x03 {
+            // ES_Descriptor: ES_ID(2) + flags(1), dann verschachtelt.
+            if p + 3 > end {
+                return 0
+            }
+            let fl: u64 = media.src_byte(p + 2)
+            p = p + 3
+            if (fl & 0x80) != 0 { p = p + 2 } // streamDependence
+            if (fl & 0x40) != 0 { p = p + 1 + media.src_byte(p) } // URL
+            if (fl & 0x20) != 0 { p = p + 2 } // OCR
+        } else if tag == 0x04 {
+            // DecoderConfigDescriptor: das erste Oktett ist die Antwort.
+            if p >= end {
+                return 0
+            }
+            return media.src_byte(p)
+        } else {
+            if len == 0 {
+                return 0
+            }
+            p = p + len
+        }
+    }
+    return 0
+}
+
+// Der Inhalt eines Beispielbeschreibers (`stsd`) fuer eine Spur.
+fn read_stsd(off: u64, end: u64, t: u64, kind: u64) {
+    // version(1) + flags(3) + entry_count(4)
+    let cnt: u64 = media.be32(off + 4)
+    if cnt == 0 {
+        return
+    }
+    var p: u64 = off + 8
+    if !box_read(p, end) {
+        return
+    }
+    let ty: u64 = b_type
+    let body: u64 = b_body
+    let bend: u64 = p + b_size
+    media.trk_set(t, media.T_CODEC, codec_of(ty, kind))
+    if kind == media.K_VIDEO {
+        // VisualSampleEntry: 6+2 reserviert, 2 pre_defined, 2 reserviert,
+        // 12 pre_defined, dann Breite und Hoehe als 16-Bit-Ganzzahlen.
+        media.trk_set(t, media.T_W, media.be16(body + 24))
+        media.trk_set(t, media.T_H, media.be16(body + 26))
+    } else if kind == media.K_AUDIO {
+        // AudioSampleEntry: 6+2 reserviert, 8 reserviert, dann
+        // Kanaele(2), Bits(2), pre_defined(2), reserviert(2),
+        // Abtastrate als 16.16.
+        media.trk_set(t, media.T_CH, media.be16(body + 16))
+        media.trk_set(t, media.T_BITS, media.be16(body + 18))
+        media.trk_set(t, media.T_RATE, media.be16(body + 24))
+    }
+    // Die Kindkaesten: esds sagt, was `mp4a` wirklich ist.
+    var q: u64 = body + 28
+    if kind == media.K_AUDIO {
+        q = body + 28
+    } else if kind == media.K_VIDEO {
+        q = body + 78
+    } else {
+        q = body
+    }
+    var guard: u64 = 0
+    while q + 8 <= bend && guard < 32 {
+        guard = guard + 1
+        if !box_read(q, bend) {
+            return
+        }
+        if b_type == B_ESDS {
+            let obj: u64 = esds_object(b_body, q + b_size)
+            if t < MAXTRK {
+                esds_obj[(t) as usize] = obj
+            }
+            if obj == 0x40 || obj == 0x66 || obj == 0x67 || obj == 0x68 {
+                media.trk_set(t, media.T_CODEC, media.C_AAC)
+            } else if obj == 0x69 || obj == 0x6B {
+                media.trk_set(t, media.T_CODEC, media.C_MP3)
+            } else if obj == 0x6C {
+                media.trk_set(t, media.T_CODEC, media.C_MJPEG)
+            } else if obj == 0x20 {
+                media.trk_set(t, media.T_CODEC, media.C_MPEG4V)
+            }
+        } else if b_type == B_WAVE {
+            // QuickTime legt `esds` gern eine Ebene tiefer.
+            var r: u64 = b_body
+            let rend: u64 = q + b_size
+            var g2: u64 = 0
+            while r + 8 <= rend && g2 < 16 {
+                g2 = g2 + 1
+                if !box_read(r, rend) {
+                    r = rend
+                } else {
+                    if b_type == B_ESDS {
+                        let o2: u64 = esds_object(b_body, r + b_size)
+                        if o2 == 0x40 {
+                            media.trk_set(t, media.T_CODEC, media.C_AAC)
+                        } else if o2 == 0x69 || o2 == 0x6B {
+                            media.trk_set(t, media.T_CODEC, media.C_MP3)
+                        }
+                    }
+                    r = r + b_size
+                }
+            }
+            if !box_read(q, bend) {
+                return
+            }
+        }
+        q = q + b_size
+    }
+}
+
+// `stbl` -- die fuenf Tabellen merken, keine davon lesen.
+fn read_stbl(off: u64, end: u64, t: u64, kind: u64) {
+    var p: u64 = off
+    var guard: u64 = 0
+    while p + 8 <= end && guard < 64 {
+        guard = guard + 1
+        if !box_read(p, end) {
+            return
+        }
+        let ty: u64 = b_type
+        let body: u64 = b_body
+        let sz: u64 = b_size
+        if ty == B_STSD {
+            read_stsd(body, p + sz, t, kind)
+        } else if ty == B_STTS {
+            if t < MAXTRK {
+                p_stts[(t) as usize] = body + 8
+                n_stts[(t) as usize] = media.be32(body + 4)
+            }
+        } else if ty == B_STSC {
+            if t < MAXTRK {
+                p_stsc[(t) as usize] = body + 8
+                n_stsc[(t) as usize] = media.be32(body + 4)
+            }
+        } else if ty == B_STSZ {
+            if t < MAXTRK {
+                c_stsz[(t) as usize] = media.be32(body + 4)
+                n_stsz[(t) as usize] = media.be32(body + 8)
+                p_stsz[(t) as usize] = body + 12
+            }
+        } else if ty == B_STZ2 {
+            // Kompakte Groessen. Selten, und die Feldbreite kann 4, 8
+            // oder 16 Bit sein -- hier wird sie GELESEN und nicht geraten.
+            if t < MAXTRK {
+                let fw: u64 = media.src_byte(body + 7)
+                n_stsz[(t) as usize] = media.be32(body + 8)
+                p_stsz[(t) as usize] = body + 12
+                if fw == 16 {
+                    c_stsz[(t) as usize] = 0
+                    w_stco[(t) as usize] = w_stco[(t) as usize] // unberuehrt
+                }
+            }
+        } else if ty == B_STCO {
+            if t < MAXTRK {
+                p_stco[(t) as usize] = body + 8
+                n_stco[(t) as usize] = media.be32(body + 4)
+                w_stco[(t) as usize] = 4
+            }
+        } else if ty == B_CO64 {
+            if t < MAXTRK {
+                p_stco[(t) as usize] = body + 8
+                n_stco[(t) as usize] = media.be32(body + 4)
+                w_stco[(t) as usize] = 8
+            }
+        }
+        p = p + sz
+    }
+}
+
+// Eine Spur. `tkhd` liefert die Nummer, `mdhd` die Zeiteinheit und die
+// Dauer, `hdlr` die Art, `stbl` den Rest.
+fn read_trak(off: u64, end: u64) {
+    var tid: u64 = 0
+    var scale: u64 = 0
+    var dur: u64 = 0
+    var lang: u64 = 0
+    var kind: u64 = media.K_NONE
+    var stbl_p: u64 = 0
+    var stbl_e: u64 = 0
+    var w: u64 = 0
+    var h: u64 = 0
+
+    // 1. Durchgang: alles ausser stbl -- die ART muss vor `stsd` bekannt
+    // sein, weil ein AudioSampleEntry anders aufgebaut ist als ein
+    // VisualSampleEntry und man das dem Kasten nicht ansieht.
+    var p: u64 = off
+    var guard: u64 = 0
+    while p + 8 <= end && guard < 64 {
+        guard = guard + 1
+        if !box_read(p, end) {
+            p = end
+        } else {
+            let ty: u64 = b_type
+            let body: u64 = b_body
+            let sz: u64 = b_size
+            if ty == B_TKHD {
+                let ver: u64 = media.src_byte(body)
+                if ver == 1 {
+                    tid = media.be32(body + 20)
+                    w = media.be32(body + 88) >> 16
+                    h = media.be32(body + 92) >> 16
+                } else {
+                    tid = media.be32(body + 12)
+                    w = media.be32(body + 76) >> 16
+                    h = media.be32(body + 80) >> 16
+                }
+            } else if ty == B_MDIA {
+                var q: u64 = body
+                let qend: u64 = p + sz
+                var g2: u64 = 0
+                while q + 8 <= qend && g2 < 64 {
+                    g2 = g2 + 1
+                    if !box_read(q, qend) {
+                        q = qend
+                    } else {
+                        let ty2: u64 = b_type
+                        let body2: u64 = b_body
+                        let sz2: u64 = b_size
+                        if ty2 == B_MDHD {
+                            let ver: u64 = media.src_byte(body2)
+                            if ver == 1 {
+                                scale = media.be32(body2 + 20)
+                                dur = media.be64(body2 + 24)
+                                lang = media.be16(body2 + 32)
+                            } else {
+                                scale = media.be32(body2 + 12)
+                                dur = media.be32(body2 + 16)
+                                lang = media.be16(body2 + 20)
+                            }
+                        } else if ty2 == B_HDLR {
+                            let ht: u64 = media.be32(body2 + 8)
+                            if ht == B_VIDE {
+                                kind = media.K_VIDEO
+                            } else if ht == B_SOUN {
+                                kind = media.K_AUDIO
+                            } else if ht == B_SBTL || ht == B_TEXT
+                                || ht == B_SUBP {
+                                kind = media.K_SUB
+                            }
+                        } else if ty2 == B_MINF {
+                            var r: u64 = body2
+                            let rend: u64 = q + sz2
+                            var g3: u64 = 0
+                            while r + 8 <= rend && g3 < 64 {
+                                g3 = g3 + 1
+                                if !box_read(r, rend) {
+                                    r = rend
+                                } else {
+                                    if b_type == B_STBL {
+                                        stbl_p = b_body
+                                        stbl_e = r + b_size
+                                    }
+                                    r = r + b_size
+                                }
+                            }
+                        }
+                        q = q + sz2
+                    }
+                }
+            }
+            p = p + sz
+        }
+    }
+    if kind == media.K_NONE {
+        return
+    }
+    let t: u64 = media.trk_add(kind, media.C_NONE, tid)
+    if t >= MAXTRK {
+        return
+    }
+    media.trk_set(t, media.T_SCALE, scale)
+    media.trk_set(t, media.T_LANG, lang)
+    if scale > 0 {
+        media.trk_set(t, media.T_DUR_MS, (dur * 1000) / scale)
+    }
+    if kind == media.K_VIDEO {
+        media.trk_set(t, media.T_W, w)
+        media.trk_set(t, media.T_H, h)
+    }
+    if stbl_p > 0 {
+        read_stbl(stbl_p, stbl_e, t, kind)
+    }
+    // Die Nutzdatenmenge: die Summe aller Beispielgroessen. Sie wird hier
+    // ADDIERT und nicht aus einem Kopffeld gelesen.
+    var bytes: u64 = 0
+    let n: u64 = n_stsz[(t) as usize]
+    let c: u64 = c_stsz[(t) as usize]
+    if c > 0 {
+        bytes = c * n
+    } else {
+        var i: u64 = 0
+        while i < n {
+            bytes = bytes + media.be32(p_stsz[(t) as usize] + i * 4)
+            i = i + 1
+        }
+    }
+    media.trk_set(t, media.T_BYTES, bytes)
+    media.trk_set(t, media.T_NSAMP, n)
+}
+
+// `moov` -- die Spuren.
+fn read_moov(off: u64, end: u64) {
+    var p: u64 = off
+    var guard: u64 = 0
+    while p + 8 <= end && guard < 64 {
+        guard = guard + 1
+        if !box_read(p, end) {
+            return
+        }
+        // ACHTUNG: `read_trak` liest selbst Kaesten und ueberschreibt
+        // damit b_size/b_type/b_body. Also ERST sichern, dann absteigen.
+        let ty: u64 = b_type
+        let body: u64 = b_body
+        let sz: u64 = b_size
+        if ty == B_MVHD {
+            let ver: u64 = media.src_byte(body)
+            if ver == 1 {
+                mv_scale = media.be32(body + 20)
+                mv_dur = media.be64(body + 24)
+            } else {
+                mv_scale = media.be32(body + 12)
+                mv_dur = media.be32(body + 16)
+            }
+        } else if ty == B_TRAK {
+            read_trak(body, p + sz)
+        }
+        p = p + sz
+    }
+}
+
+// -------------------------------------------------------------- oeffnen
+
+// Rueckgabe: true, wenn wenigstens EIN `moov` gefunden wurde. Eine Datei
+// ohne `moov` ist kein abspielbares MP4 -- und das ist genau der Fall
+// `kurz.mp4`, bei dem der Kopf abgeschnitten ist.
+fn mp4_open() -> bool {
+    var i: u64 = 0
+    while i < MAXTRK {
+        p_stts[(i) as usize] = 0
+        n_stts[(i) as usize] = 0
+        p_stsc[(i) as usize] = 0
+        n_stsc[(i) as usize] = 0
+        p_stsz[(i) as usize] = 0
+        n_stsz[(i) as usize] = 0
+        c_stsz[(i) as usize] = 0
+        p_stco[(i) as usize] = 0
+        n_stco[(i) as usize] = 0
+        w_stco[(i) as usize] = 4
+        esds_obj[(i) as usize] = 0
+        i = i + 1
+    }
+    frag = 0
+    trunc = 0
+    s_n = 0
+    s_over = 0
+    mv_scale = 0
+    mv_dur = 0
+    media.trk_reset()
+
+    let end: u64 = media.src_size()
+    var p: u64 = 0
+    var found: bool = false
+    var guard: u64 = 0
+    while p + 8 <= end && guard < 4096 {
+        guard = guard + 1
+        if !box_read(p, end) {
+            p = end
+        } else {
+            let ty: u64 = b_type
+            let body: u64 = b_body
+            let sz: u64 = b_size
+            if ty == B_MOOV {
+                read_moov(body, p + sz)
+                found = true
+            } else if ty == B_MOOF {
+                frag = 1
+            }
+            p = p + sz
+        }
+    }
+    return found
+}
+
+// ------------------------------------------------- die gerechnete Liste
+
+fn stsz_at(t: u64, i: u64) -> u64 {
+    let c: u64 = c_stsz[(t) as usize]
+    if c > 0 {
+        return c
+    }
+    if i >= n_stsz[(t) as usize] {
+        return 0
+    }
+    return media.be32(p_stsz[(t) as usize] + i * 4)
+}
+
+fn stco_at(t: u64, i: u64) -> u64 {
+    if i >= n_stco[(t) as usize] {
+        return 0
+    }
+    if w_stco[(t) as usize] == 8 {
+        return media.be64(p_stco[(t) as usize] + i * 8)
+    }
+    return media.be32(p_stco[(t) as usize] + i * 4)
+}
+
+// Aus stsc/stco/stsz/stts die Liste bauen. Das ist der Kern dieses
+// Moduls: fuenf lauflaengenkodierte Tabellen werden zu einer flachen.
+// Die Zeitstempel laufen dabei IM GLEICHSCHRITT mit -- `stts` ist eine
+// Lauflaengenliste, und wer sie in einem zweiten Durchgang liest,
+// braucht die Liste zweimal im Speicher.
+
+static mut e_idx: u64 = 0 // welcher stts-Lauf
+static mut e_rest: u64 = 0 // wie viele Beispiele noch in ihm
+static mut e_del: u64 = 0 // seine Schrittweite
+static mut e_acc: u64 = 0 // Zeit bis hierher, in Einheiten der Spur
+
+fn stts_start(t: u64) {
+    e_idx = 0
+    e_rest = 0
+    e_del = 0
+    e_acc = 0
+    stts_fetch(t)
+}
+
+fn stts_fetch(t: u64) {
+    while e_rest == 0 && e_idx < n_stts[(t) as usize] {
+        e_rest = media.be32(p_stts[(t) as usize] + e_idx * 8)
+        e_del = media.be32(p_stts[(t) as usize] + e_idx * 8 + 4)
+        e_idx = e_idx + 1
+    }
+}
+
+// Der Zeitstempel des naechsten Beispiels, und einen Schritt weiter.
+fn stts_next(t: u64) -> u64 {
+    stts_fetch(t)
+    let now: u64 = e_acc
+    if e_rest > 0 {
+        e_acc = e_acc + e_del
+        e_rest = e_rest - 1
+    }
+    return now
+}
+
+fn mp4_index(t: u64) -> bool {
+    s_n = 0
+    s_over = 0
+    cur_trk = t
+    media.idx_reset()
+    if t >= MAXTRK {
+        return false
+    }
+    let ns: u64 = n_stsz[(t) as usize]
+    let nc: u64 = n_stco[(t) as usize]
+    let nsc: u64 = n_stsc[(t) as usize]
+    if ns == 0 || nc == 0 || nsc == 0 {
+        return false
+    }
+    var scale: u64 = media.trk_get(t, media.T_SCALE)
+    if scale == 0 {
+        scale = 1000
+    }
+    stts_start(t)
+    var samp: u64 = 0
+    var k: u64 = 0
+    var stop: bool = false
+    while k < nsc && !stop {
+        let first: u64 = media.be32(p_stsc[(t) as usize] + k * 12)
+        let spc: u64 = media.be32(p_stsc[(t) as usize] + k * 12 + 4)
+        var last: u64 = nc
+        if k + 1 < nsc {
+            let nx: u64 = media.be32(p_stsc[(t) as usize] + (k + 1) * 12)
+            if nx >= 1 && nx - 1 <= nc {
+                last = nx - 1
+            }
+        }
+        if first < 1 || spc == 0 || spc > 100000 {
+            stop = true
+        } else {
+            var c: u64 = first
+            while c <= last && !stop {
+                var off: u64 = stco_at(t, c - 1)
+                var j: u64 = 0
+                while j < spc && !stop {
+                    if samp >= ns {
+                        stop = true
+                    } else {
+                        let sz: u64 = stsz_at(t, samp)
+                        let tu: u64 = stts_next(t)
+                        if !media.idx_add(off, sz, (tu * 1000) / scale) {
+                            s_over = 1
+                            stop = true
+                        } else {
+                            off = off + sz
+                            samp = samp + 1
+                            j = j + 1
+                        }
+                    }
+                }
+                c = c + 1
+            }
+            k = k + 1
+        }
+    }
+    s_n = media.idx_count()
+    return s_n > 0
+}
+
+fn mp4_nsamp() -> u64 {
+    return s_n
+}
