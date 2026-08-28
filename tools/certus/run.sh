@@ -325,7 +325,7 @@ if [ "$CBUILD_OK" = 1 ]; then
     rm -f "$sock" "$out" "$ppm"
     mk_image "$TMPD/d-win.img" && cp -f "$TMPD/d-win.img" "$TMPD/l-win.img"
     timeout 420 $QEMU_X86 -kernel "$TMPD/k0.mb" -m 512 \
-        -append "osum vfs gfx wm wig desk wmhold wiglong nokbd nosched noproc nofs noring3 nic nip=$OSUM_IP/24 ngw=$OSUM_GW script=certus http://$OSUM_GW:$PORT/index.html /w/win.ppm 6" \
+        -append "osum vfs gfx wm wig wmhold wmshell wiglong nokbd nosched noproc nofs noring3 nic nip=$OSUM_IP/24 ngw=$OSUM_GW script=certus http://$OSUM_GW:$PORT/index.html /w/win.ppm 0" \
         -serial "file:$out" -display none -no-reboot \
         -vga std -monitor "unix:$sock,server,nowait" \
         -drive "file=$TMPD/l-win.img,format=raw,if=ide,index=0" \
@@ -334,7 +334,7 @@ if [ "$CBUILD_OK" = 1 ]; then
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 > "$TMPD/win.qemu" 2>&1 &
     qpid=$!
     i=0
-    while [ $i -lt 1600 ]; do
+    while [ $i -lt 2400 ]; do
         grep -qa 'CERTUS ' "$out" 2>/dev/null && break
         kill -0 "$qpid" 2>/dev/null || break
         sleep 0.2
@@ -355,6 +355,15 @@ if [ "$CBUILD_OK" = 1 ]; then
         num "Bildschirm: Tintenpunkte" "$WT" ge 20000
         num "Bildschirm: dunkle Punkte" "$WD" ge 300
         num "Bildschirm: Textbaender" "$WB" ge 3
+        # DIE FARBEN, DIE DIE SEITE VERLANGT HAT, auf dem Schirm der
+        # emulierten Grafikkarte. Ein weisses Rechteck bestuende jede
+        # Zaehlung darueber und hiesse nichts.
+        BL=$(python3 tools/certus/farbe.py "$ppm" 0033aa)
+        RD=$(python3 tools/certus/farbe.py "$ppm" cc0000)
+        num "der blaue Kasten der Seite (#0033aa, 300x80 = 24000)" "$BL" ge 20000
+        num "der rote Kasten der Seite (#cc0000, 200x40 = 8000)" "$RD" ge 6000
+        BP=$(grep -oaE 'blitpx=[0-9]+' "$out" | head -1 | cut -d= -f2)
+        num "Bildpunkte, die WIG_BLIT wirklich ins Fenster geschoben hat" "$BP" ge 400000
     else
         bad "kein Bildschirmfoto"
         tail -3 "$TMPD/win.qemu" 2>/dev/null | sed 's/^/        /'
