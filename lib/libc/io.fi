@@ -24,6 +24,10 @@ export {
     seek, tell, size_of, stat_into, stat_size, stat_mode, is_dir_mode,
     fstat_into, unlink, make_dir, dup, dup2, pipe, dir_open, dir_read,
     dir_name, dir_kind, dir_reclen, cwd,
+    // ------------------------------------------------- RUNDE POLL
+    poll, poll_set, poll_fd, poll_revents, poll_ready,
+    PFD_BYTES, POLLIN, POLLPRI, POLLOUT, POLLERR, POLLHUP, POLLNVAL,
+    POLL_FOREVER,
     STAT_BYTES, ST_MODE, ST_SIZE, ST_INO, S_IFMT, S_IFREG, S_IFDIR,
     S_IFIFO, S_IFCHR, DT_DIR, DT_REG, D_RECLEN, D_TYPE, D_NAME,
     // -------------------------------------------------- RUNDE OFS3
@@ -314,4 +318,77 @@ fn dir_kind(rec: u64) -> u64 {
 // on a fixed size would be wrong at the first long name.
 fn dir_reclen(rec: u64) -> u64 {
     return __mmio_read16((rec + D_RECLEN) as *mut u16) as u64
+}
+
+// ================================================== RUNDE POLL
+//
+// AUF MEHRERE DESKRIPTOREN GLEICHZEITIG WARTEN. Ohne diesen Aufruf
+// kann ein Programm dieses Systems auf genau eine Sache warten, und
+// jeder Helfer, der ein Netz UND ein Kind bedient, muss auf zwei
+// warten.
+//
+//     var fds: [u8; 16] = [0 as u8; 16]      // zwei Eintraege
+//     io.poll_set((&fds[0]) as u64, 0, r0, io.POLLIN)
+//     io.poll_set((&fds[0]) as u64, 1, r1, io.POLLIN)
+//     let n: u64 = io.poll((&fds[0]) as u64, 2, 500)
+//     if io.poll_ready((&fds[0]) as u64, 0, io.POLLIN) { ... }
+//
+// `struct pollfd` ist acht Oktette und hat die Form von Linux:
+// fd (i32) bei 0, events (i16) bei 4, revents (i16) bei 6. Firn hat
+// keine Struktur ueber Ring-3-Grenzen hinweg, also ist der Puffer ein
+// Feld aus Oktetten und die vier Zugriffe darauf stehen hier -- an
+// EINER Stelle, statt in jedem Programm noch einmal.
+const PFD_BYTES: u64 = 8
+const POLLIN: u64 = 1
+const POLLPRI: u64 = 2
+const POLLOUT: u64 = 4
+const POLLERR: u64 = 8
+const POLLHUP: u64 = 16
+const POLLNVAL: u64 = 32
+// `timeout` unter null: warten, bis wirklich etwas geschieht.
+const POLL_FOREVER: u64 = 0xFFFFFFFFFFFFFFFF
+
+fn st8(p: u64, off: u64, v: u64) {
+    __mmio_write8((p + off) as *mut u8, (v & 255) as u8)
+}
+
+fn ld8(p: u64, off: u64) -> u64 {
+    return __mmio_read8((p + off) as *mut u8) as u64
+}
+
+// Eintrag `i` besetzen: Deskriptor und die Ereignisse, auf die gewartet
+// wird. `revents` wird dabei geleert -- ein Programm, das denselben
+// Puffer noch einmal benutzt, saehe sonst die Antwort des letzten Laufs.
+fn poll_set(fds: u64, i: u64, fd: u64, events: u64) {
+    let a: u64 = fds + i * PFD_BYTES
+    st8(a, 0, fd)
+    st8(a, 1, fd >> 8)
+    st8(a, 2, fd >> 16)
+    st8(a, 3, fd >> 24)
+    st8(a, 4, events)
+    st8(a, 5, events >> 8)
+    st8(a, 6, 0)
+    st8(a, 7, 0)
+}
+
+fn poll_fd(fds: u64, i: u64) -> u64 {
+    let a: u64 = fds + i * PFD_BYTES
+    return ld8(a, 0) | (ld8(a, 1) << 8) | (ld8(a, 2) << 16) | (ld8(a, 3) << 24)
+}
+
+fn poll_revents(fds: u64, i: u64) -> u64 {
+    let a: u64 = fds + i * PFD_BYTES
+    return ld8(a, 6) | (ld8(a, 7) << 8)
+}
+
+// Ist bei Eintrag `i` eines der Bits in `what` gemeldet worden?
+fn poll_ready(fds: u64, i: u64, what: u64) -> bool {
+    return (poll_revents(fds, i) & what) != 0
+}
+
+// Der Aufruf selbst. Zurueck kommt die ZAHL der Deskriptoren mit einem
+// Ereignis, 0 beim Zeitablauf -- und -1 mit `errno` im Fehlerfall, wie
+// alles in dieser Datei.
+fn poll(fds: u64, nfds: u64, timeout_ms: u64) -> u64 {
+    return errno.check(kcall.sys3(kcall.SYS_POLL, fds, nfds, timeout_ms))
 }
