@@ -53,14 +53,8 @@ import netview
 import netmon
 import share
 import cap
-import fb
 import gfx
-import vmode
-import ttf
-import ps2m
-import wm
-import tile
-import wig
+import kutil
 import nidx
 import arch.x86_64.apic
 import arch.x86_64.hv
@@ -118,8 +112,6 @@ const P_PWRIDLE: u64 = 46
 const P_PWRLOAD: u64 = 47
 const P_USER: u64 = 16
 const P_ZOMBIE: u64 = 17
-const P_FB: u64 = 13
-const P_WCLICK: u64 = 14
 const P_HV: u64 = 15 // RUNDE K12: die Gastmaschine aus Ring 3 (14 nahm K10s Fenster)
 
 const DISK_FRAMES: u64 = 256 // 1 MiB of RAM disk
@@ -147,24 +139,6 @@ const KEY_TIMEOUT: u64 = 250 // 2.5 s, then it goes on regardless
 // ==================================================================
 // RUNDE OFS3: DIE GROESSE DER WURZELPLATTE, GEFRAGT STATT GERATEN
 // ==================================================================
-//
-// `OSUM_BLOCKS` stand seit Runde K1 als Konstante hier: 4096 Bloecke,
-// zwei Megaoktett. Sie war nie eine Eigenschaft der Platte, sondern
-// eine Eigenschaft dieser Zeile -- und sie war der zweite Deckel neben
-// der einblockigen Karte in `fs.fi`. Ein Abbild von 32 MiB lief nach
-// 2 MiB voll, und `df` sagte dazu `total=4096`, was stimmte und
-// trotzdem falsch war.
-//
-// Jetzt fragt der Kernel die Platte (`blk.capacity`, ATA IDENTIFY).
-// Antwortet sie nicht, bleibt es bei der alten Konstanten -- kein Lauf,
-// der bisher funktioniert hat, faellt dadurch aus.
-fn root_blocks(state: u64) -> u64 {
-    let n: u64 = blk.capacity(state)
-    if n == 0 {
-        return OSUM_BLOCKS
-    }
-    return n
-}
 
 fn kernel_main(mbi: u64, vectors: u64, state: u64, kernel_end: u64,
     gdt: u64, tss: u64) {
@@ -300,7 +274,7 @@ fn kernel_main(mbi: u64, vectors: u64, state: u64, kernel_end: u64,
     //     APIC (`apic.map_device`) -- und weil der Zweitpuffer aus dem
     //     Rahmenverwalter kommt, den Abschnitt 3 gerade erst aufgebaut
     //     hat. Ohne das Wort `gfx` kehrt das hier sofort zurueck.
-    graphics(state, mbi)
+    gfx.stage_graphics(state, mbi)
 
     // 3b. the task table. From here on there is a scheduler -- it does
     //     not switch anything yet, because there is only one task, but
@@ -452,11 +426,11 @@ fn kernel_main(mbi: u64, vectors: u64, state: u64, kernel_end: u64,
     //     Terminal aus K9, die Handles aus K6 und das Dateisystem, aus
     //     dem die Schriften kommen. Ohne das Wort `wm` kehrt das sofort
     //     zurueck und keine Messung der Runden 52 bis K9 aendert sich.
-    surface(state)
+    gfx.stage_surface(state)
 
     // 9. ROUNDE K7: stillhalten, damit ein Bildschirmfoto entstehen
     //    kann. Ohne `fbhold` ist das ein Nichts.
-    gfx_hold(state)
+    gfx.stage_hold(state)
 
     // ROUNDE K10: was die Schutzbits am Ende des Laufs zu berichten
     // haben -- wie viele weitere Prozessoren sie tragen und wie oft das
@@ -496,7 +470,7 @@ fn hv_ring3(state: u64) {
     if t == 0 {
         return
     }
-    let e: u64 = wait_for(state, t)
+    let e: u64 = kutil.wait_for(state, t)
     serial.puts((&s_exit[0]) as u64)
     serial.dec(e)
     serial.nl()
@@ -512,830 +486,21 @@ fn hv_ring3(state: u64) {
 // Spiegel anschalten. Die Reihenfolge ist nicht beliebig: ein Spiegel,
 // der waehrend der Messung mitzeichnet, misst sich selbst.
 
-const GFX_RUNDEN: u64 = 5 // Wiederholungen je Messwert
 
-fn graphics(state: u64, mbi: u64) {
-    var s_none: [u8; 24] = "fb: kein Rahmenpuffer\0\0\0"
-    var s_geo: [u8; 5] = "fb: \0"
-    var s_x: [u8; 2] = "x\0"
-    var s_bpp: [u8; 4] = "x32\0"
-    var s_pitch: [u8; 9] = "  pitch=\0"
-    var s_src: [u8; 7] = "  src=\0"
-    var s_mb: [u8; 3] = "mb\0"
-    var s_vbe: [u8; 4] = "vbe\0"
-    var s_phys: [u8; 8] = "  phys=\0"
-    var s_win: [u8; 7] = "  win=\0"
-    var s_huge: [u8; 8] = "  huge=\0"
-    var s_cols: [u8; 8] = "  cols=\0"
-    var s_rows: [u8; 8] = "  rows=\0"
-    var s_back: [u8; 8] = "  back=\0"
-    var s_none2: [u8; 5] = "none\0"
-    var s_uc: [u8; 6] = "  uc=\0"
-    var s_st: [u8; 14] = "fb: selftest \0"
-    var s_of: [u8; 4] = " / \0"
-    var s_on: [u8; 31] = "fb: console mirrored to screen\0"
 
-    if !fb.want(state, fb.M_GFX) {
-        return
-    }
-    var w: u64 = fb.WIDTH_STD
-    var h: u64 = fb.HEIGHT_STD
-    if fb.want(state, fb.M_BIG) {
-        w = fb.WIDTH_BIG
-        h = fb.HEIGHT_BIG
-    }
-    // Der Zweitpuffer, aus zusammenhaengenden Rahmen. Acht Rahmen mehr
-    // als gerechnet: eine Karte darf eine laengere Zeile liefern als
-    // Breite mal vier, und ein zu kleiner Zweitpuffer waere ein
-    // Schreibzugriff daneben. `fb.init` prueft die Groesse noch einmal
-    // und laesst ihn im Zweifel liegen.
-    var back: u64 = 0
-    var back_bytes: u64 = 0
-    if !fb.want(state, fb.M_NODBL) {
-        let rahmen: u64 = (w * h * 4 + mem.FRAME_SIZE - 1) / mem.FRAME_SIZE + 8
-        back = mem.frame_run(state, rahmen)
-        if back != 0 {
-            back_bytes = rahmen * mem.FRAME_SIZE
-        }
-    }
-    if !fb.init(state, mbi, w, h, back, back_bytes, fb.want(state, fb.M_UC)) {
-        serial.puts((&s_none[0]) as u64)
-        serial.nl()
-        return
-    }
-    if fb.want(state, fb.M_NOCUR) {
-        fb.set_cursor(state, false)
-    }
-
-    serial.puts((&s_geo[0]) as u64)
-    serial.dec(fb.width(state))
-    serial.puts((&s_x[0]) as u64)
-    serial.dec(fb.height(state))
-    serial.puts((&s_bpp[0]) as u64)
-    serial.puts((&s_pitch[0]) as u64)
-    serial.dec(fb.pitch(state))
-    serial.puts((&s_src[0]) as u64)
-    if fb.source(state) == fb.SRC_MB {
-        serial.puts((&s_mb[0]) as u64)
-    } else {
-        serial.puts((&s_vbe[0]) as u64)
-    }
-    serial.puts((&s_phys[0]) as u64)
-    serial.hex(fb.phys(state))
-    serial.puts((&s_win[0]) as u64)
-    serial.hex(fb.addr(state))
-    serial.puts((&s_huge[0]) as u64)
-    serial.dec(fb.huges(state))
-    serial.puts((&s_cols[0]) as u64)
-    serial.dec(fb.cols(state))
-    serial.puts((&s_rows[0]) as u64)
-    serial.dec(fb.rows(state))
-    serial.puts((&s_back[0]) as u64)
-    if fb.back(state) == 0 {
-        serial.puts((&s_none2[0]) as u64)
-    } else {
-        serial.hex(fb.back(state))
-    }
-    serial.puts((&s_uc[0]) as u64)
-    serial.dec(bnum(fb.uncached(state)))
-    serial.nl()
-
-    let n: u64 = fb.selftest(state)
-    serial.puts((&s_st[0]) as u64)
-    serial.dec(n)
-    serial.puts((&s_of[0]) as u64)
-    serial.dec(fb.selftest_max())
-    serial.nl()
-
-    gfx_bench(state, back)
-
-    // RUNDE DISPLAY: die Karte fragen, was sie kann. Hier und nicht
-    // frueher, weil `probe` die Fensterplaetze zaehlt, die `fb.init`
-    // gerade genommen hat -- und weil es im laufenden Betrieb erkundet,
-    // also einen Bildschirm braucht, den es hinterher wieder so
-    // hinstellen kann, wie es ihn vorgefunden hat.
-    vmode_stage(state)
-
-    // Und JETZT der Spiegel: ab hier geht jedes Oktett, das ueber
-    // `serial.put` laeuft, auch auf den Bildschirm.
-    fb.clear(state, 0)
-    fb.home(state)
-    fb.set_echo(state, true)
-    serial.puts((&s_on[0]) as u64)
-    serial.nl()
-}
-
-fn bnum(b: bool) -> u64 {
-    if b {
-        return 1
-    }
-    return 0
-}
 
 // ================================================== RUNDE DISPLAY
-//
-// Was hier steht, ist NUR die Reihenfolge und die Meldung. Die Sache
-// selbst steht in `kernel/vmode.fi` (Liste, Wechsel, Frist, Tabelle) und
-// in `kernel/fb.fi` (Abbildung, Drehung, Skalierung). Wie ueberall in
-// diesem Kernel gilt: was gemeldet wird, ist gemessen -- die Liste ist
-// die, die die Karte angenommen hat, und nicht die, nach der gefragt
-// wurde.
-fn vmode_stage(state: u64) {
-    var s_no: [u8; 22] = "disp: keine Karte\0\0\0\0\0"
-    var s_hd: [u8; 12] = "disp: vram=\0"
-    var s_kib: [u8; 5] = " KiB\0"
-    var s_dep: [u8; 10] = "  depths=\0"
-    var s_lim: [u8; 12] = "  maplimit=\0"
-    var s_pr: [u8; 10] = "  probed=\0"
-    var s_rf: [u8; 11] = "  refused=\0"
-    var s_tb: [u8; 10] = "  toobig=\0"
-    var s_um: [u8; 15] = "  unmappable=\0\0"
-    var s_md: [u8; 13] = "disp: modes \0"
-    var s_out: [u8; 13] = "disp: out   \0"
-    var s_why2: [u8; 10] = "  reason=\0"
-    var s_one: [u8; 9] = "disp:   \0"
-    var s_x: [u8; 2] = "x\0"
-    var s_at: [u8; 3] = "x \0"
-    var s_ed: [u8; 12] = "disp: edid \0"
-    var s_yes: [u8; 4] = "ok\0\0"
-    var s_why: [u8; 5] = "why=\0"
-    var s_nat: [u8; 8] = "  nat=\0\0"
-    var s_ven: [u8; 8] = "  ven=\0\0"
-    var s_mod: [u8; 8] = "  mod=\0\0"
-    var s_st: [u8; 16] = "disp: selftest \0"
-    var s_of: [u8; 4] = " / \0"
-    var s_st2: [u8; 15] = "fb: selftest2 \0"
-    var s_geo: [u8; 12] = "disp: geom \0"
-    var s_gp: [u8; 9] = "  pitch=\0"
-    var s_gt: [u8; 9] = "  panel=\0"
-    var s_gq: [u8; 10] = "  ppitch=\0"
-    var s_gr: [u8; 7] = "  rot=\0"
-    var s_gs: [u8; 9] = "  scale=\0"
-    var s_gl: [u8; 7] = "  lut=\0"
-    var s_gv: [u8; 7] = "  sat=\0"
-    var s_gd: [u8; 12] = "  drawback=\0"
-    var s_raw: [u8; 12] = "disp: edid \0"
 
-    if !vmode.want(state, vmode.M_DISP) {
-        return
-    }
-    let n: u64 = vmode.probe(state)
-    if n == 0 && !vmode.ready(state) {
-        serial.puts((&s_no[0]) as u64)
-        serial.nl()
-        return
-    }
-    serial.puts((&s_hd[0]) as u64)
-    serial.dec(vmode.vram(state) / 1024)
-    serial.puts((&s_kib[0]) as u64)
-    serial.puts((&s_dep[0]) as u64)
-    serial.hex(vmode.depths(state))
-    serial.puts((&s_lim[0]) as u64)
-    serial.dec(vmode.map_limit(state))
-    serial.puts((&s_pr[0]) as u64)
-    serial.dec(vmode.probed(state))
-    serial.puts((&s_rf[0]) as u64)
-    serial.dec(vmode.refused(state))
-    serial.puts((&s_tb[0]) as u64)
-    serial.dec(vmode.toobig(state))
-    serial.puts((&s_um[0]) as u64)
-    serial.dec(vmode.probed(state) - vmode.refused(state)
-        - vmode.toobig(state) - n)
-    serial.nl()
-    serial.puts((&s_md[0]) as u64)
-    serial.dec(n)
-    serial.nl()
-    var i: u64 = 0
-    while i < n {
-        serial.puts((&s_one[0]) as u64)
-        serial.dec(vmode.mode_w(state, i))
-        serial.puts((&s_x[0]) as u64)
-        serial.dec(vmode.mode_h(state, i))
-        serial.puts((&s_at[0]) as u64)
-        serial.dec(vmode.mode_bpp(state, i))
-        serial.nl()
-        i = i + 1
-    }
-    // UND DIE ANDERE SEITE DER LISTE: was NICHT aufgenommen wurde und
-    // warum. Eine Liste ohne ihre Ausschluesse ist eine Behauptung --
-    // man sieht ihr nicht an, ob gefragt und abgelehnt oder gar nicht
-    // erst gefragt wurde.
-    i = 0
-    while i < vmode.cand_count() {
-        let grund: u64 = vmode.cand_why(state, i)
-        if grund != 0 {
-            serial.puts((&s_out[0]) as u64)
-            serial.dec(vmode.cand_w(i))
-            serial.puts((&s_x[0]) as u64)
-            serial.dec(vmode.cand_h(i))
-            serial.puts((&s_why2[0]) as u64)
-            serial.dec(grund)
-            serial.nl()
-        }
-        i = i + 1
-    }
-    serial.puts((&s_ed[0]) as u64)
-    if vmode.edid_ok(state) {
-        serial.puts((&s_yes[0]) as u64)
-        serial.puts((&s_nat[0]) as u64)
-        serial.dec(vmode.edid_native_w(state))
-        serial.puts((&s_x[0]) as u64)
-        serial.dec(vmode.edid_native_h(state))
-        serial.puts((&s_ven[0]) as u64)
-        i = 0
-        while i < 3 {
-            serial.put(vmode.vendor_at(state, i) as u8)
-            i = i + 1
-        }
-        serial.puts((&s_mod[0]) as u64)
-        i = 0
-        while i < 13 {
-            let c: u64 = vmode.model_at(state, i)
-            if c >= 32 && c < 127 {
-                serial.put(c as u8)
-            }
-            i = i + 1
-        }
-    } else {
-        serial.puts((&s_why[0]) as u64)
-        serial.dec(vmode.edid_why(state))
-    }
-    serial.nl()
-    if vmode.want(state, vmode.M_EDID) {
-        serial.puts((&s_raw[0]) as u64)
-        // MIT TRENNER, und das ist eine gemessene Berichtigung: ohne
-        // ihn stand da `0x00xff0xff...`, und ein Leser draussen kann
-        // "0x0" gefolgt von "0xff" nicht von "0x00" gefolgt von "xff"
-        // unterscheiden. Der Pruefer draussen zaehlte 64 Oktette statt
-        // 128 und meldete den EDID-Block als kaputt, obwohl er in
-        // Ordnung war.
-        var s_sp: [u8; 2] = " \0"
-        i = 0
-        while i < vmode.edid_bytes() {
-            serial.hex(vmode.edid_at(state, i))
-            serial.puts((&s_sp[0]) as u64)
-            i = i + 1
-        }
-        serial.nl()
-    }
-    serial.puts((&s_st[0]) as u64)
-    serial.dec(vmode.selftest(state))
-    serial.puts((&s_of[0]) as u64)
-    serial.dec(vmode.selftest_max())
-    serial.nl()
-    serial.puts((&s_st2[0]) as u64)
-    serial.dec(fb.selftest2(state))
-    serial.puts((&s_of[0]) as u64)
-    serial.dec(fb.selftest2_max())
-    serial.nl()
-    // NACH den Zusagen die Geometrie noch einmal ausgeben. Die Zusagen
-    // stellen Drehung, Tabelle und Bildgroesse um und wieder zurueck;
-    // ob sie das VOLLSTAENDIG tun, sieht man nur an diesen Zahlen --
-    // und die erste Fassung tat es nicht (siehe docs/DISPLAY.md).
-    serial.puts((&s_geo[0]) as u64)
-    serial.dec(fb.width(state))
-    serial.puts((&s_x[0]) as u64)
-    serial.dec(fb.height(state))
-    serial.puts((&s_gp[0]) as u64)
-    serial.dec(fb.pitch(state))
-    serial.puts((&s_gt[0]) as u64)
-    serial.dec(fb.panel_w(state))
-    serial.puts((&s_x[0]) as u64)
-    serial.dec(fb.panel_h(state))
-    serial.puts((&s_gq[0]) as u64)
-    serial.dec(fb.panel_pitch(state))
-    serial.puts((&s_gr[0]) as u64)
-    serial.dec(fb.rotation(state))
-    serial.puts((&s_gs[0]) as u64)
-    serial.dec(fb.scale(state))
-    serial.puts((&s_gl[0]) as u64)
-    serial.dec(fb.lut(state))
-    serial.puts((&s_gv[0]) as u64)
-    serial.dec(fb.saturation(state))
-    serial.puts((&s_gd[0]) as u64)
-    serial.dec(bnum(fb.draw_at(state) == fb.back(state)))
-    serial.nl()
-}
 
-// Der Wechsel im laufenden Betrieb, kurz vor dem Stillhalten -- damit
-// das Bildschirmfoto das Ergebnis zeigt und nicht das, was die Konsole
-// danach darueber gerollt hat.
-fn display_hold(state: u64) {
-    var s_sw: [u8; 14] = "disp: switch \0"
-    var s_x: [u8; 2] = "x\0"
-    var s_arr: [u8; 5] = " -> \0"
-    var s_rc: [u8; 5] = " rc=\0"
-    var s_us: [u8; 5] = " us=\0"
-    var s_now: [u8; 8] = " panel=\0"
-    var s_cnt: [u8; 12] = "disp: sw=\0\0\0"
-    var s_fl: [u8; 9] = "  fail=\0\0"
-    var s_rv: [u8; 8] = "  rev=\0\0"
-    var s_rot: [u8; 12] = "disp: rot=\0\0"
-    var s_img: [u8; 8] = "  img=\0\0"
-    var s_cf: [u8; 20] = "disp: confirm pend=\0"
-    var s_left: [u8; 8] = " left=\0\0"
-    var s_rr: [u8; 9] = " after=\0\0"
 
-    if !vmode.ready(state) {
-        return
-    }
-    if vmode.want(state, vmode.M_BIG) {
-        disp_switch(state, 1024, 768, (&s_sw[0]) as u64, (&s_x[0]) as u64,
-            (&s_arr[0]) as u64, (&s_rc[0]) as u64, (&s_us[0]) as u64,
-            (&s_now[0]) as u64)
-    }
-    if vmode.want(state, vmode.M_BACK) {
-        disp_switch(state, 800, 600, (&s_sw[0]) as u64, (&s_x[0]) as u64,
-            (&s_arr[0]) as u64, (&s_rc[0]) as u64, (&s_us[0]) as u64,
-            (&s_now[0]) as u64)
-    }
-    if vmode.want(state, vmode.M_BAD) {
-        // 4096x4096 steht in keiner Liste und passt in keinen
-        // Bildspeicher. Danach MUSS derselbe Bildschirm dastehen.
-        disp_switch(state, 4096, 4096, (&s_sw[0]) as u64, (&s_x[0]) as u64,
-            (&s_arr[0]) as u64, (&s_rc[0]) as u64, (&s_us[0]) as u64,
-            (&s_now[0]) as u64)
-    }
-    if vmode.want(state, vmode.M_CONFIRM) {
-        // Wechseln, NICHT bestaetigen, die Frist ablaufen lassen.
-        disp_switch(state, 1024, 768, (&s_sw[0]) as u64, (&s_x[0]) as u64,
-            (&s_arr[0]) as u64, (&s_rc[0]) as u64, (&s_us[0]) as u64,
-            (&s_now[0]) as u64)
-        serial.puts((&s_cf[0]) as u64)
-        serial.dec(bnum(vmode.pending(state)))
-        serial.puts((&s_left[0]) as u64)
-        serial.dec(vmode.remaining(state) / 1000)
-        serial.nl()
-        disp_wait(state, vmode.CONFIRM_MS + 500)
-        let ging: bool = vmode.poll(state)
-        serial.puts((&s_cf[0]) as u64)
-        serial.dec(bnum(vmode.pending(state)))
-        serial.puts((&s_rr[0]) as u64)
-        serial.dec(bnum(ging))
-        serial.puts((&s_now[0]) as u64)
-        serial.dec(fb.panel_w(state))
-        serial.puts((&s_x[0]) as u64)
-        serial.dec(fb.panel_h(state))
-        serial.nl()
-    }
-    if vmode.want(state, vmode.M_BENCH) {
-        disp_bench(state)
-    }
-    if vmode.want(state, vmode.M_ROT) {
-        fb.set_rotation(state, 90)
-        serial.puts((&s_rot[0]) as u64)
-        serial.dec(fb.rotation(state))
-        serial.puts((&s_img[0]) as u64)
-        serial.dec(fb.width(state))
-        serial.puts((&s_x[0]) as u64)
-        serial.dec(fb.height(state))
-        serial.puts((&s_now[0]) as u64)
-        serial.dec(fb.panel_w(state))
-        serial.puts((&s_x[0]) as u64)
-        serial.dec(fb.panel_h(state))
-        serial.nl()
-    }
-    vmode.confirm(state)
-    serial.puts((&s_cnt[0]) as u64)
-    serial.dec(vmode.switches(state))
-    serial.puts((&s_fl[0]) as u64)
-    serial.dec(vmode.fails(state))
-    serial.puts((&s_rv[0]) as u64)
-    serial.dec(vmode.reverts(state))
-    serial.nl()
-}
 
-fn disp_wait(state: u64, ms: u64) {
-    let hz: u64 = apic.tsc_hz(state)
-    if hz == 0 {
-        return
-    }
-    let bis: u64 = apic.tsc() + (hz / 1000) * ms
-    while apic.tsc() < bis {
-    }
-}
 
-fn disp_switch(state: u64, w: u64, h: u64, s_sw: u64, s_x: u64, s_arr: u64,
-    s_rc: u64, s_us: u64, s_now: u64) {
-    let vw: u64 = fb.panel_w(state)
-    let vh: u64 = fb.panel_h(state)
-    let t: u64 = apic.tsc()
-    let rc: u64 = vmode.set_mode(state, w, h, 32)
-    let d: u64 = us_of(state, apic.tsc() - t)
-    serial.puts(s_sw)
-    serial.dec(vw)
-    serial.puts(s_x)
-    serial.dec(vh)
-    serial.puts(s_arr)
-    serial.dec(w)
-    serial.puts(s_x)
-    serial.dec(h)
-    serial.puts(s_rc)
-    serial.dec(rc)
-    serial.puts(s_us)
-    serial.dec(d)
-    serial.puts(s_now)
-    serial.dec(fb.panel_w(state))
-    serial.puts(s_x)
-    serial.dec(fb.panel_h(state))
-    serial.nl()
-}
 
-// DIE KOSTEN DER NACHSCHLAGETABELLE, JE BILD, BEI DER GROESSTEN
-// AUFLOESUNG, DIE DIE LISTE HERGIBT.
-//
-// Gemessen wird gegen den schnellen Weg von Runde K7 auf DERSELBEN
-// Maschine, mit DEMSELBEN Zeitzaehler und in DEMSELBEN Lauf -- zwei
-// QEMU-Laeufe waeren zwei Maschinen. Vier Zahlen, weil vier Dinge
-// verschieden teuer sind:
-//   flush  der `rep movsq` ohne jede Rechnung (die Grundlinie)
-//   lut    dieselbe Flaeche, jeder Bildpunkt durch drei Tabellen
-//   sat    dazu die Saettigung -- die eben KEINE Tabelle ist
-//   rot90  die Vierteldrehung, bei der die Quelle spaltenweise gelesen
-//          wird und jeder Zugriff in eine andere Zwischenspeicherzeile
-//          faellt
-const DISP_RUNDEN: u64 = 5
 
-fn disp_bench(state: u64) {
-    var s_h: [u8; 13] = "disp: bench \0"
-    var s_x: [u8; 2] = "x\0"
-    var s_fl: [u8; 10] = "  flush=\0\0"
-    var s_lu: [u8; 8] = "  lut=\0\0"
-    var s_sa: [u8; 8] = "  sat=\0\0"
-    var s_ro: [u8; 10] = "  rot90=\0\0"
-    var s_ln: [u8; 11] = "  lutline=\0"
-    var s_us: [u8; 4] = " us\0"
-    var s_px: [u8; 7] = "  px=\0\0"
-    var s_want: [u8; 18] = "disp: bench want \0"
-    var s_rc: [u8; 5] = " rc=\0"
 
-    // Den groessten Modus der Liste nehmen -- die Frage ist, was das
-    // Umrechnen bei VIEL Flaeche kostet, nicht bei wenig.
-    let n: u64 = vmode.count(state)
-    if n > 0 {
-        let brc: u64 = vmode.set_mode(state, vmode.mode_w(state, n - 1),
-            vmode.mode_h(state, n - 1), 32)
-        vmode.confirm(state)
-        serial.puts((&s_want[0]) as u64)
-        serial.dec(vmode.mode_w(state, n - 1))
-        serial.puts((&s_x[0]) as u64)
-        serial.dec(vmode.mode_h(state, n - 1))
-        serial.puts((&s_rc[0]) as u64)
-        serial.dec(brc)
-        serial.nl()
-    }
-    let w: u64 = fb.panel_w(state)
-    let h: u64 = fb.panel_h(state)
-    fb.clear(state, fb.rgb(state, 0x30, 0x60, 0x90))
 
-    fb.set_lut(state, 0)
-    fb.set_saturation(state, 100)
-    fb.set_rotation(state, 0)
-    var t: u64 = apic.tsc()
-    var i: u64 = 0
-    while i < DISP_RUNDEN {
-        fb.dirty_all(state)
-        fb.flush(state)
-        i = i + 1
-    }
-    let d_fl: u64 = us_of(state, apic.tsc() - t) / DISP_RUNDEN
 
-    fb.set_lut(state, vmode.lut_addr(state))
-    t = apic.tsc()
-    i = 0
-    while i < DISP_RUNDEN {
-        fb.dirty_all(state)
-        fb.flush(state)
-        i = i + 1
-    }
-    let d_lu: u64 = us_of(state, apic.tsc() - t) / DISP_RUNDEN
 
-    // UND DIE ZAHL, DIE IM BETRIEB WIRKLICH ZAEHLT: eine Textzeile, also
-    // sechzehn Bildzeilen. Eine Konsole baut fast nie ein ganzes Bild
-    // auf -- derselbe Einwand, den `bench_zeile` in Runde K7 gegen den
-    // vollen Bildaufbau erhoben hat, gilt fuer die Nachschlagetabelle
-    // genauso. Wer nur das volle Bild misst, sieht die Tabelle nur von
-    // ihrer teuersten Seite.
-    t = apic.tsc()
-    i = 0
-    while i < DISP_RUNDEN {
-        fb.dirty(state, 0, 16)
-        fb.flush(state)
-        i = i + 1
-    }
-    let d_ln: u64 = us_of(state, apic.tsc() - t) / DISP_RUNDEN
-
-    fb.set_saturation(state, 150)
-    t = apic.tsc()
-    i = 0
-    while i < DISP_RUNDEN {
-        fb.dirty_all(state)
-        fb.flush(state)
-        i = i + 1
-    }
-    let d_sa: u64 = us_of(state, apic.tsc() - t) / DISP_RUNDEN
-    fb.set_saturation(state, 100)
-
-    fb.set_lut(state, 0)
-    var d_ro: u64 = 0
-    if fb.set_rotation(state, 90) {
-        t = apic.tsc()
-        i = 0
-        while i < DISP_RUNDEN {
-            fb.dirty_all(state)
-            fb.flush(state)
-            i = i + 1
-        }
-        d_ro = us_of(state, apic.tsc() - t) / DISP_RUNDEN
-        fb.set_rotation(state, 0)
-    }
-
-    serial.puts((&s_h[0]) as u64)
-    serial.dec(w)
-    serial.puts((&s_x[0]) as u64)
-    serial.dec(h)
-    serial.puts((&s_px[0]) as u64)
-    serial.dec(w * h)
-    serial.puts((&s_fl[0]) as u64)
-    serial.dec(d_fl)
-    serial.puts((&s_us[0]) as u64)
-    serial.puts((&s_lu[0]) as u64)
-    serial.dec(d_lu)
-    serial.puts((&s_us[0]) as u64)
-    serial.puts((&s_ln[0]) as u64)
-    serial.dec(d_ln)
-    serial.puts((&s_us[0]) as u64)
-    serial.puts((&s_sa[0]) as u64)
-    serial.dec(d_sa)
-    serial.puts((&s_us[0]) as u64)
-    serial.puts((&s_ro[0]) as u64)
-    serial.dec(d_ro)
-    serial.puts((&s_us[0]) as u64)
-    serial.nl()
-}
-
-// Mikrosekunden aus Prozessortakten. `apic.tsc_hz` steht seit
-// `hw.stage`; ohne APIC gibt es keine Zeitbasis und damit keine Messung.
-fn us_of(state: u64, takte: u64) -> u64 {
-    let hz: u64 = apic.tsc_hz(state)
-    if hz == 0 {
-        return 0
-    }
-    return takte * 1000000 / hz
-}
-
-// DIE MESSUNG. Beide Wege auf DERSELBEN Maschine, mit DEMSELBEN
-// Zeitzaehler und in EINEM Lauf -- zwei QEMU-Starts waeren zwei
-// Maschinen und die Zahlen nicht vergleichbar.
-//
-//   1. voller Bildaufbau, direkt auf die Karte
-//   2. eine Rollbewegung,  direkt auf die Karte
-//   3. voller Bildaufbau in den Zweitpuffer + Uebertragung
-//   4. eine Rollbewegung  im Zweitpuffer + Uebertragung
-fn gfx_bench(state: u64, back: u64) {
-    var s_b1: [u8; 26] = "        fbbench: direct  \0"
-    var s_b2: [u8; 26] = "        fbbench: buffered\0"
-    var s_fill: [u8; 8] = "  fill=\0"
-    var s_scr: [u8; 10] = "  scroll=\0"
-    var s_fl: [u8; 9] = "  flush=\0"
-    var s_ln: [u8; 9] = "  line=\0\0"
-    var s_us: [u8; 4] = " us\0"
-    var s_nb: [u8; 30] = "        fbbench: no time base\0"
-
-    if apic.tsc_hz(state) == 0 {
-        serial.puts((&s_nb[0]) as u64)
-        serial.nl()
-        return
-    }
-    let farbe: u64 = fb.rgb(state, 0x20, 0x30, 0x40)
-
-    // --- 1 und 2: ohne Zweitpuffer, jeder Bildpunkt geht auf die Karte.
-    fb.set_back(state, 0)
-    var t: u64 = apic.tsc()
-    var i: u64 = 0
-    while i < GFX_RUNDEN {
-        fb.clear(state, farbe)
-        i = i + 1
-    }
-    let d_fill: u64 = us_of(state, apic.tsc() - t) / GFX_RUNDEN
-    t = apic.tsc()
-    i = 0
-    while i < GFX_RUNDEN {
-        fb.scroll(state)
-        i = i + 1
-    }
-    let d_scroll: u64 = us_of(state, apic.tsc() - t) / GFX_RUNDEN
-    let d_line: u64 = bench_zeile(state)
-    serial.puts((&s_b1[0]) as u64)
-    serial.puts((&s_fill[0]) as u64)
-    serial.dec(d_fill)
-    serial.puts((&s_us[0]) as u64)
-    serial.puts((&s_scr[0]) as u64)
-    serial.dec(d_scroll)
-    serial.puts((&s_us[0]) as u64)
-    serial.puts((&s_ln[0]) as u64)
-    serial.dec(d_line)
-    serial.puts((&s_us[0]) as u64)
-    serial.nl()
-
-    if back == 0 {
-        fb.set_back(state, 0)
-        return
-    }
-
-    // --- 3 und 4: derselbe Bildaufbau im Arbeitsspeicher, danach EINE
-    //     Uebertragung. Die Uebertragung wird getrennt ausgewiesen, weil
-    //     genau sie der Preis der Doppelpufferung ist.
-    fb.set_back(state, back)
-    t = apic.tsc()
-    i = 0
-    while i < GFX_RUNDEN {
-        fb.clear(state, farbe)
-        i = i + 1
-    }
-    let b_fill: u64 = us_of(state, apic.tsc() - t) / GFX_RUNDEN
-    t = apic.tsc()
-    i = 0
-    while i < GFX_RUNDEN {
-        fb.scroll(state)
-        i = i + 1
-    }
-    let b_scroll: u64 = us_of(state, apic.tsc() - t) / GFX_RUNDEN
-    t = apic.tsc()
-    i = 0
-    while i < GFX_RUNDEN {
-        fb.dirty_all(state)
-        fb.flush(state)
-        i = i + 1
-    }
-    let b_flush: u64 = us_of(state, apic.tsc() - t) / GFX_RUNDEN
-    let b_line: u64 = bench_zeile(state)
-    serial.puts((&s_b2[0]) as u64)
-    serial.puts((&s_fill[0]) as u64)
-    serial.dec(b_fill)
-    serial.puts((&s_us[0]) as u64)
-    serial.puts((&s_scr[0]) as u64)
-    serial.dec(b_scroll)
-    serial.puts((&s_us[0]) as u64)
-    serial.puts((&s_fl[0]) as u64)
-    serial.dec(b_flush)
-    serial.puts((&s_us[0]) as u64)
-    serial.puts((&s_ln[0]) as u64)
-    serial.dec(b_line)
-    serial.puts((&s_us[0]) as u64)
-    serial.nl()
-}
-
-// EINE TEXTZEILE, so wie die Konsole sie schreibt -- achtzig Zeichen und
-// ein Umbruch.
-//
-// Diese Zahl ist die wichtigere der drei, und der Grund steht in ihr
-// selbst: eine Konsole baut fast nie ein ganzes Bild auf. Sie schreibt
-// eine Zeile, und mit Zweitpuffer wird von genau dieser Zeile
-// uebertragen, was sich geaendert hat -- sechzehn Bildzeilen statt
-// sechshundert. Wer nur den vollen Bildaufbau misst, sieht die
-// Doppelpufferung nur von ihrer teuren Seite.
-//
-// Ohne Zeichenmarke, weil die je Zeichen zweimal ein Rechteck malt und
-// die Messung damit ueber ihren eigenen Cursor stolpern wuerde.
-fn bench_zeile(state: u64) -> u64 {
-    let marke: bool = fb.cursor_on(state)
-    fb.set_cursor(state, false)
-    fb.clear(state, 0)
-    fb.home(state)
-    fb.flush(state)
-    let t: u64 = apic.tsc()
-    var i: u64 = 0
-    while i < GFX_RUNDEN {
-        var c: u64 = 0
-        while c < 80 {
-            fb.putc(state, 88) // 'X'
-            c = c + 1
-        }
-        fb.putc(state, 10)
-        i = i + 1
-    }
-    let us: u64 = us_of(state, apic.tsc() - t) / GFX_RUNDEN
-    fb.set_cursor(state, marke)
-    return us
-}
-
-// DAS PROGRAMM IN RING 3, DAS DEN BILDSCHIRM BESPIELT (`uprog.u_fb`).
-//
-// Der Spiegel wird VORHER abgeschaltet und die Flaeche geleert, und das
-// ist keine Kosmetik: solange die Konsole mitschreibt, rollt jede weitere
-// Zeile das Bild nach oben und uebermalt, was das Programm gezeichnet
-// hat. Danach gehoert die Flaeche dem Programm allein -- und das
-// Bildschirmfoto zeigt, was RING 3 dort hingelegt hat, nicht der Kernel.
-fn gfx_user(state: u64) {
-    var s_run: [u8; 30] = "fb: ring 3 paints, mirror off\0"
-    var s_exit: [u8; 18] = "fb: ring 3 exit=\0\0"
-
-    serial.puts((&s_run[0]) as u64)
-    serial.nl()
-    fb.set_echo(state, false)
-    fb.set_cursor(state, false)
-    fb.clear(state, 0)
-    fb.dirty_all(state)
-    fb.flush(state)
-    // Die Geometrie in einem 32-Bit-Argument: Breite oben, Hoehe unten.
-    // Ein Programm in Ring 3 kann sie sonst nirgends herbekommen.
-    let arg: u64 = (fb.width(state) << 16) | fb.height(state)
-    let t: u64 = proc.create(state, P_FB, arg, 2)
-    let e: u64 = wait_for(state, t)
-    serial.puts((&s_exit[0]) as u64)
-    serial.dec(e)
-    serial.nl()
-}
-
-// Das Pruefbild und das Stillhalten. Beides nur auf ausdrueckliches Wort:
-// `fbtest` malt, `fbhold` wartet, damit der Testlaeufer draussen
-// `screendump` rufen kann, waehrend das Bild noch steht.
-fn gfx_hold(state: u64) {
-    var s_pat: [u8; 26] = "OSUM K7 FRAMEBUFFER 01234\0"
-    var s_pat2: [u8; 26] = "abcdefghijklm ABCDEFGHIJK\0"
-    var s_hold: [u8; 10] = "fb: hold\0\0"
-    var s_go: [u8; 10] = "fb: go\0\0\0\0"
-
-    if fb.ready(state) {
-        if fb.want(state, fb.M_USER) {
-            gfx_user(state)
-        }
-        // RUNDE DISPLAY: DER WECHSEL ZUERST, DANN DAS PRUEFBILD.
-        //
-        // Die erste Fassung hatte es andersherum, und beides ging
-        // schief: nach einem Moduswechsel ist der Zweitpuffer neu und
-        // leer, das alte Pruefbild also weg -- und nach einer Drehung
-        // liegt im Zweitpuffer ein Bild mit der Zeilenlaenge des
-        // UNGEDREHTEN Bildes, das `present` dann quer auseinanderzieht.
-        // Gemessen: das Foto zeigte statt vier Farbfeldern einen
-        // Streifenteppich. Wer die Geometrie aendert, muss danach neu
-        // zeichnen; das gilt fuer dieses Pruefbild genauso wie fuer
-        // jedes Fenster.
-        display_hold(state)
-        if fb.want(state, fb.M_PATTERN) {
-            pattern(state, (&s_pat[0]) as u64, (&s_pat2[0]) as u64)
-        }
-        // RUNDE K18: das Pruefbild der Helligkeit. HIER und nicht oben in
-        // `power_stage`, und das ist gemessen und nicht ueberlegt: dort
-        // gemalt, war es im Bildschirmfoto nicht mehr zu finden -- die
-        // Konsole schreibt zwischen `power_stage` und dem Stillhalten
-        // noch drei Dutzend Zeilen auf denselben Schirm und rollt ihn
-        // dabei. Die Kernelmeldung stimmte trotzdem (px_a=0xc86432), das
-        // Bild war leer. Genau die Art Unterschied, wegen der in diesem
-        // Projekt im BILD nachgemessen wird und nicht nur im Bericht.
-        power_screen(state)
-        fb.flush(state)
-    }
-    // STILLGEHALTEN WIRD AUCH OHNE BILDSCHIRM, und das ist der Grund,
-    // aus dem `fbhold` nicht an `gfx` haengt: die Gegenprobe in
-    // `tools/gfx/run.sh` faehrt DENSELBEN Kernel mit DERSELBEN
-    // Kommandozeile und nur ohne das Wort `gfx`, wartet genauso lange und
-    // macht genauso ein Bildschirmfoto. Waere das Warten an den
-    // Bildschirm gebunden, waere die Gegenprobe ein anderer Lauf -- und
-    // ein Vergleich zweier verschiedener Laeufe beweist nichts.
-    if !fb.want(state, fb.M_HOLD) {
-        return
-    }
-    serial.puts((&s_hold[0]) as u64)
-    serial.nl()
-    // Rund vier Sekunden. Der Testlaeufer draussen sieht die Zeile oben,
-    // ruft `screendump` und prueft das Bild, waehrend es noch steht.
-    let hz: u64 = apic.tsc_hz(state)
-    if hz != 0 {
-        let bis: u64 = apic.tsc() + hz * 4
-        while apic.tsc() < bis {
-        }
-    }
-    serial.puts((&s_go[0]) as u64)
-    serial.nl()
-}
-
-// Das Pruefbild. Vier Felder in REINEN Farben, weil ein Bildschirmfoto
-// sie ohne Rundungsfrage nachrechnen kann, eine Linie quer darunter --
-// und zwei Textzeilen an einer Stelle, die sich ausrechnen laesst:
-// Zeile 14 beginnt bei y = 224, Spalte 0 bei x = 0.
-//
-// Der Text geht ueber `serial.puts`, nicht ueber `fb.puts`. Damit steht
-// dasselbe im seriellen Protokoll wie auf dem Bildschirm, und der
-// Testlaeufer kann beides gegeneinander halten statt nur das eine gegen
-// sich selbst.
-fn pattern(state: u64, eine: u64, zwei: u64) {
-    fb.set_cursor(state, false)
-    fb.clear(state, 0)
-    fb.fill(state, 0, 0, 100, 100, fb.rgb(state, 0xFF, 0, 0))
-    fb.fill(state, 100, 0, 100, 100, fb.rgb(state, 0, 0xFF, 0))
-    fb.fill(state, 200, 0, 100, 100, fb.rgb(state, 0, 0, 0xFF))
-    fb.fill(state, 300, 0, 100, 100, fb.rgb(state, 0xFF, 0xFF, 0xFF))
-    fb.line(state, 0, 110, 399, 210, fb.rgb(state, 0xFF, 0xFF, 0))
-    fb.goto(state, 0, 14)
-    serial.puts(eine)
-    serial.nl()
-    serial.puts(zwei)
-    serial.nl()
-    fb.dirty_all(state)
-    fb.flush(state)
-}
 
 // ---------------------------------------------------------- Runde K9
 //
@@ -1457,14 +622,14 @@ fn mem_stress_report(state: u64) {
     serial.puts((&s_seen[0]) as u64)
     serial.dec(kstate.get(state, kstate.STRESS_SEEN))
     serial.puts((&s_ok[0]) as u64)
-    serial.dec(yes(good))
+    serial.dec(kutil.yes(good))
     serial.nl()
 
     let hi: bool = mem.probe_high(state)
     serial.puts((&s_pr[0]) as u64)
     serial.hex(kstate.get(state, kstate.PROBE_ADDR))
     serial.puts((&s_prok[0]) as u64)
-    serial.dec(yes(hi))
+    serial.dec(kutil.yes(hi))
     serial.nl()
 }
 
@@ -1792,7 +957,7 @@ fn processes(state: u64) {
     serial.puts((&s_one[0]) as u64)
     serial.dec(sched.tget(state, one, sched.T_PID))
     serial.nl()
-    let one_exit: u64 = wait_for(state, one)
+    let one_exit: u64 = kutil.wait_for(state, one)
     serial.puts((&s_hexit[0]) as u64)
     serial.dec(one_exit)
     serial.nl()
@@ -1802,8 +967,8 @@ fn processes(state: u64) {
     let b: u64 = proc.create(state, P_MEMORY, 222, 2)
     let pa: u64 = sched.tget(state, a, sched.T_DATA)
     let pb: u64 = sched.tget(state, b, sched.T_DATA)
-    let ea: u64 = wait_for(state, a)
-    let eb: u64 = wait_for(state, b)
+    let ea: u64 = kutil.wait_for(state, a)
+    let eb: u64 = kutil.wait_for(state, b)
     serial.puts((&s_priv[0]) as u64)
     serial.hex(pa)
     serial.puts((&s_vs[0]) as u64)
@@ -1819,9 +984,9 @@ fn processes(state: u64) {
     // 3. THE COUNTER-CHECK: a process that touches kernel memory dies --
     //    and the kernel does not.
     let f: u64 = proc.create(state, P_FAULT, 0, 2)
-    let fe: u64 = wait_for(state, f)
+    let fe: u64 = kutil.wait_for(state, f)
     let g: u64 = proc.create(state, P_STEAL, 0, 2)
-    let ge: u64 = wait_for(state, g)
+    let ge: u64 = kutil.wait_for(state, g)
     serial.puts((&s_kill[0]) as u64)
     serial.dec(kstate.get(state, kstate.KILLED))
     serial.puts((&s_exit[0]) as u64)
@@ -1832,19 +997,19 @@ fn processes(state: u64) {
 
     // 4. system calls with bad arguments: error codes, not silence.
     let p4: u64 = proc.create(state, P_BADPTR, 0, 2)
-    wait_for(state, p4)
+    kutil.wait_for(state, p4)
 
     // 4b. the fork-like half of spawn: the child inherits the memory of
     //     its parent -- and gets a frame of its own for it.
     let pf: u64 = proc.create(state, P_FORK, 0, 2)
-    let ef: u64 = wait_for(state, pf)
+    let ef: u64 = kutil.wait_for(state, pf)
     serial.puts((&s_fork[0]) as u64)
     serial.dec(ef)
     serial.nl()
 
     // 5. spawn and wait, seen from ring 3.
     let p5: u64 = proc.create(state, P_PARENT, 0, 2)
-    let e5: u64 = wait_for(state, p5)
+    let e5: u64 = kutil.wait_for(state, p5)
     serial.puts((&s_alive[0]) as u64)
     serial.dec(sched.alive_count(state))
     serial.puts((&s_exit[0]) as u64)
@@ -1901,7 +1066,7 @@ fn capabilities(state: u64) {
 
     let t1: u64 = proc.create_cap(state, P_CAPS, rechte, 2)
     let g1: u64 = sched.tget(state, t1, sched.T_WORK)
-    let e1: u64 = wait_for(state, t1)
+    let e1: u64 = kutil.wait_for(state, t1)
     // Der erste Lauf hat seine Tabelle absichtlich vollgemacht (die Zusage
     // "eine volle Tabelle sagt Exhausted"). Was hier steht, ist also
     // 16 -- und genau darum ist der ZWEITE Lauf der Beweis: er bekommt
@@ -1918,7 +1083,7 @@ fn capabilities(state: u64) {
     // zufaellig derselbe Platz belegt ist.
     let t2: u64 = proc.create_cap(state, P_CAPS, rechte, 2)
     let g2: u64 = sched.tget(state, t2, sched.T_WORK)
-    let e2: u64 = wait_for(state, t2)
+    let e2: u64 = kutil.wait_for(state, t2)
     serial.puts((&s_h1[0]) as u64)
     serial.hex(g1)
     serial.puts((&s_h2[0]) as u64)
@@ -1973,14 +1138,14 @@ fn users(state: u64) {
     serial.puts((&s_begin[0]) as u64)
     serial.nl()
     let t: u64 = proc.create(state, P_USER, 0, 2)
-    let e: u64 = wait_for(state, t)
+    let e: u64 = kutil.wait_for(state, t)
     serial.puts((&s_exit[0]) as u64)
     serial.dec(e)
     serial.nl()
     if kstate.mode_on(state, kstate.M_ZOMBIE) {
         let before: u64 = sched.zombies(state, sched.K_USER)
         let z: u64 = proc.create(state, P_ZOMBIE, 0, 2)
-        wait_for(state, z)
+        kutil.wait_for(state, z)
         // Dem Enkel Zeit lassen, seinerseits zu sterben. Danach steht
         // eine Leiche in der Tafel, um die sich niemand kuemmert.
         var w: u64 = 0
@@ -1996,22 +1161,6 @@ fn users(state: u64) {
     }
 }
 
-fn wait_for(state: u64, i: u64) -> u64 {
-    if i == 0 {
-        return 0xFFFFFFFFFFFFFFFF
-    }
-    var rounds: u64 = 0
-    while rounds < 2000 {
-        if sched.tget(state, i, sched.T_STATE) == sched.S_ZOMBIE {
-            let code: u64 = sched.tget(state, i, sched.T_EXIT)
-            proc.reap(state, i)
-            return code
-        }
-        sched.sleep_ticks(state, 1)
-        rounds = rounds + 1
-    }
-    return 0xFFFFFFFFFFFFFFFE
-}
 
 // ------------------------------------------------------ the file system
 
@@ -2067,13 +1216,13 @@ fn filesystem(state: u64) {
     // file system, and `mount` has to say so.
     serial.puts((&s_pre[0]) as u64)
     serial.puts((&s_eq[0]) as u64)
-    serial.dec(yes(fs.mount(state)))
+    serial.dec(kutil.yes(fs.mount(state)))
     serial.nl()
 
     serial.puts((&s_fmt[0]) as u64)
-    serial.dec(yes(fs.format(state)))
+    serial.dec(kutil.yes(fs.format(state)))
     serial.puts((&s_eq[0]) as u64)
-    serial.dec(yes(fs.mount(state)))
+    serial.dec(kutil.yes(fs.mount(state)))
     serial.puts((&s_free[0]) as u64)
     serial.dec(fs.free_blocks(state))
     serial.puts((&s_ino[0]) as u64)
@@ -2155,9 +1304,9 @@ fn filesystem(state: u64) {
     // Delete: the name goes, the blocks come back.
     let before: u64 = fs.free_blocks(state)
     serial.puts((&s_unlink[0]) as u64)
-    serial.dec(yes(fs.unlink_path(state, (&p_big[0]) as u64)))
+    serial.dec(kutil.yes(fs.unlink_path(state, (&p_big[0]) as u64)))
     serial.puts((&s_gone[0]) as u64)
-    serial.dec(yes(fs.path(state, (&p_big[0]) as u64) == 0))
+    serial.dec(kutil.yes(fs.path(state, (&p_big[0]) as u64) == 0))
     serial.puts((&s_after[0]) as u64)
     serial.dec(fs.free_blocks(state))
     serial.puts((&s_of[0]) as u64)
@@ -2168,12 +1317,6 @@ fn filesystem(state: u64) {
     serial.nl()
 }
 
-fn yes(b: bool) -> u64 {
-    if b {
-        return 1
-    }
-    return 0
-}
 
 fn same(a: u64, b: u64, n: u64) -> u64 {
     var i: u64 = 0
@@ -2299,7 +1442,7 @@ fn shell(state: u64) {
     serial.dec(kstate.get(state, kstate.CONSOLE_LEN))
     serial.nl()
     let i: u64 = proc.create(state, P_SHELL, 0, 2)
-    let code: u64 = wait_for(state, i)
+    let code: u64 = kutil.wait_for(state, i)
     serial.puts((&s_out[0]) as u64)
     serial.dec(code)
     serial.nl()
@@ -2363,7 +1506,7 @@ fn k14_setup(state: u64) {
     vfs.init(state)
     let root_ok: bool = vfs.mount_root(state)
     serial.puts((&s_root[0]) as u64)
-    serial.dec(yes(root_ok))
+    serial.dec(kutil.yes(root_ok))
     if kstate.mode_on(state, kstate.M_NOVFS) {
         // DIE GEGENPROBE. Die Wurzel steht, alles andere nicht --
         // /proc, /dev und FAT32 gibt es in diesem Lauf nicht, und
@@ -2384,9 +1527,9 @@ fn k14_setup(state: u64) {
             (&p_dev[0]) as u64, 0)
     }
     serial.puts((&s_proc[0]) as u64)
-    serial.dec(yes(proc_m < vfs.MAX_MNT))
+    serial.dec(kutil.yes(proc_m < vfs.MAX_MNT))
     serial.puts((&s_dev[0]) as u64)
-    serial.dec(yes(dev_m < vfs.MAX_MNT))
+    serial.dec(kutil.yes(dev_m < vfs.MAX_MNT))
     serial.nl()
     if kstate.mode_on(state, kstate.M_NOFAT) {
         return
@@ -2395,7 +1538,7 @@ fn k14_setup(state: u64) {
     // Statusregister allein ist noch keine Platte.
     let have2: bool = blk.probe_ata1(state, DISK2_BLOCKS)
     serial.puts((&s_disk2[0]) as u64)
-    serial.dec(yes(have2))
+    serial.dec(kutil.yes(have2))
     serial.nl()
     if !have2 {
         return
@@ -2434,7 +1577,7 @@ fn k14_setup(state: u64) {
         first, count, (&p_mnt[0]) as u64, fflags)
     serial.puts((&s_k14[0]) as u64)
     serial.puts((&s_fat[0]) as u64)
-    serial.dec(yes(fat_m < vfs.MAX_MNT))
+    serial.dec(kutil.yes(fat_m < vfs.MAX_MNT))
     serial.puts((&s_mnts[0]) as u64)
     serial.dec(kstate.get(state, kstate.VFS_MOUNTS))
     serial.nl()
@@ -2530,85 +1673,8 @@ fn root_from_part(state: u64) -> bool {
     return true
 }
 
-// RUNDE K17. Die Naht ist absichtlich duenn: was USB ist, steht in
-// `usb.fi` und `xhci.fi`, und `kmain.fi` bekommt vier Zeilen statt
-// vierzig. Dieselbe Ueberlegung wie bei `hw.stage` in Runde K2 -- an
-// dieser Datei arbeiten mehrere Runden gleichzeitig, und eine Naht laesst
-// sich verschmelzen, ein ueber tausend Zeilen verteilter Unterschied
-// nicht.
-fn usb_stage(state: u64) {
-    usb.stage(state)
-    if !usb.ready(state) {
-        return
-    }
-    // Ein Zeigegeraet braucht einen Anschlag, auch wenn es nicht am 8042
-    // haengt. Steht schon ein PS/2-Zeiger, bleibt dessen Einstellung.
-    if usb.have_mouse(state) {
-        ps2m.adopt(state, 1024, 768)
-    }
-    usb_hold(state)
-    // DIE GEGENPROBE ZUM ABZIEHEN. Sie steht hier und nicht in der
-    // Bibliothek, weil sie eine Anforderung der Kommandozeile ist und
-    // kein Zustand des Geraets.
-    if kstate.mode_on(state, kstate.M_UNPLUG) {
-        usb_unplug(state)
-    }
-}
 
-// STILLHALTEN, DAMIT VON AUSSEN JEMAND TIPPEN KANN. Dasselbe, was
-// `wmhold` seit Runde K10 fuer das Bildschirmfoto tut: der Kern kommt
-// zur Ruhe, meldet das auf der seriellen Leitung, und erst danach
-// schickt der Testlaeufer seine Maus- und Tastenbefehle in den
-// QEMU-Monitor. Ohne diese Marke faellt der erste Klick in einen Kern,
-// der noch aufzaehlt.
-//
-// Mit `usbpoll` wird waehrenddessen SELBST nachgesehen statt auf die
-// Meldung zu warten -- die Gegenprobe zu `usbnoirq`.
-fn usb_hold(state: u64) {
-    var s_h: [u8; 10] = "k17: hold\0"
-    var s_r: [u8; 10] = "k17: free\0"
-    if !kstate.mode_on(state, kstate.M_USBHOLD) {
-        return
-    }
-    let pollen: bool = kstate.mode_on(state, kstate.M_USBPOLL)
-    serial.puts((&s_h[0]) as u64)
-    serial.nl()
-    var i: u64 = 0
-    while i < 900 {
-        if pollen {
-            usb.poll(state)
-        }
-        sched.sleep_ticks(state, 1)
-        i = i + 1
-    }
-    usb.report(state)
-    serial.puts((&s_r[0]) as u64)
-    serial.nl()
-}
 
-// Was nach dem Abziehen noch geht. Drei Zeilen, und jede einzelne ist
-// eine Zusage: der Kern laeuft weiter, das Blockgeraet meldet sich als
-// nicht da, und ein offener Deskriptor darauf gibt ENODEV (das prueft
-// `/bin/k17` aus Ring 3, nicht der Kern).
-fn usb_unplug(state: u64) {
-    var s_a: [u8; 22] = "k17: before unplug=\0\0\0"
-    var s_b: [u8; 21] = "k17: after unplug=\0\0\0"
-    var s_p: [u8; 11] = "  present=\0"
-    var s_d: [u8; 11] = "  devices=\0"
-    serial.puts((&s_a[0]) as u64)
-    serial.dec(yes(blk.present_on(state, blk.DEV_USB)))
-    serial.puts((&s_d[0]) as u64)
-    serial.dec(usb.count(state))
-    serial.nl()
-    usb.unplug_now(state)
-    serial.puts((&s_b[0]) as u64)
-    serial.dec(yes(blk.present_on(state, blk.DEV_USB)))
-    serial.puts((&s_d[0]) as u64)
-    serial.dec(usb.count(state))
-    serial.puts((&s_p[0]) as u64)
-    serial.dec(usb.unplugs(state))
-    serial.nl()
-}
 
 // RUNDE K17: EIN STICK, EINGEHAENGT WIE JEDE ANDERE PLATTE.
 //
@@ -2658,7 +1724,7 @@ fn usb_mount(state: u64) {
     serial.puts((&s_n[0]) as u64)
     serial.dec(anzahl)
     serial.puts((&s_m[0]) as u64)
-    serial.dec(yes(m < vfs.MAX_MNT))
+    serial.dec(kutil.yes(m < vfs.MAX_MNT))
     serial.nl()
 }
 
@@ -2728,14 +1794,14 @@ fn osum(state: u64) {
             serial.nl()
             return
         }
-        blk.use_ata(state, root_blocks(state))
+        blk.use_ata(state, kutil.root_blocks(state))
     }
     var mounted: bool = fs.mount(state)
     if !mounted && !bootmod.ready(state) {
         mounted = root_from_part(state)
     }
     serial.puts((&s_mount[0]) as u64)
-    serial.dec(yes(mounted))
+    serial.dec(kutil.yes(mounted))
     serial.nl()
     if !mounted {
         return
@@ -3002,9 +2068,9 @@ fn ata_disk(state: u64) {
     serial.puts((&s_yes[0]) as u64)
     serial.nl()
     serial.puts((&s_fmt[0]) as u64)
-    serial.dec(yes(fs.format(state)))
+    serial.dec(kutil.yes(fs.format(state)))
     serial.puts((&s_mount[0]) as u64)
-    serial.dec(yes(fs.mount(state)))
+    serial.dec(kutil.yes(fs.mount(state)))
     serial.nl()
     let ino: u64 = fs.create_path(state, (&p_file[0]) as u64, fs.T_FILE)
     let wrote: u64 = fs.write_at(state, ino, 0, (&text[0]) as u64, 29)
@@ -3115,121 +2181,9 @@ fn power_stage(state: u64) {
     power_report(state)
 }
 
-// 4.6 DER BILDSCHIRM, AN EINER AUSGERECHNETEN STELLE GEMESSEN.
-//
-// Ein Pruefbild von 64 mal 64 Bildpunkten bei (100,100), in einer Farbe,
-// die sich halbieren laesst, ohne dass eine Rundung ins Spiel kommt:
-// 200/100/50 wird zu 100/50/25 und wieder zurueck zu 200/100/50. Der
-// Kernel liest den Bildpunkt bei (120,120) aus dem Rahmenpuffer ZURUECK
-// und meldet ihn -- und `tools/k18/run.sh` prueft DIESELBE Stelle noch
-// einmal im BILDSCHIRMFOTO.
-//
-// DAS IST DIE LEHRE AUS RUNDE K7B, und sie steht in der Aufgabe dieser
-// Runde noch einmal: dort schien Text zu 87 Prozent zu stimmen, waehrend
-// jeder Buchstabe fehlte -- die 87 Prozent waren schwarzer Hintergrund.
-// Also wird hier keine Flaeche gezaehlt und kein Mittelwert gebildet,
-// sondern EIN Bildpunkt an EINER Stelle gegen EINEN ausgerechneten Wert.
-const PX_X: u64 = 120
-const PX_Y: u64 = 120
-const PX_COLOR: u64 = 13132850 // 0xC86432 = 200,100,50
 
-fn power_screen(state: u64) {
-    var n_a: [u8; 6] = "px_a\0\0"
-    var n_b: [u8; 6] = "px_b\0\0"
-    var n_c: [u8; 6] = "px_c\0\0"
-    var n_d: [u8; 6] = "px_d\0\0"
-    var n_e: [u8; 6] = "px_e\0\0"
-    var n_no: [u8; 9] = "px_none\0\0"
-    // OHNE DAS WORT `pwr` WIRD HIER GAR NICHTS GEMALT.
-    //
-    // Das fehlte in der ersten Fassung, und `tools/gfx/run.sh` hat es
-    // gefunden: dort wird der GANZE Bildschirm gegen den seriellen
-    // Mitschnitt gehalten, Bildpunkt fuer Bildpunkt -- und ein
-    // Pruefbild von 64 mal 64, das in JEDEM `gfx`-Lauf ueber der
-    // Konsole lag, machte daraus "14757 Bildpunkte falsch". Eine Runde
-    // darf das Bild einer anderen nicht bemalen, nur weil sie
-    // uebersetzt wurde.
-    if !kstate.mode_on(state, kstate.M_PWR) {
-        return
-    }
-    if !fb.ready(state) {
-        pnum((&n_no[0]) as u64, 1)
-        return
-    }
-    // DIE KONSOLE WIRD FUER DIE DAUER DER MESSUNG STUMMGESCHALTET, und
-    // das ist keine Kosmetik: jede Zeile, die auf den Schirm geht, ROLLT
-    // ihn um sechzehn Bildpunkte. In der ersten Fassung stand das
-    // Pruefbild deshalb in jedem Lauf woanders -- bei (100,68), wenn
-    // eine Zeile danach kam, und bei (100,36), wenn es drei waren. Die
-    // Farben stimmten auf den Punkt, die Stelle nicht, und ein Test, der
-    // an einer festen Stelle nachsieht, haette das fuer einen Fehler der
-    // Helligkeit gehalten. Ab hier geht alles nur noch auf die serielle
-    // Leitung, und das Bild steht still.
-    let echo_vorher: bool = fb.echo_on(state)
-    fb.set_echo(state, false)
-    fb.fill(state, 100, 100, 64, 64, PX_COLOR)
-    fb.flush(state)
-    phex((&n_a[0]) as u64, fb.get_pixel(state, PX_X, PX_Y) & 0xFFFFFF)
 
-    if kstate.mode_on(state, kstate.M_PWRDIM) {
-        pwr.set_bright(state, 50)
-        phex((&n_b[0]) as u64, fb.get_pixel(state, PX_X, PX_Y) & 0xFFFFFF)
-        // Und wieder hoch. 200*50/100*100/50 ist wieder 200 -- die Farbe
-        // ist mit Absicht so gewaehlt, dass die Ganzzahlrechnung hier
-        // nichts verliert. Bei 201 waere es 200, und dann muesste diese
-        // Zusage anders lauten.
-        pwr.set_bright(state, 100)
-        phex((&n_c[0]) as u64, fb.get_pixel(state, PX_X, PX_Y) & 0xFFFFFF)
-        pwr.set_bright(state, 50)
-    }
-    if kstate.mode_on(state, kstate.M_PWRBLANK) {
-        pwr.blank(state)
-        phex((&n_d[0]) as u64, fb.get_pixel(state, PX_X, PX_Y) & 0xFFFFFF)
-        pnum((&n_e[0]) as u64, pwr.value(state, pwr.PW_BLANKS))
-    }
-    // EIN EIGENES STILLHALTEN FUER DIESE RUNDE, und der Grund ist
-    // gemessen: das Stillhalten von Runde K7 (`fbhold`) meldet sich mit
-    // einer Zeile, die auf DEMSELBEN Schirm landet -- die Konsole rollt,
-    // und das Pruefbild war im Bildschirmfoto nicht mehr zu finden,
-    // obwohl der Kernel es beim Zurueckesen noch sah. Also: erst die
-    // Marke, dann malen, dann warten, und dazwischen sagt niemand mehr
-    // etwas. Das Bild, das der Testlaeufer aufnimmt, ist genau das, was
-    // hier gemalt wurde.
-    fb.flush(state)
-    var s_shot: [u8; 12] = "pwr: shot\0\0\0"
-    serial.puts((&s_shot[0]) as u64)
-    serial.nl()
-    let hz: u64 = apic.tsc_hz(state)
-    if hz != 0 {
-        let bis: u64 = apic.tsc() + hz * 5
-        while apic.tsc() < bis {
-        }
-    }
-    var s_go: [u8; 12] = "pwr: shotgo\0"
-    serial.puts((&s_go[0]) as u64)
-    serial.nl()
-    fb.set_echo(state, echo_vorher)
-}
 
-fn pnum(name: u64, v: u64) {
-    var s_p: [u8; 6] = "pwr: \0"
-    var s_e: [u8; 2] = "=\0"
-    serial.puts((&s_p[0]) as u64)
-    serial.puts(name)
-    serial.puts((&s_e[0]) as u64)
-    serial.dec(v)
-    serial.nl()
-}
-
-fn phex(name: u64, v: u64) {
-    var s_p: [u8; 6] = "pwr: \0"
-    var s_e: [u8; 2] = "=\0"
-    serial.puts((&s_p[0]) as u64)
-    serial.puts(name)
-    serial.puts((&s_e[0]) as u64)
-    serial.hex(v)
-    serial.nl()
-}
 
 fn power_report(state: u64) {
     var n_caps: [u8; 5] = "caps\0"
@@ -3250,24 +2204,24 @@ fn power_report(state: u64) {
     var n_thr: [u8; 10] = "throttles\0"
     var n_ap: [u8; 8] = "applies\0"
     var n_tz: [u8; 6] = "tzraw\0"
-    phex((&n_caps[0]) as u64, pwr.caps(state))
-    pnum((&n_prof[0]) as u64, pwr.cur_profile(state))
-    phex((&n_rat[0]) as u64, pwr.value(state, pwr.PW_RATIOS))
-    pnum((&n_rsrc[0]) as u64, pwr.value(state, pwr.PW_RATIOSRC))
-    phex((&n_pc[0]) as u64, pwr.value(state, pwr.PW_PERFCTL))
-    phex((&n_pb[0]) as u64, pwr.value(state, pwr.PW_PERFBACK))
-    phex((&n_hw[0]) as u64, pwr.value(state, pwr.PW_HWPREQ))
-    phex((&n_hb[0]) as u64, pwr.value(state, pwr.PW_HWPBACK))
-    phex((&n_mi[0]) as u64, pwr.value(state, pwr.PW_MISC))
-    phex((&n_mb[0]) as u64, pwr.value(state, pwr.PW_MISCBACK))
-    phex((&n_mo[0]) as u64, pwr.value(state, pwr.PW_MISCORIG))
-    pnum((&n_cst[0]) as u64, pwr.value(state, pwr.PW_CSTATE))
-    pnum((&n_tmp[0]) as u64, pwr.temp_c(state))
-    pnum((&n_tok[0]) as u64, pwr.value(state, pwr.PW_TEMPOK))
-    pnum((&n_tjm[0]) as u64, pwr.value(state, pwr.PW_TJMAX))
-    pnum((&n_thr[0]) as u64, pwr.value(state, pwr.PW_THROTTLES))
-    pnum((&n_ap[0]) as u64, pwr.value(state, pwr.PW_APPLIES))
-    pnum((&n_tz[0]) as u64, pwr.value(state, pwr.PW_TZRAW))
+    kutil.phex((&n_caps[0]) as u64, pwr.caps(state))
+    kutil.pnum((&n_prof[0]) as u64, pwr.cur_profile(state))
+    kutil.phex((&n_rat[0]) as u64, pwr.value(state, pwr.PW_RATIOS))
+    kutil.pnum((&n_rsrc[0]) as u64, pwr.value(state, pwr.PW_RATIOSRC))
+    kutil.phex((&n_pc[0]) as u64, pwr.value(state, pwr.PW_PERFCTL))
+    kutil.phex((&n_pb[0]) as u64, pwr.value(state, pwr.PW_PERFBACK))
+    kutil.phex((&n_hw[0]) as u64, pwr.value(state, pwr.PW_HWPREQ))
+    kutil.phex((&n_hb[0]) as u64, pwr.value(state, pwr.PW_HWPBACK))
+    kutil.phex((&n_mi[0]) as u64, pwr.value(state, pwr.PW_MISC))
+    kutil.phex((&n_mb[0]) as u64, pwr.value(state, pwr.PW_MISCBACK))
+    kutil.phex((&n_mo[0]) as u64, pwr.value(state, pwr.PW_MISCORIG))
+    kutil.pnum((&n_cst[0]) as u64, pwr.value(state, pwr.PW_CSTATE))
+    kutil.pnum((&n_tmp[0]) as u64, pwr.temp_c(state))
+    kutil.pnum((&n_tok[0]) as u64, pwr.value(state, pwr.PW_TEMPOK))
+    kutil.pnum((&n_tjm[0]) as u64, pwr.value(state, pwr.PW_TJMAX))
+    kutil.pnum((&n_thr[0]) as u64, pwr.value(state, pwr.PW_THROTTLES))
+    kutil.pnum((&n_ap[0]) as u64, pwr.value(state, pwr.PW_APPLIES))
+    kutil.pnum((&n_tz[0]) as u64, pwr.value(state, pwr.PW_TZRAW))
     // UND DIE AKKUWERTE. Sie stehen hier, damit der Testlauf die
     // Meldung des KERNELS gegen das halten kann, was `/bin/power` aus
     // RING 3 ueber `syscall` herausbekommt. Gehen die beiden
@@ -3287,13 +2241,13 @@ fn power_report(state: u64) {
     if batt.present(state) {
         vor = 1
     }
-    pnum((&n_bpres[0]) as u64, vor)
-    pnum((&n_bpct[0]) as u64, batt.percent(state))
-    pnum((&n_bmin[0]) as u64, batt.minutes(state))
-    pnum((&n_bre[0]) as u64, batt.value(state, batt.BT_REMAIN))
-    pnum((&n_bfull[0]) as u64, batt.value(state, batt.BT_FULL))
-    pnum((&n_brt[0]) as u64, batt.value(state, batt.BT_RATE))
-    pnum((&n_bst[0]) as u64, batt.value(state, batt.BT_STATE))
+    kutil.pnum((&n_bpres[0]) as u64, vor)
+    kutil.pnum((&n_bpct[0]) as u64, batt.percent(state))
+    kutil.pnum((&n_bmin[0]) as u64, batt.minutes(state))
+    kutil.pnum((&n_bre[0]) as u64, batt.value(state, batt.BT_REMAIN))
+    kutil.pnum((&n_bfull[0]) as u64, batt.value(state, batt.BT_FULL))
+    kutil.pnum((&n_brt[0]) as u64, batt.value(state, batt.BT_RATE))
+    kutil.pnum((&n_bst[0]) as u64, batt.value(state, batt.BT_STATE))
     var netz: u64 = 0
     if batt.ac_online(state) {
         netz = 1
@@ -3302,9 +2256,9 @@ fn power_report(state: u64) {
     if batt.ac_known(state) {
         nok = 1
     }
-    pnum((&n_bac[0]) as u64, netz)
-    pnum((&n_bacok[0]) as u64, nok)
-    pnum((&n_btab[0]) as u64, batt.value(state, batt.BT_TABLES))
+    kutil.pnum((&n_bac[0]) as u64, netz)
+    kutil.pnum((&n_bacok[0]) as u64, nok)
+    kutil.pnum((&n_btab[0]) as u64, batt.value(state, batt.BT_TABLES))
 }
 
 // RUNDE K18: DIE ENERGIESCHICHT, GEMESSEN AUS RING 3.
@@ -3338,7 +2292,7 @@ fn power_test(state: u64) {
     serial.puts((&s_beg[0]) as u64)
     serial.nl()
     let t: u64 = proc.create(state, P_PWR, 0, 2)
-    let e: u64 = wait_for(state, t)
+    let e: u64 = kutil.wait_for(state, t)
     serial.puts((&s_exit[0]) as u64)
     serial.dec(e)
     serial.nl()
@@ -3348,7 +2302,7 @@ fn power_test(state: u64) {
     let h0: u64 = pwr.value(state, pwr.PW_HLTS)
     let i0: u64 = pwr.value(state, pwr.PW_IDLERUNS)
     let l: u64 = proc.create(state, P_PWRLOAD, 4000000, 2)
-    wait_for(state, l)
+    kutil.wait_for(state, l)
     kpair((&n_mA[0]) as u64, pwr.value(state, pwr.PW_MWAITS) -% m0)
     kpair((&n_hA[0]) as u64, pwr.value(state, pwr.PW_HLTS) -% h0)
     kpair((&n_iA[0]) as u64, pwr.value(state, pwr.PW_IDLERUNS) -% i0)
@@ -3358,7 +2312,7 @@ fn power_test(state: u64) {
     let h1: u64 = pwr.value(state, pwr.PW_HLTS)
     let i1: u64 = pwr.value(state, pwr.PW_IDLERUNS)
     let d: u64 = proc.create(state, P_PWRIDLE, 800, 2)
-    wait_for(state, d)
+    kutil.wait_for(state, d)
     kpair((&n_mB[0]) as u64, pwr.value(state, pwr.PW_MWAITS) -% m1)
     kpair((&n_hB[0]) as u64, pwr.value(state, pwr.PW_HLTS) -% h1)
     kpair((&n_iB[0]) as u64, pwr.value(state, pwr.PW_IDLERUNS) -% i1)
@@ -3954,1704 +2908,90 @@ fn find(hay: u64, needle: u64, n: u64) -> u64 {
 //   6. Die Fenster und die Anwendungen.
 // ==================================================================
 
-const WM_ARENA_FRAMES: u64 = 128 // 512 KiB, ttf.ARENA_BYTES
-const K10_RUNDEN: u64 = 20
 
-fn surface(state: u64) {
-    var s_off: [u8; 12] = "wm: skipped\0"
-    var s_nofb: [u8; 22] = "wm: kein Bildschirm\0\0\0"
-    var s_noar: [u8; 24] = "wm: kein Arbeitsbereich\0"
-    var s_fs: [u8; 12] = "wm: mount=\0\0"
-    var s_font: [u8; 6] = "ttf: \0"
-    var s_g: [u8; 10] = "  glyphs=\0"
-    var s_upm: [u8; 7] = "  upm=\0"
-    var s_asc: [u8; 7] = "  asc=\0"
-    var s_desc: [u8; 8] = "  desc=\0"
-    var s_lh: [u8; 6] = "  lh=\0"
-    var s_kp: [u8; 8] = "  kern=\0"
-    var s_st: [u8; 12] = "  selftest \0"
-    var s_of: [u8; 4] = " / \0"
-    var s_nofont: [u8; 28] = "ttf: keine Schrift gefunden\0"
-    var s_mono: [u8; 5] = "mono\0"
-    var s_sans: [u8; 5] = "sans\0"
-    var s_icons: [u8; 6] = "icons\0"
-    var s_noicons: [u8; 18] = "wm: no icon font\0\0"
-    let PX_ICON: u64 = 16
-    var s_ms: [u8; 8] = "mouse: \0"
-    var s_id: [u8; 5] = "id=\0\0"
-    var s_pk: [u8; 11] = "  packets=\0"
-    var s_none: [u8; 19] = "mouse: kein Zeiger\0"
-    var s_wm: [u8; 5] = "wm: \0"
-    var s_x: [u8; 2] = "x\0"
-    var s_win: [u8; 11] = "  windows=\0"
-    var s_cur: [u8; 10] = "  cursor=\0"
-    var s_dirty: [u8; 9] = "  dirty=\0"
-    var s_focus: [u8; 9] = "  focus=\0"
-    var s_arena: [u8; 10] = "  arena=\0\0"
-    var s_term: [u8; 15] = "wm: term win=\0\0"
-    var s_cols: [u8; 8] = "  cols=\0"
-    var s_rows: [u8; 8] = "  rows=\0"
-    var s_cell: [u8; 8] = "  cell=\0"
-    var s_hold: [u8; 10] = "wm: hold\0\0"
-    var s_go: [u8; 8] = "wm: go\0\0"
-    var s_exit: [u8; 16] = "wm: sh exit=\0\0\0\0"
-    var s_stat: [u8; 6] = "wm: \0\0"
-    var s_comp: [u8; 13] = "composites=\0\0"
-    var s_blit: [u8; 9] = "  blits=\0"
-    var s_pix: [u8; 10] = "  pixels=\0"
-    var s_cache: [u8; 12] = "  cached=\0\0\0"
-    var s_hit: [u8; 8] = "  hits=\0"
-    var s_miss: [u8; 9] = "  miss=\0\0"
-
-    if !kstate.mode_on(state, kstate.M_WM) {
-        serial.puts((&s_off[0]) as u64)
-        serial.nl()
-        return
-    }
-    if !fb.ready(state) {
-        serial.puts((&s_nofb[0]) as u64)
-        serial.nl()
-        return
-    }
-    // 1. der Arbeitsbereich
-    let arena: u64 = mem.frame_run(state, WM_ARENA_FRAMES)
-    if arena == 0 || !ttf.init(state, arena, WM_ARENA_FRAMES * mem.FRAME_SIZE) {
-        serial.puts((&s_noar[0]) as u64)
-        serial.nl()
-        return
-    }
-    // 2. das Dateisystem, falls noetig
-    if kstate.get(state, kstate.FS_READY) == 0 && blk.present(state) {
-        blk.use_ata(state, root_blocks(state))
-        let m: bool = fs.mount(state)
-        serial.puts((&s_fs[0]) as u64)
-        serial.dec(yes(m))
-        serial.nl()
-    }
-    // 3. die Schriften
-    var p_mono: [u8; 15] = "/lib/mono.ttf\0\0"
-    var p_sans: [u8; 15] = "/lib/sans.ttf\0\0"
-    // ROUND ICONS: the third font.  It carries no letters but the
-    // symbols of the interface, and it is NOT required -- if it is
-    // missing everything keeps running and the icons are absent.
-    var p_icon: [u8; 16] = "/lib/icons.ttf\0\0"
-    let f_mono: u64 = load_font(state, (&p_mono[0]) as u64)
-    let f_sans: u64 = load_font(state, (&p_sans[0]) as u64)
-    let f_icon: u64 = load_font(state, (&p_icon[0]) as u64)
-    if f_mono >= ttf.MAX_FONTS && f_sans >= ttf.MAX_FONTS {
-        serial.puts((&s_nofont[0]) as u64)
-        serial.nl()
-        return
-    }
-    var f_ui: u64 = f_sans
-    if f_ui >= ttf.MAX_FONTS {
-        f_ui = f_mono
-    }
-    var f_tx: u64 = f_mono
-    if f_tx >= ttf.MAX_FONTS {
-        f_tx = f_sans
-    }
-    let PX_UI: u64 = 15
-    let PX_MONO: u64 = 16
-    say_font(state, f_tx, PX_MONO, (&s_mono[0]) as u64, (&s_font[0]) as u64,
-        (&s_g[0]) as u64, (&s_upm[0]) as u64, (&s_asc[0]) as u64,
-        (&s_desc[0]) as u64, (&s_lh[0]) as u64, (&s_kp[0]) as u64,
-        (&s_st[0]) as u64, (&s_of[0]) as u64)
-    if f_sans < ttf.MAX_FONTS && f_sans != f_tx {
-        say_font(state, f_sans, PX_UI, (&s_sans[0]) as u64,
-            (&s_font[0]) as u64, (&s_g[0]) as u64, (&s_upm[0]) as u64,
-            (&s_asc[0]) as u64, (&s_desc[0]) as u64, (&s_lh[0]) as u64,
-            (&s_kp[0]) as u64, (&s_st[0]) as u64, (&s_of[0]) as u64)
-    }
-    // 4. das Zeigegeraet
-    let w: u64 = fb.width(state)
-    let h: u64 = fb.height(state)
-    if kstate.mode_on(state, kstate.M_NOMOUSE) {
-        serial.puts((&s_none[0]) as u64)
-        serial.nl()
-    } else {
-        ps2m.init(state, w, h)
-        serial.puts((&s_ms[0]) as u64)
-        serial.puts((&s_id[0]) as u64)
-        serial.dec(ps2m.id(state))
-        serial.puts((&s_pk[0]) as u64)
-        serial.dec(ps2m.packets(state))
-        serial.puts((&s_st[0]) as u64)
-        serial.dec(ps2m.selftest(state))
-        serial.puts((&s_of[0]) as u64)
-        serial.dec(ps2m.selftest_max())
-        serial.nl()
-        ps2m.reset_counters(state)
-        ps2m.set_poll(state,
-            !kstate.mode_on(state, kstate.M_NOMPOLL))
-    }
-    // 5. der Fensterserver
-    let nodirty: bool = kstate.mode_on(state, kstate.M_NODIRTY)
-    let nofocus: bool = kstate.mode_on(state, kstate.M_NOFOCUS)
-    if !wm.init(state, w, h, nodirty, nofocus) {
-        return
-    }
-    // RUNDE DESKTOP: die beiden Gegenproben. Sie stehen hier und nicht
-    // in `wm.init`, weil `init` schon vier Argumente hat und weil
-    // dieselbe Zeile in `tools/desktop/run.sh` als ein Wort auf der
-    // Befehlszeile erscheint.
-    wm.set_nolayer(state, kstate.mode_on(state, kstate.M_NOLAYER))
-    wm.set_nomin(state, kstate.mode_on(state, kstate.M_NOMIN))
-    wm.set_nostrut(state, kstate.mode_on(state, kstate.M_NOSTRUT))
-    wm.set_fonts(state, f_ui, PX_UI, f_tx, PX_MONO)
-    // ROUND ICONS: the icon font is reported LATER, after `wig.init`.
-    // It has to be: `wig.init` clears the first 0x80 octets of its page
-    // and that is where the slot is kept.  The first version set it
-    // here, three dozen lines earlier, and Ring 3 then found no icons
-    // at all while the kernel had loaded the font and said so -- the
-    // most misleading kind of failure there is, because both halves
-    // were telling the truth.
-    if f_icon < ttf.MAX_FONTS {
-        say_font(state, f_icon, PX_ICON, (&s_icons[0]) as u64,
-            (&s_font[0]) as u64, (&s_g[0]) as u64, (&s_upm[0]) as u64,
-            (&s_asc[0]) as u64, (&s_desc[0]) as u64, (&s_lh[0]) as u64,
-            (&s_kp[0]) as u64, (&s_st[0]) as u64, (&s_of[0]) as u64)
-    } else {
-        serial.puts((&s_noicons[0]) as u64)
-        serial.nl()
-    }
-    if kstate.mode_on(state, kstate.M_NOMOUSE) {
-        wm.set_cursor(state, false)
-    }
-    serial.puts((&s_wm[0]) as u64)
-    serial.dec(w)
-    serial.puts((&s_x[0]) as u64)
-    serial.dec(h)
-    serial.puts((&s_cur[0]) as u64)
-    serial.dec(bnum(wm.cursor_on(state)))
-    serial.puts((&s_dirty[0]) as u64)
-    serial.dec(1 - bnum(nodirty))
-    serial.puts((&s_focus[0]) as u64)
-    serial.dec(1 - bnum(nofocus))
-    serial.puts((&s_arena[0]) as u64)
-    serial.dec(WM_ARENA_FRAMES * mem.FRAME_SIZE)
-    serial.nl()
-    serial.puts((&s_wm[0]) as u64)
-    serial.puts((&s_st[0]) as u64 + 2)
-    serial.dec(wm.selftest(state))
-    serial.puts((&s_of[0]) as u64)
-    serial.dec(wm.selftest_max())
-    serial.nl()
-    // RUNDE K15: die Naht zur Widget-Bibliothek. Sie kommt NACH dem
-    // Fensterserver, weil sie in seine Fenster schreibt, und sie kommt
-    // IMMER -- auch ohne das Wort `wig`. Ein Aufruf, den es nur
-    // manchmal gibt, ist kein Aufruf, sondern eine Falle.
-    wig.init(state)
-    wig.set_icon_font(state, f_icon)
-    var s_wig: [u8; 6] = "wig: \0"
-    var s_wsel: [u8; 11] = "selftest \0\0"
-    serial.puts((&s_wig[0]) as u64)
-    serial.puts((&s_wsel[0]) as u64)
-    serial.dec(wig.selftest(state))
-    serial.puts((&s_of[0]) as u64)
-    serial.dec(wig.selftest_max())
-    serial.nl()
-
-    // RUNDE TILING. Sie kommt HIER, vor dem ersten Fenster: der
-    // Selbsttest, der Zufallstest und die Zeitmessung bauen sich ihre
-    // eigenen Baeume und raeumen sie wieder ab. Danach steht der Baum
-    // leer und der Fensterserver kann ihn benutzen.
-    tile_stage(state, w, h)
-    let willtile: bool = kstate.mode_on(state, kstate.M_TILE)
-    let tileshot: bool =
-        kstate.mode_on(state, kstate.M_TILESHOT)
-    if willtile && !tileshot {
-        wm.set_tile_on(state, true)
-    }
-
-    // 6. der Bildschirm gehoert ab hier dem Server. Der Spiegel der
-    //    Textkonsole geht AUS -- zwei Zeichner auf einer Flaeche war
-    //    genau das Problem, das Runde K7 offen gelassen hat.
-    fb.set_echo(state, false)
-    fb.set_cursor(state, false)
-    fb.clear(state, 0)
-    wm.damage_all(state)
-
-    // Das Terminalfenster. Es bekommt das Terminal der Konsole -- von
-    // hier an geht jedes Oktett, das ein Prozess auf fd 1 schreibt,
-    // durch `tty.emit` mit SINK_WINDOW in dieses Fenster UND weiter auf
-    // die serielle Leitung.
-    var t_titel: [u8; 16] = "Terminal -- sh\0\0"
-    let tw: u64 = wm.create(state, 0, 24, 40, 560, 380, wm.K_TERM,
-        (&t_titel[0]) as u64)
-    if tw < wm.MAX_WIN {
-        wm.bind_tty(state, tw, tty.console())
-        tty.set_window(state, tty.console(), tw)
-        tty.set_sink(state, tty.console(), tty.SINK_WINDOW)
-        serial.puts((&s_term[0]) as u64)
-        serial.dec(tw)
-        serial.puts((&s_cols[0]) as u64)
-        serial.dec(wm.term_cols(state, tw))
-        serial.puts((&s_rows[0]) as u64)
-        serial.dec(wm.term_rows(state, tw))
-        serial.puts((&s_cell[0]) as u64)
-        serial.dec(560 / wm.term_cols(state, tw))
-        serial.puts((&s_x[0]) as u64)
-        serial.dec(380 / wm.term_rows(state, tw))
-        serial.nl()
-        // Zwei Zeilen, die IM FENSTER stehen und deren Stelle sich
-        // ausrechnen laesst -- Zeile 0 und 1, Spalte 0. Genau das
-        // rechnet `tools/wm/run.sh` bildpunktgenau gegen den
-        // Referenzrasterer nach.
-        var b1: [u8; 32] = "OSUM K10 WINDOW SERVER 0123\n\0\0\0\0"
-        var b2: [u8; 32] = "abcdefghijklm ABCDEFGHIJK +-*/\n\0"
-        wm.term_write(state, tw, (&b1[0]) as u64, 28)
-        wm.term_write(state, tw, (&b2[0]) as u64, 31)
-    }
-
-    // Die Anwendung in Ring 3. Sie legt ihr Fenster SELBST an, ueber ein
-    // Handle -- der Kernel gibt ihr keine Flaeche, sie holt sich eine.
-    //
-    // RUNDE K15: mit `wig` oder `wigfiles` bleibt sie WEG. Nicht aus
-    // Schoenheit: `u_wclick` wartet in einer Schleife auf Ereignisse und
-    // teilt sich einen Prozessor mit der Anwendung dieser Runde, und ihr
-    // Fenster liegt genau dort, wo der Dateimanager steht.
-    var t: u64 = 0
-    if !kstate.mode_on(state, kstate.M_WIG)
-       && !kstate.mode_on(state, kstate.M_WIGFILES)
-       && !kstate.mode_on(state, kstate.M_WIGSTART)
-       && !kstate.mode_on(state, kstate.M_DESK)
-       && !kstate.mode_on(state, kstate.M_TILESHOT) {
-        t = proc.create(state, P_WCLICK, (w << 16) | h, 2)
-        // Ein paar Marken, damit sie ihr Fenster wirklich anlegt, bevor
-        // gemessen wird.
-        sched.sleep_ticks(state, 12)
-        wm.compose(state)
-    } else if kstate.mode_on(state, kstate.M_DESK) {
-        // RUNDE I18N: die Kostenmessung VOR den Programmen. Danach
-        // schreiben drei Prozesse auf dieselbe serielle Leitung, und
-        // eine Zahl, die zwischen zwei fremden Zeilen steht, liest kein
-        // Laeufer mehr.
-        i18n_bench(state, f_ui, PX_UI)
-        t = desk_start(state)
-    } else {
-        t = k15_start(state)
-    }
-
-    // Die Shell im Terminalfenster -- auf ausdrueckliches Wort, weil sie
-    // eine Platte braucht.
-    if kstate.mode_on(state, kstate.M_WMSHELL) {
-        var p_sh: [u8; 8] = "/bin/sh\0"
-        var a_sh: [u8; 3] = "sh\0"
-        let abuf: u64 = state + kstate.EARG_OFF
-        var k: u64 = 0
-        while k < 3 {
-            kstate.set8(abuf + k, a_sh[k as usize])
-            k = k + 1
-        }
-        let sh: u64 = elf.spawn(state, (&p_sh[0]) as u64, abuf, 1, 2)
-        if sh != 0 {
-            let code: u64 = wait_wm(state, sh)
-            serial.puts((&s_exit[0]) as u64)
-            serial.dec(code)
-            serial.nl()
-        }
-    }
-
-    // Auf Verlangen: einige Glyphen als Text auf die Leitung, damit
-    // `tools/wm/run.sh` den Rasterer selbst gegen die zweite Fassung
-    // halten kann, ohne den Umweg ueber das Bild.
-    if kstate.mode_on(state, kstate.M_TTFDUMP) {
-        var zeichen: [u8; 9] = "AVROegW.\0"
-        var zi: u64 = 0
-        while zi < 8 {
-            say_glyph(state, f_tx, PX_MONO, zeichen[zi as usize] as u64)
-            zi = zi + 1
-        }
-    }
-    if willtile && tileshot {
-        wm.set_tile_on(state, true)
-        tile_shot(state, w, h)
-    }
-    wm_bench(state, f_tx, PX_MONO)
-    wm.damage_all(state)
-    wm.compose(state)
-
-    serial.puts((&s_stat[0]) as u64)
-    serial.puts((&s_comp[0]) as u64)
-    serial.dec(wm.composites(state))
-    serial.puts((&s_blit[0]) as u64)
-    serial.dec(wm.blits(state))
-    serial.puts((&s_pix[0]) as u64)
-    serial.dec(wm.pixels(state))
-    serial.puts((&s_cache[0]) as u64)
-    serial.dec(ttf.cache_used(state))
-    serial.puts((&s_hit[0]) as u64)
-    serial.dec(ttf.hits(state))
-    serial.puts((&s_miss[0]) as u64)
-    serial.dec(ttf.misses(state))
-    serial.nl()
-    serial.puts((&s_wm[0]) as u64)
-    serial.puts((&s_win[0]) as u64 + 2)
-    serial.dec(wm.count(state))
-    serial.puts((&s_focus[0]) as u64)
-    serial.dec(wm.focus(state))
-    serial.nl()
-
-    // Stillhalten, damit ein Bildschirmfoto entsteht -- und dabei WEITER
-    // den Zeiger verfolgen und zusammensetzen. Genau darin werden von
-    // aussen ueber den QEMU-Monitor Mausereignisse eingespeist.
-    if !kstate.mode_on(state, kstate.M_WMHOLD) {
-        return
-    }
-    serial.puts((&s_hold[0]) as u64)
-    serial.nl()
-    // DIE WARTESCHLEIFE GIBT DIE MASCHINE HER, und das ist kein
-    // Schoenheitsfehler, den man auch lassen koennte: die Anwendung in
-    // Ring 3 laeuft in DIESER Zeit. Die erste Fassung wartete mit
-    // `while apic.tsc() < bis {}` und liess den Zeitgeber die Aufgaben
-    // umschalten -- die Anwendung bekam dabei so wenig Rechenzeit, dass
-    // sie die Klickereignisse nicht mehr abholte. Im Bild sah man das
-    // als fehlenden Klickfleck, und im Mitschnitt an nichts.
-    let hz: u64 = apic.tsc_hz(state)
-    // RUNDE K15: mit `wiglong` zwanzig statt fuenf Sekunden. Eine
-    // Oberflaeche, in die von aussen dreissig Monitorbefehle gespeist
-    // werden -- Bewegungen, Klicks, Tasten --, ist in fuenf Sekunden
-    // nicht bedient, und ein Foto davon zeigt einen halben Vorgang.
-    var sek: u64 = 5
-    if kstate.mode_on(state, kstate.M_WIGLONG) {
-        sek = 20
-    }
-    // ADDENDUM TASKBAR: MAXIMIZE ONE SECOND IN, and not before the
-    // loop. The taskbar is a program in ring 3; it needs the first
-    // moments of the hold to read its configuration file, place itself
-    // and declare its strut. A window maximized before that would be
-    // measured against a work area that is still the whole screen, and
-    // the measurement would pass for the wrong reason.
-    var maxed: bool = false
-    if hz != 0 {
-        let ab: u64 = apic.tsc()
-        let bis: u64 = ab + hz * sek
-        while apic.tsc() < bis {
-            if !maxed && kstate.mode_on(state, kstate.M_WMAX) {
-                if apic.tsc() > ab + hz {
-                    maxed = true
-                    say_max(state)
-                }
-            }
-            wm.poll(state)
-            wm.compose(state)
-            sched.sleep_ticks(state, 1)
-        }
-    }
-    wm.damage_all(state)
-    wm.compose(state)
-    serial.puts((&s_go[0]) as u64)
-    serial.nl()
-    say_wm_input(state)
-    say_wig(state)
-    say_wins(state)
-    let _unused: u64 = t
-}
 
 // ==================================================== ADDENDUM TASKBAR
-//
-// MAXIMIZE THE TOPMOST ORDINARY WINDOW AND SAY WHAT CAME OF IT. The
-// point of the exercise is the pair of rectangles that follows: the
-// window that fills the work area, and the bar that owns the edge. If
-// the strut works they touch and do not overlap; with `nostrut` the
-// window is the whole screen and the bar is under it.
-fn say_max(state: u64) {
-    var s_a: [u8; 16] = "wm: max win=\0\0\0\0"
-    var s_b: [u8; 6] = " ok=\0\0"
-    var s_c: [u8; 6] = " wx=\0\0"
-    var s_d: [u8; 6] = " wy=\0\0"
-    var s_e: [u8; 6] = " ww=\0\0"
-    var s_f: [u8; 6] = " wh=\0\0"
-    var s_t: [u8; 10] = "Maximized\0"
-    // A WINDOW OF ITS OWN AND NOT THE ONE THAT HAPPENS TO BE ON TOP.
-    // The first version maximized the topmost application window and
-    // got `ok=0` every time, for a reason worth keeping: a window keeps
-    // the buffer it was created with, the starter asked for 440 x 300,
-    // and 796 x 568 does not fit into it. That is the server refusing
-    // to lie, not a defect -- so the measurement gets a window that was
-    // created large enough, and the refusal keeps its meaning.
-    let i: u64 = wm.create(state, 0, 0, 0, wm.MAX_W, wm.MAX_H, wm.K_RAW,
-        (&s_t[0]) as u64)
-    if i >= wm.MAX_WIN {
-        return
-    }
-    wm.fill(state, i, 0, 0, wm.MAX_W, wm.MAX_H,
-        fb.rgb(state, 0x24, 0x50, 0x30))
-    let ok: bool = wm.maximize(state, i, true)
-    wm.damage_all(state)
-    wm.compose(state)
-    serial.puts((&s_a[0]) as u64)
-    serial.dec(i)
-    serial.puts((&s_b[0]) as u64)
-    serial.dec(bnum(ok))
-    serial.puts((&s_c[0]) as u64)
-    serial.dec(wm.work_x(state))
-    serial.puts((&s_d[0]) as u64)
-    serial.dec(wm.work_y(state))
-    serial.puts((&s_e[0]) as u64)
-    serial.dec(wm.work_w(state))
-    serial.puts((&s_f[0]) as u64)
-    serial.dec(wm.work_h(state))
-    serial.nl()
-}
 
 // ====================================================== RUNDE DESKTOP
+
+// ------------------------------------------------------------- USB
 //
-// WAS WIRKLICH IN DER FENSTERTAFEL STEHT, Satz fuer Satz, auf die
-// serielle Leitung. Ohne das waere jede Aussage dieser Runde ueber
-// Ebenen und ueber Minimieren eine Aussage ueber etwas, das man im Bild
-// gerade NICHT sieht -- ein verborgenes Fenster ist im Bild
-// ununterscheidbar von einem geschlossenen.
-//
-//   wm: win nr=<platz> id=<nummer> z=<stufe> layer=<ebene> hidden=<0/1>
-//       deco=<0/1> x= y= w= h= focus=<0/1> t=[<titel>]
-fn say_wins(state: u64) {
-    var s_a: [u8; 12] = "wm: win nr=\0"
-    var s_b: [u8; 6] = " id=\0\0"
-    var s_c: [u8; 5] = " z=\0\0"
-    var s_d: [u8; 9] = " layer=\0\0"
-    var s_e: [u8; 10] = " hidden=\0\0"
-    var s_f: [u8; 8] = " deco=\0\0"
-    var s_g: [u8; 5] = " x=\0\0"
-    var s_h: [u8; 5] = " y=\0\0"
-    var s_i: [u8; 5] = " w=\0\0"
-    var s_j: [u8; 5] = " h=\0\0"
-    var s_k: [u8; 9] = " focus=\0\0"
-    var s_l: [u8; 6] = " t=[\0\0"
-    var s_m: [u8; 4] = "]\0\0\0"
-    var s_n: [u8; 16] = "wm: wins n=\0\0\0\0\0"
-    var s_o: [u8; 10] = " hides=\0\0\0"
-    var s_p: [u8; 10] = " shows=\0\0\0"
-    var s_q: [u8; 12] = " nolayer=\0\0\0"
-    var s_r: [u8; 10] = " nomin=\0\0\0"
-    var s_s1: [u8; 8] = " strut=\0"
-    var s_s2: [u8; 12] = " strutedge=\0"
-    var s_s3: [u8; 6] = " max=\0"
-    var s_s4: [u8; 6] = " ow=\0\0"
-    var s_s5: [u8; 6] = " oh=\0\0"
-    var s_w1: [u8; 16] = "wm: work x=\0\0\0\0\0"
-    var i: u64 = 0
-    while i < wm.MAX_WIN {
-        if wm.valid(state, i) {
-            serial.puts((&s_a[0]) as u64)
-            serial.dec(i)
-            serial.puts((&s_b[0]) as u64)
-            serial.dec(wm.win_id(state, i))
-            serial.puts((&s_c[0]) as u64)
-            serial.dec(wm.win_z(state, i))
-            serial.puts((&s_d[0]) as u64)
-            serial.dec(wm.win_layer(state, i))
-            serial.puts((&s_e[0]) as u64)
-            serial.dec(bnum(wm.win_hidden(state, i)))
-            serial.puts((&s_f[0]) as u64)
-            serial.dec(bnum(wm.win_deco(state, i)))
-            serial.puts((&s_g[0]) as u64)
-            serial.dec(wm.win_x(state, i) as u64)
-            serial.puts((&s_h[0]) as u64)
-            serial.dec(wm.win_y(state, i) as u64)
-            serial.puts((&s_i[0]) as u64)
-            serial.dec(wm.win_w(state, i))
-            serial.puts((&s_j[0]) as u64)
-            serial.dec(wm.win_h(state, i))
-            serial.puts((&s_k[0]) as u64)
-            serial.dec(bnum(wm.focus(state) == i))
-            serial.puts((&s_s1[0]) as u64)
-            serial.dec(wm.win_strut_size(state, i))
-            serial.puts((&s_s2[0]) as u64)
-            serial.dec(wm.win_strut_edge(state, i))
-            serial.puts((&s_s3[0]) as u64)
-            serial.dec(bnum(wm.is_max(state, i)))
-            serial.puts((&s_s4[0]) as u64)
-            serial.dec(wm.outer_w(state, i))
-            serial.puts((&s_s5[0]) as u64)
-            serial.dec(wm.outer_h(state, i))
-            serial.puts((&s_l[0]) as u64)
-            serial.puts(wm.win_title(state, i))
-            serial.puts((&s_m[0]) as u64)
-            serial.nl()
-        }
-        i = i + 1
+// RUNDE SERVERBUILD: diese drei standen schon immer hier. Beim Umzug
+// der Oberflaeche nach `kgui.fi` wanderten sie einmal mit, weil EINE
+// ihrer Zeilen ein Zeigegeraet anmeldet -- und kamen zurueck, weil ein
+// Server USB-Platten hat und keine Maus. Die eine Zeile geht jetzt
+// durch `gfx.mouse_adopt`.
+
+fn usb_stage(state: u64) {
+    usb.stage(state)
+    if !usb.ready(state) {
+        return
     }
-    serial.puts((&s_n[0]) as u64)
-    serial.dec(wm.count(state))
-    serial.puts((&s_o[0]) as u64)
-    serial.dec(wm.hides(state))
-    serial.puts((&s_p[0]) as u64)
-    serial.dec(wm.shows(state))
-    serial.puts((&s_q[0]) as u64)
-    serial.dec(bnum(wm.nolayer(state)))
-    serial.puts((&s_r[0]) as u64)
-    serial.dec(bnum(wm.nomin(state)))
-    serial.nl()
-    // THE WORK AREA, from the server itself. The taskbar says the same
-    // thing from ring 3 (`taskbar: work`); the two lines must agree,
-    // and the runner checks that they do.
-    serial.puts((&s_w1[0]) as u64)
-    serial.dec(wm.work_x(state))
+    // Ein Zeigegeraet braucht einen Anschlag, auch wenn es nicht am 8042
+    // haengt. Steht schon ein PS/2-Zeiger, bleibt dessen Einstellung.
+    if usb.have_mouse(state) {
+        gfx.mouse_adopt(state, 1024, 768)
+    }
+    usb_hold(state)
+    // DIE GEGENPROBE ZUM ABZIEHEN. Sie steht hier und nicht in der
+    // Bibliothek, weil sie eine Anforderung der Kommandozeile ist und
+    // kein Zustand des Geraets.
+    if kstate.mode_on(state, kstate.M_UNPLUG) {
+        usb_unplug(state)
+    }
+}
+
+// STILLHALTEN, DAMIT VON AUSSEN JEMAND TIPPEN KANN. Dasselbe, was
+// `wmhold` seit Runde K10 fuer das Bildschirmfoto tut: der Kern kommt
+// zur Ruhe, meldet das auf der seriellen Leitung, und erst danach
+// schickt der Testlaeufer seine Maus- und Tastenbefehle in den
+// QEMU-Monitor. Ohne diese Marke faellt der erste Klick in einen Kern,
+// der noch aufzaehlt.
+//
+// Mit `usbpoll` wird waehrenddessen SELBST nachgesehen statt auf die
+// Meldung zu warten -- die Gegenprobe zu `usbnoirq`.
+fn usb_hold(state: u64) {
+    var s_h: [u8; 10] = "k17: hold\0"
+    var s_r: [u8; 10] = "k17: free\0"
+    if !kstate.mode_on(state, kstate.M_USBHOLD) {
+        return
+    }
+    let pollen: bool = kstate.mode_on(state, kstate.M_USBPOLL)
     serial.puts((&s_h[0]) as u64)
-    serial.dec(wm.work_y(state))
-    serial.puts((&s_i[0]) as u64)
-    serial.dec(wm.work_w(state))
-    serial.puts((&s_j[0]) as u64)
-    serial.dec(wm.work_h(state))
-    serial.puts((&s_q[0]) as u64)
-    serial.dec(bnum(wm.nostrut(state)))
     serial.nl()
-}
-
-// EIN PROGRAMM VON DER PLATTE STARTEN, mit genau einem Argument. Die
-// drei Zeilen standen in `k15_start` viermal untereinander; hier
-// stehen sie einmal.
-fn desk_spawn(state: u64, pfad: u64, arg: u64, n: u64) -> u64 {
-    return desk_spawn_n(state, pfad, arg, n, 1)
-}
-
-// RUNDE NETVIEW, NACHTRAG: DASSELBE MIT MEHR ALS EINEM ARGUMENT. Bis
-// hierher stand die Eins fest im Aufruf von `elf.spawn`, weil jedes
-// Programm des Schreibtischs genau seinen eigenen Namen bekam.
-// `/bin/netview faked /bin/widgetdemo` sind drei, und `n` war schon immer
-// die Zahl der OKTETTE und nie die der Argumente -- die beiden waren
-// nur nie zu unterscheiden, weil es immer eines war.
-fn desk_spawn_n(state: u64, pfad: u64, arg: u64, n: u64,
-    argc: u64) -> u64 {
-    let abuf: u64 = state + kstate.EARG_OFF
-    var k: u64 = 0
-    while k < n {
-        kstate.set8(abuf + k, kstate.get8(arg + k) as u8)
-        k = k + 1
-    }
-    let pid: u64 = elf.spawn(state, pfad, abuf, argc, 2)
-    var s_st: [u8; 13] = "desk: start \0"
-    var s_pid: [u8; 7] = "  pid=\0"
-    serial.puts((&s_st[0]) as u64)
-    serial.puts(pfad)
-    serial.puts((&s_pid[0]) as u64)
-    serial.dec(pid)
-    serial.nl()
-    return pid
-}
-
-// ============================================ RUNDE I18N: WAS ES KOSTET
-//
-// DIE FRAGE, DIE DIESE RUNDE SICH SELBST STELLEN MUSS: bremst die
-// UTF-8-Dekodierung das Zeichnen spuerbar? Bis heute lief die
-// Textschleife ueber OKTETTE und tat je Zeichen nichts als einen
-// Feldzugriff; jetzt laeuft sie ueber ZEICHEN und ruft je Zeichen
-// `utf8.next` auf -- ein paar Vergleiche und Schiebungen, aber eben
-// mehr als nichts.
-//
-// GEMESSEN UND NICHT BEHAUPTET, und zwar so, dass die Zahl etwas heisst:
-//
-//   * BEIDE Wege in EINEM Lauf, auf DERSELBEN Maschine, mit DEMSELBEN
-//     Zeitzaehler. Zwei QEMU-Starts waeren zwei Maschinen.
-//   * DERSELBE Text, und zwar reines ASCII -- dort liefern beide
-//     Fassungen dasselbe Ergebnis, und der Unterschied ist GENAU der
-//     Dekodierer und nichts sonst.
-//   * TAUSEND Zeilen je Fassung, weil eine einzelne Zeile unter der
-//     Aufloesung des Zaehlers liegt.
-//   * Und daneben die Kosten des wirklichen ZEICHNENS derselben Zeile,
-//     damit die erste Zahl einen Massstab hat. Eine Dekodierung, die
-//     zwei Prozent einer Rasterung kostet, ist keine Bremse.
-const I18N_ZEILEN: u64 = 1000
-
-fn i18n_bench(state: u64, f: u64, px: u64) {
-    var s_a: [u8; 21] = "i18n: draw ascii us=\0"
-    var s_u: [u8; 20] = "i18n: draw utf8 us=\0"
-    var s_g: [u8; 22] = "i18n: draw glyphs us=\0"
-    var s_r: [u8; 8] = " reps=\0\0"
-    var s_n: [u8; 8] = " chars=\0"
-    // Vierzig Zeichen -- die Laenge einer Beschriftung dieser
-    // Oberflaeche, gemessen an "Der Bildmodus wird beim Start gesetzt".
-    var zeile: [u8; 41] = "Der Bildmodus wird beim Start gesetzt; im"
-    if f >= ttf.MAX_FONTS || apic.tsc_hz(state) == 0 {
-        return
-    }
-    let p: u64 = (&zeile[0]) as u64
-    // Erst einmal warmlaufen -- der Glyphenspeicher soll bei BEIDEN
-    // Messungen voll sein, sonst misst die erste die Rasterung mit.
-    let _w0: i64 = ttf.text_width26(state, f, p, 40, px)
-    var t: u64 = apic.tsc()
     var i: u64 = 0
-    var acc: i64 = 0
-    while i < I18N_ZEILEN {
-        acc = acc + ttf.text_width26_bytes(state, f, p, 40, px)
-        i = i + 1
-    }
-    let alt: u64 = us_of(state, apic.tsc() - t)
-    t = apic.tsc()
-    i = 0
-    while i < I18N_ZEILEN {
-        acc = acc + ttf.text_width26(state, f, p, 40, px)
-        i = i + 1
-    }
-    let neu: u64 = us_of(state, apic.tsc() - t)
-    // Und das wirkliche Zeichnen derselben Zeile, als Massstab: je
-    // Zeichen eine Glyphe aus dem Speicher holen ist das, was `wm.text`
-    // ausser der Schleife noch tut.
-    t = apic.tsc()
-    i = 0
-    while i < I18N_ZEILEN {
-        var k: u64 = 0
-        while k < 40 {
-            let _sl: u64 = ttf.glyph(state, f, kstate.get8(p + k), px)
-            k = k + 1
+    while i < 900 {
+        if pollen {
+            usb.poll(state)
         }
+        sched.sleep_ticks(state, 1)
         i = i + 1
     }
-    let zeichnen: u64 = us_of(state, apic.tsc() - t)
+    usb.report(state)
+    serial.puts((&s_r[0]) as u64)
+    serial.nl()
+}
+
+// Was nach dem Abziehen noch geht. Drei Zeilen, und jede einzelne ist
+// eine Zusage: der Kern laeuft weiter, das Blockgeraet meldet sich als
+// nicht da, und ein offener Deskriptor darauf gibt ENODEV (das prueft
+// `/bin/k17` aus Ring 3, nicht der Kern).
+fn usb_unplug(state: u64) {
+    var s_a: [u8; 22] = "k17: before unplug=\0\0\0"
+    var s_b: [u8; 21] = "k17: after unplug=\0\0\0"
+    var s_p: [u8; 11] = "  present=\0"
+    var s_d: [u8; 11] = "  devices=\0"
     serial.puts((&s_a[0]) as u64)
-    serial.dec(alt)
-    serial.puts((&s_r[0]) as u64)
-    serial.dec(I18N_ZEILEN)
-    serial.puts((&s_n[0]) as u64)
-    serial.dec(40)
-    serial.nl()
-    serial.puts((&s_u[0]) as u64)
-    serial.dec(neu)
-    serial.puts((&s_r[0]) as u64)
-    serial.dec(I18N_ZEILEN)
-    serial.puts((&s_n[0]) as u64)
-    serial.dec(40)
-    serial.nl()
-    serial.puts((&s_g[0]) as u64)
-    serial.dec(zeichnen)
-    serial.puts((&s_r[0]) as u64)
-    serial.dec(I18N_ZEILEN)
-    serial.nl()
-    if acc == 0 {
-        serial.nl()
-    }
-}
-
-// DER SCHREIBTISCH. Vier Programme von der Platte, in dieser
-// Reihenfolge, und die Reihenfolge ist keine Laune:
-//
-//   1. /bin/schreibtisch  legt das Fenster auf Ebene 0 an. Es entsteht
-//      als erstes und ist trotzdem HINTEN -- ohne Ebenen ginge das
-//      nicht, und genau das ist die Zusage dieser Runde.
-//   2. /bin/leiste        legt ihres auf Ebene 2 an. Es entsteht als
-//      zweites und bleibt trotzdem VORN, auch wenn danach noch drei
-//      Fenster aufgehen.
-//   3. /bin/launcher       ein gewoehnliches Fenster dazwischen.
-//   4. /bin/einstellungen nur auf Wort (`einst`), und /bin/dhcp nur
-//      auf Wort (`dhcp`) -- der DHCP-Lauf braucht eine Karte, und
-//      nicht jeder Messlauf hat eine.
-fn desk_start(state: u64) -> u64 {
-    var p_desk: [u8; 18] = "/bin/schreibtisch\0"
-    var p_leis: [u8; 12] = "/bin/leiste\0"
-    var p_star: [u8; 14] = "/bin/launcher\0"
-    var p_eins: [u8; 20] = "/bin/einstellungen\0\0"
-    var p_dhcp: [u8; 10] = "/bin/dhcp\0"
-    var a_desk: [u8; 13] = "schreibtisch\0"
-    var a_leis: [u8; 7] = "leiste\0"
-    var a_star: [u8; 8] = "starter\0"
-    var a_eins: [u8; 15] = "einstellungen\0\0"
-    var a_dhcp: [u8; 5] = "dhcp\0"
-    var pid: u64 = desk_spawn(state, (&p_desk[0]) as u64,
-        (&a_desk[0]) as u64, 13)
-    // Dem Schreibtisch Zeit geben, sein Fenster anzulegen und seine
-    // Ebene zu setzen, BEVOR die Leiste kommt. Ohne das ist die
-    // Reihenfolge in der Tafel eine Frage des Zufalls, und eine
-    // Messung ueber eine Reihenfolge, die sich bei jedem Lauf anders
-    // einstellt, misst nichts.
-    var runden: u64 = 0
-    while runden < 250 {
-        wm.poll(state)
-        wm.compose(state)
-        sched.sleep_ticks(state, 1)
-        runden = runden + 1
-    }
-    let _l: u64 = desk_spawn(state, (&p_leis[0]) as u64,
-        (&a_leis[0]) as u64, 7)
-    runden = 0
-    while runden < 250 {
-        wm.poll(state)
-        wm.compose(state)
-        sched.sleep_ticks(state, 1)
-        runden = runden + 1
-    }
-    if !kstate.mode_on(state, kstate.M_NOSTART) {
-        pid = desk_spawn(state, (&p_star[0]) as u64, (&a_star[0]) as u64, 8)
-    }
-    if kstate.mode_on(state, kstate.M_EINST) {
-        pid = desk_spawn(state, (&p_eins[0]) as u64,
-            (&a_eins[0]) as u64, 15)
-    }
-    // RUNDE THEME: das Messprogramm mit eigenem Fenster. Es schaltet
-    // hell und dunkel um und meldet, was ein Bild dabei gekostet hat.
-    if kstate.mode_on(state, kstate.M_THEMEGUI)
-       || kstate.mode_on(state, kstate.M_THEMESHOT) {
-        // DER DATEIMANAGER GEHOERT MIT AUFS BILD. Das Bildschirmfoto
-        // dieser Runde soll zeigen, was ein Thema wirklich anfasst:
-        // eine Liste mit Kopfzeile und Auswahl, ein Fenster mit
-        // Widgets und einen Dialog -- nicht eine leere Flaeche.
-        var p_ex: [u8; 14] = "/bin/explorer\0"
-        var a_ex: [u8; 9] = "explorer\0"
-        let _e: u64 = desk_spawn(state, (&p_ex[0]) as u64,
-            (&a_ex[0]) as u64, 9)
-        var p_tg: [u8; 15] = "/bin/themetest\0"
-        var a_tg: [u8; 14] = "themetest\0gui\0"
-        var a_ts: [u8; 15] = "themetest\0shot\0"
-        if kstate.mode_on(state, kstate.M_THEMESHOT) {
-            pid = desk_spawn_n(state, (&p_tg[0]) as u64,
-                (&a_ts[0]) as u64, 15, 2)
-        } else {
-            pid = desk_spawn_n(state, (&p_tg[0]) as u64,
-                (&a_tg[0]) as u64, 14, 2)
-        }
-    }
-    if kstate.mode_on(state, kstate.M_DHCP) {
-        let _d: u64 = desk_spawn(state, (&p_dhcp[0]) as u64,
-            (&a_dhcp[0]) as u64, 5)
-    }
-    // ==================================== RUNDE NETVIEW, NACHTRAG
-    //
-    // DREI PROGRAMME UNTER DREI SICHTEN, damit ein Bildschirmfoto die
-    // eigentliche Zusage dieser Runde zeigen kann: VIER Anwendungen
-    // gleichzeitig, jede mit einer anderen Vorstellung davon, ob es ein
-    // Netz gibt. Der Starter, den der Schreibtisch ohnehin aufmacht,
-    // ist die vierte -- er laeuft `real` und traegt darum KEIN Zeichen.
-    //
-    // `/bin/locate` stand hier zuerst und war falsch: das ist der
-    // Namensindex auf der Kommandozeile und macht kein Fenster auf. Der
-    // erste Lauf zeigte drei Knoepfe statt vier, und das ist der Grund,
-    // warum diese Runde die Zahl der Knoepfe MISST und nicht ansieht.
-    //
-    // Sie gehen durch `/bin/netview` und nicht ueber einen eigenen
-    // Weg: das ist derselbe Ablauf, den die Shell, der Starter und der
-    // Dateimanager nehmen, und ein Messaufbau, der einen anderen Weg
-    // nimmt, misst den anderen Weg.
-    if kstate.mode_on(state, kstate.M_NETVDEMO) {
-        netv_demo(state)
-    }
-    runden = 0
-    while runden < 500 {
-        wm.poll(state)
-        wm.compose(state)
-        sched.sleep_ticks(state, 1)
-        runden = runden + 1
-    }
-    return pid
-}
-
-// RUNDE NETVIEW, NACHTRAG: drei Fenster, drei Sichten. Die Argumente
-// stehen hintereinander mit je einer Null dazwischen, so wie
-// `desk_spawn` sie erwartet.
-fn netv_demo(state: u64) {
-    var p_nv: [u8; 13] = "/bin/netview\0"
-    var a_flt: [u8; 31] = "netview\0filtered\0/bin/explorer\0"
-    var a_fak: [u8; 30] = "netview\0faked\0/bin/widgetdemo\0"
-    var a_non: [u8; 32] = "netview\0none\0/bin/einstellungen\0"
-    let _a: u64 = desk_spawn_n(state, (&p_nv[0]) as u64,
-        (&a_flt[0]) as u64, 31, 3)
-    var runden: u64 = 0
-    while runden < 200 {
-        wm.poll(state)
-        wm.compose(state)
-        sched.sleep_ticks(state, 1)
-        runden = runden + 1
-    }
-    // MERGE FIX: the blob is 30 octets since /bin/wigdemo became
-    // /bin/widgetdemo. The 27 was the old length and cut the path off
-    // after "/bin/widgetde" -- the faked window never started, and the
-    // taskbar had no button carrying the `faked` mark.
-    let _b: u64 = desk_spawn_n(state, (&p_nv[0]) as u64,
-        (&a_fak[0]) as u64, 30, 3)
-    runden = 0
-    while runden < 200 {
-        wm.poll(state)
-        wm.compose(state)
-        sched.sleep_ticks(state, 1)
-        runden = runden + 1
-    }
-    let _c: u64 = desk_spawn_n(state, (&p_nv[0]) as u64,
-        (&a_non[0]) as u64, 32, 3)
-    runden = 0
-    while runden < 400 {
-        wm.poll(state)
-        wm.compose(state)
-        sched.sleep_ticks(state, 1)
-        runden = runden + 1
-    }
-}
-
-// RUNDE K15: DIE ANWENDUNG DIESER RUNDE STARTEN. Sie kommt von der
-// PLATTE und ist keine eingebaute Aufgabe -- die Widget-Bibliothek ist
-// eine Bibliothek in Ring 3, und ein Programm, das sie benutzt, ist ein
-// gewoehnliches Programm. `/bin/files` ist der Dateimanager,
-// `/bin/widgetdemo` die Anwendung, die jedes Widget einmal hinstellt und
-// ueber die serielle Leitung meldet, was sie sieht.
-//
-// Die beiden Gegenproben gehen als ARGUMENT mit. Das ist die ehrliche
-// Stelle dafuer: `nohit` schaltet die Trefferpruefung der Bibliothek ab
-// (ein Klick landet dann bei keinem Widget), `noclip` die
-// Zwischenablage. Beides liegt in Ring 3, also wird es in Ring 3
-// abgeschaltet.
-fn k15_start(state: u64) -> u64 {
-    var p_files: [u8; 14] = "/bin/explorer\0"
-    var p_demo: [u8; 16] = "/bin/widgetdemo\0"
-    var p_start: [u8; 14] = "/bin/launcher\0"
-    var p_spei: [u8; 14] = "/bin/speicher\0"
-    var a_files: [u8; 9] = "explorer\0"
-    var a_demo: [u8; 11] = "widgetdemo\0"
-    var a_start: [u8; 9] = "launcher\0"
-    var a_spei: [u8; 9] = "speicher\0"
-    var p_icons: [u8; 12] = "/bin/icont\0\0"
-    var a_icons: [u8; 6] = "icont\0"
-    var a_nohit: [u8; 6] = "nohit\0"
-    var a_noclip: [u8; 7] = "noclip\0"
-    var a_nokeys: [u8; 7] = "nokeys\0"
-    var a_noidx: [u8; 6] = "noidx\0"
-    let abuf: u64 = state + kstate.EARG_OFF
-    var pfad: u64 = (&p_demo[0]) as u64
-    var arg0: u64 = (&a_demo[0]) as u64
-    var n0: u64 = 11
-    if kstate.mode_on(state, kstate.M_WIGFILES) {
-        pfad = (&p_files[0]) as u64
-        arg0 = (&a_files[0]) as u64
-        n0 = 9
-    }
-    if kstate.mode_on(state, kstate.M_WIGSTART) {
-        pfad = (&p_start[0]) as u64
-        arg0 = (&a_start[0]) as u64
-        n0 = 9
-    }
-    if kstate.mode_on(state, kstate.M_WIGSPEICHER) {
-        pfad = (&p_spei[0]) as u64
-        arg0 = (&a_spei[0]) as u64
-        n0 = 9
-    }
-    // ROUND ICONS: the program that measures the icon font.
-    if kstate.mode_on(state, kstate.M_WIGICONS) {
-        pfad = (&p_icons[0]) as u64
-        arg0 = (&a_icons[0]) as u64
-        n0 = 6
-    }
-    // ROUND POWERMON: `wigapp=/bin/NAME` starts THAT program in the
-    // window server instead of one of the three above. Not a new bit in
-    // `kstate.MODE` -- that word has two bits left out of sixty-four and
-    // a dozen rounds are working on this tree at once. And not a fourth
-    // hard-wired name either: the next round that wants to show a window
-    // would need a fifth, and the one after that a sixth. The path is
-    // read out of the command line, the name after the last slash
-    // becomes argv[0], and nothing here has to change again.
-    var wpath: [u8; 64] = [0 as u8; 64]
-    var wname: [u8; 32] = [0 as u8; 32]
-    let wa: u64 = pmon.wigapp(state)
-    if wa != 0 {
-        var wi: u64 = 0
-        var slash: u64 = 0
-        while wi < 63 && kstate.get8(wa + wi) != 0 {
-            let c: u64 = kstate.get8(wa + wi)
-            wpath[wi as usize] = c as u8
-            if c == 47 {
-                slash = wi + 1
-            }
-            wi = wi + 1
-        }
-        var wj: u64 = 0
-        while wj < 31 && wpath[(slash + wj) as usize] != 0 as u8 {
-            wname[wj as usize] = wpath[(slash + wj) as usize]
-            wj = wj + 1
-        }
-        if wj != 0 {
-            pfad = (&wpath[0]) as u64
-            arg0 = (&wname[0]) as u64
-            n0 = wj
-        }
-    }
-    var at: u64 = 0
-    var k: u64 = 0
-    while k < n0 {
-        kstate.set8(abuf + at, kstate.get8(arg0 + k) as u8)
-        at = at + 1
-        k = k + 1
-    }
-    var argc: u64 = 1
-    if kstate.mode_on(state, kstate.M_WIGNOHIT) {
-        k = 0
-        while k < 6 {
-            kstate.set8(abuf + at, a_nohit[k as usize])
-            at = at + 1
-            k = k + 1
-        }
-        argc = argc + 1
-    }
-    if kstate.mode_on(state, kstate.M_WIGNOCLIP) {
-        k = 0
-        while k < 7 {
-            kstate.set8(abuf + at, a_noclip[k as usize])
-            at = at + 1
-            k = k + 1
-        }
-        argc = argc + 1
-    }
-    if kstate.mode_on(state, kstate.M_WIGNOKEYS) {
-        k = 0
-        while k < 7 {
-            kstate.set8(abuf + at, a_nokeys[k as usize])
-            at = at + 1
-            k = k + 1
-        }
-        argc = argc + 1
-    }
-    if kstate.mode_on(state, kstate.M_WIGNOIDX) {
-        k = 0
-        while k < 6 {
-            kstate.set8(abuf + at, a_noidx[k as usize])
-            at = at + 1
-            k = k + 1
-        }
-        argc = argc + 1
-    }
-    let pid: u64 = elf.spawn(state, pfad, abuf, argc, 2)
-    var s_k15: [u8; 12] = "k15: start \0"
-    var s_pid: [u8; 7] = "  pid=\0"
-    serial.puts((&s_k15[0]) as u64)
-    serial.puts(pfad)
-    serial.puts((&s_pid[0]) as u64)
-    serial.dec(pid)
-    serial.nl()
-    // Der Anwendung Zeit geben, ihr Fenster anzulegen und einmal zu
-    // malen, BEVOR gemessen wird -- sie liest dazu die Platte.
-    var runden: u64 = 0
-    while runden < 400 {
-        wm.poll(state)
-        wm.compose(state)
-        sched.sleep_ticks(state, 1)
-        runden = runden + 1
-    }
-    return pid
-}
-
-// Was die Naht in diesem Lauf wirklich getan hat. Die Zahlen sind die
-// Gegenprobe zu jeder Aussage ueber die Bereichsverfolgung: `blits` ist,
-// wie oft Ring 3 ein Rechteck herueber geschoben hat, `pixels` wie viele
-// Bildpunkte das waren -- und das ist NICHT dasselbe wie die Bildpunkte,
-// die der Server danach zusammengesetzt hat.
-fn say_wig(state: u64) {
-    var s_a: [u8; 12] = "wig: blits=\0"
-    var s_b: [u8; 10] = "  rows=\0\0\0"
-    var s_c: [u8; 10] = "  pixels=\0"
-    var s_d: [u8; 10] = "  glyphs=\0"
-    var s_e: [u8; 12] = "  clipset=\0\0"
-    var s_f: [u8; 12] = "  clipget=\0\0"
-    var s_g: [u8; 10] = "  shape=\0\0"
-    serial.puts((&s_a[0]) as u64)
-    serial.dec(wig.blits(state))
-    serial.puts((&s_b[0]) as u64)
-    serial.dec(wig.rows_copied(state))
-    serial.puts((&s_c[0]) as u64)
-    serial.dec(wig.pixels(state))
+    serial.dec(kutil.yes(blk.present_on(state, blk.DEV_USB)))
     serial.puts((&s_d[0]) as u64)
-    serial.dec(wig.glyph_calls(state))
-    serial.puts((&s_e[0]) as u64)
-    serial.dec(wig.clip_writes(state))
-    serial.puts((&s_f[0]) as u64)
-    serial.dec(wig.clip_reads(state))
-    serial.puts((&s_g[0]) as u64)
-    serial.dec(wm.shape(state))
+    serial.dec(usb.count(state))
     serial.nl()
-}
-
-// Warten auf die Shell im Fenster -- wie `wait_long`, aber es setzt
-// zwischendurch zusammen, damit man beim Zusehen etwas sieht und damit
-// der Zeiger sich bewegen laesst, waehrend sie laeuft.
-fn wait_wm(state: u64, i: u64) -> u64 {
-    if i == 0 {
-        return 0xFFFFFFFFFFFFFFFF
-    }
-    var rounds: u64 = 0
-    while rounds < 20000 {
-        if sched.tget(state, i, sched.T_STATE) == sched.S_ZOMBIE {
-            let code: u64 = sched.tget(state, i, sched.T_EXIT)
-            proc.reap(state, i)
-            return code
-        }
-        wm.poll(state)
-        wm.compose(state)
-        sched.sleep_ticks(state, 1)
-        rounds = rounds + 1
-    }
-    return 0xFFFFFFFFFFFFFFFE
-}
-
-// Was das Zeigegeraet in diesem Lauf WIRKLICH gemeldet hat. Die Zahlen
-// sind der einzige Weg, von aussen nachzuweisen, dass die ueber den
-// QEMU-Monitor eingespeisten Bewegungen angekommen sind.
-fn say_wm_input(state: u64) {
-    var s: [u8; 12] = "wminput: x=\0"
-    var s_y: [u8; 5] = "  y=\0"
-    var s_b: [u8; 7] = "  btn=\0"
-    var s_p: [u8; 11] = "  packets=\0"
-    var s_m: [u8; 9] = "  moves=\0"
-    var s_d: [u8; 9] = "  drops=\0"
-    var s_w: [u8; 9] = "  wheel=\0"
-    var s_i: [u8; 8] = "  irqs=\0"
-    var s_po: [u8; 9] = "  polls=\0"
-    var s_sp: [u8; 12] = "  spurious=\0"
-    var s_gs: [u8; 8] = "  gsi=\0\0"
-    var s_dn: [u8; 9] = "  downs=\0"
-    var s_mv: [u8; 12] = "  onmouse=\0\0"
-    var s_ht: [u8; 8] = "  hits=\0"
-    var s_e0: [u8; 7] = "  ev0=\0"
-    var s_e1: [u8; 7] = "  ev1=\0"
-    var s_z0: [u8; 6] = "  z0=\0"
-    var s_z1: [u8; 6] = "  z1=\0"
-    var s_k0: [u8; 9] = "  keys0=\0"
-    var s_k1: [u8; 9] = "  keys1=\0"
-    var s_wn: [u8; 13] = "wmafter: n=\0\0"
-    var s_wf: [u8; 9] = "  focus=\0"
-    var s_c: [u8; 10] = "  clicks=\0"
-    var s_s: [u8; 11] = "  status=\0\0"
-    serial.puts((&s[0]) as u64)
-    serial.dec(ps2m.x(state))
-    serial.puts((&s_y[0]) as u64)
-    serial.dec(ps2m.y(state))
+    usb.unplug_now(state)
     serial.puts((&s_b[0]) as u64)
-    serial.dec(ps2m.buttons(state))
+    serial.dec(kutil.yes(blk.present_on(state, blk.DEV_USB)))
+    serial.puts((&s_d[0]) as u64)
+    serial.dec(usb.count(state))
     serial.puts((&s_p[0]) as u64)
-    serial.dec(ps2m.packets(state))
-    serial.puts((&s_m[0]) as u64)
-    serial.dec(ps2m.moves(state))
-    serial.puts((&s_d[0]) as u64)
-    serial.dec(ps2m.drops(state))
-    serial.puts((&s_w[0]) as u64)
-    serial.dec(ps2m.wheel(state))
-    serial.puts((&s_i[0]) as u64)
-    serial.dec(ps2m.irqs(state))
-    serial.puts((&s_po[0]) as u64)
-    serial.dec(ps2m.polls(state))
-    serial.puts((&s_sp[0]) as u64)
-    serial.dec(ps2m.spurious(state))
-    serial.puts((&s_gs[0]) as u64)
-    serial.hex(apic.gsi_entry(state, 12))
-    serial.puts((&s_dn[0]) as u64)
-    serial.dec(wm.downs(state))
-    serial.puts((&s_mv[0]) as u64)
-    serial.dec(wm.moves_seen(state))
-    serial.puts((&s_ht[0]) as u64)
-    serial.dec(wm.hits_seen(state))
-    serial.puts((&s_e0[0]) as u64)
-    serial.dec(wm.ev_waiting(state, 0))
-    serial.puts((&s_e1[0]) as u64)
-    serial.dec(wm.ev_waiting(state, 1))
-    serial.puts((&s_z0[0]) as u64)
-    serial.dec(wm.win_z(state, 0))
-    serial.puts((&s_z1[0]) as u64)
-    serial.dec(wm.win_z(state, 1))
-    serial.puts((&s_k0[0]) as u64)
-    serial.dec(wm.win_keys(state, 0))
-    serial.puts((&s_k1[0]) as u64)
-    serial.dec(wm.win_keys(state, 1))
+    serial.dec(usb.unplugs(state))
     serial.nl()
-    // WIE VIELE FENSTER ES DANACH NOCH GIBT. Die Zeile `wm: windows=`
-    // weiter oben steht VOR der Wartezeit -- was mit der Maus geschlossen
-    // wurde, konnte sie nicht wissen.
-    serial.puts((&s_wn[0]) as u64)
-    serial.dec(wm.count(state))
-    serial.puts((&s_wf[0]) as u64)
-    serial.dec(wm.focus(state))
-    serial.puts((&s_c[0]) as u64)
-    serial.dec(ps2m.clicks(state))
-    serial.puts((&s_s[0]) as u64)
-    serial.hex(ps2m.status())
-    serial.nl()
-}
-
-fn say_font(state: u64, f: u64, px: u64, name: u64, s_font: u64, s_g: u64,
-    s_upm: u64, s_asc: u64, s_desc: u64, s_lh: u64, s_kp: u64, s_st: u64,
-    s_of: u64) {
-    if f >= ttf.MAX_FONTS {
-        return
-    }
-    serial.puts(s_font)
-    serial.puts(name)
-    serial.puts(s_g)
-    serial.dec(ttf.glyphs(state, f))
-    serial.puts(s_upm)
-    serial.dec(ttf.upm(state, f))
-    serial.puts(s_asc)
-    serial.dec(ttf.ascent(state, f, px) as u64)
-    serial.puts(s_desc)
-    serial.dec(ttf.descent(state, f, px) as u64)
-    serial.puts(s_lh)
-    serial.dec(ttf.line_height(state, f, px))
-    serial.puts(s_kp)
-    serial.dec(kern_pairs(state, f, px))
-    serial.puts(s_st)
-    serial.dec(ttf.selftest(state, f))
-    serial.puts(s_of)
-    serial.dec(ttf.selftest_max())
-    serial.nl()
-}
-
-// Wie viele der 95 Zeichenpaare dieser Schrift wirklich unterschnitten
-// werden -- eine Zahl statt der Behauptung "kann Unterschneidung".
-fn kern_pairs(state: u64, f: u64, px: u64) -> u64 {
-    var n: u64 = 0
-    var a: u64 = 0x20
-    while a <= 0x7E {
-        var b: u64 = 0x20
-        while b <= 0x7E {
-            if ttf.kern26(state, f, ttf.glyph_of(state, f, a),
-                ttf.glyph_of(state, f, b), px) != 0 {
-                n = n + 1
-            }
-            b = b + 1
-        }
-        a = a + 1
-    }
-    return n
-}
-
-// Eine Schriftdatei von der Platte in den Speicher und in den Leser.
-fn load_font(state: u64, pfad: u64) -> u64 {
-    if kstate.get(state, kstate.FS_READY) == 0 {
-        return ttf.MAX_FONTS
-    }
-    let ino: u64 = fs.path(state, pfad)
-    if ino == 0 {
-        return ttf.MAX_FONTS
-    }
-    let n: u64 = fs.inode_size(state, ino)
-    if n < 12 || n > 1048576 {
-        return ttf.MAX_FONTS
-    }
-    let rahmen: u64 = (n + mem.FRAME_SIZE - 1) / mem.FRAME_SIZE
-    let buf: u64 = mem.frame_run(state, rahmen)
-    if buf == 0 {
-        return ttf.MAX_FONTS
-    }
-    var off: u64 = 0
-    while off < n {
-        var c: u64 = n - off
-        if c > 4096 {
-            c = 4096
-        }
-        let got: u64 = fs.read_at(state, ino, off, buf + off, c)
-        if got == 0 {
-            off = n
-        } else {
-            off = off + got
-        }
-    }
-    return ttf.load_font(state, buf, n)
-}
-
-// DIE MESSUNG DIESER RUNDE, und sie hat zwei Teile:
-//
-//   1. ZUSAMMENSETZEN MIT UND OHNE BEREICHSVERFOLGUNG. Derselbe
-//      Bildschirm, dieselben Fenster, derselbe Zeitzaehler -- einmal
-//      ueber den ganzen Schirm und einmal ueber das Rechteck, das ein
-//      bewegter Zeiger schmutzig macht. Das ist die Zahl, die eine
-//      bedienbare Oberflaeche von einer unbedienbaren trennt.
-//   2. SCHRIFTRASTERUNG MIT UND OHNE ZWISCHENSPEICHER. Fuenfundneunzig
-//      Zeichen frisch gerastert gegen fuenfundneunzig aus dem Speicher.
-// EINE GLYPHE ALS TEXT AUF DIE SERIELLE LEITUNG.
-//
-// Der Rasterer sitzt im Kernel; ein Bildschirmfoto zeigt sein Ergebnis
-// erst, nachdem es durch Fenster, Zusammensetzung und Zweitpuffer
-// gelaufen ist. Wenn dort etwas fehlt, ist die erste Frage: liegt es am
-// Rasterer oder am Weg dahinter? Diese Ausgabe beantwortet sie -- sie
-// zeigt die Deckung, wie sie aus `ttf.glyph` herauskommt, und
-// `tools/wm/run.sh` haelt sie gegen `tools/ttf/raster.py`.
-fn glyph_sum(state: u64, slot: u64) -> u64 {
-    var acc: u64 = 2166136261
-    var i: u64 = 0
-    let n: u64 = ttf.g_w(state, slot) * ttf.g_h(state, slot)
-    while i < n {
-        let a: u64 = ttf.g_pixel(state, slot, i % ttf.g_w(state, slot),
-            i / ttf.g_w(state, slot))
-        acc = ((acc ^ a) *% 16777619) & 0xFFFFFFFF
-        i = i + 1
-    }
-    return acc
-}
-
-fn say_glyph(state: u64, f: u64, px: u64, c: u64) {
-    var s_g: [u8; 12] = "ttfglyph c=\0"
-    var s_px: [u8; 6] = "  px=\0"
-    var s_w: [u8; 5] = "  w=\0"
-    var s_h: [u8; 5] = "  h=\0"
-    var s_l: [u8; 8] = "  left=\0"
-    var s_t: [u8; 7] = "  top=\0"
-    var s_a: [u8; 7] = "  adv=\0"
-    var s_s: [u8; 7] = "  sum=\0"
-    var s_r: [u8; 10] = "ttfrow \0\0\0"
-    var stufen: [u8; 11] = " .:-=+*#%@\0"
-    let slot: u64 = ttf.glyph(state, f, c, px)
-    serial.puts((&s_g[0]) as u64)
-    serial.dec(c)
-    serial.puts((&s_px[0]) as u64)
-    serial.dec(px)
-    serial.puts((&s_w[0]) as u64)
-    serial.dec(ttf.g_w(state, slot))
-    serial.puts((&s_h[0]) as u64)
-    serial.dec(ttf.g_h(state, slot))
-    serial.puts((&s_l[0]) as u64)
-    serial.dec(ttf.g_left(state, slot) as u64)
-    serial.puts((&s_t[0]) as u64)
-    serial.dec(ttf.g_top(state, slot) as u64)
-    serial.puts((&s_a[0]) as u64)
-    serial.dec(ttf.g_adv(state, slot) as u64)
-    // EINE PRUEFSUMME UEBER DIE ROHEN DECKUNGSWERTE. Die Zeilen darunter
-    // sind auf zehn Stufen gerundet, damit ein Mensch sie lesen kann;
-    // diese Zahl ist es nicht. `tools/ttf/raster.py` rechnet dieselbe
-    // Summe aus seiner eigenen Rasterung -- stimmen die beiden, sind die
-    // zwei Fassungen des Rasterers OKTETT FUER OKTETT einig.
-    serial.puts((&s_s[0]) as u64)
-    serial.dec(glyph_sum(state, slot))
-    serial.nl()
-    var y: u64 = 0
-    while y < ttf.g_h(state, slot) {
-        serial.puts((&s_r[0]) as u64)
-        serial.dec(y)
-        serial.put(32 as u8)
-        serial.put(124 as u8)
-        var x: u64 = 0
-        while x < ttf.g_w(state, slot) {
-            let a: u64 = ttf.g_pixel(state, slot, x, y)
-            serial.put(stufen[(a * 10 / 256) as usize])
-            x = x + 1
-        }
-        serial.put(124 as u8)
-        serial.nl()
-        y = y + 1
-    }
-}
-
-fn wm_bench(state: u64, f: u64, px: u64) {
-    var s_c: [u8; 23] = "wmbench: compose full=\0"
-    var s_us: [u8; 4] = " us\0"
-    var s_sm: [u8; 10] = "  small=\0\0"
-    var s_fa: [u8; 11] = "  factor=\0\0"
-    var s_g: [u8; 21] = "wmbench: glyph cold=\0"
-    var s_wa: [u8; 9] = "  warm=\0\0"
-    var s_pc: [u8; 12] = " (je 95 Zn)\0"
-
-    let hz: u64 = apic.tsc_hz(state)
-    if hz == 0 {
-        return
-    }
-    // 1a. der ganze Schirm
-    var t: u64 = apic.tsc()
-    var i: u64 = 0
-    while i < K10_RUNDEN {
-        wm.damage_all(state)
-        wm.compose(state)
-        i = i + 1
-    }
-    let voll: u64 = us_of(state, apic.tsc() - t) / K10_RUNDEN
-    // 1b. nur das Rechteck eines Zeigers (12x18) -- das, was eine
-    //     Zeigerbewegung wirklich schmutzig macht.
-    t = apic.tsc()
-    i = 0
-    while i < K10_RUNDEN {
-        wm.damage(state, 300, 300, 312, 318)
-        wm.compose(state)
-        i = i + 1
-    }
-    var klein: u64 = us_of(state, apic.tsc() - t) / K10_RUNDEN
-    serial.puts((&s_c[0]) as u64)
-    serial.dec(voll)
-    serial.puts((&s_us[0]) as u64)
-    serial.puts((&s_sm[0]) as u64)
-    serial.dec(klein)
-    serial.puts((&s_us[0]) as u64)
-    serial.puts((&s_fa[0]) as u64)
-    if klein == 0 {
-        klein = 1
-    }
-    serial.dec(voll * 100 / klein)
-    serial.nl()
-
-    // 2. die Schriftrasterung
-    if f < ttf.MAX_FONTS {
-        let kalt_px: u64 = px + 7 // eine Groesse, die noch niemand hat
-        t = apic.tsc()
-        var c: u64 = 0x20
-        while c <= 0x7E {
-            ttf.glyph(state, f, c, kalt_px)
-            c = c + 1
-        }
-        let kalt: u64 = us_of(state, apic.tsc() - t)
-        t = apic.tsc()
-        c = 0x20
-        while c <= 0x7E {
-            ttf.glyph(state, f, c, kalt_px)
-            c = c + 1
-        }
-        var warm: u64 = us_of(state, apic.tsc() - t)
-        serial.puts((&s_g[0]) as u64)
-        serial.dec(kalt)
-        serial.puts((&s_us[0]) as u64)
-        serial.puts((&s_wa[0]) as u64)
-        serial.dec(warm)
-        serial.puts((&s_us[0]) as u64)
-        serial.puts((&s_fa[0]) as u64)
-        if warm == 0 {
-            warm = 1
-        }
-        serial.dec(kalt * 100 / warm)
-        serial.puts((&s_pc[0]) as u64)
-        serial.nl()
-    }
-}
-
-// =============================================== RUNDE TILING: die Buehne
-//
-// Was hier steht, ist NICHT der Fensterbaum -- der steht in
-// `kernel/tile.fi`. Hier steht, was gemessen und gemeldet wird, und in
-// welcher Reihenfolge: erst die Tastenbelegung aus der Datei, dann der
-// Selbsttest, dann die Zeiten, dann der Zufallstest. Alle drei bauen
-// sich eigene Baeume und raeumen sie wieder ab; danach ist der Baum leer
-// und der Fensterserver kann ihn benutzen.
-//
-// TAUSEND LAEUFE JE ZAHL, und das ist der Grund, warum die Zahlen in
-// NANOSEKUNDEN dastehen: `us_of` rechnet in ganzen Mikrosekunden, und
-// eine Neuberechnung fuer zwei Fenster ist schneller als das. Bei
-// tausend Laeufen ist die Mikrosekundenzahl des GANZEN Laufs zugleich
-// die Nanosekundenzahl EINES Laufs -- ohne eine einzige Division, die
-// etwas beschoenigen koennte.
-const TILE_RUNDEN: u64 = 1000
-
-fn tile_conf(state: u64) -> u64 {
-    if kstate.get(state, kstate.FS_READY) == 0 {
-        return 0
-    }
-    var pfad: [u8; 31] = "/users/osum/config/tiling.conf\0"
-    let ino: u64 = fs.path(state, (&pfad[0]) as u64)
-    if ino == 0 {
-        return 0
-    }
-    let n: u64 = fs.inode_size(state, ino)
-    if n == 0 || n > 4000 {
-        return 0
-    }
-    let buf: u64 = mem.frame_run(state, 1)
-    if buf == 0 {
-        return 0
-    }
-    var off: u64 = 0
-    while off < n {
-        var c: u64 = n - off
-        if c > 4096 {
-            c = 4096
-        }
-        let got: u64 = fs.read_at(state, ino, off, buf + off, c)
-        if got == 0 {
-            off = n
-        } else {
-            off = off + got
-        }
-    }
-    let k: u64 = tile.bind_parse(state, buf, n)
-    mem.frame_free_run(state, buf, 1)
-    return k
-}
-
-fn tile_build(state: u64, n: u64, w: u64, h: u64) {
-    tile.init(state, 0, 0, w, h)
-    var k: u64 = 0
-    while k < n {
-        k = k + 1
-        tile.insert(state, 0)
-    }
-}
-
-fn tile_time(state: u64, n: u64, w: u64, h: u64, pruefen: bool) -> u64 {
-    tile_build(state, n, w, h)
-    let t: u64 = apic.tsc()
-    var i: u64 = 0
-    while i < TILE_RUNDEN {
-        if pruefen {
-            tile.check(state)
-        } else {
-            tile.relayout(state)
-        }
-        i = i + 1
-    }
-    return us_of(state, apic.tsc() - t)
-}
-
-fn tile_stage(state: u64, w: u64, h: u64) {
-    var s_t: [u8; 7] = "tile: \0"
-    var s_x: [u8; 2] = "x\0"
-    var s_nd: [u8; 10] = "  nodes=\0\0"
-    var s_lv: [u8; 12] = "  maxleaf=\0\0"
-    var s_bd: [u8; 10] = "  binds=\0\0"
-    var s_st: [u8; 11] = "selftest \0\0"
-    var s_of: [u8; 4] = "/\0\0\0"
-    var s_be: [u8; 20] = "tile: bench relay2=\0"
-    var s_r8: [u8; 10] = "  relay8=\0"
-    var s_r32: [u8; 11] = "  relay32=\0"
-    var s_ck: [u8; 11] = "  check32=\0"
-    var s_ns: [u8; 4] = " ns\0"
-    var s_fz: [u8; 18] = "tile: fuzz ops=\0\0\0"
-    var s_vi: [u8; 15] = "  violations=\0\0"
-    var s_pk: [u8; 9] = "  peak=\0\0"
-    var s_ch: [u8; 11] = "  checks=\0\0"
-    var s_nos: [u8; 22] = "  (notiledirty: an)\0\0\0"
-
-    serial.puts((&s_t[0]) as u64)
-    serial.dec(w)
-    serial.puts((&s_x[0]) as u64)
-    serial.dec(h)
-    serial.puts((&s_nd[0]) as u64)
-    serial.dec(tile.MAX_NODES)
-    serial.puts((&s_lv[0]) as u64)
-    serial.dec(tile.MAX_LEAVES)
-    serial.nl()
-
-    serial.puts((&s_t[0]) as u64)
-    serial.puts((&s_st[0]) as u64)
-    serial.dec(tile.selftest(state))
-    serial.puts((&s_of[0]) as u64)
-    serial.dec(tile.selftest_max())
-    var s_fb: [u8; 11] = "  failed=\0\0"
-    serial.puts((&s_fb[0]) as u64)
-    serial.hex(tile.failbits(state))
-    serial.nl()
-
-    // DIE TASTENBELEGUNG KOMMT NACH DEM SELBSTTEST -- der raeumt die
-    // Tabelle am Ende ab, und eine Belegung, die danach leer ist, waere
-    // eine, die es nur auf dem Papier gibt.
-    let nb: u64 = tile_conf(state)
-    serial.puts((&s_t[0]) as u64)
-    serial.puts((&s_bd[0]) as u64 + 2)
-    serial.dec(nb)
-    serial.nl()
-
-    if apic.tsc_hz(state) != 0 {
-        let r2: u64 = tile_time(state, 2, w, h, false)
-        let r8: u64 = tile_time(state, 8, w, h, false)
-        let r32: u64 = tile_time(state, 32, w, h, false)
-        let c32: u64 = tile_time(state, 32, w, h, true)
-        serial.puts((&s_be[0]) as u64)
-        serial.dec(r2)
-        serial.puts((&s_ns[0]) as u64)
-        serial.puts((&s_r8[0]) as u64)
-        serial.dec(r8)
-        serial.puts((&s_ns[0]) as u64)
-        serial.puts((&s_r32[0]) as u64)
-        serial.dec(r32)
-        serial.puts((&s_ns[0]) as u64)
-        serial.puts((&s_ck[0]) as u64)
-        serial.dec(c32)
-        serial.puts((&s_ns[0]) as u64)
-        serial.nl()
-    }
-
-    if kstate.mode_on(state, kstate.M_TILEFUZZ) {
-        tile.init(state, 0, 0, w, h)
-        let v: u64 = tile.fuzz(state, 10000)
-        serial.puts((&s_fz[0]) as u64)
-        serial.dec(10000)
-        serial.puts((&s_vi[0]) as u64)
-        serial.dec(v)
-        serial.puts((&s_pk[0]) as u64)
-        serial.dec(tile.peak(state))
-        serial.puts((&s_ch[0]) as u64)
-        serial.dec(tile.checks(state))
-        serial.nl()
-    }
-
-    tile.init(state, 0, 0, w, h)
-    if kstate.mode_on(state, kstate.M_NOTILEDIRTY) {
-        tile.set_nosub(state, true)
-        serial.puts((&s_t[0]) as u64)
-        serial.puts((&s_nos[0]) as u64)
-        serial.nl()
-    }
-}
-
-// ------------------------------------------ die drei Anordnungen fuers Foto
-//
-// VIER FENSTER, und zwar in einer Anordnung, die sich AUSRECHNEN laesst:
-// erst waagerecht in zwei Haelften, dann jede Haelfte senkrecht. Das
-// ergibt vier Kacheln zu 400x300 an den Stellen (0,0), (400,0), (0,300)
-// und (400,300) -- Zahlen, die `tools/gfx/checkshot.py` Bildpunkt fuer
-// Bildpunkt nachrechnen kann. Mit `tiletabs` werden aus denselben vier
-// Fenstern vier REITER in einem Container, mit `tilerot` wird die
-// Anordnung um eine Vierteldrehung gedreht.
-fn tile_shot(state: u64, w: u64, h: u64) {
-    var t1: [u8; 6] = "Eins\0\0"
-    var t2: [u8; 6] = "Zwei\0\0"
-    var t3: [u8; 6] = "Drei\0\0"
-    var t4: [u8; 6] = "Vier\0\0"
-    var s_w: [u8; 11] = "tile: win=\0"
-    var s_k: [u8; 3] = " \0\0"
-    var s_c: [u8; 2] = ",\0"
-    var s_x: [u8; 2] = "x\0"
-    var s_d: [u8; 19] = "tile: dirty split=\0"
-    var s_cl: [u8; 9] = "  close=\0"
-    var s_sc: [u8; 10] = "  screen=\0"
-    var s_tb: [u8; 13] = "tile: tabs=\0\0"
-    var s_hd: [u8; 10] = "  hidden=\0"
-
-    let tabs: bool = kstate.mode_on(state, kstate.M_TILETABS)
-    let rot: bool = kstate.mode_on(state, kstate.M_TILEROT)
-    var a: u64 = wm.MAX_WIN
-    var b: u64 = wm.MAX_WIN
-    var c: u64 = wm.MAX_WIN
-    var d: u64 = wm.MAX_WIN
-    // Das Terminalfenster bleibt fuer das Foto AUSSERHALB des Baumes --
-    // sonst zeigt das Bild fuenf Kacheln und die Aufgabe verlangt vier.
-    // Es schwebt weiter an seinem Platz und liegt unter den vier neuen.
-    var f: u64 = 0
-    while f < wm.MAX_WIN {
-        if wm.valid(state, f) && wm.tiled(state, f) {
-            // `tile_float` und nicht `tile_release`: das Fenster soll an
-            // seinen ALTEN Platz zurueck. Bliebe es dort liegen, wo der
-            // Baum es hingelegt hat (ueber dem ganzen Schirm), verdeckte
-            // es die Reiterzeile -- die wird unter den Fenstern gemalt,
-            // weil dieser Fensterserver noch keine Ebenen kennt.
-            wm.tile_float(state, f)
-        }
-        f = f + 1
-    }
-    a = wm.create(state, 0, 0, 0, w / 2, h / 2, wm.K_RAW, (&t1[0]) as u64)
-    b = wm.create(state, 0, 0, 0, w / 2, h / 2, wm.K_RAW, (&t2[0]) as u64)
-    c = wm.create(state, 0, 0, 0, w / 2, h / 2, wm.K_RAW, (&t3[0]) as u64)
-    d = wm.create(state, 0, 0, 0, w / 2, h / 2, wm.K_RAW, (&t4[0]) as u64)
-    // ERST DIE MESSUNG, DANN DAS BILD, und in dieser Reihenfolge aus
-    // einem Grund: die Messung nimmt ein Fenster aus dem Baum und haengt
-    // es wieder hinein, und danach steht der Baum anders da. Also wird
-    // die Anordnung fuer das Foto DANACH noch einmal hergestellt. Ein
-    // Foto, das eine andere Anordnung zeigt als die Zeilen darueber,
-    // waere schlimmer als gar keins.
-    tile_arrange(state, a, b, c, d, false)
-    let paar: u64 = tile_dirty(state)
-    tile_arrange(state, a, b, c, d, tabs)
-    if rot {
-        tile.rotate(state, tile.root(state), 1)
-        wm.tile_apply(state)
-    }
-    wm.damage_all(state)
-    // Jedes Fenster bekommt eine eigene Farbe -- das ist es, was auf dem
-    // Foto nachgerechnet wird.
-    tile_paint(state, a, fb.rgb(state, 0xC0, 0x30, 0x30))
-    tile_paint(state, b, fb.rgb(state, 0x30, 0xB0, 0x50))
-    tile_paint(state, c, fb.rgb(state, 0x30, 0x60, 0xE0))
-    tile_paint(state, d, fb.rgb(state, 0xE0, 0xC0, 0x30))
-    tile_say(state, a, (&s_w[0]) as u64, (&s_k[0]) as u64,
-        (&s_c[0]) as u64, (&s_x[0]) as u64)
-    tile_say(state, b, (&s_w[0]) as u64, (&s_k[0]) as u64,
-        (&s_c[0]) as u64, (&s_x[0]) as u64)
-    tile_say(state, c, (&s_w[0]) as u64, (&s_k[0]) as u64,
-        (&s_c[0]) as u64, (&s_x[0]) as u64)
-    tile_say(state, d, (&s_w[0]) as u64, (&s_k[0]) as u64,
-        (&s_c[0]) as u64, (&s_x[0]) as u64)
-    var versteckt: u64 = 0
-    var k: u64 = 0
-    while k < wm.MAX_WIN {
-        if wm.valid(state, k) && wm.win_tabbed(state, k) {
-            versteckt = versteckt + 1
-        }
-        k = k + 1
-    }
-    serial.puts((&s_tb[0]) as u64)
-    serial.dec(bnum(tabs))
-    serial.puts((&s_hd[0]) as u64)
-    serial.dec(versteckt)
-    serial.nl()
-    // DIE MESSUNG, UM DIE ES GEHT: wie viele Bildpunkte kostet ein
-    // Teilen, und wie viele ein Schliessen? Gemessen wird der ZAEHLER
-    // des Fensterservers, nicht eine Schaetzung -- `compose` addiert die
-    // Flaeche, die es wirklich zusammengesetzt hat.
-    serial.puts((&s_d[0]) as u64)
-    serial.dec(paar & 0xFFFFFFFF)
-    serial.puts((&s_cl[0]) as u64)
-    serial.dec(paar >> 32)
-    serial.puts((&s_sc[0]) as u64)
-    serial.dec(w * h)
-    serial.nl()
-}
-
-// VIER FENSTER IN EINE BESTIMMTE ANORDNUNG BRINGEN, und zwar
-// wiederholbar: erst alle vier aus dem Baum nehmen, dann in fester
-// Reihenfolge wieder hinein. Erst waagerecht in zwei Haelften, dann jede
-// Haelfte senkrecht -- vier Kacheln zu 400x300. Mit `tabs` wird aus der
-// Wurzel ein Reitercontainer, und die beiden letzten kommen als REITER
-// dazu statt zu teilen; genau das tut i3, wenn ein Fenster in einem
-// Reitercontainer aufgeht.
-fn tile_arrange(state: u64, a: u64, b: u64, c: u64, d: u64, tabs: bool) {
-    var k: u64 = 0
-    while k < wm.MAX_WIN {
-        if wm.valid(state, k) {
-            wm.tile_release(state, k)
-        }
-        k = k + 1
-    }
-    tile.set_next_split(state, 0)
-    wm.tile_take(state, a)
-    tile.set_next_split(state, 1)
-    wm.tile_take(state, b)
-    if tabs {
-        tile.set_layout(state, tile.root(state), tile.LAY_TABBED)
-        wm.tile_apply(state)
-        tile.set_next_split(state, 0)
-        wm.tile_take(state, c)
-        tile.set_next_split(state, 0)
-        wm.tile_take(state, d)
-    } else {
-        wm.set_focus(state, b)
-        tile.set_next_split(state, 2)
-        wm.tile_take(state, c)
-        wm.set_focus(state, a)
-        tile.set_next_split(state, 2)
-        wm.tile_take(state, d)
-    }
-    wm.tile_apply(state)
-    wm.damage_all(state)
-}
-
-fn tile_paint(state: u64, i: u64, farbe: u64) {
-    if i >= wm.MAX_WIN {
-        return
-    }
-    wm.fill(state, i, 0, 0, wm.win_w(state, i), wm.win_h(state, i), farbe)
-}
-
-fn tile_say(state: u64, i: u64, sw: u64, sk: u64, sc: u64, sx: u64) {
-    if i >= wm.MAX_WIN {
-        return
-    }
-    serial.puts(sw)
-    serial.dec(i)
-    serial.puts(sk)
-    serial.dec(wm.win_x(state, i) as u64)
-    serial.puts(sc)
-    serial.dec(wm.win_y(state, i) as u64)
-    serial.puts(sk)
-    serial.dec(wm.outer_w(state, i))
-    serial.puts(sx)
-    serial.dec(wm.outer_h(state, i))
-    serial.nl()
-}
-
-// Schliessen und wieder Teilen, jedes fuer sich gemessen. Der Rueckgabe
-// traegt beide Zahlen: Teilen unten, Schliessen oben.
-fn tile_dirty(state: u64) -> u64 {
-    let f: u64 = wm.focus(state)
-    if f >= wm.MAX_WIN || !wm.tiled(state, f) {
-        return 0
-    }
-    wm.damage_all(state)
-    wm.compose(state)
-    let p0: u64 = wm.pixels(state)
-    wm.tile_release(state, f)
-    wm.compose(state)
-    let zu: u64 = wm.pixels(state) - p0
-    wm.damage_all(state)
-    wm.compose(state)
-    let p1: u64 = wm.pixels(state)
-    wm.tile_take(state, f)
-    wm.compose(state)
-    let auf: u64 = wm.pixels(state) - p1
-    wm.damage_all(state)
-    wm.compose(state)
-    return (zu << 32) | (auf & 0xFFFFFFFF)
 }
