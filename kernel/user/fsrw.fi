@@ -1,0 +1,193 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/fsrw.fi -- RUNDE FSROBUST: DAS PROGRAMM, DEM DER STROM
+// AUSGEHT.
+//
+// Es schreibt in einer Schleife, bis jemand es abschiesst -- und es
+// schreibt so, dass sich HINTERHER sagen laesst, ob das Dateisystem
+// dabei Schaden genommen hat. Drei Dinge laufen nebeneinander:
+//
+//   /d/roll   VIERTAUSENDNEUNUNDNEUNZIG OKTETTE, JEDE RUNDE NEU, an
+//             DIESELBE Stelle. Das ist der Fall, an dem ein Journal,
+//             das nur die Verwaltung sichert (ext3 nennt es
+//             "data=ordered"), scheitert: die Daten gehen an ihren
+//             alten Platz, und ein Stromausfall mittendrin hinterlaesst
+//             eine Datei, die vorne neu und hinten alt ist. Die ersten
+//             acht Oktette tragen die Rundennummer, die restlichen ein
+//             Muster, das AUS IHR ausgerechnet ist -- eine gemischte
+//             Datei faellt damit auf, statt wie eine gueltige
+//             auszusehen.
+//   /d/fNNNN  EINE NEUE DATEI JE RUNDE, in EINEM `write` geschrieben.
+//             Erlaubt sind hinterher genau drei Zustaende: es gibt sie
+//             nicht, es gibt sie mit null Oktetten (angelegt, noch
+//             nicht beschrieben -- `create` und `write` sind zwei
+//             Systemaufrufe, und das ist in jedem Unix so), oder es
+//             gibt sie VOLLSTAENDIG. Alles dazwischen ist ein Schaden.
+//   /d/count  DIE HOECHSTE RUNDE, DIE GANZ FERTIG WURDE. Sie wird als
+//             LETZTES geschrieben. Was darunter liegt, muss danach
+//             vollstaendig dasein -- das ist die Zusage, an der sich
+//             das Dateisystem messen laesst.
+//
+// Es wird NICHT `sync` gerufen. Das ist Absicht: gemessen werden soll,
+// was ein gewoehnliches Programm hinterlaesst, und ein gewoehnliches
+// Programm spuelt nicht nach jedem Schreiben.
+//
+//   fsrw <n>     n Runden, dann fertig (fuer den Lauf ohne Abschuss)
+//   fsrw endlos  bis jemand den Strom abdreht
+
+profile kernel
+
+import ulib
+import libc.io
+import libc.errno
+import libc.kcall
+
+export { u_start }
+
+const ROLL: u64 = 4096
+
+static mut roll: [u8; 4096] = [0 as u8; 4096];
+static mut dat: [u8; 4096] = [0 as u8; 4096];
+static mut zahl: [u8; 32] = [0 as u8; 32];
+static mut pfad: [u8; 32] = [0 as u8; 32];
+
+// Das Muster. Dieselbe Rechnung steht in `tools/fsrobust/pruef.py` --
+// zwei Umsetzungen derselben Zahl, wie ueberall in diesem Baum, damit
+// ein Fehler nicht auf beiden Seiten derselbe ist.
+fn muster(g: u64, k: u64) -> u64 {
+    // `*%` und `+%`: die Rechnung LAEUFT UEBER, und das ist der Sinn --
+    // sie soll aus benachbarten Stellen weit auseinanderliegende Werte
+    // machen. Firn haelt einen ueberlaufenden `*` fuer einen Fehler und
+    // hat damit ueberall sonst recht.
+    return ((g *% 2654435761) +% (k *% 40503)) % 251;
+}
+
+// Eine Zahl als Text in `zahl`. Rueckgabe: wie viele Ziffern.
+fn setze_zahl(v: u64) -> u64 {
+    if v == 0 {
+        zahl[(0) as usize] = 48 as u8;
+        zahl[(1) as usize] = 0 as u8;
+        return 1;
+    }
+    var stellen: u64 = 0;
+    var y: u64 = v;
+    while y > 0 {
+        stellen = stellen + 1;
+        y = y / 10;
+    }
+    let n: u64 = stellen;
+    var x: u64 = v;
+    while stellen > 0 {
+        zahl[(stellen - 1) as usize] = (48 + (x % 10)) as u8;
+        x = x / 10;
+        stellen = stellen - 1;
+    }
+    zahl[(n) as usize] = 0 as u8;
+    return n;
+}
+
+// Text zu Zahl. `ulib` hat keine, und eine falsche Zahl waere hier ein
+// Test, der etwas anderes misst, als er sagt.
+fn lies_zahl(p: u64) -> u64 {
+    var v: u64 = 0;
+    var i: u64 = 0;
+    var c: u64 = __mmio_read8((p + i) as *mut u8) as u64;
+    while c >= 48 && c <= 57 {
+        v = v * 10 + (c - 48);
+        i = i + 1;
+        c = __mmio_read8((p + i) as *mut u8) as u64;
+    }
+    return v;
+}
+
+fn u_start(args: u64) -> u64 {
+    var s_los: [u8; 10] = "fsrw: los\0";
+    var s_fertig: [u8; 14] = "fsrw: fertig=\0";
+    var p_d: [u8; 3] = "/d\0";
+    var p_roll: [u8; 8] = "/d/roll\0";
+    var p_count: [u8; 9] = "/d/count\0";
+    var p_f: [u8; 4] = "/d/\0";
+    var w_endlos: [u8; 7] = "endlos\0";
+
+    io.make_dir((&p_d[0 as usize]) as u64);
+
+    var runden: u64 = 20;
+    var endlos: bool = false;
+    let argc: u64 = ulib.arg_count(args);
+    if argc > 1 {
+        let a: u64 = ulib.arg_at(args, 1);
+        if ulib.streq(a, (&w_endlos[0 as usize]) as u64) {
+            endlos = true;
+        } else {
+            runden = lies_zahl(a);
+        }
+    }
+
+    // Die Rolldatei einmal anlegen und offen halten. Jede Runde geht
+    // dann als EIN `write` an dieselbe Stelle -- genau der Fall, um den
+    // es geht.
+    let rf: u64 = io.open((&p_roll[0 as usize]) as u64, kcall.O_RDWR);
+    var rfd: u64 = rf;
+    if errno.failed(rf) {
+        rfd = io.create((&p_roll[0 as usize]) as u64);
+    }
+    if errno.failed(rfd) {
+        return 1;
+    }
+
+    ulib.say((&s_los[0 as usize]) as u64);
+    ulib.nl();
+
+    var g: u64 = 1;
+    var weiter: bool = true;
+    while weiter {
+        // ---------------------------------------------- 1. die Rolldatei
+        var i: u64 = 0;
+        while i < 8 {
+            roll[(i) as usize] = ((g >> (i * 8)) & 255) as u8;
+            i = i + 1;
+        }
+        i = 8;
+        while i < ROLL {
+            roll[(i) as usize] = muster(g, i) as u8;
+            i = i + 1;
+        }
+        io.seek(rfd, 0, 0);
+        io.write(rfd, (&roll[0 as usize]) as u64, ROLL);
+
+        // ------------------------------------------- 2. die neue Datei
+        // Laenge 1024..4095, aus der Rundennummer ausgerechnet.
+        let len: u64 = 1024 + (g * 617) % 3072;
+        i = 0;
+        while i < len {
+            dat[(i) as usize] = muster(g + 1000000, i) as u8;
+            i = i + 1;
+        }
+        ulib.strcpy((&pfad[0 as usize]) as u64, (&p_f[0 as usize]) as u64);
+        setze_zahl(g);
+        ulib.strcat((&pfad[0 as usize]) as u64, (&zahl[0 as usize]) as u64);
+        let df: u64 = io.create((&pfad[0 as usize]) as u64);
+        if !errno.failed(df) {
+            io.write(df, (&dat[0 as usize]) as u64, len);
+            io.close(df);
+        }
+
+        // ------------------------------------------------ 3. der Zaehler
+        // ZULETZT. Was hier steht, muss hinterher vollstaendig dasein.
+        let cf: u64 = io.open((&p_count[0 as usize]) as u64, ulib.O_MAKE);
+        if !errno.failed(cf) {
+            let n: u64 = setze_zahl(g);
+            io.write(cf, (&zahl[0 as usize]) as u64, n);
+            io.close(cf);
+        }
+
+        if !endlos && g >= runden {
+            weiter = false;
+        }
+        g = g + 1;
+    }
+    io.close(rfd);
+    ulib.say((&s_fertig[0 as usize]) as u64);
+    ulib.sayu(g - 1);
+    ulib.nl();
+    return 0;
+}
