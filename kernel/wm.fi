@@ -85,6 +85,10 @@ export {
     work_h, recalc_work, maximize, is_max, struts, workcalcs,
     set_nostrut, nostrut,
     set_deco_colour, deco_rgb, deco_writes, DECO_SLOTS,
+    // RUNDE PAINT -- die Form des Fensters und ihr Preis.
+    set_form, form, form_writes, shadow_px, aa_px, paint_reset,
+    FORM_SLOTS, FM_RADIUS, FM_SHADOW, FM_SHADOW_R, FM_SHADOW_C,
+    RADIUS_MAX, SHADOW_MAX,
     DK_FRAME, DK_TITLE, DK_TEXT, DK_FRAME_ON, DK_TITLE_ON, DK_TEXT_ON,
     DK_CLOSE, DK_CLOSE_MARK, DK_DESK, DK_TERM_FG, DK_TERM_BG,
     fill, text, blit_in, flush_win, hit,
@@ -590,6 +594,325 @@ fn set_deco_colour(state: u64, i: u64, v: u64) -> bool {
     return true
 }
 
+// ==================================================== RUNDE PAINT
+//
+// DIE FORM DES FENSTERS. Vier Zahlen, gesetzt von dem, der auch die
+// Farben setzt, gelesen von `paint_win`.
+//
+// Wie bei den Farben wird WERT + 1 abgelegt: null heisst "nie gesetzt".
+// Der Rueckfall ist ECKIG UND OHNE SCHATTEN, also genau das Bild, das
+// dieses System vor dieser Runde gemalt hat. Eine Maschine, deren
+// Taskleiste noch nicht laeuft, sieht damit aus wie immer und nicht
+// wie ein halb gemaltes Fenster.
+fn form(state: u64, i: u64) -> u64 {
+    if i >= FORM_SLOTS {
+        return 0
+    }
+    let v: u64 = gs(state, S_FORM + i * 8)
+    if v == 0 {
+        return 0
+    }
+    return v - 1
+}
+
+fn set_form(state: u64, i: u64, v: u64) -> bool {
+    if i >= FORM_SLOTS {
+        return false
+    }
+    var w: u64 = v
+    if i == FM_RADIUS && w > RADIUS_MAX {
+        w = RADIUS_MAX
+    }
+    if i == FM_SHADOW && w > 100 {
+        w = 100
+    }
+    if i == FM_SHADOW_R && w > SHADOW_MAX {
+        w = SHADOW_MAX
+    }
+    if i == FM_SHADOW_C {
+        w = w & RGB24
+    }
+    ss(state, S_FORM + i * 8, w + 1)
+    ss(state, S_FORMN, gs(state, S_FORMN) + 1)
+    return true
+}
+
+fn form_writes(state: u64) -> u64 {
+    return gs(state, S_FORMN)
+}
+
+fn shadow_px(state: u64) -> u64 {
+    return gs(state, S_SHADOWPX)
+}
+
+fn aa_px(state: u64) -> u64 {
+    return gs(state, S_AAPX)
+}
+
+fn paint_reset(state: u64) {
+    ss(state, S_SHADOWPX, 0)
+    ss(state, S_AAPX, 0)
+}
+
+// DIE DECKUNG EINES ECKPUNKTES, sechzehnfach abgetastet.
+//
+// DIESELBE RECHNUNG WIE `wlibc.corner_cov` IN RING 3, und das ist keine
+// Bequemlichkeit: die Widget-Bibliothek malt die runde Ecke eines
+// Knopfes, der Server die runde Ecke des Fensters, und wenn die beiden
+// verschieden runden, sieht man in einem Dialog zwei verschiedene
+// Kruemmungen nebeneinander. `tools/paint/corners.py` haelt beide
+// Fassungen Bildpunkt fuer Bildpunkt gegeneinander.
+//
+// (dx, dy) ist der Abstand der OBEREN LINKEN Ecke des Bildpunktes vom
+// Mittelpunkt des Eckkreises, in ganzen Bildpunkten. Zwei billige
+// Abkuerzungen tragen die grosse Mehrheit der Punkte: liegt die FERNE
+// Ecke des Bildpunktes noch im Kreis, ist er ganz drin; liegt die NAHE
+// schon draussen, ist er ganz draussen. Nur der schmale Ring dazwischen
+// wird wirklich abgetastet, und nur der zaehlt in `aa_px`.
+fn corner_cov(state: u64, dx: u64, dy: u64, r: u64) -> u64 {
+    if r == 0 {
+        return 255
+    }
+    let rr: u64 = r *% r
+    if (dx + 1) * (dx + 1) + (dy + 1) * (dy + 1) <= rr {
+        return 255
+    }
+    if dx * dx + dy * dy >= rr {
+        return 0
+    }
+    var hits: u64 = 0
+    var sy: u64 = 0
+    while sy < 4 {
+        var sx: u64 = 0
+        while sx < 4 {
+            let px8: u64 = dx *% 8 +% sx *% 2 +% 1
+            let py8: u64 = dy *% 8 +% sy *% 2 +% 1
+            if px8 *% px8 +% py8 *% py8 <= (r *% 8) *% (r *% 8) {
+                hits = hits + 1
+            }
+            sx = sx + 1
+        }
+        sy = sy + 1
+    }
+    ss(state, S_AAPX, gs(state, S_AAPX) + 1)
+    return hits * 255 / 16
+}
+
+// Ein Rechteck, auf den schmutzigen Bereich beschnitten. Der Beschnitt
+// steht EINMAL hier und nicht sechsmal in `paint_win`.
+fn fill_clip(state: u64, x: i64, y: i64, w: i64, h: i64, farbe: u64,
+    cx0: i64, cy0: i64, cx1: i64, cy1: i64) {
+    let ax0: i64 = imax(x, cx0)
+    let ay0: i64 = imax(y, cy0)
+    let ax1: i64 = imin(x + w, cx1)
+    let ay1: i64 = imin(y + h, cy1)
+    if ax1 <= ax0 || ay1 <= ay0 || ax1 <= 0 || ay1 <= 0 {
+        return
+    }
+    fb.fill(state, imax(ax0, 0) as u64, imax(ay0, 0) as u64,
+        (ax1 - imax(ax0, 0)) as u64, (ay1 - imax(ay0, 0)) as u64, farbe)
+}
+
+// Ein GEMISCHTER Bildpunkt, beschnitten. `a == 0` und `a == 255` gehen
+// durch `fb.pixel_a`, das beide Abkuerzungen selbst kennt.
+fn px_clip(state: u64, x: i64, y: i64, farbe: u64, a: u64,
+    cx0: i64, cy0: i64, cx1: i64, cy1: i64) {
+    if x < cx0 || y < cy0 || x >= cx1 || y >= cy1 || x < 0 || y < 0 {
+        return
+    }
+    fb.pixel_a(state, x as u64, y as u64, farbe, a)
+}
+
+// EINE GEFUELLTE FLAECHE MIT RUNDEN ECKEN, direkt in den Bildpuffer.
+//
+// r == 0 ist Aufruf fuer Aufruf das alte `fill_clip`, und das ist keine
+// Optimierung, sondern die Zusage: auf `shape=classic` malt dieser
+// Server BILDPUNKTGENAU dasselbe wie vor der Runde.
+//
+// Warum die Ecken GEMISCHT und nicht ausgespart werden: was unter der
+// Ecke liegt, steht zu diesem Zeitpunkt schon im Bildpuffer -- der
+// Schreibtisch und alle tieferen Fenster sind gemalt. Genau das ist
+// der Grund, warum das hier geht und in Ring 3 nicht: die Bibliothek
+// malt in IHREN Puffer und weiss nicht, was darunter liegt.
+fn fill_round(state: u64, x: i64, y: i64, w: i64, h: i64, r0: u64,
+    farbe: u64, cx0: i64, cy0: i64, cx1: i64, cy1: i64) {
+    if w <= 0 || h <= 0 {
+        return
+    }
+    var r: u64 = r0
+    if r * 2 > w as u64 {
+        r = (w / 2) as u64
+    }
+    if r * 2 > h as u64 {
+        r = (h / 2) as u64
+    }
+    if r == 0 {
+        fill_clip(state, x, y, w, h, farbe, cx0, cy0, cx1, cy1)
+        return
+    }
+    let ri: i64 = r as i64
+    fill_clip(state, x, y + ri, w, h - 2 * ri, farbe, cx0, cy0, cx1, cy1)
+    fill_clip(state, x + ri, y, w - 2 * ri, ri, farbe, cx0, cy0, cx1, cy1)
+    fill_clip(state, x + ri, y + h - ri, w - 2 * ri, ri, farbe,
+        cx0, cy0, cx1, cy1)
+    var dy: u64 = 0
+    while dy < r {
+        var dx: u64 = 0
+        while dx < r {
+            let cov: u64 = corner_cov(state, r - 1 - dx, r - 1 - dy, r)
+            if cov != 0 {
+                let x0: i64 = x + dx as i64
+                let y0: i64 = y + dy as i64
+                let x1: i64 = x + w - 1 - dx as i64
+                let y1: i64 = y + h - 1 - dy as i64
+                px_clip(state, x0, y0, farbe, cov, cx0, cy0, cx1, cy1)
+                px_clip(state, x1, y0, farbe, cov, cx0, cy0, cx1, cy1)
+                px_clip(state, x0, y1, farbe, cov, cx0, cy0, cx1, cy1)
+                px_clip(state, x1, y1, farbe, cov, cx0, cy0, cx1, cy1)
+            }
+            dx = dx + 1
+        }
+        dy = dy + 1
+    }
+}
+
+// EIN UMRISS VON EINEM BILDPUNKT, rund, gemischt -- der Baustein des
+// Schattens. Vier gerade Stuecke und vier Boegen; ein Bildpunkt gehoert
+// zum Bogen, wenn er im aeusseren Kreis liegt und im inneren nicht.
+fn ring_round(state: u64, x: i64, y: i64, w: i64, h: i64, r0: u64,
+    farbe: u64, a: u64, cx0: i64, cy0: i64, cx1: i64, cy1: i64) {
+    if w <= 1 || h <= 1 || a == 0 {
+        return
+    }
+    var r: u64 = r0
+    if r * 2 > w as u64 {
+        r = (w / 2) as u64
+    }
+    if r * 2 > h as u64 {
+        r = (h / 2) as u64
+    }
+    let ri: i64 = r as i64
+    hline_a_clip(state, x + ri, y, w - 2 * ri, farbe, a, cx0, cy0, cx1, cy1)
+    hline_a_clip(state, x + ri, y + h - 1, w - 2 * ri, farbe, a,
+        cx0, cy0, cx1, cy1)
+    var k: i64 = y + ri
+    while k < y + h - ri {
+        px_clip(state, x, k, farbe, a, cx0, cy0, cx1, cy1)
+        px_clip(state, x + w - 1, k, farbe, a, cx0, cy0, cx1, cy1)
+        k = k + 1
+    }
+    if r == 0 {
+        return
+    }
+    var innen: u64 = 0
+    if r > 1 {
+        innen = r - 1
+    }
+    var dy: u64 = 0
+    while dy < r {
+        var dx: u64 = 0
+        while dx < r {
+            let aussen: u64 = corner_cov(state, r - 1 - dx, r - 1 - dy, r)
+            var i2: u64 = 0
+            if innen > 0 {
+                i2 = corner_cov(state, r - 1 - dx, r - 1 - dy, innen)
+            }
+            var cov: u64 = 0
+            if aussen > i2 {
+                cov = aussen - i2
+            }
+            if cov != 0 {
+                let d: u64 = cov * a / 255
+                let x0: i64 = x + dx as i64
+                let y0: i64 = y + dy as i64
+                let x1: i64 = x + w - 1 - dx as i64
+                let y1: i64 = y + h - 1 - dy as i64
+                px_clip(state, x0, y0, farbe, d, cx0, cy0, cx1, cy1)
+                px_clip(state, x1, y0, farbe, d, cx0, cy0, cx1, cy1)
+                px_clip(state, x0, y1, farbe, d, cx0, cy0, cx1, cy1)
+                px_clip(state, x1, y1, farbe, d, cx0, cy0, cx1, cy1)
+            }
+            dx = dx + 1
+        }
+        dy = dy + 1
+    }
+}
+
+fn hline_a_clip(state: u64, x: i64, y: i64, n: i64, farbe: u64, a: u64,
+    cx0: i64, cy0: i64, cx1: i64, cy1: i64) {
+    if y < cy0 || y >= cy1 || y < 0 || n <= 0 {
+        return
+    }
+    let x0: i64 = imax(imax(x, cx0), 0)
+    let x1: i64 = imin(x + n, cx1)
+    if x1 <= x0 {
+        return
+    }
+    fb.hline_a(state, x0 as u64, y as u64, (x1 - x0) as u64, farbe, a)
+    ss(state, S_SHADOWPX, gs(state, S_SHADOWPX) + (x1 - x0) as u64)
+}
+
+// =====================================================================
+// DER FENSTERSCHATTEN -- und warum er hier moeglich ist und in Ring 3
+// nicht.
+// =====================================================================
+//
+// docs/ROUNDLOOK.md schrieb, ein weicher Schatten sei nicht gemalt,
+// weil "the compositor cannot read what is under a window". Das war
+// eine Aussage ueber die WIDGET-BIBLIOTHEK und stimmte dort: sie malt
+// in den Puffer IHRES Fensters und sieht nichts darunter.
+//
+// Fuer den Server stimmt sie nicht, und zwar seit Runde K10: JEDES
+// FENSTER HAT SEINEN EIGENEN PUFFER (`W_BUF`, in `create` aus dem
+// Rahmenverwalter geholt), und `compose` setzt von unten nach oben
+// zusammen -- erst der Schreibtischgrund, dann Fenster fuer Fenster.
+// Wenn `paint_win` fuer Fenster i laeuft, steht ALLES, was unter i
+// liegt, bereits fertig im Bildpuffer. Der Untergrund ist da; es hat
+// ihn nur nie jemand gelesen.
+//
+// Damit ist der Schatten kein Umbau, sondern ein Aufruf an der
+// richtigen Stelle: VOR dem Rahmen von i, NACH allem unter i.
+//
+// WIE ER GEMALT WIRD. Keine Faltung -- eine Gaussche Unschaerfe
+// braeuchte einen zweiten Puffer in Bildschirmgroesse und zwei
+// Durchlaeufe darueber. Statt dessen `reach` geschachtelte Umrisse,
+// jeder einen Bildpunkt weiter aussen und jeder schwaecher als der
+// vorige: ein linearer Abfall. Bei den vier bis sechs Bildpunkten, die
+// ein Fensterschatten wirklich benutzt, ist der Unterschied zur
+// Gausskurve nicht zu sehen, und der Preis ist `reach` Umrisse statt
+// einer Faltung -- also der UMFANG mal `reach` und nicht die FLAECHE.
+// Fuer ein Fenster von 796x576 und reach 6 sind das rund 17 000
+// gemischte Bildpunkte statt 458 000.
+//
+// UND ER SITZT TIEFER ALS DAS FENSTER. Ein Bildpunkt Versatz nach unten
+// je Ring; das ist es, was das Ding als "darueber" und nicht als
+// "leuchtend" lesbar macht.
+fn paint_shadow(state: u64, i: u64, cx0: i64, cy0: i64, cx1: i64,
+    cy1: i64) {
+    let staerke: u64 = form(state, FM_SHADOW)
+    let reach: u64 = form(state, FM_SHADOW_R)
+    if staerke == 0 || reach == 0 {
+        return
+    }
+    let farbe: u64 = rgb24(state, form(state, FM_SHADOW_C))
+    let r: u64 = form(state, FM_RADIUS)
+    let wx: i64 = win_x(state, i)
+    let wy: i64 = win_y(state, i)
+    let ow: i64 = outer_w(state, i) as i64
+    let oh: i64 = outer_h(state, i) as i64
+    var k: u64 = reach
+    while k > 0 {
+        // Der aeusserste Ring ist der schwaechste.
+        let a: u64 = staerke * 255 / 100 * (reach + 1 - k) / (reach + 1)
+        if a != 0 {
+            ring_round(state, wx - k as i64, wy - k as i64 + 1,
+                ow + 2 * k as i64, oh + 2 * k as i64, r + k, farbe, a,
+                cx0, cy0, cx1, cy1)
+        }
+        k = k - 1
+    }
+}
+
 fn deco_writes(state: u64) -> u64 {
     return gs(state, S_DECON)
 }
@@ -981,10 +1304,39 @@ fn damage_all(state: u64) {
     ss(state, S_DON, 1)
 }
 
+// RUNDE PAINT: DER SCHATTEN GEHOERT ZUM SCHMUTZ.
+//
+// Ein Schatten liegt AUSSERHALB des Fensterrechtecks. Meldet ein
+// Fenster beim Verschieben nur sein eigenes Rechteck als geaendert,
+// bleibt der alte Schatten stehen -- eine Spur aus grauen Raendern
+// quer ueber den Schreibtisch. Der erste Entwurf dieser Runde tat
+// genau das, und man sah es sofort.
+//
+// Also: der schmutzige Bereich waechst um die Reichweite des Schattens,
+// und zwar auf ALLEN VIER SEITEN. Unten und rechts reicht er weiter
+// (der Schatten sitzt einen Bildpunkt tiefer), oben und links wird
+// trotzdem dieselbe Zahl genommen -- ein Bereich, der einen Bildpunkt
+// zu gross ist, kostet eine Bildzeile; einer, der einen zu klein ist,
+// kostet eine sichtbare Kante.
 fn damage_win(state: u64, i: u64) {
-    damage(state, win_x(state, i), win_y(state, i),
-        win_x(state, i) + outer_w(state, i) as i64,
-        win_y(state, i) + outer_h(state, i) as i64)
+    var r: i64 = form(state, FM_SHADOW_R) as i64
+    if form(state, FM_SHADOW) == 0 {
+        r = 0
+    }
+    if !deko(state, i) {
+        r = 0
+    }
+    var x0: i64 = win_x(state, i) - r
+    var y0: i64 = win_y(state, i) - r
+    if x0 < 0 {
+        x0 = 0
+    }
+    if y0 < 0 {
+        y0 = 0
+    }
+    damage(state, x0, y0,
+        win_x(state, i) + outer_w(state, i) as i64 + r + 1,
+        win_y(state, i) + outer_h(state, i) as i64 + r + 1)
 }
 
 fn dirty_x0(state: u64) -> u64 {
@@ -2121,11 +2473,20 @@ fn paint_win(state: u64, i: u64, cx0: u64, cy0: u64, cx1: u64, cy1: u64) {
         titel = deco(state, DK_TITLE_ON)
         schrift = deco(state, DK_TEXT_ON)
     }
+    // RUNDE PAINT: DER SCHATTEN ZUERST. Er liegt unter dem Fenster und
+    // ueber allem, was schon gemalt ist -- also genau hier, vor der
+    // ersten Fuellung des Rahmens und nach allen tieferen Fenstern.
+    paint_shadow(state, i, cx0 as i64, cy0 as i64, cx1 as i64, cy1 as i64)
     // Der ganze Aussenbereich in Rahmenfarbe, danach die Leiste und die
     // Flaeche darueber. Das ist ein Rechteck mehr als noetig und spart
     // vier Sonderfaelle an den Ecken.
-    fb.fill(state, ax0 as u64, ay0 as u64, (ax1 - ax0) as u64,
-        (ay1 - ay0) as u64, rahmen)
+    //
+    // RUNDE PAINT: mit `radius_window` als runde Flaeche. Bei Radius 0
+    // ist `fill_round` Aufruf fuer Aufruf das alte `fb.fill` auf dem
+    // beschnittenen Rechteck -- `shape=classic` malt bildpunktgleich
+    // weiter, und tools/look/run.sh misst das.
+    fill_round(state, wx, wy, ow, oh, form(state, FM_RADIUS), rahmen,
+        cx0 as i64, cy0 as i64, cx1 as i64, cy1 as i64)
     // die Titelleiste
     let tx0: i64 = imax(wx + BORDER as i64, ax0)
     let tx1: i64 = imin(wx + ow - BORDER as i64, ax1)

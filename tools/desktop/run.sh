@@ -176,12 +176,19 @@ echo "== 2. the memory map, the call numbers and the mode words =="
 kart=$(python3 tools/kernel/memmap.py kernel 2>&1)
 if [ $? -eq 0 ]; then ok "the memory map of kdata: $kart"
 else bad "the memory map collides"; echo "$kart" | sed 's/^/        /'; fi
-for n in 2112 2113; do
+# ROUND PAINT: this list said 2112, 2113 and "2113 is the highest", and
+# it had been RED since round MERGE added WM_DECO as 2114 -- the runner
+# was measuring a number that no longer existed.  A red assertion that
+# everybody has learned to step over is worse than no assertion, so it
+# is brought up to date instead of removed: every number is named, and
+# the highest is named separately, so the next round that adds one has
+# to touch this line.
+for n in 2112 2113 2114 2115; do
     grep -qE "= $n( |$)" kernel/sys.fi && ok "call number $n is in kernel/sys.fi" \
         || bad "call number $n is missing"
 done
-grep -q 'const WM_MAXNR: u64 = 2113' kernel/sys.fi \
-    && ok "and 2113 is the highest of the window server" \
+grep -q 'const WM_MAXNR: u64 = 2115' kernel/sys.fi \
+    && ok "and 2115 is the highest of the window server" \
     || bad "WM_MAXNR does not match the calls"
 # THE FOUR EDGES ARE THE SAME FOUR NUMBERS IN FOUR PLACES. Not a
 # translation table -- one set of numbers, written down four times, and

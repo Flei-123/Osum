@@ -123,6 +123,9 @@ export {
     WL_TITLE, WL_NETV, WL_BYTES, L_DESK, L_NORMAL, L_TOP,
     F_HIDDEN, F_NODECO,
     win_state, win_list, win_act, deco_push, DECO_SLOTS,
+    // ROUND PAINT: the FORM of a window, next to its colour.
+    form_push, form_one, FORM_SLOTS,
+    WF_RADIUS, WF_SHADOW, WF_SHADOW_R, WF_SHADOW_C,
     EV_KEY, EV_DOWN, EV_UP, EV_MOVE, EV_CLOSE, EV_FOCUS, EV_RESIZE,
     sys5, sys3w
 }
@@ -152,6 +155,16 @@ const WM_ACT: u64 = 2111
 const WM_STRUT: u64 = 2112
 const WM_SIZE: u64 = 2113
 const WM_DECO: u64 = 2114
+// ROUND PAINT.  The same number as `sys.WM_FORM`, and the same four
+// slot numbers as `wm.FM_*`.  Written down a third time here because a
+// library in ring 3 may not import the kernel; tools/paint/run.sh holds
+// the three lists against each other.
+const WM_FORM: u64 = 2115
+const FORM_SLOTS: u64 = 4
+const WF_RADIUS: u64 = 0
+const WF_SHADOW: u64 = 1
+const WF_SHADOW_R: u64 = 2
+const WF_SHADOW_C: u64 = 3
 
 const WI_W: u64 = 0
 const WI_H: u64 = 1
@@ -3225,6 +3238,45 @@ fn deco_one(slot: u64, colour: u64) -> u64 {
         return 0
     }
     return 1
+}
+
+// =============== ROUND PAINT: THE FORM OF THE WINDOW, TO THE SERVER
+//
+// Round LOOK built the form tokens and wrote down, honestly, that the
+// window frame did not get them: "`radius_window` and the window shadow
+// are read out of the shape file, carried through the resolver and NOT
+// DRAWN.  Those pixels belong to the kernel's compositor, not to the
+// widget library, and reaching them means widening a protocol."
+//
+// This is the other end of that widened protocol.  It carries FOUR
+// RESOLVED NUMBERS and no notion of a shape: the server never learns
+// that there is a file called `modern.shape`, it learns that the corner
+// is eight pixels.  Which is the same division of labour as `deco_push`
+// -- the policy stays in ring 3, the server gets the result.
+//
+// `classic` sends radius 0, shadow 0, reach 0.  The server's rounding
+// routine is call-for-call the old square fill at radius 0 and its
+// shadow routine returns on the first line at strength 0, so classic
+// costs exactly nothing and draws exactly what it drew before.
+fn form_one(slot: u64, wert: u64) -> u64 {
+    if ulib.bad(sys3w(WM_FORM, slot, wert, 0)) {
+        return 0
+    }
+    return 1
+}
+
+fn form_push() -> u64 {
+    var n: u64 = 0
+    n = n + form_one(WF_RADIUS, met[(M_RADIUS_WINDOW) as usize])
+    n = n + form_one(WF_SHADOW, met[(M_SHADOW) as usize])
+    n = n + form_one(WF_SHADOW_R, met[(M_SHADOW_R) as usize])
+    // THE SHADOW HAS A ROLE AND NOT A COLOUR.  `shadow` is one of the
+    // component tokens (C_SHADOW) and it is a different colour in the
+    // light and the dark scheme -- a black shadow under a dark window
+    // is invisible, and that is exactly the case a hard-coded 0x000000
+    // gets wrong.
+    n = n + form_one(WF_SHADOW_C, theme_live(C_SHADOW))
+    return n
 }
 
 fn deco_push() -> u64 {
