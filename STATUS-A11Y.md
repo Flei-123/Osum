@@ -101,7 +101,18 @@ gegengemessen und dort genauso rot:
 | `tools/i18n/run.sh` | fest eingebaute deutsche Texte: 59 | **59 auch dort** |
 
 Nach den Korrekturen: **`tools/k15/run.sh` 0 Fehler**,
-**`tests/theme/run.sh` 0 Fehler**.
+**`tests/theme/run.sh` 0 Fehler**. Die vier Zusagen, die dazwischen
+einmal unter Last umfielen, stehen im ruhigeren Lauf wieder grün — auch
+die, die den Fehler gefunden hat:
+
+```
+OK  der Fokusring liegt bildpunktgenau um die Reiter
+    (Rahmen 456x26 bei (74,124): 0 von 964 Kantenpunkten falsch,
+     0 Treffer eine Reihe daneben)
+OK  die erste davon steht im Bild (8 Zeichen, 372 Tintenpunkte, 0 falsch)
+OK  ueber einem Textfeld wird der Zeiger zum Balken: 1
+OK  die Mitte des Balkens ist weiss (255 255 255)
+```
 
 ---
 
