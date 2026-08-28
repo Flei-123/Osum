@@ -390,6 +390,13 @@ def inhalt(bild):
                 break
         if schlecht >= 0:
             befunde.append("/d/%d: Oktett %d falsch" % (k, schlecht))
+            continue
+        # Die Rechte-Metadaten (Runde MULTIUSER): der Modus wurde nach
+        # dem Schreiben gesetzt, der Zaehler kam danach.
+        m = bild.ig(ino, mkfs.I_MODE) & 0o7777
+        if m != 0o600 + (k % 8):
+            befunde.append("/d/%d traegt Modus %o statt %o"
+                           % (k, m, 0o600 + (k % 8)))
         else:
             ganz += 1
     # Die Datei DANACH darf es nicht halb geben.
