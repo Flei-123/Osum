@@ -1,0 +1,332 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/dispsave.fi -- RUNDE CUSTOMRES: DER MODUS, DER DEN NEUSTART
+// UEBERLEBT, UND DER ZAEHLER, DER IHN WIEDER LOSWIRD.
+//
+// WOFUER. Eine Aufloesung, die man nach jedem Start neu einstellen muss,
+// ist keine Einstellung, sondern eine Vorfuehrung. Also gehoert sie auf
+// die Platte. Und genau damit faengt die Gefahr an, gegen die die
+// Fuenfzehn-Sekunden-Frist NICHT hilft:
+//
+//   Die Frist rettet den Wechsel im Betrieb. Sie rettet NICHT den
+//   naechsten Start. Wer einen Modus bestaetigt hat, weil er ihn im
+//   Sommer auf dem einen Bildschirm sah, und im Winter am anderen
+//   Bildschirm startet, bekommt einen schwarzen Schirm ohne Frist --
+//   denn beim Start ist kein Programm da, das eine Frist bedienen
+//   koennte, und der Kern kann nicht wissen, ob das Bild ankommt.
+//
+// DESHALB EIN ZAEHLER, UND ZWAR DERSELBE WIE BEIM A/B-BOOT
+// (`kernel/ab.fi`, Runde UPDATE): der gespeicherte Modus gilt als IN
+// ERPROBUNG, bis ihn jemand nach einem Start BESTAETIGT. Jeder Start
+// zaehlt einen Versuch hoch. Beim dritten unbestaetigten Start wird er
+// nicht mehr angewandt, und das System bleibt in dem Modus stehen, in
+// dem es ohnehin startet. Der Rueckfall kostet nichts, weil er nichts
+// tut -- das ist der Vorzug davon, den gespeicherten Modus ERST NACH
+// dem Einhaengen der Wurzel anzuwenden und nicht davor.
+//
+// WAS EINE BESTAETIGUNG IST, UND WARUM SIE NICHT AUTOMATISCH GEHT. Der
+// Zaehler wird von `osum_dispset(DS_CONFIRM)` auf null gesetzt -- also
+// vom Knopf "Behalten" im Bedienfeld oder von `dispctl behalten`. Das
+// ist ein Handgriff eines Menschen, und genau das ist der Punkt: JEDE
+// automatische Marke ("der Kern ist bis hierher gekommen", "die
+// Register haben zurueckgelesen", "ein Programm hat sich gemeldet")
+// bewiese, dass die KARTE den Modus angenommen hat. Der Fall, fuer den
+// dieser Zaehler existiert, ist der, in dem die Karte ihn annimmt und
+// der BILDSCHIRM schwarz bleibt. Dafuer gibt es keinen Messwert im
+// Rechner. Es steht hier, weil es unbequem ist und trotzdem stimmt.
+//
+// DIE DATEI. `/system/BILDMODUS`, GENAU 31 Oktette, feste Breite:
+//
+//     w=00001400 h=00001050 t=32 v=0\n
+//
+//   w  Breite      (acht Ziffern, fuehrende Nullen sind der Normalfall)
+//   h  Hoehe       (acht Ziffern)
+//   t  Farbtiefe   (zwei Ziffern)
+//   v  Startversuche seit der letzten Bestaetigung (eine Ziffer)
+//
+// FESTE BREITE IST KEINE KOSMETIK, und der Absatz dazu steht in
+// `kernel/ab.fi`: eine Datei, deren Laenge sich nicht aendert, geht in
+// GENAU EINEN Datenblock, und ein Sektor erreicht die Platte ganz oder
+// gar nicht. Eine Datei, die mal 30 und mal 31 Oktette lang ist,
+// muesste zusaetzlich die Groesse im Inode nachziehen -- zwei
+// Schreibvorgaenge, und dazwischen der Zustand, in dem der Zaehler schon
+// steht und die Laenge noch nicht. Ausgerechnet der Zaehler, der einen
+// Stromausfall ueberleben soll, darf diesen Zustand nicht haben.
+//
+// w=0 HEISST "KEINER". So wird der Satz stillgelegt, wenn die Versuche
+// aufgebraucht sind -- ohne die Datei zu entfernen und ohne ihre Laenge
+// anzufassen.
+
+profile kernel
+
+import kstate
+import serial
+import fs
+import vmode
+import fb
+
+export { anwenden, merken, GRENZE, LEN, P_LEN }
+
+// Drei Startversuche, aus denselben drei Gruenden wie in `ab.fi`: einer
+// fuer den Fehlversuch, einer fuer den Fall, dass es an etwas Einmaligem
+// lag, und einer, damit "zweimal dasselbe" nicht schon die Entscheidung
+// ist.
+const GRENZE: u64 = 3
+const LEN: u64 = 31
+const P_LEN: u64 = 18 // "/system/BILDMODUS\0"
+
+// Die Versaetze im Satz. Sie stehen hier einmal und werden von `lesen`
+// und `bauen` beide benutzt -- zwei Listen von Versaetzen fuer dieselbe
+// Datei waeren zwei Gelegenheiten, sich zu vertun.
+const O_W: u64 = 2
+const O_H: u64 = 13
+const O_T: u64 = 24
+const O_V: u64 = 29
+
+fn g8(p: u64) -> u64 {
+    return kstate.get8(p)
+}
+
+fn p8(p: u64, v: u64) {
+    kstate.set8(p, v as u8)
+}
+
+// `n` Ziffern ohne Vorzeichen. Fuehrende Nullen sind der Normalfall,
+// nicht die Ausnahme -- die Breite ist fest.
+fn ziffern(p: u64, off: u64, n: u64) -> u64 {
+    var v: u64 = 0
+    var i: u64 = 0
+    while i < n {
+        let c: u64 = g8(p + off + i)
+        if c < 48 || c > 57 {
+            return 0xFFFFFFFFFFFFFFFF
+        }
+        v = v * 10 + (c - 48)
+        i = i + 1
+    }
+    return v
+}
+
+fn setze(p: u64, off: u64, n: u64, v: u64) {
+    var rest: u64 = v
+    var i: u64 = n
+    while i > 0 {
+        i = i - 1
+        p8(p + off + i, 48 + (rest % 10))
+        rest = rest / 10
+    }
+}
+
+fn bauen(p: u64, w: u64, h: u64, t: u64, v: u64) {
+    var muster: [u8; 32] = "w=00000000 h=00000000 t=00 v=0\n\0"
+    var i: u64 = 0
+    while i < LEN {
+        p8(p + i, muster[i as usize] as u64)
+        i = i + 1
+    }
+    setze(p, O_W, 8, w)
+    setze(p, O_H, 8, h)
+    setze(p, O_T, 2, t)
+    setze(p, O_V, 1, v)
+}
+
+fn pfad(p: u64) {
+    var t: [u8; 18] = "/system/BILDMODUS\0"
+    var i: u64 = 0
+    while i < P_LEN {
+        p8(p + i, t[i as usize] as u64)
+        i = i + 1
+    }
+}
+
+// Eine Datei mit FESTER Laenge ueberschreiben: derselbe Inode, dieselbe
+// Groesse, ein Datenblock. Sie wird NICHT vorher geleert. Gibt es sie
+// noch nicht, wird sie angelegt -- und wenn dafuer `/system` fehlt, auch
+// das. Ein Bedienfeld, das "gespeichert" sagt und nichts geschrieben
+// hat, waere schlimmer als eins ohne Knopf.
+fn fest_schreiben(state: u64, pf: u64, puffer: u64, len: u64) -> bool {
+    var ino: u64 = fs.path(state, pf)
+    if ino == 0 {
+        var d: [u8; 9] = "/system\0\0"
+        if fs.path(state, (&d[0]) as u64) == 0 {
+            let _dd: u64 = fs.create_path(state, (&d[0]) as u64, fs.T_DIR)
+        }
+        ino = fs.create_path(state, pf, fs.T_FILE)
+    }
+    if ino == 0 {
+        return false
+    }
+    return fs.write_at(state, ino, 0, puffer, len) == len
+}
+
+// ==================================================================
+// LESEN. Gibt den Grund zurueck (SW_*), und traegt bei Erfolg die vier
+// Zahlen in die Skalare des Modustreibers ein.
+fn lesen(state: u64) -> u64 {
+    var pf: [u8; 20] = [0 as u8; 20]
+    var buf: [u8; 40] = [0 as u8; 40]
+    let b: u64 = (&buf[0]) as u64
+    pfad((&pf[0]) as u64)
+    let ino: u64 = fs.path(state, (&pf[0]) as u64)
+    if ino == 0 {
+        return vmode.SW_KEINE
+    }
+    let n: u64 = fs.read_at(state, ino, 0, b, LEN)
+    if n != LEN {
+        return vmode.SW_KAPUTT
+    }
+    let w: u64 = ziffern(b, O_W, 8)
+    let h: u64 = ziffern(b, O_H, 8)
+    let t: u64 = ziffern(b, O_T, 2)
+    let v: u64 = ziffern(b, O_V, 1)
+    if w == 0xFFFFFFFFFFFFFFFF || h == 0xFFFFFFFFFFFFFFFF {
+        return vmode.SW_KAPUTT
+    }
+    if t == 0xFFFFFFFFFFFFFFFF || v == 0xFFFFFFFFFFFFFFFF {
+        return vmode.SW_KAPUTT
+    }
+    if w == 0 || h == 0 {
+        return vmode.SW_KEINE
+    }
+    vmode.set_saved(state, w, h, t, v)
+    return vmode.SW_OK
+}
+
+// SCHREIBEN, mit einem gegebenen Zaehlerstand.
+fn schreiben(state: u64, w: u64, h: u64, t: u64, v: u64) -> bool {
+    var pf: [u8; 20] = [0 as u8; 20]
+    var buf: [u8; 40] = [0 as u8; 40]
+    let b: u64 = (&buf[0]) as u64
+    pfad((&pf[0]) as u64)
+    bauen(b, w, h, t, v)
+    return fest_schreiben(state, (&pf[0]) as u64, b, LEN)
+}
+
+// EINEN MODUS MERKEN. Der Zaehler faengt bei null an: der Benutzer hat
+// gerade gesagt, dass er den Bildschirm sieht.
+//
+// Wird aus `osum_dispset(DS_CONFIRM)` gerufen und meldet sich NICHT auf
+// der seriellen Leitung -- ein Systemaufruf, der in den Mitschnitt
+// schreibt, macht jeden Testlaeufer zur Lotterie.
+fn merken(state: u64, w: u64, h: u64, t: u64) -> bool {
+    if kstate.get(state, kstate.FS_READY) == 0 {
+        return false
+    }
+    if w == 0 || h == 0 {
+        return false
+    }
+    return schreiben(state, w, h, t, 0)
+}
+
+// ==================================================================
+// DER GANZE VORGANG, EINMAL JE START.
+//
+// Er steht in `kmain.osum`, unmittelbar nachdem die Wurzel eingehaengt
+// ist -- also NACH `fb.init` und NACH `vmode.probe`. Das ist kein
+// Kompromiss, sondern die einzige moegliche Stelle: vor dem Einhaengen
+// gibt es keine Datei, und ein Modus, der aus einer Datei kommt, kann
+// nicht vor der Datei da sein. Der sichtbare Preis ist, dass die
+// Konsole die ersten Zeilen im Startmodus schreibt und danach umschaltet.
+// Der Gewinn ist, dass der Rueckfall auf den sicheren Modus GAR NICHTS
+// TUN MUSS: er besteht darin, den Modus zu lassen, in dem das System
+// ohnehin schon steht.
+fn anwenden(state: u64) {
+    var s_none: [u8; 18] = "disp: save none\0\0\0"
+    var s_bad: [u8; 21] = "disp: save unlesbar\0\0"
+    var s_auf: [u8; 22] = "disp: save aufgebrauc\0"
+    var s_auf2: [u8; 12] = "ht  v=\0\0\0\0\0\0"
+    var s_on: [u8; 16] = "disp: save on \0\0"
+    var s_x: [u8; 2] = "x\0"
+    var s_t: [u8; 4] = "x \0\0"
+    var s_v: [u8; 6] = "  v=\0\0"
+    var s_no: [u8; 21] = "disp: save refused \0\0"
+    var s_wy: [u8; 8] = "  why=\0\0"
+    var s_nm: [u8; 8] = "  num=\0\0"
+    var s_keep: [u8; 22] = "  (Startmodus bleibt)\0"
+
+    vmode.set_applied(state, 0)
+    // OHNE MODUSTREIBER UND OHNE DATEISYSTEM PASSIERT HIER GAR NICHTS,
+    // und zwar auch keine Zeile. Das ist die Gegenprobe: ein Kern ohne
+    // das Wort `disp` verhaelt sich Oktett fuer Oktett wie vor dieser
+    // Runde.
+    if !vmode.ready(state) || kstate.get(state, kstate.FS_READY) == 0 {
+        vmode.set_save_why(state, vmode.SW_AUS)
+        return
+    }
+    let why: u64 = lesen(state)
+    if why == vmode.SW_KEINE {
+        vmode.set_save_why(state, vmode.SW_KEINE)
+        serial.puts((&s_none[0]) as u64)
+        serial.nl()
+        return
+    }
+    if why == vmode.SW_KAPUTT {
+        vmode.set_save_why(state, vmode.SW_KAPUTT)
+        serial.puts((&s_bad[0]) as u64)
+        serial.nl()
+        return
+    }
+    let w: u64 = vmode.save_w(state)
+    let h: u64 = vmode.save_h(state)
+    let t: u64 = vmode.save_bpp(state)
+    let v: u64 = vmode.save_try(state)
+
+    // 1. DIE VERSUCHE SIND AUFGEBRAUCHT. Der Satz wird stillgelegt
+    //    (w=0), und der Startmodus bleibt stehen. Zuerst schreiben, dann
+    //    nicht anwenden: kaeme ein Stromausfall dazwischen, liefe der
+    //    naechste Start denselben Rueckfall noch einmal, und das ist
+    //    harmlos.
+    if v + 1 >= GRENZE {
+        let _q: bool = schreiben(state, 0, 0, t, 0)
+        vmode.set_save_why(state, vmode.SW_AUF)
+        serial.puts((&s_auf[0]) as u64)
+        serial.puts((&s_auf2[0]) as u64)
+        serial.dec(v)
+        serial.puts((&s_keep[0]) as u64)
+        serial.nl()
+        return
+    }
+
+    // 2. NOCH EIN VERSUCH. Der Zaehler geht hoch, BEVOR umgeschaltet
+    //    wird -- ein Zaehler, den ein haengender Start nicht mehr
+    //    erreicht, zaehlt nie.
+    let _z: bool = schreiben(state, w, h, t, v + 1)
+    vmode.set_saved(state, w, h, t, v + 1)
+
+    // 3. UND JETZT DURCH DIESELBEN DREI SCHRANKEN wie jede andere
+    //    eigene Aufloesung. Eine Datei ist kein Freibrief: der
+    //    Bildschirm kann ein anderer sein als der, an dem gespeichert
+    //    wurde, und die Karte eine kleinere.
+    let rc: u64 = vmode.set_custom(state, w, h, t)
+    if rc != vmode.E_OK {
+        vmode.set_save_why(state, vmode.SW_ABGELEHNT)
+        serial.puts((&s_no[0]) as u64)
+        serial.dec(w)
+        serial.puts((&s_x[0]) as u64)
+        serial.dec(h)
+        serial.puts((&s_wy[0]) as u64)
+        serial.dec(vmode.cust_why(state))
+        serial.puts((&s_nm[0]) as u64)
+        serial.dec(vmode.cust_num(state))
+        serial.puts((&s_keep[0]) as u64)
+        serial.nl()
+        return
+    }
+    // BEIM START WIRD DIE FUENFZEHN-SEKUNDEN-FRIST NICHT GESTELLT, und
+    // das ist Absicht: es ist niemand da, der sie bedienen koennte --
+    // das Bedienfeld startet erst Sekunden spaeter, wenn ueberhaupt.
+    // Hier traegt der ZAEHLER, nicht die Frist. Wer den Modus nach
+    // diesem Start bestaetigt, setzt ihn auf null zurueck; wer es
+    // dreimal nicht tut, bekommt den Startmodus.
+    vmode.confirm(state)
+    vmode.set_applied(state, 1)
+    vmode.set_save_why(state, vmode.SW_OK)
+    serial.puts((&s_on[0]) as u64)
+    serial.dec(fb.panel_w(state))
+    serial.puts((&s_x[0]) as u64)
+    serial.dec(fb.panel_h(state))
+    serial.puts((&s_t[0]) as u64)
+    serial.dec(t)
+    serial.puts((&s_v[0]) as u64)
+    serial.dec(v + 1)
+    serial.nl()
+}

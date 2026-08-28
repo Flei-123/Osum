@@ -55,6 +55,7 @@ import share
 import cap
 import fb
 import vmode
+import dispsave
 import ttf
 import ps2m
 import wm
@@ -783,6 +784,16 @@ fn vmode_stage(state: u64) {
     serial.puts((&s_of[0]) as u64)
     serial.dec(vmode.selftest_max())
     serial.nl()
+    // RUNDE CUSTOMRES: eine EIGENE Zahl und nicht die fuenfzehn von
+    // oben. Der Grund steht bei `vmode.selftest_custom`: eine bestehende
+    // Zusage zu erhoehen, um eine neue unterzubringen, waere die
+    // bequeme Art, eine alte anzufassen.
+    var s_stc: [u8; 23] = "disp: custom selftest \0"
+    serial.puts((&s_stc[0]) as u64)
+    serial.dec(vmode.selftest_custom(state))
+    serial.puts((&s_of[0]) as u64)
+    serial.dec(vmode.selftest_custom_max())
+    serial.nl()
     serial.puts((&s_st2[0]) as u64)
     serial.dec(fb.selftest2(state))
     serial.puts((&s_of[0]) as u64)
@@ -878,6 +889,61 @@ fn display_hold(state: u64) {
         serial.dec(fb.panel_h(state))
         serial.nl()
     }
+    // ============================================ RUNDE CUSTOMRES
+    if vmode.want(state, vmode.M_EIGEN) {
+        disp_eigen(state, 1400, 1050, 32)
+    }
+    if vmode.want(state, vmode.M_EIGENBAD) {
+        // 2560x1440 nimmt die Karte an und ihr Bildspeicher traegt es --
+        // was NICHT traegt, sind die acht 2-MiB-Fensterplaetze dieses
+        // Kernels. Die Meldung MUSS das sagen, und zwar mit beiden
+        // Zahlen.
+        disp_eigen(state, 2560, 1440, 32)
+        // ... und das hier ist die Karte selbst: 1366 ist kein
+        // Vielfaches von acht, und QEMU laesst deshalb den Ankerwert
+        // stehen. Zwei verschiedene Schranken, zwei verschiedene
+        // Gruende, in EINEM Lauf.
+        disp_eigen(state, 1366, 768, 32)
+        // Und die dritte: eine Farbtiefe, die dieser Kernel nicht malt.
+        disp_eigen(state, 1400, 1050, 16)
+    }
+    if vmode.want(state, vmode.M_EIGENFRIST) {
+        // DIE ZUSAGE DIESER RUNDE. Auf eine EIGENE Aufloesung wechseln,
+        // NICHT bestaetigen -- und nichts weiter tun. Kein `poll`, kein
+        // Systemaufruf, kein Programm: nur warten. Was danach dasteht,
+        // hat die Leerlaufaufgabe zurueckgeschaltet, oder es hat
+        // niemand.
+        disp_eigen(state, 1400, 1050, 32)
+        serial.puts((&s_cf[0]) as u64)
+        serial.dec(bnum(vmode.pending(state)))
+        serial.puts((&s_left[0]) as u64)
+        serial.dec(vmode.remaining(state) / 1000)
+        serial.nl()
+        disp_wait(state, vmode.CONFIRM_MS + 1500)
+        // In DIESEM Lauf gibt es noch keine Leerlaufaufgabe: der Kern
+        // steht in seiner eigenen Startaufgabe und wartet in einer
+        // Zaehlschleife. Also wird `poll` hier gerufen, genau wie im
+        // Abschnitt `dispconfirm` -- gemessen wird hier, dass die FRIST
+        // fuer eine EIGENE Aufloesung genauso gestellt und genauso
+        // zurueckgenommen wird wie fuer eine aus der Liste.
+        //
+        // DASS SIE OHNE JEDES ZUTUN ABLAEUFT, wird eine Ebene hoeher
+        // gemessen und nicht hier: in Abschnitt 5 von
+        // tools/customres/run.sh schaltet ein PROGRAMM in Ring 3 um und
+        // legt sich dann schlafen. Was dort zurueckschaltet, ist die
+        // Leerlaufaufgabe (`tasks.idle`), und sonst nichts -- `sleep`
+        // ruft keinen einzigen Bildschirmaufruf.
+        let ging: bool = vmode.poll(state)
+        serial.puts((&s_cf[0]) as u64)
+        serial.dec(bnum(vmode.pending(state)))
+        serial.puts((&s_rr[0]) as u64)
+        serial.dec(bnum(ging))
+        serial.puts((&s_now[0]) as u64)
+        serial.dec(fb.panel_w(state))
+        serial.puts((&s_x[0]) as u64)
+        serial.dec(fb.panel_h(state))
+        serial.nl()
+    }
     if vmode.want(state, vmode.M_BENCH) {
         disp_bench(state)
     }
@@ -902,6 +968,50 @@ fn display_hold(state: u64) {
     serial.dec(vmode.fails(state))
     serial.puts((&s_rv[0]) as u64)
     serial.dec(vmode.reverts(state))
+    serial.nl()
+}
+
+// RUNDE CUSTOMRES: EINE EIGENE AUFLOESUNG VERLANGEN UND MELDEN, WAS
+// DARAUS WURDE -- mit dem Grund und der Zahl, nicht mit "ging nicht".
+fn disp_eigen(state: u64, w: u64, h: u64, bpp: u64) {
+    var s_e: [u8; 14] = "disp: eigen \0\0"
+    var s_x: [u8; 2] = "x\0"
+    var s_t: [u8; 3] = "x \0"
+    var s_rc: [u8; 5] = " rc=\0"
+    var s_wy: [u8; 8] = "  why=\0\0"
+    var s_nm: [u8; 8] = "  num=\0\0"
+    var s_lim: [u8; 12] = "  maplimit=\0"
+    var s_vr: [u8; 9] = "  vram=\0\0"
+    var s_now: [u8; 8] = " panel=\0"
+    var s_us: [u8; 5] = " us=\0"
+    var s_cn: [u8; 11] = "  custom=\0\0"
+    let t: u64 = apic.tsc()
+    let rc: u64 = vmode.set_custom(state, w, h, bpp)
+    let d: u64 = us_of(state, apic.tsc() - t)
+    serial.puts((&s_e[0]) as u64)
+    serial.dec(w)
+    serial.puts((&s_x[0]) as u64)
+    serial.dec(h)
+    serial.puts((&s_t[0]) as u64)
+    serial.dec(bpp)
+    serial.puts((&s_rc[0]) as u64)
+    serial.dec(rc)
+    serial.puts((&s_wy[0]) as u64)
+    serial.dec(vmode.cust_why(state))
+    serial.puts((&s_nm[0]) as u64)
+    serial.dec(vmode.cust_num(state))
+    serial.puts((&s_vr[0]) as u64)
+    serial.dec(vmode.vram(state))
+    serial.puts((&s_lim[0]) as u64)
+    serial.dec(vmode.map_limit(state))
+    serial.puts((&s_cn[0]) as u64)
+    serial.dec(vmode.customs(state))
+    serial.puts((&s_now[0]) as u64)
+    serial.dec(fb.panel_w(state))
+    serial.puts((&s_x[0]) as u64)
+    serial.dec(fb.panel_h(state))
+    serial.puts((&s_us[0]) as u64)
+    serial.dec(d)
     serial.nl()
 }
 
@@ -2744,6 +2854,11 @@ fn osum(state: u64) {
     // Shell, die /proc erst nach ihrem Start bekaeme, haette es zum
     // Zeitpunkt ihres eigenen `open` noch nicht.
     k14_setup(state)
+    // RUNDE CUSTOMRES: DER GESPEICHERTE BILDMODUS. Hier und nicht
+    // frueher -- vor dem Einhaengen der Wurzel gibt es die Datei nicht.
+    // Ohne `disp` und ohne Wurzel tut es gar nichts, auch keine Zeile;
+    // der Absatz dazu steht in `kernel/dispsave.fi`.
+    dispsave.anwenden(state)
     usb_mount(state)
     list_dir(state, (&p_bin[0]) as u64, (&s_bin[0]) as u64)
 
