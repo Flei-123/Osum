@@ -119,6 +119,16 @@ sp() {
 # Der GROESSTE Wert einer Spalte ueber ALLE Ausgaben im Mitschnitt. Fuer
 # eine Zahl, die nur wachsen kann (die Starts), ist das die ehrliche
 # Frage -- `tail` traefe die Zeile, die `svc stop` gerade ausgegeben hat.
+# Die n-te Ausgabe von `svc status` im Mitschnitt. `dienste.sh` sieht
+# ZWEIMAL nach: einmal sofort nach dem Hochfahren (da hat jeder Dienst
+# genau einen Start) und einmal fuenf Sekunden spaeter -- und erst dort
+# steht, was diese Runde behauptet.
+spn() {
+    local f=$1 name=$2 col=$3 n=$4
+    grep -aoE "^$name (running|stopped|done|waiting|failed) [0-9]+ [0-9]+ [0-9]+ [0-9]+ [a-z,]+" "$f" \
+        | sed -n "${n}p" | awk -v c="$col" '{print $c}'
+}
+
 spmax() {
     local f=$1 name=$2 col=$3
     grep -aoE "^$name (running|stopped|done|waiting|failed) [0-9]+ [0-9]+ [0-9]+ [0-9]+ [a-z,]+" "$f" \
@@ -307,34 +317,36 @@ echo "-- 3b. der Rueckfall-Zaehler: fuenfmal, dann Schluss"
 has "$F" "init: abgeschaltet kaputt nach 5 Fehlstarts, 5 Starts" \
     "init schaltet den abstuerzenden Dienst nach genau fuenf Versuchen ab"
 is "sein Zustand ist danach 'failed' und nicht 'running'" \
-   "$(sp "$F" kaputt 2 head)" "failed"
-is "er wurde GENAU fuenfmal gestartet" "$(sp "$F" kaputt 4 head)" "5"
-is "und fuenf Rueckfaelle gezaehlt" "$(sp "$F" kaputt 5 head)" "5"
+   "$(spn "$F" kaputt 2 2)" "failed"
+is "er wurde GENAU fuenfmal gestartet" "$(spn "$F" kaputt 4 2)" "5"
+is "und fuenf Rueckfaelle gezaehlt" "$(spn "$F" kaputt 5 2)" "5"
+has "$F" "kaputt failed 0 5 5 0" \
+    "und die ganze Zeile steht so im Mitschnitt: failed, pid 0, 5 Starts, 5 Fehler"
 
 echo "-- 3c. DIE GEGENPROBE: wer mit 0 endet, wird NIE abgeschaltet"
-sauber_n=$(sp "$F" sauber 4 head)
+sauber_n=$(spmax "$F" sauber 4)
 if [ -n "${sauber_n:-}" ] && [ "$sauber_n" -gt 5 ]; then
     ok "der Dienst 'sauber' (/bin/true) hat $sauber_n Starts -- mehr als die Grenze"
 else bad "'sauber' hat nur ${sauber_n:-?} Starts, die Gegenprobe traegt nicht"; fi
-is "und trotzdem null Rueckfaelle" "$(sp "$F" sauber 5 head)" "0"
-if [ "$(sp "$F" sauber 2 head)" = "failed" ]; then
+is "und trotzdem null Rueckfaelle" "$(spmax "$F" sauber 5)" "0"
+if grep -qa "^sauber failed" "$F"; then
     bad "'sauber' wurde abgeschaltet -- die Grenze trifft das Falsche"
-else ok "'sauber' wurde NICHT abgeschaltet: $(sp "$F" sauber 2 head)"; fi
+else ok "'sauber' wurde NICHT abgeschaltet: $(spn "$F" sauber 2 2)"; fi
 
 echo "-- 3d. das Ziel: was nicht dazugehoert, laeuft nicht"
-is "der grafische Dienst steht still" "$(sp "$F" fenster 2 head)" "stopped"
-is "und wurde NULL mal gestartet" "$(sp "$F" fenster 4 head)" "0"
+is "der grafische Dienst steht still" "$(sp "$F" fenster 2 tail)" "stopped"
+is "und wurde NULL mal gestartet -- in KEINER Ausgabe" "$(spmax "$F" fenster 4)" "0"
 is "sein Ziel steht in der Zeile" "$(sp "$F" fenster 7 head)" "grafik"
-is "und der konsolen-eigene Dienst laeuft" "$(sp "$F" kons 2 head)" "running"
+is "und der konsolen-eigene Dienst laeuft" "$(sp "$F" kons 2 tail)" "running"
 
 echo "-- 3e. erst nach dem Netz"
 is "der Dienst mit 'netz' wartet, weil dieser Lauf keine Karte hat" \
-   "$(sp "$F" spaet 2 head)" "waiting"
-is "und wurde NULL mal gestartet" "$(sp "$F" spaet 4 head)" "0"
+   "$(sp "$F" spaet 2 tail)" "waiting"
+is "und wurde NULL mal gestartet -- in KEINER Ausgabe" "$(spmax "$F" spaet 4)" "0"
 hasnot "$F" "netz-ist-da" "seine Zeile steht folglich nirgends"
 
 echo "-- 3f. das alte Format von K13"
-is "eine Zeile 'name:art:befehl' laeuft weiter" "$(sp "$F" alt 2 head)" "running"
+is "eine Zeile 'name:art:befehl' laeuft weiter" "$(sp "$F" alt 2 tail)" "running"
 is "und sie gilt fuer JEDES Ziel" "$(sp "$F" alt 7 head)" "konsole,grafik"
 
 echo "-- 3g. die Protokolldatei"
@@ -376,10 +388,10 @@ echo "-- 3j. DER KERNFEHLER, DEN DIESE RUNDE GEFUNDEN HAT"
 # steht danach jeder Dienst fuer immer auf `running`, obwohl er tot ist.
 # `waitfirst` stellt den alten Weg wieder her -- und dann bricht die
 # Messung zusammen.
-sn=$(sp "$F" sauber 4 head)
+sn=$(spmax "$F" sauber 4)
 rc=$(run_case waitfirst "$TMPD/d0.img" "osum waitfirst $BASE script=sh /t/kurz.sh" 150 -no-reboot)
 WF="$TMPD/waitfirst.txt"
-wn=$(sp "$WF" sauber 4 head)
+wn=$(spmax "$WF" sauber 4)
 # DIE DEUTLICHSTE ZUSAGE ZUERST: mit dem alten `wait4` erfaehrt init NIE,
 # dass die `ctrl`-Zeile geendet hat. Die Shell schreibt `sh: bye`, und
 # danach passiert nichts mehr -- die Maschine kommt nicht herunter, und
@@ -396,12 +408,12 @@ rc=$(run_case grafik "$TMPD/dg.img" "osum $BASE script=sh /t/kurz.sh" 300 -no-re
 G="$TMPD/grafik.txt"
 has "$G" "init: ziel=grafik" "das Ziel ist ein anderes"
 is "JETZT laeuft der grafische Dienst" "$(sp "$G" fenster 2 head)" "running"
-gs=$(sp "$G" fenster 4 head)
+gs=$(spmax "$G" fenster 4)
 if [ -n "${gs:-}" ] && [ "$gs" -ge 1 ]; then
     ok "und wurde $gs mal gestartet -- im Lauf davor war es null"
 else bad "'fenster' wurde auch mit ziel=grafik nicht gestartet"; fi
 is "und JETZT steht der konsolen-eigene still" "$(sp "$G" kons 2 head)" "stopped"
-is "mit null Starts -- im Lauf davor lief er" "$(sp "$G" kons 4 head)" "0"
+is "mit null Starts -- im Lauf davor lief er" "$(spmax "$G" kons 4)" "0"
 
 echo "== 5. herunterfahren und neu starten =="
 rc=$(run_case runter "$TMPD/d0.img" "osum $BASE script=shutdown" 300 -no-reboot)
@@ -483,7 +495,7 @@ if build_progs 1; then
     S="$TMPD/stufe1.txt"
     is "die Programme von firnc1 fahren dieselbe Maschine herunter" "$rc" "0"
     has "$S" "init: dienste=9" "und ihr init liest dieselbe Tafel"
-    is "und schaltet denselben Dienst ab" "$(sp "$S" kaputt 2 head)" "failed"
+    is "und schaltet denselben Dienst ab" "$(sp "$S" kaputt 2 tail)" "failed"
 else
     bad "firnc1 baut die Programme nicht"
 fi
