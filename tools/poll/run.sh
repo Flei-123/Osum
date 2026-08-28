@@ -328,6 +328,15 @@ fi
 between "und die Warteschleife hat dieselbe Zeit gebraucht (sonst waere der Vergleich schief)" \
     "$(value_of "$F" busy_ms)" 1150 1400
 
+echo "   -- ein Signal holt einen Wartenden zurueck"
+# Ohne die Zeile in kernel/signal.fi, die S_POLL mit aufweckt, waere ein
+# `poll` ohne Frist die eine Stelle, an der ein Prozess unerreichbar
+# wird: der Zeitgeber kommt nie vorbei, weil T_WAKE auf POLL_FOREVER
+# steht. Das hier ist die Gegenprobe dazu.
+say "$F" sig_act 0 "SIGUSR1 hat eine Routine bekommen"
+say "$F" sig_ret -4 "poll(OHNE Frist) endet an einem Signal mit -EINTR"
+between "und zwar nach der Zeit des Signals, nicht spaeter" "$(value_of "$F" sig_ms)" 290 500
+
 echo "   -- die Bauform der Bruecke, ohne Draht"
 # Ohne Karte gibt es keine Steckdose (-ENODEV, kernel/sys.fi). Das ist
 # hier KEIN Fehler: der Lauf MIT Draht steht in Abschnitt 4. Was dieser
@@ -337,7 +346,7 @@ say "$F" mix_ret 1    "poll ueber Netzseite und Kindkanal meldet den Kindkanal"
 say "$F" mix_child 17 "der Kindkanal: POLLIN und POLLHUP (17)"
 say "$F" mix_hup 16   "nach dem Ende des Kindes bleibt POLLHUP stehen"
 n=$(value_of "$F" lines)
-num "Messzeilen, die /bin/pollt gedruckt hat" "${n:-0}" ge 30
+num "Messzeilen, die /bin/pollt gedruckt hat" "${n:-0}" ge 33
 
 # Die Gegenprobe zum ganzen Abschnitt: der Kernel lebt danach noch.
 grep -aq "kernel: done" "$F" && ok "der Kernel ist nach allen Faellen noch am Leben" \
