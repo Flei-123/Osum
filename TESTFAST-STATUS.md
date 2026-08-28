@@ -227,3 +227,55 @@ Uebersetzerzeit, KVM nicht.
   ueberschreiben sich gegenseitig `.test-work/<name>.log`. Deshalb laeuft
   Lauf A in einem zweiten Arbeitsbaum (`/root/tf-osum-a`). Mit
   `$OSUM_WORK` geht es kuenftig auch ohne.
+
+---
+
+## DIE ZWEI KVM-FEHLER, EINZELN REPRODUZIERT
+
+Derselbe Kernel (`build-kernel.sh` Stufe 0, 2 832 492 Oktette), dieselbe
+Kommandozeile, **nur `-accel` anders**. Protokolle unter `.mess/diag-*.txt`.
+
+```
+qemu-system-x86_64 -accel tcg -kernel k0.mb -m 128 -append "osum nokbd" ...
+    -> exit 21,  "kernel: done"                       ALLES GRUEN
+
+qemu-system-x86_64 -accel kvm -kernel k0.mb -m 128 -append "osum nokbd" ...
+    -> exit 63,  *** EXCEPTION 13 #GP  err=0x0
+```
+
+### Fehler 1 -- `rdmsr` auf ein Intel-MSR
+
+```
+*** EXCEPTION 13 #GP  err=0x0
+  rip=0x131ef5  cs=0x8  rflags=0x10246  rsp=0x4ccd60  ss=0x0
+  rax=0x1a2   rcx=0x1a2   rdx=0x0
+```
+
+`rcx` ist bei `rdmsr` der **MSR-Index**, und `0x1A2` ist
+`MSR_TEMPERATURE_TARGET` -- ein Register, das es **nur bei Intel** gibt.
+Der Wirt ist ein **AMD EPYC 7571**. TCG reicht unbekannte MSRs
+gutmuetig durch, KVM tut, was echte Hardware tut: `#GP`. Die Zeile davor
+im Protokoll ist `k13: skipped`, also stirbt der Kernel im
+Energie-/Waermeteil.
+
+Gegenprobe: mit `nopwr` auf der Kommandozeile kommt dieser `#GP` **nicht**
+mehr -- statt dessen der naechste:
+
+### Fehler 2 -- der Selektor im `sysret`-Rueckweg
+
+```
+qemu-system-x86_64 -accel kvm ... -append "osum nokbd nopwr"
+*** EXCEPTION 13 #GP  err=0x20
+  rip=0x1002af  cs=0x8  rflags=0x10006  rsp=0x5acfd8  ss=0x0
+  rbx=0x40006474  rsi=0x40006211  rbp=0x40006178
+```
+
+Der Fehlercode eines `#GP` ist bei einem Selektorfehler **der Selektor
+selbst**: `0x20` heisst GDT (TI=0), **Eintrag 4**. `rbx`, `rsi` und `rbp`
+zeigen auf `0x4000xxxx` -- Ring-3-Adressen. Der Kernel ist also auf dem
+**Rueckweg zu Ring 3**, und genau dort liegt der Selektorfehler, den die
+Runde `kvmfix` behebt. Dasselbe Bild mit `nosched noproc` dazu.
+
+**Das sind genau die zwei Fehler, die `kvmfix` angekuendigt hat** --
+hier unabhaengig reproduziert, mit Registern belegt und ohne eine Zeile
+in `kernel/` zu aendern. Alle elf roten Abschnitte haengen daran.
