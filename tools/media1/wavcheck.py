@@ -124,6 +124,12 @@ def main():
         sag("loud_last", -1)
         sag("signal_frames", 0)
         ende = 0
+    # DIE LAENGE UEBER "UNGLEICH NULL" statt ueber "lauter als 1000".
+    # Ein Sinus, der auf einem Nulldurchgang endet, hat am Ende hundert
+    # leise Rahmen -- die Schwelle 1000 wuerde ihn zu kurz melden. Die
+    # Fuellstille am Dateiende ist dagegen EXAKT null.
+    nz = np.flatnonzero(L != 0)
+    sag("signal_frames_nz", int(nz[-1]) + 1 if nz.size else 0)
     sag("tail_zero", int(np.count_nonzero(L[ende:] == 0)))
     sag("tail_frames", int(n - ende))
 
