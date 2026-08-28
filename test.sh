@@ -571,6 +571,16 @@ JOBS=${OSUM_JOBS:-$(( $(nproc 2>/dev/null || echo 2) / 2 ))}
 [ "$JOBS" -ge 1 ] 2>/dev/null || JOBS=1
 ZEIT=${OSUM_ZEIT:-1}
 
+# RUNDE TESTFAST -- EINZELNE ABSCHNITTE NACHMESSEN.
+#   $OSUM_NUR   erweiterter regulaerer Ausdruck auf den LOGNAMEN eines
+#               Abschnitts (z. B. OSUM_NUR='^(tunnel|tresor)$'). Nicht
+#               passende Abschnitte werden gar nicht erst angemeldet.
+#               Leer (Standard) = alle. Das ist ein MESSWERKZEUG: es
+#               entschaerft nichts, es laesst nur weg, was man gerade
+#               nicht misst. Die Schlussbilanz sagt dann ausdruecklich,
+#               dass sie unvollstaendig ist.
+NUR=${OSUM_NUR:-}
+
 # Diese Abschnitte teilen sich Namen im Netz des Wirts und bleiben
 # untereinander seriell. Siehe Punkt 2 oben.
 SERIELL_RE='^tools/(net|netmon|netview|tunnel)/'
@@ -587,6 +597,7 @@ PASS=0
 FAIL=0
 FAILED=""
 ZUSAGEN=0
+UEBERSPRUNGEN=0
 
 # Die angemeldeten Abschnitte, in der Reihenfolge des Skripts.
 A_TITEL=(); A_SKRIPT=(); A_NAME=(); A_MUSTER=()
@@ -632,7 +643,11 @@ abschnitt_ausgeben() { # index
     local rc ms
     rc=$(cat "$WORK/.rc.$i" 2>/dev/null || echo 1)
     ms=$(cat "$WORK/.ms.$i" 2>/dev/null || echo 0)
-    echo "== $titel =="
+    # $2="kopf_schon_da": bei OSUM_JOBS=1 steht die Ueberschrift schon
+    # VOR dem Lauf auf dem Schirm (so war es vor dieser Runde, und so
+    # sieht man beim Zusehen, woran es gerade haengt). Im parallelen
+    # Fall kann sie erst hier kommen, mit dem fertigen Block.
+    [ "${2:-}" = "kopf_schon_da" ] || echo "== $titel =="
     grep -aE "$muster" "$WORK/$name.log" | sed 's/^ */   /'
     zusagen "$WORK/$name.log"
     if [ "$rc" -eq 0 ]; then
@@ -655,11 +670,17 @@ abschnitt_ausgeben() { # index
 # wie frueher. Sonst wird der Abschnitt nur angemeldet; abgearbeitet wird
 # alles zusammen in `abschnitte_abarbeiten` weiter unten.
 lauf() { # titel skript logname muster
+    # OSUM_NUR: nicht passende Abschnitte werden nicht angemeldet.
+    if [ -n "$NUR" ] && ! printf '%s' "$3" | grep -qE "$NUR"; then
+        UEBERSPRUNGEN=$((UEBERSPRUNGEN + 1))
+        return 0
+    fi
     local i=${#A_SKRIPT[@]}
     A_TITEL+=("$1"); A_SKRIPT+=("$2"); A_NAME+=("$3"); A_MUSTER+=("$4")
     if [ "$JOBS" -le 1 ]; then
+        echo "== $1 =="
         abschnitt_ausfuehren "$i"
-        abschnitt_ausgeben "$i"
+        abschnitt_ausgeben "$i" kopf_schon_da
     fi
 }
 
@@ -879,6 +900,11 @@ abschnitte_abarbeiten
 echo
 echo "=================================================================="
 echo "gelaufen mit OSUM_JOBS=$JOBS, accel=${OSUM_ACCEL:-auto}"
+if [ "$UEBERSPRUNGEN" -gt 0 ]; then
+    echo "ACHTUNG: DIESER LAUF IST UNVOLLSTAENDIG -- OSUM_NUR='$NUR' hat"
+    echo "         $UEBERSPRUNGEN Abschnitte gar nicht erst angemeldet. Die Zahlen"
+    echo "         unten gelten NICHT als Abnahme."
+fi
 if [ "$FAIL" -eq 0 ]; then
     echo "ALLE $PASS ABSCHNITTE BESTANDEN, $ZUSAGEN Zusagen, 0 Fehler"
     exit 0
