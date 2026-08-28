@@ -921,6 +921,16 @@ lauf "25. Diebstahl: Geraeteidentitaet, Sicherung, Schluesselverwaltung (tools/t
      tools/tresor/run.sh tresor '^TRESOR: |^  OK    (SMBIOS |SHA-256 |PBKDF2|DER ZWEITE LAUF|der wiederhergestellte Baum|ACHT OKTETTE|im beschaedigten|GEGENPROBE|eine (NEUE PLATTE|ANDERE Maschine)|der Fingerabdruck ist|die Seriennummer des Laufwerks|crypto erase|open mit dem richtigen|1000 Oktette|bei 0xF1031|und seine Pruefsumme|PREIS DER AUSNAHME|MIT Liste sichert|DAS WIEDERHERGESTELLTE PAKET|das verwaiste Paket ist OKTETT|ZWEITER LAUF SCHREIBT NULL|GESCHRIEBEN nur|FAKTOR der kleinen|kein halbes Backup)'
 lauf "25. Akkuanalyse je Programm: die gemessene Gesamtleistung, anteilig zugeordnet (tools/powermon/run.sh, Runde POWERMON)" \
      tools/powermon/run.sh powermon '^POWERMON: |^        |^  OK    (another table|GEGENPROBE|the two displays|the same energy|the sum of the program|and the kernel.s own rows|the shares add up|the ageing|runtime left|one sample costs|counted and uncounted|at 10 samples|the file stays|AND THE SENTENCE|ON THIS HOST|wigapp= really|the window server counts|distinct colours)'
+# ABSCHNITT 27 -- RUNDE SNIP. Das Bildschirmfoto, und die Frage, WER den
+# Bildschirm lesen darf. Der Abschnitt misst zwei Dinge getrennt, weil sie
+# an verschiedenen Stellen messbar sind: das TASTENKUERZEL im Startfenster
+# (dort stellt die Tastatur nachweislich zu) und die ANWENDUNG in der
+# Haltephase mit der Maus auf die Knoepfe. Die wichtigste Zusage ist eine
+# ABLEHNUNG -- ohne Fahrschein null Oktette --, und ihre Gegenprobe
+# (`snapfrei`) MUSS den Selbsttest im Kern einbrechen lassen.
+lauf "27. das Bildschirmfoto und wer es bekommen darf (tools/snip/run.sh, Runde SNIP)" \
+     tools/snip/run.sh snip '^SNIP: |^  OK    (K11_OFF|die Aufrufnummer|die fuenf Felder|die Nummer 1860|snap\.selftest|der Dienst hat sich|ohne Puffer|der Kern hat den Fahrschein|das Standbild wurde|ein strenger PNG-Leser|der Ausschnitt|EIN Tastendruck|mit snapfrei|die Tastatur erkennt|OHNE eingetragenen Dienst|der Bereich ist nachweislich|die Filterwahl spart|Umschalt\+Super\+S loest|Super ALLEIN)'
+
 lauf "28. derselbe Kernel auf der ECHTEN CPU: /dev/kvm statt Emulation (tools/kvm/run.sh, Runde KVMFIX)" tools/kvm/run.sh kvm '^KVM: |^  OK    (der Kernel ist gebaut|1\.|3\.|4\.)|^  --    (CPU|3\.|4\.)|^KVM: uebersprungen'
 
 # Hier laufen die angemeldeten Abschnitte -- bei OSUM_JOBS=1 sind sie

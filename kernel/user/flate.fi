@@ -31,7 +31,7 @@ import ulib
 export {
     crc32, deflate, store, inflate, MAXBITS,
     // RUNDE SNIP: derselbe Packer, in Baendern.
-    adler32, band_begin, band, band_end, band_len,
+    adler32, band_begin, band_to, band, band_end, band_len,
     E_OK, E_INPUT, E_ROOM, E_FORMAT
 }
 
@@ -48,17 +48,41 @@ const M32: u64 = 0xFFFFFFFF
 // CRC-32 nach RFC 1952, ohne Tabelle: acht Schritte je Oktett. Die Maske
 // ist `0 -% (crc & 1)` -- das ist 0 oder 0xFFFFFFFF, und es ist eine
 // UMDEUTUNG und keine Subtraktion.
+// RUNDE SNIP: MIT TABELLE. Die Fassung darunter rechnet acht Schritte
+// JE OKTETT; ein PNG von 800x600 laeuft mit rund einer halben Million
+// Oktetten durch die Pruefsumme, das sind vier Millionen Schleifen je
+// Bild. Die Tabelle kostet 256 Woerter und wird EINMAL gebaut -- aus
+// genau derselben Rechnung, damit sie nicht abgeschrieben ist und
+// abweichen kann.
+static mut ctab: [u64; 256] = [0 as u64; 256]
+static mut ctab_da: u64 = 0
+
+fn crc_tab() {
+    if ctab_da == 1 {
+        return
+    }
+    ctab_da = 1
+    var i: u64 = 0
+    while i < 256 {
+        var c: u64 = i
+        var k: u64 = 0
+        while k < 8 {
+            let mask: u64 = 0 -% (c & 1)
+            c = (c >> 1) ^ (0xEDB88320 & mask)
+            k = k + 1
+        }
+        ctab[(i) as usize] = c
+        i = i + 1
+    }
+}
+
 fn crc32(p: u64, n: u64) -> u64 {
+    crc_tab()
     var crc: u64 = M32
     var i: u64 = 0
     while i < n {
-        crc = crc ^ ((*((p + i) as *mut u8)) as u64)
-        var k: u64 = 0
-        while k < 8 {
-            let mask: u64 = 0 -% (crc & 1)
-            crc = (crc >> 1) ^ (0xEDB88320 & mask)
-            k = k + 1
-        }
+        let j: u64 = (crc ^ ((*((p + i) as *mut u8)) as u64)) & 0xFF
+        crc = (crc >> 8) ^ ctab[(j) as usize]
         i = i + 1
     }
     return (crc ^ M32) & M32
@@ -532,11 +556,28 @@ fn store(in_p: u64, in_n: u64, out_p: u64, out_cap: u64,
 fn adler32(zustand: u64, p: u64, n: u64) -> u64 {
     var a: u64 = zustand & 0xFFFF
     var b: u64 = (zustand >> 16) & 0xFFFF
-    var i: u64 = 0
-    while i < n {
-        a = (a + ((*((p + i) as *mut u8)) as u64)) % 65521
-        b = (b + a) % 65521
-        i = i + 1
+    var at: u64 = 0
+    while at < n {
+        // NMAX: so viele Oktette duerfen zwischen zwei Restrechnungen
+        // liegen, ohne dass b ueberlaufen kann. 5552 ist die Zahl aus
+        // zlib, und sie ist hier mit 64 Bit sehr grosszuegig gerechnet
+        // -- der Punkt ist nicht der Ueberlauf, sondern die
+        // RESTRECHNUNG: zwei Divisionen je Oktett sind bei 1,4
+        // Millionen Oktetten je Bild der teuerste Posten dieses
+        // Kodierers gewesen.
+        var k: u64 = n - at
+        if k > 5552 {
+            k = 5552
+        }
+        var i: u64 = 0
+        while i < k {
+            a = a + ((*((p + at + i) as *mut u8)) as u64)
+            b = b + a
+            i = i + 1
+        }
+        a = a % 65521
+        b = b % 65521
+        at = at + k
     }
     return (b << 16) | a
 }
@@ -744,6 +785,25 @@ fn band_begin(out_p: u64, out_cap: u64) {
     wbuf = 0
     wcnt = 0
     oops = E_OK
+}
+
+// DEN AUSGABEZEIGER ZURUECKSETZEN, DEN BITPUFFER NICHT.
+//
+// Das ist die Funktion, die den Unterschied zwischen einem gueltigen
+// und einem kaputten Strom ausmacht, und sie hat diese Runde einen
+// Messlauf gekostet. Wer je Zeile `band_begin` ruft, setzt `wbuf` und
+// `wcnt` mit zurueck -- die Bits, die noch kein volles Oktett ergeben
+// haben, fallen weg, und jede Zeile faengt auf einer Oktettgrenze neu
+// an. Aneinandergehaengt ergibt das keinen deflate-Strom, sondern
+// sechshundert Anfaenge; `zlib` sagt dazu "invalid code lengths set",
+// und das PNG ist formal tadellos und trotzdem nicht lesbar.
+//
+// Wer den Strom in Stuecken hinausschreiben will, ruft `band_begin`
+// EINMAL und danach je Stueck DAS HIER.
+fn band_to(out_p: u64, out_cap: u64) {
+    dst = out_p
+    dpos = 0
+    dend = out_cap
 }
 
 // Ein Band. `letztes` = 1 setzt BFINAL, dann folgt nichts mehr.

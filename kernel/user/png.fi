@@ -127,15 +127,29 @@ fn be32(p: u64, v: u64) {
     *((p + 3) as *mut u8) = (v & 255) as u8
 }
 
+// IN STUECKEN VON HOECHSTENS VIER KILOOKTETTEN, und das ist gemessen:
+// `write` dieses Kerns fuehrt die Oktette durch einen Umschlagpuffer von
+// `kstate.BLOCK_MAX` (4096). Ein Aufruf mit 8196 Oktetten -- ein
+// gesammelter IDAT-Chunk -- schreibt 4096 und meldet 4096, und der
+// Vergleich `!= n` machte daraus `png-fehler 2` (F_WRITE), NACHDEM der
+// ganze Kodierer schon fehlerfrei durchgelaufen war. Ein kurzer Schreib
+// vorgang ist kein Fehler; ihn nicht fortzusetzen, ist einer.
 fn hinaus(p: u64, n: u64) {
-    if fehl != F_OK {
+    if fehl != F_OK || n == 0 {
         return
     }
-    if n == 0 {
-        return
-    }
-    if ulib.sys(ulib.SYS_WRITE, fd, p, n) != n {
-        fehl = F_WRITE
+    var at: u64 = 0
+    while at < n {
+        var k: u64 = n - at
+        if k > 4096 {
+            k = 4096
+        }
+        let w: u64 = ulib.sys(ulib.SYS_WRITE, fd, p + at, k)
+        if ulib.bad(w) || w == 0 {
+            fehl = F_WRITE
+            return
+        }
+        at = at + w
     }
 }
 
@@ -244,6 +258,61 @@ fn last(art: u64, n: u64, bpp: u64) -> u64 {
     return summe
 }
 
+// Die fuenf Summen nebeneinander. `bpp` ist 3.
+fn waehle(n: u64) -> u64 {
+    var s0: u64 = 0
+    var s1: u64 = 0
+    var s2: u64 = 0
+    var s3: u64 = 0
+    var s4: u64 = 0
+    var i: u64 = 0
+    while i < n {
+        let x: u64 = (jetzt[(i) as usize]) as u64
+        var a: u64 = 0
+        var c: u64 = 0
+        if i >= 3 {
+            a = (jetzt[((i - 3)) as usize]) as u64
+            c = (vorher[((i - 3)) as usize]) as u64
+        }
+        let b: u64 = (vorher[(i) as usize]) as u64
+        s0 = s0 + betrag(x)
+        s1 = s1 + betrag((x -% a) & 255)
+        s2 = s2 + betrag((x -% b) & 255)
+        s3 = s3 + betrag((x -% ((a + b) / 2)) & 255)
+        s4 = s4 + betrag((x -% paeth(a, b, c)) & 255)
+        i = i + 1
+    }
+    var art: u64 = 0
+    var beste: u64 = s0
+    if s1 < beste {
+        beste = s1
+        art = 1
+    }
+    if s2 < beste {
+        beste = s2
+        art = 2
+    }
+    if s3 < beste {
+        beste = s3
+        art = 3
+    }
+    if s4 < beste {
+        beste = s4
+        art = 4
+    }
+    return art
+}
+
+// Ein Oktett als VORZEICHENBEHAFTET gelesen. Wer sie vorzeichenlos
+// summiert, waehlt fast immer Filter 0 und hat die Heuristik nicht
+// gebaut, sondern nur ihren Namen benutzt.
+fn betrag(v: u64) -> u64 {
+    if v < 128 {
+        return v
+    }
+    return 256 - v
+}
+
 // ------------------------------------------------------- das Schreiben
 
 // `hol` ist eine Funktion, die Zeile `y` als 0x00RRGGBB nach `ziel`
@@ -304,6 +373,13 @@ fn schreibe(pfad: u64, w: u64, h: u64, hol: fn(u64, u64) -> u64) -> u64 {
     chunk((&iend[0 as usize]) as u64, 0, 0)
 
     ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    // AUF DIE PLATTE, NICHT NUR IN DEN ZWISCHENSPEICHER. Ein
+    // Bildschirmfoto ist genau die Datei, die der Mensch gleich
+    // weitergeben will, und eine Maschine, die dabei ausgeht, soll sie
+    // nicht verlieren. Gemessen war es ausserdem der Unterschied
+    // zwischen "gespeichert" im Protokoll und einer Platte, auf der die
+    // Datei nicht steht.
+    ulib.sys(ulib.SYS_SYNC, 0, 0, 0)
     return fehl
 }
 
@@ -316,13 +392,16 @@ fn idat(w: u64, h: u64, hol: fn(u64, u64) -> u64) {
     var ad: [u8; 4] = [0 as u8; 4]
     let n: u64 = w * 3
     var adler: u64 = 1
+    sam_n = 0
     // Der zlib-Rahmen: 0x78 = deflate mit 32-KiB-Fenster, 0x01 = keine
     // Voreinstellung, niedrigste Stufe. 0x7801 ist durch 31 teilbar,
     // und genau das prueft jeder zlib-Leser als erstes.
     zlib[0] = 0x78 as u8
     zlib[1] = 0x01 as u8
-    idat_stueck((&zlib[0 as usize]) as u64, 2)
+    sammle((&zlib[0 as usize]) as u64, 2)
 
+    // EINMAL, nicht je Zeile -- siehe `flate.band_to`.
+    flate.band_begin((&band[0 as usize]) as u64, BAND)
     var y: u64 = 0
     while y < h && fehl == F_OK {
         if hol((&zeile[0 as usize]) as u64, y) == 0 {
@@ -338,19 +417,23 @@ fn idat(w: u64, h: u64, hol: fn(u64, u64) -> u64) {
             jetzt[((x * 3 + 2)) as usize] = zeile[((x * 4)) as usize]
             x = x + 1
         }
-        // Die Filterwahl.
+        // DIE FILTERWAHL, IN EINEM DURCHLAUF STATT IN FUENF.
+        //
+        // Die Standardheuristik will die Summe der Betraege fuer alle
+        // fuenf Filter. Fuenfmal `last` zu rufen heisst: fuenfmal die
+        // Zeile durchgehen und je Oktett viermal in die Felder greifen
+        // (links, oben, links-oben) -- bei 2400 Oktetten und 600 Zeilen
+        // sind das 7,2 Millionen Zugriffe je Bild. Gemessen war das der
+        // Grund, warum das Speichern in der Haltezeit nicht fertig
+        // wurde.
+        //
+        // Hier werden die vier Nachbarn EINMAL gelesen und fuenf Summen
+        // nebeneinander gefuehrt. Dasselbe Ergebnis, ein Fuenftel der
+        // Zugriffe -- und die Wahl bleibt Oktett fuer Oktett dieselbe,
+        // was `tools/snip/pngcheck.py` an der Filterverteilung sieht.
         var art: u64 = 0
         if wahl_an != 0 {
-            var beste: u64 = last(0, n, 3)
-            var k: u64 = 1
-            while k < 5 {
-                let s: u64 = last(k, n, 3)
-                if s < beste {
-                    beste = s
-                    art = k
-                }
-                k = k + 1
-            }
+            art = waehle(n)
         }
         gew[(art) as usize] = gew[(art) as usize] + 1
         gef[0] = art as u8
@@ -361,14 +444,22 @@ fn idat(w: u64, h: u64, hol: fn(u64, u64) -> u64) {
         }
         adler = flate.adler32(adler, (&gef[0 as usize]) as u64, n + 1)
         // Das Band. Jede Zeile ist ein deflate-Block -- kurz, aber die
-        // Bits laufen ueber die Grenze, es ist EIN Strom.
-        flate.band_begin((&band[0 as usize]) as u64, BAND)
-        if flate.band((&gef[0 as usize]) as u64, n + 1, 0) != flate.E_OK {
+        // Bits laufen ueber die Grenze, es ist EIN Strom. Die letzte
+        // Zeile traegt BFINAL.
+        var letzte: u64 = 0
+        if y + 1 == h {
+            letzte = 1
+        }
+        flate.band_to((&band[0 as usize]) as u64, BAND)
+        if flate.band((&gef[0 as usize]) as u64, n + 1, letzte)
+            != flate.E_OK {
             fehl = F_ROOM
             return
         }
-        flate.band_end(1)
-        idat_stueck((&band[0 as usize]) as u64, flate.band_len())
+        if letzte == 1 {
+            flate.band_end(1)
+        }
+        sammle((&band[0 as usize]) as u64, flate.band_len())
         // Diese Zeile ist die naechste "Zeile davor".
         i = 0
         while i < n {
@@ -378,7 +469,47 @@ fn idat(w: u64, h: u64, hol: fn(u64, u64) -> u64) {
         y = y + 1
     }
     be32((&ad[0 as usize]) as u64, adler)
-    idat_stueck((&ad[0 as usize]) as u64, 4)
+    sammle((&ad[0 as usize]) as u64, 4)
+    spuele()
+}
+
+// EIN IDAT JE ZEILE WAREN SECHSHUNDERT CHUNKS -- sechshundert
+// Pruefsummen, sechshundert Schreibaufrufe, sechshundert Mal zwoelf
+// Oktette Rahmen. PNG erlaubt beliebig viele IDAT, aber es verlangt
+// keine sechshundert. Hier werden sie gesammelt, bis acht Kilooktette
+// beisammen sind.
+static mut sam: [u8; 8192] = [0 as u8; 8192]
+static mut sam_n: u64 = 0
+
+fn sammle(p: u64, n: u64) {
+    if fehl != F_OK {
+        return
+    }
+    var at: u64 = 0
+    while at < n {
+        if sam_n >= 8192 {
+            spuele()
+        }
+        var k: u64 = 8192 - sam_n
+        if k > n - at {
+            k = n - at
+        }
+        var i: u64 = 0
+        while i < k {
+            sam[((sam_n + i)) as usize] = *((p + at + i) as *mut u8)
+            i = i + 1
+        }
+        sam_n = sam_n + k
+        at = at + k
+    }
+}
+
+fn spuele() {
+    if sam_n == 0 {
+        return
+    }
+    idat_stueck((&sam[0 as usize]) as u64, sam_n)
+    sam_n = 0
 }
 
 // Ein IDAT-Chunk. Der Typ muss VOR den Daten im selben Puffer stehen
