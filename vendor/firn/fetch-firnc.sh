@@ -77,10 +77,35 @@ mkdir -p "$HIER/bin"
 rm -f "$HIER/bin/firnc" "$HIER/bin/firnc1" "$HIER/.gebaut"
 cp -f "$BAU/compiler/target/$HOST/release/firnc" "$HIER/bin/firnc"
 rm -rf "$HIER/lib"
-# -L: die Firn-Bibliothek enthaelt neun Symlinks, und einer davon
-# (lib/rc/rc.fi) zeigt AUS lib heraus in tests/. Als Symlink kopiert
-# waere er hier tot; aufgeloest ist die Bibliothek in sich geschlossen.
-cp -rL "$BAU/lib" "$HIER/lib"
+# RUNDE CERTUS: DIE VERWEISE BLEIBEN VERWEISE, BIS AUF DEN EINEN.
+#
+# Bis hierher stand hier `cp -rL`, und der Satz darueber lautete, die
+# Bibliothek sei danach "in sich geschlossen". Sie war es, und sie war
+# dabei KAPUTT: von den neun symbolischen Verweisen in lib/ zeigen acht
+# INNERHALB von lib (lib/std/rt.fi -> ../rt/rt.fi und so weiter). `-L`
+# macht daraus zwei echte Dateien mit demselben Inhalt -- und weil ein
+# Firn-Modul nach seinem DATEINAMEN heisst, sind lib/rt/rt.fi und
+# lib/std/rt.fi danach zwei Module namens `rt`. Ein Programm, das beide
+# Wege benutzt (jedes, das `import std.rt` UND `import rt.rt` im
+# Abhaengigkeitsbaum hat -- also der ganze Browser, weil lib/paint/png.fi
+# den zweiten Weg nimmt), bricht mit
+#
+#     error: function 'rt__heap_alloc' is already declared
+#
+# und vierzig weiteren ab. Gemessen am 28.08.2026: 40 Fehler.
+#
+# Also wird jetzt mit `-a` kopiert -- die Verweise bleiben Verweise --
+# und danach wird GENAU DER EINE aufgeloest, der aus lib herauszeigt
+# (lib/rc/rc.fi -> ../../tests/modules/rc.fi). Der Rest ist in sich
+# geschlossen, weil er es vorher schon war.
+cp -a "$BAU/lib" "$HIER/lib"
+while IFS= read -r l; do
+    ziel=$(readlink -f "$l" 2>/dev/null) || continue
+    case "$ziel" in
+        "$HIER/lib"/*) ;;                 # zeigt in lib -- bleibt Verweis
+        *) [ -f "$ziel" ] && { rm -f "$l"; cp "$ziel" "$l"; } ;;
+    esac
+done < <(find "$HIER/lib" -type l)
 
 echo ">> firnc1 bauen (der Uebersetzer in Firn, von firnc0 uebersetzt)"
 FIRNLIB="$HIER/lib" "$HIER/bin/firnc" "$BAU/bin/firnc1.fi" -o "$HIER/bin/firnc1"
