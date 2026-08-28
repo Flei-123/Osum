@@ -574,7 +574,13 @@ ZEIT=${OSUM_ZEIT:-1}
 # Diese Abschnitte teilen sich Namen im Netz des Wirts und bleiben
 # untereinander seriell. Siehe Punkt 2 oben.
 SERIELL_RE='^tools/(net|netmon|netview|tunnel)/'
-NETZSPERRE="$WORK/.netz.lock"
+# Die Sperre liegt ABSICHTLICH ausserhalb des Arbeitsbaums (/tmp und nicht
+# .test-work): auf diesem Wirt stehen mehrere Arbeitsbaeume desselben
+# Repos nebeneinander, und `ip netns` und `ip link` gehoeren dem WIRT,
+# nicht dem Arbeitsbaum. Eine Sperre je Arbeitsbaum wuerde zwei
+# gleichzeitige Abnahmen aus zwei Zweigen nicht auseinanderhalten.
+NETZSPERRE=${OSUM_NETZSPERRE:-/tmp/osum-netz.lock}
+: > "$NETZSPERRE" 2>/dev/null || NETZSPERRE="$WORK/.netz.lock"
 : > "$NETZSPERRE"
 
 PASS=0
