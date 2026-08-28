@@ -35,7 +35,8 @@ die Aussetzerzählung und die Begründungen mit drin stehen.
 ## 2. Die Zahlen — gemessen, nicht behauptet
 
 Alles unten kommt aus `tools/media1/run.sh` (QEMU 7.2, `-accel kvm`,
-`-audiodev wav`, AMD EPYC 7571). **144 Zusagen.**
+`-audiodev wav`, AMD EPYC 7571). **150 Zusagen, 149 gruen, 1 rot** (der rote Punkt
+steht in Abschnitt 7 dieses Berichts, mit Namen und Zahl).
 
 ### Der Ton selbst
 
@@ -73,10 +74,19 @@ einzelne Messung kann das nicht.
 
 | Größe | Wert |
 |---|---|
-| Gangfehler Ton gegen Zyklenzähler | **−749 ppm** (zweiter Lauf: −1997 ppm) |
-| fester Versatz | **+9 bis +11 ms** |
-| Ton gegen Zeitgeber (100 Hz, unabhängig) | **+348 bis +374 ppm** bei 2037 ppm Körnung |
+| roher Unterschied über **1 s** | **1 bis 8 ms** |
+| roher Unterschied über **5 s** | **1 bis 3 ms** |
+| Gangfehler aus beiden Längen | **−427 bis −2695 ppm** |
+| fester Versatz | **+1 bis +10 ms** |
+| Ton gegen Zeitgeber (100 Hz, unabhängig) | **1549 bis 3096 ppm** bei 2039 ppm Körnung |
 | Monotonie | **0 Rückschritte** in jedem Lauf |
+
+Jede zeitkritische Messung wird **dreimal** genommen und der **kleinste** Wert gilt.
+Das ist keine Rosinenpickerei, sondern die Bauart des Fehlers: ein Stillstand der
+Gastmaschine (der Bauserver trug an diesem Tag zwanzig gleichzeitige Abnahmen)
+macht die gemessene **Zeit** größer, niemals kleiner — die Tonuhr läuft derweil
+unbeirrt weiter. Der Fehler ist **einseitig**, also ist das Minimum die beste
+Schätzung. Alle drei Versuche stehen im Protokoll.
 
 **Der Versatz ist kein Fehler.** `CIV`/`PICB` zählen, was der Regler **geholt** hat,
 nicht was der Lautsprecher gesagt hat; dazwischen liegt der FIFO. Die Recherche hat
@@ -141,7 +151,40 @@ Sie stehen hier, weil sie auf echter Hardware genauso auftreten.
    *Gemessen: **331 von 4000 Rahmen** fehlten am Dateiende.* Behoben durch eine
    Nachfrist von 150 ms — dieselbe, die der Kernpfad schon hatte.
 
+5. **`read` darf weniger liefern als verlangt.** `omc.read_payload` nahm das Ergebnis
+   **eines** Aufrufs und übersprang den Rest als „nicht gelesen“. Aus einem Block von
+   3840 Oktetten wurden 3584, und die Tonspur war ab da um einen Rahmen verschoben.
+   *Gemessen: `maxdiff 1727` — genau der Abstand zweier benachbarter Werte eines
+   660-Hz-Sinus bei dieser Aussteuerung.* Und er trat **nur auf einer bestimmten
+   Belegung der Platte** auf: auf einer anderen lagen die Blockgrenzen anders.
+   Ein Fehler, der von der Belegung der Platte abhängt, ist der unangenehmste, den es
+   gibt — und drei Wiederholungen haben ihn nicht weggedrückt, sondern
+   **festgenagelt**. Behoben durch eine Leseschleife.
+
 ---
+
+## 3a. Der eine rote Punkt, der offen bleibt
+
+`tools/media1/run.sh`, Abschnitt 8: **„auch aus dem eigenen Behälter kommt die Datei
+BITGLEICH heraus“ — `cmp_exact = 0, maxdiff 1727`**, drei Anläufe hintereinander.
+
+Was gesichert ist:
+
+* Die Leseschleife aus Punkt 5 oben ist drin und behebt **eine** Ursache dieses
+  Bildes. Danach ist derselbe Fall **einzeln aufgebaut viermal hintereinander
+  bitgleich** (zwei Läufe vor und zwei nach dem Nachbau der Platte mit genau den
+  Dateien und Programmen, die auch der Läufer schreibt).
+* Im vollen Läufer bleibt er rot, mit **immer derselben Zahl** (1727 = ein Rahmen
+  Versatz bei 660 Hz). Also **kein** Lastflattern, sondern ein zweiter, noch nicht
+  gefundener Auslöser.
+* Der WAV-Weg über dieselbe Strecke ist im selben Lauf **bitgleich** (`cmp_exact = 1`),
+  ebenso der Kernpfad. Die Tonspur ist **vollständig** (4000 Rahmen ungleich null),
+  fängt **sofort** an (`loud_first = 1`) und hat **keine Lücke** (`gaps = 0`).
+
+Es ist also ein Versatz um einen Rahmen im Behälter-Weg unter noch unbekannter
+Bedingung — hörbar wäre er nicht, richtig ist er trotzdem nicht. **Er wird nicht
+weggeschrieben und nicht entschärft; die Zusage bleibt rot, bis die Ursache
+gefunden ist.** Das ist der erste Punkt der nächsten Runde.
 
 ## 4. Was für VIDEO noch fehlt (Block F, Schritte F5–F7)
 
