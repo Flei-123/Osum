@@ -56,6 +56,24 @@ export { u_start }
 static mut lines: u64 = 0
 
 const CLOCK_MONOTONIC: u64 = 1
+const SYS_RT_SIGACTION: u64 = 13
+const SYS_KILL: u64 = 62
+const SIGUSR1: u64 = 10
+
+// Die Routine aus crt.s, die ein Signal abfaengt und zurueckkehrt --
+// dieselbe, die `kernel/user/unix.fi` seit Runde K9 benutzt.
+fn handler_addr() -> u64 {
+    return asm("lea rax, [rip + osum_sighandler]", out("rax"))
+}
+
+fn set_handler(sig: u64, h: u64) -> u64 {
+    var sa: [u64; 4] = [0 as u64; 4]
+    sa[0] = h
+    sa[1] = 0
+    sa[2] = 0
+    sa[3] = 0
+    return kcall.sys4(SYS_RT_SIGACTION, sig, (&sa[0]) as u64, 0, 8)
+}
 
 fn tell(name: u64, v: u64) {
     var head: [u8; 8] = "pollt: \0"
@@ -87,6 +105,7 @@ fn u_start(args: u64) -> u64 {
     the_errors()
     the_timeout()
     the_block()
+    the_signal()
     the_bridge_shape()
     var done: [u8; 8] = "lines\0\0\0"
     tell((&done[0]) as u64, lines + 1)
@@ -346,6 +365,49 @@ fn the_block() {
     let b1: u64 = calls()
     tell((&n_busyms[0]) as u64, m1 -% m0)
     tell((&n_busy[0]) as u64, b1 -% b0)
+}
+
+// ================ 8b. ein Signal holt einen Wartenden zurueck
+//
+// DIE STELLE, AN DER EIN PROZESS UNERREICHBAR WERDEN KOENNTE. Ein
+// `poll` OHNE Frist traegt POLL_FOREVER in T_WAKE ein -- der Zeitgeber
+// kommt also nie vorbei. Ohne die Zeile in `kernel/signal.fi`, die
+// S_POLL mit aufweckt, haette ein SIGTERM auf so einen Prozess erst
+// gewirkt, wenn irgendwo zufaellig ein Rohr beschrieben wird. Gemessen
+// wird: das Kind schickt nach 300 ms ein SIGUSR1, und `poll` kommt mit
+// -EINTR (-4) zurueck, nicht spaeter und nicht mit 0.
+fn the_signal() {
+    var a: [u64; 1] = [0 as u64; 1]
+    var fds: [u8; 8] = [0 as u8; 8]
+    var n_ret: [u8; 9] = "sig_ret\0\0"
+    var n_ms: [u8; 8] = "sig_ms\0\0"
+    var n_act: [u8; 9] = "sig_act\0\0"
+
+    tell((&n_act[0]) as u64, set_handler(SIGUSR1, handler_addr()))
+    io.pipe((&a[0]) as u64)
+    let rd: u64 = (a[0]) & 0xFFFFFFFF
+    let wr: u64 = (a[0]) >> 32
+    let me: u64 = proc.pid()
+    let who: u64 = proc.split()
+    if who == 0 {
+        io.close(rd)
+        io.close(wr)
+        ulib.sleep_ms(300)
+        kcall.sys2(SYS_KILL, me, SIGUSR1)
+        proc.leave(0)
+    }
+    io.poll_set((&fds[0]) as u64, 0, rd, io.POLLIN)
+    let t0: u64 = mono_ms()
+    // OHNE die libc-Huelle: was hier zaehlt, ist die Zahl, die der
+    // Kernel wirklich geliefert hat, und nicht -1 mit errno daneben.
+    let r: u64 = ulib.sys(kcall.SYS_POLL, (&fds[0]) as u64, 1,
+        io.POLL_FOREVER)
+    let t1: u64 = mono_ms()
+    tell((&n_ret[0]) as u64, r)
+    tell((&n_ms[0]) as u64, t1 -% t0)
+    io.close(rd)
+    io.close(wr)
+    proc.wait_code(who)
 }
 
 // ============================ 9. die Bauform der spaeteren Bruecke

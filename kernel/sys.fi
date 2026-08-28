@@ -1656,6 +1656,27 @@ fn fset(frame: u64, off: u64, v: u64) {
 // rsp und die drei Argumentregister der Behandlungsroutine.
 fn entry(number: u64, frame: u64, state: u64) -> u64 {
     let r: u64 = dispatch(number, frame, state)
+    // RUNDE POLL, UND ES IST EIN ECHTER FEHLER, DER HIER SEIT K9 LAG.
+    // Der Satz darueber stimmte nicht: `isr.s` schreibt die Antwort
+    // NACH diesem Aufruf in den Rahmen -- also stand beim Zustellen des
+    // Signals in `F_RAX` noch die NUMMER des Systemaufrufs. `check_sys`
+    // rettet den ganzen Rahmen auf den Nutzerstapel, und `sigreturn`
+    // holt ihn von dort zurueck: der Aufruf gab damit seine eigene
+    // Nummer statt seiner Antwort, sobald ein ABGEFANGENES Signal ihn
+    // unterbrach. Gemessen an genau dieser Runde: ein `poll` ohne Frist,
+    // von SIGUSR1 unterbrochen, lieferte 7 statt -EINTR.
+    //
+    // Bis hierher fiel das niemandem auf, weil die abgefangenen Signale
+    // in `tools/unix/run.sh` einen Prozess treffen, der gerade RECHNET
+    // (dort geht die Zustellung ueber `check_irq`) oder der danach
+    // ohnehin stirbt. Ein Helfer, der in `poll` steht und ein SIGTERM
+    // sauber beantworten soll, ist der erste Fall, in dem es zaehlt.
+    //
+    // Die Antwort gehoert also VOR die Zustellung in den Rahmen.
+    // `isr.s` schreibt sie danach noch einmal an dieselbe Stelle -- das
+    // ist derselbe Wert und stoert nicht, und rax ist fuer die
+    // Behandlungsroutine ein Kratzregister.
+    fset(frame, F_RAX, r)
     signal.check_sys(state, sched.current(state), frame)
     return r
 }
