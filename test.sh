@@ -728,6 +728,16 @@ lauf "29. HTTPS aus Ring 3, und die Verweigerungen (tools/hwnet/tls.sh, Runde HW
 
 lauf "25. Akkuanalyse je Programm: die gemessene Gesamtleistung, anteilig zugeordnet (tools/powermon/run.sh, Runde POWERMON)" \
      tools/powermon/run.sh powermon '^POWERMON: |^        |^  OK    (another table|GEGENPROBE|the two displays|the same energy|the sum of the program|and the kernel.s own rows|the shares add up|the ageing|runtime left|one sample costs|counted and uncounted|at 10 samples|the file stays|AND THE SENTENCE|ON THIS HOST|wigapp= really|the window server counts|distinct colours)'
+# ABSCHNITT 30 -- RUNDE UPDATE. Der Weg, auf dem sich dieses System
+# selbst erneuert: Ed25519 (RFC 8032) und SHA-512, gegen die 1024
+# offiziellen Vektoren und gegen libsodium; `/bin/opk`, das ohne gueltige
+# Signatur NICHTS installiert; und der Erprobungszaehler im Kern, der ein
+# Update, das nicht hochkommt, nach drei Startversuchen von selbst
+# zurueckrollt. Der letzte Punkt ist die eigentliche Zusage: eine
+# absichtlich kaputte Generation, drei echte Neustarts in QEMU, und die
+# Maschine steht danach wieder auf der alten.
+lauf "30. Auto-Update: Ed25519, Signaturpflicht, A/B-Boot (tools/update/run.sh, Runde UPDATE)" \
+     tools/update/run.sh update '^UPDATE: |^        [a-z0-9]|^  OK    (all [0-9]+ checks|tools/update/oracle.fi|das signierte Paket|und installiert|die Liste nennt|GEGENPROBE|die SIGNATUR schlaegt|DER PUNKT DER RUNDE|und die alte, laufende|Start [123]|Ausgangslage|das kaputte Update|Generation 1 steht|beim naechsten Start|es wird nie|holen ->|Neustart ->|-> Erfolgsvermerk)'
 
 echo
 echo "=================================================================="
