@@ -106,14 +106,28 @@ Filterwahl der Spezifikation (kleinste Summe der Beträge je Zeile) und
 `tools/viewer/run.sh` holt die geschriebene Datei mit
 `tools/viewer/holen.py` vom Abbild und lässt sie von **Pillow** lesen.
 
-**JPEG schreiben kann diese Runde nicht.** Ein Baseline-Encoder wäre
-Vorwärts-DCT, Quantisierungstabellen (Anhang K), Huffman-Tabellen und
-ein Bitschreiber — geschätzt 450–600 Zeilen und zwei bis drei Tage. Er
-steht nicht drin, und deshalb steht er auch nicht in der Oberfläche: der
-Knopf heißt „Als PNG" und nicht „Speichern unter". Für einen
-Bildbetrachter ist PNG die richtige Wahl (verlustfrei, mit Alpha); wer
-ein bearbeitetes Foto klein haben will, braucht den Encoder — er ist der
-erste Punkt der Liste für die nächste Runde.
+**JPEG**, Baseline, 8 Bit, 4:4:4, Qualität 1–100
+(`kernel/user/imgjenc.fi`, 637 Zeilen). Vorwärts-DCT ist
+`jpeg_fdct_islow` — dieselbe Ganzzahlrechnung wie die inverse; die
+Quantisierungstabellen sind die aus Anhang K mit libjpegs
+Skalierungsformel; die Huffman-Tabellen sind ebenfalls die aus Anhang K
+(aus einer Datei gezogen, die Pillow geschrieben hat). Kein eigener
+Huffman-Erzeuger: er wäre 150 Zeilen für ein paar Prozent Dateigröße.
+
+**Wie gut ist er?** Der Vergleich kann hier nicht „gleich" heißen — ein
+JPEG ist verlustbehaftet. Gemessen wird deshalb **„gleich gut"**: derselbe
+Ausgangsbildpunkt, dieselbe Qualität, und dann Dateigröße und Fehler
+gegen libjpeg:
+
+| Qualität 85, 4:4:4 | Datei | größter Fehler | mittlerer Fehler |
+|---|---|---|---|
+| **Osum** | 3 094 Oktette | 55 | 5,061 |
+| libjpeg (Pillow) | 3 100 Oktette | 60 | 4,935 |
+
+Sechs Oktette kleiner, ein Fehler in derselben Größenordnung. Was fehlt:
+**keine Unterabtastung** (4:2:0 würde die Datei um rund ein Viertel
+kleiner machen, +150 Zeilen), kein progressives JPEG, keine
+Neustartmarken, kein optimiertes Huffman, kein EXIF im Ausgang.
 
 ---
 
@@ -194,13 +208,22 @@ drei Veränderlichen und schiebt sie je Durchgang weiter:
 ```
 
 `firnc` (Commit `a751b3db`) legt `mitte` und `rechts` dabei auf
-**denselben Stapelplatz** und zieht die Zuweisung `links = mitte` hinter
-die Neuberechnung von `rechts`. Im Assembler (`--emit=asm`) ist es
-sichtbar: der Anfangswert von `rechts` wird nach `[rbp-592]` geschrieben
-und eine Zeile später vom Anfangswert von `mitte` überschrieben; im
-Schleifenrumpf liest `mitte` dieselbe Zelle, in die der neue `rechts`
-geschrieben wird. Das ist das klassische *lost-copy problem* beim
+**denselben Stapelplatz**. Im Assembler (`--emit=asm`) ist es sichtbar:
+der Anfangswert von `rechts` wird nach `[rbp-592]` geschrieben und eine
+Zeile später vom Anfangswert von `mitte` überschrieben; im Rumpf liest
+`mitte` dieselbe Zelle, in die der neue `rechts` geschrieben wird, und
+am Ende des Durchgangs holt sich `links` von dort den **schon
+weitergerückten** Wert. Das ist das klassische *lost-copy problem* beim
 Verlassen der SSA-Form.
+
+**Die Form ist wählerisch**, und das gehört dazu: dasselbe Muster mit
+Konstanten statt Ladebefehlen (`rechts = rechts + 1`) übersetzt firnc
+richtig. Nötig für den Fehler sind alle drei Zutaten — `mitte` wird aus
+`links` initialisiert, die dritte Summe kommt aus einem Ausdruck mit
+Funktionsaufrufen, und ihre Neuberechnung steht in einem `if`. Genau
+diese Form steht als `rotationsprobe` in `kernel/user/imgtest.fi`, wird
+bei jedem Abnahmelauf ausgeführt und mit dem Sollwert 132172216260
+verglichen.
 
 Gemessen hat es sich als Farbfehler von bis zu 163 Stufen bei 4:2:0 —
 sichtbar, aber nicht offensichtlich falsch; ohne den Vergleich gegen

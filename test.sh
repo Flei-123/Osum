@@ -479,6 +479,32 @@
 #      /users/<name>/config/tiling.conf, und ohne die Datei gibt es
 #      KEINE Belegung. Dazu drei Bildschirmfotos (Teilung, Reiter,
 #      Drehung), bildpunktgenau nachgerechnet, und /bin/tiling in Ring 3.
+#  29. BILDER (tools/viewer/run.sh, Runde VIEWER): vier eigene
+#      Bilddekodierer -- PNG (mit dem DEFLATE aus Runde K11), Baseline-
+#      JPEG, BMP und GIF mit Animation -- hinter EINER Schnittstelle, die
+#      ZEILEN liefert und nie ein ganzes Bild haelt. Gemessen wird nicht
+#      "sieht gut aus", sondern Bildpunkt fuer Bildpunkt gegen Pillow
+#      (libjpeg-turbo, zlib-ng): dieselben Dateien werden auf dem Wirt
+#      dekodiert, die rohen RGBA-Oktette kommen auf dasselbe Abbild, und
+#      `/bin/imgtest` vergleicht sie IM SYSTEM. PNG, BMP und GIF kommen
+#      BITGENAU heraus, JPEG bis auf zwei Stufen je Kanal (4:2:2; alles
+#      andere bitgenau) -- die Toleranz ist benannt, weil der Dekodierer
+#      absichtlich mit libjpegs Ganzzahl-IDCT, dessen Dreiecksfilter und
+#      dessen Farbtabellen rechnet.
+#      DIE ZAHL, DIE UEBER DIE BRAUCHBARKEIT ENTSCHEIDET, steht im
+#      Protokoll: die Zeit fuer ein Foto mit zwoelf Megabildpunkten. Und
+#      die Zusage, die daran haengt: ein Bild mit FUENFZIG
+#      Megabildpunkten wird dekodiert, mit einem Arbeitsspeicher, der an
+#      der BREITE haengt und nicht an der Flaeche (2 MiB statt 200).
+#      Dazu: sieben kaputte und abgeschnittene Dateien geben einen Grund
+#      MIT NAMEN statt eines Absturzes, WebP/HEIC/SVG/TIFF werden erkannt
+#      und beim Namen abgelehnt, progressives JPEG heisst PROGRESSIV --
+#      und was das System als PNG und als JPEG SCHREIBT, wird vom Abbild
+#      geholt und von Pillow gelesen. Der Betrachter selbst laeuft im
+#      Fensterserver: blaettern, zoomen, drehen, EXIF-Lage, Miniaturen,
+#      Diaschau, zuschneiden, sichern -- geklickt wird auf die
+#      Rechtecke, die die Anwendung selbst meldet.
+#
 #  25. DIEBSTAHL (tools/tresor/run.sh, Runde TRESOR): was passiert, wenn
 #      die Maschine weg ist. Eine GERAETEIDENTITAET, die eine
 #      Neuinstallation ueberlebt (`kernel/hwid.fi`: SMBIOS ueber den
@@ -919,6 +945,16 @@ lauf "25. Diebstahl: Geraeteidentitaet, Sicherung, Schluesselverwaltung (tools/t
 lauf "25. Akkuanalyse je Programm: die gemessene Gesamtleistung, anteilig zugeordnet (tools/powermon/run.sh, Runde POWERMON)" \
      tools/powermon/run.sh powermon '^POWERMON: |^        |^  OK    (another table|GEGENPROBE|the two displays|the same energy|the sum of the program|and the kernel.s own rows|the shares add up|the ageing|runtime left|one sample costs|counted and uncounted|at 10 samples|the file stays|AND THE SENTENCE|ON THIS HOST|wigapp= really|the window server counts|distinct colours)'
 lauf "28. derselbe Kernel auf der ECHTEN CPU: /dev/kvm statt Emulation (tools/kvm/run.sh, Runde KVMFIX)" tools/kvm/run.sh kvm '^KVM: |^  OK    (der Kernel ist gebaut|1\.|3\.|4\.)|^  --    (CPU|3\.|4\.)|^KVM: uebersprungen'
+
+# ABSCHNITT 29 -- RUNDE VIEWER. Die vier Bilddekodierer (PNG, JPEG, BMP,
+# GIF), der PNG- und der JPEG-Schreiber und die Anwendung "Bilder".
+# Gemessen wird gegen Pillow (libjpeg-turbo, zlib-ng): bei PNG, BMP und
+# GIF BITGENAU, bei JPEG mit einer benannten Toleranz von zwei Stufen je
+# Kanal. Dazu die Zahl, die ueber die Brauchbarkeit entscheidet -- die
+# Zeit fuer ein Foto mit zwoelf Megabildpunkten -- und der Beweis, dass
+# ein Bild mit fuenfzig Megabildpunkten das System nicht umbringt.
+lauf "29. Bilder: PNG, JPEG, BMP, GIF gegen Pillow, und der Betrachter (tools/viewer/run.sh, Runde VIEWER)" \
+     tools/viewer/run.sh viewer '^VIEWER: |^        (12 MP|50 MP|Miniatur|Qualitaet|die Knoepfe|der Lauf|die Formate)|^  OK    ([a-z0-9]+\.(jpg|png|bmp|gif) |groesste Abweichung|das (12|50)-MP|der Arbeitsspeicher|die Miniatur|jprog|nein\.|nach allen kaputten|der Umlauf|zuschneiden ist|drehen um|Pillow liest|die Datei ist|und der Fehler|sie findet die Bilder|das erste Bild|der Miniaturenstreifen|die Zeichenflaeche|nach einem Klick|das Foto meldet|das 12-MP-Bild steht|die Diaschau|und sie ist|die Anwendung schreibt|und eine JPEG|docs/shots)'
 
 # Hier laufen die angemeldeten Abschnitte -- bei OSUM_JOBS=1 sind sie
 # oben schon gelaufen und das hier tut nichts.
