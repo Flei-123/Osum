@@ -54,9 +54,14 @@ def plus127(dst, src, a):
 
 
 def schieben(dst, src, a):
-    """Die Fassung des Kerns seit Runde PAINT -- OHNE Division.
+    """Die exakte Fassung OHNE Division -- gemessen, verworfen.
 
-    Genau `fb.mix8`: t = num + 128, dann (t + (t >> 8)) >> 8.
+    t = num + 128, dann (t + (t >> 8)) >> 8.  Ebenso exakt wie
+    `plus127`, aber auf dem Messrechner ein Fuenftel langsamer (526
+    gegen 646 Takte je Bildpunkt im Kern, 6.17 gegen 6.65 nativ).  Sie
+    steht hier weiter, damit die Zusage "beide exakten Fassungen
+    liefern denselben Wert" pruefbar bleibt -- und damit niemand die
+    Entscheidung ein zweites Mal ohne Messung trifft.
     """
     t = src * a + dst * (255 - a) + 128
     return (t + (t >> 8)) >> 8
@@ -65,7 +70,7 @@ def schieben(dst, src, a):
 FASSUNGEN = [
     ("abschneiden  (vor PAINT)", abschneiden),
     ("(num+127)/255 (Python)  ", plus127),
-    ("(t+(t>>8))>>8 (Kern)    ", schieben),
+    ("(t+(t>>8))>>8 verworfen ", schieben),
 ]
 
 
@@ -111,9 +116,10 @@ def randbedingungen():
 
 
 QUELLEN = [
-    ("kernel/fb.fi", "let t: u64 = src *% a +% dst *% ia +% 128"),
-    ("kernel/wm.fi", "let t: u64 = src *% a +% dst *% ia +% 128"),
-    ("kernel/user/wlibc.fi", "let t: u64 = src *% a +% dst *% ia +% 128"),
+    ("kernel/fb.fi", "return (src *% a +% dst *% ia +% 127) / 255"),
+    ("kernel/wm.fi", "return (src *% a +% dst *% ia +% 127) / 255"),
+    ("kernel/user/wlibc.fi",
+     "return (src *% a +% dst *% ia +% 127) / 255"),
     ("tools/gfx/checkshot.py", "(alt[k] * ia + neu[k] * a + 127) // 255"),
     ("tools/icons/sheet.py", "+ 127"),
 ]
@@ -163,7 +169,7 @@ def main():
         fehler += 1
 
     # ZUSAGE 2 und 3: beide neuen Fassungen sind EXAKT, nicht "besser".
-    for name in ("(num+127)/255 (Python)  ", "(t+(t>>8))>>8 (Kern)    "):
+    for name in ("(num+127)/255 (Python)  ", "(t+(t>>8))>>8 verworfen "):
         mx, summe, falsch, n = erg[name]
         if mx == 0 and falsch == 0:
             print("  OK    %s ist auf allen %d Tripeln exakt" % (name, n))
@@ -175,6 +181,10 @@ def main():
     # ZUSAGE 4: Kern und Wirt rechnen BILDPUNKTGLEICH. Das ist die
     # eigentliche Zusage dieser Datei -- ohne sie kann kein
     # Bildschirmfoto den Kern widerlegen.
+    # Kern UND Wirt rechnen seit PAINT beide `(num + 127) / 255`; die
+    # Zusage ist trotzdem nicht leer, denn sie haelt zusaetzlich die
+    # verworfene, schiebende Fassung dagegen -- waere die je wieder
+    # eingebaut, muesste sie bildpunktgleich sein.
     ungleich = 0
     for a in range(0, 256, schritt):
         for src in range(256):
