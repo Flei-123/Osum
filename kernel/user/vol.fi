@@ -1,0 +1,266 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/vol.fi -- RUNDE MEDIA1: /bin/vol, der Lautstaerkeregler.
+//
+//     vol                 zeigt Lautstaerke, Stummschaltung, Klaenge
+//     vol 60              setzt sie auf 60 Prozent
+//     vol +   / vol -     zehn Prozent lauter oder leiser
+//     vol stumm / laut    stummschalten und wieder zurueck
+//     vol klang an|aus    die Systemklaenge
+//     vol test            ein kurzer Ton, damit man es hoert
+//     vol laden           die Einstellung aus /etc/audio.conf anwenden
+//
+// JEDE AENDERUNG WIRD GESCHRIEBEN, nach `/etc/audio.conf`, und zwar
+// sofort. Eine Lautstaerke, die den naechsten Start nicht ueberlebt,
+// ist keine Einstellung, sondern eine Handbewegung.
+//
+// WAS DIESES PROGRAMM NICHT IST: ein Mischer. Es gibt EINE Lautstaerke
+// fuer die ganze Maschine, weil es im Kernel EINEN Tonstrom gibt. Ein
+// Regler je Programm braucht einen Mischer, ein Mischer braucht einen
+// Systembus mit Rechten (Block A3 der Roadmap), und beides gibt es
+// noch nicht. Das steht so hier und nicht im Kleingedruckten.
+
+profile kernel
+
+import ulib
+
+export { u_start }
+
+const SYS_AUDGET: u64 = 1840
+const SYS_AUDSET: u64 = 1841
+
+const A_READY: u64 = 0
+const A_VOLUME: u64 = 4
+const A_SOUNDS: u64 = 19
+const A_MUTED: u64 = 21
+const A_BACKEND: u64 = 15
+const A_LATENCY: u64 = 8
+
+const AS_VOLUME: u64 = 0
+const AS_MUTE: u64 = 2
+const AS_SOUNDS: u64 = 5
+const AS_BEEP: u64 = 6
+
+fn get(f: u64) -> u64 {
+    return ulib.sys(SYS_AUDGET, f, 0, 0)
+}
+
+fn set(f: u64, v: u64) -> u64 {
+    return ulib.sys(SYS_AUDSET, f, v, 0)
+}
+
+fn num(name: u64, v: u64) {
+    var s_p: [u8; 6] = "vol: \0"
+    var s_e: [u8; 2] = "=\0"
+    ulib.say((&s_p[0 as usize]) as u64)
+    ulib.say(name)
+    ulib.say((&s_e[0 as usize]) as u64)
+    ulib.sayn(v)
+    ulib.nl()
+}
+
+fn zeigen() {
+    var n_v: [u8; 12] = "lautstaerke\0"
+    var n_m: [u8; 6] = "stumm\0"
+    var n_k: [u8; 8] = "klaenge\0"
+    var n_b: [u8; 7] = "geraet\0"
+    var n_l: [u8; 10] = "latenzus\0\0"
+    num((&n_v[0 as usize]) as u64, get(A_VOLUME))
+    num((&n_m[0 as usize]) as u64, get(A_MUTED))
+    num((&n_k[0 as usize]) as u64, get(A_SOUNDS))
+    num((&n_b[0 as usize]) as u64, get(A_BACKEND))
+    num((&n_l[0 as usize]) as u64, get(A_LATENCY))
+}
+
+// ------------------------------------------------------ die Datei
+//
+// Drei Zeilen, `wort zahl`, so wie `/etc/theme.conf` und
+// `/etc/network.conf` es auch machen. Geschrieben wird IMMER die ganze
+// Datei: eine Zeile in einer Datei zu ersetzen heisst, sie zu lesen, zu
+// zerlegen und neu zu schreiben, und das ist derselbe Aufwand mit mehr
+// Faellen, in denen es schiefgeht.
+fn schreiben() -> bool {
+    var pfad: [u8; 17] = "/etc/audio.conf\0\0"
+    var puf: [u8; 96] = [0 as u8; 96]
+    let p: u64 = (&puf[0 as usize]) as u64
+    var n: u64 = 0
+    var k1: [u8; 13] = "lautstaerke \0"
+    var k2: [u8; 7] = "stumm \0"
+    var k3: [u8; 9] = "klaenge \0"
+    n = anhaengen(p, n, (&k1[0 as usize]) as u64, get(A_VOLUME))
+    n = anhaengen(p, n, (&k2[0 as usize]) as u64, get(A_MUTED))
+    n = anhaengen(p, n, (&k3[0 as usize]) as u64, get(A_SOUNDS))
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&pfad[0 as usize]) as u64,
+        ulib.O_MAKE, 0)
+    if ulib.bad(fd) {
+        return false
+    }
+    let w: u64 = ulib.sys(ulib.SYS_WRITE, fd, p, n)
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    return w == n
+}
+
+fn anhaengen(p: u64, at: u64, wort: u64, v: u64) -> u64 {
+    var n: u64 = at
+    var i: u64 = 0
+    while *((wort + i) as *mut u8) != 0 as u8 {
+        __mmio_write8((p + n) as *mut u8, *((wort + i) as *mut u8))
+        n = n + 1
+        i = i + 1
+    }
+    // die Zahl, hoechstens dreistellig
+    if v >= 100 {
+        __mmio_write8((p + n) as *mut u8, (48 + v / 100) as u8)
+        n = n + 1
+    }
+    if v >= 10 {
+        __mmio_write8((p + n) as *mut u8, (48 + (v / 10) % 10) as u8)
+        n = n + 1
+    }
+    __mmio_write8((p + n) as *mut u8, (48 + v % 10) as u8)
+    n = n + 1
+    __mmio_write8((p + n) as *mut u8, 10 as u8)
+    return n + 1
+}
+
+fn laden() -> bool {
+    var pfad: [u8; 17] = "/etc/audio.conf\0\0"
+    var puf: [u8; 128] = [0 as u8; 128]
+    let p: u64 = (&puf[0 as usize]) as u64
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&pfad[0 as usize]) as u64, 0, 0)
+    if ulib.bad(fd) {
+        return false
+    }
+    let n: u64 = ulib.sys(ulib.SYS_READ, fd, p, 127)
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    if ulib.bad(n) || n == 0 {
+        return false
+    }
+    __mmio_write8((p + n) as *mut u8, 0 as u8)
+    var i: u64 = 0
+    while i < n {
+        // Am Zeilenanfang: welches Wort? Es reicht das erste Zeichen,
+        // weil die drei Woerter mit l, s und k anfangen -- und wer eine
+        // vierte Zeile hinzufuegt, muss hier nachsehen. Das steht hier,
+        // damit es beim naechsten Mal jemand liest.
+        let c: u64 = (*((p + i) as *mut u8)) as u64
+        var j: u64 = i
+        while j < n && (*((p + j) as *mut u8)) as u64 != 10 {
+            j = j + 1
+        }
+        var z: u64 = i
+        while z < j && ((*((p + z) as *mut u8)) as u64 < 48
+            || (*((p + z) as *mut u8)) as u64 > 57) {
+            z = z + 1
+        }
+        var v: u64 = 0
+        var got: bool = false
+        while z < j && (*((p + z) as *mut u8)) as u64 >= 48
+            && (*((p + z) as *mut u8)) as u64 <= 57 {
+            v = v * 10 + ((*((p + z) as *mut u8)) as u64 - 48)
+            got = true
+            z = z + 1
+        }
+        if got {
+            if c == 108 {
+                set(AS_VOLUME, v)
+            }
+            if c == 115 {
+                set(AS_MUTE, v)
+            }
+            if c == 107 {
+                set(AS_SOUNDS, v)
+            }
+        }
+        i = j + 1
+    }
+    return true
+}
+
+fn u_start(args: u64) -> u64 {
+    var s_no: [u8; 25] = "vol: kein Tongeraet da\0\0\0"
+    var s_wr: [u8; 38] = "vol: /etc/audio.conf nicht schreibbar\0"
+    var s_use: [u8; 63] = "vol: vol [0..100|+|-|stumm|laut|klang an|klang aus|test|laden]\0"
+    if get(A_READY) != 1 {
+        ulib.esay_line((&s_no[0 as usize]) as u64, 0)
+        return 1
+    }
+    let argc: u64 = ulib.arg_count(args)
+    if argc < 2 {
+        zeigen()
+        return 0
+    }
+    let a: u64 = ulib.arg_at(args, 1)
+    var w_plus: [u8; 2] = "+\0"
+    var w_minus: [u8; 2] = "-\0"
+    var w_stumm: [u8; 6] = "stumm\0"
+    var w_laut: [u8; 5] = "laut\0"
+    var w_klang: [u8; 6] = "klang\0"
+    var w_test: [u8; 5] = "test\0"
+    var w_laden: [u8; 6] = "laden\0"
+    var w_an: [u8; 3] = "an\0"
+    var handled: bool = false
+    if ulib.streq(a, (&w_laden[0 as usize]) as u64) {
+        laden()
+        zeigen()
+        return 0
+    }
+    if ulib.streq(a, (&w_test[0 as usize]) as u64) {
+        set(AS_BEEP, 660)
+        ulib.sleep_ms(200)
+        zeigen()
+        return 0
+    }
+    if ulib.streq(a, (&w_plus[0 as usize]) as u64) {
+        var v: u64 = get(A_VOLUME) + 10
+        if v > 100 {
+            v = 100
+        }
+        set(AS_VOLUME, v)
+        handled = true
+    }
+    if ulib.streq(a, (&w_minus[0 as usize]) as u64) {
+        let cur: u64 = get(A_VOLUME)
+        var v2: u64 = 0
+        if cur > 10 {
+            v2 = cur - 10
+        }
+        set(AS_VOLUME, v2)
+        handled = true
+    }
+    if ulib.streq(a, (&w_stumm[0 as usize]) as u64) {
+        set(AS_MUTE, 1)
+        handled = true
+    }
+    if ulib.streq(a, (&w_laut[0 as usize]) as u64) {
+        set(AS_MUTE, 0)
+        handled = true
+    }
+    if ulib.streq(a, (&w_klang[0 as usize]) as u64) {
+        if argc < 3 {
+            ulib.esay_line((&s_use[0 as usize]) as u64, 0)
+            return 2
+        }
+        let b2: u64 = ulib.arg_at(args, 2)
+        if ulib.streq(b2, (&w_an[0 as usize]) as u64) {
+            set(AS_SOUNDS, 1)
+        } else {
+            set(AS_SOUNDS, 0)
+        }
+        handled = true
+    }
+    if !handled {
+        // eine Zahl?
+        let v3: u64 = ulib.to_num(a)
+        if v3 > 100 {
+            ulib.esay_line((&s_use[0 as usize]) as u64, 0)
+            return 2
+        }
+        set(AS_VOLUME, v3)
+        set(AS_MUTE, 0)
+    }
+    if !schreiben() {
+        ulib.esay_line((&s_wr[0 as usize]) as u64, 0)
+    }
+    zeigen()
+    return 0
+}
