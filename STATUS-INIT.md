@@ -114,15 +114,41 @@ endet **und** keine zwei Sekunden geschafft hat.
 
 ## 3. Die Zahlen
 
+Alle Läufe mit `-accel kvm -cpu host`, also auf der echten CPU.
+
+**Die Abschnitte, die der Kernumbau berühren konnte — vorher/nachher:**
+
+| Abschnitt | vorher (`mergeline`) | nachher (Zweig `init`) |
+|---|---|---|
+| 19 `tools/k13/run.sh` (Benutzer, Rechte, init) | 99 / 0 | **99 / 0** |
+| 13 `tools/unix/run.sh` (Signale, `wait`, Terminal, Uhr) | 107 / 0 | **107 / 0** |
+| 9 `tools/userland/run.sh` (Shell, 25 Werkzeuge, Rohre) | 91 / 0 | **91 / 0** |
+| 16 `tools/k11/run.sh` (Editor, Werkzeuge, Shell-Sprache) | 85 / 0 | **85 / 0** |
+| **29 `tools/init/run.sh` (NEU)** | — | **78 / 0** |
+
+`tools/unix`, `tools/userland` und `tools/k11` sind die Abschnitte, die
+am meisten `fork`/`wait4` benutzen — sie stehen hier, weil diese Runde
+`do_wait4` angefasst hat. Keine Zusage ist verlorengegangen, keine wurde
+entschärft.
+
+*Der vollständige `./test.sh` (29 Abschnitte) wurde in dieser Runde
+**nicht** zu Ende gefahren: auf demselben Wirt liefen gleichzeitig die
+Abnahmen von drei anderen Zweigen (Lastmittel dauerhaft über 20 bei 12
+Kernen), und ein Lauf unter dieser Last misst Zeitlimits statt
+Eigenschaften. Was oben steht, ist einzeln gemessen.*
+
+**Sonstige Zahlen:**
+
 | Messung | Wert |
 |---|---|
-| `tools/k13/run.sh` **vorher** (`mergeline`) | 99 Zusagen, 0 Fehler |
-| `tools/k13/run.sh` **nachher** (dieser Zweig) | **99 Zusagen, 0 Fehler** — keine verloren |
-| `tools/init/run.sh` (neu, Abschnitt 29) | *siehe unten* |
-| Beschleunigung | `-accel kvm`, `-cpu host` (echte CPU) |
 | Speicherkarte `tools/kernel/memmap.py` | 64 Bereiche, 0 Kollisionen |
-| Modusnamen | 87 → **88** (`waitfirst`) |
+| Modusnamen auf der Kommandozeile | 87 → **88** (`waitfirst`) |
 | Kernel Stufe 0 | 2.842.308 Oktette |
+| `/bin/init` (firnc0, gestrippt) | 135.616 Oktette |
+| Dienste je Tafel | 8 → **16** |
+| Rückfall-Zähler | 5 Fehlstarts, Schwelle 2000 ms |
+| Startbremse | >10 Starts in 5 s → 5 s Pause |
+| `/run/svc.cmd` gelesen | 40×/s → **5×/s** |
 
 ---
 
