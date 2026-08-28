@@ -61,6 +61,7 @@ import fb
 import vmode
 import ftype
 import pmon
+import shot
 
 import signal
 import time
@@ -117,6 +118,10 @@ export {
     SYS_OSUM_TILEGET, SYS_OSUM_TILEDO, SYS_OSUM_TILECONF,
     SYS_OSUM_TILEBIND,
     SYS_OSUM_PMON,
+    SYS_OSUM_SHOT, SH_INFO, SH_ARM, SH_GRAB, SH_KEY, SH_DROP,
+    SI_READY, SI_WIDTH, SI_HEIGHT, SI_ROWBYTES, SI_BYTES,
+    SI_CHUNKROWS, SI_SHOTS, SI_LASTPID, SI_ARMED, SI_ARMPID,
+    SI_DENIED, SI_ARMS, SI_NEXT, SI_KEY, SI_COUNT,
     CAP_BASE, CAP_VERSION, CAP_READ, CAP_WRITE, CAP_CLOSE, CAP_DUP,
     CAP_INSPECT, CAP_TRANSFER, CAP_COUNT, CAP_MAXNR,
     SYS_SOCKET, SYS_CONNECT, SYS_ACCEPT, SYS_SENDTO, SYS_RECVFROM,
@@ -1079,6 +1084,56 @@ const KB_SWITCH: u64 = 3
 // the display worth less than nothing.
 const SYS_OSUM_PMON: u64 = 1830
 
+// ===================================================== RUNDE FEEDBACK
+//
+// DAS BILDSCHIRMFOTO. EIN Aufruf mit fuenf Handlungen, aus dem Vorrat
+// 1840..1849 -- der naechste freie Zehnerplatz hinter POWERMON (1830)
+// und vor K15 (1900). Warum EINE Nummer und nicht fuenf: es ist EINE
+// Sache mit EINEM Zustand, und `SYS_OSUM_TILEDO` fuehrt seit Runde
+// TILING vor, dass eine Handlungsnummer im ersten Wort billiger ist als
+// fuenf Nummern, die zusammengehoeren.
+//
+//     osum_shot(was, a1, a2) -> Zahl
+//
+//     SH_INFO(feld)          eine Auskunft. DARF JEDER.
+//     SH_ARM(pid, 0)         einen Einmal-Schein ausstellen. Nur die
+//                            Taskleiste oder die Wurzel.
+//     SH_GRAB(puffer, len)   ein Band Bildpunkte holen. Braucht einen
+//                            gueltigen Schein DIESES Prozesses.
+//     SH_KEY(0, 0)           sich nach einem Druck auf Super+P selbst
+//                            einen Schein ausstellen -- der Kern prueft
+//                            Taste, Alter, Einmaligkeit und Fokus.
+//     SH_DROP(0, 0)          den eigenen Schein zurueckgeben.
+//
+// Die ganze Begruendung -- warum das Recht so und nicht anders liegt --
+// steht in `kernel/shot.fi`, oben, und nicht hier: sie gehoert zu dem
+// Zustand, den sie schuetzt.
+const SYS_OSUM_SHOT: u64 = 1840
+
+const SH_INFO: u64 = 0
+const SH_ARM: u64 = 1
+const SH_GRAB: u64 = 2
+const SH_KEY: u64 = 3
+const SH_DROP: u64 = 4
+
+// Die Felder von SH_INFO. ALLE frei abfragbar, und das ist Absicht: was
+// gezaehlt wird, kann nicht heimlich sein.
+const SI_READY: u64 = 0 // 1 = es gibt ein Bild zu holen
+const SI_WIDTH: u64 = 1
+const SI_HEIGHT: u64 = 2
+const SI_ROWBYTES: u64 = 3 // Breite mal drei
+const SI_BYTES: u64 = 4 // das ganze Bild
+const SI_CHUNKROWS: u64 = 5 // wie viele Zeilen ein SH_GRAB hoechstens gibt
+const SI_SHOTS: u64 = 6 // fertige Bilder seit dem Start
+const SI_LASTPID: u64 = 7 // wer das letzte bekommen hat
+const SI_ARMED: u64 = 8 // 1 = ein Schein ist offen
+const SI_ARMPID: u64 = 9 // fuer wen
+const SI_DENIED: u64 = 10 // abgelehnte Versuche
+const SI_ARMS: u64 = 11 // ausgestellte Scheine
+const SI_NEXT: u64 = 12 // welche Zeile als naechstes drankaeme
+const SI_KEY: u64 = 13 // welche Taste als Bildschirmfoto-Taste gilt
+const SI_COUNT: u64 = 14
+
 // kind 1, above the six counters of `pmon.PT_*`.
 const PT_PID: u64 = 6
 const PT_ALIVE: u64 = 7 // 1 = the slot still holds a live task
@@ -1999,6 +2054,10 @@ fn dispatch(number: u64, frame: u64, state: u64) -> u64 {
     // ROUND POWERMON: the power accounting.
     if number == SYS_OSUM_PMON {
         return do_pmon(state, me, a0, a1, a2)
+    }
+    // RUNDE FEEDBACK: das Bildschirmfoto.
+    if number == SYS_OSUM_SHOT {
+        return do_shot(state, me, a0, a1, a2)
     }
     // ------------------------------------------------------ RUNDE K13
     //
@@ -5287,6 +5346,264 @@ fn do_rename(state: u64, me: u64, from: u64, to: u64) -> u64 {
 // `k13_call`: every branch of `dispatch` costs stack whether it is taken
 // or not, and this kernel has already overflowed its kernel stack once
 // for exactly that reason.
+// ===================================================== RUNDE FEEDBACK
+//
+// DAS BILDSCHIRMFOTO. In einer eigenen Funktion und nicht als Zweig in
+// `dispatch`: derselbe Grund wie bei `k13_call` und `do_pmon` -- der
+// Rahmen von `dispatch` ist EINE Funktion mit ueber hundert Zweigen, und
+// firnc gibt jedem Zwischenwert jedes Zweiges einen eigenen Platz auf
+// dem Stapel.
+//
+// WER DARF EINEN SCHEIN AUSSTELLEN. Zwei, und beide sind schon da:
+//
+//   `ist_leiste`   ein Prozess, der einen Bildschirmrand belegt hat.
+//                  Belegen darf nur die Wurzel (WM_STRUT), und seit
+//                  Runde DESKTOP entscheidet genau diese Pruefung, wer
+//                  fremde Fenstertitel sehen darf. Wer die Titel aller
+//                  Fenster sehen darf, darf auch fragen, ob ein Bild
+//                  gemacht werden soll -- und er ist die einzige
+//                  Stelle, die den Menschen fragen KANN.
+//   euid 0         wer den Kern ohnehin lesen kann.
+//
+// Alles andere bekommt -EPERM, und der Zaehler `denied` geht hoch.
+fn shot_may_arm(state: u64, me: u64) -> bool {
+    if sched.tget(state, me, sched.T_EUID) == 0 {
+        return true
+    }
+    return ist_leiste(state, me)
+}
+
+// DER WEG UEBER DIE TASTE. Vier Bedingungen, und der Kern prueft alle
+// vier -- ein Programm, das sich selbst freigeben koennte, waere kein
+// Schloss.
+//
+//   1. der letzte Tastendruck war Super+P (gross oder klein),
+//   2. er ist weniger als GRACE_NS her,
+//   3. diese Zaehlernummer hat noch keinen Schein bekommen,
+//   4. der Rufende besitzt das Fenster MIT DEM EINGABEFOKUS.
+//
+// Punkt 4 ist der wichtigste: ohne ihn koennte ein Programm im
+// Hintergrund die Bildschirmfoto-Taste eines anderen abfangen.
+fn shot_key_ok(state: u64, me: u64) -> bool {
+    let k: u64 = kstate.get(state, kstate.K11_OFF + kstate.HK_KEY)
+    if k != shot.KEY && k != shot.KEY_UPPER {
+        return false
+    }
+    let seq: u64 = kstate.get(state, kstate.K11_OFF + kstate.HK_SEQ)
+    if seq == 0 {
+        return false // es wurde ueberhaupt noch keine Taste gelatcht
+    }
+    if shot.keyseq(state) == seq {
+        return false // dieser Druck hat seinen Schein schon gehabt
+    }
+    let ns: u64 = kstate.get(state, kstate.K11_OFF + kstate.HK_NS)
+    let now: u64 = time.mono_ns(state)
+    if now < ns {
+        return false
+    }
+    if now - ns > shot.GRACE_NS {
+        return false
+    }
+    let w: u64 = wm.focus(state)
+    if w >= wm.MAX_WIN {
+        return false
+    }
+    if !wm.valid(state, w) {
+        return false
+    }
+    return wm.win_owner(state, w) == me
+}
+
+// EIN BAND BILDPUNKTE NACH RING 3.
+//
+// Die Uebersetzung Seite fuer Seite und nicht Oktett fuer Oktett: ein
+// Bild sind ueber eine Million Oktette, und `proc.translate` ist ein
+// vierstufiger Gang durch die Seitentafeln. Einmal je 4096 Oktette
+// statt einmal je Oktett ist der Unterschied zwischen Millisekunden und
+// Sekunden.
+//
+// GEPRUEFT WIRD TROTZDEM VORHER UND GANZ: `proc.user_ok` ueber den
+// vollen Bereich, und danach muss JEDE Seite wirklich uebersetzbar sein,
+// sonst bricht die Schleife mit -EFAULT ab. Ein halb geschriebener
+// Puffer ist dabei moeglich -- der Rufende hat dann eine Fehlernummer
+// und weiss, dass er nichts davon glauben darf.
+fn shot_copy(state: u64, me: u64, dst: u64, rows: u64, from: u64) -> u64 {
+    let w: u64 = shot.width(state)
+    var y: u64 = 0
+    var at: u64 = dst
+    var page: u64 = 1 // eine Adresse, die keine Seitenanfangsadresse ist
+    var phys: u64 = 0
+    while y < rows {
+        var x: u64 = 0
+        while x < w {
+            let c: u64 = shot.rgb_at(state, x, from + y)
+            var k: u64 = 0
+            while k < 3 {
+                let a: u64 = at +% k
+                let pg: u64 = a & 0xFFFFFFFFFFFFF000
+                if pg != page {
+                    phys = proc.translate(state, me, pg)
+                    if phys == 0 {
+                        return neg(errno.E_FAULT)
+                    }
+                    page = pg
+                }
+                var v: u64 = c >> 16
+                if k == 1 {
+                    v = c >> 8
+                }
+                if k == 2 {
+                    v = c
+                }
+                kstate.set8(phys +% (a & 0xFFF), (v & 0xFF) as u8)
+                k = k + 1
+            }
+            at = at +% 3
+            x = x + 1
+        }
+        y = y + 1
+    }
+    return rows *% shot.row_bytes(state)
+}
+
+fn do_shot(state: u64, me: u64, what: u64, a1: u64, a2: u64) -> u64 {
+    // ---- AUSKUNFT. Ohne jedes Recht, mit Absicht: was gezaehlt wird,
+    //      kann nicht heimlich sein.
+    if what == SH_INFO {
+        if a1 == SI_READY {
+            if shot.ready(state) {
+                return 1
+            }
+            return 0
+        }
+        if a1 == SI_WIDTH {
+            return shot.width(state)
+        }
+        if a1 == SI_HEIGHT {
+            return shot.height(state)
+        }
+        if a1 == SI_ROWBYTES {
+            return shot.row_bytes(state)
+        }
+        if a1 == SI_BYTES {
+            return shot.image_bytes(state)
+        }
+        if a1 == SI_CHUNKROWS {
+            return shot.rows_per_chunk(state)
+        }
+        if a1 == SI_SHOTS {
+            return shot.shots(state)
+        }
+        if a1 == SI_LASTPID {
+            return shot.last_pid(state)
+        }
+        if a1 == SI_ARMED {
+            if shot.armed(state) {
+                return 1
+            }
+            return 0
+        }
+        if a1 == SI_ARMPID {
+            if shot.armed(state) {
+                return shot.arm_pid(state)
+            }
+            return 0
+        }
+        if a1 == SI_DENIED {
+            return shot.denied(state)
+        }
+        if a1 == SI_ARMS {
+            return shot.arms(state)
+        }
+        if a1 == SI_NEXT {
+            return shot.next_row(state)
+        }
+        if a1 == SI_KEY {
+            return shot.KEY
+        }
+        return neg(errno.E_INVAL)
+    }
+    if !shot.ready(state) {
+        return neg(errno.E_NODEV)
+    }
+    // ---- DEN SCHEIN AUSSTELLEN. Nur die Taskleiste oder die Wurzel.
+    if what == SH_ARM {
+        if !shot_may_arm(state, me) {
+            shot.deny(state)
+            return neg(errno.E_PERM)
+        }
+        // Auf WEN. 0 heisst "auf mich" -- der uebliche Fall, wenn die
+        // Wurzel selbst fotografiert. Eine fremde Nummer stellt die
+        // Taskleiste aus, wenn sie den Menschen gefragt hat.
+        var pid: u64 = a1
+        if pid == 0 {
+            pid = sched.tget(state, me, sched.T_PID)
+        }
+        shot.arm(state, pid)
+        return 0
+    }
+    // ---- DER WEG UEBER DIE TASTE.
+    if what == SH_KEY {
+        if !shot_key_ok(state, me) {
+            shot.deny(state)
+            return neg(errno.E_PERM)
+        }
+        // Die Zaehlernummer wird VERBRAUCHT, bevor der Schein da ist:
+        // ein zweiter Aufruf zu demselben Druck bekommt nichts mehr.
+        shot.set_keyseq(state, kstate.get(state, kstate.K11_OFF + kstate.HK_SEQ))
+        shot.arm(state, sched.tget(state, me, sched.T_PID))
+        return 0
+    }
+    // ---- DEN SCHEIN ZURUECKGEBEN. Nur der eigene.
+    if what == SH_DROP {
+        if shot.armed(state)
+            && shot.arm_pid(state) == sched.tget(state, me, sched.T_PID) {
+            shot.drop(state)
+            return 0
+        }
+        return neg(errno.E_PERM)
+    }
+    // ---- EIN BAND HOLEN.
+    if what == SH_GRAB {
+        let mine: u64 = sched.tget(state, me, sched.T_PID)
+        let from: u64 = shot.next_row(state)
+        if !shot.may_grab(state, mine, from) {
+            shot.deny(state)
+            return neg(errno.E_PERM)
+        }
+        let rb: u64 = shot.row_bytes(state)
+        if rb == 0 || a2 < rb {
+            return neg(errno.E_INVAL)
+        }
+        var len: u64 = a2
+        if len > shot.MAX_CHUNK {
+            len = shot.MAX_CHUNK
+        }
+        var rows: u64 = len / rb
+        let left: u64 = shot.height(state) - from
+        if rows > left {
+            rows = left
+        }
+        if rows == 0 {
+            return 0
+        }
+        if !proc.user_ok(state, me, a1, rows *% rb) {
+            return neg(errno.E_FAULT)
+        }
+        let n: u64 = shot_copy(state, me, a1, rows, from)
+        if errno.is_error(n) {
+            return n
+        }
+        // ERST KOPIEREN, DANN WEITERRUECKEN. Bricht das Kopieren mit
+        // -EFAULT ab, bleibt die Zeilenmarke stehen und der Rufende darf
+        // dasselbe Band mit einem richtigen Puffer noch einmal holen --
+        // statt ein Band zu verlieren, das er nie gesehen hat.
+        shot.advance(state, rows)
+        return n
+    }
+    return neg(errno.E_INVAL)
+}
+
 fn do_pmon(state: u64, me: u64, kind: u64, index: u64, field: u64) -> u64 {
     if kind == 0 {
         if field >= pmon.PM_SCALARS {
