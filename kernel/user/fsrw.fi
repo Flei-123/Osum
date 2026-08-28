@@ -43,6 +43,13 @@ import libc.kcall
 
 export { u_start }
 
+// VIER KILOOKTETT, UND ZWAR GENAU VIER. `kernel/sys.fi::MAX_IO` ist
+// 4096: ein einzelnes `write` traegt nicht mehr, ganz gleich, wie gross
+// der Puffer des Aufrufers ist. Ein groesserer Wert hier waere KEIN
+// groesseres unteilbares Schreiben, sondern mehrere hintereinander --
+// und dann waere ein gemischtes Ergebnis nach einem Stromausfall kein
+// Fehler des Dateisystems, sondern einer dieses Testprogramms. Der
+// erste Entwurf hatte 16384 und hat genau das gemessen.
 const ROLL: u64 = 4096
 
 static mut roll: [u8; 4096] = [0 as u8; 4096];
@@ -104,6 +111,7 @@ fn u_start(args: u64) -> u64 {
     var s_fertig: [u8; 14] = "fsrw: fertig=\0";
     var p_d: [u8; 3] = "/d\0";
     var p_roll: [u8; 8] = "/d/roll\0";
+    var p_roll2: [u8; 9] = "/d/roll2\0";
     var p_count: [u8; 9] = "/d/count\0";
     var p_f: [u8; 4] = "/d/\0";
     var w_endlos: [u8; 7] = "endlos\0";
@@ -133,6 +141,22 @@ fn u_start(args: u64) -> u64 {
     if errno.failed(rfd) {
         return 1;
     }
+    // ZWEI ROLLDATEIEN UND NICHT EINE. Der Grund ist gemessen: das
+    // Ueberschreiben an derselben Stelle ist der EINE Vorgang, an dem
+    // sich ein halb geschriebener Zustand ueberhaupt erkennen laesst
+    // (eine neu angelegte Datei sieht nach einem Abbruch schlicht leer
+    // aus, und das ist erlaubt). Mit einer Rolldatei fiel in einem Lauf
+    // von sechzehn Abschuessen OHNE Journal nur zweimal ein Schaden auf
+    // -- eine Gegenprobe, die selten ausschlaegt, misst nichts. Zwei
+    // verdoppeln das Fenster, ohne die Zusage zu aendern.
+    let rf2: u64 = io.open((&p_roll2[0 as usize]) as u64, kcall.O_RDWR);
+    var rfd2: u64 = rf2;
+    if errno.failed(rf2) {
+        rfd2 = io.create((&p_roll2[0 as usize]) as u64);
+    }
+    if errno.failed(rfd2) {
+        return 1;
+    }
 
     ulib.say((&s_los[0 as usize]) as u64);
     ulib.nl();
@@ -153,10 +177,12 @@ fn u_start(args: u64) -> u64 {
         }
         io.seek(rfd, 0, 0);
         io.write(rfd, (&roll[0 as usize]) as u64, ROLL);
+        io.seek(rfd2, 0, 0);
+        io.write(rfd2, (&roll[0 as usize]) as u64, ROLL);
 
         // ------------------------------------------- 2. die neue Datei
         // Laenge 1024..4095, aus der Rundennummer ausgerechnet.
-        let len: u64 = 1024 + (g * 617) % 3072;
+        let len: u64 = 512 + (g * 617) % 1536;
         i = 0;
         while i < len {
             dat[(i) as usize] = muster(g + 1000000, i) as u8;
@@ -186,6 +212,7 @@ fn u_start(args: u64) -> u64 {
         g = g + 1;
     }
     io.close(rfd);
+    io.close(rfd2);
     ulib.say((&s_fertig[0 as usize]) as u64);
     ulib.sayu(g - 1);
     ulib.nl();

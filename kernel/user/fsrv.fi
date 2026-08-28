@@ -99,7 +99,7 @@ fn pruefe_datei(g: u64) -> u64 {
     if errno.failed(fd) {
         return 0;
     }
-    let soll: u64 = 1024 + (g * 617) % 3072;
+    let soll: u64 = 512 + (g * 617) % 1536;
     let n: u64 = io.read_full(fd, (&buf[0 as usize]) as u64, 4096);
     io.close(fd);
     if errno.failed(n) {
@@ -121,17 +121,78 @@ fn pruefe_datei(g: u64) -> u64 {
     return 2;
 }
 
+static mut letzte_gen: u64 = 0;
+static mut letzte_len: u64 = 0;
+
+// EINE ROLLDATEI. Rueckgabe 1 = in Ordnung.
+//
+// In Ordnung heisst: die Datei traegt GENAU EINE Generation. Die ersten
+// acht Oktette sagen welche, die restlichen 4088 muessen dazu passen.
+// Eine Datei, die vorne neu und hinten alt ist, ist der Schaden, den ein
+// Ueberschreiben ohne Journal hinterlaesst -- und der einzige, den man
+// ueberhaupt sehen kann: eine NEU angelegte Datei sieht nach einem
+// Abbruch schlicht leer aus, und das ist erlaubt.
+fn pruefe_roll(pfad: u64, c: u64) -> u64 {
+    let rf: u64 = io.open(pfad, 0);
+    if errno.failed(rf) {
+        // Nur erlaubt, solange noch keine Runde fertig wurde.
+        if c == 0 {
+            return 1;
+        }
+        return 0;
+    }
+    let n: u64 = io.read_full(rf, (&buf[0 as usize]) as u64, ROLL);
+    io.close(rf);
+    var len: u64 = 0;
+    if !errno.failed(n) {
+        len = n;
+    }
+    letzte_len = len;
+    if len == 0 {
+        if c == 0 {
+            return 1;
+        }
+        return 0;
+    }
+    if len != ROLL {
+        return 0;
+    }
+    var g: u64 = 0;
+    var i: u64 = 0;
+    while i < 8 {
+        g = g | ((buf[(i) as usize] as u64) << (i * 8));
+        i = i + 1;
+    }
+    letzte_gen = g;
+    if g == 0 {
+        return 0;
+    }
+    if g < c {
+        return 0;
+    }
+    i = 8;
+    while i < ROLL {
+        if (buf[(i) as usize] as u64) != muster(g, i) {
+            return 0;
+        }
+        i = i + 1;
+    }
+    return 1;
+}
+
 fn u_start(args: u64) -> u64 {
     var n_count: [u8; 7] = "count\0\0";
     var n_rollgen: [u8; 9] = "rollgen\0\0";
     var n_rolllen: [u8; 9] = "rolllen\0\0";
     var n_rollok: [u8; 8] = "rollok\0\0";
+    var n_rollok2: [u8; 9] = "rollok2\0\0";
     var n_ganz: [u8; 6] = "ganz\0\0";
     var n_next: [u8; 6] = "next\0\0";
     var n_next2: [u8; 7] = "next2\0\0";
     var n_dents: [u8; 7] = "dents\0\0";
     var n_schaeden: [u8; 10] = "schaeden\0\0";
     var p_roll: [u8; 8] = "/d/roll\0";
+    var p_roll2: [u8; 9] = "/d/roll2\0";
     var p_count: [u8; 9] = "/d/count\0";
     var p_d: [u8; 3] = "/d\0";
 
@@ -158,51 +219,17 @@ fn u_start(args: u64) -> u64 {
     }
     sag((&n_count[0 as usize]) as u64, c);
 
-    // ----------------------------------------------------- die Rolldatei
-    var rollgen: u64 = 0;
-    var rolllen: u64 = 0;
-    var rollok: u64 = 0;
-    let rf: u64 = io.open((&p_roll[0 as usize]) as u64, 0);
-    if errno.failed(rf) {
-        // Nur erlaubt, solange noch keine Runde fertig wurde.
-        if c == 0 {
-            rollok = 1;
-        }
-    } else {
-        let n: u64 = io.read_full(rf, (&buf[0 as usize]) as u64, ROLL);
-        io.close(rf);
-        if !errno.failed(n) {
-            rolllen = n;
-        }
-        if rolllen == 0 && c == 0 {
-            rollok = 1;
-        }
-        if rolllen == ROLL {
-            var g: u64 = 0;
-            var i: u64 = 0;
-            while i < 8 {
-                g = g | ((buf[(i) as usize] as u64) << (i * 8));
-                i = i + 1;
-            }
-            rollgen = g;
-            var gut: bool = true;
-            i = 8;
-            while i < ROLL {
-                if (buf[(i) as usize] as u64) != muster(g, i) {
-                    gut = false;
-                    i = ROLL;
-                }
-                i = i + 1;
-            }
-            if gut && g >= c && g != 0 {
-                rollok = 1;
-            }
-        }
+    // ----------------------------------------------------- die Rolldateien
+    let r1: u64 = pruefe_roll((&p_roll[0 as usize]) as u64, c);
+    let r2: u64 = pruefe_roll((&p_roll2[0 as usize]) as u64, c);
+    sag((&n_rollgen[0 as usize]) as u64, letzte_gen);
+    sag((&n_rolllen[0 as usize]) as u64, letzte_len);
+    sag((&n_rollok[0 as usize]) as u64, r1);
+    sag((&n_rollok2[0 as usize]) as u64, r2);
+    if r1 == 0 {
+        schaeden = schaeden + 1;
     }
-    sag((&n_rollgen[0 as usize]) as u64, rollgen);
-    sag((&n_rolllen[0 as usize]) as u64, rolllen);
-    sag((&n_rollok[0 as usize]) as u64, rollok);
-    if rollok == 0 {
+    if r2 == 0 {
         schaeden = schaeden + 1;
     }
 

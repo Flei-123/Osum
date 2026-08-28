@@ -325,31 +325,36 @@ def inhalt(bild):
             else:
                 break
         c = int(ziffern) if ziffern else 0
-    ri = bild.finde("/d/roll")
-    if ri:
-        sz = bild.ig(ri, mkfs.I_SIZE)
-        if sz not in (0, 4096):
-            befunde.append("/d/roll ist %d Oktette gross" % sz)
-        elif sz == 4096:
-            r = bild.lies(ri, 0, 4096)
-            g = int.from_bytes(r[0:8], "little")
-            for i in range(8, 4096):
-                if r[i] != muster(g, i):
-                    befunde.append("/d/roll: Oktett %d gehoert nicht zu "
-                                   "Generation %d" % (i, g))
-                    break
-            if g < c:
-                befunde.append("/d/roll ist Generation %d, der Zaehler "
-                               "steht auf %d" % (g, c))
-    elif c:
-        befunde.append("/d/roll fehlt, obwohl der Zaehler auf %d steht" % c)
+    for name in ("/d/roll", "/d/roll2"):
+        ri = bild.finde(name)
+        if ri:
+            sz = bild.ig(ri, mkfs.I_SIZE)
+            if sz not in (0, 4096):
+                befunde.append("%s ist %d Oktette gross" % (name, sz))
+            elif sz == 0 and c:
+                befunde.append("%s ist leer, der Zaehler steht auf %d"
+                               % (name, c))
+            elif sz == 4096:
+                r = bild.lies(ri, 0, 4096)
+                g = int.from_bytes(r[0:8], "little")
+                for i in range(8, 4096):
+                    if r[i] != muster(g, i):
+                        befunde.append("%s: Oktett %d gehoert nicht zu "
+                                       "Generation %d" % (name, i, g))
+                        break
+                if g < c:
+                    befunde.append("%s ist Generation %d, der Zaehler "
+                                   "steht auf %d" % (name, g, c))
+        elif c:
+            befunde.append("%s fehlt, obwohl der Zaehler auf %d steht"
+                           % (name, c))
     ganz = 0
     for k in range(1, c + 1):
         ino = bild.finde("/d/%d" % k)
         if not ino:
             befunde.append("/d/%d fehlt" % k)
             continue
-        soll = 1024 + (k * 617) % 3072
+        soll = 512 + (k * 617) % 1536
         sz = bild.ig(ino, mkfs.I_SIZE)
         if sz != soll:
             befunde.append("/d/%d ist %d statt %d Oktette" % (k, sz, soll))
@@ -369,7 +374,7 @@ def inhalt(bild):
     naechste = 0
     if ino:
         sz = bild.ig(ino, mkfs.I_SIZE)
-        soll = 1024 + ((c + 1) * 617) % 3072
+        soll = 512 + ((c + 1) * 617) % 1536
         if sz == 0:
             naechste = 1
         elif sz == soll:

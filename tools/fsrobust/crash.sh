@@ -11,22 +11,24 @@
 #      entspricht, was ein Stromausfall ist: der Rechner hoert mitten
 #      im Satz auf.
 #   2. Derselbe Kern startet noch einmal auf DENSELBEN Oktetten.
-#      `mount` traegt das Journal nach, dann prueft `fsrv`, was
-#      dasteht, und `/bin/fsck` prueft die Struktur.
+#      `mount` traegt das Journal nach, `fsrv` prueft, was dasteht, und
+#      `/bin/fsck` prueft die Struktur. Danach sieht der WIRT sich das
+#      Abbild noch einmal an (tools/fsrobust/pruef.py) -- zwei
+#      Umsetzungen, und beide muessen dasselbe sagen.
 #
 # DIE PLATTE HAENGT MIT `cache=directsync` DRAN, und das ist der
-# wichtigste Schalter dieses ganzen Programms: sonst landen die
+# wichtigste Schalter dieses ganzen Programms. Ohne ihn landen die
 # Schreibvorgaenge des Gastes im Seitenpuffer des WIRTS, und der
-# ueberlebt ein SIGKILL. Der Test waere dann ein Test darueber, dass
-# Linux keinen Speicher verliert. Mit `directsync` oeffnet QEMU die
-# Datei mit O_DIRECT|O_DSYNC: was der Gast geschrieben hat, ist auf der
-# Platte; was er nicht mehr geschrieben hat, ist weg. Genau das ist ein
-# Stromausfall.
+# ueberlebt ein SIGKILL an QEMU muehelos -- der Test waere dann ein Test
+# darueber, dass Linux keinen Speicher verliert. Mit `directsync` oeffnet
+# QEMU die Datei mit O_DIRECT|O_DSYNC: was der Gast geschrieben hat, ist
+# auf der Platte; was er nicht mehr geschrieben hat, ist weg. Genau das
+# ist ein Stromausfall.
 #
-#   crash.sh <abbild> <arbeitsverzeichnis> <nummer> [nojournal]
+#   crash.sh <abbild> <arbeitsverzeichnis> <nummer> [zusatzwoerter]
 #
 # Ausgabe: EINE Zeile
-#   lauf=<n> ms=<wartezeit> count=<..> schaeden=<..> fsck=<..> rc1=<..> rc2=<..>
+#   lauf=<n> ms=<..> count=<..> schaeden=<..> fsck=<..> wirt=<..> rc2=<..>
 set -u
 cd "$(dirname "$0")/../.."
 
@@ -45,7 +47,7 @@ S2="$ARB/v-$NR.txt"
 rm -f "$LIVE" "$S1" "$S2"
 cp --sparse=always "$ABBILD" "$LIVE"
 
-# ------------------------------------------------- 1. schreiben und abschiessen
+# ------------------------------------------- 1. schreiben und abschiessen
 qemu-system-x86_64 -accel tcg -kernel "$K" -m 512 \
     -append "osum vfs nokbd $EXTRA script=fsrw endlos" \
     -serial "file:$S1" -display none -no-reboot \
@@ -56,7 +58,7 @@ QPID=$!
 # Warten, bis das Programm wirklich schreibt. Ohne das traefe der
 # Abschuss den Bootvorgang und nicht das Dateisystem.
 LOS=0
-for _ in $(seq 1 600); do
+for _ in $(seq 1 1200); do
     if [ -f "$S1" ] && tr -d '\000' < "$S1" 2>/dev/null | grep -qa 'fsrw: los'; then
         LOS=1
         break
@@ -65,29 +67,38 @@ for _ in $(seq 1 600); do
     sleep 0.05
 done
 
-# Die zufaellige Wartezeit. `$RANDOM` ist der Wirt und nicht der Gast --
-# der Gast darf nicht wissen, wann er stirbt.
+# Die zufaellige Wartezeit. Sie kommt vom WIRT -- der Gast darf nicht
+# wissen, wann er stirbt, sonst waere der Zeitpunkt kein Zufall mehr.
 MS=$(( MINMS + (RANDOM * 32768 + RANDOM) % SPANMS ))
 if [ "$LOS" = 1 ]; then
     sleep "$(awk "BEGIN{printf \"%.3f\", $MS/1000}")"
 fi
 kill -9 "$QPID" 2>/dev/null
 wait "$QPID" 2>/dev/null
-RC1=$?
 
 # ------------------------------------------------- 2. wieder hochfahren
-timeout 600 qemu-system-x86_64 -accel tcg -kernel "$K" -m 512 \
+timeout 900 qemu-system-x86_64 -accel tcg -kernel "$K" -m 512 \
     -append "osum vfs nokbd $EXTRA script=fsrv;fsck /dev/hda;exit" \
     -serial "file:$S2" -display none -no-reboot \
     -drive "file=$LIVE,format=raw,if=ide,index=0,cache=directsync" \
     -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1
 RC2=$?
 
-val() { tr -d '\000' < "$S2" | grep -a "^$1: $2 = " | head -1 | sed 's/.* = //'; }
+val() { tr -d '\000' < "$S2" 2>/dev/null | grep -a "^$1: $2 = " | head -1 | sed 's/.* = //'; }
 
 COUNT=$(val fsrv count)
 SCH=$(val fsrv schaeden)
 FSCK=$(val fsck fehler)
-GESCHR=$(tr -d '\000' < "$S1" | grep -ac 'fsrw: los')
+JOFF=$(val fsck joffen)
+
+# ------------------------------------------------- 3. der Wirt sieht nach
+WS=$(python3 tools/fsrobust/pruef.py struktur "$LIVE" 2>&1 | grep -c BEFUND)
+WI=$(python3 tools/fsrobust/pruef.py inhalt "$LIVE" 2>&1 | grep -c BEFUND)
+WIRT=$(( WS + WI ))
+
 echo "lauf=$NR ms=$MS los=$LOS count=${COUNT:-?} schaeden=${SCH:-?}" \
-     "fsck=${FSCK:-?} rc2=$RC2"
+     "fsck=${FSCK:-?} joffen=${JOFF:-?} wirt=$WIRT rc2=$RC2"
+if [ "$WIRT" != 0 ]; then
+    python3 tools/fsrobust/pruef.py struktur "$LIVE" 2>&1 | sed 's/^/    /'
+    python3 tools/fsrobust/pruef.py inhalt "$LIVE" 2>&1 | sed 's/^/    /'
+fi
