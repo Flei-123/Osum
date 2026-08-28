@@ -3072,8 +3072,37 @@ fn vfs_may(state: u64, me: u64, m: u64, node: u64, want: u64) -> bool {
     let mode: u64 = vfs.v_attr(state, m, node, vfsops.A_MODE)
     let owner: u64 = vfs.v_attr(state, m, node, vfsops.A_UID)
     let group: u64 = vfs.v_attr(state, m, node, vfsops.A_GID)
+    let ist_dir: bool = vfs.v_attr(state, m, node, vfsops.A_TYPE)
+        == vfsops.N_DIR
     return perm.may_attr(state, me, mode, owner, group, want,
-        perm.euid(state, me), perm.egid(state, me))
+        perm.euid(state, me), perm.egid(state, me), ist_dir)
+}
+
+// RUNDE MULTIUSER: RECHTE UND EIGENTUEMER EINER NEU ANGELEGTEN DATEI --
+// AUCH AUF DIESEM WEG.
+//
+// GEMESSEN, NICHT VERMUTET. Der gerade Weg ruft `perm.on_create`, seit
+// K13. Der Weg ueber die Ops-Tafel rief nichts: eine Inode kommt
+// GENULLT aus `fs.inode_alloc`, also bekam jede mit `vfsall` angelegte
+// Datei den Modus 0 und den Eigentuemer 0. `tools/k14/run.sh`
+// Abschnitt 9 laesst dieselbe Arbeit auf beiden Wegen laufen und
+// vergleicht die Platte Oktett fuer Oktett -- und genau diese Zusage
+// fiel, mit einem Unterschied in dem Oktett, in dem der Modus steht.
+//
+// Aufgefallen ist es erst, als diese Runde anfing zu FRAGEN: vorher
+// hinderte ein Modus von 0 niemanden, weil niemand ihn ansah.
+//
+// NUR FUER OFS. Bei OFS ist der Knoten die Inodenummer, also ist
+// `perm.on_create` unmittelbar anwendbar. FAT32 hat keine Rechte
+// (siehe `kernel/fat.fi`), /proc und /dev legen nichts an.
+fn vfs_on_create(state: u64, me: u64, m: u64, node: u64, mode: u64) {
+    if node == 0 {
+        return
+    }
+    if vfs.type_of(state, m) != vfsops.FS_OFS {
+        return
+    }
+    perm.on_create(state, me, node, mode)
 }
 
 fn open_vfs(state: u64, me: u64, m: u64, path: u64, flags: u64) -> u64 {
@@ -3107,6 +3136,9 @@ fn open_vfs(state: u64, me: u64, m: u64, path: u64, flags: u64) -> u64 {
         if node == 0 {
             return neg(errno.E_NOSPC)
         }
+        // 0o666 abzueglich der Maske, und sie gehoert dem, der sie
+        // anlegt -- dasselbe, was `do_open` auf dem geraden Weg tut.
+        vfs_on_create(state, me, m, node, 438)
     } else {
         if (flags & O_CREAT) != 0 && (flags & O_EXCL) != 0 {
             return neg(errno.E_EXIST)
@@ -3549,9 +3581,16 @@ fn do_mkdir(state: u64, me: u64, name: u64) -> u64 {
                     }
                     return neg(errno.E_PERM)
                 }
-                if vfs.v_create(state, m, buf, vfsops.N_DIR) == 0 {
+                let neu: u64 = vfs.v_create(state, m, buf,
+                    vfsops.N_DIR)
+                if neu == 0 {
                     return neg(errno.E_NOSPC)
                 }
+                // 0o777 abzueglich der Maske -- dasselbe, was `mkdir`
+                // auf dem geraden Weg tut. Ohne diese Zeile bekam ein
+                // ueber die Ops-Tafel angelegtes Verzeichnis den Modus
+                // 0 und war danach fuer NIEMANDEN mehr zu betreten.
+                vfs_on_create(state, me, m, neu, 511)
                 return 0
             }
         }
