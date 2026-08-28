@@ -24,7 +24,8 @@ import kstate
 import acpi
 import serial
 
-export { shutdown, halt_forever, acpi_off, off_reason, EXIT_OK, EXIT_TRAP }
+export { shutdown, halt_forever, acpi_off, acpi_reset, off_reason,
+         reset_reason, EXIT_OK, EXIT_TRAP }
 
 // QEMU makes 21 out of this: (10 << 1) | 1.
 const EXIT_OK: u8 = 10
@@ -62,6 +63,10 @@ const SLP_EN: u64 = 8192 // Bit 13 von PM1x_CNT
 
 fn out16(port: u64, v: u64) {
     asm("out dx, ax", in("dx") port as u16, in("ax") v as u16)
+}
+
+fn out8(port: u64, v: u64) {
+    asm("out dx, al", in("dx") port as u16, in("al") v as u8)
 }
 
 // DAS SCHLAFOBJEKT \_S5_ AUS DER DSDT.
@@ -185,5 +190,113 @@ fn acpi_off(state: u64) -> bool {
         asm("pause")
         spin = spin + 1
     }
+    return false
+}
+
+// ------------------------------------------ RUNDE INIT: DER NEUSTART
+//
+// Bis zu dieser Runde konnte dieses System sich AUSSCHALTEN, aber nicht
+// NEU STARTEN: `SYS_REBOOT` mit `RB_RESTART` fiel in `power.shutdown`,
+// also in den Ausgang des Pruefstands -- die Maschine blieb stehen und
+// kam nicht wieder. Fuer einen Rechner mit einem Menschen davor ist das
+// ein Schoenheitsfehler; fuer einen Server in einem Schrank ist es der
+// Unterschied zwischen "startet nach dem Update neu" und "ist weg, bis
+// jemand hinfaehrt".
+//
+// DREI WEGE, IN DIESER REIHENFOLGE, und jeder ist echte Hardware:
+//
+//   1. DAS RESET-REGISTER AUS DER FADT (ACPI 2.0, Abschnitt 4.7.3.6).
+//      Die Firmware sagt selbst, wohin welcher Wert geschrieben werden
+//      muss: `RESET_REG` ist eine generische Adresse (GAS) ab Oktett
+//      116, `RESET_VALUE` ein Oktett bei 128, und Bit 10 der Flags bei
+//      112 sagt, dass es das ueberhaupt gibt. Weil beide Felder erst
+//      mit ACPI 2.0 dazukamen, muss die FADT auch LANG genug sein --
+//      eine FADT der Fassung 1 hoert bei 116 auf, und was dahinter
+//      steht, gehoert einer anderen Tabelle.
+//   2. DER ANSCHLUSS 0xCF9 (Reset Control Register). Kein ACPI, sondern
+//      der Chipsatz; seit Intels ICH in jedem PC und in QEMU. Bit 1
+//      setzen und Bit 2 pulsen ergibt einen harten Neustart.
+//   3. DER TASTATURSCHALTKREIS. Der 8042 hat eine Leitung an den
+//      RESET-Eingang des Prozessors, und `0xFE` an Anschluss 0x64 zieht
+//      sie. Das ist der Weg von 1984 und der einzige, der auf einer
+//      Maschine ohne beides noch bleibt.
+//
+// Was gegriffen hat, steht hinterher in `reset_reason` -- 0 nichts
+// versucht, 1 FADT, 2 0xCF9, 3 der 8042. Eine Maschine, die dabei
+// verschwindet, hinterlaesst die Zahl in kdata, und der Testlaeufer
+// liest sie aus der seriellen Ausgabe VORHER.
+
+const F_LENGTH: u64 = 4 // Laenge der FADT selbst
+const F_FLAGS: u64 = 112 // ACPI-Flags
+const F_RESET_REG: u64 = 116 // GAS, 12 Oktette
+const F_RESET_VAL: u64 = 128 // ein Oktett
+const FL_RESET_SUP: u64 = 1024 // Bit 10: RESET_REG_SUP
+const GAS_MEM: u64 = 0 // AddressSpaceId 0 = Speicher
+const GAS_IO: u64 = 1 // AddressSpaceId 1 = Anschluesse
+const CF9: u64 = 0xCF9
+const KBD_CMD: u64 = 0x64
+const KBD_RESET: u64 = 0xFE
+
+fn reset_reason(state: u64) -> u64 {
+    return kstate.get(state, kstate.K13_OFF + kstate.U_RESET)
+}
+
+fn kurz_warten() {
+    var spin: u64 = 0
+    while spin < 2000000 {
+        asm("pause")
+        spin = spin + 1
+    }
+}
+
+// Kehrt NUR zurueck, wenn kein Weg gegriffen hat.
+fn acpi_reset(state: u64) -> bool {
+    var w_facp: [u8; 5] = "FACP\0"
+    var s_r1: [u8; 24] = "power: reset fadt reg=\0\0"
+    var s_r2: [u8; 22] = "power: reset 0xCF9\0\0\0\0"
+    var s_r3: [u8; 22] = "power: reset 8042\0\0\0\0\0"
+    var s_v: [u8; 7] = " wert=\0"
+    kstate.set(state, kstate.K13_OFF + kstate.U_RESET, 0)
+    let fadt: u64 = acpi.table(state, (&w_facp[0]) as u64)
+    if fadt != 0 {
+        let len: u64 = kstate.get32(fadt + F_LENGTH)
+        let flags: u64 = kstate.get32(fadt + F_FLAGS)
+        // 129 und nicht 128: das Oktett BEI 128 muss noch drin liegen.
+        if len >= 129 && (flags & FL_RESET_SUP) != 0 {
+            let space: u64 = kstate.get8(fadt + F_RESET_REG)
+            let addr: u64 = __mmio_read64((fadt + F_RESET_REG + 4) as *mut u64)
+            let val: u64 = kstate.get8(fadt + F_RESET_VAL)
+            if addr != 0 {
+                kstate.set(state, kstate.K13_OFF + kstate.U_RESET, 1)
+                serial.puts((&s_r1[0]) as u64)
+                serial.hex(addr)
+                serial.puts((&s_v[0]) as u64)
+                serial.dec(val)
+                serial.nl()
+                if space == GAS_IO {
+                    out8(addr, val)
+                }
+                if space == GAS_MEM {
+                    kstate.set8(addr, val as u8)
+                }
+                kurz_warten()
+            }
+        }
+    }
+    // Der Chipsatz. Erst Bit 1 (SYS_RST) setzen, dann mit Bit 2
+    // (RST_CPU) ausloesen -- 0x02 und danach 0x06 ist die Folge, die
+    // jeder Chipsatz seit dem ICH versteht, und QEMU auch.
+    kstate.set(state, kstate.K13_OFF + kstate.U_RESET, 2)
+    serial.puts((&s_r2[0]) as u64)
+    serial.nl()
+    out8(CF9, 2)
+    out8(CF9, 6)
+    kurz_warten()
+    // Und zuletzt der 8042.
+    kstate.set(state, kstate.K13_OFF + kstate.U_RESET, 3)
+    serial.puts((&s_r3[0]) as u64)
+    serial.nl()
+    out8(KBD_CMD, KBD_RESET)
+    kurz_warten()
     return false
 }
