@@ -1,0 +1,223 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/jarvisd.fi -- RUNDE POLL: der Beweis in Bauform.
+//
+// DAS IST DER GRUND, AUS DEM DIESE RUNDE ES GIBT. Die geplante Bruecke
+// nach JARVIS ist ein Helferprozess, der auf ZWEI Dinge gleichzeitig
+// warten muss:
+//
+//     * eine NETZVERBINDUNG -- jemand von aussen schickt einen Auftrag,
+//     * das ROHR ZU EINEM KINDPROZESS -- das Programm, das den Auftrag
+//       ausfuehrt, schreibt seine Ausgabe hinein, wann immer es mag.
+//
+// Ohne `poll` gibt es dafuer genau zwei Moeglichkeiten, und beide sind
+// falsch: entweder der Helfer liest blockierend aus dem Netz und merkt
+// nichts von seinem Kind, oder er wechselt in einer Warteschleife
+// zwischen beiden hin und her -- hundertmal je Sekunde, auch wenn
+// nichts geschieht.
+//
+// Dieses Programm ist die Bruecke in ihrer kleinsten ehrlichen Form,
+// und es ist KEIN Spielzeug: es macht genau das, was `jarvisd` machen
+// wird, nur mit einem Kind, das statt echter Arbeit zwei Zeilen sagt.
+//
+//     1. Es lauscht auf einem Anschluss (voreingestellt 9100).
+//     2. Es startet ein Kind und behaelt dessen Rohr.
+//     3. Es steht in EINEM `poll` ueber Lauscher, Verbindung und Rohr.
+//     4. Was zuerst kommt, wird zuerst bedient -- und beides wird
+//        bedient, ohne dass eines auf das andere wartet.
+//     5. Jede Zeile aus dem Netz wird beantwortet; jede Zeile aus dem
+//        Kind wird mitgezaehlt; das Ende des Kindes ist POLLHUP.
+//
+// Es druckt Zeilen der Form `jarvisd: <name> = <zahl>`, die Abschnitt 4
+// von `tools/poll/run.sh` zurueckliest.
+
+profile kernel
+
+import ulib
+import libc.kcall
+import libc.errno
+import libc.io
+import libc.net
+import libc.stdio
+import libc.text
+import libc.proc
+
+export { u_start }
+
+static mut lines: u64 = 0
+
+const PORT: u64 = 9100
+// Wie lange der Helfer insgesamt auf etwas wartet, bevor er aufgibt.
+// Eine Messung, die in einer Zeitgrenze endet, misst nichts -- also hat
+// dieses Programm eine eigene und meldet sie.
+const PATIENCE_MS: u64 = 20000
+
+fn tell(name: u64, v: u64) {
+    var head: [u8; 10] = "jarvisd: \0"
+    var mid: [u8; 4] = " = \0"
+    stdio.say((&head[0]) as u64)
+    stdio.say(name)
+    stdio.say((&mid[0]) as u64)
+    stdio.say_num(v)
+    stdio.nl()
+    stdio.flush()
+    lines = lines + 1
+}
+
+fn note(text: u64) {
+    stdio.say(text)
+    stdio.nl()
+    stdio.flush()
+}
+
+// Das Kind. Es tut, was ein ausgefuehrter Auftrag tut: es redet, wann es
+// will, und es hoert irgendwann auf.
+fn child(wr: u64) -> u64 {
+    var a: [u8; 8] = "erste\n\0\0"
+    var b: [u8; 8] = "zweite\n\0"
+    ulib.sleep_ms(400)
+    io.write_all(wr, (&a[0]) as u64, 6)
+    ulib.sleep_ms(600)
+    io.write_all(wr, (&b[0]) as u64, 7)
+    io.close(wr)
+    return 5
+}
+
+fn u_start(args: u64) -> u64 {
+    var fds: [u8; 24] = [0 as u8; 24] // drei Eintraege
+    var buf: [u8; 128] = [0 as u8; 128]
+    var head: [u8; 7] = "osum: \0"
+    var m_listen: [u8; 20] = "jarvisd: listening\0\0"
+    var n_sock: [u8; 7] = "socket\0"
+    var n_bind: [u8; 5] = "bind\0"
+    var n_lis: [u8; 7] = "listen\0"
+    var n_acc: [u8; 9] = "accepted\0"
+    var n_net: [u8; 10] = "net_lines\0"
+    var n_kid: [u8; 12] = "child_lines\0"
+    var n_hup: [u8; 10] = "child_hup\0"
+    var n_calls: [u8; 6] = "polls\0"
+    var n_first: [u8; 6] = "first\0"
+    var n_code: [u8; 11] = "child_code\0"
+
+    // ---------------------------------------------------- der Lauscher
+    let s: u64 = net.tcp_socket()
+    if net.failed(s) {
+        tell((&n_sock[0]) as u64, s)
+        return 1
+    }
+    tell((&n_sock[0]) as u64, 1)
+    tell((&n_bind[0]) as u64, net.bind_port(s, PORT))
+    tell((&n_lis[0]) as u64, net.listen(s, 4))
+
+    // ------------------------------------------------------- das Kind
+    var pipefd: [u64; 1] = [0 as u64; 1]
+    io.pipe((&pipefd[0]) as u64)
+    let rd: u64 = (pipefd[0]) & 0xFFFFFFFF
+    let wr: u64 = (pipefd[0]) >> 32
+    let who: u64 = proc.split()
+    if who == 0 {
+        net.close(s)
+        io.close(rd)
+        proc.leave(child(wr))
+    }
+    io.close(wr)
+
+    // Diese Zeile ist das Zeichen fuer den Wirt, dass er sich verbinden
+    // darf. Sie steht NACH `listen` und nicht davor.
+    note((&m_listen[0]) as u64)
+
+    // ------------------------------------------------- die eine Schleife
+    var conn: u64 = 0xFFFFFFFF // noch keine Verbindung
+    var accepted: u64 = 0
+    var net_lines: u64 = 0
+    var kid_lines: u64 = 0
+    var kid_hup: u64 = 0
+    var polls: u64 = 0
+    var first: u64 = 0 // 1 = das Kind war zuerst da, 2 = das Netz
+    var left: u64 = PATIENCE_MS
+    var going: bool = true
+    while going {
+        io.poll_set((&fds[0]) as u64, 0, s, io.POLLIN)
+        io.poll_set((&fds[0]) as u64, 1, rd, io.POLLIN)
+        io.poll_set((&fds[0]) as u64, 2, conn, io.POLLIN)
+        // Eine Frist, damit ein Lauf, in dem der Wirt gar nicht kommt,
+        // trotzdem endet und seine Zahlen sagt.
+        let r: u64 = io.poll((&fds[0]) as u64, 3, 2000)
+        polls = polls + 1
+        if errno.failed(r) {
+            going = false
+        } else if r == 0 {
+            if left <= 2000 {
+                going = false
+            } else {
+                left = left - 2000
+            }
+        } else {
+            // (a) EINE NEUE VERBINDUNG.
+            if io.poll_ready((&fds[0]) as u64, 0, io.POLLIN) {
+                let c: u64 = net.accept_from(s, 0)
+                if !net.failed(c) {
+                    if conn == 0xFFFFFFFF {
+                        conn = c
+                        accepted = accepted + 1
+                    } else {
+                        net.close(c)
+                    }
+                }
+            }
+            // (b) DAS KIND HAT ETWAS GESAGT.
+            if io.poll_ready((&fds[0]) as u64, 1, io.POLLIN) {
+                let n: u64 = io.read(rd, (&buf[0]) as u64, 128)
+                if !errno.failed(n) && n > 0 {
+                    kid_lines = kid_lines + 1
+                    if first == 0 {
+                        first = 1
+                    }
+                }
+            }
+            // Das Ende des Kindes -- POLLHUP, und es kommt, ohne dass
+            // danach gefragt wurde.
+            if io.poll_ready((&fds[0]) as u64, 1, io.POLLHUP) {
+                kid_hup = 1
+            }
+            // (c) DAS NETZ HAT ETWAS GESAGT. Beantwortet wird es SOFORT,
+            //     ohne auf das Kind zu warten -- das ist der ganze Punkt.
+            if io.poll_ready((&fds[0]) as u64, 2, io.POLLIN) {
+                let n: u64 = io.read(conn, (&buf[0]) as u64, 127)
+                if errno.failed(n) || n == 0 {
+                    net.close(conn)
+                    conn = 0xFFFFFFFF
+                } else {
+                    net_lines = net_lines + 1
+                    if first == 0 {
+                        first = 2
+                    }
+                    net.send_all(conn, (&head[0]) as u64, 6)
+                    net.send_all(conn, (&buf[0]) as u64, n)
+                }
+            }
+            if io.poll_ready((&fds[0]) as u64, 2, io.POLLHUP | io.POLLERR) {
+                net.close(conn)
+                conn = 0xFFFFFFFF
+            }
+        }
+        // Fertig, sobald beide Seiten bedient wurden.
+        if kid_hup != 0 && net_lines > 0 {
+            going = false
+        }
+    }
+
+    tell((&n_acc[0]) as u64, accepted)
+    tell((&n_net[0]) as u64, net_lines)
+    tell((&n_kid[0]) as u64, kid_lines)
+    tell((&n_hup[0]) as u64, kid_hup)
+    tell((&n_calls[0]) as u64, polls)
+    tell((&n_first[0]) as u64, first)
+    if conn != 0xFFFFFFFF {
+        net.close(conn)
+    }
+    net.close(s)
+    io.close(rd)
+    tell((&n_code[0]) as u64, proc.wait_code(who))
+    stdio.flush()
+    return 0
+}
