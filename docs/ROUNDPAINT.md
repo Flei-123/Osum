@@ -564,7 +564,65 @@ One page, as asked. No code.
 
 ---
 
-## 10. THE FILES
+## 10. THE ACCEPTANCE
+
+`./test.sh` before and after, full runs on the same machine, compared
+section by section with `tools/look/compare.py` (which round LOOK wrote
+for exactly this).
+
+```
+baseline (e0a9fec)   31 sections passed, 5 FAILED, 3188 assertions
+after                32 sections passed, 5 FAILED, 3185 assertions
+```
+
+The five red sections are the **same five** before and after — `k14`,
+`k16`, `icons`, `netview`, `tunnel/pakete` — and they were red on the
+branch this round started from. One section more passes because this
+round added one (`paint`, 36 of 36).
+
+### The one thing that went newly red, and what it taught
+
+`compare.py` found exactly one: `NETVIEW 147/23 -> 144/25`.
+
+```
+FAIL  dark:  button 1, mark-filtered: falsch 54 von 54
+FAIL  light: button 1, mark-filtered: falsch 54 von 54
+```
+
+Every one of the 54 ink pixels of the network mark was in the wrong
+place — because the program symbol of section 7 now sits in front of it.
+That was not the bug. **The bug was a duplicated number:** the taskbar
+*drew* the mark at `x + 3` and *reported* it as `kx[i] + 3` — two copies
+of one calculation in two places, and the runner looks for the mark
+where the report claims it is.
+
+Fixed by deleting the copy: the position is computed in exactly one
+place — the one that paints — and the report reads it back. After that,
+a dedicated re-run:
+
+```
+NETVIEW  147 passed / 23 failed   (baseline)
+NETVIEW  148 passed / 22 failed   (paint)
+```
+
+One better than the baseline, and no `mark-filtered` failure left.
+
+**No test was weakened.** Two assertions were brought back into contact
+with reality instead of being switched off:
+
+* `tools/desktop/run.sh` asserted `WM_MAXNR = 2113` and had been red
+  since round MERGE handed out 2114. It now names 2112..2116
+  individually — so the next round that adds a call has to touch that
+  line.
+* `tools/paint/aacheck.py` compares against FreeType with a wide bound
+  (< 45) *and says why*: that comparison contains hinting. The tight
+  bound (< 5) is on the thing the round actually controls, the sampling.
+  A bound nobody can justify is a number that gets raised at the next
+  failure.
+
+---
+
+## 11. THE FILES
 
 | file | what it is |
 |---|---|
@@ -577,7 +635,7 @@ One page, as asked. No code.
 
 ---
 
-## 11. THE PICTURES
+## 12. THE PICTURES
 
 `docs/shots/paint/`, all four 800×600, `scheme=day mode=light`, same
 disk image, same programs:
