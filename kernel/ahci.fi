@@ -111,7 +111,7 @@ import arch.x86_64.apic
 export {
     init, present, ide_mode, read_block, write_block, read_many,
     write_many, flush, blocks, block_shift, bdf, port, mode,
-    ports_seen, cmds, errs, last_tfd, buffer, ident, sig, slots,
+    ports_seen, cmds, errs, last_tfd, buffer, ident, sig, slots, why,
     MODE_NONE, MODE_AHCI, MODE_IDE
 }
 
@@ -154,6 +154,8 @@ const S_CMDS: u64 = 0x60
 const S_TFD: u64 = 0x68
 const S_S64A: u64 = 0x70
 const S_SIG: u64 = 0x78
+const S_WHY: u64 = 0x80 // an welcher Stelle die Inbetriebnahme aufgab
+const S_QUIET: u64 = 0x88 // wie viele fremde Ports wieder stillgelegt wurden
 
 // --------------------------------------------------- die HBA-Register
 
@@ -288,6 +290,10 @@ fn last_tfd(state: u64) -> u64 {
     return kstate.get(state, sc(S_TFD))
 }
 
+fn why(state: u64) -> u64 {
+    return kstate.get(state, sc(S_WHY))
+}
+
 fn sig(state: u64) -> u64 {
     return kstate.get(state, sc(S_SIG))
 }
@@ -383,6 +389,7 @@ fn init(state: u64) -> bool {
     kstate.set(state, sc(S_ERRS), 0)
     kstate.set(state, sc(S_CMDS), 0)
     kstate.set(state, sc(S_SEEN), 0)
+    kstate.set(state, sc(S_WHY), 0)
 
     let idx: u64 = pci.find_class(state, pci.CLASS_STORAGE, pci.SUB_SATA,
         pci.PROGIF_AHCI)
@@ -390,6 +397,7 @@ fn init(state: u64) -> bool {
         if ide_mode(state) {
             kstate.set(state, sc(S_MODE), MODE_IDE)
         }
+        kstate.set(state, sc(S_WHY), 1)
         return false
     }
 
@@ -400,10 +408,12 @@ fn init(state: u64) -> bool {
     // Register, um das es geht, ist das sechste.
     let phys: u64 = pci.bar(state, idx, 5)
     if phys == 0 || pci.bar_is_io(state, idx, 5) {
+        kstate.set(state, sc(S_WHY), 2)
         return false
     }
     let b: u64 = apic.map_device(state, phys)
     if b == 0 {
+        kstate.set(state, sc(S_WHY), 3)
         return false
     }
     kstate.set(state, sc(S_IDX), idx)
@@ -413,6 +423,7 @@ fn init(state: u64) -> bool {
 
     let cap: u64 = rd32(b, R_CAP)
     if cap == 0 || cap == 0xFFFFFFFF {
+        kstate.set(state, sc(S_WHY), 4)
         return false
     }
     kstate.set(state, sc(S_SLOTS), ((cap >> 8) & 0x1F) + 1)
@@ -424,6 +435,7 @@ fn init(state: u64) -> bool {
     pci.enable_master(bdf(state))
 
     if !handoff(state, b) {
+        kstate.set(state, sc(S_WHY), 5)
         return false
     }
 
@@ -433,25 +445,30 @@ fn init(state: u64) -> bool {
     wr32(b, R_GHC, rd32(b, R_GHC) | GHC_AE)
 
     if !hba_reset(state, b) {
+        kstate.set(state, sc(S_WHY), 6)
         return false
     }
 
     let pi: u64 = rd32(b, R_PI)
     kstate.set(state, sc(S_PI), pi)
     if pi == 0 {
+        kstate.set(state, sc(S_WHY), 7)
         return false
     }
 
     let p: u64 = find_disk(state, pi)
     if p >= 32 {
+        kstate.set(state, sc(S_WHY), 8)
         return false
     }
     kstate.set(state, sc(S_PORT), p)
 
     if !port_setup(state, p) {
+        kstate.set(state, sc(S_WHY), 9)
         return false
     }
     if !identify(state) {
+        kstate.set(state, sc(S_WHY), 10)
         return false
     }
     kstate.set(state, sc(S_READY), 1)
@@ -503,30 +520,58 @@ fn hba_reset(state: u64, b: u64) -> bool {
     return false
 }
 
-// Welcher Port traegt eine Platte. PI sagt, welche Ports der Chip
-// ueberhaupt hat -- eine Zahl, die auf echter Hardware fast nie 0xFFFFFFFF
-// und fast nie zusammenhaengend ist. Wer stattdessen einfach Port 0
-// nimmt, findet auf jedem Rechner nichts, dessen SSD an Port 2 haengt.
+// ==================================================================
+// WELCHER PORT TRAEGT EINE PLATTE -- UND WARUM DAS NICHT EINE ZEILE IST
+// ==================================================================
+//
+// PI sagt, welche Ports der Chip ueberhaupt HAT. Das ist auf echter
+// Hardware fast nie 1 und fast nie zusammenhaengend: eine Platte an
+// Port 2, waehrend 0 und 1 leer sind, ist der Normalfall. Wer
+// stattdessen Port 0 nimmt, findet auf so einem Rechner nichts.
+//
+// DIE ERSTE FASSUNG DIESER FUNKTION HAT GENAU DAS GETAN, WAS NAHELIEGT:
+// PxSSTS lesen, PxSIG lesen, fertig. Sie hat unter QEMU mit einer
+// angehaengten Platte NICHTS gefunden (`why=8`), und der Grund ist
+// lehrreich genug, um hier zu stehen:
+//
+//   1. NACH DEM HBA-RESET STEHT DIE VERBINDUNG NICHT SOFORT. DET in
+//      PxSSTS ist erst 1 ("Geraet da, Verbindung noch nicht") und wird
+//      3 ("Verbindung steht"), wenn die beiden Enden sich geeinigt
+//      haben. Das dauert. Ein Blick reicht nicht, es muss gewartet
+//      werden.
+//   2. PxSIG IST KEIN REGISTER, DAS DER CONTROLLER VON SICH AUS FUELLT.
+//      Dort steht, was das LAUFWERK in seinem ersten D2H-Register-FIS
+//      geschickt hat -- und ein FIS EMPFANGEN kann der Port erst, wenn
+//      der FIS-Empfangsbereich eingetragen und FRE gesetzt ist. Vorher
+//      liest PxSIG 0xFFFFFFFF oder eine Null, und beide sind keine
+//      Kennung.
+//
+// Deshalb richtet diese Funktion JEDEN in Frage kommenden Port so weit
+// ein, dass er antworten KANN, bevor sie ihn fragt. Erst danach ist die
+// Kennung eine Aussage.
 fn find_disk(state: u64, pi: u64) -> u64 {
+    let cl: u64 = state + AHCI_OFF + CLB_AT
+    let fis: u64 = state + AHCI_OFF + FB_AT
     var seen: u64 = 0
     var found: u64 = 32
     var i: u64 = 0
     while i < 32 {
-        if ((pi >> i) & 1) != 0 {
-            let ssts: u64 = prd(state, i, P_SSTS)
-            let det: u64 = ssts & 0xF
-            let ipm: u64 = (ssts >> 8) & 0xF
-            if det == DET_PRESENT && ipm == IPM_ACTIVE {
-                seen = seen + 1
-                let s: u64 = prd(state, i, P_SIG)
-                // Nur eine PLATTE. Ein ATAPI-Laufwerk spricht SCSI in
-                // ATA-Verpackung, ein Port-Multiplier ist gar kein
-                // Geraet -- beide wuerden auf READ DMA EXT nicht
-                // antworten, und ein Treiber, der sie nimmt, haengt
-                // seine Zeitschranke ab statt eine Platte zu finden.
-                if s == SIG_ATA && found >= 32 {
-                    found = i
+        if ((pi >> i) & 1) != 0 && found >= 32 {
+            zero(cl, 1024)
+            zero(fis, 256)
+            if port_arm(state, i, cl, fis) {
+                if link_up(state, i) {
+                    seen = seen + 1
+                    let s: u64 = prd(state, i, P_SIG)
                     kstate.set(state, sc(S_SIG), s)
+                    // Nur eine PLATTE. Ein ATAPI-Laufwerk spricht SCSI
+                    // in ATA-Verpackung, ein Port-Multiplier ist gar
+                    // kein Geraet -- beide antworten auf READ DMA EXT
+                    // nicht, und ein Treiber, der sie nimmt, laeuft in
+                    // seine Zeitschranke, statt eine Platte zu finden.
+                    if s == SIG_ATA {
+                        found = i
+                    }
                 }
             }
         }
@@ -536,23 +581,20 @@ fn find_disk(state: u64, pi: u64) -> u64 {
     return found
 }
 
-// Den Port anhalten, die beiden Speicherbereiche eintragen, wieder
-// anfahren. DIE REIHENFOLGE IST NICHT GESCHMACKSSACHE: ein Port, der
-// noch laeuft (CR oder FR), ignoriert jede Adresse, die man in PxCLB
-// oder PxFB schreibt -- der Controller hat sie sich beim Anfahren
-// gemerkt. Ein Treiber, der die Adressen im Laufen schreibt, sieht
-// hinterher keinen Fehler und liest in fremden Speicher.
-fn port_setup(state: u64, p: u64) -> bool {
+// Einen Port so weit herrichten, dass er ein FIS empfangen kann: alles
+// anhalten, die beiden Speicheradressen eintragen, alte Fehler wegraeumen,
+// Strom und Anlauf anfordern, FIS-Empfang an. ST bleibt AUS -- es soll
+// noch kein Befehl laufen.
+//
+// DIE REIHENFOLGE IST NICHT GESCHMACKSSACHE: ein Port, der noch laeuft
+// (CR oder FR), ignoriert jede Adresse, die man in PxCLB oder PxFB
+// schreibt -- der Controller hat sie sich beim Anfahren gemerkt. Wer die
+// Adressen im Laufen schreibt, sieht keinen Fehler und der Controller
+// legt seine FIS weiter dorthin, wo der Vorbesitzer sie haben wollte.
+fn port_arm(state: u64, p: u64, cl: u64, fis: u64) -> bool {
     if !port_stop(state, p) {
         return false
     }
-
-    let cl: u64 = state + AHCI_OFF + CLB_AT
-    let fis: u64 = state + AHCI_OFF + FB_AT
-    zero(cl, 1024)
-    zero(fis, 256)
-    zero(state + AHCI_OFF + CT_AT, 1024)
-
     // Der Controller liest den BUS, nicht die Seitentabelle. In diesem
     // Kern sind die beiden Zahlen dieselbe, weil `boot.s` das erste
     // Gigabyte auf sich selbst abbildet; in einem Kern mit hoher Haelfte
@@ -562,7 +604,6 @@ fn port_setup(state: u64, p: u64) -> bool {
     pwr(state, p, P_CLBU, cl >> 32)
     pwr(state, p, P_FB, fis & 0xFFFFFFFF)
     pwr(state, p, P_FBU, fis >> 32)
-
     // Alte Fehler wegraeumen: SERR wird durch ZURUECKSCHREIBEN geloescht,
     // nicht durch eine Null. Wer eine Null hineinschreibt, loescht nichts
     // und bekommt beim ersten Befehl den Fehler des Vorbesitzers.
@@ -570,24 +611,90 @@ fn port_setup(state: u64, p: u64) -> bool {
     pwr(state, p, P_IS, prd(state, p, P_IS))
     // Keine Unterbrechungen: dieser Treiber fragt ab (siehe Kopf).
     pwr(state, p, P_IE, 0)
-
-    // Anlaufen lassen und mit Strom versorgen, wo der Controller das kann.
     pwr(state, p, P_CMD, prd(state, p, P_CMD) | CMD_SUD | CMD_POD)
-
-    // FRE VOR ST. Der Controller darf erst Befehle abarbeiten, wenn er
-    // weiss, wohin er die Antwort legen soll.
     pwr(state, p, P_CMD, prd(state, p, P_CMD) | CMD_FRE)
     var spin: u64 = 0
     while spin < RESET_LIMIT {
         if (prd(state, p, P_CMD) & CMD_FR) != 0 {
+            return true
+        }
+        spin = spin + 1
+    }
+    return false
+}
+
+// Warten, bis die Verbindung steht UND das Laufwerk sich gemeldet hat.
+// Zwei Bedingungen, und beide werden gebraucht: DET == 3 sagt, dass die
+// physikalische Verbindung ausgehandelt ist; eine gueltige Kennung sagt,
+// dass darueber schon ein FIS gekommen ist. Ein Port ohne Geraet
+// erreicht keine von beiden und faellt nach der Schranke durch, statt
+// den Kern anzuhalten.
+fn link_up(state: u64, p: u64) -> bool {
+    var spin: u64 = 0
+    var linked: bool = false
+    while spin < RESET_LIMIT {
+        let ssts: u64 = prd(state, p, P_SSTS)
+        if (ssts & 0xF) == DET_PRESENT && ((ssts >> 8) & 0xF) == IPM_ACTIVE {
+            linked = true
             spin = RESET_LIMIT
         } else {
             spin = spin + 1
         }
     }
-    pwr(state, p, P_CMD, prd(state, p, P_CMD) | CMD_ST)
+    if !linked {
+        return false
+    }
+    spin = 0
+    while spin < RESET_LIMIT {
+        let s: u64 = prd(state, p, P_SIG)
+        if s != 0 && s != 0xFFFFFFFF {
+            // Und nicht mehr beschaeftigt: solange BSY oder DRQ steht,
+            // ist das Laufwerk mit seinem eigenen Anlauf befasst und
+            // nimmt keinen Befehl an.
+            return await_idle(state, p)
+        }
+        spin = spin + 1
+    }
+    return false
+}
 
-    // Und warten, bis das Laufwerk nicht mehr beschaeftigt ist.
+// Den Port anhalten, die beiden Speicherbereiche eintragen, wieder
+// anfahren. DIE REIHENFOLGE IST NICHT GESCHMACKSSACHE: ein Port, der
+// noch laeuft (CR oder FR), ignoriert jede Adresse, die man in PxCLB
+// oder PxFB schreibt -- der Controller hat sie sich beim Anfahren
+// gemerkt. Ein Treiber, der die Adressen im Laufen schreibt, sieht
+// hinterher keinen Fehler und liest in fremden Speicher.
+fn port_setup(state: u64, p: u64) -> bool {
+    // ERST DIE ANDEREN WIEDER STILLLEGEN. `find_disk` hat jedem Port,
+    // den es gefragt hat, DENSELBEN FIS-Empfangsbereich eingetragen und
+    // FRE gesetzt -- anders war die Kennung nicht zu bekommen. Bliebe
+    // das so, legte ein zweites Laufwerk am selben Controller seine FIS
+    // in genau die 256 Oktette, aus denen dieser Treiber die Antworten
+    // des ersten liest. Das ist die Sorte Fehler, die unter QEMU mit
+    // einer Platte nie auftritt und auf einem PC mit zwei SATA-Geraeten
+    // sofort.
+    let pi: u64 = kstate.get(state, sc(S_PI))
+    var quiet: u64 = 0
+    var i: u64 = 0
+    while i < 32 {
+        if i != p && ((pi >> i) & 1) != 0 {
+            if port_stop(state, i) {
+                quiet = quiet + 1
+            }
+        }
+        i = i + 1
+    }
+    kstate.set(state, sc(S_QUIET), quiet)
+
+    let cl: u64 = state + AHCI_OFF + CLB_AT
+    let fis: u64 = state + AHCI_OFF + FB_AT
+    zero(state + AHCI_OFF + CT_AT, 1024)
+    if !port_arm(state, p, cl, fis) {
+        return false
+    }
+    // ST ZULETZT. Der Controller darf erst Befehle abarbeiten, wenn er
+    // weiss, wo die Befehlsliste steht und wohin die Antwort soll.
+    pwr(state, p, P_CMD, prd(state, p, P_CMD) | CMD_ST)
     return await_idle(state, p)
 }
 
