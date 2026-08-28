@@ -39,7 +39,7 @@ macht, steht es in der Zeile.
 ## WIE DIESE ZAHLEN ZUSTANDE KAMEN
 
 * Netzwerktreiber vorher: `grep -rln 'e1000\|8139\|rtl8\|igb\|ixgbe' --include=*.fi kernel/` → nur `nvme.fi`, `pci.fi`, `virtio.fi`, und in den ersten beiden sind es Konstanten. Netzkartentreiber: **genau einer**.
-* Aufrufstellen des einen Treibers, die diese Runde umlenken musste: 20 in `inet.fi`, 17 in `share.fi`, 16 in `netsvc.fi`, 6 in `wg.fi`, 3 in `hwid.fi`, 3 in `trap.fi`, 2 in `netview.fi` -- **67 Zeilen in sieben Dateien**, alle mechanisch auf `netdev.` umgestellt.
+* Aufrufstellen des einen Treibers, die diese Runde umlenken musste: gezählt aus `git diff mergeline..HEAD` **56 geänderte Zeilen in sieben Dateien** -- 17 in `inet.fi`, 17 in `netsvc.fi`, 16 in `share.fi`, je 2 in `hwid.fi` und `trap.fi`, je 1 in `wg.fi` und `netview.fi`. Alle mechanisch auf `netdev.` umgestellt; die übrigen Nennungen von `virtio` in diesen Dateien stehen in Kommentaren und sind absichtlich stehen geblieben, weil sie über den virtio-Treiber reden und nicht über die Schnittstelle.
 * AHCI: `grep -rn 'ahci\|AHCI' --include=*.fi kernel/` → **nur** `pci.fi:PROGIF_AHCI` (eine unbenutzte Konstante). Es gibt keinen AHCI-Treiber. Bestätigt.
 * TLS vorher: `grep -rln 'tls\|https' --include=*.fi kernel/ lib/` → 0 Treffer im eigenen Baum. ABER: `vendor/firn/lib/tls/` (3285 Zeilen) und `vendor/firn/lib/std/crypto/` (5106 Zeilen) lagen seit dem festgenagelten Commit `a751b3db` im Baum und wurden nie benutzt.
 
