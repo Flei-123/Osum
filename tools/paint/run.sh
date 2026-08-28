@@ -211,30 +211,24 @@ else
     OH=$(echo "$R" | sed -n 's/.* oh=\([0-9]*\) .*/\1/p')
     echo "     das gemessene Fenster: x=$X y=$Y ow=$OW oh=$OH"
     if [ -n "$X" ] && [ -s "$SH/modern/desktop.ppm" ]; then
-        if out=$(python3 tools/paint/shadow.py schatten \
-                "$SH/modern/desktop.ppm" "$X" "$Y" "$OW" "$OH" 2>&1); then
+        # BEIDE MESSUNGEN GEHEN GEGEN DEN LAUF, DER ES NICHT HAT.
+        # `classic` sagt Radius 0 und Schatten 0; was `modern` mehr hat,
+        # ist der Unterschied und nicht der Hintergrund. Die erste
+        # Fassung las eine Zeile aus EINEM Bild und mass den Verlauf des
+        # Schreibtischs -- gruen, und ohne Aussage.
+        for was in schatten ecke; do
+            if [ "$was" = schatten ]; then
+                A=(schatten "$SH/classic/desktop.ppm" "$SH/modern/desktop.ppm" \
+                   "$X" "$Y" "$OW" "$OH")
+            else
+                A=(ecke "$SH/classic/desktop.ppm" "$SH/modern/desktop.ppm" \
+                   "$X" "$Y" --r 8)
+            fi
+            out=$(python3 tools/paint/shadow.py "${A[@]}" 2>&1)
             echo "$out" | sed 's/^/     /'
             PASS=$((PASS+$(echo "$out" | grep -c '^  OK')))
-        else
-            echo "$out" | sed 's/^/     /'
             FAIL=$((FAIL+$(echo "$out" | grep -c '^  FAIL')))
-        fi
-        if out=$(python3 tools/paint/shadow.py ecke \
-                "$SH/modern/desktop.ppm" "$X" "$Y" --r 8 2>&1); then
-            echo "$out" | tail -3 | sed 's/^/     /'; PASS=$((PASS+1))
-        else
-            echo "$out" | tail -3 | sed 's/^/     /'; FAIL=$((FAIL+1))
-        fi
-        # DIE GEGENPROBE. `classic` sagt Radius 0 und Schatten 0, also
-        # MUSS dort eine harte Kante stehen. Faellt diese Zusage NICHT
-        # durch, misst die vorige nichts.
-        if python3 tools/paint/shadow.py ecke "$SH/classic/desktop.ppm" \
-                "$X" "$Y" --r 8 >/dev/null 2>&1; then
-            bad "GEGENPROBE: classic hat eine geglaettete Ecke -- dann "\
-"misst die Messung auf modern nichts"
-        else
-            ok "GEGENPROBE classic: die Ecke ist hart, wie shape=classic sagt"
-        fi
+        done
     else
         bad "kein Bild und kein gemeldetes Fenster"
     fi

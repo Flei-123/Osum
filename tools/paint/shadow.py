@@ -10,15 +10,26 @@
 # Helligkeit von 231 auf 244 STEIGT, monoton, und ohne den Schatten
 # stehen dort sechsmal 247."
 #
-#   ./tools/paint/shadow.py schatten <ppm> <x> <y> <w> <h> [--reach N]
-#       Der Verlauf links neben dem Fenster: wie viele verschiedene
-#       Werte, ob er monoton zum Fenster hin dunkler wird, und wie weit
-#       er reicht.
+# UND ES WIRD IMMER GEGEN DEN LAUF GEMESSEN, DER ES NICHT HAT.
 #
-#   ./tools/paint/shadow.py ecke <ppm> <x> <y> [--r N]
-#       Die obere linke Ecke des Fensters: wie viele Graustufen liegen
-#       auf der Diagonale zwischen Rahmen und Grund.  Eine harte Ecke
-#       hat ZWEI.
+# Die erste Fassung dieses Skripts las EINE Zeile aus EINEM Bild, fand
+# links neben dem Fenster sieben Helligkeitsstufen und meldete gruen.
+# Dieselben sieben Stufen standen im ALTEN Bild -- was sie gemessen
+# hatte, war der Verlauf des Schreibtischhintergrunds.  Eine Messung,
+# die nicht durchfallen kann, ist keine.  Also braucht jede Zusage hier
+# ZWEI Bilder: `modern` und `classic`, gleiche Maschine, gleiches
+# Fenster, ein Wort Unterschied auf der Platte.
+#
+#   ./tools/paint/shadow.py schatten <ohne.ppm> <mit.ppm> <x> <y> <w> <h>
+#                                    [--reach N]
+#       Rechts neben dem Fenster: wie viele Bildpunkte in `mit` DUNKLER
+#       sind als in `ohne`, wie weit das reicht, und ob der Unterschied
+#       zum Fenster hin monoton waechst.
+#
+#   ./tools/paint/shadow.py ecke <ohne.ppm> <mit.ppm> <x> <y> [--r N]
+#       Das Eckquadrat: wie viele Bildpunkte darin eine Farbe tragen,
+#       die WEDER die des Rahmens NOCH die des Grundes ist -- also
+#       wirklich gemischt wurden.  In `ohne` muessen es null sein.
 #
 #   ./tools/paint/shadow.py vergleich <ohne.ppm> <mit.ppm> <x> <y> <w> <h>
 #       Beide Laeufe gegeneinander: wie viele Bildpunkte sich
@@ -65,78 +76,137 @@ def hell(p):
 
 
 def schatten(argv):
-    pfad = argv[0]
-    x, y, w0, h0 = (int(v) for v in argv[1:5])
+    """Der Schatten, gegen den Lauf ohne ihn."""
+    ohne, mit = argv[0], argv[1]
+    x, y, w0, h0 = (int(v) for v in argv[2:6])
     reach = 6
     if "--reach" in argv:
         reach = int(argv[argv.index("--reach") + 1])
-    w, h, b = ppm_lesen(pfad)
+    wa, ha, A = ppm_lesen(ohne)
+    wb, hb, B = ppm_lesen(mit)
+    if (wa, ha) != (wb, hb):
+        print("  FAIL  verschiedene Bildgroessen")
+        return 1
+    # RECHTS neben dem Fenster und nicht links: links kann ein anderes
+    # Fenster liegen, dessen Inhalt sich zwischen zwei Laeufen ohnehin
+    # unterscheidet (eine Shell schreibt eine Uhrzeit).  Rechts vom
+    # obersten Fenster liegt der Schreibtisch, und der ist in beiden
+    # Laeufen derselbe -- ausser dort, wo der Schatten liegt.
     zy = y + h0 // 2
-    werte = []
-    for k in range(reach + 2, 0, -1):
-        p = punkt(b, w, h, x - k, zy)
-        werte.append(None if p is None else hell(p))
-    print("PAINT-SCHATTEN: %s  Fenster %d,%d %dx%d  Zeile y=%d"
-          % (os.path.basename(pfad), x, y, w0, h0, zy))
-    print("   links davon, von aussen nach innen: %s"
-          % " ".join("--" if v is None else str(v) for v in werte))
-    echt = [v for v in werte if v is not None]
-    stufen = len(set(echt))
-    # Monoton FALLEND nach innen heisst: je naeher am Fenster, desto
-    # dunkler.  Gleiche Werte sind erlaubt (der aeusserste Ring kann
-    # rechnerisch bei Deckung 0 landen), Umkehrungen nicht.
-    monoton = all(echt[i] >= echt[i + 1] for i in range(len(echt) - 1))
-    tiefe = 0
-    if echt:
-        tiefe = echt[0] - min(echt)
-    print("   verschiedene Werte=%d  monoton nach innen dunkler=%s  "
-          "Tiefe=%d Helligkeitsstufen" % (stufen, "ja" if monoton else "NEIN",
-                                          tiefe))
+    rand = x + w0
+    print("PAINT-SCHATTEN: Fenster %d,%d %dx%d  Zeile y=%d  "
+          "rechte Aussenkante x=%d" % (x, y, w0, h0, zy, rand - 1))
+    ov = []
+    mv = []
+    for k in range(reach + 3):
+        pa = punkt(A, wa, ha, rand + k, zy)
+        pb = punkt(B, wb, hb, rand + k, zy)
+        ov.append(None if pa is None else hell(pa))
+        mv.append(None if pb is None else hell(pb))
+    print("   ohne Schatten: %s"
+          % " ".join("--" if v is None else "%3d" % v for v in ov))
+    print("   mit  Schatten: %s"
+          % " ".join("--" if v is None else "%3d" % v for v in mv))
+    diff = [0 if (a is None or b is None) else a - b
+            for a, b in zip(ov, mv)]
+    print("   Unterschied:   %s" % " ".join("%3d" % d for d in diff))
+
     zusagen = 0
     fehler = 0
-    if stufen >= 3:
-        print("  OK    der Verlauf traegt %d verschiedene Werte "
-              "(eine harte Kante haette zwei)" % stufen)
+    # 1. Es gibt ueberhaupt einen Unterschied, und er ist DUNKLER.
+    dunkler = sum(1 for d in diff if d > 0)
+    if dunkler >= 3 and min(diff) >= 0:
+        print("  OK    %d Bildpunkte sind dunkler als ohne Schatten, "
+              "und keiner ist heller" % dunkler)
         zusagen += 1
     else:
-        print("  FAIL  nur %d verschiedene Werte -- das ist keine "
-              "Mischung, das ist eine Kante" % stufen)
+        print("  FAIL  %d dunkler, kleinster Unterschied %d"
+              % (dunkler, min(diff)))
         fehler += 1
-    if monoton:
-        print("  OK    er wird zum Fenster hin monoton dunkler")
+    # 2. Er wird zum Fenster hin STAERKER -- ein Schatten, der nach
+    #    aussen zunimmt, ist keiner.
+    innen = diff[:dunkler] if dunkler else []
+    monoton = all(innen[i] >= innen[i + 1] for i in range(len(innen) - 1))
+    if monoton and innen:
+        print("  OK    der Unterschied faellt nach aussen monoton "
+              "(%d bis %d Helligkeitsstufen)" % (innen[0], innen[-1]))
         zusagen += 1
     else:
-        print("  FAIL  der Verlauf ist nicht monoton -- %s" % echt)
+        print("  FAIL  der Unterschied ist nicht monoton: %s" % innen)
+        fehler += 1
+    # 3. Und er hoert auf. Ein Schatten, der bis zum Bildrand reicht,
+    #    ist ein Farbfehler.
+    if dunkler <= reach + 1 and (len(diff) > dunkler and diff[-1] == 0):
+        print("  OK    er endet nach %d Bildpunkten (reach=%d) -- "
+              "dahinter ist das Bild unveraendert" % (dunkler, reach))
+        zusagen += 1
+    else:
+        print("  FAIL  er reicht %d Bildpunkte weit, erwartet hoechstens "
+              "%d" % (dunkler, reach + 1))
         fehler += 1
     print("PAINT-SCHATTEN: %d Zusagen, %d Fehler" % (zusagen, fehler))
     return 1 if fehler else 0
 
 
 def ecke(argv):
-    pfad = argv[0]
-    x, y = int(argv[1]), int(argv[2])
+    """Die Ecke, gegen den Lauf mit der eckigen."""
+    ohne, mit = argv[0], argv[1]
+    x, y = int(argv[2]), int(argv[3])
     r = 8
     if "--r" in argv:
         r = int(argv[argv.index("--r") + 1])
-    w, h, b = ppm_lesen(pfad)
-    # Die Diagonale durch die obere linke Ecke.  Bei einer eckigen Ecke
-    # springt sie in EINEM Schritt von Grund auf Rahmen.
-    werte = []
-    for k in range(r + 2):
-        p = punkt(b, w, h, x + k, y + k)
-        werte.append(None if p is None else hell(p))
-    echt = [v for v in werte if v is not None]
-    stufen = len(set(echt))
-    print("PAINT-ECKE: %s  Ecke bei %d,%d  Radius erwartet %d"
-          % (os.path.basename(pfad), x, y, r))
-    print("   Diagonale: %s" % " ".join(str(v) for v in echt))
-    print("   verschiedene Werte=%d" % stufen)
-    if stufen >= 3:
-        print("  OK    die Ecke traegt %d Stufen -- sie ist gerundet "
-              "und geglaettet" % stufen)
-        return 0
-    print("  FAIL  die Ecke traegt %d Stufen -- sie ist hart" % stufen)
-    return 1
+    wa, ha, A = ppm_lesen(ohne)
+    wb, hb, B = ppm_lesen(mit)
+
+    def gemischt(b, w, h):
+        """Bildpunkte im Eckquadrat, die WEDER Rahmen NOCH Grund sind.
+
+        Die Rahmenfarbe wird tief im Fenster abgelesen (r, r hinter der
+        Ecke), die Grundfarbe weit ausserhalb (drei Bildpunkte davor) --
+        beide aus DEMSELBEN Bild, damit kein Schema-Unterschied
+        hineinrechnet.
+        """
+        rahmen = punkt(b, w, h, x + r + 2, y + r + 2)
+        grund = punkt(b, w, h, x - 3, y - 3)
+        n = 0
+        for dy in range(r):
+            for dx in range(r):
+                p = punkt(b, w, h, x + dx, y + dy)
+                if p is None or p == rahmen or p == grund:
+                    continue
+                n += 1
+        return n, rahmen, grund
+
+    na, ra, ga = gemischt(A, wa, ha)
+    nb, rb, gb = gemischt(B, wb, hb)
+    print("PAINT-ECKE: Eckquadrat %dx%d bei %d,%d" % (r, r, x, y))
+    print("   ohne Radius: %d gemischte Bildpunkte  (Rahmen %s, Grund %s)"
+          % (na, ra, ga))
+    print("   mit  Radius: %d gemischte Bildpunkte  (Rahmen %s, Grund %s)"
+          % (nb, rb, gb))
+    zusagen = 0
+    fehler = 0
+    if nb > na:
+        print("  OK    die runde Ecke traegt %d gemischte Bildpunkte "
+              "mehr als die eckige" % (nb - na))
+        zusagen += 1
+    else:
+        print("  FAIL  die runde Ecke traegt nicht mehr gemischte "
+              "Bildpunkte als die eckige (%d gegen %d)" % (nb, na))
+        fehler += 1
+    # DIE GEGENPROBE, und sie steht hier und nicht im Laeufer: `classic`
+    # sagt Radius 0. Traegt sie trotzdem gemischte Bildpunkte, misst die
+    # Zusage darueber nichts.
+    if na * 4 < r * r:
+        print("  OK    GEGENPROBE: die eckige Ecke ist zu weniger als "
+              "einem Viertel gemischt (%d von %d)" % (na, r * r))
+        zusagen += 1
+    else:
+        print("  FAIL  GEGENPROBE: auch die eckige Ecke ist gemischt "
+              "(%d von %d)" % (na, r * r))
+        fehler += 1
+    print("PAINT-ECKE: %d Zusagen, %d Fehler" % (zusagen, fehler))
+    return 1 if fehler else 0
 
 
 def vergleich(argv):
