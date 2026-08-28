@@ -107,6 +107,7 @@ export {
     MAX_WIN, K_RAW, K_TERM, TITLE_H, BORDER, GRIP, MAX_W, MAX_H,
     E_KEY, E_DOWN, E_UP, E_MOVE, E_CLOSE, E_FOCUS, E_RESIZE,
     L_DESK, L_NORMAL, L_TOP, F_HIDDEN, F_NODECO, F_TABBED,
+    F_FLOAT, set_float, win_float,
     EDGE_BOTTOM, EDGE_TOP, EDGE_LEFT, EDGE_RIGHT, F_MAXIMIZED
 }
 
@@ -180,6 +181,32 @@ const F_MAXIMIZED: u64 = 4
 // dasselbe wie F_HIDDEN (minimiert): ein Klick auf den Reiter holt es
 // zurueck, ein Klick auf den Fensterknopf der Leiste nicht.
 const F_TABBED: u64 = 8
+// ================================== RUNDE SUPERSEARCH: EIN SCHWEBENDES FENSTER
+//
+// F_NODECO heisst "kein Rahmen, keine Titelleiste" -- und bis hierher
+// hiess es AUSSERDEM, ohne dass es irgendwo stand: kein Schatten und
+// keine runden Ecken. Der Zweig fuer solche Fenster in `paint_win`
+// kopiert Zeile fuer Zeile den Puffer in den Bildpuffer und kehrt
+// zurueck, VOR `paint_shadow` und VOR `fill_round`.
+//
+// Fuer den Schreibtisch und die Taskleiste ist das richtig: der
+// Schreibtisch liegt ganz hinten und hat nichts, worauf er einen
+// Schatten werfen koennte, und eine Taskleiste mit Schlagschatten hat
+// noch kein System gebaut, das man ernst nimmt.
+//
+// Fuer ein Pop-up ist es falsch. Das Suchfenster dieser Runde hat keine
+// Titelleiste (es ist keine Anwendung, es ist eine Frage), soll aber
+// ueber dem liegen, was darunter ist, und das SIEHT man nur am
+// Schatten. Also ist "ohne Schmuck" und "schwebend" ab hier zweierlei:
+//
+//   F_NODECO   ohne Rahmen, Titelleiste, Schliessfeld, Griff.
+//   F_FLOAT    trotzdem mit dem Schatten und dem Eckenradius aus den
+//              Form-Token (Runde LOOK, `FM_RADIUS`/`FM_SHADOW`).
+//
+// Ein Fenster ohne F_FLOAT wird BILDPUNKTGENAU so gemalt wie vorher --
+// das ist die Zusage, an der `tools/supersearch/run.sh` misst, dass
+// diese Runde dem Schreibtisch und der Leiste nichts angetan hat.
+const F_FLOAT: u64 = 16
 
 // ADDENDUM TASKBAR: the four screen edges. The numbers are written to
 // /etc/taskbar.conf as words ("bottom", "top", "left", "right") and
@@ -1357,7 +1384,12 @@ fn damage_win(state: u64, i: u64) {
     if form(state, FM_SHADOW) == 0 {
         r = 0
     }
-    if !deko(state, i) {
+    // RUNDE SUPERSEARCH: `|| win_float` -- ein schwebendes Fenster hat
+    // einen Schatten, obwohl es keinen Schmuck hat, und sein schmutziger
+    // Bereich muss ihn deshalb einschliessen. Ohne diese eine
+    // Veroderung bliebe beim Schliessen des Pop-ups ein Schattenrand
+    // auf dem Schreibtisch stehen.
+    if !deko(state, i) && !win_float(state, i) {
         r = 0
     }
     var x0: i64 = win_x(state, i) - r
@@ -1762,6 +1794,30 @@ fn set_deco(state: u64, i: u64, on: bool) {
         wsv(state, i, W_FLAGS, f | F_NODECO)
     }
     damage_win(state, i) // und das neue, ohne
+}
+
+// RUNDE SUPERSEARCH. Wie `set_deco`, und aus demselben Grund zweimal
+// `damage_win`: der Schatten liegt AUSSERHALB des Fensterrechtecks, und
+// wer ihn abschaltet, muss den Fleck, auf dem er lag, neu malen lassen.
+fn set_float(state: u64, i: u64, on: bool) {
+    if !valid(state, i) {
+        return
+    }
+    let f: u64 = wg(state, i, W_FLAGS)
+    damage_win(state, i)
+    if on {
+        wsv(state, i, W_FLAGS, f | F_FLOAT)
+    } else {
+        wsv(state, i, W_FLAGS, f & ~F_FLOAT)
+    }
+    damage_win(state, i)
+}
+
+fn win_float(state: u64, i: u64) -> bool {
+    if !valid(state, i) {
+        return false
+    }
+    return (wg(state, i, W_FLAGS) & F_FLOAT) != 0
 }
 
 // ==================== ADDENDUM TASKBAR: STRUTS AND THE WORK AREA ====
@@ -2495,6 +2551,107 @@ fn imin(a: i64, b: i64) -> i64 {
     return b
 }
 
+// ============================ RUNDE SUPERSEARCH: KOPIEREN MIT RUNDEN ECKEN
+//
+// `fill_round` fuellt eine runde Flaeche mit EINER Farbe. Hier soll ein
+// PUFFER hinein, und das ist eine andere Aufgabe: die Farbe steht in
+// jedem Bildpunkt woanders.
+//
+// Die Aufteilung ist dieselbe wie dort, und aus demselben Grund -- die
+// runde Ecke kostet nur die vier Eckquadrate:
+//
+//   * die Zeilen zwischen den Ecken: unveraendert `fb_row`, also der
+//     Wortkopierer, den dieser Server seit Runde K10 benutzt.
+//   * die Zeilen IN den Ecken: derselbe Kopierer, aber um den
+//     Waagerecht-Versatz der Ecke eingerueckt -- der volle Teil der
+//     Zeile also weiter am Stueck.
+//   * die 4 * r * r Bildpunkte der Eckquadrate selbst: einzeln, mit
+//     `corner_cov` als Deckung und der Mischung des Servers. Ein
+//     Bildpunkt mit Deckung 0 wird NICHT geschrieben -- dort bleibt
+//     stehen, was darunter liegt, und genau das macht die Ecke rund
+//     statt weiss.
+//
+// Bei r = 8 sind das 256 gemischte Bildpunkte, egal wie gross das
+// Fenster ist. `aa_px` zaehlt sie mit, damit der Preis in jedem Lauf
+// eine Zahl ist und keine Behauptung.
+fn blit_round(state: u64, i: u64, bq: u64, bw: u64, wx: i64, wy: i64,
+    bx0: i64, by0: i64, bx1: i64, by1: i64) {
+    let ww: i64 = wg(state, i, W_W) as i64
+    let wh: i64 = wg(state, i, W_H) as i64
+    var r: u64 = form(state, FM_RADIUS)
+    if r * 2 > ww as u64 {
+        r = (ww / 2) as u64
+    }
+    if r * 2 > wh as u64 {
+        r = (wh / 2) as u64
+    }
+    let ri: i64 = r as i64
+    var br: i64 = by0
+    while br < by1 {
+        // In welcher Zeile der Ecke sind wir? -1 heisst: in keiner, die
+        // Zeile geht durch von links nach rechts.
+        var dy: i64 = -1
+        let inz: i64 = br - wy
+        if inz < ri {
+            dy = inz
+        } else if inz >= wh - ri {
+            dy = wh - 1 - inz
+        }
+        var ein: u64 = 0
+        if dy >= 0 {
+            let dyu: u64 = dy as u64
+            // Die erste Spalte dieser Zeile, die VOLL gedeckt ist.
+            // Dieselbe Indizierung wie in `fill_round`: die Spalte `dx`
+            // vom Rand hat die Kreisentfernung `r - 1 - dx`.
+            ein = r
+            var dx: u64 = 0
+            var fertig: bool = false
+            while dx < r && !fertig {
+                if corner_cov(state, r - 1 - dx, r - 1 - dyu, r) >= 255 {
+                    ein = dx
+                    fertig = true
+                }
+                dx = dx + 1
+            }
+        }
+        let lx: i64 = imax(bx0, wx + ein as i64)
+        let rx: i64 = imin(bx1, wx + ww - ein as i64)
+        if rx > lx {
+            fb_row(state, lx as u64, br as u64,
+                bq +% (br - wy) as u64 *% bw *% 4
+                +% (lx - wx) as u64 *% 4, (rx - lx) as u64)
+        }
+        // Und die angeschnittenen Bildpunkte links und rechts davon.
+        if dy >= 0 {
+            let dyu2: u64 = dy as u64
+            var k: u64 = 0
+            while k < ein {
+                let cov: u64 = corner_cov(state, r - 1 - k, r - 1 - dyu2, r)
+                if cov != 0 {
+                    px_buf(state, wx + k as i64, br, bq, bw, wx, wy, cov,
+                        bx0, by0, bx1, by1)
+                    px_buf(state, wx + ww - 1 - k as i64, br, bq, bw, wx,
+                        wy, cov, bx0, by0, bx1, by1)
+                }
+                k = k + 1
+            }
+        }
+        br = br + 1
+    }
+}
+
+// EIN BILDPUNKT AUS DEM FENSTERPUFFER, gemischt auf das, was schon da
+// ist. Die Farbe kommt aus dem Puffer, die Deckung von der Ecke.
+fn px_buf(state: u64, x: i64, y: i64, bq: u64, bw: u64, wx: i64, wy: i64,
+    a: u64, cx0: i64, cy0: i64, cx1: i64, cy1: i64) {
+    if x < cx0 || y < cy0 || x >= cx1 || y >= cy1 || x < 0 || y < 0 {
+        return
+    }
+    let farbe: u64 = __mmio_read32((bq +% (y - wy) as u64 *% bw *% 4
+        +% (x - wx) as u64 *% 4) as *mut u32) as u64
+    fb.pixel_a(state, x as u64, y as u64, farbe & 0xFFFFFF, a)
+}
+
 // Ein Fenster in den schmutzigen Bereich. Rahmen, Titelleiste,
 // Schliessfeld, Groessengriff -- und dann die Flaeche der Anwendung.
 fn paint_win(state: u64, i: u64, cx0: u64, cy0: u64, cx1: u64, cy1: u64) {
@@ -2514,6 +2671,17 @@ fn paint_win(state: u64, i: u64, cx0: u64, cy0: u64, cx1: u64, cy1: u64) {
     // ganze Rest dieser Funktion entfaellt. Ein Schreibtisch mit
     // Titelleiste waere keiner.
     if !deko(state, i) {
+        // ================================= RUNDE SUPERSEARCH: SCHWEBEND
+        //
+        // DER SCHATTEN ZUERST, aus demselben Grund wie beim
+        // geschmueckten Fenster zwanzig Zeilen weiter unten: was unter
+        // diesem Fenster liegt, steht zu diesem Zeitpunkt fertig im
+        // Bildpuffer, und danach ist es weg.
+        let schwebt: bool = win_float(state, i)
+        if schwebt {
+            paint_shadow(state, i, cx0 as i64, cy0 as i64, cx1 as i64,
+                cy1 as i64)
+        }
         let bx0: i64 = imax(wx, cx0 as i64)
         let by0: i64 = imax(wy, cy0 as i64)
         let bx1: i64 = imin(wx + wg(state, i, W_W) as i64, cx1 as i64)
@@ -2523,6 +2691,11 @@ fn paint_win(state: u64, i: u64, cx0: u64, cy0: u64, cx1: u64, cy1: u64) {
         }
         let bw: u64 = wg(state, i, W_W)
         let bq: u64 = wg(state, i, W_BUF)
+        if schwebt && form(state, FM_RADIUS) != 0 {
+            blit_round(state, i, bq, bw, wx, wy, bx0, by0, bx1, by1)
+            ss(state, S_BLITS, gs(state, S_BLITS) + 1)
+            return
+        }
         let bn: u64 = (bx1 - bx0) as u64
         var br: i64 = by0
         while br < by1 {
