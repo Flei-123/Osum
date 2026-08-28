@@ -126,13 +126,33 @@ warten.
 
 ## 4. Abnahme
 
+Alle Läufe auf demselben Wirt, mit `-accel kvm`, bei `load average`
+17–29 (auf dieser Maschine liefen gleichzeitig vier weitere Runden).
+
+| Abschnitt | mit dieser Runde | ohne sie (Basiszweig) |
+|---|---|---|
+| `tools/k13/run.sh` — Benutzer, Rechte, init | **99 / 0** | 99 / 0 |
+| `tools/k14/run.sh` — VFS und fremde Dateisysteme | **152 / 0** | **151 / 1** |
+| `tools/ofs3/run.sh` — OFS Fassung 3 | **75 / 0** | — |
+| `tools/userland/run.sh` — die Werkzeuge | **91 / 0** | — |
+| `tools/tresor/run.sh` — Diebstahl, Sicherung, Schlüssel | **220 / 0** | — |
+| `tools/multiuser/run.sh` — diese Runde | **91 / 0** | — |
+
+**K14 war auf dem Basiszweig rot** („und die Wurzelplatte danach, Oktett
+für Oktett") und ist es mit dieser Runde nicht mehr — der Grund steht in
+`docs/ROUNDMULTIUSER.md` Abschnitt 7b: der Weg über die Ops-Tafel setzte
+keine Rechte auf neu angelegte Dateien. Nachgemessen auf
+`/root/mgline` (Basiszweig, keine Zeile dieser Runde).
+
+### Der Weg dahin
+
 | Lauf | Ergebnis |
 |---|---|
-| `tools/k13/run.sh` vor der Runde (Grundlinie) | 93 OK / 0 FAIL (Abschnitte 1–8) |
-| `tools/k13/run.sh` nach den Kernelaenderungen | 99 OK / 0 FAIL |
-| `tools/k13/run.sh` nach dem Userland | *siehe unten* |
-| `tools/multiuser/run.sh`, erster Lauf | 81 OK / 6 FAIL |
-| `tools/multiuser/run.sh`, zweiter Lauf | *siehe unten* |
+| `tools/k13/run.sh` vor der Runde (Grundlinie) | 99 / 0 |
+| `tools/multiuser/run.sh`, erster Lauf | 81 / 6 |
+| `tools/multiuser/run.sh`, zweiter Lauf | 89 / 0 |
+| … nach zwei zusätzlichen Zusagen | 90 / 1 |
+| … nach der Korrektur an der Zeitmessung | **91 / 0** |
 
 Die sechs Fehler des ersten Laufs waren **alle echte Befunde**, keiner
 davon im Kernel:
@@ -148,6 +168,26 @@ davon im Kernel:
    **Das war der wichtigste Befund: er hat gezeigt, dass die Lücke
    genauer ist, als sie im Auftrag steht.**
 4. Zwei Textfehler im Läufer selbst.
+
+Und danach noch vier, die alle **nicht** von dieser Runde stammten,
+sondern von ihr nur sichtbar gemacht wurden:
+
+5. **`tools/k14/run.sh` Abschnitt 9 war schon rot**: der Weg über die
+   Ops-Tafel rief `perm.on_create` nicht, also bekam jede mit `vfsall`
+   angelegte Datei Modus 0 und Eigentümer 0. Auf dem Basiszweig
+   nachgemessen: 151 / 1.
+6. **root kam in ein Verzeichnis mit Modus 0 nicht hinein** — die Regel
+   „root darf keine Textdatei starten" wurde auch auf Verzeichnisse
+   angewandt. Bei einem Verzeichnis heißt dasselbe Bit *betreten*, und
+   Linux macht denselben Unterschied.
+7. **`tools/k13/run.sh` Abschnitt 9 fiel mit „the disk is full"**: Firn
+   bindet ein *Modul*, und der /etc/group-Teil in `pw.fi` ließ auch
+   `whoami` und `k13t` um je 45 kB wachsen. 4130 Blöcke bei 4096
+   verfügbaren. Behoben mit `kernel/user/grp.fi`; danach 4031.
+8. **Die Uhr im Gast kann nur eine untere Schranke**: bei `load average`
+   26 wurden aus 200 angeforderten Millisekunden 3028 gemessene, weil
+   `CLOCK_MONOTONIC` unter KVM auch die Zeit mitzählt, in der die
+   virtuelle CPU nicht lief.
 
 ---
 
