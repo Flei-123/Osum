@@ -378,7 +378,26 @@ Huffman-Bäumen, adaptive Zeilenfilter.
 
 ---
 
-## 12. Was gemessen wird
+## 12. Ein Stolperstein, der hier stehen muss
+
+**Der Kern kann nicht in eine `mmap`-Fläche eines Programms schreiben** — oder
+jedenfalls nicht in die Zeichenfläche von `wlibc` (`0x40080000`, dieselbe Zahl
+wie `sys.BRK_BASE`). `SN_READ` mit einem Feld aus dem *Programmabbild* als Ziel
+liefert einwandfrei; mit der `mmap`-Fläche liefert es nichts, still.
+
+Das Ergebnis war ein PNG, das **jede Formatprüfung besteht** und vollständig
+**schwarz** ist. Wer eine Bildschirmfoto-Schnittstelle benutzt, prüfe deshalb
+niemals nur das Format, sondern immer die **Bildpunkte** —
+`tools/snip/pixel.py` gibt es genau dafür.
+
+`/bin/snip` führt seinen Streifen seither selbst, als `static` im
+Programmabbild, und schiebt ihn mit `WIG_BLIT` ins Fenster. Die Ursache ist
+nicht zu Ende untersucht und betrifft **jedes** Programm, dem der Kern in eine
+`mmap`-Fläche schreiben soll.
+
+---
+
+## 13. Was gemessen wird
 
 `tools/snip/run.sh` (Abschnitt 27 von `./test.sh`), unter `-accel kvm`:
 

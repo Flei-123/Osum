@@ -1,17 +1,27 @@
 # docs/shots/snip
 
-`vollbild-800x600-schwarz.png` ist das erste Bildschirmfoto, das Osum sich
-selbst gemacht hat: ein gueltiges PNG von 800x600 in 11 400 Oktetten, aus
-`/bin/snip` heraus geschrieben, von einem strengen Leser angenommen
-(Signatur, jede Chunk-CRC, zlib-Kopf, ADLER-32, nichts hinter IEND).
+`vollbild-800x600.png` ist das erste Bildschirmfoto, das Osum sich selbst
+gemacht hat: der Schreibtisch, aufgenommen von `/bin/snip` aus Ring 3,
+ueber einen Fahrschein, den der Kern ausgestellt hat.
 
-UND ES IST SCHWARZ, und deshalb heisst es so. Der Grund steht in
-STATUS-SNIP.md, Befund 3: der Kern kann in die `mmap`-Zeichenflaeche von
-`wlibc` nicht schreiben, also kommen die Bildpunkte des Standbildes dort
-nie an -- waehrend derselbe Aufruf mit einem Feld aus dem Programmabbild
-einwandfrei liefert.
+Gemessen:
 
-Das Bild liegt hier, weil es genau das zeigt, worauf diese Runde ihre
-Messung stuetzt: EINE DATEI, DIE JEDE FORMATPRUEFUNG BESTEHT, KANN DAS
-FALSCHE ZEIGEN. Deshalb steht in dieser Runde nirgends "die Datei
-existiert" als Zusage, und deshalb gibt es `tools/snip/pixel.py`.
+    800x600, Farbart 2, 65 930 Oktette
+    entpackt 1 440 000 Oktette -- Faktor 22
+    Zeilenfilter: none=0 sub=39 up=273 avg=0 paeth=288
+    479 767 von 480 000 Bildpunkten sind nicht schwarz
+    Bildpunkt (0,0) = (2,6,23) -- derselbe Wert wie im `screendump` des Wirtes
+
+DIE FILTERVERTEILUNG IST DIE INTERESSANTESTE ZAHL. Kein einziges `none`:
+die adaptive Wahl je Zeile nimmt wirklich den besten der fuenf, und `up`
+und `paeth` gewinnen bei einem Verlaufshintergrund genau so, wie es die
+Recherche vorhersagt.
+
+ZUR GESCHICHTE DIESER DATEI: die vorige Fassung war ein PNG, das JEDE
+Formatpruefung bestand -- richtige Signatur, richtige Pruefsummen,
+richtiger zlib-Rahmen, 800x600, 11 400 Oktette -- und vollstaendig
+SCHWARZ war. Der Kern konnte in die `mmap`-Zeichenflaeche von `wlibc`
+nicht schreiben, und ein Formatpruefer sieht so etwas nicht. Deshalb
+steht in dieser Runde nirgends "die Datei existiert" als Zusage, und
+deshalb gibt es `tools/snip/pixel.py`. Der Streifen liegt seither im
+Programmabbild.

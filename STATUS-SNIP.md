@@ -13,8 +13,11 @@ Nicht nach `main` — siehe Abschnitt „Was vor einem Merge passieren muss".
 | `wm.selftest` | 30 / 30 (unverändert) |
 | `wig.selftest` | 7 / 7 (unverändert) |
 | `kstate.K11_OFF`, Überschneidungen | **0** (vorher **6** — siehe unten) |
-| PNG aus Osum, 800×600 | **11 400 Oktette**, von einem strengen Leser angenommen: Signatur, jede Chunk-CRC, zlib-Kopf, ADLER-32, nichts hinter IEND |
-| Rohdaten desselben Bildes | 1 440 000 Oktette → Faktor **126** |
+| PNG aus Osum, 800×600 | **65 930 Oktette**, von einem strengen Leser angenommen: Signatur, jede Chunk-CRC, zlib-Kopf, ADLER-32, nichts hinter IEND |
+| Rohdaten desselben Bildes | 1 440 000 Oktette → Faktor **22** |
+| Zeilenfilter, adaptiv gewählt | none=0 **sub=39 up=273 paeth=288** — kein einziges `none` |
+| nicht-schwarze Bildpunkte | **479 767 von 480 000** |
+| Bildpunkt (0,0) im PNG | **(2, 6, 23)** — derselbe Wert wie im `screendump` des Wirtes |
 
 **Der Fahrschein trägt.** Der Kern stellt ihn aus (`snap: ticket 1 pid=5`),
 das Standbild wird genommen (`snap: take 1 800x600`), die Anwendung sieht ihn
@@ -113,12 +116,9 @@ dieser Phase die Taskleiste). Der Befund gehört dem Baum und nicht dieser Runde
   steht auf der Kernbefehlszeile, gibt Ring 3 nichts und meldet sich laut im
   Protokoll — dieselbe Bauart wie `pwrhot` in Runde K18.
 
-### 3. Der Kern kann nicht in die `mmap`-Zeichenfläche schreiben (OFFEN, blockiert eine Zusage)
+### 3. Der Kern kann nicht in die `mmap`-Zeichenfläche schreiben (gefunden UND umgangen)
 
-**Das ist der Punkt, an dem diese Runde nicht fertig ist, und er steht hier
-vorn statt versteckt.**
-
-Gemessen, drei Zeilen aus demselben Lauf:
+Gemessen, zwei Zeilen aus demselben Lauf:
 
 ```
 snip: probe 32 527904 527904 527904 527904   buf=1074462720
@@ -130,37 +130,61 @@ snip: band  0 0 0 0 0 0
   `/bin/desktop` beim Start für diesen Punkt gemeldet hat
   (`desktop: punkt x=400 y=300 c=527904`).
 * Derselbe Aufruf mit der **`mmap`-Zeichenfläche von `wlibc`**
-  (`0x40080000`) als Ziel liefert nichts. Auch ein Umweg — Zeile in den
-  eigenen Puffer holen und mit Wortkopien hinüberschieben — kommt dort nicht
-  an: das Zurücklesen gibt 0.
+  (`0x40080000`) als Ziel liefert nichts — auch nicht über den Umweg
+  „in den eigenen Puffer holen und mit Wortkopien hinüberschieben".
+  Auch ein Anfassen aller 64 Seiten vorher änderte nichts.
 
-**Folge:** das erzeugte PNG ist formal tadellos (richtige Signatur, richtige
-Pruefsummen, richtiger zlib-Rahmen, 800×600, 11 400 Oktette) und
-**vollständig schwarz**. Genau deshalb steht in dieser Runde nirgends „die
-Datei existiert" als Zusage: ein Formatprüfer sieht so etwas nicht, erst der
-Bildpunktvergleich sieht es (`479 945 von 480 000 Bildpunkten verschieden`).
+**Was das anrichtete, und warum es die wichtigste Lehre dieser Runde ist:**
+das erzeugte PNG war formal **tadellos** — richtige Signatur, richtige
+Prüfsummen, richtiger zlib-Rahmen, 800×600, 11 400 Oktette — und
+**vollständig schwarz**. Ein Formatprüfer sieht so etwas nicht. Erst der
+Bildpunktvergleich sieht es: *479 945 von 480 000 Bildpunkten verschieden*.
 
-Nicht zu Ende untersucht ist, **warum**: ob `mmap` hier weniger abbildet als
-es zusagt, ob die Seiten erst beim Zugriff entstehen und `proc.translate` sie
-deshalb nicht findet (ein Anfassen aller 64 Seiten hat nichts geändert), oder
-ob die Rückgabe `0x40080000` — dieselbe Zahl wie `sys.BRK_BASE` — auf eine
-Überschneidung von Halde und Abbildung deutet. **Das ist der nächste Schritt.**
+Genau deshalb steht in dieser Runde nirgends „die Datei existiert" als
+Zusage, und genau deshalb gibt es `tools/snip/pixel.py`.
 
-**Der Weg heraus, ohne den Entwurf aufzugeben:** einen eigenen Streifen als
-`static` im Programmabbild führen (81 × 800 × 4 = 259 200 Oktette, passt in die
-1 MiB) und ihn mit `WIG_BLIT` ins Fenster schieben — derselbe Aufruf, aber mit
-einer Quelle, die nachweislich erreichbar ist. Damit bleibt die wichtigste
-Eigenschaft erhalten: **Vorschau und Datei entstehen in derselben Funktion**,
-und die Verpixelung kann nicht im Bild und nicht in der Datei landen.
+**Umgangen:** die Anwendung führt ihren Streifen jetzt **selbst**, als
+`static` im Programmabbild (24 Zeilen × 800 × 4 = 76 800 Oktette) — dort,
+wo `SN_READ` nachweislich ankommt — und schiebt ihn mit `WIG_BLIT` ins
+Fenster, demselben Aufruf, den `wlibc.push` benutzt, nur mit einer
+erreichbaren Quelle. Ergebnis derselbe Lauf, ein Bild später:
+
+```
+800x600, Farbart 2, 65 930 Oktette
+filter  none=0 sub=39 up=273 avg=0 paeth=288
+479 767 von 480 000 Bildpunkten nicht schwarz
+Bildpunkt (0,0) = (2,6,23) -- wie im screendump des Wirtes
+```
+
+Die wichtigste Eigenschaft bleibt erhalten: **Vorschau und Datei entstehen
+in derselben Funktion** (`band_malen`), die Verpixelung kann also nicht im
+Bild und nicht in der Datei landen.
+
+**Offen bleibt die Ursache.** Ob `mmap` hier weniger abbildet als es
+zusagt, ob die Rückgabe `0x40080000` — dieselbe Zahl wie `sys.BRK_BASE` —
+auf eine Überschneidung von Halde und Abbildung deutet, oder ob
+`proc.translate` diese Seiten nicht auflöst: nicht zu Ende untersucht. Es
+betrifft **jedes** Programm, dem der Kern in eine `mmap`-Fläche schreiben
+soll, und gehört auf die Liste.
+
+**Preis der Umgehung, ehrlich:** die Beschriftung der Knöpfe und der
+Text der Textmarke fehlen. `wlibc.text_at` rastert in die `mmap`-Fläche,
+und eine eigene Glyphenrasterung über `WIG_GLYPH` in den eigenen Streifen
+ist der nächste Schritt (~60 Zeilen mit kleinem Zwischenspeicher). Die
+Knöpfe sind da, sie treffen (`snip: knopf 1`, `snip: knopf 14`), sie sind
+nur noch nicht beschriftet.
 
 ---
 
 ## Was noch nicht gemessen ist
 
-Diese Zusagen sind gebaut, aber wegen Befund 3 noch **nicht** belegt, und sie
-werden hier nicht als grün gezählt:
+Der Weg ist jetzt frei — die Zusagen sind gebaut, der Läufer steht, aber ein
+vollständiger grüner Durchlauf von `tools/snip/run.sh` steht noch aus (der
+Bauserver trägt gerade fünf fremde Abnahmen; ein Durchlauf dauert dort über
+zwanzig Minuten). Nicht als grün gezählt sind deshalb:
 
-* Bildpunktgenauigkeit des Vollbildes gegen den `screendump`
+* Bildpunktgenauigkeit des Vollbildes gegen den `screendump` (ein Punkt ist
+  von Hand geprüft: (0,0) = (2,6,23) in beiden)
 * Ausschnitt-Koordinaten auf den Punkt
 * Fenster-Modus trifft das richtige Fenster
 * Verpixeln macht den Bereich nachweislich unlesbar (Entropie/Kantenmaß)
