@@ -138,7 +138,7 @@ const D_CT: u64 = 15 // der Kasten
 const D_ICONS: u64 = 16
 // RUNDE A11Y: VIER FELDER MEHR, UND JEDES LOEST EINEN EIGENEN FEHLER.
 //
-//   D_MINW/D_MINH  die NATUERLICHE Mindestgroesse -- so breit und hoch,
+//   D_MIN          die NATUERLICHE Mindestgroesse -- so breit und hoch,
 //                  wie der eigene Text in der AKTUELLEN Schriftgroesse
 //                  wirklich ist. Ohne sie ist Skalieren ein Gluecksspiel:
 //                  die Schrift waechst um 50 Prozent, der Kasten um die
@@ -150,16 +150,29 @@ const D_ICONS: u64 = 16
 //                  wo der sichtbare Text NICHT der Name ist -- also beim
 //                  Passwortfeld, dessen sichtbarer "Text" sein Inhalt
 //                  ist und niemanden etwas angeht.
-//   D_AXF          die Merkmale fuer den Baum, heute genau eines:
-//                  AXF_SECRET.
-const D_MINW: u64 = 17
-const D_MINH: u64 = 18
-const D_AXN: u64 = 19
-const D_AXF: u64 = 20
-const D_FIELDS: u64 = 21
+//   F_SECRET       (eine Flagge in D_FLAGS, kein eigenes Wort): der
+//                  Inhalt dieses Feldes geht nicht in den Baum.
+//
+// ZWEI WOERTER UND NICHT VIER, und der Grund ist gemessen: jedes
+// grafische Programm dieses Systems bindet diese Bibliothek EIN, also
+// kostet jedes Wort mehr in `wd` 96 * 8 Oktette in JEDER der dreizehn
+// ausfuehrbaren Dateien auf dem Abbild. Die erste Fassung nahm vier
+// Woerter und liess das Abbild der Runde DESKTOP ueberlaufen
+// ("mkfs: the disk is full"). Breite und Hoehe passen in ein Wort
+// (je 32 Bit), und "geheim" ist EIN Bit und gehoert zu den Flaggen.
+const D_MIN: u64 = 17 // Mindestbreite | Mindesthoehe << 32
+const D_AXN: u64 = 18 // ausdruecklicher zugaenglicher Name
+const D_FIELDS: u64 = 19
 
-// Ein Textfeld, dessen Inhalt niemanden etwas angeht.
-const AXF_SECRET: u64 = 1
+// Ein Textfeld, dessen Inhalt niemanden etwas angeht. Eine Flagge in
+// `D_FLAGS` und kein eigenes Wort.
+const F_SECRET: u64 = 32
+
+// Wie viele Saetze der Puffer traegt.
+const AXBUF: u64 = 16
+
+// Wie viele Fokuswechsel die Spur behaelt.
+const VISITS: u64 = 32
 
 const F_FOCUSABLE: u64 = 1
 const F_PRESSED: u64 = 2
@@ -222,7 +235,7 @@ const KEY_BACKTAB: u64 = 0x10A
 
 // ------------------------------------------------------- der Zustand
 
-static mut wd: [u64; 2016] = [0 as u64; 2016] // MAXWD * D_FIELDS
+static mut wd: [u64; 1824] = [0 as u64; 1824] // MAXWD * D_FIELDS
 static mut wn: [u64; 56] = [0 as u64; 56] // MAXWN * N_FIELDS
 static mut ct: [u64; 312] = [0 as u64; 312] // MAXCT * C_FIELDS
 static mut nwd: u64 = 0
@@ -247,11 +260,15 @@ static mut s_axdirty: u64 = 1
 // vierzehn Tabulatoren tauchten elf Stellen auf, und drei fehlten --
 // nicht weil sie unerreichbar waren, sondern weil niemand hinsah. Eine
 // Spur, die bei JEDEM Fokuswechsel schreibt, hat dieses Loch nicht.
-static mut s_visit: [u64; 64] = [0 as u64; 64]
+static mut s_visit: [u64; 32] = [0 as u64; 32]
 static mut s_nvisit: u64 = 0
 static mut s_axnodes: u64 = 0
 static mut s_axpushes: u64 = 0
-static mut axbuf: [u8; 4096] = [0 as u8; 4096]
+// SECHZEHN SAETZE UND NICHT VIERUNDSECHZIG. Derselbe Grund wie bei
+// `wd`: 4096 Oktette in jeder ausfuehrbaren Datei sind teuer, und ein
+// Aufruf mehr je sechzehn Bedienelemente ist billig -- der Baum wird
+// nur neu geschickt, wenn sich etwas geaendert hat.
+static mut axbuf: [u8; 1024] = [0 as u8; 1024]
 static mut s_nohit: u64 = 0
 static mut s_alive: u64 = 1
 static mut s_fired: u64 = 0
@@ -815,7 +832,7 @@ fn place(i: u64) {
     // der haeufigste Fehler beim Skalieren, und er ist der Grund, warum
     // diese Zeile hier steht und nicht in einer Fussnote.
     //
-    // `D_MINW`/`D_MINH` sind AUS DER SCHRIFT gerechnet, in der jetzt
+    // `D_MIN` ist AUS DER SCHRIFT gerechnet, in der jetzt
     // gemalt wird. Bei 100 Prozent sind sie kleiner als jede
     // Wunschgroesse, die ein bestehendes Programm angibt -- kein
     // bestehender Testlauf sieht einen Unterschied.
@@ -824,11 +841,11 @@ fn place(i: u64) {
     if ph == 0 {
         ph = wlibc.sc(24)
     }
-    if pw != 0 && pw < g(i, D_MINW) {
-        pw = g(i, D_MINW)
+    if pw != 0 && pw < min_w(i) {
+        pw = min_w(i)
     }
-    if ph < g(i, D_MINH) {
-        ph = g(i, D_MINH)
+    if ph < min_h(i) {
+        ph = min_h(i)
     }
     if kind == 1 {
         s(i, D_X, cg(c, C_CX))
@@ -837,8 +854,8 @@ fn place(i: u64) {
         if pw != 0 && pw < innen {
             bw = pw
         }
-        if bw < g(i, D_MINW) {
-            bw = g(i, D_MINW)
+        if bw < min_w(i) {
+            bw = min_w(i)
         }
         s(i, D_W, bw)
         s(i, D_H, ph)
@@ -850,8 +867,8 @@ fn place(i: u64) {
         if bw2 == 0 || bw2 > rest {
             bw2 = rest
         }
-        if bw2 < g(i, D_MINW) {
-            bw2 = g(i, D_MINW)
+        if bw2 < min_w(i) {
+            bw2 = min_w(i)
         }
         s(i, D_X, cg(c, C_CX))
         s(i, D_Y, cg(c, C_CY))
@@ -872,8 +889,8 @@ fn place(i: u64) {
                 zw = zw - cg(c, C_GAP)
             }
         }
-        if zw < g(i, D_MINW) {
-            zw = g(i, D_MINW)
+        if zw < min_w(i) {
+            zw = min_w(i)
         }
         s(i, D_X, cg(c, C_CX))
         s(i, D_Y, cg(c, C_CY))
@@ -955,7 +972,21 @@ fn add(kind: u64, txt: u64, pw: u64, ph: u64, fokus: bool) -> u64 {
     s(i, D_FLAGS, fl)
     calc_min(i)
     place(i)
-    if s_focus == 0 && fokus {
+    // RUNDE A11Y: DIE MENUELEISTE IST FOKUSSIERBAR, ABER SIE BEKOMMT DEN
+    // FOKUS NICHT ALS ERSTE.
+    //
+    // Beides gehoert zusammen und beides ist Absicht. Erreichbar muss
+    // sie sein -- ohne das kommt niemand ohne Maus an ein Menue. Aber
+    // ein Fenster, dessen Eingabemarke beim Aufgehen in der Menueleiste
+    // steht, ist falsch: getippt wird in das erste FELD, und jede
+    // Oberflaeche der letzten dreissig Jahre haelt es so.
+    //
+    // GEMESSEN, nicht ueberlegt: die erste Fassung liess sie den Fokus
+    // nehmen, und `tools/k15/run.sh` fiel darueber -- "der Fokusring
+    // liegt bildpunktgenau um die Reiter: 964 von 964 Kantenpunkten
+    // falsch". Er lag um die Menueleiste. Ein bestehender Test, der
+    // eine Verhaltensaenderung findet, hat seine Arbeit getan.
+    if s_focus == 0 && fokus && kind != K_MENUBAR {
         s_focus = i + 1
     }
     return i
@@ -1007,7 +1038,7 @@ fn entry(buf: u64, max: u64) -> u64 {
 // weil eine Sperre, an der alles haengt, keine ist.
 fn entry_secret(buf: u64, max: u64) -> u64 {
     let i: u64 = entry(buf, max)
-    s(i, D_AXF, g(i, D_AXF) | AXF_SECRET)
+    s(i, D_FLAGS, g(i, D_FLAGS) | F_SECRET)
     return i
 }
 
@@ -1016,9 +1047,9 @@ fn set_secret(i: u64, on: bool) {
         return
     }
     if on {
-        s(i, D_AXF, g(i, D_AXF) | AXF_SECRET)
+        s(i, D_FLAGS, g(i, D_FLAGS) | F_SECRET)
     } else {
-        s(i, D_AXF, g(i, D_AXF) & ~AXF_SECRET)
+        s(i, D_FLAGS, g(i, D_FLAGS) & ~F_SECRET)
     }
     s_axdirty = 1
 }
@@ -1184,16 +1215,15 @@ fn calc_min(i: u64) {
         mw = wlibc.sc(14)
         mh = 0
     }
-    s(i, D_MINW, mw)
-    s(i, D_MINH, mh)
+    s(i, D_MIN, (mw & 0xFFFFFFFF) | ((mh & 0xFFFFFFFF) << 32))
 }
 
 fn min_w(i: u64) -> u64 {
-    return g(i, D_MINW)
+    return g(i, D_MIN) & 0xFFFFFFFF
 }
 
 fn min_h(i: u64) -> u64 {
-    return g(i, D_MINH)
+    return (g(i, D_MIN) >> 32) & 0xFFFFFFFF
 }
 
 // Wie viele Reiter es gibt -- der Testlaeufer zaehlt damit nach, dass
@@ -1316,7 +1346,7 @@ fn set_focus(i: u64) {
     }
     s_focus = i + 1
     s_axdirty = 1
-    if s_nvisit < 64 {
+    if s_nvisit < VISITS {
         s_visit[(s_nvisit) as usize] = i
         s_nvisit = s_nvisit + 1
     }
@@ -1329,7 +1359,7 @@ fn visits() -> u64 {
 }
 
 fn visit_at(k: u64) -> u64 {
-    if k >= s_nvisit || k >= 64 {
+    if k >= s_nvisit || k >= VISITS {
         return MAXWD
     }
     return s_visit[(k) as usize]
@@ -3450,7 +3480,7 @@ fn ax_zustand(i: u64) -> u64 {
     if (k == K_LIST || k == K_TABLE || k == K_TABS) && g(i, D_VAL) != 0 {
         z = z | wlibc.AS_SELECTED
     }
-    if (g(i, D_AXF) & AXF_SECRET) != 0 {
+    if (g(i, D_FLAGS) & F_SECRET) != 0 {
         z = z | wlibc.AS_PROTECTED
     }
     return z
@@ -3476,7 +3506,7 @@ fn ax_namensquelle(i: u64) -> u64 {
     if g(i, D_AXN) != 0 {
         return g(i, D_AXN)
     }
-    if (g(i, D_AXF) & AXF_SECRET) != 0 {
+    if (g(i, D_FLAGS) & F_SECRET) != 0 {
         return 0
     }
     let k: u64 = g(i, D_KIND)
@@ -3559,7 +3589,7 @@ fn ax_flush() -> u64 {
             let vater: u64 = ganz
             n = n + 1
             ganz = ganz + 1
-            if n == 64 {
+            if n == AXBUF {
                 let _s: u64 = wlibc.ax_send((&axbuf[0 as usize]) as u64, n)
                 n = 0
             }
@@ -3573,7 +3603,7 @@ fn ax_flush() -> u64 {
                     // geschuetztes Feld bekommt die Rolle
                     // "Passwortfeld" und den Wert NULL. Sein Inhalt
                     // verlaesst diesen Prozess nicht.
-                    if (g(i, D_AXF) & AXF_SECRET) != 0 {
+                    if (g(i, D_FLAGS) & F_SECRET) != 0 {
                         let off: u64 = n * wlibc.AX_NODE
                         aw(off, wlibc.AR_PASSWORD | (ax_zustand(i) << 8)
                             | (w << 16) | (vater << 24))
@@ -3581,7 +3611,7 @@ fn ax_flush() -> u64 {
                     }
                     n = n + 1
                     ganz = ganz + 1
-                    if n == 64 {
+                    if n == AXBUF {
                         let _s2: u64 = wlibc.ax_send(
                             (&axbuf[0 as usize]) as u64, n)
                         n = 0

@@ -440,9 +440,10 @@ mh=$(grep -aoE 'ax: mag .* h=[0-9]+' "$L" | tail -1 | grep -oE ' h=[0-9]+' | gre
 msx=$(grep -aoE 'ax: mag .* sx=[0-9]+' "$L" | tail -1 | grep -oE 'sx=[0-9]+' | grep -oE '[0-9]+')
 msy=$(grep -aoE 'ax: mag .* sy=[0-9]+' "$L" | tail -1 | grep -oE 'sy=[0-9]+' | grep -oE '[0-9]+')
 mf=$(grep -aoE 'ax: mag .* f=[0-9]+' "$L" | tail -1 | grep -oE ' f=[0-9]+' | grep -oE '[0-9]+')
+mr=$(grep -aoE 'ax: mag .* rand=[0-9]+' "$L" | tail -1 | grep -oE 'rand=[0-9]+' | grep -oE '[0-9]+')
 num "die Lupe hat wirklich gemalt (Bilder)" "$(feld "$L" 'frames=[0-9]+')" ge 1
 gleich "die Vergroesserung ist zweifach" "2" "$mf"
-aus=$(python3 tools/a11y/lupe.py "$TMPD/lupe.ppm" "$mx" "$my" "$mw" "$mh" "$msx" "$msy" "$mf" 2>&1)
+aus=$(python3 tools/a11y/lupe.py "$TMPD/lupe.ppm" "$mx" "$my" "$mw" "$mh" "$msx" "$msy" "$mf" "$mr" 2>&1)
 if [ $? -eq 0 ]; then ok "die Tafel zeigt BILDPUNKTGENAU den Ausschnitt um den Zeiger: $aus"
 else bad "die Lupe zeigt etwas anderes als den Ausschnitt"; echo "$aus" | sed 's/^/        /'; fi
 gleich "GEGENPROBE: ohne a11ymag wird die Tafel nicht gemalt" "0" "$(feld "$B" 'frames=[0-9]+')"

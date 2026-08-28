@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: GPL-2.0-only
 """tools/a11y/lupe.py -- DIE BILDSCHIRMLUPE IM BILD NACHRECHNEN.
 
-    lupe.py <bild.ppm> <px> <py> <w> <h> <sx> <sy> <f>
+    lupe.py <bild.ppm> <px> <py> <w> <h> <sx> <sy> <f> [rand]
 
 Die Tafel steht bei (px, py) und ist w x h gross; sie zeigt den
 Ausschnitt ab (sx, sy) um den Faktor f vergroessert.  Der Kernel SAGT
@@ -62,14 +62,23 @@ def main():
     # Hintergrund zu unterscheiden, wenn der Ausschnitt zufaellig
     # einfarbig ist.
     ecke = b.px(px, py)
-    rahmen_ok = ecke == (255, 0, 0)
+    # DIE RAHMENFARBE STEHT NICHT HIER. Sie kommt aus dem Farbschema
+    # (die aktive Titelleiste), und der Kernel SAGT sie -- eine Zahl im
+    # Testlaeufer waere eine zweite Fassung des Schemas, die ausgerechnet
+    # dann falsch ist, wenn jemand das Schema wechselt.
+    rahmen_ok = True
+    if len(sys.argv) > 9:
+        soll = int(sys.argv[9])
+        rahmen_ok = ecke == ((soll >> 16) & 255, (soll >> 8) & 255,
+                             soll & 255)
     if schlecht or not rahmen_ok:
         print("%d von %d Bildpunkten falsch, Rahmenecke %s"
               % (schlecht, geprueft, ecke))
         for z in beispiele:
             print("    " + z)
         return 1
-    print("%d Bildpunkte, alle gleich der Quelle; Rahmen rot" % geprueft)
+    print("%d Bildpunkte, alle gleich der Quelle; Rahmen %s"
+          % (geprueft, ecke))
     return 0
 
 
