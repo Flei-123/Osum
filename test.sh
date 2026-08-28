@@ -68,6 +68,14 @@
 #      Dateien paarweise gegeneinander (`tools/kernel/memmap.py`).
 #      Gegenproben: ohne das Wort `gfx` bricht jede Messung zusammen, und
 #      mit der alten Adresse 0x2F000 MUSS der Kartenpruefer anschlagen.
+#  29. Auf zwei Dinge gleichzeitig warten (tools/poll/run.sh, Runde
+#      POLL): `poll` mit POLLIN/POLLOUT/POLLERR/POLLHUP/POLLNVAL an
+#      Rohren, Steckdosen, Terminals und Dateien; der Zeitablauf gegen
+#      CLOCK_MONOTONIC; und der Beweis, dass ein wartender Prozess
+#      nicht rechnet -- neun Systemaufrufe mit `poll` gegen 123 als
+#      Warteschleife ueber dieselben 1,2 Sekunden. Dazu `/bin/jarvisd`:
+#      eine Netzverbindung und das Rohr eines Kindprozesses in EINEM
+#      `poll`, beide bedient, die Antwort kommt beim Wirt an.
 #  13. Was jedes Unix-Programm voraussetzt (tools/unix/run.sh, Runde
 #      K9): Signale (kill, sigaction, sigprocmask, sigreturn, die
 #      Standardverhalten, SIGCHLD, und SIGSEGV/SIGFPE/SIGILL aus den
@@ -714,6 +722,16 @@ lauf "25. Diebstahl: Geraeteidentitaet, Sicherung, Schluesselverwaltung (tools/t
      tools/tresor/run.sh tresor '^TRESOR: |^  OK    (SMBIOS |SHA-256 |PBKDF2|DER ZWEITE LAUF|der wiederhergestellte Baum|ACHT OKTETTE|im beschaedigten|GEGENPROBE|eine (NEUE PLATTE|ANDERE Maschine)|der Fingerabdruck ist|die Seriennummer des Laufwerks|crypto erase|open mit dem richtigen|1000 Oktette|bei 0xF1031|und seine Pruefsumme|PREIS DER AUSNAHME|MIT Liste sichert|DAS WIEDERHERGESTELLTE PAKET|das verwaiste Paket ist OKTETT|ZWEITER LAUF SCHREIBT NULL|GESCHRIEBEN nur|FAKTOR der kleinen|kein halbes Backup)'
 lauf "25. Akkuanalyse je Programm: die gemessene Gesamtleistung, anteilig zugeordnet (tools/powermon/run.sh, Runde POWERMON)" \
      tools/powermon/run.sh powermon '^POWERMON: |^        |^  OK    (another table|GEGENPROBE|the two displays|the same energy|the sum of the program|and the kernel.s own rows|the shares add up|the ageing|runtime left|one sample costs|counted and uncounted|at 10 samples|the file stays|AND THE SENTENCE|ON THIS HOST|wigapp= really|the window server counts|distinct colours)'
+# ABSCHNITT 29 -- RUNDE POLL. Der Aufruf, ohne den ein Prozess dieses
+# Systems auf GENAU EINE Sache warten konnte. Gemessen wird `poll` an
+# Rohren, Steckdosen, Terminals und Dateien, sein Zeitablauf gegen die
+# monotone Uhr, seine Fehler -- und die eine Zusage, um die es geht:
+# wer wartet, rechnet nicht (Systemaufrufe mit `poll` gegen dieselbe
+# Wartezeit als Warteschleife). Zum Schluss `/bin/jarvisd` am Draht:
+# eine Verbindung und das Rohr eines Kindes in EINEM `poll`.
+lauf "29. auf zwei Dinge gleichzeitig warten: poll (tools/poll/run.sh, Runde POLL)" \
+     tools/poll/run.sh poll '^POLL: |^  OK    (poll meldet GENAU|und es ist POLL|Verhaeltnis Warteschleife|Systemaufrufe im ganzen|dieselben 1,2 s|poll\(|die Antwort des Helfers|Durchlaeufe der einen|beide Quellen)|^        (poll: |um den es geht|Laufzeit dieses)'
+
 lauf "28. derselbe Kernel auf der ECHTEN CPU: /dev/kvm statt Emulation (tools/kvm/run.sh, Runde KVMFIX)" tools/kvm/run.sh kvm '^KVM: |^  OK    (der Kernel ist gebaut|1\.|3\.|4\.)|^  --    (CPU|3\.|4\.)|^KVM: uebersprungen'
 
 echo
