@@ -161,10 +161,18 @@ long_mode:
     /* --------------------------------------------------------- GDT ---
      *
      * The layout is the one `syscall`/`sysret` prescribes: STAR[63:48]
-     * points at 0x18, `sysretq` takes SS from 0x18+8 = 0x20 and CS from
-     * 0x18+16 = 0x28. That is why the unused 32-bit user code segment
-     * sits at 0x18 -- not out of nostalgia but because the processor
-     * counts from there.
+     * points at the unused 32-bit user code segment, `sysretq` takes SS
+     * from base+8 and CS from base+16. That is why that segment sits at
+     * 0x18 -- not out of nostalgia but because the processor counts from
+     * there.
+     *
+     * RUNDE KVMFIX: der Wert in STAR[63:48] ist 0x1B und nicht 0x18 --
+     * derselbe Eintrag, aber MIT RPL 3. AMDs `sysret` uebernimmt die
+     * zwei untersten Bits fuer SS unveraendert, Intels nicht. Also
+     * werden SS = 0x23 und CS = 0x2B daraus, und das sind genau die
+     * Selektoren, die `kernel/signal.fi` seit Runde K9 in seine
+     * iretq-Rahmen schreibt (USER_CS/USER_SS). Naeheres in
+     * `kernel/arch/x86_64/user.fi::setup`.
      *
      * The table lies in .data and not in .rodata: the kernel writes the
      * TSS descriptor (0x30/0x38) at run time, out of Firn.

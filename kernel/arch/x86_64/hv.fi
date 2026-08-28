@@ -69,6 +69,7 @@
 import serial
 import kstate
 import mem
+import msr
 import vmcb
 import cap
 import sched
@@ -322,6 +323,29 @@ fn rdmsr(index: u64) -> u64 {
     var hi: u64 = 0
     asm("rdmsr", in("rcx") index, out("rax") & lo, out("rdx") & hi)
     return (hi << 32) | (lo & 0xFFFFFFFF)
+}
+
+// RUNDE KVMFIX: DIE SVM-REGISTER GIBT ES NUR AUF AMD.
+//
+// MSR_VM_CR (0xC0010114) und MSR_VM_HSAVE (0xC0010117) sind
+// AMD-eigen. Auf einer Intel-Maschine sind beide ein #GP -- genau
+// dasselbe, was IA32_TEMPERATURE_TARGET auf einem AMD ist, nur
+// andersherum. Diese Runde ist dieser Kernel unter KVM auf einem AMD
+// gestorben; auf einem Intel-PC waere er hier gestorben.
+//
+// Der Weg ueber CPUID (`cpu_has_svm`, ECX Bit 2 von 0x80000001) steht
+// weiter davor und ist die richtige erste Frage. Aber er ist nur eine
+// Frage, und die Antwort einer virtuellen Maschine darauf ist nicht
+// bindend fuer das, was ihre MSR-Nachbildung dann wirklich annimmt.
+// Also wird zusaetzlich gefangen: ein Register, das nicht antwortet,
+// liest sich als Null und laesst `enable` mit einer Stufennummer
+// aufgeben -- statt die Maschine anzuhalten.
+fn rd_msr_safe(state: u64, index: u64) -> u64 {
+    return msr.rd0(state, index)
+}
+
+fn wr_msr_safe(state: u64, index: u64, v: u64) -> bool {
+    return msr.wr(state, index, v)
 }
 
 // ------------------------------------------------------------- die Woerter
@@ -598,7 +622,7 @@ fn enable(state: u64) -> u64 {
     set(state, S_REV, svm_rev())
     set(state, S_NASID, svm_nasid())
     set(state, S_FEAT, svm_feat())
-    if (rdmsr(MSR_VM_CR) & VM_CR_SVMDIS) != 0 {
+    if (rd_msr_safe(state, MSR_VM_CR) & VM_CR_SVMDIS) != 0 {
         return 3
     }
     if svm_nasid() < 2 {
@@ -628,12 +652,12 @@ fn enable(state: u64) -> u64 {
     set(state, S_MSRPM, msrpm)
     set(state, S_ASID, 1)
 
-    wrmsr(MSR_EFER, rdmsr(MSR_EFER) | vmcb.EFER_SVME)
-    if (rdmsr(MSR_EFER) & vmcb.EFER_SVME) == 0 {
+    wr_msr_safe(state, MSR_EFER, rd_msr_safe(state, MSR_EFER) | vmcb.EFER_SVME)
+    if (rd_msr_safe(state, MSR_EFER) & vmcb.EFER_SVME) == 0 {
         return 6
     }
-    wrmsr(MSR_VM_HSAVE, hsave)
-    if rdmsr(MSR_VM_HSAVE) != hsave {
+    wr_msr_safe(state, MSR_VM_HSAVE, hsave)
+    if rd_msr_safe(state, MSR_VM_HSAVE) != hsave {
         return 7
     }
     set(state, S_READY, 1)
