@@ -164,7 +164,18 @@ def schreiben(ziel, pcm, bilder, fps, breite, hoehe, dauer_us):
 
     erster = HDR + TRK * len(spuren)
     if dauer_us == 0 and bloecke:
-        dauer_us = max(b[0] for b in bloecke)
+        # DAS ENDE DES LETZTEN BLOCKS, nicht sein Anfang. Ein Behaelter,
+        # dessen Dauer der Zeitstempel des letzten Blocks ist, ist um
+        # genau einen Block zu kurz -- und ein Abspieler, der danach
+        # seine Fortschrittsleiste zeichnet, springt am Ende.
+        ende = 0
+        for pts, spur, flags, nutz in bloecke:
+            if spur == ton_nr:
+                ende = max(ende, pts + len(nutz) // (CHANS * BITS // 8)
+                           * 1_000_000 // RATE)
+            else:
+                ende = max(ende, pts + int(1_000_000 / fps))
+        dauer_us = ende
     kopf = struct.pack("<4sHHQIIII", MAGIC, HDR, len(spuren), dauer_us,
                        erster, len(bloecke), 0, 0)
     assert len(kopf) == HDR, len(kopf)

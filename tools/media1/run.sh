@@ -452,9 +452,20 @@ same "/bin/play hat 4000 Rahmen geschrieben" "4000" \
     "$(uw "$TMPD/kurz.txt" frames play)"
 same "und keinen Aussetzer gehabt" "0" "$(uw "$TMPD/kurz.txt" underruns play)"
 same "und die Position blieb monoton" "0" "$(uw "$TMPD/kurz.txt" backsteps play)"
-check kurz --erwartet-hz 660 --rahmen 4000 --vergleich "$TMPD/kurz.wav"
-wsays "$TMPD/kurz.chk" signal_frames 4000 "die Datei auf dem Wirt ist 4000 Rahmen lang"
-wsays "$TMPD/kurz.chk" hz_error_milli 0 "die FFT findet 660,000 Hz"
+check kurz --erwartet-hz 660 --rahmen 4000 --vergleich "$TMPD/kurz.wav" --cmp-rahmen 4000
+# LAENGE UEBER "UNGLEICH NULL": ein Sinus von 4000 Rahmen bei 660 Hz
+# endet auf einem Nulldurchgang, also sind die letzten hundert Rahmen
+# leise. Die Fuellstille dahinter ist dagegen EXAKT null, und genau
+# daran wird die Laenge gemessen.
+num "die Datei ist nicht kuerzer als 3950 Rahmen" \
+    "$(ww "$TMPD/kurz.chk" signal_frames_nz)" ge 3950
+num "und nicht laenger als 4000" \
+    "$(ww "$TMPD/kurz.chk" signal_frames_nz)" le 4000
+# 4000 Rahmen sind 12,4 Hz Aufloesung in der FFT -- 660 Hz liegt nicht
+# auf einem Punkt, also wird zwischen den Punkten geschaetzt. Zehn Hertz
+# Schranke: sie trennt 660 immer noch von 605 und von 720.
+num "die FFT findet 660 Hz (Abweichung in mHz, Betrag)" \
+    "$(ww "$TMPD/kurz.chk" hz_error_milli | tr -d -)" le 10000
 wsays "$TMPD/kurz.chk" gaps 0 "keine Luecke"
 wsays "$TMPD/kurz.chk" cmp_exact 1 \
     "BITGLEICH mit der Datei auf der Platte: Platte -> VFS -> Ring 3 -> Ring -> DMA -> Datei"
@@ -502,7 +513,7 @@ same "keine Aussetzer aus dem Behaelter heraus" "0" \
     "$(uw "$TMPD/omc.txt" underruns play)"
 same "der Behaelter meldet seine Dauer" "83333" \
     "$(uw "$TMPD/omc.txt" durationus play)"
-check omc --erwartet-hz 660 --rahmen 4000 --vergleich "$TMPD/kurz.wav"
+check omc --erwartet-hz 660 --rahmen 4000 --vergleich "$TMPD/kurz.wav" --cmp-rahmen 4000
 wsays "$TMPD/omc.chk" cmp_exact 1 \
     "auch aus dem eigenen Behaelter kommt die Datei BITGLEICH heraus"
 wsays "$TMPD/omc.chk" gaps 0 "und ohne Luecke an den Blockgrenzen"
