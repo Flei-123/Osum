@@ -56,7 +56,13 @@ export {
     may, may_real, may_ids, on_create, apply_exec, umask_of,
     euid, egid, uid_of, gid_of, is_root, may_signal,
     R_READ, R_WRITE, R_EXEC,
-    checks, denied, report
+    checks, denied, report,
+    // ------------------------------------------- RUNDE MULTIUSER
+    // Die Regel auf drei ZAHLEN statt auf einer Inode -- damit sie
+    // auch fuer ein Dateisystem gilt, das keine Inode von OFS hat.
+    may_attr,
+    // Das Betretungsrecht auf JEDEM Glied eines Pfades.
+    walk, walk_stat, mu_report
 }
 
 // Was gefragt wird -- dieselben drei Bits, die in den Rechten stehen.
@@ -109,14 +115,48 @@ fn denied(state: u64) -> u64 {
 // der ECHTEN Kennung und alles andere mit der WIRKSAMEN. Zwei
 // Regelwerke waeren zwei Gelegenheiten, sich zu unterscheiden -- so ist
 // es EIN Regelwerk mit zwei Eingaengen (`may` und `may_real` darunter).
-fn may_ids(state: u64, ino: u64, want: u64, id: u64, gid: u64) -> bool {
-    kstate.add(state, kstate.K13_OFF + kstate.U_CHECKS, 1)
-    if ino == 0 {
+// ============================================ RUNDE MULTIUSER
+//
+// DIE REGEL AUF DREI ZAHLEN. Bis zu dieser Runde stand sie auf einer
+// INODE VON OFS -- `fs.inode_mode`, `fs.inode_uid`, `fs.inode_gid` --,
+// und damit galt sie fuer genau ein Dateisystem. Ein Name auf einem
+// FAT32-Stick, in /proc oder in /dev ging durch `open_vfs`, und dort
+// wurde ueberhaupt nicht gefragt.
+//
+// Hier steht dieselbe Regel auf `mode`, `owner` und `group` als
+// Zahlen. Wo sie herkommen, ist die Sache der Schicht darueber:
+// `may_ids` holt sie aus der OFS-Inode, `sys.open_vfs` aus
+// `vfs.v_attr`. Es bleibt EINE Regel; sie hat nur zwei Eingaenge mehr.
+//
+// UND DIE ZUSATZGRUPPEN. Die zweite Aenderung dieser Runde: `gid` war
+// EINE Zahl, und ein Mensch ist in mehr als einer Gruppe. Gefragt wird
+// jetzt die wirksame Gruppe UND die Liste aus `sched.groups_*`, und
+// zwar in dieser Reihenfolge -- POSIX sagt: Besitzer, dann Gruppe
+// (Haupt- oder Neben-), dann der Rest, und immer nur EINE der drei
+// Dreiergruppen. Ein Treffer in einer NEBENgruppe wird gezaehlt
+// (`MU_GRPHITS`), damit die Zusage "Zusatzgruppen wirken" eine Zahl
+// hat und nicht nur einen Satz.
+//
+// `nogroups` auf der Kommandozeile ist die Gegenprobe: dann zaehlt nur
+// die wirksame Gruppe, und die Datei, die nur ueber eine Nebengruppe
+// zu haben war, bleibt zu.
+fn in_group(state: u64, t: u64, group: u64, gid: u64) -> bool {
+    if gid == group {
+        return true
+    }
+    if kstate.mode_on(state, kstate.M_NOGROUPS) {
         return false
     }
-    let mode: u64 = fs.inode_mode(state, ino)
-    let owner: u64 = fs.inode_uid(state, ino)
-    let group: u64 = fs.inode_gid(state, ino)
+    if sched.groups_has(state, t, group) {
+        kstate.add(state, kstate.MU_OFF + kstate.MU_GRPHITS, 1)
+        return true
+    }
+    return false
+}
+
+fn may_attr(state: u64, t: u64, mode: u64, owner: u64, group: u64,
+    want: u64, id: u64, gid: u64) -> bool {
+    kstate.add(state, kstate.K13_OFF + kstate.U_CHECKS, 1)
     var okay: bool = true
     if id == 0 {
         // Regel 1: root liest und schreibt alles. Ausfuehren nur, wenn
@@ -131,7 +171,7 @@ fn may_ids(state: u64, ino: u64, want: u64, id: u64, gid: u64) -> bool {
         if id == owner {
             have = (mode >> 6) & 7
         } else {
-            if gid == group {
+            if in_group(state, t, group, gid) {
                 have = (mode >> 3) & 7
             }
         }
@@ -142,30 +182,51 @@ fn may_ids(state: u64, ino: u64, want: u64, id: u64, gid: u64) -> bool {
     if okay {
         return true
     }
-    // Ab hier ist die Antwort NEIN -- und sie wird gezaehlt, bevor die
-    // Gegenprobe sie umbiegt. Genau darum ist `noperm` eine Gegenprobe
-    // und keine Abkuerzung: die Zahl der abgelehnten Zugriffe bleibt
-    // dieselbe, nur die Wirkung faellt weg, und der Testlaeufer sieht
-    // beides.
     kstate.add(state, kstate.K13_OFF + kstate.U_DENIED, 1)
-    kstate.set(state, kstate.K13_OFF + kstate.U_LASTDENY, (ino << 8) | want)
     if kstate.mode_on(state, kstate.M_NOPERM) {
         return true
     }
     return false
 }
 
+fn may_ids(state: u64, t: u64, ino: u64, want: u64, id: u64,
+    gid: u64) -> bool {
+    if ino == 0 {
+        kstate.add(state, kstate.K13_OFF + kstate.U_CHECKS, 1)
+        kstate.add(state, kstate.K13_OFF + kstate.U_DENIED, 1)
+        if kstate.mode_on(state, kstate.M_NOPERM) {
+            return true
+        }
+        return false
+    }
+    let mode: u64 = fs.inode_mode(state, ino)
+    let owner: u64 = fs.inode_uid(state, ino)
+    let group: u64 = fs.inode_gid(state, ino)
+    let okay: bool = may_attr(state, t, mode, owner, group, want, id, gid)
+    if okay {
+        return true
+    }
+    // Ab hier ist die Antwort NEIN. Gezaehlt hat `may_attr` schon --
+    // und zwar BEVOR die Gegenprobe sie umbiegt. Genau darum ist
+    // `noperm` eine Gegenprobe und keine Abkuerzung: die Zahl der
+    // abgelehnten Zugriffe bleibt dieselbe, nur die Wirkung faellt weg,
+    // und der Testlaeufer sieht beides. Hier steht nur noch, WELCHE
+    // Inode es war -- die Zahl, die `may_attr` nicht kennen kann.
+    kstate.set(state, kstate.K13_OFF + kstate.U_LASTDENY, (ino << 8) | want)
+    return false
+}
+
 // Mit der WIRKSAMEN Kennung -- das ist der Normalfall und der Weg, den
 // `open`, `mkdir`, `unlink`, `chdir` und `execve` nehmen.
 fn may(state: u64, t: u64, ino: u64, want: u64) -> bool {
-    return may_ids(state, ino, want, euid(state, t), egid(state, t))
+    return may_ids(state, t, ino, want, euid(state, t), egid(state, t))
 }
 
 // Mit der ECHTEN Kennung. Genau ein Aufrufer: `access`. POSIX will es so,
 // damit ein setuid-Programm fragen kann, ob DER MENSCH davor die Datei
 // haette lesen duerfen -- nicht, ob es selbst es darf.
 fn may_real(state: u64, t: u64, ino: u64, want: u64) -> bool {
-    return may_ids(state, ino, want, uid_of(state, t), gid_of(state, t))
+    return may_ids(state, t, ino, want, uid_of(state, t), gid_of(state, t))
 }
 
 // Darf dieser Prozess jenem ein Signal schicken? Die Regel von POSIX:
@@ -186,6 +247,138 @@ fn may_signal(state: u64, from: u64, to: u64) -> bool {
         return true
     }
     return false
+}
+
+// ========================= RUNDE MULTIUSER: DAS BETRETUNGSRECHT
+//
+// DIE LUECKE, DIE K13 BENANNT UND NICHT GESCHLOSSEN HAT. Sie steht seit
+// damals als Kommentar in `sys.do_open`:
+//
+//     "WAS HIER NICHT GEPRUEFT WIRD [...]: das Betretungsrecht auf
+//      JEDEM Glied eines langen Pfades. Geprueft wird das letzte
+//      Verzeichnis und das Ziel. Der Grund ist der Modulgraph --
+//      `fs.path` loest den Pfad auf und kennt keine Aufgabe, und
+//      `fs.fi` darf `perm.fi` nicht einbinden, weil `perm.fi` `fs.fi`
+//      einbindet. Das ist eine echte Luecke und keine Vereinfachung."
+//
+// WAS DIE LUECKE WERT WAR, in einem Satz: ein Verzeichnis `0o700
+// root:root` hat seinen Inhalt nicht geschuetzt. Wer den Namen der
+// Datei darin kannte, hat sie geoeffnet -- gefragt wurde nur nach den
+// Rechten der DATEI, und die konnte 0o644 sein. Auf einem
+// Serverbetriebssystem ist das kein Schoenheitsfehler: /home/jemand mit
+// 0o700 ist die uebliche und oft einzige Art, ein Heimverzeichnis
+// abzuschliessen.
+//
+// DER MODULGRAPH IST NICHT DAS HINDERNIS, das er 1013 Tage lang schien.
+// Die Pruefung muss nicht IN `fs.resolve` stehen. Sie steht hier -- in
+// dem Modul, das `fs` ohnehin einbindet und das die Aufgabe kennt --
+// und laeuft den Pfad EIN ZWEITES MAL ab, bevor der Aufrufer ihn
+// aufloest. Das kostet einen zweiten Durchgang je Bestandteil und ist
+// der Preis dafuer, `fs.fi` nicht anzufassen.
+//
+// WIE DER PFAD ZERLEGT WIRD, ohne einen Puffer: die Zeichenkette wird
+// an jedem Schraegstrich VORUEBERGEHEND abgeschnitten (eine Null
+// hineingeschrieben), `fs.path` darauf losgelassen und das Zeichen
+// danach zurueckgeschrieben. `fs.resolve` kopiert den Pfad in seinen
+// eigenen Arbeitspuffer, also sieht niemand die Null ausser dieser
+// Schleife. Ein zweiter Puffer in `kdata` waere eine zweite Stelle,
+// deren Groesse jemand vergisst.
+//
+// WAS GEPRUEFT WIRD: `R_EXEC` auf jedes VERZEICHNIS auf dem Weg,
+// einschliesslich der Wurzel. Das ist die Regel von Unix, und das
+// x-Bit eines Verzeichnisses heisst dort genau das: betreten duerfen.
+// Das LETZTE Glied -- die Datei selbst -- wird hier NICHT geprueft;
+// dafuer ist der Aufrufer da, und er tut es seit K13.
+//
+// WAS NICHT GEPRUEFT WIRD, und es steht auch unten in der Lueckenliste:
+// ein Pfad, der ueber einen symbolischen Verweis in ein anderes
+// Verzeichnis springt, wird an den Gliedern des GESCHRIEBENEN Pfades
+// geprueft und nicht an denen des aufgeloesten. `fs.resolve` baut den
+// Pfad beim Verfolgen eines Verweises neu, und diese Schleife sieht das
+// Ergebnis nicht.
+//
+// `nowalk` auf der Kommandozeile ist die Gegenprobe: gezaehlt wird
+// weiter, gewirkt wird nicht -- also genau der Zustand vor dieser
+// Runde.
+fn walk(state: u64, t: u64, path: u64) -> bool {
+    kstate.add(state, kstate.MU_OFF + kstate.MU_WALKS, 1)
+    var i: u64 = 0
+    var erlaubt: bool = true
+    var weiter: bool = true
+    while weiter {
+        let c: u64 = kstate.get8(path + i)
+        if c == 0 {
+            weiter = false
+        } else {
+            if c == 47 { // '/'
+                // Zwei Schraegstriche hintereinander ("//") und der am
+                // Ende ("/a/") ergeben denselben Praefix wie der davor;
+                // sie werden uebersprungen, sonst zaehlt derselbe
+                // Zugriff zweimal.
+                let vor: u64 = kstate.get8(path + i + 1)
+                if i == 0 || (vor != 47 && vor != 0) {
+                    kstate.set8(path + i, 0 as u8)
+                    let ino: u64 = fs.path(state, path)
+                    kstate.set8(path + i, 47 as u8)
+                    if ino == 0 {
+                        // Den Teilpfad gibt es nicht. Dann gibt es den
+                        // ganzen auch nicht, und der Aufrufer sagt
+                        // gleich -ENOENT -- hier waere -EACCES die
+                        // falsche Auskunft.
+                        weiter = false
+                    } else {
+                        if fs.inode_type(state, ino) != fs.T_DIR {
+                            weiter = false
+                        } else {
+                            if !may(state, t, ino, R_EXEC) {
+                                erlaubt = false
+                                weiter = false
+                            }
+                        }
+                    }
+                }
+            }
+            i = i + 1
+        }
+    }
+    if erlaubt {
+        return true
+    }
+    kstate.add(state, kstate.MU_OFF + kstate.MU_WALKDENY, 1)
+    if kstate.mode_on(state, kstate.M_NOWALK) {
+        return true
+    }
+    if kstate.mode_on(state, kstate.M_NOPERM) {
+        return true
+    }
+    return false
+}
+
+fn walk_stat(state: u64, was: u64) -> u64 {
+    return kstate.get(state, kstate.MU_OFF + was)
+}
+
+// Die Zahlen dieser Runde, eine Zeile. Sie steht neben `report` aus
+// K13 und aus demselben Grund: mit `init` kehrt `kmain` nie zurueck,
+// also muss auch `sys.do_reboot` sie schreiben koennen.
+fn mu_report(state: u64) {
+    var s_h: [u8; 12] = "mu: walks=\0\0"
+    var s_d: [u8; 12] = " walkdeny=\0\0"
+    var s_g: [u8; 11] = " grphits=\0\0"
+    var s_s: [u8; 11] = " suppset=\0\0"
+    var s_n: [u8; 11] = " nodechk=\0\0"
+    let b: u64 = kstate.MU_OFF
+    serial.puts((&s_h[0]) as u64)
+    serial.dec(kstate.get(state, b + kstate.MU_WALKS))
+    serial.puts((&s_d[0]) as u64)
+    serial.dec(kstate.get(state, b + kstate.MU_WALKDENY))
+    serial.puts((&s_g[0]) as u64)
+    serial.dec(kstate.get(state, b + kstate.MU_GRPHITS))
+    serial.puts((&s_s[0]) as u64)
+    serial.dec(kstate.get(state, b + kstate.MU_SUPPSET))
+    serial.puts((&s_n[0]) as u64)
+    serial.dec(kstate.get(state, b + kstate.MU_NODECHK))
+    serial.nl()
 }
 
 // ------------------------------------------------- eine NEUE Datei
@@ -283,4 +476,11 @@ fn report(state: u64) {
     serial.puts((&s_ini[0]) as u64)
     serial.dec(kstate.get(state, b + kstate.U_INITOK))
     serial.nl()
+    // RUNDE MULTIUSER: die Zahlen dieser Runde in derselben Ausgabe.
+    // Sie stehen in einer EIGENEN Zeile mit eigenem Praefix -- Runde
+    // MERGE hat gelernt, was passiert, wenn zwei Runden dieselben
+    // Feldnamen auf dieselbe Leitung schreiben: `val` nimmt den
+    // letzten Treffer, und jede Frage nach `denied` wurde mit der Null
+    // einer anderen Runde beantwortet.
+    mu_report(state)
 }

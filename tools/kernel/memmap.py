@@ -125,6 +125,10 @@ BEREICHE = [
     # SYS_OSUM_USERINFO; sie steht hier mit, damit die Runde danach bei
     # 0x43000 anfaengt und nicht mitten drin.
     ("K13",        "kstate.fi", "K13_OFF",        "K13_MAX"),
+    # RUNDE MULTIUSER: zwei Seiten am Anfang des letzten freien Stuecks
+    # (0x7A000..0x80000). Eine Seite Zaehler, eine Seite Zusatzgruppen
+    # (MAX_TASKS * MU_GRPMAX * 8 = 4096 Oktette).
+    ("MU",         "kstate.fi", "MU_OFF",         "MU_MAX"),
     # RUNDE K14: die VFS-Schicht und die fremden Dateisysteme. Der
     # Auftrag dieser Runde hat 0x43000..0x46000 zugeteilt, weil weitere
     # Runden GLEICHZEITIG an diesem Baum arbeiten -- genau die Lage, aus

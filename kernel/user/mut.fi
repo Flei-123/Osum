@@ -1,0 +1,303 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/mut.fi -- Runde MULTIUSER: der Selbsttest dieser Runde,
+// in Ring 3.
+//
+// Wie `k13t` fuer Runde K13: ein Programm, das die Zusagen dieser Runde
+// VON INNEN prueft und jede als eine Zeile meldet, die der Wirt
+// zurueckliest:
+//
+//     mut: NAME=WERT
+//
+// Der Testlaeufer haelt jeden Wert gegen eine Zahl, die er selbst
+// ausgerechnet hat -- bei den Hashwerten gegen Pythons `hashlib`, bei
+// den Rechten gegen die Regel aus dem Handbuch, bei den Zeiten gegen
+// eine untere Schranke, unter der eine Passwortpruefung nichts wert
+// waere.
+//
+// UNTERBEFEHLE
+//
+//     mut kdf <runden>     misst PBKDF2-HMAC-SHA256: wie lange EINE
+//                          Pruefung mit dieser Rundenzahl dauert.
+//                          Das ist die Messung, aus der der
+//                          Kostenfaktor dieser Runde folgt -- nicht
+//                          eine Zahl aus einer Empfehlung, sondern die
+//                          Zeit, die DIESE Maschine wirklich braucht.
+//     mut gruppen          getgroups/setgroups und was die
+//                          Zusatzgruppen an einer Datei bewirken
+//     mut pfad <datei>     das BETRETUNGSRECHT: dieselbe Datei durch
+//                          ein Verzeichnis, das der Benutzer nicht
+//                          betreten darf
+//     mut rechte <a> <b>   wie k13t, aber mit den Zusatzgruppen
+//     mut stat             die Zaehler des Kerns aus dieser Runde
+//
+// Die Uhr ist `clock_gettime(CLOCK_MONOTONIC)`. Sie kommt aus dem
+// Zyklenzaehler und nicht aus dem Zeitgeberinterrupt -- eine Messung,
+// die auf 10-Millisekunden-Schritte gerundet ist, kann eine Anmeldung
+// von 200 Millisekunden nicht von einer von 195 unterscheiden.
+
+profile kernel
+
+import ulib
+import tools
+import pw
+
+export { u_start }
+
+const SYS_CLOCK_GETTIME: u64 = 228
+const CLOCK_MONOTONIC: u64 = 1
+const SYS_GETUID: u64 = 102
+const SYS_GETGID: u64 = 104
+const SYS_GETEUID: u64 = 107
+const SYS_GETEGID: u64 = 108
+const SYS_SETUID: u64 = 105
+const SYS_SETGID: u64 = 106
+const SYS_GETGROUPS: u64 = 115
+const SYS_SETGROUPS: u64 = 116
+const SYS_OSUM_MUSTAT: u64 = 1200
+const SYS_CHMOD: u64 = 90
+const SYS_STAT: u64 = 4
+
+// Was `mustat` beantwortet -- dieselben Zahlen wie in kernel/perm.fi.
+const MU_WALKS: u64 = 0
+const MU_WALKDENY: u64 = 1
+const MU_GRPHITS: u64 = 2
+const MU_SUPPSET: u64 = 3
+const MU_NODECHK: u64 = 4
+
+fn line(name: u64, v: u64) {
+    tools.ob_str(name)
+    tools.ob_num(v)
+    tools.ob_nl()
+}
+
+fn text(name: u64, v: u64) {
+    tools.ob_str(name)
+    tools.ob_str(v)
+    tools.ob_nl()
+}
+
+// Die Uhr in Mikrosekunden. Sie laeuft ueber, wenn die Maschine 584 000
+// Jahre laeuft; bis dahin reicht ein u64.
+fn now_us() -> u64 {
+    var ts: [u64; 2] = [0 as u64; 2]
+    let r: u64 = ulib.sys(SYS_CLOCK_GETTIME, CLOCK_MONOTONIC,
+        (&ts[0]) as u64, 0)
+    if ulib.bad(r) {
+        return 0
+    }
+    return ts[0 as usize] * 1000000 + ts[1 as usize] / 1000
+}
+
+// ------------------------------------------------------------ mut kdf
+//
+// DIE MESSUNG, AUS DER DER KOSTENFAKTOR FOLGT.
+//
+// Gemessen wird nicht das Ableiten allein, sondern GENAU DAS, was eine
+// Anmeldung tut: `check_hash` auf einen fertigen Eintrag. Da steckt das
+// Zerlegen der Zeichenkette mit drin, und das ist richtig so -- die
+// Frage lautet "wie lange dauert ein Rateversuch", und ein Angreifer
+// muss dasselbe tun.
+//
+// Dreimal, und ausgegeben wird die KLEINSTE Zeit. Nicht der Mittelwert:
+// ein Ausreisser nach oben ist der Zeitgeber oder ein anderer Prozess,
+// ein Ausreisser nach unten kann es nicht geben.
+fn mess_kdf(runden: u64) -> u64 {
+    var p_it: [u8; 13] = "mut: iters=\0\0"
+    var p_us: [u8; 10] = "mut: us=\0\0"
+    var p_ps: [u8; 15] = "mut: rundenps=\0"
+    var p_ok: [u8; 14] = "mut: kdfok=\0\0\0"
+    var pass: [u8; 9] = "geheim12\0"
+    var salt: [u8; 9] = "saltsalt\0"
+    var dk: [u8; 32] = [0 as u8; 32]
+
+    line((&p_it[0]) as u64, runden)
+
+    var best: u64 = 0
+    var okv: u64 = 1
+    var k: u64 = 0
+    while k < 3 {
+        let a: u64 = now_us()
+        if !pw.pbkdf2((&pass[0]) as u64, 8, (&salt[0]) as u64, 8, runden,
+            (&dk[0]) as u64) {
+            okv = 0
+        }
+        let b: u64 = now_us()
+        var d: u64 = 0
+        if b > a {
+            d = b - a
+        }
+        if best == 0 || d < best {
+            best = d
+        }
+        k = k + 1
+    }
+    line((&p_ok[0]) as u64, okv)
+    line((&p_us[0]) as u64, best)
+    // Runden je Sekunde, ganzzahlig. Bei einer Messung von 0 gibt es
+    // keine Zahl, und dann steht auch keine da.
+    var ps: u64 = 0
+    if best > 0 {
+        ps = runden * 1000000 / best
+    }
+    line((&p_ps[0]) as u64, ps)
+    tools.ob_flush()
+    return 0
+}
+
+// -------------------------------------------------------- mut gruppen
+//
+// Die Zusatzgruppen. Drei Fragen, und die dritte ist die einzige, die
+// wirklich etwas beweist:
+//
+//   1. Was sagt `getgroups` ueber diesen Prozess?
+//   2. Kann root sie setzen, und kann ein gewoehnlicher Benutzer es
+//      NICHT? (`setgroups` ist seit jeher root vorbehalten -- wer sich
+//      selbst eine Gruppe geben darf, hat keine Gruppen.)
+//   3. Oeffnet eine Zusatzgruppe eine Datei, die sonst zu ist?
+fn gruppen(args: u64) -> u64 {
+    var p_n: [u8; 13] = "mut: ngrps=\0\0"
+    var p_g: [u8; 12] = "mut: grp=\0\0\0"
+    var p_set: [u8; 15] = "mut: setgrps=\0\0"
+    var p_open: [u8; 15] = "mut: grpopen=\0\0"
+    var g: [u64; 16] = [0 as u64; 16]
+
+    let n: u64 = ulib.sys(SYS_GETGROUPS, 16, (&g[0]) as u64, 0)
+    if ulib.bad(n) {
+        line((&p_n[0]) as u64, ulib.EOF)
+        tools.ob_flush()
+        return 1
+    }
+    line((&p_n[0]) as u64, n)
+    var i: u64 = 0
+    while i < n && i < 16 {
+        line((&p_g[0]) as u64, g[i as usize])
+        i = i + 1
+    }
+
+    // Setzen: root darf, sonst -EPERM. Der Rueckgabewert IST die
+    // Messung, deshalb steht er als Zahl da und nicht als Wort.
+    var neu: [u64; 2] = [0 as u64; 2]
+    neu[0] = 42
+    neu[1] = 77
+    line((&p_set[0]) as u64, ulib.sys(SYS_SETGROUPS, 2, (&neu[0]) as u64, 0))
+
+    // Und die Datei, die nur ueber eine Zusatzgruppe zu haben ist. Der
+    // Name kommt von der Kommandozeile; ohne Namen wird nichts geoeffnet.
+    if ulib.arg_count(args) > 2 {
+        let p: u64 = ulib.arg_at(args, 2)
+        let fd: u64 = ulib.sys(ulib.SYS_OPEN, p, 0, 0)
+        var okv: u64 = 0
+        if !ulib.bad(fd) {
+            okv = 1
+            ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+        }
+        line((&p_open[0]) as u64, okv)
+    }
+    tools.ob_flush()
+    return 0
+}
+
+// ----------------------------------------------------------- mut pfad
+//
+// DAS BETRETUNGSRECHT. Vor dieser Runde beantwortete Osum die Frage
+// "darfst du /geheim/datei.txt lesen?" ausschliesslich an
+// `datei.txt` -- das Verzeichnis `/geheim` mit 0o700 root:root wurde
+// durchquert, ohne dass jemand fragte. Wer den Namen kannte, war drin.
+//
+// Hier wird GENAU DAS gemessen: derselbe Prozess, dieselbe Datei,
+// einmal ueber einen offenen und einmal ueber einen verschlossenen
+// Weg. Die Datei selbst ist in beiden Faellen 0o644.
+fn pfad(args: u64) -> u64 {
+    var p_ok: [u8; 15] = "mut: pfadauf=\0\0"
+    var p_zu: [u8; 14] = "mut: pfadzu=\0\0"
+    if ulib.arg_count(args) < 4 {
+        return 1
+    }
+    let offen: u64 = ulib.arg_at(args, 2)
+    let zu: u64 = ulib.arg_at(args, 3)
+    let f1: u64 = ulib.sys(ulib.SYS_OPEN, offen, 0, 0)
+    var a: u64 = 0
+    if !ulib.bad(f1) {
+        a = 1
+        ulib.sys(ulib.SYS_CLOSE, f1, 0, 0)
+    }
+    line((&p_ok[0]) as u64, a)
+    let f2: u64 = ulib.sys(ulib.SYS_OPEN, zu, 0, 0)
+    var b: u64 = 0
+    if !ulib.bad(f2) {
+        b = 1
+        ulib.sys(ulib.SYS_CLOSE, f2, 0, 0)
+    }
+    line((&p_zu[0]) as u64, b)
+    tools.ob_flush()
+    return 0
+}
+
+// ----------------------------------------------------------- mut stat
+fn zaehler() -> u64 {
+    var p_w: [u8; 13] = "mut: walks=\0\0"
+    var p_d: [u8; 17] = "mut: walkdeny=\0\0\0"
+    var p_g: [u8; 16] = "mut: grphits=\0\0\0"
+    var p_s: [u8; 16] = "mut: suppset=\0\0\0"
+    var p_n: [u8; 16] = "mut: nodechk=\0\0\0"
+    line((&p_w[0]) as u64, ulib.sys(SYS_OSUM_MUSTAT, MU_WALKS, 0, 0))
+    line((&p_d[0]) as u64, ulib.sys(SYS_OSUM_MUSTAT, MU_WALKDENY, 0, 0))
+    line((&p_g[0]) as u64, ulib.sys(SYS_OSUM_MUSTAT, MU_GRPHITS, 0, 0))
+    line((&p_s[0]) as u64, ulib.sys(SYS_OSUM_MUSTAT, MU_SUPPSET, 0, 0))
+    line((&p_n[0]) as u64, ulib.sys(SYS_OSUM_MUSTAT, MU_NODECHK, 0, 0))
+    tools.ob_flush()
+    return 0
+}
+
+// --------------------------------------------------------- mut setuid
+//
+// Die Zusage, die der Auftrag ausdruecklich verlangt: setuid von einem
+// gewoehnlichen Benutzer auf root MUSS scheitern. Der Rueckgabewert
+// steht als Zahl da, damit der Wirt -EPERM von 0 unterscheiden kann und
+// nicht nur "es ist etwas passiert".
+fn versuch_root() -> u64 {
+    var p_u: [u8; 12] = "mut: uid=\0\0\0"
+    var p_r: [u8; 15] = "mut: setroot=\0\0"
+    var p_g: [u8; 16] = "mut: setgroot=\0\0"
+    line((&p_u[0]) as u64, ulib.sys(SYS_GETUID, 0, 0, 0))
+    line((&p_r[0]) as u64, ulib.sys(SYS_SETUID, 0, 0, 0))
+    line((&p_g[0]) as u64, ulib.sys(SYS_SETGID, 0, 0, 0))
+    tools.ob_flush()
+    return 0
+}
+
+fn u_start(args: u64) -> u64 {
+    var w_kdf: [u8; 4] = "kdf\0"
+    var w_grp: [u8; 8] = "gruppen\0"
+    var w_pfad: [u8; 5] = "pfad\0"
+    var w_stat: [u8; 5] = "stat\0"
+    var w_root: [u8; 8] = "werroot\0"
+    var p_done: [u8; 11] = "mut: done\0\0"
+
+    if ulib.arg_count(args) > 1 {
+        let a: u64 = ulib.arg_at(args, 1)
+        if ulib.streq(a, (&w_kdf[0]) as u64) {
+            var runden: u64 = 4096
+            if ulib.arg_count(args) > 2 {
+                runden = ulib.to_num(ulib.arg_at(args, 2))
+            }
+            return mess_kdf(runden)
+        }
+        if ulib.streq(a, (&w_grp[0]) as u64) {
+            return gruppen(args)
+        }
+        if ulib.streq(a, (&w_pfad[0]) as u64) {
+            return pfad(args)
+        }
+        if ulib.streq(a, (&w_stat[0]) as u64) {
+            return zaehler()
+        }
+        if ulib.streq(a, (&w_root[0]) as u64) {
+            return versuch_root()
+        }
+    }
+    tools.ob_str((&p_done[0]) as u64)
+    tools.ob_nl()
+    tools.ob_flush()
+    return 0
+}

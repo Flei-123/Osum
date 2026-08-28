@@ -843,6 +843,33 @@ const SYS_FACCESSAT: u64 = 269
 // Die eigene Nummer dieser Runde, aus dem zugeteilten Vorrat 1600..1699.
 const SYS_OSUM_USERINFO: u64 = 1600
 
+// ============================================= RUNDE MULTIUSER
+//
+// DREI NUMMERN, UND JEDE IST NACHGEWIESEN FREI. Der Nachweis ist nicht
+// "ich habe nachgesehen", sondern `tools/kernel/syscalls.py`: es liest
+// diese Datei UND `lib/libc/kcall.fi`, und mit `--zweige` alle
+// Zweige des Repos, weil eine Nummer, die HIER frei ist und auf einem
+// Nachbarzweig vergeben, beim Verschmelzen genau der Fehler von Runde
+// MERGE waere (1320, zweimal, und der zweite Aufruf war ab da tot).
+//
+//   115, 116   getgroups/setgroups -- die ECHTEN Nummern von Linux
+//              x86-64. K13 hat 113, 114 und 117..120 belegt und die
+//              beiden dazwischen liegen lassen; sie gehoeren
+//              hierher und nirgendwo anders hin.
+//   1200       der erste Wert des Blocks 1200..1299, der auf JEDEM
+//              der 51 Zweige dieses Repos unbenutzt ist.
+const SYS_GETGROUPS: u64 = 115
+const SYS_SETGROUPS: u64 = 116
+const SYS_OSUM_MUSTAT: u64 = 1200
+
+// Was `mustat` beantwortet -- dieselben Versaetze wie in kstate.fi,
+// nur als laufende Nummer, damit Ring 3 keine kdata-Adressen kennt.
+const MS_WALKS: u64 = 0
+const MS_WALKDENY: u64 = 1
+const MS_GRPHITS: u64 = 2
+const MS_SUPPSET: u64 = 3
+const MS_NODECHK: u64 = 4
+
 // Was `reboot` als zweites Wort versteht. Linux verlangt drei magische
 // Zahlen davor; dieser Kernel verlangt sie nicht und nimmt nur den
 // Befehl -- was er dafuer verlangt, ist die wirksame Kennung 0.
@@ -2064,6 +2091,13 @@ fn is_k13(number: u64) -> bool {
         || number == SYS_FACCESSAT {
         return true
     }
+    // RUNDE MULTIUSER: die drei dieser Runde gehen denselben Weg.
+    if number == SYS_GETGROUPS || number == SYS_SETGROUPS {
+        return true
+    }
+    if number == SYS_OSUM_MUSTAT {
+        return true
+    }
     return number == SYS_OSUM_USERINFO
 }
 
@@ -2146,6 +2180,15 @@ fn k13_call(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64,
     }
     if number == SYS_OSUM_USERINFO {
         return do_userinfo(state, me, a0)
+    }
+    if number == SYS_GETGROUPS {
+        return do_getgroups(state, me, a0, a1)
+    }
+    if number == SYS_SETGROUPS {
+        return do_setgroups(state, me, a0, a1)
+    }
+    if number == SYS_OSUM_MUSTAT {
+        return do_mustat(state, me, a0)
     }
     return neg(errno.E_NOSYS)
 }
@@ -3015,6 +3058,24 @@ fn vfs_write(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
 // K_FB). Ein zweiter Weg auf dasselbe Geraet waere eine zweite Stelle,
 // an der die Zeilendisziplin steht -- und die zweite waere irgendwann
 // die falsche.
+// RUNDE MULTIUSER: die Rechtefrage fuer einen Knoten der VFS-Schicht.
+//
+// Sie steht HIER und nicht in `vfs.fi`, und das ist derselbe Grund, aus
+// dem K13 `perm.fi` geschrieben hat: es soll EINE Regel geben. `vfs.fi`
+// kennt kein Dateisystem und keine Aufgabe -- es liefert die drei
+// Zahlen, und die Regel darauf ist die von `perm.may_attr`, dieselbe,
+// die die Wurzel benutzt. Waere sie in `vfs.fi` noch einmal
+// hingeschrieben, gaebe es zwei Stellen, an denen jemand einen Fall
+// vergessen kann.
+fn vfs_may(state: u64, me: u64, m: u64, node: u64, want: u64) -> bool {
+    kstate.add(state, kstate.MU_OFF + kstate.MU_NODECHK, 1)
+    let mode: u64 = vfs.v_attr(state, m, node, vfsops.A_MODE)
+    let owner: u64 = vfs.v_attr(state, m, node, vfsops.A_UID)
+    let group: u64 = vfs.v_attr(state, m, node, vfsops.A_GID)
+    return perm.may_attr(state, me, mode, owner, group, want,
+        perm.euid(state, me), perm.egid(state, me))
+}
+
 fn open_vfs(state: u64, me: u64, m: u64, path: u64, flags: u64) -> u64 {
     // RUNDE K17: dieselbe Frage wie beim Lesen und Schreiben, nur
     // frueher. Ohne diese drei Zeilen antwortet ein abgezogener Stick
@@ -3050,6 +3111,23 @@ fn open_vfs(state: u64, me: u64, m: u64, path: u64, flags: u64) -> u64 {
         if (flags & O_CREAT) != 0 && (flags & O_EXCL) != 0 {
             return neg(errno.E_EXIST)
         }
+    }
+    // ==================================== RUNDE MULTIUSER: DAS TOR
+    //
+    // HIER STAND KEINE EINZIGE ZEILE. `do_open` fragt seit K13
+    // `perm.may`, bevor es eine Datei der WURZEL herausgibt -- dieser
+    // Weg, der Weg jeder eingehaengten Platte, jedes /proc-Eintrags und
+    // jedes Geraets in /dev, fragte nicht. Eine OFS-Partition hinter
+    // einem Einhaengepunkt war damit fuer jeden offen, obwohl in jedem
+    // ihrer Inodes Rechte und ein Eigentuemer standen.
+    //
+    // Die Regel ist dieselbe -- `perm.may_attr`, dieselben sechzehn
+    // Zeilen wie fuer die Wurzel. Was anders ist, ist nur, WOHER die
+    // drei Zahlen kommen: aus `vfs.v_attr` statt aus `fs.inode_*`.
+    // Genau dafuer hat diese Runde `A_UID` und `A_GID` in die
+    // Ops-Tafel gelegt.
+    if !vfs_may(state, me, m, node, want_of(flags)) {
+        return neg(errno.E_ACCES)
     }
     let art: u64 = vfs.v_attr(state, m, node, vfsops.A_TYPE)
     // Die zwei Geraete, die schon einen Deskriptor haben.
@@ -3188,6 +3266,14 @@ fn do_open(state: u64, me: u64, name: u64, flags: u64) -> u64 {
     // kennt keine Aufgabe, und `fs.fi` darf `perm.fi` nicht einbinden,
     // weil `perm.fi` `fs.fi` einbindet. Das ist eine echte Luecke und
     // keine Vereinfachung.
+    // RUNDE MULTIUSER: DAS BETRETUNGSRECHT AUF JEDEM GLIED DES PFADES.
+    // Vor `fs.path` und nicht danach: wer ein Verzeichnis auf dem Weg
+    // nicht betreten darf, soll nicht einmal erfahren, ob der Name
+    // dahinter existiert. Die Begruendung und die Gegenprobe `nowalk`
+    // stehen in `kernel/perm.fi`.
+    if !perm.walk(state, me, buf) {
+        return neg(errno.E_ACCES)
+    }
     var ino: u64 = fs.path(state, buf)
     if !dir_allowed(state, me, buf, ino) {
         return neg(errno.E_ACCES)
@@ -3381,6 +3467,14 @@ fn do_unlink(state: u64, me: u64, name: u64) -> u64 {
     if kstate.get(state, kstate.FS_READY) == 0 {
         return neg(errno.E_NOSYS)
     }
+    // RUNDE MULTIUSER: DAS BETRETUNGSRECHT AUF JEDEM GLIED DES PFADES.
+    // Vor `fs.path` und nicht danach: wer ein Verzeichnis auf dem Weg
+    // nicht betreten darf, soll nicht einmal erfahren, ob der Name
+    // dahinter existiert. Die Begruendung und die Gegenprobe `nowalk`
+    // stehen in `kernel/perm.fi`.
+    if !perm.walk(state, me, buf) {
+        return neg(errno.E_ACCES)
+    }
     let ino: u64 = fs.path(state, buf)
     if ino == 0 {
         return neg(errno.E_NOENT)
@@ -3435,6 +3529,14 @@ fn do_mkdir(state: u64, me: u64, name: u64) -> u64 {
     }
     if kstate.get(state, kstate.FS_READY) == 0 {
         return neg(errno.E_NOSYS)
+    }
+    // RUNDE MULTIUSER: DAS BETRETUNGSRECHT AUF JEDEM GLIED DES PFADES.
+    // Vor `fs.path` und nicht danach: wer ein Verzeichnis auf dem Weg
+    // nicht betreten darf, soll nicht einmal erfahren, ob der Name
+    // dahinter existiert. Die Begruendung und die Gegenprobe `nowalk`
+    // stehen in `kernel/perm.fi`.
+    if !perm.walk(state, me, buf) {
+        return neg(errno.E_ACCES)
     }
     if fs.path(state, buf) != 0 {
         return neg(errno.E_EXIST)
@@ -3592,6 +3694,14 @@ fn do_stat(state: u64, me: u64, name: u64, out: u64) -> u64 {
     if kstate.get(state, kstate.FS_READY) == 0 {
         return neg(errno.E_NOSYS)
     }
+    // RUNDE MULTIUSER: DAS BETRETUNGSRECHT AUF JEDEM GLIED DES PFADES.
+    // Vor `fs.path` und nicht danach: wer ein Verzeichnis auf dem Weg
+    // nicht betreten darf, soll nicht einmal erfahren, ob der Name
+    // dahinter existiert. Die Begruendung und die Gegenprobe `nowalk`
+    // stehen in `kernel/perm.fi`.
+    if !perm.walk(state, me, buf) {
+        return neg(errno.E_ACCES)
+    }
     let ino: u64 = fs.path(state, buf)
     if ino == 0 {
         return neg(errno.E_NOENT)
@@ -3638,6 +3748,14 @@ fn do_lstat(state: u64, me: u64, name: u64, out: u64) -> u64 {
     if kstate.get(state, kstate.FS_READY) == 0 {
         return neg(errno.E_NOSYS)
     }
+    // RUNDE MULTIUSER: DAS BETRETUNGSRECHT AUF JEDEM GLIED DES PFADES.
+    // Vor `fs.path` und nicht danach: wer ein Verzeichnis auf dem Weg
+    // nicht betreten darf, soll nicht einmal erfahren, ob der Name
+    // dahinter existiert. Die Begruendung und die Gegenprobe `nowalk`
+    // stehen in `kernel/perm.fi`.
+    if !perm.walk(state, me, buf) {
+        return neg(errno.E_ACCES)
+    }
     let ino: u64 = fs.path_nofollow(state, buf)
     if ino == 0 {
         return neg(errno.E_NOENT)
@@ -3674,6 +3792,14 @@ fn do_symlink(state: u64, me: u64, ziel: u64, wo: u64) -> u64 {
     // Ein Verweis ist ein NAME in einem Verzeichnis -- also gilt die
     // Frage dem Verzeichnis, genau wie bei `open` mit O_CREAT.
     if !dir_allowed(state, me, buf, 0) {
+        return neg(errno.E_ACCES)
+    }
+    // RUNDE MULTIUSER: DAS BETRETUNGSRECHT AUF JEDEM GLIED DES PFADES.
+    // Vor `fs.path` und nicht danach: wer ein Verzeichnis auf dem Weg
+    // nicht betreten darf, soll nicht einmal erfahren, ob der Name
+    // dahinter existiert. Die Begruendung und die Gegenprobe `nowalk`
+    // stehen in `kernel/perm.fi`.
+    if !perm.walk(state, me, buf) {
         return neg(errno.E_ACCES)
     }
     if fs.path_nofollow(state, buf) != 0 {
@@ -3713,6 +3839,14 @@ fn do_readlink(state: u64, me: u64, name: u64, out: u64,
     let len: u64 = fetch_path(state, me, name, buf, MAX_NAME)
     if errno.is_error(len) {
         return len
+    }
+    // RUNDE MULTIUSER: DAS BETRETUNGSRECHT AUF JEDEM GLIED DES PFADES.
+    // Vor `fs.path` und nicht danach: wer ein Verzeichnis auf dem Weg
+    // nicht betreten darf, soll nicht einmal erfahren, ob der Name
+    // dahinter existiert. Die Begruendung und die Gegenprobe `nowalk`
+    // stehen in `kernel/perm.fi`.
+    if !perm.walk(state, me, buf) {
+        return neg(errno.E_ACCES)
     }
     let ino: u64 = fs.path_nofollow(state, buf)
     if ino == 0 {
@@ -3756,6 +3890,14 @@ fn do_utimensat(state: u64, me: u64, fd: u64, name: u64, zeiten: u64,
     let len: u64 = fetch_path(state, me, name, buf, MAX_NAME)
     if errno.is_error(len) {
         return len
+    }
+    // RUNDE MULTIUSER: DAS BETRETUNGSRECHT AUF JEDEM GLIED DES PFADES.
+    // Vor `fs.path` und nicht danach: wer ein Verzeichnis auf dem Weg
+    // nicht betreten darf, soll nicht einmal erfahren, ob der Name
+    // dahinter existiert. Die Begruendung und die Gegenprobe `nowalk`
+    // stehen in `kernel/perm.fi`.
+    if !perm.walk(state, me, buf) {
+        return neg(errno.E_ACCES)
     }
     let ino: u64 = fs.path(state, buf)
     if ino == 0 {
@@ -6038,6 +6180,14 @@ fn do_ftype(state: u64, me: u64, path: u64, out: u64, len: u64) -> u64 {
     // -ENOENT -- nicht "eine Art, die ich nicht kenne". Der Unterschied
     // ist der zwischen "gibt es nicht" und "weiss nicht, womit".
     if kstate.get(state, kstate.FS_READY) != 0 {
+    // RUNDE MULTIUSER: DAS BETRETUNGSRECHT AUF JEDEM GLIED DES PFADES.
+    // Vor `fs.path` und nicht danach: wer ein Verzeichnis auf dem Weg
+    // nicht betreten darf, soll nicht einmal erfahren, ob der Name
+    // dahinter existiert. Die Begruendung und die Gegenprobe `nowalk`
+    // stehen in `kernel/perm.fi`.
+    if !perm.walk(state, me, name) {
+        return neg(errno.E_ACCES)
+    }
         if fs.path(state, name) == 0 {
             return neg(errno.E_NOENT)
         }
@@ -6127,6 +6277,14 @@ fn do_fopen(state: u64, me: u64, path: u64, argv: u64, argc: u64) -> u64 {
     }
     if n == 0 {
         return neg(errno.E_NOENT)
+    }
+    // RUNDE MULTIUSER: DAS BETRETUNGSRECHT AUF JEDEM GLIED DES PFADES.
+    // Vor `fs.path` und nicht danach: wer ein Verzeichnis auf dem Weg
+    // nicht betreten darf, soll nicht einmal erfahren, ob der Name
+    // dahinter existiert. Die Begruendung und die Gegenprobe `nowalk`
+    // stehen in `kernel/perm.fi`.
+    if !perm.walk(state, me, name) {
+        return neg(errno.E_ACCES)
     }
     if fs.path(state, name) == 0 {
         ftype.refuse(state)
@@ -6238,6 +6396,14 @@ fn do_chdir(state: u64, me: u64, name: u64) -> u64 {
         return len
     }
     // RUNDE K13: in ein Verzeichnis wechseln heisst, es zu betreten.
+    // RUNDE MULTIUSER: DAS BETRETUNGSRECHT AUF JEDEM GLIED DES PFADES.
+    // Vor `fs.path` und nicht danach: wer ein Verzeichnis auf dem Weg
+    // nicht betreten darf, soll nicht einmal erfahren, ob der Name
+    // dahinter existiert. Die Begruendung und die Gegenprobe `nowalk`
+    // stehen in `kernel/perm.fi`.
+    if !perm.walk(state, me, buf) {
+        return neg(errno.E_ACCES)
+    }
     let ino: u64 = fs.path(state, buf)
     if ino != 0 {
         if !perm.may(state, me, ino, perm.R_EXEC) {
@@ -8561,6 +8727,14 @@ fn ino_of_path(state: u64, me: u64, name: u64) -> u64 {
     if errno.is_error(len) {
         return len
     }
+    // RUNDE MULTIUSER: DAS BETRETUNGSRECHT AUF JEDEM GLIED DES PFADES.
+    // Vor `fs.path` und nicht danach: wer ein Verzeichnis auf dem Weg
+    // nicht betreten darf, soll nicht einmal erfahren, ob der Name
+    // dahinter existiert. Die Begruendung und die Gegenprobe `nowalk`
+    // stehen in `kernel/perm.fi`.
+    if !perm.walk(state, me, buf) {
+        return neg(errno.E_ACCES)
+    }
     let ino: u64 = fs.path(state, buf)
     if ino == 0 {
         return neg(errno.E_NOENT)
@@ -8670,6 +8844,103 @@ fn do_reboot(state: u64, me: u64, cmd: u64) -> u64 {
 }
 
 // ------------------------------------------------------- die Auskunft
+
+// ================================== RUNDE MULTIUSER: DIE ZUSATZGRUPPEN
+//
+// `getgroups(n, liste)` nach POSIX: mit n == 0 gibt es nur die ANZAHL
+// zurueck und schreibt nichts -- so fragt ein Programm, wie gross der
+// Puffer sein muss, den es gleich anlegt. Mit n > 0 und n kleiner als
+// die Anzahl ist die Antwort -EINVAL und nicht eine abgeschnittene
+// Liste; eine halbe Gruppenliste ist schlimmer als keine.
+fn do_getgroups(state: u64, me: u64, n: u64, out: u64) -> u64 {
+    let have: u64 = sched.groups_count(state, me)
+    if n == 0 {
+        return have
+    }
+    if n < have {
+        return neg(errno.E_INVAL)
+    }
+    if !proc.user_ok(state, me, out, have * 8) {
+        return neg(errno.E_FAULT)
+    }
+    // Ueber den Zwischenpuffer in kdata, wie jeder andere Aufruf dieser
+    // Datei auch: der Kernel schreibt NIE unmittelbar in einen
+    // Adressraum, den er nicht selbst gebaut hat.
+    let w: u64 = state + kstate.MU_OFF + 0x800
+    var k: u64 = 0
+    while k < have {
+        kstate.set(state, kstate.MU_OFF + 0x800 + k * 8,
+            sched.groups_at(state, me, k))
+        k = k + 1
+    }
+    if have > 0 {
+        if !copy_out(state, me, out, w, have * 8) {
+            return neg(errno.E_FAULT)
+        }
+    }
+    return have
+}
+
+// `setgroups(n, liste)` -- NUR FUER root, und das ist keine Strenge um
+// ihrer selbst willen. Wer sich selbst eine Gruppe geben darf, hat
+// keine Gruppen: ein Prozess wuerde einfach `setgroups(1, [0])` rufen
+// und in jeder Gruppe sein, die er gerade braucht. Deshalb steht die
+// Frage nach der WIRKSAMEN Kennung ganz vorn, und deshalb ist die
+// Antwort -EPERM und nicht ein stilles Nichts.
+//
+// Die Liste wird VOLLSTAENDIG hereingeholt und erst dann gesetzt. Ein
+// Aufruf, der zur Haelfte gelingt, waere ein Prozess mit halben Rechten
+// -- dieselbe Ueberlegung wie bei `setresuid`.
+fn do_setgroups(state: u64, me: u64, n: u64, src: u64) -> u64 {
+    if !perm.is_root(state, me) {
+        kstate.add(state, kstate.K13_OFF + kstate.U_DENIED, 1)
+        return neg(errno.E_PERM)
+    }
+    if n > sched.GROUPS_MAX {
+        return neg(errno.E_INVAL)
+    }
+    if n == 0 {
+        sched.groups_clear(state, me)
+        kstate.add(state, kstate.MU_OFF + kstate.MU_SUPPSET, 1)
+        return 0
+    }
+    if !proc.user_ok(state, me, src, n * 8) {
+        return neg(errno.E_FAULT)
+    }
+    let w: u64 = state + kstate.MU_OFF + 0x800
+    if !copy_in(state, me, w, src, n * 8) {
+        return neg(errno.E_FAULT)
+    }
+    if !sched.groups_set(state, me, w, n) {
+        return neg(errno.E_INVAL)
+    }
+    kstate.add(state, kstate.MU_OFF + kstate.MU_SUPPSET, 1)
+    return 0
+}
+
+// Die Zaehler dieser Runde nach Ring 3, EINE Zahl je Aufruf. Kein
+// Puffer, kein Format, nichts, was sich zwischen zwei Runden
+// verschieben kann -- `SYS_OSUM_USERINFO` hat achtzehn Woerter in
+// fester Reihenfolge, und genau daran haengt, dass keine Runde davor
+// ein Feld einschieben darf.
+fn do_mustat(state: u64, me: u64, was: u64) -> u64 {
+    if was == MS_WALKS {
+        return perm.walk_stat(state, kstate.MU_WALKS)
+    }
+    if was == MS_WALKDENY {
+        return perm.walk_stat(state, kstate.MU_WALKDENY)
+    }
+    if was == MS_GRPHITS {
+        return perm.walk_stat(state, kstate.MU_GRPHITS)
+    }
+    if was == MS_SUPPSET {
+        return perm.walk_stat(state, kstate.MU_SUPPSET)
+    }
+    if was == MS_NODECHK {
+        return perm.walk_stat(state, kstate.MU_NODECHK)
+    }
+    return neg(errno.E_INVAL)
+}
 
 // SYS_OSUM_USERINFO: die Zahlen dieser Runde nach Ring 3. Sie sind das,
 // woran der Testlaeufer festmacht, dass ueberhaupt geprueft wurde -- eine
