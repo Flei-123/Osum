@@ -501,6 +501,39 @@
 #      Packdatei MUSS auffallen, und der Bereich auf der Seite von K18
 #      MUSS den Kartenpruefer ausloesen.
 #
+#  30. OSUM ALS SERVER (tools/server/run.sh, Runde SERVERBUILD): bis
+#      hierher konnte dieses System ohne Bildschirm nicht einmal
+#      GEBAUT werden. `fb.fi`, `wm.fi`, `wig.fi` und `font.fi` waren
+#      7091 der 72925 Kernelzeilen, `kernel/wm.fi` sagt woertlich "WO
+#      DER SERVER LAEUFT. Im Kernel. Das ist eine Entscheidung" -- und
+#      einen Bauschalter gab es nicht: `grep -riE
+#      'nogui|headless|console_only'` fand null Treffer.
+#      Diese Runde zieht EINE Naht ein (`kernel/gfx.fi`, 37 Symbole)
+#      und holt die Oberflaeche aus den beiden Dateien heraus, denen
+#      sie gehoerte (`kernel/kgui.fi` aus `kmain.fi`, `kernel/sysgui.fi`
+#      aus `sys.fi`). Danach schreibt kein Modul dieses Kernels mehr
+#      `fb.` oder `wm.` -- vorher waren es 745 Stellen in acht Dateien,
+#      und `tools/server/count.py` zaehlt beides nach.
+#      `tools/build-kernel.sh --gui off` LOESCHT dann elf Dateien aus
+#      dem Uebersetzungsbaum und setzt `gfx-aus.fi` an die Stelle der
+#      Naht. Gemessen wird nicht "es laeuft", sondern die SYMBOLTAFEL:
+#      741 Funktionen der Oberflaeche im GUI-Abbild, NULL im
+#      Serverabbild, und die Naht in beiden gleich breit.
+#      Die zweite Haelfte ist die serielle Leitung. Sie war ein
+#      Notausgang: der Kernel schrieb hinaus, herein kam nichts --
+#      getippt wurde auf der PS/2-Tastatur oder ueber `script=`.
+#      `kernel/sercon.fi` gibt ihr den Rueckweg (IRQ 4 auf Vektor 36,
+#      die FIFO in die Zeilendisziplin von Runde K9), und
+#      `console=ttyS0` macht das Warten unbegrenzt -- ohne das Wort
+#      endet ein `read` weiter nach vier Sekunden, und keine
+#      bestehende Messung aendert sich. Getippt wird in diesem
+#      Abschnitt WIRKLICH: `tools/server/console.py` haengt an einer
+#      UNIX-Steckdose, wartet auf `sh: ready`, schickt Zeichen fuer
+#      Zeichen und liest die Antwort. Rueckschritt und STRG-U
+#      inbegriffen. Gegenproben: ohne `console=` darf nichts ankommen,
+#      und `noserirq` nimmt den Vektor -- dann kommt es ueber den
+#      Abfrageweg, und `sercon: irqs=0` sagt es.
+#
 # Kein '|| true', kein Verschlucken von Beendigungscodes.
 set -uo pipefail
 #      NACHTRAG 27.08.2026: verwaiste Pakete. Programme werden NICHT
@@ -715,6 +748,16 @@ lauf "25. Diebstahl: Geraeteidentitaet, Sicherung, Schluesselverwaltung (tools/t
 lauf "25. Akkuanalyse je Programm: die gemessene Gesamtleistung, anteilig zugeordnet (tools/powermon/run.sh, Runde POWERMON)" \
      tools/powermon/run.sh powermon '^POWERMON: |^        |^  OK    (another table|GEGENPROBE|the two displays|the same energy|the sum of the program|and the kernel.s own rows|the shares add up|the ageing|runtime left|one sample costs|counted and uncounted|at 10 samples|the file stays|AND THE SENTENCE|ON THIS HOST|wigapp= really|the window server counts|distinct colours)'
 lauf "28. derselbe Kernel auf der ECHTEN CPU: /dev/kvm statt Emulation (tools/kvm/run.sh, Runde KVMFIX)" tools/kvm/run.sh kvm '^KVM: |^  OK    (der Kernel ist gebaut|1\.|3\.|4\.)|^  --    (CPU|3\.|4\.)|^KVM: uebersprungen'
+
+# ABSCHNITT 30 -- RUNDE SERVERBUILD. Er steht am Ende, weil er als
+# einziger Abschnitt dieser Abnahme das Abbild ZWEIMAL baut (mit und
+# ohne Bildschirm) und danach viermal bootet. Was er misst, ist die
+# Zusage der Runde: der GUI-Bau bleibt Zeile fuer Zeile derselbe, und
+# daneben entsteht ein zweiter, der 26 Prozent kleiner ist und auf
+# einer seriellen Leitung bis zur Shell kommt.
+lauf "30. Osum als Server: ohne Grafik gebaut, auf der seriellen Leitung bedient (tools/server/run.sh, Runde SERVERBUILD)" \
+     tools/server/run.sh server '^SERVER: |^        (gui=|Symbole der|srvbench: )|^  OK    (das Serverabbild|im Serverabbild|die Naht selbst|kein Modul|die Shell antwortet|Rueckschritt und|GEGENPROBE|und der Zaehler|im Regellauf|empfangene|kein Oktett|STRG-U)'
+
 
 echo
 echo "=================================================================="
