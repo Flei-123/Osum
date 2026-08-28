@@ -188,7 +188,7 @@ bash tools/build-kernel.sh "$TMPD/k.mb" > "$TMPD/k.log" 2>&1 \
     || { bad "the kernel does not build"; tail -20 "$TMPD/k.log"; }
 as --64 -o "$TMPD/crt.o" kernel/user/crt.s 2>/dev/null
 
-PROGS="icont explorer launcher locate widgetdemo sh ls cat edit"
+PROGS="icont explorer launcher locate widgetdemo sh ls cat edit viewer"
 rc=0
 for p in $PROGS; do
     "$CC" "kernel/user/$p.fi" -o "$TMPD/$p.o" > "$TMPD/$p.err" 2>&1 || {

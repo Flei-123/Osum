@@ -45,6 +45,12 @@ num() { local name=$1 wert=$2 op=$3 want=$4
     else bad "$name: $wert, erwartet $op $want"; fi
 }
 has() { grep -qaF "$2" "$1" && ok "$3" || bad "$3 -- '$2' fehlt"; }
+# Ein Bildschirmfoto wird GERECHNET und nicht angeschaut.
+schau() { local name=$1; shift
+    local aus rc
+    aus=$(python3 tools/gfx/checkshot.py "$@" 2>&1); rc=$?
+    if [ "$rc" -eq 0 ]; then ok "$name ($aus)"; else bad "$name -- $aus"; fi
+}
 
 bash vendor/firn/fetch-firnc.sh >/dev/null || { echo "fetch-firnc fehlgeschlagen"; exit 1; }
 command -v qemu-system-x86_64 >/dev/null 2>&1 || { echo "VIEWER: kein qemu"; exit 0; }
@@ -322,6 +328,220 @@ print("maxabw=%d" % mx)
 PY
 mxd=$(grep -oE 'maxabw=[0-9]+' "$TMPD/dreh.cmp" | cut -d= -f2)
 num "drehen um 90 Grad stimmt gegen Pillow" "${mxd:-99}" le 2
+
+
+# =====================================================================
+# 8. DIE ANWENDUNG, AUF DEM BILDSCHIRM
+#
+# Bis hierher wurde der Dekodierer gemessen. Jetzt die Anwendung: sie
+# laeuft im Fensterserver, zeigt ein Foto, blaettert, zoomt, dreht --
+# und was sie tut, steht in ZWEI Quellen, die beide stimmen muessen:
+# ihren Meldungen auf der seriellen Leitung und dem Bildschirmfoto.
+echo "== 8. die Anwendung Bilder im Fenster =="
+MONO=assets/osum-mono.ttf
+SANS=assets/osum-sans.ttf
+GUIPROGS="viewer sh echo ls cat launcher explorer widgetdemo locate edit"
+grc=0
+for p in $GUIPROGS; do
+    [ -f "$TMPD/$p.elf" ] && continue
+    if ! $FIRNC "kernel/user/$p.fi" -o "$TMPD/$p.o" > "$TMPD/$p.err" 2>&1; then
+        bad "firnc0 uebersetzt $p.fi nicht"; head -5 "$TMPD/$p.err"; grc=1; continue
+    fi
+    ld -T "$ULD" --defsym=USER_ENTRY=_F0.u_start -o "$TMPD/$p.elf" \
+        "$TMPD/crt.o" "$TMPD/$p.o" 2>/dev/null || { bad "ld: $p"; grc=1; }
+    strip --strip-all "$TMPD/$p.elf" 2>/dev/null
+done
+[ $grc -eq 0 ] && ok "die Programme der Oberflaeche sind gebaut"
+
+python3 tools/k15/tree.py "$TMPD/baum" > "$TMPD/baum.log" 2>&1 \
+    || bad "tools/k15/tree.py fehlgeschlagen"
+
+# Die Bilder, die der Betrachter zeigt: vier Formate, damit das
+# Blaettern wirklich durch verschiedene Dekodierer geht.
+GARGS=(build "$TMPD/gui.img" 8192 --inodes=128 /lib/
+  "/lib/mono.ttf=$MONO" "/lib/sans.ttf=$SANS" /bin/)
+for p in $GUIPROGS; do GARGS+=("/bin/$p=$TMPD/$p.elf"); done
+GARGS+=("/bin/files@/bin/explorer")
+GARGS+=(/etc/ "/etc/theme=$TMPD/baum/theme")
+GARGS+=(/bilder/
+        "/bilder/a-rot.png=$FIX/prgb.png"
+        "/bilder/b-foto.jpg=$FIX/j420.jpg"
+        "/bilder/c-alpha.png=$FIX/palpha.png"
+        "/bilder/d-tier.gif=$FIX/ganim.gif"
+        "/bilder/e-wappen.bmp=$FIX/b24.bmp"
+        "/bilder/f-quer.jpg=$FIX/jexif.jpg"
+        "/bilder/g-gross.jpg=$FIX/j12mp.jpg")
+while read -r zeile; do GARGS+=("$zeile"); done < <(python3 tools/k15/bundle.py assets/apps "$TMPD/buendel")
+python3 tools/osum/mkfs.py "${GARGS[@]}" > "$TMPD/mkfsgui.log" 2>&1 \
+    && ok "ein grafisches Abbild mit sieben Bildern in /bilder" \
+    || { bad "mkfs (Oberflaeche) fehlgeschlagen"; tail -4 "$TMPD/mkfsgui.log"; }
+
+GRUND="nokbd nosched noproc nofs"
+foto() { # name monitordatei
+    local name=$1 mon=${2:-}
+    local sock="$TMPD/mon-$name.sock"
+    local aus="$TMPD/$name.txt" ppm="$TMPD/$name.ppm"
+    rm -f "$aus" "$ppm" "$sock"
+    cp -f "$TMPD/gui.img" "$TMPD/live-$name.img"
+    timeout 300 $QEMU_X86 -kernel "$TMPD/k.mb" -m 512 \
+        -append "gfx wm wigapp=/bin/viewer wmhold wiglong $GRUND" \
+        -serial "file:$aus" -display none -no-reboot -vga std \
+        -monitor "unix:$sock,server,nowait" \
+        -drive "file=$TMPD/live-$name.img,format=raw,if=ide,index=0" \
+        -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1 &
+    local pid=$!
+    local i=0
+    while [ $i -lt 2000 ]; do
+        grep -qaE '^wm: hold' "$aus" 2>/dev/null && break
+        kill -0 "$pid" 2>/dev/null || break
+        sleep 0.15
+        i=$((i + 1))
+    done
+    if [ -n "$mon" ]; then
+        python3 tools/wm/monitor.py "$sock" "$mon" > "$TMPD/$name.monlog" 2>&1
+    fi
+    python3 tools/gfx/screenshot.py "$sock" "$ppm" 25 > "$TMPD/$name.shot" 2>&1
+    wait "$pid"
+    RC=$?
+    rm -f "$sock"
+    return 0
+}
+zeiger() { # datei x y
+    local f=$1 x=$2 y=$3 i
+    for i in 1 2 3 4 5 6; do echo "mouse_move -120 -120" >> "$f"; done
+    local dx=$x dy=$y
+    while [ "$dx" -gt 0 ] || [ "$dy" -gt 0 ]; do
+        local sx=$dx sy=$dy
+        [ "$sx" -gt 120 ] && sx=120
+        [ "$sy" -gt 120 ] && sy=120
+        echo "mouse_move $sx $sy" >> "$f"
+        dx=$((dx - sx)); dy=$((dy - sy))
+    done
+}
+klick() { # datei x y
+    zeiger "$1" "$2" "$3"
+    printf 'warte 0.3\nmouse_button 1\nwarte 0.2\nmouse_button 0\nwarte 1.2\n' >> "$1"
+}
+vfeld() { grep -a "^viewer: " "$1" | tail -1 | grep -oE "$2=[0-9]+" | head -1 | cut -d= -f2; }
+vfeld_n() { grep -a "^viewer: " "$1" | sed -n "$3p" | grep -oE "$2=[0-9]+" | head -1 | cut -d= -f2; }
+
+mkdir -p docs/shots/viewer
+
+# ---- 8a. der erste Start: das Fenster steht, das Bild ist da.
+foto start
+num "der Kern beendet sich sauber" "$RC" eq 21
+has "$TMPD/start.txt" "wm: hold" "der Kern haelt fuer das Foto still"
+has "$TMPD/start.txt" "viewer: los" "die Anwendung ist von der Platte gestartet"
+va=$(vfeld "$TMPD/start.txt" an)
+num "sie findet die Bilder im Ordner" "${va:-0}" eq 7
+vb=$(vfeld "$TMPD/start.txt" br); vh=$(vfeld "$TMPD/start.txt" ho)
+num "das erste Bild ist so breit wie die Datei sagt" "${vb:-0}" eq 64
+num "und so hoch" "${vh:-0}" eq 48
+vm=$(vfeld "$TMPD/start.txt" mini)
+num "der Miniaturenstreifen ist gefuellt" "${vm:-0}" ge 5
+# Das Foto misst, dass wirklich etwas gemalt wurde: die Zeichenflaeche
+# ist nicht leer, und der Miniaturenstreifen auch nicht.
+schau "die Zeichenflaeche traegt Bildpunkte" \
+    nichtleer "$TMPD/start.ppm" 100 120 500 300 1000
+schau "der Miniaturenstreifen traegt Bildpunkte" \
+    nichtleer "$TMPD/start.ppm" 40 490 600 50 500
+
+# ---- 8b. blaettern: aus PNG wird JPEG wird PNG wird GIF ...
+M="$TMPD/weiter.mon"; : > "$M"
+klick "$M" 74 66     # der Knopf ">"
+klick "$M" 74 66
+klick "$M" 74 66
+foto weiter "$M"
+n1=$(vfeld_n "$TMPD/weiter.txt" fmt 2)
+n2=$(vfeld_n "$TMPD/weiter.txt" fmt 3)
+n3=$(vfeld_n "$TMPD/weiter.txt" fmt 4)
+printf '        die Formate beim Blaettern: %s %s %s (1=PNG 2=JPEG 3=BMP 4=GIF)\n' \
+    "$n1" "$n2" "$n3"
+num "nach einem Klick auf > ist das zweite Bild ein JPEG" "${n1:-0}" eq 2
+num "nach dem zweiten ein PNG mit Alpha" "${n2:-0}" eq 1
+num "nach dem dritten ein GIF" "${n3:-0}" eq 4
+bi=$(vfeld "$TMPD/weiter.txt" bild)
+num "und der Zaehler steht auf dem vierten Bild" "${bi:-0}" eq 3
+
+# ---- 8c. Zoom: einpassen und 100 %.
+M="$TMPD/zoom.mon"; : > "$M"
+klick "$M" 348 66    # "100 %"
+foto zoom100 "$M"
+zf=$(vfeld "$TMPD/zoom100.txt" fit)
+zz=$(vfeld "$TMPD/zoom100.txt" zoom)
+num "nach dem Klick auf 100 % ist das Einpassen aus" "${zf:-9}" eq 0
+num "und der Zoom steht auf hundert" "${zz:-0}" eq 100
+
+# ---- 8d. drehen: aus 64x48 wird 48x64.
+M="$TMPD/dreh.mon"; : > "$M"
+klick "$M" 456 66    # "Rechts"
+foto dreh "$M"
+db=$(vfeld "$TMPD/dreh.txt" br); dh=$(vfeld "$TMPD/dreh.txt" ho)
+num "nach einer Vierteldrehung ist die Breite die alte Hoehe" "${db:-0}" eq 48
+num "und die Hoehe die alte Breite" "${dh:-0}" eq 64
+
+# ---- 8e. EXIF: das Bild mit Lage 6 kommt gedreht heraus.
+M="$TMPD/exif.mon"; : > "$M"
+for k in 1 2 3 4 5; do klick "$M" 74 66; done
+foto exif "$M"
+eo=$(vfeld "$TMPD/exif.txt" ori)
+eb=$(vfeld "$TMPD/exif.txt" br); eh=$(vfeld "$TMPD/exif.txt" ho)
+num "das Foto meldet die EXIF-Lage 6" "${eo:-0}" eq 6
+num "und es wird gedreht angezeigt: aus 40 breit wird 24" "${eb:-0}" eq 24
+num "und aus 24 hoch wird 40" "${eh:-0}" eq 40
+
+# ---- 8f. das grosse Bild: 12 MP im Fenster, ohne dass etwas stirbt.
+M="$TMPD/gross.mon"; : > "$M"
+for k in 1 2 3 4 5 6; do klick "$M" 74 66; done
+foto gross "$M"
+gb=$(vfeld "$TMPD/gross.txt" br); gh=$(vfeld "$TMPD/gross.txt" ho)
+gv=$(vfeld "$TMPD/gross.txt" voll)
+ga=$(vfeld "$TMPD/gross.txt" arena)
+num "das 12-MP-Bild steht im Fenster" "${gb:-0}" eq 4000
+num "mit voller Hoehe" "${gh:-0}" eq 3000
+printf '        dafuer gebraucht: %s Oktette Arena, ganz im Speicher=%s\n' "$ga" "$gv"
+schau "und die Zeichenflaeche zeigt es" \
+    nichtleer "$TMPD/gross.ppm" 100 120 500 300 1000
+
+# ---- 8g. Diaschau und Sichern.
+M="$TMPD/dia.mon"; : > "$M"
+klick "$M" 560 66    # "Diaschau"
+printf 'warte 4.0\n' >> "$M"
+foto dia "$M"
+dz=$(vfeld "$TMPD/dia.txt" dia)
+num "die Diaschau laeuft" "${dz:-0}" eq 1
+db2=$(vfeld "$TMPD/dia.txt" bild)
+if [ "${db2:-0}" != "0" ]; then ok "und sie ist von selbst weitergegangen (Bild $db2)"
+else bad "die Diaschau ist nicht weitergegangen"; fi
+
+M="$TMPD/save.mon"; : > "$M"
+klick "$M" 60 542    # "Zuschneiden"
+klick "$M" 152 542   # "Als PNG"
+foto save "$M"
+has "$TMPD/save.txt" "viewer: gesichert" "die Anwendung schreibt eine PNG-Datei"
+sn=$(grep -a 'viewer: gesichert' "$TMPD/save.txt" | tail -1 | grep -oE '[0-9]+' | tail -1)
+num "und die Datei ist nicht leer" "${sn:-0}" gt 100
+if python3 tools/viewer/holen.py "$TMPD/live-save.img" \
+    "/bilder/a-rot.png.viewer.png" "$TMPD/ausapp.png" > "$TMPD/holen2.log" 2>&1; then
+    if python3 - "$TMPD/ausapp.png" > "$TMPD/pilapp.log" 2>&1 <<'PY'
+import sys
+from PIL import Image
+im = Image.open(sys.argv[1]); im.load()
+print("%s %dx%d %s" % (im.format, im.width, im.height, im.mode))
+PY
+    then ok "Pillow liest, was die Anwendung geschrieben hat: $(cat "$TMPD/pilapp.log")"
+    else bad "Pillow kann die Datei der Anwendung nicht lesen"; fi
+else
+    bad "die geschriebene Datei ist nicht auf dem Abbild"; head -2 "$TMPD/holen2.log"
+fi
+
+# ---- 8h. die Bildschirmfotos in den Baum, als PNG.
+for f in start weiter zoom100 dreh exif gross dia save; do
+    [ -f "$TMPD/$f.ppm" ] || continue
+    python3 tools/gfx/ppm2png.py "$TMPD/$f.ppm" "docs/shots/viewer/$f.png" \
+        > /dev/null 2>&1 && ok "docs/shots/viewer/$f.png" \
+        || bad "das Foto $f laesst sich nicht wandeln"
+done
 
 echo
 echo "VIEWER: $pass passed, $fail failed"

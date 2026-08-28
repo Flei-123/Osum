@@ -1,0 +1,1269 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/viewer.fi -- Runde VIEWER: /bin/viewer, die Anwendung
+// "Bilder".
+//
+// SIE HEISST IM DATEISYSTEM `viewer` UND AUF DEM BILDSCHIRM "Bilder".
+// Das ist die Regel dieses Baums (docs/NAMING.md): der Pfad ist
+// englisch und wird nie uebersetzt, der Anzeigename steht in
+// `/apps/viewer.osp/INFO` und wird es.
+//
+// ================================================== WAS SIE WIRKLICH TUT
+//
+//   Blaettern    Pfeiltasten oder die Knoepfe: das naechste und das
+//                vorige Bild IM SELBEN ORDNER, in derselben Reihenfolge,
+//                die der Dateimanager zeigt.
+//   Zoom         "Einpassen" und "100 %" mit einem Klick, dazwischen in
+//                Stufen. Beim Verkleinern wird gemittelt (sonst wird aus
+//                einem Ziegeldach ein Moiré-Muster), beim Vergroessern
+//                wiederholt (sonst wird aus einem Bildschirmfoto Brei).
+//   Drehen       links und rechts, und die EXIF-Ausrichtung wird beim
+//                Laden angewandt -- sonst steht jedes zweite Handyfoto
+//                quer, und das ist der haeufigste erste Eindruck von
+//                einem Betrachter, der nichts taugt.
+//   Miniaturen   ein Streifen unten, aus dem Ordner, im Achtel
+//                dekodiert (bei JPEG kostet das ein Sechzigstel).
+//   Diaschau     alle drei Sekunden das naechste Bild, mit Rundlauf.
+//   Bearbeiten   auf den sichtbaren Ausschnitt zuschneiden, drehen, auf
+//                eine eingetippte Breite bringen -- und als PNG sichern.
+//   Angaben      Name, Format, Masse, Dateigroesse, Bittiefe, und bei
+//                einem unvollstaendigen Bild steht das da.
+//
+// ============================================ DIE GRENZE, UND SIE IST EINE
+//
+// Der Dekodierer liefert ZEILEN (`kernel/user/img.fi`), also haengt der
+// Speicherbedarf beim Anzeigen an der Fenstergroesse und nicht an der
+// Zahl der Bildpunkte: ein Panorama mit 50 Megabildpunkten wird
+// angezeigt, ohne dass etwas davon am Stueck im Speicher liegt.
+//
+// FUER DAS BEARBEITEN gilt das nicht: zuschneiden, drehen und sichern
+// brauchen das ganze Bild. Passt es nicht in das Budget (VOLLGRENZE,
+// unten als Zahl), bleibt die Anzeige eine VORSCHAU -- sie sagt das in
+// der Statuszeile, und die Knoepfe zum Bearbeiten sind aus. Ein
+// Betrachter, der in dieser Lage einfach abstuerzt, waere die
+// schlechtere Antwort; einer, der es verschweigt, auch.
+
+profile kernel
+
+import ulib
+import libc.io
+import libc.mem
+import wlib
+import wlibc
+import img
+import imgops
+import imgmem
+import appdir
+
+export { u_start }
+
+// Die Arena: alles, was Dekodierer und Bild brauchen. 48 MiB von den 74,
+// die ein Prozess seit dieser Runde haben kann.
+const ARENA: u64 = 48 * 1024 * 1024
+// Was ein Bild am Stueck kosten darf, damit es bearbeitbar bleibt:
+// 32 MiB RGBA, also acht Megabildpunkte.
+const VOLLGRENZE: u64 = 32 * 1024 * 1024
+const MAXFILE: u64 = 24 * 1024 * 1024
+const MAXNAMEN: u64 = 256
+const NAMEB: u64 = 64
+const MINIS: u64 = 8 // Miniaturen im Streifen
+const MINIW: u64 = 72
+const MINIH: u64 = 54
+
+// Das Fenster.
+const FW: u64 = 780
+const FH: u64 = 560
+const CX: u64 = 8 // Zeichenflaeche
+const CY: u64 = 78
+const CW: u64 = 764
+const CH: u64 = 380
+const MY: u64 = 464 // Miniaturenstreifen
+
+static mut arena_base: u64 = 0
+static mut namen: [u8; 16384] = [0 as u8; 16384] // MAXNAMEN * NAMEB
+static mut anz: u64 = 0
+static mut jetzt: u64 = 0 // welches Bild
+static mut ordner: [u8; 256] = [0 as u8; 256]
+static mut pfad: [u8; 320] = [0 as u8; 320]
+static mut dbuf: [u8; 4096] = [0 as u8; 4096]
+
+// Das geladene Bild.
+static mut voll: u64 = 0 // ganzes Bild, RGBA, oder 0
+static mut vw: u64 = 0
+static mut vh: u64 = 0
+static mut vorschau: u64 = 0 // verkleinerte Fassung (immer da)
+static mut pw2: u64 = 0
+static mut ph2: u64 = 0
+static mut fmt: u64 = 0
+static mut grund: u64 = 0
+static mut teilweise: u64 = 0
+static mut dateigroesse: u64 = 0
+static mut origw: u64 = 0
+static mut origh: u64 = 0
+static mut bits: u64 = 0
+static mut ori: u64 = 1
+static mut geladen: u64 = 0
+
+// Ansicht
+static mut zoom: u64 = 100 // Prozent, 0 = einpassen
+static mut fitmode: u64 = 1
+static mut panx: u64 = 0
+static mut pany: u64 = 0
+static mut drehung: u64 = 0 // 0..3, Vierteldrehungen
+static mut diaschau: u64 = 0
+static mut dialetzt: u64 = 0
+const DIAMS: u64 = 3000
+
+// Miniaturen
+static mut mini: u64 = 0 // MINIS * MINIW * MINIH * 4
+static mut mini_da: [u64; 8] = [0 as u64; 8]
+static mut mini_von: u64 = 0
+
+static mut status: [u8; 256] = [0 as u8; 256]
+static mut titel: [u8; 128] = [0 as u8; 128]
+static mut ebreite: [u8; 16] = [0 as u8; 16]
+
+// DIE BESCHRIFTUNGEN SIND STATISCH, und das ist kein Geschmack: die
+// Widget-Bibliothek MERKT SICH den Zeiger auf den Text (sie kopiert ihn
+// nicht), also muss er den Rahmen ueberleben, in dem das Fenster gebaut
+// wird. Der Uebersetzer prueft das seit Runde 79 und sagt nein --
+// derselbe Aufbau steht in `speicher.fi` und in `einstellungen.fi`.
+static mut s_prev: [u8; 4] = "<  \0"
+static mut s_next: [u8; 4] = ">  \0"
+static mut s_out: [u8; 4] = "-  \0"
+static mut s_in: [u8; 4] = "+  \0"
+static mut s_fit: [u8; 12] = "Einpassen  \0"
+static mut s_100: [u8; 8] = "100 %  \0"
+static mut s_l: [u8; 8] = "Links  \0"
+static mut s_r: [u8; 8] = "Rechts \0"
+static mut s_dia: [u8; 12] = "Diaschau   \0"
+static mut s_crop: [u8; 14] = "Zuschneiden  \0"
+static mut s_save: [u8; 12] = "Als PNG    \0"
+static mut s_br: [u8; 10] = "Breite:  \0"
+static mut s_tit: [u8; 8] = "Bilder \0"
+
+fn ld8(p: u64) -> u64 {
+    return (*((p) as *mut u8)) as u64
+}
+
+fn namep(i: u64) -> u64 {
+    return (&namen[((i * NAMEB)) as usize]) as u64
+}
+
+// ------------------------------------------------------- der Ordner
+
+fn ist_bild(name: u64) -> bool {
+    var p: u64 = name
+    var punkt: u64 = 0
+    while ld8(p) != 0 {
+        if ld8(p) == 46 {
+            punkt = p
+        }
+        p = p + 1
+    }
+    if punkt == 0 {
+        return false
+    }
+    var e: [u8; 8] = [0 as u8; 8]
+    var i: u64 = 0
+    while i < 6 && ld8(punkt + 1 + i) != 0 {
+        var c: u64 = ld8(punkt + 1 + i)
+        if c >= 65 && c <= 90 {
+            c = c + 32
+        }
+        e[(i) as usize] = c as u8
+        i = i + 1
+    }
+    var s1: [u8; 4] = "jpg\0"
+    var s2: [u8; 5] = "jpeg\0"
+    var s3: [u8; 4] = "png\0"
+    var s4: [u8; 4] = "bmp\0"
+    var s5: [u8; 4] = "gif\0"
+    let ep: u64 = (&e[0 as usize]) as u64
+    return ulib.streq(ep, (&s1[0 as usize]) as u64)
+        || ulib.streq(ep, (&s2[0 as usize]) as u64)
+        || ulib.streq(ep, (&s3[0 as usize]) as u64)
+        || ulib.streq(ep, (&s4[0 as usize]) as u64)
+        || ulib.streq(ep, (&s5[0 as usize]) as u64)
+}
+
+// Die Bilder des Ordners, in der Reihenfolge, in der das Dateisystem
+// sie hergibt -- dieselbe, die der Dateimanager zeigt.
+fn ordner_lesen() {
+    anz = 0
+    let fd: u64 = io.dir_open((&ordner[0 as usize]) as u64)
+    if ulib.bad(fd) {
+        return
+    }
+    var going: bool = true
+    while going {
+        let n: u64 = io.dir_read(fd, (&dbuf[0 as usize]) as u64, 4096)
+        if ulib.bad(n) || n == 0 {
+            going = false
+        } else {
+            var at: u64 = 0
+            while at < n {
+                let rec: u64 = (&dbuf[0 as usize]) as u64 + at
+                let nm: u64 = io.dir_name(rec)
+                if ist_bild(nm) && anz < MAXNAMEN {
+                    ulib.strncpy(namep(anz), nm, NAMEB - 1)
+                    anz = anz + 1
+                }
+                let rl: u64 = io.dir_reclen(rec)
+                if rl == 0 {
+                    at = n
+                } else {
+                    at = at + rl
+                }
+            }
+        }
+    }
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    // Einfache Sortierung nach Namen -- ein Ordner mit Fotos, der in
+    // zufaelliger Reihenfolge blaettert, fuehlt sich kaputt an.
+    var i: u64 = 1
+    while i < anz {
+        var j: u64 = i
+        while j > 0 && ulib.cmp(namep(j - 1), namep(j)) > 0 {
+            var t: [u8; 64] = [0 as u8; 64]
+            ulib.strncpy((&t[0 as usize]) as u64, namep(j), NAMEB - 1)
+            ulib.strncpy(namep(j), namep(j - 1), NAMEB - 1)
+            ulib.strncpy(namep(j - 1), (&t[0 as usize]) as u64, NAMEB - 1)
+            j = j - 1
+        }
+        i = i + 1
+    }
+}
+
+fn pfad_bauen(i: u64) {
+    let p: u64 = (&pfad[0 as usize]) as u64
+    ulib.strncpy(p, (&ordner[0 as usize]) as u64, 200)
+    let l: u64 = ulib.length(p)
+    if l > 0 && ld8(p + l - 1) != 47 {
+        __mmio_write8((p + l) as *mut u8, 47 as u8)
+        __mmio_write8((p + l + 1) as *mut u8, 0 as u8)
+    }
+    ulib.strcat(p, namep(i))
+}
+
+// ---------------------------------------------------------- das Laden
+
+fn datei_lesen(pf: u64, out_len: u64) -> u64 {
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, pf, 0, 0)
+    if ulib.bad(fd) {
+        return 0
+    }
+    let sz: u64 = ulib.size_of(pf)
+    if sz == 0 || sz > MAXFILE {
+        ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+        return 0
+    }
+    let b: u64 = imgmem.take(sz + 16)
+    if b == 0 {
+        ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+        return 0
+    }
+    var got: u64 = 0
+    var going: bool = true
+    while going {
+        var want: u64 = sz - got
+        if want > 4096 {
+            want = 4096
+        }
+        if want == 0 {
+            going = false
+        } else {
+            let n: u64 = ulib.sys(ulib.SYS_READ, fd, b + got, want)
+            if ulib.bad(n) || n == 0 {
+                going = false
+            } else {
+                got = got + n
+            }
+        }
+    }
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    __mmio_write64((out_len) as *mut u64, got)
+    return b
+}
+
+// Passt das Bild in das Fenster? Gibt die Anzeigemasse.
+fn fit_w(w: u64, h: u64) -> u64 {
+    if w == 0 || h == 0 {
+        return 1
+    }
+    var dw: u64 = w
+    var dh: u64 = h
+    if dw > CW {
+        dh = dh * CW / dw
+        dw = CW
+    }
+    if dh > CH {
+        dw = dw * CH / dh
+        dh = CH
+    }
+    if dw == 0 {
+        dw = 1
+    }
+    return dw
+}
+
+fn fit_h(w: u64, h: u64) -> u64 {
+    if w == 0 || h == 0 {
+        return 1
+    }
+    var dw: u64 = w
+    var dh: u64 = h
+    if dw > CW {
+        dh = dh * CW / dw
+        dw = CW
+    }
+    if dh > CH {
+        dw = dw * CH / dh
+        dh = CH
+    }
+    if dh == 0 {
+        dh = 1
+    }
+    return dh
+}
+
+fn laden(i: u64) {
+    imgmem.reset()
+    voll = 0
+    vorschau = 0
+    geladen = 0
+    teilweise = 0
+    drehung = 0
+    panx = 0
+    pany = 0
+    fitmode = 1
+    if anz == 0 {
+        return
+    }
+    jetzt = i
+    pfad_bauen(i)
+    var ln: [u64; 1] = [0 as u64; 1]
+    let b: u64 = datei_lesen((&pfad[0 as usize]) as u64,
+        (&ln[0 as usize]) as u64)
+    if b == 0 {
+        grund = img.I_TRUNCATED
+        return
+    }
+    dateigroesse = ln[(0) as usize]
+    if !img.begin(b, dateigroesse, 1) {
+        grund = img.reason()
+        fmt = img.format()
+        origw = 0
+        origh = 0
+        return
+    }
+    fmt = img.format()
+    grund = img.I_OK
+    origw = img.width()
+    origh = img.height()
+    bits = img.source_bits()
+    ori = img.orientation()
+    // Passt das ganze Bild? Dann halten wir es -- nur so lassen sich
+    // Drehen, Zuschneiden und Sichern anbieten.
+    let bytes: u64 = origw * origh * 4
+    let zeile: u64 = imgmem.take(origw * 4 + 64)
+    if bytes <= VOLLGRENZE && bytes + 4 * 1024 * 1024 < imgmem.left() {
+        voll = imgmem.take(bytes)
+    }
+    pw2 = fit_w(origw, origh)
+    ph2 = fit_h(origw, origh)
+    vorschau = imgmem.take(pw2 * ph2 * 4)
+    if zeile == 0 || vorschau == 0 {
+        grund = img.I_MEMORY
+        return
+    }
+    if voll != 0 {
+        var y: u64 = 0
+        while y < origh && img.next_row(zeile) {
+            imgmem.copy(voll + y * origw * 4, zeile, origw * 4)
+            y = y + 1
+        }
+        // Die Vorschau entsteht aus dem, was schon da ist.
+        if imgops.scale_begin(origw, origh, pw2, ph2, vorschau) {
+            var r: u64 = 0
+            while r < origh {
+                imgops.scale_row(voll + r * origw * 4)
+                r = r + 1
+            }
+            imgops.scale_done()
+        }
+    } else {
+        // ZU GROSS FUER DEN SPEICHER, ABER NICHT FUER DEN BILDSCHIRM:
+        // die Zeilen laufen durch den Verkleinerer und landen in der
+        // Vorschau. Nichts davon liegt je am Stueck im Speicher.
+        if imgops.scale_begin(origw, origh, pw2, ph2, vorschau) {
+            var y: u64 = 0
+            while y < origh && img.next_row(zeile) {
+                imgops.scale_row(zeile)
+                y = y + 1
+            }
+            imgops.scale_done()
+        }
+    }
+    teilweise = img.partial()
+    vw = origw
+    vh = origh
+    geladen = 1
+    // EXIF: das Foto steht sonst quer.
+    let q: u64 = imgops.orient_to_rot(ori)
+    if q != 0 {
+        drehen(q)
+    }
+}
+
+// Das ganze Bild drehen (nur wenn es am Stueck da ist), sonst nur die
+// Vorschau -- die Anzeige stimmt in beiden Faellen.
+fn drehen(q: u64) {
+    if q == 0 {
+        return
+    }
+    if voll != 0 {
+        let dst: u64 = imgmem.take(vw * vh * 4)
+        if dst != 0 {
+            imgops.rotate(voll, vw, vh, dst, q)
+            voll = dst
+            if q != 2 {
+                let t: u64 = vw
+                vw = vh
+                vh = t
+            }
+        }
+    }
+    let np: u64 = fit_w(vw, vh)
+    let nh: u64 = fit_h(vw, vh)
+    let nv: u64 = imgmem.take(np * nh * 4)
+    if nv == 0 {
+        return
+    }
+    if voll != 0 {
+        if imgops.scale_begin(vw, vh, np, nh, nv) {
+            var r: u64 = 0
+            while r < vh {
+                imgops.scale_row(voll + r * vw * 4)
+                r = r + 1
+            }
+            imgops.scale_done()
+        }
+    } else {
+        let dst: u64 = imgmem.take(pw2 * ph2 * 4)
+        if dst == 0 {
+            return
+        }
+        imgops.rotate(vorschau, pw2, ph2, dst, q)
+        if q != 2 {
+            let t: u64 = pw2
+            pw2 = ph2
+            ph2 = t
+            let t2: u64 = vw
+            vw = vh
+            vh = t2
+        }
+        imgmem.copy(nv, dst, pw2 * ph2 * 4)
+        vorschau = nv
+        return
+    }
+    vorschau = nv
+    pw2 = np
+    ph2 = nh
+}
+
+// ---------------------------------------------------------- das Malen
+
+fn schach(x: u64, y: u64) -> u64 {
+    // Das Schachbrett hinter durchsichtigen Bildpunkten. Ohne es sieht
+    // ein PNG mit Alpha aus wie eines ohne.
+    if (((x / 8) + (y / 8)) & 1) == 0 {
+        return 0xC0C0C0
+    }
+    return 0x909090
+}
+
+// Die Zeichenflaeche: das Bild, wie es gerade eingestellt ist.
+fn malen(w: u64) {
+    let h: u64 = wlib.handle(w)
+    if h == 0 {
+        return
+    }
+    // Der Streifen ist begrenzt (`wlibc.surf_rows`), also wird die
+    // Flaeche in Baendern gemalt und je Band einmal hinuebergeschoben.
+    var by: u64 = CY
+    while by < CY + CH {
+        var bh: u64 = wlibc.surf_rows()
+        if by + bh > CY + CH {
+            bh = CY + CH - by
+        }
+        wlibc.set_band(by)
+        wlibc.clip_set(CX, by, CX + CW, by + bh)
+        wlibc.rect(CX, by, CW, bh, wlibc.theme(wlibc.T_BG))
+        malen_band(by, bh)
+        wlibc.push(h, CX, by, CW, bh)
+        by = by + bh
+    }
+    // Der Miniaturenstreifen.
+    wlibc.set_band(MY)
+    wlibc.clip_set(CX, MY, CX + CW, MY + MINIH + 4)
+    wlibc.rect(CX, MY, CW, MINIH + 4, wlibc.theme(wlibc.T_PANEL))
+    var k: u64 = 0
+    while k < MINIS && mini_von + k < anz {
+        let x0: u64 = CX + 4 + k * (MINIW + 6)
+        if mini_da[(k) as usize] != 0 {
+            malen_mini(k, x0, MY + 2)
+        }
+        if mini_von + k == jetzt {
+            wlibc.frame(x0 - 2, MY, MINIW + 4, MINIH + 4,
+                wlibc.theme(wlibc.T_ACCENT))
+        }
+        k = k + 1
+    }
+    wlibc.push(h, CX, MY, CW, MINIH + 4)
+}
+
+fn malen_mini(k: u64, x0: u64, y0: u64) {
+    let p: u64 = mini + k * MINIW * MINIH * 4
+    var y: u64 = 0
+    while y < MINIH {
+        var x: u64 = 0
+        while x < MINIW {
+            let o: u64 = p + (y * MINIW + x) * 4
+            let a: u64 = ld8(o + 3)
+            var c: u64 = (ld8(o) << 16) | (ld8(o + 1) << 8) | ld8(o + 2)
+            if a < 255 {
+                c = wlibc.blend(schach(x, y), c, a)
+            }
+            wlibc.px(x0 + x, y0 + y, c)
+            x = x + 1
+        }
+        y = y + 1
+    }
+}
+
+// Ein Band der Zeichenflaeche. Jeder Bildpunkt des Fensters holt sich
+// seinen Bildpunkt aus der Quelle -- das ist die Stelle, an der Zoom,
+// Verschiebung und das Schachbrett zusammenkommen.
+fn malen_band(by: u64, bh: u64) {
+    if geladen == 0 {
+        return
+    }
+    var quelle: u64 = vorschau
+    var qw: u64 = pw2
+    var qh: u64 = ph2
+    if fitmode == 0 && voll != 0 {
+        quelle = voll
+        qw = vw
+        qh = vh
+    }
+    if quelle == 0 || qw == 0 || qh == 0 {
+        return
+    }
+    // Wie gross ist das Bild auf dem Schirm?
+    var zw: u64 = pw2
+    var zh: u64 = ph2
+    if fitmode == 0 {
+        zw = vw * zoom / 100
+        zh = vh * zoom / 100
+        if zw == 0 {
+            zw = 1
+        }
+        if zh == 0 {
+            zh = 1
+        }
+    }
+    // Wo faengt es an?
+    var ox: u64 = CX
+    var oy: u64 = CY
+    if zw < CW {
+        ox = CX + (CW - zw) / 2
+    }
+    if zh < CH {
+        oy = CY + (CH - zh) / 2
+    }
+    var y: u64 = by
+    while y < by + bh {
+        var x: u64 = CX
+        while x < CX + CW {
+            // Bildpunkt im gezoomten Bild
+            var ix: u64 = 0
+            var iy: u64 = 0
+            var drin: bool = true
+            if x + panx < ox {
+                drin = false
+            } else {
+                ix = x + panx - ox
+            }
+            if y + pany < oy {
+                drin = false
+            } else {
+                iy = y + pany - oy
+            }
+            if drin && ix < zw && iy < zh {
+                let sx: u64 = ix * qw / zw
+                let sy: u64 = iy * qh / zh
+                if sx < qw && sy < qh {
+                    let o: u64 = quelle + (sy * qw + sx) * 4
+                    let a: u64 = ld8(o + 3)
+                    var c: u64 = (ld8(o) << 16) | (ld8(o + 1) << 8)
+                        | ld8(o + 2)
+                    if a < 255 {
+                        c = wlibc.blend(schach(x, y), c, a)
+                    }
+                    wlibc.px(x, y, c)
+                }
+            }
+            x = x + 1
+        }
+        y = y + 1
+    }
+}
+
+// ------------------------------------------------------- Miniaturen
+
+fn minis_bauen() {
+    // Der Streifen zeigt ein Fenster von MINIS Bildern um das laufende
+    // herum. Jedes wird im Achtel dekodiert -- bei JPEG kostet das nur
+    // den Gleichanteil je Block.
+    var von: u64 = 0
+    if jetzt >= MINIS / 2 {
+        von = jetzt - MINIS / 2
+    }
+    if von + MINIS > anz && anz > MINIS {
+        von = anz - MINIS
+    }
+    mini_von = von
+    var k: u64 = 0
+    while k < MINIS {
+        mini_da[(k) as usize] = 0
+        k = k + 1
+    }
+    k = 0
+    while k < MINIS && von + k < anz {
+        if mini_eins(k, von + k) {
+            mini_da[(k) as usize] = 1
+        }
+        k = k + 1
+    }
+}
+
+// Der Speicher der Miniaturen liegt AUSSERHALB der Bildarena: er wird
+// beim naechsten `imgmem.reset` nicht mit weggeworfen.
+static mut mini_arena: u64 = 0
+const MINI_ARENA: u64 = 4 * 1024 * 1024
+
+fn mini_eins(k: u64, i: u64) -> bool {
+    // Fuer die Miniatur wird die Arena benutzt und danach wieder auf den
+    // Stand von vorher gebracht. Das geht, weil `imgmem` ein
+    // Stossallokator ist -- und genau dafuer ist er einer.
+    let marke: u64 = imgmem.used()
+    pfad_bauen(i)
+    var ln: [u64; 1] = [0 as u64; 1]
+    let b: u64 = datei_lesen((&pfad[0 as usize]) as u64,
+        (&ln[0 as usize]) as u64)
+    var gut: bool = false
+    if b != 0 {
+        if img.begin(b, ln[(0) as usize], 8) {
+            let w: u64 = img.width()
+            let h: u64 = img.height()
+            let zeile: u64 = imgmem.take(w * 4 + 64)
+            let ziel: u64 = mini + k * MINIW * MINIH * 4
+            if zeile != 0 && w > 0 && h > 0 {
+                imgmem.zero(ziel, MINIW * MINIH * 4)
+                // In das Kaestchen einpassen, Seitenverhaeltnis behalten.
+                var dw: u64 = w
+                var dh: u64 = h
+                if dw * MINIH > dh * MINIW {
+                    dh = dh * MINIW / dw
+                    dw = MINIW
+                } else {
+                    dw = dw * MINIH / dh
+                    dh = MINIH
+                }
+                if dw == 0 {
+                    dw = 1
+                }
+                if dh == 0 {
+                    dh = 1
+                }
+                let tmp: u64 = imgmem.take(dw * dh * 4)
+                if tmp != 0 && imgops.scale_begin(w, h, dw, dh, tmp) {
+                    var y: u64 = 0
+                    while y < h && img.next_row(zeile) {
+                        imgops.scale_row(zeile)
+                        y = y + 1
+                    }
+                    imgops.scale_done()
+                    let xo: u64 = (MINIW - dw) / 2
+                    let yo: u64 = (MINIH - dh) / 2
+                    var r: u64 = 0
+                    while r < dh {
+                        imgmem.copy(ziel + ((yo + r) * MINIW + xo) * 4,
+                            tmp + r * dw * 4, dw * 4)
+                        r = r + 1
+                    }
+                    gut = true
+                }
+            }
+        }
+    }
+    imgmem.set_used(marke)
+    return gut
+}
+
+// --------------------------------------------------------- Statuszeile
+
+fn zahl_an(ziel: u64, v: u64) {
+    var b: [u8; 26] = [0 as u8; 26]
+    let n: u64 = ulib.digits(v, (&b[0 as usize]) as u64)
+    let l: u64 = ulib.length(ziel)
+    var i: u64 = 0
+    while i < n {
+        __mmio_write8((ziel + l + i) as *mut u8, b[(i) as usize])
+        i = i + 1
+    }
+    __mmio_write8((ziel + l + n) as *mut u8, 0 as u8)
+}
+
+fn text_an(ziel: u64, p: u64) {
+    ulib.strcat(ziel, p)
+}
+
+fn status_bauen() {
+    var s_x: [u8; 4] = " x \0"
+    var s_kl: [u8; 3] = "  \0"
+    var s_ok: [u8; 8] = " Punkt\0\0"
+    var s_by: [u8; 10] = " Oktett  \0"
+    var s_teil: [u8; 22] = "  UNVOLLSTAENDIG     \0"
+    var s_pv: [u8; 24] = "  VORSCHAU (zu gross)  \0"
+    var s_fmt0: [u8; 8] = "?      \0"
+    var s_fmt1: [u8; 8] = "PNG    \0"
+    var s_fmt2: [u8; 8] = "JPEG   \0"
+    var s_fmt3: [u8; 8] = "BMP    \0"
+    var s_fmt4: [u8; 8] = "GIF    \0"
+    var s_bit: [u8; 8] = " Bit   \0"
+    var s_ori: [u8; 12] = " EXIF-Lage \0"
+    var rt: [u8; 24] = [0 as u8; 24]
+    let s: u64 = (&status[0 as usize]) as u64
+    __mmio_write8((s) as *mut u8, 0 as u8)
+    if anz == 0 {
+        var s_leer: [u8; 30] = "kein Bild in diesem Ordner\0\0\0\0"
+        text_an(s, (&s_leer[0 as usize]) as u64)
+        return
+    }
+    text_an(s, namep(jetzt))
+    text_an(s, (&s_kl[0 as usize]) as u64)
+    var fp: u64 = (&s_fmt0[0 as usize]) as u64
+    if fmt == img.F_PNG {
+        fp = (&s_fmt1[0 as usize]) as u64
+    } else if fmt == img.F_JPEG {
+        fp = (&s_fmt2[0 as usize]) as u64
+    } else if fmt == img.F_BMP {
+        fp = (&s_fmt3[0 as usize]) as u64
+    } else if fmt == img.F_GIF {
+        fp = (&s_fmt4[0 as usize]) as u64
+    }
+    text_an(s, fp)
+    if grund != img.I_OK {
+        img.reason_text(grund, (&rt[0 as usize]) as u64)
+        text_an(s, (&rt[0 as usize]) as u64)
+        return
+    }
+    zahl_an(s, vw)
+    text_an(s, (&s_x[0 as usize]) as u64)
+    zahl_an(s, vh)
+    text_an(s, (&s_kl[0 as usize]) as u64)
+    zahl_an(s, bits)
+    text_an(s, (&s_bit[0 as usize]) as u64)
+    zahl_an(s, dateigroesse)
+    text_an(s, (&s_by[0 as usize]) as u64)
+    if ori != 1 {
+        text_an(s, (&s_ori[0 as usize]) as u64)
+        zahl_an(s, ori)
+    }
+    if teilweise != 0 {
+        text_an(s, (&s_teil[0 as usize]) as u64)
+    }
+    if voll == 0 {
+        text_an(s, (&s_pv[0 as usize]) as u64)
+    }
+}
+
+// ------------------------------------------------------ das Bearbeiten
+
+fn zuschneiden() -> bool {
+    // AUF DEN SICHTBAREN AUSSCHNITT. Was man sieht, bekommt man -- das
+    // ist die eine Art zuzuschneiden, die ohne Mausauswahl im
+    // Fensterserver auskommt und trotzdem ehrlich ist.
+    if voll == 0 || geladen == 0 {
+        return false
+    }
+    var zw: u64 = pw2
+    var zh: u64 = ph2
+    if fitmode == 0 {
+        zw = vw * zoom / 100
+        zh = vh * zoom / 100
+    }
+    if zw == 0 || zh == 0 {
+        return false
+    }
+    var sx: u64 = panx * vw / zw
+    var sy: u64 = pany * vh / zh
+    var cw: u64 = CW * vw / zw
+    var ch: u64 = CH * vh / zh
+    if sx >= vw {
+        sx = 0
+    }
+    if sy >= vh {
+        sy = 0
+    }
+    if sx + cw > vw {
+        cw = vw - sx
+    }
+    if sy + ch > vh {
+        ch = vh - sy
+    }
+    if cw == 0 || ch == 0 {
+        return false
+    }
+    let dst: u64 = imgmem.take(cw * ch * 4)
+    if dst == 0 {
+        return false
+    }
+    if !imgops.crop(voll, vw, vh, sx, sy, cw, ch, dst) {
+        return false
+    }
+    voll = dst
+    vw = cw
+    vh = ch
+    neu_vorschau()
+    return true
+}
+
+fn groesse_aendern(nw: u64) -> bool {
+    if voll == 0 || geladen == 0 || nw == 0 || nw > 20000 {
+        return false
+    }
+    let nh: u64 = vh * nw / vw
+    if nh == 0 {
+        return false
+    }
+    let dst: u64 = imgmem.take(nw * nh * 4)
+    if dst == 0 {
+        return false
+    }
+    if !imgops.scale_begin(vw, vh, nw, nh, dst) {
+        return false
+    }
+    var r: u64 = 0
+    while r < vh {
+        imgops.scale_row(voll + r * vw * 4)
+        r = r + 1
+    }
+    imgops.scale_done()
+    voll = dst
+    vw = nw
+    vh = nh
+    neu_vorschau()
+    return true
+}
+
+fn neu_vorschau() {
+    pw2 = fit_w(vw, vh)
+    ph2 = fit_h(vw, vh)
+    let nv: u64 = imgmem.take(pw2 * ph2 * 4)
+    if nv == 0 {
+        return
+    }
+    if imgops.scale_begin(vw, vh, pw2, ph2, nv) {
+        var r: u64 = 0
+        while r < vh {
+            imgops.scale_row(voll + r * vw * 4)
+            r = r + 1
+        }
+        imgops.scale_done()
+    }
+    vorschau = nv
+    panx = 0
+    pany = 0
+}
+
+fn sichern() -> u64 {
+    if voll == 0 {
+        return 0
+    }
+    let cap: u64 = vw * vh * 4 + 65536
+    let datei: u64 = imgmem.take(cap)
+    if datei == 0 {
+        return 0
+    }
+    let n: u64 = img.save_png(voll, vw, vh, true, datei, cap)
+    if n == 0 {
+        return 0
+    }
+    // <name>.viewer.png neben dem Original.
+    var end: [u8; 12] = ".viewer.png\0"
+    var ziel: [u8; 340] = [0 as u8; 340]
+    let z: u64 = (&ziel[0 as usize]) as u64
+    ulib.strncpy(z, (&pfad[0 as usize]) as u64, 300)
+    ulib.strcat(z, (&end[0 as usize]) as u64)
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, z, ulib.O_MAKE, 0)
+    if ulib.bad(fd) {
+        return 0
+    }
+    var w: u64 = 0
+    while w < n {
+        var want: u64 = n - w
+        if want > 4096 {
+            want = 4096
+        }
+        let r: u64 = ulib.sys(ulib.SYS_WRITE, fd, datei + w, want)
+        if ulib.bad(r) || r == 0 {
+            w = n
+        } else {
+            w = w + r
+        }
+    }
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    return n
+}
+
+// ---------------------------------------------------------- der Ablauf
+
+fn weiter(d: u64) {
+    if anz == 0 {
+        return
+    }
+    var i: u64 = jetzt
+    if d == 1 {
+        i = i + 1
+        if i >= anz {
+            i = 0
+        }
+    } else {
+        if i == 0 {
+            i = anz - 1
+        } else {
+            i = i - 1
+        }
+    }
+    laden(i)
+    minis_bauen()
+}
+
+fn u_start(args: u64) -> u64 {
+    var s_start: [u8; 12] = "viewer: los\0"
+    var s_nomem: [u8; 22] = "viewer: keine Arena  \0"
+    var s_r_ok: [u8; 12] = "  gesichert\0"
+
+    // Der Anzeigename kommt aus dem Buendel und nicht aus dieser Datei.
+    // Der Anzeigename steht in /apps/viewer.osp/INFO. Findet sich das
+    // Buendel nicht, nimmt das Fenster den Namen aus dieser Datei --
+    // und behauptet keinen schoeneren.
+    var t_appdir: [u8; 8] = "/apps\0\0\0"
+    var t_selbst: [u8; 14] = "/bin/viewer\0\0\0"
+    let tp: u64 = (&titel[0 as usize]) as u64
+    ulib.strncpy(tp, (&s_tit[0 as usize]) as u64, 100)
+    let na: u64 = appdir.load((&t_appdir[0 as usize]) as u64, false)
+    var k2: u64 = 0
+    while k2 < na {
+        if ulib.streq(appdir.exec_of(k2), (&t_selbst[0 as usize]) as u64) {
+            ulib.strncpy(tp, appdir.name_of(k2), 100)
+            k2 = na
+        } else {
+            k2 = k2 + 1
+        }
+    }
+
+    // Der Ordner: das Argument, sein Verzeichnis, oder /bilder.
+    var s_def: [u8; 10] = "/bilder\0\0\0"
+    let op: u64 = (&ordner[0 as usize]) as u64
+    var startdatei: u64 = 0
+    if ulib.arg_count(args) > 1 {
+        let a: u64 = ulib.arg_at(args, 1)
+        if ulib.is_dir(a) {
+            ulib.strncpy(op, a, 200)
+        } else {
+            ulib.strncpy(op, a, 200)
+            let l: u64 = ulib.length(op)
+            var k: u64 = l
+            while k > 0 && ld8(op + k - 1) != 47 {
+                k = k - 1
+            }
+            startdatei = ulib.arg_at(args, 1) + k
+            if k > 1 {
+                __mmio_write8((op + k - 1) as *mut u8, 0 as u8)
+            } else {
+                __mmio_write8((op + 1) as *mut u8, 0 as u8)
+            }
+        }
+    } else {
+        ulib.strncpy(op, (&s_def[0 as usize]) as u64, 100)
+    }
+
+    let base: u64 = mem.map_pages(ARENA)
+    if ulib.bad(base) || base == 0 {
+        ulib.esay_line((&s_nomem[0 as usize]) as u64, 0)
+        return 1
+    }
+    arena_base = base
+    img.arena(base, ARENA)
+    // Der Miniaturenspeicher liegt hinter der Arena und gehoert nicht
+    // ihr -- sonst waere er nach jedem `reset` weg.
+    mini_arena = mem.map_pages(MINI_ARENA)
+    if ulib.bad(mini_arena) {
+        mini_arena = 0
+    }
+    mini = mini_arena
+
+    ordner_lesen()
+    var start: u64 = 0
+    if startdatei != 0 {
+        var i: u64 = 0
+        while i < anz {
+            if ulib.streq(namep(i), startdatei) {
+                start = i
+                i = anz
+            } else {
+                i = i + 1
+            }
+        }
+    }
+
+    if !wlib.begin(false, false) {
+        return 1
+    }
+    let w: u64 = wlib.window(20, 20, FW, FH, tp)
+    if w >= wlib.MAXWD {
+        return 1
+    }
+    wlib.box_h(w, 8, 30, FW - 16, 30, 0, 6)
+    wlib.size(34, 26)
+    let bprev: u64 = wlib.button((&s_prev[0 as usize]) as u64)
+    wlib.size(34, 26)
+    let bnext: u64 = wlib.button((&s_next[0 as usize]) as u64)
+    wlib.size(34, 26)
+    let bout: u64 = wlib.button((&s_out[0 as usize]) as u64)
+    wlib.size(34, 26)
+    let bin: u64 = wlib.button((&s_in[0 as usize]) as u64)
+    wlib.size(90, 26)
+    let bfit: u64 = wlib.button((&s_fit[0 as usize]) as u64)
+    wlib.size(66, 26)
+    let b100: u64 = wlib.button((&s_100[0 as usize]) as u64)
+    wlib.size(62, 26)
+    let bl: u64 = wlib.button((&s_l[0 as usize]) as u64)
+    wlib.size(66, 26)
+    let br: u64 = wlib.button((&s_r[0 as usize]) as u64)
+    wlib.size(88, 26)
+    let bdia: u64 = wlib.button((&s_dia[0 as usize]) as u64)
+    wlib.box_end()
+
+    wlib.box_h(w, 8, 528, FW - 16, 28, 0, 6)
+    wlib.size(104, 26)
+    let bcrop: u64 = wlib.button((&s_crop[0 as usize]) as u64)
+    wlib.size(84, 26)
+    let bsave: u64 = wlib.button((&s_save[0 as usize]) as u64)
+    wlib.size(56, 22)
+    let lbr: u64 = wlib.label((&s_br[0 as usize]) as u64)
+    wlib.size(70, 24)
+    let ebr: u64 = wlib.entry((&ebreite[0 as usize]) as u64, 12)
+    wlib.box_end()
+
+    wlib.box_v(w, 8, 500, FW - 16, 22, 0, 0)
+    wlib.size(0, 20)
+    let lst: u64 = wlib.label((&status[0 as usize]) as u64)
+    wlib.box_end()
+
+    laden(start)
+    minis_bauen()
+    status_bauen()
+    wlib.draw_all()
+    malen(w)
+    ulib.say((&s_start[0 as usize]) as u64)
+    ulib.nl()
+    bericht()
+
+    dialetzt = ulib.sys(ulib.SYS_SYSINFO, ulib.I_UPTIME, 0, 0)
+    var runden: u64 = 0
+    while wlib.alive() && runden < 40000000 {
+        runden = runden + 1
+        let id: u64 = wlib.step()
+        var neu: bool = false
+        if id < wlib.MAXWD {
+            let kind: u64 = wlib.fired_kind()
+            if kind == wlib.K_BUTTON {
+                if id == bprev {
+                    weiter(0)
+                    neu = true
+                } else if id == bnext {
+                    weiter(1)
+                    neu = true
+                } else if id == bfit {
+                    fitmode = 1
+                    panx = 0
+                    pany = 0
+                    neu = true
+                } else if id == b100 {
+                    fitmode = 0
+                    zoom = 100
+                    neu = true
+                } else if id == bin {
+                    fitmode = 0
+                    zoom = zoom * 3 / 2
+                    if zoom > 800 {
+                        zoom = 800
+                    }
+                    neu = true
+                } else if id == bout {
+                    fitmode = 0
+                    zoom = zoom * 2 / 3
+                    if zoom < 10 {
+                        zoom = 10
+                    }
+                    neu = true
+                } else if id == bl {
+                    drehen(3)
+                    neu = true
+                } else if id == br {
+                    drehen(1)
+                    neu = true
+                } else if id == bdia {
+                    if diaschau == 0 {
+                        diaschau = 1
+                    } else {
+                        diaschau = 0
+                    }
+                    dialetzt = ulib.sys(ulib.SYS_SYSINFO, ulib.I_UPTIME,
+                        0, 0)
+                    neu = true
+                } else if id == bcrop {
+                    zuschneiden()
+                    neu = true
+                } else if id == bsave {
+                    let n: u64 = sichern()
+                    var s_g: [u8; 20] = "viewer: gesichert  \0"
+                    ulib.say((&s_g[0 as usize]) as u64)
+                    ulib.sayu(n)
+                    ulib.nl()
+                    neu = true
+                }
+            } else if kind == wlib.K_ENTRY && id == ebr {
+                let nw: u64 = ulib.to_num(wlib.text_of(ebr))
+                groesse_aendern(nw)
+                neu = true
+            }
+        }
+        // Die Tastatur -- ein Bildbetrachter wird mit ihr bedient.
+        let k: u64 = wlib.key_last()
+        if k != 0 {
+            if k == 32 || k == 110 {
+                weiter(1)
+                neu = true
+            } else if k == 112 || k == 98 {
+                weiter(0)
+                neu = true
+            } else if k == 43 {
+                fitmode = 0
+                zoom = zoom * 3 / 2
+                neu = true
+            } else if k == 45 {
+                fitmode = 0
+                zoom = zoom * 2 / 3
+                if zoom < 10 {
+                    zoom = 10
+                }
+                neu = true
+            } else if k == 102 {
+                fitmode = 1
+                neu = true
+            } else if k == 49 {
+                fitmode = 0
+                zoom = 100
+                neu = true
+            } else if k == 114 {
+                drehen(1)
+                neu = true
+            }
+        }
+        if diaschau != 0 {
+            let jetztms: u64 = ulib.sys(ulib.SYS_SYSINFO, ulib.I_UPTIME,
+                0, 0)
+            if jetztms > dialetzt + DIAMS {
+                dialetzt = jetztms
+                weiter(1)
+                neu = true
+            }
+        }
+        if neu {
+            status_bauen()
+            wlib.set_text(lst, (&status[0 as usize]) as u64)
+            wlib.dirty_all(w)
+            wlib.draw_all()
+            malen(w)
+            bericht()
+        }
+    }
+    return 0
+}
+
+// Was auf dem Schirm steht, steht auch auf der seriellen Leitung -- so
+// misst die Abnahme die Anwendung, ohne ein Bildschirmfoto zu deuten.
+fn bericht() {
+    var k1: [u8; 12] = "viewer: an=\0"
+    var k2: [u8; 8] = " bild=\0\0"
+    var k3: [u8; 8] = " von=\0\0\0"
+    var k4: [u8; 8] = " br=\0\0\0\0"
+    var k5: [u8; 8] = " ho=\0\0\0\0"
+    var k6: [u8; 8] = " fmt=\0\0\0"
+    var k7: [u8; 10] = " zoom=\0\0\0\0"
+    var k8: [u8; 8] = " fit=\0\0\0"
+    var k9: [u8; 10] = " dreh=\0\0\0\0"
+    var k10: [u8; 10] = " grund=\0\0\0"
+    var k11: [u8; 12] = " teilw=\0\0\0\0\0"
+    var k12: [u8; 10] = " voll=\0\0\0\0"
+    var k13: [u8; 10] = " arena=\0\0\0"
+    var k14: [u8; 10] = " mini=\0\0\0\0"
+    var k15: [u8; 10] = " dia=\0\0\0\0\0"
+    var k16: [u8; 8] = " ori=\0\0\0"
+    ulib.say((&k1[0 as usize]) as u64)
+    ulib.sayu(anz)
+    ulib.say((&k2[0 as usize]) as u64)
+    ulib.sayu(jetzt)
+    ulib.say((&k4[0 as usize]) as u64)
+    ulib.sayu(vw)
+    ulib.say((&k5[0 as usize]) as u64)
+    ulib.sayu(vh)
+    ulib.say((&k6[0 as usize]) as u64)
+    ulib.sayu(fmt)
+    ulib.say((&k7[0 as usize]) as u64)
+    ulib.sayu(zoom)
+    ulib.say((&k8[0 as usize]) as u64)
+    ulib.sayu(fitmode)
+    ulib.say((&k9[0 as usize]) as u64)
+    ulib.sayu(drehung)
+    ulib.say((&k16[0 as usize]) as u64)
+    ulib.sayu(ori)
+    ulib.say((&k10[0 as usize]) as u64)
+    ulib.sayu(grund)
+    ulib.say((&k11[0 as usize]) as u64)
+    ulib.sayu(teilweise)
+    ulib.say((&k12[0 as usize]) as u64)
+    var v: u64 = 0
+    if voll != 0 {
+        v = 1
+    }
+    ulib.sayu(v)
+    ulib.say((&k13[0 as usize]) as u64)
+    ulib.sayu(imgmem.used())
+    ulib.say((&k14[0 as usize]) as u64)
+    var md: u64 = 0
+    var i: u64 = 0
+    while i < MINIS {
+        md = md + mini_da[(i) as usize]
+        i = i + 1
+    }
+    ulib.sayu(md)
+    ulib.say((&k15[0 as usize]) as u64)
+    ulib.sayu(diaschau)
+    ulib.nl()
+}
