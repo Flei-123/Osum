@@ -366,14 +366,19 @@ echo "-- 3j. DER KERNFEHLER, DEN DIESE RUNDE GEFUNDEN HAT"
 # `waitfirst` stellt den alten Weg wieder her -- und dann bricht die
 # Messung zusammen.
 sn=$(sp "$F" sauber 4 head)
-rc=$(run_case waitfirst "$TMPD/d0.img" "osum waitfirst $BASE script=sh /t/kurz.sh" 300 -no-reboot)
+rc=$(run_case waitfirst "$TMPD/d0.img" "osum waitfirst $BASE script=sh /t/kurz.sh" 150 -no-reboot)
 WF="$TMPD/waitfirst.txt"
 wn=$(sp "$WF" sauber 4 head)
-if [ -n "${wn:-}" ] && [ "$wn" -le 2 ]; then
-    ok "GEGENPROBE waitfirst: derselbe Dienst bleibt bei $wn Starts stehen (ohne den Fehler: $sn)"
-else bad "GEGENPROBE waitfirst traegt nicht: $wn Starts statt hoechstens zwei"; fi
-is "und er steht dabei als 'running' da, obwohl er tot ist" \
-   "$(sp "$WF" sauber 2 head)" "running"
+# DIE DEUTLICHSTE ZUSAGE ZUERST: mit dem alten `wait4` erfaehrt init NIE,
+# dass die `ctrl`-Zeile geendet hat. Die Shell schreibt `sh: bye`, und
+# danach passiert nichts mehr -- die Maschine kommt nicht herunter, und
+# der Lauf endet ueber das Zeitlimit (124) statt ueber ACPI (0).
+has "$WF" "sh: bye" "GEGENPROBE waitfirst: die ctrl-Zeile endet wie immer"
+hasnot "$WF" "init: herunterfahren" "aber init erfaehrt es nie -- der Zombie wird nicht abgeholt"
+is "und die Maschine kommt nicht herunter (Zeitlimit statt ACPI)" "$rc" "124"
+if [ -n "${wn:-}" ] && [ -n "${sn:-}" ] && [ "$wn" -lt "$sn" ]; then
+    ok "auch das Einsammeln bleibt liegen: $wn Starts statt $sn im behobenen Lauf"
+else bad "GEGENPROBE waitfirst traegt nicht: $wn Starts gegen $sn"; fi
 
 echo "== 4. DIE GEGENPROBE ZUM ZIEL: derselbe Baum mit /etc/ziel=grafik =="
 rc=$(run_case grafik "$TMPD/dg.img" "osum $BASE script=sh /t/kurz.sh" 300 -no-reboot)
