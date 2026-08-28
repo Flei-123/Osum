@@ -130,6 +130,45 @@ Runde B5, damit der Unterschied genau dort liegt, wo er liegen muß.
 `/apps/certus.osp/` — Anzeigename **Certus**, elf Schlüsselwörter, eine
 Weltkugel als Symbol, `start` als zweiter Name auf `/bin/certus`.
 
+### 6 · Das Fenster, fotografiert von der anderen Seite
+
+```
+CERTUS ... win=1 blits=1 blitpx=424000
+800x600  Hintergrund #ffffff  Tinte 97752  dunkel 18108  Farben 295  Baender 8
+```
+
+424 000 Bildpunkte in **einem** `WIG_BLIT`. Und die Probe, die eine
+Tintenzählung nicht ersetzen kann: auf dem Schirm der emulierten
+Grafikkarte stehen **genau 24 000** Bildpunkte `#0033aa` (das ist
+300 × 80) und **genau 8000** `#cc0000` (200 × 40) — die zwei Kästen, die
+die Seite verlangt hat.
+
+Dabei kam der zweite betriebsartabhängige Fehler heraus: läuft die
+Oberfläche, hängt `surface()` das Dateisystem selbst ein und rief nie
+`k14_setup` — also gab es im Fenster kein `/proc`, und derselbe Browser,
+der auf der seriellen Konsole lief, gab dort **90** zurück.
+
+### 7 · Regression
+
+`tools/osum/run.sh`: **130 bestanden, 0 gefallen** — der ELF-Lader, die
+Seitenrechte und der Fall „ein Programm auf `0x50000000` MUSS abgelehnt
+werden" halten der 192-MiB-Arena stand.
+
+`tools/kernel/run.sh` unter derselben Last gemessen, beide Zweige
+hintereinander auf demselben Wirt (Lastmittel 15–19, weil auf dieser
+Maschine parallel fremde Abnahmen laufen):
+
+| | bestanden | gefallen |
+|---|---:|---:|
+| `mergeline` (Grundlinie, `6b602af`) | 163 | **13** |
+| dieser Zweig | **169** | **7** |
+
+Die sieben sind eine Teilmenge der dreizehn und alle im Abschnitt
+„Scheduler" — Zählungen von Kontextwechseln in einem festen Zeitfenster,
+die unter Last kippen. Sie sind in `TESTFAST-STATUS.md` als lastabhängig
+vermerkt und fallen auf der Grundlinie ebenfalls. **Dieser Zweig hat
+weniger rote Abschnitte als der, von dem er kommt.**
+
 ---
 
 ## Was offen ist

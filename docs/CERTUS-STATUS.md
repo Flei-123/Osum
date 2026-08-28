@@ -370,6 +370,50 @@ Zwei Sätze dazu, und beide sind unbequem:
    die Infobox und die Navigation fehlen, weil Tabellen und `@media`
    fehlen.
 
+### 5.1 Und im Fenster
+
+Derselbe Gast, diesmal mit Fensterserver (`gfx wm wig wmhold wmshell`),
+und das Bild kommt von der **anderen Seite**: `screendump` über QEMUs
+Monitor, also aus der Bildfläche der emulierten Grafikkarte. Was der
+Browser behauptet, und was auf dem Schirm steht, sind damit zwei
+unabhängige Aussagen.
+
+```
+CERTUS ... win=1 blits=1 blitpx=424000
+800x600  Hintergrund #ffffff  Tinte 97752 (20.36 %)  dunkel 18108  Farben 295  Baender 8
+```
+
+`blitpx=424000` ist 800 × 530 — die ganze Leinwand in **einem**
+`WIG_BLIT`. Und die Farbprobe, die eine Tintenzählung nicht ersetzen
+kann (`tools/certus/farbe.py`):
+
+| die Seite verlangt | Fläche | auf dem Schirm |
+|---|---:|---:|
+| `background:#0033aa`, 300 × 80 | 24 000 | **24 000** |
+| `background:#cc0000`, 200 × 40 | 8 000 | **8 000** |
+
+**Bildpunkt für Bildpunkt genau.** Ein Browser, der irgendetwas malt,
+besteht die Tintenzählung und diese Zeile nicht.
+
+Die grobe Karte des Bildschirms, damit sichtbar ist, was da steht:
+oberste Zeile die Titelleiste des Fensterservers (`#1c4e7e`), darunter
+zwei Zeilen Bedienleiste mit der Adresse (`#d8d8d8`), dann die weiße
+Seite mit dem blauen und dem roten Kasten, unten der Rand des
+Schreibtischs.
+
+### 5.2 Ein Fehler, den nur die Betriebsart zeigt
+
+Zwischen 5 und 5.1 lag ein zweiter Fund, und er ist der unangenehmste
+dieser Runde: **derselbe Browser lief auf der seriellen Konsole und gab
+im Fenster 90 zurück.**
+
+Der Grund: läuft die Oberfläche, hängt `surface()` in `kernel/kmain.fi`
+das Dateisystem **selbst** ein, weil `osum()` es in dieser Betriebsart
+nicht tut — und rief dabei nie `k14_setup`. Also gab es in jedem Lauf
+mit Fenster **kein `/proc`**, und damit keinen Boden für den Stapelscan
+des Sammlers. Ein Fehler, der von der Betriebsart abhängt, ist der
+schlimmste, den es gibt: er sieht wie ein Fehler im Programm aus.
+
 ---
 
 ## 6. Was bis „damit kann man im Alltag surfen" fehlt
