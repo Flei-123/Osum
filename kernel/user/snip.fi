@@ -1,0 +1,1384 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/snip.fi -- RUNDE SNIP: das Bildschirmfoto-Werkzeug.
+//
+// =====================================================================
+// ES IST EIN DIENST UND KEIN BEFEHL, und das ist eine Folge der
+// Sicherheitsentscheidung und keine Geschmacksfrage.
+// =====================================================================
+//
+// Der Kern stellt einen Fahrschein nur aus, wenn ein MENSCH
+// UMSCHALT+SUPER+S drueckt, und er bindet ihn beim Ausstellen an den
+// Prozess, der als Bildschirmfoto-Dienst eingetragen ist (kernel/snap.fi).
+// Ein Programm, das erst nach dem Tastendruck startet, kaeme zu spaet --
+// und ein Fahrschein, der auf den ersten wartet, der danach greift,
+// waere genau das Wettrennen, das dieses Modell vermeidet.
+//
+// Also laeuft `/bin/snip` mit, so wie das Windows-Werkzeug seit
+// Win+Umschalt+S mitlaeuft: es traegt sich ein, wartet, und wacht auf,
+// wenn ein Fahrschein kommt.
+//
+// =====================================================================
+// WIE ES ZU DEN BILDPUNKTEN KOMMT, OHNE SIE ZU BESITZEN
+// =====================================================================
+//
+// Ein Programm auf dieser Maschine hat 1 MiB (proc.IMAGE_BASE bis
+// IMAGE_END). Ein Bildschirmfoto von 800x600 sind 1,9 MiB. Das Bild
+// liegt deshalb IM KERN und wird nie ganz hierher kopiert; was hier
+// arbeitet, ist der STREIFEN von `wlibc` -- 800 x 81 Bildpunkte in
+// einer eigenen Abbildung, ausserhalb des Programmabbilds.
+//
+// UND DAS IST DER GRUND, WARUM DAS BILD AUF DEM SCHIRM UND DAS BILD IN
+// DER DATEI NICHT AUSEINANDERGEHEN KOENNEN. Beide entstehen in
+// `band_malen` -- derselben Funktion, demselben Streifen, denselben
+// Zeichenaufrufen. Der einzige Unterschied ist die letzte Zeile:
+//
+//     Vorschau   `wlibc.push` schiebt den Streifen ins Fenster
+//     Datei      `png.schreibe` holt sich dieselben Zeilen
+//
+// Das ist keine Bequemlichkeit, sondern die Antwort auf einen echten
+// Fehler dieser Art von Werkzeug: wenn Vorschau und Export zwei Wege
+// haben, ist die Verpixelung im Bild und nicht in der Datei. Die
+// Recherche nennt genau das ("Die Redaktion muss auf den AUSGABEPIXELN
+// stattfinden"), und `tools/snip/entropie.py` misst es an der DATEI.
+//
+// =====================================================================
+// DIE BEDIENUNG
+// =====================================================================
+//
+//   UMSCHALT+SUPER+S     das Overlay geht auf, der Bildschirm steht
+//                        still ("Freeze Frame")
+//   ziehen               ein Ausschnitt, mit Groesse in Bildpunkten
+//   f                    FENSTER: das Fenster unter dem Zeiger
+//   v                    VOLLBILD
+//   3 / 5 / 0            verzoegert um 3, 5 oder 10 Sekunden
+//   Esc                  abbrechen, Fahrschein zurueckgeben
+//
+// danach der Bearbeiter:
+//
+//   z r p m t x b        zuschneiden, Rechteck, Pfeil, Freihand, Text,
+//                        verpixeln, Balken
+//   u                    letzte Marke zurueck
+//   s                    speichern
+//   Esc                  verwerfen
+//
+// WAS ES NICHT KANN, und es steht hier und nicht nur in der Doku:
+// Bildlauf-Aufnahme und Bildschirmvideo (docs/SCREENCAP.md, Abschnitt
+// 7, mit dem, was dafuer fehlt) -- und eine ZWISCHENABLAGE. Die gibt es
+// in diesem System noch nicht (Roadmap D1, braucht den Systembus A3).
+// Was hier `ablage_zwischenstand` heisst, ist genau das: ein
+// Zwischenstand, der den PFAD in die Textablage der Runde K15 legt.
+// Kein Bild. Der Name sagt es, damit niemand darauf baut.
+
+profile kernel
+
+import ulib
+import wlibc
+import png
+
+export { u_start }
+
+// ------------------------------------------------------- die Zahlen
+
+const SYS_SNAP: u64 = 1840
+
+const SN_INFO: u64 = 0
+const SN_REG: u64 = 1
+const SN_UNREG: u64 = 2
+const SN_ARM: u64 = 3
+const SN_READ: u64 = 4
+const SN_WIN: u64 = 5
+const SN_HIT: u64 = 6
+const SN_DONE: u64 = 7
+const SN_BLIT: u64 = 8
+
+const SI_READY: u64 = 0
+const SI_SEQ: u64 = 1
+const SI_OPEN: u64 = 2
+const SI_MINE: u64 = 3
+const SI_FROZEN: u64 = 4
+const SI_W: u64 = 5
+const SI_H: u64 = 6
+const SI_NWIN: u64 = 7
+const SI_HANDLER: u64 = 8
+const SI_TAKES: u64 = 9
+const SI_GRANTS: u64 = 10
+const SI_DENIED: u64 = 11
+const SI_TICKETS: u64 = 12
+const SI_REFUSED: u64 = 13
+const SI_ARMS: u64 = 14
+const SI_TTLMS: u64 = 15
+const SI_MAXTAKE: u64 = 16
+const SI_MARK: u64 = 17
+const SI_FREE: u64 = 18
+const SI_SNIPS: u64 = 19
+const SI_ATMS: u64 = 20
+
+// Die Felder eines eingefrorenen Fensters -- dieselben Nummern wie
+// `snap.WF_*`. Sie stehen hier ein zweites Mal, weil ein Programm in
+// Ring 3 den Kern nicht importieren kann; `tools/snip/run.sh` haelt die
+// beiden Listen gegeneinander.
+const WF_ID: u64 = 0
+const WF_X: u64 = 1
+const WF_Y: u64 = 2
+const WF_W: u64 = 3
+const WF_H: u64 = 4
+
+// Die Zustaende dieses Programms.
+const Z_WARTEN: u64 = 0
+const Z_AUSWAHL: u64 = 1
+const Z_EDITOR: u64 = 2
+
+// Die Arten einer Marke.
+const A_RECHTECK: u64 = 1
+const A_PFEIL: u64 = 2
+const A_FREI: u64 = 3
+const A_TEXT: u64 = 4
+const A_PIXEL: u64 = 5
+const A_BALKEN: u64 = 6
+
+const MAXA: u64 = 32 // Marken
+const AF: u64 = 8 // Woerter je Marke
+const MAXP: u64 = 512 // Punkte fuer alle Freihandzuege zusammen
+const MAXT: u64 = 192 // Oktette fuer allen Text zusammen
+const MAXBLK: u64 = 4096 // Mosaikfelder fuer alle Verpixelungen
+
+// Die Felder einer Marke.
+const M_ART: u64 = 0
+const M_X0: u64 = 1
+const M_Y0: u64 = 2
+const M_X1: u64 = 3
+const M_Y1: u64 = 4
+const M_FARBE: u64 = 5
+const M_A: u64 = 6 // Anfang in `pkt` bzw. `txt` bzw. `blk`
+const M_N: u64 = 7 // Anzahl
+
+const BLOCK: u64 = 8 // Kantenlaenge eines Mosaikfeldes
+
+const LEISTE: u64 = 26 // Hoehe der Hinweiszeile
+
+// Farben. Fest und nicht aus dem Thema: dieses Fenster liegt ueber
+// ALLEM und muss auf jedem Untergrund lesbar sein.
+const C_MARKE: u64 = 0xE02020
+const C_HELL: u64 = 0xFFFFFF
+const C_DUNKEL: u64 = 0x101418
+const C_RAHMEN: u64 = 0x30C0FF
+
+// ------------------------------------------------------- der Zustand
+
+static mut zustand: u64 = Z_WARTEN
+static mut w_h: u64 = 0 // das Fensterhandle
+static mut bild_w: u64 = 0 // Groesse des Standbildes
+static mut bild_h: u64 = 0
+static mut letzte_seq: u64 = 0
+
+// Der Ausschnitt, in Bildpunkten des Standbildes.
+static mut cx: u64 = 0
+static mut cy: u64 = 0
+static mut cw: u64 = 0
+static mut ch: u64 = 0
+
+// Das Aufziehen.
+static mut zieht: u64 = 0
+static mut zx0: u64 = 0
+static mut zy0: u64 = 0
+static mut zx1: u64 = 0
+static mut zy1: u64 = 0
+static mut modus: u64 = 0 // 0 Ausschnitt, 1 Fenster
+static mut hover: u64 = 0 // Fensterplatz + 1 unter dem Zeiger
+
+static mut marken: [u64; 256] = [0 as u64; 256] // MAXA * AF
+static mut nmarke: u64 = 0
+static mut pkt: [u64; 512] = [0 as u64; 512]
+static mut npkt: u64 = 0
+static mut txt: [u8; 192] = [0 as u8; 192]
+static mut ntxt: u64 = 0
+static mut blk: [u64; 4096] = [0 as u64; 4096]
+static mut nblk: u64 = 0
+
+static mut werkzeug: u64 = A_RECHTECK
+static mut tippt: u64 = 0 // 1 = der Text wird gerade getippt
+static mut gespeichert: u64 = 0
+static mut dateien: u64 = 0 // wie viele Bilder geschrieben wurden
+
+// Eine Zeile Bildpunkte, fuer `png.schreibe`.
+static mut zeile: [u8; 4096] = [0 as u8; 4096]
+static mut mos: [u8; 4096] = [0 as u8; 4096] // fuer die Mosaikmittel
+static mut pfad: [u8; 64] = [0 as u8; 64]
+static mut nn: [u8; 24] = [0 as u8; 24]
+
+// ------------------------------------------------------- die Aufrufe
+
+fn sys5(number: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> u64 {
+    return asm("syscall", out("rax"), in("rax") number, in("rdi") a0,
+        in("rsi") a1, in("rdx") a2, in("r10") a3, in("r8") a4,
+        clobber("rcx"), clobber("r11"), clobber("memory"))
+}
+
+fn info(feld: u64) -> u64 {
+    let v: u64 = sys5(SYS_SNAP, SN_INFO, feld, 0, 0, 0)
+    if ulib.bad(v) {
+        return 0
+    }
+    return v
+}
+
+fn eintragen() -> bool {
+    return !ulib.bad(sys5(SYS_SNAP, SN_REG, 0, 0, 0, 0))
+}
+
+fn zurueckgeben() {
+    sys5(SYS_SNAP, SN_DONE, 0, 0, 0, 0)
+}
+
+fn verzoegern(ms: u64) -> bool {
+    return !ulib.bad(sys5(SYS_SNAP, SN_ARM, ms, 0, 0, 0))
+}
+
+// Eine Zeile des Standbildes. Gibt die Zahl der Oktette zurueck.
+fn hol_zeile(ziel: u64, x: u64, y: u64, w: u64) -> u64 {
+    let n: u64 = sys5(SYS_SNAP, SN_READ, ziel, x | (y << 32),
+        w | (1 << 32), 0)
+    if ulib.bad(n) {
+        return 0
+    }
+    return n
+}
+
+fn fenster_feld(nr: u64, feld: u64) -> u64 {
+    let v: u64 = sys5(SYS_SNAP, SN_WIN, nr, feld, 0, 0)
+    if ulib.bad(v) {
+        return 0
+    }
+    return v
+}
+
+fn treffer(x: u64, y: u64) -> u64 {
+    let v: u64 = sys5(SYS_SNAP, SN_HIT, x, y, 0, 0)
+    if ulib.bad(v) {
+        return 0
+    }
+    return v
+}
+
+// ------------------------------------------------------- die Marken
+
+fn mg(i: u64, f: u64) -> u64 {
+    if i >= MAXA {
+        return 0
+    }
+    return marken[((i * AF + f)) as usize]
+}
+
+fn ms(i: u64, f: u64, v: u64) {
+    if i >= MAXA {
+        return
+    }
+    marken[((i * AF + f)) as usize] = v
+}
+
+fn marke_neu(art: u64, x0: u64, y0: u64, x1: u64, y1: u64) -> u64 {
+    if nmarke >= MAXA {
+        return MAXA
+    }
+    let i: u64 = nmarke
+    nmarke = nmarke + 1
+    ms(i, M_ART, art)
+    ms(i, M_X0, x0)
+    ms(i, M_Y0, y0)
+    ms(i, M_X1, x1)
+    ms(i, M_Y1, y1)
+    ms(i, M_FARBE, C_MARKE)
+    ms(i, M_A, 0)
+    ms(i, M_N, 0)
+    return i
+}
+
+// Die letzte Marke zuruecknehmen. Sie gibt ihren Vorrat wieder frei --
+// die Punkte, den Text und die Mosaikfelder --, weil sie IMMER die
+// zuletzt vergebene ist. Ein Rueckgaengig, das den Vorrat behielte,
+// liefe nach dreissig Marken leer.
+fn marke_weg() {
+    if nmarke == 0 {
+        return
+    }
+    let i: u64 = nmarke - 1
+    let art: u64 = mg(i, M_ART)
+    if art == A_FREI {
+        npkt = mg(i, M_A)
+    } else if art == A_TEXT {
+        ntxt = mg(i, M_A)
+    } else if art == A_PIXEL {
+        nblk = mg(i, M_A)
+    }
+    nmarke = i
+}
+
+// ---------------------------------------------------- die Verpixelung
+//
+// DIE MITTELWERTE WERDEN EINMAL GERECHNET, beim Setzen der Marke -- und
+// nicht beim Malen. Beim Malen liegt nur ein Streifen von 81 Zeilen im
+// Speicher; ein Mosaikfeld, dessen obere Haelfte im vorigen Streifen
+// lag, waere nicht zu mitteln. Hier wird das Standbild dafuer noch
+// einmal zeilenweise gelesen, was ein paar hundert Aufrufe kostet und
+// genau einmal je Marke passiert.
+//
+// BLOCKGROESSE ACHT UND EIN BALKEN DANEBEN. Die Recherche ist an dieser
+// Stelle unmissverstaendlich: ein Mosaik ist NICHT sicher -- bei
+// bekanntem Zeichensatz laesst sich der Text durch Ausprobieren aller
+// Kandidaten und Vergleich der Blockmittel zurueckrechnen (das ist,
+// was `Unredacter` gegen `pixelation` gezeigt hat), und Weichzeichnen
+// ist noch schlechter. Deshalb gibt es hier ZWEI Werkzeuge, und das
+// sichere heisst `Balken` und liegt auf derselben Leiste: eine
+// volldeckende Flaeche in Volltonfarbe, aus der sich nichts
+// zurueckrechnen laesst. Was davon der Mensch nimmt, entscheidet er --
+// aber er bekommt beides angeboten und nicht nur das huebschere.
+fn mosaik_rechnen(i: u64, x0: u64, y0: u64, w: u64, h: u64) {
+    let bx: u64 = (w + BLOCK - 1) / BLOCK
+    let by: u64 = (h + BLOCK - 1) / BLOCK
+    if nblk + bx * by > MAXBLK {
+        return
+    }
+    ms(i, M_A, nblk)
+    ms(i, M_N, bx)
+    var b: u64 = 0
+    while b < bx * by {
+        blk[((nblk + b)) as usize] = 0
+        b = b + 1
+    }
+    var yy: u64 = 0
+    while yy < h {
+        if hol_zeile((&mos[0 as usize]) as u64, x0, y0 + yy, w) == 0 {
+            yy = h
+        } else {
+            let zr: u64 = yy / BLOCK
+            var xx: u64 = 0
+            while xx < w {
+                let p: u64 = nblk + zr * bx + xx / BLOCK
+                let q: u64 = (&mos[0 as usize]) as u64 + xx * 4
+                let r: u64 = (*((q + 2) as *mut u8)) as u64
+                let g: u64 = (*((q + 1) as *mut u8)) as u64
+                let bl: u64 = (*((q) as *mut u8)) as u64
+                // Drei Summen in EINEM Wort: rot in Bit 42, gruen in
+                // Bit 21, blau unten. Ein Block ist hoechstens 64
+                // Bildpunkte, also passt jede Summe in 21 Bit
+                // (64 * 255 = 16 320).
+                let dazu: u64 = (r << 42) +% (g << 21) +% bl
+                blk[(p) as usize] = blk[(p) as usize] +% dazu
+                xx = xx + 1
+            }
+            yy = yy + 1
+        }
+    }
+    // Teilen. Die Randfelder haben weniger Bildpunkte, und genau
+    // deshalb wird je Feld gerechnet und nicht mit BLOCK*BLOCK.
+    var zr: u64 = 0
+    while zr < by {
+        var zc: u64 = 0
+        while zc < bx {
+            var fw: u64 = BLOCK
+            var fh: u64 = BLOCK
+            if zc * BLOCK + fw > w {
+                fw = w - zc * BLOCK
+            }
+            if zr * BLOCK + fh > h {
+                fh = h - zr * BLOCK
+            }
+            let n: u64 = fw * fh
+            let p: u64 = nblk + zr * bx + zc
+            let s: u64 = blk[(p) as usize]
+            if n != 0 {
+                let r: u64 = ((s >> 42) & 0x1FFFFF) / n
+                let g: u64 = ((s >> 21) & 0x1FFFFF) / n
+                let bl: u64 = (s & 0x1FFFFF) / n
+                blk[(p) as usize] = (r << 16) | (g << 8) | bl
+            }
+            zc = zc + 1
+        }
+        zr = zr + 1
+    }
+    nblk = nblk + bx * by
+}
+
+// ------------------------------------------------------- das Malen
+//
+// DIE EINE FUNKTION, DIE ES GIBT. Vorschau und Datei gehen beide hier
+// hindurch; siehe den Kopf dieser Datei.
+//
+// `y0` ist die erste Zeile des Streifens, in Koordinaten des
+// AUSGESCHNITTENEN Bildes. `n` die Zahl der Zeilen. `dunkel` sagt, ob
+// ausserhalb der Auswahl abgedunkelt wird -- das tut nur das Overlay.
+fn band_malen(y0: u64, n: u64, dunkel: u64) {
+    wlibc.set_band(y0)
+    var r: u64 = 0
+    while r < n {
+        let y: u64 = y0 + r
+        // 1. der Grund: eine Zeile des Standbildes.
+        if hol_zeile((&zeile[0 as usize]) as u64, cx, cy + y, cw) != 0 {
+            var x: u64 = 0
+            while x < cw {
+                let q: u64 = (&zeile[0 as usize]) as u64 + x * 4
+                wlibc.px(x, y, __mmio_read32((q) as *mut u32) as u64)
+                x = x + 1
+            }
+        }
+        r = r + 1
+    }
+    // 2. die Abdunklung ausserhalb der Auswahl. NUR im Overlay, und
+    //    NIE im Export -- eine abgedunkelte Datei waere das Werkzeug,
+    //    das seine eigene Bedienung mitfotografiert.
+    if dunkel != 0 {
+        dunkeln(y0, n)
+    }
+    // 3. die Marken, in der Reihenfolge, in der sie gesetzt wurden.
+    //    Verpixeln und Balken ERSETZEN, alles andere liegt darauf --
+    //    deshalb kommen sie in derselben Schleife und nicht in zwei.
+    var i: u64 = 0
+    while i < nmarke {
+        marke_malen(i, y0, n)
+        i = i + 1
+    }
+}
+
+fn dunkeln(y0: u64, n: u64) {
+    var ax0: u64 = zx0
+    var ay0: u64 = zy0
+    var ax1: u64 = zx1
+    var ay1: u64 = zy1
+    if zieht == 0 && hover != 0 {
+        ax0 = fenster_feld(hover - 1, WF_X)
+        ay0 = fenster_feld(hover - 1, WF_Y)
+        ax1 = ax0 + fenster_feld(hover - 1, WF_W)
+        ay1 = ay0 + fenster_feld(hover - 1, WF_H)
+    }
+    var r: u64 = 0
+    while r < n {
+        let y: u64 = y0 + r
+        var x: u64 = 0
+        while x < cw {
+            if y < ay0 || y >= ay1 || x < ax0 || x >= ax1 {
+                // 45 Prozent Schwarz darueber. Dunkel genug, dass die
+                // Auswahl heraussticht, hell genug, dass man noch
+                // sieht, was daneben liegt -- sonst kann man nicht
+                // entscheiden, wo der Ausschnitt anfangen soll.
+                wlibc.px(x, y, wlibc.blend(wlibc.get(x, y), C_DUNKEL, 115))
+            }
+            x = x + 1
+        }
+        r = r + 1
+    }
+    // Der Rahmen um die Auswahl, ein Bildpunkt, ganz hell.
+    if ax1 > ax0 && ay1 > ay0 {
+        wlibc.hline(ax0, ay0, ax1 - ax0, C_RAHMEN)
+        wlibc.hline(ax0, ay1 - 1, ax1 - ax0, C_RAHMEN)
+        wlibc.vline(ax0, ay0, ay1 - ay0, C_RAHMEN)
+        wlibc.vline(ax1 - 1, ay0, ay1 - ay0, C_RAHMEN)
+    }
+}
+
+fn marke_malen(i: u64, y0: u64, n: u64) {
+    let art: u64 = mg(i, M_ART)
+    let x0: u64 = mg(i, M_X0)
+    let ay0: u64 = mg(i, M_Y0)
+    let x1: u64 = mg(i, M_X1)
+    let ay1: u64 = mg(i, M_Y1)
+    let farbe: u64 = mg(i, M_FARBE)
+    if art == A_BALKEN {
+        var y: u64 = ay0
+        while y < ay1 {
+            if y >= y0 && y < y0 + n {
+                wlibc.hline(x0, y, x1 - x0, 0)
+            }
+            y = y + 1
+        }
+        return
+    }
+    if art == A_PIXEL {
+        let bx: u64 = mg(i, M_N)
+        let ab: u64 = mg(i, M_A)
+        var y: u64 = ay0
+        while y < ay1 {
+            if y >= y0 && y < y0 + n {
+                var x: u64 = x0
+                while x < x1 {
+                    let p: u64 = ab + ((y - ay0) / BLOCK) * bx
+                        + (x - x0) / BLOCK
+                    if p < MAXBLK {
+                        wlibc.px(x, y, blk[(p) as usize])
+                    }
+                    x = x + 1
+                }
+            }
+            y = y + 1
+        }
+        return
+    }
+    if art == A_RECHTECK {
+        rahmen3(x0, ay0, x1, ay1, farbe)
+        return
+    }
+    if art == A_PFEIL {
+        pfeil(x0, ay0, x1, ay1, farbe)
+        return
+    }
+    if art == A_FREI {
+        let a: u64 = mg(i, M_A)
+        let cnt: u64 = mg(i, M_N)
+        var k: u64 = 1
+        while k < cnt {
+            let p0: u64 = pkt[((a + k - 1)) as usize]
+            let p1: u64 = pkt[((a + k)) as usize]
+            linie(p0 & 0xFFFF, p0 >> 16, p1 & 0xFFFF, p1 >> 16, farbe, 2)
+            k = k + 1
+        }
+        return
+    }
+    if art == A_TEXT {
+        // Eine Platte unter dem Text. Ohne sie ist rote Schrift auf
+        // rotem Grund unlesbar, und die Recherche nennt genau das als
+        // Pflicht ("Hintergrundplatte oder Kontur fuer Lesbarkeit auf
+        // beliebigem Untergrund").
+        let a: u64 = mg(i, M_A)
+        let cnt: u64 = mg(i, M_N)
+        let br: u64 = wlibc.text_w(wlibc.F_UI, wlibc.PX_UI,
+            (&txt[0 as usize]) as u64 + a, cnt) + 8
+        let ho: u64 = wlibc.text_h(wlibc.PX_UI) + 6
+        wlibc.rect(x0, ay0, br, ho, C_DUNKEL)
+        wlibc.text_at(wlibc.F_UI, wlibc.PX_UI, x0 + 4,
+            ay0 + 3 + wlibc.ascent_of(wlibc.F_UI, wlibc.PX_UI),
+            (&txt[0 as usize]) as u64 + a, cnt, farbe)
+        return
+    }
+}
+
+fn rahmen3(x0: u64, y0: u64, x1: u64, y1: u64, farbe: u64) {
+    var d: u64 = 0
+    while d < 2 {
+        if x1 > x0 + 2 * d && y1 > y0 + 2 * d {
+            wlibc.hline(x0 + d, y0 + d, x1 - x0 - 2 * d, farbe)
+            wlibc.hline(x0 + d, y1 - 1 - d, x1 - x0 - 2 * d, farbe)
+            wlibc.vline(x0 + d, y0 + d, y1 - y0 - 2 * d, farbe)
+            wlibc.vline(x1 - 1 - d, y0 + d, y1 - y0 - 2 * d, farbe)
+        }
+        d = d + 1
+    }
+}
+
+// Bresenham, mit Strichstaerke. Nicht kantengeglaettet: eine Marke soll
+// auffallen und nicht schoen sein, und ein geglaetteter Pfeil auf einem
+// Bildschirmfoto sieht aus wie ein Teil des Bildes.
+fn linie(x0: u64, y0: u64, x1: u64, y1: u64, farbe: u64, dick: u64) {
+    var x: i64 = x0 as i64
+    var y: i64 = y0 as i64
+    let xe: i64 = x1 as i64
+    let ye: i64 = y1 as i64
+    var dx: i64 = xe - x
+    var dy: i64 = ye - y
+    var sx: i64 = 1
+    var sy: i64 = 1
+    if dx < 0 {
+        dx = 0 - dx
+        sx = 0 - 1
+    }
+    if dy < 0 {
+        dy = 0 - dy
+        sy = 0 - 1
+    }
+    var err: i64 = dx - dy
+    var n: u64 = 0
+    while n < 4096 {
+        dick_punkt(x, y, farbe, dick)
+        if x == xe && y == ye {
+            n = 4096
+        } else {
+            let e2: i64 = err + err
+            if e2 > 0 - dy {
+                err = err - dy
+                x = x + sx
+            }
+            if e2 < dx {
+                err = err + dx
+                y = y + sy
+            }
+            n = n + 1
+        }
+    }
+}
+
+fn dick_punkt(x: i64, y: i64, farbe: u64, dick: u64) {
+    var r: u64 = 0
+    while r < dick {
+        var c: u64 = 0
+        while c < dick {
+            let px_: i64 = x + c as i64
+            let py: i64 = y + r as i64
+            if px_ >= 0 && py >= 0 {
+                wlibc.px(px_ as u64, py as u64, farbe)
+            }
+            c = c + 1
+        }
+        r = r + 1
+    }
+}
+
+// DIE SPITZE WIRD KONSTRUIERT UND NICHT GEMALT. Die Recherche gibt die
+// Regel: Schaftrichtung normieren, zwei Punkte im Winkel zur Achse,
+// Spitzenlaenge im Verhaeltnis zur Strichstaerke. Ohne Sinus und
+// Kosinus geht das ueber die SENKRECHTE zum Schaft -- (-dy, dx) --,
+// und das ist exakt derselbe Winkel, nur ohne Tabelle:
+//
+//     Spitze  = Ende
+//     links   = Ende - Richtung * L + senkrecht * L/2
+//     rechts  = Ende - Richtung * L - senkrecht * L/2
+//
+// L/2 zur Achse gibt etwa 26 Grad -- mitten in den 20 bis 30, die die
+// Recherche nennt.
+fn pfeil(x0: u64, y0: u64, x1: u64, y1: u64, farbe: u64) {
+    linie(x0, y0, x1, y1, farbe, 3)
+    var dx: i64 = x1 as i64 - x0 as i64
+    var dy: i64 = y1 as i64 - y0 as i64
+    var len: i64 = dx
+    if len < 0 {
+        len = 0 - len
+    }
+    var ly: i64 = dy
+    if ly < 0 {
+        ly = 0 - ly
+    }
+    // Manhattan statt Wurzel: fuer eine Pfeilspitze reicht es, und eine
+    // Quadratwurzel in ganzen Zahlen waere zwanzig Zeilen fuer nichts.
+    len = len + ly
+    if len < 4 {
+        return
+    }
+    let l: i64 = 16 // Spitzenlaenge
+    let bx: i64 = x1 as i64 - dx * l / len
+    let by: i64 = y1 as i64 - dy * l / len
+    let sx: i64 = 0 - dy * l / (len * 2)
+    let sy: i64 = dx * l / (len * 2)
+    fuelle3(x1 as i64, y1 as i64, bx + sx, by + sy, bx - sx, by - sy,
+        farbe)
+}
+
+// Ein volles Dreieck, ueber die Kanten und eine waagerechte Fuellung.
+// Reicht fuer eine Spitze und braucht keine Kantenliste.
+fn fuelle3(ax: i64, ay: i64, bx: i64, by: i64, ccx: i64, ccy: i64,
+    farbe: u64) {
+    var t: u64 = 0
+    while t <= 16 {
+        // Die Strecke von A zu jedem Punkt zwischen B und C.
+        let px_: i64 = bx + (ccx - bx) * (t as i64) / 16
+        let py: i64 = by + (ccy - by) * (t as i64) / 16
+        if px_ >= 0 && py >= 0 && ax >= 0 && ay >= 0 {
+            linie(ax as u64, ay as u64, px_ as u64, py as u64, farbe, 2)
+        }
+        t = t + 1
+    }
+}
+
+// ------------------------------------------------------- die Vorschau
+
+fn zeichnen() {
+    if w_h == 0 {
+        return
+    }
+    var y: u64 = 0
+    while y < ch {
+        var n: u64 = wlibc.surf_rows()
+        if y + n > ch {
+            n = ch - y
+        }
+        var dunkel: u64 = 0
+        if zustand == Z_AUSWAHL {
+            dunkel = 1
+        }
+        band_malen(y, n, dunkel)
+        wlibc.push(w_h, 0, y, cw, n)
+        y = y + n
+    }
+    hinweis()
+    sys5(wlibc.WM_FLUSH, w_h, 0, 0, 0, 0)
+}
+
+// Die Zeile am oberen Rand: was gerade geht und wie gross die Auswahl
+// ist. IN BILDPUNKTEN, und das ist die Zahl, um die es geht -- ein
+// Ausschnitt ohne Groessenanzeige ist Raten.
+fn hinweis() {
+    var s_aus: [u8; 46] = "ziehen  f Fenster  v Vollbild  3/5/0 spaeter\0\0"
+    var s_ed: [u8; 52] = "z r p m t x b  u zurueck  s speichern  Esc weg\0\0\0\0\0\0"
+    let h: u64 = LEISTE
+    wlibc.set_band(0)
+    wlibc.rect(0, 0, cw, h, C_DUNKEL)
+    let asc: u64 = wlibc.ascent_of(wlibc.F_UI, wlibc.PX_UI)
+    var p: u64 = (&s_aus[0 as usize]) as u64
+    var n: u64 = 43
+    if zustand == Z_EDITOR {
+        p = (&s_ed[0 as usize]) as u64
+        n = 45
+    }
+    wlibc.text_at(wlibc.F_UI, wlibc.PX_UI, 8, 5 + asc, p, n, C_HELL)
+    // Die Groesse, rechtsbuendig.
+    let m: u64 = masse_text()
+    let br: u64 = wlibc.text_w(wlibc.F_UI, wlibc.PX_UI,
+        (&nn[0 as usize]) as u64, m)
+    if cw > br + 12 {
+        wlibc.text_at(wlibc.F_UI, wlibc.PX_UI, cw - br - 8, 5 + asc,
+            (&nn[0 as usize]) as u64, m, C_RAHMEN)
+    }
+    wlibc.push(w_h, 0, 0, cw, h)
+}
+
+// "1024 x 768" in `nn`. Gibt die Zahl der Oktette zurueck.
+fn masse_text() -> u64 {
+    var w: u64 = 0
+    var h: u64 = 0
+    if zustand == Z_EDITOR {
+        w = cw
+        h = ch
+    } else if zieht != 0 {
+        w = zx1 - zx0
+        h = zy1 - zy0
+    } else if hover != 0 {
+        w = fenster_feld(hover - 1, WF_W)
+        h = fenster_feld(hover - 1, WF_H)
+    } else {
+        w = bild_w
+        h = bild_h
+    }
+    var k: u64 = zahl(0, w)
+    nn[(k) as usize] = 32 as u8
+    nn[((k + 1)) as usize] = 120 as u8 // x
+    nn[((k + 2)) as usize] = 32 as u8
+    k = zahl(k + 3, h)
+    return k
+}
+
+fn zahl(at: u64, v: u64) -> u64 {
+    if v >= 10 {
+        let k: u64 = zahl(at, v / 10)
+        nn[(k) as usize] = (48 + v % 10) as u8
+        return k + 1
+    }
+    nn[(at) as usize] = (48 + v) as u8
+    return at + 1
+}
+
+// ------------------------------------------------------- das Fenster
+
+fn fenster_auf() -> bool {
+    var t: [u8; 8] = "snip\0\0\0\0"
+    if w_h != 0 {
+        return true
+    }
+    let h: u64 = sys5(wlibc.WM_CREATE, 0, (bild_w << 16) | bild_h,
+        (&t[0 as usize]) as u64, 0, 0)
+    if ulib.bad(h) || h == 0 {
+        return false
+    }
+    w_h = h
+    // OHNE SCHMUCK, weil ein Auswahl-Overlay mit Titelleiste keines
+    // waere -- und auf der NORMALEN Ebene, nicht auf L_TOP. Der Grund
+    // steht in `kernel/user/qs.fi`, gemessen: der Fensterserver gibt
+    // die Tastatur nur einem Fenster auf der normalen Ebene, und ohne
+    // Tastatur kaeme Esc nie an. Gehoben wird es trotzdem, also liegt
+    // es ueber allem ausser der Taskleiste.
+    sys5(wlibc.WM_STATE, h, wlibc.WS_DECO, 0, 0, 0)
+    return true
+}
+
+fn fenster_zu() {
+    if w_h == 0 {
+        return
+    }
+    sys5(wlibc.WM_CLOSE, w_h, 0, 0, 0, 0)
+    w_h = 0
+}
+
+// ------------------------------------------------------- das Speichern
+
+// DIE ZEILE, DIE `png.schreibe` HOLT. Sie geht durch dieselbe
+// `band_malen` wie die Vorschau -- und genau deshalb steht in der Datei
+// dasselbe wie auf dem Schirm.
+static mut ex_y: u64 = 0
+
+fn export_zeile(ziel: u64, y: u64) -> u64 {
+    // Ein Streifen wird gemalt, sobald `y` ihn verlaesst. Das ist
+    // hoechstens einmal je 81 Zeilen und nicht einmal je Zeile.
+    if y < wlibc.band_y() || y >= wlibc.band_y() + wlibc.surf_rows() {
+        var n: u64 = wlibc.surf_rows()
+        if y + n > ch {
+            n = ch - y
+        }
+        band_malen(y, n, 0)
+    }
+    var x: u64 = 0
+    while x < cw {
+        __mmio_write32((ziel + x * 4) as *mut u32,
+            wlibc.get(x, y) as u32)
+        x = x + 1
+    }
+    return cw * 4
+}
+
+fn speichern() {
+    var s_ok: [u8; 16] = "snip: gespeich\0\0"
+    var s_no: [u8; 20] = "snip: png-fehler \0\0\0"
+    var s_px: [u8; 10] = "  px=\0\0\0\0\0"
+    var s_x: [u8; 2] = "x\0"
+    pfad_bauen()
+    let rc: u64 = png.schreibe((&pfad[0 as usize]) as u64, cw, ch,
+        export_zeile)
+    if rc != png.F_OK {
+        ulib.say((&s_no[0 as usize]) as u64)
+        ulib.sayn(rc)
+        ulib.nl()
+        return
+    }
+    dateien = dateien + 1
+    gespeichert = 1
+    ulib.say((&s_ok[0 as usize]) as u64)
+    ulib.say((&pfad[0 as usize]) as u64)
+    ulib.say((&s_px[0 as usize]) as u64)
+    ulib.sayn(cw)
+    ulib.say((&s_x[0 as usize]) as u64)
+    ulib.sayn(ch)
+    ulib.nl()
+    filter_melden()
+    ablage_zwischenstand()
+}
+
+fn filter_melden() {
+    var s_f: [u8; 14] = "snip: filter \0"
+    var s_sp: [u8; 2] = " \0"
+    ulib.say((&s_f[0 as usize]) as u64)
+    var i: u64 = 0
+    while i < 5 {
+        ulib.sayn(png.filter_gewaehlt(i))
+        ulib.say((&s_sp[0 as usize]) as u64)
+        i = i + 1
+    }
+    ulib.nl()
+}
+
+// /bild/schnitt-N.png
+fn pfad_bauen() {
+    var v: [u8; 16] = "/bild/snip-\0\0\0\0\0"
+    var i: u64 = 0
+    while i < 11 {
+        pfad[(i) as usize] = v[(i) as usize]
+        i = i + 1
+    }
+    var k: u64 = 11
+    let n: u64 = dateien + 1
+    if n >= 10 {
+        pfad[(k) as usize] = (48 + n / 10) as u8
+        k = k + 1
+    }
+    pfad[(k) as usize] = (48 + n % 10) as u8
+    k = k + 1
+    pfad[(k) as usize] = 46 as u8 // .
+    pfad[((k + 1)) as usize] = 112 as u8 // p
+    pfad[((k + 2)) as usize] = 110 as u8 // n
+    pfad[((k + 3)) as usize] = 103 as u8 // g
+    pfad[((k + 4)) as usize] = 0 as u8
+}
+
+// ================================================================
+// DIE ZWISCHENABLAGE, UND WAS HIER STATT IHRER STEHT
+// ================================================================
+//
+// EINE SYSTEMWEITE ZWISCHENABLAGE GIBT ES IN OSUM NICHT. Roadmap D1
+// ist offen und haengt an A3, dem Systembus: eine Zwischenablage
+// braucht ein Besitzermodell, eine Typenliste, verzoegerte Uebergabe
+// und geteilten Speicher fuer grosse Daten, und nichts davon existiert.
+// Was existiert, ist die TEXTABLAGE der Runde K15 (`wig.clip_set`,
+// 4096 Oktette, ein Puffer im Kern) -- fuer Text zwischen zwei
+// Eingabefeldern gedacht und fuer nichts sonst.
+//
+// EIN BILD PASST DA NICHT HINEIN, und es soll auch nicht: 800x600 sind
+// 1,9 MiB gegen 4 KiB, und ein Bild in einem Textpuffer waere eine
+// Zwischenablage, die behauptet, es gaebe eine.
+//
+// ALSO LEGT DIESE FUNKTION DEN PFAD HINEIN, mehr nicht. Wer die Datei
+// will, findet ihren Namen; wer ein Bild einfuegen will, kann es nicht.
+// Der Name der Funktion sagt genau das, und wenn D1 steht, wird aus
+// diesen sechs Zeilen ein `clip_put(BILD, ...)` und der Name faellt
+// weg. Nicht mehr und nicht weniger.
+fn ablage_zwischenstand() {
+    var s: [u8; 30] = "snip: ablage (nur der Pfad)\0\0\0"
+    let n: u64 = ulib.length((&pfad[0 as usize]) as u64)
+    wlibc.clip_put((&pfad[0 as usize]) as u64, n)
+    ulib.say((&s[0 as usize]) as u64)
+    ulib.nl()
+}
+
+// ------------------------------------------------------- die Aufnahme
+
+// Aus der Auswahl wird der Ausschnitt. Ab hier rechnet alles in
+// Koordinaten des AUSGESCHNITTENEN Bildes -- die Verschiebung steht an
+// genau einer Stelle, in `hol_zeile`.
+fn zuschneiden(x0: u64, y0: u64, x1: u64, y1: u64) {
+    if x1 <= x0 || y1 <= y0 {
+        return
+    }
+    cx = cx + x0
+    cy = cy + y0
+    cw = x1 - x0
+    ch = y1 - y0
+    // Die Marken wandern mit. Einfacher waere, sie zu verwerfen -- und
+    // falsch: wer zuschneidet, nachdem er etwas markiert hat, will die
+    // Markierung behalten.
+    var i: u64 = 0
+    while i < nmarke {
+        ms(i, M_X0, minus(mg(i, M_X0), x0))
+        ms(i, M_Y0, minus(mg(i, M_Y0), y0))
+        ms(i, M_X1, minus(mg(i, M_X1), x0))
+        ms(i, M_Y1, minus(mg(i, M_Y1), y0))
+        i = i + 1
+    }
+}
+
+fn minus(a: u64, b: u64) -> u64 {
+    if a <= b {
+        return 0
+    }
+    return a - b
+}
+
+fn aufnehmen(x0: u64, y0: u64, x1: u64, y1: u64) {
+    zuschneiden(x0, y0, x1, y1)
+    zustand = Z_EDITOR
+    // DER FAHRSCHEIN GEHT ZURUECK, SOBALD DAS BILD DA IST. Der
+    // Bearbeiter braucht ihn nicht -- er liest weiter aus dem
+    // Standbild... und genau deshalb geht er NICHT zurueck. Das ist
+    // der eine Punkt, an dem die Bequemlichkeit und das Modell
+    // auseinandergehen, und das Modell gewinnt nicht: ohne Fahrschein
+    // gibt `SN_READ` null Oktette, und der Bearbeiter haette kein
+    // Bild mehr. Er bleibt also offen, bis der Mensch fertig ist --
+    // hoechstens 30 Sekunden (die TTL), danach ist Schluss. Wer
+    // laenger malen will, drueckt noch einmal.
+    zeichnen()
+}
+
+fn abbrechen() {
+    zurueckgeben()
+    fenster_zu()
+    zustand = Z_WARTEN
+    nmarke = 0
+    npkt = 0
+    ntxt = 0
+    nblk = 0
+    gespeichert = 0
+}
+
+// ------------------------------------------------------- die Tasten
+
+fn taste(c: u64) -> bool {
+    if c == 27 { // Esc
+        abbrechen()
+        return true
+    }
+    if zustand == Z_AUSWAHL {
+        if c == 118 { // v -- Vollbild
+            aufnehmen(0, 0, cw, ch)
+            return true
+        }
+        if c == 102 { // f -- Fenster
+            modus = 1
+            zeichnen()
+            return true
+        }
+        if c == 51 { // 3
+            spaeter(3000)
+            return true
+        }
+        if c == 53 { // 5
+            spaeter(5000)
+            return true
+        }
+        if c == 48 { // 0 -- zehn Sekunden
+            spaeter(10000)
+            return true
+        }
+        return false
+    }
+    if zustand != Z_EDITOR {
+        return false
+    }
+    if tippt != 0 {
+        text_taste(c)
+        return true
+    }
+    if c == 122 { // z -- zuschneiden auf die letzte Auswahl
+        if zx1 > zx0 && zy1 > zy0 {
+            zuschneiden(zx0, zy0, zx1, zy1)
+            zx0 = 0
+            zy0 = 0
+            zx1 = 0
+            zy1 = 0
+            zeichnen()
+        }
+        return true
+    }
+    if c == 114 { // r
+        werkzeug = A_RECHTECK
+        return true
+    }
+    if c == 112 { // p
+        werkzeug = A_PFEIL
+        return true
+    }
+    if c == 109 { // m
+        werkzeug = A_FREI
+        return true
+    }
+    if c == 116 { // t
+        werkzeug = A_TEXT
+        return true
+    }
+    if c == 120 { // x
+        werkzeug = A_PIXEL
+        return true
+    }
+    if c == 98 { // b
+        werkzeug = A_BALKEN
+        return true
+    }
+    if c == 117 { // u
+        marke_weg()
+        zeichnen()
+        return true
+    }
+    if c == 115 { // s
+        speichern()
+        return true
+    }
+    return false
+}
+
+fn spaeter(ms: u64) {
+    // Das Fenster muss WEG, sonst fotografiert es sich selbst -- und
+    // genau dafuer ist die verzoegerte Aufnahme da: ein Menue
+    // aufklappen, das beim Klick ins Overlay zugegangen waere.
+    fenster_zu()
+    zustand = Z_WARTEN
+    verzoegern(ms)
+}
+
+fn text_taste(c: u64) {
+    if c == 13 || c == 10 {
+        tippt = 0
+        zeichnen()
+        return
+    }
+    if c == 8 { // Ruecktaste
+        let i: u64 = nmarke - 1
+        if mg(i, M_N) > 0 {
+            ms(i, M_N, mg(i, M_N) - 1)
+            ntxt = ntxt - 1
+            zeichnen()
+        }
+        return
+    }
+    if c < 32 || c > 126 {
+        return
+    }
+    if ntxt >= MAXT {
+        return
+    }
+    let i: u64 = nmarke - 1
+    txt[(ntxt) as usize] = c as u8
+    ntxt = ntxt + 1
+    ms(i, M_N, mg(i, M_N) + 1)
+    zeichnen()
+}
+
+// ------------------------------------------------------- die Maus
+
+fn maus_ab(x: u64, y: u64) {
+    if zustand == Z_AUSWAHL {
+        if modus == 1 {
+            let t: u64 = treffer(cx + x, cy + y)
+            if t != 0 {
+                let wx: u64 = fenster_feld(t - 1, WF_X)
+                let wy: u64 = fenster_feld(t - 1, WF_Y)
+                aufnehmen(wx, wy, wx + fenster_feld(t - 1, WF_W),
+                    wy + fenster_feld(t - 1, WF_H))
+            }
+            return
+        }
+        zieht = 1
+        zx0 = x
+        zy0 = y
+        zx1 = x
+        zy1 = y
+        return
+    }
+    if zustand != Z_EDITOR {
+        return
+    }
+    if y < LEISTE {
+        return
+    }
+    zieht = 1
+    zx0 = x
+    zy0 = y
+    zx1 = x
+    zy1 = y
+    if werkzeug == A_FREI {
+        let i: u64 = marke_neu(A_FREI, x, y, x, y)
+        if i < MAXA {
+            ms(i, M_A, npkt)
+            ms(i, M_N, 0)
+            punkt_dazu(i, x, y)
+        }
+    }
+}
+
+fn punkt_dazu(i: u64, x: u64, y: u64) {
+    if npkt >= MAXP {
+        return
+    }
+    pkt[(npkt) as usize] = (x & 0xFFFF) | ((y & 0xFFFF) << 16)
+    npkt = npkt + 1
+    ms(i, M_N, mg(i, M_N) + 1)
+}
+
+fn maus_bewegt(x: u64, y: u64) {
+    if zustand == Z_AUSWAHL && modus == 1 && zieht == 0 {
+        let t: u64 = treffer(cx + x, cy + y)
+        if t != hover {
+            hover = t
+            zeichnen()
+        }
+        return
+    }
+    if zieht == 0 {
+        return
+    }
+    zx1 = x
+    zy1 = y
+    if zustand == Z_EDITOR && werkzeug == A_FREI && nmarke > 0 {
+        punkt_dazu(nmarke - 1, x, y)
+    }
+    zeichnen()
+}
+
+fn maus_auf(x: u64, y: u64) {
+    if zieht == 0 {
+        return
+    }
+    zieht = 0
+    var x0: u64 = zx0
+    var y0: u64 = zy0
+    var x1: u64 = x
+    var y1: u64 = y
+    if x1 < x0 {
+        x0 = x
+        x1 = zx0
+    }
+    if y1 < y0 {
+        y0 = y
+        y1 = zy0
+    }
+    zx0 = x0
+    zy0 = y0
+    zx1 = x1
+    zy1 = y1
+    if zustand == Z_AUSWAHL {
+        if x1 > x0 + 2 && y1 > y0 + 2 {
+            aufnehmen(x0, y0, x1, y1)
+        }
+        return
+    }
+    if zustand != Z_EDITOR {
+        return
+    }
+    if werkzeug == A_FREI {
+        zeichnen()
+        return
+    }
+    if werkzeug == A_TEXT {
+        let i: u64 = marke_neu(A_TEXT, x0, y0, x1, y1)
+        if i < MAXA {
+            ms(i, M_A, ntxt)
+            ms(i, M_N, 0)
+            tippt = 1
+        }
+        zeichnen()
+        return
+    }
+    if x1 <= x0 + 1 || y1 <= y0 + 1 {
+        return
+    }
+    let i: u64 = marke_neu(werkzeug, x0, y0, x1, y1)
+    if i < MAXA && werkzeug == A_PIXEL {
+        mosaik_rechnen(i, cx + x0, cy + y0, x1 - x0, y1 - y0)
+    }
+    zeichnen()
+}
+
+// ------------------------------------------------------- die Schleife
+
+fn ereignisse() {
+    var ev: [u64; 4] = [0 as u64; 4]
+    var n: u64 = 0
+    while n < 32 && w_h != 0
+        && sys5(wlibc.WM_EVENT, w_h, (&ev[0 as usize]) as u64, 0, 0, 0) == 1 {
+        let b: u64 = (&ev[0 as usize]) as u64
+        let typ: u64 = __mmio_read64((b) as *mut u64)
+        let d: u64 = __mmio_read64((b + 8) as *mut u64)
+        // DIE DREI ZAHLEN LIEGEN IN EINEM WORT: `wm.ev_push` packt sie
+        // als (a << 32) | (b << 16) | c. Fuer eine Taste ist `a` das
+        // Zeichen, fuer den Zeiger sind `a` und `b` die Koordinaten.
+        // Das ganze Wort zu lesen kostet in diesem Baum schon einmal
+        // zwei Laeufe (siehe kernel/user/qs.fi).
+        let a: u64 = (d >> 32) & 0xFFFF
+        let bb: u64 = (d >> 16) & 0xFFFF
+        if typ == wlibc.EV_KEY {
+            taste(a)
+        } else if typ == wlibc.EV_DOWN {
+            maus_ab(a, bb)
+        } else if typ == wlibc.EV_MOVE {
+            maus_bewegt(a, bb)
+        } else if typ == wlibc.EV_UP {
+            maus_auf(a, bb)
+        } else if typ == wlibc.EV_CLOSE {
+            abbrechen()
+        }
+        n = n + 1
+    }
+}
+
+// Ein neuer Fahrschein. Alles zuruecksetzen -- eine Marke aus der
+// vorigen Aufnahme im neuen Bild waere der Fehler, den man nicht
+// bemerkt, bis das Bild verschickt ist.
+fn neuer_fahrschein() {
+    bild_w = info(SI_W)
+    bild_h = info(SI_H)
+    cx = 0
+    cy = 0
+    cw = bild_w
+    ch = bild_h
+    zx0 = 0
+    zy0 = 0
+    zx1 = 0
+    zy1 = 0
+    zieht = 0
+    modus = 0
+    hover = 0
+    nmarke = 0
+    npkt = 0
+    ntxt = 0
+    nblk = 0
+    tippt = 0
+    gespeichert = 0
+    werkzeug = A_RECHTECK
+    zustand = Z_AUSWAHL
+    if !fenster_auf() {
+        zustand = Z_WARTEN
+        return
+    }
+    zeichnen()
+    say_fahrschein()
+}
+
+fn say_fahrschein() {
+    var s: [u8; 16] = "snip: schein \0\0\0"
+    var s2: [u8; 8] = "  bild=\0"
+    var s_x: [u8; 2] = "x\0"
+    ulib.say((&s[0 as usize]) as u64)
+    ulib.sayn(info(SI_SEQ))
+    ulib.say((&s2[0 as usize]) as u64)
+    ulib.sayn(bild_w)
+    ulib.say((&s_x[0 as usize]) as u64)
+    ulib.sayn(bild_h)
+    ulib.nl()
+}
+
+// ------------------------------------------------------- der Anfang
+
+fn u_start(args: u64) -> u64 {
+    var s_hi: [u8; 30] = "snip: der Dienst ist da, pid \0"
+    var s_no: [u8; 45] = "snip: SN_REG abgelehnt -- euid 0 noetig?\0\0\0\0\0"
+    var s_nd: [u8; 40] = "snip: kein Standbildpuffer (nosnap?)\0\0\0\0"
+    var s_ttl: [u8; 10] = "  ttl_ms=\0"
+    var s_pr: [u8; 12] = "  probe=1\0\0\0"
+    var s_nofl: [u8; 26] = "snip: filter aus (probe)\0\0"
+    var s_ende: [u8; 16] = "snip: fertig\0\0\0\0"
+    var w_probe: [u8; 6] = "probe\0"
+    var w_nofil: [u8; 7] = "nofilt\0"
+    var w_einmal: [u8; 7] = "einmal\0"
+
+    if !wlibc.start(false) {
+        return 1
+    }
+    if info(SI_READY) == 0 {
+        ulib.say((&s_nd[0 as usize]) as u64)
+        ulib.nl()
+        return 1
+    }
+    if !eintragen() {
+        ulib.say((&s_no[0 as usize]) as u64)
+        ulib.nl()
+        return 1
+    }
+    ulib.say((&s_hi[0 as usize]) as u64)
+    ulib.sayn(ulib.sys(ulib.SYS_GETPID, 0, 0, 0))
+    ulib.say((&s_ttl[0 as usize]) as u64)
+    ulib.sayn(info(SI_TTLMS))
+    ulib.nl()
+
+    // GEGENPROBE `nofilt`: jede Zeile nimmt Filter 0. Dasselbe Bild,
+    // eine groessere Datei -- und der Unterschied IST die Zusage.
+    var i: u64 = 0
+    let na: u64 = ulib.arg_count(args)
+    var einmal: u64 = 0
+    while i < na {
+        let p: u64 = ulib.arg_at(args, i)
+        if ulib.streq(p, (&w_nofil[0 as usize]) as u64) {
+            png.filter_wahl(0)
+            ulib.say((&s_nofl[0 as usize]) as u64)
+            ulib.nl()
+        }
+        if ulib.streq(p, (&w_einmal[0 as usize]) as u64) {
+            einmal = 1
+        }
+        i = i + 1
+    }
+
+    letzte_seq = info(SI_SEQ)
+    var runden: u64 = 0
+    while runden < 4000000 {
+        let seq: u64 = info(SI_SEQ)
+        if seq != letzte_seq && info(SI_MINE) == 1 {
+            if info(SI_FROZEN) == 1 {
+                letzte_seq = seq
+                neuer_fahrschein()
+            }
+        } else if zustand == Z_WARTEN && info(SI_MINE) == 1
+            && info(SI_FROZEN) == 1 && info(SI_OPEN) == 1 {
+            // Nach einer verzoegerten Aufnahme: derselbe Fahrschein,
+            // ein neues Standbild. Die Nummer aendert sich dabei NICHT
+            // -- ein Fahrschein, ein Zaehler.
+            neuer_fahrschein()
+        }
+        ereignisse()
+        // Der Fahrschein kann ablaufen, waehrend der Mensch malt.
+        // Dann ist das Bild weg, und ein Fenster, das ein Bild zeigt,
+        // das es nicht mehr lesen kann, waere eine Luege auf dem
+        // Schirm.
+        if zustand != Z_WARTEN && info(SI_OPEN) == 0 {
+            fenster_zu()
+            zustand = Z_WARTEN
+        }
+        if einmal == 1 && gespeichert == 1 {
+            runden = 4000000
+        } else {
+            ulib.sleep_ms(10)
+            runden = runden + 1
+        }
+    }
+    ulib.say((&s_ende[0 as usize]) as u64)
+    ulib.nl()
+    return 0
+}

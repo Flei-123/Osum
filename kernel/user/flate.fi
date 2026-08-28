@@ -30,6 +30,8 @@ import ulib
 
 export {
     crc32, deflate, store, inflate, MAXBITS,
+    // RUNDE SNIP: derselbe Packer, in Baendern.
+    adler32, band_begin, band, band_end, band_len,
     E_OK, E_INPUT, E_ROOM, E_FORMAT
 }
 
@@ -515,6 +517,30 @@ fn store(in_p: u64, in_n: u64, out_p: u64, out_cap: u64,
     return oops
 }
 
+// ADLER-32 nach RFC 1950 -- die Pruefsumme, die den zlib-Rahmen
+// abschliesst, und damit die, die ein PNG braucht. Zwei Summen modulo
+// 65521 (die groesste Primzahl unter 2^16); zusammengesetzt steht die
+// zweite oben.
+//
+// RUNDE SNIP: der Modulo steht NACH JEDEM Oktett und nicht erst am
+// Ende des Blocks. Das ist langsamer als die uebliche Form (5552
+// Oktette zwischen zwei Modulo-Rechnungen, weil so lange nichts
+// ueberlaufen kann), und es ist hier richtig: dieser Kodierer bekommt
+// die Zeilen einzeln und weiss beim Aufruf nicht, wie viele noch
+// kommen. Eine Zwischensumme, die nur beim Blockende stimmt, waere fuer
+// einen laufenden Zustand die falsche Form.
+fn adler32(zustand: u64, p: u64, n: u64) -> u64 {
+    var a: u64 = zustand & 0xFFFF
+    var b: u64 = (zustand >> 16) & 0xFFFF
+    var i: u64 = 0
+    while i < n {
+        a = (a + ((*((p + i) as *mut u8)) as u64)) % 65521
+        b = (b + a) % 65521
+        i = i + 1
+    }
+    return (b << 16) | a
+}
+
 // -------------------------------------------------------- das Einpacken
 
 // Das Fenster ist 16 KiB statt der 32 KiB, die deflate erlaubt. Der
@@ -681,4 +707,129 @@ fn deflate(in_p: u64, in_n: u64, out_p: u64, out_cap: u64,
     }
     __mmio_write64((out_len) as *mut u64, dpos)
     return oops
+}
+
+// ===================================================== RUNDE SNIP
+// DERSELBE PACKER, ABER IN BAENDERN.
+//
+// WARUM ES DAS BRAUCHT. `deflate` oben bekommt die ganze Eingabe auf
+// einmal. Ein Bildschirmfoto von 800x600 sind 1 920 000 Oktette, und
+// ein Programm auf dieser Maschine hat 1 MiB zwischen `proc.IMAGE_BASE`
+// und `proc.IMAGE_END` -- es kann das Bild nicht einmal HALTEN, von
+// einem zweiten Puffer fuer das Ergebnis ganz zu schweigen. Der
+// Kodierer holt sich das Bild deshalb ZEILENWEISE aus dem Kern und
+// schiebt es hier hindurch.
+//
+// WAS DAS KOSTET, EHRLICH: jedes Band faengt mit einer leeren
+// Streuwerttabelle an, also findet der Packer keine Wiederholung, die
+// ueber eine Bandgrenze reicht. Bei einem Bildschirmfoto ist das
+// wenig -- der PNG-Filter hat die senkrechte Aehnlichkeit schon
+// weggerechnet, bevor diese Datei die Oktette sieht -- und es ist
+// GUELTIGES deflate: mehrere Bloecke hintereinander sind genau das,
+// was RFC 1951 vorsieht. Gemessen wird der Unterschied in
+// tools/snip/run.sh, Abschnitt 3.
+//
+// DIE BITS LAUFEN UEBER DIE BANDGRENZE, und das ist der ganze Trick.
+// Ein deflate-Block endet nicht auf einer Oktettgrenze; `wbuf`/`wcnt`
+// bleiben zwischen zwei `band`-Aufrufen stehen, und erst `band_end`
+// schiebt den Rest hinaus. Zwei getrennte `deflate`-Aufrufe
+// aneinanderzuhaengen ergaebe zwei STROEME und keinen -- jeder Leser
+// wuerde beim zweiten aussteigen.
+
+fn band_begin(out_p: u64, out_cap: u64) {
+    setup()
+    dst = out_p
+    dpos = 0
+    dend = out_cap
+    wbuf = 0
+    wcnt = 0
+    oops = E_OK
+}
+
+// Ein Band. `letztes` = 1 setzt BFINAL, dann folgt nichts mehr.
+fn band(in_p: u64, in_n: u64, letztes: u64) -> u64 {
+    var i: u64 = 0
+    while i < WSIZE {
+        head[(i) as usize] = 0
+        i = i + 1
+    }
+    i = 0
+    while i < PREVN {
+        prev[(i) as usize] = 0
+        i = i + 1
+    }
+    put_bits(letztes, 1)
+    put_bits(1, 2) // feste Baeume
+    var at: u64 = 0
+    while at < in_n && oops == E_OK {
+        var best: u64 = 0
+        var bestd: u64 = 0
+        if at + 3 <= in_n {
+            let h: u64 = hash3(in_p, at)
+            var cand: u64 = head[(h) as usize]
+            var tries: u64 = 0
+            while cand != 0 && tries < CHAIN {
+                let pos: u64 = cand - 1
+                let d: u64 = at - pos
+                if d > MAXDIST || d == 0 {
+                    cand = 0
+                } else {
+                    var l: u64 = 0
+                    while l < 258 && at + l < in_n
+                    && *((in_p + pos + l) as *mut u8)
+                        == *((in_p + at + l) as *mut u8) {
+                        l = l + 1
+                    }
+                    if l > best {
+                        best = l
+                        bestd = d
+                    }
+                    cand = prev[(pos & PREVM) as usize]
+                    tries = tries + 1
+                }
+            }
+            prev[(at & PREVM) as usize] = head[(h) as usize]
+            head[(h) as usize] = at + 1
+        }
+        if best >= 3 {
+            put_length(best)
+            put_dist(bestd)
+            var k: u64 = 1
+            while k < best {
+                if at + k + 3 <= in_n {
+                    let h2: u64 = hash3(in_p, at + k)
+                    prev[((at + k) & PREVM) as usize] = head[(h2) as usize]
+                    head[(h2) as usize] = at + k + 1
+                }
+                k = k + 1
+            }
+            at = at + best
+        } else {
+            put_literal((*((in_p + at) as *mut u8)) as u64)
+            at = at + 1
+        }
+    }
+    put_code(0, 7) // 256: Ende des Blocks
+    return oops
+}
+
+// Aufraeumen: falls kein Band BFINAL gesetzt hat, kommt hier ein leerer
+// letzter Block, damit der Strom ein Ende hat. Dann die letzten Bits.
+fn band_end(schon_final: u64) -> u64 {
+    if schon_final == 0 {
+        put_bits(1, 1)
+        put_bits(1, 2)
+        put_code(0, 7)
+    }
+    if wcnt > 0 {
+        emit(wbuf & 255)
+        wbuf = 0
+        wcnt = 0
+    }
+    return oops
+}
+
+// Wie viele Oktette bisher hinausgegangen sind.
+fn band_len() -> u64 {
+    return dpos
 }
