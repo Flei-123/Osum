@@ -51,6 +51,8 @@ themes=yes
 local_dir=""
 extra=""
 accel=${OSUM_ACCEL:-tcg}
+uitrace=no
+clicks=""
 keep=no
 progs="desktop taskbar settings launcher theme explorer sh echo ls cat"
 for a in "$@"; do
@@ -72,6 +74,8 @@ for a in "$@"; do
         progs=*) progs=${a#*=} ;;
         accel=*) accel=${a#*=} ;;
         keep=*) keep=${a#*=} ;;
+        uitrace=*) uitrace=${a#*=} ;;
+        click=*) clicks="$clicks ${a#*=}" ;;
         *) echo "unknown option: $a" >&2; exit 2 ;;
     esac
 done
@@ -159,6 +163,10 @@ ARGS+=(/etc/
        "/etc/locale.conf=$OUT/locale.conf@0644"
        "/etc/passwd=$OUT/passwd@0644"
        "/etc/taskbar.conf=$OUT/taskbar.conf@0644")
+if [ "$uitrace" = yes ]; then
+    printf 'on\n' > "$OUT/uitrace"
+    ARGS+=("/etc/uitrace=$OUT/uitrace@0644")
+fi
 ARGS+=(/etc/schemas/)
 for s in assets/schemes/*.scheme; do
     ARGS+=("/etc/schemas/$(basename "$s" .scheme)=$s@0644")
@@ -229,6 +237,14 @@ while [ $i -lt 3200 ]; do
     kill -0 "$PID" 2>/dev/null || break
     sleep 0.15; i=$((i+1))
 done
+if [ -n "$clicks" ]; then
+    # THE CLICKS GO THROUGH THE QEMU MONITOR, and `mouse_move` there is
+    # RELATIVE -- see tools/themestore/click.py for why that matters and
+    # what it costs to get it wrong.
+    python3 tools/themestore/click.py $clicks > "$OUT/mon.txt" 2>"$OUT/click.err"
+    python3 tools/wm/monitor.py "$SOCK" "$OUT/mon.txt" > "$OUT/click.log" 2>&1
+    sleep 2
+fi
 if [ -z "$script" ] && [ "$shot" = yes ]; then
     python3 tools/gfx/screenshot.py "$SOCK" "$OUT/desktop.ppm" 25 \
         > "$OUT/shot.log" 2>&1
