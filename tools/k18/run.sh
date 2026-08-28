@@ -188,8 +188,8 @@ done
 # der keinen meldet, wo einer ist.
 fremd=$(grep -ran --include='*.fi' --include='*.s' -E '^const SYS_[A-Za-z0-9_]+: u64 = 17(5[0-9]|[6-9][0-9])' kernel/ \
     | grep -v -e '^kernel/sys.fi' -e '^kernel/uprog.fi' -e '^kernel/user/power.fi' \
-              -e '^kernel/user/powermon.fi' -e '^kernel/user/leiste.fi' || true)
-# `kernel/user/leiste.fi` steht seit Runde MERGE aus demselben Grund in
+              -e '^kernel/user/powermon.fi' -e '^kernel/user/taskbar.fi' || true)
+# `kernel/user/taskbar.fi` steht seit Runde MERGE aus demselben Grund in
 # der Liste wie powermon.fi: die Taskleiste zeigt den Ladestand an und
 # fragt ihn ueber GENAU DIESEN Aufruf. Ein dritter Leser derselben Zahl
 # ist der Zweck einer Aufrufnummer.
