@@ -1,0 +1,131 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/msr.fi -- RUNDE KVMFIX: ein MSR-Zugriff, der ein #GP UEBERLEBT.
+//
+// WARUM ES DIESE DATEI GIBT, UND ZWAR MIT EINER MESSUNG DAHINTER.
+//
+// Bis hierher las dieser Kernel seine Energieregister ungeschuetzt. Der
+// Kommentar in `pwr.fi` sagte dazu: "KEIN Schutz gegen #GP -- der ist
+// hier nicht noetig", und er belegte das mit `tools/k18/msrprobe.s`, das
+// AUF DIESEM WIRT nachgewiesen hatte, dass kein Zugriff eine
+// Schutzverletzung ausloest. Die Messung war richtig. Die Folgerung war
+// falsch, und der Grund steht im Satz selbst: AUF DIESEM WIRT. Der Wirt
+// war QEMU/TCG, also Software, die jeden `rdmsr` annimmt und im Zweifel
+// eine Null zurueckgibt.
+//
+// Mit /dev/kvm laeuft derselbe Gastcode auf der ECHTEN CPU. Sie ist ein
+// AMD EPYC, und IA32_TEMPERATURE_TARGET (0x1A2) ist ein INTEL-Register.
+// Gemessen, nicht vermutet:
+//
+//   qemu -accel tcg  ... -> rc=21, 76 Zeilen, "kernel: done"
+//   qemu -accel kvm  ... -> rc=63, 40 Zeilen,
+//       *** EXCEPTION 13 #GP  err=0x0  rip=0x131ef5  rcx=0x1a2
+//
+// rcx ist bei `rdmsr` der Registerindex. 0x1A2 ist das Register, das es
+// auf dieser CPU nicht gibt. Auf einem echten PC waere das derselbe Tod.
+//
+// ------------------------------------------------------------------
+// WARUM EIN FAENGERPFAD UND KEINE HERSTELLERABFRAGE
+//
+// Der naheliegende Weg waere CPUID: Hersteller lesen (GenuineIntel /
+// AuthenticAMD), Merkmalsbits pruefen, und intel-eigene Register nur auf
+// Intel anfassen. Das ist NOETIG, aber es ist NICHT HINREICHEND, und
+// zwar aus drei Gruenden, die alle auf derselben Sache beruhen -- der
+// Registersatz einer x86-Maschine ist nicht durch CPUID vollstaendig
+// beschrieben:
+//
+//   1. Auch INTEL-Maschinen fehlt einzeln ein Register. MSR_PLATFORM_INFO
+//      (0xCE) gibt es erst ab Nehalem, MSR_TURBO_RATIO_LIMIT (0x1AD) nur
+//      mit Turbo, IA32_TEMPERATURE_TARGET (0x1A2) nicht auf jedem Modell.
+//      Fuer keines dieser Register gibt es ein eigenes CPUID-Bit.
+//   2. Ein WIRT entscheidet selbst. KVM auf diesem Rechner laeuft mit
+//      ignore_msrs=N (nachgesehen in /sys/module/kvm/parameters), also
+//      wird jedes nicht nachgebildete Register zu einem #GP -- unabhaengig
+//      davon, was CPUID dem Gast erzaehlt.
+//   3. Eine Herstellerabfrage muss an JEDER Zugriffsstelle richtig sein.
+//      Ein Faengerpfad muss an EINER Stelle richtig sein.
+//
+// Also derselbe Weg, den Linux seit 1996 geht: eine Tabelle aus Paaren
+// (Adresse des Befehls, der fehlschlagen darf | Adresse, an der es
+// weitergeht). Der #GP-Behandler sieht nach, ob die Fehleradresse darin
+// steht; steht sie darin, setzt er rip auf den zweiten Wert und laesst
+// den Kernel weiterlaufen. Steht sie nicht darin, bleibt alles wie
+// bisher -- die Maschine haelt an und sagt warum.
+//
+// Die Tabelle und die beiden Zugriffe stehen in `arch/x86_64/isr.s`:
+// ihre Adressen muessen ASSEMBLERADRESSEN sein, damit sie auf den Befehl
+// genau zeigen. Eine Sprache kann das nicht zusagen. Diese Datei ist nur
+// das Fenster dorthin.
+//
+// WAS ABSICHTLICH NICHT DRIN IST: ein allgemeiner "kopiere aus dem
+// Nutzerspeicher"-Faengerpfad, wie Linux ihn auch hat. Der braucht mehr
+// als eine ausgetauschte Ruecksprungadresse (er muss auch sagen, WIE
+// VIEL nicht kopiert wurde), und diese Runde hat ihn nicht noetig.
+
+import kstate
+
+export { rd, wr, rd0, catch_rip }
+
+// Die Plaetze in der Tabelle aus isr.s.
+const V_FIXUPS: u64 = 70 // die Faengertabelle
+const V_READ: u64 = 71 // msr_read_safe
+const V_WRITE: u64 = 72 // msr_write_safe
+
+fn vector(state: u64, i: u64) -> u64 {
+    return __mmio_read64((kstate.get(state, kstate.VECTORS) + i * 8) as *mut u64)
+}
+
+// Ein Register lesen. `out` zeigt auf ein u64, in dem das Ergebnis
+// landet. Zurueck kommt `true`, wenn der Prozessor das Register kennt --
+// und `false`, wenn er mit einem #GP geantwortet hat. Im zweiten Fall
+// steht in `out` eine Null, und der Aufrufer WEISS, dass sie keine
+// Messung ist.
+fn rd(state: u64, index: u64, out: u64) -> bool {
+    var rc: u64 = 1
+    asm("call rax", in("rax") vector(state, V_READ), in("rdi") index,
+        in("rsi") out, out("rax") & rc, clobber("memory"))
+    return rc == 0
+}
+
+// Dasselbe fuer das Schreiben. `false` heisst: das Register nimmt nichts
+// an. Der Aufrufer darf danach nicht behaupten, er habe etwas gesetzt.
+fn wr(state: u64, index: u64, value: u64) -> bool {
+    var rc: u64 = 1
+    asm("call rax", in("rax") vector(state, V_WRITE), in("rdi") index,
+        in("rsi") value, out("rax") & rc, clobber("memory"))
+    return rc == 0
+}
+
+// Die bequeme Fassung fuer die Stellen, an denen eine Null ohnehin
+// "die Maschine sagt dazu nichts" bedeutet.
+fn rd0(state: u64, index: u64) -> u64 {
+    var v: u64 = 0
+    if !rd(state, index, (&v) as u64) {
+        return 0
+    }
+    return v
+}
+
+// Fuer `trap.fi`: steht diese Fehleradresse in der Faengertabelle? Wenn
+// ja, kommt die Adresse zurueck, an der es weitergeht, sonst eine Null.
+// Die Tabelle endet an einem Nullpaar; die Obergrenze von 32 Paaren ist
+// eine Bremse gegen eine Tabelle, die durch einen Bauschaden kein Ende
+// mehr hat -- ein #GP-Behandler, der endlos sucht, ist schlimmer als
+// einer, der aufgibt.
+fn catch_rip(state: u64, rip: u64) -> u64 {
+    let tbl: u64 = vector(state, V_FIXUPS)
+    if tbl == 0 {
+        return 0
+    }
+    var i: u64 = 0
+    while i < 32 {
+        let at: u64 = __mmio_read64((tbl + i * 16) as *mut u64)
+        if at == 0 {
+            return 0
+        }
+        if at == rip {
+            return __mmio_read64((tbl + i * 16 + 8) as *mut u64)
+        }
+        i = i + 1
+    }
+    return 0
+}
