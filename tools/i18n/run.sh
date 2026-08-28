@@ -293,10 +293,16 @@ schau "der uebersetzte Satz mit dem unuebersetzten Pfad steht auf dem Schirm" \
     230 230 230 30 34 40 "Farbschema (aus /etc/schemas):" 8
 
 # Die Taskleiste -- ein ANDERER Prozess, dieselbe Sprache.
-has "$EF" "taskbar: text netz" "die Taskleiste meldet ihr Netzfeld"
-grep -a 'taskbar: text netz' "$EF" | tail -1 | grep -q 'no network' \
+#
+# DAS FELD HEISST `net` UND NICHT `netz`. Bis zum dritten Nachtrag der
+# Runde LOOK stand hier `taskbar: text netz` -- eine Zeichenkette, die
+# die Leiste NIE geschrieben hat (`git log -S'text netz'` findet nichts).
+# Sieben Zusagen suchten also nach etwas, das es nicht gibt, und waren
+# damit immer rot. Eine Zusage, die nie zutreffen KANN, ist keine.
+has "$EF" "taskbar: text net" "die Taskleiste meldet ihr Netzfeld"
+grep -a 'taskbar: text net' "$EF" | tail -1 | grep -q 'no network' \
     && ok "auf Englisch: no network" || bad "die Taskleiste ist nicht englisch"
-grep -a 'taskbar: text netz' "$DF" | tail -1 | grep -q 'kein Netz' \
+grep -a 'taskbar: text net' "$DF" | tail -1 | grep -q 'kein Netz' \
     && ok "auf Deutsch: kein Netz" || bad "die Taskleiste ist nicht deutsch"
 
 # UND DIE BEIDEN BILDER SIND WIRKLICH VERSCHIEDEN. Ohne diese Zahl
@@ -371,10 +377,10 @@ else
         # UND EIN ANDERER PROZESS ZIEHT MIT. Das ist die eigentliche
         # Zusage: die Taskleiste liest die Wahl des Benutzers nach, so
         # wie sie /etc/theme nachliest.
-        if grep -a 'taskbar: text netz' "$W" | tail -1 | grep -q 'kein Netz'; then
+        if grep -a 'taskbar: text net' "$W" | tail -1 | grep -q 'kein Netz'; then
             ok "und die TASKLEISTE, ein ANDERER Prozess, zieht mit: kein Netz statt no network"
         else
-            bad "die Taskleiste bleibt englisch: $(grep -a 'taskbar: text netz' "$W" | tail -1)"
+            bad "die Taskleiste bleibt englisch: $(grep -a 'taskbar: text net' "$W" | tail -1)"
         fi
         # BILDPUNKTGENAU, in DEMSELBEN Lauf, in dem vorher Englisch stand.
         wx=$(zeile_von "$W" 2 | grep -oE ' x=[0-9]+' | grep -oE '[0-9]+')
@@ -382,8 +388,8 @@ else
         schau "der umgestellte Knopf steht bildpunktgenau auf dem Schirm" \
             ttext "$TMPD/en/wechsel.ppm" "$SANS" 15 $((CX + wx)) $((CY + wb)) \
             230 230 230 57 64 74 "Übernehmen" 8
-        nx=$(grep -a 'taskbar: text netz' "$W" | tail -1 | grep -oE ' x=[0-9]+' | grep -oE '[0-9]+')
-        nb=$(grep -a 'taskbar: text netz' "$W" | tail -1 | grep -oE ' base=[0-9]+' | grep -oE '[0-9]+')
+        nx=$(grep -a 'taskbar: text net' "$W" | tail -1 | grep -oE ' x=[0-9]+' | grep -oE '[0-9]+')
+        nb=$(grep -a 'taskbar: text net' "$W" | tail -1 | grep -oE ' base=[0-9]+' | grep -oE '[0-9]+')
         schau "und die umgestellte Taskleiste auch" \
             ttext "$TMPD/en/wechsel.ppm" "$SANS" 15 "$nx" $((572 + nb)) \
             230 230 230 42 47 55 "kein Netz" 8
