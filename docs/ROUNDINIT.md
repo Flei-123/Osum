@@ -78,6 +78,75 @@ nachgesehen.
 
 ---
 
+## 2b. Der Kernfehler, den diese Runde gefunden hat
+
+Das wichtigste Ergebnis dieser Runde steht nicht in `init.fi`, sondern in
+`kernel/sys.fi`. Es kam beim Messen heraus und nicht beim Lesen.
+
+**Der Befund.** Ein Dienst mit `respawn`, der schnell endet, blieb nach
+seinem **zweiten** Start für immer stehen. `svc status` zeigte ihn weiter
+als `running`, `ps` zeigte an derselben Stelle einen **Zombie mit
+Elternteil 1**, und die Zahl der Starts bewegte sich nicht mehr. Mit
+genügend Diensten lief die Aufgabentafel (32 Plätze) voll, und dann
+startete nichts mehr — `elf:`-Zeilen ohne ein `elf: start` dahinter.
+
+**Die Ursache.** `do_wait4` fragte:
+
+```
+let child: u64 = find_child(state, me, want)
+```
+
+und `find_child` gibt den **ersten** Prozess der Aufgabentafel zurück,
+dessen Elternteil der Rufer ist — **ohne nach seinem Zustand zu fragen**.
+Lebt der noch, so antwortete `wait4` mit `WNOHANG` an dieser Stelle eine
+`0` („nichts Neues"), und der **Zombie dahinter** wurde nie abgeholt.
+
+**Warum es 25 Runden lang niemand gemerkt hat.** Eine Shell wartet auf
+**ein** Kind und hat meist kein zweites; für sie ist der erste Treffer
+immer der richtige. Der Prozess 1 hat **immer** mehrere Kinder, und das
+langlebigste (die Konsole) steht in der Tafel meist **vor** den
+kurzlebigen Diensten. Runde K13 hatte im Testlauf genau zwei Zeilen in
+`/etc/inittab` und ist knapp daran vorbeigelaufen.
+
+**Die Behebung** ist, wonach man fragt: zuerst nach einem **Zombie**
+(`find_zombie_child`), und erst wenn es keinen gibt, danach, ob es
+überhaupt ein Kind gibt — das unterscheidet „warte" von `-ECHILD`. Bei
+genau einem Kind ist das Verhalten Zeile für Zeile das alte.
+
+**Die Gegenprobe** heißt `waitfirst` und stellt den alten Weg wieder her.
+Gemessen, derselbe Lauf, dasselbe Abbild:
+
+| | `sauber` (`/bin/true`, `respawn`) | Aufgabentafel |
+|---|---|---|
+| behoben | `stopped 0 20 0` — 20 Starts, `reaped=21`, `zombies=0` | kein Zombie |
+| `waitfirst` | `running 11 2` — steht bei **2** Starts, für immer | `11 1 zombie user` bleibt stehen |
+
+---
+
+## 2c. Die zweite Bremse: init darf die Maschine nicht selbst auffressen
+
+Der Rückfall-Zähler trifft nur, wer mit einem Fehler endet. Ein Dienst,
+der **sofort und mit 0** endet (`/bin/true` als `respawn`), ist nach
+dieser Regel keine Fehlfunktion — und frisst die Maschine trotzdem auf:
+fünf Prozessstarts je Sekunde, jeder mit `fork`, `execve` und einem
+ELF-Lader, der 28 KiB von der Platte holt. **Gemessen:** mit einem
+solchen Dienst brauchte ein `sleep 15` in einer anderen Shell länger als
+drei Minuten; ohne ihn lief derselbe Lauf durch.
+
+Dazu kam `init` selbst: es las `/run/svc.cmd` in **jedem** Durchgang, also
+vierzig Dateiöffnungen je Sekunde, dauerhaft, auf einer IDE-Platte.
+
+Zwei Änderungen, beide aus der Messung:
+
+1. **Eine Startbremse für JEDEN Dienst**, ohne nach dem Grund zu fragen:
+   mehr als **10 Starts binnen 5 Sekunden**, und der nächste Start wartet
+   **5 Sekunden** statt 200 ms. Ein gesunder Dienst kommt dort nie hin —
+   `blink` (`sleep 1`) schafft in fünf Sekunden vier Starts.
+2. **`/run/svc.cmd` nur noch alle 200 ms.** `svc` wartet eine Sekunde auf
+   Antwort; 200 ms reichen, und es ist ein Achtel der Last.
+
+---
+
 ## 3. Das Format von `/etc/inittab`
 
 Zwei Schreibweisen, und **beide werden gelesen**:
@@ -223,3 +292,14 @@ Server über Wochen trägt, aber es ist kein systemd:
 10. **Der Neustart ist nur auf QEMU gemessen**, Weg 2 von dreien. Das
     RESET-Register der FADT und der 8042 stehen im Code und sind auf
     diesem Wirt nicht gelaufen.
+11. **Die Startbremse ist grob.** Zehn Starts in fünf Sekunden, dann
+    fünf Sekunden Pause — es gibt keinen ansteigenden Rückfall
+    (200, 400, 800 …), wie ihn systemd fährt. Für einen kaputten Dienst
+    reicht es; für einen, der alle sechs Sekunden stirbt, greift sie
+    nie.
+12. **`nanosleep` schläft Marke für Marke.** `sleep 15` sind 1500
+    Durchgänge durch den Scheduler. Solange der Prozess 1 wenig tut,
+    fällt das nicht auf — unter Last wird ein langer Schlaf messbar
+    länger als er sollte. Das ist kein Fehler dieser Runde, aber es ist
+    der Grund, warum die Testskripte hier mit `sleep 5` arbeiten und
+    nicht mit `sleep 30`.
