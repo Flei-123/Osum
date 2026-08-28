@@ -463,9 +463,20 @@ PY
 grep -q '^keinklartext' "$TMPD/pwcheck.txt" \
     && ok "das Passwort steht NICHT im Klartext in /etc/shadow" \
     || bad "das Passwort steht im Klartext in /etc/shadow"
-grep -q '^runden 2048' "$TMPD/pwcheck.txt" \
-    && ok "der Eintrag traegt seine Rundenzahl (2048) bei sich" \
-    || bad "die Rundenzahl fehlt: $(grep '^runden' "$TMPD/pwcheck.txt" || true)"
+# RUNDE MULTIUSER: hier stand `^runden 2048`, und 2048 war die Zahl, die
+# `kernel/user/pw.fi` damals als ITERS trug. Diese Runde hat den
+# Kostenfaktor gemessen und heraufgesetzt -- die Zusage ist deshalb
+# NICHT gelockert, sondern SCHAERFER geworden: die Zahl im Eintrag muss
+# jetzt mit der uebereinstimmen, die im Quelltext steht, statt mit einer,
+# die hier noch einmal hingeschrieben ist. Wer ITERS aendert und diese
+# Datei vergisst, faellt damit nicht mehr durch -- wer aber den Eintrag
+# OHNE Rundenzahl schreibt oder eine andere nimmt als die vereinbarte,
+# faellt weiter durch, und das ist die Zusage, um die es geht.
+WANT_ITERS=$(grep -oE '^const KOSTEN: u64 = [0-9]+' kernel/user/pw.fi \
+    | grep -oE '[0-9]+$')
+grep -q "^runden ${WANT_ITERS:-0}$" "$TMPD/pwcheck.txt" \
+    && ok "der Eintrag traegt seine Rundenzahl (${WANT_ITERS}) bei sich -- dieselbe, die pw.fi nennt" \
+    || bad "die Rundenzahl passt nicht zu pw.fi (${WANT_ITERS:-?}): $(grep '^runden' "$TMPD/pwcheck.txt" || true)"
 grep -q '^salzlaenge 8' "$TMPD/pwcheck.txt" \
     && ok "und acht Oktette Salz aus getrandom" \
     || bad "die Salzlaenge stimmt nicht: $(grep '^salzlaenge' "$TMPD/pwcheck.txt" || true)"

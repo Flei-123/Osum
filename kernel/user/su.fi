@@ -6,11 +6,25 @@
 //     su NAME BEFEHL ARG...  BEFEHL unter NAME laufen lassen
 //     su NAME BEFEHL < d     das Passwort kommt aus einer Datei
 //
-// DIE FORM `su -c "..."` GIBT ES HIER NICHT, und der Grund steht in
-// docs/ROUNDK13.md: die Shell dieses Systems kennt kein `-c`. Statt
-// eines Zeichenkettenarguments, das noch einmal zerlegt werden muesste,
-// nimmt `su` den Befehl und seine Argumente unmittelbar. Das ist
-// weniger, aber es ist nicht falsch.
+// ============================================ RUNDE MULTIUSER
+//
+//     su -c BEFEHL ARG...    dasselbe, in der Schreibweise von POSIX
+//
+// K13 hat `-c` weggelassen und den Grund hingeschrieben: die Shell
+// dieses Systems kennt kein `-c`, also gaebe es nichts, wohin man die
+// Zeichenkette weiterreichen koennte. Der Grund stimmt weiter, und
+// deshalb tut `-c` HIER genau das, was `su NAME BEFEHL ARG...` tut --
+// es ist die gewohnte Schreibweise auf denselben Weg, nicht eine
+// zweite Zerlegung. Ein Skript, das `su justin -c /bin/id` schreibt,
+// laeuft damit; eines, das `su justin -c "a | b"` schreibt, nicht --
+// und das steht als Grenze in docs/ROUNDMULTIUSER.md, statt es
+// vorzutaeuschen.
+//
+// UND DIE ZUSATZGRUPPEN. Ohne `initgroups` behielte der Prozess die
+// Zusatzgruppen DESSEN, der `su` gerufen hat -- also die von root,
+// wenn root `su justin` sagt. Das ist genau die Art Fehler, die nicht
+// auffaellt, weil alles funktioniert: `justin` haette dann mehr
+// Rechte, nicht weniger.
 //
 // DIE REIHENFOLGE BEIM ABLEGEN DER RECHTE IST NICHT BELIEBIG: erst die
 // GRUPPE, dann der BENUTZER. Wer zuerst `setuid` sagt, ist danach kein
@@ -41,6 +55,7 @@ fn u_start(args: u64) -> u64 {
     var d_root: [u8; 5] = "root\0"
     var d_sh: [u8; 8] = "/bin/sh\0"
 
+    var o_c: [u8; 3] = "-c\0"
     var name: [u8; 64] = [0 as u8; 64]
     var first: u64 = 1
     let ac: u64 = ulib.arg_count(args)
@@ -49,6 +64,20 @@ fn u_start(args: u64) -> u64 {
         first = 2
     } else {
         ulib.strcpy((&name[0]) as u64, (&d_root[0]) as u64)
+    }
+    // RUNDE MULTIUSER: `-c` an der Stelle, an der es steht -- vor dem
+    // Namen (`su -c BEFEHL`, dann ist der Name root) oder dahinter
+    // (`su NAME -c BEFEHL`). Beides kommt vor, und beides bedeutet
+    // dasselbe: was danach steht, ist der Befehl.
+    if ulib.streq((&name[0]) as u64, (&o_c[0]) as u64) {
+        ulib.strcpy((&name[0]) as u64, (&d_root[0]) as u64)
+        first = 2
+    } else {
+        if ac > 2 {
+            if ulib.streq(ulib.arg_at(args, 2), (&o_c[0]) as u64) {
+                first = 3
+            }
+        }
     }
 
     let uid: u64 = pw.uid_of_name((&name[0]) as u64)
@@ -71,11 +100,31 @@ fn u_start(args: u64) -> u64 {
         var given: [u8; 128] = [0 as u8; 128]
         pw.read_pass((&q_pw[0]) as u64, (&given[0]) as u64, 128)
         if !pw.check_hash((&have[0]) as u64, (&given[0]) as u64) {
+            // RUNDE MULTIUSER: AUCH HIER WIRD GEWARTET. `su` ist der
+            // zweite Ort, an dem ein Passwort geprueft wird, und ein
+            // Angreifer, der schon eine Shell hat, nimmt den bequemeren
+            // -- er braucht kein Terminal dafuer. Eine Verzoegerung, die
+            // nur in `login` steht, ist eine Tuer mit Schloss neben
+            // einem offenen Fenster.
+            //
+            // EINE FESTE WARTEZEIT UND KEINE VERDOPPELUNG: `su` lebt
+            // genau einen Versuch lang, es gibt also nichts zu
+            // verdoppeln. Wer es in einer Schleife ruft, zahlt sie bei
+            // jedem Aufruf.
+            var k_del: [u8; 17] = "verzoegerung_ms\0\0"
+            let ms: u64 = pw.conf_num((&k_del[0]) as u64,
+                pw.VERZOEGERUNG_MS)
+            if ms > 0 {
+                ulib.sleep_ms(ms)
+            }
             ulib.esay_line((&e_wrong[0]) as u64, 0)
             return 1
         }
     }
 
+    // RUNDE MULTIUSER: erst die ZUSATZGRUPPEN -- `setgroups` ist root
+    // vorbehalten, und nach `setuid` ist dieser Prozess keiner mehr.
+    pw.initgroups((&name[0]) as u64)
     // Erst die Gruppe, dann der Benutzer. Siehe oben.
     if ulib.bad(ulib.sys(SYS_SETGID, gid, 0, 0)) {
         ulib.esay_line((&e_setid[0]) as u64, 0)
