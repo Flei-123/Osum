@@ -57,7 +57,7 @@ import serial
 import atomic
 import cpu
 import sched
-import virtio
+import netdev
 import errno
 import arch.x86_64.apic
 import pci
@@ -185,7 +185,7 @@ fn gw(state: u64) -> u64 {
 }
 
 fn mac_at(state: u64, i: u64) -> u64 {
-    return virtio.mac_at(state, i)
+    return netdev.mac_at(state, i)
 }
 
 // ============================================ ROUND NETVIEW, addendum
@@ -206,10 +206,10 @@ fn mac_at(state: u64, i: u64) -> u64 {
 // traffic of its own -- and the limit is written down rather than
 // dressed up.
 fn carrier(state: u64) -> bool {
-    if !virtio.present(state) {
+    if !netdev.present(state) {
         return false
     }
-    return virtio.link_up(state)
+    return netdev.link_up(state)
 }
 
 fn gw_known(state: u64) -> bool {
@@ -262,9 +262,9 @@ fn hw_for(state: u64, target: u64) -> u64 {
 
 fn card_octets(state: u64, which: u64) -> u64 {
     if which == 0 {
-        return virtio.tx_octets(state)
+        return netdev.tx_octets(state)
     }
-    return virtio.rx_octets(state)
+    return netdev.rx_octets(state)
 }
 
 fn task_slot(state: u64) -> u64 {
@@ -334,7 +334,7 @@ fn drop_lock(state: u64, flags: u64) {
 fn init(state: u64, a: u64, b: u64, c: u64, d: u64, prefix: u64,
     gateway: u64) -> bool {
     kstate.set(state, sc(S_READY), 0)
-    if !virtio.ready(state) {
+    if !netdev.ready(state) {
         return false
     }
     let hz: u64 = apic.tsc_hz(state)
@@ -374,7 +374,7 @@ fn init(state: u64, a: u64, b: u64, c: u64, d: u64, prefix: u64,
     var m: [u8; 6] = [0 as u8; 6]
     var i: u64 = 0
     while i < 6 {
-        m[i as usize] = virtio.mac_at(state, i) as u8
+        m[i as usize] = netdev.mac_at(state, i) as u8
         i = i + 1
     }
     let own: u32 = wire.ip4(a as u8, b as u8, c as u8, d as u8)
@@ -429,7 +429,7 @@ fn readdr(state: u64, a: u64, b: u64, c: u64, d: u64, prefix: u64,
     var m: [u8; 6] = [0 as u8; 6]
     var i: u64 = 0
     while i < 6 {
-        m[i as usize] = virtio.mac_at(state, i) as u8
+        m[i as usize] = netdev.mac_at(state, i) as u8
         i = i + 1
     }
     let own: u32 = wire.ip4(a as u8, b as u8, c as u8, d as u8)
@@ -473,7 +473,7 @@ fn pump(state: u64) -> u64 {
     var slot: u64 = 0
     var n: u64 = 0
     while n < PUMP_BATCH {
-        let len: u64 = virtio.rx_take(state, &frame, &slot)
+        let len: u64 = netdev.rx_take(state, &frame, &slot)
         if len == 0 {
             n = PUMP_BATCH
         } else {
@@ -503,7 +503,7 @@ fn pump(state: u64) -> u64 {
                 && !share.inbound(state, frame, len) {
                 stack.net_input(s, frame as *mut u8, len as usize, now)
             }
-            virtio.rx_recycle(state, slot)
+            netdev.rx_recycle(state, slot)
             kstate.add(state, sc(S_IN), 1)
             work = work + 1
             n = n + 1
@@ -515,7 +515,7 @@ fn pump(state: u64) -> u64 {
     let out: u64 = kstate.get(state, sc(S_SCRATCH))
     n = 0
     while n < PUMP_BATCH {
-        if virtio.tx_room(state) == 0 {
+        if netdev.tx_room(state) == 0 {
             n = PUMP_BATCH
         } else {
             let len: usize = stack.net_output(s, out as *mut u8,
@@ -531,7 +531,7 @@ fn pump(state: u64) -> u64 {
                 // form itself) or refuses (the switch is armed and the
                 // tunnel is not carrying) never reaches the card.
                 if wg.tx_hook(state, out, len as u64) == 0 {
-                    virtio.tx_frame(state, out, len as u64)
+                    netdev.tx_frame(state, out, len as u64)
                     kstate.add(state, sc(S_OUT), 1)
                 }
                 work = work + 1
@@ -678,7 +678,7 @@ fn arp_ask(state: u64, target: u64) {
     var bc: [u8; 6] = [0 as u8; 6]
     var i: u64 = 0
     while i < 6 {
-        me[i as usize] = virtio.mac_at(state, i) as u8
+        me[i as usize] = netdev.mac_at(state, i) as u8
         i = i + 1
     }
     wire.mac_broadcast(&bc[0])
@@ -690,7 +690,7 @@ fn arp_ask(state: u64, target: u64) {
     // belongs to nobody -- it goes into the system bucket, which is
     // what that bucket is for.
     netmon.frame_seen(state, (&f[0]) as u64, 14 + wire.ARP_LEN as u64, true)
-    virtio.tx_frame(state, (&f[0]) as u64, 14 + wire.ARP_LEN as u64)
+    netdev.tx_frame(state, (&f[0]) as u64, 14 + wire.ARP_LEN as u64)
 }
 
 // --------------------------------------------------------- ICMP echo
@@ -768,7 +768,7 @@ fn icmp_send(state: u64, dst: u64, body: u64, n: u64) -> u64 {
     var peer: [u8; 6] = [0 as u8; 6]
     var i: u64 = 0
     while i < 6 {
-        me[i as usize] = virtio.mac_at(state, i) as u8
+        me[i as usize] = netdev.mac_at(state, i) as u8
         peer[i as usize] = ((hw >> (i * 8)) & 0xFF) as u8
         i = i + 1
     }
@@ -797,7 +797,7 @@ fn icmp_send(state: u64, dst: u64, body: u64, n: u64) -> u64 {
     // measured run of this round showed exactly that: `ping  192 <- 192
     // payload, wire 0 <- 294`. Here is the missing half.
     netmon.frame_seen(state, (&f[0]) as u64, 14 + 20 + n, true)
-    if !virtio.tx_frame(state, (&f[0]) as u64, 14 + 20 + n) {
+    if !netdev.tx_frame(state, (&f[0]) as u64, 14 + 20 + n) {
         return errno.neg(errno.E_AGAIN)
     }
     return n
@@ -1430,7 +1430,7 @@ fn print_state(state: u64) {
         if i > 0 {
             serial.puts((&s_colon[0]) as u64)
         }
-        hex2(virtio.mac_at(state, i))
+        hex2(netdev.mac_at(state, i))
         i = i + 1
     }
     serial.nl()

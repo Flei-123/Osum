@@ -720,6 +720,20 @@ lauf "27. installieren, benutzen, entfernen -- und nichts bleibt (tools/tunnel/p
      tools/tunnel/pakete.sh tunnelpakete '^  OK    (SPURLOS|zweimal gebaut|GEGENPROBE|das Paket .bleibt.|mit --behalte-daten)'
 lauf "25. Diebstahl: Geraeteidentitaet, Sicherung, Schluesselverwaltung (tools/tresor/run.sh, Runde TRESOR)" \
      tools/tresor/run.sh tresor '^TRESOR: |^  OK    (SMBIOS |SHA-256 |PBKDF2|DER ZWEITE LAUF|der wiederhergestellte Baum|ACHT OKTETTE|im beschaedigten|GEGENPROBE|eine (NEUE PLATTE|ANDERE Maschine)|der Fingerabdruck ist|die Seriennummer des Laufwerks|crypto erase|open mit dem richtigen|1000 Oktette|bei 0xF1031|und seine Pruefsumme|PREIS DER AUSNAHME|MIT Liste sichert|DAS WIEDERHERGESTELLTE PAKET|das verwaiste Paket ist OKTETT|ZWEITER LAUF SCHREIBT NULL|GESCHRIEBEN nur|FAKTOR der kleinen|kein halbes Backup)'
+# ABSCHNITT 28 UND 29 -- RUNDE HWNET. Was diesem System zu ECHTER
+# HARDWARE fehlte, waren zwei Dinge, und beide stehen hier als eigener
+# Abschnitt: eine Netzkarte, die es auf einem echten Brett WIRKLICH gibt
+# (bis zu dieser Runde konnte der Kernel nur virtio-net, das es nur unter
+# einem Hypervisor gibt), und TLS, ohne das es kein HTTPS, keinen
+# Paketbezug und keinen Helfer gibt. Der erste Laeufer misst DIESELBE
+# Abnahme zweimal -- einmal virtio, einmal e1000 --, der zweite haelt den
+# HTTPS-Klienten gegen `openssl s_server` und, wenn es eine Route gibt,
+# gegen das echte Netz.
+lauf "28. dieselbe Abnahme auf zwei Chips: virtio-net und e1000 (tools/hwnet/run.sh, Runde HWNET)" \
+     tools/hwnet/run.sh hwnet '^HWNET: |^   [a-z0-9-]+ +[0-9]+|^  OK    (firnc[01]|k.o:|e1000.fi|tools/net/bridge.c|virtio-net-pci|e1000|the unknown card|and the kernel says|no driver claimed)'
+lauf "29. HTTPS aus Ring 3, und die Verweigerungen (tools/hwnet/tls.sh, Runde HWNET)" \
+     tools/hwnet/tls.sh hwnettls '^HWNETTLS: |^   SKIPPED|^  OK    (firnc --profile=app|not one undefined|ld with|the program on the disk|  \(that is|the test certificates|good/ca|expired/ca|wrong/ca|rogue/ca|good/empty|the trust store|[a-z0-9.]+: (the chain|certificates in|octets of|THE SAME OCTETS))'
+
 lauf "25. Akkuanalyse je Programm: die gemessene Gesamtleistung, anteilig zugeordnet (tools/powermon/run.sh, Runde POWERMON)" \
      tools/powermon/run.sh powermon '^POWERMON: |^        |^  OK    (another table|GEGENPROBE|the two displays|the same energy|the sum of the program|and the kernel.s own rows|the shares add up|the ageing|runtime left|one sample costs|counted and uncounted|at 10 samples|the file stays|AND THE SENTENCE|ON THIS HOST|wigapp= really|the window server counts|distinct colours)'
 # ABSCHNITT 29 -- RUNDE POLL. Der Aufruf, ohne den ein Prozess dieses

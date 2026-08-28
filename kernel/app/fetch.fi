@@ -1,0 +1,660 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/app/fetch.fi -- round HWNET: a page over HTTPS, from ring 3.
+//
+//     fetch [-n name] [-r roots] [-o file] [-q] [-k] <url>
+//
+//     url    http://<ipv4>[:port]/path   or   https://<ipv4>[:port]/path
+//     -n     the name the CERTIFICATE has to carry, and the SNI that is
+//            sent. Needed because there is NO RESOLVER in this system:
+//            the address is a number and the name is a separate thing.
+//            Without it the address itself is used as the name, which a
+//            normal certificate does not carry -- so the connection is
+//            refused, and that is the correct answer.
+//     -r     the trust store, default /etc/ssl/roots.pem
+//     -o     write the body to a file instead of to the output
+//     -q     only the report lines, no body on the output
+//     -k     NO CERTIFICATE CHECK. Prints a warning line and is refused
+//            unless it is spelled out. It exists so that the difference
+//            between "checked" and "not checked" is measurable, not so
+//            that anybody uses it.
+//
+// WHY THIS FILE IS NOT IN kernel/user/. Every program under
+// `kernel/user/` is `profile kernel`: freestanding, no runtime, no
+// allocator, `ulib` and `libc` and nothing else. That is the right shape
+// for `ls` and it cannot carry TLS -- the record layer alone needs a
+// heap and buffers that grow. This program is built with `--profile=app`
+// against the FULL Firn library out of `vendor/firn/lib`, the same one
+// the browser of round B5 uses, and it runs in ring 3 on Osum
+// unchanged. That works for one reason, and it is worth writing down:
+//
+//   OSUM'S SYSTEM CALLS CARRY LINUX'S NUMBERS (round K4), including the
+//   socket family (41 socket, 42 connect, 44 sendto, 45 recvfrom, 3
+//   close), 9 mmap, 12 brk, 228 clock_gettime and 318 getrandom -- and
+//   Firn's `std.rt`/`std.net` issue exactly those numbers through the
+//   `syscall` intrinsic. Osum's argument block (kernel/elf.fi,
+//   `write_args`) has Linux's shape too: argc, then the pointers, then a
+//   zero. So `fn main(start: u64)` finds its arguments where it expects
+//   them, and Firn's own `_start` (which puts `rsp` into `rdi`) is the
+//   entry point -- `kernel/user/crt.s` is not linked in at all.
+//
+// WHAT IS BORROWED AND WHAT IS NEW. Everything below the socket is
+// vendored Firn (`vendor/firn/COMMIT`, round B5): `lib/tls/tls.fi` (TLS
+// 1.3 record layer, key schedule, handshake), `lib/tls/x509.fi`
+// (certificate parsing and chain verification), `lib/std/crypto/*`
+// (X25519, AES-GCM, ChaCha20-Poly1305, SHA-256/384/512, HKDF, RSA,
+// ECDSA). This file is the program around them: a URL, a store, a
+// request, a report.
+//
+// THIS CRYPTOGRAPHY HAS NOT BEEN AUDITED. It was measured against
+// OpenSSL and Python's `cryptography` (647 primitive cases, 49 of them
+// counter-checks that must fail; 18 handshake cases against `openssl
+// s_server`), which is far more than nothing and far less than an audit.
+// It is not constant-time in every path. Do not put anything behind it
+// that would hurt if it were read. docs/REALHW.md says the same thing in
+// the same words.
+
+import std.io
+import std.rt
+import std.net
+import std.crypto.sha256
+import tls.tls
+import tls.x509
+
+const CHUNK: usize = 4096
+const SHOW: usize = 240 // octets of the body that are printed by default
+
+fn put(out: *mut rt.Buf, p: u64, n: usize) {
+    rt.buf_push_bytes(out, p, n)
+}
+
+fn line(out: *mut rt.Buf) {
+    rt.buf_push(out, 10 as u8)
+}
+
+fn say(out: *mut rt.Buf, s: str) {
+    io.print(s)
+}
+
+fn emit(out: *mut rt.Buf) {
+    rt.write_everything(1, (*out).ptr, (*out).len)
+    rt.buf_clear(out)
+}
+
+fn num_line(out: *mut rt.Buf, key: str, v: u64) {
+    io.print(key)
+    rt.buf_clear(out)
+    rt.buf_push_dec_u64(out, v)
+    rt.buf_push(out, 10 as u8)
+    emit(out)
+}
+
+fn hex_line(out: *mut rt.Buf, key: str, p: u64, n: usize) {
+    io.print(key)
+    rt.buf_clear(out)
+    var i: usize = 0
+    while i < n {
+        rt.buf_push_hex_u64(out, rt.ld8(p, i) as u64, 2)
+        i = i + 1
+    }
+    rt.buf_push(out, 10 as u8)
+    emit(out)
+}
+
+fn text_line(out: *mut rt.Buf, key: str, p: u64, n: usize) {
+    io.print(key)
+    rt.buf_clear(out)
+    put(out, p, n)
+    rt.buf_push(out, 10 as u8)
+    emit(out)
+}
+
+// ---------------------------------------------------------- the reason
+//
+// A refusal that only says "it failed" is a refusal nobody can act on.
+// These are the ten answers `x509.verify_chain` can give.
+fn reason(out: *mut rt.Buf, r: u32) {
+    if r == x509.V_OK {
+        io.print("fetch: verify OK\n")
+        return
+    }
+    if r == x509.V_PARSE {
+        io.print("fetch: verify REFUSED parse\n")
+        return
+    }
+    if r == x509.V_EXPIRED {
+        io.print("fetch: verify REFUSED expired\n")
+        return
+    }
+    if r == x509.V_NOT_YET {
+        io.print("fetch: verify REFUSED not_yet_valid\n")
+        return
+    }
+    if r == x509.V_NAME {
+        io.print("fetch: verify REFUSED wrong_name\n")
+        return
+    }
+    if r == x509.V_UNKNOWN_ISSUER {
+        io.print("fetch: verify REFUSED unknown_issuer\n")
+        return
+    }
+    if r == x509.V_BAD_SIGNATURE {
+        io.print("fetch: verify REFUSED bad_signature\n")
+        return
+    }
+    if r == x509.V_NOT_CA {
+        io.print("fetch: verify REFUSED issuer_not_a_ca\n")
+        return
+    }
+    if r == x509.V_UNSUPPORTED {
+        io.print("fetch: verify REFUSED unsupported_algorithm\n")
+        return
+    }
+    if r == x509.V_TOO_LONG {
+        io.print("fetch: verify REFUSED chain_too_long\n")
+        return
+    }
+    io.print("fetch: verify REFUSED critical_extension\n")
+}
+
+
+// ------------------------------------------------------ chunked bodies
+//
+// HTTP/1.1 answers of unknown length arrive in pieces, each with its
+// length in hexadecimal in front of it and a zero-length piece at the
+// end (RFC 9112, 7.1). Cloudflare answers example.com that way, and a
+// client that does not undo it reports twelve octets more than the page
+// has and a digest that matches nothing. MEASURED: 571 octets against
+// curl's 559, and the two digests differed until this function existed.
+fn is_hex(c: u8) -> bool {
+    if c >= 48 as u8 && c <= 57 as u8 { return true }
+    if c >= 97 as u8 && c <= 102 as u8 { return true }
+    if c >= 65 as u8 && c <= 70 as u8 { return true }
+    return false
+}
+
+fn hex_val(c: u8) -> u64 {
+    if c >= 48 as u8 && c <= 57 as u8 { return (c - 48 as u8) as u64 }
+    if c >= 97 as u8 && c <= 102 as u8 { return (c - 87 as u8) as u64 }
+    return (c - 55 as u8) as u64
+}
+
+// Case-insensitive search for a word in `p[0..n)`.
+fn contains_word(p: u64, n: usize, w: u64, wn: usize) -> bool {
+    if wn == 0 || n < wn {
+        return false
+    }
+    var i: usize = 0
+    while i + wn <= n {
+        var k: usize = 0
+        var same: bool = true
+        while k < wn {
+            var a: u8 = rt.ld8(p, i + k)
+            var b: u8 = rt.ld8(w, k)
+            if a >= 65 as u8 && a <= 90 as u8 { a = a + 32 as u8 }
+            if b >= 65 as u8 && b <= 90 as u8 { b = b + 32 as u8 }
+            if a != b {
+                same = false
+                k = wn
+            } else {
+                k = k + 1
+            }
+        }
+        if same {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn dechunk(src: u64, n: usize, out: *mut rt.Buf) -> bool {
+    var i: usize = 0
+    while i < n {
+        var len: u64 = 0
+        var digits: usize = 0
+        while i < n && is_hex(rt.ld8(src, i)) {
+            len = len * 16 + hex_val(rt.ld8(src, i))
+            digits = digits + 1
+            i = i + 1
+        }
+        if digits == 0 {
+            return false
+        }
+        // the rest of the line (a chunk extension is allowed and ignored)
+        while i < n && rt.ld8(src, i) != 10 as u8 {
+            i = i + 1
+        }
+        i = i + 1
+        if len == 0 {
+            return true
+        }
+        if i + len as usize > n {
+            return false
+        }
+        rt.buf_push_bytes(out, src + i as u64, len as usize)
+        i = i + len as usize
+        // the CRLF after the piece
+        while i < n && rt.ld8(src, i) != 10 as u8 {
+            i = i + 1
+        }
+        i = i + 1
+    }
+    return false
+}
+
+// ------------------------------------------------------------ the URL
+
+fn parse_u32(p: u64, from: usize, to: usize) -> u32 {
+    var v: u32 = 0
+    var i: usize = from
+    while i < to {
+        let ch: u8 = rt.ld8(p, i)
+        if ch < 48 as u8 || ch > 57 as u8 {
+            return v
+        }
+        v = v * 10 as u32 + (ch - 48 as u8) as u32
+        i = i + 1
+    }
+    return v
+}
+
+// The four numbers of an IPv4 address, out of `p[from..to)`. Returns
+// false when it is not four numbers -- a NAME lands here and has to be
+// refused with a sentence, not resolved into something wrong.
+fn parse_ip(p: u64, from: usize, to: usize, out: *mut u32) -> bool {
+    var parts: [u32; 4] = [0; 4]
+    var k: usize = 0
+    var v: u32 = 0
+    var digits: usize = 0
+    var i: usize = from
+    while i < to {
+        let ch: u8 = rt.ld8(p, i)
+        if ch == 46 as u8 {
+            if digits == 0 || k >= 3 {
+                return false
+            }
+            parts[k] = v
+            k = k + 1
+            v = 0
+            digits = 0
+        } else {
+            if ch < 48 as u8 || ch > 57 as u8 {
+                return false
+            }
+            v = v * 10 as u32 + (ch - 48 as u8) as u32
+            digits = digits + 1
+            if v > 255 as u32 {
+                return false
+            }
+        }
+        i = i + 1
+    }
+    if k != 3 || digits == 0 {
+        return false
+    }
+    parts[3] = v
+    *out = net.ipv4(parts[0] as u8, parts[1] as u8, parts[2] as u8,
+        parts[3] as u8)
+    return true
+}
+
+fn starts_with(p: u64, n: usize, q: u64) -> bool {
+    var i: usize = 0
+    while true {
+        let c: u8 = rt.ld8(q, i)
+        if c == 0 as u8 {
+            return true
+        }
+        if i >= n {
+            return false
+        }
+        if rt.ld8(p, i) != c {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn main(start: u64) -> i32 {
+    var out: rt.Buf = rt.buf_new()
+    var name: u64 = 0
+    var namelen: usize = 0
+    var roots: u64 = 0
+    var outfile: u64 = 0
+    var quiet: bool = false
+    var insecure: bool = false
+    var url: u64 = 0
+    var urllen: usize = 0
+
+    let argc: usize = rt.arg_count(start)
+    var i: usize = 1
+    while i < argc {
+        let a: u64 = rt.arg_ptr(start, i)
+        let n: usize = rt.c_length(a)
+        if n == 2 && rt.ld8(a, 0) == 45 as u8 {
+            let c: u8 = rt.ld8(a, 1)
+            if c == 110 as u8 { // -n
+                i = i + 1
+                if i < argc {
+                    name = rt.arg_ptr(start, i)
+                    namelen = rt.c_length(name)
+                }
+            } else if c == 114 as u8 { // -r
+                i = i + 1
+                if i < argc {
+                    roots = rt.arg_ptr(start, i)
+                }
+            } else if c == 111 as u8 { // -o
+                i = i + 1
+                if i < argc {
+                    outfile = rt.arg_ptr(start, i)
+                }
+            } else if c == 113 as u8 { // -q
+                quiet = true
+            } else if c == 107 as u8 { // -k
+                insecure = true
+            }
+        } else {
+            url = a
+            urllen = n
+        }
+        i = i + 1
+    }
+    if url == 0 {
+        io.print("usage: fetch [-n name] [-r roots] [-o file] [-q] [-k] <url>\n")
+        return 2
+    }
+
+    var secure: bool = false
+    var at: usize = 0
+    var s_https: [u8; 9] = "https://\0"
+    var s_http: [u8; 8] = "http://\0"
+    if starts_with(url, urllen, (&s_https[0]) as u64) {
+        secure = true
+        at = 8
+    } else if starts_with(url, urllen, (&s_http[0]) as u64) {
+        at = 7
+    } else {
+        io.print("fetch: the url has to start with http:// or https://\n")
+        return 2
+    }
+    // host[:port]/path
+    var hostend: usize = at
+    while hostend < urllen && rt.ld8(url, hostend) != 47 as u8
+        && rt.ld8(url, hostend) != 58 as u8 {
+        hostend = hostend + 1
+    }
+    var port: u32 = 80
+    if secure {
+        port = 443
+    }
+    var pathfrom: usize = hostend
+    if hostend < urllen && rt.ld8(url, hostend) == 58 as u8 {
+        var pe: usize = hostend + 1
+        while pe < urllen && rt.ld8(url, pe) != 47 as u8 {
+            pe = pe + 1
+        }
+        port = parse_u32(url, hostend + 1, pe)
+        pathfrom = pe
+    }
+    var addr: u32 = 0
+    if !parse_ip(url, at, hostend, &addr) {
+        io.print("fetch: there is no resolver in this system -- the url has to carry an address, and the name goes in -n\n")
+        return 2
+    }
+    if name == 0 {
+        // No name given: the address itself is what the certificate would
+        // have to carry. Almost none do, so this ends in a refusal -- on
+        // purpose, and with a sentence that says which one.
+        name = url + at as u64
+        namelen = hostend - at
+    }
+    var path: u64 = url + pathfrom as u64
+    var pathlen: usize = urllen - pathfrom
+    var slash: [u8; 2] = "/\0"
+    if pathlen == 0 {
+        path = (&slash[0]) as u64
+        pathlen = 1
+    }
+
+    // ------------------------------------------------------ the socket
+    var bad: bool = false
+    var c: net.Conn = net.connect_tcp(addr, port as u16)
+    catch | e | fail_conn(&bad)
+    if bad {
+        io.print("fetch: no connection\n")
+        return 1
+    }
+    let okt: bool = net.set_timeout(&c, 20000 as u64) catch false
+
+    var body: rt.Buf = rt.buf_new()
+    var status: i32 = 0
+    if secure {
+        status = over_tls(&c, &out, &body, name, namelen, path, pathlen,
+            roots, insecure)
+    } else {
+        status = plain(&c, &out, &body, name, namelen, path, pathlen)
+    }
+    net.close(&c)
+    if status != 0 {
+        return status
+    }
+
+    // ------------------------------------------------------ the report
+    num_line(&out, "fetch: octets ", body.len as u64)
+    var dg: [u8; 32] = [0; 32]
+    sha256.sha256(body.ptr, body.len, (&dg[0]) as u64)
+    hex_line(&out, "fetch: sha256 ", (&dg[0]) as u64, 32)
+    // THE BODY ON ITS OWN, because that is the part that can be held
+    // against another program. The whole response carries a `Date`
+    // header, so its digest differs from `curl`'s by construction; the
+    // octets after the empty line do not. This is the number that says
+    // "the same page came out of both".
+    var hend: usize = 0
+    var found: bool = false
+    while hend + 3 < body.len {
+        if rt.ld8(body.ptr, hend) == 13 as u8
+            && rt.ld8(body.ptr, hend + 1) == 10 as u8
+            && rt.ld8(body.ptr, hend + 2) == 13 as u8
+            && rt.ld8(body.ptr, hend + 3) == 10 as u8 {
+            found = true
+            break
+        }
+        hend = hend + 1
+    }
+    if found {
+        let boff: usize = hend + 4
+        let blen: usize = body.len - boff
+        var w_chunked: [u8; 8] = "chunked\0"
+        var plain_body: bool = true
+        var dec: rt.Buf = rt.buf_new()
+        if contains_word(body.ptr, hend, (&w_chunked[0]) as u64, 7) {
+            if dechunk(body.ptr + boff as u64, blen, &dec) {
+                plain_body = false
+                num_line(&out, "fetch: chunked ", 1)
+                num_line(&out, "fetch: body ", dec.len as u64)
+                var cd: [u8; 32] = [0; 32]
+                sha256.sha256(dec.ptr, dec.len, (&cd[0]) as u64)
+                hex_line(&out, "fetch: bodysha ", (&cd[0]) as u64, 32)
+            }
+        }
+        if plain_body {
+            num_line(&out, "fetch: body ", blen as u64)
+            var bd: [u8; 32] = [0; 32]
+            sha256.sha256(body.ptr + boff as u64, blen, (&bd[0]) as u64)
+            hex_line(&out, "fetch: bodysha ", (&bd[0]) as u64, 32)
+        }
+        rt.buf_free(&dec)
+    }
+    var e: usize = 0
+    while e < body.len && rt.ld8(body.ptr, e) != 13 as u8
+        && rt.ld8(body.ptr, e) != 10 as u8 {
+        e = e + 1
+    }
+    text_line(&out, "fetch: status ", body.ptr, e)
+    if outfile != 0 {
+        let okf: bool = rt.write_file(outfile, body.ptr, body.len)
+        if okf {
+            io.print("fetch: written\n")
+        } else {
+            io.print("fetch: the file could not be written\n")
+        }
+    }
+    if !quiet {
+        var show: usize = body.len
+        if show > SHOW {
+            show = SHOW
+        }
+        rt.write_everything(1, body.ptr, show)
+        io.print("\n")
+    }
+    rt.buf_free(&body)
+    rt.buf_free(&out)
+    return 0
+}
+
+// --------------------------------------------------------- over TLS
+
+fn over_tls(c: *mut net.Conn, out: *mut rt.Buf, body: *mut rt.Buf,
+    name: u64, namelen: usize, path: u64, pathlen: usize, roots: u64,
+    insecure: bool) -> i32 {
+    var storebuf: rt.Buf = rt.buf_new()
+    var store: x509.Store = x509.store_new()
+    var rootpath: [u8; 20] = "/etc/ssl/roots.pem\0\0"
+    var rp: u64 = roots
+    if rp == 0 {
+        rp = (&rootpath[0]) as u64
+    }
+    if rt.read_file(rp, &storebuf) {
+        let taken: usize = x509.store_load_pem(&store, storebuf.ptr,
+            storebuf.len)
+        num_line(out, "fetch: roots ", taken as u64)
+    } else {
+        io.print("fetch: no trust store -- nothing is trusted\n")
+        num_line(out, "fetch: roots ", 0)
+    }
+    if insecure {
+        // A store with nothing in it and a client that goes on anyway.
+        // The line is printed so that no measurement can mistake this run
+        // for a checked one.
+        io.print("fetch: WARNING -k, the certificate is NOT checked\n")
+    }
+
+    var t: tls.Tls = tls.tls_new()
+    let oki: bool = tls.tls_init(&t, c, &store, name, namelen, now_seconds())
+    var failed: bool = false
+    let ok: bool = tls.tls_handshake(&t)
+    catch | e | tls.tls_fail_into(out, e, &failed)
+    if failed && !insecure {
+        io.print("fetch: handshake FAILED\n")
+        reason(out, tls.tls_verify_reason(&t))
+        num_line(out, "fetch: alert ", tls.tls_alert_desc(&t) as u64)
+        return 1
+    }
+    if failed {
+        io.print("fetch: handshake FAILED even with -k\n")
+        return 1
+    }
+    reason(out, tls.tls_verify_reason(&t))
+    num_line(out, "fetch: suite ", tls.tls_suite(&t) as u64)
+    num_line(out, "fetch: certs ", tls.tls_peer_cert_count(&t) as u64)
+    num_line(out, "fetch: depth ", tls.tls_chain_depth(&t) as u64)
+
+    var req: rt.Buf = rt.buf_new()
+    request(&req, name, namelen, path, pathlen)
+    var werr: bool = false
+    let okw: bool = tls.tls_write(&t, req.ptr, req.len)
+    catch | e | tls.tls_fail_into(out, e, &werr)
+    rt.buf_free(&req)
+    if werr {
+        io.print("fetch: the request could not be sent\n")
+        return 1
+    }
+    var chunk: [u8; 4096] = [0; 4096]
+    var rerr: bool = false
+    while true {
+        let n: usize = tls.tls_read(&t, (&chunk[0]) as u64, CHUNK)
+        catch | e | tls.tls_fail_len(out, e, &rerr)
+        if rerr || n == 0 {
+            break
+        }
+        rt.buf_push_bytes(body, (&chunk[0]) as u64, n)
+    }
+    num_line(out, "fetch: records_in ", tls.tls_records_in(&t) as u64)
+    num_line(out, "fetch: records_out ", tls.tls_records_out(&t) as u64)
+    tls.tls_close(&t)
+    tls.tls_free(&t)
+    rt.buf_free(&storebuf)
+    return 0
+}
+
+// ------------------------------------------------------- without TLS
+//
+// The same program over plain HTTP, so that the DIFFERENCE between the
+// two is one word in the url and not a second program. It is also what
+// makes the round's measurement honest: the same octets, once in the
+// clear and once through the record layer.
+fn plain(c: *mut net.Conn, out: *mut rt.Buf, body: *mut rt.Buf,
+    name: u64, namelen: usize, path: u64, pathlen: usize) -> i32 {
+    var req: rt.Buf = rt.buf_new()
+    request(&req, name, namelen, path, pathlen)
+    var werr: bool = false
+    let w: usize = net.write_all(c, req.ptr, req.len) catch fail_len(&werr)
+    rt.buf_free(&req)
+    if werr {
+        io.print("fetch: the request could not be sent\n")
+        return 1
+    }
+    var chunk: [u8; 4096] = [0; 4096]
+    while true {
+        var rerr: bool = false
+        let n: usize = net.read(c, (&chunk[0]) as u64, CHUNK)
+        catch fail_len(&rerr)
+        if rerr || n == 0 {
+            break
+        }
+        rt.buf_push_bytes(body, (&chunk[0]) as u64, n)
+    }
+    return 0
+}
+
+fn request(req: *mut rt.Buf, name: u64, namelen: usize, path: u64,
+    pathlen: usize) {
+    var g: [u8; 5] = "GET \0"
+    rt.buf_push_bytes(req, (&g[0]) as u64, 4)
+    rt.buf_push_bytes(req, path, pathlen)
+    var h: [u8; 18] = " HTTP/1.1\r\nHost: \0"
+    rt.buf_push_bytes(req, (&h[0]) as u64, 17)
+    rt.buf_push_bytes(req, name, namelen)
+    var tail: [u8; 46] = "\r\nConnection: close\r\nUser-Agent: osum-fetch\r\n\0"
+    // 45 AND NOT 44. It was 44 for one run, which cut the last newline
+    // off the User-Agent line: `openssl s_server -www` answered anyway,
+    // the real web did not -- example.com waited for a header block that
+    // never ended and the body came back as zero octets. A length
+    // literal that is one short is invisible in every test that talks to
+    // something forgiving.
+    rt.buf_push_bytes(req, (&tail[0]) as u64, 45)
+    var crlf: [u8; 3] = "\r\n\0"
+    rt.buf_push_bytes(req, (&crlf[0]) as u64, 2)
+}
+
+fn fail_conn(bad: *mut bool) -> net.Conn {
+    *bad = true
+    return net.Conn { fd: -1, err: 0, peer: 0 as u32, peer_port: 0 as u16 }
+}
+
+fn fail_len(bad: *mut bool) -> usize {
+    *bad = true
+    return 0 as usize
+}
+
+// CLOCK_REALTIME, because a certificate's validity is calendar time and
+// not uptime. Osum reads the CMOS clock once at boot (kernel/time.fi)
+// and counts on from there, so this is the machine's real date -- which
+// is exactly what decides whether a certificate is expired.
+fn now_seconds() -> u64 {
+    var ts: [i64; 2] = [0; 2]
+    syscall(228, 0, (&ts[0]) as i64, 0, 0, 0, 0)
+    return ts[0] as u64
+}
