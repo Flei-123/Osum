@@ -112,6 +112,7 @@ export {
     init, present, ide_mode, read_block, write_block, read_many,
     write_many, flush, blocks, block_shift, bdf, port, mode,
     ports_seen, cmds, errs, last_tfd, buffer, ident, sig, slots, why,
+    dead, alive,
     MODE_NONE, MODE_AHCI, MODE_IDE
 }
 
@@ -156,6 +157,7 @@ const S_S64A: u64 = 0x70
 const S_SIG: u64 = 0x78
 const S_WHY: u64 = 0x80 // an welcher Stelle die Inbetriebnahme aufgab
 const S_QUIET: u64 = 0x88 // wie viele fremde Ports wieder stillgelegt wurden
+const S_DEAD: u64 = 0x90 // wie oft ein Befehl in die Zeitschranke lief
 
 // --------------------------------------------------- die HBA-Register
 
@@ -233,7 +235,15 @@ const PAGE: u64 = 4096
 // Wie lange gewartet wird, bevor ein Geraet fuer tot erklaert wird.
 // Absichtlich begrenzt: ein Controller, der nie antwortet, darf den Kern
 // nicht anhalten. Genau dieselbe Regel wie in `nvme.fi`.
-const SPIN_LIMIT: u64 = 4000000
+// UNTER KVM IST JEDER DIESER SCHRITTE EIN VM-AUSTRITT. Ein Lesezugriff
+// auf ein Geraeteregister kostet dort ein bis zwei Mikrosekunden -- die
+// vier Millionen aus `nvme.fi` waeren also acht Sekunden JE BEFEHL. Bei
+// einem Dateisystem mit ein paar tausend Bloecken ist das kein Zeitlimit
+// mehr, sondern ein Stillstand; genau so ist die Gegenprobe `nobm` beim
+// ersten Versuch in die 180-Sekunden-Schranke des Laeufers gelaufen,
+// statt sauber zu scheitern. Eine Million ist immer noch etwa eine
+// Sekunde und damit weit mehr, als eine SATA-Platte je braucht.
+const SPIN_LIMIT: u64 = 1000000
 const RESET_LIMIT: u64 = 2000000
 
 const MODE_NONE: u64 = 0
@@ -288,6 +298,16 @@ fn errs(state: u64) -> u64 {
 
 fn last_tfd(state: u64) -> u64 {
     return kstate.get(state, sc(S_TFD))
+}
+
+// Wie oft ein Befehl in die Zeitschranke gelaufen ist. Groesser als
+// null heisst: der Controller hat aufgehoert zu antworten.
+fn dead(state: u64) -> u64 {
+    return kstate.get(state, sc(S_DEAD))
+}
+
+fn alive(state: u64) -> bool {
+    return ready(state)
 }
 
 fn why(state: u64) -> u64 {
@@ -390,6 +410,7 @@ fn init(state: u64) -> bool {
     kstate.set(state, sc(S_CMDS), 0)
     kstate.set(state, sc(S_SEEN), 0)
     kstate.set(state, sc(S_WHY), 0)
+    kstate.set(state, sc(S_DEAD), 0)
 
     let idx: u64 = pci.find_class(state, pci.CLASS_STORAGE, pci.SUB_SATA,
         pci.PROGIF_AHCI)
@@ -832,6 +853,9 @@ fn run(state: u64, cmd: u64, lba: u64, count: u64, addr: u64, len: u64,
     if mode(state) != MODE_AHCI {
         return false
     }
+    if kstate.get(state, sc(S_DEAD)) != 0 {
+        return false
+    }
     let p: u64 = port(state)
     let cl: u64 = state + AHCI_OFF + CLB_AT
     let ct: u64 = state + AHCI_OFF + CT_AT
@@ -885,8 +909,28 @@ fn run(state: u64, cmd: u64, lba: u64, count: u64, addr: u64, len: u64,
         }
         spin = spin + 1
     }
+    // DIE ZEITSCHRANKE IST ABGELAUFEN, UND DAS IST ETWAS ANDERES ALS EIN
+    // FEHLER DES LAUFWERKS.
+    //
+    // Ein Fehler (TFES) ist ein NEIN: das Laufwerk hat geantwortet und
+    // den Befehl abgelehnt. Der naechste Befehl kann trotzdem gehen, und
+    // `recover` richtet den Port dafuer wieder her.
+    //
+    // Eine abgelaufene Schranke ist gar keine Antwort. Der Controller
+    // holt sich nichts mehr aus dem Speicher -- weil ihm das
+    // Busmaster-Bit fehlt, weil das Kabel ab ist, weil er haengt. Wer
+    // danach WEITERMACHT, wartet die volle Schranke bei JEDEM folgenden
+    // Block, und ein Dateisystem mit ein paar tausend Bloecken laesst
+    // die Maschine damit stehen. Genau das ist bei der Gegenprobe `nobm`
+    // passiert, bevor diese vier Zeilen hier standen.
+    //
+    // Also gilt das Geraet ab hier als WEG. Jeder weitere Aufruf sagt
+    // sofort nein, und `blk.fi` bekommt ein ehrliches Nein statt eines
+    // Stillstands.
     kstate.set(state, sc(S_TFD), prd(state, p, P_TFD))
     kstate.add(state, sc(S_ERRS), 1)
+    kstate.add(state, sc(S_DEAD), 1)
+    kstate.set(state, sc(S_READY), 0)
     recover(state, p)
     return false
 }
