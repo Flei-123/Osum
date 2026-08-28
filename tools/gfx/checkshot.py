@@ -525,13 +525,22 @@ def _raster_laden():
 
 
 def mische(alt, neu, a):
-    """Dieselbe Zeile wie `wm.blend` -- ganzzahlig, ohne Rundungsbeiwerk."""
+    """Dieselbe Zeile wie `fb.blend`, `wm.blend` und `wlibc.blend`.
+
+    RUNDE PAINT: hier stand `// 255` -- abschneiden.  Der Kern rundet
+    seit dieser Runde kaufmaennisch, weil abschneiden gegen die exakte
+    Rechnung auf 8 164 890 von 16 777 216 Tripeln (a, src, dst) um eins
+    danebenliegt, also auf 48.67 Prozent von ihnen.  `(num + 127) // 255`
+    ist auf allen 16.7 Millionen exakt und gleich dem, was der Kern mit
+    `(t + (t >> 8)) >> 8` rechnet -- nachgewiesen in
+    tools/paint/blendcheck.py, das genau diese Gleichheit prueft.
+    """
     if a == 0:
         return alt
     if a >= 255:
         return neu
     ia = 255 - a
-    return tuple((alt[k] * ia + neu[k] * a) // 255 for k in range(3))
+    return tuple((alt[k] * ia + neu[k] * a + 127) // 255 for k in range(3))
 
 
 def _pruefe_glyphen(bild, schrift, stellen, grund_y, vg, hg, toleranz,
