@@ -516,7 +516,11 @@ set -uo pipefail
 
 cd "$(dirname "$0")"
 ROOT=$(pwd)
-WORK="$ROOT/.test-work"
+# Wohin die Protokolle je Abschnitt gehen. Ueberschreibbar, damit
+# ZWEI Abnahmen (z. B. eine unter tcg und eine unter kvm) sich
+# nebeneinander nicht die Protokolle ueberschreiben -- gefunden
+# beim Messen dieser Runde, siehe tools/lib/work-patch.py.
+WORK="${OSUM_WORK:-$ROOT/.test-work}"
 mkdir -p "$WORK"
 
 # Modulsuchpfad: `import libc.*` findet ueber $FIRNLIB nach <repo>/lib.
@@ -625,7 +629,19 @@ abschnitt_ausfuehren() { # index
     local rc=0 s e
     s=$(date +%s%N)
     if [[ "$skript" =~ $SERIELL_RE ]]; then
-        flock "$NETZSPERRE" bash "$skript" > "$WORK/$name.log" 2>&1 || rc=$?
+        # GEFUNDEN BEIM MESSEN: die Zeit VOR dieser Zeile ist Wartezeit
+        # auf die Netzsperre und hat mit dem Abschnitt nichts zu tun --
+        # `tunnelkosten` stand einmal mit 632 s in der Tabelle, wovon
+        # ueber 600 s Warten war. Darum stoppt die Uhr fuer die NETTOZEIT
+        # erst, nachdem die Sperre erworben ist. Beides wird ausgegeben:
+        # die Bruttozeit (was der Abschnitt an der Gesamtdauer kostet)
+        # und die Nettozeit (wie lange er wirklich gerechnet hat).
+        flock "$NETZSPERRE" bash -c '
+            ns=$(date +%s%N)
+            bash "$1" > "$2" 2>&1; r=$?
+            ne=$(date +%s%N)
+            printf "%s\n" "$(( (ne - ns) / 1000000 ))" > "$3"
+            exit $r' _ "$skript" "$WORK/$name.log" "$WORK/.netto.$i" || rc=$?
     else
         bash "$skript" > "$WORK/$name.log" 2>&1 || rc=$?
     fi
@@ -657,9 +673,19 @@ abschnitt_ausgeben() { # index
         grep -aE '^  FAIL' "$WORK/$name.log" | head -12 | sed 's/^/     /'
     fi
     if [ "$ZEIT" = "1" ]; then
-        printf '   [%s  %d,%03d s  %s]\n' \
+        local netto="" nms
+        # Nur die vier Netz-Abschnitte haben eine Nettozeit. Weicht sie
+        # um mehr als eine Sekunde ab, stand der Abschnitt an der Sperre.
+        if [ -f "$WORK/.netto.$i" ]; then
+            nms=$(cat "$WORK/.netto.$i")
+            if [ $((ms - nms)) -gt 1000 ]; then
+                netto=$(printf '  (davon %d,%03d s Warten auf die Netzsperre)' \
+                        "$(( (ms - nms) / 1000 ))" "$(( (ms - nms) % 1000 ))")
+            fi
+        fi
+        printf '   [%s  %d,%03d s  %s]%s\n' \
             "$(grep -am1 '^accel: ' "$WORK/$name.log" | sed 's/^accel: //;s/ (.*//' || true)" \
-            "$(( ms / 1000 ))" "$(( ms % 1000 ))" "$name"
+            "$(( ms / 1000 ))" "$(( ms % 1000 ))" "$name" "$netto"
     fi
 }
 
@@ -696,7 +722,7 @@ abschnitte_abarbeiten() {
          "(OSUM_JOBS=1 fuer den alten seriellen Lauf) --"
     echo
 
-    rm -f "$WORK"/.done.* "$WORK"/.rc.* "$WORK"/.ms.*
+    rm -f "$WORK"/.done.* "$WORK"/.rc.* "$WORK"/.ms.* "$WORK"/.netto.*
 
     # Der Verteiler laeuft im Hintergrund und haelt $JOBS Plaetze besetzt.
     (
