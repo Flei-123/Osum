@@ -3217,6 +3217,37 @@ fn do_open(state: u64, me: u64, name: u64, flags: u64) -> u64 {
     if is_devfb(state, buf, len) {
         return open_devfb(state, me, flags)
     }
+    // ============ RUNDE MULTIUSER: DAS BETRETUNGSRECHT, VOR DER WEICHE
+    //
+    // VOR der Weiche und nicht dahinter, und das ist ein GEMESSENER
+    // Befund und keine Geschmacksfrage. Zuerst stand die Zeile im
+    // Wurzelzweig, unmittelbar vor `fs.path` -- und damit lief sie NUR
+    // ohne `vfsall`. `tools/k14/run.sh` laesst dieselbe Arbeit auf
+    // beiden Wegen laufen und vergleicht die Platte danach Oktett fuer
+    // Oktett; die Zusage fiel, weil der eine Weg eine Pruefung machte,
+    // die der andere nicht kannte.
+    //
+    // Der Fehler war nicht der Vergleich, sondern die Stelle: ein
+    // Verzeichnis auf dem Weg muss betreten werden duerfen, EGAL auf
+    // welchem Dateisystem der Name am Ende liegt. Ein Einhaengepunkt
+    // `/mnt` mit 0o700 root:root soll auch das FAT32 darunter
+    // verschliessen -- und genau das tut diese Zeile hier und dort
+    // unten nicht.
+    //
+    // Fuer einen Namen JENSEITS des Einhaengepunkts hoert `perm.walk`
+    // von selbst auf: die Teilpfade darunter gibt es im OFS nicht,
+    // `fs.path` gibt 0 zurueck, und die Schleife bricht ab. Geprueft
+    // wird also genau der Teil des Weges, der der Wurzel gehoert --
+    // mehr kann diese Schicht ehrlich nicht beantworten, und das steht
+    // als Grenze in docs/ROUNDMULTIUSER.md.
+    //
+    // Wer ein Verzeichnis auf dem Weg nicht betreten darf, soll nicht
+    // einmal erfahren, ob der Name dahinter existiert -- deshalb VOR
+    // jeder Nachschlagerei. Die Gegenprobe `nowalk` steht in
+    // `kernel/perm.fi`.
+    if !perm.walk(state, me, buf) {
+        return neg(errno.E_ACCES)
+    }
     // ============================================= RUNDE K14: die Weiche
     //
     // HIER, UND NUR HIER, ENTSCHEIDET SICH, AUF WELCHEM DATEISYSTEM EIN
@@ -3266,14 +3297,6 @@ fn do_open(state: u64, me: u64, name: u64, flags: u64) -> u64 {
     // kennt keine Aufgabe, und `fs.fi` darf `perm.fi` nicht einbinden,
     // weil `perm.fi` `fs.fi` einbindet. Das ist eine echte Luecke und
     // keine Vereinfachung.
-    // RUNDE MULTIUSER: DAS BETRETUNGSRECHT AUF JEDEM GLIED DES PFADES.
-    // Vor `fs.path` und nicht danach: wer ein Verzeichnis auf dem Weg
-    // nicht betreten darf, soll nicht einmal erfahren, ob der Name
-    // dahinter existiert. Die Begruendung und die Gegenprobe `nowalk`
-    // stehen in `kernel/perm.fi`.
-    if !perm.walk(state, me, buf) {
-        return neg(errno.E_ACCES)
-    }
     var ino: u64 = fs.path(state, buf)
     if !dir_allowed(state, me, buf, ino) {
         return neg(errno.E_ACCES)
@@ -3444,6 +3467,13 @@ fn do_unlink(state: u64, me: u64, name: u64) -> u64 {
         return len
     }
     // ROUNDE K14.
+    // RUNDE MULTIUSER: DAS BETRETUNGSRECHT, VOR DER K14-WEICHE.
+    // Warum vor und nicht hinter ihr, steht ausgeschrieben in `do_open`:
+    // sonst prueft der eine Weg, was der andere nicht kennt, und
+    // `tools/k14/run.sh` haelt beide Oktett fuer Oktett gegeneinander.
+    if !perm.walk(state, me, buf) {
+        return neg(errno.E_ACCES)
+    }
     if vfs.ready(state) {
         let m: u64 = vfs.mount_for(state, buf)
         if m < vfs.MAX_MNT {
@@ -3466,14 +3496,6 @@ fn do_unlink(state: u64, me: u64, name: u64) -> u64 {
     }
     if kstate.get(state, kstate.FS_READY) == 0 {
         return neg(errno.E_NOSYS)
-    }
-    // RUNDE MULTIUSER: DAS BETRETUNGSRECHT AUF JEDEM GLIED DES PFADES.
-    // Vor `fs.path` und nicht danach: wer ein Verzeichnis auf dem Weg
-    // nicht betreten darf, soll nicht einmal erfahren, ob der Name
-    // dahinter existiert. Die Begruendung und die Gegenprobe `nowalk`
-    // stehen in `kernel/perm.fi`.
-    if !perm.walk(state, me, buf) {
-        return neg(errno.E_ACCES)
     }
     let ino: u64 = fs.path(state, buf)
     if ino == 0 {
@@ -3507,6 +3529,13 @@ fn do_mkdir(state: u64, me: u64, name: u64) -> u64 {
         return len
     }
     // ROUNDE K14.
+    // RUNDE MULTIUSER: DAS BETRETUNGSRECHT, VOR DER K14-WEICHE.
+    // Warum vor und nicht hinter ihr, steht ausgeschrieben in `do_open`:
+    // sonst prueft der eine Weg, was der andere nicht kennt, und
+    // `tools/k14/run.sh` haelt beide Oktett fuer Oktett gegeneinander.
+    if !perm.walk(state, me, buf) {
+        return neg(errno.E_ACCES)
+    }
     if vfs.ready(state) {
         let m: u64 = vfs.mount_for(state, buf)
         if m < vfs.MAX_MNT {
@@ -3529,14 +3558,6 @@ fn do_mkdir(state: u64, me: u64, name: u64) -> u64 {
     }
     if kstate.get(state, kstate.FS_READY) == 0 {
         return neg(errno.E_NOSYS)
-    }
-    // RUNDE MULTIUSER: DAS BETRETUNGSRECHT AUF JEDEM GLIED DES PFADES.
-    // Vor `fs.path` und nicht danach: wer ein Verzeichnis auf dem Weg
-    // nicht betreten darf, soll nicht einmal erfahren, ob der Name
-    // dahinter existiert. Die Begruendung und die Gegenprobe `nowalk`
-    // stehen in `kernel/perm.fi`.
-    if !perm.walk(state, me, buf) {
-        return neg(errno.E_ACCES)
     }
     if fs.path(state, buf) != 0 {
         return neg(errno.E_EXIST)
@@ -3678,6 +3699,13 @@ fn do_stat(state: u64, me: u64, name: u64, out: u64) -> u64 {
     if errno.is_error(len) {
         return len
     }
+    // RUNDE MULTIUSER: DAS BETRETUNGSRECHT, VOR DER K14-WEICHE.
+    // Warum vor und nicht hinter ihr, steht ausgeschrieben in `do_open`:
+    // sonst prueft der eine Weg, was der andere nicht kennt, und
+    // `tools/k14/run.sh` haelt beide Oktett fuer Oktett gegeneinander.
+    if !perm.walk(state, me, buf) {
+        return neg(errno.E_ACCES)
+    }
     if vfs.ready(state) {
         let m: u64 = vfs.mount_for(state, buf)
         if m < vfs.MAX_MNT {
@@ -3693,14 +3721,6 @@ fn do_stat(state: u64, me: u64, name: u64, out: u64) -> u64 {
     }
     if kstate.get(state, kstate.FS_READY) == 0 {
         return neg(errno.E_NOSYS)
-    }
-    // RUNDE MULTIUSER: DAS BETRETUNGSRECHT AUF JEDEM GLIED DES PFADES.
-    // Vor `fs.path` und nicht danach: wer ein Verzeichnis auf dem Weg
-    // nicht betreten darf, soll nicht einmal erfahren, ob der Name
-    // dahinter existiert. Die Begruendung und die Gegenprobe `nowalk`
-    // stehen in `kernel/perm.fi`.
-    if !perm.walk(state, me, buf) {
-        return neg(errno.E_ACCES)
     }
     let ino: u64 = fs.path(state, buf)
     if ino == 0 {
@@ -3732,6 +3752,13 @@ fn do_lstat(state: u64, me: u64, name: u64, out: u64) -> u64 {
     if errno.is_error(len) {
         return len
     }
+    // RUNDE MULTIUSER: DAS BETRETUNGSRECHT, VOR DER K14-WEICHE.
+    // Warum vor und nicht hinter ihr, steht ausgeschrieben in `do_open`:
+    // sonst prueft der eine Weg, was der andere nicht kennt, und
+    // `tools/k14/run.sh` haelt beide Oktett fuer Oktett gegeneinander.
+    if !perm.walk(state, me, buf) {
+        return neg(errno.E_ACCES)
+    }
     if vfs.ready(state) {
         let m: u64 = vfs.mount_for(state, buf)
         if m < vfs.MAX_MNT {
@@ -3747,14 +3774,6 @@ fn do_lstat(state: u64, me: u64, name: u64, out: u64) -> u64 {
     }
     if kstate.get(state, kstate.FS_READY) == 0 {
         return neg(errno.E_NOSYS)
-    }
-    // RUNDE MULTIUSER: DAS BETRETUNGSRECHT AUF JEDEM GLIED DES PFADES.
-    // Vor `fs.path` und nicht danach: wer ein Verzeichnis auf dem Weg
-    // nicht betreten darf, soll nicht einmal erfahren, ob der Name
-    // dahinter existiert. Die Begruendung und die Gegenprobe `nowalk`
-    // stehen in `kernel/perm.fi`.
-    if !perm.walk(state, me, buf) {
-        return neg(errno.E_ACCES)
     }
     let ino: u64 = fs.path_nofollow(state, buf)
     if ino == 0 {
