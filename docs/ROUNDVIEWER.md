@@ -191,3 +191,85 @@ zeilenweise), aber nicht bearbeitet.
   Aufziehen im Bild bräuchte einen Weg dafür. Statt dessen schneidet
   „Zuschneiden" auf den **sichtbaren Ausschnitt** — was man sieht,
   bekommt man.
+
+---
+
+## 8. Vier weitere Fehler — alle gefunden, weil die Oberfläche wirklich bedient wurde
+
+Der Betrachter war nach Abschnitt 7 fertig **im Bericht**. Als die
+Abnahme anfing, ihm über den QEMU-Monitor wirklich Tasten zu schicken,
+fielen achtzehn Zusagen durch. Keine davon lag im Dekodierer.
+
+**a) Der Miniaturenstreifen dekodierte bei jedem Schritt alles neu.**
+`weiter()` rief `minis_bauen()`, und das las alle acht Dateien des
+Fensters von der Platte und dekodierte sie im Achtel — bei jedem
+Tastendruck, auch die 700-KB-JPEG mit 12 Megabildpunkten. **Gemessen**
+(Spur mit der Systemuhr, `viewer: m <k> <uptime>`): ein Schritt weiter
+kostete **rund 2,0 s**, davon 1,8 s allein das Lesen der einen großen
+Datei (330 ms je 128 KiB). In dieser Zeit holte die Anwendung keine
+Ereignisse ab, und die nächste Taste ging in `wlib.key_last` verloren,
+weil `step()` bis zu 64 Ereignisse in einem Durchgang abräumt und nur
+die letzte Taste stehen bleibt. Von außen sah das aus wie „Tasten
+kommen nicht an".
+
+Der Streifen führt jetzt Buch, welches Bild in welchem Kästchen steckt
+(`mini_idx`), und lagert beim Blättern die sieben unveränderten
+Kästchen über einen zweiten Block um, statt sie neu zu rechnen. **Ein
+Schritt weiter kostet jetzt rund 0,05 s.** Danach war keine Taste mehr
+verloren — der Fehler „die Bibliothek verschluckt Tasten" hat sich als
+Folge der Langsamkeit erwiesen und nicht als eigener Fehler.
+
+**b) Die Anwendung sicherte neben das falsche Bild.** `sichern()` hängt
+`.viewer.png` an `pfad`, den Pfad des angezeigten Bildes. `mini_eins()`
+benutzte für seine Datei **denselben** Puffer — nach jedem Aufbau des
+Streifens stand dort der Pfad der **letzten Miniatur**. Die Datei wurde
+also geschrieben (`viewer: gesichert 2747`), nur eben neben
+`g-gross.jpg` statt neben `a-rot.png`. Aufgefallen ist es einzig
+daran, dass die Abnahme die geschriebene Datei danach **vom Abbild
+holt** und Pillow vorlegt. Die Miniaturen haben jetzt ihren eigenen
+Puffer (`mpfad`).
+
+**c) `wmhold` hält zwanzig Sekunden, und das ist ein hartes Budget.**
+Die Warteschleife in `kmain` läuft `sek` Sekunden TSC-Zeit und fährt
+danach herunter — alles, was ein Bildschirmfoto braucht, muss
+hineinpassen. Ein Skript von 20,9 s (sechsmal weiterblättern mit je 3 s)
+lief genau einen Schritt zu lang: QEMU war weg, bevor `screendump`
+verbunden war, und der Abschnitt fiel mit `kein Monitor an ...` durch —
+ein Fehlerbild, das nach einem Fehler in der Anwendung aussieht und
+keiner ist. Zwei Antworten: die Skripte sind kürzer geworden (1,5 s je
+Taste statt 3 s, was seit **a)** reicht), und der Kern hat eine dritte
+Haltestufe bekommen (siehe unten).
+
+**d) Kern und Anwendung teilen sich die serielle Leitung — ohne
+Absprache.** In einem Lauf stand im Mitschnitt
+`...warm=9 us  fwm: go`: die Zeile `wm: hold` war mitten in einer
+Kernelmeldung verschwunden, weil die Anwendung dazwischenschrieb. Die
+Abnahme wartete auf `^wm: hold`, fand es nie, drehte ihre vollen 300 s
+und ließ QEMU in den Zeitablauf laufen. Sie sucht jetzt **ohne
+Zeilenanker** und hat einen zweiten Ausweg (hat die Anwendung schon
+berichtet, geht es weiter — und sie sagt es). Der eigentliche Fehler
+liegt tiefer und ist hiermit benannt, nicht behoben: `serial.puts` aus
+Ring 0 und aus Ring 3 brauchen eine gemeinsame Sperre.
+
+### Was der Kern dafür bekommen hat: `wigxl`
+
+`kstate.M_WIGXL` (**Bit 33** von Wort 1) und das Wort `wigxl` auf der
+Kommandozeile: **sechzig** Sekunden Stillhalten statt zwanzig. Nur der
+eine Fotolauf mit dem 12-MP-Bild bekommt es — die Warteschleife wartet
+die volle Zeit ab, und alle neun Läufe damit auszustatten hätte den
+Abschnitt um sechs Minuten verlängert, ohne etwas zu messen.
+
+Beim Einbauen ist die Falle zugeschnappt, vor der `kstate.fi` an drei
+Stellen warnt: die erste Fassung nahm Bit 17 — das gehört `M_DESK`. Der
+Betrachter startete daraufhin gar nicht, statt dessen stand der Starter
+im Bild. Zwei Schalter auf einem Bit, genau der Fehler, gegen den der
+Modusvektor der Runde K17 gebaut wurde.
+
+### Was danach stand
+
+`tools/viewer/run.sh`, Abschnitt 8, **49 von 49 Zusagen**, darunter die
+vier, die die Runde vorher nicht belegen konnte: das 12-MP-Bild steht
+mit **4000 × 3000** im Fenster (1 804 336 Oktette Arena, als
+**Vorschau** und nicht bearbeitbar), die EXIF-Lage 6 dreht das Foto von
+40 × 24 auf 24 × 40, die Diaschau geht von selbst weiter, und Pillow
+liest, was die Anwendung geschrieben hat (`PNG 64x48 RGBA`).
