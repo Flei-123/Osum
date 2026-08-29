@@ -64,6 +64,12 @@ extra=""
 # measure something DIFFERENT under KVM; a picture is not one of them,
 # and `accel=tcg` reproduces every older number.
 accel=kvm
+# ROUND SOFTUI: WHERE THE POINTER STANDS WHEN THE PICTURE IS TAKEN.
+# The hover state of the three caption buttons IS a measurement of this
+# round -- a close button that only turns red when the pointer is on it
+# cannot be photographed without a pointer. `hover=x,y` drives it there
+# and does NOT click; see tools/softui/hover.py.
+hover=""
 uitrace=no
 autohide=0
 progs="desktop taskbar settings launcher dhcp explorer widgetdemo locate sh echo ls cat edit"
@@ -84,6 +90,7 @@ for a in "$@"; do
         uitrace=*) uitrace=${a#*=} ;;
         autohide=*) autohide=${a#*=} ;;
         accel=*) accel=${a#*=} ;;
+        hover=*) hover=${a#*=} ;;
         *) echo "unknown option: $a" >&2; exit 2 ;;
     esac
 done
@@ -252,6 +259,11 @@ while [ $i -lt 2400 ]; do
     kill -0 "$PID" 2>/dev/null || break
     sleep 0.15; i=$((i+1))
 done
+if [ -n "$hover" ]; then
+    python3 tools/softui/hover.py "$hover" > "$OUT/hover.txt" 2>"$OUT/hover.err"
+    python3 tools/wm/monitor.py "$SOCK" "$OUT/hover.txt" > "$OUT/hover.log" 2>&1
+    sleep 2
+fi
 python3 tools/gfx/screenshot.py "$SOCK" "$OUT/desktop.ppm" 25 > "$OUT/shot.log" 2>&1
 wait "$PID"; RC=$?
 rm -f "$SOCK"
