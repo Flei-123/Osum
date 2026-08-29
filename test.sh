@@ -719,6 +719,20 @@ lauf "25. Akkuanalyse je Programm: die gemessene Gesamtleistung, anteilig zugeor
      tools/powermon/run.sh powermon '^POWERMON: |^        |^  OK    (another table|GEGENPROBE|the two displays|the same energy|the sum of the program|and the kernel.s own rows|the shares add up|the ageing|runtime left|one sample costs|counted and uncounted|at 10 samples|the file stays|AND THE SENTENCE|ON THIS HOST|wigapp= really|the window server counts|distinct colours)'
 lauf "28. derselbe Kernel auf der ECHTEN CPU: /dev/kvm statt Emulation (tools/kvm/run.sh, Runde KVMFIX)" tools/kvm/run.sh kvm '^KVM: |^  OK    (der Kernel ist gebaut|1\.|3\.|4\.)|^  --    (CPU|3\.|4\.)|^KVM: uebersprungen'
 
+# ABSCHNITT 29 -- RUNDE UMLAUT2. Im Starter stand "Text schreiben und
+# aendern", waehrend zwei Zeilen tiefer "Ausführen" schon richtig war.
+# Runde LOOK hat den Satz geholt und einen Pruefer gebaut, der
+# `locale/de/*` liest -- und genau daran lag es: DIE BESCHRIFTUNGEN DER
+# PROGRAMME STEHEN IM QUELLTEXT, und dorthin sah kein Pruefer. Dieser
+# Abschnitt teilt jede Zeichenkette von `kernel/**` in Bildschirmtext,
+# Mitschnitt und getippte Marke, verlangt fuer die erste Klasse echte
+# Umlaute, misst die Beschriftungsspalten in ZEICHEN statt in Oktett --
+# und weist am Bild nach, dass die Glyphen wirklich auf dem Schirm
+# stehen, Tintenpunkt fuer Tintenpunkt. Jede Zusage hat eine
+# Gegenprobe: ein Pruefer, der nicht rot werden kann, prueft nichts.
+lauf "29. echte Umlaute ueberall, wo Text auf dem Schirm steht (tools/umlaut/run.sh, Runde UMLAUT2)" \
+     tools/umlaut/run.sh umlaut '^UMLAUT2: |^     (translit|quellen|marken|spalten|puffer|schriftprobe|Beschleuniger)|^  OK    (SICHTBARE|Umschrift in|GEGENPROBE|GEGEN-GEGENPROBE|keys=|der Pruefer findet|Marken mit|Beschriftungen|Zeichenketten passen|verschiedene Zeichen|passwd zaehlt|die Einstellungen zaehlen|die Zeile steht|starter:|einstellungen:|speicher:|der Speicher-Dialog|die Spalte|\[)'
+
 echo
 echo "=================================================================="
 if [ "$FAIL" -eq 0 ]; then

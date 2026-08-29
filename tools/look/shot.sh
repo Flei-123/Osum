@@ -33,6 +33,16 @@
 #     icons=yes|no      put /lib/icons.ttf on the disk or not
 #     nvicons=yes|no    put /etc/netview/* on the disk or not
 #     progs="..."       override the program list
+#     append="..."      REPLACE the whole kernel command line instead
+#                       of appending to it. Round UMLAUT2 needs the
+#                       storage dialog, and that one comes up in the
+#                       WINDOW SERVER path (`wig wigspeicher`), which
+#                       the desktop path (`desk`) does not run. Empty
+#                       by default -- nothing changes for anyone else.
+#     accel=tcg|kvm     which QEMU accelerator (default tcg -- KVM is
+#                       faster, and round UMLAUT2 takes its pictures
+#                       with it, but a host without /dev/kvm must still
+#                       be able to run this script)
 #
 # It prints, on stdout, the numbers a caller wants to assert on: the
 # QEMU exit code, the size of the picture, and every `taskbar:` and
@@ -58,6 +68,8 @@ keep=no
 extra=""
 uitrace=no
 autohide=0
+accel=tcg
+append=""
 progs="desktop taskbar settings launcher dhcp explorer widgetdemo locate sh echo ls cat edit"
 for a in "$@"; do
     case "$a" in
@@ -75,6 +87,8 @@ for a in "$@"; do
         extra=*) extra=${a#*=} ;;
         uitrace=*) uitrace=${a#*=} ;;
         autohide=*) autohide=${a#*=} ;;
+        accel=*) accel=${a#*=} ;;
+        append=*) append=${a#*=} ;;
         *) echo "unknown option: $a" >&2; exit 2 ;;
     esac
 done
@@ -226,8 +240,17 @@ echo "disk $(stat -c%s "$OUT/disk.img") octets"
 
 # ------------------------------------------------------------ 4. boot
 SOCK="$OUT/mon.sock"; rm -f "$SOCK" "$OUT/serial.txt"
-timeout 420 qemu-system-x86_64 -kernel "$BUILDD/k0.mb" -m 512 \
-    -append "gfx wm wig wigicons desk wmhold wiglong nokbd nosched noproc nofs $extra" \
+ACC=()
+if [ "$accel" = kvm ]; then
+    if [ -w /dev/kvm ] && qemu-system-x86_64 -accel kvm -m 32 -display none \
+            -no-reboot -kernel /dev/null >/dev/null 2>&1 || [ -w /dev/kvm ]; then
+        ACC=(-accel kvm)
+    else
+        echo "accel=kvm asked for, /dev/kvm not usable -- falling back to tcg"
+    fi
+fi
+timeout 420 qemu-system-x86_64 "${ACC[@]}" -kernel "$BUILDD/k0.mb" -m 512 \
+    -append "${append:-gfx wm wig wigicons desk wmhold wiglong nokbd nosched noproc nofs $extra}" \
     -serial "file:$OUT/serial.txt" -display none -no-reboot -vga std \
     -monitor "unix:$SOCK,server,nowait" \
     -drive "file=$OUT/disk.img,format=raw,if=ide,index=0" \

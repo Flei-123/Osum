@@ -201,9 +201,82 @@ def klasse(name, inhalt, zeilen, nr, code, fenster, kern, fest):
     return 'SICHTBAR'
 
 
+def marken(wurzel):
+    """Nimmt jede getippte Marke AUCH die Umlautschreibung?
+
+    Eine Marke darf ASCII bleiben -- man muss sie ohne Umlauttaste
+    tippen koennen. Sie darf aber nicht die EINZIGE Form sein: die
+    Hilfe zeigt seit dieser Runde `opk zurück`, und wer das abtippt,
+    muss ankommen. Dieselbe Regel wie `keys=` in den Buendeln.
+
+    Geprueft wird nur, was WIRKLICH mit einer Eingabe verglichen wird.
+    Ein Pfad (`/tmp/gross`) und ein Feldname im Mitschnitt (`bloecke=`)
+    werden nicht getippt und stehen deshalb nicht zur Debatte.
+
+    -> (geprueft, [Klage, ...])
+    """
+    klagen = []
+    n = 0
+    for r in funde(wurzel):
+        if r['klasse'] != 'MARKE' or r['name'] == '-':
+            continue
+        pfad = os.path.join(wurzel, r['datei'])
+        txt = open(pfad, encoding='utf-8').read()
+        zeilen = txt.split('\n')
+        fest = re.match(r'^\s*(?:static|const)\b',
+                        zeilen[r['zeile'] - 1]) is not None
+        benutzt = stellen(zeilen, r['name'], r['zeile'], fest)
+        if not any(VERGL.search(z) for z in benutzt):
+            continue                      # wird nicht getippt
+        n += 1
+        soll = r['inhalt']
+        for stamm, ersatz in translit.finde(soll):
+            soll = soll.replace(stamm, ersatz)
+        # Steht die Umlautform als eigene Kette in derselben Datei?
+        gefunden = None
+        for nr, z in enumerate(zeilen, 1):
+            if z.lstrip().startswith('//'):
+                continue
+            d = DEKL.search(z.split('//')[0])
+            if d and inhalt_von(d.group(4)) == soll:
+                gefunden = d.group(2)
+                break
+        if gefunden is None:
+            klagen.append('%s:%d  %s = %r  -- es gibt keine Kette %r, '
+                          'also nimmt das Programm die Umlautform nicht an'
+                          % (r['datei'], r['zeile'], r['name'],
+                             r['inhalt'], soll))
+            continue
+        zw = stellen(zeilen, gefunden, 0, True)
+        if not any(VERGL.search(z) for z in zw):
+            klagen.append('%s  %s = %r steht da, wird aber mit nichts '
+                          'verglichen' % (r['datei'], gefunden, soll))
+    return n, klagen
+
+
 def main(argv):
     wurzel = os.environ.get('OSUM_ROOT', '.')
     alle = '--alle' in argv
+    if '--streng' in argv:
+        # DER MODUS FUER DIE ABNAHME: rot, sobald EINE sichtbare
+        # deutsche Zeichenkette Umschrift traegt.
+        f = funde(wurzel)
+        s = [r for r in f if r['klasse'] == 'SICHTBAR']
+        print('quellen: %d Umschriften, davon %d SICHTBAR'
+              % (len(f), len(s)))
+        for r in s:
+            print('    UMSCHRIFT  %s:%d  %-12s %-11s %s'
+                  % (r['datei'], r['zeile'], r['name'],
+                     '/'.join(r['stamm']),
+                     r['inhalt'].replace('\n', '\\n')[:60]))
+        return 1 if s else 0
+    if '--marken' in argv:
+        n, klagen = marken(wurzel)
+        print('marken: %d getippte Marken mit Umschrift, %d ohne '
+              'Umlautform' % (n, len(klagen)))
+        for k in klagen:
+            print('    FEHLT  ' + k)
+        return 1 if klagen else 0
     f = funde(wurzel)
     n = {'SICHTBAR': 0, 'MITSCHNITT': 0, 'MARKE': 0}
     for r in f:
