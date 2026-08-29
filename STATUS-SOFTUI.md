@@ -31,6 +31,8 @@ wmbench2: ringe   full=2191 us  shadowpx=19276  aapx=594
 | Ringe (Runde PAINT) | **1284 µs** | 19 276 | 594 |
 | Maske (diese Runde) | **713 µs** | 19 928 | 64 |
 
+Zweiter Lauf derselben Abnahme, zur Streuung: 669 µs gegen 1252 µs.
+
 **Faktor 1,80 in der Zeit, bei 652 gemischten Bildpunkten MEHR.** Je
 Fenster: 357 µs gegen 642 µs. Die 64 verbliebenen Eckabtastungen sind
 die runde Ecke des Fensters selbst — der Schatten braucht keine einzige
@@ -179,6 +181,45 @@ falsch geschrieben ist — die Datei hat schlicht neun Marken mehr.
 Gegenprobe dafuer ist Abschnitt A von `tools/softui/run.sh`: `classic`
 malt dasselbe Bild wie vorher, 0 von 480000 Bildpunkten anders.
 
+### Und zwei Pruefmuster wurden BERICHTIGT
+
+`tools/look/run.sh` Abschnitt A und `tools/look/umlaut.py` suchten nach
+
+    kind=2 x=<n> base=<n> fg=<n> bg=<n> t=Ausführen
+
+-- also "und nichts dazwischen". Runde THEMESTORE hat ` tw=<n>` in diese
+Luecke geschrieben, Runde SOFTUI ` ax=<n> ay=<n>` dahinter, und damit
+faellt der Abschnitt durch. **Gemessen auf dem Elterncommit dieser
+Runde, vor der ersten Zeile SOFTUI-Code: derselbe FAIL.** Ein Test, der
+umfaellt, weil ein BERICHT ein Feld dazubekommt, prueft die
+Feldreihenfolge und nicht den Bildschirm.
+
+Beide Muster sind jetzt feldweise (`(?: [a-z]+=<n>)* t=`), verlangen
+weiterhin `kind=2` und weiterhin das exakte Wort -- das ist strenger und
+nicht lockerer. Der Pruefer nimmt ausserdem den Fensterursprung aus
+`ax`/`ay` statt aus dem festen `+2 / +22`, das nur fuer ein Fenster in
+der Bildschirmecke stimmte. Ergebnis: `9 Zeichen, 438 Tintenpunkte
+geprueft, 0 falsch`.
+
+### Ein roter Abschnitt, der NICHT dieser Runde gehoert
+
+`tools/look/run.sh` Abschnitt A2a (`'Übernehmen'` im Themenprobe-Fenster)
+faellt durch. **Er faellt auf dem ELTERNCOMMIT genauso durch, und dort
+sogar schlechter:**
+
+```
+Elterncommit d4c2742   10 Zeichen, 526 Tintenpunkte geprueft, 526 falsch
+Zweig softui           10 Zeichen, 526 Tintenpunkte geprueft, 518 falsch
+```
+
+Gemessen mit demselben (berichtigten) `umlaut.py` auf beiden Baeumen,
+sonst waere es kein Vergleich. Die Stelle stimmt in beiden Faellen
+(x=158, y=337, aus `ax`/`ay` nachgerechnet) -- es ist die FARBE, gegen
+die verglichen wird: der Bericht meldet `bg=#ffffff`, unter der Schrift
+steht etwas anderes. Das kam mit dem Merge von `themestore` herein und
+ist hier nicht behoben; es steht hier, damit niemand es dieser Runde
+zuschreibt und niemand es fuer erledigt haelt.
+
 Kein anderer Test wurde angefasst.
 
 ---
@@ -203,7 +244,13 @@ Alle vier Vollbilder durch `tools/softui/pruef.py`: **0 Beanstandungen**
 
 ## Die Abnahme
 
-`bash tools/softui/run.sh` — sieben Abschnitte, alle Zahlen oben.
+`bash tools/softui/run.sh` — sieben Abschnitte:
+
+```
+SOFTUI: 25 bestanden, 0 gefallen
+```
+
+Alle Zahlen oben.
 Voraussetzung: ein Arbeitsbaum der Grundlinie und
 `SOFTUIBASEPPM=<pfad zum classic-Bild der Grundlinie>`.
 
