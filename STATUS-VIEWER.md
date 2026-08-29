@@ -138,8 +138,8 @@ hatte Folgen, die keiner der Läufer benannte:
 | `tools/viewer/run.sh` | **109 passed, 0 failed** |
 | `tools/k15/run.sh` | **254 passed, 0 failed** (vorher 35 rot) |
 | `tools/wm/run.sh` | **103 passed, 0 failed** |
-| `tools/icons/run.sh` | 24 ok, **1** rot — `lib/icons.fi` gegen den Lucide-Bauer, **vorbestehend** (diese Runde fasst weder `lib/icons.fi` noch `assets/icons` an) |
-| `tools/desktop/run.sh` | **6** rot, alle **vorbestehend**: `WM_MAXNR` erwartet 2113, `kernel/sys.fi` führt 2114 (von dieser Runde nicht angefasst), und die fünf Zusagen um `settings: ... edge=right` sind das in `docs/NETVIEW.md` §11.5 aufgeschriebene Verschneiden der seriellen Leitung zwischen drei Ring-3-Programmen — **dasselbe Grundproblem**, das diese Runde in Abschnitt 8 noch einmal getroffen hat |
+| `tools/icons/run.sh` | **24 ok, 1 failed** — `lib/icons.fi` gegen den Lucide-Bauer, **vorbestehend** (diese Runde fasst weder `lib/icons.fi` noch `assets/icons` an) |
+| `tools/desktop/run.sh` | **96 passed, 6 failed** — alle sechs alle **vorbestehend**: `WM_MAXNR` erwartet 2113, `kernel/sys.fi` führt 2114 (von dieser Runde nicht angefasst), und die fünf Zusagen um `settings: ... edge=right` sind das in `docs/NETVIEW.md` §11.5 aufgeschriebene Verschneiden der seriellen Leitung zwischen drei Ring-3-Programmen — **dasselbe Grundproblem**, das diese Runde in Abschnitt 8 noch einmal getroffen hat. Derselbe Lauf meldet in seinem Abschnitt 9 `K15: 254 passed, 0 failed` und `WM: 103 passed, 0 failed` |
 
 Für die beiden roten Läufer wurde **kein** Grundlinienlauf auf
 `mergeline` gemacht; die Zuordnung „vorbestehend" stützt sich auf die
