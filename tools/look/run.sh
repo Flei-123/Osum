@@ -277,7 +277,14 @@ for v in "classic day light" "modern day light" "modern night dark" "classic nig
             is "$1/$2: button radius" "${RB:-x}" "0"
         else
             is "$1/$2: control height" "${CH:-0}" "32"
-            is "$1/$2: button radius" "${RB:-x}" "6"
+            # ROUND SOFTUI: 8 AND NOT 6. Justin asked for "Knoepfe/
+            # Eingabefelder ~8 px"; with ctrl_h = 32 that is exactly a
+            # quarter of the height, which is the ratio Windows 11 and
+            # the skill's `default` button both land on. The assertion
+            # is still an exact equality against the number in
+            # modern.shape -- it is the number that changed, not the
+            # test.
+            is "$1/$2: button radius" "${RB:-x}" "8"
         fi
         K=$(grep -aoE 'Text/Akzent [0-9,]+  Akzent/Fläche [0-9,]+  -- WCAG [^ ]+' "$S" | tail -1)
         [ -n "$K" ] && echo "        contrast: $K"
