@@ -92,7 +92,12 @@ def gemalt(roh, text):
     anderes Programm zerschnitten hat, traegt ihren Anfang trotzdem.
     """
     roh = bis_zum_foto(roh)
-    pat = (rb"kind=(\d+) x=(\d+) base=(\d+) fg=(\d+) bg=(\d+) t="
+    # RUNDE SOFTUI: zwischen `bg=` und `t=` darf stehen, was spaetere
+    # Runden dort anfuegen (`tw=` aus THEMESTORE, `ax=`/`ay=` aus
+    # SOFTUI). Die Zusage haengt am ANKER -- dem erwarteten Text -- und
+    # nicht an der Reihenfolge der Felder davor. Vorher hat sie an der
+    # Reihenfolge gehangen und ist beim naechsten Feld umgefallen.
+    pat = (rb"kind=(\d+) x=(\d+) base=(\d+) fg=(\d+) bg=(\d+)(?: [a-z]+=\d+)* t="
            + re.escape(text.encode("utf-8")))
     treffer = list(re.finditer(pat, roh))
     if not treffer:

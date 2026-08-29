@@ -163,8 +163,12 @@ if [ -s "$TMPD/B/desktop.ppm" ]; then
     python3 tools/softui/fokus.py "$TMPD/B/desktop.ppm" \
         "$TMPD/B/serial.txt" > "$TMPD/E.txt" 2>&1
     cat "$TMPD/E.txt" | sed 's/^/        /'
-    AT=$(grep -oE 'aktiv tiefe=[0-9]+' "$TMPD/E.txt" | grep -oE '[0-9]+')
-    IT=$(grep -oE 'inaktiv tiefe=[0-9]+' "$TMPD/E.txt" | grep -oE '[0-9]+')
+    # `aktiv` steht am ZEILENANFANG, `inaktiv` auch -- und `aktiv` ist
+    # ein Teilwort von `inaktiv`. Ohne das ^ zaehlt die erste Zeile
+    # beide Male mit, und der Vergleich haelt eine Zahl gegen sich
+    # selbst.
+    AT=$(grep -E '^aktiv ' "$TMPD/E.txt" | grep -oE 'tiefe=[0-9]+' | grep -oE '[0-9]+')
+    IT=$(grep -E '^inaktiv ' "$TMPD/E.txt" | grep -oE 'tiefe=[0-9]+' | grep -oE '[0-9]+')
     if [ -n "$AT" ] && [ -n "$IT" ] && [ "$IT" -gt 0 ]; then
         if [ "$AT" -gt "$((IT * 3 / 2))" ]; then
             ok "der Schatten des scharfen Fensters ist mindestens 1,5-mal so tief ($AT gegen $IT)"
