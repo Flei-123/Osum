@@ -1,0 +1,333 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/aiot.fi -- RUNDE ASYNC: das Programm, das die
+// Auftragsschicht VON DER PLATTE AUS misst.
+//
+// Wie `/bin/pollt` aus Runde POLL existiert es nicht, um etwas zu TUN,
+// sondern um gemessen zu werden. Es druckt Zeilen der Form
+//
+//     aiot: <name> = <zahl>
+//
+// und `tools/async/run.sh` liest sie zurueck. Jede Zusage hat hier eine
+// Zahl, und jede Zahl hat dort eine Erwartung.
+//
+// WARUM ES DIESES PROGRAMM ZUSAETZLICH ZU `uprog.u_async` GIBT. Der
+// Selbsttest in `uprog.fi` liegt IM KERNELABBILD und ruft die
+// Systemaufrufe von Hand. Dieses hier ist ein gewoehnliches Programm
+// auf der Platte, gebunden gegen die libc, geladen vom ELF-Lader,
+// gestartet von der Shell -- und es benutzt AUSSCHLIESSLICH die
+// Wrapper aus `lib/libc/io.fi`. Damit ist nicht nur der Kernel
+// gemessen, sondern auch die Schnittstelle, mit der ein Programm dieses
+// Systems die Schicht wirklich benutzen wuerde. Eine libc-Anbindung,
+// die niemand uebersetzt, ist eine Behauptung.
+//
+// WAS GEMESSEN WIRD:
+//
+//   1. LESEN UND SCHREIBEN ueber die Auftragsschicht -- das Ergebnis
+//      steht in der FERTIGMELDUNG und nicht im Rueckgabewert der
+//      Abgabe. Das ist der ganze Unterschied zu `read(2)`.
+//   2. DIE KENNZAHL DES PROGRAMMS (`udata`) kommt unveraendert zurueck.
+//      Ohne sie waere ein Stapel von Auftraegen nicht zuzuordnen.
+//   3. EIN STAPEL: acht Auftraege, EIN Aufruf von `aio_wait` mit
+//      `mindestens = 8`. Das ist `min_complete` von io_uring, und es
+//      ist der Grund, warum ein Stapel EINEN Systemaufruf kostet und
+//      nicht acht.
+//   4. `open`, `read`, `fsync`, `close` auf einer Datei -- die vier
+//      Arten, die ein Dateisystem brauchen. `open` ist die einzige ohne
+//      Ziel-Handle; sein Pfad wird bei der Abgabe kopiert, und deshalb
+//      darf der Puffer danach sofort etwas anderes enthalten. Genau das
+//      wird hier gemacht.
+//   5. DIE BRUECKE: `aio_poll` auf einem Rohr. Readiness kommt als
+//      COMPLETION zurueck -- ein Programm, das nur Fertigmeldungen
+//      kennt, kann damit auf Rohre warten, ohne `poll` je aufzurufen.
+//   6. ABBRUCH: -ECANCELED, genau einmal.
+//   7. DER RUECKSTAU: siebzehn Auftraege auf sechzehn Plaetze geben
+//      -EAGAIN und keine verlorene Meldung.
+//
+// Der Beendigungscode ist die Zahl der gedruckten Zeilen.
+
+profile kernel
+
+import ulib
+import libc.kcall
+import libc.errno
+import libc.io
+import libc.stdio
+
+export { u_start }
+
+static mut lines: u64 = 0
+
+const EAGAIN: u64 = 11
+const ECANCELED: u64 = 125
+
+fn tell(name: u64, v: u64) {
+    var head: [u8; 7] = "aiot: \0"
+    var mid: [u8; 4] = " = \0"
+    stdio.say((&head[0]) as u64)
+    stdio.say(name)
+    stdio.say((&mid[0]) as u64)
+    stdio.say_num(v)
+    stdio.nl()
+    lines = lines + 1
+}
+
+// Eine Meldung abholen und ihr Ergebnis melden. `mindestens` ist 1: es
+// soll genau eine kommen.
+fn eine(cqe: u64) -> u64 {
+    return io.aio_wait(cqe, 1, 3000, 1)
+}
+
+fn u_start(args: u64) -> u64 {
+    var n_ver: [u8; 8] = "version\0"
+    das_lesen()
+    das_schreiben()
+    der_stapel()
+    die_datei()
+    die_bruecke()
+    der_abbruch()
+    der_rueckstau()
+    tell((&n_ver[0]) as u64, io.aio_version())
+    stdio.flush()
+    return lines
+}
+
+// ------------------------------------- 1. lesen ueber die Auftragsschicht
+
+fn das_lesen() {
+    var p: [u64; 1] = [0 as u64; 1]
+    var cqe: [u8; 32] = [0 as u8; 32]
+    var buf: [u8; 32] = [0 as u8; 32]
+    var wort: [u8; 5] = "abcd\0"
+    var n_got: [u8; 9] = "read_got\0"
+    var n_res: [u8; 9] = "read_res\0"
+    var n_ud: [u8; 8] = "read_ud\0"
+    var n_op: [u8; 8] = "read_op\0"
+    io.pipe((&p[0]) as u64)
+    let rd: u64 = (p[0]) & 0xFFFFFFFF
+    let wr: u64 = (p[0]) >> 32
+    io.write_all(wr, (&wort[0]) as u64, 4)
+    io.aio_read(rd, (&buf[0]) as u64, 4, 4711)
+    tell((&n_got[0]) as u64, eine((&cqe[0]) as u64))
+    tell((&n_res[0]) as u64, io.aio_result((&cqe[0]) as u64, 0))
+    tell((&n_ud[0]) as u64, io.aio_udata((&cqe[0]) as u64, 0))
+    tell((&n_op[0]) as u64, io.aio_op((&cqe[0]) as u64, 0))
+    io.close(rd)
+    io.close(wr)
+}
+
+// --------------------------------------------------------- 2. schreiben
+
+fn das_schreiben() {
+    var p: [u64; 1] = [0 as u64; 1]
+    var cqe: [u8; 32] = [0 as u8; 32]
+    var buf: [u8; 32] = [0 as u8; 32]
+    var wort: [u8; 9] = "12345678\0"
+    var n_res: [u8; 10] = "write_res\0"
+    var n_da: [u8; 9] = "write_da\0"
+    io.pipe((&p[0]) as u64)
+    let rd: u64 = (p[0]) & 0xFFFFFFFF
+    let wr: u64 = (p[0]) >> 32
+    io.aio_write(wr, (&wort[0]) as u64, 8, 1)
+    eine((&cqe[0]) as u64)
+    tell((&n_res[0]) as u64, io.aio_result((&cqe[0]) as u64, 0))
+    // Und die Oktette sind wirklich im Rohr.
+    tell((&n_da[0]) as u64, io.read(rd, (&buf[0]) as u64, 8))
+    io.close(rd)
+    io.close(wr)
+}
+
+// ------------------------------------- 3. acht Auftraege, EIN Aufruf
+//
+// DAS IST DER GRUND, WARUM ES DIE SCHICHT GIBT. Acht Lesevorgaenge
+// werden abgegeben, ohne dass einer davon wartet, und EIN `aio_wait`
+// mit `mindestens = 8` holt alle acht ab. Die Summe der Ergebnisse muss
+// 8 mal 4 = 32 sein, und die Summe der Kennzahlen 1+2+...+8 = 36 --
+// letzteres ist der Nachweis, dass wirklich ACHT VERSCHIEDENE Auftraege
+// zurueckkamen und nicht einer achtmal.
+fn der_stapel() {
+    var p: [u64; 1] = [0 as u64; 1]
+    var cqe: [u8; 256] = [0 as u8; 256]
+    var buf: [u8; 64] = [0 as u8; 64]
+    var wort: [u8; 5] = "wxyz\0"
+    var n_n: [u8; 8] = "batch_n\0"
+    var n_s: [u8; 12] = "batch_summe\0"
+    var n_u: [u8; 11] = "batch_uzsm\0"
+    var i: u64 = 0
+    io.pipe((&p[0]) as u64)
+    let rd: u64 = (p[0]) & 0xFFFFFFFF
+    let wr: u64 = (p[0]) >> 32
+    while i < 8 {
+        io.write_all(wr, (&wort[0]) as u64, 4)
+        i = i + 1
+    }
+    var k: u64 = 0
+    while k < 8 {
+        io.aio_read(rd, (&buf[0]) as u64 + k * 4, 4, k + 1)
+        k = k + 1
+    }
+    let n: u64 = io.aio_wait((&cqe[0]) as u64, 8, 3000, 8)
+    tell((&n_n[0]) as u64, n)
+    var summe: u64 = 0
+    var usumme: u64 = 0
+    var j: u64 = 0
+    while j < n {
+        summe = summe + io.aio_result((&cqe[0]) as u64, j)
+        usumme = usumme + io.aio_udata((&cqe[0]) as u64, j)
+        j = j + 1
+    }
+    tell((&n_s[0]) as u64, summe)
+    tell((&n_u[0]) as u64, usumme)
+    io.close(rd)
+    io.close(wr)
+}
+
+// ------------------------------ 4. open, read, fsync, close auf einer Datei
+
+fn die_datei() {
+    var cqe: [u8; 32] = [0 as u8; 32]
+    var buf: [u8; 64] = [0 as u8; 64]
+    var pfad: [u8; 16] = "/aiot.txt\0\0\0\0\0\0\0"
+    var text: [u8; 13] = "asynchron ok\0"
+    var n_fd: [u8; 8] = "file_fd\0"
+    var n_rd: [u8; 9] = "file_len\0"
+    var n_sy: [u8; 11] = "file_fsync\0"
+    var n_cl: [u8; 11] = "file_close\0"
+    var n_no: [u8; 11] = "file_fehlt\0"
+    // Erst einmal synchron anlegen -- diese Runde baut kein
+    // Dateisystem, sie benutzt eines.
+    let w: u64 = io.create((&pfad[0]) as u64)
+    io.write_all(w, (&text[0]) as u64, 12)
+    io.close(w)
+    // ASYNCHRON OEFFNEN. Der Pfad wird bei der Abgabe in den Kern
+    // kopiert; dass das stimmt, wird gleich danach bewiesen, indem der
+    // Puffer ueberschrieben wird, BEVOR die Meldung da ist.
+    io.aio_open((&pfad[0]) as u64, kcall.O_RDONLY, 5)
+    var z: u64 = 0
+    while z < 16 {
+        pfad[z as usize] = 88 as u8 // 'X' -- der Pfad ist jetzt Muell
+        z = z + 1
+    }
+    eine((&cqe[0]) as u64)
+    let fd: u64 = io.aio_result((&cqe[0]) as u64, 0)
+    tell((&n_fd[0]) as u64, fd)
+    io.aio_read(fd, (&buf[0]) as u64, 32, 6)
+    eine((&cqe[0]) as u64)
+    tell((&n_rd[0]) as u64, io.aio_result((&cqe[0]) as u64, 0))
+    io.aio_fsync(fd, 7)
+    eine((&cqe[0]) as u64)
+    tell((&n_sy[0]) as u64, io.aio_result((&cqe[0]) as u64, 0))
+    io.aio_close(fd, 8)
+    eine((&cqe[0]) as u64)
+    tell((&n_cl[0]) as u64, io.aio_result((&cqe[0]) as u64, 0))
+    // Ein Pfad, den es nicht gibt: der Fehler kommt als FERTIGMELDUNG
+    // und nicht als Rueckgabewert der Abgabe. Das ist bei einer
+    // asynchronen Schnittstelle der Normalfall und keine Ausnahme.
+    var weg: [u8; 16] = "/gibtsnicht.dat\0"
+    io.aio_open((&weg[0]) as u64, kcall.O_RDONLY, 9)
+    eine((&cqe[0]) as u64)
+    tell((&n_no[0]) as u64, 0 -% io.aio_result((&cqe[0]) as u64, 0))
+}
+
+// ------------------------------------- 5. readiness kommt als completion
+
+fn die_bruecke() {
+    var p: [u64; 1] = [0 as u64; 1]
+    var cqe: [u8; 32] = [0 as u8; 32]
+    var wort: [u8; 3] = "hi\0"
+    var n_vor: [u8; 12] = "poll_vorher\0"
+    var n_re: [u8; 12] = "poll_revent\0"
+    var n_op: [u8; 8] = "poll_op\0"
+    io.pipe((&p[0]) as u64)
+    let rd: u64 = (p[0]) & 0xFFFFFFFF
+    let wr: u64 = (p[0]) >> 32
+    // Der Auftrag wird ABGEGEBEN, BEVOR irgendetwas im Rohr liegt. Er
+    // wartet -- ohne zu drehen -- bis geschrieben wird.
+    io.aio_poll(rd, io.POLLIN, 31)
+    tell((&n_vor[0]) as u64, io.aio_wait((&cqe[0]) as u64, 1, 0, 1))
+    io.write_all(wr, (&wort[0]) as u64, 2)
+    eine((&cqe[0]) as u64)
+    tell((&n_re[0]) as u64, io.aio_result((&cqe[0]) as u64, 0))
+    tell((&n_op[0]) as u64, io.aio_op((&cqe[0]) as u64, 0))
+    io.close(rd)
+    io.close(wr)
+}
+
+// ------------------------------------------------------- 6. der Abbruch
+
+fn der_abbruch() {
+    var p: [u64; 1] = [0 as u64; 1]
+    var cqe: [u8; 32] = [0 as u8; 32]
+    var n_c: [u8; 12] = "cancel_call\0"
+    var n_r: [u8; 11] = "cancel_res\0"
+    var n_z: [u8; 12] = "cancel_zwei\0"
+    io.pipe((&p[0]) as u64)
+    let rd: u64 = (p[0]) & 0xFFFFFFFF
+    let wr: u64 = (p[0]) >> 32
+    // Ein `poll`, das nie fertig wird -- niemand schreibt in das Rohr.
+    let id: u64 = io.aio_poll(rd, io.POLLIN, 41)
+    tell((&n_c[0]) as u64, io.aio_cancel(id))
+    eine((&cqe[0]) as u64)
+    tell((&n_r[0]) as u64, 0 -% io.aio_result((&cqe[0]) as u64, 0))
+    // GENAU EINE MELDUNG: die zweite Abholung findet nichts.
+    tell((&n_z[0]) as u64, io.aio_wait((&cqe[0]) as u64, 1, 0, 1))
+    io.close(rd)
+    io.close(wr)
+}
+
+// ---------------------------------------------------- 7. der Rueckstau
+
+fn der_rueckstau() {
+    var p: [u64; 1] = [0 as u64; 1]
+    var cqe: [u8; 512] = [0 as u8; 512]
+    var ids: [u64; 16] = [0 as u64; 16]
+    var n_v: [u8; 12] = "voll_fehler\0"
+    var n_a: [u8; 10] = "voll_wieg\0"
+    var n_l: [u8; 10] = "voll_weg\0\0"
+    io.pipe((&p[0]) as u64)
+    let rd: u64 = (p[0]) & 0xFFFFFFFF
+    let wr: u64 = (p[0]) >> 32
+    var i: u64 = 0
+    var offen: u64 = 0
+    while i < 16 {
+        let id: u64 = io.aio_poll(rd, io.POLLIN, 100 + i)
+        ids[i as usize] = id
+        if (id >> 63) == 0 {
+            offen = offen + 1
+        }
+        i = i + 1
+    }
+    tell((&n_a[0]) as u64, offen)
+    // Der siebzehnte findet keinen Platz. EAGAIN und keine verlorene
+    // Meldung -- ein Ring, der verwirft, waere schlimmer als eine
+    // Abgabe, die Nein sagt.
+    //
+    // Die libc-Sitte, und sie steht hier ausgeschrieben, weil sie beim
+    // ersten Lauf zwei Zahlen verwechselt hat: `errno.check` gibt bei
+    // einem Fehler MINUS EINS zurueck und legt die Nummer nach
+    // `errno.errno()`. Der Rueckgabewert einer libc-Funktion ist also
+    // nie der Fehlercode selbst.
+    errno.clear()
+    let r: u64 = io.aio_poll(rd, io.POLLIN, 999)
+    var e: u64 = 0
+    if errno.failed(r) {
+        e = errno.errno()
+    }
+    tell((&n_v[0]) as u64, e)
+    var k: u64 = 0
+    while k < 16 {
+        io.aio_cancel(ids[k as usize])
+        k = k + 1
+    }
+    var weg: u64 = 0
+    var runde: u64 = 0
+    while runde < 4 {
+        let n: u64 = io.aio_wait((&cqe[0]) as u64, 16, 200, 1)
+        if (n >> 63) == 0 {
+            weg = weg + n
+        }
+        runde = runde + 1
+    }
+    tell((&n_l[0]) as u64, weg)
+    io.close(rd)
+    io.close(wr)
+}

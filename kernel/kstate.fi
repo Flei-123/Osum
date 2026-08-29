@@ -184,6 +184,13 @@ export {
     M_HANDLE, M_NOGEN, M_NOFLIGHT, M_NORIGHTS, M_HSTRICT, M_HBENCH,
     H_CHECKS, H_DENIED, H_STALE, H_CANCELS, H_INFLIGHT, H_DEFERRED,
     H_OPENED, H_CLOSED, H_PASSED, H_ESCALATE,
+    // ---- Runde ASYNC ----
+    AIO_OFF, AIO_MAX, ACQ_OFF, ACQ_MAX, ASC_OFF, ASC_MAX,
+    APATH_OFF, APATH_MAX, APATH_STRIDE,
+    M_ASYNC, M_NOAGEN, M_NOAREAP, M_ABENCH, M_NOAWORK, M_ASTRESS,
+    A_SUBMITTED, A_COMPLETED, A_CANCELLED, A_STALED, A_FAILED,
+    A_FULL, A_TIMEOUTS, A_REAPED, A_ABANDONED, A_WORKRUNS,
+    A_POSTED, A_DENIED,
     mode_on, mode_add, mode_word,
     get, set,
     add, get32, get16, get8, set8
@@ -1562,7 +1569,85 @@ const H_CLOSED: u64 = 1456 // abgeraeumte Objekte
 const H_PASSED: u64 = 1464 // ausdruecklich an ein Kind uebergebene Handles
 const H_ESCALATE: u64 = 1472 // versuchte Rechteerweiterung beim Weitergeben
 
-const KDATA_SIZE: u64 = 0x80000
+// ================================================ RUNDE ASYNC
+//
+// DIE ASYNCHRONE AUFTRAGSSCHICHT (`kernel/async.fi`). Sie ist die
+// Zwischenstufe zwischen den Handles der Runde HANDLE und dem
+// Completion-Ring der Runde RING, und sie braucht drei Bereiche.
+//
+// `kdata` war nach Runde HANDLE bis 0x7F380 belegt; 0x80000 war die
+// Grenze. Diese Runde laesst sie auf 0x90000 wachsen -- DIESELBE ZAHL
+// STEHT IN `kernel/arch/x86_64/boot.s` (KDATA_SIZE), und
+// `tools/hv/run.sh` liest beide und vergleicht sie. Das ist die
+// vierte Runde, die das tut (K12, K18, OFS3, NETMON), und jedes Mal
+// war die vergessene zweite Zahl der Fehler.
+//
+//   AIO_OFF  0x80000  die Auftragstafel, 64 Auftraege * 80 Oktett
+//   ACQ_OFF  0x82000  die Fertigmeldungsringe, 32 Aufgaben * 1024 Oktett
+//   ASC_OFF  0x8A000  die Sperre und der Vorrat dieser Runde
+//
+// Wer hier etwas aendert, traegt es in `tools/kernel/memmap.py` ein.
+const AIO_OFF: u64 = 0x80000
+const AIO_MAX: u64 = 0x2000
+const ACQ_OFF: u64 = 0x82000
+const ACQ_MAX: u64 = 0x8000
+const ASC_OFF: u64 = 0x8A000
+const ASC_MAX: u64 = 0x1000
+// Der Pfadvorrat der asynchronen `open`: 64 Auftraege zu 128 Oktett.
+// WARUM ER SEIN MUSS: ein `open` bekommt seinen Pfad als Zeiger in
+// Ring 3, und der Arbeitsfaden liest ihn erst spaeter -- da kann der
+// Prozess den Puffer laengst ueberschrieben haben oder gar nicht mehr da
+// sein. Der Pfad wird deshalb BEI DER ABGABE in den Kern kopiert, im
+// Zusammenhang des Abgebenden. Das ist dieselbe Regel wie bei den
+// registrierten Puffern von io_uring, nur eine Nummer kleiner.
+const APATH_OFF: u64 = 0x8B000
+const APATH_MAX: u64 = 0x2000
+const APATH_STRIDE: u64 = 128
+
+// Die Modusbits dieser Runde. Wort 11 war ganz frei -- Wort 10 gehoert
+// der Handle-Schicht, und ein Wort je Untersystem ist die Regel seit
+// Runde K17.
+//
+// M_ASYNC ist der Selbsttest in Ring 3. Die uebrigen sind GEGENPROBEN
+// und eine Messung:
+//
+//   M_NOAGEN   der Arbeitsfaden fragt NICHT `handle.req_object`,
+//              sondern nimmt, was gerade unter dem Handle steht.
+//              Genau der io_uring-Fehler, eine Ebene hoeher: Zusage
+//              `nicht-das-neue-ding` MUSS damit fallen.
+//   M_NOAREAP  ein sterbender Prozess raeumt seine Auftraege NICHT ab.
+//              Die Zusage `tod-raeumt-ab` MUSS damit fallen.
+//   M_NOAWORK  es laufen KEINE Arbeitsfaeden -- der Auftrag wird vom
+//              abgebenden Prozess selbst ausgefuehrt. Das ist die
+//              Gegenprobe zur Behauptung, dass die Arbeit wirklich
+//              woanders geschieht, und zugleich der Massstab der
+//              Durchsatzmessung.
+//   M_ABENCH   die Messung: Latenz und Durchsatz bei 1, 4 und 16
+//              gleichzeitig offenen Auftraegen.
+//   M_ASTRESS  der Lauf, der die Warteschlange absichtlich ueberfuellt.
+const M_ASYNC: u64 = 704 // Wort 11, Bit 0
+const M_NOAGEN: u64 = 705 // Wort 11, Bit 1
+const M_NOAREAP: u64 = 706 // Wort 11, Bit 2
+const M_ABENCH: u64 = 707 // Wort 11, Bit 3
+const M_NOAWORK: u64 = 708 // Wort 11, Bit 4
+const M_ASTRESS: u64 = 709 // Wort 11, Bit 5
+
+// Die Zaehler der Runde ASYNC. 1480 aufwaerts war frei; der hoechste
+// vergebene Skalar davor ist 1472 (H_ESCALATE).
+const A_SUBMITTED: u64 = 1480 // abgegebene Auftraege
+const A_COMPLETED: u64 = 1488 // ordentlich fertig gewordene
+const A_CANCELLED: u64 = 1496 // abgebrochene
+const A_STALED: u64 = 1504 // an der Generationspruefung gescheiterte
+const A_FAILED: u64 = 1512 // mit einem Fehler geendete
+const A_FULL: u64 = 1520 // Abgaben, die an der vollen Warteschlange scheiterten
+const A_TIMEOUTS: u64 = 1528 // Wartevorgaenge, die an der Zeitgrenze endeten
+const A_REAPED: u64 = 1536 // abgeholte Fertigmeldungen
+const A_ABANDONED: u64 = 1544 // beim Prozesstod abgeraeumte Auftraege
+const A_WORKRUNS: u64 = 1552 // Durchlaeufe der Arbeitsfaeden mit Arbeit
+const A_POSTED: u64 = 1560 // eingestellte Fertigmeldungen
+const A_DENIED: u64 = 1568 // Zugriffe auf einen fremden Auftrag
+
+const KDATA_SIZE: u64 = 0x90000
 
 // ================================================== DER MODUSVEKTOR
 //
@@ -1636,7 +1721,11 @@ const KDATA_SIZE: u64 = 0x80000
 //                      Frei ab Bit 3.
 //   Wort  9  576..639  DIE GERAETEIDENTITAET -- Runde TRESOR.
 //                      Frei ab Bit 2.
-//   Wort 10..15        FREI. Wird auch das knapp, waechst MODE_WORDS;
+//   Wort 10  640..703  DIE HANDLE-SCHICHT -- Runde HANDLE.
+//                      Frei ab Bit 6.
+//   Wort 11  704..767  DIE ASYNCHRONE AUFTRAGSSCHICHT -- Runde ASYNC.
+//                      Frei ab Bit 6.
+//   Wort 12..15        FREI. Wird auch das knapp, waechst MODE_WORDS;
 //                      die Seite fasst 512 Woerter.
 //
 // Die Namen selbst stehen bei ihrer Runde, dort wo auch steht, wofuer

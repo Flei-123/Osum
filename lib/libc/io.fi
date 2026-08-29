@@ -34,7 +34,15 @@ export {
     lstat_into, stat_mtime, stat_ctime, stat_atime, stat_nlink,
     stat_mode_of, now_sec,
     symlink, readlink, is_link_mode, set_times, touch_now,
-    ST_MTIME, ST_CTIME, ST_ATIME, ST_NLINK, S_IFLNK, DT_LNK
+    ST_MTIME, ST_CTIME, ST_ATIME, ST_NLINK, S_IFLNK, DT_LNK,
+    // ------------------------------------------------ RUNDE ASYNC
+    fsync,
+    aio_read, aio_write, aio_open, aio_close, aio_fsync, aio_poll,
+    aio_wait, aio_cancel, aio_state, aio_version,
+    aio_id, aio_udata, aio_result, aio_op,
+    CQE_BYTES, AOP_READ, AOP_WRITE, AOP_OPEN, AOP_CLOSE, AOP_FSYNC,
+    AOP_POLL,
+    AQ_NEW, AQ_RUN, AQ_DONE, AQ_CANCEL, AQ_FAIL, AQ_WAIT, AIO_FOREVER
 }
 
 const STAT_BYTES: u64 = 144
@@ -66,6 +74,137 @@ const DT_LNK: u64 = 10
 const D_RECLEN: u64 = 16
 const D_TYPE: u64 = 18
 const D_NAME: u64 = 19
+
+// ================================================== RUNDE ASYNC
+//
+// AUFTRAEGE ABGEBEN, SPAETER AUF FERTIGMELDUNGEN WARTEN.
+//
+// Der Unterschied zu `poll`: `poll` sagt, was jetzt MOEGLICH waere --
+// danach muss das Programm die Arbeit noch selbst tun. Ein Auftrag ist
+// die Arbeit; die Fertigmeldung sagt, dass sie GETAN ist. Fuer eine
+// gewoehnliche Datei ist das der einzige Weg, der etwas bedeutet: eine
+// Datei ist immer "bereit", und ein `poll` darauf ist keine Auskunft.
+//
+//     var cqe: [u8; 64] = [0 as u8; 64]      // zwei Meldungen
+//     let a: u64 = io.aio_read(fd, puffer, 4096, 1)
+//     let b: u64 = io.aio_read(fd2, puffer2, 4096, 2)
+//     let n: u64 = io.aio_wait((&cqe[0]) as u64, 2, io.AIO_FOREVER, 2)
+//     // io.aio_udata(cqe, 0) sagt, welcher der beiden es war,
+//     // io.aio_result(cqe, 0), wie viele Oktette es geworden sind.
+//
+// Eine Fertigmeldung ist 32 Oktett: Kennung, Kennzahl des Programms,
+// Ergebnis, Art -- vier Worte, und genau diese Form bekommt in Runde
+// RING der Completion-Ring im geteilten Speicher. Wer heute `aio_wait`
+// benutzt, muss dafuer nichts umschreiben ausser dem Abholweg.
+//
+// DAS ERGEBNIS STEHT IN DER MELDUNG, NICHT IM RUECKGABEWERT DER ABGABE.
+// `aio_read` gibt eine KENNUNG zurueck (oder einen negativen Fehler,
+// wenn die Abgabe selbst scheitert -- volle Warteschlange, falscher
+// Deskriptor). Ob das Lesen geklappt hat, sagt erst `aio_result`.
+const CQE_BYTES: u64 = 32
+const AOP_READ: u64 = 1
+const AOP_WRITE: u64 = 2
+const AOP_OPEN: u64 = 3
+const AOP_CLOSE: u64 = 4
+const AOP_FSYNC: u64 = 5
+const AOP_POLL: u64 = 6
+// Die Zustaende eines Auftrags.
+const AQ_NEW: u64 = 1 // angelegt
+const AQ_RUN: u64 = 2 // laeuft
+const AQ_DONE: u64 = 3 // fertig
+const AQ_CANCEL: u64 = 4 // abgebrochen
+const AQ_FAIL: u64 = 5 // fehlgeschlagen
+const AQ_WAIT: u64 = 6 // wartet auf ein Ereignis (nur `aio_poll`)
+// Warten, bis wirklich etwas fertig wird -- wie `POLL_FOREVER`.
+const AIO_FOREVER: u64 = 0xFFFFFFFFFFFFFFFF
+
+fn aio_version() -> u64 {
+    return kcall.sys0(kcall.AIO_VERSION)
+}
+
+fn aio_read(fd: u64, buf: u64, n: u64, udata: u64) -> u64 {
+    return errno.check(kcall.aio_submit_call(AOP_READ, fd, buf, n, udata))
+}
+
+fn aio_write(fd: u64, buf: u64, n: u64, udata: u64) -> u64 {
+    return errno.check(kcall.aio_submit_call(AOP_WRITE, fd, buf, n, udata))
+}
+
+// Der Pfad wird BEI DER ABGABE in den Kern kopiert -- der Puffer darf
+// danach sofort wieder etwas anderes enthalten.
+fn aio_open(path: u64, flags: u64, udata: u64) -> u64 {
+    return errno.check(kcall.aio_submit_call(AOP_OPEN, 0, path, flags,
+        udata))
+}
+
+fn aio_close(fd: u64, udata: u64) -> u64 {
+    return errno.check(kcall.aio_submit_call(AOP_CLOSE, fd, 0, 0, udata))
+}
+
+fn aio_fsync(fd: u64, udata: u64) -> u64 {
+    return errno.check(kcall.aio_submit_call(AOP_FSYNC, fd, 0, 0, udata))
+}
+
+// DIE BRUECKE VON READINESS AUF COMPLETION: ein Auftrag, der fertig
+// wird, sobald auf diesem Deskriptor eines der Ereignisse aus `events`
+// moeglich waere. Damit kann ein Programm, das nur Fertigmeldungen
+// kennt, auf Rohre, Steckdosen und Terminals warten, ohne `poll` je
+// aufzurufen. Das Ergebnis der Meldung ist die `revents`-Maske.
+fn aio_poll(fd: u64, events: u64, udata: u64) -> u64 {
+    return errno.check(kcall.aio_submit_call(AOP_POLL, fd, 0, events,
+        udata))
+}
+
+// Fertigmeldungen abholen. `max` Meldungen passen nach `out` (je
+// CQE_BYTES); zurueck kommt, wie viele es geworden sind.
+//   timeout_ms > 0   hoechstens so lange warten, danach -ETIMEDOUT
+//   timeout_ms == 0  nur nachsehen; nichts da heisst 0
+//   AIO_FOREVER      warten, bis etwas kommt
+// `mindestens` ist `min_complete` von io_uring: erst zurueckkommen,
+// wenn so viele da sind. Damit kostet ein Stapel von sechzehn
+// Auftraegen EINEN Aufruf statt sechzehn.
+fn aio_wait(out: u64, max: u64, timeout_ms: u64, mindestens: u64) -> u64 {
+    return errno.check(kcall.sys4(kcall.AIO_WAIT, out, max, timeout_ms,
+        mindestens))
+}
+
+// Abbrechen ist eine BITTE, kein Befehl: ein Auftrag, der schon laeuft,
+// wird markiert und von seinem Arbeitsfaden gemeldet -- mit
+// -ECANCELED, und genau einmal.
+fn aio_cancel(id: u64) -> u64 {
+    return errno.check(kcall.sys1(kcall.AIO_CANCEL, id))
+}
+
+fn aio_state(id: u64) -> u64 {
+    return errno.check(kcall.sys1(kcall.AIO_STATE, id))
+}
+
+// Die vier Felder einer Fertigmeldung. Firn hat keine Struktur ueber
+// Ring-3-Grenzen hinweg, also ist der Puffer ein Feld aus Oktetten und
+// die Zugriffe darauf stehen hier -- an EINER Stelle, statt in jedem
+// Programm noch einmal.
+fn aio_id(cqe: u64, i: u64) -> u64 {
+    return __mmio_read64((cqe + i * CQE_BYTES) as *mut u64)
+}
+
+fn aio_udata(cqe: u64, i: u64) -> u64 {
+    return __mmio_read64((cqe + i * CQE_BYTES + 8) as *mut u64)
+}
+
+fn aio_result(cqe: u64, i: u64) -> u64 {
+    return __mmio_read64((cqe + i * CQE_BYTES + 16) as *mut u64)
+}
+
+fn aio_op(cqe: u64, i: u64) -> u64 {
+    return __mmio_read64((cqe + i * CQE_BYTES + 24) as *mut u64)
+}
+
+// RUNDE ASYNC: den Zwischenspeicher der Platte auf den Traeger druecken.
+// Es gab ihn bis dahin nicht -- und ohne ihn ist "geschrieben" eine
+// Aussage ueber einen Zwischenspeicher und nicht ueber die Platte.
+fn fsync(fd: u64) -> u64 {
+    return errno.check(kcall.sys1(kcall.SYS_FSYNC, fd))
+}
 
 // -------------------------------------------------------- descriptors
 

@@ -53,7 +53,7 @@
     .set MB_FLAGS, 0x00000007
     .set MB_CHECK, -(MB_MAGIC + MB_FLAGS)
 
-    .set KDATA_SIZE, 0x80000            /* 512 KiB, see kstate.fi (round NETMON) */
+    .set KDATA_SIZE, 0x90000            /* 576 KiB, see kstate.fi (Runde ASYNC) */
 
     .section .multiboot, "a"
     .align 4
