@@ -112,11 +112,20 @@ FAS="$TMPD/fas"
 # auf `main` (3389fbd) mit denselben fuenf Namen und derselben Zahl
 # ("70, erwartet eq 75"), mit einem eigenen Arbeitsbaum nachgemessen.
 # Repariert ist er, indem die Ausnahmeliste sagt, was wahr ist.
+#
+# NACHTRAG AUS k-merge2: DIE LISTE ALLEIN REICHT NICHT. Sie ist eine
+# Aufzaehlung, und jede Runde bringt neue Bibliotheksmodule mit --
+# `bsec`, `bstore`, `chacha`, `msg`, `nv`, `qs` und `sha` sind seither
+# dazugekommen und standen nicht darin; der Binder ist an genau ihnen
+# gescheitert. Darum steht neben der Liste jetzt die REGEL, die sie
+# ueberfluessig macht: gezaehlt wird, was `fn u_start` hat. Die Liste
+# bleibt als Begruendung stehen.
 mkdir -p "$TMPD/s"
 PROGS=""
 for f in kernel/user/*.fi; do
     n=$(basename "$f" .fi)
     case "$n" in appdir|flate|nidx|pw|tools|ulib|wlib|wlibc) continue;; esac
+    grep -q "fn u_start" "$f" || continue
     PROGS="$PROGS $n"
 done
 gebaut=0; nichtgebaut=""
