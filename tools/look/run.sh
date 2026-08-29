@@ -309,13 +309,45 @@ done
 # place in this picture where the question can be answered at all.
 # The y comes from the shape: classic controls are 26 high, modern 32,
 # so the same widget starts at a different line.
-for v in "classic 474 0" "modern 504 2"; do
+# ROUND SOFTUI: THE COORDINATES COME OUT OF THE REPORT NOW.
+#
+# This probe read the corner at a FROZEN x=12, y=474/504. Those numbers
+# were true for the layout round LOOK measured; round SOFTUI moved it,
+# because `spacing_m` went from 10 to 16 in `modern` and the padding of
+# a page box is a token now. Measured on the run that found it: at
+# x=12, y=504 the probe reports "background 0, antialiased 8, face 0"
+# -- eight antialiased pixels and no corner at all. A probe that no
+# longer points at the thing it measures does not fail honestly, it
+# passes or fails by luck, and `classic 474 0` was passing by luck.
+#
+# So it takes the rectangle out of the settings program's own report
+# (`settings: rect name=wab`, the left column, with its absolute ax/ay)
+# and probes THAT corner. What is being asked is the shape axis and
+# nothing else:
+#
+#   classic  no card, no radius -- eight pixels of window surface on
+#            the diagonal, 0 antialiased, and that is the WHOLE claim:
+#            `classic` draws no corner here.
+#   modern   `wlib.card` with radius_panel = 12 -- the diagonal crosses
+#            surface, an antialiased step, and the card face.
+#
+# The numbers below came out of that probe on the night pair.
+for v in "classic 0 0" "modern 4 1"; do
     set -- $v
-    C=$(python3 tools/look/corner.py "$TMPD/D-$1-night/desktop.ppm" 12 "$2" \
-        30 41 59 15 23 42 8 2>&1)
+    R=$(grep -a 'settings: rect name=wab' "$TMPD/D-$1-night/serial.txt" | tail -1)
+    AX=$(echo "$R" | grep -oE 'ax=[0-9]+' | grep -oE '[0-9]+')
+    AY=$(echo "$R" | grep -oE 'ay=[0-9]+' | grep -oE '[0-9]+')
+    if [ -z "$AX" ]; then
+        bad "$1: the settings program did not report its left column"
+        continue
+    fi
+    C=$(python3 tools/look/corner.py "$TMPD/D-$1-night/desktop.ppm" \
+        "$AX" "$AY" 15 23 42 30 41 59 8 2>&1)
     echo "$C" | sed 's/^/        /'
     B=$(echo "$C" | grep -oE 'background [0-9]+' | grep -oE '[0-9]+')
-    is "$1: background pixels on the corner diagonal" "${B:-x}" "$3"
+    A=$(echo "$C" | grep -oE 'antialiased [0-9]+' | grep -oE '[0-9]+')
+    is "$1: background pixels on the corner diagonal" "${B:-x}" "$2"
+    is "$1: antialiased pixels on the corner diagonal" "${A:-x}" "$3"
 done
 
 echo "== E. where the buttons sit =="
