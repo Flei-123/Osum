@@ -496,12 +496,22 @@ klick() { # datei x y
 # laedt, beschaeftigt die Anwendung fuer eine Weile: Datei lesen,
 # dekodieren, sieben Miniaturen bauen. Mit 0,15 s zwischen Tabulator und
 # Leertaste ging die Leertaste verloren -- mit den Zahlen hier nicht.
+# ES GIBT EIN ZEITBUDGET, UND ES IST HART: `wmhold` mit `wiglong` haelt
+# die Maschine ZWANZIG SEKUNDEN still (kmain, `sek = 20`), danach faehrt
+# der Kern herunter. Alles, was ein Foto braucht -- Tabulatoren, Tasten,
+# Wartezeiten, die 0,6 s von monitor.py und das Bildschirmfoto selbst --
+# muss in diese zwanzig Sekunden passen. Ein Skript von 20,9 s (sechsmal
+# weiter mit je 3 s) lief in dieser Runde genau EINEN Schritt zu lang:
+# QEMU war weg, bevor `screendump` verbunden war, und der Abschnitt fiel
+# mit "kein Monitor an ..." durch. Deshalb sind die Zahlen hier klein --
+# und sie duerfen es sein, weil die Anwendung seit dem Miniaturen-Cache
+# fuer einen Schritt weiter rund 50 ms braucht und nicht 2 s.
 fokus() { # datei anzahl-tabs
     local f=$1 n=$2 i
-    printf 'warte 1.5\n' >> "$f"
-    i=0
-    while [ "$i" -lt "$n" ]; do printf 'sendkey tab\nwarte 0.4\n' >> "$f"; i=$((i+1)); done
     printf 'warte 1.0\n' >> "$f"
+    i=0
+    while [ "$i" -lt "$n" ]; do printf 'sendkey tab\nwarte 0.35\n' >> "$f"; i=$((i+1)); done
+    printf 'warte 0.6\n' >> "$f"
 }
 # DIE LEERTASTE UND NICHT DIE EINGABETASTE. `wlib.on_key` loest einen
 # Knopf bei `KEY_ENTER` (13) ODER bei 32 aus -- und die Eingabetaste
@@ -510,10 +520,10 @@ fokus() { # datei anzahl-tabs
 # aufgeschrieben in docs/ROUNDVIEWER.md. Die Leertaste geht.
 druecken() { # datei [wiederholungen]
     local f=$1 n=${2:-1} i=0
-    while [ "$i" -lt "$n" ]; do printf 'sendkey spc\nwarte 3.0\n' >> "$f"; i=$((i+1)); done
+    while [ "$i" -lt "$n" ]; do printf 'sendkey spc\nwarte 1.5\n' >> "$f"; i=$((i+1)); done
 }
 taste() { # datei taste
-    printf 'sendkey %s\nwarte 3.0\n' "$2" >> "$1"
+    printf 'sendkey %s\nwarte 1.5\n' "$2" >> "$1"
 }
 vfeld() { grep -a "^viewer: an=" "$1" | tail -1 | grep -oE "$2=[0-9]+" | head -1 | cut -d= -f2; }
 # Die Mitte eines Bedienelements IN BILDSCHIRMKOORDINATEN. Die
@@ -616,9 +626,15 @@ num "und es wird gedreht angezeigt: aus 40 breit wird 24" "${eb:-0}" eq 24
 num "und aus 24 hoch wird 40" "${eh:-0}" eq 40
 
 # ---- 8f. das grosse Bild: 12 MP im Fenster, ohne dass etwas stirbt.
+# EIN TASTENDRUCK UND NICHT SECHS, und der Grund ist das Zeitbudget:
+# `wmhold` haelt zwanzig Sekunden, sechsmal weiterblaettern und danach
+# ein 12-MP-Bild dekodieren passt da nicht hinein. `b` blaettert
+# ZURUECK, und zurueck vom ersten Bild ist das LETZTE -- also genau
+# g-gross.jpg. Danach bleibt Zeit fuer die 2,3 s Dekodierung.
 M="$TMPD/gross.mon"; : > "$M"
-fokus "$M" 1
-druecken "$M" 6
+printf 'warte 1.0\n' >> "$M"
+taste "$M" "b"
+printf 'warte 6.0\n' >> "$M"
 foto gross "$M"
 gb=$(vfeld "$TMPD/gross.txt" br); gh=$(vfeld "$TMPD/gross.txt" ho)
 gv=$(vfeld "$TMPD/gross.txt" voll)
