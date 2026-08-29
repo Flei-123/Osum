@@ -220,7 +220,14 @@ gleich "die kdata-Seite des Akkus" "0x59000" "$batoff"
 # kdata musste wachsen, weil der Vorrat dieser Runde hinter der alten
 # Grenze liegt -- und die Zahl steht ZWEIMAL. Beide muessen gleich sein.
 kd_fi=$(grep -aE '^const KDATA_SIZE' kernel/kstate.fi | sed 's/.*= //')
-kd_s=$(grep -aE '\.set KDATA_SIZE' kernel/arch/x86_64/boot.s | sed -E 's/.*KDATA_SIZE, *([0-9a-fx]+).*/\1/')
+# RUNDE MERGE-2: die Zeichenklasse war [0-9a-fx] -- KLEINBUCHSTABEN.
+# Solange KDATA_SIZE 0x80000 war, fiel das nicht auf: darin steht
+# kein Buchstabe. Diese Runde hat den Bereich auf 0xA0000 vergroessert,
+# und ab da schnitt das Muster nach '0x' ab -- die Zusage meldete
+# "soll '0xA0000', ist '0x'" und beschuldigte damit boot.s einer
+# Abweichung, die es nicht gab (tools/hv/run.sh liest dieselben zwei
+# Zahlen mit [0-9A-Fa-f] und war gruen). Jetzt beide Schreibweisen.
+kd_s=$(grep -aE '\.set KDATA_SIZE' kernel/arch/x86_64/boot.s | sed -E 's/.*KDATA_SIZE, *(0[xX][0-9A-Fa-f]+|[0-9]+).*/\1/')
 gleich "KDATA_SIZE in kstate.fi und boot.s ist dieselbe Zahl" "$kd_fi" "$kd_s"
 if [ "$(hexdez "${kd_fi:-0}")" -ge "$(hexdez 0x60000)" ]; then
     ok "kdata reicht ueber den Vorrat dieser Runde hinaus: $kd_fi"

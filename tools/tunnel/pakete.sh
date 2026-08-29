@@ -139,7 +139,17 @@ python3 "$OPK" bauen "$TMPD/bleibt.rezept" -o "$TMPD/pak/bleibt.opk" >/dev/null 
 python3 "$OPK" installieren "$TMPD/pak/bleibt.opk" --wurzel "$WURZEL" >/dev/null 2>&1 \
     && ok "ein drittes Paket 'bleibt' ist installiert und bleibt es" \
     || note "das dritte Paket liess sich nicht installieren"
-BLEIBT_HASH=$(sha256sum "$WURZEL/apps/bleibt.osp/start" 2>/dev/null | cut -c1-16)
+# RUNDE MERGE-2: DIE ENDUNG DES ANWENDUNGSORDNERS WIRD GEFRAGT, NICHT
+# GERATEN. Hier stand `.osp` an vier Stellen fest im Text. Der
+# Paketierer liegt ausserhalb dieses Baums ($OPK) und nennt den Ordner
+# seit seiner Umbenennung von `opkg` auf `opk` `.prog`; drei Zusagen
+# waren rot, obwohl "vpn installiert" und "proxy installiert" gruen
+# meldeten -- der Test suchte nur an der falschen Stelle. Der Wert steht
+# im Werkzeug an genau einer Zeile, und von dort wird er geholt.
+APPSUF=$(grep -oE 'name \+ "\.[a-z]+"' "$OPK" 2>/dev/null \
+         | head -1 | grep -oE '\.[a-z]+')
+APPSUF=${APPSUF:-.prog}
+BLEIBT_HASH=$(sha256sum "$WURZEL/apps/bleibt$APPSUF/start" 2>/dev/null | cut -c1-16)
 
 aufnehmen "$WURZEL" > "$TMPD/vorher.txt"
 N_VORHER=$(wc -l < "$TMPD/vorher.txt")
@@ -154,10 +164,10 @@ for prog in vpn proxy; do
 done
 
 for prog in vpn proxy; do
-    if [ -f "$WURZEL/apps/$prog.osp/start" ]; then
-        ok "/apps/$prog.osp/start liegt da"
+    if [ -f "$WURZEL/apps/$prog$APPSUF/start" ]; then
+        ok "/apps/$prog$APPSUF/start liegt da"
     else
-        bad "/apps/$prog.osp/start fehlt nach der Installation"
+        bad "/apps/$prog$APPSUF/start fehlt nach der Installation"
     fi
 done
 N_NACH_INST=$(aufnehmen "$WURZEL" | wc -l)
@@ -247,7 +257,7 @@ note "     mit --behalte-daten laesst opk alle drei stehen, auch die leeren -- e
 note "     Verzeichnis ist der Preis dafuer, dass ein volles nicht aus Versehen verschwindet"
 
 # ------------------- 6c. das dritte Paket ist unberuehrt geblieben
-NEU=$(sha256sum "$WURZEL/apps/bleibt.osp/start" 2>/dev/null | cut -c1-16)
+NEU=$(sha256sum "$WURZEL/apps/bleibt$APPSUF/start" 2>/dev/null | cut -c1-16)
 if [ -n "$BLEIBT_HASH" ] && [ "$NEU" = "$BLEIBT_HASH" ]; then
     ok "das Paket 'bleibt' ist Oktett fuer Oktett unberuehrt ($NEU)"
 else
