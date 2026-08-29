@@ -1009,18 +1009,31 @@ lauf "29. die Platte, die ein echter PC hat: AHCI/SATA ueber DMA (tools/ahci/run
      tools/ahci/run.sh ahci '^AHCI: |^  --    Beschleuniger|^  OK    (die Speicherkarte|1\.[2-7]|2\.|3\.|4\.|5\.[2-4]|6\.[2-3]|7\.[2-9]|7\.10|8\.[2-5])'
 
 
+# ABSCHNITT 30 -- RUNDE SERVERBUILD. Er ist der letzte ANGEMELDETE, weil
+# er als einziger Abschnitt dieser Abnahme das Abbild ZWEIMAL baut (mit
+# und ohne Bildschirm) und danach viermal bootet. Was er misst, ist die
+# Zusage der Runde: der GUI-Bau bleibt Zeile fuer Zeile derselbe, und
+# daneben entsteht ein zweiter, der 26 Prozent kleiner ist und auf
+# einer seriellen Leitung bis zur Shell kommt.
+#
+# RUNDE MERGE-2: ER STAND HINTER `abschnitte_abarbeiten` UND LIEF DAMIT
+# NIE. Auf dem Zweig serverbuild gab es den Verteiler noch nicht -- dort
+# fuehrte `lauf` jeden Abschnitt sofort aus, und "ans Ende haengen" hiess
+# "zuletzt laufen". Seit Runde TESTFAST MELDET `lauf` bei OSUM_JOBS > 1
+# nur noch AN; ausgefuehrt wird in `abschnitte_abarbeiten`. Wer danach
+# anmeldet, meldet ins Leere: der Abschnitt erschien in keiner Ausgabe,
+# und die Abnahme meldete trotzdem "alles bestanden". Aufgefallen beim
+# Nachmessen -- OSUM_NUR='^server$' liess 42 von 43 Abschnitten weg und
+# fuehrte danach KEINEN aus. Bei OSUM_JOBS=1 lief er die ganze Zeit.
+# Er steht jetzt VOR dem Verteiler und bleibt der letzte in der Liste;
+# an der Ausgabereihenfolge aendert sich dadurch nichts.
+lauf "30. Osum als Server: ohne Grafik gebaut, auf der seriellen Leitung bedient (tools/server/run.sh, Runde SERVERBUILD)" \
+     tools/server/run.sh server '^SERVER: |^        (gui=|Symbole der|srvbench: )|^  OK    (das Serverabbild|im Serverabbild|die Naht selbst|kein Modul|die Shell antwortet|Rueckschritt und|GEGENPROBE|und der Zaehler|im Regellauf|empfangene|kein Oktett|STRG-U)'
+
 # Hier laufen die angemeldeten Abschnitte -- bei OSUM_JOBS=1 sind sie
 # oben schon gelaufen und das hier tut nichts.
 abschnitte_abarbeiten
 
-# ABSCHNITT 30 -- RUNDE SERVERBUILD. Er steht am Ende, weil er als
-# einziger Abschnitt dieser Abnahme das Abbild ZWEIMAL baut (mit und
-# ohne Bildschirm) und danach viermal bootet. Was er misst, ist die
-# Zusage der Runde: der GUI-Bau bleibt Zeile fuer Zeile derselbe, und
-# daneben entsteht ein zweiter, der 26 Prozent kleiner ist und auf
-# einer seriellen Leitung bis zur Shell kommt.
-lauf "30. Osum als Server: ohne Grafik gebaut, auf der seriellen Leitung bedient (tools/server/run.sh, Runde SERVERBUILD)" \
-     tools/server/run.sh server '^SERVER: |^        (gui=|Symbole der|srvbench: )|^  OK    (das Serverabbild|im Serverabbild|die Naht selbst|kein Modul|die Shell antwortet|Rueckschritt und|GEGENPROBE|und der Zaehler|im Regellauf|empfangene|kein Oktett|STRG-U)'
 
 
 echo
