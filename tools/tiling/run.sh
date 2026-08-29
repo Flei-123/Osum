@@ -57,6 +57,7 @@
 # Verwendung:  bash tools/tiling/run.sh
 set -uo pipefail
 cd "$(dirname "$0")/../.."
+. tools/lib/qemu.sh          # $QEMU_X86, $OSUM_QEMU_ACCEL
 ROOT=$(pwd)
 
 export FIRNLIB="$ROOT/lib"
@@ -102,7 +103,7 @@ GRUND="nokbd nosched noproc nofs"
 lauf() { # abbild kommandozeile ausgabe abbilddatei
     local abbild=$1 zeile=$2 aus=$3 disk=$4
     cp -f "$disk" "$TMPD/live.img"
-    timeout 300 qemu-system-x86_64 -kernel "$abbild" -m 256 -append "$zeile" \
+    timeout 300 $QEMU_X86 -kernel "$abbild" -m 256 -append "$zeile" \
         -serial "file:$aus" -display none -no-reboot -vga std \
         -drive "file=$TMPD/live.img,format=raw,if=ide,index=0" \
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1
@@ -116,7 +117,7 @@ foto() { # abbild kommandozeile ausgabe ppm abbilddatei
     local live="$TMPD/live-$(basename "$aus").img"
     rm -f "$aus" "$ppm" "$sock"
     cp -f "$disk" "$live"
-    timeout 300 qemu-system-x86_64 -kernel "$abbild" -m 256 -append "$zeile" \
+    timeout 300 $QEMU_X86 -kernel "$abbild" -m 256 -append "$zeile" \
         -serial "file:$aus" -display none -no-reboot -vga std \
         -monitor "unix:$sock,server,nowait" \
         -drive "file=$live,format=raw,if=ide,index=0" \

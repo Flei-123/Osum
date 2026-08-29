@@ -48,6 +48,7 @@
 # Benutzung:  bash tools/ofs3/run.sh
 set -uo pipefail
 cd "$(dirname "$0")/../.."
+. tools/lib/qemu.sh          # $QEMU_X86, $OSUM_QEMU_ACCEL
 
 export FIRNLIB="$(pwd)/lib"
 FIRNC=${FIRNC:-vendor/firn/bin/firnc}
@@ -85,7 +86,7 @@ fi
 run_disk() { # kernel append out disk
     local image=$1 append=$2 out=$3 disk=$4
     cp --sparse=always "$disk" "$TMPD/live.img"
-    timeout 600 qemu-system-x86_64 -kernel "$image" -m 512 -append "$append" \
+    timeout 600 $QEMU_X86 -kernel "$image" -m 512 -append "$append" \
         -serial "file:$out" -display none -no-reboot \
         -drive "file=$TMPD/live.img,format=raw,if=ide,index=0" \
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1
@@ -98,7 +99,7 @@ run_disk() { # kernel append out disk
 # nach einem Neustart noch da" zu messen: der zweite Lauf bekommt genau
 # die Oktette, die der erste hinterlassen hat.
 run_again() { # kernel append out
-    timeout 600 qemu-system-x86_64 -kernel "$1" -m 512 -append "$2" \
+    timeout 600 $QEMU_X86 -kernel "$1" -m 512 -append "$2" \
         -serial "file:$3" -display none -no-reboot \
         -drive "file=$TMPD/live.img,format=raw,if=ide,index=0" \
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1

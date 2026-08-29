@@ -44,6 +44,7 @@
 # Verwendung:  bash tools/speicher/run.sh [ausgabeverzeichnis]
 set -uo pipefail
 cd "$(dirname "$0")/../.."
+. tools/lib/qemu.sh          # $QEMU_X86, $OSUM_QEMU_ACCEL
 ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
 TMPD=${1:-$(mktemp -d)}
@@ -89,7 +90,7 @@ bash tools/speicher/build.sh "$TMPD" || exit 1
 lauf() { # name kommandozeile [abbild] [frist]
     local name=$1 zeile=$2 img=${3:-inhalt.img} frist=${4:-3000}
     cp -f "$TMPD/$img" "$TMPD/live-$name.img"
-    timeout "$frist" qemu-system-x86_64 -kernel "$TMPD/k.mb" -m 256 \
+    timeout "$frist" $QEMU_X86 -kernel "$TMPD/k.mb" -m 256 \
         -append "osum nokbd nosched noproc nofs noring3 script=$zeile;exit" \
         -serial "file:$TMPD/$name.txt" -display none -no-reboot \
         -drive "file=$TMPD/live-$name.img,format=raw,if=ide,index=0" \
@@ -106,7 +107,7 @@ foto() { # name kommandozeile [marke]
     local aus="$TMPD/$name.txt" ppm="$TMPD/$name.ppm"
     rm -f "$aus" "$ppm" "$sock"
     cp -f "$TMPD/inhalt.img" "$TMPD/live-$name.img"
-    timeout 900 qemu-system-x86_64 -kernel "$TMPD/k.mb" -m 256 \
+    timeout 900 $QEMU_X86 -kernel "$TMPD/k.mb" -m 256 \
         -append "$zeile" -serial "file:$aus" -display none -no-reboot \
         -vga std -monitor "unix:$sock,server,nowait" \
         -drive "file=$TMPD/live-$name.img,format=raw,if=ide,index=0" \
