@@ -203,6 +203,14 @@ BEREICHE = [
     ("HREQ",       "kstate.fi", "HREQ_OFF",       "HREQ_MAX"),
     ("HNON",       "kstate.fi", "HNON_OFF",       "HNON_MAX"),
     ("HCNT",       "kstate.fi", "HCNT_OFF",       "HCNT_MAX"),
+    # RUNDE ASYNC: die asynchrone Auftragsschicht.  Drei Bereiche HINTER
+    # der alten Grenze 0x80000 -- deshalb waechst KDATA_SIZE in
+    # kstate.fi UND in kernel/arch/x86_64/boot.s auf 0x90000, und
+    # tools/hv/run.sh haelt beide Zahlen gegeneinander.
+    ("AIO",        "kstate.fi", "AIO_OFF",        "AIO_MAX"),
+    ("ACQ",        "kstate.fi", "ACQ_OFF",        "ACQ_MAX"),
+    ("ASC",        "kstate.fi", "ASC_OFF",        "ASC_MAX"),
+    ("APATH",      "kstate.fi", "APATH_OFF",      "APATH_MAX"),
     # RUNDE TRESOR: die Geraeteidentitaet, zwei Seiten (0x5A000..0x5C000).
     # Die erste traegt die Merkmale, die zweite ist das DMA-Ziel des
     # `identify controller` von NVMe -- und deshalb MUSS sie eine eigene,
