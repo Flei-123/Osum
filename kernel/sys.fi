@@ -50,6 +50,7 @@ import errno
 import file
 import uio
 import cap
+import handle
 import arch.x86_64.hv
 import arch.x86_64.guard
 import wm
@@ -392,6 +393,41 @@ const CAP_INSPECT: u64 = 2005 // (h, aus) -> 0, braucht R_INSPECT
 const CAP_TRANSFER: u64 = 2006 // (h, maske, pid) -> Handle, braucht R_TRANSFER
 const CAP_COUNT: u64 = 2007 // () -> belegte Plaetze der eigenen Tabelle
 const CAP_MAXNR: u64 = 2007
+
+// ------------------------------------------------- RUNDE HANDLE: 2200
+//
+// DIE HANDLE-SCHICHT VON AUSSEN. Elf Aufrufe, und sie sind nicht dazu
+// da, dass ein gewoehnliches Programm sie benutzt -- der Deskriptorpfad
+// von POSIX laeuft seit dieser Runde von SELBST ueber Handles, ohne dass
+// ein Programm etwas davon merkt. Sie sind dazu da, dass die Zusagen
+// dieser Runde AUS RING 3 nachpruefbar sind, und dafuer, dass der Ring
+// (Runde RING) sie spaeter als seine Einreich- und Abbruchschnittstelle
+// benutzen kann.
+//
+// Der Sockel ist 2200 und nicht 2114: der Fensterserver hat ab 2100
+// einen eigenen Block, und `native` verteilt nach GROESSER-GLEICH. Wer
+// eine Nummer dazwischen nimmt, landet beim Fensterserver.
+//
+// HND_OBJINFO ist AUSDRUECKLICH nur im Selbsttestmodus (`handle` auf der
+// Kommandozeile) da. Es gibt Innenzahlen des Kernels heraus -- wie viele
+// Verweise ein Objekt hat, ob ein Eintrag der offenen Dateien noch lebt
+// --, und das ist kein Wissen, das ein Programm im Regelbetrieb haben
+// soll. Ohne das Wort gibt es -E_UNSUPPORTED. Ein Testfenster, das im
+// Regelbetrieb offen bleibt, ist eine Hintertuer.
+const HND_BASE: u64 = 2200
+const HND_VERSION: u64 = 2200 // () -> Fassung dieser Schnittstelle
+const HND_FDH: u64 = 2201 // (fd) -> das Handle hinter einem Deskriptor
+const HND_RIGHTS: u64 = 2202 // (fd) -> dessen Rechte
+const HND_BEGIN: u64 = 2203 // (h, rechte) -> Abbruch-Token
+const HND_OBJECT: u64 = 2204 // (token) -> Objektnummer, oder -E_STALE
+const HND_CANCEL: u64 = 2205 // (token) -> 0
+const HND_END: u64 = 2206 // (token) -> 1 = dabei abgeraeumt
+const HND_STATE: u64 = 2207 // (token) -> Zustand des Auftrags
+const HND_DUP: u64 = 2208 // (fd, maske) -> Deskriptor mit WENIGER Rechten
+const HND_PASS: u64 = 2209 // (pid, fd, maske, zielfd) -> Deskriptor im Kind
+const HND_COUNT: u64 = 2210 // () -> belegte Handle-Plaetze
+const HND_OBJINFO: u64 = 2211 // (was, arg) -> Innenzahl, nur mit `handle`
+const HND_MAXNR: u64 = 2211
 
 // ---------------------------------------------------- Runde K10: Fenster
 //
@@ -2349,7 +2385,18 @@ fn do_write(state: u64, me: u64, fd: u64, buf: u64, want: u64) -> u64 {
     if !proc.user_ok(state, me, buf, len) {
         return neg(errno.E_FAULT)
     }
-    let of: u64 = of_of(state, me, fd)
+    // RUNDE HANDLE, TIEFENSTAFFELUNG, UND IN EINEM AUFRUF. Die
+    // uid/gid-Frage hat `perm.may` beim OEFFNEN beantwortet und bleibt,
+    // wo sie ist. Diese hier wird bei JEDEM Schreibzugriff gestellt und
+    // fragt etwas anderes: traegt das HANDLE das Schreibrecht? Ein
+    // weitergegebenes und dabei beschnittenes Handle faellt hier durch,
+    // obwohl der Benutzer die Datei duerfte. POSIX hat dafuer nur
+    // -EBADF, also gibt es -EBADF.
+    //
+    // `fd_check` und nicht `of_of` + `fd_may`: das waere die ganze
+    // Aufloesung zweimal, und das ist gemessen der Unterschied zwischen
+    // 109 und 296 Zyklen Aufschlag je Systemaufruf.
+    let of: u64 = file.fd_check(state, me, fd, handle.R_WRITE)
     if of >= file.MAX_OPEN {
         return neg(errno.E_BADF)
     }
@@ -2439,7 +2486,9 @@ fn do_read(state: u64, me: u64, fd: u64, buf: u64, want: u64) -> u64 {
     if !proc.user_ok(state, me, buf, len) {
         return neg(errno.E_FAULT)
     }
-    let of: u64 = of_of(state, me, fd)
+    // Dieselbe zweite Frage wie in `do_write`, fuer die Leseseite --
+    // und in demselben einen Aufruf.
+    let of: u64 = file.fd_check(state, me, fd, handle.R_READ)
     if of >= file.MAX_OPEN {
         return neg(errno.E_BADF)
     }
@@ -3337,7 +3386,11 @@ fn do_dup2(state: u64, me: u64, from: u64, to: u64) -> u64 {
 }
 
 fn do_lseek(state: u64, me: u64, fd: u64, off: u64, whence: u64) -> u64 {
-    let of: u64 = of_of(state, me, fd)
+    // RUNDE HANDLE: die Position verstellen ist ein EIGENES Recht. Ein
+    // Handle, das nur schreiben darf, darf nicht auch springen -- sonst
+    // ist "darf ans Ende anhaengen" nicht von "darf ueberall
+    // hinschreiben" zu unterscheiden.
+    let of: u64 = file.fd_check(state, me, fd, handle.R_SEEK)
     if of >= file.MAX_OPEN {
         return neg(errno.E_BADF)
     }
@@ -6339,12 +6392,170 @@ fn grant_console(state: u64, task: u64, rights: u64) -> u64 {
 
 // Die Weiche. `number` ist >= CAP_BASE; `number - CAP_BASE` ist die
 // Nummer INNERHALB der nativen ABI -- dieselbe wie in OrientOS.
+// ===================================================== RUNDE HANDLE
+//
+// Die elf Aufrufe des Blocks ab 2200. Fehler kommen in der Zaehlung der
+// nativen ABI zurueck (`handle.err`, negativ) und nicht in der von
+// POSIX -- zwei ABIs, zwei Listen, eine gemeinsame waere eine Luege
+// ueber beide.
+fn handle_call(state: u64, me: u64, number: u64, a0: u64, a1: u64,
+    a2: u64, a3: u64) -> u64 {
+    if number > HND_MAXNR {
+        return handle.err(handle.E_INVALID)
+    }
+    if number == HND_VERSION {
+        return 1
+    }
+    if number == HND_COUNT {
+        return handle.used(state, me)
+    }
+    if number == HND_FDH {
+        return file.fd_handle(state, me, a0)
+    }
+    if number == HND_RIGHTS {
+        if file.fd_handle(state, me, a0) == handle.HANDLE_NONE {
+            return handle.err(handle.E_BADHANDLE)
+        }
+        return file.fd_rights(state, me, a0)
+    }
+    if number == HND_BEGIN {
+        return handle.req_begin(state, me, a0, a1 & handle.R_ALL)
+    }
+    if number == HND_OBJECT {
+        // Nur der EIGENTUEMER darf seinen Auftrag befragen. Ein Token
+        // ist eine kleine Zahl mit Generation, aber es traegt keinen
+        // Wuerfelwert je Prozess -- die Auftragstafel ist eine fuer das
+        // ganze System, und die Eigentuemerfrage ist hier die Sperre.
+        if handle.req_owner(state, a0) != me {
+            return handle.err(handle.E_BADHANDLE)
+        }
+        return handle.req_object(state, a0)
+    }
+    if number == HND_STATE {
+        if handle.req_owner(state, a0) != me {
+            return handle.err(handle.E_BADHANDLE)
+        }
+        return handle.req_state(state, a0)
+    }
+    if number == HND_CANCEL {
+        if !handle.req_cancel(state, me, a0) {
+            return handle.err(handle.E_BADHANDLE)
+        }
+        return 0
+    }
+    if number == HND_END {
+        if handle.req_owner(state, a0) != me {
+            return handle.err(handle.E_BADHANDLE)
+        }
+        // DIE AUFGESCHOBENE FREIGABE. `req_end` sagt mit der
+        // Objektnummer, dass mit diesem Auftrag der letzte Verweis
+        // gefallen ist; dann -- und nur dann -- wird der Eintrag der
+        // offenen Dateien wirklich abgeraeumt. Das ist die Stelle, an
+        // der ein `close` waehrend eines Auftrags nachgeholt wird.
+        let weg: u64 = handle.req_end(state, a0)
+        if weg == 0 {
+            return 0
+        }
+        file.open_settle(state, weg - 1)
+        return 1
+    }
+    if number == HND_DUP {
+        // Vervielfaeltigen mit BESCHNITTENEN Rechten, in einen zweiten
+        // Deskriptor. Die Maske kann nur wegnehmen: `handle.give` an
+        // sich selbst schneidet sie mit dem, was das Original hat.
+        let of: u64 = of_of(state, me, a0)
+        if of >= file.MAX_OPEN {
+            return handle.err(handle.E_BADHANDLE)
+        }
+        let nfd: u64 = file.fd_alloc(state, me, 0)
+        if nfd >= file.MAX_FD {
+            return handle.err(handle.E_EXHAUSTED)
+        }
+        let got: u64 = file.fd_pass(state, me, me, a0, a1, nfd)
+        if got >= file.MAX_FD {
+            return handle.err(handle.E_RIGHTS)
+        }
+        return got
+    }
+    if number == HND_PASS {
+        let ziel: u64 = sched.find_pid(state, a0)
+        if ziel >= kstate.MAX_TASKS {
+            return handle.err(handle.E_NOTFOUND)
+        }
+        let got: u64 = file.fd_pass(state, me, ziel, a1, a2, a3)
+        if got >= file.MAX_FD {
+            return handle.err(handle.E_RIGHTS)
+        }
+        return got
+    }
+    if number == HND_OBJINFO {
+        if !kstate.mode_on(state, kstate.M_HANDLE) {
+            return handle.err(handle.E_UNSUPPORTED_HND)
+        }
+        return objinfo(state, me, a0, a1)
+    }
+    return handle.err(handle.E_INVALID)
+}
+
+// Die Innenzahlen, die der Selbsttest braucht, um seine eigenen Zusagen
+// nachzuweisen. Ohne sie koennte ein Programm in Ring 3 zwar sagen "das
+// hat nicht geklappt", aber nicht "das Objekt lebt noch" -- und genau
+// das ist die Zusage dieser Runde.
+fn objinfo(state: u64, me: u64, was: u64, arg: u64) -> u64 {
+    if was == 0 {
+        return handle.objects_used(state)
+    }
+    if was == 1 {
+        return handle.obj_refs(state, arg)
+    }
+    if was == 2 {
+        return handle.obj_flight(state, arg)
+    }
+    if was == 3 {
+        if handle.obj_live(state, arg) {
+            return 1
+        }
+        return 0
+    }
+    if was == 4 {
+        return handle.req_live(state)
+    }
+    if was == 5 {
+        return handle.obj_gen(state, arg)
+    }
+    // 6: LEBT DER EINTRAG DER OFFENEN DATEIEN NOCH? Das ist die Zahl,
+    // an der "kein Free waehrend in Flug" haengt.
+    if was == 6 {
+        if file.open_kind(state, arg) == file.K_FREE {
+            return 0
+        }
+        return 1
+    }
+    if was == 7 {
+        return file.open_refs(state, arg)
+    }
+    // 8: der Eintrag der offenen Dateien hinter einem DESKRIPTOR.
+    if was == 8 {
+        return of_of(state, me, arg)
+    }
+    if was == 9 {
+        return handle.inflight_on(state, handle.OK_FILE, arg)
+    }
+    return handle.err(handle.E_INVALID)
+}
+
 fn native(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64,
     a3: u64, a4: u64) -> u64 {
     // RUNDE K10: der Fensterserver hat seinen eigenen Block ab 2100. Er
     // liegt in DIESER ABI und nicht bei den POSIX-Nummern, weil ein
     // Fenster ein HANDLE ist und kein Deskriptor: es wird nicht geerbt,
     // es hat Rechte, und wer es nicht bekommen hat, hat kein Fenster.
+    // RUNDE HANDLE zuerst: ihr Block liegt UEBER dem des Fensterservers,
+    // und `native` verteilt nach groesser-gleich. Andersherum landete
+    // 2203 beim Fensterserver.
+    if number >= HND_BASE {
+        return handle_call(state, me, number, a0, a1, a2, a3)
+    }
     if number >= WM_BASE {
         return wm_call(state, me, number, a0, a1, a2, a3, a4)
     }
