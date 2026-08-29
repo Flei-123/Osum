@@ -53,6 +53,19 @@
 #      Ring 3, das achtzehn Zusagen darueber meldet, was es darf und was
 #      nicht. Gegenprobe: ohne das Wort `caps` gibt es nichts davon, und
 #      der uebrige Kernel verhaelt sich Zeile fuer Zeile wie vorher.
+#  10b. Die Lebensdauer, bevor es Asynchronitaet gibt (tools/handle/run.sh,
+#      Runde HANDLE): eine Objekttafel mit Verweiszaehler, Handle-Plaetze
+#      je Prozess mit Generation und Wuerfelwert, und ein Abbruch-Token
+#      je laufendem Auftrag (`kernel/handle.fi`). Der Deskriptorpfad von
+#      POSIX laeuft seit dieser Runde darueber -- `read`, `write` und
+#      `lseek` pruefen ZUSAETZLICH zur uid/gid-Frage das Recht des
+#      Handles. Fuenfunddreissig Zusagen aus Ring 3 und vier
+#      Gegenproben: ohne Generationsvergleich (`nogen`) trifft ein alter
+#      Auftrag das NEUE Objekt, ohne den Mitzaehler (`noflight`) wird
+#      waehrend des Auftrags freigegeben. Das ist die Fehlerklasse, aus
+#      der 2023 laut Google rund 60 % der eingereichten
+#      Linux-Kernel-Exploits kamen; sie wird hier gebaut, BEVOR es einen
+#      Ring gibt. Kosten gemessen: `lseek` 388 -> 506 Zyklen.
 #  11. Der Multiboot-Kopf und der UEFI-Pfad (tools/boot/run.sh): Bit 2
 #      der Flags verlangt einen linearen Rahmenpuffer. Ohne das bricht
 #      jeder Multiboot-Lader unter UEFI mit "Cannot use text mode with
@@ -828,6 +841,9 @@ lauf "9. ein Userland: eine Shell, 25 Werkzeuge, Roehren und Umlenkung (tools/us
 
 lauf "10. Handles statt Umgebungsautoritaet: die Capability-Schicht aus OrientOS (tools/caps/run.sh)" \
      tools/caps/run.sh caps '^CAPS: |^        \(\.utext'
+
+lauf "10b. die Lebensdauer vor der Asynchronitaet: Handles mit Verweiszaehler, Generation und Abbruch-Token (tools/handle/run.sh, Runde HANDLE)" \
+     tools/handle/run.sh handle '^HANDLE: |^  ZAHL '
 
 lauf "11. der Multiboot-Kopf verlangt einen Bildschirm -- der UEFI-Pfad (tools/boot/run.sh)" \
      tools/boot/run.sh boot '^BOOT: '
