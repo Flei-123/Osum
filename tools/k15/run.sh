@@ -590,9 +590,9 @@ UIFG=$(python3 tools/theme/model.py semantic assets/schemes/day.scheme dark \
     | awk '$2 == "text-primary" {print $3}')
 UIFG=$((16#$UIFG))
 i=0
-for punkt in Oeffnen Umbenennen Entfernen; do
+for punkt in Öffnen Umbenennen Entfernen; do
     # TOLERANZ 96, UND HIER STEHT DIE GEMESSENE ZAHL DAZU. Wo sich zwei
-    # Glyphenkaesten ueberlappen -- "ff" in "Oeffnen" --, mischt die
+    # Glyphenkaesten ueberlappen -- "ff" in "Öffnen" --, mischt die
     # Bibliothek (und `wm.text` genauso) Zeichen AUF Zeichen, waehrend
     # der Referenzrasterer jedes auf den reinen Grund mischt. Gemessen
     # an dieser Zeile: bei Toleranz 0 sind 4 von 345 Tintenpunkten
@@ -611,7 +611,7 @@ schau "der Rahmen des Menuefensters liegt bildpunktgenau" \
     $((MNH + TITLE + BORDER)) 76 154 232
 schau_nicht "ohne rechte Taste gibt es das Menue NICHT" \
     ttext "$TMPD/ruhe.ppm" "$SANS" 15 $((MNX + BORDER + 8)) \
-    $((MNY + TITLE + 15)) $(rgb "$UIFG") $(rgb "$MENUBG") "Oeffnen" 96
+    $((MNY + TITLE + 15)) $(rgb "$UIFG") $(rgb "$MENUBG") "Öffnen" 96
 schau_nicht "und ein anderes Wort steht auch bei Toleranz 64 nicht dort" \
     ttext "$TMPD/pop.ppm" "$SANS" 15 $((MNX + BORDER + 8)) \
     $((MNY + TITLE + 15)) $(rgb "$UIFG") $(rgb "$MENUBG") "Schuetzen" 128
@@ -635,7 +635,7 @@ mn=$(feld "$TMPD/popw.txt" "widgetdemo: state" menues)
 num "und das Menue hat genau EINMAL gefeuert" "$mn" ge 1
 schau_nicht "danach ist das Menuefenster wieder weg" \
     ttext "$TMPD/popw.ppm" "$SANS" 15 $((MNX + BORDER + 8)) \
-    $((MNY + TITLE + 15)) $(rgb "$UIFG") $(rgb "$MENUBG") "Oeffnen" 96
+    $((MNY + TITLE + 15)) $(rgb "$UIFG") $(rgb "$MENUBG") "Öffnen" 96
 
 # Der Dialog: der Knopf "Loeschen" macht ihn auf.
 DEL=$(mitte 9)
@@ -1099,7 +1099,7 @@ schau "die erste Zeile des Starters, je Zeichen" \
     $SSFG $SSEL "Datei-Explorer  --  Dateien und Ordner ansehen" 96
 schau "und die zweite" \
     ttext "$TMPD/start.ppm" "$SANS" 15 $((SCX + SRX)) $((SCY + SRB + SZH)) \
-    $SFG $SBG "Editor  --  Text schreiben und aendern" 96
+    $SFG $SBG "Editor  --  Text schreiben und ändern" 96
 # DAS SYMBOL IST EINE DATEI. Im ersten Nachtrag war es sechs Hexziffern
 # in einer Textdatei -- ehrlich, solange dieses System kein Bild lesen
 # konnte, aber eben kein Bild. Seit dem zweiten liegt in jedem Buendel
@@ -1179,7 +1179,7 @@ schau "im Bild steht er in Zeile 0 der Trefferliste" \
     $SSFG $SSEL "Datei-Explorer  --  Dateien und Ordner ansehen" 96
 schau_nicht "und in Zeile 1 steht nichts mehr" \
     ttext "$TMPD/suche.ppm" "$SANS" 15 $((SCX + SRX)) $((SCY + SRB + SZH)) \
-    $SFG $SBG "Editor  --  Text schreiben und aendern" 96
+    $SFG $SBG "Editor  --  Text schreiben und ändern" 96
 # DIE GEGENPROBE, DIE DIE ZUSAGE ERST WERTVOLL MACHT: dieselben
 # Tastendruecke, dieselben Dateien, nur OHNE das Feld `keys`.
 foto nokeys "gfx wm wigstart wignokeys wmhold wiglong $GRUND" "$M"

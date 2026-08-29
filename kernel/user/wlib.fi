@@ -55,11 +55,13 @@
 profile kernel
 
 import ulib
+import libc.io
 import wlibc
 import utf8
 
 export {
     begin, window, window_plain, window_kind, close, closed, handle,
+    trace, set_trace, set_menu_title, reshape,
     win_w, win_h, win_x, win_y, win_hide, win_layer,
     box_v, box_h, box_grid, box_end, size, gap_after,
     label, button, check, entry, list, table, tabs, menubar, choice,
@@ -76,6 +78,7 @@ export {
     theme_stales, paint_all, THEME_POLL_TICKS,
     rect_x, rect_y, rect_w, rect_h, kind_of, tab_x, tab_w,
     text_x, text_base, text_fg, text_bg, row_base, row_x, row_h,
+    zeilen_hoehe,
     head_base, cell_base, cell_x, head_h, icon_x, icon_y,
     icon_letter_x, icon_letter_base,
     K_LABEL, K_BUTTON, K_CHECK, K_ENTRY, K_LIST, K_TABLE, K_TABS,
@@ -213,6 +216,44 @@ static mut s_esc: u64 = 0 // Zustand der Fluchtfolge
 static mut s_lastclick: u64 = 0
 static mut s_lastwd: u64 = 0
 static mut s_ticks: u64 = 0
+
+// =============================== RUNDE LOOK: DIE OBERFLAECHE MELDET SICH
+//
+// Die Taskleiste meldet seit Runde DESKTOP jede Zeile, die sie malt, mit
+// x, Grundlinie, Vorder- und Hintergrundfarbe -- und deshalb kann
+// `tools/netview/run.sh` sie BILDPUNKTGENAU gegen eine zweite Rasterung
+// halten, statt sie anzusehen. Jedes andere Fenster dieses Systems
+// konnte das nicht: die Widgets werden hier gemalt, und hier wurde
+// nichts gemeldet.
+//
+// Diese Runde braucht es dreimal:
+//   * Abschnitt A -- ein Text MIT UMLAUT muss Bildpunkt fuer Bildpunkt
+//     nachgerechnet werden, und dafuer muss seine Grundlinie bekannt
+//     sein und nicht nachgerechnet.
+//   * Abschnitt C/D -- eine Zusage ueber Innenabstand und Eckenradius
+//     ist eine Zusage ueber KOORDINATEN. Wer sie im Testlauf selbst
+//     ausrechnet, prueft seine eigene Rechnung.
+//
+// ES IST AUS, SOLANGE NIEMAND ES EINSCHALTET, und eingeschaltet wird es
+// durch eine DATEI auf der Platte (`/etc/uitrace`) und nicht durch ein
+// Wort auf der Kernel-Kommandozeile: die Kommandozeile gehoert dem
+// Kernel, und ein Ring-3-Programm, das darin liest, hat eine Abhaengigkeit
+// erfunden, die es nicht braucht. Ohne die Datei ist die serielle
+// Ausgabe dieses Systems Oktett fuer Oktett dieselbe wie vorher -- das
+// ist die Bedingung dafuer, dass kein bestehender Testlaeufer davon
+// etwas merkt.
+static mut s_trace: u64 = 0
+static mut s_tx: u64 = 0
+// Der Titel des Menuefensters, wenn ein Programm ihn gesetzt hat.
+static mut mn_titel: u64 = 0
+static mut tr_a: [u8; 16] = "wlib: text win=\0"
+static mut tr_k: [u8; 8] = " kind=\0\0"
+static mut tr_x: [u8; 5] = " x=\0\0"
+static mut tr_b: [u8; 8] = " base=\0\0"
+static mut tr_f: [u8; 6] = " fg=\0\0"
+static mut tr_g: [u8; 6] = " bg=\0\0"
+static mut tr_t: [u8; 5] = " t=\0\0"
+static mut tr_buf: [u8; 320] = [0 as u8; 320]
 // RUNDE THEME. Was das Umschalten kostet, gezaehlt an der Stelle, an
 // der es passiert -- nicht geschaetzt.
 static mut s_thpoll: u64 = 0 // Tick des letzten Nachsehens
@@ -299,6 +340,14 @@ fn begin(nohit: bool, noclip: bool) -> bool {
     wlibc.theme_load((&pfad[0 as usize]) as u64)
     if nohit {
         s_nohit = 1
+    }
+    // RUNDE LOOK: gibt es die Datei, meldet diese Bibliothek jede Zeile,
+    // die sie malt. Gibt es sie nicht, aendert sich kein Oktett.
+    var p_tr: [u8; 14] = "/etc/uitrace\0\0"
+    let fdt: u64 = io.open((&p_tr[0 as usize]) as u64, 0)
+    if !ulib.bad(fdt) {
+        io.close(fdt)
+        s_trace = 1
     }
     return true
 }
@@ -798,6 +847,54 @@ fn relayout() {
     }
 }
 
+// ============================ ROUND LOOK: THE SHAPE CHANGED UNDER US
+//
+// A widget takes its height when it is CREATED (`add`), because that is
+// when the box it goes into needs to know how much room to leave. Change
+// `shape=` at run time and every one of those heights is stale: 32-pixel
+// buttons would be drawn into 26-pixel rectangles, the click targets
+// would sit where the old ones were, and the page would look like a
+// misprint.
+//
+// So a shape change is a re-measurement and not a repaint. This walks
+// the widget table, asks the CURRENT tokens for the height of each kind,
+// and lays the boxes out again. Nothing else moves: every widget keeps
+// its number, its value, its focus and -- the one that matters -- the
+// TEXT POINTER it was given, which is why a shape change and a language
+// change can happen in either order.
+//
+// Widths are left alone except for buttons, whose width is text plus
+// padding and therefore also a function of a token.
+fn reshape() {
+    var i: u64 = 0
+    while i < nwd {
+        let k: u64 = g(i, D_KIND)
+        if k == K_BUTTON {
+            s(i, D_H, wlibc.metric(wlibc.M_CTRL_H))
+            let t: u64 = g(i, D_TEXT)
+            let want: u64 = wlibc.text_w(wlibc.F_UI, wlibc.PX_UI, t, tlen(t))
+                + wlibc.metric(wlibc.M_PAD_X) * 2
+            // A button that was given a width by `size()` keeps it --
+            // the dialog buttons are meant to be equal, not snug.
+            if g(i, D_W) < want {
+                s(i, D_W, want)
+            }
+        } else if k == K_TABS {
+            s(i, D_H, wlibc.metric(wlibc.M_CTRL_H))
+        } else if k == K_ENTRY || k == K_CHOICE {
+            s(i, D_H, ctrl_thin())
+        } else if k == K_CHECK || k == K_MENUBAR {
+            s(i, D_H, ctrl_small())
+        } else if k == K_SEP {
+            s(i, D_H, sep_h())
+        } else if k == K_SCROLL {
+            s(i, D_W, scroll_w())
+        }
+        i = i + 1
+    }
+    relayout()
+}
+
 // ------------------------------------------------------- die Widgets
 
 fn add(kind: u64, txt: u64, pw: u64, ph: u64, fokus: bool) -> u64 {
@@ -836,13 +933,18 @@ fn label(txt: u64) -> u64 {
     return add(K_LABEL, txt, 0, wlibc.text_h(wlibc.PX_UI), false)
 }
 
+// ROUND LOOK: THE SIZE OF A CONTROL IS A TOKEN, NOT A LITERAL.
+// `24` was two lots of twelve and `26` was a height; both are now
+// asked for, and with `shape=classic` both come back as 24 and 26.
 fn button(txt: u64) -> u64 {
-    let w: u64 = wlibc.text_w(wlibc.F_UI, wlibc.PX_UI, txt, tlen(txt)) + 24
-    return add(K_BUTTON, txt, w, 26, true)
+    let pad: u64 = wlibc.metric(wlibc.M_PAD_X)
+    let w: u64 = wlibc.text_w(wlibc.F_UI, wlibc.PX_UI, txt, tlen(txt))
+        + pad * 2
+    return add(K_BUTTON, txt, w, wlibc.metric(wlibc.M_CTRL_H), true)
 }
 
 fn check(txt: u64, on: bool) -> u64 {
-    let i: u64 = add(K_CHECK, txt, 0, 22, true)
+    let i: u64 = add(K_CHECK, txt, 0, ctrl_small(), true)
     if on {
         s(i, D_VAL, 1)
     }
@@ -852,7 +954,7 @@ fn check(txt: u64, on: bool) -> u64 {
 // Ein Textfeld arbeitet auf dem Puffer DES AUFRUFERS. Die Bibliothek
 // legt keinen an: wer den Text hinterher braucht, hat ihn dann schon.
 fn entry(buf: u64, max: u64) -> u64 {
-    let i: u64 = add(K_ENTRY, buf, 0, 24, true)
+    let i: u64 = add(K_ENTRY, buf, 0, ctrl_thin(), true)
     s(i, D_D, max)
     s(i, D_B, tlen(buf))
     s(i, D_C, tlen(buf))
@@ -860,7 +962,7 @@ fn entry(buf: u64, max: u64) -> u64 {
 }
 
 fn list(blob: u64, rows: u64) -> u64 {
-    let i: u64 = add(K_LIST, blob, 0, rows * (wlibc.PX_UI + 5) + 4, true)
+    let i: u64 = add(K_LIST, blob, 0, rows * zeilen_hoehe() + 4, true)
     s(i, D_VAL, 0)
     s(i, D_A, 0)
     count_rows(i)
@@ -872,7 +974,8 @@ fn list(blob: u64, rows: u64) -> u64 {
 // Rueckrufe -- die Sprache hat keine Funktionszeiger, und ein
 // Zeilenpuffer ist das, was ein Dateimanager ohnehin baut.
 fn table(blob: u64, rows: u64, cols: u64, breiten: u64) -> u64 {
-    let i: u64 = add(K_TABLE, blob, 0, rows * (wlibc.PX_UI + 5) + 24, true)
+    let i: u64 = add(K_TABLE, blob, 0,
+        rows * zeilen_hoehe() + zeilen_hoehe() + 4, true)
     s(i, D_C, cols)
     s(i, D_D, breiten)
     s(i, D_VAL, 0)
@@ -882,25 +985,25 @@ fn table(blob: u64, rows: u64, cols: u64, breiten: u64) -> u64 {
 }
 
 fn tabs(txt: u64) -> u64 {
-    return add(K_TABS, txt, 0, 26, true)
+    return add(K_TABS, txt, 0, wlibc.metric(wlibc.M_CTRL_H), true)
 }
 
 fn menubar(txt: u64) -> u64 {
-    return add(K_MENUBAR, txt, 0, 22, false)
+    return add(K_MENUBAR, txt, 0, ctrl_small(), false)
 }
 
 fn choice(txt: u64, sel: u64) -> u64 {
-    let i: u64 = add(K_CHOICE, txt, 0, 24, true)
+    let i: u64 = add(K_CHOICE, txt, 0, ctrl_thin(), true)
     s(i, D_VAL, sel)
     return i
 }
 
 fn sep() -> u64 {
-    return add(K_SEP, 0, 0, 5, false)
+    return add(K_SEP, 0, 0, sep_h(), false)
 }
 
 fn scrollarea(rows: u64, sicht: u64) -> u64 {
-    let i: u64 = add(K_SCROLL, 0, 14, 0, false)
+    let i: u64 = add(K_SCROLL, 0, scroll_w(), 0, false)
     s(i, D_A, rows)
     s(i, D_B, sicht)
     return i
@@ -1115,8 +1218,102 @@ fn col_len(q: u64, rest: u64) -> u64 {
     return rest
 }
 
+// ROUND LOOK. `PX_UI + 5` was 20 and is now the `row` token, which is
+// 20 in `classic`. Every list, table, menu and drop-down in this
+// library measures itself against this one function, which is why the
+// row height only had to be moved once.
 fn zeilen_hoehe() -> u64 {
-    return wlibc.PX_UI + 5
+    return wlibc.metric(wlibc.M_ROW)
+}
+
+// Two derived heights, so that the shape files carry ONE control height
+// and not four. A checkbox and a menu bar are four pixels shorter than
+// a button and a text field two -- that is what this library has always
+// drawn (22 and 24 against 26), and the relationship is kept rather
+// than four separate tokens that could drift apart.
+fn ctrl_small() -> u64 {
+    let h: u64 = wlibc.metric(wlibc.M_CTRL_H)
+    if h < 8 {
+        return h
+    }
+    return h - 4
+}
+
+fn ctrl_thin() -> u64 {
+    let h: u64 = wlibc.metric(wlibc.M_CTRL_H)
+    if h < 6 {
+        return h
+    }
+    return h - 2
+}
+
+// The inset of TEXT inside a box that is not a button: half a button's
+// padding. The old code said 5 in `paint_entry` and 6 in `paint_list`
+// and meant the same thing both times.
+fn inset() -> u64 {
+    return wlibc.metric(wlibc.M_PAD_X) / 2
+}
+
+// AND ONE PIXEL LESS, INSIDE A TEXT FIELD.
+//
+// The old code said `x + 5` in `paint_entry` and `x + 6` in
+// `paint_list` and `paint_choice`, and meant the same thing all three
+// times. That one-pixel difference is a wart and not a decision -- but
+// tools/k15/run.sh measures the caret and the text of a text field
+// PIXEL BY PIXEL against a second rasterisation, so straightening it
+// out would move ten characters by one pixel and turn a green section
+// red for a tidy-up nobody asked for.
+//
+// So the wart is kept, named, and derived from the same token: classic
+// gets its 5 and its 6 exactly as before, and modern gets 7 and 8.
+// Whoever wants them equal can have it in a round that re-measures
+// round K15's screenshots, which is where that cost belongs.
+fn inset_text() -> u64 {
+    let i: u64 = inset()
+    if i == 0 {
+        return 0
+    }
+    return i - 1
+}
+
+// Four more derivations, for the same reason as the two heights above:
+// a shape file carries ONE control height and ONE row height, and the
+// pieces that have always been a fixed distance from those keep that
+// distance instead of becoming four more tokens that can drift.
+//
+//   scroll_w   14 in classic (M_ROW - 6). A scrollbar is a hair
+//              narrower than a row is tall, which is what makes a list
+//              read as a list and not as a table.
+//   thumb_w    the thumb sits two pixels inside its track on each side.
+//   tile_w     14 in classic (ctrl_small - 8): the coloured tile and
+//              the checkbox square, which have always been the same
+//              size because they are the same idea.
+//   sep_h      5 in classic (M_PAD_Y + 1): one line, with the vertical
+//              padding around it.
+fn scroll_w() -> u64 {
+    let r: u64 = wlibc.metric(wlibc.M_ROW)
+    if r < 10 {
+        return r
+    }
+    return r - 6
+}
+
+fn thumb_w() -> u64 {
+    return sub(scroll_w(), 4)
+}
+
+fn tile_w() -> u64 {
+    return sub(ctrl_small(), 8)
+}
+
+// The two buttons of a dialog are as wide as three of their own
+// heights plus a gap -- 94 in classic, which is what was written there.
+fn dlg_btn_w() -> u64 {
+    return wlibc.metric(wlibc.M_CTRL_H) * 3 + wlibc.metric(wlibc.M_GAP) * 2
+}
+
+fn sep_h() -> u64 {
+    return wlibc.metric(wlibc.M_PAD_Y) + 1
 }
 
 // ==================================================================
@@ -1142,6 +1339,7 @@ fn paint_bg(w: u64, x: u64, y: u64, bw: u64, bh: u64) {
 fn put_text(f: u64, pxs: u64, x: u64, y: u64, bw: u64, p: u64, n: u64,
     farbe: u64, aus: u64) -> u64 {
     if p == 0 || n == 0 {
+        s_tx = x
         return x
     }
     var tx: u64 = x
@@ -1153,20 +1351,142 @@ fn put_text(f: u64, pxs: u64, x: u64, y: u64, bw: u64, p: u64, n: u64,
             tx = x + sub(bw, tw)
         }
     }
+    // WO DER TEXT WIRKLICH ANFAENGT. Bei `aus=1` ist das nicht `x`,
+    // sondern die Mitte -- und genau diese Zahl braucht ein Pruefer, der
+    // die Glyphen nachrastert. Sie hier zu merken ist der Unterschied
+    // zwischen "der Laeufer rechnet die Zentrierung nach" (und prueft
+    // dann seine eigene Rechnung) und "das Programm sagt, wo es gemalt
+    // hat".
+    s_tx = tx
     return wlibc.text_at(f, pxs, tx, y, p, n, farbe)
 }
 
+fn trace() -> bool {
+    return s_trace != 0
+}
+
+// Den Titel des Menuefensters setzen. Ein Programm mit Katalog ruft
+// das einmal beim Start mit `msg.get("wlib.menu.title")`; wer es nicht
+// ruft, bekommt das englische Wort aus der Bibliothek.
+fn set_menu_title(p: u64) {
+    mn_titel = p
+}
+
+fn set_trace(on: bool) {
+    if on {
+        s_trace = 1
+    } else {
+        s_trace = 0
+    }
+}
+
+// EINE GEMALTE ZEILE, mit allem, was ein Pruefer braucht: das Fenster
+// (die Nummer, die der Fensterserver in `wm: win ... id=` fuehrt), die
+// Art des Bedienelements, x und Grundlinie IM FENSTER, die beiden
+// Farben und der Text.
+fn say_painted(w: u64, kind: u64, base: u64, fg: u64, bg: u64, p: u64,
+    n: u64) {
+    if s_trace == 0 || p == 0 || n == 0 {
+        return
+    }
+    // ONE WRITE AND NOT TWELVE.
+    //
+    // The first version of this called `ulib.say` and `ulib.sayn`
+    // twelve times per line, and on a desktop that is five processes
+    // sharing one serial port that came out interleaved: a checker
+    // looking for a complete line found one in most runs and none in
+    // some, which is the worst thing a measurement can be. The taskbar
+    // has lived with it since round DESKTOP because it repaints often
+    // enough that SOME line survives; a proof should not depend on
+    // that.
+    //
+    // So the line is built in a buffer and handed to the kernel in a
+    // single `write`, which is where the serialisation is. Same octets,
+    // same order, one call.
+    let b: u64 = (&tr_buf[0 as usize]) as u64
+    var at: u64 = tr_put(b, 0, (&tr_a[0 as usize]) as u64)
+    at = tr_num(b, at, ng(w, N_H))
+    at = tr_put(b, at, (&tr_k[0 as usize]) as u64)
+    at = tr_num(b, at, kind)
+    at = tr_put(b, at, (&tr_x[0 as usize]) as u64)
+    at = tr_num(b, at, s_tx)
+    at = tr_put(b, at, (&tr_b[0 as usize]) as u64)
+    at = tr_num(b, at, base)
+    at = tr_put(b, at, (&tr_f[0 as usize]) as u64)
+    at = tr_num(b, at, fg)
+    at = tr_put(b, at, (&tr_g[0 as usize]) as u64)
+    at = tr_num(b, at, bg)
+    at = tr_put(b, at, (&tr_t[0 as usize]) as u64)
+    var i: u64 = 0
+    while i < n && at + 2 < 320 {
+        __mmio_write8((b + at) as *mut u8,
+            __mmio_read8((p + i) as *mut u8))
+        at = at + 1
+        i = i + 1
+    }
+    __mmio_write8((b + at) as *mut u8, 10 as u8)
+    at = at + 1
+    let _w: u64 = ulib.put(b, at)
+}
+
+// Text into the buffer, without the terminating zero. Returns where the
+// next thing goes.
+fn tr_put(b: u64, at: u64, p: u64) -> u64 {
+    var i: u64 = 0
+    var a: u64 = at
+    while __mmio_read8((p + i) as *mut u8) != 0 as u8 && a + 2 < 320 {
+        __mmio_write8((b + a) as *mut u8,
+            __mmio_read8((p + i) as *mut u8))
+        a = a + 1
+        i = i + 1
+    }
+    return a
+}
+
+// A decimal number into the same buffer, most significant digit first.
+fn tr_num(b: u64, at: u64, v: u64) -> u64 {
+    var d: [u8; 24] = [0 as u8; 24]
+    var n: u64 = 0
+    var q: u64 = v
+    if q == 0 {
+        __mmio_write8(((&d[0 as usize]) as u64) as *mut u8, 48 as u8)
+        n = 1
+    }
+    while q > 0 && n < 24 {
+        __mmio_write8((((&d[0 as usize]) as u64) + n) as *mut u8,
+            (48 + q % 10) as u8)
+        q = q / 10
+        n = n + 1
+    }
+    var a: u64 = at
+    var i: u64 = n
+    while i > 0 && a + 2 < 320 {
+        i = i - 1
+        __mmio_write8((b + a) as *mut u8,
+            __mmio_read8((((&d[0 as usize]) as u64) + i) as *mut u8))
+        a = a + 1
+    }
+    return a
+}
+
+// ROUND LOOK: the ring is as thick as the shape says and follows the
+// same corner. It is the one thing `modern` makes LOUDER (2 pixels
+// against 1), because it is the only thing on the list that somebody
+// navigating by keyboard depends on.
 fn focus_ring(i: u64) {
     if s_focus != i + 1 {
         return
     }
-    wlibc.frame(g(i, D_X), g(i, D_Y), g(i, D_W), g(i, D_H),
-        wlibc.theme(wlibc.T_FOCUS))
+    // `rring` and not `rframe`: a focus ring goes ON TOP of a control
+    // that is already painted, and `rframe` would fill it in.
+    wlibc.rring(g(i, D_X), g(i, D_Y), g(i, D_W), g(i, D_H),
+        wlibc.metric(wlibc.M_RADIUS_BUTTON),
+        wlibc.metric(wlibc.M_FOCUS), wlibc.theme(wlibc.T_FOCUS))
 }
 
 fn paint_scroll(x: u64, y: u64, h: u64, oben: u64, sicht: u64,
     ganz: u64) {
-    wlibc.rect(x, y, 14, h, wlibc.theme(wlibc.T_SCROLL))
+    wlibc.rect(x, y, scroll_w(), h, wlibc.theme(wlibc.T_SCROLL))
     if ganz == 0 || sicht >= ganz {
         return
     }
@@ -1181,7 +1501,8 @@ fn paint_scroll(x: u64, y: u64, h: u64, oben: u64, sicht: u64,
     if ganz > sicht {
         ty = (h - th) * oben / (ganz - sicht)
     }
-    wlibc.rect(x + 2, y + ty, 10, th, wlibc.theme(wlibc.T_THUMB))
+    wlibc.rrect(x + 2, y + ty, thumb_w(), th,
+        wlibc.metric(wlibc.M_RADIUS_INPUT) / 2, wlibc.theme(wlibc.T_THUMB))
 }
 
 fn paint_button(i: u64) {
@@ -1195,9 +1516,20 @@ fn paint_button(i: u64) {
     } else if (g(i, D_FLAGS) & F_HOVER) != 0 {
         flaeche = wlibc.theme(wlibc.T_BTNHI)
     }
-    wlibc.rect(x, y, bw, bh, flaeche)
-    wlibc.frame3(x, y, bw, bh, wlibc.theme(wlibc.T_BTNHI),
-        wlibc.theme(wlibc.T_LINE), (g(i, D_FLAGS) & F_PRESSED) != 0)
+    // ROUND LOOK: a rounded face and a rounded outline. With
+    // `radius_button=0` (classic) `rrect` IS `rect` and `rframe` IS
+    // `frame3`'s square outline -- the same pixels, by the same route.
+    let rb: u64 = wlibc.metric(wlibc.M_RADIUS_BUTTON)
+    if rb == 0 {
+        wlibc.rect(x, y, bw, bh, flaeche)
+        wlibc.frame3(x, y, bw, bh, wlibc.theme(wlibc.T_BTNHI),
+            wlibc.theme(wlibc.T_LINE), (g(i, D_FLAGS) & F_PRESSED) != 0)
+    } else {
+        wlibc.rrect(x, y, bw, bh, rb, wlibc.theme(wlibc.T_LINE))
+        let bo: u64 = wlibc.metric(wlibc.M_BORDER)
+        wlibc.rrect(x + bo, y + bo, bw - 2 * bo, bh - 2 * bo,
+            rb - bo, flaeche)
+    }
     var farbe: u64 = wlibc.theme(wlibc.T_FG)
     if (g(i, D_FLAGS) & F_OFF) != 0 {
         farbe = wlibc.theme(wlibc.T_DIM)
@@ -1205,6 +1537,8 @@ fn paint_button(i: u64) {
     let grund: u64 = y + (bh + wlibc.ascent_of(wlibc.F_UI, wlibc.PX_UI)) / 2
     put_text(wlibc.F_UI, wlibc.PX_UI, x, grund, bw, g(i, D_TEXT),
         tlen(g(i, D_TEXT)), farbe, 1)
+    say_painted(g(i, D_WIN), K_BUTTON, grund, farbe, flaeche,
+        g(i, D_TEXT), tlen(g(i, D_TEXT)))
     focus_ring(i)
 }
 
@@ -1212,12 +1546,27 @@ fn paint_label(i: u64) {
     let grund: u64 = g(i, D_Y) + wlibc.ascent_of(wlibc.F_UI, wlibc.PX_UI)
     put_text(wlibc.F_UI, wlibc.PX_UI, g(i, D_X), grund, g(i, D_W),
         g(i, D_TEXT), tlen(g(i, D_TEXT)), wlibc.theme(wlibc.T_FG), 0)
+    say_painted(g(i, D_WIN), K_LABEL, grund, wlibc.theme(wlibc.T_FG),
+        bg_of(g(i, D_WIN)), g(i, D_TEXT), tlen(g(i, D_TEXT)))
+}
+
+// Die Flaeche, auf der ein Etikett liegt. `paint_bg` entscheidet das
+// schon; hier steht dieselbe Entscheidung als Frage, damit die gemeldete
+// Hintergrundfarbe die ist, die wirklich unter dem Text liegt.
+fn bg_of(w: u64) -> u64 {
+    if ng(w, N_KIND) == NK_DLG {
+        return wlibc.theme(wlibc.T_DLG)
+    }
+    if ng(w, N_KIND) == NK_MENU {
+        return wlibc.theme(wlibc.T_MENU)
+    }
+    return wlibc.theme(wlibc.T_BG)
 }
 
 fn paint_check(i: u64) {
     let x: u64 = g(i, D_X)
     let y: u64 = g(i, D_Y)
-    let k: u64 = 14
+    let k: u64 = tile_w()
     let oy: u64 = y + sub(g(i, D_H), k) / 2
     wlibc.rect(x, oy, k, k, wlibc.theme(wlibc.T_ENTRY))
     wlibc.frame(x, oy, k, k, wlibc.theme(wlibc.T_LINE))
@@ -1253,9 +1602,12 @@ fn paint_check(i: u64) {
 // Auswahlfarbe hinterlegt und in der Auswahlvordergrundfarbe gesetzt --
 // zwei Textlaeufe statt einem, damit die Farbe wirklich wechselt und
 // nicht nur der Hintergrund.
+// WHERE CHARACTER `at` OF A TEXT FIELD BEGINS. It has to agree with
+// `paint_entry` to the pixel -- the caret is drawn from here and the
+// selection is measured from here -- so it asks the same function.
 fn entry_x(i: u64, at: u64) -> u64 {
-    return g(i, D_X) + 5 + wlibc.text_w(wlibc.F_UI, wlibc.PX_UI,
-        g(i, D_TEXT), at)
+    return g(i, D_X) + inset_text() + wlibc.text_w(wlibc.F_UI,
+        wlibc.PX_UI, g(i, D_TEXT), at)
 }
 
 fn paint_entry(i: u64) {
@@ -1263,8 +1615,11 @@ fn paint_entry(i: u64) {
     let y: u64 = g(i, D_Y)
     let bw: u64 = g(i, D_W)
     let bh: u64 = g(i, D_H)
-    wlibc.rect(x, y, bw, bh, wlibc.theme(wlibc.T_ENTRY))
-    wlibc.frame(x, y, bw, bh, wlibc.theme(wlibc.T_LINE))
+    // ROUND LOOK: box and outline from the shape tokens. At radius 0
+    // and border 1 this is the `rect` + `frame` it always was.
+    wlibc.rframe(x, y, bw, bh, wlibc.metric(wlibc.M_RADIUS_INPUT),
+        wlibc.metric(wlibc.M_BORDER), wlibc.theme(wlibc.T_LINE),
+        wlibc.theme(wlibc.T_ENTRY))
     let p: u64 = g(i, D_TEXT)
     let n: u64 = tlen(p)
     let grund: u64 = y + (bh + wlibc.ascent_of(wlibc.F_UI, wlibc.PX_UI)) / 2
@@ -1289,8 +1644,8 @@ fn paint_entry(i: u64) {
     }
     // vor der Auswahl, die Auswahl, danach -- drei Laeufe, damit die
     // ausgewaehlten Zeichen ihre eigene Farbe bekommen.
-    var cx: u64 = wlibc.text_at(wlibc.F_UI, wlibc.PX_UI, x + 5, grund, p, a,
-        wlibc.theme(wlibc.T_FG))
+    var cx: u64 = wlibc.text_at(wlibc.F_UI, wlibc.PX_UI, x + inset_text(),
+        grund, p, a, wlibc.theme(wlibc.T_FG))
     if b > a {
         cx = wlibc.text_at(wlibc.F_UI, wlibc.PX_UI, entry_x(i, a), grund,
             p + a, b - a, wlibc.theme(wlibc.T_SELFG))
@@ -1303,7 +1658,11 @@ fn paint_entry(i: u64) {
     // das immer eine Marke zeigt, sagt nicht mehr, wohin getippt wird.
     if s_focus == i + 1 {
         let mx: u64 = entry_x(i, g(i, D_B))
-        wlibc.rect(mx, y + 3, 2, sub(bh, 6), wlibc.theme(wlibc.T_ACCENT))
+        // The caret is as wide as a border and never thinner than
+        // one pixel -- it is a line, and lines are the one thing this
+        // round deliberately leaves alone.
+        wlibc.rect(mx, y + 3, wlibc.metric(wlibc.M_BORDER) + 1,
+            sub(bh, 6), wlibc.theme(wlibc.T_ACCENT))
     }
     focus_ring(i)
 }
@@ -1482,8 +1841,9 @@ fn paint_list(i: u64) {
     let bh: u64 = g(i, D_H)
     let zh: u64 = zeilen_hoehe()
     let sicht: u64 = sub(bh, 4) / zh
-    wlibc.rect(x, y, bw, bh, wlibc.theme(wlibc.T_ENTRY))
-    wlibc.frame(x, y, bw, bh, wlibc.theme(wlibc.T_LINE))
+    wlibc.rframe(x, y, bw, bh, wlibc.metric(wlibc.M_RADIUS_INPUT),
+        wlibc.metric(wlibc.M_BORDER), wlibc.theme(wlibc.T_LINE),
+        wlibc.theme(wlibc.T_ENTRY))
     let ganz: u64 = g(i, D_A)
     var r: u64 = 0
     while r < sicht {
@@ -1517,10 +1877,14 @@ fn paint_list(i: u64) {
                     // Pruefer sah 25 von 169 deckenden Bildpunkten
                     // falsch; im Bild sah man nichts. Ein Symbol bringt
                     // seinen Rand selbst mit oder hat keinen.
-                    bild_malen(f, x + 5, ry + 3, 14, 14)
+                    bild_malen(f, x + 5, ry + 3, tile_w(), tile_w())
                 } else {
-                wlibc.rect(x + 5, ry + 3, 14, 14, f)
-                wlibc.frame(x + 5, ry + 3, 14, 14, wlibc.theme(wlibc.T_LINE))
+                wlibc.rrect(x + 5, ry + 3, tile_w(), tile_w(),
+                    wlibc.metric(wlibc.M_RADIUS_INPUT) / 2, f)
+                wlibc.rframe(x + 5, ry + 3, tile_w(), tile_w(),
+                    wlibc.metric(wlibc.M_RADIUS_INPUT) / 2,
+                    wlibc.metric(wlibc.M_BORDER),
+                    wlibc.theme(wlibc.T_LINE), f)
                 if ln > 0 {
                     // MITTIG AUF DAS PLAETTCHEN, und das ist keine
                     // Feinheit: die erste Fassung setzte den Buchstaben
@@ -1544,9 +1908,24 @@ fn paint_list(i: u64) {
                 }
                 }
             }
-            wlibc.text_at(wlibc.F_UI, wlibc.PX_UI, x + 6 + ein,
-                ry + wlibc.ascent_of(wlibc.F_UI, wlibc.PX_UI) + 1, q, ln,
-                farbe)
+            // ROUND LOOK, THIRD ADDENDUM: A LIST ROW SAYS WHERE IT
+            // DREW. Until here it did not, and that is exactly why
+            // "Text schreiben und aendern" could sit in the starter for
+            // half a year: the launcher's rows carry the bundle labels,
+            // the bundle labels never go through the catalogue, and a
+            // widget that reports nothing cannot be photographed. The
+            // draw goes through `put_text` for one reason -- it is what
+            // sets `s_tx`, so the reported x is the one the text
+            // really started at and not a second guess at it.
+            let rgrund: u64 = ry + wlibc.ascent_of(wlibc.F_UI,
+                wlibc.PX_UI) + 1
+            let _rt: u64 = put_text(wlibc.F_UI, wlibc.PX_UI,
+                x + 6 + ein, rgrund, sub(bw, 16), q, ln, farbe, 0)
+            var rhg: u64 = wlibc.theme(wlibc.T_ENTRY)
+            if z == g(i, D_VAL) {
+                rhg = wlibc.theme(wlibc.T_SEL)
+            }
+            say_painted(g(i, D_WIN), K_LIST, rgrund, farbe, rhg, q, ln)
         }
         r = r + 1
     }
@@ -1592,9 +1971,18 @@ fn paint_table(i: u64) {
             if c == 0 {
                 hx = cx + table_ein(i)
             }
-            wlibc.text_at(wlibc.F_UI, wlibc.PX_UI, hx,
-                y + 3 + wlibc.ascent_of(wlibc.F_UI, wlibc.PX_UI), q, ln,
-                wlibc.theme(wlibc.T_FG))
+            // Dieselbe Meldung fuer die Kopfzeile. Sie traegt
+            // "Name / Groesse / Zeit / Rechte" -- und "Groesse" ist die
+            // einzige Zeichenkette der Oberflaeche, in der ein `oe` und
+            // ein `ss` NEBENEINANDER stehen. Ohne diese Zeile ist sie
+            // nicht nachmessbar.
+            let kgrund: u64 = y + 3 + wlibc.ascent_of(wlibc.F_UI,
+                wlibc.PX_UI)
+            let _kt: u64 = put_text(wlibc.F_UI, wlibc.PX_UI, hx, kgrund,
+                spalte_breit(i, c), q, ln, wlibc.theme(wlibc.T_FG), 0)
+            say_painted(g(i, D_WIN), K_TABLE, kgrund,
+                wlibc.theme(wlibc.T_FG), wlibc.theme(wlibc.T_HEAD),
+                q, ln)
         }
         cx = cx + spalte_breit(i, c)
         if c + 1 < cols {
@@ -1767,14 +2155,23 @@ fn paint_choice(i: u64) {
     let y: u64 = g(i, D_Y)
     let bw: u64 = g(i, D_W)
     let bh: u64 = g(i, D_H)
-    wlibc.rect(x, y, bw, bh, wlibc.theme(wlibc.T_BTN))
-    wlibc.frame3(x, y, bw, bh, wlibc.theme(wlibc.T_BTNHI),
-        wlibc.theme(wlibc.T_LINE), false)
+    let rc: u64 = wlibc.metric(wlibc.M_RADIUS_BUTTON)
+    if rc == 0 {
+        wlibc.rect(x, y, bw, bh, wlibc.theme(wlibc.T_BTN))
+        wlibc.frame3(x, y, bw, bh, wlibc.theme(wlibc.T_BTNHI),
+            wlibc.theme(wlibc.T_LINE), false)
+    } else {
+        wlibc.rframe(x, y, bw, bh, rc, wlibc.metric(wlibc.M_BORDER),
+            wlibc.theme(wlibc.T_LINE), wlibc.theme(wlibc.T_BTN))
+    }
     let q: u64 = row_at(g(i, D_TEXT), g(i, D_VAL))
     if q != 0 {
-        put_text(wlibc.F_UI, wlibc.PX_UI, x + 6,
-            y + (bh + wlibc.ascent_of(wlibc.F_UI, wlibc.PX_UI)) / 2, bw, q,
+        let cgr: u64 = y + (bh
+            + wlibc.ascent_of(wlibc.F_UI, wlibc.PX_UI)) / 2
+        put_text(wlibc.F_UI, wlibc.PX_UI, x + inset(), cgr, bw, q,
             row_len(q), wlibc.theme(wlibc.T_FG), 0)
+        say_painted(g(i, D_WIN), K_CHOICE, cgr, wlibc.theme(wlibc.T_FG),
+            wlibc.theme(wlibc.T_BTN), q, row_len(q))
     }
     // Das Dreieck rechts -- sechs Zeilen, von aussen nach innen.
     var n: u64 = 0
@@ -1786,8 +2183,10 @@ fn paint_choice(i: u64) {
     focus_ring(i)
 }
 
+// ROUND LOOK: a separating line at the opacity the shape asks for.
+// `classic` says 100 and gets the same hard line it always got.
 fn paint_sep(i: u64) {
-    wlibc.hline(g(i, D_X), g(i, D_Y) + g(i, D_H) / 2, g(i, D_W),
+    wlibc.divider(g(i, D_X), g(i, D_Y) + g(i, D_H) / 2, g(i, D_W),
         wlibc.theme(wlibc.T_LINE))
 }
 
@@ -2651,7 +3050,26 @@ fn menu_open(owner: u64, sx: u64, sy: u64, items: u64, n: u64) -> u64 {
     if mn_win != 0xFFFFFFFFFFFFFFFF {
         return MAXWN
     }
-    var titel: [u8; 6] = "Menue\0"
+    // ROUND LOOK, THIRD ADDENDUM: THIS TITLE IS DRAWN.
+    //
+    // A menu window carries a 22-pixel title bar (tools/k15/run.sh
+    // computes its rows as MNY + TITLE + 15), so this string is on the
+    // screen -- and it sat here in German, hardcoded, in the widget
+    // library. `tools/i18n/scan.py` never saw it: it said "Menue", and
+    // "Menue" was not in that scanner's word list.
+    //
+    // wlib cannot read the catalogue itself. It is linked into all
+    // thirteen programs, and pulling `msg` in here would put a
+    // catalogue into `sh` and `ls` as well -- on a disk that ran out of
+    // room in this very round. So the LIBRARY carries the untranslated
+    // English, exactly as msg.fi does for a missing key, and a program
+    // that has a catalogue hands the translation down with
+    // `set_menu_title`.
+    var titel: [u8; 6] = "Menu\0\0"
+    var tp: u64 = (&titel[0 as usize]) as u64
+    if mn_titel != 0 {
+        tp = mn_titel
+    }
     let zh: u64 = zeilen_hoehe() + 2
     var bw: u64 = 60
     var k: u64 = 0
@@ -2677,8 +3095,7 @@ fn menu_open(owner: u64, sx: u64, sy: u64, items: u64, n: u64) -> u64 {
     if x + bw + 4 > wlibc.screen_w() {
         x = sub(wlibc.screen_w(), bw + 4)
     }
-    let w: u64 = new_win(x, y, bw, bh, (&titel[0 as usize]) as u64,
-        NK_MENU)
+    let w: u64 = new_win(x, y, bw, bh, tp, NK_MENU)
     if w >= MAXWN {
         return MAXWN
     }
@@ -2774,20 +3191,20 @@ fn dlg_new(titel: u64, frage: u64, anfang: u64, mit_feld: bool) -> u64 {
     dl_lbl = label(frage)
     dl_ent = MAXWD
     if mit_feld {
-        size(0, 26)
+        size(0, wlibc.metric(wlibc.M_CTRL_H))
         dl_ent = entry((&dlgbuf[0 as usize]) as u64, 158)
         set_focus(dl_ent)
     }
     let unten: u64 = cg(ctcur, C_CY)
     box_end()
     box_h(w, sub(bw, 220), unten, 208, 30, 0, 10)
-    size(94, 28)
+    size(dlg_btn_w(), wlibc.metric(wlibc.M_CTRL_H) + 2)
     if mit_feld {
         dl_ok = button((&d_ok[0 as usize]) as u64)
     } else {
         dl_ok = button((&d_ja[0 as usize]) as u64)
     }
-    size(94, 28)
+    size(dlg_btn_w(), wlibc.metric(wlibc.M_CTRL_H) + 2)
     if mit_feld {
         dl_no = button((&d_ab[0 as usize]) as u64)
     } else {
