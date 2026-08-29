@@ -932,10 +932,15 @@ fn ring_round(state: u64, x: i64, y: i64, w: i64, h: i64, r0: u64,
     hline_a_clip(state, x + ri, y, w - 2 * ri, farbe, a, cx0, cy0, cx1, cy1)
     hline_a_clip(state, x + ri, y + h - 1, w - 2 * ri, farbe, a,
         cx0, cy0, cx1, cy1)
+    // RUNDE SOFTUI: GEZAEHLT WIRD JETZT JEDER BILDPUNKT. Vorher zaehlte
+    // `S_SHADOWPX` nur die waagerechten Laeufe -- die Spalten und die
+    // vier Boegen liefen ueber `px_clip` und blieben unsichtbar. Ein
+    // Zaehler, der die Haelfte auslaesst, macht die neue Fassung
+    // scheinbar teurer als die alte.
     var k: i64 = y + ri
     while k < y + h - ri {
-        px_clip(state, x, k, farbe, a, cx0, cy0, cx1, cy1)
-        px_clip(state, x + w - 1, k, farbe, a, cx0, cy0, cx1, cy1)
+        shadow_px1(state, x, k, farbe, a, cx0, cy0, cx1, cy1)
+        shadow_px1(state, x + w - 1, k, farbe, a, cx0, cy0, cx1, cy1)
         k = k + 1
     }
     if r == 0 {
@@ -964,10 +969,10 @@ fn ring_round(state: u64, x: i64, y: i64, w: i64, h: i64, r0: u64,
                 let y0: i64 = y + dy as i64
                 let x1: i64 = x + w - 1 - dx as i64
                 let y1: i64 = y + h - 1 - dy as i64
-                px_clip(state, x0, y0, farbe, d, cx0, cy0, cx1, cy1)
-                px_clip(state, x1, y0, farbe, d, cx0, cy0, cx1, cy1)
-                px_clip(state, x0, y1, farbe, d, cx0, cy0, cx1, cy1)
-                px_clip(state, x1, y1, farbe, d, cx0, cy0, cx1, cy1)
+                shadow_px1(state, x0, y0, farbe, d, cx0, cy0, cx1, cy1)
+                shadow_px1(state, x1, y0, farbe, d, cx0, cy0, cx1, cy1)
+                shadow_px1(state, x0, y1, farbe, d, cx0, cy0, cx1, cy1)
+                shadow_px1(state, x1, y1, farbe, d, cx0, cy0, cx1, cy1)
             }
             dx = dx + 1
         }
@@ -1228,6 +1233,72 @@ fn shadow_px1(state: u64, x: i64, y: i64, farbe: u64, a: u64,
     ss(state, S_SHADOWPX, gs(state, S_SHADOWPX) + 1)
 }
 
+// Ein Lauf aus der Deckungstafel, beschnitten. Die Beschneidung
+// passiert HIER und einmal je Lauf -- `fb.hline_mask` prueft nur noch
+// den Bildschirmrand.
+fn mask_run(state: u64, x: i64, y: i64, n: i64, farbe: u64, m0: u64,
+    schritt: i64, cx0: i64, cy0: i64, cx1: i64, cy1: i64) {
+    if n <= 0 || y < cy0 || y >= cy1 || y < 0 {
+        return
+    }
+    var a: i64 = x
+    var m: u64 = m0
+    var len: i64 = n
+    if a < cx0 {
+        let weg: i64 = cx0 - a
+        if weg >= len {
+            return
+        }
+        a = cx0
+        len = len - weg
+        if schritt < 0 {
+            m = m -% weg as u64
+        } else {
+            m = m +% weg as u64
+        }
+    }
+    if a + len > cx1 {
+        len = cx1 - a
+    }
+    if len <= 0 || a < 0 {
+        return
+    }
+    fb.hline_mask(state, a as u64, y as u64, len as u64, farbe, m, schritt)
+    ss(state, S_SHADOWPX, gs(state, S_SHADOWPX) + len as u64)
+}
+
+// Ein Lauf mit EINER Deckung, beschnitten -- die gerade Kante.
+fn edge_run(state: u64, x: i64, y: i64, n: i64, farbe: u64, a: u64,
+    cx0: i64, cy0: i64, cx1: i64, cy1: i64) {
+    if a == 0 {
+        return
+    }
+    hline_a_clip(state, x, y, n, farbe, a, cx0, cy0, cx1, cy1)
+}
+
+// =====================================================================
+// DER SCHATTEN, ZEILE FUER ZEILE
+// =====================================================================
+//
+// DIE ERSTE FASSUNG DIESER RUNDE WAR SPALTENWEISE UND DAS WAR DER
+// FEHLER. Sie hat die Ecktafel Punkt fuer Punkt ueber `fb.pixel_a`
+// abgearbeitet, und gemessen kostete der Schatten damit 1143 us je Bild
+// gegen 1268 us mit den alten Ringen -- elf Hundertstel besser, wo
+// vier- bis fuenffach zu erwarten war. Die Abtastung war weg, die
+// Buchhaltung nicht: sechs Zustandszugriffe je Bildpunkt.
+//
+// Also nicht "welcher Bildpunkt der Tafel gehoert wohin", sondern
+// "welche LAEUFE hat diese Bildzeile". Die Neun-Felder-Zerlegung
+// beantwortet das ohne eine einzige Bedingung je Bildpunkt:
+//
+//   Zeilen ueber dem Fenster   zwei Ecklaeufe + ein gerader Lauf
+//   Zeilen an der Fensterecke  zwei Ecklaeufe
+//   Zeilen in der Mitte        zwei Randlaeufe aus dem Streifen
+//   Zeilen unter dem Fenster   spiegelbildlich zu oben
+//
+// Die beiden RECHTEN Laeufe lesen dieselbe Tafelzeile RUECKWAERTS
+// (`schritt = -1`), die beiden UNTEREN dieselbe Tafel von unten. Eine
+// Tafel, vier Ecken, kein Spiegeln zur Laufzeit.
 fn shadow_mask(state: u64, wx: i64, wy: i64, ow: i64, oh: i64, r: u64,
     reach: u64, bank: u64, farbe: u64,
     cx0: i64, cy0: i64, cx1: i64, cy1: i64) {
@@ -1235,7 +1306,7 @@ fn shadow_mask(state: u64, wx: i64, wy: i64, ow: i64, oh: i64, r: u64,
         shadow_build(state)
     }
     let side: u64 = gs(state, S_SHS)
-    if side == 0 {
+    if side == 0 || reach == 0 {
         return
     }
     let base: u64 = state + kstate.WM_OFF + S_SHMASK
@@ -1246,61 +1317,59 @@ fn shadow_mask(state: u64, wx: i64, wy: i64, ow: i64, oh: i64, r: u64,
     let sy: i64 = wy + 1
     let si: i64 = side as i64
     let ri: i64 = r as i64
-    // ------------------------------------------------ die vier Ecken
-    //
-    // Die Maske haelt die LINKE OBERE Ecke; die anderen drei sind ihre
-    // Spiegelbilder. Vier Adressrechnungen statt vier Tafeln.
-    var j: u64 = 0
-    while j < side {
-        let yo: i64 = sy - si + j as i64
-        let yu: i64 = sy + oh + si - 1 - j as i64
-        var ii: u64 = 0
-        while ii < side {
-            let a: u64 = kstate.get8(base + j * SHMASK_SIDE + ii)
-            if a != 0 {
-                let xl: i64 = wx - si + ii as i64
-                let xr: i64 = wx + ow + si - 1 - ii as i64
-                shadow_px1(state, xl, yo, farbe, a, cx0, cy0, cx1, cy1)
-                shadow_px1(state, xr, yo, farbe, a, cx0, cy0, cx1, cy1)
-                shadow_px1(state, xl, yu, farbe, a, cx0, cy0, cx1, cy1)
-                shadow_px1(state, xr, yu, farbe, a, cx0, cy0, cx1, cy1)
-            }
-            ii = ii + 1
+    let rc: i64 = reach as i64
+    // x der vier Ecklaeufe
+    let lx: i64 = wx - rc // linke Tafel, vorwaerts
+    let rx: i64 = wx + ow - ri // rechte Tafel, rueckwaerts
+    let mx: i64 = wx + ri // der gerade Teil dazwischen
+    let mw: i64 = ow - 2 * ri
+    let my: i64 = sy + ri // erste Zeile des geraden Mittelteils
+    let mh: i64 = oh - 2 * ri
+    // -------------------------------------------- oben, side Zeilen
+    var j: i64 = 0
+    while j < si {
+        let y: i64 = sy - si + j
+        let m: u64 = base + (j * SHMASK_SIDE as i64) as u64
+        mask_run(state, lx, y, si, farbe, m, 1, cx0, cy0, cx1, cy1)
+        mask_run(state, rx, y, si, farbe, m + (side - 1), -1,
+            cx0, cy0, cx1, cy1)
+        // Der gerade Teil oben gibt es nur, solange die Zeile noch
+        // UEBER dem Fenster liegt.
+        if j < rc && mw > 0 {
+            let a: u64 = kstate.get8(ebase + (rc - 1 - j) as u64)
+            edge_run(state, mx, y, mw, farbe, a, cx0, cy0, cx1, cy1)
         }
         j = j + 1
     }
-    // ---------------------------------------- die vier geraden Stuecke
-    //
-    // Waagerecht ueber `fb.hline_a`, das intern ein Lauf ist; senkrecht
-    // Bildpunkt fuer Bildpunkt, weil eine Spalte im Rahmenpuffer kein
-    // Lauf ist. Die Deckung ist auf einem Streifen KONSTANT -- sie
-    // haengt nur am Abstand --, also wird sie einmal je Streifen
-    // gelesen und nicht je Bildpunkt gerechnet.
-    let mitte_w: i64 = ow - 2 * ri
-    let mitte_h: i64 = oh - 2 * ri
-    var k: u64 = 0
-    while k < reach {
-        let a: u64 = kstate.get8(ebase + k)
-        if a != 0 {
-            let d: i64 = k as i64 + 1
-            if mitte_w > 0 {
-                hline_a_clip(state, wx + ri, sy - d, mitte_w, farbe, a,
-                    cx0, cy0, cx1, cy1)
-                hline_a_clip(state, wx + ri, sy + oh - 1 + d, mitte_w,
-                    farbe, a, cx0, cy0, cx1, cy1)
-            }
-            if mitte_h > 0 {
-                var q: i64 = 0
-                while q < mitte_h {
-                    shadow_px1(state, wx - d, sy + ri + q, farbe, a,
-                        cx0, cy0, cx1, cy1)
-                    shadow_px1(state, wx + ow - 1 + d, sy + ri + q, farbe,
-                        a, cx0, cy0, cx1, cy1)
-                    q = q + 1
-                }
-            }
+    // ------------------------------------------- unten, side Zeilen
+    j = 0
+    while j < si {
+        let y: i64 = sy + oh + si - 1 - j
+        let m: u64 = base + (j * SHMASK_SIDE as i64) as u64
+        mask_run(state, lx, y, si, farbe, m, 1, cx0, cy0, cx1, cy1)
+        mask_run(state, rx, y, si, farbe, m + (side - 1), -1,
+            cx0, cy0, cx1, cy1)
+        if j < rc && mw > 0 {
+            let a: u64 = kstate.get8(ebase + (rc - 1 - j) as u64)
+            edge_run(state, mx, y, mw, farbe, a, cx0, cy0, cx1, cy1)
         }
-        k = k + 1
+        j = j + 1
+    }
+    // ------------------------------------------------ die Mitte
+    //
+    // Links laeuft der Streifen von aussen nach innen, rechts von innen
+    // nach aussen -- also dieselben `reach` Oktette, einmal vorwaerts
+    // und einmal rueckwaerts. Auch hier: EIN Streifen, zwei Seiten.
+    if mh > 0 && rc > 0 {
+        var q: i64 = 0
+        while q < mh {
+            let y: i64 = my + q
+            mask_run(state, wx - rc, y, rc, farbe, ebase + (reach - 1), -1,
+                cx0, cy0, cx1, cy1)
+            mask_run(state, wx + ow, y, rc, farbe, ebase, 1,
+                cx0, cy0, cx1, cy1)
+            q = q + 1
+        }
     }
 }
 
@@ -3018,20 +3087,30 @@ fn paint_win(state: u64, i: u64, cx0: u64, cy0: u64, cx1: u64, cy1: u64) {
 // RUNDE SOFTUI: DIE TITELLEISTE
 // =====================================================================
 //
-// DER VERLAUF, UND WARUM ER IN DIE RICHTUNG GEHT, IN DIE ER GEHT.
+// DER VERLAUF, UND WARUM ER NACH UNTEN HELLER WIRD UND NICHT NACH OBEN.
 //
 // Justin wollte "dezente Verlaeufe statt Volltonfarbe, nur wenige
-// Farbstufen". Die naheliegende Wahl -- oben heller, unten die
-// Grundfarbe -- ist im hellen Schema richtig und im dunklen falsch: bei
-// heller Schrift auf dunklem Grund SENKT jede Aufhellung des Grundes
-// den Kontrast, und diese Runde hat die Auflage, ihn nicht zu senken.
+// Farbstufen". Die erste Fassung hat den Verlauf VON DER SCHRIFT WEG
+// laufen lassen, damit er den Kontrast nie senken kann. Das Bild hat
+// die Regel widerlegt: im hellen Schema ist die Titelleiste #ffffff,
+// von Weiss aus gibt es kein Heller, und die Leiste kam VOLLKOMMEN FLACH
+// heraus -- alle neunzehn Zeilen 255,255,255, nachgemessen. Eine Regel,
+// die auf der Haelfte aller Themen nichts tut, ist keine.
 //
-// Also entscheidet nicht die Vorliebe, sondern die Schrift: DER
-// VERLAUF GEHT IMMER VON DER SCHRIFT WEG. Ist die Schrift heller als
-// die Leiste, wird die Leiste nach oben dunkler; ist sie dunkler, wird
-// sie nach oben heller. In beiden Faellen ist der oberste Bildpunkt
-// der kontraststaerkste, und die Grundfarbe des Themas steht unten
-// unveraendert da.
+// Also die andere Richtung, und sie ist auch die richtigere: DIE
+// OBERSTE ZEILE IST DIE DUNKELSTE, die unterste traegt die Farbe des
+// Themas unveraendert. Das ist ein weicher Eigenschatten an der
+// Oberkante, also genau das, was eine gerundete Kante mit Licht von
+// oben macht. Nach unten gibt es IMMER Platz (ausser bei Schwarz), und
+// wo es ihn nicht gibt, nimmt `grad_room` nur so viel, wie da ist --
+// kein Kanal darf anschlagen, sonst kippt der Farbton ins Blaue.
+//
+// UND DER KONTRAST. Auf hellem Grund mit dunkler Schrift senkt das
+// Abdunkeln den Kontrast ein wenig (17,85 auf 17,04 gemessen fuer
+// #0f172a auf #ffffff), auf dunklem Grund mit heller Schrift HEBT es
+// ihn. Beide Werte liegen weit ueber dem kleinsten Paar des Systems --
+// die Titelleiste ist nirgends das bindende Paar --, und
+// tools/softui/kontrast.py misst es aus dem Bild statt es zu glauben.
 fn lum3(c: u64) -> u64 {
     return ((c >> 16) & 255) + ((c >> 8) & 255) + (c & 255)
 }
@@ -3120,17 +3199,46 @@ fn paint_title(state: u64, i: u64, wx: i64, wy: i64, ow: i64, titel: u64,
     // Endfarbe des Verlaufs in EINEM `fill_round` -- so bleibt die
     // Kantenglaettung der Ecke richtig gefaerbt --, und darunter
     // laeuft je eine Zeile.
-    let auf: bool = lum3(schrift) < lum3(titel)
-    let oben: u64 = rgb24(state, shade24(deco_titel(state, i), grad, auf))
+    let grund: u64 = deco_titel(state, i)
+    let d: u64 = grad_room(grund, grad)
+    if d == 0 {
+        fill_round(state, x0, y0, tw, th, tr, titel, ax0, ay0, ax1, ay1)
+        if tr != 0 {
+            fill_clip(state, x0, y0 + tr as i64, tw, th - tr as i64,
+                titel, ax0, ay0, ax1, ay1)
+        }
+        return
+    }
+    let oben: u64 = rgb24(state, shade24(grund, d, false))
     fill_round(state, x0, y0, tw, th, tr, oben, ax0, ay0, ax1, ay1)
     var j: i64 = tr as i64
     while j < th {
         // linear von `oben` zurueck auf die Grundfarbe
-        let rest: u64 = grad * (th - 1 - j) as u64 / (th - 1) as u64
-        let c: u64 = rgb24(state, shade24(deco_titel(state, i), rest, auf))
+        let rest: u64 = d * (th - 1 - j) as u64 / (th - 1) as u64
+        let c: u64 = rgb24(state, shade24(grund, rest, false))
         fill_clip(state, x0, y0 + j, tw, 1, c, ax0, ay0, ax1, ay1)
         j = j + 1
     }
+}
+
+// Wieviel Verlauf die Farbe TRAEGT. Der kleinste Kanal setzt die
+// Grenze: schlaegt einer an, waehrend die anderen noch Platz haben,
+// verschiebt sich der Farbton, und ein Verlauf, der die Farbe wechselt,
+// ist keiner mehr.
+fn grad_room(c: u64, want: u64) -> u64 {
+    var m: u64 = (c >> 16) & 255
+    let g: u64 = (c >> 8) & 255
+    let b: u64 = c & 255
+    if g < m {
+        m = g
+    }
+    if b < m {
+        m = b
+    }
+    if want > m {
+        return m
+    }
+    return want
 }
 
 // Die ROHE Titelfarbe (0xRRGGBB) des Fensters -- `shade24` rechnet in

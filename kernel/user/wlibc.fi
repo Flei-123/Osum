@@ -2708,18 +2708,74 @@ fn conf_key(kp: u64, kn: u64, vp: u64, vn: u64) -> bool {
 // `shape_keys()` is reported on the serial line so that zero is
 // visible. The scheme files (about 1.5 kilooctets) were inside the old
 // bound by luck and are inside the new one by margin.
+// ================================================== ROUND SOFTUI
+//
+// AND THE SAME BUG AGAIN, ONE FILE LATER -- SO THIS TIME THE LIMIT GOES
+// AWAY INSTEAD OF GOING UP.
+//
+// Round LOOK raised this buffer from 1536 to 4096 because a shape file
+// with its reasoning written into it was 4459 octets and the reader saw
+// only comment.  Round SOFTUI added nine tokens to `modern.shape`, each
+// with the measurement that produced it, and the file became 6981
+// octets.  The symptom was identical and just as quiet:
+//
+//     taskbar: shape file=modern name= id=0 keys=0 ctrl_h=26
+//
+// -- keys=0, the resolver falls back to `classic`, and a round about
+// how the system LOOKS renders in the old shape while every other line
+// of the log says `modern`.
+//
+// Raising 4096 to 8192 would buy exactly one more round.  So the reader
+// now takes the file in pieces and carries the unfinished last line
+// over into the next one: the buffer bounds a LINE, not a FILE, and
+// there is no length at which a documented configuration file stops
+// working.  `tools/softui/run.sh` section B checks it on a file with
+// twelve kilooctets of comment in front of one key.
 fn kv_read(path: u64, which: u64) -> u64 {
     var buf: [u8; 4096] = [0 as u8; 4096]
     let fd: u64 = io.open(path, 0)
     if ulib.bad(fd) {
         return 0
     }
-    let n: u64 = io.read(fd, (&buf[0 as usize]) as u64, 4095)
-    io.close(fd)
-    if ulib.bad(n) || n == 0 {
-        return 0
+    let b: u64 = (&buf[0 as usize]) as u64
+    var taken: u64 = 0
+    var rest: u64 = 0
+    var weiter: bool = true
+    while weiter {
+        let n: u64 = io.read(fd, b + rest, 4095 - rest)
+        if ulib.bad(n) || n == 0 {
+            weiter = false
+        } else {
+            let have: u64 = rest + n
+            // bis zum LETZTEN Zeilenende auswerten; was danach kommt,
+            // ist eine angefangene Zeile und wandert nach vorn.
+            var cut: u64 = have
+            while cut > 0 && *((b + cut - 1) as *mut u8) != 10 as u8 {
+                cut = cut - 1
+            }
+            if cut == 0 {
+                // Eine Zeile, die laenger ist als der Puffer. Sie wird
+                // ausgewertet und dann verworfen -- eine Marke mit
+                // viertausend Oktetten Wert gibt es nicht.
+                taken = taken + kv_scan(b, have, which)
+                rest = 0
+            } else {
+                taken = taken + kv_scan(b, cut, which)
+                var k: u64 = 0
+                while cut + k < have {
+                    *((b + k) as *mut u8) =
+                        *((b + cut + k) as *mut u8)
+                    k = k + 1
+                }
+                rest = have - cut
+            }
+        }
     }
-    return kv_scan((&buf[0 as usize]) as u64, n, which)
+    io.close(fd)
+    if rest > 0 {
+        taken = taken + kv_scan(b, rest, which)
+    }
+    return taken
 }
 
 // DIE OKTETTE, DIE SCHON IM SPEICHER LIEGEN. `conf_changed` liest
@@ -3742,6 +3798,13 @@ fn form_push() -> u64 {
 fn deco_push() -> u64 {
     var n: u64 = 0
     if met[(M_TONE) as usize] < 50 {
+        // THE FOCUSED BAR IS THE RAISED SURFACE AND THE OTHER ONE IS
+        // THE PLAIN SURFACE.  Not two arbitrary greys: `raised` is
+        // DEFINED as the step above `surface` in both the light and the
+        // dark binding, so the focused window is nearer the light in
+        // either mode.  The distance is seven levels in day/light --
+        // enough to see side by side, not enough to shout -- and the
+        // rest of the focus cue is the text weight and the shadow.
         n = n + deco_one(0, theme_live(C_BORDER))
         n = n + deco_one(1, theme_live(C_WINDOW_BG))
         n = n + deco_one(2, theme_live(C_TEXT_MUTED))
