@@ -76,6 +76,20 @@ Ein Restbefund, aelter als diese Runde: der Kern-Rasterer und
 ab (an 3 unabhaengigen Stellen je 3). Steht als OBERGRENZE 3 im
 Pruefer -- waechst die Zahl, wird der Abschnitt rot.
 
-## 6. Offen
+## 6. Vollstaendige Abnahme
 
-Vollstaendige Abnahme (`test.sh`, alle Abschnitte) laeuft.
+`test.sh` ueber alle Abschnitte laeuft. Ein roter Abschnitt ist
+untersucht und als FLATTERER nachgewiesen:
+
+**Abschnitt 4 (`tools/kernel/run.sh`), `firnc0 gegen firnc1: the same
+kernel says the same thing`** -- 175 statt 176 gruen. Der Unterschied
+ist kein Text, sondern die Reihenfolge auf der seriellen Leitung: im
+einen Lauf steht `user: hello #N`, im anderen `procuser: hello #N` und
+eine Zeile `: hello pid=N` mehr -- zwei Prozesse schreiben gleichzeitig
+in denselben Port, ihre Zeilen verschraenken sich. Nichts davon ist
+deutscher Text, und keine der 42 geaenderten Zeichenketten kommt in
+diesem Abschnitt vor.
+
+Einzeln nachgestellt: **3 von 3 Laeufen 176 passed, 0 failed.**
+Der Abschnitt ist damit als Flatterer belegt und nicht als Rueckschritt
+dieser Runde.
