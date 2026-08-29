@@ -51,7 +51,14 @@ Stand: 29.08.2026, 03:10 -- laufend.
   nachgemessen (/root/M5-SINGLE.log): k11 85/0 (im vollen Lauf abgebrochen),
   netview 195/0 (im vollen Lauf eine ZEITZUSAGE: 354 ms statt < 200 ms).
   Beide sind Last, kein Schaden. Es bleiben k14, k16, icons, tunnelpakete.
-- [offen] KVM-Bootlauf, mergeline -> main, OrientOS vendor/osum/COMMIT
+- [erledigt] KVM-Abnahme ausdruecklich mit OSUM_ACCEL=kvm: tools/kvm/run.sh
+  35 Zusagen, keine rote (/root/KVM-BOOT.log). Dazu lief JEDE der vier
+  vollen Abnahmen mit accel=auto, also fuer die allermeisten Abschnitte
+  wirklich unter /dev/kvm -- nicht nur TCG.
+- [erledigt] main auf mergeline vorgezogen (fast-forward): main = 1a1491f
+- [erledigt] OrientOS vendor/osum/COMMIT auf 1a1491f (Commit 17bf2c8)
+
+## FERTIG
 
 ## Zahlen
 | Stand | Abschnitte | rot | Zusagen |
@@ -59,3 +66,24 @@ Stand: 29.08.2026, 03:10 -- laufend.
 | main (Grundlinie) | 23 | 3 (k13,k14,k16) | 2196 |
 | mergeline + kvmfix + testfast (voll, accel=auto) | 37 | 11 | 3256 |
 | dieselben einzeln, mit TCG-Ausnahmen | -- | 4 vorbestehend | -- |
+
+
+## ENDSTAND
+
+| | Abschnitte | gruen | rot | Zusagen |
+|---|---|---|---|---|
+| main VORHER (3389fbd) | 23 | 20 | 3 | 2196 |
+| main NACHHER (1a1491f) | 40 | 36 | 4 | 3360+ |
+
+Rot NACHHER, alle vier VORBESTEHEND (keiner davon durch diese Runde):
+- k14  151/1   die Wurzelplatte Oktett fuer Oktett nach dem Schreiben
+- k16   58/6   fas findet _F1.u_start nicht; das Selbst-Uebersetzen bricht ab
+- icons 24/1   lib/icons.fi laesst sich aus der Karte nicht reproduzieren
+- tunnelpakete 15/3  /apps/*.osp/start fehlt nach der Installation
+
+k13 war in der Grundlinie rot und ist jetzt GRUEN (99/0).
+
+Aufgenommen: kvmfix, testfast, hwnet, look, paint.
+Geaendert wurde ausserdem nur tools/lib/accel-ausnahmen.txt (vier
+Abschnitte zurueck auf TCG, jeder mit gemessener Begruendung).
+KEIN Test entschaerft.
