@@ -35,7 +35,7 @@ timeout 200 $QEMU_X86 -kernel "$D/k.mb" -m 384 \
     -drive "file=$D/live.img,format=raw,if=ide,index=0" \
     -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1 &
 pid=$!
-i=0; while [ $i -lt 900 ]; do grep -qaE '^wm: hold' "$D/out.txt" 2>/dev/null && break; kill -0 $pid 2>/dev/null || break; sleep 0.15; i=$((i+1)); done
+i=0; while [ $i -lt 900 ]; do grep -qa 'wm: hold' "$D/out.txt" 2>/dev/null && break; kill -0 $pid 2>/dev/null || break; sleep 0.15; i=$((i+1)); done
 python3 tools/wm/monitor.py "$sock" "$M" > "$D/monlog" 2>&1
 python3 tools/gfx/screenshot.py "$sock" "$D/s.ppm" 25 > "$D/shot" 2>&1
 wait $pid; echo "rc=$?"
