@@ -56,15 +56,33 @@ echo "== A. classic ist unveraendert =="
 # Runde hat den Fensterserver, die Widget-Bibliothek, die Leiste und die
 # Einstellungen angefasst. Also wird das Bild gegen den Zweig gehalten,
 # von dem hier abgezweigt wurde, und zwar Bildpunkt fuer Bildpunkt.
-BASE=${SOFTUIBASE:-/root/softui-base}
-if shot A shape=classic scheme=day mode=light keep=yes; then
+# Die Grundlinie ist ein Arbeitsbaum auf dem ELTERNCOMMIT dieser Runde
+# (d4c2742, nach den drei Merges und vor der ersten Zeile SOFTUI-Code) --
+# NICHT der Zweig `mergeline`: der hat weder `paint` noch `themestore`,
+# und der Unterschied waere dann deren Werk und nicht meins.
+#   git worktree add --detach /root/softui-base d4c2742
+REF=${SOFTUIBASEPPM:-/tmp/softui/base-classic/desktop.ppm}
+if shot A shape=classic scheme=day mode=light keep=yes accel=tcg; then
     ok "classic bootet (QEMU exit 21)"
-    if [ -s "$BASE/../softui/base-classic/desktop.ppm" ] \
-       || [ -s "${SOFTUIBASEPPM:-/tmp/softui/base-classic/desktop.ppm}" ]; then
-        REF=${SOFTUIBASEPPM:-/tmp/softui/base-classic/desktop.ppm}
-        D=$(python3 tools/paint/shadow.py vergleich "$REF" \
-            "$TMPD/A/desktop.ppm" 0 0 800 600 2>&1 \
-            | grep -oE 'unterschiedlich [0-9]+' | grep -oE '[0-9]+')
+    if [ -s "$REF" ]; then
+        # ZWEI RECHTECKE SIND AUSGENOMMEN, UND BEIDE STEHEN IM BERICHT.
+        #
+        # (1) Die Uhr in der Leiste. Sie zeigt die echte Zeit; zwei
+        #     Laeufe sind zwangslaeufig verschieden.
+        # (2) Die Malflaeche des Terminalfensters. Der Kernel spiegelt
+        #     seinen Mitschnitt auf den Schirm (`fb: console mirrored`),
+        #     und darin stehen die Groesse des Kerns, Rahmenadressen und
+        #     die Zahlen von `fbbench` -- alles Dinge, die sich aendern,
+        #     weil der Kern GROESSER geworden ist, und keines davon ist
+        #     eine Aussage ueber das Aussehen.
+        #
+        # Alles andere -- Schreibtisch, Leiste, Fensterrahmen,
+        # Titelleisten, Starter, Suchfenster -- wird ohne Nachsicht
+        # verglichen.
+        G=$(python3 tools/softui/gleich.py "$REF" "$TMPD/A/desktop.ppm" \
+            --zeit --ausser 26,62,560,380 2>&1)
+        echo "$G" | sed 's/^/        /'
+        D=$(echo "$G" | grep -oE 'unterschiedlich [0-9]+' | grep -oE '[0-9]+')
         is "classic: abweichende Bildpunkte gegen die Grundlinie" "${D:-x}" "0"
     else
         bad "keine Grundlinie -- SOFTUIBASEPPM setzen"
@@ -162,17 +180,30 @@ if [ -s "$TMPD/B/desktop.ppm" ]; then
 fi
 
 echo "== F. der Kontrast =="
-# GEMESSEN WIRD AUS DEM BILD. Warum das Tokenmodell hier nicht reicht,
-# steht in tools/softui/kontrast.py.
+# GEMESSEN WIRD ZWEIMAL, und die beiden Zahlen beantworten zwei Fragen.
+#
+# (1) Das TOKENMODELL. Die Marke, gegen die diese Runde antritt -- 5,16
+#     fuer day+modern und 12,36 fuer night+modern -- ist das Paar
+#     `on-accent / accent`, also weisse Schrift auf dem Akzentblau.
+#     Diese Runde hat keine einzige Farbe angefasst, also MUSS die Zahl
+#     gleich bleiben; wenn nicht, ist etwas passiert, das niemand
+#     wollte.
+# (2) DAS BILD. Die Titelleiste traegt den Akzent nicht mehr; was dort
+#     wirklich steht, weiss nur das Foto.
 for v in "day light 516" "night dark 1236"; do
     set -- $v
     if shot "F-$1" shape=modern scheme=$1 mode=$2 keep=yes; then
         M=$(python3 tools/theme/model.py contrast "assets/schemes/$1.scheme" $2 \
-            | awk '$4=="normal"||$3=="normal"{print $(NF-1)}' | sort -n | head -1)
-        ge "$1/$2: kleinstes Textpaar im Modell (x100)" "${M:-0}" "$3"
+            | awk '$1=="on-accent"&&$2=="accent"{print $6}')
+        is "$1/$2: Text/Akzent im Modell (x100), unveraendert" "${M:-0}" "$3"
+        W=$(python3 tools/theme/model.py contrast "assets/schemes/$1.scheme" $2 \
+            | awk '$3=="normal"{print $6}' | sort -n | head -1)
+        echo "        kleinstes Textpaar im Modell: $W"
         K=$(python3 tools/softui/titel.py "$TMPD/F-$1/desktop.ppm" \
             "$TMPD/F-$1/serial.txt" 2>&1 | tail -1)
         echo "        $K"
+        R=$(echo "$K" | grep -oE 'ratio [0-9]+' | grep -oE '[0-9]+')
+        ge "$1/$2: Titelschrift im BILD, gemessen" "${R:-0}" "$(( $3 / 100 ))"
     fi
 done
 
