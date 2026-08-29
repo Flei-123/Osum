@@ -332,6 +332,30 @@ def main(argv):
                        % (rel, len(roh), g["INFO_READ"]))
         for nr, zeile in enumerate(roh.decode("utf-8").split("\n"), 1):
             umlaute += sum(1 for c in zeile if c in "äöüÄÖÜß")
+            # DIE SUCHWOERTER SIND EINE AUSNAHME, UND SIE HAT EINE REGEL.
+            # In `keys=` ist ASCII GEWOLLT: wer "menue" tippt, weil seine
+            # Tastatur kein "ü" hat, soll den Starter finden. Aber wer
+            # "menü" tippt, auch -- deshalb muss die Umlautform DANEBEN
+            # stehen und nicht STATT dessen. Genau das wird hier geprueft.
+            if zeile.startswith("keys="):
+                woerter = [w.strip() for w in
+                           zeile.split("=", 1)[1].split(",")]
+                for w in woerter:
+                    if not w:
+                        continue
+                    t = finde(w)
+                    if not t:
+                        continue
+                    geprueft += 1
+                    soll = w
+                    for stamm, ersatz in t:
+                        soll = soll.replace(stamm, ersatz)
+                    if soll not in woerter:
+                        fehler.append(
+                            "%s:%d  keys= hat '%s', aber nicht '%s' "
+                            "-- die Umlautform gehoert DANEBEN, nicht "
+                            "statt dessen" % (rel, nr, w, soll))
+                continue
             if not zeile.startswith(("name=", "info=")):
                 continue
             geprueft += 1
