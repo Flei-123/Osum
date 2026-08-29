@@ -195,8 +195,14 @@ echo "== 4. die Gegenprobe: Super+A ist KEIN Tippen auf Super =="
 printf 'warte 8\nsendkey meta_l-a\nwarte 3\n' > "$TMPD/dr-plus"
 if lauf plus "$TMPD/dr-plus"; then
     has "$L" "hk: super+a" "4: der Kern hat Super+A als Kuerzel gesehen"
-    hasnot "$L" "hk: super
-" "4: und NICHT zusaetzlich als Tippen auf die Taste allein"
+    # GEZAEHLT, NICHT GESUCHT. Hier stand ein `hasnot` mit einem
+    # Zeilenumbruch IM MUSTER -- und `grep -F` liest ein Muster mit
+    # Zeilenumbruch als ZWEI Muster: "hk: super" und das LEERE, und das
+    # leere passt auf jede Datei. Die Probe konnte also gar nicht
+    # bestehen. Die Zahl der Zeilen, die genau "hk: super" sind, sagt
+    # dasselbe und ist nachrechenbar.
+    n_tap=$(grep -ac '^hk: super$' "$L")
+    num "4: und NICHT zusaetzlich als Tippen auf die Taste allein" "$n_tap" eq 0
     hasnot "$L" "sucher: open" "4: das Suchfeld ist zugeblieben"
     has "$L" "qs: open" "4: die Schnelleinstellungen sind aufgegangen -- das Kuerzel wirkt wie vorher"
     n_a=$(grep -ac '^key: a$' "$L")
