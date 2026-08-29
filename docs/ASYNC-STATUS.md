@@ -437,3 +437,33 @@ Bindung die vollständige Aussage und nicht die halbe.
 | `/bin/aiot` über die libc | 27 Zahlen, alle wie erwartet |
 | Gegenproben `noagen` / `noareap` / `noawork` | fallen, wie sie sollen |
 | beide Übersetzer (firnc0, firnc1) | identisch |
+
+### Die volle Abnahme (`./test.sh`, 42 Abschnitte, 3352 Zusagen)
+
+Der erste vollständige Lauf meldete **33 grün / 10 rot**. Danach
+einzeln nachgefahren:
+
+| Abschnitt | im Lauf | einzeln nachgefahren | Urteil |
+|---|---|---|---|
+| `posix` | 133 / 1 | **134 / 0** | von dieser Runde verursacht, **behoben** (E_STALE/E_CANCELED fehlten in der libc) |
+| `wm` | 100 / 3 | **103 / 0** | alter `pipefail`-Fehler im Läufer, von dieser Runde ausgelöst, **behoben** |
+| `k15` | 251 / 1 | **252 / 0** | derselbe, **behoben** |
+| `tiling` | 67 / 1 | **68 / 0** | derselbe, **behoben** |
+| `net` | 74 / 1 | **75 / 0** | Lastartefakt (siehe unten) |
+| `netview` | 194 / 1 | **195 / 0** | Lastartefakt |
+| `k14` | 151 / 1 | — | **alt**, dieselbe Zeile wie auf `handle` |
+| `k16` | 58 / 6 | — | **alt**, dieselben sechs wie auf `handle` |
+| `icons` | 1 rot | auf `handle` nachgefahren: **dieselbe Zeile rot** | **alt** |
+| `tunnel/pakete.sh` | 15 / 3 | auf `handle` nachgefahren: **15 / 3** | **alt** |
+
+**Zu den Lastartefakten**, und das gehört dazu, weil es die Zahlen
+erklärt: während dieses Laufs lief auf derselben Maschine ein zweiter
+vollständiger `./test.sh` (Runde MERGE-2 in `/root/mgline2`). Beide
+teilen sich `/tmp/osum-netz.lock`; das Protokoll weist Wartezeiten von
+2808 s und 3292 s auf diese Sperre aus. `net` misst Durchsatz durch 20 %
+Paketverlust und `netview` zählt Bildpunkte nach einem Netzvorgang —
+beide sind zeitabhängig. Einzeln nachgefahren sind beide grün.
+
+**Keine der zehn roten Zeilen bleibt dieser Runde zur Last.** Vier waren
+sie (und sind behoben), zwei waren Last, vier sind älter als dieser
+Zweig.
