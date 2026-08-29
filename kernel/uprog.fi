@@ -189,6 +189,41 @@ const P_HBENCH: u64 = 49
 const SEEK_CUR: u64 = 1
 // RUNDE HANDLE: der Selbsttest der Handle-Schicht in Ring 3.
 const P_HANDLE: u64 = 48
+// RUNDE ASYNC: der Selbsttest der Auftragsschicht und ihre Messung.
+const P_ASYNC: u64 = 50
+const P_ABENCH: u64 = 51
+// RUNDE ASYNC: die Arten, die ein Dateisystem brauchen.
+const P_ASYNCFS: u64 = 52
+
+// Die sechs Aufrufe des Blocks ab 1980 (`kernel/sys.fi`).
+const AIO_VERSION: u64 = 1980
+const AIO_SUBMIT: u64 = 1981
+const AIO_WAIT: u64 = 1982
+const AIO_CANCEL: u64 = 1983
+const AIO_STATE: u64 = 1984
+const AIO_INFO: u64 = 1985
+const AOP_READ: u64 = 1
+const AOP_WRITE: u64 = 2
+const AOP_OPEN: u64 = 3
+const AOP_CLOSE: u64 = 4
+const AOP_FSYNC: u64 = 5
+const AOP_POLL: u64 = 6
+const AQ_NEW: u64 = 1
+const AQ_RUN: u64 = 2
+const AQ_DONE: u64 = 3
+const AQ_CANCEL: u64 = 4
+const AQ_FAIL: u64 = 5
+// Die Fehlerwerte von POSIX, die diese Runde benutzt.
+const EA_PERM: u64 = 1
+const EA_BADF: u64 = 9
+const EA_AGAIN: u64 = 11
+const EA_TIMEDOUT: u64 = 110
+const EA_STALE: u64 = 116
+const EA_CANCELED: u64 = 125
+// `poll` aus der Runde POLL -- gebraucht fuer die zweite Haelfte der
+// Zusage (b): nachsehen, OHNE zu lesen.
+const SYS_POLL_A: u64 = 7
+const POLLIN_A: u64 = 1
 
 // Die elf Aufrufe des Blocks ab 2200 (`kernel/sys.fi`).
 const HND_VERSION: u64 = 2200
@@ -386,6 +421,15 @@ fn u_enter(packed: u64) {
     }
     if prog == P_HANDLE {
         u_handle(arg)
+    }
+    if prog == P_ASYNC {
+        u_async(arg)
+    }
+    if prog == P_ABENCH {
+        u_abench(arg)
+    }
+    if prog == P_ASYNCFS {
+        u_asyncfs(arg)
     }
     u_sys(SYS_EXIT, 0, 0, 0)
     while true {
@@ -1323,6 +1367,663 @@ fn u_hbench(arg: u64) {
     u_say_line((&s_l[0]) as u64, u_hb(SYS_LSEEK, OUT, 0, SEEK_CUR))
     u_say_line((&s_n[0]) as u64, HB3_BLOCKS * HB3_ITERS)
     u_sys(SYS_EXIT, 0, 0, 0)
+}
+
+
+// ================================================== RUNDE ASYNC
+//
+// DER SELBSTTEST DER ASYNCHRONEN AUFTRAGSSCHICHT, AUS RING 3.
+//
+// Nicht der Kernel behauptet, seine Lebensdauerrechnung stimme -- ein
+// unprivilegiertes Programm jenseits des Schutzwalls sagt Zeile fuer
+// Zeile, was es geschafft hat und was ihm verwehrt wurde. Sechs
+// Szenarien, und jedes ist eine Fehlerklasse, an der io_uring wirklich
+// gescheitert ist:
+//
+//   (a) DAS HANDLE WIRD GESCHLOSSEN, WAEHREND DER AUFTRAG LAEUFT.
+//       Das Objekt muss bis zum Ende leben und danach sauber weg sein.
+//   (b) DER PLATZ WIRD NEU VERGEBEN. Der alte Auftrag darf das neue
+//       Objekt NIEMALS anfassen -- er bekommt -ESTALE.
+//   (c) ABBRUCH. Genau eine Fertigmeldung, kein Free waehrend in Flug.
+//   (d) DER PROZESS STIRBT MIT LAUFENDEN AUFTRAEGEN. Nichts bleibt.
+//   (e) WARTESCHLANGE VOLL UND ZEITGRENZE ABGELAUFEN. Ein definierter
+//       Fehler und keine Blockade.
+//   (f) EIN FREMDER AUFTRAG. Zugriff verweigert.
+//
+// GEARBEITET WIRD AUF ROEHREN, aus demselben Grund wie in Runde HANDLE:
+// eine Roehre gibt es ohne Dateisystem, ihre Enden haben ungleiche
+// Rechte, und sie hat einen echten Verweiszaehler, den man beim
+// Abraeumen beobachten kann.
+//
+// DER PRUEFSTANDSHALT (`AIO_INFO 20`) ist das, was diesen Test von einem
+// Zufallsfund unterscheidet. Die Zusage (b) beschreibt ein ZEITFENSTER --
+// abgegeben, noch nicht ausgefuehrt --, und ohne einen Halt haengt es an
+// der Zeitscheibe, ob der Test es trifft. Mit ihm trifft er es jedes Mal.
+
+fn a_sub(op: u64, fd: u64, buf: u64, len: u64, ud: u64) -> u64 {
+    return u_sys6(AIO_SUBMIT, op, fd, buf, len, ud, 0)
+}
+
+fn a_hold(v: u64) -> u64 {
+    return u_sys(AIO_INFO, 20, v, 0)
+}
+
+fn a_info(was: u64, arg: u64) -> u64 {
+    return u_sys(AIO_INFO, was, arg, 0)
+}
+
+// Dem Arbeitsfaden Gelegenheit geben, den Auftrag wirklich anzufassen.
+// `yield` allein reicht nicht immer -- der Faden kann zwischendurch auf
+// eine Roehre warten. Also eine Handvoll Zeitscheiben.
+fn a_atmen(n: u64) {
+    var i: u64 = 0
+    while i < n {
+        u_sys(SYS_YIELD, 0, 0, 0)
+        i = i + 1
+    }
+}
+
+// (a) DAS HANDLE WIRD GESCHLOSSEN, WAEHREND DER AUFTRAG LAEUFT.
+//
+// Der Auftrag ist ein `read` auf dem leeren Leseende einer Roehre: der
+// Arbeitsfaden nimmt ihn und bleibt darin stehen, bis jemand schreibt.
+// Genau dieses Fenster braucht die Zusage. Der Deskriptor wird
+// mittendrin geschlossen -- das Objekt muss trotzdem stehen bleiben,
+// weil der Auftrag es zaehlt, und danach sauber verschwinden.
+fn u_async_a() -> u64 {
+    var n_lauf: [u8; 17] = "a-auftrag-laeuft\0"
+    var n_lebt: [u8; 21] = "a-kein-free-in-flug\0\0"
+    var n_erg: [u8; 16] = "a-ergebnis-vier\0"
+    var n_weg: [u8; 15] = "a-danach-frei\0\0"
+    var n_leck: [u8; 12] = "a-kein-leck\0"
+    var fds: [u64; 2] = [0 as u64; 2]
+    var buf: [u8; 8] = [0 as u8; 8]
+    var cq: [u64; 4] = [0 as u64; 4]
+    var vier: [u8; 5] = "abcd\0"
+    var ok: u64 = 0
+    u_sys(SYS_PIPE, (&fds[0]) as u64, 0, 0)
+    let rfd: u64 = (fds[0]) & 0xFFFFFFFF
+    let wfd: u64 = ((fds[0]) >> 32) & 0xFFFFFFFF
+    let of: u64 = u_sys(HND_OBJINFO, 8, rfd, 0)
+    let id: u64 = a_sub(AOP_READ, rfd, (&buf[0]) as u64, 4, 4242)
+    a_atmen(8)
+    ok = ok + h_claim((&n_lauf[0]) as u64, u_sys(AIO_STATE, id, 0, 0), AQ_RUN)
+    // MITTENDRIN SCHLIESSEN. Ohne den Mitzaehler am Objekt waere das
+    // hier ein Use-after-free.
+    u_sys(SYS_CLOSE, rfd, 0, 0)
+    ok = ok + h_claim((&n_lebt[0]) as u64, u_sys(HND_OBJINFO, 3, of, 0), 1)
+    u_sys(SYS_WRITE, wfd, (&vier[0]) as u64, 4)
+    let got: u64 = u_sys6(AIO_WAIT, (&cq[0]) as u64, 1, 2000, 1, 0, 0)
+    if got == 1 {
+        ok = ok + h_claim((&n_erg[0]) as u64, cq[2], 4)
+    } else {
+        ok = ok + h_claim((&n_erg[0]) as u64, 0 -% got, 4)
+    }
+    ok = ok + h_claim((&n_weg[0]) as u64, u_sys(HND_OBJINFO, 3, of, 0), 0)
+    u_sys(SYS_CLOSE, wfd, 0, 0)
+    ok = ok + h_claim((&n_leck[0]) as u64, a_info(0, 0), 0)
+    return ok
+}
+
+// (b) DER PLATZ WIRD NEU VERGEBEN -- DIE FEHLERKLASSE, DERENTWEGEN ES
+//     DIESE RUNDE GIBT.
+//
+// Auftrag abgeben, aber NICHT ausfuehren lassen (Halt). Das Handle
+// schliessen. Eine neue Roehre aufmachen: sie bekommt DIESELBE
+// Deskriptornummer und damit DENSELBEN Handle-Platz. Vier Oktette
+// hineinschreiben. Dann die Faeden loslassen.
+//
+// Der alte Auftrag muss -ESTALE bekommen. Und -- das ist die zweite
+// Haelfte, und ohne sie beweist die erste nichts -- die vier Oktett in
+// der NEUEN Roehre muessen noch da sein. Haette der Auftrag das neue
+// Objekt getroffen, haette er sie weggelesen; `poll` sagt es, ohne
+// selbst zu lesen.
+fn u_async_b() -> u64 {
+    var n_alt: [u8; 12] = "b-veraltet\0\0"
+    var n_neu: [u8; 22] = "b-nicht-das-neue-ding\0"
+    var n_platz: [u8; 20] = "b-selber-platz\0\0\0\0\0\0"
+    var n_leck: [u8; 12] = "b-kein-leck\0"
+    var fds: [u64; 2] = [0 as u64; 2]
+    var buf: [u8; 8] = [0 as u8; 8]
+    var cq: [u64; 4] = [0 as u64; 4]
+    var pfd: [u64; 1] = [0 as u64; 1]
+    var vier: [u8; 5] = "wxyz\0"
+    var ok: u64 = 0
+    a_hold(1)
+    u_sys(SYS_PIPE, (&fds[0]) as u64, 0, 0)
+    let rfd: u64 = (fds[0]) & 0xFFFFFFFF
+    let wfd: u64 = ((fds[0]) >> 32) & 0xFFFFFFFF
+    let id: u64 = a_sub(AOP_READ, rfd, (&buf[0]) as u64, 4, 7)
+    u_sys(SYS_CLOSE, rfd, 0, 0)
+    u_sys(SYS_CLOSE, wfd, 0, 0)
+    var fds2: [u64; 2] = [0 as u64; 2]
+    u_sys(SYS_PIPE, (&fds2[0]) as u64, 0, 0)
+    let rfd2: u64 = (fds2[0]) & 0xFFFFFFFF
+    let wfd2: u64 = ((fds2[0]) >> 32) & 0xFFFFFFFF
+    ok = ok + h_claim((&n_platz[0]) as u64, rfd2, rfd)
+    u_sys(SYS_WRITE, wfd2, (&vier[0]) as u64, 4)
+    a_hold(0)
+    let got: u64 = u_sys6(AIO_WAIT, (&cq[0]) as u64, 1, 2000, 1, 0, 0)
+    if got == 1 {
+        ok = ok + h_claim((&n_alt[0]) as u64, 0 -% (cq[2]), EA_STALE)
+    } else {
+        ok = ok + h_claim((&n_alt[0]) as u64, 0 -% got, EA_STALE)
+    }
+    // Die vier Oktett stehen noch in der NEUEN Roehre. `poll` mit
+    // Zeitgrenze 0 liest nichts weg -- es sagt nur, dass etwas da ist.
+    pfd[0] = (rfd2 & 0xFFFFFFFF) | (POLLIN_A << 32)
+    u_sys(SYS_POLL_A, (&pfd[0]) as u64, 1, 0)
+    ok = ok + h_claim((&n_neu[0]) as u64,
+        h_hat((pfd[0]) >> 48, POLLIN_A), 1)
+    u_sys(SYS_CLOSE, rfd2, 0, 0)
+    u_sys(SYS_CLOSE, wfd2, 0, 0)
+    ok = ok + h_claim((&n_leck[0]) as u64, a_info(0, 0), 0)
+    return ok
+}
+
+// (c) ABBRUCH -- UND GENAU EINE FERTIGMELDUNG.
+//
+// Zwei Faelle, und sie sind verschieden. Ein Auftrag, der noch NICHT
+// angefangen hat, wird von dem gemeldet, der ihn abbricht. Ein Auftrag,
+// der LAEUFT, wird nur markiert und von seinem Arbeitsfaden gemeldet --
+// alles andere waere die doppelte Meldung.
+fn u_async_c() -> u64 {
+    var n_neu: [u8; 14] = "c-angelegt\0\0\0\0"
+    var n_ab: [u8; 16] = "c-abgebrochen\0\0\0"
+    var n_weg: [u8; 19] = "c-nach-abbruch-weg\0"
+    var n_mld: [u8; 21] = "c-genau-eine-meldung\0"
+    var n_2ab: [u8; 20] = "c-zweimal-abbrechen\0"
+    var n_lauf: [u8; 20] = "c-laufender-abbruch\0"
+    var n_leck: [u8; 12] = "c-kein-leck\0"
+    var fds: [u64; 2] = [0 as u64; 2]
+    var buf: [u8; 8] = [0 as u8; 8]
+    // VIER Meldungen zu VIER Worten. Die erste Fassung hatte hier
+    // `[u64; 4]` und rief `AIO_WAIT` mit max=4 -- der Kernel schrieb 128
+    // Oktett in einen Puffer von 32 und loeschte die Zeichenketten
+    // dahinter. Auf dem Bildschirm stand danach der Name einer Zusage
+    // als Muell, und das Programm blieb spaeter haengen. Ein Puffer,
+    // dessen Groesse nicht aus derselben Zahl kommt wie das Argument,
+    // ist ein Fehler, der auf sich warten laesst.
+    var cq: [u64; 16] = [0 as u64; 16]
+    var vier: [u8; 5] = "1234\0"
+    var ok: u64 = 0
+    u_sys(SYS_PIPE, (&fds[0]) as u64, 0, 0)
+    let rfd: u64 = (fds[0]) & 0xFFFFFFFF
+    let wfd: u64 = ((fds[0]) >> 32) & 0xFFFFFFFF
+    // Fall 1: noch nicht angefangen.
+    a_hold(1)
+    let id: u64 = a_sub(AOP_READ, rfd, (&buf[0]) as u64, 4, 11)
+    ok = ok + h_claim((&n_neu[0]) as u64, u_sys(AIO_STATE, id, 0, 0), AQ_NEW)
+    ok = ok + h_claim((&n_ab[0]) as u64, u_sys(AIO_CANCEL, id, 0, 0), 0)
+    ok = ok + h_claim((&n_weg[0]) as u64,
+        0 -% u_sys(AIO_STATE, id, 0, 0), EA_BADF)
+    ok = ok + h_claim((&n_2ab[0]) as u64,
+        0 -% u_sys(AIO_CANCEL, id, 0, 0), EA_BADF)
+    let g1: u64 = u_sys6(AIO_WAIT, (&cq[0]) as u64, 4, 0, 1, 0, 0)
+    let g2: u64 = u_sys6(AIO_WAIT, (&cq[0]) as u64, 4, 0, 1, 0, 0)
+    // Eine Meldung beim ersten Abholen, KEINE beim zweiten.
+    ok = ok + h_claim((&n_mld[0]) as u64, g1 * 10 + g2, 10)
+    a_hold(0)
+    // Fall 2: er laeuft schon. Abbrechen markiert nur; gemeldet wird er
+    // von seinem Faden, sobald das `read` zurueckkommt.
+    let id2: u64 = a_sub(AOP_READ, rfd, (&buf[0]) as u64, 4, 12)
+    a_atmen(8)
+    u_sys(AIO_CANCEL, id2, 0, 0)
+    u_sys(SYS_WRITE, wfd, (&vier[0]) as u64, 4)
+    let g3: u64 = u_sys6(AIO_WAIT, (&cq[0]) as u64, 4, 2000, 1, 0, 0)
+    if g3 == 1 {
+        ok = ok + h_claim((&n_lauf[0]) as u64, 0 -% (cq[2]), EA_CANCELED)
+    } else {
+        ok = ok + h_claim((&n_lauf[0]) as u64, 0 -% g3, EA_CANCELED)
+    }
+    u_sys(SYS_CLOSE, rfd, 0, 0)
+    u_sys(SYS_CLOSE, wfd, 0, 0)
+    ok = ok + h_claim((&n_leck[0]) as u64, a_info(0, 0), 0)
+    return ok
+}
+
+// (e) WARTESCHLANGE VOLL UND ZEITGRENZE ABGELAUFEN.
+//
+// Beides muss ein FEHLER sein und keine Blockade. Die sechzehn
+// `poll`-Auftraege warten auf ein Ereignis, das nicht kommt; der
+// siebzehnte findet keinen Platz mehr.
+fn u_async_e() -> u64 {
+    var n_voll: [u8; 22] = "e-warteschlange-voll\0\0"
+    var n_zahl: [u8; 18] = "e-sechzehn-offen\0\0"
+    var n_zeit: [u8; 14] = "e-zeitgrenze\0\0"
+    var n_null: [u8; 22] = "e-nichtblockierend\0\0\0\0"
+    var n_leck: [u8; 12] = "e-kein-leck\0"
+    var fds: [u64; 2] = [0 as u64; 2]
+    var cq: [u64; 16] = [0 as u64; 16]
+    var ids: [u64; 16] = [0 as u64; 16]
+    var ok: u64 = 0
+    u_sys(SYS_PIPE, (&fds[0]) as u64, 0, 0)
+    let rfd: u64 = (fds[0]) & 0xFFFFFFFF
+    let wfd: u64 = ((fds[0]) >> 32) & 0xFFFFFFFF
+    a_hold(1)
+    var i: u64 = 0
+    var offen: u64 = 0
+    while i < 16 {
+        let id: u64 = a_sub(AOP_POLL, rfd, 0, POLLIN_A, 100 + i)
+        ids[i as usize] = id
+        if id != 0 {
+            if (id >> 63) == 0 {
+                offen = offen + 1
+            }
+        }
+        i = i + 1
+    }
+    ok = ok + h_claim((&n_zahl[0]) as u64, offen, 16)
+    ok = ok + h_claim((&n_voll[0]) as u64,
+        0 -% a_sub(AOP_POLL, rfd, 0, POLLIN_A, 999), EA_AGAIN)
+    // Nichts ist fertig: nicht blockierend gibt 0, mit Frist gibt
+    // -ETIMEDOUT. Beides definiert, beides ohne Haenger.
+    ok = ok + h_claim((&n_null[0]) as u64,
+        u_sys6(AIO_WAIT, (&cq[0]) as u64, 4, 0, 1, 0, 0), 0)
+    ok = ok + h_claim((&n_zeit[0]) as u64,
+        0 -% u_sys6(AIO_WAIT, (&cq[0]) as u64, 4, 60, 1, 0, 0), EA_TIMEDOUT)
+    var k: u64 = 0
+    while k < 16 {
+        u_sys(AIO_CANCEL, ids[k as usize], 0, 0)
+        k = k + 1
+    }
+    a_hold(0)
+    var w: u64 = 0
+    while w < 8 {
+        u_sys6(AIO_WAIT, (&cq[0]) as u64, 4, 0, 1, 0, 0)
+        w = w + 1
+    }
+    a_atmen(8)
+    var w2: u64 = 0
+    while w2 < 8 {
+        u_sys6(AIO_WAIT, (&cq[0]) as u64, 4, 0, 1, 0, 0)
+        w2 = w2 + 1
+    }
+    u_sys(SYS_CLOSE, rfd, 0, 0)
+    u_sys(SYS_CLOSE, wfd, 0, 0)
+    ok = ok + h_claim((&n_leck[0]) as u64, a_info(0, 0), 0)
+    return ok
+}
+
+// (d) DER PROZESS STIRBT MIT LAUFENDEN AUFTRAEGEN, und (f) EIN FREMDER
+//     AUFTRAG GEHT NIEMANDEN AN.
+//
+// Beides braucht ZWEI Prozesse, also `fork`. Das Kind gibt drei
+// Auftraege ab, schickt dem Elternteil die Kennung des ersten durch eine
+// Roehre und stirbt. Der Elternteil versucht in der Zwischenzeit, den
+// fremden Auftrag anzufassen -- und darf nicht --, und sieht danach
+// nach, dass vom Kind nichts uebriggeblieben ist.
+fn u_async_df() -> u64 {
+    var n_fremd: [u8; 22] = "f-fremder-abbruch\0\0\0\0\0"
+    var n_fzus: [u8; 20] = "f-fremder-zustand\0\0\0"
+    var n_gibt: [u8; 23] = "f-es-gibt-ihn-wirklich\0"
+    var n_tod: [u8; 16] = "d-tod-raeumt-ab\0"
+    var n_zahl: [u8; 20] = "d-drei-abgeraeumt\0\0\0"
+    var fds: [u64; 2] = [0 as u64; 2]
+    var hs: [u64; 2] = [0 as u64; 2]
+    var kfd: [u64; 2] = [0 as u64; 2]
+    var ok: u64 = 0
+    // Zwei Roehren: eine fuer die Kennung, die das Kind meldet, eine
+    // fuer das Zeichen, mit dem der Elternteil es sterben laesst. Ohne
+    // die zweite haengt es an der Zeitscheibe, ob der Elternteil den
+    // fremden Auftrag ueberhaupt noch antrifft -- und ein Test, der die
+    // Fehlerklasse nur manchmal trifft, ist keiner.
+    u_sys(SYS_PIPE, (&fds[0]) as u64, 0, 0)
+    u_sys(SYS_PIPE, (&hs[0]) as u64, 0, 0)
+    let rfd: u64 = (fds[0]) & 0xFFFFFFFF
+    let wfd: u64 = ((fds[0]) >> 32) & 0xFFFFFFFF
+    let hrd: u64 = (hs[0]) & 0xFFFFFFFF
+    let hwd: u64 = ((hs[0]) >> 32) & 0xFFFFFFFF
+    let vorher: u64 = a_info(21, 0)
+    let kind: u64 = u_sys(SYS_FORK, 0, 0, 0)
+    if kind == 0 {
+        // DAS KIND. Eine eigene Roehre, damit sein `poll` nie fertig
+        // wird, drei Auftraege darauf, die Kennung an den Elternteil --
+        // und dann warten, bis es sterben darf. Es stirbt MIT DREI
+        // LAUFENDEN AUFTRAEGEN, und genau darum geht es.
+        u_sys(SYS_PIPE, (&kfd[0]) as u64, 0, 0)
+        let krd: u64 = (kfd[0]) & 0xFFFFFFFF
+        var meine: [u64; 1] = [0 as u64; 1]
+        let i1: u64 = a_sub(AOP_POLL, krd, 0, POLLIN_A, 1)
+        a_sub(AOP_POLL, krd, 0, POLLIN_A, 2)
+        a_sub(AOP_POLL, krd, 0, POLLIN_A, 3)
+        meine[0] = i1
+        u_sys(SYS_WRITE, wfd, (&meine[0]) as u64, 8)
+        var zeichen: [u8; 4] = [0 as u8; 4]
+        u_sys(SYS_READ, hrd, (&zeichen[0]) as u64, 1)
+        u_sys(SYS_EXIT, 0, 0, 0)
+    }
+    var fremd: [u64; 1] = [0 as u64; 1]
+    u_sys(SYS_READ, rfd, (&fremd[0]) as u64, 8)
+    let f: u64 = fremd[0]
+    // (f) DER FREMDE AUFTRAG. Es GIBT ihn -- das sagt die Innenschau --,
+    // und trotzdem laesst er sich weder befragen noch abbrechen. Die
+    // Kennung traegt keinen Wuerfelwert je Prozess wie ein Handle; die
+    // Auftragstafel ist eine fuer das ganze System, und die
+    // Eigentuemerfrage ist hier die Sperre.
+    var lebt: u64 = 0
+    if a_info(6, f) != 0 {
+        lebt = 1
+    }
+    ok = ok + h_claim((&n_gibt[0]) as u64, lebt, 1)
+    ok = ok + h_claim((&n_fzus[0]) as u64,
+        0 -% u_sys(AIO_STATE, f, 0, 0), EA_PERM)
+    ok = ok + h_claim((&n_fremd[0]) as u64,
+        0 -% u_sys(AIO_CANCEL, f, 0, 0), EA_PERM)
+    // (d) JETZT DARF ES STERBEN -- mit drei offenen Auftraegen.
+    var los: [u8; 2] = "x\0"
+    u_sys(SYS_WRITE, hwd, (&los[0]) as u64, 1)
+    var st: [u64; 1] = [0 as u64; 1]
+    u_sys(SYS_WAIT4, 0 -% 1, (&st[0]) as u64, 0)
+    a_atmen(8)
+    // NACH DEM TOD DES KINDES IST DIE TAFEL LEER, und die drei Auftraege
+    // sind gezaehlt abgeraeumt worden -- nicht vergessen.
+    ok = ok + h_claim((&n_tod[0]) as u64, a_info(0, 0), 0)
+    let danach: u64 = a_info(21, 0)
+    var genug: u64 = 0
+    if danach >= vorher + 3 {
+        genug = 1
+    }
+    ok = ok + h_claim((&n_zahl[0]) as u64, genug, 1)
+    u_sys(SYS_CLOSE, rfd, 0, 0)
+    u_sys(SYS_CLOSE, wfd, 0, 0)
+    u_sys(SYS_CLOSE, hrd, 0, 0)
+    u_sys(SYS_CLOSE, hwd, 0, 0)
+    return ok
+}
+
+// Die drei Arten, die es ausser `read` noch geben muss: schreiben,
+// oeffnen, schliessen, auf die Platte druecken. Sie stehen hier, damit
+// die Runde nicht nur `read` kann -- und weil `open` die einzige Art
+// ohne Ziel-Handle ist und deshalb einen eigenen Weg geht.
+fn u_async_arten() -> u64 {
+    var n_wr: [u8; 16] = "arten-schreiben\0"
+    var n_cl: [u8; 18] = "arten-schliessen\0\0"
+    var n_zu: [u8; 20] = "arten-danach-zu\0\0\0\0\0"
+    var n_ver: [u8; 16] = "arten-fassung\0\0\0"
+    var n_leck: [u8; 16] = "arten-kein-leck\0"
+    var fds: [u64; 2] = [0 as u64; 2]
+    var cq: [u64; 4] = [0 as u64; 4]
+    var acht: [u8; 9] = "12345678\0"
+    var ok: u64 = 0
+    ok = ok + h_claim((&n_ver[0]) as u64, u_sys(AIO_VERSION, 0, 0, 0), 1)
+    u_sys(SYS_PIPE, (&fds[0]) as u64, 0, 0)
+    let rfd: u64 = (fds[0]) & 0xFFFFFFFF
+    let wfd: u64 = ((fds[0]) >> 32) & 0xFFFFFFFF
+    a_sub(AOP_WRITE, wfd, (&acht[0]) as u64, 8, 21)
+    let g: u64 = u_sys6(AIO_WAIT, (&cq[0]) as u64, 1, 2000, 1, 0, 0)
+    if g == 1 {
+        ok = ok + h_claim((&n_wr[0]) as u64, cq[2], 8)
+    } else {
+        ok = ok + h_claim((&n_wr[0]) as u64, 0 -% g, 8)
+    }
+    // Asynchrones `close`: der Deskriptor geht zu, das Objekt haelt der
+    // Auftrag, bis er fertig ist.
+    a_sub(AOP_CLOSE, wfd, 0, 0, 22)
+    let g2: u64 = u_sys6(AIO_WAIT, (&cq[0]) as u64, 1, 2000, 1, 0, 0)
+    if g2 == 1 {
+        ok = ok + h_claim((&n_cl[0]) as u64, cq[2], 0)
+    } else {
+        ok = ok + h_claim((&n_cl[0]) as u64, 0 -% g2, 0)
+    }
+    ok = ok + h_claim((&n_zu[0]) as u64,
+        0 -% u_sys(SYS_WRITE, wfd, (&acht[0]) as u64, 1), 9)
+    u_sys(SYS_CLOSE, rfd, 0, 0)
+    ok = ok + h_claim((&n_leck[0]) as u64, a_info(0, 0), 0)
+    return ok
+}
+
+fn u_async(arg: u64) {
+    var s_head: [u8; 23] = "async: ring 3 beginnt\n\0"
+    var s_tail: [u8; 8] = "async: \0"
+    var s_of: [u8; 2] = "/\0"
+    var s_pr: [u8; 11] = " Zusagen\n\0\0"
+    var n_ver: [u8; 20] = "schnittstelle-da\0\0\0\0"
+    // Die Zahl steht ausgeschrieben, damit eine geloeschte Zusage
+    // auffaellt und nicht nur die Summe kleiner wird:
+    // 1 + 5 (a) + 4 (b) + 7 (c) + 5 (e) + 5 (d/f) + 5 (Arten) = 32.
+    let n: u64 = 32
+    u_say((&s_head[0]) as u64)
+    var ok: u64 = 0
+    ok = ok + h_claim((&n_ver[0]) as u64, u_sys(AIO_VERSION, 0, 0, 0), 1)
+    ok = ok + u_async_a()
+    ok = ok + u_async_b()
+    ok = ok + u_async_c()
+    ok = ok + u_async_e()
+    ok = ok + u_async_df()
+    ok = ok + u_async_arten()
+    u_say((&s_tail[0]) as u64)
+    u_say_num(ok)
+    u_say((&s_of[0]) as u64)
+    u_say_num(n)
+    u_say((&s_pr[0]) as u64)
+    u_sys(SYS_EXIT, n - ok, 0, 0)
+}
+
+
+// ============================ MESSUNG RUNDE ASYNC: LATENZ UND DURCHSATZ
+//
+// WAS GEMESSEN WIRD, UND WARUM AUF EINER ROEHRE.
+//
+// Gemessen wird ein `read` von 32 Oktett -- einmal synchron (der heutige
+// Weg), einmal ueber die Auftragsschicht bei 1, 4 und 16 gleichzeitig
+// offenen Auftraegen. Die Quelle ist das Leseende einer Roehre, das vor
+// jedem Block mit genau 512 Oktett (`file.PIPE_CAP`) gefuellt wird: so
+// blockiert kein einziger Lesevorgang, und gemessen wird die SCHICHT und
+// nicht die Wartezeit auf Daten. Eine Datei waere die ehrlichere Quelle,
+// braucht aber ein Dateisystem -- und diese Runde soll auch in einem
+// Lauf `nofs` messbar sein.
+//
+// BLOECKE UND MEDIAN, nicht Mittelwert: der Zeitgeber unterbricht, und
+// ein einzelner Ausreisser wuerde einen Mittelwert verdoppeln. 33
+// Bloecke zu 16 Lesevorgaengen, davon der mittlere.
+//
+// WAS DIE ZAHLEN NICHT SAGEN. Sie sagen nichts ueber eine Platte. Die
+// Arbeit wird von Arbeitsfaeden SYNCHRON ausgefuehrt, und sie
+// serialisieren an der Kopierseite von `sys.read_of`. Was diese Schicht
+// heute gewinnt, ist die Zeit des ABGEBENDEN Prozesses -- deshalb steht
+// `submit` als eigene Zahl daneben: das ist, was ein `read` einen
+// Prozess kostet, der ihn nur noch abgibt.
+const AB_BLOCKS: u64 = 33
+const AB_ITERS: u64 = 16
+const AB_LEN: u64 = 32
+
+fn ab_fill(wfd: u64, p: u64) {
+    var i: u64 = 0
+    while i < AB_ITERS {
+        u_sys(SYS_WRITE, wfd, p, AB_LEN)
+        i = i + 1
+    }
+}
+
+fn ab_sync(rfd: u64, wfd: u64, p: u64) -> u64 {
+    var b: [u64; 33] = [0 as u64; 33]
+    var k: u64 = 0
+    while k < AB_BLOCKS {
+        ab_fill(wfd, p)
+        let t0: u64 = u_tsc()
+        var i: u64 = 0
+        var acc: u64 = 0
+        while i < AB_ITERS {
+            acc = acc +% u_sys(SYS_READ, rfd, p, AB_LEN)
+            i = i + 1
+        }
+        let t1: u64 = u_tsc()
+        b[k as usize] = ((t1 -% t0) / AB_ITERS) +% (acc & 0)
+        k = k + 1
+    }
+    u_hb_sort((&b[0]) as u64, AB_BLOCKS)
+    return b[16]
+}
+
+// Nur die ABGABE, ohne das Warten. Das ist die Zahl, die sagt, was ein
+// Lesevorgang den abgebenden Prozess noch kostet; abgeholt wird
+// danach in einem Zug.
+fn ab_submit(rfd: u64, wfd: u64, p: u64) -> u64 {
+    var b: [u64; 33] = [0 as u64; 33]
+    var cq: [u64; 64] = [0 as u64; 64]
+    var k: u64 = 0
+    while k < AB_BLOCKS {
+        ab_fill(wfd, p)
+        let t0: u64 = u_tsc()
+        var i: u64 = 0
+        while i < AB_ITERS {
+            a_sub(AOP_READ, rfd, p, AB_LEN, 0)
+            i = i + 1
+        }
+        let t1: u64 = u_tsc()
+        b[k as usize] = (t1 -% t0) / AB_ITERS
+        var got: u64 = 0
+        while got < AB_ITERS {
+            let n: u64 = u_sys6(AIO_WAIT, (&cq[0]) as u64, 16, 0 -% 1, 16, 0, 0)
+            if (n >> 63) != 0 {
+                got = AB_ITERS
+            } else {
+                got = got + n
+            }
+        }
+        k = k + 1
+    }
+    u_hb_sort((&b[0]) as u64, AB_BLOCKS)
+    return b[16]
+}
+
+fn ab_async(rfd: u64, wfd: u64, p: u64, depth: u64) -> u64 {
+    var b: [u64; 33] = [0 as u64; 33]
+    var cq: [u64; 64] = [0 as u64; 64]
+    var k: u64 = 0
+    while k < AB_BLOCKS {
+        ab_fill(wfd, p)
+        let t0: u64 = u_tsc()
+        var runde: u64 = 0
+        while runde < AB_ITERS / depth {
+            var i: u64 = 0
+            while i < depth {
+                a_sub(AOP_READ, rfd, p, AB_LEN, 0)
+                i = i + 1
+            }
+            var got: u64 = 0
+            while got < depth {
+                let n: u64 = u_sys6(AIO_WAIT, (&cq[0]) as u64, depth, 0 -% 1, depth, 0, 0)
+                if (n >> 63) != 0 {
+                    got = depth
+                } else {
+                    got = got + n
+                }
+            }
+            runde = runde + 1
+        }
+        let t1: u64 = u_tsc()
+        b[k as usize] = (t1 -% t0) / AB_ITERS
+        k = k + 1
+    }
+    u_hb_sort((&b[0]) as u64, AB_BLOCKS)
+    return b[16]
+}
+
+fn u_abench(arg: u64) {
+    var s_s: [u8; 16] = "abench: sync=\0\0\0"
+    var s_1: [u8; 18] = "abench: async1=\0\0\0"
+    var s_4: [u8; 18] = "abench: async4=\0\0\0"
+    var s_16: [u8; 18] = "abench: async16=\0\0"
+    var s_sub: [u8; 18] = "abench: submit=\0\0\0"
+    var s_by: [u8; 16] = "abench: bytes=\0\0"
+    var s_n: [u8; 16] = "abench: iters=\0\0"
+    var fds: [u64; 2] = [0 as u64; 2]
+    var puf: [u8; 40] = [0 as u8; 40]
+    let p: u64 = (&puf[0]) as u64
+    u_sys(SYS_PIPE, (&fds[0]) as u64, 0, 0)
+    let rfd: u64 = (fds[0]) & 0xFFFFFFFF
+    let wfd: u64 = ((fds[0]) >> 32) & 0xFFFFFFFF
+    u_say_line((&s_s[0]) as u64, ab_sync(rfd, wfd, p))
+    u_say_line((&s_1[0]) as u64, ab_async(rfd, wfd, p, 1))
+    u_say_line((&s_4[0]) as u64, ab_async(rfd, wfd, p, 4))
+    u_say_line((&s_16[0]) as u64, ab_async(rfd, wfd, p, 16))
+    u_say_line((&s_sub[0]) as u64, ab_submit(rfd, wfd, p))
+    u_say_line((&s_by[0]) as u64, a_info(5, 0))
+    u_say_line((&s_n[0]) as u64, AB_BLOCKS * AB_ITERS)
+    u_sys(SYS_EXIT, 0, 0, 0)
+}
+
+
+// DIE ARTEN, DIE EIN DATEISYSTEM BRAUCHEN: `open`, `read` auf einer
+// Datei, `fsync`, `close`.
+//
+// `open` ist die einzige Art OHNE Ziel-Handle: es gibt noch nichts,
+// worauf ein Verweis zeigen koennte. Sein Pfad wird deshalb schon bei
+// der ABGABE in den Kern kopiert -- der Arbeitsfaden liest ihn spaeter,
+// und dann kann der Puffer in Ring 3 laengst ueberschrieben sein.
+fn u_asyncfs(arg: u64) {
+    var s_head: [u8; 26] = "asyncfs: ring 3 beginnt\n\0\0"
+    var s_tail: [u8; 10] = "asyncfs: \0"
+    var s_of: [u8; 2] = "/\0"
+    var s_pr: [u8; 11] = " Zusagen\n\0\0"
+    var n_op: [u8; 16] = "fs-open-geht\0\0\0\0"
+    var n_rd: [u8; 18] = "fs-read-vierzehn\0\0"
+    var n_sy: [u8; 12] = "fs-fsync-ok\0"
+    var n_cl: [u8; 12] = "fs-close-ok\0"
+    var n_zu: [u8; 20] = "fs-danach-zu\0\0\0\0\0\0\0\0"
+    var n_no: [u8; 20] = "fs-open-fehlt\0\0\0\0\0\0\0"
+    var n_leck: [u8; 14] = "fs-kein-leck\0\0"
+    var pfad: [u8; 12] = "/hello.txt\0\0"
+    var weg: [u8; 16] = "/gibtsnicht.txt\0"
+    var buf: [u8; 40] = [0 as u8; 40]
+    var cq: [u64; 4] = [0 as u64; 4]
+    let n: u64 = 7
+    var ok: u64 = 0
+    u_say((&s_head[0]) as u64)
+    // 1. asynchron oeffnen.
+    a_sub(AOP_OPEN, 0, (&pfad[0]) as u64, 0, 77)
+    var fd: u64 = 0
+    if u_sys6(AIO_WAIT, (&cq[0]) as u64, 1, 5000, 1, 0, 0) == 1 {
+        fd = cq[2]
+    } else {
+        fd = 0 -% 1
+    }
+    var auf: u64 = 0
+    if (fd >> 63) == 0 {
+        auf = 1
+    }
+    ok = ok + h_claim((&n_op[0]) as u64, auf, 1)
+    // 2. asynchron lesen -- vierzehn Oktett, die `filesystem` geschrieben hat.
+    a_sub(AOP_READ, fd, (&buf[0]) as u64, 32, 78)
+    if u_sys6(AIO_WAIT, (&cq[0]) as u64, 1, 5000, 1, 0, 0) == 1 {
+        ok = ok + h_claim((&n_rd[0]) as u64, cq[2], 14)
+    } else {
+        ok = ok + h_claim((&n_rd[0]) as u64, 0 -% 1, 14)
+    }
+    // 3. asynchron auf den Traeger druecken.
+    a_sub(AOP_FSYNC, fd, 0, 0, 79)
+    if u_sys6(AIO_WAIT, (&cq[0]) as u64, 1, 5000, 1, 0, 0) == 1 {
+        ok = ok + h_claim((&n_sy[0]) as u64, cq[2], 0)
+    } else {
+        ok = ok + h_claim((&n_sy[0]) as u64, 0 -% 1, 0)
+    }
+    // 4. asynchron schliessen. Der Deskriptor geht zu, das Objekt haelt
+    //    der Auftrag, bis er fertig ist.
+    a_sub(AOP_CLOSE, fd, 0, 0, 80)
+    if u_sys6(AIO_WAIT, (&cq[0]) as u64, 1, 5000, 1, 0, 0) == 1 {
+        ok = ok + h_claim((&n_cl[0]) as u64, cq[2], 0)
+    } else {
+        ok = ok + h_claim((&n_cl[0]) as u64, 0 -% 1, 0)
+    }
+    ok = ok + h_claim((&n_zu[0]) as u64,
+        0 -% u_sys(SYS_READ, fd, (&buf[0]) as u64, 1), EA_BADF)
+    // 5. Ein Pfad, den es nicht gibt: der Fehler kommt als
+    //    FERTIGMELDUNG und nicht als Rueckgabewert der Abgabe.
+    a_sub(AOP_OPEN, 0, (&weg[0]) as u64, 0, 81)
+    if u_sys6(AIO_WAIT, (&cq[0]) as u64, 1, 5000, 1, 0, 0) == 1 {
+        ok = ok + h_claim((&n_no[0]) as u64, 0 -% (cq[2]), 2)
+    } else {
+        ok = ok + h_claim((&n_no[0]) as u64, 0, 2)
+    }
+    ok = ok + h_claim((&n_leck[0]) as u64, a_info(0, 0), 0)
+    u_say((&s_tail[0]) as u64)
+    u_say_num(ok)
+    u_say((&s_of[0]) as u64)
+    u_say_num(n)
+    u_say((&s_pr[0]) as u64)
+    u_sys(SYS_EXIT, n - ok, 0, 0)
 }
 
 // ------------------------------------------- ROUNDE K7: /dev/fb in Ring 3
