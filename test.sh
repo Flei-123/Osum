@@ -1036,6 +1036,22 @@ abschnitte_abarbeiten
 
 
 
+# ABSCHNITT 29 -- RUNDE MULTIUSER. Er arbeitet die Grenzenliste von K13
+# ab (docs/ROUNDK13.md Abschnitt 7): das Betretungsrecht auf JEDEM Glied
+# eines Pfades, /etc/group und die Zusatzgruppen, Rechte ueber die
+# VFS-Schicht, ein GEMESSENER Kostenfaktor statt eines abgeschriebenen,
+# und die Verzoegerung nach einem Fehlversuch -- nachgewiesen an den
+# Zahlen, die `login` nennt, UND an der Uhr des Wirts. Drei
+# Gegenproben: `nowalk` (der Zustand VOR dieser Runde), `nogroups`, und
+# der Nummernwaechter, dem der Fehler von Runde MERGE (zweimal 1320)
+# untergeschoben wird und der fallen MUSS.
+#
+# Er ist der erste Abschnitt, der wirklich RECHNET, und laeuft deshalb
+# unter `-accel kvm`, wo es geht -- der rechenlastige Teil zusaetzlich
+# unter TCG, damit KVM nur schneller ist und nicht anders.
+lauf "29. Mehrbenutzerbetrieb: Pfadrechte, Zusatzgruppen, Kostenfaktor, Anmeldung (tools/multiuser/run.sh, Runde MULTIUSER)" \
+     tools/multiuser/run.sh multiuser '^MULTIUSER: |^  --    (gemessen|daraus|/dev/kvm|kein /dev/kvm)|^  OK    (JUSTIN|GEGENPROBE|EINE Pruefung|viermal|und braucht dort|setuid\(0\)|setgroups als|der Kern hat|und [0-9]+ davon|[0-9]+ Zugriffe|[0-9]+ Rechtefragen|nach dem (ersten|zweiten|dritten)|und die Uhr|mit verzoegerung|und der Lauf ist|keine Zwischendatei|der neue Eintrag|das Passwort steht NICHT|PYTHON rechnet|justin liest sie NICHT|und die EINE Ebene|MIT den Zusatzgruppen|id nennt sie)'
+
 echo
 echo "=================================================================="
 echo "gelaufen mit OSUM_JOBS=$JOBS, accel=${OSUM_ACCEL:-auto}"
