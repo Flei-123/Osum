@@ -365,7 +365,7 @@ bash tools/themestore/build.sh "$TMPD/setv" extra='einst' uitrace=yes keep=yes \
     click=680,51 > "$TMPD/setv.log" 2>&1
 SEV="$TMPD/setv/serial.txt"
 NR=$({ grep -ac 'settings: rect name=w[a-z][a-z] ' "$SE" "$SEV" || true; } \
-     | cut -d: -f2 | paste -sd+ - | bc)
+     | cut -d: -f2 | awk '{n=n+$1} END {print n+0}')
 num "gemeldete Rechtecke beider Seiten (vor dieser Runde waren es fuenf)" "${NR:-0}" ge 25
 OVER=$(python3 - "$INNER" "$SE" "$SEV" <<'PYX'
 import re, sys
@@ -379,6 +379,10 @@ for path in sys.argv[2:]:
     # gegen sich selbst und ist immer rot.
     for m in re.finditer(
             r'settings: rect name=(w[a-z][a-z]) x=(\d+) y=(\d+) w=(\d+) h=(\d+)', txt):
+        # `win` ist das FENSTER und kein Widget darin -- es traegt
+        # zufaellig einen Namen aus drei Buchstaben mit w am Anfang.
+        if m.group(1) == 'win':
+            continue
         y, h = int(m.group(3)), int(m.group(5))
         if y + h > inner:
             print("        outside: %s in %s ends at %d, the window is %d high"
