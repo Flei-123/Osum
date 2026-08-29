@@ -207,7 +207,7 @@ Zweig, seriell statt parallel:
 | THEME | 91 bestanden, 0 durchgefallen | **91 bestanden, 0 durchgefallen** | im Vollauf 89/7 -- Laststörung |
 | icons | 24 ok, 1 failed | 24 ok, 1 failed | vorbestehend (`lib/icons.fi does not match the map`) |
 | tunnelpakete | 15 bestanden, 3 fehlgeschlagen | 15 bestanden, 3 fehlgeschlagen | vorbestehend |
-| netview | siehe unten | siehe unten | vorbestehend |
+| netview | 193 passed, 1 failed | 194 passed, 1 failed | je EIN Fehlschlag, und ein ANDERER -- siehe unten |
 | ARM | 48 passed, 0 failed | **48 / 48 / 47** in drei Läufen | flattert, siehe unten |
 
 Keiner der sieben liegt an dieser Runde. Der Diff dieses Zweiges gegen
@@ -217,6 +217,24 @@ von einem der sieben Läufer gebaut oder gelesen: `kernel/vmode.fi`,
 `kernel/tasks.fi`, `kernel/user/dispctl.fi`,
 `kernel/user/einstellungen.fi`, `test.sh`, `tools/customres/run.sh` und
 sechs Dateien unter `docs/`.
+
+### netview: einer rot, aber jedes Mal ein anderer
+
+Beide Stände wurden allein gemessen, ohne andere Abnahme daneben (im
+Vollauf war der Abschnitt in den Zeitablauf gelaufen, `rc=124`). Das
+Ergebnis ist auf beiden Ständen **genau ein** rotes Feld -- und es ist
+nicht dasselbe:
+
+* `mergeline`: `9a: both Super+A presses became hotkeys: 1, expected eq 2`
+* dieser Zweig: `9c: and the whole of it is under a fifth of a second:
+  511467, expected lt 200000`
+
+Zwei verschiedene Zusagen, beide an der Uhr: eine an zwei
+Tastendrücken, die schnell genug hintereinander ankommen müssen, die
+andere an einer Frist von 200 ms, gegen die auf diesem Wirt 511 ms
+gemessen wurden. Der Zweig hat eine Zusage MEHR bestanden als die Basis
+(194 gegen 193). Nichts davon liegt an dieser Runde; `netview` liest
+keine der fünfzehn geänderten Dateien.
 
 ### ARM: der Fehlschlag ist eine Messstörung, und das ist nachgerechnet
 
