@@ -53,6 +53,7 @@ import netview
 import netmon
 import share
 import cap
+import handle
 import fb
 import vmode
 import ttf
@@ -111,6 +112,10 @@ const P_SHELL: u64 = 8
 const P_STEAL: u64 = 9
 const P_FORK: u64 = 10
 const P_CAPS: u64 = 12
+// MESSUNG RUNDE HANDLE: die Syscall-Latenz aus Ring 3.
+const P_HBENCH: u64 = 49
+// RUNDE HANDLE: der Selbsttest der Handle-Schicht in Ring 3.
+const P_HANDLE: u64 = 48
 // RUNDE K13: die beiden Programmnummern dieser Runde (kernel/uprog.fi).
 const P_PWR: u64 = 45
 const P_PWRIDLE: u64 = 46
@@ -350,6 +355,16 @@ fn kernel_main(mbi: u64, vectors: u64, state: u64, kernel_end: u64,
     // 7b. processes with an address space of their own.
     processes(state)
     capabilities(state)
+    // 7b-quater. RUNDE HANDLE: die Lebensdauerrechnung. Hier und nicht
+    //     spaeter, aus demselben Grund wie K13 eine Zeile weiter unten:
+    //     sie braucht KEIN Dateisystem. Der Selbsttest arbeitet auf
+    //     einer Roehre, und eine Roehre gibt es immer.
+    handles(state)
+    // Der Benchmark steht ABSICHTLICH ausserhalb von `handles`: mit
+    // `handle` laufen die Zaehler mit, und dann misst er den Selbsttest
+    // und nicht den Regelbetrieb. `hbench` allein ist die Messung, die
+    // gilt.
+    handle_bench(state)
     // 7b-bis. RUNDE K13: Kennungen aus Ring 3, ohne Platte. Hier und
     //     nicht spaeter, weil es KEIN Dateisystem braucht -- die Zusagen
     //     ueber uid/gid gelten auch in einem Lauf `nofs`, und ein Test,
@@ -2090,6 +2105,338 @@ fn capabilities(state: u64) {
     serial.nl()
 }
 
+
+// ==================================================== RUNDE HANDLE
+//
+// DREI DINGE MISST DIESER ABSCHNITT, UND ZWEI DAVON KANN EIN PROGRAMM
+// IN RING 3 NICHT MESSEN.
+//
+//   1. DER SELBSTTEST IN RING 3 (`uprog.u_handle`, dreissig Zusagen).
+//      Rechte-Eskalation, Use-after-close mit Generationszaehler,
+//      doppeltes Schliessen, gefaelschte Handles, Abbruch mitten im
+//      Auftrag. Sein Beendigungscode ist die Zahl der GEFALLENEN
+//      Zusagen -- 0 heisst, alle dreissig standen.
+//
+//   2. EIN HANDLE AUS EINEM FREMDEN PROZESS. Das kann ein Programm
+//      nicht zeigen, weil es den Wert des anderen gar nicht kennt --
+//      und genau das ist ja die Zusage. Der Kernel legt deshalb
+//      DASSELBE Objekt in ZWEI Aufgabentafeln, vergleicht die beiden
+//      Handle-Werte und versucht, den einen im anderen Prozess
+//      aufzuloesen. Beides muss scheitern: gleiche Werte gibt es nicht,
+//      und ein fremder Wert trifft nichts.
+//
+//   3. DIE ZAEHLER. Wie oft ueberhaupt gefragt wurde (`H_CHECKS`), wie
+//      oft ein Recht fehlte, wie oft etwas veraltet war, wie oft eine
+//      Freigabe von einem laufenden Auftrag aufgehalten wurde. Eine
+//      Rechtepruefung, die niemand aufruft, ist von einer, die immer ja
+//      sagt, sonst nicht zu unterscheiden -- das ist die Lehre aus
+//      Runde K13, und sie gilt hier genauso.
+fn handles(state: u64) {
+    var s_skip: [u8; 16] = "handle: skipped\0"
+    var s_begin: [u8; 15] = "handle: begin\0\0"
+    var s_exit: [u8; 21] = "handle: ring 3 exit=\0"
+    var s_done: [u8; 14] = "handle: done\0\0"
+    if !kstate.mode_on(state, kstate.M_HANDLE) {
+        serial.puts((&s_skip[0]) as u64)
+        serial.nl()
+        return
+    }
+    serial.puts((&s_begin[0]) as u64)
+    serial.nl()
+    handle_fremd(state)
+    handle_uebergabe(state)
+    let t: u64 = proc.create(state, P_HANDLE, 0, 2)
+    let e: u64 = wait_for(state, t)
+    serial.puts((&s_exit[0]) as u64)
+    serial.dec(e)
+    serial.nl()
+    handle_zahlen(state)
+    serial.puts((&s_done[0]) as u64)
+    serial.nl()
+}
+
+// (d) EIN HANDLE AUS EINEM FREMDEN PROZESS.
+//
+// Zwei Aufgabentafeln, DASSELBE Objekt, DERSELBE Platz -- und trotzdem
+// zwei verschiedene Handle-Werte, weil in die Generation der
+// Wuerfelwert der Tafel eingeht und der aus der pid kommt. Ein
+// abgehoerter Wert aus einem fremden Prozess trifft damit auch dann
+// nichts, wenn dort zufaellig derselbe Platz belegt ist.
+//
+// Gemessen wird auf zwei Aufgabenplaetzen, die gerade niemand hat (die
+// beiden obersten). Das ist eine Messung an der TAFEL und nicht an zwei
+// laufenden Prozessen, und das steht hier, damit es niemand fuer mehr
+// haelt, als es ist -- der Weg ueber zwei echte Prozesse scheitert
+// daran, dass keiner den Handle-Wert des anderen kennt, was ja genau
+// die Zusage ist.
+fn handle_fremd(state: u64) {
+    var s_a: [u8; 14] = "handle: ha=\0\0\0"
+    var s_b: [u8; 7] = "  hb=\0\0"
+    var s_d: [u8; 11] = "  differ=\0\0"
+    var s_x: [u8; 10] = "  cross=\0\0"
+    var s_n: [u8; 21] = "  nonce-differ=\0\0\0\0\0\0"
+    let a: u64 = kstate.MAX_TASKS - 1
+    let b: u64 = kstate.MAX_TASKS - 2
+    handle.clear_task(state, a, 4242)
+    handle.clear_task(state, b, 4243)
+    let o: u64 = handle.obj_get(state, handle.OK_FILE, file.CON_OUT)
+    handle.obj_ref(state, o)
+    let ha: u64 = handle.insert(state, a, o, handle.R_WRITE)
+    let hb: u64 = handle.insert(state, b, o, handle.R_WRITE)
+    var differ: u64 = 0
+    if ha != hb {
+        differ = 1
+    }
+    // Der Wert aus Prozess a, in Prozess b vorgelegt: er muss NICHTS
+    // treffen. `handle.MAX_OBJ` ist das Nein dieser Funktion.
+    var cross: u64 = 0
+    if handle.resolve(state, b, ha) >= handle.MAX_OBJ {
+        cross = 1
+    }
+    var nd: u64 = 0
+    if handle.nonce_of(state, a) != handle.nonce_of(state, b) {
+        nd = 1
+    }
+    serial.puts((&s_a[0]) as u64)
+    serial.hex(ha)
+    serial.puts((&s_b[0]) as u64)
+    serial.hex(hb)
+    serial.puts((&s_d[0]) as u64)
+    serial.dec(differ)
+    serial.puts((&s_x[0]) as u64)
+    serial.dec(cross)
+    serial.puts((&s_n[0]) as u64)
+    serial.dec(nd)
+    serial.nl()
+    // Aufgeraeumt: die beiden Plaetze zurueck, damit die Objekttafel
+    // nach diesem Abschnitt genauso aussieht wie davor.
+    handle.clear_task(state, a, 0)
+    handle.clear_task(state, b, 0)
+}
+
+// DIE AUSDRUECKLICHE UEBERGABE AN EIN KIND, kernelseitig gemessen.
+//
+// Der Gegenentwurf zu "alles wird vererbt": Aufgabe a gibt EIN Handle
+// an Aufgabe b, und verlangt dabei ALLE Rechte. Sie bekommt trotzdem
+// nur die Schnittmenge mit dem, was sie selbst hat -- `handle.give`
+// kann nicht addieren, und es gibt in `handle.fi` keine Funktion, die
+// es koennte.
+//
+// Zwei Gegenproben stehen daneben, denn ohne sie misst das nichts:
+// ein Handle OHNE R_TRANSFER laesst sich gar nicht weitergeben, und
+// nach der Uebergabe traegt das Objekt ZWEI Verweise und nicht einen
+// -- ein weitergegebenes Handle ist ein zweiter Halter und keine
+// Verschiebung.
+fn handle_uebergabe(state: u64) {
+    var s_p: [u8; 15] = "handle: pass=\0\0"
+    var s_s: [u8; 11] = "  shrink=\0\0"
+    var s_t: [u8; 15] = "  notransfer=\0\0"
+    var s_r: [u8; 9] = "  refs=\0\0"
+    let a: u64 = kstate.MAX_TASKS - 1
+    let b: u64 = kstate.MAX_TASKS - 2
+    handle.clear_task(state, a, 777)
+    handle.clear_task(state, b, 778)
+    let o: u64 = handle.obj_get(state, handle.OK_FILE, file.CON_OUT)
+    // Lesen, schreiben, weitergeben -- und ABSICHTLICH kein R_SEEK.
+    let ha: u64 = handle.insert(state, a, o,
+        handle.R_READ | handle.R_WRITE | handle.R_TRANSFER)
+    // ALLE Rechte verlangt. Was drueben ankommt, ist die Schnittmenge.
+    let hb: u64 = handle.give(state, a, b, ha, handle.R_ALL)
+    var passt: u64 = 0
+    if !handle.is_err(hb) {
+        passt = 1
+    }
+    let rb: u64 = handle.rights_of(state, b, hb)
+    var shrink: u64 = 0
+    if (rb & handle.R_SEEK) == 0 {
+        if (rb & handle.R_WRITE) != 0 {
+            shrink = 1
+        }
+    }
+    // Ein Handle ohne R_TRANSFER: der Versuch muss -E_RIGHTS geben.
+    let o2: u64 = handle.obj_get(state, handle.OK_FILE, file.CON_IN)
+    let hc: u64 = handle.insert(state, a, o2, handle.R_READ)
+    var kein: u64 = 0
+    if handle.is_err(handle.give(state, a, b, hc, handle.R_ALL)) {
+        kein = 1
+    }
+    let refs: u64 = handle.obj_refs(state, o)
+    serial.puts((&s_p[0]) as u64)
+    serial.dec(passt)
+    serial.puts((&s_s[0]) as u64)
+    serial.dec(shrink)
+    serial.puts((&s_t[0]) as u64)
+    serial.dec(kein)
+    serial.puts((&s_r[0]) as u64)
+    serial.dec(refs)
+    serial.nl()
+    handle.clear_task(state, a, 0)
+    handle.clear_task(state, b, 0)
+}
+
+fn hnum(name: u64, v: u64) {
+    var s_p: [u8; 9] = "handle: \0"
+    var s_e: [u8; 2] = "=\0"
+    serial.puts((&s_p[0]) as u64)
+    serial.puts(name)
+    serial.puts((&s_e[0]) as u64)
+    serial.dec(v)
+    serial.nl()
+}
+
+fn handle_zahlen(state: u64) {
+    var n_ch: [u8; 7] = "checks\0"
+    var n_de: [u8; 7] = "denied\0"
+    var n_st: [u8; 6] = "stale\0"
+    var n_ca: [u8; 8] = "cancels\0"
+    var n_de2: [u8; 9] = "deferred\0"
+    var n_op: [u8; 7] = "opened\0"
+    var n_cl: [u8; 7] = "closed\0"
+    var n_pa: [u8; 7] = "passed\0"
+    var n_es: [u8; 9] = "escalate\0"
+    var n_ob: [u8; 8] = "objects\0"
+    var n_fl: [u8; 9] = "inflight\0"
+    hnum((&n_ch[0]) as u64, kstate.get(state, kstate.H_CHECKS))
+    hnum((&n_de[0]) as u64, kstate.get(state, kstate.H_DENIED))
+    hnum((&n_st[0]) as u64, kstate.get(state, kstate.H_STALE))
+    hnum((&n_ca[0]) as u64, kstate.get(state, kstate.H_CANCELS))
+    hnum((&n_de2[0]) as u64, kstate.get(state, kstate.H_DEFERRED))
+    hnum((&n_op[0]) as u64, kstate.get(state, kstate.H_OPENED))
+    hnum((&n_cl[0]) as u64, kstate.get(state, kstate.H_CLOSED))
+    hnum((&n_pa[0]) as u64, kstate.get(state, kstate.H_PASSED))
+    hnum((&n_es[0]) as u64, kstate.get(state, kstate.H_ESCALATE))
+    // Die beiden LECK-ZAHLEN. Nach einem Lauf, in dem jeder Prozess
+    // ordentlich geendet hat, darf kein Auftrag mehr laufen, und die
+    // Objekttafel darf nur noch die drei Konsoleneintraege halten.
+    hnum((&n_ob[0]) as u64, handle.objects_used(state))
+    hnum((&n_fl[0]) as u64, handle.req_live(state))
+}
+
+// ------------------------------------------- der Mikrobenchmark
+//
+// WAS DIE HANDLE-SCHICHT IM HEISSEN PFAD KOSTET, IN ZYKLEN.
+//
+// Gemessen wird in Ring 0 und nicht in Ring 3, und der Grund ist, dass
+// hier GENAU die Funktion gemessen werden soll, die diese Runde
+// eingebaut hat: `file.fd_of` loest einen Deskriptor auf, und seit
+// dieser Runde geht das durch `handle.resolve`. Ein Syscall aus Ring 3
+// misst zusaetzlich `syscall`/`sysret`, die Adressraumfrage und den
+// Zeigerpruefer -- alles Dinge, die diese Runde nicht angefasst hat und
+// die den Unterschied nur verduennen wuerden.
+//
+// BLOECKE UND MEDIAN, nicht Mittelwert: der Zeitgeber unterbricht, und
+// ein einzelner Ausreisser von zehntausend Zyklen wuerde einen
+// Mittelwert ueber tausend Aufrufe verdoppeln. Gemessen werden 33
+// Bloecke zu je 512 Aufrufen; berichtet wird der Median der 33
+// Blockmittel.
+const HB_BLOCKS: u64 = 33
+const HB_ITERS: u64 = 512
+
+fn hb_sort(p: *mut u64, n: u64) {
+    var i: u64 = 1
+    while i < n {
+        let v: u64 = *((p as u64 + i * 8) as *mut u64)
+        var j: u64 = i
+        var going: bool = true
+        while going {
+            if j == 0 {
+                going = false
+            } else {
+                let w: u64 = *((p as u64 + (j - 1) * 8) as *mut u64)
+                if w <= v {
+                    going = false
+                } else {
+                    *((p as u64 + j * 8) as *mut u64) = w
+                    j = j - 1
+                }
+            }
+        }
+        *((p as u64 + j * 8) as *mut u64) = v
+        i = i + 1
+    }
+}
+
+// Der Median der Blockmittel fuer `file.fd_of` auf Deskriptor 1.
+fn hb_fd_of(state: u64, me: u64) -> u64 {
+    var b: [u64; 33] = [0 as u64; 33]
+    var k: u64 = 0
+    while k < HB_BLOCKS {
+        let t0: u64 = time.tsc()
+        var i: u64 = 0
+        var acc: u64 = 0
+        while i < HB_ITERS {
+            acc = acc +% file.fd_of(state, me, 1)
+            i = i + 1
+        }
+        let t1: u64 = time.tsc()
+        // `acc` muss gelesen werden, sonst darf der Uebersetzer die
+        // Schleife wegwerfen. Die Addition unten kostet nichts und
+        // haelt sie am Leben.
+        b[k as usize] = ((t1 -% t0) / HB_ITERS) +% (acc & 0)
+        k = k + 1
+    }
+    hb_sort((&b[0]) as *mut u64, HB_BLOCKS)
+    return b[16]
+}
+
+// Zum Vergleich: eine Leerschleife derselben Form. Was sie kostet, ist
+// der Preis der MESSUNG selbst (rdtsc, Schleife, Addition) und muss von
+// der Zahl oben abgezogen werden, damit dort nicht der Zeitgeber steht.
+fn hb_leer(state: u64) -> u64 {
+    var b: [u64; 33] = [0 as u64; 33]
+    var k: u64 = 0
+    while k < HB_BLOCKS {
+        let t0: u64 = time.tsc()
+        var i: u64 = 0
+        var acc: u64 = 0
+        while i < HB_ITERS {
+            acc = acc +% kstate.get(state, kstate.TICKS)
+            i = i + 1
+        }
+        let t1: u64 = time.tsc()
+        b[k as usize] = ((t1 -% t0) / HB_ITERS) +% (acc & 0)
+        k = k + 1
+    }
+    hb_sort((&b[0]) as *mut u64, HB_BLOCKS)
+    return b[16]
+}
+
+fn handle_bench(state: u64) {
+    var n_fd: [u8; 12] = "bench-fd-of\0"
+    var n_le: [u8; 12] = "bench-leer\0\0"
+    var n_kh: [u8; 11] = "bench-khz\0\0"
+    var n_it: [u8; 13] = "bench-iters\0\0"
+    var n_ok: [u8; 12] = "bench-fdok\0\0"
+    if !kstate.mode_on(state, kstate.M_HBENCH) {
+        return
+    }
+    let me: u64 = sched.current(state)
+    // DER BOOTPROZESS HAT KEINE DESKRIPTOREN. Er kommt nicht aus
+    // `proc.create`, also hat `file.init_task` ihn nie gesehen, und
+    // `fd_of` steigt bei ihm SOFORT aus: der Platz ist null. Der erste
+    // Anlauf dieser Messung hat genau das gemessen -- vorher 19, nachher
+    // 21 Zyklen, und beide Male lief `handle.resolve` ueberhaupt nicht.
+    // Deshalb bekommt der Bootprozess hier seine drei Deskriptoren, und
+    // deshalb steht `bench-fdok` mit in der Ausgabe: es ist der Eintrag,
+    // den `fd_of` liefert, und es MUSS 1 sein (die Konsole). Steht dort
+    // 64, misst der Benchmark nichts und die Zahl daneben ist wertlos.
+    handle.clear_task(state, me, sched.tget(state, me, sched.T_PID))
+    file.init_task(state, me)
+    hnum((&n_ok[0]) as u64, file.fd_of(state, me, 1))
+    hnum((&n_le[0]) as u64, hb_leer(state))
+    hnum((&n_fd[0]) as u64, hb_fd_of(state, me))
+    hnum((&n_kh[0]) as u64, time.khz(state))
+    hnum((&n_it[0]) as u64, HB_BLOCKS * HB_ITERS)
+    // UND DIE ECHTE SYSCALL-LATENZ, aus Ring 3 und ueber
+    // `syscall`/`sysret`. Die Zahl darueber ist die Funktion,
+    // diese hier ist der Preis, den ein Programm bezahlt.
+    let tb: u64 = proc.create(state, P_HBENCH, 0, 2)
+    wait_for(state, tb)
+    // Wieder abraeumen: der Bootprozess soll nach der Messung genau so
+    // dastehen wie davor.
+    file.close_all(state, me)
+}
+
 // The boot task waits for a task the way `wait` does it for a process:
 // sleep until it is a corpse, read the exit code, clear it away.
 // ==================================================== RUNDE K13
@@ -3688,6 +4035,40 @@ fn mode_of(state: u64, cmd: u64) {
     var nacw: [u8; 7] = "noacpi\0"
     var v2rw: [u8; 9] = "ofsv2raw\0"
     var zomw: [u8; 7] = "zombie\0"
+    // ===================================================== RUNDE HANDLE
+    //
+    // `handle` schaltet den Selbsttest an. Die vier danach sind
+    // GEGENPROBEN und stehen in kstate.fi bei ihren Bits erklaert;
+    // `hbench` ist der Mikrobenchmark der Syscall-Latenz.
+    //
+    // `hbench` und nicht `bench`: die Kommandozeile wird nach
+    // TEILWOERTERN durchsucht, und ein kurzes Wort trifft irgendwann
+    // etwas, was es nicht treffen sollte. Runde K13 hat diesen Fehler
+    // eine Stunde lang gesucht (siehe `k13run` oben).
+    var hndw: [u8; 7] = "handle\0"
+    var ngenw: [u8; 6] = "nogen\0"
+    var nflw: [u8; 9] = "noflight\0"
+    var nrgw: [u8; 9] = "norights\0"
+    var hstw: [u8; 8] = "hstrict\0"
+    var hbw: [u8; 7] = "hbench\0"
+    if find(cmd, (&hndw[0]) as u64, 6) != 0 {
+        kstate.mode_add(state, kstate.M_HANDLE)
+    }
+    if find(cmd, (&ngenw[0]) as u64, 5) != 0 {
+        kstate.mode_add(state, kstate.M_NOGEN)
+    }
+    if find(cmd, (&nflw[0]) as u64, 8) != 0 {
+        kstate.mode_add(state, kstate.M_NOFLIGHT)
+    }
+    if find(cmd, (&nrgw[0]) as u64, 8) != 0 {
+        kstate.mode_add(state, kstate.M_NORIGHTS)
+    }
+    if find(cmd, (&hstw[0]) as u64, 7) != 0 {
+        kstate.mode_add(state, kstate.M_HSTRICT)
+    }
+    if find(cmd, (&hbw[0]) as u64, 6) != 0 {
+        kstate.mode_add(state, kstate.M_HBENCH)
+    }
     if find(cmd, (&k13w[0]) as u64, 6) != 0 {
         kstate.mode_add(state, kstate.M_K13)
     }
