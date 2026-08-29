@@ -220,6 +220,74 @@ fn map_user_pt(state: u64, addr: u64, writable: bool, table: u64) -> bool {
     return true
 }
 
+// ======================================================= RUNDE SOFTUI
+//
+// DAS GEGENSTUECK ZU `map_user`, UND DER FEHLER, DEN ES SCHLIESST.
+//
+// GEFUNDEN, WEIL DIESE RUNDE QEMU MIT `-accel kvm` LAUFEN LIESS. Unter
+// TCG ist der voreingestellte Prozessor `qemu64`, und der KANN kein
+// SMAP; mit `-cpu host` kann er es, die Runde GUARD schaltet es
+// pflichtgemaess ein -- und das Bild kam nicht mehr hoch:
+//
+//     *** EXCEPTION 14 #PF  err=0x3  cr2=0x78b000
+//         rip=0x1217fc  rdi=0x78b000
+//
+// err=0x3 heisst: die Seite ist DA, es war ein SCHREIBEN, und es kam
+// aus Ring 0. Genau die drei Bits setzt SMAP, wenn der Kern in eine
+// BENUTZERSEITE schreibt, ohne das Fenster geoeffnet zu haben. 0x78b000
+// ist der Stapel des Ring-3-Ausflugs, rip zeigt in den Rahmenverwalter:
+// `run` gibt den Stapelrahmen mit `mem.frame_free` zurueck, und der
+// Verwalter haengt seine Freiliste IN den Rahmen -- in eine Seite, die
+// immer noch fuer Ring 3 offen steht.
+//
+// DAS IST NICHT NUR EIN SMAP-PROBLEM. Der Rahmen geht in den
+// allgemeinen Vorrat zurueck, WAEHREND er in Ring 3 eingeblendet
+// bleibt. Was als naechstes aus dem Vorrat kommt -- eine Seitentabelle,
+// ein Fensterpuffer, ein Dateiblock --, liegt dann unter einer Adresse,
+// die ein Programm in Ring 3 beschreiben darf. Ohne SMAP faellt das
+// niemandem auf; mit SMAP faellt die Maschine in derselben Sekunde um.
+// Ein betriebsartabhaengiger Fehler derselben Sorte, die Runde CERTUS
+// im Fenster gefunden hat.
+//
+// Die Behebung ist das fehlende Gegenstueck: das Benutzerbit am BLATT
+// wieder loeschen, bevor der Rahmen zurueckgeht. Die oberen drei Ebenen
+// bleiben, wie sie sind -- an ihnen haengt auch der Programmtext, und
+// das Blatt entscheidet ohnehin allein.
+fn unmap_user(state: u64, addr: u64, slot: u64) -> bool {
+    let cr3: u64 = asm("mov rax, cr3", out("rax")) & ADDR_MASK
+    let i4: u64 = (addr >> 39) & 0x1FF
+    let i3: u64 = (addr >> 30) & 0x1FF
+    let i2: u64 = (addr >> 21) & 0x1FF
+    let i1: u64 = (addr >> 12) & 0x1FF
+    let e4: u64 = __mmio_read64((cr3 + i4 * 8) as *mut u64)
+    let pdpt: u64 = e4 & ADDR_MASK
+    if pdpt == 0 {
+        return false
+    }
+    let e3: u64 = __mmio_read64((pdpt + i3 * 8) as *mut u64)
+    let pd: u64 = e3 & ADDR_MASK
+    if pd == 0 {
+        return false
+    }
+    let e2: u64 = __mmio_read64((pd + i2 * 8) as *mut u64)
+    if (e2 & PAGE_HUGE) != 0 {
+        // Die Kachel wurde nie geteilt, also war auch nie ein einzelnes
+        // Blatt offen. Nichts zu tun.
+        return false
+    }
+    let pt: u64 = e2 & ADDR_MASK
+    if pt == 0 {
+        return false
+    }
+    let old: u64 = __mmio_read64((pt + i1 * 8) as *mut u64)
+    __mmio_write64((pt + i1 * 8) as *mut u64,
+        (old & not(PAGE_USER)) | PAGE_PRESENT | PAGE_WRITE)
+    asm("mov rax, cr3\nmov cr3, rax", out("rax"))
+    let _s: u64 = slot
+    let _t: u64 = state
+    return true
+}
+
 // ------------------------------------------------------- the system call
 
 // `KERNEL_SYSCALL` out of isr.s: rdi = number, rsi = argument, rdx = data
@@ -292,6 +360,10 @@ fn run(state: u64) -> bool {
     kstate.set(state, kstate.EXCURSION, 0)
     serial.puts((&s_back[0]) as u64)
     serial.nl()
+    // RUNDE SOFTUI: ERST ZUSPERREN, DANN ZURUECKGEBEN. Die Reihenfolge
+    // ist der ganze Fehler: umgekehrt schreibt der Rahmenverwalter
+    // seine Freiliste in eine Seite, die Ring 3 noch offensteht.
+    let _u: bool = unmap_user(state, stack, 1)
     mem.frame_free(state, stack)
     return true
 }
