@@ -153,7 +153,16 @@ echo "== 2. die Speicherkarte: vier Seiten fuer den Fensterbaum =="
 kart=$(python3 tools/kernel/memmap.py kernel 2>&1)
 if [ $? -eq 0 ]; then ok "die Speicherkarte von kdata: $kart"
 else bad "die Speicherkarte von kdata kollidiert"; echo "$kart" | sed 's/^/        /'; fi
-if python3 tools/kernel/memmap.py kernel -v 2>/dev/null | grep -q " TILE  *kstate.fi:"; then
+# DIE KARTE WIRD EINMAL GEHOLT UND DANN DURCHSUCHT. Vorher stand hier
+# `python3 ... | grep -q ...` in einem Skript mit `set -o pipefail`:
+# `grep -q` steigt beim ersten Treffer aus, Python bekommt beim Schreiben
+# der naechsten Zeile SIGPIPE und endet mit 120, und `pipefail` macht
+# daraus das Ergebnis der ganzen Pipeline. Der Fehler ist alt (er tritt
+# auf `handle` und auf `mergeline2` genauso auf) und faellt nur
+# unregelmaessig auf; Runde ASYNC hat ihn haeufiger gemacht, weil sie
+# vier Bereiche ans ENDE der Karte gehaengt hat.
+karte=$(python3 tools/kernel/memmap.py kernel -v 2>/dev/null)
+if printf '%s\n' "$karte" | grep -q " TILE  *kstate.fi:"; then
     ok "der Bereich TILE steht in der Karte"
 else
     bad "der Bereich TILE steht NICHT in der Karte"
