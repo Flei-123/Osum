@@ -72,8 +72,16 @@ def main(argv):
         o = (y * W + x) * 3
         return (px[o], px[o + 1], px[o + 2])
 
-    def hell(c):
-        return (c[0] + c[1] + c[2]) // 3
+    # DER ABSTAND JE KANAL UND NICHT DER MITTELWERT.
+    #
+    # Der Mittelwert war die erste Fassung und sie hat im dunklen Schema
+    # `tiefe=0` gemeldet, obwohl der Schatten da war: der Schreibtisch
+    # ist dort (2, 6, 23) und der tiefste Schattenpunkt (2, 5, 17) --
+    # ein Viertel des Blaukanals, und nach Division durch drei zwei
+    # Stufen, die in der Rundung verschwinden. Ein Mass, das den
+    # gesuchten Unterschied durch drei teilt, ist das falsche Mass.
+    def abstand(a, b):
+        return max(abs(a[0] - b[0]), abs(a[1] - b[1]), abs(a[2] - b[2]))
 
     wins = []
     for ln in open(argv[2], "rb").read().decode("utf-8", "replace").splitlines():
@@ -105,15 +113,15 @@ def main(argv):
         for y in range(w["y"] + w["oh"] // 4, w["y"] + w["oh"] * 3 // 4):
             if y < 0 or y >= H:
                 continue
-            probe = [hell(at(x0 - k, y)) for k in range(20, 12, -1)]
-            if max(probe) != min(probe):
+            probe = [at(x0 - k, y) for k in range(20, 12, -1)]
+            if any(p != probe[0] for p in probe):
                 continue
             grund = probe[0]
             t = 0
             wt = 0
             for k in range(1, 13):
-                d = grund - hell(at(x0 - k, y))
-                if d > 2:
+                d = abstand(grund, at(x0 - k, y))
+                if d > 1:
                     wt = max(wt, k)
                     t = max(t, d)
             tiefen.append(t)
@@ -130,9 +138,10 @@ def main(argv):
         grund = gruende[len(gruende) // 2]
         y = w["y"] + w["oh"] // 2
         art = "aktiv" if w["fok"] else "inaktiv"
-        print("%s '%s' bei %d,%d: tiefe=%d weite=%d (grund %d, %d Zeilen)"
-              % (art, w["t"], w["x"], w["y"], tiefe, weite, grund,
-                 len(tiefen)))
+        print("%s '%s' bei %d,%d: tiefe=%d weite=%d (grund "
+              "#%02x%02x%02x, %d Zeilen)"
+              % (art, w["t"], w["x"], w["y"], tiefe, weite, grund[0],
+                 grund[1], grund[2], len(tiefen)))
         # Und der Balken.
         cnt = Counter()
         for j in range(w["y"] + BORDER, w["y"] + TITLE_H - 1):
