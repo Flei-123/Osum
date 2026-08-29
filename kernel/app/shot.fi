@@ -7,6 +7,19 @@
 //     -k   den Schein NICHT selbst ausstellen, sondern den nehmen, den
 //          die Bildschirmfoto-Taste (Super+P) gerade hergibt. Das ist
 //          der Weg, den ein Programm OHNE Wurzelrechte gehen muss.
+//     -t   dazu ein VERKLEINERTES rohes Bild in die genannte Datei --
+//          "OTH1", zwei Kurzwoerter fuer Breite und Hoehe, dann drei
+//          Oktette je Bildpunkt. Es dient der VORSCHAU: das Programm
+//          `feedback` hat `profile kernel` und damit keinen Packer,
+//          kann also kein PNG lesen -- ein Mensch soll aber SEHEN, was
+//          er sendet, und nicht eine Groesse lesen. Es kommt aus
+//          DENSELBEN Bildpunkten wie das PNG; zwei Aufnahmen waeren
+//          zwei verschiedene Bilder.
+//     -x   DIE GEGENPROBE. Kein Schein, sondern gleich `SH_GRAB` --
+//          das MUSS abgelehnt werden. Ein Aufruf, der den Bildschirm
+//          herausgibt, ist nur dann geschuetzt, wenn der ungeschuetzte
+//          Weg gemessen scheitert; ohne diese Zeile waere das Schloss
+//          eine Behauptung.
 //     -q   nur die Zahlen, kein Geplauder.
 //     -n   GAR NICHTS auf die Standardausgabe. Fehler bleiben Fehler
 //          und werden gesagt; im Erfolgsfall schweigt das Programm.
@@ -74,11 +87,26 @@ fn num_line(key: str, v: u64) {
     rt.buf_free(&b)
 }
 
+// Der Verkleinerungsfaktor: der kleinste, mit dem das Bild in
+// THUMB_MAX x THUMB_MAX passt. Bei 800 x 600 ist das 4 -> 200 x 150.
+const THUMB_W: usize = 200
+const THUMB_H: usize = 150
+
+fn scale_for(w: usize, h: usize) -> usize {
+    var s: usize = 1
+    while (w / s) > THUMB_W || (h / s) > THUMB_H {
+        s = s + 1
+    }
+    return s
+}
+
 fn main(start: u64) -> i32 {
     var out: u64 = 0
+    var thumbfile: u64 = 0
     var bykey: bool = false
     var quiet: bool = false
     var still: bool = false
+    var probe: bool = false
     let argc: usize = rt.arg_count(start)
     var i: usize = 1
     while i < argc {
@@ -93,14 +121,40 @@ fn main(start: u64) -> i32 {
             } else if c == 110 as u8 {
                 still = true
                 quiet = true
+            } else if c == 120 as u8 { // -x
+                probe = true
+            } else if c == 116 as u8 { // -t
+                i = i + 1
+                if i < argc {
+                    thumbfile = rt.arg_ptr(start, i)
+                }
             }
         } else {
             out = a
         }
         i = i + 1
     }
+    if probe {
+        // OHNE SCHEIN, UND ZWAR DREIMAL: greifen, den Schein eines
+        // anderen zurueckgeben, und ueber die Taste, die niemand
+        // gedrueckt hat.
+        var puffer: [u8; 4096] = [0; 4096]
+        let g: i64 = shot(SH_GRAB, (&puffer[0]) as i64, 4096)
+        num_line("shot: probe grab ", (0 - g) as u64)
+        let k: i64 = shot(SH_KEY, 0, 0)
+        num_line("shot: probe key ", (0 - k) as u64)
+        let d: i64 = shot(SH_DROP, 0, 0)
+        num_line("shot: probe drop ", (0 - d) as u64)
+        num_line("shot: probe denied ", shot(SH_INFO, SI_DENIED, 0) as u64)
+        if g < 0 && k < 0 && d < 0 {
+            io.print("shot: probe abgelehnt\n")
+            return 0
+        }
+        io.print("shot: probe DURCHGEKOMMEN -- das Schloss ist offen\n")
+        return 1
+    }
     if out == 0 {
-        io.print("usage: shot [-k] [-q] [-n] <datei.png>\n")
+        io.print("usage: shot [-k] [-q] [-n] [-x] [-t klein.raw] <datei.png>\n")
         return 2
     }
     if shot(SH_INFO, SI_READY, 0) != 1 {
@@ -148,6 +202,27 @@ fn main(start: u64) -> i32 {
     }
     rt.mem_set(prev, 0 as u8, stride)
 
+    // Das verkleinerte Bild entsteht IM SELBEN DURCHGANG: je Zeile
+    // wird jede `sc`-te Zeile abgegriffen und darin jeder `sc`-te
+    // Bildpunkt. Kein zweiter Durchgang, keine zweite Aufnahme.
+    let sc: usize = scale_for(w, h)
+    let thw: usize = w / sc
+    let thh: usize = h / sc
+    var thumb: u64 = 0
+    if thumbfile != 0 {
+        thumb = rt.heap_alloc(8 + thw * thh * 3)
+        if thumb != 0 {
+            rt.st8(thumb, 0, 79 as u8)  // O
+            rt.st8(thumb, 1, 84 as u8)  // T
+            rt.st8(thumb, 2, 72 as u8)  // H
+            rt.st8(thumb, 3, 49 as u8)  // 1
+            rt.st8(thumb, 4, (thw & 255) as u8)
+            rt.st8(thumb, 5, ((thw >> 8) & 255) as u8)
+            rt.st8(thumb, 6, (thh & 255) as u8)
+            rt.st8(thumb, 7, ((thh >> 8) & 255) as u8)
+        }
+    }
+
     var y: usize = 0
     var rows: u64 = 0
     while y < h {
@@ -162,8 +237,24 @@ fn main(start: u64) -> i32 {
         rows = rows + 1
         png.filter_row(cur, prev, stride,
             raw + ((stride + 1) * y) as u64)
+        if thumb != 0 && y % sc == 0 && (y / sc) < thh {
+            let ty: usize = y / sc
+            var tx: usize = 0
+            while tx < thw {
+                let sx: usize = tx * sc * 3
+                let d: usize = 8 + (ty * thw + tx) * 3
+                rt.st8(thumb, d, rt.ld8(cur, sx))
+                rt.st8(thumb, d + 1, rt.ld8(cur, sx + 1))
+                rt.st8(thumb, d + 2, rt.ld8(cur, sx + 2))
+                tx = tx + 1
+            }
+        }
         rt.mem_copy(prev, cur, stride)
         y = y + 1
+    }
+    if thumb != 0 {
+        rt.write_file(thumbfile, thumb, 8 + thw * thh * 3)
+        rt.heap_free(thumb, 8 + thw * thh * 3)
     }
 
     // ---- die Datei
