@@ -56,6 +56,14 @@ icons=yes
 nvicons=yes
 keep=no
 extra=""
+# ROUND SOFTUI: HARDWARE VIRTUALISATION, AND WHY IT IS A SWITCH AND NOT
+# A CONSTANT.  Round PAINT wrote "the measuring machine has no /dev/kvm"
+# and measured everything under TCG.  This machine HAS one, and the
+# difference is not cosmetic -- see docs/ROUNDSOFTUI.md, section 1.
+# It stays a switch because round KVMFIX found four test sections that
+# measure something DIFFERENT under KVM; a picture is not one of them,
+# and `accel=tcg` reproduces every older number.
+accel=kvm
 uitrace=no
 autohide=0
 progs="desktop taskbar settings launcher dhcp explorer widgetdemo locate sh echo ls cat edit"
@@ -75,6 +83,7 @@ for a in "$@"; do
         extra=*) extra=${a#*=} ;;
         uitrace=*) uitrace=${a#*=} ;;
         autohide=*) autohide=${a#*=} ;;
+        accel=*) accel=${a#*=} ;;
         *) echo "unknown option: $a" >&2; exit 2 ;;
     esac
 done
@@ -226,7 +235,11 @@ echo "disk $(stat -c%s "$OUT/disk.img") octets"
 
 # ------------------------------------------------------------ 4. boot
 SOCK="$OUT/mon.sock"; rm -f "$SOCK" "$OUT/serial.txt"
-timeout 420 qemu-system-x86_64 -kernel "$BUILDD/k0.mb" -m 512 \
+ACC=()
+if [ "$accel" = kvm ] && [ -e /dev/kvm ] && [ -r /dev/kvm ]; then
+    ACC=(-accel kvm -cpu host)
+fi
+timeout 420 qemu-system-x86_64 -kernel "$BUILDD/k0.mb" -m 512 "${ACC[@]}" \
     -append "gfx wm wig wigicons desk wmhold wiglong nokbd nosched noproc nofs $extra" \
     -serial "file:$OUT/serial.txt" -display none -no-reboot -vga std \
     -monitor "unix:$SOCK,server,nowait" \
@@ -243,6 +256,7 @@ python3 tools/gfx/screenshot.py "$SOCK" "$OUT/desktop.ppm" 25 > "$OUT/shot.log" 
 wait "$PID"; RC=$?
 rm -f "$SOCK"
 echo "qemu exit $RC"
+echo "accel ${ACC[*]:-tcg}"
 
 if [ -s "$OUT/desktop.ppm" ]; then
     python3 - "$OUT" <<'PY'
