@@ -103,7 +103,7 @@ for s in 0 1; do
 done
 [ -f "$TMPD/k0.mb" ] || { echo "TASKBAR: $pass passed, $((fail + 1)) failed"; exit 1; }
 
-PROGS="schreibtisch leiste einstellungen launcher dhcp explorer widgetdemo locate sh echo ls cat edit"
+PROGS="schreibtisch leiste einstellungen launcher dhcp explorer widgetdemo locate sh echo ls cat edit feedback"
 as --64 -o "$TMPD/crt.o" kernel/user/crt.s 2>/dev/null \
     || bad "crt.s does not assemble"
 build_progs() { # stage

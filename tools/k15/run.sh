@@ -164,7 +164,7 @@ for s in 0 1; do
 done
 [ -f "$TMPD/k0.mb" ] || { echo "K15: $pass passed, $((fail + 1)) failed"; exit 1; }
 
-PROGS="widgetdemo explorer launcher locate sh echo ls cat edit"
+PROGS="widgetdemo explorer launcher locate sh echo ls cat edit feedback"
 as --64 -o "$TMPD/crt.o" kernel/user/crt.s 2>/dev/null \
     || bad "crt.s laesst sich nicht assemblieren"
 baue() { # stufe
