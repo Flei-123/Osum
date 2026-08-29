@@ -1,0 +1,270 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/gfx.fi -- RUNDE SERVERBUILD: DIE NAHT ZWISCHEN DEM KERNEL UND
+// SEINEM BILDSCHIRM.
+//
+// WARUM ES DIESE DATEI GIBT. Osum soll auch ohne Grafik gebaut werden
+// koennen -- als Serverbetriebssystem, das auf einer seriellen Leitung
+// bis zur Shell hochkommt und in dem `fb.fi`, `wm.fi`, `wig.fi`,
+// `font.fi`, `ttf.fi`, `tile.fi`, `vmode.fi`, `ansi.fi` und `ps2m.fi`
+// GAR NICHT ERST UEBERSETZT WERDEN. Solange irgendein Modul des Kernels
+// `fb.` oder `wm.` schreibt, geht das nicht: der Uebersetzer sucht das
+// Modul, findet es nicht und bricht ab.
+//
+// WAS HIER NICHT STEHT, UND WARUM. Kein `#ifdef`. Der Quelltext dieses
+// Kernels wird nicht mit Praeprozessorschnitten durchzogen -- eine Datei,
+// die in zwei Faellen zwei verschiedene Programme ist, liest niemand mehr.
+// Statt dessen gibt es DIESE Schnittstelle in zwei Ausfertigungen:
+//
+//   kernel/gfx.fi      leitet weiter an fb/wm/ansi/vmode/kgui/sysgui
+//   kernel/gfx-aus.fi  tut nichts, gibt "kein Bildschirm" zurueck
+//
+// `tools/build-kernel.sh --gui off` legt die zweite an die Stelle der
+// ersten und LOESCHT die Grafikdateien aus dem Uebersetzungsbaum. Das ist
+// derselbe Griff, mit dem `--ohne-tunnel` seit Runde TUNNEL `wg.fi` durch
+// `wg-aus.fi` ersetzt: nicht abgeschaltet, sondern nicht vorhanden.
+//
+// WIE BREIT DIE NAHT IST, gezaehlt und nicht behauptet (die Zahl steht in
+// STATUS-SERVERBUILD.md): ausserhalb der Grafikdateien selbst und
+// ausserhalb der beiden Dateien, denen die Oberflaeche GEHOERT
+// (`kmain.fi` richtet sie beim Start ein, `sys.fi` gibt sie an Ring 3
+// weiter), greifen SECHZEHN Stellen in VIER Dateien auf Grafik zu:
+//
+//   kernel/pwr.fi      11  Helligkeit, Verdunkeln, Schirm aus
+//   kernel/kbd.fi       3  eine Taste an den Eingabefokus
+//   kernel/tty.fi       1  ein Oktett in ein Terminalfenster
+//   kernel/serial.fi    1  jedes Oktett auch auf den Schirm
+//
+// Sechzehn Stellen, elf Funktionen. Das ist die ganze Verwebung, und
+// deshalb ist der Schnitt sauber: der Rest des Kernels -- Speicher,
+// Dateisystem, Netz, Zeitplaner, Signale, USB, Hypervisor -- weiss vom
+// Bildschirm nichts.
+//
+// DIE ZWEI GROSSEN sind `kmain.fi` und `sys.fi`, und die sind KEINE
+// Zugriffe von aussen, sondern die Oberflaeche selbst: das Einrichten
+// beim Start und die Aufrufnummern fuer Ring 3. Diese Runde holt beides
+// in eigene Dateien (`kernel/kgui.fi`, `kernel/sysgui.fi`), die bei
+// gui=off ebenfalls nicht uebersetzt werden. Hier stehen nur die zwei
+// Tueren dorthin: `stage` und `syscall`.
+
+profile kernel
+
+import fb
+import wm
+import ansi
+import vmode
+import ps2m
+import kgui
+import sysgui
+
+export {
+    // Der Bildschirm, so weit ihn Nicht-Grafik-Code braucht.
+    ready, width, height, pixel, get_pixel, dirty_all, flush, echo,
+    // Der Fensterserver, so weit ihn Nicht-Grafik-Code braucht.
+    wm_ready, wm_on_key, wm_key_tty, wm_term_out,
+    // Die Kommandozeile.
+    parse,
+    // Die vier Tueren zu der Datei, der die Oberflaeche gehoert.
+    stage_graphics, stage_surface, stage_hold,
+    mouse_adopt, mouse_packet, mouse_irq, mouse_x, mouse_y, mouse_buttons,
+    mouse_packets, mouse_clicks, wm_poll,
+    // Die vier Aufrufbereiche der Oberflaeche und die acht Griffe,
+    // die /dev/fb braucht.
+    sys_wm, sys_wig, sys_disp, sys_tile,
+    fb_ready, fb_bytes, fb_pitch, fb_block, fb_offset, fb_user_base,
+    fb_write_bytes, fb_read_bytes
+}
+
+// --------------------------------------------------------- der Schirm
+
+fn ready(state: u64) -> bool {
+    return fb.ready(state)
+}
+
+fn width(state: u64) -> u64 {
+    return fb.width(state)
+}
+
+fn height(state: u64) -> u64 {
+    return fb.height(state)
+}
+
+fn pixel(state: u64, x: u64, y: u64, color: u64) {
+    fb.pixel(state, x, y, color)
+}
+
+fn get_pixel(state: u64, x: u64, y: u64) -> u64 {
+    return fb.get_pixel(state, x, y)
+}
+
+fn dirty_all(state: u64) {
+    fb.dirty_all(state)
+}
+
+fn flush(state: u64) {
+    fb.flush(state)
+}
+
+// Ein Oktett der seriellen Leitung AUCH auf den Schirm. Das ist die
+// Zeile, die `serial.put` seit Runde K7 hat, und sie steht seit Runde
+// K11 nicht mehr auf `fb.echo`, sondern auf dem Fluchtfolgenautomaten.
+fn echo(c: u8) {
+    ansi.echo(c)
+}
+
+// ------------------------------------------------------ der Fenstermann
+
+fn wm_ready(state: u64) -> bool {
+    return wm.ready(state)
+}
+
+fn wm_on_key(state: u64, c: u64) {
+    wm.on_key(state, c)
+}
+
+fn wm_key_tty(state: u64) -> u64 {
+    return wm.key_tty(state)
+}
+
+fn wm_term_out(state: u64, i: u64, c: u64) {
+    wm.term_out(state, i, c)
+}
+
+// ------------------------------------------------------ die Befehlszeile
+
+fn parse(state: u64, cmd: u64) {
+    fb.parse(state, cmd)
+    vmode.parse(state, cmd)
+}
+
+// ------------------------------------------- die Oberflaeche beim Start
+//
+// VIER Rufe, und mehr weiss `kernel_main` von der Oberflaeche nicht.
+// Was dahinter passiert, steht in `kernel/kgui.fi` -- 2711 Zeilen, die
+// bei gui=off gar nicht erst im Uebersetzungsbaum liegen.
+
+fn stage_graphics(state: u64, mbi: u64) {
+    kgui.stage_graphics(state, mbi)
+}
+
+fn stage_surface(state: u64) {
+    kgui.stage_surface(state)
+}
+
+fn stage_hold(state: u64) {
+    kgui.stage_hold(state)
+}
+
+// ------------------------------------------------------ das Zeigegeraet
+//
+// `kernel/usb.fi` reicht die Meldungen einer USB-Maus an den Zeiger
+// weiter und meldet ihre Zahlen. Ohne Bildschirm gibt es nichts, worin
+// ein Zeiger sich bewegen koennte -- die PLATTE am selben Anschluss
+// funktioniert unveraendert weiter, und das ist der Punkt: ein Server
+// hat USB, er hat nur keine Maus.
+
+fn mouse_adopt(state: u64, w: u64, h: u64) {
+    ps2m.adopt(state, w, h)
+}
+
+fn mouse_packet(state: u64, b0: u64, b1: u64, b2: u64, b3: u64,
+    vier: bool) {
+    ps2m.usb_packet(state, b0, b1, b2, b3, vier)
+}
+
+// Der Unterbrechungsweg. IRQ 12 (der Zeiger am 8042) und IRQ 11 (USB)
+// enden beide hier; ohne Grafik gibt es an IRQ 12 nichts zu holen, und
+// die Leerfassung kehrt sofort zurueck.
+fn mouse_irq(state: u64) {
+    ps2m.irq(state)
+}
+
+fn wm_poll(state: u64) -> bool {
+    return wm.poll(state)
+}
+
+fn mouse_x(state: u64) -> u64 {
+    return ps2m.x(state)
+}
+
+fn mouse_y(state: u64) -> u64 {
+    return ps2m.y(state)
+}
+
+fn mouse_buttons(state: u64) -> u64 {
+    return ps2m.buttons(state)
+}
+
+fn mouse_packets(state: u64) -> u64 {
+    return ps2m.packets(state)
+}
+
+fn mouse_clicks(state: u64) -> u64 {
+    return ps2m.clicks(state)
+}
+
+// --------------------------------------- die Oberflaeche fuer Ring 3
+//
+// VIER Bereiche von Aufrufnummern. `sys.dispatch` prueft die Grenzen
+// wie vorher und gibt den Ruf hierher weiter; was dahinter steht,
+// liegt in `kernel/sysgui.fi`. Ohne Bildschirm beantwortet die
+// Leerfassung jede dieser Nummern mit -ENOSYS -- genau wie eine
+// Nummer, die es nicht gibt.
+
+fn sys_wm(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64,
+    a3: u64, a4: u64) -> u64 {
+    return sysgui.wm_call(state, me, number, a0, a1, a2, a3, a4)
+}
+
+fn sys_wig(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64,
+    a3: u64, a4: u64) -> u64 {
+    return sysgui.wig_call(state, me, number, a0, a1, a2, a3, a4)
+}
+
+fn sys_disp(state: u64, me: u64, number: u64, a0: u64, a1: u64,
+    a2: u64) -> u64 {
+    return sysgui.disp_call(state, me, number, a0, a1, a2)
+}
+
+fn sys_tile(state: u64, me: u64, number: u64, a0: u64, a1: u64) -> u64 {
+    return sysgui.tile_call(state, me, number, a0, a1)
+}
+
+// ----------------------------------------------------------- /dev/fb
+//
+// Die acht Griffe, mit denen `sys.fi` das Geraet bedient. `fb_ready`
+// ist der Wachposten davor: ohne Bildschirm ist er `false`, und dann
+// gibt `open("/dev/fb")` -ENODEV, `mmap` -ENODEV und `lseek` eine
+// Groesse von null -- dieselben Antworten, die eine Maschine ohne
+// Grafikkarte heute schon gibt.
+
+fn fb_ready(state: u64) -> bool {
+    return fb.ready(state)
+}
+
+fn fb_bytes(state: u64) -> u64 {
+    return fb.bytes(state)
+}
+
+fn fb_pitch(state: u64) -> u64 {
+    return fb.pitch(state)
+}
+
+fn fb_block(state: u64) -> u64 {
+    return fb.block(state)
+}
+
+fn fb_offset(state: u64) -> u64 {
+    return fb.offset(state)
+}
+
+fn fb_user_base() -> u64 {
+    return fb.USER_BASE
+}
+
+fn fb_write_bytes(state: u64, off: u64, src: u64, n: u64) -> u64 {
+    return fb.write_bytes(state, off, src, n)
+}
+
+fn fb_read_bytes(state: u64, off: u64, dst: u64, n: u64) -> u64 {
+    return fb.read_bytes(state, off, dst, n)
+}
