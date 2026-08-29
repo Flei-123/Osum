@@ -9,8 +9,22 @@
 # entsteht -- sonst baut das andere Repo etwas leicht anderes und misst
 # etwas leicht anderes.
 #
-#   ./tools/build-kernel.sh AUSGABE [--stufe 0|1] [--cmdline "..."]
+#   ./tools/build-kernel.sh AUSGABE [--stufe 0|1] [--gui on|off]
 #                                  [--ohne-tunnel]
+#
+# RUNDE SERVERBUILD: --gui off BAUT OSUM ALS SERVERBETRIEBSSYSTEM.
+# `kernel/fb.fi`, `wm.fi`, `wig.fi`, `font.fi`, `ttf.fi`, `tile.fi`,
+# `vmode.fi`, `ansi.fi`, `ps2m.fi`, `kgui.fi` und `sysgui.fi` werden
+# dabei NICHT UEBERSETZT -- sie liegen nicht im Baum, aus dem der
+# Uebersetzer liest. An der Stelle von `kernel/gfx.fi` (der Naht, ueber
+# die der uebrige Kernel die Grafik erreicht) steht `kernel/gfx-aus.fi`
+# mit denselben 37 Symbolen und leeren Rumpfen. Kein `#ifdef`, kein
+# Schalter zur Laufzeit, keine tote Verzweigung im Abbild.
+#
+# Die Vorgabe steht in `tools/config` (gui=on) und laesst sich mit
+# OSUM_GUI in der Umgebung oder mit --gui auf der Befehlszeile
+# ueberschreiben, in dieser Reihenfolge: Befehlszeile > Umgebung >
+# tools/config > eingebaut.
 #
 # --ohne-tunnel baut den Kern mit `kernel/wg-aus.fi` statt `kernel/wg.fi`:
 # ohne WireGuard, ohne die Krypto darunter, ohne Notaus. Das ist die
@@ -38,14 +52,39 @@ fi
 shift
 
 STUFE=0
-OHNE_TUNNEL=0
+
+# --------------------------------------------------- die Baukonfiguration
+#
+# Reihenfolge: eingebaut < tools/config < Umgebung < Befehlszeile. Wer
+# `gui=off` in `tools/config` schreibt, baut das ganze Repo als Server;
+# wer `--gui off` schreibt, baut EIN Abbild so.
+GUI=on
+TUNNEL=on
+if [[ -f tools/config ]]; then
+    while IFS='=' read -r k v; do
+        k=${k%%#*}; k=${k// /}; v=${v%%#*}; v=${v// /}
+        [[ -z $k ]] && continue
+        case "$k" in
+            gui) GUI=$v ;;
+            tunnel) TUNNEL=$v ;;
+        esac
+    done < tools/config
+fi
+[[ -n ${OSUM_GUI:-} ]] && GUI=$OSUM_GUI
+[[ -n ${OSUM_TUNNEL:-} ]] && TUNNEL=$OSUM_TUNNEL
+
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --ohne-tunnel) OHNE_TUNNEL=1; shift ;;
+        --ohne-tunnel) TUNNEL=off; shift ;;
+        --gui) GUI=$2; shift 2 ;;
         --stufe) STUFE=$2; shift 2 ;;
         *) echo "unbekannte Option: $1" >&2; exit 1 ;;
     esac
 done
+case "$GUI" in on|off) ;; *) echo "--gui nimmt on oder off, nicht '$GUI'" >&2; exit 1 ;; esac
+case "$TUNNEL" in on|off) ;; *) echo "tunnel nimmt on oder off, nicht '$TUNNEL'" >&2; exit 1 ;; esac
+OHNE_TUNNEL=0
+[[ $TUNNEL == off ]] && OHNE_TUNNEL=1
 
 export FIRNLIB="$ROOT/lib"
 bash vendor/firn/fetch-firnc.sh >/dev/null || {
@@ -84,6 +123,21 @@ if [[ $OHNE_TUNNEL == 1 ]]; then
     cp -f kernel/wg-aus.fi "$TMP/kernel/wg.fi" || exit 1
 fi
 rm -f "$TMP/kernel/wg-aus.fi"
+
+# RUNDE SERVERBUILD: DERSELBE GRIFF, EINE ETAGE GROESSER. Nicht eine
+# Datei wird ersetzt, sondern elf werden GELOESCHT und die zwoelfte
+# (`gfx.fi`, die Naht) durch ihre Leerfassung ersetzt. Danach steht im
+# Baum, aus dem firnc liest, keine Zeile Grafik mehr -- und weil kein
+# anderes Modul `fb.` oder `wm.` schreibt (Runde SERVERBUILD hat die
+# 745 Stellen auf 0 gebracht), uebersetzt der Rest unveraendert.
+GFX_DATEIEN="fb wm wig font ttf tile vmode ansi ps2m kgui sysgui"
+if [[ $GUI == off ]]; then
+    for f in $GFX_DATEIEN; do
+        rm -f "$TMP/kernel/$f.fi" || exit 1
+    done
+    cp -f kernel/gfx-aus.fi "$TMP/kernel/gfx.fi" || exit 1
+fi
+rm -f "$TMP/kernel/gfx-aus.fi"
 KDIR="$TMP/kernel"
 
 "$FIRNC" -o "$TMP/k.o" "$KDIR/kmain.fi" || exit 1
@@ -107,4 +161,4 @@ ld -n -T kernel/kernel.ld \
 mkdir -p "$(dirname "$AUS")"
 cp -f "$TMP/osum.elf" "$AUS.elf"
 objcopy -O elf32-i386 "$TMP/osum.elf" "$AUS" || exit 1
-echo "$AUS ($(stat -c%s "$AUS") Oktette, Stufe $STUFE)"
+echo "$AUS ($(stat -c%s "$AUS") Oktette, Stufe $STUFE, gui=$GUI, tunnel=$TUNNEL)"

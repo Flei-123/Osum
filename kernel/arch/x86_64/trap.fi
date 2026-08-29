@@ -25,8 +25,8 @@
 import serial
 import kstate
 import kbd
-import ps2m
-import wm
+import gfx
+import sercon
 import power
 import pmon
 import sched
@@ -69,6 +69,13 @@ const VEC_KEYBOARD: u64 = 33
 // Damit das nicht noch einmal passiert, rechnet `tools/kernel/memmap.py`
 // ab dieser Runde auch die VEKTORTABELLE nach: zwei verschiedene Namen
 // duerfen nicht auf derselben Zahl liegen.
+// RUNDE SERVERBUILD: die serielle Leitung meldet auf 36. IRQ 4, ueber
+// GSI 4 im I/O-APIC. 36 ist frei -- 32 Zeitgeber, 33 Tastatur, 43 USB,
+// 44 Platte, 45 Netz, 46 Zeiger, 47 verirrt -- und liegt in den 48
+// Einsprungpunkten, die `isr.s` bereithaelt. `tools/kernel/memmap.py`
+// rechnet die Vektortafel nach; zwei Namen auf einer Zahl waeren genau
+// der Fehler, an dem Runde K10 einen halben Tag haengengeblieben ist.
+const VEC_SERIAL: u64 = 36
 const VEC_MOUSE: u64 = 46
 // ROUND K2. The disk controller signals its completion on 44 -- over
 // MSI-X, where it writes the vector as data to 0xFEE00000, or over its
@@ -250,6 +257,15 @@ fn entry(frame: u64, state: u64) {
         signal.check_trap(state, sched.current(state), frame)
         return
     }
+    if vector == VEC_SERIAL {
+        // RUNDE SERVERBUILD. Auf einem Server ist DAS die Tastatur.
+        // Der Entropiebeitrag wird in `sercon.drain` je Oktett
+        // eingeruehrt und nicht hier je Unterbrechung: an einer
+        // seriellen Leitung kommen vierzehn Oktette in einem Schwung.
+        sercon.irq(state)
+        eoi(state, vector)
+        return
+    }
     if vector == VEC_KEYBOARD {
         // Wann ein Mensch tippt, weiss vorher niemand -- die klassische
         // Entropiequelle, und die einzige, die ein Mensch selbst sieht.
@@ -263,8 +279,8 @@ fn entry(frame: u64, state: u64) {
         // Tastatur und ist damit dieselbe Art Entropiequelle: wann ein
         // Mensch die Hand bewegt, weiss vorher niemand.
         rand.stir(state, time.tsc())
-        ps2m.irq(state)
-        wm.poll(state)
+        gfx.mouse_irq(state)
+        gfx.wm_poll(state)
         eoi(state, vector)
         return
     }
@@ -279,7 +295,7 @@ fn entry(frame: u64, state: u64) {
         // anderen Bus.
         rand.stir(state, time.tsc())
         usb.irq(state)
-        wm.poll(state)
+        gfx.wm_poll(state)
         eoi(state, vector)
         return
     }
