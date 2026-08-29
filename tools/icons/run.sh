@@ -44,6 +44,7 @@
 # Usage:  bash tools/icons/run.sh
 set -uo pipefail
 cd "$(dirname "$0")/../.."
+. tools/lib/qemu.sh          # $QEMU_X86, $OSUM_QEMU_ACCEL
 ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
 
@@ -224,7 +225,7 @@ lauf() { # name kommandozeile abbild [marke]
     local ppm="$TMPD/$name.ppm"
     rm -f "$aus" "$ppm" "$sock"
     cp -f "$img" "$TMPD/live-$name.img"
-    timeout 240 qemu-system-x86_64 -kernel "$TMPD/k.mb" -m 256 \
+    timeout 240 $QEMU_X86 -kernel "$TMPD/k.mb" -m 256 \
         -append "$zeile" -serial "file:$aus" -display none -no-reboot \
         -vga std -monitor "unix:$sock,server,nowait" \
         -drive "file=$TMPD/live-$name.img,format=raw,if=ide,index=0" \

@@ -33,6 +33,7 @@
 # Verwendung:  bash tools/i18n/run.sh
 set -uo pipefail
 cd "$(dirname "$0")/../.."
+. tools/lib/qemu.sh          # $QEMU_X86, $OSUM_QEMU_ACCEL
 export FIRNLIB="$(pwd)/lib"
 
 TMPD=${TMPD:-$(mktemp -d)}
@@ -164,7 +165,7 @@ LANG_SET=de bash tools/i18n/build.sh "$TMPD/de" > "$TMPD/build-de.txt" 2>&1 \
 echo "== 5. Ring 3: der Dekodierer, der Katalog, die Tastatur =="
 
 cp "$TMPD/en/disk.img" "$TMPD/t.img"
-timeout 180 qemu-system-x86_64 -kernel "$TMPD/en/k.mb" -m 256 \
+timeout 180 $QEMU_X86 -kernel "$TMPD/en/k.mb" -m 256 \
     -append "osum nokbd nosched noproc nofs noring3 script=i18nt;exit" \
     -serial "file:$TMPD/i18nt.txt" -display none -no-reboot \
     -drive "file=$TMPD/t.img,format=raw,if=ide,index=0" \
@@ -184,7 +185,7 @@ lauf() { # verzeichnis name [monitordatei]
     local sock="$d/mon-$n.sock"
     rm -f "$sock" "$d/$n.txt" "$d/$n.ppm"
     cp -f "$d/disk.img" "$d/live-$n.img"
-    timeout 240 qemu-system-x86_64 -kernel "$d/k.mb" -m 256 -append "$ZEILE" \
+    timeout 240 $QEMU_X86 -kernel "$d/k.mb" -m 256 -append "$ZEILE" \
         -serial "file:$d/$n.txt" -display none -no-reboot -vga std \
         -monitor "unix:$sock,server,nowait" \
         -drive "file=$d/live-$n.img,format=raw,if=ide,index=0" \

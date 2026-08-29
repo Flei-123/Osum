@@ -43,6 +43,7 @@
 #   bash tools/tunnel/kosten.sh
 set -uo pipefail
 cd "$(dirname "$0")/../.."
+. tools/lib/qemu.sh          # $QEMU_X86, $OSUM_QEMU_ACCEL
 
 RUNDEN=${RUNDEN:-3}
 MB=${MB:-1048576}
@@ -88,7 +89,7 @@ WGARGS="wgpriv=$PRIV wgpeer=$PEER wgep=10.5.0.1:51820 wgallow=10.91.0.2/32 \
 wgaddr=10.91.0.1/24 wgport=51820 wgup"
 
 lauf() { # $1 abbild  $2 zusatz  $3 logdatei  $4 nsvc-teil
-    timeout 60 qemu-system-x86_64 -kernel "$1" -m 512 -nographic -no-reboot \
+    timeout 60 $QEMU_X86 -kernel "$1" -m 512 -nographic -no-reboot \
         -append "nic nip=10.5.0.2 nprefix=24 ngw=10.5.0.1 $4 $2" \
         -netdev user,id=n0 -device virtio-net-pci,netdev=n0,mac=52:54:00:aa:dd:01 \
         -serial mon:stdio </dev/null > "$3" 2>&1

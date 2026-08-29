@@ -78,6 +78,7 @@
 # Aufruf:  bash tools/k18/run.sh
 set -uo pipefail
 cd "$(dirname "$0")/../.."
+. tools/lib/qemu.sh          # $QEMU_X86, $OSUM_QEMU_ACCEL
 ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
 FIRNC=${FIRNC:-vendor/firn/bin/firnc}
@@ -320,7 +321,7 @@ lauf() { # name kommandozeile [ssdt] [cpu] [zeitlimit]
     [ -n "$cpu" ] && args+=(-cpu "$cpu")
     [ -n "$ssdt" ] && args+=(-acpitable
         "sig=SSDT,rev=2,oem_id=OSUM,oem_table_id=K18,data=$TMPD/$ssdt.aml")
-    timeout "$t" qemu-system-x86_64 "${args[@]}" > /dev/null 2>&1
+    timeout "$t" $QEMU_X86 "${args[@]}" > /dev/null 2>&1
     echo $?
 }
 
@@ -331,7 +332,7 @@ lauf_bild() { # name kommandozeile
     local name=$1 zeile=$2
     local sock="$TMPD/mon-$name.sock" aus="$TMPD/$name.txt" ppm="$TMPD/$name.ppm"
     rm -f "$aus" "$ppm" "$sock"
-    timeout 150 qemu-system-x86_64 -cpu max -kernel "$TMPD/k0.mb" -m 256 \
+    timeout 150 $QEMU_X86 -cpu max -kernel "$TMPD/k0.mb" -m 256 \
         -append "$zeile" -serial "file:$aus" -display none -no-reboot \
         -vga std -monitor "unix:$sock,server,nowait" \
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 > /dev/null 2>&1 &

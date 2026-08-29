@@ -51,6 +51,7 @@
 # Usage:  bash tools/desktop/run.sh [--shots <dir>]
 set -uo pipefail
 cd "$(dirname "$0")/../.."
+. tools/lib/qemu.sh          # $QEMU_X86, $OSUM_QEMU_ACCEL
 ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
 TMPD=$(mktemp -d)
@@ -195,7 +196,7 @@ run() { # name conf-file cmdline-extra [monitor-file] [reuse-image]
             bad "mkfs.py failed for $name"; sed 's/^/        /' "$TMPD/mkfs.txt" | head -5; return 1; }
         cp -f "$TMPD/disk-$name.img" "$TMPD/live-$name.img"
     fi
-    timeout 240 qemu-system-x86_64 -kernel "$TMPD/k0.mb" -m 256 \
+    timeout 240 $QEMU_X86 -kernel "$TMPD/k0.mb" -m 256 \
         -append "$BASE $extra" -serial "file:$out" -display none -no-reboot \
         -vga std -monitor "unix:$sock,server,nowait" \
         -drive "file=$TMPD/live-$name.img,format=raw,if=ide,index=0" \
