@@ -46,6 +46,7 @@
 # Usage:  bash tools/posix/run.sh
 set -uo pipefail
 cd "$(dirname "$0")/../.."
+. tools/lib/qemu.sh          # $QEMU_X86, $OSUM_QEMU_ACCEL
 
 export FIRNLIB="$(pwd)/lib"
 FIRNC=${FIRNC:-vendor/firn/bin/firnc}
@@ -284,7 +285,7 @@ fi
 run_kernel() {
     local image=$1 append=$2 out=$3
     shift 3
-    timeout 180 qemu-system-x86_64 -kernel "$image" -m 128 -append "$append" \
+    timeout 180 $QEMU_X86 -kernel "$image" -m 128 -append "$append" \
         -serial "file:$out" -display none -no-reboot "$@" \
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1
     return $?

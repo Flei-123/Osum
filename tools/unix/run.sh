@@ -63,6 +63,7 @@
 # Aufruf:  bash tools/unix/run.sh
 set -uo pipefail
 cd "$(dirname "$0")/../.."
+. tools/lib/qemu.sh          # $QEMU_X86, $OSUM_QEMU_ACCEL
 
 export FIRNLIB="$(pwd)/lib"
 FIRNC=${FIRNC:-vendor/firn/bin/firnc}
@@ -227,7 +228,7 @@ python3 tools/osum/mkfs.py build "$TMPD/disk.img" $BLOCKS $SPEC > "$TMPD/mkfs.tx
 
 run_disk() { # image append out
     cp "$TMPD/disk.img" "$TMPD/live.img"
-    timeout 300 qemu-system-x86_64 -kernel "$1" -m 128 -append "$2" \
+    timeout 300 $QEMU_X86 -kernel "$1" -m 128 -append "$2" \
         -serial "file:$3" -display none -no-reboot \
         -drive "file=$TMPD/live.img,format=raw,if=ide,index=0" \
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1

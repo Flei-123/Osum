@@ -61,6 +61,7 @@
 # Verwendung:  bash tools/guard/run.sh
 set -uo pipefail
 cd "$(dirname "$0")/../.."
+. tools/lib/qemu.sh          # $QEMU_X86, $OSUM_QEMU_ACCEL
 ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
 
@@ -90,7 +91,7 @@ fi
 lauf() {
     local img=$1 app=$2 out=$3
     shift 3
-    timeout 120 qemu-system-x86_64 -kernel "$img" -m 512 -append "$app" \
+    timeout 120 $QEMU_X86 -kernel "$img" -m 512 -append "$app" \
         -serial "file:$out" -display none -no-reboot "$@" \
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1
     return $?
