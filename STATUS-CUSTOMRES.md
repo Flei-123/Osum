@@ -177,11 +177,73 @@ einem Test daran und gehört der Runde, die das auf Blech startet.
 
 ## Abnahme
 
-| Läufer | Stand |
-| --- | --- |
-| `tools/customres/run.sh` | **131 passed, 0 failed** |
-| `tools/display/run.sh` | **145 passed, 0 failed** -- unverändert gegenüber `mergeline` |
-| `./test.sh` | (laeuft) |
+Der Zweig lag bis zuletzt auf `adaa9c7` -- dem Stand von `main`, von dem
+die Grundlinie genommen wurde. `mergeline` war inzwischen siebzehn
+Commits weiter (Runde TESTFAST: `test.sh` parallelisiert,
+`tools/lib/qemu.sh` als **eine** Stelle für die Wahl zwischen kvm und
+tcg). Der Merge lief konfliktfrei; danach wurde beides erneut gemessen,
+und der Läufer dieser Runde hängt jetzt an der zentralen Accel-Wahl
+statt an seiner eigenen zwei Zeilen langen Fassung.
+
+| Läufer | vor dem Merge | nach dem Merge |
+| --- | --- | --- |
+| `tools/customres/run.sh` | 135 passed, 0 failed | **135 passed, 0 failed** |
+| `tools/display/run.sh` | 145 passed, 0 failed | **145 passed, 0 failed** |
+
+`./test.sh` (voller Lauf, vor dem Merge, parallel): **30 Abschnitte
+bestanden, 7 fehlgeschlagen, 3278 Zusagen**. Abschnitt 28 --
+`tools/customres/run.sh` -- ist seit `CUSTOMRES 11/n` darin eingetragen.
+
+### Die sieben roten Abschnitte, einzeln nachgemessen
+
+Ein voller Lauf sagt nicht, WOHER ein rotes Feld kommt. Jeder der sieben
+wurde deshalb einzeln gemessen, auf `mergeline` **und** auf diesem
+Zweig, seriell statt parallel:
+
+| Abschnitt | `mergeline` | dieser Zweig | Befund |
+| --- | --- | --- | --- |
+| K14 | 146 passed, 6 failed | 151 passed, 1 failed | vorbestehend, in `GRUNDLINIE.md` benannt |
+| K16 | 58 passed, 6 failed | 58 passed, 6 failed | vorbestehend, in `GRUNDLINIE.md` benannt |
+| THEME | 91 bestanden, 0 durchgefallen | **91 bestanden, 0 durchgefallen** | im Vollauf 89/7 -- Laststörung |
+| icons | 24 ok, 1 failed | 24 ok, 1 failed | vorbestehend (`lib/icons.fi does not match the map`) |
+| tunnelpakete | 15 bestanden, 3 fehlgeschlagen | 15 bestanden, 3 fehlgeschlagen | vorbestehend |
+| netview | siehe unten | siehe unten | vorbestehend |
+| ARM | 48 passed, 0 failed | **48 / 48 / 47** in drei Läufen | flattert, siehe unten |
+
+Keiner der sieben liegt an dieser Runde. Der Diff dieses Zweiges gegen
+`mergeline` fasst fünfzehn Dateien an, und **keine einzige davon** wird
+von einem der sieben Läufer gebaut oder gelesen: `kernel/vmode.fi`,
+`kernel/dispsave.fi`, `kernel/kmain.fi`, `kernel/sys.fi`,
+`kernel/tasks.fi`, `kernel/user/dispctl.fi`,
+`kernel/user/einstellungen.fi`, `test.sh`, `tools/customres/run.sh` und
+sechs Dateien unter `docs/`.
+
+### ARM: der Fehlschlag ist eine Messstörung, und das ist nachgerechnet
+
+`tools/arm/run.sh` meldete im Vollauf `_F0.amain__kmain is missing`, in
+einer Wiederholung `_F0.amain__kexception is missing` -- **zwei
+verschiedene Symbole aus derselben Datei**. Das allein ist schon ein
+Hinweis, dass nicht das Bild fehlerhaft ist, sondern die Messung. Drei
+Zahlen dazu:
+
+* **Der Build ist bit-identisch reproduzierbar.** Sechs Läufe von
+  `tools/arm/build.sh` auf diesem Zweig: sechsmal dieselbe Prüfsumme
+  (`b1cdbc69…`), sechsmal 121 Symbole mit dem Präfix `_F0.`, und
+  sechsmal sind **beide** gesuchten Symbole im Bild.
+* **Bei Ruhe schlägt die Prüfung nie fehl.** Dieselbe ELF-Datei,
+  dreihundertmal `aarch64-linux-gnu-nm … | grep -q " _F0.amain__kmain$"`:
+  **0 Fehlschläge von 300**.
+* **Unter Last flattert sie.** Drei volle Läufe des Abschnitts auf
+  diesem Zweig, während andere Abnahmen liefen: 48/0, 48/0, 47/1.
+
+Der Läufer ruft `nm` viermal auf und prüft dessen Rückgabewert nicht;
+scheitert der Aufruf unter Speicher- oder Prozessdruck, ist das für den
+Test nicht von einem fehlenden Symbol zu unterscheiden. Das ist ein
+echter Mangel -- aber ein Mangel des ARM-Läufers, nicht dieses Zweiges,
+und er wird hier **nicht** angefasst: `nm` einmal aufrufen, Rückgabewert
+und leere Ausgabe getrennt melden, ist eine Verschärfung und gehört in
+die Runde, der der Läufer gehört. Hier steht die Zahl, mit der sie
+anfangen kann.
 
 Kein bestehender Test wurde entschärft. Die neun Zusagen des
 Modustreibers und die zehn aus Ring 3 stehen in **eigenen** Zählern
