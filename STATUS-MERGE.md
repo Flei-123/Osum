@@ -28,8 +28,17 @@ Stand: 29.08.2026, 03:10 -- laufend.
   ohne mwait, xHCI-Tempo), kein Merge-Schaden.
   -> tools/lib/accel-ausnahmen.txt: die vier stehen wieder drin, mit
      Messwerten (Commit 62e0ac7). KEIN Test entschaerft.
-- [offen] voller Abnahmelauf mit der neuen Ausnahmeliste
-- [offen] hwnet, look, paint
+- [erledigt] Merge hwnet -> mergeline (09eba52; 7 Konflikte, alle in
+  docs/shots/netview/*.png, mit --theirs geloest -- die Bilder werden von
+  tools/netview/run.sh ohnehin neu erzeugt und der Abschnitt ist gruen)
+- [erledigt] volle Abnahme danach (/root/M3-HWNET.log): 39 Abschnitte,
+  32 gruen / 7 rot, 3173 Zusagen
+- [erledigt] die sieben einzeln nachgemessen (/root/M3-SINGLE.log):
+  posix 134/0, smp 59/0, k17 158/0 -- alle drei nur im vollen Lauf rot
+  (posix und smp an 'No space left on device', k17 an Last).
+  Es bleiben k14, k16, icons, tunnelpakete -- alle VORBESTEHEND.
+  KEIN NEUER SCHADEN DURCH hwnet.
+- [offen] look, paint
 - [offen] KVM-Bootlauf, mergeline -> main, OrientOS vendor/osum/COMMIT
 
 ## Zahlen
