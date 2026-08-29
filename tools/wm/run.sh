@@ -173,8 +173,20 @@ echo "== 2. die Speicherkarte von kdata: drei neue Bereiche =="
 kart=$(python3 tools/kernel/memmap.py kernel 2>&1)
 if [ $? -eq 0 ]; then ok "die Speicherkarte von kdata: $kart"
 else bad "die Speicherkarte von kdata kollidiert"; echo "$kart" | sed 's/^/        /'; fi
+# DIE KARTE WIRD EINMAL GEHOLT UND DANN DURCHSUCHT, und das ist kein
+# Schoenheitsfehler, den man auch anders schreiben koennte. Vorher stand
+# hier `python3 ... | grep -q ...` in einem Skript mit `set -o pipefail`:
+# `grep -q` steigt beim ersten Treffer aus, Python bekommt beim Schreiben
+# der naechsten Zeile SIGPIPE und endet mit 120, und `pipefail` macht
+# daraus das Ergebnis der ganzen Pipeline. Ob es passiert, haengt daran,
+# wie viel Ausgabe NACH dem Treffer noch kommt und wie schnell die
+# Maschine gerade ist -- MOUSE steht weit vorn, also fast immer. Der
+# Fehler ist alt (er tritt auf `handle` und auf `mergeline2` genauso auf)
+# und faellt nur unregelmaessig auf; Runde ASYNC hat ihn haeufiger
+# gemacht, weil sie vier Bereiche ans ENDE der Karte gehaengt hat.
+karte=$(python3 tools/kernel/memmap.py kernel -v 2>/dev/null)
 for b in MOUSE WM TTF; do
-    if python3 tools/kernel/memmap.py kernel -v 2>/dev/null | grep -q " $b  *kstate.fi:"; then
+    if printf '%s\n' "$karte" | grep -q " $b  *kstate.fi:"; then
         ok "der Bereich $b steht in der Karte"
     else
         bad "der Bereich $b steht NICHT in der Karte"
@@ -202,7 +214,7 @@ fi
 # Reglers gingen an den Maustreiber.  `nvme: irqs=0` statt `irqs=5`, in
 # JEDEM Lauf, auch ohne das Wort `wm`.  Gefunden hat es Abschnitt 6 von
 # `./test.sh`.  Ab jetzt findet es ein Programm.
-vt=$(python3 tools/kernel/memmap.py kernel -v 2>/dev/null | grep -A9 'die Vektortabelle' | tail -8 | tr -s ' ' | sed 's/^ //' | tr '\n' ' ')
+vt=$(printf '%s\n' "$karte" | grep -A9 'die Vektortabelle' | tail -8 | tr -s ' ' | sed 's/^ //' | tr '\n' ' ')
 if python3 tools/kernel/memmap.py kernel >/dev/null 2>&1; then
     ok "die Vektortabelle ist ueberschneidungsfrei ($vt)"
 else

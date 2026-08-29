@@ -237,7 +237,16 @@ echo "== 2. die Speicherkarte: drei Seiten, und nur die drei =="
 kart=$(python3 tools/kernel/memmap.py kernel 2>&1)
 if [ $? -eq 0 ]; then ok "die Speicherkarte von kdata: $kart"
 else bad "die Speicherkarte von kdata kollidiert"; echo "$kart" | sed 's/^/        /'; fi
-if python3 tools/kernel/memmap.py kernel -v 2>/dev/null | grep -q " WIG  *kstate.fi:"; then
+# DIE KARTE WIRD EINMAL GEHOLT UND DANN DURCHSUCHT. Vorher stand hier
+# `python3 ... | grep -q ...` in einem Skript mit `set -o pipefail`:
+# `grep -q` steigt beim ersten Treffer aus, Python bekommt beim Schreiben
+# der naechsten Zeile SIGPIPE und endet mit 120, und `pipefail` macht
+# daraus das Ergebnis der ganzen Pipeline. Der Fehler ist alt (er tritt
+# auf `handle` und auf `mergeline2` genauso auf) und faellt nur
+# unregelmaessig auf; Runde ASYNC hat ihn haeufiger gemacht, weil sie
+# vier Bereiche ans ENDE der Karte gehaengt hat.
+karte=$(python3 tools/kernel/memmap.py kernel -v 2>/dev/null)
+if printf '%s\n' "$karte" | grep -q " WIG  *kstate.fi:"; then
     ok "der Bereich WIG steht in der Karte"
 else
     bad "der Bereich WIG steht NICHT in der Karte"
@@ -245,7 +254,7 @@ fi
 # DER VORRAT, DER DIESER RUNDE GEHOERT. Drei Runden liefen gleichzeitig;
 # genau daran waeren drei Merges beinahe gescheitert. Also wird
 # nachgerechnet, dass diese Runde in ihrem Vorrat geblieben ist.
-wo=$(python3 tools/kernel/memmap.py kernel -v 2>/dev/null | grep ' WIG ' | grep -oE '0x[0-9A-Fa-f]+' | head -2 | tr '\n' ' ')
+wo=$(printf '%s\n' "$karte" | grep ' WIG ' | grep -oE '0x[0-9A-Fa-f]+' | head -2 | tr '\n' ' ')
 gleich "der Bereich liegt im zugeteilten Vorrat" "0x46000 0x49000 " "$wo"
 # ZEHN AUFRUFE: sieben aus der Runde, drei aus dem zweiten Nachtrag
 # (1807 Tabellenlauf, 1808 Journal, 1809 Auskunft).
