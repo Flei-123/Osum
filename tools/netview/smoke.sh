@@ -36,7 +36,7 @@ python3 tools/k15/tree.py "$TMPD/baum" > /dev/null 2>&1 || exit 1
 printf '# taskbar.conf\nedge=%s\nheight=28\nwidth=104\nautohide=0\nontop=1\n' \
     "${EDGE:-bottom}" > "$TMPD/taskbar.conf"
 
-ARGS=(build "$TMPD/d.img" 4096 /lib/
+ARGS=(build "$TMPD/d.img" 8192 /lib/
     "/lib/mono.ttf=$MONO" "/lib/sans.ttf=$SANS" /bin/)
 for q in $GPROGS; do ARGS+=("/bin/$q=$TMPD/g$q.elf"); done
 ARGS+=("/bin/files@/bin/explorer")

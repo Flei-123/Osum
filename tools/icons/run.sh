@@ -203,7 +203,12 @@ done
 python3 tools/k15/tree.py "$TMPD/baum" > /dev/null 2>&1
 bau_img() { # ziel [--noicons]
     local ziel=$1 mit=${2:-mit}
-    local ARGS=(build "$ziel" 4096 /lib/
+    # RUNDE VIEWER: 8192 statt 4096 Bloecke. `/bin/viewer` steht seit dieser
+    # Runde mit in PROGS und traegt vier Dekodierer und zwei Schreiber mit
+    # sich (rund 450 KiB); mit 16 MiB brach `mkfs.py` mit "the disk is
+    # full" ab. Die Groesse des Abbilds ist eine Zahl im Testlaeufer und
+    # keine Zusage -- sie zu erhoehen entschaerft nichts.
+    local ARGS=(build "$ziel" 8192 /lib/
         "/lib/mono.ttf=assets/osum-mono.ttf"
         "/lib/sans.ttf=assets/osum-sans.ttf")
     [ "$mit" = mit ] && ARGS+=("/lib/icons.ttf=assets/osum-icons.ttf")
