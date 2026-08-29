@@ -173,11 +173,25 @@ def cmd_ecke(argv):
                               x + ww // 2 + 20, y + hh // 2 + 20)
     kante = px(w, h, d, x + ww // 2, y)
     schlecht = 0
+    # WAS "ECKIG" HEISST, und warum es nicht "gleich dem Fenstergrund"
+    # heissen darf: ein Fenster mit Rahmen traegt an seiner Oberkante
+    # NICHT die Fuellfarbe, sondern die Rahmenfarbe. Der Satz `classic`
+    # hat radius_window=0 und einen Rahmen -- seine Ecken sind
+    # kerzengerade und trugen (226,232,240), also nicht den Grund
+    # (255,255,255); die alte Regel nannte sie deshalb "rund" und die
+    # Gegenprobe scheiterte, obwohl das Bild genau das zeigte, was es
+    # zeigen sollte.
+    #
+    # Die Kantenmitte oben ist per Bauart ein Punkt, der ZUM FENSTER
+    # gehoert -- Rahmen oder Fuellung, je nach Satz. Eine Ecke ist
+    # eckig, wenn sie dasselbe traegt wie diese Kante oder wie der
+    # Fenstergrund; sie ist rund, wenn dort etwas anderes liegt, denn
+    # dann sieht man an dieser Stelle den Schreibtisch.
     for nx, ny, wie in ((x, y, "oben links"), (x + ww - 1, y, "oben rechts"),
                         (x, y + hh - 1, "unten links"),
                         (x + ww - 1, y + hh - 1, "unten rechts")):
         p = px(w, h, d, nx, ny)
-        gleich = (p == grund)
+        gleich = (p == grund) or (p == kante)
         print("ecke %-13s (%d,%d) = %s  %s" %
               (wie, nx, ny, p, "ECKIG" if gleich else "rund"))
         if gleich:
