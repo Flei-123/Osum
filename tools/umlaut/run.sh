@@ -32,6 +32,14 @@
 #         das irgendwo im sichtbaren Text steht.
 #      7. Wo "vier Zeichen" verlangt wird, werden Zeichen gezaehlt und
 #         nicht Oktette.
+#      7b. KEINE ABNAHME SUCHT MEHR NACH DEM ALTEN TEXT. Die zweite
+#         Sorte Leiche sitzt nicht im System, sondern im Laeufer:
+#         `tiling.fi` sagte "tiling: Einträge gelesen",
+#         `tools/tiling/run.sh` suchte "tiling: Eintraege" -- rot,
+#         obwohl nichts fehlte. `tools/i18n/erwartung.py` vergleicht
+#         die Suchausdruecke aller 124 Laeufer gegen die Saetze des
+#         Baums. Nur Saetze MIT Programmpraefix; Beschreibungen und
+#         getippte Eingaben bleiben ausdruecklich in Ruhe.
 #
 #   B. DAS BILD, in QEMU (mit -accel kvm, wo es geht):
 #      8.  der Starter mit den Programmbeschreibungen -- dort stand
@@ -70,7 +78,7 @@ hatnicht() { grep -qaF "$2" "$1" && bad "$3 -- '$2' steht da" || ok "$3"; }
 kopie() {
     local k=$1
     rm -rf "$k"; mkdir -p "$k"
-    cp -r kernel locale assets tools "$k"/ 2>/dev/null
+    cp -r kernel lib locale assets tools tests "$k"/ 2>/dev/null
 }
 
 # gegen <was> <datei> <alt> <neu> <befehl...>
@@ -236,6 +244,53 @@ hat kernel/user/passwd.fi "utf8.chars((&a[0]) as u64, n) < 4" \
     "passwd zaehlt Zeichen"
 hat kernel/user/settings.fi "wlibc.chars((&e_pw1[0 as usize]) as u64," \
     "die Einstellungen zaehlen Zeichen"
+
+echo
+echo "-- 7b. keine Abnahme sucht mehr nach dem alten Text"
+# Die Umstellung laesst eine zweite Sorte Leiche zurueck, und sie sitzt
+# nicht im System, sondern in der ABNAHME: `tiling.fi` sagte seit
+# UMLAUT2 2/n "tiling: Einträge gelesen", `tools/tiling/run.sh` suchte
+# weiter nach "tiling: Eintraege". Der Laeufer wurde ROT, obwohl nichts
+# fehlte -- die unangenehmste Form des Fehlers, denn er sieht aus wie
+# ein echter und wird am falschen Ende gesucht.
+OSUM_ROOT=. python3 tools/i18n/erwartung.py > "$TMPD/e.txt" 2>&1
+erc=$?
+n_e=$(sed -n 's/.*, \([0-9]*\) veraltete Erwartungen/\1/p' "$TMPD/e.txt")
+is "veraltete Erwartungen in den Abnahmelaeufern" "${n_e:-?}" "0"
+if [ "$erc" -eq 0 ]; then
+    ok "tools/i18n/erwartung.py ist gruen ($(sed -n 's/^erwartung: //p' "$TMPD/e.txt"))"
+else
+    bad "tools/i18n/erwartung.py meldet Funde"
+    sed 's/^/        /' "$TMPD/e.txt" | head -8
+fi
+gegen "eine Abnahme sucht den alten Satz" \
+    tools/tiling/run.sh \
+    "'^[0-9]+ tiling: Einträge'" \
+    "'^[0-9]+ tiling: Eintraege'" \
+    python3 tools/i18n/erwartung.py
+# GEGEN-GEGENPROBE: eine BESCHREIBUNG in Umschrift muss still bleiben,
+# und eine getippte EINGABE ("opk zurueck 0") erst recht. Ein Pruefer,
+# der die Abnahmesprache anmeckert, wird beim naechsten Mal
+# abgeschaltet, und dann prueft er gar nichts mehr. Beides ohne
+# Programmpraefix -- genau daran unterscheidet er sie vom Suchausdruck.
+kopie "$TMPD/kopie3"
+python3 - "$TMPD/kopie3/tools/tiling/run.sh" <<'PY2'
+import sys
+p = sys.argv[1]
+s = open(p, encoding='utf-8').read()
+s = s.replace('ok "Kern und Ring 3 zaehlen dieselben Eintraege ($ub)"',
+              'ok "Eintraege, die aus der Datei gelesen wurden, '
+              'und opk zurueck 0 als Eingabe ($ub)"', 1)
+open(p, 'w', encoding='utf-8').write(s)
+PY2
+( cd "$TMPD/kopie3" && OSUM_ROOT=. python3 tools/i18n/erwartung.py ) \
+    > "$TMPD/gegen3.txt" 2>&1
+if [ $? -eq 0 ]; then
+    ok "GEGEN-GEGENPROBE: eine Beschreibung in Umschrift bleibt still"
+else
+    bad "GEGEN-GEGENPROBE: eine Beschreibung wird angemeckert -- zu laut"
+    sed 's/^/        /' "$TMPD/gegen3.txt" | head -4
+fi
 
 echo
 echo "== B. DAS BILD"
