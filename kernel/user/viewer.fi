@@ -116,6 +116,12 @@ const DIAMS: u64 = 3000
 // Miniaturen
 static mut mini: u64 = 0 // MINIS * MINIW * MINIH * 4
 static mut mini_da: [u64; 8] = [0 as u64; 8]
+// WELCHES BILD IN WELCHEM KAESTCHEN STECKT. Ohne das dekodiert der
+// Streifen bei jedem Blaettern alle acht Dateien neu -- gemessen: mit
+// einer 12-MP-Datei im Ordner kostet EIN Schritt weiter 2,0 s statt
+// 0,05 s, und der Bediener sieht die Anwendung stehen.
+static mut mini_idx: [u64; 8] = [0 as u64; 8]
+static mut mini2: u64 = 0 // Umlagerplatz, gleiche Groesse wie `mini`
 static mut mini_von: u64 = 0
 
 static mut status: [u8; 256] = [0 as u8; 256]
@@ -267,10 +273,17 @@ fn datei_lesen(pf: u64, out_len: u64) -> u64 {
         ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
         return 0
     }
+    // GENAU `sz` OKTETTE UND KEINES MEHR. Nicht "bis `read` 0 sagt":
+    // liefert der Kernel einmal mehr, als die Datei lang ist, laeuft
+    // `sz - got` unter und die Schleife schreibt ueber die Arena
+    // hinaus. Wer die Laenge kennt, braucht das Dateiende nicht.
     var got: u64 = 0
     var going: bool = true
     while going {
-        var want: u64 = sz - got
+        var want: u64 = 0
+        if got < sz {
+            want = sz - got
+        }
         if want > 4096 {
             want = 4096
         }
@@ -637,16 +650,44 @@ fn minis_bauen() {
     if von + MINIS > anz && anz > MINIS {
         von = anz - MINIS
     }
-    mini_von = von
+    // WAS SCHON DEKODIERT IST, WIRD UMGELAGERT UND NICHT NEU GERECHNET.
+    // Beim Blaettern verschiebt sich das Fenster um eins: sieben der
+    // acht Kaestchen sind dieselben Bilder wie eben. Sie wandern ueber
+    // `mini2` an ihren neuen Platz; nur das eine neue wird dekodiert.
+    let tk: u64 = MINIW * MINIH * 4
+    var neu_da: [u64; 8] = [0 as u64; 8]
     var k: u64 = 0
     while k < MINIS {
-        mini_da[(k) as usize] = 0
+        neu_da[(k) as usize] = 0
+        var j: u64 = 0
+        while j < MINIS {
+            if mini_da[(j) as usize] != 0
+                && mini_idx[(j) as usize] == von + k {
+                imgmem.copy(mini2 + k * tk, mini + j * tk, tk)
+                neu_da[(k) as usize] = 1
+                j = MINIS
+            } else {
+                j = j + 1
+            }
+        }
         k = k + 1
     }
     k = 0
+    while k < MINIS {
+        if neu_da[(k) as usize] != 0 {
+            imgmem.copy(mini + k * tk, mini2 + k * tk, tk)
+        }
+        mini_da[(k) as usize] = neu_da[(k) as usize]
+        mini_idx[(k) as usize] = von + k
+        k = k + 1
+    }
+    mini_von = von
+    k = 0
     while k < MINIS && von + k < anz {
-        if mini_eins(k, von + k) {
-            mini_da[(k) as usize] = 1
+        if mini_da[(k) as usize] == 0 {
+            if mini_eins(k, von + k) {
+                mini_da[(k) as usize] = 1
+            }
         }
         k = k + 1
     }
@@ -1061,6 +1102,7 @@ fn u_start(args: u64) -> u64 {
         mini_arena = 0
     }
     mini = mini_arena
+    mini2 = mini_arena + MINIS * MINIW * MINIH * 4
 
     ordner_lesen()
     var start: u64 = 0
@@ -1376,6 +1418,7 @@ fn bericht() {
     var k14: [u8; 10] = " mini=\0\0\0\0"
     var k15: [u8; 10] = " dia=\0\0\0\0\0"
     var k16: [u8; 8] = " ori=\0\0\0"
+    var k17: [u8; 8] = " zeit=\0\0"
     ulib.say((&k1[0 as usize]) as u64)
     ulib.sayu(anz)
     ulib.say((&k2[0 as usize]) as u64)
@@ -1416,5 +1459,7 @@ fn bericht() {
     ulib.sayu(md)
     ulib.say((&k15[0 as usize]) as u64)
     ulib.sayu(diaschau)
+    ulib.say((&k17[0 as usize]) as u64)
+    ulib.sayu(ulib.sys(ulib.SYS_SYSINFO, ulib.I_UPTIME, 0, 0))
     ulib.nl()
 }

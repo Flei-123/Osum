@@ -154,6 +154,9 @@ python3 tools/osum/mkfs.py build "$TMPD/d.img" 32768 --inodes=256 \
     && ok "ein Plattenabbild mit $(echo $DATA | wc -w) Dateien darauf" \
     || { bad "mkfs fehlgeschlagen"; tail -5 "$TMPD/mkfs.log"; exit 1; }
 
+if [ "${VIEWER_NUR_GUI:-0}" = 1 ]; then
+echo "== 3 bis 7 uebersprungen (VIEWER_NUR_GUI=1) =="
+else
 echo "== 3. der Lauf im System =="
 cp "$TMPD/d.img" "$TMPD/live.img"
 LOG="$TMPD/lauf.txt"
@@ -389,6 +392,8 @@ if [ -n "$mo" ] && [ -n "$mp" ]; then
 fi
 
 
+fi   # Ende von VIEWER_NUR_GUI
+
 # =====================================================================
 # 8. DIE ANWENDUNG, AUF DEM BILDSCHIRM
 #
@@ -485,11 +490,18 @@ klick() { # datei x y
 # der Weg, den die Widget-Bibliothek fuer die Tastatur vorsieht
 # (`on_key`: Eingabetaste auf einem Knopf ruft dieselbe `fire`-Stelle
 # wie ein Klick), und er ist wiederholbar.
+# DIE WARTEZEITEN SIND GEMESSEN UND NICHT GERATEN. Der PS/2-Anschluss
+# haelt EIN Oktett; wer die naechste Taste schickt, bevor das System die
+# vorige geholt hat, verliert sie. Und ein Tastendruck, der ein Bild
+# laedt, beschaeftigt die Anwendung fuer eine Weile: Datei lesen,
+# dekodieren, sieben Miniaturen bauen. Mit 0,15 s zwischen Tabulator und
+# Leertaste ging die Leertaste verloren -- mit den Zahlen hier nicht.
 fokus() { # datei anzahl-tabs
     local f=$1 n=$2 i
-    printf 'warte 0.5\n' >> "$f"
+    printf 'warte 1.5\n' >> "$f"
     i=0
-    while [ "$i" -lt "$n" ]; do printf 'sendkey tab\nwarte 0.15\n' >> "$f"; i=$((i+1)); done
+    while [ "$i" -lt "$n" ]; do printf 'sendkey tab\nwarte 0.4\n' >> "$f"; i=$((i+1)); done
+    printf 'warte 1.0\n' >> "$f"
 }
 # DIE LEERTASTE UND NICHT DIE EINGABETASTE. `wlib.on_key` loest einen
 # Knopf bei `KEY_ENTER` (13) ODER bei 32 aus -- und die Eingabetaste
@@ -498,10 +510,10 @@ fokus() { # datei anzahl-tabs
 # aufgeschrieben in docs/ROUNDVIEWER.md. Die Leertaste geht.
 druecken() { # datei [wiederholungen]
     local f=$1 n=${2:-1} i=0
-    while [ "$i" -lt "$n" ]; do printf 'sendkey spc\nwarte 1.0\n' >> "$f"; i=$((i+1)); done
+    while [ "$i" -lt "$n" ]; do printf 'sendkey spc\nwarte 3.0\n' >> "$f"; i=$((i+1)); done
 }
 taste() { # datei taste
-    printf 'sendkey %s\nwarte 1.0\n' "$2" >> "$1"
+    printf 'sendkey %s\nwarte 3.0\n' "$2" >> "$1"
 }
 vfeld() { grep -a "^viewer: an=" "$1" | tail -1 | grep -oE "$2=[0-9]+" | head -1 | cut -d= -f2; }
 # Die Mitte eines Bedienelements IN BILDSCHIRMKOORDINATEN. Die
@@ -689,13 +701,19 @@ done
 # GEMESSEN, ob es den Fehler noch gibt -- damit die naechste Runde es
 # merkt, wenn Firn repariert ist.
 echo "== 9. die Probe auf den Uebersetzer =="
-rotw=$(grep -a '^IMGROT wert=' "$LOG" | head -1 | cut -d= -f2)
+rotw=""
+[ -n "${LOG:-}" ] && [ -f "${LOG:-}" ] && \
+    rotw=$(grep -a '^IMGROT wert=' "$LOG" | head -1 | cut -d= -f2)
+if [ "${VIEWER_NUR_GUI:-0}" = 1 ] && [ -z "$rotw" ]; then
+    echo "        uebersprungen (VIEWER_NUR_GUI=1)"
+else
 if [ "$rotw" = "132172216260" ]; then
     ok "drei rotierende Veraenderliche stimmen jetzt ($rotw) -- der Umweg in imgjpeg.h2v2 kann zurueckgebaut werden"
 elif [ -n "$rotw" ]; then
     ok "der Uebersetzerfehler ist noch da: $rotw statt 21324354 (docs/IMAGES.md, Abschnitt 7)"
 else
     bad "die Probe hat nichts geliefert"
+fi
 fi
 
 echo

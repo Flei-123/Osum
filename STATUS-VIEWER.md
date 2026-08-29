@@ -10,21 +10,22 @@ JPEG-Bildern.
 
 | # | Stück | Datei | Zeilen | Zustand |
 |---|---|---|---|---|
-| 1 | Arena-Allokator für Dekodierer | `kernel/user/imgmem.fi` | 170 | fertig |
-| 2 | **Baseline-JPEG lesen**, zeilenweise, islow-IDCT | `kernel/user/imgjpeg.fi` | 1 348 | bitgenau gegen Pillow |
-| 3 | **PNG lesen und schreiben** | `kernel/user/imgpng.fi` | 1 010 | bitgenau |
-| 4 | **GIF mit Animation** (LZW) | `kernel/user/imggif.fi` | 542 | bitgenau |
-| 5 | **BMP** + Formaterkennung + die eine Schnittstelle | `kernel/user/img.fi` | 718 | bitgenau |
+| 1 | Arena-Allokator für Dekodierer | `kernel/user/imgmem.fi` | 159 | fertig |
+| 2 | **Baseline-JPEG lesen**, zeilenweise, islow-IDCT | `kernel/user/imgjpeg.fi` | 1 419 | bitgenau gegen Pillow |
+| 3 | **PNG lesen und schreiben** | `kernel/user/imgpng.fi` | 971 | bitgenau |
+| 4 | **GIF mit Animation** (LZW) | `kernel/user/imggif.fi` | 546 | bitgenau |
+| 5 | **BMP** + Formaterkennung + die eine Schnittstelle | `kernel/user/img.fi` | 713 | bitgenau |
 | 6 | **JPEG schreiben** (islow-FDCT, Anhang K) | `kernel/user/imgjenc.fi` | 637 | gemessen gegen libjpeg |
-| 7 | Verkleinern / drehen / spiegeln / zuschneiden | `kernel/user/imgops.fi` | 300 | fertig |
-| 8 | Messprogramm gegen Pillow | `kernel/user/imgtest.fi` | 600 | fertig |
-| 9 | **Anwendung „Bilder"** | `kernel/user/viewer.fi` | 1 280 | fertig |
+| 7 | Verkleinern / drehen / spiegeln / zuschneiden | `kernel/user/imgops.fi` | 281 | fertig |
+| 8 | Messprogramm gegen Pillow | `kernel/user/imgtest.fi` | 592 | fertig |
+| 9 | **Anwendung „Bilder"** | `kernel/user/viewer.fi` | 1 420 | fertig |
 | 10 | Bündel | `assets/apps/viewer.osp/` | — | fertig |
-| 11 | Abnahme | `tools/viewer/run.sh` + 3 Helfer | 660 | fertig, Abschnitt 29 in `./test.sh` |
+| 11 | Abnahme | `tools/viewer/run.sh` + 3 Helfer | 1 050 | fertig, Abschnitt 29 in `./test.sh` |
 | 12 | Doku | `docs/IMAGES.md`, `docs/ROUNDVIEWER.md` | — | fertig |
 
-Zusammen **4 425 Zeilen Dekodierer und Schreiber** plus 1 880 Zeilen
-Anwendung, Werkzeuge und Messprogramm.
+Zusammen **4 726 Zeilen Dekodierer und Schreiber** (imgmem, imgjpeg,
+imgpng, imggif, img, imgjenc, imgops) plus 2 012 Zeilen Anwendung und
+Messprogramm und 1 050 Zeilen Abnahme.
 
 ## Die Entscheidung, die alles trägt
 
