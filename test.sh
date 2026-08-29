@@ -405,6 +405,22 @@
 #      Uebertragen. Gemessen wird mit Bildschirmfotos vorher und
 #      nachher; die Gegenprobe nimmt das Wort `disp` weg und erwartet
 #      nichts davon.
+#
+#  28. EIGENE AUFLOESUNGEN (tools/customres/run.sh, Runde CUSTOMRES):
+#      Runde DISPLAY fragte die Karte, hielt das Ergebnis aber in einer
+#      Liste fest, deren Kandidaten im Quelltext stehen -- 1400x1050 war
+#      damit unerreichbar, obwohl die Karte es kann. Diese Runde laesst
+#      Breite, Hoehe und Farbtiefe frei eingeben und schickt sie durch
+#      DIESELBEN drei Schranken; wird abgelehnt, steht WELCHE Schranke
+#      und MIT WELCHER ZAHL da (gemessen: dieselbe Anfrage an eine
+#      kleinere Karte wechselt den Grund von 3 auf 2). Dazu zwei
+#      Sicherheitsnetze: die Fuenfzehn-Sekunden-Frist laeuft jetzt
+#      WIRKLICH ohne Zutun ab (die Leerlaufaufgabe ruft `vmode.poll`;
+#      gemessen mit einem Programm, das umschaltet und dann schlaeft),
+#      und ein bestaetigter Modus ueberlebt den Neustart in
+#      /system/BILDMODUS, mit einem Erprobungszaehler wie beim A/B-Boot
+#      -- fuenf Starts auf DERSELBEN Platte, bis der Rueckfall greift.
+#      Gegenprobe: derselbe Kern ohne `disp` tut nichts davon.
 #  25. AKKUANALYSE JE PROGRAMM (tools/powermon/run.sh, Runde POWERMON):
 #      "Akkunutzung nach App", aber aus gemessenen Zahlen. Niemand kann
 #      den Verbrauch EINES Programms messen -- Windows auch nicht, es
@@ -683,6 +699,9 @@ lauf "23. USB: xHCI, Aufzaehlung, Tastatur, Maus und ein Stick (tools/k17/run.sh
 
 lauf "26. Der Bildschirm, zum zweiten Mal: Modusliste, Wechsel im Betrieb, EDID, Gamma (tools/display/run.sh, Runde DISPLAY)" \
      tools/display/run.sh display '^DISPLAY: |^  OK    (gefragt |die native |der rohe Block|er hat [0-9]+ Mikro|gemessen: |je Bildpunkt|NACHHER|VORHER|ZURUECK|Feld 1 ist rot|das Foto ist 800x600 -- der Bildmodus|und der Kernel hat von SELBST|die Aufrufnummern dieser Runde|ein Programm in Ring 3 hat)'
+
+lauf "28. Eigene Aufloesungen: drei Schranken mit ihrer Zahl, eine Frist ohne Zutun, ein Modus ueber den Neustart (tools/customres/run.sh, Runde CUSTOMRES)" \
+     tools/customres/run.sh customres '^CUSTOMRES: |^  OK    (1400x1050 steht in KEINER|das Foto ist 1400x1050|die genannte Zahl ist GENAU|und es steht da, was die Karte|und JETZT ist der Bildspeicher|eine Begruendung, die sich|nach 22 Sekunden Schlaf|der Kernel hat von SELBST|der Kernel findet den Modus|jetzt sind die drei Versuche|die Tafel steht auf dem SICHEREN|3840x2160 scheitert jetzt|mit 16 MiB war es noch|die Belegung der acht|zehn Zusagen ueber die|und die neun eigenen)'
 
 lauf "27. Marken statt Farben: hell, dunkel, automatisch, und der Kontrast nachgerechnet (tests/theme/run.sh, Runde THEME)" \
      tests/theme/run.sh theme '^THEME: |^  OK    (rohe Farbwerte|derselbe Pruefer|alle 256|groesster Abstand|[a-z]+/(light|dark): (41|23|21|jede)|#[0-9a-f]+ hell|die Farbe bleibt|GEGENPROBE|aufloesen |nachsehen |vollstaendig |erkennen, |neu malen, |das Umschalten|[a-z]+: die (haeufigste|aufgeloeste)|ohne /etc/theme.conf|und die eingebaute|aus der kaputten|und 4 werden|was die Datei)'
