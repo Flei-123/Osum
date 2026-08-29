@@ -753,6 +753,8 @@ def load(path):
     if fs.g64(SB["MAGIC"]) != MAGIC:
         return None
     fs.root = fs.g64(SB["ROOT"])
+    # RUNDE K13: die Fassung steht im Superblock; eine 0 heisst 1.
+    fs.version = fs.g64(SB["VERSION"]) or OFS_V1
     return fs
 
 
