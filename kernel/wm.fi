@@ -88,7 +88,10 @@ export {
     set_app, win_app, APP_LEN,
     // RUNDE PAINT -- die Form des Fensters und ihr Preis.
     set_form, form, form_writes, shadow_px, aa_px, paint_reset,
+    shadow_builds, set_shadow_old, cap_hover, cap_hits,
+    CAP_MIN, CAP_MAX, CAP_CLOSE,
     FORM_SLOTS, FM_RADIUS, FM_SHADOW, FM_SHADOW_R, FM_SHADOW_C,
+    FM_SHADOW2, FM_SHADOW_R2, FM_GRAD, FM_CAPTION,
     RADIUS_MAX, SHADOW_MAX,
     DK_FRAME, DK_TITLE, DK_TEXT, DK_FRAME_ON, DK_TITLE_ON, DK_TEXT_ON,
     DK_CLOSE, DK_CLOSE_MARK, DK_DESK, DK_TERM_FG, DK_TERM_BG,
@@ -375,20 +378,76 @@ const DECO_SLOTS: u64 = 11
 // demselben Grund: der Kernel bekommt KEINE Formdatei und keine
 // Meinung, er bekommt vier aufgeloeste Zahlen. Wer sie setzen darf, ist
 // wer eine Taskleiste IST -- dasselbe Recht wie bei den Farben.
-const S_FORM: u64 = 0x280 // FORM_SLOTS Woerter
 const S_FORMN: u64 = 0x2A0 // wie oft ein Wert gesetzt wurde
 const S_SHADOWPX: u64 = 0x2A8 // gemischte Bildpunkte fuer Schatten
 const S_AAPX: u64 = 0x2B0 // Bildpunkte durch den Eckenabtaster
-const FORM_SLOTS: u64 = 4
+// ===================================================== RUNDE SOFTUI
+//
+// SECHS WOERTER MEHR, UND DER GRUND, WARUM S_FORM UMZIEHT.
+//
+// Runde PAINT hat vier Formwoerter auf 0x280 gelegt und den Zaehler
+// unmittelbar dahinter auf 0x2A0. Diese Runde braucht acht -- der
+// Schatten des UNSCHARFEN Fensters ist ein eigenes Paar (Staerke und
+// Reichweite), der Verlauf der Titelleiste eine Zahl, und die Frage,
+// ob die Titelleiste drei Windows-Schaltflaechen traegt oder das alte
+// Schliessfeld, ist die achte. Acht Woerter ab 0x280 liefen genau in
+// S_FORMN hinein; `tools/paint/scalars.py` haette es gemeldet, aber
+// erst nach dem Bau. Also zieht der Block dorthin, wo Platz fuer die
+// naechste Runde ist, und der Zaehler bleibt, wo er war.
+const S_FORM: u64 = 0x300 // FORM_SLOTS Woerter
+// Wie oft die Schattenmaske gebaut wurde. DAS IST DER MESSWERT DIESER
+// RUNDE: er muss klein und konstant bleiben, waehrend die Zahl der
+// Bilder waechst. Steigt er mit jedem Bild, ist die Maske keine.
+const S_SHBUILD: u64 = 0x2B8
+const S_SHKEY: u64 = 0x2C0 // fuer welche Werte sie gebaut wurde
+const S_SHS: u64 = 0x2C8 // die Kantenlaenge des Eckquadrats
+const S_SHOLD: u64 = 0x2D0 // GEGENPROBE: wieder mit Ringen malen
+const S_CAPHOV: u64 = 0x2D8 // ueberfahrene Schaltflaeche, (Fenster*4+n)+1
+const S_CAPHITS: u64 = 0x2E0 // wie oft eine davon geklickt wurde
+// DIE MASKE SELBST. Zwei Baenke -- aktiv und unscharf -- mal
+// SHMASK_SIDE^2 Oktette. 40 ist RADIUS_MAX + SHADOW_MAX, also die
+// groesste Ecke, die dieser Server ueberhaupt malen darf.
+const S_SHMASK: u64 = 0x400 // 3200 Oktette
+const S_SHEDGE: u64 = 0x1080 // 32 Oktette
+const SHMASK_SIDE: u64 = 40
+const FORM_SLOTS: u64 = 8
 const FM_RADIUS: u64 = 0 // Eckenradius des Fensterrahmens, 0 = eckig
 const FM_SHADOW: u64 = 1 // Staerke des Schattens, 0..100, 0 = keiner
 const FM_SHADOW_R: u64 = 2 // wie weit er reicht, in Bildpunkten
 const FM_SHADOW_C: u64 = 3 // seine Farbe, 0xRRGGBB
+// RUNDE SOFTUI: DER SCHATTEN DES UNSCHARFEN FENSTERS.
+//
+// Das ist die eine Stelle, an der man den Fokus SIEHT, ohne dass eine
+// Titelleiste dafuer knallblau sein muss: das aktive Fenster steht
+// hoeher ueber dem Schreibtisch als die anderen. Zwei Zahlen und nicht
+// eine, weil "tiefer" beides ist -- dunkler UND weiter.
+const FM_SHADOW2: u64 = 4 // Staerke unter einem unscharfen Fenster
+const FM_SHADOW_R2: u64 = 5 // und wie weit die reicht
+// Der Verlauf der Titelleiste, in Helligkeitsstufen ueber die ganze
+// Hoehe. 0 = Volltonfarbe, also genau das Bild vor dieser Runde.
+const FM_GRAD: u64 = 6
+// 0 = das alte Schliessfeld (ein rotes Quadrat mit Kreuz), 1 = die
+// drei Windows-Schaltflaechen rechts oben.
+const FM_CAPTION: u64 = 7
 // Die Obergrenzen. Sie stehen hier und nicht beim Aufrufer, weil ein
 // Radius von 4000 den Rahmen nicht rund macht, sondern den Server in
 // eine Schleife ueber vier Millionen Eckpunkte schickt.
 const RADIUS_MAX: u64 = 24
 const SHADOW_MAX: u64 = 16
+// RUNDE SOFTUI: die Obergrenze des Titelverlaufs, in Helligkeitsstufen.
+const GRAD_MAX: u64 = 24
+// Die drei Schaltflaechen rechts oben, in der Reihenfolge, in der sie
+// dort stehen. DIE ZAHLEN SIND EIN PROTOKOLL: `cap_hover` gibt
+// (Fenster * 4 + n) + 1 zurueck, und tools/softui/ liest sie.
+const CAP_MIN: u64 = 0 // Minimieren -- ein waagerechter Strich
+const CAP_MAX: u64 = 1 // Maximieren -- ein Quadrat
+const CAP_CLOSE: u64 = 2 // Schliessen -- ein Kreuz
+const CAP_N: u64 = 3
+// Die Breite einer Schaltflaeche. Windows 11 nimmt 46 auf 1920; hier
+// sind es 800 Bildpunkte Schirmbreite und Fenster ab 300, also ist die
+// Flaeche auf 30 x (TITLE_H - 2*BORDER) heruntergerechnet -- immer noch
+// ein groesseres Ziel als das 14 x 14 grosse Schliessfeld davor.
+const CAP_W: u64 = 30
 const DK_FRAME: u64 = 0
 const DK_TITLE: u64 = 1
 const DK_TEXT: u64 = 2
@@ -666,6 +725,22 @@ fn set_form(state: u64, i: u64, v: u64) -> bool {
     if i == FM_SHADOW_C {
         w = w & RGB24
     }
+    // RUNDE SOFTUI: dieselben Grenzen fuer das zweite Paar, und der
+    // Verlauf bekommt eine eigene. GRAD_MAX ist die Zahl, ueber der
+    // aus "dezent" ein Farbkeil wird -- 24 Helligkeitsstufen ueber die
+    // ganze Titelleiste sind schon mehr, als Windows 11 nimmt.
+    if i == FM_SHADOW2 && w > 100 {
+        w = 100
+    }
+    if i == FM_SHADOW_R2 && w > SHADOW_MAX {
+        w = SHADOW_MAX
+    }
+    if i == FM_GRAD && w > GRAD_MAX {
+        w = GRAD_MAX
+    }
+    if i == FM_CAPTION && w > 1 {
+        w = 1
+    }
     ss(state, S_FORM + i * 8, w + 1)
     ss(state, S_FORMN, gs(state, S_FORMN) + 1)
     return true
@@ -686,6 +761,34 @@ fn aa_px(state: u64) -> u64 {
 fn paint_reset(state: u64) {
     ss(state, S_SHADOWPX, 0)
     ss(state, S_AAPX, 0)
+}
+
+fn shadow_builds(state: u64) -> u64 {
+    return gs(state, S_SHBUILD)
+}
+
+// DIE GEGENPROBE ZU DIESER RUNDE, und sie ist der einzige Grund, warum
+// `ring_round` und der alte Schattenweg stehenbleiben duerfen.
+//
+// Ein "vorher/nachher" aus ZWEI Laeufen ist zwei Maschinen: anderer
+// Wirt, andere Last, anderer Zeitgeber. Mit diesem Schalter laufen
+// beide Fassungen in EINEM Bild nacheinander, auf demselben Fenster
+// und mit demselben Zaehler -- und der Unterschied ist dann wirklich
+// der Unterschied.
+fn set_shadow_old(state: u64, on: bool) {
+    if on {
+        ss(state, S_SHOLD, 1)
+    } else {
+        ss(state, S_SHOLD, 0)
+    }
+}
+
+fn cap_hover(state: u64) -> u64 {
+    return gs(state, S_CAPHOV)
+}
+
+fn cap_hits(state: u64) -> u64 {
+    return gs(state, S_CAPHITS)
 }
 
 // DIE DECKUNG EINES ECKPUNKTES, sechzehnfach abgetastet.
@@ -923,8 +1026,16 @@ fn hline_a_clip(state: u64, x: i64, y: i64, n: i64, farbe: u64, a: u64,
 // "leuchtend" lesbar macht.
 fn paint_shadow(state: u64, i: u64, cx0: i64, cy0: i64, cx1: i64,
     cy1: i64) {
-    let staerke: u64 = form(state, FM_SHADOW)
-    let reach: u64 = form(state, FM_SHADOW_R)
+    // RUNDE SOFTUI: WELCHE BANK. Das Fenster mit dem Fokus steht
+    // hoeher; die anderen liegen flacher auf dem Schreibtisch.
+    var staerke: u64 = form(state, FM_SHADOW2)
+    var reach: u64 = form(state, FM_SHADOW_R2)
+    var bank: u64 = 1
+    if focus(state) == i {
+        staerke = form(state, FM_SHADOW)
+        reach = form(state, FM_SHADOW_R)
+        bank = 0
+    }
     if staerke == 0 || reach == 0 {
         return
     }
@@ -934,9 +1045,27 @@ fn paint_shadow(state: u64, i: u64, cx0: i64, cy0: i64, cx1: i64,
     let wy: i64 = win_y(state, i)
     let ow: i64 = outer_w(state, i) as i64
     let oh: i64 = outer_h(state, i) as i64
+    if gs(state, S_SHOLD) != 0 {
+        shadow_rings(state, wx, wy, ow, oh, r, staerke, reach, farbe,
+            cx0, cy0, cx1, cy1)
+        return
+    }
+    shadow_mask(state, wx, wy, ow, oh, r, reach, bank, farbe,
+        cx0, cy0, cx1, cy1)
+}
+
+// ---------------------------------------------------- DER ALTE WEG
+//
+// `reach` geschachtelte Umrisse, jeder einen Bildpunkt weiter aussen
+// und jeder schwaecher. Er steht als GEGENPROBE hier und nicht als
+// Erbstueck: `set_shadow_old` schaltet ihn an, und dann muss dasselbe
+// Bild herauskommen wie mit der Maske. Kaeme etwas anderes heraus,
+// waere die Maske falsch und niemand haette es gemerkt.
+fn shadow_rings(state: u64, wx: i64, wy: i64, ow: i64, oh: i64, r: u64,
+    staerke: u64, reach: u64, farbe: u64,
+    cx0: i64, cy0: i64, cx1: i64, cy1: i64) {
     var k: u64 = reach
     while k > 0 {
-        // Der aeusserste Ring ist der schwaechste.
         let a: u64 = staerke * 255 / 100 * (reach + 1 - k) / (reach + 1)
         if a != 0 {
             ring_round(state, wx - k as i64, wy - k as i64 + 1,
@@ -944,6 +1073,234 @@ fn paint_shadow(state: u64, i: u64, cx0: i64, cy0: i64, cx1: i64,
                 cx0, cy0, cx1, cy1)
         }
         k = k - 1
+    }
+}
+
+// =====================================================================
+// DIE VORBERECHNETE SCHATTENMASKE -- der Kern dieser Runde.
+// =====================================================================
+//
+// WAS AM ALTEN WEG TEUER WAR, und es waren nicht die Bildpunkte.
+//
+// `ring_round` tastet jede Ecke jedes Rings neu ab: fuer jeden der
+// (r+k)^2 Punkte eines Eckquadrats ZWEI Aufrufe von `corner_cov`, und
+// jeder davon bis zu sechzehn Unterproben. Bei r=10 und reach=6 sind
+// das je Fenster 4 * sum_{k=1..6}(10+k)^2 = 4444 Eckpunkte mal zwei
+// Abtastungen -- BEI JEDEM BILD, obwohl sich an der Ecke zwischen zwei
+// Bildern nichts aendert. Ein Schatten ist eine Funktion der FORM und
+// nicht der Zeit.
+//
+// ALSO EINMAL RECHNEN. Der Schatten ist punktsymmetrisch in seinen vier
+// Ecken und in seinen vier geraden Stuecken konstant je Abstand. Damit
+// zerfaellt er in genau zwei Tafeln:
+//
+//   * EIN Eckquadrat mit S = r + reach Kanten laenge, das viermal
+//     gespiegelt gemalt wird,
+//   * EIN Streifen von `reach` Deckungswerten fuer oben, unten, links
+//     und rechts.
+//
+// Das ist die Neun-Felder-Zerlegung, die jedes Fenstersystem fuer
+// Rahmenbilder benutzt, nur mit Deckung statt Farbe. Sie haengt NICHT
+// an der Fenstergroesse: eine Maske bedient jedes Fenster auf dem
+// Schirm.
+//
+// UND SIE LIEST DEN UNTERGRUND NICHT. Das ist die Auflage dieser Runde
+// und zugleich der Grund, warum das hier ueberhaupt geht: in der Maske
+// steht Deckung, keine Farbe. Was darunter liegt, kommt erst beim
+// Mischen dazu -- `fb.pixel_a` liest genau den einen Bildpunkt, den es
+// gerade schreibt, und niemals eine Flaeche. Ein Backdrop-Readback
+// waere das Gegenteil: erst den ganzen Bereich lesen, dann rechnen.
+//
+// WAS DIE MASKE GENAUER MACHT ALS DIE RINGE. Die Ringe liegen auf
+// ganzen Bildpunkten; ihre Boegen ueberlappen sich an den Diagonalen
+// und lassen an den Achsen Luecken. Die Maske rechnet den ECHTEN
+// Abstand zum Fensterrand in Sechzehnteln eines Bildpunktes und liest
+// den Abfall an dieser Stelle ab. An ganzzahligen Abstaenden kommt
+// dasselbe heraus wie vorher -- die Rampe ist dieselbe Formel --,
+// dazwischen etwas Besseres.
+fn shadow_key(state: u64) -> u64 {
+    let r: u64 = form(state, FM_RADIUS)
+    let a1: u64 = form(state, FM_SHADOW)
+    let r1: u64 = form(state, FM_SHADOW_R)
+    let a2: u64 = form(state, FM_SHADOW2)
+    let r2: u64 = form(state, FM_SHADOW_R2)
+    // Ein Schluessel und kein Zeitstempel: baut die Maske nur neu, wenn
+    // sich wirklich eine der fuenf Zahlen geaendert hat. + 1, damit
+    // "alles null" nicht wie "nie gebaut" aussieht.
+    return ((((r * 17 + r1) * 17 + r2) * 101 + a1) * 101 + a2) + 1
+}
+
+// Die ganzzahlige Quadratwurzel, Newton. Sie laeuft NUR beim Bau der
+// Maske -- also 1600 mal je Formwechsel und kein einziges Mal beim
+// Malen eines Bildes.
+fn isqrt(n: u64) -> u64 {
+    if n < 2 {
+        return n
+    }
+    var x: u64 = n
+    var y: u64 = (x + 1) / 2
+    while y < x {
+        x = y
+        y = (x + n / x) / 2
+    }
+    return x
+}
+
+// Der Abfall an einem Abstand `d16` (in Sechzehnteln eines Bildpunktes)
+// vom Fensterrand. Bei d16 = 16*k steht hier auf das Oktett genau die
+// Zahl, die der alte Ring k bekommen hat.
+fn shadow_ramp(staerke: u64, reach: u64, d16: u64) -> u64 {
+    let voll: u64 = reach * 16 + 16
+    if d16 == 0 || d16 >= voll {
+        return 0
+    }
+    return staerke * 255 / 100 * (voll - d16) / voll
+}
+
+fn shadow_build(state: u64) {
+    let r: u64 = form(state, FM_RADIUS)
+    let a1: u64 = form(state, FM_SHADOW)
+    let r1: u64 = form(state, FM_SHADOW_R)
+    let a2: u64 = form(state, FM_SHADOW2)
+    let r2: u64 = form(state, FM_SHADOW_R2)
+    var rmax: u64 = r1
+    if r2 > rmax {
+        rmax = r2
+    }
+    var side: u64 = r + rmax
+    if side > SHMASK_SIDE {
+        side = SHMASK_SIDE
+    }
+    ss(state, S_SHS, side)
+    let base: u64 = state + kstate.WM_OFF + S_SHMASK
+    let ebase: u64 = state + kstate.WM_OFF + S_SHEDGE
+    // die beiden Streifen der geraden Stuecke
+    var k: u64 = 0
+    while k < SHADOW_MAX {
+        var v1: u64 = 0
+        var v2: u64 = 0
+        if k < r1 {
+            v1 = shadow_ramp(a1, r1, (k + 1) * 16)
+        }
+        if k < r2 {
+            v2 = shadow_ramp(a2, r2, (k + 1) * 16)
+        }
+        kstate.set8(ebase + k, v1 as u8)
+        kstate.set8(ebase + SHADOW_MAX + k, v2 as u8)
+        k = k + 1
+    }
+    // das Eckquadrat, einmal fuer beide Baenke
+    let bank: u64 = SHMASK_SIDE * SHMASK_SIDE
+    var j: u64 = 0
+    while j < side {
+        var ii: u64 = 0
+        while ii < side {
+            let dx: u64 = side - ii
+            let dy: u64 = side - j
+            // 16 * sqrt(dx^2 + dy^2), also der Abstand vom Mittelpunkt
+            // des Eckkreises in Sechzehnteln.
+            let dist16: u64 = isqrt((dx * dx + dy * dy) * 256)
+            var d16: u64 = 0
+            if dist16 > r * 16 {
+                d16 = dist16 - r * 16
+            }
+            let o: u64 = j * SHMASK_SIDE + ii
+            kstate.set8(base + o, shadow_ramp(a1, r1, d16) as u8)
+            kstate.set8(base + bank + o, shadow_ramp(a2, r2, d16) as u8)
+            ii = ii + 1
+        }
+        j = j + 1
+    }
+    ss(state, S_SHKEY, shadow_key(state))
+    ss(state, S_SHBUILD, gs(state, S_SHBUILD) + 1)
+}
+
+// Ein Bildpunkt aus der Maske, gemischt und gezaehlt.
+fn shadow_px1(state: u64, x: i64, y: i64, farbe: u64, a: u64,
+    cx0: i64, cy0: i64, cx1: i64, cy1: i64) {
+    if a == 0 {
+        return
+    }
+    if x < cx0 || y < cy0 || x >= cx1 || y >= cy1 || x < 0 || y < 0 {
+        return
+    }
+    fb.pixel_a(state, x as u64, y as u64, farbe, a)
+    ss(state, S_SHADOWPX, gs(state, S_SHADOWPX) + 1)
+}
+
+fn shadow_mask(state: u64, wx: i64, wy: i64, ow: i64, oh: i64, r: u64,
+    reach: u64, bank: u64, farbe: u64,
+    cx0: i64, cy0: i64, cx1: i64, cy1: i64) {
+    if gs(state, S_SHKEY) != shadow_key(state) {
+        shadow_build(state)
+    }
+    let side: u64 = gs(state, S_SHS)
+    if side == 0 {
+        return
+    }
+    let base: u64 = state + kstate.WM_OFF + S_SHMASK
+        + bank * SHMASK_SIDE * SHMASK_SIDE
+    let ebase: u64 = state + kstate.WM_OFF + S_SHEDGE + bank * SHADOW_MAX
+    // EIN BILDPUNKT TIEFER. Derselbe Versatz wie beim alten Weg: der
+    // Schatten sitzt unter dem Fenster und nicht um es herum.
+    let sy: i64 = wy + 1
+    let si: i64 = side as i64
+    let ri: i64 = r as i64
+    // ------------------------------------------------ die vier Ecken
+    //
+    // Die Maske haelt die LINKE OBERE Ecke; die anderen drei sind ihre
+    // Spiegelbilder. Vier Adressrechnungen statt vier Tafeln.
+    var j: u64 = 0
+    while j < side {
+        let yo: i64 = sy - si + j as i64
+        let yu: i64 = sy + oh + si - 1 - j as i64
+        var ii: u64 = 0
+        while ii < side {
+            let a: u64 = kstate.get8(base + j * SHMASK_SIDE + ii)
+            if a != 0 {
+                let xl: i64 = wx - si + ii as i64
+                let xr: i64 = wx + ow + si - 1 - ii as i64
+                shadow_px1(state, xl, yo, farbe, a, cx0, cy0, cx1, cy1)
+                shadow_px1(state, xr, yo, farbe, a, cx0, cy0, cx1, cy1)
+                shadow_px1(state, xl, yu, farbe, a, cx0, cy0, cx1, cy1)
+                shadow_px1(state, xr, yu, farbe, a, cx0, cy0, cx1, cy1)
+            }
+            ii = ii + 1
+        }
+        j = j + 1
+    }
+    // ---------------------------------------- die vier geraden Stuecke
+    //
+    // Waagerecht ueber `fb.hline_a`, das intern ein Lauf ist; senkrecht
+    // Bildpunkt fuer Bildpunkt, weil eine Spalte im Rahmenpuffer kein
+    // Lauf ist. Die Deckung ist auf einem Streifen KONSTANT -- sie
+    // haengt nur am Abstand --, also wird sie einmal je Streifen
+    // gelesen und nicht je Bildpunkt gerechnet.
+    let mitte_w: i64 = ow - 2 * ri
+    let mitte_h: i64 = oh - 2 * ri
+    var k: u64 = 0
+    while k < reach {
+        let a: u64 = kstate.get8(ebase + k)
+        if a != 0 {
+            let d: i64 = k as i64 + 1
+            if mitte_w > 0 {
+                hline_a_clip(state, wx + ri, sy - d, mitte_w, farbe, a,
+                    cx0, cy0, cx1, cy1)
+                hline_a_clip(state, wx + ri, sy + oh - 1 + d, mitte_w,
+                    farbe, a, cx0, cy0, cx1, cy1)
+            }
+            if mitte_h > 0 {
+                var q: i64 = 0
+                while q < mitte_h {
+                    shadow_px1(state, wx - d, sy + ri + q, farbe, a,
+                        cx0, cy0, cx1, cy1)
+                    shadow_px1(state, wx + ow - 1 + d, sy + ri + q, farbe,
+                        a, cx0, cy0, cx1, cy1)
+                    q = q + 1
+                }
+            }
+        }
+        k = k + 1
     }
 }
 
@@ -1353,8 +1710,20 @@ fn damage_all(state: u64) {
 // zu gross ist, kostet eine Bildzeile; einer, der einen zu klein ist,
 // kostet eine sichtbare Kante.
 fn damage_win(state: u64, i: u64) {
+    // RUNDE SOFTUI: DIE GROESSERE DER BEIDEN REICHWEITEN.
+    //
+    // Es gibt jetzt zwei Schatten -- einen unter dem scharfen Fenster
+    // und einen flacheren unter den uebrigen -- und ein Fenster
+    // WECHSELT zwischen ihnen. Der schmutzige Bereich muss deshalb den
+    // groesseren der beiden fassen, sonst bleibt beim Fokuswechsel der
+    // Rest des tieferen Schattens als grauer Saum stehen. Genau diese
+    // Sorte Spur hat Runde PAINT schon einmal gejagt.
     var r: i64 = form(state, FM_SHADOW_R) as i64
-    if form(state, FM_SHADOW) == 0 {
+    let r2: i64 = form(state, FM_SHADOW_R2) as i64
+    if r2 > r {
+        r = r2
+    }
+    if form(state, FM_SHADOW) == 0 && form(state, FM_SHADOW2) == 0 {
         r = 0
     }
     if !deko(state, i) {
@@ -2558,28 +2927,41 @@ fn paint_win(state: u64, i: u64, cx0: u64, cy0: u64, cx1: u64, cy1: u64) {
     fill_round(state, wx, wy, ow, oh, form(state, FM_RADIUS), rahmen,
         cx0 as i64, cy0 as i64, cx1 as i64, cy1 as i64)
     // die Titelleiste
-    let tx0: i64 = imax(wx + BORDER as i64, ax0)
-    let tx1: i64 = imin(wx + ow - BORDER as i64, ax1)
-    let ty0: i64 = imax(wy + BORDER as i64, ay0)
-    let ty1: i64 = imin(wy + TITLE_H as i64 - 1, ay1)
-    if tx1 > tx0 && ty1 > ty0 {
-        fb.fill(state, tx0 as u64, ty0 as u64, (tx1 - tx0) as u64,
-            (ty1 - ty0) as u64, titel)
-    }
-    // das Schliessfeld: ein Kreuz aus zwei Linien in einem Feld
-    let bx: i64 = wx + ow - BORDER as i64 - CLOSE_W as i64 - 3
-    let by: i64 = wy + 4
-    if bx + CLOSE_W as i64 > ax0 && bx < ax1 && by + CLOSE_W as i64 > ay0 {
-        let rot: u64 = deco(state, DK_CLOSE)
-        fb.fill(state, bx as u64, by as u64, CLOSE_W, CLOSE_W, rot)
-        let weiss: u64 = deco(state, DK_CLOSE_MARK)
-        var k: u64 = 3
-        while k < CLOSE_W - 3 {
-            fb.pixel(state, (bx + k as i64) as u64, (by + k as i64) as u64,
-                weiss)
-            fb.pixel(state, (bx + k as i64) as u64,
-                (by + (CLOSE_W - 1 - k) as i64) as u64, weiss)
-            k = k + 1
+    //
+    // RUNDE SOFTUI: SIE IST NICHT MEHR EIN RECHTECK IN EINER FARBE.
+    // Zwei Dinge sind dazugekommen, und beide kosten etwas, das in
+    // docs/ROUNDSOFTUI.md steht: die oberen Ecken folgen dem
+    // Fensterradius (sonst schneidet eine eckige Leiste die runde Ecke
+    // ab, die `fill_round` gerade gemalt hat), und ueber die Hoehe
+    // laeuft ein Verlauf von wenigen Helligkeitsstufen.
+    paint_title(state, i, wx, wy, ow, titel, schrift, ax0, ay0, ax1, ay1)
+    // ------------------------------- die Schaltflaechen rechts oben
+    //
+    // ZWEI FASSUNGEN, UND DIE ALTE BLEIBT WORTGLEICH STEHEN. `classic`
+    // schickt FM_CAPTION = 0 und bekommt das rote Schliessfeld mit dem
+    // Kreuz, das dieser Server seit Runde K10 malt -- dieselben
+    // Koordinaten, dieselbe Schleife. `modern` schickt 1 und bekommt
+    // die drei Windows-Schaltflaechen: Strich, Quadrat, Kreuz.
+    var bx: i64 = wx + ow - BORDER as i64 - CLOSE_W as i64 - 3
+    if form(state, FM_CAPTION) != 0 {
+        bx = wx + ow - BORDER as i64 - (CAP_N * CAP_W) as i64
+        paint_caption(state, i, wx, wy, ow, titel, schrift,
+            ax0, ay0, ax1, ay1)
+    } else {
+        let by: i64 = wy + 4
+        if bx + CLOSE_W as i64 > ax0 && bx < ax1
+            && by + CLOSE_W as i64 > ay0 {
+            let rot: u64 = deco(state, DK_CLOSE)
+            fb.fill(state, bx as u64, by as u64, CLOSE_W, CLOSE_W, rot)
+            let weiss: u64 = deco(state, DK_CLOSE_MARK)
+            var k: u64 = 3
+            while k < CLOSE_W - 3 {
+                fb.pixel(state, (bx + k as i64) as u64,
+                    (by + k as i64) as u64, weiss)
+                fb.pixel(state, (bx + k as i64) as u64,
+                    (by + (CLOSE_W - 1 - k) as i64) as u64, weiss)
+                k = k + 1
+            }
         }
     }
     // ===================================== RUNDE NETVIEW, NACHTRAG
@@ -2630,6 +3012,333 @@ fn paint_win(state: u64, i: u64, cx0: u64, cy0: u64, cx1: u64, cy1: u64) {
         r = r + 1
     }
     ss(state, S_BLITS, gs(state, S_BLITS) + 1)
+}
+
+// =====================================================================
+// RUNDE SOFTUI: DIE TITELLEISTE
+// =====================================================================
+//
+// DER VERLAUF, UND WARUM ER IN DIE RICHTUNG GEHT, IN DIE ER GEHT.
+//
+// Justin wollte "dezente Verlaeufe statt Volltonfarbe, nur wenige
+// Farbstufen". Die naheliegende Wahl -- oben heller, unten die
+// Grundfarbe -- ist im hellen Schema richtig und im dunklen falsch: bei
+// heller Schrift auf dunklem Grund SENKT jede Aufhellung des Grundes
+// den Kontrast, und diese Runde hat die Auflage, ihn nicht zu senken.
+//
+// Also entscheidet nicht die Vorliebe, sondern die Schrift: DER
+// VERLAUF GEHT IMMER VON DER SCHRIFT WEG. Ist die Schrift heller als
+// die Leiste, wird die Leiste nach oben dunkler; ist sie dunkler, wird
+// sie nach oben heller. In beiden Faellen ist der oberste Bildpunkt
+// der kontraststaerkste, und die Grundfarbe des Themas steht unten
+// unveraendert da.
+fn lum3(c: u64) -> u64 {
+    return ((c >> 16) & 255) + ((c >> 8) & 255) + (c & 255)
+}
+
+// Eine Farbe um `d` Stufen je Kanal aufhellen oder abdunkeln, mit
+// Anschlag. Kein Mischen mit Weiss -- das verschoebe den Farbton.
+fn shade24(c: u64, d: u64, auf: bool) -> u64 {
+    var r: u64 = (c >> 16) & 255
+    var g: u64 = (c >> 8) & 255
+    var b: u64 = c & 255
+    if auf {
+        r = r + d
+        g = g + d
+        b = b + d
+        if r > 255 {
+            r = 255
+        }
+        if g > 255 {
+            g = 255
+        }
+        if b > 255 {
+            b = 255
+        }
+    } else {
+        if r > d {
+            r = r - d
+        } else {
+            r = 0
+        }
+        if g > d {
+            g = g - d
+        } else {
+            g = 0
+        }
+        if b > d {
+            b = b - d
+        } else {
+            b = 0
+        }
+    }
+    return (r << 16) | (g << 8) | b
+}
+
+// Zwei Farben mischen, `per` Hundertstel von `b`.
+fn mix24(a: u64, b: u64, per: u64) -> u64 {
+    let r: u64 = (((a >> 16) & 255) * (100 - per) + ((b >> 16) & 255) * per)
+        / 100
+    let g: u64 = (((a >> 8) & 255) * (100 - per) + ((b >> 8) & 255) * per)
+        / 100
+    let bl: u64 = ((a & 255) * (100 - per) + (b & 255) * per) / 100
+    return (r << 16) | (g << 8) | bl
+}
+
+fn paint_title(state: u64, i: u64, wx: i64, wy: i64, ow: i64, titel: u64,
+    schrift: u64, ax0: i64, ay0: i64, ax1: i64, ay1: i64) {
+    let x0: i64 = wx + BORDER as i64
+    let y0: i64 = wy + BORDER as i64
+    let tw: i64 = ow - 2 * BORDER as i64
+    let th: i64 = TITLE_H as i64 - 1 - BORDER as i64
+    if tw <= 0 || th <= 0 {
+        return
+    }
+    // Der Radius der Leiste ist der des Fensters, um den Rand nach
+    // innen gerueckt -- so bleibt die Kurve der Leiste zur Kurve des
+    // Rahmens gleichmittig statt sie zu schneiden.
+    var tr: u64 = 0
+    let rw: u64 = form(state, FM_RADIUS)
+    if rw > BORDER {
+        tr = rw - BORDER
+    }
+    if tr as i64 > th {
+        tr = th as u64
+    }
+    let grad: u64 = form(state, FM_GRAD)
+    if grad == 0 {
+        // Volltonfarbe: EIN Aufruf, wie vor dieser Runde -- nur mit
+        // runden oberen Ecken, wenn der Radius es sagt.
+        fill_round(state, x0, y0, tw, th, tr, titel, ax0, ay0, ax1, ay1)
+        if tr != 0 {
+            fill_clip(state, x0, y0 + tr as i64, tw, th - tr as i64,
+                titel, ax0, ay0, ax1, ay1)
+        }
+        return
+    }
+    // MIT VERLAUF. Die gerundeten obersten Zeilen tragen die
+    // Endfarbe des Verlaufs in EINEM `fill_round` -- so bleibt die
+    // Kantenglaettung der Ecke richtig gefaerbt --, und darunter
+    // laeuft je eine Zeile.
+    let auf: bool = lum3(schrift) < lum3(titel)
+    let oben: u64 = rgb24(state, shade24(deco_titel(state, i), grad, auf))
+    fill_round(state, x0, y0, tw, th, tr, oben, ax0, ay0, ax1, ay1)
+    var j: i64 = tr as i64
+    while j < th {
+        // linear von `oben` zurueck auf die Grundfarbe
+        let rest: u64 = grad * (th - 1 - j) as u64 / (th - 1) as u64
+        let c: u64 = rgb24(state, shade24(deco_titel(state, i), rest, auf))
+        fill_clip(state, x0, y0 + j, tw, 1, c, ax0, ay0, ax1, ay1)
+        j = j + 1
+    }
+}
+
+// Die ROHE Titelfarbe (0xRRGGBB) des Fensters -- `shade24` rechnet in
+// Kanaelen und nicht im Format des Bildschirms.
+fn deco_titel(state: u64, i: u64) -> u64 {
+    if focus(state) == i {
+        return deco_rgb(state, DK_TITLE_ON)
+    }
+    return deco_rgb(state, DK_TITLE)
+}
+
+// =====================================================================
+// RUNDE SOFTUI: DIE DREI SCHALTFLAECHEN -- WINDOWS UND NICHT MACOS
+// =====================================================================
+//
+// Justin hat das ausdruecklich verlangt und es ist keine
+// Geschmacksfrage: rechts oben, drei Felder, und die Zeichen darin
+// sind STRICHE und keine bunten Kreise. Minimieren ein waagerechter
+// Strich, Maximieren ein Quadrat (im maximierten Zustand zwei
+// versetzte), Schliessen ein Kreuz.
+//
+// DAS VERHALTEN GEHOERT DAZU. Ein Windows-Knopf hat keinen Rahmen und
+// keine Flaeche, bis der Zeiger darauf steht; dann bekommt er eine
+// dezente graue Flaeche, und der Schliessen-Knopf eine ROTE mit weissem
+// Kreuz. Ohne den Ueberfahr-Zustand sind es drei Zeichen und keine
+// Schaltflaechen -- deshalb fuehrt der Server jetzt mit, welche gerade
+// unter dem Zeiger liegt (S_CAPHOV), und faerbt genau diese eine.
+fn cap_x0(state: u64, i: u64) -> i64 {
+    return win_x(state, i) + outer_w(state, i) as i64 - BORDER as i64
+        - (CAP_N * CAP_W) as i64
+}
+
+// Welche Schaltflaeche liegt unter (x, y)? CAP_N = keine.
+fn cap_at(state: u64, i: u64, x: i64, y: i64) -> u64 {
+    if !valid(state, i) || !deko(state, i) {
+        return CAP_N
+    }
+    if form(state, FM_CAPTION) == 0 {
+        return CAP_N
+    }
+    let bx: i64 = cap_x0(state, i)
+    let by: i64 = win_y(state, i) + BORDER as i64
+    let h: i64 = TITLE_H as i64 - 1 - BORDER as i64
+    if y < by || y >= by + h || x < bx || x >= bx + (CAP_N * CAP_W) as i64 {
+        return CAP_N
+    }
+    return ((x - bx) / CAP_W as i64) as u64
+}
+
+fn paint_caption(state: u64, i: u64, wx: i64, wy: i64, ow: i64,
+    titel: u64, schrift: u64, ax0: i64, ay0: i64, ax1: i64, ay1: i64) {
+    let bx: i64 = wx + ow - BORDER as i64 - (CAP_N * CAP_W) as i64
+    let by: i64 = wy + BORDER as i64
+    let h: i64 = TITLE_H as i64 - 1 - BORDER as i64
+    if h <= 0 {
+        return
+    }
+    var tr: u64 = 0
+    let rw: u64 = form(state, FM_RADIUS)
+    if rw > BORDER {
+        tr = rw - BORDER
+    }
+    let hov: u64 = gs(state, S_CAPHOV)
+    var n: u64 = 0
+    while n < CAP_N {
+        let x: i64 = bx + (n * CAP_W) as i64
+        var mark: u64 = schrift
+        if hov != 0 && hov - 1 == i * 4 + n {
+            if n == CAP_CLOSE {
+                // ROT MIT WEISSEM KREUZ -- die eine Stelle, an der
+                // diese Oberflaeche laut werden darf.
+                let rot: u64 = deco(state, DK_CLOSE)
+                cap_face(state, x, by, h, tr, rot, n == CAP_CLOSE,
+                    ax0, ay0, ax1, ay1)
+                mark = deco(state, DK_CLOSE_MARK)
+            } else {
+                // Eine dezente graue Flaeche: die Titelfarbe, zwoelf
+                // Hundertstel in Richtung der Schrift geschoben. Kein
+                // neuer Farbsteckplatz und kein festes Grau -- auf
+                // einem dunklen Thema muss sie heller werden und auf
+                // einem hellen dunkler, und genau das tut das Mischen.
+                let f: u64 = rgb24(state, mix24(deco_titel(state, i),
+                    deco_schrift(state, i), 12))
+                cap_face(state, x, by, h, tr, f, false,
+                    ax0, ay0, ax1, ay1)
+            }
+        }
+        cap_glyph(state, n, x + (CAP_W as i64 - 10) / 2,
+            by + (h - 10) / 2, mark, i, ax0, ay0, ax1, ay1)
+        n = n + 1
+    }
+}
+
+fn deco_schrift(state: u64, i: u64) -> u64 {
+    if focus(state) == i {
+        return deco_rgb(state, DK_TEXT_ON)
+    }
+    return deco_rgb(state, DK_TEXT)
+}
+
+// Die Flaeche EINER Schaltflaeche. Nur die rechte -- das Schliessen --
+// darf oben rechts der Fensterrundung folgen; die beiden anderen sind
+// Rechtecke, weil sie mitten in der Leiste stehen.
+fn cap_face(state: u64, x: i64, y: i64, h: i64, tr: u64, farbe: u64,
+    rechts: bool, ax0: i64, ay0: i64, ax1: i64, ay1: i64) {
+    let w: i64 = CAP_W as i64
+    if !rechts || tr == 0 {
+        fill_clip(state, x, y, w, h, farbe, ax0, ay0, ax1, ay1)
+        return
+    }
+    let r: i64 = tr as i64
+    fill_round(state, x, y, w, h, tr, farbe, ax0, ay0, ax1, ay1)
+    // die drei Ecken wieder eckig machen
+    fill_clip(state, x, y, w - r, r, farbe, ax0, ay0, ax1, ay1)
+    fill_clip(state, x, y + r, w, h - r, farbe, ax0, ay0, ax1, ay1)
+}
+
+// DAS ZEICHEN. Zehn mal zehn Bildpunkte, einen Strich breit.
+//
+//   CAP_MIN    ein waagerechter Strich auf halber Hoehe
+//   CAP_MAX    ein Quadrat -- und im maximierten Zustand ZWEI
+//              versetzte, weil der Knopf dann "wiederherstellen"
+//              heisst und nicht "maximieren"
+//   CAP_CLOSE  ein Kreuz aus zwei Diagonalen
+fn cap_glyph(state: u64, n: u64, x: i64, y: i64, farbe: u64, i: u64,
+    ax0: i64, ay0: i64, ax1: i64, ay1: i64) {
+    if n == CAP_MIN {
+        cap_h(state, x, y + 5, 10, farbe, ax0, ay0, ax1, ay1)
+        return
+    }
+    if n == CAP_MAX {
+        if (wg(state, i, W_FLAGS) & F_MAXIMIZED) != 0 {
+            cap_box(state, x + 2, y, 8, 8, farbe, ax0, ay0, ax1, ay1)
+            cap_box(state, x, y + 2, 8, 8, farbe, ax0, ay0, ax1, ay1)
+            return
+        }
+        cap_box(state, x, y, 10, 10, farbe, ax0, ay0, ax1, ay1)
+        return
+    }
+    var k: i64 = 0
+    while k < 10 {
+        cap_px(state, x + k, y + k, farbe, ax0, ay0, ax1, ay1)
+        cap_px(state, x + k, y + 9 - k, farbe, ax0, ay0, ax1, ay1)
+        k = k + 1
+    }
+}
+
+fn cap_px(state: u64, x: i64, y: i64, farbe: u64, ax0: i64, ay0: i64,
+    ax1: i64, ay1: i64) {
+    if x < ax0 || y < ay0 || x >= ax1 || y >= ay1 || x < 0 || y < 0 {
+        return
+    }
+    fb.pixel(state, x as u64, y as u64, farbe)
+}
+
+fn cap_h(state: u64, x: i64, y: i64, n: i64, farbe: u64, ax0: i64,
+    ay0: i64, ax1: i64, ay1: i64) {
+    var k: i64 = 0
+    while k < n {
+        cap_px(state, x + k, y, farbe, ax0, ay0, ax1, ay1)
+        k = k + 1
+    }
+}
+
+fn cap_box(state: u64, x: i64, y: i64, w: i64, h: i64, farbe: u64,
+    ax0: i64, ay0: i64, ax1: i64, ay1: i64) {
+    cap_h(state, x, y, w, farbe, ax0, ay0, ax1, ay1)
+    cap_h(state, x, y + h - 1, w, farbe, ax0, ay0, ax1, ay1)
+    var k: i64 = 1
+    while k < h - 1 {
+        cap_px(state, x, y + k, farbe, ax0, ay0, ax1, ay1)
+        cap_px(state, x + w - 1, y + k, farbe, ax0, ay0, ax1, ay1)
+        k = k + 1
+    }
+}
+
+// Der Zeiger ist gewandert: welche Schaltflaeche liegt jetzt unter ihm?
+// Aendert sich die Antwort, wird die Titelleiste des betroffenen
+// Fensters schmutzig -- und nur sie.
+fn cap_track(state: u64, i: u64, x: i64, y: i64) {
+    var nv: u64 = 0
+    if i < MAX_WIN {
+        let n: u64 = cap_at(state, i, x, y)
+        if n < CAP_N {
+            nv = i * 4 + n + 1
+        }
+    }
+    let alt: u64 = gs(state, S_CAPHOV)
+    if nv == alt {
+        return
+    }
+    ss(state, S_CAPHOV, nv)
+    if alt != 0 {
+        damage_caption(state, (alt - 1) / 4)
+    }
+    if nv != 0 {
+        damage_caption(state, (nv - 1) / 4)
+    }
+}
+
+fn damage_caption(state: u64, i: u64) {
+    if !valid(state, i) || !deko(state, i) {
+        return
+    }
+    let bx: i64 = cap_x0(state, i)
+    let by: i64 = win_y(state, i) + BORDER as i64
+    damage(state, bx, by, bx + (CAP_N * CAP_W) as i64,
+        by + TITLE_H as i64 - 1 - BORDER as i64)
 }
 
 // Eine Bildzeile aus einem Fensterpuffer in den Zweitpuffer des
@@ -2924,6 +3633,12 @@ fn on_mouse(state: u64) {
     }
     ss(state, S_MOVES, gs(state, S_MOVES) + 1)
     let i: u64 = hit(state, x, y)
+    // RUNDE SOFTUI: der Ueberfahr-Zustand der drei Schaltflaechen. Er
+    // steht VOR dem Ausstieg fuer "kein Fenster getroffen", denn genau
+    // dann muss er zurueckgesetzt werden -- sonst bleibt der rote
+    // Schliessen-Knopf rot, nachdem der Zeiger das Fenster verlassen
+    // hat.
+    cap_track(state, i, x, y)
     if i >= MAX_WIN {
         return
     }
@@ -2947,11 +3662,32 @@ fn on_mouse(state: u64) {
                 set_focus(state, i)
             }
             if mit_schmuck {
+                // RUNDE SOFTUI: die drei Schaltflaechen, wenn die Form
+                // sie verlangt. Sie liegen VOR dem Ziehen der Leiste --
+                // wer auf das Kreuz klickt, will nicht schieben.
+                let cn: u64 = cap_at(state, i, x, y)
+                if cn < CAP_N {
+                    ss(state, S_CAPHITS, gs(state, S_CAPHITS) + 1)
+                    if cn == CAP_CLOSE {
+                        ev_push(state, i, E_CLOSE, 0, 0, 0)
+                        destroy(state, i)
+                        return
+                    }
+                    if cn == CAP_MIN {
+                        set_hidden(state, i, true)
+                        return
+                    }
+                    let auf: bool =
+                        (wg(state, i, W_FLAGS) & F_MAXIMIZED) == 0
+                    let _m: bool = maximize(state, i, auf)
+                    return
+                }
                 // Schliessfeld?
                 let bx: i64 = win_x(state, i) + outer_w(state, i) as i64
                     - BORDER as i64 - CLOSE_W as i64 - 3
                 let by: i64 = win_y(state, i) + 4
-                let im_feld: bool = x >= bx && x < bx + CLOSE_W as i64
+                let im_feld: bool = form(state, FM_CAPTION) == 0
+                    && x >= bx && x < bx + CLOSE_W as i64
                 let im_feld2: bool = y >= by && y < by + CLOSE_W as i64
                 if im_feld && im_feld2 {
                     ev_push(state, i, E_CLOSE, 0, 0, 0)
