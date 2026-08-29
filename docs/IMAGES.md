@@ -231,3 +231,53 @@ Pillow wäre es durchgegangen. **Der Umweg:** jede Spaltensumme wird
 frisch aus dem Speicher geholt, sechs Ladebefehle je Spalte statt zwei.
 `tools/viewer/run.sh` misst den Fehler in Abschnitt 9 weiter — wird
 Firn repariert, meldet der Abschnitt es.
+
+---
+
+## 8. Der Miniaturenstreifen: warum er Buch führt
+
+`viewer.fi` zeigt acht Kästchen um das laufende Bild herum. Die erste
+Fassung baute den Streifen bei **jedem** Schritt komplett neu — acht
+Dateien lesen, acht Mal `img.begin(..., 8)`. Das ist bei kleinen
+Bildern unauffällig und bei einem 12-Megapixel-Foto im selben Ordner
+tödlich; gemessen mit der Systemuhr im laufenden System:
+
+| | |
+|---|---|
+| 700 KB von der Platte lesen | **1 800 ms** (330 ms je 128 KiB) |
+| dieselbe Datei im Achtel dekodieren | 230 ms |
+| ein Schritt weiter, alter Stand | **~2 000 ms** |
+| ein Schritt weiter, mit Cache | **~50 ms** |
+
+Der Cache ist klein: `mini_idx[k]` merkt sich, welches Bild in Kästchen
+`k` steckt; beim Blättern verschiebt sich das Fenster um eins, sieben
+der acht Kästchen sind dieselben Bilder, und sie wandern über einen
+zweiten Block (`mini2`) an ihren neuen Platz. Nur das eine neue wird
+dekodiert. Kosten: **2 × 8 × 72 × 54 × 4 = 248 832 Oktette**, aus dem
+Miniaturenspeicher, der ohnehin 4 MiB groß ist.
+
+**Der Nebeneffekt ist der wichtigere.** Solange ein Tastendruck zwei
+Sekunden Arbeit auslöste, holte die Anwendung in dieser Zeit keine
+Ereignisse ab. `wlib.step()` räumt bis zu 64 Ereignisse in EINEM
+Durchgang ab, und `wlib.key_last()` behält davon nur das letzte — jede
+Taste, die während der Arbeit kam, war weg. Das sah nach einem Fehler
+in der Widget-Bibliothek aus und war keiner. Wer eine Oberfläche
+schnell hält, braucht keine Ereigniswarteschlange in der Anwendung;
+wer sie langsam werden lässt, braucht eine. Diese Runde hat sich für
+das Erste entschieden und schreibt das Zweite hier auf.
+
+---
+
+## 9. Zwei Puffer, nicht einer
+
+`pfad` ist der Pfad des **angezeigten** Bildes; `sichern()` und
+`sichern_jpeg()` hängen `.viewer.png` bzw. `.viewer.jpg` daran.
+`mini_eins()` benutzte für seine eigene Datei denselben Puffer — und
+nach jedem Aufbau des Streifens stand dort der Pfad der **letzten
+Miniatur**. Die Anwendung schrieb ihre Datei dann neben ein Bild, das
+gar nicht offen war, und meldete dabei völlig korrekt
+`viewer: gesichert 2747`.
+
+Gefunden hat das nur die Abnahme, weil sie die geschriebene Datei
+danach **vom Abbild holt** und Pillow vorlegt, statt der Meldung zu
+glauben. Die Miniaturen haben jetzt `mpfad`.

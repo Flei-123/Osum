@@ -56,7 +56,45 @@ Medienrunde für MJPEG wieder.
   **3 094 Oktette** groß gegen **3 100** von libjpeg, bei gleichem
   Fehler.
 
-## Der Kernel hat zwei Zahlen bekommen
+## Die Oberfläche, wirklich bedient: 49 von 49
+
+Abschnitt 8 der Abnahme schickt der Anwendung über den QEMU-Monitor
+Tabulator, Leertaste und Buchstaben und misst danach, was sie meldet
+und was im Bild steht. Beim ersten ernsthaften Durchlauf fielen
+**18 Zusagen** durch — keine davon im Dekodierer. Vier Fehler, alle
+gemessen und alle behoben (Einzelheiten in `docs/ROUNDVIEWER.md`
+Abschnitt 8):
+
+1. **Der Miniaturenstreifen rechnete bei jedem Schritt alles neu** —
+   acht Dateien, darunter die 12-MP-JPEG. Ein Schritt weiter kostete
+   **2,0 s**; in dieser Zeit holte die Anwendung keine Ereignisse ab und
+   die nächste Taste ging verloren. Mit dem Kästchen-Cache
+   (`mini_idx` + Umlagern statt Dekodieren) kostet er **0,05 s**, und
+   keine Taste geht mehr verloren.
+2. **`sichern()` schrieb neben das falsche Bild**, weil die Miniaturen
+   denselben Pfadpuffer benutzten. Eigener Puffer (`mpfad`).
+3. **`wmhold` hält 20 s, und das ist ein hartes Budget** — ein Skript
+   von 20,9 s fiel mit `kein Monitor an ...` durch, was wie ein Fehler
+   der Anwendung aussah. Kürzere Skripte, und für den einen Lauf mit dem
+   großen Bild eine dritte Haltestufe im Kern.
+4. **Kern und Anwendung schreiben ungesperrt auf dieselbe serielle
+   Leitung** — einmal war `wm: hold` mitten in einer Kernelmeldung
+   zerschnitten und die Abnahme wartete 300 s ins Leere. Sie sucht jetzt
+   ohne Zeilenanker; die fehlende Sperre in `serial.puts` ist benannt
+   und **nicht** behoben.
+
+| Zusage im Bild | gemessen |
+|---|---|
+| 12-MP-Bild im Fenster | **4000 × 3000**, 1 804 336 Oktette Arena, als Vorschau |
+| EXIF-Lage 6 | aus 40 × 24 wird **24 × 40** |
+| Blättern über vier Formate | PNG → JPEG → PNG+Alpha → GIF |
+| Zoom „100 %" | Einpassen aus, Zoom 100 |
+| Vierteldrehung | aus 64 × 48 wird 48 × 64 |
+| Diaschau | geht von selbst auf Bild 2 |
+| Sichern | Pillow liest `PNG 64x48 RGBA`, 2 747 Oktette |
+| Tastatur `n` / `1` / `r` | blättert, 100 %, dreht |
+
+## Der Kernel hat drei Zahlen bekommen
 
 `kernel/proc.fi`: `PRIV_SLOTS` 6 → 40, `BIG_TOP` `0x40C00000` →
 `0x45000000`. Die private Arena eines Prozesses wächst von 6 auf 74 MiB.
@@ -65,6 +103,27 @@ gelesen wird, und ein PNG braucht seinen ausgepackten Rohstrom am Stück
 (`flate.inflate` ist nicht fortsetzbar). Mit 6 MiB war schon ein
 Handyfoto nicht zu öffnen. Die Kacheln entstehen weiterhin erst bei
 Bedarf.
+
+Dazu die dritte: `kstate.M_WIGXL` (Wort 1, **Bit 33**) und das Wort
+`wigxl` — **60 s** Stillhalten statt der 20 s von `wiglong`. Nur der
+Fotolauf mit dem 12-MP-Bild bekommt es; die Warteschleife wartet die
+volle Zeit ab. Die erste Fassung hatte Bit **17** genommen, und das
+gehört `M_DESK` — der Betrachter startete daraufhin gar nicht.
+
+## Zeilenzahlen und Zeiten, zum Nachschlagen
+
+| | |
+|---|---|
+| Dekodierer und Schreiber zusammen | **4 726** Zeilen |
+| Anwendung + Messprogramm | 2 012 Zeilen |
+| Abnahme | 1 050 Zeilen |
+| 12 MP (4000 × 3000, 4:2:0) dekodieren | **2 340 ms**, 1 023 072 Oktette |
+| 50 MP (8000 × 6250, 4:2:0) dekodieren | **9 270 ms**, 2 047 376 Oktette |
+| dasselbe 12-MP-Bild als Miniatur (1/8) | **230 ms** |
+| ein Schritt weiter in der Anwendung | **~50 ms** (vorher 2 000 ms) |
+| größte Abweichung JPEG gegen Pillow | **2** Stufen (nur 4:2:2, Mittel 0,222 ‰) |
+| größte Abweichung PNG / BMP / GIF | **0** — bitgenau |
+| eigenes JPEG bei Qualität 85 | 3 094 Oktette gegen 3 100 von libjpeg |
 
 ## Vier Fehler, die nur die Messung gefunden hat
 
