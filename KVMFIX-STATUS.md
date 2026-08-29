@@ -246,7 +246,58 @@ Zweig `testfast` daneben arbeiten kann.
 
 ## 7. Die volle Abnahme unter TCG, vorher gegen nachher
 
-*(wird unten eingetragen, sobald beide Läufe durch sind)*
+Zwei vollstaendige `./test.sh`-Laeufe, gleichzeitig gestartet, in zwei
+getrennten Arbeitsbaeumen desselben Repos:
+
+* **vorher** = `/root/kvmfix-base`, Commit `e9fcc1c` (der Abzweigpunkt), unveraendert
+* **nachher** = `/root/kvmfix-osum`, Commit `11fc24f` (dieser Zweig)
+
+| | vorher | nachher |
+|---|---|---|
+| Abschnitte bestanden | 26 | **27** |
+| Abschnitte fehlgeschlagen | 10 | 10 |
+| Zusagen insgesamt | 3235 | **3278** (+43: 35 aus dem neuen KVM-Abschnitt, 8 aus schwankenden Abschnitten) |
+| Rueckgabewert | 1 | 1 |
+
+Die Fehlerlisten der beiden Laeufe waren **nicht deckungsgleich** — und das
+lag nicht am Kernel, sondern am Wirt: waehrend beider Laeufe lag die
+Systemlast bei 8-19 (andere Runden arbeiten parallel auf demselben
+Rechner), und ein Teil der Abschnitte misst Zeit (Bildschirmfotos,
+Netzdurchsatz, Umschaltvorgaenge pro Sekunde).
+
+Deshalb wurden **alle 12 verdaechtigen Abschnitte einzeln und
+nacheinander** noch einmal gefahren, in beiden Baeumen, mit demselben
+Skript (`/root/kvfix-resec.sh`). Das ist die belastbare Gegenueberstellung:
+
+| Abschnitt | vorher (`e9fcc1c`) | nachher (`kvmfix`) | Urteil |
+|---|---|---|---|
+| `net` | 75 / 0 | 75 / 0 | gleich |
+| `arm` | 47 / 1 (`pause is not pause`) | **48 / 0** | vorher war Schwankung |
+| `k17` | 158 / 0 | 158 / 0 | gleich |
+| `theme` | 7 FAIL (kein Schreibtisch angelaufen) | **0 FAIL** | vorher war Schwankung |
+| `icons` | 1 FAIL `lib/icons.fi does not match the map` | 1 FAIL, **wortgleich** | vorbestehend, nicht meiner |
+| `netview` | 188 / 1 (`no screenshot`) | **195 / 0** | vorher war Schwankung |
+| `netmon` | 76 / 0 | 76 / 0 | gleich |
+| `tunnel` | FAIL | **0 FAIL** | vorher war Schwankung |
+| `tunnel/pakete` | 3 FAIL | 3 FAIL, **wortgleich** | vorbestehend, nicht meiner |
+| `powermon` | 121 / 0 | 121 / 0 | gleich |
+| `k14` | 151 / 1 (`die Wurzelplatte danach, Oktett fuer Oktett`) | 151 / 1, **wortgleich** | vorbestehend, nicht meiner |
+| `k16` | 58 / 6 (`fas ... '_F1.u_start'`) | 58 / 6, **wortgleich** | vorbestehend, nicht meiner |
+
+**Das Ergebnis in einem Satz:** kein einziger Fehlschlag im Nachher, den
+es im Vorher nicht genauso gibt — die vier hartnaeckigen (`icons`,
+`tunnel/pakete`, `k14`, `k16`) stehen Zeichen fuer Zeichen gleich in
+beiden Baeumen und stammen aus dem Zusammenfuehren vor dieser Runde. Vier
+weitere Abschnitte waren im Vorher-Lauf rot und im Nachher gruen; das ist
+Last, nicht Verdienst — ich rechne es mir nicht an.
+
+Dazu kommt der neue Abschnitt 28: **KVM: 35 bestanden, 0 fehlgeschlagen**,
+76 s. Der ist im Vorher gar nicht vorhanden.
+
+**Ehrlicher Vorbehalt:** Vier Abschnitte sind auf diesem Wirt bereits vor
+meiner Runde rot. Die habe ich weder verursacht noch behoben — sie
+gehoeren nicht zu diesem Auftrag (`kernel/` und ein Testabschnitt), und
+ich habe sie deshalb auch nicht angefasst, statt sie stillzulegen.
 
 ---
 
