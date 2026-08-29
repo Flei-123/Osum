@@ -370,7 +370,7 @@ has "$U" "mod+shift+l  move-right" "mit Modifikatoren"
 has "$U" "mod+left  snap-left" "und mit Tasten, die kein Zeichen sind"
 # Beide Wege muessen dieselbe Zahl sagen: der Kern beim Hochlauf und das
 # Programm ueber den Systemaufruf.
-ub=$(grep -aoE '^[0-9]+ tiling: Eintraege' "$U" | head -1 | grep -oE '^[0-9]+')
+ub=$(grep -aoE '^[0-9]+ tiling: Einträge' "$U" | head -1 | grep -oE '^[0-9]+')
 if [ -n "$ub" ] && [ "$ub" = "$soll" ]; then
     ok "Kern und Ring 3 zaehlen dieselben Eintraege ($ub)"
 else
