@@ -173,8 +173,32 @@ echo "== 2. die Speicherkarte von kdata: drei neue Bereiche =="
 kart=$(python3 tools/kernel/memmap.py kernel 2>&1)
 if [ $? -eq 0 ]; then ok "die Speicherkarte von kdata: $kart"
 else bad "die Speicherkarte von kdata kollidiert"; echo "$kart" | sed 's/^/        /'; fi
+# RUNDE MERGE-2: DIESE DREI ZUSAGEN HABEN NIE DIE KARTE GEPRUEFT.
+# Hier stand `memmap.py ... -v 2>/dev/null | grep -q ...` in einem Skript
+# mit `set -o pipefail`. `grep -q` steigt beim ERSTEN Treffer sofort aus
+# und schliesst das Rohr; Python bekommt beim Leeren seines Puffers ein
+# EPIPE, meldet "BrokenPipeError" nach stderr -- wo `2>/dev/null` es
+# verschluckt -- und endet mit 120. Mit `pipefail` ist 120 der Wert der
+# ganzen Roehre, also war die Bedingung FALSCH, obwohl der Bereich
+# dastand. Gemessen: `pipeline rc=120`.
+#
+# Ob es auffiel, haengte an einem Wettrennen zwischen Pythons letztem
+# Schreibvorgang und dem Ausstieg von grep -- und damit daran, wie lang
+# die Ausgabe ist. Sie war jahrelang kurz genug. Runde MERGE-2 hat fuenf
+# Bereiche (HANDLE) dazugelegt, und ab da verlor Python das Rennen
+# zuverlaessig: drei gruene Zusagen wurden ueber Nacht rot, ohne dass an
+# der Speicherkarte irgendetwas falsch war (`memmap.py` selbst meldet in
+# derselben Zeile darueber 0 Kollisionen).
+#
+# Die Ausgabe wird jetzt EINMAL geholt und danach im Speicher durchsucht.
+# Kein Rohr, kein Wettrennen, und der Rueckgabewert von memmap.py wird
+# ausdruecklich geprueft, statt still verlorenzugehen.
+kartv=$(python3 tools/kernel/memmap.py kernel -v 2>/dev/null)
+if [ $? -ne 0 ]; then
+    bad "memmap.py -v ist fehlgeschlagen"
+fi
 for b in MOUSE WM TTF; do
-    if python3 tools/kernel/memmap.py kernel -v 2>/dev/null | grep -q " $b  *kstate.fi:"; then
+    if grep -q " $b  *kstate.fi:" <<< "$kartv"; then
         ok "der Bereich $b steht in der Karte"
     else
         bad "der Bereich $b steht NICHT in der Karte"

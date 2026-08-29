@@ -237,7 +237,15 @@ echo "== 2. die Speicherkarte: drei Seiten, und nur die drei =="
 kart=$(python3 tools/kernel/memmap.py kernel 2>&1)
 if [ $? -eq 0 ]; then ok "die Speicherkarte von kdata: $kart"
 else bad "die Speicherkarte von kdata kollidiert"; echo "$kart" | sed 's/^/        /'; fi
-if python3 tools/kernel/memmap.py kernel -v 2>/dev/null | grep -q " WIG  *kstate.fi:"; then
+# RUNDE MERGE-2: NICHT DURCH EIN ROHR IN `grep -q`. `grep -q` steigt beim
+# ersten Treffer sofort aus und schliesst das Rohr; Python endet dann mit
+# BrokenPipeError und 120, und mit `set -o pipefail` ist 120 der Wert der
+# ganzen Roehre -- die Bedingung wird FALSCH, obwohl der Bereich dasteht.
+# Dieselbe Stelle in tools/wm/run.sh hat genau so drei gruene Zusagen rot
+# gemacht, als die Speicherkarte laenger wurde. Also einmal holen, dann
+# im Speicher suchen.
+kartv=$(python3 tools/kernel/memmap.py kernel -v 2>/dev/null)
+if grep -q " WIG  *kstate.fi:" <<< "$kartv"; then
     ok "der Bereich WIG steht in der Karte"
 else
     bad "der Bereich WIG steht NICHT in der Karte"
