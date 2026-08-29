@@ -319,6 +319,30 @@ for starting/stopping/querying, and a shutdown through real ACPI -- to be
 recognised by QEMU's exit code (0 instead of 21). An escape hatch on the
 command line (`initsh`) starts the shell as before.
 
+**The first process, made fit for a server (round INIT).** `/bin/init`
+(`/sbin/init` stays as a second name) with a service table that carries
+more than a command: a **target** (`konsole` or `grafik`, out of
+`/etc/ziel` — a machine without a screen starts nothing graphical by
+itself), a **log file** per service, a dependency on the **network**, and
+two limits that keep one broken service from eating the machine. The
+first is a **fallback counter**: a service that ends with a non-zero code
+five times in a row without ever reaching two seconds of life is switched
+off (`failed`) instead of being restarted forever — and one that ends
+with **0** is never switched off, however often it does it. The second is
+a **start brake** that asks for no reason at all: more than ten starts in
+five seconds, and the next one waits five seconds. `/bin/shutdown` and
+`/bin/reboot` go through init — SIGTERM, two seconds, SIGKILL, `sync`,
+unmount, and then either ACPI off or a **real reset** (the FADT's
+RESET_REG, port 0xCF9, the 8042); the proof of the reset is that the
+kernel comes up a **second time** in the same transcript.
+
+That round also found a bug in `wait4` that had been in the tree since
+round 62: it asked `find_child` for the **first** child of the caller
+without asking about its state, so with `WNOHANG` a living first child
+hid every **zombie behind it**. A shell with one child never notices;
+process 1, which always has several, never reaps anything. Counter-proof
+on the command line: `waitfirst`.
+
 **Userland.** `/bin/sh` with pipes, redirection (`>`, `<`), `;`, line
 editor, `cd`, `exit` — and twenty-five tools: `cat`, `cp`, `date`, `df`,
 `echo`, `false`, `grep`, `head`, `kill`, `ls`, `mkdir`, `mv`, `ping`,
