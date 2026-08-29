@@ -32,6 +32,7 @@
 
 import kstate
 import mnt
+import handle
 
 export {
     init, init_task, clear_task, close_all, inherit_task, inherit_std,
@@ -42,7 +43,9 @@ export {
     pipe_readers,
     K_FREE, K_FILE, K_DIR, K_CONIN, K_CONOUT, K_PIPER, K_PIPEW, K_FB,
     K_TTY, K_SOCK, K_VFILE, K_VDIR,
-    open_mnt, open_set_mnt,
+    open_mnt, open_set_mnt, open_settle,
+    fd_handle, fd_rights, fd_may, fd_check, fd_set_rights, fd_pass,
+    rights_of_open,
     MAX_FD, MAX_OPEN, MAX_PIPES, PIPE_CAP, CON_IN, CON_OUT, CON_ERR
 }
 
@@ -150,36 +153,177 @@ fn init(state: u64) {
 
 // ------------------------------------------------------ the descriptors
 
-// A descriptor holds the index of the open file PLUS ONE, so that a zero
-// can go on meaning "closed" in a table that starts out zeroed.
+// RUNDE HANDLE: EIN DESKRIPTOR IST AB JETZT EIN HANDLE.
+//
+// Bis zu dieser Runde stand in diesem Platz der Index der offenen Datei
+// PLUS EINS -- eine rohe Zahl, und wer sie riet, hatte sie. Jetzt steht
+// darin ein HANDLE aus `kernel/handle.fi`: Platz, Generation, Wuerfelwert
+// des Prozesses, und daran haengt ein Rechte-Bitfeld. Die 0 heisst
+// weiter "geschlossen", damit eine genullte Seite eine leere Tafel ist,
+// und `fd_alloc` sucht weiter nach der 0 -- die Regel "der kleinste
+// freie Deskriptor" gilt unveraendert.
+//
+// WAS SICH FUER DEN REST DES KERNELS NICHT AENDERT: `fd_of` gibt
+// weiterhin den Index der offenen Datei zurueck. Jede Zeile in
+// `sys.fi`, `elf.fi` und `procfs.fi`, die einen Deskriptor aufloest,
+// laeuft damit ab jetzt durch die Handle-Schicht, ohne dass sie
+// umgeschrieben werden musste. Das war der Sinn der Tafel der offenen
+// Dateien aus Runde K4, und er traegt ein zweites Mal.
 fn slot_at(task: u64, fd: u64) -> u64 {
     return kstate.FDTAB_OFF + (task * MAX_FD + fd) * 8
 }
 
-// The open file behind a descriptor, or MAX_OPEN when there is none.
-fn fd_of(state: u64, task: u64, fd: u64) -> u64 {
+// Das Handle hinter einem Deskriptor, oder handle.HANDLE_NONE.
+fn fd_handle(state: u64, task: u64, fd: u64) -> u64 {
     if fd >= MAX_FD || task >= kstate.MAX_TASKS {
-        return MAX_OPEN
+        return handle.HANDLE_NONE
     }
-    let v: u64 = kstate.get(state, slot_at(task, fd))
-    if v == 0 {
-        return MAX_OPEN
-    }
-    return v - 1
+    return kstate.get(state, slot_at(task, fd))
 }
 
-fn fd_set(state: u64, task: u64, fd: u64, open: u64) {
+// The open file behind a descriptor, or MAX_OPEN when there is none.
+fn fd_of(state: u64, task: u64, fd: u64) -> u64 {
+    return fd_check(state, task, fd, 0)
+}
+
+// DER EINE AUFRUF JE SYSTEMAUFRUF: Deskriptor aufloesen UND das Recht
+// pruefen. `sys.fi` ruft im Lese-, Schreib- und Suchpfad NUR DAS -- die
+// erste Fassung dieser Runde hat `fd_of` und `fd_may` getrennt gerufen
+// und damit die ganze Aufloesung zweimal gemacht; das waren gemessen
+// 296 statt 109 Zyklen Aufschlag auf einen `lseek`.
+//
+// `need` = 0 heisst "nur aufloesen". Die Rechnung fuer den Platz steht
+// hier ausgeschrieben und nicht in `slot_at`: ein Aufruf ueber
+// Modulgrenzen kostet auf diesem Wirt gemessen 5 bis 7 Zyklen.
+fn fd_check(state: u64, task: u64, fd: u64, need: u64) -> u64 {
     if fd >= MAX_FD || task >= kstate.MAX_TASKS {
-        return
+        return MAX_OPEN
     }
-    kstate.set(state, slot_at(task, fd), open + 1)
+    let h: u64 = __mmio_read64(
+        (state + kstate.FDTAB_OFF + (task * MAX_FD + fd) * 8) as *mut u64)
+    if h == handle.HANDLE_NONE {
+        return MAX_OPEN
+    }
+    // MAX_OBJ und MAX_OPEN sind dieselbe Zahl -- der Aufrufer
+    // vergleicht wie immer gegen MAX_OPEN und merkt nichts davon.
+    return handle.resolve_num(state, task, h, need)
+}
+
+// Die Rechte des Handles hinter einem Deskriptor.
+fn fd_rights(state: u64, task: u64, fd: u64) -> u64 {
+    return handle.rights_of(state, task, fd_handle(state, task, fd))
+}
+
+// DIE ZWEITE HAELFTE DER TIEFENSTAFFELUNG. Die erste ist `perm.may` --
+// die uid/gid-Frage aus Runde K13, die beim OEFFNEN gestellt wird. Diese
+// hier wird bei JEDEM Zugriff gestellt und fragt etwas anderes: nicht
+// "darf dieser Benutzer die Datei?", sondern "traegt DIESES Handle das
+// Recht?". Ein Handle, das weitergegeben und dabei beschnitten wurde,
+// faellt hier durch, obwohl der Benutzer die Datei duerfte -- und genau
+// dafuer ist es da.
+//
+// Gegenprobe `norights`: die Frage wird gestellt und immer mit ja
+// beantwortet. Die uid/gid-Pruefung bleibt dann trotzdem stehen, also
+// zeigt der Testlauf genau den Unterschied, den diese Schicht macht.
+fn fd_may(state: u64, task: u64, fd: u64, need: u64) -> bool {
+    let h: u64 = fd_handle(state, task, fd)
+    if h == handle.HANDLE_NONE {
+        return false
+    }
+    return handle.may(state, task, h, need)
+}
+
+// Einen Deskriptor auf eine offene Datei legen, mit AUSDRUECKLICHEN
+// Rechten. `fd_set` darunter leitet die Rechte aus den Flags ab; wer
+// vererbt oder weitergibt, reicht die Rechte durch, die er selbst hatte
+// -- sie koennen dabei nur kleiner werden.
+fn fd_set_rights(state: u64, task: u64, fd: u64, open: u64,
+    rights: u64) -> bool {
+    if fd >= MAX_FD || task >= kstate.MAX_TASKS {
+        return false
+    }
+    if open >= MAX_OPEN {
+        return false
+    }
+    let o: u64 = handle.obj_get(state, handle.OK_FILE, open)
+    if o >= handle.MAX_OBJ {
+        return false
+    }
+    let h: u64 = handle.insert(state, task, o, rights)
+    if h == handle.HANDLE_NONE {
+        handle.obj_unref(state, o)
+        return false
+    }
+    kstate.set(state, slot_at(task, fd), h)
+    return true
+}
+
+// Welche Rechte ein Eintrag der offenen Dateien traegt. Fast immer sind
+// das die Flags, mit denen `open` gerufen wurde -- aber nicht bei den
+// drei Konsoleneintraegen: die legt `init` an, BEVOR es einen Prozess
+// gibt, und sie haben nie ein `open` gesehen. Ihre Flags sind null, und
+// null heisst "nur lesen". Ohne die zwei Zeilen unten haette fd 1
+// kein Schreibrecht und JEDE Ausgabe dieses Kernels waere -EBADF.
+//
+// Was sie duerfen, sagt hier also ihre ART und nicht ihr Flag. Die
+// Prueffunktionen `readable` und `writable` in `sys.fi` bleiben davon
+// unberuehrt -- sie fragen weiter die Flags, und der Pfad fuer die
+// Konsole kommt in `read_of`/`write_of` ohnehin vor ihnen.
+fn rights_of_open(state: u64, i: u64) -> u64 {
+    var r: u64 = handle.rights_for_flags(kstate.get(state, of_at(i) + OF_FLAGS))
+    let kind: u64 = kstate.get(state, of_at(i) + OF_KIND)
+    if kind == K_CONIN {
+        r = r | handle.R_READ
+    }
+    if kind == K_CONOUT {
+        r = r | handle.R_WRITE
+    }
+    return r
+}
+
+fn fd_set(state: u64, task: u64, fd: u64, open: u64) -> bool {
+    if open >= MAX_OPEN {
+        return false
+    }
+    return fd_set_rights(state, task, fd, open, rights_of_open(state, open))
 }
 
 fn fd_free(state: u64, task: u64, fd: u64) {
     if fd >= MAX_FD || task >= kstate.MAX_TASKS {
         return
     }
+    let h: u64 = kstate.get(state, slot_at(task, fd))
+    if h != handle.HANDLE_NONE {
+        handle.drop(state, task, h)
+    }
     kstate.set(state, slot_at(task, fd), 0)
+}
+
+// EIN DESKRIPTOR AUSDRUECKLICH AN EIN KIND. Das Gegenteil von "alles
+// wird vererbt": genau dieser eine, an genau diesen Platz, mit hoechstens
+// diesen Rechten. `handle.give` schneidet die Maske mit dem, was der
+// Gebende selbst hat -- groesser werden kann dabei nichts.
+//
+// Liefert den Deskriptor im Kind, oder MAX_FD.
+fn fd_pass(state: u64, from: u64, to: u64, fd: u64, mask: u64,
+    tofd: u64) -> u64 {
+    if tofd >= MAX_FD || to >= kstate.MAX_TASKS {
+        return MAX_FD
+    }
+    let of: u64 = fd_of(state, from, fd)
+    if of >= MAX_OPEN {
+        return MAX_FD
+    }
+    if kstate.get(state, slot_at(to, tofd)) != 0 {
+        return MAX_FD
+    }
+    let nh: u64 = handle.give(state, from, to, fd_handle(state, from, fd), mask)
+    if handle.is_err(nh) {
+        return MAX_FD
+    }
+    open_ref(state, of)
+    kstate.set(state, slot_at(to, tofd), nh)
+    return tofd
 }
 
 // The lowest free descriptor -- the rule every Unix program relies on when
@@ -203,13 +347,17 @@ fn init_task(state: u64, task: u64) {
     fd_set(state, task, 2, CON_ERR)
 }
 
+// RUNDE HANDLE: ein Platz, in dem noch ein Handle steht, wird
+// ORDENTLICH hergegeben und nicht nur ueberschrieben. Sonst haelt ein
+// Objekt einen Verweis von einem Prozess, den es nicht mehr gibt, und
+// die Objekttafel laeuft in einem Lauf von Stunden voll.
 fn clear_task(state: u64, task: u64) {
     if task >= kstate.MAX_TASKS {
         return
     }
     var fd: u64 = 0
     while fd < MAX_FD {
-        kstate.set(state, slot_at(task, fd), 0)
+        fd_free(state, task, fd)
         fd = fd + 1
     }
 }
@@ -224,7 +372,13 @@ fn inherit_task(state: u64, parent: u64, child: u64) {
         let of: u64 = fd_of(state, parent, fd)
         if of < MAX_OPEN {
             open_ref(state, of)
-            fd_set(state, child, fd, of)
+            // RUNDE HANDLE: das Kind bekommt die Rechte, die der
+            // ELTERNTEIL hatte -- nicht die, die aus den Flags folgen
+            // wuerden. Wer sein Handle beschnitten bekommen hat, gibt
+            // ein beschnittenes weiter. Rechte werden ueber `fork`
+            // hinweg nie groesser.
+            fd_set_rights(state, child, fd, of,
+                fd_rights(state, parent, fd))
         }
         fd = fd + 1
     }
@@ -238,14 +392,36 @@ fn inherit_task(state: u64, parent: u64, child: u64) {
 // hand over is the descriptor the shell keeps its own console copy in.
 // Without this the first `open` of every program was 6 instead of 3, and
 // `tools/posix/run.sh` measures exactly that number.
+// RUNDE HANDLE, DER SCHALTER `hstrict`: NICHTS WIRD GEERBT.
+//
+// Das Ziel ist "ein Kind bekommt nur, was ihm ausdruecklich uebergeben
+// wurde", und die Handle-Schicht kann das seit dieser Runde
+// (`fd_pass`). Der VOREINGESTELLTE Weg ist es trotzdem noch nicht, und
+// hier steht ehrlich, was daran haengt:
+//
+//   /bin/sh und die dreiundzwanzig Werkzeuge aus Runde K6 lesen von 0
+//   und schreiben nach 1, ohne je danach gefragt zu haben. Eine Shell,
+//   die jedem Kind seine Deskriptoren einzeln uebergeben muesste, ist
+//   eine ANDERE Shell -- und `tools/userland/run.sh`, `tools/osum/run.sh`
+//   und `tools/unix/run.sh` messen genau das heutige Verhalten.
+//   `elf.spawn` reicht ebenfalls stillschweigend 0, 1 und 2 weiter,
+//   und `init` startet die erste Shell darueber.
+//
+// Also: der strenge Modus ist ein SCHALTER und keine Umstellung. Mit
+// `hstrict` bekommt ein Kind NICHTS, und der Testlauf misst, dass es
+// dann wirklich nichts bekommt. Ohne ihn bleibt alles, wie es war --
+// nur laeuft es jetzt durch Handles mit Rechten statt durch rohe Zahlen.
 fn inherit_std(state: u64, parent: u64, child: u64) {
     clear_task(state, child)
+    if kstate.mode_on(state, kstate.M_HSTRICT) {
+        return
+    }
     var fd: u64 = 0
     while fd < 3 {
         let of: u64 = fd_of(state, parent, fd)
         if of < MAX_OPEN {
             open_ref(state, of)
-            fd_set(state, child, fd, of)
+            fd_set_rights(state, child, fd, of, fd_rights(state, parent, fd))
         }
         fd = fd + 1
     }
@@ -264,7 +440,10 @@ fn close_all(state: u64, task: u64) {
         if of < MAX_OPEN {
             open_unref(state, of)
         }
-        kstate.set(state, slot_at(task, fd), 0)
+        // RUNDE HANDLE: erst den Verweis der offenen Datei, dann den des
+        // Objekts. `fd_free` gibt beides in der richtigen Reihenfolge
+        // her; ein blosses Nullsetzen wuerde den Objektverweis verlieren.
+        fd_free(state, task, fd)
         fd = fd + 1
     }
 }
@@ -320,6 +499,31 @@ fn open_unref(state: u64, i: u64) {
         kstate.set(state, of_at(i) + OF_REF, r - 1)
         return
     }
+    kstate.set(state, of_at(i) + OF_REF, 0)
+    // ================================ RUNDE HANDLE: KEIN FREE IN FLUG
+    //
+    // Der letzte Deskriptor ist weg -- aber laeuft auf diesem Eintrag
+    // noch ein Auftrag, wird hier NICHT abgeraeumt. Der Eintrag bleibt
+    // stehen, ohne dass ihn ein Handle noch erreichen kann, bis
+    // `open_settle` ihn holt; das tut `sys.fi`, wenn `handle.req_end`
+    // meldet, dass der letzte Auftrag gefallen ist.
+    //
+    // Ohne diese vier Zeilen ist ein `close` waehrend eines laufenden
+    // Auftrags ein Use-after-free -- die Fehlerklasse, aus der 2023 rund
+    // 60 % der eingereichten Linux-Kernel-Exploits kamen. Die Gegenprobe
+    // `noflight` laesst den Mitzaehler weg und zeigt genau das.
+    if handle.inflight_on(state, handle.OK_FILE, i) != 0 {
+        kstate.add(state, kstate.H_DEFERRED, 1)
+        return
+    }
+    open_teardown(state, i)
+}
+
+// Der Eintrag wird WIRKLICH abgeraeumt. Zwei Wege fuehren hierher: der
+// letzte Deskriptor faellt und es laeuft nichts mehr (`open_unref`),
+// oder der letzte Auftrag faellt und es gibt keinen Deskriptor mehr
+// (`open_settle`). Wer zuletzt geht, macht das Licht aus.
+fn open_teardown(state: u64, i: u64) {
     let kind: u64 = kstate.get(state, of_at(i) + OF_KIND)
     let p: u64 = kstate.get(state, of_at(i) + OF_INO)
     if kind == K_PIPER {
@@ -349,6 +553,26 @@ fn open_unref(state: u64, i: u64) {
     kstate.set(state, of_at(i) + OF_REF, 0)
     kstate.set(state, of_at(i) + OF_FLAGS, 0)
     kstate.set(state, of_at(i) + OF_MNT, 0)
+}
+
+// Der letzte Auftrag auf diesem Eintrag ist fertig. Steht kein
+// Deskriptor mehr darauf, wird jetzt abgeraeumt -- die Freigabe, die
+// `open_unref` aufgehalten hat. Steht noch einer darauf, passiert
+// nichts: dann lebt der Eintrag zu Recht weiter.
+fn open_settle(state: u64, i: u64) {
+    if i >= MAX_OPEN || i <= CON_ERR {
+        return
+    }
+    if kstate.get(state, of_at(i) + OF_KIND) == K_FREE {
+        return
+    }
+    if kstate.get(state, of_at(i) + OF_REF) != 0 {
+        return
+    }
+    if handle.inflight_on(state, handle.OK_FILE, i) != 0 {
+        return
+    }
+    open_teardown(state, i)
 }
 
 // How many descriptors still point here. ROUND K8 needs it: a socket

@@ -68,6 +68,10 @@ const SYS_SETRESUID: u64 = 117
 const SYS_GETRESUID: u64 = 118
 const SYS_MMAP: u64 = 9
 const SYS_FSTAT: u64 = 5
+// RUNDE HANDLE braucht beide: eine Roehre als Testobjekt und `dup`,
+// um denselben Deskriptorplatz ein zweites Mal zu belegen.
+const SYS_PIPE: u64 = 22
+const SYS_DUP: u64 = 32
 const ST_SIZE: u64 = 48 // Versatz in `struct stat`, siehe sys.fi
 const ST_BLKSIZE: u64 = 56
 
@@ -180,6 +184,36 @@ const P_ZOMBIE: u64 = 17 // ein Kind ohne `wait` -- die Waise
 const P_PWR: u64 = 45 // liest die ganze Energieschicht aus Ring 3 aus
 const P_PWRIDLE: u64 = 46 // schlaeft, damit der Leerlaufpfad laeuft
 const P_PWRLOAD: u64 = 47 // rechnet, damit er NICHT laeuft
+// MESSUNG RUNDE HANDLE: die Syscall-Latenz aus Ring 3.
+const P_HBENCH: u64 = 49
+const SEEK_CUR: u64 = 1
+// RUNDE HANDLE: der Selbsttest der Handle-Schicht in Ring 3.
+const P_HANDLE: u64 = 48
+
+// Die elf Aufrufe des Blocks ab 2200 (`kernel/sys.fi`).
+const HND_VERSION: u64 = 2200
+const HND_FDH: u64 = 2201
+const HND_RIGHTS: u64 = 2202
+const HND_BEGIN: u64 = 2203
+const HND_OBJECT: u64 = 2204
+const HND_CANCEL: u64 = 2205
+const HND_END: u64 = 2206
+const HND_STATE: u64 = 2207
+const HND_DUP: u64 = 2208
+const HND_PASS: u64 = 2209
+const HND_COUNT: u64 = 2210
+const HND_OBJINFO: u64 = 2211
+
+// Die drei Rechtebits, die diese Runde dazugelegt hat, und die Fehler,
+// die es ohne asynchrone Auftraege nicht geben konnte.
+const R_APPEND: u64 = 1024
+const R_SEEK: u64 = 2048
+const R_IOCTL: u64 = 4096
+const R_HALL: u64 = 8191
+const E_STALE: u64 = 10
+const E_CANCELLED: u64 = 11
+const Q_RUN: u64 = 1
+const Q_CANCEL: u64 = 2
 
 // ------------------------------------------------------ the system call
 
@@ -346,6 +380,12 @@ fn u_enter(packed: u64) {
     }
     if prog == P_PWRLOAD {
         u_pwrload(arg)
+    }
+    if prog == P_HBENCH {
+        u_hbench(arg)
+    }
+    if prog == P_HANDLE {
+        u_handle(arg)
     }
     u_sys(SYS_EXIT, 0, 0, 0)
     while true {
@@ -944,6 +984,345 @@ fn u_caps(arg: u64) {
     c_num(h, n)
     c_say(h, (&s_pr[0]) as u64)
     u_sys(SYS_EXIT, n - ok, 0, 0)
+}
+
+
+// ================================================== RUNDE HANDLE, RING 3
+//
+// DER SELBSTTEST DER HANDLE-SCHICHT, VON JENSEITS DES SCHUTZWALLS.
+//
+// Nicht der Kernel behauptet, seine Lebensdauerrechnung stimme -- ein
+// unprivilegiertes Programm sagt Zeile fuer Zeile, was es geschafft hat
+// und was ihm verwehrt wurde. Fuenf Szenarien, und jedes ist eines, an
+// dem io_uring in Linux gescheitert ist oder haette scheitern koennen:
+//
+//   (a) RECHTE-ESKALATION beim Weitergeben. Ein Handle vervielfaeltigen
+//       und dabei MEHR verlangen, als man hat.
+//   (b) USE-AFTER-CLOSE. Auftrag laeuft, Handle wird geschlossen, der
+//       Platz wird neu vergeben, der alte Auftrag greift zu.
+//   (c) DOPPELTES CLOSE.
+//   (d) EIN GEFAELSCHTES HANDLE -- falsche Generation, falscher Platz.
+//   (e) ABBRUCH MITTEN IM AUFTRAG, und was er mit dem Objekt macht.
+//
+// GEARBEITET WIRD AUF EINER ROEHRE und nicht auf einer Datei. Das ist
+// Absicht: eine Roehre gibt es ohne Dateisystem, ihre beiden Enden haben
+// UNGLEICHE Rechte (das eine darf nur lesen, das andere nur schreiben --
+// genau der Fall, an dem sich Rechteprufung ueberhaupt zeigen laesst),
+// und sie hat einen echten Verweiszaehler, den man beim Abraeumen
+// beobachten kann. Die Konsole hat den nicht: sie wird nie freigegeben.
+//
+// Der Bericht ist in vier Funktionen geteilt. Der Grund steht bei
+// `u_caps_kann`: firnc1 erzeugt fuer EINE grosse Funktion
+// unverhaeltnismaessig viel Code, und `.utext` muss in eine 2-MiB-Kachel
+// passen.
+
+fn h_claim(name: u64, got: u64, want: u64) -> u64 {
+    var s_ok: [u8; 10] = "  [ ok ] \0"
+    var s_no: [u8; 10] = "  [FAIL] \0"
+    var s_got: [u8; 8] = "   got=\0"
+    var s_want: [u8; 7] = " want=\0"
+    var s_nl: [u8; 2] = "\n\0"
+    if got == want {
+        u_say((&s_ok[0]) as u64)
+        u_say(name)
+        u_say((&s_nl[0]) as u64)
+        return 1
+    }
+    u_say((&s_no[0]) as u64)
+    u_say(name)
+    u_say((&s_got[0]) as u64)
+    u_say_num(got)
+    u_say((&s_want[0]) as u64)
+    u_say_num(want)
+    u_say((&s_nl[0]) as u64)
+    return 0
+}
+
+// Traegt `have` das Bit `bit`? 1 oder 0 -- damit die Zusage eine Zahl
+// vergleicht und nicht eine Maske, die sich mit der naechsten Runde
+// aendert.
+fn h_hat(have: u64, bit: u64) -> u64 {
+    if (have & bit) == bit {
+        return 1
+    }
+    return 0
+}
+
+// (a) RECHTE KOENNEN NUR KLEINER WERDEN.
+//
+// Das Leseende einer Roehre darf lesen und nicht schreiben. Wer es
+// vervielfaeltigt und dabei ALLE Rechte verlangt, bekommt trotzdem nur,
+// was das Original hatte -- und die Kopie, der man auch das Lesen
+// genommen hat, kann gar nichts mehr.
+fn u_handle_rechte(rfd: u64, wfd: u64) -> u64 {
+    var n_rr: [u8; 15] = "rechte-lesen\0\0\0"
+    var n_rw: [u8; 23] = "rechte-nicht-schreiben\0"
+    var n_wr: [u8; 18] = "rechte-schreiben\0\0"
+    var n_wl: [u8; 20] = "rechte-nicht-lesen\0\0"
+    var n_esk: [u8; 20] = "keine-eskalation\0\0\0\0"
+    var n_dup: [u8; 12] = "dup-weniger\0"
+    var n_dw: [u8; 20] = "kopie-darf-nicht\0\0\0\0"
+    var n_sk: [u8; 16] = "seek-eigenrecht\0"
+    var probe: [u8; 2] = "x\0"
+    let p: u64 = (&probe[0]) as u64
+    var ok: u64 = 0
+    let rr: u64 = u_sys(HND_RIGHTS, rfd, 0, 0)
+    let wr: u64 = u_sys(HND_RIGHTS, wfd, 0, 0)
+    ok = ok + h_claim((&n_rr[0]) as u64, h_hat(rr, R_READ), 1)
+    ok = ok + h_claim((&n_rw[0]) as u64, h_hat(rr, R_WRITE), 0)
+    ok = ok + h_claim((&n_wr[0]) as u64, h_hat(wr, R_WRITE), 1)
+    ok = ok + h_claim((&n_wl[0]) as u64, h_hat(wr, R_READ), 0)
+    ok = ok + h_claim((&n_sk[0]) as u64, h_hat(rr, R_SEEK), 1)
+    // ALLE Rechte verlangen. Die Schnittmenge gibt trotzdem kein
+    // Schreibrecht her -- das Original hat keines.
+    let kopie: u64 = u_sys(HND_DUP, rfd, R_HALL, 0)
+    ok = ok + h_claim((&n_dup[0]) as u64, (kopie >> 63), 0)
+    ok = ok + h_claim((&n_esk[0]) as u64,
+        h_hat(u_sys(HND_RIGHTS, kopie, 0, 0), R_WRITE), 0)
+    // Und eine Kopie OHNE Leserecht kann auch nicht mehr lesen, obwohl
+    // sie auf dasselbe Roehrenende zeigt.
+    let stumpf: u64 = u_sys(HND_DUP, rfd, R_SEEK, 0)
+    ok = ok + h_claim((&n_dw[0]) as u64,
+        u_sys(SYS_READ, stumpf, p, 1), 0 -% E_BADF)
+    u_sys(SYS_CLOSE, kopie, 0, 0)
+    u_sys(SYS_CLOSE, stumpf, 0, 0)
+    return ok
+}
+
+// (b) USE-AFTER-CLOSE MIT GENERATIONSZAEHLER -- der Kern dieser Runde.
+//
+// Der Ablauf ist genau der, der in Linux ueber Jahre die ergiebigste
+// Fehlerklasse war: ein Auftrag laeuft, das Programm schliesst sein
+// Handle, der Platz wird neu vergeben, und der alte Auftrag greift zu.
+//
+//   1. Auftrag auf dem Leseende beginnen.
+//   2. Das Leseende SCHLIESSEN. Der Eintrag der offenen Dateien muss
+//      trotzdem noch leben -- kein Free waehrend in Flug.
+//   3. Einen neuen Deskriptor holen. Er bekommt DENSELBEN Platz.
+//   4. Der alte Auftrag greift zu: -E_STALE, und NICHT die Nummer des
+//      neuen Objekts.
+//   5. Auftrag beenden -- jetzt erst wird abgeraeumt.
+fn u_handle_veraltet(rfd: u64, wfd: u64) -> u64 {
+    var n_beg: [u8; 12] = "auftrag-an\0\0"
+    var n_lebt: [u8; 20] = "lebt-vor-dem-close\0\0"
+    var n_flug: [u8; 20] = "kein-free-in-flug\0\0\0"
+    var n_wieder: [u8; 20] = "platz-neu-vergeben\0\0"
+    var n_alt: [u8; 10] = "veraltet\0\0"
+    var n_nicht: [u8; 20] = "nicht-das-neue-ding\0"
+    var n_end: [u8; 16] = "ende-raeumt-ab\0\0"
+    var n_weg: [u8; 14] = "danach-weg\0\0\0\0"
+    var ok: u64 = 0
+    let of: u64 = u_sys(HND_OBJINFO, 8, rfd, 0)
+    let h: u64 = u_sys(HND_FDH, rfd, 0, 0)
+    let token: u64 = u_sys(HND_BEGIN, h, R_READ, 0)
+    ok = ok + h_claim((&n_beg[0]) as u64, (token >> 63), 0)
+    ok = ok + h_claim((&n_lebt[0]) as u64, u_sys(HND_OBJINFO, 6, of, 0), 1)
+    u_sys(SYS_CLOSE, rfd, 0, 0)
+    // DIE ZUSAGE. Der letzte Deskriptor ist weg, der Auftrag laeuft
+    // noch -- der Eintrag lebt.
+    ok = ok + h_claim((&n_flug[0]) as u64, u_sys(HND_OBJINFO, 6, of, 0), 1)
+    // Derselbe Deskriptorplatz, ein anderes Objekt.
+    let neu: u64 = u_sys(SYS_DUP, wfd, 0, 0)
+    ok = ok + h_claim((&n_wieder[0]) as u64, neu, rfd)
+    let neu_of: u64 = u_sys(HND_OBJINFO, 8, neu, 0)
+    let got: u64 = u_sys(HND_OBJECT, token, 0, 0)
+    ok = ok + h_claim((&n_alt[0]) as u64, got, 0 -% E_STALE)
+    ok = ok + h_claim((&n_nicht[0]) as u64, h_gleich(got, neu_of), 0)
+    ok = ok + h_claim((&n_end[0]) as u64, u_sys(HND_END, token, 0, 0), 1)
+    ok = ok + h_claim((&n_weg[0]) as u64, u_sys(HND_OBJINFO, 6, of, 0), 0)
+    u_sys(SYS_CLOSE, neu, 0, 0)
+    return ok
+}
+
+fn h_gleich(a: u64, b: u64) -> u64 {
+    if a == b {
+        return 1
+    }
+    return 0
+}
+
+// (c) DOPPELTES CLOSE und (d) DAS GEFAELSCHTE HANDLE.
+fn u_handle_falsch(wfd: u64) -> u64 {
+    var n_zu: [u8; 8] = "close1\0\0"
+    var n_zu2: [u8; 14] = "close-zweimal\0"
+    var n_hin: [u8; 14] = "handle-weg\0\0\0\0"
+    var n_gen: [u8; 20] = "gefaelschte-gen\0\0\0\0\0"
+    var n_slot: [u8; 20] = "platz-ausserhalb\0\0\0\0"
+    var n_null: [u8; 14] = "handle-null\0\0\0"
+    var n_tok: [u8; 20] = "erfundenes-token\0\0\0\0"
+    var n_nr: [u8; 21] = "nummer-gibt-es-nicht\0"
+    var ok: u64 = 0
+    let zweit: u64 = u_sys(SYS_DUP, wfd, 0, 0)
+    let h: u64 = u_sys(HND_FDH, zweit, 0, 0)
+    ok = ok + h_claim((&n_zu[0]) as u64, u_sys(SYS_CLOSE, zweit, 0, 0), 0)
+    ok = ok + h_claim((&n_zu2[0]) as u64,
+        u_sys(SYS_CLOSE, zweit, 0, 0), 0 -% E_BADF)
+    ok = ok + h_claim((&n_hin[0]) as u64, u_sys(HND_FDH, zweit, 0, 0), 0)
+    // Das Handle von eben, mit der Generation von eben: der Platz ist
+    // frei oder gehoert schon wieder jemand anderem. Beides ist nichts.
+    ok = ok + h_claim((&n_gen[0]) as u64,
+        u_sys(HND_BEGIN, h ^ 0x100000000, R_WRITE, 0), 0 -% E_BADHANDLE)
+    ok = ok + h_claim((&n_slot[0]) as u64,
+        u_sys(HND_BEGIN, (h & 0xFFFFFFFF00000000) | 99, R_WRITE, 0),
+        0 -% E_BADHANDLE)
+    ok = ok + h_claim((&n_null[0]) as u64,
+        u_sys(HND_BEGIN, 0, R_WRITE, 0), 0 -% E_BADHANDLE)
+    ok = ok + h_claim((&n_tok[0]) as u64,
+        u_sys(HND_OBJECT, 0x7777000000000005, 0, 0), 0 -% E_BADHANDLE)
+    ok = ok + h_claim((&n_nr[0]) as u64,
+        u_sys(2999, 0, 0, 0), 0 -% E_INVALID)
+    return ok
+}
+
+// (e) ABBRUCH MITTEN IM AUFTRAG.
+//
+// Ein Abbruch ist eine BITTE, kein Befehl an den Allokator. Er markiert
+// den Auftrag, mehr nicht: das Objekt bleibt stehen, bis der letzte
+// Verweis darauf faellt. Wer beim Abbrechen freigibt, hat dieselbe
+// Luecke wie der, der beim Schliessen freigibt -- der Auftrag laeuft ja
+// noch irgendwo.
+fn u_handle_abbruch(wfd: u64) -> u64 {
+    var n_beg: [u8; 15] = "auftrag-laeuft\0"
+    var n_ab: [u8; 12] = "abgebrochen\0"
+    var n_zus: [u8; 14] = "zustand-ab\0\0\0\0"
+    var n_obj: [u8; 20] = "zugriff-abgebrochen\0"
+    var n_lebt: [u8; 21] = "abbruch-raeumt-nicht\0"
+    var n_end: [u8; 23] = "ende-raeumt-noch-nicht\0"
+    var n_weg: [u8; 20] = "close-raeumt-ab\0\0\0\0\0"
+    var n_2ab: [u8; 20] = "zweimal-abbrechen\0\0\0"
+    var ok: u64 = 0
+    let of: u64 = u_sys(HND_OBJINFO, 8, wfd, 0)
+    let token: u64 = u_sys(HND_BEGIN, u_sys(HND_FDH, wfd, 0, 0), R_WRITE, 0)
+    ok = ok + h_claim((&n_beg[0]) as u64, u_sys(HND_STATE, token, 0, 0), Q_RUN)
+    ok = ok + h_claim((&n_ab[0]) as u64, u_sys(HND_CANCEL, token, 0, 0), 0)
+    ok = ok + h_claim((&n_zus[0]) as u64, u_sys(HND_STATE, token, 0, 0), Q_CANCEL)
+    ok = ok + h_claim((&n_2ab[0]) as u64,
+        u_sys(HND_CANCEL, token, 0, 0), 0 -% E_BADHANDLE)
+    ok = ok + h_claim((&n_obj[0]) as u64,
+        u_sys(HND_OBJECT, token, 0, 0), 0 -% E_CANCELLED)
+    ok = ok + h_claim((&n_lebt[0]) as u64, u_sys(HND_OBJINFO, 6, of, 0), 1)
+    // Der Deskriptor haelt noch einen Verweis -- das Ende des Auftrags
+    // raeumt also NICHTS ab.
+    ok = ok + h_claim((&n_end[0]) as u64, u_sys(HND_END, token, 0, 0), 0)
+    u_sys(SYS_CLOSE, wfd, 0, 0)
+    ok = ok + h_claim((&n_weg[0]) as u64, u_sys(HND_OBJINFO, 6, of, 0), 0)
+    return ok
+}
+
+fn u_handle(arg: u64) {
+    var s_head: [u8; 24] = "handle: ring 3 beginnt\n\0"
+    var s_tail: [u8; 9] = "handle: \0"
+    var s_of: [u8; 2] = "/\0"
+    var s_pr: [u8; 11] = " Zusagen\n\0\0"
+    var n_ver: [u8; 8] = "fassung\0"
+    var n_pipe: [u8; 7] = "roehre\0"
+    var n_cnt: [u8; 20] = "plaetze-belegt\0\0\0\0\0\0"
+    var fds: [u64; 2] = [0 as u64; 2]
+    // Dreissig war die Schaetzung beim Schreiben, fuenfunddreissig
+    // sind es geworden: 3 hier, 8 in jedem der vier Abschnitte.
+    // Die Zahl steht hier ausgeschrieben, damit eine geloeschte
+    // Zusage auffaellt und nicht nur die Summe kleiner wird.
+    let n: u64 = 35
+    u_say((&s_head[0]) as u64)
+    var ok: u64 = 0
+    ok = ok + h_claim((&n_ver[0]) as u64, u_sys(HND_VERSION, 0, 0, 0), 1)
+    let pr: u64 = u_sys(SYS_PIPE, (&fds[0]) as u64, 0, 0)
+    ok = ok + h_claim((&n_pipe[0]) as u64, pr, 0)
+    let rfd: u64 = (fds[0]) & 0xFFFFFFFF
+    let wfd: u64 = ((fds[0]) >> 32) & 0xFFFFFFFF
+    // Drei Konsolendeskriptoren und zwei Roehrenenden: fuenf Plaetze.
+    ok = ok + h_claim((&n_cnt[0]) as u64, u_sys(HND_COUNT, 0, 0, 0), 5)
+    ok = ok + u_handle_rechte(rfd, wfd)
+    ok = ok + u_handle_veraltet(rfd, wfd)
+    ok = ok + u_handle_falsch(wfd)
+    ok = ok + u_handle_abbruch(wfd)
+    u_say((&s_tail[0]) as u64)
+    u_say_num(ok)
+    u_say((&s_of[0]) as u64)
+    u_say_num(n)
+    u_say((&s_pr[0]) as u64)
+    u_sys(SYS_EXIT, n - ok, 0, 0)
+}
+
+
+// ============================== MESSUNG RUNDE HANDLE: DIE SYSCALL-LATENZ
+//
+// Was die Handle-Schicht an einem GANZEN Systemaufruf ausmacht, gemessen
+// von dort, wo es zaehlt: aus Ring 3, ueber `syscall`/`sysret`, mit allem
+// drum und dran.
+//
+// Zwei Aufrufe, und der Unterschied zwischen ihnen ist der Punkt:
+//   getpid  -- ruehrt keinen Deskriptor an. Von dieser Runde unberuehrt.
+//              Er ist der MASSSTAB: er sagt, was ein Systemaufruf auf
+//              diesem Wirt ueberhaupt kostet.
+//   lseek   -- geht durch `of_of` -> `file.fd_of` -> die Handle-Schicht,
+//              und zwar durch die ganze: aufloesen UND Rechte pruefen.
+//              Auf der Konsole endet er danach mit -ESPIPE, also misst
+//              er den Pfad und nicht das Dateisystem dahinter.
+//
+// Bloecke und MEDIAN, nicht Mittelwert: der Zeitgeber unterbricht, und
+// ein einzelner Ausreisser wuerde einen Mittelwert verdoppeln.
+const HB3_BLOCKS: u64 = 33
+const HB3_ITERS: u64 = 256
+
+fn u_tsc() -> u64 {
+    var lo: u64 = 0
+    var hi: u64 = 0
+    asm("rdtsc", out("rax") & lo, out("rdx") & hi)
+    return (hi << 32) | (lo & 0xFFFFFFFF)
+}
+
+fn u_hb_sort(p: u64, n: u64) {
+    var i: u64 = 1
+    while i < n {
+        let v: u64 = *((p + i * 8) as *mut u64)
+        var j: u64 = i
+        var going: bool = true
+        while going {
+            if j == 0 {
+                going = false
+            } else {
+                let w: u64 = *((p + (j - 1) * 8) as *mut u64)
+                if w <= v {
+                    going = false
+                } else {
+                    *((p + j * 8) as *mut u64) = w
+                    j = j - 1
+                }
+            }
+        }
+        *((p + j * 8) as *mut u64) = v
+        i = i + 1
+    }
+}
+
+fn u_hb(nr: u64, a0: u64, a1: u64, a2: u64) -> u64 {
+    var b: [u64; 33] = [0 as u64; 33]
+    var k: u64 = 0
+    while k < HB3_BLOCKS {
+        let t0: u64 = u_tsc()
+        var i: u64 = 0
+        var acc: u64 = 0
+        while i < HB3_ITERS {
+            acc = acc +% u_sys(nr, a0, a1, a2)
+            i = i + 1
+        }
+        let t1: u64 = u_tsc()
+        b[k as usize] = ((t1 -% t0) / HB3_ITERS) +% (acc & 0)
+        k = k + 1
+    }
+    u_hb_sort((&b[0]) as u64, HB3_BLOCKS)
+    return b[16]
+}
+
+fn u_hbench(arg: u64) {
+    var s_g: [u8; 16] = "hbench: getpid=\0"
+    var s_l: [u8; 15] = "hbench: lseek=\0"
+    var s_n: [u8; 15] = "hbench: iters=\0"
+    u_say_line((&s_g[0]) as u64, u_hb(SYS_GETPID, 0, 0, 0))
+    u_say_line((&s_l[0]) as u64, u_hb(SYS_LSEEK, OUT, 0, SEEK_CUR))
+    u_say_line((&s_n[0]) as u64, HB3_BLOCKS * HB3_ITERS)
+    u_sys(SYS_EXIT, 0, 0, 0)
 }
 
 // ------------------------------------------- ROUNDE K7: /dev/fb in Ring 3

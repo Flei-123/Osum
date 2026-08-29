@@ -197,6 +197,12 @@ BEREICHE = [
     # warum das aufgefallen ist.
     ("NETMON",     "kstate.fi", "NETMON_OFF",     "NETMON_MAX"),
     ("SHARE",      "kstate.fi", "SHARE_OFF",      "SHARE_MAX"),
+    # ---- Runde HANDLE ----
+    ("HND",        "kstate.fi", "HND_OFF",        "HND_MAX"),
+    ("HOBJ",       "kstate.fi", "HOBJ_OFF",       "HOBJ_MAX"),
+    ("HREQ",       "kstate.fi", "HREQ_OFF",       "HREQ_MAX"),
+    ("HNON",       "kstate.fi", "HNON_OFF",       "HNON_MAX"),
+    ("HCNT",       "kstate.fi", "HCNT_OFF",       "HCNT_MAX"),
     # RUNDE TRESOR: die Geraeteidentitaet, zwei Seiten (0x5A000..0x5C000).
     # Die erste traegt die Merkmale, die zweite ist das DMA-Ziel des
     # `identify controller` von NVMe -- und deshalb MUSS sie eine eigene,

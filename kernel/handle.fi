@@ -1,0 +1,1110 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/handle.fi -- RUNDE HANDLE: die Lebensdauer eines Kernobjekts,
+// bevor es die erste asynchrone Operation gibt.
+//
+// WARUM DIESE RUNDE VOR DEM RING KOMMT
+//
+// Google hat 2023 berichtet, dass rund 60 % der eingereichten
+// Linux-Kernel-Exploits aus io_uring stammten, und hat den Ring auf
+// Android und ChromeOS abgeschaltet. Die Ursache war nicht der Ring
+// selbst und nicht der geteilte Speicher: es war die ASYNCHRONE
+// LEBENSDAUER. Ein Auftrag lebt laenger als der Aufruf, der ihn
+// eingereicht hat. Zwischen "abgeschickt" und "fertig" kann das Programm
+// sein Handle schliessen, der Platz kann neu vergeben werden, und der
+// alte Auftrag greift dann auf das Objekt zu, das inzwischen dort steht.
+// Das ist Use-after-free mit zusaetzlichen Schritten, und es ist
+// NACHTRAEGLICH nicht zu reparieren -- man muss die Lebensdauer VOR der
+// Asynchronitaet richtig legen.
+//
+// Genau das tut dieses Modul. Der Ring (Runde RING) ist NICHT Teil
+// dieser Runde; was hier steht, ist das Fundament, auf dem er stehen
+// soll.
+//
+// DREI TAFELN, UND JEDE BEANTWORTET EINE FRAGE
+//
+//   1. DIE HANDLE-PLAETZE, je Aufgabe (`hslot`). Frage: "darf DIESER
+//      Prozess DIESES Objekt, und wie?" Ein Platz traegt eine
+//      Generation, ein Rechte-Bitfeld und den Verweis auf ein Objekt.
+//      Der Handle-WERT nach aussen ist Platz + Generation, und die
+//      Generation ist mit einem Wuerfelwert je Prozess verrechnet --
+//      derselbe Platz in zwei Prozessen ergibt nie denselben Wert.
+//
+//   2. DIE OBJEKTTAFEL (`oslot`), einmal fuers ganze System. Frage:
+//      "lebt das Ding noch?" Ein Eintrag traegt Art, Objektnummer,
+//      VERWEISZAEHLER, ZAHL DER AUFTRAEGE IN FLUG und eine eigene
+//      Generation. Es gibt GENAU EINEN Eintrag je Kernobjekt: zwei
+//      Deskriptoren auf dieselbe offene Datei (`dup2`, `fork`) sind zwei
+//      Handle-Plaetze und EIN Objekt. Daran haengt alles Weitere.
+//
+//   3. DIE AUFTRAGSTAFEL (`qslot`). Frage: "laeuft das noch, und meint
+//      es noch dasselbe?" Ein Auftrag merkt sich, MIT WELCHEM HANDLE er
+//      eingereicht wurde und AUF WELCHER OBJEKTGENERATION. Das
+//      Abbruch-Token ist sein Platz plus seine eigene Generation.
+//
+// DIE VIER ZUSAGEN, UND JEDE HAT IHRE GEGENPROBE (kstate.fi, Wort 10)
+//
+//   A. RECHTE KOENNEN NUR KLEINER WERDEN. `rights_restrict` ist eine
+//      Schnittmenge. Es gibt in diesem Modul keinen Weg, ein Recht
+//      hinzuzufuegen -- weder ueber `dup`, noch ueber `give`, noch
+//      ueber die Vererbung an ein Kind. Wer beim Weitergeben mehr
+//      verlangt, als er selbst hat, bekommt weniger und wird gezaehlt
+//      (`H_ESCALATE`).
+//
+//   B. EIN GESCHLOSSENES HANDLE TRIFFT NIE SEIN NACHFOLGEOBJEKT. Die
+//      Generation des Platzes bleibt beim Schliessen STEHEN und zaehlt
+//      bei der naechsten Belegung hoch. Zusaetzlich merkt sich der
+//      Handle-Platz die Generation des OBJEKTS, auf das er zeigt.
+//      Gegenprobe `nogen`: ohne diesen Vergleich trifft der alte
+//      Auftrag das neue Objekt, und der Test faellt.
+//
+//   C. KEIN FREE WAEHREND IN FLUG. Ein laufender Auftrag zaehlt am
+//      Objekt mit (`OB_FLIGHT`). Schliesst der Prozess sein Handle,
+//      geht der Verweiszaehler auf null -- das Objekt wird trotzdem
+//      NICHT abgeraeumt, sondern erst, wenn der letzte Auftrag fertig
+//      oder abgebrochen ist. Gegenprobe `noflight`: ohne den Mitzaehler
+//      wird waehrend des Auftrags freigegeben, und der Test faellt.
+//
+//   D. ABBRECHEN GIBT DEN SPEICHER NICHT FRUEHER FREI. `req_cancel`
+//      markiert nur; abgeraeumt wird in `req_end`, und zwar von dem,
+//      der zuletzt geht. Ein Abbruch ist eine Bitte, kein Befehl an den
+//      Allokator.
+//
+// WO DER ZUSTAND LIEGT. Stufe 0 von Firn hat keine globalen
+// veraenderlichen Variablen (SPEC 14, Punkt 5). Wie ueberall in diesem
+// Kernel liegt er in der uebergebenen Datenregion; die Versaetze stehen
+// in `kstate.fi` (HND_OFF, HOBJ_OFF, HREQ_OFF, HNON_OFF).
+//
+// ARITHMETIK. Seit Runde 72 panicken `+`, `-` und `*` beim Ueberlauf.
+// Wo eine Zweierkomplement-Umdeutung gemeint ist -- die Generation, die
+// ueberlaeuft, der Fehlercode, der negativ wird, der Mischwert des
+// Wuerfels --, steht `+%`, `-%` oder `*%`.
+//
+// VERHAELTNIS ZU `kernel/cap.fi`. cap.fi ist die native ABI aus
+// OrientOS und bleibt, wie sie ist -- ihre zehn Rechtebits und ihre
+// Fehlerwerte sind mit einem fremden Programm verabredet. Dieses Modul
+// benutzt DIESELBEN Zahlen fuer diese zehn Bits und haengt drei an
+// (R_APPEND, R_SEEK, R_IOCTL), die der Deskriptorpfad braucht. Ein Wert
+// aus cap.fi bedeutet hier dasselbe wie dort.
+
+profile kernel
+
+import kstate
+
+export {
+    R_NONE, R_READ, R_WRITE, R_EXEC, R_DUP, R_TRANSFER, R_INSPECT,
+    R_MANAGE, R_CREATE, R_MAP, R_WAIT, R_APPEND, R_SEEK, R_IOCTL, R_ALL,
+    E_BADHANDLE, E_RIGHTS, E_NOTFOUND, E_INVALID, E_EXHAUSTED,
+    E_WRONGTYPE, E_CLOSED, E_STALE, E_CANCELLED, E_UNSUPPORTED_HND,
+    OK_NONE, OK_FILE, OK_RING, OK_MAX,
+    MAX_H, MAX_OBJ, MAX_REQ, HANDLE_NONE, TOKEN_NONE,
+    Q_FREE, Q_RUN, Q_CANCEL, Q_STALE,
+    err, is_err,
+    rights_contains, rights_restrict, rights_for_flags,
+    make, slot_of, gen_of, valid,
+    clear_task, nonce_of, set_nonce, nonce_for,
+    obj_get, obj_ref, obj_unref, obj_num, obj_kind, obj_refs,
+    obj_flight, obj_gen, obj_live, inflight_on, objects_used,
+    insert, resolve, resolve_num, may, rights_of,
+    handle_at, drop, used, give,
+    req_begin, req_find, req_object, req_state, req_cancel, req_end,
+    req_live, req_owner
+}
+
+// ----------------------------------------------------------- die Rechte
+//
+// Die ersten zehn Bits sind WORTGLEICH mit `kernel/cap.fi` und damit mit
+// OrientOS' `rights.rs`. Die drei letzten kommen aus dieser Runde: der
+// Deskriptorpfad von POSIX kennt Anhaengen, Suchen und Steuern, und ohne
+// eigene Bits dafuer waeren sie unter R_WRITE mitgemeint -- ein Handle,
+// das schreiben darf, duerfte dann auch die Position verstellen.
+const R_NONE: u64 = 0
+const R_READ: u64 = 1
+const R_WRITE: u64 = 2
+const R_EXEC: u64 = 4
+const R_DUP: u64 = 8 // vervielfaeltigen (cap.fi: R_DUPLICATE)
+const R_TRANSFER: u64 = 16
+const R_INSPECT: u64 = 32
+const R_MANAGE: u64 = 64
+const R_CREATE: u64 = 128
+const R_MAP: u64 = 256
+const R_WAIT: u64 = 512
+const R_APPEND: u64 = 1024 // nur ans Ende schreiben
+const R_SEEK: u64 = 2048 // die Position verstellen
+const R_IOCTL: u64 = 4096 // das Geraet dahinter steuern
+const R_ALL: u64 = 8191 // 0x1fff -- genau die Vereinigung der dreizehn
+
+// ------------------------------------------------------- die Fehlerwerte
+//
+// 1..9 sind die von `cap.fi` und damit die von OrientOS. 10 und 11 sind
+// neu und gehoeren dieser Runde: sie beschreiben Zustaende, die es ohne
+// asynchrone Auftraege gar nicht geben konnte.
+const E_BADHANDLE: u64 = 1
+const E_RIGHTS: u64 = 2
+const E_NOTFOUND: u64 = 3
+const E_INVALID: u64 = 4
+const E_EXHAUSTED: u64 = 5
+const E_WRONGTYPE: u64 = 6
+const E_CLOSED: u64 = 8
+const E_STALE: u64 = 10 // VERALTET: das Handle meint nicht mehr dasselbe
+const E_CANCELLED: u64 = 11 // der Auftrag wurde abgebrochen
+// 9 ist in cap.fi E_UNSUPPORTED und heisst hier dasselbe: den Aufruf
+// gibt es in dieser ABI, dieser Kernel bietet ihn nur (hier) nicht an.
+const E_UNSUPPORTED_HND: u64 = 9
+
+// ------------------------------------------------------- die Objektarten
+const OK_NONE: u64 = 0
+const OK_FILE: u64 = 1 // ein Platz in der Tafel der offenen Dateien
+const OK_RING: u64 = 2 // vorgemerkt fuer Runde RING
+const OK_MAX: u64 = 2
+
+// ------------------------------------------------------------ die Masse
+//
+// MAX_H = 16 ist mit Absicht dieselbe Zahl wie `file.MAX_FD`: jeder
+// Deskriptor bekommt einen Handle-Platz, und die Handle-Tafel darf nie
+// der engere Engpass sein -- sonst gaebe es ein `open`, das an einer
+// Tabelle scheitert, von der das Programm nichts weiss.
+// MAX_OBJ = 64 ist dieselbe Zahl wie `file.MAX_OPEN`, und das ist keine
+// Bequemlichkeit: es gibt GENAU EINEN Objekteintrag je offener Datei.
+const MAX_H: u64 = 16
+const MAX_OBJ: u64 = 64
+const MAX_REQ: u64 = 64
+
+const H_BYTES: u64 = 24
+const HS_GEN: u64 = 0 // Generation dieses Platzes (lebt ueber das Schliessen hinaus)
+const HS_RIGHTS: u64 = 8
+// Unten 32 Bit: Objektplatz PLUS EINS -- die 0 heisst "frei", damit eine
+// frisch genullte Seite eine leere Tafel ist. Oben 32 Bit: die
+// Generation, die das Objekt hatte, als dieser Platz belegt wurde.
+const HS_OBJ: u64 = 16
+
+const OB_BYTES: u64 = 40
+const OB_KIND: u64 = 0 // 0 = frei
+const OB_NUM: u64 = 8 // die Objektnummer -- eine ZAHL, nie ein Zeiger
+const OB_REFS: u64 = 16 // Handle-Plaetze, die hierher zeigen
+const OB_FLIGHT: u64 = 24 // Auftraege, die gerade darauf laufen
+const OB_GEN: u64 = 32 // bleibt beim Freigeben STEHEN
+
+const Q_BYTES: u64 = 32
+const QS_STATE: u64 = 0
+const QS_OBJ: u64 = 8 // unten 32 Objektplatz, oben 32 dessen Generation
+const QS_HANDLE: u64 = 16 // MIT WELCHEM Handle eingereicht -- der Kern der Sache
+const QS_OWNER: u64 = 24 // unten 32 Aufgabe, oben 32 Generation des Auftrags
+
+const Q_FREE: u64 = 0
+const Q_RUN: u64 = 1
+const Q_CANCEL: u64 = 2
+const Q_STALE: u64 = 3
+
+const HANDLE_NONE: u64 = 0
+const TOKEN_NONE: u64 = 0
+
+// Die drei Zugriffsarten von POSIX. Sie stehen hier ein zweites Mal
+// (`sys.fi` hat sie auch), weil dieses Modul `sys.fi` NICHT einbinden
+// darf -- es liegt unter ihm. Es sind die Zahlen von Unix, sie aendern
+// sich nicht.
+const OF_WRONLY: u64 = 1
+const OF_RDWR: u64 = 2
+const OF_APPEND: u64 = 1024
+
+fn hslot(task: u64, i: u64) -> u64 {
+    return kstate.HND_OFF + (task * MAX_H + i) * H_BYTES
+}
+
+fn oslot(i: u64) -> u64 {
+    return kstate.HOBJ_OFF + i * OB_BYTES
+}
+
+fn qslot(i: u64) -> u64 {
+    return kstate.HREQ_OFF + i * Q_BYTES
+}
+
+fn nslot(task: u64) -> u64 {
+    return kstate.HNON_OFF + task * 8
+}
+
+// ------------------------------------------------------ Rechte rechnen
+
+fn rights_contains(have: u64, need: u64) -> bool {
+    return (have & need) == need
+}
+
+// DER EINZIGE ERLAUBTE WEG, RECHTE BEIM WEITERGEBEN ZU AENDERN.
+// Schnittmenge, und `R_ALL` filtert Bits weg, die es gar nicht gibt. Es
+// gibt in diesem Modul keine Funktion, die ein Recht hinzufuegt.
+fn rights_restrict(have: u64, mask: u64) -> u64 {
+    return (have & mask) & R_ALL
+}
+
+// Welche Rechte ein Deskriptor bekommt, der mit diesen Flags geoeffnet
+// wurde. Das ist die Uebersetzung zwischen der Welt von 1970 und dieser:
+// `open` sagt "lesen" oder "schreiben", und daraus wird ein Bitfeld.
+//
+// R_EXEC ist ABSICHTLICH NICHT dabei. Ein Deskriptor auf eine Datei ist
+// keine Erlaubnis, sie auszufuehren -- das entscheidet `execve` ueber
+// `perm.may`, und ein Handle, das das mitbraechte, waere genau der
+// verwirrte Stellvertreter, den diese Runde abschafft.
+fn rights_for_flags(flags: u64) -> u64 {
+    var r: u64 = R_INSPECT | R_DUP | R_TRANSFER | R_SEEK | R_IOCTL | R_WAIT
+    let acc: u64 = flags & 3
+    if acc != OF_WRONLY {
+        r = r | R_READ
+    }
+    if acc == OF_WRONLY {
+        r = r | R_WRITE
+    }
+    if acc == OF_RDWR {
+        r = r | R_WRITE
+    }
+    if (flags & OF_APPEND) != 0 {
+        r = r | R_APPEND
+    }
+    return r
+}
+
+// ------------------------------------------------------ Handles rechnen
+//
+// 64 Bit: unten Platz+1, oben Generation. Das +1 haelt die 0 fuer
+// HANDLE_NONE frei -- Platz 0 ist gueltig, das Handle 0 nie.
+//
+// DIE GENERATION IST 31 BIT BREIT UND NICHT 32, und das ist die
+// wichtigste Zeile dieses Abschnitts. Ein Handle und ein Fehler kommen
+// durch DENSELBEN Kanal zurueck: `>= 0` ist ein Ergebnis, `< 0` ein
+// Fehler (`is_err` prueft Bit 63). In die Generation geht der
+// Wuerfelwert der Tafel ein, und der ist ein Hashwert -- bei etwa der
+// HAELFTE aller Prozesse haette er Bit 31 gesetzt, und das Handle waere
+// dann ein Wert mit gesetztem Bit 63 gewesen. Also ein Handle, das wie
+// ein Fehler aussieht.
+//
+// Das ist beim ersten Lauf dieser Runde genau so passiert: `ha` kam als
+// 0x4924436a00000001 heraus (in Ordnung), `hb` als 0x9ed0744400000001
+// -- und jedes `is_err(hb)` sagte ja. Die Zusage "dup-weniger" fiel,
+// und der Fehler sah aus wie ein Rechteproblem, war aber eine
+// Zahlenraumfrage.
+//
+// Ein Bit weniger Generation heisst 2^31 statt 2^32 Wiederverwendungen
+// je Platz, bevor sich ein Wert wiederholen KANN. Bei einem Platz, der
+// mit jedem `open` hochzaehlt, sind das mehr als zwei Milliarden -- und
+// gegen den Rest steht der Wuerfelwert. Der Preis ist es wert; ein
+// Rueckgabekanal, in dem Ergebnis und Fehler sich ueberlappen koennen,
+// ist keiner.
+const GEN_MASK: u64 = 0x7FFFFFFF
+
+fn make(slot: u64, generation: u64) -> u64 {
+    return ((generation & GEN_MASK) << 32) | ((slot +% 1) & 0xFFFFFFFF)
+}
+
+fn slot_of(h: u64) -> u64 {
+    return ((h & 0xFFFFFFFF) -% 1) & 0xFFFFFFFF
+}
+
+fn gen_of(h: u64) -> u64 {
+    return (h >> 32) & GEN_MASK
+}
+
+fn valid(h: u64) -> bool {
+    return (h & 0xFFFFFFFF) != 0
+}
+
+fn err(e: u64) -> u64 {
+    return 0 -% e
+}
+
+fn is_err(v: u64) -> bool {
+    return (v >> 63) != 0
+}
+
+// ------------------------------------------------------- der Wuerfelwert
+
+fn nonce_for(pid: u64) -> u64 {
+    var acc: u64 = pid +% 0x9E3779B97F4A7C15
+    acc = (acc ^ (acc >> 30)) *% 0xBF58476D1CE4E5B9
+    acc = acc ^ (acc >> 27)
+    // Auch der Wuerfelwert bleibt unter Bit 31 -- siehe GEN_MASK.
+    return acc & GEN_MASK
+}
+
+fn nonce_of(state: u64, task: u64) -> u64 {
+    if task >= kstate.MAX_TASKS {
+        return 0
+    }
+    return kstate.get(state, nslot(task))
+}
+
+fn set_nonce(state: u64, task: u64, nonce: u64) {
+    if task >= kstate.MAX_TASKS {
+        return
+    }
+    kstate.set(state, nslot(task), nonce & GEN_MASK)
+}
+
+// ========================================================= die Objekte
+
+fn obj_kind(state: u64, i: u64) -> u64 {
+    if i >= MAX_OBJ {
+        return OK_NONE
+    }
+    return kstate.get(state, oslot(i) + OB_KIND)
+}
+
+fn obj_num(state: u64, i: u64) -> u64 {
+    if i >= MAX_OBJ {
+        return 0
+    }
+    return kstate.get(state, oslot(i) + OB_NUM)
+}
+
+fn obj_refs(state: u64, i: u64) -> u64 {
+    if i >= MAX_OBJ {
+        return 0
+    }
+    return kstate.get(state, oslot(i) + OB_REFS)
+}
+
+fn obj_flight(state: u64, i: u64) -> u64 {
+    if i >= MAX_OBJ {
+        return 0
+    }
+    return kstate.get(state, oslot(i) + OB_FLIGHT)
+}
+
+fn obj_gen(state: u64, i: u64) -> u64 {
+    if i >= MAX_OBJ {
+        return 0
+    }
+    return kstate.get(state, oslot(i) + OB_GEN) & 0xFFFFFFFF
+}
+
+fn obj_live(state: u64, i: u64) -> bool {
+    return obj_kind(state, i) != OK_NONE
+}
+
+fn objects_used(state: u64) -> u64 {
+    var n: u64 = 0
+    var i: u64 = 0
+    while i < MAX_OBJ {
+        if kstate.get(state, oslot(i) + OB_KIND) != OK_NONE {
+            n = n + 1
+        }
+        i = i + 1
+    }
+    return n
+}
+
+// Das Objekt zu (Art, Nummer): das VORHANDENE mit einem Verweis mehr,
+// sonst ein neues. Der Rueckgabewert traegt IMMER einen Verweis -- wer
+// ihn bekommt, gibt ihn irgendwann mit `obj_unref` zurueck oder haengt
+// ihn mit `insert` an einen Handle-Platz, der ihn dann haelt.
+//
+// Ein Eintrag, dessen Verweiszaehler schon auf null steht, wird NICHT
+// wiederverwendet: er ist ein Objekt im Abbau, auf dem noch ein Auftrag
+// laeuft. Wer dieselbe Nummer neu bekommt, bekommt einen frischen
+// Eintrag mit einer anderen Generation -- sonst waere der alte Auftrag
+// nach dem Schliessen plotzlich wieder gueltig.
+fn obj_get(state: u64, kind: u64, num: u64) -> u64 {
+    if kind == OK_NONE || kind > OK_MAX {
+        return MAX_OBJ
+    }
+    var i: u64 = 0
+    while i < MAX_OBJ {
+        let a: u64 = oslot(i)
+        if kstate.get(state, a + OB_KIND) == kind {
+            if kstate.get(state, a + OB_NUM) == num {
+                if kstate.get(state, a + OB_REFS) > 0 {
+                    kstate.set(state, a + OB_REFS,
+                        kstate.get(state, a + OB_REFS) + 1)
+                    return i
+                }
+            }
+        }
+        i = i + 1
+    }
+    i = 0
+    while i < MAX_OBJ {
+        let a: u64 = oslot(i)
+        if kstate.get(state, a + OB_KIND) == OK_NONE {
+            var g: u64 = (kstate.get(state, a + OB_GEN) +% 1) & 0xFFFFFFFF
+            if g == 0 {
+                g = 1
+            }
+            kstate.set(state, a + OB_GEN, g)
+            kstate.set(state, a + OB_KIND, kind)
+            kstate.set(state, a + OB_NUM, num)
+            kstate.set(state, a + OB_REFS, 1)
+            kstate.set(state, a + OB_FLIGHT, 0)
+            kstate.add(state, kstate.H_OPENED, 1)
+            return i
+        }
+        i = i + 1
+    }
+    return MAX_OBJ
+}
+
+fn obj_ref(state: u64, i: u64) {
+    if i >= MAX_OBJ {
+        return
+    }
+    kstate.set(state, oslot(i) + OB_REFS, kstate.get(state, oslot(i) + OB_REFS) + 1)
+}
+
+fn obj_free(state: u64, i: u64) {
+    let a: u64 = oslot(i)
+    kstate.set(state, a + OB_KIND, OK_NONE)
+    kstate.set(state, a + OB_NUM, 0)
+    kstate.set(state, a + OB_REFS, 0)
+    kstate.set(state, a + OB_FLIGHT, 0)
+    // DIE GENERATION BLEIBT STEHEN. Genau das macht jedes alte Handle
+    // und jeden alten Auftrag auf diesen Platz dauerhaft ungueltig.
+    kstate.add(state, kstate.H_CLOSED, 1)
+}
+
+// Ein Verweis weniger. `true` heisst: das Objekt ist jetzt WIRKLICH weg,
+// der Aufrufer darf abraeumen, was daran haengt. Wer die Objektnummer
+// danach noch braucht, liest sie VORHER.
+//
+// ZUSAGE C. Faellt der letzte Handle-Verweis, waehrend noch ein Auftrag
+// laeuft, wird NICHT freigegeben. Der Eintrag lebt weiter, ohne dass
+// ihn ein Handle erreichen kann, bis `req_end` des letzten Auftrags ihn
+// abraeumt.
+fn obj_unref(state: u64, i: u64) -> bool {
+    if i >= MAX_OBJ {
+        return false
+    }
+    let a: u64 = oslot(i)
+    if kstate.get(state, a + OB_KIND) == OK_NONE {
+        return false
+    }
+    let r: u64 = kstate.get(state, a + OB_REFS)
+    if r > 1 {
+        kstate.set(state, a + OB_REFS, r - 1)
+        return false
+    }
+    kstate.set(state, a + OB_REFS, 0)
+    if kstate.get(state, a + OB_FLIGHT) != 0 {
+        kstate.add(state, kstate.H_DEFERRED, 1)
+        return false
+    }
+    obj_free(state, i)
+    return true
+}
+
+// Wie viele Auftraege gerade auf DIESER Objektnummer laufen. Das ist die
+// Frage, die `file.open_unref` stellen muss, bevor es einen Eintrag der
+// Tafel der offenen Dateien wirklich abraeumt.
+fn inflight_on(state: u64, kind: u64, num: u64) -> u64 {
+    var n: u64 = 0
+    var i: u64 = 0
+    while i < MAX_OBJ {
+        let a: u64 = oslot(i)
+        if kstate.get(state, a + OB_KIND) == kind {
+            if kstate.get(state, a + OB_NUM) == num {
+                n = n + kstate.get(state, a + OB_FLIGHT)
+            }
+        }
+        i = i + 1
+    }
+    return n
+}
+
+// ==================================================== die Handle-Plaetze
+
+// Eine frische Tafel ist LEER, und die Generationen werden mitgeloescht.
+// Was die Plaetze zweier Prozesse trotzdem unterscheidbar haelt, ist der
+// Wuerfelwert aus der pid.
+//
+// Noch belegte Plaetze werden ORDENTLICH freigegeben und nicht nur
+// ueberschrieben: sonst haelt ein Objekt einen Verweis von einem
+// Prozess, den es nicht mehr gibt, und die Tafel laeuft ueber Stunden
+// voll.
+fn clear_task(state: u64, task: u64, pid: u64) {
+    if task >= kstate.MAX_TASKS {
+        return
+    }
+    var i: u64 = 0
+    while i < MAX_H {
+        let a: u64 = hslot(task, i)
+        let ov: u64 = kstate.get(state, a + HS_OBJ)
+        if (ov & 0xFFFFFFFF) != 0 {
+            obj_unref(state, ((ov & 0xFFFFFFFF) -% 1) & 0xFFFFFFFF)
+        }
+        kstate.set(state, a + HS_GEN, 0)
+        kstate.set(state, a + HS_RIGHTS, R_NONE)
+        kstate.set(state, a + HS_OBJ, 0)
+        i = i + 1
+    }
+    set_nonce(state, task, nonce_for(pid))
+}
+
+// Traegt ein Objekt in die Tafel einer Aufgabe ein. Der VERWEIS, den der
+// Aufrufer von `obj_get`/`obj_ref` bekommen hat, geht dabei an den
+// Handle-Platz ueber -- scheitert der Eintrag, muss der Aufrufer ihn
+// selbst mit `obj_unref` zurueckgeben.
+fn insert(state: u64, task: u64, obj: u64, rights: u64) -> u64 {
+    if task >= kstate.MAX_TASKS {
+        return HANDLE_NONE
+    }
+    if obj >= MAX_OBJ {
+        return HANDLE_NONE
+    }
+    if !obj_live(state, obj) {
+        return HANDLE_NONE
+    }
+    var i: u64 = 0
+    while i < MAX_H {
+        let a: u64 = hslot(task, i)
+        if (kstate.get(state, a + HS_OBJ) & 0xFFFFFFFF) == 0 {
+            var g: u64 = (kstate.get(state, a + HS_GEN) +% 1) & GEN_MASK
+            if g == 0 {
+                g = 1
+            }
+            kstate.set(state, a + HS_GEN, g)
+            kstate.set(state, a + HS_RIGHTS, rights & R_ALL)
+            kstate.set(state, a + HS_OBJ,
+                ((obj_gen(state, obj) & 0xFFFFFFFF) << 32)
+                | ((obj +% 1) & 0xFFFFFFFF))
+            return make(i, g ^ nonce_of(state, task))
+        }
+        i = i + 1
+    }
+    return HANDLE_NONE
+}
+
+// ===================================================================
+// DER HEISSE PFAD. Hier laeuft JEDER `read`, JEDER `write`, JEDER
+// `lseek`, `close`, `dup` und `stat` dieses Kernels durch.
+//
+// DIESE FUNKTION IST DREIMAL UMGESCHRIEBEN WORDEN, UND JEDES MAL WAR
+// DER UEBERSETZER DER GRUND. Die Zahlen sind gemessen (`hbench`,
+// Median aus 33 Bloecken zu 512 Aufrufen, AMD EPYC 7571 unter KVM):
+//
+//   Ausgangspunkt: `file.fd_of` OHNE Handle-Schicht     20 Zyklen
+//   1. Fassung, sauber aus `valid`, `slot_of`, `hslot`,
+//      `nonce_of`, `obj_kind`, `obj_gen` zusammengesetzt,
+//      `kstate.add` (ein `lock xadd`) als Zaehler:      155 Zyklen
+//   2. Fassung, Hilfsaufrufe ausgeschrieben, Zaehler nur
+//      im Selbsttest, Moduswort einmal statt zweimal:   129 Zyklen
+//   3. Fassung, zusaetzlich ohne `kstate.get`:          212 Zyklen (!)
+//   4. Fassung, eine Aufloesung je Systemaufruf statt zwei,
+//      Moduswort und Zaehler nur im Nein-Pfad:           166 Zyklen
+//   5. Fassung, diese hier: dieselbe Form, aber die
+//      Lesungen wieder ueber `kstate.get`:               siehe
+//                                       docs/HANDLE-STATUS.md
+//
+// DASS `kstate.get` SCHNELLER IST ALS DIE EINGEBAUTE LESUNG AN ORT
+// UND STELLE, ist die zweite Ueberraschung: nicht die Lesung kostet,
+// sondern die ADRESSRECHNUNG davor. `kstate.get(state, off)` rechnet
+// EINE Addition in einem Rahmen, den der Uebersetzer schon aufgemacht
+// hat; `__mmio_read64((state + BASIS + (a * B + c - 1) * G) as *mut u64)`
+// am Aufrufort sind sechs Terme, und jeder Term ist drei
+// Speicherzugriffe.
+//
+// DASS DIE DRITTE FASSUNG LANGSAMER WAR ALS DIE ZWEITE, ist die
+// eigentliche Lehre dieser Runde, und sie steht hier, damit sie der
+// Naechste nicht noch einmal lernen muss: firnc0 macht KEINE
+// REGISTERZUTEILUNG. Jeder Zwischenwert -- jede Teilrechnung, jeder
+// Vergleich, jede Konstante -- wird auf den Stapel geschrieben und
+// wieder gelesen. Die dritte Fassung hatte 575 Maschinenbefehle fuer
+// fuenfzehn Zeilen Quelltext.
+//
+// Also gilt hier NICHT "weniger Aufrufe ist schneller", sondern:
+// WENIGER AUSDRUECKE IST SCHNELLER. Ein Aufruf kostet 5 bis 7 Zyklen,
+// ein zusaetzlicher Term in einer Rechnung kostet drei Speicherzugriffe.
+// Danach ist diese Funktion gebaut: so wenige Anweisungen wie moeglich,
+// jede Lesung genau einmal, und alles, was nur im Fehlerfall gebraucht
+// wird, steht in `langsam` und nicht hier.
+//
+// DAS MODUSWORT WIRD IM ERFOLGSFALL GAR NICHT MEHR GELESEN. Die drei
+// Gegenproben (`nogen`, `norights`) aendern nur, ob eine ABLEHNUNG
+// stehenbleibt -- sie koennen einen Zugriff nie zusaetzlich verbieten.
+// Also wird erst gefragt, wenn die strenge Pruefung schon Nein gesagt
+// hat. Dasselbe gilt fuer die Zaehler.
+//
+// WAS HIER FAELLT, UND ES FAELLT ALLES: das ungueltige Handle, ein
+// Platz ausserhalb der Tafel, ein freier Platz, eine erfundene
+// Generation, ein Handle aus einem FREMDEN Prozess (der Wuerfelwert),
+// ein Platz, dessen Objekt inzwischen ein anderes ist (die
+// Objektgeneration) -- und, wenn `need` gesetzt ist, ein Handle ohne
+// das verlangte Recht.
+//
+// DIE RECHTEPRUEFUNG STEHT HIER DRIN UND NICHT DANEBEN, und auch das
+// ist gemessen: die erste Fassung hat `fd_of` und `fd_may` getrennt
+// gerufen, also die ganze Aufloesung ZWEIMAL je Systemaufruf gemacht.
+// Das waren 296 Zyklen Aufschlag auf einen `lseek` statt der Haelfte.
+
+// Die Bits von Wort 10 (kstate.fi): 1 = M_HANDLE (Selbsttest),
+// 2 = M_NOGEN, 4 = M_NOFLIGHT, 8 = M_NORIGHTS.
+const W10_HANDLE: u64 = 1
+const W10_NOGEN: u64 = 2
+const W10_NORIGHTS: u64 = 8
+
+// Warum abgelehnt wurde: fuer `langsam`, das daraus den Zaehler und die
+// Gegenprobe aussucht.
+const NO_DEAD: u64 = 1 // das Objekt gibt es nicht mehr
+const NO_OGEN: u64 = 2 // der Platz traegt inzwischen ein anderes Objekt
+const NO_GEN: u64 = 3 // falsche Generation oder fremder Wuerfelwert
+const NO_RIGHTS: u64 = 4 // Handle ja, Recht nein
+
+// Der Nein-Pfad. Er darf so teuer sein, wie er will: er laeuft nur,
+// wenn die strenge Pruefung schon abgelehnt hat. Hier -- und NUR hier
+// -- werden das Moduswort und die Zaehler angefasst.
+//
+// `o` ist der Objektplatz, den die strenge Pruefung gefunden hatte.
+// Gibt eine Gegenprobe den Zugriff doch frei, kommt er zurueck; sonst
+// MAX_OBJ.
+fn langsam(state: u64, o: u64, grund: u64) -> u64 {
+    let m: u64 = kstate.get(state, kstate.MODE_OFF + 80)
+    if (m & W10_HANDLE) != 0 {
+        if grund == NO_RIGHTS {
+            kstate.set(state, kstate.H_DENIED,
+                kstate.get(state, kstate.H_DENIED) + 1)
+        } else {
+            kstate.set(state, kstate.H_STALE,
+                kstate.get(state, kstate.H_STALE) + 1)
+        }
+    }
+    // GEGENPROBE `nogen`: ohne Generationsvergleich trifft ein
+    // geschlossenes Handle sein Nachfolgeobjekt. Genau die
+    // Fehlerklasse, um die es in dieser Runde geht -- absichtlich
+    // wieder einschaltbar, damit der Test zeigen kann, dass er sie
+    // sonst faengt. Ein TOTES Objekt gibt es auch damit nicht zurueck:
+    // die Gegenprobe darf den Generationsvergleich ausschalten, nicht
+    // die Existenz.
+    if grund != NO_DEAD {
+        if grund != NO_RIGHTS {
+            if (m & W10_NOGEN) != 0 {
+                return o
+            }
+        }
+    }
+    // GEGENPROBE `norights`: die zweite Haelfte der Tiefenstaffelung
+    // faellt weg. Die uid/gid-Pruefung von `perm.may` bleibt stehen.
+    if grund == NO_RIGHTS {
+        if (m & W10_NORIGHTS) != 0 {
+            return o
+        }
+    }
+    return MAX_OBJ
+}
+
+// Aufloesen, Recht pruefen UND die Objektnummer holen -- in EINEM
+// Aufruf mit sechs Lesungen. MAX_OBJ ist das Nein, und das geht auf,
+// weil MAX_OBJ und `file.MAX_OPEN` dieselbe Zahl sind: eine gueltige
+// Objektnummer ist 0..63, die 64 ist keine.
+fn resolve_num(state: u64, task: u64, h: u64, need: u64) -> u64 {
+    if task >= kstate.MAX_TASKS {
+        return MAX_OBJ
+    }
+    // Platz PLUS EINS, so wie er im Handle steht. Die 0 ist HANDLE_NONE
+    // und faellt mit derselben Abfrage heraus wie ein zu grosser Platz.
+    let lo: u64 = h & 0xFFFFFFFF
+    if lo == 0 {
+        return MAX_OBJ
+    }
+    if lo > MAX_H {
+        return MAX_OBJ
+    }
+    let a: u64 = kstate.HND_OFF + (task * MAX_H + lo - 1) * H_BYTES
+    let ov: u64 = kstate.get(state, a + HS_OBJ)
+    let op: u64 = ov & 0xFFFFFFFF
+    if op == 0 {
+        return MAX_OBJ
+    }
+    if op > MAX_OBJ {
+        return MAX_OBJ
+    }
+    let oa: u64 = kstate.HOBJ_OFF + (op - 1) * OB_BYTES
+    if kstate.get(state, oa) == OK_NONE {
+        return langsam(state, op - 1, NO_DEAD)
+    }
+    if kstate.get(state, oa + OB_GEN) != (ov >> 32) {
+        return langsam(state, op - 1, NO_OGEN)
+    }
+    let g: u64 = kstate.get(state, a + HS_GEN)
+        ^ kstate.get(state, kstate.HNON_OFF + task * 8)
+    if (g & GEN_MASK) != ((h >> 32) & GEN_MASK) {
+        return langsam(state, op - 1, NO_GEN)
+    }
+    if (kstate.get(state, a + HS_RIGHTS) & need) != need {
+        if langsam(state, op - 1, NO_RIGHTS) >= MAX_OBJ {
+            return MAX_OBJ
+        }
+    }
+    return kstate.get(state, oa + OB_NUM)
+}
+
+// Der kalte Weg: der Objektplatz statt der Objektnummer, ohne
+// Rechtefrage. Alles ausserhalb des heissen Pfades geht hier durch.
+fn resolve(state: u64, task: u64, h: u64) -> u64 {
+    if task >= kstate.MAX_TASKS {
+        return MAX_OBJ
+    }
+    let lo: u64 = h & 0xFFFFFFFF
+    if lo == 0 {
+        return MAX_OBJ
+    }
+    if lo > MAX_H {
+        return MAX_OBJ
+    }
+    if kstate.mode_on(state, kstate.M_HANDLE) {
+        kstate.set(state, kstate.H_CHECKS,
+            kstate.get(state, kstate.H_CHECKS) + 1)
+    }
+    // Ueber `resolve_num` und dann zurueckgerechnet waere ein zweiter
+    // Weg durch dieselben Vergleiche -- und zwei Wege sind einer zu
+    // viel. Stattdessen dieselben Schritte, aber mit dem PLATZ als
+    // Ergebnis.
+    let a: u64 = kstate.HND_OFF + (task * MAX_H + lo - 1) * H_BYTES
+    let ov: u64 = kstate.get(state, a + HS_OBJ)
+    let op: u64 = ov & 0xFFFFFFFF
+    if op == 0 {
+        return MAX_OBJ
+    }
+    if op > MAX_OBJ {
+        return MAX_OBJ
+    }
+    let oa: u64 = kstate.HOBJ_OFF + (op - 1) * OB_BYTES
+    if kstate.get(state, oa) == OK_NONE {
+        return langsam(state, op - 1, NO_DEAD)
+    }
+    if kstate.get(state, oa + OB_GEN) != (ov >> 32) {
+        return langsam(state, op - 1, NO_OGEN)
+    }
+    let g: u64 = kstate.get(state, a + HS_GEN)
+        ^ kstate.get(state, kstate.HNON_OFF + task * 8)
+    if (g & GEN_MASK) != ((h >> 32) & GEN_MASK) {
+        return langsam(state, op - 1, NO_GEN)
+    }
+    return op - 1
+}
+
+fn rights_of(state: u64, task: u64, h: u64) -> u64 {
+    if task >= kstate.MAX_TASKS {
+        return R_NONE
+    }
+    let i: u64 = slot_of(h)
+    if i >= MAX_H {
+        return R_NONE
+    }
+    return kstate.get(state, hslot(task, i) + HS_RIGHTS)
+}
+
+// Handle gueltig UND Recht vorhanden. Die beiden Neins sind
+// unterschiedlich: `resolve` zaehlt das erste, `H_DENIED` das zweite.
+fn may(state: u64, task: u64, h: u64, need: u64) -> bool {
+    if resolve(state, task, h) >= MAX_OBJ {
+        return false
+    }
+    if kstate.mode_on(state, kstate.M_NORIGHTS) {
+        return true
+    }
+    if !rights_contains(rights_of(state, task, h), need) {
+        kstate.add(state, kstate.H_DENIED, 1)
+        return false
+    }
+    return true
+}
+
+fn handle_at(state: u64, task: u64, i: u64) -> u64 {
+    if task >= kstate.MAX_TASKS {
+        return HANDLE_NONE
+    }
+    if i >= MAX_H {
+        return HANDLE_NONE
+    }
+    let a: u64 = hslot(task, i)
+    if (kstate.get(state, a + HS_OBJ) & 0xFFFFFFFF) == 0 {
+        return HANDLE_NONE
+    }
+    return make(i, kstate.get(state, a + HS_GEN) ^ nonce_of(state, task))
+}
+
+// Schliesst ein Handle. Der Platz wird frei, die GENERATION BLEIBT --
+// das ist die eine Zeile, die ein zweites `close` auf denselben Wert zu
+// -E_BADHANDLE macht und einen alten Auftrag "veraltet" werden laesst.
+fn drop(state: u64, task: u64, h: u64) -> bool {
+    let o: u64 = resolve(state, task, h)
+    if o >= MAX_OBJ {
+        return false
+    }
+    let a: u64 = hslot(task, slot_of(h))
+    kstate.set(state, a + HS_RIGHTS, R_NONE)
+    kstate.set(state, a + HS_OBJ, 0)
+    obj_unref(state, o)
+    return true
+}
+
+fn used(state: u64, task: u64) -> u64 {
+    if task >= kstate.MAX_TASKS {
+        return 0
+    }
+    var n: u64 = 0
+    var i: u64 = 0
+    while i < MAX_H {
+        if (kstate.get(state, hslot(task, i) + HS_OBJ) & 0xFFFFFFFF) != 0 {
+            n = n + 1
+        }
+        i = i + 1
+    }
+    return n
+}
+
+// EIN HANDLE AUSDRUECKLICH WEITERGEBEN -- an ein Kind oder an einen
+// anderen Prozess. Das ist der Gegenentwurf zu "alles wird vererbt":
+// was drueben ankommt, steht in der Uebergabeliste, und die Rechte
+// koennen dabei nur KLEINER werden.
+//
+// ZUSAGE A, und sie ist hier durchgesetzt und nicht nur behauptet:
+// `rights_restrict` schneidet die verlangte Maske mit dem, was der
+// Gebende SELBST hat. Wer mehr verlangt, bekommt weniger -- und wird
+// gezaehlt, weil ein Programm, das das versucht, interessant ist.
+fn give(state: u64, from: u64, to: u64, h: u64, mask: u64) -> u64 {
+    let o: u64 = resolve(state, from, h)
+    if o >= MAX_OBJ {
+        return err(E_BADHANDLE)
+    }
+    if to >= kstate.MAX_TASKS {
+        return err(E_NOTFOUND)
+    }
+    let have: u64 = rights_of(state, from, h)
+    if !rights_contains(have, R_TRANSFER) {
+        kstate.add(state, kstate.H_DENIED, 1)
+        return err(E_RIGHTS)
+    }
+    if (mask & R_ALL) != ((mask & have) & R_ALL) {
+        kstate.add(state, kstate.H_ESCALATE, 1)
+    }
+    obj_ref(state, o)
+    let nh: u64 = insert(state, to, o, rights_restrict(have, mask))
+    if nh == HANDLE_NONE {
+        obj_unref(state, o)
+        return err(E_EXHAUSTED)
+    }
+    kstate.add(state, kstate.H_PASSED, 1)
+    return nh
+}
+
+// ======================================================== die Auftraege
+//
+// Ein Auftrag ist die Klammer um alles, was LAENGER LEBT als der Aufruf,
+// der es angestossen hat. Heute hat dieser Kernel nur synchrones I/O,
+// also klammert er genau einen Aufruf -- aber die Klammer ist da, sie
+// ist gemessen, und der Ring kann sich darauf setzen, ohne dass die
+// Lebensdauerfrage nochmal aufgemacht werden muss.
+
+fn req_find(state: u64, token: u64) -> u64 {
+    if !valid(token) {
+        return MAX_REQ
+    }
+    let i: u64 = slot_of(token)
+    if i >= MAX_REQ {
+        return MAX_REQ
+    }
+    let a: u64 = qslot(i)
+    if kstate.get(state, a + QS_STATE) == Q_FREE {
+        return MAX_REQ
+    }
+    if ((kstate.get(state, a + QS_OWNER) >> 32) & GEN_MASK) != gen_of(token) {
+        return MAX_REQ
+    }
+    return i
+}
+
+fn req_owner(state: u64, token: u64) -> u64 {
+    let q: u64 = req_find(state, token)
+    if q >= MAX_REQ {
+        return kstate.MAX_TASKS
+    }
+    return kstate.get(state, qslot(q) + QS_OWNER) & 0xFFFFFFFF
+}
+
+fn req_state(state: u64, token: u64) -> u64 {
+    if !valid(token) {
+        return Q_FREE
+    }
+    let i: u64 = slot_of(token)
+    if i >= MAX_REQ {
+        return Q_FREE
+    }
+    let a: u64 = qslot(i)
+    if ((kstate.get(state, a + QS_OWNER) >> 32) & GEN_MASK) != gen_of(token) {
+        return Q_FREE
+    }
+    return kstate.get(state, a + QS_STATE)
+}
+
+// Einen Auftrag beginnen. Prueft Handle UND Recht, haelt das Objekt fest
+// und merkt sich, MIT WELCHEM Handle und AUF WELCHER Objektgeneration.
+// Liefert das Abbruch-Token, oder einen negativen Fehler.
+fn req_begin(state: u64, task: u64, h: u64, need: u64) -> u64 {
+    let o: u64 = resolve(state, task, h)
+    if o >= MAX_OBJ {
+        return err(E_BADHANDLE)
+    }
+    if !rights_contains(rights_of(state, task, h), need) {
+        kstate.add(state, kstate.H_DENIED, 1)
+        return err(E_RIGHTS)
+    }
+    var i: u64 = 0
+    while i < MAX_REQ {
+        let a: u64 = qslot(i)
+        if kstate.get(state, a + QS_STATE) == Q_FREE {
+            var g: u64 = ((kstate.get(state, a + QS_OWNER) >> 32) +% 1) & GEN_MASK
+            if g == 0 {
+                g = 1
+            }
+            kstate.set(state, a + QS_STATE, Q_RUN)
+            kstate.set(state, a + QS_OBJ,
+                ((obj_gen(state, o) & 0xFFFFFFFF) << 32) | (o & 0xFFFFFFFF))
+            kstate.set(state, a + QS_HANDLE, h)
+            kstate.set(state, a + QS_OWNER, (g << 32) | (task & 0xFFFFFFFF))
+            // ZUSAGE C. Ohne diesen Mitzaehler ist das Objekt waehrend
+            // des Auftrags freigebbar -- die Gegenprobe `noflight` laesst
+            // ihn absichtlich weg, damit der Test das zeigen kann.
+            if !kstate.mode_on(state, kstate.M_NOFLIGHT) {
+                kstate.set(state, oslot(o) + OB_FLIGHT,
+                    kstate.get(state, oslot(o) + OB_FLIGHT) + 1)
+            }
+            kstate.add(state, kstate.H_INFLIGHT, 1)
+            return make(i, g)
+        }
+        i = i + 1
+    }
+    return err(E_EXHAUSTED)
+}
+
+// DIE FUNKTION, UM DIE ES IN DIESER RUNDE GEHT.
+//
+// Ein laufender Auftrag will an sein Objekt. Er bekommt es NUR, wenn
+// alles drei noch stimmt: das Token, der Auftrag laeuft noch (kein
+// Abbruch), und -- das ist der Punkt -- das HANDLE, mit dem er
+// eingereicht wurde, meint IMMER NOCH DASSELBE OBJEKT.
+//
+// Das Szenario, gegen das das steht: Auftrag laeuft, Programm schliesst
+// sein Handle, oeffnet etwas anderes, bekommt DENSELBEN Platz zurueck --
+// und der alte Auftrag schreibt in die neue Datei. In Linux war das ueber
+// Jahre die ergiebigste Fehlerklasse ueberhaupt. Hier gibt es dafuer
+// -E_STALE, und zwar dreimal begruendet: das Handle loest nicht mehr auf,
+// oder es loest auf einen ANDEREN Objektplatz auf, oder der Platz traegt
+// inzwischen eine andere Generation.
+fn req_object(state: u64, token: u64) -> u64 {
+    let q: u64 = req_find(state, token)
+    if q >= MAX_REQ {
+        return err(E_BADHANDLE)
+    }
+    let a: u64 = qslot(q)
+    let st: u64 = kstate.get(state, a + QS_STATE)
+    if st == Q_CANCEL {
+        return err(E_CANCELLED)
+    }
+    if st != Q_RUN {
+        return err(E_STALE)
+    }
+    let ov: u64 = kstate.get(state, a + QS_OBJ)
+    let o: u64 = ov & 0xFFFFFFFF
+    let og: u64 = (ov >> 32) & 0xFFFFFFFF
+    let task: u64 = kstate.get(state, a + QS_OWNER) & 0xFFFFFFFF
+    let now: u64 = resolve(state, task, kstate.get(state, a + QS_HANDLE))
+    if now >= MAX_OBJ {
+        kstate.set(state, a + QS_STATE, Q_STALE)
+        kstate.add(state, kstate.H_STALE, 1)
+        return err(E_STALE)
+    }
+    if kstate.mode_on(state, kstate.M_NOGEN) {
+        // GEGENPROBE `nogen`: ohne Generationsvergleich nimmt der Auftrag,
+        // was JETZT unter seinem Handle steht -- also das neue Objekt.
+        // Genau das soll der Test dann sehen, und genau daran ist zu
+        // erkennen, dass er ohne die Gegenprobe etwas misst.
+        return kstate.get(state, oslot(now) + OB_NUM)
+    }
+    if now != o {
+        kstate.set(state, a + QS_STATE, Q_STALE)
+        kstate.add(state, kstate.H_STALE, 1)
+        return err(E_STALE)
+    }
+    if obj_gen(state, o) != og {
+        kstate.set(state, a + QS_STATE, Q_STALE)
+        kstate.add(state, kstate.H_STALE, 1)
+        return err(E_STALE)
+    }
+    return kstate.get(state, oslot(o) + OB_NUM)
+}
+
+// Abbrechen. MARKIERT NUR. Der Verweis bleibt liegen, das Objekt bleibt
+// stehen, und abgeraeumt wird in `req_end` -- von dem, der zuletzt geht.
+// Ein Abbruch, der sofort freigibt, ist derselbe Fehler wie ein `close`,
+// das sofort freigibt: der Auftrag laeuft ja noch irgendwo.
+fn req_cancel(state: u64, task: u64, token: u64) -> bool {
+    let q: u64 = req_find(state, token)
+    if q >= MAX_REQ {
+        return false
+    }
+    let a: u64 = qslot(q)
+    if (kstate.get(state, a + QS_OWNER) & 0xFFFFFFFF) != task {
+        return false
+    }
+    if kstate.get(state, a + QS_STATE) != Q_RUN {
+        return false
+    }
+    kstate.set(state, a + QS_STATE, Q_CANCEL)
+    kstate.add(state, kstate.H_CANCELS, 1)
+    return true
+}
+
+// Der Auftrag ist fertig -- ordentlich, veraltet oder abgebrochen, das
+// macht hier keinen Unterschied.
+//
+// RUECKGABE: 0 heisst "das Objekt lebt weiter". Alles andere ist die
+// OBJEKTNUMMER PLUS EINS und heisst: mit diesem Auftrag ist der letzte
+// Verweis gefallen, der Aufrufer raeumt jetzt ab, was an dieser Nummer
+// haengt. Die Nummer muss hier herauskommen und nicht nur ein `true` --
+// nach dem Freigeben ist sie nicht mehr zu erfragen, und der Aufrufer
+// (`sys.fi` -> `file.open_settle`) braucht genau sie.
+fn req_end(state: u64, token: u64) -> u64 {
+    let q: u64 = req_find(state, token)
+    if q >= MAX_REQ {
+        return 0
+    }
+    let a: u64 = qslot(q)
+    let o: u64 = kstate.get(state, a + QS_OBJ) & 0xFFFFFFFF
+    kstate.set(state, a + QS_STATE, Q_FREE)
+    kstate.set(state, a + QS_HANDLE, 0)
+    // KEIN DEKREMENT UEBER `kstate.add`. Die Funktion rechnet
+    // `__atomic_add(...) + v`, und dieses `+` ist seit Runde 72
+    // GEPRUEFT: mit v = 0 -% 1 laeuft die Addition des alten Wertes
+    // ueber und der Kernel panickt. Das ist beim ersten Lauf dieser
+    // Runde genau so passiert, mitten im Ring-3-Test.
+    // Also zaehlt H_INFLIGHT die BEGONNENEN Auftraege und faellt nie.
+    // Wie viele gerade laufen, sagt `req_live` -- eine Zaehlung, die
+    // nachsieht statt mitzurechnen, kann nicht auseinanderlaufen.
+    if o >= MAX_OBJ {
+        return 0
+    }
+    let oa: u64 = oslot(o)
+    if kstate.get(state, oa + OB_KIND) == OK_NONE {
+        return 0
+    }
+    let f: u64 = kstate.get(state, oa + OB_FLIGHT)
+    if f > 0 {
+        kstate.set(state, oa + OB_FLIGHT, f - 1)
+    }
+    if kstate.get(state, oa + OB_FLIGHT) != 0 {
+        return 0
+    }
+    if kstate.get(state, oa + OB_REFS) != 0 {
+        return 0
+    }
+    let num: u64 = kstate.get(state, oa + OB_NUM)
+    obj_free(state, o)
+    return num + 1
+}
+
+fn req_live(state: u64) -> u64 {
+    var n: u64 = 0
+    var i: u64 = 0
+    while i < MAX_REQ {
+        if kstate.get(state, qslot(i) + QS_STATE) == Q_RUN {
+            n = n + 1
+        }
+        i = i + 1
+    }
+    return n
+}
