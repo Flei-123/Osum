@@ -1,21 +1,40 @@
 # STATUS MERGE-FINAL (Runde 31)
 
-Stand: 28.08.2026, laufend.
+Stand: 29.08.2026, 03:10 -- laufend.
 
 ## Ausgangslage (verifiziert)
 - main = 3389fbd, mergeline = e9fcc1c (200 Commits vor main)
-- ahead-of-main: kvmfix 204, testfast 205, hwnet 209, look 228, paint 230
-- /dev/kvm vorhanden, 12 CPUs, 19 GB RAM, /root nur ~3,7 GB frei (Platte im Auge behalten)
-- Merge-Vorschau (git merge-tree): kvmfix/testfast/hwnet konfliktfrei;
-  look und paint je 11 Konflikte, ALLE in docs/shots/netview/*.png (Screenshots, regenerierbar)
+- /dev/kvm da, 12 CPUs, 19 GB RAM, /root ~3,6 GB frei
+- Merge-Vorschau: kvmfix/testfast/hwnet konfliktfrei; look und paint je
+  11 Konflikte, alle in docs/shots/netview/*.png (regenerierbar)
+
+## Grundlinie
+- main (/root/BASE-MAIN.log): 23 Abschnitte, 20 gruen / 3 rot, 2196 Zusagen
+  rot: k13, k14, k16
+- mergeline vor den Merges (/root/ML-CHECK.log): icons rot (24 ok/1),
+  tunnelpakete rot (15/3) -- beide VORBESTEHEND, nicht in main enthalten
 
 ## Fortschritt
-- [laufend] Grundlinie main: ./test.sh seriell in /root/osum-basecheck -> /root/BASE-MAIN.log
-- [erledigt] Merge kvmfix -> mergeline (Worktree /root/mgline), konfliktfrei
-- [offen] Abnahme nach kvmfix
-- [offen] testfast, hwnet, look, paint
-- [offen] KVM-Abnahmelauf
-- [offen] mergeline -> main, OrientOS vendor/osum/COMMIT
+- [erledigt] Merge kvmfix -> mergeline (konfliktfrei)
+- [erledigt] Merge testfast -> mergeline (6b602af)
+- [erledigt] Abnahme danach: /root/M2-TESTFAST.log, 26 gruen / 11 rot (3256 Zusagen)
+- [erledigt] jeden roten Abschnitt EINZELN nachgemessen (/root/M2-SINGLE.log):
+  - Phantom aus dem vollen Lauf (einzeln gruen): net 75/0, k15 252/0, arm 48/0
+  - vorbestehend rot: k14 (151/1), k16 (58/6), icons (24/1), tunnelpakete (15/3)
+  - NEU rot unter KVM: kernel 168/8, pci 91/7, k18 167/3, k17 153/5
+- [erledigt] Gegenprobe mit OSUM_ACCEL=tcg (/root/TCG-CHECK.log):
+  kernel 176/0, pci 98/0, k18 170/0, k17 158/0 -- alle vier gruen.
+  Ursache ist der Wirt unter KVM (Zeitscheiben, DMA-Zeit, CPUID Blatt 5
+  ohne mwait, xHCI-Tempo), kein Merge-Schaden.
+  -> tools/lib/accel-ausnahmen.txt: die vier stehen wieder drin, mit
+     Messwerten (Commit 62e0ac7). KEIN Test entschaerft.
+- [offen] voller Abnahmelauf mit der neuen Ausnahmeliste
+- [offen] hwnet, look, paint
+- [offen] KVM-Bootlauf, mergeline -> main, OrientOS vendor/osum/COMMIT
 
 ## Zahlen
-(werden hier eingetragen, sobald gemessen)
+| Stand | Abschnitte | rot | Zusagen |
+|---|---|---|---|
+| main (Grundlinie) | 23 | 3 (k13,k14,k16) | 2196 |
+| mergeline + kvmfix + testfast (voll, accel=auto) | 37 | 11 | 3256 |
+| dieselben einzeln, mit TCG-Ausnahmen | -- | 4 vorbestehend | -- |
