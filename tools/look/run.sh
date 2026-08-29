@@ -72,7 +72,18 @@ if shot A user=- icons=yes lang=de uitrace=yes keep=yes; then
     # atomic, so a line can come out cut in half by another program's.
     # Take the last COMPLETE one; there are several repaints, so there
     # is one.
-    L=$(grep -aoE 'kind=2 x=[0-9]+ base=[0-9]+ fg=[0-9]+ bg=[0-9]+ t=Ausführen' "$S" | tail -1)
+    #
+    # ROUND SOFTUI: THE PATTERN IS FIELD-BASED NOW, and that makes it
+    # STRICTER and not looser. It read `... bg=<n> t=Ausführen`, which
+    # says "and nothing between them" -- so it stopped matching the
+    # moment round THEMESTORE put ` tw=<n>` in that gap, and round
+    # SOFTUI put ` ax=<n> ay=<n>` after it. Measured on the parent
+    # commit of round SOFTUI, before a line of this round existed: the
+    # same FAIL. A test that breaks when a REPORT grows a field was
+    # testing the field order and not the screen.
+    #
+    # It still requires kind=2 and it still requires the exact word.
+    L=$(grep -aoE 'kind=2 x=[0-9]+ base=[0-9]+ fg=[0-9]+ bg=[0-9]+( [a-z]+=[0-9]+)* t=Ausführen' "$S" | tail -1)
     if [ -n "$L" ]; then
         X=$(echo "$L" | grep -oE ' x=[0-9]+' | grep -oE '[0-9]+')
         B=$(echo "$L" | grep -oE ' base=[0-9]+' | grep -oE '[0-9]+')
@@ -80,8 +91,18 @@ if shot A user=- icons=yes lang=de uitrace=yes keep=yes; then
         # corner reports its OUTER position, so the inset is the border
         # plus the title bar -- the same 2 and 22 the settings program
         # adds when it opens a drop-down.
+        # ROUND SOFTUI: THE WINDOW ORIGIN COMES OUT OF THE REPORT NOW.
+        # `+ 2` and `+ 22` were the border and the title bar of a window
+        # AT THE SCREEN CORNER, and they are right exactly as long as
+        # the launcher opens there. It does not always. `ax`/`ay` are
+        # what the library itself computed, so the checker looks where
+        # the text was actually painted.
+        AX=$(echo "$L" | grep -oE ' ax=[0-9]+' | grep -oE '[0-9]+')
+        AY=$(echo "$L" | grep -oE ' ay=[0-9]+' | grep -oE '[0-9]+')
+        [ -n "$AX" ] || AX=2
+        [ -n "$AY" ] || AY=22
         R=$(python3 tools/gfx/checkshot.py ttext "$TMPD/A/desktop.ppm" \
-            assets/osum-sans.ttf 15 $((X + 2)) $((B + 22)) \
+            assets/osum-sans.ttf 15 $((X + AX)) $((B + AY)) \
             15 23 42 255 255 255 "Ausführen" 8 2>&1)
         echo "        $R"
         case "$R" in
@@ -242,7 +263,15 @@ for v in "classic day light" "modern day light" "modern night dark" "classic nig
         CH=$(echo "$L" | grep -oE ' ctrl_h=[0-9]+' | grep -oE '[0-9]+')
         RB=$(echo "$L" | grep -oE ' radiusb=[0-9]+' | grep -oE '[0-9]+')
         KY=$(echo "$L" | grep -oE ' keys=[0-9]+' | grep -oE '[0-9]+')
-        is "$1/$2: keys read out of the shape file" "${KY:-0}" "15"
+        # ROUND SOFTUI: 24 AND NOT 15, and this is an update and not a
+        # relaxation -- the assertion is still an exact equality and it
+        # still fails if one key of the file is misspelt. Round SOFTUI
+        # added nine tokens (four spacings, the gradient, the tone, the
+        # flat shadow's two numbers and the caption style); both shape
+        # files carry all of them, `tools/softui/run.sh` section B reads
+        # the same number, and classic still draws the same picture
+        # (section A there, 0 of 480000 pixels different).
+        is "$1/$2: keys read out of the shape file" "${KY:-0}" "24"
         if [ "$1" = classic ]; then
             is "$1/$2: control height" "${CH:-0}" "26"
             is "$1/$2: button radius" "${RB:-x}" "0"
