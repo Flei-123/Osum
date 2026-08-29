@@ -294,7 +294,12 @@ echo
 echo "== 7. ohne Maus: Pfeil, Pfeil, Eingabetaste, und ein Fenster =="
 # =====================================================================
 printf 'warte 8\nsendkey meta_l\nwarte 2\nsendkey w\nwarte 1\nsendkey i\nwarte 1\nsendkey d\nwarte 2\nsendkey ret\nwarte 5\n' > "$TMPD/dr-start"
-if lauf start "$TMPD/dr-start"; then
+# `wigxl` STATT `wiglong`: dieser eine Lauf startet ein Programm, und
+# das dauert laenger als die zwanzig Sekunden, die der Kern sonst
+# stillhaelt. Ohne das Wort war der Kern fertig, bevor das Foto genommen
+# war -- und die Meldung lautete "kein Bild", obwohl der Start geglueckt
+# ist und pid und Fenster in der Mitschrift stehen.
+if lauf start "$TMPD/dr-start" "wigxl"; then
     has "$L" "sucher: query [wid]" "7: drei Tasten, drei Suchlaeufe, keine Eingabetaste dazwischen"
     has "$L" "sucher: start [" "7: die Eingabetaste hat wirklich ein Programm gestartet"
     has "$L" "sucher: closed by start" "7: und das Feld ist danach von selbst zugegangen"
@@ -307,8 +312,17 @@ if lauf start "$TMPD/dr-start"; then
         # DAS FENSTER IST WIRKLICH DA. Der Server zaehlt seine Fenster;
         # ein Start, der nur eine Zeile auf der seriellen Leitung
         # erzeugt, ist kein Start.
-        NW=$(grep -a 'taskbar: btn' "$L" | tail -1 | grep -oE 'n=[0-9]+' | sed 's/.*=//')
-        num "7: die Taskleiste hat einen Knopf mehr" "${NW:-0}" gt 1
+        # DAS GESTARTETE PROGRAMM MELDET SICH SELBST. Hier stand eine
+        # Zaehlung der Taskleistenknoepfe aus der LETZTEN `taskbar: btn`
+        # -Zeile -- die trug nie ein `n=`, und sobald das neue Programm
+        # laeuft, schreiben zwei Prozesse gleichzeitig auf die serielle
+        # Leitung und zerhacken einander die Zeilen. Auf eine bestimmte
+        # Zeile ist danach kein Verlass, auf das Vorkommen einer
+        # Zeichenkette schon: `widgetdemo: ready` kann nur schreiben,
+        # wer wirklich gestartet ist und seine Oberflaeche gebaut hat.
+        has "$L" "widgetdemo: ready" "7: und das gestartete Programm meldet sich selbst"
+        NPR=$(grep -ac 'widgetdemo:' "$L")
+        num "7: es hat wirklich Zeilen geschrieben" "$NPR" gt 0
         ink=$(python3 tools/look/inkbox.py "$P" 0 0 800 572 255 255 255 2>/dev/null | grep -oE 'ink [0-9]+' | grep -oE '[0-9]+')
         num "7: und auf dem Schirm steht wirklich etwas" "${ink:-0}" gt 10000
     else
