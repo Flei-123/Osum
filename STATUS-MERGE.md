@@ -42,7 +42,15 @@ Stand: 29.08.2026, 03:10 -- laufend.
 - [erledigt] volle Abnahme danach (/root/M4-LOOK.log): 39 Abschnitte,
   35 gruen / 4 rot, 3360 Zusagen -- die vier roten sind GENAU die
   vorbestehenden (k14, k16, icons, tunnelpakete). Kein neuer Schaden.
-- [offen] paint
+- [erledigt] Merge paint -> mergeline (2bdd362; 13 PNG-Konflikte --theirs,
+  plus EIN echter Konflikt in kernel/user/wlib.fi: die export-Liste --
+  HEAD hatte set_menu_title, paint window_app; beide behalten, beide
+  Funktionen sind da (Zeile 391 und 1388))
+- [erledigt] volle Abnahme danach (/root/M5-PAINT.log): 40 Abschnitte,
+  34 gruen / 6 rot, 3274 Zusagen. Die zwei zusaetzlichen einzeln
+  nachgemessen (/root/M5-SINGLE.log): k11 85/0 (im vollen Lauf abgebrochen),
+  netview 195/0 (im vollen Lauf eine ZEITZUSAGE: 354 ms statt < 200 ms).
+  Beide sind Last, kein Schaden. Es bleiben k14, k16, icons, tunnelpakete.
 - [offen] KVM-Bootlauf, mergeline -> main, OrientOS vendor/osum/COMMIT
 
 ## Zahlen
