@@ -21,7 +21,17 @@ Beide werden hier NICHT geraten, sondern aus dem Mitschnitt geholt --
 zwei Bildpunkte rechts und 22 darunter davon. Dieselben zwei Zahlen
 benutzt Teil A, und dieselben nennt tools/desktop/run.sh.
 
-  umlaut.py <serial> <ppm> <fenstertitel> <text> [toleranz]
+  umlaut.py <serial> <ppm> <fenstertitel> <text> [toleranz] [--kette]
+
+RUNDE UMLAUT2: `--kette` misst mit `checkshot tkette` statt `ttext`.
+Beide vergleichen jeden Tintenpunkt gegen dieselbe Rasterung; `tkette`
+baut die Zeile aber ERST Buchstabe fuer Buchstabe auf, bevor es
+vergleicht, und erwartet damit das Richtige, wo zwei Umrisse einander
+ueberlappen. Bei "Akzentfarbe unverändert übernommen" sind das 8 von
+1567 Punkten -- `ttext` nennt sie falsch, `tkette` nicht, und das Bild
+ist beide Male dasselbe und richtig. Die Messung wird dadurch strenger
+und nicht weicher: `tkette` prueft zusaetzlich die Reihenfolge des
+Mischens (siehe tools/gfx/checkshot.py).
 
 Eine Zeile, rc=0 wenn kein Bildpunkt abweicht.
 """
@@ -109,6 +119,8 @@ def main(argv):
     if len(argv) < 4:
         print("umlaut: <serial> <ppm> <fenstertitel> <text> [toleranz]")
         return 2
+    kette = "--kette" in argv
+    argv = [x for x in argv if x != "--kette"]
     serial, ppm, titel, text = argv[0], argv[1], argv[2], argv[3]
     tol = argv[4] if len(argv) > 4 else "0"
     zeichen = "".join(sorted(set(c for c in text if c in "äöüÄÖÜß")))
@@ -154,7 +166,8 @@ def main(argv):
         return 1
 
     r = subprocess.run(
-        ["python3", "tools/gfx/checkshot.py", "ttext", ppm,
+        ["python3", "tools/gfx/checkshot.py",
+         "tkette" if kette else "ttext", ppm,
          "assets/osum-sans.ttf", "15", str(ax), str(ay)]
         + rgb(fg) + rgb(bg) + [text, tol],
         capture_output=True, text=True)
