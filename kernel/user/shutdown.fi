@@ -1,0 +1,111 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/shutdown.fi -- die Maschine ausschalten.
+//
+//     shutdown            herunterfahren und ausschalten
+//     shutdown -h         dasselbe, ausgeschrieben
+//     shutdown -r         herunterfahren und neu starten
+//     shutdown -f         ohne init: selbst syncen und abschalten
+//
+// ZWEI WEGE, UND DER ERSTE IST DER RICHTIGE:
+//
+//   1. UEBER init. Eine Zeile nach `/run/svc.cmd`, und der Prozess 1
+//      macht, was nur er machen kann: SIGTERM an jeden Dienst, zwei
+//      Sekunden Zeit zum Aufraeumen, SIGKILL an die Reste, `sync`,
+//      die Dateisysteme aushaengen, ACPI. Ein Programm, das das selbst
+//      taete, kennt die Dienste nicht -- es ist nicht ihr Elternteil und
+//      hat ihre Kennungen nie gesehen.
+//
+//   2. OHNE init. Laeuft keiner (der Notweg `initsh` auf der
+//      Kommandozeile startet die Shell unmittelbar), dann bleibt nur
+//      `sync` und der Aufruf selbst. Das ist ehrlich weniger: es
+//      bekommt kein Dienst ein Signal, und wer Daten im Puffer haelt,
+//      verliert sie. Deshalb wird es erst genommen, wenn init drei
+//      Sekunden lang nicht geantwortet hat -- oder wenn `-f` es
+//      ausdruecklich verlangt.
+//
+// DASS ES WIRKLICH DIE MASCHINE WAR und nicht der Ausgang des
+// Pruefstands, ist am Beendigungscode von QEMU zu sehen: eine
+// ACPI-Abschaltung ergibt 0, `isa-debug-exit` ergibt 21.
+
+profile kernel
+
+import ulib
+
+export { u_start }
+
+const SYS_REBOOT: u64 = 169
+const RB_POWEROFF: u64 = 0x4321FEDC
+const RB_RESTART: u64 = 0x01234567
+
+static mut P_CMD: [u8; 13] = "/run/svc.cmd\0"
+static mut S_DOWN: [u8; 10] = "shutdown\n\0"
+static mut S_BOOT: [u8; 8] = "reboot\n\0"
+static mut E_CMD: [u8; 48] = "shutdown: /run/svc.cmd nicht schreibbar (root?)\0"
+static mut E_SLOW: [u8; 47] = "shutdown: init antwortet nicht -- selbst aus\0\0\0"
+static mut E_NOOFF: [u8; 42] = "shutdown: der Kern hat nicht abgeschaltet\0"
+static mut O_R: [u8; 3] = "-r\0"
+static mut O_H: [u8; 3] = "-h\0"
+static mut O_F: [u8; 3] = "-f\0"
+
+// Die Zeile an init. `577` ist O_WRONLY|O_CREAT|O_TRUNC -- was vorher in
+// der Datei stand, ist erledigt oder verworfen.
+fn tell(what: u64) -> bool {
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&P_CMD[0 as usize]) as u64, 577, 0)
+    if ulib.bad(fd) {
+        return false
+    }
+    ulib.sys(ulib.SYS_WRITE, fd, what, ulib.length(what))
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    return true
+}
+
+// Selbst. `sync` zuerst -- das ist das eine, was auch ohne init geht und
+// ohne das ein Abschalten Datenverlust ist.
+fn selbst(neu: bool) -> u64 {
+    ulib.sys(ulib.SYS_SYNC, 0, 0, 0)
+    if neu {
+        ulib.sys(SYS_REBOOT, RB_RESTART, 0, 0)
+    } else {
+        ulib.sys(SYS_REBOOT, RB_POWEROFF, 0, 0)
+    }
+    // Kommt der Aufruf zurueck, hat er nicht gegriffen.
+    ulib.esay_line((&E_NOOFF[0 as usize]) as u64, 0)
+    return 1
+}
+
+fn u_start(args: u64) -> u64 {
+    var neu: bool = false
+    var ohne: bool = false
+    let n: u64 = ulib.arg_count(args)
+    var i: u64 = 1
+    while i < n {
+        let a: u64 = ulib.arg_at(args, i)
+        if ulib.streq(a, (&O_R[0 as usize]) as u64) {
+            neu = true
+        }
+        if ulib.streq(a, (&O_F[0 as usize]) as u64) {
+            ohne = true
+        }
+        i = i + 1
+    }
+    if ohne {
+        return selbst(neu)
+    }
+    var was: u64 = (&S_DOWN[0 as usize]) as u64
+    if neu {
+        was = (&S_BOOT[0 as usize]) as u64
+    }
+    if !tell(was) {
+        ulib.esay_line((&E_CMD[0 as usize]) as u64, 0)
+        return selbst(neu)
+    }
+    // DREI SEKUNDEN WARTEN, und in dieser Zeit soll die Maschine weg
+    // sein. Ist sie es nicht, lief kein init -- dann selbst.
+    var k: u64 = 0
+    while k < 60 {
+        ulib.sleep_ms(50)
+        k = k + 1
+    }
+    ulib.esay_line((&E_SLOW[0 as usize]) as u64, 0)
+    return selbst(neu)
+}

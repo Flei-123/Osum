@@ -1,12 +1,24 @@
 // SPDX-License-Identifier: GPL-2.0-only
-// kernel/user/svc.fi -- Runde K13: Dienste starten, stoppen, ansehen.
+// kernel/user/svc.fi -- Dienste starten, stoppen, ansehen.
 //
-//     svc                 dasselbe wie `svc status`
-//     svc status          eine Zeile je Dienst: name zustand pid neustarts
+//     svc                 die TAFEL: wer laeuft, seit wann, wie oft neu
+//     svc list            dasselbe
+//     svc status          eine Zeile je Dienst, roh, wie init sie schreibt
 //     svc start NAME
 //     svc stop NAME
 //     svc restart NAME
+//     svc ziel            welches Ziel gerade gilt
 //     svc shutdown        das System herunterfahren
+//     svc reboot          das System neu starten
+//
+// WARUM `status` ROH BLEIBT UND DIE TAFEL EIN EIGENES WORT BEKOMMT:
+// `tools/k13/run.sh` liest die Zeilen von `svc status` mit `grep -aoE
+// '^blink running [0-9]+ [0-9]+'` aus der seriellen Ausgabe. Diese Runde
+// legt drei Spalten HINTEN an -- die vier vorderen stehen unveraendert
+// da, und jene Zusagen messen weiter, was sie gemessen haben. Eine
+// Tafel mit Ueberschrift und Spaltenbreiten waere an derselben Stelle
+// eine stille Aenderung gewesen, und stille Aenderungen an bestehenden
+// Messungen sind genau das, was dieses Projekt nicht macht.
 //
 // `status` liest nur `/run/svc.state` -- die Datei, die `init` schreibt.
 // Alles andere schreibt eine Zeile nach `/run/svc.cmd` und wartet, bis
@@ -26,25 +38,174 @@ import tools
 
 export { u_start }
 
+static mut buf: [u8; 2048] = [0 as u8; 2048]
+
 fn show_state() -> u64 {
     var path: [u8; 15] = "/run/svc.state\0"
-    var buf: [u8; 1024] = [0 as u8; 1024]
+    var b: [u8; 1024] = [0 as u8; 1024]
     let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&path[0]) as u64, 0, 0)
     if ulib.bad(fd) {
         return 1
     }
     var going: bool = true
     while going {
-        let n: u64 = ulib.sys(ulib.SYS_READ, fd, (&buf[0]) as u64, 1024)
+        let n: u64 = ulib.sys(ulib.SYS_READ, fd, (&b[0]) as u64, 1024)
         if ulib.bad(n) || n == 0 {
             going = false
         } else {
-            ulib.put((&buf[0]) as u64, n)
+            ulib.put((&b[0]) as u64, n)
         }
     }
     ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
     return 0
 }
+
+// ------------------------------------------------------------ die Tafel
+
+// Linksbuendig, auf `w` Spalten aufgefuellt.
+fn ob_left(p: u64, w: u64) {
+    let n: u64 = ulib.length(p)
+    tools.ob_str(p)
+    var i: u64 = n
+    while i < w {
+        tools.ob_byte(32)
+        i = i + 1
+    }
+}
+
+// Eine Laufzeit in Sekunden, mit einer Nachkommastelle -- 0.4s sagt
+// mehr ueber einen Dienst, der gerade zum fuenften Mal gestartet ist,
+// als eine Null.
+fn ob_dauer(ms: u64) {
+    tools.ob_num(ms / 1000)
+    tools.ob_byte(46)
+    tools.ob_num((ms % 1000) / 100)
+    tools.ob_byte(115)
+}
+
+fn table() -> u64 {
+    var path: [u8; 15] = "/run/svc.state\0"
+    var h1: [u8; 7] = "DIENST\0"
+    var h2: [u8; 8] = "ZUSTAND\0"
+    var h3: [u8; 4] = "PID\0"
+    var h4: [u8; 7] = "STARTS\0"
+    var h5: [u8; 7] = "FEHLER\0"
+    var h6: [u8; 9] = "LAUFZEIT\0"
+    var h7: [u8; 5] = "ZIEL\0"
+    var w_run: [u8; 8] = "running\0"
+    var e_no: [u8; 32] = "svc: /run/svc.state fehlt\0\0\0\0\0\0\0"
+    var strich: [u8; 2] = "-\0"
+    var name: [u8; 40] = [0 as u8; 40]
+    var zust: [u8; 24] = [0 as u8; 24]
+    var f: [u8; 32] = [0 as u8; 32]
+    var line: [u8; 256] = [0 as u8; 256]
+
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&path[0]) as u64, 0, 0)
+    if ulib.bad(fd) {
+        ulib.esay_line((&e_no[0]) as u64, 0)
+        return 1
+    }
+    var at: u64 = 0
+    var going: bool = true
+    while going {
+        let n: u64 = ulib.sys(ulib.SYS_READ, fd, (&buf[at as usize]) as u64,
+            2048 - at - 1)
+        if ulib.bad(n) || n == 0 {
+            going = false
+        } else {
+            at = at + n
+        }
+    }
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    __mmio_write8((&buf[at as usize]) as u64 as *mut u8, 0 as u8)
+
+    // DIE UHR EINMAL, NICHT JE ZEILE. Zwei Dienste, die im selben
+    // Durchgang gemessen werden, sollen dieselbe Gegenwart haben.
+    let jetzt: u64 = ulib.sys(ulib.SYS_SYSINFO, ulib.I_UPTIME, 0, 0)
+
+    ob_left((&h1[0]) as u64, 17)
+    ob_left((&h2[0]) as u64, 10)
+    tools.ob_str((&h3[0]) as u64)
+    tools.ob_byte(32)
+    tools.ob_byte(32)
+    ob_left((&h4[0]) as u64, 8)
+    ob_left((&h5[0]) as u64, 8)
+    ob_left((&h6[0]) as u64, 10)
+    tools.ob_str((&h7[0]) as u64)
+    tools.ob_nl()
+
+    var laufen: u64 = 0
+    var alle: u64 = 0
+    var pos: u64 = 0
+    while pos < at {
+        var k: u64 = 0
+        while pos + k < at && buf[(pos + k) as usize] != 10 as u8 && k < 255 {
+            line[k as usize] = buf[(pos + k) as usize]
+            k = k + 1
+        }
+        line[k as usize] = 0 as u8
+        pos = pos + k + 1
+        if line[0 as usize] != 0 as u8 {
+            alle = alle + 1
+            var p: u64 = ulib.word((&line[0]) as u64, 0, (&name[0]) as u64, 40)
+            p = ulib.word((&line[0]) as u64, p, (&zust[0]) as u64, 24)
+            ob_left((&name[0]) as u64, 17)
+            ob_left((&zust[0]) as u64, 10)
+            p = ulib.word((&line[0]) as u64, p, (&f[0]) as u64, 32)
+            tools.ob_pad(ulib.to_num((&f[0]) as u64), 3)
+            tools.ob_byte(32)
+            tools.ob_byte(32)
+            p = ulib.word((&line[0]) as u64, p, (&f[0]) as u64, 32)
+            tools.ob_pad(ulib.to_num((&f[0]) as u64), 4)
+            tools.ob_byte(32)
+            tools.ob_byte(32)
+            tools.ob_byte(32)
+            tools.ob_byte(32)
+            p = ulib.word((&line[0]) as u64, p, (&f[0]) as u64, 32)
+            tools.ob_pad(ulib.to_num((&f[0]) as u64), 4)
+            tools.ob_byte(32)
+            tools.ob_byte(32)
+            tools.ob_byte(32)
+            tools.ob_byte(32)
+            // SEIT WANN. In der Datei steht der Zeitpunkt des Starts in
+            // Millisekunden seit dem Hochfahren; was der Mensch sehen
+            // will, ist die Differenz zu jetzt.
+            p = ulib.word((&line[0]) as u64, p, (&f[0]) as u64, 32)
+            let seit: u64 = ulib.to_num((&f[0]) as u64)
+            var breit: u64 = 0
+            if ulib.streq((&zust[0]) as u64, (&w_run[0]) as u64) {
+                laufen = laufen + 1
+                if seit != 0 && jetzt >= seit {
+                    ob_dauer(jetzt -% seit)
+                    breit = 1
+                }
+            }
+            if breit == 0 {
+                tools.ob_str((&strich[0]) as u64)
+            }
+            // Die Spalte ist zehn breit; was schon dasteht, ist hoechstens
+            // neun Zeichen -- aufgefuellt wird mit Leerzeichen bis zum
+            // Ziel.
+            tools.ob_byte(32)
+            tools.ob_byte(32)
+            tools.ob_byte(32)
+            ulib.word((&line[0]) as u64, p, (&f[0]) as u64, 32)
+            tools.ob_str((&f[0]) as u64)
+            tools.ob_nl()
+        }
+    }
+    var s_sum: [u8; 4] = " / \0"
+    var s_lauf: [u8; 20] = " Dienste laufen\0\0\0\0\0"
+    tools.ob_num(laufen)
+    tools.ob_str((&s_sum[0]) as u64)
+    tools.ob_num(alle)
+    tools.ob_str((&s_lauf[0]) as u64)
+    tools.ob_nl()
+    tools.ob_flush()
+    return 0
+}
+
+// ------------------------------------------------------------- der Weg
 
 fn send(verb: u64, who: u64) -> u64 {
     var path: [u8; 13] = "/run/svc.cmd\0"
@@ -86,26 +247,57 @@ fn wait_done() -> bool {
     return false
 }
 
+fn show_ziel() -> u64 {
+    var path: [u8; 10] = "/etc/ziel\0"
+    var b: [u8; 64] = [0 as u8; 64]
+    var w_kon: [u8; 9] = "konsole\n\0"
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&path[0]) as u64, 0, 0)
+    if ulib.bad(fd) {
+        // KEINE DATEI HEISST KONSOLE -- dieselbe Regel wie in `init`,
+        // und sie steht hier noch einmal, weil ein Programm, das eine
+        // fehlende Datei als Fehler meldet, den Nutzer glauben laesst,
+        // es sei etwas kaputt.
+        ulib.say((&w_kon[0]) as u64)
+        return 0
+    }
+    let n: u64 = ulib.sys(ulib.SYS_READ, fd, (&b[0]) as u64, 63)
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    if ulib.bad(n) || n == 0 {
+        ulib.say((&w_kon[0]) as u64)
+        return 0
+    }
+    ulib.put((&b[0]) as u64, n)
+    if b[(n - 1) as usize] != 10 as u8 {
+        ulib.nl()
+    }
+    return 0
+}
+
 fn u_start(args: u64) -> u64 {
     var w_status: [u8; 7] = "status\0"
+    var w_list: [u8; 5] = "list\0"
     var w_start: [u8; 6] = "start\0"
     var w_stop: [u8; 5] = "stop\0"
     var w_rest: [u8; 8] = "restart\0"
     var w_down: [u8; 9] = "shutdown\0"
-    var e_use: [u8; 49] = "svc: svc status|start|stop|restart NAME|shutdown\0"
+    var w_boot: [u8; 7] = "reboot\0"
+    var w_ziel: [u8; 5] = "ziel\0"
+    var e_use: [u8; 68] =
+        "svc: svc [list|status|ziel|start|stop|restart NAME|shutdown|reboot]\0"
     var e_noinit: [u8; 28] = "svc: init antwortet nicht\0\0\0"
     var e_nostate: [u8; 32] = "svc: /run/svc.state fehlt\0\0\0\0\0\0\0"
 
     let n: u64 = ulib.arg_count(args)
     if n < 2 {
-        if show_state() != 0 {
-            ulib.esay_line((&e_nostate[0]) as u64, 0)
-            return 1
-        }
-        ulib.nl()
-        return 0
+        return table()
     }
     let verb: u64 = ulib.arg_at(args, 1)
+    if ulib.streq(verb, (&w_list[0]) as u64) {
+        return table()
+    }
+    if ulib.streq(verb, (&w_ziel[0]) as u64) {
+        return show_ziel()
+    }
     if ulib.streq(verb, (&w_status[0]) as u64) {
         if show_state() != 0 {
             ulib.esay_line((&e_nostate[0]) as u64, 0)
@@ -113,7 +305,8 @@ fn u_start(args: u64) -> u64 {
         }
         return 0
     }
-    if ulib.streq(verb, (&w_down[0]) as u64) {
+    if ulib.streq(verb, (&w_down[0]) as u64)
+        || ulib.streq(verb, (&w_boot[0]) as u64) {
         return send(verb, 0)
     }
     if !ulib.streq(verb, (&w_start[0]) as u64)
