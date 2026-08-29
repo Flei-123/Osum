@@ -25,10 +25,11 @@ while read -r z; do A+=("$z"); done < <(python3 tools/k15/bundle.py assets/apps 
 python3 tools/osum/mkfs.py "${A[@]}" > "$D/mkfs.log" 2>&1 || { tail -3 "$D/mkfs.log"; exit 1; }
 cp "$D/g.img" "$D/live.img"
 M="$D/m.mon"; : > "$M"
-printf 'warte 1.5\nsendkey tab\nwarte 0.6\nsendkey spc\nwarte 12.0\n' >> "$M"
+if [ -n "${MONFILE:-}" ]; then cat "$MONFILE" >> "$M"
+else printf 'warte 1.5\nsendkey tab\nwarte 0.6\nsendkey spc\nwarte 12.0\n' >> "$M"; fi
 sock="$D/mon.sock"; rm -f "$sock" "$D/out.txt"
 timeout 200 $QEMU_X86 -kernel "$D/k.mb" -m 384 \
-    -append "gfx wm wigapp=/bin/viewer wmhold wiglong nokbd nosched noproc nofs" \
+    -append "gfx wm wigapp=/bin/viewer wmhold wiglong wigxl nokbd nosched noproc nofs" \
     -serial "file:$D/out.txt" -display none -no-reboot -vga std \
     -monitor "unix:$sock,server,nowait" \
     -drive "file=$D/live.img,format=raw,if=ide,index=0" \

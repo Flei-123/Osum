@@ -441,14 +441,20 @@ python3 tools/osum/mkfs.py "${GARGS[@]}" > "$TMPD/mkfsgui.log" 2>&1 \
     || { bad "mkfs (Oberflaeche) fehlgeschlagen"; tail -4 "$TMPD/mkfsgui.log"; }
 
 GRUND="nokbd nosched noproc nofs"
-foto() { # name monitordatei
-    local name=$1 mon=${2:-}
+# DAS DRITTE ARGUMENT SIND ZUSAETZLICHE WORTE FUER DIE KOMMANDOZEILE,
+# und es gibt genau einen Grund dafuer: `wigxl` haelt SECHZIG Sekunden
+# still statt zwanzig, und die Warteschleife im Kern wartet die volle
+# Zeit -- wer sie allen neun Fotolaeufen gibt, verlaengert den Abschnitt
+# um sechs Minuten fuer nichts. Nur der Lauf mit dem 12-MP-Bild braucht
+# sie.
+foto() { # name monitordatei [zusatzworte]
+    local name=$1 mon=${2:-} extra=${3:-}
     local sock="$TMPD/mon-$name.sock"
     local aus="$TMPD/$name.txt" ppm="$TMPD/$name.ppm"
     rm -f "$aus" "$ppm" "$sock"
     cp -f "$TMPD/gui.img" "$TMPD/live-$name.img"
     timeout 300 $QEMU_X86 -kernel "$TMPD/k.mb" -m 384 \
-        -append "gfx wm wigapp=/bin/viewer wmhold wiglong $GRUND" \
+        -append "gfx wm wigapp=/bin/viewer wmhold wiglong $extra $GRUND" \
         -serial "file:$aus" -display none -no-reboot -vga std \
         -monitor "unix:$sock,server,nowait" \
         -drive "file=$TMPD/live-$name.img,format=raw,if=ide,index=0" \
@@ -634,8 +640,8 @@ num "und aus 24 hoch wird 40" "${eh:-0}" eq 40
 M="$TMPD/gross.mon"; : > "$M"
 printf 'warte 1.0\n' >> "$M"
 taste "$M" "b"
-printf 'warte 6.0\n' >> "$M"
-foto gross "$M"
+printf 'warte 25.0\n' >> "$M"
+foto gross "$M" wigxl
 gb=$(vfeld "$TMPD/gross.txt" br); gh=$(vfeld "$TMPD/gross.txt" ho)
 gv=$(vfeld "$TMPD/gross.txt" voll)
 ga=$(vfeld "$TMPD/gross.txt" arena)
