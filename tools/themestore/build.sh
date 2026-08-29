@@ -53,6 +53,8 @@ extra=""
 accel=${OSUM_ACCEL:-tcg}
 uitrace=no
 clicks=""
+xscheme=""
+xfiles=""
 keep=no
 progs="desktop taskbar settings launcher theme explorer sh echo ls cat"
 for a in "$@"; do
@@ -75,6 +77,8 @@ for a in "$@"; do
         accel=*) accel=${a#*=} ;;
         keep=*) keep=${a#*=} ;;
         uitrace=*) uitrace=${a#*=} ;;
+        xscheme=*) xscheme=${a#*=} ;;
+        xfile=*) xfiles="$xfiles ${a#*=}" ;;
         click=*) clicks="$clicks ${a#*=}" ;;
         *) echo "unknown option: $a" >&2; exit 2 ;;
     esac
@@ -170,6 +174,16 @@ fi
 ARGS+=(/etc/schemas/)
 for s in assets/schemes/*.scheme; do
     ARGS+=("/etc/schemas/$(basename "$s" .scheme)=$s@0644")
+done
+# An extra scheme from OUTSIDE assets/ -- the counter-check of this
+# round needs a scheme that fails, and a scheme that fails has no
+# business being shipped in assets/schemes.
+if [ -n "$xscheme" ] && [ -f "$xscheme" ]; then
+    ARGS+=("/etc/schemas/$(basename "$xscheme" .scheme)=$xscheme@0644")
+fi
+# Loose files into the root, for the import test: `xfile=/name=hostpath`
+for f in $xfiles; do
+    ARGS+=("${f%%=*}=${f#*=}@0644")
 done
 ARGS+=(/etc/shapes/)
 for s in assets/shapes/*.shape; do
