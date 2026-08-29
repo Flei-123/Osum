@@ -1,0 +1,935 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/feedback.fi -- Runde FEEDBACK: eine Meldung aus dem
+// laufenden System, mit Bild.
+//
+//     feedback                          das Fenster
+//     feedback -f "text"                ein Fehler, ohne Fenster
+//     feedback -w "text"                ein Wunsch, ohne Fenster
+//     feedback -b                       mit Bildschirmfoto (nur mit -f/-w)
+//     feedback -k "wer@wo"              Kontakt
+//     feedback -ja                      die Bestaetigung steht auf der
+//                                       Befehlszeile (siehe unten)
+//     feedback -warten                  nur die Warteschlange abarbeiten
+//
+// WOHIN. Nicht einkompiliert, sondern aus `/etc/feedback.conf`:
+//
+//     host=109.69.172.199        die ADRESSE. Dieses System hat keinen
+//                                Namensdienst -- `/bin/fetch` sagt das
+//                                seit Runde HWNET in genau diesen
+//                                Worten.
+//     name=fleilauncher.fleitec.com   der Name, den das ZERTIFIKAT
+//                                tragen muss und der als SNI hinausgeht
+//     path=/feedback.php
+//     projekt=Osum
+//
+// DAS IST DERSELBE ENDPUNKT, an den FleiLauncher und FreeViewer melden,
+// und dieselben Felder: {project,type,message,contact,version,os,user}.
+// Diese Runde legt EIN Feld dazu -- `image`, ein PNG in base64 --, und
+// der Server nimmt eine Meldung ohne dieses Feld weiter genau so an wie
+// vorher.
+//
+// ====================================================================
+// DIE BESTAETIGUNG, und warum sie hier so ernst genommen wird
+// ====================================================================
+//
+// Auf einem Bildschirmfoto steht, was auf dem Bildschirm stand. Das
+// kann ein Passwortfeld sein, eine offene Nachricht, ein Kontostand.
+// Deshalb:
+//
+//   1. Das Fenster dieses Programms VERSCHWINDET, bevor fotografiert
+//      wird, und kommt danach zurueck. Sonst zeigte das Bild vor allem
+//      dieses Programm.
+//   2. Das Bild wird ANGEZEIGT -- nicht "800x600, 18 kB", sondern das
+//      Bild selbst, verkleinert, im Fenster. Ein Mensch, der eine
+//      Groesse liest, hat nichts gesehen.
+//   3. Die Liste darunter zeigt JEDES Feld, das hinausgeht, im Wortlaut.
+//   4. Erst nach "Ja" im Bestaetigungsfenster geht etwas weg. Ohne
+//      Bild ebenfalls -- auch ein Text kann etwas enthalten, das
+//      jemand nicht senden wollte.
+//
+// OHNE FENSTER (`-f`/`-w`) gibt es keinen Menschen zum Fragen. Dann
+// MUSS `-ja` dabeistehen; ohne dieses Wort schreibt das Programm die
+// Meldung nur in die Warteschlange und sendet nichts. Ein Programm, das
+// ohne Fenster und ohne ausdrueckliches Wort Bilder verschickt, waere
+// genau das, wogegen `kernel/shot.fi` gebaut ist.
+//
+// KEIN NETZ: DIE MELDUNG BLEIBT. Sie wird nach
+// `/var/feedback/warten.json` gelegt, und der naechste Start dieses
+// Programms versucht es noch einmal. Eine Meldung, die verloren geht,
+// weil gerade kein Netz da war, ist die aergerlichste Art, eine Meldung
+// zu verlieren.
+
+profile kernel
+
+import ulib
+import wlibc
+import wlib
+
+export { u_start }
+
+// ------------------------------------------------------- die Nummern
+
+const SYS_SHOT: u64 = 1840
+const SH_INFO: u64 = 0
+const SI_READY: u64 = 0
+const SI_WIDTH: u64 = 1
+const SI_HEIGHT: u64 = 2
+const SI_SHOTS: u64 = 6
+const SI_DENIED: u64 = 10
+
+const WM_FILL: u64 = 2101
+const WM_FLUSH: u64 = 2105
+
+// Das verkleinerte Bild: hoechstens so gross, und `/bin/shot` rechnet
+// den Verkleinerungsfaktor daraus aus. 200 x 150 bei 800 x 600.
+const TW: u64 = 200
+const TH: u64 = 150
+const TBYTES: u64 = 90000 // TW * TH * 3
+
+// Das Fenster.
+const WINW: u64 = 620
+const WINH: u64 = 470
+
+// ------------------------------------------------------- die Puffer
+
+static mut thumb: [u8; 90016] = [0 as u8; 90016]
+static mut tw: u64 = 0
+static mut th: u64 = 0
+static mut have_shot: u64 = 0
+static mut shot_bytes: u64 = 0
+static mut shot_w: u64 = 0
+static mut shot_h: u64 = 0
+
+static mut msg: [u8; 256] = [0 as u8; 256]
+static mut kontakt: [u8; 128] = [0 as u8; 128]
+static mut typ: u64 = 0 // 0 Fehler, 1 Wunsch
+
+static mut c_host: [u8; 64] = [0 as u8; 64]
+static mut c_name: [u8; 96] = [0 as u8; 96]
+static mut c_path: [u8; 96] = [0 as u8; 96]
+static mut c_proj: [u8; 48] = [0 as u8; 48]
+
+static mut zeile: [u8; 256] = [0 as u8; 256]
+static mut rdctx: [u8; 544] = [0 as u8; 544]
+static mut liste: [u8; 1024] = [0 as u8; 1024]
+static mut lage: [u8; 160] = [0 as u8; 160]
+static mut buf: [u8; 1024] = [0 as u8; 1024]
+static mut b64tab: [u8; 65] =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/\0"
+
+static mut w_main: u64 = 0
+static mut i_msg: u64 = 0
+static mut i_kon: u64 = 0
+static mut i_lst: u64 = 0
+static mut i_lag: u64 = 0
+
+// ---------------------------------------------------------- Werkzeug
+
+fn say(p: u64) {
+    ulib.say(p)
+}
+
+fn nl() {
+    ulib.nl()
+}
+
+fn len(p: u64) -> u64 {
+    return ulib.length(p)
+}
+
+// ------------------------------------------------ Datei schreiben/lesen
+
+fn oeffnen_neu(pfad: u64) -> u64 {
+    return ulib.sys(ulib.SYS_OPEN, pfad, ulib.O_MAKE, 0x1A4)
+}
+
+fn schreiben(fd: u64, p: u64, n: u64) -> bool {
+    var w: u64 = 0
+    while w < n {
+        var teil: u64 = n - w
+        if teil > 512 {
+            teil = 512
+        }
+        let r: u64 = ulib.sys(ulib.SYS_WRITE, fd, p + w, teil)
+        if ulib.bad(r) || r == 0 {
+            return false
+        }
+        w = w + r
+    }
+    return true
+}
+
+fn text_raus(fd: u64, p: u64) -> bool {
+    return schreiben(fd, p, len(p))
+}
+
+// EIN TEXT ALS JSON-ZEICHENKETTE. Anfuehrungszeichen, Rueckstrich und
+// alles unter 0x20 muessen umschrieben werden -- sonst ist die Meldung
+// kein JSON mehr, und der Server lehnt sie ab. Genau das ist die Stelle,
+// an der eine Meldung mit einem Anfuehrungszeichen im Text sonst still
+// verschwindet.
+fn json_text(fd: u64, p: u64) -> bool {
+    var i: u64 = 0
+    var n: u64 = 0
+    var hex: [u8; 17] = "0123456789abcdef\0"
+    while true {
+        let c: u64 = __mmio_read8((p + i) as *mut u8) as u64
+        if c == 0 {
+            break
+        }
+        n = 0
+        if c == 34 || c == 92 {
+            buf[(0) as usize] = 92 as u8
+            buf[(1) as usize] = c as u8
+            n = 2
+        } else if c == 10 {
+            buf[(0) as usize] = 92 as u8
+            buf[(1) as usize] = 110 as u8
+            n = 2
+        } else if c == 13 {
+            buf[(0) as usize] = 92 as u8
+            buf[(1) as usize] = 114 as u8
+            n = 2
+        } else if c == 9 {
+            buf[(0) as usize] = 92 as u8
+            buf[(1) as usize] = 116 as u8
+            n = 2
+        } else if c < 32 {
+            buf[(0) as usize] = 92 as u8
+            buf[(1) as usize] = 117 as u8
+            buf[(2) as usize] = 48 as u8
+            buf[(3) as usize] = 48 as u8
+            buf[(4) as usize] = hex[((c >> 4) & 15) as usize]
+            buf[(5) as usize] = hex[(c & 15) as usize]
+            n = 6
+        } else {
+            buf[(0) as usize] = c as u8
+            n = 1
+        }
+        if !schreiben(fd, (&buf[0 as usize]) as u64, n) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+// DAS BILD ALS base64, STROMWEISE. Drei Oktette werden vier Zeichen,
+// und der Puffer ist ein Kilooktett gross -- ein Bild von anderthalb
+// Megaoktett passt in keinen Puffer, den ein Programm mit
+// `profile kernel` haben kann, aber es muss auch in keinen: es wird
+// gelesen und geschrieben, Stueck fuer Stueck.
+fn base64_raus(fd_out: u64, pfad: u64) -> u64 {
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, pfad, 0, 0)
+    if ulib.bad(fd) {
+        return 0
+    }
+    var roh: [u8; 768] = [0 as u8; 768]
+    var raus: [u8; 1024] = [0 as u8; 1024]
+    var total: u64 = 0
+    var rest: u64 = 0
+    var going: bool = true
+    while going {
+        let n: u64 = ulib.sys(ulib.SYS_READ, fd, (&roh[(rest) as usize]) as u64,
+            768 - rest)
+        if ulib.bad(n) || n == 0 {
+            going = false
+        }
+        var have: u64 = rest
+        if !ulib.bad(n) {
+            have = rest + n
+        }
+        var take: u64 = have
+        if going {
+            take = (have / 3) * 3
+        }
+        var i: u64 = 0
+        var o: u64 = 0
+        while i + 3 <= take {
+            let v: u64 = ((roh[(i) as usize] as u64) << 16)
+                | ((roh[(i + 1) as usize] as u64) << 8)
+                | (roh[(i + 2) as usize] as u64)
+            raus[(o) as usize] = b64tab[((v >> 18) & 63) as usize]
+            raus[(o + 1) as usize] = b64tab[((v >> 12) & 63) as usize]
+            raus[(o + 2) as usize] = b64tab[((v >> 6) & 63) as usize]
+            raus[(o + 3) as usize] = b64tab[(v & 63) as usize]
+            i = i + 3
+            o = o + 4
+        }
+        if !going && i < have {
+            // Der Rest: ein oder zwei Oktette, mit '=' aufgefuellt.
+            let r1: u64 = roh[(i) as usize] as u64
+            var v: u64 = r1 << 16
+            var zwei: bool = false
+            if i + 1 < have {
+                v = v | ((roh[(i + 1) as usize] as u64) << 8)
+                zwei = true
+            }
+            raus[(o) as usize] = b64tab[((v >> 18) & 63) as usize]
+            raus[(o + 1) as usize] = b64tab[((v >> 12) & 63) as usize]
+            if zwei {
+                raus[(o + 2) as usize] = b64tab[((v >> 6) & 63) as usize]
+            } else {
+                raus[(o + 2) as usize] = 61 as u8
+            }
+            raus[(o + 3) as usize] = 61 as u8
+            o = o + 4
+            i = have
+        }
+        if o != 0 {
+            if !schreiben(fd_out, (&raus[0 as usize]) as u64, o) {
+                ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+                return 0
+            }
+            total = total + o
+        }
+        rest = 0
+        if going && take < have {
+            var k: u64 = 0
+            while take + k < have {
+                roh[(k) as usize] = roh[(take + k) as usize]
+                k = k + 1
+            }
+            rest = have - take
+        }
+    }
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    return total
+}
+
+// ------------------------------------------------------ die Einstellung
+
+fn conf_lesen() {
+    ulib.strcpy((&c_host[0 as usize]) as u64, (&d_host[0 as usize]) as u64)
+    ulib.strcpy((&c_name[0 as usize]) as u64, (&d_name[0 as usize]) as u64)
+    ulib.strcpy((&c_path[0 as usize]) as u64, (&d_path[0 as usize]) as u64)
+    ulib.strcpy((&c_proj[0 as usize]) as u64, (&d_proj[0 as usize]) as u64)
+    var pfad: [u8; 21] = "/etc/feedback.conf\0\0\0"
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&pfad[0 as usize]) as u64, 0, 0)
+    if ulib.bad(fd) {
+        return
+    }
+    ulib.rd_init((&rdctx[0 as usize]) as u64)
+    var n: u64 = ulib.rd_line(fd, (&rdctx[0 as usize]) as u64,
+        (&zeile[0 as usize]) as u64, 250)
+    while n != ulib.EOF {
+        let z: u64 = (&zeile[0 as usize]) as u64
+        feld(z, (&k_host[0 as usize]) as u64, (&c_host[0 as usize]) as u64, 62)
+        feld(z, (&k_name[0 as usize]) as u64, (&c_name[0 as usize]) as u64, 94)
+        feld(z, (&k_path[0 as usize]) as u64, (&c_path[0 as usize]) as u64, 94)
+        feld(z, (&k_proj[0 as usize]) as u64, (&c_proj[0 as usize]) as u64, 46)
+        n = ulib.rd_line(fd, (&rdctx[0 as usize]) as u64,
+            (&zeile[0 as usize]) as u64, 250)
+    }
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+}
+
+static mut d_host: [u8; 16] = "127.0.0.1\0\0\0\0\0\0\0"
+static mut d_name: [u8; 30] = "fleilauncher.fleitec.com\0\0\0\0\0\0"
+static mut d_path: [u8; 16] = "/feedback.php\0\0\0"
+static mut d_proj: [u8; 8] = "Osum\0\0\0\0"
+static mut k_host: [u8; 6] = "host=\0"
+static mut k_name: [u8; 6] = "name=\0"
+static mut k_path: [u8; 6] = "path=\0"
+static mut k_proj: [u8; 9] = "projekt=\0"
+
+fn feld(zl: u64, schl: u64, ziel: u64, max: u64) {
+    let n: u64 = len(schl)
+    if !ulib.strneq(zl, schl, n) {
+        return
+    }
+    ulib.strncpy(ziel, zl + n, max)
+}
+
+// ------------------------------------------------------ das Bild holen
+//
+// GEMACHT WIRD ES VON `/bin/shot`. Nicht hier: der Packer braucht einen
+// Haufen, und ein Programm mit `profile kernel` hat keinen. `shot`
+// schreibt zwei Dateien -- das PNG zum Senden und ein winziges rohes
+// Bild zum ANSEHEN, beides aus DENSELBEN Bildpunkten. Zwei Aufnahmen
+// waeren zwei verschiedene Bilder, und der Mensch haette dann nicht das
+// gesehen, was hinausgeht.
+
+static mut p_shot: [u8; 12] = "/bin/shot\0\0\0"
+static mut p_png: [u8; 28] = "/var/feedback/schirm.png\0\0\0\0"
+static mut p_thumb: [u8; 28] = "/var/feedback/klein.raw\0\0\0\0\0"
+// EINE DATEI UND NICHT ZWEI.
+//
+// Bis zur Abnahme dieser Runde wurde die Meldung als `melden.json`
+// gebaut und, wenn sie nicht hinausging, mit `rename` zu `warten.json`
+// gemacht. Das war ein Systemaufruf zu viel: `SYS_RENAME` antwortet in
+// dieser Zusammenstellung mit -38 (ENOSYS), weil die VFS-Schicht nicht
+// bereitsteht -- `sys.do_rename` prueft `vfs.ready` und gibt sonst auf.
+// Die Meldung blieb also als `melden.json` liegen, der naechste Start
+// suchte `warten.json`, fand nichts, und der Wunsch war weg.
+//
+// Die Warteschlange IST jetzt die Datei, in die gebaut wird. Sie wird
+// erst geloescht, wenn der Server geantwortet hat. Kein Umbenennen,
+// kein Kopieren, kein zweiter Name fuer denselben Inhalt -- und der
+// Weg funktioniert in jeder Zusammenstellung, auch ohne VFS.
+static mut p_req: [u8; 28] = "/var/feedback/warten.json\0\0\0"
+static mut p_wait: [u8; 28] = "/var/feedback/warten.json\0\0\0"
+static mut p_dir: [u8; 16] = "/var/feedback\0\0\0"
+static mut p_var: [u8; 8] = "/var\0\0\0\0"
+static mut a_n: [u8; 3] = "-n\0"
+static mut a_t: [u8; 3] = "-t\0"
+static mut a_shot: [u8; 5] = "shot\0"
+
+fn shot_machen() -> bool {
+    ulib.sys(ulib.SYS_MKDIR, (&p_var[0 as usize]) as u64, 0x1FF, 0)
+    ulib.sys(ulib.SYS_MKDIR, (&p_dir[0 as usize]) as u64, 0x1FF, 0)
+    var argv: [u64; 6] = [0 as u64; 6]
+    argv[0 as usize] = (&a_shot[0 as usize]) as u64
+    argv[1 as usize] = (&a_n[0 as usize]) as u64
+    argv[2 as usize] = (&a_t[0 as usize]) as u64
+    argv[3 as usize] = (&p_thumb[0 as usize]) as u64
+    argv[4 as usize] = (&p_png[0 as usize]) as u64
+    let pid: u64 = ulib.sys(ulib.SYS_EXEC, (&p_shot[0 as usize]) as u64,
+        (&argv[0 as usize]) as u64, 5)
+    if ulib.bad(pid) {
+        return false
+    }
+    let code: u64 = ulib.wait_code(pid)
+    if code != 0 {
+        return false
+    }
+    shot_bytes = ulib.size_of((&p_png[0 as usize]) as u64)
+    shot_w = ulib.sys(SYS_SHOT, SH_INFO, SI_WIDTH, 0)
+    shot_h = ulib.sys(SYS_SHOT, SH_INFO, SI_HEIGHT, 0)
+    return thumb_lesen()
+}
+
+fn thumb_lesen() -> bool {
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&p_thumb[0 as usize]) as u64, 0, 0)
+    if ulib.bad(fd) {
+        return false
+    }
+    var got: u64 = 0
+    var going: bool = true
+    while going && got < 90016 {
+        let n: u64 = ulib.sys(ulib.SYS_READ, fd,
+            (&thumb[(got) as usize]) as u64, 90016 - got)
+        if ulib.bad(n) || n == 0 {
+            going = false
+        } else {
+            got = got + n
+        }
+    }
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    if got < 8 {
+        return false
+    }
+    // "OTH1", Breite und Hoehe als Kurzwoerter, dann die Bildpunkte.
+    if thumb[(0) as usize] != 79 as u8 || thumb[(1) as usize] != 84 as u8 {
+        return false
+    }
+    tw = (thumb[(4) as usize] as u64) | ((thumb[(5) as usize] as u64) << 8)
+    th = (thumb[(6) as usize] as u64) | ((thumb[(7) as usize] as u64) << 8)
+    if tw == 0 || th == 0 || tw > TW || th > TH {
+        return false
+    }
+    if got < 8 + tw * th * 3 {
+        return false
+    }
+    have_shot = 1
+    return true
+}
+
+// DAS BILD IM FENSTER. Waagerechte Laeufe gleicher Farbe werden zu EINEM
+// Rechteck -- auf einer Oberflaeche mit grossen einfarbigen Flaechen
+// sind das ein paar hundert Aufrufe je Bild statt dreissigtausend.
+fn thumb_malen(h: u64, x0: u64, y0: u64) {
+    if have_shot == 0 {
+        return
+    }
+    var y: u64 = 0
+    while y < th {
+        var x: u64 = 0
+        while x < tw {
+            let o: u64 = 8 + (y * tw + x) * 3
+            let c: u64 = ((thumb[(o) as usize] as u64) << 16)
+                | ((thumb[(o + 1) as usize] as u64) << 8)
+                | (thumb[(o + 2) as usize] as u64)
+            var n: u64 = 1
+            while x + n < tw {
+                let o2: u64 = 8 + (y * tw + x + n) * 3
+                let c2: u64 = ((thumb[(o2) as usize] as u64) << 16)
+                    | ((thumb[(o2 + 1) as usize] as u64) << 8)
+                    | (thumb[(o2 + 2) as usize] as u64)
+                if c2 != c {
+                    break
+                }
+                n = n + 1
+            }
+            ulib.sys4(WM_FILL, h, (((x0 + x) & 0xFFFF) << 16) | ((y0 + y) & 0xFFFF),
+                ((n & 0xFFFF) << 16) | 1, c)
+            x = x + n
+        }
+        y = y + 1
+    }
+    ulib.sys(WM_FLUSH, h, 0, 0)
+}
+
+// -------------------------------------------------- die Meldung bauen
+
+static mut j1: [u8; 13] = "{\"project\":\"\0"
+static mut j2: [u8; 12] = "\",\"type\":\"\0\0"
+static mut j3: [u8; 15] = "\",\"message\":\"\0\0"
+static mut j4: [u8; 15] = "\",\"contact\":\"\0\0"
+static mut j5: [u8; 15] = "\",\"version\":\"\0\0"
+static mut j6: [u8; 11] = "\",\"os\":\"\0\0\0"
+static mut j7: [u8; 13] = "\",\"user\":\"\0\0\0"
+static mut j8: [u8; 13] = "\",\"image\":\"\0\0"
+static mut j9: [u8; 3] = "\"}\0"
+static mut j_end: [u8; 2] = "\"\0"
+static mut t_bug: [u8; 4] = "bug\0"
+static mut t_feat: [u8; 8] = "feature\0"
+static mut s_ver: [u8; 7] = "0.1.0\0\0"
+static mut s_os: [u8; 23] = "OrientOS/Osum x86_64\0\0\0"
+static mut s_user: [u8; 7] = "wurzel\0"
+
+fn melden_bauen(mit_bild: bool) -> bool {
+    let fd: u64 = oeffnen_neu((&p_req[0 as usize]) as u64)
+    if ulib.bad(fd) {
+        return false
+    }
+    var ok: bool = true
+    ok = ok && text_raus(fd, (&j1[0 as usize]) as u64)
+    ok = ok && json_text(fd, (&c_proj[0 as usize]) as u64)
+    ok = ok && text_raus(fd, (&j2[0 as usize]) as u64)
+    if typ == 0 {
+        ok = ok && text_raus(fd, (&t_bug[0 as usize]) as u64)
+    } else {
+        ok = ok && text_raus(fd, (&t_feat[0 as usize]) as u64)
+    }
+    ok = ok && text_raus(fd, (&j3[0 as usize]) as u64)
+    ok = ok && json_text(fd, (&msg[0 as usize]) as u64)
+    ok = ok && text_raus(fd, (&j4[0 as usize]) as u64)
+    ok = ok && json_text(fd, (&kontakt[0 as usize]) as u64)
+    ok = ok && text_raus(fd, (&j5[0 as usize]) as u64)
+    ok = ok && json_text(fd, (&s_ver[0 as usize]) as u64)
+    ok = ok && text_raus(fd, (&j6[0 as usize]) as u64)
+    ok = ok && json_text(fd, (&s_os[0 as usize]) as u64)
+    ok = ok && text_raus(fd, (&j7[0 as usize]) as u64)
+    ok = ok && json_text(fd, (&s_user[0 as usize]) as u64)
+    if mit_bild && have_shot == 1 {
+        ok = ok && text_raus(fd, (&j8[0 as usize]) as u64)
+        let n: u64 = base64_raus(fd, (&p_png[0 as usize]) as u64)
+        ok = ok && n != 0
+        ok = ok && text_raus(fd, (&j_end[0 as usize]) as u64)
+        ok = ok && text_raus(fd, (&j9[0 as usize]) as u64 + 1)
+    } else {
+        ok = ok && text_raus(fd, (&j9[0 as usize]) as u64)
+    }
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    return ok
+}
+
+// ------------------------------------------------------------ senden
+
+static mut p_fetch: [u8; 12] = "/bin/fetch\0\0"
+static mut a_fetch: [u8; 6] = "fetch\0"
+static mut a_nn: [u8; 3] = "-n\0"
+static mut a_p: [u8; 3] = "-p\0"
+static mut a_q: [u8; 3] = "-q\0"
+static mut a_r: [u8; 3] = "-r\0"
+static mut a_roots: [u8; 20] = "/etc/ssl/roots.pem\0\0"
+static mut url: [u8; 224] = [0 as u8; 224]
+static mut u_https: [u8; 9] = "https://\0"
+
+fn url_bauen() {
+    ulib.strcpy((&url[0 as usize]) as u64, (&u_https[0 as usize]) as u64)
+    ulib.strcat((&url[0 as usize]) as u64, (&c_host[0 as usize]) as u64)
+    ulib.strcat((&url[0 as usize]) as u64, (&c_path[0 as usize]) as u64)
+}
+
+// Gibt den Beendigungscode von `/bin/fetch` zurueck; 0 heisst, die
+// Antwort ist angekommen.
+fn senden() -> u64 {
+    url_bauen()
+    // SIEBEN UND NICHT NEUN. `proc.MAX_ARGS` ist acht -- `elf.write_args`
+    // weist alles darueber ab, und `exec` gab genau deshalb 127 zurueck,
+    // ohne dass irgendwo ein Wort darueber stand. Weggefallen ist
+    // `-r /etc/ssl/roots.pem`: das IST der Vorgabewert von `/bin/fetch`
+    // (siehe kernel/app/fetch.fi, `rootpath`), die Zeile war doppelt
+    // gemoppelt. Der Inhaltstyp `application/json` ist dort ebenfalls
+    // die Vorgabe fuer einen POST.
+    var argv: [u64; 12] = [0 as u64; 12]
+    argv[0 as usize] = (&a_fetch[0 as usize]) as u64
+    argv[1 as usize] = (&a_nn[0 as usize]) as u64
+    argv[2 as usize] = (&c_name[0 as usize]) as u64
+    argv[3 as usize] = (&a_p[0 as usize]) as u64
+    argv[4 as usize] = (&p_req[0 as usize]) as u64
+    argv[5 as usize] = (&a_q[0 as usize]) as u64
+    argv[6 as usize] = (&url[0 as usize]) as u64
+    let pid: u64 = ulib.sys(ulib.SYS_EXEC, (&p_fetch[0 as usize]) as u64,
+        (&argv[0 as usize]) as u64, 7)
+    if ulib.bad(pid) {
+        return 127
+    }
+    return ulib.wait_code(pid)
+}
+
+// DIE WARTESCHLANGE. Sie braucht nichts zu tun: die Meldung liegt
+// bereits unter ihrem endgueltigen Namen (siehe `p_req` oben). Die
+// Funktion bleibt als EINE Stelle stehen, an der "sie bleibt liegen"
+// steht -- damit der Aufrufer nicht raten muss, ob etwas passiert ist.
+fn in_die_schlange() -> bool {
+    let probe: u64 = ulib.sys(ulib.SYS_OPEN, (&p_wait[0 as usize]) as u64, 0, 0)
+    if ulib.bad(probe) {
+        return false
+    }
+    ulib.sys(ulib.SYS_CLOSE, probe, 0, 0)
+    return true
+}
+
+// Beim Start: liegt von einem frueheren Lauf noch etwas da, geht es
+// JETZT hinaus. Rueckgabe 0 = nachgereicht, 1 = liegt weiter, 2 = nichts
+// da.
+fn schlange_versuchen() -> u64 {
+    // `size_of` einer Datei, DIE ES NICHT GIBT, ist kein 0 -- es ist ein
+    // Fehlerwert. Die Abfrage darauf hat jeden Start mit
+    // "warteschlange bleibt liegen" begruesst, obwohl gar nichts lag.
+    // Deshalb wird die Datei GEOEFFNET; das ist die einzige Antwort auf
+    // die Frage, ob sie da ist.
+    let probe: u64 = ulib.sys(ulib.SYS_OPEN, (&p_wait[0 as usize]) as u64, 0, 0)
+    if ulib.bad(probe) {
+        return 2 // nichts da
+    }
+    ulib.sys(ulib.SYS_CLOSE, probe, 0, 0)
+    let code: u64 = senden()
+    if code != 0 {
+        return 1
+    }
+    ulib.sys(ulib.SYS_UNLINK, (&p_wait[0 as usize]) as u64, 0, 0)
+    return 0
+}
+
+// ------------------------------------------------------------ Fenster
+
+static mut t_win: [u8; 23] = "Feedback an FleiTec\0\0\0\0"
+static mut t_tabs: [u8; 19] = "Fehler|Wunsch\0\0\0\0\0\0"
+static mut t_msg: [u8; 39] = "Was ist passiert / was fehlt?\0\0\0\0\0\0\0\0\0\0"
+static mut t_kon: [u8; 39] = "Kontakt (freiwillig)\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"
+static mut t_bshot: [u8; 27] = "Bildschirmfoto anhaengen\0\0\0"
+static mut t_bdrop: [u8; 19] = "Bild verwerfen\0\0\0\0\0"
+static mut t_bsend: [u8; 11] = "Senden\0\0\0\0\0"
+static mut t_bquit: [u8; 11] = "Schliessen\0"
+static mut t_ask: [u8; 19] = "Wirklich senden?\0\0\0"
+static mut t_ask2: [u8; 120] = "Alles unten Genannte geht an den Server -- auch das Bild, so wie es hier zu sehen ist.\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"
+
+static mut l_nix: [u8; 39] = "kein Bild angehaengt\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"
+
+fn liste_bauen() {
+    let p: u64 = (&liste[0 as usize]) as u64
+    ulib.fill(p, 0, 1024)
+    var kopf: [u8; 12] = "Projekt: \0\0\0"
+    var k2: [u8; 10] = "\nArt: \0\0\0\0"
+    var k3: [u8; 10] = "\nText: \0\0\0"
+    var k4: [u8; 14] = "\nKontakt: \0\0\0\0"
+    var k5: [u8; 14] = "\nFassung: \0\0\0\0"
+    var k6: [u8; 10] = "\nSystem: \0"
+    var k7: [u8; 10] = "\nBild: \0\0\0"
+    ulib.strcpy(p, (&kopf[0 as usize]) as u64)
+    ulib.strcat(p, (&c_proj[0 as usize]) as u64)
+    ulib.strcat(p, (&k2[0 as usize]) as u64)
+    if typ == 0 {
+        ulib.strcat(p, (&t_bug[0 as usize]) as u64)
+    } else {
+        ulib.strcat(p, (&t_feat[0 as usize]) as u64)
+    }
+    ulib.strcat(p, (&k3[0 as usize]) as u64)
+    ulib.strcat(p, (&msg[0 as usize]) as u64)
+    ulib.strcat(p, (&k4[0 as usize]) as u64)
+    ulib.strcat(p, (&kontakt[0 as usize]) as u64)
+    ulib.strcat(p, (&k5[0 as usize]) as u64)
+    ulib.strcat(p, (&s_ver[0 as usize]) as u64)
+    ulib.strcat(p, (&k6[0 as usize]) as u64)
+    ulib.strcat(p, (&s_os[0 as usize]) as u64)
+    ulib.strcat(p, (&k7[0 as usize]) as u64)
+    if have_shot == 1 {
+        var b: [u8; 40] = [0 as u8; 40]
+        var n: u64 = ulib.digits(shot_w, (&b[0 as usize]) as u64)
+        b[(n) as usize] = 0 as u8
+        ulib.strcat(p, (&b[0 as usize]) as u64)
+        var x: [u8; 2] = "x\0"
+        ulib.strcat(p, (&x[0 as usize]) as u64)
+        n = ulib.digits(shot_h, (&b[0 as usize]) as u64)
+        b[(n) as usize] = 0 as u8
+        ulib.strcat(p, (&b[0 as usize]) as u64)
+        var o: [u8; 12] = ", Oktette \0\0"
+        ulib.strcat(p, (&o[0 as usize]) as u64)
+        n = ulib.digits(shot_bytes, (&b[0 as usize]) as u64)
+        b[(n) as usize] = 0 as u8
+        ulib.strcat(p, (&b[0 as usize]) as u64)
+    } else {
+        ulib.strcat(p, (&l_nix[0 as usize]) as u64)
+    }
+}
+
+fn lage_setzen(p: u64) {
+    ulib.strncpy((&lage[0 as usize]) as u64, p, 158)
+    wlib.set_text(i_lag, (&lage[0 as usize]) as u64)
+}
+
+fn neu_zeichnen() {
+    liste_bauen()
+    wlib.set_text(i_lst, (&liste[0 as usize]) as u64)
+    wlib.draw_all()
+    thumb_malen(wlib.handle(w_main), WINW - TW - 16, 96)
+}
+
+fn fenster() -> u64 {
+    if !wlib.begin(false, false) {
+        var s_no: [u8; 40] = "feedback: kein Fensterserver\0\0\0\0\0\0\0\0\0\0\0\0"
+        say((&s_no[0 as usize]) as u64)
+        nl()
+        return 1
+    }
+    w_main = wlib.window(40, 40, WINW, WINH, (&t_win[0 as usize]) as u64)
+    if w_main >= wlib.MAXWN {
+        return 1
+    }
+    wlib.box_v(w_main, 12, 10, WINW - TW - 40, 84, 8, 6)
+    let tb: u64 = wlib.tabs((&t_tabs[0 as usize]) as u64)
+    let l1: u64 = wlib.label((&t_msg[0 as usize]) as u64)
+    i_msg = wlib.entry((&msg[0 as usize]) as u64, 200)
+    wlib.box_end()
+
+    wlib.box_v(w_main, 12, 100, WINW - TW - 40, 56, 8, 6)
+    let l2: u64 = wlib.label((&t_kon[0 as usize]) as u64)
+    i_kon = wlib.entry((&kontakt[0 as usize]) as u64, 120)
+    wlib.box_end()
+
+    wlib.box_h(w_main, 12, 162, WINW - TW - 40, 30, 0, 8)
+    wlib.size(190, 28)
+    let bshot: u64 = wlib.button((&t_bshot[0 as usize]) as u64)
+    wlib.size(130, 28)
+    let bdrop: u64 = wlib.button((&t_bdrop[0 as usize]) as u64)
+    wlib.box_end()
+
+    wlib.box_v(w_main, 12, 200, WINW - 24, 180, 0, 0)
+    wlib.size(0, 26)
+    i_lag = wlib.label((&lage[0 as usize]) as u64)
+    wlib.size(0, 148)
+    i_lst = wlib.list((&liste[0 as usize]) as u64, 8)
+    wlib.box_end()
+
+    wlib.box_h(w_main, 12, WINH - 46, WINW - 24, 30, 0, 10)
+    wlib.size(120, 28)
+    let bsend: u64 = wlib.button((&t_bsend[0 as usize]) as u64)
+    wlib.size(120, 28)
+    let bquit: u64 = wlib.button((&t_bquit[0 as usize]) as u64)
+    wlib.box_end()
+
+    var s_ready: [u8; 40] = "bereit -- bitte Text eingeben\0\0\0\0\0\0\0\0\0\0\0"
+    lage_setzen((&s_ready[0 as usize]) as u64)
+    neu_zeichnen()
+
+    var runden: u64 = 0
+    var senden_wollen: bool = false
+    while wlib.alive() && runden < 40000000 {
+        runden = runden + 1
+        let id: u64 = wlib.step()
+        if id < wlib.MAXWD {
+            let kind: u64 = wlib.fired_kind()
+            let idx: u64 = wlib.fired_index()
+            if kind == wlib.K_TABS {
+                typ = idx
+                neu_zeichnen()
+            } else if kind == wlib.K_BUTTON {
+                if id == bquit {
+                    wlib.quit()
+                } else if id == bdrop {
+                    have_shot = 0
+                    ulib.sys(ulib.SYS_UNLINK, (&p_png[0 as usize]) as u64, 0, 0)
+                    var s_d: [u8; 29] = "Bild verworfen\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"
+                    lage_setzen((&s_d[0 as usize]) as u64)
+                    neu_zeichnen()
+                } else if id == bshot {
+                    // DAS EIGENE FENSTER GEHT WEG, sonst zeigt das Bild
+                    // vor allem dieses Programm.
+                    wlib.win_hide(w_main, true)
+                    var k: u64 = 0
+                    while k < 40 {
+                        ulib.sys(ulib.SYS_YIELD, 0, 0, 0)
+                        k = k + 1
+                    }
+                    ulib.sleep_ms(250)
+                    let ok: bool = shot_machen()
+                    wlib.win_hide(w_main, false)
+                    if ok {
+                        var s_ok: [u8; 60] = "Bild aufgenommen -- rechts zu sehen; es geht so mit\0\0\0\0\0\0\0\0\0"
+                        lage_setzen((&s_ok[0 as usize]) as u64)
+                    } else {
+                        var s_bad: [u8; 60] = "Bild fehlgeschlagen (Recht? siehe kernel/shot.fi)\0\0\0\0\0\0\0\0\0\0\0"
+                        lage_setzen((&s_bad[0 as usize]) as u64)
+                    }
+                    neu_zeichnen()
+                } else if id == bsend {
+                    if len((&msg[0 as usize]) as u64) == 0 {
+                        var s_e: [u8; 40] = "ohne Text wird nichts gesendet\0\0\0\0\0\0\0\0\0\0"
+                        lage_setzen((&s_e[0 as usize]) as u64)
+                        neu_zeichnen()
+                    } else {
+                        senden_wollen = true
+                        wlib.dlg_ask((&t_ask[0 as usize]) as u64,
+                            (&t_ask2[0 as usize]) as u64)
+                    }
+                }
+            }
+        }
+        if wlib.dlg_state() > 1 {
+            let antwort: u64 = wlib.dlg_state()
+            wlib.dlg_close()
+            if senden_wollen && antwort == 2 {
+                senden_wollen = false
+                var s_s: [u8; 29] = "wird gesendet ...\0\0\0\0\0\0\0\0\0\0\0\0"
+                lage_setzen((&s_s[0 as usize]) as u64)
+                neu_zeichnen()
+                if !melden_bauen(true) {
+                    var s_f: [u8; 40] = "die Meldung liess sich nicht bauen\0\0\0\0\0\0"
+                    lage_setzen((&s_f[0 as usize]) as u64)
+                } else {
+                    let code: u64 = senden()
+                    if code == 0 {
+                        ulib.sys(ulib.SYS_UNLINK, (&p_req[0 as usize]) as u64,
+                            0, 0)
+                        var s_g: [u8; 39] = "gesendet -- danke\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"
+                        lage_setzen((&s_g[0 as usize]) as u64)
+                    } else {
+                        in_die_schlange()
+                        var s_w: [u8; 60] = "kein Netz -- die Meldung wartet und geht beim naechsten Mal\0"
+                        lage_setzen((&s_w[0 as usize]) as u64)
+                    }
+                }
+            } else {
+                senden_wollen = false
+            }
+            neu_zeichnen()
+        }
+    }
+    wlib.close(w_main)
+    return 0
+}
+
+// ------------------------------------------------------------ Anfang
+
+fn u_start(args: u64) -> u64 {
+    conf_lesen()
+    var mit_bild: bool = false
+    var ja: bool = false
+    var ohne_fenster: bool = false
+    var nur_warten: bool = false
+    var o_f: [u8; 3] = "-f\0"
+    var o_w: [u8; 3] = "-w\0"
+    var o_b: [u8; 3] = "-b\0"
+    var o_k: [u8; 3] = "-k\0"
+    var o_ja: [u8; 4] = "-ja\0"
+    var o_wt: [u8; 8] = "-warten\0"
+    let argc: u64 = ulib.arg_count(args)
+    var i: u64 = 1
+    while i < argc {
+        let a: u64 = ulib.arg_at(args, i)
+        if ulib.streq(a, (&o_f[0 as usize]) as u64) {
+            ohne_fenster = true
+            typ = 0
+            i = i + 1
+            if i < argc {
+                ulib.strncpy((&msg[0 as usize]) as u64, ulib.arg_at(args, i), 250)
+            }
+        } else if ulib.streq(a, (&o_w[0 as usize]) as u64) {
+            ohne_fenster = true
+            typ = 1
+            i = i + 1
+            if i < argc {
+                ulib.strncpy((&msg[0 as usize]) as u64, ulib.arg_at(args, i), 250)
+            }
+        } else if ulib.streq(a, (&o_k[0 as usize]) as u64) {
+            i = i + 1
+            if i < argc {
+                ulib.strncpy((&kontakt[0 as usize]) as u64,
+                    ulib.arg_at(args, i), 120)
+            }
+        } else if ulib.streq(a, (&o_b[0 as usize]) as u64) {
+            mit_bild = true
+        } else if ulib.streq(a, (&o_ja[0 as usize]) as u64) {
+            ja = true
+        } else if ulib.streq(a, (&o_wt[0 as usize]) as u64) {
+            nur_warten = true
+        }
+        i = i + 1
+    }
+
+    // DIE WARTESCHLANGE ZUERST, bei jedem Start. Eine Meldung von
+    // gestern, fuer die es damals kein Netz gab, geht heute hinaus.
+    var s_q0: [u8; 40] = "feedback: warteschlange gesendet\0\0\0\0\0\0\0\0"
+    var s_q1: [u8; 40] = "feedback: warteschlange bleibt liegen\0\0\0"
+    let q: u64 = schlange_versuchen()
+    if q == 0 {
+        say((&s_q0[0 as usize]) as u64)
+        nl()
+    } else if q == 1 {
+        say((&s_q1[0 as usize]) as u64)
+        nl()
+    }
+    if nur_warten {
+        return q
+    }
+
+    if !ohne_fenster {
+        return fenster()
+    }
+
+    // ---- ohne Fenster
+    var s_no_msg: [u8; 40] = "feedback: -f oder -w braucht einen Text\0"
+    if len((&msg[0 as usize]) as u64) == 0 {
+        say((&s_no_msg[0 as usize]) as u64)
+        nl()
+        return 2
+    }
+    ulib.sys(ulib.SYS_MKDIR, (&p_var[0 as usize]) as u64, 0x1FF, 0)
+    ulib.sys(ulib.SYS_MKDIR, (&p_dir[0 as usize]) as u64, 0x1FF, 0)
+    if mit_bild {
+        var s_sh: [u8; 40] = "feedback: bild fehlgeschlagen\0\0\0\0\0\0\0\0\0\0\0"
+        if !shot_machen() {
+            say((&s_sh[0 as usize]) as u64)
+            nl()
+        }
+    }
+    if !melden_bauen(mit_bild) {
+        var s_mb: [u8; 46] = "feedback: die meldung laesst sich nicht bauen\0"
+        say((&s_mb[0 as usize]) as u64)
+        nl()
+        return 1
+    }
+    var s_bytes: [u8; 24] = "feedback: oktette \0\0\0\0\0\0"
+    say((&s_bytes[0 as usize]) as u64)
+    ulib.sayn(ulib.size_of((&p_req[0 as usize]) as u64))
+    nl()
+    if !ja {
+        // OHNE MENSCH UND OHNE `-ja` GEHT NICHTS HINAUS.
+        var s_ja: [u8; 60] = "feedback: ohne -ja wird nichts gesendet, die meldung wartet\0"
+        in_die_schlange()
+        say((&s_ja[0 as usize]) as u64)
+        nl()
+        return 3
+    }
+    let code: u64 = senden()
+    var s_rc: [u8; 20] = "feedback: fetch rc \0"
+    say((&s_rc[0 as usize]) as u64)
+    ulib.sayn(code)
+    nl()
+    var s_g: [u8; 24] = "feedback: gesendet\0\0\0\0\0\0"
+    var s_n: [u8; 40] = "feedback: kein netz, die meldung wartet\0"
+    if code == 0 {
+        ulib.sys(ulib.SYS_UNLINK, (&p_req[0 as usize]) as u64, 0, 0)
+        say((&s_g[0 as usize]) as u64)
+        nl()
+        return 0
+    }
+    in_die_schlange()
+    say((&s_n[0 as usize]) as u64)
+    nl()
+    return 1
+}
