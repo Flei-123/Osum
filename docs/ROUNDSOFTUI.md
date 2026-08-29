@@ -428,3 +428,26 @@ run and every label is reported more than once. A checker that reports
 itself is noise.
 
 Result on all four pictures: **0 objections.**
+
+`tools/softui/run.sh`: **25 passed, 0 failed.**
+
+---
+
+## 9. ONE RED SECTION THAT IS NOT THIS ROUND'S
+
+`tools/look/run.sh` section A2a — the word `Übernehmen` in the theme
+probe window — fails. It fails on the **parent commit** too, and there
+it fails worse:
+
+```
+parent d4c2742    10 characters, 526 ink pixels checked, 526 wrong
+branch softui     10 characters, 526 ink pixels checked, 518 wrong
+```
+
+Measured with the same (corrected) `umlaut.py` on both trees, or it
+would not be a comparison. The position is right in both cases — x=158,
+y=337, recomputed from `ax`/`ay` — so it is the colour that is being
+compared against: the report says `bg=#ffffff` and something else is
+under the text. It came in with the `themestore` merge. It is not fixed
+here, and it is written down here so that nobody attributes it to this
+round and nobody thinks it is done.
