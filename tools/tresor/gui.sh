@@ -93,7 +93,7 @@ bash tools/tresor/build.sh "$TMPD/bin" 0 $PROGS > "$TMPD/bp.log" 2>&1 \
 python3 tools/k15/tree.py "$TMPD/baum" > "$TMPD/baum.log" 2>&1 \
     && ok "der Verzeichnisbaum ist gebaut" || bad "tools/k15/tree.py fehlgeschlagen"
 
-ARGS=(build "$TMPD/disk.img" 4096 /lib/ "/lib/mono.ttf=$MONO" "/lib/sans.ttf=$SANS" /bin/)
+ARGS=(build "$TMPD/disk.img" 8192 /lib/ "/lib/mono.ttf=$MONO" "/lib/sans.ttf=$SANS" /bin/)
 for p in $PROGS; do ARGS+=("/bin/$p=$TMPD/bin/${p}.elf"); done
 ARGS+=("/bin/files@/bin/explorer" /sicherung/ /etc/ "/etc/theme=$TMPD/baum/theme")
 while read -r z; do ARGS+=("$z"); done < <(python3 tools/k15/bundle.py assets/apps "$TMPD/buendel")

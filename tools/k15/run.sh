@@ -209,7 +209,15 @@ num "Zeilen der Naht im Kernel -- so wenig Kernel wie moeglich" "$kernzeilen" lt
 python3 tools/k15/tree.py "$TMPD/baum" > "$TMPD/baum.log" 2>&1 \
     && ok "der Verzeichnisbaum fuer den Dateimanager ist gebaut ($(head -1 "$TMPD/baum.log"))" \
     || bad "tools/k15/tree.py fehlgeschlagen"
-ARGS=(build "$TMPD/disk.img" 4096 /lib/
+# RUNDE VIEWER: 8192 BLOECKE STATT 4096. Der Grund steht in der Zeile
+# darueber: seit dieser Runde steht `/bin/viewer` mit in PROGS, und der
+# Betrachter traegt vier Dekodierer und zwei Schreiber mit sich (rund
+# 450 KiB). Mit 4096 Bloecken (16 MiB) brach `mkfs.py` mit "the disk is
+# full" ab, und danach fiel jede Zusage dieses Laeufers durch, die eine
+# Platte braucht -- 35 Stueck, ohne dass irgendwo stand, warum. Das
+# Abbild ist eine Zahl im Testlaeufer und keine Zusage: es groesser zu
+# machen entschaerft nichts.
+ARGS=(build "$TMPD/disk.img" 8192 /lib/
       "/lib/mono.ttf=$MONO" "/lib/sans.ttf=$SANS" /bin/)
 for p in $PROGS; do ARGS+=("/bin/$p=$TMPD/${p}0.elf"); done
 ARGS+=("/bin/files@/bin/explorer")
@@ -933,7 +941,7 @@ num "Farben, die aus /etc/theme gelesen wurden" "$tn" eq "$soll"
 # ANDEREN Datei hat er eine andere -- das ist die Gegenprobe, ohne die
 # "es gibt ein Farbschema" eine Behauptung ueber eine Zahl waere.
 sed 's/^btn=.*/btn=804020/' "$TMPD/baum/theme" > "$TMPD/theme2"
-ARGS2=(build "$TMPD/disk2.img" 4096 /lib/
+ARGS2=(build "$TMPD/disk2.img" 8192 /lib/
       "/lib/mono.ttf=$MONO" "/lib/sans.ttf=$SANS" /bin/)
 for p in $PROGS; do ARGS2+=("/bin/$p=$TMPD/${p}0.elf"); done
 ARGS2+=("/bin/files@/bin/explorer")
@@ -1066,8 +1074,15 @@ has "$TMPD/start.txt" "k15: start /bin/launcher" "der Starter kommt von der Plat
 na=$(feld "$TMPD/start.txt" "launcher: apps" apps)
 soll=$(ls -d assets/apps/*.osp | wc -l)
 num "er findet so viele Programme, wie .osp-Buendel im Baum liegen" "$na" eq "$soll"
-has "$TMPD/start.txt" "launcher: treffer i=0 name=[Datei-Explorer] exec=[/apps/explorer.osp/start]" \
-    "und das Buendel fuehrt den Dateimanager mit Name UND Befehl"
+# RUNDE VIEWER: DIE ERSTE ZEILE IST NICHT MEHR DER DATEIMANAGER.
+# Der Starter sortiert nach Anzeigenamen, und seit dieser Runde liegt
+# `viewer.osp` mit dem Namen "Bilder" im Baum -- B kommt vor D. Die
+# Zusage wird deshalb NICHT weicher, sondern rueckt eine Zeile weiter:
+# geprueft wird weiterhin Name UND Befehl, jetzt fuer beide Buendel.
+has "$TMPD/start.txt" "launcher: treffer i=0 name=[Bilder] exec=[/apps/viewer.osp/start]" \
+    "und das Buendel fuehrt den Bildbetrachter mit Name UND Befehl"
+has "$TMPD/start.txt" "launcher: treffer i=1 name=[Datei-Explorer] exec=[/apps/explorer.osp/start]" \
+    "und das naechste den Dateimanager, ebenfalls mit Name UND Befehl"
 # EIN PROGRAMM IST EIN VERZEICHNIS, und das steht nicht im Quelltext,
 # sondern auf der Platte. Was ausgefuehrt wird, ist `start` IM Buendel --
 # und `start` ist derselbe Inode wie die Datei unter `/bin`, kein zweites
@@ -1096,10 +1111,10 @@ SFG=$(frgb "$TMPD/start.txt" "launcher: rows" fg)
 SBG=$(frgb "$TMPD/start.txt" "launcher: rows" bg)
 schau "die erste Zeile des Starters, je Zeichen" \
     ttext "$TMPD/start.ppm" "$SANS" 15 $((SCX + SRX)) $((SCY + SRB)) \
-    $SSFG $SSEL "Datei-Explorer  --  Dateien und Ordner ansehen" 96
+    $SSFG $SSEL "Bilder  --  Fotos ansehen, drehen, zuschneiden" 96
 schau "und die zweite" \
     ttext "$TMPD/start.ppm" "$SANS" 15 $((SCX + SRX)) $((SCY + SRB + SZH)) \
-    $SFG $SBG "Editor  --  Text schreiben und aendern" 96
+    $SFG $SBG "Datei-Explorer  --  Dateien und Ordner ansehen" 96
 # DAS SYMBOL IST EINE DATEI. Im ersten Nachtrag war es sechs Hexziffern
 # in einer Textdatei -- ehrlich, solange dieses System kein Bild lesen
 # konnte, aber eben kein Bild. Seit dem zweiten liegt in jedem Buendel
@@ -1119,18 +1134,18 @@ pruef() { local name=$1; shift
 pruef_nicht() { local name=$1; shift
     local aus rc; aus=$(python3 tools/k15/iconpixels.py "$@" 2>&1); rc=$?
     if [ "$rc" -ne 0 ]; then ok "$name ($aus)"; else bad "$name -- ging durch"; fi; }
-for a in explorer editor; do
+for a in viewer explorer editor; do
     python3 tools/k15/icon.py --pruefe "$(sym $a)" "assets/apps/$a.osp/symbol.txt" \
         > "$TMPD/sym-$a.txt" 2>&1 \
         && ok "das Symbol von $a im Abbild ist die Zeichnung aus dem Quellbaum ($(cat "$TMPD/sym-$a.txt"))" \
         || bad "das Symbol von $a stimmt nicht mit seiner Zeichnung ueberein"
 done
-pruef "das Symbol des Dateimanagers steht Punkt fuer Punkt im Bild" \
+pruef "das Symbol des Bildbetrachters steht Punkt fuer Punkt im Bild" \
+    "$TMPD/start.ppm" $((SCX + SIX)) $((SCY + SIY)) 14 14 "$(sym viewer)"
+pruef_nicht "und es ist NICHT das des Dateimanagers (die Gegenprobe)" \
     "$TMPD/start.ppm" $((SCX + SIX)) $((SCY + SIY)) 14 14 "$(sym explorer)"
-pruef_nicht "und es ist NICHT das des Editors (die Gegenprobe)" \
-    "$TMPD/start.ppm" $((SCX + SIX)) $((SCY + SIY)) 14 14 "$(sym editor)"
-pruef "in Zeile 1 steht dafuer das des Editors" \
-    "$TMPD/start.ppm" $((SCX + SIX)) $((SCY + SIY + SZH)) 14 14 "$(sym editor)"
+pruef "in Zeile 1 steht dafuer das des Dateimanagers" \
+    "$TMPD/start.ppm" $((SCX + SIX)) $((SCY + SIY + SZH)) 14 14 "$(sym explorer)"
 
 echo "== 14c. die Suche -- und dass wirklich die Schluesselwoerter greifen =="
 # DIE ZUSAGE, UM DIE ES GEHT: man tippt "folder" und findet den
