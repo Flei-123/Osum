@@ -77,7 +77,7 @@ export {
     M_BORDER, M_PAD_X, M_PAD_Y, M_GAP, M_ROW, M_CTRL_H,
     M_SHADOW, M_SHADOW_R, M_DIVIDER, M_FOCUS, M_COUNT,
     M_SP_XS, M_SP_S, M_SP_M, M_SP_L, M_GRAD, M_TONE,
-    M_SHADOW2, M_SHADOW_R2, M_CAPTION, space,
+    M_SHADOW2, M_SHADOW_R2, M_CAPTION, space, shade, grad_room,
     SHAPE_CLASSIC, SHAPE_MODERN,
     rrect, rframe, rring, drop_shadow, divider, aa_pixels,
     theme_semantic_count,
@@ -802,17 +802,109 @@ fn drop_shadow(x: u64, y: u64, w: u64, h: u64, r: u64, strength: u64,
         // the outermost ring is the weakest
         let a: u64 = strength * 255 / 100 * (reach + 1 - i) / (reach + 1)
         if a != 0 {
-            let ox: u64 = x - i
             // A SHADOW SITS BELOW ITS WINDOW AND NOT AROUND IT. One
             // pixel of downward offset per ring is what every system
             // that draws one does, and it is what makes the thing read
             // as "above" instead of "glowing".
-            let oy: u64 = y - i + 1
-            rframe(ox, oy, w + 2 * i, h + 2 * i, r + i, 1,
-                blend(get(ox, oy + (h + 2 * i) / 2), color, a),
-                blend(get(ox, oy + (h + 2 * i) / 2), color, a))
+            shadow_edge(x - i, y - i + 1, w + 2 * i, h + 2 * i, r + i,
+                color, a)
         }
         i = i - 1
+    }
+}
+
+// EIN UMRISS VON EINEM BILDPUNKT, GEMISCHT -- und die Berichtigung
+// eines Fehlers, den erst diese Runde sichtbar gemacht hat.
+//
+// WAS HIER STAND. `drop_shadow` hat jeden seiner Ringe als `rframe`
+// gemalt, und zwar mit DERSELBEN Farbe fuer den Rand UND fuer das
+// Innere:
+//
+//     rframe(ox, oy, w + 2i, h + 2i, r + i, 1, c, c)
+//
+// `rframe` fuellt das Innere -- das ist seine Aufgabe und steht so in
+// seinem eigenen Kommentar. Der "Schatten" war also ein VOLL GEFUELLTES
+// Rechteck in Schattenfarbe, und er ist nur deshalb nie aufgefallen,
+// weil sein einziger Aufrufer (die Vorschaukachel aus Runde THEMESTORE)
+// unmittelbar danach ein Fenster darueber gemalt hat. Die Karte dieser
+// Runde tut das nicht -- sie ist kleiner als ihr Schatten --, und das
+// Bild kam mit einer schwarzen Flaeche statt einer Fensteroberflaeche
+// heraus. Gemessen: die Fensterflaeche neben der Karte war (0, 0, 1)
+// statt (248, 250, 252).
+//
+// ZWEITER FEHLER IN DERSELBEN ZEILE. Die Farbe wurde EINMAL aus EINEM
+// Bildpunkt am linken Rand gemischt (`blend(get(ox, oy + h/2), ...)`)
+// und dann ueberall hingeschrieben. Ein Schatten, der ueber zwei
+// verschiedene Untergruende laeuft, hatte damit auf beiden dieselbe
+// Farbe -- also auf einem der beiden die falsche.
+//
+// Beides ist hier behoben: EIN Bildpunkt breit, nichts gefuellt, und
+// jeder Bildpunkt einzeln gegen DAS gemischt, was unter IHM liegt.
+fn shadow_edge(x: u64, y: u64, w: u64, h: u64, r0: u64, color: u64,
+    a: u64) {
+    if w < 2 || h < 2 || a == 0 {
+        return
+    }
+    var r: u64 = r0
+    if r > RADIUS_MAX {
+        r = RADIUS_MAX
+    }
+    if r * 2 > w {
+        r = w / 2
+    }
+    if r * 2 > h {
+        r = h / 2
+    }
+    // die vier geraden Stuecke
+    var c: u64 = r
+    while c < w - r {
+        let x0: u64 = x + c
+        px(x0, y, blend(get(x0, y), color, a))
+        px(x0, y + h - 1, blend(get(x0, y + h - 1), color, a))
+        c = c + 1
+    }
+    var q: u64 = r
+    while q < h - r {
+        let y0: u64 = y + q
+        px(x, y0, blend(get(x, y0), color, a))
+        px(x + w - 1, y0, blend(get(x + w - 1, y0), color, a))
+        q = q + 1
+    }
+    if r == 0 {
+        return
+    }
+    // und die vier Boegen, mit derselben Deckung wie `rring`
+    var innen: u64 = 0
+    if r > 1 {
+        innen = r - 1
+    }
+    var dy: u64 = 0
+    while dy < r {
+        var dx: u64 = 0
+        while dx < r {
+            let aussen: u64 = corner_cov(r - 1 - dx, r - 1 - dy, r)
+            var i2: u64 = 0
+            if innen > 0 {
+                i2 = corner_cov(r - 1 - dx, r - 1 - dy, innen)
+            }
+            var cov: u64 = 0
+            if aussen > i2 {
+                cov = aussen - i2
+            }
+            if cov != 0 {
+                let d: u64 = cov * a / 255
+                let x0: u64 = x + dx
+                let y0: u64 = y + dy
+                let x1: u64 = x + w - 1 - dx
+                let y1: u64 = y + h - 1 - dy
+                px(x0, y0, blend(get(x0, y0), color, d))
+                px(x1, y0, blend(get(x1, y0), color, d))
+                px(x0, y1, blend(get(x0, y1), color, d))
+                px(x1, y1, blend(get(x1, y1), color, d))
+            }
+            dx = dx + 1
+        }
+        dy = dy + 1
     }
 }
 
@@ -1470,8 +1562,9 @@ const M_FOCUS: u64 = 13
 //   spacing_l    between two cards, and the margin of a page
 //
 // `classic` gets the numbers that WERE in the painting routines, so it
-// is unchanged by construction: 2 (the inner edge of `frame`), 4
-// (pad_y), 8 (want_gap), 12 (pad_x).  `modern` doubles the middle two.
+// is unchanged by construction: 2 (the inner edge of `frame`), 6 and 10
+// (the gap and the padding that stood in six `wlib.box_v` calls in the
+// settings program), 12 (pad_x).  `modern` takes 4/8/16/24.
 const M_SP_XS: u64 = 14
 const M_SP_S: u64 = 15
 const M_SP_M: u64 = 16
@@ -3020,8 +3113,8 @@ fn metrics_classic() {
     // the rounds BEFORE this one, written down.  A machine with no
     // /etc/shapes draws exactly what it drew yesterday.
     met[(M_SP_XS) as usize] = 2
-    met[(M_SP_S) as usize] = 4
-    met[(M_SP_M) as usize] = 8
+    met[(M_SP_S) as usize] = 6
+    met[(M_SP_M) as usize] = 10
     met[(M_SP_L) as usize] = 12
     met[(M_GRAD) as usize] = 0
     met[(M_TONE) as usize] = 100
@@ -3201,6 +3294,55 @@ fn space(i: u64) -> u64 {
         return 0
     }
     return met[((M_SP_XS + i)) as usize]
+}
+
+// ROUND SOFTUI: THE GRADIENT, AND IT IS THE SAME ARITHMETIC IN BOTH
+// RINGS.  The compositor shades the title bar (kernel/wm.fi,
+// `paint_title`) and the taskbar shades itself; if the two used
+// different rules the two bars would not match, and they sit four
+// hundred pixels apart on the same screen.  So the rule lives once,
+// in words, and twice in code -- and `tools/softui/run.sh` section D
+// reads both bars out of the SAME picture and compares the step.
+//
+// `shade` darkens; `grad_room` says by how much the colour can be
+// darkened before its smallest channel hits zero, because a gradient
+// that clips one channel is a gradient that changes the hue.
+fn shade(c: u64, d: u64) -> u64 {
+    var r: u64 = (c >> 16) & 255
+    var g: u64 = (c >> 8) & 255
+    var b: u64 = c & 255
+    if r > d {
+        r = r - d
+    } else {
+        r = 0
+    }
+    if g > d {
+        g = g - d
+    } else {
+        g = 0
+    }
+    if b > d {
+        b = b - d
+    } else {
+        b = 0
+    }
+    return (r << 16) | (g << 8) | b
+}
+
+fn grad_room(c: u64, want: u64) -> u64 {
+    var m: u64 = (c >> 16) & 255
+    let g: u64 = (c >> 8) & 255
+    let b: u64 = c & 255
+    if g < m {
+        m = g
+    }
+    if b < m {
+        m = b
+    }
+    if want > m {
+        return m
+    }
+    return want
 }
 
 fn cap(v: u64, hi: u64) -> u64 {
