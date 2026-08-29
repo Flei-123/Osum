@@ -110,6 +110,42 @@ Fotolauf mit dem 12-MP-Bild bekommt es; die Warteschleife wartet die
 volle Zeit ab. Die erste Fassung hatte Bit **17** genommen, und das
 gehört `M_DESK` — der Betrachter startete daraufhin gar nicht.
 
+## Was diese Runde in ANDEREN Abnahmen zerbrochen hatte
+
+Der Betrachter steht seit dieser Runde in der Programmliste von sechs
+weiteren Testläufern, und sein Bündel liegt unter `assets/apps`. Beides
+hatte Folgen, die keiner der Läufer benannte:
+
+* **`tools/k15/run.sh` fiel mit 35 Zusagen durch.** Die einzige Zeile,
+  die es sagte, war `mkfs: the disk is full` — `/bin/viewer` trägt vier
+  Dekodierer und zwei Schreiber (rund 450 KiB), und mit 4096 Blöcken
+  (16 MiB) ging das Abbild nicht mehr auf. Danach fehlte jede Platte,
+  und alles Weitere war Folgeschaden. **Abbild auf 8192 Blöcke.**
+* **Fünf weitere Zusagen desselben Läufers** prüften bildpunktgenau,
+  dass in Zeile 0 des Starters „Datei-Explorer" steht. Der Starter
+  sortiert nach Anzeigenamen, und **„Bilder" kommt vor „Datei-Explorer"**
+  — die Zusagen sind eine Zeile weitergerückt (Name, Beschreibung und
+  Symbol werden weiterhin Punkt für Punkt geprüft, jetzt für den
+  Betrachter in Zeile 0 und den Dateimanager in Zeile 1).
+* Dieselbe Bildgröße vorsorglich für `tools/desktop`, `tools/icons`,
+  `tools/netview/smoke.sh` und `tools/tresor/gui.sh` — sie tragen den
+  Betrachter ebenfalls in ihrer Programmliste.
+
+**Nachgemessen nach der Reparatur:**
+
+| Läufer | Ergebnis |
+|---|---|
+| `tools/viewer/run.sh` | **109 passed, 0 failed** |
+| `tools/k15/run.sh` | **254 passed, 0 failed** (vorher 35 rot) |
+| `tools/wm/run.sh` | **103 passed, 0 failed** |
+| `tools/icons/run.sh` | 24 ok, **1** rot — `lib/icons.fi` gegen den Lucide-Bauer, **vorbestehend** (diese Runde fasst weder `lib/icons.fi` noch `assets/icons` an) |
+| `tools/desktop/run.sh` | **6** rot, alle **vorbestehend**: `WM_MAXNR` erwartet 2113, `kernel/sys.fi` führt 2114 (von dieser Runde nicht angefasst), und die fünf Zusagen um `settings: ... edge=right` sind das in `docs/NETVIEW.md` §11.5 aufgeschriebene Verschneiden der seriellen Leitung zwischen drei Ring-3-Programmen — **dasselbe Grundproblem**, das diese Runde in Abschnitt 8 noch einmal getroffen hat |
+
+Für die beiden roten Läufer wurde **kein** Grundlinienlauf auf
+`mergeline` gemacht; die Zuordnung „vorbestehend" stützt sich auf die
+Quelltexte (unberührt) und auf `docs/NETVIEW.md`. Das gehört
+dazugesagt.
+
 ## Zeilenzahlen und Zeiten, zum Nachschlagen
 
 | | |
