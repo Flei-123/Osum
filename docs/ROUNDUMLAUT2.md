@@ -180,3 +180,57 @@ auf Umschrift und verlangen, dass der Pruefer rot wird:
 Und eine GEGEN-GEGENPROBE: eine neu eingefuegte MITSCHNITT-Zeile mit
 Umschrift muss GRUEN bleiben. Sonst ist der Pruefer nur laut und nicht
 richtig, und der Naechste, den er grundlos anmeckert, schaltet ihn ab.
+
+---
+
+## 7. DIE ZWEITE SORTE LEICHE: DIE ABNAHME SUCHT DEN ALTEN TEXT
+
+Nach der Umstellung wurde `tools/tiling/run.sh` rot:
+
+    FAIL  Kern sagt 21, /bin/tiling sagt ''
+
+Am System fehlte nichts. `tiling.fi` sagte seit Abschnitt 2 richtig
+`tiling: Einträge gelesen` -- und der Laeufer suchte zwei Zeilen
+weiter unten weiter nach dem alten Satz:
+
+    ub=$(grep -aoE '^[0-9]+ tiling: Eintraege' "$U" | ...)
+
+Das ist die unangenehmste Form des Fehlers: der Laeufer wird ROT, es
+sieht aus wie ein echter Ausfall, und wer ihn sucht, sucht ihn am
+falschen Ende. Elf andere Erwartungen waren in Abschnitt 2 mitgezogen
+worden, diese eine nicht, weil sie kein `has`-Aufruf ist, sondern ein
+`grep` mitten in einer Zuweisung.
+
+`tools/i18n/erwartung.py` schliesst das. Es liest jeden Satz MIT Umlaut
+aus `kernel/**`, `lib/**`, `locale/de/*` und den Buendeln, bildet
+seine Umschrift zurueck und sucht sie in allen 124 Abnahmelaeufern.
+
+**Die Schwierigkeit ist nicht das Finden, sondern das Schweigen.** Ein
+Laeufer redet in zwei Sprachen zugleich:
+
+    grep -aoE '^[0-9]+ tiling: Eintraege'          <- SUCHAUSDRUCK
+    num "Eintraege, die aus tiling.conf gelesen"   <- BESCHREIBUNG
+    lauf ... "opk zurueck 0;/apps/hallo.osp/start" <- EINGABE
+
+Nur die erste Zeile ist ein Fehler. Die zweite ist Abnahmesprache
+(`docs/I18N.md` nimmt sie aus), die dritte eine getippte Marke, die
+ausdruecklich ASCII bleiben soll. Die erste Fassung des Pruefers
+meldete 163 Funde, davon 162 Fehlalarme dieser beiden Sorten -- und ein
+Pruefer, der 162-mal grundlos anschlaegt, wird beim naechsten Mal
+abgeschaltet und prueft dann gar nichts mehr.
+
+Unterschieden wird ueber das PROGRAMMPRAEFIX. Geprueft werden nur
+Saetze der Form `tiling: …`, `fas: …`, `opk: …`, und die gesuchte
+Phrase muss das Praefix TRAGEN. Das ist die Form, in der ein Programm
+auf die Leitung schreibt und nach der eine Abnahme greppt -- und die
+Form, die in einer Beschreibung oder einer Befehlszeile nichts zu
+suchen hat. Damit: **129 Saetze, 39 Phrasen, 124 Laeufer, 0 Funde**,
+und der eine echte Fall wird gefunden.
+
+Abschnitt 7b der Runde traegt beides:
+
+* GEGENPROBE -- eine Kopie mit `tiling: Eintraege` im `grep` muss rot
+  werden (tut sie, rc=1),
+* GEGEN-GEGENPROBE -- eine neu eingefuegte BESCHREIBUNG mit
+  `Eintraege, die aus der Datei gelesen wurden` und der Eingabe
+  `opk zurueck 0` muss GRUEN bleiben (tut sie).
