@@ -38,7 +38,11 @@ Stand: 29.08.2026, 03:10 -- laufend.
   (posix und smp an 'No space left on device', k17 an Last).
   Es bleiben k14, k16, icons, tunnelpakete -- alle VORBESTEHEND.
   KEIN NEUER SCHADEN DURCH hwnet.
-- [offen] look, paint
+- [erledigt] Merge look -> mergeline (656fc98; 11 PNG-Konflikte, --theirs)
+- [erledigt] volle Abnahme danach (/root/M4-LOOK.log): 39 Abschnitte,
+  35 gruen / 4 rot, 3360 Zusagen -- die vier roten sind GENAU die
+  vorbestehenden (k14, k16, icons, tunnelpakete). Kein neuer Schaden.
+- [offen] paint
 - [offen] KVM-Bootlauf, mergeline -> main, OrientOS vendor/osum/COMMIT
 
 ## Zahlen
