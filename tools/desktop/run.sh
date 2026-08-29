@@ -104,7 +104,7 @@ for s in 0 1; do
 done
 [ -f "$TMPD/k0.mb" ] || { echo "TASKBAR: $pass passed, $((fail + 1)) failed"; exit 1; }
 
-PROGS="schreibtisch leiste einstellungen launcher dhcp explorer widgetdemo locate sh echo ls cat edit"
+PROGS="desktop taskbar settings launcher dhcp explorer widgetdemo locate sh echo ls cat edit"
 as --64 -o "$TMPD/crt.o" kernel/user/crt.s 2>/dev/null \
     || bad "crt.s does not assemble"
 build_progs() { # stage
@@ -122,14 +122,14 @@ build_progs() { # stage
     done
     return $rc
 }
-build_progs 0 && ok "firnc0: $(echo $PROGS | wc -w) programs built, /bin/leiste is $(stat -c%s "$TMPD/leiste0.elf") octets" \
+build_progs 0 && ok "firnc0: $(echo $PROGS | wc -w) programs built, /bin/taskbar is $(stat -c%s "$TMPD/taskbar0.elf") octets" \
     || bad "firnc0: the programs do not build"
 build_progs 1 && ok "firnc1: the same ones out of the compiler written in Firn" \
     || bad "firnc1: the programs do not build"
 
 # THE BAR IS A PROGRAM IN RING 3. Not a claim -- the kernel image does
 # not carry a single one of its symbols.
-for sym in leiste__paint leiste__conf_read leiste__drag_step; do
+for sym in taskbar__paint taskbar__conf_read taskbar__drag_step; do
     if nm -a "$TMPD/k0.mb.elf" 2>/dev/null | grep -q "$sym"; then
         bad "the kernel carries $sym -- the taskbar belongs in ring 3"
     else
@@ -146,7 +146,23 @@ conf() { # edge height width autohide ontop -> file
 }
 mk_image() { # image conf-file
     local img=$1 cf=$2
-    local ARGS=(build "$img" 4096 /lib/
+    # 16384 BLOCKS AND NOT 4096. mkfs' block is 512 octets, so this is
+    # 8 MiB and used to be 2. Round LOOK made the three programs of the
+    # desktop considerably bigger -- the shape tokens and the rounded,
+    # antialiased drawing in settings, the icon glyphs and the second
+    # status field in the taskbar, and a message catalogue that went
+    # from 72 keys to 154:
+    #
+    #     settings  384200 -> 565248     taskbar  278032 -> 371248
+    #     desktop   181568 -> 249368     (+342 KiB together)
+    #
+    # and the image stopped fitting. The failure is loud but it is loud
+    # in the WRONG PLACE: `mkfs: the disk is full`, then twenty-nine
+    # assertions about drag, autohide and the settings page fail because
+    # there was no image to boot. tools/look/shot.sh and
+    # tools/netview/run.sh were already on 8192 for the same set of
+    # programs, which is why they did not notice.
+    local ARGS=(build "$img" 16384 /lib/
         "/lib/mono.ttf=$MONO" "/lib/sans.ttf=$SANS" /bin/)
     local p
     for p in $PROGS; do ARGS+=("/bin/$p=$TMPD/${p}0.elf"); done
@@ -179,7 +195,7 @@ for f in kernel/wm.fi kernel/sys.fi kernel/user/wlibc.fi; do
         bad "$f numbers the edges differently"
     fi
 done
-grep -q 'edge=' kernel/user/leiste.fi && grep -q 'edge=' kernel/user/einstellungen.fi \
+grep -q 'edge=' kernel/user/taskbar.fi && grep -q 'edge=' kernel/user/settings.fi \
     && ok "both writers of /etc/taskbar.conf spell the key 'edge'" \
     || bad "the two writers of /etc/taskbar.conf disagree about the key"
 
@@ -416,7 +432,96 @@ same "so the work area is the screen minus that sliver" "598" "$wk"
 png "$TMPD/hide.ppm" "autohide"
 
 echo "== 8. the settings write the same file, and the bar follows =="
-python3 - > "$TMPD/mon-set" <<'PYEOF'
+# THE CLICKS ARE COMPUTED, NOT REMEMBERED.
+#
+# This used to be three pairs of coordinates somebody had read off a
+# screenshot once: (172,328), (174,443), (212,471). Round LOOK put a
+# shape chooser and an alignment chooser on this page above the taskbar
+# section, every control below them moved down, and the three clicks
+# landed on the wrong widgets. Six assertions went red and not one of
+# them said "the page moved" -- they said the drop-down had not opened.
+#
+# So the run is in TWO PASSES. The first boots the settings program and
+# clicks nothing; the program reports where it put its widgets
+# (`settings: rect name=... x= y= w= h=`) and where the window is. From
+# those the second pass works out where to press:
+#
+#   the chooser   the middle of the `edge` rectangle
+#   row 3         the drop-down opens directly under the chooser at the
+#                 x/y the program reports when it opens, `rh` per row
+#   Apply         the middle of the `apply` rectangle
+#
+# All of it inside the window, whose inner origin is x+2, y+22 -- the
+# border and the title bar the SERVER draws, which is why a window
+# clamped into a corner reports its OUTER position.
+conf bottom 28 104 0 1 > "$TMPD/conf-set"
+: > "$TMPD/mon-probe"
+run set-probe "$TMPD/conf-set" "einst" "$TMPD/mon-probe" || true
+P="$TMPD/set-probe.txt"
+rect() { # name field -> value
+    # ONE RECORD OR NOTHING, and the record carries `ax`/`ay`: where the
+    # widget really is on the screen. Two records merged onto one line by
+    # the shared serial port would otherwise hand back the x of one and
+    # the y of the next, and needing a SECOND record (`name=win`) to do
+    # the arithmetic doubles the chance that one of them is cut in half.
+    grep -a 'settings: rect name=' "$P" \
+        | grep -oE "name=$1 x=[0-9]+ y=[0-9]+ w=[0-9]+ h=[0-9]+ ax=[0-9]+ ay=[0-9]+" \
+        | tail -1 | grep -oE " $2=[0-9]+" | grep -oE '[0-9]+'
+}
+WH=$(rect win h)
+EAX=$(rect edge ax); EAY=$(rect edge ay); EW=$(rect edge w); EH=$(rect edge h)
+BAX=$(rect apply ax); BAY=$(rect apply ay); AW=$(rect apply w); AH=$(rect apply h)
+if [ -z "$WH" ] || [ -z "$EAX" ] || [ -z "$BAX" ]; then
+    bad "the settings did not report their geometry -- no clicks can be computed"
+    grep -a 'settings: rect' "$P" | sed 's/^/        /' | head -8
+else
+    ok "the settings report where their taskbar widgets are (edge $EAX,$EAY  apply $BAX,$BAY)"
+    # A WIDGET OUTSIDE ITS WINDOW IS DRAWN NOWHERE, NOT DRAWN WRONG.
+    #
+    # `wlib` lays a widget out at the position the box gives it and does
+    # not clamp it. If the page is taller than the window, the last
+    # controls are simply placed past the bottom edge: no error, no
+    # warning, nothing on the screen, and no way to click them. Round
+    # LOOK put two more controls on the Darstellung page and pushed
+    # Apply out that way, and the only symptom was six assertions in
+    # this section failing for what looked like an unrelated reason.
+    #
+    # The inner height of a window is its height minus the border and
+    # the title bar the server draws (2 + 22).
+    INNER=$((WH - 24))
+    OVER=0
+    while read -r nm ry rh; do
+        [ "$nm" = win ] && continue
+        [ -z "$ry" ] && continue
+        [ $((ry + rh)) -gt "$INNER" ] && {
+            echo "        outside: $nm ends at $((ry + rh)), the window is $INNER high"
+            OVER=$((OVER + 1)); }
+    done < <(grep -a 'settings: rect name=' "$P" \
+             | grep -oE 'name=[a-z]+ x=[0-9]+ y=[0-9]+ w=[0-9]+ h=[0-9]+' \
+             | sed -E 's/name=([a-z]+) x=[0-9]+ y=([0-9]+) w=[0-9]+ h=([0-9]+)/\1 \2 \3/' \
+             | sort -u)
+    num "every reported widget is INSIDE its window (a widget outside it cannot be clicked)" \
+        "$OVER" eq 0
+    CX=$((EAX + EW / 2)); CY=$((EAY + EH / 2))
+    # the menu opens at the chooser's own x and directly under it
+    MX=$EAX; MY=$((EAY + EH))
+    # The row height of a drop-down is `zeilen_hoehe() + 2`, and
+    # `zeilen_hoehe()` is the `row` token the program prints when it
+    # starts. Read it, do not assume it: it is 20 under `classic` and
+    # 24 under `modern`, and a runner that assumes one of them is a
+    # runner that works on one appearance.
+    RH=$(grep -a 'settings: shape file=' "$P" | tail -1 \
+         | grep -oE ' row=[0-9]+' | grep -oE '[0-9]+')
+    if [ -z "$RH" ]; then
+        bad "the settings did not report their row height"
+        RH=20
+    fi
+    RH=$((RH + 2))
+    # row 3 is "right": bottom, top, left, right
+    RX=$((MX + 20)); RY=$((MY + 3 * RH + RH / 2))
+    BX=$((BAX + AW / 2)); BY=$((BAY + AH / 2))
+    python3 - "$CX" "$CY" "$RX" "$RY" "$BX" "$BY" > "$TMPD/mon-set" <<'PYEOF'
+import sys
 def go(x, y):
     out = ["mouse_move -120 -120"] * 6
     dx, dy = x, y
@@ -426,26 +531,27 @@ def go(x, y):
         dx -= sx
         dy -= sy
     return out
-L = go(172, 328) + ["warte 1", "mouse_button 1", "mouse_button 0", "warte 2"]
-L += go(174, 443) + ["warte 1", "mouse_button 1", "mouse_button 0", "warte 2"]
-L += go(212, 471) + ["warte 1", "mouse_button 1", "mouse_button 0", "warte 3"]
+a = [int(v) for v in sys.argv[1:7]]
+L = go(a[0], a[1]) + ["warte 1", "mouse_button 1", "mouse_button 0", "warte 2"]
+L += go(a[2], a[3]) + ["warte 1", "mouse_button 1", "mouse_button 0", "warte 2"]
+L += go(a[4], a[5]) + ["warte 1", "mouse_button 1", "mouse_button 0", "warte 3"]
 print("\n".join(L))
 PYEOF
-conf bottom 28 104 0 1 > "$TMPD/conf-set"
-run settings "$TMPD/conf-set" "einst" "$TMPD/mon-set"
-L="$TMPD/settings.txt"
-has "$L" "settings: rect name=edge" "the settings report where their taskbar widgets are"
-has "$L" "settings: menu open" "the click opened the drop-down"
-r=$(grep -a 'settings: menu took ' "$L" | tail -1 | grep -oE 'row=[0-9]+' | sed 's/.*=//')
-same "and the row that was clicked is 'right'" "3" "$r"
-has "$L" "settings: taskbar edge=right" "'Uebernehmen' wrote edge=right"
-wr=$(grep -a 'settings: taskbar ' "$L" | tail -1 | grep -oE 'wrote=[0-9]+' | sed 's/.*=//')
-num "and it really wrote a file" "$wr" ge 1
-ename=$(grep -a 'taskbar: conf ' "$L" | tail -1 | grep -oE 'ename=[a-z]+' | sed 's/.*=//')
-same "the taskbar -- a different process -- re-read the file and moved to" "right" "$ename"
-g=$(grep -a 'taskbar: geom ' "$L" | tail -1 | grep -oE 'x=[0-9]+ y=[0-9]+ w=[0-9]+ h=[0-9]+')
-same "to exactly the right edge" "x=696 y=0 w=104 h=600" "$g"
-png "$TMPD/settings.ppm" "settings"
+    echo "        clicks: chooser $CX,$CY   row3 $RX,$RY   apply $BX,$BY   (rh=$RH)"
+    run settings "$TMPD/conf-set" "einst" "$TMPD/mon-set"
+    L="$TMPD/settings.txt"
+    has "$L" "settings: menu open" "the click opened the drop-down"
+    r=$(grep -a 'settings: menu took ' "$L" | tail -1 | grep -oE 'row=[0-9]+' | sed 's/.*=//')
+    same "and the row that was clicked is 'right'" "3" "$r"
+    has "$L" "settings: taskbar edge=right" "'Uebernehmen' wrote edge=right"
+    wr=$(grep -a 'settings: taskbar ' "$L" | tail -1 | grep -oE 'wrote=[0-9]+' | sed 's/.*=//')
+    num "and it really wrote a file" "$wr" ge 1
+    ename=$(grep -a 'taskbar: conf ' "$L" | tail -1 | grep -oE 'ename=[a-z]+' | sed 's/.*=//')
+    same "the taskbar -- a different process -- re-read the file and moved to" "right" "$ename"
+    g=$(grep -a 'taskbar: geom ' "$L" | tail -1 | grep -oE 'x=[0-9]+ y=[0-9]+ w=[0-9]+ h=[0-9]+')
+    same "to exactly the right edge" "x=696 y=0 w=104 h=600" "$g"
+    png "$TMPD/settings.ppm" "settings"
+fi
 
 echo "== 9. what the older runners said, and still say =="
 for t in tools/wm/run.sh tools/k15/run.sh; do
