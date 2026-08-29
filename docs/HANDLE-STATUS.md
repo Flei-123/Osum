@@ -59,7 +59,24 @@ Rechtebits bedeuten hier dasselbe wie dort.
 | `tools/posix/run.sh` | 134 / 0 | 134 / 0 |
 | `tools/unix/run.sh` | 107 / 0 | 107 / 0 |
 | `tools/caps/run.sh` | 67 / 0 | 67 / 0 |
+| `tools/k13/run.sh` (uid/gid) | — | 99 / 0 |
+| `tools/k14/run.sh` (VFS) | 151 / 1 | 151 / 1 |
+| `tools/userland/run.sh` | — | 91 / 0 |
+| `tools/k16/run.sh` (Selbstbau) | 58 / 6 | 58 / 6 |
 | `tools/handle/run.sh` | — | **80 / 0** (neu, beide Uebersetzer) |
+
+Zusammen **1093 bestandene Zusagen**, davon 80 neue.
+
+**Die sieben roten sind ALT und stehen genauso auf `mergeline`.** Das ist nicht
+behauptet, sondern nachgemessen: `tools/k14/run.sh` und `tools/k16/run.sh` sind
+auf dem Vorher-Stand gelaufen, und die Fehlerzeilen sind Zeile fuer Zeile
+dieselben (`diff` ueber die `FAIL`-Zeilen: identisch). K14: „und die Wurzelplatte
+danach, Oktett fuer Oktett". K16: `fas` findet `_F1.u_start` nicht, bindet 100
+statt 107 Programme, und die vier Folgezusagen daran.
+
+`tools/userland/run.sh` ist der Abschnitt, an dem diese Runde am ehesten haette
+scheitern muessen: eine Shell, fuenfundzwanzig Werkzeuge, Roehren und Umlenkung,
+alles ueber Deskriptoren, die seit dieser Runde Handles sind. 91 / 0.
 
 ### Kosten, gemessen
 
