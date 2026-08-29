@@ -36,13 +36,14 @@ import kstate
 import pci
 import arch.x86_64.apic
 import nvme
+import ahci
 import blk
 import fs
 import arch.x86_64.idt
 
 export {
     parse, stage, disk, timer_off, mode_of,
-    M_NOPCI, M_NOAPIC, M_NVME, M_BENCH,
+    M_NOPCI, M_NOAPIC, M_NVME, M_BENCH, M_AHCI,
     M_NIC, M_NICINTX, M_NICNOIRQ, M_NICNOBM,
     net_ip, net_prefix, net_gw, net_svc, net_port, net_bytes, net_wait,
     net_fallback,
@@ -69,6 +70,11 @@ const M_NIC: u64 = 512 // bring the card up at all
 const M_NICINTX: u64 = 1024 // the pin through the I/O APIC, not MSI-X
 const M_NICNOIRQ: u64 = 2048 // the vector stays masked -- counter-check
 const M_NICNOBM: u64 = 4096 // no bus master -- counter-check
+
+// RUNDE AHCI. Ein eigenes Wort, damit dieser Abschnitt NUR laeuft, wenn
+// er gemeint ist -- jede Messung aller vorherigen Runden bleibt damit
+// Oktett fuer Oktett die, die sie war.
+const M_AHCI: u64 = 8192
 
 const S_MODE: u64 = 0x0F0 // in the K2 scalar page, between apic and nvme
 
@@ -406,6 +412,14 @@ fn timer_off(state: u64) {
 // ---------------------------------------------------------- stage two
 
 fn disk(state: u64) {
+    // RUNDE AHCI: EIN EIGENER ZWEIG, und er kehrt nicht zurueck. Der
+    // NVMe-Abschnitt darunter formatiert seine eigene Platte; beides in
+    // einem Lauf waere eine Messung, in der nicht mehr zu sagen ist,
+    // welcher Treiber welchen Block geschrieben hat.
+    if on(state, M_AHCI) {
+        sata(state)
+        return
+    }
     var s_off: [u8; 14] = "nvme: skipped\0"
     var s_no: [u8; 16] = "nvme: no device\0"
     var s_fail: [u8; 20] = "nvme: init failed\0\0\0"
@@ -494,6 +508,204 @@ fn disk(state: u64) {
     filesystem(state)
     if on(state, M_BENCH) {
         bench(state)
+    }
+}
+
+// ==================================================================
+// RUNDE AHCI: DIE PLATTE, DIE EIN ECHTER PC HAT
+// ==================================================================
+//
+// Vier Messungen, und keine davon glaubt dem Treiber etwas:
+//
+//   1. WAS DER BUS SAGT. Der Controller wird ueber seine PCI-Klasse
+//      gefunden (01:06:01), nicht ueber eine Tabelle. Steht die
+//      Firmware auf IDE, meldet dieselbe Stelle `mode=ide` statt
+//      stumm nichts zu finden.
+//   2. EIN SEKTOR HIN UND ZURUECK. Ein Muster nach LBA 4096
+//      geschrieben, gelesen, verglichen. Ein Treiber, der beides
+//      nicht tut, sondern nur den Puffer stehen laesst, faellt hier
+//      NICHT auf -- deshalb wird der Lesepuffer vorher mit einem
+//      ANDEREN Muster gefuellt und zusaetzlich dagegen geprueft.
+//   3. ACHT SEKTOREN IN EINEM BEFEHL. Das ist die PRDT-Zeile mit der
+//      Laenge minus eins; ein Treiber, der sie falsch hat, liest
+//      genau einen Sektor zu wenig, und nur diese Messung sieht das.
+//   4. DAS DATEISYSTEM DARAUF. `fs.fi` bekommt kein Argument mehr und
+//      keine Zeile geaendert -- zum vierten Mal dieselbe Zusage wie
+//      bei DEV_NVME, DEV_ATA1 und DEV_USB. Und der WIRT liest das
+//      Abbild danach nach (`tools/ahci/run.sh`), also ist auch das
+//      nicht das Wort des Kernels.
+const AHCI_LBA1: u64 = 4096 // der einzelne Sektor
+const AHCI_LBAN: u64 = 5000 // die acht am Stueck
+const AHCI_MANY: u64 = 8
+
+fn sata(state: u64) {
+    var s_no: [u8; 16] = "ahci: no device\0"
+    var s_ide: [u8; 33] = "ahci: mode=ide  set BIOS to AHCI\0"
+    var s_fail: [u8; 19] = "ahci: init failed \0"
+    var s_tfd: [u8; 7] = " tfd=\0\0"
+    var s_why: [u8; 8] = "  why=\0\0"
+    var s_up: [u8; 7] = "ahci: \0"
+    var s_blk: [u8; 8] = "blocks=\0"
+    var s_sz: [u8; 10] = "  lbasz=\0\0"
+    var s_prt: [u8; 8] = "  port=\0"
+    var s_seen: [u8; 9] = "  ports=\0"
+    var s_slot: [u8; 9] = "  slots=\0"
+    var s_bm: [u8; 10] = "  master=\0"
+    var s_one: [u8; 14] = "ahci: one wr=\0"
+    var s_rd: [u8; 7] = "  rd=\0\0"
+    var s_same: [u8; 8] = "  same=\0"
+    var s_pre: [u8; 8] = "  pre=\0\0"
+    var s_many: [u8; 15] = "ahci: many wr=\0"
+    var s_n: [u8; 5] = "  n=\0"
+    var s_err: [u8; 9] = "  errs=\0\0"
+    var s_cmd: [u8; 9] = "  cmds=\0\0"
+    var s_dead: [u8; 9] = "  dead=\0\0"
+    var s_live: [u8; 10] = "  alive=\0\0"
+
+    if !ahci.present(state) {
+        if ahci.ide_mode(state) {
+            serial.puts((&s_ide[0]) as u64)
+        } else {
+            serial.puts((&s_no[0]) as u64)
+        }
+        serial.nl()
+        return
+    }
+    if !ahci.init(state) {
+        serial.puts((&s_fail[0]) as u64)
+        serial.puts((&s_tfd[0]) as u64)
+        serial.hex(ahci.last_tfd(state))
+        serial.puts((&s_why[0]) as u64)
+        serial.dec(ahci.why(state))
+        serial.nl()
+        return
+    }
+
+    // Das Busmaster-Bit wird NACH der Inbetriebnahme weggenommen, wenn
+    // die Gegenprobe danach fragt: `init` muss selbst einen Befehl
+    // (IDENTIFY) aus dem Speicher holen lassen, um die Groesse zu
+    // erfahren, und ein Lauf, der das schon nicht kann, sagt nichts
+    // ueber DMA aus. Genau dieselbe Ueberlegung wie in `disk`.
+    if on(state, M_NOBM) {
+        pci.disable_master(ahci.bdf(state))
+    }
+
+    serial.puts((&s_up[0]) as u64)
+    serial.puts((&s_blk[0]) as u64)
+    serial.dec(ahci.blocks(state))
+    serial.puts((&s_sz[0]) as u64)
+    serial.dec(1 << ahci.block_shift(state))
+    serial.puts((&s_prt[0]) as u64)
+    serial.dec(ahci.port(state))
+    serial.puts((&s_seen[0]) as u64)
+    serial.dec(ahci.ports_seen(state))
+    serial.puts((&s_slot[0]) as u64)
+    serial.dec(ahci.slots(state))
+    serial.puts((&s_bm[0]) as u64)
+    serial.dec(yes(pci.master_on(ahci.bdf(state))))
+    serial.nl()
+
+    // ---- 2. ein Sektor hin und zurueck
+    let wbuf: u64 = ahci.buffer(state, 1)
+    let rbuf: u64 = ahci.buffer(state, 0)
+    fill(wbuf, 512, 0x5A)
+    fill(rbuf, 512, 0xA5)
+    let w1: u64 = yes(ahci.write_block(state, AHCI_LBA1, wbuf))
+    // `pre` ist die Gegenprobe zum Vergleich darunter: der Lesepuffer
+    // steht VOR dem Lesen auf einem anderen Muster. Waere er hinterher
+    // immer noch darauf, haette der Controller nichts hineingelegt --
+    // und `same` waere trotzdem gruen, wenn beide Puffer nie angefasst
+    // wuerden. Erst die beiden Zahlen zusammen sagen etwas.
+    let pre: u64 = same(rbuf, wbuf, 512)
+    let r1: u64 = yes(ahci.read_block(state, AHCI_LBA1, rbuf))
+    serial.puts((&s_one[0]) as u64)
+    serial.dec(w1)
+    serial.puts((&s_rd[0]) as u64)
+    serial.dec(r1)
+    serial.puts((&s_pre[0]) as u64)
+    serial.dec(pre)
+    serial.puts((&s_same[0]) as u64)
+    serial.dec(same(rbuf, wbuf, 512))
+    serial.nl()
+
+    // ---- 3. acht Sektoren in EINEM Befehl
+    let n: u64 = AHCI_MANY * 512
+    stripe(wbuf, n)
+    fill(rbuf, n, 0)
+    let wn: u64 = yes(ahci.write_many(state, AHCI_LBAN, AHCI_MANY, wbuf))
+    let rn: u64 = yes(ahci.read_many(state, AHCI_LBAN, AHCI_MANY, rbuf))
+    serial.puts((&s_many[0]) as u64)
+    serial.dec(wn)
+    serial.puts((&s_rd[0]) as u64)
+    serial.dec(rn)
+    serial.puts((&s_n[0]) as u64)
+    serial.dec(n)
+    serial.puts((&s_same[0]) as u64)
+    serial.dec(same(rbuf, wbuf, n))
+    serial.nl()
+
+    // ---- 4. das Dateisystem, ohne eine Zeile in `fs.fi`
+    sata_fs(state)
+
+    serial.puts((&s_up[0]) as u64)
+    serial.puts((&s_cmd[0]) as u64)
+    serial.dec(ahci.cmds(state))
+    serial.puts((&s_err[0]) as u64)
+    serial.dec(ahci.errs(state))
+    serial.puts((&s_dead[0]) as u64)
+    serial.dec(ahci.dead(state))
+    serial.puts((&s_live[0]) as u64)
+    serial.dec(yes(ahci.alive(state)))
+    serial.nl()
+}
+
+fn sata_fs(state: u64) {
+    var s_fmt: [u8; 14] = "ahci: format \0"
+    var s_mount: [u8; 10] = "  mount=\0\0"
+    var s_io: [u8; 14] = "ahci: wrote=\0\0"
+    var s_read: [u8; 8] = "  read=\0"
+    var s_same: [u8; 8] = "  same=\0"
+    var s_list: [u8; 12] = "ahci: list \0"
+    var p_file: [u8; 10] = "/sata.txt\0"
+    var p_root: [u8; 2] = "/\0"
+    var text: [u8; 31] = "ahci wrote this line over DMA\n\0"
+
+    blk.use_ahci(state, FS_BLOCKS)
+    serial.puts((&s_fmt[0]) as u64)
+    serial.dec(yes(fs.format(state)))
+    serial.puts((&s_mount[0]) as u64)
+    serial.dec(yes(fs.mount(state)))
+    serial.nl()
+    let ino: u64 = fs.create_path(state, (&p_file[0]) as u64, fs.T_FILE)
+    let wrote: u64 = fs.write_at(state, ino, 0, (&text[0]) as u64, 30)
+    let scratch: u64 = state + kstate.BLOCK_OFF
+    let got: u64 = fs.read_at(state, ino, 0, scratch, 64)
+    serial.puts((&s_io[0]) as u64)
+    serial.dec(wrote)
+    serial.puts((&s_read[0]) as u64)
+    serial.dec(got)
+    serial.puts((&s_same[0]) as u64)
+    serial.dec(same(scratch, (&text[0]) as u64, 30))
+    serial.nl()
+    list_dir(state, (&p_root[0]) as u64, (&s_list[0]) as u64)
+}
+
+fn fill(p: u64, n: u64, v: u64) {
+    var i: u64 = 0
+    while i < n {
+        kstate.set8(p + i, (v & 0xFF) as u8)
+        i = i + 1
+    }
+}
+
+// Ein Muster, das je Sektor ANDERS ist. Mit einem einheitlichen Muster
+// waere ein Treiber gruen, der achtmal denselben Sektor liest -- und
+// genau das ist der Fehler, den ein falscher PRDT-Eintrag macht.
+fn stripe(p: u64, n: u64) {
+    var i: u64 = 0
+    while i < n {
+        kstate.set8(p + i, (((i / 512) * 17 + i) & 0xFF) as u8)
+        i = i + 1
     }
 }
 
@@ -731,6 +943,7 @@ fn mode_of(cmd: u64) -> u64 {
     var w_nintx: [u8; 8] = "nicintx\0"
     var w_nnoirq: [u8; 9] = "nicnoirq\0"
     var w_nnobm: [u8; 8] = "nicnobm\0"
+    var w_ahci: [u8; 5] = "ahci\0"
     if cmd == 0 {
         return 0
     }
@@ -773,6 +986,9 @@ fn mode_of(cmd: u64) -> u64 {
     }
     if find(cmd, (&w_nnobm[0]) as u64, 7) != 0 {
         m = m | M_NICNOBM
+    }
+    if find(cmd, (&w_ahci[0]) as u64, 4) != 0 {
+        m = m | M_AHCI
     }
     return m
 }

@@ -68,6 +68,16 @@ BEREICHE = [
     ("NVME_ID",    "nvme.fi",   "ID_OFF",         "0x1000"),
     ("NVME_BUF_A", "nvme.fi",   "BUF_A",          "0x1000"),
     ("NVME_BUF_B", "nvme.fi",   "BUF_B",          "0x1000"),
+    # RUNDE AHCI: der SATA-Treiber.  Fuenf Seiten aus dem Rest, den
+    # `kstate.fi` als frei ausgewiesen hat (0x7A000..0x7F000).  Die
+    # Ausrichtungen, die ein AHCI-Controller verlangt (1024 fuer die
+    # Befehlsliste, 256 fuer den FIS-Empfang, 128 fuer die Befehlstafel),
+    # fallen dabei von der Seitengrenze ab.
+    ("AHCI",       "ahci.fi",   "AHCI_OFF",       "0x1000"),
+    ("AHCI_ID",    "ahci.fi",   "AHCI_ID_OFF",    "0x1000"),
+    ("AHCI_BUF_A", "ahci.fi",   "AHCI_BUFA_OFF",  "0x1000"),
+    ("AHCI_BUF_B", "ahci.fi",   "AHCI_BUFB_OFF",  "0x1000"),
+    ("AHCI_SC",    "ahci.fi",   "AHCI_SC_OFF",    "0x1000"),
     ("CPU",        "kstate.fi", "CPU_OFF",        "CPU_BYTES * MAX_CPUS"),
     ("LOCK",       "kstate.fi", "LOCK_OFF",       "LOCK_BYTES * LOCK_COUNT"),
     ("TCPU",       "kstate.fi", "TCPU_OFF",       "TCPU_BYTES * MAX_TASKS"),
@@ -346,6 +356,8 @@ def main():
 
     dateien = {}
     for d in ("kstate.fi", "pci.fi", "nvme.fi", "fb.fi", "inet.fi",
+              # RUNDE AHCI -- der SATA-Treiber nimmt fuenf Seiten.
+              "ahci.fi",
               "virtio.fi", "hv.fi",
               # RUNDE K17 -- sonst pruefte die Karte den USB-Bereich gar
               # nicht, und ein vergessener Versatz fiele nie auf.
