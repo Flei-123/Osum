@@ -31,6 +31,8 @@
 #      auf RAM-Platte und auf echter ATA-Platte.
 #   5. Ein Programm von der Platte (tools/osum/run.sh, Runde K1): der
 #      ELF-Lader, `exec`, /bin/sh aus dem OFS-Dateisystem.
+#  29. Die Platte, die ein echter PC hat: AHCI/SATA ueber DMA, gegen
+#      bekannte Daten und mit vier Gegenproben (tools/ahci/run.sh).
 #   6. Der Kernel liest seine eigene Maschine (tools/pci/run.sh, Runde K2):
 #      PCI-Durchmusterung, lokaler APIC, NVMe ueber DMA -- mit gemessenem
 #      Durchsatz.
@@ -936,6 +938,9 @@ lauf "29. HTTPS aus Ring 3, und die Verweigerungen (tools/hwnet/tls.sh, Runde HW
 lauf "25. Akkuanalyse je Programm: die gemessene Gesamtleistung, anteilig zugeordnet (tools/powermon/run.sh, Runde POWERMON)" \
      tools/powermon/run.sh powermon '^POWERMON: |^        |^  OK    (another table|GEGENPROBE|the two displays|the same energy|the sum of the program|and the kernel.s own rows|the shares add up|the ageing|runtime left|one sample costs|counted and uncounted|at 10 samples|the file stays|AND THE SENTENCE|ON THIS HOST|wigapp= really|the window server counts|distinct colours)'
 lauf "28. derselbe Kernel auf der ECHTEN CPU: /dev/kvm statt Emulation (tools/kvm/run.sh, Runde KVMFIX)" tools/kvm/run.sh kvm '^KVM: |^  OK    (der Kernel ist gebaut|1\.|3\.|4\.)|^  --    (CPU|3\.|4\.)|^KVM: uebersprungen'
+lauf "29. die Platte, die ein echter PC hat: AHCI/SATA ueber DMA (tools/ahci/run.sh, Runde AHCI)" \
+     tools/ahci/run.sh ahci '^AHCI: |^  --    Beschleuniger|^  OK    (die Speicherkarte|1\.[2-7]|2\.|3\.|4\.|5\.[2-4]|6\.[2-3]|7\.[2-9]|7\.10|8\.[2-5])'
+
 
 # Hier laufen die angemeldeten Abschnitte -- bei OSUM_JOBS=1 sind sie
 # oben schon gelaufen und das hier tut nichts.
