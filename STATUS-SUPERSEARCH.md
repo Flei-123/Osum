@@ -154,3 +154,23 @@ Jede Zeilenbeschriftung wird an der Stelle geprueft, die das Programm
 SELBST auf der seriellen Leitung genannt hat. Das ist die Lehre aus dem
 Fehler, bei dem jeder Fenstertitel leer war: 0 von 4137 faellt auf,
 "sieht gut aus" nicht.
+
+## 7. Die Gegenprobe an fremden Tests
+
+`kernel/user/launcher.fi` gehoert Runde K15, und diese Runde hat ihn an
+zwei Stellen repariert. Also lief K15 vollstaendig nach:
+`tools/k15/run.sh` -- **252 bestanden, 0 fehlgeschlagen**. Kein
+bestehender Test wurde geaendert oder entschaerft; die beiden Zeilen,
+die K15 am Starter misst (`launcher: treffer i=0 ...` und
+`launcher: datei i=0 ...`), stimmen unveraendert.
+
+## 8. Stand
+
+Alles aus dem Auftrag steht und ist gemessen: Pop-up mittig ueber allem,
+Super auf und zu, Esc zu, kein Zeichen ins Fenster darunter, Suche
+waehrend des Tippens, Rangfolge Programme > Dateien > Einstellungen mit
+Wortanfang vor Wortmitte und genauem Namen vor allem, Umlaute, volle
+Bedienung ohne Maus, Index statt Baumdurchlauf mit der Zahl dahinter,
+runde Ecken und Schatten samt Gegenprobe.
+
+SUPERSEARCH: 64 von 64. K15: 252 von 252.
