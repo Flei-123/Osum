@@ -1052,6 +1052,17 @@ abschnitte_abarbeiten
 lauf "29. Mehrbenutzerbetrieb: Pfadrechte, Zusatzgruppen, Kostenfaktor, Anmeldung (tools/multiuser/run.sh, Runde MULTIUSER)" \
      tools/multiuser/run.sh multiuser '^MULTIUSER: |^  --    (gemessen|daraus|/dev/kvm|kein /dev/kvm)|^  OK    (JUSTIN|GEGENPROBE|EINE Pruefung|viermal|und braucht dort|setuid\(0\)|setgroups als|der Kern hat|und [0-9]+ davon|[0-9]+ Zugriffe|[0-9]+ Rechtefragen|nach dem (ersten|zweiten|dritten)|und die Uhr|mit verzoegerung|und der Lauf ist|keine Zwischendatei|der neue Eintrag|das Passwort steht NICHT|PYTHON rechnet|justin liest sie NICHT|und die EINE Ebene|MIT den Zusatzgruppen|id nennt sie)'
 
+# ABSCHNITT 29 -- RUNDE INIT. Der erste Prozess, servertauglich. Die
+# interessanteste Zusage darin ist keine Zahl, sondern ein Verhalten,
+# das sich NICHT zeigt: ein Dienst, der beim Start sofort stirbt, wird
+# genau fuenfmal neu gestartet und dann abgeschaltet -- und der Dienst
+# daneben, der ebenso sofort endet, aber mit 0, wird es NIE. Ohne diese
+# zweite Haelfte waere die Grenze nur ein Zaehler, der alles trifft, was
+# schnell endet. Dazu der ehrlichste Beweis dieser Runde: `reboot` ohne
+# `-no-reboot`, und der Kernel kommt ein zweites Mal hoch.
+lauf "29. der erste Prozess, servertauglich: /bin/init, die Grenze fuer abstuerzende Dienste, Ziele, shutdown und ein ECHTER Neustart (tools/init/run.sh, Runde INIT)" \
+     tools/init/run.sh init '^INIT: |^  OK    (Beschleunigung|init schaltet|er wurde GENAU|und fuenf Rueckfaelle|der Dienst .sauber|.sauber. wurde NICHT|der Kernel kam|und der Kern hat wirklich|GEGENPROBE|DER NOTWEG|DIE WAISE|ein Dienst mit respawn|svc list|svc start|JETZT laeuft|die Zeile des Dienstes|der Dienst mit .netz|eine Zeile .name|init liest|und am Ende steht)'
+
 echo
 echo "=================================================================="
 echo "gelaufen mit OSUM_JOBS=$JOBS, accel=${OSUM_ACCEL:-auto}"

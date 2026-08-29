@@ -1,0 +1,73 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/reboot.fi -- die Maschine neu starten.
+//
+//     reboot              herunterfahren und neu starten
+//     reboot -f           ohne init: selbst syncen und neu starten
+//
+// Derselbe Weg wie `shutdown -r`, und das ist Absicht: `reboot` ist auf
+// jedem Unix das kuerzere Wort fuer dieselbe Sache, und ein Server wird
+// oefter neu gestartet als ausgeschaltet.
+//
+// WAS EIN NEUSTART HIER WIRKLICH IST: `init` schickt SIGTERM an jeden
+// Dienst, wartet, schickt SIGKILL an die Reste, ruft `sync`, haengt die
+// Dateisysteme aus und ruft dann `reboot(RB_RESTART)`. Der Kern
+// beschreibt daraufhin das RESET-Register aus der FADT -- und wenn die
+// Firmware keines nennt, den Anschluss 0xCF9 und zuletzt den
+// Tastaturschaltkreis. Kein `hlt`, kein Anhalten: die Maschine geht
+// wirklich durch das BIOS zurueck.
+
+profile kernel
+
+import ulib
+
+export { u_start }
+
+const SYS_REBOOT: u64 = 169
+const RB_RESTART: u64 = 0x01234567
+
+static mut P_CMD: [u8; 13] = "/run/svc.cmd\0"
+static mut S_BOOT: [u8; 8] = "reboot\n\0"
+static mut E_CMD: [u8; 47] = "reboot: /run/svc.cmd nicht schreibbar (root?)\0\0"
+static mut E_SLOW: [u8; 45] = "reboot: init antwortet nicht -- selbst neu\0\0\0"
+static mut E_NOOFF: [u8; 41] = "reboot: der Kern hat nicht neu gestartet\0"
+static mut O_F: [u8; 3] = "-f\0"
+
+fn tell() -> bool {
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&P_CMD[0 as usize]) as u64, 577, 0)
+    if ulib.bad(fd) {
+        return false
+    }
+    ulib.sys(ulib.SYS_WRITE, fd, (&S_BOOT[0 as usize]) as u64,
+        ulib.length((&S_BOOT[0 as usize]) as u64))
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    return true
+}
+
+fn selbst() -> u64 {
+    ulib.sys(ulib.SYS_SYNC, 0, 0, 0)
+    ulib.sys(SYS_REBOOT, RB_RESTART, 0, 0)
+    ulib.esay_line((&E_NOOFF[0 as usize]) as u64, 0)
+    return 1
+}
+
+fn u_start(args: u64) -> u64 {
+    let n: u64 = ulib.arg_count(args)
+    var i: u64 = 1
+    while i < n {
+        if ulib.streq(ulib.arg_at(args, i), (&O_F[0 as usize]) as u64) {
+            return selbst()
+        }
+        i = i + 1
+    }
+    if !tell() {
+        ulib.esay_line((&E_CMD[0 as usize]) as u64, 0)
+        return selbst()
+    }
+    var k: u64 = 0
+    while k < 60 {
+        ulib.sleep_ms(50)
+        k = k + 1
+    }
+    ulib.esay_line((&E_SLOW[0 as usize]) as u64, 0)
+    return selbst()
+}
