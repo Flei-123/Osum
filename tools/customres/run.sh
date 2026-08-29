@@ -105,8 +105,17 @@ fi
 # dauert ein Lauf mit einer Frist von fuenfzehn Sekunden und zweiundzwanzig
 # Sekunden Schlaf laenger als das Zeitlimit, das ein Testlaeufer
 # vernuenftigerweise setzt.
-ACCEL=""
-[ -w /dev/kvm ] && ACCEL="-accel kvm"
+. tools/lib/qemu.sh          # $QEMU_X86, $OSUM_QEMU_ACCEL
+#
+# Bis zum Merge von mergeline stand hier die eigene Wahl:
+#     ACCEL=""; [ -w /dev/kvm ] && ACCEL="-accel kvm"
+# Die zentrale Fassung kann mehr: sie kennt die Ausnahmeliste
+# (tools/lib/accel-ausnahmen.txt) und $OSUM_ACCEL. Wichtig fuer
+# GENAU DIESE Runde, weil zwei ihrer Abschnitte an einer FRIST
+# haengen (fuenfzehn Sekunden) -- misst der Beschleuniger die Zeit
+# anders, gehoert der Abschnitt in die Liste und nicht in einen
+# groesseren Zeitpuffer.
+ACCEL="${QEMU_X86#qemu-system-x86_64 }"
 
 echo "== 1. die Quellen: zwei Dateien, eine Legende =="
 
