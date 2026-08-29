@@ -53,8 +53,48 @@ context_switch:
     pushq %r14
     pushq %r15
     pushfq
+
+    /* ---------------------------------------- RUNDE FEEDBACK: xmm ---
+     *
+     * Ab dieser Runde darf Ring 3 die 128-Bit-Register benutzen
+     * (`kernel/sse.fi` setzt CR4.OSFXSR). Wer sie erlaubt, muss sie
+     * auch aufheben: `sha256_ni_blocks` in `/bin/fetch` rechnet in
+     * xmm0..xmm5, und ein Zeitgeber-Wechsel mitten darin wuerde die
+     * halb gerechneten Runden der einen Aufgabe der naechsten in die
+     * Hand geben.
+     *
+     * Die 512 Oktette liegen auf dem KERNSTAPEL DER AUFGABE, die
+     * weggelegt wird -- unter dem Registerblock, nicht daneben. Damit
+     * braucht ein Aufgabendatensatz kein neues Feld und `frame_build`
+     * nur eine Anfangsablage.
+     *
+     * `fxsave` verlangt 16 Oktette Ausrichtung. Statt sie aus der
+     * Aufrufregel zu FOLGERN, wird sie hier ERZWUNGEN (`and $-16`) --
+     * und weil `and` den Abstand zum Registerblock unbekannt macht,
+     * steht dessen Adresse mit im Rahmen (bei +512).
+     *
+     * DAS BIT WIRD JEDES MAL GELESEN, nicht angenommen: auf einer
+     * Maschine ohne FXSR steht OSFXSR nicht, und `fxsave` waere dort
+     * ein ungueltiger Befehl IM KERN. Ein `mov %cr4` kostet weniger als
+     * ein zweiter Weg durch diese Datei.
+     */
+    movq %rsp, %rax                 /* Anfang des Registerblocks */
+    subq $528, %rsp
+    andq $-16, %rsp
+    movq %rax, 512(%rsp)
+    movq %cr4, %rax
+    testl $0x200, %eax              /* CR4.OSFXSR */
+    jz 1f
+    fxsave (%rsp)
+1:
     movq %rsp, (%rdi)               /* rdi still holds the slot */
     movq %rsi, %rsp                 /* from here on: the other task */
+    movq %cr4, %rax
+    testl $0x200, %eax
+    jz 2f
+    fxrstor (%rsp)
+2:
+    movq 512(%rsp), %rsp            /* zurueck auf den Registerblock */
     popfq
     popq %r15
     popq %r14
