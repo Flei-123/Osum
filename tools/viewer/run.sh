@@ -460,9 +460,24 @@ foto() { # name monitordatei [zusatzworte]
         -drive "file=$TMPD/live-$name.img,format=raw,if=ide,index=0" \
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1 &
     local pid=$!
+    # NICHT AM ZEILENANFANG SUCHEN, und das ist gemessen: Kern und
+    # Anwendung schreiben auf DIESELBE serielle Leitung, ohne sich
+    # abzusprechen. In einem Lauf dieser Runde stand dort
+    # "...warm=9 us  fwm: go" -- die Zeile `wm: hold` war mitten in
+    # einer Kernelzeile verschwunden. Die alte Schleife suchte
+    # `^wm: hold`, fand nichts, drehte ihre vollen 300 Sekunden und
+    # liess QEMU in den Zeitablauf laufen; der Abschnitt fiel dann mit
+    # "kein Monitor an ..." durch, obwohl die Anwendung fehlerfrei war.
+    # Deshalb: ohne Anker suchen, und wenn nach 90 Sekunden immer noch
+    # nichts dasteht, aber die Anwendung schon berichtet hat, trotzdem
+    # weitermachen und es SAGEN.
     local i=0
-    while [ $i -lt 2000 ]; do
-        grep -qaE '^wm: hold' "$aus" 2>/dev/null && break
+    while [ $i -lt 1200 ]; do
+        grep -qa 'wm: hold' "$aus" 2>/dev/null && break
+        if [ $i -gt 600 ] && grep -qa 'viewer: an=' "$aus" 2>/dev/null; then
+            printf '        (wm: hold nicht gefunden -- die Anwendung hat berichtet, weiter)\n'
+            break
+        fi
         kill -0 "$pid" 2>/dev/null || break
         sleep 0.15
         i=$((i + 1))
