@@ -309,6 +309,7 @@ const S_POSN: u64 = 0x1B8 // Abfragen der Position, fuer die Gegenprobe
 // wartete, wartete fuer immer. GEMESSEN: 2000 Warteschleifen und eine
 // Datei von 154891 Rahmen fuer 48000 Rahmen Ton.
 const S_POSBASE: u64 = 0x1C0
+const S_GUARD: u64 = 0x1C8 // gegen Wiedereintritt aus dem Zeitgeber
 
 // Warum es nicht ging.
 const W_OK: u64 = 0
@@ -2063,6 +2064,23 @@ fn dpib(state: u64) -> u64 {
     return kstate.get32(dpib_addr(state))
 }
 
+// DIE SPERRE GEGEN SICH SELBST, und sie ist seit dem Zeitgeberschlag
+// noetig: `position_frames` LIEST nicht nur, es SCHREIBT auch (die
+// Umlaufzaehlung, den letzten Rohwert, den zuletzt herausgegebenen
+// Wert). Seit `audio.tick` sie hundertmal je Sekunde aus dem
+// Unterbrechungsbehandler ruft, kann dieser Aufruf mitten in einen
+// anderen hineinplatzen -- und dann sieht der eine die halb
+// geschriebene Buchfuehrung des anderen.
+//
+// GEMESSEN: 48768 statt 48000 geschriebener Rahmen, sieben Aussetzer,
+// die Bitgleichheit gefallen -- in einem Lauf, in dem der Ring
+// nachweislich nie leer war (null Luecken in der Datei).
+//
+// Ein Aufruf, der die Sperre gesetzt findet, gibt den zuletzt
+// herausgegebenen Wert zurueck. Das ist richtig und nicht bloss
+// billig: die Uhr ist monoton, und ein um hoechstens einen
+// Zeitgeberschlag alter Wert ist immer noch ein gueltiger Wert.
+//
 // Die abgespielten Rahmen seit dem Start, monoton -- die Leituhr.
 //
 // DER AUSSETZER WIRD HIER GEZAEHLT UND NUR HIER. Weil der Regler nie
@@ -2078,6 +2096,10 @@ fn position_frames(state: u64) -> u64 {
     if g(state, S_RUNNING) == 0 {
         return g(state, S_POS)
     }
+    if g(state, S_GUARD) != 0 {
+        return g(state, S_POS)
+    }
+    s(state, S_GUARD, 1)
     let raw: u64 = position_raw(state)
     var w: u64 = g(state, S_WRAPS)
     if raw < g(state, S_LASTRAW) {
@@ -2129,6 +2151,7 @@ fn position_frames(state: u64) -> u64 {
         s(state, S_BACKW, g(state, S_BACKW) + 1)
     }
     s(state, S_POS, pos)
+    s(state, S_GUARD, 0)
     return pos
 }
 
