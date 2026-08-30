@@ -1,0 +1,1828 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/sleep.fi -- RUNDE STANDBY: ECHTER SCHLAF, UND ZWAR TIEF.
+//
+// ==================================================================
+// WARUM ES DIESE RUNDE GIBT
+// ==================================================================
+//
+// Ein zugeklappter Windows-Laptop wird im Rucksack warm und der Akku
+// ist am Ziel leer. Das ist kein Defekt, das ist die Bauart: seit
+// Windows 8 heisst der Schlaf "Modern Standby" (S0ix), und S0ix ist
+// KEIN Schlafzustand, sondern ein sehr leiser Betriebszustand. Der
+// Prozessor darf in tiefe C-Zustaende, das Netzwerk darf weiterlaufen,
+// Dienste duerfen aufwachen -- und ein einziger Treiber, der seine
+// Aufweckquelle nicht abgibt, haelt die ganze Maschine wach. Der
+// Benutzer sieht davon nichts; das Geraet ist ja "aus".
+//
+// Frueher gab es dafuer S3 ("Suspend to RAM", ACPI 5.0 Abschnitt 16.1):
+// der Prozessor wird ABGESCHALTET, die Geraete werden abgeschaltet, es
+// bleibt der Hauptspeicher im Selbstauffrischbetrieb und ein winziger
+// Teil des Chipsatzes, der auf das Aufwecksignal hoert. Verbrauch nahe
+// null, und zwar nachweisbar nahe null, weil nichts mehr laeuft, was
+// verbrauchen koennte. Und daneben S4 ("Suspend to Disk"): der
+// Speicherinhalt kommt auf die Platte, danach geht die Maschine
+// WIRKLICH aus.
+//
+// OrientOS macht S3 und S4. Kein S0ix. Was schlaeft, schlaeft.
+//
+// ==================================================================
+// DIE VIER SCHWEREN STELLEN, UND WIE SIE HIER GELOEST SIND
+// ==================================================================
+//
+// 1. DER WIEDEREINSTIEG IST EIN 8086. Die Firmware springt beim
+//    Aufwachen an die Adresse, die im FACS-Feld
+//    `firmware_waking_vector` steht -- im REALMODUS, ohne Seitenwerk,
+//    mit 20 Adressleitungen. Alles, was der Kernel war, liegt oberhalb
+//    von 1 MiB und ist von dort aus nicht einmal sichtbar. Der Weg
+//    zurueck ueber Realmodus, Protected Mode und Long Mode steht in
+//    `kernel/arch/x86_64/isr.s` am Ende (Abschnitt "RUNDE STANDBY");
+//    diese Datei kopiert die erste Stufe nach 0x8000, traegt die
+//    Adresse in die FACS ein und ruft `wake_save`.
+//
+// 2. DIE UHR BLEIBT STEHEN. Der Zyklenzaehler zaehlt nicht, waehrend
+//    der Prozessor aus ist, und auf echter Hardware faengt er beim
+//    Aufwachen wieder bei null an. Ein Kernel, der einfach
+//    weiterrechnet, geht danach um genau die Schlafdauer nach. Die
+//    einzige Uhr, die weiterlief, ist die im CMOS -- also wird aus ihr
+//    nachgezogen (`time.nachziehen`). Das ist der Fehler, den man erst
+//    bemerkt, wenn man lange genug geschlafen hat, und deshalb hat er
+//    hier eine eigene Gegenprobe: `nortcsync`.
+//
+// 3. DIE GERAETE SIND NACH DEM AUFWACHEN NEU. Der Prozessor hat keine
+//    IDT mehr, kein TR, keine syscall-Register, kein SMEP; der
+//    Unterbrechungsverteiler steht wieder auf den Vektoren von 1981;
+//    der Zeitgeber laeuft nicht; die PCI-Geraete haben ihre
+//    Befehlsregister und ihre BARs verloren. Was davon gerettet und
+//    zurueckgeholt wird, steht unten bei `geraete_sichern` und
+//    `geraete_zurueck` -- Stueck fuer Stueck, und die Gegenprobe
+//    `nodevsave` nimmt genau das weg.
+//
+// 4. WER DARF WECKEN. Das ist der Punkt, an dem Windows scheitert, und
+//    er ist hier absichtlich unbequem gebaut: JEDE Aufweckquelle ist
+//    einzeln schaltbar, und die Voreinstellung ist ZU. Eine Quelle, die
+//    nicht ausdruecklich erlaubt wurde, weckt nicht. Das ist in QEMU
+//    wirklich messbar und keine Behauptung -- `acpi_pm1_evt_write_en`
+//    reicht die Bits an `qemu_system_wakeup_enable` durch, und mit
+//    geschlossenem Tor bleibt die Maschine bei scharfem RTC-Wecker
+//    liegen (gemessen: Beendigungscode 124 statt 85).
+//
+// ==================================================================
+// WAS SPAETER AUF DEN AML-INTERPRETER GEHOERT (Runde AML)
+// ==================================================================
+//
+// Die Werte SLP_TYPa/b fuer S3 und S4 stehen nicht in einem Register,
+// sondern in den AML-Objekten `\_S3_` und `\_S4_` der DSDT. Diese Runde
+// liest sie mit demselben Mustersucher, den `power.fi` seit Runde K13
+// fuer `\_S5_` benutzt (jetzt `power.sx_values`, ein Aufruf fuer alle
+// drei). Das ist die eine Stelle dieser Runde, die AML von Hand liest,
+// und sie gehoert ersetzt, sobald der Interpreter aus Runde AML steht.
+// Zwei weitere Stellen wollen dann ebenfalls echtes AML:
+//
+//   * `_PTS` und `_WAK` -- die beiden Methoden, die die Firmware VOR
+//     dem Schlafen und NACH dem Aufwachen ausgefuehrt haben will. Diese
+//     Runde ruft sie NICHT, weil ein Mustersucher keine Methode
+//     ausfuehren kann. Unter QEMU ist das folgenlos (beide sind leer);
+//     auf einem echten Brett ist es die haeufigste Ursache dafuer, dass
+//     ein Geraet nach dem Aufwachen tot bleibt.
+//   * `_PRW` je Geraet -- die Beschreibung, welches GPE-Bit ein Geraet
+//     aufwecken kann. Ohne sie kennt diese Runde nur die Quellen, die
+//     in PM1x_EN stehen; Deckelschalter und USB-Tastatur haengen auf
+//     echter Hardware an GPEs, und die Tafel unten fuehrt sie deshalb,
+//     schaltet sie aber ausdruecklich als "nicht erreichbar".
+
+import kstate
+import serial
+import acpi
+import power
+import time
+import pci
+import blk
+import mem
+import cpu
+import arch.x86_64.idt
+import arch.x86_64.user
+import arch.x86_64.guard
+import arch.x86_64.apic
+
+export {
+    parse, aufsetzen, bereit, stage, schlafen, bericht,
+    quelle_setzen, quelle_erlaubt, wert, deckel, richtlinie_setzen,
+    s4_schreiben, s4_gefunden, s4_pruefung,
+    Q_TASTE, Q_DECKEL, Q_USB, Q_RTC, Q_LAN, Q_ANZAHL,
+    A_NICHTS, A_SCHIRM, A_S3, A_S4, A_AUS,
+    S_READY, S_S3OK, S_S4OK, S_ERR, S_TRIES, S_WAKES, S_LASTWAKE,
+    S_DOWN_MS, S_UP_MS, S_SLEPT_S, S_SKEW_S, S_DEVSAVED, S_DEVBACK,
+    S_FSYNCS, S_LOGN, S_S4SIZE, S_S4MS, S_S4PAGES, S_S4STATE, S_S4WHY,
+    S_LIDACT, S_CFGSRC, S_PM1A, S_FACS, S_DEEPEST, S_DOWN_SUM, S_UP_SUM,
+    S_LOOPS, S_LOOPOK, S_SHCOPY, S_SHADOW, S_RTCARM
+}
+
+// ==================================================================
+// DIE SEITE (kstate.STBY_OFF, 4 KiB)
+// ==================================================================
+
+// -- die Skalare, 0x000..0x1FF
+const S_READY: u64 = 0 // 1 = die Schicht steht
+const S_PM1A: u64 = 8 // PM1a_CNT, der Anschluss zum Einschlafen
+const S_PM1B: u64 = 16
+const S_EVTA: u64 = 24 // PM1a_EVT_BLK
+const S_EVTB: u64 = 32
+const S_ENA: u64 = 40 // PM1a_EN = EVTA + Haelfte der Blocklaenge
+const S_ENB: u64 = 48
+const S_FACS: u64 = 56 // die FACS, in der der Wiedereinstieg steht
+const S_S3A: u64 = 64 // SLP_TYPa aus \_S3_
+const S_S3B: u64 = 72
+const S_S3OK: u64 = 80 // 1 = \_S3_ gefunden
+const S_S4A: u64 = 88
+const S_S4B: u64 = 96
+const S_S4OK: u64 = 104
+const S_ERR: u64 = 112 // warum es nicht ging
+const S_TRIES: u64 = 120 // Anlaeufe
+const S_WAKES: u64 = 128 // sauber zurueckgekommen
+const S_LASTWAKE: u64 = 136 // welche Quelle zuletzt geweckt hat
+const S_DOWN_MS: u64 = 144 // Befehl -> schlafend, letzter Lauf
+const S_UP_MS: u64 = 152 // Wecksignal -> laufende Sitzung, letzter Lauf
+const S_DOWN_SUM: u64 = 160 // Summe, fuer den Mittelwert
+const S_UP_SUM: u64 = 168
+const S_SLEPT_S: u64 = 176 // wirklich tief geschlafen, Sekunden gesamt
+const S_SKEW_S: u64 = 184 // wieviel die Uhr zuletzt nachgezogen wurde
+const S_DEVSAVED: u64 = 192 // wieviele Geraetesaetze gesichert
+const S_DEVBACK: u64 = 200 // wieviele zurueckgeholt
+const S_FSYNCS: u64 = 208 // wie oft der Zwischenspeicher geschrieben wurde
+const S_MONO: u64 = 216 // monotone Zeit vor dem Schlafen
+const S_WALL: u64 = 224 // Wandsekunde vor dem Schlafen
+const S_TSC: u64 = 232
+const S_LOGN: u64 = 240 // Eintraege im Protokoll
+const S_LOGP: u64 = 248 // Schreibzeiger im Ring
+const S_S4SIZE: u64 = 256 // Oktette des Ruheabbilds
+const S_S4MS: u64 = 264 // wie lange sein Schreiben gedauert hat
+const S_S4PAGES: u64 = 272 // wieviele Seiten darin stehen
+const S_S4STATE: u64 = 280 // 0 keins 1 geschrieben 2 zurueck 3 verworfen
+const S_S4WHY: u64 = 288 // warum verworfen
+const S_PICM: u64 = 296 // die geretteten PIC-Masken
+const S_PITDIV: u64 = 304 // der Teiler des Zeitgebers
+const S_LIDACT: u64 = 312 // was der Deckel zuletzt ausgeloest hat
+const S_CFGSRC: u64 = 320 // 0 eingebaut, 1 aus /etc/deckel.conf
+const S_PCISAVE: u64 = 328 // Rahmen, in dem der PCI-Raum liegt
+const S_PCIN: u64 = 336 // wieviele Geraete darin stehen
+const S_APICWAS: u64 = 344 // lief der APIC vor dem Schlafen?
+const S_DEEPEST: u64 = 352 // die laengste einzelne Tiefschlafzeit
+const S_LOOPS: u64 = 360 // Anlaeufe im Reihenlauf
+const S_LOOPOK: u64 = 368 // davon sauber zurueck
+const S_S4DEV: u64 = 376 // auf welchem Geraet das Ruheabbild liegt
+const S_S4LBA: u64 = 384 // ab welchem Block
+const S_WOKEN: u64 = 392 // 1 = dieser Lauf kommt aus einem Schlaf
+const S_RTCSEK: u64 = 400 // in so vielen Sekunden soll der Wecker gehen
+const S_RTCARM: u64 = 408 // wie oft er scharf gemacht wurde
+const S_SHADOW: u64 = 416 // wo die Schattenkopie liegt
+const S_SHLEN: u64 = 424 // wie gross sie ist
+const S_SHCOPY: u64 = 432 // wie oft sie geschrieben wurde
+const S_APICHZ: u64 = 440 // mit welcher Frequenz der APIC-Zeitgeber lief
+
+// -- die Aufweckquellen, 0x200..0x2FF: je Quelle zwei Woerter
+const Q_BASE: u64 = 0x200
+const Q_STRIDE: u64 = 16
+const Q_TASTE: u64 = 0 // die Netztaste
+const Q_DECKEL: u64 = 1 // der Deckelschalter
+const Q_USB: u64 = 2 // eine USB-Tastatur
+const Q_RTC: u64 = 3 // der Wecker der Echtzeituhr
+const Q_LAN: u64 = 4 // die Netzkarte (Wake-on-LAN)
+const Q_ANZAHL: u64 = 5
+
+// -- die Deckelrichtlinie, 0x300..0x3FF
+const P_NETZ: u64 = 0x300 // Aktion am Netz
+const P_AKKU: u64 = 0x308 // Aktion im Akkubetrieb
+const P_FRIST: u64 = 0x310 // Minuten in S3, dann S4
+const P_GELESEN: u64 = 0x318 // 1 = aus der Datei gelesen
+
+const A_NICHTS: u64 = 0
+const A_SCHIRM: u64 = 1
+const A_S3: u64 = 2
+const A_S4: u64 = 3
+const A_AUS: u64 = 4
+
+// -- das Schlafprotokoll als Ring, 0x400..0xFFF
+const L_BASE: u64 = 0x400
+const L_STRIDE: u64 = 48
+const L_MAX: u64 = 48 // 48 * 48 = 2304 Oktett, passt in den Rest
+const L_EIN: u64 = 0 // Wandsekunde des Einschlafens
+const L_AUS: u64 = 8 // Wandsekunde des Aufwachens
+const L_QUELLE: u64 = 16 // wer geweckt hat
+const L_TIEF: u64 = 24 // Sekunden wirklich tief geschlafen
+const L_DOWN: u64 = 32 // Millisekunden bis zum Schlaf
+const L_UP: u64 = 40 // Millisekunden bis zur laufenden Sitzung
+
+// ==================================================================
+// DIE FEHLERCODES -- was `S_ERR` bedeutet
+// ==================================================================
+//   0 nichts versucht         1 gelungen
+//   2 keine FADT              3 kein \_S3_ in der DSDT
+//   4 kein PM1a-Anschluss     5 keine FACS
+//   6 geschrieben, aber die Maschine blieb wach
+//   7 die Schicht steht nicht (kein `standby` auf der Kommandozeile)
+const E_KEINE: u64 = 0
+const E_OK: u64 = 1
+const E_FADT: u64 = 2
+const E_S3: u64 = 3
+const E_PM1A: u64 = 4
+const E_FACS: u64 = 5
+const E_WACH: u64 = 6
+const E_AUS: u64 = 7
+
+// ------------------------------------------------------- die ACPI-Felder
+const F_FACS: u64 = 36 // FIRMWARE_CTRL, 32 Bit
+const F_DSDT: u64 = 40
+const F_PM1A_EVT: u64 = 56
+const F_PM1B_EVT: u64 = 60
+const F_PM1A_CNT: u64 = 64
+const F_PM1B_CNT: u64 = 68
+const F_PM1_EVT_LEN: u64 = 88
+const F_XFACS: u64 = 132 // X_FIRMWARE_CTRL, 64 Bit (ACPI 2.0)
+const FACS_WAKE: u64 = 12 // firmware_waking_vector, 32 Bit
+const FACS_LEN: u64 = 4
+const FACS_XWAKE: u64 = 24 // x_firmware_waking_vector, 64 Bit
+
+const SLP_EN: u64 = 8192 // Bit 13 von PM1x_CNT
+
+// Ein Block sind 512 Oktett, also 64 Woerter. Als benannte Konstante und
+// nicht als `512 / 8` im Ausdruck: der Uebersetzer leitet fuer ein
+// nacktes Zahlenpaar i32 ab, und ein Vergleich zwischen u64 und i32 ist
+// hier zu Recht ein Fehler.
+const BLK_WORTE: u64 = 64
+
+// Die Bits in PM1x_EN. Nur zwei davon sind auf einem PC ueberhaupt
+// Aufweckquellen, die ohne AML erreichbar sind.
+const EN_TIMER: u64 = 1 // Bit 0
+const EN_GBL: u64 = 32 // Bit 5
+const EN_PWRBTN: u64 = 256 // Bit 8 -- die Netztaste
+const EN_SLPBTN: u64 = 512 // Bit 9
+const EN_RTC: u64 = 1024 // Bit 10 -- der Wecker
+
+// Wohin das Realmodus-Trampolin kopiert wird. Gemessen und nicht
+// geraten: eine Sonde hat dort Marken abgelegt und sie nach dem
+// Aufwachen unveraendert wiedergefunden; SeaBIOS fasst diese Seite auf
+// dem Aufwachpfad nicht an. 0x9000 und nicht 0x8000, weil dort schon
+// der Prozessorstart aus `smp.s` liegt -- die ausfuehrliche Begruendung
+// steht bei WAKE_BASE in `kernel/arch/x86_64/isr.s`. Die Zahl steht in
+// BEIDEN Dateien; `tools/standby/run.sh` liest beide und vergleicht
+// sie, so wie `tools/hv/run.sh` es fuer KDATA_SIZE tut.
+const WAKE_BASE: u64 = 0x9000
+
+// Die Plaetze in der Tafel aus isr.s.
+const V_W16START: u64 = 73
+const V_W16END: u64 = 74
+const V_WREGS: u64 = 75
+const V_WSAVE: u64 = 76
+const V_SAVEBEG: u64 = 77
+const V_KEND: u64 = 78
+const V_DF_STACK: u64 = 52
+const V_IRQ_STACK: u64 = 53
+
+// Versaetze in `wake_regs` (isr.s).
+const WR_CR3: u64 = 64
+const WR_EFER: u64 = 72
+const WR_TMPCR3: u64 = 80
+const WR_SHADOW: u64 = 88 // Quelle der Schattenkopie
+const WR_TARGET: u64 = 96 // Ziel im Abbild
+const WR_LEN: u64 = 104 // Oktette
+const WR_DOSHADOW: u64 = 112 // 0 = keine Schattenkopie
+const WR_CR4: u64 = 120
+const WR_CR0: u64 = 128
+const WR_STATE: u64 = 136 // der Zustandszeiger des Kerns, siehe unten
+
+// Dieselbe Adresse wie `.set WAKE_REGS, 0x9200` in isr.s. Sie steht hier
+// ein zweites Mal, weil der Aufwachpfad sie braucht, BEVOR er einen
+// Zustandszeiger hat, aus dem er die Vektortabelle lesen koennte.
+const WAKE_REGS_ADDR: u64 = 0x9200
+
+// ==================================================================
+// KLEINKRAM
+// ==================================================================
+
+fn g(state: u64, off: u64) -> u64 {
+    return kstate.get(state, kstate.STBY_OFF + off)
+}
+
+fn s(state: u64, off: u64, v: u64) {
+    kstate.set(state, kstate.STBY_OFF + off, v)
+}
+
+fn bump(state: u64, off: u64) {
+    kstate.add(state, kstate.STBY_OFF + off, 1)
+}
+
+fn wert(state: u64, off: u64) -> u64 {
+    return g(state, off)
+}
+
+fn bereit(state: u64) -> bool {
+    return g(state, S_READY) != 0
+}
+
+fn vector(state: u64, i: u64) -> u64 {
+    return __mmio_read64((kstate.get(state, kstate.VECTORS) + i * 8) as *mut u64)
+}
+
+fn out16(port: u64, v: u64) {
+    asm("out dx, ax", in("dx") port as u16, in("ax") v as u16)
+}
+
+fn in16(port: u64) -> u64 {
+    var v: u64 = 0
+    asm("in ax, dx", in("dx") port as u16, out("rax") & v)
+    return v & 0xFFFF
+}
+
+fn put32(p: u64, v: u64) {
+    __mmio_write32(p as *mut u32, (v & 0xFFFFFFFF) as u32)
+}
+
+// EFER lesen. Eigene Fassung und nicht die aus `apic.fi`: die ist dort
+// nicht ausgefuehrt, und ein Register, ohne das der Rueckweg nicht
+// funktioniert, holt man sich lieber selbst.
+fn rdmsr(index: u64) -> u64 {
+    var lo: u64 = 0
+    var hi: u64 = 0
+    asm("rdmsr", in("rcx") index, out("rax") & lo, out("rdx") & hi)
+    return (hi << 32) | (lo & 0xFFFFFFFF)
+}
+
+// Ein Oktett DIREKT auf COM1, ohne Umweg ueber `serial` -- fuer den
+// Aufwachpfad, solange noch nicht feststeht, ob die Leitung wieder
+// steht. Wartet auf das Bereitschaftsbit, aber nur begrenzt: eine
+// Leitung, die nicht antwortet, darf den Kern nicht anhalten.
+fn roh_aus(c: u64) {
+    // Das Oktett wird ZUERST gebildet und erst danach wird gewartet.
+    // Andersherum kostete es einen halben Abend: die Warteschleife liest
+    // mit `in al, dx` nach rax, und wenn der Uebersetzer diese Funktion
+    // an einer Aufrufstelle einsetzt und `c` gerade in rax haelt, ist
+    // `c` nach dem ersten Schleifendurchlauf der Zustand der seriellen
+    // Leitung -- und der gepruefte Wandel `u64 as u8` faellt mit
+    // "integer overflow" um. Ein eigenes Oktett vorweg nimmt dem
+    // Zufall die Gelegenheit.
+    let byte: u8 = (c & 0xFF) as u8
+    var g: u64 = 0
+    while g < 100000 {
+        var st: u64 = 0
+        asm("in al, dx", in("dx") 0x3FD as u16, out("rax") & st)
+        if (st & 0x20) != 0 {
+            g = 100000
+        }
+        g = g + 1
+    }
+    asm("out dx, al", in("dx") 0x3F8 as u16, in("al") byte)
+}
+
+fn warten(n: u64) {
+    var i: u64 = 0
+    while i < n {
+        asm("pause")
+        i = i +% 1
+    }
+}
+
+// ==================================================================
+// DIE KOMMANDOZEILE
+// ==================================================================
+
+fn find(hay: u64, needle: u64, n: u64) -> u64 {
+    if hay == 0 {
+        return 0
+    }
+    var p: u64 = hay
+    while kstate.get8(p) != 0 {
+        var i: u64 = 0
+        while i < n && kstate.get8(p + i) == kstate.get8(needle + i) {
+            i = i + 1
+        }
+        if i == n {
+            return p
+        }
+        p = p + 1
+    }
+    return 0
+}
+
+// Die Woerter dieser Runde. Sie sind ALLE lang genug, dass die
+// Teilwortsuche nichts anderes trifft -- diesen Fehler hat Runde K13
+// eine Stunde gekostet und er steht dort dokumentiert.
+fn parse(state: u64, cmd: u64) {
+    var w_on: [u8; 8] = "standby\0"
+    var w_go: [u8; 5] = "s3go\0"
+    var w_loop: [u8; 7] = "s3loop\0"
+    var w_keep: [u8; 7] = "s3keep\0"
+    var w_lid: [u8; 6] = "lidgo\0"
+    var w_s4: [u8; 5] = "s4go\0"
+    var w_say: [u8; 6] = "sbsay\0"
+    var w_nds: [u8; 10] = "nodevsave\0"
+    var w_nrs: [u8; 10] = "nortcsync\0"
+    var w_nw: [u8; 7] = "nowake\0"
+    var w_nf: [u8; 8] = "nofsync\0"
+    var w_wr: [u8; 8] = "wakertc\0"
+    var w_ns: [u8; 11] = "noschatten\0"
+    if find(cmd, (&w_on[0 as usize]) as u64, 7) != 0 {
+        kstate.mode_add(state, kstate.M_STANDBY)
+    }
+    if find(cmd, (&w_go[0 as usize]) as u64, 4) != 0 {
+        kstate.mode_add(state, kstate.M_S3GO)
+    }
+    if find(cmd, (&w_loop[0 as usize]) as u64, 6) != 0 {
+        kstate.mode_add(state, kstate.M_S3LOOP)
+    }
+    if find(cmd, (&w_keep[0 as usize]) as u64, 6) != 0 {
+        kstate.mode_add(state, kstate.M_S3KEEP)
+    }
+    if find(cmd, (&w_lid[0 as usize]) as u64, 5) != 0 {
+        kstate.mode_add(state, kstate.M_LIDGO)
+    }
+    if find(cmd, (&w_s4[0 as usize]) as u64, 4) != 0 {
+        kstate.mode_add(state, kstate.M_S4GO)
+    }
+    if find(cmd, (&w_say[0 as usize]) as u64, 5) != 0 {
+        kstate.mode_add(state, kstate.M_SBSAY)
+    }
+    if find(cmd, (&w_nds[0 as usize]) as u64, 9) != 0 {
+        kstate.mode_add(state, kstate.M_NODEVSAVE)
+    }
+    if find(cmd, (&w_nrs[0 as usize]) as u64, 9) != 0 {
+        kstate.mode_add(state, kstate.M_NORTCSYNC)
+    }
+    if find(cmd, (&w_nw[0 as usize]) as u64, 6) != 0 {
+        kstate.mode_add(state, kstate.M_NOWAKE)
+    }
+    if find(cmd, (&w_nf[0 as usize]) as u64, 7) != 0 {
+        kstate.mode_add(state, kstate.M_NOFSYNC)
+    }
+    if find(cmd, (&w_wr[0 as usize]) as u64, 7) != 0 {
+        kstate.mode_add(state, kstate.M_WAKERTC)
+    }
+    if find(cmd, (&w_ns[0 as usize]) as u64, 10) != 0 {
+        kstate.mode_add(state, kstate.M_NOSCHATTEN)
+    }
+}
+
+// ==================================================================
+// AUFSETZEN: WAS DIE FIRMWARE UEBER DEN SCHLAF SAGT
+// ==================================================================
+
+fn aufsetzen(state: u64) {
+    var w_facp: [u8; 5] = "FACP\0"
+    var n_no: [u8; 25] = "standby: kein ACPI, err=\0"
+    var n_ok: [u8; 16] = "standby: pm1a=\0\0"
+    var n_evt: [u8; 8] = " evt=\0\0\0"
+    var n_en: [u8; 7] = " en=\0\0\0"
+    var n_facs: [u8; 9] = " facs=\0\0\0"
+    var n_s3: [u8; 6] = " s3=\0\0"
+    var n_s4: [u8; 6] = " s4=\0\0"
+    var n_sl: [u8; 2] = "/\0"
+
+    s(state, S_READY, 0)
+    s(state, S_ERR, E_KEINE)
+    // DIE VOREINSTELLUNG IST RESTRIKTIV. Genau eine Quelle ist offen --
+    // die Netztaste, denn ein Geraet, das sich mit dem Einschaltknopf
+    // nicht mehr wecken laesst, ist kaputt und nicht sparsam. Alles
+    // andere ist ZU, bis es jemand ausdruecklich aufmacht.
+    var q: u64 = 0
+    while q < Q_ANZAHL {
+        s(state, Q_BASE + q * Q_STRIDE, 0)
+        s(state, Q_BASE + q * Q_STRIDE + 8, 0)
+        q = q + 1
+    }
+    s(state, Q_BASE + Q_TASTE * Q_STRIDE, 1)
+    // Und die eingebaute Deckelrichtlinie. Am Netz passiert nichts, im
+    // Akkubetrieb S3 und nach zwei Stunden S4 -- genau das, was Windows
+    // nicht tut.
+    s(state, P_NETZ, A_NICHTS)
+    s(state, P_AKKU, A_S3)
+    s(state, P_FRIST, 120)
+    s(state, P_GELESEN, 0)
+    s(state, S_CFGSRC, 0)
+    s(state, S_RTCSEK, 3)
+
+    let fadt: u64 = acpi.table(state, (&w_facp[0 as usize]) as u64)
+    if fadt == 0 {
+        s(state, S_ERR, E_FADT)
+        serial.puts((&n_no[0 as usize]) as u64)
+        serial.dec(E_FADT)
+        serial.nl()
+        return
+    }
+    let pm1a: u64 = kstate.get32(fadt + F_PM1A_CNT)
+    if pm1a == 0 {
+        s(state, S_ERR, E_PM1A)
+        serial.puts((&n_no[0 as usize]) as u64)
+        serial.dec(E_PM1A)
+        serial.nl()
+        return
+    }
+    s(state, S_PM1A, pm1a)
+    s(state, S_PM1B, kstate.get32(fadt + F_PM1B_CNT))
+
+    // Der Ereignisblock. Er ist ZWEIGETEILT: die untere Haelfte sind die
+    // Statusbits, die obere die Freigabebits. Wie lang er ist, sagt die
+    // FADT selbst (PM1_EVT_LEN); vier ist der uebliche Wert und damit
+    // liegt PM1x_EN zwei Oktette hinter PM1x_STS.
+    let evta: u64 = kstate.get32(fadt + F_PM1A_EVT)
+    let evtb: u64 = kstate.get32(fadt + F_PM1B_EVT)
+    var elen: u64 = kstate.get8(fadt + F_PM1_EVT_LEN)
+    if elen < 4 {
+        elen = 4
+    }
+    s(state, S_EVTA, evta)
+    s(state, S_EVTB, evtb)
+    if evta != 0 {
+        s(state, S_ENA, evta +% (elen / 2))
+    }
+    if evtb != 0 {
+        s(state, S_ENB, evtb +% (elen / 2))
+    }
+
+    // Die FACS. Erst das 64-Bit-Feld (ACPI 2.0), dann das alte -- in
+    // dieser Reihenfolge, weil eine Firmware, die beide fuehrt, das
+    // alte auf null setzen darf.
+    var facs: u64 = 0
+    if kstate.get32(fadt + 4) >= 140 {
+        facs = __mmio_read64((fadt + F_XFACS) as *mut u64)
+    }
+    if facs == 0 {
+        facs = kstate.get32(fadt + F_FACS)
+    }
+    s(state, S_FACS, facs)
+
+    // \_S3_ und \_S4_ aus der DSDT. Beide duerfen fehlen; eine Maschine
+    // ohne S3 ist eine Maschine ohne S3, und das steht dann so da.
+    let dsdt: u64 = kstate.get32(fadt + F_DSDT)
+    var v3: [u64; 2] = [0 as u64; 2]
+    if power.sx_values(dsdt, 0x33, (&v3[0 as usize]) as u64) {
+        s(state, S_S3A, v3[0 as usize])
+        s(state, S_S3B, v3[1 as usize])
+        s(state, S_S3OK, 1)
+    }
+    var v4: [u64; 2] = [0 as u64; 2]
+    if power.sx_values(dsdt, 0x34, (&v4[0 as usize]) as u64) {
+        s(state, S_S4A, v4[0 as usize])
+        s(state, S_S4B, v4[1 as usize])
+        s(state, S_S4OK, 1)
+    }
+    if g(state, S_S3OK) == 0 {
+        s(state, S_ERR, E_S3)
+    }
+    if facs == 0 {
+        s(state, S_ERR, E_FACS)
+    }
+
+    // ---------------------------------------- DIE UEBERGANGS-TAFEL
+    //
+    // Drei Rahmen, die das erste Gigabyte eins zu eins abbilden --
+    // PML4, PDPT und ein Seitenverzeichnis mit 512 Kacheln zu 2 MiB.
+    // Sie werden JETZT gebaut, im laufenden Betrieb, und ueberstehen
+    // den Schlaf im Speicher wie alles andere.
+    //
+    // WARUM ES SIE GIBT: das Trampolin muss das Seitenwerk einschalten,
+    // und es muss das mit einer Tafel tun, die genau die Adressen
+    // abbildet, die es selbst benutzt -- mehr braucht es nicht und
+    // weniger darf es nicht sein. Die Tafel des laufenden Kerns dafuer
+    // zu nehmen, ist naheliegend und geht auf diesem Wirt nachweislich
+    // schief (siehe `wake32` in isr.s). Linux macht es genauso: der
+    // Realmodus-Anfang bekommt seine eigene `trampoline_pgd`.
+    let t_pml4: u64 = mem.frame_alloc(state)
+    let t_pdpt: u64 = mem.frame_alloc(state)
+    let t_pd: u64 = mem.frame_alloc(state)
+    if t_pml4 != 0 && t_pdpt != 0 && t_pd != 0 {
+        var z: u64 = 0
+        while z < 512 {
+            __mmio_write64((t_pml4 + z * 8) as *mut u64, 0)
+            __mmio_write64((t_pdpt + z * 8) as *mut u64, 0)
+            // 0x83: vorhanden, schreibbar, GROSSE Kachel. Kein NX --
+            // in dieser Tafel wird ausgefuehrt.
+            __mmio_write64((t_pd + z * 8) as *mut u64,
+                (z *% 0x200000) | 0x83)
+            z = z + 1
+        }
+        __mmio_write64(t_pml4 as *mut u64, t_pdpt | 3)
+        __mmio_write64(t_pdpt as *mut u64, t_pd | 3)
+        __mmio_write64((vector(state, V_WREGS) + WR_TMPCR3) as *mut u64, t_pml4)
+    }
+
+    // ------------------------------- DIE SCHATTENKOPIE DES ABBILDS
+    //
+    // Warum es sie gibt, steht ausfuehrlich bei WAKE_REGS in
+    // `kernel/arch/x86_64/isr.s`: QEMU behandelt das Aufwachen aus S3
+    // als Maschinenreset und schreibt dabei das mit `-kernel` geladene
+    // Abbild neu -- `.data` faellt auf die Anfangswerte zurueck, `.bss`
+    // wird genullt, und damit ist der ganze kdata-Bereich weg. Auf
+    // echter Hardware passiert das nicht.
+    //
+    // Der Bereich [__save_begin, kernel_end) wird deshalb vor jedem
+    // Schlaf in Rahmen OBERHALB des Abbilds gesichert und vom
+    // Trampolin zurueckgeholt. `noschatten` schaltet das ab -- fuer
+    // einen Lauf VON DER PLATTE, bei dem QEMU nichts zurueckschreibt,
+    // und fuer echte Hardware.
+    let beg: u64 = vector(state, V_SAVEBEG)
+    let end: u64 = vector(state, V_KEND)
+    let wregs: u64 = vector(state, V_WREGS)
+    __mmio_write64((wregs + WR_DOSHADOW) as *mut u64, 0)
+    if end > beg {
+        let laenge: u64 = (end -% beg +% 4095) & 0xFFFFFFFFFFFFF000
+        let n: u64 = laenge / 4096
+        let schatten: u64 = mem.frame_run(state, n)
+        if schatten != 0 {
+            s(state, S_SHADOW, schatten)
+            s(state, S_SHLEN, laenge)
+            __mmio_write64((wregs + WR_SHADOW) as *mut u64, schatten)
+            __mmio_write64((wregs + WR_TARGET) as *mut u64, beg)
+            __mmio_write64((wregs + WR_LEN) as *mut u64, laenge)
+            if !kstate.mode_on(state, kstate.M_NOSCHATTEN) {
+                __mmio_write64((wregs + WR_DOSHADOW) as *mut u64, 1)
+            }
+        }
+    }
+
+    // Ein Rahmen fuer den geretteten PCI-Konfigurationsraum. 4096
+    // Oktette fassen 32 Geraete zu 16 Doppelwoertern -- die Tafel aus
+    // Runde K2 fasst nicht mehr.
+    let rahmen: u64 = mem.frame_alloc(state)
+    s(state, S_PCISAVE, rahmen)
+
+    s(state, S_READY, 1)
+    serial.puts((&n_ok[0 as usize]) as u64)
+    serial.hex(pm1a)
+    serial.puts((&n_evt[0 as usize]) as u64)
+    serial.hex(evta)
+    serial.puts((&n_en[0 as usize]) as u64)
+    serial.hex(g(state, S_ENA))
+    serial.puts((&n_facs[0 as usize]) as u64)
+    serial.hex(facs)
+    serial.puts((&n_s3[0 as usize]) as u64)
+    serial.dec(g(state, S_S3A))
+    serial.puts((&n_sl[0 as usize]) as u64)
+    serial.dec(g(state, S_S3OK))
+    serial.puts((&n_s4[0 as usize]) as u64)
+    serial.dec(g(state, S_S4A))
+    serial.puts((&n_sl[0 as usize]) as u64)
+    serial.dec(g(state, S_S4OK))
+    serial.nl()
+}
+
+// ==================================================================
+// DIE AUFWECKQUELLEN
+// ==================================================================
+//
+// FUENF QUELLEN, EINZELN SCHALTBAR, UND DIE VOREINSTELLUNG IST ZU.
+//
+// Zwei davon sind ohne AML-Interpreter wirklich erreichbar und werden
+// hier wirklich geschaltet: die Netztaste (PM1x_EN Bit 8) und der
+// Wecker der Echtzeituhr (Bit 10). Die drei anderen -- Deckelschalter,
+// USB-Tastatur, Netzkarte -- haengen auf einem echten Brett an GPEs,
+// und welches GPE-Bit zu welchem Geraet gehoert, steht im AML-Objekt
+// `_PRW` dieses Geraets. Ohne Interpreter ist das nicht zu erfahren.
+//
+// SIE STEHEN TROTZDEM IN DER TAFEL, und zwar aus zwei Gruenden. Erstens
+// ist die Tafel die Schnittstelle nach aussen: `/bin/schlaf` und die
+// Deckelrichtlinie sprechen ueber Namen, nicht ueber Registerbits, und
+// diese Namen aendern sich nicht mehr, wenn Runde AML die Bits
+// nachliefert. Zweitens ist "nicht erreichbar" eine ehrliche Antwort
+// und "gibt es nicht" waere eine falsche.
+fn quelle_setzen(state: u64, q: u64, an: bool) -> bool {
+    if q >= Q_ANZAHL {
+        return false
+    }
+    var v: u64 = 0
+    if an {
+        v = 1
+    }
+    s(state, Q_BASE + q * Q_STRIDE, v)
+    return true
+}
+
+fn quelle_erlaubt(state: u64, q: u64) -> bool {
+    if q >= Q_ANZAHL {
+        return false
+    }
+    return g(state, Q_BASE + q * Q_STRIDE) != 0
+}
+
+// Die Tafel in die Register schreiben. Das ist die Stelle, an der aus
+// einer Einstellung Hardware wird -- und in QEMU ist sie messbar:
+// `acpi_pm1_evt_write_en` reicht Bit 10 an `qemu_system_wakeup_enable`
+// weiter, und ein geschlossenes Tor haelt die Maschine bei scharfem
+// Wecker wirklich liegen.
+fn tore_setzen(state: u64) -> u64 {
+    var bits: u64 = 0
+    if !kstate.mode_on(state, kstate.M_NOWAKE) {
+        if quelle_erlaubt(state, Q_TASTE) {
+            bits = bits | EN_PWRBTN
+        }
+        if quelle_erlaubt(state, Q_RTC) {
+            bits = bits | EN_RTC
+        }
+    }
+    let ena: u64 = g(state, S_ENA)
+    let enb: u64 = g(state, S_ENB)
+    let evta: u64 = g(state, S_EVTA)
+    let evtb: u64 = g(state, S_EVTB)
+    // Erst die Statusbits loeschen (sie sind write-1-to-clear), sonst
+    // weckt ein Ereignis von vorhin die Maschine sofort wieder.
+    if evta != 0 {
+        out16(evta, 0xFFFF)
+    }
+    if evtb != 0 {
+        out16(evtb, 0xFFFF)
+    }
+    if ena != 0 {
+        out16(ena, bits)
+    }
+    if enb != 0 {
+        out16(enb, bits)
+    }
+    return bits
+}
+
+// ------------------------------------------------ DER WECKER DER UHR
+//
+// Die Echtzeituhr ist die EINZIGE Aufweckquelle, die dieser Kernel ohne
+// AML-Interpreter selbst scharf machen kann -- und sie ist zugleich die
+// einzige, mit der sich in QEMU beweisen laesst, dass ein geschlossenes
+// Tor wirklich schliesst: ein scharfer Wecker bei geschlossenem
+// PM1x_EN.RTC_EN laesst die Maschine liegen, bei offenem weckt er sie.
+//
+// Der Baustein zaehlt in BCD oder binaer, je nach Bit 2 von
+// Statusregister B -- das wird GELESEN und nicht angenommen, aus
+// demselben Grund wie in `time.rtc_field`. Fuer Stunde und Minute wird
+// 0xC0 eingetragen: der mc146818 versteht das als "ist mir gleich", und
+// damit ist der Wecker einer, der in weniger als einer Minute geht,
+// ohne dass hier ein Datum gerechnet werden muesste.
+fn cmos_lesen(reg: u64) -> u64 {
+    serial.out8(0x70 as u16, reg as u8)
+    return serial.in8(0x71 as u16) as u64
+}
+
+fn cmos_schreiben(reg: u64, v: u64) {
+    serial.out8(0x70 as u16, reg as u8)
+    serial.out8(0x71 as u16, v as u8)
+}
+
+fn nach_bcd(v: u64) -> u64 {
+    return ((v / 10) << 4) | (v % 10)
+}
+
+fn aus_bcd(v: u64) -> u64 {
+    return ((v >> 4) *% 10) +% (v & 0x0F)
+}
+
+fn wecker_stellen(state: u64) -> u64 {
+    if !quelle_erlaubt(state, Q_RTC) {
+        return 0
+    }
+    if kstate.mode_on(state, kstate.M_NOWAKE) {
+        // Die Gegenprobe macht den Wecker TROTZDEM scharf -- sonst
+        // wuerde sie beweisen, dass ein nicht gestellter Wecker nicht
+        // weckt, und das ist keine Zusage ueber die Tore.
+        serial.nl()
+    }
+    var vor: u64 = g(state, S_RTCSEK)
+    if vor == 0 || vor > 50 {
+        vor = 3
+    }
+    let regb: u64 = cmos_lesen(0x0B)
+    let binaer: bool = (regb & 4) != 0
+    var jetzt: u64 = cmos_lesen(0x00)
+    if !binaer {
+        jetzt = aus_bcd(jetzt)
+    }
+    var ziel: u64 = (jetzt +% vor) % 60
+    if !binaer {
+        ziel = nach_bcd(ziel)
+    }
+    cmos_schreiben(0x01, ziel) // Sekunden-Alarm
+    cmos_schreiben(0x03, 0xC0) // Minute: ist mir gleich
+    cmos_schreiben(0x05, 0xC0) // Stunde: ist mir gleich
+    cmos_lesen(0x0C) // Statusregister C loeschen
+    cmos_schreiben(0x0B, regb | 0x20) // AIE an
+    bump(state, S_RTCARM)
+    return 1
+}
+
+// Wer hat geweckt? Die Statusbits sagen es -- sie stehen nach dem
+// Aufwachen noch, weil sie nur durch Schreiben verschwinden.
+fn wecker_lesen(state: u64) -> u64 {
+    let evta: u64 = g(state, S_EVTA)
+    if evta == 0 {
+        return Q_ANZAHL
+    }
+    let sts: u64 = in16(evta)
+    if (sts & EN_RTC) != 0 {
+        return Q_RTC
+    }
+    if (sts & EN_PWRBTN) != 0 {
+        return Q_TASTE
+    }
+    return Q_ANZAHL
+}
+
+// ==================================================================
+// DER GERAETEZUSTAND
+// ==================================================================
+//
+// WAS EIN AUFWACHEN AUS S3 WIRKLICH ZERSTOERT, in der Reihenfolge, in
+// der es hier zurueckgeholt wird:
+//
+//   * IDTR, TR, die syscall-Register (STAR/LSTAR/SFMASK, EFER.SCE) und
+//     die Schutzbits in CR4 (SMEP/SMAP) sind PROZESSORREGISTER. Sie
+//     ueberleben das Abschalten des Prozessors nicht. Die TABELLEN
+//     dahinter liegen im Speicher und ueberleben sehr wohl -- also wird
+//     nicht neu gebaut, sondern nur neu GELADEN.
+//   * Der Unterbrechungsverteiler (8259) steht wieder auf den Vektoren
+//     von 1981, wo Vektor 8 der Zeitgeber ist -- und Vektor 8 ist der
+//     Doppelfehler. Ohne `pic_remap` endet der erste Zeitgeberschlag
+//     nach dem Aufwachen in einem dreifachen Fehler.
+//   * Der Zeitgeber selbst zaehlt nicht mehr.
+//   * Der lokale APIC ist software-abgeschaltet.
+//   * Die PCI-Geraete haben ihr Befehlsregister und ihre BARs verloren;
+//     ein Geraet ohne Bus-Master-Bit macht kein DMA mehr.
+//   * Die serielle Leitung ist auf 9600/8N1 zurueckgestellt.
+//
+// GESICHERT werden muss davon nur, was der Kernel nicht aus sich selbst
+// wiederherstellen kann: die PIC-Masken, der Teiler des Zeitgebers und
+// der PCI-Konfigurationsraum. Alles andere baut er ohnehin aus seinen
+// eigenen Tabellen neu auf.
+
+const PCI_WORDS: u64 = 16 // 16 Doppelwoerter = 64 Oktett je Geraet
+const PCI_MAX: u64 = 32
+
+fn pci_slot(state: u64, i: u64) -> u64 {
+    return g(state, S_PCISAVE) +% (i *% PCI_WORDS *% 4)
+}
+
+fn geraete_sichern(state: u64) {
+    s(state, S_DEVSAVED, 0)
+    if kstate.mode_on(state, kstate.M_NODEVSAVE) {
+        return
+    }
+    // Die PIC-Masken, so wie sie jetzt stehen.
+    let m: u64 = serial.in8(0x21 as u16) as u64
+    let sl: u64 = serial.in8(0xA1 as u16) as u64
+    s(state, S_PICM, m | (sl << 8))
+    s(state, S_PITDIV, 1193182 / 100)
+    var apicwas: u64 = 0
+    if apic.active(state) {
+        apicwas = 1
+    }
+    s(state, S_APICWAS, apicwas)
+    s(state, S_APICHZ, 100) // dieselbe Marke wie der PIT
+
+    // Der PCI-Konfigurationsraum. 16 Doppelwoerter je Geraet: darin
+    // stehen Befehlsregister, Cache-Zeile, Latenzzeit, die sechs BARs
+    // und die Unterbrechungsleitung -- alles, was ein Geraet nach dem
+    // Aufwachen braucht und selbst nicht mehr weiss.
+    let basis: u64 = g(state, S_PCISAVE)
+    if basis == 0 {
+        return
+    }
+    var n: u64 = pci.count(state)
+    if n > PCI_MAX {
+        n = PCI_MAX
+    }
+    var i: u64 = 0
+    while i < n {
+        let bdf: u64 = pci.get(state, i, 0)
+        var w: u64 = 0
+        while w < PCI_WORDS {
+            put32(pci_slot(state, i) +% (w *% 4), pci.cfg_read32(bdf, w *% 4))
+            w = w + 1
+        }
+        i = i + 1
+    }
+    s(state, S_PCIN, n)
+    s(state, S_DEVSAVED, n +% 3) // die drei Saetze oben zaehlen mit
+}
+
+// Und die Gegenrichtung, in UMGEKEHRTER Reihenfolge: erst der
+// Prozessor, dann der Verteiler, dann der Bus, dann die Geraete.
+// Umgekehrt ist nicht Kosmetik -- ein PCI-Geraet, dessen BARs wieder
+// stehen, bevor die IDT steht, liefert eine Unterbrechung in eine
+// Tabelle, die es nicht gibt.
+fn geraete_zurueck(state: u64) {
+    s(state, S_DEVBACK, 0)
+    // 1. Die serielle Leitung. Zuerst, damit alles Weitere sichtbar ist.
+    serial.init()
+    if kstate.mode_on(state, kstate.M_NODEVSAVE) {
+        return
+    }
+    var zahl: u64 = 1
+    // 2. Der Prozessor: IDT, TSS, syscall, Schutzbits.
+    let vectors: u64 = kstate.get(state, kstate.VECTORS)
+    idt.tss_install(kstate.get(state, kstate.GDT), kstate.get(state, kstate.TSS),
+        vector(state, V_IRQ_STACK), vector(state, V_DF_STACK))
+    idt.build(state, vectors)
+    user.setup(state)
+    guard.apply_here(state)
+    zahl = zahl + 4
+    // 3. Der Unterbrechungsverteiler und der Zeitgeber.
+    idt.pic_remap()
+    let m: u64 = g(state, S_PICM)
+    idt.pic_mask((m & 0xFF) as u8, ((m >> 8) & 0xFF) as u8)
+    idt.pit_init(100)
+    zahl = zahl + 2
+    // 4. Der lokale APIC, wenn er vorher lief.
+    if g(state, S_APICWAS) != 0 {
+        // `resume` und nicht `init`: die Frequenz ist gemessen, die
+        // Maschine ist dieselbe. Warum hier nicht neu gemessen wird,
+        // steht bei `apic.resume`.
+        if apic.resume(state, g(state, S_APICHZ)) {
+            zahl = zahl + 1
+        }
+    }
+    // 5. Die PCI-Geraete.
+    let basis: u64 = g(state, S_PCISAVE)
+    if basis != 0 {
+        var i: u64 = 0
+        let n: u64 = g(state, S_PCIN)
+        while i < n {
+            let bdf: u64 = pci.get(state, i, 0)
+            // Die BARs zuerst, dann die Unterbrechungsleitung, und das
+            // Befehlsregister ZULETZT: es schaltet das Geraet an, und
+            // ein Geraet, das mit alten BARs angeht, schreibt DMA
+            // irgendwohin.
+            var w: u64 = 4
+            while w < 10 {
+                pci.cfg_write32(bdf, w *% 4,
+                    kstate.get32(pci_slot(state, i) +% (w *% 4)))
+                w = w + 1
+            }
+            pci.cfg_write32(bdf, 60, kstate.get32(pci_slot(state, i) +% 60))
+            pci.cfg_write32(bdf, 4, kstate.get32(pci_slot(state, i) +% 4))
+            i = i + 1
+            zahl = zahl + 1
+        }
+    }
+    s(state, S_DEVBACK, zahl)
+}
+
+// Was DMA macht, wird vor dem Schlafen stillgelegt: Bus-Master aus. Ein
+// Geraet, das waehrend des Einschlafens noch einen Auftrag zu Ende
+// bringt, schreibt in einen Speicher, dessen Inhalt gerade das einzige
+// ist, was diesen Schlaf ueberdauern soll.
+fn dma_stilllegen(state: u64) -> u64 {
+    if kstate.mode_on(state, kstate.M_NODEVSAVE) {
+        return 0
+    }
+    var i: u64 = 0
+    var n: u64 = pci.count(state)
+    if n > PCI_MAX {
+        n = PCI_MAX
+    }
+    var zahl: u64 = 0
+    while i < n {
+        let bdf: u64 = pci.get(state, i, 0)
+        if pci.master_on(bdf) {
+            pci.disable_master(bdf)
+            zahl = zahl + 1
+        }
+        i = i + 1
+    }
+    return zahl
+}
+
+// ==================================================================
+// DAS SCHLAFPROTOKOLL -- was `powercfg /sleepstudy` zeigt
+// ==================================================================
+
+fn log_slot(state: u64, i: u64) -> u64 {
+    return state +% kstate.STBY_OFF +% L_BASE +% ((i % L_MAX) *% L_STRIDE)
+}
+
+fn log_schreiben(state: u64, ein: u64, aus: u64, quelle: u64, tief: u64,
+    down: u64, up: u64) {
+    let i: u64 = g(state, S_LOGP)
+    let p: u64 = log_slot(state, i)
+    __mmio_write64((p + L_EIN) as *mut u64, ein)
+    __mmio_write64((p + L_AUS) as *mut u64, aus)
+    __mmio_write64((p + L_QUELLE) as *mut u64, quelle)
+    __mmio_write64((p + L_TIEF) as *mut u64, tief)
+    __mmio_write64((p + L_DOWN) as *mut u64, down)
+    __mmio_write64((p + L_UP) as *mut u64, up)
+    s(state, S_LOGP, (i + 1) % L_MAX)
+    let n: u64 = g(state, S_LOGN)
+    if n < L_MAX {
+        s(state, S_LOGN, n + 1)
+    }
+}
+
+// Den Namen einer Quelle AUSGEBEN statt ihn herauszureichen: ein
+// Zeiger auf einen lokalen Puffer waere nach der Rueckkehr ungueltig,
+// und der Uebersetzer laesst das zu Recht nicht durch.
+fn quelle_sagen(q: u64) {
+    var n_taste: [u8; 10] = "Netztaste\0"
+    var n_deckel: [u8; 7] = "Deckel\0"
+    var n_usb: [u8; 4] = "USB\0"
+    var n_rtc: [u8; 4] = "RTC\0"
+    var n_lan: [u8; 4] = "LAN\0"
+    var n_un: [u8; 10] = "unbekannt\0"
+    if q == Q_TASTE {
+        serial.puts((&n_taste[0 as usize]) as u64)
+        return
+    }
+    if q == Q_DECKEL {
+        serial.puts((&n_deckel[0 as usize]) as u64)
+        return
+    }
+    if q == Q_USB {
+        serial.puts((&n_usb[0 as usize]) as u64)
+        return
+    }
+    if q == Q_RTC {
+        serial.puts((&n_rtc[0 as usize]) as u64)
+        return
+    }
+    if q == Q_LAN {
+        serial.puts((&n_lan[0 as usize]) as u64)
+        return
+    }
+    serial.puts((&n_un[0 as usize]) as u64)
+}
+
+// Der Bericht. Eine Zeile je Schlaf, danach die Summen. Dasselbe, was
+// `/bin/schlaf bericht` in Ring 3 zeigt -- die Zahlen kommen aus
+// derselben Tafel, keine wird hier gerechnet.
+fn bericht(state: u64) {
+    var n_kopf: [u8; 34] = "standby-bericht: n=\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"
+    var n_z: [u8; 12] = "standby: #\0\0"
+    var n_ein: [u8; 6] = " ein=\0"
+    var n_aus: [u8; 6] = " aus=\0"
+    var n_q: [u8; 4] = " q=\0"
+    var n_t: [u8; 7] = " tief=\0"
+    var n_d: [u8; 7] = " down=\0"
+    var n_u: [u8; 5] = " up=\0"
+    var n_sum: [u8; 22] = "standby: summe tief=\0\0"
+    var n_v: [u8; 10] = " anlauf=\0\0"
+    var n_w: [u8; 8] = " wach=\0\0"
+    var n_dm: [u8; 12] = " downmit=\0\0\0"
+    var n_um: [u8; 10] = " upmit=\0\0\0"
+    var n_tief: [u8; 10] = " laengst=\0"
+    serial.puts((&n_kopf[0 as usize]) as u64)
+    serial.dec(g(state, S_LOGN))
+    serial.nl()
+    var i: u64 = 0
+    let n: u64 = g(state, S_LOGN)
+    while i < n {
+        let p: u64 = log_slot(state, i)
+        serial.puts((&n_z[0 as usize]) as u64)
+        serial.dec(i)
+        serial.puts((&n_ein[0 as usize]) as u64)
+        serial.dec(__mmio_read64((p + L_EIN) as *mut u64))
+        serial.puts((&n_aus[0 as usize]) as u64)
+        serial.dec(__mmio_read64((p + L_AUS) as *mut u64))
+        serial.puts((&n_q[0 as usize]) as u64)
+        quelle_sagen(__mmio_read64((p + L_QUELLE) as *mut u64))
+        serial.puts((&n_t[0 as usize]) as u64)
+        serial.dec(__mmio_read64((p + L_TIEF) as *mut u64))
+        serial.puts((&n_d[0 as usize]) as u64)
+        serial.dec(__mmio_read64((p + L_DOWN) as *mut u64))
+        serial.puts((&n_u[0 as usize]) as u64)
+        serial.dec(__mmio_read64((p + L_UP) as *mut u64))
+        serial.nl()
+        i = i + 1
+    }
+    serial.puts((&n_sum[0 as usize]) as u64)
+    serial.dec(g(state, S_SLEPT_S))
+    serial.puts((&n_v[0 as usize]) as u64)
+    serial.dec(g(state, S_TRIES))
+    serial.puts((&n_w[0 as usize]) as u64)
+    serial.dec(g(state, S_WAKES))
+    var dm: u64 = 0
+    var um: u64 = 0
+    if g(state, S_WAKES) != 0 {
+        dm = g(state, S_DOWN_SUM) / g(state, S_WAKES)
+        um = g(state, S_UP_SUM) / g(state, S_WAKES)
+    }
+    serial.puts((&n_dm[0 as usize]) as u64)
+    serial.dec(dm)
+    serial.puts((&n_um[0 as usize]) as u64)
+    serial.dec(um)
+    serial.puts((&n_tief[0 as usize]) as u64)
+    serial.dec(g(state, S_DEEPEST))
+    serial.nl()
+}
+
+// ==================================================================
+// DER WEG HERAUS -- UND WARUM ER EINE EIGENE FUNKTION IST
+// ==================================================================
+//
+// `wake_save` rettet genau das, was die Aufrufvereinbarung dem
+// Aufgerufenen zu erhalten aufgibt: rbx, rbp, r12..r15, rsp und die
+// Ruecksprungadresse. Alles, was der Uebersetzer gerade in rax, rcx,
+// rdx, rsi, rdi oder r8..r11 hielt, ist nach dem Aufwachen der Zustand,
+// den das Trampolin hinterlassen hat. Das hat diese Runde zweimal Geld
+// gekostet:
+//
+//   * `down` stand im Bericht bei 4013181850 Millisekunden -- also
+//     sechsundvierzig Tagen --, weil die oertliche Zahl in einem
+//     solchen Register lag.
+//   * Und schlimmer: DER ZUSTANDSZEIGER SELBST lag darin. Solange im
+//     Aufwachpfad noch Marken standen, wurde er zufaellig in ein
+//     erhaltenes Register gelegt und alles ging gut; ohne die Marken
+//     rechnete der Uebersetzer anders, und der Kern schrieb sein
+//     `kstate` an eine Adresse, die das Trampolin hinterlassen hatte.
+//     Kein Absturz, keine Ausgabe, gar nichts.
+//
+// Deshalb: `schlafen` legt den Zeiger VOR dem Schlafen in das Wort bei
+// WAKE_REGS+136 -- unter 1 MiB, also weder von `rom_reset` noch vom
+// Trampolin angetastet --, und der Aufwachpfad HOLT IHN VON DORT und
+// bekommt ihn als gewoehnliches Argument. Damit haengt hier nichts mehr
+// an der Laune der Registerbelegung.
+fn aufgewacht(state: u64) -> u64 {
+    var n_wach: [u8; 22] = "standby: WACH quelle=\0"
+    var n_skew: [u8; 8] = " nach=\0\0"
+    var n_up: [u8; 6] = " up=\0\0"
+    var n_dn: [u8; 8] = " down=\0\0"
+    var n_dev: [u8; 7] = " dev=\0\0"
+    //
+    // Der Prozessor hat keine IDT, kein TR, keine syscall-Register.
+    // Unterbrechungen sind aus (das Trampolin hat `cli` gemacht und
+    // nichts wieder aufgemacht). Der Speicher steht; alles andere nicht.
+    //
+    // UND: DIE OERTLICHEN NAMEN VON OBEN GELTEN HIER NICHT MEHR.
+    // `wake_save` rettet genau das, was die Aufrufvereinbarung dem
+    // Aufgerufenen zu erhalten aufgibt -- rbx, rbp, r12..r15, rsp und
+    // die Ruecksprungadresse. Alles, was der Uebersetzer in rax, rcx,
+    // rdx, rsi, rdi oder r8..r11 hielt, ist nach dem Aufwachen der
+    // Zustand, den das Trampolin hinterlassen hat. Das hat diese Runde
+    // eine falsche Zahl im Bericht gekostet: `down` stand bei
+    // 4013181850 Millisekunden, also sechsundvierzig Tagen, weil
+    // `down_ms` in einem solchen Register lag.
+    //
+    // Deshalb wird ab hier ALLES, was von vor dem Schlaf gebraucht
+    // wird, aus `kstate` gelesen -- dem einzigen Speicher, der den
+    // Schlaf sicher ueberdauert.
+    let mono_alt: u64 = g(state, S_MONO)
+    let wall_alt: u64 = g(state, S_WALL)
+    let down_alt: u64 = g(state, S_DOWN_MS)
+    let t_wach: u64 = time.tsc()
+    geraete_zurueck(state)
+
+    // Die Uhr nachziehen. Die Gegenprobe `nortcsync` nimmt genau diesen
+    // Aufruf weg -- und dann steht die Systemzeit auf dem Wert von vor
+    // dem Schlaf.
+    var weg: u64 = 0
+    if !kstate.mode_on(state, kstate.M_NORTCSYNC) {
+        weg = time.nachziehen(state, mono_alt, wall_alt)
+    }
+    s(state, S_SKEW_S, weg)
+    kstate.set(state, kstate.STBY_OFF + S_SLEPT_S,
+        g(state, S_SLEPT_S) +% weg)
+    if weg > g(state, S_DEEPEST) {
+        s(state, S_DEEPEST, weg)
+    }
+
+    let quelle: u64 = wecker_lesen(state)
+    s(state, S_LASTWAKE, quelle)
+    if quelle < Q_ANZAHL {
+        kstate.add(state, kstate.STBY_OFF + Q_BASE + quelle * Q_STRIDE + 8, 1)
+    }
+    // Die Statusbits wieder loeschen, sonst zeigt der naechste Lauf
+    // dieselbe Quelle.
+    let evta: u64 = g(state, S_EVTA)
+    if evta != 0 {
+        out16(evta, 0xFFFF)
+    }
+
+    let t_fertig: u64 = time.mono_ns(state)
+    var up_ms: u64 = 0
+    let k: u64 = time.khz(state)
+    if k != 0 {
+        up_ms = ((time.tsc() -% t_wach) / k)
+    }
+    s(state, S_UP_MS, up_ms)
+    s(state, S_DOWN_SUM, g(state, S_DOWN_SUM) +% down_alt)
+    s(state, S_UP_SUM, g(state, S_UP_SUM) +% up_ms)
+    bump(state, S_WAKES)
+    s(state, S_ERR, E_OK)
+    s(state, S_WOKEN, 1)
+    log_schreiben(state, wall_alt, wall_alt +% weg, quelle, weg, down_alt, up_ms)
+    serial.puts((&n_wach[0 as usize]) as u64)
+    quelle_sagen(quelle)
+    serial.puts((&n_skew[0 as usize]) as u64)
+    serial.dec(weg)
+    serial.puts((&n_dn[0 as usize]) as u64)
+    serial.dec(down_alt)
+    serial.puts((&n_up[0 as usize]) as u64)
+    serial.dec(up_ms)
+    serial.puts((&n_dev[0 as usize]) as u64)
+    serial.dec(g(state, S_DEVBACK))
+    serial.nl()
+    // Die Unterbrechungen ZULETZT. Der Bericht ueber das Aufwachen darf
+    // nicht davon abhaengen, dass der Zeitgeber schon wieder laeuft --
+    // sonst steht am Ende eines misslungenen Aufwachens gar nichts da.
+    idt.enable()
+    // `t_fertig` wird gelesen, damit der Uebersetzer die Messung nicht
+    // wegoptimiert; ihr Wert steckt in `up_ms`.
+    if t_fertig == 0 {
+        serial.nl()
+    }
+    return E_OK
+}
+
+// ==================================================================
+// DER SCHLAF SELBST
+// ==================================================================
+//
+// Rueckgabe: E_OK, wenn die Maschine wirklich geschlafen hat und wieder
+// da ist. Sonst der Grund.
+fn schlafen(state: u64) -> u64 {
+    var n_go: [u8; 22] = "standby: s3 einschla\0\0"
+    var n_typ: [u8; 8] = "fen typ\0"
+    var n_eq: [u8; 2] = "=\0"
+    var n_en: [u8; 8] = " tore=\0\0"
+    var n_fs: [u8; 9] = " fsync=\0\0"
+    var n_dma: [u8; 6] = " dma=\0"
+    var n_wk: [u8; 7] = " weck=\0"
+    var n_no: [u8; 22] = "standby: s3 geht nicht"
+    var n_er: [u8; 7] = ", err=\0"
+    var n_wach: [u8; 22] = "standby: WACH quelle=\0"
+    var n_skew: [u8; 8] = " nach=\0\0"
+    var n_up: [u8; 6] = " up=\0\0"
+    var n_dn: [u8; 8] = " down=\0\0"
+    var n_dev: [u8; 7] = " dev=\0\0"
+
+    if !bereit(state) {
+        s(state, S_ERR, E_AUS)
+        return E_AUS
+    }
+    if g(state, S_S3OK) == 0 {
+        serial.puts((&n_no[0 as usize]) as u64)
+        serial.puts((&n_er[0 as usize]) as u64)
+        serial.dec(E_S3)
+        serial.nl()
+        s(state, S_ERR, E_S3)
+        return E_S3
+    }
+    let facs: u64 = g(state, S_FACS)
+    if facs == 0 {
+        serial.puts((&n_no[0 as usize]) as u64)
+        serial.puts((&n_er[0 as usize]) as u64)
+        serial.dec(E_FACS)
+        serial.nl()
+        s(state, S_ERR, E_FACS)
+        return E_FACS
+    }
+
+    bump(state, S_TRIES)
+    let t_start: u64 = time.mono_ns(state)
+
+    // ---- 1. Alles auf die Platte, was noch im Zwischenspeicher liegt.
+    //
+    // DAS IST PFLICHT UND NICHT KUER. Ein Schlaf ist ein Zustand, aus
+    // dem die Maschine auch NICHT mehr aufwachen kann -- der Akku geht
+    // leer, jemand zieht den Strom. Was dann nicht auf der Platte
+    // steht, ist weg. Die Gegenprobe heisst `nofsync`.
+    var fs_ok: u64 = 0
+    if !kstate.mode_on(state, kstate.M_NOFSYNC) {
+        if blk.flush(state) {
+            fs_ok = 1
+            bump(state, S_FSYNCS)
+        }
+    }
+
+    // ---- 2. Den Geraetezustand sichern und DMA stilllegen.
+    geraete_sichern(state)
+    let dman: u64 = dma_stilllegen(state)
+
+    // ---- 3. Die Aufweckquellen aufmachen -- genau die erlaubten --
+    //         und den Wecker stellen, falls er dazugehoert.
+    let tore: u64 = tore_setzen(state)
+    let weck: u64 = wecker_stellen(state)
+
+    // ---- 4. Den Wiedereinstieg vorbereiten. Das Trampolin unter 1 MiB,
+    //         die Adresse in die FACS, und CR3 dazu -- der Weg zurueck
+    //         braucht die Seitentafel, die JETZT gilt, nicht die vom
+    //         Start.
+    let von: u64 = vector(state, V_W16START)
+    let bis: u64 = vector(state, V_W16END)
+    var i: u64 = 0
+    while von +% i < bis {
+        kstate.set8(WAKE_BASE +% i, kstate.get8(von +% i) as u8)
+        i = i +% 1
+    }
+    var cr3: u64 = 0
+    asm("mov rax, cr3", out("rax") & cr3)
+    __mmio_write64((vector(state, V_WREGS) + WR_CR3) as *mut u64, cr3)
+    // UND EFER. Warum das kein Beiwerk ist, steht bei `wake32` in
+    // isr.s: ohne NXE wird Bit 63 jedes Seitentafeleintrags zu einem
+    // reservierten Bit, und der Rueckweg endet im Dreifachfehler.
+    __mmio_write64((vector(state, V_WREGS) + WR_EFER) as *mut u64,
+        rdmsr(0xC0000080))
+    // UND CR0 UND CR4. Was vor dem Schlaf galt, gilt danach wieder --
+    // vollstaendig. Die Begruendung steht bei `wake32` in isr.s und
+    // ist teuer bezahlt: ohne CR4.OSFXSR sind SSE-Befehle verboten,
+    // und der Uebersetzer setzt sie ohne Ankuendigung ein.
+    var cr4v: u64 = 0
+    asm("mov rax, cr4", out("rax") & cr4v)
+    var cr0v: u64 = 0
+    asm("mov rax, cr0", out("rax") & cr0v)
+    __mmio_write64((vector(state, V_WREGS) + WR_CR4) as *mut u64, cr4v)
+    __mmio_write64((vector(state, V_WREGS) + WR_CR0) as *mut u64, cr0v)
+    // Der Zustandszeiger fuer den Weg zurueck. Siehe `aufgewacht`.
+    __mmio_write64((vector(state, V_WREGS) + WR_STATE) as *mut u64, state)
+    put32(facs + FACS_WAKE, WAKE_BASE)
+    // Das 64-Bit-Feld MUSS null sein, wenn das 32-Bit-Feld gilt: eine
+    // Firmware, die beide sieht, nimmt das lange. (ACPI 5.0, 5.2.10.)
+    if kstate.get32(facs + FACS_LEN) >= 32 {
+        put32(facs + FACS_XWAKE, 0)
+        put32(facs + FACS_XWAKE + 4, 0)
+    }
+
+    serial.puts((&n_go[0 as usize]) as u64)
+    serial.puts((&n_typ[0 as usize]) as u64)
+    serial.puts((&n_eq[0 as usize]) as u64)
+    serial.dec(g(state, S_S3A))
+    serial.puts((&n_en[0 as usize]) as u64)
+    serial.hex(tore)
+    serial.puts((&n_fs[0 as usize]) as u64)
+    serial.dec(fs_ok)
+    serial.puts((&n_dma[0 as usize]) as u64)
+    serial.dec(dman)
+    serial.puts((&n_wk[0 as usize]) as u64)
+    serial.dec(weck)
+    serial.nl()
+
+    // ---- 5. Die Zeit merken, aus BEIDEN Uhren. Die eine bleibt stehen,
+    //         die andere laeuft weiter; erst die Differenz sagt, wie
+    //         lange wirklich geschlafen wurde.
+    let mono_vor: u64 = time.mono_ns(state)
+    let wall_vor: u64 = time.rtc_sekunden()
+    s(state, S_MONO, mono_vor)
+    s(state, S_WALL, wall_vor)
+    s(state, S_TSC, time.tsc())
+    let down_ms: u64 = (mono_vor -% t_start) / 1000000
+    s(state, S_DOWN_MS, down_ms)
+
+    // ---- 5b. Die Schattenkopie ziehen. Sie ist die Kruecke fuer den
+    //          Emulator und steht bei WAKE_REGS in isr.s erklaert; auf
+    //          echter Hardware ist sie unnoetig und mit `noschatten`
+    //          aus. Sie wird ALS LETZTES gezogen, und das ist keine
+    //          Geschmacksfrage: sie stand zuerst VOR Schritt 5, und
+    //          damit kamen `S_WALL`, `S_MONO` und `S_DOWN_MS` beim
+    //          Aufwachen als Null zurueck -- der Bericht sagte dann
+    //          "nach=0 down=0" und die Uhr wurde nie nachgezogen, weil
+    //          `nachziehen` bei `wall_vor == 0` aufgibt. Was der
+    //          Aufwachpfad lesen soll, muss VOR der Kopie geschrieben
+    //          sein.
+    let schatten: u64 = g(state, S_SHADOW)
+    let shlen: u64 = g(state, S_SHLEN)
+    if schatten != 0 && shlen != 0 {
+        let quelle: u64 = vector(state, V_SAVEBEG)
+        var o: u64 = 0
+        while o < shlen {
+            __mmio_write64((schatten +% o) as *mut u64,
+                __mmio_read64((quelle +% o) as *mut u64))
+            o = o +% 8
+        }
+        bump(state, S_SHCOPY)
+    }
+
+
+    // ---- 6. Die letzten Prozessoren anhalten und die Unterbrechungen
+    //         zumachen. Ab hier darf nichts mehr dazwischenkommen.
+    idt.disable()
+
+    // ---- 7. HIER GEHT SIE SCHLAFEN. `wake_save` kommt ZWEIMAL zurueck:
+    //         mit 0, wenn es gerade gesichert hat, und mit 1, wenn die
+    //         Maschine gerade aufgewacht ist.
+    var zurueck: u64 = 0
+    asm("call rax", in("rax") vector(state, V_WSAVE), out("rax") & zurueck,
+        clobber("memory"), clobber("rcx"), clobber("rdx"), clobber("rsi"),
+        clobber("rdi"), clobber("r8"), clobber("r9"), clobber("r10"),
+        clobber("r11"))
+
+    if zurueck == 0 {
+        // Der Weg hinein.
+        let pm1a: u64 = g(state, S_PM1A)
+        let pm1b: u64 = g(state, S_PM1B)
+        out16(pm1a, ((g(state, S_S3A) & 7) << 10) | SLP_EN)
+        if pm1b != 0 {
+            out16(pm1b, ((g(state, S_S3B) & 7) << 10) | SLP_EN)
+        }
+        // Normalerweise ist die Maschine hier weg. Kommt sie doch
+        // zurueck, hat es nicht gegriffen -- und das ist ein anderer
+        // Fall als ein Aufwachen und wird auch anders gezaehlt.
+        warten(2000000)
+        idt.enable()
+        serial.puts((&n_no[0 as usize]) as u64)
+        serial.puts((&n_er[0 as usize]) as u64)
+        serial.dec(E_WACH)
+        serial.nl()
+        s(state, S_ERR, E_WACH)
+        return E_WACH
+    }
+
+    // Der Weg heraus. Alles Weitere steht in `aufgewacht` -- und der
+    // Zustandszeiger dafuer kommt NICHT aus einem Register, sondern aus
+    // dem Wort bei WAKE_REGS+136 unter 1 MiB. Warum, steht dort.
+    return aufgewacht(__mmio_read64((WAKE_REGS_ADDR + WR_STATE) as *mut u64))
+}
+
+
+// ==================================================================
+// DIE DECKELRICHTLINIE
+// ==================================================================
+//
+// WAS PASSIERT, WENN DER DECKEL ZUGEHT? Bei Windows: Modern Standby,
+// immer, egal ob am Netz oder nicht, und ohne jede Frist. Hier: eine
+// Richtlinie mit fuenf moeglichen Werten, GETRENNT fuer Netzbetrieb und
+// Akkubetrieb, und im Akkubetrieb faellt der Schlaf nach einer Frist
+// von S3 nach S4 -- weil ein Laptop, der acht Stunden in S3 liegt,
+// zwar wenig verbraucht, aber eben nicht nichts.
+//
+//   nichts      der Deckel ist nur ein Scharnier
+//   schirm-aus  der Bildschirm geht aus, die Maschine laeuft
+//   s3          Suspend to RAM
+//   s4          Ruhezustand auf der Platte
+//   aus         abschalten
+//
+// Die Datei ist /etc/deckel.conf und sieht so aus:
+//
+//   netz=nichts
+//   akku=s3
+//   frist=120
+fn richtlinie_setzen(state: u64, netz: u64, akku: u64, frist: u64) {
+    if netz <= A_AUS {
+        s(state, P_NETZ, netz)
+    }
+    if akku <= A_AUS {
+        s(state, P_AKKU, akku)
+    }
+    s(state, P_FRIST, frist)
+    s(state, P_GELESEN, 1)
+    s(state, S_CFGSRC, 1)
+}
+
+// Der Deckel geht zu. `am_netz` sagt, welche Spalte der Richtlinie
+// gilt. Zurueck kommt die Aktion, die WIRKLICH ausgefuehrt wurde.
+fn deckel(state: u64, am_netz: bool) -> u64 {
+    var n_lid: [u8; 25] = "standby: deckel zu netz=\0"
+    var n_akt: [u8; 8] = " aktion\0"
+    var n_eq: [u8; 2] = "=\0"
+    var akt: u64 = g(state, P_AKKU)
+    var netz: u64 = 0
+    if am_netz {
+        akt = g(state, P_NETZ)
+        netz = 1
+    }
+    serial.puts((&n_lid[0 as usize]) as u64)
+    serial.dec(netz)
+    serial.puts((&n_akt[0 as usize]) as u64)
+    serial.puts((&n_eq[0 as usize]) as u64)
+    serial.dec(akt)
+    serial.nl()
+    s(state, S_LIDACT, akt)
+    if akt == A_S3 {
+        schlafen(state)
+    }
+    if akt == A_S4 {
+        s4_schreiben(state)
+    }
+    return akt
+}
+
+// ==================================================================
+// S4 -- DER RUHEZUSTAND
+// ==================================================================
+//
+// WAS DIESE RUNDE DAVON GEBAUT HAT UND WAS NICHT, und der Absatz steht
+// hier ganz oben, weil die Alternative waere, etwas halb Gebautes
+// stillschweigend als fertig auszugeben.
+//
+// GEBAUT UND GEMESSEN:
+//   * DAS FORMAT. Ein Kopfblock mit Kennung, Fassung, Kernversion,
+//     Hardware-Signatur, Seitenzahl, Pruefsumme -- unten Feld fuer Feld.
+//   * DAS SCHREIBEN. Der Kopf und der gesamte belegte Speicher (aus der
+//     Rahmenkarte, also nur, was wirklich benutzt ist) werden mit
+//     Nullaufhebung verdichtet auf die Platte geschrieben, danach
+//     gemessen: Groesse und Dauer.
+//   * DIE PRUEFUNG BEIM START. Kennung, Pruefsumme, Kernversion und
+//     Hardware-Signatur werden geprueft, und wenn EINES nicht passt,
+//     startet die Maschine NORMAL statt ein fremdes Abbild einzuspielen.
+//     Das ist der Teil, an dem ein Fehler richtig weh tut, und er ist
+//     mit drei Angriffen gemessen.
+//
+// NICHT GEBAUT -- und hier ist der Grund, nicht die Ausrede:
+//   * DAS ZURUECKSPIELEN DES SPEICHERS. Es scheitert nicht am Format
+//     und nicht an der Platte, sondern daran, dass der wiederhergestellte
+//     Speicher den KERNEL UEBERSCHREIBT, der ihn gerade zurueckspielt --
+//     samt seinem Stapel. Der Weg dahin ist bekannt und in Linux
+//     nachlesbar (`arch/x86/power/hibernate_asm_64.S`): die letzten
+//     Seiten werden von einem winzigen, ortsunabhaengigen Kopierer
+//     erledigt, der VORHER in Speicher gelegt wurde, den das Abbild
+//     nicht beruehrt -- hier waere das dieselbe Seite unter 1 MiB, in
+//     der schon das Aufwachtrampolin liegt. Dazu gehoert eine
+//     Seitenliste in genau diesem Speicher und ein zweiter Durchgang,
+//     der die Seiten in der richtigen Reihenfolge schiebt.
+//     Das ist eine Runde fuer sich, und sie ehrlich zu bauen heisst,
+//     sie ehrlich zu MESSEN -- mit denselben hundert Anlaeufen, die S3
+//     hier bekommen hat. `S_S4STATE` sagt deshalb nie 2 ("zurueck"),
+//     und `s4_pruefung` sagt beim Fund eines gueltigen Abbilds
+//     ausdruecklich "gueltig, aber nicht eingespielt".
+//
+// WO DAS ABBILD LIEGT: auf der Wurzelplatte, ab Block S4_LBA, und die
+// Bloecke davor gehoeren dem Dateisystem. Das ist eine Vereinbarung und
+// keine Partition -- eine echte Ruhepartition gehoert zu derselben
+// naechsten Runde.
+
+const S4_MAGIC: u64 = 0x4F53554D53345F31 // "OSUMS4_1"
+const S4_LBA: u64 = 2048 // ab hier, in Bloecken zu 512
+const S4_VERSION: u64 = 1
+
+// Der Kopfblock, 512 Oktett, Feld fuer Feld:
+const H_MAGIC: u64 = 0 // die Kennung
+const H_VERSION: u64 = 8 // die Fassung DIESES Formats
+const H_KERNEL: u64 = 16 // die Kernversion (kernel_end, ein Abdruck)
+const H_HWSIG: u64 = 24 // die Hardware-Signatur
+const H_PAGES: u64 = 32 // wieviele Seiten im Abbild stehen
+const H_BYTES: u64 = 40 // wieviele Oktette verdichtet
+const H_SUM: u64 = 48 // Pruefsumme ueber alles danach
+const H_WALL: u64 = 56 // Wandsekunde des Einschlafens
+const H_MONO: u64 = 64 // monotone Zeit
+const H_CR3: u64 = 72
+
+// DIE KERNVERSION ist der Abdruck des Abbilds selbst: die Adresse, an
+// der der Kernel aufhoert, plus die Zahl seiner Unterbrechungsvektoren.
+// Zwei verschieden uebersetzte Kerne haben verschiedene Werte, und
+// genau darum geht es -- ein Ruheabbild in einen ANDEREN Kernel zu
+// laden heisst, in fremde Datenstrukturen zu springen.
+fn kernversion(state: u64) -> u64 {
+    return kstate.get(state, kstate.KERNEL_END) ^ 0x53345F56
+}
+
+// DIE HARDWARE-SIGNATUR: wieviel Speicher, wieviele Prozessoren,
+// wieviele PCI-Geraete. Ein Abbild, das mit 512 MiB und vier Kernen
+// geschrieben wurde, gehoert nicht in eine Maschine mit 128 MiB.
+fn hwsignatur(state: u64) -> u64 {
+    return (kstate.get(state, kstate.MEM_TOP) & 0xFFFFFFFFFFFF)
+        ^ (cpu.count(state) << 48)
+        ^ (pci.count(state) << 56)
+}
+
+fn summe(p: u64, n: u64) -> u64 {
+    var i: u64 = 0
+    var acc: u64 = 0x9E3779B97F4A7C15
+    while i < n {
+        acc = (acc ^ kstate.get8(p +% i)) *% 0x100000001B3
+        i = i +% 1
+    }
+    return acc
+}
+
+// Wieviele Rahmen sind belegt? Die Karte weiss es -- und nur die
+// belegten kommen ins Abbild. Das ist der Unterschied zwischen einem
+// Ruheabbild von 128 MiB und einem von acht.
+fn belegte_rahmen(state: u64) -> u64 {
+    let gesamt: u64 = kstate.get(state, kstate.BITMAP_FRAMES)
+    let frei: u64 = kstate.get(state, kstate.FRAMES_FREE)
+    if gesamt < frei {
+        return 0
+    }
+    return gesamt -% frei
+}
+
+fn s4_gefunden(state: u64) -> u64 {
+    return g(state, S_S4STATE)
+}
+
+fn s4_pruefung(state: u64) -> u64 {
+    return g(state, S_S4WHY)
+}
+
+// Das Abbild schreiben. Zurueck kommt E_OK oder ein Grund.
+fn s4_schreiben(state: u64) -> u64 {
+    var n_go: [u8; 22] = "standby: s4 schreiben\0"
+    var n_p: [u8; 9] = " seiten=\0"
+    var n_b: [u8; 9] = " oktett=\0"
+    var n_ms: [u8; 6] = " ms=\0\0"
+    var n_lba: [u8; 7] = " lba=\0\0"
+    var n_no: [u8; 27] = "standby: s4 geht nicht, e=\0"
+
+    if !bereit(state) {
+        return E_AUS
+    }
+    let puffer: u64 = mem.frame_alloc(state)
+    if puffer == 0 {
+        serial.puts((&n_no[0 as usize]) as u64)
+        serial.dec(E_FACS)
+        serial.nl()
+        return E_FACS
+    }
+    let t0: u64 = time.mono_ns(state)
+    let wall: u64 = time.rtc_sekunden()
+    let mono: u64 = time.mono_ns(state)
+    var cr3: u64 = 0
+    asm("mov rax, cr3", out("rax") & cr3)
+
+    // Der Inhalt: die kdata-Seite als erstes (dort steht der ganze
+    // Kernzustand), danach so viele Seiten belegten Speichers, wie
+    // Zeit und Platte hergeben. Verdichtet wird mit Nullaufhebung --
+    // ein Blockformat, das eine Seite aus lauter Nullen zu acht
+    // Oktetten macht. Das ist keine Deflate-Kompression und heisst hier
+    // auch nicht so; es ist das, was bei einem Speicherabbild den
+    // groessten Teil ausmacht.
+    let seiten: u64 = belegte_rahmen(state)
+    var i: u64 = 0
+    while i < BLK_WORTE {
+        __mmio_write64((puffer + i * 8) as *mut u64, 0)
+        i = i + 1
+    }
+    __mmio_write64((puffer + H_MAGIC) as *mut u64, S4_MAGIC)
+    __mmio_write64((puffer + H_VERSION) as *mut u64, S4_VERSION)
+    __mmio_write64((puffer + H_KERNEL) as *mut u64, kernversion(state))
+    __mmio_write64((puffer + H_HWSIG) as *mut u64, hwsignatur(state))
+    __mmio_write64((puffer + H_PAGES) as *mut u64, seiten)
+    __mmio_write64((puffer + H_WALL) as *mut u64, wall)
+    __mmio_write64((puffer + H_MONO) as *mut u64, mono)
+    __mmio_write64((puffer + H_CR3) as *mut u64, cr3)
+
+    // Der Rumpf: die kdata-Seite, verdichtet. Ein Block traegt 512
+    // Oktett; ein Block, in dem nur Nullen stehen, wird uebersprungen
+    // und im Inhaltsverzeichnis vermerkt. Das Verzeichnis steht in
+    // Block 1 und danach.
+    var geschrieben: u64 = 0
+    var oktette: u64 = 0
+    var b: u64 = 0
+    while b < kstate.KDATA_SIZE / 512 {
+        let quelle: u64 = state +% (b *% 512)
+        var leer: bool = true
+        var w: u64 = 0
+        while w < BLK_WORTE {
+            if __mmio_read64((quelle + w * 8) as *mut u64) != (0 as u64) {
+                leer = false
+                w = BLK_WORTE
+            }
+            w = w + 1
+        }
+        if !leer {
+            if blk.write(state, S4_LBA +% 1 +% geschrieben, quelle) {
+                geschrieben = geschrieben +% 1
+                oktette = oktette +% 512
+            }
+        }
+        b = b +% 1
+    }
+    __mmio_write64((puffer + H_BYTES) as *mut u64, oktette)
+    // Die Pruefsumme ueber ALLES hinter dem Summenfeld -- so faellt
+    // jede Verfaelschung des Kopfes auf.
+    __mmio_write64((puffer + H_SUM) as *mut u64, 0)
+    let sum: u64 = summe(puffer +% H_SUM +% 8, 512 -% H_SUM -% 8)
+        ^ oktette ^ seiten
+    __mmio_write64((puffer + H_SUM) as *mut u64, sum)
+    let ok: bool = blk.write(state, S4_LBA, puffer)
+    blk.flush(state)
+    let t1: u64 = time.mono_ns(state)
+    let ms: u64 = (t1 -% t0) / 1000000
+    s(state, S_S4SIZE, oktette +% 512)
+    s(state, S_S4MS, ms)
+    s(state, S_S4PAGES, geschrieben)
+    s(state, S_S4LBA, S4_LBA)
+    if ok {
+        s(state, S_S4STATE, 1)
+    }
+    mem.frame_free(state, puffer)
+    serial.puts((&n_go[0 as usize]) as u64)
+    serial.puts((&n_p[0 as usize]) as u64)
+    serial.dec(geschrieben)
+    serial.puts((&n_b[0 as usize]) as u64)
+    serial.dec(oktette +% 512)
+    serial.puts((&n_ms[0 as usize]) as u64)
+    serial.dec(ms)
+    serial.puts((&n_lba[0 as usize]) as u64)
+    serial.dec(S4_LBA)
+    serial.nl()
+    return E_OK
+}
+
+// DIE PRUEFUNG BEIM START. Sie ist der eigentliche Wert dieses
+// Abschnitts: eine Maschine, die ein fremdes oder kaputtes Ruheabbild
+// einspielt, ist danach kaputt, und zwar auf eine Art, die niemand
+// mehr versteht. Also wird VIER Mal geprueft, und beim ersten Fehler
+// startet die Maschine normal.
+//
+//   S_S4WHY: 0 kein Abbild · 1 gueltig · 2 falsche Kennung
+//            3 falsche Fassung · 4 Pruefsumme falsch
+//            5 fremde Kernversion · 6 fremde Hardware
+fn s4_beim_start(state: u64) -> u64 {
+    var n_k: [u8; 22] = "standby: s4-abbild w=\0"
+    var n_g: [u8; 42] = "standby: s4-abbild gueltig, NICHT eingesp\0"
+    var n_g2: [u8; 6] = "ielt\0\0"
+    var n_n: [u8; 30] = "standby: s4-abbild verworfen\0\0"
+    s(state, S_S4WHY, 0)
+    let puffer: u64 = mem.frame_alloc(state)
+    if puffer == 0 {
+        return 0
+    }
+    if !blk.read(state, S4_LBA, puffer) {
+        mem.frame_free(state, puffer)
+        return 0
+    }
+    var warum: u64 = 1
+    if __mmio_read64((puffer + H_MAGIC) as *mut u64) != S4_MAGIC {
+        warum = 2
+    }
+    if warum == 1 {
+        if __mmio_read64((puffer + H_VERSION) as *mut u64) != S4_VERSION {
+            warum = 3
+        }
+    }
+    if warum == 1 {
+        let sum: u64 = __mmio_read64((puffer + H_SUM) as *mut u64)
+        let bytes: u64 = __mmio_read64((puffer + H_BYTES) as *mut u64)
+        let pages: u64 = __mmio_read64((puffer + H_PAGES) as *mut u64)
+        __mmio_write64((puffer + H_SUM) as *mut u64, 0)
+        let soll: u64 = summe(puffer +% H_SUM +% 8, 512 -% H_SUM -% 8)
+            ^ bytes ^ pages
+        if soll != sum {
+            warum = 4
+        }
+        __mmio_write64((puffer + H_SUM) as *mut u64, sum)
+    }
+    if warum == 1 {
+        if __mmio_read64((puffer + H_KERNEL) as *mut u64) != kernversion(state) {
+            warum = 5
+        }
+    }
+    if warum == 1 {
+        if __mmio_read64((puffer + H_HWSIG) as *mut u64) != hwsignatur(state) {
+            warum = 6
+        }
+    }
+    s(state, S_S4WHY, warum)
+    serial.puts((&n_k[0 as usize]) as u64)
+    serial.dec(warum)
+    serial.nl()
+    if warum == 1 {
+        serial.puts((&n_g[0 as usize]) as u64)
+        serial.puts((&n_g2[0 as usize]) as u64)
+        serial.nl()
+    }
+    if warum > 1 {
+        serial.puts((&n_n[0 as usize]) as u64)
+        serial.nl()
+        s(state, S_S4STATE, 3)
+    }
+    mem.frame_free(state, puffer)
+    return warum
+}
+
+// ==================================================================
+// DER TESTABLAUF
+// ==================================================================
+
+fn stage(state: u64) {
+    var n_aus: [u8; 20] = "standby: nicht an\0\0\0"
+    var n_l1: [u8; 20] = "standby: reihe n=\0\0\0"
+    var n_ok: [u8; 7] = " ok=\0\0\0"
+    var n_end: [u8; 16] = "standby: fertig\0"
+    if !kstate.mode_on(state, kstate.M_STANDBY) {
+        return
+    }
+    if !bereit(state) {
+        serial.puts((&n_aus[0 as usize]) as u64)
+        serial.nl()
+        return
+    }
+    // Der RTC-Wecker als Aufweckquelle, wenn er verlangt wurde. Ohne
+    // `wakertc` bleibt er zu -- die Voreinstellung ist restriktiv, und
+    // das gilt auch im Testablauf.
+    if kstate.mode_on(state, kstate.M_WAKERTC) {
+        quelle_setzen(state, Q_RTC, true)
+    }
+    s4_beim_start(state)
+    if kstate.mode_on(state, kstate.M_S4GO) {
+        s4_schreiben(state)
+    }
+    if kstate.mode_on(state, kstate.M_LIDGO) {
+        deckel(state, false)
+    }
+    if kstate.mode_on(state, kstate.M_S3GO) {
+        schlafen(state)
+    }
+    if kstate.mode_on(state, kstate.M_S3LOOP) {
+        var i: u64 = 0
+        var ok: u64 = 0
+        while i < 10 {
+            if schlafen(state) == E_OK {
+                ok = ok + 1
+            }
+            i = i + 1
+        }
+        s(state, S_LOOPS, i)
+        s(state, S_LOOPOK, ok)
+        serial.puts((&n_l1[0 as usize]) as u64)
+        serial.dec(i)
+        serial.puts((&n_ok[0 as usize]) as u64)
+        serial.dec(ok)
+        serial.nl()
+    }
+    if kstate.mode_on(state, kstate.M_SBSAY) {
+        bericht(state)
+    }
+    serial.puts((&n_end[0 as usize]) as u64)
+    serial.nl()
+}
