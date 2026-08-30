@@ -37,7 +37,32 @@ export FIRNLIB="$(pwd)/lib"
 FIRNC=${FIRNC:-vendor/firn/bin/firnc}
 ULD=kernel/user/user.ld
 PROGS="sh ls cat echo rm df touch mkdir fsrlim fsrw fsrv fsck"
-LAEUFE=${FSR_LAEUFE:-10}
+# RUNDE MERGE-2: VIERZIG STATT ZEHN, UND DIE ZAHL IST GEMESSEN.
+#
+# Abschnitt 4 ist die Gegenprobe der ganzen Runde: OHNE Journal MUESSEN
+# bei denselben Abschuessen Schaeden auftreten, sonst misst Abschnitt 3
+# nichts. Sie ist von Natur aus ein GLUECKSSPIEL -- der Abschuss faellt
+# zu einem zufaelligen Zeitpunkt, und Schaden entsteht nur, wenn er
+# mitten in eine mehrblockige Aenderung faellt.
+#
+# Auf dem Zweig FSROBUST trafen 3 von 10 Laeufen (30 %). Auf dem
+# zusammengefuehrten Stand sind es nachgemessen 4 von 40 (10 %) -- der
+# Kernel ist nach dem Verschmelzen deutlich schneller, und damit ist das
+# verwundbare Fenster ein kleinerer Anteil der Laufzeit. (Das ist die
+# naheliegende Erklaerung fuer den Rueckgang, nicht mehr; gemessen ist
+# die RATE, nicht die Ursache.)
+#
+# Bei 10 Laeufen und 10 % Trefferrate endet die Gegenprobe mit
+# Wahrscheinlichkeit 0,9^10 = 35 % ergebnislos -- und genau das ist beim
+# ersten Lauf nach dem Merge passiert: "ohne Journal trat in 10 Laeufen
+# KEIN Schaden auf". Die Zusage war nicht falsch, sie war zu schwach.
+# Bei 40 Laeufen sind es 0,9^40 = 1,5 %.
+#
+# Dieselbe Zahl gilt fuer Abschnitt 3, und zwar aus demselben Grund:
+# "mit Journal 0 Schaeden in 10 Laeufen" ist keine starke Aussage,
+# solange ohne Journal nur jeder zehnte Lauf einen Schaden zeigt.
+# 0 von 40 ist eine.
+LAEUFE=${FSR_LAEUFE:-40}
 PAR=${FSR_PAR:-4}
 
 TMPD=$(mktemp -d)
