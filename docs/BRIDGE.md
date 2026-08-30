@@ -167,8 +167,33 @@ zweiten Weg neben FEEDBACK zu bauen. Sie steht hier, statt versteckt zu
 werden.
 
 Das Bild kommt als PNG heraus (Farbart 2, 8 Bit je Anteil), gepackt mit
-`std.deflate`; `tools/bridge/run.sh` rechnet CRC und Bilddaten mit
-Pythons `zlib` nach.
+`std.deflate`.
+
+**Und hier ist die zweite ehrliche Stelle: in diesem Zweig bekommt Ring 3
+die Bildschirmmaße gar nicht.** Gemessen mit `jarvisd -s` auf einem Kern
+mit `gfx` und `-vga std`, auf dem `fb: 800x600x32 pitch=3200` auf der
+seriellen Leitung steht:
+
+```
+schirm: shot -38   w -19   h -19   pitch -19   bpp -19   devfb 3
+```
+
+`/dev/fb` lässt sich öffnen (Deskriptor 3), aber `WIG_SCREEN` (1805) und
+`SYS_OSUM_DISPGET` (1810) antworten mit `-ENODEV`, weil beide hinter
+`wm.ready`/`vmode.ready` liegen — ohne laufenden Fensterserver gibt es
+keine Zahlen. `SYS_OSUM_SHOT` antwortet mit `-ENOSYS`, weil FEEDBACK
+fehlt. Ein Bild aus Oktetten ohne Breite und Zeilenlänge ist keins.
+
+Der Helfer sagt in dem Fall genau das, statt zu raten. **Es wurde in
+dieser Runde also kein Bildschirmfoto vom echten Bildschirm gemessen.**
+
+Der Kodierer selbst ist trotzdem gemessen und nicht nur übersetzt:
+`jarvisd -b` rechnet ein 64×48-Muster aus, schickt es durch denselben
+Weg (`png_bauen` → `zlib_compress` → IHDR/IDAT/IEND mit CRC) und gibt es
+als Hexfolge aus. Der Prüfstand prüft die Signatur, jede Stück-CRC, den
+IHDR-Kopf, entpackt mit Pythons `zlib` und rechnet **jeden einzelnen
+Bildpunkt** gegen die Formel im Quelltext nach. Gemessen: 64×48,
+**8236 Oktette**, 0 Abweichungen.
 
 ## Was der Mensch sieht
 
