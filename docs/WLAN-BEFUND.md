@@ -331,12 +331,99 @@ eigene Datei nach denselben Regeln wie `sha256.fi`.
 
 ### Der Messplatz (`tools/wlan/`)
 
-| Datei | was |
-|---|---|
-| `orakel.fi` | Ein Programm in Firn, das auf Linux laeuft und dieselben `lib/`-Dateien bindet, die der Kern binden wird. Liest eine Zeile, antwortet eine Zeile. |
-| `vektoren.py` | Die Vektoren und der Vergleich. Die Herkunft steht bei jedem einzelnen. |
-| `fuzz.py` | Rahmen verstuemmeln und nachsehen, dass nichts danebengreift. |
-| `run.sh` | Der Abschnitt, der in `test.sh` haengt. |
+| Datei | Zeilen | was |
+|---|---:|---|
+| `orakel.fi` | 673 | Ein Programm in Firn, das auf Linux laeuft und dieselben `lib/`-Dateien bindet, die der Kern binden wird. Liest eine Zeile, antwortet eine Zeile. |
+| `vektoren.py` | 1.145 | Die Vektoren und der Vergleich. Die Herkunft steht bei jedem einzelnen. |
+| `fuzz.py` | 339 | Rahmen verstuemmeln und nachsehen, dass nichts danebengreift. |
+| `mitschnitt.txt` | 44 | Echte Rahmen aus einer echten Aufzeichnung, mit ihrer Herkunft. |
+| `run.sh` | 171 | Der Abschnitt, der als Nummer 32 in `test.sh` haengt. |
+
+### Die Groesse, gezaehlt
+
+| Datei | Zeilen | davon Quelltext |
+|---|---:|---:|
+| `lib/crypto/sha1.fi` | 407 | 261 |
+| `lib/crypto/aes.fi` | 909 | 715 |
+| `lib/wlan/rahmen.fi` | 364 | 219 |
+| `lib/wlan/beacon.fi` | 534 | 371 |
+| `lib/wlan/kanal.fi` | 271 | 142 |
+| `lib/wlan/wpa.fi` | 633 | 373 |
+| `lib/wlan/ccmp.fi` | 418 | 241 |
+| `lib/wlan/zustand.fi` | 306 | 193 |
+| **zusammen** | **3.842** | **2.515** |
+
+Zum Vergleich die Zahlen aus Abschnitt 4: hostapds `src/rsn_supp/` +
+`wpa_common.c` + die sieben gebrauchten Kryptodateien sind zusammen
+**18.135 Zeilen C**, und darin steckt FT, TDLS, WNM, PMKSA-Cache,
+802.1X/EAP und OWE, was hier alles fehlt. Der Faktor liegt damit
+ungefaehr bei fuenf -- nicht bei fuenfzehn wie bei `e1000.fi` gegen
+Linux' `e1000`, weil Protokoll und Krypto sich nicht so weit
+zusammenstreichen lassen wie ein Treiber.
+
+### Was gemessen wurde: 184 Zusagen, 0 Fehler, in 55 Sekunden
+
+`bash tools/wlan/run.sh`, Abschnitt 32 der Abnahme. Die Zahlen, auf die
+es ankommt:
+
+* **Gegen eine ECHTE Aufzeichnung.** `tools/wlan/mitschnitt.txt` haelt
+  Rahmen aus `wpa-Induction.pcap` fest -- einem WPA2-PSK-Netz namens
+  `Coherer` mit dem Passwort `Induction`. Daraus: PMK ueber PBKDF2, PTK
+  ueber PRF-SHA1 mit den beiden Zufallszahlen des ECHTEN Handschlags,
+  und damit stimmen **die Pruefwerte der Nachrichten 2, 3 und 4 Oktett
+  fuer Oktett mit dem ueberein, was damals wirklich auf dem Draht
+  stand**. Der Gruppenschluessel laesst sich aus Nachricht 3
+  auspacken. Und mit dem TK gehen **vier echte verschluesselte Rahmen
+  auf**, mit LLC/SNAP darin -- ein DHCP-Paket, eine
+  IPv6-Nachbarschaftsanfrage, ein AARP-Rahmen.
+* **Gegen die Normvektoren.** FIPS 197 Anhang C (alle drei
+  Schluessellaengen, vorwaerts und rueckwaerts), RFC 4493 (alle vier),
+  RFC 3394 Abschnitt 4 (alle sechs, ein- und ausgepackt), RFC 6070,
+  die drei PRF-Vektoren aus IEEE 802.11i, die drei PMK-Vektoren aus
+  Anhang H.4, und IEEE Std 802.11-2012 M.6.4 und M.9.2 fuer CCMP.
+* **Gegen OpenSSL** ueber erzeugte Eingaben: SHA-1 ueber 200 Laengen,
+  HMAC mit Schluesseln bis 200 Oktetten, AES ueber 200 Bloecke,
+  AES-CCM ueber 120 Faelle mit Nonce 7..13 und Pruefwert 4..16.
+* **Erschoepfend.** Alle **30.940** Ereignisfolgen bis Laenge 4 ueber
+  ein Alphabet von 13 Ereignissen: keine einzige verbindet, keine
+  installiert einen Schluessel. Dazu alle 140 Verstuemmelungen der
+  richtigen Folge (Auslassen, Wiederholen, Vertauschen, Einschieben an
+  jeder Stelle) -- sie enden genau dann in VERBUNDEN, wenn sie wieder
+  gueltig sind.
+* **Fuzz.** **15.032** verstuemmelte Rahmen: jede Kuerzung jedes
+  Rahmens, jedes Oktett auf vier Werte, jedes Laengenfeld der
+  Elementkette gelogen, 16 widerspruechliche Kopfkombinationen, dazu
+  reiner Zufall. Davon **6.832 unter valgrind: NULL ungueltige
+  Zugriffe.**
+
+### Die zwei Fehler, die die Vektoren gefunden haben
+
+Beide beim ERSTEN Lauf, beide waeren ohne veroeffentlichte Vektoren nie
+aufgefallen. Sie stehen hier, weil eine Runde, die nur ihre Erfolge
+aufschreibt, nichts wert ist:
+
+1. **Die Paketnummer stand im CCMP-Kopf verdreht.** Die erste Fassung
+   nahm `pn[0]` als PN0 an; richtig ist PN5. Alles rechnete, nichts
+   stuerzte ab, der Kopf kam als `b5 03 00 20 97 76 e7 0c` heraus statt
+   als `0c e7 00 20 76 97 03 b5`. Gefunden vom Vektor M.6.4, in der
+   ersten Sekunde des ersten Laufs. Die Anmerkung steht jetzt in
+   `lib/wlan/ccmp.fi` bei `ccmp_kopf_bauen`.
+2. **Key Wrap war auf 64 Oktette begrenzt**, mit der Begruendung "das
+   reicht fuer jeden GTK". Falsch: die Schluesseldaten einer echten
+   Nachricht 3 sind 80 Oktette eingepackt, weil darin neben dem
+   Gruppenschluessel noch einmal das ganze RSN-Element steht. Gefunden
+   von der echten Aufzeichnung.
+
+### Und eine Zusage ueber das, was CCMP NICHT kann
+
+Beim Kippen jedes einzelnen Oktetts des geschuetzten Rahmens fallen
+alle auf -- **ausser genau fuenf**: die zwei Oktette Duration/ID, das
+obere Oktett der Folgenummer und die zwei nicht gesicherten Felder des
+CCMP-Kopfes. Das ist keine Schwaeche dieser Umsetzung, das ist der Text
+der Norm (IEEE 802.11-2016 12.5.3.3.3): ein Vermittler darf diese
+Felder unterwegs aendern. Der Test verlangt deshalb GENAU diese fuenf
+und keine mehr -- damit niemand spaeter glaubt, CCMP sichere den ganzen
+Kopf.
 
 **Was NICHT gebaut wurde und warum, im Einzelnen:**
 
