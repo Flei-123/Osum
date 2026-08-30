@@ -524,6 +524,17 @@
 #      Packdatei MUSS auffallen, und der Bereich auf der Seite von K18
 #      MUSS den Kartenpruefer ausloesen.
 #
+#  31. EINE ADRESSE JE NETZ (tools/netprofil/run.sh, Runde NETPROFIL):
+#      Netzprofile mit MAC-Datenschutz. Drei Stufen je Profil -- die
+#      echte Adresse der Karte, eine gewuerfelte, die JE PROFIL fest
+#      bleibt, und eine, die bei jeder Verbindung neu gewuerfelt wird.
+#      Gemessen wird nicht, was Osum sagt, sondern was AUSSEN ankommt:
+#      tcpdump auf der Linux-Seite, der Neighbour-Cache des
+#      Linux-Kernels und die Vergabeliste von `busybox udhcpd`.
+#      Gegenproben: `fixedrand` (alle Wuerfe gleich), `nomacvq` (die
+#      Karte kann ihre Adresse nicht mehr aendern) und `nomacset` (die
+#      Ueberlagerung wirkt nicht -- die echte Adresse steht auf dem
+#      Draht).
 #  30. OSUM ALS SERVER (tools/server/run.sh, Runde SERVERBUILD): bis
 #      hierher konnte dieses System ohne Bildschirm nicht einmal
 #      GEBAUT werden. `fb.fi`, `wm.fi`, `wig.fi` und `font.fi` waren
@@ -1104,6 +1115,23 @@ lauf "30. Auto-Update: Ed25519, Signaturpflicht, A/B-Boot (tools/update/run.sh, 
      tools/update/run.sh update '^UPDATE: |^        [a-z0-9]|^  OK    (all [0-9]+ checks|tools/update/oracle.fi|das signierte Paket|und installiert|die Liste nennt|GEGENPROBE|die SIGNATUR schlaegt|DER PUNKT DER RUNDE|und die alte, laufende|Start [123]|Ausgangslage|das kaputte Update|Generation 1 steht|beim naechsten Start|es wird nie|holen ->|Neustart ->|-> Erfolgsvermerk)'
 
 
+# ABSCHNITT 31 -- RUNDE NETPROFIL. Osum hatte bis dahin GENAU EINE
+# Hardwareadresse: die aus dem EEPROM der Karte, in jedem Netz, fuer
+# immer. Das ist eine Kennung, an der sich ein Mensch ueber Standorte
+# hinweg verfolgen laesst.
+#
+# Die interessanteste Zusage dieses Abschnitts ist keine Zahl aus Osum,
+# sondern eine Auskunft von aussen: `tcpdump` auf der Linux-Seite sagt,
+# welche Absenderadresse wirklich auf der Leitung stand, der
+# Neighbour-Cache des Linux-Kernels sagt es ein zweites Mal, und die
+# Vergabeliste von `busybox udhcpd` zeigt, dass der DHCP-Vertrag auf der
+# GEWUERFELTEN Adresse steht. Drei Zeugen, keiner davon aus diesem Repo.
+#
+# Und die Gegenprobe dazu ist derselbe Kern mit EINEM Wort mehr
+# (`nomacset`): dann steht die echte Adresse auf dem Draht, und alle
+# drei Zeugen sagen es genauso deutlich.
+lauf "31. eine Adresse je Netz: Netzprofile und MAC-Datenschutz (tools/netprofil/run.sh, Runde NETPROFIL)" \
+     tools/netprofil/run.sh netprofil '^NETPROFIL: |^  OK    (Wuerfe|verschiedene Adressen|die drei Stufen|Stufe (geraet|immer|netz)|und die Adresse der Karte|GEGENPROBE|virtio-net MIT|  und der Kern|  und dass diese|e1000|  e1000|und nach einem NEUSTART|nach Loeschen|das erste Oktett|die Zeile steht|und die gewuerfelte|TCPDUMP|und die echte Adresse|und der Linux-Kernel|die kaputten Zeilen|  und zwar genau|eine Zeile mit|ein gewoehnlicher Nutzer|und er kann|mit gewuerfelter Adresse|ein OFFER|und der Klient|DER VERTRAG|mit der per DHCP|Verbindungsaufbau|davon der Adresswechsel|Zeilen:|Aufrufnummer)'
 
 
 # Hier laufen die angemeldeten Abschnitte -- bei OSUM_JOBS=1 sind sie

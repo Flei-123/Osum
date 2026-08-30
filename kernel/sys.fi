@@ -66,6 +66,8 @@ import tty
 
 import inet
 import netview
+import netprof
+import netdev
 import netmon
 import share
 import wg
@@ -549,6 +551,74 @@ const NG_OUT: u64 = 7 // Rahmen hinaus
 // ueber das Nichtluegen die falscheste aller Abkuerzungen. Kommt Funk,
 // kommt hier eine Zahl dazu.
 const NG_STATE: u64 = 8
+
+// ==================================================== RUNDE NETPROFIL
+//
+// DER BEREICH 1330..1339, und warum ausgerechnet dieser.
+//
+// Es gab drei Stellen, an denen eine neue Nummer haette stehen koennen,
+// und zwei davon waeren falsch gewesen:
+//
+//   ab 1980   ist von Runde ASYNC belegt (sechs Nummern), und Runde
+//             RING vergibt daneben gerade weitere. Zwei Runden, die
+//             gleichzeitig laufen und beide "die naechste freie Nummer"
+//             nehmen, sind genau der Fehler von Runde MERGE (zweimal
+//             1320), nur ein Jahr spaeter.
+//   ab 2000   ist die ZWEITE Nummerierung -- die Handle-ABI aus
+//             OrientOS. Eine Auskunft ueber das Netz hat darin nichts
+//             verloren, auch wenn dort Platz ist.
+//   ab 1330   ist der Hunderterblock, den Runde K8 dem Netz
+//             ausgewiesen hat, und er ist ab 1323 durchgehend frei.
+//             Geprueft mit `python3 tools/kernel/syscalls.py --zweige`
+//             ueber ALLE 60 Zweige dieses Repos, nicht nur ueber den
+//             eigenen.
+//
+// 1330 fragt, 1331 setzt. SETZEN DARF NUR DIE WURZEL -- dieselbe Regel
+// wie bei der Anschrift, und aus demselben Grund: eine Hardwareadresse,
+// die jeder Prozess wechseln kann, ist keine Einstellung, sondern ein
+// Weg, den Verkehr eines anderen an sich zu ziehen.
+const SYS_OSUM_MACGET: u64 = 1330 // (was, karte) -> Zahl
+const SYS_OSUM_MACSET: u64 = 1331 // (was, adresse, karte) -> 0
+
+// Was MACGET beantwortet. Die Adresse kommt in ZWEI Zahlen, wie schon
+// bei NG_MAC0/NG_MAC1 -- ein Systemaufruf gibt einen Wert zurueck, und
+// sechs Oktette in einem Wort zusammen mit einem Fehlercode waeren
+// nicht mehr unterscheidbar.
+const MG_MAC0: u64 = 0 // wirksame Adresse, erste vier Oktette
+const MG_MAC1: u64 = 1 // wirksame Adresse, letzte zwei
+const MG_HW0: u64 = 2 // Adresse der KARTE, erste vier Oktette
+const MG_HW1: u64 = 3 // Adresse der KARTE, letzte zwei
+const MG_ACTIVE: u64 = 4 // 1 = eine Ueberlagerung ist gesetzt
+const MG_HWOK: u64 = 5 // 1 = die Karte hat die Adresse angenommen
+const MG_SETTABLE: u64 = 6 // 1 = diese Kartensorte kann es ueberhaupt
+const MG_ROLL0: u64 = 7 // WUERFELT und gibt die ersten vier Oktette
+const MG_ROLL1: u64 = 8 // die letzten zwei DESSELBEN Wurfes
+const MG_ROLLS: u64 = 9 // wie oft insgesamt gewuerfelt wurde
+const MG_CHANGES: u64 = 10 // wie oft die Adresse gesetzt wurde
+const MG_POLICY: u64 = 11 // die drei Stufen, damit Ring 3 sie nicht erfindet
+
+// Was MACSET tut.
+const MS_SET: u64 = 0 // (adresse, karte)
+const MS_CLEAR: u64 = 1 // (0, karte)
+
+// WIE DIE SECHS OKTETTE IN EINER ZAHL STEHEN, und warum das
+// ausgeschrieben gehoert: in LESERICHTUNG. aa:bb:cc:dd:ee:ff ist
+// 0x0000AABBCCDDEEFF. Das ist NICHT die Reihenfolge, in der
+// `kernel/netprof.fi` sie intern haelt (dort steht das erste Oktett in
+// den niedrigsten acht Bit, weil es dort so aus dem Geraetebereich
+// kommt), und genau deshalb steht hier eine Umrechnung und keine
+// Zuweisung. Wer die beiden verwechselt, setzt eine Adresse rueckwaerts
+// -- und aus 02:... wird ff:..., also eine Gruppenadresse, die jeder
+// Vermittler still wegwirft.
+fn mac_lesbar_zu_intern(v: u64) -> u64 {
+    var r: u64 = 0
+    var i: u64 = 0
+    while i < 6 {
+        r = r | (((v >> ((5 - i) * 8)) & 0xFF) << (i * 8))
+        i = i + 1
+    }
+    return r
+}
 
 // ZWEITER NACHTRAG: die vier Stufen stehen jetzt in
 // `kernel/netview.fi`, weil sie dort auch gerechnet werden. Hier waeren
@@ -1882,6 +1952,13 @@ fn dispatch(number: u64, frame: u64, state: u64) -> u64 {
     // anderen Runde still mit -ENOSYS beantwortet worden.
     if number >= SYS_OSUM_NETGET && number <= SYS_OSUM_SHARE {
         return net_call(state, me, number, a0, a1, a2)
+    }
+    // RUNDE NETPROFIL: die MAC-Richtlinie. EIGENE Zeile und nicht in
+    // den Bereich oben hineingezogen -- 1330 liegt ueber SYS_OSUM_SHARE
+    // (1322), und ein Bereich, der bis 1339 reichte, naehme jede Nummer
+    // mit, die eine spaetere Runde dazwischenlegt.
+    if number == SYS_OSUM_MACGET || number == SYS_OSUM_MACSET {
+        return mac_call(state, me, number, a0, a1, a2)
     }
     // RUNDE TILING: der Fensterbaum, bedient aus Ring 3.
     if number >= SYS_OSUM_TILEGET && number <= SYS_OSUM_TILEBIND {
@@ -8383,6 +8460,170 @@ fn net_call(state: u64, me: u64, number: u64, a0: u64, a1: u64,
 
 
 
+
+// ==================================================================
+//        RUNDE NETPROFIL: DIE MAC-RICHTLINIE, AUS RING 3
+// ==================================================================
+//
+// Was hier NICHT steht, ist ebenso wichtig wie was hier steht: die
+// PROFILE. Ein Profil ist eine Zeile in /etc/netprofile.conf, und
+// dieser Kern liest die Datei nie. Er kennt sechs Oktette und drei
+// Zahlen; welche sechs zu welchem Netz gehoeren, entscheidet
+// `/bin/netprof` in Ring 3.
+//
+// DIE SICHT DES PROZESSES GILT AUCH HIER. Ein Prozess unter `faked`
+// erfaehrt ueber 1300 eine erfundene Anschrift; erfuehre er ueber 1330
+// die echte Hardwareadresse, waere die Taeuschung an genau der Stelle
+// durchschaubar, an der sie am meisten wert ist. Also dieselben vier
+// Faelle wie in `net_call`, und sie stehen hier ausgeschrieben statt
+// verwiesen -- eine Sicht, die man an einer Stelle vergisst, ist keine.
+fn mac_call(state: u64, me: u64, number: u64, a0: u64, a1: u64,
+    a2: u64) -> u64 {
+    if a2 >= netprof.MAX_CARDS {
+        return neg(errno.E_INVAL)
+    }
+    if number == SYS_OSUM_MACSET {
+        if !perm.is_root(state, me) {
+            return neg(errno.E_PERM)
+        }
+        if !inet.ready(state) {
+            return neg(errno.E_NODEV)
+        }
+        if a0 == MS_CLEAR {
+            let ok: bool = netprof.clear_on(state, a2)
+            // Der Stapel haelt eine eigene Kopie der sechs Oktette. Wer
+            // sie nicht nachzieht, hat einen Kern mit der einen und
+            // einen Stapel mit der anderen Adresse.
+            if !inet.remac(state) {
+                return neg(errno.E_IO)
+            }
+            if !ok {
+                // Die Ueberlagerung ist weg; die KARTE liess sich nicht
+                // zuruecksetzen. Das ist kein Erfolg und wird auch nicht
+                // als einer gemeldet.
+                return neg(errno.E_IO)
+            }
+            return 0
+        }
+        if a0 != MS_SET {
+            return neg(errno.E_INVAL)
+        }
+        // Eine Gruppenadresse als Absender ist auf jedem Vermittler ein
+        // Rahmen, der still verschwindet. Sie wird hier ABGELEHNT und
+        // nicht stillschweigend geglaettet -- wer 01:... setzt, hat sich
+        // vertan, und das gehoert gesagt. Das Bit steht im ERSTEN
+        // Oktett, in Leserichtung also ganz oben.
+        if ((a1 >> 40) & 1) != 0 {
+            return neg(errno.E_INVAL)
+        }
+        if (a1 & 0xFFFFFFFFFFFF) == 0 {
+            return neg(errno.E_INVAL)
+        }
+        let _hw: bool = netprof.set_on(state, a2,
+            mac_lesbar_zu_intern(a1 & 0xFFFFFFFFFFFF))
+        if !inet.remac(state) {
+            return neg(errno.E_IO)
+        }
+        // Der Rueckgabewert ist 0, AUCH wenn die Karte die Adresse
+        // nicht uebernommen hat. Das ist Absicht: die Ueberlagerung
+        // gilt, jeder Rahmen traegt ab jetzt die neue Adresse, und ob
+        // die KARTE mitgezogen ist, fragt man mit MG_HWOK. Ein Fehler
+        // an dieser Stelle wuerde ein Programm dazu bringen, eine
+        // gelungene Umstellung rueckgaengig zu machen.
+        return 0
+    }
+    // ---------------------------------------------------------- fragen
+    if a0 == MG_POLICY {
+        // Die drei Stufen als eine Zahl, damit Ring 3 sie nicht
+        // abschreiben muss: geraet | netz << 8 | immer << 16.
+        return netprof.P_GERAET | (netprof.P_NETZ << 8)
+            | (netprof.P_IMMER << 16)
+    }
+    let v: u64 = netview.view_of(state, me)
+    if v == netview.V_NONE {
+        return neg(errno.E_NODEV)
+    }
+    if v == netview.V_FAKED {
+        if a0 == MG_MAC0 || a0 == MG_HW0 {
+            return netview.FAKE_MAC0
+        }
+        if a0 == MG_MAC1 || a0 == MG_HW1 {
+            return netview.FAKE_MAC1
+        }
+        // Eine erfundene Maschine hat keine Ueberlagerung, hat nie
+        // gewuerfelt und hat nie etwas gesetzt. Das ist stimmig: sie
+        // ist eine Maschine mit fester Adresse.
+        return 0
+    }
+    if !inet.ready(state) {
+        return neg(errno.E_NODEV)
+    }
+    if a0 == MG_MAC0 {
+        return (netprof.mac_at_on(state, a2, 0) << 24)
+            | (netprof.mac_at_on(state, a2, 1) << 16)
+            | (netprof.mac_at_on(state, a2, 2) << 8)
+            | netprof.mac_at_on(state, a2, 3)
+    }
+    if a0 == MG_MAC1 {
+        return (netprof.mac_at_on(state, a2, 4) << 8)
+            | netprof.mac_at_on(state, a2, 5)
+    }
+    if a0 == MG_HW0 {
+        return (netdev.mac_at_on(state, a2, 0) << 24)
+            | (netdev.mac_at_on(state, a2, 1) << 16)
+            | (netdev.mac_at_on(state, a2, 2) << 8)
+            | netdev.mac_at_on(state, a2, 3)
+    }
+    if a0 == MG_HW1 {
+        return (netdev.mac_at_on(state, a2, 4) << 8)
+            | netdev.mac_at_on(state, a2, 5)
+    }
+    if a0 == MG_ACTIVE {
+        if netprof.active_on(state, a2) {
+            return 1
+        }
+        return 0
+    }
+    if a0 == MG_HWOK {
+        if netprof.hw_ok_on(state, a2) {
+            return 1
+        }
+        return 0
+    }
+    if a0 == MG_SETTABLE {
+        if netprof.settable_on(state, a2) {
+            return 1
+        }
+        return 0
+    }
+    if a0 == MG_ROLLS {
+        return netprof.rolls(state)
+    }
+    if a0 == MG_CHANGES {
+        return netprof.changes(state, a2)
+    }
+    // WUERFELN DARF NUR DIE WURZEL, und der Grund ist nicht die
+    // Geheimhaltung -- die sechs Oktette sind kein Geheimnis. Es ist
+    // der Zaehler: `roll` zieht aus derselben Quelle wie die
+    // Anfangsfolgenummern von TCP, und ein Programm, das in einer
+    // Schleife wuerfelt, ist ein Programm, das den Sammler leerzieht.
+    if a0 == MG_ROLL0 {
+        if !perm.is_root(state, me) {
+            return neg(errno.E_PERM)
+        }
+        let m: u64 = netprof.roll_keep(state)
+        return ((m & 0xFF) << 24) | (((m >> 8) & 0xFF) << 16)
+            | (((m >> 16) & 0xFF) << 8) | ((m >> 24) & 0xFF)
+    }
+    if a0 == MG_ROLL1 {
+        if !perm.is_root(state, me) {
+            return neg(errno.E_PERM)
+        }
+        let m: u64 = netprof.last_roll(state)
+        return (((m >> 32) & 0xFF) << 8) | ((m >> 40) & 0xFF)
+    }
+    return neg(errno.E_INVAL)
+}
 
 // ==================================================================
 //        RUNDE K12: GASTMASCHINEN AUS RING 3, UEBER HANDLES

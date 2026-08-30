@@ -1,0 +1,1200 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/nprof.fi -- RUNDE NETPROFIL: DER PROFILSPEICHER.
+//
+// EINE Fassung der Profillogik fuer ZWEI Bediener. `/bin/netprof`
+// (Kommandozeile) und die Einstellungsseite "Netzprofile" tun beide
+// dasselbe, und sie tun es hier -- so, wie `pw.fi` fuer `login`, `su`
+// und `passwd` EINE Fassung der Passwortrechnung haelt und `grp.fi`
+// EINE Fassung von /etc/group.
+//
+// WARUM DAS WICHTIG IST, und nicht bloss ordentlich: eine Oberflaeche,
+// die ihren eigenen Parser fuer dieselbe Datei mitbringt, liest sie
+// eines Tages anders als das Werkzeug. Dann steht in der Liste ein
+// Profil, das `netprof an` nicht findet -- und niemand kann sagen,
+// welche der beiden Fassungen recht hat.
+//
+// Was hier NICHT steht, steht in den beiden Bedienern: das Ausdrucken
+// einer Tabelle (Kommandozeile) und das Zeichnen von Bedienelementen
+// (Oberflaeche). Was hier steht, ist die Datei, ihr Format, ihre
+// Rechte, die drei MAC-Stufen und der Verbindungsaufbau.
+//
+// ==================================================================
+// DIE DATEI
+// ==================================================================
+//
+// /etc/netprofile.conf, EINE ZEILE JE PROFIL, Felder mit ':' getrennt
+// -- dasselbe Format wie /etc/passwd und /etc/group, aus demselben
+// Grund: man kann es mit `cat` lesen und mit `edit` reparieren, wenn
+// dieses Programm einmal nicht startet.
+//
+//   name:kennung:sicherheit:bezug:ip:maske:gateway:dns:macart:macwert:auto:vorrang:zuletzt
+//
+//   name        wie das Profil heisst
+//   kennung     HEUTE der Name der Schnittstelle (`net0`). Das Feld ist
+//               ausdruecklich so breit, dass eine SSID hineinpasst (32
+//               Oktette, IEEE 802.11-2020, 9.4.2.2).
+//   sicherheit  HEUTE immer `offen`. Draht hat keine Verschluesselung.
+//               Das Feld existiert, damit ein WLAN-Treiber es spaeter
+//               nicht nachtraeglich in jede Zeile schieben muss; jeder
+//               ANDERE Wert wird abgelehnt, statt so zu tun.
+//   bezug       `dhcp` oder `fest`
+//   ip/maske/gateway   bei `fest`
+//   dns         der Namensdienst. HEUTE nur AUFBEWAHRT -- dieser Kern
+//               hat keinen Aufloeser, und ein Feld, das etwas
+//               vortaeuschte, waere schlimmer als ein leeres.
+//   macart      `geraet`, `netz` oder `immer`
+//   macwert     ZWOELF HEXZIFFERN OHNE TRENNER (8a1f039c4421). Ohne
+//               Doppelpunkte, weil der Doppelpunkt in dieser Datei das
+//               Feldtrennzeichen ist. Belegt nur bei `netz`.
+//   auto        0 oder 1: von selbst verbinden
+//   vorrang     kleinere Zahl zuerst
+//   zuletzt     Sekunden seit 1970, 0 = nie
+//
+// RECHTE: 0o600 root:root. Nicht 0o644 wie /etc/passwd -- in `macwert`
+// steht bei der Stufe `netz` eine dauerhafte Kennung dieser Maschine in
+// diesem Netz, und in dieselbe Zeile gehoert spaeter das WLAN-Passwort.
+//
+// KAPUTT UND UNVOLLSTAENDIG SIND ZWEI VERSCHIEDENE DINGE. Kaputt heisst:
+// die Zeile hat kein Format mehr. Unvollstaendig heisst: das Format
+// stimmt, die Angaben reichen noch nicht zum Verbinden. Das Erste wird
+// gezaehlt und uebersprungen, das Zweite bleibt sichtbar.
+//
+// ==================================================================
+// DIE DREI STUFEN
+// ==================================================================
+//
+//   geraet  die Adresse der Karte, unveraendert
+//   netz    einmal gewuerfelt, in der Datei gemerkt, danach immer
+//           wieder dieselbe -- der Standardfall
+//   immer   bei jeder Verbindung neu gewuerfelt
+//
+// ==================================================================
+// WAS FUER WLAN VORBEREITET IST -- UND WAS NICHT
+// ==================================================================
+//
+// VORBEREITET: `kennung` ist 40 Oktette breit (eine SSID passt hinein),
+// `sicherheit` steht im Format und wird geprueft, die MAC-Richtlinie
+// ist bereits JE NETZ, und der Aufruf 1331 verteilt nach KARTENART --
+// eine WLAN-Karte meldet sich in `kernel/netdev.fi` als dritte Art an.
+//
+// NICHT GEBAUT: kein 802.11, kein Suchlauf, keine Signalstaerke, kein
+// WPA-Handschlag, keine Passwortablage. Es gibt dafuer auch keinen
+// leeren Knopf -- ein Befehl, der eine leere Liste zurueckgibt, sieht
+// aus wie ein kaputter Treiber; eine fehlende Faehigkeit sieht aus wie
+// eine fehlende Faehigkeit.
+
+profile kernel
+
+import ulib
+
+export {
+    // die Datei
+    laden, speichern, anzahl, kaputte, name_at, kenn_at, suche,
+    neu, loesche,
+    // die Felder
+    bezug_of, ip_of, maske_of, gw_of, dns_of,
+    macart_of, macwert_of, auto_of, rang_of, zuletzt_of,
+    set_kennung, set_bezug, set_ip, set_maske, set_gw, set_dns,
+    set_macart, set_auto, set_rang,
+    // das Netz
+    verbinden, trennen, wuerfeln,
+    bereit, wirksam, karte, aktiv, hwok, settable, wuerfe, wechsel,
+    // Text
+    mac_text, mac_hex, mac_lesen, ip_text, ip_lesen,
+    art_text, art_aus_text, sag_ip, sag_mac,
+    // die Zahlen
+    P_GERAET, P_NETZ, P_IMMER, B_DHCP, B_FEST, MAXP, NAMEW, KENNW
+}
+
+const SYS_NETGET: u64 = 1300
+const SYS_NETSET: u64 = 1301
+const SYS_MACGET: u64 = 1330
+const SYS_MACSET: u64 = 1331
+const SYS_TIME: u64 = 201
+const SYS_CHMOD: u64 = 90
+const SYS_CHOWN: u64 = 92
+const SYS_STAT: u64 = 4
+
+const NG_READY: u64 = 0
+const NG_IP: u64 = 1
+const NG_MASK: u64 = 2
+const NG_GW: u64 = 3
+
+const MG_MAC0: u64 = 0
+const MG_MAC1: u64 = 1
+const MG_HW0: u64 = 2
+const MG_HW1: u64 = 3
+const MG_ACTIVE: u64 = 4
+const MG_HWOK: u64 = 5
+const MG_SETTABLE: u64 = 6
+const MG_ROLL0: u64 = 7
+const MG_ROLL1: u64 = 8
+const MG_ROLLS: u64 = 9
+const MG_CHANGES: u64 = 10
+
+const MS_SET: u64 = 0
+const MS_CLEAR: u64 = 1
+
+// Die drei Stufen. Dieselben Zahlen wie in `kernel/netprof.fi`; der
+// Abnahmelauf haelt beide Fassungen gegeneinander.
+const P_GERAET: u64 = 0
+const P_NETZ: u64 = 1
+const P_IMMER: u64 = 2
+
+const B_DHCP: u64 = 0
+const B_FEST: u64 = 1
+
+// Sicherheitsart. Heute gibt es genau eine, und das ist ehrlicher als
+// eine Auswahl, von der drei Eintraege nichts tun.
+const SEC_OFFEN: u64 = 0
+
+const MAXP: u64 = 16
+const NAMEW: u64 = 24
+const KENNW: u64 = 40 // 32 Oktette SSID plus Null passen hinein
+const DATEI_MAX: u64 = 4096
+
+static mut p_name: [u8; 384] = [0 as u8; 384] // MAXP * NAMEW
+static mut p_kenn: [u8; 640] = [0 as u8; 640] // MAXP * KENNW
+static mut p_sich: [u64; 16] = [0 as u64; 16]
+static mut p_bezug: [u64; 16] = [0 as u64; 16]
+static mut p_ip: [u64; 16] = [0 as u64; 16]
+static mut p_maske: [u64; 16] = [0 as u64; 16]
+static mut p_gw: [u64; 16] = [0 as u64; 16]
+static mut p_dns: [u64; 16] = [0 as u64; 16]
+static mut p_macart: [u64; 16] = [0 as u64; 16]
+static mut p_macwert: [u64; 16] = [0 as u64; 16] // 48 Bit in Leserichtung
+static mut p_auto: [u64; 16] = [0 as u64; 16]
+static mut p_rang: [u64; 16] = [0 as u64; 16]
+static mut p_zuletzt: [u64; 16] = [0 as u64; 16]
+static mut n_prof: u64 = 0
+static mut n_kaputt: u64 = 0
+
+static mut roh: [u8; 4096] = [0 as u8; 4096]
+static mut aus: [u8; 4096] = [0 as u8; 4096]
+static mut feld: [u8; 96] = [0 as u8; 96]
+static mut zeile: [u8; 512] = [0 as u8; 512]
+
+fn say(p: u64) {
+    let _n: u64 = ulib.say(p)
+}
+
+// Ein Oktett an einer Adresse. `ulib` hat das nicht, und eine
+// Bibliothek um zwei Zeilen zu erweitern, die genau ein Programm
+// braucht, waere die falsche Stelle.
+fn get8(p: u64) -> u64 {
+    return __mmio_read8((p) as *mut u8) as u64
+}
+
+fn set8(p: u64, v: u8) {
+    __mmio_write8((p) as *mut u8, v)
+}
+
+fn zeilenende() {
+    ulib.nl()
+}
+
+// ------------------------------------------------------------- Zahlen
+
+fn hex1(v: u64) -> u64 {
+    if v < 10 {
+        return 48 + v
+    }
+    return 87 + v // 'a'..'f'
+}
+
+fn hexwert(c: u64) -> i64 {
+    if c >= 48 && c <= 57 {
+        return (c - 48) as i64
+    }
+    if c >= 97 && c <= 102 {
+        return (c - 87) as i64
+    }
+    if c >= 65 && c <= 70 {
+        return (c - 55) as i64
+    }
+    return -1
+}
+
+// Sechs Oktette als aa:bb:cc:dd:ee:ff in einen Puffer. MIT Trennern --
+// das ist die Form, die ein Mensch liest. Ohne Trenner steht sie nur in
+// der Datei, und der Grund dafuer steht oben.
+fn mac_text(v: u64, out: u64) -> u64 {
+    var i: u64 = 0
+    var at: u64 = 0
+    while i < 6 {
+        if i > 0 {
+            set8(out + at, 58 as u8) // ':'
+            at = at + 1
+        }
+        let o: u64 = (v >> ((5 - i) * 8)) & 0xFF
+        set8(out + at, hex1((o >> 4) & 0xF) as u8)
+        set8(out + at + 1, hex1(o & 0xF) as u8)
+        at = at + 2
+        i = i + 1
+    }
+    set8(out + at, 0 as u8)
+    return at
+}
+
+// Zwoelf Hexziffern ohne Trenner -- die Form in der Datei.
+fn mac_hex(v: u64, out: u64) -> u64 {
+    var i: u64 = 0
+    while i < 6 {
+        let o: u64 = (v >> ((5 - i) * 8)) & 0xFF
+        set8(out + i * 2, hex1((o >> 4) & 0xF) as u8)
+        set8(out + i * 2 + 1, hex1(o & 0xF) as u8)
+        i = i + 1
+    }
+    set8(out + 12, 0 as u8)
+    return 12
+}
+
+// Zurueck. Nimmt BEIDE Formen an -- zwoelf Ziffern und die mit
+// Doppelpunkten. Wer die Adresse von Hand eintraegt, tippt sie so, wie
+// sie ueberall sonst steht, und dieses Programm soll ihn dafuer nicht
+// bestrafen. Gibt -1 zurueck, wenn auch nur ein Zeichen nicht passt:
+// eine halb gelesene Hardwareadresse ist schlimmer als gar keine.
+fn mac_lesen(p: u64) -> i64 {
+    var v: u64 = 0
+    var n: u64 = 0
+    var i: u64 = 0
+    while true {
+        let c: u64 = get8(p + i)
+        if c == 0 {
+            if n != 12 {
+                return -1
+            }
+            return v as i64
+        }
+        if c == 58 || c == 45 { // ':' oder '-'
+            i = i + 1
+        } else {
+            let h: i64 = hexwert(c)
+            if h < 0 || n >= 12 {
+                return -1
+            }
+            v = (v << 4) | (h as u64)
+            n = n + 1
+            i = i + 1
+        }
+    }
+    return -1
+}
+
+// 10.0.2.15 -> 0x0A00020F. -1, wenn es keine Adresse ist.
+fn ip_lesen(p: u64) -> i64 {
+    var teil: u64 = 0
+    var wert: u64 = 0
+    var ziffern: u64 = 0
+    var v: u64 = 0
+    var i: u64 = 0
+    while true {
+        let c: u64 = get8(p + i)
+        if c == 46 || c == 0 { // '.' oder Ende
+            if ziffern == 0 || wert > 255 {
+                return -1
+            }
+            v = (v << 8) | wert
+            teil = teil + 1
+            wert = 0
+            ziffern = 0
+            if c == 0 {
+                if teil != 4 {
+                    return -1
+                }
+                return v as i64
+            }
+            if teil > 3 {
+                return -1
+            }
+        } else if c >= 48 && c <= 57 {
+            wert = wert * 10 + (c - 48)
+            ziffern = ziffern + 1
+            if ziffern > 3 {
+                return -1
+            }
+        } else {
+            return -1
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+fn ip_text(v: u64, out: u64) -> u64 {
+    var at: u64 = 0
+    var i: u64 = 0
+    while i < 4 {
+        if i > 0 {
+            set8(out + at, 46 as u8)
+            at = at + 1
+        }
+        at = at + ulib.digits((v >> ((3 - i) * 8)) & 0xFF, out + at)
+        i = i + 1
+    }
+    set8(out + at, 0 as u8)
+    return at
+}
+
+fn sag_ip(v: u64) {
+    var b: [u8; 24] = [0 as u8; 24]
+    let _n: u64 = ip_text(v, (&b[0 as usize]) as u64)
+    say((&b[0 as usize]) as u64)
+}
+
+fn sag_mac(v: u64) {
+    var b: [u8; 24] = [0 as u8; 24]
+    let _n: u64 = mac_text(v, (&b[0 as usize]) as u64)
+    say((&b[0 as usize]) as u64)
+}
+
+// -------------------------------------------------------- die Datei
+
+fn name_at(i: u64) -> u64 {
+    return (&p_name[(i * NAMEW) as usize]) as u64
+}
+
+fn kenn_at(i: u64) -> u64 {
+    return (&p_kenn[(i * KENNW) as usize]) as u64
+}
+
+fn suche(nm: u64) -> i64 {
+    var i: u64 = 0
+    while i < n_prof {
+        if ulib.streq(name_at(i), nm) {
+            return i as i64
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+// Ein Feld aus einer Zeile holen. `nr` zaehlt ab 0, das Trennzeichen
+// ist ':'. Gibt false zurueck, wenn es das Feld gar nicht gibt -- eine
+// Zeile mit zwoelf Feldern statt dreizehn ist eine kaputte Zeile und
+// keine Zeile mit einem leeren Feld am Ende.
+fn feld_aus(z: u64, nr: u64, out: u64, max: u64) -> bool {
+    var f: u64 = 0
+    var i: u64 = 0
+    var at: u64 = 0
+    while true {
+        let c: u64 = get8(z + i)
+        if c == 0 {
+            if f == nr {
+                set8(out + at, 0 as u8)
+                return true
+            }
+            return false
+        }
+        if c == 58 {
+            if f == nr {
+                set8(out + at, 0 as u8)
+                return true
+            }
+            f = f + 1
+            at = 0
+        } else if f == nr {
+            if at + 1 >= max {
+                return false
+            }
+            set8(out + at, c as u8)
+            at = at + 1
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn art_aus_text(p: u64) -> i64 {
+    var g: [u8; 7] = "geraet\0"
+    var n: [u8; 5] = "netz\0"
+    var m: [u8; 6] = "immer\0"
+    if ulib.streq(p, (&g[0 as usize]) as u64) {
+        return P_GERAET as i64
+    }
+    if ulib.streq(p, (&n[0 as usize]) as u64) {
+        return P_NETZ as i64
+    }
+    if ulib.streq(p, (&m[0 as usize]) as u64) {
+        return P_IMMER as i64
+    }
+    return -1
+}
+
+// DIE NAMEN DER DREI STUFEN, in `static mut` und nicht auf dem Stapel.
+// Firn laesst die Adresse eines Rahmens nicht nach aussen (SPEC 9.4),
+// und das ist richtig so -- ein Zeiger auf einen Rahmen, den es nicht
+// mehr gibt, ist genau der Fehler, den C jeden Tag macht.
+static mut t_geraet: [u8; 7] = "geraet\0"
+static mut t_netz: [u8; 5] = "netz\0"
+static mut t_immer: [u8; 6] = "immer\0"
+
+fn art_text(a: u64) -> u64 {
+    if a == P_NETZ {
+        return (&t_netz[0 as usize]) as u64
+    }
+    if a == P_IMMER {
+        return (&t_immer[0 as usize]) as u64
+    }
+    return (&t_geraet[0 as usize]) as u64
+}
+
+// EINE ZEILE LESEN. Gibt false zurueck, wenn sie kaputt ist -- und
+// genau dann wird sie gezaehlt und uebersprungen. Was "kaputt" heisst,
+// steht hier vollstaendig und nicht verteilt:
+//
+//   * weniger als dreizehn Felder (halb geschrieben, abgeschnitten)
+//   * kein Name
+//   * eine MAC-Art, die es nicht gibt
+//   * ein Adressbezug, den es nicht gibt
+//   * `fest` ohne Adresse oder ohne Maske
+//   * eine Sicherheitsart ausser `offen`
+//   * eine MAC, die keine ist
+fn zeile_lesen(z: u64) -> bool {
+    if n_prof >= MAXP {
+        return false
+    }
+    var f: [u8; 96] = [0 as u8; 96]
+    let fp: u64 = (&f[0 as usize]) as u64
+    let i: u64 = n_prof
+
+    if !feld_aus(z, 0, fp, 96) {
+        return false
+    }
+    if ulib.length(fp) == 0 || ulib.length(fp) + 1 >= NAMEW {
+        return false
+    }
+    let _a: u64 = ulib.strncpy(name_at(i), fp, NAMEW)
+
+    if !feld_aus(z, 1, fp, 96) {
+        return false
+    }
+    if ulib.length(fp) + 1 >= KENNW {
+        return false
+    }
+    let _b: u64 = ulib.strncpy(kenn_at(i), fp, KENNW)
+
+    // Sicherheitsart. HEUTE genau ein zulaessiger Wert. Ein anderer
+    // wird ABGELEHNT und nicht stumm auf `offen` gezogen -- wer `wpa2`
+    // hineinschreibt, soll erfahren, dass es das hier nicht gibt.
+    if !feld_aus(z, 2, fp, 96) {
+        return false
+    }
+    var so: [u8; 6] = "offen\0"
+    if !ulib.streq(fp, (&so[0 as usize]) as u64) {
+        return false
+    }
+    p_sich[(i) as usize] = SEC_OFFEN
+
+    if !feld_aus(z, 3, fp, 96) {
+        return false
+    }
+    var bd: [u8; 5] = "dhcp\0"
+    var bf: [u8; 5] = "fest\0"
+    if ulib.streq(fp, (&bd[0 as usize]) as u64) {
+        p_bezug[(i) as usize] = B_DHCP
+    } else if ulib.streq(fp, (&bf[0 as usize]) as u64) {
+        p_bezug[(i) as usize] = B_FEST
+    } else {
+        return false
+    }
+
+    p_ip[(i) as usize] = 0
+    p_maske[(i) as usize] = 0
+    p_gw[(i) as usize] = 0
+    p_dns[(i) as usize] = 0
+    if !feld_aus(z, 4, fp, 96) {
+        return false
+    }
+    if ulib.length(fp) > 0 {
+        let v: i64 = ip_lesen(fp)
+        if v < 0 {
+            return false
+        }
+        p_ip[(i) as usize] = v as u64
+    }
+    if !feld_aus(z, 5, fp, 96) {
+        return false
+    }
+    if ulib.length(fp) > 0 {
+        let v: i64 = ip_lesen(fp)
+        if v < 0 {
+            return false
+        }
+        p_maske[(i) as usize] = v as u64
+    }
+    if !feld_aus(z, 6, fp, 96) {
+        return false
+    }
+    if ulib.length(fp) > 0 {
+        let v: i64 = ip_lesen(fp)
+        if v < 0 {
+            return false
+        }
+        p_gw[(i) as usize] = v as u64
+    }
+    if !feld_aus(z, 7, fp, 96) {
+        return false
+    }
+    if ulib.length(fp) > 0 {
+        let v: i64 = ip_lesen(fp)
+        if v < 0 {
+            return false
+        }
+        p_dns[(i) as usize] = v as u64
+    }
+    // HIER STAND EINMAL: `fest` OHNE Adresse ist eine kaputte Zeile.
+    // Das war falsch, und der erste Lauf dieser Runde hat es sofort
+    // gezeigt: `netprof setz heim bezug fest` schreibt die Zeile, und
+    // die Adresse kommt mit dem NAECHSTEN Befehl. Zwischen den beiden
+    // war das Profil damit unlesbar, und `netprof setz heim ip ...`
+    // antwortete "kein Profil dieses Namens" -- auf ein Profil, das man
+    // gerade eben angelegt hatte.
+    //
+    // KAPUTT UND UNVOLLSTAENDIG SIND ZWEI VERSCHIEDENE DINGE. Kaputt
+    // heisst: die Zeile hat kein Format mehr (zu wenig Felder, eine
+    // MAC, die keine ist). Unvollstaendig heisst: das Format stimmt,
+    // die Angaben reichen noch nicht zum Verbinden. Das Erste wird
+    // uebersprungen, das Zweite bleibt sichtbar und bearbeitbar -- und
+    // `verbinden` sagt dann, was fehlt.
+
+    if !feld_aus(z, 8, fp, 96) {
+        return false
+    }
+    let a: i64 = art_aus_text(fp)
+    if a < 0 {
+        return false
+    }
+    p_macart[(i) as usize] = a as u64
+
+    p_macwert[(i) as usize] = 0
+    if !feld_aus(z, 9, fp, 96) {
+        return false
+    }
+    if ulib.length(fp) > 0 {
+        let m: i64 = mac_lesen(fp)
+        if m < 0 {
+            return false
+        }
+        p_macwert[(i) as usize] = m as u64
+    }
+
+    if !feld_aus(z, 10, fp, 96) {
+        return false
+    }
+    p_auto[(i) as usize] = 0
+    if ulib.to_num(fp) != 0 {
+        p_auto[(i) as usize] = 1
+    }
+    if !feld_aus(z, 11, fp, 96) {
+        return false
+    }
+    p_rang[(i) as usize] = ulib.to_num(fp)
+    if !feld_aus(z, 12, fp, 96) {
+        return false
+    }
+    p_zuletzt[(i) as usize] = ulib.to_num(fp)
+
+    n_prof = n_prof + 1
+    return true
+}
+
+fn laden() -> bool {
+    var pfad: [u8; 21] = "/etc/netprofile.conf\0"
+    n_prof = 0
+    n_kaputt = 0
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&pfad[0 as usize]) as u64, 0, 0)
+    if ulib.bad(fd) {
+        return false // gibt es noch nicht -- kein Fehler
+    }
+    var gelesen: u64 = 0
+    while gelesen < DATEI_MAX - 1 {
+        let n: u64 = ulib.sys(ulib.SYS_READ, fd,
+            (&roh[(gelesen) as usize]) as u64, DATEI_MAX - 1 - gelesen)
+        if ulib.bad(n) || n == 0 {
+            break
+        }
+        gelesen = gelesen + n
+    }
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    roh[(gelesen) as usize] = 0 as u8
+
+    var i: u64 = 0
+    while i < gelesen {
+        var at: u64 = 0
+        while i < gelesen && roh[(i) as usize] as u64 != 10 {
+            if at + 1 < 512 {
+                zeile[(at) as usize] = roh[(i) as usize]
+                at = at + 1
+            }
+            i = i + 1
+        }
+        i = i + 1
+        zeile[(at) as usize] = 0 as u8
+        if at > 0 && zeile[0] as u64 != 35 { // '#'
+            if !zeile_lesen((&zeile[0 as usize]) as u64) {
+                n_kaputt = n_kaputt + 1
+            }
+        }
+    }
+    return true
+}
+
+fn anhaengen(at: u64, p: u64) -> u64 {
+    var i: u64 = 0
+    while true {
+        let c: u64 = get8(p + i)
+        if c == 0 {
+            return at + i
+        }
+        if at + i >= DATEI_MAX - 1 {
+            return at + i
+        }
+        aus[(at + i) as usize] = c as u8
+        i = i + 1
+    }
+    return at
+}
+
+fn anhaengen_zahl(at: u64, v: u64) -> u64 {
+    var b: [u8; 26] = [0 as u8; 26]
+    let _n: u64 = ulib.digits(v, (&b[0 as usize]) as u64)
+    return anhaengen(at, (&b[0 as usize]) as u64)
+}
+
+fn anhaengen_ip(at: u64, v: u64) -> u64 {
+    if v == 0 {
+        return at
+    }
+    var b: [u8; 24] = [0 as u8; 24]
+    let _n: u64 = ip_text(v, (&b[0 as usize]) as u64)
+    return anhaengen(at, (&b[0 as usize]) as u64)
+}
+
+fn doppelpunkt(at: u64) -> u64 {
+    aus[(at) as usize] = 58 as u8
+    return at + 1
+}
+
+// SCHREIBEN UEBER EINE ZWISCHENDATEI, genau wie `passwd` es seit Runde
+// MULTIUSER tut. Der Grund ist derselbe: wer die Zieldatei aufmacht und
+// dann abstuerzt, hat eine leere Profildatei. Wer daneben schreibt und
+// umhaengt, hat entweder die alte oder die neue.
+fn speichern() -> bool {
+    var pfad: [u8; 21] = "/etc/netprofile.conf\0"
+    var tmp: [u8; 25] = "/etc/netprofile.conf.neu\0"
+    var vor: [u8; 25] = "/etc/netprofile.conf.alt\0"
+    var kopf1: [u8; 63] =
+        "# /etc/netprofile.conf -- ein Profil je Zeile, Felder mit ':'\n\0"
+    var kopf2: [u8; 90] =
+        "# name:kennung:sicherheit:bezug:ip:maske:gateway:dns:macart:macwert:auto:vorrang:zuletzt\n\0"
+    var kopf3: [u8; 65] =
+        "# macwert: zwoelf Hexziffern OHNE Trenner. /bin/netprof pflegt.\n\0"
+    var nl: [u8; 2] = "\n\0"
+    var so: [u8; 6] = "offen\0"
+    var bd: [u8; 5] = "dhcp\0"
+    var bf: [u8; 5] = "fest\0"
+
+    var at: u64 = 0
+    at = anhaengen(at, (&kopf1[0 as usize]) as u64)
+    at = anhaengen(at, (&kopf2[0 as usize]) as u64)
+    at = anhaengen(at, (&kopf3[0 as usize]) as u64)
+    var i: u64 = 0
+    while i < n_prof {
+        at = anhaengen(at, name_at(i))
+        at = doppelpunkt(at)
+        at = anhaengen(at, kenn_at(i))
+        at = doppelpunkt(at)
+        at = anhaengen(at, (&so[0 as usize]) as u64)
+        at = doppelpunkt(at)
+        if p_bezug[(i) as usize] == B_FEST {
+            at = anhaengen(at, (&bf[0 as usize]) as u64)
+        } else {
+            at = anhaengen(at, (&bd[0 as usize]) as u64)
+        }
+        at = doppelpunkt(at)
+        at = anhaengen_ip(at, p_ip[(i) as usize])
+        at = doppelpunkt(at)
+        at = anhaengen_ip(at, p_maske[(i) as usize])
+        at = doppelpunkt(at)
+        at = anhaengen_ip(at, p_gw[(i) as usize])
+        at = doppelpunkt(at)
+        at = anhaengen_ip(at, p_dns[(i) as usize])
+        at = doppelpunkt(at)
+        at = anhaengen(at, art_text(p_macart[(i) as usize]))
+        at = doppelpunkt(at)
+        if p_macwert[(i) as usize] != 0 {
+            var mb: [u8; 16] = [0 as u8; 16]
+            let _m: u64 = mac_hex(p_macwert[(i) as usize],
+                (&mb[0 as usize]) as u64)
+            at = anhaengen(at, (&mb[0 as usize]) as u64)
+        }
+        at = doppelpunkt(at)
+        at = anhaengen_zahl(at, p_auto[(i) as usize])
+        at = doppelpunkt(at)
+        at = anhaengen_zahl(at, p_rang[(i) as usize])
+        at = doppelpunkt(at)
+        at = anhaengen_zahl(at, p_zuletzt[(i) as usize])
+        at = anhaengen(at, (&nl[0 as usize]) as u64)
+        i = i + 1
+    }
+
+    ulib.sys(ulib.SYS_UNLINK, (&tmp[0 as usize]) as u64, 0, 0)
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&tmp[0 as usize]) as u64,
+        ulib.O_MAKE, 384) // 0o600 schon beim Anlegen
+    if ulib.bad(fd) {
+        return false
+    }
+    // DIE RECHTE VOR DEM INHALT. Eine Datei, die einen Augenblick lang
+    // 0o644 ist und in der die dauerhafte Kennung dieser Maschine
+    // steht, ist einen Augenblick zu lang offen.
+    ulib.sys(SYS_CHMOD, (&tmp[0 as usize]) as u64, 384, 0)
+    ulib.sys(SYS_CHOWN, (&tmp[0 as usize]) as u64, 0, 0)
+    var ab: u64 = 0
+    while ab < at {
+        let n: u64 = ulib.sys(ulib.SYS_WRITE, fd,
+            (&aus[(ab) as usize]) as u64, at - ab)
+        if ulib.bad(n) || n == 0 {
+            ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+            ulib.sys(ulib.SYS_UNLINK, (&tmp[0 as usize]) as u64, 0, 0)
+            return false
+        }
+        ab = ab + n
+    }
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    // ============================ DIE VIER SCHRITTE, UND WARUM VIER
+    //
+    // GEMESSEN, NICHT ANGENOMMEN: `rename` dieses Kernels UEBERSCHREIBT
+    // NICHT. Runde K14 hat das ausdruecklich so entschieden
+    // (`fs.rename_path`: "dieser Kernel ueberschreibt nicht still"), und
+    // `tools/k14/run.sh` misst es. Der erste Lauf dieser Runde ist genau
+    // darueber gestolpert: das ERSTE `netprof neu` ging, jedes weitere
+    // Speichern kam mit -EEXIST zurueck und meldete "die Profildatei ist
+    // nicht schreibbar". Das steht hier, weil es der Grund fuer die vier
+    // Schritte ist -- und weil `passwd` seit Runde MULTIUSER dieselben
+    // vier hat.
+    //
+    //   1. .neu schreiben, mit 0o600 VOR dem ersten Oktett
+    //   2. netprofile.conf -> netprofile.conf.alt   (umbenennen)
+    //   3. .neu -> netprofile.conf
+    //   4. .alt loeschen
+    //
+    // Zu KEINEM Zeitpunkt sind die alten Profile weg. Was bleibt: eine
+    // Luecke von zwei Verzeichnisoperationen zwischen 2 und 3, in der es
+    // die Datei kurz nicht gibt. Dieselbe Luecke wie bei /etc/shadow,
+    // dieselbe Antwort: ein `rename`, das nach POSIX ersetzt.
+    ulib.sys(ulib.SYS_UNLINK, (&vor[0 as usize]) as u64, 0, 0)
+    let hatte: bool = !ulib.bad(ulib.sys(ulib.SYS_RENAME,
+        (&pfad[0 as usize]) as u64, (&vor[0 as usize]) as u64, 0))
+    if ulib.bad(ulib.sys(ulib.SYS_RENAME, (&tmp[0 as usize]) as u64,
+        (&pfad[0 as usize]) as u64, 0)) {
+        if hatte {
+            ulib.sys(ulib.SYS_RENAME, (&vor[0 as usize]) as u64,
+                (&pfad[0 as usize]) as u64, 0)
+        }
+        ulib.sys(ulib.SYS_UNLINK, (&tmp[0 as usize]) as u64, 0, 0)
+        return false
+    }
+    ulib.sys(ulib.SYS_UNLINK, (&vor[0 as usize]) as u64, 0, 0)
+    ulib.sys(SYS_CHMOD, (&pfad[0 as usize]) as u64, 384, 0)
+    ulib.sys(SYS_CHOWN, (&pfad[0 as usize]) as u64, 0, 0)
+    return true
+}
+
+// ------------------------------------------------------ verbinden
+
+fn wuerfeln() -> u64 {
+    let r0: u64 = ulib.sys(SYS_MACGET, MG_ROLL0, 0, 0)
+    if ulib.bad(r0) {
+        return 0
+    }
+    let r1: u64 = ulib.sys(SYS_MACGET, MG_ROLL1, 0, 0)
+    if ulib.bad(r1) {
+        return 0
+    }
+    return (r0 << 16) | r1
+}
+
+fn verbinden(i: u64) -> u64 {
+    var s_kn: [u8; 23] = "netprof: kein Netz da.\0"
+    var s_mac: [u8; 24] = "netprof: Adresse jetzt \0"
+    var s_zu: [u8; 26] = "netprof: verbunden ueber \0"
+    var s_ad: [u8; 13] = "netprof: ip=\0"
+    var s_dh: [u8; 27] = "netprof: DHCP-Klient, pid \0"
+    var s_er: [u8; 37] = "netprof: die Adresse wurde abgelehnt\0"
+    var s_wf: [u8; 39] = "netprof: es liess sich nichts wuerfeln\0"
+    var s_hw: [u8; 60] =
+        "netprof: die KARTE hat die Adresse nicht uebernommen -- nur\0"
+    var s_hw2: [u8; 61] =
+        "         der Draht traegt sie. Antworten koennen ausbleiben.\0"
+    var s_sp: [u8; 46] = "netprof: die Profildatei ist nicht schreibbar\0"
+    var pdhcp: [u8; 10] = "/bin/dhcp\0"
+    var s_unv: [u8; 56] = "netprof: `fest` ohne Adresse und Maske -- setz sie erst\0"
+    var s_ds: [u8; 41] = "netprof: /bin/dhcp startet nicht, errno \0"
+
+    if ulib.sys(SYS_NETGET, NG_READY, 0, 0) != 1 {
+        say((&s_kn[0 as usize]) as u64)
+        zeilenende()
+        return 1
+    }
+    // 1. DIE ADRESSE, und zwar VOR dem Adressbezug. Ein DHCP-Vertrag,
+    //    der unter der alten Hardwareadresse geholt wird, traegt genau
+    //    die Kennung, die diese Runde vermeiden soll.
+    var neu: u64 = 0
+    if p_macart[(i) as usize] == P_GERAET {
+        ulib.sys(SYS_MACSET, MS_CLEAR, 0, 0)
+    } else {
+        if p_macart[(i) as usize] == P_NETZ {
+            // JE PROFIL FEST: einmal wuerfeln, in die Datei, danach
+            // immer dieselbe. Genau das ist der Unterschied zu `immer`,
+            // und genau das misst die Abnahme.
+            if p_macwert[(i) as usize] == 0 {
+                neu = wuerfeln()
+                if neu == 0 {
+                    say((&s_wf[0 as usize]) as u64)
+                    zeilenende()
+                    return 1
+                }
+                p_macwert[(i) as usize] = neu
+                if !speichern() {
+                    say((&s_sp[0 as usize]) as u64)
+                    zeilenende()
+                    return 1
+                }
+            } else {
+                neu = p_macwert[(i) as usize]
+            }
+        } else {
+            neu = wuerfeln()
+            if neu == 0 {
+                say((&s_wf[0 as usize]) as u64)
+                zeilenende()
+                return 1
+            }
+        }
+        if ulib.bad(ulib.sys(SYS_MACSET, MS_SET, neu, 0)) {
+            say((&s_er[0 as usize]) as u64)
+            zeilenende()
+            return 1
+        }
+        say((&s_mac[0 as usize]) as u64)
+        sag_mac(neu)
+        zeilenende()
+        if ulib.sys(SYS_MACGET, MG_HWOK, 0, 0) == 0 {
+            say((&s_hw[0 as usize]) as u64)
+            zeilenende()
+            say((&s_hw2[0 as usize]) as u64)
+            zeilenende()
+        }
+    }
+
+    // 2. DER ADRESSBEZUG.
+    if p_bezug[(i) as usize] == B_FEST {
+        if p_ip[(i) as usize] == 0 || p_maske[(i) as usize] == 0 {
+            say((&s_unv[0 as usize]) as u64)
+            zeilenende()
+            return 1
+        }
+        if ulib.bad(ulib.sys(SYS_NETSET, p_ip[(i) as usize],
+            p_maske[(i) as usize], p_gw[(i) as usize])) {
+            say((&s_er[0 as usize]) as u64)
+            zeilenende()
+            return 1
+        }
+        say((&s_ad[0 as usize]) as u64)
+        sag_ip(p_ip[(i) as usize])
+        zeilenende()
+    } else {
+        // NICHT `SYS_SPAWN` (1000). Das nimmt eine PROGRAMMNUMMER aus
+        // dem Kernabbild und weist alles ueber 16 ab -- ein Pfadzeiger
+        // ist immer groesser, also kam von dort stumm -EINVAL zurueck.
+        // Der Aufruf fuer ein Programm VON DER PLATTE ist `SYS_EXEC`
+        // (1001, `do_execve` in kernel/sys.fi): Pfad, Argumentfeld,
+        // Anzahl. Das kostete beim Bauen dieser Runde eine halbe
+        // Stunde, und `kernel/user/settings.fi` hat denselben Fehler an
+        // seiner DHCP-Stelle -- er ist dort mit dieser Runde behoben.
+        var argv: [u64; 2] = [0 as u64; 2]
+        argv[0 as usize] = (&pdhcp[0 as usize]) as u64
+        let pid: u64 = ulib.sys(ulib.SYS_EXEC, (&pdhcp[0 as usize]) as u64,
+            (&argv[0 as usize]) as u64, 1)
+        if ulib.bad(pid) {
+            // EIGENE MELDUNG UND NICHT DIE VON OBEN. Beim ersten Lauf
+            // dieser Runde stand hier dieselbe Zeile wie fuer eine
+            // abgelehnte Adresse ("die Adresse wurde abgelehnt"), und
+            // eine halbe Stunde ging dafuer drauf, an der falschen
+            // Stelle zu suchen. Eine Fehlermeldung, die zwei
+            // verschiedene Fehler gleich nennt, ist eine Fehlermeldung
+            // weniger.
+            say((&s_ds[0 as usize]) as u64)
+            ulib.sayn(0 -% pid)
+            zeilenende()
+            return 1
+        }
+        say((&s_dh[0 as usize]) as u64)
+        ulib.sayn(pid)
+        zeilenende()
+        let _rc: u64 = ulib.wait_code(pid)
+    }
+
+    p_zuletzt[(i) as usize] = ulib.sys(SYS_TIME, 0, 0, 0)
+    if !speichern() {
+        say((&s_sp[0 as usize]) as u64)
+        zeilenende()
+        return 1
+    }
+    say((&s_zu[0 as usize]) as u64)
+    say(name_at(i))
+    zeilenende()
+    return 0
+}
+
+fn trennen() -> u64 {
+    var s_ab: [u8; 42] = "netprof: getrennt, Adresse zurueckgegeben\0"
+    var s_er: [u8; 32] = "netprof: das ging nicht (root?)\0"
+    if ulib.bad(ulib.sys(SYS_NETSET, 0, 0, 0)) {
+        say((&s_er[0 as usize]) as u64)
+        zeilenende()
+        return 1
+    }
+    ulib.sys(SYS_MACSET, MS_CLEAR, 0, 0)
+    say((&s_ab[0 as usize]) as u64)
+    zeilenende()
+    return 0
+}
+
+// ==================================================================
+// DIE ZUGRIFFE VON AUSSEN
+// ==================================================================
+//
+// Firn hat keine globalen Variablen ueber Modulgrenzen (SPEC 14.1),
+// also gehen die Felder ueber Funktionen. Das ist keine Umstaendlichkeit
+// -- es ist die Stelle, an der eine Bereichspruefung steht, statt sich
+// auf den Aufrufer zu verlassen.
+
+fn anzahl() -> u64 {
+    return n_prof
+}
+
+fn kaputte() -> u64 {
+    return n_kaputt
+}
+
+fn bezug_of(i: u64) -> u64 {
+    if i >= n_prof { return B_DHCP }
+    return p_bezug[(i) as usize]
+}
+
+fn ip_of(i: u64) -> u64 {
+    if i >= n_prof { return 0 }
+    return p_ip[(i) as usize]
+}
+
+fn maske_of(i: u64) -> u64 {
+    if i >= n_prof { return 0 }
+    return p_maske[(i) as usize]
+}
+
+fn gw_of(i: u64) -> u64 {
+    if i >= n_prof { return 0 }
+    return p_gw[(i) as usize]
+}
+
+fn dns_of(i: u64) -> u64 {
+    if i >= n_prof { return 0 }
+    return p_dns[(i) as usize]
+}
+
+fn macart_of(i: u64) -> u64 {
+    if i >= n_prof { return P_GERAET }
+    return p_macart[(i) as usize]
+}
+
+fn macwert_of(i: u64) -> u64 {
+    if i >= n_prof { return 0 }
+    return p_macwert[(i) as usize]
+}
+
+fn auto_of(i: u64) -> u64 {
+    if i >= n_prof { return 0 }
+    return p_auto[(i) as usize]
+}
+
+fn rang_of(i: u64) -> u64 {
+    if i >= n_prof { return 0 }
+    return p_rang[(i) as usize]
+}
+
+fn zuletzt_of(i: u64) -> u64 {
+    if i >= n_prof { return 0 }
+    return p_zuletzt[(i) as usize]
+}
+
+fn set_kennung(i: u64, p: u64) -> bool {
+    if i >= n_prof || ulib.length(p) + 1 >= KENNW {
+        return false
+    }
+    let _a: u64 = ulib.strncpy(kenn_at(i), p, KENNW)
+    return true
+}
+
+fn set_bezug(i: u64, v: u64) {
+    if i < n_prof && v <= B_FEST {
+        p_bezug[(i) as usize] = v
+    }
+}
+
+fn set_ip(i: u64, v: u64) {
+    if i < n_prof { p_ip[(i) as usize] = v }
+}
+
+fn set_maske(i: u64, v: u64) {
+    if i < n_prof { p_maske[(i) as usize] = v }
+}
+
+fn set_gw(i: u64, v: u64) {
+    if i < n_prof { p_gw[(i) as usize] = v }
+}
+
+fn set_dns(i: u64, v: u64) {
+    if i < n_prof { p_dns[(i) as usize] = v }
+}
+
+// DIE STUFE WECHSELN. Der gemerkte Wert geht MIT der Stufe weg: wer von
+// `netz` auf `geraet` und wieder zurueck wechselt, bekommt eine NEUE
+// Adresse -- die alte war eine Kennung, die er ausdruecklich aufgegeben
+// hat. Diese Regel stand vorher zweimal im Baum (einmal in der
+// Kommandozeile, einmal waere sie in der Oberflaeche noetig gewesen);
+// jetzt steht sie einmal.
+fn set_macart(i: u64, a: u64) {
+    if i >= n_prof || a > P_IMMER {
+        return
+    }
+    if a != P_NETZ {
+        p_macwert[(i) as usize] = 0
+    }
+    p_macart[(i) as usize] = a
+}
+
+fn set_auto(i: u64, v: u64) {
+    if i < n_prof {
+        p_auto[(i) as usize] = 0
+        if v != 0 {
+            p_auto[(i) as usize] = 1
+        }
+    }
+}
+
+fn set_rang(i: u64, v: u64) {
+    if i < n_prof { p_rang[(i) as usize] = v }
+}
+
+// EIN NEUES PROFIL. Die Vorgabe ist `netz` und NICHT `geraet`: wer
+// nichts sagt, bekommt den Schutz -- die Stufe, die man ausdruecklich
+// waehlen muss, ist die, die weniger schuetzt.
+fn neu(nm: u64, kennung: u64) -> i64 {
+    if n_prof >= MAXP {
+        return -1
+    }
+    if ulib.length(nm) == 0 || ulib.length(nm) + 1 >= NAMEW {
+        return -2
+    }
+    if suche(nm) >= 0 {
+        return -3
+    }
+    if ulib.length(kennung) + 1 >= KENNW {
+        return -2
+    }
+    let i: u64 = n_prof
+    let _a: u64 = ulib.strncpy(name_at(i), nm, NAMEW)
+    let _b: u64 = ulib.strncpy(kenn_at(i), kennung, KENNW)
+    p_sich[(i) as usize] = SEC_OFFEN
+    p_bezug[(i) as usize] = B_DHCP
+    p_ip[(i) as usize] = 0
+    p_maske[(i) as usize] = 0
+    p_gw[(i) as usize] = 0
+    p_dns[(i) as usize] = 0
+    p_macart[(i) as usize] = P_NETZ
+    p_macwert[(i) as usize] = 0
+    p_auto[(i) as usize] = 1
+    p_rang[(i) as usize] = (i + 1) * 10
+    p_zuletzt[(i) as usize] = 0
+    n_prof = n_prof + 1
+    return i as i64
+}
+
+fn loesche(i: u64) -> bool {
+    if i >= n_prof {
+        return false
+    }
+    var k: u64 = i
+    while k + 1 < n_prof {
+        let _a: u64 = ulib.strncpy(name_at(k), name_at(k + 1), NAMEW)
+        let _b: u64 = ulib.strncpy(kenn_at(k), kenn_at(k + 1), KENNW)
+        p_sich[(k) as usize] = p_sich[((k + 1)) as usize]
+        p_bezug[(k) as usize] = p_bezug[((k + 1)) as usize]
+        p_ip[(k) as usize] = p_ip[((k + 1)) as usize]
+        p_maske[(k) as usize] = p_maske[((k + 1)) as usize]
+        p_gw[(k) as usize] = p_gw[((k + 1)) as usize]
+        p_dns[(k) as usize] = p_dns[((k + 1)) as usize]
+        p_macart[(k) as usize] = p_macart[((k + 1)) as usize]
+        p_macwert[(k) as usize] = p_macwert[((k + 1)) as usize]
+        p_auto[(k) as usize] = p_auto[((k + 1)) as usize]
+        p_rang[(k) as usize] = p_rang[((k + 1)) as usize]
+        p_zuletzt[(k) as usize] = p_zuletzt[((k + 1)) as usize]
+        k = k + 1
+    }
+    n_prof = n_prof - 1
+    return true
+}
+
+// ---------------------------------------------------- was gerade gilt
+
+fn bereit() -> bool {
+    return ulib.sys(SYS_NETGET, NG_READY, 0, 0) == 1
+}
+
+// Die Adresse, die auf dem DRAHT steht.
+fn wirksam() -> u64 {
+    let m0: u64 = ulib.sys(SYS_MACGET, MG_MAC0, 0, 0)
+    let m1: u64 = ulib.sys(SYS_MACGET, MG_MAC1, 0, 0)
+    if ulib.bad(m0) || ulib.bad(m1) {
+        return 0
+    }
+    return (m0 << 16) | m1
+}
+
+// Die Adresse, auf die die KARTE hoert. Nicht dasselbe -- und wo beide
+// auseinandergehen, sendet die Maschine unter neuem Namen und hoert
+// unter dem alten.
+fn karte() -> u64 {
+    let h0: u64 = ulib.sys(SYS_MACGET, MG_HW0, 0, 0)
+    let h1: u64 = ulib.sys(SYS_MACGET, MG_HW1, 0, 0)
+    if ulib.bad(h0) || ulib.bad(h1) {
+        return 0
+    }
+    return (h0 << 16) | h1
+}
+
+fn aktiv() -> bool {
+    return ulib.sys(SYS_MACGET, MG_ACTIVE, 0, 0) == 1
+}
+
+fn hwok() -> bool {
+    return ulib.sys(SYS_MACGET, MG_HWOK, 0, 0) == 1
+}
+
+fn settable() -> bool {
+    return ulib.sys(SYS_MACGET, MG_SETTABLE, 0, 0) == 1
+}
+
+fn wuerfe() -> u64 {
+    let v: u64 = ulib.sys(SYS_MACGET, MG_ROLLS, 0, 0)
+    if ulib.bad(v) { return 0 }
+    return v
+}
+
+fn wechsel() -> u64 {
+    let v: u64 = ulib.sys(SYS_MACGET, MG_CHANGES, 0, 0)
+    if ulib.bad(v) { return 0 }
+    return v
+}

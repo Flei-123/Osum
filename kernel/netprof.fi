@@ -1,0 +1,454 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/netprof.fi -- RUNDE NETPROFIL: WELCHE ADRESSE AUF DEM DRAHT STEHT.
+//
+// ==================================================================
+// WAS DIESE DATEI IST UND WAS SIE AUSDRUECKLICH NICHT IST
+// ==================================================================
+//
+// SIE IST NICHT DIE PROFILVERWALTUNG. Die liegt in Ring 3
+// (`kernel/user/netprof.fi`), sie liest und schreibt eine Textdatei,
+// und sie hat in einem Kernel nichts verloren -- ein Parser fuer eine
+// Konfigurationsdatei im Ring 0 ist eine Angriffsflaeche und kein
+// Baustein.
+//
+// SIE IST DIE EINE STELLE, DIE SAGT, WELCHE SECHS OKTETTE ALS
+// ABSENDER IN EINEN RAHMEN GESCHRIEBEN WERDEN. Bis zu dieser Runde gab
+// es diese Stelle nicht: `inet.fi` fragte an vier Stellen direkt
+// `netdev.mac_at`, und das ist die Adresse, die im EEPROM der Karte
+// steht. Eine Maschine hatte damit genau eine Hardwareadresse, fuer
+// immer, in jedem Netz -- und das ist eine Kennung, an der sich ein
+// Mensch ueber Standorte hinweg verfolgen laesst. Android und iOS
+// haben deshalb seit 2020 den umgekehrten Standardfall.
+//
+// ==================================================================
+// DREI STUFEN, UND WARUM ES GENAU DREI SIND
+// ==================================================================
+//
+// Die Stufe steht JE PROFIL und nicht global. Das ist keine
+// Geschmacksfrage, sondern faellt aus der Sache heraus: dasselbe
+// Geraet braucht im Heimnetz eine feste Adresse (der Router hat eine
+// DHCP-Reservierung darauf, der Drucker einen Filter) und im
+// Kaffeehaus genau keine.
+//
+//   P_GERAET  Die Adresse der Karte, unveraendert. Es gibt keine
+//             Ueberlagerung; `mac_at` gibt zurueck, was `netdev`
+//             sagt.
+//   P_NETZ    Eine gewuerfelte Adresse, aber JE PROFIL FEST. Sie wird
+//             einmal gewuerfelt, in die Profildatei geschrieben und
+//             danach immer wieder benutzt. Im eigenen Netz bleibt die
+//             Maschine damit wiedererkennbar (DHCP gibt dieselbe
+//             Adresse, ein Filter greift weiter), ueber Netze hinweg
+//             nicht. Das ist der Standardfall.
+//   P_IMMER   Bei jeder Verbindung neu gewuerfelt. Teuerste Stufe:
+//             jede Verbindung ist ein neuer Rechner, also auch jedes
+//             Mal ein neuer DHCP-Vertrag.
+//
+// DER KERN KENNT DIE STUFEN NICHT. Er bekommt sechs Oktette und setzt
+// sie. Welche sechs, entscheidet Ring 3 -- der Kern kann `roll`
+// anbieten (er hat die Zufallsquelle), aber welche Stufe zu welchem
+// Profil gehoert, steht in einer Datei, die er nicht liest. Die drei
+// Konstanten stehen hier trotzdem, weil sie ueber den Aufruf gehen und
+// zwei Fassungen derselben drei Zahlen der Anfang eines Fehlers sind.
+//
+// ==================================================================
+// DAS BIT, OHNE DAS DIE ADRESSE UNGUELTIG IST
+// ==================================================================
+//
+// Eine Ethernet-Adresse traegt im ERSTEN Oktett zwei Bits, die nicht
+// zur Adresse gehoeren (IEEE 802-2014, 8.2):
+//
+//   Bit 0 (0x01)  Gruppenadresse. Gesetzt heisst: das ist KEIN
+//                 einzelner Rechner, das ist ein Rundruf. Ein Absender
+//                 mit gesetztem Bit 0 ist ein Fehler, den ein
+//                 Vermittler wegwirft -- still.
+//   Bit 1 (0x02)  Lokal verwaltet. Gesetzt heisst: diese Adresse
+//                 stammt NICHT aus dem Nummernkreis eines Herstellers.
+//                 Genau das ist eine gewuerfelte Adresse. Ohne dieses
+//                 Bit behauptet sie, aus einem OUI zu kommen, den sie
+//                 nicht hat, und kollidiert im schlimmsten Fall mit
+//                 einer echten Karte.
+//
+// `roll` setzt 0x02 und loescht 0x01, IMMER, und `tools/netprofil/run.sh`
+// prueft es ueber viele tausend Durchlaeufe nach. Eine Zusage ueber
+// zwei Bits, die man nur einmal ansieht, ist keine.
+//
+// ==================================================================
+// WAS DIE KARTE ZULAESST -- GEMESSEN, NICHT BEHAUPTET
+// ==================================================================
+//
+// Es gibt ZWEI Adressen, und sie sind nicht dieselbe:
+//
+//   1. DIE ADRESSE IM RAHMEN. Osum baut jeden Ethernet-Kopf selbst
+//      (`net.wire.eth_build`). Was als Absender darin steht,
+//      entscheidet allein diese Datei. Das geht auf JEDER Karte, weil
+//      die Karte davon nichts erfaehrt -- sie bekommt fertige Oktette.
+//   2. DIE ADRESSE DER KARTE. Der Empfangsfilter der Karte laesst nur
+//      Rahmen durch, die an sie gerichtet sind (plus Rundruf). Wer die
+//      Absenderadresse aendert, ohne den Filter mitzuziehen, sendet
+//      unter neuem Namen und hoert unter dem alten -- und die Antwort
+//      kommt nicht an.
+//
+// Punkt 2 geht NICHT auf jeder Karte, und diese Datei erfindet dafuer
+// nichts. `set` fragt den Treiber, der Treiber versucht es, LIEST DIE
+// ADRESSE DANACH AUS DER KARTE ZURUECK und vergleicht. Was dabei
+// herauskommt, steht in `hw_ok_on` und wird von `/bin/netprof` und der
+// Einstellungsseite AUSGESPROCHEN. Der gemessene Stand steht in
+// docs/ROUNDNETPROFIL.md.
+//
+// ==================================================================
+// WAS FUER WLAN VORGESEHEN IST
+// ==================================================================
+//
+// NICHTS DAVON IST WLAN. Es gibt in diesem Baum keine Zeile 802.11,
+// keine Firmware, keinen Handschlag. Was diese Datei fuer einen
+// spaeteren Treiber TUT, ist genau eines: sie macht die Adresse zu
+// einer Groesse, die JE VERBINDUNG gesetzt wird, statt zu einer
+// Eigenschaft der Maschine. Ein WLAN-Treiber, der spaeter kommt,
+// braucht die Ueberlagerung dann nicht neu zu erfinden -- er meldet
+// sich als dritte Kartenart in `netdev.fi` an und beantwortet
+// `set_mac_on`. Alles andere (SSID, Sicherheitsart, Suchlauf) steht in
+// docs/ROUNDNETPROFIL.md unter "was NICHT gebaut ist", und es steht
+// dort, weil eine Attrappe, die so tut, als koenne sie suchen,
+// schlimmer ist als eine leere Stelle.
+
+profile kernel
+
+import kstate
+import netdev
+import rand
+import serial
+
+export {
+    init, mac_at, mac_at_on, active, active_on,
+    set, set_on, clear, clear_on,
+    roll, roll_into, roll_keep, last_roll,
+    hw_ok, hw_ok_on, tried_on, settable_on,
+    rolls, changes, print_state,
+    P_GERAET, P_NETZ, P_IMMER, MAX_CARDS,
+    local_bit, group_bit, normalise
+}
+
+// Die drei Stufen. Sie gehen ueber den Aufruf 1331 nach Ring 3 und
+// stehen deshalb hier und nicht nur dort.
+const P_GERAET: u64 = 0
+const P_NETZ: u64 = 1
+const P_IMMER: u64 = 2
+
+// Die zwei Bits aus IEEE 802, im ERSTEN Oktett.
+const LOCAL: u64 = 0x02
+const GROUP: u64 = 0x01
+
+const MAX_CARDS: u64 = 2 // dieselbe Zahl wie in netdev.fi
+const CARD_SPAN: u64 = 0x40
+
+// Je Karte, ab `kstate.NETPROF_OFF`.
+const S_ON: u64 = 0x00 // 1 = eine Ueberlagerung ist gesetzt
+const S_MAC: u64 = 0x08 // sechs Oktette in einem Wort, niedrigstes zuerst
+const S_TRIED: u64 = 0x10 // 1 = es wurde versucht, die Karte umzustellen
+const S_HW: u64 = 0x18 // 1 = die Karte hat es angenommen (zurueckgelesen)
+const S_CHANGES: u64 = 0x20 // wie oft die Adresse gesetzt wurde
+const S_ORIG: u64 = 0x28 // die Adresse der Karte, beim ersten Setzen gemerkt
+
+// Global, hinter den Karten.
+const G_ROLLS: u64 = 0x200 // wie oft gewuerfelt wurde
+// Der letzte Wurf. Ein Systemaufruf gibt EINEN Wert zurueck, und sechs
+// Oktette passen nicht neben einen Fehlercode in ein Wort -- also holt
+// Ring 3 den Wurf in zwei Haelften ab, und die zweite muss dieselbe
+// sein wie die erste. Das ist die Stelle, die das erinnert. Sie liegt
+// HIER und nicht in `kernel/sys.fi`: eine Zahl, die zwei Dateien
+// kennen, ist eine Zahl, die zwei Dateien auseinanderlaufen lassen.
+const G_LAST: u64 = 0x208
+
+fn sc(c: u64, off: u64) -> u64 {
+    return kstate.NETPROF_OFF + c * CARD_SPAN + off
+}
+
+// Die Seite ist Teil von `kdata` und beim Start nicht zwingend null --
+// `nobss` ist ein Wort dieser Abnahme. Also ausdruecklich loeschen.
+fn init(state: u64) {
+    var i: u64 = 0
+    while i < kstate.NETPROF_MAX {
+        kstate.set(state, kstate.NETPROF_OFF + i, 0)
+        i = i + 8
+    }
+}
+
+// ---------------------------------------------------- die zwei Bits
+//
+// Als eigene Funktionen, damit die Abnahme sie nachrechnen kann, ohne
+// den Rahmenbau anzufassen.
+fn local_bit(mac: u64) -> u64 {
+    return (mac & LOCAL) >> 1
+}
+
+fn group_bit(mac: u64) -> u64 {
+    return mac & GROUP
+}
+
+// Aus irgendwelchen sechs Oktetten eine GUELTIGE lokal verwaltete
+// Adresse machen. Das ist die einzige Stelle, an der die beiden Bits
+// angefasst werden -- `roll` ruft sie, und `set` ruft sie NICHT: wer
+// ausdruecklich eine Adresse setzt, bekommt genau die, die er nennt.
+fn normalise(mac: u64) -> u64 {
+    // 0xFFFFFFFFFFFE ist die 48-Bit-Maske OHNE Bit 0: sie schneidet auf
+    // sechs Oktette zu und loescht das Gruppenbit in einem Schritt.
+    return (mac | LOCAL) & 0xFFFFFFFFFFFE
+}
+
+// ----------------------------------------------------------- wuerfeln
+//
+// Sechs Oktette aus `rand.bytes` -- derselben Quelle, aus der die
+// Anfangsfolgenummern von TCP kommen. Nicht aus dem Zyklenzaehler: ein
+// Wert, den ein Beobachter aus der Zeit erraten kann, ist als Deckname
+// wertlos.
+//
+// GEGENPROBE EINGEBAUT: mit `fixedrand` auf der Befehlszeile liefert
+// `rand.bytes` fuer immer 0x5A. Dann sind zwei Wuerfe gleich, und die
+// Zusage ueber `immer` MUSS zusammenbrechen. Genau das misst der
+// Abnahmelauf.
+fn roll(state: u64) -> u64 {
+    var b: [u8; 8] = [0 as u8; 8]
+    let _n: u64 = rand.bytes(state, (&b[0]) as u64, 6)
+    var v: u64 = 0
+    var i: u64 = 0
+    while i < 6 {
+        v = v | ((b[i as usize] as u64) << (i * 8))
+        i = i + 1
+    }
+    let _c: u64 = kstate.add(state, kstate.NETPROF_OFF + G_ROLLS, 1)
+    return normalise(v)
+}
+
+// Dasselbe, aber die sechs Oktette in einen Puffer geschrieben --
+// damit Ring 3 sie ueber den Aufruf 1331 abholen kann, ohne dass eine
+// zweite Stelle die Reihenfolge der Oktette kennen muss.
+fn roll_into(state: u64, dst: u64) -> u64 {
+    let v: u64 = roll(state)
+    var i: u64 = 0
+    while i < 6 {
+        kstate.set8(dst + i, ((v >> (i * 8)) & 0xFF) as u8)
+        i = i + 1
+    }
+    return v
+}
+
+// Wuerfeln UND merken, in einem Schritt. Der Aufruf 1330 holt danach
+// beide Haelften ab, ohne ein zweites Mal zu wuerfeln.
+fn roll_keep(state: u64) -> u64 {
+    let m: u64 = roll(state)
+    kstate.set(state, kstate.NETPROF_OFF + G_LAST, m)
+    return m
+}
+
+fn last_roll(state: u64) -> u64 {
+    return kstate.get(state, kstate.NETPROF_OFF + G_LAST)
+}
+
+fn rolls(state: u64) -> u64 {
+    return kstate.get(state, kstate.NETPROF_OFF + G_ROLLS)
+}
+
+fn changes(state: u64, c: u64) -> u64 {
+    if c >= MAX_CARDS {
+        return 0
+    }
+    return kstate.get(state, sc(c, S_CHANGES))
+}
+
+// ------------------------------------------------ die wirksame Adresse
+//
+// DIE EINE FRAGE, DIE DIESE DATEI BEANTWORTET. Alles in `inet.fi`, das
+// einen Absender in einen Rahmen schreibt, geht ab dieser Runde hier
+// durch.
+//
+// `nomacset` ist die Gegenprobe: die Ueberlagerung wird angenommen und
+// ist auch abfragbar, aber sie WIRKT nicht. Ein Lauf mit diesem Wort
+// muss auf dem Draht die echte Adresse zeigen.
+fn mac_at_on(state: u64, c: u64, i: u64) -> u64 {
+    if i >= 6 || c >= MAX_CARDS {
+        return 0
+    }
+    if kstate.mode_on(state, kstate.M_NOMACSET) {
+        return netdev.mac_at_on(state, c, i)
+    }
+    if kstate.get(state, sc(c, S_ON)) == 0 {
+        return netdev.mac_at_on(state, c, i)
+    }
+    return (kstate.get(state, sc(c, S_MAC)) >> (i * 8)) & 0xFF
+}
+
+fn mac_at(state: u64, i: u64) -> u64 {
+    return mac_at_on(state, 0, i)
+}
+
+fn active_on(state: u64, c: u64) -> bool {
+    if c >= MAX_CARDS {
+        return false
+    }
+    return kstate.get(state, sc(c, S_ON)) != 0
+}
+
+fn active(state: u64) -> bool {
+    return active_on(state, 0)
+}
+
+fn hw_ok_on(state: u64, c: u64) -> bool {
+    if c >= MAX_CARDS {
+        return false
+    }
+    return kstate.get(state, sc(c, S_HW)) != 0
+}
+
+fn hw_ok(state: u64) -> bool {
+    return hw_ok_on(state, 0)
+}
+
+fn tried_on(state: u64, c: u64) -> bool {
+    if c >= MAX_CARDS {
+        return false
+    }
+    return kstate.get(state, sc(c, S_TRIED)) != 0
+}
+
+// KANN DIESE KARTENSORTE IHRE EIGENE ADRESSE AENDERN? Die Frage geht
+// an den Treiber und wird von ihm beantwortet, nicht hier geraten.
+fn settable_on(state: u64, c: u64) -> bool {
+    if c >= MAX_CARDS {
+        return false
+    }
+    return netdev.mac_settable_on(state, c)
+}
+
+// -------------------------------------------------------------- setzen
+//
+// Zwei Dinge auf einmal, und sie koennen unterschiedlich ausgehen:
+//
+//   1. DIE UEBERLAGERUNG. Sie gilt ab sofort, immer, auf jeder Karte.
+//      Ab hier steht die neue Adresse als Absender in jedem Rahmen.
+//   2. DIE KARTE. `netdev.set_mac_on` versucht es und liest zurueck.
+//      Klappt es nicht, bleibt Punkt 1 trotzdem stehen -- und
+//      `hw_ok_on` sagt nein. Der Rueckgabewert dieser Funktion ist
+//      Punkt 2 und NICHT "hat geklappt": wer nur auf ihn sieht,
+//      hielte eine gelungene Ueberlagerung fuer einen Fehlschlag.
+//
+// Der Aufrufer (Aufruf 1331, `kernel/sys.fi`) muss danach
+// `inet.readdr` rufen: der eingekaufte Stapel (vendor/firn/lib/net)
+// haelt eine eigene Kopie der sechs Oktette, und die erfaehrt von hier
+// nichts.
+fn set_on(state: u64, c: u64, mac: u64) -> bool {
+    if c >= MAX_CARDS {
+        return false
+    }
+    // Die echte Adresse EINMAL merken, bevor sie ueberlagert wird --
+    // ohne sie gibt es keinen Weg zurueck, wenn der Treiber die Karte
+    // wirklich umgestellt hat.
+    if kstate.get(state, sc(c, S_ORIG)) == 0 {
+        var o: u64 = 0
+        var k: u64 = 0
+        while k < 6 {
+            o = o | (netdev.mac_at_on(state, c, k) << (k * 8))
+            k = k + 1
+        }
+        kstate.set(state, sc(c, S_ORIG), o)
+    }
+    kstate.set(state, sc(c, S_MAC), mac & 0xFFFFFFFFFFFF)
+    kstate.set(state, sc(c, S_ON), 1)
+    let _n: u64 = kstate.add(state, sc(c, S_CHANGES), 1)
+    kstate.set(state, sc(c, S_TRIED), 1)
+    let took: bool = netdev.set_mac_on(state, c, mac & 0xFFFFFFFFFFFF)
+    if took {
+        kstate.set(state, sc(c, S_HW), 1)
+    } else {
+        kstate.set(state, sc(c, S_HW), 0)
+    }
+    return took
+}
+
+fn set(state: u64, mac: u64) -> bool {
+    return set_on(state, 0, mac)
+}
+
+// -------------------------------------------------------- zurueck
+//
+// DER WEG ZURUECK IST KEIN "vergiss die Ueberlagerung". Hat der Treiber
+// die Karte wirklich umgestellt, muss er sie auch wirklich
+// zuruecksetzen -- sonst hoert die Karte danach unter einem Decknamen,
+// den niemand mehr benutzt, und die Maschine ist stumm. Deshalb: erst
+// die Karte auf die gemerkte Adresse zurueck, dann die Ueberlagerung
+// weg.
+fn clear_on(state: u64, c: u64) -> bool {
+    if c >= MAX_CARDS {
+        return false
+    }
+    let orig: u64 = kstate.get(state, sc(c, S_ORIG))
+    var ok: bool = true
+    if orig != 0 && kstate.get(state, sc(c, S_HW)) != 0 {
+        ok = netdev.set_mac_on(state, c, orig)
+    }
+    kstate.set(state, sc(c, S_ON), 0)
+    kstate.set(state, sc(c, S_MAC), 0)
+    kstate.set(state, sc(c, S_HW), 0)
+    return ok
+}
+
+fn clear(state: u64) -> bool {
+    return clear_on(state, 0)
+}
+
+// Eine Zeile auf der seriellen Leitung, damit der Abnahmelauf etwas
+// zum Nachlesen hat. Sie nennt beides getrennt: was auf dem Draht
+// steht und was die Karte davon mitbekommen hat.
+fn print_state(state: u64, c: u64) {
+    var s_h: [u8; 10] = "netprof: \0"
+    var s_c: [u8; 3] = "c\0\0"
+    var s_m: [u8; 7] = "  mac=\0"
+    var s_o: [u8; 6] = "  on=\0"
+    var s_w: [u8; 6] = "  hw=\0"
+    var s_s: [u8; 8] = "  setz=\0"
+    var s_n: [u8; 9] = "  wuerf=\0"
+    var s_g: [u8; 8] = "  chgs=\0"
+    if c >= MAX_CARDS {
+        return
+    }
+    serial.puts((&s_h[0]) as u64)
+    serial.puts((&s_c[0]) as u64)
+    serial.dec(c)
+    serial.puts((&s_m[0]) as u64)
+    var i: u64 = 0
+    while i < 6 {
+        if i > 0 {
+            serial.put(58 as u8) // ":"
+        }
+        hex2(mac_at_on(state, c, i))
+        i = i + 1
+    }
+    serial.puts((&s_o[0]) as u64)
+    if active_on(state, c) {
+        serial.dec(1)
+    } else {
+        serial.dec(0)
+    }
+    serial.puts((&s_w[0]) as u64)
+    if hw_ok_on(state, c) {
+        serial.dec(1)
+    } else {
+        serial.dec(0)
+    }
+    serial.puts((&s_s[0]) as u64)
+    if settable_on(state, c) {
+        serial.dec(1)
+    } else {
+        serial.dec(0)
+    }
+    serial.puts((&s_n[0]) as u64)
+    serial.dec(rolls(state))
+    serial.puts((&s_g[0]) as u64)
+    serial.dec(changes(state, c))
+    serial.nl()
+}
+
+fn hex2(v: u64) {
+    var d: [u8; 17] = "0123456789abcdef\0"
+    serial.put(d[((v >> 4) & 0xF) as usize])
+    serial.put(d[(v & 0xF) as usize])
+}

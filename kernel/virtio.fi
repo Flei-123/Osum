@@ -102,7 +102,9 @@ export {
     // ROUND HWNET: `netdev.fi` dispatches on all of them, not only on
     // the ones round NETMON's second card happened to need.
     irqs_on, features_on, queue_size_on, msix_on, notified_on,
-    shut_down_on
+    shut_down_on,
+    // ROUND NETPROFIL: the card's OWN address, changed and read back.
+    set_mac_on, mac_settable_on, ctrl_ok_on
 }
 
 // ------------------------------------------ the K8 part of the scalars
@@ -138,6 +140,14 @@ const S_RXB: u64 = 0x2C0
 const S_TXB: u64 = 0x2C8
 const S_NOTIFIED: u64 = 0x2D0 // how often the doorbell was rung
 const S_LINK: u64 = 0x2D8
+// ROUND NETPROFIL: the control queue (queue 2) and the two indices it
+// needs. `S_CTRL` is 1 once queue 2 stands; without it there is no way
+// to change the address of a MODERN virtio card, and this driver says
+// so instead of pretending.
+const S_CTRL: u64 = 0x2E0
+const S_CTRL_AVAIL: u64 = 0x2E8
+const S_CTRL_USED: u64 = 0x2F0
+const S_CTRL_DOOR: u64 = 0x2F8
 
 // Where the second card's copy of all of the above begins. `sc()` adds
 // it; nothing else in this file knows the number.
@@ -166,7 +176,15 @@ const TXA_OFF: u64 = 0x04000
 const TXU_OFF: u64 = 0x05000
 const RXB_OFF: u64 = 0x06000 // 64 * 2048 = 0x20000
 const TXB_OFF: u64 = 0x26000
-const RING_BYTES: u64 = 0x46000 // 286 720 octets = 70 frames
+// ROUND NETPROFIL: four more pages for the control queue. Three for
+// the ring (descriptors, avail, used) and one for the command itself --
+// the device READS the command out of memory, so it may not stand on
+// the kernel stack of whoever happens to call.
+const CTLD_OFF: u64 = 0x46000
+const CTLA_OFF: u64 = 0x47000
+const CTLU_OFF: u64 = 0x48000
+const CTLB_OFF: u64 = 0x49000
+const RING_BYTES: u64 = 0x4A000 // 303 104 octets = 74 frames
 
 // ----------------------------------------------------- the constants
 
@@ -217,6 +235,19 @@ const ST_FAILED: u64 = 128
 const F_NET_MAC: u64 = 5 // the device carries an address
 const F_NET_STATUS: u64 = 16 // and a link status
 const F_VERSION_1: u64 = 0 // in the HIGH window: bit 32 of the whole
+// ROUND NETPROFIL. Two more bits, and they only ever appear together:
+// CTRL_VQ is the queue, CTRL_MAC_ADDR is the one command on it that
+// this round needs.
+const F_NET_CTRL_VQ: u64 = 17
+const F_NET_CTRL_MAC: u64 = 23
+
+// The control command, virtio 1.1 section 5.1.6.5: one octet class,
+// one octet command, then the payload, then one octet the DEVICE
+// writes with its answer.
+const CQ: u64 = 2 // queue index of the control queue
+const CTRL_MAC: u64 = 1 // class
+const CTRL_MAC_ADDR_SET: u64 = 1 // NICHT 5: MAC_TABLE_SET ist 0, ADDR_SET ist 1
+const NET_OK: u64 = 0
 
 const NO_VECTOR: u64 = 0xFFFF
 
@@ -343,6 +374,123 @@ fn mac_at_on(state: u64, c: u64, i: u64) -> u64 {
         return 0
     }
     return (kstate.get(state, sc(c, S_MAC)) >> (i * 8)) & 0xFF
+}
+
+// ================================================== RUNDE NETPROFIL
+//
+// DIE ADRESSE DER KARTE AENDERN -- UND NACHSEHEN, OB SIE ES GETAN HAT.
+//
+// Es gibt zwei Wege, und der erste ist der, den man zuerst probiert und
+// der NICHT geht. Er steht hier trotzdem im Code, weil das Ergebnis
+// gemessen wird und nicht behauptet:
+//
+//   1. INS ADRESSFELD SCHREIBEN. Der Geraetebereich einer virtio-Karte
+//      traegt die sechs Oktette an Versatz 0. Ein Schreibzugriff darauf
+//      landet in QEMU in `virtio_net_set_config` -- und das nimmt ihn
+//      NUR an, solange weder VIRTIO_NET_F_CTRL_MAC_ADDR noch
+//      VIRTIO_F_VERSION_1 ausgehandelt sind. Osum handelt VERSION_1
+//      aus (`negotiate`, und ohne es liegt jedes Feld an einem anderen
+//      Versatz), also verpufft der Schreibzugriff. Das Zurueckholen
+//      zeigt danach die alte Adresse. Genau das ist die Messung.
+//   2. DER BEFEHL AUF DER STEUERWARTESCHLANGE. Klasse 1, Befehl 5,
+//      sechs Oktette Nutzlast, ein Oktett Antwort. Das ist der Weg,
+//      den die Spezifikation fuer eine moderne Karte vorsieht, und er
+//      geht.
+//
+// Diese Funktion versucht 2, wenn die Warteschlange steht, sonst 1 --
+// und LIEST IN BEIDEN FAELLEN DANACH ZURUECK. Zurueckgegeben wird, was
+// die Karte wirklich traegt, und nichts anderes.
+fn set_mac_on(state: u64, c: u64, mac: u64) -> bool {
+    if !ready_on(state, c) {
+        return false
+    }
+    if (kstate.get(state, sc(c, S_FEAT)) & (1 << F_NET_MAC)) == 0 {
+        return false // die Karte hat gar keine eigene Adresse
+    }
+    if kstate.get(state, sc(c, S_CTRL)) != 0 {
+        if !ctrl_mac(state, c, mac) {
+            return false
+        }
+    } else {
+        // Der Weg, der bei einer modernen Karte nicht wirkt. Er wird
+        // gegangen, DAMIT die Gegenprobe etwas zu messen hat.
+        let cfg: u64 = kstate.get(state, sc(c, S_DEVCFG))
+        if cfg == 0 {
+            return false
+        }
+        var i: u64 = 0
+        while i < 6 {
+            wr8(cfg, N_MAC + i, (mac >> (i * 8)) & 0xFF)
+            i = i + 1
+        }
+    }
+    // ZURUECKLESEN. `read_mac` holt die sechs Oktette aus dem
+    // Geraetebereich und legt sie in S_MAC ab -- das ist die Zahl, die
+    // `mac_at_on` danach meldet. Stimmt sie nicht mit dem ueberein, was
+    // gesetzt werden sollte, hat die Karte es nicht angenommen.
+    read_mac(state, c)
+    return kstate.get(state, sc(c, S_MAC)) == (mac & 0xFFFFFFFFFFFF)
+}
+
+// Kann diese Karte ihre eigene Adresse ueberhaupt aendern? Die Antwort
+// ist NICHT "virtio kann das": sie haengt an der Steuerwarteschlange,
+// und die haengt an dem, was das Geraet angeboten hat.
+fn mac_settable_on(state: u64, c: u64) -> bool {
+    if !ready_on(state, c) {
+        return false
+    }
+    return kstate.get(state, sc(c, S_CTRL)) != 0
+}
+
+fn ctrl_ok_on(state: u64, c: u64) -> bool {
+    return kstate.get(state, sc(c, S_CTRL)) != 0
+}
+
+// Der Befehl selbst. DREI Deskriptoren in einer Kette, weil QEMU (und
+// die Spezifikation) die Antwort in einem EIGENEN, vom Geraet
+// beschreibbaren Stueck erwartet:
+//
+//   0  Klasse und Befehl, zwei Oktette, das Geraet LIEST
+//   1  die sechs Oktette der Adresse, das Geraet LIEST
+//   2  ein Oktett Antwort, das Geraet SCHREIBT
+//
+// Danach wird gewartet, bis der Gebrauchtring weiterrueckt. ABGEZAEHLT
+// und nicht "bis es klappt": ein Kern, der auf ein Geraet wartet, das
+// nicht antwortet, ist ein Kern, der haengt -- und ein haengender Kern
+// sagt nie, warum.
+fn ctrl_mac(state: u64, c: u64, mac: u64) -> bool {
+    let r: u64 = ring(state, c)
+    let buf: u64 = r + CTLB_OFF
+    wr8(buf, 0, CTRL_MAC)
+    wr8(buf, 1, CTRL_MAC_ADDR_SET)
+    var i: u64 = 0
+    while i < 6 {
+        wr8(buf, 16 + i, (mac >> (i * 8)) & 0xFF)
+        i = i + 1
+    }
+    wr8(buf, 32, 0xFF) // kein gueltiger Wert -- die Antwort muss ihn ersetzen
+
+    desc_set(r + CTLD_OFF, 0, buf, 2, D_NEXT, 1)
+    desc_set(r + CTLD_OFF, 1, buf + 16, 6, D_NEXT, 2)
+    desc_set(r + CTLD_OFF, 2, buf + 32, 1, D_WRITE, 0)
+
+    let idx: u64 = kstate.get(state, sc(c, S_CTRL_AVAIL))
+    avail_put(r + CTLA_OFF, idx % QSIZE, 0)
+    avail_publish(r + CTLA_OFF, (idx +% 1) & 0xFFFF)
+    kstate.set(state, sc(c, S_CTRL_AVAIL), (idx +% 1) & 0xFFFF)
+    kick(state, c, kstate.get(state, sc(c, S_CTRL_DOOR)), CQ)
+
+    let want: u64 = (kstate.get(state, sc(c, S_CTRL_USED)) +% 1) & 0xFFFF
+    var spins: u64 = 0
+    while spins < 2000000 {
+        if used_idx(r + CTLU_OFF) == want {
+            kstate.set(state, sc(c, S_CTRL_USED), want)
+            return rd8(buf, 32) == NET_OK
+        }
+        arch.pause()
+        spins = spins + 1
+    }
+    return false
 }
 
 fn rd8(b: u64, off: u64) -> u64 {
@@ -620,6 +768,20 @@ fn init_on(state: u64, c: u64, use_msix: bool, armed: bool) -> bool {
         return false
     }
 
+    // ROUND NETPROFIL: the control queue, if it was negotiated. It is
+    // NOT fatal if it does not come up -- everything this driver did
+    // before this round works without it, and the one thing that does
+    // not is then reported as "the card refuses" rather than faked.
+    kstate.set(state, sc(c, S_CTRL), 0)
+    kstate.set(state, sc(c, S_CTRL_AVAIL), 0)
+    kstate.set(state, sc(c, S_CTRL_USED), 0)
+    if (kstate.get(state, sc(c, S_FEAT)) & (1 << F_NET_CTRL_VQ)) != 0 {
+        if queue_setup(state, c, CQ, r + CTLD_OFF, r + CTLA_OFF,
+            r + CTLU_OFF, S_CTRL_DOOR, use_msix) {
+            kstate.set(state, sc(c, S_CTRL), 1)
+        }
+    }
+
     read_mac(state, c)
     rx_fill(state, c)
 
@@ -658,6 +820,26 @@ fn negotiate(state: u64, c: u64) -> bool {
     }
     if (dev_lo & (1 << F_NET_STATUS)) != 0 {
         lo = lo | (1 << F_NET_STATUS)
+    }
+    // ROUND NETPROFIL: THE CONTROL QUEUE, AND WHY IT IS NEEDED AT ALL.
+    //
+    // A modern virtio device (VIRTIO_F_VERSION_1, negotiated ten lines
+    // up) treats its configuration region as READ-ONLY for the address:
+    // the driver may write the six octets, and the next read gives the
+    // old ones back -- QEMU refills the buffer from `n->mac` in
+    // `virtio_net_get_config` before every read. That is not a bug; it
+    // is the spec. The way a modern driver changes the address is a
+    // COMMAND on a third queue, and this is where it is asked for.
+    //
+    // `nomacvq` is the counter-test and takes both bits away again. The
+    // same kernel then measurably CANNOT change the card's address --
+    // which is the only way to show that the queue is doing the work
+    // and not something else.
+    if !kstate.mode_on(state, kstate.M_NOMACVQ) {
+        if (dev_lo & (1 << F_NET_CTRL_VQ)) != 0
+            && (dev_lo & (1 << F_NET_CTRL_MAC)) != 0 {
+            lo = lo | (1 << F_NET_CTRL_VQ) | (1 << F_NET_CTRL_MAC)
+        }
     }
     let hi: u64 = 1 << F_VERSION_1
 

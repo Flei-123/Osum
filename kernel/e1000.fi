@@ -71,7 +71,9 @@ export {
     rx_take_on, rx_recycle_on, tx_frame_on, tx_room_on, poll_on, irq_on,
     rx_frames_on, tx_frames_on, rx_octets_on, tx_octets_on,
     tx_drops_on, link_up_on, shut_down_on, irqs_on, queue_size_on,
-    msix_on, notified_on, features_on, supports, RING_SLOTS, BUFSZ
+    msix_on, notified_on, features_on, supports, RING_SLOTS, BUFSZ,
+    // ROUND NETPROFIL: RAL/RAH are writable, and this is where it shows.
+    set_mac_on, mac_settable_on
 }
 
 // ------------------------------------------------------ the data area
@@ -494,6 +496,47 @@ fn read_mac(state: u64, u: u64) -> bool {
     setreg(state, u, R_RAL, v & 0xFFFFFFFF)
     setreg(state, u, R_RAH, ((v >> 32) & 0xFFFF) | RAH_AV)
     return true
+}
+
+// ================================================== RUNDE NETPROFIL
+//
+// DIE ADRESSE DIESER KARTE LAESST SICH WIRKLICH AENDERN, und das ist
+// hier kein Zugestaendnis, sondern der Normalfall: RAL/RAH sind ganz
+// gewoehnliche Register, das Empfangsfilter liest sie bei jedem Rahmen,
+// und ein Schreibzugriff darauf gilt sofort. Genau deshalb kann Linux
+// auf einer 8254x-Karte `ip link set dev eth0 address ...` und muss
+// dafuer nichts aushandeln.
+//
+// Der Unterschied zu virtio-net gehoert ausgesprochen und steht in
+// docs/ROUNDNETPROFIL.md: dort ist das Adressfeld fuer eine moderne
+// Karte nur ueber einen Befehl auf einer dritten Warteschlange
+// erreichbar; hier sind es zwei `mov`.
+//
+// ZURUECKGELESEN WIRD TROTZDEM. Ein Register, das man schreibt und nie
+// wieder ansieht, ist eine Behauptung -- und auf echtem Blech gibt es
+// Karten, deren RAH das Gueltigkeitsbit von selbst wieder loeschen.
+fn set_mac_on(state: u64, u: u64, mac: u64) -> bool {
+    if !ready_on(state, u) {
+        return false
+    }
+    setreg(state, u, R_RAL, mac & 0xFFFFFFFF)
+    setreg(state, u, R_RAH, ((mac >> 32) & 0xFFFF) | RAH_AV)
+    let rah: u64 = reg(state, u, R_RAH)
+    if (rah & RAH_AV) == 0 {
+        return false
+    }
+    let got: u64 = (reg(state, u, R_RAL) & 0xFFFFFFFF) | ((rah & 0xFFFF) << 32)
+    if got != (mac & 0xFFFFFFFFFFFF) {
+        return false
+    }
+    // Erst wenn die Karte es wirklich traegt, gilt es auch fuer den
+    // Rest des Kerns.
+    kstate.set(state, sc(u, S_MAC), got)
+    return true
+}
+
+fn mac_settable_on(state: u64, u: u64) -> bool {
+    return ready_on(state, u)
 }
 
 fn read_link(state: u64, u: u64) {

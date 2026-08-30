@@ -178,6 +178,12 @@ BEREICHE = [
     ("PMON",       "kstate.fi", "PMON_OFF",       "PMON_MAX"),
     ("NETVIEW",    "kstate.fi", "NETVIEW_OFF",    "NETVIEW_MAX"),
     ("NETDEV",     "kstate.fi", "NETDEV_OFF",     "NETDEV_MAX"),
+    # RUNDE NETPROFIL: die MAC-Richtlinie (kernel/netprof.fi).  EINE
+    # Seite aus dem Stueck, das Merge 06 hinter der Aufgabentafel frei
+    # gelassen hat (0x92000..0xA0000) -- ausdruecklich NICHT der Rest
+    # von NETDEV_OFF, in den e1000.fi mit einer dritten Einheit
+    # hineinwachsen wuerde.
+    ("NETPROF",    "kstate.fi", "NETPROF_OFF",    "NETPROF_MAX"),
 
     # RUNDE FSROBUST: der Zustand des OFS-Journals (kernel/ofsj.fi).
     # Drei Seiten aus dem letzten freien Stueck, 0x7A000..0x80000.
@@ -282,6 +288,12 @@ KEINE_KDATA = {
     ("virtio.fi", "TXU_OFF"),
     ("virtio.fi", "RXB_OFF"),
     ("virtio.fi", "TXB_OFF"),
+    # RUNDE NETPROFIL: die Steuerwarteschlange, ebenfalls im DMA-Bereich
+    # der Karte und nicht in kdata.
+    ("virtio.fi", "CTLD_OFF"),
+    ("virtio.fi", "CTLA_OFF"),
+    ("virtio.fi", "CTLU_OFF"),
+    ("virtio.fi", "CTLB_OFF"),
     ("pci.fi", "K2_OFF"),       # derselbe Wert wie TABLE_OFF
     ("ttf.fi", "A_HEAP"),       # Versatz IM Glyphenspeicher, nicht kdata
     ("wm.fi", "W_OFF"),         # Versatz IN der Fenstertafel

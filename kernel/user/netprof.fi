@@ -1,0 +1,542 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/netprof.fi -- /bin/netprof, DIE KOMMANDOZEILE ZU DEN
+// NETZPROFILEN.
+//
+// Die Profile, ihr Format, ihre Rechte und der Verbindungsaufbau stehen
+// in `kernel/user/nprof.fi`. Dieses Programm ist die AUSGABE und die
+// Befehlszeile darum -- und die Einstellungsseite "Netzprofile" ist die
+// zweite Bedienung derselben Bibliothek. Zwei Bediener, EINE Fassung
+// der Logik; so wie `login`, `su` und `passwd` sich `pw.fi` teilen.
+//
+//   netprof                       die Profile auflisten
+//   netprof liste                 dasselbe
+//   netprof zeige <name>          ein Profil im Einzelnen
+//   netprof neu <name> [kennung]  anlegen (dhcp, mac=netz, auto=1)
+//   netprof setz <name> <feld> <wert>
+//   netprof mac <name> geraet|netz|immer
+//   netprof loesche <name>
+//   netprof an <name>             verbinden
+//   netprof aus                   trennen
+//   netprof stand                 was gerade wirklich gilt
+//
+// WARUM DIE AUSGABE HIER IN UMSCHRIFT STEHT ("gewuerfelt" statt
+// "gewürfelt") und die Einstellungsseite in richtigem Deutsch: die
+// Textkonsole dieses Kernels hat KEINEN UTF-8-Dekoder. `serial.put`
+// und `ansi.echo` nehmen ein Oktett und schlagen es im Zeichensatz
+// nach; ein "ü" sind zwei Oktette, und auf dem Schirm stuenden zwei
+// falsche Zeichen. Die Oberflaeche geht durch `msg.fi` und den
+// TrueType-Rasterer, der seit Runde I18N 339 Zeichen kann -- dort steht
+// der Umlaut richtig, und `tools/i18n/translit.py` rechnet es nach.
+// Sobald die Konsole UTF-8 kann, gehoert diese Datei nachgezogen; bis
+// dahin waere ein Umlaut hier eine Verschlechterung und keine
+// Verbesserung.
+
+profile kernel
+
+import ulib
+import nprof
+
+export { u_start }
+
+fn say(p: u64) {
+    let _n: u64 = ulib.say(p)
+}
+
+fn nl() {
+    ulib.nl()
+}
+
+// ------------------------------------------------------ die Anzeige
+
+fn zeige_zeile(i: u64) {
+    var l1: [u8; 3] = "  \0"
+    var l2: [u8; 4] = " | \0"
+    var au: [u8; 6] = "auto \0"
+    var ha: [u8; 6] = "hand \0"
+    var bd: [u8; 6] = "dhcp \0"
+    var bf: [u8; 6] = "fest \0"
+    say(nprof.name_at(i))
+    var k: u64 = ulib.length(nprof.name_at(i))
+    while k < 14 {
+        say((&l1[0 as usize]) as u64)
+        k = k + 2
+    }
+    say((&l2[0 as usize]) as u64)
+    say(nprof.kenn_at(i))
+    k = ulib.length(nprof.kenn_at(i))
+    while k < 10 {
+        say((&l1[0 as usize]) as u64)
+        k = k + 2
+    }
+    say((&l2[0 as usize]) as u64)
+    if nprof.bezug_of(i) == nprof.B_FEST {
+        say((&bf[0 as usize]) as u64)
+    } else {
+        say((&bd[0 as usize]) as u64)
+    }
+    say((&l2[0 as usize]) as u64)
+    say(nprof.art_text(nprof.macart_of(i)))
+    k = ulib.length(nprof.art_text(nprof.macart_of(i)))
+    while k < 8 {
+        say((&l1[0 as usize]) as u64)
+        k = k + 2
+    }
+    say((&l2[0 as usize]) as u64)
+    if nprof.auto_of(i) != 0 {
+        say((&au[0 as usize]) as u64)
+    } else {
+        say((&ha[0 as usize]) as u64)
+    }
+    say((&l2[0 as usize]) as u64)
+    ulib.sayn(nprof.rang_of(i))
+    nl()
+}
+
+fn liste() {
+    var k: [u8; 63] =
+        "Name           | Kennung   | Bezug | MAC-Art | Start | Vorrang\0"
+    var s: [u8; 62] =
+        "---------------+-----------+-------+---------+-------+-------\0"
+    var leer: [u8; 22] = "netprof: kein Profil.\0"
+    var kap: [u8; 28] = "netprof: fehlerhafte Zeilen\0"
+    var kap2: [u8; 44] = " -- uebersprungen, alles andere ist gueltig\0"
+    if nprof.anzahl() == 0 {
+        say((&leer[0 as usize]) as u64)
+        nl()
+    } else {
+        say((&k[0 as usize]) as u64)
+        nl()
+        say((&s[0 as usize]) as u64)
+        nl()
+        var i: u64 = 0
+        while i < nprof.anzahl() {
+            zeige_zeile(i)
+            i = i + 1
+        }
+    }
+    if nprof.kaputte() > 0 {
+        say((&kap[0 as usize]) as u64)
+        ulib.sayn(nprof.kaputte())
+        say((&kap2[0 as usize]) as u64)
+        nl()
+    }
+}
+
+fn zeige(i: u64) {
+    var l_n: [u8; 11] = "Name:     \0"
+    var l_k: [u8; 11] = "Kennung:  \0"
+    var l_s: [u8; 11] = "Sicherh.: \0"
+    var l_b: [u8; 11] = "Bezug:    \0"
+    var l_i: [u8; 11] = "Adresse:  \0"
+    var l_m: [u8; 11] = "Maske:    \0"
+    var l_g: [u8; 11] = "Gateway:  \0"
+    var l_d: [u8; 11] = "DNS:      \0"
+    var l_a: [u8; 11] = "MAC-Art:  \0"
+    var l_w: [u8; 11] = "MAC-Wert: \0"
+    var l_u: [u8; 11] = "Start:    \0"
+    var l_v: [u8; 11] = "Vorrang:  \0"
+    var l_z: [u8; 11] = "Zuletzt:  \0"
+    var offen: [u8; 33] = "offen (Draht, kein WLAN in Osum)\0"
+    var keiner: [u8; 7] = "keiner\0"
+    var nie: [u8; 4] = "nie\0"
+    var wuerf: [u8; 33] = "(wird beim Verbinden gewuerfelt)\0"
+    var dhcp: [u8; 5] = "dhcp\0"
+    var fest: [u8; 5] = "fest\0"
+    var jaa: [u8; 12] = "automatisch\0"
+    var han: [u8; 12] = "von Hand   \0"
+
+    say((&l_n[0 as usize]) as u64)
+    say(nprof.name_at(i))
+    nl()
+    say((&l_k[0 as usize]) as u64)
+    say(nprof.kenn_at(i))
+    nl()
+    say((&l_s[0 as usize]) as u64)
+    say((&offen[0 as usize]) as u64)
+    nl()
+    say((&l_b[0 as usize]) as u64)
+    if nprof.bezug_of(i) == nprof.B_FEST {
+        say((&fest[0 as usize]) as u64)
+    } else {
+        say((&dhcp[0 as usize]) as u64)
+    }
+    nl()
+    say((&l_i[0 as usize]) as u64)
+    nprof.sag_ip(nprof.ip_of(i))
+    nl()
+    say((&l_m[0 as usize]) as u64)
+    nprof.sag_ip(nprof.maske_of(i))
+    nl()
+    say((&l_g[0 as usize]) as u64)
+    nprof.sag_ip(nprof.gw_of(i))
+    nl()
+    say((&l_d[0 as usize]) as u64)
+    if nprof.dns_of(i) == 0 {
+        say((&keiner[0 as usize]) as u64)
+    } else {
+        nprof.sag_ip(nprof.dns_of(i))
+    }
+    nl()
+    say((&l_a[0 as usize]) as u64)
+    say(nprof.art_text(nprof.macart_of(i)))
+    nl()
+    say((&l_w[0 as usize]) as u64)
+    if nprof.macwert_of(i) != 0 {
+        nprof.sag_mac(nprof.macwert_of(i))
+    } else if nprof.macart_of(i) == nprof.P_IMMER {
+        say((&wuerf[0 as usize]) as u64)
+    } else {
+        say((&keiner[0 as usize]) as u64)
+    }
+    nl()
+    say((&l_u[0 as usize]) as u64)
+    if nprof.auto_of(i) != 0 {
+        say((&jaa[0 as usize]) as u64)
+    } else {
+        say((&han[0 as usize]) as u64)
+    }
+    nl()
+    say((&l_v[0 as usize]) as u64)
+    ulib.sayn(nprof.rang_of(i))
+    nl()
+    say((&l_z[0 as usize]) as u64)
+    if nprof.zuletzt_of(i) == 0 {
+        say((&nie[0 as usize]) as u64)
+    } else {
+        ulib.sayn(nprof.zuletzt_of(i))
+    }
+    nl()
+}
+
+// WAS GERADE WIRKLICH GILT. Diese Ausgabe nennt DREI Dinge getrennt,
+// die man leicht fuer eines haelt:
+//
+//   die Adresse auf dem DRAHT    -- was als Absender in jeden Rahmen geht
+//   die Adresse der KARTE        -- worauf ihr Empfangsfilter hoert
+//   ob die Karte es ANGENOMMEN hat
+//
+// Gehen die ersten beiden auseinander, sendet die Maschine unter neuem
+// Namen und hoert unter dem alten. Das ist keine Kleinigkeit, und
+// deshalb steht dann ein Satz darunter statt einer Zahl.
+fn stand() {
+    var l_e: [u8; 27] = "wirksame Adresse (Draht): \0"
+    var l_h: [u8; 27] = "Adresse der Karte:        \0"
+    var l_u: [u8; 27] = "ueberlagert:              \0"
+    var l_k: [u8; 27] = "Karte umgestellt:         \0"
+    var l_s: [u8; 27] = "Karte kann das:           \0"
+    var l_i: [u8; 27] = "IP / Maske / Gateway:     \0"
+    var l_w: [u8; 27] = "Wuerfe / Wechsel:         \0"
+    var ja: [u8; 3] = "ja\0"
+    var nein: [u8; 5] = "nein\0"
+    var kn: [u8; 23] = "netprof: kein Netz da.\0"
+    var sp: [u8; 4] = " / \0"
+    var hin: [u8; 63] =
+        "  (die Karte hoert weiter auf ihre eigene Adresse -- Antworten\0"
+    var hin2: [u8; 43] =
+        "   an die neue koennen deshalb ausbleiben)\0"
+
+    if !nprof.bereit() {
+        say((&kn[0 as usize]) as u64)
+        nl()
+        return
+    }
+    say((&l_e[0 as usize]) as u64)
+    nprof.sag_mac(nprof.wirksam())
+    nl()
+    say((&l_h[0 as usize]) as u64)
+    nprof.sag_mac(nprof.karte())
+    nl()
+    say((&l_u[0 as usize]) as u64)
+    if nprof.aktiv() {
+        say((&ja[0 as usize]) as u64)
+    } else {
+        say((&nein[0 as usize]) as u64)
+    }
+    nl()
+    say((&l_k[0 as usize]) as u64)
+    if nprof.hwok() {
+        say((&ja[0 as usize]) as u64)
+        nl()
+    } else {
+        say((&nein[0 as usize]) as u64)
+        nl()
+        if nprof.aktiv() {
+            say((&hin[0 as usize]) as u64)
+            nl()
+            say((&hin2[0 as usize]) as u64)
+            nl()
+        }
+    }
+    say((&l_s[0 as usize]) as u64)
+    if nprof.settable() {
+        say((&ja[0 as usize]) as u64)
+    } else {
+        say((&nein[0 as usize]) as u64)
+    }
+    nl()
+    say((&l_i[0 as usize]) as u64)
+    nprof.sag_ip(ulib.sys(ulib.SYS_NETGET, ulib.NG_IP, 0, 0))
+    say((&sp[0 as usize]) as u64)
+    nprof.sag_ip(ulib.sys(ulib.SYS_NETGET, ulib.NG_MASK, 0, 0))
+    say((&sp[0 as usize]) as u64)
+    nprof.sag_ip(ulib.sys(ulib.SYS_NETGET, ulib.NG_GW, 0, 0))
+    nl()
+    say((&l_w[0 as usize]) as u64)
+    ulib.sayn(nprof.wuerfe())
+    say((&sp[0 as usize]) as u64)
+    ulib.sayn(nprof.wechsel())
+    nl()
+}
+
+fn hilfe() {
+    var h1: [u8; 43] = "netprof -- Netzprofile und MAC-Datenschutz\0"
+    var h2: [u8; 44] = "  netprof [liste]              alle Profile\0"
+    var h3: [u8; 42] = "  netprof zeige <name>         ein Profil\0"
+    var h4: [u8; 39] = "  netprof neu <name> [kennung] anlegen\0"
+    var h5: [u8; 36] = "  netprof setz <name> <feld> <wert>\0"
+    var h6: [u8; 39] = "  netprof mac <name> geraet|netz|immer\0"
+    var h7: [u8; 25] = "  netprof loesche <name>\0"
+    var h8: [u8; 41] = "  netprof an <name>            verbinden\0"
+    var h9: [u8; 39] = "  netprof aus                  trennen\0"
+    var h10: [u8; 47] = "  netprof stand                was gerade gilt\0"
+    var h11: [u8; 68] =
+        "Felder fuer `setz`: kennung bezug ip maske gateway dns auto vorrang\0"
+    var h12: [u8; 70] =
+        "MAC-Arten: geraet (echte Adresse), netz (je Profil fest), immer (neu)\0"
+    say((&h1[0 as usize]) as u64)
+    nl()
+    say((&h2[0 as usize]) as u64)
+    nl()
+    say((&h3[0 as usize]) as u64)
+    nl()
+    say((&h4[0 as usize]) as u64)
+    nl()
+    say((&h5[0 as usize]) as u64)
+    nl()
+    say((&h6[0 as usize]) as u64)
+    nl()
+    say((&h7[0 as usize]) as u64)
+    nl()
+    say((&h8[0 as usize]) as u64)
+    nl()
+    say((&h9[0 as usize]) as u64)
+    nl()
+    say((&h10[0 as usize]) as u64)
+    nl()
+    say((&h11[0 as usize]) as u64)
+    nl()
+    say((&h12[0 as usize]) as u64)
+    nl()
+}
+
+fn u_start(args: u64) -> u64 {
+    var c_liste: [u8; 6] = "liste\0"
+    var c_zeige: [u8; 6] = "zeige\0"
+    var c_neu: [u8; 4] = "neu\0"
+    var c_setz: [u8; 5] = "setz\0"
+    var c_mac: [u8; 4] = "mac\0"
+    var c_del: [u8; 8] = "loesche\0"
+    var c_an: [u8; 3] = "an\0"
+    var c_aus: [u8; 4] = "aus\0"
+    var c_stand: [u8; 6] = "stand\0"
+    var c_hilfe: [u8; 6] = "hilfe\0"
+    var s_kein: [u8; 35] = "netprof: kein Profil dieses Namens\0"
+    var s_gibt: [u8; 33] = "netprof: den Namen gibt es schon\0"
+    var s_voll: [u8; 35] = "netprof: mehr Profile passen nicht\0"
+    var s_arg: [u8; 24] = "netprof: ein Name fehlt\0"
+    var s_art: [u8; 49] = "netprof: geraet, netz oder immer -- sonst nichts\0"
+    var s_ok: [u8; 21] = "netprof: gespeichert\0"
+    var s_sp: [u8; 46] = "netprof: die Profildatei ist nicht schreibbar\0"
+    var s_feld: [u8; 35] = "netprof: dieses Feld gibt es nicht\0"
+    var s_wert: [u8; 30] = "netprof: der Wert passt nicht\0"
+    var s_ang: [u8; 20] = "netprof: angelegt: \0"
+    var s_weg: [u8; 21] = "netprof: geloescht: \0"
+    var n0: [u8; 5] = "net0\0"
+
+    let argc: u64 = ulib.arg_count(args)
+    let _l: bool = nprof.laden()
+
+    if argc < 2 {
+        liste()
+        return 0
+    }
+    let a1: u64 = ulib.arg_at(args, 1)
+
+    if ulib.streq(a1, (&c_hilfe[0 as usize]) as u64) {
+        hilfe()
+        return 0
+    }
+    if ulib.streq(a1, (&c_liste[0 as usize]) as u64) {
+        liste()
+        return 0
+    }
+    if ulib.streq(a1, (&c_stand[0 as usize]) as u64) {
+        stand()
+        return 0
+    }
+    if ulib.streq(a1, (&c_aus[0 as usize]) as u64) {
+        return nprof.trennen()
+    }
+
+    if argc < 3 {
+        say((&s_arg[0 as usize]) as u64)
+        nl()
+        return 1
+    }
+    let a2: u64 = ulib.arg_at(args, 2)
+
+    if ulib.streq(a1, (&c_neu[0 as usize]) as u64) {
+        var kennung: u64 = (&n0[0 as usize]) as u64
+        if argc > 3 {
+            kennung = ulib.arg_at(args, 3)
+        }
+        let r: i64 = nprof.neu(a2, kennung)
+        if r == -1 {
+            say((&s_voll[0 as usize]) as u64)
+            nl()
+            return 1
+        }
+        if r == -3 {
+            say((&s_gibt[0 as usize]) as u64)
+            nl()
+            return 1
+        }
+        if r < 0 {
+            say((&s_wert[0 as usize]) as u64)
+            nl()
+            return 1
+        }
+        if !nprof.speichern() {
+            say((&s_sp[0 as usize]) as u64)
+            nl()
+            return 1
+        }
+        say((&s_ang[0 as usize]) as u64)
+        say(a2)
+        nl()
+        return 0
+    }
+
+    let gef: i64 = nprof.suche(a2)
+    if gef < 0 {
+        say((&s_kein[0 as usize]) as u64)
+        nl()
+        return 1
+    }
+    let i: u64 = gef as u64
+
+    if ulib.streq(a1, (&c_zeige[0 as usize]) as u64) {
+        zeige(i)
+        return 0
+    }
+    if ulib.streq(a1, (&c_an[0 as usize]) as u64) {
+        return nprof.verbinden(i)
+    }
+    if ulib.streq(a1, (&c_del[0 as usize]) as u64) {
+        let _d: bool = nprof.loesche(i)
+        if !nprof.speichern() {
+            say((&s_sp[0 as usize]) as u64)
+            nl()
+            return 1
+        }
+        say((&s_weg[0 as usize]) as u64)
+        say(a2)
+        nl()
+        return 0
+    }
+    if ulib.streq(a1, (&c_mac[0 as usize]) as u64) {
+        if argc < 4 {
+            say((&s_art[0 as usize]) as u64)
+            nl()
+            return 1
+        }
+        let a: i64 = nprof.art_aus_text(ulib.arg_at(args, 3))
+        if a < 0 {
+            say((&s_art[0 as usize]) as u64)
+            nl()
+            return 1
+        }
+        nprof.set_macart(i, a as u64)
+        if !nprof.speichern() {
+            say((&s_sp[0 as usize]) as u64)
+            nl()
+            return 1
+        }
+        say((&s_ok[0 as usize]) as u64)
+        nl()
+        return 0
+    }
+    if ulib.streq(a1, (&c_setz[0 as usize]) as u64) {
+        if argc < 5 {
+            say((&s_feld[0 as usize]) as u64)
+            nl()
+            return 1
+        }
+        let f: u64 = ulib.arg_at(args, 3)
+        let w: u64 = ulib.arg_at(args, 4)
+        var fk: [u8; 8] = "kennung\0"
+        var fb: [u8; 6] = "bezug\0"
+        var fi: [u8; 3] = "ip\0"
+        var fm: [u8; 6] = "maske\0"
+        var fg: [u8; 8] = "gateway\0"
+        var fd: [u8; 4] = "dns\0"
+        var fa: [u8; 5] = "auto\0"
+        var fv: [u8; 8] = "vorrang\0"
+        var bd: [u8; 5] = "dhcp\0"
+        var bf: [u8; 5] = "fest\0"
+        if ulib.streq(f, (&fk[0 as usize]) as u64) {
+            if !nprof.set_kennung(i, w) {
+                say((&s_wert[0 as usize]) as u64)
+                nl()
+                return 1
+            }
+        } else if ulib.streq(f, (&fb[0 as usize]) as u64) {
+            if ulib.streq(w, (&bd[0 as usize]) as u64) {
+                nprof.set_bezug(i, nprof.B_DHCP)
+            } else if ulib.streq(w, (&bf[0 as usize]) as u64) {
+                nprof.set_bezug(i, nprof.B_FEST)
+            } else {
+                say((&s_wert[0 as usize]) as u64)
+                nl()
+                return 1
+            }
+        } else if ulib.streq(f, (&fa[0 as usize]) as u64) {
+            nprof.set_auto(i, ulib.to_num(w))
+        } else if ulib.streq(f, (&fv[0 as usize]) as u64) {
+            nprof.set_rang(i, ulib.to_num(w))
+        } else if ulib.streq(f, (&fi[0 as usize]) as u64)
+            || ulib.streq(f, (&fm[0 as usize]) as u64)
+            || ulib.streq(f, (&fg[0 as usize]) as u64)
+            || ulib.streq(f, (&fd[0 as usize]) as u64) {
+            let v: i64 = nprof.ip_lesen(w)
+            if v < 0 {
+                say((&s_wert[0 as usize]) as u64)
+                nl()
+                return 1
+            }
+            if ulib.streq(f, (&fi[0 as usize]) as u64) {
+                nprof.set_ip(i, v as u64)
+            } else if ulib.streq(f, (&fm[0 as usize]) as u64) {
+                nprof.set_maske(i, v as u64)
+            } else if ulib.streq(f, (&fg[0 as usize]) as u64) {
+                nprof.set_gw(i, v as u64)
+            } else {
+                nprof.set_dns(i, v as u64)
+            }
+        } else {
+            say((&s_feld[0 as usize]) as u64)
+            nl()
+            return 1
+        }
+        if !nprof.speichern() {
+            say((&s_sp[0 as usize]) as u64)
+            nl()
+            return 1
+        }
+        say((&s_ok[0 as usize]) as u64)
+        nl()
+        return 0
+    }
+    hilfe()
+    return 1
+}

@@ -58,6 +58,7 @@ import atomic
 import cpu
 import sched
 import netdev
+import netprof
 import errno
 import arch.x86_64.apic
 import pci
@@ -71,6 +72,7 @@ import wg
 export {
     init, ready, pump, netd_body, wake, configure, readdr, us, set_task,
     ip, mask, gw, mac_at, stat, pumps, frames_in, frames_out,
+    remac,
     carrier, gw_known,
     bounce, saddr,
     tcp_stat, task_slot, print_state,
@@ -184,8 +186,19 @@ fn gw(state: u64) -> u64 {
     return kstate.get(state, sc(S_GW))
 }
 
+// RUNDE NETPROFIL: DIE ADRESSE, DIE AUF DEM DRAHT STEHT.
+//
+// Hier stand `netdev.mac_at`, also die Adresse aus dem EEPROM der
+// Karte. Ab dieser Runde geht die Frage durch `netprof.fi`, und das ist
+// der ganze Eingriff in diese Datei: JEDE Stelle, die einen Absender in
+// einen Rahmen schreibt, fragt diese eine Funktion.
+//
+// WER WEITER DIE ECHTE ADRESSE SEHEN MUSS, fragt `netdev` direkt --
+// und das tut genau eine Stelle: `kernel/hwid.fi`, die Kennung der
+// MASCHINE. Eine Maschinenkennung, die sich mit der Datenschutzstufe
+// aendert, waere keine.
 fn mac_at(state: u64, i: u64) -> u64 {
-    return netdev.mac_at(state, i)
+    return netprof.mac_at(state, i)
 }
 
 // ============================================ ROUND NETVIEW, addendum
@@ -374,7 +387,7 @@ fn init(state: u64, a: u64, b: u64, c: u64, d: u64, prefix: u64,
     var m: [u8; 6] = [0 as u8; 6]
     var i: u64 = 0
     while i < 6 {
-        m[i as usize] = netdev.mac_at(state, i) as u8
+        m[i as usize] = netprof.mac_at(state, i) as u8
         i = i + 1
     }
     let own: u32 = wire.ip4(a as u8, b as u8, c as u8, d as u8)
@@ -396,6 +409,39 @@ fn init(state: u64, a: u64, b: u64, c: u64, d: u64, prefix: u64,
     kstate.set(state, sc(S_SEQ), 1)
     kstate.set(state, sc(S_READY), 1)
     return true
+}
+
+// RUNDE NETPROFIL: DEN STAPEL VON DER NEUEN ADRESSE IN KENNTNIS SETZEN.
+//
+// `stack.net_init` bekommt die sechs Oktette EINMAL und haelt eine
+// eigene Kopie davon (vendor/firn/lib/net/stack.fi). Wer die
+// Ueberlagerung setzt und nichts weiter tut, hat einen Kern, der die
+// neue Adresse meldet, und einen Stapel, der weiter mit der alten
+// antwortet -- ein halb umgestelltes System, und das ist schlimmer als
+// gar keines.
+//
+// Diese Funktion setzt den Stapel auf DIESELBE Anschrift neu auf. Was
+// sie kostet, steht schon bei `readdr` und gilt hier genauso: offene
+// Verbindungen sind danach weg. Das ist bei einem Adresswechsel
+// richtig so -- eine TCP-Verbindung, die unter einer anderen
+// Hardwareadresse weiterliefe, waere auf jedem Vermittler dazwischen
+// eine Verbindung, die aus dem Nichts kommt.
+fn remac(state: u64) -> bool {
+    if !ready(state) {
+        return false
+    }
+    let a: u64 = ip(state)
+    let m: u64 = mask(state)
+    var prefix: u64 = 0
+    var bit: u64 = 32
+    while bit > 0 {
+        bit = bit - 1
+        if ((m >> bit) & 1) != 0 {
+            prefix = prefix + 1
+        }
+    }
+    return readdr(state, (a >> 24) & 255, (a >> 16) & 255, (a >> 8) & 255,
+        a & 255, prefix, gw(state))
 }
 
 // The address, after the fact -- `tools/net/run.sh` hands it in on the
@@ -429,7 +475,7 @@ fn readdr(state: u64, a: u64, b: u64, c: u64, d: u64, prefix: u64,
     var m: [u8; 6] = [0 as u8; 6]
     var i: u64 = 0
     while i < 6 {
-        m[i as usize] = netdev.mac_at(state, i) as u8
+        m[i as usize] = netprof.mac_at(state, i) as u8
         i = i + 1
     }
     let own: u32 = wire.ip4(a as u8, b as u8, c as u8, d as u8)
@@ -678,7 +724,7 @@ fn arp_ask(state: u64, target: u64) {
     var bc: [u8; 6] = [0 as u8; 6]
     var i: u64 = 0
     while i < 6 {
-        me[i as usize] = netdev.mac_at(state, i) as u8
+        me[i as usize] = netprof.mac_at(state, i) as u8
         i = i + 1
     }
     wire.mac_broadcast(&bc[0])
@@ -768,7 +814,7 @@ fn icmp_send(state: u64, dst: u64, body: u64, n: u64) -> u64 {
     var peer: [u8; 6] = [0 as u8; 6]
     var i: u64 = 0
     while i < 6 {
-        me[i as usize] = netdev.mac_at(state, i) as u8
+        me[i as usize] = netprof.mac_at(state, i) as u8
         peer[i as usize] = ((hw >> (i * 8)) & 0xFF) as u8
         i = i + 1
     }
