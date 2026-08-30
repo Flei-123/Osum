@@ -256,7 +256,8 @@ echo ==BEGIN==
 cat /priv/fueralle.txt > /w/kopie.txt
 chmod 640 /w/kopie.txt
 chown justin:projekt /w/kopie.txt
-mut kdf 2048
+mut kdf 1024
+mut kdf 4096
 mut kdf 8192
 echo ==END==
 SCRIPT
@@ -384,20 +385,76 @@ run_case kdf "$TMPD/d0.img" "osum $BASIS murun script=sh /t/aendern.sh"
 rc=$RC
 F="$TMPD/kdf.txt"
 is "der Lauf endet ueber ACPI (0), nicht ueber den Pruefstand (21)" "$rc" "0"
-us2048=$(mval "$F" us 1)
-us8192=$(mval "$F" us 2)
-ps=$(mval "$F" rundenps 2)
+us1024=$(mval "$F" us 1)
+us4096=$(mval "$F" us 2)
+us8192=$(mval "$F" us 3)
+ps=$(mval "$F" rundenps 3)
 if [ -n "${us8192:-}" ] && [ "${us8192:-0}" -gt 100000 ]; then
     ok "EINE Pruefung mit $ITERS Runden braucht messbar Zeit: ${us8192} us"
 else
     bad "die Pruefung dauert keine messbare Zeit (${us8192:-?} us)"
 fi
-if [ -n "${us2048:-}" ] && [ "${us2048:-0}" -gt 0 ] && [ -n "${us8192:-}" ]; then
-    v=$(( us8192 * 100 / us2048 ))
+# RUNDE MERGE-2: DAS VERHAELTNIS WIRD JETZT ZWISCHEN 1024 UND 4096
+# GEMESSEN UND NICHT MEHR ZWISCHEN 2048 UND 8192. Der Grund ist gemessen
+# und steht hier, weil er sonst wieder jemanden eine Stunde kostet.
+#
+# Diese Zusage hat auf dem Zweig MULTIUSER gehalten (401/100) und ist
+# nach dem Verschmelzen gefallen (851/100). Sie ist dabei NICHT kaputt
+# gegangen -- sie lief zum ersten Mal ueberhaupt: ihr Abschnitt war in
+# test.sh hinter `abschnitte_abarbeiten` angemeldet und damit im
+# parallelen Lauf tot (siehe MERGE-2 09b).
+#
+# Gemessen wurde daraufhin eine ganze Reihe, in EINEM Systemstart, auf
+# derselben Maschine, mit /dev/kvm:
+#
+#     Runden     us      Runden/s
+#       512    13456      38049
+#      1024    27614      37082
+#      2048    54573      37527
+#      4096   113851      35976
+#      8192   475210      17238
+#     16384   707006      23173
+#
+# Bis 4096 ist es sauber linear -- rund 36 bis 38 Tausend Runden je
+# Sekunde, ueber den Faktor acht. Ab 8192 kommt ein AUFSCHLAG VON RUND
+# 250 MILLISEKUNDEN dazu, und zwar ein KONSTANTER: 8192 kostet 248 ms
+# mehr als linear, 16384 kostet 252 ms mehr als linear. Deshalb sieht
+# 16384 je Runde wieder schneller aus als 8192.
+#
+# Was der Aufschlag IST, ist mit diesen Zahlen nicht entschieden. Er ist
+# reproduzierbar (zwei 8192er-Laeufe im selben Start: 471000 und 472035
+# us), er haengt nicht an der Reihenfolge (ein Vorlauf aendert nichts,
+# also ist es kein Taktverhalten des Wirts beim Hochlaufen), und er
+# haengt nicht am ersten Anfassen von Speicher (er faellt bei JEDEM Lauf
+# an, nicht nur beim ersten). Der naechstliegende Verdacht ist, dass der
+# Wirt den vCPU-Faden bei Laeufen ueber ~200 ms einmal verdraengt; das
+# ist NICHT belegt und steht hier als Verdacht und nicht als Befund.
+#
+# Auf dem Zweig MULTIUSER war davon nichts zu sehen, weil dort alles
+# unter TCG lief: bei 6698 Runden je Sekunde verschwinden 250 ms im
+# Rauschen. Erst der KVM-Pfad aus Runde KVMFIX macht die Laeufe so kurz,
+# dass ein fester Aufschlag von 250 ms das Verhaeltnis kippt.
+#
+# WAS DIE ZUSAGE MEINT, bleibt unveraendert: viermal so viele Runden
+# muessen viermal so viel kosten, sonst wirkt der Kostenfaktor nicht.
+# Gemessen wird das jetzt dort, wo die Messung diese Frage beantwortet
+# -- im linearen Bereich, 1024 gegen 4096. Die 8192 bleiben daneben
+# stehen und liefern die Runden je Sekunde, aus denen der Kostenfaktor
+# in kernel/user/pw.fi begruendet ist.
+if [ -n "${us1024:-}" ] && [ "${us1024:-0}" -gt 0 ] && [ -n "${us4096:-}" ]; then
+    v=$(( us4096 * 100 / us1024 ))
     if [ "$v" -ge 300 ] && [ "$v" -le 500 ]; then
-        ok "viermal so viele Runden kosten viermal so viel Zeit (${v}/100) -- die Zahl WIRKT"
+        ok "viermal so viele Runden kosten viermal so viel Zeit (${v}/100, 1024 gegen 4096) -- die Zahl WIRKT"
     else
-        bad "das Verhaeltnis stimmt nicht: ${us2048} us zu ${us8192} us (${v}/100)"
+        bad "das Verhaeltnis stimmt nicht: ${us1024} us zu ${us4096} us (${v}/100)"
+        # RUNDE MERGE-2: WENN DIE ZAHL NICHT STIMMT, GEHOEREN DIE ROHWERTE
+        # DAZU. Die Zusage nennt zwei Zahlen und ein Verhaeltnis und laesst
+        # offen, WOHER die zwei Zahlen kommen -- `mval ... us 1` und
+        # `... us 2` picken die erste und zweite Zeile eines Musters aus
+        # einer seriellen Ausgabe. Kommt eine dritte Zeile dazu, misst der
+        # Test etwas anderes, als er zu messen glaubt, und sagt es nicht.
+        echo "        alle mut-Zeilen dieses Laufs:"
+        grep -aoE "mut: [a-z]+=-?[0-9]+" "$F" | sed "s/^/          /"
     fi
 else
     bad "die Messung mit 2048 Runden fehlt"

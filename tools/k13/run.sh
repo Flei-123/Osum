@@ -45,7 +45,21 @@ export FIRNLIB="$(pwd)/lib"
 FIRNC=${FIRNC:-vendor/firn/bin/firnc}
 FC1=${FIRNC1:-vendor/firn/bin/firnc1}
 ULD=kernel/user/user.ld
-BLOCKS=4096
+# RUNDE MERGE-2: 16384 STATT 4096 BLOECKE (8 MiB statt 2 MiB).
+#
+# Der Lauf mit den Programmen aus firnc1 (Abschnitt 9) endete mit
+# "mkfs: the disk is full". Der Grund ist kein Fehler, sondern eine
+# Groesse: firnc1 baut dieselben Programme deutlich groesser als firnc0
+# -- am Kernabbild gemessen 7 266 684 gegen 3 082 944 Oktette, Faktor
+# 2,36. Elf Programme dieser Groesse passen nicht mehr in zwei
+# Megaoktette, und die Runden MULTIUSER und INIT haben die Liste
+# zusaetzlich um /sbin/init und svc verlaengert.
+#
+# Die Zahl ist eine ARBEITSGROESSE fuer ein Abbild im Temporaerbereich,
+# kein Versprechen ueber irgendetwas; sie darf grosszuegig sein. 8 MiB
+# lassen dem Stufe-1-Userland Luft, ohne dass der Lauf spuerbar laenger
+# dauert.
+BLOCKS=16384
 
 K13="id whoami chmod chown passwd su login init svc k13t"
 BASIS="sh ls cat echo sleep true false wc grep"
