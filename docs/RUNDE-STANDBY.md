@@ -446,9 +446,33 @@ Ehrlich und ohne Umschweife:
 
 ## 9. Auflagen
 
-* Bestehende Tests: `./test.sh` läuft über 53 Abschnitte; der GUI-Bau
-  (`gui=on`, 3378420 Oktette) und der GUI-lose Serverbau (`gui=off`,
-  2537740 Oktette) bauen beide durch.
+* **Bauten grün.** Der GUI-Bau (`gui=on`) ergibt 3378420 Oktette, der
+  GUI-lose Serverbau (`--gui off`) 2537740 Oktette. Beide bauen ohne
+  Fehler durch.
+* **Bestehende Tests, gemessen:**
+  * `tools/kernel/run.sh` — **176 passed, 0 failed**. Das ist der
+    Abschnitt, der IDT, PIC/PIT, Ring 3, Prozesse und Dateisystem
+    prüft, also genau das, was diese Runde angefasst hat.
+  * `tools/smp/run.sh` — **59 passed, 0 failed**. Der Abschnitt zum
+    APIC, in dem `apic.resume` dazugekommen ist.
+  * `tools/freestanding/run.sh` — 41 passed, 0 failed.
+  * `tools/core/run.sh` — 46 proofs, 0 failures.
+  * `tools/unix/run.sh` — 107 passed, 0 failed.
+* **Der vollständige `./test.sh` (53 Abschnitte) konnte nicht zu Ende
+  laufen, und der Grund ist ehrlich der falsche:** die Messmaschine
+  teilt sich eine 54-GiB-Platte mit den parallel laufenden Runden, und
+  sie lief während des Laufs auf 100 % voll. Elf Abschnitte scheiterten,
+  und in jedem einzelnen Protokoll steht derselbe Satz:
+
+  ```
+  error: cannot write '/tmp/tmp.atWQODvjLo/k0.s': No space left on device (os error 28)
+  ```
+
+  Das ist kein Rückschritt im Kern, sondern ein voller Datenträger. Der
+  Lauf wurde abgebrochen, damit er den anderen Runden nicht auch noch
+  den Platz nimmt. **Der vollständige `./test.sh` gehört auf einer
+  freien Platte nachgeholt, bevor dieser Zweig zusammengeführt wird** —
+  bis dahin steht hier eine Stichprobe und keine Zusage.
 * Kein Test wurde abgeschaltet.
 * Kein Messwert in diesem Bericht ist geschätzt. Wo etwas nicht gemessen
   werden konnte, steht das da, statt einer Zahl.
