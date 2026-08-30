@@ -384,55 +384,99 @@ hat "$OUT/b2.txt" "ota: NEUE FASSUNG verfuegbar" "(b) GEGENPROBE: dieselbe Quell
 hatnicht "$OUT/b2.txt" "RUECKSCHRITT ABGELEHNT" "(b) der Schutz schlaegt also nicht immer zu"
 dienst_aus
 
-# ---- (c) mitten im Laden abgebrochen
+# ---- (c) mitten im Laden abgebrochen -- HART, mit RST
+#
+# WAS HIER GEMESSEN WIRD UND WAS NICHT. Ein RST mitten in einem
+# TLS-Datensatz ist der haerteste Abbruch, den es gibt: die Gegenstelle
+# verschwindet ohne `close_notify` und ohne FIN. Die Zusage lautet NICHT
+# "das Programm meldet einen Fehler" -- sie lautet "AM SYSTEM AENDERT
+# SICH NICHTS". Deshalb wird DANACH ein ZWEITER Lauf gemacht, der
+# nachsieht: die Maschine kommt hoch, die alte Fassung laeuft, es gibt
+# keine zweite Generation und der Fassungszaehler steht, wo er stand.
+# Ein Nachsehen im ABGEBROCHENEN Lauf waere schwaecher -- der darf
+# untergehen, das ist ja der Fall.
 dienst "$OUT/netz2" --abbruch "hallo-2.opk:9000" || bad "Gegenstelle"
 cp -f "$OUT/basis.img" "$OUT/ziel.img"
-rc=$(lauf c1 "ota einspielen;opk liste;opk generationen;ota zeigen;exit")
-gleich "(c) die Maschine kommt trotzdem hoch" "$rc" "21"
+rc=$(lauf c1 "ota einspielen;exit")
 grep -qa "ABBRUCH hallo-2.opk" "$OUT/srv.log" \
     && ok "(c) die Gegenstelle hat die Verbindung wirklich abgerissen (RST nach 9000 Oktett)" \
     || bad "(c) die Gegenstelle hat gar nicht abgebrochen"
-hatnicht "$OUT/c1.txt" "opk: installiert" "(c) es wird NICHTS installiert"
-hatnicht "$OUT/c1.txt" "generation 1" "(c) es entsteht keine Generation"
-hat "$OUT/c1.txt" "${H1:0:12}" "(c) die laufende Fassung ist unveraendert"
-hat "$OUT/c1.txt" "ota: fassung hier 0" "(c) der Fassungszaehler ist unveraendert"
+hatnicht "$OUT/c1.txt" "opk: installiert" "(c) im abgebrochenen Lauf wird nichts installiert"
 dienst_aus
+rc=$(lauf c1b "opk richten;/apps/hallo.osp/start;opk liste;opk generationen;ota zeigen;exit")
+gleich "(c) DANACH kommt die Maschine hoch" "$rc" "21"
+hat "$OUT/c1b.txt" "paket-hallo fassung 1" "(c) und die alte Fassung laeuft"
+hat "$OUT/c1b.txt" "${H1:0:12}" "(c) der Store nennt genau den alten Streuwert"
+hatnicht "$OUT/c1b.txt" "generation 1" "(c) es entstand keine zweite Generation"
+hat "$OUT/c1b.txt" "ota: fassung hier 0" "(c) der Fassungszaehler ist unveraendert"
 
-# ---- (c2) DIE WIEDERAUFNAHME. Erst ein KURZER Rumpf (sauber
-#      geschlossen, also bleibt ein Bruchstueck liegen), dann eine
-#      Gegenstelle, die Range kann -- und es muss durchgehen.
-dienst "$OUT/netz2" --abbruch "hallo-2.opk:20000" || bad "Gegenstelle"
+# ---- (c2) DIE WIEDERAUFNAHME.
+#
+# Hier bricht die Gegenstelle MILDE ab (`--kurz`): sie schreibt 20000
+# Oktett und schliesst ordentlich. Damit bleibt ein Bruchstueck auf der
+# Platte liegen -- der Fall, in dem eine Wiederaufnahme ueberhaupt etwas
+# spart. (Beim harten RST bleibt oft gar nichts liegen, weil ein RST die
+# Empfangswarteschlange mitnimmt; das ist gemessen und steht in
+# docs/OTA.md.) Der zweite Lauf MUSS eine 206 bekommen.
+dienst "$OUT/netz2" --kurz "hallo-2.opk:20000" || bad "Gegenstelle"
 cp -f "$OUT/basis.img" "$OUT/ziel.img"
 rc=$(lauf c2a "ota einspielen;exit")
 hatnicht "$OUT/c2a.txt" "opk: installiert" "(c) der erste Versuch scheitert"
+grep -qa "^KURZ hallo-2.opk" "$OUT/srv.log" \
+    && ok "(c) die Gegenstelle hat den Rumpf wirklich abgeschnitten" \
+    || bad "(c) die Gegenstelle hat nicht abgeschnitten"
+dienst_aus
 dienst "$OUT/netz2" || bad "Gegenstelle"
 rc=$(lauf c2b "ota einspielen;opk liste;exit")
-hat "$OUT/c2b.txt" "ota: streuwert stimmt hallo-2.opk" "(c) der zweite Versuch bekommt das Paket vollstaendig"
-hat "$OUT/c2b.txt" "opk: installiert hallo" "(c) und es wird eingespielt"
-if grep -qa "^206 hallo-2.opk" "$OUT/srv.log"; then
-    ok "(c) und zwar WIEDERAUFGENOMMEN: die Gegenstelle hat 206 Partial Content geliefert"
-else
-    ok "(c) (kein 206 im Protokoll -- das Bruchstueck war leer, also wurde ganz neu geholt)"
-fi
+hat "$OUT/c2b.txt" "ota: bruchstueck, weiter ab" "(c) der zweite Versuch findet das Bruchstueck und setzt dort an"
+hat "$OUT/c2b.txt" "ota: streuwert stimmt hallo-2.opk" "(c) und bekommt das Paket vollstaendig"
+hat "$OUT/c2b.txt" "opk: installiert hallo" "(c) es wird eingespielt"
+grep -qa "^206 hallo-2.opk" "$OUT/srv.log" \
+    && ok "(c) WIEDERAUFGENOMMEN: die Gegenstelle hat 206 Partial Content geliefert" \
+    || bad "(c) keine 206 -- es wurde nicht wiederaufgenommen"
 dienst_aus
 
-# ---- (f) die Platte ist voll
+# ---- (f) der Platz reicht nicht
 #
-# Gefuellt wird sie von innen und nicht von aussen: `cat` mit sieben
-# Argumenten macht aus einer Datei die siebenfache, dreimal
-# hintereinander -- 660 KiB, 4,6 MiB, 32 MiB, 224 MiB. Der letzte Schritt
-# passt nicht mehr und laesst die Platte voll zurueck. Das ist echte
-# Fuelle und kein Schalter, der eine Fuelle behauptet.
-dienst "$OUT/netz2" || bad "Gegenstelle"
+# WIE DIE PLATTE ZU KLEIN WIRD, und warum nicht andersherum. Versucht
+# wurde zuerst, sie von innen vollzuschreiben: `cat` mit sieben
+# Argumenten, dreimal verkettet. GEMESSEN auf diesem Wirt unter Last:
+# 4,6 Megaoktett in ueber vier Minuten, durch OFS mit Journal und
+# emulierte IDE. Fuenfzig Megaoktett so zu schreiben dauert laenger als
+# der ganze uebrige Lauf.
+#
+# Gemessen wird deshalb der andere Weg zur selben Stelle: ein UPDATE, das
+# nicht hinpasst (ein Paket von zwanzig Megaoktett aus /dev/urandom,
+# richtig signiert, mit richtigem Streuwert). Fuer den Code ist das
+# derselbe Zweig -- `ota` fragt den Kern nach den freien Bloecken und
+# haelt sie gegen den Bedarf; ob die Bloecke fehlen, weil die Platte voll
+# ist oder weil das Paket gross ist, steht nirgends im Vergleich.
+#
+# UND DIE PRUEFUNG KOMMT VOR DEM LADEN. Die Laengen stehen im SIGNIERTEN
+# Verzeichnis; ein Geraet an einer schmalen Leitung soll nicht erst
+# zwanzig Megaoktett holen und dann erfahren, dass sie nicht hinpassen.
+# Der Laeufer misst genau das: die Gegenstelle darf das Paket NICHT
+# einmal ausgeliefert haben.
+dienst "$OUT/netzvoll" || bad "Gegenstelle"
 cp -f "$OUT/basis.img" "$OUT/ziel.img"
-FUELL="cat /bin/fetch /bin/fetch /bin/fetch /bin/fetch /bin/fetch /bin/fetch /bin/fetch > /f1"
-FUELL2="cat /f1 /f1 /f1 /f1 /f1 /f1 /f1 > /f2"
-FUELL3="cat /f2 /f2 /f2 /f2 /f2 /f2 /f2 > /f3"
-rc=$(lauf f1 "$FUELL;$FUELL2;$FUELL3;df;ota einspielen;opk liste;opk generationen;exit" 1200)
-hat "$OUT/f1.txt" "ZU WENIG PLATZ" "(f) auf der vollen Platte bricht ota SAUBER ab"
-hatnicht "$OUT/f1.txt" "opk: installiert" "(f) und installiert nichts"
+rc=$(lauf f1 "df;ota einspielen;opk liste;opk generationen;ota zeigen;exit" 900)
+gleich "(f) die Maschine kommt hoch" "$rc" "21"
+hat "$OUT/f1.txt" "ZU WENIG PLATZ" "(f) es reicht nicht, und ota bricht SAUBER ab"
+hatnicht "$OUT/f1.txt" "opk: installiert" "(f) es wird nichts installiert"
 hatnicht "$OUT/f1.txt" "generation 1" "(f) es entsteht keine Generation"
 hat "$OUT/f1.txt" "${H1:0:12}" "(f) die laufende Fassung ist unveraendert"
+hat "$OUT/f1.txt" "ota: fassung hier 0" "(f) der Fassungszaehler ist unveraendert"
+grep -qa "gross-1.opk" "$OUT/srv.log" \
+    && bad "(f) das Paket wurde geholt, obwohl der Platz vorher schon nicht reichte" \
+    || ok "(f) und das Paket wurde NICHT EINMAL GEHOLT -- geprueft wurde vorher"
+dienst_aus
+
+# ---- (f) DIE GEGENPROBE: dieselbe Maschine, ein Update, das hinpasst.
+dienst "$OUT/netz2" || bad "Gegenstelle"
+cp -f "$OUT/basis.img" "$OUT/ziel.img"
+rc=$(lauf f2 "ota einspielen;exit")
+hat "$OUT/f2.txt" "opk: installiert hallo" "(f) GEGENPROBE: das kleine Update geht auf derselben Platte durch"
+hatnicht "$OUT/f2.txt" "ZU WENIG PLATZ" "(f) der Platzwaechter schlaegt also nicht immer zu"
 dienst_aus
 
 # ---- die Einstellungsseite und das Umstellen im Betrieb
@@ -593,6 +637,8 @@ printf '   %-52s %s\n' "ein VERZEICHNIS (signierter Katalog, 1 Paket)" "$VZG Okt
 printf '   %-52s %s\n' "ein Paket (hallo 2.0.0, .opk)" "$PKG Oktett"
 printf '   %-52s %s\n' "ein Update auf der Leitung (VERZEICHNIS+sig+INDEX+sig+opk+sig)" \
     "$(du -sb "$OUT/netz2" | cut -f1) Oktett"
+printf '   %-52s %s\n' "davon wirklich uebertragen (aus dem Protokoll der Gegenstelle)" \
+    "$(awk '/^(200|206) /{s+=$5} END{print s+0}' "$OUT/srv.log" 2>/dev/null) Oktett (letzter Lauf)"
 printf '   %-52s %s\n' "von 'ota suchen' bis zur Antwort (ganzer Start)" "$SUCHMS ms"
 printf '   %-52s %s\n' "von 'ota einspielen' bis 'bereit zum Neustart'" "$EINMS ms"
 printf '   %-52s %s\n' "Rueckfall: der Start, in dem der Kern zurueckschaltet" "$RUECKMS ms"
