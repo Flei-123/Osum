@@ -211,6 +211,15 @@ BEREICHE = [
     ("ACQ",        "kstate.fi", "ACQ_OFF",        "ACQ_MAX"),
     ("ASC",        "kstate.fi", "ASC_OFF",        "ASC_MAX"),
     ("APATH",      "kstate.fi", "APATH_OFF",      "APATH_MAX"),
+    # RUNDE RING: die Ringtafel und die Kopierflaeche.  Zwei Bereiche
+    # HINTER der Grenze 0x90000 -- deshalb waechst KDATA_SIZE in
+    # kstate.fi UND in kernel/arch/x86_64/boot.s auf 0x92000, und
+    # tools/ring/run.sh haelt beide Zahlen gegeneinander.  Der RING
+    # SELBST steht hier NICHT: er liegt in Rahmen aus mem.frame_run,
+    # die in den Adressraum des Programms abgebildet werden, und
+    # gehoert deshalb nicht in die Karte von kdata.
+    ("RNG",        "kstate.fi", "RNG_OFF",        "RNG_MAX"),
+    ("RSC",        "kstate.fi", "RSC_OFF",        "RSC_MAX"),
     # RUNDE TRESOR: die Geraeteidentitaet, zwei Seiten (0x5A000..0x5C000).
     # Die erste traegt die Merkmale, die zweite ist das DMA-Ziel des
     # `identify controller` von NVMe -- und deshalb MUSS sie eine eigene,

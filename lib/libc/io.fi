@@ -42,7 +42,16 @@ export {
     aio_id, aio_udata, aio_result, aio_op,
     CQE_BYTES, AOP_READ, AOP_WRITE, AOP_OPEN, AOP_CLOSE, AOP_FSYNC,
     AOP_POLL,
-    AQ_NEW, AQ_RUN, AQ_DONE, AQ_CANCEL, AQ_FAIL, AQ_WAIT, AIO_FOREVER
+    AQ_NEW, AQ_RUN, AQ_DONE, AQ_CANCEL, AQ_FAIL, AQ_WAIT, AIO_FOREVER,
+    // ------------------------------------------------- RUNDE RING
+    ring_setup, ring_map, ring_close, ring_enter, ring_kick,
+    ring_put, ring_reap, ring_room, ring_ready, ring_wake_needed,
+    ring_sqe, ring_cqe, ring_dropped, ring_over, ring_bytes, ring_nr,
+    ring_version,
+    RH_MAGIC, RH_VERSION, RH_SQE, RH_CQE, RH_SQMASK, RH_CQMASK,
+    RH_SQOFF, RH_CQOFF, RH_SQHEAD, RH_SQTAIL, RH_CQHEAD, RH_CQTAIL,
+    RH_FLAGS, RH_DROPPED, RH_OVER, RH_BYTES, RH_ID,
+    SQE_BYTES, RING_MAGIC, RF_WAKEUP
 }
 
 const STAT_BYTES: u64 = 144
@@ -117,6 +126,196 @@ const AQ_FAIL: u64 = 5 // fehlgeschlagen
 const AQ_WAIT: u64 = 6 // wartet auf ein Ereignis (nur `aio_poll`)
 // Warten, bis wirklich etwas fertig wird -- wie `POLL_FOREVER`.
 const AIO_FOREVER: u64 = 0xFFFFFFFFFFFFFFFF
+
+// ==================================================== RUNDE RING
+//
+// DER COMPLETION-RING IM GETEILTEN SPEICHER, VON EINEM PROGRAMM AUS.
+//
+// DER UNTERSCHIED ZU `aio_*` IN EINEM SATZ: dort ist jede Abgabe und
+// jede Abholung ein Systemaufruf, hier ist beides ein Schreib- bzw.
+// Lesezugriff auf eigenen Speicher.
+//
+// DER ABLAUF, und mehr ist es nicht:
+//
+//     let h: u64 = io.ring_setup(32)          // einmal
+//     let r: u64 = io.ring_map(h)             // einmal
+//     ...
+//     io.ring_put(r, io.AOP_READ, fd, puffer, 4096, 1)
+//     io.ring_put(r, io.AOP_READ, fd2, puffer2, 4096, 2)
+//     io.ring_kick(h, r)        // NUR wenn die Weckflagge steht
+//     io.ring_enter(h, 0, 2, io.AIO_FOREVER)   // oder abfragen
+//     while io.ring_reap(r, (&cqe[0]) as u64) == 1 { ... }
+//
+// `ring_reap` liefert DENSELBEN 32-Oktett-Satz wie `aio_wait`, also
+// funktionieren `aio_id`, `aio_udata`, `aio_result` und `aio_op`
+// unveraendert weiter. Wer von `aio_wait` auf den Ring umzieht, aendert
+// den Abholweg und keine Auswertung.
+//
+// DIE WECKREGEL, UND SIE IST PFLICHT. Wenn niemand mehr wach ist, merkt
+// auch niemand, dass etwas im Ring liegt. Deshalb gilt fuer JEDES
+// Programm, das ohne `ring_enter` abgibt, diese Reihenfolge:
+//
+//     1. Abgabesatz schreiben          (ring_put)
+//     2. Schwanz schieben              (ring_put, letzte Zeile)
+//     3. DANACH die Flagge lesen       (ring_wake_needed)
+//     4. steht sie: anstossen          (ring_kick)
+//
+// Wer 3 vor 2 macht, baut sich den Haenger selbst. Der Kern macht es
+// spiegelbildlich (Flagge setzen, Schranke, NOCH EINMAL nachsehen), und
+// erst beide Haelften zusammen schliessen das Fenster.
+//
+// Das Netz darunter: die Arbeitsfaeden schlafen ohnehin nur mit einer
+// Frist von einer Sekunde. Ein Programm, das die Regel missachtet,
+// haengt also nicht -- es ist nur bis zu einer Sekunde langsam. Das ist
+// die unangenehmste Sorte Fehler, weil sie in keinem Test auffaellt;
+// deshalb steht die Regel hier so ausfuehrlich.
+const RH_MAGIC: u64 = 0x00
+const RH_VERSION: u64 = 0x08
+const RH_SQE: u64 = 0x10
+const RH_CQE: u64 = 0x18
+const RH_SQMASK: u64 = 0x20
+const RH_CQMASK: u64 = 0x28
+const RH_SQOFF: u64 = 0x30
+const RH_CQOFF: u64 = 0x38
+const RH_SQHEAD: u64 = 0x40 // der Kern schreibt
+const RH_SQTAIL: u64 = 0x48 // das Programm schreibt
+const RH_CQHEAD: u64 = 0x50 // das Programm schreibt
+const RH_CQTAIL: u64 = 0x58 // der Kern schreibt
+const RH_FLAGS: u64 = 0x60
+const RH_DROPPED: u64 = 0x68
+const RH_OVER: u64 = 0x70
+const RH_BYTES: u64 = 0x78
+const RH_ID: u64 = 0x80
+const SQE_BYTES: u64 = 64
+const RING_MAGIC: u64 = 0x474E4952204D5553
+const RF_WAKEUP: u64 = 1
+
+fn rld(p: u64, off: u64) -> u64 {
+    return __mmio_read64((p + off) as *mut u64)
+}
+
+fn rst(p: u64, off: u64, v: u64) {
+    __mmio_write64((p + off) as *mut u64, v)
+}
+
+fn ring_version() -> u64 {
+    return kcall.sys0(kcall.RING_VERSION)
+}
+
+// `saetze` MUSS eine Zweierpotenz zwischen 4 und 128 sein. Der
+// Fertigring wird doppelt so lang -- und genau deshalb kann er nicht
+// ueberlaufen: es gibt nie mehr Meldungen als abgegebene Auftraege.
+fn ring_setup(saetze: u64) -> u64 {
+    return errno.check(kcall.sys2(kcall.RING_SETUP, saetze, 0))
+}
+
+fn ring_map(h: u64) -> u64 {
+    return errno.check(kcall.sys1(kcall.RING_MAP, h))
+}
+
+fn ring_close(h: u64) -> u64 {
+    return errno.check(kcall.sys1(kcall.RING_CLOSE, h))
+}
+
+// Anstossen und/oder blockierend warten. `abgeben` Saetze werden JETZT
+// geerntet; danach wird gewartet, bis `mindestens` Fertigmeldungen im
+// Ring stehen. Beides darf 0 sein -- dann ist es der reine Anstoss.
+fn ring_enter(h: u64, abgeben: u64, mindestens: u64,
+    timeout_ms: u64) -> u64 {
+    return errno.check(kcall.sys4(kcall.RING_ENTER, h, abgeben,
+        mindestens, timeout_ms))
+}
+
+// Ist der Ring wirklich einer? Ein Speicherbereich ohne diese Kennung
+// ist keiner.
+fn ring_ready(r: u64) -> bool {
+    return rld(r, RH_MAGIC) == RING_MAGIC
+}
+
+fn ring_sqe(r: u64) -> u64 {
+    return rld(r, RH_SQE)
+}
+
+fn ring_cqe(r: u64) -> u64 {
+    return rld(r, RH_CQE)
+}
+
+fn ring_bytes(r: u64) -> u64 {
+    return rld(r, RH_BYTES)
+}
+
+fn ring_nr(r: u64) -> u64 {
+    return rld(r, RH_ID)
+}
+
+// Verworfene Abgabesaetze und Fertigmeldungen ohne Platz. BEIDE muessen
+// null bleiben; steht dort etwas, hat das Programm etwas falsch
+// gemacht, und der Kern sagt es ihm hier, statt es zu verschlucken.
+fn ring_dropped(r: u64) -> u64 {
+    return rld(r, RH_DROPPED)
+}
+
+fn ring_over(r: u64) -> u64 {
+    return rld(r, RH_OVER)
+}
+
+// Wie viele Saetze noch in den Abgabering passen.
+fn ring_room(r: u64) -> u64 {
+    let n: u64 = rld(r, RH_SQE)
+    return n -% (rld(r, RH_SQTAIL) -% rld(r, RH_SQHEAD))
+}
+
+fn ring_wake_needed(r: u64) -> bool {
+    return (rld(r, RH_FLAGS) & RF_WAKEUP) != 0
+}
+
+// EINEN ABGABESATZ HINLEGEN. Gibt 0, wenn kein Platz mehr ist -- dann
+// muss erst abgeholt oder angestossen werden.
+//
+// Erst der Satz, DANN der Schwanz: auf x86-64 kommt ein Schreibzugriff
+// nie vor einen aelteren (TSO), also sieht der Kern nie einen Schwanz,
+// der auf einen halb geschriebenen Satz zeigt.
+fn ring_put(r: u64, op: u64, fd: u64, buf: u64, len: u64,
+    udata: u64) -> u64 {
+    if ring_room(r) == 0 {
+        return 0
+    }
+    let t: u64 = rld(r, RH_SQTAIL)
+    let e: u64 = r + rld(r, RH_SQOFF) + (t & rld(r, RH_SQMASK)) * SQE_BYTES
+    rst(e, 0, op)
+    rst(e, 8, fd)
+    rst(e, 16, buf)
+    rst(e, 24, len)
+    rst(e, 32, udata)
+    rst(e, 40, 0)
+    rst(r, RH_SQTAIL, t +% 1)
+    return 1
+}
+
+// Die Weckregel in einer Zeile: nur anstossen, wenn die Flagge steht.
+fn ring_kick(h: u64, r: u64) -> u64 {
+    if ring_wake_needed(r) {
+        return ring_enter(h, 0, 0, 0)
+    }
+    return 0
+}
+
+// EINE FERTIGMELDUNG ABHOLEN -- OHNE SYSTEMAUFRUF. Nach `out` kommen
+// dieselben vier Worte wie von `aio_wait`, also lesen `aio_id`,
+// `aio_udata`, `aio_result` und `aio_op` sie unveraendert.
+fn ring_reap(r: u64, out: u64) -> u64 {
+    let h: u64 = rld(r, RH_CQHEAD)
+    if h == rld(r, RH_CQTAIL) {
+        return 0
+    }
+    let e: u64 = r + rld(r, RH_CQOFF) + (h & rld(r, RH_CQMASK)) * CQE_BYTES
+    rst(out, 0, rld(e, 0))
+    rst(out, 8, rld(e, 8))
+    rst(out, 16, rld(e, 16))
+    rst(out, 24, rld(e, 24))
+    rst(r, RH_CQHEAD, h +% 1)
+    return 1
+}
 
 fn aio_version() -> u64 {
     return kcall.sys0(kcall.AIO_VERSION)

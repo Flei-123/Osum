@@ -194,6 +194,9 @@ const P_ASYNC: u64 = 50
 const P_ABENCH: u64 = 51
 // RUNDE ASYNC: die Arten, die ein Dateisystem brauchen.
 const P_ASYNCFS: u64 = 52
+// RUNDE RING: der Selbsttest des Completion-Rings und seine Messung.
+const P_RING: u64 = 53
+const P_RBENCH: u64 = 54
 
 // Die sechs Aufrufe des Blocks ab 1980 (`kernel/sys.fi`).
 const AIO_VERSION: u64 = 1980
@@ -202,6 +205,50 @@ const AIO_WAIT: u64 = 1982
 const AIO_CANCEL: u64 = 1983
 const AIO_STATE: u64 = 1984
 const AIO_INFO: u64 = 1985
+// RUNDE RING (kernel/sys.fi, Block 1986..1991).
+const RG_VERSION: u64 = 1986
+const RG_SETUP: u64 = 1987
+const RG_MAP: u64 = 1988
+const RG_ENTER: u64 = 1989
+const RG_CLOSE: u64 = 1990
+const RG_INFO: u64 = 1991
+const SYS_MUNMAP: u64 = 11
+// Der Kopf des Rings. DIESELBEN Versaetze wie in `kernel/ring.fi`; wer
+// einen aendert, aendert beide -- `tools/ring/run.sh` haelt die zwei
+// Listen gegeneinander, damit aus einem vergessenen Versatz kein Test
+// wird, der etwas anderes misst, als er behauptet.
+const RH_MAGIC: u64 = 0x00
+const RH_VERSION: u64 = 0x08
+const RH_SQE: u64 = 0x10
+const RH_CQE: u64 = 0x18
+const RH_SQMASK: u64 = 0x20
+const RH_CQMASK: u64 = 0x28
+const RH_SQOFF: u64 = 0x30
+const RH_CQOFF: u64 = 0x38
+const RH_SQHEAD: u64 = 0x40
+const RH_SQTAIL: u64 = 0x48
+const RH_CQHEAD: u64 = 0x50
+const RH_CQTAIL: u64 = 0x58
+const RH_FLAGS: u64 = 0x60
+const RH_DROPPED: u64 = 0x68
+const RH_OVER: u64 = 0x70
+const RH_BYTES: u64 = 0x78
+const RH_ID: u64 = 0x80
+const RG_MAGIC: u64 = 0x474E4952204D5553
+const RF_WAKEUP: u64 = 1
+const SQ_OP: u64 = 0x00
+const SQ_FD: u64 = 0x08
+const SQ_BUF: u64 = 0x10
+const SQ_LEN: u64 = 0x18
+const SQ_UDATA: u64 = 0x20
+const SQ_FLAGS: u64 = 0x28
+const SQE_B: u64 = 64
+const CQE_B: u64 = 32
+const CQ_ID: u64 = 0x00
+const CQ_UDATA: u64 = 0x08
+const CQ_RES: u64 = 0x10
+const CQ_OP: u64 = 0x18
+const EA_INVAL: u64 = 22
 const AOP_READ: u64 = 1
 const AOP_WRITE: u64 = 2
 const AOP_OPEN: u64 = 3
@@ -430,6 +477,12 @@ fn u_enter(packed: u64) {
     }
     if prog == P_ASYNCFS {
         u_asyncfs(arg)
+    }
+    if prog == P_RING {
+        u_ring(arg)
+    }
+    if prog == P_RBENCH {
+        u_rbench(arg)
     }
     u_sys(SYS_EXIT, 0, 0, 0)
     while true {
@@ -1953,6 +2006,928 @@ fn u_abench(arg: u64) {
 // worauf ein Verweis zeigen koennte. Sein Pfad wird deshalb schon bei
 // der ABGABE in den Kern kopiert -- der Arbeitsfaden liest ihn spaeter,
 // und dann kann der Puffer in Ring 3 laengst ueberschrieben sein.
+// ================================================== RUNDE RING
+//
+// DER SELBSTTEST DES COMPLETION-RINGS, AUS RING 3.
+//
+// Was diese Runde behauptet, ist nicht "es ist schneller" -- das ist
+// die Messung und sie steht woanders. Behauptet wird: EIN PROGRAMM
+// KANN AN DIESEN SPEICHER SCHREIBEN, WAS ES WILL, UND DER KERN BLEIBT
+// HEIL UND EHRLICH. Das sind sieben Fehlerklassen, und jede ist eine,
+// an der io_uring wirklich gescheitert ist:
+//
+//   (a) DER ABGABESATZ WIRD NACH DER ABGABE GEAENDERT. Der Kern hat ihn
+//       kopiert und darf das nicht bemerken. Gegenprobe `noringcopy`.
+//   (b) KOPF UND SCHWANZ SIND GELOGEN -- riesig, rueckwaerts, irgendwo.
+//       Definierter Fehler, kein Zugriff daneben. Gegenprobe `noringsq`.
+//   (c) DER RING IST VOLL. Rueckstau statt Verwerfen, und kein
+//       Fertigsatz geht ohne Hinweis verloren.
+//   (d) DER PROZESS STIRBT MIT AUFTRAEGEN IM RING. Rahmen zurueck,
+//       Tafel leer, nichts bleibt.
+//   (e) DAS HANDLE WIRD GESCHLOSSEN, WAEHREND EIN AUFTRAG DARAUF LAEUFT.
+//       Die Generationspruefung aus Runde HANDLE greift -- durch den
+//       Ring hindurch.
+//   (f) EIN FREMDER RING GEHT NIEMANDEN AN.
+//   (g) ALLE ARBEITSFAEDEN SCHLAFEN. Die Weckregel traegt.
+//
+// Dazu die Zusage, um derentwillen es die Runde ueberhaupt gibt: EIN
+// AUFTRAG OHNE SYSTEMAUFRUF.
+
+fn r_ld(p: u64, off: u64) -> u64 {
+    return __mmio_read64((p + off) as *mut u64)
+}
+
+fn r_st(p: u64, off: u64, v: u64) {
+    __mmio_write64((p + off) as *mut u64, v)
+}
+
+// Der Platz eines Abgabesatzes. MASKIERT -- auch hier, im Programm:
+// wer seinen eigenen Ring falsch indiziert, schreibt sonst in seinen
+// Fertigring, und der Fehler saehe aus wie ein Fehler des Kerns.
+fn r_slot(base: u64, idx: u64) -> u64 {
+    return base + r_ld(base, RH_SQOFF) + (idx & r_ld(base, RH_SQMASK)) * SQE_B
+}
+
+fn r_cslot(base: u64, idx: u64) -> u64 {
+    return base + r_ld(base, RH_CQOFF) + (idx & r_ld(base, RH_CQMASK)) * CQE_B
+}
+
+// EINEN ABGABESATZ HINLEGEN UND VEROEFFENTLICHEN.
+//
+// Erst der Satz, DANN der Schwanz. Auf x86-64 kommt ein Schreibzugriff
+// nie vor einen aelteren Schreibzugriff (TSO), also braucht es hier
+// keine Schranke -- der Kern sieht nie einen Schwanz, der auf einen
+// halb geschriebenen Satz zeigt. Auf einer Maschine mit schwaecherem
+// Speichermodell stuende hier eine.
+fn r_put(base: u64, op: u64, fd: u64, buf: u64, len: u64, ud: u64) {
+    let t: u64 = r_ld(base, RH_SQTAIL)
+    let e: u64 = r_slot(base, t)
+    r_st(e, SQ_OP, op)
+    r_st(e, SQ_FD, fd)
+    r_st(e, SQ_BUF, buf)
+    r_st(e, SQ_LEN, len)
+    r_st(e, SQ_UDATA, ud)
+    r_st(e, SQ_FLAGS, 0)
+    r_st(base, RH_SQTAIL, t +% 1)
+}
+
+// EINE FERTIGMELDUNG ABHOLEN -- OHNE SYSTEMAUFRUF. Vier Worte nach
+// `out`, dann rueckt der Kopf vor. Das ist der ganze Abholweg dieser
+// Runde.
+fn r_reap(base: u64, out: u64) -> u64 {
+    let h: u64 = r_ld(base, RH_CQHEAD)
+    if h == r_ld(base, RH_CQTAIL) {
+        return 0
+    }
+    let e: u64 = r_cslot(base, h)
+    r_st(out, 0, r_ld(e, CQ_ID))
+    r_st(out, 8, r_ld(e, CQ_UDATA))
+    r_st(out, 16, r_ld(e, CQ_RES))
+    r_st(out, 24, r_ld(e, CQ_OP))
+    r_st(base, RH_CQHEAD, h +% 1)
+    return 1
+}
+
+// DIE WECKREGEL, PROGRAMMSEITE, UND SIE IST DIE GANZE REGEL:
+// erst den Schwanz schreiben (das hat `r_put` getan), DANN die Flagge
+// lesen, und nur wenn sie steht, anstossen. Umgekehrt gaebe es das
+// Fenster "Faden setzt die Flagge und schlaeft, waehrend das Programm
+// sie noch nicht gesetzt sah".
+fn r_kick(h: u64, base: u64) -> u64 {
+    if (r_ld(base, RH_FLAGS) & RF_WAKEUP) != 0 {
+        return u_sys6(RG_ENTER, h, 0, 0, 0, 0, 0)
+    }
+    return 0
+}
+
+// Blockierend warten, bis mindestens eine Fertigmeldung im Ring steht.
+fn r_warte(h: u64, mindest: u64, ms: u64) -> u64 {
+    return u_sys6(RG_ENTER, h, 0, mindest, ms, 0, 0)
+}
+
+fn r_info(was: u64, arg: u64) -> u64 {
+    return u_sys(RG_INFO, was, arg, 0)
+}
+
+fn r_hold(v: u64) -> u64 {
+    return u_sys(RG_INFO, 20, v, 0)
+}
+
+// -------------------------------------------------- das Grundgeruest
+fn u_ring_grund(h: u64, base: u64) -> u64 {
+    var n_ke: [u8; 16] = "grund-kennung\0\0\0"
+    var n_fa: [u8; 16] = "grund-fassung\0\0\0"
+    var n_la: [u8; 15] = "grund-laenge\0\0\0"
+    var n_ma: [u8; 14] = "grund-maske\0\0\0"
+    var n_au: [u8; 20] = "grund-ein-auftrag\0\0\0"
+    var n_kz: [u8; 17] = "grund-kennzahl\0\0\0"
+    var n_mu: [u8; 20] = "grund-kein-munmap\0\0\0"
+    var n_sp: [u8; 18] = "grund-speicher\0\0\0\0"
+    var fds: [u64; 2] = [0 as u64; 2]
+    var buf: [u8; 16] = [0 as u8; 16]
+    var cq: [u64; 4] = [0 as u64; 4]
+    var vier: [u8; 5] = "abcd\0"
+    var ok: u64 = 0
+    ok = ok + h_claim((&n_ke[0]) as u64, r_ld(base, RH_MAGIC), RG_MAGIC)
+    ok = ok + h_claim((&n_fa[0]) as u64, r_ld(base, RH_VERSION), 1)
+    ok = ok + h_claim((&n_la[0]) as u64,
+        r_ld(base, RH_SQE) * 1000 + r_ld(base, RH_CQE), 32064)
+    ok = ok + h_claim((&n_ma[0]) as u64, r_ld(base, RH_SQMASK), 31)
+    // EIN AUFTRAG UEBER DEN RING. Vier Oktett in die Roehre, ein `read`
+    // als Abgabesatz, Anstoss, warten, abholen -- und das Abholen ist
+    // ein Lesezugriff auf eigenen Speicher und kein Systemaufruf.
+    u_sys(SYS_PIPE, (&fds[0]) as u64, 0, 0)
+    let rfd: u64 = (fds[0]) & 0xFFFFFFFF
+    let wfd: u64 = ((fds[0]) >> 32) & 0xFFFFFFFF
+    u_sys(SYS_WRITE, wfd, (&vier[0]) as u64, 4)
+    r_put(base, AOP_READ, rfd, (&buf[0]) as u64, 4, 0x1234)
+    u_sys6(RG_ENTER, h, 1, 1, 3000, 0, 0)
+    if r_reap(base, (&cq[0]) as u64) == 1 {
+        ok = ok + h_claim((&n_au[0]) as u64, cq[2], 4)
+        ok = ok + h_claim((&n_kz[0]) as u64, cq[1], 0x1234)
+    } else {
+        ok = ok + h_claim((&n_au[0]) as u64, 0 -% 1, 4)
+        ok = ok + h_claim((&n_kz[0]) as u64, 0 -% 1, 0x1234)
+    }
+    // DAS PROGRAMM KANN SEINEM EIGENEN KERN DIE SEITEN NICHT WEGZIEHEN.
+    // Die Ringkachel liegt ausserhalb beider `mmap`-Fenster, also ist
+    // das hier -EINVAL und keine Sonderregel.
+    ok = ok + h_claim((&n_mu[0]) as u64,
+        0 -% u_sys(SYS_MUNMAP, base, 4096, 0), EA_INVAL)
+    // Was ein Ring an Speicher kostet: der Kern sagt es, das Programm
+    // liest es im Kopf nach, und beide muessen dasselbe sagen.
+    ok = ok + h_claim((&n_sp[0]) as u64, r_ld(base, RH_BYTES),
+        r_info(4, r_ld(base, RH_ID)))
+    u_sys(SYS_CLOSE, rfd, 0, 0)
+    u_sys(SYS_CLOSE, wfd, 0, 0)
+    return ok
+}
+
+// ----------------------------------- (a) DIE KOPIERREGEL, UND IHR BEWEIS
+//
+// Der Ablauf ist so gebaut, dass er das Fenster JEDES MAL trifft und
+// nicht manchmal:
+//
+//   1. Der Pruefstandshalt an -- die Arbeitsfaeden nehmen keinen neuen
+//      Auftrag an.
+//   2. Einen Abgabesatz hinlegen: lies vier Oktett nach PUFFER A,
+//      Kennzahl 0xA1.
+//   3. `ring_enter` mit `abgeben = 1`. JETZT kopiert der Kern den Satz
+//      -- im Zusammenhang dieses Aufrufs, nachweislich, denn er gibt
+//      "1 abgegeben" zurueck.
+//   4. DEN SATZ UEBERSCHREIBEN: schreib nach PUFFER B, Laenge 64,
+//      Kennzahl 0xBAD. Das ist der Angriff.
+//   5. Halt aus, warten, abholen.
+//
+// Was herauskommen MUSS: Kennzahl 0xA1, vier Oktett, und sie stehen in
+// PUFFER A. Puffer B ist unberuehrt.
+//
+// Mit `noringcopy` liest der Kern die Felder bei der Ausfuehrung noch
+// einmal aus dem geteilten Speicher -- dann steht 0xBAD in der
+// Fertigmeldung, und die Zusage faellt. Genau dafuer ist sie da.
+fn u_ring_a(h: u64, base: u64) -> u64 {
+    var n_ab: [u8; 14] = "a-abgegeben\0\0\0"
+    var n_ko: [u8; 16] = "a-kopie-haelt\0\0\0"
+    var n_pu: [u8; 16] = "a-kopie-puffer\0\0"
+    var n_fr: [u8; 22] = "a-fremder-puffer-leer\0"
+    var fds: [u64; 2] = [0 as u64; 2]
+    var pa: [u8; 16] = [0 as u8; 16]
+    var pb: [u8; 16] = [0 as u8; 16]
+    var cq: [u64; 4] = [0 as u64; 4]
+    var vier: [u8; 5] = "abcd\0"
+    var ok: u64 = 0
+    u_sys(SYS_PIPE, (&fds[0]) as u64, 0, 0)
+    let rfd: u64 = (fds[0]) & 0xFFFFFFFF
+    let wfd: u64 = ((fds[0]) >> 32) & 0xFFFFFFFF
+    u_sys(SYS_WRITE, wfd, (&vier[0]) as u64, 4)
+    r_hold(1)
+    let t: u64 = r_ld(base, RH_SQTAIL)
+    r_put(base, AOP_READ, rfd, (&pa[0]) as u64, 4, 0xA1)
+    let ab: u64 = u_sys6(RG_ENTER, h, 1, 0, 0, 0, 0)
+    ok = ok + h_claim((&n_ab[0]) as u64, ab, 1)
+    // DER ANGRIFF. Derselbe Platz, voellig anderer Inhalt.
+    let e: u64 = r_slot(base, t)
+    r_st(e, SQ_OP, AOP_WRITE)
+    r_st(e, SQ_FD, wfd)
+    r_st(e, SQ_BUF, (&pb[0]) as u64)
+    r_st(e, SQ_LEN, 64)
+    r_st(e, SQ_UDATA, 0xBAD)
+    r_hold(0)
+    r_warte(h, 1, 3000)
+    if r_reap(base, (&cq[0]) as u64) == 1 {
+        ok = ok + h_claim((&n_ko[0]) as u64, cq[1], 0xA1)
+        var stimmt: u64 = 0
+        if cq[2] == 4 {
+            if pa[0] == 97 {
+                if pa[3] == 100 {
+                    stimmt = 1
+                }
+            }
+        }
+        ok = ok + h_claim((&n_pu[0]) as u64, stimmt, 1)
+    } else {
+        ok = ok + h_claim((&n_ko[0]) as u64, 0 -% 1, 0xA1)
+        ok = ok + h_claim((&n_pu[0]) as u64, 0, 1)
+    }
+    var leer: u64 = 1
+    if pb[0] != 0 {
+        leer = 0
+    }
+    ok = ok + h_claim((&n_fr[0]) as u64, leer, 1)
+    u_sys(SYS_CLOSE, rfd, 0, 0)
+    u_sys(SYS_CLOSE, wfd, 0, 0)
+    return ok
+}
+
+// --------------------------- (b) KOPF UND SCHWANZ SIND NICHT ZU GLAUBEN
+fn u_ring_b(h: u64, base: u64) -> u64 {
+    var n_ri: [u8; 20] = "b-riesiger-schwanz\0\0"
+    var n_ru: [u8; 22] = "b-rueckwaerts-schwanz\0"
+    var n_ge: [u8; 18] = "b-badsq-gezaehlt\0\0"
+    var n_ko: [u8; 14] = "b-kopf-steht\0\0"
+    var n_he: [u8; 16] = "b-danach-heil\0\0\0"
+    var n_cq: [u8; 22] = "b-fertigkopf-verbogen\0"
+    var fds: [u64; 2] = [0 as u64; 2]
+    var buf: [u8; 16] = [0 as u8; 16]
+    var cq: [u64; 4] = [0 as u64; 4]
+    var vier: [u8; 5] = "wxyz\0"
+    var ok: u64 = 0
+    let kopf: u64 = r_ld(base, RH_SQHEAD)
+    let bad0: u64 = r_info(9, 0)
+    // 1. EIN SCHWANZ, DER EINE MILLION SAETZE BEHAUPTET. Der Ring hat
+    //    zweiunddreissig Plaetze; das ist keine Ringstellung, das ist
+    //    eine Luege.
+    r_st(base, RH_SQTAIL, kopf +% 1000000)
+    ok = ok + h_claim((&n_ri[0]) as u64,
+        0 -% u_sys6(RG_ENTER, h, 8, 0, 0, 0, 0), EA_INVAL)
+    // 2. EIN SCHWANZ HINTER DEM KOPF. Wickelnd gerechnet ist das
+    //    dieselbe Fehlerklasse -- und genau deshalb wird wickelnd
+    //    gerechnet und nicht mit Vorzeichen.
+    r_st(base, RH_SQTAIL, kopf -% 5)
+    ok = ok + h_claim((&n_ru[0]) as u64,
+        0 -% u_sys6(RG_ENTER, h, 8, 0, 0, 0, 0), EA_INVAL)
+    // 3. DER KOPF DES KERNS HAT SICH NICHT BEWEGT. Nichts wurde
+    //    abgegeben, also darf auch nichts verbraucht sein.
+    ok = ok + h_claim((&n_ko[0]) as u64, r_ld(base, RH_SQHEAD), kopf)
+    var mehr: u64 = 0
+    if r_info(9, 0) >= bad0 + 2 {
+        mehr = 1
+    }
+    ok = ok + h_claim((&n_ge[0]) as u64, mehr, 1)
+    // 4. UND DANACH LAEUFT ER WEITER. Ein Ring, den man mit einer
+    //    verbogenen Zahl dauerhaft unbrauchbar machen kann, waere ein
+    //    Denial of Service gegen den eigenen Prozess -- ertraeglich,
+    //    aber unnoetig. Der Schwanz wird zurueckgesetzt, und alles geht.
+    r_st(base, RH_SQTAIL, kopf)
+    u_sys(SYS_PIPE, (&fds[0]) as u64, 0, 0)
+    let rfd: u64 = (fds[0]) & 0xFFFFFFFF
+    let wfd: u64 = ((fds[0]) >> 32) & 0xFFFFFFFF
+    u_sys(SYS_WRITE, wfd, (&vier[0]) as u64, 4)
+    r_put(base, AOP_READ, rfd, (&buf[0]) as u64, 4, 0x5150)
+    u_sys6(RG_ENTER, h, 1, 1, 3000, 0, 0)
+    if r_reap(base, (&cq[0]) as u64) == 1 {
+        ok = ok + h_claim((&n_he[0]) as u64, cq[1], 0x5150)
+    } else {
+        ok = ok + h_claim((&n_he[0]) as u64, 0, 0x5150)
+    }
+    // 5. DER KOPF DES FERTIGRINGS, VERBOGEN. Er gehoert dem Programm,
+    //    also ist auch er eine Behauptung: steht er VOR dem Schwanz des
+    //    Kerns, waeren mehr Meldungen abgeholt worden, als es je gab.
+    //    Der Kern zaehlt das und haelt den Ring fuer voll -- das ist die
+    //    sichere Seite, denn dann schreibt er nichts hinein.
+    let bcq0: u64 = r_info(10, 0)
+    let ct: u64 = r_ld(base, RH_CQTAIL)
+    r_st(base, RH_CQHEAD, ct +% 99)
+    r_info(24, r_ld(base, RH_ID))
+    var bmehr: u64 = 0
+    if r_info(10, 0) > bcq0 {
+        bmehr = 1
+    }
+    ok = ok + h_claim((&n_cq[0]) as u64, bmehr, 1)
+    r_st(base, RH_CQHEAD, ct)
+    u_sys(SYS_CLOSE, rfd, 0, 0)
+    u_sys(SYS_CLOSE, wfd, 0, 0)
+    return ok
+}
+
+// ------------------------------------ (c) DER RING IST VOLL: RUECKSTAU
+//
+// Der Ring dieser Pruefung ist ACHT Saetze lang. Acht `poll`-Auftraege
+// auf ein leeres Roehrenende werden nie fertig -- danach sind acht
+// Auftraege in Flug, und das ist genau die Ringlaenge. Der neunte Satz
+// wird NICHT verworfen und NICHT abgelehnt: er bleibt liegen, wo er
+// liegt, der Kopf rueckt nicht ueber ihn hinaus, und beim naechsten
+// Blick wird er geholt. Ein Ring, der verwirft, ist schlimmer als
+// einer, der wartet -- das Warten kann das Programm aussitzen, den
+// Verlust nicht.
+fn u_ring_c() -> u64 {
+    var n_acht: [u8; 16] = "c-acht-in-flug\0\0"
+    var n_rue: [u8; 14] = "c-rueckstau\0\0\0"
+    var n_bl: [u8; 18] = "c-satz-bleibt-da\0\0"
+    var n_ve: [u8; 16] = "c-kein-verlust\0\0"
+    var n_le: [u8; 12] = "c-kein-leck\0"
+    var fds: [u64; 2] = [0 as u64; 2]
+    var cq: [u64; 4] = [0 as u64; 4]
+    var ok: u64 = 0
+    let h: u64 = u_sys(RG_SETUP, 8, 0, 0)
+    if (h >> 63) != 0 {
+        return 0
+    }
+    let base: u64 = u_sys(RG_MAP, h, 0, 0)
+    let nr: u64 = r_ld(base, RH_ID)
+    u_sys(SYS_PIPE, (&fds[0]) as u64, 0, 0)
+    let rfd: u64 = (fds[0]) & 0xFFFFFFFF
+    let wfd: u64 = ((fds[0]) >> 32) & 0xFFFFFFFF
+    var i: u64 = 0
+    while i < 8 {
+        r_put(base, AOP_POLL, rfd, 0, POLLIN_A, 400 + i)
+        i = i + 1
+    }
+    u_sys6(RG_ENTER, h, 8, 0, 0, 0, 0)
+    a_atmen(8)
+    ok = ok + h_claim((&n_acht[0]) as u64, r_info(1, nr), 8)
+    // Der neunte. Er passt in den Ring -- er passt nur nicht mehr in
+    // die Zahl der offenen Auftraege.
+    r_put(base, AOP_POLL, rfd, 0, POLLIN_A, 409)
+    ok = ok + h_claim((&n_rue[0]) as u64, u_sys6(RG_ENTER, h, 1, 0, 0, 0, 0), 0)
+    ok = ok + h_claim((&n_bl[0]) as u64, r_info(27, nr), 1)
+    ok = ok + h_claim((&n_ve[0]) as u64, r_info(3, nr), 0)
+    // Aufraeumen: das Schreibende zu, damit die `poll`-Auftraege fertig
+    // werden (POLLHUP), dann alles abholen.
+    u_sys(SYS_CLOSE, wfd, 0, 0)
+    var w: u64 = 0
+    while w < 40 {
+        r_warte(h, 1, 100)
+        while r_reap(base, (&cq[0]) as u64) == 1 {
+            w = w + 0
+        }
+        w = w + 1
+    }
+    u_sys(SYS_CLOSE, rfd, 0, 0)
+    u_sys(RG_CLOSE, h, 0, 0)
+    ok = ok + h_claim((&n_le[0]) as u64, r_info(1, nr), 0)
+    return ok
+}
+
+// ------------- (e) DAS HANDLE WIRD GESCHLOSSEN, DER PLATZ NEU VERGEBEN
+//
+// Das ist die Fehlerklasse aus Runde ASYNC (b), aber DURCH DEN RING
+// hindurch: der Auftrag kommt nicht mehr aus einem Systemaufruf,
+// sondern aus geteiltem Speicher -- und die Generationspruefung der
+// Runde HANDLE muss trotzdem greifen. Sie ist das Erbe, das diese Runde
+// nicht verspielen darf.
+fn u_ring_e(h: u64, base: u64) -> u64 {
+    var n_pl: [u8; 16] = "e-selber-platz\0\0"
+    var n_al: [u8; 12] = "e-veraltet\0\0"
+    var n_ne: [u8; 22] = "e-nicht-das-neue-ding\0"
+    var fds: [u64; 2] = [0 as u64; 2]
+    var fd2: [u64; 2] = [0 as u64; 2]
+    var buf: [u8; 16] = [0 as u8; 16]
+    var cq: [u64; 4] = [0 as u64; 4]
+    var pfd: [u64; 1] = [0 as u64; 1]
+    var vier: [u8; 5] = "wxyz\0"
+    var ok: u64 = 0
+    r_hold(1)
+    u_sys(SYS_PIPE, (&fds[0]) as u64, 0, 0)
+    let rfd: u64 = (fds[0]) & 0xFFFFFFFF
+    let wfd: u64 = ((fds[0]) >> 32) & 0xFFFFFFFF
+    r_put(base, AOP_READ, rfd, (&buf[0]) as u64, 4, 0xE1)
+    u_sys6(RG_ENTER, h, 1, 0, 0, 0, 0)
+    u_sys(SYS_CLOSE, rfd, 0, 0)
+    u_sys(SYS_CLOSE, wfd, 0, 0)
+    u_sys(SYS_PIPE, (&fd2[0]) as u64, 0, 0)
+    let rf2: u64 = (fd2[0]) & 0xFFFFFFFF
+    let wf2: u64 = ((fd2[0]) >> 32) & 0xFFFFFFFF
+    ok = ok + h_claim((&n_pl[0]) as u64, rf2, rfd)
+    u_sys(SYS_WRITE, wf2, (&vier[0]) as u64, 4)
+    r_hold(0)
+    r_warte(h, 1, 3000)
+    if r_reap(base, (&cq[0]) as u64) == 1 {
+        ok = ok + h_claim((&n_al[0]) as u64, 0 -% (cq[2]), EA_STALE)
+    } else {
+        ok = ok + h_claim((&n_al[0]) as u64, 0, EA_STALE)
+    }
+    // Die vier Oktett stehen NOCH in der neuen Roehre. `poll` mit
+    // Zeitgrenze 0 liest nichts weg -- es sagt nur, dass etwas da ist.
+    pfd[0] = (rf2 & 0xFFFFFFFF) | (POLLIN_A << 32)
+    u_sys(SYS_POLL_A, (&pfd[0]) as u64, 1, 0)
+    ok = ok + h_claim((&n_ne[0]) as u64,
+        h_hat((pfd[0]) >> 48, POLLIN_A), 1)
+    u_sys(SYS_CLOSE, rf2, 0, 0)
+    u_sys(SYS_CLOSE, wf2, 0, 0)
+    return ok
+}
+
+// ------------ (d) DER PROZESSTOD und (f) EIN FREMDER RING
+//
+// Beides braucht zwei Prozesse. Das Kind setzt einen eigenen Ring auf,
+// legt drei Auftraege hinein, die nie fertig werden, schickt dem
+// Elternteil sein Handle und seine Ringnummer und wartet auf sein
+// Todesurteil. Der Elternteil versucht in der Zwischenzeit, den fremden
+// Ring anzufassen -- und darf nicht --, und sieht danach nach, dass vom
+// Kind kein Rahmen und kein Auftrag uebriggeblieben ist.
+fn u_ring_df() -> u64 {
+    var n_fm: [u8; 22] = "f-fremdes-handle-map\0\0"
+    var n_fe: [u8; 24] = "f-fremdes-handle-enter\0\0"
+    var n_fc: [u8; 24] = "f-fremdes-handle-close\0\0"
+    var n_dr: [u8; 20] = "d-ring-abgeraeumt\0\0\0"
+    var n_da: [u8; 20] = "d-rahmen-zurueck\0\0\0\0"
+    var n_dk: [u8; 18] = "d-kein-auftrag\0\0\0\0"
+    var fds: [u64; 2] = [0 as u64; 2]
+    var hs: [u64; 2] = [0 as u64; 2]
+    var ok: u64 = 0
+    u_sys(SYS_PIPE, (&fds[0]) as u64, 0, 0)
+    u_sys(SYS_PIPE, (&hs[0]) as u64, 0, 0)
+    let rfd: u64 = (fds[0]) & 0xFFFFFFFF
+    let wfd: u64 = ((fds[0]) >> 32) & 0xFFFFFFFF
+    let hrd: u64 = (hs[0]) & 0xFFFFFFFF
+    let hwd: u64 = ((hs[0]) >> 32) & 0xFFFFFFFF
+    let ringe0: u64 = r_info(0, 0)
+    let rahmen0: u64 = r_info(19, 0)
+    let kind: u64 = u_sys(SYS_FORK, 0, 0, 0)
+    if kind == 0 {
+        var kfd: [u64; 2] = [0 as u64; 2]
+        var meine: [u64; 2] = [0 as u64; 2]
+        let kh: u64 = u_sys(RG_SETUP, 8, 0, 0)
+        let kb: u64 = u_sys(RG_MAP, kh, 0, 0)
+        u_sys(SYS_PIPE, (&kfd[0]) as u64, 0, 0)
+        let krd: u64 = (kfd[0]) & 0xFFFFFFFF
+        r_put(kb, AOP_POLL, krd, 0, POLLIN_A, 1)
+        r_put(kb, AOP_POLL, krd, 0, POLLIN_A, 2)
+        r_put(kb, AOP_POLL, krd, 0, POLLIN_A, 3)
+        u_sys6(RG_ENTER, kh, 3, 0, 0, 0, 0)
+        meine[0] = kh
+        meine[1] = r_ld(kb, RH_ID)
+        u_sys(SYS_WRITE, wfd, (&meine[0]) as u64, 16)
+        var zeichen: [u8; 4] = [0 as u8; 4]
+        u_sys(SYS_READ, hrd, (&zeichen[0]) as u64, 1)
+        // MIT DREI AUFTRAEGEN IM RING STERBEN. Genau darum geht es.
+        u_sys(SYS_EXIT, 0, 0, 0)
+    }
+    var fremd: [u64; 2] = [0 as u64; 2]
+    u_sys(SYS_READ, rfd, (&fremd[0]) as u64, 16)
+    let fh: u64 = fremd[0]
+    // (f) DAS FREMDE HANDLE. Es ist ein gueltiger Wert -- im Kind. Hier
+    // loest es gar nicht erst auf: die Handle-Tafel ist PRO AUFGABE, und
+    // ihre Generationen sind mit der pid gewuerfelt. Es kostet keine
+    // eigene Zeile, und das ist der Sinn davon, dass ein Ring ein
+    // HANDLE ist und keine Nummer.
+    ok = ok + h_claim((&n_fm[0]) as u64,
+        0 -% u_sys(RG_MAP, fh, 0, 0), EA_BADF)
+    ok = ok + h_claim((&n_fe[0]) as u64,
+        0 -% u_sys6(RG_ENTER, fh, 0, 0, 0, 0, 0), EA_BADF)
+    ok = ok + h_claim((&n_fc[0]) as u64,
+        0 -% u_sys(RG_CLOSE, fh, 0, 0), EA_BADF)
+    var los: [u8; 2] = "x\0"
+    u_sys(SYS_WRITE, hwd, (&los[0]) as u64, 1)
+    var st: [u64; 1] = [0 as u64; 1]
+    u_sys(SYS_WAIT4, 0 -% 1, (&st[0]) as u64, 0)
+    a_atmen(16)
+    // (d) NACH DEM TOD DES KINDES IST SEIN RING WEG -- UND SEINE RAHMEN
+    //     SIND ZURUECK. Die zweite Zahl ist die wichtigere: ein Ring
+    //     kostet bis zu zwanzig Kilooktett, und ein Prozess, der stirbt,
+    //     ohne sie zurueckzugeben, ist ein Leck, das man erst nach
+    //     tausend Prozessen sieht.
+    ok = ok + h_claim((&n_dr[0]) as u64, r_info(0, 0), ringe0)
+    ok = ok + h_claim((&n_da[0]) as u64, r_info(19, 0), rahmen0)
+    ok = ok + h_claim((&n_dk[0]) as u64, r_info(6, 0), 0)
+    u_sys(SYS_CLOSE, rfd, 0, 0)
+    u_sys(SYS_CLOSE, wfd, 0, 0)
+    u_sys(SYS_CLOSE, hrd, 0, 0)
+    u_sys(SYS_CLOSE, hwd, 0, 0)
+    return ok
+}
+
+// -------------------------------------------- (g) DIE WECKREGEL
+//
+// Erst lange genug schlafen, damit die Abgabewache aufgibt und ALLE
+// Arbeitsfaeden liegen. Dann muss die Flagge im Ringkopf stehen -- und
+// nach dem Anstoss muss der Auftrag laufen.
+fn u_ring_g(h: u64, base: u64) -> u64 {
+    var n_fl: [u8; 18] = "g-flagge-gesetzt\0\0"
+    var n_na: [u8; 20] = "g-nach-anstoss-da\0\0\0"
+    var n_ki: [u8; 18] = "g-kicks-gezaehlt\0\0"
+    var ts: [u64; 2] = [0 as u64; 2]
+    var fds: [u64; 2] = [0 as u64; 2]
+    var buf: [u8; 16] = [0 as u8; 16]
+    var cq: [u64; 4] = [0 as u64; 4]
+    var vier: [u8; 5] = "1234\0"
+    var ok: u64 = 0
+    ts[0] = 0
+    ts[1] = 500000000
+    u_sys(SYS_NANOSLEEP, (&ts[0]) as u64, 0, 0)
+    ok = ok + h_claim((&n_fl[0]) as u64,
+        r_ld(base, RH_FLAGS) & RF_WAKEUP, RF_WAKEUP)
+    u_sys(SYS_PIPE, (&fds[0]) as u64, 0, 0)
+    let rfd: u64 = (fds[0]) & 0xFFFFFFFF
+    let wfd: u64 = ((fds[0]) >> 32) & 0xFFFFFFFF
+    u_sys(SYS_WRITE, wfd, (&vier[0]) as u64, 4)
+    let k0: u64 = r_info(7, 0)
+    // DIE REGEL, ANGEWENDET: Satz hinlegen, Schwanz schieben, DANN die
+    // Flagge lesen und nur deshalb anstossen.
+    r_put(base, AOP_READ, rfd, (&buf[0]) as u64, 4, 0x6001)
+    r_kick(h, base)
+    r_warte(h, 1, 3000)
+    if r_reap(base, (&cq[0]) as u64) == 1 {
+        ok = ok + h_claim((&n_na[0]) as u64, cq[1], 0x6001)
+    } else {
+        ok = ok + h_claim((&n_na[0]) as u64, 0, 0x6001)
+    }
+    var mehr: u64 = 0
+    if r_info(7, 0) > k0 {
+        mehr = 1
+    }
+    ok = ok + h_claim((&n_ki[0]) as u64, mehr, 1)
+    u_sys(SYS_CLOSE, rfd, 0, 0)
+    u_sys(SYS_CLOSE, wfd, 0, 0)
+    return ok
+}
+
+// ------------------------------- EIN AUFTRAG GANZ OHNE SYSTEMAUFRUF
+//
+// DAS IST DIE ZUSAGE, UM DERENTWILLEN ES DIESE RUNDE GIBT, und sie wird
+// hier so nachgewiesen, dass sie nicht schoenzurechnen ist: der
+// Ringzaehler `harvest` sagt, wie viele Saetze der Kern aus Abgaberingen
+// geholt hat, und der Zaehler `kicks`, wie oft ihn jemand dafuer
+// gerufen hat. Zwischen den beiden Messpunkten darf `kicks` sich NICHT
+// bewegen, `harvest` aber schon.
+//
+// EHRLICH DAZU: `SYS_YIELD` in der Warteschleife IST ein Systemaufruf.
+// Auf EINEM Kern geht es nicht ohne -- der Arbeitsfaden bekommt den
+// Prozessor sonst nie. Gezaehlt wird deshalb nicht "null Aufrufe
+// ueberhaupt", sondern "null Aufrufe FUER DIE ABGABE UND DIE ABHOLUNG":
+// kein `ring_enter`, kein `aio_submit`, kein `aio_wait`. Auf zwei Kernen
+// faellt auch das Abgeben des Prozessors weg, und dann sind es wirklich
+// null -- die Messung in `u_rbench` laeuft deshalb mit `-smp 2`.
+fn u_ring_ohne(h: u64, base: u64) -> u64 {
+    var n_oh: [u8; 18] = "o-ohne-syscall\0\0\0\0"
+    var n_ke: [u8; 20] = "o-kein-ring-enter\0\0\0"
+    var n_er: [u8; 20] = "o-ernte-gestiegen\0\0\0"
+    var fds: [u64; 2] = [0 as u64; 2]
+    var buf: [u8; 16] = [0 as u8; 16]
+    var cq: [u64; 4] = [0 as u64; 4]
+    var vier: [u8; 5] = "efgh\0"
+    var ok: u64 = 0
+    u_sys(SYS_PIPE, (&fds[0]) as u64, 0, 0)
+    let rfd: u64 = (fds[0]) & 0xFFFFFFFF
+    let wfd: u64 = ((fds[0]) >> 32) & 0xFFFFFFFF
+    u_sys(SYS_WRITE, wfd, (&vier[0]) as u64, 4)
+    // Einmal anstossen, damit die Abgabewache wach ist -- danach wacht
+    // sie RING_SPIN Runden lang von selbst weiter, und genau diese Zeit
+    // wird hier gemessen.
+    r_put(base, AOP_READ, rfd, (&buf[0]) as u64, 4, 0x7000)
+    u_sys6(RG_ENTER, h, 1, 1, 3000, 0, 0)
+    r_reap(base, (&cq[0]) as u64)
+    u_sys(SYS_WRITE, wfd, (&vier[0]) as u64, 4)
+    let k0: u64 = r_info(7, 0)
+    let e0: u64 = r_info(8, 0)
+    // JETZT OHNE JEDEN AUFRUF DIESER SCHNITTSTELLE.
+    r_put(base, AOP_READ, rfd, (&buf[0]) as u64, 4, 0x7001)
+    var runden: u64 = 0
+    var da: u64 = 0
+    while runden < 4000 {
+        if r_reap(base, (&cq[0]) as u64) == 1 {
+            da = 1
+            runden = 4000
+        } else {
+            u_sys(SYS_YIELD, 0, 0, 0)
+            runden = runden + 1
+        }
+    }
+    var passt: u64 = 0
+    if da == 1 {
+        if cq[1] == 0x7001 {
+            passt = 1
+        }
+    }
+    ok = ok + h_claim((&n_oh[0]) as u64, passt, 1)
+    ok = ok + h_claim((&n_ke[0]) as u64, r_info(7, 0), k0)
+    var mehr: u64 = 0
+    if r_info(8, 0) > e0 {
+        mehr = 1
+    }
+    ok = ok + h_claim((&n_er[0]) as u64, mehr, 1)
+    u_sys(SYS_CLOSE, rfd, 0, 0)
+    u_sys(SYS_CLOSE, wfd, 0, 0)
+    return ok
+}
+
+// ==================== MESSUNG RUNDE RING: LATENZ, DURCHSATZ, AUFRUFE
+//
+// GLEICHE METHODIK WIE IN RUNDE ASYNC, damit die Zeilen vergleichbar
+// sind: ein `read` von 32 Oktett vom Leseende einer Roehre, die vor
+// jedem Block gefuellt wird, damit kein Lesevorgang blockiert. 33
+// Bloecke, MEDIAN und nicht Mittelwert -- der Zeitgeber unterbricht,
+// und ein einzelner Ausreisser wuerde einen Mittelwert verdoppeln.
+//
+// WAS HIER ZUSAETZLICH GEMESSEN WIRD, und es ist die eigentliche Zahl
+// dieser Runde: DIE SYSTEMAUFRUFE JE TAUSEND AUFTRAEGE.
+//
+//   synchron         1000  (ein `read` ist ein Aufruf)
+//   Runde ASYNC      1000 Abgaben + n Abholungen, also > 1000
+//   Runde RING       1000 / Buendelgroesse -- und im Grenzfall NULL,
+//                    wenn die Abgabewache wach ist.
+//
+// Der Kern zaehlt beide Seiten selbst (`ring: kicks`, `ring: harvest`),
+// und der Laeufer liest sie nach. Eine Aufrufzahl, die das Programm
+// nur behauptet, waere eine Behauptung.
+//
+// DIE ROEHRE FASST 512 OKTETT (`file.PIPE_CAP`), und daraus folgt die
+// Form dieser Messung. Eine Runde darf nie mehr lesen wollen, als
+// vorher hineinpasst -- sonst blockiert schon das FUELLEN, und gemessen
+// waere die Roehre und nicht die Schicht. Deshalb zwei Saetze Zahlen,
+// die beide genau 512 Oktett je Block bewegen:
+//
+//   16 x 32 Oktett   -- WORTGLEICH mit der Messung der Runde ASYNC
+//                       (AB_ITERS 16, AB_LEN 32). Nur so sind die
+//                       Zeilen "synchron / async / ring" vergleichbar.
+//   64 x  8 Oktett   -- fuer die Tiefen und Buendel, die groesser sind
+//                       als sechzehn. Sie sind untereinander
+//                       vergleichbar und NICHT mit dem oberen Satz;
+//                       der Bericht sagt das auch so.
+//
+// Diese Zeile ist die Lehre aus dem ersten Anlauf: mit 64 x 32 Oktett
+// lief das Messprogramm in ein blockierendes `write` und hat nicht eine
+// einzige Zahl ausgegeben.
+const RB_BLOCKS: u64 = 33
+const RB_ITERS: u64 = 16
+const RB_LEN: u64 = 32
+const RB_ITERS8: u64 = 64
+const RB_LEN8: u64 = 8
+
+fn rb_fill(wfd: u64, p: u64, iters: u64, len: u64) {
+    var i: u64 = 0
+    while i < iters {
+        u_sys(SYS_WRITE, wfd, p, len)
+        i = i + 1
+    }
+}
+
+fn rb_sync(rfd: u64, wfd: u64, p: u64, iters: u64, len: u64) -> u64 {
+    var b: [u64; 33] = [0 as u64; 33]
+    var k: u64 = 0
+    while k < RB_BLOCKS {
+        rb_fill(wfd, p, iters, len)
+        let t0: u64 = u_tsc()
+        var i: u64 = 0
+        var acc: u64 = 0
+        while i < iters {
+            acc = acc +% u_sys(SYS_READ, rfd, p, len)
+            i = i + 1
+        }
+        let t1: u64 = u_tsc()
+        b[k as usize] = ((t1 -% t0) / iters) +% (acc & 0)
+        k = k + 1
+    }
+    u_hb_sort((&b[0]) as u64, RB_BLOCKS)
+    return b[16]
+}
+
+// UEBER DEN RING, MIT ANSTOSS. Je Runde: `tiefe` Saetze hinlegen, EIN
+// `ring_enter` (abgeben und auf alle warten), `tiefe` Meldungen aus dem
+// geteilten Speicher holen. Systemaufrufe je Runde: genau einer.
+fn rb_ring(h: u64, base: u64, rfd: u64, wfd: u64, p: u64,
+    tiefe: u64, iters: u64, len: u64) -> u64 {
+    var b: [u64; 33] = [0 as u64; 33]
+    var cq: [u64; 4] = [0 as u64; 4]
+    var k: u64 = 0
+    while k < RB_BLOCKS {
+        rb_fill(wfd, p, iters, len)
+        let t0: u64 = u_tsc()
+        var runde: u64 = 0
+        while runde < iters / tiefe {
+            var i: u64 = 0
+            while i < tiefe {
+                r_put(base, AOP_READ, rfd, p, len, 0)
+                i = i + 1
+            }
+            u_sys6(RG_ENTER, h, tiefe, tiefe, 5000, 0, 0)
+            var got: u64 = 0
+            while got < tiefe {
+                if r_reap(base, (&cq[0]) as u64) == 1 {
+                    got = got + 1
+                } else {
+                    u_sys(SYS_YIELD, 0, 0, 0)
+                }
+            }
+            runde = runde + 1
+        }
+        let t1: u64 = u_tsc()
+        b[k as usize] = (t1 -% t0) / iters
+        k = k + 1
+    }
+    u_hb_sort((&b[0]) as u64, RB_BLOCKS)
+    return b[16]
+}
+
+// UEBER DEN RING, OHNE JEDEN ANSTOSS. Kein `ring_enter`, kein
+// `aio_wait` -- nur Schreiben in den eigenen Speicher und Lesen daraus.
+// Was hier noch an Aufrufen steht, ist `SYS_YIELD`, und das ist auf
+// EINEM Kern unvermeidlich: der Arbeitsfaden bekommt den Prozessor
+// sonst nie. Auf zwei Kernen faellt auch das weg -- deshalb laeuft die
+// Messung mit `-smp 2`, und deshalb steht diese Zahl neben der oberen
+// und nicht statt ihrer.
+fn rb_frei(h: u64, base: u64, rfd: u64, wfd: u64, p: u64,
+    tiefe: u64, iters: u64, len: u64) -> u64 {
+    var b: [u64; 33] = [0 as u64; 33]
+    var cq: [u64; 4] = [0 as u64; 4]
+    var k: u64 = 0
+    while k < RB_BLOCKS {
+        rb_fill(wfd, p, iters, len)
+        let t0: u64 = u_tsc()
+        var runde: u64 = 0
+        while runde < iters / tiefe {
+            var i: u64 = 0
+            while i < tiefe {
+                r_put(base, AOP_READ, rfd, p, len, 0)
+                i = i + 1
+            }
+            // NUR die Regel, sonst nichts: schlafen alle Faeden, muss
+            // angestossen werden. Sonst kein Aufruf.
+            r_kick(h, base)
+            var got: u64 = 0
+            var warte: u64 = 0
+            while got < tiefe {
+                if r_reap(base, (&cq[0]) as u64) == 1 {
+                    got = got + 1
+                } else {
+                    u_sys(SYS_YIELD, 0, 0, 0)
+                    warte = warte + 1
+                    if warte > 100000 {
+                        got = tiefe
+                    }
+                }
+            }
+            runde = runde + 1
+        }
+        let t1: u64 = u_tsc()
+        b[k as usize] = (t1 -% t0) / iters
+        k = k + 1
+    }
+    u_hb_sort((&b[0]) as u64, RB_BLOCKS)
+    return b[16]
+}
+
+// NUR DIE ABGABE. Was ein Lesevorgang den abgebenden Prozess noch
+// kostet, wenn er ihn nur hinlegt: sechs Schreibzugriffe in eigenen
+// Speicher. Das ist die Zahl, die in Runde ASYNC 2402 Zyklen war (ein
+// Systemaufruf) und hier keiner mehr ist.
+fn rb_put(h: u64, base: u64, rfd: u64, wfd: u64, p: u64) -> u64 {
+    var b: [u64; 33] = [0 as u64; 33]
+    var cq: [u64; 4] = [0 as u64; 4]
+    var k: u64 = 0
+    while k < RB_BLOCKS {
+        rb_fill(wfd, p, RB_ITERS, RB_LEN)
+        let t0: u64 = u_tsc()
+        var i: u64 = 0
+        while i < RB_ITERS {
+            r_put(base, AOP_READ, rfd, p, RB_LEN, 0)
+            i = i + 1
+        }
+        let t1: u64 = u_tsc()
+        b[k as usize] = (t1 -% t0) / RB_ITERS
+        u_sys6(RG_ENTER, h, RB_ITERS, RB_ITERS, 5000, 0, 0)
+        var got: u64 = 0
+        var warte: u64 = 0
+        while got < RB_ITERS {
+            if r_reap(base, (&cq[0]) as u64) == 1 {
+                got = got + 1
+            } else {
+                u_sys(SYS_YIELD, 0, 0, 0)
+                warte = warte + 1
+                if warte > 100000 {
+                    got = RB_ITERS
+                }
+            }
+        }
+        k = k + 1
+    }
+    u_hb_sort((&b[0]) as u64, RB_BLOCKS)
+    return b[16]
+}
+
+fn u_rbench(arg: u64) {
+    var s_s: [u8; 16] = "rbench: sync=\0\0\0"
+    var s_s8: [u8; 17] = "rbench: sync8=\0\0\0"
+    var s_1: [u8; 16] = "rbench: ring1=\0\0"
+    var s_4: [u8; 16] = "rbench: ring4=\0\0"
+    var s_16: [u8; 18] = "rbench: ring16=\0\0\0"
+    var s_64: [u8; 18] = "rbench: ring64=\0\0\0"
+    var s_f1: [u8; 16] = "rbench: frei1=\0\0"
+    var s_f8: [u8; 16] = "rbench: frei8=\0\0"
+    var s_f32: [u8; 18] = "rbench: frei32=\0\0\0"
+    var s_pu: [u8; 16] = "rbench: put=\0\0\0\0"
+    var s_by: [u8; 16] = "rbench: bytes=\0\0"
+    var s_ki: [u8; 16] = "rbench: kicks=\0\0"
+    var s_ha: [u8; 18] = "rbench: harvest=\0\0"
+    var s_n: [u8; 16] = "rbench: iters=\0\0"
+    var s_n8: [u8; 17] = "rbench: iters8=\0\0"
+    var s_no: [u8; 16] = "rbench: noring=\0"
+    var fds: [u64; 2] = [0 as u64; 2]
+    var puf: [u8; 40] = [0 as u8; 40]
+    let p: u64 = (&puf[0]) as u64
+    let h: u64 = u_sys(RG_SETUP, 64, 0, 0)
+    if (h >> 63) != 0 {
+        u_say_line((&s_no[0]) as u64, 0 -% h)
+        u_sys(SYS_EXIT, 1, 0, 0)
+    }
+    let base: u64 = u_sys(RG_MAP, h, 0, 0)
+    u_sys(SYS_PIPE, (&fds[0]) as u64, 0, 0)
+    let rfd: u64 = (fds[0]) & 0xFFFFFFFF
+    let wfd: u64 = ((fds[0]) >> 32) & 0xFFFFFFFF
+    // ERSTER SATZ: 16 x 32 Oktett, wortgleich mit Runde ASYNC.
+    u_say_line((&s_s[0]) as u64, rb_sync(rfd, wfd, p, RB_ITERS, RB_LEN))
+    u_say_line((&s_1[0]) as u64,
+        rb_ring(h, base, rfd, wfd, p, 1, RB_ITERS, RB_LEN))
+    u_say_line((&s_4[0]) as u64,
+        rb_ring(h, base, rfd, wfd, p, 4, RB_ITERS, RB_LEN))
+    u_say_line((&s_16[0]) as u64,
+        rb_ring(h, base, rfd, wfd, p, 16, RB_ITERS, RB_LEN))
+    // ZWEITER SATZ: 64 x 8 Oktett -- die Tiefe 64 und die Buendel 32
+    // passen nicht in 16 Auftraege je Block. Der synchrone Massstab
+    // dazu steht daneben, damit die Zeile nicht allein dasteht.
+    u_say_line((&s_s8[0]) as u64, rb_sync(rfd, wfd, p, RB_ITERS8, RB_LEN8))
+    u_say_line((&s_64[0]) as u64,
+        rb_ring(h, base, rfd, wfd, p, 64, RB_ITERS8, RB_LEN8))
+    let k0: u64 = r_info(7, 0)
+    let e0: u64 = r_info(8, 0)
+    u_say_line((&s_f1[0]) as u64,
+        rb_frei(h, base, rfd, wfd, p, 1, RB_ITERS8, RB_LEN8))
+    u_say_line((&s_f8[0]) as u64,
+        rb_frei(h, base, rfd, wfd, p, 8, RB_ITERS8, RB_LEN8))
+    u_say_line((&s_f32[0]) as u64,
+        rb_frei(h, base, rfd, wfd, p, 32, RB_ITERS8, RB_LEN8))
+    // DIE ZAHL DIESER RUNDE: wie oft musste in den drei Laeufen oben
+    // ueberhaupt angestossen werden, und wie viele Saetze sind dabei
+    // durch den Ring gegangen.
+    u_say_line((&s_ki[0]) as u64, r_info(7, 0) - k0)
+    u_say_line((&s_ha[0]) as u64, r_info(8, 0) - e0)
+    u_say_line((&s_pu[0]) as u64, rb_put(h, base, rfd, wfd, p))
+    u_say_line((&s_by[0]) as u64, r_info(4, r_ld(base, RH_ID)))
+    u_say_line((&s_n[0]) as u64, RB_BLOCKS * RB_ITERS)
+    u_say_line((&s_n8[0]) as u64, RB_BLOCKS * RB_ITERS8)
+    u_sys(SYS_CLOSE, rfd, 0, 0)
+    u_sys(SYS_CLOSE, wfd, 0, 0)
+    u_sys(RG_CLOSE, h, 0, 0)
+    u_sys(SYS_EXIT, 0, 0, 0)
+}
+
+
+fn u_ring(arg: u64) {
+    var s_head: [u8; 22] = "ring: ring 3 beginnt\n\0"
+    var s_tail: [u8; 7] = "ring: \0"
+    var s_of: [u8; 2] = "/\0"
+    var s_pr: [u8; 11] = " Zusagen\n\0\0"
+    var n_ver: [u8; 18] = "ring-fassung-da\0\0\0"
+    var n_auf: [u8; 16] = "ring-aufgesetzt\0"
+    var n_leck: [u8; 18] = "ring-kein-leck\0\0\0\0"
+    // Die Zahl steht ausgeschrieben, damit eine geloeschte Zusage
+    // auffaellt und nicht nur die Summe kleiner wird:
+    // 2 + 8 (Grund) + 4 (a) + 6 (b) + 5 (c) + 3 (e) + 6 (d/f)
+    // + 3 (g) + 3 (ohne) + 1 (Leck) = 41.
+    let n: u64 = 41
+    var ok: u64 = 0
+    u_say((&s_head[0]) as u64)
+    ok = ok + h_claim((&n_ver[0]) as u64, u_sys(RG_VERSION, 0, 0, 0), 1)
+    let h: u64 = u_sys(RG_SETUP, 32, 0, 0)
+    var auf: u64 = 0
+    if (h >> 63) == 0 {
+        auf = 1
+    }
+    ok = ok + h_claim((&n_auf[0]) as u64, auf, 1)
+    if auf == 1 {
+        let base: u64 = u_sys(RG_MAP, h, 0, 0)
+        ok = ok + u_ring_grund(h, base)
+        ok = ok + u_ring_a(h, base)
+        ok = ok + u_ring_b(h, base)
+        ok = ok + u_ring_c()
+        ok = ok + u_ring_e(h, base)
+        ok = ok + u_ring_df()
+        ok = ok + u_ring_g(h, base)
+        ok = ok + u_ring_ohne(h, base)
+        let rahmen: u64 = r_info(19, 0)
+        u_sys(RG_CLOSE, h, 0, 0)
+        // DIE LECKPROBE. Nach dem Abbau MUSS die Auftragstafel leer
+        // sein -- und die Rahmen des Rings muessen zurueck sein. Zwei
+        // Seiten je Ring sind wenig; zweitausend Prozesse, die je zwei
+        // vergessen, sind acht Megaoktett.
+        var frei: u64 = 0
+        if r_info(19, 0) > rahmen {
+            if r_info(6, 0) == 0 {
+                frei = 1
+            }
+        }
+        ok = ok + h_claim((&n_leck[0]) as u64, frei, 1)
+    }
+    u_say((&s_tail[0]) as u64)
+    u_say_num(ok)
+    u_say((&s_of[0]) as u64)
+    u_say_num(n)
+    u_say((&s_pr[0]) as u64)
+    u_sys(SYS_EXIT, n - ok, 0, 0)
+}
+
+
 fn u_asyncfs(arg: u64) {
     var s_head: [u8; 26] = "asyncfs: ring 3 beginnt\n\0\0"
     var s_tail: [u8; 10] = "asyncfs: \0"

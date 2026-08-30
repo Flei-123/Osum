@@ -55,7 +55,8 @@ export {
     copy_space, swap_space, use_space, page_drop, ARG_RESUME,
     USER_DATA, USER_STACK, USER_SPAN, USER_TOP,
     IMAGE_BASE, IMAGE_END, ARGS_BASE, MAX_ARGS, STACK_FLOOR, grow_stack,
-    PRIV_SLOTS, BIG_TOP, BIG_FLOOR, pd_slot, pt_for
+    PRIV_SLOTS, BIG_TOP, BIG_FLOOR, pd_slot, pt_for,
+    RING_BASE, RING_SLOT, map_at, page_unmap
 }
 
 const PAGE_PRESENT: u64 = 1
@@ -116,9 +117,27 @@ const IMAGE_END: u64 = 0x40400000 // RUNDE K16: war 0x40200000
 // Halde -- und die alte Halde dieses Systems war 851.968 Oktette
 // zwischen `brk` und `MMAP_TOP`. Es fehlte also nicht viel, aber es
 // fehlte.
-const PRIV_SLOTS: u64 = 6
+// RUNDE RING: SIEBEN STATT SECHS. Die siebte Kachel (0x40C00000) ist
+// die Kachel des Completion-Rings, und sie ist die einzige Stelle im
+// Adressraum eines Programms, in der KERNEIGENE Rahmen liegen, die
+// gleichzeitig der Kern und das Programm beschreiben.
+//
+// WARUM SIE GANZ OBEN LIEGT UND NICHT IRGENDWO DAZWISCHEN. Sie liegt
+// AUSSERHALB beider `mmap`-Fenster -- das alte endet bei MMAP_TOP
+// (0x400F0000), das grosse waechst von BIG_TOP (0x40C00000) nach UNTEN.
+// Damit sagt `munmap` auf eine Ringseite -EINVAL, ohne dass irgendeine
+// Sonderregel dafuer noetig waere: `sys.do_unmap` nimmt nur Adressen
+// INNERHALB der beiden Fenster an, und 0x40C00000 ist in keinem von
+// beiden. Ein Programm kann seinem eigenen Kern also nicht die Seiten
+// unter dem Ring wegziehen -- und das ist keine Bequemlichkeit, sondern
+// die Bedingung dafuer, dass ein Arbeitsfaden dort ueberhaupt
+// hineinschreiben darf.
+const PRIV_SLOTS: u64 = 7
 const BIG_TOP: u64 = 0x40C00000
 const BIG_FLOOR: u64 = 0x40600000
+// RUNDE RING: wo der geteilte Speicher im Programm erscheint.
+const RING_BASE: u64 = 0x40C00000
+const RING_SLOT: u64 = 6
 // RUNDE K16: DER ARGUMENTBLOCK IST HOCHGEZOGEN, DAMIT DER STAPEL WACHSEN
 // KANN.
 //
@@ -336,7 +355,21 @@ fn free_space(state: u64, i: u64) -> u64 {
             let e: u64 = read_entry(pd, k)
             if (e & PAGE_PRESENT) != 0 {
                 if (e & PAGE_HUGE) == 0 {
-                    freed = freed + free_pt(state, e & ADDR_MASK)
+                    // RUNDE RING: DIE RINGKACHEL NICHT MITZAEHLEN.
+                    // Ihre Rahmen gehoeren dem Kern und sind AM STUECK
+                    // genommen; `ring.abandon` gibt sie am Stueck
+                    // zurueck, und das ist VOR dieser Zeile geschehen.
+                    // Wer sie hier noch einmal einzeln freigaebe,
+                    // haette sie zweimal frei -- und der naechste
+                    // Prozess bekaeme einen Rahmen, in dem noch etwas
+                    // steht. Die TABELLE selbst wird sehr wohl
+                    // freigegeben, sie gehoert dem Prozess.
+                    if k == RING_SLOT {
+                        mem.frame_free(state, e & ADDR_MASK)
+                        freed = freed + 1
+                    } else {
+                        freed = freed + free_pt(state, e & ADDR_MASK)
+                    }
                 }
                 write_entry(pd, k, 0)
             }
@@ -515,6 +548,77 @@ fn map_page(state: u64, i: u64, addr: u64, writable: bool,
     // process gets them at its first context switch, and THAT writes cr3
     // and flushes everything.
     return frame
+}
+
+// RUNDE RING: EINEN SCHON VORHANDENEN RAHMEN ABBILDEN.
+//
+// `map_page` besorgt sich seinen Rahmen selbst -- fuer den Ring geht das
+// nicht: seine Seiten muessen im PHYSISCHEN Speicher AM STUECK liegen,
+// damit der Kern ihn als einen Block mit einer Adresse ansprechen kann
+// (`mem.frame_run`), und sie muessen dem KERN gehoeren und nicht dem
+// Programm. Also legt der Ring die Rahmen an und diese Funktion haengt
+// sie in den Adressraum.
+//
+// KEIN AUSFUEHRUNGSRECHT, NIE. Ein Ring traegt Daten, die ein Programm
+// selbst geschrieben hat; waere er ausfuehrbar, waere er die bequemste
+// Sprungtafel, die ein Angreifer sich wuenschen kann. Das NX-Bit steht
+// hier deshalb fest und ist kein Argument.
+fn map_at(state: u64, i: u64, addr: u64, phys: u64, writable: bool) -> bool {
+    let s: u64 = pt_slot(addr)
+    if s >= 512 {
+        return false
+    }
+    if (phys & 0xFFF) != 0 {
+        return false
+    }
+    let pt: u64 = pt_for(state, i, addr, true)
+    if pt == 0 {
+        return false
+    }
+    if (read_entry(pt, s) & PAGE_PRESENT) != 0 {
+        return false
+    }
+    var bits: u64 = PAGE_PRESENT | PAGE_USER | nx(state)
+    if writable {
+        bits = bits | PAGE_WRITE
+    }
+    write_entry(pt, s, (phys & ADDR_MASK) | bits)
+    // Anders als bei `map_page` kann der Prozess hier SCHON LAUFEN --
+    // `ring_setup` ist ein Systemaufruf aus Ring 3, seine Tabellen
+    // stehen also in cr3 und der Prozessor hat sie gecacht. Ohne das
+    // Neuladen liefe er nach der Rueckkehr in eine Seite, von der er
+    // nichts weiss.
+    let now: u64 = asm("mov rax, cr3", out("rax"))
+    if sched.tget(state, i, sched.T_CR3) == now {
+        asm("mov rax, cr3\nmov cr3, rax", out("rax"))
+    }
+    return true
+}
+
+// RUNDE RING: EINE RINGSEITE WIEDER ABHAENGEN, OHNE DEN RAHMEN
+// FREIZUGEBEN. `page_drop` gibt ihn zurueck -- das waere hier falsch:
+// die Rahmen des Rings sind AM STUECK genommen worden und werden am
+// Stueck (`mem.frame_free_run`) zurueckgegeben, von `ring.free_ring`
+// und von niemandem sonst. Wer sie hier einzeln freigaebe, haette sie
+// zweimal frei.
+fn page_unmap(state: u64, i: u64, addr: u64) -> bool {
+    let s: u64 = pt_slot(addr)
+    if s >= 512 {
+        return false
+    }
+    let pt: u64 = pt_for(state, i, addr, false)
+    if pt == 0 {
+        return false
+    }
+    if (read_entry(pt, s) & PAGE_PRESENT) == 0 {
+        return false
+    }
+    write_entry(pt, s, 0)
+    let now: u64 = asm("mov rax, cr3", out("rax"))
+    if sched.tget(state, i, sched.T_CR3) == now {
+        asm("mov rax, cr3\nmov cr3, rax", out("rax"))
+    }
+    return true
 }
 
 // ================================ RUNDE K16: DER STAPEL WAECHST BEI BEDARF
@@ -940,6 +1044,19 @@ fn copy_space(state: u64, from: u64, to: u64) -> u64 {
     // und dann ist diese Schleife genau die von damals.
     var kachel: u64 = 0
     while kachel < PRIV_SLOTS {
+        // RUNDE RING: EIN RING WIRD NICHT GEERBT.
+        //
+        // Der Ring ist geteilter Speicher zwischen dem Kern und GENAU
+        // EINEM Prozess -- die Ringtafel im Kern traegt einen
+        // Eigentuemer mit pid. Ein Kind, das die Seiten geerbt haette,
+        // saehe Fertigmeldungen seines Vaters und koennte Abgaben in
+        // einen Ring schreiben, der ihm nicht gehoert. Es bekommt
+        // deshalb GAR KEINEN Ring und muss `ring_setup` selbst rufen --
+        // dieselbe Entscheidung, die Runde K7 fuer den Rahmenpuffer
+        // getroffen hat, und aus demselben Grund.
+        if kachel == RING_SLOT {
+            kachel = kachel + 1
+        } else {
         let a: u64 = USER_DATA + kachel * USER_SPAN
         let s2: u64 = pt_for(state, from, a, false)
         if s2 != 0 {
@@ -956,6 +1073,7 @@ fn copy_space(state: u64, from: u64, to: u64) -> u64 {
             n = n + m
         }
         kachel = kachel + 1
+        }
     }
     return n
 }
