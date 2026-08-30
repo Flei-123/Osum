@@ -1,0 +1,1586 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/mp3.fi -- Runde DEMUX: MPEG-1 Layer III, in Festkomma.
+//
+// WARUM MP3 UND NICHT AAC. Die Runde durfte einen Tondekodierer RICHTIG
+// bauen statt zwei halb. MP3 gewinnt aus drei Gruenden: (1) es ist mit
+// 3500-6000 Zeilen der kleinere der beiden (die Recherche in
+// /root/osum-research-raw.md nennt AAC-LC nicht kleiner); (2) es ist der
+// EINZIGE Codec, der in allen drei Behaeltern dieser Runde vorkommt --
+// als eigene Datei, in MP4 (`.mp3`/esds 0x6B) und in Matroska
+// (`A_MPEG/L3`); (3) eine MP3-Sammlung ist das, was auf einem Rechner
+// wirklich liegt. Was AAC kostet und warum es NICHT halb dabei ist,
+// steht in STATUS-DEMUX.md.
+//
+// KEIN FLIESSKOMMA. Ring 3 dieses Systems hat keins. Alles hier rechnet
+// in GANZEN Zahlen mit 20 Bruchbits (`mp3tab.FB`); die Tafeln erzeugt
+// `tools/demux/mktab.py`. Das ist kein Notbehelf -- libmad macht es
+// genauso, und die Genauigkeit reicht: der gemessene Fehler gegen
+// ffmpeg steht in STATUS-DEMUX.md, in Einheiten des 16-Bit-Abtastwerts.
+//
+// WAS DRIN IST: MPEG-1 Layer III, 32/44,1/48 kHz, alle vier Kanalmodi
+// (Stereo, Joint mit MS UND Intensitaet, Dual, Mono), lange und kurze
+// Bloecke samt Mischblock, das Bitreservoir, die Aliasminderung, die
+// IMDCT mit allen vier Fenstern und die Polyphasensynthese.
+//
+// WAS NICHT DRIN IST, UND WARUM: MPEG-2/2.5 Layer III (halbe und
+// viertel Abtastrate, also 8-24 kHz) braucht einen zweiten
+// Skalenfaktorpfad mit eigenen Tafeln. Musik gibt es dort praktisch
+// nicht -- 32, 44,1 und 48 kHz sind MPEG-1. Der Dekodierer ERKENNT so
+// eine Datei und sagt es, statt sie falsch zu spielen. Layer I und II
+// ebenso.
+//
+// DIE STELLE, AN DER ES SCHIEFGEHT, WENN MAN NICHT AUFPASST: das
+// BITRESERVOIR. Ein Rahmen enthaelt nicht seine eigenen Daten, sondern
+// zeigt mit `main_data_begin` bis zu 511 Oktette ZURUECK. Wer den
+// Reservoirpuffer nach dem Anhaengen und nicht davor anschneidet,
+// bekommt ein Ergebnis, das die ersten Sekunden richtig klingt und
+// danach zerfaellt.
+
+profile kernel
+
+import ulib
+import media
+import mp3tab
+
+export {
+    mp3_probe, mp3_open, mp3_truncated, mp3_reset,
+    mp3_rate, mp3_channels, mp3_nframes, mp3_dur_ms, mp3_kbps, mp3_vbr,
+    mp3_next, mp3_pcm, mp3_nsamp, mp3_errors, mp3_clamps, mp3_skipped,
+    mp3_inbuf, mp3_decode, mp3_at_end, mp3_pos_ms, mp3_seek_ms,
+    mp3_hdr_at, mp3_framelen, mp3_layer, mp3_version, mp3_first,
+    MAXIN
+}
+
+const MAXIN: u64 = 2048 // groesster Rahmen: 320 kbit/s bei 32 kHz + Fuellung
+const FB: u64 = 20
+const HALF: i64 = 524288 // 1 << (FB-1), fuer das Runden
+
+// -------------------------------------------------------- der Rahmenkopf
+
+static mut h_ver: u64 = 0 // 3 = MPEG-1, 2 = MPEG-2, 0 = MPEG-2.5
+static mut h_layer: u64 = 0 // 3 = Layer III (4 - Bitfeld: 01 -> 3)
+static mut h_crc: u64 = 0 // 1 = KEINE Pruefsumme
+static mut h_bi: u64 = 0
+static mut h_si: u64 = 0
+static mut h_pad: u64 = 0
+static mut h_mode: u64 = 0
+static mut h_mext: u64 = 0
+static mut h_len: u64 = 0
+static mut nch: u64 = 2
+
+// Kopf aus vier Oktetten. false = kein gueltiger Kopf.
+fn hdr_of(b0: u64, b1: u64, b2: u64, b3: u64) -> bool {
+    if b0 != 0xFF {
+        return false
+    }
+    if (b1 & 0xE0) != 0xE0 {
+        return false
+    }
+    let ver: u64 = (b1 >> 3) & 3
+    if ver == 1 {
+        return false // reserviert
+    }
+    let lay: u64 = (b1 >> 1) & 3
+    if lay == 0 {
+        return false // reserviert
+    }
+    let bi: u64 = (b2 >> 4) & 15
+    if bi == 0 || bi == 15 {
+        return false // "frei" und "unzulaessig"
+    }
+    let si: u64 = (b2 >> 2) & 3
+    if si == 3 {
+        return false
+    }
+    h_ver = ver
+    h_layer = 4 - lay // 01 -> 3 (Layer III), 10 -> 2, 11 -> 1
+    h_crc = b1 & 1
+    h_bi = bi
+    h_si = si
+    h_pad = (b2 >> 1) & 1
+    h_mode = (b3 >> 6) & 3
+    h_mext = (b3 >> 4) & 3
+    if h_mode == 3 {
+        nch = 1
+    } else {
+        nch = 2
+    }
+    // Die Rahmenlaenge. Fuer MPEG-1 Layer III sind es 144 Abtastwerte je
+    // Oktett-Achtel, fuer MPEG-2/2.5 die Haelfte. Beide Zahlen stehen
+    // hier, damit die LAENGE stimmt, auch wenn nur MPEG-1 dekodiert wird
+    // -- sonst findet der Rahmenzaehler den naechsten Kopf nicht.
+    let br: u64 = (mp3tab.l3_bitrate[(bi) as usize]) as u64
+    var sr: u64 = (mp3tab.srate[(si) as usize]) as u64
+    if ver == 2 {
+        sr = sr / 2
+    } else if ver == 0 {
+        sr = sr / 4
+    }
+    if br == 0 || sr == 0 {
+        return false
+    }
+    if ver == 3 {
+        h_len = (144 * br) / sr + h_pad
+    } else {
+        h_len = (72 * br) / sr + h_pad
+    }
+    if h_len < 24 || h_len > MAXIN {
+        return false
+    }
+    return true
+}
+
+fn mp3_layer() -> u64 {
+    return h_layer
+}
+
+fn mp3_version() -> u64 {
+    return h_ver
+}
+
+fn mp3_framelen() -> u64 {
+    return h_len
+}
+
+// Liest den Kopf an einer Dateiposition. Nur zum Suchen.
+fn mp3_hdr_at(off: u64) -> bool {
+    return hdr_of(media.src_byte(off), media.src_byte(off + 1),
+                  media.src_byte(off + 2), media.src_byte(off + 3))
+}
+
+// -------------------------------------------------------- die Bitleser
+//
+// Zwei Leser, weil zwei Stroeme gleichzeitig offen sind: die
+// Seiteninformation liegt IM Rahmen, die Nutzdaten im Reservoir, und
+// das Reservoir faengt weiter vorn an als der Rahmen.
+
+static mut inb: [u8; 2048] = [0 as u8; 2048]
+static mut sb_bit: u64 = 0
+
+fn sb_get(n: u64) -> u64 {
+    var v: u64 = 0
+    var i: u64 = 0
+    while i < n {
+        let byte: u64 = sb_bit >> 3
+        var b: u64 = 0
+        if byte < MAXIN {
+            b = (inb[(byte) as usize]) as u64
+        }
+        v = (v << 1) | ((b >> (7 - (sb_bit & 7))) & 1)
+        sb_bit = sb_bit + 1
+        i = i + 1
+    }
+    return v
+}
+
+const RESMAX: u64 = 4096
+
+static mut res: [u8; 4096] = [0 as u8; 4096]
+static mut res_n: u64 = 0
+static mut mb_bit: u64 = 0
+static mut mb_end: u64 = 0 // Bitzahl im Reservoir
+static mut errs: u64 = 0
+
+fn mb_get(n: u64) -> u64 {
+    var v: u64 = 0
+    var i: u64 = 0
+    while i < n {
+        if mb_bit >= mb_end {
+            errs = errs + 1
+            mb_bit = mb_bit + 1
+            v = v << 1
+        } else {
+            let byte: u64 = mb_bit >> 3
+            let b: u64 = (res[(byte) as usize]) as u64
+            v = (v << 1) | ((b >> (7 - (mb_bit & 7))) & 1)
+            mb_bit = mb_bit + 1
+        }
+        i = i + 1
+    }
+    return v
+}
+
+fn mb_bit1() -> u64 {
+    if mb_bit >= mb_end {
+        errs = errs + 1
+        mb_bit = mb_bit + 1
+        return 0
+    }
+    let byte: u64 = mb_bit >> 3
+    let b: u64 = (res[(byte) as usize]) as u64
+    let v: u64 = (b >> (7 - (mb_bit & 7))) & 1
+    mb_bit = mb_bit + 1
+    return v
+}
+
+// --------------------------------------------------- die Seiteninformation
+
+static mut si_begin: u64 = 0
+static mut scfsi: [u64; 8] = [0 as u64; 8]
+static mut p23: [u64; 4] = [0 as u64; 4]
+static mut bigv: [u64; 4] = [0 as u64; 4]
+static mut ggain: [u64; 4] = [0 as u64; 4]
+static mut sfcomp: [u64; 4] = [0 as u64; 4]
+static mut winsw: [u64; 4] = [0 as u64; 4]
+static mut btype: [u64; 4] = [0 as u64; 4]
+static mut mixed: [u64; 4] = [0 as u64; 4]
+static mut tsel: [u64; 12] = [0 as u64; 12]
+static mut sbg: [u64; 12] = [0 as u64; 12]
+static mut reg0: [u64; 4] = [0 as u64; 4]
+static mut reg1: [u64; 4] = [0 as u64; 4]
+static mut pref: [u64; 4] = [0 as u64; 4]
+static mut sfsc: [u64; 4] = [0 as u64; 4]
+static mut c1sel: [u64; 4] = [0 as u64; 4]
+static mut cnt1: [u64; 4] = [0 as u64; 4]
+
+// Skalenfaktoren: [gr][ch][sfb] lang, [gr][ch][sfb][win] kurz.
+static mut scl: [u64; 88] = [0 as u64; 88] // 2*2*22
+static mut scs: [u64; 156] = [0 as u64; 156] // 2*2*13*3
+
+fn read_side() {
+    sb_bit = 32
+    if h_crc == 0 {
+        sb_bit = 48
+    }
+    si_begin = sb_get(9)
+    if nch == 1 {
+        sb_get(5)
+    } else {
+        sb_get(3)
+    }
+    var ch: u64 = 0
+    while ch < nch {
+        var g: u64 = 0
+        while g < 4 {
+            scfsi[(ch * 4 + g) as usize] = sb_get(1)
+            g = g + 1
+        }
+        ch = ch + 1
+    }
+    var gr: u64 = 0
+    while gr < 2 {
+        ch = 0
+        while ch < nch {
+            let k: u64 = gr * 2 + ch
+            p23[(k) as usize] = sb_get(12)
+            bigv[(k) as usize] = sb_get(9)
+            ggain[(k) as usize] = sb_get(8)
+            sfcomp[(k) as usize] = sb_get(4)
+            winsw[(k) as usize] = sb_get(1)
+            if winsw[(k) as usize] == 1 {
+                btype[(k) as usize] = sb_get(2)
+                mixed[(k) as usize] = sb_get(1)
+                var r: u64 = 0
+                while r < 2 {
+                    tsel[(k * 3 + r) as usize] = sb_get(5)
+                    r = r + 1
+                }
+                tsel[(k * 3 + 2) as usize] = 0
+                r = 0
+                while r < 3 {
+                    sbg[(k * 3 + r) as usize] = sb_get(3)
+                    r = r + 1
+                }
+                // Die Grenzen sind hier NICHT im Strom, sie sind fest.
+                // Die Norm schreibt 7; fuer den reinen Kurzblock ist 8
+                // richtig -- das ist der bekannte Fehler in der Norm,
+                // und jeder Dekodierer, der Musik abspielt, macht es so.
+                if btype[(k) as usize] == 2 && mixed[(k) as usize] == 0 {
+                    reg0[(k) as usize] = 8
+                } else {
+                    reg0[(k) as usize] = 7
+                }
+                reg1[(k) as usize] = 20 - reg0[(k) as usize]
+            } else {
+                var r: u64 = 0
+                while r < 3 {
+                    tsel[(k * 3 + r) as usize] = sb_get(5)
+                    r = r + 1
+                }
+                reg0[(k) as usize] = sb_get(4)
+                reg1[(k) as usize] = sb_get(3)
+                btype[(k) as usize] = 0
+                mixed[(k) as usize] = 0
+                sbg[(k * 3 + 0) as usize] = 0
+                sbg[(k * 3 + 1) as usize] = 0
+                sbg[(k * 3 + 2) as usize] = 0
+            }
+            pref[(k) as usize] = sb_get(1)
+            sfsc[(k) as usize] = sb_get(1)
+            c1sel[(k) as usize] = sb_get(1)
+            ch = ch + 1
+        }
+        gr = gr + 1
+    }
+}
+
+// ----------------------------------------------------- die Skalenfaktoren
+
+fn read_scf(gr: u64, ch: u64) {
+    let k: u64 = gr * 2 + ch
+    let s1: u64 = (mp3tab.slen1[(sfcomp[(k) as usize]) as usize]) as u64
+    let s2: u64 = (mp3tab.slen2[(sfcomp[(k) as usize]) as usize]) as u64
+    let bl: u64 = gr * 44 + ch * 22
+    let bs: u64 = gr * 78 + ch * 39
+    if winsw[(k) as usize] == 1 && btype[(k) as usize] == 2 {
+        if mixed[(k) as usize] == 1 {
+            var sfb: u64 = 0
+            while sfb < 8 {
+                scl[(bl + sfb) as usize] = mb_get(s1)
+                sfb = sfb + 1
+            }
+            sfb = 3
+            while sfb < 12 {
+                var nb: u64 = s2
+                if sfb < 6 {
+                    nb = s1
+                }
+                var w: u64 = 0
+                while w < 3 {
+                    scs[(bs + sfb * 3 + w) as usize] = mb_get(nb)
+                    w = w + 1
+                }
+                sfb = sfb + 1
+            }
+        } else {
+            var sfb: u64 = 0
+            while sfb < 12 {
+                var nb: u64 = s2
+                if sfb < 6 {
+                    nb = s1
+                }
+                var w: u64 = 0
+                while w < 3 {
+                    scs[(bs + sfb * 3 + w) as usize] = mb_get(nb)
+                    w = w + 1
+                }
+                sfb = sfb + 1
+            }
+        }
+    } else {
+        // Vier Gruppen, und `scfsi` sagt je Gruppe, ob der zweite
+        // Granulat die Werte des ersten ERBT statt sie zu lesen.
+        grp(gr, ch, 0, 6, s1, 0)
+        grp(gr, ch, 6, 11, s1, 1)
+        grp(gr, ch, 11, 16, s2, 2)
+        grp(gr, ch, 16, 21, s2, 3)
+    }
+}
+
+fn grp(gr: u64, ch: u64, from: u64, to: u64, slen: u64, g: u64) {
+    let bl: u64 = gr * 44 + ch * 22
+    if scfsi[(ch * 4 + g) as usize] == 0 || gr == 0 {
+        var sfb: u64 = from
+        while sfb < to {
+            scl[(bl + sfb) as usize] = mb_get(slen)
+            sfb = sfb + 1
+        }
+    } else {
+        var sfb: u64 = from
+        while sfb < to {
+            scl[(44 + ch * 22 + sfb) as usize] = scl[(ch * 22 + sfb) as usize]
+            sfb = sfb + 1
+        }
+    }
+}
+
+// ------------------------------------------------------- Huffman
+
+static mut hx: i64 = 0
+static mut hy: i64 = 0
+static mut hv: i64 = 0
+static mut hw: i64 = 0
+
+// Ein Codewort aus einem der Baeume. Der Baum steht in `mp3tab.htree`:
+// zwei Zellen je Knoten, eine Zelle >= 0x8000 ist ein Blatt.
+fn huff_sym(tab: u64) -> u64 {
+    var node: u64 = (mp3tab.hroot[(tab) as usize]) as u64
+    if node == 0xFFFF {
+        return 0
+    }
+    var guard: u64 = 0
+    while guard < 24 {
+        guard = guard + 1
+        let b: u64 = mb_bit1()
+        let c: u64 = (mp3tab.htree[(node * 2 + b) as usize]) as u64
+        if c >= 0x8000 {
+            return c & 0xFF
+        }
+        node = c
+    }
+    errs = errs + 1
+    return 0
+}
+
+fn huff_pair(tab: u64) {
+    let sym: u64 = huff_sym(tab)
+    var x: i64 = ((sym >> 4) & 15) as i64
+    var y: i64 = (sym & 15) as i64
+    let lb: u64 = (mp3tab.hlin[(tab) as usize]) as u64
+    if lb > 0 && x == 15 {
+        x = x + (mb_get(lb) as i64)
+    }
+    if x > 0 {
+        if mb_bit1() == 1 {
+            x = 0 - x
+        }
+    }
+    if lb > 0 && y == 15 {
+        y = y + (mb_get(lb) as i64)
+    }
+    if y > 0 {
+        if mb_bit1() == 1 {
+            y = 0 - y
+        }
+    }
+    hx = x
+    hy = y
+}
+
+fn huff_quad(tab: u64) {
+    let sym: u64 = huff_sym(tab)
+    let n: u64 = sym & 15
+    var v: i64 = ((n >> 3) & 1) as i64
+    var w: i64 = ((n >> 2) & 1) as i64
+    var x: i64 = ((n >> 1) & 1) as i64
+    var y: i64 = (n & 1) as i64
+    if v > 0 {
+        if mb_bit1() == 1 { v = 0 - v }
+    }
+    if w > 0 {
+        if mb_bit1() == 1 { w = 0 - w }
+    }
+    if x > 0 {
+        if mb_bit1() == 1 { x = 0 - x }
+    }
+    if y > 0 {
+        if mb_bit1() == 1 { y = 0 - y }
+    }
+    hv = v
+    hw = w
+    hx = x
+    hy = y
+}
+
+// --------------------------------------------------------- die Spektren
+
+static mut xr: [i64; 1152] = [0 as i64; 1152] // 2 Kanaele x 576
+
+fn read_huffman(gr: u64, ch: u64, p2start: u64) {
+    let k: u64 = gr * 2 + ch
+    let base: u64 = ch * 576
+    var i: u64 = 0
+    if p23[(k) as usize] == 0 {
+        while i < 576 {
+            xr[(base + i) as usize] = 0
+            i = i + 1
+        }
+        cnt1[(k) as usize] = 0
+        return
+    }
+    let bend: u64 = p2start + p23[(k) as usize] - 1
+    var r1: u64 = 0
+    var r2: u64 = 0
+    if winsw[(k) as usize] == 1 && btype[(k) as usize] == 2 {
+        r1 = 36
+        r2 = 576
+    } else {
+        let a: u64 = reg0[(k) as usize] + 1
+        var b: u64 = reg0[(k) as usize] + reg1[(k) as usize] + 2
+        if a > 22 {
+            r1 = 576
+        } else {
+            r1 = (mp3tab.sfbl[(h_si * 23 + a) as usize]) as u64
+        }
+        if b > 22 {
+            b = 22
+        }
+        r2 = (mp3tab.sfbl[(h_si * 23 + b) as usize]) as u64
+    }
+    let nbig: u64 = bigv[(k) as usize] * 2
+    i = 0
+    while i < nbig && i < 576 {
+        var t: u64 = 0
+        if i < r1 {
+            t = tsel[(k * 3 + 0) as usize]
+        } else if i < r2 {
+            t = tsel[(k * 3 + 1) as usize]
+        } else {
+            t = tsel[(k * 3 + 2) as usize]
+        }
+        huff_pair(t)
+        xr[(base + i) as usize] = hx
+        if i + 1 < 576 {
+            xr[(base + i + 1) as usize] = hy
+        }
+        i = i + 2
+    }
+    let ct: u64 = c1sel[(k) as usize] + 32
+    var pos: u64 = nbig
+    if pos > 576 {
+        pos = 576
+    }
+    var going: bool = true
+    while going {
+        if pos > 572 || mb_bit > bend {
+            going = false
+        } else {
+            huff_quad(ct)
+            xr[(base + pos) as usize] = hv
+            xr[(base + pos + 1) as usize] = hw
+            xr[(base + pos + 2) as usize] = hx
+            xr[(base + pos + 3) as usize] = hy
+            pos = pos + 4
+        }
+    }
+    // Ein Codewort, das ueber das Ende hinausragte, gilt nicht.
+    if mb_bit > bend + 1 && pos >= 4 {
+        pos = pos - 4
+    }
+    cnt1[(k) as usize] = pos
+    while pos < 576 {
+        xr[(base + pos) as usize] = 0
+        pos = pos + 1
+    }
+    mb_bit = bend + 1
+}
+
+// ------------------------------------------------------ Requantisierung
+
+static mut clamps: u64 = 0
+
+const XRMAX: i64 = 67108864 // 64,0 in Q20
+
+fn fdiv4(x: i64) -> i64 {
+    if x >= 0 {
+        return x / 4
+    }
+    return 0 - ((3 - x) / 4)
+}
+
+// Aus der ganzen Zahl `v` und dem Viertelexponenten `qq` den Wert in Q20.
+fn requant(v: i64, qq: i64) -> i64 {
+    if v == 0 {
+        return 0
+    }
+    var a: i64 = v
+    if a < 0 {
+        a = 0 - a
+    }
+    if a > 8206 {
+        a = 8206
+        clamps = clamps + 1
+    }
+    let p: i64 = (mp3tab.pow43[(a) as usize]) as i64 // Q14
+    let q4: i64 = fdiv4(qq)
+    let r: u64 = (qq - 4 * q4) as u64 // 0..3
+    let prod: i64 = p * ((mp3tab.pow2q[(r) as usize]) as i64) // Q40
+    let sh: i64 = 20 - q4
+    var out: i64 = 0
+    if sh >= 63 {
+        out = 0
+    } else if sh >= 0 {
+        out = prod >> (sh as u64)
+    } else {
+        let l: i64 = 0 - sh
+        if l > 5 {
+            out = XRMAX
+            clamps = clamps + 1
+        } else {
+            out = prod << (l as u64)
+        }
+    }
+    if out > XRMAX {
+        out = XRMAX
+        clamps = clamps + 1
+    }
+    if v < 0 {
+        return 0 - out
+    }
+    return out
+}
+
+fn requantize(gr: u64, ch: u64) {
+    let k: u64 = gr * 2 + ch
+    let base: u64 = ch * 576
+    let bl: u64 = gr * 44 + ch * 22
+    let bs: u64 = gr * 78 + ch * 39
+    let gain: i64 = (ggain[(k) as usize]) as i64
+    var mul: i64 = 2
+    if sfsc[(k) as usize] == 1 {
+        mul = 4
+    }
+    let n: u64 = cnt1[(k) as usize]
+    let short: bool = winsw[(k) as usize] == 1 && btype[(k) as usize] == 2
+    if !short {
+        var sfb: u64 = 0
+        var next: u64 = (mp3tab.sfbl[(h_si * 23 + 1) as usize]) as u64
+        var i: u64 = 0
+        while i < n {
+            if i == next && sfb < 21 {
+                sfb = sfb + 1
+                next = (mp3tab.sfbl[(h_si * 23 + sfb + 1) as usize]) as u64
+            }
+            var pt: i64 = 0
+            if pref[(k) as usize] == 1 {
+                pt = (mp3tab.pretab[(sfb) as usize]) as i64
+            }
+            let qq: i64 = (gain - 210)
+                - mul * ((scl[(bl + sfb) as usize] as i64) + pt)
+            xr[(base + i) as usize] = requant(xr[(base + i) as usize], qq)
+            i = i + 1
+        }
+    } else {
+        var i: u64 = 0
+        var sfb: u64 = 0
+        if mixed[(k) as usize] == 1 {
+            // Die ersten zwei Teilbaender sind LANG.
+            sfb = 0
+            var next: u64 = (mp3tab.sfbl[(h_si * 23 + 1) as usize]) as u64
+            while i < 36 && i < n {
+                if i == next && sfb < 21 {
+                    sfb = sfb + 1
+                    next = (mp3tab.sfbl[(h_si * 23 + sfb + 1) as usize]) as u64
+                }
+                let qq: i64 = (gain - 210)
+                    - mul * (scl[(bl + sfb) as usize] as i64)
+                xr[(base + i) as usize] = requant(xr[(base + i) as usize], qq)
+                i = i + 1
+            }
+            if i < 36 {
+                i = 36
+            }
+            sfb = 3
+        } else {
+            sfb = 0
+        }
+        var next: u64 = ((mp3tab.sfbs[(h_si * 14 + sfb + 1) as usize]) as u64) * 3
+        var wl: u64 = ((mp3tab.sfbs[(h_si * 14 + sfb + 1) as usize]) as u64)
+            - ((mp3tab.sfbs[(h_si * 14 + sfb) as usize]) as u64)
+        while i < n && sfb < 13 {
+            if i == next && sfb < 12 {
+                sfb = sfb + 1
+                next = ((mp3tab.sfbs[(h_si * 14 + sfb + 1) as usize]) as u64) * 3
+                wl = ((mp3tab.sfbs[(h_si * 14 + sfb + 1) as usize]) as u64)
+                    - ((mp3tab.sfbs[(h_si * 14 + sfb) as usize]) as u64)
+            }
+            var w: u64 = 0
+            while w < 3 && i < n {
+                let qq: i64 = (gain - 210 - 8 * (sbg[(k * 3 + w) as usize] as i64))
+                    - mul * (scs[(bs + sfb * 3 + w) as usize] as i64)
+                var j: u64 = 0
+                while j < wl && i < n {
+                    xr[(base + i) as usize] = requant(xr[(base + i) as usize], qq)
+                    i = i + 1
+                    j = j + 1
+                }
+                w = w + 1
+            }
+            if wl == 0 {
+                sfb = 13
+            }
+        }
+    }
+}
+
+// ------------------------------------------------------------ Umsortieren
+
+static mut re: [i64; 576] = [0 as i64; 576]
+
+fn reorder(gr: u64, ch: u64) {
+    let k: u64 = gr * 2 + ch
+    if winsw[(k) as usize] != 1 || btype[(k) as usize] != 2 {
+        return
+    }
+    let base: u64 = ch * 576
+    var sfb: u64 = 0
+    if mixed[(k) as usize] == 1 {
+        sfb = 3
+    }
+    while sfb < 13 {
+        let s0: u64 = (mp3tab.sfbs[(h_si * 14 + sfb) as usize]) as u64
+        let s1: u64 = (mp3tab.sfbs[(h_si * 14 + sfb + 1) as usize]) as u64
+        if s1 <= s0 {
+            sfb = 13
+        } else {
+            let wl: u64 = s1 - s0
+            let st: u64 = s0 * 3
+            var w: u64 = 0
+            while w < 3 {
+                var j: u64 = 0
+                while j < wl {
+                    re[(j * 3 + w) as usize] = xr[(base + st + w * wl + j) as usize]
+                    j = j + 1
+                }
+                w = w + 1
+            }
+            var j: u64 = 0
+            while j < 3 * wl {
+                xr[(base + st + j) as usize] = re[(j) as usize]
+                j = j + 1
+            }
+            sfb = sfb + 1
+        }
+    }
+}
+
+// -------------------------------------------------------------- Stereo
+
+fn mul20(a: i64, b: i64) -> i64 {
+    return (a * b + HALF) >> FB
+}
+
+fn stereo(gr: u64) {
+    if nch != 2 {
+        return
+    }
+    if h_mode != 1 || h_mext == 0 {
+        return
+    }
+    let k0: u64 = gr * 2
+    let k1: u64 = gr * 2 + 1
+    if (h_mext & 2) != 0 {
+        var mx: u64 = cnt1[(k0) as usize]
+        if cnt1[(k1) as usize] > mx {
+            mx = cnt1[(k1) as usize]
+        }
+        var i: u64 = 0
+        while i < mx {
+            let l: i64 = xr[(i) as usize]
+            let r: i64 = xr[(576 + i) as usize]
+            xr[(i) as usize] = mul20(l + r, mp3tab.INV_SQRT2)
+            xr[(576 + i) as usize] = mul20(l - r, mp3tab.INV_SQRT2)
+            i = i + 1
+        }
+    }
+    if (h_mext & 1) != 0 {
+        let bound: u64 = cnt1[(k1) as usize]
+        if winsw[(k0) as usize] == 1 && btype[(k0) as usize] == 2 {
+            var sfb: u64 = 0
+            if mixed[(k0) as usize] == 1 {
+                while sfb < 8 {
+                    if ((mp3tab.sfbl[(h_si * 23 + sfb) as usize]) as u64) >= bound {
+                        is_long(gr, sfb)
+                    }
+                    sfb = sfb + 1
+                }
+                sfb = 3
+            }
+            while sfb < 12 {
+                if (((mp3tab.sfbs[(h_si * 14 + sfb) as usize]) as u64) * 3) >= bound {
+                    is_short(gr, sfb)
+                }
+                sfb = sfb + 1
+            }
+        } else {
+            var sfb: u64 = 0
+            while sfb < 21 {
+                if ((mp3tab.sfbl[(h_si * 23 + sfb) as usize]) as u64) >= bound {
+                    is_long(gr, sfb)
+                }
+                sfb = sfb + 1
+            }
+        }
+    }
+}
+
+fn is_long(gr: u64, sfb: u64) {
+    let pos: u64 = scl[(gr * 44 + sfb) as usize]
+    if pos == 7 {
+        return
+    }
+    let l: i64 = (mp3tab.isr_l[(pos) as usize]) as i64
+    let r: i64 = (mp3tab.isr_r[(pos) as usize]) as i64
+    let a: u64 = (mp3tab.sfbl[(h_si * 23 + sfb) as usize]) as u64
+    let b: u64 = (mp3tab.sfbl[(h_si * 23 + sfb + 1) as usize]) as u64
+    var i: u64 = a
+    while i < b && i < 576 {
+        let v: i64 = xr[(i) as usize]
+        xr[(i) as usize] = mul20(v, l)
+        xr[(576 + i) as usize] = mul20(v, r)
+        i = i + 1
+    }
+}
+
+fn is_short(gr: u64, sfb: u64) {
+    let s0: u64 = (mp3tab.sfbs[(h_si * 14 + sfb) as usize]) as u64
+    let s1: u64 = (mp3tab.sfbs[(h_si * 14 + sfb + 1) as usize]) as u64
+    if s1 <= s0 {
+        return
+    }
+    let wl: u64 = s1 - s0
+    var w: u64 = 0
+    while w < 3 {
+        let pos: u64 = scs[(gr * 78 + sfb * 3 + w) as usize]
+        if pos != 7 {
+            let l: i64 = (mp3tab.isr_l[(pos) as usize]) as i64
+            let r: i64 = (mp3tab.isr_r[(pos) as usize]) as i64
+            let a: u64 = s0 * 3 + wl * w
+            var i: u64 = a
+            while i < a + wl && i < 576 {
+                let v: i64 = xr[(i) as usize]
+                xr[(i) as usize] = mul20(v, l)
+                xr[(576 + i) as usize] = mul20(v, r)
+                i = i + 1
+            }
+        }
+        w = w + 1
+    }
+}
+
+// ------------------------------------------------------- Aliasminderung
+
+fn antialias(gr: u64, ch: u64) {
+    let k: u64 = gr * 2 + ch
+    let base: u64 = ch * 576
+    if winsw[(k) as usize] == 1 && btype[(k) as usize] == 2
+        && mixed[(k) as usize] == 0 {
+        return
+    }
+    var lim: u64 = 32
+    if winsw[(k) as usize] == 1 && btype[(k) as usize] == 2
+        && mixed[(k) as usize] == 1 {
+        lim = 2
+    }
+    var sb: u64 = 1
+    while sb < lim {
+        var i: u64 = 0
+        while i < 8 {
+            let li: u64 = base + 18 * sb - 1 - i
+            let ui: u64 = base + 18 * sb + i
+            let cs: i64 = (mp3tab.csf[(i) as usize]) as i64
+            let ca: i64 = (mp3tab.caf[(i) as usize]) as i64
+            let lo: i64 = xr[(li) as usize]
+            let up: i64 = xr[(ui) as usize]
+            xr[(li) as usize] = mul20(lo, cs) - mul20(up, ca)
+            xr[(ui) as usize] = mul20(up, cs) + mul20(lo, ca)
+            i = i + 1
+        }
+        sb = sb + 1
+    }
+}
+
+// ------------------------------------------------------ IMDCT und Fenster
+
+static mut raw: [i64; 36] = [0 as i64; 36]
+static mut store: [i64; 1152] = [0 as i64; 1152] // 2 Kanaele x 32 x 18
+
+// DIE IMDCT, mit der Symmetrie ihrer eigenen Kosinustafel.
+//
+// Fuer N=36 gilt Zeile fuer Zeile: cos-Zeile[p] = -cos-Zeile[17-p] fuer
+// p < 18 und cos-Zeile[p] = cos-Zeile[53-p] fuer p >= 18. Das ist keine
+// Naeherung, es ist eine Identitaet der Kosinusfunktion (tools/demux/
+// mktab.py rechnet sie nach). Also werden 18 der 36 Zeilen gerechnet und
+// die anderen 18 abgeleitet -- die Haelfte der Multiplikationen fuer
+// dasselbe Ergebnis, bis auf das letzte Bit.
+//
+// Dazu die zweite Ersparnis, die bei echter Musik die groessere ist: ein
+// Teilband, dessen 18 Werte alle null sind, hat eine IMDCT von null. Bei
+// 128 kbit/s ist das die Mehrzahl der Teilbaender.
+
+static mut tmp36: [i64; 36] = [0 as i64; 36]
+
+fn imdct(base: u64, sb: u64, bt: u64) -> bool {
+    let inp: u64 = base + sb * 18
+    var leer: bool = true
+    var z: u64 = 0
+    while z < 18 {
+        if xr[(inp + z) as usize] != 0 {
+            leer = false
+            z = 18
+        } else {
+            z = z + 1
+        }
+    }
+    if leer {
+        var i: u64 = 0
+        while i < 36 {
+            raw[(i) as usize] = 0
+            i = i + 1
+        }
+        return false
+    }
+    if bt == 2 {
+        var i: u64 = 0
+        while i < 36 {
+            raw[(i) as usize] = 0
+            i = i + 1
+        }
+        var b: u64 = 0
+        while b < 3 {
+            var p: u64 = 0
+            while p < 12 {
+                var acc: i64 = 0
+                var m: u64 = 0
+                while m < 6 {
+                    let cv: i64 = (mp3tab.cos12[(p * 6 + m) as usize]) as i64
+                    acc = acc + xr[(inp + b + 3 * m) as usize] * cv
+                    m = m + 1
+                }
+                let v: i64 = (acc + HALF) >> FB
+                let o: u64 = 6 * b + p + 6
+                let wv: i64 = (mp3tab.imdct_win[(2 * 36 + p) as usize]) as i64
+                raw[(o) as usize] = raw[(o) as usize] + mul20(v, wv)
+                p = p + 1
+            }
+            b = b + 1
+        }
+        return true
+    }
+    var p: u64 = 0
+    while p < 9 {
+        var acc: i64 = 0
+        var m: u64 = 0
+        while m < 18 {
+            let cv: i64 = (mp3tab.cos36[(p * 18 + m) as usize]) as i64
+            acc = acc + xr[(inp + m) as usize] * cv
+            m = m + 1
+        }
+        let v: i64 = (acc + HALF) >> FB
+        tmp36[(p) as usize] = v
+        tmp36[(17 - p) as usize] = 0 - v
+        p = p + 1
+    }
+    p = 18
+    while p < 27 {
+        var acc: i64 = 0
+        var m: u64 = 0
+        while m < 18 {
+            let cv: i64 = (mp3tab.cos36[(p * 18 + m) as usize]) as i64
+            acc = acc + xr[(inp + m) as usize] * cv
+            m = m + 1
+        }
+        let v: i64 = (acc + HALF) >> FB
+        tmp36[(p) as usize] = v
+        tmp36[(53 - p) as usize] = v
+        p = p + 1
+    }
+    p = 0
+    while p < 36 {
+        let wv: i64 = (mp3tab.imdct_win[(bt * 36 + p) as usize]) as i64
+        raw[(p) as usize] = mul20(tmp36[(p) as usize], wv)
+        p = p + 1
+    }
+    return true
+}
+
+fn hybrid(gr: u64, ch: u64) {
+    let k: u64 = gr * 2 + ch
+    let base: u64 = ch * 576
+    let sbase: u64 = ch * 576
+    var sb: u64 = 0
+    while sb < 32 {
+        var bt: u64 = btype[(k) as usize]
+        if winsw[(k) as usize] == 1 && mixed[(k) as usize] == 1 && sb < 2 {
+            bt = 0
+        }
+        if winsw[(k) as usize] == 0 {
+            bt = 0
+        }
+        imdct(base, sb, bt)
+        var i: u64 = 0
+        while i < 18 {
+            xr[(base + sb * 18 + i) as usize] = raw[(i) as usize]
+                + store[(sbase + sb * 18 + i) as usize]
+            store[(sbase + sb * 18 + i) as usize] = raw[(18 + i) as usize]
+            i = i + 1
+        }
+        sb = sb + 1
+    }
+}
+
+fn freq_inv(ch: u64) {
+    let base: u64 = ch * 576
+    var sb: u64 = 1
+    while sb < 32 {
+        var i: u64 = 1
+        while i < 18 {
+            let at: u64 = base + sb * 18 + i
+            xr[(at) as usize] = 0 - xr[(at) as usize]
+            i = i + 2
+        }
+        sb = sb + 2
+    }
+}
+
+// -------------------------------------------------- die Teilbandsynthese
+
+static mut vvec: [i64; 2048] = [0 as i64; 2048] // 2 Kanaele x 1024
+static mut svec: [i64; 32] = [0 as i64; 32]
+static mut pcm: [u8; 4608] = [0 as u8; 4608] // 1152 x 2 Kanaele x 2 Oktette
+static mut nsamp: u64 = 0
+
+// DIE POLYPHASENSYNTHESE, ohne das Umkopieren und mit der halben Matrix.
+//
+// Zwei Dinge, die pdmp3 und die Norm woertlich so machen und die man
+// nicht so machen muss:
+//
+//  1. "Den V-Vektor um 64 nach oben schieben" sind 960 Kopien je
+//     Abtastschritt -- 34560 je Rahmen und Kanal. Ein Ringpuffer mit
+//     einem VERSATZ tut dasselbe mit einer Subtraktion. 1024 ist eine
+//     Zweierpotenz, also ist "modulo" ein UND.
+//  2. Die Matrix hat 64 Zeilen, aber nur 32 verschiedene: Zeile 32-i ist
+//     das Negative von Zeile i (und Zeile 16 ist null), und Zeile i ist
+//     fuer i > 32 gleich Zeile 96-i. Das ist wieder eine Identitaet des
+//     Kosinus, nachgerechnet in tools/demux/mktab.py.
+//
+// Dazu: Teilbaender, die null sind, kosten keine Multiplikation.
+
+static mut vrot: [u64; 2] = [0 as u64; 2]
+static mut nzi: [u64; 32] = [0 as u64; 32]
+static mut vtmp: [i64; 64] = [0 as i64; 64]
+
+fn subband(gr: u64, ch: u64, outoff: u64) {
+    let base: u64 = ch * 576
+    let vb: u64 = ch * 1024
+    var ss: u64 = 0
+    while ss < 18 {
+        vrot[(ch) as usize] = (vrot[(ch) as usize] + 960) & 1023
+        let rot: u64 = vrot[(ch) as usize]
+        var nz: u64 = 0
+        var i: u64 = 0
+        while i < 32 {
+            let v: i64 = xr[(base + i * 18 + ss) as usize]
+            svec[(i) as usize] = v
+            if v != 0 {
+                nzi[(nz) as usize] = i
+                nz = nz + 1
+            }
+            i = i + 1
+        }
+        // Die 32 wirklich verschiedenen Zeilen: 0..15 und 33..48.
+        i = 0
+        while i < 16 {
+            var acc: i64 = 0
+            var k: u64 = 0
+            while k < nz {
+                let j: u64 = nzi[(k) as usize]
+                let nv: i64 = (mp3tab.nwin[(i * 32 + j) as usize]) as i64
+                acc = acc + svec[(j) as usize] * nv
+                k = k + 1
+            }
+            let v: i64 = (acc + HALF) >> FB
+            vtmp[(i) as usize] = v
+            vtmp[(32 - i) as usize] = 0 - v
+            i = i + 1
+        }
+        vtmp[(16) as usize] = 0
+        i = 33
+        while i < 49 {
+            var acc: i64 = 0
+            var k: u64 = 0
+            while k < nz {
+                let j: u64 = nzi[(k) as usize]
+                let nv: i64 = (mp3tab.nwin[(i * 32 + j) as usize]) as i64
+                acc = acc + svec[(j) as usize] * nv
+                k = k + 1
+            }
+            let v: i64 = (acc + HALF) >> FB
+            vtmp[(i) as usize] = v
+            if i > 33 {
+                vtmp[(96 - i) as usize] = v
+            }
+            i = i + 1
+        }
+        vtmp[(63) as usize] = vtmp[(33) as usize]
+        i = 0
+        while i < 64 {
+            vvec[(vb + ((rot + i) & 1023)) as usize] = vtmp[(i) as usize]
+            i = i + 1
+        }
+        // DER U-VEKTOR WIRD NICHT GEBAUT. Die Norm beschreibt ihn als
+        // 512 Werte, die man erst aus V zusammensucht und dann mit der
+        // Flanke multipliziert. Beides in EINER Schleife spart 512
+        // Kopien je Abtastschritt -- und das Ergebnis ist dasselbe, weil
+        // der Index eine feste Rechnung ist: u[j*32+i] liegt bei
+        // V[(j/2)*128 + i] fuer gerades j und bei V[(j/2)*128 + i + 96]
+        // fuer ungerades.
+        i = 0
+        while i < 32 {
+            var acc: i64 = 0
+            var j: u64 = 0
+            while j < 16 {
+                var voff: u64 = (j >> 1) * 128 + i
+                if (j & 1) == 1 {
+                    voff = voff + 96
+                }
+                let dv: i64 = (mp3tab.dtbl[(j * 32 + i) as usize]) as i64
+                acc = acc + vvec[(vb + ((rot + voff) & 1023)) as usize] * dv
+                j = j + 1
+            }
+            let sum: i64 = (acc + HALF) >> FB
+            var s: i64 = (sum * 32767 + HALF) >> FB
+            if s > 32767 {
+                s = 32767
+            }
+            if s < 0 - 32767 {
+                s = 0 - 32767
+            }
+            let at: u64 = (outoff + 32 * ss + i) * 2 * nch + ch * 2
+            let u: u64 = (s + 65536) as u64
+            pcm[(at) as usize] = (u & 0xFF) as u8
+            pcm[(at + 1) as usize] = ((u >> 8) & 0xFF) as u8
+            i = i + 1
+        }
+        ss = ss + 1
+    }
+}
+
+// ------------------------------------------------------ ein ganzer Rahmen
+
+static mut skipped: u64 = 0
+
+fn mp3_inbuf() -> u64 {
+    return (&inb[0 as usize]) as u64
+}
+
+fn mp3_pcm() -> u64 {
+    return (&pcm[0 as usize]) as u64
+}
+
+fn mp3_nsamp() -> u64 {
+    return nsamp
+}
+
+fn mp3_errors() -> u64 {
+    return errs
+}
+
+fn mp3_clamps() -> u64 {
+    return clamps
+}
+
+fn mp3_skipped() -> u64 {
+    return skipped
+}
+
+fn mp3_channels() -> u64 {
+    return nch
+}
+
+fn mp3_rate() -> u64 {
+    var sr: u64 = (mp3tab.srate[(h_si) as usize]) as u64
+    if h_ver == 2 {
+        sr = sr / 2
+    } else if h_ver == 0 {
+        sr = sr / 4
+    }
+    return sr
+}
+
+// Setzt den Dekodierer zurueck: Reservoir leer, Ueberlappung leer.
+// Ohne das klingt der erste Rahmen nach einem Sprung falsch.
+fn mp3_reset() {
+    res_n = 0
+    mb_bit = 0
+    mb_end = 0
+    errs = 0
+    clamps = 0
+    skipped = 0
+    nsamp = 0
+    var i: u64 = 0
+    while i < 1152 {
+        store[(i) as usize] = 0
+        i = i + 1
+    }
+    i = 0
+    while i < 2048 {
+        vvec[(i) as usize] = 0
+        i = i + 1
+    }
+    vrot[(0) as usize] = 0
+    vrot[(1) as usize] = 0
+}
+
+// Einen Rahmen aus `inb[0..len]` dekodieren. Rueckgabe: Abtastwerte je
+// Kanal (1152), oder 0.
+fn mp3_decode(len: u64) -> u64 {
+    nsamp = 0
+    if len < 4 || len > MAXIN {
+        return 0
+    }
+    if !hdr_of((inb[0 as usize]) as u64, (inb[1 as usize]) as u64,
+               (inb[2 as usize]) as u64, (inb[3 as usize]) as u64) {
+        return 0
+    }
+    if h_layer != 3 || h_ver != 3 {
+        // Layer I/II oder MPEG-2/2.5: erkannt, nicht dekodiert.
+        return 0
+    }
+    var side: u64 = 32
+    if nch == 1 {
+        side = 17
+    }
+    var head: u64 = 4 + side
+    if h_crc == 0 {
+        head = head + 2
+    }
+    if len <= head {
+        return 0
+    }
+    read_side()
+    let mdlen: u64 = len - head
+    // DAS RESERVOIR. Erst den Startpunkt aus dem ALTEN Stand nehmen,
+    // dann anhaengen -- nie andersherum.
+    if si_begin > res_n {
+        // Der Anfang fehlt (erste Rahmen einer Datei, oder nach einem
+        // Sprung). Daten aufheben, aber nichts ausgeben.
+        skipped = skipped + 1
+        if mdlen <= RESMAX {
+            var i: u64 = 0
+            while i < mdlen {
+                res[(i) as usize] = inb[(head + i) as usize]
+                i = i + 1
+            }
+            res_n = mdlen
+        } else {
+            res_n = 0
+        }
+        return 0
+    }
+    let start: u64 = res_n - si_begin
+    if res_n + mdlen > RESMAX {
+        res_n = 0
+        skipped = skipped + 1
+        return 0
+    }
+    var i: u64 = 0
+    while i < mdlen {
+        res[(res_n + i) as usize] = inb[(head + i) as usize]
+        i = i + 1
+    }
+    res_n = res_n + mdlen
+    mb_bit = start * 8
+    mb_end = res_n * 8
+
+    var gr: u64 = 0
+    while gr < 2 {
+        var ch: u64 = 0
+        while ch < nch {
+            let p2: u64 = mb_bit
+            read_scf(gr, ch)
+            read_huffman(gr, ch, p2)
+            ch = ch + 1
+        }
+        ch = 0
+        while ch < nch {
+            requantize(gr, ch)
+            reorder(gr, ch)
+            ch = ch + 1
+        }
+        stereo(gr)
+        ch = 0
+        while ch < nch {
+            antialias(gr, ch)
+            hybrid(gr, ch)
+            freq_inv(ch)
+            subband(gr, ch, gr * 576)
+            ch = ch + 1
+        }
+        gr = gr + 1
+    }
+    // Nur die letzten 511 Oktette werden je wieder gebraucht.
+    if res_n > 511 {
+        let keep: u64 = 511
+        let from: u64 = res_n - keep
+        i = 0
+        while i < keep {
+            res[(i) as usize] = res[(from + i) as usize]
+            i = i + 1
+        }
+        res_n = keep
+    }
+    nsamp = 1152
+    return 1152
+}
+
+// ------------------------------------------- die eigenstaendige MP3-Datei
+
+static mut fpos: u64 = 0
+static mut fbeg: u64 = 0
+static mut fend: u64 = 0
+static mut nfr: u64 = 0
+static mut durms: u64 = 0
+static mut totbytes: u64 = 0
+static mut vbr: u64 = 0
+static mut trunc: u64 = 0
+static mut posms: u64 = 0
+
+fn mp3_truncated() -> bool {
+    return trunc == 1
+}
+
+fn mp3_nframes() -> u64 {
+    return nfr
+}
+
+fn mp3_dur_ms() -> u64 {
+    return durms
+}
+
+fn mp3_vbr() -> bool {
+    return vbr == 1
+}
+
+fn mp3_first() -> u64 {
+    return fbeg
+}
+
+fn mp3_kbps() -> u64 {
+    if durms == 0 {
+        return 0
+    }
+    return (totbytes * 8) / durms
+}
+
+fn mp3_at_end() -> bool {
+    return fpos + 4 > fend
+}
+
+fn mp3_pos_ms() -> u64 {
+    return posms
+}
+
+// Ein ID3v2-Kopf am Anfang wird uebersprungen: "ID3", zwei Oktette
+// Fassung, ein Oktett Fahnen und vier Oktette Laenge in Siebenbitgruppen.
+fn skip_id3(off: u64) -> u64 {
+    if media.src_byte(off) == 0x49 && media.src_byte(off + 1) == 0x44
+        && media.src_byte(off + 2) == 0x33 {
+        let a: u64 = media.src_byte(off + 6) & 0x7F
+        let b: u64 = media.src_byte(off + 7) & 0x7F
+        let c: u64 = media.src_byte(off + 8) & 0x7F
+        let d: u64 = media.src_byte(off + 9) & 0x7F
+        var n: u64 = (a << 21) | (b << 14) | (c << 7) | d
+        var extra: u64 = 10
+        if (media.src_byte(off + 5) & 0x10) != 0 {
+            extra = 20 // Fussleiste
+        }
+        return off + n + extra
+    }
+    return off
+}
+
+// Sucht ab `off` den naechsten Kopf, der auch einen ZWEITEN gueltigen
+// Kopf an der von ihm behaupteten Stelle hat. Ein einzelnes 0xFF-Paar
+// findet man in jedem Bild; erst das Paar macht es glaubhaft.
+fn find_sync(off: u64) -> u64 {
+    var p: u64 = off
+    var guard: u64 = 0
+    while p + 4 <= fend && guard < 200000 {
+        guard = guard + 1
+        if mp3_hdr_at(p) {
+            let l: u64 = h_len
+            if p + l + 4 > fend {
+                return p // letzter Rahmen, kein Nachfolger mehr
+            }
+            if mp3_hdr_at(p + l) {
+                // DREI VERKETTETE KOEPFE, nicht zwei. Ein einzelnes
+                // Paar findet man in jedem Rauschen -- und eine WAV-
+                // Datei ist voller 0xFF, weil jeder negative Abtastwert
+                // ueber -256 genau so anfaengt.
+                let l2: u64 = h_len
+                var gut: bool = p + l + l2 + 4 > fend
+                if !gut {
+                    gut = mp3_hdr_at(p + l + l2)
+                }
+                if gut {
+                    if !mp3_hdr_at(p) {
+                        return fend
+                    }
+                    return p
+                }
+            }
+        }
+        p = p + 1
+    }
+    return fend
+}
+
+fn mp3_probe() -> bool {
+    let n: u64 = media.src_size()
+    if n < 8 {
+        return false
+    }
+    fend = n
+    let s: u64 = skip_id3(0)
+    if s >= n {
+        return false
+    }
+    var p: u64 = s
+    var guard: u64 = 0
+    while p + 4 <= n && guard < 8192 {
+        guard = guard + 1
+        if mp3_hdr_at(p) {
+            let l: u64 = h_len
+            if p + l + 4 > n {
+                return true
+            }
+            if mp3_hdr_at(p + l) {
+                let l2: u64 = h_len
+                if p + l + l2 + 4 > n {
+                    return true
+                }
+                if mp3_hdr_at(p + l + l2) {
+                    return true
+                }
+            }
+        }
+        p = p + 1
+    }
+    return false
+}
+
+// Die ganze Datei einmal durchgehen: Rahmen zaehlen, Dauer und
+// Datenrate RECHNEN. Kein Xing-Kopf wird geglaubt.
+fn mp3_open() -> bool {
+    trunc = 0
+    nfr = 0
+    durms = 0
+    totbytes = 0
+    vbr = 0
+    posms = 0
+    fend = media.src_size()
+    let s: u64 = skip_id3(0)
+    fbeg = find_sync(s)
+    if fbeg >= fend {
+        return false
+    }
+    if !mp3_hdr_at(fbeg) {
+        return false
+    }
+    let rate: u64 = mp3_rate()
+    let first_bi: u64 = h_bi
+    let spf: u64 = spf_of()
+    var p: u64 = fbeg
+    var samples: u64 = 0
+    var guard: u64 = 0
+    var resyncs: u64 = 0
+    while p + 4 <= fend && guard < 2000000 {
+        guard = guard + 1
+        if !mp3_hdr_at(p) {
+            resyncs = resyncs + 1
+            if resyncs > 256 {
+                // Mehr als 256 Wiederanschluesse: das ist keine
+                // MP3-Datei, das ist etwas anderes mit 0xFF darin.
+                trunc = 1
+                p = fend
+                nfr = 0
+            } else {
+                let q: u64 = find_sync(p)
+                if q >= fend {
+                    trunc = 1
+                    p = fend
+                } else {
+                    trunc = 1
+                    p = q
+                }
+            }
+        } else {
+            if h_bi != first_bi {
+                vbr = 1
+            }
+            if p + h_len > fend {
+                trunc = 1
+                p = fend
+            } else {
+                nfr = nfr + 1
+                totbytes = totbytes + h_len
+                samples = samples + spf_of()
+                p = p + h_len
+            }
+        }
+    }
+    if rate > 0 {
+        durms = (samples * 1000) / rate
+    }
+    // Den Kopf des ERSTEN Rahmens wiederherstellen, damit
+    // `mp3_rate`/`mp3_channels` das Richtige sagen.
+    mp3_hdr_at(fbeg)
+    fpos = fbeg
+    mp3_reset()
+    // Eine MP3-Datei ist EINE Tonspur. Sie kommt in dieselbe Tafel wie
+    // die Spuren aus MP4 und MKV, damit die Anwendung nur eine kennt.
+    media.trk_reset()
+    let t: u64 = media.trk_add(media.K_AUDIO, media.C_MP3, 0)
+    if t < 16 {
+        media.trk_set(t, media.T_RATE, mp3_rate())
+        media.trk_set(t, media.T_CH, nch)
+        media.trk_set(t, media.T_BITS, 16)
+        media.trk_set(t, media.T_DUR_MS, durms)
+        media.trk_set(t, media.T_BYTES, totbytes)
+        media.trk_set(t, media.T_NSAMP, nfr)
+        media.trk_set(t, media.T_SCALE, 1000)
+    }
+    return nfr > 0
+}
+
+fn spf_of() -> u64 {
+    if h_ver == 3 {
+        return 1152
+    }
+    return 576
+}
+
+// Den naechsten Rahmen der Datei dekodieren. Rueckgabe: Abtastwerte je
+// Kanal, 0 am Ende oder bei einem Rahmen ohne Ausgabe.
+fn mp3_next() -> u64 {
+    if fpos + 4 > fend {
+        return 0
+    }
+    if !mp3_hdr_at(fpos) {
+        let q: u64 = find_sync(fpos)
+        if q >= fend {
+            fpos = fend
+            return 0
+        }
+        fpos = q
+        mp3_reset()
+        if !mp3_hdr_at(fpos) {
+            fpos = fend
+            return 0
+        }
+    }
+    let l: u64 = h_len
+    if fpos + l > fend {
+        trunc = 1
+        fpos = fend
+        return 0
+    }
+    media.src_bytes(fpos, (&inb[0 as usize]) as u64, l)
+    fpos = fpos + l
+    let n: u64 = mp3_decode(l)
+    if n > 0 {
+        let r: u64 = mp3_rate()
+        if r > 0 {
+            posms = posms + (n * 1000) / r
+        }
+    }
+    return n
+}
+
+// Springen. Ohne Index geht das bei fester Datenrate genau und bei
+// veraenderlicher naeherungsweise -- und der Abspieler SAGT das.
+fn mp3_seek_ms(ms: u64) -> bool {
+    if durms == 0 || fend <= fbeg {
+        return false
+    }
+    var t: u64 = ms
+    if t > durms {
+        t = durms
+    }
+    let span: u64 = fend - fbeg
+    var at: u64 = fbeg + (span * t) / durms
+    if at + 4 > fend {
+        at = fend
+    }
+    let q: u64 = find_sync(at)
+    if q >= fend {
+        fpos = fend
+        posms = durms
+        return false
+    }
+    fpos = q
+    posms = t
+    mp3_reset()
+    return true
+}
