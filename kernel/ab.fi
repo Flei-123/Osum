@@ -1,0 +1,237 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/ab.fi -- RUNDE UPDATE: DER ERPROBUNGSZAEHLER (A/B-Boot).
+//
+// WOFUER. Ein Update, das nicht startet, verwandelt ein Geraet im
+// Nebenzimmer in einen Ziegel. `docs/ROADMAP-UPDATE.md` A5 hat das als
+// die Luecke benannt, die spaetestens vor dem ersten Update aus der
+// Ferne zu sein hat, und dieses Modul ist sie:
+//
+//   Eine neue Generation gilt als IN ERPROBUNG. Bei jedem Start zaehlt
+//   der Kern den Versuch hoch. Bleibt der Erfolgsvermerk aus -- weil das
+//   System gar nicht so weit kommt, ihn zu setzen --, schaltet der Kern
+//   beim dritten Start VON SELBST auf die vorige Generation zurueck.
+//
+// WO DER ZAEHLER LIEGT, UND WARUM NICHT IM LADER. Die Vorlage sagte
+// „ein Zaehler im Bootlader". Der Lader ist hier LIMINE, und Limine ist
+// FREMDER CODE aus `vendor/limine` -- es hat keinen Zaehler, keinen
+// Zustandsspeicher zwischen zwei Starts und keine Stelle, an der man
+// einen ohne Patch hineinbekaeme. Ein gepatchter Fremdlader waere eine
+// Abhaengigkeit, die bei jedem Limine-Update neu bricht, und sie stuende
+// ausserdem auf der EFI-Partition, die dieses System nur beim
+// Installieren beschreibt.
+//
+// Also liegt der Zaehler an der FRUEHESTEN Stelle, die dieses System
+// selbst besitzt: im Kern, unmittelbar nachdem die Wurzel eingehaengt
+// ist und BEVOR der erste Prozess startet (`kmain.osum`, direkt nach
+// `k14_setup`). Das ist ehrlich aufgeschrieben und nicht schoengeredet,
+// und es hat eine Grenze, die genau hier steht und nirgends sonst:
+//
+//   WAS ES FAENGT: eine Generation, deren Userland nicht hochkommt --
+//   ein kaputtes `/sbin/init`, ein Paket, das den Start haengen laesst,
+//   ein PLAN, der auf einen fehlenden Store-Eintrag zeigt. Das ist der
+//   Fall, den ein Paket-Update erzeugt, und damit der haeufige.
+//   WAS ES NICHT FAENGT: einen KERN, der nicht bis hierher kommt. Dafuer
+//   braeuchte es zwei Kernabbilder auf der EFI-Partition und einen
+//   Lader, der zwischen ihnen umschaltet. Das ist eine eigene Runde
+//   (A4/A5 der Roadmap), und dieses Modul behauptet nicht, sie schon
+//   erledigt zu haben.
+//
+// DIE DATEI. `/system/ERPROBUNG`, GENAU 36 Oktette, feste Breite:
+//
+//     gen=00000007 vor=00000006 v=01 ok=0\n
+//
+//   gen  die Generation, die erprobt wird
+//   vor  die Generation, auf die zurueckgefallen wird
+//   v    wieviele Startversuche sie schon hatte
+//   ok   1, sobald ein Start durchgelaufen ist (`opk erprobung ok`)
+//
+// FESTE BREITE IST KEINE KOSMETIK. Es ist derselbe Grund, aus dem
+// `/system/AKTUELL` seit Runde INSTALL acht Ziffern und ein Zeilenende
+// hat: eine Datei, deren Laenge sich nicht aendert, wird in GENAU EINEN
+// Datenblock geschrieben, und ein Sektor erreicht die Platte ganz oder
+// gar nicht. Eine Datei, die mal 34 und mal 36 Oktette lang ist, muesste
+// zusaetzlich die Groesse im Inode nachziehen -- zwei Schreibvorgaenge,
+// und dazwischen der Zustand, in dem der Zaehler schon steht und die
+// Laenge noch nicht. Ausgerechnet der Zaehler, der einen Stromausfall
+// ueberleben soll, darf diesen Zustand nicht haben.
+//
+// WAS PASSIERT, WENN DIE DATEI FEHLT: nichts. Kein Update in Erprobung,
+// kein Zaehler, keine Zeile ausser einer. Jedes Abbild, das diese Runde
+// nicht kennt, verhaelt sich Oktett fuer Oktett wie vorher.
+//
+// WAS PASSIERT, WENN DIE DATEI KAPUTT IST: sie wird gemeldet und in
+// RUHE GELASSEN. Ein Kern, der eine unverstandene Zustandsdatei
+// ueberschreibt, ist ein Kern, der einen Fehler durch einen zweiten
+// ersetzt.
+
+profile kernel
+
+import kstate
+import serial
+import fs
+
+export { ab_boot, GRENZE, LEN }
+
+// Wieviele Startversuche eine Generation bekommt, bevor zurueckgefallen
+// wird. Drei: einer fuer den Fehlversuch, einer fuer den Fall, dass es
+// an etwas Einmaligem lag (ein halb geschriebener Sektor, ein Zeitlimit),
+// und einer, damit „zweimal dasselbe" nicht schon die Entscheidung ist.
+const GRENZE: u64 = 3
+const LEN: u64 = 36
+
+const P_ERP_LEN: u64 = 18
+const AKT_LEN: u64 = 9
+
+fn g8(p: u64) -> u64 {
+    return kstate.get8(p)
+}
+
+fn p8(p: u64, v: u64) {
+    kstate.set8(p, v as u8)
+}
+
+// `n` Ziffern aus dem Puffer, ohne Vorzeichen. Fuehrende Nullen sind der
+// Normalfall, nicht die Ausnahme -- die Breite ist fest.
+fn ziffern(p: u64, off: u64, n: u64) -> u64 {
+    var v: u64 = 0
+    var i: u64 = 0
+    while i < n {
+        let c: u64 = g8(p + off + i)
+        if c < 48 || c > 57 {
+            return 0xFFFFFFFFFFFFFFFF
+        }
+        v = v * 10 + (c - 48)
+        i = i + 1
+    }
+    return v
+}
+
+// Eine Zahl mit fester Breite hineinschreiben.
+fn setze(p: u64, off: u64, n: u64, v: u64) {
+    var rest: u64 = v
+    var i: u64 = n
+    while i > 0 {
+        i = i - 1
+        p8(p + off + i, 48 + (rest % 10))
+        rest = rest / 10
+    }
+}
+
+// Die 36 Oktette aus den vier Zahlen bauen.
+fn bauen(p: u64, gen: u64, vor: u64, v: u64, ok: u64) {
+    var muster: [u8; 37] = "gen=00000000 vor=00000000 v=00 ok=0\n\0"
+    var i: u64 = 0
+    while i < LEN {
+        p8(p + i, muster[i as usize] as u64)
+        i = i + 1
+    }
+    setze(p, 4, 8, gen)
+    setze(p, 17, 8, vor)
+    setze(p, 28, 2, v)
+    setze(p, 34, 1, ok)
+}
+
+// Eine Datei mit FESTER Laenge ueberschreiben: derselbe Inode, dieselbe
+// Groesse, ein Datenblock. Es wird NICHT vorher geleert.
+fn fest_schreiben(state: u64, pfad: u64, puffer: u64, len: u64) -> bool {
+    let ino: u64 = fs.path(state, pfad)
+    if ino == 0 {
+        return false
+    }
+    return fs.write_at(state, ino, 0, puffer, len) == len
+}
+
+// ==================================================================
+// Der ganze Vorgang, einmal je Start.
+fn ab_boot(state: u64) {
+    var p_erp: [u8; 18] = "/system/ERPROBUNG\0"
+    var p_akt: [u8; 16] = "/system/AKTUELL\0"
+    var s_keine: [u8; 21] = "ab: keine erprobung\0\0"
+    var s_kaputt: [u8; 26] = "ab: ERPROBUNG unlesbar\0\0\0\0"
+    var s_ok: [u8; 13] = "ab: gen=\0\0\0\0\0"
+    var s_best: [u8; 14] = " bestaetigt\0\0\0"
+    var s_ver: [u8; 10] = " versuch=\0"
+    var s_von: [u8; 6] = " von \0"
+    var s_zur: [u8; 40] = "ab: ERPROBUNG gescheitert, zurueck auf \0"
+    var s_wnok: [u8; 31] = "ab: ERPROBUNG nicht schreibbar\0"
+
+    var buf: [u8; 40] = [0 as u8; 40]
+    let b: u64 = (&buf[0]) as u64
+
+    let ino: u64 = fs.path(state, (&p_erp[0]) as u64)
+    if ino == 0 {
+        serial.puts((&s_keine[0]) as u64)
+        serial.nl()
+        return
+    }
+    let n: u64 = fs.read_at(state, ino, 0, b, LEN)
+    if n != LEN {
+        serial.puts((&s_kaputt[0]) as u64)
+        serial.nl()
+        return
+    }
+    let gen: u64 = ziffern(b, 4, 8)
+    let vor: u64 = ziffern(b, 17, 8)
+    let v: u64 = ziffern(b, 28, 2)
+    let ok: u64 = ziffern(b, 34, 1)
+    if gen == 0xFFFFFFFFFFFFFFFF || vor == 0xFFFFFFFFFFFFFFFF
+        || v == 0xFFFFFFFFFFFFFFFF || ok == 0xFFFFFFFFFFFFFFFF {
+        serial.puts((&s_kaputt[0]) as u64)
+        serial.nl()
+        return
+    }
+
+    // 1. SCHON BESTAETIGT: es ist kein Update in Erprobung. Nichts tun,
+    //    und das ist der Normalfall jedes Starts nach dem ersten.
+    if ok != 0 {
+        serial.puts((&s_ok[0]) as u64)
+        serial.dec(gen)
+        serial.puts((&s_best[0]) as u64)
+        serial.nl()
+        return
+    }
+
+    // 2. DIE VERSUCHE SIND AUFGEBRAUCHT: zurueck auf `vor`. Zuerst
+    //    AKTUELL -- das ist der Umschlag, und er ist EIN Schreibvorgang
+    //    fester Breite. Erst danach wird der Zaehler befriedet; kaeme
+    //    ein Stromausfall dazwischen, liefe der naechste Start denselben
+    //    Rueckfall noch einmal, und das ist harmlos.
+    if v + 1 >= GRENZE {
+        var akt: [u8; 12] = [0 as u8; 12]
+        let a: u64 = (&akt[0]) as u64
+        setze(a, 0, 8, vor)
+        p8(a + 8, 10)
+        if !fest_schreiben(state, (&p_akt[0]) as u64, a, AKT_LEN) {
+            serial.puts((&s_wnok[0]) as u64)
+            serial.nl()
+            return
+        }
+        bauen(b, vor, vor, 0, 1)
+        if !fest_schreiben(state, (&p_erp[0]) as u64, b, LEN) {
+            serial.puts((&s_wnok[0]) as u64)
+            serial.nl()
+            return
+        }
+        serial.puts((&s_zur[0]) as u64)
+        serial.dec(vor)
+        serial.nl()
+        return
+    }
+
+    // 3. NOCH EIN VERSUCH. Der Zaehler geht hoch, BEVOR der erste
+    //    Prozess startet -- nicht danach. Ein Zaehler, den ein
+    //    haengender Start nicht mehr erreicht, zaehlt nie.
+    bauen(b, gen, vor, v + 1, 0)
+    if !fest_schreiben(state, (&p_erp[0]) as u64, b, LEN) {
+        serial.puts((&s_wnok[0]) as u64)
+        serial.nl()
+        return
+    }
+    serial.puts((&s_ok[0]) as u64)
+    serial.dec(gen)
+    serial.puts((&s_ver[0]) as u64)
+    serial.dec(v + 1)
+    serial.puts((&s_von[0]) as u64)
+    serial.dec(GRENZE)
+    serial.nl()
+}
