@@ -1,0 +1,376 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/npt.fi -- /bin/npt, DIE ABNAHME DER RUNDE NETPROFIL.
+//
+// Ein Programm in Ring 3, das die Zusagen dieser Runde MISST und die
+// Zahlen auf die serielle Leitung schreibt. `tools/netprofil/run.sh`
+// haelt sie danach gegen Erwartungen -- und JEDE dieser Erwartungen
+// kann rot werden.
+//
+// WAS HIER GEMESSEN WIRD UND WAS NICHT.
+//
+// HIER: alles, was am AUFRUF haengt -- die zwei Bits einer gewuerfelten
+// Adresse, ob `immer` wirklich jedes Mal wuerfelt, ob `geraet` wirklich
+// die Adresse der Karte gibt, ob die Karte die neue Adresse annimmt,
+// und wie lange ein Wechsel dauert.
+//
+// NICHT HIER: alles, was an der DATEI haengt -- dass ein Profil mit
+// `netz` seine Adresse ueber ein Trennen hinweg behaelt, dass ein NEU
+// angelegtes Profil eine andere bekommt, dass eine halb geschriebene
+// Zeile gemeldet statt verschluckt wird, und dass ein gewoehnlicher
+// Nutzer die Datei nicht ueberschreiben kann. Das misst der Laeufer
+// ueber `/bin/netprof` und `/bin/cat` -- also ueber das Werkzeug, das
+// ein Mensch auch benutzt, und nicht ueber eine zweite Fassung
+// derselben Logik.
+//
+// DIE ZAHL DER WUERFE steht auf der Befehlszeile (`npt 20000`) und hat
+// die Vorgabe 10000. Zwei Bits, die man einmal ansieht, sind keine
+// Zusage: bei zufaelligen Oktetten waere jedes vierte Ergebnis falsch,
+// wenn die Maske fehlte -- ein einzelner Wurf verraet das mit 75
+// Prozent Wahrscheinlichkeit NICHT.
+
+profile kernel
+
+import ulib
+
+export { u_start }
+
+const SYS_NETGET: u64 = 1300
+const SYS_NETSET: u64 = 1301
+const SYS_MACGET: u64 = 1330
+const SYS_MACSET: u64 = 1331
+const SYS_CLOCK_GETTIME: u64 = 228
+const CLOCK_MONOTONIC: u64 = 1
+
+const NG_READY: u64 = 0
+const NG_IP: u64 = 1
+const NG_MASK: u64 = 2
+const NG_GW: u64 = 3
+
+const MG_MAC0: u64 = 0
+const MG_MAC1: u64 = 1
+const MG_HW0: u64 = 2
+const MG_HW1: u64 = 3
+const MG_ACTIVE: u64 = 4
+const MG_HWOK: u64 = 5
+const MG_SETTABLE: u64 = 6
+const MG_ROLL0: u64 = 7
+const MG_ROLL1: u64 = 8
+const MG_ROLLS: u64 = 9
+const MG_CHANGES: u64 = 10
+const MG_POLICY: u64 = 11
+
+const MS_SET: u64 = 0
+const MS_CLEAR: u64 = 1
+
+const P_GERAET: u64 = 0
+const P_NETZ: u64 = 1
+const P_IMMER: u64 = 2
+
+// Wie viele verschiedene Wuerfe gemerkt werden, um Doppel zu finden.
+// 512 Plaetze bei 10 000 Wuerfen aus 2^46 Moeglichkeiten: ein Doppel
+// waere ein Ereignis, das es rechnerisch nicht gibt -- also ist jedes
+// gefundene Doppel ein Fehler und keine Ueberraschung.
+const MERK: u64 = 512
+static mut gemerkt: [u64; 512] = [0 as u64; 512]
+
+fn say(p: u64) {
+    let _n: u64 = ulib.say(p)
+}
+
+fn hex1(v: u64) -> u64 {
+    if v < 10 {
+        return 48 + v
+    }
+    return 87 + v
+}
+
+// Sechs Oktette als zwoelf Hexziffern -- ohne Trenner, damit ein
+// Laeufer sie mit einem einzigen `grep -oE '[0-9a-f]{12}'` herausholt.
+fn sag_mac(v: u64) {
+    var b: [u8; 16] = [0 as u8; 16]
+    var i: u64 = 0
+    while i < 6 {
+        let o: u64 = (v >> ((5 - i) * 8)) & 0xFF
+        b[(i * 2) as usize] = hex1((o >> 4) & 0xF) as u8
+        b[(i * 2 + 1) as usize] = hex1(o & 0xF) as u8
+        i = i + 1
+    }
+    b[12] = 0 as u8
+    say((&b[0 as usize]) as u64)
+}
+
+fn wirksam() -> u64 {
+    let m0: u64 = ulib.sys(SYS_MACGET, MG_MAC0, 0, 0)
+    let m1: u64 = ulib.sys(SYS_MACGET, MG_MAC1, 0, 0)
+    return (m0 << 16) | m1
+}
+
+fn karte() -> u64 {
+    let h0: u64 = ulib.sys(SYS_MACGET, MG_HW0, 0, 0)
+    let h1: u64 = ulib.sys(SYS_MACGET, MG_HW1, 0, 0)
+    return (h0 << 16) | h1
+}
+
+fn wuerfeln() -> u64 {
+    let r0: u64 = ulib.sys(SYS_MACGET, MG_ROLL0, 0, 0)
+    let r1: u64 = ulib.sys(SYS_MACGET, MG_ROLL1, 0, 0)
+    if ulib.bad(r0) || ulib.bad(r1) {
+        return 0
+    }
+    return (r0 << 16) | r1
+}
+
+// Die Uhr in Nanosekunden. `SYS_TIME` waere sekundengenau und damit
+// fuer eine Messung im Millisekundenbereich wertlos.
+fn jetzt_ns() -> u64 {
+    var ts: [u64; 2] = [0 as u64; 2]
+    if ulib.bad(ulib.sys(SYS_CLOCK_GETTIME, CLOCK_MONOTONIC,
+        (&ts[0 as usize]) as u64, 0)) {
+        return 0
+    }
+    return ts[0] * 1000000000 + ts[1]
+}
+
+fn u_start(args: u64) -> u64 {
+    var s_start: [u8; 11] = "npt: start\0"
+    var s_ende: [u8; 10] = "npt: ende\0"
+    var s_kein: [u8; 18] = "npt: kein Netz da\0"
+    var s_pol: [u8; 18] = "npt: policy kern=\0"
+    var s_pol2: [u8; 9] = " ring3=\0\0"
+    var s_w: [u8; 16] = "npt: wuerfel n=\0"
+    var s_wl: [u8; 13] = " ohne_lokal=\0"
+    var s_wm: [u8; 13] = " multicast=\0\0"
+    var s_wd: [u8; 14] = " verschieden=\0"
+    var s_g: [u8; 17] = "npt: geraet mac=\0"
+    var s_gh: [u8; 5] = " hw=\0"
+    var s_gg: [u8; 9] = " gleich=\0"
+    var s_i: [u8; 14] = "npt: immer a=\0"
+    var s_n: [u8; 13] = "npt: netz a=\0"
+    var s_b: [u8; 4] = " b=\0"
+    var s_h: [u8; 12] = "npt: hwok=\0\0"
+    var s_sp: [u8; 18] = "npt: split draht=\0"
+    var s_sk: [u8; 8] = " karte=\0"
+    var s_hs: [u8; 11] = " settable=\0"
+    var s_ha: [u8; 8] = " aktiv=\0"
+    var s_z: [u8; 24] = "npt: verbindung_us ohne\0"
+    var s_z2: [u8; 6] = "_mac=\0"
+    var s_z3: [u8; 10] = " mit_mac=\0"
+    var s_zz: [u8; 20] = "npt: setzen_us=\0\0\0\0\0"
+    var s_zk: [u8; 13] = " loesen_us=\0\0"
+    var s_c: [u8; 16] = "npt: wechsel=\0\0\0"
+    var s_cw: [u8; 9] = " wuerfe=\0"
+
+    say((&s_start[0 as usize]) as u64)
+    ulib.nl()
+
+    if ulib.sys(SYS_NETGET, NG_READY, 0, 0) != 1 {
+        say((&s_kein[0 as usize]) as u64)
+        ulib.nl()
+        return 1
+    }
+
+    // ---------------------------------------------------------- 0. die
+    // DREI STUFEN, GEGENGELESEN. Sie stehen in `kernel/netprof.fi`, in
+    // `kernel/user/ulib.fi` und hier. Drei Fassungen derselben drei
+    // Zahlen; der Kern nennt seine eigenen, und wenn sie auseinander
+    // laufen, faellt es HIER auf und nicht in einem Profil, das
+    // stillschweigend die falsche Richtlinie bekommt.
+    let pk: u64 = ulib.sys(SYS_MACGET, MG_POLICY, 0, 0)
+    let pr: u64 = P_GERAET | (P_NETZ << 8) | (P_IMMER << 16)
+    say((&s_pol[0 as usize]) as u64)
+    ulib.sayn(pk)
+    say((&s_pol2[0 as usize]) as u64)
+    ulib.sayn(pr)
+    ulib.nl()
+
+    // ---------------------------------------------------------- 1. die
+    // ZWEI BITS, ueber viele tausend Wuerfe.
+    var n: u64 = 10000
+    if ulib.arg_count(args) > 1 {
+        let v: u64 = ulib.to_num(ulib.arg_at(args, 1))
+        if v > 0 {
+            n = v
+        }
+    }
+    var ohne_lokal: u64 = 0
+    var multicast: u64 = 0
+    var doppel: u64 = 0
+    var merk_n: u64 = 0
+    var k: u64 = 0
+    while k < n {
+        let m: u64 = wuerfeln()
+        if m == 0 {
+            ohne_lokal = ohne_lokal + 1 // wuerfeln ging gar nicht
+        } else {
+            let erst: u64 = (m >> 40) & 0xFF
+            if (erst & 0x02) == 0 {
+                ohne_lokal = ohne_lokal + 1
+            }
+            if (erst & 0x01) != 0 {
+                multicast = multicast + 1
+            }
+            var j: u64 = 0
+            while j < merk_n {
+                if gemerkt[(j) as usize] == m {
+                    doppel = doppel + 1
+                    j = merk_n
+                } else {
+                    j = j + 1
+                }
+            }
+            if merk_n < MERK {
+                gemerkt[(merk_n) as usize] = m
+                merk_n = merk_n + 1
+            }
+        }
+        k = k + 1
+    }
+    say((&s_w[0 as usize]) as u64)
+    ulib.sayn(n)
+    say((&s_wl[0 as usize]) as u64)
+    ulib.sayn(ohne_lokal)
+    say((&s_wm[0 as usize]) as u64)
+    ulib.sayn(multicast)
+    say((&s_wd[0 as usize]) as u64)
+    ulib.sayn(merk_n - doppel)
+    ulib.nl()
+
+    // ---------------------------------------------------------- 2. die
+    // STUFE `geraet`: keine Ueberlagerung, und die wirksame Adresse IST
+    // die der Karte. Wird ZUERST gemessen -- danach steht eine
+    // Ueberlagerung, und die Karte koennte umgestellt sein.
+    ulib.sys(SYS_MACSET, MS_CLEAR, 0, 0)
+    let mg: u64 = wirksam()
+    let hw: u64 = karte()
+    say((&s_g[0 as usize]) as u64)
+    sag_mac(mg)
+    say((&s_gh[0 as usize]) as u64)
+    sag_mac(hw)
+    say((&s_gg[0 as usize]) as u64)
+    if mg == hw {
+        ulib.sayn(1)
+    } else {
+        ulib.sayn(0)
+    }
+    ulib.nl()
+
+    // ---------------------------------------------------------- 3. die
+    // STUFE `immer`: zwei aufeinanderfolgende Verbindungen, zwei
+    // verschiedene Adressen. Genau das ist die Zusage, und `fixedrand`
+    // auf der Kommandozeile bringt sie zum Einsturz -- der Laeufer
+    // fuehrt diesen Lauf ausdruecklich vor.
+    let i1: u64 = wuerfeln()
+    ulib.sys(SYS_MACSET, MS_SET, i1, 0)
+    let ia: u64 = wirksam()
+    ulib.sys(SYS_MACSET, MS_CLEAR, 0, 0)
+    let i2: u64 = wuerfeln()
+    ulib.sys(SYS_MACSET, MS_SET, i2, 0)
+    let ib: u64 = wirksam()
+    say((&s_i[0 as usize]) as u64)
+    sag_mac(ia)
+    say((&s_b[0 as usize]) as u64)
+    sag_mac(ib)
+    say((&s_gg[0 as usize]) as u64)
+    if ia == ib {
+        ulib.sayn(1)
+    } else {
+        ulib.sayn(0)
+    }
+    ulib.nl()
+
+    // ---------------------------------------------------------- 4. die
+    // STUFE `netz` AUF DER AUFRUFEBENE: derselbe Wert, zweimal gesetzt,
+    // mit einem Trennen dazwischen -- und beide Male steht er auf dem
+    // Draht. Dass er ueber einen NEUSTART hinweg bleibt, haengt an der
+    // Datei und wird im Laeufer gemessen, nicht hier.
+    let fest: u64 = wuerfeln()
+    ulib.sys(SYS_MACSET, MS_SET, fest, 0)
+    let na: u64 = wirksam()
+    ulib.sys(SYS_MACSET, MS_CLEAR, 0, 0)
+    ulib.sys(SYS_MACSET, MS_SET, fest, 0)
+    let nb: u64 = wirksam()
+    say((&s_n[0 as usize]) as u64)
+    sag_mac(na)
+    say((&s_b[0 as usize]) as u64)
+    sag_mac(nb)
+    say((&s_gg[0 as usize]) as u64)
+    if na == nb {
+        ulib.sayn(1)
+    } else {
+        ulib.sayn(0)
+    }
+    ulib.nl()
+
+    // ---------------------------------------------------------- 5. was
+    // DIE KARTE DAVON MITBEKOMMEN HAT. Kein Urteil, eine Zahl: sie
+    // faellt auf einer virtio-Karte ohne Steuerwarteschlange anders aus
+    // als mit, und der Laeufer misst beide Faelle.
+    // UND DIE ZWEI ADRESSEN NEBENEINANDER, waehrend eine Ueberlagerung
+    // steht. Sie sind NICHT dasselbe, und die ganze Runde haengt daran:
+    //
+    //   draht   was als Absender in jeden Rahmen geschrieben wird
+    //   karte   worauf der Empfangsfilter der Karte hoert
+    //
+    // Gehen sie auseinander, sendet die Maschine unter neuem Namen und
+    // hoert unter dem alten. Auf einer virtio-Karte MIT
+    // Steuerwarteschlange sind sie gleich; mit `nomacvq` nicht, und
+    // dann ist genau das die ehrliche Auskunft.
+    say((&s_sp[0 as usize]) as u64)
+    sag_mac(wirksam())
+    say((&s_sk[0 as usize]) as u64)
+    sag_mac(karte())
+    ulib.nl()
+
+    say((&s_h[0 as usize]) as u64)
+    ulib.sayn(ulib.sys(SYS_MACGET, MG_HWOK, 0, 0))
+    say((&s_hs[0 as usize]) as u64)
+    ulib.sayn(ulib.sys(SYS_MACGET, MG_SETTABLE, 0, 0))
+    say((&s_ha[0 as usize]) as u64)
+    ulib.sayn(ulib.sys(SYS_MACGET, MG_ACTIVE, 0, 0))
+    ulib.nl()
+
+    // ---------------------------------------------------------- 6. die
+    // ZEIT. Zwei Verbindungsaufbauten mit fester Adresse: einer ohne
+    // Adresswechsel, einer mit. Die Differenz IST der Preis der
+    // Datenschutzstufe, und sie steht in Mikrosekunden da, weil eine
+    // Zahl in Millisekunden hier ueberall 0 waere.
+    let ip: u64 = ulib.sys(SYS_NETGET, NG_IP, 0, 0)
+    let mk: u64 = ulib.sys(SYS_NETGET, NG_MASK, 0, 0)
+    let gw: u64 = ulib.sys(SYS_NETGET, NG_GW, 0, 0)
+
+    ulib.sys(SYS_MACSET, MS_CLEAR, 0, 0)
+    let t0: u64 = jetzt_ns()
+    ulib.sys(SYS_NETSET, ip, mk, gw)
+    let t1: u64 = jetzt_ns()
+
+    let neu: u64 = wuerfeln()
+    let t2: u64 = jetzt_ns()
+    ulib.sys(SYS_MACSET, MS_SET, neu, 0)
+    let t3: u64 = jetzt_ns()
+    ulib.sys(SYS_NETSET, ip, mk, gw)
+    let t4: u64 = jetzt_ns()
+    ulib.sys(SYS_MACSET, MS_CLEAR, 0, 0)
+    let t5: u64 = jetzt_ns()
+
+    say((&s_z[0 as usize]) as u64)
+    say((&s_z2[0 as usize]) as u64)
+    ulib.sayn((t1 - t0) / 1000)
+    say((&s_z3[0 as usize]) as u64)
+    ulib.sayn((t4 - t2) / 1000)
+    ulib.nl()
+    say((&s_zz[0 as usize]) as u64)
+    ulib.sayn((t3 - t2) / 1000)
+    say((&s_zk[0 as usize]) as u64)
+    ulib.sayn((t5 - t4) / 1000)
+    ulib.nl()
+
+    say((&s_c[0 as usize]) as u64)
+    ulib.sayn(ulib.sys(SYS_MACGET, MG_CHANGES, 0, 0))
+    say((&s_cw[0 as usize]) as u64)
+    ulib.sayn(ulib.sys(SYS_MACGET, MG_ROLLS, 0, 0))
+    ulib.nl()
+
+    say((&s_ende[0 as usize]) as u64)
+    ulib.nl()
+    return 0
+}
