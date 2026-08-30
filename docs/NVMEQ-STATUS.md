@@ -627,12 +627,28 @@ Vorrunden und beide Übersetzer:
 
 | Läufer | Ergebnis |
 |---|---|
-| `tools/nvmeq/run.sh`, Ring 3 | **34 / 34**, Beendigungscode 0 |
-| `tools/nvmeq/run.sh`, gesamt | siehe die letzte Zeile des Laufs |
+| `tools/nvmeq/run.sh`, Ring 3 | **34 / 34**, Beendigungscode 0, mit firnc0 **und** firnc1 |
 | `tools/ring/run.sh` | **120 / 0** |
 | `tools/async/run.sh` | **108 / 0** |
 | `tools/handle/run.sh` | **80 / 0** |
 | `tools/poll/run.sh` | **67 / 0** |
+| `tools/build-kernel.sh`, Stufe 0/1 | grün, 3 275 308 / 7 979 832 Oktett |
+| `tools/build-kernel.sh --ohne-tunnel`, Stufe 0/1 | grün, 3 075 968 / 7 538 540 Oktett |
+
+Der **GUI-lose Bau** (`--ohne-tunnel`) und der volle Bau übersetzen
+beide mit beiden Übersetzern; die Größenunterschiede sind die
+bekannten aus `docs/TUNNEL-PAKETE.md` und haben sich durch diese Runde
+nicht verschoben.
+
+**Zur Flatterhaftigkeit unter Last:** `tools/ring/run.sh` gab in zwei
+Läufen 120 / 0 und in zwei weiteren 119 / 1 — jedes Mal an derselben
+Stelle (`die Abgabezahlen fehlen`), und jedes Mal, wenn auf dem Wirt
+gleichzeitig andere Runden rechneten (Lastmittel 24 auf 12 Kernen). Der
+Grund ist ein QEMU-Lauf, der in sein Zeitlimit läuft, und nicht der
+Kernel. Aus demselben Grund steht in `tools/nvmeq/bau.sh` jetzt
+`timeout 600` statt `timeout 300`: ein Lauf dieser Runde ist unter Last
+einmal mitten im `nqerr`-Abschnitt abgeschnitten worden, und sechs
+Zusagen „fehlten ganz", obwohl nichts kaputt war.
 
 Beide Übersetzer (firnc0 und firnc1) bauen denselben Kernel und geben
 dieselben **34** Zusagen.
