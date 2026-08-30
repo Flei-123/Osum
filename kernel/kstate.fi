@@ -106,6 +106,13 @@
 //            0x83000 die Objekttafel, 0x83A00 die Abbruch-Token,
 //            0x84200 die Wuerfelwerte, 0x84300 die Zaehler
 //   0x84380  frei, bis KDATA_SIZE (0xA0000)
+//   0x92000  DER TON (RUNDE HDA): eine Seite Tonschicht und
+//            AC97 (`audio.fi`, `ac97.fi`), drei Seiten Intel
+//            HD-Audio (`hda.fi`: Skalare und Positionspuffer,
+//            CORB/RIRB, Deskriptorliste und Widget-Tafel), zwei
+//            Seiten Mischer (`mix.fi`). Die DMA-Ringpuffer
+//            liegen NICHT hier -- sie kommen aus dem
+//            Rahmenverwalter, je 16 KiB
 //
 // ================== RUNDE MERGE-2: kdata WAECHST VON 512 AUF 640 KiB.
 //
@@ -228,6 +235,13 @@ export {
     M_HANDLE, M_NOGEN, M_NOFLIGHT, M_NORIGHTS, M_HSTRICT, M_HBENCH,
     H_CHECKS, H_DENIED, H_STALE, H_CANCELS, H_INFLIGHT, H_DEFERRED,
     H_OPENED, H_CLOSED, H_PASSED, H_ESCALATE,
+    // ---- RUNDE HDA: der Ton ----
+    AUD_OFF, AUD_MAX, HDA_OFF, HDA_MAX, HDAR_OFF, HDAR_MAX,
+    HDAB_OFF, HDAB_MAX, MIX_OFF, MIX_MAX,
+    M_AUDIO, M_NOAUDIO, M_AUDSINE, M_AUDSAY, M_AUDNOMIX,
+    M_AUDSTARVE, M_AUDBEEP, M_NOSOUNDS, M_AUDHALF, M_AUDLONG,
+    M_NOHDA, M_NOAC97, M_AUDMIX, M_AUDCLIP, M_AUD441,
+    M_AUDCLOSE, M_AUDPOS, M_AUDLOAD, M_NOAUDIRQ, M_AUDGRAPH,
     // ---- RUNDE MULTIUSER ----
     MU_OFF, MU_MAX, MU_GRP, MU_GRPMAX,
     MU_WALKS, MU_WALKDENY, MU_GRPHITS, MU_SUPPSET, MU_NODECHK,
@@ -2106,3 +2120,90 @@ fn mode_add(state: u64, bit: u64) {
 fn mode_word(state: u64, w: u64) -> u64 {
     return get(state, MODE_OFF + w * 8)
 }
+
+// ==================================================== RUNDE HDA: DER TON
+//
+// SECHS SEITEN, 0x92000..0x98000, und sie liegen dort, weil dort das
+// letzte grosse zusammenhaengende Stueck der Karte ist: Merge 06 hat
+// KDATA_SIZE auf 0xA0000 gehoben, MULTIUSER liegt auf 0x90000..0x92000,
+// und dahinter waren 56 KiB am Stueck frei (nachzulesen mit
+// `python3 tools/kernel/memmap.py kernel -v`). Nach dieser Runde sind
+// es noch 32 KiB ab 0x98000.
+//
+// WARUM SECHS UND NICHT EINE. Runde MEDIA1 kam mit einer Seite aus,
+// weil unter der Grenze nur AC97 stand: ein Portbereich, eine
+// Deskriptorliste zu 256 Oktetten, ein Kratzpuffer. Intel HD-Audio
+// bringt drei Dinge mit, die AC97 nicht hat, und alle drei sind
+// SPEICHER, den der Regler per DMA liest oder schreibt und der deshalb
+// physisch zusammenhaengend und ausgerichtet liegen muss:
+//
+//   der Befehlsring CORB   256 Eintraege zu 4 Oktetten = 1 KiB, 128er
+//   der Antwortring RIRB   256 Eintraege zu 8 Oktetten = 2 KiB, 128er
+//   der Positionspuffer    8 Oktette je Strom, 128er Ausrichtung
+//   die Deskriptorliste    bis 256 Eintraege zu 16 Oktetten = 4 KiB
+//
+// Dazu kommt die Tafel des Widget-Graphen: HD-Audio beschreibt seinen
+// Codec als Graph aus bis zu 128 Knoten, und der Weg vom Wandler zur
+// Buchse wird EINMAL beim Aufsetzen gesucht und danach nur noch
+// nachgeschlagen. Diese Tafel steht neben der Deskriptorliste.
+//
+//   0x92000  `audio.fi` (Schicht) + `ac97.fi` (Treiber) + AC97-BDL
+//            + Kratzpuffer -- die Aufteilung von Runde MEDIA1,
+//            unveraendert uebernommen
+//   0x93000  `hda.fi`: Skalare (0x000..0x400), Codec-Tafel
+//            (0x400..0x600), DMA-Positionspuffer (0x700..0x780,
+//            128er ausgerichtet, 8 Oktette je Strom), die
+//            Deskriptorliste des Ausgabestroms (0x800..0xA00,
+//            32 Eintraege zu 16 Oktetten, 128er ausgerichtet)
+//   0x94000  CORB (0x000..0x400) und RIRB (0x400..0xC00)
+//   0x95000  die Widget-Tafel: 64 Knoten zu 64 Oktetten. Sie hat eine
+//            GANZE Seite, weil an einem Knoten sechs Dinge haengen
+//            (Faehigkeiten, Buchsenbelegung, Verstaerkerbereich und
+//            bis zu acht Quellen mit ihrem INDEX -- der Index ist es,
+//            der den Eingang eines Mischers benennt)
+//   0x96000  `mix.fi`: die Stromtafel (0x000..0x400) und der
+//            Mischpuffer (0x400..0x2000, 1792 Rahmen)
+//
+// Alle sechs stehen in `tools/kernel/memmap.py`; wer sie verschiebt,
+// ohne sie dort nachzuziehen, faellt beim naechsten Bau auf.
+const AUD_OFF: u64 = 0x92000
+const AUD_MAX: u64 = 0x1000
+const HDA_OFF: u64 = 0x93000
+const HDA_MAX: u64 = 0x1000
+const HDAR_OFF: u64 = 0x94000
+const HDAR_MAX: u64 = 0x1000
+const HDAB_OFF: u64 = 0x95000
+const HDAB_MAX: u64 = 0x1000
+const MIX_OFF: u64 = 0x96000
+const MIX_MAX: u64 = 0x2000
+
+// WORT 11, DER TON. Wort 10 war zur Zeit von Runde MEDIA1 frei und ist
+// es auf diesem Zweig nicht mehr -- dort liegen seit Merge 06 HANDLE,
+// SERVERBUILD und MULTIUSER. Genau der Fehler, den `kstate.fi` an vier
+// Stellen beschreibt: zwei Zweige nehmen unabhaengig "das naechste
+// freie Wort" und nehmen dasselbe. Diese Runde nimmt Wort 11 und
+// schreibt dazu, dass Wort 12..15 frei bleiben.
+//
+// `audio` schaltet den Ton an. Alles andere sind GEGENPROBEN und
+// Schalter der Abnahme -- eine Zusage ohne Gegenprobe ist eine
+// Behauptung.
+const M_AUDIO: u64 = 704 // Wort 11, Bit 0 -- den Ton aufsetzen
+const M_NOAUDIO: u64 = 705 // Bit 1 -- GEGENPROBE: gar kein Ton
+const M_AUDSINE: u64 = 706 // Bit 2 -- 440 Hz aus dem Kernel
+const M_AUDSAY: u64 = 707 // Bit 3 -- den Bericht drucken
+const M_AUDNOMIX: u64 = 708 // Bit 4 -- GEGENPROBE: Mischer stumm
+const M_AUDSTARVE: u64 = 709 // Bit 5 -- GEGENPROBE: Ring leerlaufen
+const M_AUDBEEP: u64 = 710 // Bit 6 -- den Systemklang spielen
+const M_NOSOUNDS: u64 = 711 // Bit 7 -- Systemklaenge aus
+const M_AUDHALF: u64 = 712 // Bit 8 -- GEGENPROBE: halbe Lautstaerke
+const M_AUDLONG: u64 = 713 // Bit 9 -- fuenf Sekunden statt einer
+const M_NOHDA: u64 = 714 // Bit 10 -- GEGENPROBE: HDA uebergehen
+const M_NOAC97: u64 = 715 // Bit 11 -- GEGENPROBE: AC97 uebergehen
+const M_AUDMIX: u64 = 716 // Bit 12 -- ZWEI Stroeme gleichzeitig
+const M_AUDCLIP: u64 = 717 // Bit 13 -- GEGENPROBE: Uebersteuerung
+const M_AUD441: u64 = 718 // Bit 14 -- 44100 statt 48000 Hz
+const M_AUDCLOSE: u64 = 719 // Bit 15 -- mitten im Lauf schliessen
+const M_AUDPOS: u64 = 720 // Bit 16 -- der Positionsgang ueber 10 s
+const M_AUDLOAD: u64 = 721 // Bit 17 -- dasselbe unter Rechenlast
+const M_NOAUDIRQ: u64 = 722 // Bit 18 -- GEGENPROBE: Vektor maskiert
+const M_AUDGRAPH: u64 = 723 // Bit 19 -- den Widget-Graphen drucken

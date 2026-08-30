@@ -1,0 +1,2359 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/hda.fi -- RUNDE HDA: Ton auf echter Hardware.
+//
+// AC97 (`kernel/ac97.fi`) hat diesem Projekt den ersten hoerbaren Ton
+// gebracht und dabei alles gemessen, was eine Tonschicht koennen muss.
+// Er hat einen Mangel, und er ist nicht klein: AC97 ist auf echter
+// Hardware seit etwa 2006 ausgestorben. Ein Rechner, auf dem Osum
+// booten soll, hat mit sehr hoher Wahrscheinlichkeit einen HD-Audio-
+// Regler auf dem Brett -- Intel hat die Spezifikation 2004
+// veroeffentlicht, und seitdem sitzt auf praktisch jedem x86-Brett ein
+// Geraet der PCI-Klasse 04:03.
+//
+// DIESE DATEI IST DER GRUND, WARUM `kernel/audio.fi` SO GEBAUT IST.
+// Runde MEDIA1 hat dort eine Grenze gezogen und in docs/AUDIO.md
+// aufgeschrieben, was ein zweiter Treiber bedienen muss. Diese Datei
+// ist die Probe auf jene Rechnung: sie bedient GENAU diese Grenze, und
+// oberhalb davon aendert sich nichts als die Weiche, die sagt, welcher
+// Treiber gerade unten steht.
+//
+// ==================================================================
+// WIE HD-AUDIO GEBAUT IST, in der Reihenfolge, in der es angefasst wird
+// ==================================================================
+//
+// EIN SPEICHERBEREICH statt zweier Portbereiche. BAR0 ist Speicher,
+// mindestens 16 KiB, und darin liegt alles: die Regler-Register unten,
+// die Strombeschreibungen ab 0x80.
+//
+// ZWEI RINGE FUER BEFEHLE, und das ist der erste grosse Unterschied zu
+// AC97. Bei AC97 ist der Mischer eine Reihe von Registern, die der
+// Treiber direkt schreibt. Bei HD-Audio sitzt der Codec an einem
+// seriellen Link, und mit ihm wird ueber zwei DMA-Ringe geredet:
+//
+//   CORB  Command Outbound Ring Buffer -- 256 Eintraege zu vier
+//         Oktetten. Der Treiber schreibt einen Befehl und schiebt den
+//         Schreibzeiger CORBWP weiter; der Regler holt ihn ab.
+//   RIRB  Response Inbound Ring Buffer -- 256 Eintraege zu ACHT
+//         Oktetten (vier Oktette Antwort, vier Oktette Zusatz). Der
+//         Regler legt die Antwort ab und schiebt RIRBWP weiter.
+//
+// Es gibt einen ZWEITEN Weg, das Immediate Command Interface (ICOI,
+// ICII, ICIS bei 0x60). Er ist einfacher und in der Spezifikation
+// AUSDRUECKLICH OPTIONAL. Diese Datei nimmt CORB/RIRB als Regelweg und
+// faellt auf den unmittelbaren Weg zurueck, wenn der Ring beim ERSTEN
+// Befehl nicht antwortet -- und sie ZAEHLT, welchen Weg sie geht
+// (`cmd_path`). Ein Treiber, der nur den unmittelbaren Weg kann,
+// scheitert auf einem Regler, der ihn nicht hat; einer, der nur die
+// Ringe kann, scheitert an einem Regler mit kaputter Ringlogik. Linux
+// hat aus demselben Grund beide.
+//
+// EIN BEFEHL ist ein 32-Bit-Wort:
+//
+//     CAd (4)  NID (8)  Verb (12)  Payload (8)
+//   oder
+//     CAd (4)  NID (8)  Verb (4)   Payload (16)
+//
+//   CAd ist die Adresse des Codec am Link (0..14), NID die Nummer des
+//   Knotens IM Codec. Welche Codecs da sind, steht nach dem Ruecksetzen
+//   in STATESTS -- ein Bit je Adresse.
+//
+// DER CODEC IST EIN GRAPH, und das ist der zweite grosse Unterschied.
+// AC97 hat einen Ausgang. Ein HD-Audio-Codec hat bis zu 128 Knoten:
+// Wandler (Audio Output Converter, "DAC"), Mischer, Waehler und
+// Buchsen (Pin Complex). Wer Ton will, muss einen WEG von einem
+// Wandler zu einer Buchse finden, jeden Knoten darauf einschalten und
+// jeden Verstaerker darauf aufdrehen. GENAU HIER scheitern generische
+// Treiber auf echter Hardware, und deshalb steht die Zahl ehrlich da:
+// Linux hat fuer die Eigenheiten der Hersteller tausende Zeilen
+// Ausnahmetabellen; eine allgemeine Heuristik wie die hier trifft nach
+// allem, was oeffentlich dokumentiert ist, die Mehrzahl der Bretter,
+// aber nicht alle. Was diese Datei NICHT tut, steht unten und in
+// docs/REALHW.md.
+//
+// DER AUSGABESTROM ist wieder eine Deskriptorliste (BDL) wie bei AC97
+// -- mit EINEM entscheidenden Unterschied, und wer ihn uebersieht,
+// baut einen Treiber, der Musik im Kreis spielt:
+//
+//   BEI AC97 HAELT DER DMA AM LETZTEN GUELTIGEN EINTRAG AN (LVI). Der
+//   Treiber muss LVI staendig nachziehen, sonst ist nach 85 ms Ruhe.
+//
+//   BEI HD-AUDIO LAEUFT DER DMA IM KREIS. SDnCBL sagt, wie lang der
+//   Puffer ist, SDnLVI, wie viele Eintraege gueltig sind -- und danach
+//   faengt er WIEDER VON VORN AN, ohne dass jemand etwas schreibt. Er
+//   haelt nie an. Wer nichts nachlegt, hoert seine eigene letzte
+//   Achtelsekunde in Endlosschleife.
+//
+//   DARAUS FOLGT ZWEIERLEI. Erstens: `submit` muss hier kein Register
+//   nachziehen, es fuehrt nur Buch. Zweitens: EIN LEERGELAUFENER RING
+//   MUSS AUSGENULLT WERDEN, sonst ist der Aussetzer ein Wiederholen
+//   und kein Schweigen. Das Nullen steht in `audio.fi` (es kennt den
+//   Ringinhalt), das Zaehlen hier (`underruns`) -- gezaehlt wird in
+//   EINTRAEGEN Stille, also in 2,67-ms-Schritten, und nicht je
+//   Abfrage, weil eine Zahl, die von der Abfragehaeufigkeit abhaengt,
+//   nichts misst.
+//
+// DIE ABSPIELPOSITION gibt es zweimal, und die Wahl ist keine
+// Geschmacksfrage:
+//
+//   SDnLPIB   ein Register im Regler. Auf mehreren Chipsaetzen HINKT
+//             es nach oder springt -- das ist der Grund, warum Linux
+//             `position_fix` kennt und je Geraet anders setzt.
+//   DPIB      der DMA Position Buffer: der Regler SCHREIBT die
+//             Position per DMA in den Hauptspeicher, acht Oktette je
+//             Strom, an eine Adresse, die der Treiber vorgibt
+//             (DPLBASE/DPUBASE, Bit 0 schaltet ihn an).
+//
+//   Diese Datei nimmt DPIB und haelt LPIB daneben. Weichen beide um
+//   mehr als einen Eintrag voneinander ab, wird das GEZAEHLT
+//   (`pos_disagree`) statt verschwiegen -- auf echter Hardware ist
+//   genau diese Zahl der Hinweis darauf, dass eine Ausnahme noetig
+//   waere.
+//
+// ==================================================================
+// WAS DIESE DATEI NICHT TUT
+// ==================================================================
+//
+//   * KEINE AUFNAHME. Die Eingabestroeme und die ADC-Knoten werden
+//     aufgezaehlt und nicht angefasst.
+//   * KEIN HDMI/DisplayPort-Ton. Digitale Buchsen (Bit 9 in den
+//     Faehigkeiten) werden UEBERSPRUNGEN. HDMI-Ton braucht zusaetzlich
+//     die Kanalzuordnung und ein Infoframe; das ist eine eigene Runde.
+//   * KEINE BUCHSENERKENNUNG IM BETRIEB. Welche Buchse benutzt wird,
+//     wird EINMAL beim Aufsetzen entschieden. Ein Kopfhoerer, der
+//     spaeter eingesteckt wird, schaltet nicht um -- das braucht
+//     unaufgeforderte Antworten (Unsolicited Responses) und eine
+//     Stelle, die sie behandelt. Steht in docs/REALHW.md.
+//   * KEINE HERSTELLERTABELLEN. Kein Quirk, keine Kennung fest
+//     verdrahtet.
+//   * NUR EIN AUSGABESTROM. Mehrere Programme gleichzeitig loest der
+//     Mischer in `kernel/mix.fi`, nicht ein zweiter Hardwarestrom --
+//     das ist billiger und funktioniert auf jedem Regler gleich.
+
+profile kernel
+
+import kstate
+import serial
+import pci
+import mem
+import time
+import arch.arch
+import arch.x86_64.apic
+
+export {
+    init, present, ready, why, bdf, base,
+    start, stop, running, submit, ring_base, ring_octets,
+    entries, entry_frames, entry_octets, ring_frames,
+    position_frames, position_raw, lpib, dpib, pos_disagree,
+    set_volume, volume, muted, set_muted,
+    rate, set_rate, bits, channels,
+    underruns, submits, starts, stops, irqs, irq, drain_mark,
+    reset_box_pub, submitted_frames, backsteps,
+    codec_ready, codec_addr, vendor, device, revision,
+    dac_nid, pin_nid, path_len, path_at, out_stream, stream_tag,
+    cmd, cmd_path, cmd_fails, widgets, wstart, node_type, node_caps,
+    node_cfg, arm_irq, irq_armed, say_graph,
+    CHANNELS, BITS, RATE, RATE_ALT, MAX_NODES,
+    P_CORB, P_IMMEDIATE,
+    W_OK, W_OFF, W_NODEV, W_NOBAR, W_NORING, W_HIGHRING, W_NORESET,
+    W_NOCODEC, W_NOAFG, W_NOPATH, W_NOSTREAM
+}
+
+// ------------------------------------------------------- die Geometrie
+//
+// DIESELBE GEOMETRIE WIE AC97, und das ist Absicht: 32 Eintraege zu 128
+// Rahmen, 16 KiB Ring, 4096 Rahmen. Damit rechnet `audio.fi` fuer
+// beide Treiber mit denselben Zahlen, und der Vergleich der beiden
+// Strecken misst den TREIBER und nicht die Puffergroesse.
+//
+// WARUM GENAU DIESE ZAHLEN -- die Begruendung steht ausfuehrlich in
+// `ac97.fi` und in docs/AUDIO.md und in einem Satz hier:
+//
+//   128 Rahmen  = 2,667 ms bei 48 kHz. Feiner als der Zeitgeber dieses
+//                 Kernels (10 ms) schlaegt, damit die Stille am Ende
+//                 eines Stuecks hoechstens 2,67 ms lang ist.
+//   32 Eintraege = 85,33 ms Ring. Groesser als zwei Zeitgebermarken
+//                 (sonst laeuft er bei jedem Kontextwechsel leer) und
+//                 klein genug, dass die Verzoegerung nicht auffaellt.
+//
+// HD-AUDIO KOENNTE MEHR: bis zu 256 Eintraege und ein Puffer bis 2 GiB.
+// Das waere hier kein Gewinn, sondern nur mehr Verzoegerung.
+const CHANNELS: u64 = 2
+const BITS: u64 = 16
+const RATE: u64 = 48000
+const RATE_ALT: u64 = 44100
+const FRAME_OCTETS: u64 = 4
+const ENTRY_FRAMES: u64 = 128
+const ENTRY_OCTETS: u64 = 512
+const ENTRIES: u64 = 32
+const RING_OCTETS: u64 = 16384
+const RING_FRAMES: u64 = 4096
+const RING_PAGES: u64 = 4
+
+// WIE OFT DER REGLER SICH MELDEN SOLL. Auf JEDEM Eintrag waeren 375
+// Unterbrechungen je Sekunde -- fuer nichts, denn geholt wird der Ton
+// per DMA und nachgelegt wird aus dem Systemaufruf heraus. Auf jedem
+// achten sind es 46 je Sekunde, und das reicht fuer den einzigen
+// Zweck, den die Unterbrechung hier hat: zu belegen, dass der Regler
+// wirklich laeuft, und nach einem Aussetzer aufzuwecken.
+const IOC_EVERY: u64 = 8
+
+// ------------------------------------------------- der Platz in kdata
+//
+//   kstate.HDA_OFF  + 0x000  die Skalare
+//                   + 0x400  die Codec-Tafel (16 Adressen zu 32 Okt.)
+//                   + 0x700  der DMA-Positionspuffer, 128er
+//                            ausgerichtet, acht Oktette je Strom
+//                   + 0x800  die Deskriptorliste, 32 * 16 Oktette,
+//                            128er ausgerichtet
+//   kstate.HDAR_OFF + 0x000  CORB, 256 * 4 = 1 KiB, 128er
+//                   + 0x400  RIRB, 256 * 8 = 2 KiB, 128er
+//   kstate.HDAB_OFF + 0x000  die Widget-Tafel, 64 * 64 Oktette
+//
+// ALLE VIER ADRESSEN WERDEN VOM REGLER PER DMA GELESEN ODER
+// GESCHRIEBEN. Sie muessen deshalb (a) physisch zusammenhaengen und
+// (b) ausgerichtet liegen. `kdata` ist eins zu eins abgebildet -- die
+// virtuelle Adresse IST die physische --, und weil die Seite selbst
+// ausgerichtet ist, sind es alle Versaetze darin auch. Denselben Weg
+// gehen `nvme.fi` seit Runde K2 und `ac97.fi` seit MEDIA1.
+const CODEC_OFF: u64 = 0x400
+const CODEC_SPAN: u64 = 0x20
+const DPIB_OFF: u64 = 0x700
+const BDL_OFF: u64 = 0x800
+const CORB_OFF: u64 = 0x000
+const RIRB_OFF: u64 = 0x400
+const CORB_ENTRIES: u64 = 256
+const RIRB_ENTRIES: u64 = 256
+
+// Die Widget-Tafel. VIERUNDSECHZIG KNOTEN, und die Zahl ist gemessen
+// und nicht geraten: ein Realtek ALC892 hat 36 Knoten, ein ALC269 27,
+// QEMUs `hda-duplex` vier. Ein Codec mit mehr als 64 wird nicht
+// abgelehnt -- die Knoten darueber werden UEBERSPRUNGEN und gezaehlt
+// (`S_TOOMANY`), damit im Bericht steht, dass etwas fehlt, statt dass
+// still etwas fehlt.
+const MAX_NODES: u64 = 64
+const NODE_SPAN: u64 = 64
+const W_CAPS: u64 = 0x00 // AWCAP, Parameter 0x09
+const W_CFG: u64 = 0x08 // Buchsenbelegung, Verb 0xF1C (nur Pins)
+const W_PIN: u64 = 0x10 // PINCAP, Parameter 0x0C (nur Pins)
+const W_AMP: u64 = 0x18 // Ausgangsverstaerker, Parameter 0x12
+const W_NCONN: u64 = 0x20 // Zahl der Quellen (gesamt, auch > 8)
+const W_CONN: u64 = 0x28 // bis zu acht Quellen zu 16 Bit
+
+// ---------------------------------------------------------- Skalare
+const S_READY: u64 = 0x000
+const S_BDF: u64 = 0x008
+const S_BASE: u64 = 0x010 // BAR0, dorthin abgebildet
+const S_RING: u64 = 0x018
+const S_RUNNING: u64 = 0x020
+const S_SUBMITTED: u64 = 0x028
+const S_LASTRAW: u64 = 0x030
+const S_WRAPS: u64 = 0x038
+const S_POS: u64 = 0x040
+const S_VOL: u64 = 0x048
+const S_IRQS: u64 = 0x050
+const S_UNDER: u64 = 0x058
+const S_WHY: u64 = 0x060
+const S_VENDOR: u64 = 0x068
+const S_DEVICE: u64 = 0x070
+const S_STARTS: u64 = 0x078
+const S_STOPS: u64 = 0x080
+const S_SUBMITS: u64 = 0x088
+const S_MUTE: u64 = 0x090
+const S_BACKW: u64 = 0x098
+const S_RATE: u64 = 0x0A0
+const S_CAD: u64 = 0x0A8 // Adresse des benutzten Codec am Link
+const S_AFG: u64 = 0x0B0 // der Knoten der Audio Function Group
+const S_WSTART: u64 = 0x0B8 // erster Knoten der Gruppe
+const S_WCOUNT: u64 = 0x0C0 // wie viele es sind
+const S_DAC: u64 = 0x0C8 // der gewaehlte Wandler
+const S_PIN: u64 = 0x0D0 // die gewaehlte Buchse
+const S_PLEN: u64 = 0x0D8 // Laenge des Weges, 2..4
+const S_PATH: u64 = 0x0E0 // vier Knoten zu 16 Bit, Buchse zuerst
+const S_PIDX: u64 = 0x0E8 // vier Eingangsindizes zu 16 Bit
+const S_OSTREAM: u64 = 0x0F0 // Nummer der Strombeschreibung im Regler
+const S_TAG: u64 = 0x0F8 // die Stromkennung, 1..15
+const S_CMDPATH: u64 = 0x100 // CORB/RIRB oder unmittelbar
+const S_CMDS: u64 = 0x108
+const S_CMDFAIL: u64 = 0x110
+const S_RIRBRP: u64 = 0x118 // wo dieser Treiber im Antwortring steht
+const S_STATESTS: u64 = 0x120
+const S_GCAP: u64 = 0x128
+const S_ISS: u64 = 0x130 // Zahl der Eingabestroeme
+const S_OSS: u64 = 0x138 // Zahl der Ausgabestroeme
+const S_BSS: u64 = 0x140 // Zahl der beidseitigen
+const S_TOOMANY: u64 = 0x148 // uebersprungene Knoten (mehr als MAX_NODES)
+const S_DISAGREE: u64 = 0x150 // LPIB und DPIB weichen ab
+const S_UNDERN: u64 = 0x158 // schon gezaehlte Eintraege Stille
+const S_DRAIN: u64 = 0x160 // "ab hier kommt nichts mehr"
+const S_IRQON: u64 = 0x168
+const S_AMPSTEPS: u64 = 0x170 // Schritte des Ausgangsverstaerkers
+const S_AMPOFF: u64 = 0x178 // sein Nullpunkt (0 dB)
+const S_EAPD: u64 = 0x180 // wurde EAPD eingeschaltet
+const S_PINS: u64 = 0x188 // gefundene Buchsen mit Ausgang
+const S_DACS: u64 = 0x190 // gefundene Wandler
+const S_LOSTRESP: u64 = 0x198 // Antworten, die niemand angefordert hat
+const S_FMT: u64 = 0x1A0 // was zuletzt in SDnFMT stand
+const S_REV: u64 = 0x1A8
+
+// Warum es nicht ging.
+const W_OK: u64 = 0
+const W_OFF: u64 = 1
+const W_NODEV: u64 = 2 // kein Geraet der Klasse 04:03 auf dem Bus
+const W_NOBAR: u64 = 3 // BAR0 fehlt oder ist ein Portbereich
+const W_NORING: u64 = 4 // kein Speicher fuer den Ring
+const W_HIGHRING: u64 = 5 // Ring ueber 4 GiB und der Regler kann nur 32 Bit
+const W_NORESET: u64 = 6 // der Regler kommt aus dem Ruecksetzen nicht heraus
+const W_NOCODEC: u64 = 7 // STATESTS bleibt null -- kein Codec am Link
+const W_NOAFG: u64 = 8 // kein Codec mit einer Audio Function Group
+const W_NOPATH: u64 = 9 // kein Weg von einem Wandler zu einer Buchse
+const W_NOSTREAM: u64 = 10 // die Strombeschreibung faehrt nicht an
+
+// Welchen Weg die Befehle nehmen.
+const P_CORB: u64 = 1
+const P_IMMEDIATE: u64 = 2
+
+// -------------------------------------------- die Register des Reglers
+//
+// Die Namen sind die der Spezifikation (Intel High Definition Audio
+// Specification 1.0a, Abschnitt 3.3), damit sie nachschlagbar bleiben.
+const R_GCAP: u64 = 0x00 // 16
+const R_VMIN: u64 = 0x02 // 8
+const R_VMAJ: u64 = 0x03 // 8
+const R_GCTL: u64 = 0x08 // 32
+const R_WAKEEN: u64 = 0x0C // 16
+const R_STATESTS: u64 = 0x0E // 16
+const R_INTCTL: u64 = 0x20 // 32
+const R_INTSTS: u64 = 0x24 // 32
+const R_CORBLBASE: u64 = 0x40
+const R_CORBUBASE: u64 = 0x44
+const R_CORBWP: u64 = 0x48 // 16
+const R_CORBRP: u64 = 0x4A // 16
+const R_CORBCTL: u64 = 0x4C // 8
+const R_CORBSTS: u64 = 0x4D // 8
+const R_CORBSIZE: u64 = 0x4E // 8
+const R_RIRBLBASE: u64 = 0x50
+const R_RIRBUBASE: u64 = 0x54
+const R_RIRBWP: u64 = 0x58 // 16
+const R_RINTCNT: u64 = 0x5A // 16
+const R_RIRBCTL: u64 = 0x5C // 8
+const R_RIRBSTS: u64 = 0x5D // 8
+const R_RIRBSIZE: u64 = 0x5E // 8
+const R_ICOI: u64 = 0x60 // 32
+const R_ICII: u64 = 0x64 // 32
+const R_ICIS: u64 = 0x68 // 16
+const R_DPLBASE: u64 = 0x70 // 32
+const R_DPUBASE: u64 = 0x74 // 32
+const SD_BASE: u64 = 0x80
+const SD_SPAN: u64 = 0x20
+
+// Die Strombeschreibung, Versaetze innerhalb ihres Blocks.
+const SD_CTL: u64 = 0x00 // 24 Bit; hier als 16 + 8 angefasst
+const SD_STS: u64 = 0x03 // 8
+const SD_LPIB: u64 = 0x04 // 32
+const SD_CBL: u64 = 0x08 // 32
+const SD_LVI: u64 = 0x0C // 16
+const SD_FIFOW: u64 = 0x0E // 16
+const SD_FIFOS: u64 = 0x10 // 16
+const SD_FMT: u64 = 0x12 // 16
+const SD_BDPL: u64 = 0x18 // 32
+const SD_BDPU: u64 = 0x1C // 32
+
+const GCTL_CRST: u64 = 0x01
+const GCTL_UNSOL: u64 = 0x100
+const CORBCTL_RUN: u64 = 0x02
+const RIRBCTL_RUN: u64 = 0x02
+const RIRBCTL_INT: u64 = 0x01
+const SIZE_256: u64 = 0x02 // in CORBSIZE/RIRBSIZE: 256 Eintraege
+const RP_RST: u64 = 0x8000
+const WP_RST: u64 = 0x8000
+const ICIS_BUSY: u64 = 0x01
+const ICIS_VALID: u64 = 0x02
+const SDCTL_SRST: u64 = 0x01
+const SDCTL_RUN: u64 = 0x02
+const SDCTL_IOCE: u64 = 0x04
+const SDSTS_BCIS: u64 = 0x04
+const SDSTS_FIFOE: u64 = 0x08
+const SDSTS_DESE: u64 = 0x10
+const INTCTL_GIE: u64 = 0x80000000
+const INTCTL_CIE: u64 = 0x40000000
+const DP_ENABLE: u64 = 0x01
+
+// ------------------------------------------------------------ Verben
+const V_GET_PARAM: u64 = 0xF00
+const V_GET_CONNSEL: u64 = 0xF01
+const V_SET_CONNSEL: u64 = 0x701
+const V_GET_CONNLIST: u64 = 0xF02
+const V_SET_PSTATE: u64 = 0x705
+const V_SET_STREAM: u64 = 0x706
+const V_SET_PINCTL: u64 = 0x707
+const V_GET_PINSENSE: u64 = 0xF09
+const V_SET_EAPD: u64 = 0x70C
+const V_GET_CFGDEF: u64 = 0xF1C
+const V_SET_FORMAT: u64 = 0x2 // Vierbitverb, 16 Bit Nutzlast
+const V_SET_AMP: u64 = 0x3 // dito
+
+// -------------------------------------------------------- Parameter
+const P_VENDOR: u64 = 0x00
+const P_REVISION: u64 = 0x02
+const P_NODECOUNT: u64 = 0x04
+const P_FGTYPE: u64 = 0x05
+const P_WCAP: u64 = 0x09
+const P_PCMSIZE: u64 = 0x0A
+const P_PINCAP: u64 = 0x0C
+const P_INAMP: u64 = 0x0D
+const P_CONNLEN: u64 = 0x0E
+const P_OUTAMP: u64 = 0x12
+
+// Knotenarten (AWCAP Bits 20..23).
+const T_AUDIO_OUT: u64 = 0
+const T_AUDIO_IN: u64 = 1
+const T_MIXER: u64 = 2
+const T_SELECTOR: u64 = 3
+const T_PIN: u64 = 4
+
+const WCAP_STEREO: u64 = 0x001
+const WCAP_INAMP: u64 = 0x002
+const WCAP_OUTAMP: u64 = 0x004
+const WCAP_AMPOVR: u64 = 0x008
+const WCAP_FMTOVR: u64 = 0x010
+const WCAP_DIGITAL: u64 = 0x200
+const WCAP_CONNLIST: u64 = 0x100
+const WCAP_POWER: u64 = 0x400
+
+const PINCAP_OUT: u64 = 0x10
+const PINCAP_HP: u64 = 0x08
+const PINCAP_EAPD: u64 = 0x10000
+
+const PINCTL_OUT: u64 = 0x40
+const PINCTL_HP: u64 = 0x80
+
+// Wie lange auf ein Register gewartet wird, wenn kein Zeitmass da ist.
+const SPIN_LIMIT: u64 = 500000
+
+// ------------------------------------------------------ kleine Helfer
+
+fn g(state: u64, off: u64) -> u64 {
+    return kstate.get(state + kstate.HDA_OFF, off)
+}
+
+fn s(state: u64, off: u64, v: u64) {
+    kstate.set(state + kstate.HDA_OFF, off, v)
+}
+
+fn base(state: u64) -> u64 {
+    return g(state, S_BASE)
+}
+
+fn rd8(state: u64, off: u64) -> u64 {
+    return __mmio_read8((base(state) + off) as *mut u8) as u64
+}
+
+fn wr8(state: u64, off: u64, v: u64) {
+    __mmio_write8((base(state) + off) as *mut u8, (v & 0xFF) as u8)
+}
+
+fn rd16(state: u64, off: u64) -> u64 {
+    return __mmio_read16((base(state) + off) as *mut u16) as u64
+}
+
+fn wr16(state: u64, off: u64, v: u64) {
+    __mmio_write16((base(state) + off) as *mut u16, (v & 0xFFFF) as u16)
+}
+
+fn rd32(state: u64, off: u64) -> u64 {
+    return __mmio_read32((base(state) + off) as *mut u32) as u64
+}
+
+fn wr32(state: u64, off: u64, v: u64) {
+    __mmio_write32((base(state) + off) as *mut u32, (v & 0xFFFFFFFF) as u32)
+}
+
+// Der Block der benutzten Strombeschreibung.
+fn sd(state: u64) -> u64 {
+    return SD_BASE + g(state, S_OSTREAM) * SD_SPAN
+}
+
+fn sdrd8(state: u64, off: u64) -> u64 {
+    return rd8(state, sd(state) + off)
+}
+
+fn sdwr8(state: u64, off: u64, v: u64) {
+    wr8(state, sd(state) + off, v)
+}
+
+fn sdrd16(state: u64, off: u64) -> u64 {
+    return rd16(state, sd(state) + off)
+}
+
+fn sdwr16(state: u64, off: u64, v: u64) {
+    wr16(state, sd(state) + off, v)
+}
+
+fn sdrd32(state: u64, off: u64) -> u64 {
+    return rd32(state, sd(state) + off)
+}
+
+fn sdwr32(state: u64, off: u64, v: u64) {
+    wr32(state, sd(state) + off, v)
+}
+
+// Die vier DMA-Bereiche, mit ihrer Adresse in kdata. Sie ist zugleich
+// die physische -- siehe der Kommentar bei den Versaetzen oben.
+fn corb(state: u64) -> u64 {
+    return state + kstate.HDAR_OFF + CORB_OFF
+}
+
+fn rirb(state: u64) -> u64 {
+    return state + kstate.HDAR_OFF + RIRB_OFF
+}
+
+fn bdl(state: u64) -> u64 {
+    return state + kstate.HDA_OFF + BDL_OFF
+}
+
+fn dpib_addr(state: u64) -> u64 {
+    return state + kstate.HDA_OFF + DPIB_OFF
+}
+
+fn wtab(state: u64, nid: u64) -> u64 {
+    return state + kstate.HDAB_OFF + nid * NODE_SPAN
+}
+
+// Eine kurze, ECHTE Pause. Die Spezifikation nennt an mehreren Stellen
+// Wartezeiten in Mikrosekunden (521 us nach dem Ruecksetzen, damit die
+// Codecs sich melden). Ein Schleifenzaehler bedeutet auf einer
+// schnelleren Maschine etwas anderes; die monotone Uhr bedeutet
+// ueberall dasselbe.
+fn udelay(state: u64, us: u64) {
+    let bis: u64 = time.mono_ns(state) +% us * 1000
+    while time.mono_ns(state) < bis {
+        arch.pause()
+    }
+}
+
+// ------------------------------------------------------- die Auskunft
+
+fn present(state: u64) -> bool {
+    return g(state, S_BASE) != 0
+}
+
+fn ready(state: u64) -> bool {
+    return g(state, S_READY) != 0
+}
+
+fn why(state: u64) -> u64 {
+    return g(state, S_WHY)
+}
+
+fn bdf(state: u64) -> u64 {
+    return g(state, S_BDF)
+}
+
+fn running(state: u64) -> bool {
+    return g(state, S_RUNNING) != 0
+}
+
+fn ring_base(state: u64) -> u64 {
+    return g(state, S_RING)
+}
+
+fn ring_octets(state: u64) -> u64 {
+    return RING_OCTETS
+}
+
+fn ring_frames(state: u64) -> u64 {
+    return RING_FRAMES
+}
+
+fn entries(state: u64) -> u64 {
+    return ENTRIES
+}
+
+fn entry_frames(state: u64) -> u64 {
+    return ENTRY_FRAMES
+}
+
+fn entry_octets(state: u64) -> u64 {
+    return ENTRY_OCTETS
+}
+
+fn channels(state: u64) -> u64 {
+    return CHANNELS
+}
+
+fn bits(state: u64) -> u64 {
+    return BITS
+}
+
+fn rate(state: u64) -> u64 {
+    let r: u64 = g(state, S_RATE)
+    if r == 0 {
+        return RATE
+    }
+    return r
+}
+
+fn underruns(state: u64) -> u64 {
+    return g(state, S_UNDER)
+}
+
+fn submits(state: u64) -> u64 {
+    return g(state, S_SUBMITS)
+}
+
+fn starts(state: u64) -> u64 {
+    return g(state, S_STARTS)
+}
+
+fn stops(state: u64) -> u64 {
+    return g(state, S_STOPS)
+}
+
+fn irqs(state: u64) -> u64 {
+    return g(state, S_IRQS)
+}
+
+fn backsteps(state: u64) -> u64 {
+    return g(state, S_BACKW)
+}
+
+fn submitted_frames(state: u64) -> u64 {
+    return g(state, S_SUBMITTED)
+}
+
+fn codec_ready(state: u64) -> bool {
+    return g(state, S_STATESTS) != 0
+}
+
+fn codec_addr(state: u64) -> u64 {
+    return g(state, S_CAD)
+}
+
+fn vendor(state: u64) -> u64 {
+    return g(state, S_VENDOR)
+}
+
+fn device(state: u64) -> u64 {
+    return g(state, S_DEVICE)
+}
+
+fn revision(state: u64) -> u64 {
+    return g(state, S_REV)
+}
+
+fn dac_nid(state: u64) -> u64 {
+    return g(state, S_DAC)
+}
+
+fn pin_nid(state: u64) -> u64 {
+    return g(state, S_PIN)
+}
+
+fn path_len(state: u64) -> u64 {
+    return g(state, S_PLEN)
+}
+
+fn path_at(state: u64, i: u64) -> u64 {
+    if i > 3 {
+        return 0
+    }
+    return (g(state, S_PATH) >> (i * 16)) & 0xFFFF
+}
+
+fn out_stream(state: u64) -> u64 {
+    return g(state, S_OSTREAM)
+}
+
+fn stream_tag(state: u64) -> u64 {
+    return g(state, S_TAG)
+}
+
+fn cmd_path(state: u64) -> u64 {
+    return g(state, S_CMDPATH)
+}
+
+fn cmd_fails(state: u64) -> u64 {
+    return g(state, S_CMDFAIL)
+}
+
+fn widgets(state: u64) -> u64 {
+    return g(state, S_WCOUNT)
+}
+
+fn wstart(state: u64) -> u64 {
+    return g(state, S_WSTART)
+}
+
+fn pos_disagree(state: u64) -> u64 {
+    return g(state, S_DISAGREE)
+}
+
+fn volume(state: u64) -> u64 {
+    return g(state, S_VOL)
+}
+
+fn muted(state: u64) -> bool {
+    return g(state, S_MUTE) != 0
+}
+
+fn irq_armed(state: u64) -> bool {
+    return g(state, S_IRQON) != 0
+}
+
+// Die Knotentafel. Der Index ist der Knoten MINUS dem ersten Knoten der
+// Gruppe; ein Knoten ausserhalb liefert null statt in fremde Oktette zu
+// greifen.
+fn wslot(state: u64, nid: u64) -> u64 {
+    let st: u64 = g(state, S_WSTART)
+    if nid < st {
+        return MAX_NODES
+    }
+    let i: u64 = nid -% st
+    if i >= MAX_NODES || i >= g(state, S_WCOUNT) {
+        return MAX_NODES
+    }
+    return i
+}
+
+fn node_caps(state: u64, nid: u64) -> u64 {
+    let i: u64 = wslot(state, nid)
+    if i >= MAX_NODES {
+        return 0
+    }
+    return kstate.get(wtab(state, i), W_CAPS)
+}
+
+fn node_type(state: u64, nid: u64) -> u64 {
+    return (node_caps(state, nid) >> 20) & 0xF
+}
+
+fn node_cfg(state: u64, nid: u64) -> u64 {
+    let i: u64 = wslot(state, nid)
+    if i >= MAX_NODES {
+        return 0
+    }
+    return kstate.get(wtab(state, i), W_CFG)
+}
+
+fn node_pincap(state: u64, nid: u64) -> u64 {
+    let i: u64 = wslot(state, nid)
+    if i >= MAX_NODES {
+        return 0
+    }
+    return kstate.get(wtab(state, i), W_PIN)
+}
+
+fn node_amp(state: u64, nid: u64) -> u64 {
+    let i: u64 = wslot(state, nid)
+    if i >= MAX_NODES {
+        return 0
+    }
+    return kstate.get(wtab(state, i), W_AMP)
+}
+
+fn node_nconn(state: u64, nid: u64) -> u64 {
+    let i: u64 = wslot(state, nid)
+    if i >= MAX_NODES {
+        return 0
+    }
+    return kstate.get(wtab(state, i), W_NCONN)
+}
+
+// Die k-te Quelle eines Knotens. Nur die ersten ACHT werden gespeichert
+// -- ein Mischer mit mehr Eingaengen wird nicht abgelehnt, aber der
+// Weg wird nur unter den ersten acht gesucht, und `node_nconn` sagt die
+// WAHRE Zahl, damit im Bericht steht, dass gekuerzt wurde.
+fn node_conn(state: u64, nid: u64, k: u64) -> u64 {
+    if k >= 8 {
+        return 0
+    }
+    let i: u64 = wslot(state, nid)
+    if i >= MAX_NODES {
+        return 0
+    }
+    let w: u64 = kstate.get(wtab(state, i), W_CONN + (k / 4) * 8)
+    return (w >> ((k % 4) * 16)) & 0xFFFF
+}
+
+// ================================================== DIE BEFEHLE AN DEN CODEC
+//
+// ZWEI WEGE, EIN AUFRUF. `cmd` sieht nach, welcher Weg beim Aufsetzen
+// als tragfaehig befunden wurde, und geht ihn. Alles darueber -- der
+// Graphlauf, die Verstaerker, das Format -- kennt nur `cmd` und keinen
+// Ring.
+//
+// DER RUECKGABEWERT IST DIE ANTWORT, und eine Antwort, die nicht kommt,
+// ist 0xFFFFFFFF und KEINE 0. Das ist wichtig: 0 ist eine gueltige
+// Antwort (ein Knoten ohne Verbindungen, ein Verstaerker auf null),
+// 0xFFFFFFFF ist es fuer keinen der hier benutzten Parameter. Wer
+// beides gleich behandelt, liest aus einem stummen Codec einen Graphen
+// mit lauter Nullen und findet darin folgerichtig keinen Weg -- der
+// Fehler waere dann "kein Weg gefunden" statt "der Codec antwortet
+// nicht", und das ist ein Tag Fehlersuche an der falschen Stelle.
+const NO_ANSWER: u64 = 0xFFFFFFFF
+
+// Ein Befehlswort bauen. Zwoelfbitverben tragen acht Bit Nutzlast,
+// Vierbitverben sechzehn -- die Spezifikation unterscheidet sie an
+// den oberen vier Bits des Verbs.
+fn verb12(cad: u64, nid: u64, v: u64, payload: u64) -> u64 {
+    return ((cad & 0xF) << 28) | ((nid & 0xFF) << 20)
+        | ((v & 0xFFF) << 8) | (payload & 0xFF)
+}
+
+fn verb4(cad: u64, nid: u64, v: u64, payload: u64) -> u64 {
+    return ((cad & 0xF) << 28) | ((nid & 0xFF) << 20)
+        | ((v & 0xF) << 16) | (payload & 0xFFFF)
+}
+
+// ------------------------------------------------------- der Ringweg
+
+fn corb_rirb(state: u64, word: u64) -> u64 {
+    let b: u64 = base(state)
+    // Der Antwortring wird VOR dem Absenden gelesen, nicht danach: der
+    // Regler kann eine unaufgeforderte Antwort dazwischenlegen, und
+    // wer den Schreibzeiger erst hinterher merkt, haelt eine fremde
+    // Antwort fuer seine. Der eigene Lesezeiger steht in S_RIRBRP.
+    var rp: u64 = g(state, S_RIRBRP)
+    let wp0: u64 = rd16(state, R_RIRBWP) & 0xFF
+    if wp0 != rp {
+        // Da liegt etwas, das dieser Treiber nicht angefordert hat.
+        // Ueberspringen und zaehlen -- das sind unaufgeforderte
+        // Antworten (Buchse gesteckt, Lautstaerkerad gedreht), und
+        // diese Runde behandelt sie nicht.
+        s(state, S_LOSTRESP, g(state, S_LOSTRESP) +% 1)
+        rp = wp0
+        s(state, S_RIRBRP, rp)
+    }
+
+    let wp: u64 = (rd16(state, R_CORBWP) + 1) % CORB_ENTRIES
+    __mmio_write32((corb(state) + wp * 4) as *mut u32,
+        (word & 0xFFFFFFFF) as u32)
+    arch.barrier_write()
+    wr16(state, R_CORBWP, wp)
+
+    // Warten, bis der Regler geantwortet hat. Die Frist ist eine ZEIT
+    // und kein Zaehler: auf einer schnelleren Maschine bedeutet ein
+    // Zaehler etwas anderes, und diese Schleife steht im Aufsetzweg,
+    // wo ein haengender Codec den ganzen Kernel anhalten wuerde.
+    let deadline: u64 = time.mono_ns(state) +% 100000000
+    var got: bool = false
+    var resp: u64 = NO_ANSWER
+    while !got && time.mono_ns(state) < deadline {
+        let nw: u64 = rd16(state, R_RIRBWP) & 0xFF
+        if nw != rp {
+            let nrp: u64 = (rp + 1) % RIRB_ENTRIES
+            arch.barrier_read()
+            resp = __mmio_read32((rirb(state) + nrp * 8) as *mut u32) as u64
+            let ex: u64 = __mmio_read32((rirb(state) + nrp * 8 + 4)
+                as *mut u32) as u64
+            s(state, S_RIRBRP, nrp)
+            // Bit 4 des Zusatzwortes: die Antwort kam ungefragt. Dann
+            // ist es nicht die auf DIESEN Befehl, und es wird
+            // weitergewartet.
+            if (ex & 0x10) == 0 {
+                got = true
+            } else {
+                s(state, S_LOSTRESP, g(state, S_LOSTRESP) +% 1)
+                rp = nrp
+            }
+        } else {
+            arch.pause()
+        }
+    }
+    // Der Zustandsbits des Antwortrings sind schreib-eins-loeschend.
+    wr8(state, R_RIRBSTS, rd8(state, R_RIRBSTS))
+    if !got {
+        s(state, S_CMDFAIL, g(state, S_CMDFAIL) +% 1)
+        return NO_ANSWER
+    }
+    return resp & 0xFFFFFFFF
+}
+
+// -------------------------------------------------- der unmittelbare Weg
+//
+// ICOI nimmt den Befehl, ICII gibt die Antwort, ICIS traegt zwei Bits:
+// BUSY (der Regler arbeitet) und VALID (die Antwort steht). Die
+// Reihenfolge ist die, die Linux benutzt, und sie ist nicht beliebig:
+// VALID wird VOR dem Absenden geloescht, sonst liest der naechste
+// Aufruf die Antwort des vorigen.
+fn immediate(state: u64, word: u64) -> u64 {
+    var n: u64 = 0
+    var frei: bool = false
+    while n < SPIN_LIMIT && !frei {
+        if (rd16(state, R_ICIS) & ICIS_BUSY) == 0 {
+            frei = true
+        } else {
+            n = n + 1
+            arch.pause()
+        }
+    }
+    if !frei {
+        s(state, S_CMDFAIL, g(state, S_CMDFAIL) +% 1)
+        return NO_ANSWER
+    }
+    wr16(state, R_ICIS, ICIS_VALID)
+    wr32(state, R_ICOI, word)
+    wr16(state, R_ICIS, ICIS_BUSY)
+    n = 0
+    var da: bool = false
+    while n < SPIN_LIMIT && !da {
+        let st: u64 = rd16(state, R_ICIS)
+        if (st & (ICIS_VALID | ICIS_BUSY)) == ICIS_VALID {
+            da = true
+        } else {
+            n = n + 1
+            arch.pause()
+        }
+    }
+    if !da {
+        s(state, S_CMDFAIL, g(state, S_CMDFAIL) +% 1)
+        return NO_ANSWER
+    }
+    return rd32(state, R_ICII)
+}
+
+fn cmd(state: u64, cad: u64, nid: u64, v: u64, payload: u64) -> u64 {
+    if !present(state) {
+        return NO_ANSWER
+    }
+    s(state, S_CMDS, g(state, S_CMDS) +% 1)
+    var word: u64 = 0
+    if v > 0xF {
+        word = verb12(cad, nid, v, payload)
+    } else {
+        word = verb4(cad, nid, v, payload)
+    }
+    if g(state, S_CMDPATH) == P_IMMEDIATE {
+        return immediate(state, word)
+    }
+    return corb_rirb(state, word)
+}
+
+fn param(state: u64, cad: u64, nid: u64, p: u64) -> u64 {
+    return cmd(state, cad, nid, V_GET_PARAM, p)
+}
+
+// ============================================== DER REGLER KOMMT HOCH
+//
+// DIE REIHENFOLGE IST NICHT BELIEBIG. Jede Vertauschung hat eine eigene
+// Art zu scheitern, und sie steht daneben.
+
+fn controller_reset(state: u64) -> bool {
+    // 1. ALLE UNTERBRECHUNGEN AUS, BEVOR IRGENDETWAS ANDERES PASSIERT.
+    //    Der Regler kommt aus der Firmware in dem Zustand, in dem die
+    //    Firmware ihn gelassen hat -- unter UEFI ist das oft ein
+    //    laufender Strom.
+    wr32(state, R_INTCTL, 0)
+    wr8(state, R_CORBCTL, 0)
+    wr8(state, R_RIRBCTL, 0)
+
+    // 2. CRST AUF NULL: das ist das Ruecksetzen. Danach MUSS das Bit
+    //    als null zurueckgelesen werden -- ein Regler, der es nicht
+    //    tut, haengt, und ein Treiber, der trotzdem weitermacht,
+    //    schreibt in Register, die niemand liest.
+    wr32(state, R_GCTL, rd32(state, R_GCTL) & 0xFFFFFFFE)
+    var n: u64 = 0
+    var unten: bool = false
+    while n < SPIN_LIMIT && !unten {
+        if (rd32(state, R_GCTL) & GCTL_CRST) == 0 {
+            unten = true
+        } else {
+            n = n + 1
+            arch.pause()
+        }
+    }
+    if !unten {
+        return false
+    }
+    // Die Spezifikation verlangt mindestens 100 us Ruhe.
+    udelay(state, 200)
+
+    // 3. CRST AUF EINS, und wieder zurueckgelesen.
+    wr32(state, R_GCTL, rd32(state, R_GCTL) | GCTL_CRST)
+    n = 0
+    var oben: bool = false
+    while n < SPIN_LIMIT && !oben {
+        if (rd32(state, R_GCTL) & GCTL_CRST) != 0 {
+            oben = true
+        } else {
+            n = n + 1
+            arch.pause()
+        }
+    }
+    if !oben {
+        return false
+    }
+    // 4. UND JETZT DIE 521 MIKROSEKUNDEN. Die Zahl steht so in der
+    //    Spezifikation (Abschnitt 4.3, "Codec Discovery"): so lange
+    //    braucht ein Codec, um sich am Link zu melden. Wer STATESTS
+    //    frueher liest, liest null und schliesst daraus, es gebe
+    //    keinen Codec -- der haeufigste Anfaengerfehler an diesem
+    //    Geraet, und einer, der auf schnellen Maschinen zuverlaessig
+    //    auftritt und auf langsamen nie.
+    udelay(state, 1000)
+    return true
+}
+
+fn corb_setup(state: u64) -> bool {
+    let b: u64 = corb(state)
+    // Groesse: 256 Eintraege. CORBSIZE Bits 4..7 sagen, was der Regler
+    // kann; die untersten zwei, was er nehmen soll. Fast jeder kann
+    // 256, und dieser Treiber verlangt es -- ein Regler, der nur zwei
+    // Eintraege kann, ist in freier Wildbahn nicht bekannt.
+    wr8(state, R_CORBSIZE, (rd8(state, R_CORBSIZE) & 0xFC) | SIZE_256)
+    wr32(state, R_CORBLBASE, b & 0xFFFFFFFF)
+    wr32(state, R_CORBUBASE, (b >> 32) & 0xFFFFFFFF)
+    // DEN LESEZEIGER ZURUECKSETZEN, und zwar in vier Schritten, weil
+    // das Bit sich selbst zuruecknimmt: 0x8000 hinein, warten bis es
+    // als 0x8000 dasteht, 0 hinein, warten bis es null ist. Wer nur
+    // schreibt und nicht wartet, laesst den Regler in einem Zustand
+    // zurueck, in dem er den ersten Befehl verschluckt.
+    wr16(state, R_CORBRP, RP_RST)
+    var n: u64 = 0
+    var da: bool = false
+    while n < SPIN_LIMIT && !da {
+        if (rd16(state, R_CORBRP) & RP_RST) != 0 {
+            da = true
+        } else {
+            n = n + 1
+            arch.pause()
+        }
+    }
+    wr16(state, R_CORBRP, 0)
+    n = 0
+    var weg: bool = false
+    while n < SPIN_LIMIT && !weg {
+        if (rd16(state, R_CORBRP) & RP_RST) == 0 {
+            weg = true
+        } else {
+            n = n + 1
+            arch.pause()
+        }
+    }
+    wr16(state, R_CORBWP, 0)
+
+    // Der Antwortring.
+    let r: u64 = rirb(state)
+    wr8(state, R_RIRBSIZE, (rd8(state, R_RIRBSIZE) & 0xFC) | SIZE_256)
+    wr32(state, R_RIRBLBASE, r & 0xFFFFFFFF)
+    wr32(state, R_RIRBUBASE, (r >> 32) & 0xFFFFFFFF)
+    wr16(state, R_RIRBWP, WP_RST)
+    // RINTCNT auf eins: der Regler meldet nach JEDER Antwort. Dieser
+    // Treiber fragt ab und braucht die Meldung nicht -- aber der
+    // Zaehler ist zugleich der, nach dem der Regler den Ring
+    // fortschreibt, und null waere hier ein Ring, der nie voll wird.
+    wr16(state, R_RINTCNT, 1)
+    s(state, S_RIRBRP, 0)
+
+    wr8(state, R_CORBCTL, CORBCTL_RUN)
+    wr8(state, R_RIRBCTL, RIRBCTL_RUN)
+    // Nullen, damit eine alte Antwort aus der Firmware nicht als neue
+    // gelesen wird.
+    var i: u64 = 0
+    while i < RIRB_ENTRIES {
+        __mmio_write64((r + i * 8) as *mut u64, 0)
+        i = i + 1
+    }
+    return weg && da
+}
+
+// Welchen Befehlsweg der Regler traegt. Erst der Ring, und wenn der
+// ERSTE Befehl darueber nicht ankommt, der unmittelbare Weg. Der
+// Testbefehl ist der Herstellerkenner des Wurzelknotens -- er
+// funktioniert an JEDEM Codec und veraendert nichts.
+fn pick_path(state: u64, cad: u64) -> bool {
+    s(state, S_CMDPATH, P_CORB)
+    let v: u64 = param(state, cad, 0, P_VENDOR)
+    if v != NO_ANSWER && v != 0 {
+        s(state, S_VENDOR, v >> 16)
+        s(state, S_DEVICE, v & 0xFFFF)
+        return true
+    }
+    s(state, S_CMDPATH, P_IMMEDIATE)
+    let v2: u64 = param(state, cad, 0, P_VENDOR)
+    if v2 != NO_ANSWER && v2 != 0 {
+        s(state, S_VENDOR, v2 >> 16)
+        s(state, S_DEVICE, v2 & 0xFFFF)
+        return true
+    }
+    return false
+}
+
+// ============================================ DER GRAPH IM CODEC
+//
+// Drei Schritte, und jeder ist eine Frage an den Codec:
+//
+//   Wurzelknoten 0, Parameter 0x04  -> welche Funktionsgruppen gibt es
+//   jede Gruppe, Parameter 0x05     -> ist es eine AUDIO-Gruppe (1)
+//   die Audiogruppe, Parameter 0x04 -> welche Knoten gehoeren dazu
+//
+// Danach wird jeder Knoten EINMAL abgefragt und in die Tafel gelegt.
+// Das ist der teuerste Teil des Aufsetzens (bei 36 Knoten rund 150
+// Befehle ueber den Ring), und er passiert genau einmal -- danach wird
+// nur noch nachgeschlagen.
+
+fn read_conns(state: u64, cad: u64, nid: u64, slot: u64) {
+    let caps: u64 = kstate.get(wtab(state, slot), W_CAPS)
+    if (caps & WCAP_CONNLIST) == 0 {
+        kstate.set(wtab(state, slot), W_NCONN, 0)
+        return
+    }
+    let cl: u64 = param(state, cad, nid, P_CONNLEN)
+    if cl == NO_ANSWER {
+        kstate.set(wtab(state, slot), W_NCONN, 0)
+        return
+    }
+    let lang: bool = (cl & 0x80) != 0
+    let n: u64 = cl & 0x7F
+    kstate.set(wtab(state, slot), W_NCONN, n)
+    if n == 0 {
+        return
+    }
+    // DIE BEREICHSFORM, und sie ist der Grund, warum diese Funktion
+    // laenger ist als "vier Oktette lesen". Eine Verbindungsliste darf
+    // BEREICHE enthalten: ein Eintrag mit gesetztem obersten Bit
+    // bedeutet "von der vorigen Nummer bis zu dieser". Wer das nicht
+    // aufloest, bekommt falsche INDIZES -- und der Index ist genau
+    // das, womit der Eingang eines Mischers benannt wird. Ein um zwei
+    // verschobener Index dreht den falschen Verstaerker auf, und das
+    // Ergebnis ist ein Weg, der aussieht wie gefunden und still ist.
+    var idx: u64 = 0 // wie viele Eintraege schon gespeichert sind
+    var gelesen: u64 = 0 // wie viele Listeneintraege schon geholt sind
+    var vorher: u64 = 0
+    while gelesen < n && idx < 8 {
+        var wert: u64 = 0
+        var bereich: bool = false
+        if lang {
+            let r: u64 = cmd(state, cad, nid, V_GET_CONNLIST, gelesen)
+            if r == NO_ANSWER {
+                gelesen = n
+            } else {
+                let sub: u64 = gelesen % 2
+                let e: u64 = (r >> (sub * 16)) & 0xFFFF
+                wert = e & 0x7FFF
+                bereich = (e & 0x8000) != 0
+            }
+        } else {
+            let r: u64 = cmd(state, cad, nid, V_GET_CONNLIST,
+                (gelesen / 4) * 4)
+            if r == NO_ANSWER {
+                gelesen = n
+            } else {
+                let sub: u64 = gelesen % 4
+                let e: u64 = (r >> (sub * 8)) & 0xFF
+                wert = e & 0x7F
+                bereich = (e & 0x80) != 0
+            }
+        }
+        if gelesen < n {
+            if bereich && idx > 0 {
+                var k: u64 = vorher + 1
+                while k <= wert && idx < 8 {
+                    let off: u64 = W_CONN + (idx / 4) * 8
+                    let sh: u64 = (idx % 4) * 16
+                    let alt: u64 = kstate.get(wtab(state, slot), off)
+                    kstate.set(wtab(state, slot), off,
+                        (alt & ~(0xFFFF << sh)) | ((k & 0xFFFF) << sh))
+                    idx = idx + 1
+                    k = k + 1
+                }
+                vorher = wert
+            } else {
+                let off: u64 = W_CONN + (idx / 4) * 8
+                let sh: u64 = (idx % 4) * 16
+                let alt: u64 = kstate.get(wtab(state, slot), off)
+                kstate.set(wtab(state, slot), off,
+                    (alt & ~(0xFFFF << sh)) | ((wert & 0xFFFF) << sh))
+                idx = idx + 1
+                vorher = wert
+            }
+            gelesen = gelesen + 1
+        }
+    }
+}
+
+fn walk_widgets(state: u64, cad: u64) -> bool {
+    // Die Funktionsgruppen des Codec.
+    let nc: u64 = param(state, cad, 0, P_NODECOUNT)
+    if nc == NO_ANSWER {
+        return false
+    }
+    let fg_start: u64 = (nc >> 16) & 0xFF
+    let fg_count: u64 = nc & 0xFF
+    var afg: u64 = 0
+    var i: u64 = 0
+    while i < fg_count && afg == 0 {
+        let nid: u64 = fg_start + i
+        let t: u64 = param(state, cad, nid, P_FGTYPE)
+        if t != NO_ANSWER && (t & 0x7F) == 1 {
+            afg = nid
+        }
+        i = i + 1
+    }
+    if afg == 0 {
+        return false
+    }
+    s(state, S_AFG, afg)
+    s(state, S_REV, param(state, cad, 0, P_REVISION))
+
+    // Die Gruppe einschalten, BEVOR ihre Knoten gefragt werden. Ein
+    // Codec in D3 antwortet auf Parameter noch, aber nicht mehr
+    // zuverlaessig auf alles andere -- und ein Verstaerker, den man in
+    // D3 aufdreht, steht nach dem Aufwachen wieder auf null.
+    cmd(state, cad, afg, V_SET_PSTATE, 0)
+    udelay(state, 1000)
+
+    let wn: u64 = param(state, cad, afg, P_NODECOUNT)
+    if wn == NO_ANSWER {
+        return false
+    }
+    let ws: u64 = (wn >> 16) & 0xFF
+    var wc: u64 = wn & 0xFF
+    if wc > MAX_NODES {
+        s(state, S_TOOMANY, wc -% MAX_NODES)
+        wc = MAX_NODES
+    }
+    s(state, S_WSTART, ws)
+    s(state, S_WCOUNT, wc)
+
+    var pins: u64 = 0
+    var dacs: u64 = 0
+    var k: u64 = 0
+    while k < wc {
+        let nid: u64 = ws + k
+        let caps: u64 = param(state, cad, nid, P_WCAP)
+        var c: u64 = caps
+        if c == NO_ANSWER {
+            c = 0
+        }
+        kstate.set(wtab(state, k), W_CAPS, c)
+        kstate.set(wtab(state, k), W_CFG, 0)
+        kstate.set(wtab(state, k), W_PIN, 0)
+        kstate.set(wtab(state, k), W_AMP, 0)
+        kstate.set(wtab(state, k), W_NCONN, 0)
+        kstate.set(wtab(state, k), W_CONN, 0)
+        kstate.set(wtab(state, k), W_CONN + 8, 0)
+        let t: u64 = (c >> 20) & 0xF
+        // DER AUSGANGSVERSTAERKER. Steht Bit 3 (AMP_OVERRIDE), hat der
+        // Knoten seinen EIGENEN Bereich; sonst gilt der der ganzen
+        // Gruppe. Wer immer den Knoten fragt, bekommt bei den meisten
+        // Codecs null und dreht nichts auf.
+        if (c & WCAP_OUTAMP) != 0 {
+            var a: u64 = 0
+            if (c & WCAP_AMPOVR) != 0 {
+                a = param(state, cad, nid, P_OUTAMP)
+            } else {
+                a = param(state, cad, afg, P_OUTAMP)
+            }
+            if a == NO_ANSWER {
+                a = 0
+            }
+            kstate.set(wtab(state, k), W_AMP, a)
+        }
+        if t == T_PIN {
+            var pc: u64 = param(state, cad, nid, P_PINCAP)
+            if pc == NO_ANSWER {
+                pc = 0
+            }
+            kstate.set(wtab(state, k), W_PIN, pc)
+            var cf: u64 = cmd(state, cad, nid, V_GET_CFGDEF, 0)
+            if cf == NO_ANSWER {
+                cf = 0
+            }
+            kstate.set(wtab(state, k), W_CFG, cf)
+            if (pc & PINCAP_OUT) != 0 && (c & WCAP_DIGITAL) == 0 {
+                pins = pins + 1
+            }
+        }
+        if t == T_AUDIO_OUT && (c & WCAP_DIGITAL) == 0 {
+            dacs = dacs + 1
+        }
+        read_conns(state, cad, nid, k)
+        k = k + 1
+    }
+    s(state, S_PINS, pins)
+    s(state, S_DACS, dacs)
+    return true
+}
+
+// =========================================== DER WEG ZUM LAUTSPRECHER
+//
+// HIER SCHEITERT EIN GENERISCHER HDA-TREIBER ODER NICHT. Der Codec
+// sagt, welche Knoten es gibt und wer mit wem verbunden ist; er sagt
+// NICHT, aus welcher Buchse man etwas hoert. Das steht in der
+// BUCHSENBELEGUNG (Configuration Default, Verb 0xF1C), die der
+// Brettbauer beim Bau ins BIOS geschrieben hat:
+//
+//   Bits 30..31  Anschluss:  0 Buchse, 1 NICHT VORHANDEN, 2 fest
+//                            verdrahtet, 3 beides
+//   Bits 24..27  Geraeteart: 0 Line Out, 1 Lautsprecher, 2 Kopfhoerer,
+//                            3 CD, 4 SPDIF Out, 5 digital, ...
+//   Bits 20..23  Steckerart
+//   Bits 8..11   Zusammengehoerigkeit (Association)
+//   Bits 4..7    Reihenfolge darin (Sequence)
+//
+// DIE BEWERTUNG UNTEN, und warum sie so und nicht anders ist:
+//
+//   * Anschluss 1 ("nicht vorhanden") wird AUSGESCHLOSSEN. Ein Brett
+//     hat oft Buchsen im Codec, die auf der Platine gar nicht
+//     herausgefuehrt sind. Wer darauf spielt, hat einen Treiber, der
+//     alles richtig macht und still ist.
+//   * Line Out (0) steht VOR Lautsprecher (1) steht vor Kopfhoerer
+//     (2). Auf einem Schreibtischrechner ist die gruene Buchse der
+//     Lautsprecher; auf einem tragbaren ist es der eingebaute. Beide
+//     Faelle sind mit dieser Reihenfolge bedient, weil ein Brett
+//     selten beides hat.
+//   * Digitale Knoten (SPDIF, HDMI) werden UEBERSPRUNGEN -- sie
+//     brauchen eine Kanalzuordnung und ein Infoframe, und das ist
+//     nicht diese Runde.
+//   * Bei gleicher Art gewinnt die kleinere Reihenfolge (Sequence).
+//     So hat es der Brettbauer gemeint.
+//
+// WAS DIESE BEWERTUNG NICHT KANN, und es steht auch in docs/REALHW.md:
+// sie fragt NICHT, ob etwas eingesteckt ist. Ein Rechner mit
+// Kopfhoererbuchse UND Lautsprecher bekommt hier immer denselben Weg.
+// Das richtige Verhalten braucht unaufgeforderte Antworten und eine
+// Stelle, die auf sie hoert -- eine eigene Runde.
+fn pin_score(state: u64, nid: u64) -> u64 {
+    let caps: u64 = node_caps(state, nid)
+    if ((caps >> 20) & 0xF) != T_PIN {
+        return 0
+    }
+    if (caps & WCAP_DIGITAL) != 0 {
+        return 0
+    }
+    let pc: u64 = node_pincap(state, nid)
+    if (pc & PINCAP_OUT) == 0 {
+        return 0
+    }
+    let cfg: u64 = node_cfg(state, nid)
+    let conn: u64 = (cfg >> 30) & 3
+    if conn == 1 {
+        return 0
+    }
+    let dev: u64 = (cfg >> 20) & 0xF
+    var punkte: u64 = 0
+    if dev == 0 {
+        punkte = 400 // Line Out
+    } else if dev == 1 {
+        punkte = 380 // Lautsprecher
+    } else if dev == 2 {
+        punkte = 360 // Kopfhoerer
+    } else {
+        // Alles andere ist entweder digital, Eingang oder ein
+        // Sonderweg. EIN Punkt, damit ein Brett mit ausschliesslich
+        // unbeschrifteten Buchsen (und die gibt es, vor allem in
+        // Emulatoren) trotzdem einen Weg bekommt statt gar keinen.
+        punkte = 1
+    }
+    if punkte > 1 {
+        let seq: u64 = (cfg >> 4) & 0xF
+        punkte = punkte -% seq
+    }
+    return punkte
+}
+
+// Von der Buchse rueckwaerts zu einem Wandler. Hoechstens VIER Knoten
+// tief -- Buchse, Mischer, Waehler, Wandler --, und das ist keine
+// Bequemlichkeit, sondern eine Aussage: laenger ist bei keinem
+// dokumentierten Codec noetig, und ohne Grenze waere ein Zyklus in der
+// Verbindungsliste ein Kernel, der nicht mehr bootet. Die drei
+// geschachtelten Schleifen SIND die Grenze, im Quelltext sichtbar.
+fn seek_dac(state: u64, pin: u64) -> bool {
+    let n0: u64 = node_nconn(state, pin)
+    var i0: u64 = 0
+    while i0 < n0 && i0 < 8 {
+        let a: u64 = node_conn(state, pin, i0)
+        let ta: u64 = node_type(state, a)
+        if ta == T_AUDIO_OUT && (node_caps(state, a) & WCAP_DIGITAL) == 0 {
+            s(state, S_PLEN, 2)
+            s(state, S_PATH, (pin & 0xFFFF) | ((a & 0xFFFF) << 16))
+            s(state, S_PIDX, i0 & 0xFFFF)
+            s(state, S_DAC, a)
+            return true
+        }
+        if ta == T_MIXER || ta == T_SELECTOR {
+            let n1: u64 = node_nconn(state, a)
+            var i1: u64 = 0
+            while i1 < n1 && i1 < 8 {
+                let b: u64 = node_conn(state, a, i1)
+                let tb: u64 = node_type(state, b)
+                if tb == T_AUDIO_OUT
+                    && (node_caps(state, b) & WCAP_DIGITAL) == 0 {
+                    s(state, S_PLEN, 3)
+                    s(state, S_PATH, (pin & 0xFFFF) | ((a & 0xFFFF) << 16)
+                        | ((b & 0xFFFF) << 32))
+                    s(state, S_PIDX, (i0 & 0xFFFF) | ((i1 & 0xFFFF) << 16))
+                    s(state, S_DAC, b)
+                    return true
+                }
+                if tb == T_MIXER || tb == T_SELECTOR {
+                    let n2: u64 = node_nconn(state, b)
+                    var i2: u64 = 0
+                    while i2 < n2 && i2 < 8 {
+                        let c: u64 = node_conn(state, b, i2)
+                        if node_type(state, c) == T_AUDIO_OUT
+                            && (node_caps(state, c) & WCAP_DIGITAL) == 0 {
+                            s(state, S_PLEN, 4)
+                            s(state, S_PATH, (pin & 0xFFFF)
+                                | ((a & 0xFFFF) << 16)
+                                | ((b & 0xFFFF) << 32)
+                                | ((c & 0xFFFF) << 48))
+                            s(state, S_PIDX, (i0 & 0xFFFF)
+                                | ((i1 & 0xFFFF) << 16)
+                                | ((i2 & 0xFFFF) << 32))
+                            s(state, S_DAC, c)
+                            return true
+                        }
+                        i2 = i2 + 1
+                    }
+                }
+                i1 = i1 + 1
+            }
+        }
+        i0 = i0 + 1
+    }
+    return false
+}
+
+// Die beste Buchse, die auch wirklich an einem Wandler haengt. Zwei
+// Durchgaenge statt eines: erst die Bewertung, dann die Wegsuche --
+// denn die bestbewertete Buchse kann eine sein, von der aus KEIN
+// Wandler erreichbar ist, und dann muss die naechstbeste dran. Ein
+// Treiber, der nur die beste probiert und dann aufgibt, ist auf jedem
+// zweiten Brett still.
+fn choose_path(state: u64) -> bool {
+    let ws: u64 = g(state, S_WSTART)
+    let wc: u64 = g(state, S_WCOUNT)
+    var versucht: u64 = 0
+    var fertig: bool = false
+    // Hoechstens so viele Anlaeufe, wie es Knoten gibt.
+    while !fertig && versucht < wc {
+        var best: u64 = 0
+        var bestp: u64 = 0
+        var k: u64 = 0
+        while k < wc {
+            let nid: u64 = ws + k
+            let p: u64 = pin_score(state, nid)
+            if p > bestp && !schon_versucht(state, nid) {
+                bestp = p
+                best = nid
+            }
+            k = k + 1
+        }
+        if bestp == 0 {
+            return false
+        }
+        merke_versuch(state, best)
+        if seek_dac(state, best) {
+            s(state, S_PIN, best)
+            fertig = true
+        }
+        versucht = versucht + 1
+    }
+    return fertig
+}
+
+// Welche Buchsen schon durchprobiert sind. Sie stehen als Bitfeld in
+// der Codec-Tafel -- vier Woerter zu 64 Bit reichen fuer 256 Knoten,
+// und der Platz ist da.
+const TRIED_OFF: u64 = 0x600
+
+fn schon_versucht(state: u64, nid: u64) -> bool {
+    let w: u64 = kstate.get(state + kstate.HDA_OFF,
+        TRIED_OFF + (nid / 64) * 8)
+    return (w & (1 << (nid % 64))) != 0
+}
+
+fn merke_versuch(state: u64, nid: u64) {
+    let off: u64 = TRIED_OFF + (nid / 64) * 8
+    let w: u64 = kstate.get(state + kstate.HDA_OFF, off)
+    kstate.set(state + kstate.HDA_OFF, off, w | (1 << (nid % 64)))
+}
+
+// ==================================== DEN WEG EINSCHALTEN UND AUFDREHEN
+//
+// Ein gefundener Weg ist ein STILLER Weg, solange nicht jeder Knoten
+// darauf eingeschaltet und jeder Verstaerker darauf aufgedreht ist. Das
+// ist der zweite Ort, an dem HD-Audio anders ist als AC97: dort gibt es
+// zwei Lautstaerkeregister, hier bis zu vier Verstaerker in Reihe, und
+// EIN stummgeschalteter davon macht die ganze Kette still.
+//
+// DIE ZAHL, DIE HIER HINEINGESCHRIEBEN WIRD, ist NICHT das Maximum,
+// sondern der NULLPUNKT (Offset) aus dem Faehigkeitswort:
+//
+//     Bits 0..6   OFFSET     welcher Schritt 0 dB ist
+//     Bits 8..14  NUMSTEPS   wie viele Schritte es gibt
+//     Bits 16..22 STEPSIZE   wie gross ein Schritt ist (0,25 dB)
+//     Bit 31      MUTE       kann der Verstaerker stumm
+//
+// Bei vielen Wandlern ist OFFSET gleich NUMSTEPS, dann ist 0 dB auch
+// das Maximum. Bei Buchsenverstaerkern ist OFFSET oft KLEINER --
+// darueber liegt echte VERSTAERKUNG, und die ist auf einem eingebauten
+// Lautsprecher der Weg zum Uebersteuern. Deshalb OFFSET und nicht
+// NUMSTEPS: 0 dB ist das, was der Brettbauer als richtig hinterlegt
+// hat, und es ist zugleich der einzige Wert, bei dem der Weg vom
+// Programm bis zum Wandler RECHNUNGSFREI ist.
+fn amp_offset(cap: u64) -> u64 {
+    return cap & 0x7F
+}
+
+fn amp_steps(cap: u64) -> u64 {
+    return (cap >> 8) & 0x7F
+}
+
+// Den Ausgangsverstaerker eines Knotens setzen. 0xB000 heisst: setze
+// AUSGANG, LINKS und RECHTS, Index 0. Darunter Bit 7 stumm und die
+// sieben Bits Verstaerkung.
+fn set_out_amp(state: u64, cad: u64, nid: u64, gain: u64, mute: bool) {
+    var p: u64 = 0xB000 | (gain & 0x7F)
+    if mute {
+        p = p | 0x80
+    }
+    cmd(state, cad, nid, V_SET_AMP, p)
+}
+
+// Den EINGANGSverstaerker eines Knotens an EINEM Index. 0x7000 heisst:
+// setze EINGANG, LINKS und RECHTS. Der Index steht in Bits 8..11 -- und
+// genau deshalb muss die Verbindungsliste mit ihren Bereichen richtig
+// aufgeloest sein.
+fn set_in_amp(state: u64, cad: u64, nid: u64, idx: u64, gain: u64,
+    mute: bool) {
+    var p: u64 = 0x7000 | ((idx & 0xF) << 8) | (gain & 0x7F)
+    if mute {
+        p = p | 0x80
+    }
+    cmd(state, cad, nid, V_SET_AMP, p)
+}
+
+fn setup_path(state: u64) {
+    let cad: u64 = g(state, S_CAD)
+    let len: u64 = g(state, S_PLEN)
+    let idxw: u64 = g(state, S_PIDX)
+    var i: u64 = 0
+    while i < len {
+        let nid: u64 = path_at(state, i)
+        let caps: u64 = node_caps(state, nid)
+        // 1. Strom an. Nur, wenn der Knoten das ueberhaupt kennt --
+        //    ein Knoten ohne Bit 10 antwortet auf 0x705 mit einem
+        //    Fehler, und ein Fehler je Knoten ist eine Zahl, die
+        //    spaeter jemand sucht.
+        if (caps & WCAP_POWER) != 0 {
+            cmd(state, cad, nid, V_SET_PSTATE, 0)
+        }
+        // 2. Der Ausgangsverstaerker, auf 0 dB und nicht stumm.
+        if (caps & WCAP_OUTAMP) != 0 {
+            let a: u64 = node_amp(state, nid)
+            set_out_amp(state, cad, nid, amp_offset(a), false)
+        }
+        // 3. Der EINGANGSverstaerker des NAECHSTEN Knotens auf dem
+        //    Weg, an dem Index, ueber den wir gekommen sind. Ein
+        //    Mischer hat je Eingang einen eigenen, und alle ausser
+        //    einem sollen zu bleiben -- sonst mischt sich der
+        //    Line-In-Eingang in die Wiedergabe, was auf echter
+        //    Hardware als Rueckkopplung hoerbar wird.
+        if i + 1 < len {
+            let nxt: u64 = path_at(state, i + 1)
+            let ncaps: u64 = node_caps(state, nid)
+            if (ncaps & WCAP_INAMP) != 0 {
+                let idx: u64 = (idxw >> (i * 16)) & 0xFFFF
+                // Alle Eingaenge stumm, dann DEN einen auf.
+                let n: u64 = node_nconn(state, nid)
+                var k: u64 = 0
+                while k < n && k < 8 {
+                    set_in_amp(state, cad, nid, k, 0, true)
+                    k = k + 1
+                }
+                set_in_amp(state, cad, nid, idx, 0, false)
+            }
+            // Ein WAEHLER hat keinen Mischer, sondern einen Schalter.
+            if node_type(state, nid) == T_SELECTOR {
+                let idx: u64 = (idxw >> (i * 16)) & 0xFFFF
+                cmd(state, cad, nid, V_SET_CONNSEL, idx)
+            }
+        }
+        i = i + 1
+    }
+
+    // 4. DIE BUCHSE. Ausgang an; wenn sie einen Kopfhoerer treiben
+    //    kann, auch den Treiber an. Beides in EINEM Schreibzugriff,
+    //    weil das Register beim zweiten sonst das erste zuruecknimmt.
+    let pin: u64 = g(state, S_PIN)
+    let pc: u64 = node_pincap(state, pin)
+    var ctl: u64 = PINCTL_OUT
+    if (pc & PINCAP_HP) != 0 {
+        ctl = ctl | PINCTL_HP
+    }
+    cmd(state, cad, pin, V_SET_PINCTL, ctl)
+
+    // 5. EAPD. External Amplifier Power Down -- der Name sagt es
+    //    verkehrt herum: das Bit SCHALTET den externen Verstaerker EIN.
+    //    Auf tragbaren Rechnern haengt der eingebaute Lautsprecher an
+    //    genau so einem, und ein Treiber, der dieses eine Bit nicht
+    //    setzt, macht alles richtig und bleibt still. Es ist der
+    //    haeufigste Grund fuer "unter Linux kein Ton auf dem Laptop"
+    //    und kostet hier zwei Zeilen.
+    if (pc & PINCAP_EAPD) != 0 {
+        cmd(state, cad, pin, V_SET_EAPD, 0x02)
+        s(state, S_EAPD, 1)
+    }
+
+    // 6. Den Verstaerkerbereich des Wandlers merken -- er ist es, den
+    //    `set_volume` spaeter verstellt.
+    let dac: u64 = g(state, S_DAC)
+    let da: u64 = node_amp(state, dac)
+    s(state, S_AMPOFF, amp_offset(da))
+    s(state, S_AMPSTEPS, amp_steps(da))
+    if amp_steps(da) == 0 {
+        // Ein Wandler ohne eigenen Verstaerker gibt es; dann regelt
+        // die Buchse. Steht auch die auf null Schritten, bleibt nur
+        // der Mischer in der Schicht darueber -- und das steht dann
+        // im Bericht, statt dass die Lautstaerke stumm ins Leere
+        // geschrieben wird.
+        let pa: u64 = node_amp(state, pin)
+        s(state, S_AMPOFF, amp_offset(pa))
+        s(state, S_AMPSTEPS, amp_steps(pa))
+    }
+}
+
+// ==================================================== DAS FORMAT
+//
+// SDnFMT und der Wandler bekommen DASSELBE Wort, und das ist keine
+// Redundanz: der Regler formt daraus die Rahmen auf dem Link, der Codec
+// muss sie genauso lesen. Stehen beide Woerter verschieden, kommt
+// Rauschen oder Stille -- je nachdem, welche Seite wie danebenliegt.
+//
+//     Bit 14      BASE   0 = 48 kHz, 1 = 44,1 kHz
+//     Bits 11..13 MULT   Vervielfacher - 1
+//     Bits 8..10  DIV    Teiler - 1
+//     Bits 4..6   BITS   0=8, 1=16, 2=20, 3=24, 4=32
+//     Bits 0..3   CHAN   Kanaele - 1
+//
+// DAS IST DER GANZE GRUND, WARUM HD-AUDIO 44,1 kHz WIRKLICH KANN und
+// AC97 dafuer einen Zusatz aus Fassung 2.1 braucht: hier ist es EIN
+// Bit. Alles andere -- 96 kHz, 24 Bit, sechs Kanaele -- traegt dieses
+// Wort ebenfalls und wird von dieser Runde NICHT benutzt; die
+// Begruendung steht im Kopf.
+fn fmt_word(hz: u64) -> u64 {
+    var f: u64 = 0x0011 // 16 Bit, zwei Kanaele, Grundrate, kein Teiler
+    if hz == RATE_ALT {
+        f = f | 0x4000
+    }
+    return f
+}
+
+fn set_rate(state: u64, hz: u64) -> bool {
+    if !ready(state) {
+        return false
+    }
+    if hz != RATE && hz != RATE_ALT {
+        return false
+    }
+    if g(state, S_RUNNING) != 0 {
+        // Das Format eines LAUFENDEN Stroms zu aendern ist nicht
+        // vorgesehen und auf mehreren Reglern ein haengender Strom.
+        return false
+    }
+    let f: u64 = fmt_word(hz)
+    sdwr16(state, SD_FMT, f)
+    cmd(state, g(state, S_CAD), g(state, S_DAC), V_SET_FORMAT, f)
+    s(state, S_FMT, f)
+    s(state, S_RATE, hz)
+    return true
+}
+
+// ================================================ DIE STROMBESCHREIBUNG
+//
+// WELCHE. Der Regler hat ISS Eingabestroeme, dann OSS Ausgabestroeme,
+// dann BSS beidseitige -- IN DIESER REIHENFOLGE, als Bloecke zu 0x20
+// Oktetten ab 0x80. Der erste Ausgabestrom ist also Nummer ISS, und
+// wer stattdessen 0 nimmt, beschreibt einen EINGANG und wundert sich
+// ueber Stille. Die Zahlen stehen in GCAP.
+//
+// DIE STROMKENNUNG (Stream Tag) ist etwas anderes als die Nummer der
+// Beschreibung: sie ist die Marke, unter der die Rahmen ueber den Link
+// laufen, sie ist 1..15 und muss auf BEIDEN Seiten stehen -- in SDnCTL
+// Bits 20..23 und im Wandler (Verb 0x706). Null ist "kein Strom" und
+// stellt den Wandler ab. Diese Runde nimmt 1.
+const TAG: u64 = 1
+
+fn stream_reset(state: u64) -> bool {
+    // Erst anhalten. Ein Strom, der beim Ruecksetzen laeuft, kommt auf
+    // mehreren Reglern gar nicht zurueck.
+    sdwr8(state, SD_CTL, sdrd8(state, SD_CTL) & 0xFD)
+    var n: u64 = 0
+    var aus: bool = false
+    while n < SPIN_LIMIT && !aus {
+        if (sdrd8(state, SD_CTL) & SDCTL_RUN) == 0 {
+            aus = true
+        } else {
+            n = n + 1
+            arch.pause()
+        }
+    }
+    sdwr8(state, SD_CTL, sdrd8(state, SD_CTL) | SDCTL_SRST)
+    n = 0
+    var drin: bool = false
+    while n < SPIN_LIMIT && !drin {
+        if (sdrd8(state, SD_CTL) & SDCTL_SRST) != 0 {
+            drin = true
+        } else {
+            n = n + 1
+            arch.pause()
+        }
+    }
+    udelay(state, 100)
+    sdwr8(state, SD_CTL, sdrd8(state, SD_CTL) & 0xFE)
+    n = 0
+    var raus: bool = false
+    while n < SPIN_LIMIT && !raus {
+        if (sdrd8(state, SD_CTL) & SDCTL_SRST) == 0 {
+            raus = true
+        } else {
+            n = n + 1
+            arch.pause()
+        }
+    }
+    udelay(state, 100)
+    return drin && raus
+}
+
+// Die Deskriptorliste. EINMAL beschrieben und danach nie wieder --
+// anders als bei AC97, wo jeder Eintrag einzeln uebergeben wird. Der
+// Regler laeuft im Kreis darueber, und `submit` fuehrt nur noch Buch.
+//
+// EIN EINTRAG sind SECHZEHN Oktette: acht Adresse, vier Laenge in
+// OKTETTEN (nicht in Werten wie bei AC97, nicht in Rahmen), vier
+// Steuerbits, davon nur Bit 0 (IOC) belegt.
+fn bdl_fill(state: u64) {
+    let ring: u64 = g(state, S_RING)
+    let b: u64 = bdl(state)
+    var i: u64 = 0
+    while i < ENTRIES {
+        let e: u64 = b + i * 16
+        let a: u64 = ring + i * ENTRY_OCTETS
+        __mmio_write32(e as *mut u32, (a & 0xFFFFFFFF) as u32)
+        __mmio_write32((e + 4) as *mut u32, ((a >> 32) & 0xFFFFFFFF) as u32)
+        __mmio_write32((e + 8) as *mut u32, (ENTRY_OCTETS & 0xFFFFFFFF) as u32)
+        var ctl: u64 = 0
+        if (i % IOC_EVERY) == (IOC_EVERY - 1) {
+            ctl = 1
+        }
+        __mmio_write32((e + 12) as *mut u32, (ctl & 0xFFFFFFFF) as u32)
+        i = i + 1
+    }
+    arch.barrier_write()
+}
+
+fn zero_ring(state: u64) {
+    let r: u64 = g(state, S_RING)
+    if r == 0 {
+        return
+    }
+    var i: u64 = 0
+    while i < RING_OCTETS / 8 {
+        kstate.set(r, i * 8, 0)
+        i = i + 1
+    }
+}
+
+fn stream_setup(state: u64) -> bool {
+    if !stream_reset(state) {
+        return false
+    }
+    // Die Laenge des Ringes in Oktetten und der letzte gueltige Eintrag.
+    sdwr32(state, SD_CBL, RING_OCTETS)
+    sdwr16(state, SD_LVI, ENTRIES - 1)
+    let b: u64 = bdl(state)
+    sdwr32(state, SD_BDPL, b & 0xFFFFFFFF)
+    sdwr32(state, SD_BDPU, (b >> 32) & 0xFFFFFFFF)
+    let f: u64 = fmt_word(rate(state))
+    sdwr16(state, SD_FMT, f)
+    s(state, S_FMT, f)
+    // Die Stromkennung in Bits 20..23 -- das ist Bit 4..7 des DRITTEN
+    // Oktetts. Es wird EINZELN geschrieben und nicht als 32-Bit-Wort
+    // ueber SDnCTL, weil das vierte Oktett SDnSTS ist: schreib-eins-
+    // loeschend. Ein 32-Bit-Schreibzugriff mit Nullen dort waere
+    // harmlos, einer mit den zurueckgelesenen Bits wuerde die
+    // Zustandsbits still loeschen -- und die zaehlt diese Runde.
+    wr8(state, sd(state) + 0x02, (TAG & 0xF) << 4)
+    s(state, S_TAG, TAG)
+    // Der Wandler bekommt dieselbe Kennung und dasselbe Format.
+    let cad: u64 = g(state, S_CAD)
+    let dac: u64 = g(state, S_DAC)
+    cmd(state, cad, dac, V_SET_FORMAT, f)
+    cmd(state, cad, dac, V_SET_STREAM, (TAG << 4) | 0)
+    // Die Zustandsbits loeschen (schreib-eins-loeschend).
+    sdwr8(state, SD_STS, SDSTS_BCIS | SDSTS_FIFOE | SDSTS_DESE)
+    return true
+}
+
+// ============================================== LAUF AN, LAUF AUS, UHR
+
+fn reset_box(state: u64) {
+    s(state, S_SUBMITTED, 0)
+    s(state, S_LASTRAW, 0)
+    s(state, S_WRAPS, 0)
+    s(state, S_POS, 0)
+    s(state, S_RUNNING, 0)
+    s(state, S_BACKW, 0)
+    s(state, S_UNDERN, 0)
+    s(state, S_DRAIN, 0)
+}
+
+fn reset_box_pub(state: u64) {
+    if !present(state) {
+        return
+    }
+    stop(state)
+    stream_reset(state)
+    zero_ring(state)
+    reset_box(state)
+    stream_setup(state)
+    // Den Positionspuffer nullen: er wird vom Regler geschrieben, und
+    // ein alter Wert darin waere beim naechsten Start eine Uhr, die
+    // mitten im Lauf anfaengt.
+    kstate.set(dpib_addr(state), 0, 0)
+}
+
+fn start(state: u64) -> bool {
+    if !ready(state) {
+        return false
+    }
+    if g(state, S_RUNNING) != 0 {
+        return true
+    }
+    // Der Positionspuffer wird VOR dem Anfahren genullt und der
+    // Bezugspunkt gemerkt: der Regler schreibt dort weiter, wo er
+    // aufgehoert hat, und die Uhr soll bei null anfangen.
+    kstate.set(dpib_addr(state), 0, 0)
+    sdwr8(state, SD_STS, SDSTS_BCIS | SDSTS_FIFOE | SDSTS_DESE)
+    sdwr32(state, SD_LPIB, 0)
+    var ctl: u64 = sdrd8(state, SD_CTL) | SDCTL_RUN
+    if g(state, S_IRQON) != 0 {
+        ctl = ctl | SDCTL_IOCE
+    }
+    sdwr8(state, SD_CTL, ctl)
+    var n: u64 = 0
+    var laeuft: bool = false
+    while n < SPIN_LIMIT && !laeuft {
+        if (sdrd8(state, SD_CTL) & SDCTL_RUN) != 0 {
+            laeuft = true
+        } else {
+            n = n + 1
+            arch.pause()
+        }
+    }
+    if !laeuft {
+        return false
+    }
+    s(state, S_RUNNING, 1)
+    s(state, S_STARTS, g(state, S_STARTS) + 1)
+    return true
+}
+
+fn stop(state: u64) {
+    if !present(state) {
+        return
+    }
+    sdwr8(state, SD_CTL, sdrd8(state, SD_CTL) & 0xFC)
+    var n: u64 = 0
+    var aus: bool = false
+    while n < SPIN_LIMIT && !aus {
+        if (sdrd8(state, SD_CTL) & SDCTL_RUN) == 0 {
+            aus = true
+        } else {
+            n = n + 1
+            arch.pause()
+        }
+    }
+    s(state, S_RUNNING, 0)
+    s(state, S_STOPS, g(state, S_STOPS) + 1)
+}
+
+// EINEN VOLLEN EINTRAG UEBERGEBEN -- bei HD-Audio heisst das: BUCH
+// FUEHREN. Der Regler hat die Liste schon, er laeuft im Kreis darueber,
+// und es gibt kein Register, das man nachziehen muesste. Genau das ist
+// der Unterschied, den `audio.fi` NICHT sehen muss: die Grenze verlangt
+// "einen vollen Eintrag uebergeben", und was der Treiber dafuer tut,
+// ist seine Sache.
+fn submit(state: u64) -> bool {
+    if !ready(state) {
+        return false
+    }
+    s(state, S_SUBMITTED, g(state, S_SUBMITTED) + ENTRY_FRAMES)
+    s(state, S_SUBMITS, g(state, S_SUBMITS) + 1)
+    // Was nachgelegt wurde, ist kein Aussetzer mehr: der Zaehler der
+    // schon gemeldeten Stille wird zurueckgesetzt, sobald der
+    // Schreiber wieder vor dem Regler liegt.
+    if g(state, S_SUBMITTED) > g(state, S_POS) {
+        s(state, S_UNDERN, 0)
+    }
+    return true
+}
+
+// "Ab hier kommt nichts mehr." Die DREIZEHNTE Funktion an der Grenze,
+// und sie ist in dieser Runde dazugekommen -- mit Grund:
+//
+//   Bei AC97 haelt der DMA am letzten Eintrag von selbst an. Das Ende
+//   eines Stuecks ist dort ein Zustand der Hardware.
+//   Bei HD-Audio laeuft er weiter. Das Ende eines Stuecks ist dort
+//   eine INFORMATION, die nur der Aufrufer hat.
+//
+// Ohne diese Funktion zaehlt der Aussetzerzaehler nach dem letzten
+// Rahmen jedes Stuecks munter weiter -- die Zahl "Aussetzer je Minute"
+// waere dann eine Zahl ueber die Zahl der abgespielten Dateien und
+// nicht ueber die Qualitaet der Wiedergabe. `audio.pad_and_submit`
+// ruft sie; `ac97.fi` braucht sie nicht und hat sie nicht.
+fn drain_mark(state: u64) {
+    s(state, S_DRAIN, 1)
+}
+
+// Die rohe Position im Ring, in RAHMEN, 0..RING_FRAMES.
+//
+// ZWEI QUELLEN, EINE ANTWORT. Der DMA-Positionspuffer ist die bessere:
+// der Regler schreibt ihn selbst, und er ist auf den Chipsaetzen, auf
+// denen LPIB hinkt, richtig. LPIB wird trotzdem gelesen und
+// danebengehalten -- weichen beide um mehr als einen Eintrag
+// voneinander ab, steht das als Zahl im Bericht (`pos_disagree`)
+// statt als Vermutung in einem Kommentar.
+fn position_raw(state: u64) -> u64 {
+    let dp: u64 = kstate.get32(dpib_addr(state)) % RING_OCTETS
+    let lp: u64 = sdrd32(state, SD_LPIB) % RING_OCTETS
+    var d: u64 = 0
+    if dp > lp {
+        d = dp -% lp
+    } else {
+        d = lp -% dp
+    }
+    if d > ENTRY_OCTETS && d < RING_OCTETS -% ENTRY_OCTETS {
+        s(state, S_DISAGREE, g(state, S_DISAGREE) +% 1)
+    }
+    return dp / FRAME_OCTETS
+}
+
+fn lpib(state: u64) -> u64 {
+    return sdrd32(state, SD_LPIB)
+}
+
+fn dpib(state: u64) -> u64 {
+    return kstate.get32(dpib_addr(state))
+}
+
+// Die abgespielten Rahmen seit dem Start, monoton -- die Leituhr.
+//
+// DER AUSSETZER WIRD HIER GEZAEHLT UND NUR HIER. Weil der Regler nie
+// anhaelt, ist "der Puffer ist leergelaufen" kein Zustandsbit, sondern
+// eine RECHNUNG: der Regler hat mehr Rahmen gelesen, als der Schreiber
+// hineingelegt hat. Gezaehlt wird in EINTRAEGEN (2,67 ms), nicht je
+// Abfrage -- eine Zahl, die davon abhaengt, wie oft jemand hinsieht,
+// misst den Betrachter und nicht das Geraet.
+fn position_frames(state: u64) -> u64 {
+    if !ready(state) {
+        return 0
+    }
+    if g(state, S_RUNNING) == 0 {
+        return g(state, S_POS)
+    }
+    let raw: u64 = position_raw(state)
+    var w: u64 = g(state, S_WRAPS)
+    if raw < g(state, S_LASTRAW) {
+        w = w + 1
+        s(state, S_WRAPS, w)
+    }
+    s(state, S_LASTRAW, raw)
+    var pos: u64 = w * RING_FRAMES + raw
+    let sub: u64 = g(state, S_SUBMITTED)
+    if pos > sub {
+        if g(state, S_DRAIN) == 0 {
+            let leer: u64 = (pos -% sub) / ENTRY_FRAMES
+            let schon: u64 = g(state, S_UNDERN)
+            if leer > schon {
+                s(state, S_UNDER, g(state, S_UNDER) +% (leer -% schon))
+                s(state, S_UNDERN, leer)
+            }
+        }
+        // Die Uhr gibt NIE mehr aus, als hineingelegt wurde. Was
+        // darueber liegt, ist Stille, die der Regler aus dem
+        // ausgenullten Ring gespielt hat, und keine Wiedergabe.
+        pos = sub
+    }
+    if pos < g(state, S_POS) {
+        pos = g(state, S_POS)
+        s(state, S_BACKW, g(state, S_BACKW) + 1)
+    }
+    s(state, S_POS, pos)
+    return pos
+}
+
+// ==================================================== DIE LAUTSTAERKE
+//
+// SIE STEHT IM CODEC UND NICHT IM REGLER. AC97 hat zwei
+// Mischerregister; HD-Audio hat je Knoten einen Verstaerker, und der,
+// der hier zaehlt, ist der des WANDLERS (oder, wenn der keinen hat,
+// der der Buchse -- `setup_path` hat das schon entschieden).
+//
+// DIE ABBILDUNG: 100 Prozent sind der NULLPUNKT (0 dB), 0 Prozent sind
+// stumm. Dazwischen linear in Schritten. Das ist ABSICHTLICH nicht
+// logarithmisch: eine Rechnung im Tonweg macht jede Bitgleichheit
+// unmoeglich, und die Bitgleichheit bei 100 Prozent ist die einzige
+// Zusage dieser Runde, die den ganzen Weg vom Erzeugen bis zum
+// Lautsprecher auf einmal prueft. Wer eine gehoerrichtige Kurve will,
+// legt sie ueber diese Prozente, nicht darunter.
+fn apply_volume(state: u64) {
+    if !ready(state) {
+        return
+    }
+    let cad: u64 = g(state, S_CAD)
+    let dac: u64 = g(state, S_DAC)
+    let pin: u64 = g(state, S_PIN)
+    let off: u64 = g(state, S_AMPOFF)
+    let v: u64 = g(state, S_VOL)
+    var gain: u64 = (off * v) / 100
+    if gain > off {
+        gain = off
+    }
+    let stumm: bool = (v == 0) || (g(state, S_MUTE) != 0)
+    // Der Wandler bekommt die Zahl, die Buchse bleibt auf 0 dB. Wer
+    // BEIDE regelt, hat zwei Daempfungen in Reihe und bei 50 Prozent
+    // ein Viertel der Leistung statt der Haelfte.
+    if (node_caps(state, dac) & WCAP_OUTAMP) != 0
+        && amp_steps(node_amp(state, dac)) != 0 {
+        set_out_amp(state, cad, dac, gain, stumm)
+    } else if (node_caps(state, pin) & WCAP_OUTAMP) != 0 {
+        set_out_amp(state, cad, pin, gain, stumm)
+    }
+}
+
+fn set_volume(state: u64, pct: u64) {
+    var v: u64 = pct
+    if v > 100 {
+        v = 100
+    }
+    s(state, S_VOL, v)
+    apply_volume(state)
+}
+
+fn set_muted(state: u64, on: bool) {
+    if on {
+        s(state, S_MUTE, 1)
+    } else {
+        s(state, S_MUTE, 0)
+    }
+    apply_volume(state)
+}
+
+// ================================================== DIE UNTERBRECHUNG
+//
+// SIE TUT WENIG, UND DAS IST DIE ENTSCHEIDUNG. Sie quittiert (die
+// Zustandsbits sind schreib-eins-loeschend, und eine pegelgesteuerte
+// PCI-Leitung, die niemand quittiert, bleibt gesetzt) und sie zaehlt.
+// Sie MISCHT NICHT und sie SCHREIBT KEINE RAHMEN: das taete sie in
+// einem Zusammenhang, in dem keine Sperre genommen werden darf und in
+// dem kein Prozess existiert, dessen Speicher man lesen koennte.
+// Nachgelegt wird aus dem Systemaufruf heraus.
+fn irq(state: u64) {
+    if !present(state) {
+        return
+    }
+    s(state, S_IRQS, g(state, S_IRQS) + 1)
+    let sts: u64 = sdrd8(state, SD_STS)
+    if sts != 0 {
+        sdwr8(state, SD_STS, sts)
+    }
+    let gl: u64 = rd32(state, R_INTSTS)
+    if (gl & 0x40000000) != 0 {
+        wr8(state, R_RIRBSTS, rd8(state, R_RIRBSTS))
+    }
+}
+
+fn arm_irq(state: u64, armed: bool) -> bool {
+    if !ready(state) {
+        return false
+    }
+    let d: u64 = bdf(state)
+    pci.cfg_write16(d, 0x04, pci.cfg_read16(d, 0x04) & 0xFBFF)
+    let idx: u64 = pci.find_bdf(state, d)
+    if idx >= pci.MAX_DEV {
+        return false
+    }
+    let gsi: u64 = pci.get(state, idx, pci.E_IRQLINE)
+    if gsi == 0 || gsi > 23 {
+        return false
+    }
+    apic.route(state, gsi, 42, apic.id(state), true, true)
+    if !armed {
+        apic.mask_gsi(state, gsi)
+        wr32(state, R_INTCTL, 0)
+        s(state, S_IRQON, 0)
+        return false
+    }
+    // Gesamtfreigabe, plus die Leitung GENAU dieses einen Stromes.
+    wr32(state, R_INTCTL, INTCTL_GIE | (1 << g(state, S_OSTREAM)))
+    sdwr8(state, SD_CTL, sdrd8(state, SD_CTL) | SDCTL_IOCE)
+    s(state, S_IRQON, 1)
+    return true
+}
+
+// ==================================================================
+// AUFSETZEN
+// ==================================================================
+
+fn init(state: u64) -> bool {
+    var s_head: [u8; 6] = "hda: \0"
+    var s_no: [u8; 22] = "kein Geraet 04:03 da\0\0"
+    var s_bar: [u8; 26] = "BAR0 fehlt oder ist Port\0\0"
+    var s_ring: [u8; 22] = "kein Ringpuffer frei\0\0"
+    var s_rst: [u8; 30] = "Regler kommt nicht aus CRST\0\0\0"
+    var s_cod: [u8; 26] = "kein Codec am Link (0)\0\0\0\0"
+    var s_afg: [u8; 30] = "keine Audio-Funktionsgruppe\0\0\0"
+    var s_path: [u8; 34] = "kein Weg Wandler -> Buchse\0\0\0\0\0\0\0\0"
+    var s_str: [u8; 26] = "Strom faehrt nicht an\0\0\0\0\0"
+    var s_ok: [u8; 7] = "bereit\0"
+    var s_id: [u8; 5] = " id=\0"
+    var s_cad: [u8; 6] = " cad=\0"
+    var s_w: [u8; 11] = " widgets=\0\0"
+    var s_dac: [u8; 6] = " dac=\0"
+    var s_pin: [u8; 6] = " pin=\0"
+    var s_len: [u8; 7] = " len=\0\0"
+    var s_str2: [u8; 6] = " sd=\0\0"
+    var s_way: [u8; 7] = " weg=\0\0"
+    var s_ring2: [u8; 7] = " ring=\0"
+
+    s(state, S_WHY, W_OK)
+    s(state, S_VOL, 100)
+    s(state, S_RATE, RATE)
+
+    // 1. DAS GERAET, nach KLASSE gesucht (04 Multimedia, 03 HD-Audio)
+    //    und nicht nach einer Kennung. Es gibt HD-Audio-Regler von
+    //    Intel, AMD, NVIDIA, VIA und SiS; ein Treiber mit einer festen
+    //    Kennungsliste findet den naechsten nicht.
+    let idx: u64 = pci.find_class(state, 0x04, 0x03, 0x100)
+    if idx >= pci.MAX_DEV {
+        s(state, S_WHY, W_NODEV)
+        serial.puts((&s_head[0]) as u64)
+        serial.puts((&s_no[0]) as u64)
+        serial.nl()
+        return false
+    }
+    let d: u64 = pci.get(state, idx, pci.E_BDF)
+    s(state, S_BDF, d)
+
+    // 2. BAR0 -- SPEICHER, nicht Port. Ein HD-Audio-Regler hat keinen
+    //    Portbereich; findet sich dort einer, ist es nicht dieses
+    //    Geraet.
+    let phys: u64 = pci.bar(state, idx, 0)
+    if phys == 0 || pci.bar_is_io(state, idx, 0) {
+        s(state, S_WHY, W_NOBAR)
+        serial.puts((&s_head[0]) as u64)
+        serial.puts((&s_bar[0]) as u64)
+        serial.nl()
+        return false
+    }
+    let b: u64 = apic.map_device(state, phys)
+    if b == 0 {
+        s(state, S_WHY, W_NOBAR)
+        return false
+    }
+    s(state, S_BASE, b)
+
+    // 3. BUSMASTER. Ohne dieses Bit antwortet der Regler auf jedes
+    //    Register und holt keinen einzigen Deskriptor -- dieselbe
+    //    Gegenprobe, die Runde K2 fuer NVMe gebaut hat.
+    pci.enable_master(d)
+
+    // 4. RUECKSETZEN.
+    if !controller_reset(state) {
+        s(state, S_WHY, W_NORESET)
+        s(state, S_BASE, 0)
+        serial.puts((&s_head[0]) as u64)
+        serial.puts((&s_rst[0]) as u64)
+        serial.nl()
+        return false
+    }
+    let gcap: u64 = rd16(state, R_GCAP)
+    s(state, S_GCAP, gcap)
+    s(state, S_ISS, (gcap >> 8) & 0xF)
+    s(state, S_OSS, (gcap >> 12) & 0xF)
+    s(state, S_BSS, (gcap >> 3) & 0x1F)
+
+    // 5. WELCHE CODECS. STATESTS traegt ein Bit je Adresse am Link.
+    let st: u64 = rd16(state, R_STATESTS)
+    s(state, S_STATESTS, st)
+    if st == 0 {
+        s(state, S_WHY, W_NOCODEC)
+        s(state, S_BASE, 0)
+        serial.puts((&s_head[0]) as u64)
+        serial.puts((&s_cod[0]) as u64)
+        serial.nl()
+        return false
+    }
+
+    // 6. DIE BEFEHLSRINGE.
+    corb_setup(state)
+
+    // 7. DEN ERSTEN CODEC MIT EINER AUDIOGRUPPE NEHMEN. Ein Brett hat
+    //    oft zwei: den analogen fuer die Buchsen und einen fuer HDMI am
+    //    Bildschirmausgang. Der erste, der eine Audiogruppe hat UND
+    //    einen Weg zu einer analogen Buchse, gewinnt -- und wenn der
+    //    HDMI-Codec zuerst antwortet, wird er wieder verworfen, weil
+    //    `pin_score` seine digitalen Buchsen mit null bewertet.
+    var cad: u64 = 0
+    var fertig: bool = false
+    while cad < 15 && !fertig {
+        if (st & (1 << cad)) != 0 {
+            s(state, S_CAD, cad)
+            if pick_path(state, cad) {
+                if walk_widgets(state, cad) {
+                    if choose_path(state) {
+                        fertig = true
+                    }
+                }
+            }
+        }
+        if !fertig {
+            cad = cad + 1
+        }
+    }
+    if !fertig {
+        if g(state, S_AFG) == 0 {
+            s(state, S_WHY, W_NOAFG)
+            serial.puts((&s_head[0]) as u64)
+            serial.puts((&s_afg[0]) as u64)
+        } else {
+            s(state, S_WHY, W_NOPATH)
+            serial.puts((&s_head[0]) as u64)
+            serial.puts((&s_path[0]) as u64)
+        }
+        serial.nl()
+        s(state, S_BASE, 0)
+        return false
+    }
+
+    // 8. DER RINGPUFFER. Vier Rahmen aus dem Rahmenverwalter, wie bei
+    //    AC97 und aus demselben Grund: seitenausgerichtet, physisch
+    //    zusammenhaengend, und in kdata waeren 16 KiB Verschwendung.
+    let ring: u64 = mem.frame_run(state, RING_PAGES)
+    if ring == 0 {
+        s(state, S_WHY, W_NORING)
+        s(state, S_BASE, 0)
+        serial.puts((&s_head[0]) as u64)
+        serial.puts((&s_ring[0]) as u64)
+        serial.nl()
+        return false
+    }
+    s(state, S_RING, ring)
+    zero_ring(state)
+    bdl_fill(state)
+
+    // 9. DER POSITIONSPUFFER. Bit 0 der unteren Adresse schaltet ihn
+    //    an. Er ist der Grund, warum die Uhr dieser Runde auch auf
+    //    Chipsaetzen stimmt, auf denen LPIB hinkt.
+    let dp: u64 = dpib_addr(state)
+    var i: u64 = 0
+    while i < 16 {
+        kstate.set(dp, i * 8, 0)
+        i = i + 1
+    }
+    wr32(state, R_DPUBASE, (dp >> 32) & 0xFFFFFFFF)
+    wr32(state, R_DPLBASE, (dp & 0xFFFFFFFF) | DP_ENABLE)
+
+    // 10. DIE STROMBESCHREIBUNG. Der erste AUSGABEstrom liegt hinter
+    //     allen Eingabestroemen -- siehe der Kommentar bei TAG.
+    s(state, S_OSTREAM, g(state, S_ISS))
+    reset_box(state)
+    if !stream_setup(state) {
+        s(state, S_WHY, W_NOSTREAM)
+        s(state, S_BASE, 0)
+        serial.puts((&s_head[0]) as u64)
+        serial.puts((&s_str[0]) as u64)
+        serial.nl()
+        return false
+    }
+
+    // 11. DEN WEG EINSCHALTEN UND AUFDREHEN.
+    s(state, S_READY, 1)
+    setup_path(state)
+    apply_volume(state)
+
+    serial.puts((&s_head[0]) as u64)
+    serial.puts((&s_ok[0]) as u64)
+    serial.puts((&s_id[0]) as u64)
+    serial.hex(g(state, S_VENDOR))
+    serial.hex(g(state, S_DEVICE))
+    serial.puts((&s_cad[0]) as u64)
+    serial.dec(g(state, S_CAD))
+    serial.puts((&s_w[0]) as u64)
+    serial.dec(g(state, S_WCOUNT))
+    serial.puts((&s_dac[0]) as u64)
+    serial.dec(g(state, S_DAC))
+    serial.puts((&s_pin[0]) as u64)
+    serial.dec(g(state, S_PIN))
+    serial.puts((&s_len[0]) as u64)
+    serial.dec(g(state, S_PLEN))
+    serial.puts((&s_str2[0]) as u64)
+    serial.dec(g(state, S_OSTREAM))
+    serial.puts((&s_way[0]) as u64)
+    serial.dec(g(state, S_CMDPATH))
+    serial.puts((&s_ring2[0]) as u64)
+    serial.hex(ring)
+    serial.nl()
+    return true
+}
+
+// Den gefundenen Graphen ausdrucken. NUR mit dem Wort `audgraph`, weil
+// er auf einem echten Codec dreissig Zeilen sind -- und genau die
+// braucht, wer auf einem Brett keinen Ton bekommt: sie sagen, WELCHE
+// Buchsen der Codec hat, wie sie belegt sind und warum die gewaehlte
+// gewaehlt wurde.
+fn say_graph(state: u64) {
+    var s_h: [u8; 14] = "hda-graph: \0\0\0"
+    var s_n: [u8; 7] = "  nid=\0"
+    var s_t: [u8; 4] = " t=\0"
+    var s_c: [u8; 7] = " caps=\0"
+    var s_cf: [u8; 6] = " cfg=\0"
+    var s_pc: [u8; 6] = " pin=\0"
+    var s_a: [u8; 6] = " amp=\0"
+    var s_k: [u8; 8] = " conn=\0\0"
+    var s_p: [u8; 8] = " punkt=\0"
+    var s_ko: [u8; 2] = ",\0"
+    if !present(state) {
+        return
+    }
+    serial.puts((&s_h[0]) as u64)
+    serial.dec(g(state, S_WCOUNT))
+    serial.nl()
+    let ws: u64 = g(state, S_WSTART)
+    var k: u64 = 0
+    while k < g(state, S_WCOUNT) {
+        let nid: u64 = ws + k
+        serial.puts((&s_n[0]) as u64)
+        serial.dec(nid)
+        serial.puts((&s_t[0]) as u64)
+        serial.dec(node_type(state, nid))
+        serial.puts((&s_c[0]) as u64)
+        serial.hex(node_caps(state, nid))
+        if node_type(state, nid) == T_PIN {
+            serial.puts((&s_cf[0]) as u64)
+            serial.hex(node_cfg(state, nid))
+            serial.puts((&s_pc[0]) as u64)
+            serial.hex(node_pincap(state, nid))
+            serial.puts((&s_p[0]) as u64)
+            serial.dec(pin_score(state, nid))
+        }
+        serial.puts((&s_a[0]) as u64)
+        serial.hex(node_amp(state, nid))
+        serial.puts((&s_k[0]) as u64)
+        let n: u64 = node_nconn(state, nid)
+        var j: u64 = 0
+        while j < n && j < 8 {
+            if j > 0 {
+                serial.puts((&s_ko[0]) as u64)
+            }
+            serial.dec(node_conn(state, nid, j))
+            j = j + 1
+        }
+        serial.nl()
+        k = k + 1
+    }
+}
