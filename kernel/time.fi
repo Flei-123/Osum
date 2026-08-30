@@ -49,6 +49,8 @@ import atomic
 
 export {
     init, calibrate, mono_ns, real_ns, boot_sec, rtc_field, tsc, khz,
+    // ---- RUNDE STANDBY ----
+    rtc_sekunden, nachziehen,
     epoch_of, days_from_civil, now_sec, split,
     CLOCK_REALTIME, CLOCK_MONOTONIC, CLOCK_PROCESS, CLOCK_THREAD,
     CLOCK_MONOTONIC_RAW, CLOCK_REALTIME_COARSE, CLOCK_MONOTONIC_COARSE,
@@ -358,4 +360,74 @@ fn now_sec(state: u64) -> u64 {
 
 fn boot_sec(state: u64) -> u64 {
     return kstate.get(state, kstate.TIME_BOOT)
+}
+
+// ================================================== RUNDE STANDBY
+//
+// DIE UHR, DIE WAEHREND DES SCHLAFS STEHENBLEIBT.
+//
+// Das ist der Fehler, den fast jeder kleine Kernel macht und den fast
+// niemand bemerkt, weil man ihn nur sieht, wenn man lange genug
+// schlaeft. Die Systemzeit dieses Kernels ist TIME_BOOT plus das, was
+// der Zyklenzaehler seit TIME_TSC0 gezaehlt hat (siehe `real_ns`). Waehrend
+// S3 zaehlt der Zyklenzaehler NICHT -- der Prozessor ist aus. Auf
+// echter Hardware wird er beim Aufwachen sogar auf null zurueckgesetzt.
+// Wer nach dem Aufwachen einfach weiterrechnet, hat eine Uhr, die um
+// genau die Schlafdauer nachgeht; nach einer Nacht im Rucksack sind das
+// acht Stunden.
+//
+// Die einzige Uhr, die weiterlaeuft, ist die Echtzeituhr im CMOS -- sie
+// hat ihre eigene Batterie und ihren eigenen Quarz. Also wird nach dem
+// Aufwachen aus IHR nachgezogen.
+//
+// WIE, OHNE DIE MONOTONE UHR RUECKWAERTS LAUFEN ZU LASSEN: nicht
+// TIME_BOOT wird verschoben, sondern TIME_TSC0. Gewuenscht ist, dass
+// `raw_ns` gleich `mono_vor + geschlafene Nanosekunden` liefert; also
+// wird TIME_TSC0 um genau so viele Zyklen VOR den jetzigen Zaehlerstand
+// gelegt. Damit springt die Wandzeit richtig weiter UND die monotone
+// Uhr bleibt monoton -- sie zaehlt die Schlafzeit mit, so wie
+// CLOCK_BOOTTIME es unter Linux tut.
+//
+// Ohne Eichung (khz == 0, also `notimer`) gibt es keine Zyklen, mit
+// denen sich rechnen liesse. Dann wird stattdessen TIME_BOOT
+// vorgestellt: die Wandzeit stimmt wieder, die monotone Uhr hat den
+// Schlaf nicht gesehen. Gesagt statt verschwiegen.
+//
+// Zurueck kommen die SEKUNDEN, um die nachgezogen wurde.
+
+// Die Wandzeit direkt aus dem CMOS, ohne Umweg ueber den Zyklenzaehler.
+// Null, wenn die Uhr keine gueltigen Felder liefert.
+fn rtc_sekunden() -> u64 {
+    let y: u64 = rtc_field(R_YEAR)
+    let mo: u64 = rtc_field(R_MONTH)
+    let d: u64 = rtc_field(R_DAY)
+    let h: u64 = rtc_field(R_HOUR)
+    let mi: u64 = rtc_field(R_MIN)
+    let sec: u64 = rtc_field(R_SEC)
+    if y >= 1970 && y < 2200 && mo >= 1 && mo <= 12 && d >= 1 && d <= 31 {
+        if h < 24 && mi < 60 && sec < 60 {
+            return epoch_of(y, mo, d, h, mi, sec)
+        }
+    }
+    return 0
+}
+
+fn nachziehen(state: u64, mono_vor: u64, wall_vor: u64) -> u64 {
+    let jetzt: u64 = rtc_sekunden()
+    if jetzt == 0 || wall_vor == 0 || jetzt <= wall_vor {
+        return 0
+    }
+    let weg: u64 = jetzt -% wall_vor
+    let k: u64 = kstate.get(state, kstate.TIME_KHZ)
+    if k == 0 {
+        kstate.set(state, kstate.TIME_BOOT,
+            kstate.get(state, kstate.TIME_BOOT) +% weg)
+        return weg
+    }
+    // Ziel in Nanosekunden, und wieder erst teilen, dann malnehmen --
+    // aus demselben Grund wie in `raw_ns`.
+    let ziel: u64 = mono_vor +% (weg *% NS_PER_SEC)
+    let zyklen: u64 = ((ziel / 1000000) *% k) +% (((ziel % 1000000) *% k) / 1000000)
+    kstate.set(state, kstate.TIME_TSC0, tsc() -% zyklen)
+    return weg
 }

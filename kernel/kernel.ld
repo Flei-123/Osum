@@ -84,6 +84,18 @@ SECTIONS
     }
 
     .rodata : ALIGN(4K) { *(.rodata .rodata.*) }
+
+    /* RUNDE STANDBY: __save_begin markiert den Anfang alles
+     * BESCHREIBBAREN im Abbild (.data und .bss). Alles davor ist
+     * Programmtext und Konstanten -- Oktette, die sich zur Laufzeit
+     * nicht aendern. Der Schlafpfad braucht die Grenze, weil QEMU beim
+     * Aufwachen aus S3 (das dort ein Maschinenreset ist) das mit
+     * `-kernel` geladene Abbild NEU IN DEN SPEICHER SCHREIBT: .text und
+     * .rodata werden dabei mit demselben Inhalt ueberschrieben und
+     * bleiben richtig, .data faellt auf seine Anfangswerte zurueck und
+     * .bss wird genullt -- also auch der ganze kdata-Bereich. Naeheres
+     * bei WAKE_REGS in `kernel/arch/x86_64/isr.s`. */
+    __save_begin = .;
     .data   : ALIGN(4K) { *(.data .data.*) }
     .bss    : ALIGN(4K) { *(COMMON) *(.bss .bss.*) }
 

@@ -25,7 +25,9 @@ import acpi
 import serial
 
 export { shutdown, halt_forever, acpi_off, acpi_reset, off_reason,
-         reset_reason, EXIT_OK, EXIT_TRAP }
+         reset_reason, EXIT_OK, EXIT_TRAP,
+         // ---- RUNDE STANDBY ----
+         sx_values, F_PM1A_CNT, F_PM1B_CNT, F_DSDT, SLP_EN }
 
 // QEMU makes 21 out of this: (10 << 1) | 1.
 const EXIT_OK: u8 = 10
@@ -95,6 +97,28 @@ fn out8(port: u64, v: u64) {
 // Methode berechnet, wird hier nicht gefunden. Dann bleibt die Maschine
 // an, `off_reason` sagt 3, und der Aufrufer nimmt seinen Notweg.
 fn s5_values(dsdt: u64, out: u64) -> bool {
+    // '5' = 0x35. Seit Runde STANDBY nur noch ein Aufruf: derselbe
+    // Muster-Leser findet auch \_S3_ und \_S4_.
+    return sx_values(dsdt, 0x35, out)
+}
+
+// ================================================== RUNDE STANDBY
+//
+// DERSELBE LESER, FUER JEDES SCHLAFOBJEKT. `\_S5_` schaltet ab, `\_S3_`
+// legt schlafen, `\_S4_` schreibt den Ruhezustand -- die drei Objekte
+// haben dieselbe Form und unterscheiden sich in EINEM Oktett, der
+// Ziffer. `ziffer` ist dieses Oktett als ASCII: 0x33 fuer S3, 0x34 fuer
+// S4, 0x35 fuer S5.
+//
+// WAS DIESER LESER NICHT KANN, und das steht hier so deutlich, weil
+// parallel eine eigene Runde an einem ECHTEN AML-Interpreter arbeitet
+// (Runde AML): eine Firmware, die das Objekt in einem `If` versteckt
+// oder ueber eine Methode berechnet, wird hier nicht gefunden. Dann
+// meldet der Aufrufer, dass es diesen Schlafzustand nicht gibt, und
+// nimmt seinen Notweg. Sobald der Interpreter aus Runde AML steht,
+// gehoert GENAU DIESE FUNKTION ersetzt -- sie ist die einzige Stelle
+// dieser Runde, die AML von Hand liest.
+fn sx_values(dsdt: u64, ziffer: u64, out: u64) -> bool {
     if dsdt == 0 {
         return false
     }
@@ -106,7 +130,7 @@ fn s5_values(dsdt: u64, out: u64) -> bool {
     let end: u64 = dsdt + len - 8
     while p < end {
         if kstate.get8(p) == 0x5F && kstate.get8(p + 1) == 0x53 &&
-            kstate.get8(p + 2) == 0x35 && kstate.get8(p + 3) == 0x5F {
+            kstate.get8(p + 2) == ziffer && kstate.get8(p + 3) == 0x5F {
             var q: u64 = p + 4
             if kstate.get8(q) != 0x12 {
                 return false

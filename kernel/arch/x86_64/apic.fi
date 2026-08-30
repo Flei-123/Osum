@@ -58,7 +58,7 @@ import kstate
 import pci
 
 export {
-    present, init, active, hz, id,
+    present, init, resume, active, hz, id,
     eoi, timer_start, timer_stop, map_device, window_slots, lapic_phys,
     route, mask_gsi, ioapic_entries, gsi_entry, pic_off,
     spurious, spurious_hit, tsc, tsc_hz, VEC_SPURIOUS,
@@ -407,6 +407,56 @@ fn init(state: u64, want_hz: u64) -> bool {
     if per_sec == 0 {
         return false
     }
+    kstate.set(state, pci.K2_SCALARS + S_ACTIVE, 1)
+    timer_start(state, want_hz)
+    return true
+}
+
+// RUNDE STANDBY: DASSELBE NOCH EINMAL, ABER OHNE ZU MESSEN.
+//
+// Nach S3 ist der lokale APIC aus und muss neu aufgesetzt werden -- die
+// FREQUENZ aber ist dieselbe wie vor dem Schlaf, denn es ist dieselbe
+// Maschine. `init` wuerde trotzdem `calibrate` rufen, und `calibrate`
+// wartet in `pit_wait` bis zu ZWEI MILLIONEN Ein-/Ausgabezugriffe lang
+// auf Kanal 2 des PIT. Gemessen auf dem Aufwachpfad unter TCG: der
+// Kanal antwortet dort nicht zuverlaessig, die Schleife laeuft voll aus
+// und der Kern steht danach halbe Minuten -- so lange, dass selbst die
+// Hauptschleife von QEMU nicht mehr zum Zug kommt und der QMP-Anschluss
+// stumm bleibt. Beim Aufwachen wird deshalb NICHT gemessen, sondern der
+// vor dem Schlaf gemessene Wert wieder benutzt.
+//
+// Zurueck kommt `false`, wenn kein gemessener Wert vorliegt; dann ist
+// der Aufrufer wieder bei `init` und darf selbst entscheiden.
+fn resume(state: u64, want_hz: u64) -> bool {
+    let per_sec: u64 = kstate.get(state, pci.K2_SCALARS + S_HZ)
+    if per_sec == 0 {
+        return false
+    }
+    if !present() {
+        return false
+    }
+    var base_msr: u64 = rdmsr(MSR_APIC_BASE)
+    if (base_msr & APIC_BASE_ENABLE) == 0 {
+        base_msr = base_msr | APIC_BASE_ENABLE
+        wrmsr(MSR_APIC_BASE, base_msr)
+    }
+    let base: u64 = kstate.get(state, pci.K2_SCALARS + S_LAPIC)
+    if base == 0 {
+        return false
+    }
+    let ver: u64 = lread(base, R_VERSION)
+    if ver == 0xFFFFFFFF || ver == 0 {
+        return false
+    }
+    lwrite(base, R_TPR, 0)
+    lwrite(base, R_DFR, 0xFFFFFFFF)
+    lwrite(base, R_LDR, 1 << 24)
+    lwrite(base, R_LVT_LINT0, LVT_MASKED)
+    lwrite(base, R_LVT_LINT1, LVT_MASKED)
+    lwrite(base, R_LVT_ERROR, LVT_MASKED)
+    lwrite(base, R_ESR, 0)
+    lwrite(base, R_ESR, 0)
+    lwrite(base, R_SVR, 0x100 | VEC_SPURIOUS)
     kstate.set(state, pci.K2_SCALARS + S_ACTIVE, 1)
     timer_start(state, want_hz)
     return true

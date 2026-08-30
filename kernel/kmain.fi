@@ -35,6 +35,7 @@ import kbd
 import arch.x86_64.user
 import power
 import pwr
+import sleep
 import batt
 import hwid
 import pmon
@@ -209,6 +210,12 @@ fn kernel_main(mbi: u64, vectors: u64, state: u64, kernel_end: u64,
     // two bits left and four rounds are running beside this one.
     netmon.parse(state, cmd)
     pmon.parse(state, cmd)
+    // RUNDE STANDBY: die Woerter des Schlafs. Hier und bei den anderen
+    // Zerlegern, weil `sleep.stage` sie viel spaeter braucht und die
+    // Befehlszeile bis dahin laengst ueberschrieben sein kann -- sie
+    // liegt oberhalb von `kernel_end`, und genau diese Rahmen gibt der
+    // Rahmenverwalter aus (siehe die Bemerkung bei `hw.parse` oben).
+    sleep.parse(state, cmd)
 
     // ROUND K9. Die Uhr wird gelesen, BEVOR irgendetwas anderes Zeit
     // braucht: TIME_BOOT und TIME_TSC0 muessen aus demselben Augenblick
@@ -417,6 +424,19 @@ fn kernel_main(mbi: u64, vectors: u64, state: u64, kernel_end: u64,
     power_stage(state)
     power_test(state)
 
+    // 7b-quater. RUNDE STANDBY: DER SCHLAF. `aufsetzen` fragt die
+    //     Firmware, was sie ueber S3 und S4 sagt (PM1a/b, der
+    //     Ereignisblock, die FACS, \_S3_ und \_S4_ aus der DSDT) und
+    //     stellt die Aufweckquellen auf ihre RESTRIKTIVE Voreinstellung.
+    //     Hier und nicht spaeter, weil `/bin/schlaf` in der Shell weiter
+    //     unten schon danach fragen koennen soll; und hier und nicht
+    //     frueher, weil `pci.scan` gelaufen sein muss -- ohne die
+    //     Geraetetafel gibt es keinen PCI-Zustand zu retten.
+    //     Ohne das Wort `standby` ist das EIN Aufruf, der die Tafel
+    //     fuellt, und sonst nichts: `sleep.stage` weiter unten kehrt
+    //     ohne das Wort sofort zurueck.
+    sleep.aufsetzen(state)
+
     // 7c. the file system.
     filesystem(state)
     // 7c-bis. RUNDE ASYNC, zweiter Teil: die Arten, die ein
@@ -472,6 +492,23 @@ fn kernel_main(mbi: u64, vectors: u64, state: u64, kernel_end: u64,
     // Seriennummer des Laufwerks gibt es erst, seit `hw.disk` den
     // Controller aufgesetzt hat. Hier wird nachgeholt und gemeldet.
     hwid.late(state)
+
+    // 7h-vor. RUNDE STANDBY: EINSCHLAFEN UND AUFWACHEN.
+    //     Hier und an keiner frueheren Stelle, und dafuer gibt es drei
+    //     Gruende, die alle gemessen sind:
+    //       * Die Platte muss stehen. Vor dem Schlafen wird ihr
+    //         Zwischenspeicher geschrieben (das ist Pflicht, nicht
+    //         Kuer), und der Ruhezustand S4 schreibt sein Abbild
+    //         darauf.
+    //       * Der PCI-Bus muss gelesen sein -- `geraete_sichern` rettet
+    //         den Konfigurationsraum jedes gefundenen Geraets.
+    //       * Es muss VOR `smp.stage` sein. Diese Runde haelt genau
+    //         einen Prozessor am Leben; die anderen Kerne
+    //         zurueckzuholen ist eine eigene Runde, und ein Schlaf
+    //         mitten in deren Messung waere ein Messfehler und keine
+    //         Zusage.
+    //     Ohne das Wort `standby` kehrt das sofort zurueck.
+    sleep.stage(state)
 
     // 7h. ROUND K5: the other processors. Deliberately here and not
     //     earlier: everything above this line is what rounds 59 to K2

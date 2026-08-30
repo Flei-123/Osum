@@ -528,6 +528,20 @@ vectors:
     .quad msr_fixups                /* 70: kernel/msr.fi */
     .quad msr_read_safe             /* 71 */
     .quad msr_write_safe            /* 72 */
+    /* RUNDE STANDBY: der Weg zurueck aus dem Schlaf. 73 und 74 sind
+     * Anfang und Ende des Realmodus-Trampolins, das unter 1 MiB kopiert
+     * werden muss; 75 ist der Satz geretteter Register (dort traegt
+     * `sleep.fi` auch CR3 ein), 76 der Aufruf, der zweimal zurueckkommt.
+     * Alles vier steht am Ende DIESER Datei, siehe den Kopf dort. */
+    .quad wake16_start              /* 73 */
+    .quad wake16_end                /* 74 */
+    .quad WAKE_REGS                 /* 75: feste Adresse, siehe unten */
+    .quad wake_save                 /* 76 */
+    /* 77/78: Anfang und Ende des beschreibbaren Abbildbereichs
+     * (kernel.ld). Der Schlafpfad legt davon eine Kopie an; warum,
+     * steht bei WAKE_REGS am Ende dieser Datei. */
+    .quad __save_begin              /* 77 */
+    .quad kernel_end                /* 78 */
 
     .section .bss, "aw", @nobits
     .align 8
@@ -595,3 +609,285 @@ osum_panic:
     cli
     hlt
     jmp .Losum_halt
+
+/* ==================================================================
+ * RUNDE STANDBY: DER WEG ZURUECK AUS DEM SCHLAF
+ * ==================================================================
+ *
+ * WARUM DAS HIER STEHT UND NICHT IN EINER EIGENEN DATEI. Eine sechste
+ * Assemblerdatei muesste in SIEBZEHN Bauskripte eingetragen werden
+ * (`grep -rl 'defsym=KERNEL_MAIN'`), und jedes davon haette danach eine
+ * eigene, leicht andere Liste. `isr.s` wird ueberall schon gebaut und
+ * gebunden; der Anhang kostet keine einzige Aenderung an einem Laeufer.
+ * Der Abschnitt ist durch diesen Kopf und die Endmarke klar abgegrenzt.
+ *
+ * WAS BEIM AUFWACHEN AUS S3 WIRKLICH PASSIERT, gemessen unter QEMU 7.2
+ * mit SeaBIOS (tools/standby/run.sh):
+ *
+ *   1. Die Firmware kommt aus dem Reset, sieht am Rueckstellwert im CMOS
+ *      (QEMU schreibt 0xFE nach 0x0F), dass es ein S3-Aufwachen ist, und
+ *      springt auf die Adresse, die im FACS-Feld `firmware_waking_vector`
+ *      steht -- IM REALMODUS, mit CS = Adresse >> 4 und IP = 0.
+ *   2. Der Prozessor ist damit ein 8086: kein Seitenwerk, keine
+ *      Deskriptortabelle, 20 Adressleitungen. Alles, was der Kernel war,
+ *      liegt oberhalb von 1 MiB und ist von dort NICHT erreichbar.
+ *   3. Also drei Stufen zurueck: Realmodus -> Protected Mode (eine eigene
+ *      kleine GDT) -> Long Mode (PAE, CR3, EFER.LME, die GDT aus boot.s).
+ *
+ * DER EINZIGE TEIL, DER UNTER 1 MiB LIEGEN MUSS, ist die erste Stufe.
+ * `wake16_start .. wake16_end` wird von `sleep.fi` nach WAKE_BASE (0x8000)
+ * kopiert; alles darin rechnet mit WAKE_BASE und nicht mit der
+ * Bindeadresse -- die Sprungziele innerhalb sind Differenzen, die Basis
+ * der kleinen GDT ist WAKE_BASE plus Versatz, und der Fernsprung geht auf
+ * eine ABSOLUTE Adresse, die der Binder einsetzt. Die zweite und dritte
+ * Stufe bleiben, wo sie gebunden sind: im Protected Mode ist der ganze
+ * Adressraum flach erreichbar.
+ *
+ * 0x8000 ist gemessen und nicht geraten: die Sonde in docs/RUNDE-STANDBY.md
+ * hat dort Marken abgelegt und sie nach dem Aufwachen unveraendert
+ * wiedergefunden. SeaBIOS fasst diese Seite auf dem Aufwachpfad nicht an.
+ *
+ * ZURUECK IN DEN KERNEL geht es wie bei `setjmp`/`longjmp`: `wake_save`
+ * schreibt Ruecksprungadresse, Stapelzeiger und die aufgerufenen-erhalten
+ * Register nach `wake_regs` und gibt 0 zurueck; die dritte Stufe stellt
+ * genau diese Werte wieder her und gibt 1 zurueck. Fuer den Firn-Code in
+ * `sleep.fi` sieht das aus wie ein Aufruf, der zweimal zurueckkommt --
+ * beim zweiten Mal ist die Maschine gerade aufgewacht.
+ */
+
+/* ==================================================================
+ * WO DAS TRAMPOLIN UND SEIN REGISTERSATZ LIEGEN -- BEIDES GEMESSEN
+ * ==================================================================
+ *
+ * WAKE_BASE ist 0x9000 und nicht 0x8000, weil 0x8000 schon vergeben
+ * ist: `smp.s` kopiert seinen AP-Trampolin dorthin (AP_BASE). Die
+ * Schlafrunde laeuft VOR `smp.stage`, also haette der spaetere
+ * Prozessorstart den Wiedereinstieg ueberschrieben -- ein Fehler, der
+ * erst beim zweiten Schlaf auf einer Mehrkernmaschine aufgefallen
+ * waere.
+ *
+ * WAKE_REGS ist 0x9200 und liegt damit ebenfalls UNTER 1 MiB, und das
+ * ist der zweite und wichtigere Grund fuer diesen Block. Der
+ * Registersatz stand zuerst als `.data`-Objekt im Kernabbild. Das
+ * funktioniert auf echter Hardware und unter QEMU NICHT, und der
+ * Unterschied hat diese Runde zwei Anlaeufe gekostet:
+ *
+ *   QEMU behandelt das Aufwachen aus S3 als MASCHINENRESET, und bei
+ *   jedem Reset schreibt `rom_reset` (hw/core/loader.c) ALLE geladenen
+ *   Abbilder erneut in den Speicher -- auch das mit `-kernel`
+ *   uebergebene. `.text` und `.rodata` sind danach unveraendert (der
+ *   Inhalt ist ja derselbe), aber `.data` steht wieder auf seinen
+ *   ANFANGSWERTEN. Der gerettete Stapelzeiger, CR3 und EFER waren
+ *   damit beim Aufwachen null; der Kern schaltete das Seitenwerk mit
+ *   CR3 = 0 ein und fiel dreifach.
+ *
+ *   Gemessen in `-d int,cpu_reset`:
+ *     v=0e e=0008 cpl=0 IP=0008:00100478 CR2=00100478 CR3=00000000
+ *     EFER=0000000000000500   -> danach v=08, danach "Triple fault"
+ *
+ *   `.bss` ist davon NICHT betroffen (Typ NOBITS, im Abbild steht kein
+ *   Oktett davon) -- der ganze kdata-Bereich ueberlebt also. Nur
+ *   `.data` wird zurueckgesetzt.
+ *
+ * Auf echter Hardware gibt es dieses Zurueckschreiben nicht. Der
+ * Registersatz unter 1 MiB ist deshalb kein Zugestaendnis an den
+ * Emulator, sondern die Fassung, die auf BEIDEM richtig ist: die Seite
+ * gehoert ohnehin zum Wiedereinstieg, sie ist auf beiden Wegen
+ * erreichbar, und sie ist gemessen unversehrt (eine Sonde hat dort
+ * Marken abgelegt und nach dem Aufwachen wiedergefunden).
+ */
+    .set WAKE_BASE, 0x9000
+    .set WAKE_REGS, 0x9200
+
+/* Die Felder in WAKE_REGS:
+ *    0 Ruecksprungadresse       8 Stapelzeiger
+ *   16 rbx  24 rbp  32 r12  40 r13  48 r14  56 r15
+ *   64 CR3 des Kerns           72 EFER
+ *   80 CR3 der Uebergangstafel
+ *   88 Schattenkopie: Quelle   96 Ziel   104 Oktette   112 Schalter
+ *  120 CR4                     128 CR0
+ */
+
+    .section .rodata
+    .align 16
+    .globl wake16_start
+wake16_start:
+    .code16
+    cli
+    cld
+    xorw %ax, %ax
+    movw %ax, %ds
+    movw %ax, %es
+    movw %ax, %ss
+    movw $0x7C00, %sp                   /* Notstapel, wird nur gestreift */
+    /* Die kleine GDT: Versatz relativ zu CS (= WAKE_BASE >> 4), die
+     * Basis darin absolut, weil `lgdt` eine LINEARE Adresse will. */
+    lgdtl %cs:(wake_gdt_desc - wake16_start)
+    movl %cr0, %eax
+    orl  $1, %eax
+    movl %eax, %cr0
+    ljmpl $0x08, $wake32                /* absolut: der Binder setzt ein */
+
+    .align 8
+wake_gdt32:
+    .quad 0                             /* 0x00 null */
+    .quad 0x00CF9A000000FFFF            /* 0x08 code32, flach */
+    .quad 0x00CF92000000FFFF            /* 0x10 data32, flach */
+wake_gdt_desc:
+    .word 24 - 1
+    .long WAKE_BASE + (wake_gdt32 - wake16_start)
+    .align 16
+    .globl wake16_end
+wake16_end:
+
+    .section .text
+    .code32
+wake32:
+    movw $0x10, %ax
+    movw %ax, %ds
+    movw %ax, %es
+    movw %ax, %ss
+    movw %ax, %fs
+    movw %ax, %gs
+    /* CR4, WIE ER VOR DEM SCHLAFEN WAR, plus PAE.
+     *
+     * Nicht nur PAE, und das ist der zweite Fehler dieser Runde
+     * gewesen: nach dem Aufwachen steht CR4 auf null. Damit sind auch
+     * OSFXSR und OSXMMEXCPT weg (die der Prozessor braucht, damit
+     * SSE-Befehle ueberhaupt erlaubt sind -- und der Uebersetzer setzt
+     * sie fuer jeden groesseren Wertekopiervorgang ein) und ebenso SMEP
+     * und SMAP. Der Kern lief danach ein paar hundert Befehle weit und
+     * blieb dann ohne Meldung stehen, je nach Zeitpunkt der ersten
+     * Unterbrechung an verschiedenen Stellen. Ein Zustand, der VOR dem
+     * Schlaf galt, muss nach dem Schlaf wieder gelten -- vollstaendig
+     * und nicht in Auswahl. */
+    movl WAKE_REGS + 120, %eax
+    orl  $(1 << 5), %eax                /* PAE, sonst kein langer Modus */
+    movl %eax, %cr4
+    /* DIE UEBERGANGS-SEITENTAFEL, und nicht die des laufenden Kerns.
+     *
+     * Sie bildet das erste Gigabyte eins zu eins ab, mit 2-MiB-Kacheln
+     * und ohne ein einziges gesetztes NX-Bit -- gebaut von
+     * `sleep.aufsetzen` aus drei Rahmen, die den Schlaf im RAM
+     * ueberstehen. Der Grund, warum hier nicht einfach die Tafel des
+     * Kerns geladen wird, ist gemessen: mit ihr ueberlebt der Kern das
+     * Einschalten des Seitenwerks an genau dieser Stelle nicht (Marke
+     * 'B' kommt, Marke 'C' nicht mehr). Der Weg mit einer eigenen,
+     * minimalen Tafel fuer den Uebergang ist auch der, den Linux geht
+     * (`arch/x86/realmode/rm/trampoline_64.S` baut sich `trampoline_pgd`);
+     * die richtige Tafel wird eine Stufe weiter oben in `wake64`
+     * geladen, wo der Prozessor schon im langen Modus ist und ein
+     * Wechsel des Adressraums nichts Besonderes mehr ist. */
+    movl WAKE_REGS + 80, %eax
+    movl %eax, %cr3
+    /* EFER -- UND ZWAR DER GANZE, nicht nur LME.
+     *
+     * DAS WAR DER ERSTE ECHTE FEHLER DIESER RUNDE, und er sah aus wie
+     * ein Absturz im Nichts: Stufe 1 und 2 des Trampolins meldeten sich,
+     * Stufe 3 nie, QEMU beendete sich mit 0 (also ueber einen Reset).
+     * Der Grund: `user.setup` setzt EFER Bit 11 (NXE), damit Bit 63
+     * eines Seitentafeleintrags "nicht ausfuehrbar" heisst. Nach dem
+     * Aufwachen ist EFER auf null zurueckgesetzt -- und dann ist
+     * dasselbe Bit 63 ein RESERVIERTES Bit. Der erste Speicherzugriff
+     * mit eingeschaltetem Seitenwerk gibt einen Seitenfehler, es gibt
+     * noch keine IDT, und aus dem Doppelfehler wird ein Dreifachfehler.
+     * Also wird EFER als GANZES gerettet und zurueckgeschrieben; LME
+     * kommt sicherheitshalber dazu, falls der Kern ihn nie selbst
+     * gesetzt hatte. */
+    movl $0xC0000080, %ecx              /* EFER */
+    movl WAKE_REGS + 72, %eax
+    movl WAKE_REGS + 76, %edx
+    orl  $(1 << 8), %eax                /* LME */
+    andl $~(1 << 10), %eax              /* LMA ist NUR-LESEN */
+    wrmsr
+    /* Und CR0 genauso: der geretteten Wert plus PG und PE. Darin
+     * stehen unter anderem MP, NE und WP -- ohne WP darf der Kern in
+     * schreibgeschuetzte Seiten schreiben, ohne MP/NE verhaelt sich der
+     * Rechenwerksfehler anders als vorher. */
+    movl WAKE_REGS + 128, %eax
+    orl  $0x80000001, %eax              /* PG | PE */
+    movl %eax, %cr0
+    lgdt gdt64_pointer                  /* die GDT aus boot.s */
+    ljmp $0x08, $wake64
+
+    .code64
+wake64:
+    xorw %ax, %ax
+    movw %ax, %ds
+    movw %ax, %es
+    movw %ax, %ss
+    movw %ax, %fs
+    movw %ax, %gs
+    /* Jetzt der ECHTE Adressraum. Hier ist das ein gewoehnlicher
+     * Wechsel im langen Modus und keine Zustandsaenderung mehr. */
+    /* ---------------------------------------------------------------
+     * DIE SCHATTENKOPIE -- eine Kruecke fuer den Emulator, und sie ist
+     * als solche benannt.
+     *
+     * Auf echter Hardware ueberlebt der Speicher den S3-Schlaf, und
+     * dieser Block ist ueberfluessig; das Schalterwort bei WAKE_REGS+112
+     * ist dann null und es passiert nichts. Unter `qemu -kernel` ist
+     * das Aufwachen ein MASCHINENRESET, und QEMU schreibt bei jedem
+     * Reset alle geladenen Abbilder erneut in den Speicher
+     * (`rom_reset` in hw/core/loader.c). Damit steht `.data` wieder auf
+     * seinen Anfangswerten und `.bss` -- also der ganze kdata-Bereich,
+     * die Seitentafeln und die Kernstapel -- auf null. Ein Kern, der
+     * danach weiterlaufen will, hat keinen Zustand mehr.
+     *
+     * Also: vor dem Schlafen wird [__save_begin, kernel_end) in einen
+     * Bereich OBERHALB des Abbilds kopiert (den fasst `rom_reset` nicht
+     * an), und hier wird zurueckkopiert -- BEVOR der erste Zugriff auf
+     * eine Seitentafel oder einen Stapel passiert. Der Kern laeuft an
+     * dieser Stelle noch auf der Uebergangstafel und benutzt nur
+     * Register; deshalb darf er sich hier selbst unter den Fuessen
+     * wegkopieren.
+     *
+     * WAS DAS NICHT BEWEIST, und das steht auch im Bericht: dass der
+     * Speicher den Schlaf ueberlebt. Das beweist es nicht, weil es
+     * genau das ausgleicht. Alles ANDERE beweist es weiterhin -- den
+     * echten S3-Uebergang, den Wiedereinstieg der Firmware ueber den
+     * FACS-Vektor, den Weg Realmodus -> Protected Mode -> Long Mode,
+     * das Zurueckholen der Geraete, das Nachziehen der Uhr und die
+     * Tore der Aufweckquellen. Und ein Lauf VON DER PLATTE, bei dem
+     * QEMU nichts zurueckschreibt, laeuft mit ausgeschaltetem Schalter.
+     * ---------------------------------------------------------------- */
+    movq WAKE_REGS + 112, %rax
+    testq %rax, %rax
+    jz 9f
+    movq WAKE_REGS + 88,  %rsi          /* Schatten */
+    movq WAKE_REGS + 96,  %rdi          /* Ziel im Abbild */
+    movq WAKE_REGS + 104, %rcx          /* Oktette */
+    shrq $3, %rcx
+    rep movsq
+9:
+    movq WAKE_REGS + 64, %rax           /* jetzt die Tafel des Kerns */
+    movq %rax, %cr3
+    movq WAKE_REGS + 8,  %rsp
+    movq WAKE_REGS + 16, %rbx
+    movq WAKE_REGS + 24, %rbp
+    movq WAKE_REGS + 32, %r12
+    movq WAKE_REGS + 40, %r13
+    movq WAKE_REGS + 48, %r14
+    movq WAKE_REGS + 56, %r15
+    movq WAKE_REGS + 0,  %rcx
+    movq $1, %rax                       /* "du kommst aus dem Schlaf" */
+    jmpq *%rcx
+
+    /* wake_save() -> 0 beim Sichern, 1 beim Aufwachen. */
+    .globl wake_save
+wake_save:
+    popq %rcx
+    movq %rcx, WAKE_REGS + 0
+    movq %rsp, WAKE_REGS + 8
+    movq %rbx, WAKE_REGS + 16
+    movq %rbp, WAKE_REGS + 24
+    movq %r12, WAKE_REGS + 32
+    movq %r13, WAKE_REGS + 40
+    movq %r14, WAKE_REGS + 48
+    movq %r15, WAKE_REGS + 56
+    xorq %rax, %rax
+    jmpq *%rcx
+
+    .text
+    .code64
+/* ================= Ende des Abschnitts der Runde STANDBY ============== */
