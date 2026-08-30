@@ -1139,6 +1139,14 @@ lauf "30. der Fernzugang: SSH-2 gegen den echten OpenSSH-Klienten (tools/sshd/ru
 lauf "31. ein Abbild fuer echtes Blech: BIOS und UEFI, Diagnose, deutscher Schreibtisch (tools/usbimg/run.sh, Runde USBIMG)" \
      tools/usbimg/run.sh usbimg '^USBIMG: |^ +(kern|programme|symbole|wurzel|geprueft|umlaute) +[0-9]'
 
+# ABSCHNITT 32 -- RUNDE HID. Berichtsbeschreibungen zerlegen, EIN
+# Eingabeweg fuer PS/2, USB-HID und I2C-HID, mehr als sechs Tasten
+# gleichzeitig, das Praezisions-Touchpad und der ACPI-Ersatzweg fuer
+# I2C-HID. Der Zerleger wird gegen einen ZWEITEN Zerleger gehalten
+# (tools/hid/descs.py), Zeile fuer Zeile.
+lauf "32. HID: Berichtsbeschreibungen, ein Eingabeweg, Touchpad, I2C-HID (tools/hid/run.sh, Runde HID)" \
+     tools/hid/run.sh hid '^  ok    |^ +(ps2|usb-boot|usb-gen|i2c-soft|touchpad|n=) '
+
 # Hier laufen die angemeldeten Abschnitte -- bei OSUM_JOBS=1 sind sie
 # oben schon gelaufen und das hier tut nichts.
 abschnitte_abarbeiten
