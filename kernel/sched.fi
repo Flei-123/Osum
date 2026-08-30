@@ -51,9 +51,10 @@ export {
     T_SIGRET, T_ALARM, T_TGID, T_SHARED, T_FUTEX, T_FUTEXVAL,
     T_KILLCODE, T_UID, T_GID, T_EUID, T_EGID, T_SUID,
     T_SGID, T_UMASK, K_BOOT, K_IDLE, K_WORKER, K_USER,
-    K_GRIND, KSTACK_FRAMES, K_NETD, T_BIG,
+    K_GRIND, KSTACK_FRAMES, K_NETD, K_AIO, T_BIG,
     T_NETV, T_NETOK, NETOK_MAX,
-    S_POLL, T_POLLSEQ, poll_seq, poll_kick, poll_sleep, POLL_FOREVER,
+    S_POLL, T_POLLSEQ, poll_seq, poll_kick, poll_kick_one, poll_sleep,
+    POLL_FOREVER,
     // ---- RUNDE MULTIUSER ----
     T_NGROUPS, groups_count, groups_at, groups_has, groups_set,
     groups_clear, groups_inherit, GROUPS_MAX,
@@ -332,6 +333,13 @@ const K_GRIND: u64 = 4
 // task -- stage 0 of Firn has no function pointers in the kernel
 // profile.
 const K_NETD: u64 = 5
+// RUNDE ASYNC: DER ARBEITSFADEN DER AUFTRAGSSCHICHT. Eine eigene Art und
+// nicht K_WORKER, weil K_WORKER der Messfaden aus Runde 62 ist und in
+// `tools/kernel/run.sh` gezaehlt wird -- vier zusaetzliche Faeden dieser
+// Art haetten dort drei Zusagen umgeworfen, die mit dieser Runde nichts
+// zu tun haben. Der Rumpf steht in `sys.aio_worker`, verteilt wird er
+// wie jeder andere in `tasks.main`.
+const K_AIO: u64 = 6
 
 // ACHT frames = 32 KiB of kernel stack per task (Runde K17; davor vier).
 //
@@ -1264,6 +1272,33 @@ fn poll_kick(state: u64) {
 // DERSELBEN Laufsperre, unter der `schedule_locked` die Aufgabe abgibt;
 // zwischen beiden kann kein Wecker verlorengehen, denn ein Wecker, der
 // vorher kam, hat die Zahl bereits veraendert.
+// RUNDE ASYNC: DERSELBE WECKER, ABER AN GENAU EINE AUFGABE.
+//
+// `poll_kick` weckt ALLES, was wartet. Fuer ein Rohr ist das richtig --
+// wer darauf wartet, kann der Kern nicht wissen. Fuer eine
+// Fertigmeldung weiss er es genau: sie gehoert einer Aufgabe. Ohne
+// diesen Unterschied weckt jede einzelne Meldung auch die vier
+// Arbeitsfaeden, und die laufen dann los, finden nichts und legen sich
+// wieder hin -- bei sechzehn Meldungen in einem Zug also vierundsechzig
+// Wecker fuer nichts. GEMESSEN hat das bei sechzehn offenen Auftraegen
+// 13838 gegen 13473 Zyklen je Auftrag gemacht: 2,6 %, und damit deutlich
+// weniger, als die Ueberlegung versprach. Die Zahl steht trotzdem hier,
+// weil eine Optimierung ohne Messung eine Behauptung ist.
+//
+// Die FOLGE wird trotzdem erhoeht, und zwar VOR dem Wecken: daran
+// erkennt ein Wartender, der zwischen Pruefung und Schlaf steht, dass
+// er nicht schlafen darf. Genau das ist die Wettlaufsituation, die
+// Runde POLL geloest hat, und sie gilt hier unveraendert.
+fn poll_kick_one(state: u64, task: u64) {
+    kstate.add(state, kstate.POLLSEQ, 1)
+    if task >= kstate.MAX_TASKS {
+        return
+    }
+    if tget(state, task, T_STATE) == S_POLL {
+        tset(state, task, T_STATE, S_READY)
+    }
+}
+
 fn poll_sleep(state: u64, seen: u64, deadline: u64) {
     let flags: u64 = irq_save()
     atomic.lock_take(state, atomic.L_SCHED, cpu.here(state))
