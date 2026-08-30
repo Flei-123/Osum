@@ -44,6 +44,10 @@
 //      ihn bei JEDEM Aufruf nach, wenn er nicht dazu passt. Ein Absturz
 //      in diesem Schritt kostet deshalb nichts als den naechsten Aufruf.
 //
+// RUNDE UPDATE: JEDE INSTALLATION IST JETZT SIGNIERT. Siehe den
+// Abschnitt „DIE SIGNATUR" weiter unten. Ohne `/system/schluessel.pub`
+// und ohne gueltige Ed25519-Signatur wird NICHTS installiert.
+//
 //   opk liste
 //   opk installieren <datei.opk>
 //   opk entfernen <name>
@@ -57,6 +61,7 @@ profile kernel
 
 import ulib
 import sha
+import crypto.ed25519
 
 export { u_start }
 
@@ -69,6 +74,7 @@ static mut S_USE4: [u8; 41] = "opk aktualisieren <name> --quelle <verz>\0"
 static mut S_USE5: [u8; 17] = "opk generationen\0"
 static mut S_USE6: [u8; 16] = "opk zurueck <n>\0"
 static mut S_USE7: [u8; 26] = "opk richten | opk pruefen\0"
+static mut S_USE8: [u8; 19] = "opk erprobung [ok]\0"
 
 static mut C_LISTE: [u8; 6] = "liste\0"
 static mut C_INST: [u8; 13] = "installieren\0"
@@ -78,6 +84,8 @@ static mut C_GEN: [u8; 13] = "generationen\0"
 static mut C_ZUR: [u8; 8] = "zurueck\0"
 static mut C_RICHT: [u8; 8] = "richten\0"
 static mut C_PRUEF: [u8; 8] = "pruefen\0"
+static mut C_ERP: [u8; 10] = "erprobung\0"
+static mut A_OK: [u8; 3] = "ok\0"
 static mut O_QUELLE: [u8; 9] = "--quelle\0"
 static mut O_GRUND: [u8; 8] = "--grund\0"
 
@@ -88,6 +96,10 @@ static mut P_SYS: [u8; 8] = "/system\0"
 static mut P_GENS: [u8; 20] = "/system/generations\0"
 static mut P_AKT: [u8; 16] = "/system/AKTUELL\0"
 static mut P_AKTN: [u8; 20] = "/system/AKTUELL.neu\0"
+static mut P_ERP: [u8; 18] = "/system/ERPROBUNG\0"
+static mut P_KEY: [u8; 23] = "/system/schluessel.pub\0"
+static mut N_SIG: [u8; 5] = ".sig\0"
+static mut N_ISIG: [u8; 10] = "INDEX.sig\0"
 static mut P_USERS: [u8; 7] = "/users\0"
 static mut P_ROOT: [u8; 12] = "/users/root\0"
 static mut N_PAKET: [u8; 6] = "PAKET\0"
@@ -115,6 +127,23 @@ static mut E_NOGEN: [u8; 34] = "opk: die Generation gibt es nicht\0"
 static mut E_KEIN: [u8; 25] = "opk: nicht installiert: \0"
 static mut E_INDEX: [u8; 33] = "opk: die Quelle hat keinen INDEX\0"
 static mut E_NIX: [u8; 38] = "opk: die Quelle kennt das Paket nicht\0"
+static mut E_NOKEY: [u8; 62] = "opk: kein vertrauter Schluessel: /system/schluessel.pub fehlt\0"
+static mut E_KEYLEN: [u8; 53] = "opk: /system/schluessel.pub ist nicht 32 Oktett lang\0"
+static mut E_NOSIG: [u8; 48] = "opk: KEINE SIGNATUR -- abgelehnt, Datei fehlt: \0"
+static mut E_SIGLEN: [u8; 45] = "opk: die Signatur ist nicht 64 Oktett lang: \0"
+static mut E_SIG: [u8; 51] = "opk: SIGNATUR FALSCH -- das Paket wird ABGELEHNT: \0"
+static mut E_ISIG: [u8; 53] = "opk: SIGNATUR DES INDEX FALSCH -- Quelle ABGELEHNT: \0"
+static mut E_CTX: [u8; 39] = "opk: Ed25519 liess sich nicht aufbauen\0"
+static mut S_BEST: [u8; 12] = " bestaetigt\0"
+static mut S_ERP: [u8; 20] = "opk: in erprobung: \0"
+static mut S_ERPOK: [u8; 32] = "opk: erprobung bestaetigt fuer \0"
+static mut S_ERPKEIN: [u8; 33] = "opk: keine Erprobung offen (gen \0"
+static mut E_ERPW: [u8; 47] = "opk: /system/ERPROBUNG liess sich nicht setzen\0"
+static mut S_VOR: [u8; 6] = " vor \0"
+static mut S_ERPST: [u8; 20] = "opk: erprobung gen \0"
+static mut S_VERS: [u8; 10] = " versuch \0"
+static mut S_OFFEN: [u8; 7] = " offen\0"
+static mut S_SIGOK: [u8; 24] = "opk: Signatur geprueft \0"
 static mut E_HASHQ: [u8; 48] = "opk: das Paket passt nicht zum INDEX der Quelle\0"
 
 static mut S_GEN: [u8; 12] = "generation \0"
@@ -154,6 +183,9 @@ static mut HASH: [u8; 32] = [0 as u8; 32]
 static mut HEX: [u8; 72] = [0 as u8; 72]
 static mut NAME: [u8; 64] = [0 as u8; 64]
 static mut ZEILE: [u8; 256] = [0 as u8; 256]
+static mut SIG: [u8; 64] = [0 as u8; 64]
+static mut KEY: [u8; 32] = [0 as u8; 32]
+static mut SIGP: [u8; 320] = [0 as u8; 320]
 
 const KOPF: u64 = 64
 const KURZ: u64 = 20
@@ -533,6 +565,87 @@ fn aktuell_setzen(n: u64) -> bool {
         (&b[0 as usize]) as u64, 9)
 }
 
+// ------------------------------------------------- DIE ERPROBUNG
+//
+// RUNDE UPDATE. `/system/ERPROBUNG` ist die andere Haelfte von
+// `kernel/ab.fi`: der Kern zaehlt die Startversuche hoch und faellt
+// zurueck, dieses Programm SCHREIBT den Eintrag beim Umschalten und
+// setzt den Erfolgsvermerk, wenn ein Start durchgelaufen ist.
+//
+// GENAU 36 OKTETTE, feste Breite, aus demselben Grund wie AKTUELL:
+//
+//     gen=00000007 vor=00000006 v=01 ok=0\n
+//
+// Wer das Format aendert, aendert `kernel/ab.fi` mit -- es gibt keine
+// dritte Stelle, die es liest.
+fn erp_bauen(b: u64, gen: u64, vor: u64, v: u64, ok: u64) {
+    var muster: [u8; 37] = "gen=00000000 vor=00000000 v=00 ok=0\n\0"
+    var i: u64 = 0
+    while i < 36 {
+        p8(b + i, muster[i as usize] as u64)
+        i = i + 1
+    }
+    erp_zahl(b, 4, 8, gen)
+    erp_zahl(b, 17, 8, vor)
+    erp_zahl(b, 28, 2, v)
+    erp_zahl(b, 34, 1, ok)
+}
+
+fn erp_zahl(b: u64, off: u64, n: u64, v: u64) {
+    var rest: u64 = v
+    var i: u64 = n
+    while i > 0 {
+        i = i - 1
+        p8(b + off + i, 48 + (rest % 10))
+        rest = rest / 10
+    }
+}
+
+fn erp_ziffern(b: u64, off: u64, n: u64) -> u64 {
+    var v: u64 = 0
+    var i: u64 = 0
+    while i < n {
+        let c: u64 = g8(b + off + i)
+        if c < 48 || c > 57 {
+            return 0xFFFFFFFFFFFFFFFF
+        }
+        v = v * 10 + (c - 48)
+        i = i + 1
+    }
+    return v
+}
+
+fn erp_schreiben(gen: u64, vor: u64, v: u64, ok: u64) -> bool {
+    var b: [u8; 40] = [0 as u8; 40]
+    erp_bauen((&b[0 as usize]) as u64, gen, vor, v, ok)
+    return fest_schreiben((&P_ERP[0 as usize]) as u64,
+        (&b[0 as usize]) as u64, 36)
+}
+
+// Liest die vier Zahlen. `false` heisst: es gibt keine oder sie ist
+// unlesbar -- und dann wird sie NICHT ueberschrieben, sondern gemeldet.
+fn erp_lesen(gen: *mut u64, vor: *mut u64, v: *mut u64, ok: *mut u64)
+    -> bool {
+    var b: [u8; 40] = [0 as u8; 40]
+    let n: u64 = datei_lesen((&P_ERP[0 as usize]) as u64,
+        (&b[0 as usize]) as u64, 36)
+    if n != 36 {
+        return false
+    }
+    let p: u64 = (&b[0 as usize]) as u64
+    *gen = erp_ziffern(p, 4, 8)
+    *vor = erp_ziffern(p, 17, 8)
+    *v = erp_ziffern(p, 28, 2)
+    *ok = erp_ziffern(p, 34, 1)
+    if *gen == 0xFFFFFFFFFFFFFFFF || *vor == 0xFFFFFFFFFFFFFFFF {
+        return false
+    }
+    if *v == 0xFFFFFFFFFFFFFFFF || *ok == 0xFFFFFFFFFFFFFFFF {
+        return false
+    }
+    return true
+}
+
 fn gen_hoechste() -> u64 {
     var ents: [u8; 4096] = [0 as u8; 4096]
     let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&P_GENS[0 as usize]) as u64, 0, 0)
@@ -773,6 +886,101 @@ fn toepfe(name: u64, anlegen: bool) {
     }
 }
 
+// ------------------------------------------------- DIE SIGNATUR
+//
+// RUNDE UPDATE, UND ES IST DER PUNKT DIESER RUNDE. Bis hierher hat
+// dieses Programm eine Pruefsumme gerechnet: sie faengt eine kaputte
+// Uebertragung und sonst nichts. Wer die Oktette AENDERN kann, aendert
+// die Pruefsumme mit -- sie steht im selben Kopf. Ein Update-Weg, der
+// nur eine Pruefsumme kennt, gehoert jedem, der die Verbindung umleitet.
+//
+// DESHALB: JEDES PAKET WIRD SIGNIERT INSTALLIERT ODER GAR NICHT.
+//
+//   * Der vertraute Schluessel liegt in `/system/schluessel.pub`, 32
+//     rohe Oktette, ein oeffentlicher Ed25519-Schluessel. FEHLT ER,
+//     WIRD NICHTS INSTALLIERT. Es gibt keinen Schalter, der das
+//     abschaltet -- eine Ausnahme, die man in einem Notfall setzt, ist
+//     die Ausnahme, die ein Angreifer benutzt.
+//   * Neben `x.opk` liegt `x.opk.sig`, 64 rohe Oktette: die
+//     Ed25519-Signatur ueber ALLE Oktette des Pakets, Kopf eingeschlossen.
+//     Nicht ueber die Pruefsumme im Kopf -- dann waere der Kopf selbst
+//     ungedeckt und Laengenfelder liessen sich austauschen.
+//   * Bei `aktualisieren` wird ZUSAETZLICH `INDEX.sig` gegen denselben
+//     Schluessel geprueft, bevor eine Zeile des INDEX geglaubt wird.
+//     Damit haengt die ganze Kette an EINEM Schluessel: INDEX ->
+//     Streuwert -> Paketoktette, und jedes Glied wird gerechnet.
+//
+// Die Rechnung selbst steht in `lib/crypto/ed25519.fi` und ist gegen die
+// 1024 offiziellen Vektoren von RFC 8032 und gegen libsodium gemessen
+// (`tools/update/vectors.py`).
+
+// Den vertrauten Schluessel holen. `false` heisst: es wird nichts
+// installiert, und der Grund steht auf der Fehlerausgabe.
+fn schluessel_holen() -> bool {
+    let n: u64 = datei_lesen((&P_KEY[0 as usize]) as u64,
+        (&KEY[0 as usize]) as u64, 32)
+    if n == 0xFFFFFFFFFFFFFFFF || n == 0 {
+        fehler((&E_NOKEY[0 as usize]) as u64, 0)
+        return false
+    }
+    if n != 32 {
+        fehler((&E_KEYLEN[0 as usize]) as u64, 0)
+        return false
+    }
+    return true
+}
+
+// Eine Signaturdatei lesen. `pfad` ist die Datei, `endung` das, was
+// daran gehaengt wird (".sig") -- oder 0, wenn `pfad` schon die
+// Signaturdatei IST.
+fn signatur_holen(pfad: u64, endung: u64) -> bool {
+    ulib.strcpy((&SIGP[0 as usize]) as u64, pfad)
+    if endung != 0 {
+        ulib.strcat((&SIGP[0 as usize]) as u64, endung)
+    }
+    let n: u64 = datei_lesen((&SIGP[0 as usize]) as u64,
+        (&SIG[0 as usize]) as u64, 64)
+    if n == 0xFFFFFFFFFFFFFFFF || n == 0 {
+        fehler((&E_NOSIG[0 as usize]) as u64, (&SIGP[0 as usize]) as u64)
+        return false
+    }
+    if n != 64 {
+        fehler((&E_SIGLEN[0 as usize]) as u64, (&SIGP[0 as usize]) as u64)
+        return false
+    }
+    return true
+}
+
+// Die Rechnung. `msg`/`len` sind die Oktette, ueber die signiert wurde.
+fn signatur_gilt(msg: u64, len: u64) -> bool {
+    var c: ed25519.Ctx = ed25519.ctx_new()
+    if !ed25519.ctx_init(&c) {
+        fehler((&E_CTX[0 as usize]) as u64, 0)
+        return false
+    }
+    return ed25519.ed25519_verify(&c, (&KEY[0 as usize]) as u64, msg,
+        len as usize, (&SIG[0 as usize]) as u64)
+}
+
+// Der ganze Weg fuer eine Paketdatei: Schluessel, Signaturdatei,
+// Rechnung. Ein `false` heisst IMMER: nicht installieren.
+fn paket_signatur(pfad: u64, len: u64) -> bool {
+    if !schluessel_holen() {
+        return false
+    }
+    if !signatur_holen(pfad, (&N_SIG[0 as usize]) as u64) {
+        return false
+    }
+    if !signatur_gilt((&PKT[0 as usize]) as u64, len) {
+        fehler((&E_SIG[0 as usize]) as u64, pfad)
+        return false
+    }
+    ulib.say((&S_SIGOK[0 as usize]) as u64)
+    ulib.say(pfad)
+    ulib.nl()
+    return true
+}
+
 // ------------------------------------------- ein Paket in den Store
 //
 // Rueckgabe: 0 = Fehler, sonst die Laenge der Metadaten. Der Hexname
@@ -889,6 +1097,25 @@ fn umschalten(name: u64, hash: u64, grund: u64) -> u64 {
         return 0xFFFFFFFFFFFFFFFF
     }
     ulib.sys(ulib.SYS_SYNC, 0, 0, 0)
+    // RUNDE UPDATE: DIE NEUE GENERATION IST IN ERPROBUNG. Von hier an
+    // zaehlt `kernel/ab.fi` bei jedem Start mit, und bleibt der
+    // Erfolgsvermerk aus, faellt der Kern von selbst auf `jetzt`
+    // zurueck. Gibt es noch keine vorige Generation, ist sie ihre
+    // eigene -- es gaebe nichts, wohin man zurueckfiele.
+    var vorher: u64 = neu
+    if jetzt != 0xFFFFFFFFFFFFFFFF {
+        vorher = jetzt
+    }
+    if !erp_schreiben(neu, vorher, 0, 0) {
+        fehler((&E_ERPW[0 as usize]) as u64, 0)
+        return 0xFFFFFFFFFFFFFFFF
+    }
+    ulib.sys(ulib.SYS_SYNC, 0, 0, 0)
+    ulib.say((&S_ERP[0 as usize]) as u64)
+    ulib.sayu(neu)
+    ulib.say((&S_VOR[0 as usize]) as u64)
+    ulib.sayu(vorher)
+    ulib.nl()
     if apps_bauen(neu) == 0xFFFFFFFFFFFFFFFF {
         return 0xFFFFFFFFFFFFFFFF
     }
@@ -978,6 +1205,11 @@ fn cmd_installieren(datei: u64, grund: u64) -> u64 {
     if len >= PKT_MAX {
         return fehler((&E_GROSS[0 as usize]) as u64, 0)
     }
+    // DIE SIGNATUR ZUERST, vor der Pruefsumme und weit vor dem ersten
+    // Schreibzugriff: was hier durchfaellt, hat das System nie beruehrt.
+    if !paket_signatur(datei, len) {
+        return 1
+    }
     let ml: u64 = paket_pruefen(len)
     if ml == 0 {
         return 1
@@ -1032,12 +1264,62 @@ fn cmd_zurueck(n: u64) -> u64 {
         return 1
     }
     ulib.sys(ulib.SYS_SYNC, 0, 0, 0)
+    // Ein Rueckfall VON HAND ist per Definition bestaetigt: da sitzt
+    // jemand davor. Ohne diese Zeile bliebe der Zaehler der
+    // fehlgeschlagenen Generation stehen und der Kern faellt beim
+    // naechsten Start noch einmal zurueck -- auf dieselbe Stelle.
+    if !erp_schreiben(n, n, 0, 1) {
+        return fehler((&E_ERPW[0 as usize]) as u64, 0)
+    }
+    ulib.sys(ulib.SYS_SYNC, 0, 0, 0)
     if apps_bauen(n) == 0xFFFFFFFFFFFFFFFF {
         return 1
     }
     ulib.sys(ulib.SYS_SYNC, 0, 0, 0)
     ulib.say((&S_ZUR[0 as usize]) as u64)
     ulib.sayu(n)
+    ulib.nl()
+    return 0
+}
+
+// `opk erprobung`     -- was steht an
+// `opk erprobung ok`  -- DER ERFOLGSVERMERK. Ohne ihn faellt der Kern
+//                        nach GRENZE Startversuchen von selbst zurueck.
+fn cmd_erprobung(was: u64) -> u64 {
+    var gen: u64 = 0
+    var vor: u64 = 0
+    var v: u64 = 0
+    var ok: u64 = 0
+    if !erp_lesen(&gen, &vor, &v, &ok) {
+        let g: u64 = aktuell()
+        ulib.say((&S_ERPKEIN[0 as usize]) as u64)
+        ulib.sayu(g)
+        var zu: [u8; 2] = ")\0"
+        ulib.say((&zu[0 as usize]) as u64)
+        ulib.nl()
+        return 1
+    }
+    if was != 0 && ulib.streq(was, (&A_OK[0 as usize]) as u64) {
+        if !erp_schreiben(gen, vor, v, 1) {
+            return fehler((&E_ERPW[0 as usize]) as u64, 0)
+        }
+        ulib.sys(ulib.SYS_SYNC, 0, 0, 0)
+        ulib.say((&S_ERPOK[0 as usize]) as u64)
+        ulib.sayu(gen)
+        ulib.nl()
+        return 0
+    }
+    ulib.say((&S_ERPST[0 as usize]) as u64)
+    ulib.sayu(gen)
+    ulib.say((&S_VOR[0 as usize]) as u64)
+    ulib.sayu(vor)
+    ulib.say((&S_VERS[0 as usize]) as u64)
+    ulib.sayu(v)
+    if ok != 0 {
+        ulib.say((&S_BEST[0 as usize]) as u64)
+    } else {
+        ulib.say((&S_OFFEN[0 as usize]) as u64)
+    }
     ulib.nl()
     return 0
 }
@@ -1203,6 +1485,25 @@ fn cmd_aktualisieren(name: u64, quelle: u64, grund: u64) -> u64 {
         return fehler((&E_INDEX[0 as usize]) as u64, quelle)
     }
     p8((&IDX[0 as usize]) as u64 + n, 0)
+    // DIE SIGNATUR UEBER DEN INDEX. Ohne sie ist der INDEX nur eine
+    // Textdatei, die jeder schreiben kann, der die Quelle stellt -- und
+    // der Streuwertvergleich weiter unten prueft dann ein Paket gegen
+    // einen Streuwert, den derselbe Angreifer eingetragen hat.
+    if !schluessel_holen() {
+        return 1
+    }
+    ulib.strcpy((&PFAD2[0 as usize]) as u64, quelle)
+    slash((&PFAD2[0 as usize]) as u64)
+    ulib.strcat((&PFAD2[0 as usize]) as u64, (&N_ISIG[0 as usize]) as u64)
+    if !signatur_holen((&PFAD2[0 as usize]) as u64, 0) {
+        return 1
+    }
+    if !signatur_gilt((&IDX[0 as usize]) as u64, n) {
+        return fehler((&E_ISIG[0 as usize]) as u64, quelle)
+    }
+    ulib.say((&S_SIGOK[0 as usize]) as u64)
+    ulib.say((&PFAD2[0 as usize]) as u64)
+    ulib.nl()
     if !index_zeile(name, (&hs[0 as usize]) as u64, (&dt[0 as usize]) as u64) {
         return fehler((&E_NIX[0 as usize]) as u64, name)
     }
@@ -1214,6 +1515,9 @@ fn cmd_aktualisieren(name: u64, quelle: u64, grund: u64) -> u64 {
     if len == 0xFFFFFFFFFFFFFFFF {
         return fehler((&E_OPEN[0 as usize]) as u64,
             (&PFAD[0 as usize]) as u64)
+    }
+    if !paket_signatur((&PFAD[0 as usize]) as u64, len) {
+        return 1
     }
     let ml: u64 = paket_pruefen(len)
     if ml == 0 {
@@ -1263,6 +1567,8 @@ fn u_start(args: u64) -> u64 {
         ulib.nl()
         ulib.say((&S_USE7[0 as usize]) as u64)
         ulib.nl()
+        ulib.say((&S_USE8[0 as usize]) as u64)
+        ulib.nl()
         return 0
     }
     let cmd: u64 = ulib.arg_at(args, 1)
@@ -1291,6 +1597,13 @@ fn u_start(args: u64) -> u64 {
     }
     if ulib.streq(cmd, (&C_PRUEF[0 as usize]) as u64) {
         return cmd_pruefen()
+    }
+    if ulib.streq(cmd, (&C_ERP[0 as usize]) as u64) {
+        var wa: u64 = 0
+        if argc >= 3 {
+            wa = ulib.arg_at(args, 2)
+        }
+        return cmd_erprobung(wa)
     }
     if argc < 3 {
         return fehler((&E_ARG[0 as usize]) as u64, 0)
