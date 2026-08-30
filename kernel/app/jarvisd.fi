@@ -164,6 +164,11 @@ const MAXLISTE: usize = 6 // Eintraege je Liste
 const MAXBEFEHLE: usize = 8
 const MAXZEILE: usize = 4096
 const MAXFELD: usize = 10
+// DIE HARTE OBERGRENZE einer Nutzlast, unabhaengig von der Rechteliste.
+// `max_datei` darf darunter liegen und tut es normalerweise; DIESE Zahl
+// ist die, ab der gar nicht erst Speicher besorgt wird. Ein Server, der
+// mehr ankuendigt, redet nicht mehr mit diesem Geraet.
+const MAXNUTZ: usize = 1048576
 
 // Die Rechtebits von Runde HANDLE (kernel/handle.fi). Absichtlich
 // dieselben Zahlen; eine zweite Liste waere eine, die auseinanderlaeuft.
@@ -1418,7 +1423,7 @@ fn tue_foto(aus: *mut rt.Buf) -> bool {
     let w: i64 = syscall(S_WIGSCREEN, WS_W, 0, 0, 0, 0, 0)
     let h: i64 = syscall(S_WIGSCREEN, WS_H, 0, 0, 0, 0, 0)
     if w <= 0 || h <= 0 {
-        return ablehnen(aus, "dieser Kern hat keinen Rahmenpuffer (GUI-loser Bau)")
+        return ablehnen(aus, "keine Bildschirmmasse in Ring 3: SYS_OSUM_SHOT fehlt (Runde FEEDBACK) und der Fensterserver laeuft nicht")
     }
     var pitch: i64 = syscall(S_DISPGET, DG_PITCH, 0, 0, 0, 0, 0)
     var bpp: i64 = syscall(S_DISPGET, DG_BPP, 0, 0, 0, 0, 0)
@@ -1474,14 +1479,26 @@ fn tue_foto(aus: *mut rt.Buf) -> bool {
         rt.buf_free(&roh)
         return ablehnen(aus, "der Rahmenpuffer liess sich nicht ganz lesen")
     }
+    let gut: bool = png_bauen(aus, breite, hoehe, &roh)
+    rt.buf_free(&roh)
+    if !gut {
+        return ablehnen(aus, "das Bild liess sich nicht in ein PNG bringen")
+    }
+    return true
+}
+
+// Aus zeilenweise gefilterten RGB-Oktetten ein PNG. `roh` traegt je
+// Zeile ein Filteroktett (0) und danach 3*breite Oktette R,G,B -- genau
+// das, was RFC 2083 fuer Farbart 2 verlangt.
+fn png_bauen(aus: *mut rt.Buf, breite: usize, hoehe: usize,
+    roh: *mut rt.Buf) -> bool {
     var idat: rt.Buf = rt.buf_new()
     var pfehl: bool = false
-    let gepackt: usize = deflate.zlib_compress(roh.ptr, roh.len, 6 as usize,
-        &idat) catch | e | fehl_len(&pfehl)
-    rt.buf_free(&roh)
+    let gepackt: usize = deflate.zlib_compress((*roh).ptr, (*roh).len,
+        6 as usize, &idat) catch | e | fehl_len(&pfehl)
     if pfehl {
         rt.buf_free(&idat)
-        return ablehnen(aus, "das Bild liess sich nicht packen")
+        return false
     }
     rt.buf_clear(aus)
     var sig: [u8; 8] = [0; 8]
@@ -1513,6 +1530,46 @@ fn tue_foto(aus: *mut rt.Buf) -> bool {
     png_stueck(aus, (&n_iend[0]) as u64, 0, 0 as usize)
     rt.buf_free(&idat)
     return true
+}
+
+// -b: DERSELBE PNG-Weg mit einem gerechneten Bild statt mit dem
+// Bildschirm. Damit ist der Kodierer gemessen, auch auf einem Kern, der
+// Ring 3 keine Bildschirmmasse gibt. Das Muster ist absichtlich
+// berechenbar: der Pruefstand rechnet jeden Bildpunkt nach.
+fn bildprobe() -> i32 {
+    let breite: usize = 64
+    let hoehe: usize = 48
+    var roh: rt.Buf = rt.buf_new()
+    var y: usize = 0
+    while y < hoehe {
+        rt.buf_push(&roh, 0 as u8)
+        var x: usize = 0
+        while x < breite {
+            rt.buf_push(&roh, (x * 4) as u8)
+            rt.buf_push(&roh, (y * 5) as u8)
+            rt.buf_push(&roh, ((x + y) * 2) as u8)
+            x = x + 1
+        }
+        y = y + 1
+    }
+    var aus: rt.Buf = rt.buf_new()
+    let gut: bool = png_bauen(&aus, breite, hoehe, &roh)
+    rt.buf_free(&roh)
+    if !gut {
+        sag("bild: gescheitert\n")
+        return 1
+    }
+    sag("bild ")
+    var hx: rt.Buf = rt.buf_new()
+    hex_an(&hx, aus.ptr, aus.len)
+    sag_oktette(hx.ptr, hx.len)
+    sag("\n")
+    sag("bildlaenge ")
+    sag_zahl(aus.len as u64)
+    sag("\n")
+    rt.buf_free(&hx)
+    rt.buf_free(&aus)
+    return 0
 }
 
 // ====================================================================
@@ -1785,12 +1842,19 @@ fn bediene(d: *mut Draht) -> bool {
         }
         let laenge: usize = zahl_von(zeile.ptr + f.off[f.n - 1] as u64,
             f.len[f.n - 1]) as usize
-        if laenge > k_max_datei {
-            // Erst gar nicht einlesen. Ein Server, der mehr schickt als
-            // erlaubt ist, bekommt keine Speicherreservierung dafuer.
-            rt.buf_clear(&aus)
-            var g: [u8; 46] = "die Nutzlast ist groesser als max_datei\0\0\0\0\0\0\0"
-            rt.buf_push_bytes(&aus, (&g[0]) as u64, 38)
+        if laenge > MAXNUTZ {
+            // UEBER DER HARTEN GRENZE wird gar nicht erst Speicher
+            // besorgt und auch nicht mehr geantwortet: wer eine
+            // Nutzlast dieser Groesse ankuendigt, haelt sich nicht an
+            // das Protokoll, und der Strom laesst sich danach nicht
+            // mehr sauber lesen. Was die RECHTELISTE erlaubt
+            // (`max_datei`), liegt darunter und wird in den
+            // Auftragsarten selbst geprueft -- dort kann noch
+            // geantwortet werden.
+            sag("jarvisd: eine Nutzlast ueber der harten Grenze -- Schluss\n")
+            var a: [u8; 8] = "auftrag\0"
+            var g: [u8; 33] = "Nutzlast ueber der harten Grenze\0"
+            notiere((&a[0]) as u64, 7, "ABGELEHNT", (&g[0]) as u64, 32)
             z_abgelehnt = z_abgelehnt + 1
             sauber = false
             break
@@ -2034,6 +2098,30 @@ fn probe() -> i32 {
     return 0
 }
 
+// -s: was dieses Programm vom Bildschirm sieht. Eine Zeile Zahlen,
+// damit "kein Rahmenpuffer" nicht geraten werden muss.
+fn schirm() -> i32 {
+    sag("schirm: shot ")
+    sag_zahl(syscall(S_SHOT, 0, 0, 0, 0, 0, 0) as u64)
+    sag(" w ")
+    sag_zahl(syscall(S_WIGSCREEN, WS_W, 0, 0, 0, 0, 0) as u64)
+    sag(" h ")
+    sag_zahl(syscall(S_WIGSCREEN, WS_H, 0, 0, 0, 0, 0) as u64)
+    sag(" pitch ")
+    sag_zahl(syscall(S_DISPGET, DG_PITCH, 0, 0, 0, 0, 0) as u64)
+    sag(" bpp ")
+    sag_zahl(syscall(S_DISPGET, DG_BPP, 0, 0, 0, 0, 0) as u64)
+    var fbname: [u8; 8] = "/dev/fb\0"
+    let fd: i64 = sys_open((&fbname[0]) as u64, 0, 0)
+    sag(" devfb ")
+    sag_zahl(fd as u64)
+    if fd >= 0 {
+        sys_close(fd)
+    }
+    sag("\n")
+    return 0
+}
+
 fn bericht() {
     sag("jarvisd: verbindungen ")
     sag_zahl(z_verbindungen)
@@ -2083,6 +2171,10 @@ fn main(start: u64) -> i32 {
             } else if c == 112 as u8 { // -p
                 mach_verzeichnisse()
                 return probe()
+            } else if c == 115 as u8 { // -s
+                return schirm()
+            } else if c == 98 as u8 { // -b
+                return bildprobe()
             }
         }
         i = i + 1
