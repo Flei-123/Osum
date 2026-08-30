@@ -88,6 +88,10 @@ import blk
 // RUNDE INSTALL: `sync` schreibt auch die FSInfo-Seite von FAT32.
 import fat
 import usb
+import audio
+import ac97
+import hda
+import mix
 
 export {
     entry, neg, STAT_BYTES, DIRENT_HEAD,
@@ -992,6 +996,51 @@ const KB_SWITCH: u64 = 3
 // not: it moves the day mark and clears the split, and a program that
 // could silently zero the accounting of every other program would make
 // the display worth less than nothing.
+// ================================================ RUNDE HDA: 1840..1849
+//
+// DER TON AUS RING 3. Fuenf Nummern, und die Bauart ist die von
+// SYS_OSUM_PWRGET: EINE ZAHL JE ABFRAGE, kein Aufbau, der sich
+// zwischen den Ringen einigen muesste -- ein Abspieler fragt zwei
+// Dutzend kleine Zahlen ab und nie eine Struktur, und eine Struktur
+// muesste versioniert werden.
+//
+//   1840  osum_audget(feld)              -> Wert
+//   1841  osum_audset(feld, wert)        -> 0 oder -errno
+//   1842  osum_audwrite(zeiger, rahmen)  -> angenommene Rahmen
+//   1843  osum_audopen(rate)             -> Strom-Kennung oder -errno
+//   1844  osum_audsend(id, zeiger, rahmen) -> angenommene Rahmen
+//
+// ZWEI SCHREIBWEGE, UND DAS IST KEIN DOPPELTES. 1842 schreibt in den
+// Geraetering (EIN Programm, kleinste Verzoegerung -- der Weg aus
+// Runde MEDIA1, unveraendert); 1843/1844 gehen durch den Mischer
+// (MEHRERE Programme). Wer 1843 benutzt, bekommt eine Kennung und
+// muss sie mitfuehren; wer 1842 benutzt, hat das Geraet allein oder
+// bekommt -EBUSY.
+//
+// 1840..1849 ist der naechste freie Zehnerblock hinter 1830 (Runde
+// POWERMON). `tools/hda/run.sh` rechnet nach, dass keine dieser
+// Nummern anderswo im Baum vorkommt.
+const SYS_OSUM_AUDGET: u64 = 1840
+const SYS_OSUM_AUDSET: u64 = 1841
+const SYS_OSUM_AUDWRITE: u64 = 1842
+const SYS_OSUM_AUDOPEN: u64 = 1843
+const SYS_OSUM_AUDSEND: u64 = 1844
+
+// Die Felder von `osum_audset`. Die Nummern stehen genauso in
+// `kernel/user/play.fi` und in `kernel/user/ulib.fi`.
+const AS_VOLUME: u64 = 0
+const AS_OPEN: u64 = 1 // 1 oeffnen, 0 schliessen (Einstromweg)
+const AS_MUTE: u64 = 2
+const AS_DRAIN: u64 = 3 // angefangenen Eintrag auffuellen und abgeben
+const AS_STOP: u64 = 4
+const AS_SOUNDS: u64 = 5 // Systemklaenge an/aus
+const AS_BEEP: u64 = 6 // Wert = Frequenz in Hz, 0 = der Fehlerton
+const AS_RATE: u64 = 7 // die Abtastrate aushandeln
+const AS_CLOSE: u64 = 8 // Wert = Strom-Kennung: Mischerstrom schliessen
+const AS_END: u64 = 9 // Wert = Strom-Kennung: "ich schreibe nichts mehr"
+const AS_SVOL: u64 = 10 // (Kennung << 8) | Prozent -- Lautstaerke JE STROM
+const AS_PUMP: u64 = 11 // den Mischer einmal drehen
+
 const SYS_OSUM_PMON: u64 = 1830
 
 // kind 1, above the six counters of `pmon.PT_*`.
@@ -1890,6 +1939,22 @@ fn dispatch(number: u64, frame: u64, state: u64) -> u64 {
     // ROUND POWERMON: the power accounting.
     if number == SYS_OSUM_PMON {
         return do_pmon(state, me, a0, a1, a2)
+    }
+    // RUNDE HDA: der Ton. Fuenf Nummern, eine Weiche.
+    if number == SYS_OSUM_AUDGET {
+        return do_audget(state, a0)
+    }
+    if number == SYS_OSUM_AUDSET {
+        return do_audset(state, a0, a1)
+    }
+    if number == SYS_OSUM_AUDWRITE {
+        return do_audwrite(state, me, a0, a1)
+    }
+    if number == SYS_OSUM_AUDOPEN {
+        return do_audopen(state, me, a0)
+    }
+    if number == SYS_OSUM_AUDSEND {
+        return do_audsend(state, me, a0, a1, a2)
     }
     // ------------------------------------------------------ RUNDE K13
     //
@@ -9155,3 +9220,336 @@ fn do_jrnl(state: u64, me: u64, from: u64, dst: u64, max: u64) -> u64 {
 
 
 
+
+// ==================================================== RUNDE HDA: DER TON
+//
+// Fuenf Aufrufe, und der interessanteste ist der dritte: er kopiert
+// Rahmen aus Ring 3 in den DMA-Ringpuffer und gibt zurueck, wie viele
+// hineingingen -- MEHR NICHT. Er wartet nicht, er legt niemanden
+// schlafen, er blockiert nicht.
+//
+// WARUM NICHT BLOCKIEREND, wo doch jedes Unix `write` auf /dev/dsp
+// blockiert: weil ein Abspieler, der auf Ton wartet, in derselben
+// Schleife auch das Bild dekodieren muss. Ein blockierender Aufruf
+// zwingt ihn zu einem zweiten Faden, und Faeden gibt es in diesem
+// System noch nicht (Block A1 der Roadmap laeuft gerade). Ein Aufruf,
+// der sagt "so viel habe ich genommen", laesst dem Programm die Wahl --
+// und genau diese Wahl ist es, die spaeter Lippensynchronitaet
+// ermoeglicht: Ton nachfuellen hat Vorrang, Bild wird ausgelassen.
+//
+// DER PUFFER geht ueber `kstate.BLOCK_OFF`, den Umsteigepuffer, den
+// jeder Systemaufruf mit Daten benutzt: 4096 Oktette, also 1024 Rahmen
+// je Durchgang. Ein Zeiger aus Ring 3 wird NIE direkt an den DMA
+// gegeben -- der Regler wuerde eine Adresse lesen, die dem Prozess
+// gehoert und die er waehrend des Spielens freigeben kann.
+
+fn do_audget(state: u64, field: u64) -> u64 {
+    if field == audio.A_READY {
+        if audio.ready(state) {
+            return 1
+        }
+        return 0
+    }
+    if field == audio.A_RATE {
+        return audio.rate(state)
+    }
+    if field == audio.A_CHANNELS {
+        return audio.channels(state)
+    }
+    if field == audio.A_BITS {
+        return audio.bits(state)
+    }
+    if field == audio.A_VOLUME {
+        return audio.volume(state)
+    }
+    if field == audio.A_PLAYED {
+        // DIE PUMPE HAENGT HIER MIT DRAN, und das ist der Grund, warum
+        // ein Abspieler nichts weiter tun muss als seine Position
+        // abzufragen: er dreht damit den Mischer mit. Ohne diese Zeile
+        // liefe der Mischer nur beim Schreiben, und ein Programm, das
+        // gerade nichts zu schreiben hat, wuerde die anderen anhalten.
+        audio.mix_pump(state)
+        return audio.samples_played(state)
+    }
+    if field == audio.A_WRITTEN {
+        return audio.frames_written(state)
+    }
+    if field == audio.A_UNDERRUNS {
+        return audio.underruns(state)
+    }
+    if field == audio.A_LATENCY {
+        return audio.latency_us(state)
+    }
+    if field == audio.A_ENTRYUS {
+        return audio.entry_us(state)
+    }
+    if field == audio.A_RINGFRAMES {
+        return audio.ring_frames(state)
+    }
+    if field == audio.A_RUNNING {
+        if audio.backend(state) == audio.B_HDA {
+            if hda.running(state) {
+                return 1
+            }
+            return 0
+        }
+        if ac97.running(state) {
+            return 1
+        }
+        return 0
+    }
+    if field == audio.A_OPEN {
+        if audio.is_open(state) {
+            return 1
+        }
+        return 0
+    }
+    if field == audio.A_BACKEND {
+        return audio.backend(state)
+    }
+    if field == audio.A_WHY {
+        return audio.why(state)
+    }
+    if field == audio.A_SOUNDS {
+        if audio.sounds_on(state) {
+            return 1
+        }
+        return 0
+    }
+    if field == audio.A_BEEPS {
+        return audio.beeps(state)
+    }
+    if field == audio.A_MUTED {
+        if audio.muted(state) {
+            return 1
+        }
+        return 0
+    }
+    if field == audio.A_REMAIN {
+        return audio.remaining(state)
+    }
+    if field == audio.A_WRITES {
+        return audio.writes(state)
+    }
+    if field == audio.A_BACKSTEPS {
+        return audio.backsteps(state)
+    }
+    if field == audio.A_STREAMS {
+        return mix.streams(state)
+    }
+    if field == audio.A_MIXED {
+        return mix.mixed(state)
+    }
+    if field == audio.A_CLIPS {
+        return mix.clips(state)
+    }
+    if field == audio.A_MIXUNDER {
+        return mix.underruns(state, mix.MAX_STREAMS)
+    }
+    if field == audio.A_DISAGREE {
+        if audio.backend(state) == audio.B_HDA {
+            return hda.pos_disagree(state)
+        }
+        return 0
+    }
+    if field == audio.A_CMDPATH {
+        if audio.backend(state) == audio.B_HDA {
+            return hda.cmd_path(state)
+        }
+        return 0
+    }
+    if field == audio.A_DAC {
+        if audio.backend(state) == audio.B_HDA {
+            return hda.dac_nid(state)
+        }
+        return 0
+    }
+    if field == audio.A_PIN {
+        if audio.backend(state) == audio.B_HDA {
+            return hda.pin_nid(state)
+        }
+        return 0
+    }
+    if field == audio.A_PATHLEN {
+        if audio.backend(state) == audio.B_HDA {
+            return hda.path_len(state)
+        }
+        return 0
+    }
+    if field == audio.A_WIDGETS {
+        if audio.backend(state) == audio.B_HDA {
+            return hda.widgets(state)
+        }
+        return 0
+    }
+    if field == audio.A_CODECADDR {
+        if audio.backend(state) == audio.B_HDA {
+            return hda.codec_addr(state)
+        }
+        return 0
+    }
+    return neg(errno.E_INVAL)
+}
+
+fn do_audset(state: u64, field: u64, value: u64) -> u64 {
+    if field == AS_VOLUME {
+        if value > 100 {
+            return neg(errno.E_INVAL)
+        }
+        audio.set_volume(state, value)
+        return 0
+    }
+    if field == AS_MUTE {
+        audio.set_muted(state, value != 0)
+        return 0
+    }
+    if field == AS_SOUNDS {
+        audio.set_sounds(state, value != 0)
+        return 0
+    }
+    if !audio.ready(state) {
+        return neg(errno.E_NODEV)
+    }
+    if field == AS_OPEN {
+        if value != 0 {
+            if audio.open(state) {
+                return 0
+            }
+            return neg(errno.E_BUSY)
+        }
+        audio.close(state)
+        return 0
+    }
+    if field == AS_DRAIN {
+        audio.pad_and_submit(state)
+        return 0
+    }
+    if field == AS_STOP {
+        audio.stop(state)
+        return 0
+    }
+    if field == AS_RATE {
+        // AUSGEHANDELT UND NICHT BEFOHLEN: der Rueckgabewert sagt, ob
+        // die gewuenschte Rate wirklich gestellt wurde. Was WIRKLICH
+        // laeuft, liest das Programm danach mit A_RATE ab -- und ein
+        // Abspieler, der das nicht tut, spielt mit falscher Tonhoehe
+        // und meldet Erfolg.
+        if audio.set_rate(state, value) {
+            return 0
+        }
+        return neg(errno.E_INVAL)
+    }
+    if field == AS_CLOSE {
+        audio.close_stream(state, value)
+        return 0
+    }
+    if field == AS_END {
+        mix.mark_end(state, value)
+        audio.drain_mark(state)
+        return 0
+    }
+    if field == AS_SVOL {
+        mix.set_volume(state, value >> 8, value & 0xFF)
+        return 0
+    }
+    if field == AS_PUMP {
+        audio.mix_pump(state)
+        audio.zero_rest(state)
+        return 0
+    }
+    if field == AS_BEEP {
+        var hz: u64 = value
+        if hz == 0 {
+            audio.error_beep(state)
+            return 0
+        }
+        if hz < 20 || hz > 20000 {
+            return neg(errno.E_INVAL)
+        }
+        audio.beep(state, hz, 90)
+        return 0
+    }
+    return neg(errno.E_INVAL)
+}
+
+fn do_audwrite(state: u64, me: u64, src: u64, frames: u64) -> u64 {
+    if !audio.ready(state) {
+        return neg(errno.E_NODEV)
+    }
+    if !audio.is_open(state) {
+        return neg(errno.E_BADF)
+    }
+    if frames == 0 {
+        return 0
+    }
+    let fo: u64 = audio.frame_octets(state)
+    let cap: u64 = kstate.BLOCK_MAX / fo
+    var n: u64 = frames
+    if n > cap {
+        n = cap
+    }
+    let room: u64 = audio.space_frames(state)
+    if room == 0 {
+        return 0
+    }
+    if n > room {
+        n = room
+    }
+    let bounce: u64 = state + kstate.BLOCK_OFF
+    if !copy_in(state, me, bounce, src, n * fo) {
+        return neg(errno.E_FAULT)
+    }
+    return audio.write(state, bounce, n)
+}
+
+// DEN MISCHERWEG OEFFNEN. Der Rueckgabewert ist die Kennung des
+// Stromes (0..3) -- eine Zahl und kein Handle, weil die Handle-Schicht
+// (Runde HANDLE) fuer einen Tonstrom kein einziges ihrer Merkmale
+// braucht: er wird nicht weitergegeben, nicht geerbt, nicht abgebrochen.
+fn do_audopen(state: u64, me: u64, hz: u64) -> u64 {
+    if !audio.ready(state) {
+        return neg(errno.E_NODEV)
+    }
+    let id: u64 = audio.open_stream(state, me, hz)
+    if id >= mix.MAX_STREAMS {
+        return neg(errno.E_BUSY)
+    }
+    return id
+}
+
+fn do_audsend(state: u64, me: u64, id: u64, src: u64, frames: u64) -> u64 {
+    if !audio.ready(state) {
+        return neg(errno.E_NODEV)
+    }
+    if id >= mix.MAX_STREAMS {
+        return neg(errno.E_INVAL)
+    }
+    if !mix.is_open(state, id) {
+        return neg(errno.E_BADF)
+    }
+    if frames == 0 {
+        return 0
+    }
+    let fo: u64 = audio.frame_octets(state)
+    let cap: u64 = kstate.BLOCK_MAX / fo
+    var n: u64 = frames
+    if n > cap {
+        n = cap
+    }
+    let room: u64 = mix.space(state, id)
+    if room == 0 {
+        // KEIN PLATZ IST KEIN FEHLER. Der Aufrufer kommt wieder; ein
+        // Fehlercode hier wuerde ihn abbrechen lassen, obwohl alles in
+        // Ordnung ist.
+        audio.mix_pump(state)
+        return 0
+    }
+    if n > room {
+        n = room
+    }
+    let bounce: u64 = state + kstate.BLOCK_OFF
+    if !copy_in(state, me, bounce, src, n * fo) {
+        return neg(errno.E_FAULT)
+    }
+    return audio.write_stream(state, id, bounce, n)
+}

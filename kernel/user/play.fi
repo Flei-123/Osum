@@ -1,0 +1,439 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/play.fi -- RUNDE HDA: /bin/play, der Nachweis in Ring 3.
+//
+// Der Kernel dieser Runde kann selbst einen Ton erzeugen (`audsine`),
+// und das ist die saubere Messstrecke: EIN Verdaechtiger, wenn etwas
+// nicht stimmt. Dieses Programm ist die andere Haelfte -- es beweist,
+// dass die Strecke auch aus Ring 3 heraus traegt, durch die Shell, den
+// ELF-Lader, das Dateisystem und fuenf Systemaufrufe hindurch.
+//
+//   /bin/play datei.wav       PCM 16 Bit, ein oder zwei Kanaele
+//   /bin/play datei.mp3       MPEG-1/2/2.5 Layer III
+//   /bin/play -i datei        NUR die Angaben, kein Ton
+//   /bin/play -1 datei        den EINSTROMWEG statt des Mischers
+//
+// WARUM ZWEI WEGE, und wann welcher:
+//
+//   REGELFALL IST DER MISCHER (osum_audopen/osum_audsend). Damit
+//   koennen mehrere Programme gleichzeitig spielen, und die Rate wird
+//   umgerechnet, wenn das Geraet eine andere faehrt.
+//   `-1` nimmt den Einstromweg (osum_audset AS_OPEN, osum_audwrite):
+//   ein Puffer weniger, also kleinere Verzoegerung -- und -EBUSY,
+//   sobald jemand anderes spielt. Er ist der Weg aus Runde MEDIA1 und
+//   steht hier, damit die Abnahme BEIDE messen kann.
+//
+// WAS AM ENDE GEDRUCKT WIRD, ist die Zusage (g) dieser Runde: Rate und
+// Laenge, wie der DEKODIERER sie meldet, und daneben, wie viele Rahmen
+// wirklich abgespielt wurden. Stimmen die beiden nicht ueberein, ist
+// die Wiedergabe falsch -- und das steht dann da, statt dass jemand
+// hinterher raet.
+
+profile kernel
+
+import ulib
+import media
+import mp3
+
+export { u_start }
+
+const SYS_AUDGET: u64 = 1840
+const SYS_AUDSET: u64 = 1841
+const SYS_AUDWRITE: u64 = 1842
+const SYS_AUDOPEN: u64 = 1843
+const SYS_AUDSEND: u64 = 1844
+
+const A_READY: u64 = 0
+const A_RATE: u64 = 1
+const A_CHANNELS: u64 = 2
+const A_BITS: u64 = 3
+const A_PLAYED: u64 = 5
+const A_WRITTEN: u64 = 6
+const A_UNDERRUNS: u64 = 7
+const A_LATENCY: u64 = 8
+const A_WHY: u64 = 16
+const A_BACKEND: u64 = 15
+const A_REMAIN: u64 = 25
+const A_STREAMS: u64 = 30
+const A_MIXED: u64 = 31
+const A_CLIPS: u64 = 32
+
+const AS_OPEN: u64 = 1
+const AS_DRAIN: u64 = 3
+const AS_STOP: u64 = 4
+const AS_RATE: u64 = 7
+const AS_CLOSE: u64 = 8
+const AS_END: u64 = 9
+const AS_PUMP: u64 = 11
+
+// EIN SCHUB. 1024 Rahmen sind genau der Umsteigepuffer des
+// Systemaufrufs (4096 Oktette); mehr nimmt der Kern in einem Zug nicht
+// an, und weniger waere ein Systemaufruf mehr fuer dieselben Oktette.
+const CHUNK: u64 = 1024
+
+static mut buf: [u8; 4096] = [0 as u8; 4096]
+
+// ------------------------------------------------------------ die WAV-Datei
+//
+// RIFF, und nur so viel davon, wie fuer eine Wiedergabe noetig ist: die
+// Kette der Bloecke wird durchlaufen, `fmt ` und `data` werden
+// genommen, alles andere (LIST, INFO, Fakten der Aufnahmesoftware)
+// wird UEBERSPRUNGEN statt vorausgesetzt. Eine WAV-Datei, bei der
+// `data` nicht der zweite Block ist, ist voellig normal.
+static mut w_rate: u64 = 0
+static mut w_ch: u64 = 0
+static mut w_bits: u64 = 0
+static mut w_off: u64 = 0
+static mut w_len: u64 = 0
+
+fn tag4(at: u64, a: u64, b: u64, c: u64, d: u64) -> bool {
+    return media.src_byte(at) == a && media.src_byte(at + 1) == b
+        && media.src_byte(at + 2) == c && media.src_byte(at + 3) == d
+}
+
+fn wav_probe() -> bool {
+    if media.src_size() < 44 {
+        return false
+    }
+    // "RIFF" .... "WAVE"
+    return tag4(0, 82, 73, 70, 70) && tag4(8, 87, 65, 86, 69)
+}
+
+fn wav_open() -> bool {
+    w_rate = 0
+    w_ch = 0
+    w_bits = 0
+    w_off = 0
+    w_len = 0
+    var at: u64 = 12
+    let ende: u64 = media.src_size()
+    while at + 8 <= ende {
+        let len: u64 = media.le32(at + 4)
+        if tag4(at, 102, 109, 116, 32) { // "fmt "
+            w_ch = media.le16(at + 10)
+            w_rate = media.le32(at + 12)
+            w_bits = media.le16(at + 22)
+        }
+        if tag4(at, 100, 97, 116, 97) { // "data"
+            w_off = at + 8
+            w_len = len
+            if w_off + w_len > ende {
+                w_len = ende - w_off
+            }
+        }
+        // Bloecke sind auf gerade Laenge aufgefuellt.
+        at = at + 8 + len + (len & 1)
+    }
+    return w_rate > 0 && w_ch > 0 && w_bits == 16 && w_len > 0
+}
+
+fn u_start(args: u64) -> u64 {
+    var s_use: [u8; 40] = "Verwendung: play [-i] [-1] <datei>\0\0\0\0\0\0"
+    var s_noopen: [u8; 26] = "play: Datei nicht lesbar\0\0"
+    var s_nofmt: [u8; 40] = "play: weder WAV (16 Bit) noch MP3\0\0\0\0\0\0\0"
+    var s_nodev: [u8; 34] = "play: kein Tongeraet, Grund \0\0\0\0\0\0"
+    var s_kind: [u8; 8] = "  art: \0"
+    var s_wav: [u8; 4] = "wav\0"
+    var s_mp3: [u8; 4] = "mp3\0"
+    var s_rate: [u8; 9] = "  rate: \0"
+    var s_ch: [u8; 12] = "  kanaele: \0"
+    var s_ms: [u8; 10] = "  dauer: \0"
+    var s_msu: [u8; 4] = " ms\0"
+    var s_dr: [u8; 15] = "  geraetrate: \0"
+    var s_fr: [u8; 12] = "  rahmen: \0\0"
+    var s_pl: [u8; 13] = "  gespielt: \0"
+    var s_un: [u8; 14] = "  aussetzer: \0"
+    var s_lat: [u8; 14] = "  latenz_us: \0"
+    var s_bk: [u8; 13] = "  treiber: \0\0"
+    var s_id: [u8; 10] = "  strom: \0"
+    var s_mx: [u8; 12] = "  gemischt: "
+    var opt_i: [u8; 3] = "-i\0"
+    var opt_1: [u8; 3] = "-1\0"
+
+    let argc: u64 = ulib.arg_count(args)
+    var nur_info: bool = false
+    var einstrom: bool = false
+    var k: u64 = 1
+    while k < argc {
+        let a: u64 = ulib.arg_at(args, k)
+        if ulib.streq(a, (&opt_i[0 as usize]) as u64) {
+            nur_info = true
+            k = k + 1
+        } else if ulib.streq(a, (&opt_1[0 as usize]) as u64) {
+            einstrom = true
+            k = k + 1
+        } else {
+            k = argc
+        }
+    }
+    var pfad: u64 = 0
+    var j: u64 = 1
+    while j < argc {
+        let a: u64 = ulib.arg_at(args, j)
+        if !ulib.streq(a, (&opt_i[0 as usize]) as u64)
+            && !ulib.streq(a, (&opt_1[0 as usize]) as u64) {
+            if pfad == 0 {
+                pfad = a
+            }
+        }
+        j = j + 1
+    }
+    if pfad == 0 {
+        ulib.say((&s_use[0 as usize]) as u64)
+        ulib.nl()
+        return 1
+    }
+    if !media.src_open(pfad) {
+        ulib.esay_line((&s_noopen[0 as usize]) as u64, 0)
+        return 1
+    }
+
+    var ist_wav: bool = false
+    var rate: u64 = 0
+    var nch: u64 = 0
+    var dauer: u64 = 0
+    var rahmen: u64 = 0
+    if wav_probe() && wav_open() {
+        ist_wav = true
+        rate = w_rate
+        nch = w_ch
+        rahmen = w_len / (2 * w_ch)
+        if rate > 0 {
+            dauer = (rahmen * 1000) / rate
+        }
+        ulib.say((&s_kind[0 as usize]) as u64)
+        ulib.say((&s_wav[0 as usize]) as u64)
+        ulib.nl()
+    } else if mp3.mp3_probe() && mp3.mp3_open() {
+        rate = mp3.mp3_rate()
+        nch = mp3.mp3_channels()
+        dauer = mp3.mp3_dur_ms()
+        if rate > 0 {
+            rahmen = (dauer * rate) / 1000
+        }
+        ulib.say((&s_kind[0 as usize]) as u64)
+        ulib.say((&s_mp3[0 as usize]) as u64)
+        ulib.nl()
+    } else {
+        ulib.esay_line((&s_nofmt[0 as usize]) as u64, 0)
+        media.src_close()
+        return 1
+    }
+    ulib.say((&s_rate[0 as usize]) as u64)
+    ulib.sayu(rate)
+    ulib.nl()
+    ulib.say((&s_ch[0 as usize]) as u64)
+    ulib.sayu(nch)
+    ulib.nl()
+    ulib.say((&s_ms[0 as usize]) as u64)
+    ulib.sayu(dauer)
+    ulib.say((&s_msu[0 as usize]) as u64)
+    ulib.nl()
+    ulib.say((&s_fr[0 as usize]) as u64)
+    ulib.sayu(rahmen)
+    ulib.nl()
+    if nur_info {
+        media.src_close()
+        return 0
+    }
+
+    if ulib.sys(SYS_AUDGET, A_READY, 0, 0) != 1 {
+        // ZUSAGE (f): KEIN GERAET -> KLARE MELDUNG, KEIN ABSTURZ. Die
+        // Zahl ist der Grund aus dem Treiber und wird unveraendert
+        // durchgereicht.
+        ulib.esay_line((&s_nodev[0 as usize]) as u64,
+            ulib.sys(SYS_AUDGET, A_WHY, 0, 0))
+        media.src_close()
+        return 1
+    }
+
+    // DAS FORMAT AUSHANDELN. Der Rueckgabewert wird NICHT geglaubt --
+    // gelesen wird, was danach wirklich eingestellt ist. Ein Abspieler,
+    // der die gewuenschte Rate annimmt, spielt mit falscher Tonhoehe
+    // und meldet Erfolg.
+    var strom: u64 = 0
+    if einstrom {
+        ulib.sys(SYS_AUDSET, AS_RATE, rate, 0)
+        if ulib.bad(ulib.sys(SYS_AUDSET, AS_OPEN, 1, 0)) {
+            var s_busy: [u8; 34] = "play: Geraet ist belegt (-1)\0\0\0\0\0\0"
+            ulib.esay_line((&s_busy[0 as usize]) as u64, 0)
+            media.src_close()
+            return 1
+        }
+    } else {
+        let id: u64 = ulib.sys(SYS_AUDOPEN, rate, 0, 0)
+        if ulib.bad(id) {
+            var s_full: [u8; 37] = "play: kein Strom frei (vier offen)\0\0\0"
+            ulib.esay_line((&s_full[0 as usize]) as u64, 0)
+            media.src_close()
+            return 1
+        }
+        strom = id
+        ulib.say((&s_id[0 as usize]) as u64)
+        ulib.sayu(strom)
+        ulib.nl()
+    }
+    let grate: u64 = ulib.sys(SYS_AUDGET, A_RATE, 0, 0)
+    ulib.say((&s_dr[0 as usize]) as u64)
+    ulib.sayu(grate)
+    ulib.nl()
+
+    // ------------------------------------------------------ die Schleife
+    var gesendet: u64 = 0
+    var lauf: bool = true
+    var quelle: u64 = w_off
+    var rest: u64 = w_len
+    var wart: u64 = 0
+    while lauf {
+        // 1. einen Schub bereitstellen
+        var n: u64 = 0
+        let dst: u64 = (&buf[0 as usize]) as u64
+        if ist_wav {
+            var m: u64 = CHUNK
+            let da: u64 = rest / (2 * nch)
+            if m > da {
+                m = da
+            }
+            if m > 0 {
+                if nch == 2 {
+                    media.src_bytes(quelle, dst, m * 4)
+                } else {
+                    // Mono -> Stereo, Wert fuer Wert verdoppelt.
+                    var i: u64 = 0
+                    while i < m {
+                        let lo: u64 = media.src_byte(quelle + i * 2)
+                        let hi: u64 = media.src_byte(quelle + i * 2 + 1)
+                        buf[(i * 4) as usize] = lo as u8
+                        buf[(i * 4 + 1) as usize] = hi as u8
+                        buf[(i * 4 + 2) as usize] = lo as u8
+                        buf[(i * 4 + 3) as usize] = hi as u8
+                        i = i + 1
+                    }
+                }
+                quelle = quelle + m * 2 * nch
+                rest = rest - m * 2 * nch
+                n = m
+            }
+        } else {
+            let ns: u64 = mp3.mp3_next()
+            if ns > 0 {
+                var m2: u64 = ns
+                if m2 > CHUNK {
+                    m2 = CHUNK
+                }
+                let p: u64 = mp3.mp3_pcm()
+                if mp3.mp3_channels() == 2 {
+                    ulib.copy(p, dst, m2 * 4)
+                } else {
+                    mono_to_stereo(p, dst, m2)
+                }
+                n = m2
+            } else {
+                if mp3.mp3_at_end() {
+                    n = 0
+                    lauf = false
+                }
+            }
+        }
+        // 2. abschicken -- so viel, wie der Kern nimmt, und der Rest
+        //    beim naechsten Mal. NICHT warten: der Aufruf blockiert
+        //    nicht, und ein Abspieler, der blockiert, kann kein Bild
+        //    dekodieren.
+        var ab: u64 = 0
+        while ab < n {
+            var got: u64 = 0
+            if einstrom {
+                got = ulib.sys(SYS_AUDWRITE, dst + ab * 4, n - ab, 0)
+            } else {
+                got = ulib.sys4(SYS_AUDSEND, strom, dst + ab * 4, n - ab, 0)
+            }
+            if ulib.bad(got) {
+                ab = n
+                lauf = false
+            } else {
+                ab = ab + got
+                gesendet = gesendet + got
+                if got == 0 {
+                    // Kein Platz. Die Position abfragen dreht zugleich
+                    // den Mischer -- ein Abspieler muss dafuer nichts
+                    // Eigenes tun.
+                    ulib.sys(SYS_AUDGET, A_PLAYED, 0, 0)
+                    wart = wart + 1
+                    ulib.sleep_ms(2)
+                }
+            }
+        }
+        if ist_wav && rest == 0 {
+            lauf = false
+        }
+    }
+
+    // 3. auslaufen lassen
+    if einstrom {
+        ulib.sys(SYS_AUDSET, AS_DRAIN, 0, 0)
+    } else {
+        ulib.sys(SYS_AUDSET, AS_END, strom, 0)
+    }
+    var runde: u64 = 0
+    var fertig: bool = false
+    while !fertig && runde < 4000 {
+        ulib.sys(SYS_AUDSET, AS_PUMP, 0, 0)
+        let r: u64 = ulib.sys(SYS_AUDGET, A_REMAIN, 0, 0)
+        if r == 0 && ulib.sys(SYS_AUDGET, A_STREAMS, 0, 0) == 0 {
+            fertig = true
+        }
+        if einstrom && r == 0 {
+            fertig = true
+        }
+        ulib.sleep_ms(2)
+        runde = runde + 1
+    }
+    let gespielt: u64 = ulib.sys(SYS_AUDGET, A_PLAYED, 0, 0)
+    let unter: u64 = ulib.sys(SYS_AUDGET, A_UNDERRUNS, 0, 0)
+    let lat: u64 = ulib.sys(SYS_AUDGET, A_LATENCY, 0, 0)
+    let bk: u64 = ulib.sys(SYS_AUDGET, A_BACKEND, 0, 0)
+    let gm: u64 = ulib.sys(SYS_AUDGET, A_MIXED, 0, 0)
+    if einstrom {
+        ulib.sys(SYS_AUDSET, AS_STOP, 0, 0)
+        ulib.sys(SYS_AUDSET, AS_OPEN, 0, 0)
+    } else {
+        ulib.sys(SYS_AUDSET, AS_CLOSE, strom, 0)
+    }
+    media.src_close()
+
+    ulib.say((&s_pl[0 as usize]) as u64)
+    ulib.sayu(gesendet)
+    ulib.nl()
+    ulib.say((&s_un[0 as usize]) as u64)
+    ulib.sayu(unter)
+    ulib.nl()
+    ulib.say((&s_lat[0 as usize]) as u64)
+    ulib.sayu(lat)
+    ulib.nl()
+    ulib.say((&s_bk[0 as usize]) as u64)
+    ulib.sayu(bk)
+    ulib.nl()
+    ulib.say((&s_mx[0 as usize]) as u64)
+    ulib.sayu(gm)
+    ulib.nl()
+    let gp: u64 = gespielt
+    if gp == 0 {
+        return 0
+    }
+    return 0
+}
+
+// Mono auf zwei Kanaele. Sie steht als eigene Funktion da, weil sie
+// zweimal gebraucht wird und weil sie die einzige Stelle ist, an der
+// dieses Programm Abtastwerte anfasst.
+fn mono_to_stereo(src: u64, dst: u64, n: u64) {
+    var i: u64 = 0
+    while i < n {
+        let lo: u64 = __mmio_read8((src + i * 2) as *mut u8) as u64
+        let hi: u64 = __mmio_read8((src + i * 2 + 1) as *mut u8) as u64
+        __mmio_write8((dst + i * 4) as *mut u8, lo as u8)
+        __mmio_write8((dst + i * 4 + 1) as *mut u8, hi as u8)
+        __mmio_write8((dst + i * 4 + 2) as *mut u8, lo as u8)
+        __mmio_write8((dst + i * 4 + 3) as *mut u8, hi as u8)
+        i = i + 1
+    }
+}
