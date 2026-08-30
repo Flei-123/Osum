@@ -109,8 +109,9 @@ export {
     init, ready, why, backend,
     open, open_rate, close, is_open,
     rate, set_rate, rates_ok, channels, bits, frame_octets,
-    irq, arm_irq, zero_ahead, drain_mark,
+    irq, arm_irq, zero_ahead, zero_rest, drain_mark,
     open_stream, write_stream, close_stream, mix_pump, hw_ready_pub,
+    scratch, SCRATCH_FRAMES,
     ring_frames, latency_us, entry_us,
     write, write_kernel, pad_and_submit, stop, reset,
     frames_written, samples_played, remaining, underruns,
@@ -825,7 +826,31 @@ fn zero_ahead(state: u64) {
     let ef: u64 = hw_entry_frames(state)
     let fo: u64 = frame_octets(state)
     let w: u64 = g(state, L_WPOS)
-    let bis: u64 = w + ef * ZERO_AHEAD_ENTRIES
+    // DIE OBERGRENZE, UND SIE IST DER GANZE WITZ AN DIESER FUNKTION.
+    //
+    // "Zwei Eintraege hinter dem Schreibzeiger" ist in einem RING nicht
+    // dasselbe wie "hinter den Daten". Steht der Schreiber nahe an
+    // seiner Grenze -- und dort steht er im Regelbetrieb, weil er so
+    // schnell nachlegt, wie er darf --, dann liegt `w + 2 Eintraege`
+    // MODULO der Ringgroesse VOR dem Lesezeiger des Reglers: also auf
+    // Rahmen, die noch gar nicht gespielt sind.
+    //
+    // GEMESSEN, und es ist genau dasselbe Fehlerbild wie beim Klemmen
+    // der Uhr, nur eine Ursache weiter: 48000 geschriebene Rahmen,
+    // null gemeldete Aussetzer -- und in der Datei auf dem Wirt zwoelf
+    // Loecher. Der Schreiber hat seine eigenen Daten ausgenullt, kurz
+    // bevor der Regler sie holte.
+    //
+    // Die richtige Grenze ist `Position + Ringgroesse`: bis dorthin
+    // liegen im Ring Rahmen, die der Regler SCHON GESPIELT hat und
+    // erst beim naechsten Umlauf wieder liest. Alles darueber gehoert
+    // ihm noch.
+    let p: u64 = hw_position(state)
+    var bis: u64 = w + ef * ZERO_AHEAD_ENTRIES
+    let grenze: u64 = p + rf
+    if bis > grenze {
+        bis = grenze
+    }
     var von: u64 = g(state, L_ZERO)
     if von < w {
         von = w
@@ -845,6 +870,44 @@ fn zero_ahead(state: u64) {
 // "Ab hier kommt nichts mehr" -- an den Treiber weitergereicht.
 fn drain_mark(state: u64) {
     hw_drain_mark(state)
+}
+
+// DEN GANZEN REST DES RINGS AUSNULLEN. Am Ende eines Stuecks, EINMAL.
+//
+// WARUM ES `zero_ahead` NICHT SCHON TUT: `zero_ahead` nullt zwei
+// Eintraege voraus, und das ist im Betrieb genau richtig -- mehr waere
+// Arbeit, die der naechste Schreibvorgang sofort ueberschreibt. Am
+// ENDE ist es zu wenig: der Regler laeuft bei HD-Audio weiter, bis
+// ihn jemand anhaelt, und in den Millisekunden zwischen dem letzten
+// Rahmen und dem `stop` spielt er den Ring NOCH EINMAL.
+//
+// GEMESSEN: die Datei auf dem Wirt hatte hinter dem eine Sekunde
+// langen Ton eine Pause und danach 3839 Rahmen desselben Tons noch
+// einmal -- eine Ringlaenge. Das ist kein Aussetzer und kein
+// Rechenfehler; es ist ein Echo, und man hoert es als Stottern am Ende
+// jedes Stuecks.
+fn zero_rest(state: u64) {
+    if g(state, L_BACKEND) != B_HDA {
+        return
+    }
+    let ring: u64 = hw_ring(state)
+    if ring == 0 {
+        return
+    }
+    let rf: u64 = hw_ring_frames(state)
+    let fo: u64 = frame_octets(state)
+    let w: u64 = g(state, L_WPOS)
+    let p: u64 = hw_position(state)
+    let bis: u64 = p + rf
+    var i: u64 = w
+    if i < g(state, L_ZERO) {
+        i = g(state, L_ZERO)
+    }
+    while i < bis {
+        kstate.set(ring, (i % rf) * fo, 0)
+        i = i + 1
+    }
+    s(state, L_ZERO, bis)
 }
 
 fn hw_ready_pub(state: u64) -> bool {
@@ -972,6 +1035,7 @@ fn pad_and_submit(state: u64) {
     // ein echter Aussetzer in den letzten Millisekunden nicht mehr
     // mit.
     hw_drain_mark(state)
+    zero_rest(state)
 }
 
 fn stop(state: u64) {
@@ -1104,6 +1168,16 @@ fn phase_step(state: u64, freq: u64) -> u64 {
 // ein Kernel, der in einer Schleife auf Ton wartet, hat den Rechner
 // angehalten.
 const SCRATCH_FRAMES: u64 = 448 // 0x900..0x1000 der kdata-Seite
+
+// Der Kratzpuffer, oeffentlich. Er ist EINER und wird nacheinander
+// benutzt -- wer daraus schreibt, hat die Oktette sofort weiterkopiert
+// (`mix.write` und `write_kernel` kopieren beide gleich in ihren
+// Puffer). Zwei Toene gleichzeitig hineinzuschreiben waere ein Fehler,
+// und deshalb steht der Satz hier und nicht in einem Kommentar beim
+// Aufrufer.
+fn scratch(state: u64) -> u64 {
+    return state + kstate.AUD_OFF + 0x900
+}
 
 fn tone_push(state: u64, freq: u64, amp: u64, max_frames: u64) -> u64 {
     if !hw_ready(state) {
