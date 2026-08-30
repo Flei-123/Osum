@@ -257,10 +257,14 @@ Zeile dieselben Zusagen:
   die linke Spalte; `umlaut.py` sucht den ganzen Satz und findet ihn
   nicht. Gemessen im Referenzbaum ohne eine Zeile dieser Runde:
   **dieselben zwei**, `UMLAUT2: 45 Zusagen gruen, 2 rot`.
-* `desktop`: `WM_MAXNR does not match the calls` und
-  `the settings did not report their geometry` — im Referenzbaum
-  ebenfalls rot (dort zusätzlich `the bar never came back`, was hier
-  grün war: eine Zeitmessung, die unter Last wackelt).
+* `desktop` (95 grün / 3 rot): `WM_MAXNR does not match the calls`,
+  `the settings did not report their geometry` und, aus Abschnitt 9,
+  `tools/k15/run.sh: K15: 249 passed, 3 failed`. Im Referenzbaum sind
+  **genau diese drei** ebenfalls rot — bis auf die Zahl hinter k15,
+  die dort mit `249 passed, 3 failed` **Zeichen für Zeichen dieselbe**
+  ist. Der Referenzbaum hatte zusätzlich `the bar never came back`
+  (94 / 4), was hier grün war: eine Zeitmessung, die unter Last
+  wackelt.
 
 ---
 
