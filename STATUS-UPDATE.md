@@ -73,7 +73,7 @@ nichts installiert":
 | **ein gekipptes Oktett im Archiv** | `opk: SIGNATUR FALSCH` (und zwar **vor** der Prüfsumme) |
 | **veränderter INDEX, alte `INDEX.sig`** | `opk: SIGNATUR DES INDEX FALSCH -- Quelle ABGELEHNT` |
 | **fremder öffentlicher Schlüssel** | `opk: SIGNATUR FALSCH` |
-| **gar kein `/system/schluessel.pub`** | `opk: kein vertrauter Schluessel` |
+| **gar kein `/system/schluessel.pub`** | `opk: kein vertrauter Schlüssel` |
 
 ## 3. Der Erprobungszähler (A/B) — grün
 
