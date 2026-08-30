@@ -63,8 +63,11 @@ export {
     begin, window, window_app, window_plain, window_kind, close, closed, handle,
     trace, set_trace, set_menu_title, reshape,
     win_w, win_h, win_x, win_y, win_hide, win_layer,
-    box_v, box_h, box_grid, box_end, size, gap_after,
+    box_v, box_h, box_grid, box_end, box_at, box_use, size, gap_after,
     label, button, check, entry, list, table, tabs, menubar, choice,
+    tile, TILE_FIELDS, TL_SURFACE, TL_RAISED, TL_ACCENT, TL_ONACCENT,
+    TL_TEXT, TL_FRAME, TL_TASKBAR, TL_TBTEXT, TL_BUTTON, TL_RADW,
+    TL_RADB, TL_SHADOW, TL_EDGE, TL_ALIGN, TL_NAME, TL_LOW, TL_DANGER,
     sep, scrollarea,
     value, set_value, text_of, set_text, set_rows, set_cols, enable,
     show, shown, neu_setzen,
@@ -81,7 +84,7 @@ export {
     zeilen_hoehe,
     head_base, cell_base, cell_x, head_h, icon_x, icon_y,
     icon_letter_x, icon_letter_base,
-    K_LABEL, K_BUTTON, K_CHECK, K_ENTRY, K_LIST, K_TABLE, K_TABS,
+    K_LABEL, K_BUTTON, K_CHECK, K_ENTRY, K_LIST, K_TABLE, K_TABS, K_TILE,
     K_MENUBAR, K_CHOICE, K_SEP, K_SCROLL,
     NK_MAIN, NK_MENU, NK_DLG,
     KEY_TAB, KEY_ENTER, KEY_BS, KEY_ESC, KEY_UP, KEY_DOWN, KEY_LEFT,
@@ -91,7 +94,15 @@ export {
 
 // ------------------------------------------------------- die Zahlen
 
-const MAXWD: u64 = 96 // Widgets insgesamt
+// ROUND THEMESTORE: 160 AND NOT 96, AND `ids` IN settings.fi 128 AND
+// NOT 64. The settings program registered 86 widgets and kept only the
+// first 64 of them in its tab table -- so every widget from number 65
+// on was never hidden, and the Netzzugriff and Sprache pages were laid
+// out on TOP of whichever page was showing. That is measured, not
+// suspected: `tools/themestore/run.sh` section 5 counts the reported
+// rectangles per tab, and the number before this change was 86 on
+// every tab. Two limits, one silent overflow each.
+const MAXWD: u64 = 160 // Widgets insgesamt
 const MAXWN: u64 = 4 // Fenster: das Hauptfenster, ein Menue, ein Dialog
 const MAXCT: u64 = 24 // Kaesten
 
@@ -106,6 +117,10 @@ const K_MENUBAR: u64 = 8
 const K_CHOICE: u64 = 9
 const K_SEP: u64 = 10
 const K_SCROLL: u64 = 11
+// ROUND THEMESTORE: a preview tile. The one widget in this library
+// whose colours do NOT come from the running theme -- it draws a
+// preset, and a preset is by definition not the thing that is running.
+const K_TILE: u64 = 12
 
 const NK_MAIN: u64 = 0
 const NK_MENU: u64 = 1
@@ -190,7 +205,7 @@ const KEY_DEL: u64 = 0x109
 
 // ------------------------------------------------------- der Zustand
 
-static mut wd: [u64; 1632] = [0 as u64; 1632] // MAXWD * D_FIELDS
+static mut wd: [u64; 2720] = [0 as u64; 2720] // MAXWD * D_FIELDS
 static mut wn: [u64; 56] = [0 as u64; 56] // MAXWN * N_FIELDS
 static mut ct: [u64; 312] = [0 as u64; 312] // MAXCT * C_FIELDS
 static mut nwd: u64 = 0
@@ -252,6 +267,15 @@ static mut tr_x: [u8; 5] = " x=\0\0"
 static mut tr_b: [u8; 8] = " base=\0\0"
 static mut tr_f: [u8; 6] = " fg=\0\0"
 static mut tr_g: [u8; 6] = " bg=\0\0"
+// ROUND THEMESTORE: AND HOW WIDE IT IS.
+//
+// A checker that has to GUESS the width of a piece of text guesses too
+// generously -- it then finds ink from the widget next door inside the
+// box it drew around this one, and reports two labels as overlapping
+// that do not touch. Measured: eighty-six false overlaps in one
+// screenshot before this field existed. The program knows the width;
+// it computed it to centre the text. So it says it.
+static mut tr_w: [u8; 6] = " tw=\0\0"
 static mut tr_t: [u8; 5] = " t=\0\0"
 static mut tr_buf: [u8; 320] = [0 as u8; 320]
 // RUNDE THEME. Was das Umschalten kostet, gezaehlt an der Stelle, an
@@ -348,8 +372,37 @@ fn begin(nohit: bool, noclip: bool) -> bool {
     if !ulib.bad(fdt) {
         io.close(fdt)
         s_trace = 1
+        say_font()
     }
     return true
+}
+
+// RUNDE THEMESTORE: WIE HOCH EINE ZEILE WIRKLICH IST.
+//
+// `wlib: text ... base=` sagt die Grundlinie. Wer daraus einen Kasten
+// um die Buchstaben macht, muss wissen, wie weit die Schrift ueber und
+// unter der Grundlinie steht -- und `shotcheck.py` hat das geraten:
+// sechzehn hinauf, sechs hinunter, zweiundzwanzig hoch. Die Zeilen
+// einer Liste stehen ZWANZIG auseinander. Damit schnitt der geratene
+// Kasten jeder Zeile in die Nachbarzeile, fand dort deren Tinte und
+// meldete Ueberlappungen, die es nicht gab -- drei Stueck in einer
+// Aufnahme, in der nichts falsch war. Die Bibliothek weiss die Zahlen;
+// sie sagt sie jetzt, und geraten wird nicht mehr.
+static mut tf_a: [u8; 18] = "wlib: font ui px=\0"
+static mut tf_b: [u8; 6] = " asc=\0"
+static mut tf_c: [u8; 4] = " h=\0"
+
+fn say_font() {
+    let b: u64 = (&tr_buf[0 as usize]) as u64
+    var at: u64 = tr_put(b, 0, (&tf_a[0 as usize]) as u64)
+    at = tr_num(b, at, wlibc.PX_UI)
+    at = tr_put(b, at, (&tf_b[0 as usize]) as u64)
+    at = tr_num(b, at, wlibc.ascent_of(wlibc.F_UI, wlibc.PX_UI))
+    at = tr_put(b, at, (&tf_c[0 as usize]) as u64)
+    at = tr_num(b, at, wlibc.text_h(wlibc.PX_UI))
+    __mmio_write8((b + at) as *mut u8, 10 as u8)
+    at = at + 1
+    let _w: u64 = ulib.put(b, at)
 }
 
 fn counts() -> u64 {
@@ -423,6 +476,9 @@ fn window_plain(x: u64, y: u64, w: u64, h: u64, titel: u64,
             return MAXWN
         }
     }
+    // Der Schmuck ist eben abgeschaltet worden: der Ursprung der
+    // Malflaeche ist ein anderer als der, der beim Anlegen galt.
+    say_window(i)
     return i
 }
 
@@ -468,7 +524,61 @@ fn new_win(x: u64, y: u64, w: u64, h: u64, titel: u64, kind: u64) -> u64 {
     ns(i, N_Y, y)
     wncur = i
     dirty_all(i)
+    say_window(i)
     return i
+}
+
+// RUNDE THEMESTORE: JEDES FENSTER SAGT, WO ES STEHT -- und wo seine
+// MALFLAECHE anfaengt.
+//
+// `wlib: text ...` meldet x und Grundlinie IM FENSTER. Wer eine
+// Aufnahme des ganzen Bildschirms nachmessen will, braucht dazu den
+// Ursprung, und den hatte bisher nur `settings`, weil es ihn selbst
+// hinschrieb. Fuer jedes andere Fenster -- den Starter zum Beispiel --
+// blieb dem Pruefer nur, 0,0 anzunehmen: er misst dann eine Stelle des
+// Schreibtischs und nennt sie eine Beschriftung. Genau so ist in
+// dieser Runde eine leere Beschriftung gemeldet worden, die keine war,
+// und drei ueberlappende, die sich nicht beruehrten.
+//
+// Der Versatz wird NICHT nachgerechnet (kein BORDER, kein TITLE_H in
+// dieser Datei): er wird beim Server erfragt, der ihn in `inx`/`iny`
+// ohnehin fuehrt -- ein Fenster ohne Schmuck bekommt so von selbst 0.
+static mut tw_a: [u8; 14] = "wlib: win id=\0"
+static mut tw_x: [u8; 4] = " x=\0"
+static mut tw_y: [u8; 4] = " y=\0"
+static mut tw_w: [u8; 4] = " w=\0"
+static mut tw_h: [u8; 4] = " h=\0"
+static mut tw_cx: [u8; 5] = " cx=\0"
+static mut tw_cy: [u8; 5] = " cy=\0"
+
+fn say_window(i: u64) {
+    if s_trace == 0 || i >= MAXWN {
+        return
+    }
+    let hh: u64 = ng(i, N_H)
+    if hh == 0 {
+        return
+    }
+    let b: u64 = (&tr_buf[0 as usize]) as u64
+    var at: u64 = tr_put(b, 0, (&tw_a[0 as usize]) as u64)
+    at = tr_num(b, at, hh)
+    at = tr_put(b, at, (&tw_x[0 as usize]) as u64)
+    at = tr_num(b, at, ng(i, N_X))
+    at = tr_put(b, at, (&tw_y[0 as usize]) as u64)
+    at = tr_num(b, at, ng(i, N_Y))
+    at = tr_put(b, at, (&tw_w[0 as usize]) as u64)
+    at = tr_num(b, at, ng(i, N_W))
+    at = tr_put(b, at, (&tw_h[0 as usize]) as u64)
+    at = tr_num(b, at, ng(i, N_HH))
+    at = tr_put(b, at, (&tw_cx[0 as usize]) as u64)
+    at = tr_num(b, at, ng(i, N_X)
+        + wlibc.sys3w(wlibc.WM_INFO, hh, wlibc.WI_INX, 0))
+    at = tr_put(b, at, (&tw_cy[0 as usize]) as u64)
+    at = tr_num(b, at, ng(i, N_Y)
+        + wlibc.sys3w(wlibc.WM_INFO, hh, wlibc.WI_INY, 0))
+    __mmio_write8((b + at) as *mut u8, 10 as u8)
+    at = at + 1
+    let _w: u64 = ulib.put(b, at)
 }
 
 fn window_kind(w: u64) -> u64 {
@@ -755,6 +865,36 @@ fn box_end() {
     ctcur = 0xFFFFFFFFFFFFFFFF
 }
 
+// ROUND THEMESTORE: MOVE A BOX AFTER THE FACT.
+//
+// The two-column Darstellung page needs to know where the tab bar
+// ends, and the tab bar's height is a TOKEN -- 26 under `classic`, 32
+// under `modern`. So the columns cannot be given a fixed y at build
+// time and left there: a shape change at run time would slide the tab
+// bar down onto them. The settings program re-measures and calls this
+// after every `reshape`, which is exactly what `reshape` exists for.
+// WHICH BOX THE NEXT WIDGET GOES INTO. `box_v` and friends both
+// CREATE a box and select it; a page laid out in two columns has to be
+// able to go back to the first one, and that is all this does.
+fn box_use(c: u64) {
+    if c >= nct {
+        return
+    }
+    ctcur = c
+    wncur = cg(c, C_WIN)
+}
+
+fn box_at(c: u64, x: u64, y: u64, bw: u64, bh: u64) {
+    if c >= nct {
+        return
+    }
+    cs(c, C_X, x)
+    cs(c, C_Y, y)
+    cs(c, C_W, bw)
+    cs(c, C_H, bh)
+    reset_box(c)
+}
+
 // Die Wunschgroesse des NAECHSTEN Widgets. Danach ist sie wieder
 // vergessen -- eine Wunschgroesse, die haengenbleibt, ist die Sorte
 // Zustand, die man erst bemerkt, wenn drei Knoepfe zu hoch sind.
@@ -906,6 +1046,8 @@ fn reshape() {
             s(i, D_H, sep_h())
         } else if k == K_SCROLL {
             s(i, D_W, scroll_w())
+        } else if k == K_TILE {
+            s(i, D_H, tile_h())
         }
         i = i + 1
     }
@@ -1017,6 +1159,204 @@ fn choice(txt: u64, sel: u64) -> u64 {
 
 fn sep() -> u64 {
     return add(K_SEP, 0, 0, sep_h(), false)
+}
+
+// ============================ ROUND THEMESTORE: THE PREVIEW TILE
+//
+// Justin's words were "eine Vorschaukachel, die das ECHTE Aussehen
+// zeigt (aus den Token gerendert, kein gemaltes Bild, das spaeter nicht
+// mehr stimmt)". So there is no bitmap anywhere in this round.
+//
+// A tile is handed a block of `TILE_FIELDS` words -- the resolved
+// component colours of ONE preset, its two corner radii, its shadow
+// strength, which edge its taskbar sits on and where its buttons
+// start -- and it draws a miniature of a desktop out of them with the
+// same `rrect`, `rframe` and `drop_shadow` the real window uses. If a
+// scheme file changes, the tile changes with it, because the tile was
+// never a picture of the scheme; it is the scheme, drawn small.
+//
+// The block belongs to the CALLER, exactly like the buffer behind an
+// entry field. This library does not resolve themes and is not going
+// to start: `wlibc.theme_probe` resolves, `vorlage.fi` decides what to
+// probe, and this draws what it is given.
+// THE MINIATURE'S OWN GEOMETRY, NAMED.
+//
+// `tests/look/rawmetric.py` counts literal sizes in the argument
+// positions of the drawing calls, and it would count every one of
+// these -- rightly, by its own rule: a painting routine must not name
+// a size. These are not interface sizes, they are the proportions of a
+// PICTURE of an interface, and the honest way to say so is to give
+// each of them a name and a reason here rather than to add an
+// exception to the checker. A checker with an exception for the file
+// that was just written is not a checker.
+const TP_W: u64 = 92 // the picture half of a tile
+const TP_BAR: u64 = 5 // the miniature taskbar
+const TP_BTN: u64 = 14 // the button on it
+const TP_WX: u64 = 8 // the window's inset from the picture's left
+const TP_WY: u64 = 6 // and from its top
+const TP_WW: u64 = 60 // the miniature window
+const TP_TITLE: u64 = 7 // its title bar
+const TP_LINE: u64 = 2 // a line of body text
+const TP_MARK: u64 = 22 // the mark on the title bar
+const TILE_FIELDS: u64 = 17
+const TL_SURFACE: u64 = 0
+const TL_RAISED: u64 = 1
+const TL_ACCENT: u64 = 2
+const TL_ONACCENT: u64 = 3
+const TL_TEXT: u64 = 4
+const TL_FRAME: u64 = 5
+const TL_TASKBAR: u64 = 6
+const TL_TBTEXT: u64 = 7
+const TL_BUTTON: u64 = 8
+const TL_RADW: u64 = 9
+const TL_RADB: u64 = 10
+const TL_SHADOW: u64 = 11
+const TL_EDGE: u64 = 12
+const TL_ALIGN: u64 = 13
+const TL_NAME: u64 = 14
+const TL_LOW: u64 = 15
+const TL_DANGER: u64 = 16
+
+fn tile(spec: u64) -> u64 {
+    let i: u64 = add(K_TILE, 0, 0, tile_h(), true)
+    s(i, D_A, spec)
+    return i
+}
+
+// ONE ROW PLUS TEN PIXELS: 30 under `classic`, 34 under `modern`.
+//
+// That is not a taste, it is the answer to a subtraction. The window
+// has 542 usable pixels, the tab bar and the status line take 92 of
+// them, and ten tiles plus their heading plus the gaps have to fit in
+// what is left. 34 fits with 46 to spare; 38 does not fit at all. The
+// number is derived from the `row` token so that it follows the shape
+// instead of being measured once for one of them.
+fn tile_h() -> u64 {
+    return wlibc.metric(wlibc.M_ROW) + 10
+}
+
+fn tspec(i: u64, f: u64) -> u64 {
+    let p: u64 = g(i, D_A)
+    if p == 0 {
+        return 0
+    }
+    return __mmio_read64((p + f * 8) as *mut u64)
+}
+
+fn paint_tile(i: u64) {
+    let x: u64 = g(i, D_X)
+    let y: u64 = g(i, D_Y)
+    let w: u64 = g(i, D_W)
+    let h: u64 = g(i, D_H)
+    if w < 40 || h < 20 {
+        return
+    }
+    // THE PICTURE HALF IS ON THE RIGHT AND IS ALWAYS THE SAME SHAPE, so
+    // that ten tiles under each other can be compared by eye and by a
+    // pixel reader. 96 wide; the name gets the rest.
+    let pw: u64 = TP_W
+    let px: u64 = x + sub(w, pw)
+    let ph: u64 = sub(h, 8)
+    let py: u64 = y + 4
+    let sel: bool = g(i, D_VAL) != 0
+    // the tile's own surface, and the frame that says which one is
+    // chosen -- the frame is the only part of a tile that comes from
+    // the RUNNING theme, because "selected" is a fact about this
+    // window and not about the preset.
+    wlibc.rrect(x, y, w, h, wlibc.metric(wlibc.M_RADIUS_PANEL),
+        tspec(i, TL_SURFACE))
+    if sel {
+        wlibc.rring(x, y, w, h, wlibc.metric(wlibc.M_RADIUS_PANEL),
+            wlibc.metric(wlibc.M_FOCUS) + 1, wlibc.theme(wlibc.T_FOCUS))
+    } else {
+        wlibc.rring(x, y, w, h, wlibc.metric(wlibc.M_RADIUS_PANEL), 1,
+            tspec(i, TL_FRAME))
+    }
+    // ---- the miniature taskbar, on ITS OWN edge
+    let e: u64 = tspec(i, TL_EDGE)
+    let bar: u64 = TP_BAR
+    var bx: u64 = px
+    var by: u64 = py
+    var bw2: u64 = pw
+    var bh2: u64 = bar
+    if e == 1 {
+        by = py
+    } else if e == 2 {
+        bw2 = bar
+        bh2 = ph
+    } else if e == 3 {
+        bx = px + pw - bar
+        bw2 = bar
+        bh2 = ph
+    } else {
+        by = py + ph - bar
+    }
+    // the desktop under it
+    wlibc.rect(px, py, pw, ph, tspec(i, TL_SURFACE))
+    wlibc.rect(bx, by, bw2, bh2, tspec(i, TL_TASKBAR))
+    // one button on the bar, where the alignment puts it
+    let blen: u64 = TP_BTN
+    if e == 2 || e == 3 {
+        var byy: u64 = by + 3
+        if tspec(i, TL_ALIGN) == 1 {
+            byy = by + sub(bh2, blen) / 2
+        }
+        wlibc.rect(bx + 1, byy, sub(bar, TP_LINE), blen, tspec(i, TL_ACCENT))
+    } else {
+        var bxx: u64 = bx + 3
+        if tspec(i, TL_ALIGN) == 1 {
+            bxx = bx + sub(bw2, blen) / 2
+        }
+        wlibc.rect(bxx, by + 1, blen, sub(bar, TP_LINE), tspec(i, TL_ACCENT))
+    }
+    // ---- the miniature window, with ITS OWN radius and shadow
+    var wx: u64 = px + TP_WX
+    var wy: u64 = py + TP_WY
+    if e == 1 {
+        wy = py + TP_WY + 3
+    }
+    if e == 2 {
+        wx = px + TP_WX + 4
+    }
+    let ww: u64 = TP_WW
+    let wh: u64 = sub(ph, TP_WY * 2)
+    if wh < 10 {
+        return
+    }
+    wlibc.drop_shadow(wx, wy, ww, wh, tspec(i, TL_RADW),
+        tspec(i, TL_SHADOW), 3, tspec(i, TL_TEXT))
+    wlibc.rframe(wx, wy, ww, wh, tspec(i, TL_RADW), 1,
+        tspec(i, TL_FRAME), tspec(i, TL_RAISED))
+    // the title bar in the accent, with the label colour on it
+    let th: u64 = TP_TITLE
+    wlibc.rrect(wx + 1, wy + 1, ww - 2, th, tspec(i, TL_RADW),
+        tspec(i, TL_ACCENT))
+    wlibc.rect(wx + 1, wy + th - 2, ww - 2, TP_LINE + 1, tspec(i, TL_ACCENT))
+    wlibc.rect(wx + 4, wy + 3, TP_MARK, TP_LINE, tspec(i, TL_ONACCENT))
+    // one line of body text and a button, in the body colours
+    wlibc.rect(wx + 4, wy + th + 4, ww - TP_BTN, TP_LINE, tspec(i, TL_TEXT))
+    let byb: u64 = wy + wh - TP_TITLE - 3
+    if byb > wy + th + 6 {
+        wlibc.rframe(wx + 4, byb, TP_MARK + 2, TP_TITLE + 1, tspec(i, TL_RADB), 1,
+            tspec(i, TL_FRAME), tspec(i, TL_BUTTON))
+    }
+    // ---- the name, on the tile's own surface in its own text colour
+    let nm: u64 = tspec(i, TL_NAME)
+    let asc: u64 = wlibc.ascent_of(wlibc.F_UI, wlibc.PX_UI)
+    let tw: u64 = sub(sub(px, x), 12)
+    var col: u64 = tspec(i, TL_TEXT)
+    if tspec(i, TL_LOW) != 0 {
+        col = tspec(i, TL_DANGER)
+    }
+    // THE BASELINE IS CENTRED IN THE TILE and not four pixels down: a
+    // 30-pixel tile with a 15-pixel line has 7 above and 8 below, and
+    // putting the text at a fixed offset is how a label ends up half
+    // outside the thing it belongs to when the shape changes.
+    let base: u64 = y + sub(h, wlibc.text_h(wlibc.PX_UI)) / 2 + asc
+    let _p: u64 = put_text(wlibc.F_UI, wlibc.PX_UI, x + 8,
+        base, tw, nm, tlen(nm), col, 0)
+    say_painted(g(i, D_WIN), K_TILE, base, col,
+        tspec(i, TL_SURFACE), nm, tlen(nm))
 }
 
 fn scrollarea(rows: u64, sicht: u64) -> u64 {
@@ -1433,6 +1773,8 @@ fn say_painted(w: u64, kind: u64, base: u64, fg: u64, bg: u64, p: u64,
     at = tr_num(b, at, fg)
     at = tr_put(b, at, (&tr_g[0 as usize]) as u64)
     at = tr_num(b, at, bg)
+    at = tr_put(b, at, (&tr_w[0 as usize]) as u64)
+    at = tr_num(b, at, wlibc.text_w(wlibc.F_UI, wlibc.PX_UI, p, n))
     at = tr_put(b, at, (&tr_t[0 as usize]) as u64)
     var i: u64 = 0
     while i < n && at + 2 < 320 {
@@ -1851,6 +2193,71 @@ fn list_ein(i: u64) -> u64 {
     return 0
 }
 
+// RUNDE THEMESTORE: EINE ZEILE, DIE NICHT PASST, WIRD GEKUERZT --
+// und die gekuerzte wird gemeldet.
+//
+// Der Starter setzt Zeilen wie "Suchen -- Programme und Dateien finden
+// und starten": 412 Bildpunkte breit in einer Liste, die 416 breit ist
+// und davon 15 an den Rollbalken und 22 an das Symbol verliert. Gemalt
+// wurde bisher trotzdem die ganze Zeile; der Rest lief unter dem
+// Rollbalken durch bis an den Fensterrand. Im Bild sah man ein Wort,
+// das an der Kante aufhoert, und in `wlib: text ... tw=` stand die
+// Breite, die der Text GERN gehabt haette. Ein Pruefer, der beides
+// vergleicht, bekommt "abgeschnitten" -- zu Recht.
+//
+// Also: so viele GANZE Zeichen wie hineingehen, dann drei Punkte. Die
+// Grenze wird an UTF-8 gehalten (Folgeoktette 0x80..0xBF gehoeren zum
+// Zeichen davor) -- ein halb abgeschnittener Umlaut waere genau der
+// Fehler, den die Runde davor gejagt hat.
+static mut el_buf: [u8; 192] = [0 as u8; 192]
+
+fn fit_n(f: u64, pxs: u64, p: u64, n: u64, limit: u64) -> u64 {
+    var k: u64 = n
+    while k > 0 {
+        // nicht mitten in ein Zeichen hinein
+        while k > 0
+            && (__mmio_read8((p + k) as *mut u8) & 192 as u8) == 128 as u8 {
+            k = k - 1
+        }
+        if wlibc.text_w(f, pxs, p, k) <= limit {
+            return k
+        }
+        if k == 0 {
+            return 0
+        }
+        k = k - 1
+    }
+    return 0
+}
+
+// Gibt die Laenge im Puffer zurueck; `el_buf` traegt danach den Text,
+// der wirklich gemalt werden soll. Passt alles, wird nichts kopiert
+// und `p` bleibt der Text -- dafuer sagt die Funktion, ob sie gekuerzt
+// hat.
+fn elide(f: u64, pxs: u64, p: u64, n: u64, limit: u64) -> u64 {
+    if n == 0 || wlibc.text_w(f, pxs, p, n) <= limit {
+        return 0
+    }
+    var dots: [u8; 4] = "...\0"
+    let dw: u64 = wlibc.text_w(f, pxs, (&dots[0 as usize]) as u64, 3)
+    let k: u64 = fit_n(f, pxs, p, n, sub(limit, dw))
+    var a: u64 = 0
+    while a < k && a < 188 {
+        __mmio_write8(((&el_buf[0 as usize]) as u64 + a) as *mut u8,
+            __mmio_read8((p + a) as *mut u8))
+        a = a + 1
+    }
+    var d: u64 = 0
+    while d < 3 {
+        __mmio_write8(((&el_buf[0 as usize]) as u64 + a) as *mut u8,
+            46 as u8)
+        a = a + 1
+        d = d + 1
+    }
+    __mmio_write8(((&el_buf[0 as usize]) as u64 + a) as *mut u8, 0 as u8)
+    return a
+}
+
 fn paint_list(i: u64) {
     let x: u64 = g(i, D_X)
     let y: u64 = g(i, D_Y)
@@ -1936,13 +2343,26 @@ fn paint_list(i: u64) {
             // really started at and not a second guess at it.
             let rgrund: u64 = ry + wlibc.ascent_of(wlibc.F_UI,
                 wlibc.PX_UI) + 1
+            // Was zwischen dem Textanfang und dem Rollbalken frei ist:
+            // die Breite, ab der gekuerzt werden muss.
+            let frei: u64 = sub(bw, 21 + 6 + ein)
+            var qq: u64 = q
+            var qn: u64 = ln
+            let el: u64 = elide(wlibc.F_UI, wlibc.PX_UI, q, ln, frei)
+            if el != 0 {
+                qq = (&el_buf[0 as usize]) as u64
+                qn = el
+            }
             let _rt: u64 = put_text(wlibc.F_UI, wlibc.PX_UI,
-                x + 6 + ein, rgrund, sub(bw, 16), q, ln, farbe, 0)
+                x + 6 + ein, rgrund, sub(bw, 16), qq, qn, farbe, 0)
             var rhg: u64 = wlibc.theme(wlibc.T_ENTRY)
             if z == g(i, D_VAL) {
                 rhg = wlibc.theme(wlibc.T_SEL)
             }
-            say_painted(g(i, D_WIN), K_LIST, rgrund, farbe, rhg, q, ln)
+            // GEMELDET WIRD, WAS GEMALT WURDE -- nicht, was gewuenscht
+            // war. Sonst misst ein Pruefer die eine Zeile gegen die
+            // Breite der anderen.
+            say_painted(g(i, D_WIN), K_LIST, rgrund, farbe, rhg, qq, qn)
         }
         r = r + 1
     }
@@ -2070,12 +2490,65 @@ fn paint_table(i: u64) {
     focus_ring(i)
 }
 
-fn tab_breite(i: u64, k: u64) -> u64 {
+// THE TAB BAR DID NOT FIT AND NOBODY HAD LOOKED.
+//
+// Seven tabs of German text come to 576 pixels; the widget is 540 wide.
+// So "Sprache" was drawn from x=505 to x=586, thirty-six pixels past
+// the end of its own widget, and the eighth tab this round adds would
+// have started at 586 and run off the window entirely. It has been that
+// way since the seventh tab came back; nothing said so, because a
+// widget that paints outside its rectangle is not an error anywhere in
+// this library -- it is just paint.
+//
+// It was found by the tab trace line this round added, which is the
+// whole argument for trace lines: `x=586 w=85` in a widget that ends at
+// 550 is a sentence, and a screenshot of it is a shrug.
+//
+// The fix is one division. If the natural widths do not fit, every tab
+// is scaled by the same factor and the labels are clipped to what is
+// left. Painter and hit test both come through here, so they cannot
+// disagree about where a tab is -- which is the only thing that would
+// be worse than tabs that are too wide.
+fn tab_natur(i: u64, k: u64) -> u64 {
     let q: u64 = row_at(g(i, D_TEXT), k)
     if q == 0 {
         return 0
     }
     return wlibc.text_w(wlibc.F_UI, wlibc.PX_UI, q, row_len(q)) + 20
+}
+
+fn tab_summe(i: u64) -> u64 {
+    var t: u64 = 0
+    var k: u64 = 0
+    while k < 12 {
+        let b: u64 = tab_natur(i, k)
+        if b == 0 {
+            k = 12
+        } else {
+            t = t + b
+            k = k + 1
+        }
+    }
+    return t
+}
+
+fn tab_breite(i: u64, k: u64) -> u64 {
+    let b: u64 = tab_natur(i, k)
+    if b == 0 {
+        return 0
+    }
+    let ganz: u64 = tab_summe(i)
+    let platz: u64 = g(i, D_W)
+    if ganz <= platz || ganz == 0 {
+        return b
+    }
+    // integer scaling, and never below the room a couple of letters
+    // need -- a two-pixel tab is not a tab.
+    var sk: u64 = b * platz / ganz
+    if sk < 24 {
+        sk = 24
+    }
+    return sk
 }
 
 // RUNDE I18N: WO EIN REITER LIEGT.
@@ -2103,17 +2576,53 @@ fn tab_w(i: u64, k: u64) -> u64 {
     return tab_breite(i, k)
 }
 
+fn say_tab(w: u64, k: u64, x: u64, y: u64, tw: u64, th: u64) {
+    var a: [u8; 13] = "wlib: tab i=\0"
+    var bx: [u8; 4] = " x=\0"
+    var by: [u8; 4] = " y=\0"
+    var bw2: [u8; 4] = " w=\0"
+    var bh2: [u8; 4] = " h=\0"
+    var bax: [u8; 5] = " ax=\0"
+    var bay: [u8; 5] = " ay=\0"
+    if s_trace == 0 {
+        return
+    }
+    ulib.say((&a[0 as usize]) as u64)
+    ulib.sayn(k)
+    ulib.say((&bx[0 as usize]) as u64)
+    ulib.sayn(x)
+    ulib.say((&by[0 as usize]) as u64)
+    ulib.sayn(y)
+    ulib.say((&bw2[0 as usize]) as u64)
+    ulib.sayn(tw)
+    ulib.say((&bh2[0 as usize]) as u64)
+    ulib.sayn(th)
+    // AND THE PLACE ON THE SCREEN, in the same line. Round LOOK paid
+    // for splitting that across two lines on a shared serial port.
+    ulib.say((&bax[0 as usize]) as u64)
+    ulib.sayn(ng(w, N_X) + 2 + x)
+    ulib.say((&bay[0 as usize]) as u64)
+    ulib.sayn(ng(w, N_Y) + 22 + y)
+    ulib.nl()
+}
+
 fn paint_tabs(i: u64) {
     let x: u64 = g(i, D_X)
     let y: u64 = g(i, D_Y)
     let bh: u64 = g(i, D_H)
     wlibc.rect(x, y, g(i, D_W), bh, wlibc.theme(wlibc.T_PANEL))
+    // ROUND THEMESTORE: TWELVE AND NOT EIGHT. The settings program has
+    // eight tabs since this round, and eight was the exact limit -- the
+    // next tab anybody adds would have been drawn nowhere and would
+    // have swallowed its clicks, with no message of any kind. The hit
+    // test below counts to the same number, and it has to: a tab that
+    // is drawn and not clickable is worse than one that is neither.
     var tx: u64 = x
     var k: u64 = 0
-    while k < 8 {
+    while k < 12 {
         let q: u64 = row_at(g(i, D_TEXT), k)
         if q == 0 {
-            k = 8
+            k = 12
         } else {
             let tw: u64 = tab_breite(i, k)
             var flaeche: u64 = wlibc.theme(wlibc.T_PANEL)
@@ -2130,9 +2639,22 @@ fn paint_tabs(i: u64) {
             } else {
                 wlibc.hline(tx, y + bh - 1, tw, wlibc.theme(wlibc.T_LINE))
             }
+            // AND THE LABEL IS CLIPPED TO THE TAB. `fit` answers how
+            // many characters go into a width; without it a scaled tab
+            // paints its name across the next one, which is exactly
+            // the "overlapping text" this round is supposed to find
+            // rather than produce.
+            let nq: u64 = wlibc.fit(wlibc.F_UI, wlibc.PX_UI, q,
+                row_len(q), sub(tw, 6))
             put_text(wlibc.F_UI, wlibc.PX_UI, tx,
                 y + (bh + wlibc.ascent_of(wlibc.F_UI, wlibc.PX_UI)) / 2, tw,
-                q, row_len(q), farbe, 1)
+                q, nq, farbe, 1)
+            // WHERE THE TAB IS, REPORTED BY THE THING THAT DRAWS IT.
+            // Round LOOK made list rows and table headers say where
+            // they painted, for the reason a runner that computes a tab
+            // boundary is a runner that checks its own arithmetic. Same
+            // rule, one widget further along.
+            say_tab(g(i, D_WIN), k, tx, y, tw, bh)
             tx = tx + tw
             k = k + 1
         }
@@ -2235,6 +2757,8 @@ fn paint_one(i: u64) {
     } else if k == K_SCROLL {
         paint_scroll(g(i, D_X), g(i, D_Y), g(i, D_H), g(i, D_VAL),
             g(i, D_B), g(i, D_A))
+    } else if k == K_TILE {
+        paint_tile(i)
     }
 }
 
@@ -2438,6 +2962,15 @@ fn on_down(w: u64, x: u64, y: u64, btn: u64) {
         dirty_wd(i)
         return
     }
+    // ROUND THEMESTORE: A TILE IS A BIG BUTTON. It reports the click
+    // at once instead of on release -- there is no "pressed" look to
+    // show, because the tile already shows a preset and dimming it
+    // would misrepresent the very thing it is there to display.
+    if k == K_TILE {
+        dirty_wd(i)
+        fire(i, K_TILE, 0, w)
+        return
+    }
     if k == K_CHECK {
         s(i, D_VAL, 1 - g(i, D_VAL))
         dirty_wd(i)
@@ -2534,17 +3067,17 @@ fn on_down(w: u64, x: u64, y: u64, btn: u64) {
     if k == K_TABS {
         var tx: u64 = g(i, D_X)
         var t: u64 = 0
-        while t < 8 {
+        while t < 12 {
             let tw: u64 = tab_breite(i, t)
             if tw == 0 {
-                t = 8
+                t = 12
             } else if x >= tx && x < tx + tw {
                 if g(i, D_VAL) != t {
                     s(i, D_VAL, t)
                     dirty_wd(i)
                     fire(i, K_TABS, t, w)
                 }
-                t = 8
+                t = 12
             } else {
                 tx = tx + tw
                 t = t + 1
@@ -2983,6 +3516,12 @@ fn on_key(w: u64, c: u64) {
     if kind == K_BUTTON {
         if k == KEY_ENTER || k == 32 {
             fire(i, K_BUTTON, 0, w)
+        }
+        return
+    }
+    if kind == K_TILE {
+        if k == KEY_ENTER || k == 32 {
+            fire(i, K_TILE, 0, w)
         }
         return
     }
