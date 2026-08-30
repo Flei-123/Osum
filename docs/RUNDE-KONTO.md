@@ -141,6 +141,45 @@ Sechs Gegenproben, gefordert waren drei.
 
 ---
 
+## 3a. Was die Nachbarläufe sagen (und was schon vorher rot war)
+
+Die Auflage war: bestehende Tests, GUI-Bau und GUI-loser Serverbau
+bleiben grün. Gemessen:
+
+| Lauf | Ergebnis |
+|---|---|
+| `tools/konto/run.sh` | **107 erfüllt, 0 gescheitert** |
+| `tools/look/run.sh` | **40 erfüllt, 0 gescheitert** |
+| `tools/wm/run.sh` (aus zwei Suiten heraus) | **103 erfüllt, 0 gescheitert** |
+| GUI-Bau `tools/hwnet/build.sh` (mit `/bin/settings`) | gebaut |
+| GUI-loser Serverbau `tools/server/build.sh` | Kern 2 443 100 Oktette (gui=off), 59 Programme, 3 427 576 Oktette |
+| Systemebene `orientos/test.sh` | **ALLE 19 SCHRITTE BESTANDEN, 355 Zusagen** — darin Schritt 19, der Umzug auf einem Stick **ohne Konto und ohne Netz** |
+
+Zwei Läufe sind rot, und **beide waren es vorher schon**. Das ist nicht
+behauptet, sondern gegengemessen — in einem eigenen Arbeitsbaum auf
+`mergeline2` (`git worktree add --detach /root/konto-ref mergeline2`),
+also ohne eine einzige Zeile dieser Runde:
+
+* **`tools/i18n/run.sh`, Abschnitt 6** — 9 gefallene Zusagen, im
+  Referenzbaum **dieselben neun, Zeile für Zeile** („der Knopf heißt auf
+  Englisch: '', erwartet 'Apply'" usw.). Ursache: der Läufer sucht
+  Zeilen der Form `settings: feld id=…`; `/bin/settings` schreibt dieses
+  Format seit einer früheren Runde nicht mehr, sondern
+  `settings: rect name=…`. Nachgesehen:
+  `git show mergeline2:kernel/user/settings.fi | grep -c "feld id="` →
+  **0**. Der Läufer misst ein Format, das es nicht mehr gibt.
+* **`tools/desktop/run.sh`** — eine gefallene Zusage,
+  „WM_MAXNR does not match the calls": der Läufer verlangt
+  `const WM_MAXNR: u64 = 2115`, in `kernel/sys.fi` steht **2116** —
+  in diesem Arbeitsbaum **und** im Referenzbaum identisch
+  (`git diff mergeline2 -- kernel/sys.fi` ist leer).
+
+Beides gehört den Runden, die diese Läufer betreuen, und nicht dieser.
+Diese Runde macht es nicht schlimmer und repariert es nicht: fremde
+Läufer im Vorbeigehen nachzuziehen, während parallel dreizehn Runden auf
+denselben Dateien arbeiten, richtet mehr an, als es hilft. Gemeldet ist
+es hier, damit niemand die neun für neu hält.
+
 ## 4. Die drei Rücken im Vergleich
 
 | | `jarvis` | `xoffi` | `eigen` |
