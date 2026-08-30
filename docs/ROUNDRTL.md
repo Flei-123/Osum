@@ -112,6 +112,23 @@ veth-Paar, Netzraum mit dem Linux-Kern darin.
 | Außer der Reihe | 0 | — | — |
 | Verworfen (Ring voll) | 0 | 0 | 0 |
 
+Ein zweiter, unabhängiger Lauf (derselbe Läufer, aber innerhalb von
+`./test.sh` und damit unter der Netzsperre) bestätigt das Bild bei
+anderer Maschinenlast — die Reihenfolge der drei Spalten bleibt
+dieselbe:
+
+| | rtl8139 (C+) | virtio-net-pci | e1000 |
+|---|---|---|---|
+| Durchsatz, zweiter Lauf | **6657 KiB/s** | 5200 KiB/s | 3211 KiB/s |
+| Rahmen empfangen | 186 | 188 | 186 |
+| Unterbrechungen | 22 | 28 | 22 |
+| Prüfsummenfehler / Wiederholungen | 0 / 0 | 0 / 0 | 0 / 0 |
+
+Dieser Server fährt mehrere Runden gleichzeitig; die absoluten Zahlen
+schwanken deshalb zwischen den Läufen um etwa ein Fünftel. Vergleichbar
+sind die Spalten **innerhalb** eines Laufs, weil sie nacheinander
+entstanden sind.
+
 ### Ping und die übrigen Zusagen (rtl8139)
 
 | | Ergebnis |
@@ -234,6 +251,37 @@ verlangt.
 
 ## 6. WAS AN BESTEHENDEN TESTS GEÄNDERT WURDE, und warum
 
+Zwei Dinge, beide keine Abschaltung.
+
+### 6a. Die Netzsperre griff für `hwnet` nie — und jetzt für `rtl` auch
+
+Gefunden beim Nachmessen dieser Runde. `test.sh` serialisiert die
+Abschnitte, die `ip netns` und `ip link` anlegen, über eine Sperre in
+`/tmp` — die Geräte gehören dem **Wirt** und nicht dem Arbeitsbaum. Die
+Liste dafür lautete:
+
+    SERIELL_RE='^tools/(net|netmon|netview|tunnel)/'
+
+Der Ausdruck ist auf `tools/net…` verankert, und `tools/hwnet/` fängt mit
+`tools/hw` an. **`tools/hwnet/run.sh` lief also seit Runde HWNET
+ungesperrt** neben `net`, `netmon`, `netview` und `tunnel`.
+
+Das ist keine Theorie. An diesem Abend fiel `tools/pci/run.sh` (98
+Zusagen, sonst grün) im parallelen Lauf zweimal durch und
+`tools/net/run.sh` einmal — **beide allein sofort wieder grün**, beide
+auf der unveränderten Grundlinie ebenfalls grün. Ursache war die
+Kollision auf den Netzgeräten des Wirts.
+
+Der Ausdruck heißt jetzt:
+
+    SERIELL_RE='^tools/(net|netmon|netview|tunnel|hwnet|rtl)/'
+
+Das ist das Gegenteil einer Abschaltung: zwei Abschnitte, die bisher
+unbemerkt aneinander vorbeiliefen, halten jetzt dieselbe Reihe ein wie
+die anderen.
+
+### 6b. Eine Gegenprobe in `tools/hwnet/run.sh`
+
 **Genau eine Zeile**, und nicht, weil sie unbequem war, sondern weil ihre
 Voraussetzung weggefallen ist.
 
@@ -250,6 +298,23 @@ unverändert.
 
 **Kein Test wurde abgeschaltet.** `test.sh` hat jetzt einen Abschnitt mehr
 (Nr. 31, `tools/rtl/run.sh`, 67 Zusagen).
+
+### 6c. Nachgemessen, dass nichts kaputt ist
+
+| Abschnitt | Ergebnis auf Zweig `rtl` | Grundlinie a919787 |
+|---|---|---|
+| `tools/rtl/run.sh` (neu) | **67 / 0** | -- |
+| `tools/hwnet/run.sh` (geändert) | **54 / 0** | -- |
+| `tools/server/run.sh` (GUI-loser Bau) | **23 / 0** | -- |
+| `tools/wm/run.sh` (Oberfläche) | **103 / 0** | -- |
+| `tools/kernel/run.sh` | **176 / 0** | -- |
+| `tools/unix/run.sh` | **107 / 0** | -- |
+| `tools/posix/run.sh` | **134 / 0** | -- |
+| `tools/pci/run.sh` | **98 / 0** (allein) | 98 / 0 |
+| `tools/net/run.sh` | 74 / 1 **nur im parallelen Lauf**, siehe 6a | 75 / 0 |
+
+Beide Übersetzer (`firnc0` und `firnc1`) bauen den Kernel mit
+`r8169.fi` — in jedem Lauf des Läufers geprüft.
 
 ---
 
