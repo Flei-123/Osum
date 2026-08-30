@@ -1,0 +1,924 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/async.fi -- RUNDE ASYNC: die Auftragsschicht zwischen den
+// Handles und dem Ring.
+//
+// WO DIESE RUNDE STEHT. Runde HANDLE hat die LEBENSDAUER eines
+// Kernobjekts geordnet: Verweiszaehler, generationsbehaftete
+// Handle-Plaetze, Abbruch-Token, und ein Objekt, das nicht sterben darf,
+// solange ein Auftrag darauf laeuft. Runde RING wird den
+// Completion-Ring im geteilten Speicher bauen. DAZWISCHEN fehlt genau
+// eine Schicht, und das ist diese: ein Auftrag, der WIRKLICH laenger
+// lebt als der Systemaufruf, der ihn abgegeben hat.
+//
+// Bis hierher war die Klammer von Runde HANDLE eine Vorbereitung ohne
+// Kunden -- `req_begin` und `req_end` standen im selben Systemaufruf
+// nebeneinander, und dazwischen konnte nichts geschehen. Von dieser
+// Runde an liegen zwischen ihnen ein Zustandswechsel, ein Arbeitsfaden
+// und beliebig viele Zeitscheiben eines anderen Prozesses. Erst damit
+// ist die Zusage von Runde HANDLE ueberhaupt PRUEFBAR.
+//
+// WARUM DAS DIE GEFAEHRLICHSTE SCHICHT EINES KERNS IST. Google hat 2023
+// berichtet, dass rund 60 % der eingereichten Linux-Kernel-Exploits aus
+// io_uring stammten, und hat den Ring auf Android und ChromeOS
+// abgeschaltet. Die Ursache war nicht der geteilte Speicher und nicht
+// die Ringform, sondern GENAU DIESE SCHICHT: ein Auftrag, der ein Objekt
+// meint, das inzwischen ein anderes ist. Diese Runde ist deshalb keine
+// Leistungsrunde. Sie ist eine Lebensdauerrunde, und die Messungen
+// stehen am Ende und nicht am Anfang.
+//
+// DIE VIER ZUSAGEN DIESER RUNDE
+//
+//   A. EIN LAUFENDER AUFTRAG HAELT SEIN ZIEL AM LEBEN. Der Auftrag
+//      bekommt in `submit` ein Abbruch-Token aus `handle.req_begin`, und
+//      das ist keine Notiz, sondern eine ZAEHLENDE REFERENZ: das Objekt
+//      zaehlt einen Auftrag in Flug mit. Schliesst der Prozess sein
+//      Handle, faellt der Verweiszaehler auf null und der Eintrag der
+//      offenen Dateien bleibt trotzdem stehen, bis `finish` das Token
+//      zurueckgibt. Wer zuletzt geht, macht das Licht aus.
+//
+//   B. EIN AUFTRAG TRIFFT NIE DAS NACHFOLGEOBJEKT. Der Arbeitsfaden
+//      fragt vor JEDEM Zugriff `handle.req_object`, und das vergleicht
+//      Handle-Platz, Handle-Generation UND Objektgeneration. Passt eines
+//      nicht, gibt es -E_STALE und nicht die neue Datei. Die Gegenprobe
+//      `noagen` laesst diese Frage weg und nimmt, was gerade unter dem
+//      Handle steht -- dann trifft der alte Auftrag das neue Objekt, und
+//      der Test faellt. Das ist der io_uring-Fehler, absichtlich wieder
+//      eingebaut, damit die Zusage etwas zu bedeuten hat.
+//
+//   C. GENAU EINE FERTIGMELDUNG JE AUFTRAG. Ein Abbruch MARKIERT nur;
+//      gemeldet wird der Auftrag von dem, der ihn ausgefuehrt hat, und
+//      zwar einmal. Der Uebergang, der das durchsetzt, ist ein
+//      `lock cmpxchg` auf dem Zustandswort und keine Abfrage mit
+//      anschliessendem Schreiben -- ein `if frei dann belegen` ist auf
+//      zwei Kernen kein Uebergang, sondern eine Wette.
+//
+//   D. EIN STERBENDER PROZESS LAESST NICHTS ZURUECK. `abandon` bricht
+//      seine offenen Auftraege ab, WARTET auf die, die gerade laufen,
+//      gibt jedes Token zurueck und leert seinen Fertigmeldungsring.
+//      Danach ist die Auftragstafel wieder so leer wie vorher; das
+//      misst der Laeufer nach, statt es zu glauben.
+//
+// WAS HIER NICHT DRINSTEHT, UND ZWAR MIT ABSICHT
+//
+//   * Der Ring im geteilten Speicher (Runde RING). Die Fertigmeldungen
+//     liegen hier in `kdata` und werden mit `copy_out` abgeholt. Der
+//     Ring ersetzt spaeter den Abholweg -- Auftrag, Zustand und
+//     Lebensdauer bleiben, wie sie hier stehen.
+//   * Echte geraetenahe Asynchronitaet (NVMe-/AHCI-Warteschlangen). Die
+//     Arbeit wird von Arbeitsfaeden im Kern SYNCHRON ausgefuehrt. Das
+//     ist ehrlich gesagt und wird in der Messung auch so gezeigt: was
+//     diese Runde gewinnt, ist der abgebende Prozess, nicht die Platte.
+//
+// WO DER ZUSTAND LIEGT. Wie ueberall in diesem Kernel in der
+// uebergebenen Datenregion (SPEC 14, Punkt 5); die Versaetze stehen in
+// `kstate.fi` (AIO_OFF, ACQ_OFF, ASC_OFF).
+//
+// ARITHMETIK. Seit Runde 72 panicken `+`, `-` und `*` beim Ueberlauf.
+// Wo eine Zweierkomplement-Umdeutung gemeint ist -- die Generation, der
+// Fehlercode, der negativ wird --, steht `+%` oder `-%`.
+
+profile kernel
+
+import kstate
+import handle
+import file
+import sched
+import atomic
+
+export {
+    MAX_AIO, A_BYTES, CQ_CAP, C_BYTES, CQ_STRIDE, WORKERS,
+    Q_FREE, Q_NEW, Q_RUN, Q_DONE, Q_CANCEL, Q_FAIL, Q_WAIT,
+    rearm,
+    OP_NONE, OP_READ, OP_WRITE, OP_OPEN, OP_CLOSE, OP_FSYNC, OP_POLL,
+    OP_MAX,
+    E_AGAIN_A, E_BADREQ, E_PERM_A, E_TIMEDOUT_A, E_CANCELED_A, E_STALE_A,
+    C_ID, C_UDATA, C_RES, C_OP,
+    init, ready, set_ready, hold, held,
+    slot_of, gen_of, make_id, find, claim, claim_at, free_index,
+    take_one, release,
+    a_get, a_set, aslot,
+    op_of, state_of, token_of, owner_of, pid_of, buf_of, len_of,
+    udata_of, res_of, aux_of,
+    set_state, set_res, take_new, mark_cancel, finish, post,
+    reap_one, cq_used, cq_room, cq_lost, cq_clear,
+    live, live_for, used, abandon, drain_task,
+    lock_take, lock_give,
+    bytes_per_request
+}
+
+// ------------------------------------------------------------ die Masse
+//
+// MAX_AIO = 64 ist DIESELBE ZAHL wie `handle.MAX_REQ`, und das ist keine
+// Bequemlichkeit: jeder Auftrag dieser Schicht haelt genau ein
+// Abbruch-Token der Handle-Schicht. Waere diese Tafel groesser, gaebe es
+// eine Abgabe, die an einer Tabelle scheitert, von der der abgebende
+// Prozess nichts weiss.
+const MAX_AIO: u64 = 64
+const A_BYTES: u64 = 80
+
+// Der Fertigmeldungsring je Aufgabe. CQ_CAP ist zugleich die Obergrenze
+// der GLEICHZEITIG OFFENEN Auftraege eines Prozesses, und das ist der
+// Grund, warum der Ring nie ueberlaufen kann: es gibt nie mehr
+// Meldungen, als Plaetze da sind. Ein Ring, der Meldungen verwirft, ist
+// schlimmer als eine Abgabe, die -EAGAIN sagt -- die Abgabe kann das
+// Programm wiederholen, die verlorene Meldung nicht.
+// (Roadmap KERNEL.md, Punkt 2, Aufbaureihenfolge 3: "Rueckstau statt
+// Verwerfen bei Ueberlauf".)
+const CQ_CAP: u64 = 16
+const C_BYTES: u64 = 32
+const CQ_STRIDE: u64 = 1024 // ACQ_MAX / MAX_TASKS
+const CQ_HDR: u64 = 32
+
+// Wie viele Arbeitsfaeden. Vier ist die Zahl, bei der ein voller Ring
+// (16 offene Auftraege) noch mit Rueckstau arbeitet statt mit Leerlauf,
+// und sie ist klein genug, dass die Aufgabentabelle (32 Plaetze) davon
+// nicht spuerbar schmaler wird.
+const WORKERS: u64 = 4
+
+// -------------------------------------------------- der Auftragssatz
+//
+// A_TOKEN ist das Feld, um das es in dieser Runde geht: es ist die
+// ZAEHLENDE REFERENZ auf das Ziel. Solange es hier steht, kann das
+// Objekt dahinter nicht abgeraeumt werden, auch wenn der Prozess sein
+// Handle laengst geschlossen hat.
+const A_STATE: u64 = 0
+const A_OP: u64 = 8
+const A_TOKEN: u64 = 16 // handle.req_begin -- der Verweis, der traegt
+const A_OWNER: u64 = 24 // unten 32: Aufgabenplatz, oben 32: Generation
+const A_PID: u64 = 32 // die pid des Abgebers -- gegen Platzwiederverwendung
+const A_BUF: u64 = 40 // Adresse in Ring 3 (lesen/schreiben/oeffnen)
+const A_LEN: u64 = 48 // Laenge, bzw. Flaggen bei `open`, Maske bei `poll`
+const A_UDATA: u64 = 56 // frei waehlbare Kennung des Programms
+const A_RES: u64 = 64 // Ergebnis; negativ ist ein Fehlercode
+const A_AUX: u64 = 72 // der Deskriptor, mit dem abgegeben wurde
+
+// Die Zustaende. Genau die fuenf des Auftrags plus `frei`.
+const Q_FREE: u64 = 0
+const Q_NEW: u64 = 1 // angelegt, wartet auf einen Arbeitsfaden
+const Q_RUN: u64 = 2 // ein Arbeitsfaden hat ihn
+const Q_DONE: u64 = 3 // fertig
+const Q_CANCEL: u64 = 4 // abgebrochen
+const Q_FAIL: u64 = 5 // mit einem Fehler geendet
+// RUNDE ASYNC, DIE BRUECKE VON READINESS AUF COMPLETION: ein
+// `poll`-Auftrag, dessen Ereignis noch nicht eingetreten ist. Er ist
+// KEIN halbfertiger Auftrag -- sein Verweis haelt weiter, gemeldet ist
+// er nicht, und `take_new` sieht ihn nicht an.
+//
+// WARUM ES DIESEN ZUSTAND GEBEN MUSS. Die erste Fassung hat einen
+// solchen Auftrag einfach wieder auf `angelegt` gesetzt. Das ist eine
+// Warteschleife mit vier Faeden darin: die Messung zaehlte 525241
+// Durchlaeufe fuer drei Auftraege, und ein sterbender Prozess kam aus
+// `drain_task` nicht mehr heraus, weil bei jedem Blick einer davon
+// gerade `laeuft`. Ein wartender Auftrag muss WARTEN und nicht drehen --
+// aufgeweckt wird er von `rearm`, und das ruft der Arbeitsfaden genau
+// dann, wenn `sched.poll_kick` ihn geweckt hat. Das ist dieselbe
+// Weckfolge, die `poll(2)` benutzt; sie ist hier die Bruecke.
+const Q_WAIT: u64 = 6
+
+// Die Arten. `open` ist der einzige ohne Ziel-Handle -- es gibt noch
+// nichts, worauf ein Verweis zeigen koennte; deshalb traegt ein
+// `open`-Auftrag TOKEN_NONE und keine Lebensdauerzusage.
+const OP_NONE: u64 = 0
+const OP_READ: u64 = 1
+const OP_WRITE: u64 = 2
+const OP_OPEN: u64 = 3
+const OP_CLOSE: u64 = 4
+const OP_FSYNC: u64 = 5
+const OP_POLL: u64 = 6 // die Bruecke von readiness auf completion
+const OP_MAX: u64 = 6
+
+// Die Fehlerwerte dieser Schicht, in der Zaehlung von POSIX (`errno.fi`),
+// weil die Aufrufe dieser Runde POSIX-Aufrufe sind und keine der nativen
+// ABI. Sie stehen hier noch einmal, weil dieses Modul unter `errno.fi`
+// liegen soll und es nicht einbinden darf.
+const E_AGAIN_A: u64 = 11 // EAGAIN -- die Warteschlange ist voll
+const E_BADREQ: u64 = 9 // EBADF -- die Kennung meint keinen Auftrag
+const E_PERM_A: u64 = 1 // EPERM -- fremder Auftrag
+const E_TIMEDOUT_A: u64 = 110 // ETIMEDOUT
+const E_CANCELED_A: u64 = 125 // ECANCELED
+const E_STALE_A: u64 = 116 // ESTALE -- das Handle meint nicht mehr dasselbe
+
+// ------------------------------------------------- der Fertigmeldungssatz
+const C_ID: u64 = 0 // die Auftragskennung (Platz + Generation)
+const C_UDATA: u64 = 8
+const C_RES: u64 = 16
+const C_OP: u64 = 24
+
+// Der Kopf eines Rings.
+const CQ_HEAD: u64 = 0
+const CQ_TAIL: u64 = 8
+const CQ_LOST: u64 = 16 // MUSS null bleiben; der Laeufer liest es nach
+const CQ_RESV: u64 = 24
+
+// Die Skalare in ASC_OFF.
+const AS_LOCK: u64 = 0 // die Ausfuehrungssperre der Arbeitsfaeden
+const AS_READY: u64 = 8 // 1 = die Schicht steht
+const AS_ROUND: u64 = 16 // Reihum-Zeiger fuer die Auftragswahl
+// DER PRUEFSTANDSHALT. Steht hier eine Eins, nehmen die Arbeitsfaeden
+// KEINEN neuen Auftrag an. Er ist NUR im Selbsttestmodus (`async` auf
+// der Kommandozeile) erreichbar -- ohne das Wort gibt `AIO_INFO`
+// -ENOSYS, und niemand kann ihn setzen.
+//
+// WARUM ES IHN GEBEN MUSS. Die gefaehrlichste Zusage dieser Runde
+// (Slot-Wiederverwendung, (b)) beschreibt ein ZEITFENSTER: der Auftrag
+// ist abgegeben und noch nicht ausgefuehrt, und GENAU DANN wird das
+// Handle geschlossen und der Platz neu vergeben. Ohne einen Halt haengt
+// es an der Zeitscheibe, ob der Test dieses Fenster trifft -- und ein
+// Test, der die Fehlerklasse nur manchmal trifft, ist keiner. Mit dem
+// Halt trifft er es jedes Mal.
+const AS_HOLD: u64 = 24
+
+const GEN_MASK: u64 = 0x7FFFFFFF
+
+fn aslot(i: u64) -> u64 {
+    return kstate.AIO_OFF + i * A_BYTES
+}
+
+fn cq(task: u64) -> u64 {
+    return kstate.ACQ_OFF + task * CQ_STRIDE
+}
+
+fn a_get(state: u64, i: u64, off: u64) -> u64 {
+    if i >= MAX_AIO {
+        return 0
+    }
+    return kstate.get(state, aslot(i) + off)
+}
+
+fn a_set(state: u64, i: u64, off: u64, v: u64) {
+    if i >= MAX_AIO {
+        return
+    }
+    kstate.set(state, aslot(i) + off, v)
+}
+
+// ------------------------------------------------------ die Kennungen
+//
+// Dieselbe Form wie ein Handle und wie ein Abbruch-Token: unten Platz
+// plus eins, oben eine Generation. Das +1 haelt die 0 frei, damit eine
+// frisch genullte Seite eine leere Tafel ist, und die Generation ist
+// 31 Bit breit aus demselben Grund wie in `handle.fi` -- Ergebnis und
+// Fehler kommen durch DENSELBEN Kanal zurueck, und ein gesetztes Bit 63
+// waere ein Ergebnis, das wie ein Fehler aussieht. Diese eine Zeile hat
+// die Runde HANDLE einen halben Tag gekostet.
+fn make_id(slot: u64, generation: u64) -> u64 {
+    return ((generation & GEN_MASK) << 32) | ((slot +% 1) & 0xFFFFFFFF)
+}
+
+fn slot_of(id: u64) -> u64 {
+    return ((id & 0xFFFFFFFF) -% 1) & 0xFFFFFFFF
+}
+
+fn gen_of(id: u64) -> u64 {
+    return (id >> 32) & GEN_MASK
+}
+
+// Der Auftrag zu dieser Kennung, oder MAX_AIO. Prueft die Generation --
+// eine Kennung, deren Platz inzwischen neu vergeben wurde, trifft nichts.
+fn find(state: u64, id: u64) -> u64 {
+    if (id & 0xFFFFFFFF) == 0 {
+        return MAX_AIO
+    }
+    let i: u64 = slot_of(id)
+    if i >= MAX_AIO {
+        return MAX_AIO
+    }
+    let a: u64 = aslot(i)
+    if kstate.get(state, a + A_STATE) == Q_FREE {
+        return MAX_AIO
+    }
+    if ((kstate.get(state, a + A_OWNER) >> 32) & GEN_MASK) != gen_of(id) {
+        return MAX_AIO
+    }
+    return i
+}
+
+// ---------------------------------------------------- die Ausfuehrungssperre
+//
+// WARUM ES SIE GIBT. `sys.read_of` und `sys.write_of` arbeiten ueber
+// EINE Seite in `kdata` (`kstate.BLOCK_OFF`) -- eine Kopie geht durch
+// diesen Zwischenspeicher, weil das Dateisystem nie eine Adresse eines
+// Prozesses sehen soll. Bis zu dieser Runde konnte darin immer nur ein
+// Systemaufruf stehen. Mit vier Arbeitsfaeden koennen es vier sein, und
+// zwei Kopien in derselben Seite sind eine kaputte Datei.
+//
+// WARUM KEINE SPERRE AUS `atomic.fi`. Deren acht Plaetze sind vergeben
+// (L_SCHED bis L_PROC), und die Tafel liegt zwischen zwei anderen
+// Bereichen von `kdata` -- ein neunter Platz wuerde in TCPU_OFF
+// hineinwachsen. Also eine eigene, in der eigenen Seite dieser Runde.
+//
+// WARUM SIE NACHGIBT STATT ZU DREHEN. Die Halter sind AUFGABEN und keine
+// Kerne: ein Halter kann mitten im Halten die Zeitscheibe verlieren. Eine
+// echte Drehsperre wuerde dann bis zum Ende der eigenen Scheibe brennen.
+// `sched.yield_now` gibt den Prozessor ab und kommt wieder -- das ist
+// eine schlafende Sperre, und sie ist hier die richtige.
+fn lock_take(state: u64, who: u64) {
+    let p: u64 = state + kstate.ASC_OFF + AS_LOCK
+    var got: bool = false
+    while !got {
+        if atomic.cas(p, 0, who + 1) == 0 {
+            got = true
+        } else {
+            sched.yield_now(state)
+        }
+    }
+}
+
+fn lock_give(state: u64) {
+    atomic.store(state + kstate.ASC_OFF + AS_LOCK, 0)
+}
+
+// ------------------------------------------------------------- der Start
+
+fn init(state: u64) {
+    var i: u64 = 0
+    while i < MAX_AIO {
+        let a: u64 = aslot(i)
+        var k: u64 = 0
+        while k < A_BYTES / 8 {
+            kstate.set(state, a + k * 8, 0)
+            k = k + 1
+        }
+        i = i + 1
+    }
+    var t: u64 = 0
+    while t < kstate.MAX_TASKS {
+        cq_clear(state, t)
+        t = t + 1
+    }
+    kstate.set(state, kstate.ASC_OFF + AS_LOCK, 0)
+    kstate.set(state, kstate.ASC_OFF + AS_ROUND, 0)
+    kstate.set(state, kstate.ASC_OFF + AS_READY, 0)
+}
+
+fn hold(state: u64, v: u64) {
+    kstate.set(state, kstate.ASC_OFF + AS_HOLD, v)
+}
+
+fn held(state: u64) -> u64 {
+    return kstate.get(state, kstate.ASC_OFF + AS_HOLD)
+}
+
+fn ready(state: u64) -> bool {
+    return kstate.get(state, kstate.ASC_OFF + AS_READY) != 0
+}
+
+fn set_ready(state: u64, v: u64) {
+    kstate.set(state, kstate.ASC_OFF + AS_READY, v)
+}
+
+// ========================================================= die Abgabe
+
+// Einen freien Platz nehmen und als ANGELEGT eintragen. Der Uebergang
+// frei -> angelegt ist ein `lock cmpxchg` und keine Abfrage mit
+// anschliessendem Schreiben: zwei Kerne, die gleichzeitig denselben
+// freien Platz sehen, bekaemen sonst beide denselben.
+//
+// Der Aufrufer (`sys.aio_submit`) hat das Token schon; es wird hier
+// eingetragen, damit der Platz zu KEINEM Zeitpunkt als angelegt
+// dasteht, ohne seinen Verweis zu halten.
+fn claim(state: u64, task: u64, pid: u64, op: u64, token: u64,
+    buf: u64, len: u64, udata: u64, aux: u64) -> u64 {
+    var i: u64 = 0
+    while i < MAX_AIO {
+        if kstate.get(state, aslot(i) + A_STATE) == Q_FREE {
+            let id: u64 = claim_at(state, i, task, pid, op, token, buf, len,
+                udata, aux)
+            if id != 0 {
+                return id
+            }
+        }
+        i = i + 1
+    }
+    kstate.add(state, kstate.A_FULL, 1)
+    return 0
+}
+
+// Ein bestimmter Platz. Braucht der asynchrone `open`: sein Pfad wird
+// bei der Abgabe in den Vorrat DIESES Platzes kopiert, und danach muss
+// genau dieser Platz belegt werden -- ein anderer laese den Pfad eines
+// fremden Auftrags. Gibt 0, wenn ihn in der Zwischenzeit jemand
+// weggenommen hat; der Aufrufer sucht dann von vorn.
+fn claim_at(state: u64, i: u64, task: u64, pid: u64, op: u64, token: u64,
+    buf: u64, len: u64, udata: u64, aux: u64) -> u64 {
+    if i >= MAX_AIO {
+        return 0
+    }
+    let a: u64 = aslot(i)
+    if atomic.cas(state + a + A_STATE, Q_FREE, Q_NEW) != Q_FREE {
+        return 0
+    }
+    var g: u64 = ((kstate.get(state, a + A_OWNER) >> 32) +% 1) & GEN_MASK
+    if g == 0 {
+        g = 1
+    }
+    kstate.set(state, a + A_OP, op)
+    kstate.set(state, a + A_TOKEN, token)
+    kstate.set(state, a + A_PID, pid)
+    kstate.set(state, a + A_BUF, buf)
+    kstate.set(state, a + A_LEN, len)
+    kstate.set(state, a + A_UDATA, udata)
+    kstate.set(state, a + A_RES, 0)
+    kstate.set(state, a + A_AUX, aux)
+    // ZULETZT der Eigentuemer mit der Generation: ab dieser Zeile ist die
+    // Kennung gueltig, und alles, was sie nachschlaegt, findet einen
+    // vollstaendigen Satz.
+    kstate.set(state, a + A_OWNER, (g << 32) | (task & 0xFFFFFFFF))
+    kstate.add(state, kstate.A_SUBMITTED, 1)
+    return make_id(i, g)
+}
+
+// Der naechste freie Platz, OHNE ihn zu nehmen. Nur fuer den Pfad des
+// asynchronen `open`: geschrieben wird in seinen Vorrat, und `claim_at`
+// sagt danach, ob der Platz noch da war.
+fn free_index(state: u64) -> u64 {
+    var i: u64 = 0
+    while i < MAX_AIO {
+        if kstate.get(state, aslot(i) + A_STATE) == Q_FREE {
+            return i
+        }
+        i = i + 1
+    }
+    return MAX_AIO
+}
+
+// EINEN BESTIMMTEN angelegten Auftrag uebernehmen. Braucht die
+// Gegenprobe `noawork`: dort gibt es keine Arbeitsfaeden, und der
+// abgebende Prozess fuehrt seinen eigenen Auftrag aus -- aber ueber
+// DENSELBEN Uebergang, damit auch dort nicht zweimal gemeldet wird.
+// DIE WARTENDEN WIEDER SCHARF STELLEN. Wird vom Arbeitsfaden gerufen,
+// nachdem `sched.poll_sleep` ihn geweckt hat -- also genau dann, wenn
+// irgendwo Bereitschaft entstanden ist. Ein `poll`-Auftrag sieht danach
+// EINMAL nach; ist sein Ereignis immer noch nicht da, wartet er weiter.
+// Kein Drehen, keine Warteschleife.
+fn rearm(state: u64) -> u64 {
+    var n: u64 = 0
+    var i: u64 = 0
+    while i < MAX_AIO {
+        if kstate.get(state, aslot(i) + A_STATE) == Q_WAIT {
+            if atomic.cas(state + aslot(i) + A_STATE, Q_WAIT, Q_NEW) == Q_WAIT {
+                n = n + 1
+            }
+        }
+        i = i + 1
+    }
+    return n
+}
+
+fn take_one(state: u64, i: u64) -> bool {
+    if i >= MAX_AIO {
+        return false
+    }
+    return atomic.cas(state + aslot(i) + A_STATE, Q_NEW, Q_RUN) == Q_NEW
+}
+
+// Der Platz wird frei. Die GENERATION BLEIBT STEHEN und zaehlt beim
+// naechsten Belegen hoch -- dieselbe Zeile, die in `handle.fi` ein
+// zweites `close` zu -EBADF macht, macht hier eine zweite Abfrage nach
+// einem laengst abgeholten Auftrag zu -EBADF.
+fn release(state: u64, i: u64) {
+    if i >= MAX_AIO {
+        return
+    }
+    let a: u64 = aslot(i)
+    kstate.set(state, a + A_OP, OP_NONE)
+    kstate.set(state, a + A_TOKEN, 0)
+    kstate.set(state, a + A_PID, 0)
+    kstate.set(state, a + A_BUF, 0)
+    kstate.set(state, a + A_LEN, 0)
+    kstate.set(state, a + A_UDATA, 0)
+    kstate.set(state, a + A_RES, 0)
+    kstate.set(state, a + A_AUX, 0)
+    kstate.set(state, a + A_OWNER,
+        kstate.get(state, a + A_OWNER) & 0xFFFFFFFF00000000)
+    atomic.store(state + a + A_STATE, Q_FREE)
+}
+
+// ------------------------------------------------------- die Abfragen
+
+fn state_of(state: u64, i: u64) -> u64 {
+    return a_get(state, i, A_STATE)
+}
+
+fn op_of(state: u64, i: u64) -> u64 {
+    return a_get(state, i, A_OP)
+}
+
+fn token_of(state: u64, i: u64) -> u64 {
+    return a_get(state, i, A_TOKEN)
+}
+
+fn owner_of(state: u64, i: u64) -> u64 {
+    return a_get(state, i, A_OWNER) & 0xFFFFFFFF
+}
+
+fn pid_of(state: u64, i: u64) -> u64 {
+    return a_get(state, i, A_PID)
+}
+
+fn buf_of(state: u64, i: u64) -> u64 {
+    return a_get(state, i, A_BUF)
+}
+
+fn len_of(state: u64, i: u64) -> u64 {
+    return a_get(state, i, A_LEN)
+}
+
+fn udata_of(state: u64, i: u64) -> u64 {
+    return a_get(state, i, A_UDATA)
+}
+
+fn res_of(state: u64, i: u64) -> u64 {
+    return a_get(state, i, A_RES)
+}
+
+fn aux_of(state: u64, i: u64) -> u64 {
+    return a_get(state, i, A_AUX)
+}
+
+fn set_state(state: u64, i: u64, v: u64) {
+    if i >= MAX_AIO {
+        return
+    }
+    atomic.store(state + aslot(i) + A_STATE, v)
+}
+
+fn set_res(state: u64, i: u64, v: u64) {
+    a_set(state, i, A_RES, v)
+}
+
+// Wie viele Auftraege gerade angelegt oder in Arbeit sind.
+fn live(state: u64) -> u64 {
+    var n: u64 = 0
+    var i: u64 = 0
+    while i < MAX_AIO {
+        let s: u64 = kstate.get(state, aslot(i) + A_STATE)
+        if s == Q_NEW || s == Q_RUN || s == Q_WAIT {
+            n = n + 1
+        }
+        i = i + 1
+    }
+    return n
+}
+
+// Belegte Plaetze insgesamt -- auch die, die fertig sind und deren
+// Fertigmeldung noch nicht abgeholt wurde. Nach einem sauberen Lauf
+// MUSS diese Zahl null sein; das ist die Leckprobe dieser Runde.
+fn used(state: u64) -> u64 {
+    var n: u64 = 0
+    var i: u64 = 0
+    while i < MAX_AIO {
+        if kstate.get(state, aslot(i) + A_STATE) != Q_FREE {
+            n = n + 1
+        }
+        i = i + 1
+    }
+    return n
+}
+
+fn live_for(state: u64, task: u64) -> u64 {
+    var n: u64 = 0
+    var i: u64 = 0
+    while i < MAX_AIO {
+        let a: u64 = aslot(i)
+        if kstate.get(state, a + A_STATE) != Q_FREE {
+            if (kstate.get(state, a + A_OWNER) & 0xFFFFFFFF) == task {
+                n = n + 1
+            }
+        }
+        i = i + 1
+    }
+    return n
+}
+
+// ==================================================== der Arbeitsfaden
+
+// Einen angelegten Auftrag uebernehmen. Der Uebergang angelegt -> laeuft
+// ist wieder ein `lock cmpxchg`: zwei Arbeitsfaeden, die denselben
+// Auftrag sehen, duerfen ihn nicht beide ausfuehren -- das waere die
+// doppelte Fertigmeldung, die Zusage C verbietet.
+//
+// Reihum, nicht immer von vorn: sonst bekommt der Auftrag auf Platz 0
+// jeden Faden und die hinteren verhungern, wenn schneller abgegeben als
+// abgearbeitet wird.
+fn take_new(state: u64) -> u64 {
+    if kstate.get(state, kstate.ASC_OFF + AS_HOLD) != 0 {
+        return MAX_AIO
+    }
+    let start: u64 = kstate.get(state, kstate.ASC_OFF + AS_ROUND) % MAX_AIO
+    var k: u64 = 0
+    while k < MAX_AIO {
+        let i: u64 = (start + k) % MAX_AIO
+        if kstate.get(state, aslot(i) + A_STATE) == Q_NEW {
+            if atomic.cas(state + aslot(i) + A_STATE, Q_NEW, Q_RUN) == Q_NEW {
+                kstate.set(state, kstate.ASC_OFF + AS_ROUND, i + 1)
+                kstate.add(state, kstate.A_WORKRUNS, 1)
+                return i
+            }
+        }
+        k = k + 1
+    }
+    return MAX_AIO
+}
+
+// EINEN AUFTRAG ABBRECHEN. MARKIERT NUR.
+//
+// Ein angelegter Auftrag geht sofort auf `abgebrochen` -- niemand hat
+// ihn, also darf der Abbrechende ihn auch melden. Ein LAUFENDER wird nur
+// am Token markiert (`handle.req_cancel`); gemeldet wird er von dem
+// Arbeitsfaden, der ihn hat, und nur von dem. Alles andere waere die
+// doppelte Fertigmeldung.
+//
+// Rueckgabe: 0 = angelegt und hier abgebrochen (der Aufrufer meldet),
+// 1 = laeuft und ist markiert (der Faden meldet), 2 = zu spaet.
+fn mark_cancel(state: u64, task: u64, i: u64) -> u64 {
+    if i >= MAX_AIO {
+        return 2
+    }
+    let a: u64 = aslot(i)
+    if atomic.cas(state + a + A_STATE, Q_NEW, Q_CANCEL) == Q_NEW {
+        kstate.add(state, kstate.A_CANCELLED, 1)
+        return 0
+    }
+    // Ein wartender `poll`-Auftrag ist ebenso wenig unterwegs wie ein
+    // angelegter: niemand hat ihn, also meldet ihn der Abbrechende.
+    if atomic.cas(state + a + A_STATE, Q_WAIT, Q_CANCEL) == Q_WAIT {
+        kstate.add(state, kstate.A_CANCELLED, 1)
+        return 0
+    }
+    // Ein LAUFENDER Auftrag: der Zustand geht auf `abgebrochen`, aber
+    // der Arbeitsfaden behaelt ihn -- `take_new` nimmt nur `angelegt`,
+    // also holt ihn niemand zweimal. GEMELDET wird er von seinem Faden.
+    //
+    // Die erste Fassung hat hier NUR das Token markiert und den Zustand
+    // stehen lassen. Der Faden sah danach `laeuft`, brachte den Auftrag
+    // ordentlich zu Ende und meldete das ERGEBNIS statt -ECANCELED. Der
+    // Abbruch war eine Zeile, die nichts tat.
+    if atomic.cas(state + a + A_STATE, Q_RUN, Q_CANCEL) == Q_RUN {
+        let tk: u64 = kstate.get(state, a + A_TOKEN)
+        if tk != handle.TOKEN_NONE {
+            handle.req_cancel(state, task, tk)
+        }
+        kstate.add(state, kstate.A_CANCELLED, 1)
+        return 1
+    }
+    return 2
+}
+
+// DER RUECKWEG DES VERWEISES, UND ER GEHT NUR HIER DURCH.
+//
+// `handle.req_end` gibt das Token zurueck. Meldet es dabei, dass mit
+// diesem Auftrag der LETZTE Verweis auf das Objekt gefallen ist (der
+// Prozess hatte sein Handle waehrenddessen geschlossen), wird der
+// Eintrag der offenen Dateien JETZT abgeraeumt -- und keine Zeile
+// frueher. Das ist Zusage A in drei Zeilen.
+fn finish(state: u64, i: u64, result: u64, endstate: u64) {
+    if i >= MAX_AIO {
+        return
+    }
+    let a: u64 = aslot(i)
+    let tk: u64 = kstate.get(state, a + A_TOKEN)
+    kstate.set(state, a + A_RES, result)
+    if tk != handle.TOKEN_NONE {
+        let weg: u64 = handle.req_end(state, tk)
+        kstate.set(state, a + A_TOKEN, handle.TOKEN_NONE)
+        if weg != 0 {
+            file.open_settle(state, weg - 1)
+        }
+    }
+    atomic.store(state + a + A_STATE, endstate)
+    if endstate == Q_DONE {
+        kstate.add(state, kstate.A_COMPLETED, 1)
+    }
+    if endstate == Q_FAIL {
+        kstate.add(state, kstate.A_FAILED, 1)
+    }
+}
+
+// ================================================ die Fertigmeldungen
+
+fn cq_used(state: u64, task: u64) -> u64 {
+    if task >= kstate.MAX_TASKS {
+        return 0
+    }
+    let h: u64 = kstate.get(state, cq(task) + CQ_HEAD)
+    let t: u64 = kstate.get(state, cq(task) + CQ_TAIL)
+    return t -% h
+}
+
+fn cq_room(state: u64, task: u64) -> u64 {
+    let u: u64 = cq_used(state, task)
+    if u >= CQ_CAP {
+        return 0
+    }
+    return CQ_CAP - u
+}
+
+fn cq_lost(state: u64, task: u64) -> u64 {
+    if task >= kstate.MAX_TASKS {
+        return 0
+    }
+    return kstate.get(state, cq(task) + CQ_LOST)
+}
+
+fn cq_clear(state: u64, task: u64) {
+    if task >= kstate.MAX_TASKS {
+        return
+    }
+    kstate.set(state, cq(task) + CQ_HEAD, 0)
+    kstate.set(state, cq(task) + CQ_TAIL, 0)
+    kstate.set(state, cq(task) + CQ_LOST, 0)
+    kstate.set(state, cq(task) + CQ_RESV, 0)
+}
+
+// Eine Fertigmeldung einstellen und den Auftragsplatz freigeben.
+//
+// Der Ring kann hier nicht ueberlaufen: `sys.aio_submit` laesst je
+// Prozess hoechstens CQ_CAP Auftraege offen, und mehr Meldungen als
+// Auftraege gibt es nicht. Der Zaehler CQ_LOST steht trotzdem da und
+// wird vom Laeufer gelesen -- eine Zusage, die niemand nachprueft, ist
+// eine Behauptung.
+fn post(state: u64, i: u64) {
+    if i >= MAX_AIO {
+        return
+    }
+    let a: u64 = aslot(i)
+    let task: u64 = kstate.get(state, a + A_OWNER) & 0xFFFFFFFF
+    if task >= kstate.MAX_TASKS {
+        release(state, i)
+        return
+    }
+    let id: u64 = make_id(i, (kstate.get(state, a + A_OWNER) >> 32) & GEN_MASK)
+    if cq_room(state, task) == 0 {
+        kstate.set(state, cq(task) + CQ_LOST,
+            kstate.get(state, cq(task) + CQ_LOST) + 1)
+        release(state, i)
+        return
+    }
+    let t: u64 = kstate.get(state, cq(task) + CQ_TAIL)
+    let e: u64 = cq(task) + CQ_HDR + (t % CQ_CAP) * C_BYTES
+    kstate.set(state, e + C_ID, id)
+    kstate.set(state, e + C_UDATA, kstate.get(state, a + A_UDATA))
+    kstate.set(state, e + C_RES, kstate.get(state, a + A_RES))
+    kstate.set(state, e + C_OP, kstate.get(state, a + A_OP))
+    kstate.set(state, cq(task) + CQ_TAIL, t +% 1)
+    kstate.add(state, kstate.A_POSTED, 1)
+    // ERST die Meldung steht, DANN wird der Platz frei. Andersherum
+    // koennte ein anderer Faden den Platz belegen, waehrend seine
+    // Kennung noch geschrieben wird.
+    release(state, i)
+    // Geweckt wird ueber die Weckfolge der Runde POLL -- dieselbe, die
+    // ein Rohr benutzt, wenn Oktette ankommen. Ein Wartender, der
+    // zwischen `nichts da` und `ich schlafe` steht, verliert damit keine
+    // Meldung; die Begruendung steht bei `sched.poll_sleep`.
+    //
+    // Aber NUR an den Eigentuemer: eine Fertigmeldung geht genau eine
+    // Aufgabe etwas an. `poll_kick` wuerde auch die vier Arbeitsfaeden
+    // wecken, und die faenden nichts.
+    sched.poll_kick_one(state, task)
+}
+
+// Die aelteste Fertigmeldung einer Aufgabe nach `out` schreiben (vier
+// Worte: Kennung, Kennzahl des Programms, Ergebnis, Art). `out` ist eine
+// KERNADRESSE; wer sie nach Ring 3 bringt, ist `sys.aio_wait`.
+fn reap_one(state: u64, task: u64, out: u64) -> bool {
+    if task >= kstate.MAX_TASKS {
+        return false
+    }
+    let h: u64 = kstate.get(state, cq(task) + CQ_HEAD)
+    if h == kstate.get(state, cq(task) + CQ_TAIL) {
+        return false
+    }
+    let e: u64 = cq(task) + CQ_HDR + (h % CQ_CAP) * C_BYTES
+    kstate.set(out, C_ID, kstate.get(state, e + C_ID))
+    kstate.set(out, C_UDATA, kstate.get(state, e + C_UDATA))
+    kstate.set(out, C_RES, kstate.get(state, e + C_RES))
+    kstate.set(out, C_OP, kstate.get(state, e + C_OP))
+    kstate.set(state, cq(task) + CQ_HEAD, h +% 1)
+    kstate.add(state, kstate.A_REAPED, 1)
+    return true
+}
+
+// ---------------------------------------------------- der Prozesstod
+//
+// ZUSAGE D. Ein Prozess stirbt mit laufenden Auftraegen -- durch `exit`,
+// durch ein Signal oder durch einen Fehler in Ring 3. Was dann NICHT
+// passieren darf:
+//
+//   * ein Arbeitsfaden schreibt in den Adressraum, den `reap` gerade
+//     freigegeben hat,
+//   * ein Token bleibt liegen und haelt einen Eintrag der offenen
+//     Dateien fuer immer am Leben,
+//   * ein Platz der Auftragstafel bleibt belegt.
+//
+// Der Weg dagegen ist derselbe, den Linux nach Jahren io_uring gegangen
+// ist: ABBRECHEN UND WARTEN. Die angelegten Auftraege werden hier
+// abgebrochen und abgeraeumt; auf die LAUFENDEN wird gewartet, weil ein
+// Faden, der mitten in einer Kopie steht, sich nicht von aussen anhalten
+// laesst. Erst wenn keiner mehr laeuft, gibt der Aufrufer den Adressraum
+// frei.
+//
+// Die Wartezeit ist begrenzt: ein Auftrag dieser Runde wird SYNCHRON
+// ausgefuehrt und ist in Millisekunden fertig. Kommt er es nicht,
+// bleibt die Aufgabe stehen, statt eine Kopie in freien Speicher laufen
+// zu lassen -- ein haengender Prozess ist besser als ein Kernel, der
+// fremde Seiten ueberschreibt.
+const DRAIN_TICKS: u64 = 500 // 5 s bei 100 Hz
+
+fn drain_task(state: u64, task: u64) -> u64 {
+    var runden: u64 = 0
+    var offen: u64 = 1
+    while offen != 0 && runden < DRAIN_TICKS {
+        offen = 0
+        var i: u64 = 0
+        while i < MAX_AIO {
+            let a: u64 = aslot(i)
+            if kstate.get(state, a + A_STATE) == Q_RUN {
+                if (kstate.get(state, a + A_OWNER) & 0xFFFFFFFF) == task {
+                    offen = offen + 1
+                }
+            }
+            i = i + 1
+        }
+        if offen != 0 {
+            sched.sleep_ticks(state, 1)
+            runden = runden + 1
+        }
+    }
+    return offen
+}
+
+fn abandon(state: u64, task: u64) {
+    if task >= kstate.MAX_TASKS {
+        return
+    }
+    // GEGENPROBE `noareap`: nichts wird abgeraeumt. Der Laeufer misst
+    // danach eine Auftragstafel, die nicht mehr leer wird, und ein
+    // Objekt, das keinen Deskriptor mehr hat und trotzdem lebt.
+    if kstate.mode_on(state, kstate.M_NOAREAP) {
+        return
+    }
+    // 1. Die noch nicht begonnenen: abbrechen, Token zurueck, Platz frei.
+    //    Die Fertigmeldung geht ins Leere -- der Prozess ist tot und
+    //    holt nichts mehr ab --, also wird sie gar nicht erst gestellt.
+    var i: u64 = 0
+    while i < MAX_AIO {
+        let a: u64 = aslot(i)
+        if (kstate.get(state, a + A_OWNER) & 0xFFFFFFFF) == task {
+            if atomic.cas(state + a + A_STATE, Q_NEW, Q_CANCEL) == Q_NEW {
+                finish(state, i, 0 -% E_CANCELED_A, Q_CANCEL)
+                release(state, i)
+                kstate.add(state, kstate.A_ABANDONED, 1)
+            }
+            if atomic.cas(state + a + A_STATE, Q_WAIT, Q_CANCEL) == Q_WAIT {
+                finish(state, i, 0 -% E_CANCELED_A, Q_CANCEL)
+                release(state, i)
+                kstate.add(state, kstate.A_ABANDONED, 1)
+            }
+        }
+        i = i + 1
+    }
+    // 2. Auf die laufenden warten. Ihre pid wird vorher auf null
+    //    gesetzt: der Arbeitsfaden sieht daran, dass er den Adressraum
+    //    dieses Prozesses NICHT MEHR ANFASSEN darf, und bricht ab, statt
+    //    in Seiten zu schreiben, die gleich frei werden.
+    var j: u64 = 0
+    while j < MAX_AIO {
+        let a: u64 = aslot(j)
+        if (kstate.get(state, a + A_OWNER) & 0xFFFFFFFF) == task {
+            if kstate.get(state, a + A_STATE) == Q_RUN {
+                kstate.set(state, a + A_PID, 0)
+                let tk: u64 = kstate.get(state, a + A_TOKEN)
+                if tk != handle.TOKEN_NONE {
+                    handle.req_cancel(state, task, tk)
+                }
+            }
+        }
+        j = j + 1
+    }
+    drain_task(state, task)
+    // 3. Alles, was jetzt noch auf diesem Namen steht -- fertig,
+    //    abgebrochen, fehlgeschlagen --, wird abgeraeumt. Der Prozess
+    //    holt es nicht mehr ab.
+    var k: u64 = 0
+    while k < MAX_AIO {
+        let a: u64 = aslot(k)
+        if kstate.get(state, a + A_STATE) != Q_FREE {
+            if (kstate.get(state, a + A_OWNER) & 0xFFFFFFFF) == task {
+                finish(state, k, 0 -% E_CANCELED_A, Q_CANCEL)
+                release(state, k)
+                kstate.add(state, kstate.A_ABANDONED, 1)
+            }
+        }
+        k = k + 1
+    }
+    cq_clear(state, task)
+}
+
+// Was ein Auftrag an Speicher kostet, in Oktett -- der Satz in der
+// Auftragstafel plus sein Platz im Fertigmeldungsring. Die Zahl steht
+// hier und nicht im Bericht, damit sie sich nicht auseinanderleben
+// koennen: der Laeufer liest sie aus dem laufenden Kernel.
+fn bytes_per_request() -> u64 {
+    return A_BYTES + C_BYTES
+}
