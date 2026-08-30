@@ -86,7 +86,7 @@ import arch.arch
 
 export {
     init, open, close, is_open, streams,
-    write, space, mix_into, out_buf, avail_out, ended, mark_end,
+    write, space, mix_into, out_buf, avail_out, ended, mark_end, reap,
     set_volume, volume, set_muted, muted, rate_of,
     frames_written, frames_read, underruns, overflows,
     mixed, clips, pumps, peak, none,
@@ -104,17 +104,37 @@ export {
 const MAX_STREAMS: u64 = 4
 const NONE: u64 = 4 // "kein Platz frei" -- absichtlich MAX_STREAMS
 
-// 4096 Rahmen je Strom = 16 KiB = 85,3 ms bei 48 kHz.
+// 16384 Rahmen je Strom = 64 KiB = 341 ms bei 48 kHz.
 //
-// WARUM GENAU SO GROSS. Der Puffer ist die Zeit, die ein Programm
-// WEGBLEIBEN darf, ohne dass eine Luecke entsteht. Der Zeitgeber dieses
-// Kernels schlaegt alle 10 ms; bei vier laufenden Aufgaben kann ein
-// Programm also rund 40 ms nicht drankommen. 85 ms sind gut das
-// Doppelte -- und zugleich klein genug, dass die Verzoegerung vom
-// Schreiben bis zum Hoeren nicht ueber ein Sechstel einer Sekunde
-// steigt (Strompuffer plus Geraetering).
-const BUF_FRAMES: u64 = 4096
-const BUF_PAGES: u64 = 4
+// WARUM GENAU SO GROSS -- und die Zahl ist zweimal geaendert worden,
+// beide Male mit einer Messung dahinter.
+//
+// DER PUFFER IST DIE ZEIT, DIE EIN PROGRAMM WEGBLEIBEN DARF, ohne dass
+// eine Luecke entsteht. Die erste Fassung nahm 4096 Rahmen (85 ms) mit
+// der Begruendung: der Zeitgeber schlaegt alle 10 ms, bei vier
+// laufenden Aufgaben kommt ein Programm rund 40 ms nicht dran, 85 ms
+// sind gut das Doppelte.
+//
+// DIE RECHNUNG STIMMT FUER DEN SCHEDULER UND NICHT FUER DAS SYSTEM.
+// Zwischen zwei Schueben eines Abspielers liegen nicht nur
+// Zeitscheiben, sondern auch: ein `read` von der Platte (bei OFS ueber
+// den Blockcache, bei einem Fehlschlag ueber den IDE-Regler), das
+// Dekodieren eines MP3-Rahmens, und -- der teuerste Posten -- die
+// Systemaufrufe selbst. GEMESSEN mit /bin/play auf einer Sekunde WAV:
+// mit 85 ms Puffer 187 Aussetzer und 23819 aufgegebene Rahmen; die
+// Datei war viereinhalb Sekunden lang statt einer.
+//
+// 341 ms sind der Wert, ab dem ein Abspieler dieses Systems unter
+// diesen Bedingungen durchkommt. ER IST GROSSZUEGIG, und das ist der
+// Handel: er kostet 64 KiB je Strom (vier Stroeme = 256 KiB) und er
+// erhoeht die Verzoegerung zwischen "das Programm schreibt" und "man
+// hoert es" auf bis zu 341 + 85 = 426 ms, WENN das Programm den Puffer
+// wirklich vollschreibt. Fuer Wiedergabe ist das unauffaellig; fuer
+// einen Tastenklick oder ein Spiel waere es zu viel -- und genau
+// deshalb gibt es daneben den EINSTROMWEG (`audio.write`), der ohne
+// diesen Puffer auskommt und bei 85 ms bleibt.
+const BUF_FRAMES: u64 = 16384
+const BUF_PAGES: u64 = 16
 
 // WIE VIEL EIN DURCHGANG HOECHSTENS MISCHT. 256 Rahmen sind 5,33 ms --
 // zwei Eintraege des Geraeterings.
@@ -703,6 +723,30 @@ fn contribute(state: u64, j: u64, n: u64, dst_hz: u64) {
 //
 // Die Notlage entscheidet die Tonschicht (sie kennt den Ringvorrat)
 // und gibt sie hier herein; `mix.fi` kennt den Ring nicht.
+// AUFRAEUMEN: Stroeme schliessen, die zu Ende sind und leer gelesen
+// wurden. EIGENE FUNKTION, und sie wird VON AUSSEN gerufen, bevor
+// irgendetwas anderes passiert.
+//
+// GEMESSEN: sie stand zuerst IN `mix_into`, hinter dessen vorzeitigen
+// Ruecksprungen -- und `mix_into` wird gar nicht erst gerufen, wenn im
+// Geraetering kein Platz ist. Ein Abspieler, der am Ende auf "keine
+// Stroeme mehr" wartet, wartete damit auf ein Aufraeumen, das nur
+// stattfand, wenn er noch etwas zu schreiben hatte. Er drehte seine
+// Warteschleife 4000 Mal leer -- viereinhalb Sekunden fuer eine
+// Sekunde Ton, und dabei lief der Regler weiter und wiederholte den
+// Ring.
+fn reap(state: u64) {
+    var i: u64 = 0
+    while i < MAX_STREAMS {
+        if is_open(state, i) && sc(state, i, M_ENDED) != 0 {
+            if sc(state, i, M_RPOS) + 1 >= sc(state, i, M_WPOS) {
+                close(state, i)
+            }
+        }
+        i = i + 1
+    }
+}
+
 fn mix_into(state: u64, max_frames: u64, dst_hz: u64, notlage: bool) -> u64 {
     var n: u64 = max_frames
     if n > CHUNK_FRAMES {
@@ -711,6 +755,7 @@ fn mix_into(state: u64, max_frames: u64, dst_hz: u64, notlage: bool) -> u64 {
     if n == 0 || dst_hz == 0 {
         return 0
     }
+    reap(state)
     // ZUERST AUFRAEUMEN, DANN RECHNEN. Stroeme, die zu Ende sind und
     // leer gelesen wurden, werden geschlossen -- und zwar HIER OBEN
     // und nicht unten hinter der Mischschleife.
@@ -723,20 +768,11 @@ fn mix_into(state: u64, max_frames: u64, dst_hz: u64, notlage: bool) -> u64 {
     // spielte drei Sekunden lang Stille, die als 1063 Aussetzer
     // gezaehlt wurde. Der TON war einwandfrei; nur die Zahl daneben
     // war es nicht.
-    var i: u64 = 0
-    while i < MAX_STREAMS {
-        if is_open(state, i) && sc(state, i, M_ENDED) != 0 {
-            if sc(state, i, M_RPOS) + 1 >= sc(state, i, M_WPOS) {
-                close(state, i)
-            }
-        }
-        i = i + 1
-    }
     var beste: u64 = 0
     var kleinste: u64 = 0xFFFFFFFFFFFFFFFF
     var offen: u64 = 0
     let jetzt: u64 = time.mono_ns(state)
-    i = 0
+    var i: u64 = 0
     while i < MAX_STREAMS {
         if is_open(state, i) {
             offen = offen + 1
@@ -798,12 +834,12 @@ fn mix_into(state: u64, max_frames: u64, dst_hz: u64, notlage: bool) -> u64 {
         z = z + 1
     }
     // 2. addieren
-    i = 0
-    while i < MAX_STREAMS {
-        if is_open(state, i) {
-            contribute(state, i, n, dst_hz)
+    var i2: u64 = 0
+    while i2 < MAX_STREAMS {
+        if is_open(state, i2) {
+            contribute(state, i2, n, dst_hz)
         }
-        i = i + 1
+        i2 = i2 + 1
     }
     // 3. begrenzen und ausgeben
     let o: u64 = out_buf(state)
