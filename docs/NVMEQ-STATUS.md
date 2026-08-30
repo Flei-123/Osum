@@ -632,8 +632,20 @@ Vorrunden und beide Übersetzer:
 | `tools/async/run.sh` | **108 / 0** |
 | `tools/handle/run.sh` | **80 / 0** |
 | `tools/poll/run.sh` | **67 / 0** |
+| `tools/posix/run.sh` | **134 / 0** |
+| `tools/kernel/run.sh` | **176 / 0** |
+| `tools/wm/run.sh` | **103 / 0** |
+| `tools/caps/run.sh` | **67 / 0** |
+| `tools/unix/run.sh` | **107 / 0** |
+| `tools/mem/run.sh` | **50 / 0** |
 | `tools/build-kernel.sh`, Stufe 0/1 | grün, 3 275 308 / 7 979 832 Oktett |
 | `tools/build-kernel.sh --ohne-tunnel`, Stufe 0/1 | grün, 3 075 968 / 7 538 540 Oktett |
+
+Das ist **die vollständige Liste aus der Aufgabenstellung**, und sie
+ist vollständig grün: async 108/0, handle 80/0, ring 120/0, poll 67/0,
+posix 134/0, kernel 176/0, wm 103/0, caps 67/0, unix 107/0, mem 50/0.
+Der Läufer dieser Runde fährt davon vier selbst (ring, async, handle,
+poll); die übrigen sechs wurden am 30.08.2026 einzeln nachgefahren.
 
 Der **GUI-lose Bau** (`--ohne-tunnel`) und der volle Bau übersetzen
 beide mit beiden Übersetzern; die Größenunterschiede sind die
