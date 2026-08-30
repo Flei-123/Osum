@@ -11,6 +11,14 @@ unveraendert; keiner von beiden ist ein Auszug des anderen.
 * **Teil B -- Platte.** Welche Platte Osum findet, was die
   Firmware-Einstellung "SATA MODE" aendert, der IDE/PIO-Rueckfallweg.
 
+**NACHTRAG, RUNDE AML (30.08.2026).** Die Zeile "ACPI/Strom" in der
+Tabelle unten war seit Runde HWNET die gefaehrlichste offene Stelle
+dieser Datei: ohne AML-Interpreter kam die Unterbrechungsleitung eines
+PCI-Geraets aus dem Register 0x3C, einem Notizzettel der Firmware. Runde
+AML hat den Interpreter gebaut; die Zeile ist entsprechend neu
+geschrieben. Der Rest der Tabelle ist unveraendert und weiterhin
+ausschliesslich in QEMU gemessen.
+
 ---
 
 ## TEIL A -- NETZ
@@ -47,7 +55,7 @@ macht, steht es in der Zeile.
 | **Eingabe, PS/2** | `kernel/kbd.fi` (Port 0x60, IRQ 1), `kernel/ps2m.fi` (Maus) | unverändert | -- | Auf Desktops fast immer noch da (der 8042 lebt im Chipsatz weiter). **Auf vielen modernen Laptops NICHT**: dort hängt die Tastatur an einem internen USB- oder I²C-HID-Gerät |
 | **Eingabe, USB-HID** | `kernel/xhci.fi` + `kernel/usb.fi`: xHCI, Geräteaufzählung, HID-Boot-Protokoll für Tastatur UND Maus, umgesetzt in PS/2-Abtastcodes (`usb.fi` Zeile 37 ff.) | unverändert | Keine HID-Report-Deskriptoren (nur das Boot-Protokoll), kein I²C-HID, kein Touchpad-Protokoll (Präzisions-Touchpads melden über Report-Deskriptoren) | USB-Tastatur/Maus: geht über das Boot-Protokoll. Laptop-Touchpad über I²C-HID: geht NICHT |
 | **USB-Hostcontroller** | `kernel/xhci.fi` (xHCI 1.0, Klasse 0C:03:30) | unverändert | EHCI/UHCI/OHCI (alte Ports), USB-3-Hubs in der Tiefe, Isochronübertragungen | Jeder Rechner seit ~2012 hat xHCI, meist Intel/AMD im Chipsatz. Das ist der richtige und einzige nötige Controller |
-| **ACPI/Strom** | `kernel/acpi.fi`: RSDP-Suche, RSDT/XSDT, MADT (Prozessoren, I/O-APIC), FADT für das Abschalten. `kernel/pwr.fi`: C-Zustände, P-Zustände über MSR, `kernel/batt.fi`: Akku über die ACPI-Tabellen | unverändert | KEIN AML-Interpreter. Ohne den gibt es kein `_PRT` (Interrupt-Routing der PCI-Steckplätze), kein `_CRS`, keine Thermalzonen-Ereignisse, kein Deckelschalter, kein sauberes S3 | Genau hier wird es auf echter Hardware ernst: die Zuordnung PCI-Steckplatz → GSI kommt auf einem echten Brett aus dem AML-Objekt `_PRT`. Diese Runde liest stattdessen das Interrupt-Line-Register aus der Konfiguration (was die Firmware ausgefüllt hat). Das ist auf den meisten Brettern richtig und auf manchen nicht |
+| **ACPI/Strom** | `kernel/acpi.fi`: RSDP-Suche, RSDT/XSDT, MADT (Prozessoren, I/O-APIC), FADT für das Abschalten. `kernel/pwr.fi`: C-Zustände, P-Zustände über MSR, `kernel/batt.fi`: Akku über die ACPI-Tabellen. **RUNDE AML: dazu ein AML-Interpreter** (`aml.fi`, `amlns.fi`, `amlobj.fi`, `amlev.fi`, 4024 Zeilen) | **`_PRT` wird ausgewertet** und ersetzt das Interrupt-Line-Register; `_CRS`/`_PRS`/`_SRS`/`_STA` der Link-Geräte; OperationRegion für SystemMemory, SystemIO und PCI_Config. In QEMU gemessen: DSDT in 1,5 ms geparst, 346 Namen, `_PRT` in 4,8 ms, 128 Einträge, 100 % der dort vorkommenden Opcodes, und der Unterbrechungsvektor kommt wirklich an (13 Unterbrechungen mit der Leitung aus `_PRT`, **0** mit der um eins verschobenen) | GPE/`_Lxx`/`_Exx` (Deckelschalter, Netzteil-Ereignisse), S3, `EmbeddedControl` (damit auch `_BST` auf einem echten Laptop), `IndexField`/`BankField`, `_PRT` von PCI-zu-PCI-Brücken | Die Zuordnung PCI-Steckplatz → GSI kommt jetzt aus derselben Quelle wie bei Linux und Windows. **Der alte Weg über 0x3C bleibt als Rückfall** — schlägt AML fehl (kaputte Tabelle, unbekannter Opcode, Grenze gerissen), fährt die Maschine mit dem Verhalten von vorher weiter und sagt es auf der seriellen Leitung. Was auf echter Hardware trotzdem schiefgehen kann, steht in `docs/ROUNDAML.md` Abschnitt 8 — elf Punkte, ehrlich aufgezählt |
 | **TPM** | nichts im Kernel. `kernel/user/key.fi` und `bsec.fi` nennen TPM nur in Kommentaren als das, was es NICHT benutzt | unverändert | TPM-2.0-Treiber (TIS/CRB auf 0xFED40000), PCR-Erweiterung, Versiegeln | Auf jedem Rechner seit 2016 vorhanden (fTPM in der CPU oder dTPM). Für Justins Zweck (Helfer, Update) NICHT nötig; für „Schlüssel, den man nicht wegtragen kann" schon |
 | **Ton** | nichts. Kein `hda.fi`, kein `ac97.fi` | unverändert | ALLES: HD-Audio-Controller, Codec-Aufzählung, Widget-Graph, Streams | Intel HDA (Klasse 04:03:00) auf praktisch jedem Brett. Für Justins Zweck nicht nötig |
 
