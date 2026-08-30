@@ -616,7 +616,8 @@ export FIRNLIB="$ROOT/lib"
 #      Pfad, um den sich zwei streiten koennten. Die Protokolle gehen nach
 #      .test-work/<name>.log, und die Namen sind paarweise verschieden.
 #
-#   2. DAS NETZ. Vier Abschnitte -- net, netmon, netview und tunnel --
+#   2. DAS NETZ. Fuenf Abschnitte -- net, netmon, netview, tunnel und
+#      netprofil --
 #      bauen sich eine Netzwerk-Namensraum und ein veth-Paar. Die Namen
 #      haengen zwar an $$ (k8net-$$, nv0-$$ ...), aber:
 #        * net und netview nennen das ferne Ende BEIDE `v1`, und zwischen
@@ -625,7 +626,11 @@ export FIRNLIB="$ROOT/lib"
 #          treffen, geben "RTNETLINK answers: File exists".
 #        * netmon und netview rechnen ihren Anschluss BEIDE als
 #          5800 + ($$ % 90) * 2 aus -- derselbe Wert ist moeglich.
-#      Darum laufen genau diese vier untereinander SERIELL, ueber eine
+#        * netprofil (Runde NETPROFIL) macht dasselbe und startet
+#          zusaetzlich ein tcpdump und ein `busybox udhcpd` am fernen
+#          Ende -- beide an einem Namensraum, den ein zweiter Lauf
+#          wegreissen kann.
+#      Darum laufen genau diese fuenf untereinander SERIELL, ueber eine
 #      Sperre (flock). Zu allem anderen laufen sie weiterhin gleichzeitig.
 #      Entschaerft wird dabei nichts: jeder der vier macht genau das, was
 #      er vorher gemacht hat.
@@ -654,7 +659,14 @@ NUR=${OSUM_NUR:-}
 
 # Diese Abschnitte teilen sich Namen im Netz des Wirts und bleiben
 # untereinander seriell. Siehe Punkt 2 oben.
-SERIELL_RE='^tools/(net|netmon|netview|tunnel)/'
+# RUNDE NETPROFIL: `netprofil` gehoert in dieselbe Reihe. Er baut
+# denselben Namensraum und dasselbe veth-Paar, er rechnet seinen
+# Anschluss aus $$ aus, und er startet zusaetzlich ein `tcpdump` und ein
+# `busybox udhcpd` auf dem fernen Ende. Zwei solche Laeufe gleichzeitig
+# heisst: der zweite reisst dem ersten den Namensraum weg. Ohne diese
+# Zeile waere der Abschnitt ein Flatterer, und ein Flatterer ist
+# schlimmer als ein roter Abschnitt -- er wird weggeklickt.
+SERIELL_RE='^tools/(net|netmon|netview|tunnel|netprofil)/'
 # Die Sperre liegt ABSICHTLICH ausserhalb des Arbeitsbaums (/tmp und nicht
 # .test-work): auf diesem Wirt stehen mehrere Arbeitsbaeume desselben
 # Repos nebeneinander, und `ip netns` und `ip link` gehoeren dem WIRT,

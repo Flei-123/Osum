@@ -321,11 +321,31 @@ has "$U" "class=02:00:00 network" "the card is class 02:00 (ethernet)"
 grep -qaE 'class=02:00:00 network .*  msix' "$U" \
     && ok "the capability list says MSI-X" || bad "no MSI-X on the card"
 # The four regions and the feature negotiation are what makes it MODERN.
-# 0x100010020 = VIRTIO_NET_F_MAC (5) | VIRTIO_NET_F_STATUS (16) |
+# 0x100830020 = VIRTIO_NET_F_MAC (5) | VIRTIO_NET_F_STATUS (16) |
+# VIRTIO_NET_F_CTRL_VQ (17) | VIRTIO_NET_F_CTRL_MAC_ADDR (23) |
 # VIRTIO_F_VERSION_1 (32). Without bit 32 nothing this driver computes
 # would be at the right offset, and `negotiate` refuses.
-has "$U" "nic: queue=64  features=0x100010020  irq=msix  master=1" \
-    "virtio 1.0 negotiated: VERSION_1 + MAC + STATUS, 64 descriptors, MSI-X, bus master"
+#
+# ROUND NETPROFIL CHANGED THIS NUMBER, and the change is the point of
+# that round rather than a side effect. It used to be 0x100010020 -- MAC,
+# STATUS and VERSION_1 and nothing else. Two more bits were added:
+#
+#   CTRL_VQ (17)        a third queue, for commands
+#   CTRL_MAC_ADDR (23)  and the one command that round needs, MAC_ADDR_SET
+#
+# WHY THEY ARE NEEDED AT ALL: a modern virtio device treats the address
+# in its configuration region as read-only for the driver. QEMU takes a
+# write to it in `virtio_net_set_config` only while neither
+# CTRL_MAC_ADDR nor VERSION_1 has been negotiated -- and this driver
+# negotiates VERSION_1 two lines up. So writing there is measured to do
+# nothing (write, read back, old address), and the command on the third
+# queue is the way. `tools/netprofil/run.sh` measures both.
+#
+# THE COUNTER-TEST IS IN THE SAME KERNEL: with the word `nomacvq` the two
+# bits are not asked for, the number goes back to 0x100010020, and the
+# card measurably cannot change its own address any more.
+has "$U" "nic: queue=64  features=0x100830020  irq=msix  master=1" \
+    "virtio 1.0 negotiated: VERSION_1 + MAC + STATUS + CTRL_VQ + CTRL_MAC_ADDR, 64 descriptors, MSI-X, bus master"
 has "$U" "mac=52:54:00:aa:bb:cc" \
     "the Ethernet address was READ OUT OF THE DEVICE and is the one QEMU was given"
 has "$U" "net:  ip=10.9.0.2" "the stack of round K3 stands, with the address off the command line"
