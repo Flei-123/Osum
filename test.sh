@@ -1139,10 +1139,29 @@ lauf "30. der Fernzugang: SSH-2 gegen den echten OpenSSH-Klienten (tools/sshd/ru
 lauf "31. ein Abbild fuer echtes Blech: BIOS und UEFI, Diagnose, deutscher Schreibtisch (tools/usbimg/run.sh, Runde USBIMG)" \
      tools/usbimg/run.sh usbimg '^USBIMG: |^ +(kern|programme|symbole|wurzel|geprueft|umlaute) +[0-9]'
 
+# RUNDE MERGE-2: VORGEZOGEN. Der Abschnitt stand HINTER
+# `abschnitte_abarbeiten` und lief im parallelen Betrieb nie --
+# derselbe Merge-Schaden wie bei serverbuild, multiuser, init,
+# fsrobust und sshd. Die Wache in `lauf` faengt ihn jetzt ab.
+# ABSCHNITT 29 -- RUNDE UMLAUT2. Im Starter stand "Text schreiben und
+# aendern", waehrend zwei Zeilen tiefer "Ausführen" schon richtig war.
+# Runde LOOK hat den Satz geholt und einen Pruefer gebaut, der
+# `locale/de/*` liest -- und genau daran lag es: DIE BESCHRIFTUNGEN DER
+# PROGRAMME STEHEN IM QUELLTEXT, und dorthin sah kein Pruefer. Dieser
+# Abschnitt teilt jede Zeichenkette von `kernel/**` in Bildschirmtext,
+# Mitschnitt und getippte Marke, verlangt fuer die erste Klasse echte
+# Umlaute, misst die Beschriftungsspalten in ZEICHEN statt in Oktett --
+# und weist am Bild nach, dass die Glyphen wirklich auf dem Schirm
+# stehen, Tintenpunkt fuer Tintenpunkt. Jede Zusage hat eine
+# Gegenprobe: ein Pruefer, der nicht rot werden kann, prueft nichts.
+lauf "29. echte Umlaute ueberall, wo Text auf dem Schirm steht (tools/umlaut/run.sh, Runde UMLAUT2)" \
+     tools/umlaut/run.sh umlaut '^UMLAUT2: |^     (translit|quellen|marken|spalten|puffer|schriftprobe|Beschleuniger)|^  OK    (SICHTBARE|Umschrift in|GEGENPROBE|GEGEN-GEGENPROBE|keys=|der Pruefer findet|Marken mit|Beschriftungen|Zeichenketten passen|verschiedene Zeichen|passwd zaehlt|die Einstellungen zaehlen|die Zeile steht|starter:|einstellungen:|speicher:|der Speicher-Dialog|die Spalte|\[)'
+
 # Hier laufen die angemeldeten Abschnitte -- bei OSUM_JOBS=1 sind sie
 # oben schon gelaufen und das hier tut nichts.
 abschnitte_abarbeiten
 ABGEARBEITET=1
+
 
 
 

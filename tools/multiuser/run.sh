@@ -657,7 +657,7 @@ echo "== 11. passwd: ueber eine Zwischendatei, /etc/shadow bleibt 0o600 root =="
 run_case pw "$TMPD/d0.img" "osum $BASIS script=sh /t/passwd.sh"
 rc=$RC
 P="$TMPD/pw.txt"
-has "$P" "passwd: gesetzt fuer justin" "passwd meldet Erfolg"
+has "$P" "passwd: gesetzt für justin" "passwd meldet Erfolg"
 python3 tools/osum/mkfs.py cat "$TMPD/live-pw.img" /etc/shadow > "$TMPD/shadow.neu" 2>&1
 python3 - "$TMPD/shadow.neu" <<'PY' > "$TMPD/pwcheck.txt" 2>&1
 import binascii, hashlib, sys
