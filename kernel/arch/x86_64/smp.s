@@ -91,10 +91,35 @@ ap_prot32:
     movl AP_PARAM + P_CR3, %eax
     movl %eax, %cr3
 
-    /* EFER.LME */
+    /* EFER.LME -- und seit Runde HAERTUNG auch EFER.NXE.
+     *
+     * WARUM NXE HIER STEHEN MUSS, und was ohne es passiert: der
+     * Startprozessor schaltet NXE in `user.setup`. Dieser Kern hier tut
+     * das nicht, und bis Runde HAERTUNG fiel das nicht auf, weil in der
+     * Identitaetsabbildung kein einziges Bit 63 gesetzt war. Seit dem
+     * W^X-Durchgang ist es in fast jeder Kachel gesetzt -- und bei
+     * NXE=0 ist Bit 63 kein "nicht ausfuehrbar", sondern ein
+     * RESERVIERTES Bit. Ein reserviertes Bit in einem
+     * Seitentabelleneintrag macht JEDEN Zugriff darauf zu einem
+     * Seitenfehler (err Bit 3). Der Kern kam mit `-smp 4` bis
+     * `smp: apic=0 1 2 3` und blieb dann stehen: die weiteren Kerne
+     * fielen ueber die Bits, die sie schuetzen sollten.
+     *
+     * CPUID statt blind setzen: auf einer Maschine ohne NX waere
+     * `wrmsr` mit NXE ein #GP. Blatt 0x80000001, EDX Bit 20 -- dieselbe
+     * Abfrage, die `user.cpu_has_nx` fuer den Startprozessor macht.
+     * `cpuid` verwirft eax..edx, deshalb steht es VOR dem `movl` fuer
+     * `rdmsr`, und das Ergebnis wird in ebx aufgehoben. */
+    movl $0x80000001, %eax
+    cpuid
+    movl %edx, %ebx
     movl $0xC0000080, %ecx
     rdmsr
     orl  $(1 << 8), %eax
+    testl $(1 << 20), %ebx
+    jz 2f
+    orl  $(1 << 11), %eax
+2:
     wrmsr
 
     /* Paging on -- from this instruction the core is in compatibility

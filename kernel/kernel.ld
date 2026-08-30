@@ -29,6 +29,13 @@ SECTIONS
 
     .text : ALIGN(4K)
     {
+        /* RUNDE HAERTUNG: `__text_begin` ist die erste Seite des
+         * Kerncodes. Der W^X-Durchgang macht alles von hier bis
+         * `__user_begin` lesbar und ausfuehrbar, aber NICHT schreibbar --
+         * und alles ausserhalb schreibbar, aber NICHT ausfuehrbar. Ohne
+         * ein Symbol dafuer muesste die Grenze im Quelltext stehen, und
+         * dann waere sie beim naechsten Verschieben falsch. */
+        __text_begin = .;
         *(.multiboot)
         *(.text.boot)
         *(EXCLUDE_FILE(*uprog*.o) .text)
@@ -84,6 +91,9 @@ SECTIONS
     }
 
     .rodata : ALIGN(4K) { *(.rodata .rodata.*) }
+    /* RUNDE HAERTUNG: ab hier ist alles Daten -- schreibbar und mit
+     * gesetztem NX-Bit. Davor (.rodata) ist es nur lesbar. */
+    __data_begin = .;
     .data   : ALIGN(4K) { *(.data .data.*) }
     .bss    : ALIGN(4K) { *(COMMON) *(.bss .bss.*) }
 

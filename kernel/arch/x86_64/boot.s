@@ -217,7 +217,22 @@ boot_stack_bottom:
     .skip 16384
 boot_stack_top:
 
-    .align 16
+    /* RUNDE HAERTUNG: eine WACHSEITE unter diesem Stapel.
+     *
+     * Die vier festen Stapel dieses Kerns lagen bis hierher unmittelbar
+     * hintereinander in .bss, auf 16 ausgerichtet. Lief einer ueber,
+     * schrieb er in den naechsten -- oder in `kdata`, die Zustandsregion
+     * des ganzen Kerns. Kein Absturz, keine Meldung, nur falsche Werte
+     * an einer Stelle, die mit der Ursache nichts zu tun hat.
+     *
+     * Eine ganze Seite, auf 4096 ausgerichtet, und der Kern nimmt sie
+     * nach dem Hochlaufen aus der Abbildung (`hard.static_guards`). Ab
+     * da ist ein Ueberlauf ein Seitenfehler mit einer Adresse, die man
+     * lesen kann. Der Preis sind vier Seiten .bss. */
+    .align 4096
+    .globl kstack_guard
+kstack_guard:
+    .skip 4096
 kernel_stack_bottom:
     .skip 65536
     .globl kernel_stack_top
@@ -225,13 +240,43 @@ kernel_stack_top:
 
     /* Own stacks for the double fault (IST1) and for `syscall`: a fault
      * whose cause is a broken rsp cannot be reported on that same rsp. */
-    .align 16
+    /* RUNDE HAERTUNG: eine WACHSEITE unter diesem Stapel.
+     *
+     * Die vier festen Stapel dieses Kerns lagen bis hierher unmittelbar
+     * hintereinander in .bss, auf 16 ausgerichtet. Lief einer ueber,
+     * schrieb er in den naechsten -- oder in `kdata`, die Zustandsregion
+     * des ganzen Kerns. Kein Absturz, keine Meldung, nur falsche Werte
+     * an einer Stelle, die mit der Ursache nichts zu tun hat.
+     *
+     * Eine ganze Seite, auf 4096 ausgerichtet, und der Kern nimmt sie
+     * nach dem Hochlaufen aus der Abbildung (`hard.static_guards`). Ab
+     * da ist ein Ueberlauf ein Seitenfehler mit einer Adresse, die man
+     * lesen kann. Der Preis sind vier Seiten .bss. */
+    .align 4096
+    .globl dfstack_guard
+dfstack_guard:
+    .skip 4096
 df_stack_bottom:
     .skip 16384
     .globl df_stack_top
 df_stack_top:
 
-    .align 16
+    /* RUNDE HAERTUNG: eine WACHSEITE unter diesem Stapel.
+     *
+     * Die vier festen Stapel dieses Kerns lagen bis hierher unmittelbar
+     * hintereinander in .bss, auf 16 ausgerichtet. Lief einer ueber,
+     * schrieb er in den naechsten -- oder in `kdata`, die Zustandsregion
+     * des ganzen Kerns. Kein Absturz, keine Meldung, nur falsche Werte
+     * an einer Stelle, die mit der Ursache nichts zu tun hat.
+     *
+     * Eine ganze Seite, auf 4096 ausgerichtet, und der Kern nimmt sie
+     * nach dem Hochlaufen aus der Abbildung (`hard.static_guards`). Ab
+     * da ist ein Ueberlauf ein Seitenfehler mit einer Adresse, die man
+     * lesen kann. Der Preis sind vier Seiten .bss. */
+    .align 4096
+    .globl systack_guard
+systack_guard:
+    .skip 4096
 syscall_stack_bottom:
     .skip 16384
     .globl syscall_stack_top
@@ -241,7 +286,22 @@ syscall_stack_top:
      * has to be one of its own -- the kernel stack still carries the
      * frames of the function that entered ring 3, and an interrupt would
      * write over them. */
-    .align 16
+    /* RUNDE HAERTUNG: eine WACHSEITE unter diesem Stapel.
+     *
+     * Die vier festen Stapel dieses Kerns lagen bis hierher unmittelbar
+     * hintereinander in .bss, auf 16 ausgerichtet. Lief einer ueber,
+     * schrieb er in den naechsten -- oder in `kdata`, die Zustandsregion
+     * des ganzen Kerns. Kein Absturz, keine Meldung, nur falsche Werte
+     * an einer Stelle, die mit der Ursache nichts zu tun hat.
+     *
+     * Eine ganze Seite, auf 4096 ausgerichtet, und der Kern nimmt sie
+     * nach dem Hochlaufen aus der Abbildung (`hard.static_guards`). Ab
+     * da ist ein Ueberlauf ein Seitenfehler mit einer Adresse, die man
+     * lesen kann. Der Preis sind vier Seiten .bss. */
+    .align 4096
+    .globl irqstack_guard
+irqstack_guard:
+    .skip 4096
 irq_stack_bottom:
     .skip 16384
     .globl irq_stack_top

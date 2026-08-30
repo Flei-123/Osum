@@ -31,6 +31,7 @@ import kstate
 import mem
 import atomic
 import cpu
+import hard
 
 export {
     init, create, start, schedule, on_tick, yield_now, sleep_ticks,
@@ -779,10 +780,31 @@ fn frame_build(state: u64, ktop: u64, entry: u64, a0: u64, a1: u64,
 // is the simplest one that cannot deadlock: NO LOCK IS EVER HELD WHILE
 // ANOTHER IS TAKEN.
 fn create(state: u64, kind: u64, prio: u64, arg: u64, entry: u64) -> u64 {
-    let stack: u64 = mem.frame_run(state, KSTACK_FRAMES)
-    if stack == 0 {
+    // ================== RUNDE HAERTUNG: EIN RAHMEN MEHR, UND ER BLEIBT LEER
+    //
+    // Bis hierher waren acht Rahmen am Stueck der Kernstapel, und was
+    // darunter lag, gehoerte irgendwem. Laeuft ein Stapel ueber, schreibt
+    // er dort hinein -- kein Absturz, keine Meldung, nur ein Nachbar, der
+    // spaeter falsche Werte liest. Das ist die unangenehmste Art Fehler,
+    // die ein Kern haben kann.
+    //
+    // Jetzt wird EIN Rahmen mehr geholt, und der UNTERSTE wird aus der
+    // Identitaetsabbildung genommen (`hard.guard_under`). Er bleibt dem
+    // Rahmenverwalter entzogen -- niemand sonst bekommt ihn --, aber es
+    // gibt keine Abbildung mehr auf ihn. Wer dort hinschreibt, bekommt
+    // einen Seitenfehler mit einer Adresse, die man lesen kann.
+    //
+    // WAS DAS NICHT FAENGT, ausdruecklich: einen Rahmen, der die Wache
+    // UEBERSPRINGT. Ein einziger Zugriff 4096 Oktette unterhalb des
+    // Stapelzeigers landet dahinter. Dagegen hilft nur ein Wachwert je
+    // Rahmen, und den muesste der Uebersetzer legen; das steht in
+    // docs/HAERTUNG.md als offene Kante.
+    let run: u64 = mem.frame_run(state, KSTACK_FRAMES + 1)
+    if run == 0 {
         return 0
     }
+    let stack: u64 = run + mem.FRAME_SIZE
+    hard.guard_under(state, run)
     let flags: u64 = irq_save()
     atomic.lock_take(state, atomic.L_SCHED, cpu.here(state))
     var i: u64 = 1
@@ -801,12 +823,21 @@ fn create(state: u64, kind: u64, prio: u64, arg: u64, entry: u64) -> u64 {
         free_stack(state, stack)
         return 0
     }
-    let ktop: u64 = stack + KSTACK_FRAMES * mem.FRAME_SIZE
+    // RUNDE HAERTUNG: der Deckel des Stapels wird um einen zufaelligen,
+    // auf 16 ausgerichteten Betrag nach unten geschoben. Damit liegt
+    // JEDE Ruecksprungadresse dieser Aufgabe an einer anderen Stelle als
+    // beim letzten Start. Was das bringt und was nicht, steht in
+    // docs/HAERTUNG.md -- gegen ROP auf feste Code-Adressen hilft es
+    // nicht, gegen das Wiederfinden abgelegter Zeiger schon.
+    let voll: u64 = stack + KSTACK_FRAMES * mem.FRAME_SIZE
+    let versatz: u64 = hard.aslr_off(state)
+    let ktop: u64 = voll - versatz
+    kstate.set(state, kstate.KSTACK_RND, versatz)
     // ROUND K1: paint it, so that afterwards it can be said how much of
     // it was ever used. `frame_build` writes over the top 136 octets of
     // this in a moment; everything below is the measurement.
     var w: u64 = stack
-    while w < ktop {
+    while w < voll {
         __mmio_write64(w as *mut u64, STACK_PAINT)
         w = w + 8
     }
@@ -903,7 +934,14 @@ fn clear_signals(state: u64, i: u64) {
     tset(state, i, T_TGID, pid)
 }
 
+// RUNDE HAERTUNG: die Wachseite liegt EINEN Rahmen unter dem Stapel und
+// gehoert dazu. Sie muss erst wieder abgebildet werden (sonst faellt der
+// naechste, der diesen Rahmen bekommt, auf ein Loch) und dann
+// freigegeben -- sonst waere jede beendete Aufgabe ein Rahmen weniger.
 fn free_stack(state: u64, stack: u64) {
+    let wache: u64 = stack - mem.FRAME_SIZE
+    hard.unguard(state, wache)
+    mem.frame_free(state, wache)
     var k: u64 = 0
     while k < KSTACK_FRAMES {
         mem.frame_free(state, stack + k * mem.FRAME_SIZE)
