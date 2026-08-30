@@ -1,0 +1,271 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// lib/wlan/kanal.fi -- Kanaele, Frequenzen und was in Europa erlaubt ist.
+//
+// ==================================================================
+// WARUM DIESE DATEI ERNSTER IST, ALS SIE AUSSIEHT
+// ==================================================================
+//
+// Alles andere in dieser Runde ist Rechnen. Das hier ist Recht. Ein
+// Rechner, der auf einem Kanal sendet, der ihm nicht zusteht, oder mit
+// mehr Leistung, als ihm zusteht, ist kein Fehler -- er ist ein
+// Rechtsverstoss. In Oesterreich und im ganzen EWR gilt dafuer die
+// Funkanlagenrichtlinie 2014/53/EU, und die verweist auf harmonisierte
+// Normen:
+//
+//   EN 300 328    2400-2483,5 MHz. Der Bereich, den jeder "2,4 GHz"
+//                 nennt.
+//   EN 301 893    5150-5350 und 5470-5725 MHz.
+//   EN 303 687    5945-6425 MHz ("6 GHz", WiFi 6E).
+//
+// ==================================================================
+// DAS MUSS DASTEHEN, BEVOR IRGENDJEMAND DAS HIER BENUTZT
+// ==================================================================
+//
+// DIESE TABELLE IST AUS DEN NORMTEXTEN ABGESCHRIEBEN UND NICHT GEGEN
+// EINEN KONFORMITAETSBERICHT GEPRUEFT. Sie ist nach bestem Wissen
+// richtig und sie ist nicht beglaubigt. Solange Osum keinen
+// WLAN-Treiber hat, sendet nichts, und dann ist sie unschaedlich. In
+// dem Augenblick, in dem ein Treiber dazukommt, gehoert sie gegen die
+// GELTENDE Fassung der drei Normen geprueft -- Frequenzbereiche und
+// Leistungsgrenzen aendern sich, das 6-GHz-Band ist juenger als manche
+// Geraete im Haus.
+//
+// Und der zweite Satz dazu, der genauso wichtig ist: DIE KARTE HAT IHRE
+// EIGENE TABELLE. Intel-Karten tragen ihre Regulatorik in der PNVM
+// (`iwlwifi-*-a0.pnvm`) und lassen sich per LAR ("Location Aware
+// Regulatory") vom Treiber auf ein Land setzen. Was die Firmware
+// verbietet, sendet auch dann nicht, wenn diese Tabelle es erlaubt --
+// und umgekehrt darf diese Tabelle NIE mehr erlauben als die Firmware.
+// Der richtige Aufbau ist der Schnitt aus beidem. Diese Datei ist erst
+// die Haelfte davon; die andere steht in `docs/WLAN-BEFUND.md` in der
+// Fortsetzungsliste unter Punkt 9.
+//
+// ==================================================================
+// WAS "ERLAUBT" HIER HEISST
+// ==================================================================
+//
+//   dbm         die groesste zulaessige Strahlungsleistung (EIRP) in
+//               ganzen dBm. 20 dBm sind 100 mW, 23 dBm sind 200 mW,
+//               30 dBm sind 1 W.
+//   dfs         Radarerkennung ist Pflicht. Ohne eine Umsetzung von DFS
+//               darf auf diesem Kanal NICHT gesendet werden -- der
+//               Kanal wird deshalb hier zwar als erlaubt gemeldet, aber
+//               `darf_senden` sagt nein, solange DFS fehlt.
+//   nur_innen   nur in geschlossenen Raeumen.
+//   nur_passiv  es darf nicht von sich aus gesucht werden (keine Probe
+//               Request), sondern nur zugehoert werden, bis ein Beacon
+//               kommt. Gilt fuer alle DFS-Kanaele.
+
+export {
+    Regel, regel_new, etsi_regel, darf_senden, darf_aktiv_suchen,
+    zu_frequenz, aus_frequenz, band_von_frequenz,
+    BAND_24, BAND_5, BAND_6, DFS_FEHLT
+}
+
+const BAND_24: u64 = 1
+const BAND_5: u64 = 2
+const BAND_6: u64 = 3
+
+// Solange es keine Radarerkennung gibt, ist sie NICHT da. Diese
+// Konstante steht hier, damit die Stelle, an der sie einmal auf `false`
+// wechselt, genau eine ist.
+const DFS_FEHLT: bool = true
+
+struct Regel {
+    dbm: u64,
+    dfs: bool,
+    nur_innen: bool,
+    nur_passiv: bool,
+}
+
+fn regel_new() -> Regel {
+    return Regel { dbm: 0, dfs: false, nur_innen: false,
+        nur_passiv: false }
+}
+
+// ------------------------------------------------- Kanal -> Frequenz
+//
+// 2,4 GHz: Kanal 1 liegt auf 2412 MHz, jeder weitere 5 MHz hoeher.
+// Kanal 14 ist der Ausreisser -- er liegt auf 2484 und nicht auf 2477,
+// und er ist ohnehin nur in Japan zugelassen.
+//
+// 5 GHz: 5000 + 5 * Kanal. Das gilt geradlinig von Kanal 32 bis 177.
+//
+// 6 GHz: 5950 + 5 * Kanal, mit einem einzigen Ausreisser: Kanal 2 liegt
+// auf 5935 MHz. Der Bereich unter 5950 gehoert nicht mehr zu 6 GHz, und
+// deshalb ist Kanal 2 die Ausnahme und nicht Kanal 1.
+//
+// Rueckgabe -1: dieser Kanal gibt es in diesem Band nicht.
+fn zu_frequenz(kanal: u64, band: u64) -> i64 {
+    if band == BAND_24 {
+        if kanal >= 1 && kanal <= 13 {
+            return (2407 + kanal * 5) as i64
+        }
+        if kanal == 14 {
+            return 2484
+        }
+        return -1
+    }
+    if band == BAND_5 {
+        if kanal >= 32 && kanal <= 177 {
+            return (5000 + kanal * 5) as i64
+        }
+        return -1
+    }
+    if band == BAND_6 {
+        if kanal == 2 {
+            return 5935
+        }
+        if kanal >= 1 && kanal <= 233 {
+            return (5950 + kanal * 5) as i64
+        }
+        return -1
+    }
+    return -1
+}
+
+// ------------------------------------------------- Frequenz -> Kanal
+//
+// Die Umkehrung ist NICHT eindeutig, und das ist keine Nachlaessigkeit
+// der Norm, sondern der Grund, warum ein Kanal immer mit seinem Band
+// genannt gehoert: "Kanal 2" ist im 2,4-GHz-Band 2417 MHz und im
+// 6-GHz-Band 5935 MHz. Diese Funktion loest das ueber die Frequenz --
+// die ist eindeutig -- und gibt die Kanalnummer zurueck; wer das Band
+// braucht, ruft `band_von_frequenz`.
+fn aus_frequenz(mhz: u64) -> i64 {
+    if mhz == 2484 {
+        return 14
+    }
+    if mhz >= 2412 && mhz <= 2472 && (mhz - 2412) % 5 == 0 {
+        return ((mhz - 2412) / 5 + 1) as i64
+    }
+    if mhz == 5935 {
+        return 2
+    }
+    if mhz >= 5160 && mhz <= 5885 && mhz % 5 == 0 {
+        return ((mhz - 5000) / 5) as i64
+    }
+    if mhz >= 5955 && mhz <= 7115 && (mhz - 5950) % 5 == 0 {
+        return ((mhz - 5950) / 5) as i64
+    }
+    return -1
+}
+
+fn band_von_frequenz(mhz: u64) -> u64 {
+    if mhz >= 2400 && mhz <= 2500 {
+        return BAND_24
+    }
+    if mhz >= 5150 && mhz <= 5895 {
+        return BAND_5
+    }
+    if mhz >= 5925 && mhz <= 7125 {
+        return BAND_6
+    }
+    return 0
+}
+
+// ==================================================================
+// DIE ETSI-TABELLE
+// ==================================================================
+//
+// Rueckgabe `false` heisst: dieser Kanal ist in Europa NICHT zugeteilt.
+// Dann steht in `r` nichts Brauchbares.
+//
+// 2,4 GHz (EN 300 328): Kanaele 1 bis 13, 20 dBm EIRP, keine
+// Radarerkennung, innen wie aussen. KANAL 14 IST IN EUROPA NICHT
+// ZUGETEILT -- er steht in der Kanaltabelle oben, weil ein Beacon aus
+// Japan ihn nennen kann, und er wird hier abgelehnt.
+//
+// 5 GHz (EN 301 893):
+//   5150-5250  Kanaele 36, 40, 44, 48     23 dBm, nur innen
+//   5250-5350  Kanaele 52, 56, 60, 64     23 dBm, nur innen, DFS + TPC
+//   5470-5725  Kanaele 100 bis 140        30 dBm, DFS + TPC
+//   Kanal 144 liegt mit 20 MHz Breite ueber der oberen Bandkante
+//   (5720 + 10 = 5730 > 5725) und ist deshalb NICHT zugeteilt.
+//   Kanaele 149 bis 177 gehoeren in Europa nicht zum WLAN-Bereich.
+//
+// 6 GHz (EN 303 687): 5945-6425, Kanaele 1 bis 93, 23 dBm EIRP als
+// "Low Power Indoor", nur innen, keine Radarerkennung.
+fn etsi_regel(band: u64, kanal: u64, r: *mut Regel) -> bool {
+    (*r).dbm = 0
+    (*r).dfs = false
+    (*r).nur_innen = false
+    (*r).nur_passiv = false
+
+    if band == BAND_24 {
+        if kanal >= 1 && kanal <= 13 {
+            (*r).dbm = 20
+            return true
+        }
+        return false
+    }
+
+    if band == BAND_5 {
+        if kanal >= 36 && kanal <= 48 && (kanal - 36) % 4 == 0 {
+            (*r).dbm = 23
+            (*r).nur_innen = true
+            return true
+        }
+        if kanal >= 52 && kanal <= 64 && (kanal - 52) % 4 == 0 {
+            (*r).dbm = 23
+            (*r).nur_innen = true
+            (*r).dfs = true
+            (*r).nur_passiv = true
+            return true
+        }
+        if kanal >= 100 && kanal <= 140 && (kanal - 100) % 4 == 0 {
+            (*r).dbm = 30
+            (*r).dfs = true
+            (*r).nur_passiv = true
+            return true
+        }
+        return false
+    }
+
+    if band == BAND_6 {
+        if kanal >= 1 && kanal <= 93 && kanal % 4 == 1 {
+            (*r).dbm = 23
+            (*r).nur_innen = true
+            return true
+        }
+        return false
+    }
+
+    return false
+}
+
+// Die Frage, die der Treiber stellt, bevor er sendet.
+//
+// Ein Kanal mit Radarpflicht ist NICHT benutzbar, solange es keine
+// Radarerkennung gibt. Das ist kein Vorbehalt, das ist die Norm: EN 301
+// 893 verlangt, dass ein Geraet den Kanal 60 Sekunden lang abhoert und
+// waehrend des Betriebs weiter ueberwacht, und wenn es ein Radarsignal
+// sieht, den Kanal binnen 10 Sekunden raeumt. Nichts davon gibt es
+// hier. Deshalb: DFS-Kanaele sind zum ZUHOEREN da und nicht zum Senden.
+fn darf_senden(band: u64, kanal: u64) -> bool {
+    var r: Regel = regel_new()
+    if !etsi_regel(band, kanal, &r) {
+        return false
+    }
+    if r.dfs && DFS_FEHLT {
+        return false
+    }
+    return true
+}
+
+// Aktiv suchen heisst: eine Probe Request senden. Auf DFS-Kanaelen ist
+// das verboten, bevor ein Beacon gehoert wurde -- man darf dort nicht
+// als erster sprechen.
+fn darf_aktiv_suchen(band: u64, kanal: u64) -> bool {
+    var r: Regel = regel_new()
+    if !etsi_regel(band, kanal, &r) {
+        return false
+    }
+    if r.nur_passiv {
+        return false
+    }
+    if r.dfs && DFS_FEHLT {
+        return false
+    }
+    return true
+}
