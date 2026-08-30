@@ -34,7 +34,7 @@ import serial
 import kstate
 import mem
 
-export { setup, run, handle, map_user, map_user_pt }
+export { setup, run, handle, map_user, map_user_pt, unmap_user }
 
 const MSR_EFER: u64 = 0xC0000080
 const MSR_STAR: u64 = 0xC0000081
@@ -220,6 +220,80 @@ fn map_user_pt(state: u64, addr: u64, writable: bool, table: u64) -> bool {
     return true
 }
 
+// RUNDE USBIMG: DEN RAHMEN WIEDER ZUMACHEN, BEVOR ER ZURUECKGEHT.
+//
+// DAS IST DER DRITTE FEHLER, DEN NUR DIE ECHTE CPU ZEIGT -- nach den
+// beiden aus Runde KVMFIX, und er ist von derselben Art.
+//
+// `run` gab dem Ausflug nach Ring 3 einen Rahmen als Stapel, setzte in
+// dessen Seitentabelleneintrag das BENUTZERBIT und gab den Rahmen danach
+// mit `mem.frame_free` zurueck -- OHNE das Bit wieder wegzunehmen. Der
+// Rahmenverwalter merkt sich beim Freigeben genau diesen Rahmen als
+// naechsten Kandidaten (`FRAME_HINT`), der naechste Anforderer bekommt
+// also mit hoher Wahrscheinlichkeit GENAU IHN. Bei `modfs gfx wm` ist
+// dieser naechste Anforderer der Arbeitsbereich des Schriftlesers, und
+// der erste Zugriff darauf ist ein SCHREIBZUGRIFF DES KERNELS AUF EINE
+// SEITE MIT BENUTZERBIT.
+//
+// Mit CR4.SMAP -- und das haben alle CPUs seit Broadwell und Zen -- ist
+// das ein Seitenfehler:
+//
+//     *** EXCEPTION 14 #PF  err=0x3  cr2=0x1b97000
+//         rip=... _F0.kstate__set+0x53
+//
+// err=0x3 heisst: die Seite IST da (Bit 0) und es war ein SCHREIBEN
+// (Bit 1), und der Zugriff kam aus Ring 0. Genau das Bild eines
+// SMAP-Verstosses. cr2 war Oktett fuer Oktett die Adresse, die `run`
+// eine Zeile vorher freigegeben hatte.
+//
+// UNTER TCG PASSIERT NICHTS. QEMUs Nachbildung setzt SMAP auf diesem
+// Weg nicht durch, und deshalb ist der Fehler durch jede Abnahme dieses
+// Projekts gelaufen, seit es SMAP gibt. Gemessen (tools/usbimg/run.sh
+// und von Hand):
+//
+//     TCG  + Platte:  wm: hold, Bild da
+//     KVM  + Platte:  EXCEPTION 14 #PF err=0x3
+//     KVM  + noring3: wm: hold, Bild da   (der Ausflug faellt aus)
+//
+// Also: das Benutzerbit im Blatteintrag wieder loeschen, bevor der
+// Rahmen zurueckgeht. Nur im BLATT und nur fuer diese eine Seite -- die
+// Bits in den drei Ebenen darueber gehoeren auch dem Programmtext in
+// `.utext`, und der bleibt abgebildet.
+fn unmap_user(state: u64, addr: u64) {
+    let cr3: u64 = asm("mov rax, cr3", out("rax")) & ADDR_MASK
+    let i4: u64 = (addr >> 39) & 0x1FF
+    let i3: u64 = (addr >> 30) & 0x1FF
+    let i2: u64 = (addr >> 21) & 0x1FF
+    let i1: u64 = (addr >> 12) & 0x1FF
+    let e4: u64 = __mmio_read64((cr3 + i4 * 8) as *mut u64)
+    if (e4 & PAGE_PRESENT) == 0 {
+        return
+    }
+    let pdpt: u64 = e4 & ADDR_MASK
+    let e3: u64 = __mmio_read64((pdpt + i3 * 8) as *mut u64)
+    if (e3 & PAGE_PRESENT) == 0 {
+        return
+    }
+    let pd: u64 = e3 & ADDR_MASK
+    let e2: u64 = __mmio_read64((pd + i2 * 8) as *mut u64)
+    if (e2 & PAGE_PRESENT) == 0 {
+        return
+    }
+    // Eine 2-MiB-Kachel ist nie einzeln geoeffnet worden: `map_user_pt`
+    // teilt sie erst, bevor es das Benutzerbit setzt. Steht sie noch
+    // ungeteilt da, gibt es hier nichts zuzumachen.
+    if (e2 & PAGE_HUGE) != 0 {
+        return
+    }
+    let pt: u64 = e2 & ADDR_MASK
+    if pt == 0 {
+        return
+    }
+    let old: u64 = __mmio_read64((pt + i1 * 8) as *mut u64)
+    __mmio_write64((pt + i1 * 8) as *mut u64, old & not(PAGE_USER))
+    asm("mov rax, cr3\nmov cr3, rax", out("rax"))
+}
+
 // ------------------------------------------------------- the system call
 
 // `KERNEL_SYSCALL` out of isr.s: rdi = number, rsi = argument, rdx = data
@@ -292,6 +366,10 @@ fn run(state: u64) -> bool {
     kstate.set(state, kstate.EXCURSION, 0)
     serial.puts((&s_back[0]) as u64)
     serial.nl()
+    // ERST ZUMACHEN, DANN ZURUECKGEBEN. Andersherum bekommt der naechste
+    // Anforderer eine Seite mit Benutzerbit, und der erste Schreibzugriff
+    // des Kernels darauf ist ein SMAP-Verstoss. Siehe `unmap_user`.
+    unmap_user(state, stack)
     mem.frame_free(state, stack)
     return true
 }
