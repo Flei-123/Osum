@@ -197,6 +197,9 @@ const P_ASYNCFS: u64 = 52
 // RUNDE RING: der Selbsttest des Completion-Rings und seine Messung.
 const P_RING: u64 = 53
 const P_RBENCH: u64 = 54
+// RUNDE NVMEQ: der Selbsttest und die Messung.
+const P_NVMEQ: u64 = 55
+const P_QBENCH: u64 = 56
 
 // Die sechs Aufrufe des Blocks ab 1980 (`kernel/sys.fi`).
 const AIO_VERSION: u64 = 1980
@@ -483,6 +486,12 @@ fn u_enter(packed: u64) {
     }
     if prog == P_RBENCH {
         u_rbench(arg)
+    }
+    if prog == P_NVMEQ {
+        u_nvmeq(arg)
+    }
+    if prog == P_QBENCH {
+        u_qbench(arg)
     }
     u_sys(SYS_EXIT, 0, 0, 0)
     while true {
@@ -3902,5 +3911,902 @@ fn u_pwrload(arg: u64) {
         i = i + 1
     }
     u_k18((&n[0]) as u64, acc & 0xFF)
+    u_sys(SYS_EXIT, 0, 0, 0)
+}
+// RUNDE NVMEQ: die zwei Fehlernummern, die diese Runde braucht.
+const EA_FAULT: u64 = 14 // EFAULT -- der Zeiger gehoert dem Programm nicht
+const EA_IO: u64 = 5 // EIO -- DAS GERAET hat nein gesagt
+
+// =====================================================================
+// RUNDE NVMEQ: DER SELBSTTEST UND DIE MESSUNG
+// =====================================================================
+//
+// Gearbeitet wird auf `/dev/nvme0` -- dem BLOCKGERAET selbst und nicht
+// auf einer Datei darauf. Das ist Absicht und der Kern der Sache:
+//
+//   * Derselbe Deskriptor geht durch ALLE DREI Wege. `read(2)` darauf
+//     ist der synchrone Weg (`devfs.block_read` -> `blk.read_on` ->
+//     `nvme.read_block`, und dort wird gewartet). Derselbe Deskriptor
+//     im Abgabering mit abgeschalteter Weiche ist der Fadenweg der
+//     Runde RING. Derselbe Deskriptor mit eingeschalteter Weiche ist
+//     der Warteschlangenweg dieser Runde. Kein Unterschied im
+//     Programm, drei Unterschiede im Kern.
+//   * Es ist ein ECHTER Geraetegang. Kein Zwischenspeicher liegt
+//     dazwischen: `blk.read_on` fuer DEV_NVME ruft `nvme.read_block`,
+//     Punkt. Jeder Auftrag dieser Messung ist ein NVMe-Befehl.
+//
+// Geschrieben wird IM LETZTEN VIERTEL des Traegers (`Q_LBA`), weit
+// hinter allem, was `hw.filesystem` dort angelegt hat.
+
+const NQ_VERSION: u64 = 1992
+const NQ_INFO: u64 = 1993
+
+// Der Block, auf dem gearbeitet wird. 12288 * 512 = 6 MiB; das Abbild
+// der Laeufer ist 8 MiB gross, und das Dateisystem, das `hw.disk`
+// darauf anlegt, endet weit davor.
+const Q_LBA: u64 = 12288
+const Q_OFF: u64 = 6291456 // Q_LBA * 512
+
+fn q_info(was: u64, a: u64) -> u64 {
+    return u_sys(NQ_INFO, was, a, 0)
+}
+
+// Den Deskriptor auf den Anfang des Arbeitsbereichs stellen.
+fn q_seek(fd: u64, off: u64) -> u64 {
+    return u_sys(SYS_LSEEK, fd, off, 0)
+}
+
+fn q_open() -> u64 {
+    var pfad: [u8; 12] = "/dev/nvme0\0\0"
+    return u_sys(SYS_OPEN, (&pfad[0]) as u64, O_RDWR, 0)
+}
+
+// Ein Muster in den Arbeitsblock legen -- ueber den SYNCHRONEN Weg,
+// damit die Vergleichsdaten nicht von dem Weg stammen, der geprueft
+// werden soll.
+fn q_muster(fd: u64, p: u64) -> u64 {
+    var i: u64 = 0
+    while i < 512 {
+        u_st8(p + i, (65 + (i & 31)) & 0xFF)
+        i = i + 1
+    }
+    q_seek(fd, Q_OFF)
+    let n: u64 = u_sys(SYS_WRITE, fd, p, 512)
+    return n
+}
+
+fn u_st8(p: u64, v: u64) {
+    __mmio_write8(p as *mut u8, (v & 0xFF) as u8)
+}
+
+fn u_ld8(p: u64) -> u64 {
+    return __mmio_read8(p as *mut u8) as u64
+}
+
+// Stimmen die ersten `n` Oktett mit dem Muster ueberein?
+fn q_gleich(p: u64, n: u64) -> u64 {
+    var i: u64 = 0
+    while i < n {
+        if u_ld8(p + i) != ((65 + (i & 31)) & 0xFF) {
+            return 0
+        }
+        i = i + 1
+    }
+    return 1
+}
+
+fn q_leer(p: u64, n: u64) {
+    var i: u64 = 0
+    while i < n {
+        u_st8(p + i, 0)
+        i = i + 1
+    }
+}
+
+// ------------------------------------------------- das Grundgeruest
+fn u_nq_grund(fd: u64, h: u64, base: u64, p: u64, tief: u64) -> u64 {
+    var n_fa: [u8; 16] = "q-fassung-da\0\0\0\0"
+    var n_be: [u8; 10] = "q-bereit\0\0"
+    var n_wa: [u8; 18] = "q-warteschlangen\0\0"
+    var n_ti: [u8; 9] = "q-tiefe\0\0"
+    var n_ge: [u8; 13] = "q-geraet-da\0\0"
+    var n_au: [u8; 16] = "q-ein-auftrag\0\0\0"
+    var n_da: [u8; 18] = "q-daten-stimmen\0\0\0"
+    var n_sc: [u8; 14] = "q-schnellweg\0\0"
+    var n_ab: [u8; 14] = "q-abgegeben\0\0\0"
+    var n_ni: [u8; 20] = "q-niemand-wartet\0\0\0\0"
+    var n_mu: [u8; 16] = "q-muster-steht\0\0"
+    var cq: [u64; 4] = [0 as u64; 4]
+    var ok: u64 = 0
+    ok = ok + h_claim((&n_fa[0]) as u64, u_sys(NQ_VERSION, 0, 0, 0), 1)
+    ok = ok + h_claim((&n_be[0]) as u64, q_info(0, 0), 1)
+    // Mindestens eine, hoechstens so viele, wie es Kerne geben kann.
+    var wq: u64 = 0
+    if q_info(1, 0) >= 1 {
+        if q_info(1, 0) <= q_info(27, 0) {
+            wq = 1
+        }
+    }
+    ok = ok + h_claim((&n_wa[0]) as u64, wq, 1)
+    // DIE TIEFE, die dieser Lauf haben MUSS. Im Regelbetrieb 64; mit
+    // der Gegenprobe `nqtiny` vier. Eine feste 64 waere hier eine
+    // Zusage, die in jedem Lauf mit kurzer Warteschlange faellt, ohne
+    // dass etwas kaputt ist.
+    ok = ok + h_claim((&n_ti[0]) as u64, q_info(2, 0), tief)
+    var gd: u64 = 0
+    if (fd >> 63) == 0 {
+        gd = 1
+    }
+    ok = ok + h_claim((&n_ge[0]) as u64, gd, 1)
+
+    // ZUERST DAS MUSTER, UND ZWAR UEBER DEN SYNCHRONEN WEG GEPRUEFT.
+    //
+    // Die Zusage `q-daten-stimmen` weiter unten sagt: was durch die
+    // WARTESCHLANGE kommt, ist das, was auf der Platte steht. Damit sie
+    // das wirklich sagt, muss vorher feststehen, dass es ueberhaupt auf
+    // der Platte steht -- sonst misst sie zwei Dinge auf einmal und
+    // faellt auch dann, wenn der Schreibvorgang danebenging. Also:
+    // schreiben, mit `read(2)` zurueckholen, vergleichen. Erst dann
+    // dasselbe ueber den Ring.
+    q_muster(fd, p)
+    q_leer(p, 512)
+    q_seek(fd, Q_OFF)
+    let syn: u64 = u_sys(SYS_READ, fd, p, 512)
+    var steht: u64 = 0
+    if syn == 512 {
+        steht = q_gleich(p, 512)
+    }
+    ok = ok + h_claim((&n_mu[0]) as u64, steht, 1)
+
+    // EIN AUFTRAG, EINMAL HIN UND ZURUECK -- und die drei Zahlen, die
+    // beweisen, dass er wirklich durch das Geraet ging und nicht durch
+    // einen Faden.
+    q_leer(p, 512)
+    q_seek(fd, Q_OFF)
+    let f0: u64 = q_info(9, 0)
+    let s0: u64 = q_info(3, 0)
+    let w0: u64 = q_info(26, 0) + q_info(42, 0)
+    r_put(base, AOP_READ, fd, p, 512, 0x9001)
+    u_sys6(RG_ENTER, h, 1, 1, 5000, 0, 0)
+    var res: u64 = 0
+    if r_reap(base, (&cq[0]) as u64) == 1 {
+        res = cq[2]
+    }
+    ok = ok + h_claim((&n_au[0]) as u64, res, 512)
+    ok = ok + h_claim((&n_da[0]) as u64, q_gleich(p, 512), 1)
+    ok = ok + h_claim((&n_sc[0]) as u64, q_info(9, 0) - f0, 1)
+    ok = ok + h_claim((&n_ab[0]) as u64, q_info(3, 0) - s0, 1)
+    // DIE ZAHL FUER "NIEMAND WARTET", und sie ist die SUMME aus
+    // beidem: `nvme.waits` sind die `hlt` (ein Faden legt sich hin und
+    // wartet), `nvme.spins` sind die Drehungen mit vollem Prozessor
+    // (ein Faden KANN sich nicht hinlegen, weil er die Sperre mit
+    // abgeschalteten Interrupts haelt -- genau das tut `devfs.enter`
+    // fuer jedes `read(2)` auf `/dev/nvme0`). Ueber die Warteschlange
+    // darf sich KEINE von beiden bewegen: es wartet niemand, es meldet
+    // sich das Geraet.
+    ok = ok + h_claim((&n_ni[0]) as u64,
+        q_info(26, 0) + q_info(42, 0) - w0, 0)
+    return ok
+}
+
+// ------------- (a) EIN MANIPULIERTER PUFFER-ZEIGER IM ABGABERING
+//
+// Zwei Dinge, und sie sind NICHT dasselbe:
+//
+//   1. Ein WILDER Zeiger (eine Adresse, die dem Programm nicht
+//      gehoert). Er wird beim Ernten abgewiesen -- `proc.user_ok` --,
+//      der Auftrag endet mit -EFAULT und es geht KEIN Befehl an das
+//      Geraet. Das ist die Zusage `a-wild-nicht-abgegeben`.
+//   2. Ein GUELTIGER Zeiger. Auch der geht nicht ans Geraet: was in
+//      den NVMe-Eintrag geschrieben wird, ist eine Adresse aus dem
+//      DMA-Vorrat des Kerns, und das Programm bekommt seine Oktette
+//      erst danach, aus einer Kopie. Das ist die Zusage
+//      `a-prp-aus-vorrat` -- und die faellt, wenn die Wache fehlt.
+fn u_nq_a(fd: u64, h: u64, base: u64, p: u64) -> u64 {
+    var n_wi: [u8; 18] = "a-wilder-zeiger\0\0\0"
+    var n_wn: [u8; 26] = "a-wild-nicht-abgegeben\0\0\0\0"
+    var n_pv: [u8; 18] = "a-prp-aus-vorrat\0\0"
+    var n_pn: [u8; 34] = "a-prp-nicht-die-programmadresse\0\0\0"
+    var n_bp: [u8; 16] = "a-badprp-null\0\0\0"
+    var cq: [u64; 4] = [0 as u64; 4]
+    var ok: u64 = 0
+    // (1) DER WILDE ZEIGER.
+    let s0: u64 = q_info(3, 0)
+    q_seek(fd, Q_OFF)
+    r_put(base, AOP_READ, fd, 0xDEADBEEF000, 512, 0xA001)
+    u_sys6(RG_ENTER, h, 1, 1, 5000, 0, 0)
+    var res: u64 = 0
+    if r_reap(base, (&cq[0]) as u64) == 1 {
+        res = 0 -% cq[2]
+    }
+    ok = ok + h_claim((&n_wi[0]) as u64, res, EA_FAULT)
+    ok = ok + h_claim((&n_wn[0]) as u64, q_info(3, 0) - s0, 0)
+
+    // (2) DER GUELTIGE ZEIGER. Ein ganz gewoehnlicher Auftrag -- und
+    //     danach die Frage, WAS im Eintrag stand.
+    q_leer(p, 512)
+    q_seek(fd, Q_OFF)
+    r_put(base, AOP_READ, fd, p, 512, 0xA002)
+    u_sys6(RG_ENTER, h, 1, 1, 5000, 0, 0)
+    r_reap(base, (&cq[0]) as u64)
+    // Liegt die zuletzt geschriebene Adresse im DMA-Vorrat?
+    ok = ok + h_claim((&n_pv[0]) as u64, q_info(23, q_info(19, 0)), 1)
+    // Und ist sie eine ANDERE als die, die das Programm hingelegt hat?
+    var anders: u64 = 0
+    if q_info(19, 0) != q_info(20, 0) {
+        anders = 1
+    }
+    ok = ok + h_claim((&n_pn[0]) as u64, anders, 1)
+    ok = ok + h_claim((&n_bp[0]) as u64, q_info(6, 0), 0)
+    return ok
+}
+
+// ---- (b) DAS HANDLE WIRD GESCHLOSSEN, WAEHREND AUFTRAEGE IM GERAET STEHEN
+//
+// Deterministisch gemacht mit dem Pruefstandshalt der Unterhaelfte
+// (`NQ_INFO 32`): die Fertigstellungen bleiben im Nachlaufring liegen,
+// bis der Test sie freigibt. Der Ablauf ist damit jedes Mal derselbe:
+//
+//   1. Unterhaelfte anhalten.
+//   2. Vier Leseauftraege abgeben -- sie gehen ins Geraet, das Geraet
+//      antwortet, die Meldungen liegen im Nachlaufring.
+//   3. Den Deskriptor SCHLIESSEN und den Platz neu vergeben.
+//   4. Unterhaelfte freigeben und abholen.
+//
+// Herauskommen MUSS viermal -ESTALE: die Generationspruefung sieht,
+// dass unter dem Deskriptor etwas anderes steht. Und -- das ist die
+// eigentliche Zusage dieser Bauart -- der Speicher, in den das Geraet
+// geschrieben hat, war die ganze Zeit ueber KERNSPEICHER. Er konnte gar
+// nicht ungueltig werden.
+fn u_nq_b(h: u64, base: u64, p: u64) -> u64 {
+    var n_al: [u8; 18] = "b-alle-gemeldet\0\0\0"
+    var n_ve: [u8; 12] = "b-veraltet\0\0"
+    var n_fl: [u8; 14] = "b-kein-flug\0\0\0"
+    var n_re: [u8; 20] = "b-verweise-null\0\0\0\0\0"
+    var n_au: [u8; 18] = "b-kein-auftrag\0\0\0\0"
+    var n_null: [u8; 10] = "/dev/null\0"
+    var cq: [u64; 4] = [0 as u64; 4]
+    var ok: u64 = 0
+    let fd: u64 = q_open()
+    if (fd >> 63) != 0 {
+        return 0
+    }
+    q_seek(fd, Q_OFF)
+    q_info(32, 1)
+    let f0: u64 = q_info(9, 0)
+    var i: u64 = 0
+    while i < 4 {
+        r_put(base, AOP_READ, fd, p + i * 512, 512, 0xB000 + i)
+        i = i + 1
+    }
+    u_sys6(RG_ENTER, h, 4, 0, 0, 0, 0)
+    // Dem Geraet Zeit lassen. Es antwortet in Mikrosekunden; was hier
+    // gewartet wird, sind Zeitscheiben, keine Sekunden.
+    a_atmen(40)
+    u_sys(SYS_CLOSE, fd, 0, 0)
+    // DENSELBEN PLATZ NEU VERGEBEN. Ohne das wuerde die Pruefung nur
+    // sehen, dass der Deskriptor weg ist -- mit ihm sieht sie, dass
+    // dort JETZT ETWAS ANDERES steht, und das ist der Fall, aus dem in
+    // Linux die meisten io_uring-Luecken kamen.
+    let neu: u64 = u_sys(SYS_OPEN, (&n_null[0]) as u64, O_RDONLY, 0)
+    q_info(32, 0)
+    var got: u64 = 0
+    var stale: u64 = 0
+    var runden: u64 = 0
+    while got < 4 {
+        if r_reap(base, (&cq[0]) as u64) == 1 {
+            got = got + 1
+            if (0 -% cq[2]) == EA_STALE {
+                stale = stale + 1
+            }
+        } else {
+            r_warte(h, 1, 100)
+            runden = runden + 1
+            if runden > 60 {
+                got = 4
+            }
+        }
+    }
+    ok = ok + h_claim((&n_al[0]) as u64, got, 4)
+    // VERALTET SIND GENAU DIE, DIE WIRKLICH IM GERAET STANDEN. Ist die
+    // Warteschlange kurz (`nqtiny`), nimmt ein Arbeitsfaden den Rest --
+    // und der ist fertig, BEVOR der Deskriptor zugeht. Die erwartete
+    // Zahl wird deshalb gemessen und nicht hingeschrieben.
+    ok = ok + h_claim((&n_ve[0]) as u64, stale, q_info(9, 0) - f0)
+    ok = ok + h_claim((&n_fl[0]) as u64, q_info(18, 0), 0)
+    // Kein Verweis mehr offen -- der Auftrag hat den seinen zurueck-
+    // gegeben, obwohl der Deskriptor laengst weg war.
+    ok = ok + h_claim((&n_re[0]) as u64, q_info(41, 0), 0)
+    ok = ok + h_claim((&n_au[0]) as u64, q_info(39, 0), 0)
+    if (neu >> 63) == 0 {
+        u_sys(SYS_CLOSE, neu, 0, 0)
+    }
+    return ok
+}
+
+// ---- (c) DER PROZESS STIRBT MIT AUFTRAEGEN IM GERAET
+//
+// Das Kind legt sich einen eigenen Ring an, gibt acht Leseauftraege auf
+// `/dev/nvme0` ab und stirbt SOFORT. Was dann nicht passieren darf:
+// ein Eintrag bleibt in der Warteschlange des Geraets stehen, ein
+// Auftrag bleibt in der Tafel, ein Ring behaelt seine Rahmen, oder eine
+// Fertigmeldung wird in einen Ring gestellt, den es nicht mehr gibt.
+//
+// Die Zusage, die diese Bauart GESCHENKT bekommt: das DMA-Ziel war ein
+// Umsteigepuffer des Kerns. Das Geraet konnte, waehrend das Kind starb,
+// gar nicht in dessen Seiten schreiben -- es hatte nie eine Adresse
+// daraus.
+fn u_nq_c() -> u64 {
+    var n_fl: [u8; 14] = "c-kein-flug\0\0\0"
+    var n_au: [u8; 18] = "c-kein-auftrag\0\0\0\0"
+    var n_ri: [u8; 14] = "c-kein-ring\0\0\0"
+    var n_ra: [u8; 20] = "c-rahmen-zurueck\0\0\0\0"
+    var kfd: [u64; 2] = [0 as u64; 2]
+    var st: [u64; 1] = [0 as u64; 1]
+    var kbuf: [u8; 1024] = [0 as u8; 1024]
+    var ok: u64 = 0
+    let ringe0: u64 = q_info(38, 0)
+    let rahmen0: u64 = q_info(40, 0)
+    let kind: u64 = u_sys(SYS_FORK, 0, 0, 0)
+    if kind == 0 {
+        let kh: u64 = u_sys(RG_SETUP, 16, 0, 0)
+        let kb: u64 = u_sys(RG_MAP, kh, 0, 0)
+        let dfd: u64 = q_open()
+        q_seek(dfd, Q_OFF)
+        var i: u64 = 0
+        while i < 8 {
+            r_put(kb, AOP_READ, dfd, (&kbuf[0]) as u64, 512, 0xC000 + i)
+            i = i + 1
+        }
+        u_sys6(RG_ENTER, kh, 8, 0, 0, 0, 0)
+        // MIT ACHT EINTRAEGEN IM GERAET STERBEN. Genau darum geht es.
+        u_sys(SYS_EXIT, 0, 0, 0)
+    }
+    u_sys(SYS_WAIT4, 0 -% 1, (&st[0]) as u64, 0)
+    a_atmen(60)
+    ok = ok + h_claim((&n_fl[0]) as u64, q_info(18, 0), 0)
+    ok = ok + h_claim((&n_au[0]) as u64, q_info(39, 0), 0)
+    ok = ok + h_claim((&n_ri[0]) as u64, q_info(38, 0), ringe0)
+    ok = ok + h_claim((&n_ra[0]) as u64, q_info(40, 0), rahmen0)
+    return ok
+}
+
+// ---- (d) DAS GERAET MELDET EINEN FEHLER
+//
+// Nur im Lauf `nqerr`: der Kern gibt dem Auftrag einen Blockindex weit
+// hinter dem Ende des Traegers. Der CONTROLLER antwortet dann mit einem
+// Status ungleich null -- das ist ein echter Geraetefehler und keine
+// Pruefung des Kerns --, und er muss beim Programm ankommen. Als
+// Fehler, nicht als Haenger und nicht als Null-Ergebnis.
+fn u_nq_d(fd: u64, h: u64, base: u64, p: u64) -> u64 {
+    var n_an: [u8; 22] = "d-fehler-kommt-an\0\0\0\0\0"
+    var n_al: [u8; 18] = "d-alle-gemeldet\0\0\0"
+    var n_ge: [u8; 20] = "d-deverr-gezaehlt\0\0\0"
+    var cq: [u64; 4] = [0 as u64; 4]
+    var ok: u64 = 0
+    let e0: u64 = q_info(10, 0)
+    q_seek(fd, Q_OFF)
+    var i: u64 = 0
+    while i < 4 {
+        r_put(base, AOP_READ, fd, p + i * 512, 512, 0xD000 + i)
+        i = i + 1
+    }
+    u_sys6(RG_ENTER, h, 4, 4, 5000, 0, 0)
+    var got: u64 = 0
+    var eio: u64 = 0
+    var runden: u64 = 0
+    while got < 4 {
+        if r_reap(base, (&cq[0]) as u64) == 1 {
+            got = got + 1
+            if (0 -% cq[2]) == EA_IO {
+                eio = eio + 1
+            }
+        } else {
+            r_warte(h, 1, 100)
+            runden = runden + 1
+            if runden > 60 {
+                got = 4
+            }
+        }
+    }
+    ok = ok + h_claim((&n_al[0]) as u64, got, 4)
+    ok = ok + h_claim((&n_an[0]) as u64, eio, 4)
+    var ge: u64 = 0
+    if q_info(10, 0) - e0 >= 4 {
+        ge = 1
+    }
+    ok = ok + h_claim((&n_ge[0]) as u64, ge, 1)
+    return ok
+}
+
+// ---- (e) DIE WARTESCHLANGE IST VOLL: RUECKSTAU, KEIN VERLUST
+//
+// Zweiunddreissig Auftraege auf einmal. Ist die Warteschlange kurz
+// (Lauf `nqtiny`, Tiefe vier), passt nur ein Bruchteil hinein; der Rest
+// geht ueber den Fadenweg. VERLOREN GEHT NICHTS -- das ist die ganze
+// Zusage. Ein Auftrag, der nicht in die Warteschlange passt, ist kein
+// Fehler und kein verworfener Satz, sondern einer, der langsamer
+// bearbeitet wird.
+fn u_nq_e(fd: u64, h: u64, base: u64, p: u64) -> u64 {
+    var n_al: [u8; 18] = "e-alle-gemeldet\0\0\0"
+    var n_vo: [u8; 18] = "e-voll-gezaehlt\0\0\0"
+    var n_ve: [u8; 16] = "e-kein-verlust\0\0"
+    var cq: [u64; 4] = [0 as u64; 4]
+    var ok: u64 = 0
+    let voll0: u64 = q_info(7, 0)
+    q_seek(fd, Q_OFF)
+    var i: u64 = 0
+    while i < 32 {
+        r_put(base, AOP_READ, fd, p, 512, 0xE000 + i)
+        i = i + 1
+    }
+    u_sys6(RG_ENTER, h, 32, 0, 0, 0, 0)
+    var got: u64 = 0
+    var gut: u64 = 0
+    var runden: u64 = 0
+    while got < 32 {
+        if r_reap(base, (&cq[0]) as u64) == 1 {
+            got = got + 1
+            if cq[2] == 512 {
+                gut = gut + 1
+            }
+        } else {
+            r_warte(h, 1, 100)
+            runden = runden + 1
+            if runden > 100 {
+                got = 32
+            }
+        }
+    }
+    ok = ok + h_claim((&n_al[0]) as u64, got, 32)
+    ok = ok + h_claim((&n_ve[0]) as u64, gut, 32)
+    // STRENG NUR DORT, WO ES ETWAS HEISST. Bei voller Tiefe (64) sind
+    // zweiunddreissig Auftraege kein Rueckstau, und eine Zusage, die
+    // dann trotzdem einen verlangte, wuerde eine Zufaelligkeit messen.
+    // Im Lauf `nqtiny` ist die Tiefe vier, und dann MUSS er kommen.
+    var voll: u64 = 1
+    if q_info(2, 0) <= 8 {
+        voll = 0
+        if q_info(7, 0) > voll0 {
+            voll = 1
+        }
+    }
+    ok = ok + h_claim((&n_vo[0]) as u64, voll, 1)
+    return ok
+}
+
+// ---- (f) DER INTERRUPT GEHT VERLOREN ODER KOMMT DOPPELT
+//
+// Beides hat ein DEFINIERTES Verhalten, und beides wird gemessen statt
+// behauptet:
+//
+//   verloren (`nqnoirq`): die Oberhaelfte kehrt sofort um. Gefunden
+//       werden die Fertigstellungen dann vom Nachsehen (`nvmeq.poll`,
+//       Zahl `polled`) und im aeussersten Fall von der Zeitgrenze.
+//       `irqs` MUSS null bleiben und trotzdem alles fertig werden.
+//   doppelt (`nqdblirq`): der Abraeumweg laeuft zweimal. Der zweite
+//       Durchgang findet nichts, weil das Phasenbit schon umgeschlagen
+//       ist. `lost` MUSS null bleiben -- eine Zahl darin hiesse, dass
+//       der erste Durchgang etwas liegen gelassen hat.
+fn u_nq_f(fd: u64, h: u64, base: u64, p: u64) -> u64 {
+    var n_al: [u8; 18] = "f-alle-gemeldet\0\0\0"
+    var n_do: [u8; 14] = "f-kein-doppel\0"
+    var n_vl: [u8; 26] = "f-kein-verlorener-satz\0\0\0\0"
+    var cq: [u64; 4] = [0 as u64; 4]
+    var ok: u64 = 0
+    let c0: u64 = q_info(4, 0)
+    let f0: u64 = q_info(9, 0)
+    q_seek(fd, Q_OFF)
+    var i: u64 = 0
+    while i < 8 {
+        r_put(base, AOP_READ, fd, p, 512, 0xF000 + i)
+        i = i + 1
+    }
+    u_sys6(RG_ENTER, h, 8, 8, 8000, 0, 0)
+    var got: u64 = 0
+    var runden: u64 = 0
+    while got < 8 {
+        if r_reap(base, (&cq[0]) as u64) == 1 {
+            got = got + 1
+        } else {
+            r_warte(h, 1, 200)
+            runden = runden + 1
+            if runden > 80 {
+                got = 8
+            }
+        }
+    }
+    ok = ok + h_claim((&n_al[0]) as u64, got, 8)
+    // GENAU EINE FERTIGSTELLUNG JE AUFTRAG, DER IM GERAET WAR. Ein
+    // doppelter Interrupt darf keine zweite erzeugen -- und ein
+    // Auftrag, den bei kurzer Warteschlange ein Arbeitsfaden genommen
+    // hat, erzeugt gar keine. Verglichen wird deshalb mit der
+    // GEMESSENEN Zahl der Auftraege ueber die Warteschlange.
+    var doppel: u64 = 0
+    if q_info(4, 0) - c0 == q_info(9, 0) - f0 {
+        doppel = 1
+    }
+    ok = ok + h_claim((&n_do[0]) as u64, doppel, 1)
+    ok = ok + h_claim((&n_vl[0]) as u64, q_info(17, 0), 0)
+    return ok
+}
+
+// ---- DER RUECKFALLWEG
+//
+// Was KEINE Warteschlange hat, geht weiter durch einen Arbeitsfaden --
+// und zwar unveraendert. Eine Roehre ist der harte Fall: sie ist kein
+// Blockgeraet, kein NVMe, und ein Kern, der das durcheinanderbraechte,
+// laege mit dem ersten Auftrag daneben.
+fn u_nq_r(h: u64, base: u64, p: u64) -> u64 {
+    var n_ro: [u8; 16] = "r-roehre-geht\0\0\0"
+    var n_kf: [u8; 22] = "r-roehre-kein-schnell\0"
+    var fds: [u64; 2] = [0 as u64; 2]
+    var cq: [u64; 4] = [0 as u64; 4]
+    var vier: [u8; 5] = "wxyz\0"
+    var ok: u64 = 0
+    u_sys(SYS_PIPE, (&fds[0]) as u64, 0, 0)
+    let rfd: u64 = (fds[0]) & 0xFFFFFFFF
+    let wfd: u64 = ((fds[0]) >> 32) & 0xFFFFFFFF
+    let f0: u64 = q_info(9, 0)
+    u_sys(SYS_WRITE, wfd, (&vier[0]) as u64, 4)
+    q_leer(p, 8)
+    r_put(base, AOP_READ, rfd, p, 4, 0x7001)
+    u_sys6(RG_ENTER, h, 1, 1, 5000, 0, 0)
+    var res: u64 = 0
+    if r_reap(base, (&cq[0]) as u64) == 1 {
+        res = cq[2]
+    }
+    ok = ok + h_claim((&n_ro[0]) as u64, res, 4)
+    // Und sie hat den schnellen Weg NICHT genommen.
+    ok = ok + h_claim((&n_kf[0]) as u64, q_info(9, 0) - f0, 0)
+    u_sys(SYS_CLOSE, rfd, 0, 0)
+    u_sys(SYS_CLOSE, wfd, 0, 0)
+    return ok
+}
+
+// =====================================================================
+// DER SELBSTTEST
+// =====================================================================
+//
+// `arg` sagt, WELCHE Gegenprobe laeuft -- `kmain` liest die
+// Kommandozeile und reicht sie als Bitfeld herein. Ohne das muesste
+// jeder Abschnitt raten, ob er gerade das misst, wofuer er gebaut ist,
+// und ein Test, der raet, ist keiner.
+const QM_ERR: u64 = 1
+const QM_TINY: u64 = 2
+const QM_NOIRQ: u64 = 4
+const QM_DBLIRQ: u64 = 8
+const QM_NOQ: u64 = 16
+const QM_NODMA: u64 = 32
+
+fn u_nvmeq(arg: u64) {
+    var s_head: [u8; 23] = "nvmeq: ring 3 beginnt\n\0"
+    var s_tail: [u8; 8] = "nvmeq: \0"
+    var s_of: [u8; 2] = "/\0"
+    var s_pr: [u8; 11] = " Zusagen\n\0\0"
+    var n_leck: [u8; 18] = "q-kein-leck\0\0\0\0\0\0\0"
+    var puf: [u8; 4096] = [0 as u8; 4096]
+    let p: u64 = (&puf[0]) as u64
+    var ok: u64 = 0
+    var n: u64 = 0
+    u_say((&s_head[0]) as u64)
+    let fd: u64 = q_open()
+    let h: u64 = u_sys(RG_SETUP, 64, 0, 0)
+    if (h >> 63) != 0 {
+        u_sys(SYS_EXIT, 1, 0, 0)
+    }
+    let base: u64 = u_sys(RG_MAP, h, 0, 0)
+    // "heil" heisst: dieser Lauf hat keine Gegenprobe an, die den
+    // Regelbetrieb absichtlich kaputtmacht.
+    var heil: bool = true
+    if (arg & QM_ERR) != 0 {
+        heil = false
+    }
+    if (arg & QM_NOQ) != 0 {
+        heil = false
+    }
+    if (arg & QM_NODMA) != 0 {
+        heil = false
+    }
+    if heil {
+        n = n + 11
+        var tief: u64 = 64
+        if (arg & QM_TINY) != 0 {
+            tief = 4
+        }
+        ok = ok + u_nq_grund(fd, h, base, p, tief)
+    }
+    if (arg & QM_ERR) == 0 {
+        if (arg & QM_NOQ) == 0 {
+            n = n + 5
+            ok = ok + u_nq_a(fd, h, base, p)
+        }
+    }
+    if heil {
+        n = n + 5
+        ok = ok + u_nq_b(h, base, p)
+        n = n + 4
+        ok = ok + u_nq_c()
+        n = n + 3
+        ok = ok + u_nq_e(fd, h, base, p)
+        n = n + 3
+        ok = ok + u_nq_f(fd, h, base, p)
+    }
+    if (arg & QM_ERR) != 0 {
+        n = n + 3
+        ok = ok + u_nq_d(fd, h, base, p)
+    }
+    n = n + 2
+    ok = ok + u_nq_r(h, base, p)
+    // DIE LECKPROBE. Nach allem oben darf kein Eintrag mehr beim Geraet
+    // stehen und kein Satz mehr im Nachlaufring liegen.
+    var leck: u64 = 0
+    if q_info(18, 0) == 0 {
+        if q_info(25, 0) == 0 {
+            leck = 1
+        }
+    }
+    n = n + 1
+    ok = ok + h_claim((&n_leck[0]) as u64, leck, 1)
+    if (fd >> 63) == 0 {
+        u_sys(SYS_CLOSE, fd, 0, 0)
+    }
+    u_sys(RG_CLOSE, h, 0, 0)
+    u_say((&s_tail[0]) as u64)
+    u_say_num(ok)
+    u_say((&s_of[0]) as u64)
+    u_say_num(n)
+    u_say((&s_pr[0]) as u64)
+    u_sys(SYS_EXIT, 0, 0, 0)
+}
+
+// =====================================================================
+// DIE MESSUNG
+// =====================================================================
+//
+// GENAU DIE METHODIK DER RUNDE RING, damit die Tabellen nebeneinander
+// stehen koennen: Bloecke zu `iters` Auftraegen, 33 Bloecke, MEDIAN,
+// Zyklen JE AUFTRAG. Neu sind zwei Dinge, und beide sind der Punkt der
+// Runde:
+//
+//   1. Gemessen wird auf einer PLATTE und nicht auf einer Roehre. Eine
+//      Roehre kopiert im Kern; eine Platte laesst warten. Erst darauf
+//      ist die Frage "schlaegt asynchron synchron?" ueberhaupt fair
+//      gestellt -- genau das sagt `docs/RING-STATUS.md` in seinem
+//      letzten Abschnitt.
+//   2. Alle drei Wege laufen in EINEM BOOT, mit demselben Deskriptor
+//      und derselben Schleife. Die Weiche wird zwischen den Reihen
+//      umgelegt (`NQ_INFO 36`).
+const QB_BLOCKS: u64 = 33
+const QB_LEN: u64 = 32
+
+fn qb_sync(fd: u64, p: u64, iters: u64) -> u64 {
+    var b: [u64; 33] = [0 as u64; 33]
+    var k: u64 = 0
+    while k < QB_BLOCKS {
+        q_seek(fd, Q_OFF)
+        let t0: u64 = u_tsc()
+        var i: u64 = 0
+        var acc: u64 = 0
+        while i < iters {
+            acc = acc +% u_sys(SYS_READ, fd, p, QB_LEN)
+            i = i + 1
+        }
+        let t1: u64 = u_tsc()
+        b[k as usize] = ((t1 -% t0) / iters) +% (acc & 0)
+        k = k + 1
+    }
+    u_hb_sort((&b[0]) as u64, QB_BLOCKS)
+    return b[16]
+}
+
+// UEBER DEN RING, MIT ANSTOSS. Ob der Auftrag am Ende in einem Faden
+// oder im Geraet landet, entscheidet die Weiche -- das PROGRAMM tut
+// hier beide Male genau dasselbe, und das ist die Bedingung dafuer,
+// dass die zwei Zahlen vergleichbar sind.
+fn qb_ring(fd: u64, h: u64, base: u64, p: u64, tiefe: u64,
+    iters: u64) -> u64 {
+    var b: [u64; 33] = [0 as u64; 33]
+    var cq: [u64; 4] = [0 as u64; 4]
+    var k: u64 = 0
+    while k < QB_BLOCKS {
+        q_seek(fd, Q_OFF)
+        let t0: u64 = u_tsc()
+        var runde: u64 = 0
+        while runde < iters / tiefe {
+            var i: u64 = 0
+            while i < tiefe {
+                r_put(base, AOP_READ, fd, p, QB_LEN, 0)
+                i = i + 1
+            }
+            u_sys6(RG_ENTER, h, tiefe, tiefe, 5000, 0, 0)
+            var got: u64 = 0
+            var w: u64 = 0
+            while got < tiefe {
+                if r_reap(base, (&cq[0]) as u64) == 1 {
+                    got = got + 1
+                } else {
+                    u_sys(SYS_YIELD, 0, 0, 0)
+                    w = w + 1
+                    if w > 200000 {
+                        got = tiefe
+                    }
+                }
+            }
+            runde = runde + 1
+        }
+        let t1: u64 = u_tsc()
+        b[k as usize] = (t1 -% t0) / iters
+        k = k + 1
+    }
+    u_hb_sort((&b[0]) as u64, QB_BLOCKS)
+    return b[16]
+}
+
+// OHNE JEDEN ANSTOSS -- kein `ring_enter`, nur eigener Speicher. Was
+// hier noch an Aufrufen steht, ist `SYS_YIELD`, und das ist auf EINEM
+// Kern unvermeidlich. Auf mehreren faellt auch das weg; genau dafuer
+// laeuft die Abnahme diese Reihe zusaetzlich mit `-smp 4`.
+fn qb_frei(fd: u64, h: u64, base: u64, p: u64, buendel: u64,
+    iters: u64) -> u64 {
+    var b: [u64; 33] = [0 as u64; 33]
+    var cq: [u64; 4] = [0 as u64; 4]
+    var k: u64 = 0
+    while k < QB_BLOCKS {
+        q_seek(fd, Q_OFF)
+        let t0: u64 = u_tsc()
+        var runde: u64 = 0
+        while runde < iters / buendel {
+            var i: u64 = 0
+            while i < buendel {
+                r_put(base, AOP_READ, fd, p, QB_LEN, 0)
+                i = i + 1
+            }
+            r_kick(h, base)
+            var got: u64 = 0
+            var w: u64 = 0
+            while got < buendel {
+                if r_reap(base, (&cq[0]) as u64) == 1 {
+                    got = got + 1
+                } else {
+                    u_sys(SYS_YIELD, 0, 0, 0)
+                    w = w + 1
+                    if w > 200000 {
+                        got = buendel
+                    }
+                }
+            }
+            runde = runde + 1
+        }
+        let t1: u64 = u_tsc()
+        b[k as usize] = (t1 -% t0) / iters
+        k = k + 1
+    }
+    u_hb_sort((&b[0]) as u64, QB_BLOCKS)
+    return b[16]
+}
+
+fn qb_sag(name: u64, v: u64) {
+    u_say_line(name, v)
+}
+
+fn u_qbench(arg: u64) {
+    var s_sy: [u8; 17] = "qbench: sync=\0\0\0\0"
+    var s_r1: [u8; 17] = "qbench: ring1=\0\0\0"
+    var s_r4: [u8; 17] = "qbench: ring4=\0\0\0"
+    var s_r16: [u8; 18] = "qbench: ring16=\0\0\0"
+    var s_r64: [u8; 18] = "qbench: ring64=\0\0\0"
+    var s_q1: [u8; 15] = "qbench: nq1=\0\0\0"
+    var s_q4: [u8; 15] = "qbench: nq4=\0\0\0"
+    var s_q16: [u8; 16] = "qbench: nq16=\0\0\0"
+    var s_q64: [u8; 16] = "qbench: nq64=\0\0\0"
+    var s_f1: [u8; 19] = "qbench: ringfrei1=\0"
+    var s_f8: [u8; 19] = "qbench: ringfrei8=\0"
+    var s_f32: [u8; 21] = "qbench: ringfrei32=\0\0"
+    var s_g1: [u8; 17] = "qbench: nqfrei1=\0"
+    var s_g8: [u8; 17] = "qbench: nqfrei8=\0"
+    var s_g32: [u8; 19] = "qbench: nqfrei32=\0\0"
+    var s_ws: [u8; 20] = "qbench: waitssync=\0\0"
+    var s_wr: [u8; 20] = "qbench: waitsring=\0\0"
+    var s_wq: [u8; 18] = "qbench: waitsnq=\0\0"
+    var s_ss: [u8; 20] = "qbench: spinssync=\0\0"
+    var s_sr: [u8; 20] = "qbench: spinsring=\0\0"
+    var s_sq: [u8; 18] = "qbench: spinsnq=\0\0"
+    var s_fa: [u8; 15] = "qbench: fast=\0\0"
+    var s_fb: [u8; 19] = "qbench: fallback=\0\0"
+    var s_ir: [u8; 15] = "qbench: irqs=\0\0"
+    var s_po: [u8; 17] = "qbench: polled=\0\0"
+    var s_su: [u8; 18] = "qbench: submits=\0\0"
+    var s_it: [u8; 16] = "qbench: iters=\0\0"
+    var s_no: [u8; 16] = "qbench: nonq=\0\0\0"
+    var s_qs: [u8; 18] = "qbench: queues=\0\0\0"
+    var s_ti: [u8; 17] = "qbench: tiefe=\0\0\0"
+    var s_sp: [u8; 20] = "qbench: spurious=\0\0\0"
+    var s_to: [u8; 20] = "qbench: timeouts=\0\0\0"
+    var puf: [u8; 4096] = [0 as u8; 4096]
+    let p: u64 = (&puf[0]) as u64
+    let iters: u64 = 16
+    let fd: u64 = q_open()
+    if (fd >> 63) != 0 {
+        qb_sag((&s_no[0]) as u64, 1)
+        u_sys(SYS_EXIT, 1, 0, 0)
+    }
+    if q_info(0, 0) != 1 {
+        qb_sag((&s_no[0]) as u64, 2)
+        u_sys(SYS_EXIT, 1, 0, 0)
+    }
+    let h: u64 = u_sys(RG_SETUP, 128, 0, 0)
+    if (h >> 63) != 0 {
+        qb_sag((&s_no[0]) as u64, 3)
+        u_sys(SYS_EXIT, 1, 0, 0)
+    }
+    let base: u64 = u_sys(RG_MAP, h, 0, 0)
+    qb_sag((&s_qs[0]) as u64, q_info(1, 0))
+    qb_sag((&s_ti[0]) as u64, q_info(2, 0))
+
+    // ---- 1. SYNCHRON. Ein Systemaufruf, ein NVMe-Befehl, ein
+    //         wartender Faden. Das ist der Massstab.
+    let w0: u64 = q_info(26, 0)
+    let d0: u64 = q_info(42, 0)
+    qb_sag((&s_sy[0]) as u64, qb_sync(fd, p, iters))
+    let w1: u64 = q_info(26, 0)
+    let d1: u64 = q_info(42, 0)
+    qb_sag((&s_ws[0]) as u64, w1 - w0)
+    // DIE EHRLICHE LASTZAHL. `waits` sind die `hlt`; `spins` sind die
+    // Drehungen mit vollem Prozessor. Ein `read(2)` auf `/dev/nvme0`
+    // haelt `atomic.L_FS` mit abgeschalteten Interrupts -- es KANN gar
+    // nicht schlafen und dreht deshalb.
+    qb_sag((&s_ss[0]) as u64, d1 - d0)
+
+    // ---- 2. DER FADENWEG DER RUNDE RING. Weiche aus.
+    q_info(36, 0)
+    qb_sag((&s_r1[0]) as u64, qb_ring(fd, h, base, p, 1, iters))
+    qb_sag((&s_r4[0]) as u64, qb_ring(fd, h, base, p, 4, iters))
+    qb_sag((&s_r16[0]) as u64, qb_ring(fd, h, base, p, 16, iters))
+    // DIE LASTZAHL WIRD HIER GENOMMEN, ueber die Tiefen 1/4/16 -- und
+    // NICHT ueber die Tiefe 64. Bei Tiefe 64 ist die
+    // Geraetewarteschlange voll (sie ist 64 tief und laesst einen
+    // Platz frei), ein Teil der Auftraege geht ueber den Fadenweg, und
+    // DIE drehen natuerlich. Eine Lastzahl, die den Rueckstau
+    // mitmisst, misst nicht mehr, was sie behauptet.
+    let d2: u64 = q_info(42, 0)
+    let w2: u64 = q_info(26, 0)
+    qb_sag((&s_r64[0]) as u64, qb_ring(fd, h, base, p, 64, 64))
+    qb_sag((&s_f1[0]) as u64, qb_frei(fd, h, base, p, 1, 32))
+    qb_sag((&s_f8[0]) as u64, qb_frei(fd, h, base, p, 8, 32))
+    qb_sag((&s_f32[0]) as u64, qb_frei(fd, h, base, p, 32, 32))
+    qb_sag((&s_wr[0]) as u64, w2 - w1)
+    qb_sag((&s_sr[0]) as u64, d2 - d1)
+
+    // ---- 3. DER WARTESCHLANGENWEG. Weiche an. DASSELBE PROGRAMM.
+    q_info(36, 1)
+    let w2b: u64 = q_info(26, 0)
+    let d2b: u64 = q_info(42, 0)
+    qb_sag((&s_q1[0]) as u64, qb_ring(fd, h, base, p, 1, iters))
+    qb_sag((&s_q4[0]) as u64, qb_ring(fd, h, base, p, 4, iters))
+    qb_sag((&s_q16[0]) as u64, qb_ring(fd, h, base, p, 16, iters))
+    let w3: u64 = q_info(26, 0)
+    let d3: u64 = q_info(42, 0)
+    qb_sag((&s_q64[0]) as u64, qb_ring(fd, h, base, p, 64, 64))
+    qb_sag((&s_g1[0]) as u64, qb_frei(fd, h, base, p, 1, 32))
+    qb_sag((&s_g8[0]) as u64, qb_frei(fd, h, base, p, 8, 32))
+    qb_sag((&s_g32[0]) as u64, qb_frei(fd, h, base, p, 32, 32))
+    // DIE ZAHL FUER "NIEMAND WARTET". BEIDE muessen null sein: kein
+    // Faden hat sich schlafen gelegt UND keiner hat gedreht. Das ist
+    // der ganze Unterschied zwischen dieser Runde und der davor --
+    // ueber DENSELBEN drei Tiefen wie oben beim Fadenweg.
+    qb_sag((&s_wq[0]) as u64, w3 - w2b)
+    qb_sag((&s_sq[0]) as u64, d3 - d2b)
+
+    qb_sag((&s_fa[0]) as u64, q_info(9, 0))
+    qb_sag((&s_fb[0]) as u64, q_info(8, 0))
+    qb_sag((&s_ir[0]) as u64, q_info(5, 0))
+    qb_sag((&s_po[0]) as u64, q_info(13, 0))
+    qb_sag((&s_su[0]) as u64, q_info(3, 0))
+    qb_sag((&s_sp[0]) as u64, q_info(12, 0))
+    qb_sag((&s_to[0]) as u64, q_info(11, 0))
+    qb_sag((&s_it[0]) as u64, QB_BLOCKS * iters)
+    u_sys(SYS_CLOSE, fd, 0, 0)
+    u_sys(RG_CLOSE, h, 0, 0)
     u_sys(SYS_EXIT, 0, 0, 0)
 }

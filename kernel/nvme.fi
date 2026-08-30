@@ -74,7 +74,17 @@ import arch.arch
 export {
     init, present, read_block, write_block, read_many,
     irq, drain, blocks, block_shift, bdf, irqs, waits,
-    arm_polling, buffer, identify_ctrl
+    arm_polling, buffer, identify_ctrl,
+    // ---- RUNDE NVMEQ ----
+    //
+    // Vier Namen mehr, und alle vier sind das, was ein zweiter Treiber
+    // auf DEMSELBEN Controller braucht: darf ich ueberhaupt (`ready`),
+    // leg mir eine Warteschlange an (`admin`), was hat der Controller
+    // dazu gesagt (`admin_result`), und sag ihm, dass meine
+    // Warteschlange gewachsen ist (`doorbell`). Alles andere bleibt
+    // innen -- `nvmeq.fi` schreibt seine Eintraege selbst, in seine
+    // eigenen Warteschlangen, in seinem eigenen DMA-Vorrat.
+    ready, admin, admin_result, doorbell, spins
 }
 
 // -------------------------------------------- the K2 data area, part 3
@@ -101,6 +111,24 @@ const S_POLL: u64 = 0x180
 const S_WAITS: u64 = 0x188
 const S_MSIX: u64 = 0x190
 const S_IDX: u64 = 0x198
+// RUNDE NVMEQ: das Doppelwort 0 der letzten Admin-Fertigmeldung.
+// `set features 0x07` antwortet DARIN, wie viele Warteschlangen
+// der Controller wirklich hergibt -- und das ist eine Zahl, die
+// man LIEST und nicht annimmt.
+const S_RESULT: u64 = 0x1A0
+// RUNDE NVMEQ: WIE OFT EIN FADEN AUF DAS GERAET GEDREHT HAT.
+//
+// `S_WAITS` zaehlt die `hlt` -- also die Faelle, in denen ein Faden den
+// Prozessor abgibt und wartet. Es gibt aber den anderen Fall, und er
+// ist der teurere: kann der Aufrufer keinen Interrupt annehmen
+// (`devfs.enter` haelt `atomic.L_FS` MIT ABGESCHALTETEN INTERRUPTS),
+// dann pollt `await` -- und dreht dabei mit vollem Prozessor.
+//
+// Genau das ist der Weg, den ein `read(2)` auf `/dev/nvme0` nimmt, und
+// ohne diesen Zaehler stuende in der Messung dieser Runde "waits=0" und
+// haette den Eindruck erweckt, es warte niemand. Es wartet jemand -- er
+// tut es nur mit voller Last statt schlafend.
+const S_SPINS: u64 = 0x1A8
 
 // The four queues and the buffers. Page aligned because `boot.s` aligns
 // the whole region and every offset here is a multiple of 4096.
@@ -187,6 +215,10 @@ fn irqs(state: u64) -> u64 {
 
 fn waits(state: u64) -> u64 {
     return kstate.get(state, sc(S_WAITS))
+}
+
+fn spins(state: u64) -> u64 {
+    return kstate.get(state, sc(S_SPINS))
 }
 
 fn last_status(state: u64) -> u64 {
@@ -308,6 +340,8 @@ fn admin(state: u64, opcode: u64, nsid: u64, prp1: u64,
         let d3: u64 = cqe(cq, head, 3)
         if ((d3 >> 16) & 1) == phase {
             let status: u64 = (d3 >> 17) & 0x7FF
+            // RUNDE NVMEQ: das Ergebniswort, bevor der Kopf weiterrueckt.
+            kstate.set(state, sc(S_RESULT), cqe(cq, head, 0))
             head = head + 1
             if head >= QDEPTH {
                 head = 0
@@ -322,6 +356,10 @@ fn admin(state: u64, opcode: u64, nsid: u64, prp1: u64,
     }
     kstate.set(state, sc(S_STATUS), 0xFFFF)
     return 0xFFFF
+}
+
+fn admin_result(state: u64) -> u64 {
+    return kstate.get(state, sc(S_RESULT))
 }
 
 fn next_cid(state: u64) -> u64 {
@@ -418,6 +456,7 @@ fn init(state: u64, use_msix: bool, armed: bool) -> bool {
     kstate.set(state, sc(S_IRQS), 0)
     kstate.set(state, sc(S_DONE), 0)
     kstate.set(state, sc(S_WAITS), 0)
+    kstate.set(state, sc(S_SPINS), 0)
     kstate.set(state, sc(S_CID), 0)
     zero(state + ASQ_OFF, PAGE)
     zero(state + ACQ_OFF, PAGE)
@@ -686,10 +725,12 @@ fn await(state: u64, want: u64) -> bool {
         while spin < SPIN_LIMIT {
             drain(state)
             if kstate.get(state, sc(S_DONE)) >= want {
+                kstate.add(state, sc(S_SPINS), spin + 1)
                 return kstate.get(state, sc(S_STATUS)) == 0
             }
             spin = spin + 1
         }
+        kstate.add(state, sc(S_SPINS), spin)
         return false
     }
     let start: u64 = kstate.get(state, kstate.TICKS)

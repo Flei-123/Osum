@@ -91,6 +91,9 @@ import vfsops
 import devfs
 import part
 import blk
+// RUNDE NVMEQ: die Warteschlange des Geraets.
+import nvmeq
+import nvme
 // RUNDE INSTALL: `sync` schreibt auch die FSInfo-Seite von FAT32.
 import fat
 import usb
@@ -546,6 +549,31 @@ const RING_ENTER: u64 = 1989 // (h, abgeben, mindest, tmo_ms) -> Zahl
 const RING_CLOSE: u64 = 1990 // (h) -> 0
 const RING_INFO: u64 = 1991 // (was, arg) -> Innenzahl, nur mit `ring`
 const RING_MAXNR: u64 = 1991
+
+// ======================================== RUNDE NVMEQ: 1992..1993
+//
+// ZWEI NUMMERN, UND MEHR SIND ES ABSICHTLICH NICHT.
+//
+// Diese Runde fuehrt KEINE neue Schnittstelle fuer Programme ein. Ein
+// Programm gibt seinen Auftrag genau so ab wie in Runde RING -- ein
+// Satz im Abgabering, dieselben sechs Felder --, und es holt ihn genau
+// so ab. Was sich aendert, ist, WAS DER KERN DAMIT MACHT, und das ist
+// keine Angelegenheit einer Aufrufnummer.
+//
+// Was hier steht, ist deshalb nur das Fenster fuer den Selbsttest:
+//
+//   1992  nvmeq_version()      -> 1
+//   1993  nvmeq_info(was, arg) -> Innenzahl, NUR mit `nvmeq`/`nqbench`
+//
+// 1992 ist die naechste freie Nummer: 1986..1991 gehoeren RING,
+// 1980..1985 gehoeren ASYNC, und `CAP_BASE` faengt bei 2000 an. Wie
+// `RING_INFO` steht `NVMEQ_INFO` NICHT in der libc -- es gibt
+// Innenzahlen des Kerns heraus, und ein Testfenster, das im
+// Regelbetrieb offen bleibt, ist eine Hintertuer.
+const NVMEQ_BASE: u64 = 1992
+const NVMEQ_VERSION: u64 = 1992 // () -> Fassung dieser Schnittstelle
+const NVMEQ_INFO: u64 = 1993 // (was, arg) -> Innenzahl, nur im Selbsttest
+const NVMEQ_MAXNR: u64 = 1993
 
 // RUNDE ASYNC, und sie ist der Massstab: `fsync` gab es bis hierher gar
 // nicht. Ohne ihn haette die asynchrone Fassung nichts, wogegen sie zu
@@ -1978,6 +2006,12 @@ fn dispatch(number: u64, frame: u64, state: u64) -> u64 {
     if number >= RING_BASE {
         if number <= RING_MAXNR {
             return ring_call(state, me, number, a0, a1, a2, a3)
+        }
+    }
+    // RUNDE NVMEQ: der Block 1992..1993, direkt hinter dem von RING.
+    if number >= NVMEQ_BASE {
+        if number <= NVMEQ_MAXNR {
+            return nvmeq_call(state, me, number, a0, a1)
         }
     }
     if number == SYS_FSYNC {
@@ -7222,6 +7256,15 @@ fn aio_submit(state: u64, me: u64, op: u64, fd: u64, buf: u64,
 // die Gegenprobe zu der Behauptung, dass die Arbeit wirklich woanders
 // geschieht -- und zugleich der Massstab der Durchsatzmessung.
 fn aio_kick(state: u64, me: u64, id: u64) -> u64 {
+    // RUNDE NVMEQ: dieselbe Weiche wie in `ring_note`, fuer den Weg
+    // ueber `aio_submit` (Runde ASYNC, mit Systemaufruf). Ein Auftrag
+    // soll nicht davon abhaengen, durch welche Tuer er hereinkam.
+    let vor: u64 = async.find(state, id)
+    if vor < async.MAX_AIO {
+        if nvmeq_try(state, vor) {
+            return id
+        }
+    }
     if kstate.mode_on(state, kstate.M_NOAWORK) {
         let i: u64 = async.find(state, id)
         if i < async.MAX_AIO {
@@ -7766,7 +7809,12 @@ fn aio_worker(state: u64, index: u64) {
         // im geteilten Speicher liegt, ist noch kein Auftrag -- er wird
         // hier einer. Andersherum liefe der Faden an frischer Arbeit
         // vorbei in den Schlaf.
-        let geerntet: u64 = ring_pump(state)
+        // RUNDE NVMEQ: DIE UNTERHAELFTE, VOR ALLEM ANDEREN. Was das
+        // Geraet gemeldet hat, ist fertige Arbeit -- sie erst nach der
+        // Ringabfrage abzuholen hiesse, einen Auftrag zu beginnen,
+        // waehrend ein anderer schon auf seine Meldung wartet.
+        let nachlauf: u64 = nvmeq_pump(state)
+        let geerntet: u64 = ring_pump(state) + nachlauf
         let i: u64 = async.take_new(state)
         if i < async.MAX_AIO {
             aio_run(state, i)
@@ -7798,6 +7846,14 @@ fn aio_worker(state: u64, index: u64) {
                     // Ablauf "Programm sieht keine Flagge und stoesst
                     // nicht an -- Faden setzt die Flagge und schlaeft",
                     // und der Auftrag laege unbemerkt im Ring.
+                    // RUNDE NVMEQ: der Notausgang, unmittelbar bevor
+                    // sich dieser Faden hinlegt. Steht ein Auftrag zu
+                    // lange beim Geraet, wird er hier fuer verloren
+                    // erklaert -- und das Programm bekommt einen
+                    // Fehler statt eines Haengers.
+                    if nvmeq_sweep(state) != 0 {
+                        leer = 0
+                    }
                     var schlafen: bool = true
                     if ring.worker_sleep_begin(state) {
                         if ring.any_pending(state) {
@@ -8243,6 +8299,15 @@ fn ring_note(state: u64, id: u64, i: u64, sqidx: u64) {
     if j < async.MAX_AIO {
         ring.job_set(state, j, i, sqidx)
         ring.inc_flight(state, i)
+        // RUNDE NVMEQ: DIE WEICHE. Sie steht HIER und nicht im
+        // Arbeitsfaden, und das ist der ganze Punkt der Runde: der
+        // Auftrag geht auf dem Weg vom Abgabering in die Warteschlange
+        // des Geraets, ohne dass ein Faden ihn je in der Hand hatte.
+        // Sagt sie nein, liegt er unveraendert da und alles laeuft wie
+        // in Runde RING.
+        if nvmeq_try(state, j) {
+            return
+        }
         // GEGENPROBE `noawork`: es gibt keine Arbeitsfaeden, also fuehrt
         // der Erntende den Auftrag selbst aus -- ueber DENSELBEN
         // Uebergang (`take_one` ist ein `lock cmpxchg`), damit auch hier
@@ -8362,6 +8427,11 @@ fn ring_enter(state: u64, me: u64, h: u64, abgeben: u64, mindest: u64,
         // ZUERST die Weckfolge merken, DANN nachsehen -- dieselbe
         // Reihenfolge und derselbe Grund wie in `aio_wait`.
         let seen: u64 = sched.poll_seq(state)
+        // RUNDE NVMEQ: die Unterhaelfte auch hier. Ohne diese Zeile
+        // haengt der Warteschlangenweg an den Arbeitsfaeden -- und die
+        // Gegenprobe `noawork`, in der es keine gibt, waere ein
+        // Stillstand statt einer gefallenen Zusage.
+        nvmeq_pump(state)
         if ring.cq_used(state, i) >= mindest {
             return n
         }
@@ -8381,6 +8451,7 @@ fn ring_enter(state: u64, me: u64, h: u64, abgeben: u64, mindest: u64,
         if forever {
             wake = sched.POLL_FOREVER
         }
+        nvmeq_sweep(state)
         sched.poll_sleep(state, seen, wake)
     }
     return n
@@ -8520,6 +8591,607 @@ fn ring_call(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64,
         return ring_info(state, me, a0, a1)
     }
     return neg(errno.E_INVAL)
+}
+
+// =====================================================================
+// RUNDE NVMEQ: DIE WEICHE, DIE ABGABE UND DIE UNTERHAELFTE
+// =====================================================================
+//
+// Hier steht die Stelle, an der ein Auftrag entscheidet, ob er in einen
+// FADEN geht oder in ein GERAET. Alles darueber (Handle, Auftrag, Ring)
+// ist unveraendert; alles darunter (`nvmeq.fi`) weiss nichts von
+// Deskriptoren, Aufgaben oder Ringen.
+//
+// DIE WAHL TRIFFT DER KERN. Ein Programm kann sie nicht erzwingen und
+// nicht verhindern -- es gibt keine Flagge dafuer, und das ist Absicht:
+// welcher Weg der richtige ist, haengt am GERAET, und das Geraet kennt
+// der Kern. Ein Programm, das den schnellen Weg anfordern koennte,
+// koennte ihn auch fuer eine Roehre anfordern.
+
+// Zeigt dieser offene Eintrag auf ein Blockgeraet, das der
+// NVMe-Controller ist? Drei Fragen, und alle drei muessen ja sein.
+// Ein `/dev/hda` (ATA-PIO), ein `/dev/ram0`, eine gewoehnliche Datei
+// auf OFS oder eine Roehre faellt hier heraus und geht den Fadenweg --
+// das ist der Rueckfallweg, und er ist keine Notloesung, sondern der
+// Normalfall fuer alles, was keine Warteschlange hat.
+fn nvmeq_dev(state: u64, of: u64) -> bool {
+    if file.open_kind(state, of) != file.K_VFILE {
+        return false
+    }
+    let m: u64 = file.open_mnt(state, of)
+    if mnt_gone(state, m) {
+        return false
+    }
+    if vfs.type_of(state, m) != vfsops.FS_DEV {
+        return false
+    }
+    let node: u64 = file.open_ino(state, of)
+    if !devfs.is_block(node) {
+        return false
+    }
+    if devfs.block_of(node) != blk.DEV_NVME {
+        return false
+    }
+    return blk.present_on(state, blk.DEV_NVME)
+}
+
+// Kerneigene 16 Oktett je Aufgabe, in die `nvmeq.reap_next` einen
+// Nachlaufsatz legt. EINE Flaeche fuer alle Aufgaben waere die dritte
+// Stelle nach `kstate.BLOCK_OFF` und der Kopierflaeche der Runde RING,
+// an der sich zwei Faeden in dieselben Oktette schreiben.
+fn nvmeq_scratch(state: u64, task: u64) -> u64 {
+    var t: u64 = task
+    if t >= kstate.MAX_TASKS {
+        t = 0
+    }
+    return state + kstate.NQ_OFF + 0xA00 + t * 16
+}
+
+// ---------------------------------------------------------- DIE ABGABE
+//
+// Rueckgabe `true` heisst: DIESER AUFTRAG IST ERLEDIGT ODER UNTERWEGS,
+// kein Arbeitsfaden soll ihn mehr anfassen. `false` heisst: er liegt
+// unveraendert in der Auftragstafel und geht den Weg der Runde RING.
+fn nvmeq_try(state: u64, j: u64) -> bool {
+    // GEGENPROBE `noqueue`: die Weiche aus. Jeder Auftrag geht wieder
+    // ueber den Fadenweg -- das ist die Grundlinie, gegen die diese
+    // Runde gemessen wird, IN DEMSELBEN KERNEL und mit demselben
+    // Programm.
+    if kstate.mode_on(state, kstate.M_NOQUEUE) {
+        return false
+    }
+    if !nvmeq.ready(state) {
+        return false
+    }
+    // Dieselbe Weiche, nur zur Laufzeit -- damit die Messung beide Wege
+    // in EINEM Boot vergleichen kann. Siehe `NS_ON` in `nvmeq.fi`.
+    if !nvmeq.enabled(state) {
+        return false
+    }
+    let op: u64 = async.op_of(state, j)
+    if op != async.OP_READ {
+        if op != async.OP_WRITE {
+            return false
+        }
+    }
+    let task: u64 = async.owner_of(state, j)
+    let pid: u64 = async.pid_of(state, j)
+    if pid == 0 {
+        return false
+    }
+    if task >= kstate.MAX_TASKS {
+        return false
+    }
+    // DIE GENERATIONSPRUEFUNG, UND ZWAR HIER SCHON. Sie steht am Ende
+    // noch einmal (in `nvmeq_finish`), und beide Male aus demselben
+    // Grund: zwischen der Abgabe und der Fertigstellung kann das
+    // Handle geschlossen und sein Platz neu vergeben worden sein.
+    let got: u64 = handle.req_object(state, async.token_of(state, j))
+    if handle.is_err(got) {
+        return false
+    }
+    let of: u64 = got
+    if of >= file.MAX_OPEN {
+        return false
+    }
+    if !nvmeq_dev(state, of) {
+        return false
+    }
+    let lesen: bool = op == async.OP_READ
+    if lesen {
+        if !readable(state, of) {
+            return false
+        }
+    } else {
+        if !writable(state, of) {
+            return false
+        }
+    }
+    let len: u64 = async.len_of(state, j)
+    if len == 0 {
+        return false
+    }
+    if len > nvmeq.BOUNCE {
+        return false
+    }
+    let buf: u64 = async.buf_of(state, j)
+    let off: u64 = file.open_off(state, of)
+    let erste: u64 = off / nvmeq.SECTOR
+    let skip: u64 = off - erste * nvmeq.SECTOR
+    let bloecke: u64 = (skip + len + nvmeq.SECTOR - 1) / nvmeq.SECTOR
+    if bloecke == 0 {
+        return false
+    }
+    if bloecke * nvmeq.SECTOR > nvmeq.BOUNCE {
+        return false
+    }
+    // SCHREIBEN NUR BLOCKGENAU. Ein Schreibzugriff, der nicht an einer
+    // Blockgrenze anfaengt oder aufhoert, braucht LESEN-AENDERN-
+    // SCHREIBEN: erst den Block holen, dann die Oktette hineinlegen,
+    // dann zurueckschreiben. Das sind ZWEI Geraetegaenge mit einer
+    // Abhaengigkeit dazwischen -- also genau das, was diese Runde
+    // gerade abschafft. Solche Schreibzugriffe gehen den Fadenweg, wo
+    // `devfs.block_write_inner` sie seit Runde K14 richtig macht.
+    if !lesen {
+        if skip != 0 {
+            return false
+        }
+        if (len & (nvmeq.SECTOR - 1)) != 0 {
+            return false
+        }
+    }
+    // DIE GRENZEN DES TRAEGERS, aus der Buchhaltung des Kerns und nicht
+    // aus einer Zahl des Programms. Was darueber hinausginge, gibt der
+    // Fadenweg als KURZE Antwort zurueck (`block_read_inner` kappt);
+    // damit beide Wege dieselbe Antwort geben, nimmt der schnelle Weg
+    // solche Anforderungen gar nicht erst an.
+    let traeger: u64 = blk.blocks_on(state, blk.DEV_NVME)
+    if traeger == 0 {
+        return false
+    }
+    if erste >= traeger {
+        return false
+    }
+    if traeger - erste < bloecke {
+        return false
+    }
+    let q: u64 = nvmeq.queue_of(state)
+    let g: u64 = nvmeq.claim(state, q)
+    if g >= nvmeq.NQ_SLOTS {
+        // DIE WARTESCHLANGE IST VOLL. Kein Verlust und kein Haenger:
+        // der Auftrag liegt unveraendert da und ein Arbeitsfaden nimmt
+        // ihn. Der Rueckstau EINE Ebene hoeher (`ring.inflight_of`
+        // gegen die Ringlaenge) sorgt dafuer, dass es davon nie mehr
+        // gibt, als in den Ring passen.
+        kstate.add(state, kstate.Q_FALLBACK, 1)
+        return false
+    }
+    // ERST JETZT wird der Auftrag weggenommen. `take_one` ist ein
+    // `lock cmpxchg` -- wer ihn bekommt, ist der Einzige, und ein
+    // Arbeitsfaden, der ihn eine Zeitscheibe frueher genommen hat,
+    // gewinnt und dieser Weg tritt zurueck.
+    if !async.take_one(state, j) {
+        nvmeq.release_slot(state, g)
+        return false
+    }
+    nvmeq.fill(state, g, j, task, pid, buf, len, skip, op)
+    if !lesen {
+        // Die Oktette JETZT in den Umsteigepuffer -- im Zusammenhang
+        // dessen, der abgibt, mit `proc.user_ok` und der
+        // Seitentabelle dieser Aufgabe. Ab dieser Zeile fasst das
+        // Geraet nur noch Kernspeicher an.
+        if !copy_in(state, task, nvmeq.bounce_of(state, g), buf, len) {
+            nvmeq.release_slot(state, g)
+            async.finish(state, j, neg(errno.E_FAULT), async.Q_FAIL)
+            aio_post(state, j)
+            return true
+        }
+    }
+    // GEGENPROBE `nodmapool`: die Adresse fuer den Eintrag kommt nicht
+    // aus dem Vorrat, sondern aus dem Wert, den das Programm im
+    // geteilten Ring stehen hatte. `nvmeq.push` schreibt sie in
+    // `last_prp` -- und die Wache laesst sie nicht durch, die
+    // Tuerklingel bleibt stumm. Der Laeufer prueft beides.
+    var luege: u64 = 0
+    if kstate.mode_on(state, kstate.M_NODMAPOOL) {
+        luege = buf
+    }
+    // GEGENPROBE `nqerr`: ein Blockindex hinter dem Ende des Traegers.
+    // Das GERAET antwortet dann mit einem Status ungleich null (LBA
+    // out of range), und genau der muss beim Programm ankommen.
+    var lba: u64 = erste
+    if kstate.mode_on(state, kstate.M_NQERR) {
+        lba = traeger + 4096
+    }
+    if !nvmeq.push(state, g, lesen, lba, bloecke, luege) {
+        nvmeq.release_slot(state, g)
+        async.finish(state, j, neg(errno.E_FAULT), async.Q_FAIL)
+        aio_post(state, j)
+        return true
+    }
+    kstate.add(state, kstate.Q_FAST, 1)
+    // DER VERSATZ RUECKT BEI DER ABGABE VOR und nicht bei der
+    // Fertigstellung. Der Fadenweg macht es andersherum, und auf einem
+    // synchronen Weg ist das dasselbe -- hier nicht: bei Tiefe 16
+    // stehen sechzehn Auftraege gleichzeitig beim Geraet, und wenn der
+    // Versatz erst hinterher weiterrueckte, lesen alle sechzehn
+    // DENSELBEN Block. Der Preis ist, dass ein gescheiterter Auftrag
+    // seinen Versatz trotzdem verbraucht hat; das ist bei jedem
+    // Betriebssystem mit `pread`-artigen Auftraegen so, und ein
+    // Programm, dem das nicht passt, gibt den Versatz mit ab.
+    file.open_set_off(state, of, off + len)
+    return true
+}
+
+// ------------------------------------------------------ DIE UNTERHAELFTE
+//
+// HIER IST WARTEN ERLAUBT, UND DESHALB STEHT HIER ALLES, WAS IM
+// INTERRUPT NICHTS ZU SUCHEN HAT: die Generationspruefung, die Frage,
+// ob es den Adressraum noch gibt, die Kopie aus dem Umsteigepuffer
+// dorthin, und die Fertigmeldung in den Ring des Programms.
+//
+// Die Reihenfolge ist die ganze Zusage: ERST pruefen, DANN kopieren.
+// Wer sie umdreht, schreibt in Seiten, die `reap` gerade freigegeben
+// hat -- derselbe Fehler wie in Runde ASYNC, nur eine Ebene tiefer und
+// mit einem Geraet dazwischen.
+fn nvmeq_finish(state: u64, g: u64, status: u64) {
+    let j: u64 = nvmeq.slot_job(state, g)
+    // MEINT DIESER FLUGPLATZ NOCH DENSELBEN AUFTRAG?
+    //
+    // Es gibt einen Weg, auf dem er es nicht tut: `async.abandon`
+    // wartet beim Prozesstod hoechstens fuenf Sekunden auf laufende
+    // Auftraege und raeumt danach ab, ob sie fertig sind oder nicht.
+    // Ein Geraet, das erst danach antwortet, traefe hier einen Platz,
+    // der schon jemand anderem gehoert -- und wuerde dessen
+    // Fertigmeldung stellen. Der Zustand ist die Antwort: ein Auftrag,
+    // der DIESEM Flugplatz gehoert, steht in Q_RUN (er wurde mit
+    // `take_one` weggenommen) oder in Q_CANCEL (er wurde
+    // zwischendurch abgebrochen). Alles andere heisst: nicht mehr
+    // unserer. Dann wird nur der Platz frei, und sonst nichts.
+    let zst: u64 = async.state_of(state, j)
+    if zst != async.Q_RUN {
+        if zst != async.Q_CANCEL {
+            nvmeq.release_slot(state, g)
+            kstate.add(state, kstate.Q_CANCELLED, 1)
+            return
+        }
+    }
+    let task: u64 = nvmeq.slot_task(state, g)
+    let pid: u64 = nvmeq.slot_pid(state, g)
+    let ubuf: u64 = nvmeq.slot_ubuf(state, g)
+    let ulen: u64 = nvmeq.slot_ulen(state, g)
+    let skip: u64 = nvmeq.slot_skip(state, g)
+    let op: u64 = nvmeq.slot_op(state, g)
+    var r: u64 = ulen
+    if status == 0xFFFF {
+        // Die Zeitgrenze aus `nvmeq.sweep`. Das Geraet hat NIE
+        // geantwortet -- das Programm bekommt einen Fehler und keinen
+        // Haenger.
+        r = neg(errno.E_TIMEDOUT)
+        kstate.add(state, kstate.A_TIMEOUTS, 1)
+    } else if status != 0 {
+        // DAS GERAET HAT NEIN GESAGT. Der Status steht in elf Bit des
+        // Fertigsatzes; hier wird daraus der eine Fehler, den Unix
+        // dafuer hat.
+        r = neg(errno.E_IO)
+    } else {
+        // 1. Lebt der Auftraggeber noch, und ist er noch derselbe?
+        //    `async.abandon` setzt die pid eines laufenden Auftrags auf
+        //    null, bevor es den Adressraum freigibt -- daran (und nur
+        //    daran) erkennt diese Stelle, dass sie nichts mehr
+        //    schreiben darf.
+        var lebt: bool = true
+        if pid == 0 {
+            lebt = false
+        }
+        if lebt {
+            if async.pid_of(state, j) != pid {
+                lebt = false
+            }
+        }
+        if lebt {
+            if task >= kstate.MAX_TASKS {
+                lebt = false
+            }
+        }
+        if lebt {
+            if sched.tget(state, task, sched.T_PID) != pid {
+                lebt = false
+            }
+        }
+        if lebt {
+            let ts: u64 = sched.tget(state, task, sched.T_STATE)
+            if ts == sched.S_FREE {
+                lebt = false
+            }
+            if ts == sched.S_ZOMBIE {
+                lebt = false
+            }
+        }
+        if !lebt {
+            r = neg(errno.E_CANCELED)
+            kstate.add(state, kstate.Q_CANCELLED, 1)
+        } else {
+            // 2. MEINT DAS HANDLE NOCH IMMER DASSELBE OBJEKT? Der
+            //    Auftrag stand beim Geraet, und in der Zeit kann sein
+            //    Deskriptor geschlossen und sein Platz neu vergeben
+            //    worden sein. Die Oktette liegen deshalb im
+            //    Umsteigepuffer und nicht in einer Programmseite -- und
+            //    von dort gehen sie jetzt eben NICHT weiter.
+            let ob: u64 = handle.req_object(state,
+                async.token_of(state, j))
+            if handle.is_err(ob) {
+                r = aio_errno(ob)
+                kstate.add(state, kstate.Q_STALED, 1)
+            } else if op == async.OP_READ {
+                if !copy_out(state, task, ubuf,
+                    nvmeq.bounce_of(state, g) + skip, ulen) {
+                    r = neg(errno.E_FAULT)
+                }
+            }
+        }
+    }
+    // Der Platz wird frei, BEVOR die Meldung steht: der Umsteigepuffer
+    // ist ab hier nicht mehr in Gebrauch, und ein Platz, der erst nach
+    // der Meldung frei wuerde, waere bei voller Warteschlange genau der
+    // Platz, auf den der naechste Auftrag wartet.
+    nvmeq.release_slot(state, g)
+    var endzustand: u64 = async.Q_DONE
+    if async.state_of(state, j) == async.Q_CANCEL {
+        r = neg(errno.E_CANCELED)
+        endzustand = async.Q_CANCEL
+    } else {
+        if errno.is_error(r) {
+            endzustand = async.Q_FAIL
+        }
+    }
+    async.finish(state, j, r, endzustand)
+    // GENAU EINE FERTIGMELDUNG, ueber dieselbe Weiche wie jeder andere
+    // Auftrag. `aio_post` entscheidet, ob sie in den Ring des Programms
+    // geht oder in den Fertigmeldungsring der Runde ASYNC.
+    aio_post(state, j)
+}
+
+// Alles abholen, was im Nachlaufring liegt.
+fn nvmeq_reap(state: u64) -> u64 {
+    if !nvmeq.ready(state) {
+        return 0
+    }
+    let out: u64 = nvmeq_scratch(state, sched.current(state))
+    var n: u64 = 0
+    var weiter: bool = true
+    while weiter {
+        if nvmeq.reap_next(state, out) {
+            let g: u64 = kstate.get(out, 0)
+            let status: u64 = kstate.get(out, 8)
+            nvmeq_finish(state, g, status)
+            n = n + 1
+        } else {
+            weiter = false
+        }
+    }
+    return n
+}
+
+// DER GANZE UNTERBAU IN EINEM AUFRUF, so wie ihn die Arbeitsfaeden und
+// die wartenden Aufrufe brauchen: abholen, was schon gemeldet ist --
+// und wenn noch etwas beim Geraet steht, EINMAL nachsehen und das
+// Gefundene gleich mitnehmen.
+//
+// Das Nachsehen ist die zweite Haelfte des Hybrid-Pollings aus
+// `KERNEL.md`: wer ohnehin wach ist, sieht nach, statt sich hinzulegen
+// und wecken zu lassen. Es kostet je Runde einen Blick auf vier
+// Phasenbits. Wie oft es wirklich etwas findet, steht in
+// `nvmeq: polled` -- im Regelbetrieb ist der Interrupt schneller, und
+// genau dann ist die Zahl klein.
+fn nvmeq_pump(state: u64) -> u64 {
+    if !nvmeq.ready(state) {
+        return 0
+    }
+    var n: u64 = nvmeq_reap(state)
+    if nvmeq.inflight(state) != 0 {
+        if nvmeq.poll(state) != 0 {
+            n = n + nvmeq_reap(state)
+        }
+    }
+    return n
+}
+
+// Der Notausgang, und er wird nur da gerufen, wo sich ohnehin gleich
+// jemand hinlegt: einmal ueber die Flugtafel, und was zu lange steht,
+// wird fuer verloren erklaert. Ihn in die heisse Schleife zu stellen
+// waere 256 Vergleiche je Runde fuer einen Fall, der nie eintritt.
+fn nvmeq_sweep(state: u64) -> u64 {
+    if !nvmeq.ready(state) {
+        return 0
+    }
+    if nvmeq.sweep(state) == 0 {
+        return 0
+    }
+    return nvmeq_reap(state)
+}
+
+// Die Innenzahlen des Selbsttests. Wie `RING_INFO` nur im Selbsttest-
+// oder Messmodus.
+fn nvmeq_info(state: u64, was: u64, arg: u64) -> u64 {
+    if was == 0 {
+        return yesno(nvmeq.ready(state))
+    }
+    if was == 1 {
+        return nvmeq.queues(state)
+    }
+    if was == 2 {
+        return nvmeq.depth(state)
+    }
+    if was == 3 {
+        return kstate.get(state, kstate.Q_SUBMITS)
+    }
+    if was == 4 {
+        return kstate.get(state, kstate.Q_COMPLETED)
+    }
+    if was == 5 {
+        return kstate.get(state, kstate.Q_IRQS)
+    }
+    if was == 6 {
+        return kstate.get(state, kstate.Q_BADPRP)
+    }
+    if was == 7 {
+        return kstate.get(state, kstate.Q_QFULL)
+    }
+    if was == 8 {
+        return kstate.get(state, kstate.Q_FALLBACK)
+    }
+    if was == 9 {
+        return kstate.get(state, kstate.Q_FAST)
+    }
+    if was == 10 {
+        return kstate.get(state, kstate.Q_DEVERR)
+    }
+    if was == 11 {
+        return kstate.get(state, kstate.Q_TIMEOUTS)
+    }
+    if was == 12 {
+        return kstate.get(state, kstate.Q_SPURIOUS)
+    }
+    if was == 13 {
+        return kstate.get(state, kstate.Q_POLLED)
+    }
+    if was == 14 {
+        return kstate.get(state, kstate.Q_CANCELLED)
+    }
+    if was == 15 {
+        return kstate.get(state, kstate.Q_STALED)
+    }
+    if was == 16 {
+        return kstate.get(state, kstate.Q_REAPED)
+    }
+    if was == 17 {
+        return kstate.get(state, kstate.Q_LOST)
+    }
+    if was == 18 {
+        return nvmeq.inflight(state)
+    }
+    if was == 19 {
+        // DIE ZAHL, AUF DER DIE GANZE SICHERHEITSZUSAGE STEHT: die
+        // Adresse, die zuletzt in einen NVMe-Eintrag geschrieben werden
+        // SOLLTE. Der Laeufer haelt sie gegen den Vorrat und gegen die
+        // Programmadresse desselben Auftrags (Frage 20).
+        return nvmeq.last_prp(state)
+    }
+    if was == 20 {
+        return nvmeq.last_ubuf(state)
+    }
+    if was == 21 {
+        return nvmeq.bounce_base(state)
+    }
+    if was == 22 {
+        return nvmeq.pool_bytes(state)
+    }
+    if was == 23 {
+        return yesno(nvmeq.pool_holds(state, arg, 512))
+    }
+    if was == 24 {
+        return nvmeq.pool_frames(state)
+    }
+    if was == 25 {
+        return nvmeq.done_used(state)
+    }
+    if was == 26 {
+        // Wie oft ein Faden WIRKLICH auf das Geraet gewartet hat --
+        // `nvme.waits` zaehlt die `hlt` in `nvme.await`. Auf dem
+        // synchronen Weg steigt sie mit jedem Auftrag; auf dem
+        // Warteschlangenweg MUSS sie stehenbleiben, und das ist die
+        // Zahl fuer "niemand wartet".
+        return nvme.waits(state)
+    }
+    if was == 27 {
+        return nvmeq.NQ_QUEUES
+    }
+    if was == 28 {
+        return nvmeq.NQ_SLOTS
+    }
+    if was == 29 {
+        return blk.blocks_on(state, blk.DEV_NVME)
+    }
+    if was == 30 {
+        return nvmeq.inflight_of(state, arg)
+    }
+    if was == 31 {
+        return nvmeq.BOUNCE
+    }
+    if was == 32 {
+        // Der Pruefstandshalt der Unterhaelfte -- siehe `NS_HOLD` in
+        // `nvmeq.fi`. Er macht den Fall (b) deterministisch.
+        nvmeq.hold(state, arg)
+        return nvmeq.held(state)
+    }
+    if was == 33 {
+        return nvmeq.held(state)
+    }
+    if was == 34 {
+        return nvmeq.completions(state)
+    }
+    if was == 35 {
+        return nvmeq.submits(state)
+    }
+    if was == 36 {
+        nvmeq.enable(state, arg)
+        return yesno(nvmeq.enabled(state))
+    }
+    if was == 37 {
+        return yesno(nvmeq.enabled(state))
+    }
+    // DIE VIER LECKZAHLEN DER RUNDEN DAVOR. Sie stehen auch in
+    // `RING_INFO` -- aber das ist an das Wort `uring` gebunden, und ein
+    // Lauf dieser Runde soll den Selbsttest der Runde RING NICHT
+    // mitlaufen lassen (er wuerde die Zaehler verfaelschen, gegen die
+    // hier geprueft wird). Also dieselben Zahlen noch einmal, durch das
+    // Fenster DIESER Runde.
+    if was == 38 {
+        return ring.used(state)
+    }
+    if was == 39 {
+        return async.used(state)
+    }
+    if was == 40 {
+        return mem.frames_free(state)
+    }
+    if was == 41 {
+        return handle.req_live(state)
+    }
+    if was == 42 {
+        // DIE ZWEITE HAELFTE VON "NIEMAND WARTET": die Drehungen in
+        // `nvme.await`. Auf dem synchronen Weg ueber `/dev/nvme0` wird
+        // NICHT geschlafen, sondern gedreht -- `devfs.enter` haelt die
+        // Sperre mit abgeschalteten Interrupts, und dann kann der
+        // Fertigstellungs-Interrupt gar nicht ankommen. Diese Zahl ist
+        // deshalb die ehrlichere von beiden.
+        return nvme.spins(state)
+    }
+    return neg(errno.E_INVAL)
+}
+
+fn yesno(b: bool) -> u64 {
+    if b {
+        return 1
+    }
+    return 0
+}
+
+fn nvmeq_call(state: u64, me: u64, number: u64, a0: u64,
+    a1: u64) -> u64 {
+    if number == NVMEQ_VERSION {
+        return 1
+    }
+    if number == NVMEQ_INFO {
+        if !kstate.mode_on(state, kstate.M_NVMEQ) {
+            if !kstate.mode_on(state, kstate.M_NQBENCH) {
+                return neg(errno.E_NOSYS)
+            }
+        }
+        return nvmeq_info(state, a0, a1)
+    }
+    return neg(errno.E_NOSYS)
 }
 
 fn native(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64,

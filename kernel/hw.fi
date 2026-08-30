@@ -36,6 +36,7 @@ import kstate
 import pci
 import arch.x86_64.apic
 import nvme
+import nvmeq
 import blk
 import fs
 import arch.x86_64.idt
@@ -492,9 +493,55 @@ fn disk(state: u64) {
     }
 
     filesystem(state)
+    // RUNDE NVMEQ: die Warteschlangen des Geraets. Hier und nicht
+    // frueher, weil `nvme.init` gelaufen sein muss (die
+    // Admin-Warteschlange legt sie an), und hier und nicht spaeter,
+    // weil `kmain` gleich darunter den Selbsttest in Ring 3 startet.
+    //
+    // OHNE DIE WOERTER `nvmeq`/`nqbench` GESCHIEHT HIER NICHTS. Das ist
+    // die Bedingung dafuer, dass jede Messung der Runden 52 bis RING
+    // denselben Kernel sieht, den sie gemessen hat: keine zusaetzlichen
+    // Warteschlangen, kein Megaoktett Rahmen aus `mem.frame_run`, keine
+    // zweite Haelfte im Interrupt-Pfad.
+    nvmeq_stage(state)
     if on(state, M_BENCH) {
         bench(state)
     }
+}
+
+fn nvmeq_stage(state: u64) {
+    var s_off: [u8; 15] = "nvmeq: skipped "
+    var s_no: [u8; 20] = "nvmeq: init failed  "
+    var s_up: [u8; 9] = "nvmeq:   "
+    var s_q: [u8; 9] = "queues=  "
+    var s_d: [u8; 9] = "  depth= "
+    var s_f: [u8; 10] = "  frames= "
+    var s_b: [u8; 12] = "  bytes=    "
+    var s_p: [u8; 11] = "  bounce=  "
+    if !kstate.mode_on(state, kstate.M_NVMEQ) {
+        if !kstate.mode_on(state, kstate.M_NQBENCH) {
+            serial.puts((&s_off[0]) as u64)
+            serial.nl()
+            return
+        }
+    }
+    if !nvmeq.init(state) {
+        serial.puts((&s_no[0]) as u64)
+        serial.nl()
+        return
+    }
+    serial.puts((&s_up[0]) as u64)
+    serial.puts((&s_q[0]) as u64)
+    serial.dec(nvmeq.queues(state))
+    serial.puts((&s_d[0]) as u64)
+    serial.dec(nvmeq.depth(state))
+    serial.puts((&s_f[0]) as u64)
+    serial.dec(nvmeq.pool_frames(state))
+    serial.puts((&s_b[0]) as u64)
+    serial.dec(nvmeq.pool_bytes(state))
+    serial.puts((&s_p[0]) as u64)
+    serial.dec(nvmeq.bounce_base(state))
+    serial.nl()
 }
 
 // The whole point of `blk.fi`: the file system does not learn that the

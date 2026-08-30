@@ -195,6 +195,13 @@ export {
     M_RING, M_RBENCH, M_NOCOPY, M_NOSQCHK, M_RSTRESS,
     R_SETUPS, R_CLOSES, R_HARVEST, R_KICKS, R_BADSQ, R_BADCQ,
     R_OVERFLOW, R_DROPPED, R_POSTED, R_DENIED, R_PUMPS, R_SLEEPS,
+    // ---- RUNDE NVMEQ ----
+    NQ_OFF, NQ_MAX, NQF_OFF, NQF_MAX, NQD_OFF, NQD_MAX,
+    M_NVMEQ, M_NQBENCH, M_NODMAPOOL, M_NQNOIRQ, M_NQDBLIRQ,
+    M_NQTINY, M_NOQUEUE, M_NQERR, M_NQSTRESS,
+    Q_SUBMITS, Q_COMPLETED, Q_IRQS, Q_BADPRP, Q_QFULL, Q_FALLBACK,
+    Q_FAST, Q_DEVERR, Q_TIMEOUTS, Q_SPURIOUS, Q_POLLED, Q_CANCELLED,
+    Q_STALED, Q_REAPED, Q_SHORT, Q_LOST,
     mode_on, mode_add, mode_word,
     get, set,
     add, get32, get16, get8, set8
@@ -1682,6 +1689,121 @@ const RNG_MAX: u64 = 0x1000
 const RSC_OFF: u64 = 0x91000
 const RSC_MAX: u64 = 0x1000
 
+// ================================================== RUNDE NVMEQ
+//
+// DIE GERAETE-WARTESCHLANGE (`kernel/nvmeq.fi`).
+//
+// Runde RING hat den WEG des Auftrags vom Programm in den Kern
+// abgeschafft. Was sie NICHT abgeschafft hat, ist die Wartezeit: ein
+// Arbeitsfaden nahm den Auftrag und ging damit SYNCHRON auf die Platte.
+// Diese Runde nimmt ihm das ab -- der Auftrag geht in die
+// Submission-Warteschlange des NVMe-Controllers, das Geraet holt ihn
+// sich selbst, und niemand wartet.
+//
+// DREI Bereiche in `kdata`, und alle drei liegen hier und nicht in
+// Rahmen aus `mem.frame_run`, weil sie NIEMALS in einen Adressraum
+// abgebildet werden duerfen -- sie tragen die Zuordnung von einem
+// Geraeteauftrag auf eine Aufgabe:
+//
+//   NQ_OFF   0x92000  die Warteschlangentafel (4 Paare zu 128 Oktett),
+//                     die Skalare der Runde und Kopf/Schwanz des
+//                     Nachlaufrings. Eine Seite.
+//   NQF_OFF  0x93000  DIE FLUGTAFEL. 256 Plaetze zu 64 Oktett: je
+//                     Geraeteauftrag der Auftragsplatz in `async.fi`,
+//                     die Aufgabe, ihre pid, die ZIELADRESSE IM
+//                     PROGRAMM und der Versatz im Umsteigepuffer. Die
+//                     Zieladresse steht HIER und geht damit nie an das
+//                     Geraet -- das ist die harte Auflage der Runde.
+//                     Vier Seiten.
+//   NQD_OFF  0x97000  DER NACHLAUFRING. Was die Oberhaelfte des
+//                     Interrupts hinterlegt und die Unterhaelfte
+//                     abholt: 512 Saetze zu 16 Oktett (Platz, Status).
+//                     Zwei Seiten. Er ist doppelt so lang, wie es
+//                     Flugplaetze gibt -- daraus folgt, dass er nicht
+//                     ueberlaufen kann, derselbe Beweis wie beim
+//                     Fertigring der Runde RING.
+//
+// DER DMA-VORRAT SELBST STEHT HIER NICHT. Er kommt aus
+// `mem.frame_run` -- 264 Rahmen am Stueck, einmal beim Aufsetzen --
+// und traegt die Warteschlangen des Controllers und 256 Umsteige-
+// puffer zu je einer Seite. Ihn in `kdata` zu legen waere bequem
+// gewesen und falsch: `kdata` ist eine feste Flaeche IM KERNELABBILD,
+// und ein Megaoktett DMA-Ziel darin haette das Abbild um ein
+// Megaoktett wachsen lassen.
+//
+// `kdata` waechst von 0x92000 auf 0x99000 -- DIESELBE ZAHL STEHT IN
+// `kernel/arch/x86_64/boot.s` (KDATA_SIZE), und `tools/nvmeq/run.sh`
+// liest beide und vergleicht sie. Das ist die sechste Runde, die das
+// tut, und jedes Mal war die vergessene zweite Zahl der Fehler.
+const NQ_OFF: u64 = 0x92000
+const NQ_MAX: u64 = 0x1000
+const NQF_OFF: u64 = 0x93000
+const NQF_MAX: u64 = 0x4000
+const NQD_OFF: u64 = 0x97000
+const NQD_MAX: u64 = 0x2000
+
+// Die Modusbits dieser Runde. Wort 13 war ganz frei -- Wort 12 gehoert
+// der Runde RING, und ein Wort je Untersystem ist die Regel seit
+// Runde K17.
+//
+//   M_NVMEQ      der Selbsttest in Ring 3 (die Faelle a bis g).
+//   M_NQBENCH    die Messung: synchron gegen Fadenweg gegen
+//                Warteschlangenbetrieb, Tiefe 1/4/16/64.
+//   M_NODMAPOOL  GEGENPROBE, UND DIE WICHTIGSTE DIESER RUNDE: die
+//                Adresse, die in den NVMe-Eintrag geschrieben wird,
+//                kommt NICHT aus der kerneigenen Buchhaltung, sondern
+//                aus dem Wert, den das Programm im geteilten Ring
+//                stehen hat. Die Wache schlaegt an, der Auftrag endet
+//                mit -EFAULT und DIE TUERKLINGEL BLEIBT STUMM -- das
+//                Geraet bekommt die Adresse nachweislich nicht zu
+//                sehen. Die Zusage `a-prp-aus-vorrat` MUSS damit
+//                fallen.
+//   M_NQNOIRQ    GEGENPROBE: der Fertigstellungs-Interrupt geht
+//                verloren (die Oberhaelfte kehrt sofort um). Alles
+//                muss trotzdem fertig werden -- ueber das Nachsehen
+//                und die Zeitgrenze. Kein Haenger.
+//   M_NQDBLIRQ   GEGENPROBE: derselbe Interrupt kommt doppelt. Die
+//                zweite Runde darf NICHTS finden (Phasenbit) und wird
+//                als `spurious` gezaehlt.
+//   M_NQTINY     die Geraetewarteschlange kuenstlich kurz (4 statt 64),
+//                damit der Rueckstau ohne tausend Auftraege zu treffen
+//                ist.
+//   M_NOQUEUE    GEGENPROBE: die Weiche aus. Jeder Auftrag geht wieder
+//                ueber den Fadenweg der Runde RING -- damit ist
+//                messbar, was die Warteschlange wirklich bringt.
+//   M_NQERR      GEGENPROBE: das Geraet meldet einen Fehler (der
+//                Auftrag bekommt einen Blockindex hinter dem Ende des
+//                Traegers). Er muss beim Programm ankommen.
+//   M_NQSTRESS   der Lauf, der die Flugtafel absichtlich ueberfuellt.
+const M_NVMEQ: u64 = 832 // Wort 13, Bit 0
+const M_NQBENCH: u64 = 833 // Wort 13, Bit 1
+const M_NODMAPOOL: u64 = 834 // Wort 13, Bit 2
+const M_NQNOIRQ: u64 = 835 // Wort 13, Bit 3
+const M_NQDBLIRQ: u64 = 836 // Wort 13, Bit 4
+const M_NQTINY: u64 = 837 // Wort 13, Bit 5
+const M_NOQUEUE: u64 = 838 // Wort 13, Bit 6
+const M_NQERR: u64 = 839 // Wort 13, Bit 7
+const M_NQSTRESS: u64 = 840 // Wort 13, Bit 8
+
+// Die Zaehler der Runde NVMEQ. 1672 aufwaerts war frei; der hoechste
+// vergebene Skalar davor ist 1664 (R_SLEEPS).
+const Q_SUBMITS: u64 = 1672 // Eintraege, die wirklich beim Geraet lagen
+const Q_COMPLETED: u64 = 1680 // Fertigstellungen aus der Completion-Queue
+const Q_IRQS: u64 = 1688 // Interrupts, die etwas gefunden haben
+const Q_BADPRP: u64 = 1696 // Adressen, die die DMA-Wache abgewiesen hat
+const Q_QFULL: u64 = 1704 // Male, die die Geraetewarteschlange voll war
+const Q_FALLBACK: u64 = 1712 // Auftraege, die den Fadenweg nehmen mussten
+const Q_FAST: u64 = 1720 // Auftraege, die den Warteschlangenweg nahmen
+const Q_DEVERR: u64 = 1728 // Fertigstellungen mit Status ungleich null
+const Q_TIMEOUTS: u64 = 1736 // Auftraege, die die Zeitgrenze gerissen haben
+const Q_SPURIOUS: u64 = 1744 // Interrupts, die nichts zu tun fanden
+const Q_POLLED: u64 = 1752 // Fertigstellungen, die das Nachsehen fand
+const Q_CANCELLED: u64 = 1760 // Auftraege, deren Aufgabe nicht mehr lebte
+const Q_STALED: u64 = 1768 // an der Generationspruefung gescheiterte
+const Q_REAPED: u64 = 1776 // von der Unterhaelfte abgeholte Saetze
+const Q_SHORT: u64 = 1784 // kurze Antworten (Ende des Traegers)
+const Q_LOST: u64 = 1792 // Nachlaufsaetze ohne Platz -- MUSS null bleiben
+
 // Die Modusbits dieser Runde. Wort 12 war ganz frei -- Wort 11 gehoert
 // der Runde ASYNC, und ein Wort je Untersystem ist die Regel seit
 // Runde K17.
@@ -1720,7 +1842,7 @@ const R_DENIED: u64 = 1648 // Zugriffe auf einen fremden Ring
 const R_PUMPS: u64 = 1656 // Durchlaeufe der Ringabfrage OHNE Systemaufruf
 const R_SLEEPS: u64 = 1664 // Male, die der letzte Faden schlafen ging
 
-const KDATA_SIZE: u64 = 0x92000
+const KDATA_SIZE: u64 = 0x99000
 
 // ================================================== DER MODUSVEKTOR
 //
