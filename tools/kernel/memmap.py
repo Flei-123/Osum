@@ -178,6 +178,10 @@ BEREICHE = [
     ("PMON",       "kstate.fi", "PMON_OFF",       "PMON_MAX"),
     ("NETVIEW",    "kstate.fi", "NETVIEW_OFF",    "NETVIEW_MAX"),
     ("NETDEV",     "kstate.fi", "NETDEV_OFF",     "NETDEV_MAX"),
+
+    # RUNDE FSROBUST: der Zustand des OFS-Journals (kernel/ofsj.fi).
+    # Drei Seiten aus dem letzten freien Stueck, 0x7A000..0x80000.
+    ("JR",         "kstate.fi", "JR_OFF",         "JR_MAX"),
     ("K18BATT",    "kstate.fi", "BATT_OFF",       "BATT_MAX"),
     # RUNDE DISPLAY: der Modustreiber.  Zwei Seiten aus demselben Vorrat
     # (0x5A000 und 0x5B000) -- die Modusliste samt Skalaren und die
