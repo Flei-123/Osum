@@ -1,0 +1,296 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/app/anb_jarvis.fi -- RUNDE KONTO: der Ruecken fuer den
+// JARVIS-Server.
+//
+// Alles, was dieses System ueber JARVIS weiss, steht hier. Gelesen aus
+// dem laufenden Dienst (`/root/jarvis/server.js`, `/root/jarvis/lib/
+// auth.js`), nicht aus einer Beschreibung:
+//
+//   POST /api/login   { "username": ..., "password": ... }
+//                     -> 200 { "username": ..., "token": <JWT> }
+//                     -> 401 { "error": ... }
+//                     -> 429 { "error": ... } mit `Retry-After`
+//                     Passwoerter liegen dort als scrypt; das ist
+//                     Sache des Servers, dieses Geraet sieht davon
+//                     nichts.
+//   POST /api/logout  -> 200 { "ok": true }
+//   GET  /api/me      -> 200 { "username", "admin", "deviceToken", ... }
+//
+// ================================================= DREI EHRLICHE GRENZEN
+//
+// J1 KEIN `Authorization: Bearer`. `authReq()` liest den Sitzungskeks
+//    ODER `?token=` in der Anschrift -- eine Kopfzeile liest es nicht.
+//    Ein Token in der ANSCHRIFT landet in jedem Zugriffsprotokoll und
+//    in jedem Verlauf; das ist der schlechteste der drei Wege. Also
+//    schickt dieser Ruecken BEIDES: die Kopfzeile (fuer den Tag, an dem
+//    der Server sie liest) und einen AUSDRUECKLICH hier gebauten Keks.
+//    Das ist kein ambienter Keks: es gibt kein Glas, aus dem er kaeme,
+//    er wird fuer genau diesen einen Aufruf hingeschrieben. Im Bericht
+//    steht das als Bitte an den Betreiber.
+//
+// J2 KEIN ERNEUERN. Der Server stellt EIN Token aus, dreissig Tage, und
+//    hat keinen Weg, es zu erneuern. `erneuern` sagt deshalb ehrlich
+//    S_ABGELAUFEN mit einem Hinweis, statt einen Endpunkt zu erfinden,
+//    den es nicht gibt -- der Nutzer meldet sich neu an.
+//
+// J3 `logout` LOESCHT NUR DEN KEKS. Das ausgestellte JWT bleibt bis zu
+//    seinem `exp` gueltig; es gibt keine Sperrliste. Das Geraet loescht
+//    seine Sitzung trotzdem -- lokal ist sie dann weg --, und der
+//    Bericht sagt, was das fuer ein gestohlenes Token bedeutet.
+//
+// `deviceToken` aus `/api/me` wird NICHT genommen. Er ist der Schluessel
+// zur Fernsteuerung eines Rechners; ein Anmeldevorgang, der ihn
+// nebenbei einsammelt, waere eine Rechteausweitung durch Bequemlichkeit.
+
+import std.rt
+import std.io
+import std.str
+import knetz
+import kjson
+import anbieter
+
+export { ruecken }
+
+static mut p_login: [u8; 12] = "/api/login\0\0"
+static mut p_logout: [u8; 13] = "/api/logout\0\0"
+static mut p_me: [u8; 9] = "/api/me\0\0"
+
+static mut m_post: [u8; 5] = "POST\0"
+static mut m_get: [u8; 4] = "GET\0"
+
+static mut f_username: [u8; 9] = "username\0"
+static mut f_password: [u8; 9] = "password\0"
+static mut f_token: [u8; 6] = "token\0"
+static mut f_exp: [u8; 4] = "exp\0"
+static mut f_uid: [u8; 4] = "uid\0"
+static mut f_name: [u8; 5] = "name\0"
+
+static mut k_keks: [u8; 17] = "fleitec_session=\0"
+
+static mut h_kein_erneuern: [u8; 26] = "konto.hint.no_refresh\0\0\0\0\0"
+static mut h_form: [u8; 20] = "konto.hint.badjson\0\0"
+static mut h_status: [u8; 21] = "konto.hint.badstatus\0"
+
+static mut nm: [u8; 7] = "jarvis\0"
+
+fn ruecken() -> anbieter.Ruecken {
+    return anbieter.Ruecken { name: (&nm[0]) as u64, anmelden: anmelden,
+        erneuern: erneuern, abmelden: abmelden, pruefen: pruefen }
+}
+
+fn fehl_bool(b: *mut bool) -> bool {
+    *b = true
+    return false
+}
+
+fn ziel_aus(z: *mut anbieter.Zugang, zl: *mut knetz.Ziel) -> bool {
+    return knetz.ziel_lesen((*z).ziel, rt.c_length((*z).ziel),
+        (*z).zielname, (*z).wurzeln, zl)
+}
+
+fn hinweis(s: *mut anbieter.Sitzung, k: u64) {
+    rt.buf_clear(&(*s).hinweis)
+    rt.buf_push_bytes(&(*s).hinweis, k, rt.c_length(k))
+}
+
+fn netz_stand(a: *mut knetz.Antw) -> u32 {
+    if (*a).fehler == knetz.F_TLS {
+        return anbieter.S_TLS
+    }
+    if (*a).fehler == knetz.F_KEINNETZ || (*a).fehler == knetz.F_LESEN {
+        return anbieter.S_KEINNETZ
+    }
+    return anbieter.S_FEHLER
+}
+
+// Der Rumpf des JWT: `uid`, `name`, `exp`. Ohne Signaturpruefung, aus
+// demselben Grund wie beim anderen Ruecken -- das Geheimnis liegt beim
+// Server. Genommen wird daraus nur, was ein KONTO ausmacht.
+fn rumpf_lesen(tok: u64, tl: usize, s: *mut anbieter.Sitzung) {
+    var p1: usize = 0
+    while p1 < tl && rt.ld8(tok, p1) != 46 as u8 {
+        p1 = p1 + 1
+    }
+    if p1 >= tl {
+        return
+    }
+    var p2: usize = p1 + 1
+    while p2 < tl && rt.ld8(tok, p2) != 46 as u8 {
+        p2 = p2 + 1
+    }
+    var roh: rt.Buf = rt.buf_new()
+    if !kjson.b64u_dekodieren(tok + (p1 + 1) as u64, p2 - p1 - 1, &roh) {
+        rt.buf_free(&roh)
+        return
+    }
+    var d: kjson.Json = kjson.json_new()
+    var kaputt: bool = false
+    if !kjson.json_parse(&d, roh.ptr, roh.len) {
+        kaputt = true
+    }
+    if !kaputt && kjson.json_valid(&d) {
+        let w: u32 = kjson.json_root(&d)
+        var da: bool = false
+        let ex: i64 = kjson.ganz(&d, w, (&f_exp[0]) as u64, &da)
+        if da && ex > 0 {
+            (*s).ablauf = ex as u64
+        }
+        if (*s).subjekt.len == 0 {
+            var db: bool = false
+            let uid: i64 = kjson.ganz(&d, w, (&f_uid[0]) as u64, &db)
+            if db {
+                rt.buf_push_dec_u64(&(*s).subjekt, uid as u64)
+            } else {
+                let _u: bool = kjson.text(&d, w, (&f_uid[0]) as u64,
+                    &(*s).subjekt)
+            }
+        }
+        if (*s).anzeige.len == 0 {
+            let _n: bool = kjson.text(&d, w, (&f_name[0]) as u64,
+                &(*s).anzeige)
+        }
+    }
+    kjson.json_free(&d)
+    rt.buf_free(&roh)
+}
+
+fn anmelden(z: *mut anbieter.Zugang, s: *mut anbieter.Sitzung) -> u32 {
+    anbieter.sitzung_leeren(s)
+    var zl: knetz.Ziel = knetz.ziel_neu()
+    if !ziel_aus(z, &zl) {
+        (*s).stand = anbieter.S_FEHLER
+        hinweis(s, (&h_status[0]) as u64)
+        return (*s).stand
+    }
+    var koerper: rt.Buf = rt.buf_new()
+    var w: kjson.Schreiber = kjson.schreiber_neu(&koerper)
+    kjson.feld(&w, (&f_username[0]) as u64, (*z).kennung,
+        rt.c_length((*z).kennung))
+    kjson.feld(&w, (&f_password[0]) as u64, (*z).geheim,
+        rt.c_length((*z).geheim))
+    kjson.feld_frei(&w)
+    var a: knetz.Antw = knetz.antw_neu()
+    let da: bool = knetz.sende(&zl, (&m_post[0]) as u64, 4,
+        (&p_login[0]) as u64, 10, koerper.ptr, koerper.len, 0, 0, 0, 0, &a)
+    rt.mem_set(koerper.ptr, 0 as u8, koerper.len)
+    rt.buf_free(&koerper)
+    if !da {
+        (*s).stand = netz_stand(&a)
+        knetz.antw_frei(&a)
+        return (*s).stand
+    }
+    if a.code == 429 as u32 {
+        knetz.antw_frei(&a)
+        (*s).stand = anbieter.S_GEBREMST
+        return (*s).stand
+    }
+    if a.code == 401 as u32 {
+        knetz.antw_frei(&a)
+        (*s).stand = anbieter.S_FALSCH
+        return (*s).stand
+    }
+    if a.code != 200 as u32 {
+        knetz.antw_frei(&a)
+        (*s).stand = anbieter.S_FEHLER
+        hinweis(s, (&h_status[0]) as u64)
+        return (*s).stand
+    }
+    var d: kjson.Json = kjson.json_new()
+    var kaputt: bool = false
+    if !kjson.json_parse(&d, a.koerper.ptr, a.koerper.len) {
+        kaputt = true
+    }
+    if kaputt || !kjson.json_valid(&d) {
+        kjson.json_free(&d)
+        knetz.antw_frei(&a)
+        (*s).stand = anbieter.S_FEHLER
+        hinweis(s, (&h_form[0]) as u64)
+        return (*s).stand
+    }
+    let wz: u32 = kjson.json_root(&d)
+    if !kjson.text(&d, wz, (&f_token[0]) as u64, &(*s).zugriff) {
+        kjson.json_free(&d)
+        knetz.antw_frei(&a)
+        (*s).stand = anbieter.S_FEHLER
+        hinweis(s, (&h_form[0]) as u64)
+        return (*s).stand
+    }
+    let _u: bool = kjson.text(&d, wz, (&f_username[0]) as u64,
+        &(*s).anzeige)
+    kjson.json_free(&d)
+    knetz.antw_frei(&a)
+    rumpf_lesen((*s).zugriff.ptr, (*s).zugriff.len, s)
+    if (*s).subjekt.len == 0 {
+        rt.buf_push_bytes(&(*s).subjekt, (*s).anzeige.ptr,
+            (*s).anzeige.len)
+    }
+    // Dieser Anbieter kennt keine Mandanten: `bereich` bleibt leer, und
+    // das ist eine Aussage und kein Versaeumnis.
+    rt.buf_push_bytes(&(*s).datenort, (*z).ziel, rt.c_length((*z).ziel))
+    (*s).stand = anbieter.S_OK
+    return (*s).stand
+}
+
+fn erneuern(z: *mut anbieter.Zugang, s: *mut anbieter.Sitzung) -> u32 {
+    // J2: es gibt keinen Weg. Eine Erfindung waere hier schlimmer als
+    // die Wahrheit -- der Nutzer meldet sich neu an, und er erfaehrt
+    // warum.
+    hinweis(s, (&h_kein_erneuern[0]) as u64)
+    (*s).stand = anbieter.S_ABGELAUFEN
+    return (*s).stand
+}
+
+fn keks_bauen(z: *mut anbieter.Zugang, aus: *mut rt.Buf) {
+    rt.buf_push_bytes(aus, (&k_keks[0]) as u64, 16)
+    rt.buf_push_bytes(aus, (*z).zugriff, rt.c_length((*z).zugriff))
+}
+
+fn abmelden(z: *mut anbieter.Zugang, s: *mut anbieter.Sitzung) -> u32 {
+    var zl: knetz.Ziel = knetz.ziel_neu()
+    if !ziel_aus(z, &zl) {
+        (*s).stand = anbieter.S_FEHLER
+        return (*s).stand
+    }
+    var keks: rt.Buf = rt.buf_new()
+    keks_bauen(z, &keks)
+    var a: knetz.Antw = knetz.antw_neu()
+    let da: bool = knetz.sende(&zl, (&m_post[0]) as u64, 4,
+        (&p_logout[0]) as u64, 11, 0, 0, (*z).zugriff,
+        rt.c_length((*z).zugriff), keks.ptr, keks.len, &a)
+    var stand: u32 = anbieter.S_OK
+    if !da {
+        stand = netz_stand(&a)
+    } else if a.code != 200 as u32 {
+        stand = anbieter.S_FEHLER
+    }
+    knetz.antw_frei(&a)
+    rt.buf_free(&keks)
+    (*s).stand = stand
+    return stand
+}
+
+fn pruefen(z: *mut anbieter.Zugang, s: *mut anbieter.Sitzung) -> u32 {
+    var zl: knetz.Ziel = knetz.ziel_neu()
+    if !ziel_aus(z, &zl) {
+        (*s).stand = anbieter.S_FEHLER
+        return (*s).stand
+    }
+    var keks: rt.Buf = rt.buf_new()
+    keks_bauen(z, &keks)
+    var a: knetz.Antw = knetz.antw_neu()
+    let da: bool = knetz.sende(&zl, (&m_get[0]) as u64, 3,
+        (&p_me[0]) as u64, 7, 0, 0, (*z).zugriff,
+        rt.c_length((*z).zugriff), keks.ptr, keks.len, &a)
+    var stand: u32 = anbieter.S_OK
+    if !da {
+        stand = netz_stand(&a)
+    } else if a.code == 401 as u32 {
+        stand = anbieter.S_ABGELAUFEN
+    } else if a.code != 200 as u32 {
+        stand = anbieter.S_FEHLER
+    }
+    knetz.antw_frei(&a)
+    rt.buf_free(&keks)
+    (*s).stand = stand
+    return stand
+}

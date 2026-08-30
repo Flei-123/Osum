@@ -1,0 +1,891 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/app/kjson.fi -- RUNDE KONTO: JSON, nur so viel wie noetig.
+//
+// ============================ WARUM HIER EIN EIGENER LESER STEHT
+//
+// Zuerst stand hier ein duenner Griff ueber Firns `std/json.fi`, und das
+// war die richtige Wahl -- bis der erste echte Lauf im Gast so endete:
+//
+//     user fault: pid=5 vector=6 err=0x0 rip=0x40148784 -- process killed
+//
+// Vektor 6 ist #UD, "unbekannter Befehl", und der Befehl an dieser
+// Adresse war `cvtsi2sd` -- SSE2. `std/json.fi` haelt JEDE Zahl als
+// `f64` (`parse_number` -> `num.parse_f64`), und dieser Kern schaltet
+// SSE nicht frei: weder `CR0.EM=0` noch `CR4.OSFXSR` werden in
+// `kernel/arch/x86_64/boot.s` oder `start.s` gesetzt, und einen Platz
+// fuer `fxsave` beim Prozesswechsel gibt es auch nicht. Bisher fiel das
+// niemandem auf, weil bis heute KEIN Programm in Ring 3 `std.json`
+// benutzt hat -- diese Runde war die erste.
+//
+// Es gab zwei Wege. Der eine: SSE im Kern freischalten und den
+// Fliesskommazustand beim Wechsel sichern. Das ist eine richtige,
+// grosse Sache -- und sie gehoert NICHT in eine Runde ueber Anmeldung.
+// Halb erledigt (Bits gesetzt, Zustand nicht gesichert) waere sie ein
+// Fehler, den erst der zweite Prozess sieht. Der andere Weg, dieser:
+// ein eigener Leser fuer genau das, was eine Anmeldeantwort enthaelt --
+// Objekte, Felder, Zeichenketten, Wahrheitswerte und GANZE Zahlen.
+// Ohne ein einziges `f64`.
+//
+// WAS DAS KOSTET: `1e3` und `3.5` werden gelesen und angenommen, aber
+// als ganze Zahl ausgewertet (Vorkommateil, Nachkomma verworfen). In
+// dieser Runde kommt in einer Zahl nur `exp`, `expires_in`, `iat` und
+// eine Kennung vor -- Sekunden und Kennungen sind ganz. Steht spaeter
+// eine echte Bruchzahl in einer Antwort, muss sie als Zeichenkette
+// kommen oder der Kern muss SSE lernen; es wird dann NICHT still
+// falsch gerechnet, sondern es steht hier, was passiert.
+//
+// EINE ZUSAGE BLEIBT: Zeichenketten werden ENTPACKT (`\"`, `\\`, `\n`,
+// `\uXXXX` samt Ersatzpaaren zu UTF-8). Ein Anzeigename mit einem
+// Umlaut aus `ä` kommt richtig an, und ein Token mit einem
+// Schraegstrich auch.
+//
+// ================================ WAS DIESE DATEI SONST NOCH ANBIETET
+//
+//   * `text(d, obj, "schluessel", &aus)`  -- eine Zeichenkette holen
+//   * `text2(d, obj, "a", "b", &aus)`     -- eine Ebene tiefer
+//   * `ganz(d, obj, "schluessel", &da)`   -- eine ganze Zahl
+//   * `wahr(d, obj, "schluessel")`        -- ein Wahrheitswert
+//
+// UND EINEN SCHREIBER FUER DEN KOERPER: `feld` haengt `"k":"v"` an, mit
+// vollstaendiger Maskierung. Ein Anmeldekoerper, der ein
+// Anfuehrungszeichen im Passwort nicht maskiert, ist eine
+// Einbruchsstelle, und selbst gebastelte Anfuehrungszeichen sind genau
+// die Art Fehler, die man erst im Ernstfall sieht.
+
+import std.rt
+import std.str
+
+export {
+    Json, json_new, json_free, json_parse, json_valid, json_root,
+    json_kind, json_get_c, json_count, json_child, json_next,
+    json_string, json_int, json_is_null,
+    JSON_NONE, JSON_NULL, JSON_TRUE, JSON_FALSE, JSON_NUMBER,
+    JSON_STRING, JSON_ARRAY, JSON_OBJECT,
+    text, text2, ganz, wahr, hat, kind_of,
+    Schreiber, schreiber_neu, feld, feld_frei,
+    b64u_dekodieren,
+}
+
+const JSON_NONE: u32 = 4294967295
+
+const JSON_NULL: u8 = 0 as u8
+const JSON_FALSE: u8 = 1 as u8
+const JSON_TRUE: u8 = 2 as u8
+const JSON_NUMBER: u8 = 3 as u8
+const JSON_STRING: u8 = 4 as u8
+const JSON_ARRAY: u8 = 5 as u8
+const JSON_OBJECT: u8 = 6 as u8
+
+// Ein Knoten, 40 Oktette, flach in einem Puffer. Kein Zeiger auf einen
+// Knoten wird ueber ein `neu_knoten` hinweg gehalten -- der Puffer darf
+// umziehen, und genau daran sterben solche Leser sonst.
+const SATZ: usize = 40
+const F_KIND: usize = 0
+const F_KOFF: usize = 4
+const F_KLEN: usize = 8
+const F_VOFF: usize = 12
+const F_VLEN: usize = 16
+const F_ERST: usize = 20
+const F_NAECHST: usize = 24
+const F_ZAHL: usize = 32
+
+// Tiefer als das geht kein Anmeldedokument, und ein Angreifer, der es
+// mit tausend Klammern versucht, laeuft hier gegen eine Wand statt
+// gegen den Stapel.
+const MAX_TIEFE: u32 = 32
+
+struct Json {
+    kn: rt.Buf,
+    tx: rt.Buf,
+    q: u64,
+    qn: usize,
+    pos: usize,
+    wurzel: u32,
+    gut: bool,
+}
+
+fn json_new() -> Json {
+    return Json {
+        kn: rt.buf_new(), tx: rt.buf_new(),
+        q: 0, qn: 0, pos: 0, wurzel: JSON_NONE, gut: false,
+    }
+}
+
+fn json_free(d: *mut Json) {
+    rt.buf_free(&(*d).kn)
+    rt.buf_free(&(*d).tx)
+    (*d).wurzel = JSON_NONE
+    (*d).gut = false
+}
+
+// --------------------------------------------------------- Knotenzugriff
+
+fn anzahl(d: *mut Json) -> u32 {
+    return (rt.buf_len(&(*d).kn) / SATZ) as u32
+}
+
+fn satz(d: *mut Json, i: u32, off: usize) -> u64 {
+    return rt.buf_ptr(&(*d).kn) + ((i as usize) * SATZ + off) as u64
+}
+
+fn g8(d: *mut Json, i: u32, off: usize) -> u8 {
+    return rt.ld8(satz(d, i, off), 0)
+}
+
+fn s8(d: *mut Json, i: u32, off: usize, v: u8) {
+    rt.st8(satz(d, i, off), 0, v)
+}
+
+fn g32(d: *mut Json, i: u32, off: usize) -> u32 {
+    return rt.ld32(satz(d, i, off), 0)
+}
+
+fn s32(d: *mut Json, i: u32, off: usize, v: u32) {
+    rt.st32(satz(d, i, off), 0, v)
+}
+
+fn g64(d: *mut Json, i: u32, off: usize) -> u64 {
+    return rt.ld64(satz(d, i, off), 0)
+}
+
+fn s64(d: *mut Json, i: u32, off: usize, v: u64) {
+    rt.st64(satz(d, i, off), 0, v)
+}
+
+fn neu_knoten(d: *mut Json, kind: u8) -> u32 {
+    let i: u32 = anzahl(d)
+    var k: usize = 0
+    while k < SATZ {
+        rt.buf_push(&(*d).kn, 0 as u8)
+        k = k + 1
+    }
+    s8(d, i, F_KIND, kind)
+    s32(d, i, F_KOFF, 0)
+    s32(d, i, F_KLEN, 0)
+    s32(d, i, F_VOFF, 0)
+    s32(d, i, F_VLEN, 0)
+    s32(d, i, F_ERST, JSON_NONE)
+    s32(d, i, F_NAECHST, JSON_NONE)
+    s64(d, i, F_ZAHL, 0 as u64)
+    return i
+}
+
+// ---------------------------------------------------------------- lesen
+
+fn json_valid(d: *mut Json) -> bool {
+    return (*d).gut
+}
+
+fn json_root(d: *mut Json) -> u32 {
+    return (*d).wurzel
+}
+
+fn json_kind(d: *mut Json, i: u32) -> u8 {
+    if i >= anzahl(d) {
+        return JSON_NULL
+    }
+    return g8(d, i, F_KIND)
+}
+
+fn json_is_null(d: *mut Json, i: u32) -> bool {
+    if i >= anzahl(d) {
+        return true
+    }
+    return g8(d, i, F_KIND) == JSON_NULL
+}
+
+fn json_child(d: *mut Json, i: u32) -> u32 {
+    if i >= anzahl(d) {
+        return JSON_NONE
+    }
+    return g32(d, i, F_ERST)
+}
+
+fn json_next(d: *mut Json, i: u32) -> u32 {
+    if i >= anzahl(d) {
+        return JSON_NONE
+    }
+    return g32(d, i, F_NAECHST)
+}
+
+fn json_count(d: *mut Json, i: u32) -> usize {
+    if i >= anzahl(d) {
+        return 0
+    }
+    var n: usize = 0
+    var k: u32 = g32(d, i, F_ERST)
+    while k != JSON_NONE {
+        n = n + 1
+        k = g32(d, k, F_NAECHST)
+    }
+    return n
+}
+
+fn json_string(d: *mut Json, i: u32) -> str.Span {
+    if i >= anzahl(d) {
+        return str.span_empty()
+    }
+    if g8(d, i, F_KIND) != JSON_STRING {
+        return str.span_empty()
+    }
+    let off: u32 = g32(d, i, F_VOFF)
+    let len: u32 = g32(d, i, F_VLEN)
+    return str.span((rt.buf_ptr(&(*d).tx) + off as u64) as *mut u8,
+        len as usize)
+}
+
+fn json_int(d: *mut Json, i: u32) -> i64 {
+    if i >= anzahl(d) {
+        return 0
+    }
+    return g64(d, i, F_ZAHL) as i64
+}
+
+// Das Kind eines Objekts, dessen Schluessel genau `key` heisst (eine
+// nullterminierte Zeichenkette). Der Vergleich laeuft ueber die
+// ENTPACKTEN Schluessel -- `"id"` und `"id"` sind derselbe.
+fn json_get_c(d: *mut Json, obj: u32, key: u64) -> u32 {
+    if obj >= anzahl(d) {
+        return JSON_NONE
+    }
+    if g8(d, obj, F_KIND) != JSON_OBJECT {
+        return JSON_NONE
+    }
+    let kl: usize = rt.c_length(key)
+    var k: u32 = g32(d, obj, F_ERST)
+    while k != JSON_NONE {
+        if (g32(d, k, F_KLEN) as usize) == kl {
+            let p: u64 = rt.buf_ptr(&(*d).tx) + g32(d, k, F_KOFF) as u64
+            if rt.mem_eq(p, key, kl) {
+                return k
+            }
+        }
+        k = g32(d, k, F_NAECHST)
+    }
+    return JSON_NONE
+}
+
+// --------------------------------------------------------------- Parser
+
+fn zeichen(d: *mut Json) -> u8 {
+    if (*d).pos >= (*d).qn {
+        return 0 as u8
+    }
+    return rt.ld8((*d).q, (*d).pos)
+}
+
+fn leerraum(d: *mut Json) {
+    while (*d).pos < (*d).qn {
+        let c: u8 = rt.ld8((*d).q, (*d).pos)
+        if c == 32 as u8 || c == 9 as u8 || c == 10 as u8 || c == 13 as u8 {
+            (*d).pos = (*d).pos + 1
+        } else {
+            return
+        }
+    }
+}
+
+fn hexziffer(c: u8) -> i32 {
+    if c >= 48 as u8 && c <= 57 as u8 { return (c - 48 as u8) as i32 }
+    if c >= 97 as u8 && c <= 102 as u8 { return (c - 97 as u8) as i32 + 10 }
+    if c >= 65 as u8 && c <= 70 as u8 { return (c - 65 as u8) as i32 + 10 }
+    return -1
+}
+
+// Ein Zeichen als UTF-8 in den Textpuffer.
+fn utf8(d: *mut Json, cp: u32) {
+    if cp < 128 as u32 {
+        rt.buf_push(&(*d).tx, cp as u8)
+        return
+    }
+    if cp < 2048 as u32 {
+        rt.buf_push(&(*d).tx, (192 as u32 | (cp >> 6 as u32)) as u8)
+        rt.buf_push(&(*d).tx, (128 as u32 | (cp & 63 as u32)) as u8)
+        return
+    }
+    if cp < 65536 as u32 {
+        rt.buf_push(&(*d).tx, (224 as u32 | (cp >> 12 as u32)) as u8)
+        rt.buf_push(&(*d).tx,
+            (128 as u32 | ((cp >> 6 as u32) & 63 as u32)) as u8)
+        rt.buf_push(&(*d).tx, (128 as u32 | (cp & 63 as u32)) as u8)
+        return
+    }
+    rt.buf_push(&(*d).tx, (240 as u32 | (cp >> 18 as u32)) as u8)
+    rt.buf_push(&(*d).tx,
+        (128 as u32 | ((cp >> 12 as u32) & 63 as u32)) as u8)
+    rt.buf_push(&(*d).tx,
+        (128 as u32 | ((cp >> 6 as u32) & 63 as u32)) as u8)
+    rt.buf_push(&(*d).tx, (128 as u32 | (cp & 63 as u32)) as u8)
+}
+
+fn vier_hex(d: *mut Json, aus: *mut u32) -> bool {
+    if (*d).pos + 4 > (*d).qn {
+        return false
+    }
+    var v: u32 = 0
+    var k: usize = 0
+    while k < 4 {
+        let h: i32 = hexziffer(rt.ld8((*d).q, (*d).pos + k))
+        if h < 0 {
+            return false
+        }
+        v = (v << 4 as u32) | (h as u32)
+        k = k + 1
+    }
+    (*d).pos = (*d).pos + 4
+    *aus = v
+    return true
+}
+
+// Liest eine Zeichenkette AB dem Anfuehrungszeichen und legt sie
+// entpackt im Textpuffer ab. `off`/`len` zeigen danach dorthin.
+fn lies_kette(d: *mut Json, off: *mut u32, len: *mut u32) -> bool {
+    if zeichen(d) != 34 as u8 {
+        return false
+    }
+    (*d).pos = (*d).pos + 1
+    let anfang: u32 = rt.buf_len(&(*d).tx) as u32
+    while (*d).pos < (*d).qn {
+        let c: u8 = rt.ld8((*d).q, (*d).pos)
+        if c == 34 as u8 {
+            (*d).pos = (*d).pos + 1
+            *off = anfang
+            *len = rt.buf_len(&(*d).tx) as u32 - anfang
+            return true
+        }
+        if c < 32 as u8 {
+            // Ein rohes Steuerzeichen in einer Zeichenkette ist nach
+            // RFC 8259 verboten, und es ist ein gutes Warnzeichen.
+            return false
+        }
+        if c != 92 as u8 {
+            rt.buf_push(&(*d).tx, c)
+            (*d).pos = (*d).pos + 1
+        } else {
+            (*d).pos = (*d).pos + 1
+            if (*d).pos >= (*d).qn {
+                return false
+            }
+            let e: u8 = rt.ld8((*d).q, (*d).pos)
+            (*d).pos = (*d).pos + 1
+            if e == 34 as u8 || e == 92 as u8 || e == 47 as u8 {
+                rt.buf_push(&(*d).tx, e)
+            } else if e == 98 as u8 {
+                rt.buf_push(&(*d).tx, 8 as u8)
+            } else if e == 102 as u8 {
+                rt.buf_push(&(*d).tx, 12 as u8)
+            } else if e == 110 as u8 {
+                rt.buf_push(&(*d).tx, 10 as u8)
+            } else if e == 114 as u8 {
+                rt.buf_push(&(*d).tx, 13 as u8)
+            } else if e == 116 as u8 {
+                rt.buf_push(&(*d).tx, 9 as u8)
+            } else if e == 117 as u8 {
+                var cp: u32 = 0
+                if !vier_hex(d, &cp) {
+                    return false
+                }
+                if cp >= 55296 as u32 && cp <= 56319 as u32 {
+                    // Ein hohes Ersatzzeichen braucht sein Gegenstueck.
+                    if (*d).pos + 1 < (*d).qn
+                        && rt.ld8((*d).q, (*d).pos) == 92 as u8
+                        && rt.ld8((*d).q, (*d).pos + 1) == 117 as u8 {
+                        (*d).pos = (*d).pos + 2
+                        var lo: u32 = 0
+                        if !vier_hex(d, &lo) {
+                            return false
+                        }
+                        if lo >= 56320 as u32 && lo <= 57343 as u32 {
+                            cp = 65536 as u32
+                                + ((cp - 55296 as u32) << 10 as u32)
+                                + (lo - 56320 as u32)
+                        } else {
+                            cp = 65533 as u32
+                        }
+                    } else {
+                        cp = 65533 as u32
+                    }
+                } else if cp >= 56320 as u32 && cp <= 57343 as u32 {
+                    cp = 65533 as u32
+                }
+                utf8(d, cp)
+            } else {
+                return false
+            }
+        }
+    }
+    return false
+}
+
+// Eine Zahl. Der GANZE Teil zaehlt; ein Nachkommateil und ein Exponent
+// werden gelesen und verworfen (siehe der Kopf dieser Datei -- in Ring 3
+// gibt es hier kein SSE und damit kein `f64`).
+fn lies_zahl(d: *mut Json, i: u32) -> bool {
+    var neg: bool = false
+    if zeichen(d) == 45 as u8 {
+        neg = true
+        (*d).pos = (*d).pos + 1
+    }
+    var ziffern: usize = 0
+    var v: i64 = 0
+    while (*d).pos < (*d).qn {
+        let c: u8 = rt.ld8((*d).q, (*d).pos)
+        if c < 48 as u8 || c > 57 as u8 {
+            break
+        }
+        if ziffern < 18 {
+            v = v * 10 + (c - 48 as u8) as i64
+        }
+        ziffern = ziffern + 1
+        (*d).pos = (*d).pos + 1
+    }
+    if ziffern == 0 {
+        return false
+    }
+    if zeichen(d) == 46 as u8 {
+        (*d).pos = (*d).pos + 1
+        var nk: usize = 0
+        while (*d).pos < (*d).qn {
+            let c: u8 = rt.ld8((*d).q, (*d).pos)
+            if c < 48 as u8 || c > 57 as u8 {
+                break
+            }
+            nk = nk + 1
+            (*d).pos = (*d).pos + 1
+        }
+        if nk == 0 {
+            return false
+        }
+    }
+    let e: u8 = zeichen(d)
+    if e == 101 as u8 || e == 69 as u8 {
+        (*d).pos = (*d).pos + 1
+        let s: u8 = zeichen(d)
+        if s == 43 as u8 || s == 45 as u8 {
+            (*d).pos = (*d).pos + 1
+        }
+        var ez: usize = 0
+        var ev: i64 = 0
+        while (*d).pos < (*d).qn {
+            let c: u8 = rt.ld8((*d).q, (*d).pos)
+            if c < 48 as u8 || c > 57 as u8 {
+                break
+            }
+            if ev < 18 {
+                ev = ev * 10 + (c - 48 as u8) as i64
+            }
+            ez = ez + 1
+            (*d).pos = (*d).pos + 1
+        }
+        if ez == 0 {
+            return false
+        }
+        // Ein positiver Exponent auf einer ganzen Zahl bleibt ganz --
+        // `1e3` ist 1000. Ein negativer macht sie zu einem Bruch, und
+        // der wird abgeschnitten, nicht geraten.
+        if s != 45 as u8 {
+            var k: i64 = 0
+            while k < ev && k < 18 {
+                v = v * 10
+                k = k + 1
+            }
+        } else {
+            var k2: i64 = 0
+            while k2 < ev {
+                v = v / 10
+                k2 = k2 + 1
+            }
+        }
+    }
+    if neg {
+        v = 0 - v
+    }
+    s64(d, i, F_ZAHL, v as u64)
+    return true
+}
+
+fn wort(d: *mut Json, w: u64, n: usize) -> bool {
+    if (*d).pos + n > (*d).qn {
+        return false
+    }
+    if !rt.mem_eq((*d).q + (*d).pos as u64, w, n) {
+        return false
+    }
+    (*d).pos = (*d).pos + n
+    return true
+}
+
+fn lies_wert(d: *mut Json, tiefe: u32) -> u32 {
+    if tiefe > MAX_TIEFE {
+        return JSON_NONE
+    }
+    leerraum(d)
+    let c: u8 = zeichen(d)
+    if c == 0 as u8 {
+        return JSON_NONE
+    }
+    if c == 123 as u8 {
+        return lies_objekt(d, tiefe)
+    }
+    if c == 91 as u8 {
+        return lies_feld(d, tiefe)
+    }
+    if c == 34 as u8 {
+        var off: u32 = 0
+        var len: u32 = 0
+        if !lies_kette(d, &off, &len) {
+            return JSON_NONE
+        }
+        let i: u32 = neu_knoten(d, JSON_STRING)
+        s32(d, i, F_VOFF, off)
+        s32(d, i, F_VLEN, len)
+        return i
+    }
+    var w_true: [u8; 5] = "true\0"
+    var w_false: [u8; 6] = "false\0"
+    var w_null: [u8; 5] = "null\0"
+    if c == 116 as u8 {
+        if !wort(d, (&w_true[0]) as u64, 4) {
+            return JSON_NONE
+        }
+        return neu_knoten(d, JSON_TRUE)
+    }
+    if c == 102 as u8 {
+        if !wort(d, (&w_false[0]) as u64, 5) {
+            return JSON_NONE
+        }
+        return neu_knoten(d, JSON_FALSE)
+    }
+    if c == 110 as u8 {
+        if !wort(d, (&w_null[0]) as u64, 4) {
+            return JSON_NONE
+        }
+        return neu_knoten(d, JSON_NULL)
+    }
+    if c == 45 as u8 || (c >= 48 as u8 && c <= 57 as u8) {
+        let i: u32 = neu_knoten(d, JSON_NUMBER)
+        if !lies_zahl(d, i) {
+            return JSON_NONE
+        }
+        return i
+    }
+    return JSON_NONE
+}
+
+fn anhaengen(d: *mut Json, eltern: u32, letztes: u32, kind: u32) -> u32 {
+    if letztes == JSON_NONE {
+        s32(d, eltern, F_ERST, kind)
+    } else {
+        s32(d, letztes, F_NAECHST, kind)
+    }
+    return kind
+}
+
+fn lies_objekt(d: *mut Json, tiefe: u32) -> u32 {
+    (*d).pos = (*d).pos + 1
+    let obj: u32 = neu_knoten(d, JSON_OBJECT)
+    var letztes: u32 = JSON_NONE
+    leerraum(d)
+    if zeichen(d) == 125 as u8 {
+        (*d).pos = (*d).pos + 1
+        return obj
+    }
+    while true {
+        leerraum(d)
+        var koff: u32 = 0
+        var klen: u32 = 0
+        if !lies_kette(d, &koff, &klen) {
+            return JSON_NONE
+        }
+        leerraum(d)
+        if zeichen(d) != 58 as u8 {
+            return JSON_NONE
+        }
+        (*d).pos = (*d).pos + 1
+        let v: u32 = lies_wert(d, tiefe + 1 as u32)
+        if v == JSON_NONE {
+            return JSON_NONE
+        }
+        s32(d, v, F_KOFF, koff)
+        s32(d, v, F_KLEN, klen)
+        letztes = anhaengen(d, obj, letztes, v)
+        leerraum(d)
+        let c: u8 = zeichen(d)
+        if c == 44 as u8 {
+            (*d).pos = (*d).pos + 1
+        } else if c == 125 as u8 {
+            (*d).pos = (*d).pos + 1
+            return obj
+        } else {
+            return JSON_NONE
+        }
+    }
+    return JSON_NONE
+}
+
+fn lies_feld(d: *mut Json, tiefe: u32) -> u32 {
+    (*d).pos = (*d).pos + 1
+    let arr: u32 = neu_knoten(d, JSON_ARRAY)
+    var letztes: u32 = JSON_NONE
+    leerraum(d)
+    if zeichen(d) == 93 as u8 {
+        (*d).pos = (*d).pos + 1
+        return arr
+    }
+    while true {
+        let v: u32 = lies_wert(d, tiefe + 1 as u32)
+        if v == JSON_NONE {
+            return JSON_NONE
+        }
+        letztes = anhaengen(d, arr, letztes, v)
+        leerraum(d)
+        let c: u8 = zeichen(d)
+        if c == 44 as u8 {
+            (*d).pos = (*d).pos + 1
+        } else if c == 93 as u8 {
+            (*d).pos = (*d).pos + 1
+            return arr
+        } else {
+            return JSON_NONE
+        }
+    }
+    return JSON_NONE
+}
+
+// DER TEXTPUFFER WIRD VORHER GROSS GENUG GEMACHT. Waehrend des Lesens
+// zeigen `off`/`len` in ihn hinein; wuerde er mitten im Lauf umziehen,
+// waeren die schon gelesenen Zeichenketten trotzdem in Ordnung, weil
+// hier NUR Offsets gespeichert werden und kein einziger Zeiger.
+fn json_parse(d: *mut Json, p: u64, n: usize) -> bool {
+    rt.buf_clear(&(*d).kn)
+    rt.buf_clear(&(*d).tx)
+    (*d).q = p
+    (*d).qn = n
+    (*d).pos = 0
+    (*d).gut = false
+    (*d).wurzel = JSON_NONE
+    rt.buf_reserve(&(*d).tx, n + 16)
+    let w: u32 = lies_wert(d, 0 as u32)
+    if w == JSON_NONE {
+        return false
+    }
+    leerraum(d)
+    if (*d).pos != (*d).qn {
+        // Etwas hinter dem Dokument. Ein Server, der zwei Dokumente in
+        // eine Antwort legt, ist kein Server, dem man ein Passwort gibt.
+        return false
+    }
+    (*d).wurzel = w
+    (*d).gut = true
+    return true
+}
+
+// ------------------------------------------------------------ Handgriffe
+
+fn kind_of(d: *mut Json, i: u32) -> u8 {
+    return json_kind(d, i)
+}
+
+fn hat(d: *mut Json, obj: u32, key: u64) -> bool {
+    if obj == JSON_NONE {
+        return false
+    }
+    return json_get_c(d, obj, key) != JSON_NONE
+}
+
+// Die Zeichenkette hinter `key`, an `aus` angehaengt. `false` heisst:
+// es gibt sie nicht oder sie ist keine Zeichenkette. NICHT "sie ist
+// leer" -- das ist ein anderer Fall und der Aufrufer darf ihn
+// unterscheiden.
+fn text(d: *mut Json, obj: u32, key: u64, aus: *mut rt.Buf) -> bool {
+    if obj == JSON_NONE {
+        return false
+    }
+    let i: u32 = json_get_c(d, obj, key)
+    if i == JSON_NONE {
+        return false
+    }
+    if json_kind(d, i) != JSON_STRING {
+        return false
+    }
+    let s: str.Span = json_string(d, i)
+    rt.buf_push_bytes(aus, s.p as u64, s.n)
+    return true
+}
+
+fn text2(d: *mut Json, obj: u32, k1: u64, k2: u64,
+    aus: *mut rt.Buf) -> bool {
+    if obj == JSON_NONE {
+        return false
+    }
+    let i: u32 = json_get_c(d, obj, k1)
+    if i == JSON_NONE {
+        return false
+    }
+    return text(d, i, k2, aus)
+}
+
+fn ganz(d: *mut Json, obj: u32, key: u64, da: *mut bool) -> i64 {
+    *da = false
+    if obj == JSON_NONE {
+        return 0
+    }
+    let i: u32 = json_get_c(d, obj, key)
+    if i == JSON_NONE {
+        return 0
+    }
+    if json_kind(d, i) != JSON_NUMBER {
+        // Eine Zahl als Zeichenkette ist auch eine Zahl. Server tun das,
+        // und ein Kontoprogramm, das daran scheitert, hilft niemandem.
+        if json_kind(d, i) == JSON_STRING {
+            let s: str.Span = json_string(d, i)
+            var v: i64 = 0
+            var k: usize = 0
+            var eine: bool = false
+            while k < s.n {
+                let c: u8 = rt.ld8(s.p as u64, k)
+                if c < 48 as u8 || c > 57 as u8 {
+                    k = s.n
+                } else {
+                    v = v * 10 + (c - 48 as u8) as i64
+                    eine = true
+                    k = k + 1
+                }
+            }
+            *da = eine
+            return v
+        }
+        return 0
+    }
+    *da = true
+    return json_int(d, i)
+}
+
+fn wahr(d: *mut Json, obj: u32, key: u64) -> bool {
+    if obj == JSON_NONE {
+        return false
+    }
+    let i: u32 = json_get_c(d, obj, key)
+    if i == JSON_NONE {
+        return false
+    }
+    return json_kind(d, i) == JSON_TRUE
+}
+
+// ---------------------------------------------------------- schreiben
+
+struct Schreiber {
+    aus: *mut rt.Buf,
+    erste: bool,
+    offen: bool,
+}
+
+fn hexz(v: u32) -> u8 {
+    if v < 10 as u32 {
+        return (48 as u32 + v) as u8
+    }
+    return (87 as u32 + v) as u8
+}
+
+// Eine Zeichenkette mit Anfuehrungszeichen und vollstaendiger
+// Maskierung. Alles unter 0x20 wird zu `\u00xx`, `"` und `\` bekommen
+// ihren Schraegstrich. Rohes UTF-8 bleibt roh -- das ist erlaubt und
+// spart die Umschrift.
+fn kette_schreiben(aus: *mut rt.Buf, p: u64, n: usize) {
+    rt.buf_push(aus, 34 as u8)
+    var i: usize = 0
+    while i < n {
+        let c: u8 = rt.ld8(p, i)
+        if c == 34 as u8 || c == 92 as u8 {
+            rt.buf_push(aus, 92 as u8)
+            rt.buf_push(aus, c)
+        } else if c == 10 as u8 {
+            rt.buf_push(aus, 92 as u8)
+            rt.buf_push(aus, 110 as u8)
+        } else if c == 13 as u8 {
+            rt.buf_push(aus, 92 as u8)
+            rt.buf_push(aus, 114 as u8)
+        } else if c == 9 as u8 {
+            rt.buf_push(aus, 92 as u8)
+            rt.buf_push(aus, 116 as u8)
+        } else if c < 32 as u8 {
+            rt.buf_push(aus, 92 as u8)
+            rt.buf_push(aus, 117 as u8)
+            rt.buf_push(aus, 48 as u8)
+            rt.buf_push(aus, 48 as u8)
+            rt.buf_push(aus, hexz((c as u32) >> 4 as u32))
+            rt.buf_push(aus, hexz((c as u32) & 15 as u32))
+        } else {
+            rt.buf_push(aus, c)
+        }
+        i = i + 1
+    }
+    rt.buf_push(aus, 34 as u8)
+}
+
+fn schreiber_neu(aus: *mut rt.Buf) -> Schreiber {
+    rt.buf_push(aus, 123 as u8)
+    return Schreiber { aus: aus, erste: true, offen: true }
+}
+
+fn feld(s: *mut Schreiber, key: u64, wert: u64, wlen: usize) {
+    if !(*s).erste {
+        rt.buf_push((*s).aus, 44 as u8)
+    }
+    (*s).erste = false
+    kette_schreiben((*s).aus, key, rt.c_length(key))
+    rt.buf_push((*s).aus, 58 as u8)
+    kette_schreiben((*s).aus, wert, wlen)
+}
+
+fn feld_frei(s: *mut Schreiber) {
+    if (*s).offen {
+        rt.buf_push((*s).aus, 125 as u8)
+        (*s).offen = false
+    }
+}
+
+// ------------------------------------------------- base64url, entpacken
+//
+// Nur zum LESEN eines JWT-Rumpfes. Es prueft KEINE Signatur und tut
+// auch nicht so: ein Geraet, das ein fremdes Token entgegennimmt, kann
+// dessen HS256-Signatur gar nicht pruefen -- das Geheimnis liegt beim
+// Server. Was das Geraet KANN, ist hineinsehen und sich WEIGERN, wenn
+// etwas darin steht, das ein Betriebssystem nichts angeht
+// (`master_session`). Eine Weigerung braucht keine Signatur; sie ist
+// nur dann falsch, wenn ein Angreifer sie AUSLOEST -- und das kostet
+// ihn nichts, denn ein abgelehntes Konto ist kein Zugang.
+fn b64u_wert(c: u8) -> i32 {
+    if c >= 65 as u8 && c <= 90 as u8 { return (c - 65 as u8) as i32 }
+    if c >= 97 as u8 && c <= 122 as u8 { return (c - 97 as u8) as i32 + 26 }
+    if c >= 48 as u8 && c <= 57 as u8 { return (c - 48 as u8) as i32 + 52 }
+    if c == 45 as u8 { return 62 }
+    if c == 95 as u8 { return 63 }
+    if c == 43 as u8 { return 62 }
+    if c == 47 as u8 { return 63 }
+    return -1
+}
+
+fn b64u_dekodieren(p: u64, n: usize, aus: *mut rt.Buf) -> bool {
+    var acc: u32 = 0
+    var bits: u32 = 0
+    var i: usize = 0
+    while i < n {
+        let c: u8 = rt.ld8(p, i)
+        if c == 61 as u8 {
+            break
+        }
+        let v: i32 = b64u_wert(c)
+        if v < 0 {
+            return false
+        }
+        acc = (acc << 6 as u32) | (v as u32)
+        bits = bits + 6 as u32
+        if bits >= 8 as u32 {
+            bits = bits - 8 as u32
+            rt.buf_push(aus, ((acc >> bits) & 255 as u32) as u8)
+        }
+        i = i + 1
+    }
+    return true
+}
