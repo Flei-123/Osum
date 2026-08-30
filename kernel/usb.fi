@@ -67,6 +67,8 @@ import serial
 import kstate
 import xhci
 import kbd
+import hidrep
+import hidin
 import gfx
 
 export {
@@ -118,6 +120,10 @@ const S_ATTACHED: u64 = 0x88 // Bitkarte der Anschluesse mit Geraet
 const S_NOHID: u64 = 0x90
 const S_NOMSC: u64 = 0x98
 const S_LASTDATA: u64 = 0xA0 // Oktette im Datenteil der letzten BOT-Runde
+const S_GEN: u64 = 0xA8 // 1 = der generische Weg ist erlaubt (Modus `hid`)
+const S_GENDEV: u64 = 0xB0 // wie viele Geraete wirklich darueber laufen
+const S_RDFAIL: u64 = 0xB8 // Beschreibung nicht zu holen/zu zerlegen
+const S_RDLEN: u64 = 0xC0 // Oktette der zuletzt geholten Beschreibung
 
 const D_USED: u64 = 0
 const D_SLOT: u64 = 8
@@ -141,11 +147,20 @@ const D_MPS0: u64 = 144
 const D_INTMPS: u64 = 152
 const D_INTIVL: u64 = 160
 const D_BULKMPS: u64 = 168
+// RUNDE HID: die Laenge der Berichtsbeschreibung, wie der HID-Deskriptor
+// (Art 0x21) sie ansagt, und ob dieses Geraet ueber den Zerleger laeuft.
+const D_RDLEN: u64 = 176
+const D_GENERIC: u64 = 184
 
 const DRV_NONE: u64 = 0
 const DRV_KBD: u64 = 1
 const DRV_MOUSE: u64 = 2
 const DRV_MSC: u64 = 3
+// RUNDE HID: eine HID-Schnittstelle OHNE Boot-Protokoll. Was sie ist --
+// Tastatur, Maus, Touchpad -- steht nicht in ihrer Klasse, sondern in
+// ihrer Berichtsbeschreibung; entschieden wird deshalb erst in
+// `hid_start`, nachdem die geholt und zerlegt ist.
+const DRV_HIDGEN: u64 = 4
 
 // Die Standardanforderungen. Sie stehen im Kapitel 9 der Spezifikation
 // und in jedem Geraet der Welt gleich.
@@ -272,6 +287,15 @@ fn stage(state: u64) {
     if kstate.mode_on(state, kstate.M_NOHID) {
         s(state, S_NOHID, 1)
     }
+    // RUNDE HID: der generische Weg. `nohidrep` ist die GEGENPROBE --
+    // damit laeuft alles wie vor dieser Runde, im Boot-Protokoll, und
+    // ein Geraet ohne Boot-Protokoll wird wieder abgelehnt. Der
+    // Unterschied zwischen den beiden Laeufen ist die ganze Runde.
+    if kstate.mode_on(state, kstate.M_HID)
+        && !kstate.mode_on(state, kstate.M_NOHIDREP) {
+        s(state, S_GEN, 1)
+    }
+    hidin.stage(state)
     if kstate.mode_on(state, kstate.M_NOMSC) {
         s(state, S_NOMSC, 1)
     }
@@ -620,6 +644,23 @@ fn parse(state: u64, d: u64, buf: u64, total: u64) {
                         picked = true
                     }
                 }
+            } else if kind == 0x21 && len >= 9 && mine {
+                // DER HID-DESKRIPTOR. Er steht zwischen der
+                // Schnittstelle und ihren Endpunkten und sagt, WIE LANG
+                // die Berichtsbeschreibung ist -- ohne diese Zahl laesst
+                // sie sich nicht holen, denn ein Kontrolltransfer will
+                // die Laenge vorher wissen. Ab Oktett 6 stehen Paare
+                // (Art, Laenge); genommen wird das erste mit Art 0x22.
+                var k: u64 = 0
+                let nd: u64 = b8(buf, at + 5)
+                while k < nd && 6 + k * 3 + 2 < len {
+                    if b8(buf, at + 6 + k * 3) == 0x22 {
+                        ds(state, d, D_RDLEN, b16(buf, at + 7 + k * 3))
+                        k = nd
+                    } else {
+                        k = k + 1
+                    }
+                }
             } else if kind == 5 && len >= 7 && mine {
                 take_ep(state, d, buf, at)
             }
@@ -637,7 +678,17 @@ fn wanted(state: u64, cls: u64, sub: u64, pro: u64) -> bool {
         if g(state, S_NOHID) != 0 {
             return false
         }
-        return sub == 1 && (pro == 1 || pro == 2)
+        if sub == 1 && (pro == 1 || pro == 2) {
+            return true
+        }
+        // RUNDE HID: eine Schnittstelle OHNE Boot-Protokoll. Bis zu
+        // dieser Runde stand hier `return false` mit der Begruendung
+        // "ihr Berichtsformat steht in einer Berichtsbeschreibung, und
+        // die zerlegt diese Runde nicht". Jetzt zerlegt sie sie.
+        // DAS IST DER FALL EINES LAPTOPS: ein Praezisions-Touchpad hat
+        // kein Boot-Protokoll, und `-device usb-tablet` in QEMU auch
+        // nicht.
+        return g(state, S_GEN) != 0
     }
     if cls == CLS_MSC {
         if g(state, S_NOMSC) != 0 {
@@ -649,11 +700,14 @@ fn wanted(state: u64, cls: u64, sub: u64, pro: u64) -> bool {
 }
 
 fn driver_for(cls: u64, sub: u64, pro: u64) -> u64 {
-    if cls == CLS_HID && pro == 1 {
+    if cls == CLS_HID && sub == 1 && pro == 1 {
         return DRV_KBD
     }
-    if cls == CLS_HID && pro == 2 {
+    if cls == CLS_HID && sub == 1 && pro == 2 {
         return DRV_MOUSE
+    }
+    if cls == CLS_HID {
+        return DRV_HIDGEN
     }
     if cls == CLS_MSC {
         return DRV_MSC
@@ -675,9 +729,17 @@ fn take_ep(state: u64, d: u64, buf: u64, at: u64) {
         ds(state, d, D_INTDCI, dci)
         ds(state, d, D_INTMPS, mps)
         ds(state, d, D_INTIVL, ivl)
+        // RUNDE HID: BIS ZU DIESER RUNDE STANDEN HIER ACHT.
+        // Acht ist die Groesse eines Boot-Tastaturberichts, und
+        // solange es nur die gab, war die Zahl richtig. Ein
+        // Praezisions-Touchpad schickt 29 Oktett und `-device
+        // usb-tablet` sechs bis acht; wer bei acht abschneidet,
+        // bekommt von einem Touchpad die ersten anderthalb Finger
+        // und sonst nichts. Die Grenze ist jetzt der Platz, den
+        // `report_buf` je Geraet hat (64), und nicht eine Bauform.
         var want: u64 = mps
-        if want > 8 {
-            want = 8
+        if want > 64 {
+            want = 64
         }
         ds(state, d, D_INTLEN, want)
         return
@@ -811,6 +873,10 @@ fn drop_dev(state: u64, d: u64) {
 
 fn bind(state: u64, d: u64) {
     let k: u64 = dg(state, d, D_DRIVER)
+    if k == DRV_HIDGEN {
+        hid_start(state, d)
+        return
+    }
     if k == DRV_KBD {
         hid_start(state, d)
         s(state, S_KBD, d + 1)
@@ -840,6 +906,45 @@ fn bind(state: u64, d: u64) {
 fn hid_start(state: u64, d: u64) {
     let slot: u64 = dg(state, d, D_SLOT)
     let iface: u64 = dg(state, d, D_IFACE)
+    // RUNDE HID: ZUERST DIE BERICHTSBESCHREIBUNG VERSUCHEN.
+    //
+    // Geht sie zu holen UND zu zerlegen, laeuft dieses Geraet im
+    // BERICHTSPROTOKOLL (SET_PROTOCOL 1) und seine Berichte gehen durch
+    // `hidin.report` -- dann sind alle Tasten da, alle Knoepfe, das Rad
+    // steht da, wo die Beschreibung es hinlegt, und ein Touchpad
+    // funktioniert ueberhaupt erst.
+    //
+    // Geht sie NICHT, bleibt alles wie vorher: Boot-Protokoll. Das ist
+    // kein Rest, sondern der Rueckfallweg, und er ist der Grund, warum
+    // jedes BIOS eine USB-Tastatur bedienen kann. Ein Geraet, das man
+    // nach dieser Runde NICHT mehr bedienen koennte, waere ein
+    // Rueckschritt.
+    var generisch: bool = false
+    if g(state, S_GEN) != 0 && d < hidrep.MAX_DEV {
+        generisch = hid_descriptor(state, d, slot, iface)
+    }
+    ds(state, d, D_GENERIC, 0)
+    if generisch {
+        ds(state, d, D_GENERIC, 1)
+        s(state, S_GENDEV, g(state, S_GENDEV) + 1)
+        // SET_PROTOCOL 1 = Berichtsprotokoll.
+        xhci.control(state, slot, 0x21, 0x0B, 1, iface, 0, 0, false)
+        xhci.control(state, slot, 0x21, 0x0A, 0, iface, 0, 0, false)
+        hid_claim(state, d)
+        ds(state, d, D_PREV, 0)
+        let i2: u64 = xhci.ep_find(state, slot, dg(state, d, D_INTDCI))
+        if i2 < xhci.MAX_EP {
+            ds(state, d, D_SEQ, xhci.ep_seq(state, i2))
+        }
+        arm(state, d)
+        return
+    }
+    if dg(state, d, D_DRIVER) == DRV_HIDGEN {
+        // Kein Boot-Protokoll UND keine brauchbare Beschreibung: dieses
+        // Geraet bleibt liegen. Gezaehlt, nicht geraten.
+        ds(state, d, D_DRIVER, DRV_NONE)
+        return
+    }
     // SET_PROTOCOL 0 = Boot. Klasse, Schnittstelle, Wirt an Geraet.
     xhci.control(state, slot, 0x21, 0x0B, 0, iface, 0, 0, false)
     // SET_IDLE 0 = nur melden, wenn sich etwas aendert.
@@ -850,6 +955,65 @@ fn hid_start(state: u64, d: u64) {
         ds(state, d, D_SEQ, xhci.ep_seq(state, i))
     }
     arm(state, d)
+}
+
+// DIE BERICHTSBESCHREIBUNG HOLEN UND ZERLEGEN.
+//
+// GET_DESCRIPTOR mit bmRequestType 0x81 -- Geraet an Wirt, STANDARD,
+// Empfaenger SCHNITTSTELLE. Das letzte ist der Punkt: eine
+// Berichtsbeschreibung gehoert der Schnittstelle und nicht dem Geraet,
+// und wer sie mit 0x80 anfordert, bekommt von manchem Geraet einen
+// Stall und von manchem etwas anderes.
+//
+// Die Laenge steht im HID-Deskriptor der Konfiguration (`parse`, Art
+// 0x21). Ohne sie wird gar nicht erst gefragt -- eine geratene Laenge
+// waere entweder zu kurz (halbe Beschreibung) oder zu lang (Stall).
+fn hid_descriptor(state: u64, d: u64, slot: u64, iface: u64) -> bool {
+    let n: u64 = dg(state, d, D_RDLEN)
+    if n == 0 || n > hidrep.RAW_MAX {
+        s(state, S_RDFAIL, g(state, S_RDFAIL) + 1)
+        return false
+    }
+    let dst: u64 = hidrep.raw_of(state, d)
+    zero(dst, n)
+    if xhci.control(state, slot, 0x81, REQ_GET_DESCRIPTOR,
+        (0x22 << 8), iface, n, dst, true) < (n as i64) {
+        s(state, S_RDFAIL, g(state, S_RDFAIL) + 1)
+        return false
+    }
+    s(state, S_RDLEN, n)
+    if hidrep.parse(state, d, dst, n) != hidrep.E_OK {
+        s(state, S_RDFAIL, g(state, S_RDFAIL) + 1)
+        return false
+    }
+    hidrep.say(state, d)
+    return true
+}
+
+// Was das Geraet IST, steht in seiner Beschreibung und nicht in seiner
+// Klasse. Ein Geraet kann beides sein (viele Tastaturen melden neben
+// den Tasten eine Verbrauchersteuerung); dann zaehlt es hier als
+// Tastatur UND meldet die Multimediatasten mit.
+fn hid_claim(state: u64, d: u64) {
+    let art: u64 = hidrep.kind(state, d)
+    if (art & hidrep.K_KBD) != 0 {
+        ds(state, d, D_DRIVER, DRV_KBD)
+        if g(state, S_KBD) == 0 {
+            s(state, S_KBD, d + 1)
+        }
+        return
+    }
+    if (art & hidrep.K_MOUSE) != 0 || (art & hidrep.K_PAD) != 0 {
+        ds(state, d, D_DRIVER, DRV_MOUSE)
+        if g(state, S_MOUSE) == 0 {
+            s(state, S_MOUSE, d + 1)
+        }
+        return
+    }
+    // Etwas anderes (reine Verbrauchersteuerung zum Beispiel). Die
+    // Berichte gehen trotzdem durch den Zerleger; was `hidin` darin
+    // nicht kennt, faellt weg, statt falsch gedeutet zu werden.
+    ds(state, d, D_DRIVER, DRV_HIDGEN)
 }
 
 fn arm(state: u64, d: u64) {
@@ -914,6 +1078,16 @@ fn poll(state: u64) {
 }
 
 fn deliver(state: u64, d: u64) {
+    // RUNDE HID: EINE WEICHE UND ZWEI WEGE, DIE BEIDE IN `hidin.fi`
+    // ENDEN. Oben der generische -- der Bericht wird nach seiner
+    // Beschreibung gelesen. Unten der Rueckfallweg mit dem festen
+    // Format des Boot-Protokolls. Was danach kommt (Abtastcode,
+    // Zeilendisziplin, Fensterfokus, PS/2-Paket), ist fuer beide
+    // dasselbe und steht nur einmal da.
+    if dg(state, d, D_GENERIC) == 1 {
+        hidin.report(state, d, report_buf(state, d), dg(state, d, D_INTLEN))
+        return
+    }
     if dg(state, d, D_DRIVER) == DRV_KBD {
         kbd_report(state, d)
         return
@@ -928,224 +1102,23 @@ fn deliver(state: u64, d: u64) {
 // und das interessiert nur bei Umschalt und Steuerung, weil der
 // PS/2-Weg fuer alles andere ohnehin nur die Druecken-Codes ansieht.
 fn kbd_report(state: u64, d: u64) {
-    let p: u64 = report_buf(state, d)
-    let mods: u64 = b8(p, 0)
-    let prev: u64 = dg(state, d, D_PREV)
-    let pmods: u64 = prev & 0xFF
-    // Umschalt: links Bit 1, rechts Bit 5.
-    if (mods & 0x22) != 0 && (pmods & 0x22) == 0 {
-        kbd.on_code(state, 0x2A)
-    }
-    if (mods & 0x22) == 0 && (pmods & 0x22) != 0 {
-        kbd.on_code(state, 0xAA)
-    }
-    // Steuerung: links Bit 0, rechts Bit 4.
-    if (mods & 0x11) != 0 && (pmods & 0x11) == 0 {
-        kbd.on_code(state, 0x1D)
-    }
-    if (mods & 0x11) == 0 && (pmods & 0x11) != 0 {
-        kbd.on_code(state, 0x9D)
-    }
-    var i: u64 = 2
-    while i < 8 {
-        let u: u64 = b8(p, i)
-        if u > 3 && !in_prev(prev, u) {
-            press(state, u)
-        }
-        i = i + 1
-    }
-    var neu: u64 = mods & 0xFF
-    i = 2
-    while i < 8 {
-        neu = neu | ((b8(p, i) & 0xFF) << (i * 8))
-        i = i + 1
-    }
-    ds(state, d, D_PREV, neu)
+    let vor: u64 = hidin.keys(state)
+    hidin.kbd_report_boot(state, d, report_buf(state, d))
+    // `usb: keys=N` zaehlt seit Runde K17 die Tasten, die WIRKLICH
+    // durch den USB-Weg gegangen sind, und `tools/k17/run.sh` haengt
+    // daran. Die Zahl bleibt, auch wenn die Auswertung eine Etage
+    // tiefer gewandert ist.
+    s(state, S_KEYS, g(state, S_KEYS) + (hidin.keys(state) - vor))
 }
 
-fn in_prev(prev: u64, u: u64) -> bool {
-    var i: u64 = 2
-    while i < 8 {
-        if ((prev >> (i * 8)) & 0xFF) == u {
-            return true
-        }
-        i = i + 1
-    }
-    return false
-}
-
-// DIE STELLE, AN DER USB IN DEN WEG VON RUNDE 59 MUENDET. Der
-// Gebrauchscode wird in einen Abtastcode des Satzes 1 uebersetzt -- also
-// in genau das, was der 8042 an Tor 0x60 liefern wuerde -- und dann geht
-// er durch `kbd.on_code`. Dieselbe Tabelle fuer Umschalt, dieselbe
-// Behandlung von Steuerung, dieselbe Zeilendisziplin, derselbe
-// Eingabefokus des Fensterservers. Es gibt keinen zweiten Weg.
 fn press(state: u64, u: u64) {
-    let ext: bool = is_ext(u)
-    let code: u64 = scancode(u)
-    if code == 0 {
-        return
-    }
-    if ext {
-        kbd.on_code(state, 0xE0)
-    }
-    kbd.on_code(state, code)
+    hidin.press(state, u)
     s(state, S_KEYS, g(state, S_KEYS) + 1)
 }
 
-fn is_ext(u: u64) -> bool {
-    if u >= 0x49 && u <= 0x52 {
-        return true
-    }
-    return u == 0x54 || u == 0x58
-}
-
-// HID-Gebrauchscode -> Abtastcode, Satz 1. Zwei Tabellen und keine
-// Rechnung: die Reihenfolge der Buchstaben im HID-Feld ist alphabetisch,
-// die auf einer Tastatur ist es nicht.
-fn scancode(u: u64) -> u64 {
-    var t: [u8; 100] = [0 as u8; 100]
-    if u >= 100 {
-        return 0
-    }
-    t[4] = 0x1E as u8
-    t[5] = 0x30 as u8
-    t[6] = 0x2E as u8
-    t[7] = 0x20 as u8
-    t[8] = 0x12 as u8
-    t[9] = 0x21 as u8
-    t[10] = 0x22 as u8
-    t[11] = 0x23 as u8
-    t[12] = 0x17 as u8
-    t[13] = 0x24 as u8
-    t[14] = 0x25 as u8
-    t[15] = 0x26 as u8
-    t[16] = 0x32 as u8
-    t[17] = 0x31 as u8
-    t[18] = 0x18 as u8
-    t[19] = 0x19 as u8
-    t[20] = 0x10 as u8
-    t[21] = 0x13 as u8
-    t[22] = 0x1F as u8
-    t[23] = 0x14 as u8
-    t[24] = 0x16 as u8
-    t[25] = 0x2F as u8
-    t[26] = 0x11 as u8
-    t[27] = 0x2D as u8
-    t[28] = 0x15 as u8
-    t[29] = 0x2C as u8
-    t[30] = 0x02 as u8
-    t[31] = 0x03 as u8
-    t[32] = 0x04 as u8
-    t[33] = 0x05 as u8
-    t[34] = 0x06 as u8
-    t[35] = 0x07 as u8
-    t[36] = 0x08 as u8
-    t[37] = 0x09 as u8
-    t[38] = 0x0A as u8
-    t[39] = 0x0B as u8
-    t[40] = 0x1C as u8 // Eingabe
-    t[41] = 0x01 as u8 // Flucht
-    t[42] = 0x0E as u8 // Rueckschritt
-    t[43] = 0x0F as u8 // Tabulator
-    t[44] = 0x39 as u8 // Leerzeichen
-    t[45] = 0x0C as u8
-    t[46] = 0x0D as u8
-    t[47] = 0x1A as u8
-    t[48] = 0x1B as u8
-    t[49] = 0x2B as u8
-    t[50] = 0x2B as u8
-    t[51] = 0x27 as u8
-    t[52] = 0x28 as u8
-    t[53] = 0x29 as u8
-    t[54] = 0x33 as u8
-    t[55] = 0x34 as u8
-    t[56] = 0x35 as u8
-    t[57] = 0x3A as u8 // Feststell
-    t[58] = 0x3B as u8
-    t[59] = 0x3C as u8
-    t[60] = 0x3D as u8
-    t[61] = 0x3E as u8
-    t[62] = 0x3F as u8
-    t[63] = 0x40 as u8
-    t[64] = 0x41 as u8
-    t[65] = 0x42 as u8
-    t[66] = 0x43 as u8
-    t[67] = 0x44 as u8
-    t[68] = 0x57 as u8
-    t[69] = 0x58 as u8
-    t[71] = 0x46 as u8 // Rollen
-    t[73] = 0x52 as u8 // Einfuegen (erweitert)
-    t[74] = 0x47 as u8 // Anfang
-    t[75] = 0x49 as u8 // Seite hoch
-    t[76] = 0x53 as u8 // Entfernen
-    t[77] = 0x4F as u8 // Ende
-    t[78] = 0x51 as u8 // Seite runter
-    t[79] = 0x4D as u8 // rechts
-    t[80] = 0x4B as u8 // links
-    t[81] = 0x50 as u8 // runter
-    t[82] = 0x48 as u8 // hoch
-    t[83] = 0x45 as u8 // Nummernfeststell
-    t[84] = 0x35 as u8 // Ziffernblock geteilt (erweitert)
-    t[85] = 0x37 as u8
-    t[86] = 0x4A as u8
-    t[87] = 0x4E as u8
-    t[88] = 0x1C as u8 // Ziffernblock Eingabe (erweitert)
-    t[89] = 0x4F as u8
-    t[90] = 0x50 as u8
-    t[91] = 0x51 as u8
-    t[92] = 0x4B as u8
-    t[93] = 0x4C as u8
-    t[94] = 0x4D as u8
-    t[95] = 0x47 as u8
-    t[96] = 0x48 as u8
-    t[97] = 0x49 as u8
-    t[98] = 0x52 as u8
-    t[99] = 0x53 as u8
-    return t[u as usize] as u64
-}
-
-// Der Bericht einer Boot-Maus: Tasten, dx, dy und -- wenn der Endpunkt
-// vier Oktett gross ist -- das Rad. Daraus wird ein PS/2-PAKET gebaut
-// und in `ps2m` gegeben; von dort an ist es dieselbe Rechnung wie bei
-// einer Maus am 8042.
-//
-// ZWEI VORZEICHEN DREHEN SICH UM, und beide sind eine eigene Art zu
-// scheitern:
-//   * y. USB zaehlt nach UNTEN (wie der Bildschirm), PS/2 nach OBEN --
-//     `ps2m.apply` zieht die Bewegung deshalb ab. Wer das nicht dreht,
-//     hat einen Zeiger, der nach oben faehrt, wenn man nach unten zieht.
-//   * das Rad. USB zaehlt eine Umdrehung nach vorn als +1, PS/2 als 0x0F.
 fn mouse_report(state: u64, d: u64) {
-    let p: u64 = report_buf(state, d)
-    let btn: u64 = b8(p, 0) & 7
-    let dx: u64 = b8(p, 1) & 0xFF
-    let uy: u64 = b8(p, 2) & 0xFF
-    var dy: u64 = 0
-    if uy != 0 {
-        dy = (256 - uy) & 0xFF
-    }
-    var b0: u64 = 8 | btn
-    if (dx & 0x80) != 0 {
-        b0 = b0 | 0x10
-    }
-    if (dy & 0x80) != 0 {
-        b0 = b0 | 0x20
-    }
-    var rad: u64 = 0
-    var vier: bool = false
-    if dg(state, d, D_INTLEN) >= 4 {
-        let z: u64 = b8(p, 3) & 0xFF
-        vier = true
-        if z != 0 {
-            if (z & 0x80) != 0 {
-                rad = 1 // USB rueckwaerts -> PS/2 vorwaerts
-            } else {
-                rad = 15
-            }
-        }
-    }
-    gfx.mouse_packet(state, b0, dx, dy, rad, vier)
+    hidin.mouse_report_boot(state, d, report_buf(state, d),
+        dg(state, d, D_INTLEN))
     s(state, S_MOVES, g(state, S_MOVES) + 1)
 }
 
@@ -1603,6 +1576,25 @@ fn report(state: u64) {
     serial.puts((&s_mc[0]) as u64)
     serial.dec(gfx.mouse_clicks(state))
     serial.nl()
+    hid_report(state)
+}
+
+// RUNDE HID: EINE EIGENE ZEILE, und das mit Absicht. Die Zeile `usb:`
+// wird seit K17 von `tools/k17/run.sh` Wort fuer Wort gelesen; wer eine
+// Zahl dazwischenschiebt, bricht einen Test, der mit dieser Runde
+// nichts zu tun hat.
+fn hid_report(state: u64) {
+    var s_a: [u8; 10] = "hid: gen=\0"
+    var s_b: [u8; 8] = " rdlen=\0"
+    var s_c: [u8; 9] = " rdfail=\0"
+    serial.puts((&s_a[0]) as u64)
+    serial.dec(g(state, S_GENDEV))
+    serial.puts((&s_b[0]) as u64)
+    serial.dec(g(state, S_RDLEN))
+    serial.puts((&s_c[0]) as u64)
+    serial.dec(g(state, S_RDFAIL))
+    serial.nl()
+    hidin.say(state)
 }
 
 // WAS RING 3 UEBER DIESEN BAUM ERFAHREN DARF. Eine Zahl je Frage, ueber
