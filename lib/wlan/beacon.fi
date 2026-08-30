@@ -1,0 +1,534 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// lib/wlan/beacon.fi -- was in einem Beacon steht und was man ihm
+// glauben darf.
+//
+// ==================================================================
+// WAS EIN BEACON IST
+// ==================================================================
+//
+// Ein Zugangspunkt ruft ungefaehr zehnmal in der Sekunde in die Luft,
+// wer er ist. Dieser Ruf ist ein Verwaltungsrahmen vom Untertyp 8, und
+// er ist die einzige Nachricht, die jedes Geraet im Umkreis lesen kann,
+// ohne irgendetwas dafuer zu tun. Aus ihm kommt alles, was in einer
+// Netzliste steht: der Name, der Kanal, die Sicherheitsart.
+//
+// Nach dem Rahmenkopf (24 Oktette, `rahmen.fi`) steht ein fester Teil
+// von zwoelf Oktetten:
+//
+//   Zeitstempel        8   die Uhr des Zugangspunkts in Mikrosekunden
+//   Beacon-Intervall   2   in Zeiteinheiten zu 1024 Mikrosekunden
+//   Faehigkeiten       2   Bitfeld
+//
+// und danach eine Kette von Informationselementen. Eine Probe Response
+// (Untertyp 5) hat genau denselben Aufbau -- deshalb nimmt diese Datei
+// beide.
+//
+// ==================================================================
+// WAS MAN EINEM BEACON NICHT GLAUBEN DARF: ALLES
+// ==================================================================
+//
+// Ein Beacon ist nicht beglaubigt. Jeder kann einen senden, mit jedem
+// Namen und jedem Inhalt. Diese Datei ZERLEGT ihn, sie BEWERTET ihn
+// nicht. Insbesondere:
+//
+//   * Der SSID-Name ist eine Folge von bis zu 32 beliebigen Oktetten.
+//     Er ist KEINE Zeichenkette, er hat KEIN Nullzeichen am Ende, und
+//     er darf jedes Oktett enthalten -- auch 0x00, auch ungueltiges
+//     UTF-8. Wer ihn anzeigt, muss ihn zum Anzeigen erst pruefen. Diese
+//     Datei gibt ihn roh weiter, mit Laenge.
+//   * Die gemeldete Sicherheitsart sagt, was der Zugangspunkt
+//     BEHAUPTET. Ob er es einhaelt, entscheidet sich erst im
+//     4-Wege-Handschlag, und ein Angreifer, der einen offenen Beacon
+//     mit dem Namen des Heimnetzes sendet, ist der einfachste Angriff
+//     ueberhaupt. Der Schutz dagegen ist NICHT hier -- er ist im
+//     Profil: wer einmal mit WPA2 verbunden war, darf dasselbe Netz
+//     nie wieder offen annehmen.
+//
+// ==================================================================
+// DIE SIGNALSTAERKE STEHT NICHT IM RAHMEN
+// ==================================================================
+//
+// Das ist wichtig genug fuer einen eigenen Absatz, weil es fast immer
+// falsch erwartet wird: der Beacon enthaelt KEINE Signalstaerke. Der
+// Empfangspegel ist eine Messung des EMPFAENGERS und kommt vom Funkteil
+// als Nebeninformation zum Rahmen (bei Intel im Empfangsdeskriptor, bei
+// einem Mitschnitt im Radiotap-Kopf). `Netz.rssi` steht deshalb hier,
+// wird von `zerlege` aber NICHT gesetzt -- der Treiber setzt sie mit
+// `setze_rssi`. Solange es keinen Treiber gibt, ist sie 0, und das ist
+// die ehrliche Antwort.
+
+import wlan.rahmen
+
+export {
+    Netz, netz_new, zerlege, setze_rssi, setze_band,
+    SICH_OFFEN, SICH_WEP, SICH_WPA, SICH_WPA2, SICH_UEBERGANG,
+    SICH_WPA3, SICH_OWE,
+    CH_KEINE, CH_WEP40, CH_TKIP, CH_CCMP128, CH_WEP104, CH_BIP,
+    CH_GCMP128, CH_GCMP256, CH_CCMP256,
+    AKM_8021X, AKM_PSK, AKM_FT_8021X, AKM_FT_PSK, AKM_8021X_SHA256,
+    AKM_PSK_SHA256, AKM_SAE, AKM_FT_SAE, AKM_OWE,
+    PMF_NEIN, PMF_FAEHIG, PMF_PFLICHT,
+    SSID_MAX
+}
+
+const SSID_MAX: usize = 32
+
+const SICH_OFFEN: u64 = 0
+const SICH_WEP: u64 = 1
+const SICH_WPA: u64 = 2
+const SICH_WPA2: u64 = 3
+const SICH_UEBERGANG: u64 = 4 // WPA2 und WPA3 nebeneinander
+const SICH_WPA3: u64 = 5
+const SICH_OWE: u64 = 6
+
+// Chiffren, IEEE 802.11-2016 Tabelle 9-131, OUI 00-0F-AC.
+const CH_KEINE: u64 = 0 // "nimm die Gruppenchiffre"
+const CH_WEP40: u64 = 1
+const CH_TKIP: u64 = 2
+const CH_CCMP128: u64 = 4
+const CH_WEP104: u64 = 5
+const CH_BIP: u64 = 6
+const CH_GCMP128: u64 = 8
+const CH_GCMP256: u64 = 9
+const CH_CCMP256: u64 = 10
+
+// Anmeldeverfahren, Tabelle 9-133.
+const AKM_8021X: u64 = 1
+const AKM_PSK: u64 = 2
+const AKM_FT_8021X: u64 = 3
+const AKM_FT_PSK: u64 = 4
+const AKM_8021X_SHA256: u64 = 5
+const AKM_PSK_SHA256: u64 = 6
+const AKM_SAE: u64 = 8
+const AKM_FT_SAE: u64 = 9
+const AKM_OWE: u64 = 18
+
+const PMF_NEIN: u64 = 0
+const PMF_FAEHIG: u64 = 1
+const PMF_PFLICHT: u64 = 2
+
+struct Netz {
+    bssid: [u8; 6],
+    ssid: [u8; 32],
+    ssid_len: usize,
+    ssid_verborgen: bool, // Laenge 0 oder nur Nullen
+    kanal: u64,           // 0 = stand nicht drin
+    band: u64,
+    intervall: u64,
+    faehigkeiten: u64,
+    sicherheit: u64,
+    paar_chiffre: u64,
+    gruppen_chiffre: u64,
+    akm: u64,
+    pmf: u64,
+    hat_rsn: bool,
+    hat_wpa: bool,
+    rssi: i64, // vom Funkteil, NICHT aus dem Rahmen
+}
+
+fn netz_new() -> Netz {
+    return Netz { bssid: [0 as u8; 6], ssid: [0 as u8; 32],
+        ssid_len: 0, ssid_verborgen: true, kanal: 0, band: 0,
+        intervall: 0, faehigkeiten: 0, sicherheit: SICH_OFFEN,
+        paar_chiffre: CH_KEINE, gruppen_chiffre: CH_KEINE, akm: 0,
+        pmf: PMF_NEIN, hat_rsn: false, hat_wpa: false, rssi: 0 }
+}
+
+fn ld8(p: u64, i: usize) -> u8 {
+    return *((p + i as u64) as *mut u8)
+}
+
+fn le16(p: u64, i: usize) -> u64 {
+    return (ld8(p, i) as u64) | ((ld8(p, i + 1) as u64) << 8)
+}
+
+fn setze_rssi(nz: *mut Netz, dbm: i64) {
+    (*nz).rssi = dbm
+}
+
+fn setze_band(nz: *mut Netz, band: u64) {
+    (*nz).band = band
+}
+
+// Ein Chiffren- oder AKM-Waehler ist vier Oktette: drei OUI und ein
+// Typ. Nur die OUI 00-0F-AC (das Institut selbst) wird hier
+// ausgewertet; 00-50-F2 ist die alte WPA-OUI und wird an ihrer eigenen
+// Stelle behandelt. Alles andere ist herstellereigen und wird als
+// "kenne ich nicht" gemeldet -- NICHT als "keine Verschluesselung".
+//
+// Rueckgabe -1: fremde OUI.
+fn waehler(p: u64, i: usize, oui0: u64, oui1: u64, oui2: u64) -> i64 {
+    if (ld8(p, i) as u64) != oui0 { return -1 }
+    if (ld8(p, i + 1) as u64) != oui1 { return -1 }
+    if (ld8(p, i + 2) as u64) != oui2 { return -1 }
+    return (ld8(p, i + 3) as u64) as i64
+}
+
+// Von zwei Chiffren die bessere. Die Ordnung ist nicht Geschmack: CCMP
+// und GCMP sind AES, TKIP ist RC4 mit einem Pflaster darauf und seit
+// 2012 in der Norm als "veraltet" gefuehrt, WEP ist gebrochen.
+fn chiffre_rang(c: u64) -> u64 {
+    if c == CH_GCMP256 { return 6 }
+    if c == CH_CCMP256 { return 5 }
+    if c == CH_GCMP128 { return 4 }
+    if c == CH_CCMP128 { return 3 }
+    if c == CH_TKIP { return 2 }
+    if c == CH_WEP104 { return 1 }
+    if c == CH_WEP40 { return 1 }
+    return 0
+}
+
+// Von zwei Anmeldeverfahren das bessere. SAE (WPA3) schlaegt PSK,
+// SHA-256-PSK schlaegt SHA-1-PSK.
+fn akm_rang(a: u64) -> u64 {
+    if a == AKM_SAE { return 6 }
+    if a == AKM_FT_SAE { return 5 }
+    if a == AKM_OWE { return 4 }
+    if a == AKM_PSK_SHA256 { return 3 }
+    if a == AKM_PSK { return 2 }
+    if a == AKM_FT_PSK { return 2 }
+    if a == AKM_8021X_SHA256 { return 1 }
+    if a == AKM_8021X { return 1 }
+    if a == AKM_FT_8021X { return 1 }
+    return 0
+}
+
+// ==================================================================
+// DAS RSN-ELEMENT, IEEE 802.11-2016 9.4.2.25
+// ==================================================================
+//
+//   Version                    2   muss 1 sein
+//   Gruppenchiffre             4
+//   Zahl der Paarchiffren      2
+//   Paarchiffren               4 * n
+//   Zahl der Anmeldeverfahren  2
+//   Anmeldeverfahren           4 * n
+//   RSN-Faehigkeiten           2   ab hier ist alles freiwillig
+//   Zahl der PMKID             2
+//   PMKID                     16 * n
+//   Gruppen-Verwaltungschiffre 4
+//
+// JEDES DIESER LAENGENFELDER KOMMT AUS DER LUFT. Die Zahl der
+// Paarchiffren ist ein 16-Bit-Wert, den ein Angreifer auf 65535 setzen
+// kann, und dann will diese Funktion 262140 Oktette lesen. Deshalb
+// steht vor jedem Schritt eine Pruefung gegen `n`, und die Schleifen
+// laufen ueber `min(zahl, was noch da ist)` -- ein zu grosses
+// Laengenfeld macht das Element UNGUELTIG und nicht die Maschine kaputt.
+fn rsn_zerlege(nz: *mut Netz, p: u64, n: usize) -> bool {
+    if n < 2 {
+        return false
+    }
+    if le16(p, 0) != 1 {
+        return false // eine andere Version verstehen wir nicht
+    }
+    (*nz).hat_rsn = true
+    var at: usize = 2
+
+    // Ohne Gruppenchiffre gilt der Vorgabewert CCMP-128 (Norm).
+    (*nz).gruppen_chiffre = CH_CCMP128
+    if at + 4 <= n {
+        let g: i64 = waehler(p, at, 0, 0x0F, 0xAC)
+        if g >= 0 {
+            (*nz).gruppen_chiffre = g as u64
+        }
+        at = at + 4
+    } else {
+        return true
+    }
+
+    // Paarchiffren.
+    (*nz).paar_chiffre = CH_CCMP128
+    if at + 2 > n {
+        return true
+    }
+    let pn: usize = le16(p, at) as usize
+    at = at + 2
+    if at + pn * 4 > n {
+        return false // das Laengenfeld luegt
+    }
+    var best: u64 = 0
+    var besti: u64 = CH_KEINE
+    var i: usize = 0
+    while i < pn {
+        let c: i64 = waehler(p, at + i * 4, 0, 0x0F, 0xAC)
+        if c >= 0 {
+            let r: u64 = chiffre_rang(c as u64)
+            if r > best {
+                best = r
+                besti = c as u64
+            }
+        }
+        i = i + 1
+    }
+    if best > 0 {
+        (*nz).paar_chiffre = besti
+    }
+    at = at + pn * 4
+
+    // Anmeldeverfahren.
+    if at + 2 > n {
+        return true
+    }
+    let an: usize = le16(p, at) as usize
+    at = at + 2
+    if at + an * 4 > n {
+        return false
+    }
+    var abest: u64 = 0
+    var abesti: u64 = 0
+    var hat_sae: bool = false
+    var hat_psk: bool = false
+    var hat_owe: bool = false
+    i = 0
+    while i < an {
+        let a: i64 = waehler(p, at + i * 4, 0, 0x0F, 0xAC)
+        if a >= 0 {
+            let av: u64 = a as u64
+            if av == AKM_SAE || av == AKM_FT_SAE { hat_sae = true }
+            if av == AKM_PSK || av == AKM_PSK_SHA256
+                || av == AKM_FT_PSK { hat_psk = true }
+            if av == AKM_OWE { hat_owe = true }
+            let r: u64 = akm_rang(av)
+            if r > abest {
+                abest = r
+                abesti = av
+            }
+        }
+        i = i + 1
+    }
+    (*nz).akm = abesti
+    at = at + an * 4
+
+    // RSN-Faehigkeiten: Bit 6 heisst "kann geschuetzte
+    // Verwaltungsrahmen", Bit 7 heisst "verlangt sie".
+    if at + 2 <= n {
+        let cap: u64 = le16(p, at)
+        if (cap & 128) != 0 {
+            (*nz).pmf = PMF_PFLICHT
+        } else {
+            if (cap & 64) != 0 {
+                (*nz).pmf = PMF_FAEHIG
+            }
+        }
+        at = at + 2
+    }
+
+    // Die Einstufung. WPA3 im reinen Betrieb heisst: SAE UND
+    // Verwaltungsrahmenschutz PFLICHT. Steht SAE neben PSK, ist es der
+    // Uebergangsbetrieb, den fast jeder Router heute faehrt -- und der
+    // ist genau so schwach wie WPA2, weil ein Angreifer den Klienten
+    // auf PSK herunterreden kann.
+    if hat_owe {
+        (*nz).sicherheit = SICH_OWE
+    } else {
+        if hat_sae && hat_psk {
+            (*nz).sicherheit = SICH_UEBERGANG
+        } else {
+            if hat_sae {
+                (*nz).sicherheit = SICH_WPA3
+            } else {
+                (*nz).sicherheit = SICH_WPA2
+            }
+        }
+    }
+    return true
+}
+
+// Das alte WPA-Element: ein Herstellerelement mit der OUI 00-50-F2 und
+// dem Typ 1. Es steht in Netzen, die aelter sind als 2004, und in
+// Routern, die den Uebergang noch anbieten. Der Aufbau ist derselbe wie
+// beim RSN-Element, nur mit der OUI 00-50-F2 in den Waehlern und ohne
+// das Faehigkeitsfeld.
+//
+// `p` zeigt HINTER die vier Oktette OUI+Typ.
+fn wpa_zerlege(nz: *mut Netz, p: u64, n: usize) -> bool {
+    if n < 2 {
+        return false
+    }
+    if le16(p, 0) != 1 {
+        return false
+    }
+    (*nz).hat_wpa = true
+    var at: usize = 2
+    if at + 4 <= n {
+        let g: i64 = waehler(p, at, 0, 0x50, 0xF2)
+        if g >= 0 {
+            (*nz).gruppen_chiffre = g as u64
+        }
+        at = at + 4
+    }
+    if at + 2 <= n {
+        let pn: usize = le16(p, at) as usize
+        at = at + 2
+        if at + pn * 4 > n {
+            return false
+        }
+        var best: u64 = 0
+        var besti: u64 = CH_KEINE
+        var i: usize = 0
+        while i < pn {
+            let c: i64 = waehler(p, at + i * 4, 0, 0x50, 0xF2)
+            if c >= 0 {
+                let r: u64 = chiffre_rang(c as u64)
+                if r > best {
+                    best = r
+                    besti = c as u64
+                }
+            }
+            i = i + 1
+        }
+        if best > 0 {
+            (*nz).paar_chiffre = besti
+        }
+        at = at + pn * 4
+    }
+    if at + 2 <= n {
+        let an: usize = le16(p, at) as usize
+        at = at + 2
+        if at + an * 4 > n {
+            return false
+        }
+        var i: usize = 0
+        while i < an {
+            let a: i64 = waehler(p, at + i * 4, 0, 0x50, 0xF2)
+            if a >= 0 {
+                if (a as u64) == AKM_PSK {
+                    (*nz).akm = AKM_PSK
+                }
+                if (a as u64) == AKM_8021X && (*nz).akm == 0 {
+                    (*nz).akm = AKM_8021X
+                }
+            }
+            i = i + 1
+        }
+    }
+    // Nur setzen, wenn kein RSN-Element es schon besser weiss.
+    if !(*nz).hat_rsn {
+        (*nz).sicherheit = SICH_WPA
+    }
+    return true
+}
+
+// ==================================================================
+// DER GANZE BEACON
+// ==================================================================
+//
+// Rueckgabe `false`: das ist kein Beacon und keine Probe Response, oder
+// er ist so kurz, dass nicht einmal der feste Teil hineinpasst, oder
+// ein Element hat gelogen. In `nz` steht dann, was bis dahin sicher
+// gelesen wurde -- der Aufrufer darf es NICHT benutzen. Ein halb
+// gelesener Beacon ist kein Netz.
+fn zerlege(nz: *mut Netz, p: u64, n: usize) -> bool {
+    let kl: i64 = rahmen.kopf_laenge(p, n)
+    if kl < 0 {
+        return false
+    }
+    let f: u64 = rahmen.fc(p, n)
+    if rahmen.art(f) != rahmen.ART_VERWALTUNG {
+        return false
+    }
+    let ut: u64 = rahmen.untertyp(f)
+    if ut != rahmen.UT_BEACON && ut != rahmen.UT_PROBE_ANTWORT {
+        return false
+    }
+    let kopf: usize = kl as usize
+    // Zeitstempel, Intervall, Faehigkeiten.
+    if n < kopf + 12 {
+        return false
+    }
+    // Address 3 ist bei einem Beacon die BSSID.
+    let a3: u64 = rahmen.adr3(p, n)
+    if a3 == 0 {
+        return false
+    }
+    var i: usize = 0
+    while i < 6 {
+        (*nz).bssid[i] = ld8(a3, i)
+        i = i + 1
+    }
+    (*nz).intervall = le16(p, kopf + 8)
+    (*nz).faehigkeiten = le16(p, kopf + 10)
+    // Faehigkeiten-Bit 4 ist "Privacy": irgendeine Verschluesselung.
+    // Ohne RSN- und ohne WPA-Element bedeutet das WEP.
+    let privacy: bool = ((*nz).faehigkeiten & 16) != 0
+
+    var it: rahmen.IeIter = rahmen.ie_beginn(p, n, kopf + 12)
+    var ht_kanal: u64 = 0
+    while rahmen.ie_weiter(&it) {
+        if it.id == rahmen.IE_SSID {
+            if it.laenge > SSID_MAX {
+                return false // laenger als die Norm erlaubt
+            }
+            (*nz).ssid_len = it.laenge
+            var alles_null: bool = true
+            i = 0
+            while i < it.laenge {
+                let c: u8 = ld8(it.daten, i)
+                (*nz).ssid[i] = c
+                if c != 0 as u8 {
+                    alles_null = false
+                }
+                i = i + 1
+            }
+            (*nz).ssid_verborgen = it.laenge == 0 || alles_null
+        }
+        if it.id == rahmen.IE_DS && it.laenge >= 1 {
+            (*nz).kanal = ld8(it.daten, 0) as u64
+        }
+        if it.id == rahmen.IE_HT_BETRIEB && it.laenge >= 1 {
+            ht_kanal = ld8(it.daten, 0) as u64
+        }
+        if it.id == rahmen.IE_RSN {
+            if !rsn_zerlege(nz, it.daten, it.laenge) {
+                return false
+            }
+        }
+        if it.id == rahmen.IE_HERSTELLER && it.laenge >= 4 {
+            // 00-50-F2, Typ 1: das alte WPA-Element.
+            if (ld8(it.daten, 0) as u64) == 0
+                && (ld8(it.daten, 1) as u64) == 0x50
+                && (ld8(it.daten, 2) as u64) == 0xF2
+                && (ld8(it.daten, 3) as u64) == 1 {
+                if !wpa_zerlege(nz, it.daten + 4, it.laenge - 4) {
+                    return false
+                }
+            }
+        }
+    }
+    // Ein abgeschnittenes letztes Element macht den Beacon ungueltig.
+    // Anders als beim reinen Wandern ist hier nicht klar, ob das
+    // fehlende Element das RSN-Element war -- und ein Netz, dessen
+    // Sicherheitsart moeglicherweise weggeschnitten wurde, als "offen"
+    // zu melden, waere genau der Fehler, der eine Verbindung
+    // unverschluesselt macht.
+    if it.kaputt {
+        return false
+    }
+    // Kanal ersatzweise aus dem HT-Betriebselement.
+    if (*nz).kanal == 0 {
+        (*nz).kanal = ht_kanal
+    }
+    // Das Band steht NICHT im Rahmen. Was hier steht, ist ein Schluss
+    // aus der Kanalnummer und gilt nur, solange niemand im 6-GHz-Band
+    // funkt -- dort gibt es die Kanaele 1 bis 13 noch einmal. Wer es
+    // genau wissen will, setzt es mit `setze_band` aus der Frequenz,
+    // auf der der Rahmen wirklich empfangen wurde.
+    if (*nz).band == 0 {
+        if (*nz).kanal >= 1 && (*nz).kanal <= 14 {
+            (*nz).band = 1
+        } else {
+            if (*nz).kanal > 14 {
+                (*nz).band = 2
+            }
+        }
+    }
+    // Die Einstufung, wenn kein RSN- und kein WPA-Element da war.
+    if !(*nz).hat_rsn && !(*nz).hat_wpa {
+        if privacy {
+            (*nz).sicherheit = SICH_WEP
+        } else {
+            (*nz).sicherheit = SICH_OFFEN
+        }
+    }
+    return true
+}
