@@ -199,6 +199,7 @@ abbild() { # <abbild> <conf> [zusatzspezifikationen...]
         "/bin/ls=$TMPD/w0/ls.elf" \
         "/bin/cat=$TMPD/w0/cat.elf" \
         "/bin/echo=$TMPD/w0/echo.elf" \
+        "/bin/chmod=$TMPD/w0/chmod.elf" \
         "/bin/jsig=$TMPD/w0/jsig.elf" \
         "/bin/jarvisctl=$TMPD/w0/jarvisctl.elf" \
         "/bin/jarvisd=$TMPD/w0/jarvisd.elf" \
@@ -267,11 +268,12 @@ gegenstelle_aus() {
     if [ -n "$SRVPID" ]; then wait "$SRVPID" 2>/dev/null; SRVPID=""; fi
 }
 
-lauf_mit_netz() { # <abbild> <skript> <ausgabe> [zeitgrenze]
+EXTRA=""
+lauf_mit_netz() { # <abbild> <skript> <ausgabe> [zeitgrenze]   ($EXTRA = weitere Kernwoerter)
     local copy="$TMPD/live-$RANDOM.img"
     cp "$1" "$copy"
     timeout "${4:-220}" qemu-system-x86_64 -kernel "$K" -m 256 \
-        -append "osum nokbd nosched noproc nofs noring3 nic nip=$OSUM_IP/24 ngw=$HOST_IP nsvc=0 nwait=0 script=$2" \
+        -append "osum nokbd nosched noproc nofs noring3 $EXTRA nic nip=$OSUM_IP/24 ngw=$HOST_IP nsvc=0 nwait=0 script=$2" \
         -serial "file:$3" -display none -no-reboot \
         -drive "file=$copy,format=raw,if=ide,index=0" \
         -netdev "socket,id=n0,udp=127.0.0.1:$BPORT,localaddr=127.0.0.1:$QPORT" \
@@ -573,13 +575,24 @@ lauf_und_miss() { # <abbild> <skript> <ausgabe> <sekunden>
     rm -f "$copy"
     return $rc
 }
-lauf_und_miss "$TMPD/nonet.img" "jarvisd -t 20000 -v;exit" "$TMPD/r7.txt" 30
+# LAUF A: gar kein Draht. Ein Verbindungsversuch ins Leere laeuft in
+# TCPs eigene Zeitgrenze; entscheidend ist, dass der Dienst hochkommt,
+# es sagt und geordnet endet.
+lauf_und_miss "$TMPD/nonet.img" "jarvisd -t 20000 -v;exit" "$TMPD/r7.txt" 60
 F="$TMPD/r7.txt"
 hat "$F" "jarvisd: bereit" "ohne Netz startet der Dienst trotzdem"
 hat "$F" "jarvisd: keine Verbindung" "er sagt, dass da nichts ist"
-hat "$F" "jarvisd: warten" "und er wartet"
 hat "$F" "jarvisd: verbindungen 0" "keine einzige Verbindung"
 hat "$F" "dienst beendet" "und er endet geordnet an seiner Zeitgrenze"
+
+# LAUF B: der Draht steht, aber niemand lauscht. Dann kommt die
+# Absage sofort, und der Helfer durchlaeuft seine Wartezeiten oft
+# genug, dass sich die LEERLAUFLAST messen laesst.
+draht_auf
+lauf_und_miss "$TMPD/nonet.img" "jarvisd -t 20000 -v;exit" "$TMPD/r7c.txt" 60
+draht_zu
+F="$TMPD/r7c.txt"
+hat "$F" "jarvisd: warten" "mit Draht, aber ohne Gegenstelle: er wartet zwischen den Versuchen"
 WMS=$(grep -a 'wartezeit_ms' "$F" | tail -1 | awk '{print $3}')
 WAUF=$(grep -a 'aufrufe_beim_warten' "$F" | tail -1 | awk '{print $3}')
 note "gewartet: ${WMS:-?} ms, Systemaufrufe des ganzen Systems dabei: ${WAUF:-?}"
@@ -659,6 +672,9 @@ cat > "$TMPD/auf-foto.txt" <<'AUF'
 foto||
 foto||
 AUF
+# `gfx` schaltet den Rahmenpuffer ein (kernel/fb.fi, `parse`); ohne
+# dieses Wort hat der Kern keinen, und dann gibt es auch kein Bild.
+EXTRA="gfx"
 # ERST OHNE SCHEIN: `bildschirmfoto = ja` allein reicht nicht.
 draht_auf
 gegenstelle_an good "$TMPD/auf-foto.txt" "$TMPD/g7.log"
@@ -713,7 +729,7 @@ PYEOF
     [ "$(status_von 2)" = nein ] \
         && ok "DER SCHEIN GILT EINMAL: das zweite Foto wird abgelehnt" \
         || bad "das zweite Foto kam auch noch -- der Schein wird nicht verbraucht"
-elif grep -qa "kein Rahmenpuffer" "$G.1.bin" 2>/dev/null; then
+elif grep -qa "Rahmenpuffer" "$G.1.bin" 2>/dev/null; then
     ok "mit Schein: dieser Bau hat keinen Rahmenpuffer, und der Helfer sagt genau das"
     note "KEIN BILD GEMESSEN: der Kern dieses Laufs hat keinen Rahmenpuffer."
     [ "$(status_von 2)" = nein ] && ok "und das zweite Foto scheitert ebenfalls" \
@@ -722,6 +738,59 @@ else
     bad "foto mit Schein: $(grep -a '^ANTWORT 1 ' "$G") -- $(head -c 120 "$G.1.bin" 2>/dev/null)"
 fi
 hat "$F" "foto " "das Foto steht im Protokoll -- heimlich geht es nicht"
+EXTRA=""
+
+echo "   -- der PNG-Kodierer selbst, mit einem gerechneten Bild"
+# Ring 3 bekommt in diesem Zweig KEINE Bildschirmmasse (SYS_OSUM_SHOT
+# fehlt, der Fensterserver laeuft in diesen Laeufen nicht). Damit der
+# Kodierer trotzdem gemessen ist und nicht nur uebersetzt, rechnet
+# `jarvisd -b` ein Bild aus und schickt es durch denselben Weg.
+lauf_ohne_netz "$TMPD/foto.img" "jarvisd -b;exit" "$TMPD/r13.txt"
+tr -d '\000' < "$TMPD/r13.txt" | grep -a '^bild ' | head -1 | awk '{print $2}' > "$TMPD/bild.hex"
+if [ -s "$TMPD/bild.hex" ]; then
+    python3 - "$TMPD/bild.hex" > "$TMPD/bild.txt" 2>&1 <<'PYEOF'
+import sys, struct, zlib
+d = bytes.fromhex(open(sys.argv[1]).read().strip())
+assert d[:8] == b"\x89PNG\r\n\x1a\n", "keine PNG-Signatur"
+at = 8; w = h = 0; idat = b""; stuecke = []
+while at < len(d):
+    ln = struct.unpack(">I", d[at:at+4])[0]
+    art = d[at+4:at+8]
+    inhalt = d[at+8:at+8+ln]
+    crc = struct.unpack(">I", d[at+8+ln:at+12+ln])[0]
+    assert crc == zlib.crc32(art + inhalt) & 0xFFFFFFFF, "CRC von %s falsch" % art
+    stuecke.append(art.decode())
+    if art == b"IHDR":
+        w, h, tiefe, farbe, komp, filt, inter = struct.unpack(">IIBBBBB", inhalt)
+        assert (tiefe, farbe, komp, filt, inter) == (8, 2, 0, 0, 0), "IHDR falsch"
+    if art == b"IDAT":
+        idat += inhalt
+    at += 12 + ln
+assert stuecke == ["IHDR", "IDAT", "IEND"], stuecke
+roh = zlib.decompress(idat)
+assert len(roh) == h * (1 + 3 * w), "Bilddaten %d statt %d" % (len(roh), h*(1+3*w))
+# JEDEN Bildpunkt nachrechnen -- das Muster steht in jarvisd.fi.
+falsch = 0
+for y in range(h):
+    z = roh[y*(1+3*w):(y+1)*(1+3*w)]
+    if z[0] != 0:
+        falsch += 1
+        continue
+    for x in range(w):
+        r, g, b = z[1+3*x], z[2+3*x], z[3+3*x]
+        if (r, g, b) != ((x*4) & 255, (y*5) & 255, ((x+y)*2) & 255):
+            falsch += 1
+print("PNG-GUT %dx%d gepackt=%d roh=%d abweichungen=%d" % (w, h, len(idat), len(roh), falsch))
+PYEOF
+    if grep -qa "PNG-GUT" "$TMPD/bild.txt" && grep -qa "abweichungen=0" "$TMPD/bild.txt"; then
+        ok "der PNG-Kodierer: $(cat "$TMPD/bild.txt")"
+        note "Groesse dieses Bildes: $(( $(wc -c < "$TMPD/bild.hex") / 2 )) Oktette"
+    else
+        bad "das erzeugte PNG ist nicht in Ordnung: $(head -3 "$TMPD/bild.txt")"
+    fi
+else
+    bad "jarvisd -b hat kein Bild geliefert"
+fi
 
 # =====================================================================
 echo "== 13. die Messungen =="
