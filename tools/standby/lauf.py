@@ -99,6 +99,8 @@ def haupt():
                    help="Sekunden Geduld nach dem Wecken")
     p.add_argument("--uhr-vor", dest="uhr_vor", type=float, default=0.0,
                    help="die Gastuhr um so viele Sekunden vorstellen")
+    p.add_argument("--runden", type=int, default=1,
+                   help="Reihenlauf: so oft von aussen wecken")
     p.add_argument("--speicher", default="128")
     p.add_argument("--platte", default="")
     p.add_argument("--marke", default="standby: fertig",
@@ -119,8 +121,10 @@ def haupt():
     if a.uhr_vor:
         befehl += ["-rtc", "base=" + zeitstempel(a.uhr_vor)]
     if a.platte:
-        befehl += ["-drive", "file=%s,format=raw,if=none,id=d0" % a.platte,
-                   "-device", "virtio-blk-pci,drive=d0"]
+        # IDE, weil das der Anschluss ist, den `osum` von sich aus
+        # findet (dieselbe Zeile wie in tools/ofs3/run.sh).
+        befehl += ["-drive",
+                   "file=%s,format=raw,if=ide,index=0" % a.platte]
 
     q = subprocess.Popen(befehl, stdout=subprocess.DEVNULL,
                          stderr=subprocess.DEVNULL)
@@ -138,7 +142,35 @@ def haupt():
                 t_ein = time.time()
                 break
             time.sleep(0.05)
-        if geschlafen and not a.nicht_wecken:
+        if a.runden > 1:
+            # REIHENLAUF: der Kern schlaeft `runden` mal hintereinander
+            # (`s3loop`), und hier wird jedes Mal von aussen geweckt.
+            # Gezaehlt wird, wie oft die Maschine wirklich wieder
+            # angelaufen ist -- das ist die Zahl, die im Bericht steht.
+            n_ein = 0
+            n_auf = 0
+            ende = time.time() + a.warten
+            while time.time() < ende:
+                z = m.status()
+                if z == "suspended":
+                    n_ein += 1
+                    time.sleep(a.wecken_nach)
+                    m.befehl("system_wakeup")
+                    t0 = time.time()
+                    while time.time() < t0 + 20:
+                        if m.status() == "running":
+                            n_auf += 1
+                            break
+                        time.sleep(0.02)
+                else:
+                    time.sleep(0.02)
+                if os.path.exists(ser):
+                    if b"standby: reihe" in open(ser, "rb").read():
+                        break
+            geschlafen = n_ein > 0
+            geweckt = n_auf > 0
+            print("== reihe: eingeschlafen=%d geweckt=%d" % (n_ein, n_auf))
+        elif geschlafen and not a.nicht_wecken:
             time.sleep(a.wecken_nach)
             m.befehl("system_wakeup")
             t0 = time.time()

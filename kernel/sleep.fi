@@ -97,6 +97,7 @@ import power
 import time
 import pci
 import blk
+import fs
 import mem
 import cpu
 import arch.x86_64.idt
@@ -1106,6 +1107,127 @@ fn bericht(state: u64) {
 }
 
 // ==================================================================
+// DIE PROBE, DIE WIRKLICH ROT WERDEN KANN: WAS VOR DEM SCHLAF DA WAR,
+// MUSS DANACH NOCH DA SEIN
+// ==================================================================
+//
+// "Kein Absturz" ist kein Ergebnis. Ein Schlaf ist erst dann gelungen,
+// wenn das, was vor ihm lief, danach WEITERLAEUFT und das, was vor ihm
+// offen war, danach noch dieselben Oktette hat. `s3keep` prueft beides:
+//
+//   1. EINE OFFENE DATEI. Vor dem Schlaf wird /standby.txt angelegt und
+//      mit 512 Oktetten eines bekannten Musters beschrieben; die
+//      Inodennummer wird gemerkt -- das ist hier der offene Verweis.
+//      Nach dem Schlaf wird ueber DIESELBE Nummer gelesen und Oktett
+//      fuer Oktett verglichen.
+//
+//      DASS DAS ETWAS BEWEIST, HAENGT AN EINER ADRESSE: die RAM-Platte
+//      liegt in Rahmen, die `mem.frame_run` OBERHALB des Kernabbilds
+//      vergeben hat. Die Schattenkopie deckt nur
+//      [__save_begin, kernel_end) ab und fasst diese Rahmen NICHT an.
+//      Was hier ueberlebt, hat also wirklich den Schlaf ueberlebt und
+//      ist nicht zurueckkopiert worden.
+//
+//   2. EIN LAUFENDER ZAEHLER. Der globale Marken-zaehler wird vor dem
+//      Schlaf gemerkt. Nach dem Schlaf wird gewartet, bis er sich
+//      bewegt -- bewegt er sich nicht, laeuft der Zeitgeber nicht mehr,
+//      und dann ist die Maschine zwar wach, aber nichts arbeitet.
+const K_INO: u64 = 448 // die Inode der Probedatei
+const K_TICKS: u64 = 456 // Marken vor dem Schlaf
+const K_SUM: u64 = 464 // Quersumme des Musters vor dem Schlaf
+const K_LEN: u64 = 512 // so viele Oktette
+
+fn muster(i: u64) -> u8 {
+    return ((i * 7 + 13) % 251) as u8
+}
+
+fn keep_vor(state: u64) {
+    var p_keep: [u8; 13] = "/standby.txt\0"
+    var n_v: [u8; 24] = "standby: keep vor ino=\0\0"
+    var n_w: [u8; 9] = " wrote=\0\0"
+    var n_t: [u8; 9] = " ticks=\0\0"
+    let puffer: u64 = state + kstate.BLOCK_OFF + 4096
+    var i: u64 = 0
+    var summe: u64 = 0
+    while i < K_LEN {
+        kstate.set8(puffer + i, muster(i))
+        summe = summe +% (muster(i) as u64)
+        i = i + 1
+    }
+    let ino: u64 = fs.create_path(state, (&p_keep[0 as usize]) as u64,
+        fs.T_FILE)
+    var geschrieben: u64 = 0
+    if ino != 0 {
+        geschrieben = fs.write_at(state, ino, 0, puffer, K_LEN)
+    }
+    s(state, K_INO, ino)
+    s(state, K_SUM, summe)
+    s(state, K_TICKS, kstate.get(state, kstate.TICKS))
+    serial.puts((&n_v[0 as usize]) as u64)
+    serial.dec(ino)
+    serial.puts((&n_w[0 as usize]) as u64)
+    serial.dec(geschrieben)
+    serial.puts((&n_t[0 as usize]) as u64)
+    serial.dec(g(state, K_TICKS))
+    serial.nl()
+}
+
+fn keep_nach(state: u64) {
+    var n_n: [u8; 24] = "standby: keep nach ino=\0"
+    var n_r: [u8; 8] = " read=\0\0"
+    var n_gl: [u8; 9] = " gleich=\0"
+    var n_l: [u8; 9] = " laeuft=\0"
+    var n_t: [u8; 9] = " ticks=\0\0"
+    let ino: u64 = g(state, K_INO)
+    let puffer: u64 = state + kstate.BLOCK_OFF + 4096
+    var i: u64 = 0
+    while i < K_LEN {
+        kstate.set8(puffer + i, 0 as u8)
+        i = i + 1
+    }
+    var gelesen: u64 = 0
+    if ino != 0 {
+        gelesen = fs.read_at(state, ino, 0, puffer, K_LEN)
+    }
+    var gleich: u64 = 1
+    if gelesen != K_LEN {
+        gleich = 0
+    }
+    i = 0
+    while i < K_LEN {
+        if kstate.get8(puffer + i) != (muster(i) as u64) {
+            gleich = 0
+        }
+        i = i + 1
+    }
+    // Laeuft wieder etwas? Der Markenzaehler muss sich bewegen. Die
+    // Schranke ist grosszuegig und bricht ab, sobald er sich geruehrt
+    // hat -- sie misst nicht die Dauer, sie beantwortet eine Ja-Nein-
+    // Frage.
+    let vorher: u64 = g(state, K_TICKS)
+    var laeuft: u64 = 0
+    var w: u64 = 0
+    while w < 20000000 {
+        if kstate.get(state, kstate.TICKS) > vorher {
+            laeuft = 1
+            w = 20000000
+        }
+        w = w + 1
+    }
+    serial.puts((&n_n[0 as usize]) as u64)
+    serial.dec(ino)
+    serial.puts((&n_r[0 as usize]) as u64)
+    serial.dec(gelesen)
+    serial.puts((&n_gl[0 as usize]) as u64)
+    serial.dec(gleich)
+    serial.puts((&n_l[0 as usize]) as u64)
+    serial.dec(laeuft)
+    serial.puts((&n_t[0 as usize]) as u64)
+    serial.dec(kstate.get(state, kstate.TICKS))
+    serial.nl()
+}
+
+// ==================================================================
 // DER WEG HERAUS -- UND WARUM ER EINE EIGENE FUNKTION IST
 // ==================================================================
 //
@@ -1544,6 +1666,13 @@ const H_SUM: u64 = 48 // Pruefsumme ueber alles danach
 const H_WALL: u64 = 56 // Wandsekunde des Einschlafens
 const H_MONO: u64 = 64 // monotone Zeit
 const H_CR3: u64 = 72
+// RUNDE STANDBY, Nachtrag: EINE SUMME UEBER DEN RUMPF. Der Kopf war bis
+// hierher durch `H_SUM` gedeckt, der RUMPF durch gar nichts -- ein
+// gekipptes Oktett in einer Datenseite kam durch alle vier Pruefungen
+// und waere eingespielt worden. Genau das ist der Angriff, gegen den
+// diese Runde antreten soll. `H_BODYSUM` ist die Summe ueber alle
+// geschriebenen Rumpfbloecke und wird beim Start nachgerechnet.
+const H_BODYSUM: u64 = 80
 
 // DIE KERNVERSION ist der Abdruck des Abbilds selbst: die Adresse, an
 // der der Kernel aufhoert, plus die Zahl seiner Unterbrechungsvektoren.
@@ -1646,6 +1775,7 @@ fn s4_schreiben(state: u64) -> u64 {
     // Block 1 und danach.
     var geschrieben: u64 = 0
     var oktette: u64 = 0
+    var rumpfsumme: u64 = 0
     var b: u64 = 0
     while b < kstate.KDATA_SIZE / 512 {
         let quelle: u64 = state +% (b *% 512)
@@ -1662,11 +1792,14 @@ fn s4_schreiben(state: u64) -> u64 {
             if blk.write(state, S4_LBA +% 1 +% geschrieben, quelle) {
                 geschrieben = geschrieben +% 1
                 oktette = oktette +% 512
+                let mix: u64 = geschrieben *% 0x9E3779B97F4A7C15
+                rumpfsumme = (rumpfsumme ^ summe(quelle, 512)) +% mix
             }
         }
         b = b +% 1
     }
     __mmio_write64((puffer + H_BYTES) as *mut u64, oktette)
+    __mmio_write64((puffer + H_BODYSUM) as *mut u64, rumpfsumme)
     // Die Pruefsumme ueber ALLES hinter dem Summenfeld -- so faellt
     // jede Verfaelschung des Kopfes auf.
     __mmio_write64((puffer + H_SUM) as *mut u64, 0)
@@ -1747,6 +1880,35 @@ fn s4_beim_start(state: u64) -> u64 {
             warum = 5
         }
     }
+    // DER RUMPF. Die vier Pruefungen oben decken den Kopf; ein gekipptes
+    // Oktett in einer Datenseite kam durch sie alle hindurch. Also wird
+    // hier jeder geschriebene Block noch einmal gelesen und
+    // nachgerechnet. Das kostet einen zweiten Durchlauf ueber das
+    // Abbild -- gemessen sind das bei 118 Bloecken wenige
+    // Millisekunden, und der Preis eines eingespielten kaputten
+    // Abbilds ist eine Maschine, die niemand mehr versteht.
+    if warum == 1 {
+        let n_bl: u64 = __mmio_read64((puffer + H_BYTES) as *mut u64) / 512
+        let soll_rumpf: u64 = __mmio_read64((puffer + H_BODYSUM) as *mut u64)
+        let block: u64 = mem.frame_alloc(state)
+        if block == 0 {
+            warum = 8
+        } else {
+            var ist: u64 = 0
+            var bi: u64 = 0
+            while bi < n_bl {
+                if blk.read(state, S4_LBA +% 1 +% bi, block) {
+                    let mix: u64 = (bi +% 1) *% 0x9E3779B97F4A7C15
+                    ist = (ist ^ summe(block, 512)) +% mix
+                }
+                bi = bi +% 1
+            }
+            if ist != soll_rumpf {
+                warum = 9
+            }
+            mem.frame_free(state, block)
+        }
+    }
     if warum == 1 {
         if __mmio_read64((puffer + H_HWSIG) as *mut u64) != hwsignatur(state) {
             warum = 6
@@ -1801,7 +1963,13 @@ fn stage(state: u64) {
         deckel(state, false)
     }
     if kstate.mode_on(state, kstate.M_S3GO) {
+        if kstate.mode_on(state, kstate.M_S3KEEP) {
+            keep_vor(state)
+        }
         schlafen(state)
+        if kstate.mode_on(state, kstate.M_S3KEEP) {
+            keep_nach(state)
+        }
     }
     if kstate.mode_on(state, kstate.M_S3LOOP) {
         var i: u64 = 0
