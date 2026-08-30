@@ -256,7 +256,15 @@ Strecke nicht staerker ab, ein Emulator unter Last schon.
 | `tools/osum/run.sh` | **130 / 0** | — |
 | `tools/pci/run.sh` | **98 / 0** | — |
 | `tools/posix/run.sh` | 133 / 1 → nach der Berichtigung 132 / 2 | **132 / 2** |
-| `tools/userland/run.sh` | 89 / 2 | (laeuft) |
+| `tools/userland/run.sh` | 90 / 1 | **91 / 0** |
+
+Der EINE rote Punkt in `userland` ist `firnc1/t4: QEMU exit code 124`
+-- 124 ist der Beendigungscode von `timeout`, also ein ueberschrittenes
+Zeitlimit und kein anderes Verhalten. Er trifft den Fall, in dem der
+SELBSTGEBAUTE Uebersetzer (firnc1) den Kern baut; keine Zeile dieser
+Runde ist daran beteiligt, und der Wirt hatte waehrend der Messung
+mehrere Gastmaschinen gleichzeitig. Auf der Grundlinie, allein gemessen,
+laeuft derselbe Fall durch.
 
 Der eine echte Fund der Regression: `tools/posix/run.sh` rechnet nach,
 dass Kern und libc DIESELBE Aufrufnummerntafel haben. Die fuenf neuen
