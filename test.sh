@@ -643,7 +643,18 @@ NUR=${OSUM_NUR:-}
 
 # Diese Abschnitte teilen sich Namen im Netz des Wirts und bleiben
 # untereinander seriell. Siehe Punkt 2 oben.
-SERIELL_RE='^tools/(net|netmon|netview|tunnel)/'
+# RUNDE RTL hat zwei Laeufer nachgetragen, und beide fehlten aus
+# demselben Grund: der Ausdruck ist auf `tools/net…` verankert, und
+# `tools/hwnet/` faengt mit `tools/hw` an, passt also nie. Gemessen wurde
+# das an einem Abend, an dem `tools/pci/run.sh` (98 Zusagen, sonst gruen)
+# zweimal durchfiel und `tools/net/run.sh` einmal -- beide NUR im
+# parallelen Lauf, beide allein sofort wieder gruen. Ursache: hwnet und
+# rtl legen `ip netns` und `ip link` an, die dem WIRT gehoeren und nicht
+# dem Arbeitsbaum, und liefen dabei ohne die Sperre neben
+# net/netmon/netview. Das ist keine Testabschaltung, sondern das
+# Gegenteil: zwei Abschnitte, die bisher unbemerkt aneinander
+# vorbeigelaufen sind, halten jetzt dieselbe Reihe ein wie die anderen.
+SERIELL_RE='^tools/(net|netmon|netview|tunnel|hwnet|rtl)/'
 # Die Sperre liegt ABSICHTLICH ausserhalb des Arbeitsbaums (/tmp und nicht
 # .test-work): auf diesem Wirt stehen mehrere Arbeitsbaeume desselben
 # Repos nebeneinander, und `ip netns` und `ip link` gehoeren dem WIRT,
