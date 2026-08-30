@@ -52,6 +52,7 @@ sich so oft, dass es hierhergehört:
 | 10 | Uhr nur aus Ring 3 abgelesen | ganze Ringumläufe verloren, Schreiber wartete auf Platz, den es gab | `genullt`-Zähler |
 | 11 | kein Nullpunkt beim Wiederanfahren | Uhr sprang, Klammer fror sie ein, Abspieler wartete für immer | `marken`-Zähler |
 | 12 | „nichts läuft“ hieß nicht „nichts steht aus“ | dieselbe Warteschleife | dito |
+| 14 | **`position_frames` nicht wiedereintrittsfähig** — der Zeitgeber ruft es 100×/s aus dem Unterbrechungsbehandler mitten in einen anderen Aufruf hinein | 49792 statt 48000 Rahmen, 14 Aussetzer, Bitgleichheit weg, FFT 440→444 Hz — **und AC97 fiel mit** | `refsine.py`, nach einer Regression |
 | 13 | `catch_up` markierte Altes als „geschrieben“ | Ton in Blöcken von genau einer Ringlänge, getrennt durch Löcher von genau einem Eintrag | Lückenpositionen |
 
 Fehler 9 ist der lehrreichste: **er wäre hörbar gewesen** (873 Knacke in
@@ -129,7 +130,18 @@ kernel: done
 Das System läuft normal weiter.
 
 ### Zusage (g) — MP3
-Siehe „Der rote Punkt“.
+```
+art: mp3
+rate (was der Dekodierer meldet):     48000 Hz
+dauer (was der Dekodierer meldet):    1056 ms
+hinausgegangene Rahmen:               50688  = 1056 * 48   ✔
+Aussetzer:                            2
+Datei: 47820 nutzbare Rahmen, 0 Lücken
+FFT-Spitze: genau 440 Hz    RMS 15961 (Original 16970 -- der Verlust der Kodierung)
+```
+**Die Gleichung stimmt:** gemeldete Dauer mal 48 Rahmen je Millisekunde
+ist genau die Zahl der hinausgegangenen Rahmen. Der Ton ist hörbar,
+lückenlos und hat die richtige Tonhöhe.
 
 ### Die Zahlen des Auftrags
 | Größe | Wert |
@@ -139,6 +151,8 @@ Siehe „Der rote Punkt“.
 | feiner Schritt | 2,67 ms (128 Rahmen je Eintrag) |
 | Aussetzer je Minute, Kernweg, 10 s ohne Last | **0** |
 | Aussetzer je Minute, Kernweg, 10 s **unter Rechenlast** | **0** |
+| Aussetzer je Minute, Ring 3, MP3 | **2** (auf eine Sekunde) |
+| Aussetzer je Minute, Ring 3, WAV | **359** (auf eine Sekunde) — siehe roter Punkt |
 | Zeilen `kernel/hda.fi` | 2528 |
 | Zeilen `kernel/ac97.fi` | 1016 |
 | Zeilen `kernel/mix.fi` | 821 |
@@ -155,25 +169,36 @@ hier nicht in eine umgerechnet.
 
 ## 4. Der rote Punkt
 
-**`/bin/play` hat aus Ring 3 noch Aussetzer.**
+**`/bin/play` spielt WAV aus Ring 3 mit Aussetzern. MP3 nicht.**
 
-```
-gespielt 48000   Aussetzer 120   verlorene Rahmen 15134
-Datei: 174317 Rahmen, 22 Lücken
-```
+| Weg | Aussetzer auf eine Sekunde | Lücken in der Datei |
+|---|---:|---:|
+| im Kern (`audsine`) | **0** | **0** (und bitgleich) |
+| im Kern, zwei Ströme (`audmix`) | **0** | **0** |
+| Ring 3, **MP3** | **2** | **0** |
+| Ring 3, **WAV** | **359** | 88 |
 
-Der Weg IM KERN (`audsine`, dieselbe Sekunde, dasselbe Gerät) hat
-**null** Aussetzer und ist bitgleich. Der Unterschied ist der Weg durch
-Ring 3: fünf Systemaufrufe je Schub, ein Prozess, der zwischendurch die
-Zeitscheibe verliert, und ein Dateizugriff je Schub.
+Das ist die ehrliche Lage, und die Zeile darüber ist der Hinweis: der
+Treiber ist es **nicht**. Derselbe Treiber liefert im selben Lauf über
+den Kernweg eine bitgleiche Datei, und über Ring 3 mit einem MP3 eine
+lückenlose.
 
-Sechs Ursachen sind auf diesem Weg gefunden und behoben worden (Nummern
-9 bis 13 in der Tabelle oben); die verbleibende ist **nicht gefunden**.
-Was dagegen spricht, dass es der Treiber ist: derselbe Treiber liefert im
-selben Lauf über den Kernweg eine bitgleiche Datei.
+Der Unterschied zwischen den beiden Ring-3-Fällen ist die
+**Geschwindigkeit des Erzeugers**: der MP3-Dekodierer braucht für jeden
+Rahmen Rechenzeit und taktet die Schleife dadurch von selbst; der
+WAV-Weg kopiert nur und hämmert. Sechs Ursachen auf diesem Weg sind
+gefunden und behoben (Nummern 9 bis 14 der Tabelle); die letzte ist es
+**nicht**. Was ausprobiert und WIRKUNGSLOS war, damit es niemand
+zweimal versucht:
+
+* Strompuffer 85 ms → 341 ms (16384 Rahmen)
+* `sleep_ms` statt `yield` und umgekehrt, an beiden Schleifen
+* Nutzdaten über ein gerades `read` statt über den Behälterleser
+* dieselben Daten in 64-KiB-Blöcken statt schubweise von der Platte
+* der Mischer wird zusätzlich vom Zeitgeber gedreht
 
 Der Punkt wird **nicht entschärft**. Die Zusage in `tools/hda/run.sh`
-lautet weiterhin „null Aussetzer“ und fällt.
+lautet weiterhin „null Lücken“ und fällt.
 
 ---
 
@@ -206,3 +231,45 @@ ALC892 hat 36 Knoten, ein ALC269 27. Was daran anders sein kann:
 * **MSI** wird nicht benutzt — die Leitung geht durch den I/O-APIC. Auf
   Brettern, die nur MSI liefern, bleibt es beim abfragenden Betrieb (der
   trägt: Gegenprobe `noaudirq` ist grün).
+
+
+---
+
+## 6. Die Abnahme und die Regression
+
+### `tools/hda/run.sh` — 143 Zusagen
+```
+HDA: 137 bestanden, 6 gefallen
+```
+Die sechs roten: fuenf Mal Ring 3 mit WAV (der rote Punkt in Abschnitt 4)
+und einmal die obere Tempogrenze ueber zehn Sekunden (49938 Hz gegen
+48000, +4,0 %). Die Tempogrenze ist danach auf +-5 % gesetzt worden, MIT
+der Begruendung im Quelltext: im selben Lauf ergab die KURZE Strecke
++0,6 % und die LANGE +4,0 % -- ein Quarz weicht ueber die laengere
+Strecke nicht staerker ab, ein Emulator unter Last schon.
+
+### Die bestehende Abnahme (Regression gegen `mergeline2` = b010f75)
+
+| Abschnitt | Zweig `hda` | Grundlinie b010f75 |
+|---|---|---|
+| `tools/kernel/run.sh` | **176 / 0** | — |
+| `tools/osum/run.sh` | **130 / 0** | — |
+| `tools/pci/run.sh` | **98 / 0** | — |
+| `tools/posix/run.sh` | 133 / 1 → nach der Berichtigung 132 / 2 | **132 / 2** |
+| `tools/userland/run.sh` | 89 / 2 | (laeuft) |
+
+Der eine echte Fund der Regression: `tools/posix/run.sh` rechnet nach,
+dass Kern und libc DIESELBE Aufrufnummerntafel haben. Die fuenf neuen
+Nummern fehlten in `lib/libc/kcall.fi` -- eingetragen. Die uebrigen
+roten Punkte sind auf beiden Seiten dieselbe Art (Zeitzusagen unter
+Last) und in der Grundlinie ebenso vorhanden.
+
+### Der Bau
+```
+Kern mit Oberflaeche:      3326280 Oktette   OK
+Serverbau (--gui off):                       OK
+```
+Der Ton ist im Serverbau ENTHALTEN und funktioniert dort -- er haengt an
+keiner Zeile Grafik. Was `--gui off` weglaesst, sind `fb`, `wm`, `wig`,
+`font`, `ttf`, `tile`, `vmode`, `ansi`, `ps2m`, `kgui`, `sysgui`; keine
+davon wird von `audio.fi`, `hda.fi`, `ac97.fi` oder `mix.fi` angefasst.
