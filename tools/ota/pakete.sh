@@ -103,7 +103,47 @@ cp "$OUT/quelle1/hallo-1.opk.sig" "$OUT/netzbadsig/hallo-2.opk.sig"
 python3 tools/ota/verzeichnis.py "$OUT/netzbadsig" --fassung 2 \
     --schluessel "$OUT/geheim.key" || exit 1
 
-for d in netz1 netz2 netz3 netzfremd netzman netzbadsig; do
+# --- DAS UPDATE, DAS NICHT AUF DIE PLATTE PASST
+#
+# Ein Paket mit einem grossen, NICHT ZUSAMMENDRUECKBAREN Inhalt (Zufall
+# aus /dev/urandom). Damit hat der Fall (f) eine Groesse, die das Geraet
+# schon aus dem SIGNIERTEN Verzeichnis kennt -- und deshalb ablehnen
+# kann, BEVOR es ein einziges Oktett laedt.
+#
+# WARUM NICHT EINE ECHT VOLLGESCHRIEBENE PLATTE. Es wurde versucht: von
+# innen mit `cat`, siebenfach verkettet. Gemessen auf diesem Wirt bei
+# Last: 4,6 Megaoktett in ueber vier Minuten durch OFS mit Journal und
+# emulierte IDE. Fuenfzig Megaoktett so zu schreiben dauert laenger als
+# der ganze uebrige Lauf, und gemessen waere dasselbe: `ota` fragt den
+# Kern nach den freien Bloecken und vergleicht. Ob die fehlen, weil die
+# Platte voll ist oder weil das Update gross ist, ist fuer den Code
+# derselbe Zweig -- und die Meldung ist dieselbe.
+GROSS_MIB=${OTA_GROSS_MIB:-20}
+if [ ! -s "$OUT/gross.bin" ]; then
+    head -c $((GROSS_MIB * 1024 * 1024)) /dev/urandom > "$OUT/gross.bin"
+fi
+rm -rf "$OUT/netzvoll" "$OUT/grossbau"
+mkdir -p "$OUT/netzvoll" "$OUT/grossbau"
+cat > "$OUT/gross.rezept" <<EOF
+# Ein Paket, das absichtlich zu gross fuer die Platte des Pruefstands ist.
+name=gross
+fassung=1.0.0
+titel=Gross
+info=Ein Paket, das nicht auf die Platte passt -- fuer den Fall "kein Platz"
+keys=gross,test
+handle=konsole
+datei=nutzlast $OUT/gross.bin
+EOF
+python3 "$OPK" bauen "$OUT/gross.rezept" -o "$OUT/netzvoll/gross-1.opk" \
+    > "$OUT/gross.log" 2>&1 || { cat "$OUT/gross.log"; exit 1; }
+python3 "$OPK" quelle "$OUT/netzvoll" --schluessel "$OUT/geheim.key" \
+    >> "$OUT/gross.log" 2>&1 || { cat "$OUT/gross.log"; exit 1; }
+python3 tools/update/signpak.py "$OUT/geheim.key" "$OUT/netzvoll"/*.opk \
+    >> "$OUT/gross.log" 2>&1 || { cat "$OUT/gross.log"; exit 1; }
+python3 tools/ota/verzeichnis.py "$OUT/netzvoll" --fassung 2 \
+    --schluessel "$OUT/geheim.key" || exit 1
+
+for d in netz1 netz2 netz3 netzfremd netzman netzbadsig netzvoll; do
     echo "   $d  $(ls "$OUT/$d" | wc -l) Dateien, $(du -sb "$OUT/$d" | cut -f1) Oktette"
 done
 exit 0
