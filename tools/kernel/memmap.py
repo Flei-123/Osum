@@ -239,6 +239,19 @@ BEREICHE = [
     # Damit ist es ein Bereich in `kdata` wie jeder andere und steht
     # NICHT mehr unten in KEINE_KDATA.
     ("JRNL",       "kstate.fi", "JRNL_OFF",       "JRNL_MAX"),
+    # RUNDE HDA: der Ton, sechs Seiten am Ende der Karte
+    # (0x92000..0x98000).  Eine Seite Tonschicht und AC97, drei Seiten
+    # Intel HD-Audio (Skalare samt Positionspuffer, CORB/RIRB,
+    # Deskriptorliste samt Widget-Tafel), zwei Seiten Mischer.  Die
+    # DMA-Ringpuffer selbst stehen NICHT hier -- sie kommen aus dem
+    # Rahmenverwalter, weil 16 KiB je Strom in dieser Karte
+    # Verschwendung waeren und der Rahmenverwalter ohnehin
+    # seitenausgerichtet liefert.
+    ("AUD",        "kstate.fi", "AUD_OFF",        "AUD_MAX"),
+    ("HDA",        "kstate.fi", "HDA_OFF",        "HDA_MAX"),
+    ("HDARING",    "kstate.fi", "HDAR_OFF",       "HDAR_MAX"),
+    ("HDABDL",     "kstate.fi", "HDAB_OFF",       "HDAB_MAX"),
+    ("MIX",        "kstate.fi", "MIX_OFF",        "MIX_MAX"),
 ]
 
 # `_OFF`-Konstanten, die KEINE Bereiche in `kdata` sind -- Offsets
