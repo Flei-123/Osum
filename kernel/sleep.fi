@@ -97,6 +97,7 @@ import power
 import time
 import pci
 import blk
+import kutil
 import fs
 import mem
 import cpu
@@ -108,6 +109,7 @@ import arch.x86_64.apic
 export {
     parse, aufsetzen, bereit, stage, schlafen, bericht,
     quelle_setzen, quelle_erlaubt, wert, deckel, richtlinie_setzen,
+    tore_sagen, richtlinie_lesen, frist_faellig,
     s4_schreiben, s4_gefunden, s4_pruefung,
     Q_TASTE, Q_DECKEL, Q_USB, Q_RTC, Q_LAN, Q_ANZAHL,
     A_NICHTS, A_SCHIRM, A_S3, A_S4, A_AUS,
@@ -179,6 +181,8 @@ const S_SHADOW: u64 = 416 // wo die Schattenkopie liegt
 const S_SHLEN: u64 = 424 // wie gross sie ist
 const S_SHCOPY: u64 = 432 // wie oft sie geschrieben wurde
 const S_APICHZ: u64 = 440 // mit welcher Frequenz der APIC-Zeitgeber lief
+const S_ENSOLL: u64 = 472 // was in PM1x_EN geschrieben wurde
+const S_ENIST: u64 = 480 // was danach darin steht
 
 // -- die Aufweckquellen, 0x200..0x2FF: je Quelle zwei Woerter
 const Q_BASE: u64 = 0x200
@@ -418,9 +422,14 @@ fn parse(state: u64, cmd: u64) {
     var w_nds: [u8; 10] = "nodevsave\0"
     var w_nrs: [u8; 10] = "nortcsync\0"
     var w_nw: [u8; 7] = "nowake\0"
-    var w_nf: [u8; 8] = "nofsync\0"
+    // "ohnefsync" und NICHT "nofsync": `kmain.fi` sucht das Wort "nofs"
+    // mit derselben Teilwortsuche, und "nofsync" faengt damit an. Ein
+    // Lauf mit `nofsync` hatte deshalb GAR KEIN Dateisystem, und die
+    // Probe fiel aus einem Grund durch, den niemand gemeint hatte.
+    var w_nf: [u8; 10] = "ohnefsync\0"
     var w_wr: [u8; 8] = "wakertc\0"
     var w_ns: [u8; 11] = "noschatten\0"
+    var w_lc: [u8; 8] = "lidconf\0"
     if find(cmd, (&w_on[0 as usize]) as u64, 7) != 0 {
         kstate.mode_add(state, kstate.M_STANDBY)
     }
@@ -451,7 +460,7 @@ fn parse(state: u64, cmd: u64) {
     if find(cmd, (&w_nw[0 as usize]) as u64, 6) != 0 {
         kstate.mode_add(state, kstate.M_NOWAKE)
     }
-    if find(cmd, (&w_nf[0 as usize]) as u64, 7) != 0 {
+    if find(cmd, (&w_nf[0 as usize]) as u64, 9) != 0 {
         kstate.mode_add(state, kstate.M_NOFSYNC)
     }
     if find(cmd, (&w_wr[0 as usize]) as u64, 7) != 0 {
@@ -459,6 +468,9 @@ fn parse(state: u64, cmd: u64) {
     }
     if find(cmd, (&w_ns[0 as usize]) as u64, 10) != 0 {
         kstate.mode_add(state, kstate.M_NOSCHATTEN)
+    }
+    if find(cmd, (&w_lc[0 as usize]) as u64, 7) != 0 {
+        kstate.mode_add(state, kstate.M_LIDCONF)
     }
 }
 
@@ -736,7 +748,19 @@ fn tore_setzen(state: u64) -> u64 {
     if enb != 0 {
         out16(enb, bits)
     }
-    return bits
+    // ZURUECKLESEN, und zwar aus dem Register und nicht aus der eigenen
+    // Rechnung. Was hier steht, ist das, was die Maschine wirklich
+    // wecken darf; alles andere waere eine Behauptung ueber eine
+    // Schreiboperation. Auf dem Messwirt kommt genau das zurueck, was
+    // geschrieben wurde -- was NICHT heisst, dass QEMU sich beim Wecken
+    // daran haelt, siehe docs/RUNDE-STANDBY.md.
+    var rueck: u64 = 0
+    if ena != 0 {
+        rueck = in16(ena)
+    }
+    s(state, S_ENSOLL, bits)
+    s(state, S_ENIST, rueck)
+    return rueck
 }
 
 // ------------------------------------------------ DER WECKER DER UHR
@@ -1104,6 +1128,39 @@ fn bericht(state: u64) {
     serial.puts((&n_tief[0 as usize]) as u64)
     serial.dec(g(state, S_DEEPEST))
     serial.nl()
+    tore_sagen(state)
+}
+
+// Welche Tore offen sind, Quelle fuer Quelle, und was WIRKLICH im
+// Register steht. `soll` ist, was geschrieben wurde, `ist` das, was
+// danach daraus zurueckgelesen wurde -- zwei Zahlen und nicht eine,
+// damit ein Chipsatz, der ein Bit schluckt, hier auffaellt und nicht
+// erst beim naechsten Schlaf.
+fn tore_sagen(state: u64) {
+    var n_k: [u8; 18] = "standby: tore \0\0\0\0"
+    var n_s: [u8; 7] = "soll=\0\0"
+    var n_i: [u8; 7] = " ist=\0\0"
+    var n_t: [u8; 8] = " taste=\0"
+    var n_d: [u8; 9] = " deckel=\0"
+    var n_u: [u8; 6] = " usb=\0"
+    var n_r: [u8; 6] = " rtc=\0"
+    var n_l: [u8; 6] = " lan=\0"
+    serial.puts((&n_k[0 as usize]) as u64)
+    serial.puts((&n_s[0 as usize]) as u64)
+    serial.hex(g(state, S_ENSOLL))
+    serial.puts((&n_i[0 as usize]) as u64)
+    serial.hex(g(state, S_ENIST))
+    serial.puts((&n_t[0 as usize]) as u64)
+    serial.dec(kutil.yes(quelle_erlaubt(state, Q_TASTE)))
+    serial.puts((&n_d[0 as usize]) as u64)
+    serial.dec(kutil.yes(quelle_erlaubt(state, Q_DECKEL)))
+    serial.puts((&n_u[0 as usize]) as u64)
+    serial.dec(kutil.yes(quelle_erlaubt(state, Q_USB)))
+    serial.puts((&n_r[0 as usize]) as u64)
+    serial.dec(kutil.yes(quelle_erlaubt(state, Q_RTC)))
+    serial.puts((&n_l[0 as usize]) as u64)
+    serial.dec(kutil.yes(quelle_erlaubt(state, Q_LAN)))
+    serial.nl()
 }
 
 // ==================================================================
@@ -1136,12 +1193,20 @@ const K_INO: u64 = 448 // die Inode der Probedatei
 const K_TICKS: u64 = 456 // Marken vor dem Schlaf
 const K_SUM: u64 = 464 // Quersumme des Musters vor dem Schlaf
 const K_LEN: u64 = 512 // so viele Oktette
+const K_RUNDE: u64 = 488 // die laufende Nummer, sie geht ins Muster
+const K_N: u64 = 496 // wieviele Proben gelaufen sind
+const K_OK: u64 = 504 // wieviele davon gleich waren
 
-fn muster(i: u64) -> u8 {
-    return ((i * 7 + 13) % 251) as u8
+// Das Muster haengt an der RUNDE. Waere es in jeder Runde dasselbe,
+// wuerde ein Dateisystem, das gar nicht mehr schreibt und nur den alten
+// Inhalt zurueckgibt, den Test bestehen -- und genau das ist der
+// Fehler, den diese Probe finden soll.
+fn muster(i: u64, r: u64) -> u8 {
+    return ((i *% 7 +% 13 +% (r *% 31)) % 251) as u8
 }
 
 fn keep_vor(state: u64) {
+    let r: u64 = g(state, K_RUNDE)
     var p_keep: [u8; 13] = "/standby.txt\0"
     var n_v: [u8; 24] = "standby: keep vor ino=\0\0"
     var n_w: [u8; 9] = " wrote=\0\0"
@@ -1150,12 +1215,22 @@ fn keep_vor(state: u64) {
     var i: u64 = 0
     var summe: u64 = 0
     while i < K_LEN {
-        kstate.set8(puffer + i, muster(i))
-        summe = summe +% (muster(i) as u64)
+        kstate.set8(puffer + i, muster(i, r))
+        summe = summe +% (muster(i, r) as u64)
         i = i + 1
     }
-    let ino: u64 = fs.create_path(state, (&p_keep[0 as usize]) as u64,
-        fs.T_FILE)
+    // BEIM ERSTEN MAL anlegen, DANACH DIESELBE INODE WEITERBENUTZEN.
+    // Das ist nicht Bequemlichkeit, sondern der Punkt der Probe: der
+    // Verweis, der ueber den Schlaf hinweg gueltig bleiben soll, ist
+    // derselbe, ueber alle zehn Runden. (Der erste Anlauf legte in
+    // jeder Runde neu an, `create_path` gab ab der zweiten Runde 0
+    // zurueck -- der Name war ja schon da -- und die Probe stand bei
+    // 1 von 10. Der Fehler lag in der Probe, nicht im Schlaf.)
+    var ino: u64 = g(state, K_INO)
+    if ino == 0 {
+        ino = fs.create_path(state, (&p_keep[0 as usize]) as u64,
+            fs.T_FILE)
+    }
     var geschrieben: u64 = 0
     if ino != 0 {
         geschrieben = fs.write_at(state, ino, 0, puffer, K_LEN)
@@ -1173,6 +1248,7 @@ fn keep_vor(state: u64) {
 }
 
 fn keep_nach(state: u64) {
+    let r: u64 = g(state, K_RUNDE)
     var n_n: [u8; 24] = "standby: keep nach ino=\0"
     var n_r: [u8; 8] = " read=\0\0"
     var n_gl: [u8; 9] = " gleich=\0"
@@ -1195,7 +1271,7 @@ fn keep_nach(state: u64) {
     }
     i = 0
     while i < K_LEN {
-        if kstate.get8(puffer + i) != (muster(i) as u64) {
+        if kstate.get8(puffer + i) != (muster(i, r) as u64) {
             gleich = 0
         }
         i = i + 1
@@ -1224,6 +1300,48 @@ fn keep_nach(state: u64) {
     serial.dec(laeuft)
     serial.puts((&n_t[0 as usize]) as u64)
     serial.dec(kstate.get(state, kstate.TICKS))
+    serial.nl()
+    s(state, K_N, g(state, K_N) +% 1)
+    if gleich == 1 && laeuft == 1 {
+        s(state, K_OK, g(state, K_OK) +% 1)
+    }
+    s(state, K_RUNDE, r +% 1)
+}
+
+
+// Die Richtliniendatei einmal schreiben, einmal lesen, und zeigen, was
+// dabei herauskommt. Das ist die Probe zu `richtlinie_lesen`: sie kann
+// rot werden, weil sie ANDERE Werte in die Datei schreibt als die
+// eingebauten, und weil eine unverstandene Zeile mitgeschrieben wird,
+// die den eingebauten Wert stehen lassen MUSS.
+fn conf_probe(state: u64) {
+    var p_etc: [u8; 5] = "/etc\0"
+    var p_conf: [u8; 17] = "/etc/deckel.conf\0"
+    var inhalt: [u8; 68] = "# Deckel\nnetz=schirm-aus\nakku=s4\nfrist=45\nunsinn=blah\nakku=quatsch\n\0"
+    var n_k: [u8; 24] = "standby: conf verstand=\0"
+    var n_n: [u8; 7] = " netz=\0"
+    var n_a: [u8; 7] = " akku=\0"
+    var n_f: [u8; 8] = " frist=\0"
+    var n_q: [u8; 7] = " src=\0\0"
+    var n_fa: [u8; 12] = " faellig44=\0"
+    var n_fb: [u8; 12] = " faellig46=\0"
+    fs.create_path(state, (&p_etc[0 as usize]) as u64, fs.T_DIR)
+    let ino: u64 = fs.create_path(state, (&p_conf[0 as usize]) as u64,
+        fs.T_FILE)
+    if ino != 0 {
+        fs.write_at(state, ino, 0, (&inhalt[0 as usize]) as u64, 67)
+    }
+    let v: u64 = richtlinie_lesen(state)
+    serial.puts((&n_k[0 as usize]) as u64)
+    serial.dec(v)
+    serial.puts((&n_n[0 as usize]) as u64)
+    serial.dec(g(state, P_NETZ))
+    serial.puts((&n_a[0 as usize]) as u64)
+    serial.dec(g(state, P_AKKU))
+    serial.puts((&n_f[0 as usize]) as u64)
+    serial.dec(g(state, P_FRIST))
+    serial.puts((&n_q[0 as usize]) as u64)
+    serial.dec(g(state, S_CFGSRC))
     serial.nl()
 }
 
@@ -1567,6 +1685,180 @@ fn schlafen(state: u64) -> u64 {
 //   netz=nichts
 //   akku=s3
 //   frist=120
+
+// ------------------------------------------------ DIE DATEI /etc/deckel.conf
+//
+// Bis hierher stand die Richtlinie nur im Speicher. Eine Richtlinie, die
+// den naechsten Start nicht ueberlebt, ist keine -- also wird sie aus
+// einer Datei gelesen. Das Format ist absichtlich das langweiligste,
+// das denkbar ist: eine Zuweisung je Zeile, kein Abschnitt, kein
+// Anfuehrungszeichen, alles hinter '#' ist ein Kommentar.
+//
+//   netz=nichts
+//   akku=s3
+//   frist=120
+//
+// Was NICHT verstanden wird, wird UEBERGANGEN und nicht geraten: eine
+// unbekannte Aktion laesst den eingebauten Wert stehen. Eine
+// Richtliniendatei, die halb verstanden wird, ist gefaehrlicher als
+// gar keine.
+fn ist_zeichen(c: u64, z: u64) -> bool {
+    return c == z
+}
+
+// Vergleicht `n` Oktette ab `a` mit `n` Oktetten ab `b`.
+fn gleich_n(a: u64, b: u64, n: u64) -> bool {
+    var i: u64 = 0
+    while i < n {
+        if kstate.get8(a + i) != kstate.get8(b + i) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+// Wandelt die Aktion hinter dem Gleichheitszeichen in eine Zahl. 255
+// heisst: nicht verstanden.
+fn aktion_lesen(p: u64, ende: u64) -> u64 {
+    var w_ni: [u8; 7] = "nichts\0"
+    var w_sch: [u8; 11] = "schirm-aus\0"
+    var w_s3: [u8; 3] = "s3\0"
+    var w_s4: [u8; 3] = "s4\0"
+    var w_aus: [u8; 4] = "aus\0"
+    let n: u64 = ende -% p
+    if n >= 6 {
+        if gleich_n(p, (&w_ni[0 as usize]) as u64, 6) {
+            return A_NICHTS
+        }
+    }
+    if n >= 10 {
+        if gleich_n(p, (&w_sch[0 as usize]) as u64, 10) {
+            return A_SCHIRM
+        }
+    }
+    if n >= 3 {
+        if gleich_n(p, (&w_aus[0 as usize]) as u64, 3) {
+            return A_AUS
+        }
+    }
+    if n >= 2 {
+        if gleich_n(p, (&w_s3[0 as usize]) as u64, 2) {
+            return A_S3
+        }
+        if gleich_n(p, (&w_s4[0 as usize]) as u64, 2) {
+            return A_S4
+        }
+    }
+    return 255
+}
+
+fn zahl_lesen(p: u64, ende: u64) -> u64 {
+    var v: u64 = 0
+    var i: u64 = p
+    while i < ende {
+        let c: u64 = kstate.get8(i)
+        if c >= 48 && c <= 57 {
+            v = v *% 10 +% (c -% 48)
+        }
+        i = i + 1
+    }
+    return v
+}
+
+// Liest die Datei und setzt, was darin steht. Zurueck kommt die Zahl der
+// verstandenen Zuweisungen.
+fn richtlinie_lesen(state: u64) -> u64 {
+    var p_conf: [u8; 17] = "/etc/deckel.conf\0"
+    var w_netz: [u8; 6] = "netz=\0"
+    var w_akku: [u8; 6] = "akku=\0"
+    var w_frist: [u8; 7] = "frist=\0"
+    let ino: u64 = fs.path(state, (&p_conf[0 as usize]) as u64)
+    if ino == 0 {
+        return 0
+    }
+    let puffer: u64 = state + kstate.BLOCK_OFF + 6144
+    var i: u64 = 0
+    while i < 512 {
+        kstate.set8(puffer + i, 0 as u8)
+        i = i + 1
+    }
+    let n: u64 = fs.read_at(state, ino, 0, puffer, 511)
+    if n == 0 {
+        return 0
+    }
+    var verstanden: u64 = 0
+    var z: u64 = 0
+    while z < n {
+        // Das Zeilenende suchen; '#' beendet die Zeile ebenso.
+        var e: u64 = z
+        while e < n {
+            let c: u64 = kstate.get8(puffer + e)
+            if c == 10 || c == 13 || c == 35 {
+                e = e
+                break
+            }
+            e = e + 1
+        }
+        let len: u64 = e -% z
+        let zeile: u64 = puffer +% z
+        if len > 5 {
+            if gleich_n(zeile, (&w_netz[0 as usize]) as u64, 5) {
+                let a: u64 = aktion_lesen(zeile +% 5, zeile +% len)
+                if a != 255 {
+                    s(state, P_NETZ, a)
+                    verstanden = verstanden + 1
+                }
+            }
+            if gleich_n(zeile, (&w_akku[0 as usize]) as u64, 5) {
+                let a: u64 = aktion_lesen(zeile +% 5, zeile +% len)
+                if a != 255 {
+                    s(state, P_AKKU, a)
+                    verstanden = verstanden + 1
+                }
+            }
+        }
+        if len > 6 {
+            if gleich_n(zeile, (&w_frist[0 as usize]) as u64, 6) {
+                s(state, P_FRIST, zahl_lesen(zeile +% 6, zeile +% len))
+                verstanden = verstanden + 1
+            }
+        }
+        // Bis hinter das Zeilenende weiterruecken.
+        z = e
+        while z < n {
+            let c: u64 = kstate.get8(puffer + z)
+            if c == 10 {
+                z = z + 1
+                break
+            }
+            z = z + 1
+        }
+    }
+    if verstanden != 0 {
+        s(state, P_GELESEN, 1)
+        s(state, S_CFGSRC, 1)
+    }
+    return verstanden
+}
+
+// DIE FRIST. Ein Laptop, der acht Stunden in S3 liegt, verbraucht wenig,
+// aber nicht nichts. Nach `frist` Minuten im Akkubetrieb soll aus S3
+// ein S4 werden -- genau das, was Windows nicht tut. Diese Funktion
+// entscheidet nur; wer sie ruft, muss die verstrichene Zeit kennen.
+// Einen Wecker, der sie von selbst ruft, gibt es noch NICHT; das steht
+// so im Bericht.
+fn frist_faellig(state: u64, minuten: u64) -> bool {
+    if g(state, P_AKKU) != A_S3 {
+        return false
+    }
+    let f: u64 = g(state, P_FRIST)
+    if f == 0 {
+        return false
+    }
+    return minuten >= f
+}
+
 fn richtlinie_setzen(state: u64, netz: u64, akku: u64, frist: u64) {
     if netz <= A_AUS {
         s(state, P_NETZ, netz)
@@ -1959,6 +2251,9 @@ fn stage(state: u64) {
     if kstate.mode_on(state, kstate.M_S4GO) {
         s4_schreiben(state)
     }
+    if kstate.mode_on(state, kstate.M_LIDCONF) {
+        conf_probe(state)
+    }
     if kstate.mode_on(state, kstate.M_LIDGO) {
         deckel(state, false)
     }
@@ -1975,8 +2270,14 @@ fn stage(state: u64) {
         var i: u64 = 0
         var ok: u64 = 0
         while i < 10 {
+            if kstate.mode_on(state, kstate.M_S3KEEP) {
+                keep_vor(state)
+            }
             if schlafen(state) == E_OK {
                 ok = ok + 1
+            }
+            if kstate.mode_on(state, kstate.M_S3KEEP) {
+                keep_nach(state)
             }
             i = i + 1
         }
@@ -1987,6 +2288,15 @@ fn stage(state: u64) {
         serial.puts((&n_ok[0 as usize]) as u64)
         serial.dec(ok)
         serial.nl()
+        if kstate.mode_on(state, kstate.M_S3KEEP) {
+            var n_kp: [u8; 20] = "standby: keep n=\0\0\0\0"
+            var n_ko: [u8; 6] = " ok=\0\0"
+            serial.puts((&n_kp[0 as usize]) as u64)
+            serial.dec(g(state, K_N))
+            serial.puts((&n_ko[0 as usize]) as u64)
+            serial.dec(g(state, K_OK))
+            serial.nl()
+        }
     }
     if kstate.mode_on(state, kstate.M_SBSAY) {
         bericht(state)
