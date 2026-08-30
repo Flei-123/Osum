@@ -752,6 +752,13 @@ abschnitt_ausgeben() { # index
 # wie frueher. Sonst wird der Abschnitt nur angemeldet; abgearbeitet wird
 # alles zusammen in `abschnitte_abarbeiten` weiter unten.
 lauf() { # titel skript logname muster
+    # RUNDE MERGE-2: WER ZU SPAET ANMELDET, WIRD NICHT STILL UEBERGANGEN.
+    if [ "${ABGEARBEITET:-0}" = "1" ]; then
+        echo "FEHLER: '$3' wird NACH abschnitte_abarbeiten angemeldet und" >&2
+        echo "        wuerde damit nie laufen. Den lauf-Aufruf VOR die" >&2
+        echo "        Zeile 'abschnitte_abarbeiten' stellen." >&2
+        exit 2
+    fi
     # OSUM_NUR: nicht passende Abschnitte werden nicht angemeldet.
     if [ -n "$NUR" ] && ! printf '%s' "$3" | grep -qE "$NUR"; then
         UEBERSPRUNGEN=$((UEBERSPRUNGEN + 1))
@@ -1030,12 +1037,6 @@ lauf "29. die Platte, die ein echter PC hat: AHCI/SATA ueber DMA (tools/ahci/run
 lauf "30. Osum als Server: ohne Grafik gebaut, auf der seriellen Leitung bedient (tools/server/run.sh, Runde SERVERBUILD)" \
      tools/server/run.sh server '^SERVER: |^        (gui=|Symbole der|srvbench: )|^  OK    (das Serverabbild|im Serverabbild|die Naht selbst|kein Modul|die Shell antwortet|Rueckschritt und|GEGENPROBE|und der Zaehler|im Regellauf|empfangene|kein Oktett|STRG-U)'
 
-# Hier laufen die angemeldeten Abschnitte -- bei OSUM_JOBS=1 sind sie
-# oben schon gelaufen und das hier tut nichts.
-abschnitte_abarbeiten
-
-
-
 # ABSCHNITT 29 -- RUNDE MULTIUSER. Er arbeitet die Grenzenliste von K13
 # ab (docs/ROUNDK13.md Abschnitt 7): das Betretungsrecht auf JEDEM Glied
 # eines Pfades, /etc/group und die Zusatzgruppen, Rechte ueber die
@@ -1051,7 +1052,6 @@ abschnitte_abarbeiten
 # unter TCG, damit KVM nur schneller ist und nicht anders.
 lauf "29. Mehrbenutzerbetrieb: Pfadrechte, Zusatzgruppen, Kostenfaktor, Anmeldung (tools/multiuser/run.sh, Runde MULTIUSER)" \
      tools/multiuser/run.sh multiuser '^MULTIUSER: |^  --    (gemessen|daraus|/dev/kvm|kein /dev/kvm)|^  OK    (JUSTIN|GEGENPROBE|EINE Pruefung|viermal|und braucht dort|setuid\(0\)|setgroups als|der Kern hat|und [0-9]+ davon|[0-9]+ Zugriffe|[0-9]+ Rechtefragen|nach dem (ersten|zweiten|dritten)|und die Uhr|mit verzoegerung|und der Lauf ist|keine Zwischendatei|der neue Eintrag|das Passwort steht NICHT|PYTHON rechnet|justin liest sie NICHT|und die EINE Ebene|MIT den Zusatzgruppen|id nennt sie)'
-
 # ABSCHNITT 29 -- RUNDE INIT. Der erste Prozess, servertauglich. Die
 # interessanteste Zusage darin ist keine Zahl, sondern ein Verhalten,
 # das sich NICHT zeigt: ein Dienst, der beim Start sofort stirbt, wird
@@ -1062,6 +1062,34 @@ lauf "29. Mehrbenutzerbetrieb: Pfadrechte, Zusatzgruppen, Kostenfaktor, Anmeldun
 # `-no-reboot`, und der Kernel kommt ein zweites Mal hoch.
 lauf "29. der erste Prozess, servertauglich: /bin/init, die Grenze fuer abstuerzende Dienste, Ziele, shutdown und ein ECHTER Neustart (tools/init/run.sh, Runde INIT)" \
      tools/init/run.sh init '^INIT: |^  OK    (Beschleunigung|init schaltet|er wurde GENAU|und fuenf Rueckfaelle|der Dienst .sauber|.sauber. wurde NICHT|der Kernel kam|und der Kern hat wirklich|GEGENPROBE|DER NOTWEG|DIE WAISE|ein Dienst mit respawn|svc list|svc start|JETZT laeuft|die Zeile des Dienstes|der Dienst mit .netz|eine Zeile .name|init liest|und am Ende steht)'
+
+# RUNDE MERGE-2: HIER IST DIE GRENZE, UND SIE IST JETZT BEWACHT.
+#
+# Seit Runde TESTFAST fuehrt `lauf` bei OSUM_JOBS > 1 nichts mehr aus --
+# es MELDET nur an; gelaufen wird unten in `abschnitte_abarbeiten`. Wer
+# danach anmeldet, meldet ins Leere: der Abschnitt erscheint in keiner
+# Ausgabe, und die Abnahme sagt trotzdem "alle bestanden", nur ueber
+# einen Abschnitt weniger.
+#
+# Das ist beim Zusammenfuehren DREIMAL passiert -- serverbuild,
+# multiuser und init haben ihren Abschnitt ans Dateiende gehaengt, und
+# auf ihren eigenen Zweigen war das richtig, weil es den Verteiler dort
+# nicht gab. Bei OSUM_JOBS=1 liefen sie; im parallelen Lauf, dem
+# Regelfall, nicht. Gemerkt hat es niemand, weil nichts rot wurde.
+#
+# `lauf` schlaegt ab hier Alarm und bricht ab. Ein Abschnitt, der zu
+# spaet kommt, ist damit ein FEHLER und keine Stille.
+ABGEARBEITET=0
+
+
+# Hier laufen die angemeldeten Abschnitte -- bei OSUM_JOBS=1 sind sie
+# oben schon gelaufen und das hier tut nichts.
+abschnitte_abarbeiten
+ABGEARBEITET=1
+
+
+
+
 
 echo
 echo "=================================================================="
