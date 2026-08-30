@@ -528,6 +528,17 @@ vectors:
     .quad msr_fixups                /* 70: kernel/msr.fi */
     .quad msr_read_safe             /* 71 */
     .quad msr_write_safe            /* 72 */
+    /* Runde HAERTUNG: die zwei Abschnittsgrenzen, die der W^X-Durchgang
+     * braucht. `__user_begin`/`__user_end` (59/60) liegen dazwischen und
+     * sind schon da; .rodata reicht von `__user_end` bis `__data_begin`. */
+    .quad __text_begin              /* 73: erste Seite des Kerncodes */
+    .quad __data_begin              /* 74: erste Seite der Kerndaten */
+    /* Runde HAERTUNG: die vier Wachseiten unter den festen Stapeln aus
+     * boot.s. Der Kern nimmt sie nach dem Hochlaufen aus der Abbildung. */
+    .quad kstack_guard              /* 75 */
+    .quad dfstack_guard             /* 76 */
+    .quad systack_guard             /* 77 */
+    .quad irqstack_guard            /* 78 */
 
     .section .bss, "aw", @nobits
     .align 8

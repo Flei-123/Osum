@@ -1,0 +1,904 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/hard.fi -- RUNDE HAERTUNG: W^X im Kern, Wachseiten, ASLR, IOMMU.
+//
+// WAS SCHON DA WAR, damit diese Datei nicht behauptet, sie haette es
+// gebracht: SMEP und SMAP stehen seit Runde K10 in
+// `arch/x86_64/guard.fi` und sind dort mit Gegenproben belegt
+// (`smapraw`, `smepraw`, `nosmep`, `nosmap`). Das NX-Bit gibt es seit
+// Runde K1 (`user.setup` schaltet EFER.NXE, `proc.nx` liefert das Bit).
+// Die Zeigerpruefung eines Systemaufrufs gibt es seit Runde 62
+// (`proc.user_ok`). Diese Runde bringt vier andere Dinge:
+//
+//   1. W^X FUER DEN KERN SELBST. Bis hierher galt NX nur fuer Ring 3.
+//      Der Kern lag in der Identitaetsabbildung, und die besteht aus
+//      2-MiB-Kacheln mit den Bits 0x83 -- vorhanden, SCHREIBBAR, und
+//      ohne NX also auch AUSFUEHRBAR. Jede Seite des Kerns war damit
+//      gleichzeitig schreibbar und ausfuehrbar: sein eigener Code liess
+//      sich ueberschreiben, und sein Stapel, seine Halde und jeder
+//      Rahmen liessen sich anspringen. SMEP hilft dagegen NICHT -- SMEP
+//      verbietet Ring 0 nur Seiten mit BENUTZERBIT, und keine dieser
+//      Seiten hat eins.
+//
+//   2. WACHSEITEN UNTER DEN KERNSTAPELN. Ein Kernstapel sind acht
+//      Rahmen am Stueck aus `mem.frame_run`. Laeuft er ueber, schreibt
+//      er in den Rahmen darunter -- der einem anderen gehoert. Das ist
+//      kein Absturz, das ist stille Verfaelschung. Eine nicht
+//      abgebildete Seite darunter macht daraus einen Seitenfehler an
+//      einer Adresse, die man lesen kann.
+//
+//   3. ASLR FUER DIE STAPEL. Nur fuer die Stapel, und die Begruendung
+//      steht in docs/HAERTUNG.md: Osum wird STATISCH gelinkt, ohne PIE.
+//      Die Adresse jeder Funktion steht damit fest im Abbild, und daran
+//      aendert kein Verwuerfeln etwas. Was sich verschieben laesst, ist
+//      der Stapel -- und das hilft gegen genau eine Klasse: Angriffe,
+//      die eine ABGELEGTE Adresse brauchen (Ruecksprungadressen,
+//      Zeiger in Stapelrahmen). Gegen ROP auf feste Code-Adressen hilft
+//      es nicht, und diese Datei behauptet das auch nicht.
+//
+//   4. DIE IOMMU WIRD GELESEN, NICHT GEBAUT. `iommu_scan` sucht DMAR
+//      (Intel VT-d) und IVRS (AMD-Vi), meldet, was da ist, und hoert
+//      dann auf. Der Grund steht ausdruecklich in docs/HAERTUNG.md:
+//      halb gebaut und stillschweigend unwirksam waere schlechter als
+//      gar nicht gebaut. Osum ist heute ein Monolith, alle Treiber
+//      laufen im Kern, es gibt keine Treiber im Nutzerraum, die
+//      einzusperren waeren.
+//
+// WIE DER DURCHGANG ARBEITET. Er setzt KEINE Adressen. Er liest jeden
+// Seitentabelleneintrag, laesst die Adresse und das Benutzerbit stehen
+// und veraendert genau zwei Bits: W und NX. Das ist der Grund, warum er
+// NACH `proc.map_programs` laufen muss -- das setzt die Benutzerbits
+// auf `.utext`, und wer danach die Adresse neu schriebe, machte sie
+// wieder zunichte.
+//
+// WO DIE KACHELN GETEILT WERDEN. Eine 2-MiB-Kachel hat EIN Rechtepaar
+// fuer 512 Seiten. Der Kern braucht innerhalb einer Kachel verschiedene
+// Rechte (in der Kachel bei 0x400000 liegen `.utext`, `.rodata`,
+// `.data` und `.bss` nebeneinander), also wird sie in 512 Eintraege zu
+// 4 KiB aufgeloest. Das kostet einen Rahmen je Kachel und passiert nur
+// fuer die drei Kacheln des Abbilds. Alles oberhalb von `kernel_end`
+// bleibt eine Kachel und bekommt das NX-Bit am Stueck -- Halde und
+// Rahmen sind Daten, sie brauchen keine feinere Aufloesung.
+//
+// DIE AUSNAHME, DIE BENANNT WIRD. Das Trampolin der weiteren
+// Prozessoren wird zur Laufzeit nach 0x8000 kopiert und dort
+// AUSGEFUEHRT (`smp.s`, `AP_BASE`). Waehrend `smp.stage` laeuft, muss
+// diese Seite also schreibbar UND ausfuehrbar sein. Danach nicht mehr:
+// `tramp_seal` nimmt ihr das Schreibrecht, und ab da ist sie nur noch
+// lesbar und ausfuehrbar. Zwischen `wx_apply` und `tramp_seal` gibt es
+// ein Fenster von genau einer Seite -- `wx_verify` laeuft NACH
+// `tramp_seal` und zaehlt deshalb null Verstoesse, nicht einen.
+
+import kstate
+import serial
+import mem
+import rand
+import acpi
+
+export {
+    parse, want, wx_apply, tramp_seal, wx_verify, guard_under, unguard,
+    wp_on, static_guards,
+    report, aslr_bits, aslr_off, iommu_scan, iommu_report,
+    wx_write_probe, wx_exec_probe, kblow_probe,
+    is_guard, split_tile,
+    M_NOWX, M_NOGUARD, M_NOASLR, M_WXWRITE, M_WXEXEC, M_KBLOW, M_NONX
+}
+
+// ------------------------------------------------------- die Seitenbits
+
+const P_PRESENT: u64 = 1
+const P_WRITE: u64 = 2
+const P_USER: u64 = 4
+const P_HUGE: u64 = 0x80
+const P_NX: u64 = 0x8000000000000000
+const ADDR_MASK: u64 = 0x000FFFFFFFFFF000
+const HUGE_MASK: u64 = 0x000FFFFFFFE00000
+const PAGE: u64 = 4096
+const HUGE: u64 = 0x200000
+
+// Wo das Trampolin der weiteren Prozessoren hinkopiert wird. Derselbe
+// Wert wie `AP_BASE` in `smp.s`; er steht hier noch einmal, weil ein
+// `.set` im Assembler nicht nach Firn herueberreicht. Zwei Seiten
+// decken den Blob mit Reserve.
+// CR0 Bit 16. OHNE DIESES BIT IST DER GANZE SCHREIBSCHUTZ ZIERDE:
+// steht WP auf 0, darf Ring 0 in JEDE vorhandene Seite schreiben, auch
+// in eine, die als nur-lesend eingetragen ist. Das Nur-Lesen-Bit gilt
+// dann nur fuer Ring 3. Gemessen, nicht vermutet: die erste Fassung
+// dieser Runde machte den Kerncode nur-lesend, und die Gegenprobe
+// `wxwrite` schrieb trotzdem anstandslos hinein (Beendigungscode 21
+// statt 63). Erst mit WP=1 ist es ein #PF.
+const CR0_WP: u64 = 0x10000
+
+const TRAMP_BASE: u64 = 0x8000
+const TRAMP_PAGES: u64 = 2
+
+// ------------------------------------------- Woerter der Kommandozeile
+
+const M_NOWX: u64 = 1 // der W^X-Durchgang faellt aus
+const M_NOGUARD: u64 = 2 // keine Wachseiten unter den Kernstapeln
+const M_NOASLR: u64 = 4 // die Stapel liegen wieder fest
+const M_WXWRITE: u64 = 8 // Gegenprobe: in den eigenen Code schreiben
+const M_WXEXEC: u64 = 16 // Gegenprobe: aus dem Kerndatenbereich springen
+const M_KBLOW: u64 = 32 // Gegenprobe: den Kernstapel ueberlaufen lassen
+const M_NONX: u64 = 64 // NX gar nicht setzen (die alte Lage)
+
+fn parse(state: u64, cmd: u64) {
+    var w_nowx: [u8; 5] = "nowx\0"
+    var w_nogu: [u8; 8] = "noguard\0"
+    var w_noas: [u8; 7] = "noaslr\0"
+    var w_wxw: [u8; 8] = "wxwrite\0"
+    var w_wxe: [u8; 7] = "wxexec\0"
+    var w_kb: [u8; 6] = "kblow\0"
+    var w_nonx: [u8; 5] = "nonx\0"
+    var m: u64 = 0
+    if cmd != 0 {
+        if find(cmd, (&w_nowx[0]) as u64, 4) != 0 {
+            m = m | M_NOWX
+        }
+        if find(cmd, (&w_nogu[0]) as u64, 7) != 0 {
+            m = m | M_NOGUARD
+        }
+        if find(cmd, (&w_noas[0]) as u64, 6) != 0 {
+            m = m | M_NOASLR
+        }
+        if find(cmd, (&w_wxw[0]) as u64, 7) != 0 {
+            m = m | M_WXWRITE
+        }
+        if find(cmd, (&w_wxe[0]) as u64, 6) != 0 {
+            m = m | M_WXEXEC
+        }
+        if find(cmd, (&w_kb[0]) as u64, 5) != 0 {
+            m = m | M_KBLOW
+        }
+        if find(cmd, (&w_nonx[0]) as u64, 4) != 0 {
+            m = m | M_NONX
+        }
+    }
+    kstate.set(state, kstate.HARD_MODE, m)
+    kstate.set(state, kstate.WX_SPLITS, 0)
+    kstate.set(state, kstate.WX_PAGES, 0)
+    kstate.set(state, kstate.WX_RO, 0)
+    kstate.set(state, kstate.WX_NX, 0)
+    kstate.set(state, kstate.WX_VIOL, 0)
+    kstate.set(state, kstate.GUARD_PAGES, 0)
+    kstate.set(state, kstate.GUARD_HITS, 0)
+    kstate.set(state, kstate.IOMMU_KIND, 0)
+    kstate.set(state, kstate.IOMMU_UNITS, 0)
+    kstate.set(state, kstate.ELF_WX_REFUSED, 0)
+}
+
+fn want(state: u64, bit: u64) -> bool {
+    return (kstate.get(state, kstate.HARD_MODE) & bit) != 0
+}
+
+// ------------------------------------------------- durch die Tabellen
+
+fn rd(table: u64, i: u64) -> u64 {
+    return __mmio_read64((table + i * 8) as *mut u64)
+}
+
+fn wr(table: u64, i: u64, v: u64) {
+    __mmio_write64((table + i * 8) as *mut u64, v)
+}
+
+fn not(v: u64) -> u64 {
+    return ~v
+}
+
+fn cr0() -> u64 {
+    return asm("mov rax, cr0", out("rax"))
+}
+
+// Der Schreibschutz fuer Ring 0. Wird sowohl vom Startprozessor
+// (`wx_apply`) als auch von jedem weiteren Kern (`smp.ap_main`)
+// gesetzt -- CR0 ist pro Kern, genau wie CR4, und ein Kern ohne WP
+// haette den Schutz nicht.
+fn wp_on(state: u64) {
+    if want(state, M_NOWX) {
+        return
+    }
+    asm("mov cr0, rax", in("rax") cr0() | CR0_WP)
+}
+
+fn flush() {
+    let cr3: u64 = asm("mov rax, cr3", out("rax"))
+    asm("mov cr3, rdi", in("rdi") cr3, clobber("memory"))
+}
+
+fn vector(state: u64, i: u64) -> u64 {
+    return __mmio_read64((kstate.get(state, kstate.VECTORS) + i * 8) as *mut u64)
+}
+
+// Das Seitenverzeichnis, in dem die 2-MiB-Kachel dieser Adresse steht.
+// Gefunden wird es so, wie der Prozessor es findet: CR3 -> PML4 ->
+// PDPT -> PD. Kein Symbol, nichts, was veralten kann.
+fn pd_of(addr: u64) -> u64 {
+    let p4: u64 = asm("mov rax, cr3", out("rax")) & ADDR_MASK
+    let e4: u64 = rd(p4, (addr >> 39) & 0x1FF)
+    if (e4 & P_PRESENT) == 0 {
+        return 0
+    }
+    let e3: u64 = rd(e4 & ADDR_MASK, (addr >> 30) & 0x1FF)
+    if (e3 & P_PRESENT) == 0 {
+        return 0
+    }
+    return e3 & ADDR_MASK
+}
+
+// Eine 2-MiB-Kachel in 512 Seiten zu 4 KiB aufloesen. Die neuen
+// Eintraege tragen genau das, was die Kachel trug -- diese Funktion
+// aendert KEINE Rechte, sie macht nur feiner einstellbar, was danach
+// eingestellt wird. Zurueck kommt die Seitentabelle, oder 0.
+//
+// Die Reihenfolge ist kein Zufall: erst den Rahmen holen und FUELLEN,
+// dann den einen Eintrag im Verzeichnis umhaengen. Andersherum gaebe es
+// einen Augenblick, in dem die Kachel auf eine leere Tabelle zeigt --
+// und in diesem Augenblick liegt der Code, der gerade laeuft.
+fn split_tile(state: u64, addr: u64) -> u64 {
+    let pd: u64 = pd_of(addr)
+    if pd == 0 {
+        return 0
+    }
+    let i: u64 = (addr >> 21) & 0x1FF
+    let e: u64 = rd(pd, i)
+    if (e & P_PRESENT) == 0 {
+        return 0
+    }
+    if (e & P_HUGE) == 0 {
+        return e & ADDR_MASK // schon aufgeloest, etwa von `map_programs`
+    }
+    let base: u64 = e & HUGE_MASK
+    let bits: u64 = (e & 0xFFF & not(P_HUGE)) | (e & P_NX)
+    let pt: u64 = mem.frame_alloc(state)
+    if pt == 0 {
+        return 0
+    }
+    var k: u64 = 0
+    while k < 512 {
+        wr(pt, k, (base + k * PAGE) | bits)
+        k = k + 1
+    }
+    // Die Zwischenebene bleibt durchlaessig; entschieden wird auf dem
+    // Blatt. Das Benutzerbit der Kachel wird mitgenommen, sonst waere
+    // `.utext` fuer Ring 3 mit einem Schlag weg.
+    wr(pd, i, pt | P_PRESENT | P_WRITE | (e & P_USER))
+    flush()
+    kstate.add(state, kstate.WX_SPLITS, 1)
+    return pt
+}
+
+// Die Rechte EINER Seite setzen. Adresse und Benutzerbit bleiben, wie
+// sie sind; veraendert werden W und NX und sonst nichts.
+fn set_page(state: u64, addr: u64, writable: bool, runnable: bool) -> bool {
+    let pt: u64 = split_tile(state, addr)
+    if pt == 0 {
+        return false
+    }
+    let s: u64 = (addr >> 12) & 0x1FF
+    var e: u64 = rd(pt, s)
+    if (e & P_PRESENT) == 0 {
+        return false
+    }
+    if writable {
+        e = e | P_WRITE
+    } else {
+        e = e & not(P_WRITE)
+    }
+    if runnable {
+        e = e & not(P_NX)
+    } else {
+        if kstate.get(state, kstate.NX_OK) != 0 && !want(state, M_NONX) {
+            e = e | P_NX
+        }
+    }
+    wr(pt, s, e)
+    kstate.add(state, kstate.WX_PAGES, 1)
+    if !writable {
+        kstate.add(state, kstate.WX_RO, 1)
+    }
+    if (e & P_NX) != 0 {
+        kstate.add(state, kstate.WX_NX, 1)
+    }
+    return true
+}
+
+fn set_range(state: u64, from: u64, to: u64, writable: bool,
+    runnable: bool) -> u64 {
+    var p: u64 = from & not(PAGE - 1)
+    var n: u64 = 0
+    while p < to {
+        if set_page(state, p, writable, runnable) {
+            n = n + 1
+        }
+        p = p + PAGE
+    }
+    return n
+}
+
+// Alles oberhalb des Abbilds ist Daten -- Halde, Rahmen, Kernstapel.
+// Das bleibt eine 2-MiB-Kachel und bekommt das NX-Bit am Stueck. Das
+// ist der billige Teil: eine Schreiboperation je zwei Megabyte statt
+// 512.
+fn nx_above(state: u64, from: u64, gib: u64) -> u64 {
+    if kstate.get(state, kstate.NX_OK) == 0 || want(state, M_NONX) {
+        return 0
+    }
+    var n: u64 = 0
+    var g: u64 = 0
+    while g < gib {
+        var j: u64 = 0
+        while j < 512 {
+            let addr: u64 = g * 0x40000000 + j * HUGE
+            if addr >= from {
+                let pd: u64 = pd_of(addr)
+                if pd != 0 {
+                    let e: u64 = rd(pd, j)
+                    if (e & P_PRESENT) != 0 && (e & P_HUGE) != 0 {
+                        if (e & P_NX) == 0 {
+                            wr(pd, j, e | P_NX)
+                            n = n + 1
+                        }
+                    }
+                }
+            }
+            j = j + 1
+        }
+        g = g + 1
+    }
+    return n
+}
+
+// ------------------------------------------------------ der Durchgang
+
+// LAEUFT NACH `proc.map_programs` UND VOR `smp.stage`. Danach ist keine
+// Seite des Kerns mehr gleichzeitig schreibbar und ausfuehrbar -- mit
+// der einen benannten Ausnahme des Trampolins, das `tramp_seal` hinter
+// `smp.stage` schliesst.
+fn wx_apply(state: u64, kernel_end: u64) {
+    if want(state, M_NOWX) {
+        return
+    }
+    let text_begin: u64 = vector(state, 73)
+    let user_begin: u64 = vector(state, 59)
+    let user_end: u64 = vector(state, 60)
+    let data_begin: u64 = vector(state, 74)
+
+    // 1. Das erste Megabyte. BIOS-Daten, der Bildschirmspeicher der
+    //    Textkonsole, und das Trampolin. Schreibbar muss es sein, denn
+    //    `smp.stage` kopiert das Trampolin erst noch dorthin.
+    //    Ausfuehrbar ist nur das Trampolin selbst.
+    set_range(state, 0, TRAMP_BASE, true, false)
+    set_range(state, TRAMP_BASE, TRAMP_BASE + TRAMP_PAGES * PAGE, true, true)
+    set_range(state, TRAMP_BASE + TRAMP_PAGES * PAGE, text_begin, true, false)
+
+    // 2. Der Kerncode. Lesbar und ausfuehrbar, NICHT schreibbar. Hier
+    //    liegt der Unterschied dieser Runde: bis hierher liess sich der
+    //    eigene Code des Kerns ueberschreiben.
+    set_range(state, text_begin, user_begin, false, true)
+
+    // 3. `.utext` -- der Code, den Ring 3 sieht. Auch nur lesbar und
+    //    ausfuehrbar. Das Benutzerbit steht schon drauf und bleibt.
+    set_range(state, user_begin, user_end, false, true)
+
+    // 4. `.rodata`. Nur lesbar. Hier liegt unter anderem die Tabelle
+    //    `vectors` -- eine Tabelle von Einsprungadressen, die sich
+    //    ueberschreiben liesse, waere ein Geschenk.
+    set_range(state, user_end, data_begin, false, false)
+
+    // 5. `.data` und `.bss` bis zum Ende des Abbilds. Schreibbar, nicht
+    //    ausfuehrbar. Hier stehen auch die Seitentabellen aus `boot.s`;
+    //    sie MUESSEN schreibbar bleiben, der Prozessor traegt dort seine
+    //    Zugriffsbits ein.
+    // BIS ZUR KACHELGRENZE, nicht bis `kernel_end`. Die erste Fassung
+    // hoerte beim letzten Oktett des Abbilds auf -- und liess damit den
+    // Rest derselben aufgeloesten Kachel so stehen, wie die Aufloesung
+    // ihn geerbt hatte: schreibbar und ohne NX. `wx_verify` hat genau
+    // diese 110 Seiten gezaehlt. Der Rest der Kachel ist Halde und
+    // Rahmen, also Daten, also NX.
+    set_range(state, data_begin, (kernel_end + HUGE - 1) & not(HUGE - 1),
+        true, false)
+
+    // 6. Alles darueber: Halde, Rahmen, Kernstapel. Nur NX, am Stueck.
+    nx_above(state, (kernel_end + HUGE - 1) & not(HUGE - 1),
+        kstate.get(state, kstate.MAPPED_GIB))
+    flush()
+    static_guards(state)
+    // ZULETZT, nicht zuerst: bis hierher hat dieser Durchgang selbst in
+    // Seiten geschrieben, die er gerade nur-lesend gemacht hat (die
+    // Seitentabellen liegen in `.bss`, das ist schreibbar -- aber die
+    // Reihenfolge soll auch dann stimmen, wenn sich das einmal
+    // aendert). Ab dieser Zeile gilt der Schreibschutz auch fuer Ring 0.
+    wp_on(state)
+}
+
+// Hinter `smp.stage`: das Trampolin ist kopiert und die weiteren
+// Prozessoren sind oben. Ab jetzt braucht die Seite kein Schreibrecht
+// mehr. Erst danach ist die Zusage "keine Seite ist W und X zugleich"
+// ohne Ausnahme wahr, und erst danach zaehlt `wx_verify`.
+fn tramp_seal(state: u64) {
+    if want(state, M_NOWX) {
+        return
+    }
+    set_range(state, TRAMP_BASE, TRAMP_BASE + TRAMP_PAGES * PAGE, false, true)
+    flush()
+}
+
+// Die vier festen Stapel aus `boot.s` haben je eine eigene Seite unter
+// sich, die nur dafuer da ist, leer zu bleiben. Sie liegen in `.bss`,
+// also in einer Kachel, die der Durchgang oben ohnehin schon aufgeloest
+// hat -- das Herausnehmen kostet hier keinen weiteren Rahmen.
+//
+// WARUM NICHT AUCH `boot_stack`: der wird nur im 32-Bit-Vorspann
+// benutzt, bevor es Seitentabellen gibt, und danach nie wieder.
+fn static_guards(state: u64) -> u64 {
+    if want(state, M_NOGUARD) || want(state, M_NOWX) {
+        return 0
+    }
+    var n: u64 = 0
+    var k: u64 = 75
+    while k <= 78 {
+        let a: u64 = vector(state, k)
+        if a != 0 {
+            if guard_under(state, a) {
+                n = n + 1
+            }
+        }
+        k = k + 1
+    }
+    return n
+}
+
+// ---------------------------------------------------------- nachpruefen
+
+// GEHT DIE TABELLEN WIRKLICH AB, statt einen Merker zu lesen. Fuer jede
+// vorhandene Seite und jede vorhandene Kachel wird gefragt: ist sie
+// schreibbar UND ausfuehrbar? Jede, auf die das zutrifft, ist ein
+// Verstoss und wird gezaehlt. Die Zahl gehoert in den Bericht, und sie
+// muss null sein -- eine Zusage, die man nicht nachzaehlen kann, ist
+// keine.
+fn wx_verify(state: u64) -> u64 {
+    var viol: u64 = 0
+    let gib: u64 = kstate.get(state, kstate.MAPPED_GIB)
+    var g: u64 = 0
+    while g < gib {
+        var j: u64 = 0
+        while j < 512 {
+            let addr: u64 = g * 0x40000000 + j * HUGE
+            let pd: u64 = pd_of(addr)
+            if pd != 0 {
+                let e: u64 = rd(pd, j)
+                if (e & P_PRESENT) != 0 {
+                    if (e & P_HUGE) != 0 {
+                        if (e & P_WRITE) != 0 && (e & P_NX) == 0 {
+                            viol = viol + 1
+                        }
+                    } else {
+                        let pt: u64 = e & ADDR_MASK
+                        var k: u64 = 0
+                        while k < 512 {
+                            let f: u64 = rd(pt, k)
+                            if (f & P_PRESENT) != 0 {
+                                if (f & P_WRITE) != 0 && (f & P_NX) == 0 {
+                                    viol = viol + 1
+                                }
+                            }
+                            k = k + 1
+                        }
+                    }
+                }
+            }
+            j = j + 1
+        }
+        g = g + 1
+    }
+    kstate.set(state, kstate.WX_VIOL, viol)
+    return viol
+}
+
+// ----------------------------------------------------------- Wachseiten
+
+// EINE Seite aus der Identitaetsabbildung nehmen. Der Rahmen bleibt dem
+// Rahmenverwalter entzogen (der Aufrufer hat ihn geholt und gibt ihn
+// nicht zurueck) -- er ist ab jetzt ein Loch, und wer hineinfaellt,
+// bekommt einen Seitenfehler mit einer Adresse, die man lesen kann.
+fn guard_under(state: u64, addr: u64) -> bool {
+    if want(state, M_NOGUARD) {
+        return false
+    }
+    let pt: u64 = split_tile(state, addr)
+    if pt == 0 {
+        return false
+    }
+    let s: u64 = (addr >> 12) & 0x1FF
+    let e: u64 = rd(pt, s)
+    if (e & P_PRESENT) == 0 {
+        return false // schon ein Loch, nichts zu tun
+    }
+    wr(pt, s, e & not(P_PRESENT))
+    flush()
+    kstate.add(state, kstate.GUARD_PAGES, 1)
+    return true
+}
+
+// Zurueck, wenn ein Kernstapel abgeraeumt wird -- sonst waere jede
+// beendete Aufgabe ein Rahmen weniger, und nach genug Aufgaben stuende
+// die Maschine.
+fn unguard(state: u64, addr: u64) -> bool {
+    let pd: u64 = pd_of(addr)
+    if pd == 0 {
+        return false
+    }
+    let i: u64 = (addr >> 21) & 0x1FF
+    let e: u64 = rd(pd, i)
+    if (e & P_PRESENT) == 0 || (e & P_HUGE) != 0 {
+        return false
+    }
+    let pt: u64 = e & ADDR_MASK
+    let s: u64 = (addr >> 12) & 0x1FF
+    let f: u64 = rd(pt, s)
+    if (f & P_PRESENT) != 0 {
+        return false
+    }
+    var bits: u64 = P_PRESENT | P_WRITE
+    if kstate.get(state, kstate.NX_OK) != 0 && !want(state, M_NONX) {
+        bits = bits | P_NX
+    }
+    wr(pt, s, (addr & ADDR_MASK) | bits)
+    flush()
+    return true
+}
+
+// Fuer den Seitenfehlermelder: lag diese Adresse auf einer Wachseite?
+// Das ist der Unterschied zwischen "irgendein Fehler" und "ein Stapel
+// ist uebergelaufen, und zwar hier".
+fn is_guard(state: u64, addr: u64) -> bool {
+    let pd: u64 = pd_of(addr)
+    if pd == 0 {
+        return false
+    }
+    let i: u64 = (addr >> 21) & 0x1FF
+    let e: u64 = rd(pd, i)
+    if (e & P_PRESENT) == 0 || (e & P_HUGE) != 0 {
+        return false
+    }
+    let pt: u64 = e & ADDR_MASK
+    let f: u64 = rd(pt, (addr >> 12) & 0x1FF)
+    return (f & P_PRESENT) == 0
+}
+
+// ---------------------------------------------------------------- ASLR
+
+// WIEVIEL VERWUERFELT WIRD, und warum nicht mehr. Ein Kernstapel ist
+// acht Rahmen; verschoben wird INNERHALB einer Seite, in Schritten von
+// 16 Oktetten (die Ausrichtung, die die Aufrufkonvention verlangt).
+// 4096 / 16 = 256 Moeglichkeiten, also 8 Bit. Mehr waere nur zu holen,
+// indem man den Stapel selbst woandershin legt -- und das kostet
+// Rahmen, weil die Identitaetsabbildung keine Luecken kennt.
+const ASLR_STEP: u64 = 16
+const ASLR_SLOTS: u64 = 256 // 4096 / 16
+
+fn aslr_bits(state: u64) -> u64 {
+    if want(state, M_NOASLR) {
+        return 0
+    }
+    return 8
+}
+
+// Ein Versatz in Oktetten, ausgerichtet auf 16. Kommt aus `rand.bytes`,
+// also aus derselben Quelle wie alles andere Zufaellige in diesem Kern
+// (ChaCha, gesaet aus RDSEED/RDRAND wo vorhanden).
+fn aslr_off(state: u64) -> u64 {
+    if want(state, M_NOASLR) {
+        return 0
+    }
+    var b: [u8; 8] = [0, 0, 0, 0, 0, 0, 0, 0]
+    if rand.bytes(state, (&b[0]) as u64, 2) != 2 {
+        return 0
+    }
+    let raw: u64 = kstate.get8((&b[0]) as u64) | (kstate.get8((&b[1]) as u64) << 8)
+    return (raw % ASLR_SLOTS) * ASLR_STEP
+}
+
+// --------------------------------------------------------- Gegenproben
+//
+// Die drei folgenden bauen den Angriff WIRKLICH, statt ein Bit zu
+// pruefen. Ohne sie waere alles darueber eine Behauptung: ein Kernel,
+// der die Bits setzt und trotzdem durchlaesst, saehe von aussen genauso
+// aus wie einer, der schuetzt.
+
+// Der Kern schreibt in seinen EIGENEN Code. Mit W^X ist das ein #PF
+// (Beendigungscode 63); ohne (`nowx`) laeuft es durch und die Zelle
+// steht danach anders da.
+fn wx_write_probe(state: u64) {
+    var s_try: [u8; 22] = "hard: wx write into \0\0"
+    var s_got: [u8; 12] = "hard: got=\0\0"
+    if !want(state, M_WXWRITE) {
+        return
+    }
+    let a: u64 = vector(state, 73) // die erste Seite des Kerncodes
+    serial.puts((&s_try[0]) as u64)
+    serial.hex(a)
+    serial.nl()
+    // Ab hier darf es nicht mehr zurueckkommen, wenn W^X steht.
+    kstate.set8(a, 0x90 as u8)
+    serial.puts((&s_got[0]) as u64)
+    serial.hex(kstate.get8(a))
+    serial.nl()
+}
+
+// Der Kern springt in seinen eigenen DATENbereich. Mit NX ist das ein
+// #PF mit gesetztem Instruktionsabruf-Bit; ohne laeuft das `ret`, das
+// der Kern selbst dorthin geschrieben hat.
+fn wx_exec_probe(state: u64) {
+    var s_try: [u8; 20] = "hard: wx call into \0"
+    var s_back: [u8; 21] = "hard: came back (!)\0\0"
+    if !want(state, M_WXEXEC) {
+        return
+    }
+    let f: u64 = mem.frame_alloc(state)
+    if f == 0 {
+        return
+    }
+    kstate.set8(f, 0xC3 as u8) // ein einzelnes `ret`, der Rueckweg ist definiert
+    serial.puts((&s_try[0]) as u64)
+    serial.hex(f)
+    serial.nl()
+    asm("call rax", in("rax") f, clobber("memory"))
+    serial.puts((&s_back[0]) as u64)
+    serial.nl()
+}
+
+// Der Kern laeuft seinen eigenen Stapel hinunter, bis er unten
+// ankommt. Mit einer Wachseite ist das ein #PF auf einer Adresse
+// UNTERHALB des Stapels; ohne schreibt er in den Rahmen des Nachbarn
+// und niemand merkt es.
+//
+// Geschrieben wird in Schritten von 256 Oktetten, damit die Wachseite
+// (4096 Oktette) nicht uebersprungen werden kann -- ein Sprung ueber
+// eine ganze Seite hinweg ist genau der Fall, gegen den eine einzelne
+// Wachseite NICHT hilft, und das steht in docs/HAERTUNG.md.
+fn kblow_probe(state: u64) {
+    var s_try: [u8; 24] = "hard: kstack blow from \0"
+    var s_back: [u8; 24] = "hard: blow survived (!)\0"
+    if !want(state, M_KBLOW) {
+        return
+    }
+    let rsp: u64 = asm("mov rax, rsp", out("rax"))
+    serial.puts((&s_try[0]) as u64)
+    serial.hex(rsp)
+    serial.nl()
+    // WIE WEIT HINUNTER, und warum nicht einfach "weit". Die erste
+    // Fassung lief 100 KiB abwaerts und schlug auch OHNE Wachseiten an
+    // -- sie war da laengst durch `.data` hindurch und in `.rodata`,
+    // und die ist seit dem W^X-Durchgang nur lesbar. Eine Gegenprobe,
+    // die in beiden Faellen faellt, beweist nichts.
+    //
+    // Also wird genau bis zur Wachseite DIESES Stapels gelaufen: die
+    // groesste der vier, die noch unter dem Stapelzeiger liegt. Mit
+    // Wache schlaegt der Schreibzugriff dort an; ohne Wache ist es
+    // gewoehnliches .bss, der Lauf kommt durch und sagt das.
+    var ziel: u64 = 0
+    var k: u64 = 75
+    while k <= 78 {
+        let a: u64 = vector(state, k)
+        if a != 0 && a < rsp && a > ziel {
+            ziel = a
+        }
+        k = k + 1
+    }
+    if ziel == 0 {
+        return
+    }
+    var p: u64 = rsp & not(PAGE - 1)
+    while p > ziel {
+        p = p - 256
+        kstate.set8(p, 0x41 as u8)
+    }
+    serial.puts((&s_back[0]) as u64)
+    serial.nl()
+}
+
+// --------------------------------------------------------------- IOMMU
+//
+// GELESEN, NICHT GEBAUT. Die Begruendung steht oben und ausfuehrlich in
+// docs/HAERTUNG.md. Was hier passiert: die Tabelle suchen, ihren Kopf
+// auswerten, die Einheiten zaehlen, das Ergebnis melden. Was hier NICHT
+// passiert: Domaenen, Wurzeltabellen, Adressuebersetzung. Ein halber
+// Adressuebersetzer, der nichts uebersetzt, waere schlechter als
+// keiner -- er saehe im Bericht so aus, als sei etwas geschuetzt.
+
+const T_LENGTH: u64 = 4 // Kopf einer ACPI-Tabelle: Laenge
+const DMAR_UNITS: u64 = 48 // erste Struktur hinter Kopf + Breite + Flags
+
+fn iommu_scan(state: u64) -> u64 {
+    // `acpi.table` will einen ZEIGER auf vier Oktette Kennung, keine
+    // Zahl -- so wie `power.acpi_off` es mit 'FACP' macht. Die erste
+    // Fassung uebergab die Kennung als Wert, und der Kern lief prompt
+    // auf einen #PF mit cr2=0x52414d44: er hatte 'DMAR' als Adresse
+    // gelesen.
+    var w_dmar: [u8; 5] = "DMAR\0"
+    var w_ivrs: [u8; 5] = "IVRS\0"
+    let d: u64 = acpi.table(state, (&w_dmar[0]) as u64)
+    if d != 0 {
+        kstate.set(state, kstate.IOMMU_KIND, 1)
+        kstate.set(state, kstate.IOMMU_UNITS, count_dmar(d))
+        kstate.set(state, kstate.IOMMU_BASE, first_drhd(d))
+        return 1
+    }
+    let v: u64 = acpi.table(state, (&w_ivrs[0]) as u64)
+    if v != 0 {
+        kstate.set(state, kstate.IOMMU_KIND, 2)
+        kstate.set(state, kstate.IOMMU_UNITS, count_ivrs(v))
+        kstate.set(state, kstate.IOMMU_BASE, 0)
+        return 2
+    }
+    kstate.set(state, kstate.IOMMU_KIND, 0)
+    return 0
+}
+
+// Die Strukturen der DMAR liegen hintereinander, jede mit Art (2
+// Oktette) und Laenge (2 Oktette) im Kopf. Art 0 ist eine DRHD -- eine
+// Einheit der Adressuebersetzung. Gezaehlt werden nur die.
+fn count_dmar(t: u64) -> u64 {
+    let len: u64 = kstate.get32(t + T_LENGTH)
+    if len <= DMAR_UNITS {
+        return 0
+    }
+    var p: u64 = t + DMAR_UNITS
+    let ende: u64 = t + len
+    var n: u64 = 0
+    while p + 4 <= ende {
+        let art: u64 = kstate.get16(p)
+        let l: u64 = kstate.get16(p + 2)
+        if l == 0 {
+            return n // eine Laenge 0 waere eine Endlosschleife
+        }
+        if art == 0 {
+            n = n + 1
+        }
+        p = p + l
+    }
+    return n
+}
+
+// Die Registerbasis der ersten DRHD. Sie steht 8 Oktette hinter dem
+// Kopf der Struktur und ist die Adresse, an der ein spaeterer
+// Adressuebersetzer anfinge.
+fn first_drhd(t: u64) -> u64 {
+    let len: u64 = kstate.get32(t + T_LENGTH)
+    if len <= DMAR_UNITS {
+        return 0
+    }
+    var p: u64 = t + DMAR_UNITS
+    let ende: u64 = t + len
+    while p + 16 <= ende {
+        let art: u64 = kstate.get16(p)
+        let l: u64 = kstate.get16(p + 2)
+        if l == 0 {
+            return 0
+        }
+        if art == 0 {
+            return __mmio_read64((p + 8) as *mut u64)
+        }
+        p = p + l
+    }
+    return 0
+}
+
+// IVRS: dieselbe Bauform, Art 0x10 und 0x11 sind die Einheiten.
+fn count_ivrs(t: u64) -> u64 {
+    let len: u64 = kstate.get32(t + T_LENGTH)
+    if len <= 48 {
+        return 0
+    }
+    var p: u64 = t + 48
+    let ende: u64 = t + len
+    var n: u64 = 0
+    while p + 4 <= ende {
+        let art: u64 = kstate.get8(p)
+        let l: u64 = kstate.get16(p + 2)
+        if l == 0 {
+            return n
+        }
+        if art == 0x10 || art == 0x11 {
+            n = n + 1
+        }
+        p = p + l
+    }
+    return n
+}
+
+fn iommu_report(state: u64) {
+    var s_a: [u8; 14] = "hard: iommu=\0\0"
+    var s_no: [u8; 6] = "keine\0"
+    var s_vt: [u8; 5] = "vt-d\0"
+    var s_am: [u8; 7] = "amd-vi\0"
+    var s_u: [u8; 9] = "  units=\0"
+    var s_b: [u8; 8] = "  base=\0"
+    let k: u64 = kstate.get(state, kstate.IOMMU_KIND)
+    serial.puts((&s_a[0]) as u64)
+    if k == 1 {
+        serial.puts((&s_vt[0]) as u64)
+    } else {
+        if k == 2 {
+            serial.puts((&s_am[0]) as u64)
+        } else {
+            serial.puts((&s_no[0]) as u64)
+        }
+    }
+    serial.puts((&s_u[0]) as u64)
+    serial.dec(kstate.get(state, kstate.IOMMU_UNITS))
+    serial.puts((&s_b[0]) as u64)
+    serial.hex(kstate.get(state, kstate.IOMMU_BASE))
+    serial.nl()
+}
+
+// -------------------------------------------------------------- melden
+
+fn report(state: u64) {
+    var s_a: [u8; 14] = "hard: splits=\0"
+    var s_b: [u8; 9] = "  pages=\0"
+    var s_c: [u8; 6] = "  ro=\0"
+    var s_d: [u8; 6] = "  nx=\0"
+    var s_e: [u8; 8] = "  viol=\0"
+    var s_f: [u8; 13] = "hard: guard=\0"
+    var s_g: [u8; 8] = "  hits=\0"
+    var s_h: [u8; 13] = "  aslr_bits=\0"
+    var s_i: [u8; 10] = "  ustack=\0"
+    var s_j: [u8; 10] = "  kstack=\0"
+    serial.puts((&s_a[0]) as u64)
+    serial.dec(kstate.get(state, kstate.WX_SPLITS))
+    serial.puts((&s_b[0]) as u64)
+    serial.dec(kstate.get(state, kstate.WX_PAGES))
+    serial.puts((&s_c[0]) as u64)
+    serial.dec(kstate.get(state, kstate.WX_RO))
+    serial.puts((&s_d[0]) as u64)
+    serial.dec(kstate.get(state, kstate.WX_NX))
+    serial.puts((&s_e[0]) as u64)
+    serial.dec(kstate.get(state, kstate.WX_VIOL))
+    serial.nl()
+    serial.puts((&s_f[0]) as u64)
+    serial.dec(kstate.get(state, kstate.GUARD_PAGES))
+    serial.puts((&s_g[0]) as u64)
+    serial.dec(kstate.get(state, kstate.GUARD_HITS))
+    serial.puts((&s_h[0]) as u64)
+    serial.dec(aslr_bits(state))
+    serial.puts((&s_i[0]) as u64)
+    serial.hex(kstate.get(state, kstate.USTACK_RND))
+    serial.puts((&s_j[0]) as u64)
+    serial.hex(kstate.get(state, kstate.KSTACK_RND))
+    serial.nl()
+}
+
+// -------------------------------------------------------------- Suche
+
+// Dieselbe Suche wie in `guard.parse` und `fb.parse`: jedes Modul liest
+// sich sein eigenes Wort aus der Kommandozeile, statt dass eine Stelle
+// alle kennt.
+fn find(heu: u64, nadel: u64, n: u64) -> u64 {
+    if heu == 0 || n == 0 {
+        return 0
+    }
+    var i: u64 = 0
+    while true {
+        let c: u64 = kstate.get8(heu + i)
+        if c == 0 {
+            return 0
+        }
+        var k: u64 = 0
+        var gleich: bool = true
+        while k < n {
+            let a: u64 = kstate.get8(heu + i + k)
+            if a == 0 || a != kstate.get8(nadel + k) {
+                gleich = false
+                k = n
+            } else {
+                k = k + 1
+            }
+        }
+        if gleich {
+            return heu + i
+        }
+        i = i + 1
+    }
+    return 0
+}

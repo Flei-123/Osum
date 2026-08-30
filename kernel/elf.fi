@@ -66,7 +66,7 @@ export {
     spawn, build, load, say_reason, errno_of,
     R_OK, R_NOFILE, R_ISDIR, R_SHORT, R_MAGIC, R_CLASS, R_ENDIAN,
     R_VERSION, R_TYPE, R_MACHINE, R_SIZES, R_PHNUM, R_PHOFF, R_SEGFILE,
-    R_MEMSZ, R_RANGE, R_ALIGN, R_OVERLAP, R_NOMEM, R_ENTRY, R_READ,
+    R_MEMSZ, R_RANGE, R_ALIGN, R_OVERLAP, R_NOMEM, R_ENTRY, R_READ, R_WX,
     R_NOLOAD, R_ARGS
 }
 
@@ -107,6 +107,21 @@ const R_PERM: u64 = 23
 // vier Stufen tief -- oder im Kreis. Linux nennt das ELOOP und hoert nach
 // vier Stufen auf; dieser Kern tut dasselbe.
 const R_INTERP: u64 = 24
+
+// RUNDE HAERTUNG: EIN SEGMENT, DAS SCHREIBBAR UND AUSFUEHRBAR ZUGLEICH
+// SEIN WILL, WIRD ABGEWIESEN.
+//
+// Das Linkerskript `kernel/user/user.ld` sagt seit Runde K1, es mache
+// W^X "nachpruefbar", und es haelt sich daran: Code, Konstanten und
+// Daten sind drei Segmente in eigenen Seiten. Nur PRUEFTE es niemand.
+// `segment` las `PF_W` und `PF_X` aus dem Programmkopf und reichte
+// beide an `proc.map_page` durch -- eine Datei mit einem RWX-Segment
+// bekam also eine Seite, die schreibbar und ausfuehrbar war, und der
+// Kern hatte dem Programm damit genau das Loch aufgemacht, das W^X
+// zustopfen soll. Der Lader ist die einzige Stelle, an der das
+// auffallen kann; ein spaeterer Durchgang ueber die Seitentabellen
+// wuesste nicht mehr, welches Recht gewollt war.
+const R_WX: u64 = 25
 
 // ---------------------------------------------------------- the format
 
@@ -312,6 +327,13 @@ fn segment(state: u64, t: u64, ino: u64, ph: u64, size: u64) -> u64 {
     }
     let writable: bool = (flags & PF_W) != 0
     let runnable: bool = (flags & PF_X) != 0
+    // RUNDE HAERTUNG: hier und nicht spaeter. Gezaehlt wird auch dann,
+    // wenn der Aufrufer den Fehler verschluckt -- die Zahl gehoert in
+    // den Bericht.
+    if writable && runnable {
+        kstate.add(state, kstate.ELF_WX_REFUSED, 1)
+        return R_WX
+    }
     let zeroing: bool = !kstate.mode_on(state, kstate.M_NOBSS)
     var done: u64 = 0
     while done < memsz {
@@ -1130,6 +1152,7 @@ fn say_text_d(r: u64) {
     var t16: [u8; 17] = "not page aligned\0"
     var t17: [u8; 22] = "two segments one page\0"
     var t18: [u8; 14] = "out of frames\0"
+    var t25: [u8; 24] = "segment wants W and X\0\0\0"
     var tx: [u8; 8] = "unknown\0"
     if r == R_RANGE {
         serial.puts((&t15[0]) as u64)
@@ -1145,6 +1168,10 @@ fn say_text_d(r: u64) {
     }
     if r == R_NOMEM {
         serial.puts((&t18[0]) as u64)
+        return
+    }
+    if r == R_WX {
+        serial.puts((&t25[0]) as u64)
         return
     }
     serial.puts((&tx[0]) as u64)

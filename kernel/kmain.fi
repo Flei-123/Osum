@@ -66,6 +66,7 @@ import rand
 import tty
 import signal
 import arch.x86_64.guard
+import hard
 import bootmod
 import ab
 import hwdiag
@@ -196,6 +197,7 @@ fn kernel_main(mbi: u64, vectors: u64, state: u64, kernel_end: u64,
     // `kernel_main` sie nur als Argument hat.
     kstate.set(state, kstate.MBI, mbi)
     guard.parse(state, cmd)
+    hard.parse(state, cmd)
     bootmod.parse(state, cmd)
     hv.parse(state, cmd)
     // ROUND NETMON: the accounting is on from the first instruction, so
@@ -342,6 +344,18 @@ fn kernel_main(mbi: u64, vectors: u64, state: u64, kernel_end: u64,
     guard.apply(state)
     guard.report(state)
     proc.map_programs(state)
+    // ================================ RUNDE HAERTUNG: W^X FUER DEN KERN
+    //
+    // HIER UND NICHT FRUEHER: `map_programs` setzt die Benutzerbits auf
+    // `.utext` und loest dabei selbst eine Kachel auf. Ein Durchgang
+    // davor wuerde von dieser Aufloesung ueberschrieben. Der Durchgang
+    // hier laesst Adressen und Benutzerbits stehen und ruehrt nur W und
+    // NX an.
+    //
+    // HIER UND NICHT SPAETER: alles, was danach kommt, laeuft schon mit
+    // einem Kern, dessen Code nicht mehr beschreibbar ist -- und genau
+    // das soll gemessen werden.
+    hard.wx_apply(state, kernel_end)
     // Die beiden Gegenproben. Sie tun nichts, solange die
     // Kommandozeile sie nicht ausdruecklich verlangt -- und wenn sie
     // etwas tun, endet der Lauf hier im Trap-Melder. Genau das ist
@@ -462,6 +476,15 @@ fn kernel_main(mbi: u64, vectors: u64, state: u64, kernel_end: u64,
     //     three and hands them work.
     smp.stage(state)
 
+    // RUNDE HAERTUNG: das Trampolin der weiteren Prozessoren liegt bei
+    // 0x8000 und musste bis hierher schreibbar UND ausfuehrbar sein --
+    // `smp.stage` kopiert es erst dorthin. Jetzt ist es kopiert und die
+    // Kerne sind oben; ab hier ist die Seite nur noch lesbar und
+    // ausfuehrbar. Erst DANACH gilt die Zusage ohne Ausnahme, und erst
+    // danach wird nachgezaehlt.
+    hard.tramp_seal(state)
+    hard.wx_verify(state)
+
 
     // 7i. RUNDE K12: ein Wirt fuer fremde Betriebssysteme. Hier und
     //     nicht frueher, aus drei Gruenden: der Rahmenverwalter muss
@@ -494,6 +517,19 @@ fn kernel_main(mbi: u64, vectors: u64, state: u64, kernel_end: u64,
     // ohne eine einzige Fensteroeffnung waere ein Kernel, der
     // Ring-3-Speicher nie anfasst.
     guard.report_aps(state)
+    // RUNDE HAERTUNG: die Zahlen des Durchgangs, und was die Maschine an
+    // Adressuebersetzung fuer Geraete mitbringt. Die IOMMU wird GELESEN
+    // und gemeldet, nicht eingeschaltet -- die Begruendung steht in
+    // docs/HAERTUNG.md.
+    hard.iommu_scan(state)
+    hard.iommu_report(state)
+    hard.report(state)
+    // Die drei Gegenproben. Sie tun nichts, solange die Kommandozeile
+    // sie nicht verlangt; wenn sie etwas tun, endet der Lauf im
+    // Trap-Melder. Genau das ist der Nachweis.
+    hard.wx_write_probe(state)
+    hard.wx_exec_probe(state)
+    hard.kblow_probe(state)
     // ...und ob das Boot-Modul den ganzen Lauf unversehrt ueberstanden
     // hat. Haette `mem.scan` seinen Bereich nicht reserviert, stuende
     // hier jetzt eine andere Summe.

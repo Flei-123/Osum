@@ -47,6 +47,7 @@ import arch.x86_64.user
 import file
 import handle
 import cap
+import hard
 
 export {
     create, user_start, free_space, reap, translate, user_ok, map_programs,
@@ -172,6 +173,15 @@ const ARG_RESUME: u64 = 0xF04B
 
 fn vector(state: u64, i: u64) -> u64 {
     return __mmio_read64((kstate.get(state, kstate.VECTORS) + i * 8) as *mut u64)
+}
+
+// Der Versatz des Nutzerstapels. Wird gemerkt, damit der Testlaeufer
+// ueber viele Starts hinweg die Entropie ausrechnen kann -- eine
+// Verwuerfelung, deren Streuung niemand nachmisst, ist eine Behauptung.
+fn ustack_off(state: u64) -> u64 {
+    let o: u64 = hard.aslr_off(state)
+    kstate.set(state, kstate.USTACK_RND, o)
+    return o
 }
 
 fn nx(state: u64) -> u64 {
@@ -854,7 +864,20 @@ fn create(state: u64, prog: u64, arg: u64, prio: u64) -> u64 {
         return 0
     }
     sched.tset(state, i, sched.T_ENTRY, vector(state, V_USER_MAIN))
-    sched.tset(state, i, sched.T_USTACK, USER_TOP - 16)
+    // ===================== RUNDE HAERTUNG: DER NUTZERSTAPEL WANDERT
+    //
+    // Der Deckel des Stapels geht um einen zufaelligen, auf 16
+    // ausgerichteten Betrag nach unten. Damit liegt jede
+    // Ruecksprungadresse dieses Prozesses bei jedem Start woanders.
+    //
+    // NUR HIER, und das ist ehrlich zu sagen: Programme VON DER PLATTE
+    // bekommen ihren Stapelzeiger in `elf.fi`, und der zeigt auf den
+    // Argumentblock. Dessen Seite hat ein festes Layout (argc bei 0,
+    // die Zeiger ab 8, die Zeichenketten ab 80, die Umgebung ab
+    // ENV_OFF) und ist Teil der Startvereinbarung jedes Programms.
+    // Den zu verschieben ist keine Zeile, sondern ein Umbau -- er
+    // steht in docs/HAERTUNG.md als offene Kante.
+    sched.tset(state, i, sched.T_USTACK, USER_TOP - 16 - ustack_off(state))
     sched.tset(state, i, sched.T_ARG, prog)
     sched.tset(state, i, sched.T_WORK, arg)
     inherit(state, sched.tget(state, i, sched.T_PARENT), i)
@@ -886,7 +909,20 @@ fn create_cap(state: u64, prog: u64, rights: u64, prio: u64) -> u64 {
         return 0
     }
     sched.tset(state, i, sched.T_ENTRY, vector(state, V_USER_MAIN))
-    sched.tset(state, i, sched.T_USTACK, USER_TOP - 16)
+    // ===================== RUNDE HAERTUNG: DER NUTZERSTAPEL WANDERT
+    //
+    // Der Deckel des Stapels geht um einen zufaelligen, auf 16
+    // ausgerichteten Betrag nach unten. Damit liegt jede
+    // Ruecksprungadresse dieses Prozesses bei jedem Start woanders.
+    //
+    // NUR HIER, und das ist ehrlich zu sagen: Programme VON DER PLATTE
+    // bekommen ihren Stapelzeiger in `elf.fi`, und der zeigt auf den
+    // Argumentblock. Dessen Seite hat ein festes Layout (argc bei 0,
+    // die Zeiger ab 8, die Zeichenketten ab 80, die Umgebung ab
+    // ENV_OFF) und ist Teil der Startvereinbarung jedes Programms.
+    // Den zu verschieben ist keine Zeile, sondern ein Umbau -- er
+    // steht in docs/HAERTUNG.md als offene Kante.
+    sched.tset(state, i, sched.T_USTACK, USER_TOP - 16 - ustack_off(state))
     sched.tset(state, i, sched.T_ARG, prog)
     let h: u64 = cap.insert(state, i, cap.K_STREAM, rights, file.CON_OUT)
     sched.tset(state, i, sched.T_WORK, cap.handle_gen(h))
