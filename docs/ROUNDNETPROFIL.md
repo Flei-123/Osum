@@ -312,6 +312,67 @@ Rechtelauf mit `su justin`.
 
 ---
 
+## 7b. Was diese Runde an FREMDEN Abnahmen verändert hat — und was schon vorher rot war
+
+**GEÄNDERT, genau eine Erwartung, und sie ist der Punkt der Runde:**
+
+`tools/net/run.sh` nagelt den ausgehandelten Merkmalssatz von virtio-net
+fest. Er ist mit der Steuerwarteschlange ein anderer:
+
+```
+vorher  nic: queue=64  features=0x100010020   MAC, STATUS, VERSION_1
+jetzt   nic: queue=64  features=0x100830020   dazu CTRL_VQ (17), CTRL_MAC_ADDR (23)
+```
+
+Die Zeile im Läufer wurde angepasst, mit der Begründung darüber. Kein
+Test wurde abgeschaltet. Die Gegenprobe steht im selben Kern: mit
+`nomacvq` steht wieder `0x100010020` da, und die Karte kann ihre Adresse
+messbar nicht mehr ändern.
+
+**SCHON VORHER ROT, gemessen im Vergleich mit einem eigenen Arbeitsbaum
+auf `mergeline2` (`/root/netprofil-base`, 54bf135):**
+
+| Abschnitt | auf mergeline2 | auf netprofil |
+|---|---|---|
+| `tools/desktop/run.sh` | `FAIL the settings did not report their geometry -- no clicks can be computed` | **dasselbe, Wort für Wort** |
+| `tools/i18n/run.sh` | 9 FAIL (Knopftexte und Bildpunktprüfungen am Einstellungsfenster: `'' erwartet 'Apply'`, `'' erwartet 'Übernehmen'`, …) | 10 FAIL derselben Art; der zehnte ist ein abgestürzter Unterlauf (`alt-k15.txt: No such file or directory`) unter Last 20 auf 12 Kernen |
+| `tools/net/run.sh` | 71 bestanden, **4 FAIL** (`/bin/wget` bekam auf dem Draht keine Antwort) | 74 bestanden, **1 FAIL** (`through 20 % loss: 259312 von 262144`) |
+
+Die Ursache der Einstellungs-Fehlschläge steht seit Runde LOOK **im
+Quelltext von `kernel/user/settings.fi` selbst**: die Seite
+„Darstellung" will 674 Bildpunkte Höhe, das Fenster hat 542, und der
+Knopf `apply` liegt bei y=648 — also außerhalb. Diese Runde hat daran
+nichts geändert und auch nichts verschlimmert: der neue Reiter ist beim
+Start verborgen, und `apply` liegt danach an derselben Stelle wie
+vorher (`x=10 y=648 w=140 h=26`, in beiden Bäumen).
+
+Die Fehlschläge in `tools/net/run.sh` sind auf diesem Wirt
+lastabhängig — der Bau-Server trug während der Messung drei weitere
+Runden gleichzeitig (Lastmittel 15 bis 23 auf 12 Kernen). Der eine
+verbliebene ist die TCP-Wiederholung durch 20 Prozent Paketverlust, und
+er kam über drei Läufe auf 224 272, 259 312 und 262 144 Oktette — er
+wird mit sinkender Last grün. Auf `mergeline2` fielen unter derselben
+Last vier ANDERE Zusagen desselben Läufers.
+
+**NEU DAZUGEKOMMEN und grün: `tools/netprofil/run.sh` — 68 von 68
+Zusagen**, Abschnitt 31 in `./test.sh`, eingetragen in `SERIELL_RE`
+(er baut denselben Namensraum wie net/netmon/netview/tunnel).
+
+**Zwei stille Grenzen nebenbei gefunden und behoben** — beide waren
+Fehler, die niemand bemerkt hätte:
+
+* `wlib.MAXWD` war **96**, und `kernel/user/settings.fi` hatte schon vor
+  dieser Runde **89** Bedienelemente. Bei Überschreitung gibt `wlib.add`
+  stumm die **0** zurück — also die Nummer des ERSTEN Bedienelements.
+  Ein Klick auf ein Element, das es nicht gibt, hätte irgendwo eine
+  Farbe umgestellt. Jetzt 160.
+* `settings.merke` warf alles über **64** weg. 25 der 89 Bedienelemente
+  waren damit in keinem Reiter eingetragen — und ein Bedienelement ohne
+  Reiter wird von `zeige_reiter` weder versteckt noch gezeigt, es bleibt
+  einfach sichtbar. Jetzt ebenfalls 160.
+
+---
+
 ## 8. Was für WLAN vorbereitet ist — und was ausdrücklich nicht
 
 ### Vorbereitet (steht im Format, wird gelesen und geschrieben)
