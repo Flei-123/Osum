@@ -35,6 +35,7 @@
 profile kernel
 
 import cap
+import dispsave
 import errno
 import fb
 import fs
@@ -190,7 +191,89 @@ fn do_dispget(state: u64, field: u64) -> u64 {
     if field == sys.DG_TOOBIG {
         return vmode.toobig(state)
     }
+    // ============================================ RUNDE CUSTOMRES
+    if field == sys.DG_CUSTWHY {
+        return vmode.cust_why(state)
+    }
+    if field == sys.DG_CUSTNUM {
+        return vmode.cust_num(state)
+    }
+    if field == sys.DG_CUSTOMS {
+        return vmode.customs(state)
+    }
+    if field == sys.DG_MINW {
+        return vmode.MIN_W
+    }
+    if field == sys.DG_MINH {
+        return vmode.MIN_H
+    }
+    if field == sys.DG_MAXW {
+        return vmode.MAX_W
+    }
+    if field == sys.DG_MAXH {
+        return vmode.MAX_H
+    }
+    if field == sys.DG_SAVEOK {
+        if vmode.save_found(state) {
+            return 1
+        }
+        return 0
+    }
+    if field == sys.DG_SAVEW {
+        return vmode.save_w(state)
+    }
+    if field == sys.DG_SAVEH {
+        return vmode.save_h(state)
+    }
+    if field == sys.DG_SAVEB {
+        return vmode.save_bpp(state)
+    }
+    if field == sys.DG_SAVETRY {
+        return vmode.save_try(state)
+    }
+    if field == sys.DG_SAVEWHY {
+        return vmode.save_why(state)
+    }
+    if field == sys.DG_SAVEAPP {
+        if vmode.save_applied(state) {
+            return 1
+        }
+        return 0
+    }
     return sys.neg(errno.E_INVAL)
+}
+
+// Die Rueckgabe des Modustreibers in eine errno-Nummer. Sie steht
+// EINMAL, weil `set_mode`, `set_custom` und der Startvorgang dieselben
+// Werte liefern -- drei Uebersetzungen waeren drei Gelegenheiten,
+// dasselbe verschieden zu nennen.
+//
+// DER GRUND GEHT DABEI VERLOREN, und deshalb gibt es DG_CUSTWHY: eine
+// errno-Nummer hat drei Buchstaben Platz fuer "die Fensterplaetze dieses
+// Kernels tragen nur 12 582 912 Oktette, dein Bild braucht 14 745 600".
+fn disp_rc(r: u64) -> u64 {
+    if r == vmode.E_OK {
+        return 0
+    }
+    if r == vmode.E_NOMODE {
+        return sys.neg(errno.E_INVAL)
+    }
+    if r == vmode.E_DEPTH {
+        return sys.neg(errno.E_INVAL)
+    }
+    if r == vmode.E_NOMEM {
+        return sys.neg(errno.E_NOMEM)
+    }
+    if r == vmode.E_VRAM {
+        return sys.neg(errno.E_NOSPC)
+    }
+    if r == vmode.E_LIMIT {
+        return sys.neg(errno.E_NOSPC)
+    }
+    if r == vmode.E_NOCARD {
+        return sys.neg(errno.E_NODEV)
+    }
+    return sys.neg(errno.E_IO)
 }
 
 // WER DEN BILDSCHIRM UMSTELLT, STELLT IHN FUER ALLE UM. Es gibt einen
@@ -211,20 +294,7 @@ fn do_dispset(state: u64, me: u64, field: u64, v: u64) -> u64 {
     if field == sys.DS_MODE {
         let w: u64 = (v >> 16) & 0xFFFF
         let h: u64 = v & 0xFFFF
-        let r: u64 = vmode.set_mode(state, w, h, 32)
-        if r == vmode.E_OK {
-            return 0
-        }
-        if r == vmode.E_NOMODE {
-            return sys.neg(errno.E_INVAL)
-        }
-        if r == vmode.E_NOMEM {
-            return sys.neg(errno.E_NOMEM)
-        }
-        if r == vmode.E_DEPTH {
-            return sys.neg(errno.E_INVAL)
-        }
-        return sys.neg(errno.E_IO)
+        return disp_rc(vmode.set_mode(state, w, h, 32))
     }
     if field == sys.DS_ROT {
         if !fb.set_rotation(state, v) {
@@ -272,8 +342,50 @@ fn do_dispset(state: u64, me: u64, field: u64, v: u64) -> u64 {
         fb.flush(state)
         return 0
     }
+    if field == sys.DS_CUSTOM {
+        // RUNDE CUSTOMRES: DIE FREIE EINGABE. Drei Zahlen, drei
+        // Schranken, und bei Ablehnung stehen Grund und Zahl in
+        // DG_CUSTWHY/DG_CUSTNUM bereit -- der Aufrufer bekommt also
+        // beides: einen Fehlerwert, mit dem er rechnen kann, und einen
+        // Satz, den er hinschreiben kann.
+        let w: u64 = (v >> 32) & 0xFFFF
+        let h: u64 = (v >> 16) & 0xFFFF
+        let b: u64 = v & 0xFFFF
+        return disp_rc(vmode.set_custom(state, w, h, b))
+    }
+    if field == sys.DS_CHECK {
+        // NUR PRUEFEN. Der Bildschirm wird dabei nicht angefasst -- das
+        // ist die Voraussetzung dafuer, dass ein Bedienfeld schon
+        // WAEHREND des Tippens sagen kann, ob es gehen wird.
+        let w: u64 = (v >> 32) & 0xFFFF
+        let h: u64 = (v >> 16) & 0xFFFF
+        let b: u64 = v & 0xFFFF
+        let why: u64 = vmode.check_custom(state, w, h, b)
+        if why == vmode.CW_OK {
+            return 0
+        }
+        return disp_rc(vmode.why_to_e(why))
+    }
+    if field == sys.DS_SAVE {
+        // Den LAUFENDEN Modus auf die Platte, mit Zaehlerstand null.
+        if !dispsave.merken(state, fb.panel_w(state), fb.panel_h(state),
+            fb.bpp(state)) {
+            return sys.neg(errno.E_IO)
+        }
+        return 0
+    }
     if field == sys.DS_CONFIRM {
+        // BESTAETIGEN HEISST SEIT DIESER RUNDE ZWEIERLEI, und beides
+        // haengt an derselben Aussage des Benutzers -- "ich sehe diesen
+        // Bildschirm":
+        //   1. die Fuenfzehn-Sekunden-Frist ist beantwortet;
+        //   2. der Modus darf den Neustart ueberleben, und sein
+        //      Erprobungszaehler faengt wieder bei null an.
+        // Ein bestaetigter Modus, der beim naechsten Start weg waere,
+        // waere eine Bestaetigung ohne Wirkung.
         vmode.confirm(state)
+        let _sp: bool = dispsave.merken(state, fb.panel_w(state),
+            fb.panel_h(state), fb.bpp(state))
         return 0
     }
     if field == sys.DS_REVERT {
