@@ -1170,6 +1170,20 @@ lauf "29. echte Umlaute ueberall, wo Text auf dem Schirm steht (tools/umlaut/run
 lauf "32. der Vorlagenladen: zehn Erscheinungen, gemessen statt angeschaut (tools/themestore/run.sh, Runde THEMESTORE)" \
      tools/themestore/run.sh themestore '^THEMESTORE: |^  OK    (alle zehn|die zehn Vorlagen|dieselben Kontraste|keine Vorlage|der Kontrast|anwenden|die ausgegebene Datei|sie traegt|und die Kante|das Konto|die Seite|ein Bild je|und in keiner)'
 
+# ABSCHNITT 33 -- RUNDE SOFTUI. Die weiche Oberflaeche: der Schatten
+# aus einer vorberechneten Maske statt aus Ringen, die drei
+# Fensterknoepfe mit ihrem roten Schliessen-Knopf, der Fokus ohne
+# knallige Farbe, der Kontrast -- und vier Vollbilder, die GEMESSEN
+# werden. Abschnitt A ist die Gegenprobe, die die Runde ueberhaupt
+# landen laesst: `classic` muss BILDPUNKTGENAU so aussehen wie vorher
+# (gemessen: 0 von 480000 anders); ohne Grundlinienbild wird nur dieser
+# Abschnitt uebersprungen, nicht behauptet.
+#
+# RUNDE MERGE-2: auch dieser Laeufer war auf dem Zweig nie in test.sh
+# angemeldet -- der dritte nach usbimg und themestore.
+lauf "33. die weiche Oberflaeche: Schatten, Knoepfe, Fokus, Kontrast (tools/softui/run.sh, Runde SOFTUI)" \
+     tools/softui/run.sh softui '^SOFTUI: |^   (OK|--) +(classic|Marken|ctrl_h|Formwoerter|und die Datei|der Schatten|Maske|Ringe|ohne Schatten|die drei|der rote|hover|Fokus|Kontrast|kein Bild|Abschnitt A|[0-9]+ Beanstandungen)'
+
 # Hier laufen die angemeldeten Abschnitte -- bei OSUM_JOBS=1 sind sie
 # oben schon gelaufen und das hier tut nichts.
 abschnitte_abarbeiten

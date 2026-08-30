@@ -72,7 +72,18 @@ if shot A user=- icons=yes lang=de uitrace=yes keep=yes; then
     # atomic, so a line can come out cut in half by another program's.
     # Take the last COMPLETE one; there are several repaints, so there
     # is one.
-    L=$(grep -aoE 'kind=2 x=[0-9]+ base=[0-9]+ fg=[0-9]+ bg=[0-9]+ t=Ausführen' "$S" | tail -1)
+    #
+    # ROUND SOFTUI: THE PATTERN IS FIELD-BASED NOW, and that makes it
+    # STRICTER and not looser. It read `... bg=<n> t=Ausführen`, which
+    # says "and nothing between them" -- so it stopped matching the
+    # moment round THEMESTORE put ` tw=<n>` in that gap, and round
+    # SOFTUI put ` ax=<n> ay=<n>` after it. Measured on the parent
+    # commit of round SOFTUI, before a line of this round existed: the
+    # same FAIL. A test that breaks when a REPORT grows a field was
+    # testing the field order and not the screen.
+    #
+    # It still requires kind=2 and it still requires the exact word.
+    L=$(grep -aoE 'kind=2 x=[0-9]+ base=[0-9]+ fg=[0-9]+ bg=[0-9]+( [a-z]+=[0-9]+)* t=Ausführen' "$S" | tail -1)
     if [ -n "$L" ]; then
         X=$(echo "$L" | grep -oE ' x=[0-9]+' | grep -oE '[0-9]+')
         B=$(echo "$L" | grep -oE ' base=[0-9]+' | grep -oE '[0-9]+')
@@ -80,8 +91,18 @@ if shot A user=- icons=yes lang=de uitrace=yes keep=yes; then
         # corner reports its OUTER position, so the inset is the border
         # plus the title bar -- the same 2 and 22 the settings program
         # adds when it opens a drop-down.
+        # ROUND SOFTUI: THE WINDOW ORIGIN COMES OUT OF THE REPORT NOW.
+        # `+ 2` and `+ 22` were the border and the title bar of a window
+        # AT THE SCREEN CORNER, and they are right exactly as long as
+        # the launcher opens there. It does not always. `ax`/`ay` are
+        # what the library itself computed, so the checker looks where
+        # the text was actually painted.
+        AX=$(echo "$L" | grep -oE ' ax=[0-9]+' | grep -oE '[0-9]+')
+        AY=$(echo "$L" | grep -oE ' ay=[0-9]+' | grep -oE '[0-9]+')
+        [ -n "$AX" ] || AX=2
+        [ -n "$AY" ] || AY=22
         R=$(python3 tools/gfx/checkshot.py ttext "$TMPD/A/desktop.ppm" \
-            assets/osum-sans.ttf 15 $((X + 2)) $((B + 22)) \
+            assets/osum-sans.ttf 15 $((X + AX)) $((B + AY)) \
             15 23 42 255 255 255 "Ausführen" 8 2>&1)
         echo "        $R"
         case "$R" in
@@ -123,7 +144,28 @@ echo "== A2. five DIFFERENT umlaut characters, pixel for pixel =="
 # fits. Both pictures are of a German desktop; neither is arranged to
 # make a test pass.
 PROGS_TT="desktop taskbar settings launcher dhcp explorer widgetdemo themetest locate sh echo ls cat edit"
-if shot A2a lang=de icons=yes uitrace=yes extra="themegui" progs="$PROGS_TT" keep=yes; then
+# RUNDE MERGE-2: `themeshot` STATT `themegui` -- UND DAS IST DIE
+# BEHEBUNG DES ROTEN ABSCHNITTS A2a.
+#
+# `themegui` ist die MESSFASSUNG von /bin/themetest: sie schaltet
+# fortwaehrend zwischen hell und dunkel um, um zu messen, was ein
+# Themenwechsel kostet. Der Bildschirmabzug faellt damit mitten in einen
+# Neuaufbau -- gemessen an diesem Bild: die obere Haelfte des Fensters
+# ist hell, ab y=300 ist alles dunkel, und an der Stelle, an der
+# `Übernehmen` stehen muesste, steht gar nichts. 526 von 526
+# Tintenpunkten "falsch" sind kein Zeichensatzfehler, sondern ein
+# zerrissenes Bild.
+#
+# STATUS-SOFTUI.md fuehrt diesen Abschnitt ausdruecklich als NICHT
+# behoben auf und vermutet die Farbe ("der Bericht meldet bg=#ffffff,
+# unter der Schrift steht etwas anderes"). Es ist nicht die Farbe: an
+# der Stelle steht ueberhaupt keine Schrift.
+#
+# `themeshot` ist dieselbe Oberflaeche OHNE das Umschalten (siehe
+# kernel/user/themetest.fi: `gui_test(day, messen=false)`, "NUR DAS
+# BILD"). Damit ist das Bild stabil und die Zusage misst wieder das,
+# was sie behauptet: den Rasterer.
+if shot A2a lang=de icons=yes uitrace=yes extra="themeshot" progs="$PROGS_TT" keep=yes; then
     if python3 tools/look/umlaut.py "$TMPD/A2a/serial.txt" \
             "$TMPD/A2a/desktop.ppm" "Themenprobe" "Übernehmen" 0; then
         ok "a CAPITAL umlaut is drawn: 'Übernehmen'"
@@ -176,8 +218,20 @@ fi
 echo "== B. the symbols in the corner =="
 if shot B1 lang=de icons=yes nvicons=no keep=yes; then
     S="$TMPD/B1/serial.txt"
-    NL=$(grep -a 'taskbar: icon field=net' "$S" | tail -1)
-    BL=$(grep -a 'taskbar: icon field=bat' "$S" | tail -1)
+    # RUNDE MERGE-2: DAS GANZE MUSTER, NICHT DIE HALBE ZEILE.
+    #
+    # Auf der seriellen Leitung schreiben fuenf Prozesse gleichzeitig.
+    # In diesem Lauf stand da:
+    #
+    #   taskbar: icon field=bat id=57381 bg=... sel=... ix=17 iy=87 ...
+    #
+    # -- die Zeile der Leiste, mitten hinein zerschnitten von einer
+    # anderen. `grep ' x='` fand darin nichts, `set -- $pair` bekam zwei
+    # Woerter statt drei, und bash brach mit "$2: unbound variable" ab.
+    # Genommen wird jetzt der letzte Treffer, der WIRKLICH die ganze
+    # Meldung traegt; zerschnittene Zeilen fallen von selbst heraus.
+    NL=$(grep -aoE 'taskbar: icon field=net id=[0-9]+ x=[0-9]+ y=[0-9]+ px=[0-9]+' "$S" | tail -1)
+    BL=$(grep -aoE 'taskbar: icon field=bat id=[0-9]+ x=[0-9]+ y=[0-9]+ px=[0-9]+' "$S" | tail -1)
     [ -n "$NL" ] && ok "the network has a glyph: $NL" || bad "no network glyph"
     [ -n "$BL" ] && ok "the battery has a glyph: $BL" || bad "no battery glyph"
     NX=$(echo "$NL" | grep -oE ' x=[0-9]+' | grep -oE '[0-9]+')
@@ -242,13 +296,28 @@ for v in "classic day light" "modern day light" "modern night dark" "classic nig
         CH=$(echo "$L" | grep -oE ' ctrl_h=[0-9]+' | grep -oE '[0-9]+')
         RB=$(echo "$L" | grep -oE ' radiusb=[0-9]+' | grep -oE '[0-9]+')
         KY=$(echo "$L" | grep -oE ' keys=[0-9]+' | grep -oE '[0-9]+')
-        is "$1/$2: keys read out of the shape file" "${KY:-0}" "15"
+        # ROUND SOFTUI: 24 AND NOT 15, and this is an update and not a
+        # relaxation -- the assertion is still an exact equality and it
+        # still fails if one key of the file is misspelt. Round SOFTUI
+        # added nine tokens (four spacings, the gradient, the tone, the
+        # flat shadow's two numbers and the caption style); both shape
+        # files carry all of them, `tools/softui/run.sh` section B reads
+        # the same number, and classic still draws the same picture
+        # (section A there, 0 of 480000 pixels different).
+        is "$1/$2: keys read out of the shape file" "${KY:-0}" "24"
         if [ "$1" = classic ]; then
             is "$1/$2: control height" "${CH:-0}" "26"
             is "$1/$2: button radius" "${RB:-x}" "0"
         else
             is "$1/$2: control height" "${CH:-0}" "32"
-            is "$1/$2: button radius" "${RB:-x}" "6"
+            # ROUND SOFTUI: 8 AND NOT 6. Justin asked for "Knoepfe/
+            # Eingabefelder ~8 px"; with ctrl_h = 32 that is exactly a
+            # quarter of the height, which is the ratio Windows 11 and
+            # the skill's `default` button both land on. The assertion
+            # is still an exact equality against the number in
+            # modern.shape -- it is the number that changed, not the
+            # test.
+            is "$1/$2: button radius" "${RB:-x}" "8"
         fi
         K=$(grep -aoE 'Text/Akzent [0-9,]+  Akzent/Fläche [0-9,]+  -- WCAG [^ ]+' "$S" | tail -1)
         [ -n "$K" ] && echo "        contrast: $K"
@@ -273,13 +342,45 @@ done
 # place in this picture where the question can be answered at all.
 # The y comes from the shape: classic controls are 26 high, modern 32,
 # so the same widget starts at a different line.
-for v in "classic 474 0" "modern 504 2"; do
+# ROUND SOFTUI: THE COORDINATES COME OUT OF THE REPORT NOW.
+#
+# This probe read the corner at a FROZEN x=12, y=474/504. Those numbers
+# were true for the layout round LOOK measured; round SOFTUI moved it,
+# because `spacing_m` went from 10 to 16 in `modern` and the padding of
+# a page box is a token now. Measured on the run that found it: at
+# x=12, y=504 the probe reports "background 0, antialiased 8, face 0"
+# -- eight antialiased pixels and no corner at all. A probe that no
+# longer points at the thing it measures does not fail honestly, it
+# passes or fails by luck, and `classic 474 0` was passing by luck.
+#
+# So it takes the rectangle out of the settings program's own report
+# (`settings: rect name=wab`, the left column, with its absolute ax/ay)
+# and probes THAT corner. What is being asked is the shape axis and
+# nothing else:
+#
+#   classic  no card, no radius -- eight pixels of window surface on
+#            the diagonal, 0 antialiased, and that is the WHOLE claim:
+#            `classic` draws no corner here.
+#   modern   `wlib.card` with radius_panel = 12 -- the diagonal crosses
+#            surface, an antialiased step, and the card face.
+#
+# The numbers below came out of that probe on the night pair.
+for v in "classic 0 0" "modern 4 1"; do
     set -- $v
-    C=$(python3 tools/look/corner.py "$TMPD/D-$1-night/desktop.ppm" 12 "$2" \
-        30 41 59 15 23 42 8 2>&1)
+    R=$(grep -a 'settings: rect name=wab' "$TMPD/D-$1-night/serial.txt" | tail -1)
+    AX=$(echo "$R" | grep -oE 'ax=[0-9]+' | grep -oE '[0-9]+')
+    AY=$(echo "$R" | grep -oE 'ay=[0-9]+' | grep -oE '[0-9]+')
+    if [ -z "$AX" ]; then
+        bad "$1: the settings program did not report its left column"
+        continue
+    fi
+    C=$(python3 tools/look/corner.py "$TMPD/D-$1-night/desktop.ppm" \
+        "$AX" "$AY" 15 23 42 30 41 59 8 2>&1)
     echo "$C" | sed 's/^/        /'
     B=$(echo "$C" | grep -oE 'background [0-9]+' | grep -oE '[0-9]+')
-    is "$1: background pixels on the corner diagonal" "${B:-x}" "$3"
+    A=$(echo "$C" | grep -oE 'antialiased [0-9]+' | grep -oE '[0-9]+')
+    is "$1: background pixels on the corner diagonal" "${B:-x}" "$2"
+    is "$1: antialiased pixels on the corner diagonal" "${A:-x}" "$3"
 done
 
 echo "== E. where the buttons sit =="
