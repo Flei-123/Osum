@@ -238,7 +238,7 @@ import hashlib, os, sys
 salz = bytes(range(16))
 pruef = hashlib.pbkdf2_hmac("sha256", b"richtig", salz, 8192, 32)
 open(sys.argv[1], "w", encoding="utf-8").write(
-    "eigen1\nkennung\tlokal\nsalz\t%s\nrunden\t8192\npruef\t%s\n"
+    "eigen1\nkennung\tlokal\nsalz\t%s\nrunden\t8192\nnachweis\t%s\n"
     "subjekt\tlokal-1\nanzeige\tLokal\n" % (salz.hex(), pruef.hex()))
 PY
 ok "der Ordner-Ruecken hat ein Konto, dessen PBKDF2 der WIRT gerechnet hat"
@@ -343,9 +343,9 @@ server_auf
 
 abbild "$TMPD/d1.img" || true
 lauf "$TMPD/d1.img" "konto anbieter" "$TMPD/o_anb.txt"
-is "wie viele Ruecken angemeldet sind" "$(kv "$TMPD/o_anb.txt" ruecken)" "3"
+is "wie viele Ruecken angemeldet sind" "$(kv "$TMPD/o_anb.txt" anbieter_anzahl)" "3"
 for r in jarvis xoffi eigen; do
-    grep -qa "^konto: ruecken_name = $r$" "$TMPD/o_anb.txt" \
+    grep -qa "^konto: anbieter_name = $r$" "$TMPD/o_anb.txt" \
         && ok "der Ruecken '$r' ist da" || bad "der Ruecken '$r' fehlt"
 done
 

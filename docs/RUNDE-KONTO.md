@@ -84,6 +84,15 @@ ohne `crt.s` und ohne libc.
   (das stünde in jeder Prozessliste) und nie über eine Datei.
 * `locale/de/messages`, `locale/en/messages` — **34 Schlüssel**, in
   beiden Dateien vollständig, deutsche Texte mit echten Umlauten.
+* `kernel/user/settings.fi`, ein **Fehler dieser Runde, den ein fremder
+  Läufer gefunden hat** — siehe Abschnitt 3b: die Elementtafel fasste
+  128 Bedienelemente, mit der neunten Seite waren es mehr, und `merke`
+  hat den Überlauf **still verschluckt**. Ein nicht gemerktes Element
+  wird von `zeige_reiter` nie versteckt und steht damit auf **jeder**
+  Seite. Jetzt: Tafel 192, und der Überlauf **sagt es**
+  (`settings: elementtafel voll`) statt zu schweigen; dazu eine eigene
+  Zeile `settings: elemente n=… max=…`, damit ein Läufer den Abstand
+  zur Grenze messen kann, bevor sie erreicht ist.
 
 ### Werkzeuge
 
@@ -179,6 +188,81 @@ Diese Runde macht es nicht schlimmer und repariert es nicht: fremde
 Läufer im Vorbeigehen nachzuziehen, während parallel dreizehn Runden auf
 denselben Dateien arbeiten, richtet mehr an, als es hilft. Gemeldet ist
 es hier, damit niemand die neun für neu hält.
+
+---
+
+## 3b. Der zweite Durchgang: drei weitere Nachbarläufe, und was sie an
+dieser Runde gefunden haben
+
+Nach dem ersten Bericht sind `tools/desktop/run.sh`,
+`tools/umlaut/run.sh` und `tools/themestore/run.sh` noch einmal
+gelaufen — und zwar **zweimal**: einmal in diesem Arbeitsbaum und
+einmal in einem Referenzbaum auf **derselben Basis** wie dieser Zweig
+(`git worktree add --detach 7d487fb`, MERGE-2 17), damit „war schon
+vorher rot" eine Messung ist und keine Behauptung.
+
+| Lauf | dieser Zweig | Referenzbaum 7d487fb |
+|---|---|---|
+| `tools/konto/run.sh` | **107 / 0** | — (gibt es dort nicht) |
+| `tools/look/run.sh` | **40 / 0** | — |
+| `tools/themestore/run.sh` | **81 / 0** | 81 / 0 |
+| `tools/umlaut/run.sh` | 45 grün / **2 rot** | 45 grün / **2 rot**, dieselben zwei |
+| `tools/desktop/run.sh` | 95 / **3** | 94 / **4** |
+
+**Zwei echte Fehler dieser Runde sind dabei herausgekommen. Beide sind
+behoben, beide waren im Quelltext unsichtbar.**
+
+1. **`themestore` war rot, und es lag an dieser Runde.**
+   `shotcheck` misst Überlappungen im Bild und meldete auf der Seite
+   *Vorlagen*: `OVER 'Vorschau -- aus den Mark' und 'Konten auf diesem
+   Gerät'`. Der Satz „Konten auf diesem Gerät" gehört auf die
+   Kontenseite und stand über der Vorschau einer **anderen** Seite.
+   Ursache war nicht das Layout, sondern eine Grenze:
+   `static mut ids: [u64; 128]`, und `merke()` legt bei vollem Feld
+   **still nichts ab**. Was nicht in der Tafel steht, versteckt
+   `zeige_reiter()` nicht — es steht auf allen neun Seiten. Behoben:
+   Tafel auf 192, Überlauf meldet sich (`settings: elementtafel voll`),
+   und `settings: elemente n=… max=…` sagt bei jedem Start, wie voll
+   sie ist. Danach: **81 / 0**, und die Zusage „und sie zeigt zehn
+   Kacheln" ist mit zurückgekommen.
+   *Das ist genau der Fehler, den nur ein Läufer findet, der das BILD
+   ansieht.*
+
+2. **`umlaut` fand acht sichtbare Umschriften — alle aus dieser Runde.**
+   `tools/i18n/quellen.py --alle` zählte `SICHTBAR=8`, davon sieben in
+   `kernel/app/konto.fi`, eine in `kernel/app/anb_eigen.fi`, dazu eine
+   getippte Marke ohne Umlautform. Behoben, jede einzeln:
+   * Protokoll- und Feldnamen umbenannt, statt Umlaute in ein
+     maschinenlesbares Feld zu schreiben: `pruef` → `nachweis`
+     (Nachweisdatei des Rückens `eigen`), `ruecken` →
+     `anbieter_anzahl`, `ruecken_name` → `anbieter_name`,
+     `lokal_geloescht` → `lokal_entfernt`. Der Läufer
+     `tools/konto/run.sh` und die Einstellungsseite lesen die neuen
+     Namen.
+   * Zwei Meldungen umformuliert, weil sie den Umlaut gar nicht
+     brauchten: „die Sitzung **ließ** sich nicht ablegen" → „konnte
+     nicht abgelegt werden"; „**uebergabe** braucht --kennung" → „hier
+     fehlt --kennung".
+   * Der Unterbefehl `uebergabe` nimmt jetzt **beide** Schreibungen an
+     (`uebergabe` und `übergabe`), und die Hilfe zeigt die mit Umlaut —
+     dieselbe Regel wie `keys=` in den Bündeln.
+   Danach: `SICHTBAR=0`, `quellen.py --marken` rc=0.
+
+Was **danach noch rot ist, ist es im Referenzbaum genauso** — Zeile für
+Zeile dieselben Zusagen:
+
+* `umlaut`, Abschnitt 9 (2 rot): die beiden Kontrastzeilen der
+  Einstellungen werden von `wlib.elide()` gekürzt gemalt
+  („Akzentfarbe unverändert übernom…"), weil der Text breiter ist als
+  die linke Spalte; `umlaut.py` sucht den ganzen Satz und findet ihn
+  nicht. Gemessen im Referenzbaum ohne eine Zeile dieser Runde:
+  **dieselben zwei**, `UMLAUT2: 45 Zusagen gruen, 2 rot`.
+* `desktop`: `WM_MAXNR does not match the calls` und
+  `the settings did not report their geometry` — im Referenzbaum
+  ebenfalls rot (dort zusätzlich `the bar never came back`, was hier
+  grün war: eine Zeitmessung, die unter Last wackelt).
+
+---
 
 ## 4. Die drei Rücken im Vergleich
 
