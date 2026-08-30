@@ -37,6 +37,17 @@ Programm (ein Server, der immer funktioniert, misst nichts):
         Laenge -- der Abbruch ist damit fuer den Empfaenger erkennbar,
         und genau das muss er auch merken.
 
+  --kurz <datei>:<oktette>
+        Fuer diese Datei werden <oktette> Oktett des Rumpfes geschrieben
+        und die Verbindung danach ORDENTLICH geschlossen -- der
+        Empfaenger sieht ein sauberes Ende, aber weniger Oktette, als
+        `Content-Length` angekuendigt hat. Das ist der zweite, mildere
+        Abbruch: die Leitung ist gegangen, TCP hat aufgeraeumt, und das
+        Bruchstueck liegt beim Empfaenger. Damit laesst sich die
+        WIEDERAUFNAHME messen -- der harte Abbruch (--abbruch) laesst
+        oft gar nichts zurueck, weil ein RST die Empfangswarteschlange
+        mitnimmt.
+
   --einmal
         nach der ersten Antwort beenden.
 
@@ -55,6 +66,7 @@ import time
 
 WURZEL = "."
 ABBRUCH = {}
+KURZ = {}
 LOG = None
 EINMAL = False
 GETAN = threading.Event()
@@ -145,9 +157,17 @@ class Hand(http.server.BaseHTTPRequestHandler):
             return
 
         geschrieben = 0
+        kgrenze = KURZ.get(name)
         with open(datei, "rb") as f:
             f.seek(von)
             while geschrieben < laenge:
+                if kgrenze is not None and geschrieben >= kgrenze:
+                    protokoll("KURZ", name, "nach", geschrieben,
+                              "von", laenge, "angekuendigt")
+                    ZAEHLER["oktette"] += geschrieben
+                    if EINMAL:
+                        GETAN.set()
+                    return
                 if grenze is not None and geschrieben >= grenze:
                     protokoll("ABBRUCH", name, "nach", geschrieben,
                               "von", laenge, "angekuendigt")
@@ -159,6 +179,8 @@ class Hand(http.server.BaseHTTPRequestHandler):
                 stueck = 4096
                 if grenze is not None:
                     stueck = min(stueck, grenze - geschrieben)
+                if kgrenze is not None:
+                    stueck = min(stueck, kgrenze - geschrieben)
                 stueck = min(stueck, laenge - geschrieben)
                 b = f.read(stueck)
                 if not b:
@@ -206,6 +228,10 @@ def main():
             i += 1
             n, _, o = sys.argv[i].partition(":")
             ABBRUCH[n] = int(o)
+        elif a == "--kurz" and i + 1 < len(sys.argv):
+            i += 1
+            n, _, o = sys.argv[i].partition(":")
+            KURZ[n] = int(o)
         elif a == "--einmal":
             EINMAL = True
         else:
@@ -225,8 +251,8 @@ def main():
     if pid:
         with open(pid, "w") as f:
             f.write(str(os.getpid()))
-    protokoll("START port=%d wurzel=%s abbruch=%s"
-              % (port, WURZEL, ABBRUCH or "-"))
+    protokoll("START port=%d wurzel=%s abbruch=%s kurz=%s"
+              % (port, WURZEL, ABBRUCH or "-", KURZ or "-"))
     t = threading.Thread(target=srv.serve_forever, daemon=True)
     t.start()
     try:
