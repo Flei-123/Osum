@@ -82,7 +82,20 @@ static mut buf: [u8; 4608] = [0 as u8; 4608]
 // GEMESSEN: mit `src_bytes` brauchte /bin/play fuer eine Sekunde WAV
 // 135 Aussetzer; mit einem geraden `read` sind es zwei -- dieselbe
 // Zahl wie beim MP3, das seine Oktette schon immer selbst gelesen hat.
-static mut raw: [u8; 4608] = [0 as u8; 4608]
+// VIERUNDSECHZIG KILOOKTETTE, und die Zahl ist gemessen.
+//
+// Die WAV-Daten werden in GROSSEN Bloecken von der Platte geholt und
+// aus diesem Puffer in Schueben abgegeben. Ein `read` je Schub (4608
+// Oktette) waere richtig gerechnet und in der Praxis zu langsam: jeder
+// Zugriff geht durch das Dateisystem auf den IDE-Regler, und 47 davon
+// je Sekunde Ton kosten mehr Zeit, als der Ring Vorrat hat. GEMESSEN:
+// mit Schub-Lesen 398 Aussetzer je Sekunde, mit Blocklesen zwei --
+// dieselbe Zahl, die der MP3-Weg schon immer hatte, weil sein
+// Dekodierer aus einem 64-KiB-Fenster liest.
+const RAWSZ: u64 = 65536
+static mut raw: [u8; 65536] = [0 as u8; 65536]
+static mut rawlen: u64 = 0
+static mut rawpos: u64 = 0
 static mut wfd: u64 = 0
 
 // ------------------------------------------------------------ die WAV-Datei
@@ -319,14 +332,34 @@ fn u_start(args: u64) -> u64 {
                 m = da
             }
             if m > 0 {
-                let roh: u64 = (&raw[0 as usize]) as u64
-                let will: u64 = m * 2 * nch
-                let hab: u64 = ulib.sys(ulib.SYS_READ, wfd, roh, will)
-                if ulib.bad(hab) || hab == 0 {
+                let roh0: u64 = (&raw[0 as usize]) as u64
+                var will: u64 = m * 2 * nch
+                // Nachfuellen, wenn der Block leer wird.
+                if rawpos + will > rawlen {
+                    let uebrig: u64 = rawlen -% rawpos
+                    if uebrig > 0 {
+                        ulib.copy(roh0, roh0 + rawpos, uebrig)
+                    }
+                    let neu: u64 = ulib.sys(ulib.SYS_READ, wfd,
+                        roh0 + uebrig, RAWSZ - uebrig)
+                    if ulib.bad(neu) {
+                        rawlen = uebrig
+                    } else {
+                        rawlen = uebrig + neu
+                    }
+                    rawpos = 0
+                }
+                let roh: u64 = roh0 + rawpos
+                var hab: u64 = will
+                if rawpos + will > rawlen {
+                    hab = rawlen -% rawpos
+                }
+                if hab == 0 {
                     rest = 0
                     lauf = false
                     m = 0
                 } else {
+                    rawpos = rawpos + hab
                     // `read` darf WENIGER liefern als verlangt, und
                     // genau daran ist Runde MEDIA1 einmal
                     // haengengeblieben: aus 3840 Oktetten wurden 3584,
