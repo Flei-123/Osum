@@ -1157,6 +1157,19 @@ lauf "31. ein Abbild fuer echtes Blech: BIOS und UEFI, Diagnose, deutscher Schre
 lauf "29. echte Umlaute ueberall, wo Text auf dem Schirm steht (tools/umlaut/run.sh, Runde UMLAUT2)" \
      tools/umlaut/run.sh umlaut '^UMLAUT2: |^     (translit|quellen|marken|spalten|puffer|schriftprobe|Beschleuniger)|^  OK    (SICHTBARE|Umschrift in|GEGENPROBE|GEGEN-GEGENPROBE|keys=|der Pruefer findet|Marken mit|Beschriftungen|Zeichenketten passen|verschiedene Zeichen|passwd zaehlt|die Einstellungen zaehlen|die Zeile steht|starter:|einstellungen:|speicher:|der Speicher-Dialog|die Spalte|\[)'
 
+# ABSCHNITT 32 -- RUNDE THEMESTORE. Zehn Vorlagen als Dateien, die
+# Kontraste im System UND auf dem Wirt gerechnet, das Anwenden ueber
+# einen Aufruf, eine eigene Vorlage sichern und wieder einlesen -- und
+# zehn Aufnahmen, die GEMESSEN werden: keine leere, abgeschnittene oder
+# ueberlappende Beschriftung.
+#
+# RUNDE MERGE-2: AUCH DIESER ABSCHNITT WAR NIE ANGEMELDET. Wie bei
+# usbimg gibt es den Laeufer auf dem Zweig seit vier Commits, in test.sh
+# steht davon keine Zeile -- 81 Zusagen, die in der Abnahme nie
+# aufgetaucht sind.
+lauf "32. der Vorlagenladen: zehn Erscheinungen, gemessen statt angeschaut (tools/themestore/run.sh, Runde THEMESTORE)" \
+     tools/themestore/run.sh themestore '^THEMESTORE: |^  OK    (alle zehn|die zehn Vorlagen|dieselben Kontraste|keine Vorlage|der Kontrast|anwenden|die ausgegebene Datei|sie traegt|und die Kante|das Konto|die Seite|ein Bild je|und in keiner)'
+
 # Hier laufen die angemeldeten Abschnitte -- bei OSUM_JOBS=1 sind sie
 # oben schon gelaufen und das hier tut nichts.
 abschnitte_abarbeiten
