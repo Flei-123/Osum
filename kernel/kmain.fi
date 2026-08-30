@@ -84,6 +84,8 @@ import ftype
 // RUNDE K17: der USB-Baum -- Regler, Kern, Klassen.
 import xhci
 import usb
+import hidrep
+import hidin
 
 // Indices in the table out of isr.s.
 const V_DF_STACK: u64 = 52
@@ -272,6 +274,15 @@ fn kernel_main(mbi: u64, vectors: u64, state: u64, kernel_end: u64,
 
     // 3. memory.
     memory(state, mbi, kernel_end)
+
+    // 3a-null. RUNDE HID: DER ZERLEGER, SO FRUEH WIE MOEGLICH.
+    // Er rechnet ausschliesslich auf `kdata` und haengt an keinem Bus:
+    // kein xHCI, kein I2C, kein Zeitgeber, kein Scheduler. Deshalb
+    // steht er HIER und nicht bei den Geraeten -- ein Fehler im
+    // Zerleger ist dann von einem Fehler im Regler unterscheidbar, und
+    // der Selbsttest laeuft auf einer Maschine, die sonst gar nichts
+    // hat. Ohne `hidrep` ist das eine Verzweigung und sonst nichts.
+    hid_stage(state)
 
     // 3a0. ROUNDE K10: was der Lader danebengelegt hat, und ob es heil
     //      angekommen ist. Muss NACH `memory` stehen -- vorher gibt es
@@ -3356,6 +3367,43 @@ fn mode_of(state: u64, cmd: u64) {
     if find(cmd, (&w_hold[0]) as u64, 7) != 0 {
         kstate.mode_add(state, kstate.M_USBHOLD)
     }
+    // RUNDE HID. `hidrep` faehrt den Zerleger-Selbsttest, `hid` schaltet
+    // den generischen Weg an, `nohidrep` ist die GEGENPROBE dazu (nur
+    // Boot-Protokoll, wie vor dieser Runde). Zuerst die langen Woerter
+    // suchen, sonst findet `hid` sich in `hidrep` wieder -- `find`
+    // vergleicht Oktette und kennt keine Wortgrenze.
+    var w_hidrep: [u8; 7] = "hidrep\0"
+    var w_hiddump: [u8; 8] = "hiddump\0"
+    var w_nohrep: [u8; 9] = "nohidrep\0"
+    var w_hidlat: [u8; 7] = "hidlat\0"
+    var w_hidpad: [u8; 7] = "hidpad\0"
+    var w_i2chid: [u8; 7] = "i2chid\0"
+    var w_noi2c: [u8; 6] = "noi2c\0"
+    var w_hid: [u8; 4] = "hid\0"
+    if find(cmd, (&w_hidrep[0]) as u64, 6) != 0 {
+        kstate.mode_add(state, kstate.M_HIDREP)
+    }
+    if find(cmd, (&w_hiddump[0]) as u64, 7) != 0 {
+        kstate.mode_add(state, kstate.M_HIDDUMP)
+    }
+    if find(cmd, (&w_nohrep[0]) as u64, 8) != 0 {
+        kstate.mode_add(state, kstate.M_NOHIDREP)
+    }
+    if find(cmd, (&w_hidlat[0]) as u64, 6) != 0 {
+        kstate.mode_add(state, kstate.M_HIDLAT)
+    }
+    if find(cmd, (&w_hidpad[0]) as u64, 6) != 0 {
+        kstate.mode_add(state, kstate.M_HIDPAD)
+    }
+    if find(cmd, (&w_i2chid[0]) as u64, 6) != 0 {
+        kstate.mode_add(state, kstate.M_I2CHID)
+    }
+    if find(cmd, (&w_noi2c[0]) as u64, 5) != 0 {
+        kstate.mode_add(state, kstate.M_NOI2C)
+    }
+    if find(cmd, (&w_hid[0]) as u64, 3) != 0 {
+        kstate.mode_add(state, kstate.M_HID)
+    }
 }
 
 // Address of the first occurrence, or 0. The command line is a C string.
@@ -3416,6 +3464,23 @@ fn find(hay: u64, needle: u64, n: u64) -> u64 {
 // ihrer Zeilen ein Zeigegeraet anmeldet -- und kamen zurueck, weil ein
 // Server USB-Platten hat und keine Maus. Die eine Zeile geht jetzt
 // durch `gfx.mouse_adopt`.
+
+// ------------------------------------------------------------- HID
+//
+// RUNDE HID. Ohne `hidrep` ist das hier NICHTS -- kein Zerleger laeuft,
+// keine Zeile wird gedruckt, und keine Messung der Runden 59 bis
+// MERGE-2 aendert sich.
+fn hid_stage(state: u64) {
+    if kstate.mode_on(state, kstate.M_HIDREP) {
+        hidrep.selbsttest(state)
+    }
+    // Die Wiedergabe braucht die Tastenkarten und die Zaehler -- also
+    // erst aufsetzen, dann abspielen.
+    if kstate.mode_on(state, kstate.M_HIDPAD) {
+        hidin.stage(state)
+        hidin.wiedergabe(state)
+    }
+}
 
 fn usb_stage(state: u64) {
     usb.stage(state)
