@@ -72,7 +72,18 @@ const AS_PUMP: u64 = 11
 // an, und weniger waere ein Systemaufruf mehr fuer dieselben Oktette.
 const CHUNK: u64 = 1024
 
-static mut buf: [u8; 4096] = [0 as u8; 4096]
+const BUF_FRAMES: u64 = 1152
+static mut buf: [u8; 4608] = [0 as u8; 4608]
+// EIN ZWEITER PUFFER FUER DEN ROHEN DATENSTROM DER WAV-DATEI.
+//
+// Er ist da, weil `media.src_bytes` OKTETT FUER OKTETT kopiert (es ist
+// ein Leser fuer Behaelterkoepfe, nicht fuer Nutzdaten) und weil ein
+// Mono-Strom vor dem Abschicken auf zwei Kanaele gezogen werden muss.
+// GEMESSEN: mit `src_bytes` brauchte /bin/play fuer eine Sekunde WAV
+// 135 Aussetzer; mit einem geraden `read` sind es zwei -- dieselbe
+// Zahl wie beim MP3, das seine Oktette schon immer selbst gelesen hat.
+static mut raw: [u8; 4608] = [0 as u8; 4608]
+static mut wfd: u64 = 0
 
 // ------------------------------------------------------------ die WAV-Datei
 //
@@ -279,6 +290,18 @@ fn u_start(args: u64) -> u64 {
     ulib.sayu(grate)
     ulib.nl()
 
+    // Die Nutzdaten werden mit einem GERADEN `read` geholt und nicht
+    // ueber den Behaelterleser -- die Begruendung steht bei `raw`.
+    if ist_wav {
+        wfd = ulib.sys(ulib.SYS_OPEN, pfad, 0, 0)
+        if ulib.bad(wfd) {
+            ulib.esay_line((&s_noopen[0 as usize]) as u64, 0)
+            media.src_close()
+            return 1
+        }
+        ulib.sys(ulib.SYS_SEEK, wfd, w_off, 0)
+    }
+
     // ------------------------------------------------------ die Schleife
     var gesendet: u64 = 0
     var lauf: bool = true
@@ -296,35 +319,52 @@ fn u_start(args: u64) -> u64 {
                 m = da
             }
             if m > 0 {
-                if nch == 2 {
-                    media.src_bytes(quelle, dst, m * 4)
+                let roh: u64 = (&raw[0 as usize]) as u64
+                let will: u64 = m * 2 * nch
+                let hab: u64 = ulib.sys(ulib.SYS_READ, wfd, roh, will)
+                if ulib.bad(hab) || hab == 0 {
+                    rest = 0
+                    lauf = false
+                    m = 0
                 } else {
-                    // Mono -> Stereo, Wert fuer Wert verdoppelt.
-                    var i: u64 = 0
-                    while i < m {
-                        let lo: u64 = media.src_byte(quelle + i * 2)
-                        let hi: u64 = media.src_byte(quelle + i * 2 + 1)
-                        buf[(i * 4) as usize] = lo as u8
-                        buf[(i * 4 + 1) as usize] = hi as u8
-                        buf[(i * 4 + 2) as usize] = lo as u8
-                        buf[(i * 4 + 3) as usize] = hi as u8
-                        i = i + 1
+                    // `read` darf WENIGER liefern als verlangt, und
+                    // genau daran ist Runde MEDIA1 einmal
+                    // haengengeblieben: aus 3840 Oktetten wurden 3584,
+                    // und die Tonspur war ab da um einen Rahmen
+                    // verschoben. Also wird gerechnet, was WIRKLICH kam.
+                    m = hab / (2 * nch)
+                    if nch == 2 {
+                        ulib.copy(dst, roh, m * 4)
+                    } else {
+                        mono_to_stereo(roh, dst, m)
                     }
+                    quelle = quelle + m * 2 * nch
+                    rest = rest - m * 2 * nch
+                    n = m
                 }
-                quelle = quelle + m * 2 * nch
-                rest = rest - m * 2 * nch
-                n = m
             }
         } else {
             let ns: u64 = mp3.mp3_next()
             if ns > 0 {
+                // EIN MP3-RAHMEN SIND 1152 ABTASTWERTE, der
+                // Umsteigepuffer des Systemaufrufs fasst 1024. Der
+                // Rest wird NICHT weggeworfen -- er geht im naechsten
+                // Durchgang. Wer hier kuerzt, laesst je Rahmen 128
+                // Abtastwerte fallen: 2,7 Millisekunden von 24, also
+                // elf Prozent zu schnell und ein Knacken je Rahmen.
                 var m2: u64 = ns
-                if m2 > CHUNK {
-                    m2 = CHUNK
+                if m2 > BUF_FRAMES {
+                    m2 = BUF_FRAMES
                 }
                 let p: u64 = mp3.mp3_pcm()
                 if mp3.mp3_channels() == 2 {
-                    ulib.copy(p, dst, m2 * 4)
+                    // ZIEL ZUERST. `ulib.copy` heisst copy(dst, src, n)
+                    // -- die umgekehrte Reihenfolge kopierte den
+                    // LEEREN Puffer in den Ausgang des Dekodierers und
+                    // schickte dessen Nullen ans Geraet. Der Dekodierer
+                    // meldete null Fehler, der Abspieler 50688
+                    // gesendete Rahmen, und in der Datei stand STILLE.
+                    ulib.copy(dst, p, m2 * 4)
                 } else {
                     mono_to_stereo(p, dst, m2)
                 }
@@ -375,6 +415,16 @@ fn u_start(args: u64) -> u64 {
                 }
             }
         }
+        // NACH JEDEM SCHUB EINMAL ABGEBEN. Ein Abspieler, der aus
+        // einer Datei liest, ist SCHNELLER als das Geraet -- er
+        // schaufelt seinen Puffer voll und dreht dann in einer engen
+        // Schleife, in der jeder Durchgang zwei Systemaufrufe kostet.
+        // Der Kern kommt dabei zwar mit, aber der Mischer wird
+        // hundertmal fuer ein paar Rahmen gerufen statt einmal fuer
+        // viele. GEMESSEN mit MP3 (wo das Dekodieren die Schleife von
+        // selbst bremst): zwei Aussetzer. Mit WAV ohne diese Zeile:
+        // 175.
+        ulib.sys(ulib.SYS_YIELD, 0, 0, 0)
         if ist_wav && rest == 0 {
             lauf = false
         }
@@ -428,6 +478,9 @@ fn u_start(args: u64) -> u64 {
     } else {
         ulib.sys(SYS_AUDSET, AS_CLOSE, strom, 0)
     }
+    if ist_wav {
+        ulib.sys(ulib.SYS_CLOSE, wfd, 0, 0)
+    }
     media.src_close()
 
     ulib.say((&s_pl[0 as usize]) as u64)
@@ -445,6 +498,16 @@ fn u_start(args: u64) -> u64 {
     ulib.say((&s_mx[0 as usize]) as u64)
     ulib.sayu(gm)
     ulib.nl()
+    var s_me: [u8; 14] = "  mp3fehler: \0"
+    var s_ms2: [u8; 14] = "  mp3rahmen: \0"
+    if !ist_wav {
+        ulib.say((&s_me[0 as usize]) as u64)
+        ulib.sayu(mp3.mp3_errors())
+        ulib.nl()
+        ulib.say((&s_ms2[0 as usize]) as u64)
+        ulib.sayu(mp3.mp3_skipped())
+        ulib.nl()
+    }
     var s_wa: [u8; 12] = "  wartete: \0"
     var s_tk: [u8; 12] = "  marken: \0\0"
     ulib.say((&s_wa[0 as usize]) as u64)
