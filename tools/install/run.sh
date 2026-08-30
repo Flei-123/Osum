@@ -380,8 +380,20 @@ f = open(sys.argv[1], "r+b"); f.seek(200)
 b = f.read(1); f.seek(200); f.write(bytes([b[0] ^ 0x40]))
 EOF
 cp -f "$OUT/pak/hallo-2.opk" "$OUT/falsch.opk"
+# RUNDE MERGE-2: DAS KAPUTTE PAKET WIRD SAUBER SIGNIERT.
+#
+# Seit Runde UPDATE prueft `/bin/opk` die Ed25519-Signatur ZUERST
+# (kernel/user/opk.fi, "DIE SIGNATUR ZUERST, vor der Pruefsumme") -- ein
+# Paket ohne .sig kommt gar nicht mehr bis zur Pruefsumme, und diese
+# Gegenprobe wuerde ab jetzt aus dem falschen Grund gruen werden bzw.
+# 'opk: Pruefsumme falsch' nie zu sehen bekommen. Damit sie weiter das
+# prueft, was sie behauptet -- naemlich die PRUEFSUMME --, wird das
+# gekippte Paket mit demselben Schluessel unterschrieben wie jedes
+# andere. Der Weg ist dann: Signatur gilt -> Pruefsumme faellt.
+python3 tools/update/signpak.py "$OUT/geheim.key" "$OUT/kaputt.opk" \
+    > "$OUT/kaputt.sig.log" 2>&1 || { cat "$OUT/kaputt.sig.log"; exit 1; }
 KAPUTT="$OUT/kaputt.opk" FALSCH="$OUT/falsch.opk" \
-    EXTRA="/quelle1/kaputt.opk=$OUT/kaputt.opk /quelle1/falsch.opk=$OUT/falsch.opk" \
+    EXTRA="/quelle1/kaputt.opk=$OUT/kaputt.opk /quelle1/kaputt.opk.sig=$OUT/kaputt.opk.sig /quelle1/falsch.opk=$OUT/falsch.opk" \
     bash tools/install/build.sh "$OUT" > "$OUT/bauen2.log" 2>&1
 neue_platte
 rc=$(lauf ginst iso "install /dev/hda --ja;exit" 900)
