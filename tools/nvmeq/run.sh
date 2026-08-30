@@ -377,13 +377,24 @@ for kerne in 2 4; do
         note "   letzte Zahl vor dem Abbruch: $(grep -a '^qbench:' "$MK" | tail -1)"
     fi
 done
+# DIE GEGENPROBE ZUM DOPPELFEHLER -- UND SIE IST EINE NOTIZ UND KEINE
+# ZUSAGE, weil das Ergebnis nicht jedes Mal dasselbe ist.
+#
+# Mit ABGESCHALTETER Weiche sieht `nvmeq.fi` keinen einzigen Auftrag und
+# weckt aus dem Interrupt niemanden. Trotzdem endete dieser Lauf am
+# 30.08.2026 EINMAL im selben Doppelfehler und EINMAL sauber. Das heisst:
+# der Fehler ist ein RENNEN, das es auch ohne diese Runde gibt -- und
+# das die Interruptlast dieser Runde sehr viel wahrscheinlicher macht.
+# Beides gehoert gesagt, und deshalb steht hier weder ein "gehoert nicht
+# dieser Runde" noch ein "liegt an dieser Runde", sondern das, was der
+# Lauf getan hat.
 nq_start k0 "osum nopwr vfs nvme nqmess nqoff" "$TMPD/moff.txt" -smp 2
 rco=$?
 MO="$TMPD/moff.txt.clean"
 if [ "$rco" -ne 21 ]; then
-    ok "GEGENPROBE: mit ABGESCHALTETER Weiche kracht -smp 2 GENAUSO ($(grep -a 'EXCEPTION' "$MO" | head -1 | sed 's/^\*\*\* //')) -- der Fehler gehoert nicht dieser Runde"
+    note "-smp 2 MIT ABGESCHALTETER WEICHE: kracht auch ($(grep -a 'EXCEPTION' "$MO" | head -1 | sed 's/^\*\*\* //')) -- ohne einen einzigen Auftrag im Warteschlangenweg"
 else
-    bad "mit abgeschalteter Weiche laeuft -smp 2 durch -- dann liegt es DOCH an dieser Runde"
+    note "-smp 2 MIT ABGESCHALTETER WEICHE: laeuft diesmal durch -- das Rennen trifft nicht jedes Mal"
 fi
 
 # DIE ENTSCHEIDENDE FRAGE, und sie wird hier beantwortet und nicht
