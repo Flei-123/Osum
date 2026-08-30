@@ -44,14 +44,14 @@ niemand.**
 
 | Weg | Zyklen je Auftrag | µs | Aufträge/s |
 |---|---:|---:|---:|
-| synchron (`read(2)`) | 224 687 | 101,99 | 9 805 |
-| nvmeq Tiefe 1 | 623 859 | 283,17 | 3 531 |
-| **nvmeq Tiefe 4** | **155 564** | **70,61** | **14 162** |
-| **nvmeq Tiefe 16** | **107 325** | **48,71** | **20 528** |
-| **nvmeq Tiefe 64** | **131 798** | **59,82** | **16 716** |
+| synchron (`read(2)`) | 210 291 | 95,48 | 10 474 |
+| nvmeq Tiefe 1 | 475 745 | 216,00 | 4 630 |
+| **nvmeq Tiefe 4** | **184 559** | **83,79** | **11 934** |
+| **nvmeq Tiefe 16** | **137 872** | **62,60** | **15 975** |
+| **nvmeq Tiefe 64** | **100 514** | **45,63** | **21 913** |
 
-Bei Tiefe 16 ist der Warteschlangenweg **mehr als doppelt so schnell**
-wie der synchrone (2,09×). Bei Tiefe 1 ist er es **nicht**, und das steht hier
+Bei Tiefe 64 ist der Warteschlangenweg **mehr als doppelt so schnell**
+wie der synchrone (2,09×), bei Tiefe 16 um 53 % schneller. Bei Tiefe 1 ist er es **nicht**, und das steht hier
 genauso deutlich: ein einzelner Auftrag zahlt weiterhin den Weg zum
 Arbeitsfaden und zurück, und der ist teurer als der eingesparte
 Systemaufruf. Der Gewinn dieser Runde ist **Nebenläufigkeit**, nicht
@@ -391,26 +391,31 @@ Zwischenspeicher.
 
 | Weg | Zyklen | µs | Aufträge/s |
 |---|---:|---:|---:|
-| **synchron** (`read(2)`) | **224 687** | 101,99 | 9 805 |
-| ring (Fadenweg) Tiefe 1 | 556 417 | 252,56 | 3 960 |
-| ring (Fadenweg) Tiefe 4 | 299 178 | 135,80 | 7 364 |
-| ring (Fadenweg) Tiefe 16 | 255 411 | 115,93 | 8 626 |
-| ring (Fadenweg) Tiefe 64 | 249 121 | 113,08 | 8 844 |
-| **nvmeq Tiefe 1** | 623 859 | 283,17 | 3 531 |
-| **nvmeq Tiefe 4** | **155 564** | **70,61** | **14 162** |
-| **nvmeq Tiefe 16** | **107 325** | **48,71** | **20 528** |
-| **nvmeq Tiefe 64** | **131 798** | **59,82** | **16 716** |
+| **synchron** (`read(2)`) | **210 291** | 95,48 | 10 474 |
+| ring (Fadenweg) Tiefe 1 | 527 099 | 239,31 | 4 179 |
+| ring (Fadenweg) Tiefe 4 | 283 584 | 128,75 | 7 767 |
+| ring (Fadenweg) Tiefe 16 | 231 706 | 105,20 | 9 506 |
+| ring (Fadenweg) Tiefe 64 | 225 237 | 102,26 | 9 779 |
+| **nvmeq Tiefe 1** | 475 745 | 216,00 | 4 630 |
+| **nvmeq Tiefe 4** | **184 559** | **83,79** | **11 934** |
+| **nvmeq Tiefe 16** | **137 872** | **62,60** | **15 975** |
+| **nvmeq Tiefe 64** | **100 514** | **45,63** | **21 913** |
+
+Zum Vergleich der zweite vollständige Lauf desselben Tages (etwas
+geringere Wirtslast): synchron 224 687, nvmeq 4/16/64 = 155 564 /
+107 325 / 131 798. Die absoluten Zahlen bewegen sich um bis zu 30 %,
+**die Reihenfolge der Wege in keinem Lauf.**
 
 ### Bündel ohne jeden Anstoß
 
 | Weg | Zyklen | µs | Aufträge/s |
 |---|---:|---:|---:|
-| ring Bündel 1 | 340 425 | 154,52 | 6 472 |
-| ring Bündel 8 | 390 656 | 177,32 | 5 640 |
-| ring Bündel 32 | 395 128 | 179,35 | 5 576 |
-| nvmeq Bündel 1 | 685 560 | 311,17 | 3 214 |
-| nvmeq Bündel 8 | 364 321 | 165,36 | 6 047 |
-| nvmeq Bündel 32 | 363 004 | 164,77 | 6 069 |
+| ring Bündel 1 | 314 780 | 142,92 | 6 997 |
+| ring Bündel 8 | 226 168 | 102,68 | 9 739 |
+| ring Bündel 32 | 232 097 | 105,38 | 9 490 |
+| nvmeq Bündel 1 | 557 561 | 253,14 | 3 950 |
+| nvmeq Bündel 8 | 215 996 | 98,07 | 10 197 |
+| nvmeq Bündel 32 | 167 291 | 75,95 | 13 166 |
 
 **Diese sechs Zahlen sind die wackeligsten der ganzen Runde, und das
 gehört dazugesagt.** „Ohne jeden Anstoß" heißt auf EINEM Kern: das
@@ -427,18 +432,20 @@ gemessen wurden, und nicht, weil man auf ihnen etwas aufbauen sollte.
 
 | Tiefe | Fadenweg | Warteschlange | schneller um |
 |---:|---:|---:|---:|
-| 1 | 556 417 | 623 859 | **−12 %** (langsamer) |
-| 4 | 299 178 | 155 564 | **48 %** |
-| 16 | 255 411 | 107 325 | **58 %** |
-| 64 | 249 121 | 131 798 | **47 %** |
+| 1 | 527 099 | 475 745 | 10 % |
+| 4 | 283 584 | 184 559 | **35 %** |
+| 16 | 231 706 | 137 872 | **40 %** |
+| 64 | 225 237 | 100 514 | **55 %** |
 
 Das ist der Vergleich innerhalb derselben Schicht: gleicher Ring,
 gleiches Programm, gleiche Blöcke — nur einmal mit und einmal ohne
 Gerätewarteschlange.
 
-**Die erste Zeile ist die ehrliche.** Bei EINEM offenen Auftrag ist der
-Warteschlangenweg *langsamer* als der Fadenweg, und der Grund ist kein
-Fehler, sondern die Bauart: der Fadenweg lässt den Arbeitsfaden den
+**Die erste Zeile ist die wackelige.** Bei EINEM offenen Auftrag gibt es
+nichts nebeneinander zu tun; in diesem Lauf gewinnt der
+Warteschlangenweg um 10 %, im Lauf davor **verlor** er um 12 %
+(556 417 gegen 623 859). Der Grund ist kein Fehler, sondern die
+Bauart: der Fadenweg lässt den Arbeitsfaden den
 Auftrag gleich selbst ausführen, der Warteschlangenweg gibt ihn ans
 Gerät, wartet auf den Interrupt und lässt ihn von einem Faden abholen —
 ein Übergang mehr. Was diese Runde gewinnt, ist **Nebenläufigkeit**,
@@ -460,8 +467,8 @@ einen zweiten Zähler (`nvme.spins`), und er ist der ehrlichere:
 
 | Weg | `hlt` in `nvme.await` | **Drehungen** in `nvme.await` |
 |---|---:|---:|
-| synchron (528 Aufträge) | 0 | **773 601** |
-| Fadenweg (Tiefe 1/4/16) | 0 | **2 510 960** |
+| synchron (528 Aufträge) | 0 | **647 518** |
+| Fadenweg (Tiefe 1/4/16) | 0 | **2 102 748** |
 | **Warteschlange (Tiefe 1/4/16)** | **0** | **0** |
 
 **Null. Kein Faden legt sich hin, und keiner dreht.** Es wartet niemand;
@@ -476,7 +483,7 @@ was sie behauptet.
 ### Woher die Fertigmeldung kam
 
 ```
-nvmeq: fast=6852  fallback=33  irqs=2806  polled=3277  timeouts=0
+nvmeq: fast=6829  fallback=33  irqs=3030  polled=3143  timeouts=0
 ```
 
 Etwa die Hälfte der Fertigstellungen findet das **Nachsehen** im
@@ -563,19 +570,37 @@ statt Phasenbit).
 
 ## Was offen bleibt
 
-* **Mehrere Kerne in der Messung.** Die Zahl fehlt, und das ist die
-  größte Lücke dieser Runde. `-smp 2` und `-smp 4` enden im
+* **Mehrere Kerne in der Messung. Die Zahl fehlt, und das ist die
+  größte Lücke dieser Runde.** `-smp 2` und `-smp 4` enden im
   Doppelfehler, sobald ein Ring-3-Programm **nach `smp.stage`**
   Systemaufrufe macht: `rip` im Kernel, `rsp` auf dem *Benutzerstapel*,
   `cs=0x8` — der Eintritt hat noch nicht auf den Kernelstapel
-  umgeschaltet. **Es liegt nicht an dieser Runde**, und das ist
-  gemessen und nicht behauptet: derselbe Lauf mit **abgeschalteter
-  Weiche** (`nqoff`, der Warteschlangenweg sieht keinen einzigen
-  Auftrag und weckt aus dem Interrupt niemanden) kracht an derselben
-  Stelle. Der Selbsttest ist auf einem *und* auf zwei Kernen grün
-  (33/33); der Doppelfehler kommt mit dem dritten. Der Selbsttest steht
-  deshalb jetzt **vor** `smp.stage`, wo die Selbsttests aller Runden
-  davor stehen. Das gehört in eine eigene Runde.
+  umgeschaltet.
+
+  **Wem der Fehler gehört, ist offen, und das steht hier so.** Die
+  Gegenprobe wurde zweimal gefahren: derselbe Lauf mit **abgeschalteter
+  Weiche** (`nqoff` — der Warteschlangenweg sieht dann keinen einzigen
+  Auftrag und weckt aus dem Interrupt niemanden) endete **einmal im
+  selben Doppelfehler und einmal sauber**. Es ist also ein *Rennen*,
+  das es auch ohne diese Runde gibt — und das die Interruptlast dieser
+  Runde sehr viel wahrscheinlicher macht (mit eingeschalteter Weiche
+  trat es in **jedem** Lauf auf, mit abgeschalteter in **einem von
+  zwei**). Eine der beiden bequemen Antworten — „gehört nicht dieser
+  Runde" oder „liegt an dieser Runde" — hinzuschreiben wäre in beiden
+  Fällen mehr, als gemessen ist.
+
+  Was gemessen ist: der Selbsttest ist auf **einem und auf zwei** Kernen
+  grün (34/34, viermal nachgefahren); der Doppelfehler in der Messung
+  kommt mit zwei Kernen. Der Selbsttest steht deshalb jetzt **vor**
+  `smp.stage`, wo die Selbsttests aller Runden davor auch stehen. Der
+  Verdächtige Nummer eins ist `sched.poll_kick` aus dem
+  Interrupt-Zusammenhang: es schreibt `T_STATE` **ohne** die Laufsperre,
+  und auf mehreren Kernen läuft das gegen `schedule_locked`. Das ist
+  kein neues Muster (`tty.lput` tut es seit Runde POLL aus der
+  Tastatur-Unterbrechung), aber die NVMe-Fertigmeldung feuert tausendmal
+  häufiger als eine Taste. Das gehört in eine eigene Runde — zusammen
+  mit der Frage, warum ein `fork` aus Ring 3 nach `smp.stage` auf vier
+  Kernen ebenfalls fällt.
 * **Ein Vektor je Warteschlange.** Heute melden alle vier Paare auf
   MSI-X-Eintrag 0. Begründung oben.
 * **Registrierte Puffer.** Der Umsteigepuffer kostet eine Kopie von bis
@@ -596,13 +621,33 @@ statt Phasenbit).
 
 ## Abnahme
 
+`bash tools/nvmeq/run.sh` — neun QEMU-Läufe (Regellauf, sechs
+Gegenproben, Messung mit 1/2/4 Kernen), die vier Regressionsläufe der
+Vorrunden und beide Übersetzer:
+
 | Läufer | Ergebnis |
 |---|---|
-| `tools/nvmeq/run.sh` | siehe unten |
-| `tools/ring/run.sh` | 120 / 0 |
-| `tools/async/run.sh` | 108 / 0 |
-| `tools/handle/run.sh` | 80 / 0 |
-| `tools/poll/run.sh` | 67 / 0 |
+| `tools/nvmeq/run.sh`, Ring 3 | **34 / 34**, Beendigungscode 0 |
+| `tools/nvmeq/run.sh`, gesamt | siehe die letzte Zeile des Laufs |
+| `tools/ring/run.sh` | **120 / 0** |
+| `tools/async/run.sh` | **108 / 0** |
+| `tools/handle/run.sh` | **80 / 0** |
+| `tools/poll/run.sh` | **67 / 0** |
 
 Beide Übersetzer (firnc0 und firnc1) bauen denselben Kernel und geben
-dieselben 34 Zusagen.
+dieselben **34** Zusagen.
+
+**Kein Test ist abgeschaltet.** Zwei Zusagen sind *bedingt* formuliert,
+und beide Male steht die Bedingung daneben:
+
+* `e-voll-gezaehlt` verlangt einen Rückstau nur, wenn die Tiefe klein
+  ist (Lauf `nqtiny`, Tiefe 4). Bei voller Tiefe sind 32 Aufträge kein
+  Rückstau, und eine Zusage, die dann trotzdem einen verlangte, würde
+  eine Zufälligkeit messen.
+* Der Vergleich Warteschlange gegen Fadenweg ist ab **Tiefe 4** streng
+  und bei Tiefe 1 eine Notiz. Begründung oben.
+
+Und eine Gegenprobe ist **ausdrücklich keine Zusage**: der Lauf mit
+`-smp 2` und abgeschalteter Weiche. Er wird gefahren und sein Ergebnis
+gedruckt — aber er fällt zweimal verschieden aus, und daraus eine
+Zusage zu machen hieße, ein Rennen als Tatsache auszugeben.
