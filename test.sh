@@ -114,6 +114,18 @@
 #       eingebaut), die libc-Anbindung von der Platte und die Messung
 #       gegen den synchronen Weg.
 #
+#  10d. Der Completion-Ring im geteilten Speicher (tools/ring/run.sh,
+#       Runde RING). Das io_uring-Aequivalent: Abgabe- und Fertigring
+#       liegen im Speicher des PROGRAMMS, und im Regelbetrieb kostet
+#       weder das Abgeben noch das Abholen einen Systemaufruf. Geprueft
+#       wird nicht die Leistung, sondern die Bedingung dafuer, dass das
+#       ueberhaupt erlaubt sein darf: der Kern kopiert jeden Abgabesatz
+#       GENAU EINMAL und maskiert jeden Index. Sieben Fehlerklassen aus
+#       Ring 3, drei Gegenproben (`noringcopy` baut den io_uring-Fehler
+#       absichtlich wieder ein und faellt dann mit der Kennzahl des
+#       Angreifers), die libc-Anbindung von der Platte und die Messung
+#       gegen synchron UND gegen Runde ASYNC in EINEM Boot.
+#
 #  14. Das Netz (tools/net/run.sh, Runde K8): ein virtio-net-Treiber in
 #      Firn (`kernel/virtio.fi`), der TCP/IP-Stack aus Runde K3 als
 #      ABHAENGIGKEIT ueber vendor/firn/COMMIT (`vendor/net/PROVENANCE.md`),
@@ -865,6 +877,9 @@ lauf "10b. die Lebensdauer vor der Asynchronitaet: Handles mit Verweiszaehler, G
 
 lauf "10c. die asynchrone Auftragsschicht: ein Auftrag lebt laenger als sein Systemaufruf (tools/async/run.sh, Runde ASYNC)" \
      tools/async/run.sh async '^ASYNC: |^        (TSC |  synchron|  asynchron|  nur die Abgabe|  Speicher je Auftrag)'
+
+lauf "10d. der Completion-Ring im geteilten Speicher: eine Abgabe ohne Systemaufruf (tools/ring/run.sh, Runde RING)" \
+     tools/ring/run.sh ring '^RING: |^        (Weg \(|synchron|async |ring |Systemaufrufe|  synchron|  Runde )'
 
 lauf "11. der Multiboot-Kopf verlangt einen Bildschirm -- der UEFI-Pfad (tools/boot/run.sh)" \
      tools/boot/run.sh boot '^BOOT: '
