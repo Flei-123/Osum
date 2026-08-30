@@ -240,6 +240,47 @@ Aussage über Osums Seite und über das Protokoll dieser Runde. Offen:
 
 ## Die Abnahme
 
-`bash tools/bridge/run.sh` (auch Abschnitt 30 von `./test.sh`).
+`bash tools/bridge/run.sh` (auch Abschnitt 32 von `./test.sh`).
 Überspringt sich laut, wenn QEMU, Netzräume oder
 `python3-cryptography` fehlen.
+
+**Gemessen: 112 Zusagen, 0 gefallen** (QEMU mit `-accel kvm`, e1000).
+
+### Die Zahlen
+
+| | |
+|---|---|
+| Quelltext dieser Runde | 3008 Zeilen in drei Dateien |
+| `/bin/jarvisd` auf der Platte | 815 544 Oktette (TLS 1.3, X.509, RSA, ECDSA, DEFLATE, das Protokoll) |
+| `/bin/jsig` | 111 064 Oktette (Ed25519, SHA-512, Montgomery-Arithmetik) |
+| `/bin/jarvisctl` | rund 68 000 Oktette |
+| eine Sitzung mit sieben Aufträgen, QEMU-Start bis Ende | 4860 ms |
+| Wartelast ohne Gegenstelle | **14 Systemaufrufe in 31 750 ms** — 0 je Sekunde |
+| Rechtebitfeld vor / nach `HND_DUP` | 6187 → 2081 |
+| PNG (64×48, gerechnetes Muster) | 8236 Oktette, 0 Abweichungen |
+| TLS-Verfahren | 4865 / 4867 (AES-128-GCM bzw. ChaCha20-Poly1305) |
+
+Die drei falschen Zertifikate werden mit den richtigen Gründen abgelehnt:
+`expired` → 2, `wrong` → 4 (falscher Name), `rogue` → 5 (unbekannter
+Aussteller). Ein leerer Wurzelspeicher lehnt auch das gute ab.
+
+### Regression
+
+Es wurde **keine bestehende Datei geändert** — nur neue kamen dazu, plus
+ein Abschnitt in `test.sh`. Nachgemessen auf diesem Zweig:
+
+| Abschnitt | Ergebnis |
+|---|---|
+| `tools/core/run.sh` | 46 / 0 |
+| `tools/caps/run.sh` | 67 / 0 |
+| `tools/handle/run.sh` | 80 / 0 |
+| `tools/posix/run.sh` | 134 / 0 |
+| `tools/freestanding/run.sh` | 41 / 0 |
+| Bau Stufe 0 (GUI) | grün |
+| Bau Stufe 0 `--gui off` | grün |
+| Bau Stufe 1 (firnc1) | grün |
+
+Ein erster Lauf meldete `core` 10/46 und `caps` 33/1. **Beides war kein
+Fehler im Code, sondern eine volle Platte** (`No space left on device` in
+`tools/core/run.sh` Zeile 152, `/` stand auf 99 %). Nach dem Aufräumen
+sind beide grün. Es steht hier, damit es niemand ein zweites Mal sucht.
