@@ -446,6 +446,71 @@ BERICHTE = [
 ]
 
 
+
+
+# ----------------------------------------------------------------------
+# EINE ACPI-TABELLE MIT ZWEI I2C-GERAETEN, gebaut nach der Spezifikation.
+#
+# Der Ersatzweg in kernel/i2chid.fi sucht in DSDT und SSDT nach dem
+# Oktettmuster einer I2C-Verbindung.  Ob er das richtig tut, laesst sich
+# ohne ein Brett mit LPSS-I2C nur so pruefen: eine Tabelle bauen, in der
+# GENAU BEKANNT ist, was drinsteht, und nachsehen, ob er genau das
+# findet -- und nicht mehr.
+#
+# I2C Serial Bus Connection Resource Descriptor (ACPI 6.x, 6.4.3.8.2.1):
+#     +0   0x8E        grosser Typ, Serial Bus Connection
+#     +1   Laenge, 2 Oktett (alles NACH diesen drei)
+#     +3   Revision (0x01)
+#     +4   Index der Ressourcenquelle
+#     +5   Bustyp (0x01 = I2C)
+#     +6   allgemeine Merker
+#     +7   typabhaengige Merker, 2 Oktett
+#     +9   typabhaengige Revision
+#     +10  Laenge der Typdaten, 2 Oktett (6 bei I2C)
+#     +12  Verbindungsgeschwindigkeit, 4 Oktett
+#     +16  SKLAVENADRESSE, 2 Oktett
+#     +18  Name der Ressourcenquelle, mit abschliessender Null
+
+
+def i2c_res(adr, hz=400000, quelle=b"\\_SB.PCI0.I2C1\0"):
+    kopf = bytes([0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01])
+    tdl = (6).to_bytes(2, "little")
+    rest = kopf + tdl + hz.to_bytes(4, "little") \
+        + adr.to_bytes(2, "little") + quelle
+    return bytes([0x8E]) + len(rest).to_bytes(2, "little") + rest
+
+
+def acpi_tabelle(adressen, sig=b"DSDT"):
+    """Eine Tabelle mit Kopf (36 Oktett) und AML-artigem Fuellwerk, in
+    dem die Ressourcenvorlagen stehen.  Das Fuellwerk enthaelt absichtlich
+    ein einzelnes 0x8E, das KEINE I2C-Verbindung ist -- ein Sucher, der
+    nur auf das Oktett schaut, faellt daran auf."""
+    koerper = bytearray()
+    koerper += bytes([0x5B, 0x82, 0x30, 0x44, 0x45, 0x56, 0x30])  # Device(DEV0)
+    koerper += bytes([0x08, 0x5F, 0x48, 0x49, 0x44])              # Name(_HID
+    koerper += (0x500CD041).to_bytes(4, "little")                 # EisaId PNP0C50
+    koerper += bytes([0x8E, 0x00, 0x00, 0xFF])   # ein 0x8E, das KEINES ist
+    koerper += i2c_res(adressen[0])
+    koerper += bytes([0x11, 0x22, 0x33, 0x44, 0x8E, 0x02])  # noch ein Koeder
+    koerper += i2c_res(adressen[1], quelle=b"\\_SB.PCI0.I2C0\0")
+    koerper += i2c_res(adressen[0])   # DIESELBE noch einmal -- darf nicht
+    #                                    doppelt in die Liste
+    kopf = bytearray(36)
+    kopf[0:4] = sig
+    kopf[4:8] = (36 + len(koerper)).to_bytes(4, "little")
+    kopf[8] = 2
+    kopf[10:16] = b"OSUMHD"
+    t = bytes(kopf) + bytes(koerper)
+    # Pruefsumme, damit die Tabelle auch als echte durchginge
+    t = bytearray(t)
+    t[9] = (-sum(t)) & 0xFF
+    return bytes(t)
+
+
+I2C_ADRESSEN = [0x2C, 0x15]
+ACPI_BLOB = acpi_tabelle(I2C_ADRESSEN)
+
+
 # ----------------------------------------------------------------------
 # DER ZWEITE ZERLEGER.  Aus der Spezifikation, nicht aus hidrep.fi.
 
@@ -703,7 +768,7 @@ def firn():
     a("import kstate")
     a("")
     a("export { count, len_of, name_of, load, GUTE,")
-    a("    bcount, bdesc, blen, bload }")
+    a("    bcount, bdesc, blen, bload, alen, aload }")
     a("")
     a("const N: u64 = %d" % len(ALLE))
     a("// Die ersten GUTE Beschreibungen muessen durchgehen, die uebrigen")
@@ -861,6 +926,49 @@ def firn():
     a("    }")
     a("    return t[i as usize]")
     a("}")
+    a("")
+    a("// ------------------------------------ EINE GEBAUTE ACPI-TABELLE")
+    a("//")
+    a("// Mit GENAU zwei I2C-Verbindungen (Adressen %s) und drei"
+      % ", ".join("0x%02X" % x for x in I2C_ADRESSEN))
+    a("// Koedern, die wie eine aussehen und keine sind. Der Ersatzweg in")
+    a("// i2chid.fi muss genau die zwei finden -- die dritte Vorlage ist")
+    a("// eine WIEDERHOLUNG der ersten und darf nicht doppelt zaehlen.")
+    a("const AN: u64 = %d" % len(ACPI_BLOB))
+    a("")
+    a("fn alen() -> u64 {")
+    a("    return AN")
+    a("}")
+    a("")
+    a("fn aload(dst: u64) -> u64 {")
+    a("    var k: u64 = 0")
+    a("    while k < AN {")
+    a("        kstate.set8(dst + k, aoktett(k) as u8)")
+    a("        k = k + 1")
+    a("    }")
+    a("    return AN")
+    a("}")
+    a("")
+    a("fn aoktett(k: u64) -> u64 {")
+    a("    return (awort(k / 8) >> ((k % 8) * 8)) & 0xFF")
+    a("}")
+    a("")
+    ablob = ACPI_BLOB + b"\0" * ((8 - len(ACPI_BLOB) % 8) % 8)
+    aworte = [int.from_bytes(ablob[k:k + 8], "little")
+              for k in range(0, len(ablob), 8)]
+    a("const NAW: u64 = %d" % len(aworte))
+    a("")
+    a("fn awort(i: u64) -> u64 {")
+    a("    var t: [u64; %d] = [" % len(aworte))
+    for k in range(0, len(aworte), 4):
+        st = ", ".join("0x%016X" % w for w in aworte[k:k + 4])
+        a("        %s%s" % (st, "," if k + 4 < len(aworte) else ""))
+    a("    ]")
+    a("    if i >= NAW {")
+    a("        return 0")
+    a("    }")
+    a("    return t[i as usize]")
+    a("}")
     print("\n".join(z))
 
 
@@ -891,8 +999,23 @@ def feld_zeilen():
     return out
 
 
+def nr_von(marke):
+    """Die Nummer des Berichts mit dieser Bemerkung.  tools/hid/run.sh
+    holt sie SO und schreibt sie nicht hin -- als in dieser Runde zwei
+    Berichte fuer die Super-Taste dazukamen, verschoben sich alle
+    folgenden Nummern, und drei Zusagen fielen, obwohl am Kernel nichts
+    falsch war."""
+    for i, (_, _, k) in enumerate(BERICHTE):
+        if k == marke:
+            return i
+    raise SystemExit("kein Bericht mit der Bemerkung %r" % marke)
+
+
 def main():
     was = sys.argv[1] if len(sys.argv) > 1 else "kopf"
+    if was == "nr":
+        print(nr_von(sys.argv[2]))
+        return 0
     if was == "firn":
         firn()
     elif was == "kopf":

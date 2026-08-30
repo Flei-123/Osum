@@ -86,6 +86,7 @@ import xhci
 import usb
 import hidrep
 import hidin
+import i2chid
 
 // Indices in the table out of isr.s.
 const V_DF_STACK: u64 = 52
@@ -442,6 +443,10 @@ fn kernel_main(mbi: u64, vectors: u64, state: u64, kernel_end: u64,
     //     Blockgeraet sein. Ohne das Wort `usb` ist das hier EINE
     //     gedruckte Zeile und sonst nichts.
     usb_stage(state)
+    // RUNDE HID: HID UEBER I2C. Hier und nicht bei `hid_stage` -- die
+    // Suche nach dem Regler braucht den PCI-Baum aus `hw.stage`, und
+    // ACPI muss gelesen sein. Ohne `i2chid` ist das eine Verzweigung.
+    i2chid.stage(state)
 
     // 7e-ter. RUNDE TRESOR: DIE GERAETEIDENTITAET (`kernel/hwid.fi`).
     //     Hier und nicht frueher, weil die MAC-Adresse erst existiert,
@@ -510,6 +515,14 @@ fn kernel_main(mbi: u64, vectors: u64, state: u64, kernel_end: u64,
     // hier jetzt eine andere Summe.
     bootmod.recheck(state)
     usb.report(state)
+    // RUNDE HID: DIE LATENZMESSUNG, GANZ AM ENDE. Sie braucht die
+    // kalibrierte Taktzahl aus `time.calibrate` (Stufe 7), und die
+    // gibt es weiter oben noch nicht -- der erste Anlauf hat deshalb
+    // Zyklen ohne Zeit gemeldet.
+    if kstate.mode_on(state, kstate.M_HIDLAT) {
+        hidin.stage(state)
+        hidin.latenz(state)
+    }
 
     sercon.report(state)
     serial.puts((&s_done[0]) as u64)
@@ -3367,27 +3380,36 @@ fn mode_of(state: u64, cmd: u64) {
     if find(cmd, (&w_hold[0]) as u64, 7) != 0 {
         kstate.mode_add(state, kstate.M_USBHOLD)
     }
-    // RUNDE HID. `hidrep` faehrt den Zerleger-Selbsttest, `hid` schaltet
-    // den generischen Weg an, `nohidrep` ist die GEGENPROBE dazu (nur
-    // Boot-Protokoll, wie vor dieser Runde). Zuerst die langen Woerter
-    // suchen, sonst findet `hid` sich in `hidrep` wieder -- `find`
-    // vergleicht Oktette und kennt keine Wortgrenze.
+    // RUNDE HID. `hidgen` schaltet den generischen Weg an, `nurboot` ist
+    // die GEGENPROBE dazu (nur Boot-Protokoll, wie vor dieser Runde),
+    // `hidrep`/`hidpad`/`hidlat`/`hiddump` sind Selbsttests.
+    //
+    // DIE ERSTEN NAMEN DIESER RUNDE WAREN FALSCH, und der Fehler ist
+    // genau der, vor dem der Kommentar zu `nousb` in Runde K17 warnt:
+    // `find` vergleicht OKTETTE und kennt keine Wortgrenze. Der Schalter
+    // hiess erst `hid` und die Gegenprobe `nohidrep` -- und `nohidrep`
+    // enthaelt `nohid`. Damit schaltete die GEGENPROBE des generischen
+    // Weges die GANZE USB-Eingabe ab, und der Lauf, der beweisen sollte,
+    // dass ohne den Zerleger alles weiterlaeuft, hatte gar kein Geraet
+    // mehr. Aufgefallen ist es in `tools/hid/run.sh` an der Zusage
+    // "usb-kbd laeuft weiter". Seitdem prueft derselbe Laeufer
+    // mechanisch, dass KEIN Moduswort in einem anderen steckt.
     var w_hidrep: [u8; 7] = "hidrep\0"
     var w_hiddump: [u8; 8] = "hiddump\0"
-    var w_nohrep: [u8; 9] = "nohidrep\0"
+    var w_nohrep: [u8; 8] = "nurboot\0"
     var w_hidlat: [u8; 7] = "hidlat\0"
     var w_hidpad: [u8; 7] = "hidpad\0"
     var w_i2chid: [u8; 7] = "i2chid\0"
     var w_noi2c: [u8; 6] = "noi2c\0"
-    var w_hid: [u8; 4] = "hid\0"
+    var w_hid: [u8; 7] = "hidgen\0"
     if find(cmd, (&w_hidrep[0]) as u64, 6) != 0 {
         kstate.mode_add(state, kstate.M_HIDREP)
     }
     if find(cmd, (&w_hiddump[0]) as u64, 7) != 0 {
         kstate.mode_add(state, kstate.M_HIDDUMP)
     }
-    if find(cmd, (&w_nohrep[0]) as u64, 8) != 0 {
-        kstate.mode_add(state, kstate.M_NOHIDREP)
+    if find(cmd, (&w_nohrep[0]) as u64, 7) != 0 {
+        kstate.mode_add(state, kstate.M_NURBOOT)
     }
     if find(cmd, (&w_hidlat[0]) as u64, 6) != 0 {
         kstate.mode_add(state, kstate.M_HIDLAT)
@@ -3401,7 +3423,7 @@ fn mode_of(state: u64, cmd: u64) {
     if find(cmd, (&w_noi2c[0]) as u64, 5) != 0 {
         kstate.mode_add(state, kstate.M_NOI2C)
     }
-    if find(cmd, (&w_hid[0]) as u64, 3) != 0 {
+    if find(cmd, (&w_hid[0]) as u64, 6) != 0 {
         kstate.mode_add(state, kstate.M_HID)
     }
 }
@@ -3480,6 +3502,12 @@ fn hid_stage(state: u64) {
         hidin.stage(state)
         hidin.wiedergabe(state)
     }
+    // RUNDE HID: der Ersatzweg fuer ACPI an einer gebauten Tabelle.
+    // Braucht keinen Bus und laeuft deshalb ueberall.
+    if kstate.mode_on(state, kstate.M_HIDDUMP) {
+        i2chid.scan_test(state)
+    }
+
 }
 
 fn usb_stage(state: u64) {
