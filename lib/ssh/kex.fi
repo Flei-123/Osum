@@ -1,0 +1,154 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// lib/ssh/kex.fi -- der gemeinsame Schluessel und was daraus wird
+// (RFC 4253 Abschnitt 7.2, RFC 8731), Runde SSHD.
+//
+// NACH DEM SCHLUESSELAUSTAUSCH gibt es zwei Zahlen: den gemeinsamen
+// Schluessel K (aus X25519) und den Austauschhash H. Aus ihnen wird
+// ALLES abgeleitet, was danach gebraucht wird, und die Vorschrift ist
+// RFC 4253 Abschnitt 7.2:
+//
+//     Anfangsvektor  Klient -> Server   HASH(K || H || "A" || session_id)
+//     Anfangsvektor  Server -> Klient   HASH(K || H || "B" || session_id)
+//     Chiffrierung   Klient -> Server   HASH(K || H || "C" || session_id)
+//     Chiffrierung   Server -> Klient   HASH(K || H || "D" || session_id)
+//     Sicherung      Klient -> Server   HASH(K || H || "E" || session_id)
+//     Sicherung      Server -> Klient   HASH(K || H || "F" || session_id)
+//
+// Der Buchstabe ist EIN Oktett, nicht ein String mit Laengenwort. K ist
+// ein `mpint` -- also MIT seinem Laengenwort, und mit dem fuehrenden
+// Nulloktett, wenn das oberste Bit gesetzt ist (`lib/ssh/wire.fi`
+// erklaert, warum das die haeufigste Fehlerquelle ist). H ist der reine
+// Hashwert ohne Laengenwort, `session_id` ebenso.
+//
+// REICHT EIN HASH NICHT, wird verlaengert -- und zwar nicht mit einem
+// Zaehler, sondern mit allem, was bisher da ist:
+//
+//     K1 = HASH(K || H || X || session_id)
+//     K2 = HASH(K || H || K1)
+//     K3 = HASH(K || H || K1 || K2)
+//     ...
+//     Schluessel = K1 || K2 || K3 || ...
+//
+// `chacha20-poly1305@openssh.com` braucht 64 Oktette je Richtung, SHA-256
+// gibt 32 -- also werden hier IMMER zwei Runden gebraucht, und der
+// Verlaengerungsweg ist kein Sonderfall, sondern der Normalfall. Genau
+// deshalb wird er gemessen (`tools/sshd/vectors.py`) und nicht geglaubt.
+//
+// DIE SITZUNGSKENNUNG ist der Austauschhash der ERSTEN Aushandlung und
+// bleibt es fuer die ganze Verbindung, auch nach einer Neuaushandlung.
+// Sie ist es, die in der Signatur der Schluessel-Anmeldung steckt
+// (RFC 4252 Abschnitt 7) -- ohne sie waere eine abgehoerte Signatur auf
+// jeder anderen Verbindung wiederverwendbar.
+
+import crypto.sha256
+import ssh.wire
+
+export { Kex, kex_new, kex_set_secret, kex_set_hash, derive,
+    kex_k, kex_klen, kex_h, kex_sid, IV_CS, IV_SC, ENC_CS, ENC_SC,
+    MAC_CS, MAC_SC }
+
+// Die sechs Buchstaben von RFC 4253 7.2, als Oktett.
+const IV_CS: u64 = 65   // 'A'
+const IV_SC: u64 = 66   // 'B'
+const ENC_CS: u64 = 67  // 'C'
+const ENC_SC: u64 = 68  // 'D'
+const MAC_CS: u64 = 69  // 'E'
+const MAC_SC: u64 = 70  // 'F'
+
+struct Kex {
+    // K als `mpint`, MIT dem Laengenwort. 32 Oktette Rohwert werden zu
+    // hoechstens 4 + 33 = 37 Oktetten.
+    kmp: [u8; 40],
+    kmplen: usize,
+    h: [u8; 32],
+    sid: [u8; 32],
+}
+
+fn kex_new() -> Kex {
+    return Kex { kmp: [0 as u8; 40], kmplen: 0, h: [0 as u8; 32],
+        sid: [0 as u8; 32] }
+}
+
+fn kex_k(kx: *mut Kex) -> u64 {
+    return (&(*kx).kmp[0]) as u64
+}
+
+fn kex_klen(kx: *mut Kex) -> usize {
+    return (*kx).kmplen
+}
+
+fn kex_h(kx: *mut Kex) -> u64 {
+    return (&(*kx).h[0]) as u64
+}
+
+fn kex_sid(kx: *mut Kex) -> u64 {
+    return (&(*kx).sid[0]) as u64
+}
+
+// Die 32 Oktette, die X25519 liefert, werden als VORZEICHENLOSE Zahl mit
+// dem hoechstwertigen Oktett zuerst gelesen und als `mpint` abgelegt --
+// so macht es OpenSSH in `kex_c25519_shared_key_ext`
+// (`sshbuf_put_bignum2_bytes`), und so verlangt es RFC 8731.
+fn kex_set_secret(kx: *mut Kex, secret: u64) {
+    var b: wire.Buf = wire.buf_write((&(*kx).kmp[0]) as u64, 40)
+    wire.wmpint(&b, secret, 32)
+    (*kx).kmplen = b.len
+}
+
+// H setzen; ist noch keine Sitzungskennung da, ist H auch sie.
+fn kex_set_hash(kx: *mut Kex, h: u64, first: bool) {
+    var i: usize = 0
+    while i < 32 {
+        (*kx).h[i] = *((h + i as u64) as *mut u8)
+        i = i + 1
+    }
+    if first {
+        i = 0
+        while i < 32 {
+            (*kx).sid[i] = (*kx).h[i]
+            i = i + 1
+        }
+    }
+}
+
+// `want` Oktette Schluesselmaterial fuer den Buchstaben `letter`.
+fn derive(kx: *mut Kex, letter: u64, out: u64, want: usize) {
+    let kp: u64 = (&(*kx).kmp[0]) as u64
+    let hp: u64 = (&(*kx).h[0]) as u64
+    let sp: u64 = (&(*kx).sid[0]) as u64
+    var one: [u8; 1] = [0 as u8]
+    one[0] = (letter & 255) as u8
+
+    var s: sha256.Sha256 = sha256.sha256_new()
+    sha256.begin(&s)
+    sha256.update(&s, kp, (*kx).kmplen)
+    sha256.update(&s, hp, 32)
+    sha256.update(&s, (&one[0]) as u64, 1)
+    sha256.update(&s, sp, 32)
+    var block: [u8; 32] = [0 as u8; 32]
+    sha256.finish(&s, (&block[0]) as u64)
+
+    var done: usize = 0
+    var i: usize = 0
+    while i < 32 && done < want {
+        *((out + done as u64) as *mut u8) = block[i]
+        done = done + 1
+        i = i + 1
+    }
+    // Die Verlaengerung: jeder weitere Block hasht K, H und ALLES, was
+    // bisher herausgekommen ist.
+    while done < want {
+        var s2: sha256.Sha256 = sha256.sha256_new()
+        sha256.begin(&s2)
+        sha256.update(&s2, kp, (*kx).kmplen)
+        sha256.update(&s2, hp, 32)
+        sha256.update(&s2, out, done)
+        sha256.finish(&s2, (&block[0]) as u64)
+        i = 0
+        while i < 32 && done < want {
+            *((out + done as u64) as *mut u8) = block[i]
+            done = done + 1
+            i = i + 1
+        }
+    }
+}
