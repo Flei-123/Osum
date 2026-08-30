@@ -40,7 +40,7 @@ was er bräuchte, steht in Abschnitt 8.
 | `kernel/user/nprof.fi` | 1200 | der Profilspeicher in Ring 3 — Datei, Format, Rechte, Verbindungsaufbau |
 | `kernel/user/netprof.fi` | 542 | `/bin/netprof`, die Kommandozeile |
 | `kernel/user/npt.fi` | 376 | `/bin/npt`, der Messläufer der Abnahme |
-| `tools/netprofil/run.sh` | 669 | die Abnahme |
+| `tools/netprofil/run.sh` | 683 | die Abnahme |
 | dazu | | `virtio.fi` (Steuerwarteschlange), `e1000.fi` (RAL/RAH), `netdev.fi` (Verteilung), `inet.fi` (die vier Stellen), `sys.fi` (zwei Aufrufe), `settings.fi` (die achte Seite), `locale/de,en` |
 
 ### 2.1 Die drei Stufen — und warum sie **je Profil** stehen
@@ -280,7 +280,7 @@ das Warten auf eine Warteschlange, nur ohne Wirkung.
 
 Zeilen: `kernel/netprof.fi` 454 · `kernel/user/nprof.fi` 1200 ·
 `kernel/user/netprof.fi` 542 · `kernel/user/npt.fi` 376 ·
-`tools/netprofil/run.sh` 669. Zusammen **3 241 Zeilen**.
+`tools/netprofil/run.sh` 683. Zusammen **3 255 Zeilen**.
 
 ---
 
@@ -472,3 +472,22 @@ kommt, muss die Überlagerung nicht neu erfinden.
 * **Keine echte WLAN-Karte je gesehen.** Alles über virtio-net und e1000
   ist unter QEMU gemessen. Was über echtes Blech gesagt werden kann,
   steht in `docs/REALHW.md` und ist dort als solches gekennzeichnet.
+
+### Nachtrag 30.08.2026: die Zeitgrenze der Gastläufe
+
+Ein Abnahmelauf auf dem stark belasteten Bau-Server (Lastmittel 13 bei 12
+Kernen, weil parallel weitere Runden Gäste starten) ist in Abschnitt 4
+fünfmal rot geworden. Die Ursache war **nicht** die Netzprofilverwaltung:
+der erste Gastlauf war in die Zeitgrenze von 240 Sekunden gelaufen und
+hatte gar nichts auf die serielle Schnittstelle geschrieben, worauf die
+vier folgenden Zusagen leere Zeichenketten verglichen haben.
+
+Geändert wurde deshalb zweierlei, ohne eine Zusage abzuschalten:
+
+* Die Zeitgrenze aller Gastläufe steht jetzt auf 600 Sekunden und ist
+  über `NP_QTMO` einstellbar.
+* `bootcheck` sagt es ausdrücklich, wenn ein Gastlauf nichts geschrieben
+  hat — dann sind die folgenden roten Zusagen erkennbar Folgefehler und
+  keine Aussage über die Netzprofile. Rot bleiben sie trotzdem.
+
+Der Wiederholungslauf unter derselben Last: **alle 68 Zusagen bestanden**.

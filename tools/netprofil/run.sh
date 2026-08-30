@@ -190,7 +190,7 @@ qemu_solo() { # <append> <out> [extra...]
     shift 2
     rm -f "$out"
     cp "$TMPD/disk.img" "$TMPD/live.img"
-    timeout 240 $QEMU_X86 -kernel "$TMPD/k.mb" -m 256 \
+    timeout ${NP_QTMO:-600} $QEMU_X86 -kernel "$TMPD/k.mb" -m 256 \
         -append "$append" -serial "file:$out" -display none -no-reboot \
         -netdev user,id=n0 -device "virtio-net-pci,netdev=n0,mac=$CARDMAC" \
         -drive "file=$TMPD/live.img,format=raw,if=ide,index=0" \
@@ -264,7 +264,7 @@ num "  und 'immer' liefert dann zweimal dasselbe" \
     "$(nval "$TMPD/c-none.txt" immer gleich)" eq 1
 
 rm -f "$TMPD/e1000.txt"; cp "$TMPD/disk.img" "$TMPD/live.img"
-timeout 240 $QEMU_X86 -kernel "$TMPD/k.mb" -m 256 \
+timeout ${NP_QTMO:-600} $QEMU_X86 -kernel "$TMPD/k.mb" -m 256 \
     -append "$BASE script=npt 100;exit" -serial "file:$TMPD/e1000.txt" \
     -display none -no-reboot -netdev user,id=n0 \
     -device "e1000,netdev=n0,mac=$CARDMAC" \
@@ -298,11 +298,22 @@ python3 tools/osum/mkfs.py build "$TMPD/p.img" $BLOCKS "/bin/" "/etc/" \
     || { bad "mkfs fehlgeschlagen"; sed 's/^/        /' "$TMPD/mk1.txt" | head -4; }
 boot_p() { # <script> <out>
     rm -f "$2"
-    timeout 240 $QEMU_X86 -kernel "$TMPD/k.mb" -m 256 \
+    timeout ${NP_QTMO:-600} $QEMU_X86 -kernel "$TMPD/k.mb" -m 256 \
         -append "$BASE script=$1" -serial "file:$2" -display none -no-reboot \
         -netdev user,id=n0 -device "virtio-net-pci,netdev=n0,mac=$CARDMAC" \
         -drive "file=$TMPD/p.img,format=raw,if=ide,index=0" \
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1
+}
+# Ein Gastlauf, der gar nichts auf die serielle Schnittstelle geschrieben
+# hat, ist unter Last in die Zeitueberschreitung gelaufen. Das wird GESAGT,
+# damit die folgenden roten Zusagen als Folgefehler erkennbar sind -- sie
+# bleiben trotzdem rot.
+bootcheck() { # <log> <was>
+    if [ ! -s "$1" ]; then
+        note "ACHTUNG: $2 hat nichts geschrieben -- Gastlauf abgebrochen"
+        note "         (Zeitueberschreitung ${NP_QTMO:-600}s, Maschine unter Last?)"
+        note "         die folgenden roten Zusagen sind Folgefehler davon"
+    fi
 }
 macs() { grep -a '^netprof: Adresse jetzt' "$1" | grep -oE '([0-9a-f]{2}:){5}[0-9a-f]{2}'; }
 
@@ -322,6 +333,7 @@ macs() { grep -a '^netprof: Adresse jetzt' "$1" | grep -oE '([0-9a-f]{2}:){5}[0-
 # eine Grenze dieser Runde, die ein Benutzer wirklich merkt.
 boot_p "netprof neu heim;netprof setz heim bezug fest;netprof setz heim ip 10.0.2.99;netprof setz heim maske 255.255.255.0;netprof setz heim gateway 10.0.2.2;netprof an heim;netprof aus;netprof an heim;cat /etc/netprofile.conf;exit" \
        "$TMPD/p1.txt"
+bootcheck "$TMPD/p1.txt" "der erste Lauf"
 a1=$(macs "$TMPD/p1.txt" | sed -n 1p)
 a2=$(macs "$TMPD/p1.txt" | sed -n 2p)
 has "$TMPD/p1.txt" "netprof: angelegt: heim" "netprof legt ein Profil an"
@@ -345,6 +357,7 @@ else
 fi
 
 boot_p "netprof an heim;exit" "$TMPD/p2.txt"
+bootcheck "$TMPD/p2.txt" "der Lauf nach dem Neustart"
 b1=$(macs "$TMPD/p2.txt" | sed -n 1p)
 if [ -n "$b1" ] && [ "$b1" = "$a1" ]; then
     ok "und nach einem NEUSTART ist es immer noch dieselbe ($b1)"
@@ -356,6 +369,7 @@ fi
 # feste Adresse, damit dieser Abschnitt weiter nur die MAC-Stufe misst
 # und nicht nebenbei den DHCP-Klienten.
 boot_p "netprof loesche heim;netprof neu heim;netprof setz heim bezug fest;netprof setz heim ip 10.0.2.99;netprof setz heim maske 255.255.255.0;netprof setz heim gateway 10.0.2.2;netprof an heim;exit" "$TMPD/p3.txt"
+bootcheck "$TMPD/p3.txt" "der Lauf nach Loeschen und Neuanlegen"
 c1=$(macs "$TMPD/p3.txt" | sed -n 1p)
 if [ -n "$c1" ] && [ "$c1" != "$a1" ]; then
     ok "nach Loeschen und Neuanlegen eine ANDERE Adresse ($c1 statt $a1)"
@@ -399,7 +413,7 @@ python3 tools/osum/mkfs.py build "$TMPD/kap.img" $BLOCKS "/bin/" "/etc/" \
     && ok "ein Abbild mit einer absichtlich kaputten Profildatei" \
     || { bad "mkfs fehlgeschlagen"; sed 's/^/        /' "$TMPD/mk2.txt" | head -4; }
 rm -f "$TMPD/kap.txt"
-timeout 240 $QEMU_X86 -kernel "$TMPD/k.mb" -m 256 \
+timeout ${NP_QTMO:-600} $QEMU_X86 -kernel "$TMPD/k.mb" -m 256 \
     -append "$BASE script=netprof;netprof an gut;exit" \
     -serial "file:$TMPD/kap.txt" -display none -no-reboot \
     -netdev user,id=n0 -device "virtio-net-pci,netdev=n0,mac=$CARDMAC" \
@@ -454,7 +468,7 @@ python3 tools/osum/mkfs.py build "$TMPD/r.img" $BLOCKS "/bin/" "/etc/" "/t/" \
     && ok "ein Abbild mit /etc/shadow und einem Profil 0o600 root:root" \
     || { bad "mkfs fehlgeschlagen"; sed 's/^/        /' "$TMPD/mk3.txt" | head -4; }
 rm -f "$TMPD/rechte.txt"
-timeout 240 $QEMU_X86 -kernel "$TMPD/k.mb" -m 256 \
+timeout ${NP_QTMO:-600} $QEMU_X86 -kernel "$TMPD/k.mb" -m 256 \
     -append "$BASE script=sh /t/rechte.sh;exit" \
     -serial "file:$TMPD/rechte.txt" -display none -no-reboot \
     -netdev user,id=n0 -device "virtio-net-pci,netdev=n0,mac=$CARDMAC" \
@@ -501,7 +515,7 @@ draht_lauf() { # <extra-worte> <out> <img>
     TDPID=$!
     sleep 0.8
     rm -f "$2"
-    timeout 240 $QEMU_X86 -kernel "$TMPD/k.mb" -m 256 \
+    timeout ${NP_QTMO:-600} $QEMU_X86 -kernel "$TMPD/k.mb" -m 256 \
         -append "osum $1 nic nip=10.9.0.9/24 ngw=$HOST_IP nsvc=0 nwait=0 script=netprof an heim;ping -c 3 $HOST_IP;netprof stand;exit" \
         -serial "file:$2" -display none -no-reboot \
         -netdev "socket,id=n0,udp=127.0.0.1:$BPORT,localaddr=127.0.0.1:$QPORT" \
@@ -573,7 +587,7 @@ DHPID=$!
 sleep 0.6
 cp "$TMPD/dh.img" "$TMPD/dhlive.img"
 rm -f "$TMPD/dhcp.txt"
-timeout 240 $QEMU_X86 -kernel "$TMPD/k.mb" -m 256 \
+timeout ${NP_QTMO:-600} $QEMU_X86 -kernel "$TMPD/k.mb" -m 256 \
     -append "osum nic nip=10.9.0.9/24 ngw=$HOST_IP nsvc=0 nwait=0 script=netprof an heim;ping -c 2 $HOST_IP;netprof stand;exit" \
     -serial "file:$TMPD/dhcp.txt" -display none -no-reboot \
     -netdev "socket,id=n0,udp=127.0.0.1:$BPORT,localaddr=127.0.0.1:$QPORT" \
