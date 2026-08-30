@@ -47,6 +47,59 @@ WIN = re.compile(
     rb"wm: win nr=\d+ id=\d+ z=\d+ layer=\d+ hidden=(\d+) deco=(\d+) "
     rb"x=(\d+) y=(\d+) w=(\d+) h=(\d+).*?t=\[([^\]]*)\]")
 
+# RUNDE MERGE-2: DIE GANZE TAFEL, MIT z UND LAGE -- fuer die Frage, was
+# UEBER dem gemessenen Fenster liegt. Siehe `frei_bis`.
+WINZ = re.compile(
+    rb"wm: win nr=\d+ id=\d+ z=(\d+) layer=(\d+) hidden=(\d+) deco=(\d+) "
+    rb"x=(\d+) y=(\d+) w=(\d+) h=(\d+).*?t=\[([^\]]*)\]")
+
+
+def frei_bis(roh, titel, y0, y1, x0):
+    """Bis zu welchem x die Zeile y0..y1 rechts von x0 UNVERDECKT ist.
+
+    WAS VERDECKT IST, KANN NICHT GEMESSEN WERDEN -- und darf nicht als
+    falsch gerastertes Zeichen gezaehlt werden. `themetest` laesst zum
+    Bild absichtlich einen Dialog offen ("EIN DIALOG BLEIBT OFFEN",
+    kernel/user/themetest.fi); der liegt bei 230,258 und schneidet die
+    letzten fuenf Zeichen von `Übernehmen` ab. Der Rasterer meldete
+    dafuer "333 von 526 Tintenpunkten falsch" -- und die falschen sind
+    genau die, die auf dem Bild gar nicht stehen.
+
+    Gemessen wird deshalb bis zur linken Kante des naechsten Fensters,
+    das WEITER OBEN liegt und diese Bildzeilen schneidet. Das ist
+    strenger als es klingt: die sichtbaren Zeichen muessen weiterhin
+    Bildpunkt fuer Bildpunkt stimmen, und ist gar nichts sichtbar,
+    faellt die Zusage.
+    """
+    eigen = None
+    fenster = []
+    for m in WINZ.finditer(roh):
+        e = dict(z=int(m.group(1)), hidden=m.group(3) != b"0",
+                 deco=m.group(4) == b"1", x=int(m.group(5)),
+                 y=int(m.group(6)), w=int(m.group(7)), h=int(m.group(8)),
+                 t=m.group(9).decode("utf-8", "replace"))
+        fenster.append(e)
+        if e["t"] == titel and not e["hidden"]:
+            eigen = e
+    if eigen is None:
+        return None
+    grenze = None
+    for e in fenster:
+        if e["hidden"] or e["z"] <= eigen["z"] or e is eigen:
+            continue
+        # der AEUSSERE Kasten, Rahmen und Titelleiste eingeschlossen
+        ex0 = e["x"] - (BORDER if e["deco"] else 0)
+        ey0 = e["y"] - (TITLE if e["deco"] else 0)
+        ex1 = e["x"] + e["w"] + (BORDER if e["deco"] else 0)
+        ey1 = e["y"] + e["h"] + (BORDER if e["deco"] else 0)
+        if ey1 <= y0 or ey0 >= y1:
+            continue
+        if ex1 <= x0:
+            continue
+        if grenze is None or ex0 < grenze:
+            grenze = ex0
+    return grenze
+
 
 def fenster(roh, titel):
     """Die AEUSSERE Lage des Fensters mit diesem Titel.
@@ -102,7 +155,12 @@ def gemalt(roh, text):
     anderes Programm zerschnitten hat, traegt ihren Anfang trotzdem.
     """
     roh = bis_zum_foto(roh)
-    pat = (rb"kind=(\d+) x=(\d+) base=(\d+) fg=(\d+) bg=(\d+) t="
+    # RUNDE SOFTUI: zwischen `bg=` und `t=` darf stehen, was spaetere
+    # Runden dort anfuegen (`tw=` aus THEMESTORE, `ax=`/`ay=` aus
+    # SOFTUI). Die Zusage haengt am ANKER -- dem erwarteten Text -- und
+    # nicht an der Reihenfolge der Felder davor. Vorher hat sie an der
+    # Reihenfolge gehangen und ist beim naechsten Feld umgefallen.
+    pat = (rb"kind=(\d+) x=(\d+) base=(\d+) fg=(\d+) bg=(\d+)(?: [a-z]+=\d+)* t="
            + re.escape(text.encode("utf-8")))
     treffer = list(re.finditer(pat, roh))
     if not treffer:
@@ -164,6 +222,25 @@ def main(argv):
               "heraus, das %d breit ist -- nicht messbar"
               % (zeichen, text[:30], tx, tx + breite, ww))
         return 1
+
+    # NUR DER SICHTBARE TEIL. `frei_bis` sagt, wo das naechste Fenster
+    # anfaengt; alles ab dort steht nicht auf dem Bild.
+    hoch = 20
+    grenze = frei_bis(roh, titel, ay - hoch, ay + 6, ax)
+    if grenze is not None:
+        sicht = text
+        for k, (c, x26) in enumerate(stellen):
+            if ax + (x26 >> 6) + 12 > grenze:
+                sicht = text[:k]
+                break
+        if not sicht.strip() or not any(c in "äöüÄÖÜß" for c in sicht):
+            print("umlaut: [%s] '%s' ist ab x=%d verdeckt -- vom Umlaut "
+                  "ist nichts zu sehen" % (zeichen, text[:30], grenze))
+            return 1
+        if sicht != text:
+            print("        verdeckt ab x=%d -- gemessen wird '%s'"
+                  % (grenze, sicht))
+        text = sicht
 
     r = subprocess.run(
         ["python3", "tools/gfx/checkshot.py",

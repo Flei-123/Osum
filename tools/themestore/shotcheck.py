@@ -96,7 +96,14 @@ class Pic(object):
 # ------------------------------------------------------------------ the log
 TEXT = re.compile(
     r"wlib: text win=(\d+) kind=(\d+) x=(\d+) base=(\d+) fg=(\d+) bg=(\d+)"
-    r" tw=(\d+) t=(.*)")
+    # RUNDE MERGE-2: FELDWEISE, NICHT IN EINER FESTEN REIHENFOLGE.
+    # Runde SOFTUI haengt hinter `tw=` noch `ax=`/`ay=` an; mit dem
+    # alten Muster passte danach KEINE einzige Zeile mehr, und dieses
+    # Werkzeug meldete "texts 0 measured 0" -- also 0 statt >= 12
+    # gemessener Beschriftungen, ohne dass am Bild irgendetwas fehlte.
+    # Dieselbe Stelle hat STATUS-SOFTUI.md fuer tools/look/run.sh und
+    # tools/look/umlaut.py berichtigt und diese hier uebersehen.
+    r" tw=(\d+)(?: [a-z]+=-?\d+)* t=(.*)")
 
 # RUNDE THEMESTORE: WO DAS FENSTER STEHT, gesagt von dem Fenster.
 # Bis hierher nahm dieses Werkzeug fuer jedes Fenster ausser dem der

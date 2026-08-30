@@ -246,10 +246,19 @@ else
         bad "die Taskleiste meldet kein einziges Programmsymbol"
     fi
     # UND DASS DAS PROTOKOLL WIRKLICH GESETZT WURDE.
-    if grep -aq 'form n=4' "$TMPD/m.log"; then
-        ok "die Taskleiste hat alle vier Formwerte an den Server gegeben"
+    # RUNDE MERGE-2: VIER ODER MEHR, UND DIE ZAHL STEHT IM BERICHT.
+    #
+    # Runde SOFTUI hat `form_push` um vier weitere Werte erweitert
+    # (WF_SHADOW2, WF_SHADOW_R2, WF_GRAD, WF_CAPTION), also meldet die
+    # Leiste `form n=8`. Die Zusage dieser Runde ist, dass die VIER
+    # Formwerte von PAINT ankommen -- nicht, dass es nie mehr werden
+    # duerfen. Eine Gleichheit haette hier bei jeder weiteren Formmarke
+    # falschen Alarm geschlagen.
+    FN=$(grep -aoE 'form n=[0-9]+' "$TMPD/m.log" | tail -1 | grep -oE '[0-9]+')
+    if [ "${FN:-0}" -ge 4 ]; then
+        ok "die Taskleiste hat alle vier Formwerte an den Server gegeben (form n=$FN)"
     else
-        bad "form_push hat nicht alle vier Werte durchgebracht"
+        bad "form_push hat nicht alle vier Werte durchgebracht (form n=${FN:-fehlt})"
     fi
 fi
 
