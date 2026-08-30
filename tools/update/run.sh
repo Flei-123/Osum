@@ -129,7 +129,7 @@ h1=$(python3 -c "print(open('$OUT/quelle1/INDEX').read().split(chr(9))[2])" 2>/d
 echo "        hallo 1.0.0 = ${h1:0:16}"
 
 rc=$(lauf sig1 "opk installieren /quelle1/hallo-1.opk;opk liste;exit")
-hat "$OUT/sig1.txt" "opk: Signatur geprueft" "das signierte Paket wird geprueft"
+hat "$OUT/sig1.txt" "opk: Signatur geprüft" "das signierte Paket wird geprueft"
 hat "$OUT/sig1.txt" "opk: installiert hallo" "und installiert"
 hat "$OUT/sig1.txt" "${h1:0:12}" "die Liste nennt genau den Streuwert des Wirts"
 
@@ -162,7 +162,7 @@ hatnicht "$OUT/sig5.txt" "opk: installiert" "und es wird nichts installiert"
 # --- gar kein Schluessel
 cp -f "$OUT/leer.img" "$OUT/ziel.img"
 rc=$(lauf sig6 "rm /system/schluessel.pub;opk installieren /quelle1/hallo-1.opk;opk liste;exit")
-hat "$OUT/sig6.txt" "kein vertrauter Schluessel" "GEGENPROBE: ohne /system/schluessel.pub installiert opk gar nichts"
+hat "$OUT/sig6.txt" "kein vertrauter Schlüssel" "GEGENPROBE: ohne /system/schluessel.pub installiert opk gar nichts"
 hatnicht "$OUT/sig6.txt" "opk: installiert" "und es wird nichts installiert"
 
 # =====================================================================
@@ -180,22 +180,22 @@ START='sh /start.sh;exit'
 cp -f "$OUT/leer.img" "$OUT/ziel.img"
 rc=$(lauf ab0 "opk installieren /quelle1/hallo-1.opk;$START")
 hat "$OUT/ab0.txt" "paket-hallo fassung 1" "Ausgangslage: Fassung 1 laeuft"
-hat "$OUT/ab0.txt" "opk: erprobung bestaetigt" "und wird bestaetigt"
+hat "$OUT/ab0.txt" "opk: erprobung bestätigt" "und wird bestaetigt"
 cp -f "$OUT/ziel.img" "$OUT/basis.img"
 
 rc=$(lauf ab1 "opk aktualisieren hallo --quelle /quelle3;opk erprobung;exit")
-hat "$OUT/ab1.txt" "opk: Signatur geprueft" "das kaputte Update ist SAUBER SIGNIERT"
+hat "$OUT/ab1.txt" "opk: Signatur geprüft" "das kaputte Update ist SAUBER SIGNIERT"
 hat "$OUT/ab1.txt" "opk: installiert hallo" "und wird installiert"
 hat "$OUT/ab1.txt" "opk: in erprobung: 1 vor 0" "Generation 1 steht in Erprobung, Rueckfall waere 0"
 
 rc=$(lauf ab2 "$START")
 hat "$OUT/ab2.txt" "ab: gen=1 versuch=1 von 3" "Start 1: der Kern zaehlt"
 hat "$OUT/ab2.txt" "SCHEITERT" "die neue Fassung meldet sich und faellt um"
-hatnicht "$OUT/ab2.txt" "opk: erprobung bestaetigt" "also KEIN Erfolgsvermerk"
+hatnicht "$OUT/ab2.txt" "opk: erprobung bestätigt" "also KEIN Erfolgsvermerk"
 
 rc=$(lauf ab3 "$START")
 hat "$OUT/ab3.txt" "ab: gen=1 versuch=2 von 3" "Start 2: der Zaehler steht auf 2"
-hatnicht "$OUT/ab3.txt" "opk: erprobung bestaetigt" "immer noch kein Erfolgsvermerk"
+hatnicht "$OUT/ab3.txt" "opk: erprobung bestätigt" "immer noch kein Erfolgsvermerk"
 
 rc=$(lauf ab4 "$START")
 gleich "Start 3: die Maschine kommt hoch" "$rc" "21"
@@ -212,7 +212,7 @@ cp -f "$OUT/basis.img" "$OUT/ziel.img"
 rc=$(lauf gab1 "opk aktualisieren hallo --quelle /quelle2;$START")
 hat "$OUT/gab1.txt" "opk: in erprobung: 1 vor 0" "GEGENPROBE: auch das gute Update steht erst in Erprobung"
 hat "$OUT/gab1.txt" "paket-hallo fassung 2" "es laeuft"
-hat "$OUT/gab1.txt" "opk: erprobung bestaetigt fuer 1" "und wird im selben Start bestaetigt"
+hat "$OUT/gab1.txt" "opk: erprobung bestätigt für 1" "und wird im selben Start bestaetigt"
 rc=$(lauf gab2 "$START")
 hat "$OUT/gab2.txt" "ab: gen=1 bestaetigt" "beim naechsten Start zaehlt der Kern nichts mehr hoch"
 rc=$(lauf gab3 "$START")
@@ -229,7 +229,7 @@ rc=$(lauf fluss "opk liste;opk aktualisieren hallo --quelle /quelle2;opk erprobu
 hat "$OUT/fluss.txt" "opk: installiert hallo" "holen -> Signatur -> Generation"
 rc=$(lauf fluss2 "$START")
 hat "$OUT/fluss2.txt" "paket-hallo fassung 2" "Neustart -> die neue Fassung laeuft"
-hat "$OUT/fluss2.txt" "opk: erprobung bestaetigt" "-> Erfolgsvermerk"
+hat "$OUT/fluss2.txt" "opk: erprobung bestätigt" "-> Erfolgsvermerk"
 
 echo
 echo "=================================================================="

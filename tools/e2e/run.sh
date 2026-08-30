@@ -105,7 +105,7 @@ hat "$OUT/pak3.txt" "paket-hallo fassung 2" "after a restart the NEW version run
 echo
 echo "== 6. one generation back =="
 rc=$(lauf pak4 platte "opk zurueck 0;/apps/hallo.osp/start;exit" 600)
-hat "$OUT/pak4.txt" "opk: zurueck auf 0" "opk goes back one generation"
+hat "$OUT/pak4.txt" "opk: zurück auf 0" "opk goes back one generation"
 hat "$OUT/pak4.txt" "paket-hallo fassung 1" "and the OLD version runs again"
 
 echo
