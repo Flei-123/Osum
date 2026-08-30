@@ -1,0 +1,289 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/ringt.fi -- RUNDE RING: das Programm, das den
+// Completion-Ring VON DER PLATTE AUS benutzt.
+//
+// Wie `/bin/aiot` aus Runde ASYNC existiert es nicht, um etwas zu TUN,
+// sondern um gemessen zu werden. Es druckt Zeilen der Form
+//
+//     ringt: <name> = <zahl>
+//
+// und `tools/ring/run.sh` liest sie zurueck. Jede Zusage hat hier eine
+// Zahl, und jede Zahl hat dort eine Erwartung.
+//
+// WARUM ES DIESES PROGRAMM ZUSAETZLICH ZU `uprog.u_ring` GIBT. Der
+// Selbsttest in `uprog.fi` liegt IM KERNELABBILD und ruft die
+// Systemaufrufe von Hand -- er kann deshalb Dinge tun, die kein
+// gewoehnliches Programm koennte. Dieses hier ist ein Programm auf der
+// Platte, gebunden gegen die libc, geladen vom ELF-Lader, gestartet von
+// der Shell, und es benutzt AUSSCHLIESSLICH die Wrapper aus
+// `lib/libc/io.fi`. Eine libc-Anbindung, die niemand uebersetzt, ist
+// eine Behauptung.
+//
+// WAS GEMESSEN WIRD:
+//
+//   1. AUFSETZEN UND ABBILDEN. Der Ring traegt seine Kennung, seine
+//      Laengen und seine Groesse in Oktett -- und was der Kern
+//      hineingeschrieben hat, liest das Programm hier wieder heraus.
+//   2. EIN AUFTRAG UEBER DEN RING. Abgabe ist ein Schreibzugriff,
+//      Abholung ein Lesezugriff. Dazwischen genau EIN Systemaufruf
+//      (`ring_enter`), und der ist es nur, weil das Programm
+//      blockierend warten will.
+//   3. EIN BUENDEL. Acht Auftraege, EIN `ring_enter`. Das ist die
+//      Zahl, um die es in dieser Runde geht: acht Auftraege, ein
+//      Aufruf -- gegen acht Aufrufe in Runde ASYNC und acht weitere
+//      zum Abholen.
+//   4. DIE WECKREGEL. Erst der Schwanz, dann die Flagge, und nur wenn
+//      sie steht, der Anstoss. `ring_kick` ist genau diese Regel.
+//   5. DER RUECKSTAU. Mehr Saetze, als der Ring lang ist, gehen nicht
+//      hinein -- `ring_put` sagt 0, und nichts geht verloren.
+//   6. DIE ZAEHLER IM RINGKOPF. Verworfene Abgaben und uebergelaufene
+//      Fertigmeldungen muessen NULL sein. Ein Ring, der verliert und
+//      es nicht sagt, ist schlimmer als einer, der Nein sagt.
+//   7. EIN UNSINNIGER ABGABESATZ. Eine Art, die es nicht gibt, wird
+//      GEMELDET (-EINVAL in der Fertigmeldung) und nicht verschluckt.
+//      Ein verschluckter Auftrag ist fuer das Programm ein Haenger.
+//
+// Der Beendigungscode ist die Zahl der gedruckten Zeilen.
+
+profile kernel
+
+import ulib
+import libc.kcall
+import libc.errno
+import libc.io
+import libc.stdio
+
+export { u_start }
+
+static mut lines: u64 = 0
+
+const EINVAL: u64 = 22
+
+fn tell(name: u64, v: u64) {
+    var head: [u8; 8] = "ringt: \0"
+    var mid: [u8; 4] = " = \0"
+    stdio.say((&head[0]) as u64)
+    stdio.say(name)
+    stdio.say((&mid[0]) as u64)
+    stdio.say_num(v)
+    stdio.nl()
+    lines = lines + 1
+}
+
+fn u_start(args: u64) -> u64 {
+    var n_ver: [u8; 8] = "version\0"
+    let h: u64 = io.ring_setup(16)
+    if errno.failed(h) {
+        var n_no: [u8; 7] = "noring\0"
+        tell((&n_no[0]) as u64, errno.errno())
+        stdio.flush()
+        return lines
+    }
+    let r: u64 = io.ring_map(h)
+    der_kopf(r)
+    ein_auftrag(h, r)
+    ein_buendel(h, r)
+    die_weckregel(h, r)
+    der_rueckstau(h, r)
+    der_unsinn(h, r)
+    die_zaehler(r)
+    tell((&n_ver[0]) as u64, io.ring_version())
+    io.ring_close(h)
+    stdio.flush()
+    return lines
+}
+
+// ------------------------------------------------------- 1. der Kopf
+
+fn der_kopf(r: u64) {
+    var n_ok: [u8; 8] = "istring\0"
+    var n_sq: [u8; 4] = "sqe\0"
+    var n_cq: [u8; 4] = "cqe\0"
+    var n_by: [u8; 6] = "bytes\0"
+    var da: u64 = 0
+    if io.ring_ready(r) {
+        da = 1
+    }
+    tell((&n_ok[0]) as u64, da)
+    tell((&n_sq[0]) as u64, io.ring_sqe(r))
+    // Der Fertigring ist DOPPELT so lang wie der Abgabering, und daraus
+    // folgt, dass er nicht ueberlaufen kann: es gibt nie mehr
+    // Meldungen als abgegebene Auftraege.
+    tell((&n_cq[0]) as u64, io.ring_cqe(r))
+    tell((&n_by[0]) as u64, io.ring_bytes(r))
+}
+
+// -------------------------------------------- 2. ein Auftrag, ein Aufruf
+
+fn ein_auftrag(h: u64, r: u64) {
+    var p: [u64; 1] = [0 as u64; 1]
+    var cqe: [u8; 32] = [0 as u8; 32]
+    var buf: [u8; 32] = [0 as u8; 32]
+    var wort: [u8; 5] = "abcd\0"
+    var n_gl: [u8; 11] = "one_gelegt\0"
+    var n_re: [u8; 8] = "one_res\0"
+    var n_ud: [u8; 7] = "one_ud\0"
+    var n_op: [u8; 7] = "one_op\0"
+    io.pipe((&p[0]) as u64)
+    let rd: u64 = (p[0]) & 0xFFFFFFFF
+    let wr: u64 = (p[0]) >> 32
+    io.write_all(wr, (&wort[0]) as u64, 4)
+    // ABGABE OHNE SYSTEMAUFRUF: sechs Schreibzugriffe in eigenen
+    // Speicher, mehr ist es nicht.
+    tell((&n_gl[0]) as u64,
+        io.ring_put(r, io.AOP_READ, rd, (&buf[0]) as u64, 4, 4711))
+    // Der EINE Aufruf, und er ist es nur, weil hier blockierend
+    // gewartet werden soll.
+    io.ring_enter(h, 1, 1, 3000)
+    if io.ring_reap(r, (&cqe[0]) as u64) == 1 {
+        tell((&n_re[0]) as u64, io.aio_result((&cqe[0]) as u64, 0))
+        tell((&n_ud[0]) as u64, io.aio_udata((&cqe[0]) as u64, 0))
+        tell((&n_op[0]) as u64, io.aio_op((&cqe[0]) as u64, 0))
+    } else {
+        tell((&n_re[0]) as u64, 0)
+        tell((&n_ud[0]) as u64, 0)
+        tell((&n_op[0]) as u64, 0)
+    }
+    io.close(rd)
+    io.close(wr)
+}
+
+// ------------------------------ 3. acht Auftraege, EIN `ring_enter`
+//
+// DAS IST DIE ZAHL DIESER RUNDE. In Runde ASYNC kostete derselbe Stapel
+// acht Abgaben (acht Aufrufe) und mindestens einen `aio_wait`. Hier ist
+// es EIN Aufruf fuer acht Auftraege -- und das Abholen kostet gar
+// keinen.
+fn ein_buendel(h: u64, r: u64) {
+    var p: [u64; 1] = [0 as u64; 1]
+    var cqe: [u8; 32] = [0 as u8; 32]
+    var buf: [u8; 64] = [0 as u8; 64]
+    var acht: [u8; 9] = "12345678\0"
+    var n_ge: [u8; 12] = "acht_gelegt\0"
+    var n_ho: [u8; 11] = "acht_holen\0"
+    var n_su: [u8; 11] = "acht_summe\0"
+    io.pipe((&p[0]) as u64)
+    let rd: u64 = (p[0]) & 0xFFFFFFFF
+    let wr: u64 = (p[0]) >> 32
+    io.write_all(wr, (&acht[0]) as u64, 8)
+    var i: u64 = 0
+    var gelegt: u64 = 0
+    while i < 8 {
+        gelegt = gelegt + io.ring_put(r, io.AOP_READ, rd,
+            (&buf[0]) as u64, 1, 100 + i)
+        i = i + 1
+    }
+    tell((&n_ge[0]) as u64, gelegt)
+    io.ring_enter(h, 8, 8, 3000)
+    var geholt: u64 = 0
+    var summe: u64 = 0
+    while io.ring_reap(r, (&cqe[0]) as u64) == 1 {
+        geholt = geholt + 1
+        summe = summe +% io.aio_result((&cqe[0]) as u64, 0)
+    }
+    tell((&n_ho[0]) as u64, geholt)
+    // Acht Auftraege zu einem Oktett auf acht Oktett im Rohr: die
+    // Summe der Ergebnisse MUSS acht sein.
+    tell((&n_su[0]) as u64, summe)
+    io.close(rd)
+    io.close(wr)
+}
+
+// ---------------------------------------------------- 4. die Weckregel
+
+fn die_weckregel(h: u64, r: u64) {
+    var p: [u64; 1] = [0 as u64; 1]
+    var cqe: [u8; 32] = [0 as u8; 32]
+    var buf: [u8; 32] = [0 as u8; 32]
+    var wort: [u8; 5] = "wxyz\0"
+    var n_fe: [u8; 10] = "weck_res\0\0"
+    io.pipe((&p[0]) as u64)
+    let rd: u64 = (p[0]) & 0xFFFFFFFF
+    let wr: u64 = (p[0]) >> 32
+    io.write_all(wr, (&wort[0]) as u64, 4)
+    // DIE REGEL, IN DREI ZEILEN: hinlegen (das schiebt den Schwanz),
+    // DANN die Flagge lesen, und nur wenn sie steht, anstossen.
+    io.ring_put(r, io.AOP_READ, rd, (&buf[0]) as u64, 4, 555)
+    io.ring_kick(h, r)
+    io.ring_enter(h, 0, 1, 3000)
+    if io.ring_reap(r, (&cqe[0]) as u64) == 1 {
+        tell((&n_fe[0]) as u64, io.aio_result((&cqe[0]) as u64, 0))
+    } else {
+        tell((&n_fe[0]) as u64, 0)
+    }
+    io.close(rd)
+    io.close(wr)
+}
+
+// ----------------------------------------------------- 5. der Rueckstau
+
+fn der_rueckstau(h: u64, r: u64) {
+    var p: [u64; 1] = [0 as u64; 1]
+    var cqe: [u8; 32] = [0 as u8; 32]
+    var buf: [u8; 32] = [0 as u8; 32]
+    var n_pa: [u8; 11] = "voll_passt\0"
+    var n_ne: [u8; 11] = "voll_nein\0\0"
+    io.pipe((&p[0]) as u64)
+    let rd: u64 = (p[0]) & 0xFFFFFFFF
+    let wr: u64 = (p[0]) >> 32
+    // Sechzehn Saetze in einen Ring von sechzehn -- der siebzehnte
+    // passt nicht, und `ring_put` sagt das, statt einen alten zu
+    // ueberschreiben.
+    var i: u64 = 0
+    var passt: u64 = 0
+    while i < 16 {
+        passt = passt + io.ring_put(r, io.AOP_POLL, rd, 0, io.POLLIN, i)
+        i = i + 1
+    }
+    tell((&n_pa[0]) as u64, passt)
+    tell((&n_ne[0]) as u64,
+        io.ring_put(r, io.AOP_POLL, rd, 0, io.POLLIN, 99))
+    // Abraeumen: das Schreibende zu, dann werden die `poll`-Auftraege
+    // mit POLLHUP fertig.
+    io.ring_enter(h, 16, 0, 0)
+    io.close(wr)
+    var runde: u64 = 0
+    while runde < 40 {
+        io.ring_enter(h, 0, 1, 100)
+        while io.ring_reap(r, (&cqe[0]) as u64) == 1 {
+            runde = runde + 0
+        }
+        runde = runde + 1
+    }
+    io.close(rd)
+}
+
+// ------------------------------------------ 6. ein unsinniger Satz
+//
+// Eine Art, die es nicht gibt. Der Kern MUSS sie melden und darf sie
+// nicht verschlucken: ein Programm, dessen Auftrag spurlos verschwindet,
+// wartet fuer immer auf eine Meldung, die nie kommt. Also kommt eine --
+// mit -EINVAL und der eigenen Kennzahl darin.
+fn der_unsinn(h: u64, r: u64) {
+    var cqe: [u8; 32] = [0 as u8; 32]
+    var n_re: [u8; 12] = "quatsch_res\0"
+    var n_ud: [u8; 11] = "quatsch_ud\0"
+    io.ring_put(r, 99, 0, 0, 0, 7777)
+    io.ring_enter(h, 1, 1, 3000)
+    if io.ring_reap(r, (&cqe[0]) as u64) == 1 {
+        tell((&n_re[0]) as u64, 0 -% io.aio_result((&cqe[0]) as u64, 0))
+        tell((&n_ud[0]) as u64, io.aio_udata((&cqe[0]) as u64, 0))
+    } else {
+        tell((&n_re[0]) as u64, 0)
+        tell((&n_ud[0]) as u64, 0)
+    }
+}
+
+// ------------------------------------------- 7. die Zaehler im Kopf
+
+fn die_zaehler(r: u64) {
+    var n_dr: [u8; 8] = "dropped\0"
+    var n_ov: [u8; 9] = "overflow\0"
+    var n_ro: [u8; 5] = "room\0"
+    // `dropped` ist NICHT null: der unsinnige Satz oben ist genau das,
+    // was dieser Zaehler zaehlt. `overflow` MUSS null sein -- eine
+    // verlorene Fertigmeldung kann kein Programm wiederholen.
+    tell((&n_dr[0]) as u64, io.ring_dropped(r))
+    tell((&n_ov[0]) as u64, io.ring_over(r))
+    tell((&n_ro[0]) as u64, io.ring_room(r))
+}

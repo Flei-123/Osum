@@ -55,6 +55,8 @@ import share
 import cap
 import handle
 import async
+import ring
+import cpu
 import fb
 import vmode
 import ttf
@@ -121,6 +123,8 @@ const P_HANDLE: u64 = 48
 const P_ASYNC: u64 = 50
 const P_ABENCH: u64 = 51
 const P_ASYNCFS: u64 = 52
+const P_RING: u64 = 53
+const P_RBENCH: u64 = 54
 // RUNDE K13: die beiden Programmnummern dieser Runde (kernel/uprog.fi).
 const P_PWR: u64 = 45
 const P_PWRIDLE: u64 = 46
@@ -378,6 +382,13 @@ fn kernel_main(mbi: u64, vectors: u64, state: u64, kernel_end: u64,
     //     Aufgabe derselbe wie vorher.
     asyncs(state)
     async_bench(state)
+    // 7b-quater. RUNDE RING: der Completion-Ring im geteilten Speicher.
+    //     Hier und nicht spaeter, aus demselben Grund wie bei `asyncs`:
+    //     alle sieben Fehlerklassen arbeiten auf ROEHREN und brauchen
+    //     kein Dateisystem. Ohne das Wort `uring` eine Zeile und sonst
+    //     nichts.
+    rings(state)
+    ring_bench(state)
     // 7b-bis. RUNDE K13: Kennungen aus Ring 3, ohne Platte. Hier und
     //     nicht spaeter, weil es KEIN Dateisystem braucht -- die Zusagen
     //     ueber uid/gid gelten auch in einem Lauf `nofs`, und ein Test,
@@ -2601,6 +2612,136 @@ fn async_workers(state: u64) -> u64 {
     return n
 }
 
+// ==================================================== RUNDE RING
+//
+// DER COMPLETION-RING, GEMESSEN UND NACHGEZAEHLT.
+//
+// Was ein Programm in Ring 3 zeigen kann, zeigt `uprog.u_ring`:
+// einundvierzig Zusagen ueber die Kopierregel, verbogene Zeiger,
+// Rueckstau, Prozesstod, fremde Ringe und die Weckregel. Sein
+// Beendigungscode ist die Zahl der GEFALLENEN Zusagen -- 0 heisst, alle
+// standen.
+//
+// Was ein Programm NICHT zeigen kann, steht hier: die Leckzahlen des
+// Kerns. Nach einem Lauf, in dem jeder Prozess ordentlich geendet hat,
+// MUSS die Ringtafel leer sein, kein Auftrag mehr einem Ring zugeordnet
+// und kein Fertigring uebergelaufen. Und -- die Zahl, die es ohne
+// diese Runde gar nicht gab -- die Zahl der freien RAHMEN muss wieder
+// die vom Anfang sein: ein Ring ist der erste Speicher dieses Systems,
+// den ein unprivilegierter Prozess vom Rahmenverwalter bekommt und den
+// nur der Kern zurueckgeben kann.
+fn rings(state: u64) {
+    var s_skip: [u8; 14] = "ring: skipped\0"
+    var s_begin: [u8; 13] = "ring: begin\0\0"
+    var s_exit: [u8; 19] = "ring: ring 3 exit=\0"
+    var s_done: [u8; 12] = "ring: done\0\0"
+    var n_vor: [u8; 8] = "frames\0\0"
+    var n_nach: [u8; 13] = "frames-after\0"
+    if !kstate.mode_on(state, kstate.M_RING) {
+        serial.puts((&s_skip[0]) as u64)
+        serial.nl()
+        return
+    }
+    serial.puts((&s_begin[0]) as u64)
+    serial.nl()
+    let vorher: u64 = mem.frames_free(state)
+    rnum((&n_vor[0]) as u64, vorher)
+    let t: u64 = proc.create(state, P_RING, 0, 2)
+    let e: u64 = wait_for(state, t)
+    serial.puts((&s_exit[0]) as u64)
+    serial.dec(e)
+    serial.nl()
+    rnum((&n_nach[0]) as u64, mem.frames_free(state))
+    ring_zahlen(state)
+    serial.puts((&s_done[0]) as u64)
+    serial.nl()
+}
+
+fn rnum(name: u64, v: u64) {
+    var s_p: [u8; 7] = "ring: \0"
+    var s_e: [u8; 2] = "=\0"
+    serial.puts((&s_p[0]) as u64)
+    serial.puts(name)
+    serial.puts((&s_e[0]) as u64)
+    serial.dec(v)
+    serial.nl()
+}
+
+fn ring_zahlen(state: u64) {
+    var n_se: [u8; 7] = "setups\0"
+    var n_cl: [u8; 7] = "closes\0"
+    var n_ha: [u8; 8] = "harvest\0"
+    var n_ki: [u8; 6] = "kicks\0"
+    var n_bs: [u8; 6] = "badsq\0"
+    var n_bc: [u8; 6] = "badcq\0"
+    var n_ov: [u8; 9] = "overflow\0"
+    var n_dr: [u8; 8] = "dropped\0"
+    var n_po: [u8; 7] = "posted\0"
+    var n_de: [u8; 7] = "denied\0"
+    var n_pu: [u8; 6] = "pumps\0"
+    var n_sl: [u8; 7] = "sleeps\0"
+    var n_us: [u8; 5] = "used\0"
+    var n_aw: [u8; 6] = "awake\0"
+    var n_by: [u8; 6] = "bytes\0"
+    var n_mx: [u8; 6] = "rings\0"
+    var n_au: [u8; 8] = "aioused\0"
+    var n_fl: [u8; 9] = "inflight\0"
+    hnum_r(state, (&n_se[0]) as u64, kstate.R_SETUPS)
+    hnum_r(state, (&n_cl[0]) as u64, kstate.R_CLOSES)
+    hnum_r(state, (&n_ha[0]) as u64, kstate.R_HARVEST)
+    hnum_r(state, (&n_ki[0]) as u64, kstate.R_KICKS)
+    hnum_r(state, (&n_bs[0]) as u64, kstate.R_BADSQ)
+    hnum_r(state, (&n_bc[0]) as u64, kstate.R_BADCQ)
+    hnum_r(state, (&n_ov[0]) as u64, kstate.R_OVERFLOW)
+    hnum_r(state, (&n_dr[0]) as u64, kstate.R_DROPPED)
+    hnum_r(state, (&n_po[0]) as u64, kstate.R_POSTED)
+    hnum_r(state, (&n_de[0]) as u64, kstate.R_DENIED)
+    hnum_r(state, (&n_pu[0]) as u64, kstate.R_PUMPS)
+    hnum_r(state, (&n_sl[0]) as u64, kstate.R_SLEEPS)
+    // DIE LECKZAHLEN. Alle drei muessen null sein.
+    rnum((&n_us[0]) as u64, ring.used(state))
+    rnum((&n_fl[0]) as u64, ring_flight(state))
+    rnum((&n_au[0]) as u64, async.used(state))
+    rnum((&n_aw[0]) as u64, ring.awake(state))
+    rnum((&n_by[0]) as u64, ring.bytes_for(32))
+    rnum((&n_mx[0]) as u64, ring.MAX_RINGS)
+}
+
+fn hnum_r(state: u64, name: u64, off: u64) {
+    rnum(name, kstate.get(state, off))
+}
+
+// Auftraege, die noch irgendeinem Ring zugeordnet sind. Nach einem
+// sauberen Lauf null -- ein Auftrag, dessen Ring weg ist, waere eine
+// Fertigmeldung in einen Rahmen, der schon wieder jemand anderem
+// gehoert.
+fn ring_flight(state: u64) -> u64 {
+    var n: u64 = 0
+    var i: u64 = 0
+    while i < ring.MAX_RINGS {
+        n = n + ring.inflight_of(state, i)
+        i = i + 1
+    }
+    return n
+}
+
+// Die Messung. Sie steht ABSICHTLICH ausserhalb von `rings`: mit
+// `uring` laeuft der Selbsttest mit, und dann misst sie den Selbsttest
+// und nicht den Regelbetrieb. `rbench` allein ist die Messung, die gilt.
+fn ring_bench(state: u64) {
+    var n_kh: [u8; 12] = "rbench-khz\0\0"
+    var n_wk: [u8; 16] = "rbench-workers\0\0"
+    var n_cp: [u8; 14] = "rbench-cpus\0\0\0"
+    if !kstate.mode_on(state, kstate.M_RBENCH) {
+        return
+    }
+    let tb: u64 = proc.create(state, P_RBENCH, 0, 2)
+    wait_for(state, tb)
+    rnum((&n_kh[0]) as u64, time.khz(state))
+    rnum((&n_wk[0]) as u64, async_workers(state))
+    rnum((&n_cp[0]) as u64, cpu.count(state))
+}
+
 // Die Messung. Sie steht ABSICHTLICH ausserhalb von `asyncs`: mit
 // `async` laeuft der Selbsttest mit, und dann misst sie den Selbsttest
 // und nicht den Regelbetrieb. `abench` allein ist die Messung, die gilt.
@@ -4275,6 +4416,32 @@ fn mode_of(state: u64, cmd: u64) {
     }
     if find(cmd, (&astw[0]) as u64, 7) != 0 {
         kstate.mode_add(state, kstate.M_ASTRESS)
+    }
+    // RUNDE RING. `ring` schaltet den Selbsttest an, `rbench` die
+    // Messung; `noringcopy` und `noringsq` sind die beiden GEGENPROBEN
+    // und stehen in `kstate.fi` bei ihren Bits erklaert. Die Woerter
+    // sind lang genug, dass die Teilwortsuche nichts anderes trifft --
+    // `ring` waere zu kurz (es steckt in `noringcopy` und in
+    // `noringsq`), deshalb heisst der Selbsttest `uring`.
+    var urw: [u8; 6] = "uring\0"
+    var rbw: [u8; 7] = "rbench\0"
+    var nrcw: [u8; 11] = "noringcopy\0"
+    var nrsw: [u8; 9] = "noringsq\0"
+    var rstw: [u8; 8] = "rstress\0"
+    if find(cmd, (&urw[0]) as u64, 5) != 0 {
+        kstate.mode_add(state, kstate.M_RING)
+    }
+    if find(cmd, (&rbw[0]) as u64, 6) != 0 {
+        kstate.mode_add(state, kstate.M_RBENCH)
+    }
+    if find(cmd, (&nrcw[0]) as u64, 10) != 0 {
+        kstate.mode_add(state, kstate.M_NOCOPY)
+    }
+    if find(cmd, (&nrsw[0]) as u64, 8) != 0 {
+        kstate.mode_add(state, kstate.M_NOSQCHK)
+    }
+    if find(cmd, (&rstw[0]) as u64, 7) != 0 {
+        kstate.mode_add(state, kstate.M_RSTRESS)
     }
     if find(cmd, (&k13w[0]) as u64, 6) != 0 {
         kstate.mode_add(state, kstate.M_K13)

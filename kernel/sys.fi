@@ -52,6 +52,7 @@ import uio
 import cap
 import handle
 import async
+import ring
 import arch.x86_64.hv
 import arch.x86_64.guard
 import wm
@@ -130,6 +131,8 @@ export {
     SYS_FSYNC,
     AIO_BASE, AIO_VERSION, AIO_SUBMIT, AIO_WAIT, AIO_CANCEL, AIO_STATE,
     AIO_INFO, AIO_MAXNR,
+    RING_BASE, RING_VERSION, RING_SETUP, RING_MAP, RING_ENTER,
+    RING_CLOSE, RING_INFO, RING_MAXNR,
     grant_console, native, aio_worker
 }
 
@@ -498,6 +501,51 @@ const AIO_CANCEL: u64 = 1983 // (kennung) -> 0
 const AIO_STATE: u64 = 1984 // (kennung) -> Zustand des Auftrags
 const AIO_INFO: u64 = 1985 // (was, arg) -> Innenzahl, nur mit `async`
 const AIO_MAXNR: u64 = 1985
+
+// ------------------------------------------- RUNDE RING: 1986..1991
+//
+// DER COMPLETION-RING VON AUSSEN. Sechs Aufrufe, und der wichtigste
+// davon ist der, den man im Regelbetrieb NICHT ruft.
+//
+// WARUM DIREKT HINTER DEN ASYNC-BLOCK. 1986 ist die naechste freie
+// Nummer: 1980..1985 gehoeren der Runde ASYNC, davor ist der hoechste
+// vergebene Osum-Aufruf SYS_OSUM_WGSET (1951), und CAP_BASE faengt bei
+// 2000 an. Der Block liegt damit ganz im POSIX-Teil der Weiche, und aus
+// demselben Grund wie bei ASYNC: was er zurueckgibt, sind
+// POSIX-Ergebnisse und POSIX-Fehler.
+//
+//     ring_setup(saetze, flaggen)      -> HANDLE auf den Ring, oder -E
+//     ring_map(h)                      -> Adresse im eigenen Adressraum
+//     ring_enter(h, abgeben, mindest,
+//                zeitgrenze_ms)        -> Zahl der abgegebenen Saetze
+//     ring_close(h)                    -> 0
+//
+// `ring_enter` IST DER ANSTOSS und nicht der Regelweg. Im Regelbetrieb
+// schreibt das Programm seine Abgabesaetze in den Ring, schiebt den
+// Schwanz und liest die Fertigmeldungen wieder heraus -- ohne einen
+// einzigen Systemaufruf. Gerufen wird `ring_enter` nur in zwei Faellen,
+// und beide stehen in `kernel/ring.fi` ausgeschrieben: wenn die Flagge
+// R_F_WAKEUP im Ringkopf steht (alle Arbeitsfaeden schlafen), und wenn
+// das Programm BLOCKIEREND auf Fertigmeldungen warten will, statt den
+// Ring abzufragen.
+//
+// DER RING IST EIN HANDLE, und zwar eines aus `kernel/handle.fi` --
+// dieselbe Schicht wie ein Deskriptor, mit Rechten, Generation und
+// Objekttafel. Hier wird nichts Eigenes erfunden: `ring_setup` legt ein
+// Objekt der Art OK_RING an (die Art stand seit Runde HANDLE
+// vorgemerkt und war bis heute unbenutzt) und gibt ein Handle darauf
+// zurueck. Wer den Ring benutzen will, braucht R_WRITE; wer ihn abbauen
+// will, R_MANAGE. Ein Handle eines anderen Prozesses loest gar nicht
+// erst auf -- die Handle-Tafel ist pro Aufgabe und ihre Generationen
+// sind mit der pid gewuerfelt.
+const RING_BASE: u64 = 1986
+const RING_VERSION: u64 = 1986 // () -> Fassung dieser Schnittstelle
+const RING_SETUP: u64 = 1987 // (saetze, flaggen) -> Handle
+const RING_MAP: u64 = 1988 // (h) -> Adresse des Rings im Programm
+const RING_ENTER: u64 = 1989 // (h, abgeben, mindest, tmo_ms) -> Zahl
+const RING_CLOSE: u64 = 1990 // (h) -> 0
+const RING_INFO: u64 = 1991 // (was, arg) -> Innenzahl, nur mit `ring`
+const RING_MAXNR: u64 = 1991
 
 // RUNDE ASYNC, und sie ist der Massstab: `fsync` gab es bis hierher gar
 // nicht. Ohne ihn haette die asynchrone Fassung nichts, wogegen sie zu
@@ -1926,6 +1974,12 @@ fn dispatch(number: u64, frame: u64, state: u64) -> u64 {
             return aio_call(state, me, number, a0, a1, a2, a3, a4)
         }
     }
+    // RUNDE RING: der Block 1986..1991, direkt hinter dem von ASYNC.
+    if number >= RING_BASE {
+        if number <= RING_MAXNR {
+            return ring_call(state, me, number, a0, a1, a2, a3)
+        }
+    }
     if number == SYS_FSYNC {
         return do_fsync(state, me, a0)
     }
@@ -1976,6 +2030,12 @@ fn dispatch(number: u64, frame: u64, state: u64) -> u64 {
         // offenen Dateien und `close_all` wuerde ihn sonst aufschieben
         // muessen, ohne dass ihn spaeter noch jemand holt.
         async.abandon(state, me)
+        // RUNDE RING, UND DIE REIHENFOLGE IST DIE ZUSAGE. `async.abandon`
+        // hat eben auf die laufenden Auftraege GEWARTET -- erst danach
+        // darf eine Ringseite verschwinden. Andersherum zoege man die
+        // Seiten unter einem Arbeitsfaden weg, der noch eine
+        // Fertigmeldung hineinschreibt.
+        ring.abandon(state, me)
         sock_close_all(state, me)
         file.close_all(state, me)
         // ROUND K9: der Elternprozess erfaehrt es. Das ist SIGCHLD, und
@@ -7307,7 +7367,7 @@ fn aio_cancel(state: u64, me: u64, id: u64) -> u64 {
         // nie bekommen, weil `mark_cancel` den Zustand mit einem
         // `lock cmpxchg` weggenommen hat.
         async.finish(state, i, neg(errno.E_CANCELED), async.Q_CANCEL)
-        async.post(state, i)
+        aio_post(state, i)
     }
     return 0
 }
@@ -7471,9 +7531,42 @@ fn aio_exec(state: u64, i: u64) -> u64 {
     let op: u64 = async.op_of(state, i)
     let task: u64 = async.owner_of(state, i)
     let pid: u64 = async.pid_of(state, i)
-    let buf: u64 = async.buf_of(state, i)
-    let len: u64 = async.len_of(state, i)
+    var buf: u64 = async.buf_of(state, i)
+    var len: u64 = async.len_of(state, i)
     let fd: u64 = async.aux_of(state, i)
+    // RUNDE RING, GEGENPROBE `noringcopy` -- UND NUR SIE.
+    //
+    // Im Regelbetrieb stehen Puffer und Laenge im Auftrag, weil sie bei
+    // der Abgabe EINMAL aus dem geteilten Speicher kopiert worden sind.
+    // Hier wird genau das ausgeschaltet: die Felder werden JETZT noch
+    // einmal aus dem Abgabesatz gelesen -- also aus Speicher, den das
+    // Programm seit der Abgabe beliebig oft geaendert haben kann. Das
+    // ist "time of check to time of use", hingeschrieben, damit die
+    // Zusage `a-kopie-haelt` etwas zu bedeuten hat.
+    //
+    // Was auch die Gegenprobe NICHT tut: ungeprueft in Ring 3 schreiben.
+    // Laenge und Puffer werden weiterhin begrenzt und geprueft -- eine
+    // Gegenprobe soll eine Zusage fallen lassen und keinen Kernel.
+    if kstate.mode_on(state, kstate.M_NOCOPY) {
+        let rg: u64 = ring.job_ring(state, i)
+        if rg < ring.MAX_RINGS {
+            let ph: u64 = ring.phys_of(state, rg)
+            if ph != 0 {
+                let e: u64 = ph + ring.HDR_BYTES
+                    + ring.job_sq(state, i) * ring.SQE_BYTES
+                buf = kstate.get(e, ring.SQ_BUF)
+                len = kstate.get(e, ring.SQ_LEN)
+                if len > MAX_IO {
+                    len = MAX_IO
+                }
+                if op == async.OP_READ || op == async.OP_WRITE {
+                    if !proc.user_ok(state, task, buf, len) {
+                        return neg(errno.E_FAULT)
+                    }
+                }
+            }
+        }
+    }
     // Lebt der Auftraggeber noch, und ist er noch derselbe?
     if pid == 0 {
         return neg(errno.E_CANCELED)
@@ -7627,7 +7720,7 @@ fn aio_run(state: u64, i: u64) {
     } else {
         async.finish(state, i, r, endzustand)
     }
-    async.post(state, i)
+    aio_post(state, i)
 }
 
 // DER ARBEITSFADEN. Verteilt wird er wie jeder andere Kernfaden in
@@ -7643,21 +7736,89 @@ fn aio_run(state: u64, i: u64) {
 // wird damit hoechstens eine Sekunde spaeter bemerkt.
 const AIO_IDLE_TICKS: u64 = 100
 
+// RUNDE RING: WIE LANGE DER ERSTE ARBEITSFADEN NOCH WACHT, nachdem er
+// nichts mehr gefunden hat. Das ist io_uring's `sq_thread_idle`, und es
+// ist der Preis fuer "Abgabe ohne Systemaufruf": SOLANGE er wacht,
+// kostet eine Abgabe wirklich keinen Aufruf; danach kostet sie den
+// Anstoss. Zweihundert Abgaben des Prozessors sind kurz genug, dass ein
+// leerer Ring nicht dauerhaft Rechenzeit kostet, und lang genug, dass
+// eine Schleife, die laufend abgibt, nie darunterfaellt.
+//
+// NUR DER ERSTE FADEN WACHT. Vier wachende Faeden waeren vier Faeden,
+// die sich gegenseitig den Prozessor abgeben, und die Messung waere
+// eine Messung des Wachens. Die anderen drei schlafen wie immer.
+//
+// UND NUR, WENN ES UEBERHAUPT EINEN RING GIBT. Ein Kernel ohne
+// angemeldeten Ring verhaelt sich damit GENAU wie vor dieser Runde --
+// das ist die Bedingung dafuer, dass die Zusagen der Runden ASYNC und
+// POLL unveraendert weiter gelten.
+const RING_SPIN: u64 = 200
+
 fn aio_worker(state: u64, index: u64) {
+    // Dieser Faden ist wach. Ab jetzt zaehlt er in `ring.awake` mit, und
+    // erst wenn der LETZTE sich abmeldet, wird die Weckflagge gesetzt.
+    ring.worker_wake(state)
+    let wnr: u64 = sched.tget(state, index, sched.T_ARG)
+    var leer: u64 = 0
     while true {
         let seen: u64 = sched.poll_seq(state)
+        // ZUERST DIE RINGE, DANN DIE AUFTRAGSTAFEL. Ein Abgabesatz, der
+        // im geteilten Speicher liegt, ist noch kein Auftrag -- er wird
+        // hier einer. Andersherum liefe der Faden an frischer Arbeit
+        // vorbei in den Schlaf.
+        let geerntet: u64 = ring_pump(state)
         let i: u64 = async.take_new(state)
         if i < async.MAX_AIO {
             aio_run(state, i)
+            leer = 0
         } else {
-            sched.poll_sleep(state, seen,
-                kstate.get(state, kstate.TICKS) + AIO_IDLE_TICKS)
-            // GEWECKT HEISST: irgendwo ist Bereitschaft entstanden.
-            // Genau dann -- und nur dann -- sehen die wartenden
-            // `poll`-Auftraege wieder nach. Das ist die Bruecke von
-            // readiness auf completion, und sie kostet keinen
-            // Leerlaufzyklus.
-            async.rearm(state)
+            if geerntet != 0 {
+                leer = 0
+            } else {
+                leer = leer + 1
+                var wachen: bool = false
+                if wnr == 0 {
+                    if leer < RING_SPIN {
+                        if ring.used(state) != 0 {
+                            wachen = true
+                        }
+                    }
+                }
+                if wachen {
+                    // Die Abgabewache. Sie DREHT NICHT: `yield_now` gibt
+                    // den Prozessor ab, das Programm laeuft weiter und
+                    // legt seinen naechsten Satz hin.
+                    sched.yield_now(state)
+                } else {
+                    // DIE WECKREGEL, KERNSEITE. Wer sich als LETZTER
+                    // abmeldet, setzt die Flagge, schrankt -- und sieht
+                    // DANACH noch einmal nach. Findet er dann doch etwas,
+                    // meldet er sich sofort wieder wach und schlaeft
+                    // NICHT. Ohne diesen zweiten Blick gaebe es den
+                    // Ablauf "Programm sieht keine Flagge und stoesst
+                    // nicht an -- Faden setzt die Flagge und schlaeft",
+                    // und der Auftrag laege unbemerkt im Ring.
+                    var schlafen: bool = true
+                    if ring.worker_sleep_begin(state) {
+                        if ring.any_pending(state) {
+                            ring.worker_wake(state)
+                            schlafen = false
+                        }
+                    }
+                    if schlafen {
+                        sched.poll_sleep(state, seen,
+                            kstate.get(state, kstate.TICKS) + AIO_IDLE_TICKS)
+                        // GEWECKT HEISST: irgendwo ist Bereitschaft
+                        // entstanden. Genau dann -- und nur dann -- sehen
+                        // die wartenden `poll`-Auftraege wieder nach. Das
+                        // ist die Bruecke von readiness auf completion,
+                        // und sie kostet keinen Leerlaufzyklus.
+                        ring.worker_wake(state)
+                        async.rearm(state)
+                    }
+                    leer = 0
+                }
+            }
         }
         sched.tset(state, index, sched.T_WORK,
             sched.tget(state, index, sched.T_WORK) + 1)
@@ -7698,6 +7859,667 @@ fn do_fsync(state: u64, me: u64, fd: u64) -> u64 {
         return neg(errno.E_BADF)
     }
     return fsync_of(state, of)
+}
+
+// =================================================== RUNDE RING
+//
+// DER COMPLETION-RING: AUFSETZEN, ERNTEN, MELDEN, ABBAUEN.
+//
+// `kernel/ring.fi` fuehrt Buch und haelt die beiden Regeln, um die es
+// geht (genau eine Kopie, jeder Index maskiert). WAS ein Abgabesatz
+// bedeutet, steht hier -- und zwar in denselben Zeilen, die
+// `aio_submit` schon benutzt. Ein zweiter Abgabepfad daneben waere ein
+// zweiter Satz Fehler, und die Roadmap sagt dazu in Punkt 2:
+// "POSIX-read/poll als duenne Schicht DARUEBER -- nicht als zweiter
+// Pfad daneben."
+
+// Den Ring hinter einem Handle finden. DREI Fragen, und jede fangt eine
+// andere Sorte Angriff ab:
+//
+//   1. Loest das Handle in dieser Aufgabe ueberhaupt auf? Die
+//      Handle-Tafel ist PRO AUFGABE, und ihre Generationen sind mit der
+//      pid gewuerfelt -- ein Handle-Wert eines fremden Prozesses trifft
+//      hier nichts. Das ist Zusage (f), und sie kostet keine eigene
+//      Zeile.
+//   2. Ist das Objekt dahinter wirklich ein RING? Ohne diese Frage
+//      wuerde ein Deskriptor auf eine Datei mit der Objektnummer 3 als
+//      "Ring 3" durchgehen. Die Objektnummer allein ist keine Art.
+//   3. Steht in der Ringtafel derselbe Eigentuemer UND dieselbe pid?
+//      Ein Aufgabenplatz wird wiederverwendet, eine pid nicht.
+fn ring_lookup(state: u64, me: u64, h: u64, need: u64) -> u64 {
+    let o: u64 = handle.resolve(state, me, h)
+    if o >= handle.MAX_OBJ {
+        return ring.MAX_RINGS
+    }
+    if handle.obj_kind(state, o) != handle.OK_RING {
+        return ring.MAX_RINGS
+    }
+    if !handle.may(state, me, h, need) {
+        return ring.MAX_RINGS
+    }
+    let i: u64 = handle.obj_num(state, o)
+    if !ring.find(state, me, i) {
+        kstate.add(state, kstate.R_DENIED, 1)
+        return ring.MAX_RINGS
+    }
+    return i
+}
+
+// ---------------------------------------------------- das Aufsetzen
+//
+// Sechs Schritte, und die Reihenfolge ist wieder der Punkt:
+//
+//   1. Die Laenge pruefen. Zweierpotenz zwischen SQ_MIN und SQ_MAX --
+//      und die Zahl, der der Kern von hier an glaubt, steht ab jetzt in
+//      SEINER Tafel und nicht im Kopf im geteilten Speicher.
+//   2. Einen Platz in der Ringtafel nehmen.
+//   3. Die Rahmen AM STUECK holen (`mem.frame_run`). Am Stueck, damit
+//      der Kern den ganzen Ring mit EINER physischen Adresse
+//      ansprechen kann -- sonst muesste er fuer jeden Zugriff die
+//      Seitentabelle des Prozesses durchgehen, und das waere ein
+//      zweiter Weg, auf dem ein Programm etwas beeinflussen kann.
+//   4. Sie in den Adressraum haengen, schreibbar und NICHT ausfuehrbar.
+//   5. Den Kopf schreiben (und den ganzen Ring dabei nullen -- ein
+//      frischer Rahmen traegt, was der letzte Besitzer darin gelassen
+//      hat, und diese Seiten bekommt ein unprivilegiertes Programm zu
+//      lesen).
+//   6. Ein Objekt der Art OK_RING anlegen und ein Handle darauf geben.
+//
+// Geht ein Schritt schief, wird alles Vorherige zurueckgenommen. Ein
+// halb aufgesetzter Ring waere ein Rahmenleck mit Aussicht.
+fn ring_setup(state: u64, me: u64, sqe: u64, flags: u64) -> u64 {
+    if flags != 0 {
+        return neg(errno.E_INVAL)
+    }
+    if !ring.layout_ok(sqe) {
+        return neg(errno.E_INVAL)
+    }
+    // Die Arbeitsfaeden dieser Schicht sind die der Runde ASYNC. Sie
+    // entstehen bei der ersten Abgabe -- ein Ring IST eine Abgabe.
+    if !aio_ensure(state) {
+        return neg(errno.E_NOSYS)
+    }
+    if !ring.ready(state) {
+        ring.init(state)
+    }
+    let i: u64 = ring.alloc(state, me, sched.tget(state, me, sched.T_PID), sqe)
+    if i >= ring.MAX_RINGS {
+        return neg(errno.E_AGAIN)
+    }
+    let pages: u64 = ring.pages_for(sqe)
+    let phys: u64 = mem.frame_run(state, pages)
+    if phys == 0 {
+        ring.release_ring(state, i)
+        return neg(errno.E_NOMEM)
+    }
+    // WO DER RING IM PROGRAMM ERSCHEINT. Jeder Ringplatz hat sein
+    // eigenes Fenster von PAGES_MAX Seiten in der Ringkachel; damit
+    // braucht es keinen zweiten Adressverwalter und keine Liste, und
+    // zwei Ringe koennen sich nicht ueberlappen, auch nicht nach einem
+    // halb fehlgeschlagenen Aufsetzen.
+    let base: u64 = proc.RING_BASE + i * ring.PAGES_MAX * ring.PAGE
+    var p: u64 = 0
+    var ok: bool = true
+    while p < pages {
+        if ok {
+            if !proc.map_at(state, me, base + p * ring.PAGE,
+                phys + p * ring.PAGE, true) {
+                ok = false
+            }
+        }
+        p = p + 1
+    }
+    if !ok {
+        var q: u64 = 0
+        while q < pages {
+            proc.page_unmap(state, me, base + q * ring.PAGE)
+            q = q + 1
+        }
+        mem.frame_free_run(state, phys, pages)
+        ring.release_ring(state, i)
+        return neg(errno.E_NOMEM)
+    }
+    let obj: u64 = handle.obj_get(state, handle.OK_RING, i)
+    if obj >= handle.MAX_OBJ {
+        var r: u64 = 0
+        while r < pages {
+            proc.page_unmap(state, me, base + r * ring.PAGE)
+            r = r + 1
+        }
+        mem.frame_free_run(state, phys, pages)
+        ring.release_ring(state, i)
+        return neg(errno.E_AGAIN)
+    }
+    // R_READ zum Abholen, R_WRITE zum Abgeben, R_MANAGE zum Abbauen.
+    // Weitergeben (R_TRANSFER) und Vervielfaeltigen (R_DUP) gibt es
+    // ABSICHTLICH nicht: ein Ring ist geteilter Speicher zwischen dem
+    // Kern und GENAU EINEM Adressraum. Ein Handle darauf in einem
+    // anderen Prozess waere ein Handle auf Seiten, die dort gar nicht
+    // abgebildet sind.
+    let h: u64 = handle.insert(state, me, obj,
+        handle.R_READ | handle.R_WRITE | handle.R_MANAGE)
+    if h == handle.HANDLE_NONE {
+        handle.obj_unref(state, obj)
+        var t: u64 = 0
+        while t < pages {
+            proc.page_unmap(state, me, base + t * ring.PAGE)
+            t = t + 1
+        }
+        mem.frame_free_run(state, phys, pages)
+        ring.release_ring(state, i)
+        return neg(errno.E_AGAIN)
+    }
+    // RH_ID traegt die RINGNUMMER und nicht das Handle. Das ist keine
+    // Beliebigkeit: das Handle kennt das Programm ohnehin (es hat es
+    // gerade bekommen), die Nummer nicht -- und sie ist die Zahl, mit
+    // der es den Kern nach den Innenzahlen DIESES Rings fragen kann.
+    // Ein Geheimnis ist sie nicht: wer sie faelscht, kommt an
+    // `ring.find` nicht vorbei, das Eigentuemer UND pid vergleicht.
+    ring.attach(state, i, phys, base, pages, obj, i)
+    return h
+}
+
+fn ring_map(state: u64, me: u64, h: u64) -> u64 {
+    let i: u64 = ring_lookup(state, me, h, handle.R_READ)
+    if i >= ring.MAX_RINGS {
+        return neg(errno.E_BADF)
+    }
+    return ring.base_of(state, i)
+}
+
+fn ring_close(state: u64, me: u64, h: u64) -> u64 {
+    let i: u64 = ring_lookup(state, me, h, handle.R_MANAGE)
+    if i >= ring.MAX_RINGS {
+        return neg(errno.E_BADF)
+    }
+    // ERST DIE AUFTRAEGE, DANN DIE SEITEN. Ein Ring mit laufenden
+    // Auftraegen darf seine Seiten nicht verlieren -- sonst schreibt
+    // ein Arbeitsfaden seine Fertigmeldung in einen Rahmen, der schon
+    // wieder jemand anderem gehoert. Abgebrochen wird ueber denselben
+    // Weg wie beim Prozesstod; auf die laufenden wird gewartet.
+    var j: u64 = 0
+    while j < async.MAX_AIO {
+        if ring.job_ring(state, j) == i {
+            if async.owner_of(state, j) == me {
+                aio_cancel_slot(state, me, j)
+            }
+        }
+        j = j + 1
+    }
+    async.drain_task(state, me)
+    // ERST das Handle, DANN die Seiten. `handle.drop` gibt den Verweis
+    // auf das Objekt zurueck -- und zwar GENAU EINEN: es ruft
+    // `obj_unref` selbst. Ein zweiter Aufruf daneben waere ein Verweis
+    // zu wenig, und der naechste Ring bekaeme einen Objektplatz, den
+    // noch jemand zu halten glaubt.
+    handle.drop(state, me, h)
+    ring.release_ring(state, i)
+    return 0
+}
+
+// Einen Auftrag ueber seinen PLATZ abbrechen. `aio_cancel` nimmt eine
+// Kennung; hier ist der Platz schon bekannt, und die Kennung dafuer
+// zurueckzurechnen waere ein Umweg ueber eine Tabelle, die man gerade
+// abbaut.
+fn aio_cancel_slot(state: u64, me: u64, j: u64) {
+    let wie: u64 = async.mark_cancel(state, me, j)
+    if wie == 0 {
+        async.finish(state, j, neg(errno.E_CANCELED), async.Q_CANCEL)
+        aio_post(state, j)
+    }
+}
+
+// --------------------------------------------- DIE ERNTE
+//
+// Der Weg vom Abgabesatz zum Auftrag, und die einzige Stelle, an der
+// dieser Kern Speicher liest, den ein Programm waehrenddessen aendern
+// darf.
+//
+// `max` = 0 heisst "alles, was anliegt". `me` ist der EIGENTUEMER des
+// Rings und nicht unbedingt der laufende Faden: erntet ein
+// Arbeitsfaden, dann wird der Auftrag trotzdem auf den Namen des
+// Eigentuemers abgegeben -- seine Handles, sein Adressraum, seine
+// Rechte. Die KOPIERFLAECHE dagegen gehoert dem LAUFENDEN Faden, denn
+// er ist es, der kopiert.
+fn ring_harvest(state: u64, me: u64, i: u64, max: u64) -> u64 {
+    let p: u64 = ring.pending(state, i)
+    if p == (0 -% 1) {
+        // Ein unglaubwuerdiger Schwanz. NICHTS wird abgegeben und der
+        // Kopf bleibt stehen -- das Programm kann seinen Ring in
+        // Ordnung bringen und es noch einmal versuchen. Der Zaehler
+        // `ring: badsq` sagt, dass es passiert ist.
+        return neg(errno.E_INVAL)
+    }
+    if p == 0 {
+        return 0
+    }
+    var n: u64 = p
+    if max != 0 {
+        if n > max {
+            n = max
+        }
+    }
+    let mich: u64 = sched.current(state)
+    var k: u64 = 0
+    var fertig: u64 = 0
+    var weiter: bool = true
+    while weiter {
+        if k >= n {
+            weiter = false
+        } else {
+            // DIE EINE KOPIE. Ab hier ist der Satz kerneigen.
+            let sq: u64 = ring.take_sqe(state, i, k, mich)
+            if sq == 0 {
+                weiter = false
+            } else {
+                if ring_submit_one(state, me, i, sq,
+                    ring.sq_index(state, i, k)) == 0 {
+                    // RUECKSTAU statt Verwerfen: die Auftragstafel ist
+                    // voll oder dieser Ring hat sein Mass erreicht. Der
+                    // Satz bleibt liegen, wo er liegt, der Kopf rueckt
+                    // nicht ueber ihn hinaus, und beim naechsten Blick
+                    // wird er geholt. Ein Ring, der verwirft, ist
+                    // schlimmer als einer, der wartet.
+                    weiter = false
+                } else {
+                    fertig = fertig + 1
+                    k = k + 1
+                }
+            }
+        }
+    }
+    if fertig != 0 {
+        ring.advance_head(state, i, fertig)
+    }
+    return fertig
+}
+
+// EINEN KOPIERTEN ABGABESATZ ZU EINEM AUFTRAG MACHEN.
+//
+// `sq` ist eine KERNADRESSE (die Kopierflaeche) -- ausser unter der
+// Gegenprobe `noringcopy`, und genau das ist ihr Sinn. Jedes Feld wird
+// hier GENAU EINMAL gelesen und danach nur noch aus lokalen Werten
+// gearbeitet.
+//
+// Rueckgabe: 1 = der Satz ist verbraucht (Auftrag angelegt ODER
+// endgueltig abgelehnt und gemeldet), 0 = Rueckstau, spaeter noch
+// einmal.
+fn ring_submit_one(state: u64, me: u64, i: u64, sq: u64,
+    sqidx: u64) -> u64 {
+    let op: u64 = kstate.get(sq, ring.SQ_OP)
+    let fd: u64 = kstate.get(sq, ring.SQ_FD)
+    let buf: u64 = kstate.get(sq, ring.SQ_BUF)
+    var laenge: u64 = kstate.get(sq, ring.SQ_LEN)
+    let udata: u64 = kstate.get(sq, ring.SQ_UDATA)
+    // 1. UNSINN WIRD GEMELDET UND NICHT VERSCHLUCKT. Eine Art, die es
+    //    nicht gibt, ist ein Programmierfehler des Programms -- es
+    //    bekommt eine Fertigmeldung mit -EINVAL und seiner eigenen
+    //    Kennzahl darin. Ein stillschweigend verworfener Satz waere
+    //    fuer das Programm ein Haenger.
+    if op == async.OP_NONE || op > async.OP_MAX {
+        ring.drop_note(state, i)
+        ring.post(state, i, 0, udata, neg(errno.E_INVAL), op)
+        sched.poll_kick_one(state, me)
+        return 1
+    }
+    // 2. RUECKSTAU. Mehr gleichzeitig offene Auftraege, als der
+    //    Abgabering lang ist, gibt es nicht -- und der Fertigring ist
+    //    doppelt so lang wie der Abgabering. DARAUS folgt, dass er
+    //    nicht ueberlaufen kann, und das ist der Grund fuer das
+    //    Verhaeltnis 1:2.
+    if ring.inflight_of(state, i) >= ring.sqe_of(state, i) {
+        return 0
+    }
+    var token: u64 = handle.TOKEN_NONE
+    if op == async.OP_OPEN {
+        // Der Pfad geht wie bei `aio_submit` SOFORT in den Kern. Er
+        // steht in Ring 3 hinter `SQ_BUF`, und der Arbeitsfaden liest
+        // ihn erst spaeter.
+        let slot: u64 = async.free_index(state)
+        if slot >= async.MAX_AIO {
+            return 0
+        }
+        let ziel: u64 = state + kstate.APATH_OFF + slot * kstate.APATH_STRIDE
+        let n: u64 = fetch_path(state, me, buf, ziel, kstate.APATH_STRIDE - 1)
+        if errno.is_error(n) || n == 0 || n >= kstate.APATH_STRIDE - 1 {
+            ring.drop_note(state, i)
+            ring.post(state, i, 0, udata, neg(errno.E_INVAL), op)
+            sched.poll_kick_one(state, me)
+            return 1
+        }
+        let id0: u64 = async.claim_at(state, slot, me,
+            sched.tget(state, me, sched.T_PID), op, handle.TOKEN_NONE,
+            0, laenge, udata, n)
+        if id0 == 0 {
+            return 0
+        }
+        ring_note(state, id0, i, sqidx)
+        return 1
+    }
+    // 3. DER VERWEIS, BEVOR DER PLATZ BELEGT WIRD -- genau wie in
+    //    `aio_submit`, dieselbe Funktion, dieselbe Lebensdauerzusage.
+    let h: u64 = file.fd_handle(state, me, fd)
+    if h == handle.HANDLE_NONE {
+        ring.post(state, i, 0, udata, neg(errno.E_BADF), op)
+        sched.poll_kick_one(state, me)
+        return 1
+    }
+    token = handle.req_begin(state, me, h, aio_need(op))
+    if handle.is_err(token) {
+        ring.post(state, i, 0, udata, aio_errno(token), op)
+        sched.poll_kick_one(state, me)
+        return 1
+    }
+    if op == async.OP_READ || op == async.OP_WRITE {
+        if laenge > MAX_IO {
+            laenge = MAX_IO
+        }
+        if !proc.user_ok(state, me, buf, laenge) {
+            handle.req_end(state, token)
+            ring.post(state, i, 0, udata, neg(errno.E_FAULT), op)
+            sched.poll_kick_one(state, me)
+            return 1
+        }
+    }
+    let id: u64 = async.claim(state, me,
+        sched.tget(state, me, sched.T_PID), op, token, buf, laenge,
+        udata, fd)
+    if id == 0 {
+        let weg: u64 = handle.req_end(state, token)
+        if weg != 0 {
+            file.open_settle(state, weg - 1)
+        }
+        return 0
+    }
+    ring_note(state, id, i, sqidx)
+    return 1
+}
+
+// Den frisch angelegten Auftrag seinem Ring zuordnen -- damit seine
+// Fertigmeldung spaeter DORTHIN geht und nicht in den alten
+// Fertigmeldungsring der Aufgabe.
+fn ring_note(state: u64, id: u64, i: u64, sqidx: u64) {
+    let j: u64 = async.find(state, id)
+    if j < async.MAX_AIO {
+        ring.job_set(state, j, i, sqidx)
+        ring.inc_flight(state, i)
+        // GEGENPROBE `noawork`: es gibt keine Arbeitsfaeden, also fuehrt
+        // der Erntende den Auftrag selbst aus -- ueber DENSELBEN
+        // Uebergang (`take_one` ist ein `lock cmpxchg`), damit auch hier
+        // nicht zweimal gemeldet wird. Ohne diese vier Zeilen bliebe ein
+        // Ring in einem Lauf ohne Arbeitsfaeden einfach stehen, und die
+        // Gegenprobe waere ein Haenger statt einer gefallenen Zusage.
+        if kstate.mode_on(state, kstate.M_NOAWORK) {
+            if async.take_one(state, j) {
+                aio_run(state, j)
+            }
+        }
+    }
+}
+
+// ALLE ANGEMELDETEN RINGE EINMAL ABFRAGEN. Das ist der Weg OHNE
+// Systemaufruf: ein Arbeitsfaden ruft das vor jedem Blick in die
+// Auftragstafel, und damit wird ein Abgabesatz zum Auftrag, ohne dass
+// das Programm den Kern je gerufen haette.
+fn ring_pump(state: u64) -> u64 {
+    if ring.used(state) == 0 {
+        return 0
+    }
+    kstate.add(state, kstate.R_PUMPS, 1)
+    var n: u64 = 0
+    var i: u64 = 0
+    while i < ring.MAX_RINGS {
+        if ring.alive(state, i) {
+            let r: u64 = ring_harvest(state, ring.owner_of(state, i), i, 0)
+            if !errno.is_error(r) {
+                n = n + r
+            }
+        }
+        i = i + 1
+    }
+    return n
+}
+
+// DIE WEICHE FUER DIE FERTIGMELDUNG. Genau eine Meldung je Auftrag --
+// die Zusage C der Runde ASYNC gilt unveraendert; diese Funktion
+// entscheidet nur, WOHIN sie geht.
+fn aio_post(state: u64, i: u64) {
+    let r: u64 = ring.job_ring(state, i)
+    if r >= ring.MAX_RINGS {
+        async.post(state, i)
+        return
+    }
+    let task: u64 = async.owner_of(state, i)
+    let id: u64 = async.cqe_id(state, i)
+    var ud: u64 = async.udata_of(state, i)
+    // GEGENPROBE `noringcopy`: auch die Kennzahl wird noch einmal aus
+    // dem geteilten Speicher gelesen. Ein Programm, das seinen
+    // Abgabesatz nach der Abgabe aendert, bekommt damit die NEUE
+    // Kennzahl in seiner Fertigmeldung -- und ordnet sie dem falschen
+    // Auftrag zu. Genau das darf im Regelbetrieb nicht passieren.
+    if kstate.mode_on(state, kstate.M_NOCOPY) {
+        let ph: u64 = ring.phys_of(state, r)
+        if ph != 0 {
+            ud = kstate.get(ph + ring.HDR_BYTES
+                + ring.job_sq(state, i) * ring.SQE_BYTES, ring.SQ_UDATA)
+        }
+    }
+    ring.post(state, r, id, ud, async.res_of(state, i),
+        async.op_of(state, i))
+    ring.dec_flight(state, r)
+    ring.job_clear(state, i)
+    // ERST die Meldung steht, DANN wird der Platz frei -- dieselbe
+    // Reihenfolge und derselbe Grund wie in `async.post`.
+    async.release(state, i)
+    sched.poll_kick_one(state, task)
+}
+
+// ------------------------------------------------------ das Betreten
+//
+// DER ANSTOSS UND DAS BLOCKIERENDE WARTEN IN EINEM AUFRUF, so wie
+// io_uring es macht. Beide Teile sind freiwillig:
+//
+//   abgeben > 0   so viele Saetze JETZT ernten, im Zusammenhang des
+//                 Programms. Das ist der Weg, der das Fenster
+//                 schliesst, wenn alle Arbeitsfaeden schlafen.
+//   mindest > 0   warten, bis so viele Fertigmeldungen im Ring stehen,
+//                 hoechstens bis zur Zeitgrenze.
+//
+// abgeben == 0 und mindest == 0 ist der reine Anstoss: einmal wecken
+// und zurueck.
+fn ring_enter(state: u64, me: u64, h: u64, abgeben: u64, mindest: u64,
+    tmo: u64) -> u64 {
+    let i: u64 = ring_lookup(state, me, h, handle.R_WRITE)
+    if i >= ring.MAX_RINGS {
+        return neg(errno.E_BADF)
+    }
+    kstate.add(state, kstate.R_KICKS, 1)
+    var n: u64 = 0
+    if abgeben != 0 {
+        let r: u64 = ring_harvest(state, me, i, abgeben)
+        if errno.is_error(r) {
+            return r
+        }
+        n = r
+    }
+    // Die Arbeitsfaeden wecken. Auch wenn hier nichts geerntet wurde:
+    // der Aufrufer kann genau deshalb hier sein, weil er die Weckflagge
+    // gesehen hat.
+    sched.poll_kick(state)
+    if mindest == 0 {
+        return n
+    }
+    let forever: bool = tmo >= 0x80000000
+    var ticks: u64 = 0
+    if !forever {
+        if tmo != 0 {
+            ticks = (tmo + 9) / 10 + 1
+        }
+    }
+    let deadline: u64 = kstate.get(state, kstate.TICKS) + ticks
+    var going: bool = true
+    while going {
+        // ZUERST die Weckfolge merken, DANN nachsehen -- dieselbe
+        // Reihenfolge und derselbe Grund wie in `aio_wait`.
+        let seen: u64 = sched.poll_seq(state)
+        if ring.cq_used(state, i) >= mindest {
+            return n
+        }
+        if signal.interrupted(state, me) {
+            return neg(errno.E_INTR)
+        }
+        if tmo == 0 {
+            return n
+        }
+        if !forever {
+            if kstate.get(state, kstate.TICKS) >= deadline {
+                kstate.add(state, kstate.A_TIMEOUTS, 1)
+                return neg(errno.E_TIMEDOUT)
+            }
+        }
+        var wake: u64 = deadline
+        if forever {
+            wake = sched.POLL_FOREVER
+        }
+        sched.poll_sleep(state, seen, wake)
+    }
+    return n
+}
+
+// Die Innenzahlen, die der Selbsttest braucht. Wie `AIO_INFO` nur im
+// Selbsttest- oder Messmodus -- ein Testfenster, das im Regelbetrieb
+// offen bleibt, ist eine Hintertuer.
+fn ring_info(state: u64, me: u64, was: u64, arg: u64) -> u64 {
+    if was == 0 {
+        return ring.used(state)
+    }
+    if was == 1 {
+        return ring.inflight_of(state, arg)
+    }
+    if was == 2 {
+        return ring.harvest_of(state, arg)
+    }
+    if was == 3 {
+        return ring.over_of(state, arg)
+    }
+    if was == 4 {
+        return ring.bytes_of(state, arg)
+    }
+    if was == 5 {
+        return ring.bytes_for(arg)
+    }
+    if was == 6 {
+        return async.used(state)
+    }
+    if was == 7 {
+        return kstate.get(state, kstate.R_KICKS)
+    }
+    if was == 8 {
+        return kstate.get(state, kstate.R_HARVEST)
+    }
+    if was == 9 {
+        return kstate.get(state, kstate.R_BADSQ)
+    }
+    if was == 10 {
+        return kstate.get(state, kstate.R_BADCQ)
+    }
+    if was == 11 {
+        return kstate.get(state, kstate.R_OVERFLOW)
+    }
+    if was == 12 {
+        return kstate.get(state, kstate.R_DROPPED)
+    }
+    if was == 13 {
+        return kstate.get(state, kstate.R_POSTED)
+    }
+    if was == 14 {
+        return kstate.get(state, kstate.R_DENIED)
+    }
+    if was == 15 {
+        return kstate.get(state, kstate.R_PUMPS)
+    }
+    if was == 16 {
+        return ring.awake(state)
+    }
+    if was == 17 {
+        return ring.MAX_RINGS
+    }
+    if was == 18 {
+        return ring.SQ_MAX
+    }
+    if was == 19 {
+        // DIE RAHMENPROBE. Nach einem sauberen Lauf MUSS diese Zahl
+        // wieder die vom Anfang sein -- ein Ring, der seine Rahmen
+        // nicht zurueckgibt, ist ein Leck von bis zu 20 KiB je
+        // Prozess.
+        return mem.frames_free(state)
+    }
+    if was == 20 {
+        // Der Pruefstandshalt aus Runde ASYNC. Er gilt auch hier: die
+        // Arbeitsfaeden nehmen keinen neuen Auftrag an, und damit wird
+        // aus "abgegeben und noch nicht ausgefuehrt" ein Zustand, den
+        // ein Test HERSTELLEN kann. Ohne ihn haengt es an der
+        // Zeitscheibe, ob die Gegenprobe zur Kopierregel ihr Fenster
+        // trifft -- und ein Test, der die Fehlerklasse nur manchmal
+        // trifft, ist keiner.
+        async.hold(state, arg)
+        if arg == 0 {
+            sched.poll_kick(state)
+        }
+        return async.held(state)
+    }
+    if was == 21 {
+        return kstate.get(state, kstate.R_SLEEPS)
+    }
+    if was == 22 {
+        return ring.jobs_for(state, arg)
+    }
+    if was == 23 {
+        return handle.req_live(state)
+    }
+    if was == 24 {
+        return ring.cq_used(state, arg)
+    }
+    if was == 25 {
+        return handle.objects_used(state)
+    }
+    if was == 26 {
+        return ring.pages_for(arg)
+    }
+    if was == 27 {
+        // Wie viele Saetze DIESER Ring gerade anliegen hat, nach der
+        // Pruefung des Kerns. 0 -% 1 heisst: der Schwanz ist eine Luege.
+        return ring.pending(state, arg)
+    }
+    return neg(errno.E_INVAL)
+}
+
+fn ring_call(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64,
+    a3: u64) -> u64 {
+    if number == RING_VERSION {
+        return 1
+    }
+    if number == RING_SETUP {
+        return ring_setup(state, me, a0, a1)
+    }
+    if number == RING_MAP {
+        return ring_map(state, me, a0)
+    }
+    if number == RING_ENTER {
+        return ring_enter(state, me, a0, a1, a2, a3)
+    }
+    if number == RING_CLOSE {
+        return ring_close(state, me, a0)
+    }
+    if number == RING_INFO {
+        if !kstate.mode_on(state, kstate.M_RING) {
+            if !kstate.mode_on(state, kstate.M_RBENCH) {
+                return neg(errno.E_NOSYS)
+            }
+        }
+        return ring_info(state, me, a0, a1)
+    }
+    return neg(errno.E_INVAL)
 }
 
 fn native(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64,
