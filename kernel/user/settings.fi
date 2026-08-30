@@ -169,7 +169,13 @@ const R_SPRACHE: u64 = 6
 // "Darstellung" and it is one tab further along instead; that is a
 // worse menu and a better change.
 const R_VORL: u64 = 7
-const R_ANZ: u64 = 8
+// RUNDE KONTO: DER NEUNTE REITER, und er geht wieder ans ENDE -- aus
+// demselben Grund, den Runde LOOK und Runde THEMESTORE zwei Konstanten
+// weiter oben aufgeschrieben haben: jede andere Seite behaelt ihre
+// Nummer, also klickt ein Testlaeufer, der Reiter 5 anklickt, weiter
+// auf dasselbe wie gestern.
+const R_KONTO: u64 = 8
+const R_ANZ: u64 = 9
 
 static mut w: u64 = 0
 // 128 AND NOT 64, AND THAT IS A BUG FIX AND NOT ROOM FOR THIS ROUND.
@@ -203,6 +209,27 @@ static mut l_stat: [u8; 96] = [0 as u8; 96]
 static mut e_ip: [u8; 24] = [0 as u8; 24]
 static mut e_maske: [u8; 24] = [0 as u8; 24]
 static mut e_gw: [u8; 24] = [0 as u8; 24]
+// ---------------------------------------------------- RUNDE KONTO
+//
+// Die Seite "Konten" haelt KEIN Geheimnis in einer Datei und kein Token
+// im Speicher: sie ruft `/bin/konto` auf und liest dessen Zeilen. Das
+// Kennwort geht durch ein ROHR, nicht ueber die Befehlszeile -- was in
+// `argv` steht, steht in jeder Prozessliste.
+static mut e_kziel: [u8; 96] = [0 as u8; 96]
+static mut e_kname: [u8; 64] = [0 as u8; 64]
+static mut e_kken: [u8; 64] = [0 as u8; 64]
+static mut e_kgeh: [u8; 64] = [0 as u8; 64]
+static mut e_kber: [u8; 64] = [0 as u8; 64]
+static mut e_kcode: [u8; 24] = [0 as u8; 24]
+static mut k_liste: [u8; 1024] = [0 as u8; 1024]
+static mut k_anbn: [u8; 256] = [0 as u8; 256]
+static mut k_anb_n: u64 = 0
+static mut k_aus: [u8; 4096] = [0 as u8; 4096]
+static mut k_ausn: u64 = 0
+static mut l_kstat: [u8; 160] = [0 as u8; 160]
+static mut k_n: u64 = 0
+const SYS_PIPE: u64 = 22
+
 static mut e_pw1: [u8; 64] = [0 as u8; 64]
 static mut e_pw2: [u8; 64] = [0 as u8; 64]
 static mut puffer: [u8; 2048] = [0 as u8; 2048]
@@ -361,6 +388,28 @@ static mut k_l_ip2: [u8; 24] = "settings.address.fields\0"
 static mut k_l_kw1: [u8; 22] = "settings.password.new\0"
 static mut k_l_kw2: [u8; 24] = "settings.password.again\0"
 static mut k_b_kw: [u8; 22] = "settings.password.set\0"
+// ---- RUNDE KONTO: die Schluessel der Seite "Konten".
+// Nur Schluessel. Kein Satz dieser Seite steht in diesem Quelltext --
+// die Texte liegen in locale/en/messages und locale/de/messages, so
+// wie es docs/I18N.md verlangt.
+static mut k_k_titel: [u8; 18] = "konto.ui.heading\0\0"
+static mut k_k_prov: [u8; 19] = "konto.ui.provider\0\0"
+static mut k_k_ziel: [u8; 17] = "konto.ui.target\0\0"
+static mut k_k_name: [u8; 19] = "konto.ui.certname\0\0"
+static mut k_k_ken: [u8; 16] = "konto.ui.login\0\0"
+static mut k_k_geh: [u8; 19] = "konto.ui.password\0\0"
+static mut k_k_ber: [u8; 17] = "konto.ui.tenant\0\0"
+static mut k_k_code: [u8; 14] = "konto.ui.mfa\0\0"
+static mut k_k_add: [u8; 14] = "konto.ui.add\0\0"
+static mut k_k_out: [u8; 18] = "konto.ui.signout\0\0"
+static mut k_k_list: [u8; 19] = "konto.ui.accounts\0\0"
+static mut k_k_note: [u8; 20] = "konto.ui.optional\0\0\0"
+static mut k_k_none: [u8; 17] = "konto.ui.noneyet\0"
+static mut k_m_kok: [u8; 23] = "konto.ui.status.added\0\0"
+static mut k_m_kbad: [u8; 24] = "konto.ui.status.failed\0\0"
+static mut k_m_kout: [u8; 26] = "konto.ui.status.removed\0\0\0"
+static mut k_m_ksel: [u8; 26] = "konto.ui.status.select\0\0\0\0"
+static mut kf_text: [u8; 5] = "text\0"
 // ADDENDUM TASKBAR. English, as every new name in this tree is; the
 // older labels around them are still German and the round RENAME owns
 // that. What these five widgets write is /etc/taskbar.conf and nothing
@@ -1641,6 +1690,439 @@ fn vorlage_say() {
     }
 }
 
+// ==================================================== RUNDE KONTO
+//
+// DIE OBERFLAECHE MACHT KEINE ANMELDUNG. Sie kann es gar nicht: dieses
+// Programm ist `profile kernel` -- freistehend, ohne Halde --, und ein
+// TLS-Aufzeichnungslayer braucht eine Halde (die Begruendung steht im
+// Kopf von kernel/app/fetch.fi und gilt hier Wort fuer Wort). Also ruft
+// sie `/bin/konto` auf, das `--profile=app` gebaut ist, und liest
+// dessen Zeilen.
+//
+// DAS KENNWORT GEHT DURCH EIN ROHR. Nicht ueber `argv` (das steht in
+// jeder Prozessliste), nicht ueber eine Datei (die stuende auf der
+// Platte, und sei es nur fuer Millisekunden), nicht ueber eine
+// Umgebungsvariable (die erbt jedes Kind weiter). `pipe`, hineinschreiben,
+// Schreibende zumachen, Leseende auf Deskriptor 0 -- genau so, wie die
+// Shell dieses Systems eine Roehre baut (kernel/user/sh.fi).
+// ---------------------------------------------- RUNDE KONTO: die Adresse
+//
+// DIE SEITE MERKT SICH DIE ADRESSE, nicht das Konto. Was der Nutzer in
+// "Serveradresse" und "Name im Zertifikat" eintraegt, gehoert zu einem
+// ANBIETER und nicht zu einer Anmeldung -- also wandert es in
+// `/etc/konten.conf`, eine Zeile je Anbieter, und steht beim naechsten
+// Mal schon da. Zwei Gruende, und beide zaehlen:
+//
+//   1. Bequemlichkeit: eine Adresse tippt man einmal.
+//   2. NOTWENDIGKEIT: `proc.MAX_ARGS` ist 8. Mit `--ziel=` und
+//      `--name=` auf der Befehlszeile bliebe fuer Organisation und
+//      zweiten Faktor kein Platz mehr, und es wuerde ausgerechnet dem
+//      Nutzer um die Ohren fliegen, der beides braucht.
+//
+// IN DIESER DATEI STEHT KEIN GEHEIMNIS. Nur Adressen; das Kennwort geht
+// durch das Rohr an `/bin/konto` und sonst nirgendwohin.
+fn konf_merken(anbieter: u64, ziel: u64, zname: u64) -> bool {
+    if *((ziel) as *mut u8) == 0 as u8 {
+        return false
+    }
+    var alt: [u8; 1024] = [0 as u8; 1024]
+    var neu: [u8; 1280] = [0 as u8; 1280]
+    var pfad: [u8; 18] = "/etc/konten.conf\0\0"
+    let n: u64 = datei_lesen((&pfad[0 as usize]) as u64,
+        (&alt[0 as usize]) as u64, 1024)
+    var aus: u64 = 0
+    // Alle Zeilen uebernehmen, AUSSER der dieses Anbieters -- die wird
+    // ersetzt und nicht verdoppelt.
+    var i: u64 = 0
+    while i < n {
+        var e: u64 = i
+        while e < n && alt[(e) as usize] != 10 as u8 {
+            e = e + 1
+        }
+        // Ist das die Zeile dieses Anbieters? Dann faellt sie weg und
+        // wird unten neu geschrieben. Der Name muss GANZ passen und ein
+        // Trenner muss folgen -- sonst wuerde `xoffi` auch `xoffi2`
+        // treffen.
+        var gleich: bool = true
+        var k: u64 = 0
+        while *((anbieter + k) as *mut u8) != 0 as u8 {
+            if i + k >= e || alt[((i + k)) as usize]
+                != *((anbieter + k) as *mut u8) {
+                gleich = false
+            }
+            k = k + 1
+        }
+        if gleich {
+            if i + k >= e {
+                gleich = false
+            } else if alt[((i + k)) as usize] != 32 as u8
+                && alt[((i + k)) as usize] != 9 as u8 {
+                gleich = false
+            }
+        }
+        if !gleich && e > i {
+            var c: u64 = i
+            while c < e && aus + 1 < 1280 {
+                neu[(aus) as usize] = alt[(c) as usize]
+                aus = aus + 1
+                c = c + 1
+            }
+            neu[(aus) as usize] = 10 as u8
+            aus = aus + 1
+        }
+        i = e + 1
+    }
+    // und die eigene Zeile ans Ende
+    var f_zi: [u8; 7] = " ziel=\0"
+    var f_na: [u8; 7] = " name=\0"
+    aus = anhaengen_c((&neu[0 as usize]) as u64, aus, 1280, anbieter)
+    aus = anhaengen_c((&neu[0 as usize]) as u64, aus, 1280,
+        (&f_zi[0 as usize]) as u64)
+    aus = anhaengen_c((&neu[0 as usize]) as u64, aus, 1280, ziel)
+    if *((zname) as *mut u8) != 0 as u8 {
+        aus = anhaengen_c((&neu[0 as usize]) as u64, aus, 1280,
+            (&f_na[0 as usize]) as u64)
+        aus = anhaengen_c((&neu[0 as usize]) as u64, aus, 1280, zname)
+    }
+    if aus + 1 < 1280 {
+        neu[(aus) as usize] = 10 as u8
+        aus = aus + 1
+    }
+    return datei_schreiben((&pfad[0 as usize]) as u64,
+        (&neu[0 as usize]) as u64, aus)
+}
+
+fn anhaengen_c(ziel: u64, at: u64, max: u64, was: u64) -> u64 {
+    var a: u64 = at
+    var i: u64 = 0
+    while *((was + i) as *mut u8) != 0 as u8 && a + 1 < max {
+        *((ziel + a) as *mut u8) = *((was + i) as *mut u8)
+        a = a + 1
+        i = i + 1
+    }
+    return a
+}
+
+// `--name=` und der Wert dahinter, in EINEM Wort. Leerer Wert -> es
+// entsteht kein Wort, und der Aufruf bleibt kurz. Rueckgabe: ob das
+// Wort entstanden ist.
+fn opt_wort(ziel: u64, max: u64, vorsatz: u64, wert: u64) -> bool {
+    if *((wert) as *mut u8) == 0 as u8 {
+        return false
+    }
+    var i: u64 = 0
+    while *((vorsatz + i) as *mut u8) != 0 as u8 && i + 1 < max {
+        *((ziel + i) as *mut u8) = *((vorsatz + i) as *mut u8)
+        i = i + 1
+    }
+    var j: u64 = 0
+    while *((wert + j) as *mut u8) != 0 as u8 && i + 1 < max {
+        *((ziel + i) as *mut u8) = *((wert + j) as *mut u8)
+        i = i + 1
+        j = j + 1
+    }
+    *((ziel + i) as *mut u8) = 0 as u8
+    return true
+}
+
+fn konto_lauf(argv: u64, argc: u64, geheim: u64) -> u64 {
+    var t_bin: [u8; 11] = "/bin/konto\0"
+    var t_tmp: [u8; 5] = "/tmp\0"
+    var t_aus: [u8; 16] = "/tmp/konto.aus\0\0"
+    var nlz: [u8; 2] = "\n\0"
+    k_ausn = 0
+    k_aus[(0) as usize] = 0 as u8
+    let _md: u64 = ulib.sys(ulib.SYS_MKDIR, (&t_tmp[0 as usize]) as u64,
+        448, 0)
+    let s0: u64 = ulib.sys(ulib.SYS_DUP, 0, 0, 0)
+    let s1: u64 = ulib.sys(ulib.SYS_DUP, 1, 0, 0)
+    var fds: [u32; 2] = [0 as u32; 2]
+    var haben_rohr: bool = false
+    if geheim != 0 {
+        if !ulib.bad(ulib.sys(SYS_PIPE, (&fds[0 as usize]) as u64, 0, 0)) {
+            haben_rohr = true
+            let wfd: u64 = fds[(1) as usize] as u64
+            let n: u64 = ulib.length(geheim)
+            if n > 0 {
+                let _w1: u64 = ulib.sys(ulib.SYS_WRITE, wfd, geheim, n)
+            }
+            let _w2: u64 = ulib.sys(ulib.SYS_WRITE, wfd,
+                (&nlz[0 as usize]) as u64, 1)
+            ulib.sys(ulib.SYS_CLOSE, wfd, 0, 0)
+            ulib.sys(ulib.SYS_DUP2, fds[(0) as usize] as u64, 0, 0)
+        }
+    }
+    let afd: u64 = ulib.sys(ulib.SYS_OPEN, (&t_aus[0 as usize]) as u64,
+        ulib.O_MAKE, 384)
+    if !ulib.bad(afd) {
+        ulib.sys(ulib.SYS_DUP2, afd, 1, 0)
+        ulib.sys(ulib.SYS_CLOSE, afd, 0, 0)
+    }
+    let pid: u64 = ulib.sys(ulib.SYS_EXEC, (&t_bin[0 as usize]) as u64,
+        argv, argc)
+    if !ulib.bad(s0) {
+        ulib.sys(ulib.SYS_DUP2, s0, 0, 0)
+        ulib.sys(ulib.SYS_CLOSE, s0, 0, 0)
+    }
+    if !ulib.bad(s1) {
+        ulib.sys(ulib.SYS_DUP2, s1, 1, 0)
+        ulib.sys(ulib.SYS_CLOSE, s1, 0, 0)
+    }
+    if haben_rohr {
+        ulib.sys(ulib.SYS_CLOSE, fds[(0) as usize] as u64, 0, 0)
+    }
+    if ulib.bad(pid) {
+        return 255
+    }
+    let code: u64 = ulib.wait_code(pid)
+    let rfd: u64 = ulib.sys(ulib.SYS_OPEN, (&t_aus[0 as usize]) as u64,
+        0, 0)
+    if !ulib.bad(rfd) {
+        let n: u64 = ulib.sys(ulib.SYS_READ, rfd,
+            (&k_aus[0 as usize]) as u64, 4095)
+        ulib.sys(ulib.SYS_CLOSE, rfd, 0, 0)
+        if !ulib.bad(n) {
+            k_ausn = n
+            k_aus[(n) as usize] = 0 as u8
+        }
+    }
+    return code
+}
+
+// Den Wert hinter `konto: <name> = ` aus der letzten Ausgabe holen.
+fn konto_feld(name: u64, aus: u64, max: u64) -> bool {
+    var kopf: [u8; 8] = "konto: \0"
+    __mmio_write8((aus) as *mut u8, 0 as u8)
+    var i: u64 = 0
+    while i < k_ausn {
+        var e: u64 = i
+        while e < k_ausn && k_aus[(e) as usize] != 10 as u8 {
+            e = e + 1
+        }
+        var p: u64 = i
+        var passt: bool = true
+        var q: u64 = 0
+        while q < 7 {
+            if p + q >= e || k_aus[((p + q)) as usize]
+                != __mmio_read8(((&kopf[0 as usize]) as u64 + q) as *mut u8) {
+                passt = false
+                q = 7
+            } else {
+                q = q + 1
+            }
+        }
+        if passt {
+            p = p + 7
+            var m: u64 = 0
+            var gleich: bool = true
+            while __mmio_read8((name + m) as *mut u8) != 0 as u8 {
+                if p + m >= e || k_aus[((p + m)) as usize]
+                    != __mmio_read8((name + m) as *mut u8) {
+                    gleich = false
+                }
+                m = m + 1
+            }
+            if gleich && p + m + 3 <= e && k_aus[((p + m)) as usize] == 32 as u8
+                && k_aus[((p + m + 1)) as usize] == 61 as u8 {
+                var v: u64 = p + m + 3
+                var k: u64 = 0
+                while v < e && k + 1 < max {
+                    __mmio_write8((aus + k) as *mut u8,
+                        k_aus[(v) as usize])
+                    k = k + 1
+                    v = v + 1
+                }
+                __mmio_write8((aus + k) as *mut u8, 0 as u8)
+                return true
+            }
+        }
+        i = e + 1
+    }
+    return false
+}
+
+// Die Anbieter, die es WIRKLICH gibt -- gefragt wird `/bin/konto`, nicht
+// dieser Quelltext. Ein Anbietername steht damit an genau einer Stelle
+// im ganzen System (kernel/app/konto.fi), und ein vierter Ruecken
+// erscheint hier von selbst.
+fn anbieter_lesen() {
+    var argv: [u64; 2] = [0 as u64; 2]
+    var a0: [u8; 11] = "/bin/konto\0"
+    var a1: [u8; 9] = "anbieter\0"
+    argv[(0) as usize] = (&a0[0 as usize]) as u64
+    argv[(1) as usize] = (&a1[0 as usize]) as u64
+    let _c: u64 = konto_lauf((&argv[0 as usize]) as u64, 2, 0)
+    var name: [u8; 14] = "ruecken_name\0\0"
+    var kopf: [u8; 8] = "konto: \0"
+    k_anb_n = 0
+    var bp: u64 = 0
+    var i: u64 = 0
+    while i < k_ausn {
+        var e: u64 = i
+        while e < k_ausn && k_aus[(e) as usize] != 10 as u8 {
+            e = e + 1
+        }
+        var passt: bool = true
+        var q: u64 = 0
+        while q < 7 {
+            if i + q >= e || k_aus[((i + q)) as usize]
+                != __mmio_read8(((&kopf[0 as usize]) as u64 + q) as *mut u8) {
+                passt = false
+                q = 7
+            } else {
+                q = q + 1
+            }
+        }
+        if passt {
+            var m: u64 = 0
+            var gleich: bool = true
+            while __mmio_read8(((&name[0 as usize]) as u64 + m) as *mut u8)
+                != 0 as u8 {
+                if i + 7 + m >= e || k_aus[((i + 7 + m)) as usize]
+                    != __mmio_read8(((&name[0 as usize]) as u64 + m)
+                        as *mut u8) {
+                    gleich = false
+                }
+                m = m + 1
+            }
+            if gleich {
+                var v: u64 = i + 7 + m + 3
+                if k_anb_n > 0 && bp + 1 < 255 {
+                    k_anbn[(bp) as usize] = 10 as u8
+                    bp = bp + 1
+                }
+                while v < e && bp + 1 < 255 {
+                    k_anbn[(bp) as usize] = k_aus[(v) as usize]
+                    bp = bp + 1
+                    v = v + 1
+                }
+                k_anb_n = k_anb_n + 1
+            }
+        }
+        i = e + 1
+    }
+    k_anbn[(bp) as usize] = 0 as u8
+}
+
+// Die Kontenliste fuer das Listenfeld. GELESEN WIRD /etc/konten -- eine
+// gewoehnliche Textdatei ohne ein einziges Geheimnis darin. Angezeigt
+// wird "<anbieter>  <anzeige>", und die Kennung steht dahinter, weil
+// der Abmeldeknopf sie braucht.
+fn konten_lesen() {
+    var pfad: [u8; 12] = "/etc/konten\0"
+    var roh: [u8; 1024] = [0 as u8; 1024]
+    k_n = 0
+    k_liste[(0) as usize] = 0 as u8
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&pfad[0 as usize]) as u64, 0, 0)
+    if ulib.bad(fd) {
+        return
+    }
+    let n: u64 = ulib.sys(ulib.SYS_READ, fd, (&roh[0 as usize]) as u64,
+        1023)
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    if ulib.bad(n) || n == 0 {
+        return
+    }
+    var bp: u64 = 0
+    var i: u64 = 0
+    while i < n {
+        var e: u64 = i
+        while e < n && roh[(e) as usize] != 10 as u8 {
+            e = e + 1
+        }
+        if e > i {
+            // Feld 1 (anbieter) und Feld 4 (anzeige) aus der Zeile
+            var f: u64 = 0
+            var a: u64 = i
+            var von1: u64 = i
+            var bis1: u64 = i
+            var von4: u64 = i
+            var bis4: u64 = i
+            var k: u64 = i
+            while k <= e {
+                if k == e || roh[(k) as usize] == 9 as u8 {
+                    if f == 1 {
+                        von1 = a
+                        bis1 = k
+                    }
+                    if f == 4 {
+                        von4 = a
+                        bis4 = k
+                    }
+                    f = f + 1
+                    a = k + 1
+                }
+                k = k + 1
+            }
+            if k_n > 0 && bp + 1 < 1023 {
+                k_liste[(bp) as usize] = 10 as u8
+                bp = bp + 1
+            }
+            var v: u64 = von1
+            while v < bis1 && bp + 1 < 1023 {
+                k_liste[(bp) as usize] = roh[(v) as usize]
+                bp = bp + 1
+                v = v + 1
+            }
+            if bp + 2 < 1023 {
+                k_liste[(bp) as usize] = 32 as u8
+                k_liste[((bp + 1)) as usize] = 32 as u8
+                bp = bp + 2
+            }
+            v = von4
+            while v < bis4 && bp + 1 < 1023 {
+                k_liste[(bp) as usize] = roh[(v) as usize]
+                bp = bp + 1
+                v = v + 1
+            }
+            k_n = k_n + 1
+        }
+        i = e + 1
+    }
+    k_liste[(bp) as usize] = 0 as u8
+}
+
+// Die Kennung des Kontos Nummer `k` aus /etc/konten (Feld 0).
+fn konto_kennung(k: u64, aus: u64, max: u64) -> bool {
+    var pfad: [u8; 12] = "/etc/konten\0"
+    var roh: [u8; 1024] = [0 as u8; 1024]
+    __mmio_write8((aus) as *mut u8, 0 as u8)
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&pfad[0 as usize]) as u64, 0, 0)
+    if ulib.bad(fd) {
+        return false
+    }
+    let n: u64 = ulib.sys(ulib.SYS_READ, fd, (&roh[0 as usize]) as u64,
+        1023)
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    if ulib.bad(n) || n == 0 {
+        return false
+    }
+    var nr: u64 = 0
+    var i: u64 = 0
+    while i < n {
+        var e: u64 = i
+        while e < n && roh[(e) as usize] != 10 as u8 {
+            e = e + 1
+        }
+        if e > i {
+            if nr == k {
+                var v: u64 = i
+                var o: u64 = 0
+                while v < e && roh[(v) as usize] != 9 as u8 && o + 1 < max {
+                    __mmio_write8((aus + o) as *mut u8, roh[(v) as usize])
+                    o = o + 1
+                    v = v + 1
+                }
+                __mmio_write8((aus + o) as *mut u8, 0 as u8)
+                return o > 0
+            }
+            nr = nr + 1
+        }
+        i = e + 1
+    }
+    return false
+}
+
 fn zeige_reiter(r: u64) {
     var k: u64 = 0
     while k < nid {
@@ -1820,9 +2302,22 @@ fn u_start(args: u64) -> u64 {
     // bottom, so 50..750 by 3..569 is inside the work area with room
     // on both sides -- measured against `wm`'s own work rectangle and
     // not guessed.
-    let bw: u64 = 700
+    // RUNDE KONTO: 760 STATT 700, UND 20 STATT 50, WEIL EIN REITER
+    // DAZUGEKOMMEN IST. Die Zahl 700 stand hier, weil acht deutsche
+    // Reiter 661 Bildpunkte messen. "Konten" kommt dazu; passt die
+    // Leiste nicht mehr, skaliert `tab_breite` jeden Reiter herunter
+    // und schneidet Beschriftungen ab -- unsichtbar im Quelltext und
+    // sichtbar nur auf einem Bildschirmfoto (das war der Befund von
+    // Runde SOFTUI). 760 laesst 740 fuer die Leiste; der Schirm ist
+    // 800 breit, also liegt 20..780 noch darin.
+    //
+    // DIE ZAHL WIRD NACHGEMESSEN und nicht geglaubt:
+    // `tools/konto/run.sh` Abschnitt 9 liest die Breite der Reiterleiste
+    // aus dem laufenden Programm und wird rot, wenn sie ueber die
+    // Fensterbreite hinausragt.
+    let bw: u64 = 760
     let bh: u64 = 566
-    w = wlib.window(50, 3, bw, bh, msg.get((&k_t_titel[0 as usize]) as u64))
+    w = wlib.window(20, 3, bw, bh, msg.get((&k_t_titel[0 as usize]) as u64))
     if w >= wlib.MAXWN {
         say((&s_bad[0 as usize]) as u64)
         ulib.nl()
@@ -2101,6 +2596,58 @@ fn u_start(args: u64) -> u64 {
     wlib.size(140, 26)
     let b8: u64 = merke(wlib.button(msg.get((&k_b_uber[0 as usize]) as u64)),
         R_SPRACHE)
+    // ---- Konten (RUNDE KONTO)
+    //
+    // LINKS die Anmeldung, RECHTS die Konten, die es schon gibt. Kein
+    // Feld dieser Seite ist eine Bedingung fuer irgendetwas: wer die
+    // Seite nie oeffnet, hat ein vollstaendiges System.
+    wlib.box_use(cleft)
+    let _kt1: u64 = merke(wlib.label(msg.get((&k_k_titel[0 as usize]) as u64)),
+        R_KONTO)
+    let _kt2: u64 = merke(wlib.label(msg.get((&k_k_prov[0 as usize]) as u64)),
+        R_KONTO)
+    anbieter_lesen()
+    let ckanb: u64 = merke(wlib.choice((&k_anbn[0 as usize]) as u64, 0),
+        R_KONTO)
+    let _kt3: u64 = merke(wlib.label(msg.get((&k_k_ziel[0 as usize]) as u64)),
+        R_KONTO)
+    let ekziel: u64 = merke(wlib.entry((&e_kziel[0 as usize]) as u64, 90),
+        R_KONTO)
+    let _kt4: u64 = merke(wlib.label(msg.get((&k_k_name[0 as usize]) as u64)),
+        R_KONTO)
+    let ekname: u64 = merke(wlib.entry((&e_kname[0 as usize]) as u64, 60),
+        R_KONTO)
+    let _kt5: u64 = merke(wlib.label(msg.get((&k_k_ken[0 as usize]) as u64)),
+        R_KONTO)
+    let ekken: u64 = merke(wlib.entry((&e_kken[0 as usize]) as u64, 60),
+        R_KONTO)
+    let _kt6: u64 = merke(wlib.label(msg.get((&k_k_geh[0 as usize]) as u64)),
+        R_KONTO)
+    let ekgeh: u64 = merke(wlib.entry((&e_kgeh[0 as usize]) as u64, 60),
+        R_KONTO)
+    let _kt7: u64 = merke(wlib.label(msg.get((&k_k_ber[0 as usize]) as u64)),
+        R_KONTO)
+    let ekber: u64 = merke(wlib.entry((&e_kber[0 as usize]) as u64, 60),
+        R_KONTO)
+    let _kt8: u64 = merke(wlib.label(msg.get((&k_k_code[0 as usize]) as u64)),
+        R_KONTO)
+    let ekcode: u64 = merke(wlib.entry((&e_kcode[0 as usize]) as u64, 20),
+        R_KONTO)
+    let _kt9: u64 = merke(wlib.label(msg.get((&k_k_note[0 as usize]) as u64)),
+        R_KONTO)
+    wlib.size(160, 26)
+    let bkadd: u64 = merke(wlib.button(msg.get((&k_k_add[0 as usize]) as u64)),
+        R_KONTO)
+    wlib.box_use(cright)
+    let _kt10: u64 = merke(wlib.label(msg.get((&k_k_list[0 as usize]) as u64)),
+        R_KONTO)
+    konten_lesen()
+    wlib.size(0, 150)
+    let lkonten: u64 = merke(wlib.list((&k_liste[0 as usize]) as u64, 8), R_KONTO)
+    wlib.size(160, 26)
+    let bkout: u64 = merke(wlib.button(msg.get((&k_k_out[0 as usize]) as u64)),
+        R_KONTO)
+    let lkstat: u64 = merke(wlib.label((&l_kstat[0 as usize]) as u64), R_KONTO)
     // ---- immer sichtbar, an den unteren Rand geheftet
     wlib.box_use(cstat)
     let st: u64 = merke(wlib.label((&l_stat[0 as usize]) as u64), R_ANZ)
@@ -2226,6 +2773,13 @@ fn u_start(args: u64) -> u64 {
                     } else if id == cm {
                         items = msg.get((&k_c_mod[0 as usize]) as u64)
                         cnt = 3
+                    } else if id == ckanb {
+                        // RUNDE KONTO: die Anbieter kommen aus
+                        // `/bin/konto anbieter`, nicht aus dem Katalog --
+                        // ein Anbietername ist ein NAME und wird nicht
+                        // uebersetzt (docs/I18N.md, erster Abschnitt).
+                        items = (&k_anbn[0 as usize]) as u64
+                        cnt = k_anb_n
                     }
                     let mx: u64 = wlib.win_x(w) + 2 + wlib.rect_x(id)
                     let my: u64 = wlib.win_y(w) + 22 + wlib.rect_y(id)
@@ -2237,7 +2791,8 @@ fn u_start(args: u64) -> u64 {
                 // The library re-fires the chosen row at the widget that
                 // opened the menu. That is the answer to the choice.
                 if id == cs || id == cz || id == cn || id == ce
-                    || id == cv || id == cal || id == csh || id == cm {
+                    || id == cv || id == cal || id == csh || id == cm
+                    || id == ckanb {
                     wlib.set_value(id, wlib.fired_index())
                     if id == ce {
                         tb_edge = wlib.fired_index()
@@ -2696,6 +3251,148 @@ fn u_start(args: u64) -> u64 {
                     nv_lesen()
                     wlib.set_text(lv, (&nv_liste[0 as usize]) as u64)
                     wlib.set_text(st, (&l_stat[0 as usize]) as u64)
+                    wlib.dirty_all(w)
+                    melde_stand()
+                } else if id == bkadd {
+                    // ================================= RUNDE KONTO
+                    //
+                    // ANMELDEN. Der ganze Vorgang ist ein Aufruf von
+                    // `/bin/konto anmelden` -- die Oberflaeche kennt
+                    // weder einen Endpunkt noch ein Token noch einen
+                    // Anbieter. Was sie kennt, sind FELDER.
+                    // ACHT WOERTER, NICHT MEHR. `proc.MAX_ARGS` ist
+                    // 8 (kernel/proc.fi), und `--bereich <wert>` sind
+                    // ZWEI davon. Mit Zertifikatsname, Organisation und
+                    // zweitem Faktor waeren es vierzehn -- der Aufruf
+                    // wuerde abgewiesen, und zwar erst beim Nutzer, der
+                    // eine Organisation eintraegt. Also die angehaengte
+                    // Form: `--bereich=<wert>` ist EIN Wort. Genau
+                    // deshalb kann `/bin/konto` beide Schreibweisen.
+                    var a_an: [u8; 9] = "anmelden\0"
+                    var a_b0: [u8; 11] = "/bin/konto\0"
+                    var argv: [u64; 8] = [0 as u64; 8]
+                    var n: u64 = 0
+                    argv[(n) as usize] = (&a_b0[0 as usize]) as u64
+                    n = n + 1
+                    argv[(n) as usize] = (&a_an[0 as usize]) as u64
+                    n = n + 1
+                    // Der gewaehlte Anbieter ist die n-te Zeile der
+                    // Liste, die `/bin/konto anbieter` geliefert hat.
+                    var anbuf: [u8; 48] = [0 as u8; 48]
+                    var vor_anb: [u8; 12] = "--anbieter=\0"
+                    var o: u64 = 0
+                    while vor_anb[(o) as usize] != 0 as u8 {
+                        anbuf[(o) as usize] = vor_anb[(o) as usize]
+                        o = o + 1
+                    }
+                    var zeile: u64 = wlib.value(ckanb)
+                    var q: u64 = 0
+                    var z: u64 = 0
+                    while k_anbn[(q) as usize] != 0 as u8 && o + 1 < 48 {
+                        if k_anbn[(q) as usize] == 10 as u8 {
+                            z = z + 1
+                        } else if z == zeile {
+                            anbuf[(o) as usize] = k_anbn[(q) as usize]
+                            o = o + 1
+                        }
+                        q = q + 1
+                    }
+                    anbuf[(o) as usize] = 0 as u8
+                    argv[(n) as usize] = (&anbuf[0 as usize]) as u64
+                    n = n + 1
+                    // Die uebrigen Felder, jedes als EIN Wort
+                    // `--name=<wert>`. Ein leeres Feld faellt weg.
+                    // Die ADRESSE geht nicht auf die Befehlszeile --
+                    // sie wird gemerkt (/etc/konten.conf) und von
+                    // `/bin/konto` dort gelesen. Der Anbietername steht
+                    // in `anbuf` hinter `--anbieter=`; gemerkt wird der
+                    // Name selbst, also elf Zeichen weiter.
+                    let _cm: bool = konf_merken(
+                        (&anbuf[(11) as usize]) as u64,
+                        (&e_kziel[0 as usize]) as u64,
+                        (&e_kname[0 as usize]) as u64)
+                    var kebuf: [u8; 80] = [0 as u8; 80]
+                    var bebuf: [u8; 80] = [0 as u8; 80]
+                    var cobuf: [u8; 40] = [0 as u8; 40]
+                    var v_ke: [u8; 11] = "--kennung=\0"
+                    var v_be: [u8; 11] = "--bereich=\0"
+                    var v_co: [u8; 8] = "--code=\0"
+                    if opt_wort((&kebuf[0 as usize]) as u64, 80,
+                        (&v_ke[0 as usize]) as u64,
+                        (&e_kken[0 as usize]) as u64) {
+                        argv[(n) as usize] = (&kebuf[0 as usize]) as u64
+                        n = n + 1
+                    }
+                    if opt_wort((&bebuf[0 as usize]) as u64, 80,
+                        (&v_be[0 as usize]) as u64,
+                        (&e_kber[0 as usize]) as u64) {
+                        argv[(n) as usize] = (&bebuf[0 as usize]) as u64
+                        n = n + 1
+                    }
+                    if opt_wort((&cobuf[0 as usize]) as u64, 40,
+                        (&v_co[0 as usize]) as u64,
+                        (&e_kcode[0 as usize]) as u64) {
+                        argv[(n) as usize] = (&cobuf[0 as usize]) as u64
+                        n = n + 1
+                    }
+                    let rc: u64 = konto_lauf((&argv[0 as usize]) as u64, n,
+                        (&e_kgeh[0 as usize]) as u64)
+                    // DAS KENNWORT IST DURCH. Es wird sofort aus dem
+                    // Feld genommen -- ein Eingabefeld, in dem nach dem
+                    // Klick noch ein Passwort steht, ist ein Passwort
+                    // auf dem Bildschirm.
+                    var g: u64 = 0
+                    while g < 64 {
+                        e_kgeh[(g) as usize] = 0 as u8
+                        g = g + 1
+                    }
+                    wlib.set_text(ekgeh, (&e_kgeh[0 as usize]) as u64)
+                    var txt: [u8; 96] = [0 as u8; 96]
+                    let hat: bool = konto_feld((&kf_text[0 as usize]) as u64,
+                        (&txt[0 as usize]) as u64, 96)
+                    var at: u64 = 0
+                    if rc == 0 {
+                        at = text_an((&l_kstat[0 as usize]) as u64, 0,
+                            msg.get((&k_m_kok[0 as usize]) as u64))
+                    } else {
+                        at = text_an((&l_kstat[0 as usize]) as u64, 0,
+                            msg.get((&k_m_kbad[0 as usize]) as u64))
+                    }
+                    if hat {
+                        let _t2: u64 = text_an((&l_kstat[0 as usize]) as u64,
+                            at, (&txt[0 as usize]) as u64)
+                    }
+                    konten_lesen()
+                    wlib.set_text(lkonten, (&k_liste[0 as usize]) as u64)
+                    wlib.set_text(lkstat, (&l_kstat[0 as usize]) as u64)
+                    wlib.dirty_all(w)
+                    melde_stand()
+                } else if id == bkout {
+                    // ABMELDEN. Es wird nur abgemeldet, was AUSGEWAEHLT
+                    // ist -- ein Knopf, der ohne Auswahl alles abmeldet,
+                    // ist eine Falle.
+                    var kbuf: [u8; 40] = [0 as u8; 40]
+                    if k_n == 0 || !konto_kennung(wlib.value(lkonten),
+                        (&kbuf[0 as usize]) as u64, 40) {
+                        let _s1: u64 = text_an((&l_kstat[0 as usize]) as u64,
+                            0, msg.get((&k_m_ksel[0 as usize]) as u64))
+                    } else {
+                        var a_ab: [u8; 9] = "abmelden\0"
+                        var a_ke2: [u8; 10] = "--kennung\0"
+                        var a_b1: [u8; 11] = "/bin/konto\0"
+                        var argv2: [u64; 4] = [0 as u64; 4]
+                        argv2[(0) as usize] = (&a_b1[0 as usize]) as u64
+                        argv2[(1) as usize] = (&a_ab[0 as usize]) as u64
+                        argv2[(2) as usize] = (&a_ke2[0 as usize]) as u64
+                        argv2[(3) as usize] = (&kbuf[0 as usize]) as u64
+                        let _rc2: u64 = konto_lauf(
+                            (&argv2[0 as usize]) as u64, 4, 0)
+                        let _s2: u64 = text_an((&l_kstat[0 as usize]) as u64,
+                            0, msg.get((&k_m_kout[0 as usize]) as u64))
+                        konten_lesen()
+                        wlib.set_text(lkonten, (&k_liste[0 as usize]) as u64)
+                    }
+                    wlib.set_text(lkstat, (&l_kstat[0 as usize]) as u64)
                     wlib.dirty_all(w)
                     melde_stand()
                 } else if id == b8 {
