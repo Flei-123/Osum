@@ -98,6 +98,13 @@ printf 'de\n' > "$OUT/locale-de"
 # there was no image to boot. tools/look/shot.sh and
 # tools/netview/run.sh were already on 8192 for the same set of
 # programs, which is why they did not notice.
+#
+# ROUND USBIMG found the same wall independently and set 12288; this
+# line stays at 16384 -- the larger of the two -- and the finding of
+# that round is kept because it names a second cause: `/bin/explorer`
+# at 485,392 octets. Measured there on 28.08.2026, and the predecessor
+# `mergeline` (3e92c27) failed the same way, so it is older than either
+# round.
 ARGS=(build "$OUT/disk.img" 16384 /lib/
       "/lib/mono.ttf=assets/osum-mono.ttf" "/lib/sans.ttf=assets/osum-sans.ttf"
       /bin/)

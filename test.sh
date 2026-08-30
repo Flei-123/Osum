@@ -673,7 +673,10 @@ zusagen() {
     # `[A-Z][A-Z0-9]*` und nicht `[A-Z]+`: der Laeufer von Runde K11
     # meldet sich als "K11:", und mit dem alten Muster waeren seine
     # Zusagen still unter den Tisch gefallen.
-    n=$(grep -aoE '^[A-Z][A-Z0-9]*: [0-9]+ (passed|proofs)' "$log" | tail -1 | grep -oE '[0-9]+' | tail -1)
+    # RUNDE MERGE-2: `bestanden` dazu -- der Laeufer der Runde USBIMG
+    # meldet auf deutsch ("USBIMG: 46 bestanden, 0 gescheitert"), und mit
+    # dem alten Muster waeren seine 46 Zusagen still verschwunden.
+    n=$(grep -aoE '^[A-Z][A-Z0-9]*: [0-9]+ (passed|proofs|bestanden)' "$log" | tail -1 | grep -oE '[0-9]+' | tail -1)
     [ -n "${n:-}" ] && ZUSAGEN=$((ZUSAGEN + n))
 }
 
@@ -1122,6 +1125,19 @@ lauf "30. Auto-Update: Ed25519, Signaturpflicht, A/B-Boot (tools/update/run.sh, 
 lauf "30. der Fernzugang: SSH-2 gegen den echten OpenSSH-Klienten (tools/sshd/run.sh, Runde SSHD)" \
      tools/sshd/run.sh sshd '^SSHD: |^  OK    (tools/sshd/oracle|[0-9]+ Vergleiche|der Dienst lauscht|es gab noch keinen|sshd nennt|ssh-keyscan|ssh-keygen|und der Schluesseltyp|ssh mit (Schluessel|Passwort)|die Ausgabe|\.\.\.Zeile|und der Server hat es|der Klient sagt|strict kex|auch root|ssh gibt den|der SHA-256|die Shell|es war wirklich|die Sitzung am|die Zeilenenden|und die Rohr-Sitzung|die (erste|zweite) Sitzung|und beide haben|ein (FREMDER|falsches|unbekannter|Klient)|und der Befehl ist nicht|ein Name, den|.svc shutdown.|kein einziger|derselbe (Fingerabdruck|Schluessel)|und hat KEINEN|das Passwort geht|die Uebertragung|Zahl der Starts|angenommene Verbindungen|die groesste Zahl)|^        (SHA-256:|HMAC|mpint|Base64|Ableitung|chacha20|Gegenprobe|Auffuellung|Klartext|name-list|eine LEERE|[0-9]+ Oktette in|[0-9]+ ms fuer|langsamster|sshd running|/sbin/sshd:)'
 
+
+# ABSCHNITT 31 -- RUNDE USBIMG. Ein Abbild, das auf einem ECHTEN
+# Rechner startet: BIOS und UEFI aus derselben Datei, AHCI statt IDE,
+# e1000 statt virtio-net, dazu die Hardware-Diagnose und ein FOTO des
+# deutschen Schreibtisches, in dem die Umlaute wirklich als Umlaute
+# stehen.
+#
+# RUNDE MERGE-2: DIESER ABSCHNITT WAR AUF DEM ZWEIG NIE ANGEMELDET.
+# `tools/usbimg/run.sh` gibt es dort seit dem 28.08.2026, in test.sh
+# steht davon keine Zeile -- die 46 Zusagen sind in der Abnahme nie
+# aufgetaucht. Hier werden sie es.
+lauf "31. ein Abbild fuer echtes Blech: BIOS und UEFI, Diagnose, deutscher Schreibtisch (tools/usbimg/run.sh, Runde USBIMG)" \
+     tools/usbimg/run.sh usbimg '^USBIMG: |^ +(kern|programme|symbole|wurzel|geprueft|umlaute) +[0-9]'
 
 # Hier laufen die angemeldeten Abschnitte -- bei OSUM_JOBS=1 sind sie
 # oben schon gelaufen und das hier tut nichts.
