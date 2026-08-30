@@ -106,6 +106,16 @@
 #      Strom, die statistische Pruefung faellt durch), und drei Neustarts
 #      mit drei verschiedenen Saaten.
 #
+#  10c. Die asynchrone Auftragsschicht (tools/async/run.sh, Runde ASYNC).
+#       Ein Auftrag lebt LAENGER als der Systemaufruf, der ihn abgegeben
+#       hat: zwischen `req_begin` und `req_end` liegen jetzt ein
+#       Zustandswechsel, ein Arbeitsfaden und beliebig viele Zeitscheiben
+#       eines anderen Prozesses. Damit wird die Zusage von Runde HANDLE
+#       ueberhaupt erst pruefbar. Sechs Fehlerklassen aus Ring 3, drei
+#       Gegenproben (darunter der io_uring-Fehler, absichtlich wieder
+#       eingebaut), die libc-Anbindung von der Platte und die Messung
+#       gegen den synchronen Weg.
+#
 #  14. Das Netz (tools/net/run.sh, Runde K8): ein virtio-net-Treiber in
 #      Firn (`kernel/virtio.fi`), der TCP/IP-Stack aus Runde K3 als
 #      ABHAENGIGKEIT ueber vendor/firn/COMMIT (`vendor/net/PROVENANCE.md`),
@@ -897,6 +907,9 @@ lauf "10. Handles statt Umgebungsautoritaet: die Capability-Schicht aus OrientOS
 
 lauf "10b. die Lebensdauer vor der Asynchronitaet: Handles mit Verweiszaehler, Generation und Abbruch-Token (tools/handle/run.sh, Runde HANDLE)" \
      tools/handle/run.sh handle '^HANDLE: |^  ZAHL '
+
+lauf "10c. die asynchrone Auftragsschicht: ein Auftrag lebt laenger als sein Systemaufruf (tools/async/run.sh, Runde ASYNC)" \
+     tools/async/run.sh async '^ASYNC: |^        (TSC |  synchron|  asynchron|  nur die Abgabe|  Speicher je Auftrag)'
 
 lauf "11. der Multiboot-Kopf verlangt einen Bildschirm -- der UEFI-Pfad (tools/boot/run.sh)" \
      tools/boot/run.sh boot '^BOOT: '
