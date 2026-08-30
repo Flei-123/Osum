@@ -729,9 +729,14 @@ PYEOF
     [ "$(status_von 2)" = nein ] \
         && ok "DER SCHEIN GILT EINMAL: das zweite Foto wird abgelehnt" \
         || bad "das zweite Foto kam auch noch -- der Schein wird nicht verbraucht"
-elif grep -qa "Rahmenpuffer" "$G.1.bin" 2>/dev/null; then
-    ok "mit Schein: dieser Bau hat keinen Rahmenpuffer, und der Helfer sagt genau das"
-    note "KEIN BILD GEMESSEN: der Kern dieses Laufs hat keinen Rahmenpuffer."
+elif grep -qa "Bildschirmmasse\|Rahmenpuffer" "$G.1.bin" 2>/dev/null; then
+    # KEIN BILD. Ring 3 bekommt in diesem Zweig die Bildschirmmasse nicht:
+    # SYS_OSUM_SHOT (Runde FEEDBACK) fehlt, und WIG_SCREEN/DISPGET liegen
+    # hinter dem Fensterserver. Der Helfer sagt genau das, statt zu raten --
+    # und der Kodierer wird gleich darunter mit einem gerechneten Bild
+    # gemessen. `jarvisd -s` nennt die Zahlen, docs/BRIDGE.md die Folgen.
+    ok "mit Schein: dieser Kern gibt Ring 3 keine Bildschirmmasse, und der Helfer sagt genau das"
+    note "KEIN BILD VOM ECHTEN BILDSCHIRM GEMESSEN -- siehe docs/BRIDGE.md."
     [ "$(status_von 2)" = nein ] && ok "und das zweite Foto scheitert ebenfalls" \
                                  || bad "das zweite Foto haette auch scheitern muessen"
 else
