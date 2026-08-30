@@ -1080,17 +1080,6 @@ lauf "29. der erste Prozess, servertauglich: /bin/init, die Grenze fuer abstuerz
 # `lauf` schlaegt ab hier Alarm und bricht ab. Ein Abschnitt, der zu
 # spaet kommt, ist damit ein FEHLER und keine Stille.
 ABGEARBEITET=0
-
-
-# Hier laufen die angemeldeten Abschnitte -- bei OSUM_JOBS=1 sind sie
-# oben schon gelaufen und das hier tut nichts.
-abschnitte_abarbeiten
-ABGEARBEITET=1
-
-
-
-
-
 # ABSCHNITT 29 -- RUNDE FSROBUST. Der einzige Abschnitt dieser Abnahme,
 # der den Rechner MIT ABSICHT umbringt: QEMU wird mit SIGKILL
 # abgeschossen, mitten in einem Schreibvorgang, zu einem zufaelligen
@@ -1103,6 +1092,18 @@ ABGEARBEITET=1
 # einem Lauf mit 60.
 lauf "29. der Stromausfall: das Journal von OFS, /bin/fsck und die Grenzen (tools/fsrobust/run.sh, Runde FSROBUST)" \
      tools/fsrobust/run.sh fsrobust '^FSROBUST: |^  OK    (BESCHAEDIGTE FAELLE|ohne Journal treten|groesste Datei|EIN Block weiter|kaputte Abbilder|Laeufe, die danach|die Bestaetigung ist|fsck -r hat|nach der Reparatur|alle Eintraege|und der LETZTE Name|zweimal gebaut|eine Platte OHNE Journal|der Journalbereich liegt)'
+
+
+
+# Hier laufen die angemeldeten Abschnitte -- bei OSUM_JOBS=1 sind sie
+# oben schon gelaufen und das hier tut nichts.
+abschnitte_abarbeiten
+ABGEARBEITET=1
+
+
+
+
+
 
 echo
 echo "=================================================================="
