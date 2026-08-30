@@ -1139,6 +1139,25 @@ lauf "30. der Fernzugang: SSH-2 gegen den echten OpenSSH-Klienten (tools/sshd/ru
 lauf "31. ein Abbild fuer echtes Blech: BIOS und UEFI, Diagnose, deutscher Schreibtisch (tools/usbimg/run.sh, Runde USBIMG)" \
      tools/usbimg/run.sh usbimg '^USBIMG: |^ +(kern|programme|symbole|wurzel|geprueft|umlaute) +[0-9]'
 
+# ABSCHNITT 32 -- RUNDE BRIDGE. Der JARVIS-Helfer: ein Dienst, der sich
+# ueber TLS 1.3 beim Server MELDET (hinaus, kein offener Anschluss),
+# sich mit einem Ed25519-Schluessel ausweist und Auftraege ausfuehrt --
+# Befehl, Datei lesen, Datei schreiben, Verzeichnis auflisten,
+# Bildschirmfoto, Systeminfo.
+#
+# GEMESSEN WIRD VOR ALLEM, WAS ER NICHT DARF. Die Rechteliste unter
+# /etc/jarvis/rechte.conf wird VOR JEDEM Auftrag neu gelesen, jede
+# Auftragsart wird einzeln gegen sie geprueft, und der Kern haelt mit:
+# nach `open` wird der Deskriptor mit HND_DUP (Runde HANDLE) auf die
+# noetigen Rechte beschnitten, sodass ein Fehler im Pfadpruefer
+# trotzdem kein Schreibrecht gibt.
+#
+# GEGEN WEN: gegen tools/bridge/gegenstelle.py, einen TLS-Server in
+# Python -- NICHT gegen den echten JARVIS-Server. Das steht auch im
+# Kopf des Laeufers und in docs/BRIDGE.md.
+lauf "32. der JARVIS-Helfer und seine Rechteliste (tools/bridge/run.sh, Runde BRIDGE)" \
+     tools/bridge/run.sh bridge '^BRIDGE: |^  OK    (firnc|kein undefinierter|die Namenskollision|bridge/build|jarvisd auf der Platte|jsig auf der Platte|der GUI-lose|die Testzertifikate|die Rechteliste wird|GEGENPROBE|die Verbindung steht|die Ed25519|der Server hat|und Osum hat|der Helfer meldet|die Laenge|system|schreib|lies|liste|befehl|foto|genau eine|sieben|der Start steht|die Anmeldung steht|ein (erledigter|abgelehnter)|acht Ablehnungen|und NICHTS ist passiert|(expired|wrong|rogue):|leerer Speicher|ohne Bestaetigung|der Code wird|und die Ablehnung|sie steht auch|jarvisctl|beim zweiten Anlauf|und sie steht|die Gegenstelle hat|der Helfer stirbt|er zaehlt|und er versucht|er endet|ohne Netz|er sagt|und er wartet|keine einzige|Systemaufrufe je|pub |die Schluesseldatei|und sie laesst|nach chmod|python-cryptography|der beschnittene|und der KERN|lesen geht weiter|die Rechte des|ohne Schein|mit Schein|DER SCHEIN GILT|und das zweite|das Foto steht|drei Auftraege|Antworten, die|Quelltext)|^        (Quelltext:|/bin/jarvisd:|/bin/jsig:|Wartelast:|gewartet:|QEMU auf dem Wirt|Rechtebitfeld|Groesse des Bildschirmfotos|KEIN BILD GEMESSEN|vom QEMU-Start)|^BRIDGE: uebersprungen'
+
 # Hier laufen die angemeldeten Abschnitte -- bei OSUM_JOBS=1 sind sie
 # oben schon gelaufen und das hier tut nichts.
 abschnitte_abarbeiten
