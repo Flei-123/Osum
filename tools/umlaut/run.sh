@@ -376,9 +376,18 @@ fi
 echo
 echo "-- 9. die Einstellungen"
 if foto einstellungen "extra=einst nostart"; then
-    glyphen einstellungen "Einstellungen" "Akzentfarbe unverändert übernommen"
+    # MERGE-2 18: DIE ERWARTUNG IST NACHGEZOGEN, WEIL DIE OBERFLAECHE
+    # BERICHTIGT WURDE -- nicht umgekehrt. Beide Zeilen waren breiter als
+    # die 280 Bildpunkte ihrer Spalte; bis MERGE-2 16 malten sie ueber
+    # ihren Kasten hinaus, seit dem berichtigten `paint_label` wurden sie
+    # gekuerzt, und dieser Pruefer hat das gefunden. Die Kontrastzeile ist
+    # jetzt ZWEI Zeilen, der Akzentsatz ein Wort kuerzer. Beide tragen
+    # weiter beide Umlaute, also prueft dieser Abschnitt genau soviel wie
+    # vorher.
+    glyphen einstellungen "Einstellungen" "Akzent unverändert übernommen"
     glyphen einstellungen "Einstellungen" \
-        "Text/Akzent 5,16  Akzent/Fläche 4,93  -- WCAG erfüllt"
+        "Text/Akzent 5,16  Akzent/Fläche 4,93"
+    glyphen einstellungen "Einstellungen" "  -- WCAG erfüllt"
 fi
 
 echo
