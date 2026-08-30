@@ -1,0 +1,1323 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/audio.fi -- die Tonschicht.
+//
+// HERKUNFT: entstanden in Runde MEDIA1 (Zweig `media1`), auf
+// `mergeline2` gebracht und erweitert in Runde HDA. Was Runde HDA
+// geaendert hat, steht unten unter "WAS RUNDE HDA HINZUGEFUEGT HAT";
+// alles davor ist die Fassung von MEDIA1 samt ihren Begruendungen.
+//
+// RUNDE MEDIA1: die Tonschicht.
+//
+// Diese Datei ist die GRENZE. Unter ihr liegt ein Chip (heute AC97,
+// spaeter Intel HDA), ueber ihr liegt alles, was Ton macht -- /bin/play,
+// die Systemklaenge, spaeter die Bild-und-Ton-Wiedergabe. Der Sinn
+// dieser Runde ist nicht, dass etwas piept; der Sinn ist, dass der
+// HDA-Treiber der spaeteren Runde GENAU diese Schnittstelle bedient und
+// KEINE Zeile darueber sich aendert. Deshalb steht hier ausdruecklich,
+// was die Grenze ist -- und es steht ein zweites Mal, mechanisch
+// pruefbar, in docs/AUDIO.md:
+//
+//   SECHS DINGE braucht diese Schicht von einem Treiber, mehr nicht:
+//     1. hw_ready()          gibt es das Geraet, ist es aufgesetzt
+//     2. hw_ring()           Adresse und Geometrie des DMA-Ringpuffers
+//     3. hw_submit()         einen vollen Eintrag uebergeben, LVI nachziehen
+//     4. hw_start()/hw_stop()
+//     5. hw_position()       abgespielte RAHMEN, monoton -- die Leituhr
+//     6. hw_volume()         Lautstaerke in Prozent
+//
+//   ALLES ANDERE -- Format, Ringbuchfuehrung, Auffuellen mit Stille,
+//   Aussetzerzaehlung, Lautstaerkepolitik, Toene, Systemklaenge --
+//   steht HIER und nicht im Treiber. Ein zweiter Treiber bringt also
+//   keine zweite Kopie davon mit.
+//
+// WARUM DIE LEITUHR DER TON IST UND NICHT DER PROZESSOR. Der Quarz des
+// Tonchips laeuft nominell mit 48000 Hz und real mit +-100 ppm; ueber
+// eine Stunde sind das 360 ms. Wer das Bild an den Zeitgeber der
+// Maschine haengt und den Ton an den Chip, hat garantiert Versatz. Wer
+// das Bild an `samples_played` haengt, hat ihn per Konstruktion nicht.
+// Diese Runde baut nur die Uhr; das Bild kommt in der naechsten.
+//
+// DIE REGEL FUER SPAETER, aus der Recherche und hier festgehalten,
+// damit die Videorunde sie nicht neu erfinden muss: TON HAT VORRANG.
+// Ein leergelaufener Tonpuffer ist ein hoerbarer Knacks, ein
+// ausgelassenes Bild sieht niemand. Der Nachfuellpfad des Tons wartet
+// nie auf das Bild.
+
+// ==================================================================
+// WAS RUNDE HDA HINZUGEFUEGT HAT -- und was die Probe auf die Rechnung
+// von MEDIA1 ergeben hat
+// ==================================================================
+//
+// MEDIA1 hat oben behauptet: "der HDA-Treiber der spaeteren Runde
+// bedient GENAU diese Schnittstelle und KEINE Zeile darueber aendert
+// sich." Diese Runde hat den Treiber gebaut. Das Ergebnis, ehrlich:
+//
+//   DIE BEHAUPTUNG STIMMT ZU ZWOELF ZWOELFTELN UND EINE FUNKTION IST
+//   DAZUGEKOMMEN. `hw_drain_mark` -- "ab hier kommt nichts mehr".
+//
+//   Der Grund ist kein Versaeumnis von MEDIA1, sondern ein echter
+//   Unterschied der Hardware: bei AC97 HAELT der DMA am letzten
+//   gueltigen Eintrag an, bei HD-Audio LAEUFT er im Kreis weiter. Das
+//   Ende eines Stuecks ist bei AC97 ein Zustand der Hardware und bei
+//   HD-Audio eine Information, die nur der Aufrufer hat. Ohne diese
+//   dreizehnte Funktion zaehlte der Aussetzerzaehler nach jedem
+//   Stueck weiter, und "Aussetzer je Minute" waere eine Zahl ueber
+//   die Zahl der gespielten Dateien geworden.
+//
+// AUS DEMSELBEN UNTERSCHIED FOLGT DIE ZWEITE AENDERUNG: DER RING WIRD
+// VORAUS AUSGENULLT (`zero_ahead`). Wer bei HD-Audio nichts nachlegt,
+// hoert nicht Stille, sondern seine eigene letzte Achtelsekunde in
+// Endlosschleife -- der Regler liest weiter, was im Speicher steht.
+// Zusage (d) dieser Runde ("Unterlauf -> definierte Stille") ist genau
+// deshalb keine Selbstverstaendlichkeit, sondern diese eine Funktion.
+// Sie steht HIER und nicht im Treiber, weil sie den RINGINHALT
+// betrifft, und der gehoert der Schicht.
+//
+// DRITTENS: DIE ABTASTRATE WIRD AUSGEHANDELT. MEDIA1 kannte 48000 Hz.
+// `open_rate` fragt den Treiber nach einer Rate und nimmt, was er
+// hergibt; ein Strom mit einer anderen Rate wird im Mischer linear
+// umgerechnet (`mix.fi`). Mehr Umrechnung als das noetige Minimum ist
+// ausdruecklich nicht Teil dieser Runde.
+//
+// VIERTENS: MEHRERE PROGRAMME GLEICHZEITIG. MEDIA1 schrieb: "EIN
+// Nutzer zur Zeit -- kein Mischer in dieser Runde, und das ist keine
+// Auslassung, sondern eine Ansage." Diese Runde hebt die Ansage auf,
+// aber nicht so, wie MEDIA1 es befuerchtet hat (ein zweiter Tonserver
+// im Kernel): der Mischer in `kernel/mix.fi` ist eine Tafel aus vier
+// Stroemen und eine Additionsschleife mit Saettigung, er braucht
+// keinen Systembus und keine Politik. Die EINSTROM-Schnittstelle
+// (`open`, `write`, `close`) bleibt Zeile fuer Zeile, wie sie war --
+// sie ist jetzt der Sonderfall "genau ein Strom" und wird von
+// `kernel/kmain.fi` und den Systemklaengen weiter benutzt.
+//
+// FUENFTENS: `irq` -- ein Vektor liegt jetzt auf der Leitung
+// (`trap.VEC_AUDIO` = 42), und die Weiche hier sagt, welcher Treiber
+// ihn quittiert.
+
+profile kernel
+
+import kstate
+import serial
+import ac97
+import hda
+import mix
+import mem
+import time
+import arch.arch
+
+export {
+    init, ready, why, backend,
+    open, open_rate, close, is_open,
+    rate, set_rate, rates_ok, channels, bits, frame_octets,
+    irq, arm_irq, zero_ahead, drain_mark,
+    open_stream, write_stream, close_stream, mix_pump, hw_ready_pub,
+    ring_frames, latency_us, entry_us,
+    write, write_kernel, pad_and_submit, stop, reset,
+    frames_written, samples_played, remaining, underruns,
+    set_volume, volume, set_muted, muted,
+    tone, tone_into, tone_push, phase, set_phase,
+    beep, error_beep, sounds_on, set_sounds,
+    space_frames,
+    beeps, writes, octets_written, backsteps,
+    sine_q28, sine_neg,
+    B_NONE, B_AC97, B_HDA,
+    A_READY, A_RATE, A_CHANNELS, A_BITS, A_VOLUME, A_PLAYED, A_WRITTEN,
+    A_UNDERRUNS, A_LATENCY, A_ENTRYUS, A_RINGFRAMES, A_ENTRYFRAMES,
+    A_ENTRIES, A_RUNNING, A_OPEN, A_BACKEND, A_WHY, A_IRQS, A_SUBMITS,
+    A_SOUNDS, A_BEEPS, A_MUTED, A_STARTS, A_DCH, A_CODEC, A_REMAIN,
+    A_WRITES, A_MASTERREG, A_PCMREG, A_BACKSTEPS,
+    A_STREAMS, A_MIXED, A_CLIPS, A_MIXUNDER, A_DISAGREE, A_IRQARMED,
+    A_CMDPATH, A_DAC, A_PIN, A_PATHLEN, A_WIDGETS, A_CODECADDR,
+    A_COUNT
+}
+
+// Welcher Treiber unter der Grenze steht. Die Zahl geht bis Ring 3
+// hinauf, damit ein Programm sagen kann, WORAUF es gerade spielt --
+// und damit die spaetere HDA-Runde sich nicht als AC97 ausgeben muss.
+const B_NONE: u64 = 0
+const B_AC97: u64 = 1
+const B_HDA: u64 = 2 // Intel HD-Audio (Runde HDA)
+
+// Die Felder von `osum_audget`. Die Nummern sind Teil der Schnittstelle
+// nach Ring 3 und stehen genauso in `kernel/user/play.fi`.
+const A_READY: u64 = 0
+const A_RATE: u64 = 1
+const A_CHANNELS: u64 = 2
+const A_BITS: u64 = 3
+const A_VOLUME: u64 = 4
+const A_PLAYED: u64 = 5
+const A_WRITTEN: u64 = 6
+const A_UNDERRUNS: u64 = 7
+const A_LATENCY: u64 = 8 // Mikrosekunden, ganzer Ring
+const A_ENTRYUS: u64 = 9 // Mikrosekunden, ein Eintrag
+const A_RINGFRAMES: u64 = 10
+const A_ENTRYFRAMES: u64 = 11
+const A_ENTRIES: u64 = 12
+const A_RUNNING: u64 = 13
+const A_OPEN: u64 = 14
+const A_BACKEND: u64 = 15
+const A_WHY: u64 = 16
+const A_IRQS: u64 = 17
+const A_SUBMITS: u64 = 18
+const A_SOUNDS: u64 = 19
+const A_BEEPS: u64 = 20
+const A_MUTED: u64 = 21
+const A_STARTS: u64 = 22
+const A_DCH: u64 = 23
+const A_CODEC: u64 = 24
+const A_REMAIN: u64 = 25 // noch nicht abgespielte Rahmen
+const A_WRITES: u64 = 26
+const A_MASTERREG: u64 = 27
+const A_PCMREG: u64 = 28
+const A_BACKSTEPS: u64 = 29
+const A_BACKSTEPS_UNUSED: u64 = 29
+// ---- Runde HDA: die Zahlen, die es vorher nicht zu fragen gab
+const A_STREAMS: u64 = 30 // wie viele Stroeme der Mischer offen hat
+const A_MIXED: u64 = 31 // gemischte Rahmen, gesamt
+const A_CLIPS: u64 = 32 // dabei begrenzte Abtastwerte
+const A_MIXUNDER: u64 = 33 // Stroeme, die zu spaet kamen
+const A_DISAGREE: u64 = 34 // LPIB gegen DPIB (nur HDA)
+const A_IRQARMED: u64 = 35
+const A_CMDPATH: u64 = 36 // CORB/RIRB oder unmittelbar (nur HDA)
+const A_DAC: u64 = 37
+const A_PIN: u64 = 38
+const A_PATHLEN: u64 = 39
+const A_WIDGETS: u64 = 40
+const A_CODECADDR: u64 = 41
+const A_COUNT: u64 = 42
+
+// Die Skalare der Schicht. Sie liegen in derselben kdata-Seite wie die
+// des Treibers, aber in einem eigenen Block ab 0x400 -- der Treiber
+// nimmt 0x000..0x100, die Deskriptorliste 0x800..0x900.
+const L_OFF: u64 = 0x400
+const L_OPEN: u64 = 0x00
+const L_WPOS: u64 = 0x08 // vom Programm geschriebene Rahmen, gesamt
+const L_BACKEND: u64 = 0x10
+const L_SOUNDS: u64 = 0x18
+const L_BEEPS: u64 = 0x20
+const L_WRITES: u64 = 0x28
+const L_OCTETS: u64 = 0x30
+const L_STARTED: u64 = 0x38
+const L_RATE: u64 = 0x48 // die ausgehandelte Abtastrate des Geraets
+const L_ZERO: u64 = 0x50 // bis wohin der Ring VORAUS genullt ist
+const L_PHASE: u64 = 0x40 // Phase des laufenden Tons, damit zwei
+                          // Aufrufe hintereinander keinen Sprung haben
+
+// Wie voll der Ring hoechstens werden darf. Ein Eintrag bleibt frei:
+// der Regler holt sich seine Oktette in Schueben, und in genau den
+// Eintrag zu schreiben, den er gerade liest, waere ein Knacks, den man
+// nur an echter Hardware hoert und hier nie faende.
+const HEADROOM_ENTRIES: u64 = 1
+
+fn g(state: u64, off: u64) -> u64 {
+    return kstate.get(state + kstate.AUD_OFF, L_OFF + off)
+}
+
+fn s(state: u64, off: u64, v: u64) {
+    kstate.set(state + kstate.AUD_OFF, L_OFF + off, v)
+}
+
+// ============================================ die Treiberdinge
+//
+// JEDE Zeile, die unter die Grenze greift, steht in diesem Block. Er
+// war in MEDIA1 zwoelf Funktionen lang und ist es jetzt DREIZEHN --
+// `hw_drain_mark` ist dazugekommen, der Grund steht im Kopf. Wer einen
+// dritten Treiber anschliesst (USB-Audio waere der naechste), aendert
+// genau diese dreizehn und keine andere Zeile dieser Datei.
+//
+// DIE WEICHE IST EIN VERGLEICH UND KEINE TABELLE. Zwei Treiber, ein
+// `if` -- eine Sprungtabelle waere hier mehr Bauwerk als Nutzen und
+// haette den Nachteil, dass ein Treiber, den niemand baut (Serverbau),
+// trotzdem im Abbild stuende.
+
+fn hw_ready(state: u64) -> bool {
+    let b: u64 = g(state, L_BACKEND)
+    if b == B_HDA {
+        return hda.ready(state)
+    }
+    if b == B_AC97 {
+        return ac97.ready(state)
+    }
+    return false
+}
+
+fn hw_ring(state: u64) -> u64 {
+    let b: u64 = g(state, L_BACKEND)
+    if b == B_HDA {
+        return hda.ring_base(state)
+    }
+    if b == B_AC97 {
+        return ac97.ring_base(state)
+    }
+    return 0
+}
+
+fn hw_ring_frames(state: u64) -> u64 {
+    let b: u64 = g(state, L_BACKEND)
+    if b == B_HDA {
+        return hda.ring_frames(state)
+    }
+    if b == B_AC97 {
+        return ac97.ring_frames(state)
+    }
+    return 0
+}
+
+fn hw_entry_frames(state: u64) -> u64 {
+    let b: u64 = g(state, L_BACKEND)
+    if b == B_HDA {
+        return hda.entry_frames(state)
+    }
+    if b == B_AC97 {
+        return ac97.entry_frames(state)
+    }
+    return 1
+}
+
+fn hw_entries(state: u64) -> u64 {
+    let b: u64 = g(state, L_BACKEND)
+    if b == B_HDA {
+        return hda.entries(state)
+    }
+    if b == B_AC97 {
+        return ac97.entries(state)
+    }
+    return 0
+}
+
+fn hw_submit(state: u64) -> bool {
+    let b: u64 = g(state, L_BACKEND)
+    if b == B_HDA {
+        return hda.submit(state)
+    }
+    if b == B_AC97 {
+        return ac97.submit(state)
+    }
+    return false
+}
+
+fn hw_start(state: u64) -> bool {
+    let b: u64 = g(state, L_BACKEND)
+    if b == B_HDA {
+        return hda.start(state)
+    }
+    if b == B_AC97 {
+        return ac97.start(state)
+    }
+    return false
+}
+
+fn hw_stop(state: u64) {
+    let b: u64 = g(state, L_BACKEND)
+    if b == B_HDA {
+        hda.stop(state)
+    }
+    if b == B_AC97 {
+        ac97.stop(state)
+    }
+}
+
+fn hw_position(state: u64) -> u64 {
+    let b: u64 = g(state, L_BACKEND)
+    if b == B_HDA {
+        return hda.position_frames(state)
+    }
+    if b == B_AC97 {
+        return ac97.position_frames(state)
+    }
+    return 0
+}
+
+fn hw_volume(state: u64, pct: u64) {
+    let b: u64 = g(state, L_BACKEND)
+    if b == B_HDA {
+        hda.set_volume(state, pct)
+    }
+    if b == B_AC97 {
+        ac97.set_volume(state, pct)
+    }
+}
+
+fn hw_running(state: u64) -> bool {
+    let b: u64 = g(state, L_BACKEND)
+    if b == B_HDA {
+        return hda.running(state)
+    }
+    if b == B_AC97 {
+        return ac97.running(state)
+    }
+    return false
+}
+
+// Die dreizehnte. Bei AC97 tut sie nichts -- dort haelt der DMA von
+// selbst an, und "es kommt nichts mehr" ist dort ein Zustand der
+// Hardware statt einer Mitteilung.
+fn hw_drain_mark(state: u64) {
+    if g(state, L_BACKEND) == B_HDA {
+        hda.drain_mark(state)
+    }
+}
+
+fn hw_rate(state: u64) -> u64 {
+    let b: u64 = g(state, L_BACKEND)
+    if b == B_HDA {
+        return hda.rate(state)
+    }
+    if b == B_AC97 {
+        return ac97.rate(state)
+    }
+    return ac97.RATE
+}
+
+fn hw_set_rate(state: u64, hz: u64) -> bool {
+    let b: u64 = g(state, L_BACKEND)
+    if b == B_HDA {
+        return hda.set_rate(state, hz)
+    }
+    if b == B_AC97 {
+        return ac97.set_rate(state, hz)
+    }
+    return false
+}
+
+// ==================================================== oben die Schicht
+
+// HD-AUDIO ZUERST, AC97 DANACH -- und die Reihenfolge ist die ganze
+// Aussage dieser Runde. Auf einem Rechner, den man anfassen kann, gibt
+// es HD-Audio und kein AC97; im Emulator gibt es beides, je nachdem,
+// was auf der Befehlszeile steht. Wer AC97 zuerst probiert, faehrt auf
+// einer Maschine mit beidem den ausgestorbenen Chip -- und misst dann
+// zwei Monate lang den falschen.
+//
+// ZWEI GEGENPROBEN, und ohne sie waere die Reihenfolge eine
+// Behauptung: `nohda` uebergeht den einen, `noac97` den anderen. Erst
+// damit laesst sich auf DERSELBEN Maschine dieselbe Strecke einmal
+// ueber HD-Audio und einmal ueber AC97 messen und die Zahlen
+// nebeneinanderlegen.
+fn init(state: u64) -> bool {
+    s(state, L_BACKEND, B_NONE)
+    s(state, L_SOUNDS, 1) // Systemklaenge sind an, bis jemand sie abstellt
+    s(state, L_RATE, ac97.RATE)
+    mix.init(state)
+    if !kstate.mode_on(state, kstate.M_NOHDA) {
+        if hda.init(state) {
+            s(state, L_BACKEND, B_HDA)
+            s(state, L_RATE, hda.rate(state))
+            return true
+        }
+    }
+    if !kstate.mode_on(state, kstate.M_NOAC97) {
+        if ac97.init(state) {
+            s(state, L_BACKEND, B_AC97)
+            s(state, L_RATE, ac97.rate(state))
+            return true
+        }
+    }
+    return false
+}
+
+// Die Unterbrechung, weitergereicht an den Treiber, der gerade unten
+// steht. Beide melden auf demselben Vektor -- es laeuft immer nur
+// einer.
+fn irq(state: u64) {
+    let b: u64 = g(state, L_BACKEND)
+    if b == B_HDA {
+        hda.irq(state)
+    }
+    if b == B_AC97 {
+        ac97.irq(state)
+    }
+}
+
+// Den Vektor legen oder maskiert lassen. Gibt zurueck, ob er wirklich
+// scharf ist -- ein Geraet ohne brauchbare Leitung im I/O-APIC bleibt
+// abfragend, und das ist kein Fehler, sondern der Zustand, in dem
+// Runde MEDIA1 gemessen hat.
+fn arm_irq(state: u64, armed: bool) -> bool {
+    let b: u64 = g(state, L_BACKEND)
+    if b == B_HDA {
+        return hda.arm_irq(state, armed)
+    }
+    if b == B_AC97 {
+        return ac97.arm_irq(state, armed)
+    }
+    return false
+}
+
+fn backend(state: u64) -> u64 {
+    return g(state, L_BACKEND)
+}
+
+fn ready(state: u64) -> bool {
+    return hw_ready(state)
+}
+
+fn why(state: u64) -> u64 {
+    let b: u64 = g(state, L_BACKEND)
+    if b == B_HDA {
+        return hda.why(state)
+    }
+    if b == B_AC97 {
+        return ac97.why(state)
+    }
+    // KEIN TREIBER OBEN. Dann sagt die Zahl dessen, der zuletzt
+    // versucht wurde -- und wenn beide uebergangen wurden, ist es die
+    // von AC97, die dann W_OFF ist. Zusage (f) dieser Runde ("kein
+    // Geraet -> klare Meldung, System laeuft weiter") haengt daran,
+    // dass hier eine ZAHL steht und nicht null.
+    if hda.why(state) != hda.W_OK {
+        return hda.why(state)
+    }
+    return ac97.why(state)
+}
+
+// DIE ABTASTRATE, und sie ist seit dieser Runde nicht mehr fest.
+//
+// SIE STEHT IN DER SCHICHT UND NICHT IM TREIBER, obwohl der Treiber
+// sie einstellt: die Schicht muss sie auch dann kennen, wenn kein
+// Treiber da ist (sonst rechnet ein Programm mit null und teilt
+// dadurch), und sie muss ueber ein `close`/`open` hinweg stehen
+// bleiben.
+fn rate(state: u64) -> u64 {
+    let r: u64 = g(state, L_RATE)
+    if r == 0 {
+        return ac97.RATE
+    }
+    return r
+}
+
+// Welche Raten diese Schicht ueberhaupt aushandelt. ZWEI, und die
+// Begruendung ist eine Abwaegung und keine Bequemlichkeit:
+//
+//   48000  ist die Grundrate jedes Tonchips seit AC97 und die Rate der
+//          Systemklaenge.
+//   44100  ist die Rate praktisch jeder Musikdatei -- CD, MP3, die
+//          meisten WAV-Dateien.
+//
+// Alles andere (32000, 96000, 8000 fuer Sprache) KOENNTE HD-Audio,
+// AC97 nur mit VRA, und beide wuerden dafuer eine Umrechnung
+// brauchen, die diese Runde ausdruecklich nicht baut. Ein Strom mit
+// einer dritten Rate wird im Mischer linear auf die Geraeterate
+// gezogen; das ist die Untergrenze dessen, was geht, und es steht als
+// solche im Bericht.
+fn rates_ok(state: u64, hz: u64) -> bool {
+    return hz == ac97.RATE || hz == ac97.RATE_ALT
+}
+
+// Die Rate des GERAETS stellen. Geht nur, solange nichts laeuft -- ein
+// Format zu wechseln, waehrend der DMA liest, ist auf mehreren Reglern
+// ein haengender Strom, und der Preis dafuer waere ein Neustart.
+fn set_rate(state: u64, hz: u64) -> bool {
+    if !hw_ready(state) {
+        return false
+    }
+    if !rates_ok(state, hz) {
+        return false
+    }
+    if hz == g(state, L_RATE) {
+        return true
+    }
+    if hw_running(state) {
+        return false
+    }
+    if !hw_set_rate(state, hz) {
+        // Der Chip kann es nicht. Was WIRKLICH eingestellt ist, wird
+        // uebernommen -- eine Schicht, die eine Rate behauptet, die
+        // nirgends steht, spielt mit falscher Tonhoehe und meldet
+        // Erfolg.
+        s(state, L_RATE, hw_rate(state))
+        return false
+    }
+    s(state, L_RATE, hz)
+    return true
+}
+
+fn channels(state: u64) -> u64 {
+    return ac97.CHANNELS
+}
+
+fn bits(state: u64) -> u64 {
+    return ac97.BITS
+}
+
+fn frame_octets(state: u64) -> u64 {
+    return channels(state) * (bits(state) / 8)
+}
+
+fn ring_frames(state: u64) -> u64 {
+    return hw_ring_frames(state)
+}
+
+// Die Verzoegerung in Mikrosekunden -- gerechnet, nicht behauptet:
+// Rahmen im Ring mal eine Million durch die Abtastrate.
+fn latency_us(state: u64) -> u64 {
+    if rate(state) == 0 {
+        return 0
+    }
+    return hw_ring_frames(state) * 1000000 / rate(state)
+}
+
+fn entry_us(state: u64) -> u64 {
+    if rate(state) == 0 {
+        return 0
+    }
+    return hw_entry_frames(state) * 1000000 / rate(state)
+}
+
+fn is_open(state: u64) -> bool {
+    return g(state, L_OPEN) != 0
+}
+
+// Das Geraet oeffnen. EIN Nutzer zur Zeit -- kein Mischer in dieser
+// Runde, und das ist keine Auslassung, sondern eine Ansage: ein
+// Software-Mischer ohne Systembus (Block A3) waere ein zweiter
+// Tonserver im Kernel, und der gehoert nicht hierher.
+fn open(state: u64) -> bool {
+    return open_rate(state, rate(state))
+}
+
+// Oeffnen MIT Rate. Der Rueckgabewert sagt nur, ob das Geraet offen
+// ist; welche Rate es wirklich faehrt, sagt `rate` danach -- und ein
+// Programm, das 44100 wollte und 48000 bekommt, MUSS das ablesen
+// koennen, statt es zu glauben. Genau daran haengt Zusage (g) dieser
+// Runde: die Laenge einer MP3-Wiedergabe stimmt nur, wenn beide Seiten
+// dieselbe Rate meinen.
+fn open_rate(state: u64, hz: u64) -> bool {
+    if !hw_ready(state) {
+        return false
+    }
+    if g(state, L_OPEN) != 0 {
+        return false
+    }
+    if rates_ok(state, hz) && hz != g(state, L_RATE) {
+        hw_stop(state)
+        set_rate(state, hz)
+    }
+    reset(state)
+    s(state, L_OPEN, 1)
+    return true
+}
+
+fn close(state: u64) {
+    if g(state, L_OPEN) == 0 {
+        return
+    }
+    hw_stop(state)
+    s(state, L_OPEN, 0)
+}
+
+// Alles auf Anfang: der Treiber setzt seine Box zurueck, die Schicht
+// ihre Buchfuehrung. Wird beim Oeffnen gerufen, damit zwei Laeufe
+// hintereinander dieselben Zahlen liefern.
+fn reset(state: u64) {
+    hw_stop(state)
+    let b: u64 = g(state, L_BACKEND)
+    if b == B_HDA {
+        hda.reset_box_pub(state)
+    }
+    if b == B_AC97 {
+        ac97.reset_box_pub(state)
+    }
+    s(state, L_WPOS, 0)
+    s(state, L_ZERO, 0)
+    s(state, L_STARTED, 0)
+    s(state, L_WRITES, 0)
+    s(state, L_OCTETS, 0)
+    s(state, L_PHASE, 0)
+}
+
+fn frames_written(state: u64) -> u64 {
+    return g(state, L_WPOS)
+}
+
+fn samples_played(state: u64) -> u64 {
+    return hw_position(state)
+}
+
+fn remaining(state: u64) -> u64 {
+    let w: u64 = g(state, L_WPOS)
+    let p: u64 = hw_position(state)
+    if p >= w {
+        return 0
+    }
+    return w -% p
+}
+
+fn underruns(state: u64) -> u64 {
+    let b: u64 = g(state, L_BACKEND)
+    if b == B_HDA {
+        return hda.underruns(state)
+    }
+    if b == B_AC97 {
+        return ac97.underruns(state)
+    }
+    return 0
+}
+
+fn backsteps(state: u64) -> u64 {
+    let b: u64 = g(state, L_BACKEND)
+    if b == B_HDA {
+        return hda.backsteps(state)
+    }
+    if b == B_AC97 {
+        return ac97.backsteps(state)
+    }
+    return 0
+}
+
+fn writes(state: u64) -> u64 {
+    return g(state, L_WRITES)
+}
+
+fn octets_written(state: u64) -> u64 {
+    return g(state, L_OCTETS)
+}
+
+fn beeps(state: u64) -> u64 {
+    return g(state, L_BEEPS)
+}
+
+fn set_volume(state: u64, pct: u64) {
+    hw_volume(state, pct)
+}
+
+fn volume(state: u64) -> u64 {
+    let b: u64 = g(state, L_BACKEND)
+    if b == B_HDA {
+        return hda.volume(state)
+    }
+    return ac97.volume(state)
+}
+
+fn set_muted(state: u64, on: bool) {
+    let b: u64 = g(state, L_BACKEND)
+    if b == B_HDA {
+        hda.set_muted(state, on)
+        return
+    }
+    ac97.set_muted(state, on)
+}
+
+fn muted(state: u64) -> bool {
+    let b: u64 = g(state, L_BACKEND)
+    if b == B_HDA {
+        return hda.muted(state)
+    }
+    return ac97.muted(state)
+}
+
+fn sounds_on(state: u64) -> bool {
+    return g(state, L_SOUNDS) != 0
+}
+
+fn set_sounds(state: u64, on: bool) {
+    if on {
+        s(state, L_SOUNDS, 1)
+    } else {
+        s(state, L_SOUNDS, 0)
+    }
+}
+
+// Wie viele Rahmen jetzt hineinpassen. Der Kopfraum von einem Eintrag
+// steht oben begruendet.
+fn space_frames(state: u64) -> u64 {
+    let ring: u64 = hw_ring_frames(state)
+    if ring == 0 {
+        return 0
+    }
+    let cap: u64 = ring -% hw_entry_frames(state) * HEADROOM_ENTRIES
+    let w: u64 = g(state, L_WPOS)
+    let p: u64 = hw_position(state)
+    var used: u64 = 0
+    if w > p {
+        used = w -% p
+    }
+    if used >= cap {
+        return 0
+    }
+    return cap -% used
+}
+
+// Rahmen aus dem Kernelspeicher in den Ring. Gibt zurueck, wie viele
+// wirklich hineingingen -- der Aufrufer wiederholt, statt dass diese
+// Funktion wartet. Warten gehoert in den Systemaufruf, wo es einen
+// Prozess gibt, den man schlafen legen kann; hier gibt es nur den
+// Kernel, und ein Kernel, der in einer Schleife auf Ton wartet, hat
+// den Rechner angehalten.
+fn write_kernel(state: u64, src: u64, frames: u64) -> u64 {
+    if !hw_ready(state) {
+        return 0
+    }
+    var n: u64 = frames
+    let room: u64 = space_frames(state)
+    if n > room {
+        n = room
+    }
+    if n == 0 {
+        return 0
+    }
+    let ring: u64 = hw_ring(state)
+    let rf: u64 = hw_ring_frames(state)
+    let fo: u64 = frame_octets(state)
+    var done: u64 = 0
+    while done < n {
+        let w: u64 = g(state, L_WPOS) + done
+        let slot: u64 = w % rf
+        var chunk: u64 = rf -% slot
+        if chunk > n -% done {
+            chunk = n -% done
+        }
+        copy_octets(src + done * fo, ring + slot * fo, chunk * fo)
+        done = done + chunk
+    }
+    s(state, L_WPOS, g(state, L_WPOS) + n)
+    s(state, L_WRITES, g(state, L_WRITES) + 1)
+    s(state, L_OCTETS, g(state, L_OCTETS) + n * fo)
+    zero_ahead(state)
+    submit_full(state)
+    return n
+}
+
+// Derselbe Weg fuer Oktette, die schon im Kernel liegen (der
+// Systemaufruf kopiert sie vorher aus Ring 3 in den Blockpuffer).
+fn write(state: u64, src: u64, frames: u64) -> u64 {
+    return write_kernel(state, src, frames)
+}
+
+// ================================ DEN RING VORAUS AUSNULLEN
+//
+// DIE FUNKTION, DIE ES OHNE HD-AUDIO NICHT GEBEN MUESSTE, und die
+// Zusage (d) dieser Runde traegt.
+//
+//   Bei AC97 haelt der DMA am letzten gueltigen Eintrag an. Laeuft der
+//   Puffer leer, ist Ruhe -- der Chip spielt nichts, weil er nichts
+//   mehr hat.
+//   Bei HD-Audio laeuft der DMA IM KREIS. Laeuft der Puffer leer,
+//   spielt der Regler weiter, was im Speicher steht: die vorletzte
+//   Achtelsekunde, wieder und wieder. Das ist kein Aussetzer mehr,
+//   das ist ein Fehler, der wie Absicht klingt.
+//
+// ALSO WIRD VORAUSGENULLT: nach jedem Schreiben werden die naechsten
+// zwei Eintraege hinter dem Schreibzeiger auf Stille gesetzt. Zwei und
+// nicht einer, weil der Regler sich seine Oktette IM VORAUS holt (der
+// FIFO des Chips, bei QEMU der Mischerpuffer) -- er liest den Eintrag
+// hinter dem, den er gerade spielt. Zwei und nicht mehr, weil jedes
+// weitere Nullen Arbeit ist, die der naechste Schreibvorgang sofort
+// wieder ueberschreibt.
+//
+// KOSTEN: 1024 Oktette je Schreibvorgang, also bei 48 kHz und Schueben
+// von 1024 Rahmen rund 48 KiB je Sekunde -- unter einem Promille
+// dessen, was der Ton selbst bewegt.
+//
+// `L_ZERO` merkt sich, bis wohin schon genullt ist, damit dieselben
+// Oktette nicht bei jedem Aufruf noch einmal genullt werden.
+const ZERO_AHEAD_ENTRIES: u64 = 2
+
+fn zero_ahead(state: u64) {
+    if g(state, L_BACKEND) != B_HDA {
+        return
+    }
+    let ring: u64 = hw_ring(state)
+    if ring == 0 {
+        return
+    }
+    let rf: u64 = hw_ring_frames(state)
+    let ef: u64 = hw_entry_frames(state)
+    let fo: u64 = frame_octets(state)
+    let w: u64 = g(state, L_WPOS)
+    let bis: u64 = w + ef * ZERO_AHEAD_ENTRIES
+    var von: u64 = g(state, L_ZERO)
+    if von < w {
+        von = w
+    }
+    if von >= bis {
+        return
+    }
+    var i: u64 = von
+    while i < bis {
+        let slot: u64 = i % rf
+        kstate.set(ring, slot * fo, 0)
+        i = i + 1
+    }
+    s(state, L_ZERO, bis)
+}
+
+// "Ab hier kommt nichts mehr" -- an den Treiber weitergereicht.
+fn drain_mark(state: u64) {
+    hw_drain_mark(state)
+}
+
+fn hw_ready_pub(state: u64) -> bool {
+    return hw_ready(state)
+}
+
+fn copy_octets(src: u64, dst: u64, n: u64) {
+    var i: u64 = 0
+    // In Achtergruppen, solange es geht -- der Ring ist
+    // seitenausgerichtet und die Rahmen sind vier Oktette gross, also
+    // ist jede Grenze hier durch vier teilbar.
+    while i + 8 <= n {
+        kstate.set(dst, i, kstate.get(src, i))
+        i = i + 8
+    }
+    while i < n {
+        kstate.set8(dst + i, kstate.get8(src + i) as u8)
+        i = i + 1
+    }
+}
+
+// WIE VIEL IM RING STEHEN MUSS, BEVOR DER REGLER ANFAEHRT. Diese Zahl
+// war 8 (also 21 ms), und das war falsch. Der Fehler ist gemessen und
+// steht hier, weil er auf echter Hardware genauso auftritt:
+//
+//   DER REGLER HOLT SICH DIE OKTETTE IM VORAUS, nicht im Takt der
+//   Lautsprecher. AC97 hat einen FIFO, QEMU hat einen Mischerpuffer
+//   (Voreinstellung 46 ms). Sobald der Lauf beginnt, zieht er sich ALLES
+//   heran, was dasteht -- bis sein eigener Puffer voll ist. Steht
+//   weniger im Ring als in seinen Puffer passt, ist der Ring nach einem
+//   Wimpernschlag LEER, der DMA bleibt am letzten gueltigen Eintrag
+//   stehen (DCH), und der Regler schiebt Stille nach.
+//
+//   GEMESSEN, /bin/play auf einer 24000-Rahmen-Datei mit Vorlauf 8:
+//   24 Aussetzer bei 24 Schreibvorgaengen -- also bei JEDEM --, und in
+//   der Datei auf dem Wirt standen 111209 Rahmen statt 24000: 24000
+//   Rahmen Ton, verteilt auf 23 Luecken aus Stille. Mit Vorlauf 24 sind
+//   es 0 Aussetzer und 24000 Rahmen.
+//
+// 24 Eintraege sind 3072 Rahmen und 64 ms -- mehr als der Puffer des
+// Wirts (46 ms) und weniger als der Ring (85 ms), damit noch Platz zum
+// Nachlegen bleibt. Wer den Ring kleiner macht, muss diese Zahl
+// mitdenken: der Vorlauf MUSS ueber der Ausgabepufferung der Hardware
+// liegen, sonst hilft kein noch so schneller Schreiber.
+const PREFILL_ENTRIES: u64 = 24
+
+// Alle vollstaendigen Eintraege uebergeben, die seit dem letzten Mal
+// zusammengekommen sind, und den Lauf anwerfen, sobald genug im Ring
+// steht.
+fn submit_full(state: u64) {
+    let ef: u64 = hw_entry_frames(state)
+    if ef == 0 {
+        return
+    }
+    let want: u64 = g(state, L_WPOS) / ef
+    var have: u64 = submitted_entries(state)
+    while have < want {
+        if !hw_submit(state) {
+            have = want
+        } else {
+            have = have + 1
+        }
+    }
+    if g(state, L_STARTED) == 0 && submitted_entries(state) >= PREFILL_ENTRIES {
+        if hw_start(state) {
+            s(state, L_STARTED, 1)
+        }
+    }
+}
+
+fn submitted_entries(state: u64) -> u64 {
+    let ef: u64 = hw_entry_frames(state)
+    if ef == 0 {
+        return 0
+    }
+    let b: u64 = g(state, L_BACKEND)
+    if b == B_HDA {
+        return hda.submitted_frames(state) / ef
+    }
+    if b == B_AC97 {
+        return ac97.submitted_frames(state) / ef
+    }
+    return 0
+}
+
+// Das Ende einer Wiedergabe: den angefangenen Eintrag mit Stille
+// auffuellen, uebergeben, und falls noch gar nichts laeuft, jetzt
+// starten. Danach wartet der Aufrufer, bis `remaining` null ist.
+//
+// DIE STILLE AM ENDE ist der Preis dafuer, dass immer volle Eintraege
+// uebergeben werden (Begruendung in `ac97.submit`): hoechstens 511
+// Rahmen, also 10,65 ms. Die Abnahme weist sie aus, statt sie
+// wegzurechnen.
+fn pad_and_submit(state: u64) {
+    if !hw_ready(state) {
+        return
+    }
+    let ef: u64 = hw_entry_frames(state)
+    let w: u64 = g(state, L_WPOS)
+    let rest: u64 = w % ef
+    if rest != 0 {
+        let pad: u64 = ef -% rest
+        let ring: u64 = hw_ring(state)
+        let rf: u64 = hw_ring_frames(state)
+        let fo: u64 = frame_octets(state)
+        var i: u64 = 0
+        while i < pad {
+            let slot: u64 = (w + i) % rf
+            kstate.set(ring, slot * fo, 0)
+            i = i + 1
+        }
+        s(state, L_WPOS, w + pad)
+    }
+    zero_ahead(state)
+    submit_full(state)
+    if g(state, L_STARTED) == 0 && g(state, L_WPOS) > 0 {
+        if hw_start(state) {
+            s(state, L_STARTED, 1)
+        }
+    }
+    // ERST JETZT, nach dem letzten Uebergeben: ab hier kommt nichts
+    // mehr, und was der Regler ab jetzt an Stille spielt, ist kein
+    // Aussetzer. Vor `submit_full` gerufen waere die Marke schon
+    // gesetzt, waehrend noch Eintraege unterwegs sind -- dann zaehlte
+    // ein echter Aussetzer in den letzten Millisekunden nicht mehr
+    // mit.
+    hw_drain_mark(state)
+}
+
+fn stop(state: u64) {
+    hw_stop(state)
+    s(state, L_STARTED, 0)
+}
+
+// ========================================================== der Sinus
+//
+// Ein Kernel ohne Fliesskomma braucht einen Sinus, sobald er einen Ton
+// erzeugen soll. Hier steht er als Reihe in Festkomma Q28 -- kein
+// Tabellenfeld, weil eine Tabelle mit 256 Eintraegen im Quelltext
+// stuende und die Phasenkoernung mitbraechte.
+//
+//   Phase p laeuft ueber 32 Bit und meint 0..2*pi.
+//   Quadrant q = p >> 30, Rest r = p & 0x3FFFFFFF meint 0..pi/2.
+//   x = r * (pi/2) / 2^30, in Q28.
+//   sin x = x - x^3/6 + x^5/120 - x^7/5040 + x^9/362880
+//
+// Q28 UND NICHT Q30, und das ist der Grund, warum hier eine Zahl steht,
+// die willkuerlich aussieht: x^7 mal x^2 in Q30 waere 6,7e19 und damit
+// groesser als ein 64-Bit-Wort. In Q28 bleibt das groesste
+// Zwischenergebnis bei 4,2e18 und passt. Der Fehler der Reihe nach dem
+// x^9-Glied liegt bei 3,7e-6 -- das sind -108 dB und damit weit unter
+// dem, was 16 Bit ueberhaupt darstellen.
+const Q28: u64 = 268435456 // 1 << 28
+const PI_HALF_Q28: u64 = 421657428 // round(pi/2 * 2^28)
+
+fn sine_q28(phase: u64) -> u64 {
+    let q: u64 = (phase >> 30) & 3
+    var r: u64 = phase & 0x3FFFFFFF
+    if q == 1 || q == 3 {
+        r = 0x40000000 -% r
+    }
+    // x in Q28, 0..pi/2
+    let x: u64 = (r * PI_HALF_Q28) >> 30
+    let x2: u64 = (x * x) >> 28
+    let p3: u64 = (x * x2) >> 28
+    let p5: u64 = (p3 * x2) >> 28
+    let p7: u64 = (p5 * x2) >> 28
+    let p9: u64 = (p7 * x2) >> 28
+    var v: u64 = x + p5 / 120 + p9 / 362880
+    let sub: u64 = p3 / 6 + p7 / 5040
+    if sub >= v {
+        return 0
+    }
+    v = v -% sub
+    if v > Q28 {
+        return Q28
+    }
+    return v
+}
+
+// DAS VORZEICHEN, und die Zeile hat schon einmal eine ganze Messung
+// gekostet. Die Phase ist ein 64-Bit-Wort, das einen 32-Bit-Winkel
+// TRAEGT: `(phase >> 31) != 0` ist deshalb NICHT das Vorzeichenbit,
+// sondern "die Phase ist irgendwann einmal ueber 2^31 gewesen" -- und
+// das ist sie nach 55 Rahmen fuer immer. GEMESSEN: die Datei enthielt
+// einen gleichgerichteten Sinus, die FFT fand 880 Hz statt 440 Hz und
+// einen Gleichanteil von -15243. Das `& 1` ist die ganze Berichtigung.
+fn sine_neg(phase: u64) -> bool {
+    return ((phase >> 31) & 1) != 0
+}
+
+// Einen Ton in einen Puffer schreiben, als 16-Bit-Werte in zwei
+// Kanaelen. `amp` ist die Aussteuerung in 0..32767.
+//
+// Der Phasenschritt ist f * 2^32 / rate, aufgerundet auf die
+// naechstliegende ganze Zahl: bei 440 Hz und 48 kHz sind das 39370534
+// und damit 440,0000051 Hz. Genau darauf wird der FFT-Punkt in
+// tools/media1/run.sh gehalten.
+fn tone_into(state: u64, buf: u64, frames: u64, freq: u64, amp: u64,
+    phase0: u64) -> u64 {
+    let r: u64 = rate(state)
+    if r == 0 {
+        return phase0
+    }
+    let step: u64 = (freq * 4294967296 + r / 2) / r
+    var ph: u64 = phase0
+    var i: u64 = 0
+    while i < frames {
+        let m: u64 = (sine_q28(ph) * amp) >> 28
+        var v: u64 = m
+        if sine_neg(ph) {
+            v = 65536 -% m
+        }
+        if v > 65535 {
+            v = 65535
+        }
+        kstate.set8(buf + i * 4, (v & 0xFF) as u8)
+        kstate.set8(buf + i * 4 + 1, ((v >> 8) & 0xFF) as u8)
+        kstate.set8(buf + i * 4 + 2, (v & 0xFF) as u8)
+        kstate.set8(buf + i * 4 + 3, ((v >> 8) & 0xFF) as u8)
+        ph = (ph +% step) & 0xFFFFFFFF
+        i = i + 1
+    }
+    return ph
+}
+
+// Einen Ton abspielen. Der Puffer ist ein Eintrag gross und wird so oft
+// gefuellt, wie Platz im Ring ist; was nicht hineinpasst, wird beim
+// naechsten Aufruf nachgereicht. Kommt der Aufrufer nicht wieder,
+// bleibt der Rest ungesagt -- deshalb gibt die Funktion zurueck, wie
+// viele Rahmen sie wirklich untergebracht hat.
+fn phase(state: u64) -> u64 {
+    return g(state, L_PHASE)
+}
+
+fn set_phase(state: u64, v: u64) {
+    s(state, L_PHASE, v)
+}
+
+fn phase_step(state: u64, freq: u64) -> u64 {
+    let r: u64 = rate(state)
+    if r == 0 {
+        return 0
+    }
+    return (freq * 4294967296 + r / 2) / r
+}
+
+// SO VIEL TON, WIE GERADE HINEINPASST, und keinen Rahmen mehr. Die
+// Phase steht in der Schicht und nicht auf dem Stapel des Aufrufers:
+// zwei Aufrufe hintereinander sollen EINEN Ton ergeben, und ein
+// Phasensprung an der Nahtstelle waere im Spektrum als Breitband zu
+// sehen -- also genau das, was der FFT-Punkt der Abnahme nicht sehen
+// darf.
+//
+// Der Aufrufer bekommt zurueck, wie viele Rahmen wirklich hineingingen,
+// und entscheidet selbst, ob er wartet. Warten gehoert nicht hierher:
+// ein Kernel, der in einer Schleife auf Ton wartet, hat den Rechner
+// angehalten.
+const SCRATCH_FRAMES: u64 = 448 // 0x900..0x1000 der kdata-Seite
+
+fn tone_push(state: u64, freq: u64, amp: u64, max_frames: u64) -> u64 {
+    if !hw_ready(state) {
+        return 0
+    }
+    var n: u64 = space_frames(state)
+    if n > max_frames {
+        n = max_frames
+    }
+    if n > SCRATCH_FRAMES {
+        n = SCRATCH_FRAMES
+    }
+    if n == 0 {
+        return 0
+    }
+    let scratch: u64 = state + kstate.AUD_OFF + 0x900
+    let ph: u64 = tone_into(state, scratch, n, freq, amp, g(state, L_PHASE))
+    let got: u64 = write_kernel(state, scratch, n)
+    // Was nicht geschrieben wurde, muss beim naechsten Versuch neu
+    // erzeugt werden -- also geht die Phase genau um die geschriebenen
+    // Rahmen weiter und nicht um die erzeugten.
+    if got == n {
+        s(state, L_PHASE, ph)
+    } else {
+        s(state, L_PHASE, g(state, L_PHASE) +% got * phase_step(state, freq))
+    }
+    return got
+}
+
+// Einen ganzen Ton von n Millisekunden abspielen. Bequemlichkeit fuer
+// die Systemklaenge; wer messen will, nimmt `tone_push` und macht die
+// Schleife selbst, weil nur dort die Uhr abgelesen werden kann.
+//
+// DIE FRIST. Ein Ton von n Millisekunden darf hoechstens n
+// Millisekunden plus zwei Sekunden dauern; danach ist etwas kaputt,
+// und ein Kernel, der auf Ton wartet, hat den Rechner angehalten. Die
+// Frist steht als ZEIT und nicht als Schleifenzaehler, weil ein
+// Zaehler auf einer schnelleren Maschine etwas anderes bedeutet.
+fn tone(state: u64, freq: u64, ms: u64, amp: u64) -> u64 {
+    if !hw_ready(state) {
+        return 0
+    }
+    let want: u64 = rate(state) * ms / 1000
+    let deadline: u64 = time.mono_ns(state) +% (ms + 2000) * 1000000
+    var done: u64 = 0
+    var give_up: bool = false
+    while done < want && !give_up {
+        let got: u64 = tone_push(state, freq, amp, want -% done)
+        done = done + got
+        if got == 0 {
+            arch.pause()
+            if time.mono_ns(state) > deadline {
+                give_up = true
+            }
+        }
+    }
+    return done
+}
+
+// ==================================================== die Systemklaenge
+//
+// Klein, und trotzdem der Punkt, an dem sich zeigt, ob die Schicht
+// wirklich benutzbar ist: ein Ton bei einer Fehlermeldung darf keinen
+// Prozess brauchen, keine Datei, keinen Mischer und keine
+// Wiedergabeliste -- er muss aus dem Kernel heraus in zwei Zeilen
+// gehen, und danach muss die Wiedergabe, die vielleicht gerade laeuft,
+// unveraendert weiterlaufen.
+//
+// DESHALB SPIELT ER NICHT, WENN JEMAND ANDERES SPIELT. Ein zweiter
+// Strom braeuchte einen Mischer; ein Ton, der die Musik unterbricht,
+// waere schlimmer als keiner. Er wird dann gezaehlt und verworfen --
+// `beeps` steigt trotzdem, damit der Testlauf sieht, dass der Weg
+// gegangen wurde.
+const BEEP_HZ: u64 = 880
+const BEEP_MS: u64 = 90
+const BEEP_AMP: u64 = 6000 // etwa -15 dB; ein Warnton ist kein Konzert
+
+fn beep(state: u64, freq: u64, ms: u64) -> bool {
+    if !hw_ready(state) {
+        return false
+    }
+    if !sounds_on(state) {
+        return false
+    }
+    s(state, L_BEEPS, g(state, L_BEEPS) + 1)
+    if g(state, L_OPEN) != 0 {
+        return false // jemand spielt gerade; kein Dazwischenfunken
+    }
+    reset(state)
+    let n: u64 = tone(state, freq, ms, BEEP_AMP)
+    pad_and_submit(state)
+    return n > 0
+}
+
+fn error_beep(state: u64) -> bool {
+    return beep(state, BEEP_HZ, BEEP_MS)
+}
+
+// ==================================================== DER MISCHERWEG
+//
+// ZWEI WEGE IN DENSELBEN RING, und sie schliessen einander aus:
+//
+//   DER EINSTROMWEG (`open` / `write` / `close`) ist der aus Runde
+//   MEDIA1, Zeile fuer Zeile unveraendert. Er schreibt DIREKT in den
+//   DMA-Ring. Ihn benutzen der Kernel selbst (Systemklaenge, der
+//   Messton der Abnahme) und jedes Programm, das allein spielen will.
+//
+//   DER MISCHERWEG (`open_stream` / `write_stream` / `close_stream`)
+//   geht ueber `kernel/mix.fi`: das Programm schreibt in SEINEN
+//   Puffer, und `mix_pump` legt die Summe in den Ring.
+//
+// WARUM NICHT NUR DER MISCHERWEG, wo er doch mehr kann: weil er EINEN
+// PUFFER MEHR hat. Der Einstromweg kostet die Verzoegerung des Rings
+// (85 ms); der Mischerweg kostet Strompuffer PLUS Ring. Fuer einen
+// Systemklang, der als Antwort auf eine Taste kommt, ist das der
+// Unterschied zwischen "sofort" und "verzoegert" -- und die
+// Systemklaenge sind der eine Fall, in dem es niemanden gibt, mit dem
+// gemischt werden muesste, weil sie ausfallen, wenn jemand spielt
+// (`beep`, unveraendert aus MEDIA1).
+//
+// WER GERADE SCHREIBT, sagt `L_OPEN` (Einstromweg) beziehungsweise die
+// Zahl der offenen Stroeme in `mix.fi`. Beides zugleich ist verboten
+// und wird abgelehnt, nicht gemischt: zwei Schreiber auf einem
+// Ringpuffer ohne Sperre ist ein Fehler, der sich als Knacksen tarnt.
+
+fn open_stream(state: u64, pid: u64, hz: u64) -> u64 {
+    if !hw_ready(state) {
+        return mix.NONE
+    }
+    if g(state, L_OPEN) != 0 {
+        return mix.NONE // der Einstromweg hat das Geraet
+    }
+    // DER ERSTE STROM BESTIMMT DIE GERAETERATE. Jeder weitere wird
+    // umgerechnet. Das ist die billigste richtige Regel: der
+    // Musikspieler kommt zuerst und bekommt seine 44100 ohne
+    // Rechnung, der Systemklang danach wird gezogen -- und nicht
+    // umgekehrt.
+    if mix.streams(state) == 0 {
+        if rates_ok(state, hz) {
+            hw_stop(state)
+            s(state, L_STARTED, 0)
+            set_rate(state, hz)
+        }
+        reset(state)
+    }
+    let id: u64 = mix.open(state, pid, hz)
+    return id
+}
+
+fn write_stream(state: u64, id: u64, src: u64, frames: u64) -> u64 {
+    let n: u64 = mix.write(state, id, src, frames)
+    mix_pump(state)
+    return n
+}
+
+fn close_stream(state: u64, id: u64) {
+    mix.close(state, id)
+    if mix.streams(state) == 0 {
+        // DER LETZTE MACHT DAS LICHT AUS. Der DMA wird angehalten,
+        // sobald niemand mehr spielt -- bei HD-Audio laeuft er sonst
+        // fuer immer weiter und liest einen Ring, den keiner mehr
+        // fuellt. Zusage (e) dieser Runde ist genau diese Zeile.
+        hw_drain_mark(state)
+        hw_stop(state)
+        s(state, L_STARTED, 0)
+    }
+}
+
+// DIE PUMPE. Sie holt vom Mischer, was da ist, und legt es in den Ring
+// -- so viel, wie hineinpasst, und keinen Rahmen mehr.
+//
+// WER SIE RUFT, und das ist die eigentliche Entscheidung dieser Runde:
+//
+//   * JEDER `audwrite`-Systemaufruf. Das ist der Regelfall: wer
+//     schreibt, treibt.
+//   * JEDE Abfrage der Position (`audget A_PLAYED`). Ein Abspieler
+//     fragt sie in jeder Runde seiner Schleife; damit laeuft die
+//     Pumpe auch dann, wenn ein Strom gerade nichts zu schreiben hat,
+//     ein anderer aber schon.
+//   * DER ZEITGEBER (`kernel/kmain.clock`), zehnmal je Sekunde.
+//
+// WARUM NICHT AUS DER UNTERBRECHUNG DES TONREGLERS, wo es doch dort
+// hingehoerte: weil dort keine Sperre genommen werden darf und weil
+// der Mischer eine Schleife ueber bis zu 1024 Abtastwerte ist. Eine
+// Unterbrechung, die so lange rechnet, verschiebt den Zeitgeber -- und
+// der ist die Uhr, gegen die diese Runde ihre Latenz misst.
+fn mix_pump(state: u64) -> u64 {
+    if !hw_ready(state) {
+        return 0
+    }
+    if mix.streams(state) == 0 {
+        return 0
+    }
+    if g(state, L_OPEN) != 0 {
+        return 0
+    }
+    var gesamt: u64 = 0
+    var weiter: bool = true
+    while weiter {
+        let platz: u64 = space_frames(state)
+        if platz == 0 {
+            weiter = false
+        } else {
+            let n: u64 = mix.mix_into(state, platz, rate(state))
+            if n == 0 {
+                weiter = false
+            } else {
+                let got: u64 = write_kernel(state, mix.out_buf(state), n)
+                gesamt = gesamt + got
+                if got < n {
+                    weiter = false
+                }
+            }
+        }
+    }
+    return gesamt
+}
