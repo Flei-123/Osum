@@ -66,6 +66,20 @@ icons=yes
 nvicons=yes
 keep=no
 extra=""
+# ROUND SOFTUI: HARDWARE VIRTUALISATION, AND WHY IT IS A SWITCH AND NOT
+# A CONSTANT.  Round PAINT wrote "the measuring machine has no /dev/kvm"
+# and measured everything under TCG.  This machine HAS one, and the
+# difference is not cosmetic -- see docs/ROUNDSOFTUI.md, section 1.
+# It stays a switch because round KVMFIX found four test sections that
+# measure something DIFFERENT under KVM; a picture is not one of them,
+# and `accel=tcg` reproduces every older number.
+accel=kvm
+# ROUND SOFTUI: WHERE THE POINTER STANDS WHEN THE PICTURE IS TAKEN.
+# The hover state of the three caption buttons IS a measurement of this
+# round -- a close button that only turns red when the pointer is on it
+# cannot be photographed without a pointer. `hover=x,y` drives it there
+# and does NOT click; see tools/softui/hover.py.
+hover=""
 uitrace=no
 autohide=0
 accel=tcg
@@ -89,6 +103,7 @@ for a in "$@"; do
         autohide=*) autohide=${a#*=} ;;
         accel=*) accel=${a#*=} ;;
         append=*) append=${a#*=} ;;
+        hover=*) hover=${a#*=} ;;
         *) echo "unknown option: $a" >&2; exit 2 ;;
     esac
 done
@@ -241,10 +256,14 @@ echo "disk $(stat -c%s "$OUT/disk.img") octets"
 # ------------------------------------------------------------ 4. boot
 SOCK="$OUT/mon.sock"; rm -f "$SOCK" "$OUT/serial.txt"
 ACC=()
+# RUNDE MERGE-2: `-cpu host` von softui, die Pruefung samt Hinweis von
+# uns. Ohne `-cpu host` ist der Prozessor `qemu64`, der kein SMAP kann --
+# und genau mit SMAP hat softui den fehlenden Gegenpart zu `map_user`
+# gefunden. Ohne die Pruefung faellt ein Wirt ohne /dev/kvm still auf
+# eine Zeile herein, die er nicht ausfuehren kann.
 if [ "$accel" = kvm ]; then
-    if [ -w /dev/kvm ] && qemu-system-x86_64 -accel kvm -m 32 -display none \
-            -no-reboot -kernel /dev/null >/dev/null 2>&1 || [ -w /dev/kvm ]; then
-        ACC=(-accel kvm)
+    if [ -e /dev/kvm ] && [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
+        ACC=(-accel kvm -cpu host)
     else
         echo "accel=kvm asked for, /dev/kvm not usable -- falling back to tcg"
     fi
@@ -262,10 +281,16 @@ while [ $i -lt 2400 ]; do
     kill -0 "$PID" 2>/dev/null || break
     sleep 0.15; i=$((i+1))
 done
+if [ -n "$hover" ]; then
+    python3 tools/softui/hover.py "$hover" > "$OUT/hover.txt" 2>"$OUT/hover.err"
+    python3 tools/wm/monitor.py "$SOCK" "$OUT/hover.txt" > "$OUT/hover.log" 2>&1
+    sleep 2
+fi
 python3 tools/gfx/screenshot.py "$SOCK" "$OUT/desktop.ppm" 25 > "$OUT/shot.log" 2>&1
 wait "$PID"; RC=$?
 rm -f "$SOCK"
 echo "qemu exit $RC"
+echo "accel ${ACC[*]:-tcg}"
 
 if [ -s "$OUT/desktop.ppm" ]; then
     python3 - "$OUT" <<'PY'

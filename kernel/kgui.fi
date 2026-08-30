@@ -1533,6 +1533,19 @@ fn surface(state: u64) {
     }
     wm.damage_all(state)
     wm.compose(state)
+    // RUNDE SOFTUI: DIE ZWEITE MESSUNG, UND WARUM ES SIE GEBEN MUSS.
+    //
+    // `wm_bench` oben laeuft, BEVOR die Taskleiste in Ring 3 ihre
+    // Formmarken schickt -- zu dem Zeitpunkt ist der Radius 0 und die
+    // Schattenstaerke 0, und die Zahl beschreibt einen Bildaufbau, den
+    // auf einer eingerichteten Maschine niemand je sieht. Sie ist nicht
+    // falsch, sie beantwortet nur eine andere Frage.
+    //
+    // Diese hier laeuft NACH dem Halten: die Taskleiste hat geredet,
+    // `shape=modern` steht in den vier Formwoertern, und der gemessene
+    // Bildaufbau ist der mit runden Ecken und Schatten. Genau der
+    // Unterschied zwischen den beiden Zahlen ist der Preis der Form.
+    wm_bench2(state)
     serial.puts((&s_go[0]) as u64)
     serial.nl()
     say_wm_input(state)
@@ -1853,10 +1866,26 @@ fn desk_start(state: u64) -> u64 {
         // dieser Runde soll zeigen, was ein Thema wirklich anfasst:
         // eine Liste mit Kopfzeile und Auswahl, ein Fenster mit
         // Widgets und einen Dialog -- nicht eine leere Flaeche.
-        var p_ex: [u8; 14] = "/bin/explorer\0"
-        var a_ex: [u8; 9] = "explorer\0"
-        let _e: u64 = desk_spawn(state, (&p_ex[0]) as u64,
-            (&a_ex[0]) as u64, 9)
+        // RUNDE MERGE-2: NUR BEI `themegui`, NICHT BEI `themeshot`.
+        //
+        // Gemessen an tools/look/run.sh, Abschnitt A2a: der
+        // Dateimanager legt sich mit seinem Suchfenster und seiner
+        // Nachfrage UEBER die Themenprobe (z=4,5,6 gegen z=3), und auf
+        // dem Bild steht an der Stelle, an der `Übernehmen` gemeldet
+        // wird, nichts als die Flaeche des Managers. Der Pruefer meldet
+        // dann "526 von 526 Tintenpunkten falsch" und man sucht den
+        // Fehler im Zeichensatz.
+        //
+        // `themegui` ist die Messfassung und will die volle Buehne --
+        // dort bleibt der Manager. `themeshot` heisst "NUR DAS BILD"
+        // (kernel/user/themetest.fi), und dazu gehoert, dass nichts
+        // davorsteht.
+        if kstate.mode_on(state, kstate.M_THEMEGUI) {
+            var p_ex: [u8; 14] = "/bin/explorer\0"
+            var a_ex: [u8; 9] = "explorer\0"
+            let _e: u64 = desk_spawn(state, (&p_ex[0]) as u64,
+                (&a_ex[0]) as u64, 9)
+        }
         var p_tg: [u8; 15] = "/bin/themetest\0"
         var a_tg: [u8; 14] = "themetest\0gui\0"
         var a_ts: [u8; 15] = "themetest\0shot\0"
@@ -2465,6 +2494,154 @@ fn wm_bench(state: u64, f: u64, px: u64) {
         serial.puts((&s_pc[0]) as u64)
         serial.nl()
     }
+}
+
+// RUNDE MERGE-2: dieser Block kam auf `softui` in kernel/kmain.fi an;
+// seit `serverbuild` steht der ganze Fensterteil hier.
+// ===================================================== RUNDE SOFTUI
+//
+// DERSELBE BILDAUFBAU, ABER MIT DER FORM, DIE WIRKLICH AUF DEM SCHIRM
+// STEHT -- und dazu die zwei Zaehler, die sagen, WOFUER die Zeit
+// draufgegangen ist:
+//
+//   shadowpx   gemischte Bildpunkte, die zum Fensterschatten gehoeren
+//   aapx       Bildpunkte, die durch den Eckenabtaster mussten
+//
+// Der zweite ist der eigentliche Messwert dieser Runde. Der Schatten
+// aus Runde PAINT hat ihn in die Hoehe getrieben, weil er seine Ecken
+// BEI JEDEM BILD neu abgetastet hat; die vorberechnete Maske dieser
+// Runde macht ihn zu null, ohne dass ein Bildpunkt weniger gemischt
+// wird. Wer nur die Mikrosekunden misst, sieht den Grund nicht.
+const SOFTUI_RUNDEN: u64 = 20
+
+fn wm_bench2(state: u64) {
+    var s_c: [u8; 24] = "wmbench2: compose full=\0"
+    var s_us: [u8; 4] = " us\0"
+    var s_sm: [u8; 10] = "  small=\0\0"
+    var s_sp: [u8; 13] = "  shadowpx=\0\0"
+    var s_aa: [u8; 9] = "  aapx=\0\0"
+    var s_sb: [u8; 12] = "  shbuild=\0\0"
+    var s_r: [u8; 25] = "wmbench2: ringe   full=\0\0"
+    var s_m: [u8; 25] = "wmbench2: maske   full=\0\0"
+    var s_o: [u8; 25] = "wmbench2: ohne    full=\0\0"
+    let hz: u64 = apic.tsc_hz(state)
+    if hz == 0 {
+        return
+    }
+    var t: u64 = apic.tsc()
+    var i: u64 = 0
+    while i < SOFTUI_RUNDEN {
+        wm.damage_all(state)
+        wm.compose(state)
+        i = i + 1
+    }
+    let voll: u64 = us_of(state, apic.tsc() - t) / SOFTUI_RUNDEN
+    t = apic.tsc()
+    i = 0
+    while i < SOFTUI_RUNDEN {
+        wm.damage(state, 300, 300, 312, 318)
+        wm.compose(state)
+        i = i + 1
+    }
+    let klein: u64 = us_of(state, apic.tsc() - t) / SOFTUI_RUNDEN
+    // EIN EINZIGES Bild fuer die zwei Zaehler. Ueber zwanzig Laeufe
+    // gemittelt waere die Zahl durch zwanzig teilbar und nicht mehr
+    // nachrechenbar; hier steht, was EIN voller Bildaufbau kostet.
+    wm.paint_reset(state)
+    wm.damage_all(state)
+    wm.compose(state)
+    serial.puts((&s_c[0]) as u64)
+    serial.dec(voll)
+    serial.puts((&s_us[0]) as u64)
+    serial.puts((&s_sm[0]) as u64)
+    serial.dec(klein)
+    serial.puts((&s_us[0]) as u64)
+    serial.puts((&s_sp[0]) as u64)
+    serial.dec(wm.shadow_px(state))
+    serial.puts((&s_aa[0]) as u64)
+    serial.dec(wm.aa_px(state))
+    serial.puts((&s_sb[0]) as u64)
+    serial.dec(wm.shadow_builds(state))
+    serial.nl()
+    // ============================== DAS VORHER UND DAS NACHHER
+    //
+    // BEIDE FASSUNGEN IN EINEM LAUF, auf derselben Maschine, mit
+    // demselben Zeitgeber, an demselben Bild. Zwei QEMU-Starts waeren
+    // zwei Maschinen; auf einem Wirt, der noch fuenf andere Abnahmen
+    // traegt, sind zwei Maschinen zwei verschiedene Zahlen.
+    //
+    // Zuerst die Maske, dann die Ringe, dann zurueck auf die Maske --
+    // die letzte Zeile stellt den Zustand wieder her, mit dem das Bild
+    // aufgenommen wird.
+    wm.paint_reset(state)
+    t = apic.tsc()
+    i = 0
+    while i < SOFTUI_RUNDEN {
+        wm.damage_all(state)
+        wm.compose(state)
+        i = i + 1
+    }
+    let m_us: u64 = us_of(state, apic.tsc() - t) / SOFTUI_RUNDEN
+    let m_sp: u64 = wm.shadow_px(state) / SOFTUI_RUNDEN
+    let m_aa: u64 = wm.aa_px(state) / SOFTUI_RUNDEN
+    wm.set_shadow_old(state, true)
+    wm.paint_reset(state)
+    t = apic.tsc()
+    i = 0
+    while i < SOFTUI_RUNDEN {
+        wm.damage_all(state)
+        wm.compose(state)
+        i = i + 1
+    }
+    let r_us: u64 = us_of(state, apic.tsc() - t) / SOFTUI_RUNDEN
+    let r_sp: u64 = wm.shadow_px(state) / SOFTUI_RUNDEN
+    let r_aa: u64 = wm.aa_px(state) / SOFTUI_RUNDEN
+    wm.set_shadow_old(state, false)
+    // ============================== UND DER LAUF, DER KEINEN HAT
+    //
+    // Die Regel dieses Baums (tools/paint/shadow.py): "Es wird IMMER
+    // gegen den Lauf gemessen, der es nicht hat." Ohne diese dritte
+    // Zahl sind die ersten beiden zwei Bildaufbauten, die zu neunzig
+    // Hundertsteln aus dem Umkopieren von Fensterpuffern bestehen, und
+    // ihr Unterschied verschwindet im Rauschen. Mit ihr steht da, was
+    // der Schatten WIRKLICH kostet.
+    let s1: u64 = wm.form(state, wm.FM_SHADOW)
+    let s2: u64 = wm.form(state, wm.FM_SHADOW2)
+    let _f1: bool = wm.set_form(state, wm.FM_SHADOW, 0)
+    let _f2: bool = wm.set_form(state, wm.FM_SHADOW2, 0)
+    t = apic.tsc()
+    i = 0
+    while i < SOFTUI_RUNDEN {
+        wm.damage_all(state)
+        wm.compose(state)
+        i = i + 1
+    }
+    let o_us: u64 = us_of(state, apic.tsc() - t) / SOFTUI_RUNDEN
+    let _f3: bool = wm.set_form(state, wm.FM_SHADOW, s1)
+    let _f4: bool = wm.set_form(state, wm.FM_SHADOW2, s2)
+    serial.puts((&s_o[0]) as u64)
+    serial.dec(o_us)
+    serial.puts((&s_us[0]) as u64)
+    serial.nl()
+    serial.puts((&s_m[0]) as u64)
+    serial.dec(m_us)
+    serial.puts((&s_us[0]) as u64)
+    serial.puts((&s_sp[0]) as u64)
+    serial.dec(m_sp)
+    serial.puts((&s_aa[0]) as u64)
+    serial.dec(m_aa)
+    serial.nl()
+    serial.puts((&s_r[0]) as u64)
+    serial.dec(r_us)
+    serial.puts((&s_us[0]) as u64)
+    serial.puts((&s_sp[0]) as u64)
+    serial.dec(r_sp)
+    serial.puts((&s_aa[0]) as u64)
+    serial.dec(r_aa)
+    serial.nl()
+    wm.paint_reset(state)
+    wm.damage_all(state)
+    wm.compose(state)
 }
 
 fn tile_conf(state: u64) -> u64 {
