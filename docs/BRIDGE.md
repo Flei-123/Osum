@@ -275,6 +275,7 @@ ein Abschnitt in `test.sh`. Nachgemessen auf diesem Zweig:
 | `tools/caps/run.sh` | 67 / 0 |
 | `tools/handle/run.sh` | 80 / 0 |
 | `tools/posix/run.sh` | 134 / 0 |
+| `tools/userland/run.sh` | 91 / 0 |
 | `tools/freestanding/run.sh` | 41 / 0 |
 | Bau Stufe 0 (GUI) | grün |
 | Bau Stufe 0 `--gui off` | grün |
