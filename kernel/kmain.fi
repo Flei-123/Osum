@@ -3951,6 +3951,10 @@ fn audio_two(state: u64) {
     if a >= mix.MAX_STREAMS || b >= mix.MAX_STREAMS {
         return
     }
+    let t_start: u64 = time.mono_ns(state)
+    var t_pump: u64 = 0
+    var t_gen: u64 = 0
+    var runden: u64 = 0
     let want: u64 = hz // genau eine Sekunde
     var wa: u64 = 0
     var wb: u64 = 0
@@ -3971,7 +3975,7 @@ fn audio_two(state: u64) {
             }
             if n > 0 {
                 pa = audio.tone_into(state, sc, n, 440, 12000, pa)
-                let got: u64 = audio.write_stream(state, a, sc, n)
+                let got: u64 = mix.write(state, a, sc, n)
                 wa = wa + got
                 tat = tat + got
             }
@@ -3986,12 +3990,15 @@ fn audio_two(state: u64) {
             }
             if n2 > 0 {
                 pb = audio.tone_into(state, sc, n2, 660, 12000, pb)
-                let got2: u64 = audio.write_stream(state, b, sc, n2)
+                let got2: u64 = mix.write(state, b, sc, n2)
                 wb = wb + got2
                 tat = tat + got2
             }
         }
+        let tp0: u64 = time.mono_ns(state)
         audio.mix_pump(state)
+        t_pump = t_pump +% (time.mono_ns(state) -% tp0)
+        runden = runden + 1
         if wa >= want && wb >= want {
             lauf = false
         }
@@ -4002,14 +4009,26 @@ fn audio_two(state: u64) {
             }
         }
     }
+    let t_fill: u64 = time.mono_ns(state) -% t_start
     mix.mark_end(state, a)
     mix.mark_end(state, b)
-    // Leerspielen: pumpen, bis der Mischer nichts mehr hergibt.
+    // AB HIER KOMMT NICHTS MEHR -- und das muss der Treiber wissen,
+    // BEVOR der Ring leerlaeuft. Sonst zaehlt jede Sekunde Nachlauf
+    // als Aussetzer, und "Aussetzer je Minute" waere eine Zahl ueber
+    // die Zahl der abgespielten Stuecke.
+    audio.drain_mark(state)
+    // Leerspielen: pumpen, bis der Mischer nichts mehr hergibt, UND
+    // dabei den Ring hinter dem Schreibzeiger ausnullen. Ohne das
+    // zweite spielt der Regler den Ring noch einmal ab -- gemessen:
+    // hinter der einen Sekunde Ton standen 33 weitere Ringlaengen
+    // desselben Tons in der Datei, jede mit einem 132 Rahmen langen
+    // Loch an der Naht.
     let bis: u64 = time.mono_ns(state) +% 3000000000
     var leer: bool = false
     while !leer {
         audio.mix_pump(state)
         audio.samples_played(state)
+        audio.zero_rest(state)
         if mix.streams(state) == 0 && audio.remaining(state) == 0 {
             leer = true
         }
@@ -4023,6 +4042,13 @@ fn audio_two(state: u64) {
     audio.close_stream(state, a)
     audio.close_stream(state, b)
     audio.stop(state)
+    var n_t1: [u8; 10] = "mix_tfill\0"
+    var n_t2: [u8; 10] = "mix_tpump\0"
+    var n_t3: [u8; 11] = "mix_runden\0"
+    aud_num((&n_t1[0]) as u64, t_fill / 1000)
+    aud_num((&n_t2[0]) as u64, t_pump / 1000)
+    aud_num((&n_t3[0]) as u64, runden)
+    t_gen = t_gen
     var n_wa: [u8; 8] = "mix_wa\0\0"
     var n_wb: [u8; 8] = "mix_wb\0\0"
     var n_mx: [u8; 10] = "mix_mixed\0"
@@ -4070,7 +4096,7 @@ fn audio_clip(state: u64) {
             if n > want -% wa { n = want -% wa }
             if n > 0 {
                 pa = audio.tone_into(state, sc, n, 440, 32000, pa)
-                wa = wa + audio.write_stream(state, a, sc, n)
+                wa = wa + mix.write(state, a, sc, n)
                 tat = tat + 1
             }
         }
@@ -4080,7 +4106,7 @@ fn audio_clip(state: u64) {
             if n2 > want -% wb { n2 = want -% wb }
             if n2 > 0 {
                 pb = audio.tone_into(state, sc, n2, 440, 32000, pb)
-                wb = wb + audio.write_stream(state, b, sc, n2)
+                wb = wb + mix.write(state, b, sc, n2)
                 tat = tat + 1
             }
         }
@@ -4093,12 +4119,14 @@ fn audio_clip(state: u64) {
     }
     mix.mark_end(state, a)
     mix.mark_end(state, b)
+    audio.drain_mark(state)
     let bis: u64 = time.mono_ns(state) +% 3000000000
     var leer: bool = false
     while !leer {
         audio.mix_pump(state)
         audio.samples_played(state)
-        if mix.streams(state) == 0 { leer = true }
+        audio.zero_rest(state)
+        if mix.streams(state) == 0 && audio.remaining(state) == 0 { leer = true }
         if time.mono_ns(state) > bis { leer = true }
         arch.pause()
     }
@@ -4107,6 +4135,14 @@ fn audio_clip(state: u64) {
     audio.close_stream(state, a)
     audio.close_stream(state, b)
     audio.stop(state)
+    var n_ia: [u8; 9] = "clip_ida\0"
+    var n_ib: [u8; 9] = "clip_idb\0"
+    var n_wa2: [u8; 8] = "clip_wa\0"
+    var n_wb2: [u8; 8] = "clip_wb\0"
+    aud_num((&n_ia[0]) as u64, a)
+    aud_num((&n_ib[0]) as u64, b)
+    aud_num((&n_wa2[0]) as u64, wa)
+    aud_num((&n_wb2[0]) as u64, wb)
     var n_cl: [u8; 11] = "clip_clips\0"
     var n_pk: [u8; 10] = "clip_peak\0"
     var n_mx: [u8; 11] = "clip_mixed\0"

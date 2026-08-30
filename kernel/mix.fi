@@ -81,6 +81,7 @@ profile kernel
 import kstate
 import serial
 import mem
+import time
 import arch.arch
 
 export {
@@ -132,6 +133,8 @@ const BUF_PAGES: u64 = 4
 // Schleife, die den Kernel laenger am Stueck beschaeftigt als eine
 // Zeitscheibe dauert.
 const CHUNK_FRAMES: u64 = 256
+// Wie lange ein leerer Strom die anderen aufhalten darf.
+const BLOCK_NS: u64 = 5000000
 const FRAME_OCTETS: u64 = 4
 
 // -------------------------------------------------- der Platz in kdata
@@ -163,6 +166,7 @@ const M_OVER: u64 = 0x48
 const M_FRAC: u64 = 0x50 // Bruchteil der Umrechnung, Q32
 const M_WRITES: u64 = 0x58
 const M_ENDED: u64 = 0x60
+const M_TFED: u64 = 0x68 // wann dieser Strom zuletzt gefuettert wurde
 
 const G_OPEN: u64 = 0x00
 const G_MIXED: u64 = 0x08
@@ -282,6 +286,7 @@ fn init(state: u64) {
         ss(state, i, M_FRAC, 0)
         ss(state, i, M_WRITES, 0)
         ss(state, i, M_ENDED, 0)
+        ss(state, i, M_TFED, 0)
         i = i + 1
     }
     gs(state, G_OPEN, 0)
@@ -352,6 +357,7 @@ fn open(state: u64, pid: u64, hz: u64) -> u64 {
     ss(state, frei, M_RATE, hz)
     ss(state, frei, M_FRAC, 0)
     ss(state, frei, M_ENDED, 0)
+    ss(state, frei, M_TFED, time.mono_ns(state))
     gs(state, G_OPEN, gg(state, G_OPEN) + 1)
     return frei
 }
@@ -537,6 +543,7 @@ fn write(state: u64, i: u64, src: u64, frames: u64) -> u64 {
         k = k + 1
     }
     ss(state, i, M_WPOS, w + n)
+    ss(state, i, M_TFED, time.mono_ns(state))
     ss(state, i, M_WRITES, sc(state, i, M_WRITES) + 1)
     return n
 }
@@ -669,7 +676,34 @@ fn contribute(state: u64, j: u64, n: u64, dst_hz: u64) {
     ss(state, j, M_FRAC, pos & 0xFFFFFFFF)
 }
 
-fn mix_into(state: u64, max_frames: u64, dst_hz: u64) -> u64 {
+// WIE VIEL GEMISCHT WIRD, WENN DIE STROEME UNGLEICH SCHNELL SIND.
+//
+// DIE ERSTE FASSUNG NAHM IMMER DAS MAXIMUM -- "so viel, wie der
+// schnellste hergibt, die anderen mit Stille". Die Begruendung dafuer
+// klang gut (ein Programm, das gerade nichts schreibt, darf die
+// anderen nicht anhalten) und war in der Messung ein Reinfall:
+//
+//   GEMESSEN mit zwei Stroemen zu je einer Sekunde: der Mischer wurde
+//   nach JEDEM Schreibvorgang gerufen, also abwechselnd, wenn gerade
+//   EIN Strom Daten hatte. Der andere bekam Stille. Ergebnis: 96000
+//   geschriebene Rahmen ergaben 3,9 Sekunden Datei mit
+//   34 Loechern -- beide Toene da, beide zerhackt.
+//
+// ALSO ZWEI POLITIKEN, und die Umschaltung ist eine Zahl:
+//
+//   IM REGELFALL DAS MINIMUM. Es wird nur gemischt, was ALLE offenen
+//   Stroeme haben. Wer nichts hat, haelt die anderen kurz auf -- und
+//   das ist richtig, solange im Geraetering noch Vorrat liegt.
+//
+//   IN DER NOTLAGE DAS MAXIMUM. Faellt der Vorrat im Geraetering
+//   unter acht Eintraege (21 ms), ist Warten keine Option mehr: dann
+//   wird gemischt, was da ist, und wer zu spaet kommt, bekommt eine
+//   Luecke. Der Schaden trifft den, der ihn verursacht hat, statt
+//   alle.
+//
+// Die Notlage entscheidet die Tonschicht (sie kennt den Ringvorrat)
+// und gibt sie hier herein; `mix.fi` kennt den Ring nicht.
+fn mix_into(state: u64, max_frames: u64, dst_hz: u64, notlage: bool) -> u64 {
     var n: u64 = max_frames
     if n > CHUNK_FRAMES {
         n = CHUNK_FRAMES
@@ -677,11 +711,32 @@ fn mix_into(state: u64, max_frames: u64, dst_hz: u64) -> u64 {
     if n == 0 || dst_hz == 0 {
         return 0
     }
-    // Wie viel der SCHNELLSTE Strom hergibt -- die Begruendung, warum
-    // das Maximum und nicht das Minimum, steht im Kopf dieser Datei.
-    var beste: u64 = 0
-    var offen: u64 = 0
+    // ZUERST AUFRAEUMEN, DANN RECHNEN. Stroeme, die zu Ende sind und
+    // leer gelesen wurden, werden geschlossen -- und zwar HIER OBEN
+    // und nicht unten hinter der Mischschleife.
+    //
+    // GEMESSEN, und es ist ein Fehler, den nur die Uhr verraet: unten
+    // stand das Aufraeumen hinter den vorzeitigen Ruecksprungen. Ein
+    // Mischer, der nichts mehr zu mischen hat, kehrt oben um -- und
+    // kam damit nie zum Aufraeumen. Die Stroeme blieben offen, der
+    // Aufrufer wartete auf "keine Stroeme mehr", und der Regler
+    // spielte drei Sekunden lang Stille, die als 1063 Aussetzer
+    // gezaehlt wurde. Der TON war einwandfrei; nur die Zahl daneben
+    // war es nicht.
     var i: u64 = 0
+    while i < MAX_STREAMS {
+        if is_open(state, i) && sc(state, i, M_ENDED) != 0 {
+            if sc(state, i, M_RPOS) + 1 >= sc(state, i, M_WPOS) {
+                close(state, i)
+            }
+        }
+        i = i + 1
+    }
+    var beste: u64 = 0
+    var kleinste: u64 = 0xFFFFFFFFFFFFFFFF
+    var offen: u64 = 0
+    let jetzt: u64 = time.mono_ns(state)
+    i = 0
     while i < MAX_STREAMS {
         if is_open(state, i) {
             offen = offen + 1
@@ -689,8 +744,39 @@ fn mix_into(state: u64, max_frames: u64, dst_hz: u64) -> u64 {
             if av > beste {
                 beste = av
             }
+            // WER DARF DIE ANDEREN AUFHALTEN. Nur ein Strom, der
+            // GERADE NOCH geschrieben hat. Das ist die dritte und
+            // letzte Regel des Mischers, und sie ist teuer erkauft:
+            //
+            //   DIE MINIMUM-REGEL ALLEIN VERKLEMMT SICH. Sobald ein
+            //   Programm fertig ist und nichts mehr schickt, ist sein
+            //   Vorrat null, das Minimum ist null, und ALLE anderen
+            //   stehen still -- bis der Geraetering so leer ist, dass
+            //   die Notlage greift. Dann laeuft es kurz an und
+            //   verklemmt sich wieder.
+            //
+            //   GEMESSEN: zwei Stroeme zu je einer Sekunde brauchten
+            //   3,98 Sekunden. Der Mischer wurde 2,07 Millionen Mal
+            //   gerufen und hat 609 Mal wirklich gemischt; 1,44
+            //   Millionen Aufrufe fanden "das Minimum ist null" vor.
+            //   Die Datei hatte 34 Loecher.
+            //
+            //   DIE FRIST ist fuenf Millisekunden. Sie liegt zwischen
+            //   den beiden Zeiten, die hier zaehlen: eine Runde des
+            //   Schreibers dauert Mikrosekunden, der Geraetering
+            //   traegt 85 Millisekunden. Ein Programm, das laenger als
+            //   fuenf Millisekunden nichts geschickt hat, ist entweder
+            //   fertig oder zu langsam -- in beiden Faellen darf es
+            //   die anderen nicht anhalten.
+            let ruht: bool = (jetzt -% sc(state, i, M_TFED)) > BLOCK_NS
+            if av < kleinste && !ruht && sc(state, i, M_ENDED) == 0 {
+                kleinste = av
+            }
         }
         i = i + 1
+    }
+    if !notlage && offen > 0 && kleinste < beste {
+        beste = kleinste
     }
     if offen == 0 || beste == 0 {
         // KEIN STROM HAT ETWAS. Dann wird NICHTS gemischt. Wer hier
@@ -728,16 +814,6 @@ fn mix_into(state: u64, max_frames: u64, dst_hz: u64) -> u64 {
         __mmio_write32((o + k * FRAME_OCTETS) as *mut u32,
             ((l & 0xFFFF) | ((rr & 0xFFFF) << 16)) as u32)
         k = k + 1
-    }
-    // 4. Stroeme aufraeumen, die zu Ende sind und leer gelesen wurden.
-    i = 0
-    while i < MAX_STREAMS {
-        if is_open(state, i) && sc(state, i, M_ENDED) != 0 {
-            if sc(state, i, M_RPOS) >= sc(state, i, M_WPOS) {
-                close(state, i)
-            }
-        }
-        i = i + 1
     }
     gs(state, G_MIXED, gg(state, G_MIXED) +% n)
     gs(state, G_PUMPS, gg(state, G_PUMPS) + 1)
