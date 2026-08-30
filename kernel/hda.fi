@@ -296,6 +296,19 @@ const S_FMT: u64 = 0x1A0 // was zuletzt in SDnFMT stand
 const S_REV: u64 = 0x1A8
 const S_POSFIX: u64 = 0x1B0 // 1 = der Regler schreibt DPIB nicht
 const S_POSN: u64 = 0x1B8 // Abfragen der Position, fuer die Gegenprobe
+// DER NULLPUNKT DER UHR, und er ist die Berichtigung eines Fehlers, der
+// erst auftrat, als der Regler im Betrieb ANGEHALTEN und WIEDER
+// GESTARTET wurde (was er tut, sobald ein Programm eine Pause macht).
+//
+// `start` nullt den Positionspuffer -- es muss ihn nullen, sonst
+// faengt die Uhr mit dem Stand des vorigen Laufes an. Damit springt die
+// rohe Position auf null zurueck, waehrend die Schicht darueber
+// weiterzaehlt. Ohne Nullpunkt sah das aus wie ein Umlauf, die Uhr
+// sprang um einen Ring nach vorn, die Klammer gegen Rueckwaertsgehen
+// fror sie ein -- und ein Abspieler, der auf "der Ring ist leer"
+// wartete, wartete fuer immer. GEMESSEN: 2000 Warteschleifen und eine
+// Datei von 154891 Rahmen fuer 48000 Rahmen Ton.
+const S_POSBASE: u64 = 0x1C0
 
 // Warum es nicht ging.
 const W_OK: u64 = 0
@@ -1838,6 +1851,7 @@ fn reset_box(state: u64) {
     s(state, S_LASTRAW, 0)
     s(state, S_WRAPS, 0)
     s(state, S_POS, 0)
+    s(state, S_POSBASE, 0)
     s(state, S_RUNNING, 0)
     s(state, S_BACKW, 0)
     s(state, S_UNDERN, 0)
@@ -1872,6 +1886,11 @@ fn start(state: u64) -> bool {
     kstate.set(dpib_addr(state), 0, 0)
     sdwr8(state, SD_STS, SDSTS_BCIS | SDSTS_FIFOE | SDSTS_DESE)
     sdwr32(state, SD_LPIB, 0)
+    // Der Nullpunkt: ab hier zaehlt die rohe Position wieder bei null,
+    // die herausgegebene laeuft weiter.
+    s(state, S_POSBASE, g(state, S_POS))
+    s(state, S_WRAPS, 0)
+    s(state, S_LASTRAW, 0)
     var ctl: u64 = sdrd8(state, SD_CTL) | SDCTL_RUN
     if g(state, S_IRQON) != 0 {
         ctl = ctl | SDCTL_IOCE
@@ -2066,7 +2085,7 @@ fn position_frames(state: u64) -> u64 {
         s(state, S_WRAPS, w)
     }
     s(state, S_LASTRAW, raw)
-    var pos: u64 = w * RING_FRAMES + raw
+    var pos: u64 = g(state, S_POSBASE) + w * RING_FRAMES + raw
     let sub: u64 = g(state, S_SUBMITTED)
     if pos > sub {
         if g(state, S_DRAIN) == 0 {
