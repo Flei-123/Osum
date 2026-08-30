@@ -1,0 +1,585 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/app/anb_xoffi.fi -- RUNDE KONTO: der Ruecken fuer Xoffi.
+//
+// ALLES ANBIETERWISSEN DIESER RUNDE UEBER XOFFI STEHT IN DIESER DATEI.
+// Kein Endpunkt, kein Feldname, kein Anspruch aus deren Token taucht
+// ausserhalb auf; `tools/konto/trennung.py` macht daraus eine Messung.
+//
+// Die API-Beschreibung stammt vom Betreiber (backend/routes/auth/auth.py,
+// FastAPI). Was hier steht, steht dort -- mit EINER Ausnahme, die
+// ausdruecklich benannt ist (P_MFA, siehe unten).
+//
+// ==================================================== FUENF FALLSTRICKE
+//
+// (1) MANDANTENTRENNUNG. Bei Xoffi bestimmt die DOMAENE die
+//     Organisation, und dieselbe Anschrift kann in MEHREREN
+//     Organisationen bestehen. Ein OrientOS-Geraet hat keine Domaene.
+//     Also:
+//       * der Mandant wird MITGESCHICKT (`organisation` im Koerper) und
+//         ist Teil der Kontokennung (`anbieter.kennung`);
+//       * kommt in der Antwort ein ANDERER Mandant zurueck als der
+//         angefragte, wird die Anmeldung ABGELEHNT. Das ist kein
+//         Formfehler -- es waere ein Datenleck ueber Mandantengrenzen;
+//       * ist die Anschrift in mehreren Organisationen und wurde keine
+//         genannt, wird GEFRAGT und nicht geraten (S_MEHRDEUTIG).
+//     EHRLICHE GRENZE: ob der echte Server ein Feld `organisation`
+//     ueberhaupt liest, weiss dieses Geraet nicht. Es kann nur pruefen,
+//     WAS ZURUECKKAM -- und genau das tut es. Steht in der Antwort ein
+//     anderer Mandant, ist es aus; steht gar keiner, wird der Antwort
+//     kein Mandant angedichtet.
+//
+// (2) NIEMALS AMBIENTE KEKSE. Der Server setzt zusaetzlich einen
+//     HttpOnly-Keks `xoffi_jwt`. Dieser Ruecken liest ihn nicht und
+//     schickt ihn nie: jeder Aufruf traegt `Authorization: Bearer`,
+//     ausdruecklich. `knetz.fi` hat gar kein Keksglas, in dem einer
+//     landen koennte. Gegenprobe: `--kaputt keks`.
+//
+// (3) SIEBEN TAGE AUF DER PLATTE. Das Zugriffstoken laeuft 7 Tage, das
+//     Erneuerungstoken 30. Beide liegen NUR gesiegelt (`ksiegel.fi`),
+//     erneuert wird VOR dem Ablauf (`konto.fi`, VORLAUF), und beim
+//     Abmelden wird `logout` wirklich aufgerufen und nicht nur lokal
+//     vergessen. Gegenprobe: `--kaputt klartext`, `--kaputt nurlokal`.
+//
+// (4) master_session UND VERWALTUNGSANSPRUECHE. `master_session` heisst:
+//     jemand hat sich als jemand anders angemeldet. Ein Geraetekonto ist
+//     das nicht, und dieser Ruecken WEIGERT SICH, eine solche Sitzung
+//     als Geraetekonto zu nehmen. `is_admin` und `nexus_core_access`
+//     sind Rechte in EINER FREMDEN FIRMA; sie werden gelesen, um sie
+//     ausdruecklich NICHT zu uebernehmen -- das Kontoformat
+//     (`kspeicher.fi`) hat kein Feld, in das sie passen wuerden.
+//     Gegenproben: `--kaputt claimcheck`, `--kaputt rechte`.
+//
+// (5) DIE SPERRLISTE FAELLT OFFEN. Faellt Redis aus, wirkt ein Abmelden
+//     serverseitig nicht. Deshalb endet die LOKALE Sitzung unabhaengig
+//     davon: `konto abmelden` loescht das gesiegelte Token auch dann,
+//     wenn der Server nicht antwortet, und sagt es.
+
+import std.rt
+import std.io
+import std.str
+import knetz
+import kjson
+import anbieter
+import kgegen
+
+export { ruecken }
+
+// ---------------------------------------------------------- die Wege
+//
+// P_LOGIN, P_REFRESH, P_LOGOUT und P_HEALTH stehen so in der
+// Beschreibung des Betreibers.
+//
+// P_MFA STEHT DORT NICHT. Die Beschreibung nennt den ERSTEN Schritt
+// (`{ mfa_required, temp_token }`, 10 Minuten gueltig) und nennt den
+// zweiten nicht. Dieser Weg ist deshalb eine ANNAHME, sie steht hier an
+// EINER Stelle, sie ist im Bericht als offene Frage an den Betreiber
+// vermerkt, und die Attrappe im Testaufbau erfuellt sie. Wer den echten
+// Weg kennt, aendert eine Zeile.
+static mut p_login: [u8; 17] = "/api/auth/login\0\0"
+static mut p_mfa: [u8; 23] = "/api/auth/mfa/verify\0\0\0"
+static mut p_refresh: [u8; 19] = "/api/auth/refresh\0\0"
+static mut p_logout: [u8; 18] = "/api/auth/logout\0\0"
+static mut p_health: [u8; 18] = "/api/auth/health\0\0"
+
+static mut m_post: [u8; 5] = "POST\0"
+static mut m_get: [u8; 4] = "GET\0"
+
+// Feldnamen aus deren API
+static mut f_login: [u8; 6] = "login\0"
+static mut f_password: [u8; 9] = "password\0"
+static mut f_org: [u8; 13] = "organisation\0"
+static mut f_success: [u8; 8] = "success\0"
+static mut f_data: [u8; 5] = "data\0"
+static mut f_user: [u8; 5] = "user\0"
+static mut f_token: [u8; 6] = "token\0"
+static mut f_refresh: [u8; 14] = "refresh_token\0"
+static mut f_temp: [u8; 11] = "temp_token\0"
+static mut f_mfareq: [u8; 13] = "mfa_required\0"
+static mut f_id: [u8; 3] = "id\0"
+static mut f_email: [u8; 6] = "email\0"
+static mut f_username: [u8; 9] = "username\0"
+static mut f_name: [u8; 5] = "name\0"
+static mut f_orgs: [u8; 14] = "organisations\0"
+static mut f_code: [u8; 5] = "code\0"
+static mut f_master: [u8; 15] = "master_session\0"
+static mut f_admin: [u8; 9] = "is_admin\0"
+static mut f_nexus: [u8; 18] = "nexus_core_access\0"
+static mut f_exp: [u8; 4] = "exp\0"
+static mut f_error: [u8; 6] = "error\0"
+static mut f_detail: [u8; 7] = "detail\0"
+
+// Hinweisschluessel fuer den Sprachkatalog. NUR Schluessel -- der Text
+// steht in locale/*/messages, nicht hier.
+static mut h_mandant: [u8; 22] = "konto.hint.tenant_mix\0"
+static mut h_master: [u8; 20] = "konto.hint.assumed\0\0"
+static mut h_form: [u8; 20] = "konto.hint.badjson\0\0"
+static mut h_status: [u8; 21] = "konto.hint.badstatus\0"
+static mut h_mehr: [u8; 22] = "konto.hint.many_orgs\0\0"
+
+static mut nm: [u8; 6] = "xoffi\0"
+
+fn ruecken() -> anbieter.Ruecken {
+    return anbieter.Ruecken { name: (&nm[0]) as u64, anmelden: anmelden,
+        erneuern: erneuern, abmelden: abmelden, pruefen: pruefen }
+}
+
+// ------------------------------------------------------------- Werkzeug
+
+fn ziel_aus(z: *mut anbieter.Zugang, zl: *mut knetz.Ziel) -> bool {
+    return knetz.ziel_lesen((*z).ziel, rt.c_length((*z).ziel),
+        (*z).zielname, (*z).wurzeln, zl)
+}
+
+fn hinweis(s: *mut anbieter.Sitzung, k: u64) {
+    rt.buf_clear(&(*s).hinweis)
+    rt.buf_push_bytes(&(*s).hinweis, k, rt.c_length(k))
+}
+
+// Den Rumpf eines JWT lesen. Ohne Signaturpruefung -- siehe
+// kernel/app/kjson.fi, `b64u_dekodieren`.
+fn anspruch_lesen(tok: u64, tl: usize, aus: *mut rt.Buf) -> bool {
+    var p1: usize = 0
+    while p1 < tl && rt.ld8(tok, p1) != 46 as u8 {
+        p1 = p1 + 1
+    }
+    if p1 >= tl {
+        return false
+    }
+    var p2: usize = p1 + 1
+    while p2 < tl && rt.ld8(tok, p2) != 46 as u8 {
+        p2 = p2 + 1
+    }
+    return kjson.b64u_dekodieren(tok + (p1 + 1) as u64, p2 - p1 - 1, aus)
+}
+
+// Die drei Fragen an einen Anspruchssatz, und die Antwort auf zwei davon
+// ist immer dieselbe: DAS GEHT DIESES BETRIEBSSYSTEM NICHTS AN.
+fn ansprueche_pruefen(tok: u64, tl: usize, ablauf: *mut u64) -> u32 {
+    *ablauf = 0
+    var roh: rt.Buf = rt.buf_new()
+    if !anspruch_lesen(tok, tl, &roh) {
+        rt.buf_free(&roh)
+        return anbieter.S_OK // kein JWT -- dann gibt es auch nichts darin
+    }
+    var d: kjson.Json = kjson.json_new()
+    var kaputt: bool = false
+    if !kjson.json_parse(&d, roh.ptr, roh.len) {
+        kaputt = true
+    }
+    if kaputt || !kjson.json_valid(&d) {
+        kjson.json_free(&d)
+        rt.buf_free(&roh)
+        return anbieter.S_OK
+    }
+    let w: u32 = kjson.json_root(&d)
+    var da: bool = false
+    let ex: i64 = kjson.ganz(&d, w, (&f_exp[0]) as u64, &da)
+    if da && ex > 0 {
+        *ablauf = ex as u64
+    }
+    // master_session: eine uebernommene Identitaet. Als Geraetekonto
+    // abgelehnt, und zwar unabhaengig davon, WAS darin steht.
+    var uebernommen: bool = false
+    if kjson.hat(&d, w, (&f_master[0]) as u64) {
+        if !kjson.json_is_null(&d, kjson.json_get_c(&d, w,
+            (&f_master[0]) as u64)) {
+            uebernommen = true
+        }
+    }
+    // is_admin / nexus_core_access werden GELESEN und WEGGEWORFEN. Sie
+    // stehen hier, damit sichtbar ist, dass sie bekannt sind und
+    // trotzdem nirgends hingehen. Nur die kaputte Fassung tut etwas
+    // damit -- und `tools/konto/run.sh` Abschnitt 8 wird dann rot.
+    let fremd_admin: bool = kjson.wahr(&d, w, (&f_admin[0]) as u64)
+    let fremd_nexus: bool = kjson.wahr(&d, w, (&f_nexus[0]) as u64)
+    if kgegen.an(kgegen.G_RECHTE) {
+        if fremd_admin || fremd_nexus {
+            var rp: [u8; 20] = "/etc/konto.rechte\0\0\0"
+            var eins: [u8; 6] = "root\n\0"
+            let _w: bool = rt.write_file((&rp[0]) as u64,
+                (&eins[0]) as u64, 5)
+        }
+    }
+    kjson.json_free(&d)
+    rt.buf_free(&roh)
+    if uebernommen && !kgegen.an(kgegen.G_CLAIM) {
+        return anbieter.S_ABGELEHNT
+    }
+    return anbieter.S_OK
+}
+
+fn fehl_bool(b: *mut bool) -> bool {
+    *b = true
+    return false
+}
+
+// ------------------------------------------------------------- anmelden
+
+fn koerper_login(z: *mut anbieter.Zugang, aus: *mut rt.Buf) {
+    var s: kjson.Schreiber = kjson.schreiber_neu(aus)
+    kjson.feld(&s, (&f_login[0]) as u64, (*z).kennung,
+        rt.c_length((*z).kennung))
+    kjson.feld(&s, (&f_password[0]) as u64, (*z).geheim,
+        rt.c_length((*z).geheim))
+    if (*z).bereich != 0 && rt.c_length((*z).bereich) > 0 {
+        kjson.feld(&s, (&f_org[0]) as u64, (*z).bereich,
+            rt.c_length((*z).bereich))
+    }
+    kjson.feld_frei(&s)
+}
+
+fn koerper_mfa(z: *mut anbieter.Zugang, aus: *mut rt.Buf) {
+    var s: kjson.Schreiber = kjson.schreiber_neu(aus)
+    kjson.feld(&s, (&f_temp[0]) as u64, (*z).temp, rt.c_length((*z).temp))
+    kjson.feld(&s, (&f_code[0]) as u64, (*z).code, rt.c_length((*z).code))
+    kjson.feld_frei(&s)
+}
+
+// Der Keks, den es NICHT geben darf. Er entsteht nur in der kaputten
+// Fassung, damit Abschnitt 5 etwas zu finden hat.
+fn keks_wenn_kaputt(z: *mut anbieter.Zugang, aus: *mut rt.Buf) -> u64 {
+    if !kgegen.an(kgegen.G_KEKS) {
+        return 0
+    }
+    var k: [u8; 24] = "xoffi_jwt=vondersitzung\0"
+    rt.buf_push_bytes(aus, (&k[0]) as u64, 23)
+    return aus as u64
+}
+
+fn anmelden(z: *mut anbieter.Zugang, s: *mut anbieter.Sitzung) -> u32 {
+    anbieter.sitzung_leeren(s)
+    var zl: knetz.Ziel = knetz.ziel_neu()
+    if !ziel_aus(z, &zl) {
+        (*s).stand = anbieter.S_FEHLER
+        hinweis(s, (&h_status[0]) as u64)
+        return (*s).stand
+    }
+    var koerper: rt.Buf = rt.buf_new()
+    var pfad: u64 = (&p_login[0]) as u64
+    var pl: usize = 15
+    if (*z).temp != 0 && rt.c_length((*z).temp) > 0 {
+        koerper_mfa(z, &koerper)
+        pfad = (&p_mfa[0]) as u64
+        pl = 20
+    } else {
+        koerper_login(z, &koerper)
+    }
+    var keksbuf: rt.Buf = rt.buf_new()
+    let keks: u64 = keks_wenn_kaputt(z, &keksbuf)
+    var kekslen: usize = 0
+    if keks != 0 {
+        kekslen = keksbuf.len
+    }
+    var a: knetz.Antw = knetz.antw_neu()
+    let da: bool = knetz.sende(&zl, (&m_post[0]) as u64, 4, pfad, pl,
+        koerper.ptr, koerper.len, 0, 0, keksbuf.ptr, kekslen, &a)
+    // Das Geheimnis war im Koerper. Es wird ueberschrieben, sobald es
+    // auf der Leitung war -- nicht erst, wenn der Puffer freigegeben wird.
+    rt.mem_set(koerper.ptr, 0 as u8, koerper.len)
+    rt.buf_free(&koerper)
+    rt.buf_free(&keksbuf)
+    if !da {
+        (*s).stand = netz_stand(&a)
+        knetz.antw_frei(&a)
+        return (*s).stand
+    }
+    let r: u32 = antwort_lesen(z, s, &a)
+    knetz.antw_frei(&a)
+    return r
+}
+
+fn netz_stand(a: *mut knetz.Antw) -> u32 {
+    if (*a).fehler == knetz.F_TLS {
+        return anbieter.S_TLS
+    }
+    if (*a).fehler == knetz.F_KEINNETZ || (*a).fehler == knetz.F_LESEN {
+        return anbieter.S_KEINNETZ
+    }
+    return anbieter.S_FEHLER
+}
+
+fn antwort_lesen(z: *mut anbieter.Zugang, s: *mut anbieter.Sitzung,
+    a: *mut knetz.Antw) -> u32 {
+    if (*a).code == 429 as u32 {
+        (*s).stand = anbieter.S_GEBREMST
+        return (*s).stand
+    }
+    var d: kjson.Json = kjson.json_new()
+    var kaputt: bool = false
+    if !kjson.json_parse(&d, (*a).koerper.ptr, (*a).koerper.len) {
+        kaputt = true
+    }
+    if kaputt || !kjson.json_valid(&d) {
+        kjson.json_free(&d)
+        (*s).stand = anbieter.S_FEHLER
+        hinweis(s, (&h_form[0]) as u64)
+        if (*a).code == 401 as u32 || (*a).code == 403 as u32 {
+            (*s).stand = anbieter.S_FALSCH
+        }
+        return (*s).stand
+    }
+    let w: u32 = kjson.json_root(&d)
+
+    // MEHRERE ORGANISATIONEN -- es wird gefragt, nicht geraten.
+    if kjson.hat(&d, w, (&f_orgs[0]) as u64) {
+        let arr: u32 = kjson.json_get_c(&d, w, (&f_orgs[0]) as u64)
+        if kjson.json_kind(&d, arr) == kjson.JSON_ARRAY
+            && kjson.json_count(&d, arr) > 1 {
+            var kind: u32 = kjson.json_child(&d, arr)
+            while kind != kjson.JSON_NONE {
+                if kjson.json_kind(&d, kind) == kjson.JSON_STRING {
+                    let sp: str.Span = kjson.json_string(&d, kind)
+                    rt.buf_push_bytes(&(*s).auswahl, sp.p as u64, sp.n)
+                    rt.buf_push(&(*s).auswahl, 10 as u8)
+                }
+                kind = kjson.json_next(&d, kind)
+            }
+            kjson.json_free(&d)
+            (*s).stand = anbieter.S_MEHRDEUTIG
+            hinweis(s, (&h_mehr[0]) as u64)
+            return (*s).stand
+        }
+    }
+
+    // ZWEITER FAKTOR
+    if kjson.wahr(&d, w, (&f_mfareq[0]) as u64) {
+        if kjson.text(&d, w, (&f_temp[0]) as u64, &(*s).temp) {
+            kjson.json_free(&d)
+            (*s).stand = anbieter.S_ZWEITFAKTOR
+            return (*s).stand
+        }
+        let dd: u32 = kjson.json_get_c(&d, w, (&f_data[0]) as u64)
+        if kjson.text(&d, dd, (&f_temp[0]) as u64, &(*s).temp) {
+            kjson.json_free(&d)
+            (*s).stand = anbieter.S_ZWEITFAKTOR
+            return (*s).stand
+        }
+    }
+
+    if (*a).code != 200 as u32 {
+        var msg: rt.Buf = rt.buf_new()
+        if !kjson.text(&d, w, (&f_error[0]) as u64, &msg) {
+            let _x: bool = kjson.text(&d, w, (&f_detail[0]) as u64, &msg)
+        }
+        rt.buf_free(&msg)
+        kjson.json_free(&d)
+        if (*a).code == 401 as u32 || (*a).code == 403 as u32 {
+            (*s).stand = anbieter.S_FALSCH
+        } else if (*a).code == 410 as u32 || (*a).code == 419 as u32 {
+            (*s).stand = anbieter.S_ABGELAUFEN
+        } else {
+            (*s).stand = anbieter.S_FEHLER
+            hinweis(s, (&h_status[0]) as u64)
+        }
+        return (*s).stand
+    }
+
+    let dat: u32 = kjson.json_get_c(&d, w, (&f_data[0]) as u64)
+    if !kjson.text(&d, dat, (&f_token[0]) as u64, &(*s).zugriff) {
+        kjson.json_free(&d)
+        (*s).stand = anbieter.S_FEHLER
+        hinweis(s, (&h_form[0]) as u64)
+        return (*s).stand
+    }
+    let _r: bool = kjson.text(&d, dat, (&f_refresh[0]) as u64,
+        &(*s).erneuerung)
+
+    // Der Mandant aus der Antwort. Er kann eine Zeichenkette sein oder
+    // ein Gegenstand mit `name`/`id` -- beides kommt vor, also beides
+    // gelesen, und wenn keines da ist, wird NICHTS erfunden.
+    let orgk: u32 = kjson.json_get_c(&d, dat, (&f_org[0]) as u64)
+    if orgk != kjson.JSON_NONE {
+        if kjson.json_kind(&d, orgk) == kjson.JSON_STRING {
+            let sp: str.Span = kjson.json_string(&d, orgk)
+            rt.buf_push_bytes(&(*s).bereich, sp.p as u64, sp.n)
+        } else {
+            if !kjson.text(&d, orgk, (&f_name[0]) as u64, &(*s).bereich) {
+                let _i: bool = kjson.text(&d, orgk, (&f_id[0]) as u64,
+                    &(*s).bereich)
+            }
+        }
+    }
+
+    // DIE MANDANTENPROBE. Kam ein anderer Mandant zurueck als der
+    // angefragte, ist das kein Schoenheitsfehler.
+    if !kgegen.an(kgegen.G_MANDANT) {
+        if (*z).bereich != 0 && rt.c_length((*z).bereich) > 0
+            && (*s).bereich.len > 0 {
+            let bl: usize = rt.c_length((*z).bereich)
+            var gleich: bool = bl == (*s).bereich.len
+            if gleich {
+                gleich = rt.mem_eq((*z).bereich, (*s).bereich.ptr, bl)
+            }
+            if !gleich {
+                kjson.json_free(&d)
+                (*s).stand = anbieter.S_ABGELEHNT
+                hinweis(s, (&h_mandant[0]) as u64)
+                return (*s).stand
+            }
+        }
+    } else {
+        // die kaputte Fassung: der Mandant faellt weg, zwei Firmen
+        // werden zu einem Konto
+        rt.buf_clear(&(*s).bereich)
+    }
+
+    let usr: u32 = kjson.json_get_c(&d, dat, (&f_user[0]) as u64)
+    if !kjson.text(&d, usr, (&f_id[0]) as u64, &(*s).subjekt) {
+        let _e: bool = kjson.text(&d, usr, (&f_email[0]) as u64,
+            &(*s).subjekt)
+    }
+    if !kjson.text(&d, usr, (&f_username[0]) as u64, &(*s).anzeige) {
+        if !kjson.text(&d, usr, (&f_email[0]) as u64, &(*s).anzeige) {
+            rt.buf_push_bytes(&(*s).anzeige, (*s).subjekt.ptr,
+                (*s).subjekt.len)
+        }
+    }
+    // DER DATENORT. Bei diesem Anbieter liegen die Daten HINTER XOFFI:
+    // das Ziel selbst, und der Mandant trennt sie darin. Mehr sagt
+    // dieser Ruecken nicht -- welchen Pfad die Runde SYNC daran haengt,
+    // ist deren Sache (docs/KONTO-SYNC.md).
+    rt.buf_push_bytes(&(*s).datenort, (*z).ziel, rt.c_length((*z).ziel))
+    kjson.json_free(&d)
+
+    var ablauf: u64 = 0
+    let cl: u32 = ansprueche_pruefen((*s).zugriff.ptr, (*s).zugriff.len,
+        &ablauf)
+    if cl != anbieter.S_OK {
+        anbieter.sitzung_leeren(s)
+        (*s).stand = cl
+        hinweis(s, (&h_master[0]) as u64)
+        return (*s).stand
+    }
+    (*s).ablauf = ablauf
+    (*s).stand = anbieter.S_OK
+    return (*s).stand
+}
+
+// ------------------------------------------------------------- erneuern
+//
+// DER MOBILE WEG: das Erneuerungstoken steht im KOERPER. Der Web-Weg
+// (gleitend, mit dem Zugriffstoken als Bearer) haengt an einer Sitzung,
+// die ein Geraet nicht hat.
+fn erneuern(z: *mut anbieter.Zugang, s: *mut anbieter.Sitzung) -> u32 {
+    var zl: knetz.Ziel = knetz.ziel_neu()
+    if !ziel_aus(z, &zl) {
+        (*s).stand = anbieter.S_FEHLER
+        return (*s).stand
+    }
+    var koerper: rt.Buf = rt.buf_new()
+    var w: kjson.Schreiber = kjson.schreiber_neu(&koerper)
+    kjson.feld(&w, (&f_refresh[0]) as u64, (*z).erneuerung,
+        rt.c_length((*z).erneuerung))
+    kjson.feld_frei(&w)
+    var a: knetz.Antw = knetz.antw_neu()
+    let da: bool = knetz.sende(&zl, (&m_post[0]) as u64, 4,
+        (&p_refresh[0]) as u64, 17, koerper.ptr, koerper.len, 0, 0, 0, 0,
+        &a)
+    rt.mem_set(koerper.ptr, 0 as u8, koerper.len)
+    rt.buf_free(&koerper)
+    if !da {
+        (*s).stand = netz_stand(&a)
+        knetz.antw_frei(&a)
+        return (*s).stand
+    }
+    if a.code != 200 as u32 {
+        knetz.antw_frei(&a)
+        (*s).stand = anbieter.S_ABGELAUFEN
+        return (*s).stand
+    }
+    var d: kjson.Json = kjson.json_new()
+    var kaputt: bool = false
+    if !kjson.json_parse(&d, a.koerper.ptr, a.koerper.len) {
+        kaputt = true
+    }
+    if kaputt || !kjson.json_valid(&d) {
+        kjson.json_free(&d)
+        knetz.antw_frei(&a)
+        (*s).stand = anbieter.S_FEHLER
+        return (*s).stand
+    }
+    let wz: u32 = kjson.json_root(&d)
+    let dat: u32 = kjson.json_get_c(&d, wz, (&f_data[0]) as u64)
+    var neu: rt.Buf = rt.buf_new()
+    if !kjson.text(&d, dat, (&f_token[0]) as u64, &neu) {
+        rt.buf_free(&neu)
+        kjson.json_free(&d)
+        knetz.antw_frei(&a)
+        (*s).stand = anbieter.S_ABGELAUFEN
+        return (*s).stand
+    }
+    var neuref: rt.Buf = rt.buf_new()
+    let hatref: bool = kjson.text(&d, dat, (&f_refresh[0]) as u64, &neuref)
+    kjson.json_free(&d)
+    knetz.antw_frei(&a)
+
+    var ablauf: u64 = 0
+    let cl: u32 = ansprueche_pruefen(neu.ptr, neu.len, &ablauf)
+    if cl != anbieter.S_OK {
+        rt.buf_free(&neu)
+        rt.buf_free(&neuref)
+        (*s).stand = cl
+        return (*s).stand
+    }
+    rt.buf_clear(&(*s).zugriff)
+    rt.buf_push_bytes(&(*s).zugriff, neu.ptr, neu.len)
+    if hatref {
+        rt.buf_clear(&(*s).erneuerung)
+        rt.buf_push_bytes(&(*s).erneuerung, neuref.ptr, neuref.len)
+    }
+    (*s).ablauf = ablauf
+    rt.buf_free(&neu)
+    rt.buf_free(&neuref)
+    (*s).stand = anbieter.S_OK
+    return (*s).stand
+}
+
+// ------------------------------------------------------------- abmelden
+
+fn abmelden(z: *mut anbieter.Zugang, s: *mut anbieter.Sitzung) -> u32 {
+    if kgegen.an(kgegen.G_NURLOKAL) {
+        (*s).stand = anbieter.S_OK
+        return (*s).stand
+    }
+    var zl: knetz.Ziel = knetz.ziel_neu()
+    if !ziel_aus(z, &zl) {
+        (*s).stand = anbieter.S_FEHLER
+        return (*s).stand
+    }
+    var a: knetz.Antw = knetz.antw_neu()
+    let da: bool = knetz.sende(&zl, (&m_post[0]) as u64, 4,
+        (&p_logout[0]) as u64, 16, 0, 0, (*z).zugriff,
+        rt.c_length((*z).zugriff), 0, 0, &a)
+    var stand: u32 = anbieter.S_OK
+    if !da {
+        stand = netz_stand(&a)
+    } else if a.code != 200 as u32 {
+        stand = anbieter.S_FEHLER
+    }
+    knetz.antw_frei(&a)
+    (*s).stand = stand
+    return stand
+}
+
+fn pruefen(z: *mut anbieter.Zugang, s: *mut anbieter.Sitzung) -> u32 {
+    var zl: knetz.Ziel = knetz.ziel_neu()
+    if !ziel_aus(z, &zl) {
+        (*s).stand = anbieter.S_FEHLER
+        return (*s).stand
+    }
+    var a: knetz.Antw = knetz.antw_neu()
+    let da: bool = knetz.sende(&zl, (&m_get[0]) as u64, 3,
+        (&p_health[0]) as u64, 16, 0, 0, (*z).zugriff,
+        rt.c_length((*z).zugriff), 0, 0, &a)
+    var stand: u32 = anbieter.S_OK
+    if !da {
+        stand = netz_stand(&a)
+    } else if a.code == 401 as u32 || a.code == 403 as u32 {
+        stand = anbieter.S_ABGELAUFEN
+    } else if a.code != 200 as u32 {
+        stand = anbieter.S_FEHLER
+    }
+    knetz.antw_frei(&a)
+    (*s).stand = stand
+    return stand
+}
