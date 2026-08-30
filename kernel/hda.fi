@@ -143,7 +143,7 @@ export {
     init, present, ready, why, bdf, base,
     start, stop, running, submit, ring_base, ring_octets,
     entries, entry_frames, entry_octets, ring_frames,
-    position_frames, position_raw, lpib, dpib, pos_disagree,
+    position_frames, position_raw, lpib, dpib, pos_disagree, posfix,
     set_volume, volume, muted, set_muted,
     rate, set_rate, bits, channels,
     underruns, submits, starts, stops, irqs, irq, drain_mark,
@@ -294,6 +294,7 @@ const S_DACS: u64 = 0x190 // gefundene Wandler
 const S_LOSTRESP: u64 = 0x198 // Antworten, die niemand angefordert hat
 const S_FMT: u64 = 0x1A0 // was zuletzt in SDnFMT stand
 const S_REV: u64 = 0x1A8
+const S_POSFIX: u64 = 0x1B0 // 1 = der Regler schreibt DPIB nicht
 
 // Warum es nicht ging.
 const W_OK: u64 = 0
@@ -511,8 +512,23 @@ fn bdl(state: u64) -> u64 {
     return state + kstate.HDA_OFF + BDL_OFF
 }
 
-fn dpib_addr(state: u64) -> u64 {
+// Der Anfang des Positionspuffers -- die Adresse, die dem Regler
+// genannt wird.
+fn dpib_base(state: u64) -> u64 {
     return state + kstate.HDA_OFF + DPIB_OFF
+}
+
+// DIE STELLE FUER *UNSEREN* STROM, und das ist ACHT OKTETTE JE STROM,
+// gezaehlt mit der Nummer der Strombeschreibung -- nicht ab null.
+//
+// GEMESSEN, und es hat eine Stunde gekostet: der Positionspuffer stand
+// bei jedem Ablesen auf null, waehrend LPIB munter hochlief. Der
+// Regler schrieb die Position sehr wohl -- nur an Versatz 32, weil
+// unser Ausgabestrom die Nummer 4 hat (vier Eingabestroeme liegen
+// davor). Wer bei null liest, liest den EINGABEstrom 0, und der laeuft
+// nicht. Die Uhr stand still und die Wiedergabe lief.
+fn dpib_addr(state: u64) -> u64 {
+    return dpib_base(state) + g(state, S_OSTREAM) * 8
 }
 
 fn wtab(state: u64, nid: u64) -> u64 {
@@ -1046,7 +1062,33 @@ fn corb_setup(state: u64) -> bool {
     s(state, S_RIRBRP, 0)
 
     wr8(state, R_CORBCTL, CORBCTL_RUN)
-    wr8(state, R_RIRBCTL, RIRBCTL_RUN)
+    // BEIDE BITS, UND DAS ZWEITE IST DER GANZE TAG.
+    //
+    // RIRBCTL Bit 1 ist der DMA des Antwortrings, Bit 0 ("Response
+    // Interrupt Control") heisst dem Namen nach nur "melde dich". Es
+    // tut mehr: OHNE DIESES BIT SETZT DER REGLER DAS ZUSTANDSBIT
+    // RIRBSTS.RINTFL GAR NICHT ERST -- und genau ueber dieses Bit
+    // laeuft die Freigabe des Befehlsrings.
+    //
+    // DIE KETTE, in der Reihenfolge, in der sie zerbricht: RINTCNT
+    // sagt, nach wie vielen Antworten der Regler eine Pause macht
+    // (hier: nach jeder). Nach der Pause fasst er den Befehlsring
+    // NICHT MEHR AN, bis der Treiber RINTFL loescht. Ist RINTFL nie
+    // gesetzt worden, kann es niemand loeschen, und der Ring steht
+    // fuer immer.
+    //
+    // GEMESSEN, und es ist genau das Fehlerbild, das diese Runde einen
+    // halben Tag gekostet hat: der ERSTE Befehl geht durch (der
+    // Herstellerkenner kam zurueck), der ZWEITE nicht. CORBWP stand
+    // auf 2, CORBRP auf 1 -- der Regler hatte den zweiten Befehl nie
+    // abgeholt. Ein Treiber, der daraus schliesst "der Codec hat keine
+    // Audiogruppe", sucht danach an der voellig falschen Stelle.
+    //
+    // (QEMU, hw/audio/intel-hda.c, `intel_hda_response`:
+    //  `if (d->rirb_ctl & ICH6_RBCTL_IRQ_EN) { d->rirb_sts |= ...IRQ }`.
+    //  Echte Regler verhalten sich nach der Spezifikation genauso --
+    //  RINTFL ist in Abschnitt 3.3.28 an RINTCTL gebunden.)
+    wr8(state, R_RIRBCTL, RIRBCTL_RUN | RIRBCTL_INT)
     // Nullen, damit eine alte Antwort aus der Firmware nicht als neue
     // gelesen wird.
     var i: u64 = 0
@@ -1920,6 +1962,26 @@ fn drain_mark(state: u64) {
 fn position_raw(state: u64) -> u64 {
     let dp: u64 = kstate.get32(dpib_addr(state)) % RING_OCTETS
     let lp: u64 = sdrd32(state, SD_LPIB) % RING_OCTETS
+    // DER RUECKFALL, UND ER IST KEINE VORSICHTSMASSNAHME AUF VERDACHT.
+    // Der Positionspuffer ist in der Spezifikation OPTIONAL; es gibt
+    // Regler, die DPLBASE annehmen und nie etwas hineinschreiben. Wer
+    // sich blind darauf verlaesst, hat eine Uhr, die auf null steht,
+    // waehrend Musik laeuft -- und das sieht aus wie ein toter
+    // Treiber, obwohl der Ton hoerbar ist.
+    //
+    // Die Erkennung ist eine Beobachtung und keine Kennungstabelle:
+    // steht DPIB auf null, waehrend LPIB ueber einen ganzen Eintrag
+    // hinaus gelaufen ist, dann schreibt dieser Regler den Puffer
+    // nicht. Ab da gilt LPIB, und `S_POSFIX` sagt im Bericht, dass
+    // umgeschaltet wurde.
+    if g(state, S_POSFIX) == 0 {
+        if dp == 0 && lp > ENTRY_OCTETS {
+            s(state, S_POSFIX, 1)
+        }
+    }
+    if g(state, S_POSFIX) != 0 {
+        return lp / FRAME_OCTETS
+    }
     var d: u64 = 0
     if dp > lp {
         d = dp -% lp
@@ -1930,6 +1992,11 @@ fn position_raw(state: u64) -> u64 {
         s(state, S_DISAGREE, g(state, S_DISAGREE) +% 1)
     }
     return dp / FRAME_OCTETS
+}
+
+// Welche Quelle die Uhr gerade benutzt: 0 = Positionspuffer, 1 = LPIB.
+fn posfix(state: u64) -> u64 {
+    return g(state, S_POSFIX)
 }
 
 fn lpib(state: u64) -> u64 {
@@ -1973,11 +2040,34 @@ fn position_frames(state: u64) -> u64 {
                 s(state, S_UNDERN, leer)
             }
         }
-        // Die Uhr gibt NIE mehr aus, als hineingelegt wurde. Was
-        // darueber liegt, ist Stille, die der Regler aus dem
-        // ausgenullten Ring gespielt hat, und keine Wiedergabe.
-        pos = sub
     }
+    // DIE UHR WIRD *NICHT* AUF `sub` GEKLEMMT, und diese eine Zeile hat
+    // die Runde eine Messung gekostet, die aussah wie ein Erfolg.
+    //
+    // DER ERSTE ANLAUF klemmte sie: "die Hardware kann nicht mehr
+    // gespielt haben, als sie bekommen hat." Bei AC97 ist das WAHR --
+    // dort haelt der DMA am letzten gueltigen Eintrag an und kann
+    // gar nicht weiterlaufen. Bei HD-Audio ist es FALSCH, und die
+    // Folge ist keine kleine Ungenauigkeit, sondern ein zerstoertes
+    // Signal:
+    //
+    //   Die Schicht darueber rechnet ihren freien Platz als
+    //   "Ringgroesse minus (geschrieben minus GESPIELT)". Klemmt man
+    //   `gespielt` an `geschrieben`, ist diese Zahl immer die ganze
+    //   Ringgroesse -- die Schicht haelt den Ring fuer leer, obwohl
+    //   der Regler mitten darin liest, und schreibt HINTER dessen
+    //   Lesezeiger. Was dort landet, wird nie gehoert.
+    //
+    //   GEMESSEN: 48000 geschriebene Rahmen, 48000 "gespielte", null
+    //   Aussetzer gemeldet -- und in der Datei auf dem Wirt standen
+    //   9673 Rahmen Ton, verteilt auf elf Bruchstuecke zwischen
+    //   43361 Rahmen Stille. Jede Zahl im Kernel sagte, es sei alles
+    //   in Ordnung.
+    //
+    // ALSO: die Uhr sagt, was der Regler WIRKLICH geholt hat, auch
+    // wenn das Stille aus einem leergelaufenen Ring war. Dass davon
+    // ein Teil keine Wiedergabe war, sagt `underruns` -- getrennt und
+    // ehrlich, statt in der Uhr versteckt.
     if pos < g(state, S_POS) {
         pos = g(state, S_POS)
         s(state, S_BACKW, g(state, S_BACKW) + 1)
@@ -2198,17 +2288,52 @@ fn init(state: u64) -> bool {
     //    einen Weg zu einer analogen Buchse, gewinnt -- und wenn der
     //    HDMI-Codec zuerst antwortet, wird er wieder verworfen, weil
     //    `pin_score` seine digitalen Buchsen mit null bewertet.
+    // DIE DREI ANTWORTEN JE CODEC, und sie stehen hier, weil genau
+    // diese drei Zahlen sagen, WO es klemmt, wenn auf einem fremden
+    // Brett kein Ton kommt: `p` -- der Codec antwortet ueberhaupt;
+    // `w` -- er hat eine Audiogruppe und einen lesbaren Graphen;
+    // `c` -- darin steht ein Weg zu einer analogen Buchse. Ohne diese
+    // Aufteilung ist jeder Fehlschlag "kein Ton" und jede Fehlersuche
+    // faengt bei null an.
+    var s_dbg: [u8; 12] = "hda: codec \0"
+    var s_p: [u8; 4] = " p=\0"
+    var s_w2: [u8; 4] = " w=\0"
+    var s_c2: [u8; 4] = " c=\0"
+    var s_ss: [u8; 14] = "hda: statests\0"
+    let dbg: bool = kstate.mode_on(state, kstate.M_AUDGRAPH)
+    if dbg {
+        serial.puts((&s_ss[0]) as u64)
+        serial.hex(st)
+        serial.nl()
+    }
     var cad: u64 = 0
     var fertig: bool = false
     while cad < 15 && !fertig {
         if (st & (1 << cad)) != 0 {
             s(state, S_CAD, cad)
-            if pick_path(state, cad) {
-                if walk_widgets(state, cad) {
-                    if choose_path(state) {
+            let okp: bool = pick_path(state, cad)
+            var okw: bool = false
+            var okc: bool = false
+            if okp {
+                okw = walk_widgets(state, cad)
+                if okw {
+                    okc = choose_path(state)
+                    if okc {
                         fertig = true
                     }
                 }
+            }
+            if dbg {
+                serial.puts((&s_dbg[0]) as u64)
+                serial.dec(cad)
+                serial.puts((&s_p[0]) as u64)
+                serial.dec(yesno(okp))
+                serial.puts((&s_w2[0]) as u64)
+                serial.dec(yesno(okw))
+                serial.puts((&s_c2[0]) as u64)
+                serial.dec(yesno(okc))
+                serial.nl()
+                say_graph(state)
             }
         }
         if !fertig {
@@ -2249,7 +2374,7 @@ fn init(state: u64) -> bool {
     // 9. DER POSITIONSPUFFER. Bit 0 der unteren Adresse schaltet ihn
     //    an. Er ist der Grund, warum die Uhr dieser Runde auch auf
     //    Chipsaetzen stimmt, auf denen LPIB hinkt.
-    let dp: u64 = dpib_addr(state)
+    let dp: u64 = dpib_base(state)
     var i: u64 = 0
     while i < 16 {
         kstate.set(dp, i * 8, 0)
@@ -2306,6 +2431,13 @@ fn init(state: u64) -> bool {
 // braucht, wer auf einem Brett keinen Ton bekommt: sie sagen, WELCHE
 // Buchsen der Codec hat, wie sie belegt sind und warum die gewaehlte
 // gewaehlt wurde.
+fn yesno(b: bool) -> u64 {
+    if b {
+        return 1
+    }
+    return 0
+}
+
 fn say_graph(state: u64) {
     var s_h: [u8; 14] = "hda-graph: \0\0\0"
     var s_n: [u8; 7] = "  nid=\0"
