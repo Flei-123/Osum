@@ -87,7 +87,13 @@ nq_start() {
     cp "$NQ_TMP/nv.img" "$NQ_TMP/nvlive.img"
     local abs
     case "$out" in /*) abs=$out ;; *) abs=$(pwd)/$out ;; esac
-    ( cd "$NQ_TMP" && timeout 300 $QEMU_X86 -kernel "$img.mb" -m 256 \
+    # 600 s und nicht 300: auf einer Maschine, auf der mehrere Runden
+    # gleichzeitig rechnen (Lastmittel 24 auf 12 Kernen gemessen), braucht
+    # allein der Start bis zur Shell ueber eine Minute. Ein Zeitlimit, das
+    # die Auslastung des Wirts misst, ist kein Zeitlimit -- ein Lauf ist
+    # darin einmal mitten im nqerr-Abschnitt abgeschnitten worden, und
+    # sechs Zusagen "fehlten ganz", obwohl nichts kaputt war.
+    ( cd "$NQ_TMP" && timeout 600 $QEMU_X86 -kernel "$img.mb" -m 256 \
         -append "$append" \
         -serial "file:$abs" -display none -no-reboot \
         -drive "file=live.img,format=raw,if=ide,index=0" \
