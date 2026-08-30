@@ -219,7 +219,22 @@ boot_stack_top:
 
     .align 16
 kernel_stack_bottom:
-    .skip 65536
+    /* RUNDE AML: 65536 -> 131072.
+     *
+     * Der AML-Interpreter (kernel/aml.fi) fuehrt FREMDEN Code aus, den
+     * die Firmware hinterlegt hat, und er tut es rekursiv: jede
+     * Klammerebene eines AML-Ausdrucks ist eine Verschachtelungsstufe.
+     * Gemessen mit der Stapelwache in kernel/amlev.fi, beim Auswerten
+     * von `_PRT` in QEMUs DSDT: 42240 Oktette. Das sind zwei Drittel
+     * der alten 65536 -- zu wenig Abstand fuer eine DSDT, die tiefer
+     * verschachtelt ist als die einer virtuellen Maschine.
+     *
+     * Die Wache (STACK_LIMIT, 57344) bricht die Auswertung mit einem
+     * definierten Fehler ab, bevor der Stapel ausgeht; mit 131072
+     * Oktetten liegt sie mit grossem Abstand darunter. Der Preis sind
+     * 64 KiB mehr .bss -- im Abbild auf der Platte steht davon kein
+     * einziges Oktett. */
+    .skip 131072
     .globl kernel_stack_top
 kernel_stack_top:
 

@@ -447,6 +447,26 @@
 #      laufende Programm den ganzen Bildschirm angehaengt -- der
 #      haeufigste Fehler solcher Anzeigen, hier als Zahl).
 #
+#  31. DIE SPRACHE DER FIRMWARE (tools/aml/run.sh, Runde AML): ein
+#      AML-Interpreter. Bis dahin las Osum die Unterbrechungsleitung
+#      eines PCI-Geraets aus dem Register 0x3C seiner Konfiguration --
+#      einem Notizzettel der Firmware, der auf den meisten Brettern
+#      stimmt und auf manchen nicht. Die Wahrheit steht im AML-Objekt
+#      `_PRT` der Wurzelbruecke, und QEMUs `_PRT` ist keine Tabelle,
+#      sondern eine METHODE mit While-Schleife, Paketen, `Index` und
+#      Verweisen auf fuenf Link-Geraete, deren `_CRS` wiederum ein
+#      PIIX3-Register aus dem PCI-Konfigurationsraum liest.
+#      Gegengerechnet wird gegen `tools/aml/disasm.py` -- dieselbe
+#      Kodierung ein zweites Mal, in Python, von Hand nach der
+#      Spezifikation. DIE ZUSAGE, an der die Runde haengt: der
+#      Unterbrechungsvektor kommt WIRKLICH an, und mit `amlwrong` (die
+#      Leitung um eins verschoben eingetragen) kommt er NICHT an.
+#      Vier Gegenproben: `amlbad` (abgeschnittene DSDT -> definierter
+#      Fehler, Rueckfall auf 0x3C, Maschine faehrt fertig hoch),
+#      `amlloop` (Schleife ohne Ende -> Schrittgrenze), `amldeep`
+#      (Rekursion -> Tiefengrenze, kein Stapelueberlauf), `noaml`
+#      (kein Interpreter, der Zustand von vorher).
+#
 #  24. ENERGIE UND LEISTUNG (tools/k18/run.sh, Runde K18): bis dahin
 #      konnte dieser Kernel ueber ACPI genau eine Sache -- abschalten.
 #      Zwischen "laeuft" und "aus" gab es nichts. Diese Runde baut die
@@ -1039,6 +1059,9 @@ lauf "29. die Platte, die ein echter PC hat: AHCI/SATA ueber DMA (tools/ahci/run
 # an der Ausgabereihenfolge aendert sich dadurch nichts.
 lauf "30. Osum als Server: ohne Grafik gebaut, auf der seriellen Leitung bedient (tools/server/run.sh, Runde SERVERBUILD)" \
      tools/server/run.sh server '^SERVER: |^        (gui=|Symbole der|srvbench: )|^  OK    (das Serverabbild|im Serverabbild|die Naht selbst|kein Modul|die Shell antwortet|Rueckschritt und|GEGENPROBE|und der Zaehler|im Regellauf|empfangene|kein Oktett|STRG-U)'
+
+lauf "31. die Sprache der Firmware: ein AML-Interpreter, _PRT statt Register 0x3C (tools/aml/run.sh, Runde AML)" \
+     tools/aml/run.sh aml '^AML: |^    (DSDT parsen|_PRT auswerten|Namensraum|Arena benutzt|Kernstapel|Verschachtelung|Zeilen Quelltext|Bootzeit|Abdeckung|in der Tabelle|davon unterstuetzt)|^  OK    (MIT der Leitung|mit der FALSCHEN|die NAMEN stimmen|_PRT und das Register|00:03.0 Stift A|der Rueckfall|die Schrittgrenze|die Tiefengrenze|nach dem Verwerfen|die Abdeckung)'
 
 # ABSCHNITT 29 -- RUNDE MULTIUSER. Er arbeitet die Grenzenliste von K13
 # ab (docs/ROUNDK13.md Abschnitt 7): das Betretungsrecht auf JEDEM Glied

@@ -1,0 +1,1549 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/amlev.fi -- RUNDE AML, TEIL 3: DIE AUSFUEHRUNG.
+//
+// Hier laeuft AML wirklich. Was diese Datei kann, ist genau das, was
+// gebraucht wird, um `_PRT`, `_CRS`, `_PRS`, `_SRS` und `_STA` auf einer
+// gewoehnlichen Maschine auszuwerten -- nicht mehr. Ein vollstaendiger
+// Nachbau von ACPICA ist AUSDRUECKLICH NICHT das Ziel dieser Runde; er
+// waere groesser als der uebrige Kernel und liesse sich mit dem, was
+// hier zur Verfuegung steht, nicht messen.
+//
+// ZWEI GRENZEN, DIE NICHT VERHANDELBAR SIND. Eine Firmware ist fremder
+// Code, den dieser Kernel ausfuehrt. Ohne Grenzen ist der erste
+// verschriebene Zaehler in einer While-Schleife ein Rechner, der beim
+// Hochfahren stehenbleibt, und die erste sich selbst aufrufende Methode
+// ein Stapelueberlauf im Kern.
+//
+//   BUDGET   Jeder ausgewertete Term kostet einen Schritt. Sind die
+//            Schritte alle, bricht die Auswertung mit ERR_BUDGET ab.
+//   TIEFE    Verschachtelung von Ausdruecken und Methodenaufrufen wird
+//            gezaehlt. Der Kernstapel ist 65536 Oktette gross
+//            (`kernel/arch/x86_64/boot.s`); DEPTH_MAX ist so gewaehlt,
+//            dass er nicht ausgeht, und die Abnahme faehrt dagegen.
+//
+// WO DIE ZWISCHENERGEBNISSE LIEGEN. NICHT auf der Halde. Jeder Aufrufer
+// von `ev` gibt einen Platz von 24 Oktetten mit, und der steht auf dem
+// Firn-Stapel (`var o: [u64; 3]`). Das ist kein Geiz: eine Schleife, die
+// nicht endet, wuerde sonst die Halde leerraeumen, bevor das Budget
+// greift -- und dann meldete die Abnahme "Halde voll", wo sie
+// "Endlosschleife" pruefen wollte. Auf die Halde kommt nur, was einen
+// Rumpf hat: Puffer, Pakete, Zeichenketten und die Rahmen der Methoden.
+
+import kstate
+import serial
+import amlns
+import amlobj
+
+export {
+    ev, ev_target, exec_list, call_method, store_into, deref,
+    frame_new, frame_scope_set, frame_ret, frame_ctl,
+    budget_set, budget_left, depth_reset, stack_base, stack_high,
+    depth_high, stack_clear,
+    seen_mark, seen_get, seen_ext, seen_ext_mark, notifies,
+    FRAME_BYTES, DEPTH_MAX, CALL_MAX
+}
+
+// --------------------------------------------- die Plaetze in `kdata`
+//
+// `amlns.fi` benutzt 0..55, diese Datei 56 aufwaerts. Sie stehen in
+// EINER Seite; wer eine dazunimmt, traegt sie hier ein.
+
+const A_DEPTH: u64 = 56
+const A_CALLS: u64 = 64
+const A_BUDGET: u64 = 72
+const A_LASTIF: u64 = 80 // war die Bedingung des letzten `If` wahr?
+const A_NOTIFY: u64 = 88 // wie oft `Notify` gesehen wurde
+const A_SP0: u64 = 96 // Stapelzeiger beim Betreten des Interpreters
+const A_SPHI: u64 = 104
+const A_DEPTHHI: u64 = 112 // tiefste erreichte Verschachtelung // wie tief der Stapel dabei hoechstens war
+
+const A_OPS: u64 = 128 // 4 Woerter: welche der 256 Opcodes vorkamen
+const A_EXT: u64 = 168 // 3 Woerter: dasselbe fuer 0x5B 0x00..0x8F
+
+const DEPTH_MAX: u64 = 32
+const CALL_MAX: u64 = 8
+
+// WIE VIEL KERNSTAPEL DER INTERPRETER VERBRAUCHEN DARF.
+//
+// Die Zahl 48 oben ist eine Vorsichtsgrenze und KEINE Wache: wie viele
+// Oktette eine Verschachtelungsstufe wirklich kostet, entscheidet der
+// Uebersetzer, nicht der Quelltext. `ev_inner` hat zwei Dutzend
+// Zwischenplaetze zu je 24 Oktetten, und Firn legt sie im Rahmen an,
+// gleich welcher Zweig genommen wird.
+//
+// GEMESSEN, NICHT GERATEN: mit CALL_MAX 10 und DEPTH_MAX 48 hat der
+// Rekursionstest (`amldeep`) den Kernstapel von 65536 Oktetten
+// UEBERSCHRITTEN -- die Zeichenkette, die den Fehler melden sollte,
+// stand danach nicht mehr auf dem Stapel, und die Ausgabe brach mitten
+// im Wort ab. Also wird der Stapelzeiger SELBST gemessen: `stage`
+// merkt sich, wo er stand, und jede Verschachtelungsstufe rechnet nach,
+// wie weit sie sich davon entfernt hat. Wer die Grenze reisst, bekommt
+// ERR_DEPTH -- das ist derselbe definierte Fehler wie bei zu tiefer
+// Rekursion, und er kommt jetzt aus einer Messung.
+const STACK_LIMIT: u64 = 57344
+
+// Ein Methodenrahmen. Sieben Argumente, acht Ortsvariablen, ein
+// Rueckgabeplatz und ein Steuerwort -- alles aneinander, damit ein
+// Rahmen EINE Zuteilung ist.
+const FRAME_BYTES: u64 = 400
+const F_SCOPE: u64 = 0
+const F_ARGS: u64 = 8 // 7 * 24
+const F_LOCALS: u64 = 176 // 8 * 24
+const F_RET: u64 = 368
+const F_CTL: u64 = 392
+
+// Was das Steuerwort sagt.
+const C_NONE: u64 = 0
+const C_RETURN: u64 = 1
+const C_BREAK: u64 = 2
+const C_CONTINUE: u64 = 3
+
+fn g(state: u64, off: u64) -> u64 {
+    return kstate.get(state, kstate.AML_OFF + off)
+}
+
+fn s(state: u64, off: u64, v: u64) {
+    kstate.set(state, kstate.AML_OFF + off, v)
+}
+
+fn budget_set(state: u64, n: u64) {
+    s(state, A_BUDGET, n)
+    s(state, A_DEPTH, 0)
+    s(state, A_CALLS, 0)
+}
+
+// Wo der Stapel steht. Das ist die einzige Zeile Assembler in dieser
+// Datei, und sie liest ein Register, das keine Sprache benennt.
+fn sp_now() -> u64 {
+    return asm("mov rax, rsp", out("rax"))
+}
+
+// Hier faengt der Interpreter an. Alles, was tiefer geht, wird von hier
+// aus gemessen.
+fn stack_base(state: u64) {
+    s(state, A_SP0, sp_now())
+    s(state, A_SPHI, 0)
+}
+
+// Wie viele Oktette Kernstapel der tiefste Punkt gekostet hat.
+fn stack_high(state: u64) -> u64 {
+    return g(state, A_SPHI)
+}
+
+// Den Hoechststand zuruecksetzen -- damit sich messen laesst, WELCHER
+// Abschnitt den Stapel verbraucht: das Laden oder das Ausfuehren.
+fn stack_clear(state: u64) {
+    s(state, A_SPHI, 0)
+}
+
+fn depth_high(state: u64) -> u64 {
+    return g(state, A_DEPTHHI)
+}
+
+fn budget_left(state: u64) -> u64 {
+    return g(state, A_BUDGET)
+}
+
+fn depth_reset(state: u64) {
+    s(state, A_DEPTH, 0)
+    s(state, A_CALLS, 0)
+}
+
+fn notifies(state: u64) -> u64 {
+    return g(state, A_NOTIFY)
+}
+
+// ---------------------------------------- welche Opcodes vorkamen
+//
+// Nicht Zierde: die Abnahme rechnet die ABDECKUNG aus -- wie viele der
+// Opcodes, die in der DSDT dieser Maschine wirklich stehen, dieser
+// Interpreter kennt. Dazu muss er sagen koennen, welche er gesehen hat.
+
+fn seen_mark(state: u64, op: u64) {
+    let w: u64 = A_OPS + (op / 64) * 8
+    s(state, w, g(state, w) | (1 << (op & 63)))
+}
+
+fn seen_get(state: u64, op: u64) -> bool {
+    let w: u64 = A_OPS + (op / 64) * 8
+    return (g(state, w) & (1 << (op & 63))) != 0
+}
+
+fn seen_ext_mark(state: u64, op: u64) {
+    let w: u64 = A_EXT + (op / 64) * 8
+    s(state, w, g(state, w) | (1 << (op & 63)))
+}
+
+fn seen_ext(state: u64, op: u64) -> bool {
+    let w: u64 = A_EXT + (op / 64) * 8
+    return (g(state, w) & (1 << (op & 63))) != 0
+}
+
+// ------------------------------------------------------------ Rahmen
+
+fn frame_new(state: u64) -> u64 {
+    return amlns.heap_alloc(state, FRAME_BYTES)
+}
+
+fn frame_scope(f: u64) -> u64 {
+    return amlns.rd64(f + F_SCOPE)
+}
+
+fn frame_scope_set(f: u64, v: u64) {
+    amlns.wr64(f + F_SCOPE, v)
+}
+
+fn frame_arg(f: u64, i: u64) -> u64 {
+    return f + F_ARGS + i * amlobj.OBJ_BYTES
+}
+
+fn frame_local(f: u64, i: u64) -> u64 {
+    return f + F_LOCALS + i * amlobj.OBJ_BYTES
+}
+
+fn frame_ret(f: u64) -> u64 {
+    return f + F_RET
+}
+
+fn frame_ctl(f: u64) -> u64 {
+    return amlns.rd64(f + F_CTL)
+}
+
+fn frame_ctl_set(f: u64, v: u64) {
+    amlns.wr64(f + F_CTL, v)
+}
+
+// ------------------------------------------------------ Buch fuehren
+
+// Ein Schritt. Gibt false zurueck, wenn das Budget alle ist -- und dann
+// steht ERR_BUDGET, und jede Schleife oben bricht ab.
+fn step(state: u64) -> bool {
+    let b: u64 = g(state, A_BUDGET)
+    if b == 0 {
+        amlns.err_set(state, amlns.ERR_BUDGET)
+        return false
+    }
+    s(state, A_BUDGET, b -% 1)
+    return true
+}
+
+fn enter(state: u64) -> bool {
+    let d: u64 = g(state, A_DEPTH)
+    if d >= DEPTH_MAX {
+        amlns.err_set(state, amlns.ERR_DEPTH)
+        return false
+    }
+    let sp0: u64 = g(state, A_SP0)
+    let sp: u64 = sp_now()
+    if sp0 != 0 && sp0 > sp {
+        let used: u64 = sp0 -% sp
+        if used > g(state, A_SPHI) {
+            s(state, A_SPHI, used)
+        }
+        if used > STACK_LIMIT {
+            amlns.err_set(state, amlns.ERR_DEPTH)
+            return false
+        }
+    }
+    s(state, A_DEPTH, d + 1)
+    if d + 1 > g(state, A_DEPTHHI) {
+        s(state, A_DEPTHHI, d + 1)
+    }
+    return true
+}
+
+fn leave(state: u64) {
+    let d: u64 = g(state, A_DEPTH)
+    if d != 0 {
+        s(state, A_DEPTH, d -% 1)
+    }
+}
+
+fn bad(state: u64) -> bool {
+    return amlns.err(state) != amlns.ERR_OK
+}
+
+// ------------------------------------------------------- Verweise aufloesen
+
+// Aus einem Verweis den Wert machen. Arbeitet an Ort und Stelle.
+fn deref(state: u64, o: u64) {
+    let t: u64 = amlobj.otype(o)
+    if t == amlobj.OT_REF_SLOT {
+        amlobj.ocopy(o, amlobj.ov1(o))
+        return
+    }
+    if t == amlobj.OT_REF_BYTE {
+        amlobj.oint(o, amlns.rd8(amlobj.ov1(o)))
+        return
+    }
+    if t == amlobj.OT_REF_NODE {
+        node_value(state, amlobj.ov1(o), o)
+        return
+    }
+}
+
+// Den Wert eines Knotens holen.
+fn node_value(state: u64, node: u64, dst: u64) {
+    if node == amlns.NONE {
+        amlobj.oset(dst, amlobj.OT_NONE, 0, 0)
+        amlns.err_set(state, amlns.ERR_NOTFOUND)
+        return
+    }
+    let k: u64 = amlns.node_kind(state, node)
+    if k == amlns.NK_NAME {
+        let cached: u64 = amlns.node_b(state, node)
+        if cached != 0 {
+            amlobj.ocopy(dst, cached)
+            return
+        }
+        // Noch nie gelesen: das AML hinter dem Namen auswerten und das
+        // Ergebnis merken. Ein `Name` ist konstant -- ein zweites Lesen
+        // muesste dasselbe ergeben, und die Halde ist nicht unendlich.
+        let f: u64 = frame_new(state)
+        if f == 0 {
+            amlobj.oset(dst, amlobj.OT_NONE, 0, 0)
+            return
+        }
+        frame_scope_set(f, amlns.node_parent(state, node))
+        let o: u64 = amlobj.obj_new(state)
+        if o == 0 {
+            amlobj.oset(dst, amlobj.OT_NONE, 0, 0)
+            return
+        }
+        ev(state, f, amlns.node_a(state, node), o)
+        amlns.set_b(state, node, o)
+        amlobj.ocopy(dst, o)
+        return
+    }
+    if k == amlns.NK_FIELD {
+        amlobj.oint(dst, amlobj.field_read(state, node))
+        return
+    }
+    if k == amlns.NK_BUFFIELD {
+        amlobj.oint(dst, buffield_read(state, node))
+        return
+    }
+    // Geraet, Bereich, Region, Mutex: der Knoten selbst ist der Wert.
+    amlobj.oset(dst, amlobj.OT_REF_NODE, node, 0)
+}
+
+// ----------------------------------------------- Felder in einem Puffer
+//
+// `CreateDWordField(PRR0, 5, PRRI)` legt einen Namen an, der auf vier
+// Oktette IN EINEM PUFFER zeigt. Der Knoten haelt das Pufferobjekt, den
+// Bitversatz und die Bitbreite.
+fn buffield_read(state: u64, node: u64) -> u64 {
+    let bo: u64 = amlns.node_a(state, node)
+    let bit: u64 = amlns.node_b(state, node)
+    let width: u64 = amlns.node_c(state, node)
+    if amlobj.otype(bo) != amlobj.OT_BUF {
+        amlns.err_set(state, amlns.ERR_TYPE)
+        return 0
+    }
+    let at: u64 = amlobj.ov1(bo)
+    let len: u64 = amlobj.ov2(bo)
+    var v: u64 = 0
+    var i: u64 = 0
+    while i < width {
+        let b: u64 = bit + i
+        if b / 8 >= len {
+            break
+        }
+        if (amlns.rd8(at + b / 8) & (1 << (b & 7))) != 0 {
+            v = v | (1 << i)
+        }
+        i = i + 1
+    }
+    return v
+}
+
+fn buffield_write(state: u64, node: u64, val: u64) {
+    let bo: u64 = amlns.node_a(state, node)
+    let bit: u64 = amlns.node_b(state, node)
+    let width: u64 = amlns.node_c(state, node)
+    if amlobj.otype(bo) != amlobj.OT_BUF {
+        amlns.err_set(state, amlns.ERR_TYPE)
+        return
+    }
+    let at: u64 = amlobj.ov1(bo)
+    let len: u64 = amlobj.ov2(bo)
+    var i: u64 = 0
+    while i < width {
+        let b: u64 = bit + i
+        if b / 8 >= len {
+            break
+        }
+        var byte: u64 = amlns.rd8(at + b / 8)
+        if (val & (1 << i)) != 0 {
+            byte = byte | (1 << (b & 7))
+        } else {
+            byte = byte & (0xFF -% (1 << (b & 7)))
+        }
+        amlns.wr8(at + b / 8, byte)
+        i = i + 1
+    }
+}
+
+// --------------------------------------------------------------- Store
+
+// Ein Objekt in ein Ziel legen. `tgt` ist das, was `ev_target` geliefert
+// hat.
+fn store_into(state: u64, src: u64, tgt: u64) {
+    let t: u64 = amlobj.otype(tgt)
+    if t == amlobj.OT_NONE {
+        return // Ziel war NullName: das Ergebnis wird verworfen
+    }
+    if t == amlobj.OT_REF_SLOT {
+        amlobj.ocopy(amlobj.ov1(tgt), src)
+        return
+    }
+    if t == amlobj.OT_REF_BYTE {
+        amlns.wr8(amlobj.ov1(tgt), amlobj.to_int(src))
+        return
+    }
+    if t == amlobj.OT_DEBUG {
+        return
+    }
+    if t != amlobj.OT_REF_NODE {
+        amlns.err_set(state, amlns.ERR_TYPE)
+        return
+    }
+    let node: u64 = amlobj.ov1(tgt)
+    if node == amlns.NONE {
+        amlns.err_set(state, amlns.ERR_NOTFOUND)
+        return
+    }
+    let k: u64 = amlns.node_kind(state, node)
+    if k == amlns.NK_FIELD {
+        amlobj.field_write(state, node, amlobj.to_int(src))
+        return
+    }
+    if k == amlns.NK_BUFFIELD {
+        buffield_write(state, node, amlobj.to_int(src))
+        return
+    }
+    if k == amlns.NK_NAME {
+        let o: u64 = amlobj.obj_new(state)
+        if o == 0 {
+            return
+        }
+        amlobj.ocopy(o, src)
+        amlns.set_b(state, node, o)
+        return
+    }
+    amlns.err_set(state, amlns.ERR_TYPE)
+}
+
+// ------------------------------------------------------- ein Ziel lesen
+//
+// Ein Ziel ist KEIN Wert: `Store(Zero, Local0)` will den PLATZ von
+// Local0, nicht seinen Inhalt. Deshalb gibt es diese zweite Fassung von
+// `ev`, und deshalb liefert sie Verweise.
+fn ev_target(state: u64, f: u64, p: u64, dst: u64) -> u64 {
+    if !step(state) {
+        return 0
+    }
+    let c: u64 = amlns.rd8(p)
+    if c == 0x00 {
+        // NullName -- "das Ergebnis interessiert nicht"
+        amlobj.oset(dst, amlobj.OT_NONE, 0, 0)
+        return p + 1
+    }
+    if c >= 0x60 && c <= 0x67 {
+        seen_mark(state, c)
+        amlobj.oset(dst, amlobj.OT_REF_SLOT, frame_local(f, c -% 0x60), 0)
+        return p + 1
+    }
+    if c >= 0x68 && c <= 0x6E {
+        seen_mark(state, c)
+        amlobj.oset(dst, amlobj.OT_REF_SLOT, frame_arg(f, c -% 0x68), 0)
+        return p + 1
+    }
+    if c == 0x5B && amlns.rd8(p + 1) == 0x31 {
+        seen_ext_mark(state, 0x31)
+        amlobj.oset(dst, amlobj.OT_DEBUG, 0, 0)
+        return p + 2
+    }
+    // Index, DerefOf, RefOf duerfen ebenfalls als Ziel stehen.
+    if c == 0x88 || c == 0x83 || c == 0x71 {
+        return ev(state, f, p, dst)
+    }
+    // Sonst: ein Name. Der PLATZ, nicht der Wert.
+    if c == 0x5C || c == 0x5E || c == 0x2E || c == 0x2F || c == 0x5F
+        || (c >= 0x41 && c <= 0x5A) {
+        var out: [u64; 1] = [0 as u64; 1]
+        let node: u64 = amlns.walk(state, frame_scope(f), p, (&out[0]) as u64)
+        amlobj.oset(dst, amlobj.OT_REF_NODE, node, 0)
+        if node == amlns.NONE {
+            amlns.err_set(state, amlns.ERR_NOTFOUND)
+        }
+        return out[0]
+    }
+    amlns.err_set(state, amlns.ERR_OPCODE)
+    return 0
+}
+
+// Ein Ziel lesen und gleich hineinschreiben. Das ist das dritte
+// Argument fast jedes Rechenbefehls (`Add(a, b, ZIEL)`).
+fn ev_store_target(state: u64, f: u64, p: u64, val: u64) -> u64 {
+    var t: [u64; 3] = [0 as u64; 3]
+    let q: u64 = ev_target(state, f, p, (&t[0]) as u64)
+    if q == 0 {
+        return 0
+    }
+    store_into(state, val, (&t[0]) as u64)
+    return q
+}
+
+// --------------------------------------------------- zwei Zahlen holen
+
+// Liest zwei TermArgs und legt sie als Zahlen nach a und b.
+fn two_ints(state: u64, f: u64, p: u64, a: u64, b: u64) -> u64 {
+    var x: [u64; 3] = [0 as u64; 3]
+    var y: [u64; 3] = [0 as u64; 3]
+    var q: u64 = ev(state, f, p, (&x[0]) as u64)
+    if q == 0 {
+        return 0
+    }
+    deref(state, (&x[0]) as u64)
+    q = ev(state, f, q, (&y[0]) as u64)
+    if q == 0 {
+        return 0
+    }
+    deref(state, (&y[0]) as u64)
+    amlns.wr64(a, amlobj.to_int((&x[0]) as u64))
+    amlns.wr64(b, amlobj.to_int((&y[0]) as u64))
+    return q
+}
+
+// AML rechnet modulo 2^64 und verschiebt um 64 oder mehr zu null. Beides
+// steht hier EINMAL, damit es nicht an zwoelf Stellen falsch ist.
+fn shl(v: u64, n: u64) -> u64 {
+    if n >= 64 {
+        return 0
+    }
+    return v << n
+}
+
+fn shr(v: u64, n: u64) -> u64 {
+    if n >= 64 {
+        return 0
+    }
+    return v >> n
+}
+
+// --------------------------------------------------- der Auswerter
+
+// Wertet EINEN Term ab `p` aus und legt das Ergebnis nach `dst`.
+// Rueckgabe: die Stelle dahinter, oder 0 bei einem Fehler.
+fn ev(state: u64, f: u64, p: u64, dst: u64) -> u64 {
+    if !step(state) {
+        return 0
+    }
+    if !enter(state) {
+        return 0
+    }
+    let r: u64 = ev_inner(state, f, p, dst)
+    leave(state)
+    return r
+}
+
+fn ev_inner(state: u64, f: u64, p: u64, dst: u64) -> u64 {
+    let c: u64 = amlns.rd8(p)
+    amlobj.oset(dst, amlobj.OT_NONE, 0, 0)
+
+    // ------------------------------------------------ Konstanten
+    if c == 0x00 {
+        seen_mark(state, c)
+        amlobj.oint(dst, 0)
+        return p + 1
+    }
+    if c == 0x01 {
+        seen_mark(state, c)
+        amlobj.oint(dst, 1)
+        return p + 1
+    }
+    if c == 0xFF {
+        seen_mark(state, c)
+        amlobj.oint(dst, 0xFFFFFFFFFFFFFFFF)
+        return p + 1
+    }
+    if c == 0x0A {
+        seen_mark(state, c)
+        amlobj.oint(dst, amlns.rd8(p + 1))
+        return p + 2
+    }
+    if c == 0x0B {
+        seen_mark(state, c)
+        amlobj.oint(dst, amlns.rd16(p + 1))
+        return p + 3
+    }
+    if c == 0x0C {
+        seen_mark(state, c)
+        amlobj.oint(dst, amlns.rd32(p + 1))
+        return p + 5
+    }
+    if c == 0x0E {
+        seen_mark(state, c)
+        amlobj.oint(dst, amlns.rd64(p + 1))
+        return p + 9
+    }
+    if c == 0x0D { // Zeichenkette
+        seen_mark(state, c)
+        var n: u64 = 0
+        while amlns.rd8(p + 1 + n) != 0 {
+            n = n + 1
+        }
+        amlobj.oset(dst, amlobj.OT_STR, p + 1, n)
+        return p + 2 + n
+    }
+
+    // ------------------------------------------------ Arg und Local
+    if c >= 0x60 && c <= 0x67 {
+        seen_mark(state, c)
+        amlobj.ocopy(dst, frame_local(f, c -% 0x60))
+        return p + 1
+    }
+    if c >= 0x68 && c <= 0x6E {
+        seen_mark(state, c)
+        amlobj.ocopy(dst, frame_arg(f, c -% 0x68))
+        return p + 1
+    }
+
+    // ------------------------------------------------ Puffer und Paket
+    if c == 0x11 {
+        return ev_buffer(state, f, p, dst)
+    }
+    if c == 0x12 || c == 0x13 {
+        return ev_package(state, f, p, dst)
+    }
+
+    // ------------------------------------------------ Steuerung
+    if c == 0xA0 {
+        return ev_if(state, f, p)
+    }
+    if c == 0xA1 { // Else ohne If davor: ueberspringen
+        seen_mark(state, c)
+        return skip_pkg(p)
+    }
+    if c == 0xA2 {
+        return ev_while(state, f, p)
+    }
+    if c == 0xA4 { // Return
+        seen_mark(state, c)
+        let q: u64 = ev(state, f, p + 1, frame_ret(f))
+        if q == 0 {
+            return 0
+        }
+        deref(state, frame_ret(f))
+        frame_ctl_set(f, C_RETURN)
+        return q
+    }
+    if c == 0xA5 { // Break
+        seen_mark(state, c)
+        frame_ctl_set(f, C_BREAK)
+        return p + 1
+    }
+    if c == 0x9F { // Continue
+        seen_mark(state, c)
+        frame_ctl_set(f, C_CONTINUE)
+        return p + 1
+    }
+    if c == 0xA3 { // Noop
+        seen_mark(state, c)
+        return p + 1
+    }
+    if c == 0xCC { // BreakPoint -- fuer uns dasselbe wie Noop
+        seen_mark(state, c)
+        return p + 1
+    }
+
+    // ------------------------------------------------ Store
+    if c == 0x70 || c == 0x9D {
+        return ev_store(state, f, p, dst, c)
+    }
+
+    // ------------------------------------------------ Rechnen
+    if c == 0x72 || c == 0x74 || c == 0x77 || c == 0x79 || c == 0x7A
+        || c == 0x7B || c == 0x7C || c == 0x7D || c == 0x7E || c == 0x7F
+        || c == 0x85 {
+        return ev_binary(state, f, p, dst, c)
+    }
+    if c == 0x78 {
+        return ev_divide(state, f, p, dst)
+    }
+    if c == 0x80 || c == 0x81 || c == 0x82 { // Not, FindSetLeft/RightBit
+        return ev_unary(state, f, p, dst, c)
+    }
+    if c == 0x75 || c == 0x76 { // Increment, Decrement
+        return ev_incdec(state, f, p, dst, c)
+    }
+
+    // ------------------------------------------------ Vergleichen
+    if c == 0x90 || c == 0x91 || c == 0x93 || c == 0x94 || c == 0x95 {
+        return ev_compare(state, f, p, dst, c, 0)
+    }
+    if c == 0x92 {
+        let nx: u64 = amlns.rd8(p + 1)
+        if nx == 0x93 || nx == 0x94 || nx == 0x95 {
+            seen_mark(state, c)
+            return ev_compare(state, f, p + 1, dst, nx, 1)
+        }
+        seen_mark(state, c)
+        return ev_lnot(state, f, p, dst)
+    }
+
+    // ------------------------------------------------ Verweise
+    if c == 0x88 {
+        return ev_index(state, f, p, dst)
+    }
+    if c == 0x83 { // DerefOf
+        seen_mark(state, c)
+        let q: u64 = ev(state, f, p + 1, dst)
+        if q == 0 {
+            return 0
+        }
+        deref(state, dst)
+        return q
+    }
+    if c == 0x71 { // RefOf
+        seen_mark(state, c)
+        return ev_target(state, f, p + 1, dst)
+    }
+    if c == 0x87 || c == 0x8E { // SizeOf, ObjectType
+        return ev_sizeof(state, f, p, dst, c)
+    }
+
+    // ------------------------------------------------ Umwandeln
+    if c == 0x96 || c == 0x99 || c == 0x97 || c == 0x98 {
+        return ev_convert(state, f, p, dst, c)
+    }
+
+    // ------------------------------------------------ Namen anlegen
+    if c == 0x08 {
+        return ev_name(state, f, p)
+    }
+    if c == 0x8A || c == 0x8B || c == 0x8C || c == 0x8D || c == 0x8F {
+        return ev_createfield(state, f, p, c)
+    }
+
+    // ------------------------------------------------ Notify
+    if c == 0x86 {
+        seen_mark(state, c)
+        return ev_notify(state, f, p)
+    }
+
+    // ------------------------------------------------ erweiterte Opcodes
+    if c == 0x5B {
+        return ev_ext(state, f, p, dst)
+    }
+
+    // ------------------------------------------------ ein Name
+    if c == 0x5C || c == 0x5E || c == 0x2E || c == 0x2F || c == 0x5F
+        || (c >= 0x41 && c <= 0x5A) {
+        return ev_namestring(state, f, p, dst)
+    }
+
+    amlns.err_set(state, amlns.ERR_OPCODE)
+    return 0
+}
+
+// ================================================================
+// DIE ZWEIGE, DIE ZWISCHENPLAETZE BRAUCHEN, ALS EIGENE FUNKTIONEN
+// ================================================================
+//
+// WARUM SIE NICHT IN `ev_inner` STEHEN, wo sie hingehoeren wuerden.
+// Firn legt die Zwischenplaetze ALLER Zweige einer Funktion in EINEM
+// Rahmen an, gleich welcher Zweig genommen wird. `ev_inner` mit einem
+// Dutzend Plaetzen zu je 24 Oktetten kostete damit rund 1600 Oktette
+// Kernstapel JE VERSCHACHTELUNGSSTUFE -- gemessen mit der Stapelwache
+// oben: 52064 Oktette bei 48 Stufen, bei einem Kernstapel von 65536.
+// Das ist kein theoretisches Problem: der Rekursionstest `amldeep` hat
+// den Stapel wirklich ueberschrieben, und die Fehlermeldung, die das
+// haette sagen sollen, stand danach nicht mehr da.
+//
+// Aufgeteilt kostet eine Stufe nur noch den kleinen Rahmen von
+// `ev_inner` plus den EINEN Zweig, der wirklich genommen wird.
+
+fn skip_pkg(p: u64) -> u64 {
+    var out: [u64; 1] = [0 as u64; 1]
+    let ln: u64 = amlns.pkglen(p + 1, (&out[0]) as u64)
+    return p + 1 + ln
+}
+
+fn ev_store(state: u64, f: u64, p: u64, dst: u64, c: u64) -> u64 {
+    seen_mark(state, c)
+    var v: [u64; 3] = [0 as u64; 3]
+    var q: u64 = ev(state, f, p + 1, (&v[0]) as u64)
+    if q == 0 {
+        return 0
+    }
+    deref(state, (&v[0]) as u64)
+    q = ev_store_target(state, f, q, (&v[0]) as u64)
+    if q == 0 {
+        return 0
+    }
+    amlobj.ocopy(dst, (&v[0]) as u64)
+    return q
+}
+
+fn ev_unary(state: u64, f: u64, p: u64, dst: u64, c: u64) -> u64 {
+    seen_mark(state, c)
+    var x: [u64; 3] = [0 as u64; 3]
+    let q: u64 = ev(state, f, p + 1, (&x[0]) as u64)
+    if q == 0 {
+        return 0
+    }
+    deref(state, (&x[0]) as u64)
+    let v: u64 = amlobj.to_int((&x[0]) as u64)
+    var r: u64 = 0
+    if c == 0x80 {
+        r = ~v
+    }
+    if c == 0x81 {
+        var i: u64 = 64
+        while i > 0 {
+            if (v & shl(1, i -% 1)) != 0 {
+                r = i
+                break
+            }
+            i = i -% 1
+        }
+    }
+    if c == 0x82 {
+        var i: u64 = 0
+        while i < 64 {
+            if (v & shl(1, i)) != 0 {
+                r = i + 1
+                break
+            }
+            i = i + 1
+        }
+    }
+    amlobj.oint(dst, r)
+    return ev_store_target(state, f, q, dst)
+}
+
+fn ev_incdec(state: u64, f: u64, p: u64, dst: u64, c: u64) -> u64 {
+    seen_mark(state, c)
+    var t: [u64; 3] = [0 as u64; 3]
+    var v: [u64; 3] = [0 as u64; 3]
+    let q: u64 = ev_target(state, f, p + 1, (&t[0]) as u64)
+    if q == 0 {
+        return 0
+    }
+    amlobj.ocopy((&v[0]) as u64, (&t[0]) as u64)
+    deref(state, (&v[0]) as u64)
+    var n: u64 = amlobj.to_int((&v[0]) as u64)
+    if c == 0x75 {
+        n = n +% 1
+    } else {
+        n = n -% 1
+    }
+    amlobj.oint(dst, n)
+    store_into(state, dst, (&t[0]) as u64)
+    return q
+}
+
+fn ev_lnot(state: u64, f: u64, p: u64, dst: u64) -> u64 {
+    var x: [u64; 3] = [0 as u64; 3]
+    let q: u64 = ev(state, f, p + 1, (&x[0]) as u64)
+    if q == 0 {
+        return 0
+    }
+    deref(state, (&x[0]) as u64)
+    if amlobj.truth((&x[0]) as u64) {
+        amlobj.oint(dst, 0)
+    } else {
+        amlobj.oint(dst, 0xFFFFFFFFFFFFFFFF)
+    }
+    return q
+}
+
+fn ev_sizeof(state: u64, f: u64, p: u64, dst: u64, c: u64) -> u64 {
+    seen_mark(state, c)
+    var x: [u64; 3] = [0 as u64; 3]
+    let q: u64 = ev(state, f, p + 1, (&x[0]) as u64)
+    if q == 0 {
+        return 0
+    }
+    deref(state, (&x[0]) as u64)
+    if c == 0x87 {
+        amlobj.oint(dst, amlobj.ov2((&x[0]) as u64))
+    } else {
+        amlobj.oint(dst, amlobj.otype((&x[0]) as u64))
+    }
+    return q
+}
+
+fn ev_notify(state: u64, f: u64, p: u64) -> u64 {
+    var a: [u64; 3] = [0 as u64; 3]
+    var b: [u64; 3] = [0 as u64; 3]
+    var q: u64 = ev_target(state, f, p + 1, (&a[0]) as u64)
+    if q == 0 {
+        return 0
+    }
+    q = ev(state, f, q, (&b[0]) as u64)
+    if q == 0 {
+        return 0
+    }
+    s(state, A_NOTIFY, g(state, A_NOTIFY) + 1)
+    return q
+}
+
+// --------------------------------------------------------- die Teile
+
+fn ev_buffer(state: u64, f: u64, p: u64, dst: u64) -> u64 {
+    seen_mark(state, 0x11)
+    var out: [u64; 1] = [0 as u64; 1]
+    let ln: u64 = amlns.pkglen(p + 1, (&out[0]) as u64)
+    let end: u64 = p + 1 + ln
+    var sz: [u64; 3] = [0 as u64; 3]
+    let j: u64 = ev(state, f, out[0], (&sz[0]) as u64)
+    if j == 0 {
+        return 0
+    }
+    deref(state, (&sz[0]) as u64)
+    var want: u64 = amlobj.to_int((&sz[0]) as u64)
+    let have: u64 = end -% j
+    if want < have {
+        want = have
+    }
+    if want > 0x10000 {
+        amlns.err_set(state, amlns.ERR_TYPE)
+        return 0
+    }
+    let o: u64 = amlobj.obj_buf(state, want)
+    if o == 0 {
+        return 0
+    }
+    var i: u64 = 0
+    while i < have {
+        amlns.wr8(amlobj.ov1(o) + i, amlns.rd8(j + i))
+        i = i + 1
+    }
+    amlobj.ocopy(dst, o)
+    return end
+}
+
+fn ev_package(state: u64, f: u64, p: u64, dst: u64) -> u64 {
+    let c: u64 = amlns.rd8(p)
+    seen_mark(state, c)
+    var out: [u64; 1] = [0 as u64; 1]
+    let ln: u64 = amlns.pkglen(p + 1, (&out[0]) as u64)
+    let end: u64 = p + 1 + ln
+    var j: u64 = out[0]
+    var n: u64 = 0
+    if c == 0x12 {
+        n = amlns.rd8(j)
+        j = j + 1
+    } else {
+        var sz: [u64; 3] = [0 as u64; 3]
+        j = ev(state, f, j, (&sz[0]) as u64)
+        if j == 0 {
+            return 0
+        }
+        deref(state, (&sz[0]) as u64)
+        n = amlobj.to_int((&sz[0]) as u64)
+    }
+    if n > 512 {
+        amlns.err_set(state, amlns.ERR_TYPE)
+        return 0
+    }
+    let o: u64 = amlobj.obj_pkg(state, n)
+    if o == 0 {
+        return 0
+    }
+    var i: u64 = 0
+    while j < end && i < n {
+        j = ev(state, f, j, amlobj.pkg_at(o, i))
+        if j == 0 {
+            return 0
+        }
+        i = i + 1
+    }
+    amlobj.ocopy(dst, o)
+    return end
+}
+
+fn ev_if(state: u64, f: u64, p: u64) -> u64 {
+    seen_mark(state, 0xA0)
+    var out: [u64; 1] = [0 as u64; 1]
+    let ln: u64 = amlns.pkglen(p + 1, (&out[0]) as u64)
+    let end: u64 = p + 1 + ln
+    var pr: [u64; 3] = [0 as u64; 3]
+    let j: u64 = ev(state, f, out[0], (&pr[0]) as u64)
+    if j == 0 {
+        return 0
+    }
+    deref(state, (&pr[0]) as u64)
+    if amlobj.truth((&pr[0]) as u64) {
+        s(state, A_LASTIF, 1)
+        exec_list(state, f, j, end)
+    } else {
+        s(state, A_LASTIF, 0)
+    }
+    return end
+}
+
+fn ev_while(state: u64, f: u64, p: u64) -> u64 {
+    seen_mark(state, 0xA2)
+    var out: [u64; 1] = [0 as u64; 1]
+    let ln: u64 = amlns.pkglen(p + 1, (&out[0]) as u64)
+    let end: u64 = p + 1 + ln
+    let pred: u64 = out[0]
+    while true {
+        if bad(state) {
+            break
+        }
+        var pr: [u64; 3] = [0 as u64; 3]
+        let j: u64 = ev(state, f, pred, (&pr[0]) as u64)
+        if j == 0 {
+            break
+        }
+        deref(state, (&pr[0]) as u64)
+        if !amlobj.truth((&pr[0]) as u64) {
+            break
+        }
+        exec_list(state, f, j, end)
+        let ctl: u64 = frame_ctl(f)
+        if ctl == C_RETURN {
+            break
+        }
+        if ctl == C_BREAK {
+            frame_ctl_set(f, C_NONE)
+            break
+        }
+        if ctl == C_CONTINUE {
+            frame_ctl_set(f, C_NONE)
+        }
+    }
+    return end
+}
+
+fn ev_binary(state: u64, f: u64, p: u64, dst: u64, c: u64) -> u64 {
+    seen_mark(state, c)
+    var a: [u64; 1] = [0 as u64; 1]
+    var b: [u64; 1] = [0 as u64; 1]
+    let q: u64 = two_ints(state, f, p + 1, (&a[0]) as u64, (&b[0]) as u64)
+    if q == 0 {
+        return 0
+    }
+    var r: u64 = 0
+    if c == 0x72 {
+        r = a[0] +% b[0]
+    }
+    if c == 0x74 {
+        r = a[0] -% b[0]
+    }
+    if c == 0x77 {
+        r = a[0] *% b[0]
+    }
+    if c == 0x79 {
+        r = shl(a[0], b[0])
+    }
+    if c == 0x7A {
+        r = shr(a[0], b[0])
+    }
+    if c == 0x7B {
+        r = a[0] & b[0]
+    }
+    if c == 0x7C {
+        r = ~(a[0] & b[0])
+    }
+    if c == 0x7D {
+        r = a[0] | b[0]
+    }
+    if c == 0x7E {
+        r = ~(a[0] | b[0])
+    }
+    if c == 0x7F {
+        r = a[0] ^ b[0]
+    }
+    if c == 0x85 {
+        if b[0] == 0 {
+            amlns.err_set(state, amlns.ERR_DIV0)
+            return 0
+        }
+        r = a[0] % b[0]
+    }
+    amlobj.oint(dst, r)
+    return ev_store_target(state, f, q, dst)
+}
+
+fn ev_divide(state: u64, f: u64, p: u64, dst: u64) -> u64 {
+    seen_mark(state, 0x78)
+    var a: [u64; 1] = [0 as u64; 1]
+    var b: [u64; 1] = [0 as u64; 1]
+    var q: u64 = two_ints(state, f, p + 1, (&a[0]) as u64, (&b[0]) as u64)
+    if q == 0 {
+        return 0
+    }
+    if b[0] == 0 {
+        amlns.err_set(state, amlns.ERR_DIV0)
+        return 0
+    }
+    var rest: [u64; 3] = [0 as u64; 3]
+    amlobj.oint((&rest[0]) as u64, a[0] % b[0])
+    q = ev_store_target(state, f, q, (&rest[0]) as u64)
+    if q == 0 {
+        return 0
+    }
+    amlobj.oint(dst, a[0] / b[0])
+    return ev_store_target(state, f, q, dst)
+}
+
+fn ev_compare(state: u64, f: u64, p: u64, dst: u64, c: u64,
+    negate: u64) -> u64 {
+    seen_mark(state, c)
+    var x: [u64; 3] = [0 as u64; 3]
+    var y: [u64; 3] = [0 as u64; 3]
+    var q: u64 = ev(state, f, p + 1, (&x[0]) as u64)
+    if q == 0 {
+        return 0
+    }
+    deref(state, (&x[0]) as u64)
+    q = ev(state, f, q, (&y[0]) as u64)
+    if q == 0 {
+        return 0
+    }
+    deref(state, (&y[0]) as u64)
+    var r: bool = false
+    if c == 0x90 {
+        r = amlobj.truth((&x[0]) as u64) && amlobj.truth((&y[0]) as u64)
+    } else {
+        if c == 0x91 {
+            r = amlobj.truth((&x[0]) as u64) || amlobj.truth((&y[0]) as u64)
+        } else {
+            let a: u64 = amlobj.to_int((&x[0]) as u64)
+            let b: u64 = amlobj.to_int((&y[0]) as u64)
+            if c == 0x93 {
+                r = a == b
+            }
+            if c == 0x94 {
+                r = a > b
+            }
+            if c == 0x95 {
+                r = a < b
+            }
+        }
+    }
+    if negate != 0 {
+        r = !r
+    }
+    if r {
+        amlobj.oint(dst, 0xFFFFFFFFFFFFFFFF)
+    } else {
+        amlobj.oint(dst, 0)
+    }
+    return q
+}
+
+fn ev_index(state: u64, f: u64, p: u64, dst: u64) -> u64 {
+    seen_mark(state, 0x88)
+    var src: [u64; 3] = [0 as u64; 3]
+    var idx: [u64; 3] = [0 as u64; 3]
+    var q: u64 = ev(state, f, p + 1, (&src[0]) as u64)
+    if q == 0 {
+        return 0
+    }
+    deref(state, (&src[0]) as u64)
+    q = ev(state, f, q, (&idx[0]) as u64)
+    if q == 0 {
+        return 0
+    }
+    deref(state, (&idx[0]) as u64)
+    let i: u64 = amlobj.to_int((&idx[0]) as u64)
+    let t: u64 = amlobj.otype((&src[0]) as u64)
+    if t == amlobj.OT_PKG {
+        if i >= amlobj.ov2((&src[0]) as u64) {
+            amlns.err_set(state, amlns.ERR_TYPE)
+            return 0
+        }
+        amlobj.oset(dst, amlobj.OT_REF_SLOT,
+            amlobj.pkg_at((&src[0]) as u64, i), 0)
+    } else {
+        if t == amlobj.OT_BUF || t == amlobj.OT_STR {
+            if i >= amlobj.ov2((&src[0]) as u64) {
+                amlns.err_set(state, amlns.ERR_TYPE)
+                return 0
+            }
+            amlobj.oset(dst, amlobj.OT_REF_BYTE,
+                amlobj.ov1((&src[0]) as u64) + i, 0)
+        } else {
+            amlns.err_set(state, amlns.ERR_TYPE)
+            return 0
+        }
+    }
+    return ev_store_target(state, f, q, dst)
+}
+
+fn ev_convert(state: u64, f: u64, p: u64, dst: u64, c: u64) -> u64 {
+    seen_mark(state, c)
+    var x: [u64; 3] = [0 as u64; 3]
+    let q: u64 = ev(state, f, p + 1, (&x[0]) as u64)
+    if q == 0 {
+        return 0
+    }
+    deref(state, (&x[0]) as u64)
+    if c == 0x99 { // ToInteger
+        amlobj.oint(dst, amlobj.to_int((&x[0]) as u64))
+        return ev_store_target(state, f, q, dst)
+    }
+    if c == 0x96 { // ToBuffer
+        if amlobj.otype((&x[0]) as u64) == amlobj.OT_INT {
+            let o: u64 = amlobj.obj_buf(state, 8)
+            if o == 0 {
+                return 0
+            }
+            let v: u64 = amlobj.ov1((&x[0]) as u64)
+            var i: u64 = 0
+            while i < 8 {
+                amlns.wr8(amlobj.ov1(o) + i, shr(v, i * 8) & 0xFF)
+                i = i + 1
+            }
+            amlobj.ocopy(dst, o)
+        } else {
+            amlobj.ocopy(dst, (&x[0]) as u64)
+        }
+        return ev_store_target(state, f, q, dst)
+    }
+    // ToHexString und ToDecimalString: eine Zeichenkette auf der Halde.
+    let v: u64 = amlobj.to_int((&x[0]) as u64)
+    let o: u64 = amlobj.obj_buf(state, 24)
+    if o == 0 {
+        return 0
+    }
+    let at: u64 = amlobj.ov1(o)
+    var n: u64 = 0
+    if c == 0x98 {
+        var i: u64 = 16
+        var lead: u64 = 1
+        while i > 0 {
+            let d: u64 = shr(v, (i -% 1) * 4) & 0xF
+            if d != 0 || lead == 0 || i == 1 {
+                lead = 0
+                if d < 10 {
+                    amlns.wr8(at + n, 48 + d)
+                } else {
+                    amlns.wr8(at + n, 55 + d)
+                }
+                n = n + 1
+            }
+            i = i -% 1
+        }
+    } else {
+        var div: u64 = 10000000000000000000
+        var lead: u64 = 1
+        while div > 0 {
+            let d: u64 = (v / div) % 10
+            if d != 0 || lead == 0 || div == 1 {
+                lead = 0
+                amlns.wr8(at + n, 48 + d)
+                n = n + 1
+            }
+            div = div / 10
+        }
+    }
+    amlobj.oset(dst, amlobj.OT_STR, at, n)
+    return ev_store_target(state, f, q, dst)
+}
+
+// `Name(X, wert)` MITTEN IN EINER METHODE. Das gibt es wirklich: QEMUs
+// `IQCR` legt bei jedem Aufruf einen frischen Puffer `PRR0` an und
+// gibt ihn zurueck. Also wird der Knoten angelegt (oder
+// wiederverwendet) und sein Wert JEDES MAL neu gerechnet.
+fn ev_name(state: u64, f: u64, p: u64) -> u64 {
+    seen_mark(state, 0x08)
+    var out: [u64; 1] = [0 as u64; 1]
+    let node: u64 = amlns.walk_create(state, frame_scope(f), p + 1,
+        (&out[0]) as u64, amlns.NK_NAME, amlns.NMAX)
+    if node == amlns.NONE {
+        return 0
+    }
+    amlns.set_kind(state, node, amlns.NK_NAME)
+    amlns.set_a(state, node, out[0])
+    let o: u64 = amlobj.obj_new(state)
+    if o == 0 {
+        return 0
+    }
+    let q: u64 = ev(state, f, out[0], o)
+    if q == 0 {
+        return 0
+    }
+    amlns.set_b(state, node, o)
+    return q
+}
+
+// CreateByteField/WordField/DWordField/QWordField/BitField.
+fn ev_createfield(state: u64, f: u64, p: u64, c: u64) -> u64 {
+    seen_mark(state, c)
+    var src: [u64; 3] = [0 as u64; 3]
+    var idx: [u64; 3] = [0 as u64; 3]
+    var q: u64 = ev(state, f, p + 1, (&src[0]) as u64)
+    if q == 0 {
+        return 0
+    }
+    deref(state, (&src[0]) as u64)
+    q = ev(state, f, q, (&idx[0]) as u64)
+    if q == 0 {
+        return 0
+    }
+    deref(state, (&idx[0]) as u64)
+    if amlobj.otype((&src[0]) as u64) != amlobj.OT_BUF {
+        amlns.err_set(state, amlns.ERR_TYPE)
+        return 0
+    }
+    // Das Pufferobjekt muss den Aufruf ueberleben -- also eine Kopie des
+    // OBJEKTS auf der Halde (nicht der Daten: die sollen dieselben
+    // bleiben, sonst schreibt das Feld in einen anderen Puffer als den,
+    // den die Methode zurueckgibt).
+    let keep: u64 = amlobj.obj_new(state)
+    if keep == 0 {
+        return 0
+    }
+    amlobj.ocopy(keep, (&src[0]) as u64)
+    var bit: u64 = amlobj.to_int((&idx[0]) as u64)
+    var width: u64 = 8
+    if c == 0x8B {
+        width = 16
+    }
+    if c == 0x8A {
+        width = 32
+    }
+    if c == 0x8F {
+        width = 64
+    }
+    if c == 0x8D {
+        width = 1
+    }
+    if c != 0x8D {
+        bit = bit * 8 // bei allen ausser CreateBitField ist es ein Oktettversatz
+    }
+    var out: [u64; 1] = [0 as u64; 1]
+    let node: u64 = amlns.walk_create(state, frame_scope(f), q,
+        (&out[0]) as u64, amlns.NK_BUFFIELD, amlns.NMAX)
+    if node == amlns.NONE {
+        return 0
+    }
+    amlns.set_kind(state, node, amlns.NK_BUFFIELD)
+    amlns.set_a(state, node, keep)
+    amlns.set_b(state, node, bit)
+    amlns.set_c(state, node, width)
+    return out[0]
+}
+
+fn ev_ext(state: u64, f: u64, p: u64, dst: u64) -> u64 {
+    let e: u64 = amlns.rd8(p + 1)
+    seen_ext_mark(state, e)
+    if e == 0x31 { // Debug
+        amlobj.oset(dst, amlobj.OT_DEBUG, 0, 0)
+        return p + 2
+    }
+    if e == 0x30 { // Revision
+        amlobj.oint(dst, 2)
+        return p + 2
+    }
+    if e == 0x33 { // Timer -- 100ns-Einheiten. Wir haben keine; null.
+        amlobj.oint(dst, 0)
+        return p + 2
+    }
+    if e == 0x23 { // Acquire: ein Interpreter, ein Faden -> immer sofort
+        var t: [u64; 3] = [0 as u64; 3]
+        let q: u64 = ev_target(state, f, p + 2, (&t[0]) as u64)
+        if q == 0 {
+            return 0
+        }
+        amlobj.oint(dst, 0)
+        return q + 2 // die zwei Oktette Zeitgrenze
+    }
+    if e == 0x27 || e == 0x24 || e == 0x26 { // Release, Signal, Reset
+        var t: [u64; 3] = [0 as u64; 3]
+        return ev_target(state, f, p + 2, (&t[0]) as u64)
+    }
+    if e == 0x21 || e == 0x22 { // Stall, Sleep -- ohne Uhr: nur lesen
+        var t: [u64; 3] = [0 as u64; 3]
+        return ev(state, f, p + 2, (&t[0]) as u64)
+    }
+    if e == 0x12 { // CondRefOf
+        var t: [u64; 3] = [0 as u64; 3]
+        var q: u64 = ev_target(state, f, p + 2, (&t[0]) as u64)
+        if q == 0 {
+            return 0
+        }
+        var ok: u64 = 0
+        if amlobj.otype((&t[0]) as u64) == amlobj.OT_REF_NODE {
+            if amlobj.ov1((&t[0]) as u64) != amlns.NONE {
+                ok = 1
+            }
+        }
+        if ok == 0 {
+            // Der Name gibt es nicht -- das ist bei CondRefOf KEIN Fehler.
+            kstate.set(state, kstate.AML_OFF + 40, amlns.ERR_OK)
+        }
+        q = ev_store_target(state, f, q, (&t[0]) as u64)
+        if ok != 0 {
+            amlobj.oint(dst, 0xFFFFFFFFFFFFFFFF)
+        } else {
+            amlobj.oint(dst, 0)
+        }
+        return q
+    }
+    if e == 0x13 { // CreateField(quelle, bit, laenge, name)
+        var src: [u64; 3] = [0 as u64; 3]
+        var bit: [u64; 3] = [0 as u64; 3]
+        var len: [u64; 3] = [0 as u64; 3]
+        var q: u64 = ev(state, f, p + 2, (&src[0]) as u64)
+        if q == 0 {
+            return 0
+        }
+        deref(state, (&src[0]) as u64)
+        q = ev(state, f, q, (&bit[0]) as u64)
+        if q == 0 {
+            return 0
+        }
+        deref(state, (&bit[0]) as u64)
+        q = ev(state, f, q, (&len[0]) as u64)
+        if q == 0 {
+            return 0
+        }
+        deref(state, (&len[0]) as u64)
+        let keep: u64 = amlobj.obj_new(state)
+        if keep == 0 {
+            return 0
+        }
+        amlobj.ocopy(keep, (&src[0]) as u64)
+        var out: [u64; 1] = [0 as u64; 1]
+        let node: u64 = amlns.walk_create(state, frame_scope(f), q,
+            (&out[0]) as u64, amlns.NK_BUFFIELD, amlns.NMAX)
+        if node == amlns.NONE {
+            return 0
+        }
+        amlns.set_kind(state, node, amlns.NK_BUFFIELD)
+        amlns.set_a(state, node, keep)
+        amlns.set_b(state, node, amlobj.to_int((&bit[0]) as u64))
+        amlns.set_c(state, node, amlobj.to_int((&len[0]) as u64))
+        return out[0]
+    }
+    // Fatal, Load, Unload, LoadTable, ToBCD, FromBCD, Wait: nicht in
+    // dieser Runde. Ein definierter Fehler ist besser als eine Zahl,
+    // die niemand nachrechnen kann.
+    amlns.err_set(state, amlns.ERR_OPCODE)
+    return 0
+}
+
+// Ein Name im Ausdruck: entweder ein Methodenaufruf oder ein Wert.
+fn ev_namestring(state: u64, f: u64, p: u64, dst: u64) -> u64 {
+    var out: [u64; 1] = [0 as u64; 1]
+    let node: u64 = amlns.walk(state, frame_scope(f), p, (&out[0]) as u64)
+    var q: u64 = out[0]
+    if node == amlns.NONE {
+        amlns.err_set(state, amlns.ERR_NOTFOUND)
+        return 0
+    }
+    if amlns.node_kind(state, node) != amlns.NK_METHOD {
+        node_value(state, node, dst)
+        return q
+    }
+    // Ein Aufruf. Die Zahl der Argumente steht im Knoten -- ohne sie
+    // waere nicht zu erkennen, wo der Aufruf aufhoert.
+    let argc: u64 = amlns.node_flags(state, node) & 7
+    var args: [u64; 21] = [0 as u64; 21] // 7 * 3 Woerter
+    var i: u64 = 0
+    while i < argc {
+        q = ev(state, f, q, (&args[(i * 3) as usize]) as u64)
+        if q == 0 {
+            return 0
+        }
+        deref(state, (&args[(i * 3) as usize]) as u64)
+        i = i + 1
+    }
+    call_method(state, node, argc, (&args[0]) as u64, dst)
+    return q
+}
+
+// -------------------------------------------------------- Aufrufen
+
+// Eine Methode ausfuehren. `argsrc` zeigt auf `argc` Objektplaetze.
+fn call_method(state: u64, node: u64, argc: u64, argsrc: u64, dst: u64) {
+    amlobj.oset(dst, amlobj.OT_NONE, 0, 0)
+    let calls: u64 = g(state, A_CALLS)
+    if calls >= CALL_MAX {
+        amlns.err_set(state, amlns.ERR_DEPTH)
+        return
+    }
+    s(state, A_CALLS, calls + 1)
+    // WO DIE HALDE STAND, BEVOR DIESER AUFRUF ETWAS GENOMMEN HAT.
+    // Gibt die Methode eine ZAHL zurueck und hat sie keinen neuen Namen
+    // angelegt, dann gehoert alles, was sie belegt hat, ihr allein --
+    // und der Schiebezeiger darf zurueck. Ohne das kostet jeder der
+    // vierhundert Aufrufe beim Auswerten von `_PRT` einen Rahmen von
+    // 400 Oktetten, und die Halde ist nach hundert Steckplaetzen leer
+    // (gemessen: 196296 statt 192 KiB, Fehler ERR_HEAP, 103 statt 128
+    // Eintraege in der Routentafel).
+    let mark: u64 = amlns.heap_mark(state)
+    let nmark: u64 = amlns.nodes(state)
+    let f: u64 = frame_new(state)
+    if f == 0 {
+        s(state, A_CALLS, calls)
+        return
+    }
+    frame_scope_set(f, node)
+    var i: u64 = 0
+    while i < argc && i < 7 {
+        amlobj.ocopy(frame_arg(f, i), argsrc + i * amlobj.OBJ_BYTES)
+        i = i + 1
+    }
+    exec_list(state, f, amlns.node_a(state, node), amlns.node_b(state, node))
+    if frame_ctl(f) == C_RETURN {
+        amlobj.ocopy(dst, frame_ret(f))
+    }
+    s(state, A_CALLS, calls)
+    let t: u64 = amlobj.otype(dst)
+    if (t == amlobj.OT_NONE || t == amlobj.OT_INT)
+        && amlns.nodes(state) == nmark {
+        amlns.heap_reset(state, mark)
+    }
+}
+
+// Eine Folge von Termen. Haelt an, sobald `Return`, `Break` oder
+// `Continue` gesehen wurde oder ein Fehler steht.
+fn exec_list(state: u64, f: u64, p: u64, end: u64) {
+    var i: u64 = p
+    while i < end {
+        if bad(state) {
+            return
+        }
+        if frame_ctl(f) != C_NONE {
+            return
+        }
+        var o: [u64; 3] = [0 as u64; 3]
+        let c: u64 = amlns.rd8(i)
+        var q: u64 = 0
+        if c == 0xA0 {
+            q = ev(state, f, i, (&o[0]) as u64)
+            // Ein `Else` unmittelbar dahinter gehoert zu diesem `If`.
+            if q != 0 && q < end {
+                if amlns.rd8(q) == 0xA1 {
+                    seen_mark(state, 0xA1)
+                    var out: [u64; 1] = [0 as u64; 1]
+                    let ln: u64 = amlns.pkglen(q + 1, (&out[0]) as u64)
+                    let eend: u64 = q + 1 + ln
+                    if g(state, A_LASTIF) == 0 {
+                        exec_list(state, f, out[0], eend)
+                    }
+                    q = eend
+                }
+            }
+        } else {
+            q = ev(state, f, i, (&o[0]) as u64)
+        }
+        if q == 0 || q <= i {
+            if q <= i {
+                amlns.err_set(state, amlns.ERR_TRUNC)
+            }
+            return
+        }
+        i = q
+    }
+}
