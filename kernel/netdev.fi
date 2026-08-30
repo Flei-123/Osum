@@ -19,13 +19,30 @@
 // THE TABLE, and why a table and not an `if`:
 //
 //   1AF4:1000/1041  virtio-net      kernel/virtio.fi   (round K8)
-//   8086:100E ...   Intel 8254x     kernel/e1000.fi    (this round)
+//   8086:100E ...   Intel 8254x     kernel/e1000.fi    (round HWNET)
+//   8086:15B7 ...   Intel I219      kernel/e1000.fi    (round RTL, ICH part)
+//   10EC:8168 ...   Realtek 8168/69 kernel/r8169.fi    (round RTL)
+//   10EC:8139       Realtek 8139C+  kernel/r8169.fi    (round RTL, rev >= 0x20)
 //
 // Everything else on class 02:00 is REFUSED WITH ITS NUMBER printed, so
 // that a machine which does not work says which chip it has instead of
 // saying nothing. That sentence is the whole point of the round: Justin
 // puts OrientOS on a real board, and the serial line has to say either
 // "e1000 at 00:03.0" or "no driver for 10EC:8168" -- never just silence.
+//
+// ROUND RTL made that table a DATA TABLE. Until this round the choice was
+// an `if` cascade inside `probe`, and adding a chip meant editing the
+// walk over the bus. Now there is exactly one function, `driver_for`, and
+// one line per chip in it; `probe` calls it and knows nothing else. A
+// second function, `reason_for`, names the chips this kernel RECOGNISES
+// but does not drive -- an I225 is not the same kind of "no" as a card
+// nobody has ever heard of, and a serial line that says which of the two
+// it is saves a day.
+//
+// `print_table` runs the whole table against a built-in list of numbers
+// and prints the answer for each. That is what makes the choice testable
+// WITHOUT the chip: this repository has no I219 and no RTL8168, but it
+// can prove that 8086:15B7 lands on `i219` and 10EC:8168 on `r8169`.
 //
 // WHAT IS NOT HERE. No hot plug, no more than two cards, no per-card
 // interrupt sharing (each card gets a vector of its own, 45 and 46, as
@@ -36,11 +53,15 @@ import serial
 import pci
 import virtio
 import e1000
+import r8169
 
 export {
     probe, kind_on, print_kind, MAX_CARDS,
-    KIND_NONE, KIND_VIRTIO, KIND_E1000,
+    KIND_NONE, KIND_VIRTIO, KIND_E1000, KIND_R8169, KIND_I219,
+    driver_for, reason_for, print_table, selftest,
+    rx_errors, oversize, rx_overflow,
     unsupported_count, unsupported_vendor, unsupported_device,
+    unsupported_reason,
     init, present, ready, up, mac_at, bdf, idx,
     rx_take, rx_recycle, tx_frame, tx_room, poll,
     irq, irqs, rx_frames, tx_frames, tx_drops, rx_octets, tx_octets,
@@ -72,12 +93,25 @@ const S_PROBED: u64 = 0x18
 // The refused cards, so that the machine can say what it has. One
 // vendor/device pair, 0x300 upwards.
 const S_UNSUP_N: u64 = 0x300
-const S_UNSUP: u64 = 0x308 // n * 16: vendor, device
+const S_UNSUP: u64 = 0x308 // n * 24: Hersteller, Geraet, Grund
 const MAX_UNSUP: u64 = 8
 
 const KIND_NONE: u64 = 0
 const KIND_VIRTIO: u64 = 1
 const KIND_E1000: u64 = 2
+const KIND_R8169: u64 = 3 // Runde RTL: kernel/r8169.fi
+const KIND_I219: u64 = 4 // Runde RTL: kernel/e1000.fi, PCH-Zweig
+
+// WARUM eine Karte keinen Treiber bekommt. Ein Chip, den dieser Kern
+// KENNT und trotzdem nicht bedient, ist ein anderes "nein" als einer, den
+// noch nie jemand gesehen hat -- und auf einem Brett, das nicht ins Netz
+// kommt, ist genau dieser Unterschied die Auskunft, die weiterhilft.
+const WHY_UNKNOWN: u64 = 0
+const WHY_IGC: u64 = 1 // I225/I226: igc-Silizium, nur erweiterte Deskriptoren
+const WHY_IGB: u64 = 2 // I210/I211: igb-Silizium, andere Warteschlangen
+const WHY_WIFI: u64 = 3 // WLAN: 802.11-MAC und Firmware, kein Ethernet
+const WHY_OLD8139: u64 = 4 // RTL8139 vor Revision 0x20: kein C+-Modus
+const WHY_OTHERVENDOR: u64 = 5 // Broadcom, Atheros, Aquantia, Marvell
 
 // Card 0 keeps vector 45 and card 1 takes 46 -- unchanged from round
 // NETMON, because `isr.s` has those two stubs and no others.
@@ -112,6 +146,8 @@ fn unit_of(state: u64, c: u64) -> u64 {
 fn print_kind(k: u64) {
     var s_virtio: [u8; 11] = "virtio-net\0"
     var s_e1000: [u8; 6] = "e1000\0"
+    var s_r8169: [u8; 6] = "r8169\0"
+    var s_i219: [u8; 5] = "i219\0"
     var s_none: [u8; 5] = "none\0"
     if k == KIND_VIRTIO {
         serial.puts((&s_virtio[0]) as u64)
@@ -119,6 +155,14 @@ fn print_kind(k: u64) {
     }
     if k == KIND_E1000 {
         serial.puts((&s_e1000[0]) as u64)
+        return
+    }
+    if k == KIND_R8169 {
+        serial.puts((&s_r8169[0]) as u64)
+        return
+    }
+    if k == KIND_I219 {
+        serial.puts((&s_i219[0]) as u64)
         return
     }
     serial.puts((&s_none[0]) as u64)
@@ -148,37 +192,43 @@ fn probe(state: u64) {
     let n: u64 = pci.count(state)
     var i: u64 = 0
     var cards: u64 = 0
+    // EINE Einheitenzaehlung JE TREIBERDATEI und nicht je Kennzeichnung:
+    // `KIND_E1000` und `KIND_I219` sind zwei Namen fuer dieselbe Datei
+    // `e1000.fi`, und deren Einheit 0 gibt es nur einmal.
     var virtio_units: u64 = 0
     var e1000_units: u64 = 0
+    var r8169_units: u64 = 0
     while i < n {
         if pci.get(state, i, pci.E_CLASS) == CLASS_NET {
             if pci.get(state, i, pci.E_SUBCLASS) == SUB_ETHERNET {
                 let ven: u64 = pci.get(state, i, pci.E_VENDOR)
                 let dev: u64 = pci.get(state, i, pci.E_DEVICE)
-                var k: u64 = KIND_NONE
+                let rev: u64 = pci.cfg_read8(pci.get(state, i, pci.E_BDF), 0x08)
+                let k: u64 = driver_for(ven, dev, rev)
                 var unit: u64 = 0
-                if ven == VENDOR_VIRTIO {
-                    if dev == 0x1000 || dev == 0x1041 {
-                        k = KIND_VIRTIO
-                        unit = virtio_units
-                    }
+                if k == KIND_VIRTIO {
+                    unit = virtio_units
                 }
-                if ven == e1000.VENDOR_INTEL {
-                    if e1000.supports(dev) {
-                        k = KIND_E1000
-                        unit = e1000_units
-                    }
+                if k == KIND_E1000 || k == KIND_I219 {
+                    unit = e1000_units
+                }
+                if k == KIND_R8169 {
+                    unit = r8169_units
                 }
                 if k == KIND_NONE {
-                    note_unsupported(state, ven, dev)
+                    note_unsupported(state, ven, dev, reason_for(ven, dev, rev))
                 } else {
                     if cards < MAX_CARDS {
-                        // A driver has only so many units of its own.
+                        // Ein Treiber hat nur so viele eigene Einheiten.
                         var room: bool = true
                         if k == KIND_VIRTIO && unit >= virtio.MAX_CARDS {
                             room = false
                         }
-                        if k == KIND_E1000 && unit >= e1000.MAX_UNITS {
+                        if (k == KIND_E1000 || k == KIND_I219)
+                            && unit >= e1000.MAX_UNITS {
+                            room = false
+                        }
+                        if k == KIND_R8169 && unit >= r8169.MAX_UNITS {
                             room = false
                         }
                         if room {
@@ -188,8 +238,12 @@ fn probe(state: u64) {
                             cards = cards + 1
                             if k == KIND_VIRTIO {
                                 virtio_units = virtio_units + 1
-                            } else {
+                            }
+                            if k == KIND_E1000 || k == KIND_I219 {
                                 e1000_units = e1000_units + 1
+                            }
+                            if k == KIND_R8169 {
+                                r8169_units = r8169_units + 1
                             }
                         }
                     }
@@ -200,13 +254,211 @@ fn probe(state: u64) {
     }
 }
 
-fn note_unsupported(state: u64, ven: u64, dev: u64) {
+// ==================================================== DIE TREIBERTABELLE
+//
+// EINE Stelle im ganzen Kern, an der steht, welcher Chip welchen Treiber
+// bekommt. Wer eine Karte ergaenzen will, schreibt hier EINE Zeile -- er
+// muss weder den Lauf ueber den Bus noch den Verteiler darunter anfassen.
+//
+// `rev` ist die PCI-Revision und wird fuer genau einen Chip gebraucht:
+// der RTL8139 hat seine Deskriptorringe erst ab Revision 0x20 (der
+// C+-Modus). Ein RTL8139B davor sieht auf dem Bus gleich aus und kann
+// nichts davon -- ihn anzunehmen hiesse, eine Karte zu behaupten, die
+// nie einen Rahmen abgibt.
+fn driver_for(ven: u64, dev: u64, rev: u64) -> u64 {
+    // ---- 1AF4 Red Hat/virtio -- gibt es nur unter einem Hypervisor
+    if ven == VENDOR_VIRTIO {
+        // uebergangsweise (0.9.5 + 1.0) bzw. modern
+        if dev == 0x1000 || dev == 0x1041 {
+            return KIND_VIRTIO
+        }
+        return KIND_NONE
+    }
+    // ---- 10EC Realtek -- kernel/r8169.fi
+    if ven == r8169.VENDOR_REALTEK {
+        if r8169.supports(dev) {
+            if r8169.needs_cplus_rev(dev) && rev < 0x20 {
+                return KIND_NONE // 8139A/B: keine Ringe, kein Treiber
+            }
+            return KIND_R8169
+        }
+        return KIND_NONE
+    }
+    // ---- 8086 Intel -- kernel/e1000.fi, zwei Familien in einer Datei
+    if ven == e1000.VENDOR_INTEL {
+        if e1000.supports_8254x(dev) {
+            return KIND_E1000
+        }
+        if e1000.supports_ich(dev) {
+            return KIND_I219
+        }
+        return KIND_NONE
+    }
+    return KIND_NONE
+}
+
+// WARUM NICHT, fuer die Chips, die dieser Kern immerhin ERKENNT. Das ist
+// keine Hoeflichkeit: "I225 -- igc-Silizium, anderer Deskriptor" sagt
+// einem Menschen vor einem Brett, dass er einen Treiber schreiben muss,
+// waehrend "unbekannt" ihn zuerst zweifeln laesst, ob die Karte ueberhaupt
+// steckt.
+fn reason_for(ven: u64, dev: u64, rev: u64) -> u64 {
+    if ven == r8169.VENDOR_REALTEK {
+        if dev == 0x8139 {
+            return WHY_OLD8139
+        }
+        return WHY_UNKNOWN
+    }
+    if ven == e1000.VENDOR_INTEL {
+        // I225/I226 -- neuere Bretter, 2,5 Gbit
+        if dev == 0x15F2 || dev == 0x15F3 || dev == 0x125B || dev == 0x125C {
+            return WHY_IGC
+        }
+        if dev == 0x0D9F || dev == 0x3100 || dev == 0x3101 {
+            return WHY_IGC
+        }
+        // I210/I211
+        if dev == 0x1533 || dev == 0x1536 || dev == 0x1537 || dev == 0x1539 {
+            return WHY_IGB
+        }
+        // Die WLAN-Bausteine, die in denselben Laptops stecken. Sie sind
+        // NICHT Klasse 02:00, tauchen hier also normalerweise nicht auf --
+        // die Zeile steht fuer print_table, damit die Auskunft stimmt,
+        // wenn jemand die Nummer nachschlaegt.
+        if dev == 0x2723 || dev == 0x2725 || dev == 0xA0F0 || dev == 0x0082 {
+            return WHY_WIFI
+        }
+        return WHY_UNKNOWN
+    }
+    // Broadcom (14E4), Atheros/Qualcomm (168C, 1969), Aquantia (1D6A),
+    // Marvell (11AB), Nvidia (10DE), AMD/pcnet (1022), DEC/tulip (1011)
+    if ven == 0x14E4 || ven == 0x168C || ven == 0x1969 {
+        return WHY_OTHERVENDOR
+    }
+    if ven == 0x1D6A || ven == 0x11AB || ven == 0x1022 {
+        return WHY_OTHERVENDOR
+    }
+    if ven == 0x1011 || ven == 0x15AD {
+        return WHY_OTHERVENDOR
+    }
+    return WHY_UNKNOWN
+}
+
+fn print_reason(why: u64) {
+    var s_igc: [u8; 34] = "igc silicon, advanced descriptors\0"
+    var s_igb: [u8; 30] = "igb silicon, other queue set\0\0"
+    var s_wifi: [u8; 26] = "wifi, needs 802.11 + fw\0\0\0"
+    var s_old: [u8; 31] = "rtl8139 rev < 0x20, no C+ mode\0"
+    var s_oth: [u8; 25] = "other vendor, no driver\0\0"
+    if why == WHY_IGC {
+        serial.puts((&s_igc[0]) as u64)
+        return
+    }
+    if why == WHY_IGB {
+        serial.puts((&s_igb[0]) as u64)
+        return
+    }
+    if why == WHY_WIFI {
+        serial.puts((&s_wifi[0]) as u64)
+        return
+    }
+    if why == WHY_OLD8139 {
+        serial.puts((&s_old[0]) as u64)
+        return
+    }
+    if why == WHY_OTHERVENDOR {
+        serial.puts((&s_oth[0]) as u64)
+        return
+    }
+}
+
+// ================================================= DIE TABELLE, GEPRUEFT
+//
+// Dieses Verzeichnis hat keinen RTL8168 und keinen I219, und es wird auch
+// keinen bekommen. Was es aber pruefen KANN, ist die Wahl selbst: fuer
+// jede Nummer aus der Liste unten steht hinterher auf der seriellen
+// Leitung, welcher Treiber sie bekaeme. Das ist der Unterschied zwischen
+// einer Tabelle, die jemand gelesen hat, und einer, die jemand ausgefuehrt
+// hat.
+//
+//   netdev: tab 0x8086:0x15b7 rev=0x0 -> i219
+//   netdev: tab 0x10ec:0x8168 rev=0x0 -> r8169
+//   netdev: tab 0x8086:0x125b rev=0x0 -> none  igc silicon, ...
+fn tab_line(ven: u64, dev: u64, rev: u64) {
+    var s_t: [u8; 13] = "netdev: tab \0"
+    var s_c: [u8; 2] = ":\0"
+    var s_r: [u8; 7] = " rev=\0\0"
+    var s_a: [u8; 5] = " -> \0"
+    var s_s: [u8; 3] = "  \0"
+    serial.puts((&s_t[0]) as u64)
+    serial.hex(ven)
+    serial.puts((&s_c[0]) as u64)
+    serial.hex(dev)
+    serial.puts((&s_r[0]) as u64)
+    serial.hex(rev)
+    serial.puts((&s_a[0]) as u64)
+    let k: u64 = driver_for(ven, dev, rev)
+    print_kind(k)
+    // Der Grund NUR, wenn es einen gibt. Zwei Leerzeichen hinter "none"
+    // und dahinter nichts waeren eine Andeutung, die nichts sagt -- und
+    // eine Zeile, deren Ende davon abhaengt, ob jemand den Chip kennt,
+    // ist eine Zeile, auf die sich kein Test verlassen kann.
+    if k == KIND_NONE {
+        let why: u64 = reason_for(ven, dev, rev)
+        if why != WHY_UNKNOWN {
+            serial.puts((&s_s[0]) as u64)
+            print_reason(why)
+        }
+    }
+    serial.nl()
+}
+
+fn print_table(state: u64) {
+    // Je EINE bekannte Nummer aus jeder Klasse, in der Reihenfolge der
+    // Tabelle. Wer eine Zeile in `driver_for` ergaenzt, ergaenzt hier eine.
+    tab_line(0x1AF4, 0x1000, 0x00) // virtio-net, uebergangsweise
+    tab_line(0x1AF4, 0x1041, 0x01) // virtio-net, modern
+    tab_line(0x8086, 0x100E, 0x03) // 82540EM -- QEMUs -device e1000
+    tab_line(0x8086, 0x10D3, 0x00) // 82574L  -- QEMUs -device e1000e
+    tab_line(0x8086, 0x15B7, 0x00) // I219-LM
+    tab_line(0x8086, 0x15B8, 0x00) // I219-V
+    tab_line(0x8086, 0x0D4E, 0x00) // I219-LM, Tiger Lake
+    tab_line(0x10EC, 0x8139, 0x20) // RTL8139C+ -- mit C+-Modus
+    tab_line(0x10EC, 0x8139, 0x10) // RTL8139B  -- OHNE C+-Modus
+    tab_line(0x10EC, 0x8168, 0x00) // RTL8168/8111
+    tab_line(0x10EC, 0x8169, 0x00) // RTL8169
+    tab_line(0x10EC, 0x8136, 0x00) // RTL8101E/8102E
+    tab_line(0x10EC, 0x8029, 0x00) // ne2000 -- gleicher Hersteller, kein Treiber
+    tab_line(0x8086, 0x15F3, 0x00) // I225-V
+    tab_line(0x8086, 0x125B, 0x00) // I226-LM
+    tab_line(0x8086, 0x1533, 0x00) // I210
+    tab_line(0x8086, 0x2723, 0x00) // Wi-Fi 6 AX200
+    tab_line(0x14E4, 0x1686, 0x00) // Broadcom NetXtreme
+    tab_line(0x1234, 0x5678, 0x00) // es gibt sie nicht: der unbekannte Fall
+}
+
+// Die Selbstpruefung der Treiber, so weit ein Treiber sie ohne Gegenstelle
+// machen kann: voller Sendering und zu grosser Rahmen.
+fn selftest(state: u64) {
+    var c: u64 = 0
+    while c < MAX_CARDS {
+        let k: u64 = kind_on(state, c)
+        if k == KIND_R8169 {
+            r8169.print_regs_on(state, unit_of(state, c))
+            r8169.selftest_on(state, unit_of(state, c))
+        }
+        c = c + 1
+    }
+}
+
+fn note_unsupported(state: u64, ven: u64, dev: u64, why: u64) {
     let n: u64 = kstate.get(state, kstate.NETDEV_OFF + S_UNSUP_N)
     if n >= MAX_UNSUP {
         return
     }
-    kstate.set(state, kstate.NETDEV_OFF + S_UNSUP + n * 16, ven)
-    kstate.set(state, kstate.NETDEV_OFF + S_UNSUP + n * 16 + 8, dev)
+    kstate.set(state, kstate.NETDEV_OFF + S_UNSUP + n * 24, ven)
+    kstate.set(state, kstate.NETDEV_OFF + S_UNSUP + n * 24 + 8, dev)
+    kstate.set(state, kstate.NETDEV_OFF + S_UNSUP + n * 24 + 16, why)
     kstate.set(state, kstate.NETDEV_OFF + S_UNSUP_N, n + 1)
 }
 
@@ -218,11 +470,15 @@ fn unsupported_count(state: u64) -> u64 {
 }
 
 fn unsupported_vendor(state: u64, i: u64) -> u64 {
-    return kstate.get(state, kstate.NETDEV_OFF + S_UNSUP + i * 16)
+    return kstate.get(state, kstate.NETDEV_OFF + S_UNSUP + i * 24)
 }
 
 fn unsupported_device(state: u64, i: u64) -> u64 {
-    return kstate.get(state, kstate.NETDEV_OFF + S_UNSUP + i * 16 + 8)
+    return kstate.get(state, kstate.NETDEV_OFF + S_UNSUP + i * 24 + 8)
+}
+
+fn unsupported_reason(state: u64, i: u64) -> u64 {
+    return kstate.get(state, kstate.NETDEV_OFF + S_UNSUP + i * 24 + 16)
 }
 
 // WHAT THE MACHINE SAYS ABOUT ITS OWN NETWORK. One line per card that
@@ -265,6 +521,13 @@ fn print_cards(state: u64) {
         serial.hex(unsupported_vendor(state, j))
         serial.puts((&s_col[0]) as u64)
         serial.hex(unsupported_device(state, j))
+        // ROUND RTL: und WARUM nicht, wenn dieser Kern den Chip kennt.
+        let why: u64 = unsupported_reason(state, j)
+        if why != WHY_UNKNOWN {
+            serial.puts((&s_sp[0]) as u64)
+            serial.puts((&s_sp[0]) as u64)
+            print_reason(why)
+        }
         serial.nl()
         j = j + 1
     }
@@ -282,8 +545,11 @@ fn init_on(state: u64, c: u64, use_msix: bool, armed: bool) -> bool {
     if k == KIND_VIRTIO {
         return virtio.init_on(state, unit_of(state, c), use_msix, armed)
     }
-    if k == KIND_E1000 {
+    if k == KIND_E1000 || k == KIND_I219 {
         return e1000.init_on(state, unit_of(state, c), use_msix, armed)
+    }
+    if k == KIND_R8169 {
+        return r8169.init_on(state, unit_of(state, c), use_msix, armed)
     }
     return false
 }
@@ -293,8 +559,11 @@ fn present_on(state: u64, c: u64) -> bool {
     if k == KIND_VIRTIO {
         return virtio.present_on(state, unit_of(state, c))
     }
-    if k == KIND_E1000 {
+    if k == KIND_E1000 || k == KIND_I219 {
         return e1000.present_on(state, unit_of(state, c))
+    }
+    if k == KIND_R8169 {
+        return r8169.present_on(state, unit_of(state, c))
     }
     return false
 }
@@ -304,8 +573,11 @@ fn ready_on(state: u64, c: u64) -> bool {
     if k == KIND_VIRTIO {
         return virtio.ready_on(state, unit_of(state, c))
     }
-    if k == KIND_E1000 {
+    if k == KIND_E1000 || k == KIND_I219 {
         return e1000.ready_on(state, unit_of(state, c))
+    }
+    if k == KIND_R8169 {
+        return r8169.ready_on(state, unit_of(state, c))
     }
     return false
 }
@@ -315,8 +587,11 @@ fn up_on(state: u64, c: u64) -> bool {
     if k == KIND_VIRTIO {
         return virtio.up_on(state, unit_of(state, c))
     }
-    if k == KIND_E1000 {
+    if k == KIND_E1000 || k == KIND_I219 {
         return e1000.up_on(state, unit_of(state, c))
+    }
+    if k == KIND_R8169 {
+        return r8169.up_on(state, unit_of(state, c))
     }
     return false
 }
@@ -326,8 +601,11 @@ fn bdf_on(state: u64, c: u64) -> u64 {
     if k == KIND_VIRTIO {
         return virtio.bdf_on(state, unit_of(state, c))
     }
-    if k == KIND_E1000 {
+    if k == KIND_E1000 || k == KIND_I219 {
         return e1000.bdf_on(state, unit_of(state, c))
+    }
+    if k == KIND_R8169 {
+        return r8169.bdf_on(state, unit_of(state, c))
     }
     return 0
 }
@@ -337,8 +615,11 @@ fn idx_on(state: u64, c: u64) -> u64 {
     if k == KIND_VIRTIO {
         return virtio.idx_on(state, unit_of(state, c))
     }
-    if k == KIND_E1000 {
+    if k == KIND_E1000 || k == KIND_I219 {
         return e1000.idx_on(state, unit_of(state, c))
+    }
+    if k == KIND_R8169 {
+        return r8169.idx_on(state, unit_of(state, c))
     }
     return pci.MAX_DEV
 }
@@ -348,8 +629,11 @@ fn irqs_on(state: u64, c: u64) -> u64 {
     if k == KIND_VIRTIO {
         return virtio.irqs_on(state, unit_of(state, c))
     }
-    if k == KIND_E1000 {
+    if k == KIND_E1000 || k == KIND_I219 {
         return e1000.irqs_on(state, unit_of(state, c))
+    }
+    if k == KIND_R8169 {
+        return r8169.irqs_on(state, unit_of(state, c))
     }
     return 0
 }
@@ -359,8 +643,11 @@ fn rx_frames_on(state: u64, c: u64) -> u64 {
     if k == KIND_VIRTIO {
         return virtio.rx_frames_on(state, unit_of(state, c))
     }
-    if k == KIND_E1000 {
+    if k == KIND_E1000 || k == KIND_I219 {
         return e1000.rx_frames_on(state, unit_of(state, c))
+    }
+    if k == KIND_R8169 {
+        return r8169.rx_frames_on(state, unit_of(state, c))
     }
     return 0
 }
@@ -370,8 +657,11 @@ fn tx_frames_on(state: u64, c: u64) -> u64 {
     if k == KIND_VIRTIO {
         return virtio.tx_frames_on(state, unit_of(state, c))
     }
-    if k == KIND_E1000 {
+    if k == KIND_E1000 || k == KIND_I219 {
         return e1000.tx_frames_on(state, unit_of(state, c))
+    }
+    if k == KIND_R8169 {
+        return r8169.tx_frames_on(state, unit_of(state, c))
     }
     return 0
 }
@@ -381,8 +671,11 @@ fn tx_drops_on(state: u64, c: u64) -> u64 {
     if k == KIND_VIRTIO {
         return virtio.tx_drops_on(state, unit_of(state, c))
     }
-    if k == KIND_E1000 {
+    if k == KIND_E1000 || k == KIND_I219 {
         return e1000.tx_drops_on(state, unit_of(state, c))
+    }
+    if k == KIND_R8169 {
+        return r8169.tx_drops_on(state, unit_of(state, c))
     }
     return 0
 }
@@ -392,8 +685,11 @@ fn rx_octets_on(state: u64, c: u64) -> u64 {
     if k == KIND_VIRTIO {
         return virtio.rx_octets_on(state, unit_of(state, c))
     }
-    if k == KIND_E1000 {
+    if k == KIND_E1000 || k == KIND_I219 {
         return e1000.rx_octets_on(state, unit_of(state, c))
+    }
+    if k == KIND_R8169 {
+        return r8169.rx_octets_on(state, unit_of(state, c))
     }
     return 0
 }
@@ -403,8 +699,11 @@ fn tx_octets_on(state: u64, c: u64) -> u64 {
     if k == KIND_VIRTIO {
         return virtio.tx_octets_on(state, unit_of(state, c))
     }
-    if k == KIND_E1000 {
+    if k == KIND_E1000 || k == KIND_I219 {
         return e1000.tx_octets_on(state, unit_of(state, c))
+    }
+    if k == KIND_R8169 {
+        return r8169.tx_octets_on(state, unit_of(state, c))
     }
     return 0
 }
@@ -414,8 +713,11 @@ fn features_on(state: u64, c: u64) -> u64 {
     if k == KIND_VIRTIO {
         return virtio.features_on(state, unit_of(state, c))
     }
-    if k == KIND_E1000 {
+    if k == KIND_E1000 || k == KIND_I219 {
         return e1000.features_on(state, unit_of(state, c))
+    }
+    if k == KIND_R8169 {
+        return r8169.features_on(state, unit_of(state, c))
     }
     return 0
 }
@@ -425,8 +727,11 @@ fn queue_size_on(state: u64, c: u64) -> u64 {
     if k == KIND_VIRTIO {
         return virtio.queue_size_on(state, unit_of(state, c))
     }
-    if k == KIND_E1000 {
+    if k == KIND_E1000 || k == KIND_I219 {
         return e1000.queue_size_on(state, unit_of(state, c))
+    }
+    if k == KIND_R8169 {
+        return r8169.queue_size_on(state, unit_of(state, c))
     }
     return 0
 }
@@ -436,8 +741,11 @@ fn msix_on(state: u64, c: u64) -> bool {
     if k == KIND_VIRTIO {
         return virtio.msix_on(state, unit_of(state, c))
     }
-    if k == KIND_E1000 {
+    if k == KIND_E1000 || k == KIND_I219 {
         return e1000.msix_on(state, unit_of(state, c))
+    }
+    if k == KIND_R8169 {
+        return r8169.msix_on(state, unit_of(state, c))
     }
     return false
 }
@@ -447,8 +755,11 @@ fn notified_on(state: u64, c: u64) -> u64 {
     if k == KIND_VIRTIO {
         return virtio.notified_on(state, unit_of(state, c))
     }
-    if k == KIND_E1000 {
+    if k == KIND_E1000 || k == KIND_I219 {
         return e1000.notified_on(state, unit_of(state, c))
+    }
+    if k == KIND_R8169 {
+        return r8169.notified_on(state, unit_of(state, c))
     }
     return 0
 }
@@ -458,8 +769,11 @@ fn link_up_on(state: u64, c: u64) -> bool {
     if k == KIND_VIRTIO {
         return virtio.link_up_on(state, unit_of(state, c))
     }
-    if k == KIND_E1000 {
+    if k == KIND_E1000 || k == KIND_I219 {
         return e1000.link_up_on(state, unit_of(state, c))
+    }
+    if k == KIND_R8169 {
+        return r8169.link_up_on(state, unit_of(state, c))
     }
     return false
 }
@@ -469,8 +783,11 @@ fn mac_at_on(state: u64, c: u64, i: u64) -> u64 {
     if k == KIND_VIRTIO {
         return virtio.mac_at_on(state, unit_of(state, c), i)
     }
-    if k == KIND_E1000 {
+    if k == KIND_E1000 || k == KIND_I219 {
         return e1000.mac_at_on(state, unit_of(state, c), i)
+    }
+    if k == KIND_R8169 {
+        return r8169.mac_at_on(state, unit_of(state, c), i)
     }
     return 0
 }
@@ -480,8 +797,11 @@ fn rx_take_on(state: u64, c: u64, frame: *mut u64, slot: *mut u64) -> u64 {
     if k == KIND_VIRTIO {
         return virtio.rx_take_on(state, unit_of(state, c), frame, slot)
     }
-    if k == KIND_E1000 {
+    if k == KIND_E1000 || k == KIND_I219 {
         return e1000.rx_take_on(state, unit_of(state, c), frame, slot)
+    }
+    if k == KIND_R8169 {
+        return r8169.rx_take_on(state, unit_of(state, c), frame, slot)
     }
     return 0
 }
@@ -492,8 +812,11 @@ fn rx_recycle_on(state: u64, c: u64, id: u64) {
         virtio.rx_recycle_on(state, unit_of(state, c), id)
         return
     }
-    if k == KIND_E1000 {
+    if k == KIND_E1000 || k == KIND_I219 {
         e1000.rx_recycle_on(state, unit_of(state, c), id)
+    }
+    if k == KIND_R8169 {
+        r8169.rx_recycle_on(state, unit_of(state, c), id)
     }
 }
 
@@ -502,8 +825,11 @@ fn tx_room_on(state: u64, c: u64) -> u64 {
     if k == KIND_VIRTIO {
         return virtio.tx_room_on(state, unit_of(state, c))
     }
-    if k == KIND_E1000 {
+    if k == KIND_E1000 || k == KIND_I219 {
         return e1000.tx_room_on(state, unit_of(state, c))
+    }
+    if k == KIND_R8169 {
+        return r8169.tx_room_on(state, unit_of(state, c))
     }
     return 0
 }
@@ -513,8 +839,11 @@ fn tx_frame_on(state: u64, c: u64, src: u64, n: u64) -> bool {
     if k == KIND_VIRTIO {
         return virtio.tx_frame_on(state, unit_of(state, c), src, n)
     }
-    if k == KIND_E1000 {
+    if k == KIND_E1000 || k == KIND_I219 {
         return e1000.tx_frame_on(state, unit_of(state, c), src, n)
+    }
+    if k == KIND_R8169 {
+        return r8169.tx_frame_on(state, unit_of(state, c), src, n)
     }
     return false
 }
@@ -524,8 +853,11 @@ fn poll_on(state: u64, c: u64) -> bool {
     if k == KIND_VIRTIO {
         return virtio.poll_on(state, unit_of(state, c))
     }
-    if k == KIND_E1000 {
+    if k == KIND_E1000 || k == KIND_I219 {
         return e1000.poll_on(state, unit_of(state, c))
+    }
+    if k == KIND_R8169 {
+        return r8169.poll_on(state, unit_of(state, c))
     }
     return false
 }
@@ -536,8 +868,11 @@ fn irq_on(state: u64, c: u64) {
         virtio.irq_on(state, unit_of(state, c))
         return
     }
-    if k == KIND_E1000 {
+    if k == KIND_E1000 || k == KIND_I219 {
         e1000.irq_on(state, unit_of(state, c))
+    }
+    if k == KIND_R8169 {
+        r8169.irq_on(state, unit_of(state, c))
     }
 }
 
@@ -547,8 +882,11 @@ fn shut_down_on(state: u64, c: u64) {
         virtio.shut_down_on(state, unit_of(state, c))
         return
     }
-    if k == KIND_E1000 {
+    if k == KIND_E1000 || k == KIND_I219 {
         e1000.shut_down_on(state, unit_of(state, c))
+    }
+    if k == KIND_R8169 {
+        r8169.shut_down_on(state, unit_of(state, c))
     }
 }
 
@@ -593,3 +931,29 @@ fn rx_take(state: u64, frame: *mut u64, slot: *mut u64) -> u64 {
 }
 
 fn rx_recycle(state: u64, id: u64) { rx_recycle_on(state, 0, id) }
+
+// RUNDE RTL. Zwei Zaehler, die es nur beim Realtek-Treiber gibt: Rahmen,
+// die der Chip selbst als fehlerhaft gemeldet hat, und Rahmen, die groesser
+// waren als ein Puffer. Fuer die anderen Treiber ist die ehrliche Antwort
+// 0 -- nicht, weil dort nichts schiefgeht, sondern weil dort niemand
+// zaehlt, und eine erfundene Zahl waere schlimmer als eine fehlende.
+fn rx_errors(state: u64) -> u64 {
+    if kind_on(state, 0) == KIND_R8169 {
+        return r8169.rx_errors_on(state, unit_of(state, 0))
+    }
+    return 0
+}
+
+fn oversize(state: u64) -> u64 {
+    if kind_on(state, 0) == KIND_R8169 {
+        return r8169.oversize_on(state, unit_of(state, 0))
+    }
+    return 0
+}
+
+fn rx_overflow(state: u64) -> u64 {
+    if kind_on(state, 0) == KIND_R8169 {
+        return r8169.rx_overflow_on(state, unit_of(state, 0))
+    }
+    return 0
+}

@@ -1119,6 +1119,18 @@ lauf "30. Auto-Update: Ed25519, Signaturpflicht, A/B-Boot (tools/update/run.sh, 
 # der Beendigungscode, eine Datei mit SHA-256 auf beiden Seiten, eine
 # Shell an einem Pseudoterminal, zwei Verbindungen gleichzeitig -- und
 # zu jedem davon die Gegenprobe, die es erst zu einer Aussage macht.
+# RUNDE RTL. Der Realtek RTL8168/8169 -- der haeufigste Netzchip auf
+# Consumer-Brettern -- und der PCH-Zweig fuer den Intel I219. Runde HWNET
+# hatte den Realtek geprueft und NICHT gebaut, weil QEMU nur `-device
+# rtl8139` kennt und der 8139 als "nicht derselbe Chip" galt. Der 8139 ab
+# Revision 0x20 hat aber den C+-Modus, und in dem hat er die
+# Deskriptorringe des 8169 -- QEMU emuliert ihn. Damit ist die Ringmechanik
+# messbar, und dieser Abschnitt misst sie: Ping, 256 KiB TCP, DHCP,
+# Ringueberlauf, Rahmen groesser als der Puffer, Verbindung weg und wieder
+# da, und die Treibertabelle gegen neunzehn PCI-Nummern.
+lauf "31. der Chip, den ein echtes Brett hat: Realtek 8168/8169 und der PCH-Zweig fuer I219 (tools/rtl/run.sh, Runde RTL)" \
+     tools/rtl/run.sh rtl '^RTL: |^   [a-z0-9-]+ +[0-9]+|^  OK    (firnc[01]|k.o:|r8169.fi|tools/net/bridge.c|10EC|8086|1AF4|14E4|GEGENPROBE|eine Nummer|und fuer die|die PCI-Durchmusterung|netdev waehlt|die Ethernet-Adresse|die unbekannte Karte|und der Kern sagt|kein Treiber hat|rtl8139:|RINGUEBERLAUF|GROESSER ALS MTU|der C\+-Modus|der Empfangsfilter|der Chip wurde|der Empfangs- und|die Selbstpruefung|und danach redet|vorher:|Kabel|und der Treiber meldet|virtio-net-pci:|e1000:)'
+
 lauf "30. der Fernzugang: SSH-2 gegen den echten OpenSSH-Klienten (tools/sshd/run.sh, Runde SSHD)" \
      tools/sshd/run.sh sshd '^SSHD: |^  OK    (tools/sshd/oracle|[0-9]+ Vergleiche|der Dienst lauscht|es gab noch keinen|sshd nennt|ssh-keyscan|ssh-keygen|und der Schluesseltyp|ssh mit (Schluessel|Passwort)|die Ausgabe|\.\.\.Zeile|und der Server hat es|der Klient sagt|strict kex|auch root|ssh gibt den|der SHA-256|die Shell|es war wirklich|die Sitzung am|die Zeilenenden|und die Rohr-Sitzung|die (erste|zweite) Sitzung|und beide haben|ein (FREMDER|falsches|unbekannter|Klient)|und der Befehl ist nicht|ein Name, den|.svc shutdown.|kein einziger|derselbe (Fingerabdruck|Schluessel)|und hat KEINEN|das Passwort geht|die Uebertragung|Zahl der Starts|angenommene Verbindungen|die groesste Zahl)|^        (SHA-256:|HMAC|mpint|Base64|Ableitung|chacha20|Gegenprobe|Auffuellung|Klartext|name-list|eine LEERE|[0-9]+ Oktette in|[0-9]+ ms fuer|langsamster|sshd running|/sbin/sshd:)'
 
