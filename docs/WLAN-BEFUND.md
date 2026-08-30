@@ -355,7 +355,7 @@ eigene Datei nach denselben Regeln wie `sha256.fi`.
 
 Zum Vergleich die Zahlen aus Abschnitt 4: hostapds `src/rsn_supp/` +
 `wpa_common.c` + die sieben gebrauchten Kryptodateien sind zusammen
-**18.135 Zeilen C**, und darin steckt FT, TDLS, WNM, PMKSA-Cache,
+**18.136 Zeilen C**, und darin steckt FT, TDLS, WNM, PMKSA-Cache,
 802.1X/EAP und OWE, was hier alles fehlt. Der Faktor liegt damit
 ungefaehr bei fuenf -- nicht bei fuenfzehn wie bei `e1000.fi` gegen
 Linux' `e1000`, weil Protokoll und Krypto sich nicht so weit
