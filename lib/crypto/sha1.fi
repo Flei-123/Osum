@@ -1,0 +1,407 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// lib/crypto/sha1.fi -- SHA-1 (FIPS 180-4) und was WPA2 darauf baut.
+//
+// ==================================================================
+// WARUM AUSGERECHNET SHA-1, das doch gebrochen ist
+// ==================================================================
+//
+// Es ist gebrochen -- fuer SIGNATUREN. Eine Kollision in SHA-1 ist seit
+// 2017 (SHAttered) gerechnet worden und kostet heute wenig. Genau
+// deshalb steht in `docs/WLAN-BEFUND.md` und hier: DIESE DATEI IST
+// NICHT FUER SIGNATUREN. Sie wird an einer einzigen Stelle gebraucht:
+//
+//   IEEE 802.11i schreibt fuer WPA2-PSK vor, dass der Hauptschluessel
+//   PMK aus dem Passwort mit PBKDF2-HMAC-SHA1 entsteht und die
+//   Sitzungsschluessel PTK mit einer PRF ueber HMAC-SHA1. Das ist
+//   keine Wahl, die dieses Repository trifft -- es ist die Rechnung,
+//   die JEDER Zugangspunkt der Welt auf der anderen Seite macht. Wer
+//   sie anders rechnet, verbindet sich nicht.
+//
+// Und die Sicherheit haengt hier nicht an Kollisionsfreiheit, sondern
+// an HMAC. HMAC-SHA1 ist von den bekannten SHA-1-Kollisionen NICHT
+// betroffen; die Angriffe brauchen die Freiheit, beide Nachrichten zu
+// waehlen, und die gibt es in einem Schluesselableitungs-PRF nicht.
+// WPA3 rechnet trotzdem mit SHA-256, und wo dieses Repository die Wahl
+// hat, nimmt es SHA-256 (`lib/crypto/sha256.fi`).
+//
+// ==================================================================
+// WAS HIER DRIN IST UND WARUM AN EINEM STUECK
+// ==================================================================
+//
+//   sha1        FIPS 180-4
+//   hmac        HMAC-SHA1, RFC 2104
+//   hmac3       dasselbe, aber ueber DREI Stuecke ohne sie vorher
+//               aneinanderzuhaengen. Das ist kein Luxus: die PRF von
+//               802.11i haengt Marke, Daten und einen Zaehler
+//               aneinander, und ein Zwischenpuffer dafuer waere eine
+//               feste Obergrenze und eine Stelle zum Ueberlaufen.
+//   prf         PRF-SHA1, IEEE 802.11i 8.5.1.1
+//   pbkdf2      PBKDF2-HMAC-SHA1, RFC 2898
+//
+// ==================================================================
+// DIE REGELN DIESER DATEI (dieselben wie sha256.fi)
+// ==================================================================
+//
+// KEINE `profile`-Zeile, KEIN `import`, kein Allokator, kein
+// Systemaufruf, aller Zustand beim Aufrufer. Damit laesst sie sich in
+// den Kern, in ein Ring-3-Programm und in einen Testlaeufer auf dem
+// Wirt binden, ohne dass eine Zeile sich aendert.
+//
+// SHA-1 ist ein 32-Bit-Verfahren, Firns `u64` ist 64 Bit. JEDE Rechnung
+// endet deshalb auf `& M32`, und jede Addition benutzt den
+// AUSDRUECKLICHEN Ueberlaufoperator `+%`. Ein einzelnes fehlendes
+// `& M32` erzeugt einen Hash, der stabil ist, zufaellig aussieht und
+// mit nichts auf der Welt uebereinstimmt -- deshalb wird diese Datei
+// nicht geglaubt, sondern GEMESSEN (tools/wlan/vektoren.py, gegen
+// Pythons `hashlib` und gegen RFC 6070).
+//
+// ==================================================================
+// EHRLICH
+// ==================================================================
+//
+// S1 NICHT KONSTANTZEITIG IN DER LAENGE. Die Zahl der Runden ist die
+//    Zahl der Bloecke, also die Nachrichtenlaenge. In jeder Benutzung
+//    hier ist die oeffentlich. Innerhalb einer Runde gibt es keinen
+//    Sprung, der vom INHALT abhaengt.
+// S2 PBKDF2 IST ABSICHTLICH LANGSAM und wird es hier auch sein: 4096
+//    Wiederholungen zu je zwei SHA-1-Bloecken. Auf einem echten
+//    Rechner sind das einige Millisekunden, in QEMU/TCG deutlich mehr.
+//    Der abgeleitete PMK gehoert deshalb ZWISCHENGESPEICHERT (je
+//    Passwort und SSID einmal) und nicht bei jeder Verbindung neu
+//    gerechnet. Das tut diese Datei nicht -- das ist Aufgabe dessen,
+//    der die Profile verwaltet.
+// S3 KEINE OBERGRENZE FUER DIE EINGABELAENGE, aber `pbkdf2` und `prf`
+//    schreiben hoechstens `OUT_MAX` Oktette und geben `false` zurueck,
+//    wenn mehr verlangt wird. Stillschweigend abschneiden waere hier
+//    der schlimmste Fehler: ein zu kurzer Schluessel, der aussieht wie
+//    ein Schluessel.
+
+export { Sha1, sha1_new, begin, update, finish, hash,
+    hmac, hmac3, prf, pbkdf2, DIGEST, BLOCK, OUT_MAX }
+
+const DIGEST: usize = 20
+const BLOCK: usize = 64
+const OUT_MAX: usize = 128
+const M32: u64 = 4294967295
+
+struct Sha1 {
+    h: [u64; 5],
+    buf: [u8; 64],
+    have: usize, // Oktette, die in `buf` liegen
+    nlo: u64,    // Oktette insgesamt, untere 64 Bit
+    nhi: u64,    // Oktette insgesamt, obere 64 Bit
+}
+
+fn ld8(p: u64, i: usize) -> u8 {
+    return *((p + i as u64) as *mut u8)
+}
+
+fn st8(p: u64, i: usize, v: u8) {
+    *((p + i as u64) as *mut u8) = v
+}
+
+// Linksrotation im 32-Bit-Wort. Der nach links geschobene Teil muss
+// maskiert werden, sonst stehen oberhalb von Bit 31 Reste.
+fn rotl(x: u64, n: u64) -> u64 {
+    return (((x << n) & M32) | ((x & M32) >> (32 - n))) & M32
+}
+
+fn sha1_new() -> Sha1 {
+    return Sha1 { h: [0 as u64; 5], buf: [0 as u8; 64], have: 0,
+        nlo: 0, nhi: 0 }
+}
+
+// FIPS 180-4 5.3.1.
+fn begin(s: *mut Sha1) {
+    (*s).h[0] = 0x67452301
+    (*s).h[1] = 0xEFCDAB89
+    (*s).h[2] = 0x98BADCFE
+    (*s).h[3] = 0x10325476
+    (*s).h[4] = 0xC3D2E1F0
+    (*s).have = 0
+    (*s).nlo = 0
+    (*s).nhi = 0
+}
+
+// Ein Block von 64 Oktetten, FIPS 180-4 6.1.2.
+//
+// Der Nachrichtenplan hat achtzig Woerter; die ersten sechzehn sind der
+// Block selbst (hoechstwertiges Oktett zuerst), die uebrigen entstehen
+// durch XOR von vieren und EINE Linksrotation. Genau diese eine
+// Rotation ist der Unterschied zwischen SHA-1 und SHA-0, und sie ist
+// der Grund, warum SHA-0 zurueckgezogen wurde.
+fn compress(s: *mut Sha1, p: u64) {
+    var w: [u64; 80] = [0 as u64; 80]
+    var i: usize = 0
+    while i < 16 {
+        var v: u64 = 0
+        var j: usize = 0
+        while j < 4 {
+            v = ((v << 8) | (ld8(p, i * 4 + j) as u64)) & M32
+            j = j + 1
+        }
+        w[i] = v
+        i = i + 1
+    }
+    i = 16
+    while i < 80 {
+        w[i] = rotl(w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16], 1)
+        i = i + 1
+    }
+
+    var a: u64 = (*s).h[0]
+    var b: u64 = (*s).h[1]
+    var c: u64 = (*s).h[2]
+    var d: u64 = (*s).h[3]
+    var e: u64 = (*s).h[4]
+
+    i = 0
+    while i < 80 {
+        var f: u64 = 0
+        var k: u64 = 0
+        if i < 20 {
+            f = (b & c) ^ ((~b) & d & M32)
+            k = 0x5A827999
+        } else {
+            if i < 40 {
+                f = b ^ c ^ d
+                k = 0x6ED9EBA1
+            } else {
+                if i < 60 {
+                    f = (b & c) ^ (b & d) ^ (c & d)
+                    k = 0x8F1BBCDC
+                } else {
+                    f = b ^ c ^ d
+                    k = 0xCA62C1D6
+                }
+            }
+        }
+        let t: u64 = (rotl(a, 5) +% f +% e +% k +% w[i]) & M32
+        e = d
+        d = c
+        c = rotl(b, 30)
+        b = a
+        a = t
+        i = i + 1
+    }
+
+    (*s).h[0] = ((*s).h[0] +% a) & M32
+    (*s).h[1] = ((*s).h[1] +% b) & M32
+    (*s).h[2] = ((*s).h[2] +% c) & M32
+    (*s).h[3] = ((*s).h[3] +% d) & M32
+    (*s).h[4] = ((*s).h[4] +% e) & M32
+}
+
+// So oft der Aufrufer mag. `n == 0` ist erlaubt und tut nichts -- das
+// braucht `hmac3`, wenn ein Stueck fehlt.
+fn update(s: *mut Sha1, p: u64, n: usize) {
+    var i: usize = 0
+    while i < n {
+        (*s).buf[(*s).have] = ld8(p, i)
+        (*s).have = (*s).have + 1
+        if (*s).have == BLOCK {
+            compress(s, (&(*s).buf[0]) as u64)
+            (*s).have = 0
+        }
+        i = i + 1
+    }
+    let old: u64 = (*s).nlo
+    (*s).nlo = old +% (n as u64)
+    if (*s).nlo < old {
+        (*s).nhi = (*s).nhi +% 1
+    }
+}
+
+// FIPS 180-4 5.1.1: ein Einsbit, dann Nullen, dann die Laenge in BIT
+// als 64-Bit-Zahl, hoechstwertiges Oktett zuerst.
+fn finish(s: *mut Sha1, out: u64) {
+    let lo: u64 = ((*s).nlo << 3)
+    var pad: [u8; 1] = [128 as u8]
+    update(s, (&pad[0]) as u64, 1)
+    var zero: [u8; 1] = [0 as u8]
+    while (*s).have != 56 {
+        update(s, (&zero[0]) as u64, 1)
+    }
+    var len: [u8; 8] = [0 as u8; 8]
+    var i: usize = 0
+    while i < 8 {
+        len[i] = ((lo >> ((7 - i) as u64 * 8)) & 255) as u8
+        i = i + 1
+    }
+    update(s, (&len[0]) as u64, 8)
+    i = 0
+    while i < 5 {
+        var j: usize = 0
+        while j < 4 {
+            st8(out, i * 4 + j, (((*s).h[i] >> ((3 - j) as u64 * 8))
+                & 255) as u8)
+            j = j + 1
+        }
+        i = i + 1
+    }
+}
+
+fn hash(p: u64, n: usize, out: u64) {
+    var s: Sha1 = sha1_new()
+    begin(&s)
+    update(&s, p, n)
+    finish(&s, out)
+}
+
+// ---------------------------------------------------------------- HMAC
+//
+// HMAC-SHA1 ueber DREI Stuecke (RFC 2104). Ein Stueck mit Laenge 0 wird
+// uebersprungen, also ist `hmac` nur der Fall mit einem Stueck.
+//
+// DIE EINE STELLE, an der man HMAC falsch macht: ein Schluessel, der
+// laenger ist als der Block, wird ERST gehasht und DANN aufgefuellt.
+// Sie steht deshalb genau einmal da.
+fn hmac3(key: u64, klen: usize, p1: u64, n1: usize, p2: u64, n2: usize,
+    p3: u64, n3: usize, out: u64) {
+    var k: [u8; 64] = [0 as u8; 64]
+    if klen > BLOCK {
+        var t: [u8; 20] = [0 as u8; 20]
+        hash(key, klen, (&t[0]) as u64)
+        var i: usize = 0
+        while i < DIGEST {
+            k[i] = t[i]
+            i = i + 1
+        }
+    } else {
+        var i: usize = 0
+        while i < klen {
+            k[i] = ld8(key, i)
+            i = i + 1
+        }
+    }
+    var ipad: [u8; 64] = [0 as u8; 64]
+    var opad: [u8; 64] = [0 as u8; 64]
+    var i: usize = 0
+    while i < BLOCK {
+        ipad[i] = (k[i] ^ (54 as u8))
+        opad[i] = (k[i] ^ (92 as u8))
+        i = i + 1
+    }
+    var inner: [u8; 20] = [0 as u8; 20]
+    var s: Sha1 = sha1_new()
+    begin(&s)
+    update(&s, (&ipad[0]) as u64, BLOCK)
+    update(&s, p1, n1)
+    update(&s, p2, n2)
+    update(&s, p3, n3)
+    finish(&s, (&inner[0]) as u64)
+    begin(&s)
+    update(&s, (&opad[0]) as u64, BLOCK)
+    update(&s, (&inner[0]) as u64, DIGEST)
+    finish(&s, out)
+}
+
+fn hmac(key: u64, klen: usize, msg: u64, mlen: usize, out: u64) {
+    hmac3(key, klen, msg, mlen, 0, 0, 0, 0, out)
+}
+
+// ------------------------------------------------- PRF, IEEE 802.11i
+//
+// 8.5.1.1: PRF(K, A, B, Len). A ist eine Marke wie "pairwise key
+// expansion", B sind die Daten, und HINTER B steht ein Zaehler, der bei
+// 0 anfaengt und je 20 Oktetten Ausgabe um eins steigt.
+//
+// DIE FALLE, die jeder einmal hat: zwischen Marke und Daten steht ein
+// NULLOKTETT. In C faellt das nicht auf, weil `strlen(label) + 1` genau
+// das mit einschliesst. Hier steht es ausdruecklich da.
+//
+// `llen` ist die Laenge der Marke OHNE das Nulloktett; das Nulloktett
+// haengt diese Funktion selbst an.
+//
+// Rueckgabe `false`, wenn mehr als OUT_MAX Oktette verlangt werden --
+// nicht abgeschnitten.
+fn prf(key: u64, klen: usize, label: u64, llen: usize,
+    data: u64, dlen: usize, out: u64, outlen: usize) -> bool {
+    if outlen > OUT_MAX {
+        return false
+    }
+    // Marke und Nulloktett am Stueck: die Marke ist kurz und aus dem
+    // eigenen Quelltext, nicht vom Netz.
+    if llen > 64 {
+        return false
+    }
+    var lb: [u8; 65] = [0 as u8; 65]
+    var i: usize = 0
+    while i < llen {
+        lb[i] = ld8(label, i)
+        i = i + 1
+    }
+    lb[llen] = 0 as u8
+
+    var ctr: [u8; 1] = [0 as u8]
+    var blk: [u8; 20] = [0 as u8; 20]
+    var pos: usize = 0
+    var c: usize = 0
+    while pos < outlen {
+        ctr[0] = c as u8
+        hmac3(key, klen, (&lb[0]) as u64, llen + 1, data, dlen,
+            (&ctr[0]) as u64, 1, (&blk[0]) as u64)
+        var j: usize = 0
+        while j < DIGEST && pos + j < outlen {
+            st8(out, pos + j, blk[j])
+            j = j + 1
+        }
+        pos = pos + DIGEST
+        c = c + 1
+    }
+    return true
+}
+
+// ------------------------------------------------- PBKDF2, RFC 2898
+//
+// F(P, S, c, i) = U1 ^ U2 ^ ... ^ Uc  mit  U1 = PRF(P, S || INT(i))
+// und Uj = PRF(P, Uj-1). INT(i) ist eine 32-Bit-Zahl, hoechstwertiges
+// Oktett zuerst, und i faengt bei EINS an -- nicht bei null. Das ist
+// der zweite Unterschied zur PRF darueber und die zweite Stelle, an der
+// sich zwei Umsetzungen still voneinander entfernen.
+//
+// Fuer WPA2-PSK ruft der Aufrufer das mit dem Passwort als P, der SSID
+// als S, 4096 Wiederholungen und 32 Oktetten Ausgabe.
+fn pbkdf2(pw: u64, pwlen: usize, salt: u64, saltlen: usize,
+    iters: usize, out: u64, outlen: usize) -> bool {
+    if outlen > OUT_MAX || iters == 0 {
+        return false
+    }
+    var idx: [u8; 4] = [0 as u8; 4]
+    var u: [u8; 20] = [0 as u8; 20]
+    var acc: [u8; 20] = [0 as u8; 20]
+    var pos: usize = 0
+    var blocknr: u64 = 1
+    while pos < outlen {
+        idx[0] = ((blocknr >> 24) & 255) as u8
+        idx[1] = ((blocknr >> 16) & 255) as u8
+        idx[2] = ((blocknr >> 8) & 255) as u8
+        idx[3] = (blocknr & 255) as u8
+        hmac3(pw, pwlen, salt, saltlen, (&idx[0]) as u64, 4, 0, 0,
+            (&u[0]) as u64)
+        var j: usize = 0
+        while j < DIGEST {
+            acc[j] = u[j]
+            j = j + 1
+        }
+        var it: usize = 1
+        while it < iters {
+            hmac3(pw, pwlen, (&u[0]) as u64, DIGEST, 0, 0, 0, 0,
+                (&u[0]) as u64)
+            j = 0
+            while j < DIGEST {
+                acc[j] = acc[j] ^ u[j]
+                j = j + 1
+            }
+            it = it + 1
+        }
+        j = 0
+        while j < DIGEST && pos + j < outlen {
+            st8(out, pos + j, acc[j])
+            j = j + 1
+        }
+        pos = pos + DIGEST
+        blocknr = blocknr + 1
+    }
+    return true
+}
