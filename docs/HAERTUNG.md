@@ -141,7 +141,21 @@ darunter — kein Absturz, keine Meldung, nur ein Nachbar mit falschen Werten.
 * Der Trap-Melder **benennt** den Treffer: `WACHSEITE -- Stapel uebergelaufen`.
   Ohne das stünde dort eine Adresse, die niemand einordnen kann.
 
-Gemessen: 19 Wachseiten (ein Prozessor), 27 (vier).
+Gemessen: 18 Wachseiten (ein Prozessor).
+
+**Die Seitentabellen werden beim Start geholt, nicht im Lauf.** Die erste
+Fassung liess `guard_under` die Kachel bei Bedarf auflösen — und `split_tile`
+holt dafür einen Rahmen, den es nie zurückgibt (zu Recht, die Tabelle bleibt in
+Gebrauch). Nur fiel dieser Rahmen dann *mitten im Lauf* weg, und
+`tools/guard/run.sh` zählt genau das: „jeder Rahmen, den das Userland nahm, kam
+zurück" wurde zu **129019 von 129020**. Ein Test, der einen echten Rahmenverlust
+findet, hat recht — also wurde die Ursache behoben und nicht der Test.
+
+Jetzt löst `presplit` beim Start acht Kacheln über `kernel_end` auf (16 MiB
+Rahmenraum; `mem.frame_run` sucht von unten, dort liegen die Kernstapel), und
+`guard_under` schreibt nur noch ein Blatt um. Findet es keine aufgelöste Kachel,
+gibt es eben keine Wache — lieber eine Wache weniger als ein Rahmen, der während
+des Laufs verschwindet. Preis: acht Rahmen, einmal beim Start.
 
 **Was das nicht fängt**, ausdrücklich: einen Rahmen, der die Wache
 *überspringt*. Ein einziger Zugriff mehr als 4096 Oktette unterhalb des
