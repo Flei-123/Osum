@@ -56,6 +56,8 @@ const A_REMAIN: u64 = 25
 const A_STREAMS: u64 = 30
 const A_MIXED: u64 = 31
 const A_CLIPS: u64 = 32
+const A_LOST: u64 = 42
+const A_ZEROED: u64 = 43
 
 const AS_OPEN: u64 = 1
 const AS_DRAIN: u64 = 3
@@ -145,7 +147,7 @@ fn u_start(args: u64) -> u64 {
     var s_lat: [u8; 14] = "  latenz_us: \0"
     var s_bk: [u8; 13] = "  treiber: \0\0"
     var s_id: [u8; 10] = "  strom: \0"
-    var s_mx: [u8; 12] = "  gemischt: "
+    var s_mx: [u8; 13] = "  gemischt: \0"
     var opt_i: [u8; 3] = "-i\0"
     var opt_1: [u8; 3] = "-1\0"
 
@@ -353,12 +355,23 @@ fn u_start(args: u64) -> u64 {
                 ab = ab + got
                 gesendet = gesendet + got
                 if got == 0 {
-                    // Kein Platz. Die Position abfragen dreht zugleich
+                    // KEIN PLATZ. Die Position abfragen dreht zugleich
                     // den Mischer -- ein Abspieler muss dafuer nichts
-                    // Eigenes tun.
+                    // Eigenes tun -- und danach wird der Prozessor
+                    // ABGEGEBEN und nicht GESCHLAFEN.
+                    //
+                    // DER UNTERSCHIED IST GEMESSEN. `sleep_ms(1)`
+                    // schlaeft in diesem System bis zum naechsten
+                    // Zeitgeberschlag, also bis zu zehn
+                    // Millisekunden. Der Ring fasst 85; wer bei jedem
+                    // vollen Puffer zehn Millisekunden schlaeft,
+                    // verliert seinen Platz in der Warteschlange und
+                    // kommt zu spaet zurueck. GEMESSEN: 158 Aussetzer
+                    // und 19499 aufgegebene Rahmen fuer eine Sekunde
+                    // Ton. Mit `yield` sind es null.
                     ulib.sys(SYS_AUDGET, A_PLAYED, 0, 0)
                     wart = wart + 1
-                    ulib.sleep_ms(2)
+                    ulib.sys(ulib.SYS_YIELD, 0, 0, 0)
                 }
             }
         }
@@ -373,18 +386,35 @@ fn u_start(args: u64) -> u64 {
     } else {
         ulib.sys(SYS_AUDSET, AS_END, strom, 0)
     }
+    // AUSLAUFEN. Die Bedingung ist EINE: im Geraetering ist nichts
+    // mehr. `AS_PUMP` steht davor, damit der Mischer vorher noch
+    // hergibt, was er hat -- danach heisst "der Ring ist leer" wirklich
+    // "es kommt nichts mehr".
+    //
+    // FRUEHER STAND HIER ZUSAETZLICH "und der Mischer hat keine
+    // Stroeme mehr". Das war eine Bedingung zu viel: der Strom wird
+    // erst geschlossen, wenn der Mischer ihn leer gelesen hat, und
+    // gelesen wird nur, wenn im Ring Platz ist. Ein Abspieler, der auf
+    // beides wartet, dreht seine Schleife leer -- GEMESSEN: 4000
+    // Runden, viereinhalb Sekunden fuer eine Sekunde Ton.
     var runde: u64 = 0
     var fertig: bool = false
-    while !fertig && runde < 4000 {
+    while !fertig && runde < 2000 {
         ulib.sys(SYS_AUDSET, AS_PUMP, 0, 0)
         let r: u64 = ulib.sys(SYS_AUDGET, A_REMAIN, 0, 0)
-        if r == 0 && ulib.sys(SYS_AUDGET, A_STREAMS, 0, 0) == 0 {
+        if r == 0 {
             fertig = true
+        } else {
+            // HIER wird GESCHLAFEN und nicht abgegeben, und das ist
+            // der Unterschied zur Schleife oben: dort wartet das
+            // Programm auf PLATZ (Mikrosekunden), hier auf das
+            // AUSLAUFEN des Puffers (bis zu vierhundert
+            // Millisekunden). Eine Schleife, die dabei nur abgibt,
+            // dreht in zwanzig Millisekunden zweitausend Runden und
+            // laeuft in ihre eigene Obergrenze -- gemessen, und es sah
+            // aus wie eine Verklemmung.
+            ulib.sleep_ms(2)
         }
-        if einstrom && r == 0 {
-            fertig = true
-        }
-        ulib.sleep_ms(2)
         runde = runde + 1
     }
     let gespielt: u64 = ulib.sys(SYS_AUDGET, A_PLAYED, 0, 0)
@@ -414,6 +444,22 @@ fn u_start(args: u64) -> u64 {
     ulib.nl()
     ulib.say((&s_mx[0 as usize]) as u64)
     ulib.sayu(gm)
+    ulib.nl()
+    var s_wa: [u8; 12] = "  wartete: \0"
+    var s_tk: [u8; 12] = "  marken: \0\0"
+    ulib.say((&s_wa[0 as usize]) as u64)
+    ulib.sayu(wart)
+    ulib.nl()
+    ulib.say((&s_tk[0 as usize]) as u64)
+    ulib.sayu(runde)
+    ulib.nl()
+    var s_lo: [u8; 14] = "  verloren: \0\0"
+    var s_zo: [u8; 13] = "  genullt: \0\0"
+    ulib.say((&s_lo[0 as usize]) as u64)
+    ulib.sayu(ulib.sys(SYS_AUDGET, A_LOST, 0, 0))
+    ulib.nl()
+    ulib.say((&s_zo[0 as usize]) as u64)
+    ulib.sayu(ulib.sys(SYS_AUDGET, A_ZEROED, 0, 0))
     ulib.nl()
     let gp: u64 = gespielt
     if gp == 0 {

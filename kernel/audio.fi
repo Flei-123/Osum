@@ -109,9 +109,9 @@ export {
     init, ready, why, backend,
     open, open_rate, close, is_open,
     rate, set_rate, rates_ok, channels, bits, frame_octets,
-    irq, arm_irq, zero_ahead, zero_rest, drain_mark,
-    open_stream, write_stream, close_stream, mix_pump, hw_ready_pub,
-    catch_up, lost,
+    irq, tick, arm_irq, zero_ahead, zero_rest, drain_mark,
+    open_stream, write_stream, close_stream, end_stream, mix_pump, hw_ready_pub,
+    catch_up, lost, zeroed, zero_all,
     scratch, SCRATCH_FRAMES,
     ring_frames, latency_us, entry_us,
     write, write_kernel, pad_and_submit, stop, reset,
@@ -129,7 +129,7 @@ export {
     A_SOUNDS, A_BEEPS, A_MUTED, A_STARTS, A_DCH, A_CODEC, A_REMAIN,
     A_WRITES, A_MASTERREG, A_PCMREG, A_BACKSTEPS,
     A_STREAMS, A_MIXED, A_CLIPS, A_MIXUNDER, A_DISAGREE, A_IRQARMED,
-    A_CMDPATH, A_DAC, A_PIN, A_PATHLEN, A_WIDGETS, A_CODECADDR,
+    A_CMDPATH, A_DAC, A_PIN, A_PATHLEN, A_WIDGETS, A_CODECADDR, A_LOST, A_ZEROED,
     A_COUNT
 }
 
@@ -186,7 +186,9 @@ const A_PIN: u64 = 38
 const A_PATHLEN: u64 = 39
 const A_WIDGETS: u64 = 40
 const A_CODECADDR: u64 = 41
-const A_COUNT: u64 = 42
+const A_LOST: u64 = 42 // Rahmen, die nach einem Aussetzer aufgegeben wurden
+const A_ZEROED: u64 = 43 // vorausgenullte Rahmen
+const A_COUNT: u64 = 44
 
 // Die Skalare der Schicht. Sie liegen in derselben kdata-Seite wie die
 // des Treibers, aber in einem eigenen Block ab 0x400 -- der Treiber
@@ -203,6 +205,8 @@ const L_STARTED: u64 = 0x38
 const L_RATE: u64 = 0x48 // die ausgehandelte Abtastrate des Geraets
 const L_ZERO: u64 = 0x50 // bis wohin der Ring VORAUS genullt ist
 const L_LOST: u64 = 0x58 // Rahmen, die nach einem Aussetzer aufgegeben wurden
+const L_ZEROED: u64 = 0x60 // vorausgenullte Rahmen, gesamt
+const L_IDLE: u64 = 0x68 // Zeitgeberschlaege ohne Nachschub
 const L_PHASE: u64 = 0x40 // Phase des laufenden Tons, damit zwei
                           // Aufrufe hintereinander keinen Sprung haben
 
@@ -422,6 +426,54 @@ fn init(state: u64) -> bool {
 // Die Unterbrechung, weitergereicht an den Treiber, der gerade unten
 // steht. Beide melden auf demselben Vektor -- es laeuft immer nur
 // einer.
+// DER ZEITGEBERSCHLAG. Er liest die Position (damit die Umlaufzaehlung
+// keinen Umlauf verliert), nullt voraus und dreht den Mischer. Er tut
+// NICHTS, wenn kein Ton laeuft -- drei Vergleiche und zurueck.
+fn tick(state: u64) {
+    if g(state, L_BACKEND) == B_NONE {
+        return
+    }
+    // AUFRAEUMEN AUCH DANN, WENN NICHTS LAEUFT. Ein Strom, dessen
+    // Programm sich verabschiedet hat, muss auch dann geschlossen
+    // werden, wenn der Regler gerade steht -- sonst haelt ein
+    // beendeter Abspieler einen der vier Plaetze fuer immer.
+    mix.reap(state)
+    if !hw_running(state) {
+        return
+    }
+    samples_played(state)
+    zero_ahead(state)
+    if mix.streams(state) != 0 {
+        mix_pump(state)
+    }
+    // NICHTS MEHR DA -> ANHALTEN. Bei HD-Audio laeuft der Regler
+    // weiter, bis ihn jemand anhaelt; ein Ring ohne Nachschub wird
+    // dabei im Kreis gelesen. Vorausnullen deckt das ab, SOLANGE die
+    // Uhr mitkommt -- und ein Programm, das laenger wegbleibt als ein
+    // Ringumlauf, ist genau der Fall, in dem sie es nicht tut.
+    //
+    // Also wird der Lauf abgestellt, sobald der Schreiber leer ist.
+    // Das kostet beim naechsten Rahmen den Vorlauf (24 Eintraege,
+    // 64 ms) -- und es macht aus einem Aussetzer das, was er sein
+    // soll: STILLE. Ein wiederholter Takt waere lauter als das
+    // Original und klaenge nach Absicht.
+    // FUENF SCHLAEGE LANG NICHTS -> ANHALTEN. Nicht beim ersten: ein
+    // Schreiber, der genau auf der Grenze arbeitet, wuerde sonst
+    // hundertmal je Sekunde angehalten und wieder angefahren, und
+    // jedes Anfahren kostet den Vorlauf.
+    if g(state, L_STARTED) != 0 && remaining(state) == 0 {
+        s(state, L_IDLE, g(state, L_IDLE) + 1)
+        if g(state, L_IDLE) >= 5 {
+            hw_drain_mark(state)
+            hw_stop(state)
+            s(state, L_STARTED, 0)
+            s(state, L_IDLE, 0)
+        }
+    } else {
+        s(state, L_IDLE, 0)
+    }
+}
+
 fn irq(state: u64) {
     let b: u64 = g(state, L_BACKEND)
     if b == B_HDA {
@@ -601,12 +653,45 @@ fn open_rate(state: u64, hz: u64) -> bool {
     return true
 }
 
+// SCHLIESSEN. Zuerst DEN GANZEN RING AUF STILLE, dann anhalten -- und
+// die Reihenfolge ist der Punkt.
+//
+// Bei HD-Audio laeuft der Regler, bis ihn jemand anhaelt, und zwischen
+// dem letzten Rahmen eines Programms und dem `stop` liegen bei einem
+// Prozess, der sich gerade beendet, mehrere Zeitscheiben. In dieser
+// Zeit spielt der Regler den Ring weiter -- und was darin steht, ist
+// das Ende des Stuecks. GEMESSEN aus Ring 3: hinter einer Sekunde Ton
+// standen weitere Sekunden desselben Tons in der Datei.
+//
+// Das Nullen kostet 16 KiB EINMAL je Schliessen. Es steht VOR dem
+// Anhalten, damit der Regler die Stille noch holt; danach ist es
+// wirkungslos, weil er nicht mehr liest.
 fn close(state: u64) {
     if g(state, L_OPEN) == 0 {
         return
     }
+    zero_all(state)
     hw_stop(state)
     s(state, L_OPEN, 0)
+    s(state, L_STARTED, 0)
+}
+
+// Den ganzen Ring auf Stille, ohne Ruecksicht auf Schreib- oder
+// Lesezeiger. NUR beim Schliessen und beim Anhalten benutzen -- im
+// Betrieb waere es das Loeschen der eigenen Daten.
+fn zero_all(state: u64) {
+    let ring: u64 = hw_ring(state)
+    if ring == 0 {
+        return
+    }
+    let rf: u64 = hw_ring_frames(state)
+    let fo: u64 = frame_octets(state)
+    var i: u64 = 0
+    while i < rf {
+        __mmio_write32((ring + i * fo) as *mut u32, 0)
+        i = i + 1
+    }
+    s(state, L_ZERO, g(state, L_WPOS) + rf)
 }
 
 // Alles auf Anfang: der Treiber setzt seine Box zurueck, die Schicht
@@ -638,7 +723,23 @@ fn samples_played(state: u64) -> u64 {
     return hw_position(state)
 }
 
+// WAS NOCH AUSSTEHT. Null, wenn NICHTS LAEUFT -- und diese eine Zeile
+// hat eine Warteschleife aufgeloest, die sich nicht aufloesen wollte.
+//
+// Steht der Regler (weil der Ring leer war und `tick` ihn abgestellt
+// hat), dann friert die Position auf ihrem letzten Wert ein. Der liegt
+// unter dem Schreibzeiger, denn die letzten Rahmen sind ja gespielt
+// worden, waehrend die Uhr schon stand. "Geschrieben minus gespielt"
+// ist dann fuer immer groesser als null, und ein Abspieler, der auf
+// "der Ring ist leer" wartet, wartet fuer immer. GEMESSEN: 2000
+// Warteschleifen je Wiedergabe.
+//
+// Ein stehender Regler HAT nichts mehr ausstehen. Genau das sagt die
+// Zeile.
 fn remaining(state: u64) -> u64 {
+    if g(state, L_STARTED) == 0 && !hw_running(state) {
+        return 0
+    }
     let w: u64 = g(state, L_WPOS)
     let p: u64 = hw_position(state)
     if p >= w {
@@ -830,7 +931,6 @@ fn write(state: u64, src: u64, frames: u64) -> u64 {
 // Rauschteppich. Gefunden hat es NUR der Wertevergleich gegen die
 // nachgerechnete Reihe (`tools/hda/refsine.py`). Genau dafuer gibt es
 // ihn.
-const ZERO_AHEAD_ENTRIES: u64 = 2
 
 // ================= NACH EINEM AUSSETZER AUFHOLEN
 //
@@ -870,8 +970,25 @@ fn catch_up(state: u64) -> u64 {
     }
     let verloren: u64 = p -% w
     s(state, L_WPOS, p)
-    s(state, L_ZERO, p)
     s(state, L_LOST, g(state, L_LOST) +% verloren)
+    // UND DER GANZE RING WIRD STILL. Das ist der Teil, der beim ersten
+    // Anlauf fehlte, und ohne ihn ist das Aufholen schlimmer als der
+    // Aussetzer selbst:
+    //
+    //   Der Schreibzeiger springt nach vorn und markiert damit alles
+    //   hinter sich als "geschrieben". Der Inhalt an diesen Stellen
+    //   ist aber der VOM VORIGEN UMLAUF -- der Regler spielt ihn
+    //   ordnungsgemaess ab, und man hoert die letzten 85 Millisekunden
+    //   noch einmal. Das Vorausnullen greift dort nicht mehr, weil es
+    //   nur zwischen Schreibzeiger und Position arbeitet.
+    //
+    //   GEMESSEN: 48000 Rahmen geschickt, 138661 Rahmen Ton in der
+    //   Datei, in Bloecken von genau einer Ringlaenge, jeder durch ein
+    //   Loch von genau einem Eintrag (128 Rahmen) getrennt.
+    //
+    // Nach einem Aussetzer ist ALLES im Ring veraltet. Also: Stille.
+    zero_all(state)
+    s(state, L_ZERO, p + hw_ring_frames(state))
     return verloren
 }
 
@@ -911,11 +1028,27 @@ fn zero_ahead(state: u64) {
     // erst beim naechsten Umlauf wieder liest. Alles darueber gehoert
     // ihm noch.
     let p: u64 = hw_position(state)
-    var bis: u64 = w + ef * ZERO_AHEAD_ENTRIES
-    let grenze: u64 = p + rf
-    if bis > grenze {
-        bis = grenze
-    }
+    // SO WEIT WIE MOEGLICH, UND DAS IST BILLIGER ALS ES AUSSIEHT.
+    //
+    // Die erste Fassung nullte ZWEI Eintraege voraus (5,3 ms). Das
+    // reicht, solange der Schreiber nur kurz stolpert -- und es reicht
+    // nicht, wenn er laenger wegbleibt: dann liest der Regler wieder,
+    // was vor einem Umlauf dort stand, und man hoert die letzte
+    // Achtelsekunde noch einmal.
+    //
+    // GEMESSEN mit /bin/play aus Ring 3: 48000 Rahmen geschrieben,
+    // 47999 gemischt -- und in der Datei standen 231357 Rahmen Ton.
+    // Der Ring wurde viereinhalb Mal wiederholt, und weil eine
+    // Wiederholung genauso laut ist wie das Original, sah jede Zahl
+    // richtig aus.
+    //
+    // JETZT WIRD ALLES GENULLT, was zwischen dem Schreibzeiger und
+    // `Position + Ringgroesse` liegt. Das ist die ganze Strecke, die
+    // dem Schreiber gehoert. KOSTEN: jeder Rahmen wird hoechstens
+    // EINMAL genullt (`L_ZERO` merkt sich, bis wohin), also verdoppelt
+    // sich der Speicherverkehr auf dem Ring -- 384 KiB je Sekunde bei
+    // 48 kHz, ein Tausendstel dessen, was ein Bild kostet.
+    var bis: u64 = p + rf
     var von: u64 = g(state, L_ZERO)
     if von < w {
         von = w
@@ -930,6 +1063,11 @@ fn zero_ahead(state: u64) {
         i = i + 1
     }
     s(state, L_ZERO, bis)
+    s(state, L_ZEROED, g(state, L_ZEROED) +% (bis -% von))
+}
+
+fn zeroed(state: u64) -> u64 {
+    return g(state, L_ZEROED)
 }
 
 // "Ab hier kommt nichts mehr" -- an den Treiber weitergereicht.
@@ -1398,9 +1536,26 @@ fn write_stream(state: u64, id: u64, src: u64, frames: u64) -> u64 {
     return n
 }
 
+// "ICH SCHREIBE NICHTS MEHR." Der Strom bleibt offen, bis der Mischer
+// ihn leer gelesen hat -- und der Lauf wird ANGEWORFEN, falls er es
+// noch nicht ist. Ohne das letzte Stueck bliebe eine Datei, die
+// kuerzer ist als der Vorlauf (64 ms), fuer immer ungehoert im Puffer
+// liegen.
+fn end_stream(state: u64, id: u64) {
+    mix.mark_end(state, id)
+    mix_pump(state)
+    if g(state, L_STARTED) == 0 && g(state, L_WPOS) > 0 {
+        if hw_start(state) {
+            s(state, L_STARTED, 1)
+        }
+    }
+    hw_drain_mark(state)
+}
+
 fn close_stream(state: u64, id: u64) {
     mix.close(state, id)
     if mix.streams(state) == 0 {
+        zero_all(state)
         // DER LETZTE MACHT DAS LICHT AUS. Der DMA wird angehalten,
         // sobald niemand mehr spielt -- bei HD-Audio laeuft er sonst
         // fuer immer weiter und liest einen Ring, den keiner mehr
@@ -1433,6 +1588,10 @@ fn mix_pump(state: u64) -> u64 {
     if !hw_ready(state) {
         return 0
     }
+    // AUFRAEUMEN VOR ALLEM ANDEREN -- die Begruendung steht bei
+    // `mix.reap`. Steht es weiter unten, findet es nicht statt, wenn
+    // im Ring kein Platz ist, und genau dann braucht es jemand.
+    mix.reap(state)
     if mix.streams(state) == 0 {
         return 0
     }
