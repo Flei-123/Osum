@@ -76,7 +76,7 @@ import acpi
 
 export {
     parse, want, wx_apply, tramp_seal, wx_verify, guard_under, unguard,
-    wp_on, static_guards,
+    wp_on, static_guards, presplit,
     report, aslr_bits, aslr_off, iommu_scan, iommu_report,
     wx_write_probe, wx_exec_probe, kblow_probe,
     is_guard, split_tile,
@@ -401,6 +401,7 @@ fn wx_apply(state: u64, kernel_end: u64) {
     nx_above(state, (kernel_end + HUGE - 1) & not(HUGE - 1),
         kstate.get(state, kstate.MAPPED_GIB))
     flush()
+    presplit(state, kernel_end)
     static_guards(state)
     // ZULETZT, nicht zuerst: bis hierher hat dieser Durchgang selbst in
     // Seiten geschrieben, die er gerade nur-lesend gemacht hat (die
@@ -420,6 +421,32 @@ fn tramp_seal(state: u64) {
     }
     set_range(state, TRAMP_BASE, TRAMP_BASE + TRAMP_PAGES * PAGE, false, true)
     flush()
+}
+
+// DIE KACHELN, AUS DENEN KERNSTAPEL KOMMEN, BEIM START AUFLOESEN.
+//
+// `mem.frame_run` sucht von unten her den ersten freien Lauf, also
+// liegen die Kernstapel dicht ueber `kernel_end`. Acht Kacheln sind
+// 16 MiB Rahmenraum -- weit mehr, als die Aufgaben dieses Systems je
+// gleichzeitig an Stapeln halten. Der Preis sind acht Rahmen, und zwar
+// EINMAL beim Start, wo jede Zaehlung sie als Grundstand sieht.
+const PRESPLIT_KACHELN: u64 = 8
+
+fn presplit(state: u64, kernel_end: u64) -> u64 {
+    if want(state, M_NOGUARD) {
+        return 0
+    }
+    var n: u64 = 0
+    var k: u64 = 0
+    var a: u64 = (kernel_end + HUGE - 1) & not(HUGE - 1)
+    while k < PRESPLIT_KACHELN {
+        if split_tile(state, a) != 0 {
+            n = n + 1
+        }
+        a = a + HUGE
+        k = k + 1
+    }
+    return n
 }
 
 // Die vier festen Stapel aus `boot.s` haben je eine eigene Seite unter
@@ -504,7 +531,29 @@ fn guard_under(state: u64, addr: u64) -> bool {
     if want(state, M_NOGUARD) {
         return false
     }
-    let pt: u64 = split_tile(state, addr)
+    // TEILT NICHT. Das ist der Unterschied zur ersten Fassung, und er
+    // ist gemessen: `split_tile` holt einen Rahmen fuer die neue
+    // Seitentabelle und gibt ihn nie zurueck -- zu Recht, die Tabelle
+    // bleibt ja in Gebrauch. Nur faellt dieser eine Rahmen dann
+    // MITTEN IM LAUF weg, und tools/guard/run.sh zaehlt genau das:
+    // "jeder Rahmen, den das Userland nahm, kam zurueck" wurde zu
+    // 129019 von 129020.
+    //
+    // Also werden die Kacheln, aus denen Kernstapel kommen, beim START
+    // aufgeloest (`presplit`), und hier wird nur noch ein Blatt
+    // umgeschrieben. Findet sich keine aufgeloeste Kachel, gibt es
+    // eben keine Wache -- lieber eine Wache weniger als ein Rahmen,
+    // der waehrend des Laufs verschwindet.
+    let pd: u64 = pd_of(addr)
+    if pd == 0 {
+        return false
+    }
+    let ti: u64 = (addr >> 21) & 0x1FF
+    let te: u64 = rd(pd, ti)
+    if (te & P_PRESENT) == 0 || (te & P_HUGE) != 0 {
+        return false
+    }
+    let pt: u64 = te & ADDR_MASK
     if pt == 0 {
         return false
     }
