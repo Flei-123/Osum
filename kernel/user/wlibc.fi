@@ -80,6 +80,14 @@ export {
     rrect, rframe, rring, drop_shadow, divider, aa_pixels,
     theme_semantic_count,
     theme_override_count, theme_load, theme_set, theme_sum,
+    // ROUND THEMESTORE: resolve a preset WITHOUT publishing it, so that
+    // a list of ten appearances can show ten previews and ten measured
+    // contrast ratios without the screen changing ten times.
+    theme_probe, theme_probe_comp, theme_probe_metric,
+    theme_probe_txt, theme_probe_min, theme_probe_worst,
+    theme_probe_ok, theme_probe_moved, theme_probe_pairs,
+    theme_probe_pair, theme_probe_pair_fg, theme_probe_pair_bg,
+    theme_probe_high, PAIR_COUNT, theme_accent_own, ACCENT_BLACK,
     // ---- ROUND NETVIEW, addendum: icons whose colours come from
     // the scheme (OSYM coverage 1..5 = a role, not an alpha).
     icon_ok, icon_w, icon_h, icon_role, icon_draw, ICON_ROLES,
@@ -116,7 +124,7 @@ export {
     WM_STATE, WM_LIST, WM_ACT, WM_DECO, WI_LAYER, WI_HIDDEN,
     WS_LAYER, WS_HIDDEN, WS_DECO, WA_RAISE, WA_HIDE, WA_TOGGLE,
     WM_STRUT, WS_MAXIMIZED, WI_WORKX, WI_WORKY, WI_WORKW, WI_WORKH,
-    WI_MAXIMIZED, WE_BOTTOM, WE_TOP, WE_LEFT, WE_RIGHT,
+    WI_MAXIMIZED, WI_INX, WI_INY, WE_BOTTOM, WE_TOP, WE_LEFT, WE_RIGHT,
     win_strut, win_max, work_x, work_y, work_w, work_h, edge_name,
     edge_by_name,
     WL_ID, WL_X, WL_Y, WL_W, WL_H, WL_LAYER, WL_FLAGS, WL_FOCUS,
@@ -181,6 +189,10 @@ const WI_WORKY: u64 = 12
 const WI_WORKW: u64 = 13
 const WI_WORKH: u64 = 14
 const WI_MAXIMIZED: u64 = 15
+// RUNDE THEMESTORE: der Versatz der Malflaeche im aeusseren Rechteck,
+// so wie der Server ihn fuehrt. Siehe kernel/sys.fi.
+const WI_INX: u64 = 16
+const WI_INY: u64 = 17
 
 // ADDENDUM TASKBAR: the four screen edges, same numbers as in the
 // kernel. `WE_` and not `E_`, because `E_` already means an event here.
@@ -1497,6 +1509,89 @@ static mut acc_moved: u64 = 0
 static mut acc_r_text: u64 = 0
 static mut acc_r_ui: u64 = 0
 
+// ============================ ROUND THEMESTORE: THE PROBE
+//
+// A preset names a scheme, a mode, a shape and an accent.  The list in
+// the settings window has to show, for each of ten of them, what it
+// LOOKS like and what its contrast IS -- before anything is applied.
+//
+// There is exactly one resolver in this file and there is going to
+// stay exactly one.  So the probe does not re-implement anything: it
+// puts the preset's values into the same three variables the settings
+// file would have put them in, runs the same `theme_apply`, copies the
+// answer out, and then calls `theme_reload()` -- which reads
+// /etc/theme.conf off the disk again and restores the true state from
+// the file, not from a remembered copy.  Restoring from a copy is how
+// round THEME's `theme_reload` came to be one step behind itself.
+//
+// WHAT IT COSTS AND WHAT IT DOES NOT COST.  Two file reads and two
+// resolves per preset; the numbers are in docs/ROUNDTHEMESTORE.md.
+// It does publish into the live bank for the length of the call --
+// a program that painted in the middle of a probe would paint the
+// probed colours.  Nothing does: a probe runs to completion inside one
+// event, and `theme_frame_begin` latches a bank for the whole of a
+// paint.  It is written down here rather than left to be found.
+static mut prb_comp: [u64; 41] = [0 as u64; 41]
+static mut prb_met: [u64; 14] = [0 as u64; 14]
+static mut prb_pair: [u64; 17] = [0 as u64; 17]
+static mut prb_txt: u64 = 0
+static mut prb_min: u64 = 0
+static mut prb_worst: u64 = 0
+static mut prb_ok: u64 = 1
+static mut prb_moved: u64 = 0
+static mut prb_high: u64 = 0
+
+// THE SEVENTEEN TEXT PAIRINGS, and they are the same seventeen
+// `tools/theme/model.py` calls TEXT_PAIRS with kind "normal".  Two
+// implementations of one list; `tools/themestore/run.sh` prints both
+// and compares them pair by pair, which is the only reason a second
+// list is allowed to exist at all.
+const PAIR_COUNT: u64 = 17
+static mut pair_fg: [u64; 17] = [0 as u64; 17]
+static mut pair_bg: [u64; 17] = [0 as u64; 17]
+static mut pairs_ok: u64 = 0
+
+fn pairs_init() {
+    if pairs_ok != 0 {
+        return
+    }
+    pair_fg[(0) as usize] = S_TEXT_PRIMARY
+    pair_bg[(0) as usize] = S_SURFACE
+    pair_fg[(1) as usize] = S_TEXT_PRIMARY
+    pair_bg[(1) as usize] = S_SURFACE_RAISED
+    pair_fg[(2) as usize] = S_TEXT_PRIMARY
+    pair_bg[(2) as usize] = S_SURFACE_SUNKEN
+    pair_fg[(3) as usize] = S_TEXT_PRIMARY
+    pair_bg[(3) as usize] = S_SURFACE_HOVER
+    pair_fg[(4) as usize] = S_TEXT_PRIMARY
+    pair_bg[(4) as usize] = S_SURFACE_PRESSED
+    pair_fg[(5) as usize] = S_TEXT_PRIMARY
+    pair_bg[(5) as usize] = S_OVERLAY
+    pair_fg[(6) as usize] = S_TEXT_SECONDARY
+    pair_bg[(6) as usize] = S_SURFACE
+    pair_fg[(7) as usize] = S_TEXT_SECONDARY
+    pair_bg[(7) as usize] = S_SURFACE_RAISED
+    pair_fg[(8) as usize] = S_TEXT_SECONDARY
+    pair_bg[(8) as usize] = S_SURFACE_SUNKEN
+    pair_fg[(9) as usize] = S_TEXT_SECONDARY
+    pair_bg[(9) as usize] = S_SURFACE_HOVER
+    pair_fg[(10) as usize] = S_ON_ACCENT
+    pair_bg[(10) as usize] = S_ACCENT
+    pair_fg[(11) as usize] = S_ON_ACCENT
+    pair_bg[(11) as usize] = S_ACCENT_HOVER
+    pair_fg[(12) as usize] = S_ON_ACCENT
+    pair_bg[(12) as usize] = S_ACCENT_PRESSED
+    pair_fg[(13) as usize] = S_ON_SELECTION
+    pair_bg[(13) as usize] = S_SELECTION
+    pair_fg[(14) as usize] = S_DANGER
+    pair_bg[(14) as usize] = S_SURFACE
+    pair_fg[(15) as usize] = S_WARNING
+    pair_bg[(15) as usize] = S_SURFACE
+    pair_fg[(16) as usize] = S_SUCCESS
+    pair_bg[(16) as usize] = S_SURFACE
+    pairs_ok = 1
+}
+
 static mut st_hover: u64 = 0
 static mut st_pressed: u64 = 0
 static mut st_on: u64 = 0
@@ -2093,6 +2188,19 @@ fn theme_accent_ratio_text() -> u64 {
 
 fn theme_accent_ratio_ui() -> u64 {
     return acc_r_ui
+}
+
+// ROUND THEMESTORE: what /etc/theme.conf's `accent=` line SAYS, and 0
+// if the line is empty. `theme_accent_wanted` answers a different
+// question -- it falls back to the scheme's own accent, which is what
+// the settings window wants to display and exactly what a preset
+// writer must NOT write down, because then the preset would pin a
+// colour the scheme is free to change.
+fn theme_accent_own() -> u64 {
+    if set_accent == ACCENT_BLACK {
+        return ACCENT_BLACK
+    }
+    return set_accent
 }
 
 fn theme_accent_wanted() -> u64 {
@@ -3029,6 +3137,169 @@ fn reload_inner(aus_kopie: bool) -> u64 {
 
 fn theme_reload() -> u64 {
     return reload_inner(false)
+}
+
+// ROUND THEMESTORE.  `scheme` and `shape` are file names under
+// /etc/schemas and /etc/shapes, `mode` is MODE_LIGHT/DARK/AUTO,
+// `accent` is an RGB value or 0 for "the scheme's own".  Returns the
+// number of scheme keys understood -- 0 means the scheme file was not
+// there, and the caller has to say so rather than show a preview of
+// the built-in ramp under somebody else's name.
+fn theme_probe(scheme: u64, mode: u64, shape: u64, accent: u64) -> u64 {
+    var p_dir: [u8; 14] = "/etc/schemas/\0"
+    var p_shapes: [u8; 13] = "/etc/shapes/\0"
+    var path: [u8; 64] = [0 as u8; 64]
+    pairs_init()
+    comp_map_init()
+    kv_bad = 0
+    primitives_builtin()
+    metrics_classic()
+    var n: u64 = 0
+    while *((scheme + n) as *mut u8) != 0 as u8 {
+        n = n + 1
+    }
+    copy_bounded((&sch_file[0 as usize]) as u64, scheme, n, 32)
+    path_join((&p_dir[0 as usize]) as u64, (&sch_file[0 as usize]) as u64,
+        (&path[0 as usize]) as u64, 64)
+    let keys: u64 = kv_read((&path[0 as usize]) as u64, 0)
+    // The shape set, by the same route as in `reload_inner`: `classic`
+    // is already in `met`, so a shape file that is not there leaves the
+    // old behaviour standing instead of half a set.
+    var m: u64 = 0
+    while *((shape + m) as *mut u8) != 0 as u8 {
+        m = m + 1
+    }
+    if m > 0 {
+        copy_bounded((&shp_file[0 as usize]) as u64, shape, m, 32)
+        path_join((&p_shapes[0 as usize]) as u64,
+            (&shp_file[0 as usize]) as u64,
+            (&path[0 as usize]) as u64, 64)
+        let sk: u64 = kv_read((&path[0 as usize]) as u64, 4)
+        if sk == 0 {
+            metrics_classic()
+        } else if met[(M_RADIUS_BUTTON) as usize] != 0
+            || met[(M_SHADOW) as usize] != 0 {
+            shp_id = SHAPE_MODERN
+        }
+    }
+    set_mode = mode
+    set_accent = accent
+    if accent != 0 && (accent & RGB24) == 0 {
+        set_accent = ACCENT_BLACK
+    }
+    // A preset with mode=auto is resolved the way the clock would
+    // resolve it right now; that is what the person would get.
+    theme_apply()
+    var i: u64 = 0
+    while i < C_COUNT {
+        prb_comp[(i) as usize] = sem[(comp_role[(i) as usize]) as usize]
+        i = i + 1
+    }
+    var j: u64 = 0
+    while j < M_COUNT {
+        prb_met[(j) as usize] = met[(j) as usize]
+        j = j + 1
+    }
+    prb_high = sch_high
+    prb_ok = 0
+    if acc_ok != 0 {
+        prb_ok = 1
+    }
+    prb_moved = acc_moved
+    prb_txt = contrast(sem[(S_TEXT_PRIMARY) as usize],
+        sem[(S_SURFACE) as usize])
+    var k: u64 = 0
+    var least: u64 = 0xFFFFFFFFFFFFFFFF
+    var wat: u64 = 0
+    while k < PAIR_COUNT {
+        let r: u64 = contrast(sem[(pair_fg[(k) as usize]) as usize],
+            sem[(pair_bg[(k) as usize]) as usize])
+        prb_pair[(k) as usize] = r
+        if r < least {
+            least = r
+            wat = k
+        }
+        k = k + 1
+    }
+    prb_min = least
+    prb_worst = wat
+    // AND BACK, OFF THE DISK. Not from a saved copy of the variables:
+    // the file is the truth about what this machine is set to, and a
+    // probe that restored a copy would be one step behind itself the
+    // moment anything else wrote the file.
+    let _g: u64 = reload_inner(false)
+    return keys
+}
+
+fn theme_probe_comp(i: u64) -> u64 {
+    if i >= C_COUNT {
+        return 0
+    }
+    return prb_comp[(i) as usize]
+}
+
+fn theme_probe_metric(i: u64) -> u64 {
+    if i >= M_COUNT {
+        return 0
+    }
+    return prb_met[(i) as usize]
+}
+
+// text-primary on surface, times 100. The number Justin asked for.
+fn theme_probe_txt() -> u64 {
+    return prb_txt
+}
+
+// The SMALLEST of the seventeen. A preset is only as readable as its
+// worst pairing, and quoting the flattering one would be the sort of
+// number this repository does not print.
+fn theme_probe_min() -> u64 {
+    return prb_min
+}
+
+fn theme_probe_worst() -> u64 {
+    return prb_worst
+}
+
+fn theme_probe_ok() -> bool {
+    return prb_ok != 0
+}
+
+fn theme_probe_moved() -> u64 {
+    return prb_moved
+}
+
+// A high-contrast scheme is judged against 7:1 and not 4.5:1, and the
+// caller has to know which bar applies.
+fn theme_probe_high() -> bool {
+    return prb_high != 0
+}
+
+fn theme_probe_pairs() -> u64 {
+    return PAIR_COUNT
+}
+
+fn theme_probe_pair(i: u64) -> u64 {
+    if i >= PAIR_COUNT {
+        return 0
+    }
+    return prb_pair[(i) as usize]
+}
+
+fn theme_probe_pair_fg(i: u64) -> u64 {
+    pairs_init()
+    if i >= PAIR_COUNT {
+        return 0
+    }
+    return pair_fg[(i) as usize]
+}
+
+fn theme_probe_pair_bg(i: u64) -> u64 {
+    pairs_init()
+    if i >= PAIR_COUNT {
+        return 0
+    }
+    return pair_bg[(i) as usize]
 }
 
 // HAT SICH /etc/theme.conf GEAENDERT? Ein Vergleich der Oktette und

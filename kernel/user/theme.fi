@@ -1,0 +1,497 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/theme.fi -- ROUND THEMESTORE: /bin/theme.
+//
+// The preset store on the command line. It exists for two reasons and
+// the second one is the important one.
+//
+// ONE: not everything that changes how a machine looks should need a
+// mouse. `theme apply terminal` over a serial line is a whole
+// sentence.
+//
+// TWO -- AND THIS IS THE REASON IT WAS WRITTEN FIRST: a claim about a
+// preset has to be MEASURABLE. The settings window can show ten tiles
+// and ten ratios, and a screenshot of ten tiles proves that ten tiles
+// were drawn. It does not prove what the numbers in them are. This
+// program prints every field and every measured ratio as one line per
+// preset, on the serial port, out of the SAME `vorlage.fi` and the
+// SAME `wlibc.theme_probe` the window uses -- so
+// `tools/themestore/run.sh` can compare all of it against
+// `tools/theme/model.py`, which knows nothing about either.
+//
+//   theme                  the same as `theme list`
+//   theme list             every preset, with its measured contrast
+//   theme show <name>      one preset, with all seventeen pairings
+//   theme apply <name>     write /etc/theme.conf and /etc/taskbar.conf
+//   theme save <id> <name> the appearance that is RUNNING, as your own
+//   theme export <name> <path>
+//   theme import <path> <id>
+//   theme remove <id>      one of your own
+//   theme link             copy your own into the account
+//   theme restore          copy the account's back out
+//   theme where            the three directories, and whether there is
+//                          an account at all
+//
+// It is English on standard output. Round I18N excluded command-line
+// programs on purpose and this is one; `tools/i18n/scan.py` counts it.
+
+profile kernel
+
+import ulib
+import libc.io
+import wlibc
+import vorlage
+
+export { u_start }
+
+static mut buf: [u8; 128] = [0 as u8; 128]
+
+fn say(p: u64) {
+    let n: u64 = ulib.length(p)
+    let _w: u64 = ulib.put(p, n)
+}
+
+fn sp() {
+    var s: [u8; 2] = " \0"
+    say((&s[0 as usize]) as u64)
+}
+
+// 461 -> "4.61". The ratio is carried as hundredths everywhere in this
+// system; printing it as a decimal here and nowhere else keeps one
+// representation in the code and one in the eye.
+fn ratio(v: u64) {
+    var dot: [u8; 2] = ".\0"
+    ulib.sayn(v / 100)
+    say((&dot[0 as usize]) as u64)
+    let r: u64 = v % 100
+    if r < 10 {
+        var z: [u8; 2] = "0\0"
+        say((&z[0 as usize]) as u64)
+    }
+    ulib.sayn(r)
+}
+
+// THE WORD TABLES ARE STATIC. Firn refuses to let a pointer into a
+// function's own frame out through the return value, and it is right
+// to: the frame is gone by the time the caller prints from it.
+static mut w_system: [u8; 7] = "system\0"
+static mut w_local: [u8; 6] = "local\0"
+static mut w_account: [u8; 8] = "account\0"
+static mut w_light: [u8; 6] = "light\0"
+static mut w_dark: [u8; 5] = "dark\0"
+static mut w_auto: [u8; 5] = "auto\0"
+static mut w_left: [u8; 5] = "left\0"
+static mut w_center: [u8; 7] = "center\0"
+
+fn origin_name(o: u64) -> u64 {
+    if o == vorlage.O_LOCAL {
+        return (&w_local[0 as usize]) as u64
+    }
+    if o == vorlage.O_ACCOUNT {
+        return (&w_account[0 as usize]) as u64
+    }
+    return (&w_system[0 as usize]) as u64
+}
+
+fn mode_name(m: u64) -> u64 {
+    if m == wlibc.MODE_LIGHT {
+        return (&w_light[0 as usize]) as u64
+    }
+    if m == wlibc.MODE_DARK {
+        return (&w_dark[0 as usize]) as u64
+    }
+    return (&w_auto[0 as usize]) as u64
+}
+
+fn align_name(a: u64) -> u64 {
+    if a == 1 {
+        return (&w_center[0 as usize]) as u64
+    }
+    return (&w_left[0 as usize]) as u64
+}
+
+fn hex6(v: u64) {
+    var d: [u8; 8] = [0 as u8; 8]
+    var k: u64 = 0
+    while k < 6 {
+        let nib: u64 = (v >> ((5 - k) * 4)) & 15
+        var c: u64 = 48 + nib
+        if nib > 9 {
+            c = 87 + nib
+        }
+        d[(k) as usize] = c as u8
+        k = k + 1
+    }
+    d[(6) as usize] = 0 as u8
+    say((&d[0 as usize]) as u64)
+}
+
+// ONE LINE PER PRESET, AND EVERY FIELD IN IT. A runner that has to
+// stitch two lines together to learn one fact is a runner that will
+// one day stitch the wrong two -- round LOOK paid for that lesson on
+// the settings rectangle.
+fn line(i: u64) {
+    var a: [u8; 15] = "theme: preset \0"
+    var k_id: [u8; 4] = "id=\0"
+    var k_nm: [u8; 7] = " name=\0"
+    var k_or: [u8; 9] = " origin=\0"
+    var k_sc: [u8; 9] = " scheme=\0"
+    var k_md: [u8; 7] = " mode=\0"
+    var k_sh: [u8; 8] = " shape=\0"
+    var k_ac: [u8; 9] = " accent=\0"
+    var k_ed: [u8; 7] = " edge=\0"
+    var k_al: [u8; 8] = " align=\0"
+    var k_ke: [u8; 7] = " keys=\0"
+    var k_ba: [u8; 6] = " bad=\0"
+    var k_tx: [u8; 6] = " txt=\0"
+    var k_mi: [u8; 6] = " min=\0"
+    var k_wo: [u8; 8] = " worst=\0"
+    var k_br: [u8; 6] = " bar=\0"
+    var k_lo: [u8; 6] = " low=\0"
+    var k_ok: [u8; 5] = " ok=\0"
+    var k_mv: [u8; 8] = " moved=\0"
+    var dash: [u8; 2] = "-\0"
+    let _k: u64 = vorlage.measure(i)
+    say((&a[0 as usize]) as u64)
+    say((&k_id[0 as usize]) as u64)
+    say(vorlage.id_at(i))
+    say((&k_nm[0 as usize]) as u64)
+    say(vorlage.name_at(i))
+    say((&k_or[0 as usize]) as u64)
+    say(origin_name(vorlage.origin_at(i)))
+    say((&k_sc[0 as usize]) as u64)
+    say(vorlage.scheme_at(i))
+    say((&k_md[0 as usize]) as u64)
+    say(mode_name(vorlage.mode_at(i)))
+    say((&k_sh[0 as usize]) as u64)
+    say(vorlage.shape_at(i))
+    say((&k_ac[0 as usize]) as u64)
+    if vorlage.accent_at(i) == vorlage.ACC_NONE {
+        say((&dash[0 as usize]) as u64)
+    } else {
+        hex6(vorlage.accent_at(i))
+    }
+    say((&k_ed[0 as usize]) as u64)
+    say(wlibc.edge_name(vorlage.edge_at(i)))
+    say((&k_al[0 as usize]) as u64)
+    say(align_name(vorlage.align_at(i)))
+    say((&k_ke[0 as usize]) as u64)
+    ulib.sayn(vorlage.keys_at(i))
+    say((&k_ba[0 as usize]) as u64)
+    ulib.sayn(vorlage.bad_at(i))
+    say((&k_tx[0 as usize]) as u64)
+    ulib.sayn(vorlage.m_txt())
+    say((&k_mi[0 as usize]) as u64)
+    ulib.sayn(vorlage.m_min())
+    say((&k_wo[0 as usize]) as u64)
+    ulib.sayn(vorlage.m_worst())
+    say((&k_br[0 as usize]) as u64)
+    ulib.sayn(vorlage.m_bar())
+    say((&k_lo[0 as usize]) as u64)
+    ulib.sayn(vorlage.low_at(i))
+    say((&k_ok[0 as usize]) as u64)
+    if vorlage.m_ok() {
+        ulib.sayn(1)
+    } else {
+        ulib.sayn(0)
+    }
+    say((&k_mv[0 as usize]) as u64)
+    ulib.sayn(vorlage.m_moved())
+    ulib.nl()
+}
+
+// The human line under it: the name, the ratio, and the word that
+// matters. `low contrast` is printed for a preset whose worst text
+// pairing is under its bar -- 4.5:1, or 7:1 for a high-contrast
+// scheme. It is never left off, and it is never softened.
+fn pretty(i: u64) {
+    var mid: [u8; 4] = "  \0\0"
+    var lowc: [u8; 21] = "  -- LOW CONTRAST!\0\0\0"
+    var okc: [u8; 3] = " \0\0"
+    var col: [u8; 3] = ": \0"
+    ulib.sayn(i)
+    say((&col[0 as usize]) as u64)
+    say(vorlage.name_at(i))
+    say((&mid[0 as usize]) as u64)
+    ratio(vorlage.m_min())
+    var to: [u8; 4] = ":1\0\0"
+    say((&to[0 as usize]) as u64)
+    if vorlage.low_at(i) != 0 {
+        say((&lowc[0 as usize]) as u64)
+    } else {
+        say((&okc[0 as usize]) as u64)
+    }
+    ulib.nl()
+}
+
+fn do_list() -> u64 {
+    var h: [u8; 20] = "theme: presets n=\0\0\0"
+    let n: u64 = vorlage.scan()
+    say((&h[0 as usize]) as u64)
+    ulib.sayn(n)
+    ulib.nl()
+    var i: u64 = 0
+    while i < n {
+        line(i)
+        pretty(i)
+        i = i + 1
+    }
+    return 0
+}
+
+fn do_show(nm: u64) -> u64 {
+    var nf: [u8; 22] = "theme: no such preset\0"
+    var pl: [u8; 15] = "theme: pair i=\0"
+    var pf: [u8; 5] = " fg=\0"
+    var pb: [u8; 5] = " bg=\0"
+    var pr: [u8; 5] = " r=\0\0"
+    let _n: u64 = vorlage.scan()
+    let i: u64 = vorlage.find(nm)
+    if i >= vorlage.MAXV {
+        say((&nf[0 as usize]) as u64)
+        ulib.nl()
+        return 1
+    }
+    line(i)
+    var k: u64 = 0
+    while k < wlibc.theme_probe_pairs() {
+        say((&pl[0 as usize]) as u64)
+        ulib.sayn(k)
+        say((&pf[0 as usize]) as u64)
+        say(wlibc.theme_semantic_name_at(wlibc.theme_probe_pair_fg(k)))
+        say((&pb[0 as usize]) as u64)
+        say(wlibc.theme_semantic_name_at(wlibc.theme_probe_pair_bg(k)))
+        say((&pr[0 as usize]) as u64)
+        ulib.sayn(wlibc.theme_probe_pair(k))
+        ulib.nl()
+        k = k + 1
+    }
+    return 0
+}
+
+fn do_apply(nm: u64) -> u64 {
+    var nf: [u8; 22] = "theme: no such preset\0"
+    var ap: [u8; 16] = "theme: applied \0"
+    var ba: [u8; 24] = "theme: could not write \0"
+    let _n: u64 = vorlage.scan()
+    let i: u64 = vorlage.find(nm)
+    if i >= vorlage.MAXV {
+        say((&nf[0 as usize]) as u64)
+        ulib.nl()
+        return 1
+    }
+    if !vorlage.apply_at(i) {
+        say((&ba[0 as usize]) as u64)
+        say(vorlage.id_at(i))
+        ulib.nl()
+        return 1
+    }
+    say((&ap[0 as usize]) as u64)
+    say(vorlage.id_at(i))
+    ulib.nl()
+    line(i)
+    return 0
+}
+
+fn do_save(id: u64, label: u64) -> u64 {
+    var okm: [u8; 14] = "theme: saved \0"
+    var bad: [u8; 21] = "theme: save failed \0\0"
+    let _n: u64 = vorlage.scan()
+    if !vorlage.save_as(id, label) {
+        say((&bad[0 as usize]) as u64)
+        ulib.nl()
+        return 1
+    }
+    say((&okm[0 as usize]) as u64)
+    say(id)
+    ulib.nl()
+    let _m: u64 = vorlage.scan()
+    let i: u64 = vorlage.find(id)
+    if i < vorlage.MAXV {
+        line(i)
+    }
+    return 0
+}
+
+fn do_export(nm: u64, to: u64) -> u64 {
+    var okm: [u8; 18] = "theme: exported \0\0"
+    var bad: [u8; 23] = "theme: export failed \0\0"
+    let _n: u64 = vorlage.scan()
+    let i: u64 = vorlage.find(nm)
+    if i >= vorlage.MAXV || !vorlage.export_at(i, to) {
+        say((&bad[0 as usize]) as u64)
+        ulib.nl()
+        return 1
+    }
+    say((&okm[0 as usize]) as u64)
+    say(vorlage.id_at(i))
+    sp()
+    say(to)
+    ulib.nl()
+    return 0
+}
+
+fn do_import(from: u64, id: u64) -> u64 {
+    var okm: [u8; 18] = "theme: imported \0\0"
+    var bad: [u8; 23] = "theme: import failed \0\0"
+    let _n: u64 = vorlage.scan()
+    if !vorlage.import_from(from, id) {
+        say((&bad[0 as usize]) as u64)
+        say(from)
+        ulib.nl()
+        return 1
+    }
+    say((&okm[0 as usize]) as u64)
+    say(id)
+    ulib.nl()
+    let _m: u64 = vorlage.scan()
+    let i: u64 = vorlage.find(id)
+    if i < vorlage.MAXV {
+        line(i)
+    }
+    return 0
+}
+
+fn do_remove(id: u64) -> u64 {
+    var okm: [u8; 16] = "theme: removed \0"
+    var bad: [u8; 32] = "theme: not yours, not removed \0\0"
+    let _n: u64 = vorlage.scan()
+    let i: u64 = vorlage.find(id)
+    if i >= vorlage.MAXV || !vorlage.remove_at(i) {
+        say((&bad[0 as usize]) as u64)
+        say(id)
+        ulib.nl()
+        return 1
+    }
+    say((&okm[0 as usize]) as u64)
+    say(id)
+    ulib.nl()
+    return 0
+}
+
+// THE ACCOUNT LINES SAY WHETHER THERE IS AN ACCOUNT, EVERY TIME.
+// `have=0` is a normal answer and not an error: without an account
+// everything else in this program still works, and that is the rule of
+// this project, not a limitation of this round.
+fn do_where() -> u64 {
+    var a: [u8; 19] = "theme: dir system=\0"
+    var b: [u8; 8] = " local=\0"
+    var c: [u8; 15] = "theme: account\0"
+    var h: [u8; 8] = " have=\0\0"
+    var d: [u8; 6] = " dir=\0"
+    var none: [u8; 2] = "-\0"
+    say((&a[0 as usize]) as u64)
+    say(vorlage.dir_sys())
+    say((&b[0 as usize]) as u64)
+    say(vorlage.dir_local())
+    ulib.nl()
+    say((&c[0 as usize]) as u64)
+    say((&h[0 as usize]) as u64)
+    if vorlage.account_have() {
+        ulib.sayn(1)
+        say((&d[0 as usize]) as u64)
+        say(vorlage.account_dir())
+    } else {
+        ulib.sayn(0)
+        say((&d[0 as usize]) as u64)
+        say((&none[0 as usize]) as u64)
+    }
+    ulib.nl()
+    return 0
+}
+
+fn do_link() -> u64 {
+    var a: [u8; 18] = "theme: linked n=\0\0"
+    var no: [u8; 35] = "theme: no account -- nothing to do\0"
+    let _n: u64 = vorlage.scan()
+    if !vorlage.account_have() {
+        say((&no[0 as usize]) as u64)
+        ulib.nl()
+        return 0
+    }
+    say((&a[0 as usize]) as u64)
+    ulib.sayn(vorlage.link_all())
+    ulib.nl()
+    return 0
+}
+
+fn do_restore() -> u64 {
+    var a: [u8; 20] = "theme: restored n=\0\0"
+    var no: [u8; 35] = "theme: no account -- nothing to do\0"
+    if !vorlage.account_have() {
+        say((&no[0 as usize]) as u64)
+        ulib.nl()
+        return 0
+    }
+    say((&a[0 as usize]) as u64)
+    ulib.sayn(vorlage.restore_all())
+    ulib.nl()
+    let _n: u64 = vorlage.scan()
+    return 0
+}
+
+fn u_start(args: u64) -> u64 {
+    var c_list: [u8; 5] = "list\0"
+    var c_show: [u8; 5] = "show\0"
+    var c_apply: [u8; 6] = "apply\0"
+    var c_save: [u8; 5] = "save\0"
+    var c_export: [u8; 7] = "export\0"
+    var c_import: [u8; 7] = "import\0"
+    var c_remove: [u8; 7] = "remove\0"
+    var c_link: [u8; 5] = "link\0"
+    var c_restore: [u8; 8] = "restore\0"
+    var c_where: [u8; 6] = "where\0"
+    var usage: [u8; 63] = "usage: theme [list|show|apply|save|export|import|link|restore]\0"
+    let _t: u64 = wlibc.theme_reload()
+    let n: u64 = ulib.arg_count(args)
+    if n < 2 {
+        return do_list()
+    }
+    let cmd: u64 = ulib.arg_at(args, 1)
+    let b: u64 = (&buf[0 as usize]) as u64
+    let _c: u64 = ulib.strncpy(b, cmd, 120)
+    if ulib.streq(b, (&c_list[0 as usize]) as u64) {
+        return do_list()
+    }
+    if ulib.streq(b, (&c_where[0 as usize]) as u64) {
+        return do_where()
+    }
+    if ulib.streq(b, (&c_link[0 as usize]) as u64) {
+        return do_link()
+    }
+    if ulib.streq(b, (&c_restore[0 as usize]) as u64) {
+        return do_restore()
+    }
+    if n < 3 {
+        say((&usage[0 as usize]) as u64)
+        ulib.nl()
+        return 2
+    }
+    let a2: u64 = ulib.arg_at(args, 2)
+    if ulib.streq(b, (&c_show[0 as usize]) as u64) {
+        return do_show(a2)
+    }
+    if ulib.streq(b, (&c_apply[0 as usize]) as u64) {
+        return do_apply(a2)
+    }
+    if ulib.streq(b, (&c_remove[0 as usize]) as u64) {
+        return do_remove(a2)
+    }
+    if n < 4 {
+        say((&usage[0 as usize]) as u64)
+        ulib.nl()
+        return 2
+    }
+    let a3: u64 = ulib.arg_at(args, 3)
+    if ulib.streq(b, (&c_save[0 as usize]) as u64) {
+        return do_save(a2, a3)
+    }
+    if ulib.streq(b, (&c_export[0 as usize]) as u64) {
+        return do_export(a2, a3)
+    }
+    if ulib.streq(b, (&c_import[0 as usize]) as u64) {
+        return do_import(a2, a3)
+    }
+    say((&usage[0 as usize]) as u64)
+    ulib.nl()
+    return 2
+}
