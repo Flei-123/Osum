@@ -1,0 +1,1334 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/ota.fi -- RUNDE OTA: DAS UPDATE UEBER DAS INTERNET.
+//
+// WAS VORHER DA WAR, und es ist viel: `kernel/user/opk.fi` installiert
+// signierte Pakete, legt Generationen an und schaltet um; `kernel/ab.fi`
+// zaehlt die Startversuche einer Generation und faellt von selbst
+// zurueck; `kernel/app/fetch.fi` holt eine Datei ueber TLS 1.3 mit
+// Kettenpruefung. Was FEHLTE, war die Verdrahtung -- ein Programm, das
+// von sich aus nachsieht, ob es etwas Neues gibt, es holt, es PRUEFT,
+// BEVOR es etwas anfasst, und erst dann `opk` die Arbeit machen laesst.
+// Das ist diese Datei.
+//
+//   ota suchen        nachsehen, was es gibt (schreibt NICHTS am System)
+//   ota zeigen        was hier steht: Fassung, Generation, Erprobung
+//   ota einspielen    holen, pruefen, einspielen -- OHNE Neustart
+//   ota bestaetigen   der Erfolgsvermerk nach einem guten Start
+//   ota zurueck       von Hand auf die vorige Generation
+//   ota wachhund      die Frist abwarten und notfalls neu starten
+//   ota dienst        automatische Suche im eingestellten Zeitabstand
+//   ota einstellungen die Seite, auf der steht, wie dieses Geraet
+//                     eingestellt ist
+//   ota einstellen <schluessel> <wert>   und wie man es aendert
+//
+// ES WIRD NIE VON SELBST NEU GESTARTET. `einspielen` endet mit dem Satz
+// "bereit zum Neustart" und tut nichts weiter. Der einzige Ort in dieser
+// Datei, der `reboot` aufruft, ist der WACHHUND -- und der laeuft nur,
+// wenn schon ein Update in Erprobung steht und sich nicht meldet; dann
+// ist ein Neustart nicht der Eingriff, sondern die Rettung.
+//
+// ------------------------------------------------------------------
+// DIE REIHENFOLGE, UND SIE IST DER GANZE PUNKT
+//
+//   1. VERZEICHNIS holen (HTTPS, Kette geprueft von `/bin/fetch`).
+//   2. Ed25519-SIGNATUR ueber das VERZEICHNIS pruefen. Faellt sie durch,
+//      ist danach KEINE Zeile daraus geglaubt worden -- auch nicht die
+//      Fassungsnummer.
+//   3. RUECKSCHRITTSSCHUTZ: die Fassung im VERZEICHNIS muss GROESSER
+//      sein als `/system/FASSUNG`. Sonst: abgelehnt.
+//   4. Jedes Paket VOLLSTAENDIG holen, dann Laenge und SHA-256 gegen das
+//      VERZEICHNIS halten. Erst wenn ALLE stimmen, geht es weiter.
+//   5. PLATZ pruefen.
+//   6. `opk aktualisieren` -- das prueft INDEX.sig und die Signatur des
+//      Pakets ein ZWEITES Mal und mit seinem eigenen Code, legt den
+//      Store-Eintrag an, schreibt die neue Generation und schaltet um.
+//   7. `/system/FASSUNG` hochsetzen. ZULETZT, nicht vorher.
+//
+// WARUM SCHRITT 7 ZULETZT KOMMT. Zwischen 6 und 7 kann der Strom
+// ausfallen. Dann steht die neue Generation, und `/system/FASSUNG` nennt
+// noch die alte Zahl -- also wird dasselbe Update beim naechsten Mal
+// noch einmal angeboten und noch einmal eingespielt. Das ist Arbeit
+// zweimal und sonst nichts. Die andere Reihenfolge waere:
+// `/system/FASSUNG` steht schon hoch, die Generation nicht -- und dann
+// hat das Geraet eine Fassung eingetragen, die es nicht hat, und lehnt
+// genau das Update ab, das es braucht. Von zwei Fehlern nimmt man den,
+// der sich von selbst repariert.
+//
+// ------------------------------------------------------------------
+// WAS DAS VERZEICHNIS IST, UND WARUM ES NEBEN DEM INDEX STEHT
+//
+//     OTA1
+//     fassung <TAB> <dezimal>
+//     paket <TAB> name <TAB> fassung <TAB> sha256 <TAB> oktette <TAB> datei
+//
+// `INDEX`/`INDEX.sig` (Runde UPDATE) nennt je Paket den STORE-Streuwert
+// -- den ueber Metadaten und Daten INNERHALB des Pakets. Das ist das
+// richtige Glied fuer "ist das Ausgepackte das gemeinte", und `opk`
+// rechnet es. Es ist NICHT das Glied fuer die Frage, die ein Update aus
+// dem Netz ZUERST stellen muss: "sind die Oktette, die ueber die Leitung
+// kamen, vollstaendig und unveraendert -- BEVOR ich sie anfasse?" Dafuer
+// braucht es den Streuwert ueber die DATEI und ihre LAENGE. Beides steht
+// im VERZEICHNIS, und beides ist von derselben Ed25519-Signatur gedeckt.
+//
+// Und die FASSUNGSNUMMER. Ohne sie ist jede alte, richtig signierte
+// Antwort eine gueltige Antwort: wer sie aufgehoben hat, setzt ein
+// Geraet auf eine Fassung mit bekannter Luecke zurueck, und keine
+// Signaturpruefung der Welt merkt etwas davon. Das ist der Angriff, den
+// man am leichtesten vergisst, und `/system/FASSUNG` ist die Antwort
+// darauf: eine Zahl, die nur steigt.
+//
+// ------------------------------------------------------------------
+// DIE WIEDERAUFNAHME
+//
+// Reisst die Leitung mitten im Laden, bleibt ein Bruchstueck unter
+// `/tmp/ota/` liegen. Der naechste Versuch sieht dessen Laenge an und
+// laesst `/bin/fetch -b <laenge>` nur den REST holen (`Range: bytes=n-`,
+// Antwort `206`). Geprueft wird danach der Streuwert des GANZEN
+// Ergebnisses -- nicht der der beiden Haelften. Ein Bruchstueck, das
+// laenger ist als angekuendigt, wird weggeworfen und neu geholt; das ist
+// der Fall, in dem eine Gegenstelle `Range` nicht kann und den ganzen
+// Rumpf noch einmal schickt.
+//
+// WAS EIN ABBRUCH NICHT ANFASST: alles ausser `/tmp/ota/`. Solange nicht
+// jeder Streuwert stimmt, ist `opk` nicht aufgerufen worden, und ohne
+// `opk` gibt es keinen Store-Eintrag, keine Generation und kein
+// Umschalten. Deshalb ist "mitten im Laden abgebrochen" hier kein
+// Sonderfall mit eigenem Code, sondern der Normalfall, in dem eine
+// Pruefung nein sagt.
+//
+// ------------------------------------------------------------------
+// DIE EINSTELLUNGEN, `/etc/ota.conf`, eine Zeile je Feld:
+//
+//     quelle=https://10.0.2.2:8443     woher (IPv4, weil es keinen
+//                                      Resolver gibt -- siehe unten)
+//     name=ota.test                    der Name, den das Zertifikat
+//                                      tragen MUSS
+//     abstand=3600                     Sekunden zwischen zwei Suchen
+//     auto=ja                          automatisch suchen? ja/nein
+//     frist=120                        Sekunden, die der Wachhund auf
+//                                      den Erfolgsvermerk wartet
+//
+// KEIN RESOLVER. Osum hat keinen (docs/ROADMAP-UPDATE.md A2), und
+// deshalb steht in `quelle` eine ADRESSE und in `name` der Name fuer
+// Zertifikat und SNI. Das ist keine Bequemlichkeit, sondern die
+// Wahrheit: dieses System kann `pkg.example.org` nicht aufloesen, und
+// ein Programm, das so tut, als koennte es das, waere eine Luege mit
+// einem spaeteren, unverstaendlichen Fehler.
+
+profile kernel
+
+import ulib
+import sha
+import crypto.ed25519
+
+export { u_start }
+
+// ------------------------------------------------------------ die Texte
+
+static mut S_USE1: [u8; 38] = "ota suchen | zeigen | einspielen\0\0\0\0\0\0"
+static mut S_USE2: [u8; 46] = "ota bestaetigen | zurueck | wachhund | dienst\0"
+static mut C_SUCH: [u8; 7] = "suchen\0"
+static mut C_ZEIG: [u8; 7] = "zeigen\0"
+static mut C_EIN: [u8; 12] = "einspielen\0\0"
+static mut C_BEST: [u8; 12] = "bestaetigen\0"
+static mut C_ZUR: [u8; 8] = "zurueck\0"
+static mut C_WACH: [u8; 9] = "wachhund\0"
+static mut C_DIEN: [u8; 7] = "dienst\0"
+static mut C_EINS: [u8; 14] = "einstellungen\0"
+static mut C_SETZ: [u8; 12] = "einstellen\0\0"
+static mut P_CONF: [u8; 14] = "/etc/ota.conf\0"
+static mut P_FASS: [u8; 16] = "/system/FASSUNG\0"
+static mut P_FASST: [u8; 20] = "/system/FASSUNG.neu\0"
+static mut P_ERP: [u8; 18] = "/system/ERPROBUNG\0"
+static mut P_AKT: [u8; 16] = "/system/AKTUELL\0"
+static mut P_KEY: [u8; 23] = "/system/schluessel.pub\0"
+static mut P_STAND: [u8; 18] = "/system/ota.stand\0"
+static mut P_TMP: [u8; 9] = "/tmp/ota\0"
+static mut P_FETCH: [u8; 11] = "/bin/fetch\0"
+static mut P_OPK: [u8; 9] = "/bin/opk\0"
+static mut N_VZ: [u8; 12] = "VERZEICHNIS\0"
+static mut N_VZSIG: [u8; 16] = "VERZEICHNIS.sig\0"
+static mut N_INDEX: [u8; 6] = "INDEX\0"
+static mut N_ISIG: [u8; 10] = "INDEX.sig\0"
+static mut N_SIG: [u8; 5] = ".sig\0"
+static mut N_PAKET: [u8; 7] = "paket\t\0"
+static mut N_KENN: [u8; 5] = "OTA1\0"
+static mut N_FASS: [u8; 9] = "fassung\t\0"
+static mut K_QUELLE: [u8; 8] = "quelle=\0"
+static mut K_NAME: [u8; 6] = "name=\0"
+static mut K_ABST: [u8; 9] = "abstand=\0"
+static mut K_AUTO: [u8; 6] = "auto=\0"
+static mut K_FRIST: [u8; 7] = "frist=\0"
+static mut W_JA: [u8; 3] = "ja\0"
+static mut A_O: [u8; 3] = "-o\0"
+static mut A_N: [u8; 3] = "-n\0"
+static mut A_B: [u8; 3] = "-b\0"
+static mut A_AKTU: [u8; 14] = "aktualisieren\0"
+static mut A_QUELLE: [u8; 9] = "--quelle\0"
+static mut A_ERP: [u8; 10] = "erprobung\0"
+static mut A_OK: [u8; 3] = "ok\0"
+static mut A_ZUR: [u8; 8] = "zurueck\0"
+static mut A_RICHT: [u8; 8] = "richten\0"
+static mut E_CONF: [u8; 49] = "ota: /etc/ota.conf fehlt oder nennt keine Quelle\0"
+static mut E_KEY: [u8; 56] = "ota: kein vertrauter Schluessel -- es wird nichts getan\0"
+static mut E_HOLEN: [u8; 32] = "ota: nicht zu holen: \0\0\0\0\0\0\0\0\0\0\0"
+static mut E_KENN: [u8; 46] = "ota: das ist kein VERZEICHNIS (Kennung fehlt)\0"
+static mut E_VZSIG: [u8; 55] = "ota: SIGNATUR DES VERZEICHNISSES FALSCH -- ABGELEHNT\0\0\0"
+static mut E_NOSIG: [u8; 42] = "ota: KEINE SIGNATUR zum VERZEICHNIS\0\0\0\0\0\0\0"
+static mut E_ZURUECK: [u8; 47] = "ota: RUECKSCHRITT ABGELEHNT -- angeboten wird \0"
+static mut E_ZUR2: [u8; 21] = ", hier steht schon \0\0"
+static mut E_LAENGE: [u8; 43] = "ota: falsche Laenge, ABGELEHNT: \0\0\0\0\0\0\0\0\0\0\0"
+static mut E_STREU: [u8; 45] = "ota: STREUWERT STIMMT NICHT, ABGELEHNT: \0\0\0\0\0"
+static mut E_PLATZ: [u8; 40] = "ota: ZU WENIG PLATZ -- abgebrochen, es \0"
+static mut E_PLATZ2: [u8; 34] = "     wurde nichts geschrieben. \0\0\0"
+static mut E_OPK: [u8; 41] = "ota: opk hat nicht installiert, Code \0\0\0\0"
+static mut E_FASS: [u8; 45] = "ota: /system/FASSUNG liess sich nicht setzen\0"
+static mut E_KEINS: [u8; 39] = "ota: das VERZEICHNIS nennt kein Paket\0\0"
+static mut S_QUELLE: [u8; 14] = "ota: quelle \0\0"
+static mut S_HIER: [u8; 22] = "ota: fassung hier \0\0\0\0"
+static mut S_DORT: [u8; 22] = "ota: fassung dort \0\0\0\0"
+static mut S_NEU: [u8; 30] = "ota: NEUE FASSUNG verfuegbar\0\0"
+static mut S_AKTU: [u8; 34] = "ota: alles aktuell, nichts zu tun\0"
+static mut S_PAKET: [u8; 12] = "ota: paket \0"
+static mut S_GEHOLT: [u8; 15] = "ota: geholt   \0"
+static mut S_TEIL: [u8; 32] = "ota: bruchstueck, weiter ab \0\0\0\0"
+static mut S_GEPRUEFT: [u8; 24] = "ota: streuwert stimmt \0\0"
+static mut S_PLATZ: [u8; 14] = "ota: platz \0\0\0"
+static mut S_VON: [u8; 13] = "ota: noetig \0"
+static mut S_SPIEL: [u8; 26] = "ota: einspielen mit opk \0\0"
+static mut S_FERTIG: [u8; 42] = "ota: BEREIT ZUM NEUSTART -- es wird NICHT\0"
+static mut S_FERTIG2: [u8; 42] = "     von selbst neu gestartet. `reboot`.\0\0"
+static mut S_GEN: [u8; 21] = "ota: generation \0\0\0\0\0"
+static mut S_ERPR: [u8; 23] = "ota: in erprobung: \0\0\0\0"
+static mut S_RUHE: [u8; 26] = "ota: nichts in erprobung\0\0"
+static mut S_WBEST: [u8; 32] = "ota: wachhund: bestaetigt nach \0"
+static mut S_WSEK: [u8; 3] = " s\0"
+static mut S_WFRIST: [u8; 49] = "ota: WACHHUND: keine Bestaetigung binnen Frist\0\0\0"
+static mut S_WNEU: [u8; 44] = "ota: WACHHUND: Neustart -- der Kern zaehlt\0\0"
+static mut S_DIENST: [u8; 30] = "ota: dienst, abstand \0\0\0\0\0\0\0\0\0"
+static mut S_DAUS: [u8; 42] = "ota: automatische Suche ist AUSgeschaltet\0"
+static mut S_KEINQ: [u8; 2] = "\0\0"
+static mut S_ESEITE: [u8; 39] = "ota: die Einstellungen (/etc/ota.conf)\0"
+static mut S_EQ: [u8; 12] = "  quelle   \0"
+static mut S_EN: [u8; 12] = "  name     \0"
+static mut S_EA: [u8; 12] = "  abstand  \0"
+static mut S_EU: [u8; 12] = "  auto     \0"
+static mut S_EF: [u8; 12] = "  frist    \0"
+static mut S_EWIE: [u8; 47] = "  aendern:  ota einstellen <schluessel> <wert>\0"
+static mut S_EGES: [u8; 14] = "ota: gesetzt \0"
+static mut S_EIST: [u8; 12] = " ist jetzt \0"
+static mut E_ESCHL: [u8; 61] = "ota: das ist kein Schluessel: quelle name abstand auto frist\0"
+static mut E_ESCHR: [u8; 46] = "ota: /etc/ota.conf liess sich nicht schreiben\0"
+static mut S_NICHT: [u8; 16] = "(nicht gesetzt)\0"
+// --------------------------------------------------------- die Puffer
+//
+// KEINE HALDE. Jedes Programm unter `kernel/user/` ist `profile kernel`
+// und hat keinen Allokator; was hier steht, steht im Abbild. Deshalb ist
+// jede Groesse eine ENTSCHEIDUNG und keine Bequemlichkeit:
+//
+//   VZ    8192   das VERZEICHNIS. Eine Paketzeile ist etwa 110 Oktett,
+//                das reicht fuer ueber siebzig Pakete. Ein groesseres
+//                wird ABGELEHNT und nicht halb gelesen.
+//   CONF  1024   `/etc/ota.conf`.
+//   BLOCK 4096   das Fenster, mit dem eine heruntergeladene Datei
+//                gestreut wird. SHA-256 ist stroemend (`sha.begin`,
+//                `update`, `finish`), also muss ein Paket NICHT ganz in
+//                den Speicher -- der Unterschied zu `opk`, das es fuer
+//                die Pruefsumme ueber Metadaten UND Daten braucht.
+const VZ_MAX: u64 = 8192
+static mut VZ: [u8; 8192] = [0 as u8; 8192]
+static mut CONF: [u8; 1024] = [0 as u8; 1024]
+static mut BLOCK: [u8; 4096] = [0 as u8; 4096]
+static mut SIG: [u8; 64] = [0 as u8; 64]
+static mut KEY: [u8; 32] = [0 as u8; 32]
+static mut HASH: [u8; 32] = [0 as u8; 32]
+static mut HEX: [u8; 72] = [0 as u8; 72]
+// ZWEI PUFFER UND NICHT EINER. `HEX` traegt den Streuwert, den diese
+// Maschine GERECHNET hat; `SOLLHEX` den, den das signierte Verzeichnis
+// NENNT. Beides in einen Puffer zu legen hiesse, den erwarteten Wert mit
+// dem gemessenen zu ueberschreiben und danach zu vergleichen, ob er sich
+// selbst gleicht -- eine Pruefung, die immer ja sagt.
+static mut SOLLHEX: [u8; 72] = [0 as u8; 72]
+static mut URL: [u8; 320] = [0 as u8; 320]
+static mut ZIEL: [u8; 256] = [0 as u8; 256]
+static mut ZIEL2: [u8; 256] = [0 as u8; 256]
+static mut QUELLE: [u8; 200] = [0 as u8; 200]
+static mut HNAME: [u8; 128] = [0 as u8; 128]
+static mut FELD: [u8; 128] = [0 as u8; 128]
+static mut FELD2: [u8; 128] = [0 as u8; 128]
+static mut PNAME: [u8; 64] = [0 as u8; 64]
+static mut ARGV: [u64; 8] = [0 as u64; 8]
+// Diese beiden liegen STATISCH und nicht auf dem Stapel, weil ihre
+// Adresse in ARGV landet und ARGV den Aufruf ueberlebt -- der
+// Uebersetzer prueft das und hat recht damit.
+static mut VONB: [u8; 24] = [0 as u8; 24]
+static mut ZURB: [u8; 16] = [0 as u8; 16]
+static mut CONF2: [u8; 1024] = [0 as u8; 1024]
+static mut WERT: [u8; 256] = [0 as u8; 256]
+
+static mut vz_len: u64 = 0
+static mut conf_len: u64 = 0
+
+const FASS_LEN: u64 = 9
+const ERP_LEN: u64 = 36
+// Wieviel mehr Platz als die reinen Paketoktette da sein muss. DREI,
+// und die Zahl ist gerechnet und nicht gefuehlt: einmal die Datei unter
+// `/tmp/ota`, einmal der ausgepackte Store-Eintrag, und einmal Luft fuer
+// die neue Generation, das Journal und die Verzeichniseintraege. Wer
+// weniger nimmt, laesst `opk` mitten im Auspacken auf eine volle Platte
+// laufen -- und genau das ist der Fall, den Punkt (f) misst.
+const PLATZ_FAKTOR: u64 = 3
+
+// ------------------------------------------------------ Kleinigkeiten
+
+fn g8(p: u64) -> u64 {
+    return (*((p) as *mut u8)) as u64
+}
+
+fn p8(p: u64, v: u64) {
+    __mmio_write8((p) as *mut u8, v as u8)
+}
+
+fn laenge(p: u64) -> u64 {
+    var n: u64 = 0
+    while g8(p + n) != 0 {
+        n = n + 1
+    }
+    return n
+}
+
+fn slash(out: u64) {
+    var s: [u8; 2] = "/\0"
+    ulib.strcat(out, (&s[0 as usize]) as u64)
+}
+
+fn zahl_an(out: u64, v: u64) {
+    var b: [u8; 24] = [0 as u8; 24]
+    ulib.digits(v, (&b[0 as usize]) as u64)
+    ulib.strcat(out, (&b[0 as usize]) as u64)
+}
+
+fn sagn(t: u64, v: u64) {
+    ulib.say(t)
+    ulib.sayu(v)
+    ulib.nl()
+}
+
+fn sagt(t: u64, s: u64) {
+    ulib.say(t)
+    ulib.say(s)
+    ulib.nl()
+}
+
+fn fehler(t: u64, was: u64) -> u64 {
+    ulib.eput(t)
+    if was != 0 {
+        ulib.eput(was)
+    }
+    var nl: [u8; 2] = "\n\0"
+    ulib.eput((&nl[0 as usize]) as u64)
+    return 1
+}
+
+// -------------------------------------------------------- Dateien
+
+fn datei_lesen(pfad: u64, puffer: u64, max: u64) -> u64 {
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, pfad, 0, 0)
+    if ulib.bad(fd) {
+        return 0xFFFFFFFFFFFFFFFF
+    }
+    var n: u64 = 0
+    var weiter: bool = true
+    while weiter {
+        let r: u64 = ulib.sys(ulib.SYS_READ, fd, puffer + n, max - n)
+        if ulib.bad(r) || r == 0 {
+            weiter = false
+        } else {
+            n = n + r
+            if n >= max {
+                weiter = false
+            }
+        }
+    }
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    return n
+}
+
+// EINE DATEI MIT FESTER LAENGE UEBERSCHREIBEN, ohne sie vorher
+// wegzunehmen -- derselbe Inode, dieselbe Groesse, EIN Datenblock. Das
+// ist die Bauart von `/system/AKTUELL` (Runde INSTALL) und
+// `/system/ERPROBUNG` (Runde UPDATE), und `/system/FASSUNG` gehoert
+// aus demselben Grund dazu: ein Zaehler, der einen Stromausfall
+// ueberleben soll, darf keinen Zwischenzustand haben.
+fn fest_schreiben(pfad: u64, puffer: u64, len: u64) -> bool {
+    var fd: u64 = ulib.sys(ulib.SYS_OPEN, pfad, ulib.O_RDWR, 0)
+    if ulib.bad(fd) {
+        fd = ulib.sys(ulib.SYS_OPEN, pfad, ulib.O_MAKE, 0)
+        if ulib.bad(fd) {
+            return false
+        }
+    }
+    ulib.sys(ulib.SYS_SEEK, fd, 0, ulib.SEEK_SET)
+    var n: u64 = 0
+    while n < len {
+        let w: u64 = ulib.sys(ulib.SYS_WRITE, fd, puffer + n, len - n)
+        if ulib.bad(w) || w == 0 {
+            ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+            return false
+        }
+        n = n + w
+    }
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    ulib.sys(ulib.SYS_SYNC, 0, 0, 0)
+    return true
+}
+
+fn datei_schreiben(pfad: u64, puffer: u64, len: u64) -> bool {
+    ulib.sys(ulib.SYS_UNLINK, pfad, 0, 0)
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, pfad, ulib.O_MAKE, 0)
+    if ulib.bad(fd) {
+        return false
+    }
+    var n: u64 = 0
+    while n < len {
+        let w: u64 = ulib.sys(ulib.SYS_WRITE, fd, puffer + n, len - n)
+        if ulib.bad(w) || w == 0 {
+            ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+            return false
+        }
+        n = n + w
+    }
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    return true
+}
+
+fn groesse(pfad: u64) -> u64 {
+    let g: u64 = ulib.size_of(pfad)
+    if ulib.bad(g) {
+        return 0
+    }
+    return g
+}
+
+fn weg(pfad: u64) {
+    ulib.sys(ulib.SYS_UNLINK, pfad, 0, 0)
+}
+
+// ------------------------------------------------- die Einstellungen
+
+fn conf_laden() -> bool {
+    let n: u64 = datei_lesen((&P_CONF[0 as usize]) as u64,
+        (&CONF[0 as usize]) as u64, 1023)
+    if n == 0xFFFFFFFFFFFFFFFF {
+        conf_len = 0
+        return false
+    }
+    conf_len = n
+    p8((&CONF[0 as usize]) as u64 + n, 0)
+    return true
+}
+
+// `schluessel=wert` je Zeile. Gelesen wird aus dem Puffer.
+fn conf_wert(schl: u64, out: u64, max: u64) -> bool {
+    let c: u64 = (&CONF[0 as usize]) as u64
+    let sl: u64 = laenge(schl)
+    var i: u64 = 0
+    while i < conf_len {
+        if i == 0 || g8(c + i - 1) == 10 {
+            if i + sl <= conf_len && ulib.strneq(c + i, schl, sl) {
+                var k: u64 = 0
+                var j: u64 = i + sl
+                while j < conf_len && g8(c + j) != 10 && g8(c + j) != 13
+                    && k + 1 < max {
+                    p8(out + k, g8(c + j))
+                    k = k + 1
+                    j = j + 1
+                }
+                p8(out + k, 0)
+                return k > 0
+            }
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn conf_zahl(schl: u64, vorgabe: u64) -> u64 {
+    var b: [u8; 32] = [0 as u8; 32]
+    if !conf_wert(schl, (&b[0 as usize]) as u64, 32) {
+        return vorgabe
+    }
+    return ulib.to_num((&b[0 as usize]) as u64)
+}
+
+// ------------------------------------------------ der Fassungszaehler
+//
+// `/system/FASSUNG`, GENAU NEUN OKTETTE: acht Ziffern und ein
+// Zeilenende. Fehlt die Datei, gilt Fassung 0 -- ein frisch
+// installiertes Geraet nimmt damit JEDES Verzeichnis an, und das ist
+// richtig so: es hat noch nichts, was es zurueckzusetzen gaebe.
+
+fn fassung_lesen() -> u64 {
+    var b: [u8; 16] = [0 as u8; 16]
+    let n: u64 = datei_lesen((&P_FASS[0 as usize]) as u64,
+        (&b[0 as usize]) as u64, 15)
+    if n == 0xFFFFFFFFFFFFFFFF || n < 8 {
+        return 0
+    }
+    var v: u64 = 0
+    var i: u64 = 0
+    while i < 8 {
+        let ch: u64 = b[i as usize] as u64
+        if ch < 48 || ch > 57 {
+            return 0
+        }
+        v = v * 10 + (ch - 48)
+        i = i + 1
+    }
+    return v
+}
+
+fn fassung_schreiben(v: u64) -> bool {
+    var b: [u8; 12] = [0 as u8; 12]
+    var rest: u64 = v
+    var i: u64 = 8
+    while i > 0 {
+        i = i - 1
+        b[i as usize] = (48 + (rest % 10)) as u8
+        rest = rest / 10
+    }
+    b[8 as usize] = 10 as u8
+    return fest_schreiben((&P_FASS[0 as usize]) as u64,
+        (&b[0 as usize]) as u64, FASS_LEN)
+}
+
+// ------------------------------------------------------- die Signatur
+
+fn schluessel_holen() -> bool {
+    let n: u64 = datei_lesen((&P_KEY[0 as usize]) as u64,
+        (&KEY[0 as usize]) as u64, 32)
+    if n != 32 {
+        return false
+    }
+    return true
+}
+
+fn signatur_gilt(msg: u64, len: u64) -> bool {
+    var c: ed25519.Ctx = ed25519.ctx_new()
+    if !ed25519.ctx_init(&c) {
+        return false
+    }
+    return ed25519.ed25519_verify(&c, (&KEY[0 as usize]) as u64, msg,
+        len as usize, (&SIG[0 as usize]) as u64)
+}
+
+// -------------------------------------------------------- der Streuwert
+//
+// STROEMEND, in Stuecken von 4096 Oktett. Ein Paket muss dafuer NICHT in
+// den Speicher passen -- das ist der Unterschied zu `opk`, das es fuer
+// die Pruefsumme ueber Metadaten und Daten am Stueck braucht, und der
+// Grund, warum diese Datei kein Puffer von 384 KiB hat.
+fn streu_datei(pfad: u64, out: u64) -> bool {
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, pfad, 0, 0)
+    if ulib.bad(fd) {
+        return false
+    }
+    sha.begin()
+    var weiter: bool = true
+    while weiter {
+        let r: u64 = ulib.sys(ulib.SYS_READ, fd,
+            (&BLOCK[0 as usize]) as u64, 4096)
+        if ulib.bad(r) || r == 0 {
+            weiter = false
+        } else {
+            sha.update((&BLOCK[0 as usize]) as u64, r)
+        }
+    }
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    sha.finish(out)
+    return true
+}
+
+// ------------------------------------------------------------- holen
+//
+// `/bin/fetch` ist ein EIGENES Programm und wird als solches gestartet.
+// Es koennte nicht anders sein: `fetch` ist `--profile=app` und traegt
+// die ganze Firn-Bibliothek mit TLS 1.3, X.509, RSA und ECDSA; diese
+// Datei ist `profile kernel` und hat nicht einmal eine Halde. Zwei
+// Bauarten in einem Programm gibt es nicht, also sind es zwei Programme
+// und ein `exec`.
+//
+// ACHT ARGUMENTE, NICHT MEHR: `kernel/proc.fi` gibt einem `exec` genau
+// MAX_ARGS = 8 mit. Deshalb heisst der Aufruf mit Wiederaufnahme
+//     fetch -o <ziel> -n <name> -b <von> <url>
+// und nicht ein Wort mehr -- und deshalb ist "still" in `fetch` seit
+// dieser Runde die VORGABE statt eines `-q`.
+fn hole(datei: u64, ziel: u64, von: u64) -> u64 {
+    let u: u64 = (&URL[0 as usize]) as u64
+    ulib.strcpy(u, (&QUELLE[0 as usize]) as u64)
+    slash(u)
+    ulib.strcat(u, datei)
+
+    ulib.digits(von, (&VONB[0 as usize]) as u64)
+
+    ARGV[0 as usize] = (&P_FETCH[0 as usize]) as u64
+    ARGV[1 as usize] = (&A_O[0 as usize]) as u64
+    ARGV[2 as usize] = ziel
+    ARGV[3 as usize] = (&A_N[0 as usize]) as u64
+    ARGV[4 as usize] = (&HNAME[0 as usize]) as u64
+    var argc: u64 = 6
+    if von > 0 {
+        ARGV[5 as usize] = (&A_B[0 as usize]) as u64
+        ARGV[6 as usize] = (&VONB[0 as usize]) as u64
+        ARGV[7 as usize] = u
+        argc = 8
+    } else {
+        ARGV[5 as usize] = u
+    }
+    let pid: u64 = ulib.sys(ulib.SYS_EXEC, (&P_FETCH[0 as usize]) as u64,
+        (&ARGV[0 as usize]) as u64, argc)
+    if ulib.bad(pid) {
+        return 0xFFFFFFFFFFFFFFFF
+    }
+    return ulib.wait_code(pid)
+}
+
+fn opk_ruf(a1: u64, a2: u64, a3: u64, a4: u64, argc: u64) -> u64 {
+    ARGV[0 as usize] = (&P_OPK[0 as usize]) as u64
+    ARGV[1 as usize] = a1
+    ARGV[2 as usize] = a2
+    ARGV[3 as usize] = a3
+    ARGV[4 as usize] = a4
+    let pid: u64 = ulib.sys(ulib.SYS_EXEC, (&P_OPK[0 as usize]) as u64,
+        (&ARGV[0 as usize]) as u64, argc)
+    if ulib.bad(pid) {
+        return 0xFFFFFFFFFFFFFFFF
+    }
+    return ulib.wait_code(pid)
+}
+
+// ------------------------------------------------- das VERZEICHNIS lesen
+
+// Feld Nummer `k` (ab 0) der Zeile, die bei `zeile` anfaengt. Felder sind
+// durch Tabulatoren getrennt, die Zeile endet mit einem Zeilenende.
+fn feld(zeile: u64, ende: u64, k: u64, out: u64, max: u64) -> bool {
+    var i: u64 = zeile
+    var n: u64 = 0
+    while n < k {
+        while i < ende && g8(i) != 9 && g8(i) != 10 {
+            i = i + 1
+        }
+        if i >= ende || g8(i) == 10 {
+            p8(out, 0)
+            return false
+        }
+        i = i + 1
+        n = n + 1
+    }
+    var w: u64 = 0
+    while i < ende && g8(i) != 9 && g8(i) != 10 && w + 1 < max {
+        p8(out + w, g8(i))
+        w = w + 1
+        i = i + 1
+    }
+    p8(out + w, 0)
+    return w > 0
+}
+
+// Der Anfang der `k`-ten Paketzeile, oder 0.
+fn paket_zeile(k: u64) -> u64 {
+    let v: u64 = (&VZ[0 as usize]) as u64
+    let e: u64 = v + vz_len
+    var i: u64 = v
+    var n: u64 = 0
+    while i < e {
+        if i == v || g8(i - 1) == 10 {
+            if ulib.strneq(i, (&N_PAKET[0 as usize]) as u64, 6) {
+                if n == k {
+                    return i + 6
+                }
+                n = n + 1
+            }
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+fn paket_zahl() -> u64 {
+    var n: u64 = 0
+    while paket_zeile(n) != 0 {
+        n = n + 1
+    }
+    return n
+}
+
+// Die Fassung, die das Verzeichnis nennt. Sie steht in der ZWEITEN
+// Zeile, und sie wird erst gelesen, nachdem die Signatur gestimmt hat.
+fn vz_fassung() -> u64 {
+    let v: u64 = (&VZ[0 as usize]) as u64
+    let e: u64 = v + vz_len
+    var i: u64 = v
+    while i < e {
+        if i == v || g8(i - 1) == 10 {
+            if ulib.strneq(i, (&N_FASS[0 as usize]) as u64, 8) {
+                var b: [u8; 24] = [0 as u8; 24]
+                var w: u64 = 0
+                var j: u64 = i + 8
+                while j < e && g8(j) != 10 && w + 1 < 24 {
+                    b[w as usize] = g8(j) as u8
+                    w = w + 1
+                    j = j + 1
+                }
+                b[w as usize] = 0 as u8
+                return ulib.to_num((&b[0 as usize]) as u64)
+            }
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+fn tmp_pfad(out: u64, datei: u64) {
+    ulib.strcpy(out, (&P_TMP[0 as usize]) as u64)
+    slash(out)
+    ulib.strcat(out, datei)
+}
+
+// ------------------------------------------- Schritt 1 bis 3, am Stueck
+//
+// Rueckgabe: 0 = alles in Ordnung und `vz_len` steht, sonst der Code,
+// mit dem sich das Programm beendet. NICHTS AM SYSTEM ist danach
+// angefasst -- geschrieben wurde nur unter `/tmp/ota/`.
+fn verzeichnis_holen(laut: bool) -> u64 {
+    if !conf_laden() {
+        return fehler((&E_CONF[0 as usize]) as u64, 0)
+    }
+    if !conf_wert((&K_QUELLE[0 as usize]) as u64,
+        (&QUELLE[0 as usize]) as u64, 200) {
+        return fehler((&E_CONF[0 as usize]) as u64, 0)
+    }
+    if !conf_wert((&K_NAME[0 as usize]) as u64,
+        (&HNAME[0 as usize]) as u64, 128) {
+        return fehler((&E_CONF[0 as usize]) as u64, 0)
+    }
+    // DER VERTRAUTE SCHLUESSEL ZUERST. Ohne ihn hat es keinen Sinn,
+    // ueberhaupt etwas zu holen -- geglaubt wuerde davon nichts.
+    if !schluessel_holen() {
+        return fehler((&E_KEY[0 as usize]) as u64, 0)
+    }
+    if laut {
+        sagt((&S_QUELLE[0 as usize]) as u64, (&QUELLE[0 as usize]) as u64)
+    }
+    ulib.sys(ulib.SYS_MKDIR, (&P_TMP[0 as usize]) as u64, 0, 0)
+
+    // Das alte Verzeichnis wird WEGGEWORFEN und nicht wiederverwendet.
+    // Ein Bruchstueck eines Pakets darf liegenbleiben (dafuer gibt es
+    // die Wiederaufnahme); ein halbes VERZEICHNIS nie.
+    tmp_pfad((&ZIEL[0 as usize]) as u64, (&N_VZ[0 as usize]) as u64)
+    tmp_pfad((&ZIEL2[0 as usize]) as u64, (&N_VZSIG[0 as usize]) as u64)
+    weg((&ZIEL[0 as usize]) as u64)
+    weg((&ZIEL2[0 as usize]) as u64)
+
+    if hole((&N_VZ[0 as usize]) as u64, (&ZIEL[0 as usize]) as u64, 0) != 0 {
+        return fehler((&E_HOLEN[0 as usize]) as u64,
+            (&N_VZ[0 as usize]) as u64)
+    }
+    if hole((&N_VZSIG[0 as usize]) as u64, (&ZIEL2[0 as usize]) as u64, 0)
+        != 0 {
+        return fehler((&E_HOLEN[0 as usize]) as u64,
+            (&N_VZSIG[0 as usize]) as u64)
+    }
+    let n: u64 = datei_lesen((&ZIEL[0 as usize]) as u64,
+        (&VZ[0 as usize]) as u64, VZ_MAX - 1)
+    if n == 0xFFFFFFFFFFFFFFFF || n == 0 {
+        return fehler((&E_HOLEN[0 as usize]) as u64,
+            (&N_VZ[0 as usize]) as u64)
+    }
+    vz_len = n
+    let sn: u64 = datei_lesen((&ZIEL2[0 as usize]) as u64,
+        (&SIG[0 as usize]) as u64, 64)
+    if sn != 64 {
+        vz_len = 0
+        return fehler((&E_NOSIG[0 as usize]) as u64, 0)
+    }
+    // ---- DIE SIGNATUR. Ab hier und keinen Schritt frueher darf eine
+    //      Zeile des Verzeichnisses geglaubt werden.
+    if !signatur_gilt((&VZ[0 as usize]) as u64, vz_len) {
+        vz_len = 0
+        return fehler((&E_VZSIG[0 as usize]) as u64, 0)
+    }
+    if !ulib.strneq((&VZ[0 as usize]) as u64, (&N_KENN[0 as usize]) as u64,
+        4) {
+        vz_len = 0
+        return fehler((&E_KENN[0 as usize]) as u64, 0)
+    }
+    return 0
+}
+
+// ------------------------------------------- Schritt 3: Rueckschritt
+//
+// Rueckgabe: 0 = die angebotene Fassung ist neuer, 1 = abgelehnt.
+fn rueckschritt(dort: u64, hier: u64, laut: bool) -> u64 {
+    if laut {
+        sagn((&S_HIER[0 as usize]) as u64, hier)
+        sagn((&S_DORT[0 as usize]) as u64, dort)
+    }
+    if dort > hier {
+        return 0
+    }
+    // GLEICH IST AUCH NICHT NEUER. Eine Quelle, die dieselbe Zahl noch
+    // einmal anbietet, hat nichts Neues -- und ein Angreifer, der eine
+    // alte Antwort wiederholt, hat damit auch nichts erreicht.
+    ulib.eput((&E_ZURUECK[0 as usize]) as u64)
+    var b: [u8; 24] = [0 as u8; 24]
+    ulib.digits(dort, (&b[0 as usize]) as u64)
+    ulib.eput((&b[0 as usize]) as u64)
+    ulib.eput((&E_ZUR2[0 as usize]) as u64)
+    ulib.digits(hier, (&b[0 as usize]) as u64)
+    ulib.eput((&b[0 as usize]) as u64)
+    var nl: [u8; 2] = "\n\0"
+    ulib.eput((&nl[0 as usize]) as u64)
+    return 1
+}
+
+// -------------------------------------- Schritt 4: ein Paket holen und
+//                                        pruefen, mit Wiederaufnahme
+//
+// Rueckgabe: true nur, wenn die Datei danach GENAU die Laenge und GENAU
+// den Streuwert hat, die das signierte Verzeichnis nennt.
+fn paket_holen(datei: u64, soll_len: u64, soll_hex: u64) -> bool {
+    if soll_len == 0 || g8(datei) == 0 {
+        fehler((&E_LAENGE[0 as usize]) as u64, datei)
+        return false
+    }
+    tmp_pfad((&ZIEL[0 as usize]) as u64, datei)
+    var versuch: u64 = 0
+    var gut: bool = false
+    // WARUM es scheitert, wird UNTERWEGS gemerkt und nicht hinterher
+    // erraten: nach dem letzten Versuch ist die Datei weggeworfen, und
+    // eine Laenge von 0 sieht dann aus wie ein Abbruch, obwohl der
+    // Streuwert nicht gestimmt hat. Zwei sehr verschiedene Faelle --
+    // "die Leitung riss" und "da wird etwas untergeschoben" -- duerfen
+    // nicht dieselbe Meldung bekommen.
+    var streu_falsch: bool = false
+    // VIER PRUEFUNGEN, DREI VERSUCHE. Geprueft wird VOR jedem Holen --
+    // sonst wuerde ein Bruchstueck, das schon vollstaendig ist, noch
+    // einmal geholt -- und nach dem letzten, sonst waere der dritte
+    // Versuch der einzige, dessen Ergebnis niemand ansieht.
+    while versuch < 4 && !gut {
+        var da: u64 = groesse((&ZIEL[0 as usize]) as u64)
+        if da > soll_len {
+            // Laenger als angekuendigt: entweder eine Gegenstelle, die
+            // `Range` nicht kann und den ganzen Rumpf noch einmal
+            // geschickt hat, oder Unsinn. Beides wird weggeworfen und
+            // nicht zurechtgeschnitten.
+            weg((&ZIEL[0 as usize]) as u64)
+            da = 0
+        }
+        if da == soll_len {
+            if streu_datei((&ZIEL[0 as usize]) as u64,
+                (&HASH[0 as usize]) as u64) {
+                sha.hex_out((&HASH[0 as usize]) as u64, 32,
+                    (&HEX[0 as usize]) as u64)
+                if ulib.strneq((&HEX[0 as usize]) as u64, soll_hex, 64) {
+                    gut = true
+                }
+            }
+            if !gut {
+                // Richtige Laenge, falscher Inhalt: nichts zu retten.
+                streu_falsch = true
+                weg((&ZIEL[0 as usize]) as u64)
+                da = 0
+            }
+        }
+        if !gut && versuch < 3 {
+            if da > 0 {
+                sagn((&S_TEIL[0 as usize]) as u64, da)
+            }
+            hole(datei, (&ZIEL[0 as usize]) as u64, da)
+        }
+        versuch = versuch + 1
+    }
+    if gut {
+        return true
+    }
+    if streu_falsch {
+        fehler((&E_STREU[0 as usize]) as u64, datei)
+        return false
+    }
+    ulib.eput((&E_LAENGE[0 as usize]) as u64)
+    ulib.eput(datei)
+    var nl: [u8; 2] = "\n\0"
+    ulib.eput((&nl[0 as usize]) as u64)
+    return false
+}
+
+// --------------------------------------------------------- die Befehle
+
+fn cmd_zeigen() -> u64 {
+    conf_laden()
+    if conf_wert((&K_QUELLE[0 as usize]) as u64,
+        (&QUELLE[0 as usize]) as u64, 200) {
+        sagt((&S_QUELLE[0 as usize]) as u64, (&QUELLE[0 as usize]) as u64)
+    }
+    sagn((&S_HIER[0 as usize]) as u64, fassung_lesen())
+    var b: [u8; 16] = [0 as u8; 16]
+    let n: u64 = datei_lesen((&P_AKT[0 as usize]) as u64,
+        (&b[0 as usize]) as u64, 15)
+    if n != 0xFFFFFFFFFFFFFFFF && n >= 8 {
+        p8((&b[0 as usize]) as u64 + 8, 0)
+        sagn((&S_GEN[0 as usize]) as u64,
+            ulib.to_num((&b[0 as usize]) as u64))
+    }
+    var e: [u8; 40] = [0 as u8; 40]
+    let m: u64 = datei_lesen((&P_ERP[0 as usize]) as u64,
+        (&e[0 as usize]) as u64, 39)
+    if m == ERP_LEN && e[34 as usize] == 48 as u8 {
+        p8((&e[0 as usize]) as u64 + 12, 0)
+        sagt((&S_ERPR[0 as usize]) as u64,
+            (&e[0 as usize]) as u64 + 4)
+    } else {
+        ulib.say((&S_RUHE[0 as usize]) as u64)
+        ulib.nl()
+    }
+    return 0
+}
+
+fn cmd_suchen() -> u64 {
+    let r: u64 = verzeichnis_holen(true)
+    if r != 0 {
+        return r
+    }
+    let dort: u64 = vz_fassung()
+    let hier: u64 = fassung_lesen()
+    // DER STAND, den die Einstellungsseite liest. Er wird geschrieben,
+    // NACHDEM die Signatur gestimmt hat -- eine Anzeige, die eine
+    // ungeprueften Zahl zeigt, waere schlimmer als keine.
+    var st: [u8; 64] = [0 as u8; 64]
+    ulib.digits(dort, (&st[0 as usize]) as u64)
+    var nl: [u8; 2] = "\n\0"
+    ulib.strcat((&st[0 as usize]) as u64, (&nl[0 as usize]) as u64)
+    datei_schreiben((&P_STAND[0 as usize]) as u64,
+        (&st[0 as usize]) as u64, laenge((&st[0 as usize]) as u64))
+    if rueckschritt(dort, hier, true) != 0 {
+        return 1
+    }
+    let anz: u64 = paket_zahl()
+    if anz == 0 {
+        return fehler((&E_KEINS[0 as usize]) as u64, 0)
+    }
+    ulib.say((&S_NEU[0 as usize]) as u64)
+    ulib.nl()
+    var k: u64 = 0
+    while k < anz {
+        let z: u64 = paket_zeile(k)
+        feld(z, (&VZ[0 as usize]) as u64 + vz_len, 0,
+            (&FELD[0 as usize]) as u64, 128)
+        feld(z, (&VZ[0 as usize]) as u64 + vz_len, 1,
+            (&FELD2[0 as usize]) as u64, 128)
+        ulib.say((&S_PAKET[0 as usize]) as u64)
+        ulib.say((&FELD[0 as usize]) as u64)
+        var sp: [u8; 2] = " \0"
+        ulib.say((&sp[0 as usize]) as u64)
+        ulib.say((&FELD2[0 as usize]) as u64)
+        ulib.nl()
+        k = k + 1
+    }
+    return 0
+}
+
+fn cmd_einspielen() -> u64 {
+    let r: u64 = verzeichnis_holen(true)
+    if r != 0 {
+        return r
+    }
+    let dort: u64 = vz_fassung()
+    let hier: u64 = fassung_lesen()
+    if rueckschritt(dort, hier, true) != 0 {
+        return 1
+    }
+    let anz: u64 = paket_zahl()
+    if anz == 0 {
+        return fehler((&E_KEINS[0 as usize]) as u64, 0)
+    }
+
+    // ---- 4. ALLES HOLEN UND PRUEFEN, BEVOR IRGENDETWAS GESCHRIEBEN
+    //         WIRD. Auch die Signaturdatei je Paket und der INDEX --
+    //         `opk` braucht beide und prueft sie ein zweites Mal.
+    var gesamt: u64 = 0
+    var k: u64 = 0
+    while k < anz {
+        let z: u64 = paket_zeile(k)
+        let e: u64 = (&VZ[0 as usize]) as u64 + vz_len
+        // DIE FELDNUMMERN. `paket_zeile` gibt den Zeiger HINTER
+        // "paket\t" zurueck, also ist Feld 0 der Name:
+        //   0 name  1 fassung  2 sha256  3 oktette  4 datei
+        feld(z, e, 2, (&SOLLHEX[0 as usize]) as u64, 72)
+        feld(z, e, 3, (&FELD[0 as usize]) as u64, 128)
+        feld(z, e, 4, (&FELD2[0 as usize]) as u64, 128)
+        let soll: u64 = ulib.to_num((&FELD[0 as usize]) as u64)
+        gesamt = gesamt + soll
+        if !paket_holen((&FELD2[0 as usize]) as u64, soll,
+            (&SOLLHEX[0 as usize]) as u64) {
+            return 1
+        }
+        sagt((&S_GEPRUEFT[0 as usize]) as u64, (&FELD2[0 as usize]) as u64)
+        // die Signaturdatei daneben
+        ulib.strcpy((&ZIEL2[0 as usize]) as u64, (&FELD2[0 as usize]) as u64)
+        ulib.strcat((&ZIEL2[0 as usize]) as u64, (&N_SIG[0 as usize]) as u64)
+        tmp_pfad((&ZIEL[0 as usize]) as u64, (&ZIEL2[0 as usize]) as u64)
+        weg((&ZIEL[0 as usize]) as u64)
+        if hole((&ZIEL2[0 as usize]) as u64, (&ZIEL[0 as usize]) as u64, 0)
+            != 0 {
+            return fehler((&E_HOLEN[0 as usize]) as u64,
+                (&ZIEL2[0 as usize]) as u64)
+        }
+        k = k + 1
+    }
+    tmp_pfad((&ZIEL[0 as usize]) as u64, (&N_INDEX[0 as usize]) as u64)
+    weg((&ZIEL[0 as usize]) as u64)
+    if hole((&N_INDEX[0 as usize]) as u64, (&ZIEL[0 as usize]) as u64, 0)
+        != 0 {
+        return fehler((&E_HOLEN[0 as usize]) as u64,
+            (&N_INDEX[0 as usize]) as u64)
+    }
+    tmp_pfad((&ZIEL[0 as usize]) as u64, (&N_ISIG[0 as usize]) as u64)
+    weg((&ZIEL[0 as usize]) as u64)
+    if hole((&N_ISIG[0 as usize]) as u64, (&ZIEL[0 as usize]) as u64, 0)
+        != 0 {
+        return fehler((&E_HOLEN[0 as usize]) as u64,
+            (&N_ISIG[0 as usize]) as u64)
+    }
+
+    // ---- 5. PLATZ. Gefragt wird den Kern, nicht gerechnet.
+    let bfree: u64 = ulib.sys(ulib.SYS_SYSINFO, ulib.I_BFREE, 0, 0)
+    let bsize: u64 = ulib.sys(ulib.SYS_SYSINFO, ulib.I_BSIZE, 0, 0)
+    let frei: u64 = bfree * bsize
+    let noetig: u64 = gesamt * PLATZ_FAKTOR
+    sagn((&S_PLATZ[0 as usize]) as u64, frei)
+    sagn((&S_VON[0 as usize]) as u64, noetig)
+    if frei < noetig {
+        ulib.eput((&E_PLATZ[0 as usize]) as u64)
+        var nl: [u8; 2] = "\n\0"
+        ulib.eput((&nl[0 as usize]) as u64)
+        ulib.eput((&E_PLATZ2[0 as usize]) as u64)
+        ulib.eput((&nl[0 as usize]) as u64)
+        return 1
+    }
+
+    // ---- 6. EINSPIELEN. `opk` prueft INDEX.sig und die Signatur des
+    //         Pakets noch einmal, mit seinem eigenen Code, und legt die
+    //         neue Generation an. Diese Datei schreibt selbst NICHTS in
+    //         den Store und NICHTS an den Generationen.
+    k = 0
+    while k < anz {
+        let z: u64 = paket_zeile(k)
+        let e: u64 = (&VZ[0 as usize]) as u64 + vz_len
+        feld(z, e, 0, (&PNAME[0 as usize]) as u64, 64)
+        sagt((&S_SPIEL[0 as usize]) as u64, (&PNAME[0 as usize]) as u64)
+        let rc: u64 = opk_ruf((&A_AKTU[0 as usize]) as u64,
+            (&PNAME[0 as usize]) as u64,
+            (&A_QUELLE[0 as usize]) as u64,
+            (&P_TMP[0 as usize]) as u64, 5)
+        if rc != 0 {
+            sagn((&E_OPK[0 as usize]) as u64, rc)
+            return 1
+        }
+        k = k + 1
+    }
+
+    // ---- 7. ZULETZT der Zaehler.
+    if !fassung_schreiben(dort) {
+        return fehler((&E_FASS[0 as usize]) as u64, 0)
+    }
+    ulib.say((&S_FERTIG[0 as usize]) as u64)
+    ulib.nl()
+    ulib.say((&S_FERTIG2[0 as usize]) as u64)
+    ulib.nl()
+    return 0
+}
+
+fn cmd_bestaetigen() -> u64 {
+    return opk_ruf((&A_ERP[0 as usize]) as u64, (&A_OK[0 as usize]) as u64,
+        0, 0, 3)
+}
+
+// Von Hand zurueck auf die Generation, die vor der laufenden stand. Die
+// Zahl steht in `/system/ERPROBUNG` unter `vor=`; steht dort nichts,
+// gibt es nichts zurueckzunehmen und das wird gesagt.
+fn cmd_zurueck() -> u64 {
+    var e: [u8; 40] = [0 as u8; 40]
+    let m: u64 = datei_lesen((&P_ERP[0 as usize]) as u64,
+        (&e[0 as usize]) as u64, 39)
+    if m != ERP_LEN {
+        ulib.say((&S_RUHE[0 as usize]) as u64)
+        ulib.nl()
+        return 1
+    }
+    p8((&e[0 as usize]) as u64 + 25, 0)
+    ulib.strcpy((&ZURB[0 as usize]) as u64, (&e[0 as usize]) as u64 + 17)
+    let rc: u64 = opk_ruf((&A_ZUR[0 as usize]) as u64,
+        (&ZURB[0 as usize]) as u64, 0, 0, 3)
+    if rc != 0 {
+        return rc
+    }
+    return opk_ruf((&A_RICHT[0 as usize]) as u64, 0, 0, 0, 2)
+}
+
+// ----------------------------------------------------------- Wachhund
+//
+// WAS DER ZAEHLER IN `kernel/ab.fi` FAENGT UND WAS NICHT. Er zaehlt bei
+// JEDEM Start hoch und faellt beim dritten Versuch ohne Erfolgsvermerk
+// von selbst zurueck. Das faengt jede Generation, die NICHT HOCHKOMMT --
+// vorausgesetzt, die Maschine startet ueberhaupt noch einmal.
+//
+// Genau da ist die Luecke, und dieser Befehl ist sie: eine Generation,
+// die HOCHKOMMT und dann HAENGT, startet nie wieder von selbst. Niemand
+// setzt den Erfolgsvermerk, niemand zaehlt, und das Geraet steht. Der
+// Wachhund wartet die eingestellte Frist ab, sieht in
+// `/system/ERPROBUNG` nach, und wenn dort noch `ok=0` steht, startet er
+// die Maschine neu. Beim naechsten Start zaehlt der Kern; nach drei
+// solchen Runden ist die alte Generation wieder da.
+//
+// ER STARTET NUR NEU, WENN ETWAS IN ERPROBUNG STEHT. Auf einem System
+// ohne laufendes Update tut er nichts und beendet sich -- ein Wachhund,
+// der auch dann beisst, wenn nichts los ist, wird abgeschaltet, und dann
+// ist er nicht da, wenn er gebraucht wird.
+const SYS_REBOOT: u64 = 169
+const RB_RESTART: u64 = 0x01234567
+
+fn cmd_wachhund(arg: u64) -> u64 {
+    conf_laden()
+    var frist: u64 = conf_zahl((&K_FRIST[0 as usize]) as u64, 120)
+    if arg != 0 {
+        frist = ulib.to_num(arg)
+    }
+    var e: [u8; 40] = [0 as u8; 40]
+    var m: u64 = datei_lesen((&P_ERP[0 as usize]) as u64,
+        (&e[0 as usize]) as u64, 39)
+    if m != ERP_LEN || e[34 as usize] != 48 as u8 {
+        ulib.say((&S_RUHE[0 as usize]) as u64)
+        ulib.nl()
+        return 0
+    }
+    var s: u64 = 0
+    while s < frist {
+        ulib.sleep_ms(1000)
+        s = s + 1
+        m = datei_lesen((&P_ERP[0 as usize]) as u64,
+            (&e[0 as usize]) as u64, 39)
+        if m == ERP_LEN && e[34 as usize] != 48 as u8 {
+            sagn((&S_WBEST[0 as usize]) as u64, s)
+            return 0
+        }
+    }
+    ulib.say((&S_WFRIST[0 as usize]) as u64)
+    ulib.nl()
+    ulib.say((&S_WNEU[0 as usize]) as u64)
+    ulib.nl()
+    ulib.sys(ulib.SYS_SYNC, 0, 0, 0)
+    ulib.sys(SYS_REBOOT, RB_RESTART, 0, 0)
+    return 0
+}
+
+// ------------------------------------------------------------- Dienst
+//
+// Die automatische Suche. Sie SUCHT und meldet, mehr nicht: eingespielt
+// wird auf Ansage, und neu gestartet wird nie ohne Zustimmung. Ein
+// Abstand von 0 oder `auto=nein` schaltet sie ab, und dann sagt sie das
+// und beendet sich, statt still zu schlafen.
+fn cmd_dienst() -> u64 {
+    conf_laden()
+    var auto: [u8; 16] = [0 as u8; 16]
+    let hat: bool = conf_wert((&K_AUTO[0 as usize]) as u64,
+        (&auto[0 as usize]) as u64, 16)
+    let abstand: u64 = conf_zahl((&K_ABST[0 as usize]) as u64, 3600)
+    if !hat || !ulib.streq((&auto[0 as usize]) as u64,
+        (&W_JA[0 as usize]) as u64) || abstand == 0 {
+        ulib.say((&S_DAUS[0 as usize]) as u64)
+        ulib.nl()
+        return 0
+    }
+    sagn((&S_DIENST[0 as usize]) as u64, abstand)
+    var weiter: bool = true
+    while weiter {
+        cmd_suchen()
+        var s: u64 = 0
+        while s < abstand {
+            // `nanosleep` nimmt hoechstens sechzig Sekunden (Runde K4),
+            // also wird in Schritten geschlafen. Das ist kein Umweg: so
+            // laesst sich der Dienst auch beenden, ohne eine Stunde zu
+            // warten.
+            ulib.sleep_ms(1000)
+            s = s + 1
+        }
+    }
+    return 0
+}
+
+// ------------------------------------------------- die Einstellungsseite
+//
+// SIE IST EINE SEITE UND KEIN REITER IN DER OBERFLAECHE, und das ist eine
+// Entscheidung mit einem Grund, den man nachzaehlen kann:
+// `kernel/user/settings.fi` legt seine Bedienelemente mit `merke()` in ein
+// Feld von 64 -- und ruft `merke()` SECHSUNDACHTZIG Mal auf (gemessen:
+// `grep -o 'merke(' kernel/user/settings.fi | wc -l` = 87, davon eine die
+// Definition). Alles ab dem 65. Element steht in `ids`/`rtr` nicht drin;
+// `zeige_reiter` kann es weder zeigen noch verstecken, also steht es auf
+// JEDEM Reiter. Ein achter Reiter waere ein Fehler auf einen Fehler
+// gesetzt. Das gehoert repariert -- in einer Runde, die diese Datei
+// aufraeumt, und nicht nebenbei in dieser.
+fn zeile_zeigen(t: u64, schl: u64) {
+    ulib.say(t)
+    if conf_wert(schl, (&WERT[0 as usize]) as u64, 256) {
+        ulib.say((&WERT[0 as usize]) as u64)
+    } else {
+        ulib.say((&S_NICHT[0 as usize]) as u64)
+    }
+    ulib.nl()
+}
+
+fn cmd_einstellungen() -> u64 {
+    conf_laden()
+    ulib.say((&S_ESEITE[0 as usize]) as u64)
+    ulib.nl()
+    zeile_zeigen((&S_EQ[0 as usize]) as u64, (&K_QUELLE[0 as usize]) as u64)
+    zeile_zeigen((&S_EN[0 as usize]) as u64, (&K_NAME[0 as usize]) as u64)
+    zeile_zeigen((&S_EA[0 as usize]) as u64, (&K_ABST[0 as usize]) as u64)
+    zeile_zeigen((&S_EU[0 as usize]) as u64, (&K_AUTO[0 as usize]) as u64)
+    zeile_zeigen((&S_EF[0 as usize]) as u64, (&K_FRIST[0 as usize]) as u64)
+    ulib.say((&S_EWIE[0 as usize]) as u64)
+    ulib.nl()
+    return 0
+}
+
+// Einen Schluessel setzen. Die Datei wird NEU geschrieben: alle Zeilen
+// ausser der betroffenen bleiben Oktett fuer Oktett stehen, die
+// betroffene wird ersetzt oder angehaengt. Kommentare bleiben damit
+// erhalten -- eine Einstellungsdatei, die beim ersten Schreiben ihre
+// Erklaerungen verliert, erklaert nach dem ersten Schreiben nichts mehr.
+fn cmd_einstellen(schl: u64, wert: u64) -> u64 {
+    var voll: [u8; 32] = [0 as u8; 32]
+    var erlaubt: bool = false
+    // Der Schluessel kommt OHNE `=`; die Tabelle oben traegt es mit.
+    var i: u64 = 0
+    while i < 5 {
+        var k: u64 = (&K_QUELLE[0 as usize]) as u64
+        if i == 1 { k = (&K_NAME[0 as usize]) as u64 }
+        if i == 2 { k = (&K_ABST[0 as usize]) as u64 }
+        if i == 3 { k = (&K_AUTO[0 as usize]) as u64 }
+        if i == 4 { k = (&K_FRIST[0 as usize]) as u64 }
+        let kl: u64 = laenge(k) - 1
+        if laenge(schl) == kl && ulib.strneq(schl, k, kl) {
+            erlaubt = true
+            ulib.strncpy((&voll[0 as usize]) as u64, k, 32)
+        }
+        i = i + 1
+    }
+    if !erlaubt {
+        return fehler((&E_ESCHL[0 as usize]) as u64, 0)
+    }
+    conf_laden()
+    let c: u64 = (&CONF[0 as usize]) as u64
+    let n: u64 = (&CONF2[0 as usize]) as u64
+    let vl: u64 = laenge((&voll[0 as usize]) as u64)
+    var aus: u64 = 0
+    var p: u64 = 0
+    while p < conf_len {
+        var e: u64 = p
+        while e < conf_len && g8(c + e) != 10 {
+            e = e + 1
+        }
+        if e < conf_len {
+            e = e + 1
+        }
+        // die alte Zeile dieses Schluessels faellt weg
+        if !(e - p >= vl && ulib.strneq(c + p, (&voll[0 as usize]) as u64, vl)) {
+            var k2: u64 = p
+            while k2 < e && aus + 1 < 1024 {
+                p8(n + aus, g8(c + k2))
+                aus = aus + 1
+                k2 = k2 + 1
+            }
+        }
+        p = e
+    }
+    if aus > 0 && g8(n + aus - 1) != 10 {
+        p8(n + aus, 10)
+        aus = aus + 1
+    }
+    var q: u64 = 0
+    while q < vl && aus + 1 < 1024 {
+        p8(n + aus, g8((&voll[0 as usize]) as u64 + q))
+        aus = aus + 1
+        q = q + 1
+    }
+    q = 0
+    while g8(wert + q) != 0 && aus + 1 < 1024 {
+        p8(n + aus, g8(wert + q))
+        aus = aus + 1
+        q = q + 1
+    }
+    p8(n + aus, 10)
+    aus = aus + 1
+    if !datei_schreiben((&P_CONF[0 as usize]) as u64, n, aus) {
+        return fehler((&E_ESCHR[0 as usize]) as u64, 0)
+    }
+    ulib.sys(ulib.SYS_SYNC, 0, 0, 0)
+    ulib.say((&S_EGES[0 as usize]) as u64)
+    ulib.say(schl)
+    ulib.say((&S_EIST[0 as usize]) as u64)
+    ulib.say(wert)
+    ulib.nl()
+    return 0
+}
+
+fn u_start(args: u64) -> u64 {
+    let argc: u64 = ulib.arg_count(args)
+    if argc < 2 {
+        ulib.say((&S_USE1[0 as usize]) as u64)
+        ulib.nl()
+        ulib.say((&S_USE2[0 as usize]) as u64)
+        ulib.nl()
+        return 0
+    }
+    let cmd: u64 = ulib.arg_at(args, 1)
+    if ulib.streq(cmd, (&C_ZEIG[0 as usize]) as u64) {
+        return cmd_zeigen()
+    }
+    if ulib.streq(cmd, (&C_SUCH[0 as usize]) as u64) {
+        return cmd_suchen()
+    }
+    if ulib.streq(cmd, (&C_EIN[0 as usize]) as u64) {
+        return cmd_einspielen()
+    }
+    if ulib.streq(cmd, (&C_BEST[0 as usize]) as u64) {
+        return cmd_bestaetigen()
+    }
+    if ulib.streq(cmd, (&C_ZUR[0 as usize]) as u64) {
+        return cmd_zurueck()
+    }
+    if ulib.streq(cmd, (&C_WACH[0 as usize]) as u64) {
+        var a: u64 = 0
+        if argc >= 3 {
+            a = ulib.arg_at(args, 2)
+        }
+        return cmd_wachhund(a)
+    }
+    if ulib.streq(cmd, (&C_DIEN[0 as usize]) as u64) {
+        return cmd_dienst()
+    }
+    if ulib.streq(cmd, (&C_EINS[0 as usize]) as u64) {
+        return cmd_einstellungen()
+    }
+    if ulib.streq(cmd, (&C_SETZ[0 as usize]) as u64) {
+        if argc < 4 {
+            return fehler((&E_ESCHL[0 as usize]) as u64, 0)
+        }
+        return cmd_einstellen(ulib.arg_at(args, 2), ulib.arg_at(args, 3))
+    }
+    ulib.say((&S_USE1[0 as usize]) as u64)
+    ulib.nl()
+    return 1
+}

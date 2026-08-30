@@ -45,7 +45,23 @@ INODES=${INODES:-512}
 
 mkdir -p "$OUT/bin"
 
-PROGS=${PROGS:-"sh ls cat echo cp mv rm mkdir rmdir touch head tail wc grep sort uniq true false sleep ps kill uname date df mount umount install opk sync tar find du chmod id whoami"}
+PROGS=${PROGS:-"sh ls cat echo cp mv rm mkdir rmdir touch head tail wc grep sort uniq true false sleep ps kill uname date df mount umount install opk ota reboot sync tar find du chmod id whoami"}
+
+# RUNDE OTA: DIE PROGRAMME DER ZWEITEN BAUART.
+#
+# Alles unter `kernel/user/` ist `profile kernel`: freistehend, ohne
+# Halde, mit `crt.s` davor. Ein Programm, das TLS spricht, kann so nicht
+# gebaut werden -- die Datensatzschicht allein braucht eine Halde. Dafuer
+# gibt es `kernel/app/` (Runde HWNET): `--profile=app`, die VOLLE
+# Firn-Bibliothek aus `vendor/firn/lib`, gebunden mit demselben
+# `user.ld` und OHNE `crt.s`, weil Firns eigenes `_start` schon das tut,
+# was Osums Lader erwartet.
+#
+# BIS ZU DIESER RUNDE LAG `/bin/fetch` IN KEINEM ABBILD. `docs/UPDATE.md`
+# hat das als ersten Punkt der Fehlliste benannt: "es fehlt die
+# Verdrahtung, nicht die Kryptographie". Von hier an ist es drin, und
+# damit kann das Geraet selbst holen, was es einspielt.
+APPS=${APPS:-"fetch"}
 
 bash vendor/firn/fetch-firnc.sh > "$OUT/firnc.log" 2>&1 || {
     echo "== firnc laesst sich nicht bauen"; tail -20 "$OUT/firnc.log"; exit 1; }
@@ -77,6 +93,33 @@ for p in $PROGS; do
 done
 [ "$rc" = 0 ] || exit 1
 echo "   programme $(echo "$gebaut" | wc -w) Stueck"
+
+# ---------------------------------------------------------- die Apps
+gebaut_app=""
+for p in $APPS; do
+    [ -f "kernel/app/$p.fi" ] || continue
+    if ! FIRNLIB="$ROOT/vendor/firn/lib" "$CC" -c --profile=app \
+            -o "$OUT/app-$p.o" "kernel/app/$p.fi" > "$OUT/app-$p.err" 2>&1; then
+        echo "== $p (app): der Uebersetzer sagt nein"
+        head -20 "$OUT/app-$p.err"
+        exit 1
+    fi
+    # KEIN crt.o: Firns eigenes `_start` ist der Eintrittspunkt.
+    if ! ld -T kernel/user/user.ld -o "$OUT/bin/$p" "$OUT/app-$p.o" \
+            2> "$OUT/app-$p.lderr"; then
+        echo "== $p (app): der Binder sagt nein"
+        head -12 "$OUT/app-$p.lderr"
+        exit 1
+    fi
+    strip --strip-all "$OUT/bin/$p"
+    gebaut="$gebaut $p"
+    gebaut_app="$gebaut_app $p"
+done
+if [ -n "$gebaut_app" ]; then
+    asz=0
+    for a in $gebaut_app; do asz=$((asz + $(stat -c%s "$OUT/bin/$a"))); done
+    echo "   apps      $(echo "$gebaut_app" | wc -w) Stueck ($asz Oktette)"
+fi
 
 # ---------------------------------------------------------- limine.conf
 #
@@ -119,6 +162,56 @@ SPEC+=(/quelle1/ /quelle2/)
 # RUNDE UPDATE: der vertraute Schluessel gehoert auf das Geraet, sonst
 # installiert `/bin/opk` nichts mehr.
 SPEC+=("/system/schluessel.pub=$OUT/schluessel.pub")
+
+# ---------------------------------------------------------- RUNDE OTA
+#
+# DER WURZELSPEICHER. `/bin/fetch` prueft die Kette gegen
+# `/etc/ssl/roots.pem`; ohne die Datei wird NICHTS vertraut, und das ist
+# das richtige Verhalten, aber kein brauchbares Abbild. $OTA_ROOTS zeigt
+# auf die Datei, die hineinsoll; ohne die Variable wird die Auswahl aus
+# `tools/hwnet/mkroots.py` genommen (die Mozilla-Wurzeln des Wirts). Geht
+# auch das nicht, bleibt die Datei WEG -- und dann sagt `fetch` beim
+# ersten Versuch "no trust store", was besser ist als eine leere Datei,
+# die wie ein Speicher aussieht.
+ROOTS=${OTA_ROOTS:-}
+if [ -z "$ROOTS" ]; then
+    if python3 tools/hwnet/mkroots.py "$OUT/roots.pem" > "$OUT/roots.log" 2>&1; then
+        ROOTS="$OUT/roots.pem"
+    fi
+fi
+SPEC+=(/etc/ssl/)
+if [ -n "$ROOTS" ] && [ -s "$ROOTS" ]; then
+    SPEC+=("/etc/ssl/roots.pem=$ROOTS")
+    echo "   wurzeln   $(stat -c%s "$ROOTS") Oktette"
+else
+    echo "   wurzeln   KEINE -- fetch wird nichts vertrauen"
+fi
+
+# DIE EINSTELLUNGEN. Die Vorgabe schaltet die automatische Suche AUS und
+# nennt keine Quelle: ein Abbild, das ab Werk irgendwo nachfragt, waere
+# eine Entscheidung, die niemand getroffen hat.
+if [ -n "${OTA_CONF:-}" ]; then
+    [ "$OTA_CONF" -ef "$OUT/ota.conf" ] || cp -f "$OTA_CONF" "$OUT/ota.conf"
+else
+    cat > "$OUT/ota.conf" <<'EOFC'
+# /etc/ota.conf -- woher dieses Geraet seine Updates holt.
+#
+# quelle   die Adresse der Quelle. IPv4 und nicht ein Name: dieses
+#          System hat keinen Resolver (docs/ROADMAP-UPDATE.md A2).
+# name     der Name, den das Zertifikat tragen MUSS. Ohne ihn wird die
+#          Adresse als Name genommen, und die traegt kein Zertifikat --
+#          die Verbindung wird dann abgelehnt, und das ist richtig so.
+# abstand  Sekunden zwischen zwei automatischen Suchen.
+# auto     ja/nein. Vorgabe: nein.
+# frist    Sekunden, die der Wachhund auf den Erfolgsvermerk wartet.
+#quelle=https://192.0.2.1:443
+#name=pkg.example.org
+abstand=3600
+auto=nein
+frist=120
+EOFC
+fi
+SPEC+=("/etc/ota.conf=$OUT/ota.conf")
 for q in 1 2; do
     for f in "$OUT/quelle$q"/*; do
         SPEC+=("/quelle$q/$(basename "$f")=$f")
