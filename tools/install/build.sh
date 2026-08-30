@@ -29,7 +29,17 @@ CC=${FIRNC:-vendor/firn/bin/firnc}
 OUT=${1:-/tmp/install}
 LIMINE=${LIMINE_DIR:-/root/jarvis/projects/u_DiS4in7esMF1/orientos/vendor/limine}
 ZIEL_MIB=${ZIEL_MIB:-256}
-BLOCKS=${QUELL_BLOCKS:-10240}
+# RUNDE MERGE-2: 32768 STATT 10240 BLOECKE (16 MiB statt 5 MiB).
+#
+# Dieselbe Ursache wie in tools/k13/run.sh, nur an der anderen Stelle:
+# die Quelle traegt den Kern UND das Userland. Gemessen an diesem
+# Stand sind das 3 112 516 Oktette Kern und 1 687 208 Oktette fuer die
+# 34 Programme -- zusammen mit Limine, den zwei signierten Quellen und
+# dem Journal (522 Bloecke) passt das nicht mehr in fuenf Megaoktette,
+# und mkfs.py endete mit "mkfs: the disk is full". Die Zahl ist eine
+# Arbeitsgroesse fuer ein Abbild im Temporaerbereich, kein Versprechen:
+# sie darf grosszuegig sein. Das Zielgeraet bleibt bei ZIEL_MIB.
+BLOCKS=${QUELL_BLOCKS:-32768}
 KARTEN=${KARTEN:-128}
 INODES=${INODES:-512}
 
