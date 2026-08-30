@@ -1,0 +1,1209 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/nvmeq.fi -- RUNDE NVMEQ: DIE WARTESCHLANGE DES GERAETS.
+//
+// ================================================================
+// DER EINE SATZ
+// ================================================================
+//
+// Ein Auftrag landet nicht mehr in einem Faden, der wartet, sondern in
+// der Submission-Warteschlange des NVMe-Controllers. Das Geraet holt
+// ihn sich selbst, legt die Oktette selbst dorthin, wo der Eintrag es
+// sagt, und meldet sich selbst. Zwischen der Tuerklingel und dem
+// Interrupt wartet NIEMAND.
+//
+// ================================================================
+// WARUM DAS DIE FEHLENDE ZEILE WAR
+// ================================================================
+//
+// Drei Runden haben darauf hingearbeitet, und `docs/RING-STATUS.md`
+// sagt in seiner ehrlichen Zeile genau, was noch fehlte:
+//
+//     "Der synchrone Weg wird auf einem Kern weiterhin nicht
+//      geschlagen. 8441 gegen 13130 Zyklen bei Tiefe 16 -- Faktor
+//      1,56. Der Grund ist unveraendert und liegt NICHT am Weg der
+//      Eintraege: die Arbeitsfaeden gehen intern weiter SYNCHRON auf
+//      die Platte."
+//
+// HANDLE gab die Lebensdauer (Generation, Verweiszaehler, Abbruch),
+// ASYNC gab den Auftrag, der laenger lebt als sein Aufruf, RING gab
+// den Weg hinein und hinaus ohne Systemaufruf. Was fehlte, war das
+// Ende: ein Auftrag, der nicht mehr in `blk.read` steht und wartet.
+//
+// Und die Reihenfolge stimmte auch von der Gefahrenseite. Ein Geraet,
+// das per DMA schreibt, braucht eine Buchhaltung, die sagt, WOHIN es
+// schreiben darf und WIE LANGE dieses Ziel gueltig ist. Ohne die drei
+// Runden davor waere das kein Leistungsproblem gewesen, sondern ein
+// Schreibzugriff des Controllers in eine Seite, die inzwischen jemand
+// anderem gehoert.
+//
+// ================================================================
+// DIE HARTE AUFLAGE DIESER RUNDE, IN EINEM SATZ
+// ================================================================
+//
+//   > JEDE ADRESSE, DIE IN EINEN NVMe-EINTRAG GESCHRIEBEN WIRD, KOMMT
+//   > AUS DEM DMA-VORRAT DIESES MODULS -- NIEMALS AUS EINEM WERT, DEN
+//   > EIN PROGRAMM IRGENDWO STEHEN HAT.
+//
+// Das ist keine Empfehlung, es ist eine WACHE (`pool_holds`), sie steht
+// unmittelbar vor der Tuerklingel, und sie hat eine Gegenprobe
+// (`nodmapool`), die sie ausschaltet und damit die Zusage
+// `a-prp-aus-vorrat` fallen laesst.
+//
+// Die Bauart, die das moeglich macht, heisst UMSTEIGEPUFFER: das
+// Geraet schreibt IMMER in eine kerneigene Seite, und der Kern kopiert
+// von dort in den Adressraum des Programms -- geprueft, mit
+// Generationspruefung, und erst dann, wenn feststeht, dass es diesen
+// Adressraum noch gibt. Das kostet eine Kopie von hoechstens 4096
+// Oktett und ist der Grund, warum die Faelle (b) und (c) unten
+// UEBERHAUPT KEINE Sonderbehandlung brauchen:
+//
+//   * Handle geschlossen, waehrend Auftraege beim Geraet stehen? Das
+//     DMA-Ziel ist eine Kernseite. Es kann gar nicht ungueltig werden.
+//   * Prozess gestorben, waehrend Auftraege beim Geraet stehen? Dito.
+//     Der Controller schreibt in kerneigenen Speicher, und die Kopie
+//     nach Ring 3 findet dann einfach nicht mehr statt.
+//
+// Die Alternative -- die Programmseite festpinnen und dem Geraet
+// direkt geben (io_urings `IORING_REGISTER_BUFFERS`) -- spart die
+// Kopie und verlangt dafuer eine Buchhaltung ueber gepinnte
+// Benutzerseiten UND eine IOMMU, damit ein falsch gerechneter Zeiger
+// nicht in Kernelspeicher zeigt. `/root/osum-roadmap/KERNEL.md`,
+// Punkt 1, sagt genau das: "Ein Userspace-Treiber ohne IOMMU ist eine
+// Illusion." Diese Runde baut den Weg zuerst und sicher; das Pinnen
+// steht in `docs/NVMEQ-STATUS.md` unter "was offen bleibt".
+//
+// ================================================================
+// DIE OBERHAELFTE UND DIE UNTERHAELFTE
+// ================================================================
+//
+// Der Interrupt-Pfad ist kurz, und das ist eine Zusage, keine
+// Absichtserklaerung. Die OBERHAELFTE (`irq`) tut drei Dinge:
+//
+//   1. Die Completion-Warteschlangen leerraeumen (Phasenbit lesen,
+//      Kennung und Status herausholen, Kopf weiterschieben,
+//      Tuerklingel).
+//   2. Je Fertigstellung EINEN Satz (Platz, Status) in den
+//      Nachlaufring legen.
+//   3. Wecken.
+//
+// Was sie NICHT tut: in einen Adressraum schreiben, Seitentabellen
+// begehen, Handles aufloesen, Sperren des Dateisystems nehmen, einen
+// Fertigring eines Programms anfassen. All das macht die
+// UNTERHAELFTE (`sys.nvmeq_reap`) im Zusammenhang eines
+// Arbeitsfadens, wo es erlaubt ist zu warten.
+//
+// ================================================================
+// MEHRERE WARTESCHLANGEN
+// ================================================================
+//
+// NVMe erlaubt ein Warteschlangenpaar je Kern, und genau so wird es
+// angelegt: NQ_QUEUES Paare mit den Nummern 2 bis 5 (0 ist die
+// Admin-Warteschlange, 1 gehoert `nvme.fi` und seinem synchronen
+// Weg). Gewaehlt wird beim Abgeben nach `cpu.here` -- zwei Kerne, die
+// gleichzeitig abgeben, fassen damit weder dieselbe Abgabesperre noch
+// dasselbe Tuerklingel-Register an.
+//
+// EHRLICH DAZU: der VEKTOR ist noch geteilt. Alle Paare melden auf
+// MSI-X-Eintrag 0, also auf demselben Interrupt, den `nvme.fi` schon
+// scharfgeschaltet hat. Das nimmt den Engpass beim ABGEBEN (Sperre,
+// Schwanz, Tuerklingel -- alles je Kern), nicht beim MELDEN: die
+// Oberhaelfte laeuft weiterhin auf einem Kern und raeumt dort alle
+// Warteschlangen ab. Ein Vektor je Warteschlange ist der naechste
+// Schritt; `msix_arm` in `nvme.fi` nimmt die Eintragsnummer bereits
+// als Parameter, und `isr.s` hat mit 48 Vektoren Platz fuer 44..47.
+// Es steht nicht in dieser Runde, weil es ohne einen zweiten Kern in
+// der Messung nichts beweist -- und die Messung mit `-smp 4` ist die
+// letzte Zeile dieser Runde, nicht die erste.
+//
+// ================================================================
+// WAS NICHT DURCH DIE WARTESCHLANGE GEHT
+// ================================================================
+//
+// Der Rueckfallweg bleibt vollstaendig erhalten, und DIE WAHL TRIFFT
+// DER KERN, nicht der Aufrufer. `sys.nvmeq_try` nimmt einen Auftrag
+// nur dann, wenn ALLE diese Fragen mit ja beantwortet sind:
+//
+//   * Ist es ein Lesen oder Schreiben?
+//   * Zeigt der Deskriptor auf ein BLOCKGERAET (devfs), und ist dieses
+//     Geraet der NVMe-Controller?
+//   * Passt die Anforderung in EINEN Umsteigepuffer (hoechstens acht
+//     Bloecke, also 4096 Oktett -- damit kommt sie mit PRP1 aus und
+//     braucht keine PRP-Liste)?
+//   * Ist beim Schreiben der Bereich blockgenau (kein
+//     Lesen-Aendern-Schreiben)?
+//   * Ist ein Flugplatz frei?
+//
+// Sonst geht der Auftrag den Weg der Runde RING: ein Arbeitsfaden
+// nimmt ihn und arbeitet ihn synchron ab. ATA-PIO, virtio, Rohre,
+// Steckdosen, gewoehnliche Dateien auf OFS -- alles unveraendert.
+// `nvmeq: fallback` zaehlt, wie oft.
+//
+// ARITHMETIK. Seit Runde 72 panicken `+`, `-` und `*` beim Ueberlauf.
+// Kopf und Schwanz einer Warteschlange LAUFEN UEBER, das ist ihre
+// Bauart -- dort steht deshalb `+%` und `-%`.
+
+profile kernel
+
+import kstate
+import mem
+import nvme
+import sched
+import cpu
+import atomic
+
+export {
+    NQ_QUEUES, NQ_DEPTH, NQ_SLOTS, NQ_TINY, BOUNCE, SECTOR, PAGE,
+    FIRST_QID, NQ_TICKS, DONE_SLOTS,
+    init, ready, queues, depth, pool_base, pool_frames, pool_bytes,
+    bounce_base, pool_holds, last_prp, last_ubuf,
+    claim, fill, release_slot, push, bounce_of, inflight, inflight_of,
+    slot_job, slot_task, slot_pid, slot_ubuf, slot_ulen, slot_skip,
+    slot_op, slot_state,
+    irq, poll, sweep, reap_next, done_used, hold, held,
+    enable, enabled,
+    queue_of, submits, completions, shutdown
+}
+
+// ------------------------------------------------------------ die Masse
+//
+// VIER WARTESCHLANGENPAARE. Nicht acht und nicht eins: `smp.fi` bringt
+// in diesem System bis zu vier Prozessoren hoch (`-smp 4` ist die
+// Messkonfiguration), und eine Warteschlange je Kern ist genau die
+// Zahl, ab der keine zwei Kerne mehr um dasselbe Register streiten.
+const NQ_QUEUES: u64 = 4
+
+// TIEFE 64 JE WARTESCHLANGE. Die Messung dieser Runde geht bis Tiefe
+// 64 (so verlangt es die Aufgabenstellung), und eine Warteschlange,
+// die genau dann volllaeuft, wenn gemessen wird, misst den Rueckstau
+// statt das Geraet. `nvme.fi` prueft beim Aufsetzen, dass der
+// Controller mindestens 64 Eintraege kann (`MQES`).
+const NQ_DEPTH: u64 = 64
+
+// Die Gegenprobe `nqtiny` macht daraus vier. Damit ist der Rueckstau
+// mit acht Auftraegen zu treffen statt mit hundert.
+const NQ_TINY: u64 = 4
+
+const NQ_SLOTS: u64 = 256 // NQ_QUEUES * NQ_DEPTH -- die Flugtafel
+
+// Der Nachlaufring ist DOPPELT so lang, wie es Flugplaetze gibt.
+// Daraus folgt, dass er nicht ueberlaufen kann: es gibt nie mehr
+// Fertigstellungen als Flugplaetze, und ein Platz wird erst wieder
+// vergeben, wenn seine Meldung abgeholt ist. Derselbe Beweis wie beim
+// Fertigring der Runde RING, dieselbe Zahl 1:2, und `nvmeq: lost`
+// MUSS null bleiben.
+const DONE_SLOTS: u64 = 512
+
+const PAGE: u64 = 4096
+const SECTOR: u64 = 512
+const BOUNCE: u64 = 4096 // ein Umsteigepuffer, also acht Bloecke
+const SQE_B: u64 = 64
+const CQE_B: u64 = 16
+const FLIGHT_B: u64 = 64
+const QD_B: u64 = 128
+const DONE_B: u64 = 16
+
+// 0 ist die Admin-Warteschlange, 1 gehoert `nvme.fi` -- der synchrone
+// Weg muss weiter funktionieren, und er tut es auf seiner eigenen.
+const FIRST_QID: u64 = 2
+
+// Wie lange ein Auftrag beim Geraet stehen darf, bevor der Kern ihn
+// fuer verloren erklaert. Drei Sekunden bei 100 Hz -- dieselbe Frist,
+// die `nvme.await` fuer den synchronen Weg benutzt. Sie ist der
+// Notausgang gegen einen verlorenen Interrupt und der Grund, warum
+// die Gegenprobe `nqnoirq` ein Ergebnis liefert statt eines Haengers.
+const NQ_TICKS: u64 = 300
+
+// NVMe-Opcodes des NVM-Befehlssatzes.
+const IO_WRITE: u64 = 0x01
+const IO_READ: u64 = 0x02
+
+// Admin-Opcodes, so weit diese Datei sie braucht.
+const A_CREATE_SQ: u64 = 0x01
+const A_CREATE_CQ: u64 = 0x05
+const A_SET_FEATURES: u64 = 0x09
+const A_DELETE_SQ: u64 = 0x00
+const A_DELETE_CQ: u64 = 0x04
+const F_NUMQUEUES: u64 = 0x07
+
+// ------------------------------------------- die Warteschlangentafel
+
+const QD_STATE: u64 = 0 // 0 = nicht angelegt, 1 = steht
+const QD_QID: u64 = 8 // die Nummer, die der Controller kennt
+const QD_SQ: u64 = 16 // Adresse der Abgabewarteschlange im Vorrat
+const QD_CQ: u64 = 24 // Adresse der Fertigwarteschlange im Vorrat
+const QD_TAIL: u64 = 32 // Schwanz der Abgabe -- gehoert dem Kern
+const QD_HEAD: u64 = 40 // Kopf der Fertigmeldungen -- gehoert dem Kern
+const QD_PHASE: u64 = 48 // das Phasenbit, mit dem eine Meldung gilt
+const QD_INFL: u64 = 56 // wie viele Eintraege gerade beim Geraet sind
+const QD_SUB: u64 = 64 // abgegeben, insgesamt
+const QD_CPL: u64 = 72 // fertig geworden, insgesamt
+const QD_LOCK: u64 = 80 // die Abgabe- und Abraeumsperre DIESER Schlange
+const QD_FULL: u64 = 88 // wie oft sie voll war
+
+// ----------------------------------------------------- die Flugtafel
+//
+// EIN PLATZ JE EINTRAG BEIM GERAET, und er traegt genau das, was das
+// Geraet NICHT sehen darf: wohin die Oktette am Ende gehoeren.
+
+const FL_STATE: u64 = 0 // 0 frei, 1 beim Geraet, 2 im Nachlauf
+const FL_JOB: u64 = 8 // der Auftragsplatz in `async.fi`
+const FL_TASK: u64 = 16 // die Aufgabe, der er gehoert
+const FL_PID: u64 = 24 // und ihre pid -- gegen Platzwiederverwendung
+const FL_UBUF: u64 = 32 // DIE ZIELADRESSE IM PROGRAMM. Nie im Eintrag.
+const FL_ULEN: u64 = 40 // wie viele Oktett das Programm wollte
+const FL_SKIP: u64 = 48 // ihr Versatz im Umsteigepuffer
+const FL_MISC: u64 = 56 // unten 8 Bit: Art; darueber: Faelligkeit
+
+// ---------------------------------------------------- der Nachlaufring
+
+const DN_SLOT: u64 = 0
+const DN_STATUS: u64 = 8
+
+// ----------------------------------------------------- die Skalare
+
+const SC_OFF: u64 = 0x800
+const NS_READY: u64 = 0x00
+const NS_QUEUES: u64 = 0x08
+const NS_POOL: u64 = 0x10 // erste Adresse des DMA-Vorrats
+const NS_FRAMES: u64 = 0x18
+const NS_DHEAD: u64 = 0x20
+const NS_DTAIL: u64 = 0x28
+const NS_DLOCK: u64 = 0x30
+const NS_LASTPRP: u64 = 0x38 // die zuletzt in einen Eintrag geschriebene
+const NS_LASTUBUF: u64 = 0x40 // und die Programmadresse desselben Auftrags
+const NS_DEPTH: u64 = 0x48
+const NS_INFL: u64 = 0x50 // Eintraege beim Geraet, ueber alle Schlangen
+// DER PRUEFSTANDSHALT DER UNTERHAELFTE. Steht er, holt `nvmeq_reap`
+// nichts mehr ab: die Fertigstellungen bleiben im Nachlaufring liegen.
+// Damit wird aus "steht beim Geraet und ist noch nicht zugestellt" ein
+// Zustand, den ein Test HERSTELLEN kann -- dieselbe Bauart und
+// derselbe Grund wie `async.hold` in Runde ASYNC. Ohne ihn haengt es
+// an der Zeitscheibe, ob der Fall "Handle geschlossen, waehrend
+// Auftraege beim Geraet stehen" ueberhaupt getroffen wird, und ein
+// Test, der eine Fehlerklasse nur manchmal trifft, ist keiner.
+const NS_HOLD: u64 = 0x58
+// DIE WEICHE ALS SCHALTER, ZUR LAUFZEIT.
+//
+// Das Wort `noqueue` auf der Kommandozeile schaltet den
+// Warteschlangenweg fuer den ganzen Lauf ab -- gut fuer eine
+// Gegenprobe, unbrauchbar fuer eine MESSUNG: der synchrone Weg misst
+// sich zwischen zwei Boots um bis zu zwanzig Prozent anders, und nur
+// in EINEM Boot sagen die Verhaeltnisse etwas. Diese Runde hat das aus
+// `docs/RING-STATUS.md` uebernommen, und dafuer muss sich die Weiche
+// zwischen zwei Messreihen umlegen lassen.
+const NS_ON: u64 = 0x60
+
+// ------------------------------------------------------ kleine Helfer
+
+fn sc(off: u64) -> u64 {
+    return kstate.NQ_OFF + SC_OFF + off
+}
+
+fn qd(i: u64) -> u64 {
+    return kstate.NQ_OFF + i * QD_B
+}
+
+fn q_get(state: u64, i: u64, off: u64) -> u64 {
+    if i >= NQ_QUEUES {
+        return 0
+    }
+    return kstate.get(state, qd(i) + off)
+}
+
+fn q_set(state: u64, i: u64, off: u64, v: u64) {
+    if i >= NQ_QUEUES {
+        return
+    }
+    kstate.set(state, qd(i) + off, v)
+}
+
+fn fl(g: u64) -> u64 {
+    return kstate.NQF_OFF + g * FLIGHT_B
+}
+
+fn f_get(state: u64, g: u64, off: u64) -> u64 {
+    if g >= NQ_SLOTS {
+        return 0
+    }
+    return kstate.get(state, fl(g) + off)
+}
+
+fn f_set(state: u64, g: u64, off: u64, v: u64) {
+    if g >= NQ_SLOTS {
+        return
+    }
+    kstate.set(state, fl(g) + off, v)
+}
+
+// ------------------------------------------------------------ die Sperren
+//
+// ZWEI, UND BEIDE WERDEN MIT ABGESCHALTETEN INTERRUPTS GEHALTEN.
+//
+// Das ist kein Detail, sondern die Bedingung dafuer, dass die
+// Oberhaelfte ueberhaupt spinnen darf: haelt ein Faden auf DIESEM Kern
+// die Sperre und der Interrupt trifft ihn, dann wartet die
+// Oberhaelfte auf einen Faden, der erst weiterlaufen kann, wenn sie
+// fertig ist. Genau dieser Stillstand ist der klassische Fehler in
+// Treibern mit Unterbrechungen, und die einzige Abhilfe, die wirklich
+// traegt, ist: WER EINE SPERRE NIMMT, DIE EIN INTERRUPT AUCH NIMMT,
+// SCHALTET DIE INTERRUPTS AB.
+//
+// Ein Kern, der auf einen ANDEREN Kern wartet, ist davon nicht
+// betroffen -- der laeuft weiter und gibt die Sperre in wenigen
+// Dutzend Zyklen wieder her.
+
+fn qlock(state: u64, i: u64) -> u64 {
+    let flags: u64 = sched.irq_save()
+    let p: u64 = state + qd(i) + QD_LOCK
+    let me: u64 = cpu.here(state) + 1
+    var got: bool = false
+    while !got {
+        if atomic.cas(p, 0, me) == 0 {
+            got = true
+        } else {
+            atomic.pause()
+        }
+    }
+    return flags
+}
+
+fn qunlock(state: u64, i: u64, flags: u64) {
+    atomic.store(state + qd(i) + QD_LOCK, 0)
+    sched.irq_restore(flags)
+}
+
+fn dlock(state: u64) -> u64 {
+    let flags: u64 = sched.irq_save()
+    let p: u64 = state + sc(NS_DLOCK)
+    let me: u64 = cpu.here(state) + 1
+    var got: bool = false
+    while !got {
+        if atomic.cas(p, 0, me) == 0 {
+            got = true
+        } else {
+            atomic.pause()
+        }
+    }
+    return flags
+}
+
+fn dunlock(state: u64, flags: u64) {
+    atomic.store(state + sc(NS_DLOCK), 0)
+    sched.irq_restore(flags)
+}
+
+// ------------------------------------------------------ die Abfragen
+
+fn ready(state: u64) -> bool {
+    return kstate.get(state, sc(NS_READY)) != 0
+}
+
+fn queues(state: u64) -> u64 {
+    return kstate.get(state, sc(NS_QUEUES))
+}
+
+fn depth(state: u64) -> u64 {
+    return kstate.get(state, sc(NS_DEPTH))
+}
+
+fn pool_base(state: u64) -> u64 {
+    return kstate.get(state, sc(NS_POOL))
+}
+
+fn pool_frames(state: u64) -> u64 {
+    return kstate.get(state, sc(NS_FRAMES))
+}
+
+fn pool_bytes(state: u64) -> u64 {
+    return kstate.get(state, sc(NS_FRAMES)) * PAGE
+}
+
+fn last_prp(state: u64) -> u64 {
+    return kstate.get(state, sc(NS_LASTPRP))
+}
+
+fn last_ubuf(state: u64) -> u64 {
+    return kstate.get(state, sc(NS_LASTUBUF))
+}
+
+fn enable(state: u64, v: u64) {
+    kstate.set(state, sc(NS_ON), v)
+}
+
+fn enabled(state: u64) -> bool {
+    return kstate.get(state, sc(NS_ON)) != 0
+}
+
+fn hold(state: u64, v: u64) {
+    kstate.set(state, sc(NS_HOLD), v)
+}
+
+fn held(state: u64) -> u64 {
+    return kstate.get(state, sc(NS_HOLD))
+}
+
+fn inflight(state: u64) -> u64 {
+    return kstate.get(state, sc(NS_INFL))
+}
+
+fn inflight_of(state: u64, i: u64) -> u64 {
+    return q_get(state, i, QD_INFL)
+}
+
+fn submits(state: u64) -> u64 {
+    var n: u64 = 0
+    var i: u64 = 0
+    while i < NQ_QUEUES {
+        n = n + q_get(state, i, QD_SUB)
+        i = i + 1
+    }
+    return n
+}
+
+fn completions(state: u64) -> u64 {
+    var n: u64 = 0
+    var i: u64 = 0
+    while i < NQ_QUEUES {
+        n = n + q_get(state, i, QD_CPL)
+        i = i + 1
+    }
+    return n
+}
+
+fn slot_state(state: u64, g: u64) -> u64 {
+    return f_get(state, g, FL_STATE)
+}
+
+fn slot_job(state: u64, g: u64) -> u64 {
+    return f_get(state, g, FL_JOB)
+}
+
+fn slot_task(state: u64, g: u64) -> u64 {
+    return f_get(state, g, FL_TASK)
+}
+
+fn slot_pid(state: u64, g: u64) -> u64 {
+    return f_get(state, g, FL_PID)
+}
+
+fn slot_ubuf(state: u64, g: u64) -> u64 {
+    return f_get(state, g, FL_UBUF)
+}
+
+fn slot_ulen(state: u64, g: u64) -> u64 {
+    return f_get(state, g, FL_ULEN)
+}
+
+fn slot_skip(state: u64, g: u64) -> u64 {
+    return f_get(state, g, FL_SKIP)
+}
+
+fn slot_op(state: u64, g: u64) -> u64 {
+    return f_get(state, g, FL_MISC) & 0xFF
+}
+
+// ==================================================== DER DMA-VORRAT
+//
+// EINMAL BESORGT, NIE FREIGEGEBEN, UND DAS IST ABSICHT.
+//
+// `/root/osum-roadmap/KERNEL.md` sagt es in einem Satz: "Map/Unmap
+// kostet us -> vorab gemappte, wiederverwendete DMA-Pools statt
+// Mapping pro I/O." Ein Vorrat, der bei jedem Auftrag entstuende, waere
+// ein Rahmenverwalter im heissen Pfad -- und, schlimmer, eine
+// Adresse, die eben noch einem Geraet gehoerte und gleich wieder
+// jemand anderem. Genau daraus entsteht der Fehler, gegen den die
+// ganze Runde gebaut ist.
+//
+// DIE RECHNUNG:
+//     NQ_QUEUES  Seiten Abgabewarteschlangen   (64 * 64 = 4096, passt)
+//   + NQ_QUEUES  Seiten Fertigwarteschlangen   (64 * 16 = 1024, passt)
+//   + NQ_SLOTS   Seiten Umsteigepuffer
+//   = 4 + 4 + 256 = 264 Rahmen = 1 081 344 Oktett.
+//
+// Am Stueck, weil die Warteschlangen des Controllers
+// "physically contiguous" angemeldet werden und weil eine einzige
+// Basisadresse die Wache `pool_holds` zu einem Zahlenvergleich macht
+// statt zu einem Tabellendurchgang.
+
+fn frames_needed() -> u64 {
+    return 2 * NQ_QUEUES + NQ_SLOTS
+}
+
+fn bounce_base(state: u64) -> u64 {
+    return pool_base(state) + 2 * NQ_QUEUES * PAGE
+}
+
+// Der Umsteigepuffer eines Flugplatzes. Seitenausgerichtet, und daraus
+// folgt unmittelbar, dass PRP2 immer null sein darf: ein PRP-Eintrag
+// deckt den REST SEINER SEITE ab, und 4096 Oktett ab Versatz 0 sind
+// genau diese Seite. Ein Umsteigepuffer, der mitten in einer Seite
+// laege, braeuchte einen zweiten Zeiger -- und ein Treiber, der das
+// vergisst, laeuft, bis ein Puffer zufaellig am Seitenende liegt.
+fn bounce_of(state: u64, g: u64) -> u64 {
+    if g >= NQ_SLOTS {
+        return 0
+    }
+    return bounce_base(state) + g * PAGE
+}
+
+// =============================================== DIE WACHE
+//
+// DIE WICHTIGSTE FUNKTION DIESER DATEI.
+//
+// Sie beantwortet genau eine Frage: STAMMT DIESE ADRESSE AUS UNSERER
+// EIGENEN BUCHHALTUNG? Drei Bedingungen, und alle drei muessen halten:
+//
+//   1. Sie liegt im Umsteigebereich des Vorrats -- also nicht in
+//      `kdata`, nicht im Kernelabbild, nicht in einer Programmseite,
+//      nicht in den Warteschlangen selbst.
+//   2. Sie faengt auf einer Seitengrenze an. Ein Puffer, der das nicht
+//      tut, ist keiner von unseren.
+//   3. Die Laenge bleibt in DIESER Seite. Ein Geraet, das ueber das
+//      Ende hinausschreibt, traefe den Umsteigepuffer des naechsten
+//      Auftrags.
+//
+// Wer sie umgeht, umgeht die ganze Runde. Deshalb steht sie nicht
+// irgendwo, sondern in `push`, eine Zeile vor der Tuerklingel, und
+// wenn sie nein sagt, WIRD NICHT GEKLINGELT.
+fn pool_holds(state: u64, addr: u64, len: u64) -> bool {
+    let base: u64 = bounce_base(state)
+    if base == 0 {
+        return false
+    }
+    if addr < base {
+        return false
+    }
+    let off: u64 = addr - base
+    if off >= NQ_SLOTS * PAGE {
+        return false
+    }
+    if (off & (PAGE - 1)) != 0 {
+        return false
+    }
+    if len == 0 || len > PAGE {
+        return false
+    }
+    return true
+}
+
+// ================================================== DAS AUFSETZEN
+
+fn init(state: u64) -> bool {
+    kstate.set(state, sc(NS_READY), 0)
+    if !nvme.ready(state) {
+        return false
+    }
+    // Die Tafeln zuerst, damit ein zweiter Anlauf nach einem
+    // Fehlschlag nicht auf Resten des ersten steht.
+    var i: u64 = 0
+    while i < NQ_QUEUES {
+        var k: u64 = 0
+        while k < QD_B / 8 {
+            kstate.set(state, qd(i) + k * 8, 0)
+            k = k + 1
+        }
+        i = i + 1
+    }
+    var g: u64 = 0
+    while g < NQ_SLOTS {
+        var m: u64 = 0
+        while m < FLIGHT_B / 8 {
+            kstate.set(state, fl(g) + m * 8, 0)
+            m = m + 1
+        }
+        g = g + 1
+    }
+    var d: u64 = 0
+    while d < DONE_SLOTS {
+        kstate.set(state, kstate.NQD_OFF + d * DONE_B + DN_SLOT, 0)
+        kstate.set(state, kstate.NQD_OFF + d * DONE_B + DN_STATUS, 0)
+        d = d + 1
+    }
+    kstate.set(state, sc(NS_DHEAD), 0)
+    kstate.set(state, sc(NS_DTAIL), 0)
+    kstate.set(state, sc(NS_DLOCK), 0)
+    kstate.set(state, sc(NS_LASTPRP), 0)
+    kstate.set(state, sc(NS_LASTUBUF), 0)
+    kstate.set(state, sc(NS_INFL), 0)
+    kstate.set(state, sc(NS_HOLD), 0)
+    kstate.set(state, sc(NS_ON), 1)
+
+    var tiefe: u64 = NQ_DEPTH
+    if kstate.mode_on(state, kstate.M_NQTINY) {
+        tiefe = NQ_TINY
+    }
+    kstate.set(state, sc(NS_DEPTH), tiefe)
+
+    let pool: u64 = mem.frame_run(state, frames_needed())
+    if pool == 0 {
+        return false
+    }
+    kstate.set(state, sc(NS_POOL), pool)
+    kstate.set(state, sc(NS_FRAMES), frames_needed())
+    zero(pool, frames_needed() * PAGE)
+
+    // WIE VIELE PAARE DER CONTROLLER UEBERHAUPT HERGIBT.
+    //
+    // `nvme.fi` hat beim Aufsetzen nach EINEM Paar gefragt, weil es nur
+    // eines brauchte. Hier wird ausdruecklich nachgefragt -- und die
+    // ANTWORT gelesen, statt sie anzunehmen. Ein Controller darf
+    // weniger geben, als man verlangt; Feld 0 der Fertigmeldung sagt
+    // dann, wie viele es wirklich sind (nullbasiert, unten die
+    // Abgabe-, oben die Fertigwarteschlangen).
+    let want: u64 = (NQ_QUEUES - 1) | ((NQ_QUEUES - 1) << 16)
+    var erlaubt: u64 = NQ_QUEUES
+    if nvme.admin(state, A_SET_FEATURES, 0, 0, F_NUMQUEUES, want) == 0 {
+        let res: u64 = nvme.admin_result(state)
+        let nsq: u64 = (res & 0xFFFF) + 1
+        let ncq: u64 = ((res >> 16) & 0xFFFF) + 1
+        erlaubt = nsq
+        if ncq < erlaubt {
+            erlaubt = ncq
+        }
+        // Das eine Paar, das `nvme.fi` schon hat, geht ab.
+        if erlaubt > 1 {
+            erlaubt = erlaubt - 1
+        } else {
+            erlaubt = 0
+        }
+    }
+    if erlaubt > NQ_QUEUES {
+        erlaubt = NQ_QUEUES
+    }
+
+    var n: u64 = 0
+    var q: u64 = 0
+    while q < erlaubt {
+        if make_queue(state, q, tiefe) {
+            n = n + 1
+        } else {
+            q = erlaubt
+        }
+        q = q + 1
+    }
+    kstate.set(state, sc(NS_QUEUES), n)
+    if n == 0 {
+        return false
+    }
+    kstate.set(state, sc(NS_READY), 1)
+    return true
+}
+
+// EIN PAAR. Fertigwarteschlange VOR Abgabewarteschlange -- eine
+// Abgabewarteschlange nennt beim Anlegen die Fertigwarteschlange, in
+// die sie meldet, und die muss dann schon existieren. Dieselbe
+// Reihenfolge und derselbe Grund wie in `nvme.init`.
+fn make_queue(state: u64, q: u64, tiefe: u64) -> bool {
+    let qid: u64 = FIRST_QID + q
+    let sq: u64 = pool_base(state) + q * PAGE
+    let cq: u64 = pool_base(state) + (NQ_QUEUES + q) * PAGE
+    zero(sq, PAGE)
+    zero(cq, PAGE)
+    // Zusammenhaengend (Bit 0), Interrupts an (Bit 1), MSI-X-Eintrag 0.
+    // Der Eintrag 0 ist der, den `nvme.msix_arm` scharfgeschaltet hat;
+    // ein eigener je Warteschlange ist der naechste Schritt und steht
+    // im Kopf dieser Datei begruendet.
+    let cq11: u64 = 1 | 2 | (0 << 16)
+    if nvme.admin(state, A_CREATE_CQ, 0, cq,
+        ((tiefe - 1) << 16) | qid, cq11) != 0 {
+        return false
+    }
+    // Zusammenhaengend, und oben die Nummer der Fertigwarteschlange.
+    if nvme.admin(state, A_CREATE_SQ, 0, sq,
+        ((tiefe - 1) << 16) | qid, 1 | (qid << 16)) != 0 {
+        nvme.admin(state, A_DELETE_CQ, 0, 0, qid, 0)
+        return false
+    }
+    q_set(state, q, QD_QID, qid)
+    q_set(state, q, QD_SQ, sq)
+    q_set(state, q, QD_CQ, cq)
+    q_set(state, q, QD_TAIL, 0)
+    q_set(state, q, QD_HEAD, 0)
+    // Das Phasenbit faengt bei EINS an: die Warteschlange ist genullt,
+    // und eine Fertigmeldung dreht das Bit auf eins. Steht hier null,
+    // sieht der Kern in einer leeren Warteschlange lauter fertige
+    // Auftraege.
+    q_set(state, q, QD_PHASE, 1)
+    q_set(state, q, QD_STATE, 1)
+    return true
+}
+
+// Ein sauberer Abbau. Wird heute nur vom Selbsttest gerufen; er steht
+// hier, weil ein Treiber, der seine Warteschlangen nicht wieder
+// abmelden kann, beim ersten Neustart des Geraets Muell hinterlaesst.
+fn shutdown(state: u64) {
+    if !ready(state) {
+        return
+    }
+    kstate.set(state, sc(NS_READY), 0)
+    var q: u64 = 0
+    while q < NQ_QUEUES {
+        if q_get(state, q, QD_STATE) != 0 {
+            let qid: u64 = q_get(state, q, QD_QID)
+            // Abgabe zuerst: eine Fertigwarteschlange, in die noch eine
+            // Abgabewarteschlange meldet, laesst sich nicht abmelden.
+            nvme.admin(state, A_DELETE_SQ, 0, 0, qid, 0)
+            nvme.admin(state, A_DELETE_CQ, 0, 0, qid, 0)
+            q_set(state, q, QD_STATE, 0)
+        }
+        q = q + 1
+    }
+    kstate.set(state, sc(NS_QUEUES), 0)
+}
+
+fn zero(p: u64, n: u64) {
+    var i: u64 = 0
+    while i < n / 8 {
+        __mmio_write64((p + i * 8) as *mut u64, 0)
+        i = i + 1
+    }
+}
+
+// ================================================== DIE FLUGPLAETZE
+
+// WELCHE WARTESCHLANGE. Der Kern, auf dem gerade abgegeben wird -- das
+// ist die ganze Regel. Zwei Kerne fassen damit weder dieselbe Sperre
+// noch dasselbe Tuerklingel-Register an, und auf einem Kern faellt die
+// Rechnung auf null zusammen.
+fn queue_of(state: u64) -> u64 {
+    let n: u64 = queues(state)
+    if n == 0 {
+        return 0
+    }
+    let h: u64 = cpu.here(state)
+    return h - (h / n) * n
+}
+
+// Einen Platz nehmen. Mit `cas`, weil zwei Kerne gleichzeitig abgeben
+// duerfen und ein Platz, den beide nehmen, zwei Auftraege in denselben
+// Umsteigepuffer schreiben liesse.
+fn claim(state: u64, q: u64) -> u64 {
+    if q >= NQ_QUEUES {
+        return NQ_SLOTS
+    }
+    let tiefe: u64 = depth(state)
+    // EINEN PLATZ FREI LASSEN. Eine NVMe-Warteschlange gilt als voll,
+    // wenn der Schwanz eine Runde vor dem Kopf steht -- der letzte
+    // Platz ist damit nicht benutzbar, sonst waeren "voll" und "leer"
+    // dieselbe Stellung.
+    if q_get(state, q, QD_INFL) + 1 >= tiefe {
+        q_set(state, q, QD_FULL, q_get(state, q, QD_FULL) + 1)
+        kstate.add(state, kstate.Q_QFULL, 1)
+        return NQ_SLOTS
+    }
+    var k: u64 = 0
+    while k < tiefe {
+        let g: u64 = q * NQ_DEPTH + k
+        if atomic.cas(state + fl(g) + FL_STATE, 0, 1) == 0 {
+            return g
+        }
+        k = k + 1
+    }
+    q_set(state, q, QD_FULL, q_get(state, q, QD_FULL) + 1)
+    kstate.add(state, kstate.Q_QFULL, 1)
+    return NQ_SLOTS
+}
+
+fn fill(state: u64, g: u64, job: u64, task: u64, pid: u64,
+    ubuf: u64, ulen: u64, skip: u64, op: u64) {
+    f_set(state, g, FL_JOB, job)
+    f_set(state, g, FL_TASK, task)
+    f_set(state, g, FL_PID, pid)
+    f_set(state, g, FL_UBUF, ubuf)
+    f_set(state, g, FL_ULEN, ulen)
+    f_set(state, g, FL_SKIP, skip)
+    let due: u64 = kstate.get(state, kstate.TICKS) + NQ_TICKS
+    f_set(state, g, FL_MISC, (op & 0xFF) | (due << 8))
+}
+
+fn release_slot(state: u64, g: u64) {
+    if g >= NQ_SLOTS {
+        return
+    }
+    f_set(state, g, FL_JOB, 0)
+    f_set(state, g, FL_TASK, 0)
+    f_set(state, g, FL_PID, 0)
+    f_set(state, g, FL_UBUF, 0)
+    f_set(state, g, FL_ULEN, 0)
+    f_set(state, g, FL_SKIP, 0)
+    f_set(state, g, FL_MISC, 0)
+    atomic.store(state + fl(g) + FL_STATE, 0)
+}
+
+// ================================================== DIE ABGABE
+//
+// Ein Eintrag ist 64 Oktett, sechzehn Doppelworte, und jedes einzelne
+// geht durch `__mmio_write32`. Der Controller ist der ZWEITE Leser
+// dieses Speichers -- er liest ihn, waehrend der Kern schreibt --, und
+// genau das ist der Fall, in dem der Uebersetzer einen Schreibzugriff
+// nicht verschieben, zusammenfassen oder weglassen darf. Ein
+// gewoehnlicher Feldzugriff traegt diese Zusage nicht; die Intrinsics
+// tun es seit Runde 52.
+
+fn sqe(sq: u64, slot: u64, dw: u64, v: u64) {
+    __mmio_write32((sq + slot * SQE_B + dw * 4) as *mut u32,
+        (v & 0xFFFFFFFF) as u32)
+}
+
+fn cqe(cq: u64, slot: u64, dw: u64) -> u64 {
+    return __mmio_read32((cq + slot * CQE_B + dw * 4) as *mut u32) as u64
+}
+
+// DIE KENNUNG. Sie traegt, WELCHE Warteschlange und WELCHER Platz --
+// mehr braucht die Oberhaelfte nicht, und mehr darf sie auch nicht
+// brauchen: alles Weitere steht in der Flugtafel, die das Geraet nie
+// sieht.
+fn cid_of(q: u64, k: u64) -> u64 {
+    return ((q & 0xF) << 12) | (k & 0xFFF)
+}
+
+fn cid_queue(cid: u64) -> u64 {
+    return (cid >> 12) & 0xF
+}
+
+fn cid_slot(cid: u64) -> u64 {
+    return cid & 0xFFF
+}
+
+// EINEN AUFTRAG WIRKLICH ABGEBEN.
+//
+// `prp_luege` ist NICHT null nur in der Gegenprobe `nodmapool`: dann
+// steht dort die Adresse, die das Programm im geteilten Ring stehen
+// hatte, und die Wache bekommt sie zu sehen statt der eigenen. Im
+// Regelbetrieb ist der Parameter null und die Adresse kommt aus
+// `bounce_of` -- also aus dieser Datei und aus nichts sonst.
+fn push(state: u64, g: u64, lesen: bool, lba: u64, bloecke: u64,
+    prp_luege: u64) -> bool {
+    if !ready(state) {
+        return false
+    }
+    if g >= NQ_SLOTS {
+        return false
+    }
+    let q: u64 = g / NQ_DEPTH
+    if q_get(state, q, QD_STATE) == 0 {
+        return false
+    }
+    var prp: u64 = bounce_of(state, g)
+    if prp_luege != 0 {
+        prp = prp_luege
+    }
+    let laenge: u64 = bloecke * SECTOR
+    // WAS DAS PROGRAMM WOLLTE UND WAS DAS GERAET BEKOMMT -- beide
+    // Zahlen werden mitgeschrieben, damit der Laeufer sie
+    // GEGENEINANDER halten kann. Genau darauf steht die Zusage
+    // `a-prp-nicht-die-programmadresse`.
+    kstate.set(state, sc(NS_LASTPRP), prp)
+    kstate.set(state, sc(NS_LASTUBUF), f_get(state, g, FL_UBUF))
+    // ---------------- DIE WACHE, EINE ZEILE VOR DER TUERKLINGEL ----
+    if !pool_holds(state, prp, laenge) {
+        kstate.add(state, kstate.Q_BADPRP, 1)
+        return false
+    }
+    // ---------------------------------------------------------------
+    let sq: u64 = q_get(state, q, QD_SQ)
+    let tiefe: u64 = depth(state)
+    let flags: u64 = qlock(state, q)
+    var tail: u64 = q_get(state, q, QD_TAIL)
+    var op: u64 = IO_WRITE
+    if lesen {
+        op = IO_READ
+    }
+    var i: u64 = 0
+    while i < 16 {
+        sqe(sq, tail, i, 0)
+        i = i + 1
+    }
+    sqe(sq, tail, 0, (op & 0xFF) | ((cid_of(q, g - q * NQ_DEPTH) & 0xFFFF) << 16))
+    sqe(sq, tail, 1, 1) // Namensraum 1
+    sqe(sq, tail, 6, prp & 0xFFFFFFFF)
+    sqe(sq, tail, 7, prp >> 32)
+    sqe(sq, tail, 8, 0) // PRP2 -- siehe `bounce_of`: immer null
+    sqe(sq, tail, 9, 0)
+    sqe(sq, tail, 10, lba & 0xFFFFFFFF)
+    sqe(sq, tail, 11, lba >> 32)
+    sqe(sq, tail, 12, (bloecke - 1) & 0xFFFF)
+    tail = tail + 1
+    if tail >= tiefe {
+        tail = 0
+    }
+    q_set(state, q, QD_TAIL, tail)
+    q_set(state, q, QD_INFL, q_get(state, q, QD_INFL) + 1)
+    q_set(state, q, QD_SUB, q_get(state, q, QD_SUB) + 1)
+    kstate.set(state, sc(NS_INFL), kstate.get(state, sc(NS_INFL)) + 1)
+    kstate.add(state, kstate.Q_SUBMITS, 1)
+    // Der Eintrag muss im Speicher stehen, BEVOR die Tuerklingel sagt,
+    // dass er da ist. Kein Zaunbefehl steht hier und keiner ist noetig:
+    // Eintrag und Tuerklingel gehen beide durch die Intrinsics, die der
+    // Uebersetzer nicht gegeneinander verschieben darf, und x86 ordnet
+    // einen Schreibzugriff nicht gegen einen spaeteren. Auf einer
+    // Maschine mit schwaecherem Speichermodell stuende hier eine Zeile
+    // mehr -- und Firn braeuchte ein Intrinsic dafuer, das es nicht
+    // hat. Dieselbe Stelle, dieselbe Begruendung wie in `nvme.fi`.
+    nvme.doorbell(state, q_get(state, q, QD_QID), 0, tail)
+    qunlock(state, q, flags)
+    return true
+}
+
+// ============================================ DIE OBERHAELFTE
+//
+// KURZ. Das ist die ganze Zusage dieser Funktion, und sie ist
+// nachpruefbar: hier steht keine Kopie in einen Adressraum, keine
+// Aufloesung eines Handles, keine Sperre des Dateisystems und keine
+// Schleife, deren Laenge ein Programm bestimmt.
+
+fn irq(state: u64) {
+    // GEGENPROBE `nqnoirq`: der Interrupt geht verloren. Die
+    // Oberhaelfte kehrt um, ohne etwas zu tun -- und alles muss
+    // trotzdem fertig werden, ueber `poll` und `sweep`.
+    if kstate.mode_on(state, kstate.M_NQNOIRQ) {
+        kstate.add(state, kstate.Q_SPURIOUS, 1)
+        return
+    }
+    let got: u64 = drain_all(state, false)
+    if got == 0 {
+        // Ein Interrupt, der nichts findet, ist kein Fehler: er kann
+        // fuer eine Fertigstellung stehen, die ein anderer Kern gerade
+        // schon abgeraeumt hat, oder er kommt doppelt (Gegenprobe
+        // `nqdblirq`). DEFINIERTES VERHALTEN heisst hier: zaehlen und
+        // zurueckkehren. Kein Haenger, keine zweite Meldung.
+        kstate.add(state, kstate.Q_SPURIOUS, 1)
+        return
+    }
+    kstate.add(state, kstate.Q_IRQS, 1)
+    // WECKEN. `poll_kick` ist sperrenfrei -- es erhoeht eine Zahl und
+    // setzt Zustaende in der Aufgabentafel -- und darf deshalb aus
+    // einem Interrupt gerufen werden. Ein Wecker, der eine Sperre
+    // naehme, waere genau der Stillstand, gegen den oben die
+    // Interrupts abgeschaltet werden.
+    sched.poll_kick(state)
+}
+
+// NACHSEHEN STATT WARTEN. Derselbe Abraeumweg, nur aus dem
+// Zusammenhang eines Fadens. Er ist der Notausgang gegen einen
+// verlorenen Interrupt und zugleich die Haelfte des Hybrid-Pollings
+// aus `KERNEL.md`: wer ohnehin wach ist, sieht nach, statt sich
+// hinzulegen.
+fn poll(state: u64) -> u64 {
+    if !ready(state) {
+        return 0
+    }
+    if kstate.get(state, sc(NS_INFL)) == 0 {
+        return 0
+    }
+    return drain_all(state, true)
+}
+
+fn drain_all(state: u64, gezaehlt: bool) -> u64 {
+    var n: u64 = 0
+    var q: u64 = 0
+    while q < NQ_QUEUES {
+        if q_get(state, q, QD_STATE) != 0 {
+            n = n + drain_one(state, q, gezaehlt)
+        }
+        q = q + 1
+    }
+    // GEGENPROBE `nqdouble`: derselbe Interrupt kommt doppelt. Der
+    // Abraeumweg laeuft ein zweites Mal ueber genau dieselben
+    // Warteschlangen. Er steht hier und nicht in `trap.fi`, weil dort
+    // der Vektor auch `nvme.irq` traegt und die Gegenprobe nur DIESE
+    // Haelfte doppelt sehen soll.
+    //
+    // WAS DER ZWEITE DURCHGANG FINDEN DARF, UND WAS NICHT. Er darf
+    // NEUE Fertigstellungen finden -- das Geraet arbeitet weiter,
+    // waehrend hier abgeraeumt wird, und eine Meldung, die eine
+    // Mikrosekunde spaeter kommt, ist keine doppelte. Was er NICHT
+    // darf, ist dieselbe noch einmal zustellen, und dagegen stehen
+    // ZWEI Riegel, die beide im ersten Durchgang schon zugefallen
+    // sind: das Phasenbit im Fertigsatz und der Zustand des
+    // Flugplatzes (`FL_STATE == 1`). Die Zusage misst deshalb nicht
+    // "der zweite Durchgang findet nichts", sondern
+    // "abgegeben == fertig gemeldet" -- und das ist die Zahl, die
+    // wirklich etwas heisst.
+    //
+    // DIE ERSTE FASSUNG HAT GENAU DAS VERWECHSELT: sie zaehlte jeden
+    // Fund des zweiten Durchgangs als `lost` und meldete drei
+    // verlorene Saetze, wo nichts verloren war.
+    if kstate.mode_on(state, kstate.M_NQDBLIRQ) {
+        var q2: u64 = 0
+        while q2 < NQ_QUEUES {
+            if q_get(state, q2, QD_STATE) != 0 {
+                n = n + drain_one(state, q2, gezaehlt)
+            }
+            q2 = q2 + 1
+        }
+    }
+    return n
+}
+
+fn drain_one(state: u64, q: u64, gezaehlt: bool) -> u64 {
+    let cq: u64 = q_get(state, q, QD_CQ)
+    if cq == 0 {
+        return 0
+    }
+    let tiefe: u64 = depth(state)
+    let flags: u64 = qlock(state, q)
+    var head: u64 = q_get(state, q, QD_HEAD)
+    var phase: u64 = q_get(state, q, QD_PHASE)
+    var got: u64 = 0
+    while got < tiefe {
+        let d3: u64 = cqe(cq, head, 3)
+        if ((d3 >> 16) & 1) != phase {
+            break
+        }
+        let cid: u64 = d3 & 0xFFFF
+        let status: u64 = (d3 >> 17) & 0x7FF
+        let g: u64 = cid_queue(cid) * NQ_DEPTH + cid_slot(cid)
+        // EINE KENNUNG, DIE ES NICHT GIBT, WIRD GEMELDET UND NICHT
+        // BENUTZT. Sie kann nur aus einem Controller kommen, der etwas
+        // zurueckgibt, das nie abgegeben wurde -- und dann ist ein
+        // Zaehler die richtige Antwort und kein Zugriff auf Platz
+        // `g` in einer Tafel, die so weit gar nicht reicht.
+        if g < NQ_SLOTS && f_get(state, g, FL_STATE) == 1 {
+            done_push(state, g, status)
+            if status != 0 {
+                kstate.add(state, kstate.Q_DEVERR, 1)
+            }
+        } else {
+            kstate.add(state, kstate.Q_SPURIOUS, 1)
+        }
+        head = head + 1
+        if head >= tiefe {
+            head = 0
+            phase = 1 - phase
+        }
+        got = got + 1
+    }
+    if got > 0 {
+        q_set(state, q, QD_HEAD, head)
+        q_set(state, q, QD_PHASE, phase)
+        q_set(state, q, QD_CPL, q_get(state, q, QD_CPL) + got)
+        var offen: u64 = q_get(state, q, QD_INFL)
+        if offen >= got {
+            offen = offen - got
+        } else {
+            offen = 0
+        }
+        q_set(state, q, QD_INFL, offen)
+        let alle: u64 = kstate.get(state, sc(NS_INFL))
+        if alle >= got {
+            kstate.set(state, sc(NS_INFL), alle - got)
+        } else {
+            kstate.set(state, sc(NS_INFL), 0)
+        }
+        kstate.add(state, kstate.Q_COMPLETED, got)
+        if gezaehlt {
+            kstate.add(state, kstate.Q_POLLED, got)
+        }
+        // Erst jetzt sagen, wie weit gelesen wurde. Ein Kopf, der
+        // vorher weiterrueckt, gibt dem Controller Plaetze frei, deren
+        // Inhalt noch nicht ausgewertet ist.
+        nvme.doorbell(state, q_get(state, q, QD_QID), 1, head)
+    }
+    qunlock(state, q, flags)
+    return got
+}
+
+// ================================================== DER NACHLAUFRING
+
+fn done_push(state: u64, g: u64, status: u64) {
+    let f: u64 = dlock(state)
+    let tail: u64 = kstate.get(state, sc(NS_DTAIL))
+    let head: u64 = kstate.get(state, sc(NS_DHEAD))
+    if (tail -% head) >= DONE_SLOTS {
+        // Kann nicht vorkommen -- der Ring ist doppelt so lang, wie es
+        // Flugplaetze gibt. Steht diese Zahl je ueber null, ist die
+        // Rechnung falsch, und dann soll man es sehen.
+        kstate.add(state, kstate.Q_LOST, 1)
+        dunlock(state, f)
+        return
+    }
+    let e: u64 = state + kstate.NQD_OFF
+        + (tail & (DONE_SLOTS - 1)) * DONE_B
+    kstate.set(e, DN_SLOT, g)
+    kstate.set(e, DN_STATUS, status)
+    // ERST der Satz, DANN der Schwanz. Wer den Schwanz sieht, sieht
+    // auch den Satz -- unter derselben Sperre, also ohne Zaun.
+    kstate.set(state, sc(NS_DTAIL), tail +% 1)
+    f_set(state, g, FL_STATE, 2)
+    dunlock(state, f)
+}
+
+fn done_used(state: u64) -> u64 {
+    return kstate.get(state, sc(NS_DTAIL)) -% kstate.get(state, sc(NS_DHEAD))
+}
+
+// EINEN SATZ ABHOLEN. `out` sind 16 Oktett kerneigener Speicher des
+// Aufrufers; hier wird NICHT in einen Adressraum geschrieben.
+fn reap_next(state: u64, out: u64) -> bool {
+    if !ready(state) {
+        return false
+    }
+    if kstate.get(state, sc(NS_HOLD)) != 0 {
+        return false
+    }
+    let f: u64 = dlock(state)
+    let head: u64 = kstate.get(state, sc(NS_DHEAD))
+    if head == kstate.get(state, sc(NS_DTAIL)) {
+        dunlock(state, f)
+        return false
+    }
+    let e: u64 = state + kstate.NQD_OFF
+        + (head & (DONE_SLOTS - 1)) * DONE_B
+    kstate.set(out, DN_SLOT, kstate.get(e, DN_SLOT))
+    kstate.set(out, DN_STATUS, kstate.get(e, DN_STATUS))
+    kstate.set(state, sc(NS_DHEAD), head +% 1)
+    dunlock(state, f)
+    kstate.add(state, kstate.Q_REAPED, 1)
+    return true
+}
+
+// ================================================== DIE ZEITGRENZE
+//
+// DER NOTAUSGANG. Ein Auftrag, der beim Geraet steht und nach
+// NQ_TICKS immer noch nicht gemeldet ist, wird fuer verloren erklaert
+// und mit einem Status ungleich null in den Nachlaufring gelegt. Das
+// Programm bekommt dann einen FEHLER -- und keinen Haenger, und das
+// ist der Unterschied, um den es geht.
+//
+// Vorher wird EINMAL nachgesehen: der haeufigste Grund, warum eine
+// Meldung fehlt, ist nicht ein totes Geraet, sondern ein verlorener
+// Interrupt. Genau das prueft die Gegenprobe `nqnoirq`, und genau
+// deshalb steht `poll` vor der Zeitgrenze und nicht dahinter.
+fn sweep(state: u64) -> u64 {
+    if !ready(state) {
+        return 0
+    }
+    if kstate.get(state, sc(NS_INFL)) == 0 {
+        return 0
+    }
+    poll(state)
+    let jetzt: u64 = kstate.get(state, kstate.TICKS)
+    var n: u64 = 0
+    var g: u64 = 0
+    while g < NQ_SLOTS {
+        if f_get(state, g, FL_STATE) == 1 {
+            let due: u64 = f_get(state, g, FL_MISC) >> 8
+            if due != 0 && jetzt > due {
+                let q: u64 = g / NQ_DEPTH
+                var offen: u64 = q_get(state, q, QD_INFL)
+                if offen != 0 {
+                    q_set(state, q, QD_INFL, offen - 1)
+                }
+                let alle: u64 = kstate.get(state, sc(NS_INFL))
+                if alle != 0 {
+                    kstate.set(state, sc(NS_INFL), alle - 1)
+                }
+                // 0xFFFF ist kein Status, den ein Controller je
+                // schickt (die Statusbreite sind elf Bit). Er bedeutet
+                // hier "hat nie geantwortet", und die Unterhaelfte
+                // macht daraus -ETIMEDOUT.
+                done_push(state, g, 0xFFFF)
+                kstate.add(state, kstate.Q_TIMEOUTS, 1)
+                n = n + 1
+            }
+        }
+        g = g + 1
+    }
+    return n
+}

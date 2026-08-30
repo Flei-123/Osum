@@ -220,6 +220,15 @@ BEREICHE = [
     # gehoert deshalb nicht in die Karte von kdata.
     ("RNG",        "kstate.fi", "RNG_OFF",        "RNG_MAX"),
     ("RSC",        "kstate.fi", "RSC_OFF",        "RSC_MAX"),
+    # RUNDE NVMEQ: die Geraete-Warteschlange.  Drei Bereiche HINTER der
+    # Grenze 0x92000 -- deshalb waechst KDATA_SIZE in kstate.fi UND in
+    # kernel/arch/x86_64/boot.s auf 0x99000, und tools/nvmeq/run.sh
+    # haelt beide Zahlen gegeneinander.  Der DMA-VORRAT SELBST steht
+    # hier NICHT: er kommt aus mem.frame_run und gehoert deshalb nicht
+    # in die Karte von kdata.
+    ("NQ",         "kstate.fi", "NQ_OFF",         "NQ_MAX"),
+    ("NQF",        "kstate.fi", "NQF_OFF",        "NQF_MAX"),
+    ("NQD",        "kstate.fi", "NQD_OFF",        "NQD_MAX"),
     # RUNDE TRESOR: die Geraeteidentitaet, zwei Seiten (0x5A000..0x5C000).
     # Die erste traegt die Merkmale, die zweite ist das DMA-Ziel des
     # `identify controller` von NVMe -- und deshalb MUSS sie eine eigene,

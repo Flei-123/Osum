@@ -56,6 +56,7 @@ import cap
 import handle
 import async
 import ring
+import nvmeq
 import cpu
 import fb
 import vmode
@@ -125,6 +126,8 @@ const P_ABENCH: u64 = 51
 const P_ASYNCFS: u64 = 52
 const P_RING: u64 = 53
 const P_RBENCH: u64 = 54
+const P_NVMEQ: u64 = 55
+const P_QBENCH: u64 = 56
 // RUNDE K13: die beiden Programmnummern dieser Runde (kernel/uprog.fi).
 const P_PWR: u64 = 45
 const P_PWRIDLE: u64 = 46
@@ -469,6 +472,12 @@ fn kernel_main(mbi: u64, vectors: u64, state: u64, kernel_end: u64,
     // Controller aufgesetzt hat. Hier wird nachgeholt und gemeldet.
     hwid.late(state)
 
+    // 7g-bis. RUNDE NVMEQ, ERSTER TEIL: DER SELBSTTEST. Hier und nicht
+    //     frueher, weil `hw.disk` gelaufen sein muss (ohne Controller
+    //     keine Warteschlange), und hier und nicht spaeter, weil er
+    //     forkt -- siehe die Begruendung bei `nvmeq_bench` unten.
+    nvmeqs(state)
+
     // 7h. ROUND K5: the other processors. Deliberately here and not
     //     earlier: everything above this line is what rounds 59 to K2
     //     measured, and it measures it on ONE core, exactly as before.
@@ -476,6 +485,26 @@ fn kernel_main(mbi: u64, vectors: u64, state: u64, kernel_end: u64,
     //     kernel behaves as it did; under `-smp 4` it starts the other
     //     three and hands them work.
     smp.stage(state)
+
+    // 7h-bis. RUNDE NVMEQ, ZWEITER TEIL: DIE MESSUNG. Sie steht HINTER
+    //     `smp.stage` und der Selbsttest DAVOR, und beides hat einen
+    //     Grund.
+    //
+    //     Der Selbsttest forkt (Fall c: ein Kind stirbt mit Auftraegen
+    //     im Geraet). Ein `fork` aus Ring 3 NACH `smp.stage` hat auf
+    //     vier Prozessoren einen Doppelfehler ausgeloest -- im
+    //     Systemaufruf-Eintritt, auf dem Benutzerstapel, also an einer
+    //     Stelle, die mit dieser Runde nichts zu tun hat. Auf einem und
+    //     auf zwei Prozessoren laeuft derselbe Test durch. Das ist in
+    //     `docs/NVMEQ-STATUS.md` unter "was offen bleibt" notiert und
+    //     NICHT stillschweigend umgangen: der Selbsttest steht jetzt da,
+    //     wo die Selbsttests aller Runden davor stehen -- vor
+    //     `smp.stage`.
+    //
+    //     Die MESSUNG forkt nicht und gehoert hierher: sie ist die
+    //     einzige Zahl dieser Runde, die sich erst mit mehreren Kernen
+    //     zeigt, und wie viele es sind, sagt `-smp` auf der QEMU-Zeile.
+    nvmeq_bench(state)
 
 
     // 7i. RUNDE K12: ein Wirt fuer fremde Betriebssysteme. Hier und
@@ -2757,6 +2786,151 @@ fn async_bench(state: u64) {
     anum((&n_wk[0]) as u64, async_workers(state))
 }
 
+
+// ==================================================== RUNDE NVMEQ
+//
+// DIE GERAETE-WARTESCHLANGE, IN RING 3 GEPRUEFT.
+//
+// Hier und nicht weiter oben, und dafuer gibt es drei Gruende:
+//
+//   1. `hw.disk` muss gelaufen sein. Vorher gibt es keinen
+//      NVMe-Controller, keine Admin-Warteschlange und damit auch keine
+//      Warteschlange, die man anlegen koennte.
+//   2. `/dev` muss eingehaengt sein (`k14_setup`, eine Stufe hoeher).
+//      Der Selbsttest arbeitet auf `/dev/nvme0` -- auf dem
+//      BLOCKGERAET, nicht auf einer Datei darauf --, und ohne devfs
+//      gibt es diesen Namen nicht.
+//   3. `smp.stage` soll DAVOR liegen und nicht danach. Runde RING hat
+//      ihre Messung bewusst auf EINEM Kern gemacht, weil dort der
+//      synchrone Weg am besten dasteht. Diese Runde behauptet, den
+//      Warteschlangenbetrieb gebaut zu haben, und der zeigt sich erst
+//      mit mehreren Kernen -- also laeuft die Messung DAHINTER, und
+//      wie viele Prozessoren sie sieht, sagt `-smp` auf der
+//      QEMU-Zeile. Unter `-smp 1` sind die Bedingungen dieselben wie
+//      in Runde RING.
+//
+// Ohne die Woerter `nvmeq`/`nqbench` ist das hier EINE gedruckte Zeile
+// und sonst nichts.
+fn nvmeqs(state: u64) {
+    var s_skip: [u8; 16] = "nvmeq: skipped\0\0"
+    var s_begin: [u8; 22] = "nvmeq: ring 3 laeuft\0\0"
+    var s_exit: [u8; 15] = "nvmeq: exit=\0\0\0"
+    var s_done: [u8; 14] = "nvmeq: fertig\0"
+    var n_vor: [u8; 8] = "frames\0\0"
+    var n_nach: [u8; 14] = "frames-after\0\0"
+    if !kstate.mode_on(state, kstate.M_NVMEQ) {
+        serial.puts((&s_skip[0]) as u64)
+        serial.nl()
+        return
+    }
+    serial.puts((&s_begin[0]) as u64)
+    serial.nl()
+    qnum(state, (&n_vor[0]) as u64, mem.frames_free(state))
+    // WELCHE GEGENPROBE LAEUFT -- als Bitfeld an das Programm. Ein
+    // Selbsttest, der nicht weiss, welche Regel gerade absichtlich
+    // fehlt, muesste raten, und ein Test, der raet, ist keiner.
+    var arg: u64 = 0
+    if kstate.mode_on(state, kstate.M_NQERR) {
+        arg = arg + 1
+    }
+    if kstate.mode_on(state, kstate.M_NQTINY) {
+        arg = arg + 2
+    }
+    if kstate.mode_on(state, kstate.M_NQNOIRQ) {
+        arg = arg + 4
+    }
+    if kstate.mode_on(state, kstate.M_NQDBLIRQ) {
+        arg = arg + 8
+    }
+    if kstate.mode_on(state, kstate.M_NOQUEUE) {
+        arg = arg + 16
+    }
+    if kstate.mode_on(state, kstate.M_NODMAPOOL) {
+        arg = arg + 32
+    }
+    let t: u64 = proc.create(state, P_NVMEQ, arg, 2)
+    let e: u64 = wait_for(state, t)
+    serial.puts((&s_exit[0]) as u64)
+    serial.dec(e)
+    serial.nl()
+    qnum(state, (&n_nach[0]) as u64, mem.frames_free(state))
+    nvmeq_zahlen(state)
+    serial.puts((&s_done[0]) as u64)
+    serial.nl()
+}
+
+fn qnum(state: u64, name: u64, v: u64) {
+    var s_p: [u8; 8] = "nvmeq: \0"
+    var s_e: [u8; 2] = "=\0"
+    serial.puts((&s_p[0]) as u64)
+    serial.puts(name)
+    serial.puts((&s_e[0]) as u64)
+    serial.dec(v)
+    serial.nl()
+}
+
+fn nvmeq_zahlen(state: u64) {
+    var n_su: [u8; 8] = "submits\0"
+    var n_cp: [u8; 10] = "completed\0"
+    var n_ir: [u8; 5] = "irqs\0"
+    var n_bp: [u8; 7] = "badprp\0"
+    var n_qf: [u8; 6] = "qfull\0"
+    var n_fb: [u8; 9] = "fallback\0"
+    var n_fa: [u8; 5] = "fast\0"
+    var n_de: [u8; 7] = "deverr\0"
+    var n_to: [u8; 9] = "timeouts\0"
+    var n_sp: [u8; 9] = "spurious\0"
+    var n_po: [u8; 7] = "polled\0"
+    var n_ca: [u8; 10] = "cancelled\0"
+    var n_st: [u8; 7] = "staled\0"
+    var n_re: [u8; 7] = "reaped\0"
+    var n_lo: [u8; 5] = "lost\0"
+    var n_fl: [u8; 9] = "inflight\0"
+    var n_dn: [u8; 5] = "done\0"
+    var n_qu: [u8; 7] = "queues\0"
+    var n_ti: [u8; 6] = "depth\0"
+    var n_by: [u8; 10] = "poolbytes\0"
+    qnum(state, (&n_su[0]) as u64, kstate.get(state, kstate.Q_SUBMITS))
+    qnum(state, (&n_cp[0]) as u64, kstate.get(state, kstate.Q_COMPLETED))
+    qnum(state, (&n_ir[0]) as u64, kstate.get(state, kstate.Q_IRQS))
+    qnum(state, (&n_bp[0]) as u64, kstate.get(state, kstate.Q_BADPRP))
+    qnum(state, (&n_qf[0]) as u64, kstate.get(state, kstate.Q_QFULL))
+    qnum(state, (&n_fb[0]) as u64, kstate.get(state, kstate.Q_FALLBACK))
+    qnum(state, (&n_fa[0]) as u64, kstate.get(state, kstate.Q_FAST))
+    qnum(state, (&n_de[0]) as u64, kstate.get(state, kstate.Q_DEVERR))
+    qnum(state, (&n_to[0]) as u64, kstate.get(state, kstate.Q_TIMEOUTS))
+    qnum(state, (&n_sp[0]) as u64, kstate.get(state, kstate.Q_SPURIOUS))
+    qnum(state, (&n_po[0]) as u64, kstate.get(state, kstate.Q_POLLED))
+    qnum(state, (&n_ca[0]) as u64, kstate.get(state, kstate.Q_CANCELLED))
+    qnum(state, (&n_st[0]) as u64, kstate.get(state, kstate.Q_STALED))
+    qnum(state, (&n_re[0]) as u64, kstate.get(state, kstate.Q_REAPED))
+    // DIE DREI LECKZAHLEN. Alle drei muessen null sein.
+    qnum(state, (&n_lo[0]) as u64, kstate.get(state, kstate.Q_LOST))
+    qnum(state, (&n_fl[0]) as u64, nvmeq.inflight(state))
+    qnum(state, (&n_dn[0]) as u64, nvmeq.done_used(state))
+    qnum(state, (&n_qu[0]) as u64, nvmeq.queues(state))
+    qnum(state, (&n_ti[0]) as u64, nvmeq.depth(state))
+    qnum(state, (&n_by[0]) as u64, nvmeq.pool_bytes(state))
+}
+
+// Die Messung. Sie steht ABSICHTLICH ausserhalb von `nvmeqs`: mit
+// `nvmeq` laeuft der Selbsttest mit, und dann misst sie den Selbsttest
+// und nicht den Regelbetrieb. `nqbench` allein ist die Messung, die
+// gilt -- dieselbe Regel wie bei `hbench`, `abench` und `rbench`.
+fn nvmeq_bench(state: u64) {
+    var n_kh: [u8; 12] = "qbench-khz\0\0"
+    var n_wk: [u8; 16] = "qbench-workers\0\0"
+    var n_cp: [u8; 14] = "qbench-cpus\0\0\0"
+    if !kstate.mode_on(state, kstate.M_NQBENCH) {
+        return
+    }
+    let tb: u64 = proc.create(state, P_QBENCH, 0, 2)
+    wait_for(state, tb)
+    qnum(state, (&n_kh[0]) as u64, time.khz(state))
+    qnum(state, (&n_wk[0]) as u64, async_workers(state))
+    qnum(state, (&n_cp[0]) as u64, cpu.count(state))
+}
+
 // ==================================================== RUNDE K13
 //
 // Zwei Programme aus `uprog.fi`, beide in Ring 3, beide ohne Platte:
@@ -4442,6 +4616,53 @@ fn mode_of(state: u64, cmd: u64) {
     }
     if find(cmd, (&rstw[0]) as u64, 7) != 0 {
         kstate.mode_add(state, kstate.M_RSTRESS)
+    }
+    // RUNDE NVMEQ. `nvmeq` schaltet den Selbsttest an, `nqmess` die
+    // Messung; die uebrigen sechs sind GEGENPROBEN und stehen in
+    // `kstate.fi` bei ihren Bits erklaert.
+    //
+    // WARUM DIE WOERTER SO HEISSEN. `find` sucht ein TEILWORT, und
+    // damit ist jeder Name, der einen bereits vergebenen enthaelt, eine
+    // Falle: `nqbench` haette `bench` mitgeschaltet (die Messung der
+    // Runde K2), `nqnoirq` haette `noirq` mitgeschaltet (der maskierte
+    // Vektor derselben Runde) und `nqlost` das `lost` einer dritten.
+    // Deshalb `nqmess`, `nqweg` und `nqnopool` -- alle acht sind gegen
+    // die 212 bereits vergebenen Woerter geprueft.
+    var nqw: [u8; 6] = "nvmeq\0"
+    var nqmw: [u8; 7] = "nqmess\0"
+    var nqpw: [u8; 9] = "nqnopool\0"
+    var nqww: [u8; 6] = "nqweg\0"
+    var nqdw: [u8; 9] = "nqdouble\0"
+    var nqtw: [u8; 7] = "nqtiny\0"
+    var nqow: [u8; 6] = "nqoff\0"
+    var nqew: [u8; 6] = "nqerr\0"
+    var nqsw: [u8; 9] = "nqstress\0"
+    if find(cmd, (&nqw[0]) as u64, 5) != 0 {
+        kstate.mode_add(state, kstate.M_NVMEQ)
+    }
+    if find(cmd, (&nqmw[0]) as u64, 6) != 0 {
+        kstate.mode_add(state, kstate.M_NQBENCH)
+    }
+    if find(cmd, (&nqpw[0]) as u64, 8) != 0 {
+        kstate.mode_add(state, kstate.M_NODMAPOOL)
+    }
+    if find(cmd, (&nqww[0]) as u64, 5) != 0 {
+        kstate.mode_add(state, kstate.M_NQNOIRQ)
+    }
+    if find(cmd, (&nqdw[0]) as u64, 8) != 0 {
+        kstate.mode_add(state, kstate.M_NQDBLIRQ)
+    }
+    if find(cmd, (&nqtw[0]) as u64, 6) != 0 {
+        kstate.mode_add(state, kstate.M_NQTINY)
+    }
+    if find(cmd, (&nqow[0]) as u64, 5) != 0 {
+        kstate.mode_add(state, kstate.M_NOQUEUE)
+    }
+    if find(cmd, (&nqew[0]) as u64, 5) != 0 {
+        kstate.mode_add(state, kstate.M_NQERR)
+    }
+    if find(cmd, (&nqsw[0]) as u64, 8) != 0 {
+        kstate.mode_add(state, kstate.M_NQSTRESS)
     }
     if find(cmd, (&k13w[0]) as u64, 6) != 0 {
         kstate.mode_add(state, kstate.M_K13)
