@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // kernel/app/fetch.fi -- round HWNET: a page over HTTPS, from ring 3.
 //
-//     fetch [-n name] [-r roots] [-o file] [-q] [-k] <url>
+//     fetch [-n name] [-r roots] [-o file] [-b von] [-a] [-v] [-k] <url>
 //
 //     url    http://<ipv4>[:port]/path   or   https://<ipv4>[:port]/path
 //     -n     the name the CERTIFICATE has to carry, and the SNI that is
@@ -12,7 +12,23 @@
 //            refused, and that is the correct answer.
 //     -r     the trust store, default /etc/ssl/roots.pem
 //     -o     write the body to a file instead of to the output
-//     -q     only the report lines, no body on the output
+//     -b     RUNDE OTA: begin at this octet. Sends `Range: bytes=<n>-`
+//            and expects `206 Partial Content`. A `-b` greater than zero
+//            APPENDS to the file of -o by itself -- that is what resuming
+//            means, and Osum's `exec` takes eight arguments (proc.fi,
+//            MAX_ARGS), so a separate flag for it would not fit next to
+//            -q -o <file> -n <name> <url>.
+//     -a     append to the file of -o even without -b.
+//     -q     only the report lines, no body on the output. RUNDE OTA:
+//            THIS IS NOW THE DEFAULT, and `-v` is what turns the body
+//            back on. The reason is a number and not a taste: Osum's
+//            `exec` takes EIGHT arguments (kernel/proc.fi, MAX_ARGS), and
+//            a resuming download needs `-o <file> -n <name> -b <von>
+//            <url>` -- that is eight WITH the program name and nine with
+//            a `-q` in front. The flag stays accepted so that every
+//            caller written before this round keeps working.
+//     -v     print the first 240 octets of the body, the way this
+//            program did by default until round OTA
 //     -k     NO CERTIFICATE CHECK. Prints a warning line and is refused
 //            unless it is spelled out. It exists so that the difference
 //            between "checked" and "not checked" is measurable, not so
@@ -156,6 +172,86 @@ fn reason(out: *mut rt.Buf, r: u32) {
     io.print("fetch: verify REFUSED critical_extension\n")
 }
 
+
+// ------------------------------------------------- RUNDE OTA: die Datei
+//
+// WAS `-o` SCHREIBT, und bis zu dieser Runde war es falsch: geschrieben
+// wurde `body` -- die GANZE Antwort, Kopfzeilen eingeschlossen. Fuer die
+// Messung von Runde HWNET spielte das keine Rolle (dort wurde `-o` nicht
+// benutzt, gemessen wurde der Streuwert des Rumpfes auf der Ausgabe);
+// fuer ein Update ist es der Unterschied zwischen einem Paket und einer
+// Datei, die mit `HTTP/1.0 200 OK` anfaengt. Seit dieser Runde schreibt
+// `-o` GENAU DEN RUMPF, ausgepackt, wenn er in Stuecken kam.
+//
+// UND ES KANN ANHAENGEN. Ein Download, dem die Leitung abgerissen ist,
+// hinterlaesst ein Bruchstueck. `-b <von>` holt den Rest ab dem Oktett
+// `von`, `-a` haengt ihn an das Bruchstueck an. Das ist die
+// Wiederaufnahme, und sie braucht auf dieser Seite genau diese zwei
+// Zeilen -- die Arbeit steckt darin, dass der Aufrufer den Streuwert
+// des GANZEN Ergebnisses prueft und nicht den der beiden Haelften.
+const SYS_OPEN2: i64 = 2
+const SYS_CLOSE2: i64 = 3
+const SYS_LSEEK2: i64 = 8
+const O_WRITE_CREATE: i64 = 65   // O_WRONLY | O_CREAT
+const O_WRITE_TRUNC: i64 = 577   // O_WRONLY | O_CREAT | O_TRUNC
+const SEEK_END2: i64 = 2
+const RECHTE2: i64 = 420         // 0644
+
+fn body_out(path: u64, p: u64, n: usize, anhaengen: bool) -> bool {
+    var flags: i64 = O_WRITE_TRUNC
+    if anhaengen {
+        flags = O_WRITE_CREATE
+    }
+    let fd: i64 = syscall(SYS_OPEN2, path as i64, flags, RECHTE2, 0, 0, 0)
+    if fd < 0 {
+        return false
+    }
+    if anhaengen {
+        syscall(SYS_LSEEK2, fd, 0, SEEK_END2, 0, 0, 0)
+    }
+    let ok: bool = rt.write_everything(fd, p, n)
+    syscall(SYS_CLOSE2, fd, 0, 0, 0, 0, 0)
+    return ok
+}
+
+// Die Nummer der Antwort: die drei Ziffern hinter `HTTP/1.x `. Ein
+// Aufrufer, der wiederaufnimmt, muss 206 von 200 unterscheiden koennen --
+// eine Gegenstelle, die `Range` nicht kann, schickt 200 und den GANZEN
+// Rumpf, und wer den anhaengt, hat die Datei doppelt.
+fn status_code(p: u64, n: usize) -> u64 {
+    var i: usize = 0
+    while i < n && rt.ld8(p, i) != 32 as u8 {
+        i = i + 1
+    }
+    i = i + 1
+    var v: u64 = 0
+    var d: usize = 0
+    while i < n && d < 3 {
+        let c: u8 = rt.ld8(p, i)
+        if c < 48 as u8 || c > 57 as u8 {
+            return v
+        }
+        v = v * 10 + (c - 48 as u8) as u64
+        i = i + 1
+        d = d + 1
+    }
+    return v
+}
+
+// Eine Dezimalzahl aus dem Argument, ohne Vorzeichen.
+fn parse_dec_u64(p: u64, n: usize) -> u64 {
+    var v: u64 = 0
+    var i: usize = 0
+    while i < n {
+        let c: u8 = rt.ld8(p, i)
+        if c < 48 as u8 || c > 57 as u8 {
+            return v
+        }
+        v = v * 10 + (c - 48 as u8) as u64
+        i = i + 1
+    }
+    return v
+}
 
 // ------------------------------------------------------ chunked bodies
 //
@@ -322,10 +418,12 @@ fn main(start: u64) -> i32 {
     var namelen: usize = 0
     var roots: u64 = 0
     var outfile: u64 = 0
-    var quiet: bool = false
+    var quiet: bool = true
     var insecure: bool = false
     var url: u64 = 0
     var urllen: usize = 0
+    var von: u64 = 0
+    var anhaengen: bool = false
 
     let argc: usize = rt.arg_count(start)
     var i: usize = 1
@@ -350,8 +448,18 @@ fn main(start: u64) -> i32 {
                 if i < argc {
                     outfile = rt.arg_ptr(start, i)
                 }
+            } else if c == 98 as u8 { // -b
+                i = i + 1
+                if i < argc {
+                    let z: u64 = rt.arg_ptr(start, i)
+                    von = parse_dec_u64(z, rt.c_length(z))
+                }
+            } else if c == 97 as u8 { // -a
+                anhaengen = true
             } else if c == 113 as u8 { // -q
                 quiet = true
+            } else if c == 118 as u8 { // -v
+                quiet = false
             } else if c == 107 as u8 { // -k
                 insecure = true
             }
@@ -362,7 +470,7 @@ fn main(start: u64) -> i32 {
         i = i + 1
     }
     if url == 0 {
-        io.print("usage: fetch [-n name] [-r roots] [-o file] [-q] [-k] <url>\n")
+        io.print("usage: fetch [-n name] [-r roots] [-o file] [-b von] [-a] [-v] [-k] <url>\n")
         return 2
     }
 
@@ -432,9 +540,9 @@ fn main(start: u64) -> i32 {
     var status: i32 = 0
     if secure {
         status = over_tls(&c, &out, &body, name, namelen, path, pathlen,
-            roots, insecure)
+            roots, insecure, von)
     } else {
-        status = plain(&c, &out, &body, name, namelen, path, pathlen)
+        status = plain(&c, &out, &body, name, namelen, path, pathlen, von)
     }
     net.close(&c)
     if status != 0 {
@@ -463,29 +571,30 @@ fn main(start: u64) -> i32 {
         }
         hend = hend + 1
     }
+    // RUNDE OTA: `bp`/`bn` sind der RUMPF -- das, was `-o` schreibt und
+    // was ein Aufrufer gegen einen Streuwert haelt. Vor dieser Runde gab
+    // es diese beiden Groessen nicht als solche; der Rumpf wurde nur
+    // gemessen und dann weggeworfen.
+    var bp: u64 = body.ptr
+    var bn: usize = body.len
+    var dec: rt.Buf = rt.buf_new()
     if found {
         let boff: usize = hend + 4
         let blen: usize = body.len - boff
+        bp = body.ptr + boff as u64
+        bn = blen
         var w_chunked: [u8; 8] = "chunked\0"
-        var plain_body: bool = true
-        var dec: rt.Buf = rt.buf_new()
         if contains_word(body.ptr, hend, (&w_chunked[0]) as u64, 7) {
             if dechunk(body.ptr + boff as u64, blen, &dec) {
-                plain_body = false
+                bp = dec.ptr
+                bn = dec.len
                 num_line(&out, "fetch: chunked ", 1)
-                num_line(&out, "fetch: body ", dec.len as u64)
-                var cd: [u8; 32] = [0; 32]
-                sha256.sha256(dec.ptr, dec.len, (&cd[0]) as u64)
-                hex_line(&out, "fetch: bodysha ", (&cd[0]) as u64, 32)
             }
         }
-        if plain_body {
-            num_line(&out, "fetch: body ", blen as u64)
-            var bd: [u8; 32] = [0; 32]
-            sha256.sha256(body.ptr + boff as u64, blen, (&bd[0]) as u64)
-            hex_line(&out, "fetch: bodysha ", (&bd[0]) as u64, 32)
-        }
-        rt.buf_free(&dec)
+        num_line(&out, "fetch: body ", bn as u64)
+        var bd: [u8; 32] = [0; 32]
+        sha256.sha256(bp, bn, (&bd[0]) as u64)
+        hex_line(&out, "fetch: bodysha ", (&bd[0]) as u64, 32)
     }
     var e: usize = 0
     while e < body.len && rt.ld8(body.ptr, e) != 13 as u8
@@ -493,8 +602,9 @@ fn main(start: u64) -> i32 {
         e = e + 1
     }
     text_line(&out, "fetch: status ", body.ptr, e)
+    num_line(&out, "fetch: code ", status_code(body.ptr, e))
     if outfile != 0 {
-        let okf: bool = rt.write_file(outfile, body.ptr, body.len)
+        let okf: bool = body_out(outfile, bp, bn, anhaengen || von > 0)
         if okf {
             io.print("fetch: written\n")
         } else {
@@ -509,6 +619,7 @@ fn main(start: u64) -> i32 {
         rt.write_everything(1, body.ptr, show)
         io.print("\n")
     }
+    rt.buf_free(&dec)
     rt.buf_free(&body)
     rt.buf_free(&out)
     return 0
@@ -518,7 +629,7 @@ fn main(start: u64) -> i32 {
 
 fn over_tls(c: *mut net.Conn, out: *mut rt.Buf, body: *mut rt.Buf,
     name: u64, namelen: usize, path: u64, pathlen: usize, roots: u64,
-    insecure: bool) -> i32 {
+    insecure: bool, von: u64) -> i32 {
     var storebuf: rt.Buf = rt.buf_new()
     var store: x509.Store = x509.store_new()
     var rootpath: [u8; 20] = "/etc/ssl/roots.pem\0\0"
@@ -562,7 +673,7 @@ fn over_tls(c: *mut net.Conn, out: *mut rt.Buf, body: *mut rt.Buf,
     num_line(out, "fetch: depth ", tls.tls_chain_depth(&t) as u64)
 
     var req: rt.Buf = rt.buf_new()
-    request(&req, name, namelen, path, pathlen)
+    request(&req, name, namelen, path, pathlen, von)
     var werr: bool = false
     let okw: bool = tls.tls_write(&t, req.ptr, req.len)
     catch | e | tls.tls_fail_into(out, e, &werr)
@@ -596,9 +707,9 @@ fn over_tls(c: *mut net.Conn, out: *mut rt.Buf, body: *mut rt.Buf,
 // makes the round's measurement honest: the same octets, once in the
 // clear and once through the record layer.
 fn plain(c: *mut net.Conn, out: *mut rt.Buf, body: *mut rt.Buf,
-    name: u64, namelen: usize, path: u64, pathlen: usize) -> i32 {
+    name: u64, namelen: usize, path: u64, pathlen: usize, von: u64) -> i32 {
     var req: rt.Buf = rt.buf_new()
-    request(&req, name, namelen, path, pathlen)
+    request(&req, name, namelen, path, pathlen, von)
     var werr: bool = false
     let w: usize = net.write_all(c, req.ptr, req.len) catch fail_len(&werr)
     rt.buf_free(&req)
@@ -620,7 +731,7 @@ fn plain(c: *mut net.Conn, out: *mut rt.Buf, body: *mut rt.Buf,
 }
 
 fn request(req: *mut rt.Buf, name: u64, namelen: usize, path: u64,
-    pathlen: usize) {
+    pathlen: usize, von: u64) {
     var g: [u8; 5] = "GET \0"
     rt.buf_push_bytes(req, (&g[0]) as u64, 4)
     rt.buf_push_bytes(req, path, pathlen)
@@ -636,6 +747,17 @@ fn request(req: *mut rt.Buf, name: u64, namelen: usize, path: u64,
     // something forgiving.
     rt.buf_push_bytes(req, (&tail[0]) as u64, 45)
     var crlf: [u8; 3] = "\r\n\0"
+    // RUNDE OTA: die Wiederaufnahme. `Range: bytes=<von>-` heisst "ab
+    // diesem Oktett bis zum Ende". Bei `von == 0` wird die Zeile NICHT
+    // geschrieben -- eine Gegenstelle, die kein `Range` kann, soll fuer
+    // den Normalfall gar nicht erst danach gefragt werden.
+    if von > 0 {
+        var rg: [u8; 16] = "Range: bytes=\0\0\0"
+        rt.buf_push_bytes(req, (&rg[0]) as u64, 13)
+        rt.buf_push_dec_u64(req, von)
+        var dash: [u8; 4] = "-\r\n\0"
+        rt.buf_push_bytes(req, (&dash[0]) as u64, 3)
+    }
     rt.buf_push_bytes(req, (&crlf[0]) as u64, 2)
 }
 
