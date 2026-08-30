@@ -295,6 +295,7 @@ const S_LOSTRESP: u64 = 0x198 // Antworten, die niemand angefordert hat
 const S_FMT: u64 = 0x1A0 // was zuletzt in SDnFMT stand
 const S_REV: u64 = 0x1A8
 const S_POSFIX: u64 = 0x1B0 // 1 = der Regler schreibt DPIB nicht
+const S_POSN: u64 = 0x1B8 // Abfragen der Position, fuer die Gegenprobe
 
 // Warum es nicht ging.
 const W_OK: u64 = 0
@@ -1931,6 +1932,12 @@ fn submit(state: u64) -> bool {
     if g(state, S_SUBMITTED) > g(state, S_POS) {
         s(state, S_UNDERN, 0)
     }
+    // NEUE DATEN HEBEN DIE ENDMARKE AUF. Ohne diese Zeile bleibt nach
+    // dem ersten `pad_and_submit` die Aussetzerzaehlung fuer immer
+    // aus, und die Gegenprobe `audstarve` -- die den Ring absichtlich
+    // leerlaufen laesst -- meldet null Aussetzer. Ein Zaehler, der in
+    // seiner eigenen Gegenprobe nicht ausschlaegt, ist wertlos.
+    s(state, S_DRAIN, 0)
     return true
 }
 
@@ -1959,8 +1966,41 @@ fn drain_mark(state: u64) {
 // danebengehalten -- weichen beide um mehr als einen Eintrag
 // voneinander ab, steht das als Zahl im Bericht (`pos_disagree`)
 // statt als Vermutung in einem Kommentar.
+// WIE OFT LPIB GEGENGELESEN WIRD, und warum nicht jedes Mal.
+//
+// LPIB IST EIN REGISTER IM REGLER, der Positionspuffer ist gewoehnlicher
+// Hauptspeicher. Auf echtem Blech kostet der Registerzugriff einen
+// Umweg ueber den Bus; unter einem Hypervisor kostet er einen
+// AUSSTIEG AUS DER GASTMASCHINE, und der ist ein bis zehn
+// Mikrosekunden teuer.
+//
+// GEMESSEN, und es war die Ursache eines Fehlers, der wie ein
+// Mischerfehler aussah: der Abspielweg fragt die Position mehrmals je
+// Durchgang (freier Platz, Vorausnullen, Aufholen). Mit einem
+// Registerzugriff bei jeder Frage brauchte eine Runde des Schreibers
+// 144 Mikrosekunden statt weniger als einer -- 22158 Runden ergaben
+// 3,2 Sekunden Wartezeit fuer eine Sekunde Ton, und der Ring lief
+// dabei staendig leer. Die Uhr selbst war richtig; sie war nur zu
+// teuer.
+//
+// ALSO: die Position kommt aus dem Speicher, und das Register wird nur
+// noch jedes 256. Mal danebengehalten -- oft genug, damit ein Regler,
+// der den Positionspuffer nicht bedient, sofort auffaellt, und selten
+// genug, dass es nichts kostet.
+const LPIB_EVERY: u64 = 256
+
 fn position_raw(state: u64) -> u64 {
     let dp: u64 = kstate.get32(dpib_addr(state)) % RING_OCTETS
+    let zaehler: u64 = g(state, S_POSN) +% 1
+    s(state, S_POSN, zaehler)
+    if g(state, S_POSFIX) != 0 {
+        // Der Regler bedient den Positionspuffer nicht -- dann bleibt
+        // nur das Register, und dann wird es auch jedes Mal gelesen.
+        return (sdrd32(state, SD_LPIB) % RING_OCTETS) / FRAME_OCTETS
+    }
+    if dp != 0 && (zaehler % LPIB_EVERY) != 0 {
+        return dp / FRAME_OCTETS
+    }
     let lp: u64 = sdrd32(state, SD_LPIB) % RING_OCTETS
     // DER RUECKFALL, UND ER IST KEINE VORSICHTSMASSNAHME AUF VERDACHT.
     // Der Positionspuffer ist in der Spezifikation OPTIONAL; es gibt
@@ -1978,9 +2018,6 @@ fn position_raw(state: u64) -> u64 {
         if dp == 0 && lp > ENTRY_OCTETS {
             s(state, S_POSFIX, 1)
         }
-    }
-    if g(state, S_POSFIX) != 0 {
-        return lp / FRAME_OCTETS
     }
     var d: u64 = 0
     if dp > lp {

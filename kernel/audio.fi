@@ -111,6 +111,7 @@ export {
     rate, set_rate, rates_ok, channels, bits, frame_octets,
     irq, arm_irq, zero_ahead, zero_rest, drain_mark,
     open_stream, write_stream, close_stream, mix_pump, hw_ready_pub,
+    catch_up, lost,
     scratch, SCRATCH_FRAMES,
     ring_frames, latency_us, entry_us,
     write, write_kernel, pad_and_submit, stop, reset,
@@ -201,6 +202,7 @@ const L_OCTETS: u64 = 0x30
 const L_STARTED: u64 = 0x38
 const L_RATE: u64 = 0x48 // die ausgehandelte Abtastrate des Geraets
 const L_ZERO: u64 = 0x50 // bis wohin der Ring VORAUS genullt ist
+const L_LOST: u64 = 0x58 // Rahmen, die nach einem Aussetzer aufgegeben wurden
 const L_PHASE: u64 = 0x40 // Phase des laufenden Tons, damit zwei
                           // Aufrufe hintereinander keinen Sprung haben
 
@@ -621,6 +623,7 @@ fn reset(state: u64) {
     }
     s(state, L_WPOS, 0)
     s(state, L_ZERO, 0)
+    s(state, L_LOST, 0)
     s(state, L_STARTED, 0)
     s(state, L_WRITES, 0)
     s(state, L_OCTETS, 0)
@@ -749,6 +752,7 @@ fn write_kernel(state: u64, src: u64, frames: u64) -> u64 {
     if !hw_ready(state) {
         return 0
     }
+    catch_up(state)
     var n: u64 = frames
     let room: u64 = space_frames(state)
     if n > room {
@@ -813,6 +817,53 @@ fn write(state: u64, src: u64, frames: u64) -> u64 {
 // `L_ZERO` merkt sich, bis wohin schon genullt ist, damit dieselben
 // Oktette nicht bei jedem Aufruf noch einmal genullt werden.
 const ZERO_AHEAD_ENTRIES: u64 = 2
+
+// ================= NACH EINEM AUSSETZER AUFHOLEN
+//
+// DIE ZWEITE FOLGE DES FREI LAUFENDEN DMA, und die teuerste. Bei AC97
+// kann der Regler den Schreibzeiger nicht ueberholen -- er haelt an.
+// Bei HD-Audio kann er, und wenn er es getan hat, steht der
+// Schreibzeiger HINTER ihm.
+//
+// WAS DANN PASSIERT, WENN MAN NICHTS TUT: der freie Platz rechnet sich
+// aus "geschrieben minus gespielt"; ist gespielt groesser, ist der
+// Ring scheinbar leer, und der Schreiber legt seine Rahmen genau
+// dorthin, wo der Regler GERADE VORBEI ist. Gehoert werden sie erst
+// einen ganzen Umlauf spaeter -- und weil der Schreiber dabei nie
+// aufholt, bleibt er fuer immer einen Ring im Rueckstand und der Ring
+// laeuft bei JEDEM Umlauf leer.
+//
+// GEMESSEN: zwei Stroeme zu je einer Sekunde brauchten 3,97 Sekunden,
+// 1077 Aussetzer, 34 Loecher in der Datei. Der Mischer war NICHT das
+// Problem -- er brauchte 0,76 der 3,97 Sekunden; der Rest war Warten
+// auf Platz, den es laengst gab.
+//
+// ALSO: den Schreibzeiger auf die Position ziehen. Die Rahmen
+// dazwischen sind verloren -- sie waeren zu spaet gekommen --, und
+// genau das sagt `lost`. Sie stillschweigend doch noch zu spielen
+// hiesse, den Ton dauerhaft um einen Ring zu verzoegern.
+fn catch_up(state: u64) -> u64 {
+    if g(state, L_BACKEND) != B_HDA {
+        return 0
+    }
+    if !hw_running(state) {
+        return 0
+    }
+    let p: u64 = hw_position(state)
+    let w: u64 = g(state, L_WPOS)
+    if p <= w {
+        return 0
+    }
+    let verloren: u64 = p -% w
+    s(state, L_WPOS, p)
+    s(state, L_ZERO, p)
+    s(state, L_LOST, g(state, L_LOST) +% verloren)
+    return verloren
+}
+
+fn lost(state: u64) -> u64 {
+    return g(state, L_LOST)
+}
 
 fn zero_ahead(state: u64) {
     if g(state, L_BACKEND) != B_HDA {
@@ -1374,6 +1425,7 @@ fn mix_pump(state: u64) -> u64 {
     if g(state, L_OPEN) != 0 {
         return 0
     }
+    catch_up(state)
     var gesamt: u64 = 0
     var weiter: bool = true
     while weiter {
@@ -1381,7 +1433,13 @@ fn mix_pump(state: u64) -> u64 {
         if platz == 0 {
             weiter = false
         } else {
-            let n: u64 = mix.mix_into(state, platz, rate(state))
+            // NOTLAGE: weniger als acht Eintraege (21 ms) liegen
+            // noch ungespielt im Geraetering. Dann wird gemischt,
+            // was da ist; sonst wird gewartet, bis alle Stroeme
+            // liefern. Die Begruendung steht bei `mix.mix_into`.
+            let vorrat: u64 = remaining(state)
+            let notlage: bool = vorrat < hw_entry_frames(state) * 8
+            let n: u64 = mix.mix_into(state, platz, rate(state), notlage)
             if n == 0 {
                 weiter = false
             } else {
