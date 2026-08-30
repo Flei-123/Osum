@@ -549,8 +549,14 @@ hatnicht "$OUT/dgeg4.txt" "zurueck auf" "(d) GEGENPROBE: es wird NIE zurueckgefa
 # wenn die Maschine noch einmal startet. Eine Generation, die haengt,
 # startet nie wieder von selbst. Das ist der Wachhund: er wartet die
 # Frist ab und startet neu.
+# Die Fassung 3 kommt aus dem NETZ und nicht von der Platte: `/quelle3`
+# liegt gar nicht im Abbild -- im Abbild liegen nur `/quelle1` und
+# `/quelle2` (tools/install/build.sh). Der Wachhund wird also an genau
+# dem Weg gemessen, um den es in dieser Runde geht.
+dienst "$OUT/netz3" || bad "Gegenstelle"
 cp -f "$OUT/basis.img" "$OUT/ziel.img"
-rc=$(lauf wach1 "opk aktualisieren hallo --quelle /quelle3;ota wachhund 5;exit" 300)
+rc=$(lauf wach1 "ota einspielen;ota wachhund 5;exit" 300)
+dienst_aus
 hat "$OUT/wach1.txt" "opk: in erprobung" "der Wachhund: es steht etwas in Erprobung"
 hat "$OUT/wach1.txt" "WACHHUND: keine Bestaetigung" "die Frist laeuft ab, ohne dass jemand bestaetigt"
 hat "$OUT/wach1.txt" "WACHHUND: Neustart" "und der Wachhund startet die Maschine neu"

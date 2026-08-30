@@ -30,16 +30,16 @@ DIE SCHALTER, DIE ETWAS KAPUTT MACHEN, und sie sind der Grund fuer dieses
 Programm (ein Server, der immer funktioniert, misst nichts):
 
   --abbruch <datei>:<oktette>
-        Fuer diese Datei werden hoechstens <oktette> Oktett des Rumpfes
-        geschrieben, dann wird die Verbindung HART geschlossen (RST, kein
+        Fuer diese Datei wird nur bis zur STELLE <oktette> DER DATEI
+        geliefert, dann wird die Verbindung HART geschlossen (RST, kein
         `close_notify`, kein FIN mit Anstand). Das ist der Fall (c):
         mitten im Laden getrennt. `Content-Length` nennt vorher die volle
         Laenge -- der Abbruch ist damit fuer den Empfaenger erkennbar,
         und genau das muss er auch merken.
 
   --kurz <datei>:<oktette>
-        Fuer diese Datei werden <oktette> Oktett des Rumpfes geschrieben
-        und die Verbindung danach ORDENTLICH geschlossen -- der
+        Fuer diese Datei wird nur bis zur STELLE <oktette> DER DATEI
+        geliefert und die Verbindung danach ORDENTLICH geschlossen -- der
         Empfaenger sieht ein sauberes Ende, aber weniger Oktette, als
         `Content-Length` angekuendigt hat. Das ist der zweite, mildere
         Abbruch: die Leitung ist gegangen, TCP hat aufgeraeumt, und das
@@ -158,18 +158,29 @@ class Hand(http.server.BaseHTTPRequestHandler):
 
         geschrieben = 0
         kgrenze = KURZ.get(name)
+        # DIE STELLE, AN DER DIE LEITUNG REISST, IST EINE STELLE IN DER
+        # DATEI -- nicht eine Anzahl Oktette dieser einen Antwort. Sonst
+        # kaeme ein Geraet, das ab 20000 wieder ansetzt, beim zweiten
+        # Versuch einfach durch (13787 Oktett Rest sind ja weniger als
+        # 20000), und die Gegenstelle waere nach einer Wiederaufnahme
+        # heil -- eine Leitung, die von selbst besser wird, misst nichts.
+        # Absolut gerechnet reisst sie IMMER an derselben Stelle, und
+        # der erste Lauf scheitert wirklich.
         with open(datei, "rb") as f:
             f.seek(von)
             while geschrieben < laenge:
-                if kgrenze is not None and geschrieben >= kgrenze:
-                    protokoll("KURZ", name, "nach", geschrieben,
+                stelle = von + geschrieben
+                if kgrenze is not None and stelle >= kgrenze:
+                    protokoll("KURZ", name, "bei", stelle,
+                              "nach", geschrieben,
                               "von", laenge, "angekuendigt")
                     ZAEHLER["oktette"] += geschrieben
                     if EINMAL:
                         GETAN.set()
                     return
-                if grenze is not None and geschrieben >= grenze:
-                    protokoll("ABBRUCH", name, "nach", geschrieben,
+                if grenze is not None and stelle >= grenze:
+                    protokoll("ABBRUCH", name, "bei", stelle,
+                              "nach", geschrieben,
                               "von", laenge, "angekuendigt")
                     ZAEHLER["oktette"] += geschrieben
                     self._hart_zu()
@@ -178,9 +189,9 @@ class Hand(http.server.BaseHTTPRequestHandler):
                     return
                 stueck = 4096
                 if grenze is not None:
-                    stueck = min(stueck, grenze - geschrieben)
+                    stueck = min(stueck, grenze - stelle)
                 if kgrenze is not None:
-                    stueck = min(stueck, kgrenze - geschrieben)
+                    stueck = min(stueck, kgrenze - stelle)
                 stueck = min(stueck, laenge - geschrieben)
                 b = f.read(stueck)
                 if not b:
