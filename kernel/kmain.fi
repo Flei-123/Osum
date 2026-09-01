@@ -67,6 +67,7 @@ import rand
 import tty
 import signal
 import arch.x86_64.guard
+import arch.x86_64.fpu
 import bootmod
 import ab
 import hwdiag
@@ -201,6 +202,9 @@ fn kernel_main(mbi: u64, vectors: u64, state: u64, kernel_end: u64,
     // `kernel_main` sie nur als Argument hat.
     kstate.set(state, kstate.MBI, mbi)
     guard.parse(state, cmd)
+    // RUNDE AVX: die Vektorregister lesen ihr eigenes Wort, so wie
+    // `guard` seit K10. nofpu / nofpuswitch / fpulazy / noxsave / noavx.
+    fpu.parse(state, cmd)
     bootmod.parse(state, cmd)
     hv.parse(state, cmd)
     // ROUND NETMON: the accounting is on from the first instruction, so
@@ -332,6 +336,18 @@ fn kernel_main(mbi: u64, vectors: u64, state: u64, kernel_end: u64,
     //     the timer already counts its ticks against it.
     kstate.set(state, kstate.KPML4,
         asm("mov rax, cr3", out("rax")) & ADDR_MASK)
+    // RUNDE AVX: CR0/CR4/XCR0, UND ZWAR VOR `sched.init`.
+    //
+    // Bis zu dieser Runde stand in CR4 nur PAE (0x20) plus SMEP/SMAP --
+    // kein OSFXSR, kein OSXSAVE. Damit war JEDE SSE-Anweisung auf dieser
+    // Maschine ein #UD, und `/bin/fetch` starb unter `-cpu max` an der
+    // SHA-NI-Fassung von SHA-256, die Firns Bibliothek dort waehlt.
+    //
+    // Die Zeile steht HIER und nicht neben `guard.apply`, weil
+    // `sched.init` und das erste `sched.create` schon Vektorbereiche
+    // anfordern -- `fpu.area_new` antwortet 0, solange nicht
+    // freigeschaltet ist, und Aufgabe 0 haette dann keinen.
+    fpu.apply(state)
     sched.init(state)
     let idle: u64 = sched.create(state, sched.K_IDLE, 1, 0, 0)
     sched.start(state, idle)
@@ -346,6 +362,10 @@ fn kernel_main(mbi: u64, vectors: u64, state: u64, kernel_end: u64,
     // Programm gesetzt wird, hat genau dieses eine nicht geschuetzt.
     guard.apply(state)
     guard.report(state)
+    // RUNDE AVX: der Bericht steht HIER und die Freischaltung weiter
+    // oben -- so steht in der Zeile das VOLLSTAENDIGE CR4, mit SMEP
+    // und SMAP darin.
+    fpu.report(state)
     proc.map_programs(state)
     // Die beiden Gegenproben. Sie tun nichts, solange die
     // Kommandozeile sie nicht ausdruecklich verlangt -- und wenn sie
@@ -513,6 +533,7 @@ fn kernel_main(mbi: u64, vectors: u64, state: u64, kernel_end: u64,
     // ohne eine einzige Fensteroeffnung waere ein Kernel, der
     // Ring-3-Speicher nie anfasst.
     guard.report_aps(state)
+    fpu.report_aps(state)
     // ...und ob das Boot-Modul den ganzen Lauf unversehrt ueberstanden
     // hat. Haette `mem.scan` seinen Bereich nicht reserviert, stuende
     // hier jetzt eine andere Summe.
