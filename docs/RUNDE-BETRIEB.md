@@ -719,9 +719,11 @@ Programmen unter `kernel/user/` und `kernel/app/`). Was diese Runde
 
 Geprüft:
 
-* **Alle Programme übersetzen** — `host`, `dnswt`, `ota`, `opk`, `dhcp`
-  unter `profile kernel`, `fetch` unter `--profile=app`, und das Abbild
-  baut mit **38 Programmen** statt 36 (`dhcp` und `host` sind neu darin).
+* **Alle Programme übersetzen** — **127 Dateien** unter `kernel/user/`
+  einzeln durch `firnc` (`rc=0`, keine einzige Ablehnung), `fetch` unter
+  `--profile=app`, und **der Kern baut** (`tools/build-kernel.sh`,
+  3 142 432 Oktette). Das Abbild trägt jetzt **38 Programme** statt 36
+  (`dhcp` und `host` sind neu darin).
 * **Das Abbild installiert sich und kommt hoch** — `install: fertig`,
   Beendigungscode 21, dreizehn Starts in diesem Lauf.
 * **`tools/ota/verzeichnis.py` erzeugt OTA2**, damit der Läufer der Runde
@@ -731,6 +733,9 @@ Geprüft:
 * **`tools/ota/server.py`** liefert zusätzlich Unterpfade aus; der flache
   Weg (nur der letzte Namensteil) bleibt unverändert, und `--abbruch`
   und `--kurz` greifen weiter auf den Basisnamen zu.
+
+Das vollständige Protokoll des Abschlusslaufs liegt als
+`docs/RUNDE-BETRIEB.log` daneben.
 
 **Nicht neu gefahren** wurde die vollständige Abnahme (`./test.sh`,
 fünfzehn Abschnitte, über hundert QEMU-Starts) — der Wirt trägt zurzeit
