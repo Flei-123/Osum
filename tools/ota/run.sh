@@ -267,7 +267,7 @@ hat "$OUT/inst.txt" "install: fertig" "der Installer meldet sich fertig"
 
 # Fassung 1 einspielen und bestaetigen -- das ist der Ausgangszustand
 # jedes weiteren Falls.
-rc=$(lauf basis0 "opk installieren /quelle1/hallo-1.opk;sh /start.sh;exit")
+rc=$(lauf basis0 "opk installieren /quelle1/hallo-1.opk;sh /start.sh;df;exit")
 hat "$OUT/basis0.txt" "paket-hallo fassung 1" "Ausgangslage: Fassung 1 laeuft"
 hat "$OUT/basis0.txt" "opk: erprobung bestaetigt" "und ist bestaetigt"
 cp -f "$OUT/ziel.img" "$OUT/basis.img"
@@ -300,6 +300,7 @@ T0=$(date +%s%N)
 rc=$(lauf gut2 "ota einspielen;opk erprobung;exit")
 T1=$(date +%s%N)
 EINMS=$(( (T1 - T0) / 1000000 ))
+cp -f "$OUT/srv.log" "$OUT/srv-gut.log" 2>/dev/null || true
 gleich "einspielen: die Maschine kommt hoch" "$rc" "21"
 hat "$OUT/gut2.txt" "ota: streuwert stimmt hallo-2.opk" "der Streuwert des GELADENEN Pakets stimmt"
 hat "$OUT/gut2.txt" "opk: Signatur geprueft" "opk prueft die Signatur ein ZWEITES Mal, mit eigenem Code"
@@ -309,7 +310,7 @@ hat "$OUT/gut2.txt" "ota: BEREIT ZUM NEUSTART" "und der Neustart wird ANGEBOTEN"
 hatnicht "$OUT/gut2.txt" "power: init sagt ab" "ES WIRD NICHT VON SELBST NEU GESTARTET"
 OKT=$(grep -a "^ota: platz" "$OUT/gut2.txt" | tail -1 | awk '{print $3}')
 
-rc=$(lauf gut3 "sh /start.sh;ota zeigen;exit")
+rc=$(lauf gut3 "sh /start.sh;ota zeigen;df;exit")
 gleich "der Neustart" "$rc" "21"
 hat "$OUT/gut3.txt" "ab: gen=1 versuch=1 von 3" "der Kern zaehlt den Erprobungsversuch"
 hat "$OUT/gut3.txt" "paket-hallo fassung 2" "DIE NEUE FASSUNG LAEUFT"
@@ -571,26 +572,81 @@ echo "== 5. (e) der Stromausfall: $SCHUESSE Schuesse mitten ins Einspielen =="
 # =====================================================================
 #
 # QEMU wird mit SIGKILL abgeschossen -- nicht `-no-reboot`, nicht ein
-# Ausgang, sondern der Stecker. Der Zeitpunkt wandert ueber den ganzen
-# Vorgang: vom Aufbau der TLS-Verbindung ueber das Laden und Pruefen bis
-# mitten in das Schreiben des Store-Eintrags und das Umschalten.
+# Ausgang, sondern der Stecker.
+#
+# WO DIE SCHUESSE LIEGEN, UND WARUM DAS NICHT GERATEN WIRD: im ersten
+# vollen Lauf standen sie fest zwischen 1 und 16 Sekunden, weil "so etwa
+# zwanzig Sekunden" geschaetzt war. Gemessen (tools/ota/zeitprobe.sh,
+# jede serielle Zeile gestempelt) faengt das Netz aber erst nach rund
+# zehn Sekunden an und geschrieben wird erst kurz vor der
+# sechsundzwanzigsten. Ergebnis: alle dreissig Schuesse trafen die
+# Firmware, dreissig von dreissig endeten auf "alt", KEIN EINZIGER auf
+# "neu" -- dreissig gruene Haken, die nichts belegten.
+#
+# Deshalb wird das Fenster JETZT GEMESSEN und nicht gesetzt: die Probe
+# laeuft einmal sauber durch und liefert T_NETZ, T_LADEN, T_SCHREIB und
+# T_FERTIG. Die eine Haelfte der Schuesse verteilt sich gleichmaessig
+# ueber den ganzen Vorgang, die andere DICHT ueber die Schreibphase
+# (vom gepruefsten Paket bis kurz hinter "bereit zum Neustart") -- genau
+# dort, wo ein Stromausfall wehtun kann.
 #
 # DIE ZUSAGE: die Maschine kommt danach hoch, und sie hat ENTWEDER die
 # alte ODER die neue Fassung. Nie etwas dazwischen, nie eine Generation
-# ohne Store-Eintrag, nie ein halbes AKTUELL.
+# ohne Store-Eintrag, nie ein halbes AKTUELL. UND: das Fenster muss
+# BEIDE Seiten treffen -- kommt kein einziges "neu" heraus, ist der Test
+# wertlos und faellt durch.
+dienst "$OUT/netz2" || bad "Gegenstelle"
+OUT="$OUT" bash tools/ota/zeitprobe.sh "$OUT/zeitmarken" > "$OUT/zeitprobe.log" 2>&1
+dienst_aus
+T_NETZ=0; T_LADEN=0; T_SCHREIB=0; T_FERTIG=0; T_ENDE=0
+. "$OUT/zeitmarken" 2>/dev/null || true
+zahl "(e) die Zeitprobe hat den ganzen Einspielvorgang gesehen" "$T_FERTIG" gt 0
+echo "        gemessen: netz $T_NETZ ms, paket geprueft $T_LADEN ms, geschrieben $T_SCHREIB ms, bereit $T_FERTIG ms"
+E_MAX=$(( T_ENDE + 1000 ))
+[ "$E_MAX" -gt 2000 ] || E_MAX=27000
+E_S0=$T_LADEN
+[ "$E_S0" -gt 0 ] || E_S0=14000
+E_S1=$T_SCHREIB
+[ "$E_S1" -gt "$E_S0" ] || E_S1=$(( E_S0 + 9000 ))
+# Das dritte Fenster liegt HINTER dem Umschalten. Es reicht bewusst ueber
+# das Ende des gemessenen Laufs hinaus: der naechste Lauf ist nie exakt
+# gleich schnell (gemessen 22,8 s und 25,8 s auf demselben Wirt), und ein
+# Schuss, der zu frueh kommt, faellt einfach in die Schreibphase zurueck.
+E_F=$T_FERTIG
+[ "$E_F" -gt "$E_S1" ] || E_F=$(( E_S1 + 100 ))
+# Grosszuegig hinter das Ende hinaus: derselbe Lauf brauchte auf diesem
+# Wirt einmal 22,8 s und einmal 25,8 s. Ein Fenster, das nur knapp hinter
+# der gemessenen Marke endet, faellt bei einem langsamen Lauf wieder in
+# die Schreibphase zurueck -- und dann misst der Abschnitt wieder nichts.
+E_S2=$(( T_ENDE + 6000 ))
+[ "$E_S2" -gt "$E_F" ] || E_S2=$(( E_F + 6000 ))
 alt_n=0
 neu_n=0
 tot_n=0
+getroffen=0
+verfehlt=0
 i=0
 while [ "$i" -lt "$SCHUESSE" ]; do
     i=$((i+1))
     dienst "$OUT/netz2" || bad "Gegenstelle"
     cp -f "$OUT/basis.img" "$OUT/ziel.img"
-    # Der Zeitpunkt: gleichmaessig ueber 1,0 bis 16,0 Sekunden verteilt.
-    # Die Spanne ist gemessen und nicht geraten -- ein sauberer Lauf von
-    # `ota einspielen` von der Platte braucht auf diesem Wirt etwa
-    # zwanzig Sekunden von der Firmware bis zum Umschalten.
-    MS=$(( 1000 + (i * 15000) / SCHUESSE ))
+    # DER ZEITPUNKT KOMMT AUS DER MASCHINE, NICHT AUS DER UHR.
+    # Der erste Anlauf hat die Schusszeiten aus einem Messlauf
+    # hochgerechnet -- und auf einem belasteten Wirt lag der spaeteste
+    # Schuss (27,2 s) noch vor dem Laden. Dreissig Mal "alt", kein
+    # einziges "neu": nichts belegt. Jetzt wartet jeder Schuss auf eine
+    # MARKE, die die Maschine selbst gedruckt hat, und zieht den Stecker
+    # einen Versatz spaeter. Drei Phasen im Wechsel:
+    #   1. das Netz steht, das Paket ist noch nicht geprueft
+    #   2. das Paket ist geprueft -- jetzt wird geschrieben
+    #   3. HINTER dem Umschalten: "bereit zum Neustart" steht schon da
+    if [ $(( i % 3 )) = 1 ]; then
+        MARKE="ota: quelle"; VERSATZ=$(( 100 + i * 60 )); PHASE=netz
+    elif [ $(( i % 3 )) = 2 ]; then
+        MARKE="ota: streuwert stimmt"; VERSATZ=$(( 50 + i * 120 )); PHASE=schreiben
+    else
+        MARKE="ota: BEREIT ZUM NEUSTART"; VERSATZ=$(( 20 + i * 10 )); PHASE=danach
+    fi
     OVMF=$(ls /usr/share/OVMF/OVMF_CODE.fd /usr/share/ovmf/OVMF.fd 2>/dev/null | head -1)
     cp -f /usr/share/OVMF/OVMF_VARS.fd "$OUT/e.vars.fd" 2>/dev/null || true
     {
@@ -609,8 +665,16 @@ while [ "$i" -lt "$SCHUESSE" ]; do
         -netdev user,id=otan0 -device e1000,netdev=otan0,mac=52:54:00:0a:0b:0c \
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 > /dev/null 2>&1 &
     QP=$!
-    # Millisekunden warten, dann DEN STECKER ZIEHEN.
-    python3 -c "import time;time.sleep($MS/1000.0)"
+    # Auf die Marke der Maschine warten, Versatz abwarten, DANN DEN
+    # STECKER ZIEHEN. Wird die Marke innerhalb der Frist nie gedruckt,
+    # kehrt das Skript mit 3 zurueck: der Schuss zaehlt dann als
+    # "Phase verfehlt" und wird unten offen ausgewiesen.
+    if python3 tools/ota/warte_marke.py "$OUT/e$i.txt" "$MARKE" "$VERSATZ" 600; then
+        getroffen=$((getroffen+1))
+    else
+        verfehlt=$((verfehlt+1))
+        echo "        (e) Schuss $i: Marke '$MARKE' kam nicht innerhalb der Frist"
+    fi
     kill -9 "$QP" 2>/dev/null
     wait "$QP" 2>/dev/null
     dienst_aus
@@ -619,20 +683,27 @@ while [ "$i" -lt "$SCHUESSE" ]; do
     rc=$(lauf "en$i" "opk richten;/apps/hallo.osp/start;opk liste;exit" 400)
     if [ "$rc" != 21 ]; then
         tot_n=$((tot_n+1))
-        bad "(e) Schuss $i bei ${MS} ms: die Maschine kommt NICHT mehr hoch (rc=$rc)"
+        bad "(e) Schuss $i in Phase $PHASE: die Maschine kommt NICHT mehr hoch (rc=$rc)"
     elif grep -qa "paket-hallo fassung 2" "$OUT/en$i.txt"; then
         neu_n=$((neu_n+1))
     elif grep -qa "paket-hallo fassung 1" "$OUT/en$i.txt"; then
         alt_n=$((alt_n+1))
     else
         tot_n=$((tot_n+1))
-        bad "(e) Schuss $i bei ${MS} ms: WEDER die alte NOCH die neue Fassung laeuft"
+        bad "(e) Schuss $i in Phase $PHASE: WEDER die alte NOCH die neue Fassung laeuft"
     fi
 done
 zahl "(e) Schuesse, nach denen die Maschine ENTWEDER alt ODER neu ist" \
      "$((alt_n + neu_n))" eq "$SCHUESSE"
 zahl "(e) davon: nichts dazwischen und kein Ziegelstein" "$tot_n" eq 0
-echo "        alt=$alt_n  neu=$neu_n  kaputt=$tot_n  (Schuesse bei 1000..16000 ms)"
+# Der Test, der den Test prueft: ein Fenster, das nur die Firmware
+# trifft, wuerde dreissig makellose "alt" liefern und nichts belegen.
+zahl "(e) Schuesse, die WIRKLICH nach dem Umschalten lagen (sonst misst das nichts)" \
+     "$neu_n" gt 0
+zahl "(e) und Schuesse, die davor lagen" "$alt_n" gt 0
+zahl "(e) Schuesse, die ihre Phase wirklich getroffen haben" "$getroffen" eq "$SCHUESSE"
+echo "        alt=$alt_n  neu=$neu_n  kaputt=$tot_n  Phase getroffen=$getroffen verfehlt=$verfehlt"
+echo "        (Schuesse an Marken der Maschine ausgerichtet: 'ota: quelle' / 'ota: streuwert stimmt' / 'ota: BEREIT ZUM NEUSTART')"
 
 # =====================================================================
 echo
@@ -644,9 +715,11 @@ printf '   %-52s %s\n' "ein Paket (hallo 2.0.0, .opk)" "$PKG Oktett"
 printf '   %-52s %s\n' "ein Update auf der Leitung (VERZEICHNIS+sig+INDEX+sig+opk+sig)" \
     "$(du -sb "$OUT/netz2" | cut -f1) Oktett"
 printf '   %-52s %s\n' "davon wirklich uebertragen (aus dem Protokoll der Gegenstelle)" \
-    "$(awk '/^(200|206) /{s+=$5} END{print s+0}' "$OUT/srv.log" 2>/dev/null) Oktett (letzter Lauf)"
+    "$(awk '/^(200|206) /{s+=$6} END{print s+0}' "$OUT/srv-gut.log" 2>/dev/null) Oktett (der gute Lauf)"
 printf '   %-52s %s\n' "von 'ota suchen' bis zur Antwort (ganzer Start)" "$SUCHMS ms"
-printf '   %-52s %s\n' "von 'ota einspielen' bis 'bereit zum Neustart'" "$EINMS ms"
+printf '   %-52s %s\n' "von 'ota einspielen' bis 'bereit zum Neustart'" "$EINMS ms (Wanduhr, mit Rahmen)"
+printf '   %-52s %s\n' "davon in der Maschine: Firmware->Netz / ->Paket geprueft" "$T_NETZ ms / $T_LADEN ms"
+printf '   %-52s %s\n' "in der Maschine: ->geschrieben / ->bereit zum Neustart" "$T_SCHREIB ms / $T_FERTIG ms"
 printf '   %-52s %s\n' "Rueckfall: der Start, in dem der Kern zurueckschaltet" "$RUECKMS ms"
 printf '   %-52s %s\n' "/bin/fetch (TLS 1.3, X.509, RSA, ECDSA, Ed25519 nein)" "$FSZ Oktett"
 printf '   %-52s %s\n' "/bin/ota" "$OSZ Oktett"
