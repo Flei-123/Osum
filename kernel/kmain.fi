@@ -120,6 +120,7 @@ const P_HANDLE: u64 = 48
 const P_ASYNC: u64 = 50
 const P_ABENCH: u64 = 51
 const P_ASYNCFS: u64 = 52
+const P_VEC: u64 = 53 // RUNDE AVX
 // RUNDE K13: die beiden Programmnummern dieser Runde (kernel/uprog.fi).
 const P_PWR: u64 = 45
 const P_PWRIDLE: u64 = 46
@@ -413,6 +414,10 @@ fn kernel_main(mbi: u64, vectors: u64, state: u64, kernel_end: u64,
     //     Aufgabe derselbe wie vorher.
     asyncs(state)
     async_bench(state)
+    // 7b-sexies. RUNDE AVX: die Gegenprobe zum Kontextwechsel. Hier und
+    //     nicht spaeter, weil sie kein Dateisystem braucht -- vier
+    //     Prozesse, ihre Vektorregister und sonst nichts.
+    vectors(state)
     // 7b-bis. RUNDE K13: Kennungen aus Ring 3, ohne Platte. Hier und
     //     nicht spaeter, weil es KEIN Dateisystem braucht -- die Zusagen
     //     ueber uid/gid gelten auch in einem Lauf `nofs`, und ein Test,
@@ -3722,5 +3727,65 @@ fn usb_unplug(state: u64) {
     serial.dec(usb.count(state))
     serial.puts((&s_p[0]) as u64)
     serial.dec(usb.unplugs(state))
+    serial.nl()
+}
+
+
+// ==================================================== RUNDE AVX
+//
+// DER NACHWEIS, DASS DER KONTEXTWECHSEL DIE VEKTORREGISTER SICHERT.
+//
+// Vier Prozesse laufen GLEICHZEITIG, jeder mit einem Muster, das nur zu
+// ihm passt. Jeder gibt den Prozessor 128-mal ab und sieht danach nach,
+// ob er seine eigenen Werte wiederfindet. Der Beendigungscode ist die
+// Zahl der Abweichungen; 0 in allen vier heisst, dass kein Prozess je
+// die Register eines anderen gesehen hat.
+//
+// DIE GEGENPROBE IST DIE HAELFTE DES NACHWEISES. Mit `nofpuswitch`
+// schaltet `fpu.apply` frei, aber `fpu.switch` tut nichts -- genau der
+// Fehler, vor dem `docs/OTA.md` warnt ("Das Freischalten allein waere
+// FALSCH: dann benutzt Ring 3 Vektorregister, die kein Kontextwechsel
+// sichert"). Dann MUSS diese Zahl gross werden. Ein Test, der nicht rot
+// werden kann, misst nichts.
+fn vectors(state: u64) {
+    var s_skip: [u8; 13] = "vec: skipped\0"
+    var s_beg: [u8; 11] = "vec: begin\0"
+    var s_ex: [u8; 11] = "vec: exit=\0"
+    var s_sp: [u8; 2] = " \0"
+    var s_sum: [u8; 10] = "vec: sum=\0"
+    var s_res: [u8; 12] = "vec: clean=\0"
+    if !fpu.want(state, fpu.M_VEC) {
+        serial.puts((&s_skip[0]) as u64)
+        serial.nl()
+        return
+    }
+    serial.puts((&s_beg[0]) as u64)
+    serial.nl()
+    let a: u64 = proc.create(state, P_VEC, 1, 2)
+    let b: u64 = proc.create(state, P_VEC, 2, 2)
+    let c: u64 = proc.create(state, P_VEC, 3, 2)
+    let d: u64 = proc.create(state, P_VEC, 4, 2)
+    let ea: u64 = kutil.wait_for(state, a)
+    let eb: u64 = kutil.wait_for(state, b)
+    let ec: u64 = kutil.wait_for(state, c)
+    let ed: u64 = kutil.wait_for(state, d)
+    serial.puts((&s_ex[0]) as u64)
+    serial.dec(ea)
+    serial.puts((&s_sp[0]) as u64)
+    serial.dec(eb)
+    serial.puts((&s_sp[0]) as u64)
+    serial.dec(ec)
+    serial.puts((&s_sp[0]) as u64)
+    serial.dec(ed)
+    serial.nl()
+    serial.puts((&s_sum[0]) as u64)
+    serial.dec(ea + eb + ec + ed)
+    serial.nl()
+    serial.puts((&s_res[0]) as u64)
+    if ea == 0 && eb == 0 && ec == 0 && ed == 0 {
+        serial.dec(1)
+    } else {
+        serial.dec(0)
+    }
     serial.nl()
 }
