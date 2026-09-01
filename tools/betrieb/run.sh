@@ -465,7 +465,7 @@ echo "== BETRIEB: $pass gruen, $fail rot =="
 # =====================================================================
 {
   echo "gruen=$pass rot=$fail gegenproben=$gpok/$gp"
-  echo "dnswt=$DG/19 dig=${VG:-0}/20 ports=$PN txids=$TN spanne=$PMIN..$PMAX"
+  echo "dnswt=$DG/19 dig=${VG:-0}/21 ports=$PN txids=$TN spanne=$PMIN..$PMAX"
 } > "$OUT/zahlen.txt"
 cat "$OUT/zahlen.txt"
 exit $((fail>0))
