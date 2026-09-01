@@ -144,6 +144,7 @@ static mut P_AKT: [u8; 16] = "/system/AKTUELL\0"
 static mut P_KEY: [u8; 23] = "/system/schluessel.pub\0"
 static mut P_ERS: [u8; 19] = "/system/ersatz.pub\0"
 static mut P_KGEN: [u8; 22] = "/system/SCHLUESSELGEN\0"
+static mut P_SPERR: [u8; 17] = "/system/GESPERRT\0"
 static mut P_STAND: [u8; 18] = "/system/ota.stand\0"
 static mut P_TMP: [u8; 9] = "/tmp/ota\0"
 static mut P_FETCH: [u8; 11] = "/bin/fetch\0"
@@ -285,6 +286,11 @@ static mut kgen: u64 = 0
 static mut kgen_neu: u64 = 0
 static mut kette_riss: bool = false
 static mut mit_ersatz: bool = false
+// DIE GEMERKTE SPERRLISTE. 64 Eintraege zu je neun Oktetten
+// ("%08d\n") -- feste Breite, wie `/system/FASSUNG`, damit ein
+// Stromausfall keine halbe Zahl hinterlaesst.
+static mut SPERRB: [u8; 640] = [0 as u8; 640]
+static mut sperr_n: u64 = 0
 static mut URL: [u8; 320] = [0 as u8; 320]
 static mut ZIEL: [u8; 256] = [0 as u8; 256]
 static mut ZIEL2: [u8; 256] = [0 as u8; 256]
@@ -777,8 +783,106 @@ fn kette_gehen() {
     }
 }
 
-// Steht `f` in der Sperrliste des (signierten!) Verzeichnisses?
+// ------------------------------- RUNDE BETRIEB: die GEMERKTE Sperrliste
+//
+// WARUM DAS GERAET SICH DIE LISTE MERKEN MUSS, und es ist der ganze
+// Grund, warum eine Sperrliste ueberhaupt etwas kann.
+//
+// Der Rueckschrittsschutz faengt alles, was AELTER ist als die Fassung,
+// die schon laeuft. Was er NICHT faengt, ist eine zurueckgezogene
+// Fassung, die NEUER ist als die laufende: Geraet bei 4, Fassung 5 ist
+// zurueckgezogen, Fassung 6 ist die richtige. Wer die -- richtig
+// signierte! -- Auslieferung 5 aufgehoben hat und sie dem Geraet
+// vorlegt, kommt an jeder Signaturpruefung und am Rueckschrittsschutz
+// vorbei.
+//
+// Dagegen hilft nur, dass das Geraet die Sperrliste BEHAELT. Es sieht
+// sie beim naechsten `ota suchen` (das jede Stunde laeuft, `ota
+// dienst`) im signierten VERZEICHNIS, schreibt sie nach
+// `/system/GESPERRT` -- und von da an ist Fassung 5 fuer dieses Geraet
+// tot, gleich wer sie anbietet und wie gut sie unterschrieben ist.
+//
+// Die Liste WAECHST nur. Ein Eintrag verschwindet nie, denn ein
+// Verzeichnis, das eine Sperre WEGLIESSE, waere genau der Angriff.
+fn sperr_laden() {
+    sperr_n = 0
+    let n: u64 = datei_lesen((&P_SPERR[0 as usize]) as u64,
+        (&SPERRB[0 as usize]) as u64, 639)
+    if n == 0xFFFFFFFFFFFFFFFF || n < 9 {
+        return
+    }
+    sperr_n = n / 9
+    if sperr_n > 64 {
+        sperr_n = 64
+    }
+}
+
+fn sperr_hat(f: u64) -> bool {
+    var i: u64 = 0
+    while i < sperr_n {
+        var b: [u8; 12] = [0 as u8; 12]
+        ulib.copy((&b[0 as usize]) as u64,
+            (&SPERRB[0 as usize]) as u64 + i * 9, 8)
+        p8((&b[0 as usize]) as u64 + 8, 0)
+        if ulib.to_num((&b[0 as usize]) as u64) == f {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn sperr_dazu(f: u64) -> bool {
+    if sperr_hat(f) || sperr_n >= 64 {
+        return false
+    }
+    let at: u64 = (&SPERRB[0 as usize]) as u64 + sperr_n * 9
+    var rest: u64 = f
+    var i: u64 = 8
+    while i > 0 {
+        i = i - 1
+        p8(at + i, 48 + (rest % 10))
+        rest = rest / 10
+    }
+    p8(at + 8, 10)
+    sperr_n = sperr_n + 1
+    return true
+}
+
+// Jede Sperre aus dem GEPRUEFTEN Verzeichnis dazunehmen und die Datei
+// schreiben, wenn sich etwas geaendert hat.
+fn sperr_uebernehmen() {
+    sperr_laden()
+    var k: u64 = 0
+    var neu: u64 = 0
+    var weiter: bool = true
+    while weiter {
+        let z: u64 = zeile_ab((&N_SPERR[0 as usize]) as u64, 9, k)
+        if z == 0 {
+            weiter = false
+        } else {
+            if feld(z, (&VZ[0 as usize]) as u64 + vz_len, 0,
+                (&KFELD[0 as usize]) as u64, 24) {
+                if sperr_dazu(ulib.to_num((&KFELD[0 as usize]) as u64)) {
+                    neu = neu + 1
+                }
+            }
+            k = k + 1
+        }
+    }
+    if neu > 0 {
+        fest_schreiben((&P_SPERR[0 as usize]) as u64,
+            (&SPERRB[0 as usize]) as u64, sperr_n * 9)
+    }
+}
+
+// Steht `f` in der Sperrliste des (signierten!) Verzeichnisses -- oder
+// in der, die dieses Geraet sich gemerkt hat?
 fn ist_gesperrt(f: u64) -> bool {
+    sperr_laden()
+    if sperr_hat(f) {
+        return true
+    }
     var k: u64 = 0
     var weiter: bool = true
     while weiter {
@@ -1113,6 +1217,11 @@ fn verzeichnis_holen(laut: bool) -> u64 {
     // wird (gesperrte Fassung, Rueckschritt, kein Platz): ein
     // Schluesselwechsel ist ein eigener Vorgang und haengt nicht daran,
     // ob gerade ein Paket eingespielt wird.
+    // DIE SPERRLISTE WIRD GEMERKT, sobald das Verzeichnis geprueft ist
+    // -- auch bei `ota suchen`, das sonst nichts am System anfasst. Das
+    // ist die eine Ausnahme, und sie hat einen Grund: eine Sperre, die
+    // erst beim Einspielen gemerkt wird, kommt zu spaet.
+    sperr_uebernehmen()
     if kgen_neu > kgen {
         if !datei_schreiben((&P_KEY[0 as usize]) as u64,
             (&KEY[0 as usize]) as u64, 32) {
