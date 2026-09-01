@@ -206,6 +206,47 @@ steht auf **jedem** Reiter. Ein achter Reiter wäre ein Fehler auf einen
 Fehler gesetzt. Das gehört repariert, in einer Runde, die diese Datei
 aufräumt.
 
+## 7. Der Test, der zuerst nichts gemessen hat
+
+Fall (e) — dreißigmal der Stecker mitten im Einspielen — stand im ersten
+vollen Lauf mit **30 von 30 grün** da: jede Maschine kam hoch, jede hatte
+entweder die alte oder die neue Fassung, keine war ein Ziegelstein. Die
+Zeile darunter war das Problem:
+
+    alt=30  neu=0  kaputt=0  (Schuesse bei 1000..16000 ms)
+
+**Kein einziger Schuss ist je hinter das Umschalten gekommen.** Die
+Spanne 1–16 Sekunden war geschätzt („ein Einspielen dauert etwa zwanzig
+Sekunden"), und die Schätzung war falsch. `tools/ota/zeitprobe.sh` fährt
+denselben Vorgang einmal sauber durch und stempelt jede serielle Zeile
+mit der Zeit seit dem Start von QEMU. Gemessen:
+
+| Marke | ms |
+|---|---:|
+| `ota: quelle …` — das Netz steht | 9 799 |
+| `ota: streuwert stimmt` — das Paket ist geladen und geprüft | 13 938 |
+| `opk: installiert` — geschrieben | 22 731 |
+| `ota: BEREIT ZUM NEUSTART` | 22 814 |
+
+Die ersten zehn Sekunden gehören der Firmware und dem Hochfahren. Alle
+dreißig Schüsse lagen also **vor der ersten Zeile, die `ota` überhaupt
+schreibt** — dreißig grüne Haken dafür, dass eine Maschine, an der nichts
+passiert, unverändert bleibt.
+
+Seitdem wird das Fenster **gemessen statt gesetzt**: der Läufer fährt die
+Zeitprobe, nimmt ihre Marken und verteilt die Schüsse in drei Dritteln —
+über den ganzen Vorgang, dicht in die Schreibphase (Paket geprüft bis
+`opk: installiert`) und hinter das Umschalten. Und er prüft sich selbst:
+kommt **kein einziges „neu"** heraus, fällt der Abschnitt durch, weil ein
+Fenster, das nur die Firmware trifft, nichts belegt. Genau diese Prüfung
+war beim ersten Lauf mit dem neuen Code rot — sie tut also, wofür sie da
+ist.
+
+Zwei weitere Zahlen waren aus demselben Grund still falsch und sind
+repariert: „davon wirklich übertragen" las Feld 5 statt 6 aus dem
+Protokoll der Gegenstelle und zeigte immer 0, und „Blöcke frei" war leer,
+weil `df` in keinem der Prüfläufe je aufgerufen wurde.
+
 ---
 
 ## WAS NOCH FEHLT — für den Betrieb gegen einen echten Server
