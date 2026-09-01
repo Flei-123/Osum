@@ -1,0 +1,939 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/arch/x86_64/fpu.fi -- RUNDE AVX: die Vektorregister.
+//
+// ============================================================ DER BEFUND
+//
+// `docs/OTA.md`, Abschnitt "WAS NOCH FEHLT", Punkt 1. Dasselbe Abbild,
+// derselbe Kern, nur ein anderes `-cpu`:
+//
+//     qemu64        SSE2                 laeuft
+//     Nehalem       SSE4.2               laeuft
+//     Westmere      AES-NI               laeuft
+//     SandyBridge   AVX                  laeuft
+//     Haswell       AVX2, BMI2           laeuft
+//     max           AVX-512, SHA-NI      user fault: vector=6  (#UD)
+//
+// Nachgemessen und bestaetigt, bevor eine Zeile geschrieben wurde:
+//
+//     guard: cr4=0x300020
+//
+// Bit 5 ist PAE, Bit 20/21 sind SMEP/SMAP aus Runde K10. Was FEHLT, ist
+// Bit 9 (OSFXSR), Bit 10 (OSXMMEXCPT) und Bit 18 (OSXSAVE). Damit ist auf
+// dieser Maschine JEDE SSE-Anweisung ein #UD -- auch in Ring 0.
+//
+// Warum es trotzdem bis `Haswell` lief: Firns Bibliothek fragt `cpuid`
+// und nimmt den breitesten Weg (`lib/std/cpu.fi`, `lib/std/crypto/
+// accel.fi`). `sha256.fi` schaltet auf SHA-NI um, sobald `cpuid` Blatt 7
+// Bit 29 gesetzt ist -- und das meldet QEMU erst ab `-cpu max`. Bis
+// dahin rechnet dieselbe Bibliothek skalar und ruehrt kein einziges
+// Vektorregister an. TLS 1.3 haengt an SHA-256; also stirbt `/bin/fetch`
+// genau dort und nirgends sonst.
+//
+// ======================================================= WAS HIER STEHT
+//
+//   CR0    MP setzen, EM loeschen, TS behandeln, NE setzen.
+//          Mit EM=1 waere jede SSE-Anweisung ein #UD, ganz gleich was in
+//          CR4 steht; mit MP=0 loest `fwait` bei gesetztem TS kein #NM
+//          aus, und der traege Weg unten haette ein Loch.
+//   CR4    OSFXSR (das Betriebssystem sichert FXSAVE-Zustand),
+//          OSXMMEXCPT (SSE-Ausnahmen kommen als #XM und nicht als #UD),
+//          OSXSAVE -- letzteres NUR, wenn `cpuid` XSAVE anbietet.
+//   XCR0   ueber XSETBV, und NUR die Anteile, die `cpuid` Blatt 0x0D
+//          MELDET. Ein Bit, das die Maschine nicht hat, ist ein #GP im
+//          `xsetbv` selbst -- die Freischaltung wuerde die Maschine
+//          umbringen statt sie zu retten.
+//
+// UND DAS FREISCHALTEN ALLEIN WAERE FALSCH. Steht so in `docs/OTA.md`:
+// dann benutzt Ring 3 Register, die kein Kontextwechsel sichert, und ein
+// Prozess sieht die Register eines anderen. Deshalb ist der eigentliche
+// Inhalt dieser Datei `save`/`restore` und nicht `apply`.
+//
+// ====================================================== DIE GEGENPROBE
+//
+// `nofpuswitch` auf der Kernel-Befehlszeile schaltet frei UND laesst den
+// Kontextwechsel weg -- also genau der Fehler, vor dem der OTA-Bericht
+// warnt. `vec` startet vier Prozesse, die gleichzeitig bekannte Werte in
+// ihre Vektorregister schreiben und danach nachsehen, ob sie ihre
+// eigenen wiederfinden. Ohne die Sicherung MUSS das fehlschlagen; erst
+// wenn es das nachweislich tut, misst der Test ueberhaupt etwas.
+//
+// ================================================== WARUM KEIN LAZY FPU
+//
+// Der klassische Weg (CR0.TS setzen, beim ersten Zugriff #NM fangen und
+// erst dann laden) ist hier als `fpulazy` gebaut und gemessen, nicht
+// weggelassen. Die Zahlen stehen in `docs/RUNDE-AVX.md`. Kurz: er spart
+// nur die HAELFTE (das Laden), weil die Sicherung beim Wegschalten
+// trotzdem eager bleiben muss -- sonst braeuchte eine Aufgabe, die von
+// Kern 0 nach Kern 1 wandert, einen Interruptschuss an Kern 0, damit der
+// seine Register herausrueckt. Und praktisch jede Firn-Bibliothek fasst
+// SSE an, also faellt das #NM ohnehin fast immer.
+//
+// ================================================ WO DER BEREICH LIEGT
+//
+// Ein Rahmen (4096 Oktette) je Aufgabe aus `mem.frame_alloc`. Nicht in
+// `kdata`: der Bereich ist mit AVX-512 ueber 2,5 KiB gross, 32 Aufgaben
+// waeren 128 KiB, und KDATA_SIZE zu vergroessern hiesse `boot.s`,
+// `kstate.fi` und `tools/kernel/memmap.py` anzufassen -- waehrend
+// MERGE-3 nebenan laeuft. Ein Rahmen ist ausserdem 4096-fach
+// ausgerichtet und damit sowohl fuer FXSAVE (16) als auch fuer XSAVE
+// (64) richtig, ohne dass irgendwo gerundet werden muesste.
+//
+// ARITHMETIK: nur Bitarbeit und Zaehler, die nicht ueberlaufen koennen.
+
+import kstate
+import serial
+import mem
+import cpu
+
+export {
+    parse, probe, apply, apply_here, report, report_aps,
+    enabled, lazy, area_size, mode, xcr0,
+    area_new, area_free, area_init, area_copy,
+    save, restore, switch, on_nm, drop_owner, adopt_now, ts_set, ts_clear,
+    sync_here,
+    M_NOFPU, M_NOFPUSWITCH, M_FPULAZY, M_NOXSAVE, M_NOAVX, M_VEC,
+    M_FPUFORCE, M_R3SMP, M_BENCH, want, cpu_feat,
+    MODE_OFF, MODE_FX, MODE_XSAVE, MODE_XSAVEOPT,
+    VEC_WORDS, VEC_BYTES, vec_seed, vec_put, vec_take, vec_calc,
+    vec_ref, vec_diff
+}
+
+// ---------------------------------------------------------- die Bits
+
+const CR0_MP: u64 = 2 // Bit 1  -- Monitor Coprocessor
+const CR0_EM: u64 = 4 // Bit 2  -- Emulation; 1 = jede SSE-Anweisung ist #UD
+const CR0_TS: u64 = 8 // Bit 3  -- Task Switched
+const CR0_NE: u64 = 32 // Bit 5 -- x87-Fehler als #MF statt ueber IRQ13
+
+const CR4_OSFXSR: u64 = 0x200 // Bit 9
+const CR4_OSXMMEXCPT: u64 = 0x400 // Bit 10
+const CR4_OSXSAVE: u64 = 0x40000 // Bit 18
+
+// `cpuid` Blatt 1
+const F1_FXSR: u64 = 0x1000000 // EDX Bit 24
+const F1_SSE: u64 = 0x2000000 // EDX Bit 25
+const F1_XSAVE: u64 = 0x4000000 // ECX Bit 26
+// Bit 27 daneben ist OSXSAVE und meldet, was DAS BETRIEBSSYSTEM
+// gesetzt hat -- vor `apply` ist es null. Wer danach fragt, ob die
+// Maschine XSAVE kann, fragt nie wieder ja. (Genau dieser Griff
+// danebengegriffen: der erste Lauf dieser Runde meldete `mode=1` auch
+// unter `-cpu max`.)
+const F1_AVX: u64 = 0x10000000 // ECX Bit 28
+
+// `cpuid` Blatt 7, Unterblatt 0, EBX
+const F7_AVX512F: u64 = 0x10000 // Bit 16
+
+// `cpuid` Blatt 0x0D, Unterblatt 1, EAX
+const FD1_XSAVEOPT: u64 = 1 // Bit 0
+
+// XCR0. Die drei AVX-512-Anteile gehen nur GEMEINSAM -- ein Teilsatz ist
+// ein #GP im `xsetbv`.
+const XCR0_X87: u64 = 1
+const XCR0_SSE: u64 = 2
+const XCR0_AVX: u64 = 4
+const XCR0_AVX512: u64 = 0xE0 // Bit 5 opmask, 6 ZMM_Hi256, 7 Hi16_ZMM
+
+// Wie gesichert wird.
+const MODE_OFF: u64 = 0
+const MODE_FX: u64 = 1
+const MODE_XSAVE: u64 = 2
+const MODE_XSAVEOPT: u64 = 3
+
+// Ein Rahmen. Groesser wird der Bereich in dieser Runde nicht; passt der
+// gemeldete Bedarf nicht hinein, faellt `probe` auf FXSAVE zurueck.
+const AREA_MAX: u64 = 4096
+
+// Der saubere Anfangszustand. FCW 0x037F ist der Wert nach `fninit`
+// (alle Ausnahmen maskiert, 64 Bit Genauigkeit, Runden zur Mitte);
+// MXCSR 0x1F80 ist der Wert nach dem Zuruecksetzen (alle sechs
+// SSE-Ausnahmen maskiert). Eine 0 in MXCSR waere KEIN gueltiger
+// Anfangszustand: sie schaltet alle Masken AB, und der erste denormale
+// Zwischenwert waere ein #XM.
+const INIT_FCW: u64 = 0x37F
+const INIT_MXCSR: u64 = 0x1F80
+const INIT_MXCSR_MASK: u64 = 0xFFFF
+
+// ------------------------------------------- Woerter der Kommandozeile
+
+const M_NOFPU: u64 = 1 // gar nichts freischalten (der Stand von vorher)
+const M_NOFPUSWITCH: u64 = 2 // freischalten, aber NICHT sichern
+const M_FPULAZY: u64 = 4 // CR0.TS + #NM statt immer laden
+const M_NOXSAVE: u64 = 8 // FXSAVE erzwingen, auch wo XSAVE da waere
+const M_NOAVX: u64 = 16 // XCR0 auf x87+SSE begrenzen
+const M_VEC: u64 = 32 // die vier Testprozesse starten (`vec`)
+// GEGENPROBE ZU DER EINEN REGEL, DIE `docs/OTA.md` ausdruecklich nennt:
+// "Nichts freischalten, was `cpuid` nicht anbietet -- das ist selbst ein
+// #GP". `fpuforce` setzt die drei AVX-512-Bits in XCR0, OHNE zu fragen.
+// Auf einer Maschine, die sie hat, aendert das nichts; auf einer ohne
+// (jede AMD bis Zen 4, jeder Intel-Desktop seit Alder Lake) muss der
+// Kernel im `xsetbv` an einem #GP stehenbleiben. Genau das ist der
+// Nachweis, dass die Abfrage in `probe` keine Zierde ist.
+const M_FPUFORCE: u64 = 64
+// DIAGNOSE, NICHT ABNAHME. `r3smp` startet die vier Ring-3-Prozesse
+// NOCH EINMAL, hinter `smp.stage`. Unter `-smp 1` laeuft das durch;
+// unter `-smp 4` endet es in einem #DF, und zwar auch mit `nofpu` --
+// also ohne eine Zeile dieser Runde. Damit ist belegt, woher der Fehler
+// kommt: `syscall_entry` in `isr.s` hat EIN globales Wort fuer den
+// Nutzerstapel und EINES fuer den Kernstapel (Runde K5). Das Wort steht
+// in KEINEM Abnahmelauf.
+const M_R3SMP: u64 = 128
+// `fpubench`: der Preis in Zyklen je Kontextwechsel, gemessen und
+// nicht geschaetzt. Zwei Arme, weil der traege Weg (`fpulazy`) genau
+// zwischen ihnen den Unterschied macht: Aufgaben OHNE Vektorbenutzung
+// und Aufgaben MIT.
+const M_BENCH: u64 = 256
+
+fn parse(state: u64, cmd: u64) {
+    var w_nofpu: [u8; 6] = "nofpu\0"
+    var w_nosw: [u8; 12] = "nofpuswitch\0"
+    var w_lazy: [u8; 8] = "fpulazy\0"
+    var w_noxs: [u8; 8] = "noxsave\0"
+    var w_noavx: [u8; 6] = "noavx\0"
+    var w_vec: [u8; 8] = "vecproc\0"
+    var w_force: [u8; 9] = "fpuforce\0"
+    var w_r3: [u8; 6] = "r3smp\0"
+    var w_bench: [u8; 9] = "fpubench\0"
+    var m: u64 = 0
+    if cmd != 0 {
+        // `nofpuswitch` faengt mit `nofpu` an -- also erst das lange
+        // Wort pruefen und das kurze nur dann, wenn das lange nicht
+        // steht. Sonst waere `nofpuswitch` immer auch `nofpu` und die
+        // Gegenprobe wuerde gar nichts freischalten.
+        if find(cmd, (&w_nosw[0]) as u64, 11) != 0 {
+            m = m | M_NOFPUSWITCH
+        } else {
+            if find(cmd, (&w_nofpu[0]) as u64, 5) != 0 {
+                m = m | M_NOFPU
+            }
+        }
+        if find(cmd, (&w_lazy[0]) as u64, 7) != 0 {
+            m = m | M_FPULAZY
+        }
+        if find(cmd, (&w_noxs[0]) as u64, 7) != 0 {
+            m = m | M_NOXSAVE
+        }
+        if find(cmd, (&w_noavx[0]) as u64, 5) != 0 {
+            m = m | M_NOAVX
+        }
+        // `vecproc` und nicht `vec`: die Kommandozeile wird nach
+        // TEILWOERTERN durchsucht, und ein Wort mit drei Zeichen trifft
+        // irgendwann etwas, was es nicht treffen sollte. Runde K13 hat
+        // genau diesen Fehler eine Stunde lang gesucht (`k13run`).
+        if find(cmd, (&w_vec[0]) as u64, 7) != 0 {
+            m = m | M_VEC
+        }
+        if find(cmd, (&w_force[0]) as u64, 8) != 0 {
+            m = m | M_FPUFORCE
+        }
+        if find(cmd, (&w_r3[0]) as u64, 5) != 0 {
+            m = m | M_R3SMP
+        }
+        if find(cmd, (&w_bench[0]) as u64, 8) != 0 {
+            m = m | M_BENCH
+        }
+    }
+    kstate.set(state, kstate.FPU_WORDS, m)
+    kstate.set(state, kstate.FPU_MODE, MODE_OFF)
+    kstate.set(state, kstate.FPU_XCR0, 0)
+    kstate.set(state, kstate.FPU_SIZE, 0)
+    kstate.set(state, kstate.FPU_APS, 0)
+    kstate.set(state, kstate.FPU_SAVES, 0)
+    kstate.set(state, kstate.FPU_RESTORES, 0)
+    kstate.set(state, kstate.FPU_NM, 0)
+    kstate.set(state, kstate.FPU_AREAS, 0)
+}
+
+fn want(state: u64, bit: u64) -> bool {
+    return (kstate.get(state, kstate.FPU_WORDS) & bit) != 0
+}
+
+// --------------------------------------------------------- `cpuid`
+//
+// rbx traegt in dieser Sprache den Rahmen und ist die eine Ausgabe, die
+// `asm` nicht hergibt; retten und zurueckholen ist der Weg, den
+// `guard.leaf7_ebx` und `rand.has_rdseed` schon gehen.
+
+fn cpuid_a(leaf: u64, sub: u64) -> u64 {
+    return asm("push rbx\nmov eax, edi\nmov ecx, esi\ncpuid\npop rbx",
+        in("rdi") leaf, in("rsi") sub, out("rax"),
+        clobber("rcx"), clobber("rdx"))
+}
+
+fn cpuid_b(leaf: u64, sub: u64) -> u64 {
+    return asm("push rbx\nmov eax, edi\nmov ecx, esi\ncpuid\nmov eax, ebx\npop rbx",
+        in("rdi") leaf, in("rsi") sub, out("rax"),
+        clobber("rcx"), clobber("rdx"))
+}
+
+fn cpuid_c(leaf: u64, sub: u64) -> u64 {
+    return asm("push rbx\nmov eax, edi\nmov ecx, esi\ncpuid\nmov eax, ecx\npop rbx",
+        in("rdi") leaf, in("rsi") sub, out("rax"),
+        clobber("rcx"), clobber("rdx"))
+}
+
+fn cpuid_d(leaf: u64, sub: u64) -> u64 {
+    return asm("push rbx\nmov eax, edi\nmov ecx, esi\ncpuid\nmov eax, edx\npop rbx",
+        in("rdi") leaf, in("rsi") sub, out("rax"),
+        clobber("rcx"), clobber("rdx"))
+}
+
+fn max_leaf() -> u64 {
+    return cpuid_a(0, 0)
+}
+
+// -------------------------------------------------- die Steuerregister
+
+fn cr0() -> u64 {
+    return asm("mov rax, cr0", out("rax"))
+}
+
+fn cr0_set(v: u64) {
+    asm("mov cr0, rax", in("rax") v)
+}
+
+fn cr4() -> u64 {
+    return asm("mov rax, cr4", out("rax"))
+}
+
+fn cr4_set(v: u64) {
+    asm("mov cr4, rax", in("rax") v)
+}
+
+// XSETBV/XGETBV nehmen die Maske in EDX:EAX und die Nummer in ECX. Der
+// 64-Bit-Wert wird IM Schablonentext geteilt, damit `asm` nur EINE
+// Eingabe braucht und keine Ladereihenfolge etwas zerstoeren kann.
+fn xsetbv0(v: u64) {
+    asm("mov rdx, rax\nshr rdx, 32\nxor ecx, ecx\nxsetbv",
+        in("rax") v, clobber("rcx"), clobber("rdx"))
+}
+
+fn xgetbv0() -> u64 {
+    return asm("xor ecx, ecx\nxgetbv\nmov eax, eax\nshl rdx, 32\nor rax, rdx",
+        out("rax"), clobber("rcx"), clobber("rdx"))
+}
+
+fn clts() {
+    asm("clts")
+}
+
+fn ts_clear() {
+    clts()
+}
+
+fn ts_set() {
+    cr0_set(cr0() | CR0_TS)
+}
+
+// ------------------------------------------------- sichern und laden
+
+fn fxsave_to(area: u64) {
+    asm("fxsave64 [rdi]", in("rdi") area, clobber("memory"))
+}
+
+fn fxrstor_from(area: u64) {
+    asm("fxrstor64 [rdi]", in("rdi") area, clobber("memory"))
+}
+
+fn xsave_to(area: u64, m: u64) {
+    asm("mov rdx, rax\nshr rdx, 32\nxsave64 [rdi]",
+        in("rdi") area, in("rax") m, clobber("rdx"), clobber("memory"))
+}
+
+fn xsaveopt_to(area: u64, m: u64) {
+    asm("mov rdx, rax\nshr rdx, 32\nxsaveopt64 [rdi]",
+        in("rdi") area, in("rax") m, clobber("rdx"), clobber("memory"))
+}
+
+fn xrstor_from(area: u64, m: u64) {
+    asm("mov rdx, rax\nshr rdx, 32\nxrstor64 [rdi]",
+        in("rdi") area, in("rax") m, clobber("rdx"), clobber("memory"))
+}
+
+// ------------------------------------------------------------ nachsehen
+
+// Was diese Maschine kann und was davon benutzt wird. Laeuft EINMAL, auf
+// dem Startprozessor. Jeder weitere Kern uebernimmt das Ergebnis --
+// gaebe es eine Maschine, deren Kerne verschieden viel koennen, waere
+// jede Entscheidung ueber den Kontextwechsel ohnehin falsch.
+fn probe(state: u64) {
+    if want(state, M_NOFPU) {
+        kstate.set(state, kstate.FPU_MODE, MODE_OFF)
+        return
+    }
+    let mx: u64 = max_leaf()
+    if mx < 1 {
+        kstate.set(state, kstate.FPU_MODE, MODE_OFF)
+        return
+    }
+    let f1d: u64 = cpuid_d(1, 0)
+    let f1c: u64 = cpuid_c(1, 0)
+    kstate.set(state, kstate.FPU_FEAT, (f1c << 32) | (f1d & 0xFFFFFFFF))
+    // Ohne FXSAVE gibt es keinen Bereich, in den gesichert werden
+    // koennte -- und ohne SSE nichts, was zu sichern waere. Eine solche
+    // Maschine (vor Pentium III) bekommt gar nichts; alles bleibt wie
+    // vor dieser Runde.
+    if (f1d & F1_FXSR) == 0 || (f1d & F1_SSE) == 0 {
+        kstate.set(state, kstate.FPU_MODE, MODE_OFF)
+        return
+    }
+    var m: u64 = MODE_FX
+    var want_xcr0: u64 = 0
+    var sz: u64 = 512
+    if (f1c & F1_XSAVE) != 0 && !want(state, M_NOXSAVE) && mx >= 13 {
+        // Was Blatt 0x0D anbietet -- und NUR das. XCR0 Bit 0 (x87) ist
+        // immer gesetzt, sonst ist `xsetbv` selbst ein #GP.
+        let sup_lo: u64 = cpuid_a(13, 0) & 0xFFFFFFFF
+        var mask: u64 = XCR0_X87
+        if (sup_lo & XCR0_SSE) != 0 {
+            mask = mask | XCR0_SSE
+        }
+        if !want(state, M_NOAVX) {
+            if (mask & XCR0_SSE) != 0 && (sup_lo & XCR0_AVX) != 0
+            && (f1c & F1_AVX) != 0 {
+                mask = mask | XCR0_AVX
+            }
+            if (mask & XCR0_AVX) != 0 && (sup_lo & XCR0_AVX512) == XCR0_AVX512
+            && mx >= 7 {
+                if (cpuid_b(7, 0) & F7_AVX512F) != 0 {
+                    mask = mask | XCR0_AVX512
+                }
+            }
+        }
+        // Der Hoechstbedarf ueber ALLE Anteile, die die Maschine
+        // anbietet (Blatt 0x0D, Unterblatt 0, ECX). Das ist die obere
+        // Schranke; der genaue Bedarf fuer die gewaehlte Maske steht
+        // erst nach dem `xsetbv` in EBX und wird dort nachgelesen.
+        let need: u64 = cpuid_c(13, 0)
+        // DIE GEGENPROBE, und sie steht ABSICHTLICH hinter der Abfrage:
+        // wer hier ohne zu fragen setzt, stirbt im `xsetbv`.
+        if want(state, M_FPUFORCE) {
+            mask = mask | XCR0_AVX | XCR0_AVX512
+        }
+        if need <= AREA_MAX && (mask & XCR0_SSE) != 0 {
+            m = MODE_XSAVE
+            want_xcr0 = mask
+            sz = need
+            if (cpuid_a(13, 1) & FD1_XSAVEOPT) != 0 {
+                m = MODE_XSAVEOPT
+            }
+        }
+    }
+    kstate.set(state, kstate.FPU_MODE, m)
+    kstate.set(state, kstate.FPU_XCR0, want_xcr0)
+    kstate.set(state, kstate.FPU_SIZE, sz)
+}
+
+// --------------------------------------------------------- einschalten
+
+// Die Bits, die auf JEDEM Kern gesetzt werden muessen. CR0 und CR4 sind
+// pro Kern, XCR0 auch -- ein Kern ohne diese drei Zeilen laesst jeden
+// Prozess sterben, der auf ihm eingeplant wird.
+fn enable_here(state: u64) {
+    var c0: u64 = cr0()
+    c0 = c0 & ~CR0_EM // SSE ist keine Emulation
+    c0 = c0 | CR0_MP // damit `fwait` bei TS ein #NM gibt
+    c0 = c0 | CR0_NE // x87-Fehler als #MF, nicht ueber IRQ13
+    c0 = c0 & ~CR0_TS // erst einmal AN; der traege Weg setzt es selbst
+    cr0_set(c0)
+    var c4: u64 = cr4()
+    c4 = c4 | CR4_OSFXSR | CR4_OSXMMEXCPT
+    let m: u64 = kstate.get(state, kstate.FPU_MODE)
+    if m >= MODE_XSAVE {
+        c4 = c4 | CR4_OSXSAVE
+    }
+    cr4_set(c4)
+    if m >= MODE_XSAVE {
+        xsetbv0(kstate.get(state, kstate.FPU_XCR0))
+    }
+}
+
+// Der Startprozessor. `probe` hat entschieden; hier wird es wahr, und
+// danach wird die GENAUE Groesse nachgelesen -- die aus Blatt 0x0D,
+// Unterblatt 0, EBX gilt fuer das XCR0, das JETZT steht.
+fn apply(state: u64) {
+    probe(state)
+    if kstate.get(state, kstate.FPU_MODE) == MODE_OFF {
+        return
+    }
+    enable_here(state)
+    if kstate.get(state, kstate.FPU_MODE) >= MODE_XSAVE {
+        let exact: u64 = cpuid_b(13, 0)
+        if exact >= 576 && exact <= AREA_MAX {
+            kstate.set(state, kstate.FPU_SIZE, exact)
+        }
+    }
+    kstate.set(state, kstate.FPU_CR4, cr4())
+}
+
+// Jeder weitere Prozessor, aus `smp.ap_main`. Er fragt `cpuid` nicht
+// noch einmal: was der Startprozessor entschieden hat, gilt fuer die
+// Maschine. Gezaehlt wird nur der Kern, der die Bits danach WIRKLICH in
+// seinem CR4 stehen hat -- ein `mov cr4`, das nichts bewirkt haette,
+// faellt hier auf.
+fn apply_here(state: u64) {
+    if kstate.get(state, kstate.FPU_MODE) == MODE_OFF {
+        return
+    }
+    enable_here(state)
+    var soll: u64 = CR4_OSFXSR | CR4_OSXMMEXCPT
+    if kstate.get(state, kstate.FPU_MODE) >= MODE_XSAVE {
+        soll = soll | CR4_OSXSAVE
+    }
+    if (cr4() & soll) == soll {
+        kstate.add(state, kstate.FPU_APS, 1)
+    }
+}
+
+fn enabled(state: u64) -> bool {
+    return kstate.get(state, kstate.FPU_MODE) != MODE_OFF
+}
+
+fn lazy(state: u64) -> bool {
+    return want(state, M_FPULAZY)
+}
+
+fn mode(state: u64) -> u64 {
+    return kstate.get(state, kstate.FPU_MODE)
+}
+
+fn xcr0(state: u64) -> u64 {
+    return kstate.get(state, kstate.FPU_XCR0)
+}
+
+fn area_size(state: u64) -> u64 {
+    return kstate.get(state, kstate.FPU_SIZE)
+}
+
+// ------------------------------------------------------- der Bereich
+
+// Der Anfangszustand eines neuen Prozesses, und er ist GENULLT und nicht
+// das, was der Vorgaenger auf diesem Platz hinterlassen hat. Das ist
+// derselbe Fehler, den Runde K6 mit den Signalroutinen schon einmal
+// hatte: ein Platz, den eine tote Aufgabe hinterlaesst, darf seiner
+// Nachfolgerin nichts vererben -- hier waeren es die Zwischenwerte
+// fremder Rechnungen.
+//
+// Zwei Felder muessen von Hand stehen, alles andere ist Null:
+//   +0   FCW = 0x037F
+//   +24  MXCSR = 0x1F80, darueber die MXCSR_MASK
+// XRSTOR laedt MXCSR IMMER aus dem Bereich, sobald SSE oder AVX in der
+// Maske steht -- unabhaengig davon, was im Kopf (XSTATE_BV) steht. Eine
+// 0 dort waere ein gueltiger, aber falscher Zustand: alle Masken offen.
+fn area_init(state: u64, area: u64) {
+    if area == 0 {
+        return
+    }
+    var i: u64 = 0
+    while i < AREA_MAX / 8 {
+        __mmio_write64((area + i * 8) as *mut u64, 0)
+        i = i + 1
+    }
+    __mmio_write64(area as *mut u64, INIT_FCW)
+    __mmio_write64((area + 24) as *mut u64,
+        INIT_MXCSR | (INIT_MXCSR_MASK << 32))
+    // Der XSAVE-Kopf liegt auf 512: XSTATE_BV = 0 heisst "alle Anteile
+    // im Anfangszustand", XCOMP_BV = 0 heisst Standardformat (nicht
+    // verdichtet). Beides steht schon durch das Nullen oben.
+}
+
+fn area_new(state: u64) -> u64 {
+    if !enabled(state) {
+        return 0
+    }
+    let a: u64 = mem.frame_alloc(state)
+    if a == 0 {
+        return 0
+    }
+    area_init(state, a)
+    kstate.add(state, kstate.FPU_AREAS, 1)
+    return a
+}
+
+fn area_free(state: u64, area: u64) {
+    if area == 0 {
+        return
+    }
+    mem.frame_free(state, area)
+}
+
+// `fork` erbt den Vektorzustand des Elternteils -- MXCSR, Rundungsart
+// und die Register selbst. Ein Kind, das mit anderen Rundungsbits
+// weiterrechnet als sein Elternteil, waere ein Fehler, der sich als
+// Zufall tarnt.
+fn area_copy(state: u64, dst: u64, src: u64) {
+    if dst == 0 || src == 0 {
+        return
+    }
+    var i: u64 = 0
+    while i < AREA_MAX / 8 {
+        __mmio_write64((dst + i * 8) as *mut u64,
+            __mmio_read64((src + i * 8) as *mut u64))
+        i = i + 1
+    }
+}
+
+// ------------------------------------------------ sichern / laden
+
+fn save(state: u64, area: u64) {
+    if area == 0 {
+        return
+    }
+    let m: u64 = kstate.get(state, kstate.FPU_MODE)
+    if m == MODE_FX {
+        fxsave_to(area)
+    } else {
+        if m == MODE_XSAVEOPT {
+            xsaveopt_to(area, kstate.get(state, kstate.FPU_XCR0))
+        } else {
+            if m == MODE_XSAVE {
+                xsave_to(area, kstate.get(state, kstate.FPU_XCR0))
+            }
+        }
+    }
+    kstate.set(state, kstate.FPU_SAVES,
+        kstate.get(state, kstate.FPU_SAVES) + 1)
+}
+
+fn restore(state: u64, area: u64) {
+    if area == 0 {
+        return
+    }
+    let m: u64 = kstate.get(state, kstate.FPU_MODE)
+    if m == MODE_FX {
+        fxrstor_from(area)
+    } else {
+        if m >= MODE_XSAVE {
+            xrstor_from(area, kstate.get(state, kstate.FPU_XCR0))
+        }
+    }
+    kstate.set(state, kstate.FPU_RESTORES,
+        kstate.get(state, kstate.FPU_RESTORES) + 1)
+}
+
+// ----------------------------------------------- der Kontextwechsel
+
+// Gerufen aus `sched.switch_to`, mit ausgeschalteten Unterbrechungen und
+// der Laufliste in der Hand. Hier wird weder gesperrt noch angefordert.
+//
+// EAGER (die Vorgabe): den Zustand des Abgebenden sichern, den des
+// Kommenden laden. Zwei Anweisungen, kein Fangbereich, keine Buchfuehrung
+// darueber, wer gerade was in seinen Registern hat.
+//
+// TRAEGE (`fpulazy`): das Laden faellt weg, CR0.TS wird gesetzt, und der
+// erste Vektorzugriff des Kommenden landet in `on_nm`. Das SICHERN
+// bleibt eager, und das ist kein Versehen: wuerde es ausgelassen, blieben
+// die Register einer Aufgabe auf DEM Kern liegen, von dem sie
+// weggeschaltet wurde -- und die naechste Runde derselben Aufgabe auf
+// einem ANDEREN Kern faende in ihrem Bereich veraltete Werte. Der Ausweg
+// waere ein Interruptschuss an den alten Kern; der kostet mehr als das,
+// was er spart.
+// `me` kommt von aussen und wird NICHT noch einmal ausgerechnet.
+// `cpu.here` liest das Kennungsregister des lokalen APIC -- unter KVM
+// ist das ein Ausstieg aus der Gastmaschine, und `sched.switch_to` hat
+// die Zahl drei Zeilen weiter oben ohnehin schon.
+fn switch(state: u64, me: u64, from_area: u64, to_area: u64) {
+    if !enabled(state) {
+        return
+    }
+    // DIE GEGENPROBE. Freigeschaltet, aber nichts gesichert -- genau der
+    // Fehler, vor dem `docs/OTA.md` warnt.
+    if want(state, M_NOFPUSWITCH) {
+        return
+    }
+    if want(state, M_FPULAZY) {
+        // Nur sichern, wenn dieser Kern den Zustand des Abgebenden
+        // wirklich geladen hat. Eine Aufgabe, die nie ein Vektorregister
+        // angefasst hat, hat ihn nicht -- ihr Bereich ist noch der, den
+        // `area_init` geschrieben hat, und der ist richtig.
+        if from_area != 0 && cpu.get(state, me, cpu.C_FPUOWNER) == from_area {
+            save(state, from_area)
+        }
+        cpu.set(state, me, cpu.C_FPUOWNER, 0)
+        ts_set()
+        return
+    }
+    save(state, from_area)
+    restore(state, to_area)
+    cpu.set(state, me, cpu.C_FPUOWNER, to_area)
+}
+
+// DEN LEBENDEN ZUSTAND IN DEN BEREICH SCHREIBEN, und das ist kein
+// Luxus, sondern eine Fehlerbehebung an einer Stelle, die beim ersten
+// Anlauf falsch war.
+//
+// Im Bereich einer Aufgabe steht der Zustand, den der LETZTE
+// Kontextwechsel dort abgelegt hat. Solange die Aufgabe LAEUFT, ist das
+// nicht ihr Zustand -- der steht in den Registern des Prozessors, und
+// dort hat er sich seitdem geaendert. Wer den Bereich einer LAUFENDEN
+// Aufgabe liest (`fork` tut genau das: es kopiert ihn ins Kind), liest
+// etwas Veraltetes. Das Kind bekaeme die Register des Elternteils von
+// vor seinem letzten Wechsel.
+//
+// Gesichert wird nur, wenn DIESER Kern die Register dieser Aufgabe
+// wirklich traegt -- sonst waere es der Zustand von jemand anderem.
+fn sync_here(state: u64, area: u64) {
+    if !enabled(state) || area == 0 {
+        return
+    }
+    if cpu.get(state, cpu.here(state), cpu.C_FPUOWNER) == area {
+        save(state, area)
+    }
+}
+
+// Nach `execve`: der Bereich ist frisch genullt, aber in den REGISTERN
+// steht noch, was das alte Abbild hinterlassen hat. Ohne diese Zeilen
+// wuerde der naechste Wechsel genau das wieder in den frischen Bereich
+// hineinsichern -- und das neue Programm liefe mit dem MXCSR des alten.
+fn adopt_now(state: u64, area: u64) {
+    if !enabled(state) || area == 0 {
+        return
+    }
+    let me: u64 = cpu.here(state)
+    if want(state, M_FPULAZY) {
+        cpu.set(state, me, cpu.C_FPUOWNER, 0)
+        ts_set()
+        return
+    }
+    restore(state, area)
+    cpu.set(state, me, cpu.C_FPUOWNER, area)
+}
+
+// #NM (Vektor 7), aus `trap.entry`. Nur auf dem traegen Weg erreichbar:
+// eager laeuft mit geloeschtem TS und loest kein #NM aus.
+fn on_nm(state: u64, area: u64) -> bool {
+    if !enabled(state) || !want(state, M_FPULAZY) {
+        return false
+    }
+    clts()
+    let me: u64 = cpu.here(state)
+    let own: u64 = cpu.get(state, me, cpu.C_FPUOWNER)
+    if own != 0 && own != area {
+        save(state, own)
+    }
+    restore(state, area)
+    cpu.set(state, me, cpu.C_FPUOWNER, area)
+    kstate.set(state, kstate.FPU_NM, kstate.get(state, kstate.FPU_NM) + 1)
+    return true
+}
+
+// Ein Bereich verschwindet (`reap`, `execve`). Was ein Kern noch als
+// "geladen" fuehrt, darf danach nicht mehr gesichert werden -- der
+// Rahmen gehoert dann schon jemand anderem.
+fn drop_owner(state: u64, area: u64) {
+    if area == 0 {
+        return
+    }
+    var i: u64 = 0
+    while i < kstate.MAX_CPUS {
+        if cpu.get(state, i, cpu.C_FPUOWNER) == area {
+            cpu.set(state, i, cpu.C_FPUOWNER, 0)
+        }
+        i = i + 1
+    }
+}
+
+// ------------------------------------------------------------- melden
+
+// Was `cpuid` ueber diese Maschine sagt -- die Zahlen, aus denen
+// `probe` seine Entscheidung gebaut hat. Ohne sie waere jede Zeile
+// darueber eine Behauptung ueber eine Maschine, die niemand nachsehen
+// kann.
+fn report_cpu(state: u64) {
+    var s_a: [u8; 11] = "fpu: f1c=\0\0"
+    var s_b: [u8; 9] = "  f1d=\0\0\0"
+    var s_c: [u8; 9] = "  f7b=\0\0\0"
+    var s_d: [u8; 9] = "  sup=\0\0\0"
+    var s_e: [u8; 10] = "  need=\0\0\0"
+    serial.puts((&s_a[0]) as u64)
+    serial.hex(cpuid_c(1, 0))
+    serial.puts((&s_b[0]) as u64)
+    serial.hex(cpuid_d(1, 0))
+    serial.puts((&s_c[0]) as u64)
+    if max_leaf() >= 7 {
+        serial.hex(cpuid_b(7, 0))
+    } else {
+        serial.hex(0)
+    }
+    serial.puts((&s_d[0]) as u64)
+    if max_leaf() >= 13 {
+        serial.hex(cpuid_a(13, 0))
+    } else {
+        serial.hex(0)
+    }
+    serial.puts((&s_e[0]) as u64)
+    if max_leaf() >= 13 {
+        serial.dec(cpuid_c(13, 0))
+    } else {
+        serial.dec(0)
+    }
+    serial.nl()
+}
+
+fn cpu_feat(state: u64) -> u64 {
+    return kstate.get(state, kstate.FPU_FEAT)
+}
+
+fn report(state: u64) {
+    var s_a: [u8; 11] = "fpu: mode=\0"
+    var s_b: [u8; 8] = "  cr4=\0\0"
+    var s_c: [u8; 9] = "  xcr0=\0\0"
+    var s_d: [u8; 9] = "  size=\0\0"
+    var s_e: [u8; 9] = "  lazy=\0\0"
+    serial.puts((&s_a[0]) as u64)
+    serial.dec(kstate.get(state, kstate.FPU_MODE))
+    serial.puts((&s_b[0]) as u64)
+    serial.hex(cr4())
+    serial.puts((&s_c[0]) as u64)
+    if kstate.get(state, kstate.FPU_MODE) >= MODE_XSAVE {
+        serial.hex(xgetbv0())
+    } else {
+        serial.hex(0)
+    }
+    serial.puts((&s_d[0]) as u64)
+    serial.dec(kstate.get(state, kstate.FPU_SIZE))
+    serial.puts((&s_e[0]) as u64)
+    serial.dec(yesno(want(state, M_FPULAZY)))
+    serial.nl()
+    report_cpu(state)
+}
+
+fn report_aps(state: u64) {
+    var s_a: [u8; 10] = "fpu: aps=\0"
+    var s_b: [u8; 10] = "  saves=\0\0"
+    var s_c: [u8; 13] = "  restores=\0\0"
+    var s_d: [u8; 8] = "  nm=\0\0\0"
+    var s_e: [u8; 10] = "  areas=\0\0"
+    serial.puts((&s_a[0]) as u64)
+    serial.dec(kstate.get(state, kstate.FPU_APS))
+    serial.puts((&s_b[0]) as u64)
+    serial.dec(kstate.get(state, kstate.FPU_SAVES))
+    serial.puts((&s_c[0]) as u64)
+    serial.dec(kstate.get(state, kstate.FPU_RESTORES))
+    serial.puts((&s_d[0]) as u64)
+    serial.dec(kstate.get(state, kstate.FPU_NM))
+    serial.puts((&s_e[0]) as u64)
+    serial.dec(kstate.get(state, kstate.FPU_AREAS))
+    serial.nl()
+}
+
+fn yesno(b: bool) -> u64 {
+    if b {
+        return 1
+    }
+    return 0
+}
+
+// -------------------------------------------------------------- Suche
+//
+// Dieselbe Suche wie in `guard.find` und `fb.parse`: jedes Modul liest
+// sich sein eigenes Wort aus der Kommandozeile, statt dass eine Stelle
+// alle kennt.
+fn find(heu: u64, nadel: u64, n: u64) -> u64 {
+    if heu == 0 || n == 0 {
+        return 0
+    }
+    var i: u64 = 0
+    while true {
+        let c: u64 = kstate.get8(heu + i)
+        if c == 0 {
+            return 0
+        }
+        var k: u64 = 0
+        var gleich: bool = true
+        while k < n {
+            let a: u64 = kstate.get8(heu + i + k)
+            if a == 0 || a != kstate.get8(nadel + k) {
+                gleich = false
+                k = n
+            } else {
+                k = k + 1
+            }
+        }
+        if gleich {
+            return heu + i
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+
+// =============================================== die Vektorprobe im Kern
+//
+// Dasselbe Verfahren wie `uprog.u_vec`, nur in Ring 0 und nur auf xmm.
+// Sie ist da, weil der Test aus Ring 3 auf EINEM Prozessor bleiben muss:
+// `syscall_entry` in `isr.s` legt den Nutzerstapel in EIN globales Wort
+// (`sys_rsp`) und holt den Kernstapel aus EINEM (`kdata + KSTACK_CUR`).
+// Zwei Kerne, die gleichzeitig einen Systemaufruf machen, stehen danach
+// auf demselben Kernstapel -- gemessen, siehe `docs/RUNDE-AVX.md`. Das
+// ist eine Grenze aus Runde K5 und steht dort auch so im Kommentar von
+// `sched.set_kernel_stack`; sie zu heben ist eine eigene Runde
+// (`swapgs` und ein Kernstapel je Kern).
+//
+// KERNAUFGABEN wandern dagegen sehr wohl zwischen den Kernen (Runde K5,
+// `sched.may_run` mit ANY_CPU), und sie gehen durch DENSELBEN
+// Kontextwechsel. Also wird auf ihnen gemessen, was auf mehreren
+// Prozessoren zu messen ist: dass eine Aufgabe ihre Vektorregister
+// mitnimmt, wenn sie den Kern wechselt.
+//
+// NUR xmm, und das ist Absicht: was hier gezeigt wird, ist der WECHSEL.
+// Wie breit gesichert wird, zeigt der Test aus Ring 3, und die Breite
+// haengt an XCR0 und nicht am Kern, auf dem er laeuft.
+
+const VEC_REGS: u64 = 16
+const VEC_LANES: u64 = 2
+const VEC_WORDS: u64 = 32 // 16 Register * 2 Bahnen
+const VEC_BYTES: u64 = 256
+
+fn vec_put(p: u64) {
+    asm("movdqu xmm0,[rdi]\nmovdqu xmm1,[rdi+16]\nmovdqu xmm2,[rdi+32]\nmovdqu xmm3,[rdi+48]\nmovdqu xmm4,[rdi+64]\nmovdqu xmm5,[rdi+80]\nmovdqu xmm6,[rdi+96]\nmovdqu xmm7,[rdi+112]\nmovdqu xmm8,[rdi+128]\nmovdqu xmm9,[rdi+144]\nmovdqu xmm10,[rdi+160]\nmovdqu xmm11,[rdi+176]\nmovdqu xmm12,[rdi+192]\nmovdqu xmm13,[rdi+208]\nmovdqu xmm14,[rdi+224]\nmovdqu xmm15,[rdi+240]",
+        in("rdi") p, clobber("memory"))
+}
+
+fn vec_take(p: u64) {
+    asm("movdqu [rdi],xmm0\nmovdqu [rdi+16],xmm1\nmovdqu [rdi+32],xmm2\nmovdqu [rdi+48],xmm3\nmovdqu [rdi+64],xmm4\nmovdqu [rdi+80],xmm5\nmovdqu [rdi+96],xmm6\nmovdqu [rdi+112],xmm7\nmovdqu [rdi+128],xmm8\nmovdqu [rdi+144],xmm9\nmovdqu [rdi+160],xmm10\nmovdqu [rdi+176],xmm11\nmovdqu [rdi+192],xmm12\nmovdqu [rdi+208],xmm13\nmovdqu [rdi+224],xmm14\nmovdqu [rdi+240],xmm15",
+        in("rdi") p, clobber("memory"))
+}
+
+fn vec_calc() {
+    asm("paddq xmm0,xmm1\npaddq xmm1,xmm2\npaddq xmm2,xmm3\npaddq xmm3,xmm4\npaddq xmm4,xmm5\npaddq xmm5,xmm6\npaddq xmm6,xmm7\npaddq xmm7,xmm8\npaddq xmm8,xmm9\npaddq xmm9,xmm10\npaddq xmm10,xmm11\npaddq xmm11,xmm12\npaddq xmm12,xmm13\npaddq xmm13,xmm14\npaddq xmm14,xmm15")
+}
+
+fn vec_seed(p: u64, seed: u64) {
+    var k: u64 = 0
+    while k < VEC_WORDS {
+        __mmio_write64((p + k * 8) as *mut u64,
+            (seed << 56) | (seed << 40) | (seed << 24) | (k << 8) | 0xA5)
+        k = k + 1
+    }
+}
+
+// Dieselbe Folge in gewoehnlichen Zahlen. `+%` ist gemeint: `paddq`
+// rechnet 64 Bit mit Ueberlauf.
+fn vec_ref(p: u64) {
+    var n: u64 = 0
+    while n + 1 < VEC_REGS {
+        var l: u64 = 0
+        while l < VEC_LANES {
+            let a: u64 = __mmio_read64((p + (n * VEC_LANES + l) * 8) as *mut u64)
+            let b: u64 = __mmio_read64(
+                (p + ((n + 1) * VEC_LANES + l) * 8) as *mut u64)
+            __mmio_write64((p + (n * VEC_LANES + l) * 8) as *mut u64, a +% b)
+            l = l + 1
+        }
+        n = n + 1
+    }
+}
+
+fn vec_diff(a: u64, b: u64) -> u64 {
+    var k: u64 = 0
+    var bad: u64 = 0
+    while k < VEC_WORDS {
+        if __mmio_read64((a + k * 8) as *mut u64)
+        != __mmio_read64((b + k * 8) as *mut u64) {
+            bad = bad + 1
+        }
+        k = k + 1
+    }
+    return bad
+}
