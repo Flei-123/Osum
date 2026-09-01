@@ -90,7 +90,8 @@ export {
     enabled, lazy, area_size, mode, xcr0,
     area_new, area_free, area_init, area_copy,
     save, restore, switch, on_nm, drop_owner, adopt_now,
-    M_NOFPU, M_NOFPUSWITCH, M_FPULAZY, M_NOXSAVE, M_NOAVX, want,
+    M_NOFPU, M_NOFPUSWITCH, M_FPULAZY, M_NOXSAVE, M_NOAVX, M_VEC,
+    M_FPUFORCE, want, cpu_feat,
     MODE_OFF, MODE_FX, MODE_XSAVE, MODE_XSAVEOPT
 }
 
@@ -156,6 +157,15 @@ const M_NOFPUSWITCH: u64 = 2 // freischalten, aber NICHT sichern
 const M_FPULAZY: u64 = 4 // CR0.TS + #NM statt immer laden
 const M_NOXSAVE: u64 = 8 // FXSAVE erzwingen, auch wo XSAVE da waere
 const M_NOAVX: u64 = 16 // XCR0 auf x87+SSE begrenzen
+const M_VEC: u64 = 32 // die vier Testprozesse starten (`vec`)
+// GEGENPROBE ZU DER EINEN REGEL, DIE `docs/OTA.md` ausdruecklich nennt:
+// "Nichts freischalten, was `cpuid` nicht anbietet -- das ist selbst ein
+// #GP". `fpuforce` setzt die drei AVX-512-Bits in XCR0, OHNE zu fragen.
+// Auf einer Maschine, die sie hat, aendert das nichts; auf einer ohne
+// (jede AMD bis Zen 4, jeder Intel-Desktop seit Alder Lake) muss der
+// Kernel im `xsetbv` an einem #GP stehenbleiben. Genau das ist der
+// Nachweis, dass die Abfrage in `probe` keine Zierde ist.
+const M_FPUFORCE: u64 = 64
 
 fn parse(state: u64, cmd: u64) {
     var w_nofpu: [u8; 6] = "nofpu\0"
@@ -163,6 +173,8 @@ fn parse(state: u64, cmd: u64) {
     var w_lazy: [u8; 8] = "fpulazy\0"
     var w_noxs: [u8; 8] = "noxsave\0"
     var w_noavx: [u8; 6] = "noavx\0"
+    var w_vec: [u8; 8] = "vecproc\0"
+    var w_force: [u8; 9] = "fpuforce\0"
     var m: u64 = 0
     if cmd != 0 {
         // `nofpuswitch` faengt mit `nofpu` an -- also erst das lange
@@ -184,6 +196,16 @@ fn parse(state: u64, cmd: u64) {
         }
         if find(cmd, (&w_noavx[0]) as u64, 5) != 0 {
             m = m | M_NOAVX
+        }
+        // `vecproc` und nicht `vec`: die Kommandozeile wird nach
+        // TEILWOERTERN durchsucht, und ein Wort mit drei Zeichen trifft
+        // irgendwann etwas, was es nicht treffen sollte. Runde K13 hat
+        // genau diesen Fehler eine Stunde lang gesucht (`k13run`).
+        if find(cmd, (&w_vec[0]) as u64, 7) != 0 {
+            m = m | M_VEC
+        }
+        if find(cmd, (&w_force[0]) as u64, 8) != 0 {
+            m = m | M_FPUFORCE
         }
     }
     kstate.set(state, kstate.FPU_WORDS, m)
@@ -354,6 +376,11 @@ fn probe(state: u64) {
         // Schranke; der genaue Bedarf fuer die gewaehlte Maske steht
         // erst nach dem `xsetbv` in EBX und wird dort nachgelesen.
         let need: u64 = cpuid_c(13, 0)
+        // DIE GEGENPROBE, und sie steht ABSICHTLICH hinter der Abfrage:
+        // wer hier ohne zu fragen setzt, stirbt im `xsetbv`.
+        if want(state, M_FPUFORCE) {
+            mask = mask | XCR0_AVX | XCR0_AVX512
+        }
         if need <= AREA_MAX && (mask & XCR0_SSE) != 0 {
             m = MODE_XSAVE
             want_xcr0 = mask
@@ -653,6 +680,45 @@ fn drop_owner(state: u64, area: u64) {
 
 // ------------------------------------------------------------- melden
 
+// Was `cpuid` ueber diese Maschine sagt -- die Zahlen, aus denen
+// `probe` seine Entscheidung gebaut hat. Ohne sie waere jede Zeile
+// darueber eine Behauptung ueber eine Maschine, die niemand nachsehen
+// kann.
+fn report_cpu(state: u64) {
+    var s_a: [u8; 11] = "fpu: f1c=\0\0"
+    var s_b: [u8; 9] = "  f1d=\0\0\0"
+    var s_c: [u8; 9] = "  f7b=\0\0\0"
+    var s_d: [u8; 9] = "  sup=\0\0\0"
+    var s_e: [u8; 10] = "  need=\0\0\0"
+    serial.puts((&s_a[0]) as u64)
+    serial.hex(cpuid_c(1, 0))
+    serial.puts((&s_b[0]) as u64)
+    serial.hex(cpuid_d(1, 0))
+    serial.puts((&s_c[0]) as u64)
+    if max_leaf() >= 7 {
+        serial.hex(cpuid_b(7, 0))
+    } else {
+        serial.hex(0)
+    }
+    serial.puts((&s_d[0]) as u64)
+    if max_leaf() >= 13 {
+        serial.hex(cpuid_a(13, 0))
+    } else {
+        serial.hex(0)
+    }
+    serial.puts((&s_e[0]) as u64)
+    if max_leaf() >= 13 {
+        serial.dec(cpuid_c(13, 0))
+    } else {
+        serial.dec(0)
+    }
+    serial.nl()
+}
+
+fn cpu_feat(state: u64) -> u64 {
+    return kstate.get(state, kstate.FPU_FEAT)
+}
+
 fn report(state: u64) {
     var s_a: [u8; 11] = "fpu: mode=\0"
     var s_b: [u8; 8] = "  cr4=\0\0"
@@ -674,6 +740,7 @@ fn report(state: u64) {
     serial.puts((&s_e[0]) as u64)
     serial.dec(yesno(want(state, M_FPULAZY)))
     serial.nl()
+    report_cpu(state)
 }
 
 fn report_aps(state: u64) {

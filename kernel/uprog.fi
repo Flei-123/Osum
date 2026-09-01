@@ -194,6 +194,9 @@ const P_ASYNC: u64 = 50
 const P_ABENCH: u64 = 51
 // RUNDE ASYNC: die Arten, die ein Dateisystem brauchen.
 const P_ASYNCFS: u64 = 52
+// RUNDE AVX: der Vektorregister-Test. Mehrere davon laufen
+// GLEICHZEITIG und pruefen, dass jeder seine eigenen Werte behaelt.
+const P_VEC: u64 = 53
 
 // Die sechs Aufrufe des Blocks ab 1980 (`kernel/sys.fi`).
 const AIO_VERSION: u64 = 1980
@@ -430,6 +433,9 @@ fn u_enter(packed: u64) {
     }
     if prog == P_ASYNCFS {
         u_asyncfs(arg)
+    }
+    if prog == P_VEC {
+        u_vec(arg)
     }
     u_sys(SYS_EXIT, 0, 0, 0)
     while true {
@@ -2928,4 +2934,267 @@ fn u_pwrload(arg: u64) {
     }
     u_k18((&n[0]) as u64, acc & 0xFF)
     u_sys(SYS_EXIT, 0, 0, 0)
+}
+
+
+// ==================================================== RUNDE AVX
+//
+// DIE GEGENPROBE ZUM KONTEXTWECHSEL, UND SIE IST DER EIGENTLICHE
+// NACHWEIS DIESER RUNDE.
+//
+// Vier dieser Programme laufen GLEICHZEITIG. Jedes schreibt ein Muster
+// in ALLE Vektorregister, das nur zu ihm passt (es steckt seine
+// Programmnummer darin), rechnet damit, gibt den Prozessor ab -- und
+// sieht danach nach, ob es seine eigenen Werte wiederfindet.
+//
+// OHNE die Sicherung im Kontextwechsel MUSS das fehlschlagen: die
+// Register sind EINE Sache und gehoeren dem Prozessor, nicht dem
+// Prozess. Genau dafuer gibt es das Wort `nofpuswitch` auf der
+// Kernel-Befehlszeile -- es schaltet CR4/XCR0 frei, laesst aber
+// FXSAVE/XSAVE weg. Das ist der Fehler, vor dem `docs/OTA.md` warnt
+// ("Das Freischalten allein waere FALSCH"), und dieser Test zeigt ihn
+// als Zahl. Ein Test, der nicht rot werden KANN, misst nichts.
+//
+// WIE BREIT GEMESSEN WIRD, entscheidet die Maschine -- mit genau der
+// Frage, die auch Firns Bibliothek stellt (`lib/std/cpu.fi`):
+//
+//   xmm   immer (SSE2 ist in x86-64 enthalten)
+//   ymm   wenn CPUID.1:ECX Bit 28 (AVX) UND Bit 27 (OSXSAVE) stehen
+//         UND XCR0 die Bits 1 und 2 traegt. Bit 27 ist die Zusage DES
+//         BETRIEBSSYSTEMS, nicht der Maschine -- vor dieser Runde stand
+//         es hier auf null, und deshalb blieb ein Programm, das richtig
+//         fragt, bei xmm.
+//   zmm   dazu CPUID.7:EBX Bit 16 (AVX512F) und XCR0 Bits 5,6,7. Dann
+//         werden ALLE 32 zmm geprueft, also auch zmm16..31 -- die
+//         liegen in einem EIGENEN XSAVE-Anteil (Hi16_ZMM), und das ist
+//         der, den man am leichtesten vergisst.
+//
+// GERECHNET WIRD NUR ZWISCHEN DEN REGISTERN SELBST (`paddq xmmN,
+// xmmN+1`, der Reihe nach). Damit braucht der Test keinen
+// Speicheroperanden und keine Ausrichtung, und die Nachrechnung in
+// gewoehnlichen Zahlen ist Zeile fuer Zeile dieselbe Folge.
+//
+// SPEICHER: die Seite auf USER_DATA (4096 Oktette) reicht genau --
+// 32 Register * 8 Bahnen * 8 Oktette = 2048 fuer das Erwartete und
+// 2048 fuer das Vorgefundene.
+
+const VEC_WANT: u64 = USER_DATA
+const VEC_GOT: u64 = USER_DATA + 2048
+const VEC_ROUNDS: u64 = 64
+
+// ---- cpuid und xgetbv aus Ring 3 -------------------------------------
+//
+// rbx traegt den Rahmen und ist die eine Ausgabe, die `asm` in dieser
+// Sprache nicht hergibt; retten und zurueckholen ist derselbe Griff wie
+// in `kernel/arch/x86_64/guard.fi`.
+
+fn u_cpuid_b(leaf: u64, sub: u64) -> u64 {
+    return asm("push rbx\nmov eax, edi\nmov ecx, esi\ncpuid\nmov eax, ebx\npop rbx",
+        in("rdi") leaf, in("rsi") sub, out("rax"),
+        clobber("rcx"), clobber("rdx"))
+}
+
+fn u_cpuid_c(leaf: u64, sub: u64) -> u64 {
+    return asm("push rbx\nmov eax, edi\nmov ecx, esi\ncpuid\nmov eax, ecx\npop rbx",
+        in("rdi") leaf, in("rsi") sub, out("rax"),
+        clobber("rcx"), clobber("rdx"))
+}
+
+// XGETBV ist in Ring 3 erlaubt, SOBALD CR4.OSXSAVE steht -- und genau
+// das meldet CPUID.1:ECX Bit 27. Ohne die Abfrage davor waere dieser
+// Aufruf auf einer Maschine ohne die Runde ein #UD.
+fn u_xgetbv0() -> u64 {
+    return asm("xor ecx, ecx\nxgetbv\nmov eax, eax\nshl rdx, 32\nor rax, rdx",
+        out("rax"), clobber("rcx"), clobber("rdx"))
+}
+
+// 1 = xmm, 2 = ymm, 3 = zmm
+fn u_vec_width() -> u64 {
+    let f1c: u64 = u_cpuid_c(1, 0)
+    if (f1c & 0x8000000) == 0 { // Bit 27: OSXSAVE
+        return 1
+    }
+    let x: u64 = u_xgetbv0()
+    if (f1c & 0x10000000) == 0 || (x & 6) != 6 { // Bit 28: AVX
+        return 1
+    }
+    if (x & 0xE0) == 0xE0 {
+        if (u_cpuid_b(7, 0) & 0x10000) != 0 { // Bit 16: AVX512F
+            return 3
+        }
+    }
+    return 2
+}
+
+fn u_vec_regs(w: u64) -> u64 {
+    if w == 3 {
+        return 32
+    }
+    return 16
+}
+
+fn u_vec_lanes(w: u64) -> u64 {
+    if w == 3 {
+        return 8
+    }
+    if w == 2 {
+        return 4
+    }
+    return 2
+}
+
+// ---- die Register fuellen, auslesen und rechnen -----------------------
+
+fn u_xmm_put(p: u64) {
+    asm("movdqu xmm0,[rdi]\nmovdqu xmm1,[rdi+16]\nmovdqu xmm2,[rdi+32]\nmovdqu xmm3,[rdi+48]\nmovdqu xmm4,[rdi+64]\nmovdqu xmm5,[rdi+80]\nmovdqu xmm6,[rdi+96]\nmovdqu xmm7,[rdi+112]\nmovdqu xmm8,[rdi+128]\nmovdqu xmm9,[rdi+144]\nmovdqu xmm10,[rdi+160]\nmovdqu xmm11,[rdi+176]\nmovdqu xmm12,[rdi+192]\nmovdqu xmm13,[rdi+208]\nmovdqu xmm14,[rdi+224]\nmovdqu xmm15,[rdi+240]",
+        in("rdi") p, clobber("memory"))
+}
+
+fn u_xmm_take(p: u64) {
+    asm("movdqu [rdi],xmm0\nmovdqu [rdi+16],xmm1\nmovdqu [rdi+32],xmm2\nmovdqu [rdi+48],xmm3\nmovdqu [rdi+64],xmm4\nmovdqu [rdi+80],xmm5\nmovdqu [rdi+96],xmm6\nmovdqu [rdi+112],xmm7\nmovdqu [rdi+128],xmm8\nmovdqu [rdi+144],xmm9\nmovdqu [rdi+160],xmm10\nmovdqu [rdi+176],xmm11\nmovdqu [rdi+192],xmm12\nmovdqu [rdi+208],xmm13\nmovdqu [rdi+224],xmm14\nmovdqu [rdi+240],xmm15",
+        in("rdi") p, clobber("memory"))
+}
+
+fn u_xmm_add() {
+    asm("paddq xmm0,xmm1\npaddq xmm1,xmm2\npaddq xmm2,xmm3\npaddq xmm3,xmm4\npaddq xmm4,xmm5\npaddq xmm5,xmm6\npaddq xmm6,xmm7\npaddq xmm7,xmm8\npaddq xmm8,xmm9\npaddq xmm9,xmm10\npaddq xmm10,xmm11\npaddq xmm11,xmm12\npaddq xmm12,xmm13\npaddq xmm13,xmm14\npaddq xmm14,xmm15")
+}
+
+fn u_ymm_put(p: u64) {
+    asm("vmovdqu ymm0,[rdi]\nvmovdqu ymm1,[rdi+32]\nvmovdqu ymm2,[rdi+64]\nvmovdqu ymm3,[rdi+96]\nvmovdqu ymm4,[rdi+128]\nvmovdqu ymm5,[rdi+160]\nvmovdqu ymm6,[rdi+192]\nvmovdqu ymm7,[rdi+224]\nvmovdqu ymm8,[rdi+256]\nvmovdqu ymm9,[rdi+288]\nvmovdqu ymm10,[rdi+320]\nvmovdqu ymm11,[rdi+352]\nvmovdqu ymm12,[rdi+384]\nvmovdqu ymm13,[rdi+416]\nvmovdqu ymm14,[rdi+448]\nvmovdqu ymm15,[rdi+480]",
+        in("rdi") p, clobber("memory"))
+}
+
+fn u_ymm_take(p: u64) {
+    asm("vmovdqu [rdi],ymm0\nvmovdqu [rdi+32],ymm1\nvmovdqu [rdi+64],ymm2\nvmovdqu [rdi+96],ymm3\nvmovdqu [rdi+128],ymm4\nvmovdqu [rdi+160],ymm5\nvmovdqu [rdi+192],ymm6\nvmovdqu [rdi+224],ymm7\nvmovdqu [rdi+256],ymm8\nvmovdqu [rdi+288],ymm9\nvmovdqu [rdi+320],ymm10\nvmovdqu [rdi+352],ymm11\nvmovdqu [rdi+384],ymm12\nvmovdqu [rdi+416],ymm13\nvmovdqu [rdi+448],ymm14\nvmovdqu [rdi+480],ymm15",
+        in("rdi") p, clobber("memory"))
+}
+
+fn u_ymm_add() {
+    asm("vpaddq ymm0,ymm0,ymm1\nvpaddq ymm1,ymm1,ymm2\nvpaddq ymm2,ymm2,ymm3\nvpaddq ymm3,ymm3,ymm4\nvpaddq ymm4,ymm4,ymm5\nvpaddq ymm5,ymm5,ymm6\nvpaddq ymm6,ymm6,ymm7\nvpaddq ymm7,ymm7,ymm8\nvpaddq ymm8,ymm8,ymm9\nvpaddq ymm9,ymm9,ymm10\nvpaddq ymm10,ymm10,ymm11\nvpaddq ymm11,ymm11,ymm12\nvpaddq ymm12,ymm12,ymm13\nvpaddq ymm13,ymm13,ymm14\nvpaddq ymm14,ymm14,ymm15")
+}
+
+fn u_zmm_put(p: u64) {
+    asm("vmovdqu64 zmm0,[rdi]\nvmovdqu64 zmm1,[rdi+64]\nvmovdqu64 zmm2,[rdi+128]\nvmovdqu64 zmm3,[rdi+192]\nvmovdqu64 zmm4,[rdi+256]\nvmovdqu64 zmm5,[rdi+320]\nvmovdqu64 zmm6,[rdi+384]\nvmovdqu64 zmm7,[rdi+448]\nvmovdqu64 zmm8,[rdi+512]\nvmovdqu64 zmm9,[rdi+576]\nvmovdqu64 zmm10,[rdi+640]\nvmovdqu64 zmm11,[rdi+704]\nvmovdqu64 zmm12,[rdi+768]\nvmovdqu64 zmm13,[rdi+832]\nvmovdqu64 zmm14,[rdi+896]\nvmovdqu64 zmm15,[rdi+960]\nvmovdqu64 zmm16,[rdi+1024]\nvmovdqu64 zmm17,[rdi+1088]\nvmovdqu64 zmm18,[rdi+1152]\nvmovdqu64 zmm19,[rdi+1216]\nvmovdqu64 zmm20,[rdi+1280]\nvmovdqu64 zmm21,[rdi+1344]\nvmovdqu64 zmm22,[rdi+1408]\nvmovdqu64 zmm23,[rdi+1472]\nvmovdqu64 zmm24,[rdi+1536]\nvmovdqu64 zmm25,[rdi+1600]\nvmovdqu64 zmm26,[rdi+1664]\nvmovdqu64 zmm27,[rdi+1728]\nvmovdqu64 zmm28,[rdi+1792]\nvmovdqu64 zmm29,[rdi+1856]\nvmovdqu64 zmm30,[rdi+1920]\nvmovdqu64 zmm31,[rdi+1984]",
+        in("rdi") p, clobber("memory"))
+}
+
+fn u_zmm_take(p: u64) {
+    asm("vmovdqu64 [rdi],zmm0\nvmovdqu64 [rdi+64],zmm1\nvmovdqu64 [rdi+128],zmm2\nvmovdqu64 [rdi+192],zmm3\nvmovdqu64 [rdi+256],zmm4\nvmovdqu64 [rdi+320],zmm5\nvmovdqu64 [rdi+384],zmm6\nvmovdqu64 [rdi+448],zmm7\nvmovdqu64 [rdi+512],zmm8\nvmovdqu64 [rdi+576],zmm9\nvmovdqu64 [rdi+640],zmm10\nvmovdqu64 [rdi+704],zmm11\nvmovdqu64 [rdi+768],zmm12\nvmovdqu64 [rdi+832],zmm13\nvmovdqu64 [rdi+896],zmm14\nvmovdqu64 [rdi+960],zmm15\nvmovdqu64 [rdi+1024],zmm16\nvmovdqu64 [rdi+1088],zmm17\nvmovdqu64 [rdi+1152],zmm18\nvmovdqu64 [rdi+1216],zmm19\nvmovdqu64 [rdi+1280],zmm20\nvmovdqu64 [rdi+1344],zmm21\nvmovdqu64 [rdi+1408],zmm22\nvmovdqu64 [rdi+1472],zmm23\nvmovdqu64 [rdi+1536],zmm24\nvmovdqu64 [rdi+1600],zmm25\nvmovdqu64 [rdi+1664],zmm26\nvmovdqu64 [rdi+1728],zmm27\nvmovdqu64 [rdi+1792],zmm28\nvmovdqu64 [rdi+1856],zmm29\nvmovdqu64 [rdi+1920],zmm30\nvmovdqu64 [rdi+1984],zmm31",
+        in("rdi") p, clobber("memory"))
+}
+
+fn u_zmm_add() {
+    asm("vpaddq zmm0,zmm0,zmm1\nvpaddq zmm1,zmm1,zmm2\nvpaddq zmm2,zmm2,zmm3\nvpaddq zmm3,zmm3,zmm4\nvpaddq zmm4,zmm4,zmm5\nvpaddq zmm5,zmm5,zmm6\nvpaddq zmm6,zmm6,zmm7\nvpaddq zmm7,zmm7,zmm8\nvpaddq zmm8,zmm8,zmm9\nvpaddq zmm9,zmm9,zmm10\nvpaddq zmm10,zmm10,zmm11\nvpaddq zmm11,zmm11,zmm12\nvpaddq zmm12,zmm12,zmm13\nvpaddq zmm13,zmm13,zmm14\nvpaddq zmm14,zmm14,zmm15\nvpaddq zmm15,zmm15,zmm16\nvpaddq zmm16,zmm16,zmm17\nvpaddq zmm17,zmm17,zmm18\nvpaddq zmm18,zmm18,zmm19\nvpaddq zmm19,zmm19,zmm20\nvpaddq zmm20,zmm20,zmm21\nvpaddq zmm21,zmm21,zmm22\nvpaddq zmm22,zmm22,zmm23\nvpaddq zmm23,zmm23,zmm24\nvpaddq zmm24,zmm24,zmm25\nvpaddq zmm25,zmm25,zmm26\nvpaddq zmm26,zmm26,zmm27\nvpaddq zmm27,zmm27,zmm28\nvpaddq zmm28,zmm28,zmm29\nvpaddq zmm29,zmm29,zmm30\nvpaddq zmm30,zmm30,zmm31")
+}
+
+fn u_vec_put(w: u64, p: u64) {
+    if w == 3 {
+        u_zmm_put(p)
+    } else {
+        if w == 2 {
+            u_ymm_put(p)
+        } else {
+            u_xmm_put(p)
+        }
+    }
+}
+
+fn u_vec_take(w: u64, p: u64) {
+    if w == 3 {
+        u_zmm_take(p)
+    } else {
+        if w == 2 {
+            u_ymm_take(p)
+        } else {
+            u_xmm_take(p)
+        }
+    }
+}
+
+fn u_vec_calc(w: u64) {
+    if w == 3 {
+        u_zmm_add()
+    } else {
+        if w == 2 {
+            u_ymm_add()
+        } else {
+            u_xmm_add()
+        }
+    }
+}
+
+// Dieselbe Folge in gewoehnlichen Zahlen. `+%` ist gemeint: `paddq`
+// rechnet 64 Bit mit Ueberlauf, und die gepruefte Arithmetik der Runde
+// 72 wuerde hier anhalten, wo die Maschine einfach weiterzaehlt.
+fn u_vec_calc_ref(p: u64, regs: u64, lanes: u64) {
+    var n: u64 = 0
+    while n + 1 < regs {
+        var l: u64 = 0
+        while l < lanes {
+            let a: u64 = __mmio_read64((p + (n * lanes + l) * 8) as *mut u64)
+            let b: u64 = __mmio_read64((p + ((n + 1) * lanes + l) * 8) as *mut u64)
+            __mmio_write64((p + (n * lanes + l) * 8) as *mut u64, a +% b)
+            l = l + 1
+        }
+        n = n + 1
+    }
+}
+
+fn u_vec_seed(p: u64, words: u64, arg: u64) {
+    var k: u64 = 0
+    while k < words {
+        __mmio_write64((p + k * 8) as *mut u64,
+            (arg << 56) | (arg << 40) | (arg << 24) | (k << 8) | 0x5A)
+        k = k + 1
+    }
+}
+
+fn u_vec_diff(a: u64, b: u64, words: u64) -> u64 {
+    var k: u64 = 0
+    var bad: u64 = 0
+    while k < words {
+        if __mmio_read64((a + k * 8) as *mut u64)
+        != __mmio_read64((b + k * 8) as *mut u64) {
+            bad = bad + 1
+        }
+        k = k + 1
+    }
+    return bad
+}
+
+fn u_vec(arg: u64) {
+    var s_w: [u8; 12] = "vec: width=\0"
+    var s_p: [u8; 10] = "vec: pid=\0"
+    var s_a: [u8; 10] = "vec: arg=\0"
+    var s_b: [u8; 10] = "vec: bad=\0"
+    var s_r: [u8; 13] = "vec: rounds=\0"
+    let w: u64 = u_vec_width()
+    let regs: u64 = u_vec_regs(w)
+    let lanes: u64 = u_vec_lanes(w)
+    let words: u64 = regs * lanes
+    let pid: u64 = u_sys(SYS_GETPID, 0, 0, 0)
+    u_say_line((&s_p[0]) as u64, pid)
+    u_say_line((&s_a[0]) as u64, arg)
+    u_say_line((&s_w[0]) as u64, w)
+    u_vec_seed(VEC_WANT, words, arg)
+    u_vec_put(w, VEC_WANT)
+    var bad: u64 = 0
+    var r: u64 = 0
+    while r < VEC_ROUNDS {
+        // DEN PROZESSOR ABGEBEN. Hier -- und nur hier -- kann ein
+        // anderer Prozess die Register mit SEINEM Muster ueberschreiben.
+        u_sys(SYS_YIELD, 0, 0, 0)
+        u_vec_calc(w)
+        u_vec_calc_ref(VEC_WANT, regs, lanes)
+        u_sys(SYS_YIELD, 0, 0, 0)
+        u_vec_take(w, VEC_GOT)
+        bad = bad + u_vec_diff(VEC_WANT, VEC_GOT, words)
+        r = r + 1
+    }
+    u_say_line((&s_r[0]) as u64, VEC_ROUNDS)
+    u_say_line((&s_b[0]) as u64, bad)
+    if bad > 250 {
+        bad = 250
+    }
+    u_sys(SYS_EXIT, bad, 0, 0)
 }
