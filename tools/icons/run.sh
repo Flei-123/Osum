@@ -203,7 +203,15 @@ done
 python3 tools/k15/tree.py "$TMPD/baum" > /dev/null 2>&1
 bau_img() { # ziel [--noicons]
     local ziel=$1 mit=${2:-mit}
-    local ARGS=(build "$ziel" 4096 /lib/
+    # RUNDE MERGE-3: 16384 STATT 4096 BLOECKE. Mit 4096 (2 MiB) brach
+    # `mkfs.py` hier mit "the disk is full" ab, seit der Zusammenfuehrung
+    # von mergeline2 -- die neun Programme dieses Abschnitts sind mit der
+    # weichen Oberflaeche (Runde SOFTUI), den Vorlagen (THEMESTORE) und
+    # dem Zeichenwerk (PAINT) gewachsen, und der Baum aus k15/tree.py mit
+    # ihnen. Es ist KEINE Zusage entschaerft: das Abbild wird groesser,
+    # gemessen wird danach dasselbe. 8 MiB sind rund das Vierfache des
+    # Inhalts, damit dieselbe Zeile nicht in einer Runde wieder faellt.
+    local ARGS=(build "$ziel" 16384 /lib/
         "/lib/mono.ttf=assets/osum-mono.ttf"
         "/lib/sans.ttf=assets/osum-sans.ttf")
     [ "$mit" = mit ] && ARGS+=("/lib/icons.ttf=assets/osum-icons.ttf")

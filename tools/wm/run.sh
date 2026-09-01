@@ -226,7 +226,7 @@ fi
 # Reglers gingen an den Maustreiber.  `nvme: irqs=0` statt `irqs=5`, in
 # JEDEM Lauf, auch ohne das Wort `wm`.  Gefunden hat es Abschnitt 6 von
 # `./test.sh`.  Ab jetzt findet es ein Programm.
-vt=$(printf '%s\n' "$karte" | grep -A9 'die Vektortabelle' | tail -8 | tr -s ' ' | sed 's/^ //' | tr '\n' ' ')
+vt=$(printf '%s\n' "$kartv" | grep -A9 'die Vektortabelle' | tail -8 | tr -s ' ' | sed 's/^ //' | tr '\n' ' ')
 if python3 tools/kernel/memmap.py kernel >/dev/null 2>&1; then
     ok "die Vektortabelle ist ueberschneidungsfrei ($vt)"
 else
