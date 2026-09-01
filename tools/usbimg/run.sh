@@ -305,7 +305,7 @@ echo "== 7. keine Platte, keine Karte -- und trotzdem ein Bericht =="
 # echter Rechner mit einem Controller, den dieser Kern nicht findet,
 # ebenfalls landet.
 lauf_direkt leer "hwdiag hwdiagstop gfx nopci nokbd nosched noproc nofs noring3"
-if grep -qa 'hwdiag: pci=KEIN GERAET' "$TMPD/leer.txt"; then
+if grep -qa 'hwdiag: pci=KEIN GERÄT' "$TMPD/leer.txt"; then
     ok "ohne Bus sagt der Bericht das, statt still zu haengen"
 else
     bad "ohne Bus fehlt die Meldung"

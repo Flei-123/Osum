@@ -130,7 +130,14 @@ rm -f "$TMP/kernel/wg-aus.fi"
 # Baum, aus dem firnc liest, keine Zeile Grafik mehr -- und weil kein
 # anderes Modul `fb.` oder `wm.` schreibt (Runde SERVERBUILD hat die
 # 745 Stellen auf 0 gebracht), uebersetzt der Rest unveraendert.
-GFX_DATEIEN="fb wm wig font ttf tile vmode ansi ps2m kgui sysgui"
+# MERGE-2 18 (customres): `dispsave.fi` ist die ZWOELFTE. Sie liest und
+# schreibt /system/BILDMODUS und ruft dafuer 37-mal `vmode.` und `fb.` --
+# sie GEHOERT der Grafik, genau wie die elf davor, und muss beim
+# GUI-losen Bau ebenfalls verschwinden. `tools/server/count.py` hat es
+# gemeldet: 37 Stellen ausserhalb der Naht. Der Weg dorthin fuer den
+# uebrigen Kern sind die zwei Tueren `gfx.disp_poll` und
+# `gfx.disp_restore`.
+GFX_DATEIEN="fb wm wig font ttf tile vmode ansi ps2m kgui sysgui dispsave"
 if [[ $GUI == off ]]; then
     for f in $GFX_DATEIEN; do
         rm -f "$TMP/kernel/$f.fi" || exit 1

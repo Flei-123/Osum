@@ -166,6 +166,8 @@ export {
     K9_MODE, SMEP_OK, SMAP_OK, GUARD_MODE, SMAP_WINDOWS, MBI,
     MOD_BASE, MOD_BYTES, MOD_CRC, MOD_WANT, MOD_OK, MOD_MODE,
     GUARD_APS, K11_OFF, K11_MAX, KB_SHIFT, KB_CTRL, KB_EXT,
+    FPU_WORDS, FPU_MODE, FPU_XCR0, FPU_SIZE, FPU_APS, FPU_CR4,
+    FPU_SAVES, FPU_RESTORES, FPU_NM, FPU_AREAS, FPU_FEAT,
     KB_SEQS, KB_SUPER, HK_SEQ, HK_KEY, HK_NS,
     AN_STATE, AN_NPAR, AN_PRIV, AN_SEQS, AN_REV,
     AN_PAR, AN_MAXPAR, ENV_N, ENV_LEN, ENV_BUF, ENV_MAX,
@@ -233,6 +235,13 @@ export {
     MU_WALKS, MU_WALKDENY, MU_GRPHITS, MU_SUPPSET, MU_NODECHK,
     MU_TRIES, MU_DELAYMS,
     M_NOWALK, M_NOGROUPS, M_MU,
+    // ---- Runde ASYNC ----
+    AIO_OFF, AIO_MAX, ACQ_OFF, ACQ_MAX, ASC_OFF, ASC_MAX,
+    APATH_OFF, APATH_MAX, APATH_STRIDE,
+    M_ASYNC, M_NOAGEN, M_NOAREAP, M_ABENCH, M_NOAWORK, M_ASTRESS,
+    A_SUBMITTED, A_COMPLETED, A_CANCELLED, A_STALED, A_FAILED,
+    A_FULL, A_TIMEOUTS, A_REAPED, A_ABANDONED, A_WORKRUNS,
+    A_POSTED, A_DENIED,
     mode_on, mode_add, mode_word,
     get, set,
     add, get32, get16, get8, set8
@@ -1826,6 +1835,114 @@ const M_MU: u64 = 649 // Wort 10, Bit 9
 const M_NOWALK: u64 = 650 // Wort 10, Bit 10
 const M_NOGROUPS: u64 = 651 // Wort 10, Bit 11
 
+// ================================================ RUNDE ASYNC
+//
+// DIE ASYNCHRONE AUFTRAGSSCHICHT (`kernel/async.fi`). Sie ist die
+// Zwischenstufe zwischen den Handles der Runde HANDLE und dem
+// Completion-Ring der Runde RING, und sie braucht drei Bereiche.
+//
+// RUNDE MERGE-2 -- FUENFTE ADRESSKOLLISION DIESER RUNDE. Auf dem Zweig
+// ASYNC war `kdata` nach Runde HANDLE bis 0x7F380 belegt und 0x80000
+// die Grenze; der Zweig liess sie auf 0x90000 wachsen und legte seine
+// vier Bereiche auf 0x80000..0x8D000. In `mergeline2` steht dort
+// laengst etwas anderes: HND/HOBJ/HREQ/HNON/HCNT ab 0x80000 (Merge 06,
+// Runde HANDLE), die Aufgabentafel TASK_OFF 0x88000..0x90000 (Merge
+// 08) und MU_OFF 0x90000..0x92000 (Merge 09, Runde MULTIUSER). Alle
+// vier Bereiche haetten sich ueberschnitten -- `tools/kernel/memmap.py`
+// meldet es.
+//
+// KDATA_SIZE muss deshalb NICHT wachsen: Merge 06 hat sie bereits auf
+// 0xA0000 gesetzt. Die vier Bereiche liegen jetzt HINTER MULTIUSER, in
+// dem Raum 0x92000..0xA0000 (56 KiB); sie brauchen 0xD000 (52 KiB) und
+// lassen 0x9F000..0xA0000 frei.
+//
+//   AIO_OFF  0x92000  die Auftragstafel, 64 Auftraege * 80 Oktett
+//   ACQ_OFF  0x94000  die Fertigmeldungsringe, 32 Aufgaben * 1024 Oktett
+//   ASC_OFF  0x9C000  die Sperre und der Vorrat dieser Runde
+//   APATH_OFF 0x9D000 der Pfadvorrat, 64 * 128 Oktett
+//
+// Wer hier etwas aendert, traegt es in `tools/kernel/memmap.py` ein.
+const AIO_OFF: u64 = 0x92000
+const AIO_MAX: u64 = 0x2000
+const ACQ_OFF: u64 = 0x94000
+const ACQ_MAX: u64 = 0x8000
+const ASC_OFF: u64 = 0x9C000
+const ASC_MAX: u64 = 0x1000
+// Der Pfadvorrat der asynchronen `open`: 64 Auftraege zu 128 Oktett.
+// WARUM ER SEIN MUSS: ein `open` bekommt seinen Pfad als Zeiger in
+// Ring 3, und der Arbeitsfaden liest ihn erst spaeter -- da kann der
+// Prozess den Puffer laengst ueberschrieben haben oder gar nicht mehr da
+// sein. Der Pfad wird deshalb BEI DER ABGABE in den Kern kopiert, im
+// Zusammenhang des Abgebenden. Das ist dieselbe Regel wie bei den
+// registrierten Puffern von io_uring, nur eine Nummer kleiner.
+const APATH_OFF: u64 = 0x9D000
+const APATH_MAX: u64 = 0x2000
+const APATH_STRIDE: u64 = 128
+
+// Die Modusbits dieser Runde. Wort 11 war ganz frei -- Wort 10 gehoert
+// der Handle-Schicht, und ein Wort je Untersystem ist die Regel seit
+// Runde K17.
+//
+// M_ASYNC ist der Selbsttest in Ring 3. Die uebrigen sind GEGENPROBEN
+// und eine Messung:
+//
+//   M_NOAGEN   der Arbeitsfaden fragt NICHT `handle.req_object`,
+//              sondern nimmt, was gerade unter dem Handle steht.
+//              Genau der io_uring-Fehler, eine Ebene hoeher: Zusage
+//              `nicht-das-neue-ding` MUSS damit fallen.
+//   M_NOAREAP  ein sterbender Prozess raeumt seine Auftraege NICHT ab.
+//              Die Zusage `tod-raeumt-ab` MUSS damit fallen.
+//   M_NOAWORK  es laufen KEINE Arbeitsfaeden -- der Auftrag wird vom
+//              abgebenden Prozess selbst ausgefuehrt. Das ist die
+//              Gegenprobe zur Behauptung, dass die Arbeit wirklich
+//              woanders geschieht, und zugleich der Massstab der
+//              Durchsatzmessung.
+//   M_ABENCH   die Messung: Latenz und Durchsatz bei 1, 4 und 16
+//              gleichzeitig offenen Auftraegen.
+//   M_ASTRESS  der Lauf, der die Warteschlange absichtlich ueberfuellt.
+const M_ASYNC: u64 = 704 // Wort 11, Bit 0
+const M_NOAGEN: u64 = 705 // Wort 11, Bit 1
+const M_NOAREAP: u64 = 706 // Wort 11, Bit 2
+const M_ABENCH: u64 = 707 // Wort 11, Bit 3
+const M_NOAWORK: u64 = 708 // Wort 11, Bit 4
+const M_ASTRESS: u64 = 709 // Wort 11, Bit 5
+
+// Die Zaehler der Runde ASYNC. 1480 aufwaerts war frei; der hoechste
+// vergebene Skalar davor ist 1472 (H_ESCALATE).
+const A_SUBMITTED: u64 = 1480 // abgegebene Auftraege
+const A_COMPLETED: u64 = 1488 // ordentlich fertig gewordene
+const A_CANCELLED: u64 = 1496 // abgebrochene
+const A_STALED: u64 = 1504 // an der Generationspruefung gescheiterte
+const A_FAILED: u64 = 1512 // mit einem Fehler geendete
+const A_FULL: u64 = 1520 // Abgaben, die an der vollen Warteschlange scheiterten
+const A_TIMEOUTS: u64 = 1528 // Wartevorgaenge, die an der Zeitgrenze endeten
+const A_REAPED: u64 = 1536 // abgeholte Fertigmeldungen
+const A_ABANDONED: u64 = 1544 // beim Prozesstod abgeraeumte Auftraege
+const A_WORKRUNS: u64 = 1552 // Durchlaeufe der Arbeitsfaeden mit Arbeit
+const A_POSTED: u64 = 1560 // eingestellte Fertigmeldungen
+const A_DENIED: u64 = 1568 // Zugriffe auf einen fremden Auftrag
+
+// ===================================================== RUNDE AVX
+//
+// Die Skalare der Vektorregister-Schicht (`kernel/arch/x86_64/fpu.fi`).
+// Sie liegen in der SKALARSEITE (Offset 0..4096) und nehmen keine neue
+// Seite in `kdata` -- der hoechste bis dahin vergebene Skalar war
+// A_DENIED auf 1568, und ab 1600 ist die Seite frei. Damit aendert diese
+// Runde `tools/kernel/memmap.py` nicht und liegt keiner anderen Runde im
+// Weg, die gerade eine Seite sucht.
+const FPU_WORDS: u64 = 1600 // nofpu/nofpuswitch/fpulazy/noxsave/noavx
+const FPU_MODE: u64 = 1608 // 0 aus, 1 FXSAVE, 2 XSAVE, 3 XSAVEOPT
+const FPU_XCR0: u64 = 1616 // die Maske, die wirklich in XCR0 steht
+const FPU_SIZE: u64 = 1624 // Oktette je Bereich, aus cpuid 0x0D
+const FPU_APS: u64 = 1632 // weitere Prozessoren mit gesetzten Bits
+const FPU_CR4: u64 = 1640 // das CR4 des Startprozessors, zum Melden
+const FPU_SAVES: u64 = 1648 // gesicherte Zustaende
+const FPU_RESTORES: u64 = 1656 // geladene Zustaende
+const FPU_NM: u64 = 1664 // #NM-Faelle auf dem traegen Weg
+const FPU_AREAS: u64 = 1672 // angelegte Bereiche
+const FPU_FEAT: u64 = 1680 // cpuid Blatt 1: ECX<<32 | EDX
+
+
 // ================================================== DER MODUSVEKTOR
 //
 // WARUM ES IHN GIBT. Der Modus war achtzehn Runden lang EIN u64, und
@@ -1898,8 +2015,13 @@ const M_NOGROUPS: u64 = 651 // Wort 10, Bit 11
 //                      Frei ab Bit 3.
 //   Wort  9  576..639  DIE GERAETEIDENTITAET -- Runde TRESOR.
 //                      Frei ab Bit 2.
-//   Wort 10           SERVERBUILD (M_SERCON, M_NOSERIRQ, M_SERPOLL)
-//   Wort 11..15        FREI. Wird auch das knapp, waechst MODE_WORDS;
+//   Wort 10  640..703  DIE HANDLE-SCHICHT (Runde HANDLE, 640..645), der
+//                      serielle Serverbau (SERVERBUILD, 646..648) und
+//                      die Mehrbenutzerschicht (MULTIUSER, 649..651).
+//                      Frei ab Bit 12.
+//   Wort 11  704..767  DIE ASYNCHRONE AUFTRAGSSCHICHT -- Runde ASYNC.
+//                      Frei ab Bit 6.
+//   Wort 12..15        FREI. Wird auch das knapp, waechst MODE_WORDS;
 //                      die Seite fasst 512 Woerter.
 //
 // Die Namen selbst stehen bei ihrer Runde, dort wo auch steht, wofuer

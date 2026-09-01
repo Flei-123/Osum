@@ -31,6 +31,7 @@ import kstate
 import mem
 import atomic
 import cpu
+import arch.x86_64.fpu
 
 export {
     init, create, start, schedule, on_tick, yield_now, sleep_ticks,
@@ -51,12 +52,15 @@ export {
     T_SIGRET, T_ALARM, T_TGID, T_SHARED, T_FUTEX, T_FUTEXVAL,
     T_KILLCODE, T_UID, T_GID, T_EUID, T_EGID, T_SUID,
     T_SGID, T_UMASK, K_BOOT, K_IDLE, K_WORKER, K_USER,
-    K_GRIND, KSTACK_FRAMES, K_NETD, T_BIG,
+    K_GRIND, KSTACK_FRAMES, K_NETD, K_AIO, K_VEC, K_YIELD, T_BIG,
     T_NETV, T_NETOK, NETOK_MAX,
-    S_POLL, T_POLLSEQ, poll_seq, poll_kick, poll_sleep, POLL_FOREVER,
+    S_POLL, T_POLLSEQ, poll_seq, poll_kick, poll_kick_one, poll_sleep,
+    POLL_FOREVER,
     // ---- RUNDE MULTIUSER ----
     T_NGROUPS, groups_count, groups_at, groups_has, groups_set,
     groups_clear, groups_inherit, GROUPS_MAX,
+    // ---- RUNDE AVX ----
+    T_FPU, fpu_area, fpu_set_area, fpu_inherit, fpu_reset,
 }
 
 // ------------------------------------------------------ the task record
@@ -274,6 +278,13 @@ const T_POLLSEQ: u64 = 504
 // 512, und die naechsten sechs Runden muessen diese Zeile
 // nicht noch einmal schreiben.
 const T_NGROUPS: u64 = 512
+
+// RUNDE AVX: der Vektorzustand dieser Aufgabe -- die Adresse EINES
+// Rahmens aus `mem.frame_alloc`, in den `FXSAVE`/`XSAVE` schreibt. 0
+// heisst "hat keinen"; das ist der Zustand vor `fpu.apply` und auf einer
+// Maschine ohne SSE. Der Platz liegt hinter den Zusatzgruppen
+// (512 + GROUPS_MAX * 8 = 640) und damit noch weit unter TASK_BYTES.
+const T_FPU: u64 = 640
 const GROUPS_MAX: u64 = 16
 
 // The three descriptor slots of round 62. Nothing writes them any more;
@@ -332,6 +343,21 @@ const K_GRIND: u64 = 4
 // task -- stage 0 of Firn has no function pointers in the kernel
 // profile.
 const K_NETD: u64 = 5
+// RUNDE ASYNC: DER ARBEITSFADEN DER AUFTRAGSSCHICHT. Eine eigene Art und
+// nicht K_WORKER, weil K_WORKER der Messfaden aus Runde 62 ist und in
+// `tools/kernel/run.sh` gezaehlt wird -- vier zusaetzliche Faeden dieser
+// Art haetten dort drei Zusagen umgeworfen, die mit dieser Runde nichts
+// zu tun haben. Der Rumpf steht in `sys.aio_worker`, verteilt wird er
+// wie jeder andere in `tasks.main`.
+const K_AIO: u64 = 6
+// RUNDE AVX: die Vektorprobe als KERNaufgabe. Sie wandert zwischen den
+// Kernen (ANY_CPU) und geht durch denselben Kontextwechsel wie alles
+// andere -- damit ist sie der Nachweis auf mehreren Prozessoren.
+const K_VEC: u64 = 7
+// RUNDE AVX: eine Aufgabe, die NICHTS tut als den Prozessor abgeben.
+// Sie ist das Messgeraet fuer den Preis des Kontextwechsels: was zwei
+// von ihnen an Zyklen verbrauchen, ist der Wechsel und sonst nichts.
+const K_YIELD: u64 = 8
 
 // ACHT frames = 32 KiB of kernel stack per task (Runde K17; davor vier).
 //
@@ -679,6 +705,13 @@ fn init(state: u64) {
     }
     // The one task in this kernel that is not allowed to move.
     tc_set(state, 0, TC_AFF, 0)
+    // RUNDE AVX: auch Aufgabe 0 braucht einen Vektorbereich. Sie ist die
+    // Aufgabe, VON der der allererste Wechsel weggeht -- ohne Bereich
+    // haette dieser Wechsel nichts, wohin er die Register des Kerns
+    // legen koennte, und der erste Prozess faende sie noch vor. Das
+    // setzt voraus, dass `fpu.apply` schon gelaufen ist; in
+    // `kernel_main` steht es unmittelbar vor dieser Zeile.
+    tset(state, 0, T_FPU, fpu.area_new(state))
     set_kernel_stack(state, vector(state, 61))
     trace_push(state, 1)
 }
@@ -696,6 +729,10 @@ fn set_idle(state: u64, i: u64) {
 // up. Its stack is not one the frame allocator handed out for a task, so
 // T_KSTACK stays zero and `reap` will not give it back.
 fn adopt(state: u64, kind: u64, prio: u64, ktop: u64) -> u64 {
+    // RUNDE AVX: auch ein uebernommener Zusammenhang braucht einen
+    // Bereich -- sonst haette der erste Wechsel VON ihm nichts, wohin er
+    // sichern koennte, und die Register des Vorgaengers blieben stehen.
+    let vec_area: u64 = fpu.area_new(state)
     let flags: u64 = irq_save()
     atomic.lock_take(state, atomic.L_SCHED, cpu.here(state))
     var i: u64 = 1
@@ -711,6 +748,7 @@ fn adopt(state: u64, kind: u64, prio: u64, ktop: u64) -> u64 {
     if slot == 0 {
         atomic.lock_give(state, atomic.L_SCHED)
         irq_restore(flags)
+        fpu.area_free(state, vec_area)
         return 0
     }
     var j: u64 = 0
@@ -719,6 +757,7 @@ fn adopt(state: u64, kind: u64, prio: u64, ktop: u64) -> u64 {
         j = j + 1
     }
     tset(state, slot, T_PID, kstate.add(state, kstate.NEXT_PID, 1) - 1)
+    tset(state, slot, T_FPU, vec_area)
     tset(state, slot, T_KTOP, ktop)
     tset(state, slot, T_PRIO, prio)
     tset(state, slot, T_BUDGET, prio)
@@ -783,6 +822,16 @@ fn create(state: u64, kind: u64, prio: u64, arg: u64, entry: u64) -> u64 {
     if stack == 0 {
         return 0
     }
+    // RUNDE AVX: der Vektorbereich kommt aus demselben Grund VOR die
+    // Sperre wie der Stapel -- der Rahmenverwalter hat eine eigene, und
+    // dieser Kern haelt nie zwei Sperren gleichzeitig. `area_new`
+    // antwortet 0, solange `fpu.apply` nicht gelaufen ist; dann hat die
+    // Aufgabe keinen Bereich und der Wechsel laesst sie in Ruhe.
+    let vec_area: u64 = fpu.area_new(state)
+    if vec_area == 0 && fpu.enabled(state) {
+        free_stack(state, stack)
+        return 0
+    }
     let flags: u64 = irq_save()
     atomic.lock_take(state, atomic.L_SCHED, cpu.here(state))
     var i: u64 = 1
@@ -799,6 +848,7 @@ fn create(state: u64, kind: u64, prio: u64, arg: u64, entry: u64) -> u64 {
         atomic.lock_give(state, atomic.L_SCHED)
         irq_restore(flags)
         free_stack(state, stack)
+        fpu.area_free(state, vec_area)
         return 0
     }
     let ktop: u64 = stack + KSTACK_FRAMES * mem.FRAME_SIZE
@@ -821,6 +871,7 @@ fn create(state: u64, kind: u64, prio: u64, arg: u64, entry: u64) -> u64 {
     }
     tset(state, slot, T_PID, kstate.add(state, kstate.NEXT_PID, 1) - 1)
     tset(state, slot, T_KSTACK, stack)
+    tset(state, slot, T_FPU, vec_area)
     tset(state, slot, T_KTOP, ktop)
     tset(state, slot, T_PRIO, prio)
     tset(state, slot, T_BUDGET, prio)
@@ -1088,9 +1139,65 @@ fn switch_to(state: u64, from: u64, to: u64) {
         }
     }
     set_kernel_stack(state, tget(state, to, T_KTOP))
+    // RUNDE AVX: DIE VEKTORREGISTER. Sie stehen ausserhalb des
+    // Aufgabensatzes und ausserhalb dessen, was `context_switch`
+    // anfasst -- der rettet die Allzweckregister und die Flaggen und
+    // sonst nichts. Ohne diese eine Zeile faende ein Prozess nach dem
+    // Wechsel die xmm/ymm/zmm eines anderen vor.
+    //
+    // HIER und nicht in `switch.s`: die Anweisung, die gebraucht wird
+    // (FXSAVE, XSAVE oder XSAVEOPT), und die Maske dazu stehen erst zur
+    // LAUFZEIT fest -- sie kommen aus `cpuid`. Eine Assemblerdatei
+    // muesste sich darueber verzweigen; hier ist es eine Fallunterschei-
+    // dung in derselben Sprache wie alles andere. Der Kern selbst
+    // benutzt keine Vektorregister (nachgezaehlt: `objdump -d` auf dem
+    // Abbild findet null xmm/ymm/zmm), also darf zwischen dem Laden und
+    // dem Stapelwechsel noch Firn-Code stehen.
+    fpu.switch(state, me, fpu_area(state, from), fpu_area(state, to))
     asm("call rax", in("rax") vector(state, V_SWITCH),
         in("rdi") task_at(state, from) + T_RSP,
         in("rsi") tget(state, to, T_RSP), clobber("memory"))
+}
+
+// RUNDE AVX: der Vektorbereich einer Aufgabe. Zwei Zeilen, damit
+// `proc.fi` und `trap.fi` ihn erreichen, ohne T_FPU selbst zu kennen.
+fn fpu_area(state: u64, i: u64) -> u64 {
+    if i >= kstate.MAX_TASKS {
+        return 0
+    }
+    return tget(state, i, T_FPU)
+}
+
+fn fpu_set_area(state: u64, i: u64, area: u64) {
+    if i < kstate.MAX_TASKS {
+        tset(state, i, T_FPU, area)
+    }
+}
+
+// `fork`: das Kind erbt den Vektorzustand des Elternteils. MXCSR,
+// Rundungsart und die Register selbst -- POSIX verlangt genau das, und
+// ein Kind, das mit anderen Rundungsbits weiterrechnet als sein
+// Elternteil, waere ein Fehler, den niemand suchen wuerde.
+fn fpu_inherit(state: u64, parent: u64, child: u64) {
+    // ZUERST den lebenden Zustand des Elternteils in seinen Bereich --
+    // `fork` laeuft IM Elternteil, also stehen seine Register im
+    // Prozessor und nicht im Bereich. Ohne diese Zeile erbt das Kind den
+    // Stand vom letzten Kontextwechsel des Elternteils.
+    fpu.sync_here(state, fpu_area(state, parent))
+    fpu.area_copy(state, fpu_area(state, child), fpu_area(state, parent))
+}
+
+// `execve`: der Prozess wird ein anderes Programm. Sein Vektorzustand
+// geht auf den Anfangswert zurueck -- und zwar SAMT den Registern, sonst
+// sicherte der naechste Wechsel den alten Zustand in den frischen
+// Bereich zurueck.
+fn fpu_reset(state: u64, i: u64) {
+    let a: u64 = fpu_area(state, i)
+    if a == 0 {
+        return
+    }
+    fpu.area_init(state, a)
+    fpu.adopt_now(state, a)
 }
 
 // Give the processor away. Comes back when this task is scheduled again
@@ -1264,6 +1371,33 @@ fn poll_kick(state: u64) {
 // DERSELBEN Laufsperre, unter der `schedule_locked` die Aufgabe abgibt;
 // zwischen beiden kann kein Wecker verlorengehen, denn ein Wecker, der
 // vorher kam, hat die Zahl bereits veraendert.
+// RUNDE ASYNC: DERSELBE WECKER, ABER AN GENAU EINE AUFGABE.
+//
+// `poll_kick` weckt ALLES, was wartet. Fuer ein Rohr ist das richtig --
+// wer darauf wartet, kann der Kern nicht wissen. Fuer eine
+// Fertigmeldung weiss er es genau: sie gehoert einer Aufgabe. Ohne
+// diesen Unterschied weckt jede einzelne Meldung auch die vier
+// Arbeitsfaeden, und die laufen dann los, finden nichts und legen sich
+// wieder hin -- bei sechzehn Meldungen in einem Zug also vierundsechzig
+// Wecker fuer nichts. GEMESSEN hat das bei sechzehn offenen Auftraegen
+// 13838 gegen 13473 Zyklen je Auftrag gemacht: 2,6 %, und damit deutlich
+// weniger, als die Ueberlegung versprach. Die Zahl steht trotzdem hier,
+// weil eine Optimierung ohne Messung eine Behauptung ist.
+//
+// Die FOLGE wird trotzdem erhoeht, und zwar VOR dem Wecken: daran
+// erkennt ein Wartender, der zwischen Pruefung und Schlaf steht, dass
+// er nicht schlafen darf. Genau das ist die Wettlaufsituation, die
+// Runde POLL geloest hat, und sie gilt hier unveraendert.
+fn poll_kick_one(state: u64, task: u64) {
+    kstate.add(state, kstate.POLLSEQ, 1)
+    if task >= kstate.MAX_TASKS {
+        return
+    }
+    if tget(state, task, T_STATE) == S_POLL {
+        tset(state, task, T_STATE, S_READY)
+    }
+}
+
 fn poll_sleep(state: u64, seen: u64, deadline: u64) {
     let flags: u64 = irq_save()
     atomic.lock_take(state, atomic.L_SCHED, cpu.here(state))
@@ -1369,12 +1503,23 @@ fn reap(state: u64, i: u64) -> bool {
         return false
     }
     let stack: u64 = tget(state, i, T_KSTACK)
+    // RUNDE AVX: derselbe Weg wie beim Stapel -- der Platz wird UNTER
+    // der Sperre geleert, der Rahmen DANACH zurueckgegeben. Und vorher
+    // wird jedem Kern, der diesen Bereich noch als geladen fuehrt,
+    // gesagt, dass es ihn nicht mehr gibt; sonst sicherte der naechste
+    // Wechsel in einen Rahmen, der schon jemand anderem gehoert.
+    let vec_area: u64 = tget(state, i, T_FPU)
+    tset(state, i, T_FPU, 0)
     tset(state, i, T_KSTACK, 0)
     tset(state, i, T_STATE, S_FREE)
     atomic.lock_give(state, atomic.L_SCHED)
     irq_restore(flags)
     if stack != 0 {
         free_stack(state, stack)
+    }
+    if vec_area != 0 {
+        fpu.drop_owner(state, vec_area)
+        fpu.area_free(state, vec_area)
     }
     return true
 }
