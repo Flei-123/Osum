@@ -514,6 +514,7 @@ fn kernel_main(mbi: u64, vectors: u64, state: u64, kernel_end: u64,
     // fehlerhaft, sondern toedlich: der erste `movdqu` auf einem Kern
     // ohne CR4.OSFXSR ist ein #UD.
     vectors_smp(state)
+    ring3_smp(state)
 
 
     // 7i. RUNDE K12: ein Wirt fuer fremde Betriebssysteme. Hier und
@@ -3903,4 +3904,45 @@ fn vec_tasks_alive(state: u64) -> u64 {
         i = i + 1
     }
     return n
+}
+
+
+// RUNDE AVX, DIAGNOSE UND KEINE ABNAHME: dieselben vier PROZESSE hinter
+// `smp.stage`. Ohne das Wort `r3smp` passiert hier nichts. Was dabei
+// herauskommt, steht in `docs/RUNDE-AVX.md`: unter `-smp 1` laeuft es
+// durch, unter `-smp 4` endet es in einem #DF -- auch mit `nofpu`, also
+// ohne eine Zeile dieser Runde. Der Grund liegt in `isr.s` und ist
+// Runde K5 alt.
+fn ring3_smp(state: u64) {
+    var s_beg: [u8; 14] = "r3smp: begin\0\0"
+    var s_ex: [u8; 13] = "r3smp: exit=\0"
+    var s_sp: [u8; 2] = " \0"
+    if !fpu.want(state, fpu.M_R3SMP) {
+        return
+    }
+    serial.puts((&s_beg[0]) as u64)
+    serial.nl()
+    // Bit 8: ohne Freischaltung darf das Programm kein Vektorregister
+    // anfassen -- sonst misst der Lauf ein #UD statt des Wettlaufs.
+    var flag: u64 = 0
+    if !fpu.enabled(state) {
+        flag = 0x100
+    }
+    let a: u64 = proc.create(state, P_VEC, flag | 5, 2)
+    let b: u64 = proc.create(state, P_VEC, flag | 6, 2)
+    let c: u64 = proc.create(state, P_VEC, flag | 7, 2)
+    let d: u64 = proc.create(state, P_VEC, flag | 8, 2)
+    let ea: u64 = kutil.wait_for(state, a)
+    let eb: u64 = kutil.wait_for(state, b)
+    let ec: u64 = kutil.wait_for(state, c)
+    let ed: u64 = kutil.wait_for(state, d)
+    serial.puts((&s_ex[0]) as u64)
+    serial.dec(ea)
+    serial.puts((&s_sp[0]) as u64)
+    serial.dec(eb)
+    serial.puts((&s_sp[0]) as u64)
+    serial.dec(ec)
+    serial.puts((&s_sp[0]) as u64)
+    serial.dec(ed)
+    serial.nl()
 }
