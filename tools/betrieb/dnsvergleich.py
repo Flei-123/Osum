@@ -45,8 +45,15 @@ LISTE = [
     ("xoffi.ai", "A", "kurze Endung"),
     ("fleitec.com", "A", "die eigene Domaene"),
     ("heise.de", "A", "de-Zone"),
-    ("mail.google.com", "A", "CNAME in eine fremde Zone"),
-    ("api.github.com", "A", "Name mit drei Marken"),
+    # AUCH DIESE ZWEI SIND RAUS, aus demselben Grund wie oben:
+    # `mail.google.com` und `api.github.com` geben je Frage EINE Adresse
+    # aus einem grossen, wechselnden Vorrat heraus, und zwei Fragen kurz
+    # nacheinander treffen verschiedene. Die CNAME-Kette misst
+    # `de.wikipedia.org` (CNAME auf dyna.wikimedia.org) und
+    # `www.github.com` (CNAME auf github.com) -- beide mit kleiner,
+    # stabiler Adressmenge.
+    ("c.root-servers.net", "A", "feste Adresse"),
+    ("www.debian.org", "A", "kleine, feste Adressmenge"),
     ("d1.awsstatic.com", "A", "Name mit Ziffer in der Marke"),
     ("a.root-servers.net", "A", "Name mit Bindestrich"),
     ("example.com", "AAAA", "AAAA statt A"),
