@@ -17,6 +17,13 @@
 #
 #   bash tools/avx/cputab.sh <OUT-Verzeichnis eines ota/run.sh-Laufes>
 #
+# Je Prozessormodell ZWEI Startvorgaenge: `ota suchen` (TLS 1.3,
+# Kettenpruefung, Ed25519 ueber das VERZEICHNIS) und, wenn der
+# durchkam, `ota einspielen` -- das Paket ueber die Leitung holen,
+# seine SHA-256 gegen das signierte VERZEICHNIS halten und
+# einspielen. Der zweite ist der Beweis: eine Pruefsumme, die
+# stimmt, und nicht nur ein Handschlag, der zustande kam.
+#
 # VORHER und NACHHER entstehen so:
 #
 #   # vorher -- der Zweig `ota` allein
@@ -76,34 +83,49 @@ MODELLE=${OSUM_CPUS:-"qemu64 Nehalem Westmere SandyBridge Haswell Skylake-Server
 echo "cputab: OUT=$OUT  Port=$PORT  Netz=$NETZ"
 printf '\n%-16s %-4s %-5s %-6s %-6s %s\n' \
     "-cpu" "rc" "mode" "xcr0" "size" "Ergebnis"
-printf '%s\n' "---------------------------------------------------------------------"
+printf '%s\n' "--------------------------------------------------------------------------------"
 
-for M in $MODELLE; do
+# EIN Startvorgang mit einem Skript, Ergebnis im Protokoll.
+start() { # <name> <skript>
     cp -f "$OUT/basis.img" "$OUT/ziel.img"
     dienst || { echo "Gegenstelle startet nicht"; exit 1; }
-    NAME="cputab-$M"
     OSUM_CPU="$M" OTA_NETZ="$NETZ" OUT="$OUT" \
-        bash tools/install/oneshot.sh "$NAME" platte \
-        "ota zeigen;ota suchen;exit" 600 > /dev/null 2>&1
-    RC=$(cat "$OUT/$NAME.rc" 2>/dev/null)
-    sed -i -e 's/\x1b\[[0-9;=]*[a-zA-Z]//g' "$OUT/$NAME.txt" 2>/dev/null
-    L="$OUT/$NAME.txt"
+        bash tools/install/oneshot.sh "$1" platte "$2" 600 > /dev/null 2>&1
+    sed -i -e 's/\x1b\[[0-9;=]*[a-zA-Z]//g' "$OUT/$1.txt" 2>/dev/null
+    dienst_aus
+}
+
+for M in $MODELLE; do
+    # 1. SUCHEN: TLS 1.3, Kette geprueft, VERZEICHNIS mit Ed25519.
+    start "cputab-$M-suchen" "ota zeigen;ota suchen;exit"
+    RC=$(cat "$OUT/cputab-$M-suchen.rc" 2>/dev/null)
+    L="$OUT/cputab-$M-suchen.txt"
     MODE=$(grep -ao 'fpu: mode=[0-9]*' "$L" | head -1 | cut -d= -f2)
     XCR0=$(grep -ao 'xcr0=0x[0-9a-f]*' "$L" | head -1 | cut -d= -f2)
     SIZE=$(grep -ao 'size=[0-9]*' "$L" | head -1 | cut -d= -f2)
     if grep -qa "vector=6" "$L"; then
         ERG="#UD (vector=6) -- /bin/fetch tot"
-    elif grep -qa "ota: NEUE FASSUNG verfuegbar" "$L"; then
-        if grep -qa "fetch: verify OK" "$L"; then
-            ERG="laeuft -- Kette geprueft, Fassung 2 gefunden"
+    elif grep -qa "ota: NEUE FASSUNG verfuegbar" "$L" \
+         && grep -qa "fetch: verify OK" "$L"; then
+        # 2. EINSPIELEN: das Paket holen, die SHA-256 gegen das
+        #    signierte VERZEICHNIS halten und einspielen. DAS ist der
+        #    Beweis, den die Runde verlangt -- nicht der Handschlag
+        #    allein, sondern die Pruefsumme der geladenen Oktette.
+        start "cputab-$M-spielen" "ota einspielen;exit"
+        S="$OUT/cputab-$M-spielen.txt"
+        RC2=$(cat "$OUT/cputab-$M-spielen.rc" 2>/dev/null)
+        if grep -qa "vector=6" "$S"; then
+            ERG="suchen ok, EINSPIELEN #UD (vector=6)"
+        elif grep -qa "ota: streuwert stimmt" "$S" \
+             && grep -qa "opk: installiert hallo" "$S"; then
+            ERG="laeuft -- Kette geprueft, Streuwert stimmt, eingespielt (rc=$RC2)"
         else
-            ERG="laeuft, aber OHNE Kettenpruefung"
+            ERG="suchen ok, einspielen gescheitert -- siehe $S"
         fi
     else
         ERG="anders gescheitert -- siehe $L"
     fi
     printf '%-16s %-4s %-5s %-6s %-6s %s\n' \
         "$M" "${RC:-?}" "${MODE:--}" "${XCR0:--}" "${SIZE:--}" "$ERG"
-    dienst_aus
 done
 printf '\nProtokolle: %s/cputab-*.txt\n' "$OUT"
