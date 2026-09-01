@@ -931,6 +931,38 @@ const SYS_OSUM_TILECONF: u64 = 1822 // (text, len) -> Zahl der Eintraege
 const SYS_OSUM_TILEBIND: u64 = 1823 // (nr, feld) -> Taste/Modifikator/Handlung
 
 
+// ====================================================== RUNDE OFS4
+//
+// EINE NUMMER FUER DAS GANZE GROESSENAENDERN, und die erste Zahl sagt,
+// was gefragt oder getan werden soll. Der Grund fuer EINE Nummer statt
+// dreizehn ist derselbe wie bei `SYS_OSUM_PWRGET` daneben: dreizehn
+// Nummern waeren dreizehn Zeilen in `dispatch` und dreizehn Eintraege in
+// jeder Tabelle, die es dazu gibt -- fuer eine Sache, die ein einziges
+// Werkzeug ruft.
+//
+// 1840 UND NICHT 1830: 1830 gehoert `SYS_OSUM_PMON`, 1820..1823 der
+// Kachelung, 1810..1812 dem Bildschirm, 1800..1809 der Widget-Naht.
+// Nachgezaehlt und nicht geraten.
+//
+//   1840  osum_fsres(was, wert) -> Zahl
+//
+// WACHSEN UND VERKLEINERN DUERFEN NUR root. Alles andere ist eine
+// Auskunft und darf jeder -- `df` fragt dieselben Zahlen.
+const SYS_OSUM_FSRES: u64 = 1840
+const FR_BLOCKS: u64 = 0   // wie gross das Dateisystem ist
+const FR_DEV: u64 = 1      // wie gross das Geraet ist
+const FR_MAP: u64 = 2      // wie weit die Blockkarte reicht
+const FR_FREE: u64 = 3     // freie Bloecke
+const FR_DATA: u64 = 4     // erster Datenblock
+const FR_INODES: u64 = 5   // wie viele Inodes es gibt
+const FR_MOVED: u64 = 6    // wie viele Bloecke der letzte Umzug bewegt hat
+const FR_NEED: u64 = 7     // (wert) belegte Bloecke hinter der Grenze
+const FR_ROOM: u64 = 8     // (wert) freie Bloecke davor
+const FR_FITS: u64 = 9     // (wert) 1, wenn die Verkleinerung passt
+const FR_GROW: u64 = 10    // (wert) wachsen -> neue Groesse oder 0
+const FR_SHRINK: u64 = 11  // (wert) verkleinern -> neue Groesse oder 0
+const FR_CAP: u64 = 12     // der Deckel des Zuteilers (0 = keiner)
+
 const SYS_OSUM_PWRGET: u64 = 1750
 const SYS_OSUM_PWRSET: u64 = 1751
 const SYS_OSUM_PWRSTR: u64 = 1752
@@ -1845,6 +1877,10 @@ fn dispatch(number: u64, frame: u64, state: u64) -> u64 {
     // RUNDE K18: die Energieschicht.
     if number >= SYS_OSUM_PWRGET && number <= SYS_OSUM_PWRSTR {
         return pwr_call(state, me, number, a0, a1, a2)
+    }
+    // RUNDE OFS4: wachsen und verkleinern.
+    if number == SYS_OSUM_FSRES {
+        return fsres_call(state, me, a0, a1)
     }
     // RUNDE DISPLAY: der Bildschirm. Eigene Funktion, aus demselben
     // Grund wie oben -- der Rahmen entsteht erst, wenn wirklich eine
@@ -9165,3 +9201,64 @@ fn do_jrnl(state: u64, me: u64, from: u64, dst: u64, max: u64) -> u64 {
 
 
 
+
+
+// ====================================================== RUNDE OFS4
+//
+// DIE NAHT ZUM GROESSENAENDERN. Zwoelf Auskuenfte und zwei Taten, alle
+// ueber `SYS_OSUM_FSRES`. Die Auskuenfte kosten hoechstens einen
+// Kartenlauf; die zwei Taten kosten so viel, wie sie kosten, und
+// duerfen nur root.
+//
+// KEINE ZEIGER AUS RING 3. Jeder Wert geht als Zahl hinein und als Zahl
+// heraus -- damit gibt es an dieser Naht nichts zu pruefen und nichts
+// zu kopieren, und `proc.user_ok` wird gar nicht erst gebraucht.
+fn fsres_call(state: u64, me: u64, was: u64, wert: u64) -> u64 {
+    if kstate.get(state, kstate.FS_READY) == 0 {
+        return neg(errno.E_NODEV)
+    }
+    if was == FR_BLOCKS {
+        return fs.total_blocks(state)
+    }
+    if was == FR_DEV {
+        return blk.blocks(state)
+    }
+    if was == FR_MAP {
+        return fs.max_blocks(state)
+    }
+    if was == FR_FREE {
+        return fs.free_blocks(state)
+    }
+    if was == FR_DATA {
+        return fs.data_start(state)
+    }
+    if was == FR_INODES {
+        return fs.inode_count(state)
+    }
+    if was == FR_MOVED {
+        return fs.resize_moved(state)
+    }
+    if was == FR_CAP {
+        return fs.resize_cap(state)
+    }
+    if was == FR_NEED {
+        return fs.shrink_need(state, wert)
+    }
+    if was == FR_ROOM {
+        return fs.shrink_room(state, wert)
+    }
+    if was == FR_FITS {
+        return fs.shrink_fits(state, wert)
+    }
+    // ------------------------------------------------------ die zwei Taten
+    if was == FR_GROW || was == FR_SHRINK {
+        if !perm.is_root(state, me) {
+            return neg(errno.E_PERM)
+        }
+        if was == FR_GROW {
+            return fs.grow_to(state, wert)
+        }
+        return fs.shrink_to(state, wert)
+    }
+    return neg(errno.E_INVAL)
+}

@@ -1,0 +1,711 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/ofs4.fi -- RUNDE OFS4: WACHSEN UND VERKLEINERN, IN RING 3
+// GEMESSEN.
+//
+// Warum in Ring 3 und nicht im Kernel: der Kernel kann sich selbst nicht
+// widerlegen. Alles, was dieses Programm ueber die Dateien sagt, geht
+// durch `open`, `read`, `stat`, `getdents` und `rename` -- dieselben
+// Systemaufrufe, die jedes andere Programm benutzt. Ein Umzug, der einen
+// Block an die falsche Stelle legt, faellt damit als falscher Inhalt auf
+// und nicht als eine Zahl, die der Kern ueber sich selbst meldet.
+//
+// Jede Zeile hat die Form `ofs4: <name> = <zahl>`; `tools/ofs4/run.sh`
+// liest sie und haelt sie gegen die Erwartung. Der eigentliche Beweis
+// ist dabei nicht eine einzelne Zahl, sondern dass die Zahlen VOR und
+// NACH dem Groessenwechsel DIESELBEN sind -- der Testlaeufer vergleicht
+// zwei Ausgaben Zeile fuer Zeile.
+//
+// DIE BEFEHLE:
+//
+//   ofs4 info            die Geometrie, wie der Kern sie sieht
+//   ofs4 bauen           den Bestand anlegen (einmal, dauert)
+//   ofs4 pruef           den Bestand nachrechnen -- die Zeilen, die
+//                        vor und nach jedem Groessenwechsel gleich
+//                        sein muessen
+//   ofs4 klein <n>|auto  verkleinern (auto = so klein wie moeglich)
+//   ofs4 wachsen <n>|auto  wachsen (auto = so gross wie das Geraet)
+//   ofs4 nein            eine Verkleinerung, die NICHT passen kann --
+//                        sie muss sauber abgelehnt werden
+//   ofs4 last <n>        wachsen, WAEHREND `/bin/fsrw` schreibt
+//   ofs4 pendel          verkleinern und wachsen ohne Unterlass, bis
+//                        jemand den Strom abdreht (fuer crash.sh)
+//
+// DER BESTAND, und jedes Stueck ist mit Absicht so gewaehlt:
+//
+//   /d4/viele/   200 Namen in EINEM Verzeichnis -- die Verzeichnisdatei
+//                selbst wird damit mehrblockig und geht durch den
+//                einfach indirekten Zeiger.
+//   /d4/gNNN     Fuellstuecke zu 32 KiB. JEDES ZWEITE WIRD AM ENDE
+//                GELOESCHT: damit steht der freie Platz VORNE und der
+//                belegte HINTEN, und das ist genau die Lage, in der ein
+//                Verkleinern wirklich etwas zu tun hat. Ohne diesen
+//                Schritt lieferte der Zuteiler eine luecklose Reihe von
+//                vorn, und "verkleinern" hiesse "die Zahl im Superblock
+//                aendern" -- ein gruener Test, der nichts misst.
+//   /d4/mittel   256 KiB -- durch den DOPPELT indirekten Zeiger.
+//   /d4/tief     2,25 MiB -- ueber der Grenze der Fassung 2 (2.134.016
+//                Oktette), also durch den DREIFACH indirekten Zeiger.
+//                Sie wird als LETZTE geschrieben und liegt deshalb ganz
+//                hinten: ihre Bloecke sind die, die umziehen muessen.
+//   /d4/hart     ein ZWEITER NAME auf /d4/mittel -- dieselbe Inode.
+//   /d4/zeig     ein symbolischer Verweis auf /d4/mittel.
+//   /d4/rename1  wird in `pruef` umbenannt und wieder zurueck; die
+//                Inodenummer davor und danach muss dieselbe sein.
+
+profile kernel
+
+import ulib
+import libc.io
+import libc.errno
+import libc.kcall
+
+export { u_start }
+
+// `kernel/sys.fi::SYS_OSUM_FSRES`, dieselbe Nummer.
+const SYS_FSRES: u64 = 1840
+const FR_BLOCKS: u64 = 0
+const FR_DEV: u64 = 1
+const FR_MAP: u64 = 2
+const FR_FREE: u64 = 3
+const FR_DATA: u64 = 4
+const FR_INODES: u64 = 5
+const FR_MOVED: u64 = 6
+const FR_NEED: u64 = 7
+const FR_ROOM: u64 = 8
+const FR_FITS: u64 = 9
+const FR_GROW: u64 = 10
+const FR_SHRINK: u64 = 11
+const FR_CAP: u64 = 12
+
+// DIE TIEFE DATEI IST LUECKENHAFT, und das ist keine Abkuerzung, sondern
+// die genauere Messung. Was der dreifach indirekte Zeiger kostet, sind
+// DREI ZEIGERBLOECKE und ein Datenblock -- nicht 4608 Datenbloecke. Eine
+// volle Datei von 2,25 MiB haette dieselben drei Zeigerbloecke und dazu
+// viertausend gewoehnliche Bloecke, die nichts Neues pruefen. Die Stelle
+// 2.200.000 liegt hinter (8 + 64 + 4096) * 512 = 2.134.016 und damit im
+// DREIFACH indirekten Bereich; 1.000.000 liegt im doppelt indirekten; 0
+// im direkten. Drei Stufen, drei Stellen, vier Datenbloecke.
+const T_P0: u64 = 0
+const T_P1: u64 = 1000000
+const T_P2: u64 = 2200000
+const TIEF: u64 = 2359296   // 2,25 MiB -- ueber 2.134.016, also dreifach
+const MITTEL: u64 = 131072  // 128 KiB -- doppelt indirekt
+const FUELL: u64 = 32768    // ein Fuellstueck
+const NFUELL: u64 = 16
+const NVIELE: u64 = 24
+
+static mut buf: [u8; 4096] = [0 as u8; 4096]
+static mut st: [u8; 160] = [0 as u8; 160]
+static mut st2: [u8; 160] = [0 as u8; 160]
+static mut pfad: [u8; 64] = [0 as u8; 64]
+static mut pfad2: [u8; 64] = [0 as u8; 64]
+static mut ents: [u8; 4096] = [0 as u8; 4096]
+static mut argv0: [u8; 16] = [0 as u8; 16]
+static mut argv1: [u8; 16] = [0 as u8; 16]
+static mut argp: [u64; 4] = [0 as u64; 4]
+
+fn sag(name: u64, wert: u64) {
+    var s_kopf: [u8; 7] = "ofs4: \0"
+    var s_gl: [u8; 4] = " = \0"
+    ulib.say((&s_kopf[0 as usize]) as u64)
+    ulib.say(name)
+    ulib.say((&s_gl[0 as usize]) as u64)
+    ulib.sayu(wert)
+    ulib.nl()
+}
+
+fn fsres(was: u64, wert: u64) -> u64 {
+    return ulib.sys(SYS_FSRES, was, wert, 0)
+}
+
+// Das Muster einer Stelle. Aus der Stelle AUSGERECHNET und nicht
+// gemerkt: ein Dateisystem, das nach dem Umzug den falschen Block
+// liefert, faellt damit auf, statt eine Null zu liefern, die wie eine
+// Null aussieht. Dieselbe Rechnung steht in `tools/ofs4/pruef.py`.
+fn muster(pos: u64) -> u64 {
+    return ((pos *% 2654435761) +% 1013904223) % 251
+}
+
+// Eine Zahl an das Ende von `pfad` haengen, dreistellig.
+fn pfad_num(basis: u64, n: u64) {
+    ulib.strcpy((&pfad[0 as usize]) as u64, basis)
+    let l: u64 = ulib.length((&pfad[0 as usize]) as u64)
+    pfad[(l) as usize] = (48 + (n / 100) % 10) as u8
+    pfad[(l + 1) as usize] = (48 + (n / 10) % 10) as u8
+    pfad[(l + 2) as usize] = (48 + n % 10) as u8
+    pfad[(l + 3) as usize] = 0 as u8
+}
+
+fn lies_zahl(p: u64) -> u64 {
+    return ulib.to_num(p)
+}
+
+// ------------------------------------------------------------ schreiben
+
+fn schreib(p: u64, laenge: u64) -> u64 {
+    let fd: u64 = io.create(p)
+    if errno.failed(fd) {
+        return 0
+    }
+    var pos: u64 = 0
+    var weiter: bool = true
+    while pos < laenge && weiter {
+        var k: u64 = 0
+        while k < 4096 {
+            buf[(k) as usize] = muster(pos + k) as u8
+            k = k + 1
+        }
+        var n: u64 = 4096
+        if pos + n > laenge {
+            n = laenge - pos
+        }
+        let w: u64 = io.write(fd, (&buf[0 as usize]) as u64, n)
+        if errno.failed(w) || w != n {
+            weiter = false
+        } else {
+            pos = pos + n
+        }
+    }
+    io.close(fd)
+    return pos
+}
+
+// Die luecklose Datei ueber alle drei Zeigerstufen.
+fn stueck(fd: u64, pos: u64) -> u64 {
+    if errno.failed(io.seek(fd, pos, 0)) {
+        return 0
+    }
+    var k: u64 = 0
+    while k < 4096 {
+        buf[(k) as usize] = muster(pos + k) as u8
+        k = k + 1
+    }
+    let w: u64 = io.write(fd, (&buf[0 as usize]) as u64, 4096)
+    if errno.failed(w) {
+        return 0
+    }
+    return w
+}
+
+fn schreib_tief(p: u64) -> u64 {
+    let fd: u64 = io.create(p)
+    if errno.failed(fd) {
+        return 0
+    }
+    var n: u64 = 0
+    n = n + stueck(fd, T_P0)
+    n = n + stueck(fd, T_P1)
+    n = n + stueck(fd, T_P2)
+    io.close(fd)
+    return n
+}
+
+// 512 Oktette ab `pos` lesen und zaehlen, wie viele davon stimmen. Der
+// Sollwert ist aus der STELLE ausgerechnet und nicht gemerkt: ein
+// Dateisystem, das nach dem Umzug den falschen Block liefert, faellt
+// damit auf, statt eine Null zu liefern, die wie eine Null aussieht.
+fn probe(p: u64, pos: u64) -> u64 {
+    let fd: u64 = io.open(p, 0)
+    if errno.failed(fd) {
+        return 0
+    }
+    var gut: u64 = 0
+    if !errno.failed(io.seek(fd, pos, 0)) {
+        let n: u64 = io.read(fd, (&buf[0 as usize]) as u64, 512)
+        if !errno.failed(n) {
+            var i: u64 = 0
+            while i < n {
+                if (buf[(i) as usize]) as u64 == muster(pos + i) {
+                    gut = gut + 1
+                }
+                i = i + 1
+            }
+        }
+    }
+    io.close(fd)
+    return gut
+}
+
+// EIN FINGERABDRUCK UEBER DEN GANZEN INHALT. FNV-1a, aber ueber
+// 64-Bit-Woerter und nicht ueber Oktette: eine Datei von 2,25 MiB sind
+// 2.359.296 Oktette und 294.912 Woerter, und der Unterschied ist in
+// QEMU eine Sekunde gegen acht. Jedes Oktett geht trotzdem ein.
+//
+// `*%` und `^`: die Rechnung LAEUFT UEBER, und das ist FNV.
+fn fingerabdruck(p: u64) -> u64 {
+    let fd: u64 = io.open(p, 0)
+    if errno.failed(fd) {
+        return 0
+    }
+    var h: u64 = 14695981039346656037
+    var weiter: bool = true
+    while weiter {
+        let n: u64 = io.read(fd, (&buf[0 as usize]) as u64, 4096)
+        if errno.failed(n) || n == 0 {
+            weiter = false
+        } else {
+            var i: u64 = 0
+            while i * 8 < n {
+                let w: u64 = __mmio_read64(((&buf[0 as usize]) as u64
+                    + i * 8) as *mut u64)
+                h = (h ^ w) *% 1099511628211
+                i = i + 1
+            }
+            // Was hinter der letzten vollen Acht liegt, geht oktettweise
+            // ein -- sonst waere eine Datei, deren Laenge kein
+            // Vielfaches von acht ist, am Ende ungeprueft.
+            var r: u64 = (n / 8) * 8
+            while r < n {
+                h = (h ^ (buf[(r) as usize] as u64)) *% 1099511628211
+                r = r + 1
+            }
+        }
+    }
+    io.close(fd)
+    return h
+}
+
+fn ino_von(p: u64) -> u64 {
+    if errno.failed(io.stat_into(p, (&st[0 as usize]) as u64)) {
+        return 0
+    }
+    return __mmio_read64(((&st[0 as usize]) as u64 + io.ST_INO) as *mut u64)
+}
+
+// ---------------------------------------------------------------- bauen
+
+fn bauen() -> u64 {
+    var p_d4: [u8; 4] = "/d4\0"
+    var p_viele: [u8; 10] = "/d4/viele\0"
+    var p_vn: [u8; 14] = "/d4/viele/v\0\0\0"
+    var p_g: [u8; 10] = "/d4/g\0\0\0\0\0"
+    var p_mittel: [u8; 11] = "/d4/mittel\0"
+    var p_tief: [u8; 9] = "/d4/tief\0"
+    var p_hart: [u8; 9] = "/d4/hart\0"
+    var p_zeig: [u8; 9] = "/d4/zeig\0"
+    var p_ren: [u8; 12] = "/d4/rename1\0"
+    var n_g: [u8; 7] = "gebaut\0"
+    var n_v: [u8; 6] = "viele\0"
+    var n_f: [u8; 7] = "fuell1\0"
+
+    io.make_dir((&p_d4[0 as usize]) as u64)
+    io.make_dir((&p_viele[0 as usize]) as u64)
+
+    // 1. Zweihundert Namen in EINEM Verzeichnis.
+    var i: u64 = 0
+    var gemacht: u64 = 0
+    while i < NVIELE {
+        pfad_num((&p_vn[0 as usize]) as u64, i)
+        let f: u64 = io.create((&pfad[0 as usize]) as u64)
+        if !errno.failed(f) {
+            io.close(f)
+            gemacht = gemacht + 1
+        }
+        i = i + 1
+    }
+    sag((&n_v[0 as usize]) as u64, gemacht)
+
+    // 2. Die Fuellstuecke.
+    i = 0
+    var gefuellt: u64 = 0
+    while i < NFUELL {
+        pfad_num((&p_g[0 as usize]) as u64, i)
+        if schreib((&pfad[0 as usize]) as u64, FUELL) == FUELL {
+            gefuellt = gefuellt + 1
+        }
+        i = i + 1
+    }
+    sag((&n_f[0 as usize]) as u64, gefuellt)
+
+    // 3. Die zwei tiefen Dateien -- ZULETZT, damit sie hinten liegen.
+    var n_m: [u8; 7] = "mittel\0"
+    var n_t: [u8; 5] = "tief\0"
+    sag((&n_m[0 as usize]) as u64,
+        schreib((&p_mittel[0 as usize]) as u64, MITTEL))
+    sag((&n_t[0 as usize]) as u64,
+        schreib_tief((&p_tief[0 as usize]) as u64))
+    schreib((&p_ren[0 as usize]) as u64, 4096)
+
+    // 4. Der zweite Name und der Verweis.
+    ulib.sys(ulib.SYS_LINK, (&p_mittel[0 as usize]) as u64,
+        (&p_hart[0 as usize]) as u64, 0)
+    io.symlink((&p_mittel[0 as usize]) as u64, (&p_zeig[0 as usize]) as u64)
+
+    // 5. JEDES ZWEITE FUELLSTUECK WEG. Der freie Platz steht danach
+    //    vorne, das Belegte hinten -- die Lage, in der ein Verkleinern
+    //    wirklich Bloecke bewegen muss.
+    i = 0
+    var weg: u64 = 0
+    while i < NFUELL {
+        if (i % 2) == 0 {
+            pfad_num((&p_g[0 as usize]) as u64, i)
+            if !errno.failed(io.unlink((&pfad[0 as usize]) as u64)) {
+                weg = weg + 1
+            }
+        }
+        i = i + 1
+    }
+    sag((&n_g[0 as usize]) as u64, weg)
+    return 0
+}
+
+// ---------------------------------------------------------------- pruefen
+
+fn pruefen() -> u64 {
+    var p_mittel: [u8; 11] = "/d4/mittel\0"
+    var p_tief: [u8; 9] = "/d4/tief\0"
+    var p_hart: [u8; 9] = "/d4/hart\0"
+    var p_zeig: [u8; 9] = "/d4/zeig\0"
+    var p_ren: [u8; 12] = "/d4/rename1\0"
+    var p_ren2: [u8; 12] = "/d4/rename2\0"
+    var p_viele: [u8; 10] = "/d4/viele\0"
+    var p_g: [u8; 10] = "/d4/g\0\0\0\0\0"
+
+    var n_mittel: [u8; 12] = "sum_mittel\0\0"
+    var n_fuell: [u8; 11] = "sum_fuell\0\0"
+    var n_ltief: [u8; 11] = "len_tief\0\0\0"
+    var n_lmittel: [u8; 12] = "len_mittel\0\0"
+    var n_itief: [u8; 10] = "ino_tief\0\0"
+    var n_imittel: [u8; 12] = "ino_mittel\0\0"
+    var n_ihart: [u8; 10] = "ino_hart\0\0"
+    var n_hart: [u8; 9] = "hartok\0\0\0"
+    var n_zeig: [u8; 9] = "zeigok\0\0\0"
+    var n_ren: [u8; 10] = "renameok\0\0"
+    var n_iren: [u8; 9] = "ino_ren\0\0"
+    var n_dent: [u8; 7] = "dents\0\0"
+    var n_mtief: [u8; 12] = "mtime_tief\0\0"
+    var n_ndat: [u8; 7] = "ndate\0\0"
+
+    // 1. Die drei Zeigerstufen der luecklosen Datei, jede an ihrer
+    //    Stelle. 512 von 512 Oktetten muessen stimmen.
+    var n_p0: [u8; 8] = "tief_0\0\0"
+    var n_p1: [u8; 8] = "tief_1\0\0"
+    var n_p2: [u8; 8] = "tief_2\0\0"
+    sag((&n_p0[0 as usize]) as u64, probe((&p_tief[0 as usize]) as u64, T_P0))
+    sag((&n_p1[0 as usize]) as u64, probe((&p_tief[0 as usize]) as u64, T_P1))
+    sag((&n_p2[0 as usize]) as u64, probe((&p_tief[0 as usize]) as u64, T_P2))
+    sag((&n_mittel[0 as usize]) as u64,
+        fingerabdruck((&p_mittel[0 as usize]) as u64))
+    sag((&n_ltief[0 as usize]) as u64,
+        io.size_of((&p_tief[0 as usize]) as u64))
+    sag((&n_lmittel[0 as usize]) as u64,
+        io.size_of((&p_mittel[0 as usize]) as u64))
+
+    // 2. Alle uebriggebliebenen Fuellstuecke, zu EINER Zahl gefaltet.
+    var h: u64 = 14695981039346656037
+    var da: u64 = 0
+    var i: u64 = 0
+    while i < NFUELL {
+        pfad_num((&p_g[0 as usize]) as u64, i)
+        let f: u64 = fingerabdruck((&pfad[0 as usize]) as u64)
+        if f != 0 {
+            da = da + 1
+        }
+        h = (h ^ f) *% 1099511628211
+        i = i + 1
+    }
+    sag((&n_fuell[0 as usize]) as u64, h)
+    sag((&n_ndat[0 as usize]) as u64, da)
+
+    // 3. Die Inodenummern. SIE SIND DIE ZUSAGE DIESER RUNDE: sie duerfen
+    //    sich durch keinen Groessenwechsel aendern, sonst braechen der
+    //    harte Verweis, `stat` und der Namensindex aus Runde K15.
+    let it: u64 = ino_von((&p_tief[0 as usize]) as u64)
+    let im: u64 = ino_von((&p_mittel[0 as usize]) as u64)
+    let ih: u64 = ino_von((&p_hart[0 as usize]) as u64)
+    sag((&n_itief[0 as usize]) as u64, it)
+    sag((&n_imittel[0 as usize]) as u64, im)
+    sag((&n_ihart[0 as usize]) as u64, ih)
+    var hartok: u64 = 0
+    if im != 0 && im == ih {
+        hartok = 1
+    }
+    sag((&n_hart[0 as usize]) as u64, hartok)
+
+    // 4. Der symbolische Verweis: `lstat` sieht ihn, `stat` sieht die
+    //    Datei dahinter, und durch ihn hindurch kommt derselbe Inhalt.
+    var zeigok: u64 = 0
+    if !errno.failed(io.lstat_into((&p_zeig[0 as usize]) as u64,
+        (&st[0 as usize]) as u64)) {
+        if io.is_link_mode(io.stat_mode_of((&st[0 as usize]) as u64)) {
+            if fingerabdruck((&p_zeig[0 as usize]) as u64)
+                == fingerabdruck((&p_mittel[0 as usize]) as u64) {
+                zeigok = 1
+            }
+        }
+    }
+    sag((&n_zeig[0 as usize]) as u64, zeigok)
+
+    // 5. Umbenennen ohne Kopieren, hin und zurueck.
+    let i1: u64 = ino_von((&p_ren[0 as usize]) as u64)
+    var renok: u64 = 0
+    var i2: u64 = 0
+    if !ulib.bad(ulib.sys(ulib.SYS_RENAME, (&p_ren[0 as usize]) as u64,
+        (&p_ren2[0 as usize]) as u64, 0)) {
+        i2 = ino_von((&p_ren2[0 as usize]) as u64)
+        if !ulib.bad(ulib.sys(ulib.SYS_RENAME,
+            (&p_ren2[0 as usize]) as u64, (&p_ren[0 as usize]) as u64, 0)) {
+            if i1 != 0 && i1 == i2 && ino_von((&p_ren[0 as usize]) as u64) == i1 {
+                renok = 1
+            }
+        }
+    }
+    sag((&n_ren[0 as usize]) as u64, renok)
+    sag((&n_iren[0 as usize]) as u64, i1)
+
+    // 6. Das grosse Verzeichnis, ueber `getdents`.
+    var dents: u64 = 0
+    let dd: u64 = io.dir_open((&p_viele[0 as usize]) as u64)
+    if !errno.failed(dd) {
+        var going: bool = true
+        while going {
+            let n: u64 = io.dir_read(dd, (&ents[0 as usize]) as u64, 4096)
+            if n == 0 || errno.failed(n) {
+                going = false
+            } else {
+                var at: u64 = 0
+                while at < n {
+                    dents = dents + 1
+                    at = at + io.dir_reclen((&ents[0 as usize]) as u64 + at)
+                }
+            }
+        }
+        io.close(dd)
+    }
+    sag((&n_dent[0 as usize]) as u64, dents)
+
+    // 7. Die Aenderungszeit. EIN UMZUG IST KEINE AENDERUNG DES INHALTS,
+    //    also darf sie sich nicht bewegen.
+    var mt: u64 = 0
+    if !errno.failed(io.stat_into((&p_tief[0 as usize]) as u64,
+        (&st2[0 as usize]) as u64)) {
+        mt = io.stat_mtime((&st2[0 as usize]) as u64)
+    }
+    sag((&n_mtief[0 as usize]) as u64, mt)
+    return 0
+}
+
+// ----------------------------------------------------------------- info
+
+fn info() {
+    var n_bl: [u8; 8] = "blocks\0\0"
+    var n_dev: [u8; 5] = "dev\0\0"
+    var n_map: [u8; 5] = "map\0\0"
+    var n_fr: [u8; 6] = "free\0\0"
+    var n_ds: [u8; 6] = "data\0\0"
+    var n_in: [u8; 8] = "inodes\0\0"
+    var n_cap: [u8; 5] = "cap\0\0"
+    sag((&n_bl[0 as usize]) as u64, fsres(FR_BLOCKS, 0))
+    sag((&n_dev[0 as usize]) as u64, fsres(FR_DEV, 0))
+    sag((&n_map[0 as usize]) as u64, fsres(FR_MAP, 0))
+    sag((&n_fr[0 as usize]) as u64, fsres(FR_FREE, 0))
+    sag((&n_ds[0 as usize]) as u64, fsres(FR_DATA, 0))
+    sag((&n_in[0 as usize]) as u64, fsres(FR_INODES, 0))
+    sag((&n_cap[0 as usize]) as u64, fsres(FR_CAP, 0))
+}
+
+// Die kleinste Groesse, auf die sich dieses Dateisystem verkleinern
+// laesst: alles, was belegt ist, plus ein Rand. `frei` und `blocks`
+// kommen aus dem Kern, die Subtraktion ist die einzige Rechnung.
+fn kleinstes() -> u64 {
+    let alt: u64 = fsres(FR_BLOCKS, 0)
+    let frei: u64 = fsres(FR_FREE, 0)
+    if frei >= alt {
+        return alt
+    }
+    return alt - frei + 192
+}
+
+fn verkleinern(ziel: u64) -> u64 {
+    var n_ziel: [u8; 6] = "ziel\0\0"
+    var n_need: [u8; 6] = "need\0\0"
+    var n_room: [u8; 6] = "room\0\0"
+    var n_fits: [u8; 6] = "fits\0\0"
+    var n_neu: [u8; 6] = "klein\0"
+    var n_mv: [u8; 8] = "moved\0\0\0"
+    sag((&n_ziel[0 as usize]) as u64, ziel)
+    sag((&n_need[0 as usize]) as u64, fsres(FR_NEED, ziel))
+    sag((&n_room[0 as usize]) as u64, fsres(FR_ROOM, ziel))
+    sag((&n_fits[0 as usize]) as u64, fsres(FR_FITS, ziel))
+    let r: u64 = fsres(FR_SHRINK, ziel)
+    sag((&n_neu[0 as usize]) as u64, r)
+    sag((&n_mv[0 as usize]) as u64, fsres(FR_MOVED, 0))
+    return r
+}
+
+fn vergroessern(ziel: u64) -> u64 {
+    var n_ziel: [u8; 6] = "ziel\0\0"
+    var n_neu: [u8; 8] = "wachsen\0"
+    let r: u64 = fsres(FR_GROW, ziel)
+    sag((&n_ziel[0 as usize]) as u64, ziel)
+    sag((&n_neu[0 as usize]) as u64, r)
+    return r
+}
+
+// ------------------------------------------------- wachsen unter Last
+//
+// `/bin/fsrw endlos` schreibt, waehrend gewachsen wird. Es ist ein
+// EIGENER PROZESS und keine Schleife in diesem hier: nur so laeuft das
+// Schreiben wirklich WAEHREND des Wachsens und nicht dazwischen.
+fn last(ziel: u64) -> u64 {
+    var p_fsrw: [u8; 10] = "/bin/fsrw\0"
+    var w_endlos: [u8; 7] = "endlos\0"
+    var n_pid: [u8; 5] = "pid\0\0"
+    var n_los: [u8; 6] = "last\0\0"
+    ulib.strcpy((&argv0[0 as usize]) as u64, (&p_fsrw[0 as usize]) as u64)
+    ulib.strcpy((&argv1[0 as usize]) as u64, (&w_endlos[0 as usize]) as u64)
+    argp[(0) as usize] = (&argv0[0 as usize]) as u64
+    argp[(1) as usize] = (&argv1[0 as usize]) as u64
+    let pid: u64 = ulib.sys(ulib.SYS_EXEC, (&p_fsrw[0 as usize]) as u64,
+        (&argp[0 as usize]) as u64, 2)
+    sag((&n_pid[0 as usize]) as u64, pid)
+    if ulib.bad(pid) {
+        return 0
+    }
+    // Warten, bis der andere wirklich schreibt. Ohne das traefe das
+    // Wachsen den Programmstart und nicht das Dateisystem.
+    ulib.sleep_ms(700)
+    sag((&n_los[0 as usize]) as u64, 1)
+    let r: u64 = vergroessern(ziel)
+    ulib.sleep_ms(400)
+    ulib.sys(ulib.SYS_KILL, pid, 9, 0)
+    ulib.sleep_ms(200)
+    return r
+}
+
+// ------------------------------------------------------------- pendeln
+//
+// Verkleinern und wachsen ohne Unterlass. `tools/ofs4/crash.sh` schiesst
+// QEMU mitten hinein ab; danach muss `fsck` in JEDEM Fall ein gueltiges
+// Dateisystem finden -- die alte Groesse oder die neue, nie etwas
+// dazwischen.
+//
+// DIE PAUSE IST NICHT BEQUEMLICHKEIT, SONDERN DIE ZWEITE HAELFTE DER
+// MESSUNG. Ohne sie liegt der Kippschalter des Wachsens (EINE
+// Umschreibung, wenige Millisekunden) unmittelbar hinter dem des
+// Verkleinerns, und ein zufaelliger Abschuss trifft praktisch immer die
+// UMZUGSKETTE -- das Ergebnis ist dann immer die alte Groesse. Mit
+// `ofs4 pendel <ms>` steht das Dateisystem `ms` Millisekunden lang in
+// der VERKLEINERTEN Groesse, und erst damit kommt der zweite erlaubte
+// Endzustand ueberhaupt vor. Beide muessen gueltig sein, und ein
+// dritter darf es nicht geben.
+fn pendel(pause: u64) -> u64 {
+    var s_los: [u8; 11] = "ofs4: los\0\0"
+    var n_r: [u8; 7] = "runde\0\0"
+    let gross: u64 = fsres(FR_BLOCKS, 0)
+    let klein: u64 = kleinstes()
+    if klein >= gross {
+        return 1
+    }
+    ulib.say((&s_los[0 as usize]) as u64)
+    ulib.nl()
+    var runde: u64 = 0
+    while runde < 100000 {
+        fsres(FR_SHRINK, klein)
+        if pause != 0 {
+            ulib.sleep_ms(pause)
+        }
+        fsres(FR_GROW, gross)
+        if pause != 0 {
+            ulib.sleep_ms(pause / 4)
+        }
+        runde = runde + 1
+        sag((&n_r[0 as usize]) as u64, runde)
+    }
+    return 0
+}
+
+// ---------------------------------------------------------------- Start
+
+fn u_start(args: u64) -> u64 {
+    var w_info: [u8; 5] = "info\0"
+    var w_bauen: [u8; 6] = "bauen\0"
+    var w_pruef: [u8; 6] = "pruef\0"
+    var w_klein: [u8; 6] = "klein\0"
+    var w_wachsen: [u8; 8] = "wachsen\0"
+    var w_nein: [u8; 5] = "nein\0"
+    var w_last: [u8; 5] = "last\0"
+    var w_pendel: [u8; 7] = "pendel\0"
+    var w_auto: [u8; 5] = "auto\0"
+    var n_ende: [u8; 6] = "ende\0\0"
+    var n_nein: [u8; 5] = "nein\0"
+    var n_ziel: [u8; 6] = "ziel\0\0"
+    var n_fits: [u8; 6] = "fits\0\0"
+
+    let argc: u64 = ulib.arg_count(args)
+    if argc < 2 {
+        info()
+        return 0
+    }
+    let a: u64 = ulib.arg_at(args, 1)
+    var wert: u64 = 0
+    if argc > 2 {
+        let b: u64 = ulib.arg_at(args, 2)
+        if ulib.streq(b, (&w_auto[0 as usize]) as u64) {
+            wert = 0
+        } else {
+            wert = lies_zahl(b)
+        }
+    }
+    if ulib.streq(a, (&w_info[0 as usize]) as u64) {
+        info()
+        sag((&n_ende[0 as usize]) as u64, 1)
+        return 0
+    }
+    if ulib.streq(a, (&w_bauen[0 as usize]) as u64) {
+        bauen()
+        info()
+        sag((&n_ende[0 as usize]) as u64, 1)
+        return 0
+    }
+    if ulib.streq(a, (&w_pruef[0 as usize]) as u64) {
+        pruefen()
+        sag((&n_ende[0 as usize]) as u64, 1)
+        return 0
+    }
+    if ulib.streq(a, (&w_klein[0 as usize]) as u64) {
+        if wert == 0 {
+            wert = kleinstes()
+        }
+        verkleinern(wert)
+        info()
+        sag((&n_ende[0 as usize]) as u64, 1)
+        return 0
+    }
+    if ulib.streq(a, (&w_wachsen[0 as usize]) as u64) {
+        if wert == 0 {
+            wert = fsres(FR_DEV, 0)
+        }
+        vergroessern(wert)
+        info()
+        sag((&n_ende[0 as usize]) as u64, 1)
+        return 0
+    }
+    // EINE VERKLEINERUNG, DIE NICHT PASSEN KANN. Ziel: der erste
+    // Datenblock plus acht -- da passt nichts hin, was belegt ist. Es
+    // MUSS sauber abgelehnt werden, und danach muss die Platte Oktett
+    // fuer Oktett dieselbe sein; das prueft der Wirt.
+    if ulib.streq(a, (&w_nein[0 as usize]) as u64) {
+        let ziel: u64 = fsres(FR_DATA, 0) + 8
+        sag((&n_ziel[0 as usize]) as u64, ziel)
+        sag((&n_fits[0 as usize]) as u64, fsres(FR_FITS, ziel))
+        sag((&n_nein[0 as usize]) as u64, fsres(FR_SHRINK, ziel))
+        info()
+        sag((&n_ende[0 as usize]) as u64, 1)
+        return 0
+    }
+    if ulib.streq(a, (&w_last[0 as usize]) as u64) {
+        if wert == 0 {
+            wert = fsres(FR_DEV, 0)
+        }
+        last(wert)
+        info()
+        sag((&n_ende[0 as usize]) as u64, 1)
+        return 0
+    }
+    if ulib.streq(a, (&w_pendel[0 as usize]) as u64) {
+        return pendel(wert)
+    }
+    info()
+    return 0
+}
