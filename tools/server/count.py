@@ -26,7 +26,10 @@ GRAFIK = ["fb", "wm", "wig", "font", "ttf", "tile", "vmode", "ansi", "ps2m"]
 # Die Dateien, DENEN die Grafik gehoert: die Module selbst, die Naht und
 # die beiden Ausbauten aus `kmain.fi` und `sys.fi`.
 EIGEN = set(g + ".fi" for g in GRAFIK) | {
-    "gfx.fi", "gfx-aus.fi", "kgui.fi", "sysgui.fi"}
+    "gfx.fi", "gfx-aus.fi", "kgui.fi", "sysgui.fi",
+    # MERGE-2 18 (customres): der gespeicherte Bildmodus. Sie ist selbst
+    # eine Grafikdatei und wird bei --gui off mit geloescht.
+    "dispsave.fi"}
 MUSTER = re.compile(
     r"(?<![A-Za-z0-9_.])(" + "|".join(GRAFIK) + r")\.([A-Za-z_][A-Za-z0-9_]*)")
 

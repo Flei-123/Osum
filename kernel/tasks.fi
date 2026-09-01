@@ -28,6 +28,8 @@ import kstate
 import sched
 import inet
 import pwr
+import sys
+import gfx
 import arch.arch
 
 export { main, WORK_UNITS, SPIN, GRIND_UNITS, GRIND_STEP }
@@ -54,6 +56,13 @@ fn main(state: u64, index: u64, kind: u64) {
     }
     if kind == sched.K_GRIND {
         grinder(state, index)
+    }
+    // RUNDE ASYNC: der Arbeitsfaden der Auftragsschicht. Sein Rumpf
+    // steht in `sys.fi`, weil er `read_of` und `write_of` braucht --
+    // diese Datei kennt nur, WER laeuft, nicht WAS er tut. Er kehrt
+    // nicht zurueck.
+    if kind == sched.K_AIO {
+        sys.aio_worker(state, index)
     }
     // ROUND K8: and this one never comes back -- `netd_body` is a loop
     // that only ends when the machine does.
@@ -83,6 +92,34 @@ fn idle(state: u64) {
         let allow: bool = !kstate.mode_on(state, kstate.M_NOCSTATES)
     while true {
         pwr.idle_wait(state, allow)
+        // ==================================== RUNDE CUSTOMRES
+        //
+        // HIER LAEUFT DIE BESTAETIGUNGSFRIST AB, UND NUR HIER LAEUFT SIE
+        // WIRKLICH OHNE ZUTUN AB.
+        //
+        // Bis zu dieser Runde sah `vmode.poll` nur `osum_dispset` --
+        // also lief die Frist nur weiter, solange irgendein Programm den
+        // Bildschirm anfasste. Das ist der Fall herum, den man nicht
+        // braucht: wer nach einem Moduswechsel vor einem SCHWARZEN
+        // Schirm sitzt, ruft nichts mehr auf. Genau dann muss der Kern
+        // von selbst zurueckschalten.
+        //
+        // WARUM DIE LEERLAUFAUFGABE UND NICHT DER ZEITGEBER. Weil `poll`
+        // Seitentafeln umbildet und ein ganzes Bild schreibt. Das ist
+        // die Lehre aus Runde K18: dort hat das Umrechnen des
+        // Bildschirms IM ZEITGEBER den Kernstapel bis auf 112 Oktette
+        // gefuellt. Hier steht sie in AUFGABENKONTEXT, auf dem eigenen
+        // Stapel der Leerlaufaufgabe -- und die kommt oft genug dran:
+        // der Zeitgeber weckt sie hundertmal je Sekunde aus `hlt` bzw.
+        // `mwait`, und laeuft eine andere Aufgabe, dann laeuft ein
+        // Programm, und dann greift ausserdem der Weg ueber den
+        // Systemaufruf.
+        //
+        // Der erste Vergleich in `poll` ist ein Wort aus `kdata` gegen
+        // null. Ein Leerlauf ohne offene Frist kostet also genau das.
+        // MERGE-2 18: durch die Grafiknaht. `tasks.fi` wird auch im
+        // GUI-losen Kern uebersetzt, und dort gibt es `vmode` nicht.
+        let _r: bool = gfx.disp_poll(state)
     }
 }
 
