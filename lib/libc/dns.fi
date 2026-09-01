@@ -1,0 +1,475 @@
+// SPDX-License-Identifier: MIT
+// lib/libc/dns.fi -- RUNDE BETRIEB: aus einem NAMEN eine ADRESSE.
+//
+// Bis zu dieser Runde stand in `lib/libc/net.fi` woertlich: "THERE IS NO
+// NAME RESOLUTION. Osum has no resolver and no /etc/hosts; an address is
+// four numbers." Deshalb trug `/etc/ota.conf` eine IPv4-Adresse und
+// daneben den Namen nur fuers Zertifikat. Diese Datei schliesst das.
+//
+// SIE IST DER UNTERE HALB DES AUFLOESERS: die Steckdose, die Uhr, der
+// Zufall und die Wiederholung. Das Format selbst -- Anfrage bauen,
+// Antwort zerlegen, Namenskompression -- steht in `libc/dnswire.fi` und
+// kommt ohne einen einzigen Systemaufruf aus, damit es sich ohne ein
+// Paket pruefen laesst.
+//
+// ==================================================================
+// WAS EINEN AUFLOESER ANGREIFBAR MACHT, UND WAS HIER DAGEGEN STEHT
+//
+// Der Angriff heisst Cache-Vergiftung und er ist alt: wer die Leitung
+// NICHT sieht, schickt einfach eine gefaelschte Antwort und hofft, dass
+// sie vor der echten ankommt und dass er die Felder errraet, die sie
+// zuordenbar machen. Zu erraten sind:
+//
+//   * die Kennung        16 Bit -- aus `getrandom`, nicht aus einem Zaehler
+//   * der Quellport      ~16 Bit -- GEWUERFELT und ausdruecklich gebunden
+//   * die Schreibweise   ein Bit je Buchstabe (0x20, `dnswire.q_build`)
+//
+// DER QUELLPORT IST HIER KEINE FORMSACHE. Osums Kern vergibt fuer eine
+// UDP-Steckdose, die NICHT gebunden wurde, den Port
+// `40000 + (zaehler & 4095)` (`kernel/inet.fi`, `sock_sendto`) -- ein
+// ZAEHLER ueber 4096 Werte. Wer den vorigen Port kennt, kennt den
+// naechsten. Deshalb bindet dieser Aufloeser IMMER selbst, mit einem
+// Port aus `getrandom`; und wenn das Binden achtmal misslingt, bricht er
+// ab, statt still auf den Zaehler zurueckzufallen.
+//
+// EINE ANTWORT, DIE NICHT PASST, BEENDET DEN VERSUCH NICHT. Sie wird
+// gezaehlt und weggeworfen, und es wird bis zum Ablauf der Frist weiter
+// gewartet. Das ist der Unterschied zwischen "ein Faelscher muss schneller
+// sein als der Nameserver" und "ein Faelscher muss die richtige Antwort
+// verdraengen" -- im zweiten Fall gewinnt er nur mit vollstaendig
+// geratenen Feldern.
+//
+// GEPRUEFT WIRD AUSSERDEM, VON WEM DAS PAKET KAM: Adresse des Servers,
+// den wir gefragt haben, und Port 53. Beides kostet zwei Vergleiche und
+// wirft alles weg, was von woanders kommt.
+//
+// ==================================================================
+// /etc/resolv.conf
+//
+//     nameserver 192.168.1.1     bis zu vier, in dieser Reihenfolge
+//     options timeout:2 attempts:2
+//     fallback 9.9.9.9           NUR wenn kein nameserver antwortet
+//
+// KEINE FEST EINGEBAUTE ADRESSE. In dieser Datei steht keine einzige
+// Nameserver-Adresse; `grep -c '8\.8\.8\.8' lib/libc/dns.fi` ist 0, und
+// `tools/betrieb/run.sh` prueft das nach. `fallback` ist der sichtbare,
+// abschaltbare Rueckfall aus dem Auftrag: er steht in einer Datei, die
+// man lesen und loeschen kann, `/bin/resolvconf` LAESST IHN STEHEN, wenn
+// DHCP die Datei neu schreibt, und ohne die Zeile gibt es ihn nicht.
+//
+// `search`, `domain` und `ndots` werden GELESEN UND VERWORFEN. Ein Name
+// wird gefragt, wie er dasteht. Fuer eine Update-Quelle ist das richtig
+// (sie ist ein voller Name); fuer `ping nachbar` waere es zu wenig, und
+// das steht in `docs/RUNDE-BETRIEB.md` unter "was noch fehlt".
+
+import libc.kcall
+import libc.net
+import libc.dnswire
+
+export {
+    conf_load, conf_set, conf_count, conf_at, conf_timeout, conf_attempts,
+    resolve, resolve_a,
+    used_server, used_port, used_txid, used_tries, dropped, used_ms,
+    R_NOSERVER, R_NET, R_TIMEOUT, R_NOPORT
+}
+
+const R_NOSERVER: u64 = 20 // /etc/resolv.conf nennt keinen brauchbaren
+const R_NET: u64 = 21 // die Steckdose selbst ging nicht auf
+const R_TIMEOUT: u64 = 22 // niemand hat geantwortet
+const R_NOPORT: u64 = 23 // kein zufaelliger Quellport zu bekommen
+
+const MAX_SRV: u64 = 4
+const MSG_MAX: u64 = 1500 // ein UDP-Paket ohne EDNS0 bleibt darunter
+const CONF_MAX: u64 = 2048
+const PORT_TRIES: u64 = 8
+
+static mut SRV: [u64; 5] = [0 as u64; 5]
+static mut NSRV: u64 = 0
+static mut FALL: u64 = 0
+static mut TMO: u64 = 2000 // ms
+static mut ATT: u64 = 2
+static mut GELADEN: bool = false
+
+static mut CONF: [u8; 2048] = [0 as u8; 2048]
+static mut QB: [u8; 1500] = [0 as u8; 1500]
+static mut RB: [u8; 1500] = [0 as u8; 1500]
+static mut RND: [u8; 40] = [0 as u8; 40]
+static mut TS: [u8; 16] = [0 as u8; 16]
+static mut SA: [u8; 16] = [0 as u8; 16]
+static mut SL: [u8; 8] = [0 as u8; 8]
+static mut P_CONF: [u8; 17] = "/etc/resolv.conf\0"
+
+static mut U_SRV: u64 = 0
+static mut U_PORT: u64 = 0
+static mut U_TXID: u64 = 0
+static mut U_TRIES: u64 = 0
+static mut U_DROP: u64 = 0
+static mut U_MS: u64 = 0
+
+fn used_server() -> u64 { return U_SRV }
+fn used_port() -> u64 { return U_PORT }
+fn used_txid() -> u64 { return U_TXID }
+fn used_tries() -> u64 { return U_TRIES }
+fn dropped() -> u64 { return U_DROP }
+fn used_ms() -> u64 { return U_MS }
+fn conf_count() -> u64 { return NSRV }
+fn conf_timeout() -> u64 { return TMO }
+fn conf_attempts() -> u64 { return ATT }
+
+fn conf_at(i: u64) -> u64 {
+    if i >= NSRV {
+        return 0
+    }
+    return SRV[(i) as usize]
+}
+
+fn ld8(p: u64, i: u64) -> u64 {
+    return __mmio_read8((p + i) as *mut u8) as u64
+}
+
+fn st8(p: u64, i: u64, v: u64) {
+    __mmio_write8((p + i) as *mut u8, (v & 255) as u8)
+}
+
+fn ld64(p: u64) -> u64 {
+    return *((p) as *mut u64)
+}
+
+fn bad(v: u64) -> bool {
+    return v > 0xFFFFFFFFFFFFF000
+}
+
+// ------------------------------------------------------ die Uhr
+
+fn now_ms() -> u64 {
+    // CLOCK_MONOTONIC. Die Wanduhr waere falsch: sie darf springen, und
+    // eine Frist, die durch einen Zeitsprung ablaeuft, ist keine.
+    let r: u64 = kcall.sys2(kcall.SYS_CLOCK_GETTIME, 1,
+        (&TS[0 as usize]) as u64)
+    if bad(r) {
+        return 0
+    }
+    let s: u64 = ld64((&TS[0 as usize]) as u64)
+    let ns: u64 = ld64(((&TS[0 as usize]) as u64) + 8)
+    return s * 1000 + ns / 1000000
+}
+
+fn schlaf_ms(ms: u64) {
+    var t: [u8; 16] = [0 as u8; 16]
+    let p: u64 = (&t[0 as usize]) as u64
+    *((p) as *mut u64) = ms / 1000
+    *((p + 8) as *mut u64) = (ms % 1000) * 1000000
+    kcall.sys2(kcall.SYS_NANOSLEEP, p, 0)
+}
+
+fn wuerfeln(p: u64, n: u64) -> bool {
+    let r: u64 = kcall.sys3(kcall.SYS_GETRANDOM, p, n, 0)
+    if bad(r) || r != n {
+        return false
+    }
+    return true
+}
+
+// --------------------------------------------------- /etc/resolv.conf
+
+fn wort_gleich(p: u64, i: u64, n: u64, w: u64, wl: u64) -> bool {
+    if i + wl > n {
+        return false
+    }
+    var k: u64 = 0
+    while k < wl {
+        if ld8(p, i + k) != ld8(w, k) {
+            return false
+        }
+        k = k + 1
+    }
+    return true
+}
+
+// `a.b.c.d` ab `i`, hoert beim ersten Zeichen auf, das nicht dazugehoert.
+fn ip_an(p: u64, i: u64, n: u64) -> u64 {
+    var v: u64 = 0
+    var teil: u64 = 0
+    var punkte: u64 = 0
+    var ziffern: u64 = 0
+    var k: u64 = i
+    while k < n {
+        let c: u64 = ld8(p, k)
+        if c >= 48 && c <= 57 {
+            teil = teil * 10 + (c - 48)
+            if teil > 255 {
+                return 0
+            }
+            ziffern = ziffern + 1
+            k = k + 1
+        } else if c == 46 && punkte < 3 && ziffern > 0 {
+            v = (v << 8) | teil
+            teil = 0
+            ziffern = 0
+            punkte = punkte + 1
+            k = k + 1
+        } else {
+            break
+        }
+    }
+    if punkte != 3 || ziffern == 0 {
+        return 0
+    }
+    return (v << 8) | teil
+}
+
+fn zahl_an(p: u64, i: u64, n: u64) -> u64 {
+    var v: u64 = 0
+    var k: u64 = i
+    var d: u64 = 0
+    while k < n {
+        let c: u64 = ld8(p, k)
+        if c < 48 || c > 57 {
+            break
+        }
+        v = v * 10 + (c - 48)
+        d = d + 1
+        if d > 6 {
+            break
+        }
+        k = k + 1
+    }
+    if d == 0 {
+        return 0
+    }
+    return v
+}
+
+fn ueber_leer(p: u64, i: u64, n: u64) -> u64 {
+    var k: u64 = i
+    while k < n {
+        let c: u64 = ld8(p, k)
+        if c != 32 && c != 9 {
+            break
+        }
+        k = k + 1
+    }
+    return k
+}
+
+// Von Hand eintragen -- der zweite Weg aus dem Auftrag. Setzt die Liste
+// auf genau einen Server und schaltet das Lesen der Datei ab.
+fn conf_set(ip: u64) {
+    NSRV = 1
+    SRV[(0) as usize] = ip
+    GELADEN = true
+}
+
+fn conf_load() -> u64 {
+    NSRV = 0
+    FALL = 0
+    TMO = 2000
+    ATT = 2
+    GELADEN = true
+    let fd: u64 = kcall.sys3(kcall.SYS_OPEN, (&P_CONF[0 as usize]) as u64,
+        0, 0)
+    if bad(fd) {
+        return 0
+    }
+    let p: u64 = (&CONF[0 as usize]) as u64
+    var n: u64 = 0
+    while n < CONF_MAX {
+        let r: u64 = kcall.sys3(kcall.SYS_READ, fd, p + n, CONF_MAX - n)
+        if bad(r) || r == 0 {
+            break
+        }
+        n = n + r
+    }
+    kcall.sys1(kcall.SYS_CLOSE, fd)
+    var w_ns: [u8; 11] = "nameserver\0"
+    var w_fb: [u8; 9] = "fallback\0"
+    var w_op: [u8; 8] = "options\0"
+    var w_to: [u8; 9] = "timeout:\0"
+    var w_at: [u8; 10] = "attempts:\0"
+    var i: u64 = 0
+    while i < n {
+        var e: u64 = i
+        while e < n && ld8(p, e) != 10 {
+            e = e + 1
+        }
+        var a: u64 = ueber_leer(p, i, e)
+        if a < e && ld8(p, a) != 35 && ld8(p, a) != 59 {
+            if wort_gleich(p, a, e, (&w_ns[0 as usize]) as u64, 10) {
+                let ip: u64 = ip_an(p, ueber_leer(p, a + 10, e), e)
+                if ip != 0 && NSRV < MAX_SRV {
+                    SRV[(NSRV) as usize] = ip
+                    NSRV = NSRV + 1
+                }
+            } else if wort_gleich(p, a, e, (&w_fb[0 as usize]) as u64, 8) {
+                let ip2: u64 = ip_an(p, ueber_leer(p, a + 8, e), e)
+                if ip2 != 0 {
+                    FALL = ip2
+                }
+            } else if wort_gleich(p, a, e, (&w_op[0 as usize]) as u64, 7) {
+                var k: u64 = a + 7
+                while k < e {
+                    if wort_gleich(p, k, e, (&w_to[0 as usize]) as u64, 8) {
+                        let t: u64 = zahl_an(p, k + 8, e)
+                        if t > 0 && t <= 30 {
+                            TMO = t * 1000
+                        }
+                    }
+                    if wort_gleich(p, k, e, (&w_at[0 as usize]) as u64, 9) {
+                        let t2: u64 = zahl_an(p, k + 9, e)
+                        if t2 > 0 && t2 <= 10 {
+                            ATT = t2
+                        }
+                    }
+                    k = k + 1
+                }
+            }
+        }
+        i = e + 1
+    }
+    // DER RUECKFALL, und er ist der letzte in der Liste und nicht der
+    // erste: er wird nur gefragt, wenn vor ihm niemand geantwortet hat.
+    if FALL != 0 && NSRV < MAX_SRV {
+        SRV[(NSRV) as usize] = FALL
+        NSRV = NSRV + 1
+    }
+    return NSRV
+}
+
+// ------------------------------------------------------ die Anfrage
+
+// Ein Versuch gegen EINEN Server. Gibt einen der R_* zurueck.
+fn frage(server: u64, name: u64, qtype: u64, out: u64) -> u64 {
+    if !wuerfeln((&RND[0 as usize]) as u64, 34) {
+        return R_NET
+    }
+    let txid: u64 = (ld8((&RND[0 as usize]) as u64, 32) << 8)
+        | ld8((&RND[0 as usize]) as u64, 33)
+    let qlen: u64 = dnswire.q_build((&QB[0 as usize]) as u64, MSG_MAX,
+        txid, name, qtype, (&RND[0 as usize]) as u64)
+    if qlen == 0 {
+        return dnswire.R_BADNAME
+    }
+    let fd: u64 = kcall.sys3(kcall.SYS_SOCKET, net.AF_INET,
+        net.SOCK_DGRAM | net.SOCK_NONBLOCK, 0)
+    if bad(fd) {
+        return R_NET
+    }
+    // DER GEWUERFELTE QUELLPORT. 1024..65535, aus `getrandom`, und
+    // wirklich GEBUNDEN -- ohne dieses Binden vergibt Osums Kern einen
+    // Port aus einem Zaehler.
+    var port: u64 = 0
+    var v: u64 = 0
+    var t: u64 = 0
+    while t < PORT_TRIES {
+        var pr: [u8; 2] = [0 as u8; 2]
+        if !wuerfeln((&pr[0 as usize]) as u64, 2) {
+            net.close(fd)
+            return R_NET
+        }
+        let kand: u64 = 1024 + (((ld8((&pr[0 as usize]) as u64, 0) << 8)
+            | ld8((&pr[0 as usize]) as u64, 1)) % 64512)
+        v = net.bind_port(fd, kand)
+        if !bad(v) {
+            port = kand
+            break
+        }
+        t = t + 1
+    }
+    if port == 0 {
+        net.close(fd)
+        return R_NOPORT
+    }
+    U_PORT = port
+    U_TXID = txid
+    U_SRV = server
+    let s: u64 = net.sendto_ip(fd, (&QB[0 as usize]) as u64, qlen, server, 53)
+    if bad(s) {
+        net.close(fd)
+        return R_NET
+    }
+    let start: u64 = now_ms()
+    let ende: u64 = start + TMO
+    var erg: u64 = R_TIMEOUT
+    while true {
+        st8((&SL[0 as usize]) as u64, 0, 16)
+        var j: u64 = 1
+        while j < 8 {
+            st8((&SL[0 as usize]) as u64, j, 0)
+            j = j + 1
+        }
+        let r: u64 = kcall.sock_recv(fd, (&RB[0 as usize]) as u64, MSG_MAX,
+            (&SA[0 as usize]) as u64, (&SL[0 as usize]) as u64)
+        if !bad(r) && r > 0 {
+            // WOHER KAM DAS? Falsche Adresse oder falscher Port: weg
+            // damit, und WEITER WARTEN -- ein Fremdpaket darf den
+            // Versuch nicht beenden.
+            let von: u64 = net.sa_ip((&SA[0 as usize]) as u64)
+            let vp: u64 = net.sa_port((&SA[0 as usize]) as u64)
+            if von != server || vp != 53 {
+                U_DROP = U_DROP + 1
+            } else {
+                let c: u64 = dnswire.ans_check((&RB[0 as usize]) as u64, r,
+                    (&QB[0 as usize]) as u64, qlen, qtype, out)
+                if c == dnswire.R_MISMATCH || c == dnswire.R_NOTQUERY {
+                    // Kennung oder Frage passen nicht: das war nicht die
+                    // Antwort auf diese Frage. Zaehlen und weiterwarten.
+                    U_DROP = U_DROP + 1
+                } else {
+                    erg = c
+                    break
+                }
+            }
+        }
+        let jetzt: u64 = now_ms()
+        if jetzt >= ende {
+            break
+        }
+        schlaf_ms(1)
+    }
+    U_MS = now_ms() - start
+    net.close(fd)
+    return erg
+}
+
+// Der ganze Weg: jeden Server, `attempts` Mal, bis einer eine ANTWORT
+// gibt. "Es gibt den Namen nicht" IST eine Antwort und wird nicht
+// wiederholt -- sonst fragt ein Tippfehler achtmal.
+fn resolve(name: u64, qtype: u64, out: u64) -> u64 {
+    if !GELADEN {
+        conf_load()
+    }
+    U_DROP = 0
+    U_TRIES = 0
+    if NSRV == 0 {
+        return R_NOSERVER
+    }
+    var letzte: u64 = R_TIMEOUT
+    var a: u64 = 0
+    while a < ATT {
+        var i: u64 = 0
+        while i < NSRV {
+            U_TRIES = U_TRIES + 1
+            let c: u64 = frage(SRV[(i) as usize], name, qtype, out)
+            if c == dnswire.R_OK || c == dnswire.R_NXDOMAIN
+                || c == dnswire.R_NODATA || c == dnswire.R_BADNAME {
+                return c
+            }
+            letzte = c
+            i = i + 1
+        }
+        a = a + 1
+    }
+    return letzte
+}
+
+// Die bequeme Form: ein A-Satz als eine Zahl, oder 0.
+fn resolve_a(name: u64) -> u64 {
+    var b: [u8; 16] = [0 as u8; 16]
+    let p: u64 = (&b[0 as usize]) as u64
+    let c: u64 = resolve(name, dnswire.T_A, p)
+    if c != dnswire.R_OK {
+        return 0
+    }
+    return (ld8(p, 0) << 24) | (ld8(p, 1) << 16) | (ld8(p, 2) << 8)
+        | ld8(p, 3)
+}
