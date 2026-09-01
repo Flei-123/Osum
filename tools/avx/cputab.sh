@@ -50,12 +50,24 @@ OUT=${1:?"Aufruf: cputab.sh <OUT eines ota/run.sh-Laufes>"}
 [ -f tools/ota/server.py ] || {
     echo "tools/ota/ fehlt -- dieses Skript braucht den Zweig 'ota'"; exit 1; }
 
-# DERSELBE PORT WIE IM LAEUFER. Er steht in `/etc/ota.conf` IM ABBILD,
-# das der Lauf installiert hat -- ein anderer Port hiesse, dass das
-# Geraet ins Leere greift. Die Rechnung ist woertlich die aus
-# `tools/ota/run.sh`.
-PORT=$(( 18000 + $(printf '%d' "0x$(printf '%s' "$ROOT" | md5sum | cut -c1-3)") % 1000 ))
-NETZ=${OTA_NETZ:-avxnet}
+# DERSELBE PORT WIE IM LAEUFER, und er laesst sich nicht ausrechnen:
+# `tools/ota/run.sh` nimmt `18000 + ($$ % 900)`, also seine eigene
+# Prozessnummer. Die Zahl steht dafuer in `/etc/ota.conf` IM ABBILD, und
+# von dort schreibt sie das Geraet in jede Zeile `ota: quelle
+# https://10.0.2.2:<port>`. Also wird sie aus den Protokollen des Laufes
+# GELESEN und nicht geraten -- ein anderer Port hiesse, dass das Geraet
+# ins Leere greift, und der Lauf saehe aus wie ein Fehler dieser Runde.
+PORT=${OTA_PORT:-$(grep -hao '10\.0\.2\.2:[0-9]*' "$OUT"/*.txt 2>/dev/null \
+     | head -1 | cut -d: -f2)}
+[ -n "${PORT:-}" ] || { echo "Port nicht gefunden -- \$OTA_PORT setzen"; exit 1; }
+# DIE KERNWOERTER FUER DIE NETZKARTE, woertlich die aus
+# `tools/ota/run.sh`. `$OTA_NETZ` traegt KEINEN Netzwerknamen, sondern
+# die Zeile, die der Kern braucht, um die e1000 an QEMUs Benutzernetz zu
+# haengen -- `oneshot.sh` schreibt sie in die `limine.conf` auf der
+# Platte UND macht daraus die `-netdev`-Argumente. Steht hier etwas
+# anderes, hat das Geraet keine Adresse und `fetch` meldet
+# `no connection`.
+NETZ=${OTA_NETZ:-"nic nip=10.0.2.15/24 ngw=10.0.2.2 nsvc=0 nwait=0"}
 
 SRVPID=""
 dienst_aus() {
@@ -102,7 +114,8 @@ for M in $MODELLE; do
     L="$OUT/cputab-$M-suchen.txt"
     MODE=$(grep -ao 'fpu: mode=[0-9]*' "$L" | head -1 | cut -d= -f2)
     XCR0=$(grep -ao 'xcr0=0x[0-9a-f]*' "$L" | head -1 | cut -d= -f2)
-    SIZE=$(grep -ao 'size=[0-9]*' "$L" | head -1 | cut -d= -f2)
+    SIZE=$(grep -ao 'fpu: mode=.*' "$L" | head -1 \
+           | grep -ao 'size=[0-9]*' | head -1 | cut -d= -f2)
     if grep -qa "vector=6" "$L"; then
         ERG="#UD (vector=6) -- /bin/fetch tot"
     elif grep -qa "ota: NEUE FASSUNG verfuegbar" "$L" \
