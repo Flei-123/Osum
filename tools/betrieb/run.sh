@@ -85,7 +85,7 @@ nsd() { # [schalter...]
 lauf() { # name skript [limit]
     OTA_NETZ="$NETZ" OUT="$OUT" bash tools/install/oneshot.sh \
         "$1" platte "$2" "${3:-600}" > /dev/null 2>&1
-    sed -i -e 's/\x1b\[[0-9;=]*[a-zA-Z]//g' "$OUT/$1.txt" 2>/dev/null
+    sed -i -e 's/\x1b\[[0-9;=]*[a-zA-Z]//g' -e 's/\r//g' "$OUT/$1.txt" 2>/dev/null
     cat "$OUT/$1.rc" 2>/dev/null
 }
 frisch() { cp -f "$OUT/basis.img" "$OUT/ziel.img"; }
