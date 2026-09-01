@@ -106,6 +106,16 @@
 #      Strom, die statistische Pruefung faellt durch), und drei Neustarts
 #      mit drei verschiedenen Saaten.
 #
+#  10c. Die asynchrone Auftragsschicht (tools/async/run.sh, Runde ASYNC).
+#       Ein Auftrag lebt LAENGER als der Systemaufruf, der ihn abgegeben
+#       hat: zwischen `req_begin` und `req_end` liegen jetzt ein
+#       Zustandswechsel, ein Arbeitsfaden und beliebig viele Zeitscheiben
+#       eines anderen Prozesses. Damit wird die Zusage von Runde HANDLE
+#       ueberhaupt erst pruefbar. Sechs Fehlerklassen aus Ring 3, drei
+#       Gegenproben (darunter der io_uring-Fehler, absichtlich wieder
+#       eingebaut), die libc-Anbindung von der Platte und die Messung
+#       gegen den synchronen Weg.
+#
 #  14. Das Netz (tools/net/run.sh, Runde K8): ein virtio-net-Treiber in
 #      Firn (`kernel/virtio.fi`), der TCP/IP-Stack aus Runde K3 als
 #      ABHAENGIGKEIT ueber vendor/firn/COMMIT (`vendor/net/PROVENANCE.md`),
@@ -428,6 +438,22 @@
 #      Uebertragen. Gemessen wird mit Bildschirmfotos vorher und
 #      nachher; die Gegenprobe nimmt das Wort `disp` weg und erwartet
 #      nichts davon.
+#
+#  28. EIGENE AUFLOESUNGEN (tools/customres/run.sh, Runde CUSTOMRES):
+#      Runde DISPLAY fragte die Karte, hielt das Ergebnis aber in einer
+#      Liste fest, deren Kandidaten im Quelltext stehen -- 1400x1050 war
+#      damit unerreichbar, obwohl die Karte es kann. Diese Runde laesst
+#      Breite, Hoehe und Farbtiefe frei eingeben und schickt sie durch
+#      DIESELBEN drei Schranken; wird abgelehnt, steht WELCHE Schranke
+#      und MIT WELCHER ZAHL da (gemessen: dieselbe Anfrage an eine
+#      kleinere Karte wechselt den Grund von 3 auf 2). Dazu zwei
+#      Sicherheitsnetze: die Fuenfzehn-Sekunden-Frist laeuft jetzt
+#      WIRKLICH ohne Zutun ab (die Leerlaufaufgabe ruft `vmode.poll`;
+#      gemessen mit einem Programm, das umschaltet und dann schlaeft),
+#      und ein bestaetigter Modus ueberlebt den Neustart in
+#      /system/BILDMODUS, mit einem Erprobungszaehler wie beim A/B-Boot
+#      -- fuenf Starts auf DERSELBEN Platte, bis der Rueckfall greift.
+#      Gegenprobe: derselbe Kern ohne `disp` tut nichts davon.
 #  25. AKKUANALYSE JE PROGRAMM (tools/powermon/run.sh, Runde POWERMON):
 #      "Akkunutzung nach App", aber aus gemessenen Zahlen. Niemand kann
 #      den Verbrauch EINES Programms messen -- Windows auch nicht, es
@@ -898,6 +924,9 @@ lauf "10. Handles statt Umgebungsautoritaet: die Capability-Schicht aus OrientOS
 lauf "10b. die Lebensdauer vor der Asynchronitaet: Handles mit Verweiszaehler, Generation und Abbruch-Token (tools/handle/run.sh, Runde HANDLE)" \
      tools/handle/run.sh handle '^HANDLE: |^  ZAHL '
 
+lauf "10c. die asynchrone Auftragsschicht: ein Auftrag lebt laenger als sein Systemaufruf (tools/async/run.sh, Runde ASYNC)" \
+     tools/async/run.sh async '^ASYNC: |^        (TSC |  synchron|  asynchron|  nur die Abgabe|  Speicher je Auftrag)'
+
 lauf "11. der Multiboot-Kopf verlangt einen Bildschirm -- der UEFI-Pfad (tools/boot/run.sh)" \
      tools/boot/run.sh boot '^BOOT: '
 
@@ -956,6 +985,9 @@ lauf "23. USB: xHCI, Aufzaehlung, Tastatur, Maus und ein Stick (tools/k17/run.sh
 
 lauf "26. Der Bildschirm, zum zweiten Mal: Modusliste, Wechsel im Betrieb, EDID, Gamma (tools/display/run.sh, Runde DISPLAY)" \
      tools/display/run.sh display '^DISPLAY: |^  OK    (gefragt |die native |der rohe Block|er hat [0-9]+ Mikro|gemessen: |je Bildpunkt|NACHHER|VORHER|ZURUECK|Feld 1 ist rot|das Foto ist 800x600 -- der Bildmodus|und der Kernel hat von SELBST|die Aufrufnummern dieser Runde|ein Programm in Ring 3 hat)'
+
+lauf "28. Eigene Aufloesungen: drei Schranken mit ihrer Zahl, eine Frist ohne Zutun, ein Modus ueber den Neustart (tools/customres/run.sh, Runde CUSTOMRES)" \
+     tools/customres/run.sh customres '^CUSTOMRES: |^  OK    (1400x1050 steht in KEINER|das Foto ist 1400x1050|die genannte Zahl ist GENAU|und es steht da, was die Karte|und JETZT ist der Bildspeicher|eine Begruendung, die sich|nach 22 Sekunden Schlaf|der Kernel hat von SELBST|der Kernel findet den Modus|jetzt sind die drei Versuche|die Tafel steht auf dem SICHEREN|3840x2160 scheitert jetzt|mit 16 MiB war es noch|die Belegung der acht|zehn Zusagen ueber die|und die neun eigenen)'
 
 lauf "27. Marken statt Farben: hell, dunkel, automatisch, und der Kontrast nachgerechnet (tests/theme/run.sh, Runde THEME)" \
      tests/theme/run.sh theme '^THEME: |^  OK    (rohe Farbwerte|derselbe Pruefer|alle 256|groesster Abstand|[a-z]+/(light|dark): (41|23|21|jede)|#[0-9a-f]+ hell|die Farbe bleibt|GEGENPROBE|aufloesen |nachsehen |vollstaendig |erkennen, |neu malen, |das Umschalten|[a-z]+: die (haeufigste|aufgeloeste)|ohne /etc/theme.conf|und die eingebaute|aus der kaputten|und 4 werden|was die Datei)'
@@ -1139,10 +1171,56 @@ lauf "30. der Fernzugang: SSH-2 gegen den echten OpenSSH-Klienten (tools/sshd/ru
 lauf "31. ein Abbild fuer echtes Blech: BIOS und UEFI, Diagnose, deutscher Schreibtisch (tools/usbimg/run.sh, Runde USBIMG)" \
      tools/usbimg/run.sh usbimg '^USBIMG: |^ +(kern|programme|symbole|wurzel|geprueft|umlaute) +[0-9]'
 
+# RUNDE MERGE-2: VORGEZOGEN. Der Abschnitt stand HINTER
+# `abschnitte_abarbeiten` und lief im parallelen Betrieb nie --
+# derselbe Merge-Schaden wie bei serverbuild, multiuser, init,
+# fsrobust und sshd. Die Wache in `lauf` faengt ihn jetzt ab.
+# ABSCHNITT 29 -- RUNDE UMLAUT2. Im Starter stand "Text schreiben und
+# aendern", waehrend zwei Zeilen tiefer "Ausführen" schon richtig war.
+# Runde LOOK hat den Satz geholt und einen Pruefer gebaut, der
+# `locale/de/*` liest -- und genau daran lag es: DIE BESCHRIFTUNGEN DER
+# PROGRAMME STEHEN IM QUELLTEXT, und dorthin sah kein Pruefer. Dieser
+# Abschnitt teilt jede Zeichenkette von `kernel/**` in Bildschirmtext,
+# Mitschnitt und getippte Marke, verlangt fuer die erste Klasse echte
+# Umlaute, misst die Beschriftungsspalten in ZEICHEN statt in Oktett --
+# und weist am Bild nach, dass die Glyphen wirklich auf dem Schirm
+# stehen, Tintenpunkt fuer Tintenpunkt. Jede Zusage hat eine
+# Gegenprobe: ein Pruefer, der nicht rot werden kann, prueft nichts.
+lauf "29. echte Umlaute ueberall, wo Text auf dem Schirm steht (tools/umlaut/run.sh, Runde UMLAUT2)" \
+     tools/umlaut/run.sh umlaut '^UMLAUT2: |^     (translit|quellen|marken|spalten|puffer|schriftprobe|Beschleuniger)|^  OK    (SICHTBARE|Umschrift in|GEGENPROBE|GEGEN-GEGENPROBE|keys=|der Pruefer findet|Marken mit|Beschriftungen|Zeichenketten passen|verschiedene Zeichen|passwd zaehlt|die Einstellungen zaehlen|die Zeile steht|starter:|einstellungen:|speicher:|der Speicher-Dialog|die Spalte|\[)'
+
+# ABSCHNITT 32 -- RUNDE THEMESTORE. Zehn Vorlagen als Dateien, die
+# Kontraste im System UND auf dem Wirt gerechnet, das Anwenden ueber
+# einen Aufruf, eine eigene Vorlage sichern und wieder einlesen -- und
+# zehn Aufnahmen, die GEMESSEN werden: keine leere, abgeschnittene oder
+# ueberlappende Beschriftung.
+#
+# RUNDE MERGE-2: AUCH DIESER ABSCHNITT WAR NIE ANGEMELDET. Wie bei
+# usbimg gibt es den Laeufer auf dem Zweig seit vier Commits, in test.sh
+# steht davon keine Zeile -- 81 Zusagen, die in der Abnahme nie
+# aufgetaucht sind.
+lauf "32. der Vorlagenladen: zehn Erscheinungen, gemessen statt angeschaut (tools/themestore/run.sh, Runde THEMESTORE)" \
+     tools/themestore/run.sh themestore '^THEMESTORE: |^  OK    (alle zehn|die zehn Vorlagen|dieselben Kontraste|keine Vorlage|der Kontrast|anwenden|die ausgegebene Datei|sie traegt|und die Kante|das Konto|die Seite|ein Bild je|und in keiner)'
+
+# ABSCHNITT 33 -- RUNDE SOFTUI. Die weiche Oberflaeche: der Schatten
+# aus einer vorberechneten Maske statt aus Ringen, die drei
+# Fensterknoepfe mit ihrem roten Schliessen-Knopf, der Fokus ohne
+# knallige Farbe, der Kontrast -- und vier Vollbilder, die GEMESSEN
+# werden. Abschnitt A ist die Gegenprobe, die die Runde ueberhaupt
+# landen laesst: `classic` muss BILDPUNKTGENAU so aussehen wie vorher
+# (gemessen: 0 von 480000 anders); ohne Grundlinienbild wird nur dieser
+# Abschnitt uebersprungen, nicht behauptet.
+#
+# RUNDE MERGE-2: auch dieser Laeufer war auf dem Zweig nie in test.sh
+# angemeldet -- der dritte nach usbimg und themestore.
+lauf "33. die weiche Oberflaeche: Schatten, Knoepfe, Fokus, Kontrast (tools/softui/run.sh, Runde SOFTUI)" \
+     tools/softui/run.sh softui '^SOFTUI: |^   (OK|--) +(classic|Marken|ctrl_h|Formwoerter|und die Datei|der Schatten|Maske|Ringe|ohne Schatten|die drei|der rote|hover|Fokus|Kontrast|kein Bild|Abschnitt A|[0-9]+ Beanstandungen)'
+
 # Hier laufen die angemeldeten Abschnitte -- bei OSUM_JOBS=1 sind sie
 # oben schon gelaufen und das hier tut nichts.
 abschnitte_abarbeiten
 ABGEARBEITET=1
+
 
 
 

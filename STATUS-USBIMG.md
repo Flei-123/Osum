@@ -177,7 +177,7 @@ ist Zen 1 (17h) — korrekt für einen EPYC 7571.
 Gemessen (Abschnitt 7):
 
 ```
-hwdiag: pci=KEIN GERAET -- der Bus antwortet nicht
+hwdiag: pci=KEIN GERÄT -- der Bus antwortet nicht
 hwdiag: disk=KEINER -- kein Plattencontroller auf dem Bus
 hwdiag: net=KEINE KARTE -- kein Ethernet auf dem Bus
 hwdiag: ==================== ENDE DER DIAGNOSE ====================
