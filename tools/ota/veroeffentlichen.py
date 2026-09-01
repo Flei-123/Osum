@@ -111,6 +111,11 @@ def sha256d(pfad):
 
 
 def signieren(bund, datei, aus, wer="haupt"):
+    # Erst wegnehmen: das Ziel kann eine HARTE VERKNUEPFUNG in den Vorrat
+    # sein (aus einem aelteren Stand dieses Werkzeugs), und ein Schreiben
+    # darauf traefe jede andere Verknuepfung mit.
+    if os.path.lexists(aus):
+        os.remove(aus)
     r = subprocess.run([sys.executable, BUND_PY, bund, "signieren", datei,
                         "-o", aus, "--wer", wer],
                        capture_output=True, text=True)
