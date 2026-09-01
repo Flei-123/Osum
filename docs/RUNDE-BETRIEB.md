@@ -504,13 +504,17 @@ weil „keine Adresse" und „den Namen gibt es nicht" zwei verschiedene
 Aussagen sind.
 
 **Was dabei aufgefallen ist und im Läufer steht:** der erste Entwurf
-dieser Liste hatte `s3.dualstack.eu-central-1.amazonaws.com` und
-`google.com`/AAAA darin. Beide waren rot, ohne dass etwas falsch war —
-die Zonen geben aus einem Vorrat von über zwanzig Adressen bei jeder
-Frage acht andere heraus, und `host` und `dig` bekamen disjunkte Mengen.
-Ein Prüfstand, der bei richtigem Verhalten würfelt, misst nichts; beide
-sind durch Namen mit **einer festen** Adresse ersetzt
-(`a.gtld-servers.net`, `b.root-servers.net`, `a.root-servers.net`/AAAA).
+dieser Liste hatte `s3.dualstack.eu-central-1.amazonaws.com`,
+`google.com`/AAAA, `mail.google.com` und `api.github.com` darin. Alle
+vier waren zeitweise rot, **ohne dass etwas falsch war**: diese Zonen
+geben je Frage eine Auswahl aus einem großen, wechselnden Vorrat heraus,
+und `host` und `dig` bekamen zwei disjunkte Mengen — auch nach drei
+Wiederholungen der `dig`-Frage. Ein Prüfstand, der bei richtigem
+Verhalten würfelt, misst nichts. Sie sind durch Namen mit **kleiner,
+fester** Adressmenge ersetzt (`a.gtld-servers.net`, `b.root-servers.net`,
+`c.root-servers.net`, `www.debian.org`, `a.root-servers.net`/AAAA); die
+CNAME-Ketten messen weiterhin `de.wikipedia.org` (CNAME auf
+`dyna.wikimedia.org`) und `www.github.com` (CNAME auf `github.com`).
 
 Dauer je Auskunft auf dem Wirt: **0–4 ms** (20 Läufe, Mittel 1,7 ms).
 Auf Osum in QEMU: **6–7 ms**.
