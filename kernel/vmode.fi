@@ -61,14 +61,25 @@ export {
     vram, depths, refused, toobig, probed, map_limit,
     edid_ok, edid_why, edid_native_w, edid_native_h, edid_at, edid_bytes,
     vendor_at, model_at,
-    set_mode, current, revert, confirm, pending, deadline, remaining,
+    set_mode, set_custom, check_custom, switch_to, current, revert,
+    confirm, pending, deadline, remaining,
+    cust_w, cust_h, cust_bpp, cust_why, cust_num, customs, need_bytes,
+    why_to_e, list_insert, list_remove,
+    selftest_custom, selftest_custom_max,
+    CW_OK, CW_REGS, CW_VRAM, CW_LIMIT, CW_DEPTH, CW_UNSINN, CW_NOCARD,
+    MIN_W, MIN_H, MAX_W, MAX_H,
+    save_found, save_w, save_h, save_bpp, save_try, save_why,
+    save_applied, set_saved, set_save_why, set_applied,
+    SW_OK, SW_KEINE, SW_KAPUTT, SW_AUF, SW_ABGELEHNT, SW_AUS,
     poll, switches, fails, reverts, confirms, CONFIRM_MS,
     lut_addr, set_picture, brightness, contrast, gamma, build_lut,
     selftest, selftest_max,
     parse, mode, want,
     M_DISP, M_BIG, M_BACK, M_BAD, M_BENCH, M_ROT, M_CONFIRM, M_EDID,
     MAX_MODES,
-    E_OK, E_NOCARD, E_NOMODE, E_NOMEM, E_SETFAIL, E_MAPFAIL, E_DEPTH
+    E_OK, E_NOCARD, E_NOMODE, E_NOMEM, E_SETFAIL, E_MAPFAIL, E_DEPTH,
+    E_VRAM, E_LIMIT,
+    M_EIGEN, M_EIGENBAD, M_EIGENFRIST
 }
 
 // ------------------------------------------------------------ Zahlen
@@ -122,6 +133,114 @@ const S_MAPLIMIT: u64 = 0x0E0
 const S_UNMAPPABLE: u64 = 0x0E8
 const S_MODEBITS: u64 = 0x0F0
 
+// ===================================================== RUNDE CUSTOMRES
+//
+// EINE BENUTZERDEFINIERTE AUFLOESUNG IST KEIN NEUER TREIBER, SONDERN EIN
+// WEGGELASSENER FILTER. `set_mode` verlangt, dass die Zahlen in der
+// Liste stehen, die `probe` aus zweiundzwanzig Kandidaten gesiebt hat --
+// und die Kandidaten sind aufgeschrieben. Wer 1400x1050 will, findet es
+// dort nicht, obwohl die Karte es kann; genau das ist der Punkt, an dem
+// das NVIDIA-Bedienfeld eine eigene Zeile anbietet.
+//
+// WAS DIESE RUNDE STATTDESSEN TUT: dieselben DREI SCHRANKEN, die `probe`
+// auf jeden Kandidaten anwendet, auf EINE frei eingegebene Zahl -- und
+// bei Ablehnung steht nicht "geht nicht" da, sondern WELCHE Schranke
+// gegriffen hat UND MIT WELCHER ZAHL.
+//
+// DIE REIHENFOLGE DER PRUEFUNG IST HIER EINE ANDERE ALS IN `probe`, UND
+// DAS IST GEMESSEN UND NICHT GERATEN. `probe` fragt zuerst die Karte,
+// weil es aufzaehlt und die Karte die kuerzeste Auskunft gibt. Fuer EINE
+// Eingabe ist das die schlechtere Reihenfolge: QEMUs Registerpruefung
+// enthaelt ihre eigene Speicherpruefung, also lehnt die KARTE ab, sobald
+// das Bild nicht in ihren Bildspeicher passt -- und der Benutzer liest
+// dann "die Register haben abgelehnt", wo "braucht 9 216 000 Oktette,
+// die Karte hat 8 388 608" dagestanden haette. Gemessen mit
+// `-device VGA,vgamem_mb=4`: dort werden ALLE dreizehn Kandidaten ueber
+// 1360x768 mit Grund 1 abgewiesen und KEINER mit Grund 2, obwohl der
+// Grund in Wahrheit der Bildspeicher ist. Die zwei Schranken, die dieser
+// Kernel selbst RECHNEN kann, werden deshalb zuerst gerechnet; die
+// Karte wird zuletzt gefragt. Die NUMMERN der Gruende bleiben dieselben
+// wie bei `cand_why`, damit eine Legende fuer beide reicht.
+//
+//   0  angenommen
+//   1  die Register der Karte haben die Zahl nicht angenommen
+//      (`num` = der Wert, der stattdessen stehenblieb)
+//   2  passt nicht in den Bildspeicher der Karte
+//      (`num` = die noetigen Oktette, `vram` = was da ist)
+//   3  dieser Kernel kann es nicht einblenden
+//      (`num` = die noetigen Oktette, `map_limit` = was geht)
+//   4  diese Farbtiefe zeichnet dieser Kernel nicht (`num` = die Tiefe)
+//   5  die Zahlen sind ausserhalb dessen, was ein Bildschirm ist
+//      (`num` = die Zahl, die es zerreisst)
+//   6  es gibt gar keinen Modustreiber (`disp` fehlt)
+const CW_OK: u64 = 0
+const CW_REGS: u64 = 1
+const CW_VRAM: u64 = 2
+const CW_LIMIT: u64 = 3
+const CW_DEPTH: u64 = 4
+const CW_UNSINN: u64 = 5
+const CW_NOCARD: u64 = 6
+
+// DIE GRENZEN DER FREIEN EINGABE, und sie sind bewusst weit. Was
+// darunter oder darueber liegt, wird abgewiesen, BEVOR die Karte gefragt
+// wird -- nicht aus Vorsicht, sondern weil eine 12-Bit-Zahl in ein
+// VBE-Register passen muss und weil eine Konsole mit acht Bildpunkten
+// Breite keine ist. Die untere Schranke ist genau der kleinste Modus,
+// den die Kandidatenliste ohnehin schon anbietet (320x200).
+const MIN_W: u64 = 320
+const MIN_H: u64 = 200
+const MAX_W: u64 = 8192
+const MAX_H: u64 = 8192
+
+const S_CUSTW: u64 = 0x0F8 // die zuletzt VERLANGTE eigene Breite
+const S_CUSTH: u64 = 0x100
+const S_CUSTB: u64 = 0x108
+const S_CUSTWHY: u64 = 0x110 // CW_*
+const S_CUSTNUM: u64 = 0x118 // die Zahl, die entschieden hat
+const S_CUSTOM: u64 = 0x120 // wieviele eigene Modi in der Liste stehen
+// Ein Riegel gegen zwei gleichzeitige Rueckkehren. `revert` loescht die
+// Frist als ERSTES, also kann ein zweiter Aufrufer ohnehin nicht
+// hineinlaufen; dieser Riegel ist der Guertel zum Hosentraeger und
+// kostet einen Vergleich.
+const S_BUSY: u64 = 0x128
+
+// ---------------------------- der Modus, der den Neustart ueberlebt
+//
+// DIE ZAHLEN STEHEN HIER, DIE DATEI STEHT IN `kernel/dispsave.fi`. Das
+// ist dieselbe Trennung wie zwischen `kstate.fi` und den Modulen, die
+// darin wohnen: wer den Bereich besitzt, vergibt die Versaetze. Ein
+// zweites Modul, das sich Versaetze in der DISP-Seite selbst ausdenkt,
+// waere genau der Fehler, an dem Runde K7 gescheitert ist.
+const S_SAVEOK: u64 = 0x130 // 1 = es lag ein lesbarer Satz vor
+const S_SAVEW: u64 = 0x138
+const S_SAVEH: u64 = 0x140
+const S_SAVEB: u64 = 0x148
+const S_SAVETRY: u64 = 0x150 // Startversuche ohne Bestaetigung
+const S_SAVEWHY: u64 = 0x158 // SW_*
+const S_SAVEAPP: u64 = 0x160 // 1 = in diesem Start wirklich angewandt
+
+// Warum der gespeicherte Modus steht oder nicht steht.
+//   0 angewandt
+//   1 es gibt keine Datei -- der Normalfall jedes Systems, das nie
+//     etwas eingestellt hat
+//   2 die Datei ist unlesbar. Sie wird GEMELDET und in Ruhe gelassen;
+//     ein Kern, der eine unverstandene Zustandsdatei ueberschreibt,
+//     ersetzt einen Fehler durch einen zweiten (dieselbe Regel wie in
+//     `kernel/ab.fi` fuer /system/ERPROBUNG).
+//   3 die Startversuche sind aufgebraucht -- der Modus hat dreimal
+//     nicht zu einem bestaetigten Start gefuehrt, also bleibt der
+//     sichere Startmodus stehen
+//   4 der Modus wurde JETZT abgelehnt (die Karte, der Bildspeicher oder
+//     die Fensterplaetze); `cust_why` sagt, welche der drei Schranken
+//   5 kein Modustreiber oder kein Dateisystem -- ohne `disp` tut diese
+//     Runde nichts, und das ist die Gegenprobe
+const SW_OK: u64 = 0
+const SW_KEINE: u64 = 1
+const SW_KAPUTT: u64 = 2
+const SW_AUF: u64 = 3
+const SW_ABGELEHNT: u64 = 4
+const SW_AUS: u64 = 5
+
 // Die Rueckgaben von `set_mode`. Nicht `errno`-Nummern, weil sie eine
 // Ebene tiefer liegen: `sys.fi` uebersetzt sie fuer Ring 3.
 const E_OK: u64 = 0
@@ -131,6 +250,8 @@ const E_NOMEM: u64 = 3
 const E_SETFAIL: u64 = 4
 const E_MAPFAIL: u64 = 5
 const E_DEPTH: u64 = 6
+const E_VRAM: u64 = 7 // RUNDE CUSTOMRES: passt nicht in den Bildspeicher
+const E_LIMIT: u64 = 8 // RUNDE CUSTOMRES: dieser Kernel blendet es nicht ein
 
 // --------------------------------------------------------- Bochs-VBE
 //
@@ -386,6 +507,82 @@ fn map_limit(state: u64) -> u64 {
     return g(state, S_MAPLIMIT)
 }
 
+fn cust_w(state: u64) -> u64 {
+    return g(state, S_CUSTW)
+}
+
+fn cust_h(state: u64) -> u64 {
+    return g(state, S_CUSTH)
+}
+
+fn cust_bpp(state: u64) -> u64 {
+    return g(state, S_CUSTB)
+}
+
+fn cust_why(state: u64) -> u64 {
+    return g(state, S_CUSTWHY)
+}
+
+fn cust_num(state: u64) -> u64 {
+    return g(state, S_CUSTNUM)
+}
+
+fn save_found(state: u64) -> bool {
+    return g(state, S_SAVEOK) != 0
+}
+
+fn save_w(state: u64) -> u64 {
+    return g(state, S_SAVEW)
+}
+
+fn save_h(state: u64) -> u64 {
+    return g(state, S_SAVEH)
+}
+
+fn save_bpp(state: u64) -> u64 {
+    return g(state, S_SAVEB)
+}
+
+fn save_try(state: u64) -> u64 {
+    return g(state, S_SAVETRY)
+}
+
+fn save_why(state: u64) -> u64 {
+    return g(state, S_SAVEWHY)
+}
+
+fn save_applied(state: u64) -> bool {
+    return g(state, S_SAVEAPP) != 0
+}
+
+fn set_saved(state: u64, w: u64, h: u64, bpp: u64, v: u64) {
+    s(state, S_SAVEOK, 1)
+    s(state, S_SAVEW, w)
+    s(state, S_SAVEH, h)
+    s(state, S_SAVEB, bpp)
+    s(state, S_SAVETRY, v)
+}
+
+fn set_save_why(state: u64, why: u64) {
+    s(state, S_SAVEWHY, why)
+}
+
+fn set_applied(state: u64, v: u64) {
+    s(state, S_SAVEAPP, v)
+}
+
+fn customs(state: u64) -> u64 {
+    return g(state, S_CUSTOM)
+}
+
+// Wieviele Oktette ein Bild dieser Groesse braucht. EINE Stelle, damit
+// die Zahl in der Fehlermeldung dieselbe ist wie die in der Pruefung --
+// eine Meldung, die eine andere Zahl nennt als die, an der es scheiterte,
+// ist schlimmer als keine.
+fn need_bytes(w: u64, h: u64, bpp: u64) -> u64 {
+    return w * h * (bpp / 8)
+}
+
 fn current(state: u64) -> u64 {
     let c: u64 = g(state, S_CUR)
     if c == 0 {
@@ -617,6 +814,37 @@ fn probe(state: u64) -> u64 {
 
     // Und alles wieder so hinstellen, wie es war -- siehe den langen
     // Absatz oben. Vier Registerschreibvorgaenge genuegen dafuer nicht.
+    wieder_hin(state, a_x, a_y, a_b, a_e)
+
+    // Welcher der gefundenen Modi laeuft gerade?
+    let cur: u64 = find_mode(state, fb.panel_w(state), fb.panel_h(state), 32)
+    if cur < MAX_MODES {
+        s(state, S_CUR, cur + 1)
+    } else {
+        s(state, S_CUR, 0)
+    }
+    s(state, S_READY, 1)
+    build_lut(state)
+    return n
+}
+
+// DEN LAUFENDEN BILDSCHIRM WIEDER HINSTELLEN, NACHDEM IN XRES/YRES
+// HERUMGESCHRIEBEN WURDE.
+//
+// Das ist der teuerste Fehler dieser Runde, ausgelagert in eine Funktion,
+// damit er nur EINMAL richtig sein muss: solange VBE_ENABLE an ist, ist
+// ein Schreibzugriff auf XRES kein stiller Registerzugriff -- QEMU
+// rechnet daraus sofort die Zeilenlaenge des LAUFENDEN Bildes neu
+// (VBE_VIRT_WIDTH), und die bleibt danach stehen. XRES und YRES
+// zurueckzuschreiben genuegt NICHT. Also derselbe Weg wie in `set_mode`
+// -- aus, Zahlen, an --, und danach wird die Zeilenlaenge
+// zurueckGELESEN und mit der verglichen, die `fb.fi` fuehrt.
+//
+// RUNDE CUSTOMRES braucht das ein zweites Mal: `karte_nimmt` fragt die
+// Karte nach EINER frei eingegebenen Zahl und muss den Bildschirm
+// danach genauso unberuehrt hinterlassen wie `probe` nach seinen
+// zweiundzwanzig Fragen.
+fn wieder_hin(state: u64, a_x: u64, a_y: u64, a_b: u64, a_e: u64) {
     if (a_e & VBE_ENABLED) != 0 && a_x != 0 && a_y != 0 {
         let neu_pt: u64 = vbe_set(a_x, a_y, a_b)
         if neu_pt != 0 {
@@ -634,17 +862,199 @@ fn probe(state: u64) -> u64 {
         vbe_write(VBE_BPP, a_b)
         vbe_write(VBE_ENABLE, a_e)
     }
+}
 
-    // Welcher der gefundenen Modi laeuft gerade?
-    let cur: u64 = find_mode(state, fb.panel_w(state), fb.panel_h(state), 32)
-    if cur < MAX_MODES {
-        s(state, S_CUR, cur + 1)
-    } else {
-        s(state, S_CUR, 0)
+// ============================================== RUNDE CUSTOMRES
+//
+// NIMMT DIE KARTE DIESE BEIDEN ZAHLEN AN? Gibt 0 zurueck, wenn ja --
+// sonst den Wert, der im Register STEHENGEBLIEBEN ist, und das ist der
+// Ankerwert (640 bzw. 480). Diese Zahl ist die, die in der
+// Fehlermeldung steht: "die Karte behielt 640 statt 1366".
+//
+// Der laufende Bildschirm bleibt unberuehrt -- gerettet, gefragt,
+// zurueckgestellt, ueber `wieder_hin`.
+fn karte_nimmt(state: u64, w: u64, h: u64) -> u64 {
+    let a_x: u64 = vbe_read(VBE_XRES)
+    let a_y: u64 = vbe_read(VBE_YRES)
+    let a_b: u64 = vbe_read(VBE_BPP)
+    let a_e: u64 = vbe_read(VBE_ENABLE)
+    var blieb: u64 = 0
+    if !accepts(VBE_XRES, 640, w) {
+        blieb = vbe_read(VBE_XRES)
+        if blieb == 0 {
+            blieb = 640
+        }
     }
-    s(state, S_READY, 1)
-    build_lut(state)
-    return n
+    if blieb == 0 {
+        if !accepts(VBE_YRES, 480, h) {
+            blieb = vbe_read(VBE_YRES)
+            if blieb == 0 {
+                blieb = 480
+            }
+        }
+    }
+    wieder_hin(state, a_x, a_y, a_b, a_e)
+    return blieb
+}
+
+// DIE DREI SCHRANKEN AUF EINE FREI EINGEGEBENE ZAHL. Sie fasst nichts
+// an: nach einem Aufruf steht derselbe Bildschirm da wie vorher, und das
+// ist die Voraussetzung dafuer, dass die Oberflaeche schon beim TIPPEN
+// sagen kann, ob es gehen wird.
+//
+// Gibt CW_OK zurueck oder den Grund; der Grund und die entscheidende
+// Zahl stehen danach auch in `cust_why` und `cust_num`, damit Ring 3
+// beides ueber einen Getter bekommt und nicht aus einem Fehlerwert
+// raten muss.
+fn check_custom(state: u64, w: u64, h: u64, bpp: u64) -> u64 {
+    s(state, S_CUSTW, w)
+    s(state, S_CUSTH, h)
+    s(state, S_CUSTB, bpp)
+    s(state, S_CUSTNUM, 0)
+    if !ready(state) || !fb.ready(state) {
+        s(state, S_CUSTWHY, CW_NOCARD)
+        return CW_NOCARD
+    }
+    // 0. Zahlen, die kein Bildschirm sind. Zuerst, weil alles danach mit
+    //    ihnen rechnen wuerde.
+    if w < MIN_W || w > MAX_W {
+        s(state, S_CUSTNUM, w)
+        s(state, S_CUSTWHY, CW_UNSINN)
+        return CW_UNSINN
+    }
+    if h < MIN_H || h > MAX_H {
+        s(state, S_CUSTNUM, h)
+        s(state, S_CUSTWHY, CW_UNSINN)
+        return CW_UNSINN
+    }
+    // 1. Die Farbtiefe. Der Grund steht in docs/DISPLAY.md 8.1 und hat
+    //    sich in dieser Runde nicht geaendert: dieser Kernel zeichnet in
+    //    32 Bit und in nichts anderem. Die Karte kann mehr, und dass sie
+    //    es kann, wird auch gemeldet -- gewechselt wird trotzdem nicht.
+    if bpp != 32 {
+        s(state, S_CUSTNUM, bpp)
+        s(state, S_CUSTWHY, CW_DEPTH)
+        return CW_DEPTH
+    }
+    let noetig: u64 = need_bytes(w, h, bpp)
+    // 2. Passt das Bild in den Bildspeicher der KARTE?
+    let vm: u64 = g(state, S_VRAM)
+    if vm != 0 && noetig > vm {
+        s(state, S_CUSTNUM, noetig)
+        s(state, S_CUSTWHY, CW_VRAM)
+        return CW_VRAM
+    }
+    // 3. Kann DIESER KERNEL es einblenden? Acht 2-MiB-Fensterplaetze am
+    //    oberen Ende des Kernel-Seitenverzeichnisses, geteilt mit
+    //    `apic.map_device` -- die Zahl steht in `map_limit` und ist
+    //    gemessen, nicht gesetzt.
+    let limit: u64 = g(state, S_MAPLIMIT)
+    if limit == 0 || noetig > limit {
+        s(state, S_CUSTNUM, noetig)
+        s(state, S_CUSTWHY, CW_LIMIT)
+        return CW_LIMIT
+    }
+    // 4. Und zuletzt die Karte selbst. Zurueckgelesen, ohne den Modus zu
+    //    setzen; der Bildschirm flackert dabei nicht.
+    let blieb: u64 = karte_nimmt(state, w, h)
+    if blieb != 0 {
+        s(state, S_CUSTNUM, blieb)
+        s(state, S_CUSTWHY, CW_REGS)
+        return CW_REGS
+    }
+    s(state, S_CUSTNUM, noetig)
+    s(state, S_CUSTWHY, CW_OK)
+    return CW_OK
+}
+
+// Der Grund als Rueckgabewert von `set_mode`-Art, damit `sys.fi` ihn
+// wie jeden anderen uebersetzen kann.
+fn why_to_e(why: u64) -> u64 {
+    if why == CW_REGS {
+        return E_SETFAIL
+    }
+    if why == CW_VRAM {
+        return E_VRAM
+    }
+    if why == CW_LIMIT {
+        return E_LIMIT
+    }
+    if why == CW_DEPTH {
+        return E_DEPTH
+    }
+    if why == CW_NOCARD {
+        return E_NOCARD
+    }
+    return E_NOMODE
+}
+
+// EINEN EIGENEN MODUS EINSTELLEN. Pruefen, wechseln, und -- wenn es
+// steht -- IN DIE LISTE AUFNEHMEN.
+//
+// WARUM IN DIE LISTE. Weil er einer ist. Ein Modus, den die Karte
+// angenommen hat und den dieser Kernel einblendet, unterscheidet sich
+// von einem aus der Kandidatenliste durch nichts ausser der Frage, wer
+// ihn aufgeschrieben hat. Stuende er nicht drin, gaebe `current` fuer
+// den LAUFENDEN Bildschirm "unbekannt" zurueck, die Auswahlliste im
+// Bedienfeld zeigte auf nichts, und `revert` fuende den Weg zurueck
+// nicht mehr. Genau so macht es das NVIDIA-Bedienfeld auch: eine
+// bestaetigte eigene Aufloesung steht danach zwischen den anderen.
+fn set_custom(state: u64, w: u64, h: u64, bpp: u64) -> u64 {
+    let why: u64 = check_custom(state, w, h, bpp)
+    if why != CW_OK {
+        s(state, S_FAILS, g(state, S_FAILS) + 1)
+        return why_to_e(why)
+    }
+    let r: u64 = switch_to(state, w, h, true)
+    if r == E_OK {
+        if list_insert(state, w, h) {
+            s(state, S_CUSTOM, g(state, S_CUSTOM) + 1)
+        }
+        // Die Nummer des laufenden Modus stimmt erst, nachdem die Liste
+        // steht -- ein Einschub verschiebt jeden Eintrag dahinter.
+        let cur: u64 = find_mode(state, fb.panel_w(state),
+            fb.panel_h(state), 32)
+        if cur < MAX_MODES {
+            s(state, S_CUR, cur + 1)
+        } else {
+            s(state, S_CUR, 0)
+        }
+    }
+    return r
+}
+
+// EINEN MODUS IN DIE SORTIERTE LISTE EINSCHIEBEN. Die Ordnung ist die
+// von `probe`: lexikografisch nach Breite, dann Hoehe -- und NICHT nach
+// Flaeche, denn 1280x1024 hat mehr Bildpunkte als 1360x768. Zusage 4 des
+// Selbsttests haengt daran.
+fn list_insert(state: u64, w: u64, h: u64) -> bool {
+    if find_mode(state, w, h, 32) < MAX_MODES {
+        return false
+    }
+    let n: u64 = g(state, S_COUNT)
+    if n >= MAX_MODES {
+        return false
+    }
+    let key: u64 = (w << 16) | h
+    var i: u64 = 0
+    var platz: u64 = n
+    while i < n {
+        let k: u64 = (mode_w(state, i) << 16) | mode_h(state, i)
+        if k > key && platz == n {
+            platz = i
+        }
+        i = i + 1
+    }
+    var j: u64 = n
+    while j > platz {
+        kstate.set(state, kstate.DISP_OFF + LIST_OFF + j * 8,
+            kstate.get(state, kstate.DISP_OFF + LIST_OFF + (j - 1) * 8))
+        j = j - 1
+    }
+    kstate.set(state, kstate.DISP_OFF + LIST_OFF + platz * 8,
+        (w << 32) | (h << 16) | 32)
+    s(state, S_COUNT, n + 1)
+    return true
 }
 
 // ---------------------------------------------------------------- EDID
@@ -847,8 +1257,36 @@ fn set_mode(state: u64, w: u64, h: u64, bpp: u64) -> u64 {
         s(state, S_FAILS, g(state, S_FAILS) + 1)
         return E_NOMODE
     }
+    return switch_to(state, w, h, true)
+}
+
+// RUNDE CUSTOMRES: DER WECHSEL SELBST, OHNE DIE LISTE ZU FRAGEN.
+//
+// Bis zu dieser Runde stand dieser Rumpf in `set_mode`, und die
+// Listenpruefung stand davor -- untrennbar. Das war zweimal falsch:
+//
+//   1. Eine EIGENE Aufloesung steht per Definition nicht in der Liste.
+//      Sie hat trotzdem denselben Wechsel zu durchlaufen, mit derselben
+//      Reihenfolge und denselben Rueckfaellen.
+//   2. `revert` ging ueber `set_mode` -- und damit ueber `find_mode`.
+//      Wer von einem eigenen Modus aus zurueckwollte, dessen ALTER
+//      Modus aber ebenfalls ein eigener war, bekam E_NOMODE und blieb
+//      sitzen. Das Sicherheitsnetz haette genau in dem Fall gerissen,
+//      fuer den es gebaut ist. Von hier an geht `revert` HIER hinein:
+//      der alte Modus hat nachweislich funktioniert, denn er stand
+//      gerade auf dem Bildschirm -- eine Liste zu fragen waere die
+//      schlechtere Auskunft.
+//
+// `arm` stellt die Bestaetigungsfrist. Der Rueckweg stellt keine.
+fn switch_to(state: u64, w: u64, h: u64, arm: bool) -> u64 {
+    if !ready(state) || !fb.ready(state) {
+        return E_NOCARD
+    }
     if w == fb.panel_w(state) && h == fb.panel_h(state) {
-        s(state, S_CUR, idx + 1)
+        let da: u64 = find_mode(state, w, h, 32)
+        if da < MAX_MODES {
+            s(state, S_CUR, da + 1)
+        }
         return E_OK
     }
 
@@ -927,20 +1365,32 @@ fn set_mode(state: u64, w: u64, h: u64, bpp: u64) -> u64 {
     fb.clear(state, 0)
     fb.dirty_all(state)
     fb.flush(state)
-    s(state, S_CUR, idx + 1)
+    let idx: u64 = find_mode(state, w, h, 32)
+    if idx < MAX_MODES {
+        s(state, S_CUR, idx + 1)
+    } else {
+        s(state, S_CUR, 0)
+    }
     s(state, S_SWITCHES, g(state, S_SWITCHES) + 1)
 
     // Und die Frist. Wer nicht bestaetigt, bekommt den alten Modus
     // zurueck -- weil er ihn wahrscheinlich gar nicht sieht.
-    s(state, S_OLDW, alt_w)
-    s(state, S_OLDH, alt_h)
-    s(state, S_PEND, 1)
-    s(state, S_DEADLINE, now_ms(state) + CONFIRM_MS)
+    if arm {
+        s(state, S_OLDW, alt_w)
+        s(state, S_OLDH, alt_h)
+        s(state, S_PEND, 1)
+        s(state, S_DEADLINE, now_ms(state) + CONFIRM_MS)
+    }
     return E_OK
 }
 
 // Denselben Weg wie oben, nur mit den Zahlen des ALTEN Modus, und ohne
 // eine neue Frist zu stellen.
+//
+// RUNDE CUSTOMRES: ueber `switch_to` und NICHT mehr ueber `set_mode`.
+// Der Grund steht bei `switch_to`: der alte Modus muss nicht in der
+// Liste stehen, um zurueckgestellt werden zu koennen -- er stand gerade
+// auf dem Bildschirm, und das ist der bessere Nachweis als eine Liste.
 fn revert(state: u64) -> u64 {
     if g(state, S_PEND) == 0 {
         return E_NOMODE
@@ -948,7 +1398,7 @@ fn revert(state: u64) -> u64 {
     let w: u64 = g(state, S_OLDW)
     let h: u64 = g(state, S_OLDH)
     s(state, S_PEND, 0)
-    let r: u64 = set_mode(state, w, h, 32)
+    let r: u64 = switch_to(state, w, h, false)
     s(state, S_PEND, 0)
     s(state, S_REVERTS, g(state, S_REVERTS) + 1)
     return r
@@ -989,6 +1439,16 @@ fn remaining(state: u64) -> u64 {
 // Seitentafeln um und schreibt ein ganzes Bild; sie wird aus dem
 // Systemaufruf gerufen, also in Aufgabenkontext, auf dem Stapel der
 // Aufgabe.
+//
+// RUNDE CUSTOMRES: SIE WIRD JETZT AUCH AUS DER LEERLAUFAUFGABE GERUFEN.
+// Bis hierher rief sie nur `do_dispset` -- also lief die Frist nur ab,
+// solange irgendein Programm den Bildschirm anfasste. Das ist genau der
+// falsche Fall herum: wer vor einem schwarzen Schirm sitzt, faellt
+// niemandem ins Wort, und ein Sicherheitsnetz, das ein Zutun braucht,
+// ist keines. `tasks.idle` ruft sie jetzt bei jedem Aufwachen aus
+// `hlt`/`mwait` -- das ist Aufgabenkontext, auf dem Stapel der
+// Leerlaufaufgabe, und der Zeitgeber weckt sie hundertmal je Sekunde.
+// Im Unterbrechungspfad steht sie deshalb weiterhin NICHT.
 fn poll(state: u64) -> bool {
     if g(state, S_PEND) == 0 {
         return false
@@ -996,7 +1456,12 @@ fn poll(state: u64) -> bool {
     if now_ms(state) < g(state, S_DEADLINE) {
         return false
     }
+    if g(state, S_BUSY) != 0 {
+        return false
+    }
+    s(state, S_BUSY, 1)
     revert(state)
+    s(state, S_BUSY, 0)
     return true
 }
 
@@ -1375,6 +1840,155 @@ fn selftest_max() -> u64 {
     return 15
 }
 
+// ============================== RUNDE CUSTOMRES: die eigenen Zusagen
+//
+// EIN EIGENER ZAEHLER UND NICHT DIE FUENFZEHN VON OBEN. Die fuenfzehn
+// sind gemessen, stehen in docs/DISPLAY.md und werden von
+// `tools/display/run.sh` auf die Zahl genau geprueft; sie um sechs zu
+// erhoehen hiesse, eine bestehende Zusage anzufassen, um eine neue
+// unterzubringen. Also stehen die neuen hier, mit eigener Zahl.
+fn selftest_custom(state: u64) -> u64 {
+    if !ready(state) {
+        return 0
+    }
+    var n: u64 = 0
+    let vor_w: u64 = fb.panel_w(state)
+    let vor_h: u64 = fb.panel_h(state)
+
+    // 1. Eine Breite unterhalb dessen, was ein Bildschirm ist, wird als
+    //    Unsinn abgewiesen -- und zwar OHNE die Karte zu fragen.
+    if check_custom(state, 8, 600, 32) == CW_UNSINN {
+        if cust_num(state) == 8 {
+            n = n + 1
+        }
+    }
+    // 2. Dasselbe fuer die Hoehe.
+    if check_custom(state, 800, 9000, 32) == CW_UNSINN {
+        if cust_num(state) == 9000 {
+            n = n + 1
+        }
+    }
+    // 3. Eine Farbtiefe, die dieser Kernel nicht zeichnet, mit IHREM
+    //    Grund und IHRER Zahl.
+    if check_custom(state, 800, 600, 16) == CW_DEPTH {
+        if cust_num(state) == 16 {
+            n = n + 1
+        }
+    }
+    // 4. Etwas, das dieser Kernel nicht einblenden kann, nennt die
+    //    Kachelgrenze -- und die genannte Zahl ist die, die es zerreisst.
+    //    2560x1440x4 sind 14 745 600 Oktette; die acht 2-MiB-Plaetze
+    //    tragen weniger (`map_limit`, gemessen).
+    let gross: u64 = need_bytes(2560, 1440, 32)
+    if gross > map_limit(state) {
+        if check_custom(state, 2560, 1440, 32) == CW_LIMIT {
+            if cust_num(state) == gross {
+                n = n + 1
+            }
+        }
+    }
+    // 5. DIE RECHNUNG DER BILDSPEICHERSCHRANKE, ohne auf eine Karte
+    //    angewiesen zu sein, die sie ausloest. Unter QEMU feuert sie
+    //    nie (die Karte lehnt vorher ab, gemessen); das macht sie nicht
+    //    ungeprueft: eine Breite, deren Bild groesser ist als der
+    //    gemeldete Bildspeicher, MUSS Grund 2 bekommen, und zwar bevor
+    //    irgendjemand die Register fragt.
+    var w2: u64 = 4096
+    while w2 <= MAX_W && need_bytes(w2, 4096, 32) <= vram(state) {
+        w2 = w2 + 1024
+    }
+    if w2 <= MAX_W {
+        if check_custom(state, w2, 4096, 32) == CW_VRAM {
+            if cust_num(state) == need_bytes(w2, 4096, 32) {
+                n = n + 1
+            }
+        }
+    }
+    // 6. UND DIE WICHTIGSTE: nach fuenf abgelehnten Anfragen steht
+    //    DERSELBE Bildschirm da wie vorher. Eine Pruefung, die den
+    //    Bildschirm anfasst, waere in einem Bedienfeld unbrauchbar --
+    //    dort wird bei jedem Tastendruck geprueft.
+    if fb.panel_w(state) == vor_w && fb.panel_h(state) == vor_h {
+        if fb.ready(state) {
+            n = n + 1
+        }
+    }
+    // 7. Ein eigener Modus, den die Karte kann und der in die
+    //    Fensterplaetze passt, wird ANGENOMMEN -- und steht danach
+    //    nicht in der Kandidatenliste, denn dort war er nie.
+    var i: u64 = 0
+    var gefunden: bool = false
+    while i < cand_count() {
+        if cand_w(i) == 1400 && cand_h(i) == 1050 {
+            gefunden = true
+        }
+        i = i + 1
+    }
+    if !gefunden {
+        if need_bytes(1400, 1050, 32) <= map_limit(state) {
+            if check_custom(state, 1400, 1050, 32) == CW_OK {
+                n = n + 1
+            }
+        }
+    }
+    // 8. Und die Einschubordnung: ein eingeschobener Modus laesst die
+    //    Liste sortiert. Geprueft wird auf einer KOPIE der Zahlen, ohne
+    //    zu schalten -- eingeschoben wird, geprueft wird, und dann steht
+    //    er drin, so wie nach einem echten Wechsel auch.
+    let vorher: u64 = count(state)
+    if list_insert(state, 1400, 1050) {
+        var gut: bool = count(state) == vorher + 1
+        i = 1
+        while i < count(state) {
+            let a: u64 = (mode_w(state, i - 1) << 16) | mode_h(state, i - 1)
+            let b: u64 = (mode_w(state, i) << 16) | mode_h(state, i)
+            if b <= a {
+                gut = false
+            }
+            i = i + 1
+        }
+        if find_mode(state, 1400, 1050, 32) >= MAX_MODES {
+            gut = false
+        }
+        if gut {
+            n = n + 1
+        }
+        // und wieder heraus, damit `disp: modes` die Zahl meldet, die
+        // die KARTE hergegeben hat.
+        list_remove(state, 1400, 1050)
+    }
+    // 9. ... und danach ist die Liste wieder genau so lang wie vorher.
+    if count(state) == vorher {
+        if find_mode(state, 1400, 1050, 32) >= MAX_MODES {
+            n = n + 1
+        }
+    }
+    return n
+}
+
+fn selftest_custom_max() -> u64 {
+    return 9
+}
+
+// Nur fuer den Selbsttest: einen Eintrag wieder herausnehmen. Im Betrieb
+// wird nichts aus der Liste entfernt -- ein Modus, der einmal ging, geht
+// weiter.
+fn list_remove(state: u64, w: u64, h: u64) -> bool {
+    let idx: u64 = find_mode(state, w, h, 32)
+    if idx >= MAX_MODES {
+        return false
+    }
+    let n: u64 = g(state, S_COUNT)
+    var j: u64 = idx
+    while j + 1 < n {
+        kstate.set(state, kstate.DISP_OFF + LIST_OFF + j * 8,
+            kstate.get(state, kstate.DISP_OFF + LIST_OFF + (j + 1) * 8))
+        j = j + 1
+    }
+    s(state, S_COUNT, n - 1)
+    return true
+}
+
 // ---------------------------------------------- die Woerter dieser Runde
 //
 // Wie in `fb.fi` und `pwr.fi`: die Woerter stehen bei dem Modul, das
@@ -1407,6 +2021,17 @@ const M_BENCH: u64 = 16
 const M_ROT: u64 = 32
 const M_CONFIRM: u64 = 64
 const M_EDID: u64 = 128
+// RUNDE CUSTOMRES
+//   `dispeigen`       eine Aufloesung einstellen, die in KEINER
+//                     Kandidatenliste steht (1400x1050).
+//   `dispeigenbad`    eine verlangen, die zu gross ist -- und die
+//                     Meldung MUSS die Schranke und die Zahl nennen.
+//   `dispeigenfrist`  auf die eigene Aufloesung wechseln, NICHT
+//                     bestaetigen, und die Frist ohne jedes Zutun
+//                     ablaufen lassen.
+const M_EIGEN: u64 = 256
+const M_EIGENBAD: u64 = 512
+const M_EIGENFRIST: u64 = 1024
 
 // Eigene Fassung, aus demselben Grund wie die in `fb.fi`: dieses Modul
 // bindet `kmain.fi` nicht ein.
@@ -1501,6 +2126,9 @@ fn parse(state: u64, cmd: u64) {
     var w_rot: [u8; 8] = "disprot\0"
     var w_conf: [u8; 12] = "dispconfirm\0"
     var w_edid: [u8; 9] = "dispedid\0"
+    var w_eig: [u8; 11] = "dispeigen\0\0"
+    var w_eigb: [u8; 14] = "dispeigenbad\0\0"
+    var w_eigf: [u8; 16] = "dispeigenfrist\0\0"
     var m: u64 = 0
     if cmd != 0 {
         if find_word(cmd, (&w_disp[0]) as u64, 4) != 0 {
@@ -1526,6 +2154,15 @@ fn parse(state: u64, cmd: u64) {
         }
         if find_word(cmd, (&w_edid[0]) as u64, 8) != 0 {
             m = m | M_EDID
+        }
+        if find_word(cmd, (&w_eig[0]) as u64, 9) != 0 {
+            m = m | M_EIGEN
+        }
+        if find_word(cmd, (&w_eigb[0]) as u64, 12) != 0 {
+            m = m | M_EIGENBAD
+        }
+        if find_word(cmd, (&w_eigf[0]) as u64, 14) != 0 {
+            m = m | M_EIGENFRIST
         }
     }
     s(state, S_MODEBITS, m)

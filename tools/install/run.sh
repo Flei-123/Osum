@@ -365,7 +365,7 @@ hat "$OUT/pak3.txt" "paket-hallo fassung 2" "nach dem NEUSTART laeuft die neue F
 hat "$OUT/pak3.txt" "generation 1" "es gibt zwei Generationen"
 
 rc=$(lauf pak4 platte "opk zurueck 0;/apps/hallo.osp/start;opk liste;exit" 600)
-hat "$OUT/pak4.txt" "opk: zurueck auf 0" "eine Generation zurueck"
+hat "$OUT/pak4.txt" "opk: zurück auf 0" "eine Generation zurueck"
 hat "$OUT/pak4.txt" "paket-hallo fassung 1" "und die ALTE Fassung laeuft wieder"
 hat "$OUT/pak4.txt" "${h1:0:12}" "die Liste nennt wieder den alten Hash"
 
@@ -398,7 +398,7 @@ KAPUTT="$OUT/kaputt.opk" FALSCH="$OUT/falsch.opk" \
 neue_platte
 rc=$(lauf ginst iso "install /dev/hda --ja;exit" 900)
 rc=$(lauf gpak platte "opk installieren /quelle1/kaputt.opk;opk installieren /quelle1/hallo-1.opk;opk aktualisieren hallo --quelle /quelle1;exit" 600)
-hat "$OUT/gpak.txt" "opk: Pruefsumme falsch" "GEGENPROBE: ein gekipptes Oktett im Paket wird abgelehnt"
+hat "$OUT/gpak.txt" "opk: Prüfsumme falsch" "GEGENPROBE: ein gekipptes Oktett im Paket wird abgelehnt"
 hat "$OUT/gpak.txt" "opk: installiert hallo" "GEGENPROBE zur Gegenprobe: das UNVERSEHRTE Paket wird angenommen"
 
 echo

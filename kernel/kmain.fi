@@ -54,6 +54,7 @@ import netmon
 import share
 import cap
 import handle
+import async
 import gfx
 import sercon
 import kutil
@@ -114,6 +115,10 @@ const P_CAPS: u64 = 12
 const P_HBENCH: u64 = 49
 // RUNDE HANDLE: der Selbsttest der Handle-Schicht in Ring 3.
 const P_HANDLE: u64 = 48
+// RUNDE ASYNC: der Selbsttest der Auftragsschicht und ihre Messung.
+const P_ASYNC: u64 = 50
+const P_ABENCH: u64 = 51
+const P_ASYNCFS: u64 = 52
 // RUNDE K13: die beiden Programmnummern dieser Runde (kernel/uprog.fi).
 const P_PWR: u64 = 45
 const P_PWRIDLE: u64 = 46
@@ -380,6 +385,14 @@ fn kernel_main(mbi: u64, vectors: u64, state: u64, kernel_end: u64,
     // und nicht den Regelbetrieb. `hbench` allein ist die Messung, die
     // gilt.
     handle_bench(state)
+    // 7b-quinquies. RUNDE ASYNC: die asynchrone Auftragsschicht. Hier
+    //     und direkt hinter HANDLE, weil sie auf ihr steht und aus
+    //     demselben Grund kein Dateisystem braucht -- gearbeitet wird
+    //     auf Roehren. Die Arbeitsfaeden entstehen bei der ersten
+    //     Abgabe; ohne das Wort `async` bleibt der Kernel Aufgabe fuer
+    //     Aufgabe derselbe wie vorher.
+    asyncs(state)
+    async_bench(state)
     // 7b-bis. RUNDE K13: Kennungen aus Ring 3, ohne Platte. Hier und
     //     nicht spaeter, weil es KEIN Dateisystem braucht -- die Zusagen
     //     ueber uid/gid gelten auch in einem Lauf `nofs`, und ein Test,
@@ -406,6 +419,12 @@ fn kernel_main(mbi: u64, vectors: u64, state: u64, kernel_end: u64,
 
     // 7c. the file system.
     filesystem(state)
+    // 7c-bis. RUNDE ASYNC, zweiter Teil: die Arten, die ein
+    //     DATEISYSTEM brauchen -- asynchron oeffnen, lesen, auf den
+    //     Traeger druecken, schliessen. Sie stehen hier und nicht oben
+    //     bei `asyncs`, weil es vor dieser Zeile keine Datei gibt, die
+    //     man oeffnen koennte.
+    asyncs_fs(state)
 
     // 7d. a command line in ring 3.
     shell(state)
@@ -547,7 +566,6 @@ fn hv_ring3(state: u64) {
 
 
 // ================================================== RUNDE DISPLAY
-
 
 
 
@@ -1501,6 +1519,164 @@ fn handle_bench(state: u64) {
 
 // The boot task waits for a task the way `wait` does it for a process:
 // sleep until it is a corpse, read the exit code, clear it away.
+
+// ==================================================== RUNDE ASYNC
+//
+// DIE ASYNCHRONE AUFTRAGSSCHICHT, GEMESSEN UND NACHGEZAEHLT.
+//
+// Was ein Programm in Ring 3 zeigen kann, zeigt `uprog.u_async`: zwei
+// und dreissig Zusagen ueber Lebensdauer, Abbruch, Rueckstau und fremde
+// Auftraege. Sein Beendigungscode ist die Zahl der GEFALLENEN Zusagen --
+// 0 heisst, alle standen.
+//
+// Was ein Programm NICHT zeigen kann, steht hier: die Leckzahlen. Nach
+// einem Lauf, in dem jeder Prozess ordentlich geendet hat, MUSS die
+// Auftragstafel leer sein, kein Handle-Auftrag mehr in Flug, kein Ring
+// eine Meldung verloren haben und die Objekttafel wieder auf ihren drei
+// Konsoleneintraegen stehen. Eine Refcount-Schicht, die niemand
+// nachzaehlt, ist eine Behauptung.
+fn asyncs(state: u64) {
+    var s_skip: [u8; 15] = "async: skipped\0"
+    var s_begin: [u8; 14] = "async: begin\0\0"
+    var s_exit: [u8; 20] = "async: ring 3 exit=\0"
+    var s_done: [u8; 13] = "async: done\0\0"
+    if !kstate.mode_on(state, kstate.M_ASYNC) {
+        serial.puts((&s_skip[0]) as u64)
+        serial.nl()
+        return
+    }
+    serial.puts((&s_begin[0]) as u64)
+    serial.nl()
+    let t: u64 = proc.create(state, P_ASYNC, 0, 2)
+    let e: u64 = kutil.wait_for(state, t)
+    serial.puts((&s_exit[0]) as u64)
+    serial.dec(e)
+    serial.nl()
+    async_zahlen(state)
+    serial.puts((&s_done[0]) as u64)
+    serial.nl()
+}
+
+// RUNDE ASYNC, ZWEITER TEIL: auf einem echten Dateisystem.
+fn asyncs_fs(state: u64) {
+    var s_exit: [u8; 22] = "asyncfs: ring 3 exit=\0"
+    if !kstate.mode_on(state, kstate.M_ASYNC) {
+        return
+    }
+    if kstate.get(state, kstate.FS_READY) == 0 {
+        return
+    }
+    let t: u64 = proc.create(state, P_ASYNCFS, 0, 2)
+    let e: u64 = kutil.wait_for(state, t)
+    serial.puts((&s_exit[0]) as u64)
+    serial.dec(e)
+    serial.nl()
+}
+
+fn anum(name: u64, v: u64) {
+    var s_p: [u8; 8] = "async: \0"
+    var s_e: [u8; 2] = "=\0"
+    serial.puts((&s_p[0]) as u64)
+    serial.puts(name)
+    serial.puts((&s_e[0]) as u64)
+    serial.dec(v)
+    serial.nl()
+}
+
+fn async_zahlen(state: u64) {
+    var n_su: [u8; 10] = "submitted\0"
+    var n_co: [u8; 10] = "completed\0"
+    var n_ca: [u8; 10] = "cancelled\0"
+    var n_st: [u8; 6] = "stale\0"
+    var n_fa: [u8; 7] = "failed\0"
+    var n_fu: [u8; 5] = "full\0"
+    var n_ti: [u8; 9] = "timeouts\0"
+    var n_re: [u8; 7] = "reaped\0"
+    var n_ab: [u8; 10] = "abandoned\0"
+    var n_po: [u8; 7] = "posted\0"
+    var n_de: [u8; 7] = "denied\0"
+    var n_wo: [u8; 9] = "workruns\0"
+    var n_us: [u8; 5] = "used\0"
+    var n_li: [u8; 5] = "live\0"
+    var n_lo: [u8; 5] = "lost\0"
+    var n_ob: [u8; 8] = "objects\0"
+    var n_fl: [u8; 9] = "inflight\0"
+    var n_by: [u8; 6] = "bytes\0"
+    var n_wk: [u8; 8] = "workers\0"
+    var n_ct: [u8; 6] = "tasks\0"
+    hnum_a(state, (&n_su[0]) as u64, kstate.A_SUBMITTED)
+    hnum_a(state, (&n_co[0]) as u64, kstate.A_COMPLETED)
+    hnum_a(state, (&n_ca[0]) as u64, kstate.A_CANCELLED)
+    hnum_a(state, (&n_st[0]) as u64, kstate.A_STALED)
+    hnum_a(state, (&n_fa[0]) as u64, kstate.A_FAILED)
+    hnum_a(state, (&n_fu[0]) as u64, kstate.A_FULL)
+    hnum_a(state, (&n_ti[0]) as u64, kstate.A_TIMEOUTS)
+    hnum_a(state, (&n_re[0]) as u64, kstate.A_REAPED)
+    hnum_a(state, (&n_ab[0]) as u64, kstate.A_ABANDONED)
+    hnum_a(state, (&n_po[0]) as u64, kstate.A_POSTED)
+    hnum_a(state, (&n_de[0]) as u64, kstate.A_DENIED)
+    hnum_a(state, (&n_wo[0]) as u64, kstate.A_WORKRUNS)
+    // DIE LECKZAHLEN. Alle fuenf muessen null sein (bis auf die drei
+    // Konsoleneintraege der Objekttafel).
+    anum((&n_us[0]) as u64, async.used(state))
+    anum((&n_li[0]) as u64, async.live(state))
+    anum((&n_lo[0]) as u64, async_lost(state))
+    anum((&n_ob[0]) as u64, handle.objects_used(state))
+    anum((&n_fl[0]) as u64, handle.req_live(state))
+    anum((&n_by[0]) as u64, async.bytes_per_request())
+    anum((&n_wk[0]) as u64, async_workers(state))
+    anum((&n_ct[0]) as u64, async.MAX_AIO)
+}
+
+fn hnum_a(state: u64, name: u64, off: u64) {
+    anum(name, kstate.get(state, off))
+}
+
+// Verlorene Fertigmeldungen ueber ALLE Aufgaben. Sie MUSS null sein:
+// die Abgabe laesst je Prozess hoechstens so viele Auftraege offen, wie
+// der Ring Plaetze hat -- ein Ring, der verwirft, ist schlimmer als eine
+// Abgabe, die -EAGAIN sagt.
+fn async_lost(state: u64) -> u64 {
+    var n: u64 = 0
+    var i: u64 = 0
+    while i < kstate.MAX_TASKS {
+        n = n + async.cq_lost(state, i)
+        i = i + 1
+    }
+    return n
+}
+
+// Wie viele Arbeitsfaeden wirklich laufen. Nicht die Zahl, die
+// `async.WORKERS` verspricht -- die, die in der Aufgabentabelle steht.
+fn async_workers(state: u64) -> u64 {
+    var n: u64 = 0
+    var i: u64 = 0
+    while i < kstate.MAX_TASKS {
+        if sched.tget(state, i, sched.T_STATE) != sched.S_FREE {
+            if sched.tget(state, i, sched.T_KIND) == sched.K_AIO {
+                n = n + 1
+            }
+        }
+        i = i + 1
+    }
+    return n
+}
+
+// Die Messung. Sie steht ABSICHTLICH ausserhalb von `asyncs`: mit
+// `async` laeuft der Selbsttest mit, und dann misst sie den Selbsttest
+// und nicht den Regelbetrieb. `abench` allein ist die Messung, die gilt.
+fn async_bench(state: u64) {
+    var n_kh: [u8; 12] = "abench-khz\0\0"
+    var n_wk: [u8; 16] = "abench-workers\0\0"
+    if !kstate.mode_on(state, kstate.M_ABENCH) {
+        return
+    }
+    let tb: u64 = proc.create(state, P_ABENCH, 0, 2)
+    kutil.wait_for(state, tb)
+    anum((&n_kh[0]) as u64, time.khz(state))
+    anum((&n_wk[0]) as u64, async_workers(state))
+}
+
 // ==================================================== RUNDE K13
 //
 // Zwei Programme aus `uprog.fi`, beide in Ring 3, beide ohne Platte:
@@ -2213,6 +2389,13 @@ fn osum(state: u64) {
     // eine Generation entscheiden kann, die gleich starten soll.
     // Begruendung und Grenzen: kernel/ab.fi.
     ab.ab_boot(state)
+    // RUNDE CUSTOMRES (MERGE-2 18): DER GESPEICHERTE BILDMODUS. Hier
+    // und nicht frueher -- vor dem Einhaengen der Wurzel gibt es die
+    // Datei nicht. Der Ruf geht durch die Grafiknaht: `dispsave` haengt
+    // an `vmode`, und `vmode` gibt es im GUI-losen Kern nicht.
+    // BEIDE Zeilen bleiben -- ab.ab_boot entscheidet ueber die
+    // Generation, disp_restore ueber den Bildmodus.
+    gfx.disp_restore(state)
     usb_mount(state)
     list_dir(state, (&p_bin[0]) as u64, (&s_bin[0]) as u64)
 
@@ -2941,6 +3124,36 @@ fn mode_of(state: u64, cmd: u64) {
     }
     if find(cmd, (&hbw[0]) as u64, 6) != 0 {
         kstate.mode_add(state, kstate.M_HBENCH)
+    }
+    // RUNDE ASYNC. `async` schaltet den Selbsttest an, `abench` die
+    // Messung; die drei danach sind GEGENPROBEN und stehen in
+    // `kstate.fi` bei ihren Bits erklaert. Die Woerter sind lang genug,
+    // dass die Teilwortsuche nichts anderes trifft -- `abench` und
+    // `hbench` unterscheiden sich im ersten Zeichen und sind beide
+    // sechs lang.
+    var asyw: [u8; 6] = "async\0"
+    var abw: [u8; 7] = "abench\0"
+    var nagw: [u8; 7] = "noagen\0"
+    var narw: [u8; 8] = "noareap\0"
+    var nawv: [u8; 8] = "noawork\0"
+    var astw: [u8; 8] = "astress\0"
+    if find(cmd, (&asyw[0]) as u64, 5) != 0 {
+        kstate.mode_add(state, kstate.M_ASYNC)
+    }
+    if find(cmd, (&abw[0]) as u64, 6) != 0 {
+        kstate.mode_add(state, kstate.M_ABENCH)
+    }
+    if find(cmd, (&nagw[0]) as u64, 6) != 0 {
+        kstate.mode_add(state, kstate.M_NOAGEN)
+    }
+    if find(cmd, (&narw[0]) as u64, 7) != 0 {
+        kstate.mode_add(state, kstate.M_NOAREAP)
+    }
+    if find(cmd, (&nawv[0]) as u64, 7) != 0 {
+        kstate.mode_add(state, kstate.M_NOAWORK)
+    }
+    if find(cmd, (&astw[0]) as u64, 7) != 0 {
+        kstate.mode_add(state, kstate.M_ASTRESS)
     }
     if find(cmd, (&k13w[0]) as u64, 6) != 0 {
         kstate.mode_add(state, kstate.M_K13)

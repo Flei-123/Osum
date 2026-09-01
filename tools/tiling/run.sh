@@ -368,18 +368,18 @@ lauf "$K0" "gfx wm tile wmshell $GRUND script=tiling;tiling load;tiling keys" \
     "$TMPD/u.txt" "$DISK"
 num "der Lauf mit /bin/tiling endet sauber" "$?" eq 21
 U="$TMPD/u.txt"
-has "$U" "tiling: der Kachelbetrieb laeuft" "das Programm sieht den Kachelbetrieb"
+has "$U" "tiling: der Kachelbetrieb läuft" "das Programm sieht den Kachelbetrieb"
 has "$U" "Fenster: 2 von 48" "es nennt die Zahl der Fenster und die Obergrenze"
 has "$U" "Aufbau:  split" "es nennt den Modus des Containers"
-has "$U" "Invariante: haelt" "und es laesst den Kern die Invariante NACHRECHNEN"
-has "$U" "21 tiling: Eintraege gelesen" \
+has "$U" "Invariante: hält" "und es laesst den Kern die Invariante NACHRECHNEN"
+has "$U" "21 tiling: Einträge gelesen" \
     "es liest /users/osum/config/tiling.conf und schiebt sie in den Kern"
 has "$U" "mod+h  focus-left" "es liest die Belegung wieder heraus"
 has "$U" "mod+shift+l  move-right" "mit Modifikatoren"
 has "$U" "mod+left  snap-left" "und mit Tasten, die kein Zeichen sind"
 # Beide Wege muessen dieselbe Zahl sagen: der Kern beim Hochlauf und das
 # Programm ueber den Systemaufruf.
-ub=$(grep -aoE '^[0-9]+ tiling: Eintraege' "$U" | head -1 | grep -oE '^[0-9]+')
+ub=$(grep -aoE '^[0-9]+ tiling: Einträge' "$U" | head -1 | grep -oE '^[0-9]+')
 if [ -n "$ub" ] && [ "$ub" = "$soll" ]; then
     ok "Kern und Ring 3 zaehlen dieselben Eintraege ($ub)"
 else

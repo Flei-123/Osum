@@ -156,6 +156,81 @@ STAEMME = [
     ("ausfuehr",     "ausführ"),
     ("Ausfuehr",     "Ausführ"),
     ("durchfuehr",   "durchführ"),
+    # ---- Runde UMLAUT2: was der Quelltext noch trug ----------------
+    ("liess",        "ließ"),
+    ("Liess",        "Ließ"),
+    ("hiess",        "hieß"),
+    ("Hiess",        "Hieß"),
+    ("fliess",       "fließ"),
+    ("Fliess",       "Fließ"),
+    ("faeng",        "fäng"),
+    ("Faeng",        "Fäng"),
+    ("gaeng",        "gäng"),
+    ("Gaeng",        "Gäng"),
+    ("geraet",       "gerät"),
+    ("Geraet",       "Gerät"),
+    ("GERAET",       "GERÄT"),
+    ("bloeck",       "blöck"),
+    ("Bloeck",       "Blöck"),
+    ("saettig",      "sättig"),
+    ("Saettig",      "Sättig"),
+    ("rueck",        "rück"),
+    ("Rueck",        "Rück"),
+    ("itaet",        "ität"),
+    ("waerm",        "wärm"),
+    ("Waerm",        "Wärm"),
+    ("fueg",         "füg"),
+    ("Fueg",         "Füg"),
+    ("haelt",        "hält"),
+    ("Haelt",        "Hält"),
+    ("traeg",        "träg"),
+    ("Traeg",        "Träg"),
+    ("schlaeg",      "schläg"),
+    ("Schlaeg",      "Schläg"),
+    ("saetze",       "sätze"),
+    ("Saetze",       "Sätze"),
+    ("staend",       "ständ"),
+    ("Staend",       "Ständ"),
+    ("aendr",        "ändr"),
+    ("haeng",        "häng"),
+    ("Haeng",        "Häng"),
+    ("koerp",        "körp"),
+    ("Koerp",        "Körp"),
+    ("hoer",         "hör"),
+    ("Hoer",         "Hör"),
+    ("stoer",        "stör"),
+    ("Stoer",        "Stör"),
+    ("bloed",        "blöd"),
+    ("froeh",        "fröh"),
+    ("kuerz",        "kürz"),
+    ("Kuerz",        "Kürz"),
+    ("stueck",       "stück"),
+    ("Stueck",       "Stück"),
+    ("zurueckset",   "zurückset"),
+    ("gruen",        "grün"),
+    ("Gruen",        "Grün"),
+    ("wuensch",      "wünsch"),
+    ("Wuensch",      "Wünsch"),
+    ("gueltig",      "gültig"),
+    ("Gueltig",      "Gültig"),
+    ("verfueg",      "verfüg"),
+    ("Verfueg",      "Verfüg"),
+    ("genueg",       "genüg"),
+    ("Genueg",       "Genüg"),
+    ("uebrig",       "übrig"),
+    ("Uebrig",       "Übrig"),
+    ("ueblich",      "üblich"),
+    ("Ueblich",      "Üblich"),
+    ("aehnlich",     "ähnlich"),
+    ("Aehnlich",     "Ähnlich"),
+    ("naeher",       "näher"),
+    ("Naeher",       "Näher"),
+    ("spuel",        "spül"),
+    ("fuell",        "füll"),
+    ("Fuell",        "Füll"),
+    ("gefuell",      "gefüll"),
+    ("schluess",     "schlüss"),
+    ("Schluess",     "Schlüss"),
     ("Umschrift-x",  "Umschrift-x"),  # nie ein Treffer, haelt die Liste stabil
 ]
 STAEMME = [s for s in STAEMME if s[0] != "Umschrift-x"]
@@ -257,6 +332,30 @@ def main(argv):
                        % (rel, len(roh), g["INFO_READ"]))
         for nr, zeile in enumerate(roh.decode("utf-8").split("\n"), 1):
             umlaute += sum(1 for c in zeile if c in "äöüÄÖÜß")
+            # DIE SUCHWOERTER SIND EINE AUSNAHME, UND SIE HAT EINE REGEL.
+            # In `keys=` ist ASCII GEWOLLT: wer "menue" tippt, weil seine
+            # Tastatur kein "ü" hat, soll den Starter finden. Aber wer
+            # "menü" tippt, auch -- deshalb muss die Umlautform DANEBEN
+            # stehen und nicht STATT dessen. Genau das wird hier geprueft.
+            if zeile.startswith("keys="):
+                woerter = [w.strip() for w in
+                           zeile.split("=", 1)[1].split(",")]
+                for w in woerter:
+                    if not w:
+                        continue
+                    t = finde(w)
+                    if not t:
+                        continue
+                    geprueft += 1
+                    soll = w
+                    for stamm, ersatz in t:
+                        soll = soll.replace(stamm, ersatz)
+                    if soll not in woerter:
+                        fehler.append(
+                            "%s:%d  keys= hat '%s', aber nicht '%s' "
+                            "-- die Umlautform gehoert DANEBEN, nicht "
+                            "statt dessen" % (rel, nr, w, soll))
+                continue
             if not zeile.startswith(("name=", "info=")):
                 continue
             geprueft += 1

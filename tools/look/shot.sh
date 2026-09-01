@@ -33,6 +33,16 @@
 #     icons=yes|no      put /lib/icons.ttf on the disk or not
 #     nvicons=yes|no    put /etc/netview/* on the disk or not
 #     progs="..."       override the program list
+#     append="..."      REPLACE the whole kernel command line instead
+#                       of appending to it. Round UMLAUT2 needs the
+#                       storage dialog, and that one comes up in the
+#                       WINDOW SERVER path (`wig wigspeicher`), which
+#                       the desktop path (`desk`) does not run. Empty
+#                       by default -- nothing changes for anyone else.
+#     accel=tcg|kvm     which QEMU accelerator (default tcg -- KVM is
+#                       faster, and round UMLAUT2 takes its pictures
+#                       with it, but a host without /dev/kvm must still
+#                       be able to run this script)
 #
 # It prints, on stdout, the numbers a caller wants to assert on: the
 # QEMU exit code, the size of the picture, and every `taskbar:` and
@@ -56,8 +66,24 @@ icons=yes
 nvicons=yes
 keep=no
 extra=""
+# ROUND SOFTUI: HARDWARE VIRTUALISATION, AND WHY IT IS A SWITCH AND NOT
+# A CONSTANT.  Round PAINT wrote "the measuring machine has no /dev/kvm"
+# and measured everything under TCG.  This machine HAS one, and the
+# difference is not cosmetic -- see docs/ROUNDSOFTUI.md, section 1.
+# It stays a switch because round KVMFIX found four test sections that
+# measure something DIFFERENT under KVM; a picture is not one of them,
+# and `accel=tcg` reproduces every older number.
+accel=kvm
+# ROUND SOFTUI: WHERE THE POINTER STANDS WHEN THE PICTURE IS TAKEN.
+# The hover state of the three caption buttons IS a measurement of this
+# round -- a close button that only turns red when the pointer is on it
+# cannot be photographed without a pointer. `hover=x,y` drives it there
+# and does NOT click; see tools/softui/hover.py.
+hover=""
 uitrace=no
 autohide=0
+accel=tcg
+append=""
 progs="desktop taskbar settings launcher dhcp explorer widgetdemo locate sh echo ls cat edit"
 for a in "$@"; do
     case "$a" in
@@ -75,6 +101,9 @@ for a in "$@"; do
         extra=*) extra=${a#*=} ;;
         uitrace=*) uitrace=${a#*=} ;;
         autohide=*) autohide=${a#*=} ;;
+        accel=*) accel=${a#*=} ;;
+        append=*) append=${a#*=} ;;
+        hover=*) hover=${a#*=} ;;
         *) echo "unknown option: $a" >&2; exit 2 ;;
     esac
 done
@@ -226,8 +255,21 @@ echo "disk $(stat -c%s "$OUT/disk.img") octets"
 
 # ------------------------------------------------------------ 4. boot
 SOCK="$OUT/mon.sock"; rm -f "$SOCK" "$OUT/serial.txt"
-timeout 420 qemu-system-x86_64 -kernel "$BUILDD/k0.mb" -m 512 \
-    -append "gfx wm wig wigicons desk wmhold wiglong nokbd nosched noproc nofs $extra" \
+ACC=()
+# RUNDE MERGE-2: `-cpu host` von softui, die Pruefung samt Hinweis von
+# uns. Ohne `-cpu host` ist der Prozessor `qemu64`, der kein SMAP kann --
+# und genau mit SMAP hat softui den fehlenden Gegenpart zu `map_user`
+# gefunden. Ohne die Pruefung faellt ein Wirt ohne /dev/kvm still auf
+# eine Zeile herein, die er nicht ausfuehren kann.
+if [ "$accel" = kvm ]; then
+    if [ -e /dev/kvm ] && [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
+        ACC=(-accel kvm -cpu host)
+    else
+        echo "accel=kvm asked for, /dev/kvm not usable -- falling back to tcg"
+    fi
+fi
+timeout 420 qemu-system-x86_64 "${ACC[@]}" -kernel "$BUILDD/k0.mb" -m 512 \
+    -append "${append:-gfx wm wig wigicons desk wmhold wiglong nokbd nosched noproc nofs $extra}" \
     -serial "file:$OUT/serial.txt" -display none -no-reboot -vga std \
     -monitor "unix:$SOCK,server,nowait" \
     -drive "file=$OUT/disk.img,format=raw,if=ide,index=0" \
@@ -239,10 +281,16 @@ while [ $i -lt 2400 ]; do
     kill -0 "$PID" 2>/dev/null || break
     sleep 0.15; i=$((i+1))
 done
+if [ -n "$hover" ]; then
+    python3 tools/softui/hover.py "$hover" > "$OUT/hover.txt" 2>"$OUT/hover.err"
+    python3 tools/wm/monitor.py "$SOCK" "$OUT/hover.txt" > "$OUT/hover.log" 2>&1
+    sleep 2
+fi
 python3 tools/gfx/screenshot.py "$SOCK" "$OUT/desktop.ppm" 25 > "$OUT/shot.log" 2>&1
 wait "$PID"; RC=$?
 rm -f "$SOCK"
 echo "qemu exit $RC"
+echo "accel ${ACC[*]:-tcg}"
 
 if [ -s "$OUT/desktop.ppm" ]; then
     python3 - "$OUT" <<'PY'
