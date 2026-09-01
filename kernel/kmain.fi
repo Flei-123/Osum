@@ -505,6 +505,15 @@ fn kernel_main(mbi: u64, vectors: u64, state: u64, kernel_end: u64,
     //     kernel behaves as it did; under `-smp 4` it starts the other
     //     three and hands them work.
     smp.stage(state)
+    // RUNDE AVX, ZWEITER DURCHGANG: dieselben vier Prozesse NOCH EINMAL,
+    // jetzt aber mit allen Kernen oben. Der erste Durchgang oben lief
+    // auf einem Prozessor -- er misst, dass der Wechsel sichert; dieser
+    // hier misst zusaetzlich, dass eine Aufgabe, die von einem Kern auf
+    // einen anderen wandert, ihre Register mitnimmt. Ohne
+    // `fpu.apply_here` in `smp.ap_main` waere das nicht einmal
+    // fehlerhaft, sondern toedlich: der erste `movdqu` auf einem Kern
+    // ohne CR4.OSFXSR ist ein #UD.
+    vectors_smp(state)
 
 
     // 7i. RUNDE K12: ein Wirt fuer fremde Betriebssysteme. Hier und
@@ -3788,4 +3797,110 @@ fn vectors(state: u64) {
         serial.dec(0)
     }
     serial.nl()
+}
+
+
+// RUNDE AVX: DIE PROBE AUF MEHREREN PROZESSOREN.
+//
+// KERNaufgaben und keine Prozesse, und dafuer gibt es einen gemessenen
+// Grund. Ein Versuch mit vier Prozessen aus Ring 3 hinter `smp.stage`
+// endete unter `-smp 4` in einem #DF mit `rsp` in einer NUTZERseite:
+// `syscall_entry` in `isr.s` legt den Nutzerstapel in EIN globales Wort
+// (`sys_rsp`) und holt den Kernstapel aus EINEM (`kdata + KSTACK_CUR`).
+// Zwei Kerne, die gleichzeitig einen Systemaufruf machen, stehen danach
+// auf demselben Kernstapel. Das ist eine Grenze aus Runde K5 -- sie
+// steht im Kommentar von `sched.set_kernel_stack` woertlich da ("a
+// started core ... never leaves ring 0 in this round") -- und sie hat
+// mit den Vektorregistern nichts zu tun. Nachgeprueft: dieselben vier
+// Aufgaben mit `nofpu` (also ohne eine Zeile dieser Runde) enden genauso.
+//
+// KERNAUFGABEN wandern sehr wohl ueber alle Kerne (`may_run` mit
+// ANY_CPU) und gehen durch DENSELBEN `switch_to`. Also wird auf ihnen
+// gemessen, was zu messen ist: dass eine Aufgabe ihre Vektorregister
+// mitnimmt, wenn der Scheduler sie auf einen anderen Kern legt.
+fn vectors_smp(state: u64) {
+    var s_beg: [u8; 15] = "vecsmp: begin\0\0"
+    var s_ex: [u8; 14] = "vecsmp: exit=\0"
+    var s_sp: [u8; 2] = " \0"
+    var s_c: [u8; 15] = "vecsmp: clean=\0"
+    var s_n: [u8; 15] = "vecsmp: cores=\0"
+    var s_m: [u8; 16] = "vecsmp: onmask=\0"
+    var s_sk: [u8; 16] = "vecsmp: skipped\0"
+    if !fpu.want(state, fpu.M_VEC) {
+        return
+    }
+    if !fpu.enabled(state) {
+        serial.puts((&s_sk[0]) as u64)
+        serial.nl()
+        return
+    }
+    serial.puts((&s_beg[0]) as u64)
+    serial.nl()
+    // Die Zahl der Kerne, die die Freischaltung WIRKLICH tragen: die
+    // weiteren Prozessoren, die sich in `fpu.apply_here` selbst gezaehlt
+    // haben, plus den Startprozessor. Zurueckgelesen aus CR4 und nicht
+    // angenommen -- siehe `guard.report_aps`.
+    serial.puts((&s_n[0]) as u64)
+    serial.dec(kstate.get(state, kstate.FPU_APS) + 1)
+    serial.nl()
+    var t: [u64; 6] = [0 as u64; 6]
+    var i: u64 = 0
+    while i < 6 {
+        t[i as usize] = sched.create(state, sched.K_VEC, 1, 0, 0)
+        i = i + 1
+    }
+    i = 0
+    while i < 6 {
+        if t[i as usize] != 0 {
+            sched.start(state, t[i as usize])
+        }
+        i = i + 1
+    }
+    while vec_tasks_alive(state) > 0 {
+        sched.sleep_ticks(state, 1)
+    }
+    var bad: u64 = 0
+    var mask: u64 = 0
+    serial.puts((&s_ex[0]) as u64)
+    i = 0
+    while i < 6 {
+        if t[i as usize] != 0 {
+            let e: u64 = sched.tget(state, t[i as usize], sched.T_EXIT)
+            bad = bad + e
+            mask = mask | sched.cpu_mask(state, t[i as usize])
+            serial.dec(e)
+            serial.puts((&s_sp[0]) as u64)
+        }
+        i = i + 1
+    }
+    serial.nl()
+    // Welche Kerne diese sechs Aufgaben zusammen wirklich getragen
+    // haben. Ein Bit je Kern; steht hier 0x1, lief alles auf dem
+    // Startprozessor und der Abschnitt hat nichts ueber mehrere
+    // Prozessoren gesagt.
+    serial.puts((&s_m[0]) as u64)
+    serial.hex(mask)
+    serial.nl()
+    serial.puts((&s_c[0]) as u64)
+    if bad == 0 {
+        serial.dec(1)
+    } else {
+        serial.dec(0)
+    }
+    serial.nl()
+}
+
+fn vec_tasks_alive(state: u64) -> u64 {
+    var n: u64 = 0
+    var i: u64 = 0
+    while i < kstate.get(state, kstate.TASKS) {
+        if sched.tget(state, i, sched.T_KIND) == sched.K_VEC {
+            let st: u64 = sched.tget(state, i, sched.T_STATE)
+            if st != sched.S_FREE && st != sched.S_ZOMBIE {
+                n = n + 1
+            }
+        }
+        i = i + 1
+    }
+    return n
 }

@@ -92,7 +92,9 @@ export {
     save, restore, switch, on_nm, drop_owner, adopt_now,
     M_NOFPU, M_NOFPUSWITCH, M_FPULAZY, M_NOXSAVE, M_NOAVX, M_VEC,
     M_FPUFORCE, want, cpu_feat,
-    MODE_OFF, MODE_FX, MODE_XSAVE, MODE_XSAVEOPT
+    MODE_OFF, MODE_FX, MODE_XSAVE, MODE_XSAVEOPT,
+    VEC_WORDS, VEC_BYTES, vec_seed, vec_put, vec_take, vec_calc,
+    vec_ref, vec_diff
 }
 
 // ---------------------------------------------------------- die Bits
@@ -801,4 +803,85 @@ fn find(heu: u64, nadel: u64, n: u64) -> u64 {
         i = i + 1
     }
     return 0
+}
+
+
+// =============================================== die Vektorprobe im Kern
+//
+// Dasselbe Verfahren wie `uprog.u_vec`, nur in Ring 0 und nur auf xmm.
+// Sie ist da, weil der Test aus Ring 3 auf EINEM Prozessor bleiben muss:
+// `syscall_entry` in `isr.s` legt den Nutzerstapel in EIN globales Wort
+// (`sys_rsp`) und holt den Kernstapel aus EINEM (`kdata + KSTACK_CUR`).
+// Zwei Kerne, die gleichzeitig einen Systemaufruf machen, stehen danach
+// auf demselben Kernstapel -- gemessen, siehe `docs/RUNDE-AVX.md`. Das
+// ist eine Grenze aus Runde K5 und steht dort auch so im Kommentar von
+// `sched.set_kernel_stack`; sie zu heben ist eine eigene Runde
+// (`swapgs` und ein Kernstapel je Kern).
+//
+// KERNAUFGABEN wandern dagegen sehr wohl zwischen den Kernen (Runde K5,
+// `sched.may_run` mit ANY_CPU), und sie gehen durch DENSELBEN
+// Kontextwechsel. Also wird auf ihnen gemessen, was auf mehreren
+// Prozessoren zu messen ist: dass eine Aufgabe ihre Vektorregister
+// mitnimmt, wenn sie den Kern wechselt.
+//
+// NUR xmm, und das ist Absicht: was hier gezeigt wird, ist der WECHSEL.
+// Wie breit gesichert wird, zeigt der Test aus Ring 3, und die Breite
+// haengt an XCR0 und nicht am Kern, auf dem er laeuft.
+
+const VEC_REGS: u64 = 16
+const VEC_LANES: u64 = 2
+const VEC_WORDS: u64 = 32 // 16 Register * 2 Bahnen
+const VEC_BYTES: u64 = 256
+
+fn vec_put(p: u64) {
+    asm("movdqu xmm0,[rdi]\nmovdqu xmm1,[rdi+16]\nmovdqu xmm2,[rdi+32]\nmovdqu xmm3,[rdi+48]\nmovdqu xmm4,[rdi+64]\nmovdqu xmm5,[rdi+80]\nmovdqu xmm6,[rdi+96]\nmovdqu xmm7,[rdi+112]\nmovdqu xmm8,[rdi+128]\nmovdqu xmm9,[rdi+144]\nmovdqu xmm10,[rdi+160]\nmovdqu xmm11,[rdi+176]\nmovdqu xmm12,[rdi+192]\nmovdqu xmm13,[rdi+208]\nmovdqu xmm14,[rdi+224]\nmovdqu xmm15,[rdi+240]",
+        in("rdi") p, clobber("memory"))
+}
+
+fn vec_take(p: u64) {
+    asm("movdqu [rdi],xmm0\nmovdqu [rdi+16],xmm1\nmovdqu [rdi+32],xmm2\nmovdqu [rdi+48],xmm3\nmovdqu [rdi+64],xmm4\nmovdqu [rdi+80],xmm5\nmovdqu [rdi+96],xmm6\nmovdqu [rdi+112],xmm7\nmovdqu [rdi+128],xmm8\nmovdqu [rdi+144],xmm9\nmovdqu [rdi+160],xmm10\nmovdqu [rdi+176],xmm11\nmovdqu [rdi+192],xmm12\nmovdqu [rdi+208],xmm13\nmovdqu [rdi+224],xmm14\nmovdqu [rdi+240],xmm15",
+        in("rdi") p, clobber("memory"))
+}
+
+fn vec_calc() {
+    asm("paddq xmm0,xmm1\npaddq xmm1,xmm2\npaddq xmm2,xmm3\npaddq xmm3,xmm4\npaddq xmm4,xmm5\npaddq xmm5,xmm6\npaddq xmm6,xmm7\npaddq xmm7,xmm8\npaddq xmm8,xmm9\npaddq xmm9,xmm10\npaddq xmm10,xmm11\npaddq xmm11,xmm12\npaddq xmm12,xmm13\npaddq xmm13,xmm14\npaddq xmm14,xmm15")
+}
+
+fn vec_seed(p: u64, seed: u64) {
+    var k: u64 = 0
+    while k < VEC_WORDS {
+        __mmio_write64((p + k * 8) as *mut u64,
+            (seed << 56) | (seed << 40) | (seed << 24) | (k << 8) | 0xA5)
+        k = k + 1
+    }
+}
+
+// Dieselbe Folge in gewoehnlichen Zahlen. `+%` ist gemeint: `paddq`
+// rechnet 64 Bit mit Ueberlauf.
+fn vec_ref(p: u64) {
+    var n: u64 = 0
+    while n + 1 < VEC_REGS {
+        var l: u64 = 0
+        while l < VEC_LANES {
+            let a: u64 = __mmio_read64((p + (n * VEC_LANES + l) * 8) as *mut u64)
+            let b: u64 = __mmio_read64(
+                (p + ((n + 1) * VEC_LANES + l) * 8) as *mut u64)
+            __mmio_write64((p + (n * VEC_LANES + l) * 8) as *mut u64, a +% b)
+            l = l + 1
+        }
+        n = n + 1
+    }
+}
+
+fn vec_diff(a: u64, b: u64) -> u64 {
+    var k: u64 = 0
+    var bad: u64 = 0
+    while k < VEC_WORDS {
+        if __mmio_read64((a + k * 8) as *mut u64)
+        != __mmio_read64((b + k * 8) as *mut u64) {
+            bad = bad + 1
+        }
+        k = k + 1
+    }
+    return bad
 }
