@@ -45,6 +45,21 @@ OHNEQEMU=0
 W="$OUT/wirt"
 mkdir -p "$W"
 
+# DER LAUF MUSS SICH WIEDERHOLEN LASSEN. Er veroeffentlicht Fassungen und
+# wechselt Schluessel; ohne diesen Schnappschuss stuende beim zweiten Lauf
+# Fassung 18 und Generation 6 da, und jede Zahl im Bericht waere eine
+# andere. `$OUT/rein` ist der Zustand nach `vorbereiten.sh`.
+if [ -d "$OUT/aus" ] && [ ! -d "$OUT/rein" ]; then
+    mkdir -p "$OUT/rein"
+    cp -a "$OUT/aus" "$OUT/rein/aus"
+    cp -a "$OUT/bund.json" "$OUT/rein/bund.json"
+fi
+if [ -d "$OUT/rein" ]; then
+    rm -rf "$OUT/aus" "$OUT/fremdaus"
+    cp -a "$OUT/rein/aus" "$OUT/aus"
+    cp -a "$OUT/rein/bund.json" "$OUT/bund.json"
+fi
+
 pass=0
 fail=0
 ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
