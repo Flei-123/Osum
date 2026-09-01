@@ -13,9 +13,17 @@ nicht angefasst.
 
 ---
 
-## 0. Die drei wichtigsten Ergebnisse
+## 0. Der Lauf in einer Zeile
 
-*(werden am Ende dieses Dokuments mit Zahlen wiederholt)*
+> **`bash tools/betrieb/run.sh` — 95 Zusagen grün, 0 rot.**
+> Darin: **19 von 19** feindlichen DNS-Nachrichten abgewehrt (ohne ein
+> Paket zu schicken), **21 von 21** echten Namen gleich wie `dig`,
+> **24 Köder** eines Fälschers gezählt und verworfen ohne eine falsche
+> Antwort, **7 von 7** Gegenproben zur Schlüsselverwaltung bestanden,
+> und ein Gerät, das **drei Fassungen** zurücklag, ist über einen
+> **Namen** aktuell geworden. Dreizehn echte QEMU-Starts.
+
+## 0.1 Die drei wichtigsten Ergebnisse
 
 1. **`ota` holt ein Update über einen NAMEN, Ende zu Ende.** In
    `/etc/ota.conf` steht seit dieser Runde `quelle=https://pkg.betrieb.test:…`
@@ -41,18 +49,18 @@ nicht angefasst.
 
 | Datei | Zeilen | Was |
 |---|---:|---|
-| `lib/libc/dnswire.fi` | 448 | DNS (RFC 1035) als reine Oktettarbeit — **kein Systemaufruf**, deshalb ohne ein Paket prüfbar |
-| `lib/libc/dns.fi` | 456 | die Steckdose: `/etc/resolv.conf`, gewürfelter Quellport, Kennung, 0x20, Frist mit Wiederholung, mehrere Server |
-| `kernel/user/host.fi` | 331 | `/bin/host` — das Messgerät gegen `dig` |
-| `kernel/user/dnswt.fi` | 393 | 19 von Hand gebaute, feindliche Nachrichten |
+| `lib/libc/dnswire.fi` | 502 | DNS (RFC 1035) als reine Oktettarbeit — **kein Systemaufruf**, deshalb ohne ein Paket prüfbar |
+| `lib/libc/dns.fi` | 543 | die Steckdose: `/etc/resolv.conf`, gewürfelter Quellport, Kennung, 0x20, Frist mit Wiederholung, mehrere Server |
+| `kernel/user/host.fi` | 330 | `/bin/host` — das Messgerät gegen `dig` |
+| `kernel/user/dnswt.fi` | 353 | 19 von Hand gebaute, feindliche Nachrichten |
 | `tools/ota/schluesselbund.py` | 294 | der geheime Schlüssel: verschlüsselt, und das Signieren getrennt vom Bauen |
-| `tools/ota/veroeffentlichen.py` | 407 | Register, Vorrat, Archiv, Sperrliste, Kettensätze |
-| `tools/betrieb/dnsdienst.py` | 244 | Nameserver **und Fälscher** |
-| `tools/betrieb/dnsvergleich.py` | 176 | `/bin/host` gegen `dig`, 20 Namen |
-| `tools/betrieb/run.sh` | 421 | der Läufer |
-| `tools/betrieb/vorbereiten.sh` | 104 | Pakete, Zertifikate, Bund, vier Auslieferungen, Abbild, Platte |
-| `tools/betrieb/crt-wirt.s` | 74 | zwei Zeilen Unterschied: dasselbe Programm auf dem Wirt |
-| `tools/betrieb/wirt.sh` · `masse.py` | 20 · 66 | Bauhelfer |
+| `tools/ota/veroeffentlichen.py` | 442 | Register, Vorrat, Archiv, Sperrliste, Kettensätze |
+| `tools/betrieb/dnsdienst.py` | 222 | Nameserver **und Fälscher** |
+| `tools/betrieb/dnsvergleich.py` | 174 | `/bin/host` gegen `dig`, 20 Namen |
+| `tools/betrieb/run.sh` | 471 | der Läufer |
+| `tools/betrieb/vorbereiten.sh` | 107 | Pakete, Zertifikate, Bund, vier Auslieferungen, Abbild, Platte |
+| `tools/betrieb/crt-wirt.s` | 76 | zwei Zeilen Unterschied: dasselbe Programm auf dem Wirt |
+| `tools/betrieb/wirt.sh` · `masse.py` | 20 · 64 | Bauhelfer |
 
 Geändert:
 
@@ -110,8 +118,8 @@ dastünden. Zwei davon stimmten nicht:
 | „`/etc/resolv.conf` schreibt niemand" | Stimmt. |
 
 Deshalb ist es kein 50-Zeilen-Nachtrag geworden, sondern ein eigener
-Auflöser — **904 Zeilen in zwei Dateien**, davon 448 ohne einen einzigen
-Systemaufruf.
+Auflöser — **1 045 Zeilen in zwei Dateien**, davon 502 ohne einen
+einzigen Systemaufruf.
 
 ### 3.2 Warum das Format von der Steckdose getrennt ist
 
@@ -527,7 +535,7 @@ Auf Osum in QEMU: **6–7 ms**.
 |---|---|
 | verschiedene **Quellports** | 20 von 20 |
 | verschiedene **Kennungen** | 20 von 20 |
-| Spannweite der Quellports | 1580 … 64934 |
+| Spannweite der Quellports | 2322 … 63326 |
 | kleinster Port | ≥ 1024 |
 | richtige Antworten | 20 von 20 |
 
