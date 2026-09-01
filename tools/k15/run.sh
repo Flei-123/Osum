@@ -253,7 +253,7 @@ fi
 # DER VORRAT, DER DIESER RUNDE GEHOERT. Drei Runden liefen gleichzeitig;
 # genau daran waeren drei Merges beinahe gescheitert. Also wird
 # nachgerechnet, dass diese Runde in ihrem Vorrat geblieben ist.
-wo=$(printf '%s\n' "$karte" | grep ' WIG ' | grep -oE '0x[0-9A-Fa-f]+' | head -2 | tr '\n' ' ')
+wo=$(printf '%s\n' "$kartv" | grep ' WIG ' | grep -oE '0x[0-9A-Fa-f]+' | head -2 | tr '\n' ' ')
 gleich "der Bereich liegt im zugeteilten Vorrat" "0x46000 0x49000 " "$wo"
 # ZEHN AUFRUFE: sieben aus der Runde, drei aus dem zweiten Nachtrag
 # (1807 Tabellenlauf, 1808 Journal, 1809 Auskunft).
