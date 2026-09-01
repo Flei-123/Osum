@@ -50,7 +50,11 @@ LISTE = [
     ("d1.awsstatic.com", "A", "Name mit Ziffer in der Marke"),
     ("a.root-servers.net", "A", "Name mit Bindestrich"),
     ("example.com", "AAAA", "AAAA statt A"),
-    ("google.com", "AAAA", "AAAA hinter Anycast"),
+    # KEIN GOOGLE-AAAA MEHR: `google.com` verteilt sein AAAA ueber
+    # mehrere /64, und zwei Fragen kurz nacheinander bekommen zwei
+    # disjunkte Mengen. `a.root-servers.net` hat GENAU EIN AAAA und
+    # aendert es seit Jahren nicht.
+    ("a.root-servers.net", "AAAA", "AAAA mit fester Adresse"),
     ("one.one.one.one", "AAAA", "AAAA, vier Marken"),
     ("de.wikipedia.org", "AAAA", "AAAA hinter einer CNAME-Kette"),
     # ein sehr langer Name: 4 Marken, zusammen 71 Oktett, existiert
