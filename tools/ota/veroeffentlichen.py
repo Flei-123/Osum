@@ -230,7 +230,8 @@ def aktuell_setzen(aus, register, gesperrt):
     return n
 
 
-def bauen(aus, stand, bund, notiz, sperren, feste_fassung=None):
+def bauen(aus, stand, bund, notiz, sperren, feste_fassung=None,
+          signierer="haupt", kette_kaputt=False):
     os.makedirs(os.path.join(aus, "pakete"), exist_ok=True)
     os.makedirs(os.path.join(aus, "v"), exist_ok=True)
 
@@ -271,7 +272,7 @@ def bauen(aus, stand, bund, notiz, sperren, feste_fassung=None):
             shutil.copy2(p, vorrat)
         vsig = vorrat + ".sig"
         if not os.path.isfile(vsig):
-            signieren(bund, vorrat, vsig)
+            signieren(bund, vorrat, vsig, signierer)
         verknuepfen(vorrat, os.path.join(zv, d))
         verknuepfen(vsig, os.path.join(zv, d + ".sig"))
         name, pf = meta_aus_opk(p)
@@ -284,18 +285,28 @@ def bauen(aus, stand, bund, notiz, sperren, feste_fassung=None):
         sys.stderr.write(r.stdout + r.stderr)
         raise SystemExit("veroeffentlichen: opk quelle schlug fehl")
     signieren(bund, os.path.join(zv, "INDEX"),
-              os.path.join(zv, "INDEX.sig"))
+              os.path.join(zv, "INDEX.sig"), signierer)
 
     # 4. DAS VERZEICHNIS.
     b = bund_lesen(bund)
     sperrliste = sorted(set(gesperrt_lesen(aus)) | set(sperren))
     gesperrt_schreiben(aus, sperrliste)
-    roh = verzeichnis_text(fassung, b["haupt"]["gen"], b["kette"],
+    kette = [dict(k) for k in b["kette"]]
+    if kette_kaputt and kette:
+        # EIN BIT IM LETZTEN KETTENSATZ. Alles andere bleibt richtig:
+        # die Auslieferung ist sauber signiert, nur der WECHSEL laesst
+        # sich nicht mehr nachrechnen. Das ist der Fall "unterbrochene
+        # Kette", und ein Geraet muss ihn von "kein Wechsel"
+        # unterscheiden.
+        sig = bytearray(bytes.fromhex(kette[-1]["sig"]))
+        sig[0] ^= 1
+        kette[-1]["sig"] = bytes(sig).hex()
+    roh = verzeichnis_text(fassung, b["haupt"]["gen"], kette,
                            sperrliste, pakete)
     with open(os.path.join(zv, "VERZEICHNIS"), "wb") as f:
         f.write(roh)
     signieren(bund, os.path.join(zv, "VERZEICHNIS"),
-              os.path.join(zv, "VERZEICHNIS.sig"))
+              os.path.join(zv, "VERZEICHNIS.sig"), signierer)
 
     # 5. Der oeffentliche Schluessel liegt zum Nachsehen daneben. Er ist
     #    KEIN Vertrauensanker -- der steht im Abbild des Geraets.
@@ -361,6 +372,8 @@ def main():
     zurueck = None
     nurzeigen = False
     feste = None
+    signierer = "haupt"
+    kaputt = False
     i = 2
     while i < len(sys.argv):
         a = sys.argv[i]
@@ -382,6 +395,11 @@ def main():
         elif a == "--zuruecknehmen":
             i += 1
             zurueck = int(sys.argv[i])
+        elif a == "--signierer":
+            i += 1
+            signierer = sys.argv[i]
+        elif a == "--kette-kaputt":
+            kaputt = True
         elif a == "--zeigen":
             nurzeigen = True
         else:
@@ -396,7 +414,7 @@ def main():
     if not stand or not bund:
         print(__doc__)
         return 2
-    bauen(aus, stand, bund, notiz, sperren, feste)
+    bauen(aus, stand, bund, notiz, sperren, feste, signierer, kaputt)
     return 0
 
 
