@@ -1,0 +1,330 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// kernel/user/host.fi -- RUNDE BETRIEB: /bin/host, das MESSGERAET fuer
+// die Namensaufloesung.
+//
+//     host <name>              die Adresse, eine Zeile, wie `dig +short`
+//     host -t aaaa <name>      ein anderer Satz (a, aaaa, cname)
+//     host -s <ip> <name>      DIESEN Nameserver fragen, nicht den aus
+//                              /etc/resolv.conf -- die Eintragung von
+//                              Hand aus dem Auftrag
+//     host -v <name>           dazu: Server, Quellport, Kennung,
+//                              Versuche, weggeworfene Fremdpakete, ms
+//     host -c                  was in /etc/resolv.conf steht
+//
+// WARUM ES DIESES PROGRAMM GIBT UND NICHT NUR EINE BIBLIOTHEK. Der
+// Auftrag verlangt eine MESSUNG gegen `dig` auf demselben Wirt. Dafuer
+// braucht es zwei Programme, die dieselbe Frage stellen und deren
+// Ausgabe sich Zeile fuer Zeile vergleichen laesst -- `host <name>`
+// schreibt genau eine Zeile mit genau einer Adresse, so wie
+// `dig +short <name>`.
+//
+// DASS DIESES PROGRAMM AUCH AUF DEM WIRT LAEUFT, ist kein Trick, sondern
+// eine Eigenschaft dieses Systems: Osums Systemaufrufe TRAGEN LINUX'
+// NUMMERN (Runde K4), und `kernel/user/user.ld` bindet ein gewoehnliches
+// statisches ELF. Derselbe Quelltext, derselbe Uebersetzer, dieselbe
+// Binaerdatei -- nur der Lader ist ein anderer. Deshalb kann diese Runde
+// gegen `dig` mit ECHTEN Nameservern und ECHTEN Namen messen und danach
+// dieselbe Datei in QEMU auf Osum gegen denselben Nameserver fahren.
+
+profile kernel
+
+import ulib
+import libc.dns
+import libc.dnswire
+
+export { u_start }
+
+static mut NAME: [u8; 300] = [0 as u8; 300]
+static mut ADR: [u8; 16] = [0 as u8; 16]
+static mut ZEILE: [u8; 128] = [0 as u8; 128]
+
+fn g8(p: u64, i: u64) -> u64 {
+    return (*((p + i) as *mut u8)) as u64
+}
+
+fn s8(p: u64, i: u64, v: u64) {
+    __mmio_write8((p + i) as *mut u8, (v & 255) as u8)
+}
+
+fn sag(p: u64) {
+    ulib.say(p)
+}
+
+fn nl() {
+    ulib.nl()
+}
+
+// Vier Oktette als `a.b.c.d`.
+fn v4(p: u64, out: u64) {
+    var n: u64 = 0
+    var i: u64 = 0
+    while i < 4 {
+        if i > 0 {
+            s8(out, n, 46)
+            n = n + 1
+        }
+        let t: u64 = g8(p, i)
+        if t >= 100 {
+            s8(out, n, 48 + t / 100)
+            n = n + 1
+        }
+        if t >= 10 {
+            s8(out, n, 48 + (t / 10) % 10)
+            n = n + 1
+        }
+        s8(out, n, 48 + t % 10)
+        n = n + 1
+        i = i + 1
+    }
+    s8(out, n, 0)
+}
+
+fn hexziffer(v: u64) -> u64 {
+    if v < 10 {
+        return 48 + v
+    }
+    return 87 + v
+}
+
+// Sechzehn Oktette als IPv6. Die volle Form mit acht Gruppen, ohne die
+// Verkuerzung `::` -- sie ist laenger zu lesen und leichter zu
+// vergleichen, und `dig` laesst sich mit `-6`-Normalisierung darauf
+// bringen (`tools/betrieb/dnsvergleich.py` tut genau das).
+fn v6(p: u64, out: u64) {
+    var n: u64 = 0
+    var g: u64 = 0
+    while g < 8 {
+        if g > 0 {
+            s8(out, n, 58)
+            n = n + 1
+        }
+        let w: u64 = (g8(p, g * 2) << 8) | g8(p, g * 2 + 1)
+        var k: u64 = 0
+        var start: bool = true
+        while k < 4 {
+            let nib: u64 = (w >> ((3 - k) * 4)) & 15
+            if nib != 0 || k == 3 || !start {
+                s8(out, n, hexziffer(nib))
+                n = n + 1
+                start = false
+            }
+            k = k + 1
+        }
+        g = g + 1
+    }
+    s8(out, n, 0)
+}
+
+fn grund(c: u64) {
+    var t0: [u8; 9] = "NXDOMAIN\0"
+    var t1: [u8; 7] = "NODATA\0"
+    var t2: [u8; 9] = "SERVFAIL\0"
+    var t3: [u8; 8] = "REFUSED\0"
+    var t4: [u8; 10] = "TRUNCATED\0"
+    var t5: [u8; 7] = "FORMAT\0"
+    var t6: [u8; 5] = "LOOP\0"
+    var t7: [u8; 8] = "TIMEOUT\0"
+    var t8: [u8; 9] = "NOSERVER\0"
+    var t9: [u8; 4] = "NET\0"
+    var ta: [u8; 8] = "BADNAME\0"
+    var tb: [u8; 7] = "NOPORT\0"
+    var tc: [u8; 9] = "MISMATCH\0"
+    var tz: [u8; 8] = "UNKNOWN\0"
+    if c == dnswire.R_NXDOMAIN { sag((&t0[0 as usize]) as u64) }
+    else if c == dnswire.R_NODATA { sag((&t1[0 as usize]) as u64) }
+    else if c == dnswire.R_SERVFAIL { sag((&t2[0 as usize]) as u64) }
+    else if c == dnswire.R_REFUSED { sag((&t3[0 as usize]) as u64) }
+    else if c == dnswire.R_TRUNC { sag((&t4[0 as usize]) as u64) }
+    else if c == dnswire.R_FORMAT { sag((&t5[0 as usize]) as u64) }
+    else if c == dnswire.R_LOOP { sag((&t6[0 as usize]) as u64) }
+    else if c == dns.R_TIMEOUT { sag((&t7[0 as usize]) as u64) }
+    else if c == dns.R_NOSERVER { sag((&t8[0 as usize]) as u64) }
+    else if c == dns.R_NET { sag((&t9[0 as usize]) as u64) }
+    else if c == dnswire.R_BADNAME { sag((&ta[0 as usize]) as u64) }
+    else if c == dns.R_NOPORT { sag((&tb[0 as usize]) as u64) }
+    else if c == dnswire.R_MISMATCH { sag((&tc[0 as usize]) as u64) }
+    else { sag((&tz[0 as usize]) as u64) }
+}
+
+fn zeig_conf() -> u64 {
+    var t: [u8; 12] = "nameserver \0"
+    var k: [u8; 10] = "timeout \0\0"
+    var a: [u8; 10] = "attempts \0"
+    dns.conf_load()
+    var i: u64 = 0
+    while i < dns.conf_count() {
+        var b: [u8; 8] = [0 as u8; 8]
+        let ip: u64 = dns.conf_at(i)
+        s8((&b[0 as usize]) as u64, 0, (ip >> 24) & 255)
+        s8((&b[0 as usize]) as u64, 1, (ip >> 16) & 255)
+        s8((&b[0 as usize]) as u64, 2, (ip >> 8) & 255)
+        s8((&b[0 as usize]) as u64, 3, ip & 255)
+        v4((&b[0 as usize]) as u64, (&ZEILE[0 as usize]) as u64)
+        sag((&t[0 as usize]) as u64)
+        sag((&ZEILE[0 as usize]) as u64)
+        nl()
+        i = i + 1
+    }
+    sag((&k[0 as usize]) as u64)
+    ulib.sayu(dns.conf_timeout())
+    nl()
+    sag((&a[0 as usize]) as u64)
+    ulib.sayu(dns.conf_attempts())
+    nl()
+    if dns.conf_count() == 0 {
+        return 1
+    }
+    return 0
+}
+
+fn u_start(args: u64) -> u64 {
+    var use1: [u8; 49] = "host [-v] [-t a|aaaa] [-s <ip>] <name> | host -c\0"
+    var f_v: [u8; 3] = "-v\0"
+    var f_t: [u8; 3] = "-t\0"
+    var f_s: [u8; 3] = "-s\0"
+    var f_c: [u8; 3] = "-c\0"
+    var w_aaaa: [u8; 5] = "aaaa\0"
+    var w_a: [u8; 2] = "a\0"
+    var w_cname: [u8; 6] = "cname\0"
+    var s_srv: [u8; 10] = "  server \0"
+    var s_prt: [u8; 10] = "  port   \0"
+    var s_txi: [u8; 10] = "  txid   \0"
+    var s_try: [u8; 10] = "  tries  \0"
+    var s_drp: [u8; 10] = "  fremd  \0"
+    var s_ms: [u8; 10] = "  ms     \0"
+    var s_cn: [u8; 10] = "  cname  \0"
+    var s_ttl: [u8; 10] = "  ttl    \0"
+    let n: u64 = ulib.arg_count(args)
+    var laut: bool = false
+    var typ: u64 = dnswire.T_A
+    var srv: u64 = 0
+    var name: u64 = 0
+    var i: u64 = 1
+    while i < n {
+        let a: u64 = ulib.arg_at(args, i)
+        if ulib.streq(a, (&f_c[0 as usize]) as u64) {
+            return zeig_conf()
+        } else if ulib.streq(a, (&f_v[0 as usize]) as u64) {
+            laut = true
+        } else if ulib.streq(a, (&f_t[0 as usize]) as u64) && i + 1 < n {
+            i = i + 1
+            let w: u64 = ulib.arg_at(args, i)
+            if ulib.streq(w, (&w_aaaa[0 as usize]) as u64) {
+                typ = dnswire.T_AAAA
+            } else if ulib.streq(w, (&w_cname[0 as usize]) as u64) {
+                typ = dnswire.T_CNAME
+            } else if ulib.streq(w, (&w_a[0 as usize]) as u64) {
+                typ = dnswire.T_A
+            } else {
+                sag((&use1[0 as usize]) as u64)
+                nl()
+                return 2
+            }
+        } else if ulib.streq(a, (&f_s[0 as usize]) as u64) && i + 1 < n {
+            i = i + 1
+            srv = parse_ip(ulib.arg_at(args, i))
+            if srv == 0 {
+                sag((&use1[0 as usize]) as u64)
+                nl()
+                return 2
+            }
+        } else {
+            name = a
+        }
+        i = i + 1
+    }
+    if name == 0 {
+        sag((&use1[0 as usize]) as u64)
+        nl()
+        return 2
+    }
+    ulib.strncpy((&NAME[0 as usize]) as u64, name, 299)
+    if srv != 0 {
+        dns.conf_set(srv)
+    }
+    let c: u64 = dns.resolve((&NAME[0 as usize]) as u64, typ,
+        (&ADR[0 as usize]) as u64)
+    if c == dnswire.R_OK {
+        if typ == dnswire.T_AAAA {
+            v6((&ADR[0 as usize]) as u64, (&ZEILE[0 as usize]) as u64)
+        } else {
+            v4((&ADR[0 as usize]) as u64, (&ZEILE[0 as usize]) as u64)
+        }
+        sag((&ZEILE[0 as usize]) as u64)
+        nl()
+    } else {
+        grund(c)
+        nl()
+    }
+    if laut {
+        var b: [u8; 8] = [0 as u8; 8]
+        let ip: u64 = dns.used_server()
+        s8((&b[0 as usize]) as u64, 0, (ip >> 24) & 255)
+        s8((&b[0 as usize]) as u64, 1, (ip >> 16) & 255)
+        s8((&b[0 as usize]) as u64, 2, (ip >> 8) & 255)
+        s8((&b[0 as usize]) as u64, 3, ip & 255)
+        v4((&b[0 as usize]) as u64, (&ZEILE[0 as usize]) as u64)
+        sag((&s_srv[0 as usize]) as u64)
+        sag((&ZEILE[0 as usize]) as u64)
+        nl()
+        sag((&s_prt[0 as usize]) as u64)
+        ulib.sayu(dns.used_port())
+        nl()
+        sag((&s_txi[0 as usize]) as u64)
+        ulib.sayu(dns.used_txid())
+        nl()
+        sag((&s_try[0 as usize]) as u64)
+        ulib.sayu(dns.used_tries())
+        nl()
+        sag((&s_drp[0 as usize]) as u64)
+        ulib.sayu(dns.dropped())
+        nl()
+        sag((&s_ms[0 as usize]) as u64)
+        ulib.sayu(dns.used_ms())
+        nl()
+        sag((&s_cn[0 as usize]) as u64)
+        ulib.sayu(dnswire.cnames())
+        nl()
+        sag((&s_ttl[0 as usize]) as u64)
+        ulib.sayu(dnswire.ttl())
+        nl()
+    }
+    if c == dnswire.R_OK {
+        return 0
+    }
+    if c == dnswire.R_NXDOMAIN {
+        return 3
+    }
+    return 1
+}
+
+fn parse_ip(p: u64) -> u64 {
+    var v: u64 = 0
+    var teil: u64 = 0
+    var punkte: u64 = 0
+    var ziffern: u64 = 0
+    var i: u64 = 0
+    while true {
+        let c: u64 = g8(p, i)
+        if c >= 48 && c <= 57 {
+            teil = teil * 10 + (c - 48)
+            if teil > 255 {
+                return 0
+            }
+            ziffern = ziffern + 1
+            i = i + 1
+        } else if c == 46 && punkte < 3 && ziffern > 0 {
+            v = (v << 8) | teil
+            teil = 0
+            ziffern = 0
+            punkte = punkte + 1
+            i = i + 1
+        } else {
+            break
+        }
+    }
+    if punkte != 3 || ziffern == 0 {
+        return 0
+    }
+    return (v << 8) | teil
+}
