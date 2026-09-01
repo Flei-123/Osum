@@ -515,6 +515,7 @@ fn kernel_main(mbi: u64, vectors: u64, state: u64, kernel_end: u64,
     // ohne CR4.OSFXSR ist ein #UD.
     vectors_smp(state)
     ring3_smp(state)
+    fpu_bench(state)
 
 
     // 7i. RUNDE K12: ein Wirt fuer fremde Betriebssysteme. Hier und
@@ -3945,4 +3946,283 @@ fn ring3_smp(state: u64) {
     serial.puts((&s_sp[0]) as u64)
     serial.dec(ed)
     serial.nl()
+}
+
+
+// RUNDE AVX: WAS DER KONTEXTWECHSEL JETZT MEHR KOSTET.
+//
+// Zwei Arme, und der Unterschied zwischen ihnen ist die ganze Frage
+// "lazy oder nicht":
+//
+//   A  zwei Aufgaben, die NUR den Prozessor abgeben und kein einziges
+//      Vektorregister anfassen. Das ist der Fall, fuer den der traege
+//      Weg gebaut ist.
+//   B  zwei Aufgaben, die in jeder Runde alle 16 xmm beschreiben und
+//      auslesen. Das ist der Fall, den es in Wirklichkeit gibt --
+//      praktisch jede libc benutzt SSE.
+//
+// Gemessen wird mit `rdtsc` um den ganzen Lauf und dem globalen
+// Wechselzaehler. Was herauskommt, ist der Preis EINES Wechsels, alles
+// eingerechnet: Laufliste, Sperre, Adressraum, Stapel -- und seit dieser
+// Runde XSAVE/XRSTOR. Der Vergleichswert kommt aus demselben Abbild mit
+// dem Wort `nofpu`, also aus dem Stand vor dieser Runde.
+fn fpu_bench(state: u64) {
+    var s_a: [u8; 17] = "fpubench: armA c\0"
+    var s_b: [u8; 17] = "fpubench: armB c\0"
+    var s_sw: [u8; 12] = "  switches=\0"
+    var s_cy: [u8; 10] = "  cycles=\0"
+    var s_per: [u8; 9] = "  each=\0\0"
+    var s_mem: [u8; 17] = "fpubench: bytes=\0"
+    var s_ar: [u8; 10] = "  areas=\0\0"
+    var s_fr: [u8; 11] = "  frames=\0\0"
+    if !fpu.want(state, fpu.M_BENCH) {
+        return
+    }
+    // ZUERST die Anweisungen selbst, und das ist die Zahl, auf die es
+    // ankommt. Der Wechsel als Ganzes ist auf diesem Wirt (zwoelf Kerne,
+    // auf denen gleichzeitig mehrere andere Runden QEMU laufen lassen)
+    // um mehr verrauscht, als der Unterschied gross ist -- eine Messung,
+    // deren Rauschen groesser ist als ihr Gegenstand, misst nichts.
+    bench_ops(state)
+    bench_ops(state)
+    bench_ops(state)
+    bench_parts(state)
+    bench_parts(state)
+    bench_arm(state, sched.K_YIELD, (&s_a[0]) as u64, (&s_sw[0]) as u64,
+        (&s_cy[0]) as u64, (&s_per[0]) as u64)
+    if fpu.enabled(state) {
+        bench_arm(state, sched.K_VEC, (&s_b[0]) as u64, (&s_sw[0]) as u64,
+            (&s_cy[0]) as u64, (&s_per[0]) as u64)
+    }
+    // Der Speicher: die GEMESSENE Groesse aus cpuid Blatt 0x0D und der
+    // Rahmen, der dafuer je Aufgabe belegt wird. Beides gehoert genannt
+    // -- das eine ist der Bedarf, das andere der Preis.
+    serial.puts((&s_mem[0]) as u64)
+    serial.dec(kstate.get(state, kstate.FPU_SIZE))
+    serial.puts((&s_ar[0]) as u64)
+    serial.dec(kstate.get(state, kstate.FPU_AREAS))
+    serial.puts((&s_fr[0]) as u64)
+    serial.dec(4096)
+    serial.nl()
+}
+
+fn bench_arm(state: u64, kind: u64, label: u64, s_sw: u64, s_cy: u64,
+    s_per: u64) {
+    let a: u64 = sched.create(state, kind, 1, 0, 0)
+    let b: u64 = sched.create(state, kind, 1, 0, 0)
+    if a == 0 || b == 0 {
+        return
+    }
+    let sw0: u64 = kstate.get(state, kstate.SWITCHES)
+    let t0: u64 = time.tsc()
+    sched.start(state, a)
+    sched.start(state, b)
+    while bench_alive(state, kind) > 0 {
+        sched.sleep_ticks(state, 1)
+    }
+    let t1: u64 = time.tsc()
+    let sw1: u64 = kstate.get(state, kstate.SWITCHES)
+    let sw: u64 = sw1 - sw0
+    let cy: u64 = t1 - t0
+    serial.puts(label)
+    serial.puts(s_sw)
+    serial.dec(sw)
+    serial.puts(s_cy)
+    serial.dec(cy)
+    serial.puts(s_per)
+    if sw > 0 {
+        serial.dec(cy / sw)
+    } else {
+        serial.dec(0)
+    }
+    serial.nl()
+}
+
+fn bench_alive(state: u64, kind: u64) -> u64 {
+    var n: u64 = 0
+    var i: u64 = 0
+    while i < kstate.get(state, kstate.TASKS) {
+        if sched.tget(state, i, sched.T_KIND) == kind {
+            let st: u64 = sched.tget(state, i, sched.T_STATE)
+            if st != sched.S_FREE && st != sched.S_ZOMBIE {
+                n = n + 1
+            }
+        }
+        i = i + 1
+    }
+    return n
+}
+
+
+// DER PREIS DER BEIDEN ANWEISUNGEN, OHNE ALLES ANDERE.
+//
+// `fpu.save` + `fpu.restore` in einer Schleife, gegen dieselbe Schleife
+// ohne die beiden gehalten. Was uebrig bleibt, ist genau das, was jeder
+// Kontextwechsel seit dieser Runde mehr kostet -- unabhaengig davon, wie
+// teuer der Wechsel drumherum ist und wie stark der Wirt gerade belastet
+// wird.
+//
+// Die Leerschleife rechnet etwas, das gedruckt wird. Ein Rumpf, dessen
+// Ergebnis niemand liest, waere in `dce.rs` weg, und dann waere die
+// Referenz null.
+// MINIMUM STATT MITTELWERT, und das ist hier kein Schoenheitsfehler,
+// sondern die einzige Art, auf diesem Wirt etwas zu messen. Zwoelf
+// Kerne, auf denen gleichzeitig mehrere andere Runden QEMU laufen
+// lassen: ein Mittelwert misst dann die Nachbarn mit. Ein
+// weggenommener Zeitabschnitt kann eine Messung nur VERLAENGERN, nie
+// verkuerzen -- also ist das Minimum ueber viele kurze Buendel der
+// saubere Wert, und der Mittelwert daneben sagt, wie unruhig es war.
+const BENCH_BURSTS: u64 = 400
+const BENCH_IN: u64 = 250
+
+fn bench_ops(state: u64) {
+    var s_a: [u8; 18] = "fpubench: ops n=\0\0"
+    var s_b: [u8; 8] = "  min=\0\0"
+    var s_c: [u8; 9] = "  mitt=\0\0"
+    var s_d: [u8; 12] = "  leermin=\0\0"
+    var s_e: [u8; 8] = "  je=\0\0\0"
+    var s_f: [u8; 8] = "  acc=\0\0"
+    var s_no: [u8; 18] = "fpubench: ops aus\0"
+    if !fpu.enabled(state) {
+        serial.puts((&s_no[0]) as u64)
+        serial.nl()
+        return
+    }
+    let area: u64 = mem.frame_alloc(state)
+    if area == 0 {
+        return
+    }
+    fpu.area_init(state, area)
+    // Erst laden, damit die Register in einem definierten Zustand sind
+    // und XSAVEOPT seine Bezugsadresse kennt.
+    fpu.restore(state, area)
+    var best: u64 = 0xFFFFFFFFFFFFFFFF
+    var total: u64 = 0
+    var b: u64 = 0
+    while b < BENCH_BURSTS {
+        let t0: u64 = time.tsc()
+        var i: u64 = 0
+        while i < BENCH_IN {
+            fpu.save(state, area)
+            fpu.restore(state, area)
+            i = i + 1
+        }
+        let d: u64 = time.tsc() - t0
+        if d < best {
+            best = d
+        }
+        total = total +% d
+        b = b + 1
+    }
+    // Dieselbe Schleife OHNE die beiden Aufrufe. Ihr Ergebnis wird
+    // gedruckt -- ein Rumpf, den niemand liest, waere in `dce.rs` weg
+    // und die Referenz waere null.
+    var lbest: u64 = 0xFFFFFFFFFFFFFFFF
+    var acc: u64 = 0
+    var c: u64 = 0
+    while c < BENCH_BURSTS {
+        let t0: u64 = time.tsc()
+        var i: u64 = 0
+        while i < BENCH_IN {
+            acc = acc +% kstate.get(state, kstate.FPU_SIZE)
+            i = i + 1
+        }
+        let d: u64 = time.tsc() - t0
+        if d < lbest {
+            lbest = d
+        }
+        c = c + 1
+    }
+    serial.puts((&s_a[0]) as u64)
+    serial.dec(BENCH_BURSTS * BENCH_IN)
+    serial.puts((&s_b[0]) as u64)
+    serial.dec(best / BENCH_IN)
+    serial.puts((&s_c[0]) as u64)
+    serial.dec(total / (BENCH_BURSTS * BENCH_IN))
+    serial.puts((&s_d[0]) as u64)
+    serial.dec(lbest / BENCH_IN)
+    serial.puts((&s_e[0]) as u64)
+    if best > lbest {
+        serial.dec((best - lbest) / BENCH_IN)
+    } else {
+        serial.dec(0)
+    }
+    serial.puts((&s_f[0]) as u64)
+    serial.hex(acc)
+    serial.nl()
+    mem.frame_free(state, area)
+}
+
+
+// DIE EINZELTEILE, aus denen die Entscheidung "traege oder nicht"
+// besteht. Dasselbe Verfahren wie `bench_ops`: Minimum ueber viele
+// kurze Buendel.
+//
+//   sichern    was jeder Wechsel in BEIDEN Faellen kostet
+//   laden      was der traege Weg einspart -- aber nur bei Aufgaben, die
+//              kein einziges Vektorregister anfassen
+//   ts         `mov cr0` mit gesetztem TS und `clts` zurueck; das ist,
+//              was der traege Weg dafuer ZUSAETZLICH bezahlt.
+//              ACHTUNG: unter KVM ist `mov cr0` ein Ausstieg aus der
+//              Gastmaschine und deshalb teurer als auf Blech. Die Zahl
+//              ist eine OBERE Schranke, kein Hardwarewert.
+fn bench_parts(state: u64) {
+    var s_a: [u8; 20] = "fpubench: teile sav\0"
+    var s_b: [u8; 8] = "  lad=\0\0"
+    var s_c: [u8; 8] = "  ts=\0\0\0"
+    if !fpu.enabled(state) {
+        return
+    }
+    let area: u64 = mem.frame_alloc(state)
+    if area == 0 {
+        return
+    }
+    fpu.area_init(state, area)
+    fpu.restore(state, area)
+    var bs: u64 = 0xFFFFFFFFFFFFFFFF
+    var bl: u64 = 0xFFFFFFFFFFFFFFFF
+    var bt: u64 = 0xFFFFFFFFFFFFFFFF
+    var b: u64 = 0
+    while b < BENCH_BURSTS {
+        var t0: u64 = time.tsc()
+        var i: u64 = 0
+        while i < BENCH_IN {
+            fpu.save(state, area)
+            i = i + 1
+        }
+        var d: u64 = time.tsc() - t0
+        if d < bs {
+            bs = d
+        }
+        t0 = time.tsc()
+        i = 0
+        while i < BENCH_IN {
+            fpu.restore(state, area)
+            i = i + 1
+        }
+        d = time.tsc() - t0
+        if d < bl {
+            bl = d
+        }
+        t0 = time.tsc()
+        i = 0
+        while i < BENCH_IN {
+            fpu.ts_set()
+            fpu.ts_clear()
+            i = i + 1
+        }
+        d = time.tsc() - t0
+        if d < bt {
+            bt = d
+        }
+        b = b + 1
+    }
+    serial.puts((&s_a[0]) as u64)
+    serial.dec(bs / BENCH_IN)
+    serial.puts((&s_b[0]) as u64)
+    serial.dec(bl / BENCH_IN)
+    serial.puts((&s_c[0]) as u64)
+    serial.dec(bt / BENCH_IN)
+    serial.nl()
+    mem.frame_free(state, area)
 }
