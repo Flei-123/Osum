@@ -145,21 +145,49 @@ ok "die CRC32 des Abbilds auf dem Wirt: 0x$CRC (der Kernel schreibt 0x$CRCK)"
 
 # ------------------------------------------------- 2. die Bits in CR4
 
+# RUNDE AVX: DIE PRUEFUNG SIEHT AUF DIE BITS UND NICHT MEHR AUF DIE GANZE
+# ZAHL.
+#
+# Bis dahin stand hier ein Vergleich gegen `guard: cr4=0x300020` -- also
+# gegen den VOLLSTAENDIGEN Inhalt von CR4. Das hielt genau so lange, wie
+# SMEP und SMAP die einzigen Bits waren, die dieser Kernel setzt. Runde
+# AVX setzt OSFXSR (Bit 9), OSXMMEXCPT (Bit 10) und OSXSAVE (Bit 18)
+# dazu, und aus 0x300020 wurde 0x340620 -- der Abschnitt fiel, ohne dass
+# an SMEP oder SMAP irgendetwas anders geworden waere.
+#
+# Die Zusage dieses Abschnitts ist "Bit 20 und Bit 21 stehen wirklich in
+# CR4, zurueckgelesen aus dem Register". Genau das wird jetzt geprueft,
+# und nichts darueber hinaus. Die volle Zahl steht weiter im Protokoll.
+cr4bits() { # <logdatei> <maske hex> <erwartet hex> <name>
+    local v
+    v=$(grep -ao 'guard: cr4=0x[0-9a-f]*' "$1" | head -1 | cut -d= -f2)
+    if [ -z "$v" ]; then bad "$4 -- keine Zeile 'guard: cr4='"; return; fi
+    if [ $(( v & $2 )) -eq $(( $3 )) ]; then
+        ok "$4 (cr4=$v)"
+    else
+        bad "$4 -- cr4=$v, Bits $2 sind $(printf '0x%x' $(( v & $2 ))), erwartet $3"
+    fi
+}
+
 echo "== 2. SMEP und SMAP stehen wirklich in CR4 =="
 BASIS="nokbd nosched noproc nofs noring3"
 
 rc=0; lauf "$TMPD/k0.mb" "$BASIS" "$TMPD/max.log" -cpu max || rc=$?
 gleich "Beendigungscode mit -cpu max" "$rc" 21
-has "$TMPD/max.log" "guard: cr4=0x300020  smep=1  smap=1  cpu=1/1" \
-    "CR4 traegt Bit 20 UND Bit 21, und CPUID meldet beide"
+cr4bits "$TMPD/max.log" 0x300000 0x300000 \
+    "CR4 traegt Bit 20 UND Bit 21"
+has "$TMPD/max.log" "smep=1  smap=1  cpu=1/1" \
+    "beide sind gesetzt, und CPUID meldet beide"
 
 # DIE GEGENPROBE ZUR MESSUNG SELBST: derselbe Kernel auf einem
 # Prozessor, der die Bits nicht kennt (QEMUs Vorgabe). Er darf sie NICHT
 # melden und muss trotzdem durchlaufen.
 rc=0; lauf "$TMPD/k0.mb" "$BASIS" "$TMPD/alt.log" || rc=$?
 gleich "Beendigungscode auf einem Prozessor ohne die Bits" "$rc" 21
-has "$TMPD/alt.log" "guard: cr4=0x20  smep=0  smap=0  cpu=0/0" \
-    "ohne CPUID-Meldung wird nichts gesetzt und nichts behauptet"
+cr4bits "$TMPD/alt.log" 0x300000 0x0 \
+    "ohne CPUID-Meldung steht in CR4 weder Bit 20 noch Bit 21"
+has "$TMPD/alt.log" "smep=0  smap=0  cpu=0/0" \
+    "und es wird auch nichts behauptet"
 
 rc=0; lauf "$TMPD/k0.mb" "$BASIS nosmep" "$TMPD/nosmep.log" -cpu max || rc=$?
 has "$TMPD/nosmep.log" "smep=0  smap=1" "nosmep laesst SMAP stehen und nimmt SMEP"
@@ -276,7 +304,8 @@ echo "== 9. firnc1 baut denselben Kern =="
 if [ -f "$TMPD/k1.mb" ]; then
     rc=0; lauf "$TMPD/k1.mb" "$BASIS" "$TMPD/max1.log" -cpu max || rc=$?
     gleich "firnc1: Beendigungscode" "$rc" 21
-    has "$TMPD/max1.log" "guard: cr4=0x300020  smep=1  smap=1  cpu=1/1" \
+    cr4bits "$TMPD/max1.log" 0x300000 0x300000 "firnc1: Bit 20 und Bit 21 in CR4"
+    has "$TMPD/max1.log" "smep=1  smap=1  cpu=1/1" \
         "firnc1: dieselben Bits in CR4"
     rc=0; lauf "$TMPD/k1.mb" "$BASIS smapraw" "$TMPD/rawr1.log" -cpu max || rc=$?
     gleich "firnc1: smapraw bleibt stehen" "$rc" 63
