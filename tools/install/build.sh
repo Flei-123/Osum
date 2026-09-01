@@ -45,7 +45,7 @@ INODES=${INODES:-512}
 
 mkdir -p "$OUT/bin"
 
-PROGS=${PROGS:-"sh ls cat echo cp mv rm mkdir rmdir touch head tail wc grep sort uniq true false sleep ps kill uname date df mount umount install opk ota reboot sync tar find du chmod id whoami"}
+PROGS=${PROGS:-"sh ls cat echo cp mv rm mkdir rmdir touch head tail wc grep sort uniq true false sleep ps kill uname date df mount umount install opk ota dhcp host reboot sync tar find du chmod id whoami"}
 
 # RUNDE OTA: DIE PROGRAMME DER ZWEITEN BAUART.
 #
