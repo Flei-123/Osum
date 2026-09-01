@@ -270,11 +270,26 @@ def bauen(aus, stand, bund, notiz, sperren, feste_fassung=None,
         vorrat = os.path.join(aus, "pakete", h + ".opk")
         if not os.path.isfile(vorrat):
             shutil.copy2(p, vorrat)
-        vsig = vorrat + ".sig"
-        if not os.path.isfile(vsig):
-            signieren(bund, vorrat, vsig, signierer)
         verknuepfen(vorrat, os.path.join(zv, d))
-        verknuepfen(vsig, os.path.join(zv, d + ".sig"))
+        # DIE SIGNATUR GEHOERT DER AUSLIEFERUNG UND NICHT DEM VORRAT.
+        #
+        # GEMESSEN, UND ES WAR EIN ECHTER FEHLER: der erste Entwurf legte
+        # `<sha256>.opk.sig` neben die Datei in den Vorrat und benutzte
+        # sie wieder. Nach einem SCHLUESSELWECHSEL war die Auslieferung
+        # damit in sich widerspruechlich -- `INDEX.sig` und
+        # `VERZEICHNIS.sig` trugen den neuen Schluessel, die Paketsignatur
+        # den alten -- und ein Geraet, das den Wechsel gerade angenommen
+        # hatte, sagte richtigerweise `opk: SIGNATUR FALSCH -- das Paket
+        # wird ABGELEHNT`. Das Paket ist inhaltsadressiert und
+        # unveraenderlich; die Signatur darueber haengt an einer
+        # SCHLUESSELGENERATION. Beides in denselben Topf zu legen war der
+        # Fehler.
+        #
+        # Also: die Oktette liegen einmal im Vorrat, die Signatur wird je
+        # Auslieferung neu gerechnet. Das kostet 64 Oktett je Paket und
+        # Fassung und macht jede Auslieferung unter EINEM Schluessel in
+        # sich stimmig.
+        signieren(bund, vorrat, os.path.join(zv, d + ".sig"), signierer)
         name, pf = meta_aus_opk(p)
         pakete.append((name, pf, h, os.path.getsize(p), d))
 
