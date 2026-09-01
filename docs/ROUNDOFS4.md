@@ -208,6 +208,77 @@ nur zwei Groessen" eine Aussage ueber **eine** Groesse gewesen — und das
 steht hier, weil der erste Entwurf dieses Tests genau diesen Fehler
 hatte.
 
+## Die Auflage: bestehende Tests bleiben gruen
+
+Kein Test wurde abgeschaltet. Gelaufen sind die Abschnitte, die diese
+Runde ueberhaupt beruehren koennen (`kernel`, `posix`, `fsrobust`,
+`ofs3`, `k15`, `speicher`, `install`) plus GUI-Bau und GUI-loser
+Serverbau. Alle gruen — mit EINER Auffaelligkeit, die hier vollstaendig
+steht, weil sie zuerst wie ein Regress dieser Runde aussah.
+
+### Der ofs3-Abschnitt 3 und das Zeitlimit von 600 Sekunden
+
+`tools/ofs3/run.sh` gab in einem Lauf **69 bestanden, 6 gescheitert**.
+Der erste Fehler war `QEMU exit 124` — das ist das `timeout 600` in
+`run_disk`, nicht ein Fehlschlag im Kern; die uebrigen fuenf sind
+Folgefehler desselben abgeschnittenen Laufs (`k13: ofsver=3` fehlt,
+`viele` fehlt, `ende` fehlt, `kernel: done` fehlt, `o3.txt` ohne
+Rahmen).
+
+Nachgemessen wurde mit demselben Abbild, demselben Aufruf und **einem
+Lauf nach dem anderen** (`/tmp/o4/iso/lauf.sh`, Zeitlimit auf 900 bzw.
+1200 s angehoben, damit der Lauf ueberhaupt zu Ende kommt). Acht Laeufe,
+drei Kerne, jeder Lauf mit `RC=21` und `viele = 120` — also jedes Mal
+inhaltlich RICHTIG, nur unterschiedlich lange:
+
+| Kern | Laeufe | Dauer je Lauf | Mittel |
+|---|---|---|---|
+| **mergeline2, unveraendert** | 2 | 611 s, 693 s | **652 s** |
+| **ofs4 (dieser Zweig)** | 3 | 609 s, 661 s, 743 s | **671 s** |
+| ofs4 ohne den Deckel in `block_alloc` | 3 | 626 s, 684 s, 687 s | **666 s** |
+
+Vier Schluesse, und jeder ist eine Zahl:
+
+1. **Es ist kein Regress.** Die Spannweiten ueberlappen vollstaendig
+   (Basis 611–693 s, ofs4 609–743 s). Der schnellste Lauf ueberhaupt war
+   ein **ofs4**-Lauf mit 609 s, der langsamste Basislauf 693 s. Der
+   Unterschied der Mittelwerte betraegt 19 s auf 650 s, also **3 %** —
+   bei einer Streuung von ueber 130 s innerhalb ein und desselben Kerns.
+2. **Der Deckel kostet nichts.** Er ist ein `kstate.get` je
+   `block_alloc`, ein Speicherzugriff neben einem Plattenzugriff. Der
+   Kern OHNE ihn liegt bei 666 s, der MIT ihm bei 671 s — fuenf
+   Sekunden auf 670, und der langsamste Lauf ueberhaupt (743 s) war
+   einer MIT Deckel, der zweitlangsamste (687 s) einer OHNE. Die
+   Messung kann den Unterschied nicht aufloesen, und genau das ist die
+   Aussage.
+3. **Gemessen wurde die Last, nicht der Kern.** Waehrend der Messreihe
+   lief auf demselben Server eine fremde Uebersetzung; die Lastzahl
+   stieg von 8 auf 33. Die Dauer folgt ihr und nicht der Variante.
+4. **Auch die unveraenderte Basis reisst das Limit.** 693 s bei
+   `timeout 600` heisst: `tools/ofs3/run.sh` faellt auf einem belasteten
+   Server **ohne jedes Zutun dieser Runde** in denselben `exit 124`.
+   Genau das war im ersten Gesamtlauf zu sehen, in dem auch der
+   Basiszweig 69/6 meldete.
+
+Der Testfall selbst legt 120 Dateien mit 255 Zeichen langen Namen an;
+das Verzeichnis waechst dabei ueber die direkten Zeiger hinaus. Auf
+einem unbelasteten Rechner geht das in der Frist auf, auf einem
+belasteten nicht — der Lauf blieb nie haengen, er kam mit `RC=21` und
+allen richtigen Zahlen zu Ende, nur zu spaet.
+
+### Die zwei roten Punkte in `k15`
+
+`tools/k15/run.sh` meldet **250 bestanden, 2 gescheitert** — auf dem
+Zweig dieser Runde GENAUSO wie auf unveraendertem `mergeline2` (beide
+Laeufe nachgemessen, beide Male dieselben zwei Punkte). Es sind
+Tintenzaehlungen im Bild ("372 Tintenpunkte geprueft, 283 falsch"),
+also Schriftdarstellung und kein Dateisystem. Sie sind vor dieser Runde
+rot und werden hier weder verursacht noch repariert.
+
+Das Zeitlimit gehoert `tools/ofs3/run.sh` und damit Runde OFS3; diese
+Runde hat es **nicht** angefasst. Wer es heraufsetzt, sollte das dort
+und mit Begruendung tun.
+
 ## Was NICHT geht, und warum
 
 1. **Wachsen ueber die Kartendeckung hinaus.** Die Karte liegt vor der
