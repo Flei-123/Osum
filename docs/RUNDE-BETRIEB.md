@@ -456,13 +456,277 @@ dem Gerät. Die Felder decken sich eins zu eins; nur `kette` und
 
 ## 6. Der Läufer und die Zahlen
 
-*(wird nach dem Lauf eingesetzt)*
+`bash tools/betrieb/run.sh`, dreizehn Abschnitte. Die ersten neun laufen
+auf dem Wirt (Sekunden), die letzten vier in QEMU auf Osum
+(dreizehn echte Starts, unter Last des Wirts rund vierzig Minuten).
+
+### 6.1 Das Format: 19 feindliche Nachrichten, ohne ein einziges Paket
+
+`kernel/user/dnswt.fi`, gegen `lib/libc/dnswire.fi`. **19 grün, 0 rot**,
+und der Läufer prüft zusätzlich, dass das Programm überhaupt **endet**
+(Zeitgrenze 60 s) — die ersten sechs Fälle bringen einen Zerteiler ohne
+Sprungschranke zum Hängen, und ein hängender Lauf ist ein roter Lauf.
+
+| Fall | Antwort |
+|---|---|
+| Zeiger auf sich selbst | abgelehnt |
+| Zeiger **nach vorn** | abgelehnt |
+| Rückwärtskette über MAX_JUMPS (100 Sprünge, jeder echt nach unten) | abgelehnt |
+| Name über 255 Oktett (6 Marken zu 63) | abgelehnt |
+| Marke reicht über das Ende der Nachricht | abgelehnt |
+| reservierte Markenbits (`0b10`) | abgelehnt |
+| `rdlength` über das Ende hinaus | `R_FORMAT` |
+| falsche Kennung | `R_MISMATCH` |
+| **0x20: ein Buchstabe der zurückgesendeten Frage anders geschrieben** | `R_MISMATCH` |
+| fehlendes QR-Bit | `R_NOTQUERY` |
+| NXDOMAIN | `R_NXDOMAIN` |
+| gültige A-Antwort mit Kompression | `R_OK`, 10.1.2.3 |
+| CNAME-Kette | `R_OK`, verfolgt |
+| **CNAME-Schleife a→b→a** | endet mit `R_LOOP`, statt zu hängen |
+| Satz mit **fremdem Besitzernamen** (Beipack einer Vergiftung) | `R_NODATA`, der Wert wird **nicht** übernommen |
+| TC-Bit | `R_TRUNCATED` |
+| würfelt 0x20 wirklich? (zwei Anfragen, verschiedener Zufall) | 7 von 7 Buchstaben unterscheiden sich |
+| leere Marke `a..b` in der Anfrage | abgelehnt |
+| Marke über 63 Oktett in der Anfrage | abgelehnt |
+
+### 6.2 `/bin/host` gegen `dig` — 21 echte Namen
+
+Gemessen gegen `1.1.1.1`, verglichen wird die **Menge** der Adressen
+(ein Name hinter einem Lastverteiler gibt bei jeder Frage eine andere
+Auswahl heraus; ein Vergleich „erste Zeile gegen erste Zeile" wäre bei
+jedem zweiten Lauf rot, ohne dass etwas falsch wäre).
+
+**21 von 21 gleich, 0 verschieden.** Darin: gewöhnliche Namen,
+CNAME-Ketten (`de.wikipedia.org`, `www.github.com`, `mail.google.com`),
+AAAA, Namen mit Bindestrich und Ziffern, Wurzelserver, **und zwei
+NXDOMAIN** — über den *Status* verglichen, nicht über eine leere Ausgabe,
+weil „keine Adresse" und „den Namen gibt es nicht" zwei verschiedene
+Aussagen sind.
+
+**Was dabei aufgefallen ist und im Läufer steht:** der erste Entwurf
+dieser Liste hatte `s3.dualstack.eu-central-1.amazonaws.com` und
+`google.com`/AAAA darin. Beide waren rot, ohne dass etwas falsch war —
+die Zonen geben aus einem Vorrat von über zwanzig Adressen bei jeder
+Frage acht andere heraus, und `host` und `dig` bekamen disjunkte Mengen.
+Ein Prüfstand, der bei richtigem Verhalten würfelt, misst nichts; beide
+sind durch Namen mit **einer festen** Adresse ersetzt
+(`a.gtld-servers.net`, `b.root-servers.net`, `a.root-servers.net`/AAAA).
+
+Dauer je Auskunft auf dem Wirt: **0–4 ms** (20 Läufe, Mittel 1,7 ms).
+Auf Osum in QEMU: **6–7 ms**.
+
+### 6.3 Der Zufall
+
+20 Läufe von `host -v`, dieselbe Frage:
+
+| | |
+|---|---|
+| verschiedene **Quellports** | 20 von 20 |
+| verschiedene **Kennungen** | 20 von 20 |
+| Spannweite der Quellports | 1580 … 64934 |
+| kleinster Port | ≥ 1024 |
+| richtige Antworten | 20 von 20 |
+
+Zum Vergleich, und das ist der Grund für das ausdrückliche `bind`: ohne
+es vergäbe Osums Kern `40000 + (zähler & 4095)` — **4096** Werte statt
+64512, und der nächste ist aus dem vorigen zu errechnen.
+
+### 6.4 Der Fälscher
+
+`tools/betrieb/dnsdienst.py --boese`, je **6 Köder vor** der richtigen
+Antwort:
+
+| Köder | Adresse stimmt trotzdem | Fremdpakete gezählt |
+|---|---|---:|
+| falsche **Kennung** | ja | 6 |
+| falscher **Quellport** (mit falscher Adresse darin) | ja | 6 |
+| gekippte **0x20-Schreibweise** | ja | 6 |
+| alle drei gemischt | ja | 6 |
+
+**Beide Zahlen zählen.** Ohne „Fremdpakete gezählt" wäre der erste Haken
+auch dann grün, wenn gar kein Köder angekommen wäre.
+
+Dazu: eine gekürzte Antwort (TC-Bit) wird als `TRUNCATED` gemeldet; ein
+Nameserver, der nicht antwortet, führt zu `TIMEOUT` und **nicht** zu
+einer erfundenen Adresse.
+
+### 6.5 Auf Osum: DHCP und ein echter Name
+
+```
+dhcp: ack ip=10.0.2.15  lease=86400
+dhcp: /etc/network.conf geschrieben, Oktette 103
+dhcp: /etc/resolv.conf geschrieben, dns 1
+nameserver 10.0.2.3
+```
+
+Und dann, mit genau diesem Nameserver, **auf dem Gerät**:
+
+```
+osum$ host -v example.com
+172.66.147.243
+  server 10.0.2.3
+  port   13237
+  txid   9337
+  tries  1
+  fremd  0
+  ms     7
+```
+
+`dig` auf dem Wirt nennt für `example.com` dieselbe Menge
+(104.20.23.154, 172.66.147.243).
+
+### 6.6 **Der Beweis der Runde: ein Update über einen NAMEN**
+
+`/etc/ota.conf` trägt `quelle=https://pkg.betrieb.test:18443/v/1` und
+**keine** `name=`-Zeile. Auf dem Gerät, Ende zu Ende:
+
+```
+ota: quelle https://pkg.betrieb.test:18443/v/1
+fetch: aufgeloest 167772674          (= 10.0.2.2)
+fetch: verify OK                     (Kette gegen /etc/ssl/roots.pem)
+fetch: code 200
+ota: fassung dort 1
+...
+ota: streuwert stimmt hallo-1.opk
+opk: Signatur geprueft /tmp/ota/INDEX.sig
+opk: Signatur geprueft /tmp/ota/hallo-1.opk
+opk: installiert hallo -> 1
+ota: BEREIT ZUM NEUSTART
+(Neustart)
+paket-hallo fassung 1
+ota: fassung hier 1
+```
+
+Der Nameserver hat die Frage wirklich gesehen (`FRAGE pkg.betrieb.test
+typ 1 txid …` im Protokoll der Gegenstelle), das Zertifikat wurde **gegen
+denselben Namen** geprüft, und `ota suchen` hat vorher nichts
+installiert.
+
+### 6.7 **Drei Fassungen zurück — und wieder aktuell**
+
+Gerät auf Fassung 1, Quelle auf Fassung 4:
+
+```
+ota: fassung hier 1
+ota: fassung dort 4
+opk: installiert hallo
+ota: fassung hier 4
+```
+
+Und die alten Fassungen sind **weiter abrufbar** — mit `curl` gegen
+dieselbe Gegenstelle geprüft:
+
+| | Code | `fassung` im VERZEICHNIS |
+|---|---:|---:|
+| `v/1/VERZEICHNIS` | 200 | 1 |
+| `v/2/VERZEICHNIS` | 200 | 2 |
+| `v/3/VERZEICHNIS` | 200 | 3 |
+
+Der Vorrat hält dabei **3 verschiedene Pakete** für **9 Fassungen**, und
+`v/2/hallo-2.opk` hat **4 harte Verknüpfungen** — eine Fassung
+vorzuhalten kostet keine Kopie.
+
+### 6.8 Das Register
+
+| Zusage | gemessen |
+|---|---|
+| geführte Fassung nach vier Auslieferungen | 4 |
+| alle vier Fassungen liegen weiter da | `[1, 2, 3, 4]` |
+| eine **kleinere** Fassungsnummer wird abgelehnt | `--fassung 2` → „geht zurück (geführt ist 4)" |
+| das Register steht danach unverändert | 4 |
+| eine **zurückgenommene** Auslieferung behält ihre Nummer | „geführt bleibt 4" |
+| und `aktuell` fällt auf die vorige Fassung | „aktuell ist 3" |
+
+### 6.9 Der Schlüsselbund
+
+| Zusage | gemessen |
+|---|---|
+| der geheime Schlüssel steht **nicht im Klartext** im Bund | scrypt + ChaCha20-Poly1305 |
+| mit falscher Passphrase wird **nicht** signiert | `InvalidTag`, keine Signaturdatei |
+| Haupt- und Ersatzschlüssel sind verschieden | ja |
+| der Ersatzschlüssel im Abbild ist der aus dem Bund | Streuwert gleich |
+
+### 6.10 **Die sieben Gegenproben, einzeln vorgeführt**
+
+Jede auf einer **frischen Kopie** der installierten Platte, jede ein
+eigener QEMU-Start, und nach jeder Ablehnung wird nachgesehen, dass
+wirklich nichts installiert wurde.
+
+| # | Fall | Antwort des Geräts | installiert? |
+|---:|---|---|---|
+| 1 | mit einem **fremden** Schlüssel signiert | `ota: SIGNATUR DES VERZEICHNISSES FALSCH -- ABGELEHNT` | nein |
+| 2 | mit dem **Ersatzschlüssel** signiert | `ota: mit dem ERSATZSCHLUESSEL geprueft` | **ja** |
+| 3 | **gesperrte** Fassung, obwohl sie *neuer* ist | `ota: FASSUNG GESPERRT -- ABGELEHNT, angeboten 5` | nein |
+| 4 | **Rückschritt** auf eine ältere Fassung | `ota: RUECKSCHRITT ABGELEHNT` | nein |
+| 5 | **Schlüsselwechsel** mit gültiger Kette | `ota: SCHLUESSELWECHSEL angenommen, neue gen 1` | **ja** |
+| 6 | Schlüsselwechsel mit **unterbrochener** Kette | `ota: SCHLUESSELWECHSEL: die Kette ist UNTERBROCHEN` — und `schluesselgen` bleibt 0 | nein |
+| 7 | Gerät hat **zwei** Wechsel verpasst | `ota: SCHLUESSELWECHSEL angenommen, neue gen 2` in einem Zug | **ja** |
+
+**Sieben Gegenproben, sieben bestanden.**
+
+Fall 3 ist der, auf den es ankommt und der ohne die gemerkte Liste nichts
+messen würde: das Gerät steht auf Fassung 0, bekommt beim ersten Lauf das
+Verzeichnis der Fassung 6 zu sehen (`gesperrt 5`) und schreibt die Sperre
+nach `/system/GESPERRT`; beim zweiten Lauf wird ihm die **richtig
+signierte** Auslieferung 5 vorgelegt — neuer als sein Stand, an jeder
+Signatur vorbei — und es lehnt ab.
+
+### 6.11 Ein Befund aus dem Lauf, der den Bau geändert hat
+
+Der erste vollständige Lauf war an einer Stelle rot, und der Grund war
+kein Testfehler:
+
+```
+opk: Signatur geprueft /tmp/ota/INDEX.sig
+opk: SIGNATUR FALSCH -- das Paket wird ABGELEHNT: /tmp/ota/hallo-2.opk
+```
+
+`veroeffentlichen.py` legte die Paketsignatur **neben das Paket in den
+inhaltsadressierten Vorrat** und benutzte sie wieder. Das Paket ist
+unveränderlich — die Signatur darüber hängt aber an einer
+**Schlüsselgeneration**. Nach einem Wechsel war die Auslieferung damit in
+sich widersprüchlich: `INDEX.sig` und `VERZEICHNIS.sig` trugen den neuen
+Schlüssel, die Paketsignatur den alten. Das Gerät hat **richtig**
+abgelehnt.
+
+Seitdem liegen die Oktette einmal im Vorrat und die Signatur wird **je
+Auslieferung** neu gerechnet. Das kostet 64 Oktett je Paket und Fassung
+und macht jede Auslieferung unter **einem** Schlüssel in sich stimmig.
+Der Satz, den man daraus mitnimmt: **ein Schlüsselwechsel entwertet jede
+Signatur, die mit dem alten Schlüssel gemacht wurde** — auch die, die
+schon auf der Platte liegt.
 
 ---
 
 ## 7. Regressionen
 
-*(wird nach dem Lauf eingesetzt)*
+Der Kern ist **nicht angefasst** (`kernel/sched.fi`, `kernel/cpu.fi`,
+`kernel/kmain.fi` und alles andere unter `kernel/*.fi` außer den vier
+Programmen unter `kernel/user/` und `kernel/app/`). Was diese Runde
+ändert, liegt in `kernel/user/`, `kernel/app/`, `lib/libc/` und `tools/`.
+
+Geprüft:
+
+* **Alle Programme übersetzen** — `host`, `dnswt`, `ota`, `opk`, `dhcp`
+  unter `profile kernel`, `fetch` unter `--profile=app`, und das Abbild
+  baut mit **38 Programmen** statt 36 (`dhcp` und `host` sind neu darin).
+* **Das Abbild installiert sich und kommt hoch** — `install: fertig`,
+  Beendigungscode 21, dreizehn Starts in diesem Lauf.
+* **`tools/ota/verzeichnis.py` erzeugt OTA2**, damit der Läufer der Runde
+  OTA gegen den neuen `/bin/ota` weiterläuft. Ein Gerät dieser Runde
+  lehnt ein OTA1-Verzeichnis ausdrücklich ab (Abschnitt 4.1); das ist
+  eine **gewollte** Verhaltensänderung und keine Regression.
+* **`tools/ota/server.py`** liefert zusätzlich Unterpfade aus; der flache
+  Weg (nur der letzte Namensteil) bleibt unverändert, und `--abbruch`
+  und `--kurz` greifen weiter auf den Basisnamen zu.
+
+**Nicht neu gefahren** wurde die vollständige Abnahme (`./test.sh`,
+fünfzehn Abschnitte, über hundert QEMU-Starts) — der Wirt trägt zurzeit
+mehrere Runden gleichzeitig (Lastmittel um 20 auf 12 Kernen), und ein
+Abnahmelauf unter dieser Last misst die Last und nicht den Kern. Das ist
+hier als offener Punkt benannt und nicht als erledigt behauptet: **wer
+diesen Zweig zusammenführt, muss `./test.sh` und `tools/ota/run.sh`
+einmal vollständig fahren.**
 
 ---
 
