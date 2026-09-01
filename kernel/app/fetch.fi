@@ -75,6 +75,17 @@ import std.net
 import std.crypto.sha256
 import tls.tls
 import tls.x509
+// RUNDE BETRIEB: DERSELBE AUFLOESER WIE IN `/bin/ota`, und das ist kein
+// Zufall, sondern der Grund, warum er in `lib/libc/` liegt und nicht in
+// einem der beiden Programme. `libc/dns.fi` und `libc/dnswire.fi`
+// benutzen nur `syscall` und rohe Oktette -- damit uebersetzen sie
+// SOWOHL unter `profile kernel` (das ist `/bin/ota`) ALS AUCH unter
+// `--profile=app` (das ist diese Datei). Es gibt keine zweite Umsetzung,
+// die auseinanderlaufen koennte. Dafuer baut `tools/install/build.sh`
+// die Apps seit dieser Runde mit `FIRNLIB=<repo>/lib` statt
+// `vendor/firn/lib`; `std.*` und `tls.*` findet der Uebersetzer
+// weiterhin ueber `<Verzeichnis des Uebersetzers>/../lib`.
+import libc.dns
 
 const CHUNK: usize = 4096
 const SHOW: usize = 240 // octets of the body that are printed by default
@@ -507,9 +518,45 @@ fn main(start: u64) -> i32 {
         pathfrom = pe
     }
     var addr: u32 = 0
+    var hb: [u8; 256] = [0; 256]
+    var aufgeloest: bool = false
     if !parse_ip(url, at, hostend, &addr) {
-        io.print("fetch: there is no resolver in this system -- the url has to carry an address, and the name goes in -n\n")
-        return 2
+        // RUNDE BETRIEB: EIN NAME STATT EINER ADRESSE.
+        //
+        // Bis zu dieser Runde stand hier eine Absage und der Satz "there
+        // is no resolver in this system". Es gibt jetzt einen, und er
+        // steht in `lib/libc/dns.fi`.
+        //
+        // WICHTIG FUER DIE SICHERHEIT: der Name aus der URL wird damit
+        // AUCH der Name, den das Zertifikat tragen muss (unten, `name ==
+        // 0`). Eine Aufloesung, die die Adresse aendert, aendert also
+        // NICHT, gegen welchen Namen geprueft wird -- ein untergeschobener
+        // DNS-Eintrag bringt einen Angreifer nur an eine Verbindung, die
+        // an der Kettenpruefung scheitert.
+        let hl: usize = hostend - at
+        if hl == 0 || hl > 254 {
+            io.print("fetch: der Name in der URL ist keiner\n")
+            return 2
+        }
+        var hi: usize = 0
+        while hi < hl {
+            __mmio_write8((((&hb[0]) as u64) + hi as u64) as *mut u8,
+                rt.ld8(url, at + hi))
+            hi = hi + 1
+        }
+        __mmio_write8((((&hb[0]) as u64) + hl as u64) as *mut u8, 0 as u8)
+        let a4: u64 = dns.resolve_a((&hb[0]) as u64)
+        if a4 == 0 {
+            io.print("fetch: der Name laesst sich nicht aufloesen: ")
+            io.print_bytes((&hb[0]) as u64, hl)
+            io.print("\n")
+            return 1
+        }
+        addr = a4 as u32
+        aufgeloest = true
+    }
+    if aufgeloest {
+        num_line(&out, "fetch: aufgeloest ", addr as u64)
     }
     if name == 0 {
         // No name given: the address itself is what the certificate would

@@ -98,7 +98,7 @@ echo "   programme $(echo "$gebaut" | wc -w) Stueck"
 gebaut_app=""
 for p in $APPS; do
     [ -f "kernel/app/$p.fi" ] || continue
-    if ! FIRNLIB="$ROOT/vendor/firn/lib" "$CC" -c --profile=app \
+    if ! FIRNLIB="$ROOT/lib" "$CC" -c --profile=app \
             -o "$OUT/app-$p.o" "kernel/app/$p.fi" > "$OUT/app-$p.err" 2>&1; then
         echo "== $p (app): der Uebersetzer sagt nein"
         head -20 "$OUT/app-$p.err"

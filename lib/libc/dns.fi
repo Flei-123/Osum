@@ -63,8 +63,18 @@
 // das steht in `docs/RUNDE-BETRIEB.md` unter "was noch fehlt".
 
 import libc.kcall
-import libc.net
 import libc.dnswire
+
+// KEIN `import libc.net`, UND DAS IST EIN BEFUND UND KEIN GESCHMACK.
+// Diese Datei wird AUCH unter `--profile=app` uebersetzt (fuer
+// `/bin/fetch`), und dort heisst `net` bereits Firns `std.net`: der
+// Uebersetzer fuehrt Modulnamen nicht je Datei, sondern je Uebersetzung,
+// und `import libc.net` bekam deshalb das FREMDE `net` untergeschoben
+// ("'AF_INET' is not exported by module 'net'"). Statt den Namen in
+// einem der beiden Baeume zu aendern, stehen die sechs Aufrufe, die
+// dieser Aufloeser wirklich braucht, hier unten selbst -- eine
+// Steckdose, ein Bindeaufruf, sendto, recvfrom, close, und sechzehn
+// Oktett `sockaddr_in`.
 
 export {
     conf_load, conf_set, conf_count, conf_at, conf_timeout, conf_attempts,
@@ -137,6 +147,62 @@ fn ld64(p: u64) -> u64 {
 
 fn bad(v: u64) -> bool {
     return v > 0xFFFFFFFFFFFFF000
+}
+
+// ------------------------------------------------- die sechs Aufrufe
+
+const AF_INET: u64 = 2
+const SOCK_DGRAM: u64 = 2
+const SOCK_NONBLOCK: u64 = 2048
+const SA_BYTES: u64 = 16
+
+// Sechzehn Oktett, die Familie in der Ordnung der MASCHINE und Port und
+// Adresse in der Ordnung der LEITUNG. Diese Mischung ist seit 4.2BSD die
+// Form der Schnittstelle; `lib/libc/net.fi` schreibt sie genauso.
+fn sa_build(sa: u64, a: u64, port: u64) {
+    var i: u64 = 0
+    while i < SA_BYTES {
+        st8(sa, i, 0)
+        i = i + 1
+    }
+    st8(sa, 0, AF_INET & 255)
+    st8(sa, 1, (AF_INET >> 8) & 255)
+    st8(sa, 2, (port >> 8) & 255)
+    st8(sa, 3, port & 255)
+    st8(sa, 4, (a >> 24) & 255)
+    st8(sa, 5, (a >> 16) & 255)
+    st8(sa, 6, (a >> 8) & 255)
+    st8(sa, 7, a & 255)
+}
+
+fn sa_ip(sa: u64) -> u64 {
+    return (ld8(sa, 4) << 24) | (ld8(sa, 5) << 16) | (ld8(sa, 6) << 8)
+        | ld8(sa, 7)
+}
+
+fn sa_port(sa: u64) -> u64 {
+    return (ld8(sa, 2) << 8) | ld8(sa, 3)
+}
+
+fn udp_socket() -> u64 {
+    return kcall.sys3(kcall.SYS_SOCKET, AF_INET,
+        SOCK_DGRAM | SOCK_NONBLOCK, 0)
+}
+
+fn bind_port(fd: u64, port: u64) -> u64 {
+    var sa: [u8; 16] = [0 as u8; 16]
+    sa_build((&sa[0 as usize]) as u64, 0, port)
+    return kcall.sys3(kcall.SYS_BIND, fd, (&sa[0 as usize]) as u64, SA_BYTES)
+}
+
+fn sendto_ip(fd: u64, p: u64, n: u64, a: u64, port: u64) -> u64 {
+    var sa: [u8; 16] = [0 as u8; 16]
+    sa_build((&sa[0 as usize]) as u64, a, port)
+    return kcall.sock_send(fd, p, n, (&sa[0 as usize]) as u64, SA_BYTES)
+}
+
+fn schliessen(fd: u64) -> u64 {
+    return kcall.sys1(kcall.SYS_CLOSE, fd)
 }
 
 // ------------------------------------------------------ die Uhr
@@ -349,8 +415,7 @@ fn frage(server: u64, name: u64, qtype: u64, out: u64) -> u64 {
     if qlen == 0 {
         return dnswire.R_BADNAME
     }
-    let fd: u64 = kcall.sys3(kcall.SYS_SOCKET, net.AF_INET,
-        net.SOCK_DGRAM | net.SOCK_NONBLOCK, 0)
+    let fd: u64 = udp_socket()
     if bad(fd) {
         return R_NET
     }
@@ -363,12 +428,12 @@ fn frage(server: u64, name: u64, qtype: u64, out: u64) -> u64 {
     while t < PORT_TRIES {
         var pr: [u8; 2] = [0 as u8; 2]
         if !wuerfeln((&pr[0 as usize]) as u64, 2) {
-            net.close(fd)
+            schliessen(fd)
             return R_NET
         }
         let kand: u64 = 1024 + (((ld8((&pr[0 as usize]) as u64, 0) << 8)
             | ld8((&pr[0 as usize]) as u64, 1)) % 64512)
-        v = net.bind_port(fd, kand)
+        v = bind_port(fd, kand)
         if !bad(v) {
             port = kand
             break
@@ -376,15 +441,15 @@ fn frage(server: u64, name: u64, qtype: u64, out: u64) -> u64 {
         t = t + 1
     }
     if port == 0 {
-        net.close(fd)
+        schliessen(fd)
         return R_NOPORT
     }
     U_PORT = port
     U_TXID = txid
     U_SRV = server
-    let s: u64 = net.sendto_ip(fd, (&QB[0 as usize]) as u64, qlen, server, 53)
+    let s: u64 = sendto_ip(fd, (&QB[0 as usize]) as u64, qlen, server, 53)
     if bad(s) {
-        net.close(fd)
+        schliessen(fd)
         return R_NET
     }
     let start: u64 = now_ms()
@@ -403,8 +468,8 @@ fn frage(server: u64, name: u64, qtype: u64, out: u64) -> u64 {
             // WOHER KAM DAS? Falsche Adresse oder falscher Port: weg
             // damit, und WEITER WARTEN -- ein Fremdpaket darf den
             // Versuch nicht beenden.
-            let von: u64 = net.sa_ip((&SA[0 as usize]) as u64)
-            let vp: u64 = net.sa_port((&SA[0 as usize]) as u64)
+            let von: u64 = sa_ip((&SA[0 as usize]) as u64)
+            let vp: u64 = sa_port((&SA[0 as usize]) as u64)
             if von != server || vp != 53 {
                 U_DROP = U_DROP + 1
             } else {
@@ -427,7 +492,7 @@ fn frage(server: u64, name: u64, qtype: u64, out: u64) -> u64 {
         schlaf_ms(1)
     }
     U_MS = now_ms() - start
-    net.close(fd)
+    schliessen(fd)
     return erg
 }
 
